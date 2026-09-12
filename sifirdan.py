@@ -103,6 +103,8 @@ SAVE_CKPT  = os.environ.get("SAVE_CKPT", "1") != "0"
 SAVE_TABLE = os.environ.get("SAVE_TABLE", "1") != "0"   # ornek basina uzun tablo
 SAVE_KV    = os.environ.get("SAVE_KV", "1") != "0"      # bellek K/V anlik goruntusu
 SAVE_CIRCUIT = os.environ.get("SAVE_CIRCUIT", "1") != "0"  # logit lens, dikkat, kafa ablasyonu
+SAVE_SNAP  = os.environ.get("SAVE_SNAP", "1") != "0"    # ARA kontrol noktalari (fp16)
+CKPT_EVERY = int(os.environ.get("CKPT_EVERY", "3"))     # kac degerlendirmede bir
 
 os.makedirs(OUT, exist_ok=True)
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
@@ -404,7 +406,12 @@ def _hid(model, X, poz, depth=None, bs=512):
                 break
             h = blk(h)
         idx = torch.from_numpy(poz[i:i+bs]).to(DEV)
-        out.append(h[torch.arange(len(idx), device=DEV), idx].float().cpu().numpy())
+        ar = torch.arange(len(idx), device=DEV)
+        # CTX penceresi: poz, poz-1, ... -> bellegin gordugu bilginin AYNISI.
+        # Kritik: tek pozisyon alinirsa depth=0 kontrolu BOS olur ('?' her
+        # ornekte ayni token) ve kontrol vakum olur.
+        win = torch.stack([h[ar, (idx - t).clamp(min=0)] for t in range(CTX)], 1)
+        out.append(win.reshape(len(idx), -1).float().cpu().numpy())
     model.train()
     return np.concatenate(out)
 
@@ -429,6 +436,28 @@ def kopru_probu(model, Etr, btr, Ete, bte, lam=100.0, depth=None):
     S = P @ Emb.T
     g = S[np.arange(len(bte)), bte]
     return float(np.median((S > g[:, None]).sum(1) / max(1, Emb.shape[0] - 1)))
+
+
+def prob_seti(model, Etr, Ete, btr, bte, atr, ate, salt=0):
+    """TANI paketi. Her biri ayni prob makinesiyle, KIYASLANABILIR.
+      kopru      : kopru gizli durumdan okunabiliyor mu
+      kopru_L0   : ayni sey HAM GOMMELERDEN (CTX penceresi) -- kontrol
+      kopru_null : kopru etiketleri KARISTIRILMIS -- prob'un taban gurultusu
+      cevap      : ayni sey ALTIN CEVAP icin (zamanlama: once hangisi belirir?)
+    kopru ~ kopru_L0 ise modelin hesabi bir sey EKLEMIYOR.
+    kopru ~ kopru_null ise sinyal yok."""
+    r = np.random.RandomState(DATA_SEED + 500 + salt)
+    sh = btr[r.permutation(len(btr))]
+    out = {}
+    for nm, tr, te, dep in (("kopru", btr, bte, None), ("kopru_L0", btr, bte, 0),
+                            ("kopru_null", sh, bte, None), ("cevap", atr, ate, None)):
+        try:
+            out[nm] = kopru_probu(model, Etr, tr, Ete, te, depth=dep)
+        except Exception as ex:
+            out[nm] = float("nan"); out[nm + "_hata"] = str(ex)[:60]
+    out["kopru_kazanc"] = out["kopru_L0"] - out["kopru"]      # hesabin EKLEDIGI
+    out["kopru_net"] = out["kopru_null"] - out["kopru"]       # null uzerine net
+    return out
 
 
 @torch.no_grad()
@@ -545,6 +574,31 @@ def kafa_ablasyonu(model, EC, E1, bs=512, nmax=1500):
     return dict(taban_comp=b0c, taban_1hop=b01, dusus_comp=dc, dusus_1hop=d1)
 
 
+@torch.no_grad()
+def agirlik_istat(model):
+    """TANI: modul basina agirlik normu + bellek tayfi (etkin rank).
+    Weight decay altinda hangi modul buyuyor, bellek kac yonu gercekten kullaniyor."""
+    o = {}
+    gr = {}
+    for n, p_ in model.named_parameters():
+        k = ("mem_K" if n.endswith("mem.K") else "mem_V" if n.endswith("mem.V")
+             else "mem" if ".mem." in n else "emb" if "emb" in n or "pos" in n
+             else "attn" if (".qkv." in n or ".po." in n)
+             else "ffn" if (".f1." in n or ".f2." in n) else "diger")
+        gr[k] = gr.get(k, 0.0) + float(p_.detach().float().pow(2).sum())
+    for k, v in gr.items():
+        o[f"w_{k}"] = float(np.sqrt(v))
+    if model.mem is not None:
+        for nm, M_ in (("K", model.mem.K), ("V", model.mem.V)):
+            sv = torch.linalg.svdvals(M_.detach().float())
+            pw = (sv ** 2); pw = pw / pw.sum()
+            o[f"mem{nm}_etkin_rank"] = float(torch.exp(
+                -(pw * torch.log(pw + 1e-12)).sum()))     # entropi-tabanli rank
+            o[f"mem{nm}_sv1_orani"] = float(pw[0])
+        o["mem_scale"] = float(model.mem.logit_scale.detach().exp().clamp(1, 100))
+    return o
+
+
 def yaz_tablo(tablo, arm, seed):
     """Ornek basina uzun tablo: sonradan egitim tekrar etmeden analiz icin.
     Ana soru: AYNI KOPRUYE sahip sorular AYNI SLOTLARI mi yakiyor?"""
@@ -648,15 +702,9 @@ def run_arm(arm, seed, data, log):
                                gold=np.array([f for *_, f in LL], np.int32))
                     row.update(dt); tablo.append(row)
             rec.update(bellek_istat(model, EC[0]))
-            try:
-                rec["kopru_prob"] = kopru_probu(model, ES, brS - ENT_OFF,
-                                                EC, brC - ENT_OFF)
-                rec["kopru_prob_L0"] = kopru_probu(model, ES, brS - ENT_OFF,
-                                                   EC, brC - ENT_OFF, depth=0)
-                rec["kopru_kazanc"] = rec["kopru_prob_L0"] - rec["kopru_prob"]
-            except Exception as ex:
-                rec["kopru_prob"] = rec["kopru_prob_L0"] = float("nan")
-                rec["kopru_kazanc"] = float("nan"); rec["kopru_hata"] = str(ex)[:80]
+            rec.update(prob_seti(model, ES, EC, brS - ENT_OFF, brC - ENT_OFF,
+                                 ES[2] - ENT_OFF, EC[2] - ENT_OFF, salt=step))
+            rec.update(agirlik_istat(model))
             curve.append(rec)
             json.dump(curve, open(os.path.join(
                 OUT, f"egri_{arm}_s{seed}.json"), "w"), indent=1)
@@ -667,10 +715,15 @@ def run_arm(arm, seed, data, log):
                 rec["lens_gold"] = lg_; rec["lens_kopru"] = lb_
                 rec["lens_kopru_min"] = float(np.min(lb_))
                 rec["lens_kopru_kat"] = int(np.argmin(lb_))
+                rec["lens_gold_min"] = float(np.min(lg_))
+                rec["lens_gold_kat"] = int(np.argmin(lg_))
                 np.savez_compressed(
                     os.path.join(OUT, f"dikkat_{arm}_s{seed}_{step:06d}.npz"),
                     comp=dikkat(model, EC[0], EC[1]),
                     seen=dikkat(model, ES[0], ES[1]))
+            if SAVE_SNAP and (len(curve) % CKPT_EVERY == 0):
+                torch.save({k: v.half().cpu() for k, v in model.state_dict().items()},
+                           os.path.join(OUT, f"snap_{arm}_s{seed}_{step:06d}.pt"))
             if SAVE_KV and model.mem is not None:
                 np.savez_compressed(
                     os.path.join(OUT, f"kv_{arm}_s{seed}_{step:06d}.npz"),
@@ -680,7 +733,8 @@ def run_arm(arm, seed, data, log):
             log(f"    {step:6d}  loss {loss.item():.3f}  1hop {a1:.3f}  "
                 f"seen {rec['seen']:.3f}  comp {rec['comp']:.3f}  "
                 f"| ent {rec['ent']:.3f}  kopru-sira {rec['comp_bridge_rank']:.0f}  "
-                f"kopru {rec['kopru_prob']:.3f} (L0 {rec['kopru_prob_L0']:.3f}, kazanc {rec['kopru_kazanc']:+.3f})  belleksiz {rec['comp_acc_nomem']:.3f}  "
+                f"kopru {rec['kopru']:.3f} (L0 {rec['kopru_L0']:.3f} null {rec['kopru_null']:.3f}) "
+                f"cevap {rec['cevap']:.3f}  belleksiz {rec['comp_acc_nomem']:.3f}  "
                 f"memH {rec['mem_H']:.2f}"
                 + (f"  lens-kopru {rec['lens_kopru_min']:.3f}@K{rec['lens_kopru_kat']}"
                    if SAVE_CIRCUIT else "")
