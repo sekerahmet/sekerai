@@ -103,6 +103,7 @@ DELTA_MIN, CI_TOO_WIDE = 0.05, 0.15
 FLOOR, CEIL = 0.10, 0.95   # taban/tavan etkisi: fark olcmek anlamsiz
 NL = chr(10)
 COMPILE = os.environ.get("COMPILE", "1") != "0"
+ABORT_ON_FATAL = os.environ.get("ABORT_ON_FATAL", "1") != "0"
 SAVE_CKPT  = os.environ.get("SAVE_CKPT", "1") != "0"
 SAVE_TABLE = os.environ.get("SAVE_TABLE", "1") != "0"   # ornek basina uzun tablo
 SAVE_KV    = os.environ.get("SAVE_KV", "1") != "0"      # bellek K/V anlik goruntusu
@@ -716,6 +717,57 @@ def yaz_tablo(tablo, arm, seed):
                                for k, v in cols.items()})
 
 
+def saglik(rec, curve, arm, adim, toplam):
+    """ERKEN TESHIS — her degerlendirmede. Butun degerler zaten hesaplandi,
+    ek maliyet yok. Amac: 1.4 saat kosup sonunda 'bellek olmus' demek yerine
+    ilk olcumde bagirmak. (12 Eylul: weight decay C'nin bellegini 10k adimda
+    oldurdu, 40 dk sonra tesadufen fark edildi.)
+    Doner: (uyari listesi, olumcul_mu)"""
+    u, olumcul = [], False
+    ilerleme = adim / max(1, toplam)
+
+    # Bellek kontrolleri icin ISINMA PAYI: ilk %10'da bellek henuz oturmamis
+    # olabilir, orada uyarmak gurultu olur. Weight decay patolojisi %17'de
+    # (10k/60k) zaten net gorunuyordu.
+    if arm != "A" and ilerleme >= 0.10:
+        sc = rec.get("mem_scale", float("nan"))
+        if np.isfinite(sc) and sc < 8.0:
+            u.append(f"bellek sicakligi dustu ({sc:.2f}, baslangic 16) "
+                     "-> softmax yayvanlasiyor")
+        H = rec.get("mem_H", float("nan"))
+        if np.isfinite(H):
+            if H < GATE_MEMENT:
+                u.append(f"bellek cokmesi: memH {H:.2f} (~{math.exp(H):.0f} etkin slot)")
+            elif H > 0.95 * math.log(CFG["M"]):
+                u.append(f"bellek SECICI DEGIL: memH {H:.2f} ~ duzgun dagilim "
+                         f"({math.log(CFG['M']):.2f})")
+        for nm in ("memK_etkin_rank", "memV_etkin_rank"):
+            r_ = rec.get(nm, float("nan"))
+            if np.isfinite(r_) and r_ < 5:
+                u.append(f"{nm} cokmesi: {r_:.1f}")
+
+    if ilerleme > 0.25 and rec.get("one", 1) < 0.5:
+        u.append(f"1hop ogrenilmiyor ({rec['one']:.3f}) -> egitim bozuk olabilir")
+    if ilerleme > 0.5 and rec.get("comp", 1) < FLOOR:
+        u.append(f"comp tabanda ({rec['comp']:.3f}) -> gorev cok zor olabilir")
+    for k in ("ho_kopru", "kopru", "cevap"):
+        if k in rec and not np.isfinite(rec[k]):
+            u.append(f"prob '{k}' nan donuyor")
+    if not np.isfinite(rec.get("loss", 0)):
+        u.append("loss nan/inf")
+
+    # OLUMCUL: bellek ust uste UC olcumde olu -> devam etmenin anlami yok
+    if arm != "A" and len(curve) >= 3:
+        son3 = curve[-3:]
+        if all(np.isfinite(c.get("mem_scale", np.nan)) and c["mem_scale"] < 3.0
+               and np.isfinite(c.get("memK_etkin_rank", np.nan))
+               and c["memK_etkin_rank"] < 3 for c in son3):
+            olumcul = True
+            u.append("OLUMCUL: bellek uc olcumdur olu (scale<3, anahtar rank<3). "
+                     "Bu kolu surdurmek bos.")
+    return u, olumcul
+
+
 def run_arm(arm, seed, data, log):
     facts, pairs, one, tr2, comp, ent_ev, seen_e, unseen_e = data
     torch.manual_seed(seed); np.random.seed(seed)
@@ -863,6 +915,13 @@ def run_arm(arm, seed, data, log):
             # tablosu tam o noktayi kullaniyor.
             json.dump(curve, open(os.path.join(
                 OUT, f"egri_{arm}_s{seed}.json"), "w"), indent=1)
+            uy, olumcul = saglik(rec, curve, arm, step, S)
+            rec["uyarilar"] = uy
+            for w in uy:
+                log(f"      >>> UYARI: {w}")
+            if olumcul and ABORT_ON_FATAL:
+                log(f"      >>> kol {arm} durduruldu (olumcul saglik hatasi)")
+                break
             log(f"    {step:6d}  loss {loss.item():.3f}  1hop {a1:.3f}  "
                 f"seen {rec['seen']:.3f}  comp {rec['comp']:.3f}  "
                 f"| ent {rec['ent']:.3f}  kopru-sira {rec['comp_bridge_rank']:.0f}  "
