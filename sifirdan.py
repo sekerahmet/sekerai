@@ -115,6 +115,14 @@ TRAIN_SEEDS = [int(s) for s in os.environ.get("SEEDS", "0").split(",")]
 CTX         = 4          # bellek sorgusu kac pozisyonu birlestiriyor
 N_BOOT      = 4000
 UNSEEN_ENT_FRAC = 0.10
+# IKINCI-HOP TUTMA: olgularin bu kadari egitimde IKINCI hop rolunde hic
+# kullanilmaz; ENT2 degerlendirme kumesi bunlardan olusur.
+#   Neden: bizim ENT'imiz BIRINCI hop'u tutuyor (baş varlik hic besteleme basi
+#   olmamis) ve olculdu ki ikinci hop %96 tanidik. Wang ve ark. (2405.15071) ile
+#   2606.20737'nin OOD tanimi ise IKINCI hop olgusunun hic gorulmemesi -- farkli
+#   bir ariza. Ikisini AYNI kosuda olcmek icin bu kume gerekli.
+#   0 = kapali, veri kosu 2 ile BIT DUZEYINDE AYNI kalir.
+HOP2_FRAC = float(os.environ.get("HOP2_FRAC", "0"))
 N_EVAL_MAX  = 3000       # her eval kumesinden en fazla bu kadar ornek
 GATE_1HOP, GATE_SEEN, GATE_MEMENT = 0.90, 0.80, math.log(32)
 DELTA_MIN, CI_TOO_WIDE = 0.05, 0.15
@@ -173,15 +181,30 @@ def build_data():
     unseen_ent = np.sort(perm[:n_unseen])          # hic 2-hop egitimi yok
     seen_ent = np.sort(perm[n_unseen:])
 
+    # IKINCI-HOP rolunden men edilen olgular. HOP2_FRAC=0 ise hic RNG
+    # tuketilmez -> veri eski kosularla birebir ayni kalir.
+    hop2_tut = set()
+    if HOP2_FRAC > 0:
+        n_h2 = int(round(HOP2_FRAC * N * R))
+        flat = rng.permutation(N * R)[:n_h2]
+        hop2_tut = {(int(f) // R, int(f) % R) for f in flat}
+
     # gorulmus varliklar icin cift bolmesi: PT egitim / kalani test
-    tr2, comp = [], []
+    # (b,r2) yasakliysa zincir egitime de COMP'a da GIRMEZ -> ENT2 olur.
+    tr2, comp, ent2 = [], [], []
     for e in seen_ent:
         pp = rng.permutation(NP)
-        for j in pp[:PT]:
-            tr2.append((e, pairs[j][0], pairs[j][1]))
-        for j in pp[PT:]:
-            comp.append((e, pairs[j][0], pairs[j][1]))
-    ent_eval = [(e, p[0], p[1]) for e in unseen_ent for p in pairs]
+        for k, j in enumerate(pp):
+            r1, r2 = pairs[j]
+            if (int(facts[e, r1]), r2) in hop2_tut:
+                ent2.append((e, r1, r2))
+            elif k < PT:
+                tr2.append((e, r1, r2))
+            else:
+                comp.append((e, r1, r2))
+    # ENT temiz kalsin: ikinci hop'u da yasak olanlari disari al (cifte OOD)
+    ent_eval = [(e, p[0], p[1]) for e in unseen_ent for p in pairs
+                if (int(facts[e, p[0]]), p[1]) not in hop2_tut]
 
     def chains(lst):
         out = []
@@ -190,17 +213,30 @@ def build_data():
             out.append((int(e), int(r1), int(r2), b, int(facts[b, r2])))
         return out
 
-    tr2, comp, ent_eval = chains(tr2), chains(comp), chains(ent_eval)
+    tr2, comp, ent_eval, ent2 = (chains(tr2), chains(comp),
+                                 chains(ent_eval), chains(ent2))
 
     # --- sizinti denetimi: egitimdeki (e,r1,r2) kumesi testle kesismemeli
     trset = {(e, a, b) for e, a, b, _, _ in tr2}
-    for nm, st in (("COMP", comp), ("ENT", ent_eval)):
+    for nm, st in (("COMP", comp), ("ENT", ent_eval), ("ENT2", ent2)):
         k = sum((e, a, b) in trset for e, a, b, _, _ in st)
         assert k == 0, f"{nm} sizintisi: {k}"
     assert len(set(unseen_ent) & set(seen_ent)) == 0
 
+    # --- ENT2 denetimi: tutulan olgular egitimde IKINCI HOP olmamali
+    ikinci_rol = {(b, r2) for _, _, r2, b, _ in tr2}
+    assert not (ikinci_rol & hop2_tut),         f"ENT2 sizintisi: {len(ikinci_rol & hop2_tut)} tutulan olgu egitimde ikinci hop olmus"
+    for _, _, r2, b, _ in ent2:
+        assert (b, r2) in hop2_tut, "ENT2'de yasak-olmayan zincir var"
+    # ENT gercekten BIRINCI hop'u tutuyor mu, ENT2 IKINCI'yi mi
+    ilk_rol = {(e, r1) for e, r1, _, _, _ in tr2}
+    assert not any((e, r1) in ilk_rol for e, r1, _, _, _ in ent_eval),         "ENT'te birinci hop sizintisi"
+    if ent2:
+        _ik = sum((b, r2) in ikinci_rol for _, _, r2, b, _ in ent2)
+        assert _ik == 0, f"ENT2 ikinci hop sizintisi: {_ik}"
+
     one = [(int(e), int(r), int(facts[e, r])) for e in range(N) for r in range(R)]
-    return facts, pairs, one, tr2, comp, ent_eval, seen_ent, unseen_ent
+    return facts, pairs, one, tr2, comp, ent_eval, seen_ent, unseen_ent, ent2
 
 
 def enc_one(batch):
@@ -323,12 +359,16 @@ class Net(nn.Module):
 
     def forward(self, x, want_w=False, no_mem=False):
         h = self.emb(x) + self.pos(torch.arange(x.shape[1], device=x.device))[None]
-        h0, w = h, None
+        h0, ws = h, []
         for i, blk in enumerate(self.blocks):
             h = blk(h)
             h, w_ = self._mem_uygula(h, h0, i, no_mem)
             if w_ is not None:
-                w = w_                                  # SON okumanin agirliklari
+                ws.append(w_)
+        # [okuma, B, T, M]. Tek okumada [1,B,T,M] -> eski davranisla uyumlu.
+        # SON okumayi dondurmek sagligi korlestiriyordu: ilk okumalar cokse
+        # haber alinmiyordu. Artik HEPSI donuyor.
+        w = torch.stack(ws) if ws else None
         return self.head(self.nf(h)), (w if want_w else None)
 
 
@@ -375,10 +415,10 @@ def mem_entropy(model, X, bs=512, nmax=1024):
         xb = torch.from_numpy(X[i:i + bs]).to(DEV)
         with torch.autocast(DEV, dtype=torch.float16, enabled=(DEV == "cuda")):
             _, w = model(xb, want_w=True)
-        w = w.float().reshape(-1, w.shape[-1]).mean(0)
+        w = w.float().reshape(w.shape[0], -1, w.shape[-1]).mean(1)   # [okuma, M]
         acc = w if acc is None else acc + w
-    p = (acc / acc.sum()).cpu().numpy()
-    return float(-(p * np.log(p + 1e-12)).sum())
+    P = (acc / acc.sum(-1, keepdim=True)).cpu().numpy()
+    return float(min(-(q * np.log(q + 1e-12)).sum() for q in P))     # en kotu okuma
 
 
 @torch.no_grad()
@@ -410,7 +450,9 @@ def zengin(model, E, gold_bridge, shortcut_tgt, bs=512):
         pred.append((p.argmax(-1) + lo).cpu().numpy())
         pp.append(p.max(-1).values.cpu().numpy())
         if w is not None:                      # ornek basina EN COK YANAN 3 SLOT
-            ww = w[torch.arange(len(idx), device=DEV), idx].float()
+            # ornek basina slot tablosu SON okumadan; havuzlanmis olcum
+            # bellek_istat'ta (okuma basina entropi orada).
+            ww = w[-1][torch.arange(len(idx), device=DEV), idx].float()
             tk = torch.topk(ww, TOPSLOT, -1)
             sl.append(tk.indices.cpu().numpy()); slw.append(tk.values.cpu().numpy())
             slH.append((-(ww * torch.log(ww + 1e-12)).sum(-1)).cpu().numpy())
@@ -599,12 +641,16 @@ def bellek_istat(model, X, bs=512, nmax=2048):
         xb = torch.from_numpy(X[i:i+bs]).to(DEV)
         with torch.autocast(DEV, dtype=torch.float16, enabled=(DEV == "cuda")):
             _, w = model(xb, want_w=True)
-        w = w.float().reshape(-1, w.shape[-1]).sum(0)
+        w = w.float().reshape(w.shape[0], -1, w.shape[-1]).sum(1)   # [okuma, M]
         acc = w if acc is None else acc + w
     model.train()
-    p = (acc / acc.sum()).cpu().numpy()
-    return dict(mem_H=float(-(p * np.log(p + 1e-12)).sum()),
-                mem_olu=float((p < 1e-6).mean()), mem_tepe=float(p.max()))
+    P = (acc / acc.sum(-1, keepdim=True)).cpu().numpy()              # [okuma, M]
+    H = [float(-(q * np.log(q + 1e-12)).sum()) for q in P]
+    ph = P.mean(0)                                   # okumalar birlestirilmis
+    # KAPI en KOTU okumaya baksin: biri cokerse haber verilsin.
+    return dict(mem_H=float(min(H)), mem_H_okuma=H,
+                mem_H_havuz=float(-(ph * np.log(ph + 1e-12)).sum()),
+                mem_olu=float((ph < 1e-6).mean()), mem_tepe=float(ph.max()))
 
 
 @torch.no_grad()
@@ -795,7 +841,7 @@ def saglik(rec, curve, arm, adim, toplam):
 
 
 def run_arm(arm, seed, data, log):
-    facts, pairs, one, tr2, comp, ent_ev, seen_e, unseen_e = data
+    facts, pairs, one, tr2, comp, ent_ev, seen_e, unseen_e, ent2_ev = data
     torch.manual_seed(seed); np.random.seed(seed)
 
     X1, P1, T1, C1 = enc_one(one)
@@ -810,7 +856,9 @@ def run_arm(arm, seed, data, log):
         return lst
 
     L1, LS, LC, LE = (sub(one, 0), sub(tr2, 1), sub(comp, 2), sub(ent_ev, 3))
+    L2 = sub(ent2_ev, 4)                      # ENT2: ikinci hop hic gorulmemis
     E1, ES, EC, EE = enc_one(L1), enc_two(LS), enc_two(LC), enc_two(LE)
+    E2 = enc_two(L2) if L2 else None
     # tani hedefleri: kopru varligi ve "r1'i atla" kisayolu
     brS = np.array([ENT_OFF + b for _, _, _, b, _ in LS], np.int64)
     brC = np.array([ENT_OFF + b for _, _, _, b, _ in LC], np.int64)
@@ -818,11 +866,14 @@ def run_arm(arm, seed, data, log):
     scS = np.array([ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in LS], np.int64)
     scC = np.array([ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in LC], np.int64)
     scE = np.array([ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in LE], np.int64)
+    br2 = np.array([ENT_OFF + b for _, _, _, b, _ in L2], np.int64)
+    sc2 = np.array([ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in L2], np.int64)
     _pti, _pvi = onek_bolme(LS)          # (e,r1) onegine gore prob bolmesi
 
     log(f"  --- kol {arm} ---")
     log(f"    veri kodlandi: 1hop {len(L1)} | 2hop-egitim {len(LS)} | "
-        f"COMP {len(LC)} | ENT {len(LE)}")
+        f"COMP {len(LC)} | ENT {len(LE)}"
+        + (f" | ENT2 {len(L2)}" if L2 else ""))
     model = Net(arm, CFG).to(DEV)
     npm = nparam(model)
     # torch.compile SADECE egitim adimina. Tani fonksiyonlari ham `model`i
@@ -890,9 +941,12 @@ def run_arm(arm, seed, data, log):
             rec = dict(step=step, loss=float(loss.item()), one=float(a1),
                        lr=float(lr), secs=round(time.time() - t0, 1))
             # --- TANI (kesifsel): birincil karari ETKILEMEZ
-            for tag, EE_, gb, st, LL in (("seen", ES, brS, scS, LS),
-                                         ("comp", EC, brC, scC, LC),
-                                         ("ent", EE, brE, scE, LE)):
+            _kumeler = [("seen", ES, brS, scS, LS),
+                        ("comp", EC, brC, scC, LC),
+                        ("ent", EE, brE, scE, LE)]
+            if E2 is not None:
+                _kumeler.append(("ent2", E2, br2, sc2, L2))
+            for tag, EE_, gb, st, LL in _kumeler:
                 z, dt = zengin(model, EE_, gb, st)
                 rec[tag] = z["acc"]
                 for k, v in z.items():
@@ -958,7 +1012,9 @@ def run_arm(arm, seed, data, log):
                 break
             log(f"    {step:6d}  loss {loss.item():.3f}  1hop {a1:.3f}  "
                 f"seen {rec['seen']:.3f}  comp {rec['comp']:.3f}  "
-                f"| ent {rec['ent']:.3f}  kopru-sira {rec['comp_bridge_rank']:.0f}  "
+                f"| ent {rec['ent']:.3f}  "
+                + (f"ENT2 {rec['ent2']:.3f}  " if 'ent2' in rec else "")
+                + f"kopru-sira {rec['comp_bridge_rank']:.0f}  "
                 f"kopru {rec['kopru']:.3f} (L0 {rec['kopru_L0']:.3f} null {rec['kopru_null']:.3f}) "
                 f"cevap {rec['cevap']:.3f} | ONEK-TUT kopru {rec.get('ho_kopru', float('nan')):.3f} "
                 f"(L0 {rec.get('ho_kopru_L0', float('nan')):.3f} "
@@ -971,7 +1027,10 @@ def run_arm(arm, seed, data, log):
                 + f"  ({time.time()-t0:.0f}s)")
 
     r = {}
-    for nm, E in (("one", E1), ("seen", ES), ("comp", EC), ("ent", EE)):
+    _son = [("one", E1), ("seen", ES), ("comp", EC), ("ent", EE)]
+    if E2 is not None:
+        _son.append(("ent2", E2))
+    for nm, E in _son:
         okr, okf = evaluate(model, *E[:3])
         r[nm] = dict(acc=float(okr.mean()), acc_free=float(okf.mean()),
                      ok=okr, clus=E[3])
@@ -1032,7 +1091,7 @@ def main():
         f"~{_fl*len(ARMS)*len(TRAIN_SEEDS)/5e12/3600:.1f} saat")
     log("veri hazirlaniyor...")
     data = build_data()
-    facts, pairs, one, tr2, comp, ent_ev, seen_e, unseen_e = data
+    facts, pairs, one, tr2, comp, ent_ev, seen_e, unseen_e, ent2_ev = data
     log(f"olgu {len(one)} | 2hop-egitim {len(tr2)} | COMP {len(comp)} "
         f"({len(set(e for e,*_ in comp))} varlik) | ENT {len(ent_ev)} "
         f"({len(unseen_e)} varlik)")
@@ -1049,8 +1108,13 @@ def main():
     log("\n" + "=" * 78)
     log(f"SONUCLAR  ({len(TRAIN_SEEDS)} seed)")
     log("=" * 78)
+    _e2 = any("ent2" in R[(a, TRAIN_SEEDS[0])] for a in ARMS)
     log(f"{'kol':4s} {'param':>8s} {'1hop':>7s} {'seen':>7s} {'COMP':>7s} "
-        f"{'ENT':>7s} {'kisayol':>8s} {'memH':>7s}")
+        f"{'ENT':>7s}" + (f" {'ENT2':>7s}" if _e2 else "")
+        + f" {'kisayol':>8s} {'memH':>7s}")
+    if _e2:
+        log("     ENT  = 1. hop hic 1. hop olarak kullanilmamis (bizim bolme)")
+        log("     ENT2 = 2. hop hic 2. hop olarak kullanilmamis (2405.15071'in OOD'u)")
     agg = {}
     for arm in ARMS:
         rs = [R[(arm, s)] for s in TRAIN_SEEDS]
@@ -1059,9 +1123,13 @@ def main():
                         shortcut=float(np.mean([r["shortcut"] for r in rs])),
                         mement=float(np.mean([r["mement"] for r in rs])),
                         nparam=rs[0]["nparam"])
+        if _e2:
+            agg[arm]["ent2"] = g("ent2")
         a = agg[arm]
         log(f"{arm:4s} {a['nparam']/1e6:7.2f}M {a['one']:7.3f} {a['seen']:7.3f} "
-            f"{a['comp']:7.3f} {a['ent']:7.3f} {a['shortcut']:8.3f} {a['mement']:7.2f}")
+            f"{a['comp']:7.3f} {a['ent']:7.3f}"
+            + (f" {a['ent2']:7.3f}" if _e2 else "")
+            + f" {a['shortcut']:8.3f} {a['mement']:7.2f}")
 
     # ---- kapilar
     gates, why = True, []
