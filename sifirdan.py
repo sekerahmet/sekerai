@@ -104,7 +104,14 @@ SAVE_TABLE = os.environ.get("SAVE_TABLE", "1") != "0"   # ornek basina uzun tabl
 SAVE_KV    = os.environ.get("SAVE_KV", "1") != "0"      # bellek K/V anlik goruntusu
 SAVE_CIRCUIT = os.environ.get("SAVE_CIRCUIT", "1") != "0"  # logit lens, dikkat, kafa ablasyonu
 SAVE_SNAP  = os.environ.get("SAVE_SNAP", "1") != "0"    # ARA kontrol noktalari (fp16)
-CKPT_EVERY = int(os.environ.get("CKPT_EVERY", "3"))     # kac degerlendirmede bir
+TOPSLOT    = int(os.environ.get("TOPSLOT", "8"))         # ornek basina saklanan slot sayisi
+CKPT_EVERY = int(os.environ.get("CKPT_EVERY", "1"))     # kac degerlendirmede bir
+# NOT: 12 Eylul 8.5M kosusunda 3 kullanildi (12 noktanin 4'u) ve bu cimrilikti.
+# Depolama kisit degil (Drive 2 TB); 100M icin 12 anlik goruntu x 3 kol ~7 GB.
+# Hangi olcumu yapmak isteyecegin onceden bilinmiyor: ayni gun uc olcum hatasi
+# olcum YAPILDIKTAN SONRA bulundu, ikisinde ara kayit olmadigi icin kosu bastan
+# baslatildi. TEK ISTISNA: kosu basladiktan sonra kollarin kayit sikligini
+# DEGISTIRME -- kollar arasi tutarlilik cozunurlukten onemli.
 
 os.makedirs(OUT, exist_ok=True)
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
@@ -369,7 +376,7 @@ def zengin(model, E, gold_bridge, shortcut_tgt, bs=512):
         pp.append(p.max(-1).values.cpu().numpy())
         if w is not None:                      # ornek basina EN COK YANAN 3 SLOT
             ww = w[torch.arange(len(idx), device=DEV), idx].float()
-            tk = torch.topk(ww, 3, -1)
+            tk = torch.topk(ww, TOPSLOT, -1)
             sl.append(tk.indices.cpu().numpy()); slw.append(tk.values.cpu().numpy())
             slH.append((-(ww * torch.log(ww + 1e-12)).sum(-1)).cpu().numpy())
     model.train()
@@ -384,7 +391,7 @@ def zengin(model, E, gold_bridge, shortcut_tgt, bs=512):
                  kopru_sira=c(br).astype(np.int32))
     if sl:
         S, W = c(sl), c(slw)
-        for j in range(3):
+        for j in range(TOPSLOT):
             detay[f"slot{j+1}"] = S[:, j].astype(np.int32)
             detay[f"slot{j+1}_w"] = W[:, j].astype(np.float32)
         detay["slot_H"] = c(slH).astype(np.float32)

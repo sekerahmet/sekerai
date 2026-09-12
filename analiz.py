@@ -69,7 +69,8 @@ def slot_testi(df, adim=None, kume="comp", nmax=4000, seed=0):
       ayni_kopru_farkli_e : kopru ayni, soru varligi FARKLI   <- tezin tahmini
       ayni_e              : varlik ayni (kopru de cogu zaman ayni) <- kontrol
       farkli              : ikisi de farkli                   <- taban
-    Olcu: iki sorunun en cok yanan 3 slotunun kesisim buyuklugu (0..3).
+    Olcu: iki sorunun en cok yanan N slotunun kesisim buyuklugu (0..N).
+    N = tabloda kac slot sutunu varsa (8.5M kosusunda 3, sonrakilerde 8).
     """
     if df is None or "slot1" not in df:
         return None
@@ -87,7 +88,9 @@ def slot_testi(df, adim=None, kume="comp", nmax=4000, seed=0):
     r = np.random.RandomState(seed)
     if len(idx) > nmax:
         idx = idx[r.permutation(len(idx))[:nmax]]
-    S = np.stack([np.asarray(df[f"slot{j}"])[idx] for j in (1, 2, 3)], 1)
+    ns = len([k for k in df if k.startswith("slot") and not k.endswith("_w")
+              and k != "slot_H"])
+    S = np.stack([np.asarray(df[f"slot{j}"])[idx] for j in range(1, ns + 1)], 1)
     e = np.asarray(df["e"])[idx]; b = np.asarray(df["kopru"])[idx]
     n = len(idx)
 
