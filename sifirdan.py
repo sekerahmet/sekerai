@@ -145,6 +145,17 @@ SAVE_RESUME= os.environ.get("SAVE_RESUME", "1") != "0"  # optimizer+RNG: kosuyu 
 #  koşuldu. Depolama kisit degil.)
 RESUME_EVERY = int(os.environ.get("RESUME_EVERY", "1"))
 RESUME_FROM  = os.environ.get("RESUME_FROM", "")   # surdur_*.pt yolu
+
+# KIMLIK DENETIMI (Identity Bridge, arXiv 2509.24653). Sifir-hop gorev:
+#   [Q1] e IDENT ? -> e        "Turkiye'nin kendisi nedir? -> Turkiye"
+# Islevi: varligin GIRDI temsili ile CIKTI temsilini hizalamak. Zincirde ara
+# sonuc uretilip tekrar girdi gibi kullanilmak zorunda; kirilma noktasi orasi.
+# Kritik: bu denetim HER varliga verilebilir, hic 2-hop gormemis olanlara da.
+#   12 Eylul olcumu: besteleme iliskiler uzerinde genellesiyor (%73) ama
+#   varliklar uzerinde genellesmiyor (%2.5). Ariza varlik baglanmasi.
+# IDENT_FRAC = egitim havuzunun ne kadari kimlik ornegi olsun (0 = kapali).
+IDENT_FRAC = float(os.environ.get("IDENT_FRAC", "0"))
+CFG["IDENT_FRAC"] = IDENT_FRAC
 TOPSLOT    = int(os.environ.get("TOPSLOT", "8"))         # ornek basina saklanan slot sayisi
 CKPT_EVERY = int(os.environ.get("CKPT_EVERY", "1"))     # kac degerlendirmede bir
 # NOT: 12 Eylul 8.5M kosusunda 3 kullanildi (12 noktanin 4'u) ve bu cimrilikti.
@@ -159,6 +170,7 @@ DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ozel token'lar
 PAD, Q1, Q2, QM, EOS = 0, 1, 2, 3, 4
+IDENT = 5              # kullanilmayan ozel token; VOCAB DEGISMEZ
 SPECIAL = 8
 REL_OFF = SPECIAL
 ENT_OFF = SPECIAL + CFG["N_REL"]
@@ -256,6 +268,17 @@ def enc_one(batch):
     return (X, np.full(len(batch), 3, np.int64),
             np.array([ENT_OFF + a for _, _, a in batch], np.int64),
             np.array([e for e, _, _ in batch], np.int64))
+
+
+def enc_ident(ents):
+    """[Q1] e IDENT ? e EOS  -> hedef pozisyon 3, hedef = e'nin kendisi.
+    VOCAB/ENT_OFF degismez: mimari kimlik denetimsiz kolla BIREBIR ayni."""
+    X = np.zeros((len(ents), T_LEN), np.int64)
+    for i, e in enumerate(ents):
+        X[i, :6] = [Q1, ENT_OFF + e, IDENT, QM, ENT_OFF + e, EOS]
+    return (X, np.full(len(ents), 3, np.int64),
+            np.array([ENT_OFF + e for e in ents], np.int64),
+            np.array(list(ents), np.int64))
 
 
 def enc_two(batch):
@@ -897,8 +920,18 @@ def run_arm(arm, seed, data, log):
 
     X1, P1, T1, C1 = enc_one(one)
     X2, P2, T2, C2 = enc_two(tr2)
-    Xtr = np.concatenate([X1, X2]); Ptr = np.concatenate([P1, P2])
-    Ttr = np.concatenate([T1, T2])
+    parts = [(X1, P1, T1), (X2, P2, T2)]
+    EI = None
+    if IDENT_FRAC > 0:
+        EI = enc_ident(range(CFG["N_ENT"]))          # HER varlik, ENT dahil
+        n_tab = len(X1) + len(X2)
+        tekrar = max(1, int(round(IDENT_FRAC / max(1e-9, 1 - IDENT_FRAC)
+                                  * n_tab / len(EI[0]))))
+        parts.append((np.tile(EI[0], (tekrar, 1)),
+                      np.tile(EI[1], tekrar), np.tile(EI[2], tekrar)))
+    Xtr = np.concatenate([a for a, _, _ in parts])
+    Ptr = np.concatenate([b for _, b, _ in parts])
+    Ttr = np.concatenate([c for _, _, c in parts])
 
     def sub(lst, salt):
         r = np.random.RandomState(DATA_SEED + 7 + salt)
@@ -924,7 +957,9 @@ def run_arm(arm, seed, data, log):
     log(f"  --- kol {arm} ---")
     log(f"    veri kodlandi: 1hop {len(L1)} | 2hop-egitim {len(LS)} | "
         f"COMP {len(LC)} | ENT {len(LE)}"
-        + (f" | ENT2 {len(L2)}" if L2 else ""))
+        + (f" | ENT2 {len(L2)}" if L2 else "")
+        + (f" | KIMLIK {len(EI[0])}x{tekrar} = %{100*len(parts[2][0])/len(Xtr):.0f} havuz"
+           if EI is not None else ""))
     model = Net(arm, CFG).to(DEV)
     npm = nparam(model)
     # torch.compile SADECE egitim adimina. Tani fonksiyonlari ham `model`i
@@ -1005,6 +1040,8 @@ def run_arm(arm, seed, data, log):
             a1 = evaluate(model, *E1[:3])[0].mean()
             rec = dict(step=step, loss=float(loss.item()), one=float(a1),
                        lr=float(lr), secs=round(time.time() - t0, 1))
+            if EI is not None:      # kimlik gorevi ogrenildi mi (saglik)
+                rec["ident"] = float(evaluate(model, *EI[:3])[0].mean())
             # --- TANI (kesifsel): birincil karari ETKILEMEZ
             _kumeler = [("seen", ES, brS, scS, LS),
                         ("comp", EC, brC, scC, LC),
@@ -1087,7 +1124,8 @@ def run_arm(arm, seed, data, log):
                 break
             log(f"    {step:6d}  loss {loss.item():.3f}  1hop {a1:.3f}  "
                 f"seen {rec['seen']:.3f}  comp {rec['comp']:.3f}  "
-                f"| ent {rec['ent']:.3f}  "
+                + (f"kimlik {rec['ident']:.3f}  " if 'ident' in rec else "")
+                + f"| ent {rec['ent']:.3f}  "
                 + (f"ENT2 {rec['ent2']:.3f}  " if 'ent2' in rec else "")
                 + f"kopru-sira {rec['comp_bridge_rank']:.0f}  "
                 f"kopru {rec['kopru']:.3f} (L0 {rec['kopru_L0']:.3f} null {rec['kopru_null']:.3f}) "
