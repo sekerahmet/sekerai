@@ -123,6 +123,7 @@ UNSEEN_ENT_FRAC = 0.10
 #   bir ariza. Ikisini AYNI kosuda olcmek icin bu kume gerekli.
 #   0 = kapali, veri kosu 2 ile BIT DUZEYINDE AYNI kalir.
 HOP2_FRAC = float(os.environ.get("HOP2_FRAC", "0"))
+CFG["HOP2_FRAC"] = HOP2_FRAC   # cikti dosyalari veri bolmesini KENDISI anlatsin
 N_EVAL_MAX  = 3000       # her eval kumesinden en fazla bu kadar ornek
 GATE_1HOP, GATE_SEEN, GATE_MEMENT = 0.90, 0.80, math.log(32)
 DELTA_MIN, CI_TOO_WIDE = 0.05, 0.15
@@ -136,6 +137,7 @@ SAVE_TABLE = os.environ.get("SAVE_TABLE", "1") != "0"   # ornek basina uzun tabl
 SAVE_KV    = os.environ.get("SAVE_KV", "1") != "0"      # bellek K/V anlik goruntusu
 SAVE_CIRCUIT = os.environ.get("SAVE_CIRCUIT", "1") != "0"  # logit lens, dikkat, kafa ablasyonu
 SAVE_SNAP  = os.environ.get("SAVE_SNAP", "1") != "0"    # ARA kontrol noktalari (fp16)
+SAVE_RESUME= os.environ.get("SAVE_RESUME", "1") != "0"  # optimizer+RNG: kosuyu UZATABILMEK icin
 TOPSLOT    = int(os.environ.get("TOPSLOT", "8"))         # ornek basina saklanan slot sayisi
 CKPT_EVERY = int(os.environ.get("CKPT_EVERY", "1"))     # kac degerlendirmede bir
 # NOT: 12 Eylul 8.5M kosusunda 3 kullanildi (12 noktanin 4'u) ve bu cimrilikti.
@@ -747,13 +749,43 @@ def kafa_ablasyonu(model, EC, E1, bs=512, nmax=1500):
 
 
 @torch.no_grad()
+@torch.no_grad()
+def okuma_katkisi(model, X, bs=512, nmax=1024):
+    """TANI: her bellek okuma noktasi kalintiya ne kadar ekliyor?
+    Donen okuma basina ortalama ||m|| / ||h||.  Uc okumali kosuda
+    'isi hangi okuma yapiyor' sorusunun dogrudan olcumu -- yalnizca
+    kontrol noktalarindan geri hesaplamak yerine canli kaydediyoruz."""
+    if model.mem is None:
+        return {}
+    model.eval()
+    pay = [[] for _ in model.mem_at]
+    for i in range(0, min(len(X), nmax), bs):
+        xb = torch.from_numpy(X[i:i + bs]).to(DEV)
+        h = model.emb(xb) + model.pos(torch.arange(xb.shape[1], device=DEV))[None]
+        h0, k = h, 0
+        for j, blk in enumerate(model.blocks):
+            h = blk(h)
+            if (j + 1) in model.mem_at:
+                m, _ = model.mem(h0 if model.arm == "B" else h)
+                pay[k].append(float((m.float().norm(dim=-1)
+                                     / (h.float().norm(dim=-1) + 1e-6)).mean()))
+                h = h + m
+                k += 1
+    model.train()
+    return {"okuma_katki": [float(np.mean(v)) for v in pay]}
+
+
 def agirlik_istat(model):
     """TANI: modul basina agirlik normu + bellek tayfi (etkin rank).
     Weight decay altinda hangi modul buyuyor, bellek kac yonu gercekten kullaniyor."""
     o = {}
     gr = {}
     for n, p_ in model.named_parameters():
+        # RMSNorm kazanclari AYRI: kosu 2'de bunlara uygulanan weight decay
+        # kol A'nin son comp'unu 0.675 -> 0.561'e dusurmustu ve 'diger'in
+        # icinde kaybolduğu icin fark edilmemisti.
         k = ("mem_K" if n.endswith("mem.K") else "mem_V" if n.endswith("mem.V")
+             else "norm" if p_.dim() < 2 and ".mem." not in n
              else "mem" if ".mem." in n else "emb" if "emb" in n or "pos" in n
              else "attn" if (".qkv." in n or ".po." in n)
              else "ffn" if (".f1." in n or ".f2." in n) else "diger")
@@ -973,6 +1005,7 @@ def run_arm(arm, seed, data, log):
             except Exception as ex:
                 rec["kopru_profil"] = []; rec["profil_hata"] = str(ex)[:80]
             rec.update(agirlik_istat(model))
+            rec.update(okuma_katkisi(model, EC[0]))
             curve.append(rec)
             if SAVE_TABLE and tablo:
                 yaz_tablo(tablo, arm, seed)
@@ -1054,6 +1087,19 @@ def run_arm(arm, seed, data, log):
                         rel_off=REL_OFF, ent_off=ENT_OFF, ctx=CTX,
                         state=model.state_dict()), ck)
         log(f"    kaydedildi -> {ck}")
+    if SAVE_RESUME:
+        # SURDURME PAKETI: model fp32 + optimizer momentleri + batch
+        # ornekleyicisinin RNG durumu + adim. Bu ucu olmadan bir kosu
+        # SIFIRDAN baslatilmak zorunda.
+        #   Bu projenin tekrarlayan hatasi 'erken kesmek' oldu: kosu 2 tam
+        #   60 binde kesildi ve comp egrisi hala dogrusaldi. Paket varsa
+        #   120 bin yetmezse ustune eklenir, bastan koşulmaz.
+        rk = os.path.join(OUT, f"surdur_{arm}_s{seed}.pt")
+        torch.save(dict(arm=arm, seed=seed, cfg=CFG, step=CFG["STEPS"],
+                        state=model.state_dict(), opt=opt.state_dict(),
+                        rs=rs.get_state(), torch_rng=torch.get_rng_state()), rk)
+        log(f"    surdurme paketi -> {rk} "
+            f"({os.path.getsize(rk)/1e6:.0f} MB)")
     del model; torch.cuda.empty_cache() if DEV == "cuda" else None
     return r
 
@@ -1096,9 +1142,12 @@ def main():
         f"({len(set(e for e,*_ in comp))} varlik) | ENT {len(ent_ev)} "
         f"({len(unseen_e)} varlik)")
 
+    _z = lambda L: (np.array([(e, a, b, br, an) for e, a, b, br, an in L], np.int64)
+                    if L else np.zeros((0, 5), np.int64))
     np.savez(os.path.join(OUT, "veri.npz"), facts=facts,
              pairs=np.array(pairs), unseen=np.array(unseen_e),
-             comp=np.array([(e, a, b, br, an) for e, a, b, br, an in comp]))
+             seen=np.array(seen_e), hop2_frac=np.array([HOP2_FRAC]),
+             comp=_z(comp), ent=_z(ent_ev), ent2=_z(ent2_ev), tr2=_z(tr2))
     R = {}
     for sd in TRAIN_SEEDS:
         log(f"\n--- seed {sd} ---")
