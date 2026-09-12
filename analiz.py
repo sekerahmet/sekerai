@@ -20,6 +20,25 @@ SLOT TESTI — tezin dogrudan sinavi:
   Kontrol sart: ayni-e ciftleri de ayri olculur, cunku ayni kopru cogu zaman
   ayni e'den gelir ve etki koprununki degil e'ninki olabilir.
 
+ON KAYIT-2 (HIZ) — 12 Eylul 2026, kol A kosarken, B ve C HENUZ KOSMADAN yazildi.
+
+  Gerekce: gercek egitimde kimse yakinsamadan 10x sonrasina kadar egitmez.
+  Ayni son dogruluga DAHA AZ ADIMDA varmak gercek bir kazanctir ve grokking
+  literaturunun asil baktigi nicelik de genellemenin BASLAMA anidir.
+
+  Olcu     : tau = comp >= 0.30'a ulasilan ilk degerlendirme adimi; ayrica AUC.
+  Iddia esigi: C'nin tau'su B'ninkinden en az 5000 adim kucuk OLMALI, VE AUC
+             farki ayni yonde olmali.
+  Esik neden 0.30: A kolunun egrisinden secildi (A ~30k civarinda geciyor),
+             boylece butce icinde ulasilabilir bir orta nokta. A, C-B
+             karsilastirmasinin PARCASI DEGIL; dolayisiyla bu secim C-B'yi
+             yanlilamaz.
+  Uyari    : B ve C yalnizca bellegin okudugu tensorde farklidir, bu yuzden
+             aralarindaki hiz farki adresleme mekanizmasina atfedilebilir.
+             A ile kiyas ayni kontrole sahip DEGILDIR (A'nin FFN'i genis).
+  Statu    : tek seed ile sonuc ON BULGU. Grokking baslangici seed'e cok
+             duyarlidir; hiz iddiasi >=3 seed ister.
+
 Kullanim:
     python analiz.py --out /content/out2
 """
@@ -94,6 +113,18 @@ def slot_testi(df, adim=None, kume="comp", nmax=4000, seed=0):
     return {k: (float(np.mean(v)), len(v)) for k, v in gruplar.items() if v}
 
 
+def hiz_olcusu(egri, esik=0.30):
+    """IKINCIL ON KAYIT — bkz. dosya basindaki ON KAYIT-2 notu.
+
+    tau  : comp >= esik'e ULASILAN ILK degerlendirme adimi (yoksa None)
+    auc  : comp egrisinin adim-normalize alani (surekli surum)
+    """
+    st = [c["step"] for c in egri]; cs = [c["comp"] for c in egri]
+    tau = next((s_ for s_, v in zip(st, cs) if v >= esik), None)
+    auc = float(np.trapezoid(cs, st) / (st[-1] - st[0])) if len(st) > 1 else float("nan")
+    return tau, auc
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="/content/out2")
@@ -132,6 +163,25 @@ def main():
           f"({cs[-1]/max(cs[0],1e-9):.1f}x) | kopru {ks[0]:.3f} -> {ks[-1]:.3f}")
     P("\n> Kopru yatay kalip comp tirmaniyorsa: ogrenilen sey kopruyu BULMAK "
       "degil, onu KULLANMAK.")
+
+    # ---- 2b. IKINCIL ON KAYIT: hiz
+    P("\n## Hiz (IKINCIL — B ve C kosmadan once kayda gecti)\n")
+    P("| kol | tau(0.20) | tau(0.30) | tau(0.40) | tau(0.50) | AUC |")
+    P("|---|---|---|---|---|---|")
+    taus = {}
+    for x in arms:
+        rs = [hiz_olcusu(egri[x], e)[0] for e in (.20, .30, .40, .50)]
+        auc = hiz_olcusu(egri[x])[1]
+        taus[x] = rs[1]
+        P(f"| {x} | " + " | ".join(str(v) if v else "-" for v in rs) + f" | {auc:.3f} |")
+    if taus.get("B") and taus.get("C"):
+        d = taus["B"] - taus["C"]
+        P(f"\n**C - B hiz farki:** C esige {d:+d} adim {'ONCE' if d>0 else 'SONRA'} ulasti.")
+        P("> ON KAYIT-2 esigi: en az bir degerlendirme araligi (5000 adim) ONCE,\n"
+          "> VE AUC farki ayni yonde. Tek seed ile sonuc yine ON BULGU'dur;\n"
+          "> grokking baslangici seed'e cok duyarlidir, hiz iddiasi >=3 seed ister.")
+    elif taus.get("B") is None or taus.get("C") is None:
+        P("\n(B ve/veya C esigi bu butcede gecmedi -> hiz karsilastirmasi yapilamaz)")
 
     # ---- 3. bellek ablasyonu
     P("\n## Bellek ablasyonu (bellegi kapatinca comp)\n")
