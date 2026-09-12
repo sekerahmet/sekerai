@@ -139,6 +139,12 @@ SAVE_KV    = os.environ.get("SAVE_KV", "1") != "0"      # bellek K/V anlik gorun
 SAVE_CIRCUIT = os.environ.get("SAVE_CIRCUIT", "1") != "0"  # logit lens, dikkat, kafa ablasyonu
 SAVE_SNAP  = os.environ.get("SAVE_SNAP", "1") != "0"    # ARA kontrol noktalari (fp16)
 SAVE_RESUME= os.environ.get("SAVE_RESUME", "1") != "0"  # optimizer+RNG: kosuyu UZATABILMEK icin
+# Surdurme paketi kac degerlendirmede bir yazilsin. 0 = yalnizca kol sonunda.
+# 1 yapmak ~100 MB/olcum maliyetli ama kopan kosu SIFIRDAN baslamaz.
+# (Colab runtime'i 12 Eylul'de iki kez kendi kapatti; ikisinde de kol bastan
+#  koşuldu. Depolama kisit degil.)
+RESUME_EVERY = int(os.environ.get("RESUME_EVERY", "1"))
+RESUME_FROM  = os.environ.get("RESUME_FROM", "")   # surdur_*.pt yolu
 TOPSLOT    = int(os.environ.get("TOPSLOT", "8"))         # ornek basina saklanan slot sayisi
 CKPT_EVERY = int(os.environ.get("CKPT_EVERY", "1"))     # kac degerlendirmede bir
 # NOT: 12 Eylul 8.5M kosusunda 3 kullanildi (12 noktanin 4'u) ve bu cimrilikti.
@@ -952,8 +958,22 @@ def run_arm(arm, seed, data, log):
     warm = max(10, S // 20)
     rs = np.random.RandomState(seed + 991)
     curve, tablo, t0 = [], [], time.time()
+    bas = 1
+    if RESUME_FROM and os.path.exists(RESUME_FROM):
+        _ck = torch.load(RESUME_FROM, map_location=DEV, weights_only=False)
+        assert _ck["arm"] == arm and _ck["seed"] == seed,             f"surdurme paketi baska kola ait: {_ck['arm']}/{_ck['seed']}"
+        model.load_state_dict(_ck["state"])
+        opt.load_state_dict(_ck["opt"])
+        rs.set_state(_ck["rs"])
+        torch.set_rng_state(_ck["torch_rng"].cpu())
+        bas = int(_ck["step"]) + 1
+        _eg = os.path.join(OUT, f"egri_{arm}_s{seed}.json")
+        if os.path.exists(_eg):
+            curve = [c for c in json.load(open(_eg)) if c["step"] <= _ck["step"]]
+        log(f"    SURDURULUYOR: adim {_ck['step']} -> {S}  "
+            f"({len(curve)} onceki olcum korundu)")
 
-    for step in range(1, S + 1):
+    for step in range(bas, S + 1):
         if step < warm:                      # isinma
             lr = CFG["LR"] * step / warm
         elif CFG.get("SCHED", 0):            # SABIT: grokking icin LR sonmemeli
@@ -1033,6 +1053,15 @@ def run_arm(arm, seed, data, log):
                     os.path.join(OUT, f"dikkat_{arm}_s{seed}_{step:06d}.npz"),
                     comp=dikkat(model, EC[0], EC[1]),
                     seen=dikkat(model, ES[0], ES[1]))
+            if SAVE_RESUME and RESUME_EVERY and (len(curve) % RESUME_EVERY == 0):
+                # ATOMIK: once .tmp, sonra rename. Yazarken kopma olursa
+                # yarim dosya kalmasin.
+                _rp = os.path.join(OUT, f"surdur_{arm}_s{seed}.pt")
+                torch.save(dict(arm=arm, seed=seed, cfg=CFG, step=step,
+                                state=model.state_dict(), opt=opt.state_dict(),
+                                rs=rs.get_state(), torch_rng=torch.get_rng_state()),
+                           _rp + ".tmp")
+                os.replace(_rp + ".tmp", _rp)
             if SAVE_SNAP and (len(curve) % CKPT_EVERY == 0):
                 torch.save({k: v.half().cpu() for k, v in model.state_dict().items()},
                            os.path.join(OUT, f"snap_{arm}_s{seed}_{step:06d}.pt"))
