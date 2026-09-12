@@ -691,9 +691,19 @@ def run_arm(arm, seed, data, log):
     npm = nparam(model)
     log(f"  kol {arm}: {npm/1e6:.2f}M parametre")
 
-    opt = torch.optim.AdamW(model.parameters(), lr=CFG["LR"],
-                            weight_decay=CFG.get("WD", 0.01),
-                            betas=(0.9, 0.95))
+    # WEIGHT DECAY sadece 2-B matrislere. Skaler ve 1-B parametreler (RMSNorm
+    # kazanci, bellegin logit_scale'i) HARIC.
+    # NEDEN: 12 Eylul kosusunda logit_scale'e de decay uygulaniyordu ve kol C'de
+    # sicaklik 12.5 -> 2.3'e cokup kelepce tabanina yaklasti; anahtar/deger etkin
+    # rank'i 61 -> 1.8'e dustu, bellek tek sabit vektore dondu (tepe agirlik
+    # 0.109 -> 0.001, duzgun dagilim 0.00024). Kol B'de gradyan decay'i
+    # dengeledigi icin ayni cokus olmadi -> karsilastirma YANLIydi.
+    dec = [p_ for p_ in model.parameters() if p_.dim() >= 2]
+    nodec = [p_ for p_ in model.parameters() if p_.dim() < 2]
+    opt = torch.optim.AdamW(
+        [{"params": dec, "weight_decay": CFG.get("WD", 0.01)},
+         {"params": nodec, "weight_decay": 0.0}],
+        lr=CFG["LR"], betas=(0.9, 0.95))
     scaler = torch.amp.GradScaler(DEV, enabled=(DEV == "cuda"))
     S, B = CFG["STEPS"], CFG["BATCH"]
     warm = max(10, S // 20)
