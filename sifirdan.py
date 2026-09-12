@@ -99,7 +99,10 @@ GATE_1HOP, GATE_SEEN, GATE_MEMENT = 0.90, 0.80, math.log(32)
 DELTA_MIN, CI_TOO_WIDE = 0.05, 0.15
 FLOOR, CEIL = 0.10, 0.95   # taban/tavan etkisi: fark olcmek anlamsiz
 NL = chr(10)
-SAVE_CKPT = os.environ.get("SAVE_CKPT", "1") != "0"
+SAVE_CKPT  = os.environ.get("SAVE_CKPT", "1") != "0"
+SAVE_TABLE = os.environ.get("SAVE_TABLE", "1") != "0"   # ornek basina uzun tablo
+SAVE_KV    = os.environ.get("SAVE_KV", "1") != "0"      # bellek K/V anlik goruntusu
+SAVE_CIRCUIT = os.environ.get("SAVE_CIRCUIT", "1") != "0"  # logit lens, dikkat, kafa ablasyonu
 
 os.makedirs(OUT, exist_ok=True)
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
@@ -207,12 +210,15 @@ class Block(nn.Module):
         self.po = nn.Linear(d, d, bias=False)
         self.f1 = nn.Linear(d, dff, bias=False)
         self.f2 = nn.Linear(dff, d, bias=False)
+        self.abl = None          # kapatilacak kafa indeksleri (tani icin)
 
     def forward(self, x):
         B, T, D = x.shape
         q, k, v = self.qkv(self.n1(x)).chunk(3, -1)
         sh = lambda t: t.view(B, T, self.nh, self.hd).transpose(1, 2)
         o = F.scaled_dot_product_attention(sh(q), sh(k), sh(v), is_causal=True)
+        if self.abl is not None:
+            o = o.clone(); o[:, self.abl, :, :] = 0
         x = x + self.po(o.transpose(1, 2).reshape(B, T, D))
         return x + self.f2(F.gelu(self.f1(self.n2(x))))
 
@@ -337,13 +343,14 @@ def zengin(model, E, gold_bridge, shortcut_tgt, bs=512):
     X, tp, tt = E[0], E[1], E[2]
     lo, hi = ENT_OFF, ENT_OFF + CFG["N_ENT"]
     ok, okab, gp, br, br5, sc = [], [], [], [], [], []
+    pred, pp, sl, slw, slH = [], [], [], [], []
     model.eval()
     for i in range(0, len(X), bs):
         xb = torch.from_numpy(X[i:i+bs]).to(DEV)
         idx = torch.from_numpy(tp[i:i+bs]).to(DEV)
         ar = torch.arange(len(idx), device=DEV)
         with torch.autocast(DEV, dtype=torch.float16, enabled=(DEV == "cuda")):
-            l1, _ = model(xb)
+            l1, w = model(xb, want_w=True)
             l2, _ = model(xb, no_mem=True)
         p = l1.float()[ar, idx][:, lo:hi].softmax(-1)
         g = torch.from_numpy(tt[i:i+bs]).to(DEV) - lo
@@ -356,12 +363,30 @@ def zengin(model, E, gold_bridge, shortcut_tgt, bs=512):
         br5.append((torch.topk(p, 5, -1).indices == b[:, None]).any(-1).cpu().numpy())
         sc.append((p.argmax(-1) + lo ==
                    torch.from_numpy(shortcut_tgt[i:i+bs]).to(DEV)).cpu().numpy())
+        pred.append((p.argmax(-1) + lo).cpu().numpy())
+        pp.append(p.max(-1).values.cpu().numpy())
+        if w is not None:                      # ornek basina EN COK YANAN 3 SLOT
+            ww = w[torch.arange(len(idx), device=DEV), idx].float()
+            tk = torch.topk(ww, 3, -1)
+            sl.append(tk.indices.cpu().numpy()); slw.append(tk.values.cpu().numpy())
+            slH.append((-(ww * torch.log(ww + 1e-12)).sum(-1)).cpu().numpy())
     model.train()
     c = lambda v: np.concatenate(v)
-    return dict(acc=float(c(ok).mean()), acc_nomem=float(c(okab).mean()),
+    ozet = dict(acc=float(c(ok).mean()), acc_nomem=float(c(okab).mean()),
                 gold_prob=float(c(gp).mean()),
                 bridge_rank=float(np.median(c(br))), bridge_top5=float(c(br5).mean()),
                 shortcut=float(c(sc).mean()))
+    detay = dict(ok=c(ok).astype(np.int8), ok_nomem=c(okab).astype(np.int8),
+                 ok_kisayol=c(sc).astype(np.int8), p_gold=c(gp).astype(np.float32),
+                 p_pred=c(pp).astype(np.float32), pred=c(pred).astype(np.int32),
+                 kopru_sira=c(br).astype(np.int32))
+    if sl:
+        S, W = c(sl), c(slw)
+        for j in range(3):
+            detay[f"slot{j+1}"] = S[:, j].astype(np.int32)
+            detay[f"slot{j+1}_w"] = W[:, j].astype(np.float32)
+        detay["slot_H"] = c(slH).astype(np.float32)
+    return ozet, detay
 
 
 @torch.no_grad()
@@ -424,6 +449,120 @@ def bellek_istat(model, X, bs=512, nmax=2048):
                 mem_olu=float((p < 1e-6).mean()), mem_tepe=float(p.max()))
 
 
+@torch.no_grad()
+def logit_lens(model, E, bridge, bs=512):
+    """TANI: her katmanin kalintisi cikisa projelenince ALTIN ve KOPRU kacinci?
+    'Kopru hangi katmanda beliriyor, cevap hangi katmanda?' sorusunun cevabi.
+    Donen: [L+1] normalize sira (0 en iyi, 0.5 sans), altin ve kopru icin."""
+    X, poz, tt = E[0], E[1], E[2]
+    lo, hi = ENT_OFF, ENT_OFF + CFG["N_ENT"]
+    L = len(model.blocks)
+    rg = [[] for _ in range(L + 1)]; rb = [[] for _ in range(L + 1)]
+    model.eval()
+    for i in range(0, len(X), bs):
+        xb = torch.from_numpy(X[i:i+bs]).to(DEV)
+        idx = torch.from_numpy(poz[i:i+bs]).to(DEV)
+        ar = torch.arange(len(idx), device=DEV)
+        g = torch.from_numpy(tt[i:i+bs]).to(DEV) - lo
+        b = torch.from_numpy(bridge[i:i+bs]).to(DEV) - lo
+        h = model.emb(xb) + model.pos(torch.arange(xb.shape[1], device=DEV))[None]
+        hs = [h]
+        for j, blk in enumerate(model.blocks):
+            h = blk(h)
+            if model.mem is not None and j == model.mem_at - 1:
+                src = hs[0] if model.arm == "B" else h
+                h = h + model.mem(src)[0]
+            hs.append(h)
+        for j, hh in enumerate(hs):
+            lg = model.head(model.nf(hh))[ar, idx][:, lo:hi].float()
+            for tgt, box in ((g, rg), (b, rb)):
+                v = lg[ar, tgt]
+                box[j].append(((lg > v[:, None]).sum(-1).float()
+                               / max(1, hi - lo - 1)).cpu().numpy())
+    model.train()
+    return ([float(np.median(np.concatenate(x))) for x in rg],
+            [float(np.median(np.concatenate(x))) for x in rb])
+
+
+@torch.no_grad()
+def dikkat(model, X, poz, bs=256, nmax=1024):
+    """TANI: cevap pozisyonunda her (katman, kafa) hangi pozisyona bakiyor?
+    Donen: [L, NH, T] ortalama dikkat."""
+    L, NH = len(model.blocks), model.blocks[0].nh
+    T = X.shape[1]
+    acc = np.zeros((L, NH, T), np.float64); n = 0
+    model.eval()
+    for i in range(0, min(len(X), nmax), bs):
+        xb = torch.from_numpy(X[i:i+bs]).to(DEV)
+        idx = torch.from_numpy(poz[i:i+bs]).to(DEV)
+        ar = torch.arange(len(idx), device=DEV)
+        h = model.emb(xb) + model.pos(torch.arange(T, device=DEV))[None]
+        h0 = h
+        for j, blk in enumerate(model.blocks):
+            B_ = h.shape[0]
+            q, k, _ = blk.qkv(blk.n1(h)).chunk(3, -1)
+            sh = lambda t: t.view(B_, T, NH, blk.hd).transpose(1, 2)
+            sc = (sh(q) @ sh(k).transpose(-1, -2)) / math.sqrt(blk.hd)
+            m = torch.triu(torch.ones(T, T, device=DEV, dtype=torch.bool), 1)
+            sc = sc.masked_fill(m, float("-inf")).softmax(-1)
+            acc[j] += sc[ar, :, idx, :].float().sum(0).cpu().numpy()
+            h = blk(h)
+            if model.mem is not None and j == model.mem_at - 1:
+                h = h + model.mem(h0 if model.arm == "B" else h)[0]
+        n += len(idx)
+    model.train()
+    return acc / max(1, n)
+
+
+@torch.no_grad()
+def kafa_ablasyonu(model, EC, E1, bs=512, nmax=1500):
+    """TANI: her kafayi tek tek kapat, comp ve 1hop dususunu olc.
+    2-hop'u bozup 1-hop'u bozmayan kafa = besteleme devresi."""
+    def acc(E):
+        X, poz, tt = E[0][:nmax], E[1][:nmax], E[2][:nmax]
+        lo, hi = ENT_OFF, ENT_OFF + CFG["N_ENT"]
+        o = []
+        for i in range(0, len(X), bs):
+            xb = torch.from_numpy(X[i:i+bs]).to(DEV)
+            idx = torch.from_numpy(poz[i:i+bs]).to(DEV)
+            ar = torch.arange(len(idx), device=DEV)
+            with torch.autocast(DEV, dtype=torch.float16, enabled=(DEV == "cuda")):
+                lg, _ = model(xb)
+            pr = lg.float()[ar, idx][:, lo:hi].argmax(-1) + lo
+            o.append((pr == torch.from_numpy(tt[i:i+bs]).to(DEV)).cpu().numpy())
+        return float(np.concatenate(o).mean())
+
+    model.eval()
+    b0c, b01 = acc(EC), acc(E1)
+    L, NH = len(model.blocks), model.blocks[0].nh
+    dc = np.zeros((L, NH), np.float32); d1 = np.zeros((L, NH), np.float32)
+    for l in range(L):
+        for hd in range(NH):
+            model.blocks[l].abl = [hd]
+            dc[l, hd] = b0c - acc(EC); d1[l, hd] = b01 - acc(E1)
+            model.blocks[l].abl = None
+    model.train()
+    return dict(taban_comp=b0c, taban_1hop=b01, dusus_comp=dc, dusus_1hop=d1)
+
+
+def yaz_tablo(tablo, arm, seed):
+    """Ornek basina uzun tablo: sonradan egitim tekrar etmeden analiz icin.
+    Ana soru: AYNI KOPRUYE sahip sorular AYNI SLOTLARI mi yakiyor?"""
+    cols = {}
+    for k in tablo[0]:
+        cols[k] = np.concatenate([t[k] for t in tablo])
+    cols["kol"] = np.full(len(cols["step"]), arm, object)
+    cols["seed"] = np.full(len(cols["step"]), seed, np.int32)
+    yol = os.path.join(OUT, f"kayit_{arm}_s{seed}")
+    try:
+        import pandas as pd
+        pd.DataFrame(cols).to_parquet(yol + ".parquet", index=False)
+    except Exception:
+        np.savez_compressed(yol + ".npz",
+                            **{k: (v.astype("U8") if v.dtype == object else v)
+                               for k, v in cols.items()})
+
+
 def run_arm(arm, seed, data, log):
     facts, pairs, one, tr2, comp, ent_ev, seen_e, unseen_e = data
     torch.manual_seed(seed); np.random.seed(seed)
@@ -460,7 +599,7 @@ def run_arm(arm, seed, data, log):
     S, B = CFG["STEPS"], CFG["BATCH"]
     warm = max(10, S // 20)
     rs = np.random.RandomState(seed + 991)
-    curve, t0 = [], time.time()
+    curve, tablo, t0 = [], [], time.time()
 
     for step in range(1, S + 1):
         if step < warm:                      # isinma
@@ -490,13 +629,24 @@ def run_arm(arm, seed, data, log):
             rec = dict(step=step, loss=float(loss.item()), one=float(a1),
                        lr=float(lr), secs=round(time.time() - t0, 1))
             # --- TANI (kesifsel): birincil karari ETKILEMEZ
-            for tag, EE_, gb, st in (("seen", ES, brS, scS), ("comp", EC, brC, scC),
-                                     ("ent", EE, brE, scE)):
-                z = zengin(model, EE_, gb, st)
+            for tag, EE_, gb, st, LL in (("seen", ES, brS, scS, LS),
+                                         ("comp", EC, brC, scC, LC),
+                                         ("ent", EE, brE, scE, LE)):
+                z, dt = zengin(model, EE_, gb, st)
                 rec[tag] = z["acc"]
                 for k, v in z.items():
                     if k != "acc":
                         rec[f"{tag}_{k}"] = v
+                if SAVE_TABLE:
+                    n = len(dt["ok"])
+                    row = dict(step=np.full(n, step, np.int32),
+                               kume=np.full(n, tag, object),
+                               e=np.array([a for a, *_ in LL], np.int32),
+                               r1=np.array([b for _, b, *_ in LL], np.int32),
+                               r2=np.array([c for _, _, c, _, _ in LL], np.int32),
+                               kopru=np.array([d for *_, d, _ in LL], np.int32),
+                               gold=np.array([f for *_, f in LL], np.int32))
+                    row.update(dt); tablo.append(row)
             rec.update(bellek_istat(model, EC[0]))
             try:
                 rec["kopru_prob"] = kopru_probu(model, ES, brS - ENT_OFF,
@@ -510,11 +660,31 @@ def run_arm(arm, seed, data, log):
             curve.append(rec)
             json.dump(curve, open(os.path.join(
                 OUT, f"egri_{arm}_s{seed}.json"), "w"), indent=1)
+            if SAVE_TABLE and tablo:
+                yaz_tablo(tablo, arm, seed)
+            if SAVE_CIRCUIT:
+                lg_, lb_ = logit_lens(model, EC, brC)
+                rec["lens_gold"] = lg_; rec["lens_kopru"] = lb_
+                rec["lens_kopru_min"] = float(np.min(lb_))
+                rec["lens_kopru_kat"] = int(np.argmin(lb_))
+                np.savez_compressed(
+                    os.path.join(OUT, f"dikkat_{arm}_s{seed}_{step:06d}.npz"),
+                    comp=dikkat(model, EC[0], EC[1]),
+                    seen=dikkat(model, ES[0], ES[1]))
+            if SAVE_KV and model.mem is not None:
+                np.savez_compressed(
+                    os.path.join(OUT, f"kv_{arm}_s{seed}_{step:06d}.npz"),
+                    K=model.mem.K.detach().half().cpu().numpy(),
+                    V=model.mem.V.detach().half().cpu().numpy(),
+                    scale=float(model.mem.logit_scale.detach().exp().clamp(1, 100)))
             log(f"    {step:6d}  loss {loss.item():.3f}  1hop {a1:.3f}  "
                 f"seen {rec['seen']:.3f}  comp {rec['comp']:.3f}  "
                 f"| ent {rec['ent']:.3f}  kopru-sira {rec['comp_bridge_rank']:.0f}  "
                 f"kopru {rec['kopru_prob']:.3f} (L0 {rec['kopru_prob_L0']:.3f}, kazanc {rec['kopru_kazanc']:+.3f})  belleksiz {rec['comp_acc_nomem']:.3f}  "
-                f"memH {rec['mem_H']:.2f}  ({time.time()-t0:.0f}s)")
+                f"memH {rec['mem_H']:.2f}"
+                + (f"  lens-kopru {rec['lens_kopru_min']:.3f}@K{rec['lens_kopru_kat']}"
+                   if SAVE_CIRCUIT else "")
+                + f"  ({time.time()-t0:.0f}s)")
 
     r = {}
     for nm, E in (("one", E1), ("seen", ES), ("comp", EC), ("ent", EE)):
@@ -525,6 +695,16 @@ def run_arm(arm, seed, data, log):
     r["mement"] = mem_entropy(model, EC[0])
     r["nparam"] = int(npm); r["curve"] = curve
     r["secs"] = time.time() - t0
+    if SAVE_CIRCUIT:                   # DEVRE: pahali, sadece sonda
+        ka = kafa_ablasyonu(model, EC, E1)
+        np.savez_compressed(os.path.join(OUT, f"kafa_{arm}_s{seed}.npz"), **ka)
+        dc, d1 = ka["dusus_comp"], ka["dusus_1hop"]
+        sec = dc - d1                                  # comp'u bozup 1hop'u bozmayan
+        top = np.dstack(np.unravel_index(np.argsort(-sec, axis=None)[:5], sec.shape))[0]
+        log("    besteleme devresi (comp dususu - 1hop dususu, en buyuk 5):")
+        for l, h in top:
+            log(f"      K{l}H{h}: comp {dc[l,h]:+.3f}  1hop {d1[l,h]:+.3f}  "
+                f"fark {sec[l,h]:+.3f}")
     if SAVE_CKPT:                      # oynama ortami icin agirliklar
         ck = os.path.join(OUT, f"model_{arm}_s{seed}.pt")
         torch.save(dict(arm=arm, seed=seed, cfg=CFG, vocab=VOCAB, t_len=T_LEN,
