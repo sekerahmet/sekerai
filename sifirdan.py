@@ -30,8 +30,11 @@ BOLME:
 ONCEDEN YAZILMIS KARAR KURALI  (kod calismadan once sabit):
     KAPI-1  her uc kol da EVAL_1HOP >= 0.90 olmali. Degilse: YETERSIZ EGITIM.
     KAPI-2  en az bir kol EVAL_SEEN >= 0.80 olmali. Degilse: YETERSIZ EGITIM.
-    KAPI-3  C kolunda bellek kullanim entropisi > log(32) olmali (slot cokmesi
-            olursa sonuc "C kotu" degil, "bellek egitilemedi" demektir).
+    KAPI-3  BELLEKLI HER KOLDA kullanim entropisi > log(32) olmali (slot cokmesi
+            olursa sonuc "o kol kotu" degil, "bellek egitilemedi" demektir).
+            Once yalnizca C kontrol ediliyordu; bu gozden kacmaydi -- 2000
+            adimlik deneme kosusunda kol B memH=0.93 (~2.5 etkin slot) cikti
+            ve kapiya takilmadi.
     BIRINCIL  d = acc_C - acc_B, EVAL_COMP uzerinde,
               varlik-kumeli esli bootstrap %95 GA.
         GA alt siniri > +0.05   -> LATENT ADRES KAZANDI
@@ -964,8 +967,13 @@ def main():
         gates = False; why.append(f"KAPI-1 dustu: 1hop < {GATE_1HOP}")
     if max(agg[a]["seen"] for a in ARMS) < GATE_SEEN:
         gates = False; why.append(f"KAPI-2 dustu: seen < {GATE_SEEN}")
-    if "C" in ARMS and agg["C"]["mement"] < GATE_MEMENT:
-        gates = False; why.append(f"KAPI-3 dustu: bellek cokmesi (H={agg['C']['mement']:.2f})")
+    for _a in ARMS:                      # KAPI-3 BELLEKLI HER KOLA
+        _h = agg[_a].get("mement", float("nan"))
+        if np.isfinite(_h) and _h < GATE_MEMENT:
+            gates = False
+            why.append(f"KAPI-3 dustu: kol {_a} bellek cokmesi "
+                       f"(H={_h:.2f} < {GATE_MEMENT:.2f}, yani ~{math.exp(_h):.0f} "
+                       f"etkin slot)")
 
     if not set("ABC") <= set(ARMS):          # tam olmayan kosu -> sadece tani
         log("-" * 78)
