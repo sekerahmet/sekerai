@@ -834,8 +834,6 @@ def run_arm(arm, seed, data, log):
                 rec["kopru_profil"] = []; rec["profil_hata"] = str(ex)[:80]
             rec.update(agirlik_istat(model))
             curve.append(rec)
-            json.dump(curve, open(os.path.join(
-                OUT, f"egri_{arm}_s{seed}.json"), "w"), indent=1)
             if SAVE_TABLE and tablo:
                 yaz_tablo(tablo, arm, seed)
             if SAVE_CIRCUIT:
@@ -858,6 +856,13 @@ def run_arm(arm, seed, data, log):
                     K=model.mem.K.detach().half().cpu().numpy(),
                     V=model.mem.V.detach().half().cpu().numpy(),
                     scale=float(model.mem.logit_scale.detach().exp().clamp(1, 100)))
+            # EGRI EN SONA yazilir: onceden yaziliyordu ve devre olcumleri
+            # (lens_kopru/lens_gold) rec'e ONDAN SONRA ekleniyordu, yani her
+            # noktanin lens verisi bir sonraki yazimda diske iniyor, SON
+            # noktanınki ise hic kaydedilmiyordu -- analiz.py'nin katman
+            # tablosu tam o noktayi kullaniyor.
+            json.dump(curve, open(os.path.join(
+                OUT, f"egri_{arm}_s{seed}.json"), "w"), indent=1)
             log(f"    {step:6d}  loss {loss.item():.3f}  1hop {a1:.3f}  "
                 f"seen {rec['seen']:.3f}  comp {rec['comp']:.3f}  "
                 f"| ent {rec['ent']:.3f}  kopru-sira {rec['comp_bridge_rank']:.0f}  "
