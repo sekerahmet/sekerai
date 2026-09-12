@@ -438,7 +438,28 @@ def kopru_probu(model, Etr, btr, Ete, bte, lam=100.0, depth=None):
     return float(np.median((S > g[:, None]).sum(1) / max(1, Emb.shape[0] - 1)))
 
 
-def prob_seti(model, Etr, Ete, btr, bte, atr, ate, salt=0):
+def _alt(E, idx):
+    return (E[0][idx], E[1][idx], E[2][idx], E[3][idx])
+
+
+def onek_bolme(LL):
+    """Prob icin (e, r1) ONEKINE gore bolme.
+
+    NEDEN: olgular rastgele bir tablo; f(e,r1) hicbir kuralla tahmin edilemez,
+    sadece EZBERLENEBILIR. Prob'u, degerlendirdigi onekler uzerinde egitirsen
+    kopruyu modelin hesabindan degil, (e,r1) kimliginden okur -- ham gommelerden
+    bile. (Olculdu: L0 0.025.) Onek tutulunca ezber imkansiz olur; geriye kalan
+    okunabilirlik modelin kalintisinda TUTARLI BIR YONDE yazili olmasindan gelir."""
+    key = [(e, r1) for e, r1, _, _, _ in LL]
+    uq = sorted(set(key))
+    rs = np.random.RandomState(DATA_SEED + 77)
+    half = {uq[i] for i in rs.permutation(len(uq))[:len(uq) // 2]}
+    tr = np.array([i for i, k in enumerate(key) if k in half], np.int64)
+    te = np.array([i for i, k in enumerate(key) if k not in half], np.int64)
+    return tr, te
+
+
+def prob_seti(model, Etr, Ete, btr, bte, atr, ate, salt=0, LS=None):
     """TANI paketi. Her biri ayni prob makinesiyle, KIYASLANABILIR.
       kopru      : kopru gizli durumdan okunabiliyor mu
       kopru_L0   : ayni sey HAM GOMMELERDEN (CTX penceresi) -- kontrol
@@ -457,6 +478,23 @@ def prob_seti(model, Etr, Ete, btr, bte, atr, ate, salt=0):
             out[nm] = float("nan"); out[nm + "_hata"] = str(ex)[:60]
     out["kopru_kazanc"] = out["kopru_L0"] - out["kopru"]      # hesabin EKLEDIGI
     out["kopru_net"] = out["kopru_null"] - out["kopru"]       # null uzerine net
+
+    # --- ASIL OLCUM: (e,r1) onegi TUTULMUS prob. Ezber imkansiz.
+    if LS is not None:
+        ti, vi = onek_bolme(LS)
+        if len(ti) > 32 and len(vi) > 32:
+            Ea, Eb = _alt(Etr, ti), _alt(Etr, vi)
+            ba, bb = btr[ti], btr[vi]
+            for nm, dep in (("ho_kopru", None), ("ho_kopru_L0", 0)):
+                try:
+                    out[nm] = kopru_probu(model, Ea, ba, Eb, bb, depth=dep)
+                except Exception as ex:
+                    out[nm] = float("nan"); out[nm + "_hata"] = str(ex)[:60]
+            try:
+                out["ho_kopru_null"] = kopru_probu(
+                    model, Ea, ba[r.permutation(len(ba))], Eb, bb)
+            except Exception:
+                out["ho_kopru_null"] = float("nan")
     return out
 
 
@@ -703,7 +741,7 @@ def run_arm(arm, seed, data, log):
                     row.update(dt); tablo.append(row)
             rec.update(bellek_istat(model, EC[0]))
             rec.update(prob_seti(model, ES, EC, brS - ENT_OFF, brC - ENT_OFF,
-                                 ES[2] - ENT_OFF, EC[2] - ENT_OFF, salt=step))
+                                 ES[2] - ENT_OFF, EC[2] - ENT_OFF, salt=step, LS=LS))
             rec.update(agirlik_istat(model))
             curve.append(rec)
             json.dump(curve, open(os.path.join(
@@ -734,7 +772,10 @@ def run_arm(arm, seed, data, log):
                 f"seen {rec['seen']:.3f}  comp {rec['comp']:.3f}  "
                 f"| ent {rec['ent']:.3f}  kopru-sira {rec['comp_bridge_rank']:.0f}  "
                 f"kopru {rec['kopru']:.3f} (L0 {rec['kopru_L0']:.3f} null {rec['kopru_null']:.3f}) "
-                f"cevap {rec['cevap']:.3f}  belleksiz {rec['comp_acc_nomem']:.3f}  "
+                f"cevap {rec['cevap']:.3f} | ONEK-TUT kopru {rec.get('ho_kopru', float('nan')):.3f} "
+                f"(L0 {rec.get('ho_kopru_L0', float('nan')):.3f} "
+                f"null {rec.get('ho_kopru_null', float('nan')):.3f})  "
+                f"belleksiz {rec['comp_acc_nomem']:.3f}  "
                 f"memH {rec['mem_H']:.2f}"
                 + (f"  lens-kopru {rec['lens_kopru_min']:.3f}@K{rec['lens_kopru_kat']}"
                    if SAVE_CIRCUIT else "")
