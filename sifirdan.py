@@ -50,7 +50,8 @@ Colab:
     !pip -q install torch --upgrade   # zaten kurulu
     %run sifirdan.py
 """
-import os, json, math, time
+import os
+import subprocess, json, math, time
 import numpy as np
 import torch
 import torch.nn as nn
@@ -527,7 +528,7 @@ def kopru_profil(model, E, btr_idx, bte_idx, b_all, lam=100.0):
 
 
 @torch.no_grad()
-def _hid(model, X, poz, depth=None, bs=512):
+def _hid(model, X, poz, depth=None, bs=512, mem_uygula=True):
     """depth blok sonrasi gizli durum. depth=0 -> saf gomme (kontrol kolu)."""
     out = []
     model.eval()
@@ -536,10 +537,21 @@ def _hid(model, X, poz, depth=None, bs=512):
     for i in range(0, len(X), bs):
         xb = torch.from_numpy(X[i:i+bs]).to(DEV)
         h = model.emb(xb) + model.pos(torch.arange(xb.shape[1], device=DEV))[None]
+        h0 = h
         for j, blk in enumerate(model.blocks):
             if j >= depth:
                 break
             h = blk(h)
+            # TUZAK: bu satir yoktu. depth <= mem_at[0] oldugu surece fark
+            # etmiyordu (bellek zaten uygulanmamis olurdu) ve kullanilan iki
+            # derinlik de oyleydi -- ama daha derin cagiran biri SESSIZCE
+            # belleksiz durum alirdi.
+            #
+            # mem_uygula=False: bellek okumasinin GIRDISI, yani modulun
+            # sorguladigi durum. `ho_kopru` sutunu bunu olcuyor ve kosu 2'den
+            # beri boyle; sureklilik icin problar False geciyor.
+            if mem_uygula:
+                h, _ = model._mem_uygula(h, h0, j)
         idx = torch.from_numpy(poz[i:i+bs]).to(DEV)
         ar = torch.arange(len(idx), device=DEV)
         # CTX penceresi: poz, poz-1, ... -> bellegin gordugu bilginin AYNISI.
@@ -551,7 +563,8 @@ def _hid(model, X, poz, depth=None, bs=512):
     return np.concatenate(out)
 
 
-def kopru_probu(model, Etr, btr, Ete, bte, lam=100.0, depth=None):
+def kopru_probu(model, Etr, btr, Ete, bte, lam=100.0, depth=None,
+                mem_uygula=False):
     """TANI: gizli durumdan KOPRU varliginin gommesi dogrusal okunabiliyor mu?
     Donen deger normalize sira: 0 = mukemmel, 0.5 = sans.
 
@@ -559,8 +572,8 @@ def kopru_probu(model, Etr, btr, Ete, bte, lam=100.0, depth=None):
     EZBERLEYEBILIR (tuttugumuz sey cift (r1,r2), tek basina r1 degil). O yuzden
     her zaman depth=0 KONTROLU ile birlikte okunmali: fark, modelin hesabinin
     EKLEDIGI bilgidir. depth=0 ile ayni cikiyorsa hesap bir sey eklemiyor."""
-    Ztr, Zte = (_hid(model, Etr[0], Etr[1], depth),
-                _hid(model, Ete[0], Ete[1], depth))
+    Ztr, Zte = (_hid(model, Etr[0], Etr[1], depth, mem_uygula=mem_uygula),
+                _hid(model, Ete[0], Ete[1], depth, mem_uygula=mem_uygula))
     Emb = model.emb.weight.detach()[ENT_OFF:ENT_OFF + CFG["N_ENT"]].float().cpu().numpy()
     Emb = Emb / (np.linalg.norm(Emb, axis=1, keepdims=True) + 1e-8)
     mu = Ztr.mean(0); Ztr, Zte = Ztr - mu, Zte - mu
@@ -1122,7 +1135,15 @@ def main():
     def log(s):
         print(s, flush=True); lines.append(s)
 
+    try:
+        _git = subprocess.run(["git", "log", "--oneline", "-1"],
+                              cwd=os.path.dirname(os.path.abspath(__file__)),
+                              capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception:
+        _git = "?"
+    CFG["_commit"] = _git          # verdict.json ve model .pt'sine iner
     log(f"preset={PRESET}  cihaz={DEV}  seeds={TRAIN_SEEDS}")
+    log(f"kod: {_git or '(git yok)'}")
     log(f"vocab={VOCAB}  T={T_LEN}  bellek_param={mem_params(CFG)/1e6:.2f}M")
     log(f"bellek okuma noktasi: {list(MEM_AT)} ({len(MEM_AT)} okuma/ileri gecis)"
         + ("" if len(MEM_AT) == 1 else
