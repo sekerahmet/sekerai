@@ -103,6 +103,7 @@ DELTA_MIN, CI_TOO_WIDE = 0.05, 0.15
 FLOOR, CEIL = 0.10, 0.95   # taban/tavan etkisi: fark olcmek anlamsiz
 NL = chr(10)
 COMPILE = os.environ.get("COMPILE", "1") != "0"
+PROG    = int(os.environ.get("PROG", "1000"))   # kac adimda bir ilerleme satiri
 ABORT_ON_FATAL = os.environ.get("ABORT_ON_FATAL", "1") != "0"
 SAVE_CKPT  = os.environ.get("SAVE_CKPT", "1") != "0"
 SAVE_TABLE = os.environ.get("SAVE_TABLE", "1") != "0"   # ornek basina uzun tablo
@@ -794,6 +795,9 @@ def run_arm(arm, seed, data, log):
     scE = np.array([ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in LE], np.int64)
     _pti, _pvi = onek_bolme(LS)          # (e,r1) onegine gore prob bolmesi
 
+    log(f"  --- kol {arm} ---")
+    log(f"    veri kodlandi: 1hop {len(L1)} | 2hop-egitim {len(LS)} | "
+        f"COMP {len(LC)} | ENT {len(LE)}")
     model = Net(arm, CFG).to(DEV)
     npm = nparam(model)
     # torch.compile SADECE egitim adimina. Tani fonksiyonlari ham `model`i
@@ -851,6 +855,11 @@ def run_arm(arm, seed, data, log):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         scaler.step(opt); scaler.update()
 
+        if PROG and step % PROG == 0 and step % CFG["EVERY"] != 0:
+            el = time.time() - t0
+            hz = step / max(el, 1e-9)
+            log(f"      adim {step:6d}/{S}  (%{100*step/S:4.1f})  loss {loss.item():.3f}"
+                f"  {hz:5.1f} adim/s  gecen {el/60:4.1f} dk  kalan ~{(S-step)/hz/60:4.1f} dk")
         if step % CFG["EVERY"] == 0 or step == S:
             a1 = evaluate(model, *E1[:3])[0].mean()
             rec = dict(step=step, loss=float(loss.item()), one=float(a1),
@@ -993,6 +1002,7 @@ def main():
     log(f"T4 kabasi (~5 TFLOP/s etkin): kol basina ~{_fl/5e12/60:.0f} dk, "
         f"{len(ARMS)} kol x {len(TRAIN_SEEDS)} seed = "
         f"~{_fl*len(ARMS)*len(TRAIN_SEEDS)/5e12/3600:.1f} saat")
+    log("veri hazirlaniyor...")
     data = build_data()
     facts, pairs, one, tr2, comp, ent_ev, seen_e, unseen_e = data
     log(f"olgu {len(one)} | 2hop-egitim {len(tr2)} | COMP {len(comp)} "
