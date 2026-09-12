@@ -183,6 +183,29 @@ def main():
     elif taus.get("B") is None or taus.get("C") is None:
         P("\n(B ve/veya C esigi bu butcede gecmedi -> hiz karsilastirmasi yapilamaz)")
 
+    # ---- 2c. GERCEK MALIYET (duvar saati)
+    P("")
+    P("## Hesap maliyeti — kollar gercekten esit mi?")
+    P("")
+    P("> Teoride esit: yogun bellekte her parametre token basina TAM BIR KEZ")
+    P("> okunuyor (K skorda, V agirlikli toplamda), FFN de oyle. Yani parametre")
+    P("> esitlemek = hesap esitlemek. Olculdu: ek MAC/token A 1.933.312,")
+    P("> C 1.933.312 -- sifir fark. Asagisi bunun GERCEK cekirdeklerde de")
+    P("> tuttugunun kontrolu; tutmazsa hiz/verimlilik iddiasi duzeltilmelidir.")
+    P("")
+    P("| kol | toplam sn | sn / 1000 adim | A'ya gore |")
+    P("|---|---|---|---|")
+    taban = None
+    for x in arms:
+        c = egri[x][-1]
+        sn = c.get("secs")
+        if sn is None:
+            continue
+        per = 1000.0 * sn / c["step"]
+        if taban is None:
+            taban = per
+        P(f"| {x} | {sn:.0f} | {per:.2f} | {per/taban:.3f}x |")
+
     # ---- 3. bellek ablasyonu
     P("\n## Bellek ablasyonu (bellegi kapatinca comp)\n")
     for x in arms:
