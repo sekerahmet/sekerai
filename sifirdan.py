@@ -99,6 +99,7 @@ GATE_1HOP, GATE_SEEN, GATE_MEMENT = 0.90, 0.80, math.log(32)
 DELTA_MIN, CI_TOO_WIDE = 0.05, 0.15
 FLOOR, CEIL = 0.10, 0.95   # taban/tavan etkisi: fark olcmek anlamsiz
 NL = chr(10)
+COMPILE = os.environ.get("COMPILE", "1") != "0"
 SAVE_CKPT  = os.environ.get("SAVE_CKPT", "1") != "0"
 SAVE_TABLE = os.environ.get("SAVE_TABLE", "1") != "0"   # ornek basina uzun tablo
 SAVE_KV    = os.environ.get("SAVE_KV", "1") != "0"      # bellek K/V anlik goruntusu
@@ -399,6 +400,56 @@ def zengin(model, E, gold_bridge, shortcut_tgt, bs=512):
 
 
 @torch.no_grad()
+@torch.no_grad()
+def _hid_tum(model, X, poz, bs=512):
+    """TEK forward'da katman 0..L icin CTX penceresi. Kollar arasi
+    KIYASLANABILIR derinlik profili verir -- eski surum her kolu kendi bellek
+    okuma noktasinda prubluyordu (A/C katman 4, B katman 0) ve bu iki sayi
+    ayni seyi olcmuyordu."""
+    L = len(model.blocks)
+    out = [[] for _ in range(L + 1)]
+    model.eval()
+    for i in range(0, len(X), bs):
+        xb = torch.from_numpy(X[i:i+bs]).to(DEV)
+        idx = torch.from_numpy(poz[i:i+bs]).to(DEV)
+        ar = torch.arange(len(idx), device=DEV)
+        h = model.emb(xb) + model.pos(torch.arange(xb.shape[1], device=DEV))[None]
+        h0 = h
+        hs = [h]
+        for j, blk in enumerate(model.blocks):
+            h = blk(h)
+            if model.mem is not None and j == model.mem_at - 1:
+                h = h + model.mem(h0 if model.arm == "B" else h)[0]
+            hs.append(h)
+        for j, hh in enumerate(hs):
+            w = torch.stack([hh[ar, (idx - t).clamp(min=0)] for t in range(CTX)], 1)
+            out[j].append(w.reshape(len(idx), -1).float().cpu().numpy())
+    model.train()
+    return [np.concatenate(o) for o in out]
+
+
+def _ridge_rank(Ztr, btr, Zte, bte, Emb, lam=100.0):
+    mu = Ztr.mean(0); Ztr, Zte = Ztr - mu, Zte - mu
+    G = Ztr.T @ Ztr
+    A = np.linalg.solve(G + lam * np.eye(G.shape[0]), Ztr.T @ Emb[btr])
+    P = Zte @ A
+    P = P / (np.linalg.norm(P, axis=1, keepdims=True) + 1e-8)
+    S = P @ Emb.T
+    g = S[np.arange(len(bte)), bte]
+    return float(np.median((S > g[:, None]).sum(1) / max(1, Emb.shape[0] - 1)))
+
+
+def kopru_profil(model, E, btr_idx, bte_idx, b_all, lam=100.0):
+    """Katman katman kopru okunabilirligi. Donen: [L+1] liste, 0=tepe 0.5=sans.
+    Onek tutulmus bolme kullanilir (ezber imkansiz)."""
+    Z = _hid_tum(model, E[0], E[1])
+    Emb = model.emb.weight.detach()[ENT_OFF:ENT_OFF + CFG["N_ENT"]].float().cpu().numpy()
+    Emb = Emb / (np.linalg.norm(Emb, axis=1, keepdims=True) + 1e-8)
+    return [_ridge_rank(z[btr_idx], b_all[btr_idx], z[bte_idx], b_all[bte_idx], Emb, lam)
+            for z in Z]
+
+
+@torch.no_grad()
 def _hid(model, X, poz, depth=None, bs=512):
     """depth blok sonrasi gizli durum. depth=0 -> saf gomme (kontrol kolu)."""
     out = []
@@ -686,9 +737,21 @@ def run_arm(arm, seed, data, log):
     scS = np.array([ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in LS], np.int64)
     scC = np.array([ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in LC], np.int64)
     scE = np.array([ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in LE], np.int64)
+    _pti, _pvi = onek_bolme(LS)          # (e,r1) onegine gore prob bolmesi
 
     model = Net(arm, CFG).to(DEV)
     npm = nparam(model)
+    # torch.compile SADECE egitim adimina. Tani fonksiyonlari ham `model`i
+    # kullanir: onlar no_mem/want_w bayraklari ve degisken batch ile cagriliyor,
+    # derlenmis surumde her varyant yeniden derleme tetikler ve yavaslatir.
+    # Parametreler ortak oldugu icin ikisi AYNI modeldir.
+    trn = model
+    if COMPILE and DEV == "cuda":
+        try:
+            trn = torch.compile(model)
+            log("    torch.compile acik (egitim yolu)")
+        except Exception as ex:
+            log(f"    torch.compile atlandi: {str(ex)[:60]}")
     log(f"  kol {arm}: {npm/1e6:.2f}M parametre")
 
     # WEIGHT DECAY sadece 2-B matrislere. Skaler ve 1-B parametreler (RMSNorm
@@ -724,7 +787,7 @@ def run_arm(arm, seed, data, log):
         pb = torch.from_numpy(Ptr[j]).to(DEV)
         tb = torch.from_numpy(Ttr[j]).to(DEV)
         with torch.autocast(DEV, dtype=torch.float16, enabled=(DEV == "cuda")):
-            lg, _ = model(xb)
+            lg, _ = trn(xb)
             lg = lg[torch.arange(B, device=DEV), pb]
             loss = F.cross_entropy(lg.float(), tb)
         opt.zero_grad(set_to_none=True)
@@ -759,6 +822,13 @@ def run_arm(arm, seed, data, log):
             rec.update(bellek_istat(model, EC[0]))
             rec.update(prob_seti(model, ES, EC, brS - ENT_OFF, brC - ENT_OFF,
                                  ES[2] - ENT_OFF, EC[2] - ENT_OFF, salt=step, LS=LS))
+            try:                       # KATMAN PROFILI (kollar arasi kiyaslanabilir)
+                pr = kopru_profil(model, ES, _pti, _pvi, brS - ENT_OFF)
+                rec["kopru_profil"] = pr
+                rec["profil_min"] = float(np.min(pr))
+                rec["profil_kat"] = int(np.argmin(pr))
+            except Exception as ex:
+                rec["kopru_profil"] = []; rec["profil_hata"] = str(ex)[:80]
             rec.update(agirlik_istat(model))
             curve.append(rec)
             json.dump(curve, open(os.path.join(
@@ -792,6 +862,7 @@ def run_arm(arm, seed, data, log):
                 f"cevap {rec['cevap']:.3f} | ONEK-TUT kopru {rec.get('ho_kopru', float('nan')):.3f} "
                 f"(L0 {rec.get('ho_kopru_L0', float('nan')):.3f} "
                 f"null {rec.get('ho_kopru_null', float('nan')):.3f})  "
+                f"profil {rec.get('profil_min', float('nan')):.3f}@K{rec.get('profil_kat', -1)}  "
                 f"belleksiz {rec['comp_acc_nomem']:.3f}  "
                 f"memH {rec['mem_H']:.2f}"
                 + (f"  lens-kopru {rec['lens_kopru_min']:.3f}@K{rec['lens_kopru_kat']}"
