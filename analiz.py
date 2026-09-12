@@ -128,6 +128,56 @@ def hiz_olcusu(egri, esik=0.30):
     return tau, auc
 
 
+def cifte_kapi(OUT, arm, seed=0):
+    """Composition Collapse (arXiv 2605.26789) konfundunu ayirt eder.
+
+    ENT2 = 'ikinci hop olgusu egitimde HIC ikinci hop olarak kullanilmamis'.
+    ENT2 basarisizligi iki sebepten olabilir:
+      (a) model besteleyemiyor                 <- aradigimiz sonuc
+      (b) o olguyu zaten guvenilir bilmiyor    <- OLCUM TUZAGI
+    Genel 1hop dogrulugunun ~0.997 olmasi (b)'yi DISLAMAZ: o ortalama,
+    tutulan olgularin kendi dogrulugu degil.
+
+    Ayirt etme: ENT2 dogrulugunu, karsilik gelen (b,r2) olgusu 1-hop'ta
+    DOGRU bilinen ornekler uzerinde yeniden hesapla. Son kontrol
+    noktasindan dogrudan olculur; parquet gerekmez."""
+    import torch
+    v = json.load(open(os.path.join(OUT, "verdict.json")))
+    cfg = v["cfg"]
+    z = np.load(os.path.join(OUT, "veri.npz"))
+    if "ent2" not in z.files or len(z["ent2"]) == 0:
+        return None
+    mp = os.path.join(OUT, "model_%s_s%d.pt" % (arm, seed))
+    if not os.path.exists(mp):
+        return None
+
+    os.environ["PRESET"] = v.get("preset", "grok")
+    os.environ["MEM_AT"] = ",".join(str(x) for x in cfg.get("MEM_AT", [cfg["L"] // 2]))
+    os.environ["HOP2_FRAC"] = str(cfg.get("HOP2_FRAC", 0))
+    os.environ["COMPILE"] = "0"
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import sifirdan as S
+
+    facts = z["facts"]
+    ent2 = [tuple(int(x) for x in row) for row in z["ent2"]]
+    net = S.Net(arm, S.CFG).to(S.DEV)
+    net.load_state_dict(torch.load(mp, map_location=S.DEV)["state"])
+    net.eval()
+
+    ciftler = sorted({(b, r2) for _, _, r2, b, _ in ent2})
+    b1 = [(b, r2, int(facts[b, r2])) for b, r2 in ciftler]
+    ok1, _ = S.evaluate(net, *S.enc_one(b1)[:3])
+    bil = {(b, r2): bool(o) for (b, r2, _), o in zip(b1, ok1)}
+
+    ok2, _ = S.evaluate(net, *S.enc_two(ent2)[:3])
+    kapi = np.array([bil[(b, r2)] for _, _, r2, b, _ in ent2])
+    return dict(n=len(ent2), n_olgu=len(b1),
+                bir_hop_tutulan=float(ok1.mean()),
+                ent2=float(ok2.mean()),
+                ent2_kapili=float(ok2[kapi].mean()) if kapi.any() else float("nan"),
+                n_kapili=int(kapi.sum()))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="/content/out2")
@@ -147,15 +197,58 @@ def main():
 
     # ---- 1. eğriler
     P("## Egriler (son nokta)\n")
-    P("| kol | adim | comp | seen | 1hop | ent | kopru(ONEK-TUT) | kopru_L0 | cevap | belleksiz | memH |")
-    P("|---|---|---|---|---|---|---|---|---|---|---|")
+    _e2 = any("ent2" in egri[x][-1] for x in arms)
+    P("| kol | adim | comp | seen | 1hop | ent |" + (" ENT2 |" if _e2 else "")
+      + " kopru(ONEK-TUT) | kopru_L0 | cevap | belleksiz | memH |")
+    P("|---|---|---|---|---|---|" + ("---|" if _e2 else "")
+      + "---|---|---|---|---|")
     for x in arms:
         c = egri[x][-1]
         g = lambda k, d="-": (f"{c[k]:.3f}" if isinstance(c.get(k), (int, float))
                               and np.isfinite(c.get(k, np.nan)) else d)
         P(f"| {x} | {c['step']} | {g('comp')} | {g('seen')} | {g('one')} | {g('ent')} | "
-          f"{g('ho_kopru')} | {g('ho_kopru_L0')} | {g('cevap')} | "
+          + (f"{g('ent2')} | " if _e2 else "")
+          + f"{g('ho_kopru')} | {g('ho_kopru_L0')} | {g('cevap')} | "
           f"{g('comp_acc_nomem')} | {g('mem_H')} |")
+
+    # ---- 1b. ENT2: BIRINCIL (deney 4) + cifte kapi
+    if _e2:
+        P("")
+        P("## ENT2 - ikinci-hop OOD (BIRINCIL, esik 0.10)")
+        P("")
+        P("> ENT  = 1. hop olgusu hic 1. hop olarak kullanilmamis (bizim bolme)")
+        P("> ENT2 = 2. hop olgusu hic 2. hop olarak kullanilmamis "
+          "(2405.15071 / 2606.20737 OOD tanimi)")
+        P("")
+        P("| kol | ENT2 max | hangi adimda | ENT2 son | esik 0.10 |")
+        P("|---|---|---|---|---|")
+        for x in arms:
+            vs = [(c.get("ent2", float("nan")), c["step"]) for c in egri[x]]
+            vs = [(v_, st) for v_, st in vs if np.isfinite(v_)]
+            if not vs:
+                continue
+            mx, mst = max(vs)
+            P(f"| {x} | {mx:.3f} | {mst} | {vs[-1][0]:.3f} | "
+              f"{'**GECTI**' if mx > 0.10 else 'gecmedi'} |")
+        P("")
+        P("### Cifte kapi (Composition Collapse, arXiv 2605.26789)")
+        P("")
+        P("> ENT2 dusuk cikarsa iki aciklama var: model besteleyemiyor, ya da "
+          "o olgulari zaten bilmiyor. 'ENT2 (kapili)' sutunu yalnizca 1-hop'u "
+          "DOGRU bilinen olgular uzerinde hesaplandi.")
+        P("")
+        P("| kol | tutulan olgu | 1hop(tutulan) | ENT2 (hepsi) | ENT2 (kapili) | n |")
+        P("|---|---|---|---|---|---|")
+        for x in arms:
+            try:
+                d = cifte_kapi(OUT, x, SEED)
+            except Exception as ex:
+                P(f"| {x} | HATA: {str(ex)[:50]} | | | | |")
+                continue
+            if d is None:
+                continue
+            P(f"| {x} | {d['n_olgu']} | {d['bir_hop_tutulan']:.3f} | "
+              f"{d['ent2']:.3f} | {d['ent2_kapili']:.3f} | {d['n_kapili']} |")
 
     # ---- 2. kopru sabit mi, comp tirmaniyor mu?
     P("\n## Kopru okunabilirligi vs comp dogrulugu\n")
