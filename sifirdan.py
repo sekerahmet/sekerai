@@ -80,6 +80,13 @@ CFG = dict(
                D=256, L=8,  NH=8,  DFF=1024,
                M=4096, DK=128, DM=256,
                STEPS=60000, BATCH=512, LR=1e-3, EVERY=5000, WD=0.1, SCHED=1),
+    # TEKRARLI ERISIM deneyi. arXiv 2606.20737'nin Dense+Mem'i OOD grokking'i
+    # 60-85 bin adimda goruyor; kosu 2 tam 60 binde kesilmisti. MEM_AT=2,4,6 ile
+    # birlikte kullan.
+    grok_uzun=dict(N_ENT=1000, N_REL=8,  N_PAIR=40, P_TRAIN=30,
+               D=256, L=8,  NH=8,  DFF=1024,
+               M=4096, DK=128, DM=256,
+               STEPS=120000, BATCH=512, LR=1e-3, EVERY=5000, WD=0.1, SCHED=1),
     # ~150M. Bu gorev icin GEREKMEZ; karar 'small'dan cikar. T4'te kol basina
     # yaklasik 3-4 saat, uc kol bir gun. Sadece olcek merakiysa kullan.
     big  =dict(N_ENT=8000, N_REL=10, N_PAIR=16, P_TRAIN=12,
@@ -91,6 +98,17 @@ for _k in list(CFG):                       # ortam degiskeniyle ezme: STEPS=4000
     if _k in os.environ:
         CFG[_k] = type(CFG[_k])(float(os.environ[_k]))
 ARMS = tuple(os.environ.get("ARMS", "ABC"))
+
+# Bellek KAC noktada okunuyor (1-tabanli blok sayisi; "4" = 4. bloktan sonra).
+#   "4"      -> tek okuma, kosu 2 ile ayni
+#   "2,4,6"  -> uc okuma; arXiv 2606.20737 Dense+Mem'i (12 katman, 3/6/9) 8
+#               katmana olceklenmis hali. Son blok bilerek belleksiz kalir.
+# Bellek MODULU paylasimli: okuma sayisi PARAMETRE EKLEMEZ, sadece hesap ekler.
+# Dolayisiyla >1 okumada kollar arasi FLOP esitligi BOZULUR -- raporda yaz.
+MEM_AT = tuple(sorted({int(v) for v in
+                       os.environ.get("MEM_AT", str(CFG["L"] // 2)).split(",")}))
+assert all(1 <= m < CFG["L"] for m in MEM_AT),     f"MEM_AT 1..L-1 araliginda olmali (son blok belleksiz): {MEM_AT}, L={CFG['L']}"
+CFG["MEM_AT"] = MEM_AT
 
 DATA_SEED   = 0          # veri TUM kollarda ve TUM seed'lerde AYNI
 TRAIN_SEEDS = [int(s) for s in os.environ.get("SEEDS", "0").split(",")]
@@ -270,7 +288,7 @@ class Net(nn.Module):
     def __init__(self, arm, cfg):
         super().__init__()
         self.arm, d, L = arm, cfg["D"], cfg["L"]
-        self.mem_at = L // 2                     # bellek bu bloktan SONRA girer
+        self.mem_at = tuple(cfg.get("MEM_AT", (L // 2,)))   # bu bloklardan SONRA
         dff = cfg["DFF"]
         if arm == "A":                           # parametre esitleme
             mp = mem_params(cfg)
@@ -291,15 +309,26 @@ class Net(nn.Module):
         elif isinstance(m, nn.Embedding):
             nn.init.normal_(m.weight, std=0.02)
 
+    def _mem_uygula(self, h, h0, j, no_mem=False):
+        """Bellegi (varsa) j. bloktan SONRA uygula. Donen (h, w|None).
+
+        B: sorgu h0'dan (token-adresli) -> okuma sayisi kacsa OLSUN ayni sorgu,
+           ayni cevap. Tekrarli erisim B'ye yapisal olarak bir sey katamaz.
+        C: sorgu h'den (latent)         -> her okumada GUNCELLENMIS sorgu.
+        Tekrarli erisim deneyinin tum ayrimi bu iki satirda."""
+        if self.mem is None or no_mem or (j + 1) not in self.mem_at:
+            return h, None
+        m, w = self.mem(h0 if self.arm == "B" else h)
+        return h + m, w
+
     def forward(self, x, want_w=False, no_mem=False):
         h = self.emb(x) + self.pos(torch.arange(x.shape[1], device=x.device))[None]
         h0, w = h, None
         for i, blk in enumerate(self.blocks):
             h = blk(h)
-            if self.mem is not None and not no_mem and i == self.mem_at - 1:
-                src = h0 if self.arm == "B" else h      # <-- TEK FARK
-                m, w = self.mem(src)
-                h = h + m
+            h, w_ = self._mem_uygula(h, h0, i, no_mem)
+            if w_ is not None:
+                w = w_                                  # SON okumanin agirliklari
         return self.head(self.nf(h)), (w if want_w else None)
 
 
@@ -423,8 +452,7 @@ def _hid_tum(model, X, poz, bs=512):
         hs = [h]
         for j, blk in enumerate(model.blocks):
             h = blk(h)
-            if model.mem is not None and j == model.mem_at - 1:
-                h = h + model.mem(h0 if model.arm == "B" else h)[0]
+            h, _ = model._mem_uygula(h, h0, j)
             hs.append(h)
         for j, hh in enumerate(hs):
             w = torch.stack([hh[ar, (idx - t).clamp(min=0)] for t in range(CTX)], 1)
@@ -460,7 +488,7 @@ def _hid(model, X, poz, depth=None, bs=512):
     out = []
     model.eval()
     if depth is None:
-        depth = 0 if model.arm == "B" else model.mem_at
+        depth = 0 if model.arm == "B" else model.mem_at[0]   # ILK okuma noktasi
     for i in range(0, len(X), bs):
         xb = torch.from_numpy(X[i:i+bs]).to(DEV)
         h = model.emb(xb) + model.pos(torch.arange(xb.shape[1], device=DEV))[None]
@@ -599,9 +627,7 @@ def logit_lens(model, E, bridge, bs=512):
         hs = [h]
         for j, blk in enumerate(model.blocks):
             h = blk(h)
-            if model.mem is not None and j == model.mem_at - 1:
-                src = hs[0] if model.arm == "B" else h
-                h = h + model.mem(src)[0]
+            h, _ = model._mem_uygula(h, hs[0], j)
             hs.append(h)
         for j, hh in enumerate(hs):
             lg = model.head(model.nf(hh))[ar, idx][:, lo:hi].float()
@@ -637,8 +663,7 @@ def dikkat(model, X, poz, bs=256, nmax=1024):
             sc = sc.masked_fill(m, float("-inf")).softmax(-1)
             acc[j] += sc[ar, :, idx, :].float().sum(0).cpu().numpy()
             h = blk(h)
-            if model.mem is not None and j == model.mem_at - 1:
-                h = h + model.mem(h0 if model.arm == "B" else h)[0]
+            h, _ = model._mem_uygula(h, h0, j)
         n += len(idx)
     model.train()
     return acc / max(1, n)
@@ -994,6 +1019,9 @@ def main():
 
     log(f"preset={PRESET}  cihaz={DEV}  seeds={TRAIN_SEEDS}")
     log(f"vocab={VOCAB}  T={T_LEN}  bellek_param={mem_params(CFG)/1e6:.2f}M")
+    log(f"bellek okuma noktasi: {list(MEM_AT)} ({len(MEM_AT)} okuma/ileri gecis)"
+        + ("" if len(MEM_AT) == 1 else
+           "  -- DIKKAT: >1 okumada kollar arasi FLOP esitligi BOZUK"))
     _np = nparam(Net("C", CFG))
     _tok = CFG["STEPS"] * CFG["BATCH"] * T_LEN
     _fl = 6.0 * _np * _tok
