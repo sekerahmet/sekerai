@@ -198,15 +198,19 @@ def main():
     # ---- 1. eğriler
     P("## Egriler (son nokta)\n")
     _e2 = any("ent2" in egri[x][-1] for x in arms)
-    P("| kol | adim | comp | seen | 1hop | ent |" + (" ENT2 |" if _e2 else "")
+    _id = any("ident" in egri[x][-1] for x in arms)
+    P("| kol | adim | comp | seen | 1hop |" + (" kimlik |" if _id else "")
+      + " ent |" + (" ENT2 |" if _e2 else "")
       + " kopru(ONEK-TUT) | kopru_L0 | cevap | belleksiz | memH |")
-    P("|---|---|---|---|---|---|" + ("---|" if _e2 else "")
-      + "---|---|---|---|---|")
+    P("|---|---|---|---|---|" + ("---|" if _id else "") + "---|"
+      + ("---|" if _e2 else "") + "---|---|---|---|---|")
     for x in arms:
         c = egri[x][-1]
         g = lambda k, d="-": (f"{c[k]:.3f}" if isinstance(c.get(k), (int, float))
                               and np.isfinite(c.get(k, np.nan)) else d)
-        P(f"| {x} | {c['step']} | {g('comp')} | {g('seen')} | {g('one')} | {g('ent')} | "
+        P(f"| {x} | {c['step']} | {g('comp')} | {g('seen')} | {g('one')} | "
+          + (f"{g('ident')} | " if _id else "")
+          + f"{g('ent')} | "
           + (f"{g('ent2')} | " if _e2 else "")
           + f"{g('ho_kopru')} | {g('ho_kopru_L0')} | {g('cevap')} | "
           f"{g('comp_acc_nomem')} | {g('mem_H')} |")
@@ -249,6 +253,34 @@ def main():
                 continue
             P(f"| {x} | {d['n_olgu']} | {d['bir_hop_tutulan']:.3f} | "
               f"{d['ent2']:.3f} | {d['ent2_kapili']:.3f} | {d['n_kapili']} |")
+
+    # ---- 1c. KIMLIK DENETIMI (deney 5)
+    if _id:
+        P("")
+        P("## Kimlik denetimi — saglik kapisi ve birincil olcu")
+        P("")
+        P("> `kimlik` DUSUK kalirsa sonuc 'recete ise yaramadi' DEGIL,")
+        P("> 'recete uygulanamadi' demektir. Ikisi cok farkli.")
+        P("")
+        P("| kol | kimlik | ENT (birincil, esik 0.20) | ENT2 | comp | 1hop | hukum |")
+        P("|---|---|---|---|---|---|---|")
+        for x in arms:
+            c = egri[x][-1]
+            if "ident" not in c:
+                continue
+            idv = c["ident"]
+            ent_mx = max(r.get("ent", 0) for r in egri[x])
+            if idv < 0.95:
+                h = "**GECERSIZ** (kimlik ogrenilmedi)"
+            elif ent_mx > 0.20:
+                h = "**ACTI**"
+            else:
+                h = "acmadi"
+            P(f"| {x} | {idv:.3f} | {ent_mx:.3f} | {c.get('ent2', float('nan')):.3f} | "
+              f"{c['comp']:.3f} | {c['one']:.3f} | {h} |")
+        P("")
+        P("Karsilastirma tabani — kol A (kimlik denetimi YOK, ayni veri, 120k):")
+        P("`comp 0.851 | 1hop 0.996 | ENT 0.029 | ENT2 0.049`")
 
     # ---- 2. kopru sabit mi, comp tirmaniyor mu?
     P("\n## Kopru okunabilirligi vs comp dogrulugu\n")
