@@ -164,12 +164,29 @@ sonuc = dict(alt=ALT, esik=ESIK, duraklar=DURAKLAR, NA=NA,
              asamaA=[], atesledi=False)
 print(f"{'adim':>7} {'comp':>7} {'p*':>3} {'sinyal':>8}   "
       f"{'d(p=1)':>8} {'d(p=2)':>8} {'d(p=3)':>8}")
+# TANI MODU: her durakta ASAMA B'yi de kos, KARAR VERME. D3.1'in
+# proseduru ilk esik gecisinde durur; burada kazananin ve SKORUN adimla
+# nasil degistigini gormek istiyoruz. Karar bu tablodan SONRA, ayrica.
+TAM = os.environ.get("ARAMA_TAM") == "1"
+if TAM:
+    print("  [TANI MODU] her durakta ASAMA B de kosulur, prosedur DURMAZ
+")
 for adim in hedef:
     a = asamaA(adim)
     sonuc["asamaA"].append(a)
     print(f"{adim:7d} {a['comp']:7.3f} {a['p_yildiz']:3d} {a['sinyal']:+8.4f}   "
           f"{a['d']['1']:+8.4f} {a['d']['2']:+8.4f} {a['d']['3']:+8.4f}"
           + ("   >>> ESIK GECILDI" if a["sinyal"] >= ESIK else ""))
+    if TAM:
+        b = asamaB(adim, a["p_yildiz"], a["inv0"], a["comp"])
+        sonuc.setdefault("tani", []).append(
+            dict(adim=adim, comp=a["comp"], sinyal=a["sinyal"],
+                 p_yildiz=a["p_yildiz"], kazanan=b["kazanan"]))
+        k = b["kazanan"]
+        print(f"        ASAMA B -> parca {k['p']}  b0={k['b0']}  "
+              f"skor {k['skor']:+.4f}"
+              + ("   (D3.1 kazanani: parca 1, skor +0.0565)" if adim == hedef[0] else ""))
+        continue
     if a["sinyal"] >= ESIK:
         b = asamaB(adim, a["p_yildiz"], a["inv0"], a["comp"])
         sonuc.update(atesledi=True, atesleme_adimi=adim,
