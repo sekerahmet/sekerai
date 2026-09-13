@@ -271,6 +271,52 @@ ayarlarını taşıyordu ve düzeltmeyi unutan kişi sessizce önceki deneyi
 başlatıyordu. `IMZA` artık `{dosya: [imza]}` — yalnız `sifirdan.py` değil,
 **iskele de** denetlenir; itmeyi unutursan HÜCRE 3 durur.
 
+### Dosyalama düzeni — ADI VARSAYMA, buraya bak
+
+Her ad bir **maske** taşır (deney adı / kol / tohum / adım). Maskesiz ad
+koyma: iki deneyin çıktısı karışır ve hangisinin hangisi olduğu sonradan
+çıkarılamaz.
+
+```
+DEPO (GitHub, Colab bunu klonlar)
+  sifirdan.py                  EGITIM CEKIRDEGI -- adi ASLA degismez
+  analiz.py                    kosu sonrasi tani ('import sifirdan')
+  sablon/                      deneyden BAGIMSIZ altyapi
+  deney/<ad>.py                deneye OZEL karar mantigi (surucu)
+  uret_sablon.py               defteri URETIR; DENEYLER sozlugu icinde
+
+COLAB
+  /content/kod_<ad>/           GitHub klonu   -- uzerine YAZILMAZ
+  /content/calis_<ad>/         calisma (hizli disk)
+  /content/drive/MyDrive/deney_<ad>/    KALICI ayna
+
+CALISMA / AYNA icinde
+  cikti_<kol>/                 her kol kendi klasorunde
+                               (tek kollu eski kosularda duz 'cikti')
+      snap_<kol>_s<tohum>_<adim:06d>.pt     anlik goruntu (fp16)
+      surdur_<kol>_s<tohum>.pt              CANLI surdurme paketi
+      egri_<kol>_s<tohum>.json              olcum egrisi (TUM alanlar)
+      dikkat_/kv_<kol>_s<tohum>_<adim>.npz  tani tensorleri
+  sur/<kol>/surdur_<kol>_s<tohum>_<adim:06d>.pt   ADIM ADLI arsiv
+  log/  egitim_<deney>_<kol>_<adim:06d>.txt / surucu_<deney>.txt /
+        bakici_<deney>.txt
+  ham/                         analiz ciktilari (json/npz)
+  konfig.json  durum.json  konfig_giris.json  RAPOR.txt
+
+BELGE (yerel, depoda degil)
+  belge/onkayit/ONKAYIT_<DENEY>_<KONU>.md   kosudan ONCE, DEGISMEZ
+  belge/bulgu/BULGU_<KONU>.md               sonuc
+  belge/fikir/                              henuz deney olmamis
+  arsiv/cekirdek_eski/                      dondurulmus eski surumler
+```
+
+**Adım numarası her yerde 6 hane sıfır dolgulu.** `f"..._{20000}.pt"`
+yazmak hiçbir şey bulmaz ama `190000`'i bulur (zaten 6 hane) — hata
+**kısmen** görünür, en sinsi hali. `glob`'dan oku.
+
+**Her koşu ham veriyi MAKSİMUM yoğunlukta bırakır** — bugün işe yaramayan
+da dahil. Gerekçe ve liste §9'da; disk ucuz, koşu pahalı.
+
 **Kurtarma = HÜCRE 0-4'ü tekrar koşmak.** Ayrı bir `kurtar.py` yok ve
 gerekmiyor: kapılar imzayı doğruluyor, `durum.json` kaldığı yeri biliyor,
 adım adlı paketler Drive'da, HÜCRE 6 hangi adıma dönülebileceğini listeler.
