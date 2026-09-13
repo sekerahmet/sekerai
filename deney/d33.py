@@ -16,7 +16,7 @@ TEK surecte kosar (D3.2'de ek yukun %95 oldugu olculdu).
 
     python d33.py <konfig_giris.json>
 """
-import os, sys, json, time, glob
+import os, sys, json, time, glob, subprocess
 
 KON = json.load(open(sys.argv[1]))
 sys.path.insert(0, KON["KOD"])
@@ -46,6 +46,7 @@ KON.update(
     DERINLIK=list(range(1, S.CFG["L"])),           # D3'un konfigi
     HEDEF_SON=120000,
     PENCERE=[60000, 65000, 70000, 75000, 80000],
+    PHI_BEKLENEN=5.06,     # onkayit 3'te olculen deger; asagida ASSERT edilir
     OLGUNLUK=0.50,                                 # comp(A5 @ pencere)
     MEKANIZMA=0.30,                                # kisayol(A5 @ pencere)
     TOL_YORUNGE=9.9,                               # referans kol yok
@@ -59,7 +60,12 @@ KON.update(
            "DOLANMA": ["ent_shortcut", 0.00, +1, 1]},
 )
 if SMOKE:
-    KON.update(HEDEF_SON=600, PENCERE=[400, 600], OLGUNLUK=-1.0, MEKANIZMA=-1.0)
+    KON.update(HEDEF_SON=600, PENCERE=[400, 600], OLGUNLUK=-1.0,
+               MEKANIZMA=-1.0, PHI_BEKLENEN=2.17)   # smoke'un gercek phi'si
+# Baska bir phi noktasinda kosulacaksa beklenen deger disaridan verilir.
+# Degeri loglanir ve onkayitta adi gecer; sessizce susturulamaz.
+if "PHI_BEKLENEN" in os.environ:
+    KON["PHI_BEKLENEN"] = float(os.environ["PHI_BEKLENEN"])
 
 K = Kosu(KON)
 DERINLIK = tuple(KON["DERINLIK"])
@@ -77,6 +83,16 @@ K.log(f"  atomik olgu {_atom}  egitim-2hop {len(_d[3])}  "
       f"COMP {len(_d[4])}  ENT {len(_d[5])}  ENT2 {len(_d[8])}")
 K.log(f"  kollar: A5 (maskesiz) | D5 (poz 1 @ {MBLK}) | "
       f"K5 (poz 2 @ {MBLK}, KONTROL: eslesmis maliyet, yanlis yer)")
+
+# PHI KAPISI — bu deneyin TANIMLAYICI buyuklugu. Loglamak yetmez: yanlis
+# P_TRAIN ile baslarsak phi 3.03'te kalir ve bir saat boyunca D3'un
+# kopyasini kosariz, sonucu da "phi ile hayatta kaldi" diye okuruz.
+if KON.get("PHI_BEKLENEN") is not None:
+    assert abs(PHI - KON["PHI_BEKLENEN"]) < 0.05, (
+        f"PHI={PHI:.3f} ama onkayit {KON['PHI_BEKLENEN']} diyor -> DURDURULDU. "
+        f"(N_ENT={S.CFG['N_ENT']} N_REL={S.CFG['N_REL']} "
+        f"N_PAIR={S.CFG['N_PAIR']} P_TRAIN={S.CFG['P_TRAIN']})")
+    K.log(f"  PHI KAPISI GECTI   {PHI:.3f} ~ {KON['PHI_BEKLENEN']}")
 K.kaydet(rapor_ek=[f"phi = {PHI:.2f}  (dusuk-phi referans 3.03)",
                    f"A5 maskesiz | D5 poz 1 @ {MBLK} | K5 poz 2 (KONTROL)",
                    f"dusuk-phi sonuc: A 0.0603  D3 0.3607  oran 5.98x"])
@@ -115,22 +131,34 @@ K.log(f"BITTI.  pencere noktalari: A5 {h(A5)}/{_np}  D5 {h(D5)}/{_np}  "
 # Kapiyi sadece insan okursa unutulabilir ya da sonucu gorup gevsetilebilir.
 _p = ",".join(str(s) for s in KON["PENCERE"])
 _mb = f"{DERINLIK[0]}-{DERINLIK[-1]}"
-_komut = [
-    f"python sablon/pencere.py --cikti {K.y('BIRINCIL_D33.json')}",
-    f"  --kol 'A5:{K.y(A5)}:{_p}:yok'",
-    f"  --kol 'D5:{K.y(D5)}:{_p}:1@{_mb}'",
-    f"  --kol 'K5:{K.y(K5)}:{_p}:2@{_mb}'",
-    f"  --kapi 'A5 comp >= {KON['OLGUNLUK']}'          # OLGUNLUK",
-    f"  --kapi 'A5 ent_kisayol >= {KON['MEKANIZMA']}'  # MEKANIZMA",
-    f"  --kapi 'D5/A5 ent >= 3.0'                      # BIRINCIL",
-    f"  --kapi 'D5/K5 ent >= 2.0'                      # YER mi MALIYET mi",
-    f"  --kapi 'A5 ent < 0.18'                         # ANTITEZ (kalirsa antitez kazandi)",
-    f"  --kapi 'D5 bir_hop >= 0.98'                    # SAGLIK",
-]
-K.log("  birincil okuma (kapilar komutun icinde):")
-for _l in _komut:
+ARG = ["--cikti", K.y("BIRINCIL_D33.json"),
+       "--kol", f"A5:{K.y(A5)}:{_p}:yok",
+       "--kol", f"D5:{K.y(D5)}:{_p}:1@{_mb}",
+       "--kol", f"K5:{K.y(K5)}:{_p}:2@{_mb}",
+       "--kapi", f"A5 comp >= {KON['OLGUNLUK']}",          # OLGUNLUK
+       "--kapi", f"A5 ent_kisayol >= {KON['MEKANIZMA']}",  # MEKANIZMA
+       "--kapi", "D5/A5 ent >= 3.0",                       # BIRINCIL
+       "--kapi", "D5/K5 ent >= 2.0",                       # YER mi MALIYET mi
+       "--kapi", "A5 ent < 0.18",                          # ANTITEZ: KALIRSA kazandi
+       "--kapi", "D5-A5 ent2 < 0.05",                      # OZGULLUK
+       "--kapi", "D5-A5 comp >= -0.10",                    # SAGLIK
+       "--kapi", "D5 bir_hop >= 0.98"]                     # SAGLIK
+open(K.y("BIRINCIL_KOMUT.sh"), "w").write(
+    "python sablon/pencere.py "
+    + " ".join((f"'{x}'" if " " in x else x) for x in ARG) + "\n")
+
+# BIRINCIL OKUMAYI SURUCU KOSAR. Kapilari bir .sh dosyasina birakmak
+# "kapiyi kod degerlendirsin" amacini bosa cikariyordu: dosyayi kosmak yine
+# insana kaliyordu, unutulabilir ya da sonucu gorup atlanabilirdi.
+K.log("\n  BIRINCIL OKUMA (surucu kosuyor):")
+_r = subprocess.run([sys.executable, "-u",
+                     os.path.join(KON["KOD"], "sablon", "pencere.py")] + ARG,
+                    cwd=KON["KOD"], env=dict(KON["TEMIZ"], **KON["ORT"]),
+                    capture_output=True, text=True)
+for _l in (_r.stdout or _r.stderr).splitlines():
     K.log("    " + _l)
-open(K.y("BIRINCIL_KOMUT.sh"), "w").write((" \\\n").join(_komut) + "\n")
+if _r.returncode != 0:
+    K.log("  !! BIRINCIL OKUMA COKTU — elle kos: BIRINCIL_KOMUT.sh")
 K.not_(f"BITTI — pencere noktalari A5 {h(A5)}/{_np} D5 {h(D5)}/{_np} K5 {h(K5)}/{_np}",
        f"phi = {PHI:.2f}   dusuk-phi referans: A 0.0603 / D3 0.3607 = 5.98x",
        f"okuma komutu: BIRINCIL_KOMUT.sh")

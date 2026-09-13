@@ -134,10 +134,18 @@ def main():
     for spec in a.kapi:
         sol, alan, op, esik = spec.split()
         esik = float(esik)
-        if "/" in sol:                       # oran kapisi
+        if "/" in sol:                       # ORAN kapisi
             p, q = sol.split("/")
             deger = sonuc[p][alan] / sonuc[q][alan]
             nasil = f"{sonuc[p][alan]:.4f} / {sonuc[q][alan]:.4f}"
+        elif "-" in sol:                     # FARK kapisi
+            # OZGULLUK ("ENT2(D5) - ENT2(A5) < 0.05") ve SAGLIK
+            # ("comp(D5) >= comp(A5) - 0.10") fark kapilari; oran bicimi
+            # bunlari IFADE EDEMIYORDU, yani onceden yazilan iki kapi
+            # uygulanamaz durumdaydi.
+            p, q = sol.split("-")
+            deger = sonuc[p][alan] - sonuc[q][alan]
+            nasil = f"{sonuc[p][alan]:.4f} - {sonuc[q][alan]:.4f}"
         else:
             deger = sonuc[sol][alan]
             nasil = f"{deger:.4f}"
