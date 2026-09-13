@@ -245,6 +245,13 @@ def build_data():
 
     # iliski ciftleri (r1 != r2), sabit kume
     allp = [(a, b) for a in range(R) for b in range(R) if a != b]
+    # R iliskiyle en fazla R*(R-1) SIRALI cift var. NP bunu asarsa `pairs`
+    # sessizce kisa kalir ve asagidaki pairs[j] kriptik bir IndexError verir
+    # (13 Eylul: N_REL=8 iken N_PAIR=80 istendi, 56 cift vardi).
+    assert NP <= len(allp), (
+        f"N_PAIR={NP} > mumkun cift sayisi {len(allp)} (N_REL={R} -> R*(R-1)). "
+        f"Ya N_PAIR'i dusur ya N_REL'i yukselt.")
+    assert PT <= NP, f"P_TRAIN={PT} > N_PAIR={NP}"
     pairs = [allp[i] for i in rng.permutation(len(allp))[:NP]]
 
     # varlik bolmesi
