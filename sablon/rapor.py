@@ -71,7 +71,11 @@ for alt in altlar:
     print(f"\n EGRI [{bu}]   son {min(len(egri),10)} olcum")
     print(f" {'':7}{('|------- ' + bu + ' — bu kol -------|'):^39}"
           + (f"{('|-- ' + ref_ad + ' — kontrol --|'):^18}" if kiyas else ""))
-    print(f" {'adim':>7} {'1hop':>6} {'comp':>6} {'ent':>6} {'ent2':>6} {'kisayol':>7}"
+    # `seen` = EGITIMDE gorulmus 2-hop zincirlerdeki dogruluk. Ezber ile
+    # genellemeyi ayiran sutun bu: seen yuksek + comp dusuk = ezberliyor ama
+    # genellemiyor; seen de dusuk = ezberleyemiyor bile (kapasite).
+    print(f" {'adim':>7} {'1hop':>6} {'seen':>6} {'comp':>6} {'ent':>6} {'ent2':>6}"
+          f" {'kisayol':>7}"
           + (f" |{'comp':>8} {'ent':>7} | durum" if kiyas else ""))
     for r in egri[-10:]:
         b = ref.get(r["step"], {}) if kiyas else {}
@@ -84,7 +88,8 @@ for alt in altlar:
             d_ = r[alan] - b[alan]
             if (d_ < -tol) if yon < 0 else (d_ > tol) if yon > 0 else abs(d_) > tol:
                 u.append(ad_)
-        print(f" {r['step']:7d} {r['one']:6.3f} {r['comp']:6.3f} {r['ent']:6.3f}"
+        print(f" {r['step']:7d} {r['one']:6.3f} {r.get('seen', float('nan')):6.3f}"
+              f" {r['comp']:6.3f} {r['ent']:6.3f}"
               f" {r.get('ent2', float('nan')):6.3f} {r['ent_shortcut']:7.3f}"
               + (f" |{b.get('comp', float('nan')):8.3f} "
                  f"{b.get('ent', float('nan')):7.3f} | F{f} "
