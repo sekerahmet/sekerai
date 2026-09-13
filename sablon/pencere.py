@@ -61,6 +61,11 @@ def main():
     ap.add_argument("--kol", action="append", required=True)
     ap.add_argument("--cikti", required=True)
     ap.add_argument("--tohum", type=int, default=0)
+    # ONCEDEN YAZILAN KAPILARI KOD DEGERLENDIRSIN. Kapiyi sadece insan
+    # okursa unutulabilir ya da sonucu gorup gevsetilebilir; burada
+    # pazarlik yok. Bicim:  "<kol> <alan> <op> <esik>"  ya da
+    #                       "<kol>/<kol> <alan> <op> <esik>"  (oran)
+    ap.add_argument("--kapi", action="append", default=[])
     a = ap.parse_args()
 
     # Olcme setleri: kol() ile AYNI kurulum. Kopyalanmis sabit yok (§6).
@@ -74,8 +79,12 @@ def main():
 
     L1, LS, LC, LE = sub(one, 0), sub(tr2, 1), sub(comp, 2), sub(ent_ev, 3)
     L2 = sub(ent2_ev, 4)
-    E1, EC, EE = S.enc_one(L1), S.enc_two(LC), S.enc_two(LE)
+    E1, ES, EC, EE = S.enc_one(L1), S.enc_two(LS), S.enc_two(LC), S.enc_two(LE)
     E2 = S.enc_two(L2) if L2 else None
+    # `seen` = EGITIMDE gorulmus 2-hop. Ezber ile genellemeyi ayirir ve
+    # D3.2'nin teshisini tek basina bu sutun verdi; olmamasi eksikti.
+    brS = np.array([S.ENT_OFF + b for _, _, _, b, _ in LS], np.int64)
+    scS = np.array([S.ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in LS], np.int64)
     brE = np.array([S.ENT_OFF + b for _, _, _, b, _ in LE], np.int64)
     scE = np.array([S.ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in LE], np.int64)
     brC = np.array([S.ENT_OFF + b for _, _, _, b, _ in LC], np.int64)
@@ -101,18 +110,45 @@ def main():
 
         zE, _ = S.zengin(net, EE, brE, scE)
         zC, _ = S.zengin(net, EC, brC, scC)
+        zS, _ = S.zengin(net, ES, brS, scS)
         z2, _ = S.zengin(net, E2, br2, sc2)
         r = dict(kol=ad, klasor=klasor, adimlar=bulunan, maske=mask,
                  ent=zE["acc"], ent_kisayol=zE["shortcut"],
                  comp=zC["acc"], comp_kisayol=zC["shortcut"],
-                 ent2=z2["acc"],
+                 seen=zS["acc"], ent2=z2["acc"],
                  bir_hop=float(S.evaluate(net, *E1[:3])[0].mean()))
         sonuc[ad] = r
         print(f"\n{ad:8s} maske {mask:8s} adimlar {bulunan}")
         print(f"   ENT {r['ent']:.4f}   (kisayol {r['ent_kisayol']:.3f})")
-        print(f"   comp {r['comp']:.3f}  ent2 {r['ent2']:.4f}  1hop {r['bir_hop']:.3f}")
+        print(f"   comp {r['comp']:.3f}  seen {r['seen']:.3f}  "
+              f"ent2 {r['ent2']:.4f}  1hop {r['bir_hop']:.3f}")
         for blk in net.blocks:
             blk.mask_key = None
+
+    # --- ONCEDEN YAZILAN KAPILAR ------------------------------------------
+    OP = {">=": lambda x, y: x >= y, "<=": lambda x, y: x <= y,
+          ">": lambda x, y: x > y, "<": lambda x, y: x < y}
+    kapilar = []
+    if a.kapi:
+        print(f"\n{'='*62}\nONCEDEN YAZILAN KAPILAR")
+    for spec in a.kapi:
+        sol, alan, op, esik = spec.split()
+        esik = float(esik)
+        if "/" in sol:                       # oran kapisi
+            p, q = sol.split("/")
+            deger = sonuc[p][alan] / sonuc[q][alan]
+            nasil = f"{sonuc[p][alan]:.4f} / {sonuc[q][alan]:.4f}"
+        else:
+            deger = sonuc[sol][alan]
+            nasil = f"{deger:.4f}"
+        gecti = OP[op](deger, esik)
+        kapilar.append(dict(kural=spec, deger=deger, gecti=bool(gecti)))
+        print(f"  {'GECTI ' if gecti else '!! KALDI'}  {sol} {alan} {op} {esik}"
+              f"   ->  {nasil} = {deger:.4f}")
+    sonuc["_kapilar"] = kapilar
+    if kapilar:
+        k = sum(x["gecti"] for x in kapilar)
+        print(f"  {k}/{len(kapilar)} kapi gecti")
 
     json.dump(sonuc, open(a.cikti, "w"), indent=1)
     print(f"\n-> {a.cikti}")
