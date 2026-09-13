@@ -76,6 +76,18 @@ if SMOKE:
 if SMOKE and "PHI_BEKLENEN" in os.environ:
     KON["PHI_BEKLENEN"] = float(os.environ["PHI_BEKLENEN"])
 
+# KOLLAR ortam degiskeniyle daraltilabilir. K5 KULLANICI KARARIYLA
+# kaldirildi (13 Eylul): "gerek yok, vakit kaybi, ilgilenmiyoruz".
+# GERI DONULEBILIR: sabit tohumla sifirdan kosar, KOLLAR="A5,D5,K5" ile
+# aynen geri gelir, hicbir sey kaybolmaz.
+# KAYBEDILEN: "kazanc YERDEN mi MALIYETTEN mi" sorusu cevapsiz kalir.
+# (phi 3.03'te D/K = 0.3010/0.0370 = 8.1x olculmustu; yuksek phi'de
+#  olculmemis olacak -> D5 kazansa bile "YER belirleyici" DENEMEZ.)
+_SEC = [x.strip() for x in os.environ.get("KOLLAR", "A5,D5").split(",") if x.strip()]
+assert _SEC and set(_SEC) <= {"A5", "D5", "K5"}, f"bilinmeyen kol: {_SEC}"
+KON["KOL_SAYISI"] = len(_SEC)
+KON["RAPOR_TOPLAM"] = len(_SEC) * KON["HEDEF_SON"]
+
 K = Kosu(KON)
 DERINLIK = tuple(KON["DERINLIK"])
 HEDEF_SON = KON["HEDEF_SON"]
@@ -90,8 +102,11 @@ K.log(f"  veri {S.CFG['N_ENT']}x{S.CFG['N_PAIR']} ({S.CFG['P_TRAIN']} egitimde) 
       f"R={S.CFG['N_REL']}  ->  PHI = {PHI:.2f}   (dusuk-phi referans: 3.03)")
 K.log(f"  atomik olgu {_atom}  egitim-2hop {len(_d[3])}  "
       f"COMP {len(_d[4])}  ENT {len(_d[5])}  ENT2 {len(_d[8])}")
-K.log(f"  kollar: A5 (maskesiz) | D5 (poz 1 @ {MBLK}) | "
-      f"K5 (poz 2 @ {MBLK}, KONTROL: eslesmis maliyet, yanlis yer)")
+_ACK = {"A5": "A5 (maskesiz)", "D5": f"D5 (poz 1 @ {MBLK})",
+        "K5": f"K5 (poz 2 @ {MBLK}, KONTROL: eslesmis maliyet, yanlis yer)"}
+K.log("  kollar: " + " | ".join(_ACK[k] for k in _SEC))
+if "K5" not in _SEC:
+    K.log("  !! K5 YOK -> 'kazanc YERDEN mi MALIYETTEN mi' sorusu CEVAPSIZ")
 
 # PHI KAPISI — bu deneyin TANIMLAYICI buyuklugu. Loglamak yetmez: yanlis
 # P_TRAIN ile baslarsak phi 3.03'te kalir ve bir saat boyunca D3'un
@@ -103,7 +118,8 @@ if KON.get("PHI_BEKLENEN") is not None:
         f"N_PAIR={S.CFG['N_PAIR']} P_TRAIN={S.CFG['P_TRAIN']})")
     K.log(f"  PHI KAPISI GECTI   {PHI:.3f} ~ {KON['PHI_BEKLENEN']}")
 K.kaydet(rapor_ek=[f"phi = {PHI:.2f}  (dusuk-phi referans 3.03)",
-                   f"A5 maskesiz | D5 poz 1 @ {MBLK} | K5 poz 2 (KONTROL)",
+                   "kollar: " + " | ".join(_SEC)
+                   + ("" if "K5" in _SEC else "   (K5 kaldirildi)"),
                    f"dusuk-phi sonuc: A 0.0603  D3 0.3607  oran 5.98x"])
 
 # ============================================================== ANA DONGU
@@ -112,9 +128,10 @@ K.kaydet(rapor_ek=[f"phi = {PHI:.2f}  (dusuk-phi referans 3.03)",
 # K5: ESLESMIS MALIYET, YANLIS YER. Deney 7'de K kolu bir bulguyu oldurdu
 # ("maskeleme ogrenmeyi hizlandiriyor") ve digerini kurtardi. CLAUDE.md 10b:
 # "Kontrolu sonraya birakma. Kontrol kolu tasariminin parcasidir, ek degil."
-for ad, alt, ek in (("A5", A5, None),
-                    ("D5", D5, dict(MASK_KEY="1", MASK_BLK=MBLK)),
-                    ("K5", K5, dict(MASK_KEY="2", MASK_BLK=MBLK))):
+_HEPSI = (("A5", A5, None),
+          ("D5", D5, dict(MASK_KEY="1", MASK_BLK=MBLK)),
+          ("K5", K5, dict(MASK_KEY="2", MASK_BLK=MBLK)))
+for ad, alt, ek in [x for x in _HEPSI if x[0] in _SEC]:
     # Bayrak YETMEZ: durum.json "bitti" derken klasor bos olabilir
     # (Drive geri yuklemesi yarim kaldi). Atlanirsa olcum eksik kalirdi.
     if K.bitti_mi(ad, alt, KON["PENCERE"]):
@@ -128,34 +145,36 @@ for ad, alt, ek in (("A5", A5, None),
     # Ilerleme UC kolun toplami uzerinden. Onceki hali her kol bitince
     # adim=HEDEF_SON yaziyordu -> A5 biter bitmez rapor %100 diyordu,
     # oysa isin ucte ikisi duruyordu.
-    _bitti = sum(1 for x in ("A5", "D5", "K5") if K.st.get(f"{x}_bitti"))
+    _bitti = sum(1 for x in _SEC if K.st.get(f"{x}_bitti"))
     K.kaydet(**{f"{ad}_bitti": True}, adim=(_bitti + 1) * HEDEF_SON)
     K.log(f"{ad} bitti ({sn} sn = {sn/60:.0f} dk)")
     if ek is not None:
         K.konfig_kapisi(dict(MASK_KEY=ek["MASK_KEY"],
                              MASK_BLK=list(DERINLIK)), alt=alt)
 
-K.kaydet(faz=3, faz_ad="BITTI", adim=KON["KOL_SAYISI"] * HEDEF_SON)
+K.kaydet(faz=3, faz_ad="BITTI", adim=len(_SEC) * HEDEF_SON)
 _np = len(KON["PENCERE"])          # elle "/5" yazma yok (CLAUDE.md 6)
 h = lambda a: sum(os.path.exists(
     K.y(a, f"snap_{KON['KOL']}_s{KON['SEED']}_{s:06d}.pt")) for s in KON["PENCERE"])
-K.log(f"BITTI.  pencere noktalari: A5 {h(A5)}/{_np}  D5 {h(D5)}/{_np}  "
-      f"K5 {h(K5)}/{_np}")
+K.log("BITTI.  pencere noktalari: " + "  ".join(
+    f"{k} {h({'A5': A5, 'D5': D5, 'K5': K5}[k])}/{_np}" for k in _SEC))
 
 # Birincil okuma komutu — ONCEDEN YAZILAN KAPILAR da komutun icinde.
 # Kapiyi sadece insan okursa unutulabilir ya da sonucu gorup gevsetilebilir.
 _p = ",".join(str(s) for s in KON["PENCERE"])
 _mb = f"{DERINLIK[0]}-{DERINLIK[-1]}"
-ARG = ["--cikti", K.y("BIRINCIL_D33.json"),
-       "--kol", f"A5:{K.y(A5)}:{_p}:yok",
-       "--kol", f"D5:{K.y(D5)}:{_p}:1@{_mb}",
-       "--kol", f"K5:{K.y(K5)}:{_p}:2@{_mb}",
+_KM = {"A5": f"A5:{K.y(A5)}:{_p}:yok",
+       "D5": f"D5:{K.y(D5)}:{_p}:1@{_mb}",
+       "K5": f"K5:{K.y(K5)}:{_p}:2@{_mb}"}
+ARG = ["--cikti", K.y("BIRINCIL_D33.json")]
+for _k in _SEC:
+    ARG += ["--kol", _KM[_k]]
+ARG += [
        # Etiketli: ciktida hangi kapi oldugu ve GECMEK ne demek okunsun.
        # ANTITEZ kapisi TERS yonlu — gecmesi "antitez KAYBETTI" demek.
        "--kapi", f"OLGUNLUK: A5 comp >= {KON['OLGUNLUK']}",
        "--kapi", f"MEKANIZMA-kisayol-var: A5 ent_kisayol >= {KON['MEKANIZMA']}",
        "--kapi", "BIRINCIL-kazanc-yasiyor: D5/A5 ent >= 3.0",
-       "--kapi", "YER-mi-MALIYET-mi: D5/K5 ent >= 2.0",
        "--kapi", "ANTITEZ-KAYBETTI: A5 ent < 0.18",
        "--kapi", "OZGULLUK-ENT2-oynamadi: D5-A5 ent2 < 0.05",
        "--kapi", "SAGLIK-comp: D5-A5 comp >= -0.10",
@@ -179,7 +198,9 @@ if _r.returncode == 3:
           "YAZILDI ama eksik kola bagli kapilar ATLANDI, hukum verilemez.")
 elif _r.returncode != 0:
     K.log("  !! BIRINCIL OKUMA COKTU — elle kos: BIRINCIL_KOMUT.sh")
-K.not_(f"BITTI — pencere noktalari A5 {h(A5)}/{_np} D5 {h(D5)}/{_np} K5 {h(K5)}/{_np}",
+_KY = {"A5": A5, "D5": D5, "K5": K5}
+K.not_("BITTI — pencere noktalari "
+       + " ".join(f"{k} {h(_KY[k])}/{_np}" for k in _SEC),
        f"phi = {PHI:.2f}   dusuk-phi referans: A 0.0603 / D3 0.3607 = 5.98x",
        f"okuma komutu: BIRINCIL_KOMUT.sh")
 K.log("SURUCU BITTI")
