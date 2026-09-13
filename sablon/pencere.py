@@ -25,6 +25,9 @@ import os, sys, json, glob, argparse
 import numpy as np
 import torch
 
+# Python betigin KENDI klasorunu sys.path'e koyar, calisma dizinini degil.
+# Bu dosya sablon/ icinde; sifirdan.py depo KOKUNDE. Koku elle ekliyoruz.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import sifirdan as S
 
 
