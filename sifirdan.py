@@ -176,6 +176,15 @@ RESUME_FROM  = os.environ.get("RESUME_FROM", "")   # surdur_*.pt yolu
 # RESUME_FROM'dan FARKI: optimizer/RNG TASINMAZ, adim 1'den sayilir.
 # Amac: egitilmis A'yi yeniden egitmeden uzerine mudahale denemek.
 INIT_FROM    = os.environ.get("INIT_FROM", "")
+# ISINMA TABANI. Isinma uzunlugu normalde CFG["STEPS"]//20 -- yani bu
+# kosuda gidilecek hedefe bagli. Egitim PARCALI yurutuluyorsa (D3.1: her
+# 5.000 adimda dur, ara, devam et) ilk parcanin STEPS'i 5.000 olur ve
+# isinma 6.000 yerine 250 adim surer: ayni tohum, BASKA bir yorunge.
+# WARM_OF=120000 verilirse isinma TOPLAM kosu uzerinden hesaplanir ve
+# parcali kosu, tek seferlik kosuyla ayni LR programini gorur.
+# Verilmezse (0) eski davranis -- bit duzeyinde no-op.
+WARM_OF      = int(os.environ.get("WARM_OF", "0"))
+assert WARM_OF >= 0, f"WARM_OF negatif olamaz: {WARM_OF}"
 
 # KIMLIK DENETIMI (Identity Bridge, arXiv 2509.24653). Sifir-hop gorev:
 #   [Q1] e IDENT ? -> e        "Turkiye'nin kendisi nedir? -> Turkiye"
@@ -1073,7 +1082,11 @@ def run_arm(arm, seed, data, log):
         lr=CFG["LR"], betas=(0.9, 0.95))
     scaler = torch.amp.GradScaler(DEV, enabled=(DEV == "cuda"))
     S, B = CFG["STEPS"], CFG["BATCH"]
-    warm = max(10, S // 20)
+    warm = max(10, (WARM_OF or S) // 20)
+    if WARM_OF:
+        assert WARM_OF >= S, (
+            f"WARM_OF={WARM_OF} < STEPS={S}: isinma tabani hedeften kucuk, "
+            "parcali kosu mantigi bozuk")
     rs = np.random.RandomState(seed + 991)
     curve, tablo, t0 = [], [], time.time()
     bas = 1
