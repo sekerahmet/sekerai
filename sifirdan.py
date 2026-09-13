@@ -1219,8 +1219,14 @@ def run_arm(arm, seed, data, log):
                            _rp + ".tmp")
                 os.replace(_rp + ".tmp", _rp)
             if SAVE_SNAP and (len(curve) % CKPT_EVERY == 0):
+                # ATOMIK: surdurme paketi gibi .tmp + os.replace. Duz yazmada
+                # runtime tam o anda kopunca gecerli ADLI ama YARIM bir dosya
+                # kaliyordu; BIRINCIL OLCUM (pencere.py) tam bu dosyalari
+                # okuyor -> ucuz dosya korunuyor, olcumun dayandigi acikta.
+                _sy = os.path.join(OUT, f"snap_{arm}_s{seed}_{step:06d}.pt")
                 torch.save({k: v.half().cpu() for k, v in model.state_dict().items()},
-                           os.path.join(OUT, f"snap_{arm}_s{seed}_{step:06d}.pt"))
+                           _sy + ".tmp")
+                os.replace(_sy + ".tmp", _sy)
             if SAVE_KV and model.mem is not None:
                 np.savez_compressed(
                     os.path.join(OUT, f"kv_{arm}_s{seed}_{step:06d}.npz"),

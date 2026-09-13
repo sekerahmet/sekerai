@@ -31,9 +31,12 @@ if SMOKE:
     KON["ORT"] = dict(KON["ORT"], PRESET="smoke", MEM_AT="2", EVERY="200",
                       COMPILE="0", N_ENT="200", N_REL="6", N_PAIR="20",
                       P_TRAIN="16")
-os.environ.update({k: v for k, v in KON["ORT"].items()
-                   if k in ("PRESET", "ARMS", "SEEDS", "HOP2_FRAC", "MEM_AT",
-                            "N_ENT", "N_REL", "N_PAIR", "P_TRAIN")})
+# Elle kopyalanmis filtre YOK: ORT tek kaynak (defterdeki liste ile burasi
+# birbirini tutmuyordu; veriyi belirleyen bir anahtar eklenirse surucu ile
+# pencere.py FARKLI veri kurabilirdi).
+assert not (set(KON["ORT"]) & {"MASK_KEY", "MASK_BLK", "RESUME_FROM",
+                               "INIT_FROM", "OUT", "STEPS"}),     f"ORT kosuya ozel degisken tasiyor: {KON['ORT']}"
+os.environ.update(KON["ORT"])
 
 import numpy as np
 import torch
@@ -112,8 +115,10 @@ K.kaydet(rapor_ek=[f"phi = {PHI:.2f}  (dusuk-phi referans 3.03)",
 for ad, alt, ek in (("A5", A5, None),
                     ("D5", D5, dict(MASK_KEY="1", MASK_BLK=MBLK)),
                     ("K5", K5, dict(MASK_KEY="2", MASK_BLK=MBLK))):
-    if K.st.get(f"{ad}_bitti"):
-        K.log(f"{ad} zaten bitmis, atlaniyor")
+    # Bayrak YETMEZ: durum.json "bitti" derken klasor bos olabilir
+    # (Drive geri yuklemesi yarim kaldi). Atlanirsa olcum eksik kalirdi.
+    if K.bitti_mi(ad, alt, KON["PENCERE"]):
+        K.log(f"{ad} zaten bitmis (olcum noktalari diskte dogrulandi), atlaniyor")
         continue
     K.kaydet(faz=1 if ad == "A5" else 2,
              faz_ad=f"{ad} kosuyor ({'maskesiz' if ek is None else 'maskeli'}), "
@@ -169,7 +174,10 @@ _r = subprocess.run([sys.executable, "-u",
                     capture_output=True, text=True)
 for _l in (_r.stdout or _r.stderr).splitlines():
     K.log("    " + _l)
-if _r.returncode != 0:
+if _r.returncode == 3:
+    K.log("  !! BIRINCIL OKUMA KISMI — bazi kollar olculemedi. Sonuc dosyasi "
+          "YAZILDI ama eksik kola bagli kapilar ATLANDI, hukum verilemez.")
+elif _r.returncode != 0:
     K.log("  !! BIRINCIL OKUMA COKTU — elle kos: BIRINCIL_KOMUT.sh")
 K.not_(f"BITTI — pencere noktalari A5 {h(A5)}/{_np} D5 {h(D5)}/{_np} K5 {h(K5)}/{_np}",
        f"phi = {PHI:.2f}   dusuk-phi referans: A 0.0603 / D3 0.3607 = 5.98x",

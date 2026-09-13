@@ -22,9 +22,54 @@ class Kosu:
         for a in ("sur", "log", "ham"):
             os.makedirs(self.y(a), exist_ok=True)
         kon["commit"] = kon.get("commit", "?")
-        self._yaz_json(self.y("konfig.json"), kon)
+        # COMMIT KAPISI: yeni konfigi YAZMADAN once diskte duran eskiye bak.
+        _eski = self._oku_json(self.y("konfig.json"))
         self.st = self._oku_json(self.y("durum.json"),
                                  dict(faz=1, adim=0, faz_ad="", rapor_ek=[]))
+        self._commit_kapisi(_eski)
+        self._yaz_json(self.y("konfig.json"), kon)
+
+    def _commit_kapisi(self, eski):
+        """Drive'dan geri yuklenen yarim is, BU commit'le mi uretilmis?
+
+        HUCRE 4 `cp -ru EV/. CALIS/` ile her seyi geri aliyor; durum.json
+        eski commit'in "<kol>_bitti" bayragini da getiriyor. Kod arada
+        degistiyse bir kol ESKI, digerleri YENI kodla egitilir ve ayni
+        tabloya girer -> WARM_OF hatasinin tekrari, ama sessiz hali."""
+        simdi = self.kon["commit"]
+        if not eski or eski.get("commit") in (None, "?") or simdi == "?":
+            return
+        if eski["commit"] == simdi:
+            return
+        biten = [k[:-6] for k, v in self.st.items()
+                 if k.endswith("_bitti") and v]
+        assert not biten and not self.st.get("adim"), (
+            f"COMMIT DEGISTI ama YARIM IS duruyor -> DURDURULDU.\n"
+            f"  diskteki is : commit {eski['commit']}  "
+            f"(biten kol: {biten or 'yok'}, adim {self.st.get('adim', 0)})\n"
+            f"  simdi kosan : commit {simdi}\n"
+            f"  Iki kol farkli kodla egitilip ayni tabloya girerdi.\n"
+            f"  Ya o commit'e don, ya {self.C} ve Drive kopyasini silip "
+            f"sifirdan basla.")
+        self.log(f"  COMMIT KAPISI   disk {eski['commit']} -> simdi {simdi}"
+                 f"   (yarim is yok, devam)")
+
+    def bitti_mi(self, ad, alt, pencere=None):
+        """durum.json 'bitti' diyorsa DISKTEN de dogrula.
+
+        Bayrak var ama olcum noktalari yok (Drive geri yuklemesi yarim
+        kaldi / klasor silindi) -> kol ATLANIR, sonra pencere.py o kolun
+        anlik goruntulerini bulamaz. Kurtarma yolu kendini bozuyordu."""
+        if not self.st.get(f"{ad}_bitti"):
+            return False
+        eksik = [s for s in (pencere or []) if not os.path.exists(
+            self.y(alt, f"snap_{self.KOL}_s{self.SEED}_{s:06d}.pt"))]
+        assert not eksik, (
+            f"{ad} 'bitti' isaretli ama OLCUM NOKTALARI DISKTE YOK: {eksik}\n"
+            f"  klasor: {self.y(alt)}\n"
+            f"  Atlanirsa birincil okuma eksik kalir. Ya eksikleri Drive'dan "
+            f"geri yukle, ya durum.json'daki '{ad}_bitti' bayragini sil.")
+        return True
 
     # --- yollar ---------------------------------------------------------
     def y(self, *a):

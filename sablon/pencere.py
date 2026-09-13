@@ -46,7 +46,8 @@ def agirlik_ortalamasi(klasor, kol, tohum, adimlar):
     for a in adimlar:
         y = glob.glob(os.path.join(klasor, f"snap_{kol}_s{tohum}_*{a}.pt"))
         y = [p for p in y if int(os.path.basename(p).split("_")[-1][:-3]) == a]
-        assert y, f"anlik goruntu YOK: {klasor} adim {a}"
+        if not y:
+            raise FileNotFoundError(f"anlik goruntu YOK: {klasor} adim {a}")
         sd = torch.load(y[0], map_location="cpu")
         toplam = ({k: v.float() for k, v in sd.items()} if toplam is None
                   else {k: toplam[k] + v.float() for k, v in sd.items()})
@@ -94,7 +95,7 @@ def main():
     print(f"olcme seti: ent {len(LE)}  comp {len(LC)}  ent2 {len(L2)}  1hop {len(L1)}")
 
     net = S.Net("A", S.CFG).to(S.DEV)
-    sonuc = {}
+    sonuc, eksik = {}, []
     for tanim in a.kol:
         # Yol iki nokta icerebilir (Windows "C:\..."), o yuzden SAGDAN bol:
         # son iki alan adimlar ve maske; kalanin ILK ikinoktasi ad/klasor ayraci.
@@ -102,8 +103,18 @@ def main():
         ad, klasor = govde.split(":", 1)
         adimlar = [int(x) for x in adimlar.split(",")]
         poz, bloklar = maske_coz(mask)
-        sd, bulunan = agirlik_ortalamasi(klasor, "A", a.tohum, adimlar)
-        net.load_state_dict(sd)
+        # BIR kol eksikse BUTUN okuma coluyordu: assert ilk eksik anlik
+        # goruntude patliyor, HESAPLANMIS kollarin sonucu da yazilmiyordu.
+        # Kismi sonuc sifir sonuctan iyidir; eksik olan ciktida ISARETLENIR.
+        try:
+            sd, bulunan = agirlik_ortalamasi(klasor, "A", a.tohum, adimlar)
+            net.load_state_dict(sd)
+        except Exception as e:
+            print()
+            print(f"{ad:8s} !! OLCULEMEDI: {e}")
+            sonuc[ad] = dict(kol=ad, klasor=klasor, maske=mask, hata=str(e))
+            eksik.append(ad)
+            continue
         net.eval()
         for i, blk in enumerate(net.blocks):
             blk.mask_key = poz if (bloklar and i in bloklar) else None
@@ -111,7 +122,11 @@ def main():
         zE, _ = S.zengin(net, EE, brE, scE)
         zC, _ = S.zengin(net, EC, brC, scC)
         zS, _ = S.zengin(net, ES, brS, scS)
-        z2, _ = S.zengin(net, E2, br2, sc2)
+        # ENT2 seti BOS olabilir (kucuk konfig). Yukarida "E2 = ... if L2
+        # else None" diye bir koruma vardi ama SAHTEYDI: asagisi None'i ele
+        # almiyordu ve zengin() TypeError ile BUTUN okumayi olduruyordu.
+        z2 = (S.zengin(net, E2, br2, sc2)[0] if E2 is not None
+              else {"acc": None})
         r = dict(kol=ad, klasor=klasor, adimlar=bulunan, maske=mask,
                  ent=zE["acc"], ent_kisayol=zE["shortcut"],
                  comp=zC["acc"], comp_kisayol=zC["shortcut"],
@@ -120,8 +135,9 @@ def main():
         sonuc[ad] = r
         print(f"\n{ad:8s} maske {mask:8s} adimlar {bulunan}")
         print(f"   ENT {r['ent']:.4f}   (kisayol {r['ent_kisayol']:.3f})")
+        _e2 = "YOK" if r["ent2"] is None else f"{r['ent2']:.4f}"
         print(f"   comp {r['comp']:.3f}  seen {r['seen']:.3f}  "
-              f"ent2 {r['ent2']:.4f}  1hop {r['bir_hop']:.3f}")
+              f"ent2 {_e2}  1hop {r['bir_hop']:.3f}")
         for blk in net.blocks:
             blk.mask_key = None
 
@@ -139,6 +155,15 @@ def main():
         kural = (kural or spec).strip()
         sol, alan, op, esik = kural.split()
         esik = float(esik)
+        _kol = sol.replace("/", " ").replace("-", " ").split()
+        # kol hic olculemedi YA DA o alan bu kolda yok/None
+        if any(k in eksik or sonuc.get(k, {}).get(alan) is None
+               for k in _kol):
+            kapilar.append(dict(etiket=etiket.strip(), kural=kural,
+                                deger=None, gecti=None))
+            print(f"  ATLANDI   {etiket.strip() or sol:26s} {kural}"
+                  f"   ->  kol OLCULEMEDI")
+            continue
         if "/" in sol:                       # ORAN kapisi
             p, q = sol.split("/")
             deger = sonuc[p][alan] / sonuc[q][alan]
@@ -162,11 +187,18 @@ def main():
               f"   ->  {nasil} = {deger:.4f}")
     sonuc["_kapilar"] = kapilar
     if kapilar:
-        k = sum(x["gecti"] for x in kapilar)
-        print(f"  {k}/{len(kapilar)} kapi gecti")
+        k = sum(1 for x in kapilar if x["gecti"])
+        at = sum(1 for x in kapilar if x["gecti"] is None)
+        print(f"  {k}/{len(kapilar)} kapi gecti"
+              + (f"   ({at} kapi OLCULEMEDI)" if at else ""))
 
+    sonuc["_eksik_kol"] = eksik
     json.dump(sonuc, open(a.cikti, "w"), indent=1)
     print(f"\n-> {a.cikti}")
+    if eksik:
+        print(f"!! OLCULEMEYEN KOL: {', '.join(eksik)}"
+              f"   -> yukaridaki sonuclar KISMI, hukum verilemez")
+        sys.exit(3)
 
 
 if __name__ == "__main__":
