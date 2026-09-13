@@ -111,6 +111,33 @@ MEM_AT = tuple(sorted({int(v) for v in
 assert all(1 <= m < CFG["L"] for m in MEM_AT),     f"MEM_AT 1..L-1 araliginda olmali (son blok belleksiz): {MEM_AT}, L={CFG['L']}"
 CFG["MEM_AT"] = MEM_AT
 
+# KATMANLAR ARASI PARAMETRE PAYLASIMI (Universal Transformer tarzi).
+#   SHARE=0 (varsayilan) -> kapali, kod eskisiyle BIREBIR ayni
+#   SHARE=4, L=8         -> 4 ayri blok iki kez donuyor: 0,1,2,3,0,1,2,3
+# Wang 2405.15071 Ek E.2 ve 2608.07261 s.5.2 bagimsiz olarak bunu test edip
+# gorulmemis varlikta OOD genellemeyi ACTIGINI bildiriyor. Kok teshis:
+# "rekurans icermeyen tasarim katmanlar arasi bellek paylasimini yasakliyor".
+# DIKKAT: parametre sayisi duser -> kol A ile parametre esitligi BOZULUR, yaz.
+SHARE = int(os.environ.get("SHARE", "0"))
+assert SHARE == 0 or (1 <= SHARE <= CFG["L"] and CFG["L"] % SHARE == 0),     f"SHARE, L'yi tam bolmeli: SHARE={SHARE}, L={CFG['L']}"
+CFG["SHARE"] = SHARE
+
+# KISAYOL YOLUNU EGITIM BOYUNCA KAPAT.
+#   MASK_KEY=1  -> hicbir sorgu poz 1'e (varlik) bakamaz
+#   MASK_BLK=6,7-> yalniz bu bloklarda
+# Gerekce (kol A, 200.000 adim, olculdu):
+#   karar blok 6-7'de cevap pozisyonunun dikkat paylastirmasiyla veriliyor;
+#   COMP p1'e 0.002-0.010 koyuyor (yol ATIL), ENT 0.066-0.213 (KISAYOL).
+#   Cikarimda kesince: COMP 0.901->0.901 (bedava), ENT kisayol 0.689->0.243.
+#   p2 (r1) maskesi maliyeti eslesmis KONTROL: kisayol 0.691 (etkisiz).
+MASK_KEY = os.environ.get("MASK_KEY", "")
+MASK_BLK = tuple(sorted({int(v) for v in os.environ.get("MASK_BLK", "").split(",") if v != ""}))
+if MASK_KEY != "":
+    assert MASK_BLK and all(0 <= b < CFG["L"] for b in MASK_BLK), f"MASK_BLK: {MASK_BLK}"
+    assert SHARE == 0, "MASK_BLK ile SHARE birlikte kullanilamaz (bloklar paylasimli)"
+CFG["MASK_KEY"] = MASK_KEY
+CFG["MASK_BLK"] = MASK_BLK
+
 DATA_SEED   = 0          # veri TUM kollarda ve TUM seed'lerde AYNI
 TRAIN_SEEDS = [int(s) for s in os.environ.get("SEEDS", "0").split(",")]
 CTX         = 4          # bellek sorgusu kac pozisyonu birlestiriyor
@@ -145,6 +172,10 @@ SAVE_RESUME= os.environ.get("SAVE_RESUME", "1") != "0"  # optimizer+RNG: kosuyu 
 #  koşuldu. Depolama kisit degil.)
 RESUME_EVERY = int(os.environ.get("RESUME_EVERY", "1"))
 RESUME_FROM  = os.environ.get("RESUME_FROM", "")   # surdur_*.pt yolu
+# SICAK BASLANGIC: bitmis bir kosunun model_*.pt agirliklarindan devam et.
+# RESUME_FROM'dan FARKI: optimizer/RNG TASINMAZ, adim 1'den sayilir.
+# Amac: egitilmis A'yi yeniden egitmeden uzerine mudahale denemek.
+INIT_FROM    = os.environ.get("INIT_FROM", "")
 
 # KIMLIK DENETIMI (Identity Bridge, arXiv 2509.24653). Sifir-hop gorev:
 #   [Q1] e IDENT ? -> e        "Turkiye'nin kendisi nedir? -> Turkiye"
@@ -156,6 +187,15 @@ RESUME_FROM  = os.environ.get("RESUME_FROM", "")   # surdur_*.pt yolu
 # IDENT_FRAC = egitim havuzunun ne kadari kimlik ornegi olsun (0 = kapali).
 IDENT_FRAC = float(os.environ.get("IDENT_FRAC", "0"))
 CFG["IDENT_FRAC"] = IDENT_FRAC
+# Kimlik denetiminin BICIMI:
+#   q1     : [Q1] e IDENT ? -> e            (makalenin harfi harfine hali)
+#            Cevap baglamda VAR -> kopyalama devresiyle cozulebilir.
+#   q2son  : [Q2] e r1 IDENT ? -> facts[e,r1]   (kopru denetimi)
+#            Cevap baglamda YOK -> kopyalanamaz. Zincire GIRISI Q2
+#            cercevesinde HER varlik icin calistirir.
+IDENT_MODE = os.environ.get("IDENT_MODE", "q1")
+assert IDENT_MODE in ("q1", "q2son"), f"IDENT_MODE q1|q2son olmali: {IDENT_MODE}"
+CFG["IDENT_MODE"] = IDENT_MODE
 TOPSLOT    = int(os.environ.get("TOPSLOT", "8"))         # ornek basina saklanan slot sayisi
 CKPT_EVERY = int(os.environ.get("CKPT_EVERY", "1"))     # kac degerlendirmede bir
 # NOT: 12 Eylul 8.5M kosusunda 3 kullanildi (12 noktanin 4'u) ve bu cimrilikti.
@@ -176,6 +216,8 @@ REL_OFF = SPECIAL
 ENT_OFF = SPECIAL + CFG["N_REL"]
 VOCAB   = ENT_OFF + CFG["N_ENT"]
 T_LEN   = 8
+if MASK_KEY != "":                 # sinir kontrolu T_LEN tanimlandiktan SONRA
+    assert 0 <= int(MASK_KEY) < T_LEN, f"MASK_KEY 0..{T_LEN-1} olmali: {MASK_KEY}" 
 
 
 # ============================ VERI ========================================
@@ -281,6 +323,21 @@ def enc_ident(ents):
             np.array(list(ents), np.int64))
 
 
+def enc_ident_q2son(batch):
+    """[Q2] e r1 IDENT ? b EOS  -> hedef pozisyon 4, hedef = facts[e,r1] (KOPRU).
+
+    Ikinci hop kimlik: "e'nin r1'i, sonra kendisi". Model gercek bir birinci
+    hop yapmak ZORUNDA; cevap (kopru) girdide HIC GECMIYOR, dolayisiyla
+    kopyalama devresiyle cozulemez. enc_two ile AYNI cerceve ve AYNI hedef
+    pozisyonu -> 2-hop devresini egzersiz ettirir."""
+    X = np.zeros((len(batch), T_LEN), np.int64)
+    for i, (e, r1, b) in enumerate(batch):
+        X[i, :7] = [Q2, ENT_OFF + e, REL_OFF + r1, IDENT, QM, ENT_OFF + b, EOS]
+    return (X, np.full(len(batch), 4, np.int64),
+            np.array([ENT_OFF + b for _, _, b in batch], np.int64),
+            np.array([e for e, _, _ in batch], np.int64))
+
+
 def enc_two(batch):
     """[Q2] e r1 r2 ? ans EOS  -> hedef pozisyon 4"""
     X = np.zeros((len(batch), T_LEN), np.int64)
@@ -312,12 +369,20 @@ class Block(nn.Module):
         self.f1 = nn.Linear(d, dff, bias=False)
         self.f2 = nn.Linear(dff, d, bias=False)
         self.abl = None          # kapatilacak kafa indeksleri (tani icin)
+        self.mask_key = None     # bu KEY pozisyonuna hicbir sorgu bakamaz
 
     def forward(self, x):
         B, T, D = x.shape
         q, k, v = self.qkv(self.n1(x)).chunk(3, -1)
         sh = lambda t: t.view(B, T, self.nh, self.hd).transpose(1, 2)
-        o = F.scaled_dot_product_attention(sh(q), sh(k), sh(v), is_causal=True)
+        if self.mask_key is None:
+            o = F.scaled_dot_product_attention(sh(q), sh(k), sh(v), is_causal=True)
+        else:                                   # KISAYOL YOLU KAPALI
+            m = torch.triu(torch.ones(T, T, device=x.device, dtype=torch.bool), 1)
+            m[:, self.mask_key] = True
+            m[self.mask_key, self.mask_key] = False      # kendine bakabilir
+            o = F.scaled_dot_product_attention(sh(q), sh(k), sh(v),
+                                               attn_mask=~m[None, None])
         if self.abl is not None:
             o = o.clone(); o[:, self.abl, :, :] = 0
         x = x + self.po(o.transpose(1, 2).reshape(B, T, D))
@@ -363,11 +428,18 @@ class Net(nn.Module):
             dff = cfg["DFF"] + int(round(mp / (2.0 * d * L)))
         self.emb = nn.Embedding(VOCAB, d)
         self.pos = nn.Embedding(T_LEN, d)
-        self.blocks = nn.ModuleList([Block(d, cfg["NH"], dff) for _ in range(L)])
+        n_ayri = cfg.get("SHARE", 0) or L          # SHARE=0 -> L ayri blok
+        _ayri = [Block(d, cfg["NH"], dff) for _ in range(n_ayri)]
+        # Ayni nesne birden fazla konumda: parameters() tekrari eler, yani
+        # paylasim GERCEK (gradyanlar toplanir, parametre sayisi duser).
+        self.blocks = nn.ModuleList([_ayri[i % n_ayri] for i in range(L)])
         self.nf = RMSNorm(d)
         self.head = nn.Linear(d, VOCAB, bias=False)
         self.head.weight = self.emb.weight        # bagli
         self.mem = None if arm == "A" else Memory(d, cfg["M"], cfg["DK"], cfg["DM"])
+        if MASK_KEY != "":
+            for _b in MASK_BLK:
+                self.blocks[_b].mask_key = int(MASK_KEY)
         self.apply(self._init)
 
     @staticmethod
@@ -750,6 +822,10 @@ def dikkat(model, X, poz, bs=256, nmax=1024):
             sh = lambda t: t.view(B_, T, NH, blk.hd).transpose(1, 2)
             sc = (sh(q) @ sh(k).transpose(-1, -2)) / math.sqrt(blk.hd)
             m = torch.triu(torch.ones(T, T, device=DEV, dtype=torch.bool), 1)
+            if blk.mask_key is not None:        # egitimdeki maske burada da gecerli
+                m = m.clone()
+                m[:, blk.mask_key] = True
+                m[blk.mask_key, blk.mask_key] = False
             sc = sc.masked_fill(m, float("-inf")).softmax(-1)
             acc[j] += sc[ar, :, idx, :].float().sum(0).cpu().numpy()
             h = blk(h)
@@ -923,7 +999,14 @@ def run_arm(arm, seed, data, log):
     parts = [(X1, P1, T1), (X2, P2, T2)]
     EI = None
     if IDENT_FRAC > 0:
-        EI = enc_ident(range(CFG["N_ENT"]))          # HER varlik, ENT dahil
+        if IDENT_MODE == "q1":
+            EI = enc_ident(range(CFG["N_ENT"]))      # HER varlik, ENT dahil
+            EI_U = enc_ident(sorted(unseen_e))       # sadece ENT varliklari
+        else:                                        # q2son: kopru denetimi
+            _ik = [(int(e), int(r), int(facts[e, r]))
+                   for e in range(CFG["N_ENT"]) for r in range(CFG["N_REL"])]
+            EI = enc_ident_q2son(_ik)
+            EI_U = enc_ident_q2son([t for t in _ik if t[0] in set(unseen_e)])
         n_tab = len(X1) + len(X2)
         tekrar = max(1, int(round(IDENT_FRAC / max(1e-9, 1 - IDENT_FRAC)
                                   * n_tab / len(EI[0]))))
@@ -994,6 +1077,20 @@ def run_arm(arm, seed, data, log):
     rs = np.random.RandomState(seed + 991)
     curve, tablo, t0 = [], [], time.time()
     bas = 1
+    if INIT_FROM and not (RESUME_FROM and os.path.exists(RESUME_FROM)):
+        assert os.path.exists(INIT_FROM), f"INIT_FROM yok: {INIT_FROM}"
+        _ic = torch.load(INIT_FROM, map_location=DEV, weights_only=False)
+        for _k in ("D", "L", "NH", "DFF", "N_ENT", "N_REL", "N_PAIR", "P_TRAIN"):
+            assert _ic["cfg"].get(_k) == CFG.get(_k),                 f"INIT_FROM uyumsuz: {_k}={_ic['cfg'].get(_k)} != {CFG.get(_k)}"
+        assert _ic.get("vocab", VOCAB) == VOCAB, "INIT_FROM: VOCAB uyusmuyor"
+        assert _ic.get("arm") == arm, f"INIT_FROM baska kol: {_ic.get('arm')}"
+        _e = model.load_state_dict(_ic["state"], strict=True)
+        log(f"    SICAK BASLANGIC: {os.path.basename(INIT_FROM)}  "
+            f"(kaynak kol {_ic.get('arm')}, {_ic['cfg'].get('STEPS')} adim, "
+            f"HOP2_FRAC={_ic['cfg'].get('HOP2_FRAC')}, "
+            f"IDENT_FRAC={_ic['cfg'].get('IDENT_FRAC')}, "
+            f"commit={str(_ic['cfg'].get('_commit'))[:8]})")
+        assert float(_ic["cfg"].get("HOP2_FRAC", 0)) == HOP2_FRAC,             "INIT_FROM baska veri bolmesiyle egitilmis (HOP2_FRAC farkli)"
     if RESUME_FROM and os.path.exists(RESUME_FROM):
         _ck = torch.load(RESUME_FROM, map_location=DEV, weights_only=False)
         assert _ck["arm"] == arm and _ck["seed"] == seed,             f"surdurme paketi baska kola ait: {_ck['arm']}/{_ck['seed']}"
@@ -1042,6 +1139,8 @@ def run_arm(arm, seed, data, log):
                        lr=float(lr), secs=round(time.time() - t0, 1))
             if EI is not None:      # kimlik gorevi ogrenildi mi (saglik)
                 rec["ident"] = float(evaluate(model, *EI[:3])[0].mean())
+                # ASIL onemli olan: ENT (gorulmemis) varliklarda ogrenildi mi?
+                rec["ident_ent"] = float(evaluate(model, *EI_U[:3])[0].mean())
             # --- TANI (kesifsel): birincil karari ETKILEMEZ
             _kumeler = [("seen", ES, brS, scS, LS),
                         ("comp", EC, brC, scC, LC),
