@@ -169,8 +169,7 @@ print(f"{'adim':>7} {'comp':>7} {'p*':>3} {'sinyal':>8}   "
 # nasil degistigini gormek istiyoruz. Karar bu tablodan SONRA, ayrica.
 TAM = os.environ.get("ARAMA_TAM") == "1"
 if TAM:
-    print("  [TANI MODU] her durakta ASAMA B de kosulur, prosedur DURMAZ
-")
+    print("  [TANI MODU] her durakta ASAMA B de kosulur, prosedur DURMAZ\n")
 for adim in hedef:
     a = asamaA(adim)
     sonuc["asamaA"].append(a)
