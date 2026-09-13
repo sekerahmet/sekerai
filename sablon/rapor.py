@@ -23,7 +23,9 @@ def yas(y):
 kon = jy(P("konfig.json"), {}) or {}
 st = jy(P("durum.json"), {}) or {}
 D = kon.get("DENEY", "?")
-hedef = kon.get("HEDEF_SON", 0)
+# Coklu kollu kosuda ilerleme TOPLAM is uzerinden gosterilmeli; tek kolun
+# hedefini kullanmak ilk kol bitince "%100" yaziyordu.
+hedef = kon.get("RAPOR_TOPLAM") or kon.get("HEDEF_SON", 0)
 KOL, SEED = kon.get("KOL", "A"), kon.get("SEED", 0)
 
 # Bir kosuda BIRDEN COK kol olabilir (D3.2: A4 kontrolu + D3.2 maskeli kolu).

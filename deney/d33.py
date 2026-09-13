@@ -45,6 +45,8 @@ A5, D5, K5 = "cikti_a5", "cikti_d5", "cikti_k5"
 KON.update(
     DERINLIK=list(range(1, S.CFG["L"])),           # D3'un konfigi
     HEDEF_SON=120000,
+    KOL_SAYISI=3,          # rapor ilerlemeyi UC kol uzerinden gostersin
+    RAPOR_TOPLAM=3 * 120000,
     PENCERE=[60000, 65000, 70000, 75000, 80000],
     PHI_BEKLENEN=5.06,     # onkayit 3'te olculen deger; asagida ASSERT edilir
     OLGUNLUK=0.50,                                 # comp(A5 @ pencere)
@@ -60,11 +62,15 @@ KON.update(
            "DOLANMA": ["ent_shortcut", 0.00, +1, 1]},
 )
 if SMOKE:
-    KON.update(HEDEF_SON=600, PENCERE=[400, 600], OLGUNLUK=-1.0,
+    KON.update(RAPOR_TOPLAM=3 * 600,
+               HEDEF_SON=600, PENCERE=[400, 600], OLGUNLUK=-1.0,
                MEKANIZMA=-1.0, PHI_BEKLENEN=2.17)   # smoke'un gercek phi'si
-# Baska bir phi noktasinda kosulacaksa beklenen deger disaridan verilir.
-# Degeri loglanir ve onkayitta adi gecer; sessizce susturulamaz.
-if "PHI_BEKLENEN" in os.environ:
+# YALNIZ DUMAN TESTINDE ezilebilir. Gecen tur bunu kosulsuz eklemistim:
+# deneyin TANIMLAYICI buyuklugunu koruyan kapiyi, test kolayligi ugruna
+# her ortam degiskenine acmis oldum — ve HUCRE 3'un temizlik listesinde de
+# yoktu, yani kosular arasi SIZABILIRDI. Tam da N_PAIR=80'i basimiza acan
+# hata sinifi. Gercek kosuda kapi artik susturulamaz.
+if SMOKE and "PHI_BEKLENEN" in os.environ:
     KON["PHI_BEKLENEN"] = float(os.environ["PHI_BEKLENEN"])
 
 K = Kosu(KON)
@@ -114,13 +120,17 @@ for ad, alt, ek in (("A5", A5, None),
                     f"hedef {HEDEF_SON}")
     t = time.time()
     sn = K.egit(HEDEF_SON, ek, alt=alt)
-    K.kaydet(**{f"{ad}_bitti": True}, adim=HEDEF_SON)
+    # Ilerleme UC kolun toplami uzerinden. Onceki hali her kol bitince
+    # adim=HEDEF_SON yaziyordu -> A5 biter bitmez rapor %100 diyordu,
+    # oysa isin ucte ikisi duruyordu.
+    _bitti = sum(1 for x in ("A5", "D5", "K5") if K.st.get(f"{x}_bitti"))
+    K.kaydet(**{f"{ad}_bitti": True}, adim=(_bitti + 1) * HEDEF_SON)
     K.log(f"{ad} bitti ({sn} sn = {sn/60:.0f} dk)")
     if ek is not None:
         K.konfig_kapisi(dict(MASK_KEY=ek["MASK_KEY"],
                              MASK_BLK=list(DERINLIK)), alt=alt)
 
-K.kaydet(faz=3, faz_ad="BITTI")
+K.kaydet(faz=3, faz_ad="BITTI", adim=KON["KOL_SAYISI"] * HEDEF_SON)
 _np = len(KON["PENCERE"])          # elle "/5" yazma yok (CLAUDE.md 6)
 h = lambda a: sum(os.path.exists(
     K.y(a, f"snap_{KON['KOL']}_s{KON['SEED']}_{s:06d}.pt")) for s in KON["PENCERE"])
@@ -135,14 +145,16 @@ ARG = ["--cikti", K.y("BIRINCIL_D33.json"),
        "--kol", f"A5:{K.y(A5)}:{_p}:yok",
        "--kol", f"D5:{K.y(D5)}:{_p}:1@{_mb}",
        "--kol", f"K5:{K.y(K5)}:{_p}:2@{_mb}",
-       "--kapi", f"A5 comp >= {KON['OLGUNLUK']}",          # OLGUNLUK
-       "--kapi", f"A5 ent_kisayol >= {KON['MEKANIZMA']}",  # MEKANIZMA
-       "--kapi", "D5/A5 ent >= 3.0",                       # BIRINCIL
-       "--kapi", "D5/K5 ent >= 2.0",                       # YER mi MALIYET mi
-       "--kapi", "A5 ent < 0.18",                          # ANTITEZ: KALIRSA kazandi
-       "--kapi", "D5-A5 ent2 < 0.05",                      # OZGULLUK
-       "--kapi", "D5-A5 comp >= -0.10",                    # SAGLIK
-       "--kapi", "D5 bir_hop >= 0.98"]                     # SAGLIK
+       # Etiketli: ciktida hangi kapi oldugu ve GECMEK ne demek okunsun.
+       # ANTITEZ kapisi TERS yonlu — gecmesi "antitez KAYBETTI" demek.
+       "--kapi", f"OLGUNLUK: A5 comp >= {KON['OLGUNLUK']}",
+       "--kapi", f"MEKANIZMA-kisayol-var: A5 ent_kisayol >= {KON['MEKANIZMA']}",
+       "--kapi", "BIRINCIL-kazanc-yasiyor: D5/A5 ent >= 3.0",
+       "--kapi", "YER-mi-MALIYET-mi: D5/K5 ent >= 2.0",
+       "--kapi", "ANTITEZ-KAYBETTI: A5 ent < 0.18",
+       "--kapi", "OZGULLUK-ENT2-oynamadi: D5-A5 ent2 < 0.05",
+       "--kapi", "SAGLIK-comp: D5-A5 comp >= -0.10",
+       "--kapi", "SAGLIK-1hop: D5 bir_hop >= 0.98"]
 open(K.y("BIRINCIL_KOMUT.sh"), "w").write(
     "python sablon/pencere.py "
     + " ".join((f"'{x}'" if " " in x else x) for x in ARG) + "\n")

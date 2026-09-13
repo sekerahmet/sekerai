@@ -132,7 +132,12 @@ def main():
     if a.kapi:
         print(f"\n{'='*62}\nONCEDEN YAZILAN KAPILAR")
     for spec in a.kapi:
-        sol, alan, op, esik = spec.split()
+        # "ETIKET: X alan op esik"  — etiket istege bagli ama olmadan
+        # cikti okunmuyor: hangi kapi oldugu ve gecmenin ne demek oldugu
+        # belli olmuyordu, ustelik bir kapi TERS yonlu.
+        etiket, _, kural = spec.rpartition(":")
+        kural = (kural or spec).strip()
+        sol, alan, op, esik = kural.split()
         esik = float(esik)
         if "/" in sol:                       # ORAN kapisi
             p, q = sol.split("/")
@@ -150,8 +155,10 @@ def main():
             deger = sonuc[sol][alan]
             nasil = f"{deger:.4f}"
         gecti = OP[op](deger, esik)
-        kapilar.append(dict(kural=spec, deger=deger, gecti=bool(gecti)))
-        print(f"  {'GECTI ' if gecti else '!! KALDI'}  {sol} {alan} {op} {esik}"
+        kapilar.append(dict(etiket=etiket.strip(), kural=kural,
+                            deger=deger, gecti=bool(gecti)))
+        print(f"  {'GECTI ' if gecti else '!! KALDI'}  "
+              f"{etiket.strip() or sol:26s} {sol} {alan} {op} {esik}"
               f"   ->  {nasil} = {deger:.4f}")
     sonuc["_kapilar"] = kapilar
     if kapilar:
