@@ -43,6 +43,7 @@ KON.update(
     NA=2000,                                       # olculen sd 0.0036
     PENCERE=[60000, 65000, 70000, 75000, 80000],   # birincil olcu
     TOL_YORUNGE=0.05,                              # FAZ 1 == referans kol mu
+    REF_AD="A",                                    # rapor sutun basligi
     # rapor.py icin: {ad: [alan, tolerans, yon, faz]}
     #   yon -1 referansin ALTINA duserse, +1 USTUNE cikarsa, 0 iki yonde de
     # DOLANMA: maske acikken kisayol, MASKESIZ kontrolu gecerse model maskeyi
