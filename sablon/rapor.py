@@ -56,9 +56,14 @@ if egri:
     for r in egri[-10:]:
         b = ref.get(r["step"], {})
         f = 1 if (at is None or r["step"] <= at) else 2
-        u = [ad_ for ad_, (alan, tol, yon, fz) in U.items()
-             if b and fz == f and
-             ((r[alan] < b[alan] - tol) if yon < 0 else (abs(r[alan] - b[alan]) > tol))]
+        # yon: -1 referansin ALTINA duserse, +1 USTUNE cikarsa, 0 iki yonde de
+        u = []
+        for ad_, (alan, tol, yon, fz) in U.items():
+            if not b or fz != f or alan not in r or alan not in b:
+                continue
+            d_ = r[alan] - b[alan]
+            if (d_ < -tol) if yon < 0 else (d_ > tol) if yon > 0 else abs(d_) > tol:
+                u.append(ad_)
         print(f" {r['step']:7d} {r['one']:6.3f} {r['comp']:6.3f} {r['ent']:6.3f}"
               f" {r.get('ent2', float('nan')):6.3f} {r['ent_shortcut']:7.3f}"
               f" |{b.get('comp', float('nan')):8.3f} {b.get('ent', float('nan')):7.3f}"
