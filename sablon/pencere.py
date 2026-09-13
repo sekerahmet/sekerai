@@ -87,7 +87,10 @@ def main():
     net = S.Net("A", S.CFG).to(S.DEV)
     sonuc = {}
     for tanim in a.kol:
-        ad, klasor, adimlar, mask = tanim.split(":")
+        # Yol iki nokta icerebilir (Windows "C:\..."), o yuzden SAGDAN bol:
+        # son iki alan adimlar ve maske; kalanin ILK ikinoktasi ad/klasor ayraci.
+        govde, adimlar, mask = tanim.rsplit(":", 2)
+        ad, klasor = govde.split(":", 1)
         adimlar = [int(x) for x in adimlar.split(",")]
         poz, bloklar = maske_coz(mask)
         sd, bulunan = agirlik_ortalamasi(klasor, "A", a.tohum, adimlar)
