@@ -50,22 +50,29 @@ class Kosu:
         print(*a, flush=True)
 
     # --- egri -----------------------------------------------------------
-    def egri(self):
+    # `alt`: bir kosuda BIRDEN COK kol olabilir (D3.2: A4 kontrolu + D3.2
+    # maskeli kolu). Her kol kendi alt klasorunde; varsayilan "cikti".
+    def egri(self, alt="cikti"):
         return self._oku_json(
-            self.y("cikti", f"egri_{self.KOL}_s{self.SEED}.json"), []) or []
+            self.y(alt, f"egri_{self.KOL}_s{self.SEED}.json"), []) or []
 
-    def surdur_yolu(self):
-        return self.y("cikti", f"surdur_{self.KOL}_s{self.SEED}.pt")
+    def surdur_yolu(self, alt="cikti"):
+        return self.y(alt, f"surdur_{self.KOL}_s{self.SEED}.pt")
 
     # --- EGITIM ---------------------------------------------------------
-    def egit(self, hedef, ek=None):
-        """hedef adima kadar egit. Log adim adli, yedek adim adli."""
-        sp = self.surdur_yolu()
+    def egit(self, hedef, ek=None, alt="cikti"):
+        """hedef adima kadar egit. Log adim adli, yedek adim adli.
+
+        SIFIRDAN baslatmak icin: bos bir `alt` klasoru ver. sifirdan.py
+        RESUME_FROM bos olunca ayni tohumla ayni baslangic parametrelerini
+        kurar (52/52 tensor bit-ayni oldugu olculdu) -- ek kod gerekmez."""
+        os.makedirs(self.y(alt), exist_ok=True)
+        sp = self.surdur_yolu(alt)
         env = dict(self.kon["TEMIZ"], **self.kon["ORT"],
-                   OUT=self.y("cikti"), STEPS=str(hedef),
+                   OUT=self.y(alt), STEPS=str(hedef),
                    RESUME_FROM=(sp if os.path.exists(sp) else ""))
         env.update(ek or {})
-        ly = self.y("log", f"egitim_{self.D}_{hedef:06d}.txt")
+        ly = self.y("log", f"egitim_{self.D}_{alt}_{hedef:06d}.txt")
         t = time.time()
         r = subprocess.run([sys.executable, "-u", "sifirdan.py"],
                            cwd=self.kon["KOD"], env=env,
@@ -76,19 +83,20 @@ class Kosu:
         # GERI DONULEBILIRLIK: paket her olcumde UZERINE yaziliyor; adim adli
         # bir kopya almazsak gecmis bir adima donulemez (CLAUDE.md 7).
         if os.path.exists(sp):
-            hy = self.y("sur", f"surdur_{self.KOL}_s{self.SEED}_{hedef:06d}.pt")
+            os.makedirs(self.y("sur", alt), exist_ok=True)
+            hy = self.y("sur", alt, f"surdur_{self.KOL}_s{self.SEED}_{hedef:06d}.pt")
             if not os.path.exists(hy):
                 shutil.copy2(sp, hy + ".tmp"); os.replace(hy + ".tmp", hy)
         return round(time.time() - t)
 
     # --- KAPILAR --------------------------------------------------------
-    def yorunge_kapisi(self, adim, alan="comp", tol=None):
+    def yorunge_kapisi(self, adim, alan="comp", tol=None, alt="cikti"):
         """Maskesiz faz, referans kolun TEKRARI olmali. Degilse burada dur.
 
         Bugunku warm=STEPS//20 hatasi bu kapiyla 10.000'de yakalandi; kapi
         yoksa 80.000 adim sonra 'prosedur basarisiz' diye raporlanacakti."""
         ref = {r["step"]: r for r in (self._oku_json(self.kon["REF_EGRI"], []) or [])}
-        e = [r for r in self.egri() if r["step"] == adim]
+        e = [r for r in self.egri(alt) if r["step"] == adim]
         if not e or adim not in ref:
             return None
         f = e[0][alan] - ref[adim][alan]
@@ -101,10 +109,10 @@ class Kosu:
                     f"referans kolun tekrari DEGIL -> kiyas gecersiz, DURDURULDU.")
         return f
 
-    def konfig_kapisi(self, bekle):
+    def konfig_kapisi(self, bekle, alt="cikti"):
         """Surdurme paketi hangi konfigle yazilmis? Davranistan degil KAYITTAN."""
         import torch
-        sp = self.surdur_yolu()
+        sp = self.surdur_yolu(alt)
         assert os.path.exists(sp), "surdurme paketi yok"
         c = torch.load(sp, map_location="cpu", weights_only=False).get("cfg", {})
         # tuple/list ayrimi anlamsiz: paket tuple tutuyor, JSON list dondurur.
