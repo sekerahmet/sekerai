@@ -45,10 +45,15 @@ for satir in st.get("rapor_ek", []):          # deneye OZEL blok
 
 # ---- 2) EGITIM EGRISI + referans kol ---------------------------------------
 if egri:
-    rn = os.path.basename(kon.get("REF_EGRI", "")) or "-"
-    print(f"\n EGRI   son {min(len(egri),10)} olcum        referans: {rn}")
+    # Sutun basligi "REF" degil KOLUN ADI olmali: tabloya bakan kisi hangi
+    # sayinin kime ait oldugunu sormak zorunda kalmamali.
+    ra = kon.get("REF_AD") or os.path.basename(
+        os.path.dirname(kon.get("REF_EGRI", "") or "")) or "REF"
+    print(f"\n EGRI   son {min(len(egri),10)} olcum")
+    print(f" {'':7}{('|------- ' + D.upper() + ' — bu kosu -------|'):^39}"
+          f"{('|-- ' + ra + ' — kontrol --|'):^18}")
     print(f" {'adim':>7} {'1hop':>6} {'comp':>6} {'ent':>6} {'ent2':>6} {'kisayol':>7}"
-          f" |{'compREF':>8} {'entREF':>7} | durum")
+          f" |{'comp':>8} {'ent':>7} | durum")
     U = kon.get("UYARI", {})
     # Uyari FAZA bagli: atesleme oncesi satirlar maskesiz (FAZ 1 = referansin
     # TEKRARI olmali), sonrasi maskeli (FAZ 2 = referanstan SAPMASI beklenir).
