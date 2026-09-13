@@ -80,6 +80,23 @@ bizim eski kosular : phi 3.03   (N_PAIR 40, P_TRAIN 30)
 D3.3               : phi 5.06   (N_PAIR 56, P_TRAIN 50)
 ```
 
+**φ'nin İKİ amacı var — ikincisini unutma:**
+
+1. **Bilimsel:** antitezin ekseni. Literatürün test aralığı 3.6–12.6; bizim
+   3.03 onun altındaydı. "Ölçek tek başına `ent`'i çözer mi?" sorusu
+   ancak o aralıkta anlamlı.
+2. **Pratik: KOŞUYU HIZLANDIRIR.** Yüksek φ aynı olgunluğa çok daha az
+   adımda varıyor:
+
+```
+comp = 0.82'ye varma:   phi 3.03 -> ~120.000 adim
+                        phi 5.06 -> ~13.000 adim     (~8 kat hizli)
+```
+
+Yani A5'in `comp`'unun 20.000'de doyması **sürpriz değil, tasarım.**
+Sonraki deneylerde yineleme hızı için de yüksek φ tercih edilebilir —
+ama ölçüm penceresi de o oranda kayar (bkz. `ONKAYIT_D33` §5-EK).
+
 `P_TRAIN` ile yükseltilir çünkü atomik olgu sayısı **sabit** kalır → model
 bayt bayt aynı, bellek/olgu oranı değişmez. `N_REL` ile yükseltmek D3.2'nin
 kapasite karıştırıcısını geri getirir.

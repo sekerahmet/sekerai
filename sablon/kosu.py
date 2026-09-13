@@ -41,18 +41,29 @@ class Kosu:
             return
         if eski["commit"] == simdi:
             return
+        # CEKIRDEK AYNIYSA devam serbest: commit degisse de egitim
+        # yorungesi degismez (ornek: kol listesi degisti, sifirdan.py degil).
+        e_md5, y_md5 = eski.get("md5"), self.kon.get("md5")
+        if e_md5 and e_md5 == y_md5:
+            self.log(f"  COMMIT KAPISI   disk {eski['commit']} -> simdi "
+                     f"{simdi}   (sifirdan.py md5 AYNI {e_md5[:10]}, devam)")
+            return
         biten = [k[:-6] for k, v in self.st.items()
                  if k.endswith("_bitti") and v]
-        assert not biten and not self.st.get("adim"), (
-            f"COMMIT DEGISTI ama YARIM IS duruyor -> DURDURULDU.\n"
-            f"  diskteki is : commit {eski['commit']}  "
-            f"(biten kol: {biten or 'yok'}, adim {self.st.get('adim', 0)})\n"
-            f"  simdi kosan : commit {simdi}\n"
-            f"  Iki kol farkli kodla egitilip ayni tabloya girerdi.\n"
-            f"  Ya o commit'e don, ya {self.C} ve Drive kopyasini silip "
-            f"sifirdan basla.")
+        # ILERLEMEYI DISKTEN OKU. durum.json'daki `adim` kol BITENE kadar 0
+        # kalir; kol ortasindaki 85.000 adim "yarim is yok" gibi gorunuyordu.
+        _e = glob.glob(self.y("cikti*", f"egri_{self.KOL}_s{self.SEED}.json"))
+        yarim = [os.path.basename(os.path.dirname(p)) for p in _e
+                 if self._oku_json(p, [])]
+        assert not biten and not yarim and not self.st.get("adim"), (
+            f"EGITIM CEKIRDEGI DEGISTI ama YARIM IS duruyor -> DURDURULDU." + chr(10) +
+            f"  diskteki is : commit {eski['commit']}  md5 {str(e_md5)[:10]}" + chr(10) +
+            f"                biten {biten or 'yok'}  yarim {yarim or 'yok'}" + chr(10) +
+            f"  simdi kosan : commit {simdi}  md5 {str(y_md5)[:10]}" + chr(10) +
+            f"  Iki kol FARKLI cekirdekle egitilip ayni tabloya girerdi." + chr(10) +
+            f"  Ya o commit'e don, ya {self.C} ve Drive kopyasini silip sifirdan basla.")
         self.log(f"  COMMIT KAPISI   disk {eski['commit']} -> simdi {simdi}"
-                 f"   (yarim is yok, devam)")
+                 f"   (cekirdek farkli ama hic ilerleme yok, devam)")
 
     def bitti_mi(self, ad, alt, pencere=None):
         """durum.json 'bitti' diyorsa DISKTEN de dogrula.
