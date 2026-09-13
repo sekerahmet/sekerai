@@ -8,135 +8,88 @@ Ayrıntı belgede, kural burada. Sayı alıntılarken §0'daki tabloyu kullan.
 
 ---
 
-## 0. TEZ — bu projenin ne iddia ettiği
+## 0. TEZ VE YÖNTEM — bağlam kaybına karşı
 
-**Bu bölüm bağlam kaybına karşı yazıldı. Yeni oturum ÖNCE burayı okur.**
+**Yeni oturum ÖNCE burayı okur.** Deneye özel sayılar burada DEĞİL,
+`belge/onkayit/` ve `belge/bulgu/` altında. Burası değişmeyen kısım.
 
 ### Problem
 
 Sentetik bilgi grafiği, iki adımlı soru: `[Q2] e r1 r2 ?` → `facts[facts[e,r1],r2]`.
 
 ```
-Turkiye --basketi--> ANKARA --nufusu--> 5.7M
-            (kopru: modelin ANKARA'yi YAZMADAN kullanmasi gerekir)
+Turkiye --baskenti--> ANKARA --nufusu--> 5.7M
+            (KOPRU: modelin ANKARA'yi YAZMADAN kullanmasi gerekir)
 KISAYOL : r2'yi dogrudan e'ye uygulamak -> "Turkiye'nin nufusu"
-          Model bunu ogrenip kopruyu ATLIYOR. Tespit edilen mekanizma bu.
+          Model bunu ogrenip kopruyu ATLIYOR. Olculen mekanizma bu.
+
+dizilim: poz 0=Q2, 1=VARLIK, 2=r1, 3=r2, 4=cevap
+MASK_KEY=p : egitim sirasinda butun sorgularin poz p'ye bakmasini engelle
 ```
 
-Bölmeler:
-
-| bölme | ne | 
+| bölme | ne |
 |---|---|
 | `comp` | görülmemiş r1–r2 **çifti**, varlık görülmüş |
 | `ent`  | varlık **hiç zincir başı olmamış** ← **asıl problem** |
 | `ent2` | ikinci hop hiç kompozisyonel görülmemiş (özgüllük kontrolü) |
 
-Dizilim: poz 0=Q2, **1=varlık**, **2=r1**, 3=r2, 4=cevap.
-`MASK_KEY=p` = eğitim sırasında bütün sorguların poz `p`'ye bakmasını engelle.
-
 ### Tez
 
 > **Maskeleme modelin daha iyi öğrenmesini sağlar.**
 
-Kısayol yolunu eğitim sırasında kapatırsan, model köprüyü kullanmayı
-öğrenmek zorunda kalır ve `ent` yükselir.
+Kısayol yolunu eğitim sırasında kapatırsan model köprüyü kullanmak zorunda
+kalır ve `ent` yükselir.
+
+### Antitez
+
+> **Ölçek (veri/parametre) tek başına `ent`'i çözer; maskeleme gereksizdir.**
+
+Antitez zayıf olamaz (tohum değiştirmek gibi). Ölçek olmak zorunda.
 
 ### Zincir — her adım ölçüldü
 
 ```
-D3     Yeri TERSINE MUHENDISLIKLE bulduk (poz 1, bloklar 1..7).
-       A 0.0603 -> D3 0.3607   = 5.98x      DOGRULANDI
-
-D3.1   "Yeri tersine muhendislik OLMADAN da bulabilir miyiz?"
-       Asama A: her 5.000 adimda, girdinin 3 parcasini ayri ayri BOZ;
-                ENT'te COMP'tan fazla degismezlik veren parca hangisi?
-                sinyal >= 0.03 olan ILK adimda atesle.
-       Asama B: 3 parca x L blok-kuyrugu tara. Skor = r1 bagimsizligini
-                dusur, COMP'a dokunma.  Insan mudahalesi YOK.
-       Sonuc: adim 40.000'de PARCA 1, skor +0.0565 -> D3'un yeriyle AYNI.
-       EVET, bulabiliyoruz.                  DOGRULANDI
-
-CIKARIM (tezin 4. adimi, dogrulandi):
-       Yeri bildikten sonra, orada maskeleyip AYNI TOHUM ve AYNI VERIYLE
-       BASLANGICTAN kosarsan D3.1, D3 gibi davranir.
-
-ANTITEZ (siradaki soru): peki OLCEK degisince?
-       Maskeleme hala gerekli mi, yoksa yeterince veri/parametre tek
-       basina `ent`'i cozer mi?
-
-D3.2   Veri x4 denendi -> YANLIS EKSEN. Onceden yazilmis olcutle
-       "olcek disi" hukmu verildi. Literature bakilmamisti.
-
-D3.3   Literatur sonrasi dogru eksen: phi.
+D3     Yeri TERSINE MUHENDISLIKLE bulduk.  A 0.0603 -> D3 0.3607  DOGRULANDI
+D3.1   Yeri ARAYARAK da bulabiliyor muyuz? EVET, ayni yeri buldu.  DOGRULANDI
+CIKARIM  Yeri bilince, orada maskeleyip AYNI TOHUM + AYNI VERIYLE
+         BASLANGICTAN kosarsan D3.1, D3 gibi davranir.             DOGRULANDI
+ANTITEZ  Peki OLCEK degisince?
+D3.2   Veri x4 -> YANLIS EKSEN, 'olcek disi' hukmu. Literature bakilmamisti.
+D3.3   Literatur sonrasi dogru eksen: phi.   -> belge/onkayit/ONKAYIT_D33_PHI_EKSENI.md
 ```
 
-### φ (phi) — D3.3'ün ekseni
+### Yöntem — yeri nasıl buluyoruz (D3.1'de doğrulandı)
 
 ```
-phi = |egitimdeki 2-hop| / |atomik olgu|      (Wang ve ark.)
-      genellesmenin HIZINI belirleyen buyukluk; onlarin araligi 3.6-12.6
+ASAMA A (ucuz, her olcumde)
+   Girdinin 3 parcasini AYRI AYRI boz (1=varlik, 2=r1, 3=r2).
+   sinyal(p) = degismezlik(ENT,p) - degismezlik(COMP,p)
+   ENT'te COMP'tan FAZLA degismezlik veren parca = kacis yolu.
+   sinyal >= ESIK olan ILK adimda atesle.
 
-bizim eski kosular : phi 3.03   (N_PAIR 40, P_TRAIN 30)
-D3.3               : phi 5.06   (N_PAIR 56, P_TRAIN 50)
+ASAMA B (pahali, bir kez)
+   3 parca x L blok-kuyrugu tara.
+   skor = (r1 bagimsizligini DUSUR) - (COMP'a ZARAR)
+   Kazanan = argmax. INSAN MUDAHALESI YOK.
 ```
 
-**φ'nin İKİ amacı var — ikincisini unutma:**
+**İki aşamayı AYRI doğrula.** Tetiğin çalışması seçimin de çalıştığı anlamına
+gelmez: φ=5.06'da Aşama A ilk durakta ateşledi ama Aşama B'nin kazananı orada
+**negatif** skor verdi. Aşama B'nin skoru pozitif değilse seçim yoktur.
 
-1. **Bilimsel:** antitezin ekseni. Literatürün test aralığı 3.6–12.6; bizim
-   3.03 onun altındaydı. "Ölçek tek başına `ent`'i çözer mi?" sorusu
-   ancak o aralıkta anlamlı.
-2. **Pratik: KOŞUYU HIZLANDIRIR.** Yüksek φ aynı olgunluğa çok daha az
-   adımda varıyor:
+**Bilinen gedik:** Aşama B bir blok kuyruğu (`b0`) da döndürüyor ama
+kullanılmıyor — koşular sabit `1..L-1` ile yapılıyor. Yani **pozisyon**
+aramadan geliyor, **derinlik** gelmiyor.
 
-```
-comp = 0.82'ye varma:   phi 3.03 -> ~120.000 adim
-                        phi 5.06 -> ~13.000 adim     (~8 kat hizli)
-```
+### Ölçme
 
-Yani A5'in `comp`'unun 20.000'de doyması **sürpriz değil, tasarım.**
-Sonraki deneylerde yineleme hızı için de yüksek φ tercih edilebilir —
-ama ölçüm penceresi de o oranda kayar (bkz. `ONKAYIT_D33` §5-EK).
+Birincil okuma: **5 anlık görüntünün AĞIRLIK ORTALAMASI**, sonra ölç.
+Eğri ortalaması DEĞİL — ikisi arasında ~2x fark var ve karıştırmak bulgunun
+kendisini değiştirir. Kol **kendi maskesiyle** ölçülür. Tek yol:
+`sablon/pencere.py`. Pencere bağımlılığı: `sablon/kayan_pencere.py`.
 
-`P_TRAIN` ile yükseltilir çünkü atomik olgu sayısı **sabit** kalır → model
-bayt bayt aynı, bellek/olgu oranı değişmez. `N_REL` ile yükseltmek D3.2'nin
-kapasite karıştırıcısını geri getirir.
-
-### D3.3'ün kolları — ADLANDIRMA
-
-```
-DENEY = D3.3   (phi 5.06).  Kollarinin sonundaki 5 = phi~5 KUSAGI.
-                            (D3.2'nin kollari A4'tu.)
-
-A5   maskesiz                      ANTITEZIN kolu: olcek tek basina yeter mi?
-D5   MASK_KEY=1  bloklar 1..7      TEZIN kolu  =  'D3.3' denince kastedilen
-K5   MASK_KEY=2  bloklar 1..7      KONTROL: ayni maliyet, YANLIS yer
-```
-
-**A5 neden var:** eski `A` kolu φ=3.03'te. Aynı taban olarak kullanılamaz,
-o yüzden maskesiz kol bu φ'de yeniden koşuluyor. `D5`, `D3`'ün yüksek-φ
-karşılığıdır.
-
-Birincil ölçü: **60–80 bin, 5 nokta AĞIRLIK ORTALAMASI, `ent`**, her kol
-kendi maskesiyle, `sablon/pencere.py` ile. (Eğri ortalaması DEĞİL — ikisi
-arasında ~2x fark var ve karıştırmak bulgunun kendisini değiştirir.)
-
-Kapı: `ent(D5)/ent(A5) >= 3.0` (düşük-φ'deki 5.98x'in yarısı).
-`A5 ent < 0.18` geçerse **antitez kaybetti** (ters yönlü kapı).
-
-### Referans sayılar — HEPSİ `sablon/pencere.py` ile, φ=3.03
-
-| kol | maske | `ent` |
-|---|---|---|
-| A  | yok   | 0.0603 |
-| D  | 1@6-7 | 0.3010 |
-| K  | 2@6-7 | 0.0370 |
-| E1 | 1@6-7 | 0.2897 (tohum 1) |
-| E2 | yok   | 0.0633 (tohum 1) |
-| D3 | 1@1-7 | 0.3607 |
-
-**Belgelerdeki eski sayılar (A 0.062, D 0.322, D3 0.365) ESKİ ölçüm
-hattından.** Ayrıntı: `belge/bulgu/BULGU_OLCUM_HATTI.md`. Sayı alıntılarken
-bu tabloyu kullan, belgelerden kopyalama.
+**Sayı alıntılarken belgelerden kopyalama** — belgelerde iki farklı ölçüm
+hattından sayılar var. Tek geçerli tablo: `belge/bulgu/BULGU_OLCUM_HATTI.md`.
 
 ---
 ## 1. Sıra: ölçüm → veri → tez → antitez → sentez → sentezi ölç
