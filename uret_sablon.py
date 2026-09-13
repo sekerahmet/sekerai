@@ -318,13 +318,31 @@ print(f"   import shutil, json")
 print(f"   # <kol> = yukarida gorunen klasor (cikti / cikti_a4 / cikti_d32)")
 print(f"   shutil.copy2('{CALIS}/sur/<kol>/surdur_{KOL}_s{SEED}_040000.pt',")
 print(f"                '{CALIS}/<kol>/surdur_{KOL}_s{SEED}.pt')")
-print(f"   d = json.load(open('{CALIS}/durum.json')); d['adim'] = 40000")
+print(f"   d = json.load(open('{CALIS}/durum.json'))")
+print(f"   d['adim'] = 40000                    # sadece ilerleme cubugu")
+print(f"   d.pop('<KOL>_bitti', None)           # <-- ZORUNLU. Surucu kolu")
+print(f"                                        #     ATLARKEN bu bayraga")
+print(f"                                        #     bakar, 'adim'a DEGIL.")
 print(f"   json.dump(d, open('{CALIS}/durum.json','w'))")
 print("   ...sonra HUCRE 4'u tekrar kos.")
+print("\n   BITMIS bir kolu geri almak istiyorsan bayragi silmek SART;")
+print("   yoksa paketi geri koysan bile kol atlanir ve hicbir sey degismez.")
 ''')
 
 H = [k.replace("@AD@", AD).replace("@ONKAYIT@", _d["ONKAYIT"])
       .replace("@ORT@", _ort).replace("@IMZA@", _imza) for k in H]
+
+# Defter SAF ASCII olsun: Colab'a MCP ile yazarken ve terminalde okurken
+# tek bir kodlama surprizi bile hucreyi sessizce bozabilir.
+_ASCII = {"—": "--", "§": "bolum ", "ı": "i",
+          "ş": "s", "ç": "c", "ğ": "g", "ü": "u",
+          "ö": "o", "İ": "I", "Ş": "S", "Ç": "C",
+          "Ğ": "G", "Ü": "U", "Ö": "O", "’": "'",
+          "“": '"', "”": '"', "→": "->"}
+for _a, _b in _ASCII.items():
+    H = [k.replace(_a, _b) for k in H]
+_kalan = sorted({c for k in H for c in k if ord(c) > 127})
+assert not _kalan, f"defterde ASCII disi karakter kaldi: {_kalan}"
 
 nb = dict(nbformat=4, nbformat_minor=0,
           metadata=dict(colab=dict(provenance=[]),
@@ -333,6 +351,15 @@ nb = dict(nbformat=4, nbformat_minor=0,
           cells=[dict(cell_type="code", metadata={},
                       source=(k + "\n").splitlines(True),
                       execution_count=None, outputs=[]) for k in H])
+import ast
+for _i, _k in enumerate(H):
+    try:
+        ast.parse(_k)
+    except SyntaxError as _e:
+        _c = chr(10).join(_k.split(chr(10))[max(0, _e.lineno - 3):_e.lineno + 1])
+        raise SystemExit(f'HUCRE {_i} GECERSIZ PYTHON, satir {_e.lineno}: '
+                         f'{_e.msg}' + chr(10) + _c)
+
 io.open(sys.argv[1], "w", encoding="utf-8", newline="\n").write(
     json.dumps(nb, indent=1, ensure_ascii=False))
 print(f"{sys.argv[1]}   {len(H)} hucre   "
