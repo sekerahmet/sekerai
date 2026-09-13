@@ -18,22 +18,30 @@ import torch
 C = sys.argv[1]
 kon = json.load(open(os.path.join(C, "konfig.json")))
 kol, seed = kon.get("KOL", "A"), kon.get("SEED", 0)
-sp = os.path.join(C, "cikti", f"surdur_{kol}_s{seed}.pt")
-if not os.path.exists(sp):
+
+# Bir kosuda BIRDEN COK kol olabilir (D3.2: cikti_a4 + cikti_d32). Klasor
+# adini VARSAYMA, diskten bul — "cikti" sabitini yazmak d32'de sessizce
+# hicbir sey yedeklememeye yol aciyordu.
+altlar = sorted(os.path.basename(p) for p in glob.glob(os.path.join(C, "cikti*"))
+                if os.path.isdir(p))
+if not altlar:
     sys.exit(0)
 
-try:
-    adim = int(torch.load(sp, map_location="cpu", weights_only=False)["step"])
-except Exception as e:                       # yarida yazilmis olabilir: sonraki tur
-    print(f"paket okunamadi ({e}), sonraki turda tekrar denenecek")
-    sys.exit(0)
-
-os.makedirs(os.path.join(C, "sur"), exist_ok=True)
-hy = os.path.join(C, "sur", f"surdur_{kol}_s{seed}_{adim:06d}.pt")
-if os.path.exists(hy):
-    sys.exit(0)
-shutil.copy2(sp, hy + ".tmp")                # .tmp + mv: yarim dosya kalmasin
-os.replace(hy + ".tmp", hy)
-n = len(glob.glob(os.path.join(C, "sur", "*.pt")))
-print(f"arsivlendi: adim {adim}  ({n} geri donus noktasi, "
-      f"{os.path.getsize(hy)/1e6:.0f} MB)")
+for alt in altlar:
+    sp = os.path.join(C, alt, f"surdur_{kol}_s{seed}.pt")
+    if not os.path.exists(sp):
+        continue
+    try:
+        adim = int(torch.load(sp, map_location="cpu", weights_only=False)["step"])
+    except Exception as e:                   # yarida yazilmis: sonraki turda
+        print(f"{alt}: paket okunamadi ({e}), sonraki turda tekrar")
+        continue
+    os.makedirs(os.path.join(C, "sur", alt), exist_ok=True)
+    hy = os.path.join(C, "sur", alt, f"surdur_{kol}_s{seed}_{adim:06d}.pt")
+    if os.path.exists(hy):
+        continue
+    shutil.copy2(sp, hy + ".tmp")            # .tmp + mv: yarim dosya kalmasin
+    os.replace(hy + ".tmp", hy)
+    n = len(glob.glob(os.path.join(C, "sur", alt, "*.pt")))
+    print(f"{alt}: arsivlendi adim {adim}  ({n} geri donus noktasi, "
+          f"{os.path.getsize(hy)/1e6:.0f} MB)")

@@ -24,8 +24,23 @@ kon = jy(P("konfig.json"), {}) or {}
 st = jy(P("durum.json"), {}) or {}
 D = kon.get("DENEY", "?")
 hedef = kon.get("HEDEF_SON", 0)
-ref = {r["step"]: r for r in (jy(kon.get("REF_EGRI", ""), []) or [])}
-egri = jy(P("cikti", f"egri_{kon.get('KOL','A')}_s{kon.get('SEED',0)}.json"), []) or []
+KOL, SEED = kon.get("KOL", "A"), kon.get("SEED", 0)
+
+# Bir kosuda BIRDEN COK kol olabilir (D3.2: A4 kontrolu + D3.2 maskeli kolu).
+# Klasorleri diskten bul; "cikti" sabitini yazmak d32'de raporu BOS birakiyordu.
+altlar = sorted(os.path.basename(p) for p in glob.glob(P("cikti*"))
+                if os.path.isdir(p)) or ["cikti"]
+egriler = {a: (jy(P(a, f"egri_{KOL}_s{SEED}.json"), []) or []) for a in altlar}
+
+# Kiyas sutunu: ayni kosudaki KONTROL kolu varsa o, yoksa disaridan REF_EGRI.
+kalt = kon.get("KONTROL_ALT")
+if kalt and egriler.get(kalt):
+    ref = {r["step"]: r for r in egriler[kalt]}
+    ref_ad = kon.get("REF_AD") or kalt
+else:
+    ref = {r["step"]: r for r in (jy(kon.get("REF_EGRI", ""), []) or [])}
+    ref_ad = kon.get("REF_AD") or os.path.basename(
+        os.path.dirname(kon.get("REF_EGRI", "") or "")) or "REF"
 
 CIZ = "=" * 76
 print(CIZ)
@@ -43,23 +58,23 @@ if hedef:
 for satir in st.get("rapor_ek", []):          # deneye OZEL blok
     print(" " + satir)
 
-# ---- 2) EGITIM EGRISI + referans kol ---------------------------------------
-if egri:
-    # Sutun basligi "REF" degil KOLUN ADI olmali: tabloya bakan kisi hangi
-    # sayinin kime ait oldugunu sormak zorunda kalmamali.
-    ra = kon.get("REF_AD") or os.path.basename(
-        os.path.dirname(kon.get("REF_EGRI", "") or "")) or "REF"
-    print(f"\n EGRI   son {min(len(egri),10)} olcum")
-    print(f" {'':7}{('|------- ' + D.upper() + ' — bu kosu -------|'):^39}"
-          f"{('|-- ' + ra + ' — kontrol --|'):^18}")
+# ---- 2) EGITIM EGRILERI (her kol icin ayri tablo) ---------------------------
+U = kon.get("UYARI", {})
+# Uyari FAZA bagli: atesleme oncesi satirlar maskesiz, sonrasi maskeli.
+at = (st.get("asamaB") or {}).get("adim")
+for alt in altlar:
+    egri = egriler.get(alt) or []
+    if not egri:
+        continue
+    bu = alt if alt != "cikti" else D.upper()
+    kiyas = (alt != kalt) and bool(ref)      # kontrol kolunun kendine kiyasi olmaz
+    print(f"\n EGRI [{bu}]   son {min(len(egri),10)} olcum")
+    print(f" {'':7}{('|------- ' + bu + ' — bu kol -------|'):^39}"
+          + (f"{('|-- ' + ref_ad + ' — kontrol --|'):^18}" if kiyas else ""))
     print(f" {'adim':>7} {'1hop':>6} {'comp':>6} {'ent':>6} {'ent2':>6} {'kisayol':>7}"
-          f" |{'comp':>8} {'ent':>7} | durum")
-    U = kon.get("UYARI", {})
-    # Uyari FAZA bagli: atesleme oncesi satirlar maskesiz (FAZ 1 = referansin
-    # TEKRARI olmali), sonrasi maskeli (FAZ 2 = referanstan SAPMASI beklenir).
-    at = (st.get("asamaB") or {}).get("adim")
+          + (f" |{'comp':>8} {'ent':>7} | durum" if kiyas else ""))
     for r in egri[-10:]:
-        b = ref.get(r["step"], {})
+        b = ref.get(r["step"], {}) if kiyas else {}
         f = 1 if (at is None or r["step"] <= at) else 2
         # yon: -1 referansin ALTINA duserse, +1 USTUNE cikarsa, 0 iki yonde de
         u = []
@@ -71,25 +86,28 @@ if egri:
                 u.append(ad_)
         print(f" {r['step']:7d} {r['one']:6.3f} {r['comp']:6.3f} {r['ent']:6.3f}"
               f" {r.get('ent2', float('nan')):6.3f} {r['ent_shortcut']:7.3f}"
-              f" |{b.get('comp', float('nan')):8.3f} {b.get('ent', float('nan')):7.3f}"
-              f" | F{f} {','.join(u) if u else 'tamam'}"
+              + (f" |{b.get('comp', float('nan')):8.3f} "
+                 f"{b.get('ent', float('nan')):7.3f} | F{f} "
+                 f"{','.join(u) if u else 'tamam'}" if kiyas else "")
               + ("   <<< MASKE ACILDI" if at == r["step"] else ""))
 
 # ---- 3) GERI DONULEBILIRLIK ------------------------------------------------
-sur = sorted(glob.glob(P("sur", "*.pt")))
-snap = sorted(glob.glob(P("cikti", "snap_*.pt")))
 ham = sorted(glob.glob(P("ham", "*")))
 print(f"\n KAYIT   (CLAUDE.md 9 — 'yapacagin analiz henuz icat edilmedi')")
-print(f"   surdurme, ADIM ADLI : {len(sur):3d} paket"
-      + (f"   {', '.join(os.path.basename(p).split('_')[-1][:-3] for p in sur[-5:])}"
-         if sur else "   !! YOK — gecmis bir adima DONULEMEZ"))
-print(f"   anlik goruntu       : {len(snap):3d} adet")
-print(f"   ham analiz ciktisi  : {len(ham):3d} dosya")
 pen = kon.get("PENCERE", [])
-if pen:
-    v = [a for a in pen if os.path.exists(P("cikti", f"snap_{kon.get('KOL','A')}"
-                                            f"_s{kon.get('SEED',0)}_{a:06d}.pt"))]
-    print(f"   birincil pencere {pen[0]}-{pen[-1]} : {len(v)}/{len(pen)} nokta hazir")
+for alt in altlar:
+    # tek kollu eski kosular sur/ altina duz yaziyordu, coklu kol sur/<alt>/
+    sur = sorted(glob.glob(P("sur", alt, "*.pt"))
+                 + (glob.glob(P("sur", "*.pt")) if alt == "cikti" else []))
+    snap = sorted(glob.glob(P(alt, "snap_*.pt")))
+    bu = alt if alt != "cikti" else D.upper()
+    print(f"   [{bu}] surdurme ADIM ADLI: {len(sur):3d} paket"
+          + (f"   son {', '.join(os.path.basename(p).split('_')[-1][:-3] for p in sur[-3:])}"
+             if sur else "   !! YOK — gecmis bir adima DONULEMEZ")
+          + f"   |  anlik goruntu {len(snap):3d}"
+          + (f"   |  pencere {sum(os.path.exists(P(alt, f'snap_{KOL}_s{SEED}_{a:06d}.pt')) for a in pen)}/{len(pen)}"
+             if pen else ""))
+print(f"   ham analiz ciktisi  : {len(ham):3d} dosya")
 
 # ---- 4) CANLILIK -----------------------------------------------------------
 _dp = f"[{D[0]}]{D[1:]}_surucu|[s]ifirdan.py"

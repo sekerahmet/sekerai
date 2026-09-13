@@ -17,7 +17,9 @@ class Kosu:
         self.kon = kon
         self.C = kon["CALIS"]
         self.KOL, self.SEED, self.D = kon["KOL"], kon["SEED"], kon["DENEY"]
-        for a in ("cikti", "sur", "log", "ham"):
+        # "cikti" BURADA yaratilmaz: kol klasorunu egit() kendi acar. Bos bir
+        # cikti/ yaratmak coklu-kollu kosuda rapora hayalet satir dusuruyordu.
+        for a in ("sur", "log", "ham"):
             os.makedirs(self.y(a), exist_ok=True)
         kon["commit"] = kon.get("commit", "?")
         self._yaz_json(self.y("konfig.json"), kon)

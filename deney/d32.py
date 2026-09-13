@@ -50,6 +50,7 @@ KON.update(
     OLGUNLUK=0.30,                                 # comp(A4 @ 60-80k) esigi
     TOL_YORUNGE=9.9,        # A4 kendisi referans; yorunge kapisi ANLAMSIZ
     REF_AD="A4",
+    KONTROL_ALT=A4,        # rapor kiyas sutunu: ayni kosudaki kontrol kolu
     UYARI={"SAGLIK":   ["comp", 0.10, -1, 2],
            "YOL":      ["ent", 0.00, -1, 2],
            "DOLANMA":  ["ent_shortcut", 0.00, +1, 2]},
