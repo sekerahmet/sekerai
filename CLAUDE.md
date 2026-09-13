@@ -84,13 +84,20 @@ D3.3               : phi 5.06   (N_PAIR 56, P_TRAIN 50)
 bayt bayt aynı, bellek/olgu oranı değişmez. `N_REL` ile yükseltmek D3.2'nin
 kapasite karıştırıcısını geri getirir.
 
-### D3.3'ün kolları
+### D3.3'ün kolları — ADLANDIRMA
 
 ```
+DENEY = D3.3   (phi 5.06).  Kollarinin sonundaki 5 = phi~5 KUSAGI.
+                            (D3.2'nin kollari A4'tu.)
+
 A5   maskesiz                      ANTITEZIN kolu: olcek tek basina yeter mi?
-D5   MASK_KEY=1  bloklar 1..7      TEZIN kolu
+D5   MASK_KEY=1  bloklar 1..7      TEZIN kolu  =  'D3.3' denince kastedilen
 K5   MASK_KEY=2  bloklar 1..7      KONTROL: ayni maliyet, YANLIS yer
 ```
+
+**A5 neden var:** eski `A` kolu φ=3.03'te. Aynı taban olarak kullanılamaz,
+o yüzden maskesiz kol bu φ'de yeniden koşuluyor. `D5`, `D3`'ün yüksek-φ
+karşılığıdır.
 
 Birincil ölçü: **60–80 bin, 5 nokta AĞIRLIK ORTALAMASI, `ent`**, her kol
 kendi maskesiyle, `sablon/pencere.py` ile. (Eğri ortalaması DEĞİL — ikisi
