@@ -138,6 +138,22 @@ class Kosu:
                    OUT=self.y(alt), STEPS=str(hedef),
                    RESUME_FROM=(sp if os.path.exists(sp) else ""))
         env.update(ek or {})
+        # KONFIG KAPISI BURADA, EGITIMDEN ONCE (14 Eylul).
+        #
+        # Eskiden suruculer kapiyi egit()'ten SONRA cagiriyordu
+        # (g.py:275 egit -> :276 "bitti" -> :278 kapi; d33.py:144 -> :152).
+        # Ama sifirdan.py:1401-1402 surdurme paketini `cfg=CFG` ile, yani AZ
+        # ONCE KULLANILAN konfigle yaziyor. Yani kapi kendi uretiminin
+        # ciktisini denetliyordu: yanlis konfigle surdurme ZATEN OLUP BITMIS
+        # oluyor, kol "bitti" isaretleniyor, sonra kapi tautolojik olarak
+        # geciyordu. CLAUDE.md 7 bu kapi icin "yanlis MASK_KEY ile SESSIZCE
+        # surdurmeyi ONLER" diyor -- o haliyle ONLEYEMIYORDU.
+        #
+        # Kapi yalniz SURDURMEDE anlamli: sifirdan baslarken paket yok.
+        # Ve `ek`/`alt` artik surucude TEKRAR yazilmiyor -> ikisinin
+        # ayrisma ihtimali YAPISAL olarak kalkti (AUDIT'in onerisi).
+        if env["RESUME_FROM"]:
+            self.konfig_kapisi_tam(ek=ek, alt=alt)
         ly = self.y("log", f"egitim_{self.D}_{alt}_{hedef:06d}.txt")
         t = time.time()
         r = subprocess.run([sys.executable, "-u", "sifirdan.py"],
