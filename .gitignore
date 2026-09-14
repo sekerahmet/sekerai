@@ -14,6 +14,10 @@ belge/
 # Depo PUBLIC ve bunlar 17 MB'lik ikili dosyalar -- ASLA girmemeli.
 veri/
 
+# arsiv: 15 Eylul oncesi her sey. YERELDE durur, depoda DURMAZ.
+# (Gecmisi f31df5f commit'inde duruyor; diskten silinmedi.)
+arsiv/
+
 # kosu ciktilari: ikili, buyuk, yeniden uretilebilir. Depo PUBLIC.
 *.pt
 *.npz
