@@ -67,6 +67,12 @@ def main():
     br2 = np.array([S.ENT_OFF + b for _, _, _, b, _ in L2], np.int64) if L2 else None
     sc2 = (np.array([S.ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in L2], np.int64)
            if L2 else None)
+    # ENT-YOK (gomulu kontrol). Salt 5 = egitim dongusuyle AYNI ornekleme.
+    LY = sub(S.ENT_YOK, 5) if getattr(S, "ENT_YOK", None) else []
+    EY = S.enc_two(LY) if LY else None
+    brY = np.array([S.ENT_OFF + b for _, _, _, b, _ in LY], np.int64) if LY else None
+    scY = (np.array([S.ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in LY], np.int64)
+           if LY else None)
 
     kollar = []
     for t in a.kol:
@@ -110,11 +116,13 @@ def main():
             zC, _ = S.zengin(net, EC, brC, scC)
             z2 = (S.zengin(net, E2, br2, sc2)[0] if E2 is not None
                   else {"acc": None})
+            zY = (S.zengin(net, EY, brY, scY)[0] if EY is not None
+                  else {"acc": None})
             for blk in net.blocks:
                 blk.mask_key = None
             sonuc[ad][f"{w[0]}-{w[-1]}"] = dict(
                 adimlar=w, ent=zE["acc"], ent_kisayol=zE["shortcut"],
-                comp=zC["acc"], ent2=z2["acc"])
+                comp=zC["acc"], ent2=z2["acc"], ent_yok=zY["acc"])
         print(f"  {ad} bitti ({len(pencereler)} pencere)")
 
     # ------------------------------------------------------------- TABLO
@@ -140,6 +148,26 @@ def main():
         for ad, _, _, _ in kollar:
             sat += f"{sonuc[ad][k]['comp']:>12.3f}{sonuc[ad][k]['ent_kisayol']:>11.3f}"
         print(sat)
+
+    # GOMULU KONTROL, pencere pencere. Onkayit 5.3'un hukmu tek pencereye
+    # baglanmamali: ENT-AYIRT'ta oran yuksek ama ENT-YOK'ta da yuksekse
+    # kazanc kisayola OZGU degildir.
+    if all(sonuc[ad][anah[0]].get("ent_yok") is not None
+           for ad, _, _, _ in kollar):
+        print(chr(10) + "=" * 78)
+        print("ENT-YOK (gomulu kontrol: kisayol IMKANSIZ)")
+        print(f"  {'pencere':>15s}"
+              + "".join(f"{ad:>10s}" for ad, _, _, _ in kollar)
+              + "".join(f"{o+' YOK':>12s}" for o in a.oran))
+        for k in anah:
+            sat = f"  {k:>15s}  "
+            for ad, _, _, _ in kollar:
+                sat += f"{sonuc[ad][k]['ent_yok']:>10.4f}"
+            for o in a.oran:
+                p_, q_ = o.split("/")
+                v = sonuc[q_][k]["ent_yok"]
+                sat += f"{(sonuc[p_][k]['ent_yok']/v if v else float('inf')):>12.2f}"
+            print(sat)
 
     # ONKAYIT 5-EK: oran pencerelerin bir kisminda esigin ustunde, bir
     # kisminda altindaysa hukum "pencereye bagli" -> BIRINCIL ZAYIFLAR.

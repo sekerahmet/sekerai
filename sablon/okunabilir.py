@@ -37,7 +37,22 @@ _KOK = ["Turkiye", "Ankara", "Istanbul", "Fransa", "Paris", "Japonya", "Tokyo",
 
 
 def adlar(n_ent, n_rel):
-    """token kimligi -> ad.  Ilk 50 varlik tanidik isim, gerisi turetilmis."""
+    """token kimligi -> ad.
+
+    VERI bayragi ACIKSA adlar VERI SETINDEN gelir; asagidaki sabit tablo
+    eski RASTGELE graf icindir (8 iliski, 1000 varlik) ve yeni veride
+    `ILISKI[r % 8]` yuzunden 10. iliskiyi "baskent_10" diye gosterirdi.
+    Sayilar dogru kalirdi (kendi kendini egriye karsi dogruluyor) ama
+    ETIKET yanlis olurdu -- "model kisayola sapmis" okumasi yanlis
+    iliskiye atfedilirdi."""
+    if getattr(S, "VERI", ""):
+        import importlib
+        VM = importlib.import_module("veri_" + S.VERI)
+        G = VM.kur()
+        E = [a for t in VM.TIPLER for a in G["ad"][t]]
+        R = list(VM.ILISKI)
+        assert len(E) == n_ent and len(R) == n_rel,             f"ad tablosu uyusmuyor: {len(E)}/{n_ent}  {len(R)}/{n_rel}"
+        return E, R
     ent = list(_KOK[:min(n_ent, len(_KOK))])
     i = 0
     while len(ent) < n_ent:

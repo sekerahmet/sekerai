@@ -232,13 +232,34 @@ _mb = f"{DERINLIK[0]}-{DERINLIK[-1]}"
 ARG = ["--cikti", K.y("BIRINCIL_G.json"),
        "--kol", f"G:{K.y(G_)}:{_p}:yok",
        "--kol", f"GM:{K.y(GM_)}:{_p}:{MK}@{_mb}",
+       # KAPI DILBILGISI: "<etiket>: <sol> <alan> <op> <sayi>" -- TAM 4 sozcuk.
+       # Etikette BOSLUK, kuralda parantezli not OLAMAZ (split 4'u asar).
+       # Alan adi pencere.py'nin sonuc sozlugunden gelir: EGRIDE `ent_shortcut`,
+       # pencere.py'de `ent_kisayol` -- ayni buyuklugun IKI ADI var ve yanlisi
+       # sessizce "ATLANDI" diye gecerdi.
        "--kapi", f"OLGUNLUK: G comp >= {KON['OLGUNLUK']}",
-       "--kapi", f"ON KAPI: G ent_shortcut >= {KON['MEKANIZMA']}",
-       "--kapi", "BIRINCIL: GM/G ent >= 2.0  (onkayit 5.1)",
-       "--kapi", "MEKANIZMA: GM ent_shortcut < G ent_shortcut  (onkayit 5.2)",
-       "--kapi", "GOMULU KONTROL: fayda(ENT-AYIRT) > fayda(ENT-YOK)  (5.3)",
-       "--kapi", "OZGULLUK: seen >= 0.95 HER IKI KOLDA  (onkayit 5.4)"]
-K.log("BIRINCIL OKUMA:\n  python " + os.path.join(KON["KOD"], "sablon",
-                                                  "pencere.py")
-      + " " + " ".join(ARG))
-json.dump(ARG, open(K.y("BIRINCIL_KOMUT_G.json"), "w"), indent=1)
+       "--kapi", f"ON-KAPI-kisayol-var: G ent_kisayol >= {KON['MEKANIZMA']}",
+       "--kapi", "BIRINCIL-5.1-kazanc: GM/G ent >= 2.0",
+       "--kapi", "MEKANIZMA-5.2-kisayol-dustu: GM-G ent_kisayol < 0.0",
+       # 5.3 cebirsel sadelesme: (GM.ent/G.ent)/(GM.ent_yok/G.ent_yok)
+       #                       = (GM.ent/GM.ent_yok)/(G.ent/G.ent_yok)
+       "--kapi", "GOMULU-KONTROL-5.3: GM/G ent_bolu_yok > 1.0",
+       "--kapi", "OZGULLUK-5.4-G: G seen >= 0.95",
+       "--kapi", "OZGULLUK-5.4-GM: GM seen >= 0.95",
+       "--kapi", "SAGLIK-1hop: GM bir_hop >= 0.98"]
+# ORTAM ONEKI SART: pencere.py `import sifirdan` yapiyor, sifirdan CFG'yi
+# ORTAMDAN kuruyor. VERI/PRESET olmadan VOCAB 1085 yerine 4016 olur ve
+# BUTUN kollar "OLCULEMEDI" der -- denendi, oyle oluyor. Onceki hali oneki
+# basmiyordu; komut kopyalaninca dusuyordu.
+_ONEK = " ".join(f"{k}={v}" for k, v in sorted(KON["ORT"].items())
+                 if k in ("VERI", "PRESET", "ENT_PAY", "COMP_PAY",
+                          "MEM_AT", "N_PAIR", "P_TRAIN"))
+_YOL = os.path.join(KON["KOD"], "sablon", "pencere.py")
+# TIRNAK SART: kapi dizeleri BOSLUK iceriyor ve icinde ">=" var. Tirnaksiz
+# basilan komut kabuga yapistirildiginda ">=" YONLENDIRME olur, "=" adinda
+# dosya yaratir ve argparse'a cop gider. `" ".join(ARG)` bunu yapiyordu.
+_t = lambda x: f'"{x}"' if (" " in x or ">" in x or "<" in x) else x
+_KOMUT = _ONEK + " python " + _t(_YOL) + " " + " ".join(_t(x) for x in ARG)
+K.log("BIRINCIL OKUMA:" + chr(10) + "  " + _KOMUT)
+json.dump(dict(onek=_ONEK, arg=ARG, komut=_KOMUT),
+          open(K.y("BIRINCIL_KOMUT_G.json"), "w"), indent=1)

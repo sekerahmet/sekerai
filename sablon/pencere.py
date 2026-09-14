@@ -92,7 +92,16 @@ def main():
     scC = np.array([S.ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in LC], np.int64)
     br2 = np.array([S.ENT_OFF + b for _, _, _, b, _ in L2], np.int64)
     sc2 = np.array([S.ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in L2], np.int64)
-    print(f"olcme seti: ent {len(LE)}  comp {len(LC)}  ent2 {len(L2)}  1hop {len(L1)}")
+    # ENT-YOK: kisayolun TIP OLARAK imkansiz oldugu ENT zincirleri.
+    # `S.ENT_YOK` VERI bayragi acikken dolar, kapaliyken BOS -> eski kosular
+    # bit ayni okunur. Salt 5, egitim dongusuyle AYNI (sifirdan.py:1165);
+    # baska bir salt kullanilsaydi egri ile pencere FARKLI ornek olcerdi.
+    LY = sub(S.ENT_YOK, 5) if getattr(S, "ENT_YOK", None) else []
+    EY = S.enc_two(LY) if LY else None
+    brY = np.array([S.ENT_OFF + b for _, _, _, b, _ in LY], np.int64)
+    scY = np.array([S.ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in LY], np.int64)
+    print(f"olcme seti: ent {len(LE)}  comp {len(LC)}  ent2 {len(L2)}  "
+          f"ent_yok {len(LY)}  1hop {len(L1)}")
 
     net = S.Net("A", S.CFG).to(S.DEV)
     sonuc, eksik = {}, []
@@ -127,15 +136,32 @@ def main():
         # almiyordu ve zengin() TypeError ile BUTUN okumayi olduruyordu.
         z2 = (S.zengin(net, E2, br2, sc2)[0] if E2 is not None
               else {"acc": None})
+        zY = (S.zengin(net, EY, brY, scY)[0] if EY is not None
+              else {"acc": None, "shortcut": None})
         r = dict(kol=ad, klasor=klasor, adimlar=bulunan, maske=mask,
                  ent=zE["acc"], ent_kisayol=zE["shortcut"],
                  comp=zC["acc"], comp_kisayol=zC["shortcut"],
                  seen=zS["acc"], ent2=z2["acc"],
+                 ent_yok=zY["acc"], ent_yok_kisayol=zY["shortcut"],
                  bir_hop=float(S.evaluate(net, *E1[:3])[0].mean()))
+        # TURETILMIS ALAN: onkayit 5.3 "fayda(AYIRT) > fayda(YOK)" bir ORANIN
+        # ORANI ve kapi dilbilgisi bunu IFADE EDEMIYOR. Cebirsel olarak
+        #   (GM.ent/G.ent) / (GM.ent_yok/G.ent_yok)
+        #     = (GM.ent/GM.ent_yok) / (G.ent/G.ent_yok)
+        # yani kol basina TEK alan yetiyor ve kapi "GM/G ent_bolu_yok > 1.0"
+        # olarak yazilabiliyor. Payda 0 ise alan None -> kapi ATLANDI der
+        # (sessizce inf/NaN uretip "gecti" demesindense).
+        r["ent_bolu_yok"] = (r["ent"] / r["ent_yok"]
+                             if r["ent_yok"] else None)
         sonuc[ad] = r
         print(f"\n{ad:8s} maske {mask:8s} adimlar {bulunan}")
         print(f"   ENT {r['ent']:.4f}   (kisayol {r['ent_kisayol']:.3f})")
         _e2 = "YOK" if r["ent2"] is None else f"{r['ent2']:.4f}"
+        if r["ent_yok"] is not None:
+            # GOMULU KONTROL: kisayolun IMKANSIZ oldugu ENT zincirleri.
+            # ent_yok_kisayol 0.000 CIKMALI -- cikmiyorsa scY yanlis kurulmus.
+            print(f"   ENT-YOK {r['ent_yok']:.4f}   "
+                  f"(kisayol {r['ent_yok_kisayol']:.3f} -- 0.000 OLMALI)")
         print(f"   comp {r['comp']:.3f}  seen {r['seen']:.3f}  "
               f"ent2 {_e2}  1hop {r['bir_hop']:.3f}")
         for blk in net.blocks:
@@ -153,9 +179,39 @@ def main():
         # belli olmuyordu, ustelik bir kapi TERS yonlu.
         etiket, _, kural = spec.rpartition(":")
         kural = (kural or spec).strip()
-        sol, alan, op, esik = kural.split()
-        esik = float(esik)
+        # KAPI DENETIMI. Onceki hali bozuk kurali ya ValueError ile KOSUNUN
+        # SONUNDA dusuruyordu ya da bilinmeyen alan adini sessizce "ATLANDI"
+        # yapiyordu. 14 Eylul: deney G'nin 6 kapisinin 4'u bozuktu --
+        # ikisi parantezli not yuzunden (split 4'u asiyor), biri sag tarafi
+        # sayi degil kol adi, biri `ent_shortcut` (egrinin adi; pencere.py'de
+        # alan `ent_kisayol`). Hicbiri kosmadan once fark edilmiyordu.
+        _p = kural.split()
+        assert len(_p) == 4, (
+            f"KAPI BOZUK (4 sozcuk olmali, {len(_p)} var): {spec!r}" + chr(10) +
+            f"   bicim: '<etiket>: <sol> <alan> <op> <sayi>'  "
+            f"-- etikette BOSLUK, kuralda parantezli not OLAMAZ")
+        sol, alan, op, esik = _p
+        assert op in OP, f"KAPI BOZUK (op '{op}' taninmiyor): {spec!r}"
+        try:
+            esik = float(esik)
+        except ValueError:
+            raise AssertionError(
+                f"KAPI BOZUK (sag taraf SAYI olmali, '{esik}' geldi): {spec!r}"
+                f"   iki kolu kiyaslamak icin fark kullan: 'GM-G {alan} < 0.0'")
         _kol = sol.replace("/", " ").replace("-", " ").split()
+        # ALAN ADI DENETIMI: olculmus bir koldaki anahtarlarla karsilastir.
+        # "alan yok" (programci hatasi, GURULTULU olmali) ile "alan None"
+        # (kume bos, ATLANDI dogru) ayni sey degil.
+        _olculen = [v for v in sonuc.values()
+                    if isinstance(v, dict) and "hata" not in v]
+        if _olculen:
+            assert alan in _olculen[0], (
+                f"KAPI BOZUK (alan '{alan}' yok): {spec!r}" + chr(10) +
+                f"   gecerli alanlar: "
+                + ", ".join(k for k in _olculen[0] if k not in
+                            ("kol", "klasor", "adimlar", "maske")))
+        for k in _kol:
+            assert k in sonuc, f"KAPI BOZUK (kol '{k}' yok): {spec!r}"
         # kol hic olculemedi YA DA o alan bu kolda yok/None
         if any(k in eksik or sonuc.get(k, {}).get(alan) is None
                for k in _kol):
@@ -166,6 +222,15 @@ def main():
             continue
         if "/" in sol:                       # ORAN kapisi
             p, q = sol.split("/")
+            # PAYDA SIFIR: eskiden ZeroDivisionError ile BUTUN okumayi
+            # oldururdu -- 2 x 120.000 adimlik kosunun EN SONUNDA. ENT
+            # phi 5'te 0.005 civari; bir pencerede 0.000 cikmasi mumkun.
+            if not sonuc[q][alan]:
+                kapilar.append(dict(etiket=etiket.strip(), kural=kural,
+                                    deger=None, gecti=None))
+                print(f"  ATLANDI   {etiket.strip() or sol:26s} {kural}"
+                      f"   ->  payda SIFIR ({q}.{alan} = {sonuc[q][alan]})")
+                continue
             deger = sonuc[p][alan] / sonuc[q][alan]
             nasil = f"{sonuc[p][alan]:.4f} / {sonuc[q][alan]:.4f}"
         elif "-" in sol:                     # FARK kapisi
