@@ -124,6 +124,44 @@ for alt in altlar:
              if pen else ""))
 print(f"   ham analiz ciktisi  : {len(ham):3d} dosya")
 
+# ---- 3b) DOYMA -- BUTCE FAZLA MI? (CLAUDE.md 8) ----------------------------
+# Adim butcesi onceki deneyden KOPYALANIYOR ve kimse "gerekli miydi" diye
+# sormuyor: 120.000 D3.3'ten G'ye gecti, oysa D3.3'un kendi egrisi 20.000'de
+# doymustu. Insanin fark etmesini bekleme -- rapor her turda soylesin.
+def _doyma(eg, alan, tol=0.02):
+    """Alanin SON degerine %tol icinde girip BIR DAHA cikmadigi ILK adim."""
+    v = [(x["step"], x[alan]) for x in eg if alan in x and x[alan] is not None]
+    if len(v) < 4:
+        return None
+    son = v[-1][1]
+    esik = max(abs(son) * tol, 0.005)
+    for j in range(len(v)):
+        if all(abs(w - son) <= esik for _, w in v[j:]):
+            return v[j][0]
+    return v[-1][0]
+
+
+for _a in sorted(glob.glob(P("cikti*"))):
+    _eg = jy(os.path.join(_a, f"egri_{KOL}_s{SEED}.json"), [])
+    if len(_eg) < 4:
+        continue
+    _sn = _eg[-1]["step"]
+    _d = {k: _doyma(_eg, k) for k in ("comp", "ent", "ent_yok", "ent_shortcut")
+          if k in _eg[-1] and _eg[-1][k] is not None}
+    if not _d:
+        continue
+    _en = max(v for v in _d.values() if v)
+    print(chr(10) + f"DOYMA [{os.path.basename(_a)}]   son adim {_sn}")
+    print("   " + "   ".join(f"{k} {v}" for k, v in _d.items()))
+    if _en < 0.6 * _sn:
+        print(f"   !! BUTCE FAZLA: butun alanlar {_en} adimda doymus, kosu "
+              f"{_sn}'e kadar surmus.")
+        print(f"      ~%{100*(_sn-_en)/_sn:.0f}'i ayni platoyu olcuyor. "
+              f"Yeni deneyde BUTCE = doyma + pencere (CLAUDE.md 8).")
+    else:
+        print(f"   butce makul: doyma {_en}, son {_sn}")
+
+
 # ---- 4) CANLILIK -----------------------------------------------------------
 _dp = f"[{D[0]}]{D[1:]}_surucu|[s]ifirdan.py"
 # 'ps | grep <betik>' kendi komut satirini yakalar -> yanlis "calisiyor" der;
