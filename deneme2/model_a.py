@@ -34,15 +34,21 @@ ARSIVDEKI sifirdan.py'DEN NE DEGISTI (dordu de fiilen ariza cikarmisti)
    ic-ice yigin yok.
 
 --------------------------------------------------------------------------
-`dff = 1496` NEDEN GARIP BIR SAYI
+MIMARI NEREDEN GELIYOR
 
-Arsivde `dff` hesaplaniyordu: bellekli kollarla parametre esitlemek icin
-`1024 + mem_params/(2*d*L)` = `1024 + 472`. Yani BELLEKSIZ kolun mimarisi,
-sahip olmadigi bir modulun ayarina bagliydi.
+Hicbiri kafadan atilmadi. Hepsi 2604.07822 "Loop, Think & Generalize"
+satir 594'ten, tam metinden:
+    d=768, 12 kafa, 4 katmanlik tekrarli blok,
+    AdamW lr 1e-4, wd 0.01, dogrusal isinma 2000 adim, batch 512
+O calisma AYNI gorevde (iki adimli kompozisyon, OOD) ve dongulu mimarinin
+ise yaradigini olcmus. Kodu acik: github.com/OSU-NLP-Group/Loop-Think-Generalize
 
-Bellek modulu deneme 2'de YOK. Sayi yine de 1496 birakildi ki mimari ayni
-buyuklukte kalsin (8.508.928 parametre); ama artik TURETILMIYOR, ELLE
-yaziliyor ve degistirilebilir. Bu bir gerekce degil, bir baslangic noktasi.
+TEK VARSAYIM: `dff`. Makalede yazmiyor; 4*d = 3072 aldim (GPT-2 standardi,
+Wang ve FTCT de 4x kullaniyor). Isaretli.
+
+Arsivdeki eski sayilar (d=256, dff=1496, lr=1e-3) TASINMADI. Onlarin
+gerekcesi arsivde ARANDI ve BULUNAMADI; ozellikle lr=1e-3 yayimlanmis
+hicbir calismada yok.
 """
 from __future__ import annotations
 
@@ -78,11 +84,17 @@ class Ayar:
     arama_pay: float = 0.25    # ENT'in ne kadari ARAMA'ya (HUKUMDEN AYRIK)
 
     # --- mimari
-    d: int = 256
-    l: int = 8                 # BLOK sayisi (paylasilan agirlik)
-    nh: int = 8
-    dff: int = 1496            # acik sayi, gerekce dosya basinda
-    dongu: int = 1             # ayni bloklar kac kez uygulanacak (R)
+    #   MIMARI: 2604.07822 "Loop, Think & Generalize" satir 594, BIREBIR:
+    #   "we use an embedding dimension of 768, 12 attention heads and a
+    #    recurrent block of 4 transformer layers"
+    #   Kafadan atilmadi; yayimlanmis ve ayni gorevde (2-hop OOD) calismis
+    #   bir konfigurasyon. Kodu: github.com/OSU-NLP-Group/Loop-Think-Generalize
+    d: int = 768
+    l: int = 4                 # BLOK sayisi (paylasilan agirlik)
+    nh: int = 12
+    dff: int = 3072            # 4*d, GPT-2 standardi. MAKALEDE YAZMIYOR --
+    #                            varsayim, isaretli. (Wang ve FTCT 4x kullaniyor.)
+    dongu: int = 2             # ayni bloklar kac kez uygulanacak (R)
     #   dongu=1  -> DUZ transformer (l katman)
     #   dongu=R  -> l*R katman-esdegeri hesap, AYNI parametrelerle
     # 2604.07822:24 birebir: "The model with R=1 is equivalent to a 4-layer
@@ -94,17 +106,18 @@ class Ayar:
     tohum: int = 0
     adim: int = 20000          # TAVAN (CLAUDE.md kural 1). Yetmezse 40.000.
     batch: int = 512
-    lr: float = 1e-3
-    wd: float = 0.1
+    lr: float = 1e-4           # 2604.07822:594. Eskiden 1e-3 idi (arsivden,
+    #                            gerekcesi YOKTU) ve yayimlanmis hicbir
+    #                            calismada 1e-3 yok: Wang 1e-4, IdBridge 1e-4,
+    #                            FTCT 5e-5.
+    wd: float = 0.01           # 2604.07822:594.  DIKKAT: Wang 0.1 kullaniyor
+    #                            ve Ek E.1'de "buyuk wd grokking'i hizlandirir"
+    #                            diyor. Iki makale AYRISIYOR; bu acik bir dugme.
     isinma: int = 2000         # ACIK -- `adim`dan turetilmez.
-    #   2000: Wang ve ark. 2024'un kullandigi sayi (tam metin, satir 126).
-    #   6000 idi (arsivden, 120000//20). 20.000 adimlik bir kosuda 6000
-    #   isinma kosunun %30'u demek -- LR daha tirmanirken olcum baslardi.
+    #   2604.07822:594 "linear warmup schedule of 2000 steps" -- Wang da 2000.
+    #   6000 idi (arsivden, 120000//20). 20.000 adimlik kosuda %30 ederdi.
     sabit_lr: bool = True      # True: isinmadan sonra LR SABIT (grokking icin)
-    olc_her: int = 1000        # 20.000/1000 = 20 olcum noktasi.
-    #   5000 idi -> 20.000 adimda sadece 4 nokta kalirdi; egrinin sekli
-    #   gorunmez, doyma adimi okunamaz, 5 anlik goruntuluk pencere zor
-    #   kurulur. 20 nokta = 16 farkli pencere.
+    olc_her: int = 2000        # 20.000/2000 = 10 olcum noktasi (kullanici).
     n_olcum_max: int = 3000    # her olcme kumesinden en fazla
 
     # --- kimlik gorevi (model_a1 / model_a2 bunu degistirir)
