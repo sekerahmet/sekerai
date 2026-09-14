@@ -42,6 +42,35 @@ DENEYLER = {
                  RESUME_EVERY="1", WARM_OF="120000",
                  N_PAIR="56", P_TRAIN="50"),
     ),
+    "g": dict(
+        ONKAYIT="ONKAYIT_G_GERCEK_VERI.md",
+        # IMZA = YAPISAL capa. VERI bayragini ve dis-veri yolunu ayrica
+        # denetliyoruz: bayrak itilmeden kosarsak sessizce ESKI RASTGELE
+        # GRAF egitilir ve sonuc "yeni veride de calisti" diye okunur.
+        IMZA={
+            "sifirdan.py": [
+                'VERI = os.environ.get("VERI"',
+                'def build_data_dis',
+                'ENT_YOK = ent_yk',
+                '("ent_yok", EY, brY, scY, LY)',
+                'self.mask_key = None',
+                'm[:, self.mask_key] = True',
+                'os.replace(_sy + ".tmp", _sy)'],
+            "veri_okul.py": ['def zincirler', 'GEREKTIRIR = ', 'def _eb('],
+            "veri_kontrol.py": ['BOZUK KONTROL SAYISI'],
+            "sablon/kosu.py": ['def bitti_mi', 'def _commit_kapisi'],
+            "sablon/pencere.py": ['_eksik_kol', 'raise FileNotFoundError'],
+            "sablon/arsivle.py": ['_alinan_', 'os.replace(gec, hy)'],
+            "sablon/kayan_pencere.py": ['def adimlari_bul'],
+            "sablon/bakici.sh": ['echo "--- tur'],
+            "deney/d33_arama.py": ['ARAMA_CIKTI'],
+            "deney/g.py": ['FAZ 2: ON KAPI', 'if SKOR <= 0']},
+        # VERI=okul  -> N_ENT/N_REL veri setinden TURETILIR, elle yazilmaz.
+        # N_PAIR/P_TRAIN YOK: tipli grafta cift kumesi tipten geliyor.
+        ORT=dict(PRESET="grok_uzun", MEM_AT="4", RESUME_EVERY="1",
+                 WARM_OF="120000", VERI="okul",
+                 ENT_PAY="0.20", COMP_PAY="0.10"),
+    ),
 }
 
 if len(sys.argv) < 3 or sys.argv[2] not in DENEYLER:

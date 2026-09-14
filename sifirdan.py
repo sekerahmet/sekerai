@@ -217,6 +217,25 @@ CKPT_EVERY = int(os.environ.get("CKPT_EVERY", "1"))     # kac degerlendirmede bi
 os.makedirs(OUT, exist_ok=True)
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
+# ============================ DIS VERI (bayrakli) =========================
+# VERI=""      -> eski rastgele graf. Hicbir satir calismaz, kosu BIT AYNI.
+# VERI="okul"  -> veri_okul.py (elde yapilmis TIPLI graf)
+# VERI="gercek"-> veri_gercek.py
+# N_ENT/N_REL VERI SETINDEN okunur, elle yazilmaz (CLAUDE.md 6: sabit kopyalama
+# bayatlar). VOCAB/ENT_OFF bunlardan turedigi icin burada, onlardan ONCE.
+VERI = os.environ.get("VERI", "")
+ENT_PAY = float(os.environ.get("ENT_PAY", "0.20"))    # ENT'e ayrilan varlik
+COMP_PAY = float(os.environ.get("COMP_PAY", "0.10"))  # COMP'a ayrilan zincir
+ENT_YOK = []           # VERI modunda ENT-YOK sinavi. BOSSA olculmez.
+# Neden modul duzeyinde bir liste: build_data'nin 9'lu donus sozlesmesi
+# pencere.py / kayan_pencere.py / okunabilir.py tarafindan ACIKCA aciliyor.
+# Onuncu eleman eklemek bayrak KAPALIYKEN bile o dosyalari kirardi.
+if VERI:
+    import importlib
+    _VM = importlib.import_module("veri_" + VERI)
+    CFG["N_ENT"] = sum(len(_VM.__dict__["kur"]()["ad"][t]) for t in _VM.TIPLER)
+    CFG["N_REL"] = len(_VM.ILISKI)
+
 # ozel token'lar
 PAD, Q1, Q2, QM, EOS = 0, 1, 2, 3, 4
 IDENT = 5              # kullanilmayan ozel token; VOCAB DEGISMEZ
@@ -230,8 +249,96 @@ if MASK_KEY != "":                 # sinir kontrolu T_LEN tanimlandiktan SONRA
 
 
 # ============================ VERI ========================================
+def build_data_dis():
+    """Elde yapilmis TIPLI graf -> build_data'nin AYNI 9'lu sozlesmesi.
+
+    Farklar ve sebepleri:
+      * `facts` hucresi BOS olabilir -> -1. Rastgele grafta her hucre doluydu.
+        `scE = ENT_OFF + facts[e,r2]` boyle bir yerde ENT_OFF-1 verir; bu bir
+        ILISKI token'idir, hicbir varlik tahminiyle eslesmez, yani kisayol
+        orani 0.000 cikar. ENT-YOK icin DOGRU davranis budur.
+      * AYNI (kisayol = cevap) ve DONUS (cevap = sorulan varlik) zincirleri
+        SINAVA GIRMEZ; egitimde kalabilirler. ENT varliklarininki ise egitime
+        de giremez (varlik zincir basi olmayacak) -> tamamen DUSER.
+      * ENT varliklari TIPE GORE TABAKALI secilir; tek tip secilirse sinav o
+        tipin iliski karisimina indirgenir.
+    """
+    global ENT_YOK
+    G = _VM.kur(); zin = _VM.zincirler(G)
+    E = [a for t in _VM.TIPLER for a in G["ad"][t]]
+    R = list(_VM.ILISKI)
+    eid = {a: i for i, a in enumerate(E)}
+    rid = {r: i for i, r in enumerate(R)}
+    assert len(E) == CFG["N_ENT"] and len(R) == CFG["N_REL"],         f"VOCAB uyusmuyor: {len(E)}/{CFG['N_ENT']}  {len(R)}/{CFG['N_REL']}"
+
+    facts = np.full((len(E), len(R)), -1, np.int64)
+    for (e, r), h in G["olgu"].items():
+        facts[eid[e], rid[r]] = eid[h]
+
+    bas = {}
+    for x in zin:
+        bas.setdefault(x[0], []).append(x)
+
+    rng = np.random.RandomState(DATA_SEED)
+    ent_ad = set()
+    for t in _VM.TIPLER:                       # TABAKALI
+        a = [x for x in G["ad"][t] if x in bas]
+        if a:
+            k = int(round(len(a) * ENT_PAY))
+            ent_ad |= {a[int(i)] for i in rng.permutation(len(a))[:k]}
+
+    tr2, comp, ent_ay, ent_yk = [], [], [], []
+    for e in E:                                # E sirasi SABIT -> tekrarlanabilir
+        lst = bas.get(e)
+        if not lst:
+            continue
+        if e in ent_ad:
+            for x in lst:
+                if x[6] == "AYIRT":  ent_ay.append(x)
+                elif x[6] == "YOK":  ent_yk.append(x)
+            continue                           # AYNI/DONUS: dusuyor
+        p = rng.permutation(len(lst))
+        k = int(round(len(lst) * (1.0 - COMP_PAY)))
+        for i, j in enumerate(p):
+            x = lst[int(j)]
+            if i < k:
+                tr2.append(x)
+            elif x[6] in ("AYIRT", "YOK"):
+                comp.append(x)                 # AYNI/DONUS sinava girmez
+
+    say = lambda L: [(eid[x[0]], rid[x[1]], rid[x[2]], eid[x[3]], eid[x[4]])
+                     for x in L]
+    tr2, comp, ent_ay, ent_yk = say(tr2), say(comp), say(ent_ay), say(ent_yk)
+    one = [(eid[e], rid[r], eid[h]) for (e, r), h in G["olgu"].items()]
+    pairs = sorted({(r1, r2) for _, r1, r2, _, _ in tr2 + comp + ent_ay + ent_yk})
+    unseen_ent = np.sort(np.array([eid[a] for a in ent_ad], np.int64))
+    seen_ent = np.sort(np.array([i for a, i in eid.items() if a not in ent_ad],
+                                np.int64))
+
+    # --- SIZINTI DENETIMI ------------------------------------------------
+    trset = {(e, a, b) for e, a, b, _, _ in tr2}
+    for nm, st in (("COMP", comp), ("ENT-AYIRT", ent_ay), ("ENT-YOK", ent_yk)):
+        k = sum((e, a, b) in trset for e, a, b, _, _ in st)
+        assert k == 0, f"{nm} sizintisi: {k}"
+    _ent_id = set(unseen_ent.tolist())
+    k = sum(e in _ent_id for e, *_ in tr2)
+    assert k == 0, f"ENT varligi egitimde ZINCIR BASI olmus: {k}"
+    assert not (set(unseen_ent.tolist()) & set(seen_ent.tolist()))
+
+    ENT_YOK = ent_yk
+    # `log` main()'in ICINDE tanimli bir kapanis (sifirdan.py:1442); build_data
+    # disaridan da cagriliyor (pencere.py, okunabilir.py, kayan_pencere.py)
+    # ve orada NameError verirdi.
+    print(f"  VERI={VERI}  olgu {len(one)}  egitim2 {len(tr2)}  COMP {len(comp)}  "
+        f"ENT-AYIRT {len(ent_ay)}  ENT-YOK {len(ent_yk)}  "
+        f"phi {len(tr2)/len(one):.2f}")
+    return facts, pairs, one, tr2, comp, ent_ay, seen_ent, unseen_ent, []
+
+
 def build_data():
     """Olgular + bolmeler. Hicbir egitim ornegi test kombinasyonunu icermez."""
+    if VERI:
+        return build_data_dis()
     N, R, NP, PT = CFG["N_ENT"], CFG["N_REL"], CFG["N_PAIR"], CFG["P_TRAIN"]
     rng = np.random.RandomState(DATA_SEED)
 
@@ -1051,12 +1158,21 @@ def run_arm(arm, seed, data, log):
     scE = np.array([ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in LE], np.int64)
     br2 = np.array([ENT_OFF + b for _, _, _, b, _ in L2], np.int64)
     sc2 = np.array([ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in L2], np.int64)
+    # ENT-YOK: kisayolun TIP OLARAK imkansiz oldugu ENT zincirleri (gomulu
+    # kontrol). VERI bayragi kapaliyken ENT_YOK bostur -> hicbiri kurulmaz.
+    # scY'de facts[e,r2] = -1 -> ENT_OFF-1, bir ILISKI token'i; hicbir varlik
+    # tahminiyle eslesmez, yani kisayol orani 0.000 cikar. Dogrusu bu.
+    LY = sub(ENT_YOK, 5) if ENT_YOK else []
+    EY = enc_two(LY) if LY else None
+    brY = np.array([ENT_OFF + b for _, _, _, b, _ in LY], np.int64)
+    scY = np.array([ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in LY], np.int64)
     _pti, _pvi = onek_bolme(LS)          # (e,r1) onegine gore prob bolmesi
 
     log(f"  --- kol {arm} ---")
     log(f"    veri kodlandi: 1hop {len(L1)} | 2hop-egitim {len(LS)} | "
         f"COMP {len(LC)} | ENT {len(LE)}"
         + (f" | ENT2 {len(L2)}" if L2 else "")
+        + (f" | ENT-YOK {len(LY)}" if LY else "")
         + (f" | KIMLIK {len(EI[0])}x{tekrar} = %{100*len(parts[2][0])/len(Xtr):.0f} havuz"
            if EI is not None else ""))
     model = Net(arm, CFG).to(DEV)
@@ -1167,6 +1283,8 @@ def run_arm(arm, seed, data, log):
                         ("ent", EE, brE, scE, LE)]
             if E2 is not None:
                 _kumeler.append(("ent2", E2, br2, sc2, L2))
+            if EY is not None:
+                _kumeler.append(("ent_yok", EY, brY, scY, LY))
             for tag, EE_, gb, st, LL in _kumeler:
                 z, dt = zengin(model, EE_, gb, st)
                 rec[tag] = z["acc"]

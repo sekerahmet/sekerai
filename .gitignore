@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# buyuk dokumler: uretilebilir, depoda durmasin
+*_dokum.txt

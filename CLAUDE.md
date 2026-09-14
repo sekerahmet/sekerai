@@ -321,13 +321,14 @@ COLAB
   /content/drive/MyDrive/deney_<ad>/    KALICI ayna
 
 CALISMA / AYNA icinde
-  cikti_<kol>/                 her kol kendi klasorunde
+  cikti_<kol>/                 KOLU AYIRAN TEK SEY BU KLASORDUR
                                (tek kollu eski kosularda duz 'cikti')
-      snap_<kol>_s<tohum>_<adim:06d>.pt     anlik goruntu (fp16)
-      surdur_<kol>_s<tohum>.pt              CANLI surdurme paketi
-      egri_<kol>_s<tohum>.json              olcum egrisi (TUM alanlar)
-      dikkat_/kv_<kol>_s<tohum>_<adim>.npz  tani tensorleri
-  sur/<kol>/surdur_<kol>_s<tohum>_<adim:06d>.pt   ADIM ADLI arsiv
+      snap_A_s<tohum>_<adim:06d>.pt         anlik goruntu (fp16)
+      surdur_A_s<tohum>.pt                  CANLI surdurme paketi
+      egri_A_s<tohum>.json                  olcum egrisi (TUM alanlar)
+      dikkat_/kv_A_s<tohum>_<adim>.npz      tani tensorleri
+  sur/<kol>/surdur_A_s<tohum>_<adim:06d>.pt       ADIM ADLI arsiv
+
   log/  egitim_<deney>_<kol>_<adim:06d>.txt / surucu_<deney>.txt /
         bakici_<deney>.txt
   ham/                         analiz ciktilari (json/npz)
@@ -339,6 +340,18 @@ BELGE (yerel, depoda degil)
   belge/fikir/                              henuz deney olmamis
   arsiv/cekirdek_eski/                      dondurulmus eski surumler
 ```
+
+DOSYA ADINDAKI 'A' KOL ADI DEGIL, SABIT. `uret_sablon.py:72` her deneyde
+`KOL, SEED = "A", 0` yaziyor ve bu `ARMS=A` olarak egitime gidiyor; A5/D5
+kosusunda bile dosyalar `snap_A_s0_*.pt`. Kolu klasor ayiriyor. Araclarin
+bir kismi bunu bilerek "A" sabitini gomuyor (`pencere.py:110`,
+`kayan_pencere.py:75,102`, `okunabilir.py:97`), bir kismi kol adini
+parametre saniyor (`kosu.py:77`, `rapor.py:115`, `d33.py:158`).
+> (13 Eylul oncesi yazilan bu satir `snap_<kol>_...` diyordu ve YANLISTI.
+> Yeni kol adiyla -- G/GM gibi -- `snap_G_*.pt` arayan bir arac hicbir sey
+> bulamaz, "kol kosmadi" der; iki kol ayni klasore duserse `pencere.py`
+> sessizce YANLIS kolu okur. Dogrulayan komut:
+> `grep -rn 'snap_A\|snap_{' sablon/*.py deney/*.py uret_sablon.py`)
 
 **Adım numarası her yerde 6 hane sıfır dolgulu.** `f"..._{20000}.pt"`
 yazmak hiçbir şey bulmaz ama `190000`'i bulur (zaten 6 hane) — hata

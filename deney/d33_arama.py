@@ -213,6 +213,8 @@ else:
     print(f"\n  ESIK GECILMEDI (elde {len(hedef)} durak var). "
           f"Daha fazla anlik goruntu bekleniyor.")
 
-y = os.path.join(C, "ARAMA_D33.json")
+# Cikti adi ortamdan: G deneyi ayni prosedürü kendi kolunda kosuyor ve
+# sonucu ayri dosyaya yaziyor. Varsayilan D3.3 ile AYNI -> no-op.
+y = os.path.join(C, os.environ.get("ARAMA_CIKTI", "ARAMA_D33.json"))
 json.dump(sonuc, open(y, "w"), indent=1)
 print(f"\n-> {y}")
