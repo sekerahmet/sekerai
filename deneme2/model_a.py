@@ -1,0 +1,536 @@
+# -*- coding: utf-8 -*-
+"""model_a — TABAN.  Okul verisi, maske yok, kimlik gorevi yok.
+
+Onceden kayit: belge/onkayit/model_a.md
+
+    model_a    taban
+    model_a1   kimlik koprusu   [Q2] e r1 IDENT ? -> kopru
+    model_a2   sahte kimlik     [Q1] e IDENT ? -> e          (KONTROL)
+
+Varyasyonlar BU DOSYAYI import eder ve yalniz AYAR'in bir alanini degistirir;
+mimariyi/veriyi yeniden tanimlamazlar (deneme2/ISIMLENDIRME.md).
+
+--------------------------------------------------------------------------
+ARSIVDEKI sifirdan.py'DEN NE DEGISTI (dordu de fiilen ariza cikarmisti)
+
+1. AYAR ARTIK NESNE, ortam degiskeni DEGIL.
+   Eskiden `MASK_KEY = os.environ.get(...)` modul seviyesindeydi ve IMPORT
+   ANINDA okunuyordu; her arac import etmeden once ortami kurmak zorundaydi,
+   onceki hucrelerden sizan MEM_AT assert patlatti. Burada import'un yan
+   etkisi YOK: her sey `Ayar` icinde, fonksiyonlara PARAMETRE olarak gider.
+
+2. AD DOSYADA.  Eskiden butun kollar ARMS=A ile kostu, yani G de GM de
+   `snap_A_s0_*.pt` yazdi; kolu yalniz KLASOR ayiriyordu. Burada `ayar.ad`
+   dosya adina giriyor: `snap_model_a_00050000.pt`.
+
+3. ISINMA ACIK SAYI.  Eskiden `warm = max(10, STEPS // 20)` idi; kosuyu
+   parcalara bolunce isinma 6000 degil 250 adim oldu ve ayni tohum baska
+   yorunge izledi. Burada `ayar.isinma` dogrudan yazilir, `adim`dan
+   TURETILMEZ.
+
+4. TANI BURADA DEGIL.  Sonda/logit-lens/dikkat `tani_a.py`ye gider, olcum
+   `pencere_a.py`ye. Bu dosya: ayar + veri + model + egitim. 1500 satirlik
+   ic-ice yigin yok.
+
+--------------------------------------------------------------------------
+`dff = 1496` NEDEN GARIP BIR SAYI
+
+Arsivde `dff` hesaplaniyordu: bellekli kollarla parametre esitlemek icin
+`1024 + mem_params/(2*d*L)` = `1024 + 472`. Yani BELLEKSIZ kolun mimarisi,
+sahip olmadigi bir modulun ayarina bagliydi. Bellek modulu deneme 2'de YOK,
+ama sayi KORUNUYOR: arsivdeki G/GM ile ayni model olmazsa KAPI-0 (kod
+dogrulamasi) anlamsizlasir. Turetme gitti, sayi ve gerekcesi kaldi.
+"""
+from __future__ import annotations
+
+import dataclasses as dc
+import json, math, os, time
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+import veri_okul as VO
+
+DEV = "cuda" if torch.cuda.is_available() else "cpu"
+
+# Ozel token'lar. ENT_OFF/VOCAB veriden TURER (Veri.__post_init__), burada
+# sabit YAZILMAZ -- arsivde `ENT_OFF` bir kez elle 14 yazilmis, 16'ymis.
+PAD, Q1, Q2, QM, EOS, IDENT = 0, 1, 2, 3, 4, 5
+SPECIAL = 8
+REL_OFF = SPECIAL
+T_LEN = 8
+
+
+# ======================= AYAR ============================================
+@dc.dataclass(frozen=True)
+class Ayar:
+    ad: str = "model_a"
+
+    # --- veri (uctu de arsivdeki G/GM ile AYNI olmali, yoksa kiyas kurulmaz)
+    veri_tohum: int = 0
+    ent_pay: float = 0.20      # varliklarin ne kadari ENT'e ayrilir
+    comp_pay: float = 0.10     # zincirlerin ne kadari COMP'a ayrilir
+    arama_pay: float = 0.25    # ENT'in ne kadari ARAMA'ya (HUKUMDEN AYRIK)
+
+    # --- mimari
+    d: int = 256
+    l: int = 8
+    nh: int = 8
+    dff: int = 1496            # acik sayi, gerekce dosya basinda
+
+    # --- egitim
+    tohum: int = 0
+    adim: int = 50000
+    batch: int = 512
+    lr: float = 1e-3
+    wd: float = 0.1
+    isinma: int = 6000         # ACIK -- `adim`dan turetilmez
+    sabit_lr: bool = True      # True: isinmadan sonra LR SABIT (grokking icin)
+    olc_her: int = 5000
+    n_olcum_max: int = 3000    # her olcme kumesinden en fazla
+
+    # --- kimlik gorevi (model_a1 / model_a2 bunu degistirir)
+    ident_frac: float = 0.0
+    ident_kip: str = ""        # "" | "q2son" | "q1"
+
+    # --- maske (bu deneyde kapali; aile ilerde kullanabilsin diye duruyor)
+    mask_poz: int | None = None
+    mask_blok: tuple = ()
+
+    def degistir(self, **kw) -> "Ayar":
+        bilinmeyen = set(kw) - {f.name for f in dc.fields(self)}
+        assert not bilinmeyen, f"Ayar'da boyle alan yok: {bilinmeyen}"
+        return dc.replace(self, **kw)
+
+    def sozluk(self) -> dict:
+        return dc.asdict(self)
+
+    def fark(self, other: "Ayar") -> dict:
+        a, b = self.sozluk(), other.sozluk()
+        return {k: (a[k], b[k]) for k in a if a[k] != b[k] and k != "ad"}
+
+
+def fark_bas(a: Ayar, b: Ayar, yaz=print) -> dict:
+    """'Tek fark su' bir IDDIA degil, CIKTI olsun (ISIMLENDIRME.md b).
+
+    Kol C tam bunun yoklugundan gecersiz kaldi: tek okuma noktasiyla
+    egitilmis paketten uc okuma noktasiyla surduruldu, hicbir sey hata
+    vermedi, kimse fark etmedi."""
+    d = a.fark(b)
+    yaz(f"  {a.ad}  vs  {b.ad}")
+    if not d:
+        yaz("     FARK YOK -- ayni ayar. Kasitli mi?")
+    for k, (x, y) in sorted(d.items()):
+        yaz(f"     FARKLI : {k:<12} {x!r} -> {y!r}")
+    yaz(f"     AYNI   : {len(a.sozluk()) - len(d) - 1} alan")
+    return d
+
+
+# ======================= VERI ============================================
+@dc.dataclass
+class Veri:
+    facts: np.ndarray          # (n_ent, n_rel)  -1 = olgu YOK
+    one: list                  # (e, r, hedef)              1hop
+    tr2: list                  # (e, r1, r2, kopru, cevap)  egitim 2hop
+    comp: list                 #  ayni   -- gorulmemis r1-r2 cifti
+    ent: list                  #  ayni   -- varlik hic zincir basi olmamis (HUKUM)
+    ent_yok: list              #  ayni   -- kisayol TIP OLARAK imkansiz
+    ent_arama: list            #  ayni   -- maske aramasi icin, HUKUMDEN AYRIK
+    n_ent: int = 0
+    n_rel: int = 0
+
+    def __post_init__(self):
+        self.n_ent, self.n_rel = self.facts.shape
+        self.ent_off = SPECIAL + self.n_rel
+        self.vocab = self.ent_off + self.n_ent
+        self.phi = len(self.tr2) / max(1, len(self.one))
+
+
+def veri_kur(ayar: Ayar, yaz=print) -> Veri:
+    """Okul grafi -> bolmeler.  Arsivdeki build_data_dis ile AYNI mantik.
+
+    Tohum `ayar.veri_tohum`; butun kollarda AYNI olmali, yoksa kollar farkli
+    veri gorur ve 'sartlar esit' bozulur."""
+    G = VO.kur()
+    zin = VO.zincirler(G)
+    E = [a for t in VO.TIPLER for a in G["ad"][t]]
+    R = list(VO.ILISKI)
+    eid = {a: i for i, a in enumerate(E)}
+    rid = {r: i for i, r in enumerate(R)}
+
+    facts = np.full((len(E), len(R)), -1, np.int64)
+    for (e, r), h in G["olgu"].items():
+        facts[eid[e], rid[r]] = eid[h]
+
+    bas = {}
+    for x in zin:
+        bas.setdefault(x[0], []).append(x)
+
+    rng = np.random.RandomState(ayar.veri_tohum)
+    ent_ad = set()
+    for t in VO.TIPLER:                       # TABAKALI: tek tip secilirse
+        a = [x for x in G["ad"][t] if x in bas]   # sinav o tipin karisimina
+        if a:                                     # indirgenir
+            k = int(round(len(a) * ayar.ent_pay))
+            ent_ad |= {a[int(i)] for i in rng.permutation(len(a))[:k]}
+
+    # ARAMA / HUKUM ayrimi VARLIK duzeyinde: ayni varligin baska bir zinciri
+    # de sizinti sayilir. Olculdu: ayrim olmadan hukum kumesinin %24'u
+    # aramada zaten gorulmustu.
+    _ea = sorted(ent_ad)
+    _k = max(1, int(round(len(_ea) * ayar.arama_pay)))
+    _ix = rng.permutation(len(_ea))
+    arama_ad = {_ea[int(i)] for i in _ix[:_k]}
+    hukum_ad = ent_ad - arama_ad
+
+    tr2, comp, ent_ay, ent_yk, ent_ar = [], [], [], [], []
+    for e in E:                                # E sirasi SABIT -> tekrarlanabilir
+        lst = bas.get(e)
+        if not lst:
+            continue
+        if e in ent_ad:
+            hedef = ent_ay if e in hukum_ad else ent_ar
+            for x in lst:
+                if x[6] == "AYIRT":
+                    hedef.append(x)
+                elif x[6] == "YOK" and e in hukum_ad:
+                    ent_yk.append(x)
+            continue                           # AYNI / DONUS: duser
+        p = rng.permutation(len(lst))
+        k = int(round(len(lst) * (1.0 - ayar.comp_pay)))
+        for i, j in enumerate(p):
+            x = lst[int(j)]
+            if i < k:
+                tr2.append(x)
+            elif x[6] in ("AYIRT", "YOK"):
+                comp.append(x)                 # AYNI/DONUS sinava girmez
+
+    say = lambda L: [(eid[x[0]], rid[x[1]], rid[x[2]], eid[x[3]], eid[x[4]])
+                     for x in L]
+    v = Veri(facts=facts, one=[(eid[e], rid[r], eid[h])
+                               for (e, r), h in G["olgu"].items()],
+             tr2=say(tr2), comp=say(comp), ent=say(ent_ay),
+             ent_yok=say(ent_yk), ent_arama=say(ent_ar))
+
+    # --- SIZINTI DENETIMI -- sessiz gecmesin
+    trset = {(e, a, b) for e, a, b, _, _ in v.tr2}
+    for nm, st in (("COMP", v.comp), ("ENT", v.ent), ("ENT-YOK", v.ent_yok)):
+        k = sum((e, a, b) in trset for e, a, b, _, _ in st)
+        assert k == 0, f"{nm} sizintisi: {k} ornek egitimde de var"
+    _ent_id = {eid[a] for a in ent_ad}
+    k = sum(e in _ent_id for e, *_ in v.tr2)
+    assert k == 0, f"ENT varligi egitimde ZINCIR BASI olmus: {k}"
+    _h = {e for e, *_ in v.ent} | {e for e, *_ in v.ent_yok}
+    _a = {e for e, *_ in v.ent_arama}
+    assert not (_h & _a), f"ARAMA/HUKUM varlik sizintisi: {len(_h & _a)}"
+
+    yaz(f"  veri: olgu {len(v.one)}  egitim2 {len(v.tr2)}  COMP {len(v.comp)}  "
+        f"ENT {len(v.ent)}  ENT-YOK {len(v.ent_yok)}  "
+        f"ENT-ARAMA {len(v.ent_arama)}  phi {v.phi:.2f}")
+    yaz(f"        n_ent {v.n_ent}  n_rel {v.n_rel}  vocab {v.vocab}  "
+        f"ent_off {v.ent_off}")
+    return v
+
+
+# ======================= KODLAMA =========================================
+def _bos(n):
+    return np.zeros((n, T_LEN), np.int64)
+
+
+def kodla_1hop(v: Veri, batch):
+    """[Q1] e r ? cevap EOS   -> hedef pozisyon 3"""
+    X = _bos(len(batch))
+    for i, (e, r, a) in enumerate(batch):
+        X[i, :6] = [Q1, v.ent_off + e, REL_OFF + r, QM, v.ent_off + a, EOS]
+    return X, np.full(len(batch), 3, np.int64), \
+        np.array([v.ent_off + a for _, _, a in batch], np.int64)
+
+
+def kodla_2hop(v: Veri, batch):
+    """[Q2] e r1 r2 ? cevap EOS   -> hedef pozisyon 4"""
+    X = _bos(len(batch))
+    for i, (e, r1, r2, _b, a) in enumerate(batch):
+        X[i, :7] = [Q2, v.ent_off + e, REL_OFF + r1, REL_OFF + r2, QM,
+                    v.ent_off + a, EOS]
+    return X, np.full(len(batch), 4, np.int64), \
+        np.array([v.ent_off + a for *_, a in batch], np.int64)
+
+
+def kodla_kimlik_q1(v: Veri, ents):
+    """[Q1] e IDENT ? e EOS  -> hedef = varligin KENDISI.
+
+    KONTROL gorevi (model_a2): cevap girdide duruyor, yani KOPYALAMAYLA
+    cozulebilir. Ise yaramaz olmasi KASITLI -- havuza a1 ile ayni miktarda
+    veri ekler, ogretici degeri olmadan."""
+    X = _bos(len(ents))
+    for i, e in enumerate(ents):
+        X[i, :6] = [Q1, v.ent_off + e, IDENT, QM, v.ent_off + e, EOS]
+    return X, np.full(len(ents), 3, np.int64), \
+        np.array([v.ent_off + e for e in ents], np.int64)
+
+
+def kodla_kimlik_q2son(v: Veri, batch):
+    """[Q2] e r1 IDENT ? kopru EOS  -> hedef = facts[e,r1], yani KOPRU.
+
+    Cevap (kopru) girdide HIC GECMIYOR -> kopyalamayla cozulemez.
+    kodla_2hop ile AYNI cerceve ve AYNI hedef pozisyonu (4) -> ayni devreyi
+    egzersiz ettirir.  Test edilen sey bu (model_a1)."""
+    X = _bos(len(batch))
+    for i, (e, r1, b) in enumerate(batch):
+        X[i, :7] = [Q2, v.ent_off + e, REL_OFF + r1, IDENT, QM,
+                    v.ent_off + b, EOS]
+    return X, np.full(len(batch), 4, np.int64), \
+        np.array([v.ent_off + b for _, _, b in batch], np.int64)
+
+
+def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
+    """1hop + 2hop (+ istege bagli kimlik gorevi) -> tek havuz."""
+    parca = [kodla_1hop(v, v.one), kodla_2hop(v, v.tr2)]
+    kimlik = None
+    if ayar.ident_frac > 0:
+        assert ayar.ident_kip in ("q1", "q2son"), \
+            f"ident_kip 'q1' ya da 'q2son' olmali: {ayar.ident_kip!r}"
+        if ayar.ident_kip == "q1":
+            kimlik = kodla_kimlik_q1(v, range(v.n_ent))
+        else:
+            ik = [(e, r, int(v.facts[e, r]))
+                  for e in range(v.n_ent) for r in range(v.n_rel)
+                  if v.facts[e, r] >= 0]        # -1 = olgu YOK, atla
+            kimlik = kodla_kimlik_q2son(v, ik)
+        n_tab = len(parca[0][0]) + len(parca[1][0])
+        tekrar = max(1, int(round(ayar.ident_frac / max(1e-9, 1 - ayar.ident_frac)
+                                  * n_tab / len(kimlik[0]))))
+        parca.append(tuple(np.tile(z, (tekrar,) + (1,) * (z.ndim - 1))
+                           for z in kimlik))
+        yaz(f"  kimlik gorevi: {ayar.ident_kip}  {len(kimlik[0])} ornek x{tekrar}")
+    X = np.concatenate([a for a, _, _ in parca])
+    P = np.concatenate([b for _, b, _ in parca])
+    T = np.concatenate([c for _, _, c in parca])
+    if kimlik is not None:
+        yaz(f"                 havuzun %{100*len(parca[2][0])/len(X):.0f}'i")
+    return X, P, T, kimlik
+
+
+# ======================= MODEL ===========================================
+class RMSNorm(nn.Module):
+    def __init__(self, d, eps=1e-6):
+        super().__init__()
+        self.g = nn.Parameter(torch.ones(d))
+        self.eps = eps
+
+    def forward(self, x):
+        f = x.float()
+        return (self.g.float() * f
+                * torch.rsqrt(f.pow(2).mean(-1, keepdim=True) + self.eps)
+                ).to(x.dtype)
+
+
+class Blok(nn.Module):
+    def __init__(self, d, nh, dff):
+        super().__init__()
+        self.nh, self.hd = nh, d // nh
+        self.n1, self.n2 = RMSNorm(d), RMSNorm(d)
+        self.qkv = nn.Linear(d, 3 * d, bias=False)
+        self.po = nn.Linear(d, d, bias=False)
+        self.f1 = nn.Linear(d, dff, bias=False)
+        self.f2 = nn.Linear(dff, d, bias=False)
+        self.mask_poz = None    # bu pozisyon bu blokta YENIDEN OKUNAMAZ
+
+    def forward(self, x):
+        B, T, D = x.shape
+        q, k, val = self.qkv(self.n1(x)).chunk(3, -1)
+        sh = lambda t: t.view(B, T, self.nh, self.hd).transpose(1, 2)
+        if self.mask_poz is None:
+            o = F.scaled_dot_product_attention(sh(q), sh(k), sh(val),
+                                               is_causal=True)
+        else:
+            m = torch.triu(torch.ones(T, T, device=x.device, dtype=torch.bool), 1)
+            m[:, self.mask_poz] = True
+            m[self.mask_poz, self.mask_poz] = False      # kendine bakabilir
+            o = F.scaled_dot_product_attention(sh(q), sh(k), sh(val),
+                                               attn_mask=~m[None, None])
+        x = x + self.po(o.transpose(1, 2).reshape(B, T, D))
+        return x + self.f2(F.gelu(self.f1(self.n2(x))))
+
+
+class Model(nn.Module):
+    def __init__(self, ayar: Ayar, vocab: int):
+        super().__init__()
+        self.ayar, self.vocab = ayar, vocab
+        d = ayar.d
+        self.emb = nn.Embedding(vocab, d)
+        self.pos = nn.Embedding(T_LEN, d)
+        self.bloklar = nn.ModuleList([Blok(d, ayar.nh, ayar.dff)
+                                      for _ in range(ayar.l)])
+        self.nf = RMSNorm(d)
+        self.head = nn.Linear(d, vocab, bias=False)
+        self.head.weight = self.emb.weight        # bagli gomme
+        for i in ayar.mask_blok:
+            self.bloklar[i].mask_poz = ayar.mask_poz
+        self.apply(self._ilk)
+
+    @staticmethod
+    def _ilk(m):
+        if isinstance(m, (nn.Linear, nn.Embedding)):
+            nn.init.normal_(m.weight, std=0.02)
+
+    def forward(self, x):
+        h = self.emb(x) + self.pos(torch.arange(x.shape[1], device=x.device))[None]
+        for blk in self.bloklar:
+            h = blk(h)
+        return self.head(self.nf(h))
+
+    def n_param(self):
+        gor, tot = set(), 0
+        for p in self.parameters():
+            if id(p) not in gor:
+                gor.add(id(p)); tot += p.numel()
+        return tot
+
+
+# ======================= OLCME ===========================================
+def olcme_listeleri(ayar: Ayar, v: Veri):
+    """Her kumeden en fazla n_olcum_max ornek. TEK KAYNAK: egitim dongusu de
+    pencere_a.py de BURAYI cagirir. Arsivde bu mantik iki dosyada AYRI AYRI
+    duruyordu ve bir salt degisirse farkli ornek olculurdu, sessizce."""
+    def alt(lst, salt):
+        if not lst:
+            return []
+        r = np.random.RandomState(ayar.veri_tohum + 7 + salt)
+        if len(lst) > ayar.n_olcum_max:
+            return [lst[i] for i in r.permutation(len(lst))[:ayar.n_olcum_max]]
+        return list(lst)
+    return dict(one=alt(v.one, 0), seen=alt(v.tr2, 1), comp=alt(v.comp, 2),
+                ent=alt(v.ent, 3), ent_yok=alt(v.ent_yok, 5))
+
+
+@torch.no_grad()
+def dogruluk(model, v: Veri, X, P, T, bs=512):
+    """VARLIK-KISITLI argmax: cevap her zaman bir varliktir, ilişki/ozel
+    token'lar yarismaya sokulmaz."""
+    model.eval()
+    lo, hi = v.ent_off, v.ent_off + v.n_ent
+    ok = []
+    for i in range(0, len(X), bs):
+        xb = torch.from_numpy(X[i:i + bs]).to(DEV)
+        with torch.autocast(DEV, dtype=torch.float16, enabled=(DEV == "cuda")):
+            lg = model(xb)
+        idx = torch.from_numpy(P[i:i + bs]).to(DEV)
+        ar = torch.arange(len(idx), device=DEV)
+        lg = lg.float()[ar, idx][:, lo:hi]
+        g = torch.from_numpy(T[i:i + bs]).to(DEV) - lo
+        ok.append((lg.argmax(-1) == g).cpu().numpy())
+    model.train()
+    return float(np.concatenate(ok).mean())
+
+
+@torch.no_grad()
+def kisayol_orani(model, v: Veri, lst, bs=512):
+    """Model kac ornekte KISAYOL cevabini (facts[e, r2]) soyluyor?
+    facts hucresi -1 ise (olgu yok) ent_off-1 cikar; bu bir ILISKI token'idir,
+    hicbir varlik tahminiyle eslesmez -> oran 0.000. ENT-YOK icin dogrusu bu."""
+    if not lst:
+        return float("nan")
+    X, P, _ = kodla_2hop(v, lst)
+    ksy = np.array([v.ent_off + int(v.facts[e, r2]) for e, _, r2, _, _ in lst])
+    model.eval()
+    lo, hi = v.ent_off, v.ent_off + v.n_ent
+    ok = []
+    for i in range(0, len(X), bs):
+        xb = torch.from_numpy(X[i:i + bs]).to(DEV)
+        with torch.autocast(DEV, dtype=torch.float16, enabled=(DEV == "cuda")):
+            lg = model(xb)
+        idx = torch.from_numpy(P[i:i + bs]).to(DEV)
+        ar = torch.arange(len(idx), device=DEV)
+        p = lg.float()[ar, idx][:, lo:hi].argmax(-1) + lo
+        ok.append((p.cpu().numpy() == ksy[i:i + bs]))
+    model.train()
+    return float(np.concatenate(ok).mean())
+
+
+# ======================= EGITIM ==========================================
+def egit(ayar: Ayar, alt=None, yaz=print) -> list:
+    alt = alt or f"cikti_{ayar.ad.replace('model_', '')}"
+    os.makedirs(alt, exist_ok=True)
+    yaz(f"=== {ayar.ad} ===  cihaz {DEV}  cikti {alt}/")
+    v = veri_kur(ayar, yaz)
+    Xtr, Ptr, Ttr, kimlik = egitim_havuzu(ayar, v, yaz)
+
+    L = olcme_listeleri(ayar, v)
+    kod = {k: (kodla_1hop(v, L[k]) if k == "one" else kodla_2hop(v, L[k]))
+           for k in L if L[k]}
+    yaz("  olcme: " + "  ".join(f"{k} {len(L[k])}" for k in L if L[k]))
+
+    torch.manual_seed(ayar.tohum)
+    model = Model(ayar, v.vocab).to(DEV)
+    yaz(f"  parametre {model.n_param():,}  (d={ayar.d} l={ayar.l} "
+        f"nh={ayar.nh} dff={ayar.dff})")
+
+    dec = [p for p in model.parameters() if p.dim() >= 2]
+    nodec = [p for p in model.parameters() if p.dim() < 2]
+    opt = torch.optim.AdamW([{"params": dec, "weight_decay": ayar.wd},
+                             {"params": nodec, "weight_decay": 0.0}],
+                            lr=ayar.lr, betas=(0.9, 0.95))
+    scaler = torch.amp.GradScaler(DEV, enabled=(DEV == "cuda"))
+    rs = np.random.RandomState(ayar.tohum + 991)
+    egri, t0 = [], time.time()
+
+    json.dump(ayar.sozluk(), open(f"{alt}/ayar.json", "w"), indent=1)
+
+    for adim in range(1, ayar.adim + 1):
+        if adim < ayar.isinma:
+            lr = ayar.lr * adim / ayar.isinma
+        elif ayar.sabit_lr:
+            lr = ayar.lr              # grokking icin LR SONMEMELI
+        else:
+            lr = ayar.lr * 0.5 * (1 + math.cos(
+                math.pi * (adim - ayar.isinma) / max(1, ayar.adim - ayar.isinma)))
+        for g in opt.param_groups:
+            g["lr"] = lr
+
+        j = rs.randint(0, len(Xtr), ayar.batch)
+        xb = torch.from_numpy(Xtr[j]).to(DEV)
+        pb = torch.from_numpy(Ptr[j]).to(DEV)
+        tb = torch.from_numpy(Ttr[j]).to(DEV)
+        with torch.autocast(DEV, dtype=torch.float16, enabled=(DEV == "cuda")):
+            lg = model(xb)
+            lg = lg[torch.arange(ayar.batch, device=DEV), pb]
+            kayip = F.cross_entropy(lg.float(), tb)
+        opt.zero_grad(set_to_none=True)
+        scaler.scale(kayip).backward()
+        scaler.unscale_(opt)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        scaler.step(opt)
+        scaler.update()
+
+        if adim % ayar.olc_her == 0 or adim == ayar.adim:
+            r = dict(adim=adim, kayip=float(kayip.item()), lr=float(lr),
+                     sn=round(time.time() - t0, 1))
+            for k in kod:
+                r[k] = dogruluk(model, v, *kod[k])
+            r["ent_kisayol"] = kisayol_orani(model, v, L["ent"])
+            r["ent_yok_kisayol"] = kisayol_orani(model, v, L["ent_yok"])
+            if kimlik is not None:
+                r["kimlik"] = dogruluk(model, v, *kimlik)
+            egri.append(r)
+            # ANLIK GORUNTU: agirlik ortalamasi olcumunun sartı. Adim adli,
+            # 8 hane sifir dolgulu -- arsivde `f"..._{20000}.pt"` hicbir sey
+            # bulmamis ama 190000'i bulmustu (zaten 6 haneydi), yani hata
+            # KISMEN gorunmustu. Ad `ayar.ad` tasiyor.
+            torch.save({k: t.half() for k, t in model.state_dict().items()},
+                       f"{alt}/snap_{ayar.ad}_{adim:08d}.pt")
+            json.dump(egri, open(f"{alt}/egri_{ayar.ad}.json", "w"))
+            yaz(f"  {adim:7d}/{ayar.adim}  kayip {r['kayip']:.3f}  "
+                + "  ".join(f"{k} {r[k]:.3f}" for k in
+                            ("one", "seen", "comp", "ent") if k in r)
+                + f"  ksy {r['ent_kisayol']:.3f}"
+                + (f"  kimlik {r['kimlik']:.3f}" if "kimlik" in r else "")
+                + f"  ({r['sn']/60:.0f} dk)")
+    return egri
+
+
+AYAR = Ayar()
+
+if __name__ == "__main__":
+    egit(AYAR)
