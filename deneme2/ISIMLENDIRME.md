@@ -99,7 +99,7 @@ bir şey koymak gerekir. İki şey:
 # model_a1.py
 from model_a import AYAR, Model, veri_kur, egit
 
-AYAR = AYAR.degistir(ident_frac=0.15, ident_mode="q2son")
+AYAR = AYAR.degistir(ident_frac=0.15, ident_kip="q2son")
 #      ^ SADECE FARK. Mimari/veri/tohum/adim TEKRAR YAZILMAZ.
 ```
 
@@ -110,7 +110,7 @@ değiştirebilir. Kopyala-yapıştır yasak değil, **imkânsız**.
 
 ```
 model_a  vs  model_a1
-   FARKLI :  ident_frac  (0.0 -> 0.15)    ident_mode  ("-" -> "q2son")
+   FARKLI :  ident_frac  (0.0 -> 0.15)    ident_kip  ("" -> "q2son")
    AYNI   :  49 alan
 ```
 
@@ -125,7 +125,11 @@ hiçbir şey hata vermedi, kimse fark etmedi.
 ```
 deneme2/
     ISIMLENDIRME.md
-    model_a.py       model_a1.py
-    pencere_a.py     kosu_a.py     rapor_a.py
-    cikti_a/         cikti_a1/
+    SABLON.ipynb     <- kopyalanacak defter (MODEL = None)
+    veri_okul.py     <- veri ureteci, GOREVI tanimlar, modele ait DEGIL
+    model_a.py       model_a.ipynb
+    pencere_a.py     <- olcum (henuz yazilmadi)
 ```
+
+Cikti depoda DEGIL, Drive'da: `deneme2/<model>/`. Kosu ciktisi ikili ve
+buyuk; `.gitignore`da `*.pt *.npz *.parquet` var.
