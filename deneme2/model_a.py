@@ -79,19 +79,32 @@ class Ayar:
 
     # --- mimari
     d: int = 256
-    l: int = 8
+    l: int = 8                 # BLOK sayisi (paylasilan agirlik)
     nh: int = 8
     dff: int = 1496            # acik sayi, gerekce dosya basinda
+    dongu: int = 1             # ayni bloklar kac kez uygulanacak (R)
+    #   dongu=1  -> DUZ transformer (l katman)
+    #   dongu=R  -> l*R katman-esdegeri hesap, AYNI parametrelerle
+    # 2604.07822:24 birebir: "The model with R=1 is equivalent to a 4-layer
+    # vanilla transformer" ve "systematic generalization in the 2-hop task
+    # already emerges from WEIGHT SHARING under fixed recurrence."
+    # Yani duz model ayri bir model DEGIL, bu eksenin R=1 kosesi.
 
     # --- egitim
     tohum: int = 0
-    adim: int = 80000      # TAVAN. Uzatmak kullanici karari (CLAUDE.md kural 1)
+    adim: int = 20000          # TAVAN (CLAUDE.md kural 1). Yetmezse 40.000.
     batch: int = 512
     lr: float = 1e-3
     wd: float = 0.1
-    isinma: int = 6000         # ACIK -- `adim`dan turetilmez
+    isinma: int = 2000         # ACIK -- `adim`dan turetilmez.
+    #   2000: Wang ve ark. 2024'un kullandigi sayi (tam metin, satir 126).
+    #   6000 idi (arsivden, 120000//20). 20.000 adimlik bir kosuda 6000
+    #   isinma kosunun %30'u demek -- LR daha tirmanirken olcum baslardi.
     sabit_lr: bool = True      # True: isinmadan sonra LR SABIT (grokking icin)
-    olc_her: int = 5000
+    olc_her: int = 1000        # 20.000/1000 = 20 olcum noktasi.
+    #   5000 idi -> 20.000 adimda sadece 4 nokta kalirdi; egrinin sekli
+    #   gorunmez, doyma adimi okunamaz, 5 anlik goruntuluk pencere zor
+    #   kurulur. 20 nokta = 16 farkli pencere.
     n_olcum_max: int = 3000    # her olcme kumesinden en fazla
 
     # --- kimlik gorevi (model_a1 / model_a2 bunu degistirir)
@@ -381,8 +394,9 @@ class Model(nn.Module):
 
     def forward(self, x):
         h = self.emb(x) + self.pos(torch.arange(x.shape[1], device=x.device))[None]
-        for blk in self.bloklar:
-            h = blk(h)
+        for _ in range(self.ayar.dongu):       # R kez AYNI bloklar
+            for blk in self.bloklar:
+                h = blk(h)
         return self.head(self.nf(h))
 
     def n_param(self):
@@ -469,7 +483,8 @@ def egit(ayar: Ayar, alt=None, yaz=print) -> list:
     torch.manual_seed(ayar.tohum)
     model = Model(ayar, v.vocab).to(DEV)
     yaz(f"  parametre {model.n_param():,}  (d={ayar.d} l={ayar.l} "
-        f"nh={ayar.nh} dff={ayar.dff})")
+        f"nh={ayar.nh} dff={ayar.dff} dongu={ayar.dongu})"
+        f"  -> {ayar.l*ayar.dongu} katman-esdegeri hesap")
 
     dec = [p for p in model.parameters() if p.dim() >= 2]
     nodec = [p for p in model.parameters() if p.dim() < 2]
