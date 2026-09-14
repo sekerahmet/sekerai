@@ -182,6 +182,16 @@ for adim in hedef:
             dict(adim=adim, comp=a["comp"], sinyal=a["sinyal"],
                  p_yildiz=a["p_yildiz"], kazanan=b["kazanan"]))
         k = b["kazanan"]
+        if os.environ.get("ARAMA_TABLO") == "1":
+            # TAM TABLO: kazanani okumak yetmez. "b0=0 neden hic secilmiyor"
+            # sorusu ancak butun adaylari gorunce cevaplanir.
+            print(f"        --- adim {adim}: 24 adayin hepsi "
+                  f"(inv0={a['inv0']:.3f} comp0={a['comp']:.3f})")
+            for p in (1, 2, 3):
+                sat = "          p=%d  " % p
+                for r in [x for x in b["tablo"] if x["p"] == p]:
+                    sat += f"b{r['b0']}:{r['skor']:+.3f} "
+                print(sat)
         print(f"        ASAMA B -> parca {k['p']}  b0={k['b0']}  "
               f"skor {k['skor']:+.4f}"
               + ("   (D3.1 kazanani: parca 1, skor +0.0565)" if adim == hedef[0] else ""))
