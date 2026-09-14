@@ -12,6 +12,14 @@ Deneye OZEL karar mantigi (ne zaman dur, neye bak, ne sec) surucu dosyasinda.
 import os, sys, json, time, glob, shutil, subprocess
 
 
+def _sorulmayan(c, bekle, muaf):
+    """Kayitli cfg'de olup ne SORULAN ne MUAF olan anahtarlar.
+
+    Ayri fonksiyon: Kosu ornegi kurmadan test edilebilsin (§6 test 3).
+    """
+    return sorted(k for k in c if k not in bekle and k not in muaf)
+
+
 class Kosu:
     def __init__(self, kon):
         self.kon = kon
@@ -167,8 +175,52 @@ class Kosu:
                     f"referans kolun tekrari DEGIL -> kiyas gecersiz, DURDURULDU.")
         return f
 
+    def konfig_kapisi_tam(self, bekle, muaf=("STEPS",), alt="cikti"):
+        """konfig_kapisi'nin OPT-OUT hali: SORULMAYAN ANAHTAR DA ARIZADIR.
+
+        NEDEN (14 Eylul, AUDIT). `konfig_kapisi` yalniz KENDISINE VERILEN
+        anahtarlari denetliyor. Alti cagrinin altisi da yalniz MASK_KEY/
+        MASK_BLK geciriyor; hicbiri MEM_AT gecirmiyor. Ve kol C tam bu
+        yuzden gecersiz kaldi (belge/KOLLAR.md, C satiri):
+          colab_C_devam.py:54 TEK okuma noktasiyla egitilmis paketten
+          MEM_AT=2,4,6 ile SURDURDU. Memory tek paylasimli modul ve okuma
+          sayisi parametre eklemiyor -> load_state_dict SESSIZCE gecti.
+
+        Asil ariza MEM_AT'in eksik olmasi DEGIL, varsayilanin
+        "sorulmayan denetlenmez" olmasi. Bir sonraki kol yeni bir anahtar
+        getirir (SHARE, IDENT_FRAC, HOP2_FRAC, N_PAIR...), biri listeye
+        eklemeyi unutur, ayni sessiz hata tekrar mumkun olur.
+
+        Burada varsayilan TERSINE cevrildi: kayitli cfg'deki HER anahtar
+        ya `bekle`de sorulmus ya `muaf`ta ACIKCA hariç tutulmus olmali.
+        Unutmak ARTIK HATA VERIR.
+
+        muaf=("STEPS",): surucular parca parca egitiyor (K.egit(HEDEF,...)),
+        yani STEPS mesru sekilde degisir. Baska mesru fark cikarsa muaf
+        listesine GEREKCESIYLE eklenir -- sessizce degil.
+
+        Eski `konfig_kapisi` geriye donuk uyumluluk icin duruyor; YENI
+        surucular BUNU cagirmali.
+        """
+        import torch
+        sp = self.surdur_yolu(alt)
+        assert os.path.exists(sp), "surdurme paketi yok"
+        c = torch.load(sp, map_location="cpu", weights_only=False).get("cfg", {})
+        sorulmayan = _sorulmayan(c, bekle, muaf)
+        assert not sorulmayan, (
+            f"SORULMAYAN KONFIG ANAHTARI: {sorulmayan}" + chr(10)
+            + "  Bu anahtarlar surdurme paketinde KAYITLI ama denetlenmiyor."
+              " Sessizce farkli bir konfigle surdurmek MUMKUN." + chr(10)
+            + "  Ya `bekle` sozlugune ekle, ya `muaf`a GEREKCESIYLE koy."
+              "  (kol C bu yuzden gecersiz kaldi -- belge/KOLLAR.md)")
+        return self.konfig_kapisi(bekle, alt=alt)
+
     def konfig_kapisi(self, bekle, alt="cikti"):
-        """Surdurme paketi hangi konfigle yazilmis? Davranistan degil KAYITTAN."""
+        """Surdurme paketi hangi konfigle yazilmis? Davranistan degil KAYITTAN.
+
+        DIKKAT: yalniz `bekle`deki anahtarlari denetler. Yeni surucular
+        `konfig_kapisi_tam` kullanmali (sorulmayan anahtar da ariza sayilir).
+        """
         import torch
         sp = self.surdur_yolu(alt)
         assert os.path.exists(sp), "surdurme paketi yok"
