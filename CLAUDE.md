@@ -35,10 +35,25 @@ MASK_KEY=p : egitim sirasinda butun sorgularin poz p'ye bakmasini engelle
 
 ### Tez
 
-> **Maskeleme modelin daha iyi öğrenmesini sağlar.**
+> **Doğru yere maskelenmiş model, ŞARTLAR EŞİTKEN maskelenmemişten iyidir.**
 
-Kısayol yolunu eğitim sırasında kapatırsan model köprüyü kullanmak zorunda
-kalır ve `ent` yükselir.
+*Şartlar eşit* = aynı tohum, aynı veri, aynı adım, aynı model; **tek fark
+maske**. Kısayol yolunu eğitim sırasında kapatırsan model köprüyü kullanmak
+zorunda kalır ve `ent` yükselir.
+
+**Destek — bütün eşleştirilmiş kıyaslar (birincil ölçü):**
+
+```
+D /A    phi 3.03 t0  1@6-7   4.99x     24/24 adimda ustun
+D3/A    phi 3.03 t0  1@1-7   5.98x     24/24
+E1/E2   phi 3.03 t1  1@6-7   4.58x     20/20
+D5/A5   phi 5.06 t0  1@1-7   3.19x     18/24
+-------------------------------------------------------
+K /A    phi 3.03 t0  2@6-7   0.61x      7/20   YANLIS yer
+
+92 noktanin 86'si (%93,5) maskeli kol lehine; dusuk phi'de 68/68.
+K, tezdeki 'DOGRU YERE' kaydinin bos olmadigini gosteriyor.
+```
 
 ### Antitez
 
