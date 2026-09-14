@@ -157,8 +157,7 @@ def main():
                 dg += int(pr[k0] == a0)
                 ks_ += int(pr[k0] == facts[e0, r2_])
     m = len(ent_ev)
-    print(f'
-   TUM ENT setinde ({m} ornek):')
+    print(f'\n   TUM ENT setinde ({m} ornek):')
     print(f'      dogruluk (ent) {dg/m:.4f}    kisayol {ks_/m:.4f}')
     print('      -> EGRIDEKI ent / ent_shortcut ile tutmali; tutmuyorsa ARAC bozuk')
     print("   KISAYOL = ikinci iliskiyi DOGRUDAN ilk varliga uygulamis")
