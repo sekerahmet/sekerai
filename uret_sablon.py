@@ -58,8 +58,14 @@ DENEYLER = {
                 'self.mask_key = None',
                 'm[:, self.mask_key] = True',
                 'os.replace(_sy + ".tmp", _sy)'],
-            "veri_okul.py": ['def zincirler', 'GEREKTIRIR = ', 'def _eb('],
-            "veri_kontrol.py": ['BOZUK KONTROL SAYISI'],
+            # Kaydirma kaldirildi -> capa da degisti (14 Eylul). Eski capa
+            # 'def _eb(' idi ve o fonksiyon artik YOK.
+            "veri_okul.py": ['def zincirler', 'GEREKTIRIR = ',
+                             'def _esle(', 'def _devirsiz(',
+                             'aile kurulamadi'],
+            "veri_kontrol.py": ['BOZUK KONTROL SAYISI',
+                                'hicbir iliski SABIT KAYDIRMA degil',
+                                'hicbir (r1,r2) zinciri SABIT KAYDIRMA degil'],
             "sablon/kosu.py": ['def bitti_mi', 'def _commit_kapisi'],
             "sablon/pencere.py": ['_eksik_kol', 'raise FileNotFoundError'],
             "sablon/arsivle.py": ['_alinan_', 'os.replace(gec, hy)'],
