@@ -227,6 +227,8 @@ VERI = os.environ.get("VERI", "")
 ENT_PAY = float(os.environ.get("ENT_PAY", "0.20"))    # ENT'e ayrilan varlik
 COMP_PAY = float(os.environ.get("COMP_PAY", "0.10"))  # COMP'a ayrilan zincir
 ENT_YOK = []           # VERI modunda ENT-YOK sinavi. BOSSA olculmez.
+ENT_ARAMA = []         # MASKE ARAMASINA ayrilan ENT zincirleri (AYRI VARLIKLAR)
+ARAMA_PAY = float(os.environ.get("ARAMA_PAY", "0.25"))
 # Neden modul duzeyinde bir liste: build_data'nin 9'lu donus sozlesmesi
 # pencere.py / kayan_pencere.py / okunabilir.py tarafindan ACIKCA aciliyor.
 # Onuncu eleman eklemek bayrak KAPALIYKEN bile o dosyalari kirardi.
@@ -267,7 +269,10 @@ def build_data_dis():
       * ENT varliklari TIPE GORE TABAKALI secilir; tek tip secilirse sinav o
         tipin iliski karisimina indirgenir.
     """
-    global ENT_YOK
+    # ENT_ARAMA da BURADA olmali: yoksa asagidaki atama YEREL degisken
+    # yaratir, modul globali [] kalir ve arama sessizce ESKI kumeyi
+    # kullanir -- yani ayrimi yapip ise yaramadigini fark etmezdik.
+    global ENT_YOK, ENT_ARAMA
     G = _VM.kur(); zin = _VM.zincirler(G)
     E = [a for t in _VM.TIPLER for a in G["ad"][t]]
     R = list(_VM.ILISKI)
@@ -291,15 +296,28 @@ def build_data_dis():
             k = int(round(len(a) * ENT_PAY))
             ent_ad |= {a[int(i)] for i in rng.permutation(len(a))[:k]}
 
-    tr2, comp, ent_ay, ent_yk = [], [], [], []
+    # ARAMA / HUKUM AYRIMI -- VARLIK DUZEYINDE.
+    # Maske yeri Asama A/B ile araniyor ve Asama A'nin sinyali ENT uzerinde
+    # olculuyor (d33_arama.py:76 `ent_ev[:NA]`). Ayrim olmadan mudahale
+    # HUKUM VERECEGIMIZ kumeye bakilarak seciliyordu: olculdu, hukum
+    # kumesinin %24'u aramada zaten gorulmustu. Ayrim CHAIN degil VARLIK
+    # duzeyinde: ayni varligin baska bir zinciri de sizinti sayilir.
+    _ea = sorted(ent_ad)
+    _k = max(1, int(round(len(_ea) * ARAMA_PAY)))
+    _ix = rng.permutation(len(_ea))
+    arama_ad = {_ea[int(i)] for i in _ix[:_k]}
+    hukum_ad = ent_ad - arama_ad
+
+    tr2, comp, ent_ay, ent_yk, ent_ar = [], [], [], [], []
     for e in E:                                # E sirasi SABIT -> tekrarlanabilir
         lst = bas.get(e)
         if not lst:
             continue
         if e in ent_ad:
+            _hedef = ent_ay if e in hukum_ad else ent_ar
             for x in lst:
-                if x[6] == "AYIRT":  ent_ay.append(x)
-                elif x[6] == "YOK":  ent_yk.append(x)
+                if x[6] == "AYIRT":  _hedef.append(x)
+                elif x[6] == "YOK" and e in hukum_ad:  ent_yk.append(x)
             continue                           # AYNI/DONUS: dusuyor
         p = rng.permutation(len(lst))
         k = int(round(len(lst) * (1.0 - COMP_PAY)))
@@ -312,7 +330,8 @@ def build_data_dis():
 
     say = lambda L: [(eid[x[0]], rid[x[1]], rid[x[2]], eid[x[3]], eid[x[4]])
                      for x in L]
-    tr2, comp, ent_ay, ent_yk = say(tr2), say(comp), say(ent_ay), say(ent_yk)
+    tr2, comp = say(tr2), say(comp)
+    ent_ay, ent_yk, ent_ar = say(ent_ay), say(ent_yk), say(ent_ar)
     one = [(eid[e], rid[r], eid[h]) for (e, r), h in G["olgu"].items()]
     pairs = sorted({(r1, r2) for _, r1, r2, _, _ in tr2 + comp + ent_ay + ent_yk})
     unseen_ent = np.sort(np.array([eid[a] for a in ent_ad], np.int64))
@@ -329,12 +348,17 @@ def build_data_dis():
     assert k == 0, f"ENT varligi egitimde ZINCIR BASI olmus: {k}"
     assert not (set(unseen_ent.tolist()) & set(seen_ent.tolist()))
 
-    ENT_YOK = ent_yk
+    # ARAMA ile HUKUM kumeleri AYRIK olmali -- varlik duzeyinde.
+    _ha = {e for e, *_ in ent_ay} | {e for e, *_ in ent_yk}
+    _aa = {e for e, *_ in ent_ar}
+    assert not (_ha & _aa), f"ARAMA/HUKUM varlik sizintisi: {len(_ha & _aa)}"
+    ENT_YOK, ENT_ARAMA = ent_yk, ent_ar
     # `log` main()'in ICINDE tanimli bir kapanis (sifirdan.py:1442); build_data
     # disaridan da cagriliyor (pencere.py, okunabilir.py, kayan_pencere.py)
     # ve orada NameError verirdi.
     print(f"  VERI={VERI}  olgu {len(one)}  egitim2 {len(tr2)}  COMP {len(comp)}  "
         f"ENT-AYIRT {len(ent_ay)}  ENT-YOK {len(ent_yk)}  "
+        f"ENT-ARAMA {len(ent_ar)} ({len(arama_ad)} varlik, HUKUMDEN AYRIK)  "
         f"phi {len(tr2)/len(one):.2f}")
     return facts, pairs, one, tr2, comp, ent_ay, seen_ent, unseen_ent, []
 

@@ -73,7 +73,14 @@ facts, pairs, one, tr2, comp_, ent_ev, seen_ent, unseen_ent, ent2_ev = S.build_d
 lo, hi = S.ENT_OFF, S.ENT_OFF + S.CFG["N_ENT"]
 rg = np.random.RandomState(0)          # SABIT ornek: duraklar arasi kiyas icin
 VER = {}
-for ad, lst in (("COMP", comp_[:NA]), ("ENT", ent_ev[:NA])):
+# ARAMA KUMESI: S.ENT_ARAMA varsa ONU kullan. O kume HUKUM kumesinden
+# VARLIK DUZEYINDE ayrik; yoksa (VERI bayragi kapali, D3.3 gibi) eski
+# davranis -- ent_ev[:NA], yani BIT AYNI.
+_ent_kaynak = getattr(S, "ENT_ARAMA", None) or ent_ev
+if _ent_kaynak is not ent_ev:
+    print(f"  ARAMA kumesi AYRI: {len(_ent_kaynak)} zincir "
+          f"(hukum kumesiyle varlik duzeyinde AYRIK)")
+for ad, lst in (("COMP", comp_[:NA]), ("ENT", _ent_kaynak[:NA])):
     E = S.enc_two(lst)
     VER[ad] = dict(X=E[0], poz=E[1],
                    gold=(S.ENT_OFF + np.array([x[4] for x in lst])).astype(np.int64),
