@@ -21,7 +21,7 @@ zorunda kaldi. `--maske` her kol icin ayri verilir.
 Kol bicimi:  <ad>:<klasor>:<adimlar>:<maske>
 Maske bicimi: "yok"  ya da  "<poz>@<ilk>-<son>"   ornek 1@1-7
 """
-import os, sys, json, glob, argparse
+import os, sys, json, glob, argparse, hashlib
 import numpy as np
 import torch
 
@@ -72,14 +72,10 @@ def main():
     # Olcme setleri: kol() ile AYNI kurulum. Kopyalanmis sabit yok (§6).
     facts, pairs, one, tr2, comp, ent_ev, seen_ent, unseen_ent, ent2_ev = S.build_data()
 
-    def sub(lst, salt):
-        r = np.random.RandomState(S.DATA_SEED + 7 + salt)
-        if len(lst) > S.N_EVAL_MAX:
-            lst = [lst[i] for i in r.permutation(len(lst))[:S.N_EVAL_MAX]]
-        return lst
-
-    L1, LS, LC, LE = sub(one, 0), sub(tr2, 1), sub(comp, 2), sub(ent_ev, 3)
-    L2 = sub(ent2_ev, 4)
+    # OLCME SETLERI: sifirdan.py'nin egitim dongusuyle AYNI FONKSIYONDAN
+    # (AUDIT B2, 14 Eylul). Eskiden burada `sub()` mantigi KOPYA duruyordu;
+    # bir salt/bolme degisirse hicbir hata vermeden farkli ornek olculurdu.
+    L1, LS, LC, LE, L2, LY = S.olcme_listeleri(one, tr2, comp, ent_ev, ent2_ev)
     E1, ES, EC, EE = S.enc_one(L1), S.enc_two(LS), S.enc_two(LC), S.enc_two(LE)
     E2 = S.enc_two(L2) if L2 else None
     # `seen` = EGITIMDE gorulmus 2-hop. Ezber ile genellemeyi ayirir ve
@@ -92,16 +88,33 @@ def main():
     scC = np.array([S.ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in LC], np.int64)
     br2 = np.array([S.ENT_OFF + b for _, _, _, b, _ in L2], np.int64)
     sc2 = np.array([S.ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in L2], np.int64)
-    # ENT-YOK: kisayolun TIP OLARAK imkansiz oldugu ENT zincirleri.
-    # `S.ENT_YOK` VERI bayragi acikken dolar, kapaliyken BOS -> eski kosular
-    # bit ayni okunur. Salt 5, egitim dongusuyle AYNI (sifirdan.py:1165);
-    # baska bir salt kullanilsaydi egri ile pencere FARKLI ornek olcerdi.
-    LY = sub(S.ENT_YOK, 5) if getattr(S, "ENT_YOK", None) else []
+    # ENT-YOK kodlamasi. LY yukarida olcme_listeleri()'nden geldi; salt 5
+    # artik TEK YERDE tanimli, burada tekrar edilmiyor.
     EY = S.enc_two(LY) if LY else None
     brY = np.array([S.ENT_OFF + b for _, _, _, b, _ in LY], np.int64)
     scY = np.array([S.ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in LY], np.int64)
     print(f"olcme seti: ent {len(LE)}  comp {len(LC)}  ent2 {len(L2)}  "
           f"ent_yok {len(LY)}  1hop {len(L1)}")
+
+    # --- OLCME SETI PARMAK IZI (AUDIT B2, 14 Eylul) ----------------------
+    # Setler artik S.olcme_listeleri()'nden geliyor (tek kaynak), yani
+    # "iki dosya farkli salt kullanir" arizasi KAPANDI. Bu damga geriye
+    # kalani yakalar: build_data / veri ureteci / konfig / N_EVAL_MAX
+    # degisirse ayni VERI ile farkli bir iz cikar ve OLCUM_IZ assert'i
+    # atesler. Yani "ayni deneyin iki olcumu ayni seti mi gordu" sorusu
+    # artik MEKANIK olarak cevaplanabiliyor.
+    _iz = hashlib.md5(repr([len(x) for x in (L1, LS, LC, LE, L2, LY)]).encode()
+                      + b"|" + repr([tuple(x[:3]) for x in
+                                     (L1, LS, LC, LE, L2, LY) if x]).encode()
+                      ).hexdigest()[:12]
+    print(f"olcme seti parmak izi: {_iz}   VERI={S.VERI or '(yok)'}")
+    _BEKLENEN = os.environ.get("OLCUM_IZ", "")
+    assert not _BEKLENEN or _BEKLENEN == _iz, (
+        f"OLCME SETI DEGISMIS: beklenen {_BEKLENEN}, kurulan {_iz}." + chr(10)
+        + "  Ayni VERI/konfig ile onceki kosuyla AYNI seti olcmuyorsun ->"
+          " sayilar kiyaslanamaz." + chr(10)
+        + "  Bilerek degistiysen OLCUM_IZ'i guncelle; degilse sifirdan.py'de"
+          " ne degisti diye bak.")
 
     net = S.Net("A", S.CFG).to(S.DEV)
     sonuc, eksik = {}, []

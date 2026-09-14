@@ -122,9 +122,18 @@ SHARE = int(os.environ.get("SHARE", "0"))
 assert SHARE == 0 or (1 <= SHARE <= CFG["L"] and CFG["L"] % SHARE == 0),     f"SHARE, L'yi tam bolmeli: SHARE={SHARE}, L={CFG['L']}"
 CFG["SHARE"] = SHARE
 
-# KISAYOL YOLUNU EGITIM BOYUNCA KAPAT.
-#   MASK_KEY=1  -> hicbir sorgu poz 1'e (varlik) bakamaz
+# KISAYOLUN YENIDEN-OKUNMASINI EGITIM BOYUNCA KAPAT.
+#   MASK_KEY=1  -> bu bloklarda hicbir sorgu poz 1'e (varlik) BAKAMAZ
 #   MASK_BLK=6,7-> yalniz bu bloklarda
+#
+# ADLANDIRMA DUZELTMESI (14 Eylul, AUDIT oturumu). Baslik eskiden
+# "KISAYOL YOLUNU ... KAPAT" idi ve YANILTICIYDI. Maske bir KUYRUK:
+# `blk.mask_key = poz if i >= b0`. Kosularda b0=1, yani BLOK 0 MASKESIZ.
+# Blok 0'da poz 1'in icerigi diger pozisyonlarin artik akisina giriyor ve
+# oradan dikkate ihtiyac duymadan TASINIYOR. Yani 1..7 maskesi varligin
+# KULLANILMASINI engellemiyor, YENIDEN OKUNMASINI engelliyor.
+# "Modeli kopruyu kullanmak ZORUNDA birakiyoruz" cumlesi bu haliyle YANLIS.
+# CLAUDE.md 0 bunu zaten dogru yaziyordu ("Kacis BLOK 0'dan -- olculdu").
 # Gerekce (kol A, 200.000 adim, olculdu):
 #   karar blok 6-7'de cevap pozisyonunun dikkat paylastirmasiyla veriliyor;
 #   COMP p1'e 0.002-0.010 koyuyor (yol ATIL), ENT 0.066-0.213 (KISAYOL).
@@ -453,6 +462,42 @@ def build_data():
     return facts, pairs, one, tr2, comp, ent_eval, seen_ent, unseen_ent, ent2
 
 
+def olcme_listeleri(one, tr2, comp, ent_ev, ent2_ev):
+    """OLCME SETLERINI KURAN TEK YER. Egitim dongusu de, pencere.py de burayi
+    cagirir -- ayni mantigi IKI YERDE tasimak yasak.
+
+    NEDEN (AUDIT B2, 14 Eylul). Eskiden bu blok run_arm() icinde ve
+    sablon/pencere.py icinde AYRI AYRI duruyordu; ikisi de
+    `RandomState(DATA_SEED + 7 + salt)`, salt 0..5, ayni sirayla. Sabit
+    kopyalanmamisti ama MANTIK kopyalanmisti ve ariza bicimi ayni (§6
+    "sabitleri elle kopyalama"):
+      yeni bir bolme eklenir (or. ENT3, salt 6) ya da salt sirasi degisir
+        -> pencere.py ESKI setleri olcmeye devam eder
+        -> `ent` FARKLI bir 3000'lik alt-orneklem uzerinde olculur
+        -> HICBIR HATA VERMEZ, butun manset sayilar ~1 SE kayar
+        -> ve "olcum hatti D'nin bilinen egrisini yeniden uretiyor"
+           denetiminin kendisi bozulur (artik farkli ornekleri kiyaslar).
+
+    SALT'LAR SOZLESMEDIR, DEGISTIRME. Degistirilirse eski kosularin
+    anlik goruntuleriyle yeni olcumler KIYASLANAMAZ hale gelir.
+    Yeni bir bolme eklenecekse SIRADAKI salt'i (6, 7, ...) kullan;
+    aradakileri kaydirma.
+    """
+    def sub(lst, salt):
+        r = np.random.RandomState(DATA_SEED + 7 + salt)
+        if len(lst) > N_EVAL_MAX:
+            lst = [lst[i] for i in r.permutation(len(lst))[:N_EVAL_MAX]]
+        return lst
+
+    L1, LS, LC, LE = sub(one, 0), sub(tr2, 1), sub(comp, 2), sub(ent_ev, 3)
+    L2 = sub(ent2_ev, 4)          # ENT2: ikinci hop hic gorulmemis
+    # ENT-YOK: kisayolun TIP OLARAK imkansiz oldugu ENT zincirleri (gomulu
+    # kontrol). VERI bayragi kapaliyken ENT_YOK bostur -> [] doner ve eski
+    # kosular BIT AYNI okunur.
+    LY = sub(ENT_YOK, 5) if ENT_YOK else []
+    return L1, LS, LC, LE, L2, LY
+
+
 def enc_one(batch):
     """[Q1] e r ? ans EOS  -> hedef pozisyon 3"""
     X = np.zeros((len(batch), T_LEN), np.int64)
@@ -528,7 +573,9 @@ class Block(nn.Module):
         sh = lambda t: t.view(B, T, self.nh, self.hd).transpose(1, 2)
         if self.mask_key is None:
             o = F.scaled_dot_product_attention(sh(q), sh(k), sh(v), is_causal=True)
-        else:                                   # KISAYOL YOLU KAPALI
+        else:              # bu blokta poz mask_key YENIDEN OKUNAMAZ
+                           # ("yol kapali" DEGIL: blok 0 maskesizse icerik
+                           #  artik akista tasiniyor -- bkz. :125 duzeltmesi)
             m = torch.triu(torch.ones(T, T, device=x.device, dtype=torch.bool), 1)
             m[:, self.mask_key] = True
             m[self.mask_key, self.mask_key] = False      # kendine bakabilir
@@ -1167,14 +1214,9 @@ def run_arm(arm, seed, data, log):
     Ptr = np.concatenate([b for _, b, _ in parts])
     Ttr = np.concatenate([c for _, _, c in parts])
 
-    def sub(lst, salt):
-        r = np.random.RandomState(DATA_SEED + 7 + salt)
-        if len(lst) > N_EVAL_MAX:
-            lst = [lst[i] for i in r.permutation(len(lst))[:N_EVAL_MAX]]
-        return lst
-
-    L1, LS, LC, LE = (sub(one, 0), sub(tr2, 1), sub(comp, 2), sub(ent_ev, 3))
-    L2 = sub(ent2_ev, 4)                      # ENT2: ikinci hop hic gorulmemis
+    # OLCME SETLERI: tek kaynak (bkz. olcme_listeleri, AUDIT B2).
+    # Eskiden bu blok burada ve pencere.py'de AYRI AYRI duruyordu.
+    L1, LS, LC, LE, L2, LY = olcme_listeleri(one, tr2, comp, ent_ev, ent2_ev)
     E1, ES, EC, EE = enc_one(L1), enc_two(LS), enc_two(LC), enc_two(LE)
     E2 = enc_two(L2) if L2 else None
     # tani hedefleri: kopru varligi ve "r1'i atla" kisayolu
@@ -1186,11 +1228,9 @@ def run_arm(arm, seed, data, log):
     scE = np.array([ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in LE], np.int64)
     br2 = np.array([ENT_OFF + b for _, _, _, b, _ in L2], np.int64)
     sc2 = np.array([ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in L2], np.int64)
-    # ENT-YOK: kisayolun TIP OLARAK imkansiz oldugu ENT zincirleri (gomulu
-    # kontrol). VERI bayragi kapaliyken ENT_YOK bostur -> hicbiri kurulmaz.
+    # ENT-YOK kodlamasi. LY yukarida olcme_listeleri()'nden geldi.
     # scY'de facts[e,r2] = -1 -> ENT_OFF-1, bir ILISKI token'i; hicbir varlik
     # tahminiyle eslesmez, yani kisayol orani 0.000 cikar. Dogrusu bu.
-    LY = sub(ENT_YOK, 5) if ENT_YOK else []
     EY = enc_two(LY) if LY else None
     brY = np.array([ENT_OFF + b for _, _, _, b, _ in LY], np.int64)
     scY = np.array([ENT_OFF + int(facts[e, r2]) for e, _, r2, _, _ in LY], np.int64)
