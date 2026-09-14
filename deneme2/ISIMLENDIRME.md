@@ -5,13 +5,18 @@
 ```
 model_a              <- AD
 model_a.py           <- modelin kendisi
+model_a.ipynb        <- onun Colab defteri (SABLON.ipynb'in KOPYASI)
 pencere_a.py         <- onun olcumu
-kosu_a.py            <- onun kosturucusu
-rapor_a.py           <- onun raporu
-cikti_a/             <- onun ciktisi
 belge/onkayit/model_a.md    <- kosudan ONCE
 belge/bulgu/model_a.md      <- sonuc
+Drive: deneme2/model_a/     <- onun ciktisi
 ```
+
+**Colab: kuyruk/surucu YOK.** Bir defter = bir model. `SABLON.ipynb`i
+kopyala, adini modelin adi yap, TEK SATIRI degistir. Sablonda `MODEL = None`
+ve bir `assert` var: kopyalayip duzeltmeyi unutan SESSIZCE baska bir modeli
+kosturamaz. (Eskiden HUCRE 0 onceki deneyin ayarlarini tasiyordu ve tam
+bu oluyordu.)
 
 Ekrana bakınca hangi modele ait olduğu belli. **Arama yapmadan.**
 
