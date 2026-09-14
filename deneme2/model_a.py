@@ -3,12 +3,13 @@
 
 Onceden kayit: belge/onkayit/model_a.md
 
-    model_a    taban
-    model_a1   kimlik koprusu   [Q2] e r1 IDENT ? -> kopru
-    model_a2   sahte kimlik     [Q1] e IDENT ? -> e          (KONTROL)
+Deneme 2'nin ILK kosusu. Tek kol, tez sinamiyor. Isi: kodun egittigini
+gormek ve UZERINE DENEY KURULACAK ZEMINI olcmek -- doyma adimi, ENT
+seviyesi, kisayol orani, en iyi pencere.
 
-Varyasyonlar BU DOSYAYI import eder ve yalniz AYAR'in bir alanini degistirir;
-mimariyi/veriyi yeniden tanimlamazlar (deneme2/ISIMLENDIRME.md).
+Varyasyon (model_a1 gibi) BU DOSYAYI import eder ve yalniz AYAR'in bir
+alanini degistirir; mimariyi/veriyi yeniden tanimlamaz
+(deneme2/ISIMLENDIRME.md). Taban olculmeden varyasyon YAZILMAZ.
 
 --------------------------------------------------------------------------
 ARSIVDEKI sifirdan.py'DEN NE DEGISTI (dordu de fiilen ariza cikarmisti)
@@ -37,9 +38,11 @@ ARSIVDEKI sifirdan.py'DEN NE DEGISTI (dordu de fiilen ariza cikarmisti)
 
 Arsivde `dff` hesaplaniyordu: bellekli kollarla parametre esitlemek icin
 `1024 + mem_params/(2*d*L)` = `1024 + 472`. Yani BELLEKSIZ kolun mimarisi,
-sahip olmadigi bir modulun ayarina bagliydi. Bellek modulu deneme 2'de YOK,
-ama sayi KORUNUYOR: arsivdeki G/GM ile ayni model olmazsa KAPI-0 (kod
-dogrulamasi) anlamsizlasir. Turetme gitti, sayi ve gerekcesi kaldi.
+sahip olmadigi bir modulun ayarina bagliydi.
+
+Bellek modulu deneme 2'de YOK. Sayi yine de 1496 birakildi ki mimari ayni
+buyuklukte kalsin (8.508.928 parametre); ama artik TURETILMIYOR, ELLE
+yaziliyor ve degistirilebilir. Bu bir gerekce degil, bir baslangic noktasi.
 """
 from __future__ import annotations
 
@@ -67,7 +70,8 @@ T_LEN = 8
 class Ayar:
     ad: str = "model_a"
 
-    # --- veri (uctu de arsivdeki G/GM ile AYNI olmali, yoksa kiyas kurulmaz)
+    # --- veri (bir ailenin butun kollarinda AYNI olmali, yoksa
+    #     'sartlar esit' bozulur ve kollar farkli veri gorur)
     veri_tohum: int = 0
     ent_pay: float = 0.20      # varliklarin ne kadari ENT'e ayrilir
     comp_pay: float = 0.10     # zincirlerin ne kadari COMP'a ayrilir
@@ -81,7 +85,7 @@ class Ayar:
 
     # --- egitim
     tohum: int = 0
-    adim: int = 50000
+    adim: int = 80000      # TAVAN. Uzatmak kullanici karari (CLAUDE.md kural 1)
     batch: int = 512
     lr: float = 1e-3
     wd: float = 0.1
