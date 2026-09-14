@@ -175,7 +175,33 @@ class Kosu:
                     f"referans kolun tekrari DEGIL -> kiyas gecersiz, DURDURULDU.")
         return f
 
-    def konfig_kapisi_tam(self, bekle, muaf=("STEPS",), alt="cikti"):
+    def _canli_cfg(self, ek=None):
+        """Egitimin GORECEGI CFG -- ayni ortamla, AYRI surecte, GPU'suz.
+
+        kosu.py `import sifirdan` YAPAMAZ: surucu sureci egitimi alt surec
+        olarak baslatiyor (egit(), :subprocess.run) ve kendi ortami alt
+        surecinkiyle ayni olmak zorunda degil. Import etseydik kapi YANLIS
+        referansa bakardi.
+        Cozum: alt sureci ZATEN aciyoruz -- bir saniyelik bir tanesini
+        CFG'yi sormak icin acalim. ~2 sn, GPU yok (CUDA gizleniyor).
+        """
+        env = dict(self.kon["TEMIZ"], **self.kon["ORT"], CUDA_VISIBLE_DEVICES="")
+        env.update(ek or {})
+        r = subprocess.run(
+            [sys.executable, "-c",
+             "import json, sifirdan as S; print('CFG_JSON', json.dumps("
+             "{k: (list(v) if isinstance(v, tuple) else v)"
+             " for k, v in S.CFG.items()}))"],
+            cwd=self.kon["KOD"], env=env, capture_output=True, text=True)
+        assert r.returncode == 0, (
+            "CANLI CFG okunamadi (rc=%d):" % r.returncode + chr(10)
+            + (r.stderr or r.stdout)[-600:])
+        satir = [l for l in r.stdout.splitlines() if l.startswith("CFG_JSON ")]
+        assert satir, "CFG_JSON satiri yok:" + chr(10) + r.stdout[-400:]
+        return json.loads(satir[-1][len("CFG_JSON "):])
+
+    def konfig_kapisi_tam(self, bekle=None, muaf=("STEPS", "_commit"),
+                          alt="cikti", ek=None):
         """konfig_kapisi'nin OPT-OUT hali: SORULMAYAN ANAHTAR DA ARIZADIR.
 
         NEDEN (14 Eylul, AUDIT). `konfig_kapisi` yalniz KENDISINE VERILEN
@@ -195,14 +221,27 @@ class Kosu:
         ya `bekle`de sorulmus ya `muaf`ta ACIKCA hariç tutulmus olmali.
         Unutmak ARTIK HATA VERIR.
 
-        muaf=("STEPS",): surucular parca parca egitiyor (K.egit(HEDEF,...)),
-        yani STEPS mesru sekilde degisir. Baska mesru fark cikarsa muaf
-        listesine GEREKCESIYLE eklenir -- sessizce degil.
+        BEKLENEN DEGERLER DE ELLE YAZILMAZ (14 Eylul, AUDIT ikinci tur).
+        `bekle=None` ise referans `_canli_cfg()`'den gelir: egitimin ayni
+        ortamda gorecegi CFG. Boylece "ismi listeye eklemeyi unutma"
+        problemini cozerken "degeri yanlis yazma" problemini ACMIYORUZ --
+        ikisi de ayni siniftan olurdu. Gercek CFG 24 anahtar; elle yazmak
+        21'ini kopyalamak demekti.
+
+        MUAF LISTESI -- her biri GEREKCELI:
+          STEPS    surucular parca parca egitiyor (:egit, STEPS=str(hedef))
+          _commit  sifirdan.py:1522'de main()'de ekleniyor, yani KAYITLI
+                   pakette VAR ama taze import'ta YOK; ayrica iki oturum
+                   arasi mesru sekilde degisir ve ZATEN ayri bir kapida
+                   denetleniyor (`_commit_kapisi`, CLAUDE.md 7).
+        Baska mesru fark cikarsa muaf'a GEREKCESIYLE eklenir, sessizce degil.
 
         Eski `konfig_kapisi` geriye donuk uyumluluk icin duruyor; YENI
         surucular BUNU cagirmali.
         """
         import torch
+        if bekle is None:
+            bekle = self._canli_cfg(ek)
         sp = self.surdur_yolu(alt)
         assert os.path.exists(sp), "surdurme paketi yok"
         c = torch.load(sp, map_location="cpu", weights_only=False).get("cfg", {})
@@ -213,7 +252,13 @@ class Kosu:
               " Sessizce farkli bir konfigle surdurmek MUMKUN." + chr(10)
             + "  Ya `bekle` sozlugune ekle, ya `muaf`a GEREKCESIYLE koy."
               "  (kol C bu yuzden gecersiz kaldi -- belge/KOLLAR.md)")
-        return self.konfig_kapisi(bekle, alt=alt)
+        # MUAF anahtarlar KARSILASTIRMADAN da cikarilir. Yoksa `bekle` canli
+        # CFG oldugunda STEPS mesru sekilde farkli olur (paket 80000, egitim
+        # 120000 hedefliyor) ve kapi HAKSIZ YERE atesler. Bunu kendi testim
+        # yakaladi: TEST 4'te fark listesi ['STEPS', 'MEM_AT'] cikti; orada
+        # olmasi gereken yalniz MEM_AT.
+        return self.konfig_kapisi({k: v for k, v in bekle.items()
+                                   if k not in muaf}, alt=alt)
 
     def konfig_kapisi(self, bekle, alt="cikti"):
         """Surdurme paketi hangi konfigle yazilmis? Davranistan degil KAYITTAN.
