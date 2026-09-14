@@ -244,14 +244,27 @@ MK, MB = str(A["secilen_parca"]), A["MASK_BLK"]
 
 # TANI turu: KAYIT icin, karari ETKILEMEZ. Basarisiz olursa yalniz loglanir
 # (CLAUDE.md 9: "yapacagin analiz henuz icat edilmedi, buna gore kaydet").
-_rt = subprocess.run([sys.executable,
-                      os.path.join(KON["KOD"], "deney", "d33_arama.py"),
-                      sys.argv[1]],
-                     env=dict(os.environ, ARAMA_ALT=G_,
-                              ARAMA_CIKTI="ARAMA_G_TANI.json",
-                              ARAMA_TAM="1", ARAMA_TABLO="1"))
-K.log(f"  TANI turu (24 aday x her durak) rc={_rt.returncode} "
-      f"-> ARAMA_G_TANI.json" + ("" if _rt.returncode == 0 else "  !! basarisiz"))
+#
+# ATLAMA KORUMASI (14 Eylul): karar turunun `if not os.path.exists(ARJ)`
+# korumasi vardi, TANI turunun YOKTU -> her yeniden baslatmada tekrar
+# kosuyordu. Colab runtime'i bu kosuda UC kez geri donusturuldu; tani turu
+# uc kez kosup her seferinde GM ile AYNI ANDA GPU yedi. Ikinci bir GPU isi
+# geri donusumu tetikleyen sebeplerden biri olabilir -- yani koruma eksikligi
+# kendini besleyen bir dongu kuruyordu.
+_TJ = os.path.join(KON["CALIS"], "ARAMA_G_TANI.json")
+if os.path.exists(_TJ):
+    K.log(f"  TANI turu ZATEN var, atlaniyor -> {os.path.basename(_TJ)}")
+    _rt = None
+else:
+    _rt = subprocess.run([sys.executable,
+                          os.path.join(KON["KOD"], "deney", "d33_arama.py"),
+                          sys.argv[1]],
+                         env=dict(os.environ, ARAMA_ALT=G_,
+                                  ARAMA_CIKTI="ARAMA_G_TANI.json",
+                                  ARAMA_TAM="1", ARAMA_TABLO="1"))
+    K.log(f"  TANI turu (24 aday x her durak) rc={_rt.returncode} "
+          f"-> ARAMA_G_TANI.json"
+          + ("" if _rt.returncode == 0 else "  !! basarisiz"))
 K.kaydet(rapor_ek=[f"ARAMA: parca {MK} @ {MB}, skor {SKOR:+.4f} "
                    f"(D3/D3.1/D3.3 hep parca 1 bulmustu)"])
 
