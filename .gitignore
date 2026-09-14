@@ -9,3 +9,7 @@ CLAUDE.md
 
 # onkayitlar ve bulgular YEREL kalir (depo PUBLIC)
 belge/
+
+# ham kosu verisi: Drive'dan cekilen anlik goruntu/olcum dosyalari.
+# Depo PUBLIC ve bunlar 17 MB'lik ikili dosyalar -- ASLA girmemeli.
+veri/
