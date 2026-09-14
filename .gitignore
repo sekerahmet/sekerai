@@ -3,3 +3,6 @@ __pycache__/
 
 # buyuk dokumler: uretilebilir, depoda durmasin
 *_dokum.txt
+
+# calisma kurallari: YEREL kalir, depoya girmez
+CLAUDE.md
