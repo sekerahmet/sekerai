@@ -52,12 +52,27 @@ from kosu import Kosu
 
 G_, GM_ = "cikti_g", "cikti_gm"
 
+# BUTCE -- adim sayisi. Varsayilan 80.000; ONCEDEN 120.000 idi.
+# OLCULDU (G kolu, 14 Eylul): phi 5.09'da BUTUN egriler 50.000 adimda
+# doyuyor.  50.000 -> 75.000 arasi degisim:
+#     comp +0.007   ent 0.000   entyok +0.006   kisayol +0.006
+# Yani 70.000 adim daha kosup hicbir sey degismiyor; iki kol icin
+# ~140.000 adim ~= 78 dk GPU. D3.3'te de ayni desen vardi (comp 20.000'de
+# doymus, pencere yine 60-80k'ya konmustu).
+# UZATMA KULLANICI KARARIDIR: HUCRE 0'daki ORT'ta BUTCE degistirilir.
+# Bu kosu ICINDE kendiliginden uzamaz.
+BUTCE = int(os.environ.get("BUTCE", "80000"))
+_E = int(S.CFG["EVERY"])
+assert BUTCE % _E == 0, f"BUTCE ({BUTCE}) EVERY'nin ({_E}) kati olmali"
+# PENCERE = son %20, olcum noktalarina oturtulmus (onkayit 5.1).
+PENCERE = [BUTCE - 4 * _E + i * _E for i in range(5)]
+
 KON.update(
     DERINLIK=list(range(1, S.CFG["L"])),
-    HEDEF_SON=120000,
+    HEDEF_SON=BUTCE,
     KOL_SAYISI=2,
-    RAPOR_TOPLAM=2 * 120000,
-    PENCERE=[100000, 105000, 110000, 115000, 120000],   # onkayit 5.1: SON %20
+    RAPOR_TOPLAM=2 * BUTCE,
+    PENCERE=PENCERE,
     PHI_BEKLENEN=5.09,
     OLGUNLUK=0.50,          # comp(G @ pencere) -- gorev ogrenilmis mi
     MEKANIZMA=0.30,         # BILGI: D3.3'un tasinmis esigi, DURDURMAZ

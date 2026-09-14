@@ -72,11 +72,17 @@ DENEYLER = {
             "sablon/kayan_pencere.py": ['def adimlari_bul'],
             "sablon/bakici.sh": ['echo "--- tur'],
             "deney/d33_arama.py": ['ARAMA_CIKTI'],
-            "deney/g.py": ['FAZ 2: ON KAPI', 'if SKOR <= 0']},
+            "deney/g.py": ['FAZ 2: ON KAPI', 'if SKOR <= 0',
+                           'BUTCE = int(os.environ.get']},
         # VERI=okul  -> N_ENT/N_REL veri setinden TURETILIR, elle yazilmaz.
         # N_PAIR/P_TRAIN YOK: tipli grafta cift kumesi tipten geliyor.
+        # BUTCE: adim sayisi. 80.000 ONCEDEN degil SONRADAN secildi --
+        # G kolunda butun egrilerin 50.000'de doydugu OLCULDU, 120.000
+        # ayni platoyu olcuyordu (iki kol icin ~78 dk bosa GPU).
+        # WARM_OF BUTCE'ye ESIT olmali: isinma TOPLAM kosudan hesaplanir.
+        # UZATMA KULLANICI KARARI -- buradaki iki sayi birlikte degisir.
         ORT=dict(PRESET="grok_uzun", MEM_AT="4", RESUME_EVERY="1",
-                 WARM_OF="120000", VERI="okul",
+                 BUTCE="80000", WARM_OF="80000", VERI="okul",
                  ENT_PAY="0.20", COMP_PAY="0.10"),
     ),
 }
