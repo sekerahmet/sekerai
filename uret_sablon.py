@@ -105,6 +105,51 @@ def hucre(kod):
 
 
 hucre(r'''
+# ############################################################################
+# KILAVUZ -- HANGI HUCRE NE ZAMAN KOSULUR.  Bu hucre HICBIR SEY YAPMAZ.
+#   14 Eylul'de eklendi: hucreler ihtiyac ciktikca eklenmisti ve hicbirinde
+#   "bu ne zaman kosulur" yazmiyordu -- aralarinda pkill yapan ve klasor
+#   SILEN ikisi vardi. Kullanici ayirt edemedigini soyledi, hakliydi.
+# ############################################################################
+print("""
+==============================================================================
+ YESIL  -- HER AN kosabilirsin.  Sadece DOSYA OKUR, GPU'ya dokunmaz,
+            kosan egitimi ETKILEMEZ.
+------------------------------------------------------------------------------
+   HUCRE 7  CANLI DURUM    surecler + egri + egitim logu     <- ANA TAKIP
+   HUCRE 5  RAPOR          RAPOR.txt'i basar
+   HUCRE 6  KURTARMA       adim adli paketleri listeler
+
+==============================================================================
+ SARI   -- YALNIZ KURTARMA SIRASINDA, 0>1>2>3>4 SIRASIYLA.
+            Runtime dustuyse (HUCRE 7 "HICBIRI KOSMUYOR" derse) kosulur.
+------------------------------------------------------------------------------
+   HUCRE 0  AYAR           degiskenler.  KAPI'yi SIFIRLAR -> 1,2,3 tekrar
+   HUCRE 1  DONANIM        GPU kapisi
+   HUCRE 2  DRIVE          Drive baglar
+   HUCRE 3  KOD       !!   kod klasorunu SILER ve yeniden klonlar.
+                           Surucu FAZ 3'te oradan arama betigini okuyor ->
+                           tam o anda kosarsan ARAMA KIRILIR.
+   HUCRE 4  BASLAT    !!   KOSAN SURUCUYU OLDURUR (pkill) ve yeniden
+                           baslatir.  Kosu sag iken KOSMA -- kaldigi yerden
+                           devam eder ama son olcumden sonraki adimlar gider.
+
+==============================================================================
+ KIRMIZI -- EGITIM KOSARKEN ASLA.  Bu defterde yok; ELLE eklersen
+            basina "KIRMIZI" yaz.  Ornekler: GPU'da tani/tarama kosan
+            hucreler, klasor silen hucreler.
+            (14 Eylul: egitim koserken ikinci bir GPU isi baslatildi,
+             runtime iki kez geri donusturuldu.)
+
+==============================================================================
+ KURAL:  Once HUCRE 7'yi kos.  Surecler ayakta gorunuyorsa SARI ve KIRMIZI
+         hucrelere DOKUNMA.  Ayakta degilse SARI sirayi kos.
+==============================================================================
+""")
+''')
+
+
+hucre(r'''
 # ============================================================================
 # HUCRE 0 — AYAR.  DENEYE OZEL TEK YER. Baska hicbir hucre degismez.
 # ============================================================================
@@ -201,7 +246,10 @@ KAPI["2 DRIVE"] = EV
 
 hucre(r'''
 # ============================================================================
-# HUCRE 3 — KAPI 3: KOD.  Colab'da YAMA YOK; kod GitHub'dan akar.
+# HUCRE 3 — KAPI 3: KOD.   [SARI -- kosu SAG iken KOSMA]
+#   Kod klasorunu SILIP yeniden klonlar. Surucu FAZ 3'te oradan arama
+#   betigini okur; tam o anda kosarsan arama kirilir.
+#   Colab'da YAMA YOK; kod GitHub'dan akar.
 #   3a  imzalar kaynakta var mi              (depoya itmeyi unuttuk mu)
 #   3b  iceri aktarilan modul AYNI klondan mi  (§7'nin en pahali hatasi)
 #   3c  mudahale ETKILI mi + kapatinca BIT-AYNI mi  (§7: etkisizlik = ariza)
@@ -298,7 +346,8 @@ print(f"\nBASLANGIC  "
 
 hucre(r'''
 # ============================================================================
-# HUCRE 4 — BASLAT.  Surucu ve bakici AYRI SUREC -> cekirdek SERBEST kalir.
+# HUCRE 4 — BASLAT.   [SARI -- kosu SAG iken KOSMA: pkill eder]
+#   Surucu ve bakici AYRI SUREC -> cekirdek SERBEST kalir.
 #   Bu hucre bitince defteri kapatabilirsin; kosu devam eder.
 # ============================================================================
 import subprocess, sys, os, time, json, shutil
@@ -346,7 +395,8 @@ assert p1.poll() is None, "SURUCU HEMEN OLDU — yukaridaki loga bak"
 
 hucre(r'''
 # ============================================================================
-# HUCRE 5 — RAPOR.  Dosyayi basar, HESAP YAPMAZ, GPU kullanmaz.
+# HUCRE 5 — RAPOR.   [YESIL -- her an kosulur]
+#   Dosyayi basar, HESAP YAPMAZ, GPU kullanmaz.
 #   Bakici zaten her 5 dk'da tazeliyor; burasi sadece okuyor.
 #   Defter kapaliyken de Drive'dan ayni dosya okunabilir: EV/RAPOR.txt
 # ============================================================================
@@ -362,7 +412,7 @@ else:                       # bakici daha ilk turunu atmadi — kendimiz ureteli
 
 hucre(r'''
 # ============================================================================
-# HUCRE 6 — KURTARMA.  Runtime koparsa: yeni defter ac, HUCRE 0-4'u kos.
+# HUCRE 6 — KURTARMA.   [YESIL -- her an kosulur]  Runtime koparsa: yeni defter ac, HUCRE 0-4'u kos.
 #   durum.json ve adim adli paketler Drive'da; kaldigi yerden devam eder.
 # ============================================================================
 import glob, os
@@ -386,6 +436,48 @@ print("   ...sonra HUCRE 4'u tekrar kos.")
 print("\n   BITMIS bir kolu geri almak istiyorsan bayragi silmek SART;")
 print("   yoksa paketi geri koysan bile kol atlanir ve hicbir sey degismez.")
 ''')
+
+hucre(r'''
+# ============================================================================
+# HUCRE 7 — CANLI DURUM.   [YESIL -- her an kosulur]
+#   HUCRE 0'a BAGIMLI DEGIL: cekirdek yeniden baslayinca degiskenler
+#   kayboluyor ve o anda en cok ihtiyac duyulan sey bu hucre oluyor.
+#   RAPOR.txt'i DEGIL, egriyi ve logu DOGRUDAN okur -- RAPOR.txt bakici
+#   tarafindan 5 dk'da bir yazildigi icin BAYAT olabilir.
+# ============================================================================
+import os, json, glob, time, subprocess
+_C = "/content/calis_@AD@"
+print(f"simdi {time.strftime('%H:%M:%S')}")
+# `ps | grep <betik>` KENDI komut satirini yakalar ve yanlis "kosuyor"
+# der (CLAUDE.md 7). Ilk harfi koseli parantez icine alinca yakalamaz.
+_p = "[" + "@AD@"[0] + "]" + "@AD@"[1:] + "_surucu"
+print(subprocess.run(["bash", "-lc",
+    f"ps -eo pid,etime,cmd | grep -E '[s]ifirdan|{_p}|[b]akici' "
+    "|| echo '!! HICBIRI KOSMUYOR -- runtime geri donusturulmus olabilir'"],
+    capture_output=True, text=True).stdout)
+for _k in sorted(glob.glob(f"{_C}/cikti*")):
+    _e = f"{_k}/egri_A_s0.json"
+    if not os.path.exists(_e):
+        continue
+    r = json.load(open(_e))
+    print(f"--- {os.path.basename(_k)}   {len(r)} olcum   "
+          f"dosya {time.strftime('%H:%M', time.localtime(os.path.getmtime(_e)))}")
+    _al = [k for k in ("one", "seen", "comp", "ent", "ent_yok",
+                       "ent_shortcut") if k in r[-1]]
+    print("   " + "".join(f"{a:>9s}" for a in ["step"] + _al))
+    for x in r[-6:]:
+        print("   " + f"{x['step']:9d}"
+              + "".join(f"{x.get(a, float('nan')):9.3f}" for a in _al))
+_l = sorted(glob.glob(f"{_C}/log/egitim_*.txt"))
+if _l:
+    print(f"--- {os.path.basename(_l[-1])}")
+    print("".join(open(_l[-1]).read().splitlines(True)[-3:]))
+_d = f"{_C}/durum.json"
+if os.path.exists(_d):
+    _j = json.load(open(_d))
+    print(f"--- durum: faz {_j.get('faz')}  {_j.get('faz_ad','')}")
+''')
+
 
 H = [k.replace("@AD@", AD).replace("@ONKAYIT@", _d["ONKAYIT"])
       .replace("@ORT@", _ort).replace("@IMZA@", _imza) for k in H]
