@@ -10,7 +10,7 @@ NEDEN BU ALAN (olculdu, `sema_hesap.py`):
   phi tavani = kopru tipinin ORTALAMA CIKIS DERECESI. Alan adi phi'yi
   degistirmez, TIP BASINA ILISKI SAYISI degistirir. Bir insanin dogal
   olarak 10 iliskisi vardir, bir bolgenin 3. Cografya semasi phi 3.01'de
-  tavan yapiyordu; burada ~5.8.
+  tavan yapiyordu; burada 7.04 (dosyayi kosunca basilir).
   Ama tek bir tipe (KISI) her seyi yiginca kisayol HER ZAMAN mumkun olur
   ve gomulu kontrol %59'dan %14'e duser. Bu yuzden OKUL / SEHIR / DERS de
   zenginlestirildi ve her iliski DAR kaynakli tutuldu.
@@ -31,7 +31,7 @@ UC TASARIM KURALI (her biri olculmus bir arizadan cikti):
      varligin KENDISI. Tek degerli oldugu icin hepsi degil -- OLCULDU:
         baba cocuk      350/700 DONUS, 350 GERCEK kompozisyon (kardesi cikar)
         ogretmen ogrenci 700/700 DONUS (tam esleme, istisnasiz)
-     Toplam disarida kalan: AYNI 2.297 + DONUS 2.816 = zincirlerin %9'u.
+     Toplam disarida kalan: AYNI 1.566 + DONUS 2.810 = zincirlerin %8'i.
      (Cografya verisinde bu %29 idi.)
 
 SOYADI KALITIMI: cocuk / kardes / anne / baba AYNI soyadi tasir; bir soyadi
@@ -39,10 +39,15 @@ blogu 50 kardes cifti = 100 kisi. Ebeveyn haritasi bu yuzden BLOK ICINDE
 kaydirilir -- global kaydirma butun cifleri tek halkaya baglayip kalitimi
 imkansiz kiliyordu. Assert ile denetleniyor.
 
-GERCEK olan : kisi adlari, 81 il, ders adlari, okul adlari
+GERCEK olan : kisi adlari, 80 il, ders adlari, okul adlari
 URETILMIS   : kim kimin akrabasi/ogretmeni/arkadasi (tohumla, tutarli)
 
-    python veri_okul.py [--dok cikti.txt]
+DOCSTRING'DEKI SAYILAR ELLE YAZILI -> BAYATLAR. veri_gercek.py'de tam olarak
+bu oldu (sema daralinca 5.700 yazili kaldi, gercek 4.140 idi) ve ancak
+GitHub'da goze carpinca yakalandi. Gecerli sayi her zaman dosyanin CIKTISI.
+
+    python veri_okul.py [--dok cikti.txt]      <- sayilar burada
+    python veri_kontrol.py                     <- 23 tutarlilik kontrolu
 """
 import argparse
 import io

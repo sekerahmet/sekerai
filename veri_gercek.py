@@ -7,19 +7,21 @@ tutturmak icin 1.200 ulke uyduruyordu (`ulke_431`). Okunmuyordu. Dunyada
 
     GERCEK olan  : ulke adi, baskent, ana dil, sehir adlari, dil ailesi
     URETILMIS    : komsuluk (kita icinde cografi siraya gore komsu secilir),
-                   bolge adlari (<Ulke>_Kuzey/_Guney/_Bati), bolge-sehir
-                   eslesmesi, listede olmayan sehirler (<Ulke>_Sehir3)
+                   bolge adlari (<Ulke>_Kuzey, <Ulke>_Guney), bolge-sehir
+                   eslesmesi, 376/780 sehir (<Ulke>_SehirN)
 
-Olgu sayisi ~5.700; egitim hacmini olgu sayisi DEGIL 2-adimli zincir sayisi
-ve phi belirliyor (phi = egitim 2-adimlisi / atomik olgu). Zincir sayisi
-kombinatorik oldugu icin 10.000'i zaten asiyor.
+ATOMIK OLGU 4.140, 2-ADIMLI ZINCIR 12.480 (phi tavani 3.01). Egitim hacmini
+olgu sayisi DEGIL zincir sayisi ve phi belirliyor (phi = egitim 2-adimlisi /
+atomik olgu). BU SAYILAR DOSYAYI KOSUNCA BASILIR; docstring'e elle yazilan
+her sayi bayatlar -- bu blok bir kez bayatladi (semayi daraltinca 5.700
+yazili kaldi, gercek 4.140 oldu) ve ancak GitHub'da goze carpinca yakalandi.
 
 GOMULU KONTROL: graf TIPLI oldugu icin kisayol f(e,r2) HER ZAMAN cevap
 uretemez:
 
-    Turkiye komsusu baskenti ?  -> Yunanistan -> Atina
+    Turkiye komsusu baskenti ?  -> Kibris -> Lefkosa
         KISAYOL "Turkiye baskenti" = Ankara        VAR   (model bunu ogrenir)
-    Izmir bolgesi merkezi ?     -> Turkiye_Bati -> ...
+    Izmir bolgesi merkezi ?     -> Turkiye_Kuzey -> Ankara
         KISAYOL "Izmir merkezi"                    YOK   (sehrin merkezi olmaz)
 
 Ayni modelde kisayolu MUMKUN olan ve OLMAYAN zincirleri ayri olceriz.
