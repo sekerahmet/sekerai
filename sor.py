@@ -34,6 +34,7 @@ KOMUTLAR
     :v [TIP] [n]           varlik listele        :i        iliski listele
     :r [KUME]              rastgele soru sec     (KUME: ent / comp / egitim)
     :b <varlik>            varligin butun olgulari
+    :z <varlik> <r> <r>..  ZINCIR: adim adim yurut (KESIF, onkayit DISI)
     :q                     cik
 """
 import argparse
@@ -201,6 +202,47 @@ def main():
                 sat += f"{ad(t):20s}{p:5.3f} {'DOGRU' if t == h else '':8s}"
             print(sat)
 
+    def zincir(e, iliskiler):
+        """Modele zinciri ADIM ADIM yurut: her adim 1-ADIMLI soru, cikan
+        cevap bir sonraki adima GERI BESLENIR.
+
+        DIKKAT -- KESIF ARACI, ONKAYIT DISI. Olctugu sey KOMPOZISYON DEGIL:
+        her adim ayri bir OLGU sorusu, yani modelin BILGISI + hatanin
+        BIRIKMESI. Hukum veren olcum yalniz pencere.py'dendir (CLAUDE.md 0);
+        buradaki hicbir sayi birincil okumaya girmez."""
+        print(chr(10) + "ZINCIR  " + e + " -> " + " -> ".join(iliskiler))
+        g = [eid[e]]
+        for r in iliskiler:
+            h = facts[g[-1], rid[r]] if g[-1] >= 0 else -1
+            g.append(int(h))
+        print("  gercek  " + " -> ".join(
+            (ad(x) if x >= 0 else "(YOK)") for x in g))
+        print()
+        print("  adim iliski      " + "".join(f"{k.ad:^30s}" for k in kollar))
+        cur = {k.ad: eid[e] for k in kollar}
+        for i, r in enumerate(iliskiler):
+            sat = f"  {i+1:4d} {r:11s} "
+            for k in kollar:
+                c = cur[k.ad]
+                if c < 0 or tip[ad(c)] not in VM.SEMA[r]:
+                    sat += f"{'(bu tipte iliski YOK)':22s}{'':8s}"
+                    cur[k.ad] = -1
+                    continue
+                X = np.zeros((1, S.T_LEN), np.int64)
+                X[0, :6] = [S.Q1, S.ENT_OFF + c, S.REL_OFF + rid[r], S.QM, 0, S.EOS]
+                t = k.tahmin(X, 3, 1)[0][0]
+                sat += f"{ad(t):22s}{('yolda' if t == g[i+1] else 'SAPTI'):8s}"
+                cur[k.ad] = t
+            print(sat)
+        print()
+        for k in kollar:
+            son = cur[k.ad]
+            print(f"  {k.ad:4s} son cevap "
+                  f"{(ad(son) if son >= 0 else '(YOK)'):22s}"
+                  f"{'DOGRU' if son == g[-1] else 'YANLIS'}"
+                  f"   (gercek {ad(g[-1]) if g[-1] >= 0 else '(YOK)'})")
+
+
     while True:
         try:
             s = input("\n> ").strip()
@@ -231,6 +273,14 @@ def main():
                 h = facts[eid[e], rid[r]]
                 if h >= 0:
                     print(f"   {e:20s} {r:12s} {ad(h)}")
+            continue
+        if s.startswith(":z"):
+            q = s.split()
+            if len(q) < 3 or q[1] not in eid:
+                print("  !! :z <varlik> <r1> <r2> [<r3> ...]"); continue
+            if any(x not in rid for x in q[2:]):
+                print("  !! bilinmeyen iliski  (:i ile listele)"); continue
+            zincir(q[1], q[2:])
             continue
         if s.startswith(":r"):
             p = s.split()
