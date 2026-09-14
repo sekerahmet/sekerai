@@ -20,23 +20,24 @@ DENEYLER = {
     ),
     "d33": dict(
         ONKAYIT="ONKAYIT_D33_PHI_EKSENI.md",
-        # d33 phi'yi N_PAIR/P_TRAIN ile kuruyor -> o asserti de imzala
-        # IMZA yalniz sifirdan.py'yi denetliyordu: ISKELEYI (kosu/pencere/
-        # arsivle/bakici/surucu) itmeyi unutursak KAPI 3a GECIYOR ve Colab
-        # eski altyapiyla kosuyordu. Her dosyanin kendi imzasi var.
+        # IMZA = YAPISAL capa, MESAJ METNI DEGIL. 13 Eylul: kosu.py'deki
+        # "COMMIT DEGISTI ama YARIM IS" mesajini yeniden yazdim, imza o
+        # metni ariyordu ve kapi bosuna atesledi -- kod ESKI degildi,
+        # IMZA eskiydi. Fonksiyon adi / cagri / atama sec; cumle secme.
         IMZA={
             "sifirdan.py": [
                 'WARM_OF      = int(os.environ.get("WARM_OF"',
                 'self.mask_key = None',
                 'm[:, self.mask_key] = True',
-                'N_PAIR={NP} > mumkun cift sayisi'],
-            "sablon/kosu.py": ['def bitti_mi', 'COMMIT DEGISTI ama YARIM IS'],
-            "sablon/pencere.py": ['_eksik_kol', 'OLCULEMEDI'],
-            "sablon/arsivle.py": ['ONCE KOPYALA, SONRA ADIMI KOPYADAN OKU'],
-            "sablon/bakici.sh": ['arsivle.py HATA'],
-            "deney/d33.py": ['K.bitti_mi(ad, alt']},
+                'assert NP <= len(allp)',
+                'os.replace(_sy + ".tmp", _sy)'],
+            "sablon/kosu.py": ['def bitti_mi', 'def _commit_kapisi'],
+            "sablon/pencere.py": ['_eksik_kol', 'raise FileNotFoundError'],
+            "sablon/arsivle.py": ['_alinan_', 'os.replace(gec, hy)'],
+            "sablon/kayan_pencere.py": ['def adimlari_bul'],
+            "sablon/bakici.sh": ['echo "--- tur'],
+            "deney/d33.py": ['K.bitti_mi(ad, alt', '_SEC = [x.strip()']},
         # N_PAIR/P_TRAIN = phi 5.06'yi TANIMLAYAN iki sayi (onkayit 3).
-        # Sablonda bunlara yer yoktu; elle eklenmesi gerekiyordu.
         ORT=dict(PRESET="grok_uzun", HOP2_FRAC="0.10", MEM_AT="4",
                  RESUME_EVERY="1", WARM_OF="120000",
                  N_PAIR="56", P_TRAIN="50"),

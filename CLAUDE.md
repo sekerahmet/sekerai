@@ -209,6 +209,11 @@ YEREL  sifirdan.py duzelt + uc testi kos
 
 Colab'daki yama iki ayrı kaynak yaratıyordu (`/content/_d` yamalı,
 `/content/_a` yamasız) ve hangisinin koştuğu belirsizdi. Klon tek kaynak.
+**İmza YAPISAL bir çapa olmalı, mesaj metni DEĞİL.** 13 Eylül: `kosu.py`'deki
+bir hata mesajını yeniden yazdım, imza o cümleyi arıyordu ve kapı boşuna
+ateşledi — kod eski değildi, **imza** eskiydi. Fonksiyon adı (`def bitti_mi`),
+çağrı (`K.bitti_mi(ad, alt`), atama (`_SEC = [x.strip()`) seç; cümle seçme.
+
 Bunun yerine **imzaları assert et**: kodda bulunması gereken string'leri
 listeye koy, klonda yoksa dur. *"Yereli düzelttim ama itmeyi unuttum"*
 sessizce değil, ilk hücrede patlar.
