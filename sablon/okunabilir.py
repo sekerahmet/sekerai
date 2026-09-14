@@ -113,8 +113,12 @@ def main():
     for i, blk in enumerate(net.blocks):
         blk.mask_key = poz if (blok and i in blok) else None
 
+    # RASTGELE ornek: ent_ev VARLIGA GORE SIRALI, ilk 12 hep AYNI varlik
+    # olur ve tek varligin davranisi genelin yerine gecer (13 Eylul: A5'te
+    # 1/12 kisayol gorundu, gercek oran 0.82 idi).
     n = 12
-    lst = ent_ev[:n]
+    rg = np.random.RandomState(0)
+    lst = [ent_ev[i] for i in rg.permutation(len(ent_ev))[:n]]
     X, tp, tt, _ = S.enc_two(lst)
     with torch.no_grad():
         lg, _ = net(torch.from_numpy(X).to(S.DEV))
@@ -136,6 +140,27 @@ def main():
         print(f"   {E[e]:13s} {R[r1]:11s} {R[r2]:11s} ? "
               f"{E[a]:12s} {E[t]:12s} {ne}")
     print(f"\n   {n} ornekte: " + "  ".join(f"{k} {v}" for k, v in sayac.items()))
+
+    # BILINEN DEGERE KARSI DOGRULA (CLAUDE.md 10a): ayni olcumu TUM ENT
+    # setinde yap, egrideki sayiyla yan yana bas. Tutmuyorsa ARAC bozuk.
+    TX, Ttp, _t, _e = S.enc_two(ent_ev)
+    dg = ks_ = 0
+    lo_, hi_ = S.ENT_OFF, S.ENT_OFF + S.CFG['N_ENT']
+    with torch.no_grad():
+        for i0 in range(0, len(TX), 512):
+            xb = torch.from_numpy(TX[i0:i0 + 512]).to(S.DEV)
+            ixb = torch.from_numpy(Ttp[i0:i0 + 512]).to(S.DEV)
+            arb = torch.arange(len(ixb), device=S.DEV)
+            pr = (net(xb)[0].float()[arb, ixb][:, lo_:hi_]
+                  .argmax(-1).cpu().numpy())
+            for k0, (e0, _r1, r2_, _b, a0) in enumerate(ent_ev[i0:i0 + 512]):
+                dg += int(pr[k0] == a0)
+                ks_ += int(pr[k0] == facts[e0, r2_])
+    m = len(ent_ev)
+    print(f'
+   TUM ENT setinde ({m} ornek):')
+    print(f'      dogruluk (ent) {dg/m:.4f}    kisayol {ks_/m:.4f}')
+    print('      -> EGRIDEKI ent / ent_shortcut ile tutmali; tutmuyorsa ARAC bozuk')
     print("   KISAYOL = ikinci iliskiyi DOGRUDAN ilk varliga uygulamis")
     print("   KOPRU   = ara cevabi yazmis, ikinci adimi atlamis")
 
