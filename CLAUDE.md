@@ -56,7 +56,10 @@ CIKARIM  Yeri bilince, orada maskeleyip AYNI TOHUM + AYNI VERIYLE
 ANTITEZ  Peki OLCEK degisince?
 D3.2   Veri x4 -> YANLIS EKSEN, 'olcek disi' hukmu. Literature bakilmamisti.
 D3.3   Literatur sonrasi dogru eksen: phi (3.03 -> 5.06).
-       SONUC: kazanc DARALIYOR ama yok olmuyor.
+       SONUC: TEZ AYAKTA. Maskelemenin CARPANI korunuyor:
+         phi 3.03  4.58 / 4.99 / 5.98x   (uc bagimsiz kol cifti)
+         phi 5.06  3.19 / 3.79x
+       Dusen sey carpan degil, IKI KOLUN DA mutlak seviyesi.
          onceden yazilan pencere  A5 0.0090 -> D5 0.0287   3.19x
          her kol kendi en iyisinde 0.0357 -> 0.1353        3.79x  [SONRADAN]
          D3'un 0.3607'si ile kiyas: tepe %37, pencerede %7,9
