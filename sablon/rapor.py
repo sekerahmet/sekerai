@@ -76,7 +76,15 @@ for alt in altlar:
     # `seen` = EGITIMDE gorulmus 2-hop zincirlerdeki dogruluk. Ezber ile
     # genellemeyi ayiran sutun bu: seen yuksek + comp dusuk = ezberliyor ama
     # genellemiyor; seen de dusuk = ezberleyemiyor bile (kapasite).
-    print(f" {'adim':>7} {'1hop':>6} {'seen':>6} {'comp':>6} {'ent':>6} {'ent2':>6}"
+    # ENT2 slotu bos olan kosularda (VERI=... modu) yerine ENT-YOK basilir:
+    # gomulu kontrol deney G'nin TEK ayirt edici olcusu ve rapor onu hic
+    # gostermiyordu -- `ent2` sutunu saatlerce `nan` basiyordu. Rapor
+    # kosu KILITLIYKEN bakilabilsin diye var (CLAUDE.md 7); goremedigimiz
+    # sey icin var olmasinin anlami yok.
+    _yok = any("ent_yok" in r for r in egri)
+    _u4 = "ENTYOK" if _yok else "ent2"
+    _a4 = (lambda r: r.get("ent_yok", float("nan"))) if _yok else           (lambda r: r.get("ent2", float("nan")))
+    print(f" {'adim':>7} {'1hop':>6} {'seen':>6} {'comp':>6} {'ent':>6} {_u4:>6}"
           f" {'kisayol':>7}"
           + (f" |{'comp':>8} {'ent':>7} | durum" if kiyas else ""))
     for r in egri[-10:]:
@@ -92,7 +100,7 @@ for alt in altlar:
                 u.append(ad_)
         print(f" {r['step']:7d} {r['one']:6.3f} {r.get('seen', float('nan')):6.3f}"
               f" {r['comp']:6.3f} {r['ent']:6.3f}"
-              f" {r.get('ent2', float('nan')):6.3f} {r['ent_shortcut']:7.3f}"
+              f" {_a4(r):6.3f} {r['ent_shortcut']:7.3f}"
               + (f" |{b.get('comp', float('nan')):8.3f} "
                  f"{b.get('ent', float('nan')):7.3f} | F{f} "
                  f"{','.join(u) if u else 'tamam'}" if kiyas else "")

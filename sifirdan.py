@@ -233,7 +233,11 @@ ENT_YOK = []           # VERI modunda ENT-YOK sinavi. BOSSA olculmez.
 if VERI:
     import importlib
     _VM = importlib.import_module("veri_" + VERI)
-    CFG["N_ENT"] = sum(len(_VM.__dict__["kur"]()["ad"][t]) for t in _VM.TIPLER)
+    # kur() BIR KEZ. Onceki hali generator icinde cagiriyordu -> her ic
+    # import'ta grafi DORT kez kuruyordu (tip sayisi kadar). Dogruydu ama
+    # bosunaydi; kur() RNG tuketiyor ve her surecte kosuyor.
+    _G0 = _VM.kur()
+    CFG["N_ENT"] = sum(len(_G0["ad"][t]) for t in _VM.TIPLER)
     CFG["N_REL"] = len(_VM.ILISKI)
 
 # ozel token'lar

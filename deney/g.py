@@ -60,7 +60,8 @@ KON.update(
     PENCERE=[100000, 105000, 110000, 115000, 120000],   # onkayit 5.1: SON %20
     PHI_BEKLENEN=5.09,
     OLGUNLUK=0.50,          # comp(G @ pencere) -- gorev ogrenilmis mi
-    MEKANIZMA=0.30,         # ON KAPI: kisayol(G @ pencere), onkayit 5.0
+    MEKANIZMA=0.30,         # BILGI: D3.3'un tasinmis esigi, DURDURMAZ
+    SANS_KAT=10,            # ON KAPI: kisayol >= SANS_KAT x sans (onkayit 5.0)
     TOL_YORUNGE=9.9,
     REF_AD="G",
     KONTROL_ALT=G_,
@@ -69,10 +70,12 @@ KON.update(
            "DOLANMA": ["ent_shortcut", 0.00, +1, 1]},
 )
 if SMOKE:
-    # MEKANIZMA -1 DEGIL 0.0: -1 olsaydi ON KAPI blogu tumuyle atlanir ve
-    # `pencerede()` hic kosmazdi -- duman testi tam da o yolu denemeli.
     KON.update(RAPOR_TOPLAM=2 * 600, HEDEF_SON=600, PENCERE=[400, 600],
-               OLGUNLUK=-1.0, MEKANIZMA=0.0, PHI_BEKLENEN=None)
+               OLGUNLUK=-1.0, SANS_KAT=0, PHI_BEKLENEN=None)
+    # SANS_KAT=0: kapi KOSAR (pencerede() sinanir) ama gecer -> duman testi
+    # FAZ 3 ve 4'e de ulasir. MEKANIZMA=-1 yapsaydik kapi blogu TUMUYLE
+    # atlanirdi; 0.0 yapsaydik gercek esik (0.05) yine durdururdu -- ilk
+    # denemede tam oyle oldu ve arama/GM yolu sinanmadan kaldi.
 
 _SEC = [x.strip() for x in os.environ.get("KOLLAR", "G,GM").split(",") if x.strip()]
 assert _SEC and set(_SEC) <= {"G", "GM"}, f"bilinmeyen kol: {_SEC}"
@@ -93,6 +96,26 @@ _atom = len(_d[2])
 assert _atom < S.CFG["N_ENT"] * S.CFG["N_REL"], \
     "olgu sayisi tam carpim -- VERI bayragi acik mi?"
 PHI = len(_d[3]) / _atom
+
+# --- SANS SEVIYESI ---------------------------------------------------------
+# Birincil olcu bir ORAN (GM/G). Paydasi sans seviyesine yapisiksa oran
+# etkiyi degil GURULTUYU olcer: G 0.004'e duserse oran sisirilir, G tam
+# sansta ise oran 1'e cakilir. D3.3'te maskesiz kolun ENT'i 0.0090 idi;
+# BURADA sans 0.005 civari, yani oyle bir deger sansin ancak 1.8 kati.
+# Onkayitta boyle bir taban YOKTU -- eklendi (kosudan ONCE).
+_G0 = _VM_G = None
+import veri_okul as _VOK
+_gg = _VOK.kur()
+_tipsay = {t: len(_gg["ad"][t]) for t in _VOK.TIPLER}
+_E = [a for t in _VOK.TIPLER for a in _gg["ad"][t]]
+def _sans(lst):
+    if not lst:
+        return None
+    return sum(1.0 / _tipsay[_gg["tip"][_E[a]]] for *_, a in lst) / len(lst)
+SANS_AYIRT, SANS_YOK = _sans(_d[5]), _sans(S.ENT_YOK)
+K.log(f"  SANS SEVIYESI  ENT-AYIRT {SANS_AYIRT:.5f} (1/{1/SANS_AYIRT:.0f})   "
+      f"ENT-YOK {SANS_YOK:.5f} (1/{1/SANS_YOK:.0f})")
+KON["SANS_AYIRT"], KON["SANS_YOK"] = SANS_AYIRT, SANS_YOK
 K.log(f"DENEY G basliyor  commit {KON['commit']}")
 K.log(f"  VERI={os.environ.get('VERI', '(YOK)')}  sozluk {S.VOCAB} "
       f"({S.CFG['N_REL']} iliski + {S.CFG['N_ENT']} varlik)")
@@ -140,13 +163,23 @@ if "GM" not in _SEC:
 
 # ============================================ FAZ 2: ON KAPI (onkayit 5.0)
 ksy = pencerede(G_, "ent_shortcut")
+# ESIK TASINDI, ONU BILEREK KULLANIYORUZ. 0.30 D3.3'un RASTGELE grafindaki
+# A5'ten geliyor; bu veri farkli ve CLAUDE.md 10b tam olarak "bir esik baska
+# bir rejime tasinmaz" diyor. O yuzden DURDURAN esik 0.30 DEGIL, SANSIN 10
+# KATI: mekanizmanin VAR olup olmadigini sorar. 0.30 yalniz "D3.3 ile ayni
+# guclulukte mi" diye BILGI olarak basilir.
+DUR_ESIK = KON["SANS_KAT"] * SANS_AYIRT
 K.log(f"ON KAPI  G'nin ENT-AYIRT kisayol orani = "
-      f"{'yok' if ksy is None else f'{ksy:.4f}'}   (esik {KON['MEKANIZMA']})")
-if KON["MEKANIZMA"] >= 0:
+      f"{'yok' if ksy is None else f'{ksy:.4f}'}")
+K.log(f"  durduran esik  {DUR_ESIK:.4f}  "
+      f"(sansin {KON['SANS_KAT']} kati, sans {SANS_AYIRT:.5f})")
+K.log(f"  bilgi: D3.3'un tasinmis esigi 0.30 -> "
+      f"{'ustunde' if (ksy or 0) >= 0.30 else 'ALTINDA (ayni guclulukte degil)'}")
+if KON["SANS_KAT"] >= 0:
     assert ksy is not None, "G egrisi yok -> on kapi olculemez"
-    if ksy < KON["MEKANIZMA"]:
+    if ksy < DUR_ESIK:
         K.kaydet(faz=9, faz_ad="DURDU: ON KAPI GECILEMEDI")
-        K.log(f"  !! kisayol {ksy:.4f} < {KON['MEKANIZMA']} -> bu veride "
+        K.log(f"  !! kisayol {ksy:.4f} < {DUR_ESIK:.4f} -> bu veride "
               f"bastirilacak bir mekanizma YOK. GM KOSULMAYACAK.")
         K.log("     Bu bir basarisizlik degil, SONUCTUR (onkayit 5.0).")
         sys.exit(0)
@@ -219,6 +252,15 @@ if not K.bitti_mi("GM", GM_, KON["PENCERE"]):
 else:
     K.log("GM zaten bitmis, atlaniyor")
 
+# EKSIK KONTROL: YANLIS YERE maskelenmis kol (D3.3'teki K5) G'de de YOK.
+# d33.py bunu acikca logluyor; G'nin onkaydinda yazili degildi.
+# SONUC: GM > G cikarsa "maskeleme yardim etti" DENIR, ama "YER belirleyici"
+# DENEMEZ -- kazanc yerden mi maliyetten mi, bu deney soyleyemez.
+# (phi 3.03'te D/K = 8.1x olculmustu; bu veride olculmemis olacak.)
+K.log("!! KONTROL KOLU YOK (yanlis yere maskeli). 'Kazanc YERDEN mi "
+      "MALIYETTEN mi' sorusu bu deneyde CEVAPSIZ kalir.")
+K.kaydet(rapor_ek=["KONTROL KOLU YOK: 'dogru YERE' kaydi bu deneyde "
+                   "SINANMIYOR (D3.3'te K5 de yoktu)"])
 K.kaydet(faz=3, faz_ad="BITTI", adim=len(_SEC) * HEDEF_SON)
 _np = len(KON["PENCERE"])
 h = lambda a: sum(os.path.exists(
@@ -238,14 +280,25 @@ ARG = ["--cikti", K.y("BIRINCIL_G.json"),
        # pencere.py'de `ent_kisayol` -- ayni buyuklugun IKI ADI var ve yanlisi
        # sessizce "ATLANDI" diye gecerdi.
        "--kapi", f"OLGUNLUK: G comp >= {KON['OLGUNLUK']}",
-       "--kapi", f"ON-KAPI-kisayol-var: G ent_kisayol >= {KON['MEKANIZMA']}",
-       "--kapi", "BIRINCIL-5.1-kazanc: GM/G ent >= 2.0",
+       "--kapi", f"ON-KAPI-kisayol-var: G ent_kisayol >= {DUR_ESIK:.4f}",
+       # BIRINCIL IKI PARCALI. Oran tek basina yeterli DEGIL: payda sans
+       # seviyesine yapisiksa (G ~ 0.005) oran gurultuyu buyutur. FARK kapisi
+       # paydadan bagimsiz ve ayni hukmu verir. IKISI DE gecmeli.
+       "--kapi", "BIRINCIL-5.1a-oran: GM/G ent >= 2.0",
+       f"--kapi", f"BIRINCIL-5.1b-fark: GM-G ent >= {2*SANS_AYIRT:.4f}",
+       # Oranin okunabilir olmasi icin PAYDA sansin ustunde olmali.
+       # Gecmezse oran "ATLANMAZ" ama hukum HATALI OKUNUR -> etiketle.
+       f"--kapi", f"PAYDA-SAGLIGI: G ent >= {2*SANS_AYIRT:.4f}",
        "--kapi", "MEKANIZMA-5.2-kisayol-dustu: GM-G ent_kisayol < 0.0",
        # 5.3 cebirsel sadelesme: (GM.ent/G.ent)/(GM.ent_yok/G.ent_yok)
        #                       = (GM.ent/GM.ent_yok)/(G.ent/G.ent_yok)
        "--kapi", "GOMULU-KONTROL-5.3: GM/G ent_bolu_yok > 1.0",
-       "--kapi", "OZGULLUK-5.4-G: G seen >= 0.95",
-       "--kapi", "OZGULLUK-5.4-GM: GM seen >= 0.95",
+       # 5.4'un AMACI "GM'de cokmus mu" -- bu bir KIYAS. Mutlak kapi bunu
+       # test etmiyordu: ikisi birden 0.93'te olsa GM'e haksizca "maske
+       # kapasiteyi yedi" denirdi. FARK asil kapi, mutlak olan saglik kontrolu.
+       "--kapi", "OZGULLUK-5.4a-fark: GM-G seen >= -0.02",
+       "--kapi", "SAGLIK-seen-G: G seen >= 0.90",
+       "--kapi", "SAGLIK-seen-GM: GM seen >= 0.90",
        "--kapi", "SAGLIK-1hop: GM bir_hop >= 0.98"]
 # ORTAM ONEKI SART: pencere.py `import sifirdan` yapiyor, sifirdan CFG'yi
 # ORTAMDAN kuruyor. VERI/PRESET olmadan VOCAB 1085 yerine 4016 olur ve
@@ -258,7 +311,12 @@ _YOL = os.path.join(KON["KOD"], "sablon", "pencere.py")
 # TIRNAK SART: kapi dizeleri BOSLUK iceriyor ve icinde ">=" var. Tirnaksiz
 # basilan komut kabuga yapistirildiginda ">=" YONLENDIRME olur, "=" adinda
 # dosya yaratir ve argparse'a cop gider. `" ".join(ARG)` bunu yapiyordu.
-_t = lambda x: f'"{x}"' if (" " in x or ">" in x or "<" in x) else x
+# BAYRAK DISINDAKI HER SEY TIRNAKLANIR. Onceki kosul "bosluk ya da <> varsa"
+# idi ve yollar disarida kaliyordu: Windows'ta uretilen
+# C:\AI_NEW_MODEL\sablon\pencere.py bash'te "\s" -> "s" diye cozulup
+# C:AI_NEW_MODELsablonpencere.py oluyordu. Colab'da yollar egik cizgili
+# oldugu icin orada gorunmezdi -- yani YEREL'de denenmedikce yakalanmazdi.
+_t = lambda x: x if x.startswith("--") else '"' + x + '"'
 _KOMUT = _ONEK + " python " + _t(_YOL) + " " + " ".join(_t(x) for x in ARG)
 K.log("BIRINCIL OKUMA:" + chr(10) + "  " + _KOMUT)
 json.dump(dict(onek=_ONEK, arg=ARG, komut=_KOMUT),

@@ -222,9 +222,17 @@ print(f"KAPI 3a GECTI  commit {COMMIT}  md5 {MD5[:10]}  "
 # (13 Eylul: N_PAIR=80 tam boyle sizmisti).
 _KOSUYA_OZEL = ("MASK_KEY", "MASK_BLK", "RESUME_FROM", "INIT_FROM", "OUT",
                 "STEPS", "SHARE", "IDENT_MODE")
+# VERI/ENT_PAY/COMP_PAY bu listeye 14 Eylul'de EKLENDI. Olculdu: deney G
+# VERI=okul ile kosuyor, d33'un ORT'unda VERI YOK ve eski liste onu
+# silmiyordu -> ayni runtime'da G'den SONRA d33 kosulursa d33 sessizce
+# OKUL VERISIYLE egitilirdi. Ustelik d33'un PHI kapisi bunu GORMEZ:
+#   d33 bekleneni 5.06, tolerans 0.05;  okul verisinin phi'si 5.0857
+#   fark 0.0257  ->  KAPI GECER.
+# Yani sizintiyi yakalamasi gereken tek kapi, 0.024 farkla kor kaliyordu.
 for _v in _KOSUYA_OZEL + ("PRESET", "ARMS", "SEEDS", "HOP2_FRAC", "MEM_AT",
                           "RESUME_EVERY", "WARM_OF", "N_ENT", "N_REL",
-                          "N_PAIR", "P_TRAIN"):
+                          "N_PAIR", "P_TRAIN",
+                          "VERI", "ENT_PAY", "COMP_PAY"):
     os.environ.pop(_v, None)
 # Elle kopyalanmis filtre listesi YOK: ORT tek kaynak. Eskiden defterdeki
 # liste ile surucudeki liste birbirini tutmuyordu ve KAPI 3c modeli
@@ -237,7 +245,13 @@ import sifirdan as S
 assert os.path.realpath(S.__file__).startswith(os.path.realpath(KOD)), \
     f"BASKA KLONDAN geliyor: {S.__file__}"
 assert "self.mask_key" in inspect.getsource(S.Block.forward), "modul YAMASIZ"
-print(f"KAPI 3b GECTI  S.__file__ = {S.__file__}")
+# VERI KAPISI: liste elle tutuluyor ve bir dahakine yine unutulabilir.
+# Bu assert dogrudan SONUCU denetliyor -- modul hangi veriyi kurdu?
+assert S.VERI == ORT.get("VERI", ""), (
+    f"VERI UYUSMUYOR: modul '{S.VERI}' kurdu, deney '{ORT.get('VERI','')}' "
+    f"istiyor -> onceki oturumdan SIZMIS ortam degiskeni")
+print(f"KAPI 3b GECTI  S.__file__ = {S.__file__}   VERI={S.VERI or '(yok)'}  "
+      f"VOCAB={S.VOCAB}")
 
 _n = S.Net(KOL, S.CFG).to(S.DEV).eval()
 _x = torch.randint(0, _n.emb.num_embeddings, (8, S.T_LEN), device=S.DEV)
