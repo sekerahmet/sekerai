@@ -13,3 +13,8 @@ belge/
 # ham kosu verisi: Drive'dan cekilen anlik goruntu/olcum dosyalari.
 # Depo PUBLIC ve bunlar 17 MB'lik ikili dosyalar -- ASLA girmemeli.
 veri/
+
+# kosu ciktilari: ikili, buyuk, yeniden uretilebilir. Depo PUBLIC.
+*.pt
+*.npz
+*.parquet
