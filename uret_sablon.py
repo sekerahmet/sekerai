@@ -91,6 +91,40 @@ DENEYLER = {
                  BUTCE="80000", WARM_OF="80000", VERI="okul",
                  ENT_PAY="0.20", COMP_PAY="0.10"),
     ),
+    "h": dict(
+        ONKAYIT="ONKAYIT_H_MASKE_DOZ.md",
+        IMZA={
+            "sifirdan.py": [
+                'VERI = os.environ.get("VERI"',
+                'def olcme_listeleri',
+                'KISAYOLUN YENIDEN-OKUNMASINI',
+                'global ENT_YOK, ENT_ARAMA',
+                'm[:, self.mask_key] = True',
+                'warm = max(10, (WARM_OF or S) // 20)'],
+            "veri_okul.py": ['def zincirler', 'def _esle(', 'def _devirsiz('],
+            "veri_kontrol.py": ['hicbir iliski SABIT KAYDIRMA degil'],
+            # KONFIG KAPISI: kol C bu yuzden gecersiz kaldi (belge/KOLLAR.md).
+            # H'nin dort kolu AYNI klasor agacinda; yanlis MASK_BLK ile
+            # surdurme tam bu deneyde olumcul olurdu.
+            "sablon/kosu.py": ['def bitti_mi', 'def _commit_kapisi',
+                               'def _sorulmayan', 'def konfig_kapisi_tam',
+                               'if env["RESUME_FROM"]:'],
+            "sablon/pencere.py": ['S.olcme_listeleri(one', 'olcme seti parmak izi'],
+            "sablon/arsivle.py": ['_alinan_', 'os.replace(gec, hy)'],
+            "sablon/kayan_pencere.py": ['def adimlari_bul'],
+            "sablon/gpu_kapisi.py": ['def gpu_bos_mu'],
+            "sablon/maske_tara.py": ['TEK BLOK TARAMASI', 'def _sub'],
+            "sablon/bakici.sh": ['echo "--- tur'],
+            "deney/h.py": ['KOLLAR = [("H4"', 'WARM_OF=120000 ZORUNLU']},
+        # WARM_OF != BUTCE  -- BILEREK. Isinma max(10, WARM_OF//20) = 6000,
+        # G/GM'nin AYNISI (onlar 120.000 kostu). 80.000 verilseydi 4000 olur
+        # ve yeni kollar G/GM'nin yorungesinden ayrilirdi -> doz-yanit
+        # kiyaslanamaz hale gelirdi. §6'nin WARM_OF maddesi tam bu hatadan.
+        # assert WARM_OF >= STEPS geciyor (120000 >= 80000).
+        ORT=dict(PRESET="grok_uzun", MEM_AT="4", RESUME_EVERY="1",
+                 BUTCE="80000", WARM_OF="120000", VERI="okul",
+                 ENT_PAY="0.20", COMP_PAY="0.10"),
+    ),
 }
 
 if len(sys.argv) < 3 or sys.argv[2] not in DENEYLER:
