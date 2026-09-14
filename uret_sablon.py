@@ -51,7 +51,9 @@ DENEYLER = {
             "sifirdan.py": [
                 'VERI = os.environ.get("VERI"',
                 'def build_data_dis',
-                'ENT_YOK = ent_yk',
+                'ENT_YOK, ENT_ARAMA = ent_yk, ent_ar',
+                'global ENT_YOK, ENT_ARAMA',
+                'ARAMA/HUKUM varlik sizintisi',
                 '("ent_yok", EY, brY, scY, LY)',
                 'self.mask_key = None',
                 'm[:, self.mask_key] = True',
