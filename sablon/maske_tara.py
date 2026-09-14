@@ -40,7 +40,9 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sifirdan as S
+from gpu_kapisi import gpu_bos_mu
 
 
 def yukle(klasor, tohum, adimlar):
@@ -64,8 +66,12 @@ def main():
     ap.add_argument("--adim", required=True, help="tek sayi ya da virgullu")
     ap.add_argument("--tohum", type=int, default=0)
     ap.add_argument("--n", type=int, default=2000, help="ornek sayisi")
+    ap.add_argument("--zorla", action="store_true",
+                    help="egitim kosuyor olsa bile baslat")
     a = ap.parse_args()
 
+    # EGITIM KOSARKEN BASLAMA (14 Eylul: uc runtime geri donusumu).
+    gpu_bos_mu(zorla=a.zorla, ad="maske taramasi")
     assert S.VERI, "VERI bayragi YOK"
     facts, _p, _one, _tr2, comp, ent, _se, _ue, _e2 = S.build_data()
     assert S.ENT_ARAMA, "ENT_ARAMA bos -> arama kumesi ayrilmamis"

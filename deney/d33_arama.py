@@ -49,6 +49,13 @@ os.environ.update(KON["ORT"])
 import numpy as np
 import torch
 import sifirdan as S
+from gpu_kapisi import gpu_bos_mu
+
+# TANI turu (ARAMA_TAM=1) KAYIT icindir, karari etkilemez -> egitimin
+# yaninda kosmasi icin hicbir sebep yok. KARAR turu ise surucunun akisinda
+# ve egitim o sirada ZATEN durmus oluyor, o yuzden yalniz TANI kapiliyor.
+if os.environ.get("ARAMA_TAM") == "1":
+    gpu_bos_mu(ad="arama TANI turu")
 
 ALT = os.environ.get("ARAMA_ALT", "cikti_a5")     # hangi kolun goruntuleri
 C = KON["CALIS"]
