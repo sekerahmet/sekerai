@@ -98,6 +98,51 @@ kontrol("iliski adi bir varlik adi DEGIL",
 kontrol("okul adindaki il, okulun sehri ile ayni",
         [x for x in O if not x.startswith(o[(x, "sehir")] + "_")])
 
+# --- 5b. SABIT KAYDIRMA -- 14 EYLUL'DE EKLENDI, EN PAHALI KONTROL --------
+# Ilk surumde kardes i<->i+1, arkadas i<->i+350, ogretmen i->i+211 idi.
+# 23 kontrolun HEPSI geciyordu; hicbiri "bu gorev kompozisyon YAPMADAN
+# cozulebilir mi" diye sormuyordu. Iki kaydirmanin bileskesi yine bir
+# kaydirmadir: model "kardes ogretmen = +212" kuralini 848 egitim
+# varligindan ogrenip hic gormedigi varliga uyguluyordu.
+#   OLCULDU (kosu iptal): ENT-AYIRT %58 kaydirma -> ent 0.882
+#                         ENT-YOK    %0 kaydirma -> ent 0.070
+#   D3.3'un rastgele grafinda ayni olcu 0.009 idi.
+E_IX = {a: i for i, a in enumerate(K + O + S + D)}
+_kay = []
+for r in V.ILISKI:
+    d = {E_IX[o[(e, r)]] - E_IX[e] for e in E_IX if (e, r) in o}
+    if len(d) <= 4:
+        _kay.append((r, len(d)))
+kontrol("hicbir iliski SABIT KAYDIRMA degil", _kay)
+
+# Zincirin KENDISI de kaydirma olmamali: tek tek iliskiler rastgele olsa
+# bile (r1,r2) bileskesi duzenli cikabilir.
+_zk = []
+for r1 in V.ILISKI:
+    for r2 in V.ILISKI:
+        if r1 == r2:
+            continue
+        c = collections.Counter()
+        for e in E_IX:
+            b = o.get((e, r1))
+            if b is None or (b, r2) not in o:
+                continue
+            if o[(b, r2)] == e:
+                continue     # DONUS sinifi: kaydirma her zaman 0, ve bu
+                             # zincirler ZATEN sinavdan cikariliyor.
+            c[E_IX[o[(b, r2)]] - E_IX[e]] += 1
+        if not c:
+            continue
+        # IKI ariza bicimi: (a) zincir COK AZ farkli kaydirma veriyor
+        # (kaydirma o kaydirma -> yine kaydirma), (b) tek bir kaydirma
+        # BASKIN. Ilk yazdigimda kosulu "len(c) > 20" diye kurmustum --
+        # tam tersi: asil vaka AZ SAYIDA kaydirma. Eski surume karsi
+        # kosunca 0 verdi ve bunu ancak o kiyas gosterdi.
+        _en = c.most_common(1)[0]
+        if len(c) <= 4 or _en[1] > 0.5 * sum(c.values()):
+            _zk.append((r1, r2, len(c), _en))
+kontrol("hicbir (r1,r2) zinciri SABIT KAYDIRMA degil", _zk)
+
 # --- 6. ATA HALKASI (kacinilmaz, ama OLCULSUN) --------------------------
 x = K[0]; gor = []
 for _ in range(400):

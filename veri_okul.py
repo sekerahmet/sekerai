@@ -40,7 +40,13 @@ kaydirilir -- global kaydirma butun cifleri tek halkaya baglayip kalitimi
 imkansiz kiliyordu. Assert ile denetleniyor.
 
 GERCEK olan : kisi adlari, 80 il, ders adlari, okul adlari
-URETILMIS   : kim kimin akrabasi/ogretmeni/arkadasi (tohumla, tutarli)
+URETILMIS   : kim kimin akrabasi/ogretmeni/arkadasi -- HEPSI RASTGELE.
+              14 Eylul'e kadar ARITMETIK KAYDIRMA idi (kardes i<->i+1,
+              arkadas i<->i+350, ogretmen i->i+211). Tutarliydi, 23
+              kontrolun hepsi geciyordu, ama gorevi COZULMUS kiliyordu:
+              iki kaydirmanin bileskesi yine kaydirmadir. Kosu iptal
+              edildi, uretec rastgeleye cevrildi, veri_kontrol.py'ye iki
+              kapi eklendi (24: iliski, 25: zincir).
 
 DOCSTRING'DEKI SAYILAR ELLE YAZILI -> BAYATLAR. veri_gercek.py'de tam olarak
 bu oldu (sema daralinca 5.700 yazili kaldi, gercek 4.140 idi) ve ancak
@@ -138,21 +144,41 @@ TIPLER = ["KISI", "OKUL", "SEHIR", "DERS"]
 # "kardesinin babasi" = "babasi".  Bunlar AYNI sinifina duser; burada
 # listelenmesinin sebebi belgede SAYILABILMESI.
 GEREKTIRIR = {("kardes", "baba"): "baba", ("kardes", "anne"): "anne"}
-OGR_KAY = 211      # ogretmen halkasi: sabit kaydirma -> tam esleme, sabit nokta yok
-CIFT_BLOK = 50     # bir SOYADI blogunda kac kardes cifti (50 cift = 100 kisi)
-BABA_KAY, ANNE_KAY = 17, 31    # BLOK ICINDE kaydirma; gcd(.,50)=1 -> birebir
+BLOK = 100         # bir SOYADI blogunda kac kisi (50 erkek + 50 kadin)
+
+# 14 EYLUL -- SABIT KAYDIRMALAR KALDIRILDI.
+# Ilk surumde kardes i<->i+1, arkadas i<->i+350, ogretmen i->i+211 idi.
+# Tutarliydi ve 23 kontrolun hepsi geciyordu, ama GOREVI COZULMUS KILIYORDU:
+# iki kaydirmanin BILESKESI yine bir kaydirmadir, yani "kardes ogretmen"
+# = "+212" demek. Model bunu 848 egitim varligindan KURAL olarak ogrenip
+# hic gormedigi varliga uyguluyordu -- kopruyu kullanmadan.
+#   OLCULDU (kosu iptal, belge/bulgu/egri_G_iptal_20260914.json):
+#     ENT-AYIRT  r1,r2 IKISI DE kaydirma %58  ->  ent 0.882
+#     ENT-YOK    r1,r2 IKISI DE kaydirma  %0  ->  ent 0.070
+#   D3.3'un rastgele grafinda ayni olcu 0.009 idi. Yani ENT-YOK dogru
+#   zorlugu olcuyordu, ENT-AYIRT aritmetikle cozulmustu.
+# Simdi HER esleme RASTGELE. Yapi kisitlari (kardesler ayni ebeveyn, ters
+# ciftler, soyadi kalitimi, simetri) DURUYOR -- onlar aritmetik degil.
 
 
-def _eb(kc, kay):
-    """Kardes cifti kc'nin ebeveyninin geldigi cift. Kaydirma SOYADI
-    BLOGUNUN ICINDE kalir; global kaydirma (eski hali: (kc+97) % 350)
-    butun cifleri tek halkaya bagliyordu ve soyadi kalitimi IMKANSIZ oluyordu.
+def _esle(rng, idx):
+    """idx'i rastgele IKISERLI eslestir; simetrik sozluk dondur."""
+    p = list(rng.permutation(list(idx)))
+    d = {}
+    for k in range(0, len(p) - 1, 2):
+        d[p[k]], d[p[k + 1]] = p[k + 1], p[k]
+    return d
 
-    BABA ve ANNE AYRI kaydirmadan gelir. Tek kaydirma kullanilinca baba ile
-    anne AYNI ciftin iki uyesi, yani BIRBIRININ KARDESI oluyordu
-    (Ahmet_Yilmaz kardes Ayse_Yilmaz, ikisinin de cocuk Onur_Yilmaz)."""
-    b = kc // CIFT_BLOK
-    return b * CIFT_BLOK + ((kc % CIFT_BLOK + kay) % CIFT_BLOK)
+
+def _devirsiz(rng, idx):
+    """Sabit noktasiz birebir esleme (derangement). Tersi de dondurulur."""
+    idx = list(idx)
+    for _ in range(1000):
+        p = list(rng.permutation(idx))
+        if all(x != y for x, y in zip(idx, p)):
+            return dict(zip(idx, p)), dict(zip(p, idx))
+    raise RuntimeError("devirsiz esleme bulunamadi")
+
 
 N_KISI, N_OKUL = 700, 200
 
@@ -160,103 +186,120 @@ N_KISI, N_OKUL = 700, 200
 def kur(tohum=0):
     rng = np.random.RandomState(tohum)
 
-    # cift indeks ERKEK, tek indeks KADIN. Aile kurulumu bunu kullaniyor:
-    # baba kisi[2p] (erkek), anne kisi[2p+1] (kadin).
+    # cift indeks ERKEK, tek indeks KADIN; her 100 kisi bir SOYADI blogu.
     kisi = [f"{(ERKEK if i % 2 == 0 else KADIN)[(i // 2) % 50]}"
             f"_{SOYAD[(i // 2) // 50]}" for i in range(N_KISI)]
     assert len(set(kisi)) == N_KISI, "kisi adi tekrari"
-    sehir = list(IL)
-    ders = list(DERS)
+    sehir, ders = list(IL), list(DERS)
     okul = [f"{sehir[i % len(sehir)]}_{OKUL_TUR[(i // len(sehir)) % 3]}"
             for i in range(N_OKUL)]
     assert len(set(okul)) == N_OKUL, "okul adi tekrari"
 
     ad = {"KISI": kisi, "OKUL": okul, "SEHIR": sehir, "DERS": ders}
     hepsi = [a for t in TIPLER for a in ad[t]]
-    assert len(hepsi) == len(set(hepsi)), \
-        "TEKRAR EDEN AD: " + str([a for a in set(hepsi) if hepsi.count(a) > 1])
+    assert len(hepsi) == len(set(hepsi)),         "TEKRAR EDEN AD: " + str([a for a in set(hepsi) if hepsi.count(a) > 1])
 
     olgu = {}
     n = N_KISI
 
-    # --- AILE: kisiler IKISERLI kardes. 350 kardes cifti. -----------------
-    # Kardesler AYNI anne-babayi paylasir (tutarli). Bunun bedeli
-    # ("kardes baba" = "baba") olculur ve sinavdan cikarilir.
-    for k in range(0, n, 2):
-        olgu[(kisi[k], "kardes")] = kisi[k + 1]
-        olgu[(kisi[k + 1], "kardes")] = kisi[k]
-        # cift k//2'nin ebeveyni: AYNI SOYADI blogundan, ama baba ile anne
-        # FARKLI ciflerden -- yoksa evli cift birbirinin kardesi olur.
-        baba = kisi[2 * _eb(k // 2, BABA_KAY)]
-        anne = kisi[2 * _eb(k // 2, ANNE_KAY) + 1]
-        for c in (kisi[k], kisi[k + 1]):
-            olgu[(c, "baba")] = baba
-            olgu[(c, "anne")] = anne
-
-    # --- cocuk: baba/anne'nin TERSI, TEK DEGERLI -------------------------
-    # Her kisi TAM OLARAK bir kardes ciftinin ebeveyni (harita birebir), yani
-    # `cocuk` her kiside tanimli. Kayitli cocuk ciftin ILKI: ikinci cocuk icin
-    # "X baba cocuk" -> KARDESI cikar, o zincir GERCEK kompozisyondur.
-    for k in range(0, n, 2):
-        olgu[(kisi[2 * _eb(k // 2, BABA_KAY)], "cocuk")] = kisi[k]
-        olgu[(kisi[2 * _eb(k // 2, ANNE_KAY) + 1], "cocuk")] = kisi[k]
+    # --- AILE: her SOYADI blogu KENDI ICINDE, hepsi RASTGELE --------------
+    # Kisitlar (aritmetik degil, YAPISAL):
+    #   kardesler ayni anne-babayi paylasir
+    #   baba erkek, anne kadin, ikisi de AYNI soyadi blogundan
+    #   kimse kendi cocugunun ebeveyni degil; anne ile baba KARDES degil
+    #   her erkek TAM 1 ciftin babasi, her kadin TAM 1 ciftin annesi
+    #     -> `cocuk` (baba/anne tersi) her kiside TANIMLI
+    for b0 in range(n // BLOK):
+        blok = list(range(b0 * BLOK, (b0 + 1) * BLOK))
+        erk = [i for i in blok if i % 2 == 0]
+        kad = [i for i in blok if i % 2 == 1]
+        for deneme in range(2000):
+            kp = list(rng.permutation(blok))
+            cift = [(kp[2 * k], kp[2 * k + 1]) for k in range(len(blok) // 2)]
+            uye = {x: j for j, c in enumerate(cift) for x in c}
+            ba = list(rng.permutation(erk))      # cift j'nin babasi ba[j]
+            an = list(rng.permutation(kad))      # cift j'nin annesi an[j]
+            if not all(uye[ba[j]] != j and uye[an[j]] != j       # kendi cocugu degil
+                       and uye[ba[j]] != uye[an[j]]             # es ile kardes degil
+                       for j in range(len(cift))):
+                continue
+            # RASTGELE esleme KISA DONGU uretebiliyor; kaydirmali surumde
+            # bunlar yapisal olarak imkansizdi, simdi ACIKCA elenmeli.
+            # Olculdu: ilk denemede 10 kisinin babasi ayni zamanda cocugu,
+            # 6 kisinin dedesi kendisiydi.
+            _ba = {x: ba[uye[x]] for x in blok}          # x -> babasi
+            _an = {x: an[uye[x]] for x in blok}          # x -> annesi
+            _co = {}
+            for j2, (x2, y2) in enumerate(cift):
+                _co[ba[j2]] = x2
+                _co[an[j2]] = x2
+            if all(_ba[x] != _co[x] and _an[x] != _co[x]         # baba/anne = cocuk
+                   and _ba[_ba[x]] != x and _an[_an[x]] != x     # dede/nine = kendisi
+                   and _co[_co[x]] != x                          # torun = kendisi
+                   for x in blok):
+                break
+        else:
+            raise RuntimeError(f"blok {b0}: aile kurulamadi")
+        for j, (x, y) in enumerate(cift):
+            olgu[(kisi[x], "kardes")] = kisi[y]
+            olgu[(kisi[y], "kardes")] = kisi[x]
+            for c in (x, y):
+                olgu[(kisi[c], "baba")] = kisi[ba[j]]
+                olgu[(kisi[c], "anne")] = kisi[an[j]]
+            olgu[(kisi[ba[j]], "cocuk")] = kisi[x]     # kayitli cocuk: ciftin ILKI
+            olgu[(kisi[an[j]], "cocuk")] = kisi[x]
     assert all((c, "cocuk") in olgu for c in kisi), "cocuk eksik"
 
-    # SOYADI KALITIMI: cocuk, kardes, anne, baba AYNI soyadi tasimali.
-    _soy = lambda a: a.rsplit("_", 1)[1]
-    for c in kisi:
-        for r in ("kardes", "baba", "anne", "cocuk"):
-            assert _soy(olgu[(c, r)]) == _soy(c),                 f"soyadi kalitimi bozuk: {c} {r} {olgu[(c, r)]}"
-        # evli cift birbirinin kardesi OLMAMALI
-        assert olgu[(olgu[(c, "baba")], "kardes")] != olgu[(c, "anne")],             f"anne-baba kardes cikti: {c}"
-
-    # --- ogretmen / ogrenci: TAM ESLEME, tersi KESIN ---------------------
-    # Rastgele harita denendi: kisilerin ~%37'si kimseye ogretmen olmuyor ve
-    # `ogrenci` onlarda UYDURUK dolduruluyordu. Sabit kaydirma birebir ve
-    # sabit noktasiz; `ogrenci` tam ters. Bedeli: "ogretmen ogrenci" zinciri
-    # her zaman DONUS (700 zincir, sinavdan cikar) -- sayilir ve yazilir.
+    # --- ogretmen / ogrenci: RASTGELE devirsiz esleme, tersi KESIN --------
+    ogr, ters = _devirsiz(rng, range(n))
     for i, c in enumerate(kisi):
-        olgu[(c, "ogretmen")] = kisi[(i + OGR_KAY) % n]
-        olgu[(c, "ogrenci")] = kisi[(i - OGR_KAY) % n]
+        olgu[(c, "ogretmen")] = kisi[ogr[i]]
+        olgu[(c, "ogrenci")] = kisi[ters[i]]
 
-    # --- arkadas: SIMETRIK, kardes cifti DISINDA bir eslesme -------------
-    # kisi[i] <-> kisi[(i + n//2) % n]  -> karsilikli ve kardesten farkli
+    # --- arkadas: RASTGELE simetrik esleme, kardesten FARKLI --------------
+    for _ in range(200):
+        ark = _esle(rng, range(n))
+        if all(kisi[ark[i]] != olgu[(kisi[i], "kardes")] for i in range(n)):
+            break
+    else:
+        raise RuntimeError("arkadas eslemesi kurulamadi")
     for i, c in enumerate(kisi):
-        olgu[(c, "arkadas")] = kisi[(i + n // 2) % n]
+        olgu[(c, "arkadas")] = kisi[ark[i]]
 
-    # --- okul / sehir / ders --------------------------------------------
-    # DIKKAT: kisinin sehri, OKULUNUN sehrinden BAGIMSIZ secilir. Bagimli
-    # olsaydi "X okul sehir" = "X sehir" olur ve zincir olculemezdi
-    # (cografya verisinde `dili` boyle bozulmustu).
+    # --- okul / sehir / ders ---------------------------------------------
+    # Kisinin sehri, OKULUNUN sehrinden BAGIMSIZ. Bagimli olsaydi
+    # "X okul sehir" = "X sehir" olurdu ve zincir olculemezdi.
     for i, c in enumerate(kisi):
         olgu[(c, "okul")] = okul[int(rng.randint(N_OKUL))]
         olgu[(c, "sehir")] = sehir[int(rng.randint(len(sehir)))]
         olgu[(c, "ders")] = ders[int(rng.randint(len(ders)))]
+    rak = _esle(rng, range(N_OKUL))
     for i, o in enumerate(okul):
         olgu[(o, "mudur")] = kisi[int(rng.randint(n))]
         olgu[(o, "kurucu")] = kisi[int(rng.randint(n))]
-        olgu[(o, "sehir")] = sehir[i % len(sehir)]        # okul ilindedir
-        olgu[(o, "rakip")] = okul[i + 1 if i % 2 == 0 else i - 1]  # SIMETRIK
+        olgu[(o, "sehir")] = sehir[i % len(sehir)]      # okul ADINDAKI il
+        olgu[(o, "rakip")] = okul[rak[i]]
         olgu[(o, "ders")] = ders[int(rng.randint(len(ders)))]
+    kom = _esle(rng, range(len(sehir)))
     for i, s_ in enumerate(sehir):
-        # SIMETRIK: i<->i+1 ciftleri. Halka kullanilirsa "Adana komsu
-        # Adiyaman" olur ama "Adiyaman komsu Adana" OLMAZ -- komsuluk
-        # anlamca simetrik, 81/81 il bu kontrolden kaliyordu.
-        olgu[(s_, "komsu")] = sehir[i + 1 if i % 2 == 0 else i - 1]
+        olgu[(s_, "komsu")] = sehir[kom[i]]
         olgu[(s_, "vali")] = kisi[int(rng.randint(n))]
         olgu[(s_, "okul")] = okul[int(rng.randint(N_OKUL))]
+    onk, _t = _devirsiz(rng, range(len(ders)))
     for i, d in enumerate(ders):
         olgu[(d, "hoca")] = kisi[int(rng.randint(n))]
-        olgu[(d, "onkosul")] = ders[(i + 1) % len(ders)]
+        olgu[(d, "onkosul")] = ders[onk[i]]
 
-    # SIMETRIK iliskiler: r(r(x)) == x.  Halka kurulumu bu kontrolden
-    # kaliyordu ve "A komsu B ama B komsu A degil" uretiyordu.
+    # --- DENETIMLER -------------------------------------------------------
+    _soy = lambda a: a.rsplit("_", 1)[1]
+    for c in kisi:
+        for r in ("kardes", "baba", "anne", "cocuk"):
+            assert _soy(olgu[(c, r)]) == _soy(c),                 f"soyadi kalitimi bozuk: {c} {r} {olgu[(c, r)]}"
+        assert olgu[(olgu[(c, "baba")], "kardes")] != olgu[(c, "anne")],             f"anne-baba kardes cikti: {c}"
     for grup, r in ((sehir, "komsu"), (okul, "rakip"),
                     (kisi, "kardes"), (kisi, "arkadas")):
         bozuk = [x for x in grup if olgu[(olgu[(x, r)], r)] != x]
         assert not bozuk, f"{r} simetrik degil: {bozuk[:3]}"
-
-    # kendine gitmesin
     kendi = [(e, r) for (e, r), h in olgu.items() if h == e]
     assert not kendi, f"kendine giden olgu: {kendi[:5]}"
 
@@ -266,6 +309,7 @@ def kur(tohum=0):
                 kim={s: i for i, s in enumerate(sozluk)},
                 tip={a: t for t in TIPLER for a in ad[t]},
                 olgu=olgu, sema=SEMA, iliski=ILISKI)
+
 
 
 def zincirler(G):
