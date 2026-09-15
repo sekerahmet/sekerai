@@ -76,6 +76,16 @@ AYAR_KILIT = dict(
     # model_b/test_sabit_b.py, dar_alfa=0 iken ModelB'nin model_a.Model
     # ile BIT DUZEYINDE ayni cikti verdigini her kosuda dogruluyor.
     dar_alfa=0.0, dar_tau=1.0, dar_kapi=False,
+    # `dar_sdpa` 16 Eylul'de eklendi -- `model_b2` icin. Kilit YINE
+    # YAKALADI (alan 33 -> 34, "dar_sdpa KILITTE YOK"). Gerekce kilide
+    # DOKUNULMADAN ONCE yazildi: belge/onkayit/model_b2.md.
+    # Bu alan MODELI degistirmez, `Phi`nin HESAP YOLUNU degistirir:
+    # Phi(h) = softmax(nf(h) Wᵀ/tau) @ W  ==  Attention(Q=nf(h), K=V=W).
+    # `model_a.Model` `Phi`yi zaten hic cagirmaz. VARSAYILAN KAPALI --
+    # asagidaki `parametre 3427840` ve `agirlik sha` bunu dogruluyor,
+    # ayrica model_b/test_sabit_b.py §6 iki yolun ayni fonksiyonu
+    # verdigini (fp32 bagil fark < 1e-5) her kosuda olcuyor.
+    dar_sdpa=False,
 )
 
 VERI_KILIT = dict(

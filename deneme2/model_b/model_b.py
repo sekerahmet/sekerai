@@ -71,6 +71,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import model_a as M                                          # noqa: E402
 # `model_a` KLASOR olarak da var; yol yanlissa namespace paketi gelir ve
@@ -101,8 +102,38 @@ class ModelB(M.Model):
         """Denk. 5. `head.weight` ZATEN `emb.weight` (bagli gomme), yani
         bu tam olarak softmax(W h / tau) @ W. Logitler final norm'dan
         geciriliyor -- modelin KENDI okuma yolu, logit lens ile ayni."""
+        if self.ayar.dar_sdpa:
+            return self._phi_sdpa(h)
         p = torch.softmax(self.head(self.nf(h)) / self.ayar.dar_tau, dim=-1)
         return p @ self.emb.weight
+
+    def _phi_sdpa(self, h):
+        """AYNI fonksiyon, baska hesap yolu. `Phi` bir DIKKAT katmani:
+
+            Phi(h) = softmax( nf(h) Wᵀ / tau ) @ W
+                     ^Q          ^K    ^olcek    ^V
+
+        `head` bias'siz ve `head.weight is emb.weight` oldugu icin
+        `head(z)` = `z @ W.T`. Yani Q=nf(h), K=V=W, scale=1/tau.
+        SDPA (N,V) olasilik matrisini HIC YAZMAZ -- kosan softmax ile
+        dilim dilim hesaplar. Kazanc carpma sayisindan DEGIL, HBM
+        trafigindan gelir; bu yuzden yalniz BUYUK yiginda gorunur.
+
+        Modelin kendi dikkati de ayni fonksiyonu kullaniyor
+        (`model_a.Blok`), yani yeni bir bagimlilik YOK.
+
+        BIT DUZEYINDE ayni DEGIL: fp16'da toplama sirasi farkli, olculen
+        bagil fark ~1e-3. `test_sabit_b.py` §6 bunu sinirliyor.
+        """
+        q = self.nf(h)
+        W = self.emb.weight
+        d = q.shape[-1]
+        on = q.shape[:-1]                       # (B, T) -- sonra geri konur
+        return F.scaled_dot_product_attention(
+            q.reshape(1, 1, -1, d),
+            W.reshape(1, 1, W.shape[0], d),
+            W.reshape(1, 1, W.shape[0], d),
+            scale=1.0 / self.ayar.dar_tau).reshape(*on, d)
 
     def forward(self, x):
         h = self.emb(x) + self.pos(torch.arange(x.shape[1], device=x.device))[None]

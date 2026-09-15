@@ -66,6 +66,14 @@ def main():
     for _g in ("AYAR", "egit", "fark_bas"):
         _bak(f"model_b1.{_g} var", hasattr(model_b1, _g), "kos.py duser")
 
+    import model_b2
+    f3 = set(model_b1.AYAR.fark(model_b2.AYAR)) | {"ad"}
+    _bak(f"model_b2 <-> model_b1 farki {sorted(f3)}",
+         sorted(f3) == ["ad", "dar_sdpa"],
+         "model_b2 SADECE hesap yolunu degistirmeli")
+    for _g in ("AYAR", "egit", "fark_bas"):
+        _bak(f"model_b2.{_g} var", hasattr(model_b2, _g), "kos.py duser")
+
 
     print()
     print("=== 1b) KOS.PY KOSULLARINDA IMPORT (ALT SUREC) ===")
@@ -82,7 +90,7 @@ def main():
     # yan etki olarak duzeltiyor ve `model_b1` hazir yolu buluyor.
     # `kos.py` ise YALNIZ istenen modulu import eder. Bu kusur bilerek
     # bozulmus bir surumle sinandi: duzeltmeden ONCE test GECIYORDU.
-    for _ad in ("model_b", "model_b1"):
+    for _ad in ("model_b", "model_b1", "model_b2"):
         _satir = [
             "import sys, importlib",
             "sys.path.insert(0, %r)" % _B,
@@ -151,6 +159,38 @@ def main():
     _bak("olc() sabit M.Model KULLANMIYOR",
          "MODEL_SINIFI or M.Model" in
          io.open(os.path.join(_A, "pencere_a.py"), encoding="utf-8").read())
+
+    print()
+    print("=== 6) SDPA Phi, NAIF Phi ILE AYNI FONKSIYON MU ===")
+    # model_b2'nin BUTUN iddiasi buna dayaniyor: ayni fonksiyon, ucuz
+    # hesap. Bozulursa model_b2 "hizli" degil "BASKA BIR MODEL" olur.
+    # BIT DUZEYINDE esitlik BEKLENMIYOR -- fp16'da toplama sirasi farkli.
+    # Onkayit model_b2.md §4: fp32'de < 1e-5, fp16'da < 1e-3 (bagil).
+    import model_b2
+    naif = model_b2.AYAR.degistir(dar_sdpa=False)
+    torch.manual_seed(0); m_n = ModelB(naif, 1208).eval()
+    torch.manual_seed(0); m_s = ModelB(model_b2.AYAR, 1208).eval()
+    _bak("ayni agirlik", all(
+        torch.equal(a_, b_) for a_, b_ in zip(m_n.parameters(),
+                                              m_s.parameters())))
+    _h = torch.randn(4, M.T_LEN, model_b2.AYAR.d)
+    with torch.no_grad():
+        p_n, p_s = m_n._phi(_h), m_s._phi(_h)
+    _d32 = (p_n - p_s).abs().max().item() / p_n.abs().max().item()
+    _bak(f"fp32 bagil fark {_d32:.2e}", _d32 < 1e-5, "esik 1e-5")
+    # ve UCTAN UCA: ayni x, iki yol
+    _x = torch.randint(0, 1208, (4, M.T_LEN))
+    with torch.no_grad():
+        o_n, o_s = m_n(_x), m_s(_x)
+    _de = (o_n - o_s).abs().max().item() / o_n.abs().max().item()
+    _bak(f"model ciktisi bagil fark {_de:.2e}", _de < 1e-5, "esik 1e-5")
+    # dar_sdpa, darbogaz KAPALIYKEN hicbir sey yapmamali
+    _kap = model_b2.AYAR.degistir(dar_alfa=0.0, dar_kapi=False)
+    torch.manual_seed(0); m_k = ModelB(_kap, 1208).eval()
+    torch.manual_seed(0); m_a = M.Model(_kap, 1208).eval()
+    with torch.no_grad():
+        _dk = (m_k(_x) - m_a(_x)).abs().max().item()
+    _bak(f"dar_alfa=0 + dar_sdpa=1 -> hala BIT AYNI ({_dk:.3e})", _dk == 0.0)
 
     print()
     print(f"{_iyi} gecti, {_kotu} BOZUK")

@@ -171,6 +171,13 @@ class Ayar:
     dar_alfa: float = 0.0      # 0 = KAPALI. Sabit gecit gucu.
     dar_tau: float = 1.0       # Phi'nin softmax sicakligi.
     dar_kapi: bool = False     # True = ogrenilebilir gecit (d+1 parametre)
+    dar_sdpa: bool = False     # Phi'yi SDPA ile hesapla. SAYISAL DEGIL,
+    #   HESAPLAMA yolu degisir: Phi(h) = softmax(nf(h) Wᵀ/tau) @ W tam
+    #   olarak Attention(Q=nf(h), K=W, V=W, scale=1/tau) -- `head` bias'siz
+    #   ve `head.weight is emb.weight` oldugu icin bu CEBIRSEL OZDESLIK.
+    #   Kazanc (N,V) ara matrisinin HIC yazilmamasindan gelir (B=1000,
+    #   V=2145 -> 34,3 MB). Onkayit: belge/onkayit/model_b2.md
+    #   BIT DUZEYINDE ayni DEGIL (fp16 toplama sirasi) -> yorunge ayrisir.
     ood_pay: float = 0.0       # 0 = KAPALI. >0 ise ATOMIK OLGULARIN (kenar)
     #   bu orani atomic_OOD'ye ayrilir -- Wang 2405.15071 §3.1'in birebir
     #   tanimi: "The atomic facts are then the EDGES ... which we partition
@@ -240,7 +247,7 @@ ESKI_VARSAYILAN = {
     # ent_kati bolmesi 15 Eylul'de eklendi; ondan once YOKTU -> kapali.
     "kati_pay": 0.0,
     "ood_pay": 0.0,
-    "dar_alfa": 0.0, "dar_tau": 1.0, "dar_kapi": False,
+    "dar_alfa": 0.0, "dar_tau": 1.0, "dar_kapi": False, "dar_sdpa": False,
 }
 
 
