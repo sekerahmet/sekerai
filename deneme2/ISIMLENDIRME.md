@@ -14,9 +14,14 @@ Drive: deneme2/model_a/     <- onun ciktisi
 
 ## Tohum
 
-Ayni model UC TOHUMLA kosar: `t0`, `t1`, `t2`. Ayri model degil, AYNI
-modelin tekrari -- tek fark rastgele baslangic ve batch sirasi.
-**Veri ucunde de AYNI** (`veri_tohum` ayri bir alan, 0'da sabit).
+Tohum = rastgeleligin baslangic numarasi. Ayni tohum = birebir ayni kosu.
+`t0`, `t1`, `t2` ayri MODEL degil, AYNI modelin tekrari -- tek fark
+baslangic agirliklari ve batch sirasi.
+**Veri hepsinde AYNI** (`veri_tohum` ayri bir alan, 0'da sabit).
+
+**ONCE TEK TOHUM kosulur (`t0`).** Sonuc olumluysa yeter. Olumsuzsa
+defterdeki `TOHUMLAR` satiri `[1, 2]` yapilip tekrar kosulur; `t0`
+klasorune dokunulmaz, yeni kosular `t1/` ve `t2/`'ye yazar.
 
 ```
 Drive: deneme2/model_a/t0/  t1/  t2/
