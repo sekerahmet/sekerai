@@ -212,8 +212,18 @@ def main():
     # SUTUNLAR OLCME SETINDEN TURETILIR, elle yazilmaz. `ent_kati`
     # (kati_pay > 0) ancak boyle gorunur; sabit liste olsaydi olculur ama
     # BASILMAZDI -- "olculup gosterilmeyen sayi, yok sayilan sayidir".
-    SUT = tuple(k for k in ("one", "seen", "comp", "ent", "ent_yok",
+    # !! 15 Eylul: `ood` eklendiginde BU LISTEYE eklenmedi ve model_a8'in
+    # 60.000'lik kosusunda `ood` OLCULDU ama BASILMADI -- json'a yazildi,
+    # tabloya girmedi. Tam olarak bu dosyanin yorumunda yazan tuzak
+    # ("olculup gosterilmeyen sayi, yok sayilan sayidir") ve `ent_yok`un
+    # basina gelenin aynisi. Liste artik OLCME SETINDEN suzuluyor ama
+    # SIRALAMA burada duruyor; YENI BOLME EKLEYEN BU SATIRA DA EKLEMELI.
+    SUT = tuple(k for k in ("one", "seen", "comp", "ood", "ent", "ent_yok",
                             "ent_kati") if k in kod)
+    _atlanan = [k for k in kod if k not in SUT]
+    assert not _atlanan, (
+        f"OLCULUYOR AMA BASILMIYOR: {_atlanan}. pencere_a.py'deki SUT "
+        f"listesine ekle -- sessiz kaybolmasin.")
     bas = f"  {'pencere':<18}" + "".join(f"{k:>9}" for k in SUT)
     print(bas + f"{'ent_ksy':>9}{'yok_ksy':>9}")
 

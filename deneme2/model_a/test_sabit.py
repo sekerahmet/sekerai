@@ -144,7 +144,7 @@ def main():
     # Her kol, TABANINDAN tam olarak SU alanlarda ayrilmali. `ad` her zaman
     # ayrilir (cikti dosya adlarina giriyor). Fazladan bir alan ayrilirsa
     # "tek dugme" iddiasi coker ve kiyas yorumlanamaz hale gelir.
-    import model_a1, model_a2, model_a3, model_a4, model_a5, model_a6, model_a7, model_a8
+    import model_a1, model_a2, model_a3, model_a4, model_a5, model_a6, model_a7, model_a8, model_a9, model_a10
     DUGME = (
         ("model_a1", M.AYAR, model_a1.AYAR, {"ad", "dongu"}),
         ("model_a2", M.AYAR, model_a2.AYAR, {"ad", "l", "dongu"}),
@@ -165,6 +165,13 @@ def main():
         # model_a8'in TABANI model_a5 (model_a7 DEGIL): kati_pay ayri bir
         # soru, ikisini ayni kosuda karistirmak tek dugme ilkesini bozar.
         ("model_a8", model_a5.AYAR, model_a8.AYAR, {"ad", "ood_pay"}),
+        # model_a9  : model_a8'in grafi degisti (veri_okul2 -> veri_wang)
+        # model_a10 : a9'un PAYLASIMSIZ kontrolu. IKI dugme ama TEK kavram:
+        #   `dongu`yu tek basina 1 yapmak hesabi da yariya indirirdi ve
+        #   "paylasim mi yoktu, hesap mi yetmedi" AYRILAMAZDI. `l=8` hesabi
+        #   esitler. model_a <-> model_a2 ciftiyle AYNI dugme yapisi.
+        ("model_a9", model_a8.AYAR, model_a9.AYAR, {"ad", "veri_ad"}),
+        ("model_a10", model_a9.AYAR, model_a10.AYAR, {"ad", "l", "dongu"}),
     )
     for ad, taban, kol, bek in DUGME:
         f = set(taban.fark(kol)) | {"ad"}
