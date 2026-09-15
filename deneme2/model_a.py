@@ -505,6 +505,31 @@ def olcme_listeleri(ayar: Ayar, v: Veri):
                 ent=alt(v.ent, 3), ent_yok=alt(v.ent_yok, 5))
 
 
+def olcme_izi(L: dict) -> str:
+    """Olcme setlerinin PARMAK IZI -- setin KENDISINI temsil eder.
+
+    Dis hakemlik (15 Eylul) hakli cikti. Onceki hali sadece
+    `(anahtar, uzunluk, ilk 2 ornek)` hash'liyordu ve ORTADAN degisen bir
+    ornegi GORMUYORDU. Olculdu: ent[1500] degistirildi, uzunluk ve ilk iki
+    ornek ayni kaldi -> parmak izi BIREBIR AYNI cikti. Yani tam yakalamasi
+    gereken seyi kaciriyordu.
+
+    Simdi BAYT DUZEYINDE: her kumenin tamami int64 dizisine cevrilip
+    ham baytlari hash'leniyor. `repr()`ten hem daha hizli hem tam
+    deterministik (repr float/int gosterimine bagli degil).
+
+    TEK KAYNAK: egit() de pencere_a.py de BURAYI cagirir. Ayni veri ve
+    ayarla ayni izi vermeleri MEKANIK olarak dogrulanabilsin diye."""
+    import hashlib
+    h = hashlib.md5()
+    for k in sorted(L):
+        h.update(k.encode())
+        arr = np.asarray(L[k], dtype=np.int64)
+        h.update(repr(arr.shape).encode())
+        h.update(arr.tobytes())
+    return h.hexdigest()[:12]
+
+
 @torch.no_grad()
 def dogruluk(model, v: Veri, X, P, T, bs=512):
     """VARLIK-KISITLI argmax: cevap her zaman bir varliktir, ilişki/ozel
@@ -567,7 +592,9 @@ def egit(ayar: Ayar, alt=None, yaz=print) -> list:
     L = olcme_listeleri(ayar, v)
     kod = {k: (kodla_1hop(v, L[k]) if k == "one" else kodla_2hop(v, L[k]))
            for k in L if L[k]}
-    yaz("  olcme: " + "  ".join(f"{k} {len(L[k])}" for k in L if L[k]))
+    iz = olcme_izi(L)
+    yaz("  olcme: " + "  ".join(f"{k} {len(L[k])}" for k in L if L[k])
+        + f"   parmak izi {iz}")
 
     torch.manual_seed(ayar.tohum)
     model = Model(ayar, v.vocab).to(DEV)
@@ -589,7 +616,10 @@ def egit(ayar: Ayar, alt=None, yaz=print) -> list:
     rs = np.random.RandomState(ayar.tohum + 991)
     egri, t0 = [], time.time()
 
-    json.dump(ayar.sozluk(), open(f"{alt}/ayar_t{ayar.tohum}.json", "w"), indent=1)
+    # Ayarin YANINA olcme izini de yaz: "bu kosu hangi ornekleri olctu"
+    # sorusu sonradan MEKANIK olarak cevaplanabilsin.
+    json.dump(dict(ayar.sozluk(), _olcme_izi=iz),
+              open(f"{alt}/ayar_t{ayar.tohum}.json", "w"), indent=1)
 
     for adim in range(1, ayar.adim + 1):
         if adim < ayar.isinma:

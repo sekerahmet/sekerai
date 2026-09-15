@@ -55,7 +55,10 @@ def ayar_oku(klasor: str) -> M.Ayar:
     """Egitimin YAZDIGI ayari geri kur. Elle kurulmaz (koruma 1)."""
     y = glob.glob(os.path.join(klasor, "ayar_t*.json"))
     assert len(y) == 1, f"tam bir ayar_t*.json bekleniyordu, {len(y)} bulundu: {klasor}"
-    d = json.load(open(y[0], encoding="utf-8"))
+    ham = json.load(open(y[0], encoding="utf-8"))
+    # `_` ile baslayanlar META (orn. _olcme_izi) -- Ayar alani degiller,
+    # ayrilirlar. Assert'ler yalniz GERCEK alanlara bakar.
+    d = {k: x for k, x in ham.items() if not k.startswith("_")}
     alan = {f.name for f in __import__("dataclasses").fields(M.Ayar)}
     fazla = set(d) - alan
     eksik = alan - set(d)
@@ -113,13 +116,25 @@ def main():
     L = M.olcme_listeleri(ayar, veri)
     kod = {k: (M.kodla_1hop(veri, L[k]) if k == "one" else M.kodla_2hop(veri, L[k]))
            for k in L if L[k]}
-    # OLCME SETI PARMAK IZI: ayni VERI/ayar ile ayni seti olctugumuz
-    # MEKANIK olarak dogrulanabilsin.
-    import hashlib
-    iz = hashlib.md5(repr([(k, len(L[k]), tuple(L[k][:2])) for k in sorted(L)]
-                          ).encode()).hexdigest()[:12]
-    print(f"  olcme    " + "  ".join(f"{k} {len(L[k])}" for k in L if L[k]))
+    # OLCME SETI PARMAK IZI -- model_a.olcme_izi()'nden, KOPYA DEGIL.
+    iz = M.olcme_izi(L)
+    print("  olcme    " + "  ".join(f"{k} {len(L[k])}" for k in L if L[k]))
     print(f"  parmak izi {iz}")
+    # EGITIMIN yazdigi izle KARSILASTIR: olcum, egitimin gordugu ornekleri
+    # mi olcuyor? Ayni ayardan turemis olmalari YETMEZ -- veri ureteci ya da
+    # bolme mantigi degistiyse iz tutmaz ve sayilar kiyaslanamaz hale gelir.
+    _ay = glob.glob(os.path.join(a.klasor, "ayar_t*.json"))
+    _kayitli = json.load(open(_ay[0], encoding="utf-8")).get("_olcme_izi")
+    if _kayitli is None:
+        print("  !! egitim izi KAYDETMEMIS (eski kosu) -- karsilastirilamadi")
+    elif _kayitli != iz:
+        raise SystemExit(
+            f"\n!! OLCME SETI DEGISMIS: egitim {_kayitli}, olcum {iz}.\n"
+            "   Bu kosunun egittigi orneklerle simdi olctuklerimiz AYNI DEGIL;\n"
+            "   sayilar kiyaslanamaz. veri_okul.py ya da bolme mantigi"
+            " degisti mi?")
+    else:
+        print(f"  iz EGITIMLE AYNI ({_kayitli})  <- ayni ornekler olculuyor")
 
     if len(adimlar) < a.genislik:
         print(f"\n!! {len(adimlar)} anlik goruntu var, pencere {a.genislik} "
