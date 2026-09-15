@@ -208,6 +208,12 @@ class Veri:
     ent_arama: list            #  ayni   -- maske aramasi icin, HUKUMDEN AYRIK
     n_ent: int = 0
     n_rel: int = 0
+    # TIP: her varligin tipi (KISI/OKUL/SEHIR/DERS). TANI icin gerekli --
+    # "model YANLIS cevap verirken hic olmazsa DOGRU TIPTE bir sey mi
+    # soyluyor?" sorusu bunsuz sorulamaz. `veri_kur` doldurur; tani_a
+    # kendi basina TURETMEZ (turetirse iki dosya ayri siralama kurar).
+    tip: np.ndarray | None = None      # (n_ent,) tip indeksi
+    tip_ad: tuple = ()                 # tip indeksi -> ad
 
     def __post_init__(self):
         self.n_ent, self.n_rel = self.facts.shape
@@ -241,6 +247,10 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
     G = VO.kur(ayar.veri_tohum)
     zin = VO.zincirler(G)
     E = [a for t in VO.TIPLER for a in G["ad"][t]]
+    # E, TIP SIRASIYLA kuruluyor -- tip dizisi AYNI comprehension'dan
+    # cikarilir ki iki yerde iki siralama olmasin.
+    E_tip = np.array([i for i, t in enumerate(VO.TIPLER)
+                      for _ in G["ad"][t]], np.int64)
     R = list(VO.ILISKI)
     eid = {a: i for i, a in enumerate(E)}
     rid = {r: i for i, r in enumerate(R)}
@@ -297,7 +307,8 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
     v = Veri(facts=facts, one=[(eid[e], rid[r], eid[h])
                                for (e, r), h in G["olgu"].items()],
              tr2=say(tr2), comp=say(comp), ent=say(ent_ay),
-             ent_yok=say(ent_yk), ent_arama=say(ent_ar))
+             ent_yok=say(ent_yk), ent_arama=say(ent_ar),
+             tip=E_tip, tip_ad=tuple(VO.TIPLER))
 
     # --- SIZINTI DENETIMI -- sessiz gecmesin
     trset = {(e, a, b) for e, a, b, _, _ in v.tr2}
