@@ -121,7 +121,9 @@ class Ayar:
 
     # --- egitim
     tohum: int = 0
-    adim: int = 20000          # TAVAN (CLAUDE.md kural 1). Yetmezse 40.000.
+    adim: int = 20000          # ILK SINIR (CLAUDE.md kural 1), tavan DEGIL.
+    #   Uzatmanin yazili bir ust siniri YOK; uzatmak KULLANICI kararidir
+    #   ve UZATMA = SURDURME: `kos.py --adim <yeni> --surdur`.
     batch: int = 512
     lr: float = 1e-3           # 2603.25009 Tablo 1, AdamW standardi.
     #   1e-4 idi (Loop&Generalize'dan). Ama o calisma grokking'i HIZLANDIRMAYI
@@ -772,7 +774,7 @@ def surdurme_yaz(yol, ayar, model, opt, scaler, rs, adim, egri, iz):
     baslar, yorunge kesintisiz kosudan FARKLI olur ve hicbir sey hata
     vermez -- arsivdeki kol C tam boyle gecersiz kalmisti.
 
-    CLAUDE.md kural 1 "yetmezse 40.000'e uzatilir" diyordu; kod bunu
+    CLAUDE.md kural 1 "yetmezse uzatilir" diyordu; kod bunu
     imkansiz kiliyordu. Kural ile kod CELISIYORDU.
 
     TEK dosya, her olcum noktasinda ATOMIK olarak ustune yazilir (~41 MB:
