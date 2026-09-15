@@ -213,7 +213,32 @@ oluyor ve tohum klasorunde OKUNMASI GEREKEN dort json'u gomuyorlardi.
 Okuma sirasi: `kosu_t<N>.json`in `durum`u -> `egri` (ON okuma) ->
 `pencere` (BIRINCIL okuma).
 
-Uc sey kosudan sonra degil, kosu SIRASINDA garanti edilir:
+## Tekrar kosunca ne kaybolur -- HICBIR SEY
+
+```
+BASKA TOHUM (t1, t2)    ayri klasore yazar, oncekine DOKUNMAZ
+AYNI TOHUM              kosu REDDEDILIR: "t0 ZATEN DOLU"
+AYNI TOHUM + --ustune   eskisi SILINMEZ, t0_eski_<zaman>/ diye TASINIR
+```
+
+Ucu de olculerek sinandi (15 Eylul). Once boyle degildi:
+
+- **Coken kosu korunmuyordu.** Ilk olcumden once coken bir kosu geriye
+  yalniz `ayar_*.json` + `kosu_*.json` birakir. Doluluk denetimi yalniz
+  anlik goruntulere ve egriye bakiyordu, dolayisiyla klasoru "bos" sayip
+  tekrar kosuyor ve cokme kaydini siliyordu. Ustelik o kayit da eksikti:
+  cokme `try` blogunun DISINDA oldugu icin kunye `durum: KOSUYOR`da
+  kaliyordu -- ne `HATA` ne sebep.
+- **`--ustune` klasoru temizlemiyordu, UZERINE yaziyordu.** 8 adimlik
+  kosunun ustune 4 adimlik kosu koyulunca `snap/` icinde 2,4 (yeni) ile
+  6,8 (eski) YAN YANA kaldi -- ve `pencere_a` "anlik 4 goruntu: 2..8"
+  deyip IKI FARKLI KOSUNUN agirliklarini ayni pencerede ortaladi. Hicbir
+  sey hata vermedi. Arsivdeki kol C tam boyle gecersiz kalmisti.
+- **`pencere_a` kendi ciktisini eziyordu.** `--genislik 4` okumasi,
+  sonraki `--genislik 2` kosusuyla siliniyordu. Artik genislik dosya
+  adinda: `pencere_model_a_t0_g5.json`.
+
+## Uc sey kosudan sonra degil, kosu SIRASINDA garanti edilir:
 
 - **Atomik yazim.** Her `.pt` ve `.json` once `.tmp`e yazilip `os.replace`
   ile yerine konur. Olculdu: atomik olmadan yarim bir `.pt`

@@ -271,7 +271,13 @@ def main():
         else:
             print("  egri duzlesmis -> butce yetti")
 
-    yol = a.cikti or os.path.join(a.klasor, f"pencere_{ayar.ad}_t{ayar.tohum}.json")
+    # DOSYA ADINDA GENISLIK VAR. Yoksa `--genislik 4` ile alinan okuma,
+    # sonraki `--genislik 2` kosusu tarafindan SESSIZCE eziliyordu ve
+    # kaybolduguna dair hicbir iz kalmiyordu. Ayni genislikle tekrar
+    # kosmak ayni sayilari uretir (ayni anlik goruntuler, ayni kod), yani
+    # o durumda ezmenin bir bedeli yok.
+    yol = a.cikti or os.path.join(
+        a.klasor, f"pencere_{ayar.ad}_t{ayar.tohum}_g{a.genislik}.json")
     # M._yaz_json: atomik (.tmp -> replace). Egitim hala kosuyorken bu dosya
     # okunabilir; yarim yazilmis json JSONDecodeError verir (olculdu).
     M._yaz_json(yol, dict(

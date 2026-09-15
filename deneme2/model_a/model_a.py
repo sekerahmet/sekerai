@@ -707,27 +707,48 @@ def _yazilabilir(alt: str, yaz=print):
     yaz(f"  yazilabilir: {alt}" + ("   (DRIVE)" if "/content/drive" in p else ""))
 
 
-def _bos_mu(alt: str, ayar: Ayar, ustune: bool):
-    """Bitmis bir kosunun uzerine SESSIZCE yazma.
+def _klasor_hazirla(alt: str, ustune: bool, yaz=print):
+    """Bir kosu klasorune IKINCI kez yazilmasin. Hicbir sey SILINMEZ.
 
-    Onkayit ve ISIMLENDIRME.md "olumsuzsa TOHUMLAR=[1,2] yapip tekrar kos,
-    t0 klasorune DOKUNULMAZ" diyor. Bu bir NIYETTI: defterdeki baslat
-    hucresini ikinci kez calistirmak t0'in anlik goruntulerini ezerdi ve
-    hicbir sey uyarmazdi. Artik mekanik."""
-    var = (glob.glob(os.path.join(alt, "snap", "*.pt"))
-           + glob.glob(os.path.join(alt, "snap_*.pt")))   # eski DUZ yerlesim
-    e = os.path.join(alt, f"egri_{ayar.ad}_t{ayar.tohum}.json")
-    if os.path.exists(e):
-        var.append(e)
-    if var and not ustune:
+    Uc ariza olculdu (15 Eylul), ucu de sessizdi:
+
+    1. COKEN KOSU KORUNMUYORDU. Ilk olcumden once coken bir kosu geriye
+       yalniz `ayar_*.json` + `kosu_*.json` birakiyor -- anlik goruntu de
+       egri de yok. Eski denetim yalniz onlara bakiyordu, dolayisiyla
+       "bos" sayip tekrar kosuyordu ve cokme kaydini SILIYORDU. Artik
+       klasordeki HERHANGI bir dosya doluluk sayilir.
+
+    2. `ustune=True` KLASORU TEMIZLEMIYORDU, uzerine yaziyordu. Olculdu:
+       8 adimlik kosunun uzerine 4 adimlik kosu koyuldu, snap/ icinde
+       2,4 (yeni) ile 6,8 (eski) YAN YANA kaldi.
+
+    3. VE bu karisim pencere_a'ya girdi: "anlik 4 goruntu: 2..8" deyip
+       IKI FARKLI KOSUNUN agirliklarini ayni pencerede ortaladi. Hicbir
+       sey hata vermedi. Arsivdeki kol C tam boyle gecersiz kalmisti.
+
+    Cozum: `ustune` artik SILMEZ, TASIR -- eski klasor
+    `<alt>_eski_<zaman>` olur, yenisi bos baslar. Tasima basarisiz olursa
+    hata YUKARI FIRLAR; hicbir kosulda silmeye dusmeyiz."""
+    var = [y for y in glob.glob(os.path.join(alt, "*")) if os.path.isfile(y)]
+    var += glob.glob(os.path.join(alt, "snap", "*.pt"))
+    if not var:
+        return
+    if not ustune:
         raise SystemExit(
             os.linesep
-            + f"!! {alt} ZATEN DOLU ({len(var)} dosya) -- burada bitmis ya da"
+            + f"!! {alt} ZATEN DOLU ({len(var)} dosya) -- burada bitmis,"
             + os.linesep
-            + "   yarim kalmis bir kosu var; uzerine yazmak onu SILER."
+            + "   yarim kalmis ya da COKMUS bir kosu var." + os.linesep
+            + "   Yeni tohum BASKA klasore yazar (t1/, t2/)." + os.linesep
+            + "   Ayni tohumu tekrar kosmak istiyorsan: ustune=True"
             + os.linesep
-            + "   Yeni tohum BASKA klasore yazar (t1/, t2/). Gercekten ezmek"
-            + os.linesep + "   istiyorsan: egit(..., ustune=True).")
+            + "   (--ustune). O da SILMEZ: eskisini _eski_<zaman> diye"
+            + os.linesep + "   yan klasore tasir.")
+    yedek = f"{alt}_eski_{time.strftime('%Y%m%d_%H%M%S')}"
+    os.rename(alt, yedek)          # basarisiz olursa firlasin: SILMEYIZ
+    os.makedirs(alt, exist_ok=True)
+    yaz(f"  ustune=True -> eski kosu SILINMEDI, tasindi: "
+        f"{os.path.basename(yedek)}/  ({len(var)} dosya)")
 
 
 def erken_teshis(r: dict, ayar: Ayar, yaz=print, uyarildi: set | None = None):
@@ -777,11 +798,13 @@ def erken_teshis(r: dict, ayar: Ayar, yaz=print, uyarildi: set | None = None):
 # ======================= EGITIM ==========================================
 def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None) -> list:
     alt = alt or f"cikti_{ayar.ad}_t{ayar.tohum}"
+    os.makedirs(alt, exist_ok=True)
+    _yazilabilir(alt, yaz)              # Drive gercekten bagli mi, saniye 0'da
+    _klasor_hazirla(alt, ustune, yaz)   # dolu klasore IKINCI kez yazma
     # Anlik goruntuler AYRI alt klasorde: 20.000 adimda 10, uzatilirsa 20
     # dosya oluyor ve tohum klasorunde okunmasi gereken 4 json'u gomuyor.
+    # _klasor_hazirla'dan SONRA: once doluluk bakilir, sonra klasor acilir.
     os.makedirs(f"{alt}/snap", exist_ok=True)
-    _yazilabilir(alt, yaz)          # Drive gercekten bagli mi, saniye 0'da
-    _bos_mu(alt, ayar, ustune)      # bitmis kosuyu sessizce ezme
     yaz(f"=== {ayar.ad}  tohum {ayar.tohum} ===  cihaz {DEV}  cikti {alt}/")
     v = veri_kur(ayar, yaz)
     Xtr, Ptr, Ttr, kimlik = egitim_havuzu(ayar, v, yaz)
@@ -877,19 +900,24 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None) -> list:
     # ANLIK GORUNTU KAYDEDILMEZ: egitilmemis agirlik pencere_a'nin agirlik
     # ortalamasina girerse ilk pencereyi KIRLETIR.
     uyarildi = set()
-    r0 = _nokta(0, None, 0.0)
-    egri.append(r0)
-    yaz(_satir(r0) + "   <- SANS (egitim yok, anlik goruntu YAZILMAZ)")
-    erken_teshis(r0, ayar, yaz, uyarildi)
-    _yaz_json(egri_yolu, egri)
-
+    r0 = None
     tahmin = False
     # Kayip birikimi GPU'da tutulur: her adimda .item() demek her adimda
     # GPU senkronu demek olurdu. Tensor olarak toplanip yalniz olcum
     # noktasinda bir kez okunuyor -- bedeli yok.
     kayip_top = torch.zeros((), device=DEV)
     kayip_say = 0
+    # ADIM 0 DA `try` ICINDE. Disaridayken burada coken bir kosu kunyeyi
+    # `durum: KOSUYOR`da birakiyordu -- olculdu: ilk olcumde patlayan kosu
+    # ne `HATA` yazdi ne de sebebi. Klasor "yarim mi, kosuyor mu, oldu mu"
+    # belli olmadan kaliyordu.
     try:
+        r0 = _nokta(0, None, 0.0)
+        egri.append(r0)
+        yaz(_satir(r0) + "   <- SANS (egitim yok, anlik goruntu YAZILMAZ)")
+        erken_teshis(r0, ayar, yaz, uyarildi)
+        _yaz_json(egri_yolu, egri)
+
         for adim in range(1, ayar.adim + 1):
             if adim < ayar.isinma:
                 lr = ayar.lr * adim / ayar.isinma
@@ -967,7 +995,8 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None) -> list:
     except BaseException as e:
         kunye.update(durum="HATA", hata=f"{type(e).__name__}: {e}"[:400],
                      bitis=time.strftime("%Y-%m-%d %H:%M:%S"),
-                     son_adim=egri[-1]["adim"], sure_dk=round((time.time()-t0)/60, 1))
+                     son_adim=(egri[-1]["adim"] if egri else -1),
+                     sure_dk=round((time.time() - t0) / 60, 1))
         _yaz_json(kunye_yolu, kunye)
         raise
     kunye.update(durum="BITTI", bitis=time.strftime("%Y-%m-%d %H:%M:%S"),

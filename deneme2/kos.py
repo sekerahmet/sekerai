@@ -69,11 +69,22 @@ Bu klasörü **kod yazdı**, elle düzenleme. Depoda değil, Drive'da; koşu
    ortalaması alınıp tek model ölçülür. Eğri değerleriyle pencere
    değerleri **aynı şey değildir**.
 
-## Tohumlar
+## Tohumlar, ve tekrar koşmak
 
 `t0`, `t1`, `t2` ayrı model değil, **aynı modelin tekrarı** — tek fark
 başlangıç ağırlıkları ve batch sırası. Veri hepsinde aynı (`veri_tohum`
-ayrı bir alan). Dolu bir tohum klasörüne tekrar koşmak **reddedilir**.
+ayrı bir alan).
+
+**Hiçbir koşu ezilmez:**
+
+```
+başka tohum          ayrı klasöre yazar, öncekine dokunmaz
+aynı tohum           REDDEDİLİR -- "ZATEN DOLU"
+aynı tohum --ustune  eskisi SİLİNMEZ, t<N>_eski_<zaman>/ diye TAŞINIR
+```
+
+`t<N>_eski_*` klasörleri eski koşulardır; `kosu_t<N>.json`'larındaki
+`baslangic` ve `commit` hangisi olduğunu söyler.
 
 Üreten kod: `deneme2/{model}/` — `kosu_t<N>.json` içindeki `commit`
 hangi sürüm olduğunu söyler.
