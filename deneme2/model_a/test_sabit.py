@@ -48,6 +48,14 @@ AYAR_KILIT = dict(
     n_olcum_max=3000, nh=4, olc_her=2000, sabit_lr=True, tohum=0,
     veri_tohum=0, wd=0.1,
     veri_ad="veri_okul",          # 15 Eylul'de EKLENDI, varsayilani eski yol
+    # GERI BESLEMELI ORTALAMA (Lookahead) -- 15 Eylul'de EKLENDI.
+    # Kilit bu uc alani YAKALADI ve dogru davrandi: 12 kontrol dustu,
+    # 8'i eski kosu klasorlerinin artik OKUNAMAYACAGINI gosteriyordu.
+    # Gerekce ONCE yazildi: belge/onkayit/model_a5.md (testin kendi
+    # kurali). Sonra `ESKI_VARSAYILAN`a eklenip kilit guncellendi.
+    # UCU DE VARSAYILAN KAPALI -- model_a..a4'un davranisi degismiyor,
+    # ve bunu asagidaki VERI/PARAMETRE kilidi dogruluyor.
+    ort_bas=0, ort_her=0, ort_alfa=0.5,
 )
 
 VERI_KILIT = dict(
@@ -124,7 +132,7 @@ def main():
     # Her kol, TABANINDAN tam olarak SU alanlarda ayrilmali. `ad` her zaman
     # ayrilir (cikti dosya adlarina giriyor). Fazladan bir alan ayrilirsa
     # "tek dugme" iddiasi coker ve kiyas yorumlanamaz hale gelir.
-    import model_a1, model_a2, model_a3, model_a4
+    import model_a1, model_a2, model_a3, model_a4, model_a5
     DUGME = (
         ("model_a1", M.AYAR, model_a1.AYAR, {"ad", "dongu"}),
         ("model_a2", M.AYAR, model_a2.AYAR, {"ad", "l", "dongu"}),
@@ -132,6 +140,9 @@ def main():
         # model_a4'un TABANI model_a DEGIL model_a3 -- sorulan sey
         # "wd calisirken olcek ne yapiyor", o yuzden wd=0.5 zemininde.
         ("model_a4", model_a3.AYAR, model_a4.AYAR, {"ad", "veri_ad"}),
+        # model_a5'in TABANI model_a4 -- "model_a4 standartlarinda"
+        # geri beslemeli ortalama (kullanici, 15 Eylul).
+        ("model_a5", model_a4.AYAR, model_a5.AYAR, {"ad", "ort_bas"}),
     )
     for ad, taban, kol, bek in DUGME:
         f = set(taban.fark(kol)) | {"ad"}

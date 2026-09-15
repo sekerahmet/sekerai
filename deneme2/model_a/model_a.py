@@ -156,6 +156,17 @@ class Ayar:
     #   2604.07822:594 "linear warmup schedule of 2000 steps" -- Wang da 2000.
     #   6000 idi (arsivden, 120000//20). 20.000 adimlik kosuda %30 ederdi.
     sabit_lr: bool = True      # True: isinmadan sonra LR SABIT (grokking icin)
+    # --- GERI BESLEMELI AGIRLIK ORTALAMASI (Lookahead, 1907.08610)
+    #   Onceden kayit: belge/onkayit/model_a5.md  (kullanici fikri, 15 Eylul)
+    #     phi   <- (1 - ort_alfa) * phi + ort_alfa * theta
+    #     theta <- phi          (egitim ORTALANMIS agirliktan devam eder)
+    #   VARSAYILAN KAPALI: ort_bas=0 -> hicbir sey yapilmaz, model_a..a4'un
+    #   davranisi DEGISMEZ. `test_sabit.py` bunu her kosuda dogruluyor.
+    ort_bas: int = 0           # 0 = KAPALI. >0 ise bu adimdan SONRA ortala.
+    ort_her: int = 0           # 0 -> `olc_her` kullanilir. Lookahead'in `k`si.
+    #   DIKKAT: makale k=5..10 tariyor; olc_her=2000 onun 200-400 KATI.
+    #   Sonumleme cikarsa once BU sorgulanmali, fikir degil.
+    ort_alfa: float = 0.5      # 0.5 = "bir onceki modelle esit ortalama".
     olc_her: int = 2000        # 20.000/2000 = 10 olcum noktasi (kullanici).
     n_olcum_max: int = 3000    # her olcme kumesinden en fazla
 
@@ -192,6 +203,12 @@ class Ayar:
 # SESSIZCE yanlis etiketlenir.
 ESKI_VARSAYILAN = {
     "veri_ad": "veri_okul",   # 15 Eylul oncesi tek veri kaynagi buydu
+    # Geri beslemeli ortalama (Lookahead) 15 Eylul'de eklendi. Ondan once
+    # BOYLE BIR SEY YOKTU -> kapali. `ort_bas=0` tam olarak "kapali"
+    # demek; digerleri o durumda hic okunmuyor ama alan olarak var olmali.
+    "ort_bas": 0,
+    "ort_her": 0,
+    "ort_alfa": 0.5,
 }
 
 
@@ -793,7 +810,8 @@ def _klasor_hazirla(alt: str, ustune: bool, yaz=print):
         f"{os.path.basename(yedek)}/  ({len(var)} dosya)")
 
 
-def surdurme_yaz(yol, ayar, model, opt, scaler, rs, adim, egri, iz):
+def surdurme_yaz(yol, ayar, model, opt, scaler, rs, adim, egri, iz,
+                 yavas=None):
     """SURDURME PAKETI -- kosuyu KALDIGI YERDEN devam ettirmeye yeter.
 
     Anlik goruntu (`snap/*.pt`) BUNU YAPAMAZ: icinde yalniz fp16 AGIRLIK
@@ -816,6 +834,11 @@ def surdurme_yaz(yol, ayar, model, opt, scaler, rs, adim, egri, iz):
             torch_rng=torch.get_rng_state(),
             cuda_rng=(torch.cuda.get_rng_state_all() if DEV == "cuda" else None),
             adim=adim, egri=egri, ayar=ayar.sozluk(), olcme_izi=iz,
+            # Lookahead YAVAS agirligi. ort_bas=0 iken None -- eski
+            # paketlerde bu anahtar hic YOKTU, `surdurme_oku` .get() ile
+            # okuyor, yani eski paketler aynen surdurulebilir.
+            yavas=(None if yavas is None else
+                   {k: v.cpu() for k, v in yavas.items()}),
         ), t)
     _atomik(yol, w)
 
@@ -865,9 +888,15 @@ def surdurme_oku(yol, ayar: Ayar, model, opt, scaler, rs, iz, yaz=print):
     torch.set_rng_state(_cpu(p["torch_rng"]))
     if DEV == "cuda" and p.get("cuda_rng"):
         torch.cuda.set_rng_state_all([_cpu(x) for x in p["cuda_rng"]])
+    # YAVAS agirlik (Lookahead). Eski paketlerde anahtar YOK -> None.
+    # Yeniden kurulurken modelin cihazina tasinir.
+    _yav = p.get("yavas")
+    if _yav is not None:
+        _yav = {k: v.to(DEV) for k, v in _yav.items()}
     yaz(f"  SURDURULUYOR: adim {p['adim']} -> {ayar.adim}   "
-        f"({len(p['egri'])} olcum noktasi devralindi)")
-    return p["adim"], list(p["egri"])
+        f"({len(p['egri'])} olcum noktasi devralindi)"
+        + ("   [yavas agirlik da devralindi]" if _yav is not None else ""))
+    return p["adim"], list(p["egri"]), _yav
 
 
 def erken_teshis(r: dict, ayar: Ayar, yaz=print, uyarildi: set | None = None):
@@ -965,6 +994,9 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
     scaler = torch.amp.GradScaler(DEV, enabled=(DEV == "cuda"))
     rs = np.random.RandomState(ayar.tohum + 991)
     egri, t0 = [], time.time()
+    # Lookahead'in YAVAS agirligi. ort_bas=0 iken hep None kalir ve hicbir
+    # sey olmaz -- eski kollarin davranisi aynen korunur.
+    yavas, ort_say = None, 0
 
     # Ayarin YANINA olcme izini de yaz: "bu kosu hangi ornekleri olctu"
     # sorusu sonradan MEKANIK olarak cevaplanabilsin.
@@ -1034,7 +1066,8 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
     tahmin = False
     bas = 0
     if surduruluyor:
-        bas, egri = surdurme_oku(sur_yol, ayar, model, opt, scaler, rs, iz, yaz)
+        bas, egri, yavas = surdurme_oku(sur_yol, ayar, model, opt, scaler,
+                                        rs, iz, yaz)
         r0 = egri[0]                    # adim 0 olcumu devralindi
         # ONCEKI KUNYE SILINMEZ. Surdurulen kosu baska bir oturumda, baska
         # bir GPU'da, baska bir commit'te baslamis olabilir; "bu sayilar
@@ -1103,6 +1136,36 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
             scaler.step(opt)
             scaler.update()
 
+            # --- GERI BESLEMELI ORTALAMA (Lookahead) -- OLCUMDEN ONCE.
+            # Sirasi onemli: once ortala, sonra olc/anlik-goruntu al.
+            # Boylece egri, anlik goruntu ve surdurme paketi HEPSI ayni
+            # (ortalanmis) agirligi gorur; "hangi agirlik olculdu"
+            # sorusu tek cevapli kalir.
+            _oh = ayar.ort_her or ayar.olc_her
+            if ayar.ort_bas and adim >= ayar.ort_bas and adim % _oh == 0:
+                with torch.no_grad():
+                    sd_ = model.state_dict()
+                    # DIKKAT: dongu degiskenleri `_k`/`_t`. `v` DISARIDA
+                    # Veri nesnesi; `for k, v in ...` yazilirsa GOLGELENIR
+                    # ve bir sonraki olcumde `v.ent_off` patlar. Duman
+                    # testi bunu yakaladi (15 Eylul) -- gercek kosuda ilk
+                    # ortalama adiminda cokerdi.
+                    if yavas is None:          # ILK esik: phi <- theta
+                        yavas = {_k: _t.detach().clone()
+                                 for _k, _t in sd_.items()}
+                        yaz(f"    ORTALAMA ACILDI adim {adim}  "
+                            f"alfa {ayar.ort_alfa}  her {_oh} adim")
+                    else:
+                        a_ = ayar.ort_alfa
+                        for _k, _t in sd_.items():
+                            if yavas[_k].dtype.is_floating_point:
+                                yavas[_k].mul_(1 - a_).add_(_t.detach(),
+                                                            alpha=a_)
+                            else:              # sayac/maske gibi alanlar
+                                yavas[_k].copy_(_t.detach())
+                        model.load_state_dict(yavas)
+                        ort_say += 1
+
             if adim % ayar.olc_her == 0 or adim == ayar.adim:
                 r = _nokta(adim, float(kayip_top.item() / max(1, kayip_say)),
                            lr, kayip_son=float(kayip.item()))
@@ -1124,7 +1187,7 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
                 # Kosu koparsa en fazla `olc_her` adim kaybedilir; defterde
                 # "surdurme yok, bastan baslar" yaziyordu, artik dogru degil.
                 surdurme_yaz(sur_yol, ayar, model, opt, scaler, rs, adim,
-                             egri, iz)
+                             egri, iz, yavas)
                 yaz(_satir(r))
                 erken_teshis(r, ayar, yaz, uyarildi)
                 if not tahmin:
