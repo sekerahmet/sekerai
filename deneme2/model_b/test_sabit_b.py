@@ -52,6 +52,20 @@ def main():
     f = set(model_a9.AYAR.fark(model_b.AYAR)) | {"ad"}
     _bak(f"model_b dugmeleri {sorted(f)}", sorted(f) == ["ad", "dar_alfa"])
 
+    import model_b1, model_a8
+    f1 = set(model_b.AYAR.fark(model_b1.AYAR)) | {"ad"}
+    _bak(f"model_b1 dugmeleri (model_b'den) {sorted(f1)}",
+         sorted(f1) == ["ad", "veri_ad"])
+    # ASIL KIYAS: model_a8'den TEK FARK darbogaz olmali. Bozulursa
+    # "darbogazin etkisi" iddiasi gecersiz olur -- baska bir sey de
+    # degismis demektir.
+    f2 = set(model_a8.AYAR.fark(model_b1.AYAR)) | {"ad"}
+    _bak(f"model_b1 <-> model_a8 farki {sorted(f2)}",
+         sorted(f2) == ["ad", "dar_alfa"],
+         "model_a8 kiyasi TEK DUGME olmali")
+    for _g in ("AYAR", "egit", "fark_bas"):
+        _bak(f"model_b1.{_g} var", hasattr(model_b1, _g), "kos.py duser")
+
     print("\n=== 2) dar_alfa=0 -> ModelB, model_a.Model ILE AYNI MI ===")
     # Bu kolun BUTUN kiyasi buna dayaniyor. Ek modul kurulmamali,
     # parametre sayisi degismemeli, cikti BIT DUZEYINDE ayni olmali.
