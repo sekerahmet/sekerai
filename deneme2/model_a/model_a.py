@@ -162,6 +162,18 @@ class Ayar:
     #     theta <- phi          (egitim ORTALANMIS agirliktan devam eder)
     #   VARSAYILAN KAPALI: ort_bas=0 -> hicbir sey yapilmaz, model_a..a4'un
     #   davranisi DEGISMEZ. `test_sabit.py` bunu her kosuda dogruluyor.
+    ood_pay: float = 0.0       # 0 = KAPALI. >0 ise ATOMIK OLGULARIN (kenar)
+    #   bu orani atomic_OOD'ye ayrilir -- Wang 2405.15071 §3.1'in birebir
+    #   tanimi: "The atomic facts are then the EDGES ... which we partition
+    #   disjointly into atomic_ID and atomic_OOD (95%:5%)".
+    #   EGITIM  = iki kenari da ID olan zincirler (train_inferred_ID)
+    #   SINAV   = iki kenari da OOD olan zincirler (test_inferred_OOD)
+    #   KARISIK = bir kenari OOD -> NE EGITIM NE SINAV, tamamen duser
+    #   ATOMIK OLGULAR HEPSI EGITIMDE (Wang §2: "our training set includes
+    #   ALL the atomic facts").
+    #   `kati_pay`dan FARKI: orada VARLIK boluyorduk ve ikinci hop kenari
+    #   egitimde 2. hop olarak %93,7 geciyordu -- yani makalenin %0'ini
+    #   ureten mekanizma YOKTU. Burada tanim geregi %0.
     kati_pay: float = 0.0      # 0 = KAPALI. >0 ise varliklarin bu orani
     #   HICBIR egitim zincirinde gorunmez -- ne bas, ne kopru, ne cevap.
     #   `ent_pay`den FARKI: ENT varliklari kopru ve cevap olarak egitimde
@@ -218,6 +230,7 @@ ESKI_VARSAYILAN = {
     "ort_alfa": 0.5,
     # ent_kati bolmesi 15 Eylul'de eklendi; ondan once YOKTU -> kapali.
     "kati_pay": 0.0,
+    "ood_pay": 0.0,
 }
 
 
@@ -263,6 +276,12 @@ class Veri:
     # kendi basina TURETMEZ (turetirse iki dosya ayri siralama kurar).
     tip: np.ndarray | None = None      # (n_ent,) tip indeksi
     tip_ad: tuple = ()                 # tip indeksi -> ad
+    ood: list = dc.field(default_factory=list)
+    #   WANG'IN test_inferred_OOD'si: zincirin IKI kenari da atomic_OOD.
+    #   Yani ne birinci hop ne ikinci hop, egitimdeki HICBIR zincirde
+    #   gecmiyor. Bas varlik ise BASKA kenarlariyla egitimde zincir basi
+    #   OLMUS (Wang'da da oyle) -- tutulan sey VARLIK degil KENAR.
+    #   ood_pay=0 ise BOS kalir.
     ent_kati: list = dc.field(default_factory=list)
     #   varlik HICBIR egitim zincirinde gecmemis -- ne bas, ne kopru, ne
     #   cevap. Yalniz atomik olgularda var. Wang 2405.15071'in OOD'si bu;
@@ -360,28 +379,57 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
     arama_ad = {_ea[int(i)] for i in _ix[:_k]}
     hukum_ad = ent_ad - arama_ad
 
-    tr2, comp, ent_ay, ent_yk, ent_ar, ent_kt = [], [], [], [], [], []
+    # OOD KENARLARI -- rng'den EN SON cekilir. Onceki cekilislerin
+    # (ent_ad, kati_ad, arama_ad) sirasi DEGISMEMELI; degisirse ood_pay=0
+    # olsa bile eski kollarin verisi kayar. `test_sabit` bunu dogruluyor.
+    ood_k = set()
+    if ayar.ood_pay > 0:
+        _kn = [(e, r) for e in E for r in R if facts[eid[e], rid[r]] >= 0]
+        _k = int(round(len(_kn) * ayar.ood_pay))
+        ood_k = {_kn[int(i)] for i in rng.permutation(len(_kn))[:_k]}
+
+    def _ood(x):
+        """Zincirin kac kenari atomic_OOD'de?  x = (e, r1, r2, kopru, cevap)"""
+        return ((x[0], x[1]) in ood_k) + ((x[3], x[2]) in ood_k)
+
+    tr2, comp, ent_ay, ent_yk, ent_ar, ent_kt, ood_ay = [], [], [], [], [], [], []
     for e in E:                                # E sirasi SABIT -> tekrarlanabilir
         lst = bas.get(e)
         if not lst:
             continue
         if e in kati_ad:                       # HICBIR ROLDE egitimde yok
             for x in lst:
-                if x[6] in ("AYIRT", "YOK"):
+                if x[6] in ("AYIRT", "YOK") and _ood(x) == 0:
                     ent_kt.append(x)
             continue                           # AYNI / DONUS: duser
         if e in ent_ad:
             hedef = ent_ay if e in hukum_ad else ent_ar
             for x in lst:
+                if _ood(x):                    # OOD kenarli: ENT'e girmez
+                    continue
                 if x[6] == "AYIRT":
                     hedef.append(x)
                 elif x[6] == "YOK" and e in hukum_ad:
                     ent_yk.append(x)
             continue                           # AYNI / DONUS: duser
-        p = rng.permutation(len(lst))
-        k = int(round(len(lst) * (1.0 - ayar.comp_pay)))
+        # WANG'IN UC YOLU (§2, §3.1):
+        #   iki kenar da OOD -> test_inferred_OOD
+        #   bir kenar OOD    -> KARISIK: ne egitim ne sinav, DUSER
+        #   iki kenar da ID  -> normal (tr2 / comp)
+        # `lst_id` ood_pay=0 iken `lst`in KENDISI olur ve rng akisi
+        # birebir korunur -- eski kollarin verisi degismez.
+        lst_id = []
+        for x in lst:
+            d = _ood(x)
+            if d == 2:
+                if x[6] in ("AYIRT", "YOK"):
+                    ood_ay.append(x)
+            elif d == 0:
+                lst_id.append(x)
+        p = rng.permutation(len(lst_id))
+        k = int(round(len(lst_id) * (1.0 - ayar.comp_pay)))
         for i, j in enumerate(p):
-            x = lst[int(j)]
+            x = lst_id[int(j)]
             if i < k:
                 tr2.append(x)
             elif x[6] in ("AYIRT", "YOK"):
@@ -415,7 +463,8 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
                                for (e, r), h in G["olgu"].items()],
              tr2=say(tr2), comp=say(comp), ent=say(ent_ay),
              ent_yok=say(ent_yk), ent_arama=say(ent_ar),
-             tip=E_tip, tip_ad=tuple(_V.TIPLER), ent_kati=say(ent_kt))
+             tip=E_tip, tip_ad=tuple(_V.TIPLER), ent_kati=say(ent_kt),
+             ood=say(ood_ay))
 
     # --- SIZINTI DENETIMI -- sessiz gecmesin
     trset = {(e, a, b) for e, a, b, _, _ in v.tr2}
@@ -446,10 +495,36 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
         _l = sum((e, a, b) in _sz for e, a, b, _, _ in v.ent_kati)
         assert _l == 0, f"ENT-KATI sizintisi: {_l}"
 
+    if ood_k:
+        _ok = {(eid[e], rid[r]) for e, r in ood_k}
+        # 1) OOD kenari HICBIR egitim zincirinde, HICBIR hop'ta gecmemeli
+        _x = sum(1 for e, r1, r2, b, _ in v.tr2
+                 if (e, r1) in _ok or (b, r2) in _ok)
+        assert _x == 0, f"OOD kenari egitim zincirinde gecti: {_x}"
+        # 2) SINAV zincirinin IKI kenari da OOD olmali
+        _y = sum(1 for e, r1, r2, b, _ in v.ood
+                 if not ((e, r1) in _ok and (b, r2) in _ok))
+        assert _y == 0, f"ood bolmesinde iki kenari OOD olmayan: {_y}"
+        # 3) ASIL MEKANIZMA (Wang §3.3): ikinci hop kenari egitimde IKINCI
+        #    HOP olarak gecmemeli. `ent_kati`de bu %93,7 geciyordu -- yani
+        #    o bolme makalenin %0'ini ureten kosulu SAGLAMIYORDU.
+        _ik = {(b, r2) for _, _, r2, b, _ in v.tr2}
+        _z = sum(1 for _, _, r2, b, _ in v.ood if (b, r2) in _ik)
+        assert _z == 0, f"OOD 2. hop kenari egitimde 2. HOP olarak gecti: {_z}"
+        # 4) ATOMIK OLGULAR DURMALI (Wang §2: "all the atomic facts")
+        _ao = sum(1 for e, r, _ in v.one if (e, r) in _ok)
+        assert _ao == len(_ok), f"OOD atomik olgulari silinmis: {_ao}/{len(_ok)}"
+        _bs = {e for e, *_ in v.tr2}
+        _hb = sum(1 for e, *_ in v.ood if e in _bs)
+        yaz(f"  OOD: {len(_ok)} kenar atomic_OOD (%{100*ayar.ood_pay:.1f}). "
+            f"sinav {len(v.ood)} zincir. "
+            f"bas varlik egitimde BASKA zincirlerde bas olmus: "
+            f"{_hb}/{len(v.ood)} (%{100*_hb/max(1,len(v.ood)):.0f})")
     yaz(f"  veri: olgu {len(v.one)}  egitim2 {len(v.tr2)}  COMP {len(v.comp)}  "
         f"ENT {len(v.ent)}  ENT-YOK {len(v.ent_yok)}  "
         f"ENT-ARAMA {len(v.ent_arama)}"
         + (f"  ENT-KATI {len(v.ent_kati)}" if v.ent_kati else "")
+        + (f"  OOD {len(v.ood)}" if v.ood else "")
         + f"  phi {v.phi:.2f}")
     yaz(f"        n_ent {v.n_ent}  n_rel {v.n_rel}  vocab {v.vocab}  "
         f"ent_off {v.ent_off}")
@@ -462,7 +537,7 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
     _tc = {(a, b) for _, a, b, _, _ in v.tr2}
     _tv = {e for e, *_ in v.tr2}
     for _ad, _L in (("COMP", v.comp), ("ENT", v.ent), ("ENT-YOK", v.ent_yok),
-                    ("ENT-KATI", v.ent_kati)):
+                    ("ENT-KATI", v.ent_kati), ("OOD", v.ood)):
         if not _L:
             continue
         _yc = sum(1 for _, a, b, _, _ in _L if (a, b) not in _tc)
@@ -675,6 +750,8 @@ def olcme_listeleri(ayar: Ayar, v: Veri):
     # gelirdi -- pencere_a egitim izi ile olcme izini karsilastiriyor.
     if v.ent_kati:
         d["ent_kati"] = alt(v.ent_kati, 6)
+    if v.ood:
+        d["ood"] = alt(v.ood, 8)
     return d
 
 
@@ -1103,7 +1180,7 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
         olcme_izi=iz, havuz=int(len(Xtr)),
         veri=dict(olgu=len(v.one), egitim2=len(v.tr2), comp=len(v.comp),
                   ent=len(v.ent), ent_yok=len(v.ent_yok),
-                  ent_kati=len(v.ent_kati),
+                  ent_kati=len(v.ent_kati), ood=len(v.ood),
                   ent_arama=len(v.ent_arama), n_ent=v.n_ent, n_rel=v.n_rel,
                   vocab=v.vocab, phi=round(v.phi, 4),
                   wang_phi=round(v.wang_phi, 4)),

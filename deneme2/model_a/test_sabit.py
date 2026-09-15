@@ -62,6 +62,12 @@ AYAR_KILIT = dict(
     # VARSAYILAN KAPALI -- asagidaki VERI kilidi model_a'nin gordugu
     # verinin BIT DUZEYINDE ayni kaldigini dogruluyor.
     kati_pay=0.0,
+    # WANG'IN KENAR BOLMESI (ood_pay) 15 Eylul'de eklendi. Kilit yine
+    # YAKALADI (alan 29 -> 30). Gerekce ONCE: belge/onkayit/model_a8.md §1
+    # -- makale bastan sona okundu ve `kati_pay`in (model_a7) makalenin
+    # %0'ini ureten kosulu SAGLAMADIGI olculdu (2. hop kenari egitimde
+    # 2. hop olarak %93,7 geciyordu). VARSAYILAN KAPALI.
+    ood_pay=0.0,
 )
 
 VERI_KILIT = dict(
@@ -138,7 +144,7 @@ def main():
     # Her kol, TABANINDAN tam olarak SU alanlarda ayrilmali. `ad` her zaman
     # ayrilir (cikti dosya adlarina giriyor). Fazladan bir alan ayrilirsa
     # "tek dugme" iddiasi coker ve kiyas yorumlanamaz hale gelir.
-    import model_a1, model_a2, model_a3, model_a4, model_a5, model_a6, model_a7
+    import model_a1, model_a2, model_a3, model_a4, model_a5, model_a6, model_a7, model_a8
     DUGME = (
         ("model_a1", M.AYAR, model_a1.AYAR, {"ad", "dongu"}),
         ("model_a2", M.AYAR, model_a2.AYAR, {"ad", "l", "dongu"}),
@@ -156,6 +162,9 @@ def main():
         # kapandi (a6-a5 = +0.0024), o yuzden sinav zorlasirken ailenin
         # en iyi TEK anlik goruntusunu veren kola donuluyor.
         ("model_a7", model_a5.AYAR, model_a7.AYAR, {"ad", "kati_pay"}),
+        # model_a8'in TABANI model_a5 (model_a7 DEGIL): kati_pay ayri bir
+        # soru, ikisini ayni kosuda karistirmak tek dugme ilkesini bozar.
+        ("model_a8", model_a5.AYAR, model_a8.AYAR, {"ad", "ood_pay"}),
     )
     for ad, taban, kol, bek in DUGME:
         f = set(taban.fark(kol)) | {"ad"}
