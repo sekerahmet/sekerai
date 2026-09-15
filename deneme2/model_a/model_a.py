@@ -162,6 +162,13 @@ class Ayar:
     #     theta <- phi          (egitim ORTALANMIS agirliktan devam eder)
     #   VARSAYILAN KAPALI: ort_bas=0 -> hicbir sey yapilmaz, model_a..a4'un
     #   davranisi DEGISMEZ. `test_sabit.py` bunu her kosuda dogruluyor.
+    kati_pay: float = 0.0      # 0 = KAPALI. >0 ise varliklarin bu orani
+    #   HICBIR egitim zincirinde gorunmez -- ne bas, ne kopru, ne cevap.
+    #   `ent_pay`den FARKI: ENT varliklari kopru ve cevap olarak egitimde
+    #   GORUNUYOR, yalniz bas olmuyor. KATI olanlar hicbir rolde yok.
+    #   ATOMIK OLGULARI DURUR -- Wang 2405.15071 de atomicOOD'yi egitimde
+    #   tutuyor; sinav "olgulari biliyor, zincir kurabiliyor mu".
+    #   VARSAYILAN KAPALI -> model_a..a6'nin verisi DEGISMEZ.
     ort_bas: int = 0           # 0 = KAPALI. >0 ise bu adimdan SONRA ortala.
     ort_her: int = 0           # 0 -> `olc_her` kullanilir. Lookahead'in `k`si.
     #   DIKKAT: makale k=5..10 tariyor; olc_her=2000 onun 200-400 KATI.
@@ -209,6 +216,8 @@ ESKI_VARSAYILAN = {
     "ort_bas": 0,
     "ort_her": 0,
     "ort_alfa": 0.5,
+    # ent_kati bolmesi 15 Eylul'de eklendi; ondan once YOKTU -> kapali.
+    "kati_pay": 0.0,
 }
 
 
@@ -254,6 +263,12 @@ class Veri:
     # kendi basina TURETMEZ (turetirse iki dosya ayri siralama kurar).
     tip: np.ndarray | None = None      # (n_ent,) tip indeksi
     tip_ad: tuple = ()                 # tip indeksi -> ad
+    ent_kati: list = dc.field(default_factory=list)
+    #   varlik HICBIR egitim zincirinde gecmemis -- ne bas, ne kopru, ne
+    #   cevap. Yalniz atomik olgularda var. Wang 2405.15071'in OOD'si bu;
+    #   orada transformer %0 aliyor (22 milyon adimda bile). `ent`ten FARKI:
+    #   ENT varliklari kopru ve cevap olarak egitimde GORUNUYOR.
+    #   kati_pay=0 ise BOS kalir ve hicbir sey degismez.
 
     def __post_init__(self):
         self.n_ent, self.n_rel = self.facts.shape
@@ -269,7 +284,11 @@ class Veri:
         # bizimki 5.09, Wang tanimiyla 6.36 -- %25 fark. Wang'in 3.6-18.0
         # taramasina konumlanirken WANG_PHI kullanilmali, phi degil.
         _ent = {e for e, *_ in self.ent} | {e for e, *_ in self.ent_yok} \
-            | {e for e, *_ in self.ent_arama}
+            | {e for e, *_ in self.ent_arama} \
+            | {e for e, *_ in self.ent_kati}
+        # KATI varliklari da paydadan DUSER: Wang'in atomicID tanimi
+        # "OOD varliklarinin olgularini dislar" diyor ve KATI tam
+        # olarak onun OOD'si. Dusurulmezse wang_phi KUCUK gorunur.
         _id = sum(1 for e, _, _ in self.one if e not in _ent)
         self.wang_phi = len(self.tr2) / max(1, _id)
 
@@ -319,6 +338,19 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
             k = int(round(len(a) * ayar.ent_pay))
             ent_ad |= {a[int(i)] for i in rng.permutation(len(a))[:k]}
 
+    # KATI GRUBU -- ENT'ten AYRIK secilir. Bu varliklar egitim zincirinde
+    # HICBIR ROLDE gorunmeyecek (bas, kopru, cevap). ENT ise yalniz bas
+    # olmuyor. Tabakalama ENT ile AYNI: tek tip secilirse sinav o tipin
+    # karisimina indirgenir.
+    kati_ad = set()
+    if ayar.kati_pay > 0:
+        for t in _V.TIPLER:
+            a = [x for x in G["ad"][t] if x in bas and x not in ent_ad]
+            if a:
+                k = int(round(len(a) * ayar.kati_pay))
+                kati_ad |= {a[int(i)] for i in rng.permutation(len(a))[:k]}
+        assert not (kati_ad & ent_ad), "KATI ve ENT gruplari ORTUSUYOR"
+
     # ARAMA / HUKUM ayrimi VARLIK duzeyinde: ayni varligin baska bir zinciri
     # de sizinti sayilir. Olculdu: ayrim olmadan hukum kumesinin %24'u
     # aramada zaten gorulmustu.
@@ -328,11 +360,16 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
     arama_ad = {_ea[int(i)] for i in _ix[:_k]}
     hukum_ad = ent_ad - arama_ad
 
-    tr2, comp, ent_ay, ent_yk, ent_ar = [], [], [], [], []
+    tr2, comp, ent_ay, ent_yk, ent_ar, ent_kt = [], [], [], [], [], []
     for e in E:                                # E sirasi SABIT -> tekrarlanabilir
         lst = bas.get(e)
         if not lst:
             continue
+        if e in kati_ad:                       # HICBIR ROLDE egitimde yok
+            for x in lst:
+                if x[6] in ("AYIRT", "YOK"):
+                    ent_kt.append(x)
+            continue                           # AYNI / DONUS: duser
         if e in ent_ad:
             hedef = ent_ay if e in hukum_ad else ent_ar
             for x in lst:
@@ -350,13 +387,35 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
             elif x[6] in ("AYIRT", "YOK"):
                 comp.append(x)                 # AYNI/DONUS sinava girmez
 
+    # KATI varligi KOPRU ya da CEVAP olarak da gecmemeli -- bolmenin
+    # tanimi "hicbir rolde yok". Bas konumunu yukaridaki `continue`
+    # hallediyor; kalan iki konum BURADA siliniyor.
+    # OLCULDU (15 Eylul): kati_pay=0.05'te bu, egitim zincirlerinin
+    # %9,3'unu goturuyor. YERINE KOYULMUYOR -- bu kolun kiyasi KOSU ICI
+    # (comp vs ent vs ent_kati, ayni model, ayni adim, ayni phi), o yuzden
+    # phi'nin baska kollarla eslesmesi GEREKMIYOR. Dolgu zincir eklemek
+    # egitim dagilimini bozardi (elde kalan havuz AYNI/DONUS turunden,
+    # yani TRIVIAL zincirler).
+    if kati_ad:
+        _n0 = len(tr2)
+        tr2 = [x for x in tr2 if x[3] not in kati_ad and x[4] not in kati_ad]
+        # COMP ve ENT sinavlari da KATI'den arindirilir: yoksa o orneklerin
+        # bir kismi gizliden ent_kati olur ve UC GRUBUN KARSITLIGI bulanir.
+        comp = [x for x in comp if x[3] not in kati_ad and x[4] not in kati_ad]
+        ent_ay = [x for x in ent_ay if x[3] not in kati_ad and x[4] not in kati_ad]
+        ent_yk = [x for x in ent_yk if x[3] not in kati_ad and x[4] not in kati_ad]
+        ent_ar = [x for x in ent_ar if x[3] not in kati_ad and x[4] not in kati_ad]
+        yaz(f"  KATI: {len(kati_ad)} varlik hicbir zincirde yok. "
+            f"egitim zinciri {_n0} -> {len(tr2)} "
+            f"(-{_n0 - len(tr2)}, %{100*(_n0-len(tr2))/max(1,_n0):.1f})")
+
     say = lambda L: [(eid[x[0]], rid[x[1]], rid[x[2]], eid[x[3]], eid[x[4]])
                      for x in L]
     v = Veri(facts=facts, one=[(eid[e], rid[r], eid[h])
                                for (e, r), h in G["olgu"].items()],
              tr2=say(tr2), comp=say(comp), ent=say(ent_ay),
              ent_yok=say(ent_yk), ent_arama=say(ent_ar),
-             tip=E_tip, tip_ad=tuple(_V.TIPLER))
+             tip=E_tip, tip_ad=tuple(_V.TIPLER), ent_kati=say(ent_kt))
 
     # --- SIZINTI DENETIMI -- sessiz gecmesin
     trset = {(e, a, b) for e, a, b, _, _ in v.tr2}
@@ -369,10 +428,29 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
     _h = {e for e, *_ in v.ent} | {e for e, *_ in v.ent_yok}
     _a = {e for e, *_ in v.ent_arama}
     assert not (_h & _a), f"ARAMA/HUKUM varlik sizintisi: {len(_h & _a)}"
+    # KATI: BOLMENIN TANIMI BU. Bas/kopru/cevap UC KONUMDA da denetlenir --
+    # `ent` icin yalniz bas denetleniyor, cunku orada kopru/cevap SERBEST.
+    if kati_ad:
+        _kid = {eid[a] for a in kati_ad}
+        _k = sum(1 for e, _, _, b, c in v.tr2
+                 if e in _kid or b in _kid or c in _kid)
+        assert _k == 0, f"KATI varligi egitim zincirinde gecti: {_k}"
+        assert v.ent_kati, "kati_pay > 0 ama ent_kati BOS"
+        _kt = {e for e, *_ in v.ent_kati}
+        assert _kt <= _kid, "ent_kati'de KATI olmayan varlik var"
+        assert not (_kt & (_h | _a)), "KATI ile ENT gruplari ORTUSUYOR"
+        # Atomik olgular DURMALI -- Wang da atomicOOD'yi egitimde tutuyor.
+        _ko = sum(1 for e, _, _ in v.one if e in _kid)
+        assert _ko > 0, "KATI varliklarinin atomik olgulari da silinmis"
+        _sz = {(e, a, b) for e, a, b, _, _ in v.tr2}
+        _l = sum((e, a, b) in _sz for e, a, b, _, _ in v.ent_kati)
+        assert _l == 0, f"ENT-KATI sizintisi: {_l}"
 
     yaz(f"  veri: olgu {len(v.one)}  egitim2 {len(v.tr2)}  COMP {len(v.comp)}  "
         f"ENT {len(v.ent)}  ENT-YOK {len(v.ent_yok)}  "
-        f"ENT-ARAMA {len(v.ent_arama)}  phi {v.phi:.2f}")
+        f"ENT-ARAMA {len(v.ent_arama)}"
+        + (f"  ENT-KATI {len(v.ent_kati)}" if v.ent_kati else "")
+        + f"  phi {v.phi:.2f}")
     yaz(f"        n_ent {v.n_ent}  n_rel {v.n_rel}  vocab {v.vocab}  "
         f"ent_off {v.ent_off}")
     yaz(f"        phi {v.phi:.2f} (bizim tanim)   {v.wang_phi:.2f} (Wang tanimi, "
@@ -383,7 +461,8 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
     # ciftlerin TAMAMI egitimde cikti. Sayi gozukurse iddia kayamaz.
     _tc = {(a, b) for _, a, b, _, _ in v.tr2}
     _tv = {e for e, *_ in v.tr2}
-    for _ad, _L in (("COMP", v.comp), ("ENT", v.ent), ("ENT-YOK", v.ent_yok)):
+    for _ad, _L in (("COMP", v.comp), ("ENT", v.ent), ("ENT-YOK", v.ent_yok),
+                    ("ENT-KATI", v.ent_kati)):
         if not _L:
             continue
         _yc = sum(1 for _, a, b, _, _ in _L if (a, b) not in _tc)
@@ -589,8 +668,14 @@ def olcme_listeleri(ayar: Ayar, v: Veri):
         if len(lst) > ayar.n_olcum_max:
             return [lst[i] for i in r.permutation(len(lst))[:ayar.n_olcum_max]]
         return list(lst)
-    return dict(one=alt(v.one, 0), seen=alt(v.tr2, 1), comp=alt(v.comp, 2),
-                ent=alt(v.ent, 3), ent_yok=alt(v.ent_yok, 5))
+    d = dict(one=alt(v.one, 0), seen=alt(v.tr2, 1), comp=alt(v.comp, 2),
+             ent=alt(v.ent, 3), ent_yok=alt(v.ent_yok, 5))
+    # ANAHTAR YALNIZ DOLUYSA EKLENIR. Bos liste bile eklense `olcme_izi`
+    # DEGISIR ve BUTUN eski kosular "iz tutmuyor" diye olculemez hale
+    # gelirdi -- pencere_a egitim izi ile olcme izini karsilastiriyor.
+    if v.ent_kati:
+        d["ent_kati"] = alt(v.ent_kati, 6)
+    return d
 
 
 def olcme_izi(L: dict) -> str:
@@ -1018,6 +1103,7 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
         olcme_izi=iz, havuz=int(len(Xtr)),
         veri=dict(olgu=len(v.one), egitim2=len(v.tr2), comp=len(v.comp),
                   ent=len(v.ent), ent_yok=len(v.ent_yok),
+                  ent_kati=len(v.ent_kati),
                   ent_arama=len(v.ent_arama), n_ent=v.n_ent, n_rel=v.n_rel,
                   vocab=v.vocab, phi=round(v.phi, 4),
                   wang_phi=round(v.wang_phi, 4)),

@@ -209,8 +209,12 @@ def main():
                   for i in range(len(adimlar) - a.genislik + 1)]
     print(f"\n{len(pencereler)} kayan pencere, genislik {a.genislik}. "
           f"EN IYISI SECILMIYOR, hepsi raporlaniyor.\n")
-    bas = f"  {'pencere':<18}" + "".join(f"{k:>9}" for k in
-                                         ("one", "seen", "comp", "ent", "ent_yok"))
+    # SUTUNLAR OLCME SETINDEN TURETILIR, elle yazilmaz. `ent_kati`
+    # (kati_pay > 0) ancak boyle gorunur; sabit liste olsaydi olculur ama
+    # BASILMAZDI -- "olculup gosterilmeyen sayi, yok sayilan sayidir".
+    SUT = tuple(k for k in ("one", "seen", "comp", "ent", "ent_yok",
+                            "ent_kati") if k in kod)
+    bas = f"  {'pencere':<18}" + "".join(f"{k:>9}" for k in SUT)
     print(bas + f"{'ent_ksy':>9}{'yok_ksy':>9}")
 
     sonuc = []
@@ -220,8 +224,7 @@ def main():
         etiket = f"{p[0]}-{p[-1]}"
         sonuc.append(dict(pencere=etiket, adimlar=p, **r))
         print(f"  {etiket:<18}"
-              + "".join(f"{r.get(k, float('nan')):>9.4f}" for k in
-                        ("one", "seen", "comp", "ent", "ent_yok"))
+              + "".join(f"{r.get(k, float('nan')):>9.4f}" for k in SUT)
               + f"{r['ent_kisayol']:>9.4f}{r['ent_yok_kisayol']:>9.4f}")
 
     # --- ONCEDEN YAZILAN KAPILAR (belge/onkayit/model_a.md 5)

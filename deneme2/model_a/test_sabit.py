@@ -56,6 +56,12 @@ AYAR_KILIT = dict(
     # UCU DE VARSAYILAN KAPALI -- model_a..a4'un davranisi degismiyor,
     # ve bunu asagidaki VERI/PARAMETRE kilidi dogruluyor.
     ort_bas=0, ort_her=0, ort_alfa=0.5,
+    # ENT-KATI bolmesi 15 Eylul'de eklendi (Wang 2405.15071'in OOD'si).
+    # Kilit bunu da YAKALADI: alan sayisi 28 -> 29, 2 kontrol dustu.
+    # Gerekce ONCE yazildi: belge/onkayit/model_a7.md §6.
+    # VARSAYILAN KAPALI -- asagidaki VERI kilidi model_a'nin gordugu
+    # verinin BIT DUZEYINDE ayni kaldigini dogruluyor.
+    kati_pay=0.0,
 )
 
 VERI_KILIT = dict(
@@ -132,7 +138,7 @@ def main():
     # Her kol, TABANINDAN tam olarak SU alanlarda ayrilmali. `ad` her zaman
     # ayrilir (cikti dosya adlarina giriyor). Fazladan bir alan ayrilirsa
     # "tek dugme" iddiasi coker ve kiyas yorumlanamaz hale gelir.
-    import model_a1, model_a2, model_a3, model_a4, model_a5, model_a6
+    import model_a1, model_a2, model_a3, model_a4, model_a5, model_a6, model_a7
     DUGME = (
         ("model_a1", M.AYAR, model_a1.AYAR, {"ad", "dongu"}),
         ("model_a2", M.AYAR, model_a2.AYAR, {"ad", "l", "dongu"}),
@@ -146,6 +152,10 @@ def main():
         # model_a6'nin TABANI model_a5 -- ayrilan soru "model_a5'in
         # sonucu FIKRIN mi `k`NIN mi", o yuzden model_a5 zemininde.
         ("model_a6", model_a5.AYAR, model_a6.AYAR, {"ad", "ort_her"}),
+        # model_a7'nin TABANI model_a5 (model_a6 DEGIL): `k` ekseni
+        # kapandi (a6-a5 = +0.0024), o yuzden sinav zorlasirken ailenin
+        # en iyi TEK anlik goruntusunu veren kola donuluyor.
+        ("model_a7", model_a5.AYAR, model_a7.AYAR, {"ad", "kati_pay"}),
     )
     for ad, taban, kol, bek in DUGME:
         f = set(taban.fark(kol)) | {"ad"}
