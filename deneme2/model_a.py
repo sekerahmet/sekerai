@@ -120,15 +120,19 @@ class Ayar:
     lr: float = 1e-3           # 2603.25009 Tablo 1, AdamW standardi.
     #   1e-4 idi (Loop&Generalize'dan). Ama o calisma grokking'i HIZLANDIRMAYI
     #   hedeflemiyordu; bu calisma tam onu olcuyor ve AdamW icin 1e-3 kullaniyor.
-    wd: float = 1.0            # 2603.25009 4.1 + Tablo 1. KRITIK DUGME.
+    wd: float = 0.1            # KULLANICI KARARI. KRITIK DUGME.
+    #   NOT: arsivdeki butun kosular da 0.1 kullaniyordu (grok_uzun preset,
+    #   G/GM'nin kayitli cfg'si). O ayarla 120.000 adim kosuldu ve ent
+    #   0.14'te kaldi -- ama model DUZ idi. Burada tek fark DONGU.
+    #   2603.25009'un taramasi (modular addition, AdamW):
     #   Onceki deger 0.01 idi ve o calismanin taramasinda 0.01 = "no seed
     #   grokks within 400,000 steps". Yani hicbir sey gormeyecegimiz deger.
     #     lambda 0.01  ->  hic grokking YOK
-    #     lambda 1.0   ->  3/3 tohum, gecikme 44.000 adim   <- SECILEN
+    #     lambda 1.0   ->  3/3 tohum, gecikme 44.000 adim
     #     lambda 5.0   ->  3/3 tohum, gecikme 24.000 adim   (optimal)
-    #   1.0 secildi (kullanici). Makalenin kendi ifadesi: buyuk wd
-    #   "is required to reliably induce grokking with AdamW".
+    #   0.1 bu taramanin ALTINDA kaliyor (0.01 ile 1.0 arasi, olculmemis).
     #   SINIR: o tarama MODULAR ADDITION'da yapildi, bizim gorevde degil.
+    #   Yani "0.1 yanlis" DIYEMEM; "olculmemis aralikta" diyebilirim.
     betas: tuple = (0.9, 0.999)   # AdamW momentum katsayilari.
     #   Hicbir makale YAZMIYOR. Yazilmamis olmasi "torch varsayilani" demek
     #   olarak okundu -> (0.9, 0.999). Arsivde (0.9, 0.95) idi (GPT tarzi) ve
