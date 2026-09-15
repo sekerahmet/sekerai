@@ -12,6 +12,28 @@ belge/bulgu/model_a.md      <- sonuc
 Drive: deneme2/model_a/     <- onun ciktisi
 ```
 
+## Tohum
+
+Ayni model UC TOHUMLA kosar: `t0`, `t1`, `t2`. Ayri model degil, AYNI
+modelin tekrari -- tek fark rastgele baslangic ve batch sirasi.
+**Veri ucunde de AYNI** (`veri_tohum` ayri bir alan, 0'da sabit).
+
+```
+Drive: deneme2/model_a/t0/  t1/  t2/
+       snap_model_a_t0_00020000.pt
+       egri_model_a_t0.json     ayar_t0.json
+```
+
+Sebebi: grokking tohuma bagli. 2603.25009'da "only 1 of 3 seeds grokked"
+gibi sonuclar var. Tek tohumla bir sey gormezsek "konfigurasyon yanlis" mi
+"bu baslangic sanssiz" mi ayiramayiz.
+
+```
+3/3 yukseldi  ->  saglam
+1/3 yukseldi  ->  oluyor ama KIRILGAN
+0/3 yukseldi  ->  konfigurasyon yanlis, sansizlik degil
+```
+
 **Colab: kuyruk/surucu YOK.** Bir defter = bir model. `SABLON.ipynb`i
 kopyala, adini modelin adi yap, TEK SATIRI degistir. Sablonda `MODEL = None`
 ve bir `assert` var: kopyalayip duzeltmeyi unutan SESSIZCE baska bir modeli

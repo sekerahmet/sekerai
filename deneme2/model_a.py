@@ -507,9 +507,9 @@ def kisayol_orani(model, v: Veri, lst, bs=512):
 
 # ======================= EGITIM ==========================================
 def egit(ayar: Ayar, alt=None, yaz=print) -> list:
-    alt = alt or f"cikti_{ayar.ad.replace('model_', '')}"
+    alt = alt or f"cikti_{ayar.ad}_t{ayar.tohum}"
     os.makedirs(alt, exist_ok=True)
-    yaz(f"=== {ayar.ad} ===  cihaz {DEV}  cikti {alt}/")
+    yaz(f"=== {ayar.ad}  tohum {ayar.tohum} ===  cihaz {DEV}  cikti {alt}/")
     v = veri_kur(ayar, yaz)
     Xtr, Ptr, Ttr, kimlik = egitim_havuzu(ayar, v, yaz)
 
@@ -533,7 +533,7 @@ def egit(ayar: Ayar, alt=None, yaz=print) -> list:
     rs = np.random.RandomState(ayar.tohum + 991)
     egri, t0 = [], time.time()
 
-    json.dump(ayar.sozluk(), open(f"{alt}/ayar.json", "w"), indent=1)
+    json.dump(ayar.sozluk(), open(f"{alt}/ayar_t{ayar.tohum}.json", "w"), indent=1)
 
     for adim in range(1, ayar.adim + 1):
         if adim < ayar.isinma:
@@ -576,8 +576,8 @@ def egit(ayar: Ayar, alt=None, yaz=print) -> list:
             # bulmamis ama 190000'i bulmustu (zaten 6 haneydi), yani hata
             # KISMEN gorunmustu. Ad `ayar.ad` tasiyor.
             torch.save({k: t.half() for k, t in model.state_dict().items()},
-                       f"{alt}/snap_{ayar.ad}_{adim:08d}.pt")
-            json.dump(egri, open(f"{alt}/egri_{ayar.ad}.json", "w"))
+                       f"{alt}/snap_{ayar.ad}_t{ayar.tohum}_{adim:08d}.pt")
+            json.dump(egri, open(f"{alt}/egri_{ayar.ad}_t{ayar.tohum}.json", "w"))
             yaz(f"  {adim:7d}/{ayar.adim}  kayip {r['kayip']:.3f}  "
                 + "  ".join(f"{k} {r[k]:.3f}" for k in
                             ("one", "seen", "comp", "ent") if k in r)
