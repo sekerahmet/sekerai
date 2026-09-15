@@ -99,7 +99,13 @@ def main():
     ap.add_argument("--commit", default=None,
                     help="defterin klonladigi commit; kunyeye yazilir")
     ap.add_argument("--ustune", action="store_true",
-                    help="DOLU klasorun uzerine yaz (varsayilan: REDDET)")
+                    help="DOLU klasoru _eski_<zaman>'a TASI, yenisini bos ac")
+    ap.add_argument("--adim", type=int, default=None,
+                    help="butce tavanini degistir (CLAUDE.md kural 1: "
+                         "uzatmak KULLANICI kararidir). ayar_t<N>.json'a yazilir.")
+    ap.add_argument("--surdur", action="store_true",
+                    help="surdurme_t<N>.pt'den KALDIGI YERDEN devam et. "
+                         "--adim ile birlikte kullanilir.")
     a = ap.parse_args()
 
     sys.path.insert(0, aile_yolu(a.model))
@@ -122,8 +128,14 @@ def main():
     with open(os.path.join(a.ev, "OKU.md"), "w", encoding="utf-8") as f:
         f.write(OKU.format(model=a.model))
     for t in a.tohum:
-        M.egit(M.AYAR.degistir(tohum=t), alt=f"{a.ev}/t{t}",
-               ustune=a.ustune, commit=a.commit)
+        ayar = M.AYAR.degistir(tohum=t)
+        if a.adim is not None:
+            # Butce degisikligi bir IDDIA degil, CIKTI olsun: hem ekrana
+            # basilir hem ayar_t<N>.json'a yazilir.
+            M.fark_bas(M.AYAR, ayar.degistir(adim=a.adim))
+            ayar = ayar.degistir(adim=a.adim)
+        M.egit(ayar, alt=f"{a.ev}/t{t}", ustune=a.ustune,
+               commit=a.commit, surdur=a.surdur)
 
 
 if __name__ == "__main__":

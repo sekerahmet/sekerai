@@ -762,6 +762,72 @@ def _klasor_hazirla(alt: str, ustune: bool, yaz=print):
         f"{os.path.basename(yedek)}/  ({len(var)} dosya)")
 
 
+def surdurme_yaz(yol, ayar, model, opt, scaler, rs, adim, egri, iz):
+    """SURDURME PAKETI -- kosuyu KALDIGI YERDEN devam ettirmeye yeter.
+
+    Anlik goruntu (`snap/*.pt`) BUNU YAPAMAZ: icinde yalniz fp16 AGIRLIK
+    var. Olculdu (15 Eylul): 28 anahtarin hepsi model agirligi; AdamW'nin
+    `exp_avg`/`exp_avg_sq` momentleri, adim sayaci, GradScaler olcegi ve
+    batch RNG durumu YOK. Agirliktan devam edilirse optimizer SIFIRDAN
+    baslar, yorunge kesintisiz kosudan FARKLI olur ve hicbir sey hata
+    vermez -- arsivdeki kol C tam boyle gecersiz kalmisti.
+
+    CLAUDE.md kural 1 "yetmezse 40.000'e uzatilir" diyordu; kod bunu
+    imkansiz kiliyordu. Kural ile kod CELISIYORDU.
+
+    TEK dosya, her olcum noktasinda ATOMIK olarak ustune yazilir (~41 MB:
+    fp32 agirlik + iki AdamW momenti). Yani kosu koparsa en fazla
+    `olc_her` adim kaybedilir."""
+    def w(t):
+        torch.save(dict(
+            model=model.state_dict(), opt=opt.state_dict(),
+            scaler=scaler.state_dict(), rs=rs.get_state(),
+            torch_rng=torch.get_rng_state(),
+            cuda_rng=(torch.cuda.get_rng_state_all() if DEV == "cuda" else None),
+            adim=adim, egri=egri, ayar=ayar.sozluk(), olcme_izi=iz,
+        ), t)
+    _atomik(yol, w)
+
+
+def surdurme_oku(yol, ayar: Ayar, model, opt, scaler, rs, iz, yaz=print):
+    """Paketi geri kur. UYMAYAN her sey burada DURDURUR, sessiz gecmez."""
+    p = torch.load(yol, map_location=DEV, weights_only=False)
+    eski = p["ayar"]
+    yeni = ayar.sozluk()
+    # `adim` DISINDA her alan ayni olmali: uzatma butceyi degistirir,
+    # modeli/veriyi DEGISTIRMEZ. `ad` da serbest degil -- cikti adlarina
+    # giriyor.
+    fark = {k for k in yeni if k != "adim" and eski.get(k) != yeni[k]}
+    if fark:
+        raise SystemExit(
+            os.linesep + f"!! SURDURULEMEZ: ayar degismis: {sorted(fark)}"
+            + os.linesep
+            + f"   eski { {k: eski.get(k) for k in sorted(fark)} }"
+            + os.linesep
+            + f"   yeni { {k: yeni[k] for k in sorted(fark)} }" + os.linesep
+            + "   Butce disinda bir sey degistiyse bu SURDURME degil, "
+            + "BASKA bir kosudur.")
+    if p.get("olcme_izi") != iz:
+        raise SystemExit(
+            os.linesep + f"!! SURDURULEMEZ: olcme seti degismis "
+            f"(paket {p.get('olcme_izi')}, simdi {iz}).")
+    if p["adim"] >= ayar.adim:
+        raise SystemExit(
+            os.linesep + f"!! SURDURULECEK BIR SEY YOK: paket {p['adim']} "
+            f"adimda, hedef {ayar.adim}. Uzatmak icin `adim` buyutulmeli.")
+    model.load_state_dict(p["model"])
+    opt.load_state_dict(p["opt"])
+    scaler.load_state_dict(p["scaler"])
+    rs.set_state(p["rs"])
+    torch.set_rng_state(p["torch_rng"].cpu() if hasattr(p["torch_rng"], "cpu")
+                        else p["torch_rng"])
+    if DEV == "cuda" and p.get("cuda_rng") is not None:
+        torch.cuda.set_rng_state_all(p["cuda_rng"])
+    yaz(f"  SURDURULUYOR: adim {p['adim']} -> {ayar.adim}   "
+        f"({len(p['egri'])} olcum noktasi devralindi)")
+    return p["adim"], list(p["egri"])
+
+
 def erken_teshis(r: dict, ayar: Ayar, yaz=print, uyarildi: set | None = None):
     """Bozuk kosuyu 45 dakika sonra degil, ILK OLCUMDE yakala.
 
@@ -807,11 +873,22 @@ def erken_teshis(r: dict, ayar: Ayar, yaz=print, uyarildi: set | None = None):
 
 
 # ======================= EGITIM ==========================================
-def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None) -> list:
+def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
+         surdur=False) -> list:
     alt = alt or f"cikti_{ayar.ad}_t{ayar.tohum}"
     os.makedirs(alt, exist_ok=True)
     _yazilabilir(alt, yaz)              # Drive gercekten bagli mi, saniye 0'da
-    _klasor_hazirla(alt, ustune, yaz)   # dolu klasore IKINCI kez yazma
+    sur_yol = f"{alt}/surdurme_t{ayar.tohum}.pt"
+    surduruluyor = surdur and os.path.exists(sur_yol)
+    if surdur and not surduruluyor:
+        raise SystemExit(
+            os.linesep + f"!! SURDURME PAKETI YOK: {sur_yol}" + os.linesep
+            + "   Bu klasordeki kosu surdurme destegi EKLENMEDEN once"
+            + os.linesep
+            + "   kosulmus olabilir. O zaman uzatma bir SURDURME degil,"
+            + os.linesep + "   BASTAN kosudur: --ustune ile yeniden kos.")
+    if not surduruluyor:
+        _klasor_hazirla(alt, ustune, yaz)   # dolu klasore IKINCI kez yazma
     # Anlik goruntuler AYRI alt klasorde: 20.000 adimda 10, uzatilirsa 20
     # dosya oluyor ve tohum klasorunde okunmasi gereken 4 json'u gomuyor.
     # _klasor_hazirla'dan SONRA: once doluluk bakilir, sonra klasor acilir.
@@ -913,6 +990,21 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None) -> list:
     uyarildi = set()
     r0 = None
     tahmin = False
+    bas = 0
+    if surduruluyor:
+        bas, egri = surdurme_oku(sur_yol, ayar, model, opt, scaler, rs, iz, yaz)
+        r0 = egri[0]                    # adim 0 olcumu devralindi
+        # ONCEKI KUNYE SILINMEZ. Surdurulen kosu baska bir oturumda, baska
+        # bir GPU'da, baska bir commit'te baslamis olabilir; "bu sayilar
+        # hangi kosudan" sorusu oturum basina cevaplanabilmeli.
+        try:
+            _eski = json.load(open(kunye_yolu, encoding="utf-8"))
+            _onc = _eski.pop("onceki", [])
+            kunye["onceki"] = _onc + [_eski]
+        except Exception:
+            pass
+        kunye.update(surduruldu=True, surdurme_baslangic=bas)
+        _yaz_json(kunye_yolu, kunye)
     # Kayip birikimi GPU'da tutulur: her adimda .item() demek her adimda
     # GPU senkronu demek olurdu. Tensor olarak toplanip yalniz olcum
     # noktasinda bir kez okunuyor -- bedeli yok.
@@ -923,13 +1015,14 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None) -> list:
     # ne `HATA` yazdi ne de sebebi. Klasor "yarim mi, kosuyor mu, oldu mu"
     # belli olmadan kaliyordu.
     try:
-        r0 = _nokta(0, None, 0.0)
-        egri.append(r0)
-        yaz(_satir(r0) + "   <- SANS (egitim yok, anlik goruntu YAZILMAZ)")
-        erken_teshis(r0, ayar, yaz, uyarildi)
-        _yaz_json(egri_yolu, egri)
+        if not surduruluyor:
+            r0 = _nokta(0, None, 0.0)
+            egri.append(r0)
+            yaz(_satir(r0) + "   <- SANS (egitim yok, anlik goruntu YAZILMAZ)")
+            erken_teshis(r0, ayar, yaz, uyarildi)
+            _yaz_json(egri_yolu, egri)
 
-        for adim in range(1, ayar.adim + 1):
+        for adim in range(bas + 1, ayar.adim + 1):
             if adim < ayar.isinma:
                 lr = ayar.lr * adim / ayar.isinma
             elif ayar.sabit_lr:
@@ -985,6 +1078,11 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None) -> list:
                 sd = {k: t.half() for k, t in model.state_dict().items()}
                 _atomik(yol, lambda t, _s=sd: torch.save(_s, t))
                 _yaz_json(egri_yolu, egri)
+                # SURDURME PAKETI: tek dosya, her olcumde ustune yazilir.
+                # Kosu koparsa en fazla `olc_her` adim kaybedilir; defterde
+                # "surdurme yok, bastan baslar" yaziyordu, artik dogru degil.
+                surdurme_yaz(sur_yol, ayar, model, opt, scaler, rs, adim,
+                             egri, iz)
                 yaz(_satir(r))
                 erken_teshis(r, ayar, yaz, uyarildi)
                 if not tahmin:
@@ -993,12 +1091,15 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None) -> list:
                     # kurulumundan SONRA basliyor). r['sn'] icinde iki olcum
                     # var (adim 0 ve bu). Olcum maliyeti ayri sayilmazsa
                     # tahmin 10 olcum kadar EKSIK cikardi.
-                    olcum = r0["sn"]
-                    hiz = max(0.0, r["sn"] - 2 * olcum) / adim
-                    n_olc = ayar.adim // ayar.olc_her + 1
-                    top = hiz * ayar.adim + olcum * n_olc
+                    # Surdurulen kosuda r0['sn'] ESKI oturumun saatinden
+                    # gelir; bu oturumun saatiyle karistirilamaz.
+                    olcum = 0.0 if surduruluyor else r0["sn"]
+                    kalan_adim = ayar.adim - bas
+                    hiz = max(0.0, r["sn"] - 2 * olcum) / max(1, adim - bas)
+                    n_olc = kalan_adim // ayar.olc_her + (0 if surduruluyor else 1)
+                    top = hiz * kalan_adim + olcum * n_olc
                     yaz(f"     >> HIZ {hiz*1000:.0f} ms/adim, olcum basina "
-                        f"{olcum:.0f} sn x{n_olc}  ->  toplam ~{top/60:.0f} dk, "
+                        f"{olcum:.0f} sn x{n_olc}  ->  bu oturum ~{top/60:.0f} dk, "
                         f"kalan ~{(top - r['sn'])/60:.0f} dk.")
                     yaz("        Bu rakam beklenenin cok ustundeyse SIMDI "
                         "durdur -- 45 dk mi 6 saat mi, sonunda degil BURADA "
