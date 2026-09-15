@@ -162,6 +162,15 @@ class Ayar:
     #     theta <- phi          (egitim ORTALANMIS agirliktan devam eder)
     #   VARSAYILAN KAPALI: ort_bas=0 -> hicbir sey yapilmaz, model_a..a4'un
     #   davranisi DEGISMEZ. `test_sabit.py` bunu her kosuda dogruluyor.
+    # --- DARBOGAZ (model_b ailesi okur, model_a GORMEZDEN GELIR) -----------
+    #   DiscoLoop (arXiv 2607.00341) Denklem 4-6. Dongu turlari arasinda
+    #   kalinti akisina "cozulmus gomme" kanali eklenir:
+    #       H~ = H + alfa * RMSNorm(Phi(H)),   Phi(h) = softmax(Wh/tau) @ W
+    #   `model_a.Model` bu alanlari HIC OKUMAZ -- parametre sayisi ve
+    #   baslangic agirligi degismez, `test_sabit` bunu dogruluyor.
+    dar_alfa: float = 0.0      # 0 = KAPALI. Sabit gecit gucu.
+    dar_tau: float = 1.0       # Phi'nin softmax sicakligi.
+    dar_kapi: bool = False     # True = ogrenilebilir gecit (d+1 parametre)
     ood_pay: float = 0.0       # 0 = KAPALI. >0 ise ATOMIK OLGULARIN (kenar)
     #   bu orani atomic_OOD'ye ayrilir -- Wang 2405.15071 §3.1'in birebir
     #   tanimi: "The atomic facts are then the EDGES ... which we partition
@@ -231,6 +240,7 @@ ESKI_VARSAYILAN = {
     # ent_kati bolmesi 15 Eylul'de eklendi; ondan once YOKTU -> kapali.
     "kati_pay": 0.0,
     "ood_pay": 0.0,
+    "dar_alfa": 0.0, "dar_tau": 1.0, "dar_kapi": False,
 }
 
 
@@ -1107,6 +1117,8 @@ def erken_teshis(r: dict, ayar: Ayar, yaz=print, uyarildi: set | None = None):
 
 # ======================= EGITIM ==========================================
 def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
+         model_kur=None,   # None -> Model. `model_b` kendi sinifini verir;
+         #                   varsayilan davranis BIT DUZEYINDE ayni kalir.
          surdur=False) -> list:
     alt = alt or f"cikti_{ayar.ad}_t{ayar.tohum}"
     os.makedirs(alt, exist_ok=True)
@@ -1138,7 +1150,7 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
         + f"   parmak izi {iz}")
 
     torch.manual_seed(ayar.tohum)
-    model = Model(ayar, v.vocab).to(DEV)
+    model = (model_kur or Model)(ayar, v.vocab).to(DEV)
     yaz(f"  parametre {model.n_param():,}  (d={ayar.d} l={ayar.l} "
         f"nh={ayar.nh} dff={ayar.dff} dongu={ayar.dongu})"
         f"  -> {ayar.l*ayar.dongu} katman-esdegeri hesap")

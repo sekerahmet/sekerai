@@ -68,6 +68,14 @@ AYAR_KILIT = dict(
     # %0'ini ureten kosulu SAGLAMADIGI olculdu (2. hop kenari egitimde
     # 2. hop olarak %93,7 geciyordu). VARSAYILAN KAPALI.
     ood_pay=0.0,
+    # DARBOGAZ alanlari 16 Eylul'de eklendi -- YENI AILE `model_b` icin
+    # (DiscoLoop, arXiv 2607.00341 Denk. 4-6). Gerekce ONCE yazildi:
+    # belge/onkayit/model_b.md §3.
+    # `model_a.Model` bu alanlari HIC OKUMAZ. Kanit asagida, 4. bolumde:
+    # `parametre 3427840` ve `agirlik sha` DEGISMEDI. Ayrica
+    # model_b/test_sabit_b.py, dar_alfa=0 iken ModelB'nin model_a.Model
+    # ile BIT DUZEYINDE ayni cikti verdigini her kosuda dogruluyor.
+    dar_alfa=0.0, dar_tau=1.0, dar_kapi=False,
 )
 
 VERI_KILIT = dict(
