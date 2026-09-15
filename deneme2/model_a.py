@@ -34,21 +34,26 @@ ARSIVDEKI sifirdan.py'DEN NE DEGISTI (dordu de fiilen ariza cikarmisti)
    ic-ice yigin yok.
 
 --------------------------------------------------------------------------
-MIMARI NEREDEN GELIYOR
+MIMARI VE OPTIMIZASYON NEREDEN GELIYOR -- IKI AYRI KAYNAK
 
-Hicbiri kafadan atilmadi. Hepsi 2604.07822 "Loop, Think & Generalize"
-satir 594'ten, tam metinden:
-    d=768, 12 kafa, 4 katmanlik tekrarli blok,
-    AdamW lr 1e-4, wd 0.01, dogrusal isinma 2000 adim, batch 512
-O calisma AYNI gorevde (iki adimli kompozisyon, OOD) ve dongulu mimarinin
-ise yaradigini olcmus. Kodu acik: github.com/OSU-NLP-Group/Loop-Think-Generalize
+Ikisini KASITLI olarak ayri yerlerden aldik. Gerekcesi 2603.25009'un kendi
+merkezi bulgusu: "grokking dynamics are NOT primarily determined by
+architecture, but by interactions between optimization stability and
+regularization." Yani iki makale FARKLI seylere bakiyor.
 
-TEK VARSAYIM: `dff`. Makalede yazmiyor; 4*d = 3072 aldim (GPT-2 standardi,
-Wang ve FTCT de 4x kullaniyor). Isaretli.
+MIMARI -- 2604.07822 "Loop, Think & Generalize" satir 594
+    d=768, 12 kafa, 4 katmanlik TEKRARLI blok, batch 512, isinma 2000
+    Ayni gorev (iki adimli kompozisyon, OOD) ve dongunun ise yaradigini
+    olcmus. Kod: github.com/OSU-NLP-Group/Loop-Think-Generalize
 
-Arsivdeki eski sayilar (d=256, dff=1496, lr=1e-3) TASINMADI. Onlarin
-gerekcesi arsivde ARANDI ve BULUNAMADI; ozellikle lr=1e-3 yayimlanmis
-hicbir calismada yok.
+OPTIMIZASYON -- 2603.25009 "A Systematic Empirical Study of Grokking" 4.1
+    AdamW lr 1e-3, wd 1.0, gradyan kirpma 1.0, GELU, pre-norm, dropout yok
+    Bu calisma grokking'i HIZLANDIRMAYI olcuyor ve wd'yi "dominant control
+    parameter" olarak buluyor -- dar bir "Goldilocks" bandi var.
+
+SINIR, ACIKCA: 2603.25009'un gorevi MODULAR ADDITION (mod 97), bizimki
+degil. Sayilari (ozellikle wd) oradan aldik ama transfer ettigi OLCULMEDI.
+Ilk kosunun isi bunu gormek.
 """
 from __future__ import annotations
 
@@ -92,8 +97,8 @@ class Ayar:
     d: int = 768
     l: int = 4                 # BLOK sayisi (paylasilan agirlik)
     nh: int = 12
-    dff: int = 3072            # 4*d, GPT-2 standardi. MAKALEDE YAZMIYOR --
-    #                            varsayim, isaretli. (Wang ve FTCT 4x kullaniyor.)
+    dff: int = 3072            # 4*d. ARTIK VARSAYIM DEGIL: 2603.25009 4.1
+    #                            "a feedforward dimension of 4d = 2,048" diyor.
     dongu: int = 2             # ayni bloklar kac kez uygulanacak (R)
     #   dongu=1  -> DUZ transformer (l katman)
     #   dongu=R  -> l*R katman-esdegeri hesap, AYNI parametrelerle
@@ -106,13 +111,23 @@ class Ayar:
     tohum: int = 0
     adim: int = 20000          # TAVAN (CLAUDE.md kural 1). Yetmezse 40.000.
     batch: int = 512
-    lr: float = 1e-4           # 2604.07822:594. Eskiden 1e-3 idi (arsivden,
-    #                            gerekcesi YOKTU) ve yayimlanmis hicbir
-    #                            calismada 1e-3 yok: Wang 1e-4, IdBridge 1e-4,
-    #                            FTCT 5e-5.
-    wd: float = 0.01           # 2604.07822:594.  DIKKAT: Wang 0.1 kullaniyor
-    #                            ve Ek E.1'de "buyuk wd grokking'i hizlandirir"
-    #                            diyor. Iki makale AYRISIYOR; bu acik bir dugme.
+    lr: float = 1e-3           # 2603.25009 Tablo 1, AdamW standardi.
+    #   1e-4 idi (Loop&Generalize'dan). Ama o calisma grokking'i HIZLANDIRMAYI
+    #   hedeflemiyordu; bu calisma tam onu olcuyor ve AdamW icin 1e-3 kullaniyor.
+    wd: float = 1.0            # 2603.25009 4.1 + Tablo 1. KRITIK DUGME.
+    #   Onceki deger 0.01 idi ve o calismanin taramasinda 0.01 = "no seed
+    #   grokks within 400,000 steps". Yani hicbir sey gormeyecegimiz deger.
+    #     lambda 0.01  ->  hic grokking YOK
+    #     lambda 1.0   ->  3/3 tohum, gecikme 44.000 adim   <- SECILEN
+    #     lambda 5.0   ->  3/3 tohum, gecikme 24.000 adim   (optimal)
+    #   1.0 secildi (kullanici). Makalenin kendi ifadesi: buyuk wd
+    #   "is required to reliably induce grokking with AdamW".
+    #   SINIR: o tarama MODULAR ADDITION'da yapildi, bizim gorevde degil.
+    betas: tuple = (0.9, 0.999)   # AdamW momentum katsayilari.
+    #   Hicbir makale YAZMIYOR. Yazilmamis olmasi "torch varsayilani" demek
+    #   olarak okundu -> (0.9, 0.999). Arsivde (0.9, 0.95) idi (GPT tarzi) ve
+    #   `egit()` icine GOMULUYDU -- yani ayar.json'a bile girmiyordu.
+    #   Artik alan: gorunur, kaydediliyor, degistirilebilir. CIKARIM, olcum degil.
     isinma: int = 2000         # ACIK -- `adim`dan turetilmez.
     #   2604.07822:594 "linear warmup schedule of 2000 steps" -- Wang da 2000.
     #   6000 idi (arsivden, 120000//20). 20.000 adimlik kosuda %30 ederdi.
@@ -503,7 +518,7 @@ def egit(ayar: Ayar, alt=None, yaz=print) -> list:
     nodec = [p for p in model.parameters() if p.dim() < 2]
     opt = torch.optim.AdamW([{"params": dec, "weight_decay": ayar.wd},
                              {"params": nodec, "weight_decay": 0.0}],
-                            lr=ayar.lr, betas=(0.9, 0.95))
+                            lr=ayar.lr, betas=tuple(ayar.betas))
     scaler = torch.amp.GradScaler(DEV, enabled=(DEV == "cuda"))
     rs = np.random.RandomState(ayar.tohum + 991)
     egri, t0 = [], time.time()
