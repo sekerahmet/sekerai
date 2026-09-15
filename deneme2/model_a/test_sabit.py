@@ -86,6 +86,12 @@ AYAR_KILIT = dict(
     # ayrica model_b/test_sabit_b.py §6 iki yolun ayni fonksiyonu
     # verdigini (fp32 bagil fark < 1e-5) her kosuda olcuyor.
     dar_sdpa=False,
+    # `dar_sert` 16 Eylul'de eklendi -- `model_b3` icin. Kilit YINE
+    # YAKALADI (alan 34 -> 35). Gerekce kilide DOKUNULMADAN ONCE
+    # yazildi: belge/onkayit/model_b3.md.
+    # Phi'nin `tau -> 0` limiti: W[argmax(nf(h) Wᵀ)] + straight-through.
+    # `model_a.Model` Phi'yi zaten hic cagirmaz. VARSAYILAN KAPALI.
+    dar_sert=False,
 )
 
 VERI_KILIT = dict(

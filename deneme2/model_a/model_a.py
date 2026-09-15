@@ -171,6 +171,14 @@ class Ayar:
     dar_alfa: float = 0.0      # 0 = KAPALI. Sabit gecit gucu.
     dar_tau: float = 1.0       # Phi'nin softmax sicakligi.
     dar_kapi: bool = False     # True = ogrenilebilir gecit (d+1 parametre)
+    dar_sert: bool = False     # Phi'yi SERTLESTIR: tau -> 0 limiti.
+    #   Phi(h) = W[argmax(nf(h) Wᵀ)] -- yumusak ortalama yerine TEK gomme.
+    #   argmax turevlenemez; straight-through (van den Oord 2017, VQ-VAE):
+    #   ileri sert, geri gradyan nf(h)'ye DOGRUDAN gecer. Yani bu bir
+    #   VEKTOR NICEMLEME -- gizli durum sozluk gomme tablosuna yuvarlanir.
+    #   IKI SEYI BIRDEN degistirir (ileri gecis + gradyan yolu); onkayit
+    #   belge/onkayit/model_b3.md §2 bunu kusur olarak yaziyor.
+    #   `dar_sdpa` ile BIRLIKTE kullanilamaz (sert yolda softmax YOK).
     dar_sdpa: bool = False     # Phi'yi SDPA ile hesapla. SAYISAL DEGIL,
     #   HESAPLAMA yolu degisir: Phi(h) = softmax(nf(h) Wᵀ/tau) @ W tam
     #   olarak Attention(Q=nf(h), K=W, V=W, scale=1/tau) -- `head` bias'siz
@@ -248,6 +256,7 @@ ESKI_VARSAYILAN = {
     "kati_pay": 0.0,
     "ood_pay": 0.0,
     "dar_alfa": 0.0, "dar_tau": 1.0, "dar_kapi": False, "dar_sdpa": False,
+    "dar_sert": False,
 }
 
 

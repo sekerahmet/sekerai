@@ -66,7 +66,13 @@ def main():
     for _g in ("AYAR", "egit", "fark_bas"):
         _bak(f"model_b1.{_g} var", hasattr(model_b1, _g), "kos.py duser")
 
-    import model_b2
+    import model_b2, model_b3
+    f4 = set(model_b1.AYAR.fark(model_b3.AYAR)) | {"ad"}
+    _bak(f"model_b3 <-> model_b1 farki {sorted(f4)}",
+         sorted(f4) == ["ad", "dar_sert"],
+         "model_b3 SADECE Phi'nin icini degistirmeli")
+    for _g in ("AYAR", "egit", "fark_bas"):
+        _bak(f"model_b3.{_g} var", hasattr(model_b3, _g), "kos.py duser")
     f3 = set(model_b1.AYAR.fark(model_b2.AYAR)) | {"ad"}
     _bak(f"model_b2 <-> model_b1 farki {sorted(f3)}",
          sorted(f3) == ["ad", "dar_sdpa"],
@@ -90,7 +96,7 @@ def main():
     # yan etki olarak duzeltiyor ve `model_b1` hazir yolu buluyor.
     # `kos.py` ise YALNIZ istenen modulu import eder. Bu kusur bilerek
     # bozulmus bir surumle sinandi: duzeltmeden ONCE test GECIYORDU.
-    for _ad in ("model_b", "model_b1", "model_b2"):
+    for _ad in ("model_b", "model_b1", "model_b2", "model_b3"):
         _satir = [
             "import sys, importlib",
             "sys.path.insert(0, %r)" % _B,
@@ -191,6 +197,62 @@ def main():
     with torch.no_grad():
         _dk = (m_k(_x) - m_a(_x)).abs().max().item()
     _bak(f"dar_alfa=0 + dar_sdpa=1 -> hala BIT AYNI ({_dk:.3e})", _dk == 0.0)
+
+    print()
+    print("=== 7) SERT Phi (model_b3) ===")
+    # Uc sey denetleniyor:
+    #   a) ILERI cikti GERCEKTEN bir gomme satiri mi (yuvarlama oldu mu)
+    #   b) GRADYAN akiyor mu (straight-through kopmus olabilir -- o zaman
+    #      darbogaz egitilmez ve kol SESSIZCE anlamsizlasir)
+    #   c) tau -> 0 limiti gercekten tutuyor mu (kucuk tau ile yumusak
+    #      Phi, sert Phi'ye YAKINSAMALI)
+    import model_b3
+    torch.manual_seed(0); m_s = ModelB(model_b3.AYAR, 1208)
+    _h = torch.randn(3, M.T_LEN, model_b3.AYAR.d, requires_grad=True)
+    _g = m_s._phi(_h)
+    with torch.no_grad():
+        _W = m_s.emb.weight
+        _en = (_g.reshape(-1, 1, _W.shape[1]) - _W[None]).abs().sum(-1).min(-1)
+    _bak(f"cikti bir GOMME SATIRI (en buyuk uzaklik {_en.values.max():.2e})",
+         _en.values.max().item() < 1e-5, "yuvarlama OLMAMIS")
+    _g.sum().backward()
+    _bak("gradyan h'ye AKIYOR (straight-through)",
+         _h.grad is not None and _h.grad.abs().sum().item() > 0,
+         "STE kopmus -- darbogaz EGITILMEZ")
+    # tau -> 0 LIMITI. Tek bir tau'da ESITLIK beklemek YANLIS test --
+    # iddia bir LIMIT. Dogru test: tau kuculdukce fark MONOTON kuculsun
+    # ve sonunda ihmal edilebilir olsun. (Ilk surum tau=0.001'de esitlik
+    # istiyordu ve 2.98e-02 ile dustu; esik gevsetilmedi, TEST duzeltildi.)
+    _hd = _h.detach()
+    _ref = None; _dizi = []
+    with torch.no_grad():
+        _sert = m_s._phi(_hd)
+        _olc = _sert.abs().max().item()
+        for _t in (0.1, 0.01, 0.001, 1e-4, 1e-5):
+            torch.manual_seed(0)
+            _my = ModelB(model_b3.AYAR.degistir(dar_sert=False, dar_tau=_t),
+                         1208)
+            _dizi.append((_my._phi(_hd) - _sert).abs().max().item() / _olc)
+    _bak("tau kuculdukce fark MONOTON azaliyor  "
+         + " > ".join(f"{x:.1e}" for x in _dizi),
+         all(a_ > b_ for a_, b_ in zip(_dizi, _dizi[1:])),
+         "MONOTON DEGIL -- sert Phi bir limit DEGIL")
+    _bak(f"tau=1e-5'te bagil fark {_dizi[-1]:.2e}", _dizi[-1] < 1e-3,
+         "sert Phi, tau->0 limitine YAKINSAMIYOR")
+    # dar_sert + dar_sdpa BIRLIKTE olmamali
+    try:
+        ModelB(model_b3.AYAR.degistir(dar_sdpa=True), 1208)
+        _bak("dar_sert + dar_sdpa REDDEDILIYOR", False, "assert ATMADI")
+    except AssertionError:
+        _bak("dar_sert + dar_sdpa REDDEDILIYOR", True)
+    # darbogaz kapaliyken dar_sert de bir sey yapmamali
+    _k = model_b3.AYAR.degistir(dar_alfa=0.0, dar_kapi=False)
+    _x2 = torch.randint(0, 1208, (4, M.T_LEN))
+    torch.manual_seed(0); _mk = ModelB(_k, 1208).eval()
+    torch.manual_seed(0); _ma = M.Model(_k, 1208).eval()
+    with torch.no_grad():
+        _dk = (_mk(_x2) - _ma(_x2)).abs().max().item()
+    _bak(f"dar_alfa=0 + dar_sert=1 -> hala BIT AYNI ({_dk:.3e})", _dk == 0.0)
 
     print()
     print(f"{_iyi} gecti, {_kotu} BOZUK")

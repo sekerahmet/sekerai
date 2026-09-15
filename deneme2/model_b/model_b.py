@@ -88,6 +88,9 @@ class ModelB(M.Model):
 
     def __init__(self, ayar: M.Ayar, vocab: int):
         super().__init__(ayar, vocab)
+        assert not (ayar.dar_sert and ayar.dar_sdpa), (
+            "dar_sert ve dar_sdpa BIRLIKTE olmaz: sert yolda softmax YOK, "
+            "SDPA'nin hizlandiracagi bir sey de yok.")
         self.dar_acik = ayar.dar_alfa > 0 or ayar.dar_kapi
         if not self.dar_acik:
             return                       # HICBIR ek parametre YOK
@@ -102,6 +105,8 @@ class ModelB(M.Model):
         """Denk. 5. `head.weight` ZATEN `emb.weight` (bagli gomme), yani
         bu tam olarak softmax(W h / tau) @ W. Logitler final norm'dan
         geciriliyor -- modelin KENDI okuma yolu, logit lens ile ayni."""
+        if self.ayar.dar_sert:
+            return self._phi_sert(h)
         if self.ayar.dar_sdpa:
             return self._phi_sdpa(h)
         p = torch.softmax(self.head(self.nf(h)) / self.ayar.dar_tau, dim=-1)
@@ -134,6 +139,30 @@ class ModelB(M.Model):
             W.reshape(1, 1, W.shape[0], d),
             W.reshape(1, 1, W.shape[0], d),
             scale=1.0 / self.ayar.dar_tau).reshape(*on, d)
+
+    def _phi_sert(self, h):
+        """Denk. 5'in `tau -> 0` LIMITI + straight-through.
+
+            ILERI:  Phi(h) = W[ argmax( nf(h) Wᵀ ) ]   en yuksek ic-carpim
+            GERI:   gradyan nf(h)'ye DOGRUDAN gecer (identity)
+
+        Bu bir VEKTOR NICEMLEME (van den Oord 2017, VQ-VAE): gizli durum
+        sozluk gomme tablosuna yuvarlanir. VQ-VAE'den farki, kod defteri
+        ayri bir tablo DEGIL -- modelin kendi `emb`i, ve ana kayipla
+        birlikte egitiliyor. Bu yuzden commitment loss YOK (onkayit
+        model_b3.md §6-2: bu bir VARSAYIM, olculmedi).
+
+        (N,V) matrisi ne ILERIDE ne GERIDE olusuyor: argmax `no_grad`
+        icinde, gradyan softmax'a hic ugramiyor. Olculen egitim maliyeti
+        naif yola gore -%11,1 (onkayit §3).
+
+        UYARI: bu TEK DUGME DEGIL -- ileri gecisi VE gradyan yolunu
+        birlikte degistirir. Onkayit §2 bunu kusur olarak yaziyor.
+        """
+        q = self.nf(h)
+        with torch.no_grad():
+            i = (q @ self.emb.weight.T).argmax(-1)
+        return self.emb.weight[i].detach() + (q - q.detach())
 
     def forward(self, x):
         h = self.emb(x) + self.pos(torch.arange(x.shape[1], device=x.device))[None]
