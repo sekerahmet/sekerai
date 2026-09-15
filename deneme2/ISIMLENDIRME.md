@@ -11,12 +11,15 @@ deneme2/model_a/                 <- AILE KLASORU, her sey burada
     model_a1.py  model_a2.py     varyasyonlar, AYNI klasorde
 belge/onkayit/model_a.md         <- kosudan ONCE
 belge/bulgu/model_a.md           <- sonuc
-Drive: deneme2/model_a/t0/       <- onun ciktisi
+Drive: MyDrive/model_a/          <- onun ciktisi, TEPE KLASOR
 ```
 
-**Depodaki klasor ile Drive'daki klasor AYNI ADI tasir.** `deneme2/model_a/`
-depoda kodu, Drive'da ciktiyi tutar; ikisi karismaz cunku cikti depoda
-degil (`.gitignore`: `*.pt *.npz *.parquet`).
+**Ad her yerde ayni, klasor her yerde TEK.** Depoda `deneme2/model_a/`
+kodu tutar; Drive'da `MyDrive/model_a/` ciktiyi tutar. Drive tarafinda
+`deneme2/` ara klasoru YOK: tepede dogrudan modelin adi duruyor
+(kullanici karari, 15 Eylul). Arsivdeki kosular `deney_G`, `deney_GM`
+diye zaten tepedeydi, yani carpisma da olmaz -- ve harf bir daha
+kullanilmadigi icin iki kosu ayni adi alamaz.
 
 Aile klasoru ISIMLENDIRME'nin "arac AILEYE aittir" kuralinin klasor
 karsiligi: `pencere_a.py` `model_a`nin degil, **A ailesinin** araci, o
@@ -34,9 +37,9 @@ defterdeki `TOHUMLAR` satiri `[1, 2]` yapilip tekrar kosulur; `t0`
 klasorune dokunulmaz, yeni kosular `t1/` ve `t2/`'ye yazar.
 
 ```
-Drive: deneme2/model_a/t0/  t1/  t2/
-       snap_model_a_t0_00020000.pt
-       egri_model_a_t0.json     ayar_t0.json
+Drive: MyDrive/model_a/t0/  t1/  t2/
+       egri_model_a_t0.json   ayar_t0.json   kosu_t0.json
+       snap/snap_model_a_t0_00020000.pt
 ```
 
 Sebebi: grokking tohuma bagli. 2603.25009'da "only 1 of 3 seeds grokked"
@@ -182,21 +185,33 @@ bir kural sessizce yanlis klasoru secebilirdi.
 TEK import yan etkisi ve deterministik: ortam degiskeni okumuyor, ayar
 tasimiyor -- `sifirdan.py`nin arizasi oydu (asagida, 1. madde).
 
-Cikti depoda DEGIL, Drive'da: `deneme2/<model>/t<N>/`. Kosu ciktisi ikili
-ve buyuk; `.gitignore`da `*.pt *.npz *.parquet` var.
+Cikti depoda DEGIL, Drive'da. Kosu ciktisi ikili ve buyuk;
+`.gitignore`da `*.pt *.npz *.parquet` var.
 
-## Bir kosu klasorunde ne var
+## Drive'da bir modelin klasoru
 
 ```
-deneme2/model_a/t0/
-    ayar_t0.json                    NE ISTEDIK   (+ _olcme_izi)
-    kosu_t0.json                    NE KOSTU     commit, GPU, torch, durum,
-                                                 veri sayilari, sure
-    egri_model_a_t0.json            her olcum noktasi (adim 0 dahil)
-    snap_model_a_t0_00002000.pt     anlik goruntuler, fp16
-    pencere_model_a_t0.json         pencere_a'nin ciktisi
-    log_20260915_143200.txt         o kosunun logu (ZAMAN DAMGALI)
+MyDrive/model_a/                    TEPE KLASOR = MODELIN ADI
+    OKU.md                          klasoru anlatir, her kosuda yenilenir
+    log/
+        kos_20260915_143200.txt     KOSUNUN logu -- tohumun DEGIL
+                                    (bir kosu birden cok tohum surebilir)
+    t0/   t1/   t2/                 her TOHUM kendi klasorunde
+        ayar_t0.json                NE ISTEDIK  (+ _olcme_izi)
+        kosu_t0.json                NE KOSTU    commit, GPU, torch, durum,
+                                                veri sayilari, sure
+        egri_model_a_t0.json        her olcum noktasi (adim 0 dahil)
+        pencere_model_a_t0.json     pencere_a'nin ciktisi
+        snap/
+            snap_model_a_t0_00002000.pt    agirliklar, fp16
 ```
+
+Anlik goruntuler `snap/` altinda: 20.000 adimda 10, uzatilirsa 20 dosya
+oluyor ve tohum klasorunde OKUNMASI GEREKEN dort json'u gomuyorlardi.
+`pencere_a` iki yerlesime de bakar (`snap/*.pt` ve eski duz `snap_*.pt`).
+
+Okuma sirasi: `kosu_t<N>.json`in `durum`u -> `egri` (ON okuma) ->
+`pencere` (BIRINCIL okuma).
 
 Uc sey kosudan sonra degil, kosu SIRASINDA garanti edilir:
 

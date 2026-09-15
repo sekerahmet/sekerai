@@ -41,9 +41,14 @@ import model_a as M
 
 
 def anlik_goruntuler(klasor: str) -> dict:
-    """{adim: yol}.  Adim dosya ADINDAN degil, glob + regex ile cikarilir."""
+    """{adim: yol}.  Adim dosya ADINDAN degil, glob + regex ile cikarilir.
+
+    Iki yerleşime de bakar: `t<N>/snap/*.pt` (yeni) ve `t<N>/snap_*.pt`
+    (eski duz). `.tmp` uzantili yarim dosyalar ikisinde de ELENIR --
+    desen `.pt` ile BITMEK zorunda."""
     bul = {}
-    for y in glob.glob(os.path.join(klasor, "snap_*.pt")):
+    for y in (glob.glob(os.path.join(klasor, "snap", "*.pt"))
+              + glob.glob(os.path.join(klasor, "snap_*.pt"))):
         m = re.search(r"_(\d+)\.pt$", os.path.basename(y))
         if m:
             bul[int(m.group(1))] = y

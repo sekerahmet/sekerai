@@ -40,6 +40,46 @@ def aile_yolu(model: str) -> str:
     return os.path.dirname(aday[0])
 
 
+OKU = """# {model} — ham koşu çıktısı
+
+Bu klasörü **kod yazdı**, elle düzenleme. Depoda değil, Drive'da; koşu
+çıktısı ikili ve büyük (`.gitignore`: `*.pt *.npz *.parquet`).
+
+```
+{model}/
+    OKU.md                        bu dosya (her koşuda yenilenir)
+    log/
+        kos_<zaman>.txt           KOŞUNUN logu (tohumun değil -- bir koşu
+                                  birden çok tohum sürebilir)
+    t0/   t1/   t2/               her TOHUM kendi klasöründe
+        ayar_t0.json              NE İSTEDİK  + _olcme_izi
+        kosu_t0.json              NE KOŞTU: commit, GPU, torch, durum, süre
+        egri_model_a_t0.json      her ölçüm noktası (adım 0 dahil)
+        pencere_model_a_t0.json   pencere_a'nın çıktısı (birincil okuma)
+        snap/
+            snap_model_a_t0_00002000.pt    ağırlıklar, fp16
+```
+
+## Önce nereye bakılır
+
+1. `kosu_t<N>.json` → `durum`. `BITTI` değilse koşu **tamamlanmamıştır**;
+   anlık görüntüler geçerli ama bütçe sorusu sorulamaz.
+2. `egri_*.json` → eğri. **Ön okuma.**
+3. `pencere_*.json` → **birincil okuma**: N anlık görüntünün ağırlık
+   ortalaması alınıp tek model ölçülür. Eğri değerleriyle pencere
+   değerleri **aynı şey değildir**.
+
+## Tohumlar
+
+`t0`, `t1`, `t2` ayrı model değil, **aynı modelin tekrarı** — tek fark
+başlangıç ağırlıkları ve batch sırası. Veri hepsinde aynı (`veri_tohum`
+ayrı bir alan). Dolu bir tohum klasörüne tekrar koşmak **reddedilir**.
+
+Üreten kod: `deneme2/{model}/` — `kosu_t<N>.json` içindeki `commit`
+hangi sürüm olduğunu söyler.
+"""
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True, help="orn. model_a")
@@ -63,6 +103,13 @@ def main():
 
     print(f"kos.py   model {a.model}   ev {a.ev}   tohum {a.tohum}   "
           f"commit {a.commit or '(yerel)'}", flush=True)
+
+    # Klasor KENDINI anlatsin: Drive'i uc ay sonra acan kisi (biz) hangi
+    # dosyaya once bakacagini bilmeli. Her kosuda yenilenir, tohum
+    # klasorlerine DOKUNMAZ.
+    os.makedirs(a.ev, exist_ok=True)
+    with open(os.path.join(a.ev, "OKU.md"), "w", encoding="utf-8") as f:
+        f.write(OKU.format(model=a.model))
     for t in a.tohum:
         M.egit(M.AYAR.degistir(tohum=t), alt=f"{a.ev}/t{t}",
                ustune=a.ustune, commit=a.commit)

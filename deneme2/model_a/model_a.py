@@ -714,7 +714,8 @@ def _bos_mu(alt: str, ayar: Ayar, ustune: bool):
     t0 klasorune DOKUNULMAZ" diyor. Bu bir NIYETTI: defterdeki baslat
     hucresini ikinci kez calistirmak t0'in anlik goruntulerini ezerdi ve
     hicbir sey uyarmazdi. Artik mekanik."""
-    var = glob.glob(os.path.join(alt, "snap_*.pt"))
+    var = (glob.glob(os.path.join(alt, "snap", "*.pt"))
+           + glob.glob(os.path.join(alt, "snap_*.pt")))   # eski DUZ yerlesim
     e = os.path.join(alt, f"egri_{ayar.ad}_t{ayar.tohum}.json")
     if os.path.exists(e):
         var.append(e)
@@ -776,7 +777,9 @@ def erken_teshis(r: dict, ayar: Ayar, yaz=print, uyarildi: set | None = None):
 # ======================= EGITIM ==========================================
 def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None) -> list:
     alt = alt or f"cikti_{ayar.ad}_t{ayar.tohum}"
-    os.makedirs(alt, exist_ok=True)
+    # Anlik goruntuler AYRI alt klasorde: 20.000 adimda 10, uzatilirsa 20
+    # dosya oluyor ve tohum klasorunde okunmasi gereken 4 json'u gomuyor.
+    os.makedirs(f"{alt}/snap", exist_ok=True)
     _yazilabilir(alt, yaz)          # Drive gercekten bagli mi, saniye 0'da
     _bos_mu(alt, ayar, ustune)      # bitmis kosuyu sessizce ezme
     yaz(f"=== {ayar.ad}  tohum {ayar.tohum} ===  cihaz {DEV}  cikti {alt}/")
@@ -938,7 +941,8 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None) -> list:
                 # haneydi), yani hata KISMEN gorunmustu. Ad `ayar.ad` tasir.
                 # ATOMIK: yarim .pt hem torch.load'i patlatir hem de
                 # pencere_a'nin glob'una girer (bkz. _atomik).
-                yol = f"{alt}/snap_{ayar.ad}_t{ayar.tohum}_{adim:08d}.pt"
+                yol = (f"{alt}/snap/"
+                       f"snap_{ayar.ad}_t{ayar.tohum}_{adim:08d}.pt")
                 sd = {k: t.half() for k, t in model.state_dict().items()}
                 _atomik(yol, lambda t, _s=sd: torch.save(_s, t))
                 _yaz_json(egri_yolu, egri)
