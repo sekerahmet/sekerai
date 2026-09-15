@@ -793,7 +793,10 @@ def surdurme_yaz(yol, ayar, model, opt, scaler, rs, adim, egri, iz):
 
 def surdurme_oku(yol, ayar: Ayar, model, opt, scaler, rs, iz, yaz=print):
     """Paketi geri kur. UYMAYAN her sey burada DURDURUR, sessiz gecmez."""
-    p = torch.load(yol, map_location=DEV, weights_only=False)
+    # map_location="cpu": DEV verilirse paketteki HER tensor GPU'ya tasinir
+    # ve RNG durumlari bozulur (asagiya bak). Optimizer durumu CPU'dan
+    # yuklenince `load_state_dict` onu zaten parametrenin cihazina taşır.
+    p = torch.load(yol, map_location="cpu", weights_only=False)
     eski = p["ayar"]
     yeni = ayar.sozluk()
     # `adim` DISINDA her alan ayni olmali: uzatma butceyi degistirir,
@@ -821,10 +824,17 @@ def surdurme_oku(yol, ayar: Ayar, model, opt, scaler, rs, iz, yaz=print):
     opt.load_state_dict(p["opt"])
     scaler.load_state_dict(p["scaler"])
     rs.set_state(p["rs"])
-    torch.set_rng_state(p["torch_rng"].cpu() if hasattr(p["torch_rng"], "cpu")
-                        else p["torch_rng"])
-    if DEV == "cuda" and p.get("cuda_rng") is not None:
-        torch.cuda.set_rng_state_all(p["cuda_rng"])
+    # RNG durumlari CPU ByteTensor OLMAK ZORUNDA.
+    # OLCULDU (15 Eylul, T4'te ilk gercek surdurmede): paket
+    # `map_location=DEV` ile yuklenince RNG tensorleri de GPU'ya tasindi ve
+    # `set_rng_state` "RNG state must be a torch.ByteTensor" diye patladi.
+    # CPU'da hic gorunmuyordu: orada `cuda_rng` None, yani bu dal HIC
+    # calismiyordu. Bit-duzeyinde gecen 8+8 testim de CPU'daydi -- test
+    # onemli dali KAPSAMIYORDU.
+    _cpu = lambda x: x.cpu() if torch.is_tensor(x) else x
+    torch.set_rng_state(_cpu(p["torch_rng"]))
+    if DEV == "cuda" and p.get("cuda_rng"):
+        torch.cuda.set_rng_state_all([_cpu(x) for x in p["cuda_rng"]])
     yaz(f"  SURDURULUYOR: adim {p['adim']} -> {ayar.adim}   "
         f"({len(p['egri'])} olcum noktasi devralindi)")
     return p["adim"], list(p["egri"])
