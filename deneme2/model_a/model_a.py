@@ -194,7 +194,15 @@ class Veri:
     facts: np.ndarray          # (n_ent, n_rel)  -1 = olgu YOK
     one: list                  # (e, r, hedef)              1hop
     tr2: list                  # (e, r1, r2, kopru, cevap)  egitim 2hop
-    comp: list                 #  ayni   -- gorulmemis r1-r2 cifti
+    comp: list                 #  ayni   -- egitimde GORULMEMIS (e,r1,r2) UCLUSU
+    #   !! DIKKAT (15 Eylul hakemligi): buraya ve CLAUDE.md'ye "gorulmemis
+    #   r1-r2 CIFTI" yazilmisti. OLCULDU, YANLIS: comp'un 4281 orneginin
+    #   4281'inin (r1,r2) cifti egitimde de var (115 ciftin 115'i). Bolme
+    #   kodu ZINCIR tutuyor, CIFT tutmuyor. Yani comp "bu iliski ciftini hic
+    #   gormedi" demek DEGIL, "bu varligin bu ciftle zincirini gormedi"
+    #   demek -- cok daha zayif bir genelleme sinavi. Kod degismedi
+    #   (arsivdeki build_data_dis ile ayni), ETIKET duzeltildi.
+    #   ILISKI-CIFTI genellemesini olcen bir bolme HENUZ YOK.
     ent: list                  #  ayni   -- varlik hic zincir basi olmamis (HUKUM)
     ent_yok: list              #  ayni   -- kisayol TIP OLARAK imkansiz
     ent_arama: list            #  ayni   -- maske aramasi icin, HUKUMDEN AYRIK
@@ -310,6 +318,21 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
         f"ent_off {v.ent_off}")
     yaz(f"        phi {v.phi:.2f} (bizim tanim)   {v.wang_phi:.2f} (Wang tanimi, "
         f"payda atomicID)   -- TURETILMIS, ayar DEGIL")
+
+    # BOLMELER NE KADAR YENI -- her kosuda BASILIR, bir daha etiket kaymasin.
+    # 15 Eylul'de comp'a "gorulmemis iliski cifti" deniyordu; olculunce
+    # ciftlerin TAMAMI egitimde cikti. Sayi gozukurse iddia kayamaz.
+    _tc = {(a, b) for _, a, b, _, _ in v.tr2}
+    _tv = {e for e, *_ in v.tr2}
+    for _ad, _L in (("COMP", v.comp), ("ENT", v.ent), ("ENT-YOK", v.ent_yok)):
+        if not _L:
+            continue
+        _yc = sum(1 for _, a, b, _, _ in _L if (a, b) not in _tc)
+        _yv = sum(1 for e, *_ in _L if e not in _tv)
+        yaz(f"        {_ad:<8} YENI olan: iliski-cifti {_yc}/{len(_L)}   "
+            f"zincir-basi varlik {_yv}/{len(_L)}")
+    yaz("        ^ COMP'ta cift YENI DEGIL: comp 'gorulmemis UCLU', "
+        "'gorulmemis CIFT' DEGIL.")
     return v
 
 
@@ -599,10 +622,29 @@ def _atomik(yol: str, yazici):
     Iki yolla oluyordu: (a) Drive'a yazarken kosu kesilir, (b) egitim
     yazarken pencere_a AYNI ANDA okur. `.tmp` + `os.replace` ikisini de
     kapatir: okuyucu ya ESKI ya YENI dosyayi gorur, ARASINI asla.
-    `.tmp` AYNI klasorde -- replace ancak ayni dosya sisteminde atomik."""
+    `.tmp` AYNI klasorde -- replace ancak ayni dosya sisteminde atomik.
+
+    GERI DUSUS: bazi FUSE suruculeri (Drive dahil) var olan bir dosyanin
+    UZERINE rename'i reddedebilir. O durumda once siler, sonra tasiriz --
+    artik atomik DEGIL, ama kosu adim 4000'de cokmez. Bir kez uyarilir."""
     t = yol + ".tmp"
     yazici(t)
-    os.replace(t, yol)
+    try:
+        os.replace(t, yol)
+    except OSError as e:
+        global _ATOMIK_UYARI
+        if not _ATOMIK_UYARI:
+            _ATOMIK_UYARI = True
+            print(f"  !! os.replace calismadi ({type(e).__name__}: {e}). "
+                  "Sil-sonra-tasi'ya dusuluyor:")
+            print("     yazim ATOMIK DEGIL, egitim kosarken olcum "
+                  "calistirma.")
+        if os.path.exists(yol):
+            os.remove(yol)
+        os.replace(t, yol)
+
+
+_ATOMIK_UYARI = False
 
 
 def _yaz_json(yol: str, nesne):
@@ -687,7 +729,7 @@ def _bos_mu(alt: str, ayar: Ayar, ustune: bool):
             + os.linesep + "   istiyorsan: egit(..., ustune=True).")
 
 
-def erken_teshis(r: dict, ayar: Ayar, yaz=print):
+def erken_teshis(r: dict, ayar: Ayar, yaz=print, uyarildi: set | None = None):
     """Bozuk kosuyu 45 dakika sonra degil, ILK OLCUMDE yakala.
 
     BIRIM TESTI onkayitta (belge/onkayit/model_a.md 5) zaten YAZILIYDI --
@@ -717,7 +759,12 @@ def erken_teshis(r: dict, ayar: Ayar, yaz=print):
             + "   kez NaN olursa egitim SESSIZCE devam eder ve butun"
             + os.linesep
             + "   dogruluklar sifira duser. Kosu durduruldu.")
-    if a >= 2 * ayar.isinma and r.get("one", 1.0) < 0.05:
+    # UYARI BIR KEZ: her olcum noktasinda tekrarlanirsa logu doldurur ve
+    # asil satirlari gozden kacirtir.
+    if (a >= 2 * ayar.isinma and r.get("one", 1.0) < 0.05
+            and (uyarildi is None or "one" not in uyarildi)):
+        if uyarildi is not None:
+            uyarildi.add("one")
         yaz(f"  !! UYARI: adim {a}, isinma ({ayar.isinma}) coktan bitti ama "
             f"one {r['one']:.3f}.")
         yaz("     Atomik olgu ezberi bu gorevin EN KOLAY parcasi, sans "
@@ -777,7 +824,7 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None) -> list:
         ad=ayar.ad, tohum=ayar.tohum, durum="KOSUYOR",
         commit=commit or _commit(),
         cihaz=DEV, gpu=_gpu_adi(), torch=torch.__version__,
-        numpy=np.__version__, python=os.sys.version.split()[0],
+        numpy=np.__version__, python=sys.version.split()[0],
         baslangic=time.strftime("%Y-%m-%d %H:%M:%S"),
         parametre=model.n_param(), katman_esdegeri=ayar.l * ayar.dongu,
         olcme_izi=iz, havuz=int(len(Xtr)),
@@ -794,8 +841,13 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None) -> list:
 
     egri_yolu = f"{alt}/egri_{ayar.ad}_t{ayar.tohum}.json"
 
-    def _nokta(adim, kayip, lr):
-        r = dict(adim=adim, kayip=kayip, lr=float(lr),
+    def _nokta(adim, kayip, lr, kayip_son=None):
+        # `kayip` ARALIK ORTALAMASI (bkz. dongudeki birikim), `kayip_son`
+        # yalniz son batch. Onkayit 4.6 "kayip doyma adimi"ni okuyacak; tek
+        # batch'in kaybi bunun icin gurultulu bir tahminci -- batch 512'de
+        # ornekleme sacilimi tek basina 0.05-0.1 oynatiyor. Ikisi de yaziliyor
+        # ki "ortalama mi dustu, gurultu mu" sorusu sonradan sorulabilsin.
+        r = dict(adim=adim, kayip=kayip, kayip_son=kayip_son, lr=float(lr),
                  sn=round(time.time() - t0, 1))
         for k in kod:
             r[k] = dogruluk(model, v, *kod[k])
@@ -821,13 +873,19 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None) -> list:
     # olcmek (teorik 1/1060 ~ 0.001, ama tahmin degil OLCUM yazilsin).
     # ANLIK GORUNTU KAYDEDILMEZ: egitilmemis agirlik pencere_a'nin agirlik
     # ortalamasina girerse ilk pencereyi KIRLETIR.
+    uyarildi = set()
     r0 = _nokta(0, None, 0.0)
     egri.append(r0)
     yaz(_satir(r0) + "   <- SANS (egitim yok, anlik goruntu YAZILMAZ)")
-    erken_teshis(r0, ayar, yaz)
+    erken_teshis(r0, ayar, yaz, uyarildi)
     _yaz_json(egri_yolu, egri)
 
     tahmin = False
+    # Kayip birikimi GPU'da tutulur: her adimda .item() demek her adimda
+    # GPU senkronu demek olurdu. Tensor olarak toplanip yalniz olcum
+    # noktasinda bir kez okunuyor -- bedeli yok.
+    kayip_top = torch.zeros((), device=DEV)
+    kayip_say = 0
     try:
         for adim in range(1, ayar.adim + 1):
             if adim < ayar.isinma:
@@ -854,8 +912,13 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None) -> list:
             with torch.autocast(DEV, dtype=torch.float16,
                                 enabled=(DEV == "cuda")):
                 lg = model(xb)
-                lg = lg[torch.arange(ayar.batch, device=DEV), pb]
+                # xb.shape[0], ayar.batch DEGIL: ikisi burada esit ama bir
+                # varyasyon degisken batch kullanirsa `ayar.batch` sessizce
+                # yanlis satirlari secerdi.
+                lg = lg[torch.arange(xb.shape[0], device=DEV), pb]
                 kayip = F.cross_entropy(lg.float(), tb)
+            kayip_top += kayip.detach()
+            kayip_say += 1
             opt.zero_grad(set_to_none=True)
             scaler.scale(kayip).backward()
             scaler.unscale_(opt)
@@ -864,7 +927,10 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None) -> list:
             scaler.update()
 
             if adim % ayar.olc_her == 0 or adim == ayar.adim:
-                r = _nokta(adim, float(kayip.item()), lr)
+                r = _nokta(adim, float(kayip_top.item() / max(1, kayip_say)),
+                           lr, kayip_son=float(kayip.item()))
+                kayip_top = torch.zeros((), device=DEV)
+                kayip_say = 0
                 egri.append(r)
                 # ANLIK GORUNTU: agirlik ortalamasi olcumunun sarti. Adim
                 # adli, 8 hane sifir dolgulu -- arsivde `f"..._{20000}.pt"`
@@ -877,14 +943,23 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None) -> list:
                 _atomik(yol, lambda t, _s=sd: torch.save(_s, t))
                 _yaz_json(egri_yolu, egri)
                 yaz(_satir(r))
-                erken_teshis(r, ayar, yaz)
+                erken_teshis(r, ayar, yaz, uyarildi)
                 if not tahmin:
                     tahmin = True
-                    hiz = (r["sn"] - r0["sn"]) / adim      # r0 = olcum yuku
-                    yaz(f"     >> HIZ {hiz*1000:.0f} ms/adim  ->  toplam "
-                        f"~{(hiz*ayar.adim + r0['sn'])/60:.0f} dk, kalan "
-                        f"~{hiz*(ayar.adim-adim)/60:.0f} dk.  Bu rakam "
-                        "beklenenin cok ustundeyse SIMDI durdur.")
+                    # r0['sn'] = BIR olcumun maliyeti (t0 veri/model
+                    # kurulumundan SONRA basliyor). r['sn'] icinde iki olcum
+                    # var (adim 0 ve bu). Olcum maliyeti ayri sayilmazsa
+                    # tahmin 10 olcum kadar EKSIK cikardi.
+                    olcum = r0["sn"]
+                    hiz = max(0.0, r["sn"] - 2 * olcum) / adim
+                    n_olc = ayar.adim // ayar.olc_her + 1
+                    top = hiz * ayar.adim + olcum * n_olc
+                    yaz(f"     >> HIZ {hiz*1000:.0f} ms/adim, olcum basina "
+                        f"{olcum:.0f} sn x{n_olc}  ->  toplam ~{top/60:.0f} dk, "
+                        f"kalan ~{(top - r['sn'])/60:.0f} dk.")
+                    yaz("        Bu rakam beklenenin cok ustundeyse SIMDI "
+                        "durdur -- 45 dk mi 6 saat mi, sonunda degil BURADA "
+                        "belli olsun.")
     except BaseException as e:
         kunye.update(durum="HATA", hata=f"{type(e).__name__}: {e}"[:400],
                      bitis=time.strftime("%Y-%m-%d %H:%M:%S"),

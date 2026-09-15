@@ -103,6 +103,18 @@ def kunye_bas(k: dict):
         print("     Anlik goruntuler gecerli, ama BUTCE sorusu sorulamaz: "
               "egri doymadi, KESILDI.")
 
+    # OLCEN KOD, EGITEN KODLA AYNI MI?
+    # Parmak izi olcme SETINI koruyor, KODU korumuyor. Mimari degisirse
+    # `load_state_dict` zaten patlar (strict=True), ama olcme mantigi
+    # degisirse -- varlik-kisitli argmax, kisayol tanimi, pencere ortalamasi
+    # -- hicbir sey ses cikarmaz ve sayilar sessizce baska bir seyi olcer.
+    e = (k.get("commit") or "").split("+")[0]
+    s = M._commit().split("+")[0]
+    if e and s and e not in ("?",) and s not in ("?",) and e != s:
+        print(f"  !! KOD FARKLI: egitim {k.get('commit')}, olcum {M._commit()}")
+        print("     Bu sayilari uretecek kod, onlari EGITEN koddan baska bir "
+              "surumde. Hata degil -- ama bulguya yazilmali.")
+
 
 def agirlik_ortalamasi(yollar: list) -> dict:
     """Eleman eleman ortalama. fp16 kaydedildi -> float32'de toplanir."""
@@ -224,9 +236,24 @@ def main():
     #     OLGUNLUK KAPISI GECMEDEN BU SORU SORULMAZ. Hicbir sey ogrenilmemis
     #     bir kosuda egri de "duz" gorunur ve bu satir "butce yetti" derdi --
     #     tam tersi dogruyken.
+    # KUSUR (15 Eylul, ikinci hakemlik): burada `sonuc[-1]` ile `sonuc[-2]`
+    # kiyaslaniyordu. Kayan pencereler ORTUSUYOR: genislik 5'te ardisik iki
+    # pencere 5 anlik goruntunun 4'unu PAYLASIR. Yani fark YAPISAL OLARAK
+    # kucuk cikar ve bu satir neredeyse her zaman "egri duzlesmis -> butce
+    # yetti" derdi. Tam da cevap vermesi gereken soruda YANLIS TARAFA
+    # dusen bir esik. Artik AYRIK iki pencere kiyaslaniyor.
     if len(sonuc) >= 2:
-        d = sonuc[-1].get("ent", 0) - sonuc[-2].get("ent", 0)
-        print(f"\nBUTCE: son iki pencerede ent degisimi {d:+.4f}")
+        if len(sonuc) > a.genislik:
+            onceki, tip = sonuc[-1 - a.genislik], "AYRIK"
+        else:
+            onceki, tip = sonuc[0], "ORTUSEN"
+        d = sonuc[-1].get("ent", 0) - onceki.get("ent", 0)
+        print(f"\nBUTCE: {onceki['pencere']} -> {sonuc[-1]['pencere']} "
+              f"({tip} pencereler) ent degisimi {d:+.4f}")
+        if tip == "ORTUSEN":
+            print(f"  !! {len(sonuc)} pencere var, ayrik cift icin "
+                  f"{a.genislik + 1} gerekiyor. Bu iki pencere anlik "
+                  "goruntu PAYLASIYOR, fark oldugundan KUCUK gorunur.")
         if kunye and kunye.get("durum") != "BITTI":
             print(f"  KOSU TAMAMLANMAMIS (durum {kunye.get('durum')}) -> BUTCE "
                   "SORUSU SORULMAZ. Egri doymadi, KESILDI.")
