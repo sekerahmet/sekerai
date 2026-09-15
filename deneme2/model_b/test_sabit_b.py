@@ -66,6 +66,38 @@ def main():
     for _g in ("AYAR", "egit", "fark_bas"):
         _bak(f"model_b1.{_g} var", hasattr(model_b1, _g), "kos.py duser")
 
+
+    print()
+    print("=== 1b) KOS.PY KOSULLARINDA IMPORT (ALT SUREC) ===")
+    # 16 EYLUL: model_b1'in ILK Colab kosusu ilk saniyede coktu --
+    #   ImportError: cannot import name 'egit' from 'model_a'
+    #                (unknown location)
+    # cunku `deneme2/model_a` bir KLASOR ve yolu once eklenmezse
+    # `import model_a` onu NAMESPACE PAKETI olarak buluyor.
+    # YERELDE GORULMEDI: hem duman testi hem bu kilit sys.path'i ELLE
+    # kuruyordu. `kos.py` ise YALNIZ aile klasorunu ekler.
+    # Artik ALT SURECTE, kos.py'nin TAM kosullariyla deneniyor.
+    # HER MODUL KENDI ALT SURECINDE. Ikisini AYNI surecte denemek testi
+    # ISE YARAMAZ hale getiriyordu: `model_b` once import edilince yolu
+    # yan etki olarak duzeltiyor ve `model_b1` hazir yolu buluyor.
+    # `kos.py` ise YALNIZ istenen modulu import eder. Bu kusur bilerek
+    # bozulmus bir surumle sinandi: duzeltmeden ONCE test GECIYORDU.
+    for _ad in ("model_b", "model_b1"):
+        _satir = [
+            "import sys, importlib",
+            "sys.path.insert(0, %r)" % _B,
+            "m = importlib.import_module(%r)" % _ad,
+            "assert hasattr(m, 'egit'), 'egit YOK'",
+            "assert hasattr(m, 'AYAR'), 'AYAR YOK'",
+            "assert hasattr(m, 'fark_bas'), 'fark_bas YOK'",
+        ]
+        _r2 = subprocess.run([sys.executable, "-c", chr(10).join(_satir)],
+                             cwd=os.path.dirname(_B),
+                             capture_output=True, text=True)
+        _bak(f"{_ad}: kos.py kosullarinda TEK BASINA import",
+             _r2.returncode == 0,
+             (_r2.stderr.strip().splitlines() or ["?"])[-1][:110])
+
     print("\n=== 2) dar_alfa=0 -> ModelB, model_a.Model ILE AYNI MI ===")
     # Bu kolun BUTUN kiyasi buna dayaniyor. Ek modul kurulmamali,
     # parametre sayisi degismemeli, cikti BIT DUZEYINDE ayni olmali.

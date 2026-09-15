@@ -44,9 +44,23 @@ BU DOSYA MIMARIYI YENIDEN TANIMLAMAZ: `model_b`den import eder.
 from __future__ import annotations
 
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# `model_a` KLASOR olarak da var (deneme2/model_a/). Yolu ONCE eklemezsek
+# `import model_a` o KLASORU namespace paketi olarak bulur ve
+#   ImportError: cannot import name 'egit' from 'model_a' (unknown location)
+# verir. OLCULDU (16 Eylul): model_b1'in ILK Colab kosusu tam bu yuzden
+# ilk saniyede coktu. Yerelde gorulmedi cunku test betigi sys.path'i elle
+# kuruyordu; `kos.py` ise YALNIZ aile klasorunu ekliyor.
+_B = os.path.dirname(os.path.abspath(__file__))          # deneme2/model_b
+_A = os.path.join(os.path.dirname(_B), "model_a")        # deneme2/model_a
+for _p in (_A, _B):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 import model_a as M                                          # noqa: E402
+assert hasattr(M, "egit"), (
+    f"model_a MODUL degil PAKET olarak yuklendi: {getattr(M,'__file__',None)}. "
+    f"sys.path[0:3]={sys.path[0:3]}")
 from model_b import ModelB, AYAR as TABAN                     # noqa: E402
 
 fark_bas = M.fark_bas

@@ -73,6 +73,10 @@ import torch
 import torch.nn as nn
 
 import model_a as M                                          # noqa: E402
+# `model_a` KLASOR olarak da var; yol yanlissa namespace paketi gelir ve
+# hata ANCAK `egit` cagrilinca cikar. Burada, import aninda patlasin.
+assert hasattr(M, "egit"), (
+    f"model_a MODUL degil PAKET olarak yuklendi: {getattr(M,'__file__',None)}")
 from model_a9 import AYAR as TABAN                           # noqa: E402
 
 
