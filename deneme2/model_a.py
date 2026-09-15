@@ -207,7 +207,12 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
 
     Tohum `ayar.veri_tohum`; butun kollarda AYNI olmali, yoksa kollar farkli
     veri gorur ve 'sartlar esit' bozulur."""
-    G = VO.kur()
+    # KUSUR (15 Eylul hakemligi): burada `VO.kur()` yaziyordu, yani graf
+    # HER ZAMAN tohum 0 ile uretiliyordu. `ayar.veri_tohum` yalniz BOLMEYI
+    # etkiliyordu. Olculdu: veri_tohum 0 ve 1 ayni `facts`, farkli `tr2`.
+    # Yani "veri tohumunu degistirdim" diyen biri grafin degismedigini
+    # FARK ETMEZDI.
+    G = VO.kur(ayar.veri_tohum)
     zin = VO.zincirler(G)
     E = [a for t in VO.TIPLER for a in G["ad"][t]]
     R = list(VO.ILISKI)
@@ -313,11 +318,16 @@ def kodla_2hop(v: Veri, batch):
 
 
 def kodla_kimlik_q1(v: Veri, ents):
-    """[Q1] e IDENT ? e EOS  -> hedef = varligin KENDISI.
+    """[Q1] e IDENT ? e EOS  -> hedef = varligin KENDISI (SIFIR-HOP).
 
-    KONTROL gorevi (model_a2): cevap girdide duruyor, yani KOPYALAMAYLA
-    cozulebilir. Ise yaramaz olmasi KASITLI -- havuza a1 ile ayni miktarda
-    veri ekler, ogretici degeri olmadan."""
+    DUZELTME (15 Eylul hakemligi): bunu daha once "ise yaramaz kontrol" diye
+    anlatmistim. YANLIS. arXiv 2509.24653'un onerdigi identity bridge TAM
+    BUDUR -- birebir: "a zero-hop SELF-MAPPING for each bridge token" ve
+    "an identity mapping on bridge tokens". Yani e -> e.
+
+    Bilinen itiraz (arsiv DENEY5): cevap girdide duruyor, kopyalamayla
+    cozulebilir. Makale bunu bilerek yapiyor; iddiasi, gizli durumu token
+    gommesiyle HIZALAMAYA zorlamasi."""
     X = _bos(len(ents))
     for i, e in enumerate(ents):
         X[i, :6] = [Q1, v.ent_off + e, IDENT, QM, v.ent_off + e, EOS]
@@ -326,11 +336,20 @@ def kodla_kimlik_q1(v: Veri, ents):
 
 
 def kodla_kimlik_q2son(v: Veri, batch):
-    """[Q2] e r1 IDENT ? kopru EOS  -> hedef = facts[e,r1], yani KOPRU.
+    """[Q2] e r1 IDENT ? kopru EOS  -> hedef = facts[e,r1], yani BIRINCI HOP.
 
-    Cevap (kopru) girdide HIC GECMIYOR -> kopyalamayla cozulemez.
-    kodla_2hop ile AYNI cerceve ve AYNI hedef pozisyonu (4) -> ayni devreyi
-    egzersiz ettirir.  Test edilen sey bu (model_a1)."""
+    DUZELTME (15 Eylul hakemligi): bu, makalenin identity bridge'i DEGILDIR.
+    Makale SIFIR-HOP self-mapping oneriyor (e -> e; yukaridaki q1). Bu ise
+    BIRINCI HOP DENETIMI -- daha guclu ve FARKLI bir mudahale.
+
+    !! BEDELI VAR: ENT varliklari burada [Q2] cercevesinde ZINCIR BASI
+    oluyor. ENT bolmesinin tanimi "varlik hic zincir basi olmamis" idi;
+    q2son ile bu tanim BOZULUR. Olculdu: 8.400 kimlik orneginin 1.274'u
+    (%15) bir ENT varligini zincir basi yapiyor. `egitim_havuzu` bunu her
+    kosuda BASAR, sessiz gecmez.
+
+    Cevap (kopru) girdide gecmiyor -> kopyalamayla cozulemez. kodla_2hop ile
+    AYNI cerceve ve AYNI hedef pozisyonu (4)."""
     X = _bos(len(batch))
     for i, (e, r1, b) in enumerate(batch):
         X[i, :7] = [Q2, v.ent_off + e, REL_OFF + r1, IDENT, QM,
@@ -359,6 +378,17 @@ def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
         parca.append(tuple(np.tile(z, (tekrar,) + (1,) * (z.ndim - 1))
                            for z in kimlik))
         yaz(f"  kimlik gorevi: {ayar.ident_kip}  {len(kimlik[0])} ornek x{tekrar}")
+        # ENT TANIMI BOZULUYOR MU -- her kosuda BASILIR (15 Eylul hakemligi).
+        # Mevcut sizinti assert'i yalniz `tr2`ye bakiyor; kimlik havuzu oradan
+        # gecmiyor ve ENT varligini [Q2] cercevesinde zincir basi yapabiliyor.
+        _ent_v = {e for e, *_ in v.ent} | {e for e, *_ in v.ent_yok}
+        _bas = [e for e, _, _ in ik] if ayar.ident_kip == "q2son" else []
+        _n = sum(1 for e in _bas if e in _ent_v)
+        if _n:
+            yaz(f"  !! DIKKAT: kimlik havuzunda {_n}/{len(_bas)} ornek bir ENT "
+                f"varligini [Q2] cercevesinde ZINCIR BASI yapiyor.")
+            yaz("     ENT'in tanimi ('hic zincir basi olmamis') BU KOLDA "
+                "gecerli degil; taban ile ent kiyasi bunu hesaba katmali.")
     X = np.concatenate([a for a, _, _ in parca])
     P = np.concatenate([b for _, b, _ in parca])
     T = np.concatenate([c for _, _, c in parca])
@@ -465,6 +495,12 @@ def olcme_listeleri(ayar: Ayar, v: Veri):
 def dogruluk(model, v: Veri, X, P, T, bs=512):
     """VARLIK-KISITLI argmax: cevap her zaman bir varliktir, ilişki/ozel
     token'lar yarismaya sokulmaz."""
+    # KUSUR (15 Eylul): sonunda `model.train()` vardi -- yani olcum,
+    # cagiranin kipini DEGISTIRIYORDU. pencere_a.olc() `net.eval()` deyip
+    # arka arkaya olcuyor; ilk cagridan sonra model TRAIN kipine gecmis
+    # oluyordu. Su an dropout/batchnorm yok, yani sonuca etkisi YOKTU --
+    # ama biri dropout eklerse olcum SESSIZCE rastgelelesirdi.
+    onceki = model.training
     model.eval()
     lo, hi = v.ent_off, v.ent_off + v.n_ent
     ok = []
@@ -477,7 +513,7 @@ def dogruluk(model, v: Veri, X, P, T, bs=512):
         lg = lg.float()[ar, idx][:, lo:hi]
         g = torch.from_numpy(T[i:i + bs]).to(DEV) - lo
         ok.append((lg.argmax(-1) == g).cpu().numpy())
-    model.train()
+    model.train(onceki)
     return float(np.concatenate(ok).mean())
 
 
@@ -490,6 +526,7 @@ def kisayol_orani(model, v: Veri, lst, bs=512):
         return float("nan")
     X, P, _ = kodla_2hop(v, lst)
     ksy = np.array([v.ent_off + int(v.facts[e, r2]) for e, _, r2, _, _ in lst])
+    onceki = model.training            # bkz. dogruluk()'taki ayni kusur
     model.eval()
     lo, hi = v.ent_off, v.ent_off + v.n_ent
     ok = []
@@ -501,7 +538,7 @@ def kisayol_orani(model, v: Veri, lst, bs=512):
         ar = torch.arange(len(idx), device=DEV)
         p = lg.float()[ar, idx][:, lo:hi].argmax(-1) + lo
         ok.append((p.cpu().numpy() == ksy[i:i + bs]))
-    model.train()
+    model.train(onceki)
     return float(np.concatenate(ok).mean())
 
 

@@ -156,12 +156,16 @@ def main():
         ("BIRIM TESTI",  "ent_yok_kisayol == 0.000",
          abs(son.get("ent_yok_kisayol", 1)) < 1e-9),
     ]
+    # KAPIYA ADIYLA ERIS, SIRA NUMARASIYLA DEGIL (15 Eylul hakemligi).
+    # Once `kapilar[2]` / `kapilar[3]` yaziyordu; listeye basa bir kapi
+    # eklendiginde bu satirlar SESSIZCE baska kapiyi okurdu.
+    gecti_mi = {ad: g for ad, _, g in kapilar}
     print(f"\n{'='*62}\nONCEDEN YAZILAN KAPILAR  (son pencere: {son['pencere']})")
     for ad, kural, gecti in kapilar:
         print(f"  {'GECTI ' if gecti else '!! KALDI'}  {ad:<14} {kural}")
-    if not kapilar[3][2]:
+    if not gecti_mi["BIRIM TESTI"]:
         print("  !! BIRIM TESTI KALDI -> OLCUM KODU BOZUK, sayilar okunmaz.")
-    if not kapilar[2][2]:
+    if not gecti_mi["OLGUNLUK"]:
         print("  !! OLGUNLUK KALDI -> kol 'olgunlasmamis', ENT YORUMLANMAZ.")
 
     # --- BUTCE YETTI MI (onkayit 6, son satir)
@@ -171,7 +175,7 @@ def main():
     if len(sonuc) >= 2:
         d = sonuc[-1].get("ent", 0) - sonuc[-2].get("ent", 0)
         print(f"\nBUTCE: son iki pencerede ent degisimi {d:+.4f}")
-        if not kapilar[2][2]:
+        if not gecti_mi["OLGUNLUK"]:
             print("  OLGUNLUK kapisi KALDI -> BUTCE SORUSU SORULMAZ. Egri duz "
                   "cikabilir ama sebebi doyma degil, hic ogrenilmemis olmasi.")
         elif d > 0.005:
