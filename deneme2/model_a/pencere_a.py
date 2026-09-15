@@ -39,6 +39,8 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import model_a as M
 
+MODEL_SINIFI = None   # `pencere_b` doldurur; None -> model_a.Model
+
 
 def anlik_goruntuler(klasor: str) -> dict:
     """{adim: yol}.  Adim dosya ADINDAN degil, glob + regex ile cikarilir.
@@ -146,7 +148,12 @@ def agirlik_ortalamasi(yollar: list) -> dict:
 
 
 def olc(ayar: M.Ayar, veri: M.Veri, kod: dict, L: dict, sd: dict) -> dict:
-    net = M.Model(ayar, veri.vocab).to(M.DEV)
+    # MODEL SINIFI AILEYE GORE secilir. `pencere_b` darbogazli kendi
+    # sinifini yazar. Yanlis sinifla olcmek ya SESSIZCE yanlis sayi
+    # uretir ya da load_state_dict'te patlar; ikincisi iyi, birincisi
+    # olumcul. `model_b/test_sabit_b.py` bu kancayi HER KOSUDA dogrular
+    # -- cunku 16 Eylul'de bu yama bir kez SESSIZCE uygulanmadi.
+    net = (MODEL_SINIFI or M.Model)(ayar, veri.vocab).to(M.DEV)
     net.load_state_dict(sd)
     net.eval()
     r = {k: M.dogruluk(net, veri, *kod[k]) for k in kod}

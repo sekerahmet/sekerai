@@ -14,7 +14,7 @@ de geliyor demektir.
 """
 from __future__ import annotations
 
-import os, subprocess, sys
+import io, os, subprocess, sys
 
 _B = os.path.dirname(os.path.abspath(__file__))
 _A = os.path.join(os.path.dirname(_B), "model_a")
@@ -88,6 +88,23 @@ def main():
     with torch.no_grad():
         d3 = (e(x) - f2(x)).abs().max().item()
     _bak(f"dongu=1'de fark {d3:.3e}", d3 == 0.0)
+
+    print()
+    print("=== 5) pencere_b KANCASI GERCEKTEN CALISIYOR MU ===")
+    # 16 EYLUL: bu yama BIR KEZ SESSIZCE UYGULANMADI. Bir kabuk
+    # zincirinde `sed` hata verdi, `&&` koptu, yamayi yazan blok HIC
+    # calismadi, ve commit "kanca eklendi" diyerek gecti. Hata ancak
+    # UCTAN UCA tur testinde goruldu -- kilit o zaman bakmiyordu.
+    # Artik bakiyor.
+    import pencere_b, pencere_a
+    _bak("pencere_a'da MODEL_SINIFI alani var",
+         hasattr(pencere_a, "MODEL_SINIFI"))
+    _bak("pencere_b onu ModelB yapti",
+         getattr(pencere_a, "MODEL_SINIFI", None) is ModelB,
+         f"su an: {getattr(pencere_a, 'MODEL_SINIFI', 'ALAN YOK')}")
+    _bak("olc() sabit M.Model KULLANMIYOR",
+         "MODEL_SINIFI or M.Model" in
+         io.open(os.path.join(_A, "pencere_a.py"), encoding="utf-8").read())
 
     print()
     print(f"{_iyi} gecti, {_kotu} BOZUK")
