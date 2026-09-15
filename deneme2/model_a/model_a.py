@@ -58,7 +58,7 @@ Ilk kosunun isi bunu gormek.
 from __future__ import annotations
 
 import dataclasses as dc
-import glob, json, math, os, subprocess, sys, time
+import glob, importlib, json, math, os, subprocess, sys, time
 import numpy as np
 import torch
 import torch.nn as nn
@@ -89,6 +89,12 @@ class Ayar:
 
     # --- veri (bir ailenin butun kollarinda AYNI olmali, yoksa
     #     'sartlar esit' bozulur ve kollar farkli veri gorur)
+    veri_ad: str = "veri_okul"   # HANGI GRAF. "veri_okul2" = tam IKI KATI.
+    #   15 Eylul'de eklendi. Modul adi olarak yaziliyor ki `ayar_t<N>.json`a
+    #   girsin: "bu kosu hangi veriyi gordu" sorusu SONRADAN cevaplanabilsin.
+    #   Alan eklemek SURDURMEYI bozabilirdi (eski paketlerde bu anahtar YOK
+    #   ve karsilastirma 'degismis' derdi); `surdurme_oku` icinde ESKI
+    #   VARSAYILAN tablosu var, oraya bak.
     veri_tohum: int = 0
     ent_pay: float = 0.20      # varliklarin ne kadari ENT'e ayrilir
     comp_pay: float = 0.10     # zincirlerin ne kadari COMP'a ayrilir
@@ -174,6 +180,21 @@ class Ayar:
         return {k: (a[k], b[k]) for k in a if a[k] != b[k] and k != "ad"}
 
 
+# ESKI KOSULARLA UYUM. Bir alan Ayar'a SONRADAN eklenirse, ondan once
+# yazilmis `ayar_t<N>.json` ve `surdurme_t<N>.pt` dosyalarinda o anahtar
+# YOKTUR. Tablo olmasa yeni bir alan eklemek:
+#   - butun eski kosularin SURDURULMESINI kirardi (surdurme_oku)
+#   - butun eski kosularin OLCULMESINI kirardi (pencere_a.ayar_oku)
+# Olculdu (15 Eylul, `veri_ad` eklenirken): ikisi de fiilen kirildi.
+#
+# BURAYA YAZILAN DEGER, ALANIN EKLENMEDEN ONCE KODUN FIILEN YAPTIGI SEY
+# OLMALI -- "makul varsayilan" degil. Yanlis yazilirsa eski kosular
+# SESSIZCE yanlis etiketlenir.
+ESKI_VARSAYILAN = {
+    "veri_ad": "veri_okul",   # 15 Eylul oncesi tek veri kaynagi buydu
+}
+
+
 def fark_bas(a: Ayar, b: Ayar, yaz=print) -> dict:
     """'Tek fark su' bir IDDIA degil, CIKTI olsun (ISIMLENDIRME.md b).
 
@@ -246,14 +267,22 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
     # etkiliyordu. Olculdu: veri_tohum 0 ve 1 ayni `facts`, farkli `tr2`.
     # Yani "veri tohumunu degistirdim" diyen biri grafin degismedigini
     # FARK ETMEZDI.
-    G = VO.kur(ayar.veri_tohum)
-    zin = VO.zincirler(G)
-    E = [a for t in VO.TIPLER for a in G["ad"][t]]
+    # HANGI GRAF -- modul adi AYARDAN geliyor, sabit degil. "veri_okul"
+    # (1060 varlik) ya da "veri_okul2" (2120). Modul `kur`/`zincirler`/
+    # `TIPLER`/`ILISKI` sozlesmesini saglamak zorunda; saglamazsa burada
+    # AttributeError verir, sessizce yanlis veri kurmaz.
+    _V = importlib.import_module(ayar.veri_ad)
+    for _g in ("kur", "zincirler", "TIPLER", "ILISKI"):
+        assert hasattr(_V, _g), f"{ayar.veri_ad} modulunde {_g} yok"
+
+    G = _V.kur(ayar.veri_tohum)
+    zin = _V.zincirler(G)
+    E = [a for t in _V.TIPLER for a in G["ad"][t]]
     # E, TIP SIRASIYLA kuruluyor -- tip dizisi AYNI comprehension'dan
     # cikarilir ki iki yerde iki siralama olmasin.
-    E_tip = np.array([i for i, t in enumerate(VO.TIPLER)
+    E_tip = np.array([i for i, t in enumerate(_V.TIPLER)
                       for _ in G["ad"][t]], np.int64)
-    R = list(VO.ILISKI)
+    R = list(_V.ILISKI)
     eid = {a: i for i, a in enumerate(E)}
     rid = {r: i for i, r in enumerate(R)}
 
@@ -267,7 +296,7 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
 
     rng = np.random.RandomState(ayar.veri_tohum)
     ent_ad = set()
-    for t in VO.TIPLER:                       # TABAKALI: tek tip secilirse
+    for t in _V.TIPLER:                       # TABAKALI: tek tip secilirse
         a = [x for x in G["ad"][t] if x in bas]   # sinav o tipin karisimina
         if a:                                     # indirgenir
             k = int(round(len(a) * ayar.ent_pay))
@@ -310,7 +339,7 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
                                for (e, r), h in G["olgu"].items()],
              tr2=say(tr2), comp=say(comp), ent=say(ent_ay),
              ent_yok=say(ent_yk), ent_arama=say(ent_ar),
-             tip=E_tip, tip_ad=tuple(VO.TIPLER))
+             tip=E_tip, tip_ad=tuple(_V.TIPLER))
 
     # --- SIZINTI DENETIMI -- sessiz gecmesin
     trset = {(e, a, b) for e, a, b, _, _ in v.tr2}
@@ -802,7 +831,8 @@ def surdurme_oku(yol, ayar: Ayar, model, opt, scaler, rs, iz, yaz=print):
     # `adim` DISINDA her alan ayni olmali: uzatma butceyi degistirir,
     # modeli/veriyi DEGISTIRMEZ. `ad` da serbest degil -- cikti adlarina
     # giriyor.
-    fark = {k for k in yeni if k != "adim" and eski.get(k) != yeni[k]}
+    fark = {k for k in yeni
+            if k != "adim" and eski.get(k, ESKI_VARSAYILAN.get(k)) != yeni[k]}
     if fark:
         raise SystemExit(
             os.linesep + f"!! SURDURULEMEZ: ayar degismis: {sorted(fark)}"

@@ -68,6 +68,16 @@ def ayar_oku(klasor: str) -> M.Ayar:
     fazla = set(d) - alan
     eksik = alan - set(d)
     assert not fazla, f"ayar dosyasinda BILINMEYEN alan: {fazla} ({y[0]})"
+    # ALANLAR SONRADAN EKLENEBILIR. Eski `ayar_t<N>.json`larda yeni alan
+    # YOKTUR; tablo olmasa bu assert butun eski kosularin OLCULMESINI
+    # kirardi. Olculdu (15 Eylul, `veri_ad` eklenince fiilen kirildi).
+    # Tablo `model_a.ESKI_VARSAYILAN` -- TEK yerde durur, `surdurme_oku`
+    # da ayni tabloyu kullanir, ikisi ayrisamaz.
+    for k in sorted(eksik & set(M.ESKI_VARSAYILAN)):
+        d[k] = M.ESKI_VARSAYILAN[k]
+        print(f"  ESKI AYAR: '{k}' dosyada yok -> {d[k]!r} varsayildi "
+              f"(alan {k} sonradan eklendi)")
+    eksik -= set(M.ESKI_VARSAYILAN)
     assert not eksik, f"ayar dosyasinda EKSIK alan: {eksik} ({y[0]})"
     d["mask_blok"] = tuple(d["mask_blok"])
     d["betas"] = tuple(d["betas"])

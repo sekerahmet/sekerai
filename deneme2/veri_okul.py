@@ -183,7 +183,40 @@ def _devirsiz(rng, idx):
 N_KISI, N_OKUL = 700, 200
 
 
-def kur(tohum=0):
+def kur(tohum=0, olcek=None):
+    """`olcek=None` -> BUGUNKU graf, BIREBIR. Baska bir sey verilirse
+    havuzlar buyur/kucultulur ve graf olceklenir.
+
+    ```
+    kur(0)                                  # 1060 varlik,  8400 olgu
+    kur(0, veri_okul2.OLCEK2)               # 2120 varlik, 16800 olgu
+    ```
+
+    Havuzlar MODUL GLOBALI olarak duruyor; burada YEREL isme baglaniyor.
+    `globals()` ile okunmasinin sebebi teknik: ayni ismi yerel olarak
+    atayinca Python butun govdeyi yerel sayar, yani asagidaki 130 satirin
+    HICBIRINE dokunmadan olcek degistirilebiliyor. Alternatifi 9 ayri
+    yerde arama-degistirme yapmakti; biri atlanirsa graf SESSIZCE karisik
+    olcekte cikardi.
+
+    SABIT KALAN: iliski semasi, yapisal kisitlar, BLOK=100, tur sayilari.
+    Yani bu bir OLCEK dugmesidir, GOREV dugmesi degil.
+    """
+    o = olcek or {}
+    N_KISI = o.get("n_kisi", globals()["N_KISI"])
+    N_OKUL = o.get("n_okul", globals()["N_OKUL"])
+    SOYAD = o.get("soyad", globals()["SOYAD"])
+    IL = o.get("il", globals()["IL"])
+    DERS = o.get("ders", globals()["DERS"])
+    assert N_KISI % BLOK == 0, f"N_KISI ({N_KISI}) BLOK'a ({BLOK}) bolunmeli"
+    assert N_KISI <= 2 * 50 * len(SOYAD), (
+        f"N_KISI={N_KISI} isim havuzunu asiyor: 2*50*{len(SOYAD)} soyad "
+        f"= {2 * 50 * len(SOYAD)}. SOYAD listesini buyut.")
+    assert N_OKUL <= len(IL) * len(OKUL_TUR), (
+        f"N_OKUL={N_OKUL} > {len(IL)}*{len(OKUL_TUR)}={len(IL)*len(OKUL_TUR)}. "
+        f"IL listesini ya da OKUL_TUR'u buyut.")
+    assert len(IL) % 2 == 0, "komsu esitlemesi icin IL sayisi CIFT olmali"
+
     rng = np.random.RandomState(tohum)
 
     # cift indeks ERKEK, tek indeks KADIN; her 100 kisi bir SOYADI blogu.
