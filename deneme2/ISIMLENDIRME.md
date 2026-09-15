@@ -155,7 +155,7 @@ deneme2/
     SABLON.ipynb     <- kopyalanacak defter (MODEL = None)
     veri_okul.py     <- veri ureteci, GOREVI tanimlar, modele ait DEGIL
     model_a.py       model_a.ipynb
-    pencere_a.py     <- olcum (henuz yazilmadi)
+    pencere_a.py     <- BIRINCIL OKUMA: agirlik ortalamasi
 ```
 
 Cikti depoda DEGIL, Drive'da: `deneme2/<model>/`. Kosu ciktisi ikili ve
