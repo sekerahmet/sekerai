@@ -3,14 +3,24 @@
 **15 Eylül 2026.** Tek kural: **bir modelin adı her yerde aynıdır.**
 
 ```
-model_a              <- AD
-model_a.py           <- modelin kendisi
-model_a.ipynb        <- onun Colab defteri (SABLON.ipynb'in KOPYASI)
-pencere_a.py         <- onun olcumu
-belge/onkayit/model_a.md    <- kosudan ONCE
-belge/bulgu/model_a.md      <- sonuc
-Drive: deneme2/model_a/     <- onun ciktisi
+model_a                          <- AD
+deneme2/model_a/                 <- AILE KLASORU, her sey burada
+    model_a.py                   modelin kendisi
+    model_a.ipynb                onun Colab defteri (SABLON.ipynb'in KOPYASI)
+    pencere_a.py                 olcum -- BUTUN A ailesini olcer
+    model_a1.py  model_a2.py     varyasyonlar, AYNI klasorde
+belge/onkayit/model_a.md         <- kosudan ONCE
+belge/bulgu/model_a.md           <- sonuc
+Drive: deneme2/model_a/t0/       <- onun ciktisi
 ```
+
+**Depodaki klasor ile Drive'daki klasor AYNI ADI tasir.** `deneme2/model_a/`
+depoda kodu, Drive'da ciktiyi tutar; ikisi karismaz cunku cikti depoda
+degil (`.gitignore`: `*.pt *.npz *.parquet`).
+
+Aile klasoru ISIMLENDIRME'nin "arac AILEYE aittir" kuralinin klasor
+karsiligi: `pencere_a.py` `model_a`nin degil, **A ailesinin** araci, o
+yuzden ailenin klasorunde durur ve `model_a1` de onunla olculur.
 
 ## Tohum
 
@@ -153,10 +163,49 @@ hiçbir şey hata vermedi, kimse fark etmedi.
 deneme2/
     ISIMLENDIRME.md
     SABLON.ipynb     <- kopyalanacak defter (MODEL = None)
-    veri_okul.py     <- veri ureteci, GOREVI tanimlar, modele ait DEGIL
-    model_a.py       model_a.ipynb
-    pencere_a.py     <- BIRINCIL OKUMA: agirlik ortalamasi
+    veri_okul.py     <- veri ureteci; GOREVI tanimlar, modele ait DEGIL
+    kos.py           <- defterin baslattigi surec; altyapi, modele ait DEGIL
+    model_a/         <- A AILESI
+        model_a.py   model_a.ipynb   pencere_a.py
+    model_b/         <- B AILESI (henuz yok)
 ```
 
-Cikti depoda DEGIL, Drive'da: `deneme2/<model>/`. Kosu ciktisi ikili ve
-buyuk; `.gitignore`da `*.pt *.npz *.parquet` var.
+Kokte duran uc dosya **hicbir modele ait degil**: `veri_okul.py` gorevi
+tanimlar (model_a da model_b de ayni veriyi gorur), `kos.py` kosuyu
+baslatir, `SABLON.ipynb` kopyalanir.
+
+`kos.py` aile klasorunu **isimden turetmez, ARAR**:
+`deneme2/*/<model>.py` tam bir kez bulunmali. `model_a1 -> model_a` gibi
+bir kural sessizce yanlis klasoru secebilirdi.
+
+`model_a.py` iceriden bir ust klasoru yola ekler (`veri_okul` icin). Bu
+TEK import yan etkisi ve deterministik: ortam degiskeni okumuyor, ayar
+tasimiyor -- `sifirdan.py`nin arizasi oydu (asagida, 1. madde).
+
+Cikti depoda DEGIL, Drive'da: `deneme2/<model>/t<N>/`. Kosu ciktisi ikili
+ve buyuk; `.gitignore`da `*.pt *.npz *.parquet` var.
+
+## Bir kosu klasorunde ne var
+
+```
+deneme2/model_a/t0/
+    ayar_t0.json                    NE ISTEDIK   (+ _olcme_izi)
+    kosu_t0.json                    NE KOSTU     commit, GPU, torch, durum,
+                                                 veri sayilari, sure
+    egri_model_a_t0.json            her olcum noktasi (adim 0 dahil)
+    snap_model_a_t0_00002000.pt     anlik goruntuler, fp16
+    pencere_model_a_t0.json         pencere_a'nin ciktisi
+    log_20260915_143200.txt         o kosunun logu (ZAMAN DAMGALI)
+```
+
+Uc sey kosudan sonra degil, kosu SIRASINDA garanti edilir:
+
+- **Atomik yazim.** Her `.pt` ve `.json` once `.tmp`e yazilip `os.replace`
+  ile yerine konur. Olculdu: atomik olmadan yarim bir `.pt`
+  `torch.load`'i patlatiyor VE `pencere_a`nin glob'una giriyor; yarim bir
+  `egri.json` butun egriyi goturuyor.
+- **Dolu klasor REDDEDILIR.** "t0 klasorune dokunulmaz" bir niyetti;
+  artik `egit()` dolu klasorde durur. Bilerek ezmek icin `--ustune`.
+- **Zaman damgali log.** Eskiden tek `log.txt` vardi ve her kosu onu `"w"`
+  ile aciyordu: `TOHUMLAR=[1,2]` ile ikinci kez kosunca t0'in logu
+  siliniyordu -- yani "dokunulmaz" klasore fiilen dokunuluyordu.

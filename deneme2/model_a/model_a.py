@@ -58,12 +58,18 @@ Ilk kosunun isi bunu gormek.
 from __future__ import annotations
 
 import dataclasses as dc
-import json, math, os, time
+import glob, json, math, os, subprocess, sys, time
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Bu dosya AILE klasorunde (deneme2/model_a/); `veri_okul.py` bir UST
+# klasorde (deneme2/) cunku GOREVI tanimlar, modele ait degil -- model_a da
+# model_b de ayni veriyi gorur. Ust klasoru yola eklemek TEK import yan
+# etkisidir ve deterministiktir: ortam degiskeni okumuyor, ayar tasimiyor
+# (sifirdan.py'nin arizasi oydu, bkz. ISIMLENDIRME.md).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import veri_okul as VO
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
@@ -581,10 +587,151 @@ def kisayol_orani(model, v: Veri, lst, bs=512):
     return float(np.concatenate(ok).mean())
 
 
+# ======================= DOSYA / ORTAM ===================================
+def _atomik(yol: str, yazici):
+    """Once `<yol>.tmp`e yaz, sonra os.replace ile yerine koy.
+
+    OLCULDU (15 Eylul): yarim kalmis bir anlik goruntu pencere_a'nin
+    glob'una GIRIYOR (adim 4000 listeye girdi) ve orada `torch.load`
+    "PytorchStreamReader failed" diye patliyor; yarim kalmis bir
+    `egri.json` ise JSONDecodeError veriyor ve BUTUN egri kayboluyor.
+
+    Iki yolla oluyordu: (a) Drive'a yazarken kosu kesilir, (b) egitim
+    yazarken pencere_a AYNI ANDA okur. `.tmp` + `os.replace` ikisini de
+    kapatir: okuyucu ya ESKI ya YENI dosyayi gorur, ARASINI asla.
+    `.tmp` AYNI klasorde -- replace ancak ayni dosya sisteminde atomik."""
+    t = yol + ".tmp"
+    yazici(t)
+    os.replace(t, yol)
+
+
+def _yaz_json(yol: str, nesne):
+    def w(t):
+        with open(t, "w", encoding="utf-8") as f:
+            json.dump(nesne, f, indent=1)
+    _atomik(yol, w)
+
+
+def _commit() -> str:
+    """Bu sayilari HANGI KOD uretti.
+
+    Defter GitHub'dan klonluyor ve commit'i EKRANA basiyordu -- ama cikti
+    klasorune YAZMIYORDU. Uc gun sonra "bu kosu hangi koddan" sorusunun
+    mekanik cevabi yoktu. `+KIRLI`: calisma agacinda kaydedilmemis
+    degisiklik var, yani commit tek basina kosuyu TARIF ETMIYOR."""
+    k = os.path.dirname(os.path.abspath(__file__))
+    try:
+        h = subprocess.run(["git", "-C", k, "rev-parse", "--short", "HEAD"],
+                           capture_output=True, text=True, timeout=15)
+        if h.returncode:
+            return "?"
+        d = subprocess.run(["git", "-C", k, "status", "--porcelain"],
+                           capture_output=True, text=True, timeout=15)
+        return h.stdout.strip() + ("+KIRLI" if d.stdout.strip() else "")
+    except Exception:
+        return "?"
+
+
+def _gpu_adi() -> str:
+    try:
+        return torch.cuda.get_device_name(0) if DEV == "cuda" else ""
+    except Exception:
+        return ""
+
+
+def _yazilabilir(alt: str, yaz=print):
+    """Drive GERCEKTEN bagli mi -- ve oraya yazip geri okuyabiliyor muyuz?
+
+    Colab'da drive.mount calismadiysa `/content/drive/MyDrive/...` sihirli
+    bir yol degildir, siradan bir klasordur: `os.makedirs` hic sikayet
+    etmeden onu GECICI DISKTE acar. Kosu 45 dk surer, biter, runtime olur
+    ve HER SEY SILINIR -- hicbir yerde hata gorunmez. `ismount` gercek
+    FUSE baglantisi ile sahte klasoru ayirir."""
+    p = os.path.abspath(alt).replace(os.sep, "/")
+    if "/content/drive" in p and not os.path.ismount("/content/drive"):
+        raise SystemExit(
+            os.linesep + "!! /content/drive BAGLI DEGIL." + os.linesep
+            + f"   {alt} Drive gibi duruyor ama runtime'in GECICI diski;"
+            + os.linesep
+            + "   kosu bitince her sey silinir ve hicbir hata gorunmez."
+            + os.linesep
+            + "   Defterin 'Drive' hucresini (drive.mount) calistir.")
+    t = os.path.join(alt, ".yazma_denemesi")
+    with open(t, "w") as f:
+        f.write("ok")
+    with open(t) as f:
+        assert f.read() == "ok", f"yazildi ama geri okunamadi: {alt}"
+    os.remove(t)
+    yaz(f"  yazilabilir: {alt}" + ("   (DRIVE)" if "/content/drive" in p else ""))
+
+
+def _bos_mu(alt: str, ayar: Ayar, ustune: bool):
+    """Bitmis bir kosunun uzerine SESSIZCE yazma.
+
+    Onkayit ve ISIMLENDIRME.md "olumsuzsa TOHUMLAR=[1,2] yapip tekrar kos,
+    t0 klasorune DOKUNULMAZ" diyor. Bu bir NIYETTI: defterdeki baslat
+    hucresini ikinci kez calistirmak t0'in anlik goruntulerini ezerdi ve
+    hicbir sey uyarmazdi. Artik mekanik."""
+    var = glob.glob(os.path.join(alt, "snap_*.pt"))
+    e = os.path.join(alt, f"egri_{ayar.ad}_t{ayar.tohum}.json")
+    if os.path.exists(e):
+        var.append(e)
+    if var and not ustune:
+        raise SystemExit(
+            os.linesep
+            + f"!! {alt} ZATEN DOLU ({len(var)} dosya) -- burada bitmis ya da"
+            + os.linesep
+            + "   yarim kalmis bir kosu var; uzerine yazmak onu SILER."
+            + os.linesep
+            + "   Yeni tohum BASKA klasore yazar (t1/, t2/). Gercekten ezmek"
+            + os.linesep + "   istiyorsan: egit(..., ustune=True).")
+
+
+def erken_teshis(r: dict, ayar: Ayar, yaz=print):
+    """Bozuk kosuyu 45 dakika sonra degil, ILK OLCUMDE yakala.
+
+    BIRIM TESTI onkayitta (belge/onkayit/model_a.md 5) zaten YAZILIYDI --
+    ama yalniz kosu BITTIKTEN sonra pencere_a'da degerlendiriliyordu. Yani
+    "olcum kodu bozuk mu" sorusunun cevabi icin butun kosuyu beklemek
+    gerekiyordu. Burada adim 0'da soruluyor: saniye 0."""
+    a = r["adim"]
+    k = r.get("ent_yok_kisayol")
+    if k is not None and k == k and abs(k) > 1e-9:      # k == k  ->  NaN degil
+        raise SystemExit(
+            os.linesep
+            + f"!! BIRIM TESTI KALDI (adim {a}): ent_yok_kisayol {k:.4f}, "
+            + "MATEMATIKSEL OLARAK 0 olmaliydi." + os.linesep
+            + "   ENT-YOK zincirlerinde facts hucresi -1'dir; kisayol cevabi"
+            + os.linesep
+            + "   ent_off-1 cikar, yani bir ILISKI token'i -- hicbir varlik"
+            + os.linesep
+            + "   tahminiyle eslesemez. Sifir DEGILSE olcum kodu bozuktur ve"
+            + os.linesep
+            + "   bu kosunun BUTUN sayilari okunmaz. Kosu durduruldu.")
+    kp = r.get("kayip")
+    if kp is not None and not math.isfinite(kp):
+        raise SystemExit(
+            os.linesep + f"!! KAYIP {kp} (adim {a}) -- NaN/inf." + os.linesep
+            + "   fp16 + GradScaler bozuk GRADYANI atlar, ama agirliklar bir"
+            + os.linesep
+            + "   kez NaN olursa egitim SESSIZCE devam eder ve butun"
+            + os.linesep
+            + "   dogruluklar sifira duser. Kosu durduruldu.")
+    if a >= 2 * ayar.isinma and r.get("one", 1.0) < 0.05:
+        yaz(f"  !! UYARI: adim {a}, isinma ({ayar.isinma}) coktan bitti ama "
+            f"one {r['one']:.3f}.")
+        yaz("     Atomik olgu ezberi bu gorevin EN KOLAY parcasi, sans "
+            "seviyesi ~0.001.")
+        yaz("     Burada takilmak egitimin bozuk oldugunu DUSUNDURUR "
+            "-- kapi degil, UYARI.")
+
+
 # ======================= EGITIM ==========================================
-def egit(ayar: Ayar, alt=None, yaz=print) -> list:
+def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None) -> list:
     alt = alt or f"cikti_{ayar.ad}_t{ayar.tohum}"
     os.makedirs(alt, exist_ok=True)
+    _yazilabilir(alt, yaz)          # Drive gercekten bagli mi, saniye 0'da
+    _bos_mu(alt, ayar, ustune)      # bitmis kosuyu sessizce ezme
     yaz(f"=== {ayar.ad}  tohum {ayar.tohum} ===  cihaz {DEV}  cikti {alt}/")
     v = veri_kur(ayar, yaz)
     Xtr, Ptr, Ttr, kimlik = egitim_havuzu(ayar, v, yaz)
@@ -618,63 +765,137 @@ def egit(ayar: Ayar, alt=None, yaz=print) -> list:
 
     # Ayarin YANINA olcme izini de yaz: "bu kosu hangi ornekleri olctu"
     # sorusu sonradan MEKANIK olarak cevaplanabilsin.
-    json.dump(dict(ayar.sozluk(), _olcme_izi=iz),
-              open(f"{alt}/ayar_t{ayar.tohum}.json", "w"), indent=1)
+    _yaz_json(f"{alt}/ayar_t{ayar.tohum}.json",
+              dict(ayar.sozluk(), _olcme_izi=iz))
 
-    for adim in range(1, ayar.adim + 1):
-        if adim < ayar.isinma:
-            lr = ayar.lr * adim / ayar.isinma
-        elif ayar.sabit_lr:
-            lr = ayar.lr              # grokking icin LR SONMEMELI
-        else:
-            lr = ayar.lr * 0.5 * (1 + math.cos(
-                math.pi * (adim - ayar.isinma) / max(1, ayar.adim - ayar.isinma)))
-        for g in opt.param_groups:
-            g["lr"] = lr
+    # KUNYE: ayar "ne isteyecektik"i, kunye "fiilen ne kostu"yu yazar. Ikisi
+    # ayri sey. Commit, GPU, torch surumu ve veri sayilari SADECE LOGA
+    # basiliyordu; log ise defterde tek dosyaydi ve her kosuda ustune
+    # yaziliyordu -- yani bu bilgiler ikinci kosuda KAYBOLUYORDU.
+    kunye_yolu = f"{alt}/kosu_t{ayar.tohum}.json"
+    kunye = dict(
+        ad=ayar.ad, tohum=ayar.tohum, durum="KOSUYOR",
+        commit=commit or _commit(),
+        cihaz=DEV, gpu=_gpu_adi(), torch=torch.__version__,
+        numpy=np.__version__, python=os.sys.version.split()[0],
+        baslangic=time.strftime("%Y-%m-%d %H:%M:%S"),
+        parametre=model.n_param(), katman_esdegeri=ayar.l * ayar.dongu,
+        olcme_izi=iz, havuz=int(len(Xtr)),
+        veri=dict(olgu=len(v.one), egitim2=len(v.tr2), comp=len(v.comp),
+                  ent=len(v.ent), ent_yok=len(v.ent_yok),
+                  ent_arama=len(v.ent_arama), n_ent=v.n_ent, n_rel=v.n_rel,
+                  vocab=v.vocab, phi=round(v.phi, 4),
+                  wang_phi=round(v.wang_phi, 4)),
+        olcme={k: len(L[k]) for k in L},
+    )
+    _yaz_json(kunye_yolu, kunye)
+    yaz(f"  kunye: commit {kunye['commit']}  {kunye['gpu'] or DEV}  "
+        f"torch {kunye['torch']}  -> {kunye_yolu}")
 
-        # YERINE KOYARAK ornekleme: ayni ornek bir batch'te tekrar gelebilir
-        # ve EPOCH diye bir sey YOK. Literaturdeki butceler epoch cinsinden
-        # (Loop&Generalize "7k epoch", 2603.25009 full-batch) -- bizim adim
-        # sayimiz onlarla DOGRUDAN kiyaslanamaz. Beklenen gecis sayisi:
-        # adim*batch/len(Xtr) = 20000*512/51120 ~ 200, ama Poisson sacilimli.
-        j = rs.randint(0, len(Xtr), ayar.batch)
-        xb = torch.from_numpy(Xtr[j]).to(DEV)
-        pb = torch.from_numpy(Ptr[j]).to(DEV)
-        tb = torch.from_numpy(Ttr[j]).to(DEV)
-        with torch.autocast(DEV, dtype=torch.float16, enabled=(DEV == "cuda")):
-            lg = model(xb)
-            lg = lg[torch.arange(ayar.batch, device=DEV), pb]
-            kayip = F.cross_entropy(lg.float(), tb)
-        opt.zero_grad(set_to_none=True)
-        scaler.scale(kayip).backward()
-        scaler.unscale_(opt)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        scaler.step(opt)
-        scaler.update()
+    egri_yolu = f"{alt}/egri_{ayar.ad}_t{ayar.tohum}.json"
 
-        if adim % ayar.olc_her == 0 or adim == ayar.adim:
-            r = dict(adim=adim, kayip=float(kayip.item()), lr=float(lr),
-                     sn=round(time.time() - t0, 1))
-            for k in kod:
-                r[k] = dogruluk(model, v, *kod[k])
-            r["ent_kisayol"] = kisayol_orani(model, v, L["ent"])
-            r["ent_yok_kisayol"] = kisayol_orani(model, v, L["ent_yok"])
-            if kimlik is not None:
-                r["kimlik"] = dogruluk(model, v, *kimlik)
-            egri.append(r)
-            # ANLIK GORUNTU: agirlik ortalamasi olcumunun sartı. Adim adli,
-            # 8 hane sifir dolgulu -- arsivde `f"..._{20000}.pt"` hicbir sey
-            # bulmamis ama 190000'i bulmustu (zaten 6 haneydi), yani hata
-            # KISMEN gorunmustu. Ad `ayar.ad` tasiyor.
-            torch.save({k: t.half() for k, t in model.state_dict().items()},
-                       f"{alt}/snap_{ayar.ad}_t{ayar.tohum}_{adim:08d}.pt")
-            json.dump(egri, open(f"{alt}/egri_{ayar.ad}_t{ayar.tohum}.json", "w"))
-            yaz(f"  {adim:7d}/{ayar.adim}  kayip {r['kayip']:.3f}  "
-                + "  ".join(f"{k} {r[k]:.3f}" for k in
-                            ("one", "seen", "comp", "ent") if k in r)
+    def _nokta(adim, kayip, lr):
+        r = dict(adim=adim, kayip=kayip, lr=float(lr),
+                 sn=round(time.time() - t0, 1))
+        for k in kod:
+            r[k] = dogruluk(model, v, *kod[k])
+        r["ent_kisayol"] = kisayol_orani(model, v, L["ent"])
+        r["ent_yok_kisayol"] = kisayol_orani(model, v, L["ent_yok"])
+        if kimlik is not None:
+            r["kimlik"] = dogruluk(model, v, *kimlik)
+        return r
+
+    def _satir(r):
+        return (f"  {r['adim']:7d}/{ayar.adim}  "
+                + ("kayip   ---" if r["kayip"] is None
+                   else f"kayip {r['kayip']:.3f}")
+                + "  " + "  ".join(f"{k} {r[k]:.3f}" for k in
+                                   ("one", "seen", "comp", "ent") if k in r)
                 + f"  ksy {r['ent_kisayol']:.3f}"
                 + (f"  kimlik {r['kimlik']:.3f}" if "kimlik" in r else "")
                 + f"  ({r['sn']/60:.0f} dk)")
+
+    # --- ADIM 0 -- hicbir sey egitilmeden OLCUM YOLUNUN TAMAMI kosulur.
+    # Iki isi var: (a) BIRIM TESTI'ni saniye 0'da patlatmak -- olcum kodu
+    # bozuksa 45 dakika beklemenin anlami yok; (b) SANS SEVIYESINI bu veride
+    # olcmek (teorik 1/1060 ~ 0.001, ama tahmin degil OLCUM yazilsin).
+    # ANLIK GORUNTU KAYDEDILMEZ: egitilmemis agirlik pencere_a'nin agirlik
+    # ortalamasina girerse ilk pencereyi KIRLETIR.
+    r0 = _nokta(0, None, 0.0)
+    egri.append(r0)
+    yaz(_satir(r0) + "   <- SANS (egitim yok, anlik goruntu YAZILMAZ)")
+    erken_teshis(r0, ayar, yaz)
+    _yaz_json(egri_yolu, egri)
+
+    tahmin = False
+    try:
+        for adim in range(1, ayar.adim + 1):
+            if adim < ayar.isinma:
+                lr = ayar.lr * adim / ayar.isinma
+            elif ayar.sabit_lr:
+                lr = ayar.lr              # grokking icin LR SONMEMELI
+            else:
+                lr = ayar.lr * 0.5 * (1 + math.cos(
+                    math.pi * (adim - ayar.isinma)
+                    / max(1, ayar.adim - ayar.isinma)))
+            for g in opt.param_groups:
+                g["lr"] = lr
+
+            # YERINE KOYARAK ornekleme: ayni ornek bir batch'te tekrar
+            # gelebilir ve EPOCH diye bir sey YOK. Literaturdeki butceler
+            # epoch cinsinden (Loop&Generalize "7k epoch", 2603.25009
+            # full-batch) -- adim sayimiz onlarla DOGRUDAN kiyaslanamaz.
+            # Beklenen gecis: adim*batch/len(Xtr) = 20000*512/51120 ~ 200,
+            # ama Poisson sacilimli.
+            j = rs.randint(0, len(Xtr), ayar.batch)
+            xb = torch.from_numpy(Xtr[j]).to(DEV)
+            pb = torch.from_numpy(Ptr[j]).to(DEV)
+            tb = torch.from_numpy(Ttr[j]).to(DEV)
+            with torch.autocast(DEV, dtype=torch.float16,
+                                enabled=(DEV == "cuda")):
+                lg = model(xb)
+                lg = lg[torch.arange(ayar.batch, device=DEV), pb]
+                kayip = F.cross_entropy(lg.float(), tb)
+            opt.zero_grad(set_to_none=True)
+            scaler.scale(kayip).backward()
+            scaler.unscale_(opt)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(opt)
+            scaler.update()
+
+            if adim % ayar.olc_her == 0 or adim == ayar.adim:
+                r = _nokta(adim, float(kayip.item()), lr)
+                egri.append(r)
+                # ANLIK GORUNTU: agirlik ortalamasi olcumunun sarti. Adim
+                # adli, 8 hane sifir dolgulu -- arsivde `f"..._{20000}.pt"`
+                # hicbir sey bulmamis ama 190000'i bulmustu (zaten 6
+                # haneydi), yani hata KISMEN gorunmustu. Ad `ayar.ad` tasir.
+                # ATOMIK: yarim .pt hem torch.load'i patlatir hem de
+                # pencere_a'nin glob'una girer (bkz. _atomik).
+                yol = f"{alt}/snap_{ayar.ad}_t{ayar.tohum}_{adim:08d}.pt"
+                sd = {k: t.half() for k, t in model.state_dict().items()}
+                _atomik(yol, lambda t, _s=sd: torch.save(_s, t))
+                _yaz_json(egri_yolu, egri)
+                yaz(_satir(r))
+                erken_teshis(r, ayar, yaz)
+                if not tahmin:
+                    tahmin = True
+                    hiz = (r["sn"] - r0["sn"]) / adim      # r0 = olcum yuku
+                    yaz(f"     >> HIZ {hiz*1000:.0f} ms/adim  ->  toplam "
+                        f"~{(hiz*ayar.adim + r0['sn'])/60:.0f} dk, kalan "
+                        f"~{hiz*(ayar.adim-adim)/60:.0f} dk.  Bu rakam "
+                        "beklenenin cok ustundeyse SIMDI durdur.")
+    except BaseException as e:
+        kunye.update(durum="HATA", hata=f"{type(e).__name__}: {e}"[:400],
+                     bitis=time.strftime("%Y-%m-%d %H:%M:%S"),
+                     son_adim=egri[-1]["adim"], sure_dk=round((time.time()-t0)/60, 1))
+        _yaz_json(kunye_yolu, kunye)
+        raise
+    kunye.update(durum="BITTI", bitis=time.strftime("%Y-%m-%d %H:%M:%S"),
+                 son_adim=egri[-1]["adim"],
+                 sure_dk=round((time.time() - t0) / 60, 1))
+    _yaz_json(kunye_yolu, kunye)
+    yaz(f"  BITTI  {kunye['sure_dk']} dk  son adim {kunye['son_adim']}")
     return egri
 
 

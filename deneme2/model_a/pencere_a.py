@@ -33,7 +33,7 @@ UC YAPISAL KORUMA -- arsivde bunlarin yoklugu pahaliya mal oldu
 from __future__ import annotations
 
 import argparse, glob, json, os, re, sys
-import numpy as np
+
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -69,6 +69,41 @@ def ayar_oku(klasor: str) -> M.Ayar:
     return M.Ayar(**d)
 
 
+def kunye_oku(klasor: str) -> dict:
+    """Kosunun kunyesi: HANGI KOD, HANGI GPU, kosu BITTI mi.
+
+    `ayar` "ne isteyecektik"i yazar, kunye "fiilen ne kostu"yu. Ikisi ayri
+    sey ve ikincisi daha once HICBIR YERDE durmuyordu: commit yalniz
+    defterin ekranina basiliyordu, log ise her kosuda ustune yaziliyordu.
+    Boylece "bu sayilar hangi koddan" sorusunun mekanik cevabi yoktu."""
+    y = glob.glob(os.path.join(klasor, "kosu_t*.json"))
+    if not y:
+        return {}
+    return json.load(open(y[0], encoding="utf-8"))
+
+
+def kunye_bas(k: dict):
+    if not k:
+        print("  kunye    YOK (eski kosu) -- commit/GPU/durum bilinmiyor")
+        return
+    print(f"  kunye    commit {k.get('commit','?')}   "
+          f"{k.get('gpu') or k.get('cihaz','?')}   torch {k.get('torch','?')}"
+          f"   {k.get('baslangic','?')}")
+    d = k.get("durum")
+    if d == "BITTI":
+        print(f"  durum    BITTI  {k.get('sure_dk','?')} dk, "
+              f"son adim {k.get('son_adim','?')}")
+    else:
+        # Yarim kosunun anlik goruntuleri GECERLIDIR, ama "egri duzlesti mi"
+        # sorusu BASKA bir soruya donusur: egri bitmedi, KESILDI.
+        print(f"  !! durum {d}  -- kosu TAMAMLANMADI "
+              f"(son adim {k.get('son_adim','?')})")
+        if k.get("hata"):
+            print(f"     hata: {k['hata']}")
+        print("     Anlik goruntuler gecerli, ama BUTCE sorusu sorulamaz: "
+              "egri doymadi, KESILDI.")
+
+
 def agirlik_ortalamasi(yollar: list) -> dict:
     """Eleman eleman ortalama. fp16 kaydedildi -> float32'de toplanir."""
     toplam = None
@@ -102,6 +137,7 @@ def main():
     a = ap.parse_args()
 
     ayar = ayar_oku(a.klasor)
+    kunye = kunye_oku(a.klasor)
     snap = anlik_goruntuler(a.klasor)
     adimlar = list(snap)
     print(f"=== pencere_a  {ayar.ad} tohum {ayar.tohum} ===")
@@ -110,6 +146,7 @@ def main():
           f"dongu={ayar.dongu} lr={ayar.lr} wd={ayar.wd}")
     print(f"  maske    {'YOK' if ayar.mask_poz is None else f'{ayar.mask_poz}@{ayar.mask_blok}'}"
           f"   <- ayar dosyasindan, VARSAYILMADI")
+    kunye_bas(kunye)
     print(f"  anlik    {len(adimlar)} goruntu: {adimlar[0]}..{adimlar[-1]}")
 
     veri = M.veri_kur(ayar)
@@ -190,7 +227,10 @@ def main():
     if len(sonuc) >= 2:
         d = sonuc[-1].get("ent", 0) - sonuc[-2].get("ent", 0)
         print(f"\nBUTCE: son iki pencerede ent degisimi {d:+.4f}")
-        if not gecti_mi["OLGUNLUK"]:
+        if kunye and kunye.get("durum") != "BITTI":
+            print(f"  KOSU TAMAMLANMAMIS (durum {kunye.get('durum')}) -> BUTCE "
+                  "SORUSU SORULMAZ. Egri doymadi, KESILDI.")
+        elif not gecti_mi["OLGUNLUK"]:
             print("  OLGUNLUK kapisi KALDI -> BUTCE SORUSU SORULMAZ. Egri duz "
                   "cikabilir ama sebebi doyma degil, hic ogrenilmemis olmasi.")
         elif d > 0.005:
@@ -200,11 +240,12 @@ def main():
             print("  egri duzlesmis -> butce yetti")
 
     yol = a.cikti or os.path.join(a.klasor, f"pencere_{ayar.ad}_t{ayar.tohum}.json")
-    json.dump(dict(ad=ayar.ad, tohum=ayar.tohum, klasor=a.klasor,
-                   genislik=a.genislik, parmak_izi=iz, ayar=ayar.sozluk(),
-                   pencereler=sonuc,
-                   kapilar=[dict(ad=x, kural=y, gecti=z) for x, y, z in kapilar]),
-              open(yol, "w", encoding="utf-8"), indent=1)
+    # M._yaz_json: atomik (.tmp -> replace). Egitim hala kosuyorken bu dosya
+    # okunabilir; yarim yazilmis json JSONDecodeError verir (olculdu).
+    M._yaz_json(yol, dict(
+        ad=ayar.ad, tohum=ayar.tohum, klasor=a.klasor, genislik=a.genislik,
+        parmak_izi=iz, ayar=ayar.sozluk(), kunye=kunye, pencereler=sonuc,
+        kapilar=[dict(ad=x, kural=y, gecti=z) for x, y, z in kapilar]))
     print(f"\n-> {yol}")
 
 
