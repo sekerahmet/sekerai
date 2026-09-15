@@ -199,7 +199,19 @@ class Veri:
         self.n_ent, self.n_rel = self.facts.shape
         self.ent_off = SPECIAL + self.n_rel
         self.vocab = self.ent_off + self.n_ent
+        # phi: TURETILMIS TANI SAYISI, kontrol parametresi DEGIL. Ayarlanamaz;
+        # graf yogunlugundan ve ent_pay/comp_pay'den duser. "phi'yi 7 yapalim"
+        # denemez -- veri ureticisi degistirilir.
         self.phi = len(self.tr2) / max(1, len(self.one))
+        # WANG'IN TANIMI AYNI DEGIL (15 Eylul hakemligi). Wang 2405.15071:155
+        # "phi = |train_inferredID| / |atomicID|" ve atomicID, OOD varliklarinin
+        # olgularini DISLAR. Bizim paydamiz TUM olgular. Olculdu: ayni veride
+        # bizimki 5.09, Wang tanimiyla 6.36 -- %25 fark. Wang'in 3.6-18.0
+        # taramasina konumlanirken WANG_PHI kullanilmali, phi degil.
+        _ent = {e for e, *_ in self.ent} | {e for e, *_ in self.ent_yok} \
+            | {e for e, *_ in self.ent_arama}
+        _id = sum(1 for e, _, _ in self.one if e not in _ent)
+        self.wang_phi = len(self.tr2) / max(1, _id)
 
 
 def veri_kur(ayar: Ayar, yaz=print) -> Veri:
@@ -290,6 +302,8 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
         f"ENT-ARAMA {len(v.ent_arama)}  phi {v.phi:.2f}")
     yaz(f"        n_ent {v.n_ent}  n_rel {v.n_rel}  vocab {v.vocab}  "
         f"ent_off {v.ent_off}")
+    yaz(f"        phi {v.phi:.2f} (bizim tanim)   {v.wang_phi:.2f} (Wang tanimi, "
+        f"payda atomicID)   -- TURETILMIS, ayar DEGIL")
     return v
 
 
@@ -561,6 +575,11 @@ def egit(ayar: Ayar, alt=None, yaz=print) -> list:
         f"nh={ayar.nh} dff={ayar.dff} dongu={ayar.dongu})"
         f"  -> {ayar.l*ayar.dongu} katman-esdegeri hesap")
 
+    # dim>=2 -> decay.  GOMME DE BURAYA GIRIYOR (dim 2) ve head'e bagli
+    # oldugu icin tek sayilir. Bu bir SECIM: cok sayida LLM tarifi gommeyi
+    # decay DISINDA tutar. 2603.25009 "AdamW ... weight decay = 1.0" diyor,
+    # grup ayrimindan bahsetmiyor -> her seye uygulandigi okundu. wd buyudukce
+    # (0.1 -> 1.0) bu secim onem kazanir; ACIK DUGME.
     dec = [p for p in model.parameters() if p.dim() >= 2]
     nodec = [p for p in model.parameters() if p.dim() < 2]
     opt = torch.optim.AdamW([{"params": dec, "weight_decay": ayar.wd},
@@ -583,6 +602,11 @@ def egit(ayar: Ayar, alt=None, yaz=print) -> list:
         for g in opt.param_groups:
             g["lr"] = lr
 
+        # YERINE KOYARAK ornekleme: ayni ornek bir batch'te tekrar gelebilir
+        # ve EPOCH diye bir sey YOK. Literaturdeki butceler epoch cinsinden
+        # (Loop&Generalize "7k epoch", 2603.25009 full-batch) -- bizim adim
+        # sayimiz onlarla DOGRUDAN kiyaslanamaz. Beklenen gecis sayisi:
+        # adim*batch/len(Xtr) = 20000*512/51120 ~ 200, ama Poisson sacilimli.
         j = rs.randint(0, len(Xtr), ayar.batch)
         xb = torch.from_numpy(Xtr[j]).to(DEV)
         pb = torch.from_numpy(Ptr[j]).to(DEV)
