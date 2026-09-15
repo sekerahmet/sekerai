@@ -94,10 +94,16 @@ class Ayar:
     #    recurrent block of 4 transformer layers"
     #   Kafadan atilmadi; yayimlanmis ve ayni gorevde (2-hop OOD) calismis
     #   bir konfigurasyon. Kodu: github.com/OSU-NLP-Group/Loop-Think-Generalize
-    d: int = 768
+    d: int = 256               # 768 idi (Loop&Generalize). KUCULTULDU.
+    #   Gerekce KESE DEGIL, 2603.25009'un merkezi bulgusu: "grokking dynamics
+    #   are NOT primarily determined by architecture". O calismanin kendi
+    #   transformer'i d=512, DERINLIK 1. Genislik ikinci derece bir etken
+    #   olarak okundu; birinci derece olan sey (wd, lr) literaturden alindi.
+    #   Bu bir CIKARIM. 768 bir dugme olarak duruyor, pahali degil (~54 dk).
     l: int = 4                 # BLOK sayisi (paylasilan agirlik)
-    nh: int = 12
-    dff: int = 3072            # 4*d. ARTIK VARSAYIM DEGIL: 2603.25009 4.1
+    nh: int = 4                # 256/4 = 64 per kafa -- Loop&Generalize'in
+    #                            768/12 = 64'uyle AYNI kafa boyutu.
+    dff: int = 1024            # 4*d. VARSAYIM DEGIL: 2603.25009 4.1
     #                            "a feedforward dimension of 4d = 2,048" diyor.
     dongu: int = 2             # ayni bloklar kac kez uygulanacak (R)
     #   dongu=1  -> DUZ transformer (l katman)
