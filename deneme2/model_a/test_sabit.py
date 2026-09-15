@@ -132,7 +132,7 @@ def main():
     # Her kol, TABANINDAN tam olarak SU alanlarda ayrilmali. `ad` her zaman
     # ayrilir (cikti dosya adlarina giriyor). Fazladan bir alan ayrilirsa
     # "tek dugme" iddiasi coker ve kiyas yorumlanamaz hale gelir.
-    import model_a1, model_a2, model_a3, model_a4, model_a5
+    import model_a1, model_a2, model_a3, model_a4, model_a5, model_a6
     DUGME = (
         ("model_a1", M.AYAR, model_a1.AYAR, {"ad", "dongu"}),
         ("model_a2", M.AYAR, model_a2.AYAR, {"ad", "l", "dongu"}),
@@ -143,6 +143,9 @@ def main():
         # model_a5'in TABANI model_a4 -- "model_a4 standartlarinda"
         # geri beslemeli ortalama (kullanici, 15 Eylul).
         ("model_a5", model_a4.AYAR, model_a5.AYAR, {"ad", "ort_bas"}),
+        # model_a6'nin TABANI model_a5 -- ayrilan soru "model_a5'in
+        # sonucu FIKRIN mi `k`NIN mi", o yuzden model_a5 zemininde.
+        ("model_a6", model_a5.AYAR, model_a6.AYAR, {"ad", "ort_her"}),
     )
     for ad, taban, kol, bek in DUGME:
         f = set(taban.fark(kol)) | {"ad"}
