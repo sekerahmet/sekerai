@@ -97,24 +97,32 @@ BOLME_NOT = {
 
 @torch.no_grad()
 def sor(v, net, metin, yaz=print):
-    p = metin.replace(",", " ").split()
-    if len(p) not in (2, 3):
-        yaz("  kullanim: <varlik> <iliski> [<iliski2>]")
-        return
+    # ALT CIZGI ZORUNLU DEGIL. Varlik artik JETONLARLA yaziliyor
+    # (Ahmet | Kilic), yani "Ahmet_Kilic" TEK bir kelime degil; kullanici
+    # da "Ahmet Kilic cocuk sehir" yazabilmeli. Alt cizgi yazarsa da olur.
+    p = metin.replace(",", " ").replace("_", " ").split()
     ad2id = {_ad(v, e): e for e in range(v.n_ent)}
     rel2id = {r: i for i, r in enumerate(v.iliski)} if hasattr(v, "iliski") \
         else None
-    e_ad, rels = p[0], p[1:]
+    # COZUMLEME SAGDAN: sondaki ILISKI adlari (en fazla 2) ayrilir,
+    # kalani VARLIK olur. Iliski adlari sabit bir liste oldugu icin bu
+    # belirsiz degil -- varlik adlarinda iliski adi gecmiyor.
+    rels = []
+    while p and len(rels) < 2 and rel2id is not None and p[-1] in rel2id:
+        rels.insert(0, p.pop())
+    if not p or not rels:
+        yaz("  kullanim: <varlik> <iliski> [<iliski2>]")
+        yaz("     ornek: Ahmet Kilic cocuk sehir   |   Tokat vali baba")
+        if rel2id:
+            yaz(f"     iliskiler: {list(rel2id)}")
+        return
+    e_ad = "_".join(p)
     if e_ad not in ad2id:
         yak = [a for a in ad2id if a.lower().startswith(e_ad.lower()[:4])][:6]
         yaz(f"  '{e_ad}' grafta YOK." + (f"  Benzer: {yak}" if yak else ""))
         return
     e = ad2id[e_ad]
-    try:
-        rid = [rel2id[r] for r in rels]
-    except (KeyError, TypeError):
-        yaz(f"  iliski YOK: {rels}.  Gecerliler: {list(rel2id)}")
-        return
+    rid = [rel2id[r] for r in rels]
 
     if len(rid) == 1:
         X, Pp, _ = M.kodla_1hop(v, [(e, rid[0], 0)])
@@ -139,6 +147,9 @@ def sor(v, net, metin, yaz=print):
 
     g_ad = _ad(v, gercek) if gercek >= 0 else "(olgu YOK)"
     bol = _bolme(v, e, rid[0], rid[1] if len(rid) > 1 else None)
+    if v.par is not None:
+        yaz("  jeton   soru: " + " | ".join(
+            v.par_ad[j][int(v.par[e, j])] for j in range(v.yuva)))
     yaz(f"  model   {m_ad}")
     yaz(f"  gercek  {g_ad}" + ("        DOGRU" if m_ad == g_ad and gercek >= 0
                                else "        YANLIS" if gercek >= 0 else ""))
