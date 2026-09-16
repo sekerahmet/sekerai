@@ -66,7 +66,19 @@ def main():
     for _g in ("AYAR", "egit", "fark_bas"):
         _bak(f"model_b1.{_g} var", hasattr(model_b1, _g), "kos.py duser")
 
-    import model_b2, model_b3, model_b4, model_b5
+    import model_b2, model_b3, model_b4, model_b5, model_b6
+    f7 = set(model_b1.AYAR.fark(model_b6.AYAR)) | {"ad"}
+    _bak(f"model_b6 <-> model_b1 farki {sorted(f7)}",
+         sorted(f7) == ["ad", "jeton_ad"],
+         "model_b6 SADECE kodlamayi degistirmeli")
+    _bak('model_b6 jeton_ad="tam"', model_b6.AYAR.jeton_ad == "tam",
+         f'jeton_ad={model_b6.AYAR.jeton_ad!r}')
+    _bak('model_b5 jeton_ad="ilk" (KUSURLU, yeniden uretilebilir)',
+         model_b5.AYAR.jeton_ad == "ilk",
+         f'jeton_ad={model_b5.AYAR.jeton_ad!r}')
+    _bak('model_b1 jeton_ad="" (DEGISMEDI)', model_b1.AYAR.jeton_ad == "")
+    for _g in ("AYAR", "egit", "fark_bas"):
+        _bak(f"model_b6.{_g} var", hasattr(model_b6, _g), "kos.py duser")
     f6 = set(model_b1.AYAR.fark(model_b5.AYAR)) | {"ad"}
     _bak(f"model_b5 <-> model_b1 farki {sorted(f6)}",
          sorted(f6) == ["ad", "jeton_ad"],
@@ -114,7 +126,7 @@ def main():
     # `kos.py` ise YALNIZ istenen modulu import eder. Bu kusur bilerek
     # bozulmus bir surumle sinandi: duzeltmeden ONCE test GECIYORDU.
     for _ad in ("model_b", "model_b1", "model_b2", "model_b3",
-                "model_b4", "model_b5"):
+                "model_b4", "model_b5", "model_b6"):
         _satir = [
             "import sys, importlib",
             "sys.path.insert(0, %r)" % _B,
@@ -283,6 +295,64 @@ def main():
     with torch.no_grad():
         _dk = (_mk(_x2) - _ma(_x2)).abs().max().item()
     _bak(f"dar_alfa=0 + dar_sert=1 -> hala BIT AYNI ({_dk:.3e})", _dk == 0.0)
+
+    print()
+    print("=== 8) VERI DENETIMI -- jeton_ad='tam' kodlamasi ===")
+    # Kullanici, 16 Eylul: "biz dogru veri kurup dogru sorulari
+    # sormuyorsak zaten bastan yanlis demektir, olctugumuz de yanlis
+    # demektir." `model_b5` tam bundan dustu. Bu bolum kodlamayi HER
+    # KOSUDA denetler -- bir daha kusurlu kodlamayla kosulmasin.
+    import model_b6, numpy as _np
+    _v = M.veri_kur(model_b6.AYAR.degistir(n_olcum_max=50),
+                    yaz=lambda *a, **k: None)
+    _sz = _v.par_ad[0]
+    _coz = lambda r: "_".join(_sz[i] for i in r if i)
+    import importlib as _il
+    _V = _il.import_module(model_b6.AYAR.veri_ad)
+    _G = _V.kur(model_b6.AYAR.veri_tohum)
+    _E = [a for t in _V.TIPLER for a in _G["ad"][t]]
+    _bak(f"gidis-donus: coz(kodla(x)) == x  ({len(_E)} varlik)",
+         all(_coz(_v.par[i]) == _E[i] for i in range(len(_E))),
+         "KODLAMA GERI DONMUYOR")
+    _bak("birebir: farkli varlik -> farkli jeton dizisi",
+         len({tuple(r) for r in _v.par}) == len(_E))
+    _bak("TEK PAYLASILAN sozluk (butun yuvalar ayni blok)",
+         _v.paylasilan and len(set(_v.yuva_ara)) == 1,
+         f"yuva_ara={_v.yuva_ara}")
+    _bak("hicbir jetonun icinde ALT CIZGI yok",
+         not any("_" in p for p in _sz), [p for p in _sz if "_" in p][:3])
+    _bak("dolgu <YOK> hep SAGDA",
+         all(all(_v.par[i][j] or not any(_v.par[i][k] for k in range(j, _v.yuva))
+                 for j in range(_v.yuva)) for i in range(len(_E))))
+    _bak("her varligin en az 1 gercek jetonu var",
+         all(_v.par[i][0] for i in range(len(_E))))
+    _kon = {}
+    for i in range(len(_E)):
+        for j in range(_v.yuva):
+            if _v.par[i][j]:
+                _kon.setdefault(int(_v.par[i][j]), set()).add(j)
+    _pay = [k for k, s_ in _kon.items() if len(s_) > 1]
+    _bak(f"ayni jeton BIRDEN COK yuvada gecebiliyor ({len(_pay)} tane)",
+         len(_pay) > 0, "paylasim YOK -> sozluk fiilen ayrik")
+    _bak(f"t_len ({model_b6.AYAR.t_len}) 2-hop dizisine yetiyor",
+         1 + 2 * _v.yuva + 2 + 1 + 1 <= model_b6.AYAR.t_len)
+    # --- BOLME GECERLILIGI ---------------------------------------------
+    _tr = {(e, a, b) for e, a, b, _, _ in _v.tr2}
+    _bak("comp: egitimde olan UCLU yok (UCLU duzeyi GECERLI)",
+         sum((e, a, b) in _tr for e, a, b, _, _ in _v.comp) == 0)
+    _i1 = {(e, r) for e, r, _, _, _ in _v.tr2}
+    _i2 = {(b, r) for _, _, r, b, _ in _v.tr2}
+    _bak("ood: egitim zincirinde gecen KENAR yok (KENAR duzeyi GECERLI)",
+         sum(1 for e, r1, r2, b, _ in _v.ood
+             if (e, r1) in _i1 or (b, r2) in _i2) == 0)
+    _bas = {x[0] for x in _v.tr2}
+    _bak("ent: egitimde ZINCIR BASI olan ENT varligi yok",
+         sum(1 for e, *_ in _v.ent if e in _bas) == 0)
+    for _ad2, _ls in (("comp", _v.comp), ("ent", _v.ent),
+                      ("ent_yok", _v.ent_yok), ("ood", _v.ood)):
+        _bak(f"{_ad2}: DONUS (cevap == soru varligi) YOK",
+             sum(1 for e, _, _, _, a in _ls if e == a) == 0,
+             "kopyalamayla gecilebilir!")
 
     print()
     print(f"{_iyi} gecti, {_kotu} BOZUK")

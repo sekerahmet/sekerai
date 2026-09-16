@@ -171,7 +171,24 @@ class Ayar:
     dar_alfa: float = 0.0      # 0 = KAPALI. Sabit gecit gucu.
     dar_tau: float = 1.0       # Phi'nin softmax sicakligi.
     dar_kapi: bool = False     # True = ogrenilebilir gecit (d+1 parametre)
-    jeton_ad: bool = False     # Varliklari IKI JETON olarak kodla.
+    jeton_ad: str = ""         # Varliklari COK JETON olarak kodla.
+    #   ""     KAPALI -- varlik = TEK jeton (model_a .. model_b4).
+    #   "ilk"  KUSURLU. ILK alt cizgiden bolup IKI AYRIK sozluk kurar.
+    #          `model_b5` bununla kosuldu ve KUSURLU ilan edildi
+    #          (onkayit model_b5.md §8.1): ayni dizge iki ayri jeton
+    #          oluyor (Aydin sehir vs soyad), `Fen_Lisesi` icinde alt
+    #          cizgiyle TEK jeton kaliyor. Yeniden uretilebilirlik icin
+    #          DURUYOR, YENI KOL ICIN KULLANILMAZ.
+    #   "tam"  DOGRUSU. BUTUN alt cizgilerden boler, TEK PAYLASILAN
+    #          sozluk kurar, 3 yuvaya sagdan doldurur:
+    #            Ayse_Yilmaz       -> (Ayse,    Yilmaz, <YOK>)
+    #            Adana_Fen_Lisesi  -> (Adana,   Fen,    Lisesi)
+    #            Adana             -> (Adana,   <YOK>,  <YOK>)
+    #            Nukleer_Fizik     -> (Nukleer, Fizik,  <YOK>)
+    #          Boylece `Adana` sehirde de okulda da AYNI jeton, `Lisesi`
+    #          butun okullarda ortak, `Fizik` her yerde ayni.
+    #          Onkayit: belge/onkayit/model_b6.md §2 (8 kontrol + bolme
+    #          gecerliligi + kisayol olcumu).
     #   Ayse_Yilmaz -> (Ayse, Yilmaz);  Ankara_Fen_Lisesi -> (Ankara,
     #   Fen_Lisesi);  Ankara -> (Ankara, <YOK>).  ILK alt cizgiden bolunur,
     #   cunku anlamli olan o. Sonucu: sozluk 2145 -> ~300 ve varliklar
@@ -242,7 +259,12 @@ class Ayar:
             [Q2] e        r1 r2 ?  a       EOS       ->  8
             [Q2] e1 e2    r1 r2 ?  a1 a2   EOS       -> 11
         """
-        return 11 if self.jeton_ad else T_LEN
+        if not self.jeton_ad:
+            return T_LEN
+        # "ilk" 2 yuva, "tam" 3 yuva. Ikisinde de 2-hop 11'e siginiyor:
+        #   "ilk"  [Q2] e1 e2    r1 r2 ? a1 a2    EOS  =  9
+        #   "tam"  [Q2] e1 e2 e3 r1 r2 ? a1 a2 a3 EOS  = 11
+        return 11
 
     def sozluk(self) -> dict:
         return dc.asdict(self)
@@ -274,7 +296,7 @@ ESKI_VARSAYILAN = {
     "kati_pay": 0.0,
     "ood_pay": 0.0,
     "dar_alfa": 0.0, "dar_tau": 1.0, "dar_kapi": False, "dar_sdpa": False,
-    "dar_sert": False, "jeton_ad": False,
+    "dar_sert": False, "jeton_ad": "",
 }
 
 
@@ -347,11 +369,24 @@ class Veri:
             self.n1 = self.n2 = self.n_ent
         else:
             # IKI AYRIK BLOK -> yuva basina KISITLI argmax temiz kalir.
-            self.yuva = 2
-            self.n1, self.n2 = len(self.par_ad[0]), len(self.par_ad[1])
-            self.p1_off = self.ent_off
-            self.p2_off = self.p1_off + self.n1
-            self.vocab = self.p2_off + self.n2
+            self.yuva = self.par.shape[1]
+            # PAYLASILAN sozluk ("tam") -> butun yuvalar AYNI blok.
+            # AYRIK sozluk ("ilk")     -> yuva basina ayri blok.
+            _ayni = all(x is self.par_ad[0] or x == self.par_ad[0]
+                        for x in self.par_ad)
+            self.paylasilan = _ayni
+            if _ayni:
+                n = len(self.par_ad[0])
+                self.yuva_ara = [(self.ent_off, self.ent_off + n)] * self.yuva
+                self.vocab = self.ent_off + n
+            else:
+                o, self.yuva_ara = self.ent_off, []
+                for ad_ in self.par_ad:
+                    self.yuva_ara.append((o, o + len(ad_))); o += len(ad_)
+                self.vocab = o
+            (self.p1_off, _h1) = self.yuva_ara[0]
+            (self.p2_off, _h2) = self.yuva_ara[min(1, self.yuva - 1)]
+            self.n1, self.n2 = _h1 - self.p1_off, _h2 - self.p2_off
         if not self.t_len:
             self.t_len = 11 if self.par is not None else T_LEN
         # phi: TURETILMIS TANI SAYISI, kontrol parametresi DEGIL. Ayarlanamaz;
@@ -403,7 +438,26 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
     # Soyadi PAYLASIMI zaten var (veri_okul: "cocuk/kardes/anne/baba AYNI
     # soyadi tasir"), yani hicbir jeton TEK BASINA kisiyi belirlemiyor.
     _par = _par_ad = None
-    if ayar.jeton_ad:
+    if ayar.jeton_ad == "tam":
+        # DOGRU KODLAMA: butun alt cizgiler, TEK PAYLASILAN sozluk.
+        _yuva = max(len(a.split("_")) for a in E)
+        _pl = sorted({p for a in E for p in a.split("_")})
+        _ix = {p: i + 1 for i, p in enumerate(_pl)}      # 0 = <YOK>
+        _par = np.array([[_ix.get(p, 0) for p in
+                          (a.split("_") + ["<YOK>"] * _yuva)[:_yuva]]
+                         for a in E], np.int64)
+        _sz = ("<YOK>",) + tuple(_pl)
+        _par_ad = (_sz,) * _yuva                         # AYNI sozluk, her yuva
+        assert not any("_" in p for p in _pl), "jeton icinde ALT CIZGI kaldi"
+        assert len({tuple(r) for r in _par}) == len(E),             "BIREBIR DEGIL -- ayni jeton dizisi birden cok varliga denk"
+        _coz = lambda r: "_".join(_sz[i] for i in r if i)
+        _kt = [(E[i], _coz(_par[i])) for i in range(len(E))
+               if _coz(_par[i]) != E[i]]
+        assert not _kt, f"GIDIS-DONUS BOZUK: {_kt[:3]}"
+        yaz(f"  jeton_ad=tam: {len(E)} varlik -> {_yuva} yuva, "
+            f"PAYLASILAN sozluk {len(_sz)} jeton "
+            f"(tek jetonda {len(E)} idi)")
+    elif ayar.jeton_ad == "ilk":
         _ik = [(a.split("_", 1) + ["<YOK>"])[:2] for a in E]
         _y1 = sorted({p[0] for p in _ik})
         _y2 = sorted({p[1] for p in _ik})
@@ -640,10 +694,12 @@ def _bos(n, v=None):
 
 
 def _e(v, e):
-    """Varligin jeton(lar)i. jeton_ad kapaliysa tek elemanli liste."""
+    """Varligin jeton(lar)i. jeton_ad kapaliysa tek elemanli liste.
+    `yuva_ara` TEK KAYNAK -- paylasilan sozlukte butun yuvalar ayni
+    blogu gosterir, ayrik sozlukte her yuva kendi blogunu."""
     if v.par is None:
         return [v.ent_off + e]
-    return [v.p1_off + int(v.par[e, 0]), v.p2_off + int(v.par[e, 1])]
+    return [v.yuva_ara[j][0] + int(v.par[e, j]) for j in range(v.yuva)]
 
 
 def kodla_1hop(v: Veri, batch):
@@ -897,7 +953,7 @@ def dogruluk(model, v: Veri, X, P, T, bs=512):
     onceki = model.training
     model.eval()
     # YUVA BASINA KISITLI argmax. yuva=1 iken eski davranisla AYNI.
-    ARA = [(v.p1_off, v.p1_off + v.n1), (v.p2_off, v.p2_off + v.n2)][:P.shape[1]]
+    ARA = v.yuva_ara[:P.shape[1]]
     ok = []
     for i in range(0, len(X), bs):
         xb = torch.from_numpy(X[i:i + bs]).to(DEV)
@@ -936,7 +992,7 @@ def kisayol_orani(model, v: Veri, lst, bs=512):
     ksy = np.array([_ksy(e, r2) for e, _, r2, _, _ in lst], np.int64)
     onceki = model.training            # bkz. dogruluk()'taki ayni kusur
     model.eval()
-    ARA = [(v.p1_off, v.p1_off + v.n1), (v.p2_off, v.p2_off + v.n2)][:P.shape[1]]
+    ARA = v.yuva_ara[:P.shape[1]]
     ok = []
     for i in range(0, len(X), bs):
         xb = torch.from_numpy(X[i:i + bs]).to(DEV)

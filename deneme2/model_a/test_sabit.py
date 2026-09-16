@@ -100,7 +100,13 @@ AYAR_KILIT = dict(
     # kayip IKI hedef. HEPSI `jeton_ad`a bagli; VARSAYILAN KAPALI ve
     # asagidaki `parametre 3427840` + `agirlik sha` + VERI kilidi
     # model_a'nin BIT DUZEYINDE degismedigini dogruluyor.
-    jeton_ad=False,
+    # 16 Eylul: `jeton_ad` once bool eklendi, sonra SURUMLU str yapildi
+    # ("", "ilk", "tam"). Sebep: `model_b5` "ilk" ile kosuldu ve KUSURLU
+    # cikti (ayni dizge iki ayri jeton, bolunmemis bilesikler --
+    # onkayit model_b5.md §8.1). Duzeltmeyi ayni bayragin ICINE yapmak
+    # model_b5'i SESSIZCE yeniden uretilemez kilardi; surum ekleyerek
+    # ikisi de durur. `ident_kip` ile ayni desen.
+    jeton_ad="",
 )
 
 VERI_KILIT = dict(

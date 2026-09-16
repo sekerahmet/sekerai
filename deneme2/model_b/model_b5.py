@@ -81,7 +81,7 @@ assert hasattr(M, "egit"), (
 from model_b import ModelB                                   # noqa: E402
 from model_b1 import AYAR as TABAN                           # noqa: E402
 
-AYAR = TABAN.degistir(ad="model_b5", jeton_ad=True)
+AYAR = TABAN.degistir(ad="model_b5", jeton_ad="ilk")   # KUSURLU, bkz. onkayit §8.1
 #      ^ SADECE FARK. veri_okul2, dar_alfa=0.5, ood_pay=0.05, wd=0.5,
 #        ort_bas=10000 hepsi model_b1'den gelir.
 
