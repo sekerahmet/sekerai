@@ -85,7 +85,12 @@ def denetle(yol, T, yaz=print):
     #   ailenin taban kolu     -> kiyas tabani, yorumda adi GECER
     #   BASKA ailenin kolu     -> capraz kiyas (model_b1 <-> model_a8)
     # Yakalanan tam olarak sudur: model_b6'nin kodunda "model_b5".
-    aile = re.match(r"(model_[a-z])", ad).group(1)
+    # AILE ADI: harfli ailelerde `model_<harf>` (model_b15 -> model_b);
+    # RAKAMLI ailede ad zaten TEK BASINA ailedir (model_00). Eskiden
+    # regex yalniz [a-z] tutuyordu ve `model_00` eklenince bu satir
+    # AttributeError ile DUSTU -- 16 Eylul.
+    _m = re.match(r"(model_[a-z])", ad)
+    aile = _m.group(1) if _m else ad
     # TABAN kolun adi serbest -- ve KOLUN KENDI .py'sinden okunur, elle
     # yazilmaz. model_b1 hepsinin tabani DEGIL: model_b7'nin tabani
     # model_b6. Sabit "aile+1" kurali dogru defteri BOZUK gosteriyordu.
