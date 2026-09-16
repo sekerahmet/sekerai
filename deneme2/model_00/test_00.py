@@ -153,13 +153,23 @@ with torch.no_grad():
        "forward() == head(govde()) -- sonda modelin GERCEK hesabini goruyor")
 import asama1_00 as A1                                      # noqa: E402
 _lst = v.comp[:8]
+# !! MODELI M.DEV'E TASI. `gizli()` girdiyi `.to(M.DEV)` ediyor; model
+# CPU'da kalirsa GPU'lu makinede "index is on cuda:0, other tensors on
+# cpu" ile duser. ILK YAZIMDA BU EKSIKTI ve yerelde (DEV="cpu") FARK
+# EDILMEDI -- kusur Colab'da, kilidin ilk GPU kosusunda cikti.
+# Gercek kullanimda `asama1_00.main` modeli zaten `.to(M.DEV)` ediyor;
+# yani hata ARACIN degil, BU TESTIN hatasiydi. Sonra CPU'ya geri
+# aliniyor: asagidaki bolumler CPU tensorleriyle devam ediyor.
 try:
+    net.to(M.DEV)
     _q = A1.gizli(net, v, _lst, 6)
     ok(_q.shape == (8, A.d), "asama1_00.gizli() KOSUYOR (DOGRUSAL SONDA yolu)",
-       str(_q.shape))
+       f"{_q.shape} cihaz {M.DEV}")
 except Exception as _e:                                      # noqa: BLE001
     ok(False, "asama1_00.gizli() KOSUYOR (DOGRUSAL SONDA yolu)",
        f"{type(_e).__name__}: {_e}")
+finally:
+    net.to("cpu")
 
 # --- 2) ILERI GECIS ------------------------------------------------------
 print("\n=== 2) ILERI GECIS ===")
