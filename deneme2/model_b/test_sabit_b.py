@@ -371,7 +371,9 @@ def main():
              len(getattr(_vv, "yuva_ara", [])) == _vv.yuva)
         _LL = M.olcme_listeleri(_a, _vv)
         _lst = _LL["ood"][:16]
-        _net = ModelB(_a, _vv.vocab)
+        # .to(M.DEV) SART: tahmin_ve_sira girdiyi DEV'e tasiyor. Yerelde
+        # DEV=cpu oldugu icin eksikligi GORUNMEDI, Colab'da (cuda) dustu.
+        _net = ModelB(_a, _vv.vocab).to(M.DEV)
         _net.eval()
         _th, _sr = _T.tahmin_ve_sira(_net, _vv, _lst)
         _bak(f"{_a.ad}: tahmin_ve_sira sekli ({len(_lst)},)",
