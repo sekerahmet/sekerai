@@ -227,6 +227,15 @@ def main():
          f"({abs(_ana.item() - _sec.item()):.1e})",
          abs(_ana.item() - _sec.item()) < 1e-5)
     _pay = _Pk.size / int((_xk[:, 1:] != M.PAD).sum())
+    # ON KOSUL OLCUMU DEPODA MI: model_b10'un onkayit 11.1'deki sayisi
+    # bir oturumluk betikten degil, asama1'den uretilmeli.
+    import asama1 as _A1
+    _bak("asama1.birim_teshisi var (onkayit model_b10.md 11.1)",
+         hasattr(_A1, "birim_teshisi"),
+         "ON KOSUL olcumu depoda DEGIL -> tekrar uretilemez")
+    _bak("asama1 --birim bayragi var",
+         "--birim" in io.open(_A1.__file__, encoding="utf-8").read())
+
     _bak(f"SEYRELME olculdu: cevap gorevi kayip terimlerinin "
          f"{_pay:.0%}'i", 0.2 < _pay < 0.45,
          "cevap gorevine dusen gradyan ~3 kat seyreliyor -- "

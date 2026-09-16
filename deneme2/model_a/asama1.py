@@ -264,6 +264,55 @@ def head_teshisi(net, v, poz_h, yaz=print):
     return out
 
 
+def birim_teshisi(net, v, lst, yaz=print):
+    """VARLIK BIRIM MI: soru varliginin ICINDEKI next-token gecisi.
+
+    `tam_kayip` (model_b10) bunu iddia ediyor: kayip HER pozisyonda
+    hesaplanirsa model 'Ahmet' -> 'Yilmaz' gecisini de ogrenir, yani
+    varligi BIRIM olarak baglar. Iddia edilen sey kuruldu mu, olculur.
+
+    model_b6/b9'da bu pozisyonlar HIC gradyan ALMADI -> oradaki tahmin
+    rastgeledir. Kiyas SANS DEGIL, EN SIK KOSULLU SINIF: 'Ahmet' 14 ayri
+    kisi, tam tahmin ZATEN IMKANSIZ; tavan verinin kendi kosullu
+    dagilimidir. (Ayni hataya sonda'da iki kez dustuk: once sansla,
+    sonra en sik sinifla kiyasladik -- her ikisi de yanlis tabandi.)
+    """
+    if v.par is None or v.yuva < 2:
+        return {}
+    import collections
+    X, _, _ = M.kodla_2hop(v, lst)
+    xb = torch.from_numpy(X).to(M.DEV)
+    with torch.no_grad():
+        lg = net(xb)
+    lo, hi = v.yuva_ara[0]
+    tah = (lg[:, :, lo:hi].argmax(-1) + lo).cpu().numpy()
+
+    # VERI TAVANI: onceki yuvalar verilince en sik gelen yuva
+    sik = [collections.defaultdict(collections.Counter)
+           for _ in range(v.yuva)]
+    for e in range(v.n_ent):
+        satir = tuple(int(v.par[e, j]) for j in range(v.yuva))
+        for j in range(1, v.yuva):
+            sik[j][satir[:j]][satir[j]] += 1
+
+    yaz(f"    {'yuva':<6}{'MODEL':>9}{'VERI TAVANI':>13}   hukum")
+    out = {}
+    for j in range(1, v.yuva):
+        # poz j, X[:, j+1]'i tahmin eder (varligin j. yuvasi)
+        d = float((tah[:, j] == X[:, j + 1]).mean())
+        t = 0.0
+        for x in lst:
+            satir = tuple(int(v.par[x[0], q]) for q in range(v.yuva))
+            c = sik[j][satir[:j]]
+            t += int(c.most_common(1)[0][0] == satir[j])
+        t /= max(1, len(lst))
+        hukum = ("TAVANDA" if d >= t - 1e-9 else
+                 "BIRIM OGRENILDI" if d > 0.5 * t else "ogrenilmedi")
+        out[str(j)] = dict(model=d, tavan=t, hukum=hukum)
+        yaz(f"    {j:<6}{d:>9.4f}{t:>13.4f}   {hukum}")
+    return out
+
+
 def bas(ad, mat, as2, v, yaz=print):
     """EN IYI pozisyon hukum verir; butun tablo `--tara` ile basilir."""
     eniyi = int(mat[:, 0].argmax())
@@ -305,6 +354,8 @@ def main():
                     help="LINEER SONDA: kopru hidden state'te DOGRUSAL mi")
     ap.add_argument("--head", action="store_true",
                     help="model_c: head'ler AYRISTI mi, karisim agirliklari")
+    ap.add_argument("--birim", action="store_true",
+                    help="model_b10: varlik BIRIM olarak ogrenildi mi")
     ap.add_argument("--n", type=int, default=400)
     ap.add_argument("--cikti", default=None)
     a = ap.parse_args()
@@ -352,6 +403,10 @@ def main():
             print("    -- LINEER SONDA --")
             q = gizli(net1, v, lst, ep)
             sonuc[bol]["sonda"] = sonda(q, v, lst)
+        # --- BIRIM TESHISI (model_b10) ---------------------------------
+        if a.birim:
+            print("    -- BIRIM TESHISI (varligin ICINDEKI gecis) --")
+            sonuc[bol]["birim"] = birim_teshisi(net, v, lst)
         # --- HEAD TESHISI (model_c) ------------------------------------
         if a.head and getattr(net, "cok_bas", False):
             print("    -- HEAD TESHISI --")
