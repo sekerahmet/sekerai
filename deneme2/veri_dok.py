@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """veri_dok — VERIYI DISARI DOK ve SAGLIK DENETIMINDEN gecir.
 
-    python veri_dok.py [--model model_b6] [--klasor ../veri]
+    python veri_dok.py [--model model_b6] [--klasor <yol>] [--tam]
+
+Dokum KOLUN AILE KLASORUNE gider:  model_b/veri/model_b6/
+Depoya GIRMEZ (.gitignore'da `veri/`), yerelde durur.
 
 Kullanici, 16 Eylul 2026: "veri cok onemli ya, dogru mu egitiyoruz yanlis
 mi egitiyoruz, saglik sorularimiz var mi? bana lokalde bunlari ayri ayri
@@ -548,13 +551,23 @@ def yaz_taban(d, yol):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="model_b6")
-    ap.add_argument("--klasor", default=os.path.join(os.path.dirname(_K),
-                                                     "veri"))
+    ap.add_argument("--klasor", default=None,
+                    help="varsayilan: <AILE>/veri/<model>")
     ap.add_argument("--tam", action="store_true",
                     help="buyuk egitim dosyalarini KIRPMA")
     a = ap.parse_args()
 
     d = Dok(a.model)
+    if a.klasor is None:
+        # DOKUM, KOLUN AILE KLASORUNE yazilir -- deponun tepesine DEGIL.
+        # Klasor adi isimden TURETILMEZ, dosya ARANIR (defterin 3. hucresi
+        # `pencere_*.py`yi nasil buluyorsa oyle): model_b6 -> model_b/.
+        # Alt klasor MODELIN ADI, cunku dokum jetonlamaya BAGLI --
+        # model_b1 ("") ile model_b6 ("tam") AYNI grafi FARKLI dokerdi.
+        import glob as _g
+        _ad = _g.glob(os.path.join(_K, "*", a.model + ".py"))
+        assert len(_ad) == 1, f"{a.model}.py tam bir kez bulunmali: {_ad}"
+        a.klasor = os.path.join(os.path.dirname(_ad[0]), "veri", a.model)
     os.makedirs(a.klasor, exist_ok=True)
     yol = lambda n: os.path.join(a.klasor, n)
     v = d.v
