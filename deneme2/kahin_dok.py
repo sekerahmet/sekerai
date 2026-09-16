@@ -24,11 +24,16 @@ Bu, makalenin kendi mudahalesinin ("an easy training-free realignment
 intervention nearly closes the generalization gap") bizim rejimdeki
 karsiligi. EGITIM YOK, yalniz ileri gecis.
 """
+import os
 import sys
 import numpy as np
 import torch
 
-R = "C:/AI_NEW_MODEL/deneme2"
+# YOL DEPODAN TURETILIR, elle YAZILMAZ. Sabit "C:/AI_NEW_MODEL/deneme2"
+# yaziliydi: yerelde calisiyor, Colab'da `ModuleNotFoundError: pencere_a`
+# ile DUSUYORDU (16 Eylul, model_b13 kahin testi). Betik nerede durursa
+# dursun kendi ailesini bulmali.
+R = os.path.dirname(os.path.abspath(__file__))
 for p in (R + "/model_a", R + "/model_b", R):
     sys.path.insert(0, p)
 import model_a as M          # noqa: E402
