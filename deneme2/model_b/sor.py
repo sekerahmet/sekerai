@@ -216,11 +216,32 @@ def sor(v, net, metin, yaz=print):
         kopru = b
         X, Pp, _ = M.kodla_2hop(v, [(e, rid[0], rid[1], 0, 0)])
 
-    lg = net(torch.from_numpy(X).to(M.DEV)).float()
     # `yuva_ara` TEK KAYNAK -- dogruluk() ve kayip da onu kullaniyor.
     ARA = v.yuva_ara[:Pp.shape[1]] if v.par is not None else         [(v.ent_off, v.ent_off + v.n_ent)]
-    tah = [int(lg[0, int(Pp[0, j]), lo:hi].argmax()) + lo
-           for j, (lo, hi) in enumerate(ARA)]
+    # --- OZYINELI COZUM -- ve neden ------------------------------------
+    # KUSUR (16 Eylul, hakemlikte bulundu): dizi `kodla_*(v, [(..., 0)])`
+    # ile kuruluyor, yani cevap yuvalarina VARLIK 0'in jetonlari giriyor.
+    # Next-token sozlesmesinde P[j] pozisyonu, j. cevap jetonunu ONCEKI
+    # jetona bakarak tahmin ediyor -- ve orada YER TUTUCU duruyordu.
+    # Yalnizca P[0] temizdi (nedensel maske).
+    #
+    # OLCULDU (model_b14, 52000-60000 penceresi, 600 ornek):
+    #     seen   yer tutucu 0.3950   ogretmenli 0.9983   ozyineli 0.9983
+    #     comp   yer tutucu 0.0067   ogretmenli 0.0167   ozyineli 0.0167
+    # Yani `sor.py` `seen`de 60 puan YANLIS cevap basiyordu; gorunur
+    # belirtisi "Ipek Cetin" (gercek "Ipek Celik") gibi ILK jetonu dogru,
+    # sonrasi yanlis cevaplardi.
+    #
+    # Ozyineli cozum OGRETMENLI okumayla BIREBIR ayni cikti (yukaridaki
+    # tablo) -- yani `dogruluk()`un teacher-forced olmasi olcuyu
+    # SISIRMIYOR. Bu ayri bir bulgu, belge/OLCULENLER.md'ye yazildi.
+    Xc = X.copy()
+    tah = []
+    for j, (lo, hi) in enumerate(ARA):
+        lg = net(torch.from_numpy(Xc).to(M.DEV)).float()
+        t = int(lg[0, int(Pp[0, j]), lo:hi].argmax()) + lo
+        tah.append(t)
+        Xc[0, int(Pp[0, j]) + 1] = t      # tahmini GERI YAZ
     if v.par is None:
         m_ad = _ad(v, tah[0] - v.ent_off)
     else:

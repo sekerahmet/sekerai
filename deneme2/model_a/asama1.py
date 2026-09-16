@@ -314,11 +314,39 @@ def birim_teshisi(net, v, lst, yaz=print):
 
 
 def bas(ad, mat, as2, v, yaz=print):
-    """EN IYI pozisyon hukum verir; butun tablo `--tara` ile basilir."""
+    """EN IYI pozisyon + SORU SONU pozisyonu. IKISI DE basilir.
+
+    !! 16 Eylul, hakemlikte bulundu: "en iyi poz" TEK BASINA
+    KODLAMALAR ARASINDA KIYASLANAMAZ. `ek_kip="tr"` + `bicim>=3`
+    kollarinda 1-hop BILDIRIM bicimi ("Ayse'nin annesi Fatma'dir")
+    modele `e ' <NIN> r <SI>` onekinden sonra KOPRUYU yaz diye
+    ogretiyor -- ve 2-hop sorusunun ilk alti jetonu bununla BIREBIR
+    AYNI. Tarama o pozisyonu buluyor ve fiilen `one`i raporluyor.
+
+    OLCULDU (model_b15, 12000-16000 penceresi):
+        poz        6      7      8      9     10     ASAMA-2
+        comp    1.000  0.000  0.000  0.033  0.025    0.0400
+        ood     1.000  0.000  0.000  0.029  0.033    0.0143
+    Kopru hop sinirinda 1.000, BIR JETON sonra 0.000.
+
+    KIYASLANABILIR olan SORU SONU pozisyonudur: cevabin ILK jetonunu
+    tahmin eden pozisyon. Eski kodlamada o poz 6 (QM), ek_kip'te poz
+    10. `model_b13`/`b14`te orada 0.0275 cikmisti.
+    """
     eniyi = int(mat[:, 0].argmax())
+    # SORU SONU = ilk cevap jetonunun BIR ONCESI. `kopru_hedefi` DEGIL
+    # (o r1/r2 pozisyonlarini veriyor).  2-hop bicim 0:
+    #   eksiz  [S2] e(yuva) r1 r2 ?  -> 3 + yuva
+    #   ek_kip e(yuva) ' <NIN> r1 <SI> <NIN> r2 <SI> ?  -> yuva + 7
+    _son = min(mat.shape[0] - 1, (v.yuva + 7) if v.ek_kip else (3 + v.yuva))
     yaz(f"\n  {ad}")
     yaz(f"    ASAMA-1 kopru YUVA 0 (ayirt edici):  "
         f"en iyi poz {eniyi} -> {mat[eniyi, 0]:.4f}")
+    yaz(f"    SORU SONU poz {_son} -> {mat[_son, 0]:.4f}"
+        + ("   <- KODLAMALAR ARASI KIYASTA BU OKUNUR" if v.ek_kip else ""))
+    if v.ek_kip and eniyi != _son:
+        yaz("    !! en iyi poz, BILDIRIM biciminin OGRETTIGI yer olabilir")
+        yaz("       (1-hop bildiriminde cevap tam orada baslar).")
     if v.yuva > 1:
         yaz(f"    (ayni pozda diger yuvalar: "
             + "  ".join(f"j{j}={mat[eniyi, j]:.4f}"
@@ -326,6 +354,8 @@ def bas(ad, mat, as2, v, yaz=print):
             + "   <- dolgu yuvasi ALDATIR)")
     yaz(f"    ASAMA-2 cevap dogrulugu:             {as2:.4f}")
     return dict(en_iyi_poz=eniyi, asama1_yuva0=float(mat[eniyi, 0]),
+                soru_sonu_poz=int(_son),
+                asama1_soru_sonu=float(mat[_son, 0]),
                 asama1_hepsi_poz=[[float(x) for x in r] for r in mat],
                 asama2=float(as2))
 
