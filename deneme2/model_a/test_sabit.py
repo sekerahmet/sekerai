@@ -113,6 +113,11 @@ AYAR_KILIT = dict(
     # donguden sonra HICBIR pozisyonda cozulemiyor -- Phi pozisyon-yerel
     # oldugu icin uc jetonlu varligin temiz gommesi YOK.
     dar_kafa=1,
+    # `kopru_kayip` 16 Eylul'de eklendi -- `model_b8` icin. YARDIMCI
+    # kayip: kopruyu r1/r2 pozisyonlarinda tahmin ettir. 0.0 = kapali,
+    # eski kollarla BIT AYNI. TESHIS kolu: kopru hidden state'e
+    # konulursa bilesim duzelir mi?
+    kopru_kayip=0.0,
 )
 
 VERI_KILIT = dict(

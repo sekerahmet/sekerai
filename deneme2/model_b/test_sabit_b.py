@@ -67,6 +67,7 @@ def main():
         _bak(f"model_b1.{_g} var", hasattr(model_b1, _g), "kos.py duser")
 
     import model_b2, model_b3, model_b4, model_b5, model_b6, model_b7
+    import model_b8
     f7 = set(model_b1.AYAR.fark(model_b6.AYAR)) | {"ad"}
     _bak(f"model_b6 <-> model_b1 farki {sorted(f7)}",
          sorted(f7) == ["ad", "jeton_ad"],
@@ -91,6 +92,38 @@ def main():
          model_b6.AYAR.dar_alfa == 0.5, str(model_b6.AYAR.dar_alfa))
     for _g in ("AYAR", "egit", "fark_bas"):
         _bak(f"model_b7.{_g} var", hasattr(model_b7, _g), "kos.py duser")
+    # --- model_b8: YARDIMCI KOPRU KAYBI (TESHIS) -----------------------
+    f9 = set(model_b6.AYAR.fark(model_b8.AYAR)) | {"ad"}
+    _bak(f"model_b8 <-> model_b6 farki {sorted(f9)}",
+         sorted(f9) == ["ad", "kopru_kayip"],
+         "model_b8 SADECE yardimci kaybi acmali")
+    _bak("model_b8 kopru_kayip=1.0", model_b8.AYAR.kopru_kayip == 1.0,
+         str(model_b8.AYAR.kopru_kayip))
+    _bak("model_b6 kopru_kayip=0.0 (DEGISMEDI)",
+         model_b6.AYAR.kopru_kayip == 0.0, str(model_b6.AYAR.kopru_kayip))
+    for _g in ("AYAR", "egit", "fark_bas"):
+        _bak(f"model_b8.{_g} var", hasattr(model_b8, _g), "kos.py duser")
+    # Kopru pozisyonlari ANA KAYBIN pozisyonlariyla CAKISMAMALI -- caksaydi
+    # ayni yerden hem kopru hem cevap istenirdi ve ikisi CELISIRDI.
+    _v8 = M.veri_kur(model_b8.AYAR, yaz=lambda *x: None)
+    _kp, _nk = M.kopru_hedefi(_v8)
+    _X8, _P8, _T8 = M.kodla_2hop(_v8, _v8.tr2[:1])
+    _bak(f"kopru pozisyonlari {_kp}, cevap pozisyonlari {list(_P8[0])} "
+         "-- CAKISMIYOR", not (set(_kp) & set(int(z) for z in _P8[0])))
+    _bak(f"kopru {_nk} token (yuva {_v8.yuva}, en fazla 2 poz)",
+         _nk == min(_v8.yuva, 2))
+    # Kopru NEDENSEL olarak belirli mi: en kucuk kopru pozisyonu, r1'in
+    # yerinden KUCUK OLMAMALI, yoksa model henuz r1'i gormemis olurdu.
+    _bak(f"en kucuk kopru pozisyonu {min(_kp)} >= r1 pozisyonu "
+         f"{1 + _v8.yuva}", min(_kp) >= 1 + _v8.yuva)
+    _X9, _P9, _T9, _k9, _KP9, _KT9 = M.egitim_havuzu(
+        model_b8.AYAR, _v8, yaz=lambda *x: None)
+    _bak("1hop satirlarinda kopru hedefi -1 (MASKELI)",
+         bool((_KT9[:len(_v8.one), 0] < 0).all()))
+    _bak("2hop satirlarinda kopru hedefi GECERLI",
+         bool((_KT9[len(_v8.one):, 0] >= 0).all()))
+    _bak(f"kopru hedefi {int((_KT9[:, 0] >= 0).sum())}/{len(_KT9)} satirda",
+         int((_KT9[:, 0] >= 0).sum()) == len(_v8.tr2))
     for _g in ("AYAR", "egit", "fark_bas"):
         _bak(f"model_b6.{_g} var", hasattr(model_b6, _g), "kos.py duser")
     f6 = set(model_b1.AYAR.fark(model_b5.AYAR)) | {"ad"}
@@ -140,7 +173,8 @@ def main():
     # `kos.py` ise YALNIZ istenen modulu import eder. Bu kusur bilerek
     # bozulmus bir surumle sinandi: duzeltmeden ONCE test GECIYORDU.
     for _ad in ("model_b", "model_b1", "model_b2", "model_b3",
-                "model_b4", "model_b5", "model_b6", "model_b7"):
+                "model_b4", "model_b5", "model_b6", "model_b7",
+                "model_b8"):
         _satir = [
             "import sys, importlib",
             "sys.path.insert(0, %r)" % _B,

@@ -196,6 +196,19 @@ class Ayar:
     #   `T_LEN` 8 -> 11 (t_len ozelligi), cevap IKI jeton, kayip IKI hedef.
     #   MIMARI DEGISMEZ. Onkayit: belge/onkayit/model_b5.md
     #   VARSAYILAN KAPALI -- eski kollarin hepsi bit duzeyinde AYNI kalir.
+    kopru_kayip: float = 0.0   # YARDIMCI KAYIP: kopruyu TAHMIN ETTIR.
+    #   0.0 = KAPALI, eski kollarla BIT AYNI.
+    #   >0 ise ana kayba su eklenir: r1 ve r2 pozisyonlarinda koprunun
+    #   ILK iki token'ini uret. O pozisyonlar nedensel olarak (e, r1)'i
+    #   GORMUS durumda, yani kopru orada BELIRLI; ve ana kayip onlari
+    #   KULLANMIYOR (cevap 3+yuva'dan itibaren okunuyor).
+    #   BU BIR TESHIS, mimari oneri DEGIL: kopru etiketi graftan geliyor,
+    #   gercek metinde gelmezdi. SINAVDA hicbir sey enjekte edilmez --
+    #   model normal kosar, comp/ood her zamanki gibi olculur.
+    #   Sordugu soru: kopru hidden state'e KONULURSA bilesim duzelir mi?
+    #   OLCULDU (16 Eylul, lineer sonda): model_b6'da koprunun AD token'i
+    #   hidden state'ten cikarilamiyor (0.0162, en sik sinif 0.0227).
+    #   Onkayit: belge/onkayit/model_b8.md
     dar_kafa: int = 1          # Phi'nin BAS sayisi (model_c).
     #   1 = KAPALI, ek parametre YOK, `model_b` ile BIT AYNI.
     #   m > 1:  Phi_m(h) = (1/m) SUM_j softmax(W A_j nf(h)/tau) @ W
@@ -305,7 +318,7 @@ ESKI_VARSAYILAN = {
     "kati_pay": 0.0,
     "ood_pay": 0.0,
     "dar_alfa": 0.0, "dar_tau": 1.0, "dar_kapi": False, "dar_sdpa": False,
-    "dar_sert": False, "jeton_ad": "", "dar_kafa": 1,
+    "dar_sert": False, "jeton_ad": "", "dar_kafa": 1, "kopru_kayip": 0.0,
 }
 
 
@@ -790,6 +803,17 @@ def kodla_kimlik_q2son(v: Veri, batch):
         np.array([[v.ent_off + b] for _, _, b in batch], np.int64)
 
 
+def kopru_hedefi(v: Veri):
+    """(pozisyonlar, kac token). Kopru, r1 ve r2 pozisyonlarindan okunur.
+
+        [S2] e1 e2 e3 r1 r2 ?  a1 a2 a3 EOS
+                      ^^ ^^              <- BURASI BOS: ana kayip
+                                            cevabi 3+yuva'dan okuyor
+    Iki pozisyon var, o yuzden en fazla IKI token. Ucuncu yuva zaten
+    cogunlukla <YOK> dolgusu (olculdu: %94,7), bilgi tasimiyor."""
+    return [1 + v.yuva, 2 + v.yuva][:min(v.yuva, 2)], min(v.yuva, 2)
+
+
 def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
     """1hop + 2hop (+ istege bagli kimlik gorevi) -> tek havuz."""
     parca = [kodla_1hop(v, v.one), kodla_2hop(v, v.tr2)]
@@ -824,9 +848,21 @@ def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
     X = np.concatenate([a for a, _, _ in parca])
     P = np.concatenate([b for _, b, _ in parca])
     T = np.concatenate([c for _, _, c in parca])
+    # KOPRU HEDEFI. -1 = bu satirda kopru YOK (1hop, kimlik) -> maskelenir.
+    _kp, _nk = kopru_hedefi(v)
+    _kt = [np.full((len(parca[0][0]), _nk), -1, np.int64),
+           np.array([_e(v, x[3])[:_nk] for x in v.tr2], np.int64)]
+    if kimlik is not None:
+        _kt.append(np.full((len(parca[2][0]), _nk), -1, np.int64))
+    KT = np.concatenate(_kt)
+    assert len(KT) == len(X), (len(KT), len(X))
+    if ayar.kopru_kayip > 0:
+        yaz(f"  KOPRU KAYBI acik: agirlik {ayar.kopru_kayip}  "
+            f"pozisyon {_kp}  {_nk} token  "
+            f"({int((KT[:, 0] >= 0).sum())}/{len(KT)} satirda gecerli)")
     if kimlik is not None:
         yaz(f"                 havuzun %{100*len(parca[2][0])/len(X):.0f}'i")
-    return X, P, T, kimlik
+    return X, P, T, kimlik, np.array(_kp, np.int64), KT
 
 
 # ======================= MODEL ===========================================
@@ -1325,7 +1361,7 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
     os.makedirs(f"{alt}/snap", exist_ok=True)
     yaz(f"=== {ayar.ad}  tohum {ayar.tohum} ===  cihaz {DEV}  cikti {alt}/")
     v = veri_kur(ayar, yaz)
-    Xtr, Ptr, Ttr, kimlik = egitim_havuzu(ayar, v, yaz)
+    Xtr, Ptr, Ttr, kimlik, KPOZ, KTR = egitim_havuzu(ayar, v, yaz)
 
     L = olcme_listeleri(ayar, v)
     kod = {k: (kodla_1hop(v, L[k]) if k == "one" else kodla_2hop(v, L[k]))
@@ -1481,16 +1517,28 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
             tb = torch.from_numpy(Ttr[j]).to(DEV)
             with torch.autocast(DEV, dtype=torch.float16,
                                 enabled=(DEV == "cuda")):
-                lg = model(xb)
+                lg_tam = model(xb)
                 # xb.shape[0], ayar.batch DEGIL: ikisi burada esit ama bir
                 # varyasyon degisken batch kullanirsa `ayar.batch` sessizce
                 # yanlis satirlari secerdi.
                 # pb/tb artik (B, yuva). yuva=1 iken eski davranisla
                 # AYNI: tek pozisyon, tek hedef, ayni kayip.
                 _ar = torch.arange(xb.shape[0], device=DEV)[:, None]
-                lg = lg[_ar, pb]                       # (B, yuva, V)
+                lg = lg_tam[_ar, pb]                   # (B, yuva, V)
                 kayip = F.cross_entropy(
                     lg.float().reshape(-1, lg.shape[-1]), tb.reshape(-1))
+                # --- YARDIMCI KOPRU KAYBI (kopru_kayip>0 ise) -----------
+                # kopru_kayip=0'da bu blok HIC calismaz -> eski kollar
+                # BIT DUZEYINDE ayni kalir.
+                if ayar.kopru_kayip > 0:
+                    kb = torch.from_numpy(KTR[j]).to(DEV)      # (B, nk)
+                    m = kb[:, 0] >= 0                          # 2hop satirlar
+                    if bool(m.any()):
+                        kp = torch.from_numpy(KPOZ).to(DEV)
+                        lgk = lg_tam[m][:, kp]                 # (Bm, nk, V)
+                        kayip = kayip + ayar.kopru_kayip * F.cross_entropy(
+                            lgk.float().reshape(-1, lgk.shape[-1]),
+                            kb[m].reshape(-1))
             kayip_top += kayip.detach()
             kayip_say += 1
             opt.zero_grad(set_to_none=True)
