@@ -234,7 +234,11 @@ def sor(v, net, metin, yaz=print):
     # "anne" + "u" = "anneu" gibi sacmaliklar cikardi (ilk surumde
     # tam bu oldu). Onun yerine NE ANLASILDIGI acikca yazilir.
     yaz(f"  cozum   varlik '{_ad(v, e)}'  +  iliski {rels}")
-    yaz(f"  model   {m_ad}")
+    # BOS DIZE BASMA. Model uc yuvaya da <YOK> derse `_birlestir`
+    # hepsini atar ve satir BOS kalirdi -- okuyan kisi "arac mi coktu,
+    # model mi 'hicbir sey' dedi" AYIRAMAZ. (Bu projede bir kez daha
+    # goruntu kusuru modelin hatasi sanilmisti; ayrinti onkayitta.)
+    yaz(f"  model   {m_ad if m_ad else '(uc yuva da <YOK> -- model BOS cevap verdi)'}")
     yaz(f"  gercek  {g_ad}" + ("        DOGRU" if m_ad == g_ad and gercek >= 0
                                else "        YANLIS" if gercek >= 0 else ""))
     yaz(f"  bolme   {bol}   ({BOLME_NOT.get(bol, '')})")

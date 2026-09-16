@@ -134,6 +134,33 @@ ok(all(hasattr(_b0, x) for x in ("w1", "w2", "w3")),
 ok(_b0.w1.out_features == A.dff and _b0.w2.in_features == A.dff,
    "SwiGLU gizli boyutu d_ff")
 
+# --- 1b) OKUMA ARACLARININ MODELDEN ISTEDIGI YUZEY ----------------------
+# KUSUR (16 Eylul hakemligi): `asama1_00.gizli()` ileri gecisi ELLE
+# kuruyordu -- `net1.emb + net1.pos` ve TEK argumanli `blk(h)`. Ikisi de
+# `model_a.Model`e ozgu; ModelSade'de `.pos` YOK (RoPE var) ve
+# `Blok.forward` UC argumanli. DOGRUSAL SONDA, yani bu kolun onkayitta
+# yazili EK OKUMASI, 20.000 adimdan SONRA AttributeError ile duserdi.
+# Kilit sadece import ediyordu, KOSMUYORDU -- o yuzden gormedi.
+ok(hasattr(S.ModelSade, "govde"), "ModelSade.govde() var (sonda bunu cagirir)")
+ok(not hasattr(net, "pos"), "ogrenilmis pozisyon gommesi YOK -- elle ileri "
+                            "gecis kuran her arac DUSER")
+_gx = torch.randint(0, v.vocab, (4, A.t_len))
+with torch.no_grad():
+    _g = net.govde(_gx)
+    ok(tuple(_g.shape) == (4, A.t_len, A.d), "govde() sekli (B,T,d)",
+       str(tuple(_g.shape)))
+    ok(torch.allclose(net(_gx), net.head(_g), atol=0),
+       "forward() == head(govde()) -- sonda modelin GERCEK hesabini goruyor")
+import asama1_00 as A1                                      # noqa: E402
+_lst = v.comp[:8]
+try:
+    _q = A1.gizli(net, v, _lst, 6)
+    ok(_q.shape == (8, A.d), "asama1_00.gizli() KOSUYOR (DOGRUSAL SONDA yolu)",
+       str(_q.shape))
+except Exception as _e:                                      # noqa: BLE001
+    ok(False, "asama1_00.gizli() KOSUYOR (DOGRUSAL SONDA yolu)",
+       f"{type(_e).__name__}: {_e}")
+
 # --- 2) ILERI GECIS ------------------------------------------------------
 print("\n=== 2) ILERI GECIS ===")
 x = torch.randint(0, v.vocab, (4, A.t_len))

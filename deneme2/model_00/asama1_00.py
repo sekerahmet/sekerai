@@ -83,11 +83,11 @@ def gizli(net1, v, lst, poz, bs=256):
     cik = []
     for i in range(0, len(X), bs):
         xb = torch.from_numpy(X[i:i + bs]).to(M.DEV)
-        h = net1.emb(xb) + net1.pos(torch.arange(X.shape[1],
-                                                 device=M.DEV))[None]
-        for blk in net1.bloklar:
-            h = blk(h)
-        cik.append(net1.nf(h[:, poz]).cpu())
+        # ILERI GECISI ELLE KURMA -- modelin kendi govdesini cagir.
+        # Eski hali `net1.emb + net1.pos` + tek argumanli `blk(h)` idi;
+        # ikisi de `model_a.Model`e ozgu ve `ModelSade`de YOK. Bu satir
+        # 16 Eylul hakemliginde AttributeError ile yakalandi.
+        cik.append(net1.govde(xb)[:, poz].cpu())
     return torch.cat(cik).numpy()
 
 
@@ -409,11 +409,10 @@ def main():
             print("    -- HEAD TESHISI --")
             X0, _, _ = M.kodla_2hop(v, lst)
             with torch.no_grad():
-                hh = net1.emb(torch.from_numpy(X0).to(M.DEV))
-                hh = hh + net1.pos(torch.arange(X0.shape[1],
-                                                device=M.DEV))[None]
-                for blk in net1.bloklar:
-                    hh = blk(hh)
+                # (Bu dal `cok_bas` modellere ozgu -- ModelSade'de
+                # CALISMAZ ve zaten `getattr(net,"cok_bas",False)` ile
+                # kapali. Yine de elle ileri gecis BIRAKILMIYOR.)
+                hh = net1.govde(torch.from_numpy(X0).to(M.DEV))
             sonuc[bol]["head"] = head_teshisi(net, v, hh[:, ep])
 
     yol = a.cikti or os.path.join(

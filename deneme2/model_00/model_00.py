@@ -196,7 +196,21 @@ class ModelSade(nn.Module):
         return sum(p.numel() for p in {id(p): p
                                        for p in self.parameters()}.values())
 
-    def forward(self, x):
+    def govde(self, x):
+        """SON katman + son norm -- head ONCESI gizli durum (B, T, d).
+
+        `asama1_00.gizli()` (DOGRUSAL SONDA) bunu cagirir. KUSUR ve
+        DUZELTMESI (16 Eylul hakemligi): orada ileri gecis ELLE yeniden
+        kuruluyordu --
+
+            h = net1.emb(xb) + net1.pos(...)      # ogrenilmis pozisyon
+            for blk in net1.bloklar: h = blk(h)   # tek argumanli blok
+
+        ikisi de `model_a.Model`e ozgu; `ModelSade`de `.pos` YOK (RoPE
+        var) ve `Blok.forward` UC argumanli. Sonda 20.000 adimlik
+        kosudan SONRA AttributeError ile duserdi -- ve o sonda bu kolun
+        onkayitta yazili EK OKUMASI. Artik tek kaynak burasi: sonda
+        modelin GERCEKTEN hesapladigini goruyor."""
         # RoPE tablosu t_len'e gore kuruldu. Daha uzun dizi gelirse
         # dilimleme SESSIZCE kisa tablo dondururdu; burada patlasin.
         assert x.shape[1] <= self.rope_cos.shape[0], (
@@ -206,7 +220,10 @@ class ModelSade(nn.Module):
         sin = self.rope_sin.to(h.dtype)
         for blk in self.bloklar:
             h = blk(h, cos, sin)
-        return self.head(self.nf(h))
+        return self.nf(h)
+
+    def forward(self, x):
+        return self.head(self.govde(x))
 
 
 # ======================= AYAR ============================================

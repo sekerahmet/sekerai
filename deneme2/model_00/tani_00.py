@@ -275,9 +275,21 @@ def zincir_testi(net, v: M.Veri, lst, ad: str, yaz=print) -> dict:
     d2 = M.dogruluk(net, v, *M.kodla_1hop(v, h2))
     iki = M.dogruluk(net, v, *M.kodla_2hop(v, lst))
     yaz(f"\n  {ad}   n={len(lst)}")
-    yaz(f"    1. HOP tek basina   [Q1] e  r1 ? -> b     {d1:.4f}")
-    yaz(f"    2. HOP tek basina   [Q1] b  r2 ? -> a     {d2:.4f}")
-    yaz(f"    IKISI BIRDEN        [Q2] e r1 r2 ? -> a   {iki:.4f}")
+    # ETIKET DIZIYE GORE. KUSUR (16 Eylul hakemligi): burada [Q1]/[Q2]
+    # SABIT yaziliydi; `ek_kip="tr"` dizisinde oyle bir jeton YOK (rolu
+    # POZISYON degil EK tasiyor). Sayilar dogruydu, ETIKET yanlisti --
+    # rapora bakan kisi dizinin sekli hakkinda yanlis sey okurdu.
+    if v.ek_kip:
+        _e1 = "e ' <NIN> r1 <SI> ? -> b  "
+        _e2 = "b ' <NIN> r2 <SI> ? -> a  "
+        _ei = "e ' <NIN> r1 <SI> <NIN> r2 <SI> ? -> a"
+    else:
+        _e1, _e2, _ei = ("[Q1] e  r1 ? -> b         ",
+                         "[Q1] b  r2 ? -> a         ",
+                         "[Q2] e r1 r2 ? -> a")
+    yaz(f"    1. HOP tek basina   {_e1}   {d1:.4f}")
+    yaz(f"    2. HOP tek basina   {_e2}   {d2:.4f}")
+    yaz(f"    IKISI BIRDEN        {_ei}   {iki:.4f}")
     yaz(f"    -> parcalar {min(d1, d2):.4f}'e kadar biliniyor, "
         f"birlesince {iki:.4f}.  KAYIP {min(d1, d2) - iki:+.4f}")
     return dict(hop1=d1, hop2=d2, iki_hop=iki, kayip=min(d1, d2) - iki)
