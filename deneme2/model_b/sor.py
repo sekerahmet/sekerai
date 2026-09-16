@@ -38,6 +38,11 @@ import model_a as M                                          # noqa: E402
 import pencere_a as P                                        # noqa: E402
 from model_b import ModelB                                   # noqa: E402
 
+# `sor_c` bunu doldurur; None -> ModelB. `pencere_a`/`tani_a`/`asama1`
+# kancalarinin AYNISI. Kanca OLMADAN model_c anlik goruntusu
+# "Unexpected key(s): kafa" ile REDDEDILIRDI.
+MODEL_SINIFI = None
+
 
 def _ad(v, e):
     """Varlik id -> okunabilir ad.  YUVA SAYISINA BAGIMSIZ.
@@ -70,7 +75,7 @@ def kur(klasor, genislik=5):
     adimlar = list(snap)
     pen = adimlar[-min(genislik, len(adimlar)):]
     sd = P.agirlik_ortalamasi([snap[x] for x in pen])
-    net = ModelB(ayar, v.vocab).to(M.DEV)
+    net = (MODEL_SINIFI or ModelB)(ayar, v.vocab).to(M.DEV)
     net.load_state_dict(sd)
     net.eval()
     return ayar, v, net, pen

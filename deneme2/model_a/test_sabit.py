@@ -107,6 +107,12 @@ AYAR_KILIT = dict(
     # model_b5'i SESSIZCE yeniden uretilemez kilardi; surum ekleyerek
     # ikisi de durur. `ident_kip` ile ayni desen.
     jeton_ad="",
+    # `dar_kafa` 16 Eylul'de eklendi -- `model_c` icin. Phi'nin BAS
+    # sayisi. 1 = kapali, ek parametre YOK, ModelB ile BIT AYNI.
+    # Gerekce OLCULDU (asama1): cok jetonlu kodlamada kopru ilk
+    # donguden sonra HICBIR pozisyonda cozulemiyor -- Phi pozisyon-yerel
+    # oldugu icin uc jetonlu varligin temiz gommesi YOK.
+    dar_kafa=1,
 )
 
 VERI_KILIT = dict(

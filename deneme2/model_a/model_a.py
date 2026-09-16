@@ -196,6 +196,15 @@ class Ayar:
     #   `T_LEN` 8 -> 11 (t_len ozelligi), cevap IKI jeton, kayip IKI hedef.
     #   MIMARI DEGISMEZ. Onkayit: belge/onkayit/model_b5.md
     #   VARSAYILAN KAPALI -- eski kollarin hepsi bit duzeyinde AYNI kalir.
+    dar_kafa: int = 1          # Phi'nin BAS sayisi (model_c).
+    #   1 = KAPALI, ek parametre YOK, `model_b` ile BIT AYNI.
+    #   m > 1:  Phi_m(h) = (1/m) SUM_j softmax(W A_j nf(h)/tau) @ W
+    #   Her bas bir YUVA cozer -- cok jetonlu bir varligin "temiz
+    #   gommesi" ancak boyle kurulabilir. OLCULDU (16 Eylul, asama1):
+    #   jeton_ad="tam" iken kopru 11 pozisyonun hicbirinde cozulemiyor
+    #   (0.0442), cunku Phi POZISYON-YEREL ve uc jetonlu varligin tek
+    #   bir gomme satiri YOK. A_0 = I ile baslatilir.
+    #   Onkayit: belge/onkayit/model_c.md
     dar_sert: bool = False     # Phi'yi SERTLESTIR: tau -> 0 limiti.
     #   Phi(h) = W[argmax(nf(h) Wᵀ)] -- yumusak ortalama yerine TEK gomme.
     #   argmax turevlenemez; straight-through (van den Oord 2017, VQ-VAE):
@@ -296,7 +305,7 @@ ESKI_VARSAYILAN = {
     "kati_pay": 0.0,
     "ood_pay": 0.0,
     "dar_alfa": 0.0, "dar_tau": 1.0, "dar_kapi": False, "dar_sdpa": False,
-    "dar_sert": False, "jeton_ad": "",
+    "dar_sert": False, "jeton_ad": "", "dar_kafa": 1,
 }
 
 
