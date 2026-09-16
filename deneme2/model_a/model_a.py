@@ -263,6 +263,17 @@ class Ayar:
     # --- kimlik gorevi (model_a1 / model_a2 bunu degistirir)
     ident_frac: float = 0.0
     ident_kip: str = ""        # "" | "q2son" | "q1"
+    tam_kayip: bool = False
+    #   False: kayip YALNIZ cevap yuvalarinda -- bu bir SORU-CEVAP kaybi.
+    #   True : kayip HER pozisyonda, next-token -- yani DIL MODELI kaybi.
+    #
+    #   16 Eylul, kullanici: "normal dil egitimindeki veri mimarisini
+    #   kullanmaliyiz." Olculdu: `lg_tam = model(xb)` butun pozisyonlarin
+    #   logit'ini zaten uretiyor, biz 11'in 3'unu alip %70'ini ATIYORUZ.
+    #   Bu yuzden model 'Ahmet' -> 'Yilmaz' gecisini HIC tahmin etmiyor;
+    #   varligin IKI jetonunu birim olarak baglamasi icin tek baski,
+    #   cevabi uretirken. Model nedensel maskeli (is_causal=True), yani
+    #   next-token kaybi mesru -- ileriye bakip KOPYALAYAMAZ.
 
     # --- maske (bu deneyde kapali; aile ilerde kullanabilsin diye duruyor)
     mask_poz: int | None = None
@@ -319,6 +330,9 @@ ESKI_VARSAYILAN = {
     "ood_pay": 0.0,
     "dar_alfa": 0.0, "dar_tau": 1.0, "dar_kapi": False, "dar_sdpa": False,
     "dar_sert": False, "jeton_ad": "", "dar_kafa": 1, "kopru_kayip": 0.0,
+    # tam_kayip 16 Eylul'de eklendi; ondan onceki butun kosular SORU-CEVAP
+    # kaybiyla egitildi -> kapali.
+    "tam_kayip": False,
 }
 
 
@@ -1486,6 +1500,8 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
     # "model_b8'in kaybi daha yuksek" diye YANLIS okunurdu.
     yrd_top = torch.zeros((), device=DEV)
     yrd_say = 0
+    ana_top = torch.zeros((), device=DEV)
+    ana_say = 0
     # KPOZ her adimda tensora ceviriliyordu; bir kez yeter.
     _KPT = torch.from_numpy(KPOZ).to(DEV)
     # ADIM 0 DA `try` ICINDE. Disaridayken burada coken bir kosu kunyeyi
@@ -1532,8 +1548,24 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
                 # AYNI: tek pozisyon, tek hedef, ayni kayip.
                 _ar = torch.arange(xb.shape[0], device=DEV)[:, None]
                 lg = lg_tam[_ar, pb]                   # (B, yuva, V)
-                kayip = F.cross_entropy(
+                # `ana` HER ZAMAN hesaplanir: model_b6 ile KIYASLANABILIR
+                # olan sayi budur. tam_kayip acikken optimize edilen sey
+                # `ana` DEGIL, ama egriye ikisi de yazilir. (model_b8'de
+                # `kayip` sutunu kirlenmisti ve b6 ile kiyaslanamaz hale
+                # gelmisti -- ayni hataya dusmemek icin.)
+                ana = F.cross_entropy(
                     lg.float().reshape(-1, lg.shape[-1]), tb.reshape(-1))
+                if ayar.tam_kayip:
+                    # DIL MODELI KAYBI: pozisyon t, X[t+1]'i tahmin eder.
+                    # PAD (=0) hedefleri atlanir; PAD dizinin yalniz
+                    # KUYRUGUNDA var, arasinda yok.
+                    kayip = F.cross_entropy(
+                        lg_tam[:, :-1].float().reshape(-1, lg_tam.shape[-1]),
+                        xb[:, 1:].reshape(-1), ignore_index=PAD)
+                    ana_top += ana.detach()
+                    ana_say += 1
+                else:
+                    kayip = ana
                 # --- YARDIMCI KOPRU KAYBI (kopru_kayip>0 ise) -----------
                 # kopru_kayip=0'da bu blok HIC calismaz -> eski kollar
                 # BIT DUZEYINDE ayni kalir.
@@ -1603,10 +1635,18 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
                     r["kayip_yrd"] = float(yrd_top.item() / max(1, yrd_say))
                     r["kayip_ana"] = round(
                         r["kayip"] - ayar.kopru_kayip * r["kayip_yrd"], 6)
+                if ayar.tam_kayip:
+                    # `kayip` = DIL MODELI kaybi (optimize edilen).
+                    # `kayip_ana` = yalniz cevap yuvalari -- model_b6'nin
+                    # `kayip` sutunuyla AYNI SEY, tek kiyaslanabilir sayi.
+                    r["kayip_ana"] = round(
+                        float(ana_top.item() / max(1, ana_say)), 6)
                 kayip_top = torch.zeros((), device=DEV)
                 kayip_say = 0
                 yrd_top = torch.zeros((), device=DEV)
                 yrd_say = 0
+                ana_top = torch.zeros((), device=DEV)
+                ana_say = 0
                 egri.append(r)
                 # ANLIK GORUNTU: agirlik ortalamasi olcumunun sarti. Adim
                 # adli, 8 hane sifir dolgulu -- arsivde `f"..._{20000}.pt"`

@@ -118,6 +118,23 @@ AYAR_KILIT = dict(
     # eski kollarla BIT AYNI. TESHIS kolu: kopru hidden state'e
     # konulursa bilesim duzelir mi?
     kopru_kayip=0.0,
+    # `tam_kayip` 16 Eylul'de eklendi -- `model_b10` icin. Kilit YINE
+    # YAKALADI (alan 38 -> 39, "tam_kayip KILITTE YOK") ve egitimi
+    # DURDURDU. Gerekce kilide DOKUNULMADAN ONCE yazildi:
+    # belge/onkayit/model_b10.md.
+    #
+    # NE: kayip YALNIZ cevap yuvalarinda mi (False, SORU-CEVAP), yoksa
+    # HER pozisyonda next-token mi (True, DIL MODELI). Olculdu:
+    # `lg_tam = model(xb)` butun pozisyonlarin logit'ini zaten uretiyor,
+    # kod 11'in 3'unu alip %70'ini ATIYORDU. Yani alti koldur egitilen
+    # sey bir soru-cevap basligiydi.
+    #
+    # VARSAYILAN KAPALI, ve "kapaliyken eski kodla ayni" IDDIA DEGIL
+    # OLCUM: commit 7b25cf3'un model_a.py'si ayri alt surecte cikarildi,
+    # ayni tohumla 6 adim egitildi -> EN BUYUK AGIRLIK FARKI 0.000e+00
+    # (29 anahtar). Asagidaki `parametre 3427840` + `agirlik sha` da
+    # bunu her kosuda dogruluyor.
+    tam_kayip=False,
 )
 
 VERI_KILIT = dict(

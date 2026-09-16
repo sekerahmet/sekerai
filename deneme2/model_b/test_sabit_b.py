@@ -20,7 +20,9 @@ _B = os.path.dirname(os.path.abspath(__file__))
 _A = os.path.join(os.path.dirname(_B), "model_a")
 sys.path[:0] = [_B, _A, os.path.dirname(_B)]
 
+import numpy as np                                           # noqa: E402
 import torch                                                 # noqa: E402
+import torch.nn.functional as F                              # noqa: E402
 import model_a as M                                          # noqa: E402
 import model_b                                               # noqa: E402
 from model_b import ModelB                                   # noqa: E402
@@ -67,7 +69,7 @@ def main():
         _bak(f"model_b1.{_g} var", hasattr(model_b1, _g), "kos.py duser")
 
     import model_b2, model_b3, model_b4, model_b5, model_b6, model_b7
-    import model_b8, model_b9
+    import model_b8, model_b9, model_b10
     f7 = set(model_b1.AYAR.fark(model_b6.AYAR)) | {"ad"}
     _bak(f"model_b6 <-> model_b1 farki {sorted(f7)}",
          sorted(f7) == ["ad", "jeton_ad"],
@@ -161,6 +163,64 @@ def main():
     _g9(_xg).sum().backward()
     _bak("gradyan kapi_w'ye AKIYOR",
          _g9.kapi_w.grad is not None and _g9.kapi_w.grad.abs().sum() > 0)
+    # --- model_b10: DIL MODELI KAYBI ----------------------------------
+    # Alti koldur egittigimiz sey bir SORU-CEVAP basligiydi: logit'lerin
+    # %70'i atiliyordu. Bu kol kaybi HER pozisyona yayiyor.
+    f11 = set(model_b6.AYAR.fark(model_b10.AYAR)) | {"ad"}
+    _bak(f"model_b10 <-> model_b6 farki {sorted(f11)}",
+         sorted(f11) == ["ad", "tam_kayip"],
+         "model_b10 SADECE kaybin NEREDE hesaplandigini degistirmeli")
+    _bak("model_b10 tam_kayip=True", model_b10.AYAR.tam_kayip is True)
+    _bak("model_b6 tam_kayip=False (DEGISMEDI)",
+         model_b6.AYAR.tam_kayip is False)
+    _bak("model_b10 dar_kapi=False, dar_kafa=1, kopru_kayip=0 "
+         "(b9/c/b8 ile KARISMIYOR)",
+         model_b10.AYAR.dar_kapi is False and model_b10.AYAR.dar_kafa == 1
+         and model_b10.AYAR.kopru_kayip == 0.0)
+    _bak("model_b10 MIMARI DEGISMIYOR: ek parametre YOK",
+         sum(p.numel() for p in ModelB(model_b10.AYAR, _v8.vocab).parameters())
+         == sum(p.numel() for p in ModelB(model_b6.AYAR, _v8.vocab).parameters()))
+    for _g in ("AYAR", "egit", "fark_bas"):
+        _bak(f"model_b10.{_g} var", hasattr(model_b10, _g), "kos.py duser")
+
+    # CEVAP KAYBI, DIL KAYBININ ALT KUMESI MI -- yani tam_kayip yeni bir
+    # sozlesme getirmiyor, mevcut next-token sozlesmesini BUTUN
+    # pozisyonlara yayiyor. Tutmazsa iki kayip AYRI SEY olur ve
+    # `kayip_ana` sutunu model_b6 ile kiyaslanamaz.
+    _Xk, _Pk, _Tk = M.kodla_2hop(_v8, _v8.tr2[:32])
+    _bak("cevap pozisyonlari next-token sozlesmesine uyuyor (2hop)",
+         all(_Xk[i, _Pk[i, j] + 1] == _Tk[i, j]
+             for i in range(len(_Xk)) for j in range(_Pk.shape[1])))
+    _X1, _P1, _T1 = M.kodla_1hop(_v8, _v8.one[:32])
+    _bak("cevap pozisyonlari next-token sozlesmesine uyuyor (1hop)",
+         all(_X1[i, _P1[i, j] + 1] == _T1[i, j]
+             for i in range(len(_X1)) for j in range(_P1.shape[1])))
+    _bak("PAD dizinin ORTASINDA yok (ignore_index=PAD guvenli)",
+         all((lambda nz: len(nz) == 0 or nz.max() - nz.min() + 1 == len(nz))
+             (np.nonzero(r)[0]) for r in np.concatenate([_Xk, _X1])))
+    torch.manual_seed(0)
+    _n10 = ModelB(model_b10.AYAR, _v8.vocab).eval()
+    _xk = torch.from_numpy(_Xk)
+    with torch.no_grad():
+        _lgt = _n10(_xk)
+    _arr = torch.arange(_xk.shape[0])[:, None]
+    _ana = F.cross_entropy(
+        _lgt[_arr, torch.from_numpy(_Pk)].float().reshape(-1, _lgt.shape[-1]),
+        torch.from_numpy(_Tk).reshape(-1))
+    _hep = F.cross_entropy(
+        _lgt[:, :-1].float().reshape(-1, _lgt.shape[-1]),
+        _xk[:, 1:].reshape(-1), ignore_index=M.PAD,
+        reduction="none").reshape(_xk.shape[0], -1)
+    _sec = _hep[_arr, torch.from_numpy(_Pk)].mean()
+    _bak(f"cevap kaybi DIL kaybinin ALT KUMESI "
+         f"({abs(_ana.item() - _sec.item()):.1e})",
+         abs(_ana.item() - _sec.item()) < 1e-5)
+    _pay = _Pk.size / int((_xk[:, 1:] != M.PAD).sum())
+    _bak(f"SEYRELME olculdu: cevap gorevi kayip terimlerinin "
+         f"{_pay:.0%}'i", 0.2 < _pay < 0.45,
+         "cevap gorevine dusen gradyan ~3 kat seyreliyor -- "
+         "onkayit model_b10.md 5'te CONFOUND olarak yazili")
+
     for _g in ("AYAR", "egit", "fark_bas"):
         _bak(f"model_b6.{_g} var", hasattr(model_b6, _g), "kos.py duser")
     f6 = set(model_b1.AYAR.fark(model_b5.AYAR)) | {"ad"}
@@ -211,7 +271,7 @@ def main():
     # bozulmus bir surumle sinandi: duzeltmeden ONCE test GECIYORDU.
     for _ad in ("model_b", "model_b1", "model_b2", "model_b3",
                 "model_b4", "model_b5", "model_b6", "model_b7",
-                "model_b8", "model_b9"):
+                "model_b8", "model_b9", "model_b10"):
         _satir = [
             "import sys, importlib",
             "sys.path.insert(0, %r)" % _B,
