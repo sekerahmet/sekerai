@@ -325,9 +325,9 @@ ok("veri_ad" not in GOREV_ALAN, "veri_ad GOREV_ALAN'da YOK (ad degil icerik)")
 # dugmesi gorunmez kalmasin diye ACIKCA ekleniyor.
 _fark = sorted(set(B15.fark(A)) | {"ad", "hop2_pay"})
 ok(_fark == ["ad", "betas", "dar_alfa", "dar_kapi", "dff", "dongu",
-             "hop2_pay", "l", "ort_bas", "veri_ad"],
+             "hop2_pay", "l", "ort_bas", "veri_ad", "wd"],
    f"model_01 <-> model_b15 farki {_fark}",
-   "MIMARI + STANDART TARIF + veri ADI + BU KOLUN DUGMESI (hop2_pay)")
+   "MIMARI + STANDART TARIF + veri ADI + IKI DUGME (hop2_pay, wd)")
 
 v15 = MA.veri_kur(B15, yaz=lambda *a: None)
 ok(M.olcme_izi(M.olcme_listeleri(A, v))
@@ -387,8 +387,13 @@ ok(A.betas == (0.9, 0.95),
    "betas (0.9, 0.95) -- nanoGPT/GPT-3/Llama/Pythia", str(A.betas))
 ok(B15.betas == (0.9, 0.999),
    "model_b15'te PyTorch varsayilani (DEGISMEDI)", str(B15.betas))
-ok(A.wd == 0.1 and A.sabit_lr is False,
-   "wd 0.1 + cosine (zaten standart, CLAUDE.md kural 4)")
+# !! wd ARTIK STANDART DEGIL -- bu kosunun DUGMESI. CLAUDE.md kural 4
+# "wd 0.1 ARTIK ARANMAZ" diyordu; kullanici 17 Eylul'de bu kolda deldi.
+# Kilit gevsetilmedi, HEDEFI DEGISTI: 0.1 degil 0.5 bekliyor.
+ok(A.wd == 0.5, "wd 0.5 -- 0.1'in BES KATI, IKINCI KOSUNUN DUGMESI",
+   str(A.wd))
+ok(B15.wd == 0.1, "model_b15'te 0.1 (DEGISMEDI)", str(B15.wd))
+ok(A.sabit_lr is False, "cosine -> lr/10 (CLAUDE.md kural 4, DEGISMEDI)")
 ok(A.isinma == 2000, "isinma 2000 -- nanoGPT/Llama MUTLAK degeriyle AYNI")
 ok(A.lr == 1e-3, "lr 1e-3 -- Pythia-70m ile ayni mertebe")
 

@@ -97,6 +97,21 @@ AYAR = Ayar(
     dff=704,             # SwiGLU, 8/3 * 256 = 682,7 -> 64'un kati
     # dar_alfa / dar_kapi VARSAYILANDA (0.0 / False) -> Phi darbogazi YOK
 
+    # --- IKINCI KOSUNUN DUGMESI: AGIRLIK CEZASI -----------------------
+    # Kullanici karari, 17 Eylul: "simdi kisayolu cezalandiracagiz ama
+    # ayri model gerek yok. model_01'de degerini 5 katina, yani 0,5'e
+    # cikarip ayni defterde tekrar calistiralim."
+    #
+    # GEREKCE ILK KOSUDA OLCULDU: hop2_pay=0.0 kolunda kisayol
+    # COKMEDI, BUYUDU -- ent_kisayol 0.0760 (model_00) -> 0.4573, ALTI
+    # KAT. Model egitimde TEK BIR 2-hop dizisi gormedigi halde r2'yi
+    # dogrudan ozneye uyguluyor. Yani kisayol 2-hop orneklerinden
+    # OGRENILMIYOR; 1-hop'tan gelip 2-hop sorusuna TASIYOR.
+    #
+    # !! BU CLAUDE.md KURAL 4'U DELIYOR ("wd 0.1 ARTIK ARANMAZ").
+    # Kural kullanicinindi, delme karari da kullanicinin -- 17 Eylul.
+    wd=0.5,              # 0.1'in BES KATI
+
     # --- OPTIMIZASYON: STANDART TARIF ---------------------------------
     betas=(0.9, 0.95),   # nanoGPT / GPT-3 / Llama / Pythia
     sabit_lr=False,      # cosine -> lr/10 (CLAUDE.md kural 4)
@@ -105,7 +120,7 @@ AYAR = Ayar(
 
 # Yukarida ACIKCA yazilmayan ama TASINAN degerler burada sabitleniyor:
 # bir gun `Ayar()` varsayilani degisirse bu assert'ler once duser.
-assert AYAR.wd == 0.1, "CLAUDE.md kural 4"
+assert AYAR.wd == 0.5, "IKINCI KOSUNUN DUGMESI -- kullanici karari, 17 Eylul"
 assert AYAR.lr == 1e-3 and AYAR.isinma == 2000, "nanoGPT/Llama MUTLAK 2000"
 assert AYAR.d == 256 and AYAR.nh == 4, "head_dim 64"
 assert AYAR.batch == 512 and AYAR.adim == 20000, "kural 1: ILK SINIR"
