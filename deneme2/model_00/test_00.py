@@ -188,6 +188,50 @@ ok(list(V00.ILISKI) == list(V4.ILISKI) and V00.TIPLER == V4.TIPLER,
 ok(V00.SEMA == V4.SEMA and V00.GEREKTIRIR == V4.GEREKTIRIR,
    "SEMA + GEREKTIRIR AYNI")
 ok(V00.turetilebilir(_G0) == V4.turetilebilir(_G4), "TURETILEBILIR ciftler AYNI")
+
+# --- 3b) HAKEMLIKTE BULUNAN IKI KUSUR -- GERI GELMESIN ------------------
+# (1) TABAN GRAF kendi basina tutarli mi. Ilk birlestirmede TEK bir SEMA
+#     vardi; `_taban_kur()` semasi olgusu OLMAYAN tip ciftleri vaat
+#     ediyordu ve `zincirler` KeyError veriyordu. Sonuc grafi dogruydu,
+#     ama mayin oradaydi.
+_GT = V00._taban_kur(0)
+ok(_GT["sema"]["kardes"] == {"KISI": "KISI"},
+   "taban graf TABAN semayi tasiyor (genis semayi DEGIL)",
+   str(_GT["sema"]["kardes"]))
+try:
+    _zt = V00.zincirler(_GT)
+    ok(len(_zt) == 59140, "zincirler(_taban_kur(0)) CALISIYOR", f"{len(_zt)} zincir")
+except KeyError as _e:
+    ok(False, "zincirler(_taban_kur(0)) CALISIYOR", f"KeyError {_e}")
+ok(V00.SEMA is not V00.SEMA_TABAN and set(V00.SEMA) == set(V00.SEMA_TABAN),
+   "SEMA ve SEMA_TABAN AYRI sozluk, AYNI semboller")
+
+# (2) IZ KOR MU. Ilk surum `ad` listelerini SIRALAYIP kariyordu ve `sema`yi
+#     hic karmiyordu: varlik sirasini ters cevirmek (butun jeton id'leri
+#     kaydirir) ve SEMA'ya tip cifti eklemek (sinavi degistirir) IZ'i
+#     KIPIRDATMIYORDU. Uc kor nokta da burada sinaniyor.
+import copy as _cp                                           # noqa: E402
+_iz0 = V00.graf_izi(_G0)
+for _ad, _boz in (
+        ("varlik SIRASI", lambda g: g["ad"].__setitem__(
+            "KISI", list(reversed(g["ad"]["KISI"])))),
+        ("SEMA tip cifti", lambda g: g["sema"]["onkosul"].__setitem__(
+            "KISI", "DERS")),
+        ("sozluk SIRASI", lambda g: g.__setitem__(
+            "sozluk", list(reversed(g["sozluk"]))))):
+    _h = _cp.deepcopy(_G0)
+    _boz(_h)
+    ok(V00.graf_izi(_h) != _iz0, f"IZ {_ad} degisimini GORUYOR")
+
+# (3) `jeton_ad` EK JETONLARINDA cokmuyor. veri_dok/analiz_00 `ek_kip`
+#     gelen her kolda IndexError veriyordu -- model_b15'in verisi bu
+#     yuzden hic dokulmemisti.
+sys.path.insert(0, _B)
+import analiz_00 as AZ                                       # noqa: E402
+_d = AZ.Dok("model_00")
+_ekler = [_d.jeton_ad(i) for i in range(_d.v.ek0, _d.v.vocab)]
+ok(_ekler == ["'", "<NIN>", "<SI>", "<DIR>"],
+   "analiz_00.jeton_ad EK JETONLARINI adlandiriyor", str(_ekler))
 for _g in ("kur", "zincirler", "TIPLER", "ILISKI", "SEMA", "GEREKTIRIR",
            "BLOK", "yaz", "turetilebilir"):
     ok(hasattr(V00, _g), f"veri_00.{_g} var (sozlesme)")
@@ -202,6 +246,15 @@ ok(M.ESKI_VARSAYILAN == MA.ESKI_VARSAYILAN, "ESKI_VARSAYILAN AYNI")
 ok([f.name for f in M.dc.fields(M.Ayar)]
    == [f.name for f in MA.dc.fields(MA.Ayar)], "Ayar ALANLARI ayni")
 ok(M.T_LEN == MA.T_LEN and M.SPECIAL == MA.SPECIAL, "sabitler AYNI")
+# Ayar VARSAYILANLARI: yalniz BILEREK degistirilen ikisi farkli olmali.
+# Ucuncusu cikarsa kopya sapmis demektir. (Varsayilanlar yeniden kurulusta
+# KULLANILMIYOR -- `ayar_oku` eksik alanlari ESKI_VARSAYILAN'dan
+# dolduruyor -- ama sapma yine de GORULSUN.)
+import dataclasses as _dcc                                   # noqa: E402
+_vf = sorted(f.name for f in _dcc.fields(M.Ayar)
+             if getattr(M.Ayar(), f.name) != getattr(MA.Ayar(), f.name))
+ok(_vf == ["ad", "veri_ad"],
+   "Ayar VARSAYILANLARI yalniz ad + veri_ad'da farkli", str(_vf))
 
 for f in GOREV_ALAN:
     ok(getattr(A, f) == getattr(B15, f), f"gorev alani {f} model_b15 ile AYNI",

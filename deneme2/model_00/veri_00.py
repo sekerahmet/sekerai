@@ -39,10 +39,11 @@ YAPI
     genislet(G, tohum)  veri_okul3.genislet -- sekiz alan acilimi
     kur(tohum)          ikisi arka arkaya + IZ denetimi   <- KULLANILAN
 
-SEMA burada TEK bir sozluk: taban semanin uzerine genisletme satirlari
-yaziliyor. `_taban_kur` semayi yalniz `G["sema"]`ya koymak icin okuyor
-(hesaba girmiyor), `genislet` de zaten ayni sozlugu geri yaziyor --
-yani birlestirme grafi DEGISTIRMIYOR. Sinanan sey de bu.
+IKI SEMA var, orijinaldeki gibi: `SEMA_TABAN` (taban grafin semasi) ve
+`SEMA` (sekiz alan acilimiyla genisletilmis). `_taban_kur` birincisini,
+`genislet` ikincisini `G["sema"]`ya koyar. Ilk birlestirmede tek sozluk
+vardi ve taban graf kendi basina TUTARSIZ kaliyordu -- ayrinti asagida,
+SEMA tanimlarinin yaninda.
 """
 from __future__ import annotations
 
@@ -108,7 +109,7 @@ OKUL_TUR = ["Lisesi", "Fen_Lisesi", "Anadolu_Lisesi"]
 # `sehir` ve `ders` uc ayri tipten cikiyor -> kisayolun MUMKUN oldugu
 # zincirler olusuyor. Ortusme olmazsa gomulu kontrol %100 olur ve AYIRT
 # sinifi (sinavin yapildigi yer) kalmaz.
-SEMA = {
+SEMA_TABAN = {
     "kardes":   {"KISI": "KISI"},                 # simetrik
     "baba":     {"KISI": "KISI"},
     "anne":     {"KISI": "KISI"},
@@ -127,7 +128,7 @@ SEMA = {
     "hoca":     {"DERS": "KISI"},
     "onkosul":  {"DERS": "DERS"},
 }
-ILISKI = list(SEMA)
+ILISKI = list(SEMA_TABAN)
 TIPLER = ["KISI", "OKUL", "SEHIR", "DERS"]
 
 # Anlamca BIRBIRINI GEREKTIREN cifler: (r1, r2) -> r_esdeger
@@ -331,7 +332,7 @@ def _taban_kur(tohum=0, olcek=None):
     return dict(ad=ad, n={t: len(ad[t]) for t in TIPLER}, sozluk=sozluk,
                 kim={s: i for i, s in enumerate(sozluk)},
                 tip={a: t for t in TIPLER for a in ad[t]},
-                olgu=olgu, sema=SEMA, iliski=ILISKI)
+                olgu=olgu, sema=SEMA_TABAN, iliski=ILISKI)
 
 
 
@@ -429,9 +430,19 @@ def yaz(G, z, f=print):
 
 # --- veri_okul3: SEKIZ ALAN ACILIMININ SEMASI --------------------------
 # Eski girdiler AYNEN; yalniz yeni (tip -> tip) satirlari eklendi.
-# Burada TABAN SEMANIN USTUNE yaziliyor (veri_okul3 ayri bir kopya
-# kuruyordu; sonuc ayni, cunku `_taban_kur` semayi hesapta KULLANMIYOR
-# ve `genislet` zaten G["sema"]yi bu sozlukle degistiriyor).
+#
+# !! KUSUR ve DUZELTMESI (16 Eylul hakemligi). Ilk birlestirmede TEK bir
+# `SEMA` vardi: taban semanin USTUNE yaziliyordu. Sonuc grafi dogruydu
+# (derin karsilastirma gecti) ama TABAN GRAF kendi basina TUTARSIZ
+# kaliyordu -- `_taban_kur()` semasi henuz olgusu OLMAYAN tip ciftleri
+# vaat ediyordu:
+#
+#     ORIJINAL  VO.zincirler(VO.kur(0))       -> 59.140 zincir
+#     ILK KOPYA zincirler(_taban_kur(0))      -> KeyError ('...', 'rakip')
+#
+# Bugun kimse `_taban_kur`u tek basina cagirmiyor, ama bu bir MAYINDI.
+# Orijinaldeki gibi IKI AYRI sozluk tutuluyor.
+SEMA = {r: dict(m) for r, m in SEMA_TABAN.items()}
 SEMA["kardes"].update({"OKUL": "OKUL", "SEHIR": "SEHIR"})
 SEMA["komsu"].update({"KISI": "KISI", "OKUL": "OKUL"})
 SEMA["rakip"].update({"KISI": "KISI", "SEHIR": "SEHIR"})
@@ -440,6 +451,9 @@ SEMA["hoca"].update({"OKUL": "KISI"})
 SEMA["okul"].update({"DERS": "OKUL"})
 SEMA["sehir"].update({"DERS": "SEHIR"})
 SEMA["ders"].update({"SEHIR": "DERS"})
+
+assert set(SEMA) == set(SEMA_TABAN), "YENI SEMBOL EKLENMIS -- arama uzayi bozulur"
+assert len(ILISKI) == 17, f"|R| 17 olmali: {len(ILISKI)}"
 
 
 # ======================================================================
@@ -574,15 +588,33 @@ def turetilebilir(G, esik=0.5):
 
 # tohum 0 grafinin parmak izi. Olculdu 16 Eylul 2026; uc ayri surecte
 # ayni cikti (sozluk sirasina bagli DEGIL, her sey siralanip karilir).
-IZ = "42a423f41000"
+IZ = "3f6751c4ccd4"
 
 
 def graf_izi(G):
-    """Grafin ICERIGINDEN tureyen sabit parmak izi."""
+    """Grafin ICERIGINDEN tureyen sabit parmak izi.
+
+    !! ILK SURUMUN IKI KOR NOKTASI VARDI (16 Eylul hakemligi, olculdu):
+
+      1. `ad` listeleri SIRALANARAK karilyordu. Oysa varlik SIRASI
+         `sozluk`u, `sozluk` da JETON ID'lerini belirliyor. KISI
+         listesini ters cevirdim -- IZ KIPIRDAMADI, ama butun kodlama
+         kaymis olurdu.
+      2. `sema` hic karilmiyordu. SEMA'ya bir tip cifti ekledim --
+         IZ yine ayni cikti, oysa gecerli zincir kumesi (SINAVIN
+         KENDISI) degisirdi.
+
+    Simdi: `olgu` SIRALI (sozluk sirasi Python surumune gore oynayabilir,
+    icerik oynamaz), `ad` / `sozluk` / `iliski` SIRASIYLA, `sema` da
+    dahil. Determinizm uc ayri surecte sinandi.
+    """
     h = hashlib.sha256()
-    h.update(repr(sorted(map(str, G["olgu"]))).encode())
-    h.update(repr(sorted(G["iliski"])).encode())
-    h.update(repr({k: sorted(v) for k, v in sorted(G["ad"].items())}).encode())
+    h.update(repr(sorted(map(str, G["olgu"].items()))).encode())
+    h.update(repr(list(G["iliski"])).encode())
+    h.update(repr([(t, list(G["ad"][t])) for t in sorted(G["ad"])]).encode())
+    h.update(repr(list(G["sozluk"])).encode())
+    h.update(repr(sorted((r, sorted(m.items()))
+                         for r, m in G["sema"].items())).encode())
     return h.hexdigest()[:12]
 
 

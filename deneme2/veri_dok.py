@@ -86,6 +86,13 @@ class Dok:
             return OZEL[i]
         if i < M.SPECIAL + v.n_rel:
             return "@" + self.R[i - M.SPECIAL]
+        # EK JETONLARI sozlugun SONUNDA (ek_kip="tr" -> 4 tane).
+        # KUSUR (16 Eylul hakemligi): burada bu dal YOKTU ve `i` ek
+        # jetonuysa varlik tablosunda aranip IndexError veriyordu. Yani
+        # bu arac `ek_kip` gelen HER kolda (model_b15, model_00) coker,
+        # model_b13'te calisirdi -- model_b15'in verisi hic DOKULMEMIS.
+        if getattr(v, "ek0", 0) and i >= v.ek0:
+            return ("'", "<NIN>", "<SI>", "<DIR>")[i - v.ek0]
         lo = v.yuva_ara[0][0]
         return v.par_ad[0][i - lo] if v.par is not None else self.ad(i - lo)
 
