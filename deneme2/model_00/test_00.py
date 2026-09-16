@@ -132,11 +132,36 @@ from ayar_00 import VERI_ALAN                                # noqa: E402
 for f in VERI_ALAN:
     ok(getattr(A, f) == getattr(B15, f), f"veri alani {f} model_b15 ile AYNI",
        f"{getattr(A, f)!r} vs {getattr(B15, f)!r}")
+
+# --- AD DEGIL, ICERIK -----------------------------------------------
+# Kullanici karari, 16 Eylul: "verisi de veri_00 olsun". Iki kol artik
+# FARKLI ad kullaniyor (veri_00 / veri_okul4), o yuzden `veri_ad` esitligi
+# ARANMAZ -- yerine GRAFIN KENDISI karsilastirilir. Asagidaki havuz ve
+# olcme izi denetimleri bunu ayrica bit duzeyinde tekrarliyor.
+ok("veri_ad" not in VERI_ALAN, "veri_ad VERI_ALAN'da YOK (ad degil icerik)")
+ok(A.veri_ad == "veri_00", "model_00 KENDI veri modulunu okur", A.veri_ad)
+ok(B15.veri_ad == "veri_okul4", "model_b15 DEGISMEDI", B15.veri_ad)
+import veri_00 as V00                                        # noqa: E402
+import veri_okul4 as V4                                      # noqa: E402
+_G0, _G4 = V00.kur(A.veri_tohum), V4.kur(B15.veri_tohum)
+ok(V00.graf_izi(_G0) == V00.graf_izi(_G4),
+   "GRAF model_b15'inkiyle AYNI (parmak izi)", V00.graf_izi(_G0))
+ok(V00.graf_izi(_G0) == V00.IZ,
+   "graf izi veri_00.IZ ile TUTUYOR -- veri sessizce kaymadi", V00.IZ)
+ok(len(V00.zincirler(_G0)) == len(V4.zincirler(_G4)),
+   "zincir sayisi AYNI", str(len(V00.zincirler(_G0))))
+ok(list(V00.ILISKI) == list(V4.ILISKI) and V00.TIPLER == V4.TIPLER,
+   "ILISKI ve TIPLER AYNI", f"|R|={len(V00.ILISKI)}")
+for _g in ("kur", "zincirler", "TIPLER", "ILISKI"):
+    ok(hasattr(V00, _g), f"veri_00.{_g} var (model_a.veri_kur sozlesmesi)")
+for _g in ("SEMA", "GEREKTIRIR", "BLOK", "yaz", "turetilebilir"):
+    ok(hasattr(V00, _g), f"veri_00.{_g} var (veri_dok/graf_dok kullaniyor)")
+
 _fark = sorted(set(B15.fark(A)) | {"ad"})
 ok(_fark == ["ad", "betas", "dar_alfa", "dar_kapi", "dff", "dongu",
-             "l", "ort_bas"],
+             "l", "ort_bas", "veri_ad"],
    f"model_00 <-> model_b15 farki {_fark}",
-   "MIMARI (l, dongu, dff, dar_*) + STANDART TARIF (betas, ort_bas)")
+   "MIMARI + STANDART TARIF (betas, ort_bas) + veri ADI (icerik AYNI)")
 v15 = M.veri_kur(B15, yaz=lambda *a: None)
 ok(M.olcme_izi(M.olcme_listeleri(A, v))
    == M.olcme_izi(M.olcme_listeleri(B15, v15)),

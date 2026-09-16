@@ -20,6 +20,22 @@ IKI GRUP, IKI KAYNAK
                         asagida tek tek gerekcelendirildi.
 
 ==========================================================================
+VERI: veri_00 -- KENDI ADIYLA, AMA AYNI ICERIK
+
+Kullanici karari, 16 Eylul: *"verisi de veri_00 olsun lutfen, okul degil
+veri_00 olacak"*.
+
+`veri_ad = "veri_00"`. Modulun ICERIGI `veri_okul4`un aynisi ve bugun
+ona devrediyor -- bagimsizlik MIMARI icin gecerli, veri icin DEGIL
+(ayni veriyi gormezse kol hicbir sey olcmez). `veri_00.py` bir parmak
+izi (`IZ`) tutuyor ve `kur()` her cagrilista denetliyor, yani veri
+sessizce kayamaz.
+
+Bu yuzden `veri_ad` asagidaki VERI_ALAN listesinde YOK: iki kol artik
+farkli AD kullaniyor. Ad yerine ICERIK sinaniyor -- `test_00.py` grafi,
+egitim havuzunu (bit duzeyinde) ve `olcme_izi`ni karsilastiriyor.
+
+==========================================================================
 DEVRALINMAYAN IKI AYAR -- ve neden
 
 1) ort_bas 10000 -> 0     LOOKAHEAD ORTALAMASI KAPATILDI
@@ -92,13 +108,19 @@ from model_b15 import AYAR as TABAN                          # noqa: E402
 # model_b15 ile BIREBIR AYNI kalmasi GEREKEN alanlar. `test_00.py` bunu
 # her kosuda sinar: biri kayarsa sinav/egitim havuzu ayrisir ve kol
 # kiyaslanamaz hale gelir.
-VERI_ALAN = ("veri_ad", "veri_tohum", "ent_pay", "comp_pay", "arama_pay",
+#
+# !! `veri_ad` bu listede YOK ve olmamali: model_00 "veri_00", model_b15
+# "veri_okul4" diyor. Ad farkli, ICERIK ayni -- ve test_00.py adi degil
+# ICERIGI sinyor (graf + egitim havuzu + olcme izi).
+VERI_ALAN = ("veri_tohum", "ent_pay", "comp_pay", "arama_pay",
              "ood_pay", "kati_pay", "jeton_ad", "ek_kip", "bicim",
              "ident_frac", "ident_kip", "belge_pay", "tam_kayip",
              "batch", "adim", "tohum", "olc_her", "n_olcum_max")
 
 AYAR = TABAN.degistir(
     ad="model_00",
+    # --- VERI: kendi adiyla, ICERIK model_b15 ile AYNI ------------------
+    veri_ad="veri_00",
     # --- MIMARI: kolun tanimi -----------------------------------------
     l=8,                 # 8 AYRI katman
     dongu=1,             # DONGU YOK
@@ -117,3 +139,5 @@ assert AYAR.isinma == 2000, "nanoGPT/Llama MUTLAK 2000"
 assert AYAR.ort_bas == 0, "Lookahead KAPALI olmali"
 assert AYAR.betas == (0.9, 0.95), "dil modeli tarifi"
 assert AYAR.dongu == 1 and AYAR.l == 8, "8 AYRI katman, dongu YOK"
+assert AYAR.veri_ad == "veri_00", "model_00 KENDI veri modulunu okur"
+assert "veri_ad" not in VERI_ALAN, "ad DEGIL, ICERIK sinanir"
