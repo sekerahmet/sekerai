@@ -70,7 +70,7 @@ def main():
 
     import model_b2, model_b3, model_b4, model_b5, model_b6, model_b7
     import model_b8, model_b9, model_b10, model_b11, model_b12
-    import model_b13
+    import model_b13, model_b14
     f7 = set(model_b1.AYAR.fark(model_b6.AYAR)) | {"ad"}
     _bak(f"model_b6 <-> model_b1 farki {sorted(f7)}",
          sorted(f7) == ["ad", "jeton_ad"],
@@ -400,6 +400,49 @@ def main():
     _bak("KIMLIK satirlarinda kopru hedefi -1 (maskeli)",
          bool((_KT13[(_X13 == M.IDENT).any(1)][:, 0] < 0).all()))
 
+    # --- model_b14: VERI YOGUNLUGU (veri_okul3) ------------------------
+    # TEK DUGME: veri_ad. wd/cosine/ident model_b13'ten DEVRALINIR.
+    # Sebep OLCULDU: model_b13'te one/seen 1.0000 oldu, comp 0.0577
+    # kaldi -- "ogrenemedi" mazereti kapandi. Literatur (Wang 2024;
+    # arXiv 2505.17923) tek bir yere isaret ediyor: phi.
+    f15 = set(model_b13.AYAR.fark(model_b14.AYAR)) | {"ad"}
+    _bak(f"model_b14 <-> model_b13 farki {sorted(f15)}",
+         sorted(f15) == ["ad", "veri_ad"],
+         "model_b14 SADECE GRAFI degistirmeli")
+    _bak('model_b14 veri_ad="veri_okul3"',
+         model_b14.AYAR.veri_ad == "veri_okul3")
+    _bak('model_b13 veri_ad="veri_okul2" (DEGISMEDI)',
+         model_b13.AYAR.veri_ad == "veri_okul2")
+    _bak("model_b14 ident/wd/cosine model_b13'ten DEVRALINDI",
+         model_b14.AYAR.ident_frac == 0.2 and model_b14.AYAR.wd == 0.1
+         and model_b14.AYAR.sabit_lr is False,
+         "CLAUDE.md kural 4")
+    _bak("model_b14 t_len 11 (DEGISMEDI)", model_b14.AYAR.t_len == 11)
+    for _g in ("AYAR", "egit", "fark_bas"):
+        _bak(f"model_b14.{_g} var", hasattr(model_b14, _g), "kos.py duser")
+    import veri_okul2 as _V2, veri_okul3 as _V3, veri_okul as _VO
+    _G2, _G3 = _V2.kur(0), _V3.kur(0)
+    _bak("veri_okul3: |R| = 17 (YENI SEMBOL YOK -- arama uzayi 17^2 SABIT)",
+         len(_G3["iliski"]) == 17 and list(_G3["iliski"]) == list(_G2["iliski"]),
+         "arXiv 2505.17923: |R|^k veri acliginin ASIL kaynagi")
+    _bak("veri_okul2 olgulari veri_okul3'te BIREBIR duruyor",
+         all(_G3["olgu"].get(k) == v for k, v in _G2["olgu"].items()),
+         "kontrol (model_b13) ancak boyle gecerli")
+    _z2, _z3 = _VO.zincirler(_G2), _VO.zincirler(_G3)
+    _p2, _p3 = len(_z2) / len(_G2["olgu"]), len(_z3) / len(_G3["olgu"])
+    _bak(f"phi TAVANI 7,04 -> 9,57", abs(_p3 - 9.57) < 0.01 and abs(_p2 - 7.04) < 0.01,
+         f"{_p2:.2f} -> {_p3:.2f}")
+    _bak("veri_okul3 YENI turetilebilir cift URETMEDI",
+         [x for x in _V3.turetilebilir(_G3)
+          if (x[0], x[1]) not in _V3.GEREKTIRIR] == [],
+         "iki iliski ayni eslemeyse model birini digerinden OKUR")
+    _v14 = M.veri_kur(model_b14.AYAR, yaz=lambda *a: None)
+    _bak(f"model_b14 egitim phi'si YUKSELDI",
+         _v14.phi > _v13.phi, f"{_v13.phi:.2f} -> {_v14.phi:.2f}")
+    _bak("model_b14 varlik sayisi DEGISMEDI (2120)",
+         _v14.n_ent == _v13.n_ent == 2120)
+    _bak("model_b14 vocab DEGISMEDI", _v14.vocab == _v13.vocab)
+
     # TEK JETONLU yol BOZULMADI mi (model_b1)
     _v1 = M.veri_kur(model_b1.AYAR, yaz=lambda *a: None)
     _X1, _P1, _T1 = M.kodla_kimlik_q1(_v1, range(5))
@@ -458,7 +501,7 @@ def main():
     for _ad in ("model_b", "model_b1", "model_b2", "model_b3",
                 "model_b4", "model_b5", "model_b6", "model_b7",
                 "model_b8", "model_b9", "model_b10", "model_b11",
-                "model_b12", "model_b13"):
+                "model_b12", "model_b13", "model_b14"):
         _satir = [
             "import sys, importlib",
             "sys.path.insert(0, %r)" % _B,
