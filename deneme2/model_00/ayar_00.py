@@ -1,66 +1,48 @@
 # -*- coding: utf-8 -*-
-"""ayar_00 — model_00'in KENDI ayarlari. Paylasilan tercihlere ESIR DEGIL.
+"""ayar_00 — model_00'in KENDI ayari. TEK BASINA DURUR.
 
-Kullanici, 16 Eylul 2026: *"standart seyi kurmamizdaki sikinti ne?
-Ayar dosyasi ise onu ayar00 diye bir dosya yap, ordan okusun."*
+Kullanici karari, 16 Eylul 2026:
+    *"bunlarin hepsi model_00 folderi altinda olmali. model_00 diger
+    hicbir model ile ayni seyi kullanmamali."*
 
-Hakli soru. `model_00`un iddiasi "STANDART tarif"; o iddia, projenin
-birikmis optimizasyon tercihlerini sessizce devralarak korunamaz. Bu
-dosya, hangi alanin NEREDEN geldigini ve NEDEN o degerde oldugunu
-tek tek yaziyor.
+Onceki surum `from model_b15 import AYAR as TABAN` diyordu; yani
+model_00'in ayari model_b15 -> model_b14 -> model_b13 -> ... zincirinden
+DEVRALINIYORDU ve zincirin herhangi bir halkasi degisince sessizce
+kayardi. Artik oyle degil: her alan ASAGIDA, `Ayar()` varsayilaninin
+uzerine, TEK TEK ve gerekcesiyle yaziliyor.
 
-==========================================================================
-IKI GRUP, IKI KAYNAK
-
-  VERI alanlari      -> model_b15'ten AYNEN devralinir.
-                        Ayni veriyi gormezse kol hicbir sey olcmez;
-                        sinav ve egitim havuzu BIT DUZEYINDE ayni kalmali.
-
-  MIMARI + OPTIMIZASYON -> STANDART TARIF. Referanslarla birlikte
-                        asagida tek tek gerekcelendirildi.
+Bunun bir yan faydasi var ve ilk kurulumda tam da bu kacmisti: devralma
+GIZLIYORDU, acik yazim GOSTERIYOR.
 
 ==========================================================================
-VERI: veri_00 -- KENDI ADIYLA, AMA AYNI ICERIK
+IKI GRUP, IKI GEREKCE
 
-Kullanici karari, 16 Eylul: *"verisi de veri_00 olsun lutfen, okul degil
-veri_00 olacak"*.
+  GOREV alanlari    -> model_b15'in gordugu SINAVIN AYNISI olmali.
+                       Ayni veriyi gormezse kol hicbir sey olcmez;
+                       sinav ve egitim havuzu BIT DUZEYINDE ayni kalmali.
+                       `test_00.py` bunu her kosuda siniyor.
 
-`veri_ad = "veri_00"`. Modulun ICERIGI `veri_okul4`un aynisi ve bugun
-ona devrediyor -- bagimsizlik MIMARI icin gecerli, veri icin DEGIL
-(ayni veriyi gormezse kol hicbir sey olcmez). `veri_00.py` bir parmak
-izi (`IZ`) tutuyor ve `kur()` her cagrilista denetliyor, yani veri
-sessizce kayamaz.
-
-Bu yuzden `veri_ad` asagidaki VERI_ALAN listesinde YOK: iki kol artik
-farkli AD kullaniyor. Ad yerine ICERIK sinaniyor -- `test_00.py` grafi,
-egitim havuzunu (bit duzeyinde) ve `olcme_izi`ni karsilastiriyor.
+  MIMARI + OPTIMIZASYON -> STANDART TARIF, referanslariyla.
 
 ==========================================================================
-DEVRALINMAYAN IKI AYAR -- ve neden
+STANDART TARIFE GORE: NE DEVRALINMADI
 
-1) ort_bas 10000 -> 0     LOOKAHEAD ORTALAMASI KAPATILDI
+1) LOOKAHEAD ORTALAMASI -- `ort_bas` 0 (YANI KAPALI)
 
-   Paylasilan ayar 10.000. adimdan sonra "yavas agirlik" tutup her 2000
+   model_b ailesi 10.000. adimdan sonra "yavas agirlik" tutup her 2000
    adimda bir onunla karistiriyor (kosu logunda "ORTALAMA ACILDI adim
    10000  alfa 0.5  her 2000 adim"). Bu bir OPTIMIZER SARMALAYICISI
    (Lookahead, Zhang ve ark. 2019) ve nanoGPT'de, Llama'da, Pythia'da,
    GPT-2/GPT-3 tarifinde YOK.
 
-   `model_00` standart bir transformerin ne yaptigini olcecekse, standart
-   olmayan bir optimizasyon numarasiyla kosamaz. KAPALI.
+   `model_00` standart bir transformerin ne yaptigini olcecekse,
+   standart olmayan bir optimizasyon numarasiyla kosamaz. KAPALI.
+   (`Ayar()` varsayilani zaten 0; model_b15 onu 10000 yapiyordu.)
 
-   !! Bu, model_b15 ile arasinda EK bir fark demek. Kolun tanimi zaten
-   "referans", ablasyon degil (onkayit model_00.md 3), ve CLAUDE.md
-   "KIYAS ARTIK ARKA PLANDA" diyor.
+2) betas -- (0.9, 0.95), (0.9, 0.999) DEGIL
 
-2) betas (0.9, 0.999) -> (0.9, 0.95)
-
-   0.999 PyTorch'un VARSAYILANI, dil modeli tarifi degil. Dort referans
-   da 0.95 kullaniyor:
-       nanoGPT   beta2 = 0.95
-       GPT-3     beta2 = 0.95
-       Llama     beta2 = 0.95
-       Pythia    beta2 = 0.95
+   0.999 PyTorch'un VARSAYILANI, dil modeli tarifi degil:
+       nanoGPT 0.95    GPT-3 0.95    Llama 0.95    Pythia 0.95
 
    beta2 gradyan BUYUKLUGUNUN hafiza suresi; etkin pencere ~1/(1-beta2):
        0.999 -> ~1000 adim      0.95 -> ~20 adim
@@ -70,74 +52,86 @@ DEVRALINMAYAN IKI AYAR -- ve neden
    asil onemli oldugu durum bir jetonun binlerce adimda bir gorunmesi;
    bizde EN SEYREK jeton bile ~2 adimda bir geciyor (olculdu: varlik
    jetonu sikliklari 632.296 .. 256, batch 512'de en seyrek ~0,44
-   kez/batch). Yani gerekce "tarif boyle", olculmus bir kazanc DEGIL.
+   kez/batch). Gerekce "tarif boyle", olculmus bir kazanc DEGIL.
+
+3) Phi DARBOGAZI -- `dar_alfa` 0.0, `dar_kapi` False
+
+   DiscoLoop projeye ozgu; standart tarifte yok. Kurulmuyor bile.
 
 ==========================================================================
-DEVRALINAN AMA ZATEN STANDART OLANLAR
+ZATEN STANDART OLANLAR (varsayilandan gelenler de dahil)
 
     wd = 0.1              nanoGPT / Pythia / Qwen2.5 SFT -- CLAUDE.md kural 4
     cosine -> lr/10       nanoGPT / Pythia (min_lr = lr/10) -- kural 4
+                          (`sabit_lr=False` bunu aciyor)
     isinma = 2000         nanoGPT warmup_iters=2000, Llama warmup=2000
                           MUTLAK deger olarak BIREBIR ayni. (Oran farkli
                           cikiyor cunku onlarin kosusu 600k adim, bizimki
                           20k -- ama tarifin yazdigi sayi 2000.)
     lr = 1e-3             Pythia-70m 1e-3. Bizim model 6,5M; bu mertebede
                           dogru yon KUCUK model -> BUYUK lr.
-    grad clip 1.0         hepsi
-    batch = 512           olcum hattiyla paylasilir, degistirilmedi
-    adim = 20000          CLAUDE.md kural 1 (ILK SINIR)
-    olc_her / n_olcum_max OLCUM alanlari -- kiyas icin AYNI kalmali
+    grad clip 1.0         hepsi (`egit` yapiyor)
     tam_kayip = True      butun pozisyonlarda next-token: standart LM kaybi
-
-==========================================================================
+    d 256 / nh 4          head_dim 64 -- bu olcekte GQA/MQA anlamsiz
+    batch 512             olcum hattiyla paylasilir
+    adim 20000            CLAUDE.md kural 1 (ILK SINIR)
 """
 from __future__ import annotations
 
-import os
-import sys
+from taban_00 import Ayar                                    # noqa: E402
 
-_B = os.path.dirname(os.path.abspath(__file__))
-for _p in (os.path.join(os.path.dirname(_B), "model_a"),
-           os.path.join(os.path.dirname(_B), "model_b"),
-           os.path.dirname(_B)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
-from model_b15 import AYAR as TABAN                          # noqa: E402
-
-# model_b15 ile BIREBIR AYNI kalmasi GEREKEN alanlar. `test_00.py` bunu
-# her kosuda sinar: biri kayarsa sinav/egitim havuzu ayrisir ve kol
-# kiyaslanamaz hale gelir.
+# Sinavin AYNI kalmasi GEREKEN alanlari. `test_00.py` bunlari model_b15
+# ile karsilastirir: biri kayarsa sinav/egitim havuzu ayrisir ve sayilar
+# ayni tabloda okunamaz.
 #
-# !! `veri_ad` bu listede YOK ve olmamali: model_00 "veri_00", model_b15
-# "veri_okul4" diyor. Ad farkli, ICERIK ayni -- ve test_00.py adi degil
-# ICERIGI sinyor (graf + egitim havuzu + olcme izi).
-VERI_ALAN = ("veri_tohum", "ent_pay", "comp_pay", "arama_pay",
-             "ood_pay", "kati_pay", "jeton_ad", "ek_kip", "bicim",
-             "ident_frac", "ident_kip", "belge_pay", "tam_kayip",
-             "batch", "adim", "tohum", "olc_her", "n_olcum_max")
+# !! `veri_ad` bu listede YOK ve olmamali: model_00 "veri_00" diyor,
+# model_b15 "veri_okul4". Ad farkli, ICERIK ayni -- ve kilit adi degil
+# ICERIGI siniyor (graf derin karsilastirma + egitim havuzu + olcme izi).
+GOREV_ALAN = ("veri_tohum", "ent_pay", "comp_pay", "arama_pay",
+              "ood_pay", "kati_pay", "jeton_ad", "ek_kip", "bicim",
+              "ident_frac", "ident_kip", "belge_pay", "tam_kayip",
+              "batch", "adim", "tohum", "olc_her", "n_olcum_max")
 
-AYAR = TABAN.degistir(
+AYAR = Ayar(
     ad="model_00",
-    # --- VERI: kendi adiyla, ICERIK model_b15 ile AYNI ------------------
-    veri_ad="veri_00",
-    # --- MIMARI: kolun tanimi -----------------------------------------
+
+    # --- GOREV: model_b15'in gordugu SINAVIN AYNISI --------------------
+    veri_ad="veri_00",   # KENDI veri modulu; ICERIK veri_okul4 ile AYNI
+    jeton_ad="tam",      # varlik = JETON DIZISI (3 yuva), tek jeton DEGIL
+    ek_kip="tr",         # Turkce ek jetonlari:  '  <NIN>  <SI>  <DIR>
+    bicim=3,             # 3 yuzey bicimi (ek_kip olmadan ANLAMSIZ)
+    ood_pay=0.05,        # dagitim disi bolme
+    ident_frac=0.2,      # kimlik koprusu
+    ident_kip="q1",
+    tam_kayip=True,      # butun pozisyonlarda next-token
+
+    # --- MIMARI: kolun TANIMI -----------------------------------------
     l=8,                 # 8 AYRI katman
-    dongu=1,             # DONGU YOK
+    dongu=1,             # DONGU YOK (model_b15: l=4, dongu=2)
     dff=704,             # SwiGLU, 8/3 * 256 = 682,7 -> 64'un kati
-    dar_alfa=0.0,        # Phi darbogazi YOK
-    dar_kapi=False,      # ogrenilen gecit YOK
+    # dar_alfa / dar_kapi VARSAYILANDA (0.0 / False) -> Phi darbogazi YOK
+
     # --- OPTIMIZASYON: STANDART TARIF ---------------------------------
     betas=(0.9, 0.95),   # nanoGPT / GPT-3 / Llama / Pythia
-    ort_bas=0,           # LOOKAHEAD KAPALI -- hicbir standart tarifte YOK
+    sabit_lr=False,      # cosine -> lr/10 (CLAUDE.md kural 4)
+    # ort_bas VARSAYILANDA (0) -> LOOKAHEAD KAPALI
 )
 
-# Devraldigimiz seylerin GERCEKTEN devralindigini burada da sabitliyoruz:
-# bir gun model_b15 degisirse bu assert'ler once duser.
-assert AYAR.wd == 0.1 and AYAR.sabit_lr is False, "CLAUDE.md kural 4"
-assert AYAR.isinma == 2000, "nanoGPT/Llama MUTLAK 2000"
-assert AYAR.ort_bas == 0, "Lookahead KAPALI olmali"
+# Yukarida ACIKCA yazilmayan ama TASINAN degerler burada sabitleniyor:
+# bir gun `Ayar()` varsayilani degisirse bu assert'ler once duser.
+assert AYAR.wd == 0.1, "CLAUDE.md kural 4"
+assert AYAR.lr == 1e-3 and AYAR.isinma == 2000, "nanoGPT/Llama MUTLAK 2000"
+assert AYAR.d == 256 and AYAR.nh == 4, "head_dim 64"
+assert AYAR.batch == 512 and AYAR.adim == 20000, "kural 1: ILK SINIR"
+assert AYAR.olc_her == 2000 and AYAR.n_olcum_max == 3000, "olcum hatti"
+assert AYAR.veri_tohum == 0 and AYAR.tohum == 0
+
+# STANDART TARIFIN KENDISI -- projeye ozgu ne varsa KAPALI olmali.
+assert AYAR.ort_bas == 0, "LOOKAHEAD KAPALI"
 assert AYAR.betas == (0.9, 0.95), "dil modeli tarifi"
+assert AYAR.dar_alfa == 0.0 and not AYAR.dar_kapi, "Phi DARBOGAZI YOK"
+assert AYAR.kopru_kayip == 0.0, "YARDIMCI KAYIP YOK"
+assert AYAR.mask_poz is None and not AYAR.mask_blok, "MASKE YOK"
 assert AYAR.dongu == 1 and AYAR.l == 8, "8 AYRI katman, dongu YOK"
 assert AYAR.veri_ad == "veri_00", "model_00 KENDI veri modulunu okur"
-assert "veri_ad" not in VERI_ALAN, "ad DEGIL, ICERIK sinanir"
+assert "veri_ad" not in GOREV_ALAN, "ad DEGIL, ICERIK sinanir"

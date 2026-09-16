@@ -78,20 +78,20 @@ import math
 import os
 import sys
 
+# YALNIZ KENDI KLASORU yola eklenir. `model_a` / `model_b` / ust klasor
+# EKLENMEZ -- kullanici karari, 16 Eylul: "model_00 diger hicbir model
+# ile ayni seyi kullanmamali."
 _B = os.path.dirname(os.path.abspath(__file__))
-_A = os.path.join(os.path.dirname(_B), "model_a")
-_K = os.path.dirname(_B)
-for _p in (_A, _B, _K, os.path.join(os.path.dirname(_B), "model_b")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if _B not in sys.path:
+    sys.path.insert(0, _B)
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import model_a as M                                          # noqa: E402
+import taban_00 as M                                         # noqa: E402
 assert hasattr(M, "egit"), (
-    f"model_a MODUL degil PAKET olarak yuklendi: {getattr(M,'__file__',None)}")
+    f"taban_00 MODUL degil PAKET olarak yuklendi: {getattr(M,'__file__',None)}")
 
 
 # ======================= ROPE ============================================
@@ -213,9 +213,13 @@ class ModelSade(nn.Module):
 # KENDI ayar dosyasindan okunur -- paylasilan tercihlere ESIR DEGIL.
 # Kullanici, 16 Eylul: "ayar dosyasi ise onu ayar00 diye bir dosya yap,
 # ordan okusun." Hangi alanin nereden geldigi ve NEDEN o degerde oldugu
-# `ayar_00.py`de tek tek yazili.
-from model_b15 import AYAR as TABAN                          # noqa: E402
-from ayar_00 import AYAR, VERI_ALAN                          # noqa: E402,F401
+# `ayar_00.py`de tek tek yazili -- ve artik `model_b15`ten DEVRALINMIYOR,
+# `Ayar()` varsayilaninin uzerine acikca yaziliyor.
+from ayar_00 import AYAR, GOREV_ALAN                         # noqa: E402,F401
+
+# Kiyas tabani: MOTORUN VARSAYILANI. (Onceden `model_b15.AYAR` idi; kol
+# artik o zincire bagli degil.)
+TABAN = M.Ayar()
 
 fark_bas = M.fark_bas
 
