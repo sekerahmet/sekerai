@@ -66,7 +66,15 @@ def main():
     for _g in ("AYAR", "egit", "fark_bas"):
         _bak(f"model_b1.{_g} var", hasattr(model_b1, _g), "kos.py duser")
 
-    import model_b2, model_b3
+    import model_b2, model_b3, model_b4
+    f5 = set(model_b1.AYAR.fark(model_b4.AYAR)) | {"ad"}
+    _bak(f"model_b4 <-> model_b1 farki {sorted(f5)}",
+         sorted(f5) == ["ad", "ort_bas"],
+         "model_b4 SADECE geri beslemeli ortalamayi kapatmali")
+    _bak("model_b4'te ortalama GERCEKTEN kapali",
+         model_b4.AYAR.ort_bas == 0, f"ort_bas={model_b4.AYAR.ort_bas}")
+    for _g in ("AYAR", "egit", "fark_bas"):
+        _bak(f"model_b4.{_g} var", hasattr(model_b4, _g), "kos.py duser")
     f4 = set(model_b1.AYAR.fark(model_b3.AYAR)) | {"ad"}
     _bak(f"model_b3 <-> model_b1 farki {sorted(f4)}",
          sorted(f4) == ["ad", "dar_sert"],
@@ -96,7 +104,8 @@ def main():
     # yan etki olarak duzeltiyor ve `model_b1` hazir yolu buluyor.
     # `kos.py` ise YALNIZ istenen modulu import eder. Bu kusur bilerek
     # bozulmus bir surumle sinandi: duzeltmeden ONCE test GECIYORDU.
-    for _ad in ("model_b", "model_b1", "model_b2", "model_b3"):
+    for _ad in ("model_b", "model_b1", "model_b2", "model_b3",
+                "model_b4"):
         _satir = [
             "import sys, importlib",
             "sys.path.insert(0, %r)" % _B,
