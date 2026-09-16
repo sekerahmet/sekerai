@@ -149,7 +149,16 @@ def sonda(q, v, lst, yaz=print):
 
     Kiyas SANS degil EN SIK SINIF: slot 2 cogunlukla <YOK> dolgusu, sans
     0.50 ama en sik sinif 0.95 -- sansla kiyaslayan "bilgi var" der.
-    Ilk yazimda tam bunu yaptim ve slot 0 icin YANLIS etiket bastim."""
+    Ilk yazimda tam bunu yaptim ve slot 0 icin YANLIS etiket bastim.
+
+    IKINCI TABAN -- KOPYA (16 Eylul, model_c sonrasi eklendi). En sik
+    sinif da YETMIYOR: kopru cogu zaman soru varligiyla AYNI AILEDEN
+    ("Ahmet Kilic --cocuk--> Huseyin Kilic"), yani slot 1 (soyad)
+    GIRDIDE zaten duruyor. Sonda o slotu "cozunce" kopruyu bildigi
+    icin degil, girdiden KOPYALADIGI icin cozmus olabilir. OLCULDU:
+    comp'ta kopya orani 0.4450 iken sonda 0.3780 cikti -- yani sonda
+    TRIVIAL kopyanin bile ALTINDA, ama en sik sinifa (0.0976) gore
+    "BILGI VAR" yaziyordu. Taban artik max(en_sik, kopya)."""
     try:
         from sklearn.linear_model import LogisticRegression
     except ImportError:                                    # pragma: no cover
@@ -162,8 +171,11 @@ def sonda(q, v, lst, yaz=print):
     tr, te = cift != 0, cift == 0
     yaz(f"    egitim {int(tr.sum())} / sinav {int(te.sum())}  "
         "((e,r1) AYRIK)")
-    yaz(f"    {'slot':<6}{'aday':>6}{'SONDA':>9}{'EN SIK':>9}{'sans':>8}"
-        "   hukum")
+    # KOPYA TABANI: soru varliginin ayni slot'u kopruye ESIT mi. Model
+    # hicbir sey bilmeden bunu yapabilir; sonda da yapabilir.
+    ent_ = np.array([[int(t) for t in M._e(v, x[0])] for x in lst])
+    yaz(f"    {'slot':<6}{'aday':>6}{'SONDA':>9}{'EN SIK':>9}{'KOPYA':>9}"
+        f"{'sans':>8}   hukum")
     out = {}
     for j in range(kop.shape[1]):
         y = kop[:, j] - lo
@@ -174,10 +186,16 @@ def sonda(q, v, lst, yaz=print):
         acc = float(clf.score(q[te], y[te]))
         c = collections.Counter(y[te].tolist())
         sik = c.most_common(1)[0][1] / int(te.sum())
-        hukum = ("DOLGU, bilgi degil" if sik > 0.5 else
-                 "BILGI VAR" if acc > 2 * sik else "bilgi YOK")
-        out[str(j)] = dict(aday=ns, sonda=acc, en_sik=sik, hukum=hukum)
-        yaz(f"    {j:<6}{ns:>6}{acc:>9.4f}{sik:>9.4f}{1/ns:>8.4f}   {hukum}")
+        kpy = float((ent_[te, j] == kop[te, j]).mean())
+        taban = max(sik, kpy)
+        hukum = ("TABAN>0.5 (%s), bilgi DEGIL" % ("kopya" if kpy >= sik
+                                                 else "dolgu")
+                 if taban > 0.5 else
+                 "BILGI VAR" if acc > 2 * taban else "bilgi YOK")
+        out[str(j)] = dict(aday=ns, sonda=acc, en_sik=sik, kopya=kpy,
+                           taban=taban, hukum=hukum)
+        yaz(f"    {j:<6}{ns:>6}{acc:>9.4f}{sik:>9.4f}{kpy:>9.4f}"
+            f"{1/ns:>8.4f}   {hukum}")
     return out
 
 
