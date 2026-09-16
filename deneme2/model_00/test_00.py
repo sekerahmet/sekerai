@@ -125,16 +125,18 @@ ok(not torch.allclose(l1[0, -1], l2[0, -1], atol=1e-5),
 
 # --- 3) VERI model_b15 ILE AYNI MI --------------------------------------
 print("\n=== 3) VERI model_b15 ILE BIREBIR AYNI MI ===")
-VERI_ALAN = ("veri_ad", "veri_tohum", "ent_pay", "comp_pay", "arama_pay",
-             "ood_pay", "kati_pay", "jeton_ad", "ek_kip", "bicim",
-             "ident_frac", "ident_kip", "belge_pay", "tam_kayip")
+# VERI_ALAN listesi `ayar_00.py`den okunur -- TEK KAYNAK. Burada
+# kopyalansaydi iki liste ayri ayri degisir ve kilit sessizce EKSIK
+# denetler hale gelirdi.
+from ayar_00 import VERI_ALAN                                # noqa: E402
 for f in VERI_ALAN:
     ok(getattr(A, f) == getattr(B15, f), f"veri alani {f} model_b15 ile AYNI",
        f"{getattr(A, f)!r} vs {getattr(B15, f)!r}")
 _fark = sorted(set(B15.fark(A)) | {"ad"})
-ok(_fark == ["ad", "dar_alfa", "dar_kapi", "dff", "dongu", "l"],
+ok(_fark == ["ad", "betas", "dar_alfa", "dar_kapi", "dff", "dongu",
+             "l", "ort_bas"],
    f"model_00 <-> model_b15 farki {_fark}",
-   "YALNIZ mimari alanlari degismeli")
+   "MIMARI (l, dongu, dff, dar_*) + STANDART TARIF (betas, ort_bas)")
 v15 = M.veri_kur(B15, yaz=lambda *a: None)
 ok(M.olcme_izi(M.olcme_listeleri(A, v))
    == M.olcme_izi(M.olcme_listeleri(B15, v15)),
@@ -143,6 +145,29 @@ X0, _, _, _, _, _ = M.egitim_havuzu(A, v, yaz=lambda *a: None)
 X1, _, _, _, _, _ = M.egitim_havuzu(B15, v15, yaz=lambda *a: None)
 ok(X0.shape == X1.shape and (X0 == X1).all(),
    "EGITIM HAVUZU model_b15 ile BIREBIR AYNI", f"{X0.shape} vs {X1.shape}")
+
+# --- 3b) STANDART TARIF -- DEVRALINMAYANLAR -----------------------------
+print("\n=== 3b) STANDART TARIF -- devralinMAYANLAR ===")
+# `ort_bas` en onemlisi: paylasilan ayar 10.000. adimdan sonra LOOKAHEAD
+# (yavas agirlik) ortalamasi yapiyor -- kosu logunda "ORTALAMA ACILDI".
+# Bu bir optimizer SARMALAYICISI ve nanoGPT/Llama/Pythia/GPT-2 tarifinde
+# YOK. Standart modelin ne yaptigini olcecek bir kol, standart olmayan
+# bir numarayla kosamaz.
+ok(A.ort_bas == 0, "LOOKAHEAD ORTALAMASI KAPALI (ort_bas=0)",
+   f"b15 {B15.ort_bas} -> 00 {A.ort_bas}")
+ok(B15.ort_bas == 10000, "model_b15'te ACIK (DEGISMEDI)", str(B15.ort_bas))
+ok(A.betas == (0.9, 0.95),
+   "betas (0.9, 0.95) -- nanoGPT/GPT-3/Llama/Pythia", str(A.betas))
+ok(B15.betas == (0.9, 0.999),
+   "model_b15'te PyTorch varsayilani (DEGISMEDI)", str(B15.betas))
+# Devralinanlar ZATEN standart olmali:
+ok(A.wd == 0.1 and A.sabit_lr is False,
+   "wd 0.1 + cosine DEVRALINDI (zaten standart, CLAUDE.md kural 4)")
+ok(A.isinma == 2000,
+   "isinma 2000 DEVRALINDI -- nanoGPT/Llama MUTLAK degeriyle AYNI")
+ok(A.lr == 1e-3, "lr 1e-3 DEVRALINDI -- Pythia-70m ile ayni mertebe")
+ok(A.mask_poz is None and not A.mask_blok and A.kopru_kayip == 0,
+   "projeye ozgu DIGER numaralarin hepsi KAPALI")
 
 # --- 4) PARAMETRE --------------------------------------------------------
 print("\n=== 4) PARAMETRE ===")

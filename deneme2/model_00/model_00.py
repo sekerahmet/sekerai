@@ -39,17 +39,25 @@ Referanslar: nanoGPT (GPT-2 tarifi), Pythia-70m/160m, Llama tarzi blok.
 zaten bu tarifin kendisi.
 
 --------------------------------------------------------------------------
-VERI AYARLARI model_b15 ILE BIREBIR AYNI -- bu KASITLI
+AYARLAR `ayar_00.py`DE -- paylasilan tercihlere ESIR DEGIL
 
-"Her seyden bagimsiz" MIMARI icin gecerli; veri icin degil. Ayni veriyi
-gormezse kol hicbir sey olcmez. Degisen YALNIZ mimari:
+    VERI alanlari         model_b15'ten AYNEN (sinav ve havuz BIT AYNI)
+    MIMARI + OPTIMIZASYON STANDART TARIF, referanslariyla
 
-    veri_okul4 (1060 varlik)   ek_kip="tr"   bicim=3   t_len 17
-    ident_frac=0.2  wd=0.1  cosine  tam_kayip=True
+Iki ayar BILEREK devralinmadi (gerekce `ayar_00.py`de):
 
-`test_00.py` bunu her kosuda sinar: model_b15 ile AYNI olmasi gereken
-butun VERI alanlari birebir tutmali, FARKLI olmasi gerekenler de
-yalnizca mimari alanlari olmali.
+    ort_bas 10000 -> 0        LOOKAHEAD ORTALAMASI KAPATILDI. Paylasilan
+                              ayar 10.000. adimdan sonra yavas agirlik
+                              tutup karistiriyor; bu bir optimizer
+                              SARMALAYICISI ve hicbir standart tarifte
+                              YOK. Standart modelin ne yaptigini olcecek
+                              bir kol, standart olmayan bir numarayla
+                              kosamaz.
+    betas (0.9,0.999) -> (0.9,0.95)   0.999 PyTorch varsayilani; nanoGPT,
+                              GPT-3, Llama, Pythia hepsi 0.95.
+
+`test_00.py` her kosuda sinar: VERI alanlari model_b15 ile birebir
+tutmali, farklilar da YALNIZ mimari + bu iki optimizasyon alani olmali.
 
 --------------------------------------------------------------------------
 PARAMETRE
@@ -97,9 +105,20 @@ def _rope_tablo(t_len: int, kafa_d: int, taban: float = 10000.0):
 
 
 def _rope(x, cos, sin):
-    """x: (B, nh, T, kafa_d).  Cift/tek kanallari ikili dondurur."""
+    """x: (B, nh, T, kafa_d).  Cift/tek kanallari ikili dondurur.
+
+    GORELILIK SINANDI (16 Eylul, hakemlik): q_m . k_n yalniz (m-n)'ye
+    bagli -- m-n=3 icin bes farkli m'de yayilim 1,9e-06; m=n'de skor
+    donmemis hale ESIT. Yani donme birimsel ve goreli.
+
+    `.to(x.dtype)`: autocast'ta `emb` fp32, `qkv` fp16 doner; cos/sin
+    `h.dtype`den (fp32) geldigi icin q/k fp32'ye YUKSELIRDI. SDPA
+    autocast listesinde oldugu icin bu FIILEN sorun CIKARMIYOR (CPU
+    bf16 autocast ile sinandi, gecti) -- ama o bir PyTorch politikasi.
+    Tek satirla bagimsiz kaliyoruz; sayisal fark YOK."""
+    c = cos[None, None, : x.shape[2]].to(x.dtype)
+    s = sin[None, None, : x.shape[2]].to(x.dtype)
     x1, x2 = x[..., 0::2], x[..., 1::2]
-    c, s = cos[None, None, : x.shape[2]], sin[None, None, : x.shape[2]]
     return torch.stack([x1 * c - x2 * s, x1 * s + x2 * c], dim=-1).flatten(-2)
 
 
@@ -178,6 +197,10 @@ class ModelSade(nn.Module):
                                        for p in self.parameters()}.values())
 
     def forward(self, x):
+        # RoPE tablosu t_len'e gore kuruldu. Daha uzun dizi gelirse
+        # dilimleme SESSIZCE kisa tablo dondururdu; burada patlasin.
+        assert x.shape[1] <= self.rope_cos.shape[0], (
+            f"dizi {x.shape[1]} > t_len {self.rope_cos.shape[0]}")
         h = self.emb(x)
         cos = self.rope_cos.to(h.dtype)
         sin = self.rope_sin.to(h.dtype)
@@ -187,17 +210,12 @@ class ModelSade(nn.Module):
 
 
 # ======================= AYAR ============================================
+# KENDI ayar dosyasindan okunur -- paylasilan tercihlere ESIR DEGIL.
+# Kullanici, 16 Eylul: "ayar dosyasi ise onu ayar00 diye bir dosya yap,
+# ordan okusun." Hangi alanin nereden geldigi ve NEDEN o degerde oldugu
+# `ayar_00.py`de tek tek yazili.
 from model_b15 import AYAR as TABAN                          # noqa: E402
-
-# VERI ayarlari model_b15'ten AYNEN devralinir (yukaridaki nota bak).
-# Degisen YALNIZ mimari:
-AYAR = TABAN.degistir(
-    ad="model_00",
-    l=8, dongu=1,            # 8 AYRI katman, paylasim YOK
-    dff=704,                 # 8/3 * 256 = 682,7 -> 64'un kati
-    dar_alfa=0.0,            # Phi darbogazi YOK
-    dar_kapi=False,          # ogrenilen gecit YOK
-)
+from ayar_00 import AYAR, VERI_ALAN                          # noqa: E402,F401
 
 fark_bas = M.fark_bas
 
