@@ -1481,6 +1481,13 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
     # noktasinda bir kez okunuyor -- bedeli yok.
     kayip_top = torch.zeros((), device=DEV)
     kayip_say = 0
+    # YARDIMCI kaybi AYRI say. `kayip` sutunu ikisinin TOPLAMI ve
+    # kopru_kayip=0 olan kollarla KIYASLANAMAZ; ayri yazilmazsa
+    # "model_b8'in kaybi daha yuksek" diye YANLIS okunurdu.
+    yrd_top = torch.zeros((), device=DEV)
+    yrd_say = 0
+    # KPOZ her adimda tensora ceviriliyordu; bir kez yeter.
+    _KPT = torch.from_numpy(KPOZ).to(DEV)
     # ADIM 0 DA `try` ICINDE. Disaridayken burada coken bir kosu kunyeyi
     # `durum: KOSUYOR`da birakiyordu -- olculdu: ilk olcumde patlayan kosu
     # ne `HATA` yazdi ne de sebebi. Klasor "yarim mi, kosuyor mu, oldu mu"
@@ -1534,11 +1541,18 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
                     kb = torch.from_numpy(KTR[j]).to(DEV)      # (B, nk)
                     m = kb[:, 0] >= 0                          # 2hop satirlar
                     if bool(m.any()):
-                        kp = torch.from_numpy(KPOZ).to(DEV)
-                        lgk = lg_tam[m][:, kp]                 # (Bm, nk, V)
-                        kayip = kayip + ayar.kopru_kayip * F.cross_entropy(
+                        lgk = lg_tam[m][:, _KPT]               # (Bm, nk, V)
+                        yrd = F.cross_entropy(
                             lgk.float().reshape(-1, lgk.shape[-1]),
                             kb[m].reshape(-1))
+                        # ORTALAMA GECERLI SATIRLAR UZERINDE; ana kayip
+                        # BUTUN satirlarda ortalaniyor. Havuzun %82'si
+                        # 2hop, yani yardimci terimin FIILI agirligi
+                        # kopru_kayip'in ~1,22 KATI. Hata degil ama
+                        # "agirlik 1.0" gorunup 1,22 olmasi YANILTIR.
+                        kayip = kayip + ayar.kopru_kayip * yrd
+                        yrd_top += yrd.detach()
+                        yrd_say += 1
             kayip_top += kayip.detach()
             kayip_say += 1
             opt.zero_grad(set_to_none=True)
@@ -1581,8 +1595,18 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
             if adim % ayar.olc_her == 0 or adim == ayar.adim:
                 r = _nokta(adim, float(kayip_top.item() / max(1, kayip_say)),
                            lr, kayip_son=float(kayip.item()))
+                if ayar.kopru_kayip > 0:
+                    # AYRI SUTUN: `kayip` = ana + agirlikli yardimci.
+                    # `kayip_yrd` yalniz yardimci terim (agirliksiz).
+                    # `kayip_ana` = kayip - kopru_kayip * kayip_yrd, yani
+                    # model_b6 ile KIYASLANABILIR olan sayi.
+                    r["kayip_yrd"] = float(yrd_top.item() / max(1, yrd_say))
+                    r["kayip_ana"] = round(
+                        r["kayip"] - ayar.kopru_kayip * r["kayip_yrd"], 6)
                 kayip_top = torch.zeros((), device=DEV)
                 kayip_say = 0
+                yrd_top = torch.zeros((), device=DEV)
+                yrd_say = 0
                 egri.append(r)
                 # ANLIK GORUNTU: agirlik ortalamasi olcumunun sarti. Adim
                 # adli, 8 hane sifir dolgulu -- arsivde `f"..._{20000}.pt"`
