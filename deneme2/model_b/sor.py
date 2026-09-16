@@ -50,8 +50,14 @@ def _ad(v, e):
 
 
 def _birlestir(parcalar):
-    """<YOK> dolgusunu atar, kalanini alt cizgiyle birlestirir."""
-    return "_".join(p for p in parcalar if p != "<YOK>")
+    """<YOK> dolgusunu atar, kalanini BOSLUKLA birlestirir.
+
+    ALT CIZGI YOK. Kullanici, 16 Eylul: "ahmet_kilic denediysen sikinti
+    cunku _ yok." Dogru: alt cizgi ham grafin ad dizgesinde var, MODELIN
+    DUNYASINDA YOK -- model "Ahmet" ve "Kilic" diye iki jeton goruyor.
+    Ciktida alt cizgi basmak, olmayan bir jetoni varmis gibi gosterirdi.
+    Tek jetonlu kollarda ad zaten tek parcadir, hicbir sey degismez."""
+    return " ".join(p for p in parcalar if p != "<YOK>")
 
 
 def kur(klasor, genislik=5):
@@ -116,7 +122,7 @@ def sor(v, net, metin, yaz=print):
         if rel2id:
             yaz(f"     iliskiler: {list(rel2id)}")
         return
-    e_ad = "_".join(p)
+    e_ad = " ".join(p)
     if e_ad not in ad2id:
         yak = [a for a in ad2id if a.lower().startswith(e_ad.lower()[:4])][:6]
         yaz(f"  '{e_ad}' grafta YOK." + (f"  Benzer: {yak}" if yak else ""))
