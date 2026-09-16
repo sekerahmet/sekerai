@@ -367,6 +367,12 @@ class Veri:
             self.yuva, self.vocab = 1, self.ent_off + self.n_ent
             self.p1_off = self.p2_off = self.ent_off
             self.n1 = self.n2 = self.n_ent
+            # `yuva_ara` BURADA DA kurulur. Yoksa `dogruluk()` tek jetonlu
+            # kollarda AttributeError ile duserdi -- 16 Eylul, model_b6
+            # yamasinda gozden kacti, duman testinde yakalandi. Tek kaynak
+            # olsun diye TEK ELEMANLI liste; sart yazmaya gerek kalmiyor.
+            self.paylasilan = True
+            self.yuva_ara = [(self.ent_off, self.vocab)]
         else:
             # IKI AYRIK BLOK -> yuva basina KISITLI argmax temiz kalir.
             self.yuva = self.par.shape[1]

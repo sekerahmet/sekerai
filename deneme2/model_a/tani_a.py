@@ -53,7 +53,33 @@ import model_a as M
 import pencere_a as P
 
 KATEGORI = ("DOGRU", "KOPRU", "KISAYOL", "VARLIK", "KOPRU_YANLIS",
-            "VARLIK_BASKA", "ILGISIZ")
+            "VARLIK_BASKA", "VARLIK_DEGIL", "ILGISIZ")
+# VARLIK_DEGIL yalniz COK JETONLU kodlamada olabilir: yuva basina argmax
+# HICBIR varliga denk gelmeyen bir jeton birlesimi uretebilir
+# ("Ayse" + "Lisesi"). Tek jetonda bu kategori HEP BOS kalir.
+
+
+def varlik_sozlugu(v: M.Veri):
+    """(yuva jetonlari) -> varlik id.  Birebirlik `veri_kur`da ASSERT'li."""
+    if v.par is None:
+        return None
+    return {tuple(int(x) for x in v.par[e]): e for e in range(v.n_ent)}
+
+
+def yuva_araliklari(v: M.Veri, yuva: int):
+    """Yuva basina (lo, hi). TEK KAYNAK `v.yuva_ara` -- `dogruluk()` ve
+    kayip da onu kullaniyor, burada yeniden turetilmiyor."""
+    if v.par is None:
+        return [(v.ent_off, v.ent_off + v.n_ent)]
+    return list(v.yuva_ara[:yuva])
+
+
+def cevap_uzunlugu(v: M.Veri, e: int) -> int:
+    """Varligin KAC jetonla yazildigi (<YOK> dolgusu sayilmaz)."""
+    if v.par is None:
+        return 1
+    return sum(1 for j in range(v.yuva)
+               if v.par_ad[j][int(v.par[e, j])] != "<YOK>")
 
 
 @torch.no_grad()
@@ -62,8 +88,13 @@ def tahmin_ve_sira(net, v: M.Veri, lst, bs=512):
 
     Sira 0 = model dogru cevabi ilk siraya koydu. Varlik-kisitli:
     iliski/ozel token'lar yarismaya SOKULMAZ (dogruluk() ile ayni kural)."""
-    X, Pz, T = M.kodla_2hop(v, lst)
-    lo, hi = v.ent_off, v.ent_off + v.n_ent
+    X, Pz, _T = M.kodla_2hop(v, lst)
+    ARA = yuva_araliklari(v, Pz.shape[1])
+    soz = varlik_sozlugu(v)
+    # EJ[e, j] = e varliginin j. yuvadaki jetonunun YUVA ICI indisi.
+    EJ = (np.arange(v.n_ent, dtype=np.int64)[:, None] if v.par is None
+          else v.par[:, :len(ARA)])
+    EJt = torch.from_numpy(np.ascontiguousarray(EJ)).to(M.DEV)
     onceki = net.training
     net.eval()
     tah, sira = [], []
@@ -73,13 +104,29 @@ def tahmin_ve_sira(net, v: M.Veri, lst, bs=512):
                             enabled=(M.DEV == "cuda")):
             lg = net(xb)
         idx = torch.from_numpy(Pz[i:i + bs]).to(M.DEV)
-        ar = torch.arange(len(idx), device=M.DEV)
-        lg = lg.float()[ar, idx][:, lo:hi]
-        g = torch.from_numpy(T[i:i + bs]).to(M.DEV) - lo
-        tah.append(lg.argmax(-1).cpu().numpy())
-        # dogru cevaptan KESIN BUYUK kac varlik var -> onun sirasi
-        dogru_skor = lg.gather(1, g[:, None])
-        sira.append((lg > dogru_skor).sum(-1).cpu().numpy())
+        ar = torch.arange(len(idx), device=M.DEV)[:, None]
+        lgp = lg.float()[ar, idx]                      # (B, yuva, V)
+        # TAHMIN: yuva basina KISITLI argmax -- `dogruluk()` ile AYNI
+        # kural. Tek yuvada eski davranisin birebir aynisi.
+        pj = torch.stack([lgp[:, j, lo:hi].argmax(-1)
+                          for j, (lo, hi) in enumerate(ARA)], 1)
+        pj = pj.cpu().numpy()
+        if soz is None:
+            tah.append(pj[:, 0])
+        else:
+            tah.append(np.array([soz.get(tuple(int(x) for x in r), -1)
+                                 for r in pj], np.int64))
+        # SIRA: varlik puani = yuvalarin LOG-OLASILIKLARI TOPLAMI. Kayip
+        # yuvalari bagimsiz kabul ediyor, puan da oyle. Tek yuvada
+        # log_softmax siralamayi DEGISTIRMEZ -> eski sira ile ayni.
+        puan = None
+        for j, (lo, hi) in enumerate(ARA):
+            lp = torch.log_softmax(lgp[:, j, lo:hi], -1)     # (B, slot)
+            p = lp[:, EJt[:, j]]                             # (B, n_ent)
+            puan = p if puan is None else puan + p
+        g = torch.as_tensor([x[4] for x in lst[i:i + bs]], device=M.DEV)
+        dogru_skor = puan.gather(1, g[:, None])
+        sira.append((puan > dogru_skor).sum(-1).cpu().numpy())
     net.train(onceki)
     return np.concatenate(tah), np.concatenate(sira)
 
@@ -89,6 +136,9 @@ def ayristir(v: M.Veri, lst, tah: np.ndarray) -> list:
     out = []
     for (e, r1, r2, b, a), p in zip(lst, tah):
         ksy = int(v.facts[e, r2])
+        if p < 0:
+            out.append("VARLIK_DEGIL")      # jeton birlesimi bir varlik DEGIL
+            continue
         if p == a:
             k = "DOGRU"
         elif p == b:
@@ -142,9 +192,13 @@ def hedef_uzayi(v: M.Veri, lst, tah: np.ndarray, yaz=print) -> dict:
     Ikisi de SANS SEVIYESIYLE birlikte raporlanir; cunku KISI tipi
     varliklarin %66'si zaten KISI'dir ve "dogru tipi buldu" demek ancak
     sanstan yukarideyse bir sey ifade eder."""
-    yanlis = [(x, int(p)) for x, p in zip(lst, tah) if p != x[4]]
+    # p < 0 -> tahmin hicbir varliga denk gelmiyor; TIP ve MENZIL
+    # tanimsiz. Sayisi ayrica raporlanir, ortalamaya KARISTIRILMAZ.
+    dis = sum(1 for p in tah if int(p) < 0)
+    yanlis = [(x, int(p)) for x, p in zip(lst, tah)
+              if p != x[4] and int(p) >= 0]
     if not yanlis:
-        return {}
+        return dict(varlik_degil=dis) if dis else {}
     tip = v.tip
     # menzil[r] = r iliskisinin cikti kumesi
     menzil = {}
@@ -166,9 +220,42 @@ def hedef_uzayi(v: M.Veri, lst, tah: np.ndarray, yaz=print) -> dict:
         f"(sans %{100*tip_sans:.1f})")
     yaz(f"       r2'nin MENZILINDE      : %{100*men_ic:5.1f}   "
         f"(sans %{100*men_sans:.1f})")
+    if dis:
+        yaz(f"       VARLIK DEGIL           : {dis} ornek (uzay disinda)")
     return dict(n_yanlis=len(yanlis), tip_ayni=float(tip_ayni),
                 tip_sans=float(tip_sans), menzil_ic=float(men_ic),
-                menzil_sans=float(men_sans))
+                menzil_sans=float(men_sans), varlik_degil=dis)
+
+
+def uzunluga_gore(v: M.Veri, lst, kat: list, ad: str, yaz=print) -> dict:
+    """Ayni bolme, CEVABIN JETON SAYISINA gore ayrilmis.
+
+    Onkayit model_b6.md 2.6 (BAGLAYICI, kosudan ONCE yazildi): `ood`
+    homojen DEGIL -- orneklerin %26,1'inde cevap TEK jetonlu (SEHIR,
+    DERS), yani cok-jetonlu baglama o orneklerde HIC SINANMIYOR. Tek
+    sayi olarak okunursa kolay vakalar zor vakalari gizler.
+
+    Tek jetonlu kodlamada butun cevaplar 1 jetonludur; tablo tek satir
+    olur ve toplamla AYNI sayiyi verir -- yani bu rapor eski kollari
+    degistirmez."""
+    u = [cevap_uzunlugu(v, x[4]) for x in lst]
+    d = {}
+    yaz("")
+    yaz(f"  {ad} -- CEVABIN JETON SAYISINA GORE  (onkayit model_b6 2.6)")
+    yaz(f"    {'jeton':<7}{'n':>6}{'DOGRU':>9}{'KISAYOL':>9}{'KOPRU':>8}")
+    for uz in sorted(set(u)):
+        ix = [i for i, x in enumerate(u) if x == uz]
+        n = len(ix)
+        pay = {k: sum(1 for i in ix if kat[i] == k) / n
+               for k in ("DOGRU", "KISAYOL", "KOPRU")}
+        d[str(uz)] = dict(n=n, **pay)
+        yaz(f"    {uz:<7}{n:>6}{pay['DOGRU']:>9.4f}"
+            f"{pay['KISAYOL']:>9.4f}{pay['KOPRU']:>8.4f}")
+    if len(d) > 1:
+        e, z = d[str(min(u))]["DOGRU"], d[str(max(u))]["DOGRU"]
+        yaz(f"    -> en KISA cevap {e:.4f}  vs  en UZUN cevap {z:.4f}"
+            f"   fark {z - e:+.4f}")
+    return d
 
 
 def iliski_karsilastir(v: M.Veri, L: dict, yaz=print) -> dict:
@@ -255,16 +342,21 @@ def main():
 
     sonuc = {}
     print(f"\n{'='*66}\nENT CEVAPLARI NE? -- yanlis olanlar dahil hepsi")
-    for ad in ("ent", "ent_yok", "comp", "seen"):
+    # `ood` EKLENDI: model_b6'nin BIRINCIL olcusu o (bolme KENAR
+    # duzeyinde, jetonlamadan etkilenmiyor). Once yoktu -- birincil
+    # olcunun ayrisimi CIKMIYORDU.
+    for ad in ("ent", "ent_yok", "ood", "comp", "seen"):
         if not L.get(ad):
             continue
         tah, sira = tahmin_ve_sira(net, veri, L[ad])
         kat = ayristir(veri, L[ad], tah)
         sonuc[ad] = ozet(ad, kat, sira)
         sonuc[ad]["uzay"] = hedef_uzayi(veri, L[ad], tah)
+        if ad in ("ood", "ent"):
+            sonuc[ad]["uzunluk"] = uzunluga_gore(veri, L[ad], kat, ad)
 
     print(f"\n{'='*66}\nOLGULARI BILIYOR MU, BIRLESTIREMIYOR MU?")
-    for ad in ("ent", "comp", "seen"):
+    for ad in ("ent", "ood", "comp", "seen"):
         if L.get(ad):
             sonuc[ad]["zincir"] = zincir_testi(net, veri, L[ad], ad)
 

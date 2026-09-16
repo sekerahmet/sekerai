@@ -354,6 +354,44 @@ def main():
              sum(1 for e, _, _, _, a in _ls if e == a) == 0,
              "kopyalamayla gecilebilir!")
 
+    # ===================================================================
+    print()
+    print("=== 9) TANI YUVA SAYISINDAN BAGIMSIZ MI ===")
+    # Neden kilitte: `tani_a` TEK yuvaya sabitti ve jeton_ad ile
+    # cokuyordu; `dogruluk()` ise `yuva_ara`yi sartsiz okuyup TEK
+    # jetonlu kollarda AttributeError veriyordu. Ikisi de 16 Eylul'de
+    # duman testinde yakalandi -- kilitte OLMADIGI icin 78 kontrol
+    # GECIYORDU. Simdi her kosuda deneniyor.
+    import tani_a as _T                                      # noqa: E402
+    import model_b1 as _m1                                   # noqa: E402
+    for _mod in (_m1, model_b6):
+        _a = _mod.AYAR
+        _vv = M.veri_kur(_a, yaz=lambda *x: None)
+        _bak(f"{_a.ad}: yuva_ara kuruldu (yuva={_vv.yuva})",
+             len(getattr(_vv, "yuva_ara", [])) == _vv.yuva)
+        _LL = M.olcme_listeleri(_a, _vv)
+        _lst = _LL["ood"][:16]
+        _net = ModelB(_a, _vv.vocab)
+        _net.eval()
+        _th, _sr = _T.tahmin_ve_sira(_net, _vv, _lst)
+        _bak(f"{_a.ad}: tahmin_ve_sira sekli ({len(_lst)},)",
+             _th.shape == (len(_lst),) and _sr.shape == (len(_lst),),
+             f"{_th.shape} {_sr.shape}")
+        _kt = _T.ayristir(_vv, _lst, _th)
+        _bak(f"{_a.ad}: butun kategoriler KATEGORI listesinde",
+             set(_kt) <= set(_T.KATEGORI), set(_kt) - set(_T.KATEGORI))
+        _uz = _T.uzunluga_gore(_vv, _lst, _kt, "ood", yaz=lambda *x: None)
+        _bak(f"{_a.ad}: uzunluk tablosu TOPLAMI n'e esit",
+             sum(x["n"] for x in _uz.values()) == len(_lst))
+        _bak(f"{_a.ad}: dogruluk() dusmeden kosuyor",
+             0.0 <= M.dogruluk(_net, _vv, *M.kodla_2hop(_vv, _lst)) <= 1.0)
+    _bak("tek jetonluda uzunluk tablosu TEK satir",
+         len(_T.uzunluga_gore(
+             M.veri_kur(_m1.AYAR, yaz=lambda *x: None),
+             M.olcme_listeleri(_m1.AYAR, M.veri_kur(
+                 _m1.AYAR, yaz=lambda *x: None))["ood"][:16],
+             ["DOGRU"] * 16, "ood", yaz=lambda *x: None)) == 1)
+
     print()
     print(f"{_iyi} gecti, {_kotu} BOZUK")
     if _kotu:

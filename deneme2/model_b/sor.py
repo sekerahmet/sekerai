@@ -40,12 +40,18 @@ from model_b import ModelB                                   # noqa: E402
 
 
 def _ad(v, e):
-    """Varlik id -> okunabilir ad."""
+    """Varlik id -> okunabilir ad.  YUVA SAYISINA BAGIMSIZ.
+
+    Onceden IKI yuvaya sabitliydi; jeton_ad="tam" 3 yuva kullaniyor ve
+    ucuncu jeton SESSIZCE DUSUYORDU (Ankara_Fen_Lisesi -> Ankara_Fen)."""
     if v.par is None:
         return f"e{e}"
-    a = v.par_ad[0][int(v.par[e, 0])]
-    b = v.par_ad[1][int(v.par[e, 1])]
-    return a if b == "<YOK>" else f"{a}_{b}"
+    return _birlestir(v.par_ad[j][int(v.par[e, j])] for j in range(v.yuva))
+
+
+def _birlestir(parcalar):
+    """<YOK> dolgusunu atar, kalanini alt cizgiyle birlestirir."""
+    return "_".join(p for p in parcalar if p != "<YOK>")
 
 
 def kur(klasor, genislik=5):
@@ -121,16 +127,15 @@ def sor(v, net, metin, yaz=print):
         X, Pp, _ = M.kodla_2hop(v, [(e, rid[0], rid[1], 0, 0)])
 
     lg = net(torch.from_numpy(X).to(M.DEV)).float()
-    ARA = [(v.p1_off, v.p1_off + v.n1), (v.p2_off, v.p2_off + v.n2)][:Pp.shape[1]]
-    tah = []
-    for j, (lo, hi) in enumerate(ARA):
-        tah.append(int(lg[0, int(Pp[0, j]), lo:hi].argmax()) + lo)
+    # `yuva_ara` TEK KAYNAK -- dogruluk() ve kayip da onu kullaniyor.
+    ARA = v.yuva_ara[:Pp.shape[1]] if v.par is not None else         [(v.ent_off, v.ent_off + v.n_ent)]
+    tah = [int(lg[0, int(Pp[0, j]), lo:hi].argmax()) + lo
+           for j, (lo, hi) in enumerate(ARA)]
     if v.par is None:
         m_ad = _ad(v, tah[0] - v.ent_off)
     else:
-        a = v.par_ad[0][tah[0] - v.p1_off]
-        b2 = v.par_ad[1][tah[1] - v.p2_off]
-        m_ad = a if b2 == "<YOK>" else f"{a}_{b2}"
+        m_ad = _birlestir(v.par_ad[j][tah[j] - ARA[j][0]]
+                          for j in range(len(ARA)))
 
     g_ad = _ad(v, gercek) if gercek >= 0 else "(olgu YOK)"
     bol = _bolme(v, e, rid[0], rid[1] if len(rid) > 1 else None)
