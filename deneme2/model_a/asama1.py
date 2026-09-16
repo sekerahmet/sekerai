@@ -109,6 +109,143 @@ def olc(net1, net, v, lst, bs=256):
     return tut / n, as2.mean()
 
 
+@torch.no_grad()
+def gizli(net1, v, lst, poz, bs=256):
+    """poz'daki nf(h) -- ILK LOOP'tan sonra, Phi UYGULANMADAN."""
+    X, _, _ = M.kodla_2hop(v, lst)
+    cik = []
+    for i in range(0, len(X), bs):
+        xb = torch.from_numpy(X[i:i + bs]).to(M.DEV)
+        h = net1.emb(xb) + net1.pos(torch.arange(X.shape[1],
+                                                 device=M.DEV))[None]
+        for blk in net1.bloklar:
+            h = blk(h)
+        cik.append(net1.nf(h[:, poz]).cpu())
+    return torch.cat(cik).numpy()
+
+
+@torch.no_grad()
+def ornek_bazli(net1, v, lst, poz, bs=256):
+    """poz'da ORNEK BASINA: kopru yuva0 dogru mu (bool dizi)."""
+    X, _, _ = M.kodla_2hop(v, lst)
+    lo, hi = (v.yuva_ara[0] if v.par is not None
+              else (v.ent_off, v.ent_off + v.n_ent))
+    kop = np.array([_jetonlar(v, x[3])[0] for x in lst])
+    ok = np.zeros(len(X), bool)
+    for i in range(0, len(X), bs):
+        xb = torch.from_numpy(X[i:i + bs]).to(M.DEV)
+        z = net1(xb).float()[:, poz, lo:hi]
+        h = torch.from_numpy(kop[i:i + bs]).to(M.DEV) - lo
+        ok[i:i + xb.shape[0]] = (z.argmax(-1) == h).cpu().numpy()
+    return ok
+
+
+def sonda(q, v, lst, yaz=print):
+    """LINEER SONDA: kopru, hidden state'ten DOGRUSAL olarak cikarilabiliyor
+    mu? Yuva basina ayri.
+
+    (e, r1) CIFTLERINE GORE AYRIK bolme -- ayni cift hem egitimde hem
+    sinavda olsaydi sonda GRAFI EZBERLERDI ve her zaman yuksek cikardi.
+
+    Kiyas SANS degil EN SIK SINIF: slot 2 cogunlukla <YOK> dolgusu, sans
+    0.50 ama en sik sinif 0.95 -- sansla kiyaslayan "bilgi var" der.
+    Ilk yazimda tam bunu yaptim ve slot 0 icin YANLIS etiket bastim."""
+    try:
+        from sklearn.linear_model import LogisticRegression
+    except ImportError:                                    # pragma: no cover
+        yaz("    (sklearn yok, sonda atlandi)")
+        return {}
+    import collections
+    lo = v.yuva_ara[0][0] if v.par is not None else v.ent_off
+    kop = np.array([[int(t) for t in M._e(v, x[3])] for x in lst])
+    cift = np.array([hash((x[0], x[1])) % 5 for x in lst])
+    tr, te = cift != 0, cift == 0
+    yaz(f"    egitim {int(tr.sum())} / sinav {int(te.sum())}  "
+        "((e,r1) AYRIK)")
+    yaz(f"    {'slot':<6}{'aday':>6}{'SONDA':>9}{'EN SIK':>9}{'sans':>8}"
+        "   hukum")
+    out = {}
+    for j in range(kop.shape[1]):
+        y = kop[:, j] - lo
+        ns = len(set(y.tolist()))
+        if ns < 2 or te.sum() < 20:
+            continue
+        clf = LogisticRegression(max_iter=300).fit(q[tr], y[tr])
+        acc = float(clf.score(q[te], y[te]))
+        c = collections.Counter(y[te].tolist())
+        sik = c.most_common(1)[0][1] / int(te.sum())
+        hukum = ("DOLGU, bilgi degil" if sik > 0.5 else
+                 "BILGI VAR" if acc > 2 * sik else "bilgi YOK")
+        out[str(j)] = dict(aday=ns, sonda=acc, en_sik=sik, hukum=hukum)
+        yaz(f"    {j:<6}{ns:>6}{acc:>9.4f}{sik:>9.4f}{1/ns:>8.4f}   {hukum}")
+    return out
+
+
+def uzunluga_gore(v, lst, mat, poz, yaz=print):
+    """ASAMA-1, KOPRUNUN token sayisina gore. Ayni model, ayni kosu --
+    confound YOK. Hipotez: Phi pozisyon-yerel oldugu icin COK token'li
+    kopruyu enjekte edemez; dogruysa TEK token'li koprulerde daha
+    yuksek cikmali."""
+    import collections
+    if v.par is None:
+        return {}
+    uz = [sum(1 for j in range(v.yuva)
+              if v.par_ad[j][int(v.par[x[3], j])] != "<YOK>") for x in lst]
+    tip = [v.tip_ad[v.tip[x[3]]] for x in lst]
+    yaz(f"    KOPRUNUN token sayisina gore (poz {poz}):")
+    yaz(f"    {'kopru':<9}{'n':>6}{'ASAMA-1':>10}   kopru tipi")
+    out = {}
+    for u in sorted(set(uz)):
+        ix = [i for i, x in enumerate(uz) if x == u]
+        t = collections.Counter(tip[i] for i in ix)
+        d = float(mat[ix].mean())
+        out[str(u)] = dict(n=len(ix), asama1=d)
+        yaz(f"    {u} token{'':<2}{len(ix):>6}{d:>10.4f}   "
+            + "/".join(f"{k}:{n}" for k, n in t.most_common(3)))
+    yaz("    ^ TIP ile KARISIK: tek token'li koprular SEHIR/DERS, aday")
+    yaz("      kumesi kucuk. Tek basina hukum vermez.")
+    return out
+
+
+@torch.no_grad()
+def head_teshisi(net, v, poz_h, yaz=print):
+    """model_c: her head NE cozuyor, karisim agirliklari NE?
+
+    Tasarim "her head bir yuva cozsun" diyor ama KAYIPTA bunu zorlayan
+    HICBIR SEY YOK -- kayip yalniz son cevabi goruyor. Head'ler cokerse
+    null sonuc YORUMLANAMAZ: hipotez mi yanlis, uygulama mi tutmadi,
+    ayrilamaz. Bu yuzden olculuyor."""
+    if not getattr(net, "cok_bas", False):
+        return {}
+    m = net.kafa.shape[0]
+    W = net.emb.weight
+    q = net.nf(poz_h)                                  # (N, d)
+    yaz(f"    {m} head, {len(q)} pozisyon ornegi")
+    gs, ss, tepe = [], [], []
+    for j in range(m):
+        p = torch.softmax((q @ net.kafa[j].T) @ W.T / net.ayar.dar_tau, -1)
+        gs.append(p @ W)
+        ss.append((gs[j] * net.kar_w[j]).sum(-1) + net.kar_b[j])
+        tepe.append(p.argmax(-1))
+    a = torch.softmax(torch.stack(ss, -1), -1)         # (N, m)
+    out = dict(karisim=[float(x) for x in a.mean(0)])
+    yaz(f"    karisim agirligi (ortalama): "
+        + "  ".join(f"h{j}={a[:, j].mean():.3f}" for j in range(m)))
+    yaz(f"    karisim SACILIMI (std)     : "
+        + "  ".join(f"h{j}={a[:, j].std():.3f}" for j in range(m)))
+    ayni = [[float((tepe[i] == tepe[j]).float().mean())
+             for j in range(m)] for i in range(m)]
+    out["ayni_token"] = ayni
+    yaz("    head'ler AYNI token'i mi seciyor (1.0 = tamamen COKMUS):")
+    for i in range(m):
+        yaz("      " + "  ".join(f"{ayni[i][j]:.3f}" for j in range(m)))
+    cok = max(ayni[i][j] for i in range(m) for j in range(m) if i != j)
+    out["coktu"] = bool(cok > 0.9)
+    yaz(f"    -> {'!! HEAD''LER COKTU' if cok > 0.9 else 'head''ler AYRI'}"
+        f"  (en buyuk ortusme {cok:.3f})")
+    return out
+
+
 def bas(ad, mat, as2, v, yaz=print):
     """EN IYI pozisyon hukum verir; butun tablo `--tara` ile basilir."""
     eniyi = int(mat[:, 0].argmax())
@@ -146,6 +283,10 @@ def main():
     ap.add_argument("--tara", action="store_true",
                     help="BUTUN pozisyonlarin tablosunu bas")
     ap.add_argument("--bolme", default="ood,ent,comp,seen")
+    ap.add_argument("--sonda", action="store_true",
+                    help="LINEER SONDA: kopru hidden state'te DOGRUSAL mi")
+    ap.add_argument("--head", action="store_true",
+                    help="model_c: head'ler AYRISTI mi, karisim agirliklari")
     ap.add_argument("--n", type=int, default=400)
     ap.add_argument("--cikti", default=None)
     a = ap.parse_args()
@@ -181,8 +322,29 @@ def main():
             continue
         mat, as2 = olc(net1, net, v, lst)
         sonuc[bol] = bas(f"{bol}  n={len(lst)}", mat, as2, v)
+        ep = sonuc[bol]["en_iyi_poz"]
         if a.tara:
             tara_bas(mat, M.kodla_2hop(v, lst[:1])[0][0], v)
+        # --- KOPRU UZUNLUGUNA GORE (ayni model, confound YOK) ----------
+        if v.par is not None:
+            ob = ornek_bazli(net1, v, lst, ep)
+            sonuc[bol]["uzunluk"] = uzunluga_gore(v, lst, ob, ep)
+        # --- LINEER SONDA ----------------------------------------------
+        if a.sonda:
+            print("    -- LINEER SONDA --")
+            q = gizli(net1, v, lst, ep)
+            sonuc[bol]["sonda"] = sonda(q, v, lst)
+        # --- HEAD TESHISI (model_c) ------------------------------------
+        if a.head and getattr(net, "cok_bas", False):
+            print("    -- HEAD TESHISI --")
+            X0, _, _ = M.kodla_2hop(v, lst)
+            with torch.no_grad():
+                hh = net1.emb(torch.from_numpy(X0).to(M.DEV))
+                hh = hh + net1.pos(torch.arange(X0.shape[1],
+                                                device=M.DEV))[None]
+                for blk in net1.bloklar:
+                    hh = blk(hh)
+            sonuc[bol]["head"] = head_teshisi(net, v, hh[:, ep])
 
     yol = a.cikti or os.path.join(
         a.klasor, f"asama1_{ayar.ad}_t{ayar.tohum}_g{g}.json")
