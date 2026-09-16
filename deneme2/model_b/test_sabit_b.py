@@ -166,20 +166,31 @@ def main():
     # --- model_b10: DIL MODELI KAYBI ----------------------------------
     # Alti koldur egittigimiz sey bir SORU-CEVAP basligiydi: logit'lerin
     # %70'i atiliyordu. Bu kol kaybi HER pozisyona yayiyor.
-    f11 = set(model_b6.AYAR.fark(model_b10.AYAR)) | {"ad"}
-    _bak(f"model_b10 <-> model_b6 farki {sorted(f11)}",
+    # TABAN model_b9 -- kullanici karari 16 Eylul ("b10 learnable gate
+    # olacak"). Boylece kol YINE TEK DUGME ve merdiven bir basamak
+    # uzuyor: b6 -> b9 (dar_kapi) -> b10 (tam_kayip) -> b8 (TAVAN).
+    f11 = set(model_b9.AYAR.fark(model_b10.AYAR)) | {"ad"}
+    _bak(f"model_b10 <-> model_b9 farki {sorted(f11)}",
          sorted(f11) == ["ad", "tam_kayip"],
          "model_b10 SADECE kaybin NEREDE hesaplandigini degistirmeli")
+    f11b = set(model_b6.AYAR.fark(model_b10.AYAR)) | {"ad"}
+    _bak(f"model_b10 <-> model_b6 farki {sorted(f11b)} (IKI dugme, "
+         f"atfetme b9 uzerinden)",
+         sorted(f11b) == ["ad", "dar_kapi", "tam_kayip"])
     _bak("model_b10 tam_kayip=True", model_b10.AYAR.tam_kayip is True)
+    _bak("model_b9 tam_kayip=False (DEGISMEDI)",
+         model_b9.AYAR.tam_kayip is False)
     _bak("model_b6 tam_kayip=False (DEGISMEDI)",
          model_b6.AYAR.tam_kayip is False)
-    _bak("model_b10 dar_kapi=False, dar_kafa=1, kopru_kayip=0 "
-         "(b9/c/b8 ile KARISMIYOR)",
-         model_b10.AYAR.dar_kapi is False and model_b10.AYAR.dar_kafa == 1
+    _bak("model_b10 dar_kapi=True (model_b9'dan DEVRALINDI)",
+         model_b10.AYAR.dar_kapi is True)
+    _bak("model_b10 dar_kafa=1, kopru_kayip=0 (c/b8 ile KARISMIYOR)",
+         model_b10.AYAR.dar_kafa == 1
          and model_b10.AYAR.kopru_kayip == 0.0)
-    _bak("model_b10 MIMARI DEGISMIYOR: ek parametre YOK",
+    _bak("model_b10 MIMARI, model_b9 ile AYNI: ek parametre YOK",
          sum(p.numel() for p in ModelB(model_b10.AYAR, _v8.vocab).parameters())
-         == sum(p.numel() for p in ModelB(model_b6.AYAR, _v8.vocab).parameters()))
+         == sum(p.numel() for p in ModelB(model_b9.AYAR, _v8.vocab).parameters()),
+         "tam_kayip MIMARIYE dokunmaz, yalniz kaybin NEREDE oldugunu degistirir")
     for _g in ("AYAR", "egit", "fark_bas"):
         _bak(f"model_b10.{_g} var", hasattr(model_b10, _g), "kos.py duser")
 

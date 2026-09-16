@@ -1,11 +1,31 @@
 # -*- coding: utf-8 -*-
-"""model_b10 — DIL MODELI KAYBI.  Taban model_b6, TEK FARK: tam_kayip.
+"""model_b10 — DIL MODELI KAYBI.  Taban model_b9, TEK FARK: tam_kayip.
 
 Onceden kayit: belge/onkayit/model_b10.md
 
-    model_b6    tam_kayip=False   kayip YALNIZ cevap yuvalarinda
-    model_b10   tam_kayip=True    kayip HER pozisyonda (next-token)
-                                  ^ TEK FARK
+    model_b9    dar_kapi=True  tam_kayip=False   kayip YALNIZ cevapta
+    model_b10   dar_kapi=True  tam_kayip=True    kayip HER pozisyonda
+                                                 ^ TEK FARK
+
+--------------------------------------------------------------------------
+TABAN NEDEN model_b9 -- kullanici karari, 16 Eylul
+
+Kullanici: "b10 learnable gate olacak o net." Ben model_b6 uzerine
+kurmustum ve itiraz ettim: model_b9 gate'i TEK BASINA olctu ve
+NEGATIF cikti (comp 0.0600, b6 0.0657). Kullanici karari tekrarladi.
+
+Tabani model_b9 yapinca kol YINE TEK DUGME oluyor ve atfetme
+KAYBOLMUYOR -- merdiven bir basamak uzuyor:
+
+    model_b6  -> model_b9    TEK FARK dar_kapi    comp 0.0600  OLCULDU
+    model_b9  -> model_b10   TEK FARK tam_kayip   <- bu kol
+    model_b6  -> model_b8    TAVAN                comp 0.9747  OLCULDU
+
+Yani b10'un b9'a gore farki DOGRUDAN tam_kayip'in katkisidir.
+EKSIK HUCRE: "model_b6 + tam_kayip" (gate'siz) KOSULMADI. b10 b9'i
+gecerse, kazancin tam_kayip'ten mi yoksa tam_kayip x gate
+ETKILESIMINDEN mi geldigi ancak o kolla ayrilir. Onkayit 7 bunu
+yaziyor.
 
 --------------------------------------------------------------------------
 NEDEN -- kullanici, 16 Eylul
@@ -94,12 +114,13 @@ assert hasattr(M, "egit"), (
     f"model_a MODUL degil PAKET olarak yuklendi: {getattr(M,'__file__',None)}")
 
 from model_b import ModelB                                   # noqa: E402
-from model_b6 import AYAR as TABAN                           # noqa: E402
+from model_b9 import AYAR as TABAN                           # noqa: E402
 
 AYAR = TABAN.degistir(ad="model_b10", tam_kayip=True)
-#      ^ SADECE FARK. jeton_ad="tam", dar_kafa=1, dar_alfa=0.5,
-#        dar_kapi=False, kopru_kayip=0.0, ood_pay=0.05, wd=0.5,
-#        ort_bas=10000 hepsi model_b6'dan DEVRALINIR.
+#      ^ SADECE FARK. dar_kapi=True (model_b9'dan), jeton_ad="tam",
+#        dar_kafa=1, kopru_kayip=0.0, ood_pay=0.05, wd=0.5,
+#        ort_bas=10000 hepsi DEVRALINIR.
+#        NOT: dar_kapi=True iken `dar_alfa` FORWARD'DA KULLANILMIYOR.
 
 fark_bas = M.fark_bas
 
