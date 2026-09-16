@@ -6,8 +6,18 @@ Kullanici istegi, 16 Eylul 2026:
      bir sey istiyorum. Yani 'Ayse Yilmaz baba' diye yazdigimda
      'Mehmet Yilmaz' gibi bir cevap verdigini gormek istiyorum."
 
-    python sor.py <klasor> [--genislik 5] [--soru "Ayse_Yilmaz baba"]
+    python sor.py <klasor> [--genislik 5] [--soru "Ayse Yilmaz'in annesi"]
     python sor.py <klasor>                      # etkilesimli
+
+TURKCE YAZILIR (kullanici istegi, 16 Eylul):
+
+    Ayse Yilmaz'in annesi
+    Ayse Yilmaz'in annesinin kardesi
+    Adana Lisesi'nin muduru
+
+Ciplak yazim da calisir ve BOZULMADI:  "Ayse Yilmaz anne kardes".
+Turkce harf sart degil: "Ayse" de olur "Ayşe" de, "kardesi" de olur
+"kardeşi" de.
 
 !! BU BIR OLCU DEGIL. Elle sorulan sorular SECILMIS sorulardir; hukum
 `pencere_b` ile verilir. Bu arac ANLAMAK icin, KANITLAMAK icin degil.
@@ -52,6 +62,62 @@ def _ad(v, e):
     if v.par is None:
         return f"e{e}"
     return _birlestir(v.par_ad[j][int(v.par[e, j])] for j in range(v.yuva))
+
+
+_TR = str.maketrans("çğıöşüÇĞIİÖŞÜ", "cgiosucgiiosu")
+_YUM = {"k": "g", "p": "b", "t": "d"}        # son ses yumusamasi
+_TAMLAYAN = ("nin", "nun", "nın", "nün", "in", "un", "ın", "ün")
+
+
+def _sade(x):
+    """Turkce harfleri ASCII'ye indirir, kucuk harfe cevirir. Kullanici
+    'kardeşi' de yazabilsin 'kardesi' de."""
+    return x.translate(_TR).lower()
+
+
+def _yazimlar(r):
+    """Bir iliskinin KABUL EDILEN yazimlari.
+
+        anne   -> anne, annesi, annesinin, annenin ...
+        okul   -> okul, okulu, okulunun ...
+        cocuk  -> cocuk, cocugu, cocugunun ...   (k -> g yumusamasi)
+        sehir  -> sehir, sehri, sehrinin ...     (unlu dusmesi)
+
+    Fazla yazim URETMEK zararsiz; TEK kural iki iliskinin ayni yazimi
+    PAYLASMAMASI ve bu `_iliski_sozluk` icinde assert ile siniriyor."""
+    g = _sade(r)
+    govde = {g}
+    if g[-1] in _YUM:
+        govde.add(g[:-1] + _YUM[g[-1]])          # cocuk -> cocug
+    if len(g) >= 3 and g[-2] in "aeiou":
+        govde.add(g[:-2] + g[-1])                # sehir -> sehr
+    out = {g}
+    for b in govde:
+        out |= {b + "i", b + "u", b + "si", b + "su"}
+    # zincirde ikinci hop'un TAMLAYANI olur: "annesi" -> "annesinin"
+    return out | {a + e for a in set(out) for e in _TAMLAYAN}
+
+
+def _iliski_sozluk(v):
+    """yazim -> iliski id. Cakisma varsa DUSER: sessizce yanlis iliskiye
+    baglamak, hic cozumlememekten kotudur."""
+    d, cakisma = {}, []
+    for i, r in enumerate(v.iliski):
+        for y in _yazimlar(r):
+            if y in d and d[y] != i:
+                cakisma.append((y, v.iliski[d[y]], r))
+            d[y] = i
+    assert not cakisma, f"iliski yazimi CAKISIYOR: {cakisma[:5]}"
+    return d
+
+
+def _varlik_sadele(kelimeler):
+    """Son kelimedeki tamlayan ekini atar:  Yilmaz'in -> Yilmaz.
+    Kesme yoksa ek de aranmaz -- varlik adlarinda ek YOK."""
+    k = list(kelimeler)
+    if k and "'" in k[-1]:
+        k[-1] = k[-1].split("'")[0]
+    return [x for x in k if x]
 
 
 def _birlestir(parcalar):
@@ -112,28 +178,33 @@ def sor(v, net, metin, yaz=print):
     # (Ahmet | Kilic), yani "Ahmet_Kilic" TEK bir kelime degil; kullanici
     # da "Ahmet Kilic cocuk sehir" yazabilmeli. Alt cizgi yazarsa da olur.
     p = metin.replace(",", " ").replace("_", " ").split()
-    ad2id = {_ad(v, e): e for e in range(v.n_ent)}
-    rel2id = {r: i for i, r in enumerate(v.iliski)} if hasattr(v, "iliski") \
-        else None
-    # COZUMLEME SAGDAN: sondaki ILISKI adlari (en fazla 2) ayrilir,
-    # kalani VARLIK olur. Iliski adlari sabit bir liste oldugu icin bu
-    # belirsiz degil -- varlik adlarinda iliski adi gecmiyor.
-    rels = []
-    while p and len(rels) < 2 and rel2id is not None and p[-1] in rel2id:
-        rels.insert(0, p.pop())
-    if not p or not rels:
-        yaz("  kullanim: <varlik> <iliski> [<iliski2>]")
-        yaz("     ornek: Ahmet Kilic cocuk sehir   |   Tokat vali baba")
-        if rel2id:
-            yaz(f"     iliskiler: {list(rel2id)}")
+    ad2id = {_sade(_ad(v, e)): e for e in range(v.n_ent)}
+    yaz2id = _iliski_sozluk(v) if hasattr(v, "iliski") else None
+    # COZUMLEME SAGDAN: sondaki ILISKI kelimeleri (en fazla 2) ayrilir,
+    # kalani VARLIK olur. "Ayse Yilmaz'in annesinin kardesi" ->
+    # varlik "Ayse Yilmaz", iliskiler [anne, kardes]. Sira DOGRU: dizide
+    # once gelen ILK hop'tur ("annesinin" = 1. hop).
+    rid = []
+    while p and len(rid) < 2 and yaz2id is not None \
+            and _sade(p[-1]) in yaz2id:
+        rid.insert(0, yaz2id[_sade(p.pop())])
+    p = _varlik_sadele(p)
+    if not p or not rid:
+        yaz("  kullanim:  <varlik>'in <iliski>[nin] [<iliski2>]")
+        yaz("     ornek:  Ayse Yilmaz'in annesi")
+        yaz("             Ayse Yilmaz'in annesinin kardesi")
+        yaz("             Ahmet Kilic cocuk sehir        (ciplak yazim da olur)")
+        if yaz2id is not None:
+            yaz(f"     iliskiler: {list(v.iliski)}")
         return
     e_ad = " ".join(p)
-    if e_ad not in ad2id:
-        yak = [a for a in ad2id if a.lower().startswith(e_ad.lower()[:4])][:6]
+    if _sade(e_ad) not in ad2id:
+        yak = [_ad(v, i) for a, i in ad2id.items()
+               if a.startswith(_sade(e_ad)[:4])][:6]
         yaz(f"  '{e_ad}' grafta YOK." + (f"  Benzer: {yak}" if yak else ""))
         return
-    e = ad2id[e_ad]
-    rid = [rel2id[r] for r in rels]
+    e = ad2id[_sade(e_ad)]
+    rels = [v.iliski[i] for i in rid]
 
     if len(rid) == 1:
         X, Pp, _ = M.kodla_1hop(v, [(e, rid[0], 0)])
@@ -161,6 +232,10 @@ def sor(v, net, metin, yaz=print):
     if v.par is not None:
         yaz("  jeton   soru: " + " | ".join(
             v.par_ad[j][int(v.par[e, j])] for j in range(v.yuva)))
+    # COZUMLEME geri okunur. Turkce EK URETMIYORUZ -- uretseydik
+    # "anne" + "u" = "anneu" gibi sacmaliklar cikardi (ilk surumde
+    # tam bu oldu). Onun yerine NE ANLASILDIGI acikca yazilir.
+    yaz(f"  cozum   varlik '{_ad(v, e)}'  +  iliski {rels}")
     yaz(f"  model   {m_ad}")
     yaz(f"  gercek  {g_ad}" + ("        DOGRU" if m_ad == g_ad and gercek >= 0
                                else "        YANLIS" if gercek >= 0 else ""))
