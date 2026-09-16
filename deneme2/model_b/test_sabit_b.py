@@ -175,6 +175,18 @@ def main():
          "MODEL_SINIFI or M.Model" in
          io.open(os.path.join(_A, "pencere_a.py"), encoding="utf-8").read())
 
+    # 16 EYLUL: `tani_a` da sabit `M.Model` kullaniyordu -- model_b anlik
+    # goruntusunu "Unexpected key(s): dar_norm.g" ile REDDEDERDI ve bu
+    # ancak tani KOSULUNCA gorulurdu. pencere_a'daki hatanin AYNISI.
+    import tani_b, tani_a
+    _bak("tani_a'da MODEL_SINIFI alani var", hasattr(tani_a, "MODEL_SINIFI"))
+    _bak("tani_b onu ModelB yapti",
+         getattr(tani_a, "MODEL_SINIFI", None) is ModelB,
+         f"su an: {getattr(tani_a, 'MODEL_SINIFI', 'ALAN YOK')}")
+    _bak("tani_a sabit M.Model KULLANMIYOR",
+         "MODEL_SINIFI or M.Model" in
+         io.open(os.path.join(_A, "tani_a.py"), encoding="utf-8").read())
+
     print()
     print("=== 6) SDPA Phi, NAIF Phi ILE AYNI FONKSIYON MU ===")
     # model_b2'nin BUTUN iddiasi buna dayaniyor: ayni fonksiyon, ucuz

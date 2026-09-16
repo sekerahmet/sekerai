@@ -40,6 +40,11 @@ from __future__ import annotations
 
 import argparse, os, sys
 
+# `tani_b` bunu doldurur; None -> model_a.Model. `pencere_a`daki kancanin
+# AYNISI. 16 Eylul: burada YOKTU ve `tani_a`, model_b anlik goruntusunu
+# "Unexpected key(s): dar_norm.g" ile REDDEDERDI.
+MODEL_SINIFI = None
+
 import numpy as np
 import torch
 
@@ -244,7 +249,7 @@ def main():
     print(f"  pencere {pen[0]}-{pen[-1]} ({g} anlik goruntu) "
           f"-- pencere_a'nin SON penceresi")
     sd = P.agirlik_ortalamasi([snap[x] for x in pen])
-    net = M.Model(ayar, veri.vocab).to(M.DEV)
+    net = (MODEL_SINIFI or M.Model)(ayar, veri.vocab).to(M.DEV)
     net.load_state_dict(sd)
     net.eval()
 
