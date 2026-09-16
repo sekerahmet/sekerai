@@ -66,7 +66,7 @@ def main():
     for _g in ("AYAR", "egit", "fark_bas"):
         _bak(f"model_b1.{_g} var", hasattr(model_b1, _g), "kos.py duser")
 
-    import model_b2, model_b3, model_b4, model_b5, model_b6
+    import model_b2, model_b3, model_b4, model_b5, model_b6, model_b7
     f7 = set(model_b1.AYAR.fark(model_b6.AYAR)) | {"ad"}
     _bak(f"model_b6 <-> model_b1 farki {sorted(f7)}",
          sorted(f7) == ["ad", "jeton_ad"],
@@ -77,6 +77,20 @@ def main():
          model_b5.AYAR.jeton_ad == "ilk",
          f'jeton_ad={model_b5.AYAR.jeton_ad!r}')
     _bak('model_b1 jeton_ad="" (DEGISMEDI)', model_b1.AYAR.jeton_ad == "")
+    # --- model_b7: MAKALENIN GATE'I -----------------------------------
+    # Alti kol da alfa=0.5 kostu; makale 5.1/5.3'te alfa=1 kullaniyor.
+    # 0.5 secimi EGITILMIS agirliga SONRADAN mudahaleden gelmisti ve o
+    # kanit egitime TASINMAZ. Onkayit: belge/onkayit/model_b7.md
+    f8 = set(model_b6.AYAR.fark(model_b7.AYAR)) | {"ad"}
+    _bak(f"model_b7 <-> model_b6 farki {sorted(f8)}",
+         sorted(f8) == ["ad", "dar_alfa"],
+         "model_b7 SADECE gate'i degistirmeli")
+    _bak("model_b7 dar_alfa=1.0 (MAKALENIN AYARI)",
+         model_b7.AYAR.dar_alfa == 1.0, str(model_b7.AYAR.dar_alfa))
+    _bak("model_b6 dar_alfa=0.5 (DEGISMEDI)",
+         model_b6.AYAR.dar_alfa == 0.5, str(model_b6.AYAR.dar_alfa))
+    for _g in ("AYAR", "egit", "fark_bas"):
+        _bak(f"model_b7.{_g} var", hasattr(model_b7, _g), "kos.py duser")
     for _g in ("AYAR", "egit", "fark_bas"):
         _bak(f"model_b6.{_g} var", hasattr(model_b6, _g), "kos.py duser")
     f6 = set(model_b1.AYAR.fark(model_b5.AYAR)) | {"ad"}
@@ -126,7 +140,7 @@ def main():
     # `kos.py` ise YALNIZ istenen modulu import eder. Bu kusur bilerek
     # bozulmus bir surumle sinandi: duzeltmeden ONCE test GECIYORDU.
     for _ad in ("model_b", "model_b1", "model_b2", "model_b3",
-                "model_b4", "model_b5", "model_b6"):
+                "model_b4", "model_b5", "model_b6", "model_b7"):
         _satir = [
             "import sys, importlib",
             "sys.path.insert(0, %r)" % _B,
