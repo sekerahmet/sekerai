@@ -850,13 +850,46 @@ def kodla_kimlik_q1(v: Veri, ents):
 
     Bilinen itiraz (arsiv DENEY5): cevap girdide duruyor, kopyalamayla
     cozulebilir. Makale bunu bilerek yapiyor; iddiasi, gizli durumu token
-    gommesiyle HIZALAMAYA zorlamasi."""
-    assert v.par is None, "kimlik kollari jeton_ad ile KOSULMADI"
-    X = _bos(len(ents))
+    gommesiyle HIZALAMAYA zorlamasi.
+
+    COK JETONA ACILDI (16 Eylul, kullanici karari). Onceden burada
+    `assert v.par is None` vardi -- yani identity bridge TAM DA bizim
+    rejimimizde (cok jetonlu varlik) KAPALIYDI ve hic kosulmadi.
+
+        tek jeton   [Q1] e        IDENT ? e        EOS    6 jeton
+        cok jeton   [Q1] e1 e2 e3 IDENT ? e1 e2 e3 EOS   10 jeton
+
+    t_len 11'e SIGIYOR, yani bu kol `t_len`e DOKUNMAZ.
+
+    NEDEN -- kahin testimiz (belge/bulgu/kahin_testi.md) makalenin
+    teshisini DOGRULADI. arXiv 2509.24653 4.1, birebir:
+      "The result shows that the model completely fails to decode c on
+       OOD two-hop reasoning, which indicates token b doesn't bridge
+       the gap between first hop and second hop."
+      "We attribute this failure to a contextual disconnect between the
+       input and output spaces. The model is not explicitly required to
+       establish an equivalence between the input token b and the
+       output token b, which is a trivial capability for well-trained
+       LLMs."
+      "a straightforward solution is to augment the training data with
+       b -> b 'zero-hop' sequences, which we term as identity bridge."
+
+    GRAF BILGISI KULLANMIYOR: ne olgu, ne cevap, ne kopru. Yalniz
+    varligin KENDI jetonlari. `kopru_kayip`tan (model_b8) farki BU.
+    """
+    ents = list(ents)
+    X = _bos(len(ents), v)
+    P, T = [], []
+    p0 = 2 + v.yuva                          # QM'nin pozisyonu
     for i, e in enumerate(ents):
-        X[i, :6] = [Q1, v.ent_off + e, IDENT, QM, v.ent_off + e, EOS]
-    return X, np.full((len(ents), 1), 3, np.int64), \
-        np.array([[v.ent_off + e] for e in ents], np.int64)
+        ez = _e(v, e)
+        dz = [Q1] + ez + [IDENT, QM] + ez + [EOS]
+        assert len(dz) <= v.t_len, (
+            f"kimlik dizisi {len(dz)} jeton, t_len {v.t_len}")
+        X[i, :len(dz)] = dz
+        P.append(list(range(p0, p0 + v.yuva)))
+        T.append(ez)
+    return X, np.array(P, np.int64), np.array(T, np.int64)
 
 
 def kodla_kimlik_q2son(v: Veri, batch):

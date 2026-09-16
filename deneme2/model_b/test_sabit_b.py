@@ -70,6 +70,7 @@ def main():
 
     import model_b2, model_b3, model_b4, model_b5, model_b6, model_b7
     import model_b8, model_b9, model_b10, model_b11, model_b12
+    import model_b13
     f7 = set(model_b1.AYAR.fark(model_b6.AYAR)) | {"ad"}
     _bak(f"model_b6 <-> model_b1 farki {sorted(f7)}",
          sorted(f7) == ["ad", "jeton_ad"],
@@ -351,6 +352,61 @@ def main():
     _bak("model_b11'in LR'i SABIT kaldi (DEGISMEDI)",
          _lr(model_b11.AYAR, 20000) == model_b11.AYAR.lr)
 
+    # --- model_b13: IDENTITY BRIDGE (arXiv 2509.24653) -----------------
+    # Kahin testimiz makalenin teshisini DOGRULADI: kopru elden verilse
+    # bile bilesim olmuyor ("contextual disconnect between the input and
+    # output spaces"). Cozumleri: b -> b "zero-hop" satirlari.
+    f14 = set(model_b10.AYAR.fark(model_b13.AYAR)) | {"ad"}
+    _bak(f"model_b13 <-> model_b10 farki {sorted(f14)}",
+         sorted(f14) == ["ad", "ident_frac", "ident_kip", "sabit_lr", "wd"],
+         "EN IYI TAHMIN kolu: ident cifti + wd + cosine (onkayit 0)")
+    _bak("model_b13 ident_kip='q1' (SIFIR-HOP, e -> e)",
+         model_b13.AYAR.ident_kip == "q1",
+         "q2son GRAFTAN kopruyu soyler ve ENT tanimini BOZAR")
+    _bak("model_b13 ident_frac=0.2", model_b13.AYAR.ident_frac == 0.2)
+    _bak("model_b10 ident_frac=0.0 (DEGISMEDI)",
+         model_b10.AYAR.ident_frac == 0.0)
+    _bak(f"model_b13 t_len 11 -- kimlik satiri SIGIYOR, belge_pay=0",
+         model_b13.AYAR.t_len == 11 and model_b13.AYAR.belge_pay == 0.0)
+    for _g in ("AYAR", "egit", "fark_bas"):
+        _bak(f"model_b13.{_g} var", hasattr(model_b13, _g), "kos.py duser")
+
+    # KIMLIK SATIRI: cok jetonlu, dogru bicimli, GRAF BILGISI YOK
+    _v13 = M.veri_kur(model_b13.AYAR, yaz=lambda *a: None)
+    _Xk, _Pk, _Tk = M.kodla_kimlik_q1(_v13, range(_v13.n_ent))
+    _bak(f"kimlik satiri COK JETONLU ({int((_Xk[0] != M.PAD).sum())} jeton)",
+         int((_Xk[0] != M.PAD).sum()) == 2 * _v13.yuva + 4)
+    _bak("kimlik satiri t_len'e SIGIYOR",
+         int((_Xk != M.PAD).sum(1).max()) <= _v13.t_len)
+    _bak("kimlik: next-token sozlesmesi",
+         all(_Xk[i, _Pk[i, j] + 1] == _Tk[i, j]
+             for i in range(0, len(_Xk), 97) for j in range(_v13.yuva)))
+    _bak("kimlik: cevap = SORUNUN KENDISI (e -> e)",
+         bool((_Xk[:, 1:1 + _v13.yuva] == _Tk).all()))
+    _bak(f"kimlik: BUTUN varliklar kapsandi ({len(_Xk)}/{_v13.n_ent})",
+         len(_Xk) == _v13.n_ent)
+    # GRAF BILGISI YOK: satirda IKINCI bir varlik ya da ILISKI gecmiyor
+    _iliski_var = bool(((_Xk >= M.REL_OFF) & (_Xk < _v13.ent_off)).any())
+    _bak("kimlik satirinda ILISKI jetonu YOK -> graf bilgisi KULLANILMIYOR",
+         not _iliski_var, "kopru_kayip'tan (model_b8) FARKI tam BU")
+
+    # HAVUZ: kimlik payi ve SEYRELME
+    _X13, _P13, _T13, _k13, _KP13, _KT13 = M.egitim_havuzu(
+        model_b13.AYAR, _v13, yaz=lambda *a: None)
+    _kim_n = int((_X13 == M.IDENT).any(1).sum())
+    _bak(f"havuzun %{100*_kim_n/len(_X13):.0f}'i KIMLIK "
+         f"({_kim_n}/{len(_X13)})", 0.15 < _kim_n / len(_X13) < 0.25,
+         "model_b11 SEYRELMENIN zararini olctu; pay 0.2'de tutuldu")
+    _bak("KIMLIK satirlarinda kopru hedefi -1 (maskeli)",
+         bool((_KT13[(_X13 == M.IDENT).any(1)][:, 0] < 0).all()))
+
+    # TEK JETONLU yol BOZULMADI mi (model_b1)
+    _v1 = M.veri_kur(model_b1.AYAR, yaz=lambda *a: None)
+    _X1, _P1, _T1 = M.kodla_kimlik_q1(_v1, range(5))
+    _bak("TEK JETONLU kimlik hala calisiyor (model_b1, yuva 1)",
+         _v1.yuva == 1 and _X1.shape[1] == _v1.t_len
+         and bool((_X1[:, 1:2] == _T1).all()))
+
     for _g in ("AYAR", "egit", "fark_bas"):
         _bak(f"model_b6.{_g} var", hasattr(model_b6, _g), "kos.py duser")
     f6 = set(model_b1.AYAR.fark(model_b5.AYAR)) | {"ad"}
@@ -402,7 +458,7 @@ def main():
     for _ad in ("model_b", "model_b1", "model_b2", "model_b3",
                 "model_b4", "model_b5", "model_b6", "model_b7",
                 "model_b8", "model_b9", "model_b10", "model_b11",
-                "model_b12"):
+                "model_b12", "model_b13"):
         _satir = [
             "import sys, importlib",
             "sys.path.insert(0, %r)" % _B,
