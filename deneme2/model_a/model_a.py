@@ -263,6 +263,28 @@ class Ayar:
     # --- kimlik gorevi (model_a1 / model_a2 bunu degistirir)
     ident_frac: float = 0.0
     ident_kip: str = ""        # "" | "q2son" | "q1"
+    belge_pay: float = 0.0
+    #   0 = KAPALI. >0 ise egitim havuzuna BELGE satirlari eklenir:
+    #   ZINCIRLENEN IKI ATOMIK OLGU AYNI DIZIDE.
+    #
+    #       [S1] Ayse Yilmaz <YOK> cocuk  ? Fatma Yilmaz <YOK> <EOS>
+    #       [S1] Fatma Yilmaz <YOK> kardes ? Emre Yilmaz <YOK> <EOS>
+    #       ------------------- TEK DIZI, 20 jeton -------------------
+    #
+    #   YENI OLGU YOK: iki olgu da `one` icinde zaten AYRI AYRI var.
+    #   Eklenen tek sey BITISIKLIK -- gercek metinde "Ayse'nin cocugu
+    #   Fatma. Fatma'nin kardesi Emre." ayni paragraftadir; bizde
+    #   hicbir dizi iki olguyu birden tasimiyordu (olculdu: koprunun
+    #   ayirt edici jetonu 2-hop satirlarinin %3,28'inde geciyor, o da
+    #   isim cakismasi).
+    #
+    #   BELGELER YALNIZ `tr2`DEN kurulur. comp/ent/ent_yok/ood/
+    #   ent_arama zincirlerinden KURULMAZ -- kurulsaydi o zincirlerin
+    #   koprusu baglama YAZILMIS olurdu, yani SIZINTI. `egitim_havuzu`
+    #   bunu assert ile denetler.
+    #
+    #   `belge_pay` = havuzun ne kadari BELGE olacak (ident_frac ile
+    #   ayni desen). 0.5 -> yari yariya.
     tam_kayip: bool = False
     #   False: kayip YALNIZ cevap yuvalarinda -- bu bir SORU-CEVAP kaybi.
     #   True : kayip HER pozisyonda, next-token -- yani DIL MODELI kaybi.
@@ -297,6 +319,13 @@ class Ayar:
         # "ilk" 2 yuva, "tam" 3 yuva. Ikisinde de 2-hop 11'e siginiyor:
         #   "ilk"  [Q2] e1 e2    r1 r2 ? a1 a2    EOS  =  9
         #   "tam"  [Q2] e1 e2 e3 r1 r2 ? a1 a2 a3 EOS  = 11
+        if self.belge_pay > 0:
+            # BELGE = iki 1-hop olgu YAN YANA.
+            #   [S1] e1 e2 e3 r ? b1 b2 b3 EOS  = 10   (x2 = 20)
+            # 2-hop sorusu 11; 20 ikisini de kapsiyor.
+            #   !! BEDELI VAR: butun satirlar 20'ye DOLGULANIR ve
+            #   attention T^2 -> 11^2=121'den 20^2=400'e cikar, ~3,3 kat.
+            return 20
         return 11
 
     def sozluk(self) -> dict:
@@ -333,6 +362,9 @@ ESKI_VARSAYILAN = {
     # tam_kayip 16 Eylul'de eklendi; ondan onceki butun kosular SORU-CEVAP
     # kaybiyla egitildi -> kapali.
     "tam_kayip": False,
+    # belge_pay 16 Eylul'de eklendi; ondan onceki butun kosularda satir
+    # basina TEK olgu vardi -> kapali.
+    "belge_pay": 0.0,
 }
 
 
@@ -774,6 +806,40 @@ def kodla_2hop(v: Veri, batch):
     return X, np.array(P, np.int64), np.array(T, np.int64)
 
 
+def kodla_belge(v: Veri, batch):
+    """BELGE: zincirlenen IKI atomik olgu AYNI DIZIDE.
+
+        [S1] e r1 ? b <EOS>  [S1] b r2 ? a <EOS>
+
+    Gercek metinde "Ayse'nin cocugu Fatma. Fatma'nin kardesi Emre."
+    ayni paragraftadir. Bizde hicbir dizi iki olguyu birden tasimiyordu.
+    YENI OLGU YOK -- ikisi de `one` icinde ZATEN var; eklenen tek sey
+    BITISIKLIK.
+
+    KAYIP: butun pozisyonlarda (next-token). Yani bu kodlayici ancak
+    `tam_kayip` ile ANLAMLI -- yoksa belgenin ortasi hic ogrenilmez.
+    `egitim_havuzu` bunu assert ile denetler.
+
+    P/T doner ama ikinci olgunun CEVAP yuvalarini gosterir: `tam_kayip`
+    kapaliyken bile satir CÖP olmasin diye. (Kolun kendisi tam_kayip
+    ACIK kosuyor; bu yalniz saglamlik.)
+    """
+    X = _bos(len(batch), v)
+    P, T = [], []
+    for i, (e, r1, r2, b, a) in enumerate(batch):
+        ez, bz, az = _e(v, e), _e(v, b), _e(v, a)
+        d1 = [Q1] + ez + [REL_OFF + r1, QM] + bz + [EOS]
+        d2 = [Q1] + bz + [REL_OFF + r2, QM] + az + [EOS]
+        dz = d1 + d2
+        assert len(dz) <= v.t_len, (
+            f"belge {len(dz)} jeton, t_len {v.t_len} -- t_len TURETIMI YANLIS")
+        X[i, :len(dz)] = dz
+        p0 = len(d1) + 2 + v.yuva          # 2. olgunun QM pozisyonu
+        P.append(list(range(p0, p0 + v.yuva)))
+        T.append(az)
+    return X, np.array(P, np.int64), np.array(T, np.int64)
+
+
 def kodla_kimlik_q1(v: Veri, ents):
     """[Q1] e IDENT ? e EOS  -> hedef = varligin KENDISI (SIFIR-HOP).
 
@@ -859,6 +925,33 @@ def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
                 f"varligini [Q2] cercevesinde ZINCIR BASI yapiyor.")
             yaz("     ENT'in tanimi ('hic zincir basi olmamis') BU KOLDA "
                 "gecerli degil; taban ile ent kiyasi bunu hesaba katmali.")
+    # --- BELGE SATIRLARI (belge_pay > 0 ise) ----------------------------
+    if ayar.belge_pay > 0:
+        assert ayar.tam_kayip, (
+            "belge_pay tam_kayip GEREKTIRIR: kayip yalniz cevap yuvalarinda "
+            "hesaplanirsa belgenin ORTASI (kopru) hic ogrenilmez ve kol "
+            "hicbir sey olcmez.")
+        # !! SIZINTI DENETIMI: belgeler YALNIZ tr2'den. Sinav
+        # zincirlerinden kurulsaydi o zincirin koprusu BAGLAMA yazilmis
+        # olurdu -- yani cevabi elden vermis olurduk.
+        _sinav = {(x[0], x[1], x[2]) for lst in
+                  (v.comp, v.ent, v.ent_yok, v.ent_arama, v.ood)
+                  for x in lst}
+        _kaynak = [x for x in v.tr2]
+        _sizan = [x for x in _kaynak if (x[0], x[1], x[2]) in _sinav]
+        assert not _sizan, (
+            f"!! SIZINTI: {len(_sizan)} belge SINAV zincirinden kurulacakti")
+        n_tab = len(parca[0][0]) + len(parca[1][0])
+        n_bel = int(round(ayar.belge_pay / max(1e-9, 1 - ayar.belge_pay)
+                          * n_tab))
+        rs_b = np.random.RandomState(ayar.veri_tohum + 7717)
+        idx = rs_b.randint(0, len(_kaynak), n_bel)
+        belge = kodla_belge(v, [_kaynak[j] for j in idx])
+        parca.append(belge)
+        yaz(f"  BELGE: {n_bel} satir (havuzun %{100*n_bel/(n_tab+n_bel):.0f}'i)"
+            f"  kaynak tr2 ({len(_kaynak)} zincir)  t_len {v.t_len}")
+        yaz(f"     sizinti denetimi GECTI: sinav zincirinden belge YOK")
+
     X = np.concatenate([a for a, _, _ in parca])
     P = np.concatenate([b for _, b, _ in parca])
     T = np.concatenate([c for _, _, c in parca])
@@ -868,6 +961,10 @@ def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
            np.array([_e(v, x[3])[:_nk] for x in v.tr2], np.int64)]
     if kimlik is not None:
         _kt.append(np.full((len(parca[2][0]), _nk), -1, np.int64))
+    if ayar.belge_pay > 0:
+        # BELGE satirlarinda kopru hedefi YOK: kopru zaten dizide YAZILI,
+        # ayrica tahmin ettirmenin anlami yok. -1 -> maskelenir.
+        _kt.append(np.full((len(belge[0]), _nk), -1, np.int64))
     KT = np.concatenate(_kt)
     assert len(KT) == len(X), (len(KT), len(X))
     if ayar.kopru_kayip > 0:

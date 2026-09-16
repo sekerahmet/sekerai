@@ -135,6 +135,21 @@ AYAR_KILIT = dict(
     # (29 anahtar). Asagidaki `parametre 3427840` + `agirlik sha` da
     # bunu her kosuda dogruluyor.
     tam_kayip=False,
+    # `belge_pay` 16 Eylul'de eklendi -- `model_b11` icin. Kilit YINE
+    # YAKALADI (alan 39 -> 40). Gerekce kilide DOKUNULMADAN ONCE yazildi:
+    # belge/onkayit/model_b11.md.
+    #
+    # NE: egitim havuzuna BELGE satirlari -- zincirlenen IKI atomik olgu
+    # AYNI DIZIDE. YENI OLGU YOK, eklenen tek sey BITISIKLIK. Olculdu:
+    # koprunun ayirt edici jetonu 2-hop satirlarinin %3,28'inde geciyor
+    # (o da isim cakismasi), ve t_len 11'e iki olgu SIGMIYOR.
+    #
+    # ORTAK CEKIRDEGE dokunan IKINCI kol (`jeton_ad`dan sonra):
+    # `t_len` 11 -> 20 TURETILIYOR. VARSAYILAN KAPALI, ve kapaliyken
+    # eski kodla BIT AYNI oldugu OLCULDU (05aa827'nin model_a.py'si alt
+    # surecte cikarilip 6 adim egitildi -> agirlik farki 0.000e+00,
+    # 31 anahtar).
+    belge_pay=0.0,
 )
 
 VERI_KILIT = dict(

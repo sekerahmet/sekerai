@@ -69,7 +69,7 @@ def main():
         _bak(f"model_b1.{_g} var", hasattr(model_b1, _g), "kos.py duser")
 
     import model_b2, model_b3, model_b4, model_b5, model_b6, model_b7
-    import model_b8, model_b9, model_b10
+    import model_b8, model_b9, model_b10, model_b11
     f7 = set(model_b1.AYAR.fark(model_b6.AYAR)) | {"ad"}
     _bak(f"model_b6 <-> model_b1 farki {sorted(f7)}",
          sorted(f7) == ["ad", "jeton_ad"],
@@ -241,6 +241,64 @@ def main():
          "cevap gorevine dusen gradyan ~3 kat seyreliyor -- "
          "onkayit model_b10.md 5'te CONFOUND olarak yazili")
 
+    # --- model_b11: BELGE -- iki olgu AYNI DIZIDE ----------------------
+    f12 = set(model_b10.AYAR.fark(model_b11.AYAR)) | {"ad"}
+    _bak(f"model_b11 <-> model_b10 farki {sorted(f12)}",
+         sorted(f12) == ["ad", "belge_pay"],
+         "model_b11 SADECE satirda kac olgu oldugunu degistirmeli")
+    _bak("model_b11 belge_pay=0.5", model_b11.AYAR.belge_pay == 0.5)
+    _bak("model_b10 belge_pay=0.0 (DEGISMEDI)",
+         model_b10.AYAR.belge_pay == 0.0)
+    _bak(f"model_b11 t_len 20 (model_b10 {model_b10.AYAR.t_len}, DEGISMEDI)",
+         model_b11.AYAR.t_len == 20 and model_b10.AYAR.t_len == 11)
+    _bak("model_b11 tam_kayip=True (belge_pay BUNU GEREKTIRIR)",
+         model_b11.AYAR.tam_kayip is True)
+    for _g in ("AYAR", "egit", "fark_bas"):
+        _bak(f"model_b11.{_g} var", hasattr(model_b11, _g), "kos.py duser")
+
+    # belge_pay tam_kayip GEREKTIRIYOR mu -- assert GERCEKTEN atiyor mu
+    _v11 = M.veri_kur(model_b11.AYAR, yaz=lambda *a: None)
+    try:
+        M.egitim_havuzu(model_b11.AYAR.degistir(tam_kayip=False), _v11,
+                        yaz=lambda *a: None)
+        _ok = False
+    except AssertionError:
+        _ok = True
+    _bak("belge_pay tam_kayip GEREKTIRIR (assert ATIYOR)", _ok,
+         "kayip yalniz cevapta olsaydi belgenin ORTASI ogrenilmezdi")
+
+    # BELGE SATIRI: iki olgu, kopru DIZIDE, ve SIZINTI YOK
+    _z = _v11.tr2[0]
+    _Xb, _Pb, _Tb = M.kodla_belge(_v11, [_z])
+    _jb = set(int(t) for t in _Xb[0])
+    _bak("BELGE satiri: kopru DIZIDE yazili",
+         set(int(t) for t in M._e(_v11, _z[3])) <= _jb,
+         "belgenin amaci tam BU: kopru baglamda GORULSUN")
+    _bak("BELGE satiri: iki [S1] cercevesi var",
+         int((_Xb[0] == M.Q1).sum()) == 2, str(int((_Xb[0] == M.Q1).sum())))
+    _bak(f"BELGE satiri t_len'e SIGIYOR ({int((_Xb[0] != M.PAD).sum())}"
+         f"/{_v11.t_len})",
+         int((_Xb[0] != M.PAD).sum()) <= _v11.t_len)
+    _bak("BELGE cevabi 2. olgunun cevabi",
+         list(_Tb[0]) == [int(t) for t in M._e(_v11, _z[4])])
+
+    _X11, _P11, _T11, _k11, _KP11, _KT11 = M.egitim_havuzu(
+        model_b11.AYAR, _v11, yaz=lambda *a: None)
+    _n_bel = int((_X11 == M.Q1).sum(1) == 2).sum() if False else int(
+        ((_X11 == M.Q1).sum(1) == 2).sum())
+    _bak(f"havuzun %{100*_n_bel/len(_X11):.0f}'i BELGE ({_n_bel}/{len(_X11)})",
+         0.45 < _n_bel / len(_X11) < 0.55)
+    _bak("BELGE satirlarinda kopru hedefi -1 (maskeli)",
+         bool((_KT11[((_X11 == M.Q1).sum(1) == 2)][:, 0] < 0).all()))
+    _sinav11 = {(x[0], x[1], x[2]) for lst in
+                (_v11.comp, _v11.ent, _v11.ent_yok, _v11.ent_arama, _v11.ood)
+                for x in lst}
+    _bak("SIZINTI YOK: hicbir SINAV zinciri tr2'de degil",
+         not any((x[0], x[1], x[2]) in _sinav11 for x in _v11.tr2),
+         "belgeler tr2'den kuruluyor; tr2 sinavla kesisirse SIZINTI olur")
+    _bak(f"olcme izi DEGISMEDI ({M.olcme_izi(M.olcme_listeleri(model_b11.AYAR, _v11))})",
+         M.olcme_izi(M.olcme_listeleri(model_b11.AYAR, _v11)) == "57cf60a5e9af")
+
     for _g in ("AYAR", "egit", "fark_bas"):
         _bak(f"model_b6.{_g} var", hasattr(model_b6, _g), "kos.py duser")
     f6 = set(model_b1.AYAR.fark(model_b5.AYAR)) | {"ad"}
@@ -291,7 +349,7 @@ def main():
     # bozulmus bir surumle sinandi: duzeltmeden ONCE test GECIYORDU.
     for _ad in ("model_b", "model_b1", "model_b2", "model_b3",
                 "model_b4", "model_b5", "model_b6", "model_b7",
-                "model_b8", "model_b9", "model_b10"):
+                "model_b8", "model_b9", "model_b10", "model_b11"):
         _satir = [
             "import sys, importlib",
             "sys.path.insert(0, %r)" % _B,
