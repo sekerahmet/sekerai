@@ -95,9 +95,17 @@ def denetle(yol, T, yaz=print):
         if c["cell_type"] != "code":
             continue
         sab = _oz(T[i]) if i < len(T) else ""
+        # KOLUN KENDI ADI bu hucrede geciyorsa, baska kol adlari
+        # REFERANSTIR (kiyas tabani, tavan) ve sorun DEGIL. Yakalamak
+        # istedigim hata suydu: model_b6'nin rapor tablosu kendi adi
+        # YERINE `model_b5` yaziyordu -- yani kol KENDINI etiketlemiyordu.
+        # Ilk kural "taban disinda hicbir ad" diyordu ve model_b9'u
+        # (tavan referansi model_b8) YANLIS yere BOZUK gosterdi.
+        kendi = ad in _oz(c)
         for m in set(re.findall(aile + r"\d+", _oz(c))):
-            if m not in serbest and m not in sab:
-                kotu.append(f"{i}. hucrede AYNI AILEDEN baska kol: {m}")
+            if m not in serbest and m not in sab and not kendi:
+                kotu.append(f"{i}. hucrede KOLUN KENDI ADI YOK ama "
+                            f"{m} var")
     yaz(f"  {ad:<12} {'BOZUK' if kotu else ' ok  '}  "
         + ("; ".join(not_) if not_ else "sablonla birebir"))
     for k in kotu:

@@ -67,7 +67,7 @@ def main():
         _bak(f"model_b1.{_g} var", hasattr(model_b1, _g), "kos.py duser")
 
     import model_b2, model_b3, model_b4, model_b5, model_b6, model_b7
-    import model_b8
+    import model_b8, model_b9
     f7 = set(model_b1.AYAR.fark(model_b6.AYAR)) | {"ad"}
     _bak(f"model_b6 <-> model_b1 farki {sorted(f7)}",
          sorted(f7) == ["ad", "jeton_ad"],
@@ -124,6 +124,43 @@ def main():
          bool((_KT9[len(_v8.one):, 0] >= 0).all()))
     _bak(f"kopru hedefi {int((_KT9[:, 0] >= 0).sum())}/{len(_KT9)} satirda",
          int((_KT9[:, 0] >= 0).sum()) == len(_v8.tr2))
+    # --- model_b9: LEARNABLE GATE, TEK BASINA --------------------------
+    # model_c uc head ekliyor; ikisi AYNI kolda degisirse sonuc cikarsa
+    # hangisinden geldigi AYRILAMAZ. Bu kol gate'i YALNIZ BASINA olcer.
+    f10 = set(model_b6.AYAR.fark(model_b9.AYAR)) | {"ad"}
+    _bak(f"model_b9 <-> model_b6 farki {sorted(f10)}",
+         sorted(f10) == ["ad", "dar_kapi"],
+         "model_b9 SADECE gate'i ogrenilebilir yapmali")
+    _bak("model_b9 dar_kapi=True (learnable gate)",
+         model_b9.AYAR.dar_kapi is True)
+    _bak("model_b6 dar_kapi=False (fixed gate, DEGISMEDI)",
+         model_b6.AYAR.dar_kapi is False)
+    _bak("model_b9 dar_kafa=1 (model_c ile KARISMIYOR)",
+         model_b9.AYAR.dar_kafa == 1, str(model_b9.AYAR.dar_kafa))
+    for _g in ("AYAR", "egit", "fark_bas"):
+        _bak(f"model_b9.{_g} var", hasattr(model_b9, _g), "kos.py duser")
+    # 0. ADIMDA FIXED GATE ILE AYNI: sigmoid(0) = 0.5 = dar_alfa.
+    # Boyle olmasaydi "gate mi ise yaradi, farkli baslangic mi"
+    # ayrilamazdi.
+    torch.manual_seed(0)
+    _g6 = ModelB(model_b6.AYAR, _v8.vocab)
+    torch.manual_seed(0)
+    _g9 = ModelB(model_b9.AYAR, _v8.vocab)
+    _bak("kapi_w ve kapi_b SIFIRDAN basliyor",
+         bool(torch.all(_g9.kapi_w == 0)) and bool(torch.all(_g9.kapi_b == 0)))
+    _bak("ek parametre d+1 = 257",
+         sum(p.numel() for p in _g9.parameters())
+         - sum(p.numel() for p in _g6.parameters()) == model_b6.AYAR.d + 1)
+    _g9.load_state_dict(_g6.state_dict(), strict=False)
+    _g6.eval(); _g9.eval()
+    _xg = torch.randint(0, _v8.vocab, (4, model_b9.AYAR.t_len))
+    with torch.no_grad():
+        _dg = (_g6(_xg) - _g9(_xg)).abs().max().item()
+    _bak(f"0. adimda model_b6 ile fark {_dg:.3e}", _dg == 0.0)
+    _g9.train()
+    _g9(_xg).sum().backward()
+    _bak("gradyan kapi_w'ye AKIYOR",
+         _g9.kapi_w.grad is not None and _g9.kapi_w.grad.abs().sum() > 0)
     for _g in ("AYAR", "egit", "fark_bas"):
         _bak(f"model_b6.{_g} var", hasattr(model_b6, _g), "kos.py duser")
     f6 = set(model_b1.AYAR.fark(model_b5.AYAR)) | {"ad"}
@@ -174,7 +211,7 @@ def main():
     # bozulmus bir surumle sinandi: duzeltmeden ONCE test GECIYORDU.
     for _ad in ("model_b", "model_b1", "model_b2", "model_b3",
                 "model_b4", "model_b5", "model_b6", "model_b7",
-                "model_b8"):
+                "model_b8", "model_b9"):
         _satir = [
             "import sys, importlib",
             "sys.path.insert(0, %r)" % _B,
