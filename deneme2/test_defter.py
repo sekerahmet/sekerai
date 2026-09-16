@@ -46,6 +46,16 @@ def _oz(c):
     return "".join(c["source"])
 
 
+def _taban_oku(py):
+    """Kolun TABANI: <ad>.py icindeki `from model_bX import ... TABAN`
+    ya da `TABAN = model_bX.AYAR`. Elle liste tutmuyoruz -- taban zaten
+    kodda YAZILI, oradan okunur."""
+    if not os.path.exists(py):
+        return set()
+    s_ = io.open(py, encoding="utf-8").read()
+    return set(re.findall(r"from\s+(model_[a-z]\d*)\s+import.*?TABAN", s_))         | set(re.findall(r"TABAN\s*=\s*(model_[a-z]\d*)\.", s_))
+
+
 def denetle(yol, T, yaz=print):
     ad = os.path.basename(yol)[:-6]
     N = json.load(io.open(yol, encoding="utf-8"))["cells"]
@@ -76,12 +86,17 @@ def denetle(yol, T, yaz=print):
     #   BASKA ailenin kolu     -> capraz kiyas (model_b1 <-> model_a8)
     # Yakalanan tam olarak sudur: model_b6'nin kodunda "model_b5".
     aile = re.match(r"(model_[a-z])", ad).group(1)
+    # TABAN kolun adi serbest -- ve KOLUN KENDI .py'sinden okunur, elle
+    # yazilmaz. model_b1 hepsinin tabani DEGIL: model_b7'nin tabani
+    # model_b6. Sabit "aile+1" kurali dogru defteri BOZUK gosteriyordu.
+    taban = _taban_oku(os.path.join(os.path.dirname(yol), ad + ".py"))
+    serbest = {ad, aile + "1"} | taban
     for i, c in enumerate(N):
         if c["cell_type"] != "code":
             continue
         sab = _oz(T[i]) if i < len(T) else ""
         for m in set(re.findall(aile + r"\d+", _oz(c))):
-            if m != ad and m != aile + "1" and m not in sab:
+            if m not in serbest and m not in sab:
                 kotu.append(f"{i}. hucrede AYNI AILEDEN baska kol: {m}")
     yaz(f"  {ad:<12} {'BOZUK' if kotu else ' ok  '}  "
         + ("; ".join(not_) if not_ else "sablonla birebir"))
