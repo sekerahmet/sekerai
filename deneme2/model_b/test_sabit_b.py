@@ -333,17 +333,21 @@ def main():
             return a.lr * adim / max(1, a.isinma)
         if a.sabit_lr:
             return a.lr
-        return a.lr * 0.5 * (1 + _mt.cos(
+        _alt = a.lr / 10.0
+        _k = 0.5 * (1 + _mt.cos(
             _mt.pi * (adim - a.isinma) / max(1, a.adim - a.isinma)))
+        return _alt + _k * (a.lr - _alt)
 
     _A12 = model_b12.AYAR
     _dizi = [_lr(_A12, x) for x in (2000, 5000, 10000, 15000, 20000)]
     _bak("cosine MONOTON azaliyor (isinmadan sonra)",
          all(x > y for x, y in zip(_dizi, _dizi[1:])),
          "  ".join(f"{x:.6f}" for x in _dizi))
-    _bak(f"cosine SIFIRA iniyor ({_dizi[-1]:.1e}) -- BILINEN SAPMA",
-         _dizi[-1] < 1e-9,
-         "referanslar lr/10'da durur (min_lr); onkayit model_b12.md 3")
+    _bak(f"cosine TABANI lr/10 ({_dizi[-1]:.6f}), SIFIR DEGIL",
+         abs(_dizi[-1] - _A12.lr / 10) < 1e-12,
+         "nanoGPT/Pythia/Qwen SFT ucu de lr/10'da durur -- min_lr")
+    _bak("cosine TEPESI lr (isinma bitisinde)",
+         abs(_dizi[0] - _A12.lr) < 1e-12, f"{_dizi[0]:.6f}")
     _bak("model_b11'in LR'i SABIT kaldi (DEGISMEDI)",
          _lr(model_b11.AYAR, 20000) == model_b11.AYAR.lr)
 

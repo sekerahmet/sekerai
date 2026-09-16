@@ -1619,9 +1619,24 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
             elif ayar.sabit_lr:
                 lr = ayar.lr              # grokking icin LR SONMEMELI
             else:
-                lr = ayar.lr * 0.5 * (1 + math.cos(
+                # COSINE, TABANI lr/10 -- nanoGPT / Pythia / Qwen SFT ucu de
+                # boyle yapiyor. Taban OLMADAN son adimda lr TAM SIFIR olur
+                # ve model fiilen DONAR; `ort_bas` ile birlikte birincil
+                # pencere donmus agirliklari ortalar.
+                #   nanoGPT train.py:  min_lr + coeff * (learning_rate - min_lr)
+                #   nanoGPT GPT-2      min_lr 6e-5   = lr/10
+                #   Pythia-70m.yml     min_lr 1e-4   = lr/10  (lr 1e-3)
+                #   Qwen2.5 SFT        7e-6 -> 7e-7  = lr/10
+                # Kullanici karari, 16 Eylul: "min lr olsun, tabani lr/10
+                # olsun." YENI AYAR ALANI DEGIL -- `sabit_lr=False` dali
+                # deneme 2'de HIC KOSMADI (olculdu: 25 kosulmus ayar
+                # dosyasinin 0'inda cosine), yani hicbir kayitli sonuc
+                # degismiyor. `sabit_lr=True` yolu BIT AYNI kalir.
+                _alt = ayar.lr / 10.0
+                _k = 0.5 * (1 + math.cos(
                     math.pi * (adim - ayar.isinma)
                     / max(1, ayar.adim - ayar.isinma)))
+                lr = _alt + _k * (ayar.lr - _alt)
             for g in opt.param_groups:
                 g["lr"] = lr
 
