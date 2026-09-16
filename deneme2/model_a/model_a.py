@@ -264,6 +264,21 @@ class Ayar:
     ident_frac: float = 0.0
     ident_kip: str = ""        # "" | "q2son" | "q1"
     belge_pay: float = 0.0
+    # --- EK ISARETLEYICILI KODLAMA (16 Eylul) --------------------------
+    # Bugunku dilde rolu POZISYON tasiyor: "Fatma anne Ayse" ile
+    # "Ayse anne Fatma" farkli seyler. Yani siradan bir permutasyon
+    # ANLAMI BOZAR -- bu, bicim cesitliligini imkansiz kiliyordu.
+    # Turkce'de sira serbesttir cunku rolu EK tasir:
+    #   "Ayse'nin annesi Fatma'dir" = "Fatma'dir Ayse'nin annesi"
+    # ek_kip="tr" dort jeton ekler -- ILISKI DEGIL, DILBILGISI:
+    #   '     ozel adla ek arasina (Ayse'nin)
+    #   <NIN> tamlayan (sahip)
+    #   <SI>  tamlanan (iliski)
+    #   <DIR> yuklem (cevap)
+    # Jetonlar SOZLUGUN SONUNA ekleniyor -> REL_OFF/ent_off KAYMAZ,
+    # ek_kip="" ile uretilen diziler BIT AYNI kalir.
+    ek_kip: str = ""           # "" | "tr"
+    bicim: int = 1             # kac YUZEY BICIMI (1..3), ek_kip GEREKTIRIR
     #   0 = KAPALI. >0 ise egitim havuzuna BELGE satirlari eklenir:
     #   ZINCIRLENEN IKI ATOMIK OLGU AYNI DIZIDE.
     #
@@ -314,6 +329,19 @@ class Ayar:
             [Q2] e        r1 r2 ?  a       EOS       ->  8
             [Q2] e1 e2    r1 r2 ?  a1 a2   EOS       -> 11
         """
+        if self.ek_kip:
+            # bicim 0 (en uzun): 2-hop
+            #   e1 e2 e3 ' <NIN> r1 <SI> <NIN> r2 <SI> ? a1 a2 a3 ' <DIR> EOS
+            #   = 2*yuva + 11 = 17   (yuva 3)
+            # 1-hop bicim 0: e ' <NIN> r <SI> ? a ' <DIR> EOS = 14
+            # kimlik satiri (eksiz, degismedi) = 10 -- ikisi de siginir.
+            assert self.jeton_ad == "tam", (
+                f"ek_kip su an yalniz jeton_ad='tam' ile KURULDU: "
+                f"{self.jeton_ad!r}")
+            assert self.belge_pay == 0, (
+                "ek_kip + belge_pay BIRLIKTE KURULMADI: belge satirina ek "
+                "isaretleyici eklenmedi, t_len turetimi yanlis olur.")
+            return 17
         if not self.jeton_ad:
             return T_LEN
         # "ilk" 2 yuva, "tam" 3 yuva. Ikisinde de 2-hop 11'e siginiyor:
@@ -365,6 +393,9 @@ ESKI_VARSAYILAN = {
     # belge_pay 16 Eylul'de eklendi; ondan onceki butun kosularda satir
     # basina TEK olgu vardi -> kapali.
     "belge_pay": 0.0,
+    # ek_kip/bicim 16 Eylul'de eklendi; ondan onceki butun kosular TEK
+    # bicimde ve eksiz kodlamayla egitildi -> kapali.
+    "ek_kip": "", "bicim": 1,
 }
 
 
@@ -427,6 +458,7 @@ class Veri:
     #   jeton_ad=False ise None ve hicbir sey degismez.
     par_ad: tuple = ()                 # (yuva1 adlari, yuva2 adlari)
     t_len: int = 0                     # veri_kur doldurur (ayar.t_len)
+    ek_kip: str = ""                   # "" | "tr"  (ayar.ek_kip)
 
     def __post_init__(self):
         self.n_ent, self.n_rel = self.facts.shape
@@ -461,6 +493,14 @@ class Veri:
             (self.p1_off, _h1) = self.yuva_ara[0]
             (self.p2_off, _h2) = self.yuva_ara[min(1, self.yuva - 1)]
             self.n1, self.n2 = _h1 - self.p1_off, _h2 - self.p2_off
+        # EK ISARETLEYICILERI SOZLUGUN SONUNA. Boylece REL_OFF, ent_off
+        # ve yuva_ara HIC KAYMAZ -- ek_kip kapaliyken uretilen diziler
+        # BIT AYNI kalir, eski kosular gecerliligini korur.
+        self.ek0 = 0
+        if self.ek_kip:
+            assert self.ek_kip == "tr", f"ek_kip: {self.ek_kip!r}"
+            self.ek0 = self.vocab
+            self.vocab += 4            # '  <NIN>  <SI>  <DIR>
         if not self.t_len:
             self.t_len = 11 if self.par is not None else T_LEN
         # phi: TURETILMIS TANI SAYISI, kontrol parametresi DEGIL. Ayarlanamaz;
@@ -677,7 +717,7 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
              ent_yok=say(ent_yk), ent_arama=say(ent_ar),
              tip=E_tip, tip_ad=tuple(_V.TIPLER), ent_kati=say(ent_kt),
              ood=say(ood_ay), par=_par, par_ad=_par_ad or (),
-             t_len=ayar.t_len)
+             t_len=ayar.t_len, ek_kip=ayar.ek_kip)
 
     # --- SIZINTI DENETIMI -- sessiz gecmesin
     trset = {(e, a, b) for e, a, b, _, _ in v.tr2}
@@ -776,32 +816,81 @@ def _e(v, e):
     return [v.yuva_ara[j][0] + int(v.par[e, j]) for j in range(v.yuva)]
 
 
-def kodla_1hop(v: Veri, batch):
+def _ekler(v):
+    """(KESME, NIN, SI, DIR) -- sozlugun SONUNA eklendi (Veri.__post_init__).
+    Eski jeton id'leri KAYMADI."""
+    assert v.ek_kip == "tr", "ek_kip kapali, ek isaretleyici YOK"
+    return v.ek0, v.ek0 + 1, v.ek0 + 2, v.ek0 + 3
+
+
+def kodla_1hop(v: Veri, batch, bicim_no: int = 0):
     """[Q1] e r ? cevap EOS   -> hedef pozisyon 3
-    jeton_ad: [Q1] e1 e2 r ? a1 a2 EOS -> hedefler 4 ve 5."""
+    jeton_ad: [Q1] e1 e2 r ? a1 a2 EOS -> hedefler 4 ve 5.
+
+    ek_kip="tr": rolu POZISYON degil EK tasir, o yuzden SIRA DEGISEBILIR.
+        0  Ayse Yilmaz <YOK> ' <NIN> anne <SI> ? Fatma Yilmaz <YOK> ' <DIR> EOS
+        1  anne <SI> Ayse Yilmaz <YOK> ' <NIN> ? Fatma Yilmaz <YOK> ' <DIR> EOS
+        2  Ayse Yilmaz <YOK> ' <NIN> anne <SI> Fatma Yilmaz <YOK> ' <DIR> EOS
+           ^ bildirim: soru isareti YOK
+
+    Ucunde de CEVAP SONDA. "Fatma'dir Ayse'nin annesi" gibi cevap-basta
+    bir bicim KURULMADI: o dizide cevap hicbir seyden turemiyor, yani
+    cevap pozisyonu bir sey OLCMUYOR olurdu.
+    """
     X = _bos(len(batch), v)
     P, T = [], []
     for i, (e, r, a) in enumerate(batch):
         ez, az = _e(v, e), _e(v, a)
-        dz = [Q1] + ez + [REL_OFF + r, QM] + az + [EOS]
+        if not v.ek_kip:
+            dz = [Q1] + ez + [REL_OFF + r, QM] + az + [EOS]
+            a0 = 3 + v.yuva                  # ILK cevap jetonunun yeri
+        else:
+            K, N, S, D = _ekler(v)
+            oz, il = ez + [K, N], [REL_OFF + r, S]
+            on = {0: oz + il + [QM], 1: il + oz + [QM], 2: oz + il}[bicim_no % 3]
+            dz = on + az + [K, D, EOS]
+            a0 = len(on)
+        assert len(dz) <= v.t_len, (len(dz), v.t_len, bicim_no)
         X[i, :len(dz)] = dz
-        p0 = 2 + v.yuva                      # QM'nin pozisyonu
-        P.append(list(range(p0, p0 + v.yuva)))
+        # next-token: a0'daki jeton a0-1'den tahmin edilir
+        P.append(list(range(a0 - 1, a0 - 1 + v.yuva)))
         T.append(az)
     return X, np.array(P, np.int64), np.array(T, np.int64)
 
 
-def kodla_2hop(v: Veri, batch):
+def kodla_2hop(v: Veri, batch, bicim_no: int = 0):
     """[Q2] e r1 r2 ? cevap EOS   -> hedef pozisyon 4
-    jeton_ad: [Q2] e1 e2 r1 r2 ? a1 a2 EOS -> hedefler 5 ve 6."""
+    jeton_ad: [Q2] e1 e2 r1 r2 ? a1 a2 EOS -> hedefler 5 ve 6.
+
+    ek_kip="tr": "Ayse Yilmaz'in cocugunun kardesi ...dir"
+        cocugunun = cocuk <SI> <NIN>   -- zincir DIZIDE isaretli
+        0  e ' <NIN> r1 <SI> <NIN> r2 <SI> ? a ' <DIR> EOS      (KANONIK)
+        1  r2 <SI> r1 <SI> <NIN> e ' <NIN> ? a ' <DIR> EOS      (devrik)
+        2  e ' <NIN> r1 <SI> <NIN> r2 <SI> a ' <DIR> EOS        (bildirim)
+
+    !! OLCME HEP bicim 0 ile yapilir (onkayit). Egitim `ayar.bicim`
+    kadar bicim gorur; sinav TEK bicimdir, yoksa "cesitlilik ogretti mi"
+    sorusu "cesitlilikle mi sinandi" sorusuna karisirdi.
+    """
     X = _bos(len(batch), v)
     P, T = [], []
     for i, (e, r1, r2, _b, a) in enumerate(batch):
         ez, az = _e(v, e), _e(v, a)
-        dz = [Q2] + ez + [REL_OFF + r1, REL_OFF + r2, QM] + az + [EOS]
+        if not v.ek_kip:
+            dz = [Q2] + ez + [REL_OFF + r1, REL_OFF + r2, QM] + az + [EOS]
+            a0 = 4 + v.yuva
+        else:
+            K, N, S, D = _ekler(v)
+            oz = ez + [K, N]
+            i1, i2 = [REL_OFF + r1, S], [REL_OFF + r2, S]
+            on = {0: oz + i1 + [N] + i2 + [QM],
+                  1: i2 + i1 + [N] + oz + [QM],
+                  2: oz + i1 + [N] + i2}[bicim_no % 3]
+            dz = on + az + [K, D, EOS]
+            a0 = len(on)
+        assert len(dz) <= v.t_len, (len(dz), v.t_len, bicim_no)
         X[i, :len(dz)] = dz
-        p0 = 3 + v.yuva                      # QM'nin pozisyonu
-        P.append(list(range(p0, p0 + v.yuva)))
+        P.append(list(range(a0 - 1, a0 - 1 + v.yuva)))
         T.append(az)
     return X, np.array(P, np.int64), np.array(T, np.int64)
 
@@ -923,13 +1012,57 @@ def kopru_hedefi(v: Veri):
                       ^^ ^^              <- BURASI BOS: ana kayip
                                             cevabi 3+yuva'dan okuyor
     Iki pozisyon var, o yuzden en fazla IKI token. Ucuncu yuva zaten
-    cogunlukla <YOK> dolgusu (olculdu: %94,7), bilgi tasimiyor."""
+    cogunlukla <YOK> dolgusu (olculdu: %94,7), bilgi tasimiyor.
+
+    ek_kip="tr", bicim 0:
+        e1 e2 e3 ' <NIN> r1 <SI> <NIN> r2 <SI> ? ...
+                          ^^         ^^
+    !! BICIM 0'A gore. Baska bicimde r1/r2 baska yerde -- o yuzden
+    `egitim_havuzu` bicim>1 iken kopru_kayip'i REDDEDIYOR."""
+    if v.ek_kip:
+        return [v.yuva + 2, v.yuva + 5][:min(v.yuva, 2)], min(v.yuva, 2)
     return [1 + v.yuva, 2 + v.yuva][:min(v.yuva, 2)], min(v.yuva, 2)
 
 
 def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
     """1hop + 2hop (+ istege bagli kimlik gorevi) -> tek havuz."""
-    parca = [kodla_1hop(v, v.one), kodla_2hop(v, v.tr2)]
+    _bic = max(1, ayar.bicim)
+    assert _bic == 1 or ayar.ek_kip, (
+        "bicim>1 ek_kip GEREKTIRIR: eksiz dilde sirayi degistirmek ANLAMI "
+        "BOZAR ('Fatma anne Ayse' != 'Ayse anne Fatma').")
+    assert _bic <= 3, f"kurulu bicim sayisi 3, istenen {_bic}"
+    assert not (_bic > 1 and ayar.kopru_kayip > 0), (
+        "bicim>1 + kopru_kayip: kopru pozisyonu bicimden bicime DEGISIYOR, "
+        "kopru_hedefi tek bir pozisyon listesi donuyor -> hedef YANLIS satira "
+        "duser.")
+    _kp, _nk = kopru_hedefi(v)
+    parca, _kt = [], []
+    # !! BICIM CESITLILIGI YALNIZ OLGU (1-hop) SATIRLARINA. Iki sebep:
+    #
+    # 1) MEKANIZMA. Physics of LM 3.1'in olctugu sey ENTITENIN BILGISININ
+    #    kac farkli ifadeyle gecdigi ("knowledge augmentation"); soru
+    #    tarafi ayri bir sey. Bizim semptomumuz da tam orada: ezber tam
+    #    (one/seen 1.0000) ama dogrusal sonda BOS -- yani olgu
+    #    ezberlenmis, KODLANMAMIS.
+    #
+    # 2) BEDEL. Her sey 3 bicimde uretilseydi havuz 198.688 -> 593.944
+    #    olurdu (3x). model_b14 bunun bedelini OLCTU: havuz 1,7 katina
+    #    cikinca 20.000 adim yetmedi, 60.000'e uzatildi. Yalniz 1-hop
+    #    cogaltilinca havuz ~%27 buyuyor.
+    #
+    # Sinav zaten bicim 0 ile yapiliyor; 2-hop'u da tek bicimde tutmak
+    # egitim/sinav BICIM UYUSMAZLIGINI da ortadan kaldiriyor.
+    for _b in range(_bic):
+        parca.append(kodla_1hop(v, v.one, _b))
+        _kt.append(np.full((len(v.one), _nk), -1, np.int64))
+        parca.append(kodla_2hop(v, v.tr2, _b))
+        _kt.append(np.array([_e(v, x[3])[:_nk] for x in v.tr2], np.int64))
+    _n_tab = sum(len(a) for a, _, _ in parca)
+    if _bic > 1:
+        yaz(f"  BICIM CESITLILIGI: {_bic} yuzey bicimi -- OLGU ve SORU "
+            f"satirlarinin IKISINDE de")
+        yaz(f"     (1hop {len(v.one)} + 2hop {len(v.tr2)}) x{_bic} = {_n_tab}")
+        yaz("     SINAV hep bicim 0 -- egitim daha cok yuzey gorur, sinav TEK.")
     kimlik = None
     if ayar.ident_frac > 0:
         assert ayar.ident_kip in ("q1", "q2son"), \
@@ -941,11 +1074,12 @@ def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
                   for e in range(v.n_ent) for r in range(v.n_rel)
                   if v.facts[e, r] >= 0]        # -1 = olgu YOK, atla
             kimlik = kodla_kimlik_q2son(v, ik)
-        n_tab = len(parca[0][0]) + len(parca[1][0])
         tekrar = max(1, int(round(ayar.ident_frac / max(1e-9, 1 - ayar.ident_frac)
-                                  * n_tab / len(kimlik[0]))))
+                                  * _n_tab / len(kimlik[0]))))
         parca.append(tuple(np.tile(z, (tekrar,) + (1,) * (z.ndim - 1))
                            for z in kimlik))
+        _kim_satir = len(parca[-1][0])
+        _kt.append(np.full((_kim_satir, _nk), -1, np.int64))
         yaz(f"  kimlik gorevi: {ayar.ident_kip}  {len(kimlik[0])} ornek x{tekrar}")
         # ENT TANIMI BOZULUYOR MU -- her kosuda BASILIR (15 Eylul hakemligi).
         # Mevcut sizinti assert'i yalniz `tr2`ye bakiyor; kimlik havuzu oradan
@@ -974,13 +1108,19 @@ def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
         _sizan = [x for x in _kaynak if (x[0], x[1], x[2]) in _sinav]
         assert not _sizan, (
             f"!! SIZINTI: {len(_sizan)} belge SINAV zincirinden kurulacakti")
-        n_tab = len(parca[0][0]) + len(parca[1][0])
+        assert not ayar.ek_kip, (
+            "belge + ek_kip KURULMADI (kodla_belge'ye ek isaretleyici "
+            "eklenmedi)")
+        n_tab = _n_tab
         n_bel = int(round(ayar.belge_pay / max(1e-9, 1 - ayar.belge_pay)
                           * n_tab))
         rs_b = np.random.RandomState(ayar.veri_tohum + 7717)
         idx = rs_b.randint(0, len(_kaynak), n_bel)
         belge = kodla_belge(v, [_kaynak[j] for j in idx])
         parca.append(belge)
+        # BELGE satirlarinda kopru hedefi YOK: kopru zaten dizide YAZILI,
+        # ayrica tahmin ettirmenin anlami yok. -1 -> maskelenir.
+        _kt.append(np.full((len(belge[0]), _nk), -1, np.int64))
         yaz(f"  BELGE: {n_bel} satir (havuzun %{100*n_bel/(n_tab+n_bel):.0f}'i)"
             f"  kaynak tr2 ({len(_kaynak)} zincir)  t_len {v.t_len}")
         yaz(f"     sizinti denetimi GECTI: sinav zincirinden belge YOK")
@@ -988,16 +1128,8 @@ def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
     X = np.concatenate([a for a, _, _ in parca])
     P = np.concatenate([b for _, b, _ in parca])
     T = np.concatenate([c for _, _, c in parca])
-    # KOPRU HEDEFI. -1 = bu satirda kopru YOK (1hop, kimlik) -> maskelenir.
-    _kp, _nk = kopru_hedefi(v)
-    _kt = [np.full((len(parca[0][0]), _nk), -1, np.int64),
-           np.array([_e(v, x[3])[:_nk] for x in v.tr2], np.int64)]
-    if kimlik is not None:
-        _kt.append(np.full((len(parca[2][0]), _nk), -1, np.int64))
-    if ayar.belge_pay > 0:
-        # BELGE satirlarinda kopru hedefi YOK: kopru zaten dizide YAZILI,
-        # ayrica tahmin ettirmenin anlami yok. -1 -> maskelenir.
-        _kt.append(np.full((len(belge[0]), _nk), -1, np.int64))
+    # KOPRU HEDEFI `_kt` yukarida parca ile YAN YANA kuruldu (-1 = bu
+    # satirda kopru YOK: 1hop, kimlik, belge -> maskelenir).
     KT = np.concatenate(_kt)
     assert len(KT) == len(X), (len(KT), len(X))
     if ayar.kopru_kayip > 0:
@@ -1005,7 +1137,7 @@ def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
             f"pozisyon {_kp}  {_nk} token  "
             f"({int((KT[:, 0] >= 0).sum())}/{len(KT)} satirda gecerli)")
     if kimlik is not None:
-        yaz(f"                 havuzun %{100*len(parca[2][0])/len(X):.0f}'i")
+        yaz(f"                 havuzun %{100*_kim_satir/len(X):.0f}'i")
     return X, P, T, kimlik, np.array(_kp, np.int64), KT
 
 

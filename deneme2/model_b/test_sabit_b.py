@@ -70,7 +70,7 @@ def main():
 
     import model_b2, model_b3, model_b4, model_b5, model_b6, model_b7
     import model_b8, model_b9, model_b10, model_b11, model_b12
-    import model_b13, model_b14
+    import model_b13, model_b14, model_b15
     f7 = set(model_b1.AYAR.fark(model_b6.AYAR)) | {"ad"}
     _bak(f"model_b6 <-> model_b1 farki {sorted(f7)}",
          sorted(f7) == ["ad", "jeton_ad"],
@@ -320,8 +320,8 @@ def main():
     _bak("model_b12 MIMARI, model_b11 ile AYNI: ek parametre YOK",
          sum(p.numel() for p in ModelB(model_b12.AYAR, _v11.vocab).parameters())
          == sum(p.numel() for p in ModelB(model_b11.AYAR, _v11.vocab).parameters()))
-    _bak("Ayar alan sayisi 40 -- model_a.py'ye DOKUNULMADI",
-         len(vars(M.Ayar())) == 40, str(len(vars(M.Ayar()))))
+    _bak("Ayar alan sayisi 42 (ek_kip + bicim, model_b15)",
+         len(vars(M.Ayar())) == 42, str(len(vars(M.Ayar()))))
     for _g in ("AYAR", "egit", "fark_bas"):
         _bak(f"model_b12.{_g} var", hasattr(model_b12, _g), "kos.py duser")
 
@@ -443,6 +443,110 @@ def main():
          _v14.n_ent == _v13.n_ent == 2120)
     _bak("model_b14 vocab DEGISMEDI", _v14.vocab == _v13.vocab)
 
+    # --- model_b15: BICIM CESITLILIGI (ek isaretleyicili dil) ----------
+    # BIR CIFT DUGME: ek_kip + bicim. ek_kip olmadan bicim ANLAMSIZ.
+    f16 = set(model_b14.AYAR.fark(model_b15.AYAR)) | {"ad"}
+    _bak(f"model_b15 <-> model_b14 farki {sorted(f16)}",
+         sorted(f16) == ["ad", "bicim", "ek_kip", "veri_ad"],
+         "UC dugme: olcek + kodlama cifti. ATFETME YAPILAMAZ, ve artik "
+         "hedef atfetme DEGIL (CLAUDE.md: KIYAS ARTIK ARKA PLANDA).")
+    _bak('model_b15 veri_ad="veri_okul4" (1060 varlik)',
+         model_b15.AYAR.veri_ad == "veri_okul4")
+    _bak('model_b14 veri_ad="veri_okul3" (DEGISMEDI)',
+         model_b14.AYAR.veri_ad == "veri_okul3")
+    _bak('model_b15 ek_kip="tr", bicim=3',
+         model_b15.AYAR.ek_kip == "tr" and model_b15.AYAR.bicim == 3)
+    _bak('model_b14 ek_kip="" (DEGISMEDI)', model_b14.AYAR.ek_kip == "")
+    _bak("model_b15 t_len 17 (model_b14 11, DEGISMEDI)",
+         model_b15.AYAR.t_len == 17 and model_b14.AYAR.t_len == 11)
+    _bak("model_b15 ident/wd/cosine model_b14'ten DEVRALINDI",
+         model_b15.AYAR.ident_frac == 0.2 and model_b15.AYAR.wd == 0.1
+         and model_b15.AYAR.sabit_lr is False, "CLAUDE.md kural 4")
+    for _g in ("AYAR", "egit", "fark_bas"):
+        _bak(f"model_b15.{_g} var", hasattr(model_b15, _g), "kos.py duser")
+    _v15 = M.veri_kur(model_b15.AYAR, yaz=lambda *a: None)
+    _bak("model_b15 varlik 1060 (veri_okul4, YARIM havuz)",
+         _v15.n_ent == 1060, str(_v15.n_ent))
+    _bak("EK jetonlari SOZLUGUN SONUNDA -- ent_off/REL_OFF KAYMADI",
+         _v15.ek0 == _v15.vocab - 4 and _v15.ent_off == _v13.ent_off,
+         f"ek0={_v15.ek0} vocab={_v15.vocab} ent_off={_v15.ent_off}")
+    # phi OLCEK-DEGISMEZ: varlik yariya indi ama TAVAN degismedi.
+    import veri_okul3 as _V3, veri_okul4 as _V4, veri_okul as _VO
+    _G3, _G4 = _V3.kur(0), _V4.kur(0)
+    _p3 = len(_VO.zincirler(_G3)) / len(_G3["olgu"])
+    _p4 = len(_VO.zincirler(_G4)) / len(_G4["olgu"])
+    _bak("phi TAVANI OLCEK-DEGISMEZ: okul3 = okul4 = 9,57",
+         abs(_p3 - _p4) < 0.01 and abs(_p4 - 9.57) < 0.01,
+         f"okul3 {_p3:.4f}  okul4 {_p4:.4f}")
+    _bak("veri_okul4 varlik 1060, olgu 10.960",
+         sum(_G4["n"].values()) == 1060 and len(_G4["olgu"]) == 10960)
+    _bak("veri_okul4 SEMA veri_okul3 ile AYNI (|R|=17, ayni acilimlar)",
+         _V4.SEMA == _V3.SEMA and len(_G4["iliski"]) == 17)
+    _bak("veri_okul4 YENI turetilebilir cift URETMEDI",
+         [x for x in _V4.turetilebilir(_G4)
+          if (x[0], x[1]) not in _V4.GEREKTIRIR] == [])
+    _bak("model_b15 olcme izi DEGISTI (b14 b7a4e954b2a2) -- NOT DUSULDU",
+         M.olcme_izi(M.olcme_listeleri(model_b15.AYAR, _v15)) != "b7a4e954b2a2",
+         "varlik kumesi yarilandi -> sinav zincirleri BASKA. Kol iptal "
+         "DEGIL: CLAUDE.md 'KIYAS ARTIK ARKA PLANDA'.")
+    # --- uc bicim AYNI OLGUYU mu tasiyor -------------------------------
+    _T15 = [M.kodla_1hop(_v15, _v15.one[:2000], _b)[2] for _b in range(3)]
+    _bak("uc bicim AYNI cevabi tasiyor (1-hop, 2000 ornek)",
+         all((_T15[0] == _T15[_b]).all() for _b in (1, 2)))
+    _X15 = [M.kodla_1hop(_v15, _v15.one[:2000], _b)[0] for _b in range(3)]
+    _bak("uc bicim DIZI olarak FARKLI (hicbiri ayni degil)",
+         not any((_X15[0][i] == _X15[_b][i]).all()
+                 for i in range(2000) for _b in (1, 2)))
+    _P15, _TT15 = M.kodla_2hop(_v15, _v15.tr2[:500], 0)[1:]
+    _XX15 = M.kodla_2hop(_v15, _v15.tr2[:500], 0)[0]
+    _bak("next-token sozlesmesi tutuyor (2-hop, bicim 0)",
+         all(_XX15[i][_P15[i][j] + 1] == _TT15[i][j]
+             for i in range(500) for j in range(_v15.yuva)))
+    _K15, _N15, _S15, _D15 = M._ekler(_v15)
+    _kotu = 0
+    for _b in range(3):
+        _XB = M.kodla_1hop(_v15, _v15.one[:300], _b)[0]
+        for _r in _XB:
+            _d = list(_r)
+            for _j, _t in enumerate(_d):
+                if _t == _K15 and _d[_j + 1] not in (_N15, _D15):
+                    _kotu += 1
+                if _t == _S15 and not (M.REL_OFF <= _d[_j - 1] < _v15.ent_off):
+                    _kotu += 1
+    _bak("' her zaman <NIN>/<DIR> ONUNDE, <SI> her zaman ILISKI ardinda",
+         _kotu == 0, f"{_kotu} hata")
+    _X15h, _P15h, _T15h, _kim15, _kp15, _KT15 = M.egitim_havuzu(
+        model_b15.AYAR, _v15, yaz=lambda *a: None)
+    # !! `egitim_havuzu` kimligi COGALTILMADAN ONCEKI haliyle donuyor
+    # (2120); havuzdakinin kac kati oldugu ident_frac'tan duser. O
+    # yuzden kimlik satir sayisi ARTIKTAN cikarilir.
+    _kim_n = len(_X15h) - (len(_v15.one) + len(_v15.tr2)) * 3
+    _bak("BICIM cogaltmasi OLGU **ve** SORU satirlarinda",
+         _kim_n > 0 and _kim_n % len(_kim15[0]) == 0,
+         f"havuz {len(_X15h)} = (olgu {len(_v15.one)} + 2hop "
+         f"{len(_v15.tr2)}) x3 + kimlik {_kim_n}")
+    _bak("PAD dizinin ORTASINDA yok (ek_kip)",
+         all((_X15h[i][int((_X15h[i] == M.PAD).argmax()):].sum() == 0)
+             for i in range(0, len(_X15h), 1013) if (_X15h[i] == M.PAD).any()))
+    # bicim>1 + kopru_kayip REDDEDILMELI: kopru pozisyonu bicimden
+    # bicime degisiyor, tek pozisyon listesi YANLIS satira duserdi.
+    try:
+        M.egitim_havuzu(model_b15.AYAR.degistir(kopru_kayip=1.0), _v15,
+                        yaz=lambda *a: None)
+        _ok = False
+    except AssertionError:
+        _ok = True
+    _bak("bicim>1 + kopru_kayip REDDEDILIYOR (assert ATIYOR)", _ok)
+    # ek_kip olmadan bicim REDDEDILMELI
+    try:
+        M.egitim_havuzu(model_b14.AYAR.degistir(bicim=3), _v13,
+                        yaz=lambda *a: None)
+        _ok = False
+    except AssertionError:
+        _ok = True
+    _bak("ek_kip'siz bicim>1 REDDEDILIYOR (eksiz dilde sira ANLAMI BOZAR)",
+         _ok)
+
     # TEK JETONLU yol BOZULMADI mi (model_b1)
     _v1 = M.veri_kur(model_b1.AYAR, yaz=lambda *a: None)
     _X1, _P1, _T1 = M.kodla_kimlik_q1(_v1, range(5))
@@ -501,7 +605,7 @@ def main():
     for _ad in ("model_b", "model_b1", "model_b2", "model_b3",
                 "model_b4", "model_b5", "model_b6", "model_b7",
                 "model_b8", "model_b9", "model_b10", "model_b11",
-                "model_b12", "model_b13", "model_b14"):
+                "model_b12", "model_b13", "model_b14", "model_b15"):
         _satir = [
             "import sys, importlib",
             "sys.path.insert(0, %r)" % _B,

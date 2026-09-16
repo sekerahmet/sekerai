@@ -150,6 +150,34 @@ AYAR_KILIT = dict(
     # surecte cikarilip 6 adim egitildi -> agirlik farki 0.000e+00,
     # 31 anahtar).
     belge_pay=0.0,
+    # `ek_kip` + `bicim` 16 Eylul'de eklendi -- `model_b15` icin. Kilit
+    # YINE YAKALADI (alan 40 -> 42). Gerekce kilide DOKUNULMADAN ONCE
+    # yazildi: belge/onkayit/model_b15.md.
+    #
+    # NE: EK ISARETLEYICILI kodlama. Bugunku dilde rolu POZISYON
+    # tasiyor ("Fatma anne Ayse" != "Ayse anne Fatma"), o yuzden yuzey
+    # bicimini degistirmek ANLAMI BOZUYORDU. Turkce'de sira serbesttir
+    # cunku rolu EK tasir. Dort jeton eklendi -- iliski DEGIL,
+    # dilbilgisi: '  <NIN>  <SI>  <DIR>.  `bicim` kac yuzey bicimi
+    # uretilecegi (1..3); `ek_kip` olmadan ANLAMSIZ, egitim_havuzu
+    # assert ile reddediyor.
+    #
+    # NEDEN: Physics of LM 3.1 (2309.14316) semptomumuzu birebir tarif
+    # ediyor -- "can still memorize the training data, but it is not
+    # linearly encoded in the entity's hidden embeddings". Bizde ezber
+    # 1.0000, dogrusal sonda BOS.
+    #
+    # ORTAK CEKIRDEGE dokunan UCUNCU kol (`jeton_ad`, `belge_pay`dan
+    # sonra): `t_len` 11 -> 17 TURETILIYOR ve vocab 466 -> 470.
+    # VARSAYILAN KAPALI. Kapaliyken BIT AYNI oldugu OLCULDU: yeni
+    # jetonlar SOZLUGUN SONUNA eklendi (REL_OFF/ent_off/yuva_ara
+    # KAYMADI) ve model_b6/b13/b14 egitim havuzlarinin sha256'si
+    # yamadan once ve sonra BIREBIR AYNI cikti
+    #   model_b6   93.495 satir  1d3ccd30e25b2b27
+    #   model_b13 116.815 satir  5b9eab1e785570f7
+    #   model_b14 198.688 satir  29569380a3926fd6
+    ek_kip="",
+    bicim=1,
 )
 
 VERI_KILIT = dict(

@@ -148,14 +148,14 @@ def _farkli_esle(rng, idx, yasak, ad, deneme=400):
     raise RuntimeError(f"{ad}: yasaklardan farkli esleme kurulamadi")
 
 
-def kur(tohum=0):
-    """`veri_okul2` grafi + sekiz ALAN ACILIMI.
+def genislet(G, tohum=0):
+    """Verilen grafa SEKIZ ALAN ACILIMINI ekler. OLCEKTEN BAGIMSIZ --
+    `veri_okul2` (2x) ile de `veri_okul` (1x) ile de calisir; phi
+    OLCEK-DEGISMEZ oldugu icin tavan iki durumda da 9,57.
 
-    Eski olgular BIREBIR korunur: `veri_okul2.kur(tohum)` aynen
-    cagrilir ve donen sozluge yalnizca EKLEME yapilir. Yeni olgular
-    ayri bir RNG akisindan (tohum + 7777) gelir ki eski akis
-    kaymasin."""
-    G = V2.kur(tohum)
+    Eski olgular BIREBIR korunur: gelen sozluge yalnizca EKLEME
+    yapilir. Yeni olgular ayri bir RNG akisindan (tohum + 7777) gelir
+    ki taban grafin akisi kaymasin."""
     ad, olgu = G["ad"], G["olgu"]
     kisi, okul, sehir, ders = ad["KISI"], ad["OKUL"], ad["SEHIR"], ad["DERS"]
     for t, v in (("KISI", kisi), ("OKUL", okul), ("SEHIR", sehir), ("DERS", ders)):
@@ -225,6 +225,11 @@ def kur(tohum=0):
             eksik = [r for r in gec if (a, r) not in olgu]
             assert not eksik, f"{a} ({t}) icin eksik olgu: {eksik}"
     return G
+
+
+def kur(tohum=0):
+    """`veri_okul2` (2x) grafi + sekiz alan acilimi."""
+    return genislet(V2.kur(tohum), tohum)
 
 
 zincirler = VO.zincirler
