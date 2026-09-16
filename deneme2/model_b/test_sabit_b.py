@@ -69,7 +69,7 @@ def main():
         _bak(f"model_b1.{_g} var", hasattr(model_b1, _g), "kos.py duser")
 
     import model_b2, model_b3, model_b4, model_b5, model_b6, model_b7
-    import model_b8, model_b9, model_b10, model_b11
+    import model_b8, model_b9, model_b10, model_b11, model_b12
     f7 = set(model_b1.AYAR.fark(model_b6.AYAR)) | {"ad"}
     _bak(f"model_b6 <-> model_b1 farki {sorted(f7)}",
          sorted(f7) == ["ad", "jeton_ad"],
@@ -299,6 +299,54 @@ def main():
     _bak(f"olcme izi DEGISMEDI ({M.olcme_izi(M.olcme_listeleri(model_b11.AYAR, _v11))})",
          M.olcme_izi(M.olcme_listeleri(model_b11.AYAR, _v11)) == "57cf60a5e9af")
 
+    # --- model_b12: PAKET KOL -- wd + LR programi BIRLIKTE -------------
+    # Kullanici karari 16 Eylul: "LR ve wd = 0,1 ayni anda degissin."
+    # ITIRAZ EDILDI, karar TEKRARLANDI. Onkayit 0: atfetme YAPILAMAZ,
+    # olumluysa bisect kollari (b12a yalniz wd, b12b yalniz cosine).
+    f13 = set(model_b11.AYAR.fark(model_b12.AYAR)) | {"ad"}
+    _bak(f"model_b12 <-> model_b11 farki {sorted(f13)}",
+         sorted(f13) == ["ad", "sabit_lr", "wd"],
+         "PAKET KOL: tam IKI dugme, ucuncusu OLMAMALI")
+    _bak(f"model_b12 wd=0.1 (model_b11 {model_b11.AYAR.wd}, DEGISMEDI)",
+         model_b12.AYAR.wd == 0.1 and model_b11.AYAR.wd == 0.5,
+         "referanslarin DORDU de 0.1: nanoGPT, Pythia-70m/160m, Qwen2.5 SFT")
+    _bak("model_b12 sabit_lr=False (model_b11 True, DEGISMEDI)",
+         model_b12.AYAR.sabit_lr is False
+         and model_b11.AYAR.sabit_lr is True)
+    _bak("model_b12 belge_pay/tam_kayip/dar_kapi model_b11'den DEVRALINDI",
+         model_b12.AYAR.belge_pay == 0.5 and model_b12.AYAR.tam_kayip is True
+         and model_b12.AYAR.dar_kapi is True)
+    _bak("model_b12 MIMARI, model_b11 ile AYNI: ek parametre YOK",
+         sum(p.numel() for p in ModelB(model_b12.AYAR, _v11.vocab).parameters())
+         == sum(p.numel() for p in ModelB(model_b11.AYAR, _v11.vocab).parameters()))
+    _bak("Ayar alan sayisi 40 -- model_a.py'ye DOKUNULMADI",
+         len(vars(M.Ayar())) == 40, str(len(vars(M.Ayar()))))
+    for _g in ("AYAR", "egit", "fark_bas"):
+        _bak(f"model_b12.{_g} var", hasattr(model_b12, _g), "kos.py duser")
+
+    # COSINE PROGRAMI: gercekten AZALIYOR mu, ve SIFIRA mi iniyor
+    # (bilinen sapma -- referanslar lr/10'da durur; onkayit model_b12.md 3)
+    import math as _mt
+
+    def _lr(a, adim):
+        if adim < a.isinma:
+            return a.lr * adim / max(1, a.isinma)
+        if a.sabit_lr:
+            return a.lr
+        return a.lr * 0.5 * (1 + _mt.cos(
+            _mt.pi * (adim - a.isinma) / max(1, a.adim - a.isinma)))
+
+    _A12 = model_b12.AYAR
+    _dizi = [_lr(_A12, x) for x in (2000, 5000, 10000, 15000, 20000)]
+    _bak("cosine MONOTON azaliyor (isinmadan sonra)",
+         all(x > y for x, y in zip(_dizi, _dizi[1:])),
+         "  ".join(f"{x:.6f}" for x in _dizi))
+    _bak(f"cosine SIFIRA iniyor ({_dizi[-1]:.1e}) -- BILINEN SAPMA",
+         _dizi[-1] < 1e-9,
+         "referanslar lr/10'da durur (min_lr); onkayit model_b12.md 3")
+    _bak("model_b11'in LR'i SABIT kaldi (DEGISMEDI)",
+         _lr(model_b11.AYAR, 20000) == model_b11.AYAR.lr)
+
     for _g in ("AYAR", "egit", "fark_bas"):
         _bak(f"model_b6.{_g} var", hasattr(model_b6, _g), "kos.py duser")
     f6 = set(model_b1.AYAR.fark(model_b5.AYAR)) | {"ad"}
@@ -349,7 +397,8 @@ def main():
     # bozulmus bir surumle sinandi: duzeltmeden ONCE test GECIYORDU.
     for _ad in ("model_b", "model_b1", "model_b2", "model_b3",
                 "model_b4", "model_b5", "model_b6", "model_b7",
-                "model_b8", "model_b9", "model_b10", "model_b11"):
+                "model_b8", "model_b9", "model_b10", "model_b11",
+                "model_b12"):
         _satir = [
             "import sys, importlib",
             "sys.path.insert(0, %r)" % _B,
