@@ -171,6 +171,14 @@ class Ayar:
     dar_alfa: float = 0.0      # 0 = KAPALI. Sabit gecit gucu.
     dar_tau: float = 1.0       # Phi'nin softmax sicakligi.
     dar_kapi: bool = False     # True = ogrenilebilir gecit (d+1 parametre)
+    jeton_ad: bool = False     # Varliklari IKI JETON olarak kodla.
+    #   Ayse_Yilmaz -> (Ayse, Yilmaz);  Ankara_Fen_Lisesi -> (Ankara,
+    #   Fen_Lisesi);  Ankara -> (Ankara, <YOK>).  ILK alt cizgiden bolunur,
+    #   cunku anlamli olan o. Sonucu: sozluk 2145 -> ~300 ve varliklar
+    #   BILESIK hale gelir -- 700 kisi, 100 ad + 7 soyaddan kurulur.
+    #   `T_LEN` 8 -> 11 (t_len ozelligi), cevap IKI jeton, kayip IKI hedef.
+    #   MIMARI DEGISMEZ. Onkayit: belge/onkayit/model_b5.md
+    #   VARSAYILAN KAPALI -- eski kollarin hepsi bit duzeyinde AYNI kalir.
     dar_sert: bool = False     # Phi'yi SERTLESTIR: tau -> 0 limiti.
     #   Phi(h) = W[argmax(nf(h) Wᵀ)] -- yumusak ortalama yerine TEK gomme.
     #   argmax turevlenemez; straight-through (van den Oord 2017, VQ-VAE):
@@ -226,6 +234,16 @@ class Ayar:
         assert not bilinmeyen, f"Ayar'da boyle alan yok: {bilinmeyen}"
         return dc.replace(self, **kw)
 
+    @property
+    def t_len(self) -> int:
+        """Dizi uzunlugu. ALAN DEGIL, TURETILMIS -- `jeton_ad`dan duser,
+        yani iki yerde iki deger olamaz.
+
+            [Q2] e        r1 r2 ?  a       EOS       ->  8
+            [Q2] e1 e2    r1 r2 ?  a1 a2   EOS       -> 11
+        """
+        return 11 if self.jeton_ad else T_LEN
+
     def sozluk(self) -> dict:
         return dc.asdict(self)
 
@@ -256,7 +274,7 @@ ESKI_VARSAYILAN = {
     "kati_pay": 0.0,
     "ood_pay": 0.0,
     "dar_alfa": 0.0, "dar_tau": 1.0, "dar_kapi": False, "dar_sdpa": False,
-    "dar_sert": False,
+    "dar_sert": False, "jeton_ad": False,
 }
 
 
@@ -315,10 +333,27 @@ class Veri:
     #   ENT varliklari kopru ve cevap olarak egitimde GORUNUYOR.
     #   kati_pay=0 ise BOS kalir ve hicbir sey degismez.
 
+    par: np.ndarray | None = None      # (n_ent, 2) jeton ciftleri
+    #   jeton_ad=False ise None ve hicbir sey degismez.
+    par_ad: tuple = ()                 # (yuva1 adlari, yuva2 adlari)
+    t_len: int = 0                     # veri_kur doldurur (ayar.t_len)
+
     def __post_init__(self):
         self.n_ent, self.n_rel = self.facts.shape
         self.ent_off = SPECIAL + self.n_rel
-        self.vocab = self.ent_off + self.n_ent
+        if self.par is None:
+            self.yuva, self.vocab = 1, self.ent_off + self.n_ent
+            self.p1_off = self.p2_off = self.ent_off
+            self.n1 = self.n2 = self.n_ent
+        else:
+            # IKI AYRIK BLOK -> yuva basina KISITLI argmax temiz kalir.
+            self.yuva = 2
+            self.n1, self.n2 = len(self.par_ad[0]), len(self.par_ad[1])
+            self.p1_off = self.ent_off
+            self.p2_off = self.p1_off + self.n1
+            self.vocab = self.p2_off + self.n2
+        if not self.t_len:
+            self.t_len = 11 if self.par is not None else T_LEN
         # phi: TURETILMIS TANI SAYISI, kontrol parametresi DEGIL. Ayarlanamaz;
         # graf yogunlugundan ve ent_pay/comp_pay'den duser. "phi'yi 7 yapalim"
         # denemez -- veri ureticisi degistirilir.
@@ -359,6 +394,29 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
     G = _V.kur(ayar.veri_tohum)
     zin = _V.zincirler(G)
     E = [a for t in _V.TIPLER for a in G["ad"][t]]
+
+    # --- IKI JETONLU KODLAMA (ayar.jeton_ad) ----------------------------
+    # ILK alt cizgiden bolunur, cunku anlamli olan o:
+    #   Ayse_Yilmaz       -> (Ayse, Yilmaz)        ad + soyad
+    #   Ankara_Fen_Lisesi -> (Ankara, Fen_Lisesi)  sehir + tur
+    #   Ankara            -> (Ankara, <YOK>)
+    # Soyadi PAYLASIMI zaten var (veri_okul: "cocuk/kardes/anne/baba AYNI
+    # soyadi tasir"), yani hicbir jeton TEK BASINA kisiyi belirlemiyor.
+    _par = _par_ad = None
+    if ayar.jeton_ad:
+        _ik = [(a.split("_", 1) + ["<YOK>"])[:2] for a in E]
+        _y1 = sorted({p[0] for p in _ik})
+        _y2 = sorted({p[1] for p in _ik})
+        _i1 = {a: i for i, a in enumerate(_y1)}
+        _i2 = {a: i for i, a in enumerate(_y2)}
+        _par = np.array([[_i1[p[0]], _i2[p[1]]] for p in _ik], np.int64)
+        _par_ad = (tuple(_y1), tuple(_y2))
+        # BIREBIRLIK: iki jeton bir varligi TEK SEKILDE belirlemeli, yoksa
+        # "dogru cevap" tanimsiz olurdu.
+        assert len({tuple(p) for p in _par}) == len(E), \
+            "IKI JETON birebir DEGIL -- ayni cift birden cok varliga denk"
+        yaz(f"  jeton_ad ACIK: {len(E)} varlik -> yuva1 {len(_y1)}  "
+            f"yuva2 {len(_y2)}  (tek jetonda {len(E)} idi)")
     # E, TIP SIRASIYLA kuruluyor -- tip dizisi AYNI comprehension'dan
     # cikarilir ki iki yerde iki siralama olmasin.
     E_tip = np.array([i for i, t in enumerate(_V.TIPLER)
@@ -490,7 +548,8 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
              tr2=say(tr2), comp=say(comp), ent=say(ent_ay),
              ent_yok=say(ent_yk), ent_arama=say(ent_ar),
              tip=E_tip, tip_ad=tuple(_V.TIPLER), ent_kati=say(ent_kt),
-             ood=say(ood_ay))
+             ood=say(ood_ay), par=_par, par_ad=_par_ad or (),
+             t_len=ayar.t_len)
 
     # --- SIZINTI DENETIMI -- sessiz gecmesin
     trset = {(e, a, b) for e, a, b, _, _ in v.tr2}
@@ -576,27 +635,45 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
 
 
 # ======================= KODLAMA =========================================
-def _bos(n):
-    return np.zeros((n, T_LEN), np.int64)
+def _bos(n, v=None):
+    return np.zeros((n, v.t_len if v is not None else T_LEN), np.int64)
+
+
+def _e(v, e):
+    """Varligin jeton(lar)i. jeton_ad kapaliysa tek elemanli liste."""
+    if v.par is None:
+        return [v.ent_off + e]
+    return [v.p1_off + int(v.par[e, 0]), v.p2_off + int(v.par[e, 1])]
 
 
 def kodla_1hop(v: Veri, batch):
-    """[Q1] e r ? cevap EOS   -> hedef pozisyon 3"""
-    X = _bos(len(batch))
+    """[Q1] e r ? cevap EOS   -> hedef pozisyon 3
+    jeton_ad: [Q1] e1 e2 r ? a1 a2 EOS -> hedefler 4 ve 5."""
+    X = _bos(len(batch), v)
+    P, T = [], []
     for i, (e, r, a) in enumerate(batch):
-        X[i, :6] = [Q1, v.ent_off + e, REL_OFF + r, QM, v.ent_off + a, EOS]
-    return X, np.full(len(batch), 3, np.int64), \
-        np.array([v.ent_off + a for _, _, a in batch], np.int64)
+        ez, az = _e(v, e), _e(v, a)
+        dz = [Q1] + ez + [REL_OFF + r, QM] + az + [EOS]
+        X[i, :len(dz)] = dz
+        p0 = 2 + v.yuva                      # QM'nin pozisyonu
+        P.append(list(range(p0, p0 + v.yuva)))
+        T.append(az)
+    return X, np.array(P, np.int64), np.array(T, np.int64)
 
 
 def kodla_2hop(v: Veri, batch):
-    """[Q2] e r1 r2 ? cevap EOS   -> hedef pozisyon 4"""
-    X = _bos(len(batch))
+    """[Q2] e r1 r2 ? cevap EOS   -> hedef pozisyon 4
+    jeton_ad: [Q2] e1 e2 r1 r2 ? a1 a2 EOS -> hedefler 5 ve 6."""
+    X = _bos(len(batch), v)
+    P, T = [], []
     for i, (e, r1, r2, _b, a) in enumerate(batch):
-        X[i, :7] = [Q2, v.ent_off + e, REL_OFF + r1, REL_OFF + r2, QM,
-                    v.ent_off + a, EOS]
-    return X, np.full(len(batch), 4, np.int64), \
-        np.array([v.ent_off + a for *_, a in batch], np.int64)
+        ez, az = _e(v, e), _e(v, a)
+        dz = [Q2] + ez + [REL_OFF + r1, REL_OFF + r2, QM] + az + [EOS]
+        X[i, :len(dz)] = dz
+        p0 = 3 + v.yuva                      # QM'nin pozisyonu
+        P.append(list(range(p0, p0 + v.yuva)))
+        T.append(az)
+    return X, np.array(P, np.int64), np.array(T, np.int64)
 
 
 def kodla_kimlik_q1(v: Veri, ents):
@@ -610,11 +687,12 @@ def kodla_kimlik_q1(v: Veri, ents):
     Bilinen itiraz (arsiv DENEY5): cevap girdide duruyor, kopyalamayla
     cozulebilir. Makale bunu bilerek yapiyor; iddiasi, gizli durumu token
     gommesiyle HIZALAMAYA zorlamasi."""
+    assert v.par is None, "kimlik kollari jeton_ad ile KOSULMADI"
     X = _bos(len(ents))
     for i, e in enumerate(ents):
         X[i, :6] = [Q1, v.ent_off + e, IDENT, QM, v.ent_off + e, EOS]
-    return X, np.full(len(ents), 3, np.int64), \
-        np.array([v.ent_off + e for e in ents], np.int64)
+    return X, np.full((len(ents), 1), 3, np.int64), \
+        np.array([[v.ent_off + e] for e in ents], np.int64)
 
 
 def kodla_kimlik_q2son(v: Veri, batch):
@@ -634,10 +712,11 @@ def kodla_kimlik_q2son(v: Veri, batch):
     AYNI cerceve ve AYNI hedef pozisyonu (4)."""
     X = _bos(len(batch))
     for i, (e, r1, b) in enumerate(batch):
+        assert v.par is None, "kimlik kollari jeton_ad ile KOSULMADI"
         X[i, :7] = [Q2, v.ent_off + e, REL_OFF + r1, IDENT, QM,
                     v.ent_off + b, EOS]
-    return X, np.full(len(batch), 4, np.int64), \
-        np.array([v.ent_off + b for _, _, b in batch], np.int64)
+    return X, np.full((len(batch), 1), 4, np.int64), \
+        np.array([[v.ent_off + b] for _, _, b in batch], np.int64)
 
 
 def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
@@ -727,7 +806,7 @@ class Model(nn.Module):
         self.ayar, self.vocab = ayar, vocab
         d = ayar.d
         self.emb = nn.Embedding(vocab, d)
-        self.pos = nn.Embedding(T_LEN, d)
+        self.pos = nn.Embedding(ayar.t_len, d)
         self.bloklar = nn.ModuleList([Blok(d, ayar.nh, ayar.dff)
                                       for _ in range(ayar.l)])
         self.nf = RMSNorm(d)
@@ -817,17 +896,22 @@ def dogruluk(model, v: Veri, X, P, T, bs=512):
     # ama biri dropout eklerse olcum SESSIZCE rastgelelesirdi.
     onceki = model.training
     model.eval()
-    lo, hi = v.ent_off, v.ent_off + v.n_ent
+    # YUVA BASINA KISITLI argmax. yuva=1 iken eski davranisla AYNI.
+    ARA = [(v.p1_off, v.p1_off + v.n1), (v.p2_off, v.p2_off + v.n2)][:P.shape[1]]
     ok = []
     for i in range(0, len(X), bs):
         xb = torch.from_numpy(X[i:i + bs]).to(DEV)
         with torch.autocast(DEV, dtype=torch.float16, enabled=(DEV == "cuda")):
             lg = model(xb)
         idx = torch.from_numpy(P[i:i + bs]).to(DEV)
-        ar = torch.arange(len(idx), device=DEV)
-        lg = lg.float()[ar, idx][:, lo:hi]
-        g = torch.from_numpy(T[i:i + bs]).to(DEV) - lo
-        ok.append((lg.argmax(-1) == g).cpu().numpy())
+        ar = torch.arange(len(idx), device=DEV)[:, None]
+        lgp = lg.float()[ar, idx]                       # (n, yuva, V)
+        tb = torch.from_numpy(T[i:i + bs]).to(DEV)
+        dogru = None
+        for j, (lo, hi) in enumerate(ARA):
+            d = lgp[:, j, lo:hi].argmax(-1) == (tb[:, j] - lo)
+            dogru = d if dogru is None else (dogru & d)
+        ok.append(dogru.cpu().numpy())
     model.train(onceki)
     return float(np.concatenate(ok).mean())
 
@@ -840,19 +924,33 @@ def kisayol_orani(model, v: Veri, lst, bs=512):
     if not lst:
         return float("nan")
     X, P, _ = kodla_2hop(v, lst)
-    ksy = np.array([v.ent_off + int(v.facts[e, r2]) for e, _, r2, _, _ in lst])
+    # KISAYOL CEVABI da yuva basina kodlanir. `_e` TEK KAYNAK -- burada
+    # yeniden turetilmiyor. facts -1 ise ent_off-1 (bir ILISKI token'i)
+    # cikar ve hicbir varlik tahminiyle eslesmez; yuva kipinde de oyle
+    # olmasi icin -1 ozel olarak ele alinir.
+    def _ksy(e, r2):
+        h = int(v.facts[e, r2])
+        if h < 0:
+            return [v.ent_off - 1] * v.yuva      # ESLESMEZ, oran 0.000
+        return _e(v, h)
+    ksy = np.array([_ksy(e, r2) for e, _, r2, _, _ in lst], np.int64)
     onceki = model.training            # bkz. dogruluk()'taki ayni kusur
     model.eval()
-    lo, hi = v.ent_off, v.ent_off + v.n_ent
+    ARA = [(v.p1_off, v.p1_off + v.n1), (v.p2_off, v.p2_off + v.n2)][:P.shape[1]]
     ok = []
     for i in range(0, len(X), bs):
         xb = torch.from_numpy(X[i:i + bs]).to(DEV)
         with torch.autocast(DEV, dtype=torch.float16, enabled=(DEV == "cuda")):
             lg = model(xb)
         idx = torch.from_numpy(P[i:i + bs]).to(DEV)
-        ar = torch.arange(len(idx), device=DEV)
-        p = lg.float()[ar, idx][:, lo:hi].argmax(-1) + lo
-        ok.append((p.cpu().numpy() == ksy[i:i + bs]))
+        ar = torch.arange(len(idx), device=DEV)[:, None]
+        lgp = lg.float()[ar, idx]                        # (n, yuva, V)
+        esit = None
+        for j, (lo, hi) in enumerate(ARA):
+            p = lgp[:, j, lo:hi].argmax(-1).cpu().numpy() + lo
+            d = p == ksy[i:i + bs, j]
+            esit = d if esit is None else (esit & d)
+        ok.append(esit)
     model.train(onceki)
     return float(np.concatenate(ok).mean())
 
@@ -1316,8 +1414,12 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
                 # xb.shape[0], ayar.batch DEGIL: ikisi burada esit ama bir
                 # varyasyon degisken batch kullanirsa `ayar.batch` sessizce
                 # yanlis satirlari secerdi.
-                lg = lg[torch.arange(xb.shape[0], device=DEV), pb]
-                kayip = F.cross_entropy(lg.float(), tb)
+                # pb/tb artik (B, yuva). yuva=1 iken eski davranisla
+                # AYNI: tek pozisyon, tek hedef, ayni kayip.
+                _ar = torch.arange(xb.shape[0], device=DEV)[:, None]
+                lg = lg[_ar, pb]                       # (B, yuva, V)
+                kayip = F.cross_entropy(
+                    lg.float().reshape(-1, lg.shape[-1]), tb.reshape(-1))
             kayip_top += kayip.detach()
             kayip_say += 1
             opt.zero_grad(set_to_none=True)

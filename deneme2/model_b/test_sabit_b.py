@@ -66,7 +66,16 @@ def main():
     for _g in ("AYAR", "egit", "fark_bas"):
         _bak(f"model_b1.{_g} var", hasattr(model_b1, _g), "kos.py duser")
 
-    import model_b2, model_b3, model_b4
+    import model_b2, model_b3, model_b4, model_b5
+    f6 = set(model_b1.AYAR.fark(model_b5.AYAR)) | {"ad"}
+    _bak(f"model_b5 <-> model_b1 farki {sorted(f6)}",
+         sorted(f6) == ["ad", "jeton_ad"],
+         "model_b5 SADECE kodlamayi degistirmeli, MIMARIYI degil")
+    _bak("model_b5 t_len 11", model_b5.AYAR.t_len == 11,
+         f"t_len={model_b5.AYAR.t_len}")
+    _bak("model_b1 t_len 8 (DEGISMEDI)", model_b1.AYAR.t_len == 8)
+    for _g in ("AYAR", "egit", "fark_bas"):
+        _bak(f"model_b5.{_g} var", hasattr(model_b5, _g), "kos.py duser")
     f5 = set(model_b1.AYAR.fark(model_b4.AYAR)) | {"ad"}
     _bak(f"model_b4 <-> model_b1 farki {sorted(f5)}",
          sorted(f5) == ["ad", "ort_bas"],
@@ -105,7 +114,7 @@ def main():
     # `kos.py` ise YALNIZ istenen modulu import eder. Bu kusur bilerek
     # bozulmus bir surumle sinandi: duzeltmeden ONCE test GECIYORDU.
     for _ad in ("model_b", "model_b1", "model_b2", "model_b3",
-                "model_b4"):
+                "model_b4", "model_b5"):
         _satir = [
             "import sys, importlib",
             "sys.path.insert(0, %r)" % _B,

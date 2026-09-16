@@ -92,6 +92,15 @@ AYAR_KILIT = dict(
     # Phi'nin `tau -> 0` limiti: W[argmax(nf(h) Wᵀ)] + straight-through.
     # `model_a.Model` Phi'yi zaten hic cagirmaz. VARSAYILAN KAPALI.
     dar_sert=False,
+    # `jeton_ad` 16 Eylul'de eklendi -- `model_b5` icin (varliklar IKI
+    # JETON: Ayse_Yilmaz -> Ayse + Yilmaz). Kilit YINE YAKALADI
+    # (alan 35 -> 36). Gerekce kilide DOKUNULMADAN ONCE yazildi:
+    # belge/onkayit/model_b5.md.
+    # ORTAK CEKIRDEGE dokunan ILK kol: t_len 8 -> 11, cevap IKI jeton,
+    # kayip IKI hedef. HEPSI `jeton_ad`a bagli; VARSAYILAN KAPALI ve
+    # asagidaki `parametre 3427840` + `agirlik sha` + VERI kilidi
+    # model_a'nin BIT DUZEYINDE degismedigini dogruluyor.
+    jeton_ad=False,
 )
 
 VERI_KILIT = dict(
