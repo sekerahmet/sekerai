@@ -100,6 +100,15 @@ class ModelC(ModelB):
         g = torch.Generator().manual_seed(ayar.tohum * 1000 + 7)
         A[1:] += torch.randn(m - 1, d, d, generator=g) * (_GURULTU / d ** 0.5)
         self.kafa = nn.Parameter(A)      # (m, d, d)
+        # KARISIM AGIRLIGI -- head'ler uzerinden softmax, POZISYON BASINA.
+        # Sabit 1/m yanlisti: `Ozlem` pozisyonunda soyad head'inin katkisi
+        # zararli olabilir, model bunu soyleyememeliydi. (Kullanici, 16
+        # Eylul: "mantiken karisim agirligi gerekli bir sey.")
+        # w = 0, b = 0 ile baslar -> softmax(0,0,0) = 1/3 her biri, yani
+        # 0. adimda SADE ORTALAMAYLA BIT AYNI. m=1'de softmax tek elemanli
+        # -> 1.0 -> ModelB'nin Phi'si. Ek parametre m*(d+1).
+        self.kar_w = nn.Parameter(torch.zeros(m, d))
+        self.kar_b = nn.Parameter(torch.zeros(m))
 
     def _phi(self, h):
         if not self.cok_bas:
@@ -108,12 +117,16 @@ class ModelC(ModelB):
         q = self.nf(h)                                  # (..., d)
         W = self.emb.weight                             # (V, d)
         t = self.ayar.dar_tau
-        toplam = None
+        gs, ss = [], []
         for j in range(self.kafa.shape[0]):
             p = torch.softmax((q @ self.kafa[j].T) @ W.T / t, dim=-1)
-            g = p @ W
-            toplam = g if toplam is None else toplam + g
-        return toplam / self.kafa.shape[0]
+            g = p @ W                                   # (..., d)
+            gs.append(g)
+            ss.append((g * self.kar_w[j]).sum(-1) + self.kar_b[j])
+        # (..., m) uzerinden softmax -> karisim, toplami 1. Baslangicta
+        # w=b=0 oldugu icin butun skorlar 0 -> tam 1/m.
+        a = torch.softmax(torch.stack(ss, -1), dim=-1)
+        return sum(a[..., j:j + 1] * gs[j] for j in range(len(gs)))
 
 
 TABAN = model_b6.AYAR

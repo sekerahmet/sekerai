@@ -100,8 +100,9 @@ def main():
          == sum(p.numel() for p in c.parameters()),
          f"{sum(p.numel() for p in b.parameters())} vs "
          f"{sum(p.numel() for p in c.parameters())}")
-    _bak("ek modul YOK (kafa parametresi kurulmadi)",
-         not hasattr(c, "kafa") and c.cok_bas is False)
+    _bak("ek modul YOK (kafa/karisim parametresi kurulmadi)",
+         not hasattr(c, "kafa") and not hasattr(c, "kar_w")
+         and c.cok_bas is False)
     c.load_state_dict(b.state_dict())
     x = torch.randint(0, v.vocab, (4, a1.t_len))
     b.eval(); c.eval()
@@ -116,13 +117,18 @@ def main():
          hasattr(c3, "kafa")
          and tuple(c3.kafa.shape) == (3, model_c.AYAR.d, model_c.AYAR.d),
          str(tuple(c3.kafa.shape)) if hasattr(c3, "kafa") else "YOK")
-    _bak("ek parametre m*d^2 = 196.608",
+    _bak("ek parametre m*d^2 + m*(d+1) = 197.379",
          sum(p.numel() for p in c3.parameters())
-         - sum(p.numel() for p in b.parameters()) == 3 * 256 * 256,
+         - sum(p.numel() for p in b.parameters()) == 3 * 256 * 256 + 3 * 257,
          str(sum(p.numel() for p in c3.parameters())
              - sum(p.numel() for p in b.parameters())))
-    # kafa disindaki AGIRLIKLAR ayni olsun ki fark YALNIZ Phi'den gelsin
-    sd = {k: t for k, t in c3.state_dict().items() if k != "kafa"}
+    _bak("karisim agirligi kuruldu (m,d) + (m,)",
+         hasattr(c3, "kar_w") and tuple(c3.kar_w.shape) == (3, 256)
+         and tuple(c3.kar_b.shape) == (3,))
+    # Phi'ye AIT parametreler disindaki AGIRLIKLAR ayni olsun ki fark
+    # YALNIZ cok basli Phi'den gelsin -- ModelB'de kafa/karisim YOK.
+    sd = {k: t for k, t in c3.state_dict().items()
+          if k not in ("kafa", "kar_w", "kar_b")}
     b3 = ModelB(model_c.AYAR, v.vocab)
     b3.load_state_dict(sd)
     b3.eval(); c3.eval()
@@ -150,6 +156,35 @@ def main():
         d0 = (phi_b - phi_c0).abs().max().item()
     _bak(f"Phi_3'un 0. basi == ModelB'nin Phi'si {d0:.3e}", d0 < 1e-5)
 
+    print()
+    print("=== 4b) KARISIM AGIRLIGI OGRENILEBILIR, BASLANGICTA 1/m ===")
+    # Sabit 1/m yanlisti: model "bu pozisyonda bu head gereksiz"
+    # diyememeliydi. Softmax secildi ki w=b=0 iken TAM 1/m ciksin --
+    # yani kol, sade ortalamanin BASLADIGI yerden baslasin.
+    _bak("kar_w ve kar_b SIFIRDAN basliyor",
+         bool(torch.all(c3.kar_w == 0)) and bool(torch.all(c3.kar_b == 0)))
+    with torch.no_grad():
+        h2 = torch.randn(2, 5, model_c.AYAR.d)
+        q2 = c3.nf(h2)
+        _gs = [torch.softmax((q2 @ c3.kafa[j].T) @ c3.emb.weight.T
+                             / model_c.AYAR.dar_tau, -1) @ c3.emb.weight
+               for j in range(3)]
+        _sade = sum(_gs) / 3
+        dk = (c3._phi(h2) - _sade).abs().max().item()
+    _bak(f"baslangicta karisim == SADE ORTALAMA {dk:.3e}", dk < 1e-6)
+    # gradyan karisima AKIYOR mu
+    _c4 = ModelC(model_c.AYAR, v.vocab)
+    _X, _P, _T = M.kodla_2hop(v, L["seen"][:8])
+    _lg = _c4(torch.from_numpy(_X))
+    _ar = torch.arange(8)[:, None]
+    torch.nn.functional.cross_entropy(
+        _lg[_ar, torch.from_numpy(_P)].reshape(-1, v.vocab),
+        torch.from_numpy(_T).reshape(-1)).backward()
+    _bak("gradyan kar_w'ye AKIYOR",
+         _c4.kar_w.grad is not None and _c4.kar_w.grad.abs().sum() > 0)
+    _bak("gradyan HER head'in A_j'sine AKIYOR",
+         all(_c4.kafa.grad[j].abs().sum() > 0 for j in range(3)))
+
     print("\n=== 5) SON TURDA enjeksiyon YOK (alfa(K-1)=0) ===")
     a_tek = model_c.AYAR.degistir(dongu=1)
     torch.manual_seed(0)
@@ -157,7 +192,7 @@ def main():
     torch.manual_seed(0)
     b_tek = ModelB(a_tek.degistir(dar_kafa=1), v.vocab)
     b_tek.load_state_dict({k: t for k, t in c_tek.state_dict().items()
-                           if k != "kafa"})
+                           if k not in ("kafa", "kar_w", "kar_b")})
     c_tek.eval(); b_tek.eval()
     with torch.no_grad():
         dt = (c_tek(x) - b_tek(x)).abs().max().item()
