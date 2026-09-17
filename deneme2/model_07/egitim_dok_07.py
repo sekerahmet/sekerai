@@ -130,7 +130,7 @@ def _ayrim(d, v, X, P=None, T=None, i=0, fim=False):
     r = [int(t) for t in X[i] if int(t) != M.PAD]
     if fim:
         j = r.index(v.ayir)
-        return d.oku(r[:j + 1]), d.oku(r[j + 1:])
+        return d.oku(r[:j + 1]), d.oku(r[j + 1:]), d.oku(r[j + 1:])
     if T is not None and int((_np.asarray(T[i]) >= 0).sum()) > 0:
         # !! ISTENEN, KUYRUGUN TAMAMI DEGIL -- T'nin MASKESIZ hedefleri.
         # Kullanici sordu (17 Eylul): "13'te son 3 jetonu mu istiyoruz?"
@@ -141,9 +141,16 @@ def _ayrim(d, v, X, P=None, T=None, i=0, fim=False):
         # gosteriyordu; olculen `Kocaeli'`.
         p0 = int(P[i][0])
         hedef = [int(t) for t in _np.asarray(T[i]) if int(t) >= 0]
-        return d.oku(r[:p0 + 1]), d.oku(hedef)
+        # ISTENEN = cumlenin DEVAMININ TAMAMI (kullanici, 17 Eylul:
+        # "beklediğimiz yeri (Kocaeli'dir) diye yaz, yoksa neyi
+        # istedigimizi anlamiyorum"). OLCULEN ayri satirda: ad
+        # jetonlari + sinir isareti. Aradaki fark `dir` ve nokta --
+        # EGITILIYOR ama birincil olcude maskeli. `pencere_07`nin
+        # `ek_` sutunu onlari AYRICA olcer.
+        return (d.oku(r[:p0 + 1]), d.oku(r[p0 + 1:]), d.oku(hedef))
     return ("(cumlenin tamami)",
-            "HER KONUMDA sonraki jeton -- cevap yuvasi YOK "
+            "HER KONUMDA sonraki jeton",
+            "YOK -- cevap yuvasi maskeli "
             "(cevap kendi baglamindan ONCE geliyor)")
 
 
@@ -324,17 +331,30 @@ def main():
             _ad = dosya[3:-4]
             with io.open(os.path.join(kl, dosya), encoding="utf-8") as g:
                 ilk = g.readline().rstrip(NL)
-            ver, ist = AYRIM.get(_ad, ("?", "?"))
+            ver, ist, olc = AYRIM.get(_ad, ("?", "?", "?"))
             f.write(f"{dosya}   ({n:,} satir)" + NL)
             f.write(f"   amac    : {ne}" + NL)
             f.write(f"   ornek   : {ilk}" + NL)
             f.write(f"   VERILEN : {ver}" + NL)
-            f.write(f"   ISTENEN : {ist}" + NL + NL)
+            f.write(f"   ISTENEN : {ist}" + NL)
+            if olc != ist:
+                f.write(f"   OLCULEN : {olc}" + NL)
+            f.write(NL)
         f.write("01/02/03 sozluk dosyalaridir; 'verilen/istenen' yok." + NL)
-        f.write(NL + "!! tam_kayip=True -- KAYIP HER KONUMDA hesaplanir."
-                " Yukaridaki ISTENEN" + NL)
-        f.write("   sutunu kaybin sekli DEGIL, satirin NE OGRETTIGI:"
-                " olculen cevap yuvasi." + NL)
+        f.write(NL + "VERILEN / ISTENEN / OLCULEN -- uc ayri sey:" + NL)
+        f.write("  VERILEN  modelin GORDUGU onek" + NL)
+        f.write("  ISTENEN  cumlenin DEVAMI -- tam_kayip=True oldugu icin"
+                " hepsi EGITILIYOR" + NL)
+        f.write("  OLCULEN  `dogruluk()`un BAKTIGI yer: ad jetonlari +"
+                " sinir isareti" + NL)
+        f.write("           (ISTENEN ile ayniysa satir YAZILMAZ)" + NL + NL)
+        f.write("Fark `dir` ve nokta. `dir` adin SON JETONUNDAN"
+                " deterministik -- olculdu:" + NL)
+        f.write("73 farkli son jeton, CAKISMA 0. O yuzden birincil olcu"
+                " onu maskeliyor." + NL)
+        f.write("Ama determinizm MATEMATIKTE; MODELDE olup olmadigini"
+                " `pencere_07`nin" + NL)
+        f.write("`ek_` sutunu AYRICA olcer (unlu uyumu)." + NL)
         f.write(NL + "EGITIM HAVUZU = 10..20 arasi dosyalar." + NL)
         f.write("SINAV = 30..35. Sinav DUZ BILDIRIMLE yapilir (tip1); "
                 "soru bicimi ve" + NL)

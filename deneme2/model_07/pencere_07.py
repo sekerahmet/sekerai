@@ -190,6 +190,15 @@ def olc(ayar: M.Ayar, veri: M.Veri, kod: dict, L: dict, sd: dict) -> dict:
     net.load_state_dict(sd)
     net.eval()
     r = {k: M.dogruluk(net, veri, *kod[k]) for k in kod}
+    # BILDIRME EKI -- UNLU UYUMU. IKINCIL, hukum vermez.
+    # Kullanici, 17 Eylul: "niye 3 degil? cunku dir da bir token."
+    # Birincil olcu `dir`i maskeliyor (adin son jetonundan
+    # deterministik: 73 son jeton, cakisma 0). Ama o deterministiklik
+    # MATEMATIKTE var, MODELDE olmayabilir -- ve bu kolun tezi
+    # "modele DILI ogretecegiz". Ayri sayi olarak olculuyor.
+    for _b in ("one", "seen", "comp", "ent"):
+        if kod.get(_b):
+            r[f"ek_{_b}"] = M.ek_dogruluk(net, veri, *kod[_b])
     r["ent_kisayol"] = M.kisayol_orani(net, veri, L["ent"])
     r["ent_yok_kisayol"] = M.kisayol_orani(net, veri, L["ent_yok"])
     # SORU BICIMI -- IKINCIL, ayri adla (`soru_`), ayri tabloda.
@@ -312,6 +321,24 @@ def main():
         print(f"  {etiket:<18}"
               + "".join(f"{r.get(k, float('nan')):>9.4f}" for k in SUT)
               + f"{r['ent_kisayol']:>9.4f}{r['ent_yok_kisayol']:>9.4f}")
+
+    # --- BILDIRME EKI TABLOSU (IKINCIL -- HUKUM VERMEZ) ----------------
+    _ek = [k for k in sonuc[-1] if k.startswith("ek_")]
+    if _ek:
+        _eb = [b for b in ("one", "seen", "comp", "ent")
+               if f"ek_{b}" in sonuc[-1]]
+        print()
+        print("=" * 62)
+        print("BILDIRME EKI -- 'Kocaeli' YAZDIKTAN SONRA 'dir' mi 'dır' mi")
+        print("  Birincil olcu bu konumu MASKELIYOR: ek, adin son")
+        print("  jetonundan deterministik (73 son jeton, cakisma 0).")
+        print("  Ama determinizm MATEMATIKTE; MODELDE olup olmadigini")
+        print("  yalniz bu sutun soyler. HUKUM VERMEZ.")
+        print(f"  {'pencere':<18}" + "".join(f"{b:>11}" for b in _eb))
+        for r in sonuc:
+            print(f"  {r['pencere']:<18}"
+                  + "".join(f"{r.get('ek_'+b, float('nan')):>11.4f}"
+                            for b in _eb))
 
     # --- SORU BICIMI TABLOSU (IKINCIL -- HUKUM VERMEZ) -----------------
     _sk = [k for k in sonuc[-1] if k.startswith("soru_")]

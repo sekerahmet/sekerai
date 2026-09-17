@@ -1752,6 +1752,64 @@ def dogruluk(model, v: Veri, X, P, T, bs=512):
 
 
 @torch.no_grad()
+def ek_dogruluk(model, v: Veri, X, P, T, bs=512):
+    """BILDIRME EKI dogru mu -- UNLU UYUMU olcusu. IKINCIL.
+
+    Kullanici, 17 Eylul: *"niye 3 degil? cunku dir da bir token."*
+    Hakli: `dir` dizide bir jeton ve `tam_kayip` onu EGITIYOR, ama
+    `dogruluk()` onu OLCMUYOR (`_cevap` hedefi ad + sinir isaretinde
+    kesiyor).
+
+    Gerekce OLCULDU ve tutuyor: `dir` adin SON JETONUNUN deterministik
+    bir fonksiyonu -- 73 farkli son jeton, CAKISMA 0. Yani adi dogru
+    yazan modelin dogru eki de matematiksel olarak bellidir.
+
+        dır 366  dir 349  dür 160  tir 139  tür 48  tır 18  dur 7
+
+    AMA o deterministiklik MATEMATIKTE var, MODELDE olmayabilir. Model
+    adi dogru yazip `dır` yerine `dir` derse birincil olcu bunu
+    GORMUYOR. Bu kolun tezi "modele DILI ogretecegiz" ve unlu uyumu o
+    dilin bir kurali -- yani tezin yarisi olculmeden kaliyordu.
+
+    BURASI ONU OLCER, AYRI SAYI OLARAK. Birincil olcuye EKLENMEZ:
+    eklenirse `model_05` ve `model_06` ile kiyas sutunu bozulur.
+
+    Nasil: sinir isaretinin (kesme) konumundan bir sonraki jeton
+    tahmin edilir ve GERCEK ek ile karsilastirilir. Kisitlama YOK --
+    butun sozluk uzerinde argmax, cunku soru "o konuma dogru jetonu
+    yaziyor mu".
+
+    Cevap yuvasi maskeli olan satirlar (devrik bicimler) ATLANIR:
+    orada olculecek bir cevap yok."""
+    onceki = model.training
+    model.eval()
+    # sinir isaretinin konumu: T'nin SON maskesiz hedefi P[j]+1'de,
+    # o hedefi P[j] konumundan tahmin ediyoruz. Ek ise P[j]+2'de ve
+    # P[j]+1 konumundan tahmin edilir.
+    son_j = (T >= 0).sum(1) - 1
+    gecerli = son_j >= 0
+    poz = P[np.arange(len(P)), np.maximum(son_j, 0)] + 1
+    hed_i = poz + 1
+    gecerli &= hed_i < X.shape[1]
+    hedef = X[np.arange(len(X)), np.minimum(hed_i, X.shape[1] - 1)]
+    gecerli &= hedef != PAD
+    if not gecerli.any():
+        return float("nan")
+    Xg, pg, hg = X[gecerli], poz[gecerli], hedef[gecerli]
+    ok = []
+    for i in range(0, len(Xg), bs):
+        xb = torch.from_numpy(Xg[i:i + bs]).to(DEV)
+        with torch.autocast(DEV, dtype=torch.float16, enabled=(DEV == "cuda")):
+            lg = model(xb)
+        idx = torch.from_numpy(pg[i:i + bs]).to(DEV)
+        ar = torch.arange(len(idx), device=DEV)
+        tah = lg.float()[ar, idx].argmax(-1)
+        ok.append((tah == torch.from_numpy(hg[i:i + bs]).to(DEV)).cpu().numpy())
+    model.train(onceki)
+    return float(np.concatenate(ok).mean())
+
+
+@torch.no_grad()
 def kisayol_orani(model, v: Veri, lst, bs=512):
     """Model kac ornekte KISAYOL cevabini (facts[e, r2]) soyluyor?
     facts hucresi -1 ise (olgu yok) ent_off-1 cikar; bu bir ILISKI token'idir,
