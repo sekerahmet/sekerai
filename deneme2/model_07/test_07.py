@@ -620,5 +620,45 @@ for ad in ("veri_07", "taban_07", "ayar_07", "pencere_07", "tani_07",
     ok(_r2.returncode == 0, f"{ad} TEK BASINA import (yalniz model_05/)",
        _r2.stderr.strip()[-200:])
 
+# --- 8) KOPYALAMADA KAYBOLAN DUZELTMELER ---------------------------------
+# !! BU BOLUM BIR KAZADAN DOGDU. `model_07/` klasoru `model_06/`dan
+# KOPYALANDI ve kopya, duzeltmeleri tasiyan commit'ten ONCEYDI. Uc sey
+# sessizce geri gitti:
+#   konus.bat     hala `konus_05.py` cagiriyordu (kullanici IKI KEZ
+#                 carpti; klasorden turetilen surumle degistirildi)
+#   --genislik    5 -> 1'e dondu. Olculdu (model_06, 20.000): tek anlik
+#                 goruntu one 0.7530, pencere 0.9237. Yani arac
+#                 OLCULENDEN BASKA bir modeli gosteriyordu.
+#   bosluk cevabi tek jeton yerine hepsi basiliyordu; modelin hatasini
+#                 OLDUGUNDAN BUYUK gosteriyordu.
+# Ucunu de INSAN yakaladi, kod DEGIL. Burasi artik kodun yakalamasi icin.
+print("\n=== 8) KOPYALAMADA KAYBOLAN DUZELTMELER ===")
+import inspect, io                                          # noqa: E402
+import konus_07 as _K                                       # noqa: E402
+
+_sig = inspect.signature(_K.kur).parameters["genislik"].default
+ok(_sig == 5, "konus_07.kur VARSAYILANI 5 (pencere ortalamasi)",
+   f"genislik={_sig} -- 1 ise arac OLCULENDEN BASKA modeli gosterir")
+
+_ks = io.open(os.path.join(_B, "konus_07.py"), encoding="utf-8").read()
+ok('ap.add_argument("--genislik", type=int, default=5' in _ks,
+   "konus_07 --genislik VARSAYILANI da 5",
+   "argparse varsayilani `kur`dan AYRI; ikisi ayrisirsa CLI kazanir")
+ok("_c = _p[:1]" in _ks and "model DURMADI" in _ks,
+   "bosluk cevabi TEK JETON basiliyor",
+   "egitimde bosluk 187.296/187.296 kez tek jetonluk")
+
+_bat = io.open(os.path.join(_B, "konus.bat"), encoding="utf-8",
+               errors="replace").read()
+# !! YORUMA DEGIL KOMUTA bak: bat'in gecmis notunda "konus_05.py"
+# gecmesi normaldir, o bir ACIKLAMA. Aranan sey, `python` satirinin
+# betik adini ELLE yazip yazmadigi.
+_cagri = [x.strip() for x in _bat.splitlines()
+          if x.strip().lower().startswith("python")]
+ok("KLASOR:~6" in _bat, "konus.bat betik adini KLASORDEN turetiyor",
+   "elle yazilan ad, klasor kopyalaninca KAYIYOR")
+ok(_cagri and all("konus_0" not in c for c in _cagri),
+   "konus.bat CAGRISI elle yazilmis bir ad TASIMIYOR", str(_cagri))
+
 print(f"\n{_gecti} gecti, {_bozuk} BOZUK")
 sys.exit(1 if _bozuk else 0)

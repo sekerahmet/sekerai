@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 > nul
-REM konus_06'yi CIFT TIKLAMAYLA baslatir.
+REM Bu klasorun konus_<NN>.py betigini CIFT TIKLAMAYLA baslatir.
 REM !! DOSYA ADI KLASORDEN TURETILIYOR, elle yazilmiyor. Sebep:
-REM model_06 klasoru model_05'ten kopyalandiginda dosya adlari
+REM Bir kol klasoru bir digerinden kopyalandiginda dosya adlari
 REM degisti ama bu bat'in ICI kopyalandigi gibi kaldi ve
-REM 'konus_05.py bulunamadi' hatasi verdi (kullanici, 17 Eylul).
+REM 'betik bulunamadi' hatasi verdi (kullanici, 17 Eylul, IKI KEZ).
 REM Klasor adi ne ise konus_<o>.py aranir -- bir daha kaymaz.
 cd /d "%~dp0"
 set PYTHONIOENCODING=utf-8

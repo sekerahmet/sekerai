@@ -24,7 +24,7 @@ gozlerimle gormek istiyorum."*
 !! BU BIR OLCU DEGIL. Elle secilmis sorulardir; hukum `pencere_07` ile
 verilir (onkayit `belge/onkayit/model_07.md`).
 
-    python konus_07.py                      en son anlik goruntu
+    python konus_07.py                      son 5'in AGIRLIK ORTALAMASI
     python konus_07.py --adim 8000          belli bir adim
     python konus_07.py --genislik 5         son 5'in agirlik ortalamasi
     python konus_07.py --klasor <yol>       baska bir kosu
@@ -323,7 +323,28 @@ class Sozluk:
 
 
 # --- MODEL ---------------------------------------------------------------
-def kur(klasor, genislik=1, adim=None):
+def kur(klasor, genislik=5, adim=None):
+    """Modeli kur. VARSAYILAN: son 5 anlik goruntunun AGIRLIK ORTALAMASI.
+
+    !! ONCEDEN 1 IDI -- yani elimizdeki EN IYI modeli GOSTERMIYORDU.
+    Kullanici sordu (17 Eylul): *"su an konus en guncel agirlikli
+    ortalama iyi olan versiyon mu?"* Degildi. Olculdu (model_06, 20.000):
+
+        tek anlik goruntu   one 0.7530  seen 0.8003  comp 0.3118  ent 0.1977
+        pencere (5 ort.)    one 0.9237  seen 0.9723  comp 0.3970  ent 0.3083
+        FARK                   +0.1707     +0.1720     +0.0852     +0.1106
+
+    `one` 0,75 ile 0,92 arasindaki fark, elle sorulan sorularda gorulen
+    sacma cevaplarin buyuk kismini aciklar. Hukum de zaten pencereyle
+    veriliyor (CLAUDE.md "Birincil okuma"); arac baska bir modeli
+    gosterirse ekranda gorulen sey OLCULEN sey OLMAZ.
+
+    !! model_07'ye KOPYALANIRKEN KAYBOLDU: bu klasor, duzeltmeyi
+    tasiyan commit'ten ONCE kopyalandi ve varsayilan 1'e geri dondu.
+    Ayni hata ikinci kez.
+
+    `--genislik 1` ile eski davranisa donulur.
+    """
     ayar = P.ayar_oku(klasor)
     v = M.veri_kur(ayar, yaz=lambda *a: None)
     snap = P.anlik_goruntuler(klasor)
@@ -457,8 +478,9 @@ def main():
     ap.add_argument("--dene", action="store_true",
                     help="jetonlayiciyi egitim satirlarina karsi sina")
     ap.add_argument("--klasor", default=KLASOR)
-    ap.add_argument("--genislik", type=int, default=1,
-                    help="son N anlik goruntunun agirlik ortalamasi")
+    ap.add_argument("--genislik", type=int, default=5,
+                    help="son N anlik goruntunun AGIRLIK ORTALAMASI "
+                         "(varsayilan 5 -- hukum de bununla veriliyor)")
     ap.add_argument("--adim", type=int, default=None)
     ap.add_argument("--soru", action="append", default=None)
     a = ap.parse_args()
@@ -575,15 +597,29 @@ def main():
         # (kullanici, 17 Eylul: "bu sekilde yaptigim zaman neyi yanlis
         # yapiyorum?" -- yanlis yapan kendisi degil, bu satirdi.)
         if _fim:
-            # Cevap dizinin SONUNDA. Cumleyi bosluk DOLDURULMUS haliyle
-            # geri yaz -- kullanici ne sordugunu ve ne geldigini yan yana
-            # gorsun.
+            # !! EGITIMDE BOSLUK HEP TEK JETON (olculdu: AYIRAC'tan
+            # sonraki jeton sayisi 187.296/187.296 satirda 1). Yani cevap
+            # ILK jeton; devami modelin durmayi ogrenmedigini gosterir,
+            # cevabin parcasi DEGIL.
+            #
+            # Onceden hepsi "bosluga gelen" diye basiliyordu ve modelin
+            # hatasini OLDUGUNDAN BUYUK gosteriyordu: tek jetonluk bir
+            # bosluga 6 jeton basip "Kardesi Fatih Yilmaz'dir." diyordu.
+            # Kullanici sordu ("t_len uyumsuzlugundan mi?") -- degildi,
+            # bosluga 6-8 jetonluk yer kaliyordu; arac SOZLESMEYI
+            # bilmiyordu.
+            #
+            # !! Bu duzeltme de model_07'ye kopyalanirken KAYBOLMUSTU.
             _p = [int(t) for t in cikti[len(jet):]]
             _dolu = [t for t in jet[:-1]]
             _i = _dolu.index(v.bosluk)
-            print("  " + D.oku(_dolu[:_i] + _p + _dolu[_i + 1:]))
-            print("  bosluga gelen: " + D.oku(_p)
-                  + f"   ({' '.join(D.jeton_ad(t) for t in _p)})")
+            _c = _p[:1]
+            print("  " + D.oku(_dolu[:_i] + _c + _dolu[_i + 1:]))
+            print(f"  bosluga gelen: {D.jeton_ad(_c[0]) if _c else '(yok)'}")
+            _fazla = _p[1:]
+            if _fazla and _fazla[0] not in (M.PAD,):
+                print("  !! model DURMADI -- egitimde bosluk HEP tek jeton."
+                      " Devami: " + " ".join(D.jeton_ad(t) for t in _fazla))
             return
         yeni_cumle = jet[-1] in (M.QM, M.EOS)
         print(D.oku(cikti[len(jet):] if yeni_cumle else cikti))
