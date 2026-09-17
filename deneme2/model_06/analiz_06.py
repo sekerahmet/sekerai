@@ -101,6 +101,8 @@ class Dok:
                 return "<BOS>"
             if getattr(v, "ayir", 0) and i == v.ayir:
                 return "<AYIR>"
+            if getattr(v, "virgul", 0) and i == v.virgul:
+                return ","
             return (("'",) + tuple(v.ek_nin_ad)
                     + tuple(v.ek_dir_ad)
                     + tuple(v.soru_ad))[i - v.ek0]
@@ -121,7 +123,10 @@ class Dok:
         """
         v, VM = self.v, self.VM
         yapisik = {M.QM, M.EOS}
-        # <BOS> ve <AYIR> yapisik DEGIL -- onlar kelime degil, isaret.
+        # VIRGUL de ONCEKI KELIMEYE yapisir: "Yilmaz," -- "Yilmaz ,"
+        # degil. <BOS> ve <AYIR> yapisik DEGIL, onlar kelime degil.
+        if getattr(v, "virgul", 0):
+            yapisik = yapisik | {v.virgul}
         if getattr(v, "ek0", 0):
             yapisik |= set(range(v.ek0, v.ek0 + 1 + len(v.ek_nin_ad)
                                  + len(v.ek_dir_ad)))

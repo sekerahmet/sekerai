@@ -343,16 +343,21 @@ class Ayar:
         # !! model_06: SORU BICIMI YOK, yalniz BILDIRIM (kullanici
         # karari, 17 Eylul: "yalniz bildirim kullanalim"). En uzun satir
         # 2-hop bildirim:
-        #   e1 e2 e3 ' NIN r1 NIN r2 a1 a2 a3 ' DIR .  = 2*yuva + 8 = 14
+        #   kanonik  e1 e2 e3 ' NIN r1 NIN r2 a1 a2 a3 ' DIR .
+        #                                              = 2*yuva + 8 = 14
+        #   devrik   a1 a2 a3 ' DIR , e1 e2 e3 ' NIN r1 NIN r2 .
+        #                                              = 2*yuva + 9 = 15
+        #   ^ VIRGUL devrik bicimlerde oge sinirini isaretliyor
+        #     (kullanici, 17 Eylul). EN UZUN SATIR BU.
         # BOSLUK DOLDURMA +2 ekler (bosluk isareti + ayirac; cikarilan
-        # parca sona tasinir, uzunluk L - 1 + 1 + 1 + 1 = L + 2).
-        #   TOPLAM = 2*yuva + 10 = 16   (yuva 3)
+        # parca sona tasinir, uzunluk L - u + 1 + 1 + u = L + 2).
+        #   TOPLAM = 2*yuva + 11 = 17   (yuva 3)
         # kimlik: e SORU DIR ? e ' DIR .                = 2*yuva + 6 = 12
         #
         # model_05'te 3*yuva + 15 = 24 idi. Farkin TAMAMI, cevabin soruyu
         # birebir tekrar etmesiydi: olculdu, o 7 jetonun kosullu
         # entropisi 0,000 -- gradyan uretmiyorlardi.
-        return 2 * 3 + 10
+        return 2 * 3 + 11
         if not self.jeton_ad:
             return T_LEN
         # "ilk" 2 yuva, "tam" 3 yuva. Ikisinde de 2-hop 11'e siginiyor:
@@ -558,7 +563,19 @@ class Veri:
                 # sorulamaz (sagini goremez); parca SONA tasinir.
                 self.bosluk = self.vocab
                 self.ayir = self.vocab + 1
-                self.vocab += 2
+                # VIRGUL -- kullanici karari, 17 Eylul: *"burda , kavrami
+                # devreye giriyor... kardesi'dir Ozlem Yilmaz, Ibrahim
+                # Yilmaz'in"*.
+                #
+                # GEREKCESI OLCULDU: devrik bicimde cevap ile ozne YAN YANA
+                # iki ad oluyor ve aralarinda HIC isaret yoktu --
+                # "Kardesidir Ozlem Yilmaz Ibrahim Yilmaz'in": cevap
+                # "Ozlem" mi "Ozlem Yilmaz" mi, dizide bunu soyleyen bir
+                # sey yok. `havuz_06` yakaladi: 3000 satirin 300'unde
+                # next-token sozlesmesi dusuyordu. Diger biciminde sinir
+                # zaten isaretli ('dir / 'in); burada VIRGUL isaretliyor.
+                self.virgul = self.vocab + 2
+                self.vocab += 3
         # --- DEGISKEN UZUNLUKLU AD (17 Eylul, kullanici: "<YOK> sil,
         # gereksiz"). Once her varlik TAM `yuva` jeton kapliyordu ve kisa
         # adlar <YOK> ile SAGDAN dolduruluyordu -- havuzdaki butun
@@ -925,7 +942,7 @@ def _e(v, e):
     return [v.yuva_ara[j][0] + int(v.par[e, j]) for j in range(n)]
 
 
-def _cevap(v, az, a0):
+def _cevap(v, az, a0, son=None):
     """Cevabin KAYIP POZISYONLARI ve HEDEFLERI, degisken uzunlukta.
 
     Ad kac kelimeyse o kadar hedef, ARDINDAN kesme isareti -- yani model
@@ -934,14 +951,21 @@ def _cevap(v, az, a0):
 
         Kocaeli ' dir           -> hedef [Kocaeli, ', -1, -1]
         Ozlem Yilmaz ' dir      -> hedef [Ozlem, Yilmaz, ', -1]
+
+    `son` SONLANDIRICI jeton. Varsayilan KESME ISARETI, cunku kanonik
+    bicimde adin ardindan "'dir" geliyor. DEVRIK bicimde (iliski basta)
+    cevabin ardindan VIRGUL geliyor -- sinir orada virgulle isaretli.
+    Sonlandirici bicimden bicime degistigi icin PARAMETRE; sabit
+    yazilirsa hedef YANLIS jetonu bekler (fiilen oldu, havuz_06 yakaladi).
     """
     n = v.cevap_yuva
-    if a0 == 0:
-        # CEVAP CUMLENIN BASINDA (yuklem-basta bicimi): onunde tahmin
-        # edilecek konum YOK. Satir tam kayipla yine egitiliyor, ama
-        # CEVAP YUVASI olcumune KATILMAZ -- hepsi maskeli.
+    son = _kesme(v) if son is None else son
+    if a0 is None:
+        # DEVRIK BICIM: cevap oznesinden ONCE geliyor, soldan tahmin
+        # edilemez. Satir tam kayipla yine egitiliyor ama CEVAP YUVASI
+        # olcumune KATILMAZ -- hepsi maskeli.
         return list(range(n)), [-1] * n
-    hedef = list(az) + [_kesme(v)] + [-1] * (n - len(az) - 1)
+    hedef = list(az) + [son] + [-1] * (n - len(az) - 1)
     assert len(hedef) == n, (len(az), n)
     return list(range(a0 - 1, a0 - 1 + n)), hedef
 
@@ -1035,11 +1059,27 @@ def _bildirim(v, oz, il, az, a, son_r, bicim_no):
     """
     K = _kesme(v)
     D = _dir(v, a=a)
+    # !! CEVAP YUVASI OLCUMU YALNIZ KANONIK BICIMDE (a0 = None -> maskeli).
+    # Devrik bicimlerin IKISINDE de cevap, OZNEDEN ONCE geliyor:
+    #   bicim 1  "Ozlem Yilmaz'dir, ..."        -> onunde HICBIR SEY yok
+    #   bicim 2  "Kardesidir Ozlem Yilmaz, ..." -> onunde yalniz "kardesi"
+    # Ikisinde de cevap soldan TAHMIN EDILEMEZ (1087 varliktan hangisi
+    # oldugunu soyleyen bir sey yok) -- olcseydik sahte bir dusuk sayi
+    # uretirdi. `havuz_06` yakaladi: bicim 2 olculurken 2140 "ayni soru,
+    # farkli cevap" celiskisi cikiyordu.
+    #
+    # Bu bir kayip DEGIL: satirlar tam kayiple yine egitiliyor ve
+    # ISLERI ZATEN TERS YON -- cevaptan ozneyi/iliskiyi cikarmak.
     if bicim_no % 3 == 0:
-        return oz + il + az + [K, D, EOS], len(oz) + len(il)
+        return oz + il + az + [K, D, EOS], len(oz) + len(il), K
     if bicim_no % 3 == 1:
-        return az + [K, D] + oz + il + [EOS], 0
-    return il + [_dir(v, r=son_r)] + az + oz + [EOS], len(il) + 1
+        # "Ozlem Yilmaz'dir, Ibrahim Yilmaz'in kardesi."
+        return az + [K, D, v.virgul] + oz + il + [EOS], None, K
+    # "Kardesidir Ozlem Yilmaz, Ibrahim Yilmaz'in."
+    # Cevabin ardindan VIRGUL -- sinir isareti. Onsuz iki ad yan yana
+    # geliyordu ve nerede bittigi belirsizdi (kullanici, 17 Eylul).
+    return (il + [_dir(v, r=son_r)] + az + [v.virgul] + oz + [EOS],
+            None, v.virgul)
 
 
 def kodla_1hop(v: Veri, batch, bicim_no: int = 0):
@@ -1049,10 +1089,10 @@ def kodla_1hop(v: Veri, batch, bicim_no: int = 0):
     for i, (e, r, a) in enumerate(batch):
         ez, az = _e(v, e), _e(v, a)
         oz, il = ez + [_kesme(v), _nin(v, e=e)], [REL_OFF + r]
-        dz, a0 = _bildirim(v, oz, il, az, a, r, bicim_no)
+        dz, a0, son = _bildirim(v, oz, il, az, a, r, bicim_no)
         assert len(dz) <= v.t_len, (len(dz), v.t_len, bicim_no)
         X[i, :len(dz)] = dz
-        _p, _t = _cevap(v, az, a0)
+        _p, _t = _cevap(v, az, a0, son)
         P.append(_p)
         T.append(_t)
     return X, np.array(P, np.int64), np.array(T, np.int64)
@@ -1074,10 +1114,10 @@ def kodla_2hop(v: Veri, batch, bicim_no: int = 0):
         ez, az = _e(v, e), _e(v, a)
         oz = ez + [_kesme(v), _nin(v, e=e)]
         il = [REL_OFF + r1, _nin(v, r=r1), REL_OFF + r2]
-        dz, a0 = _bildirim(v, oz, il, az, a, r2, bicim_no)
+        dz, a0, son = _bildirim(v, oz, il, az, a, r2, bicim_no)
         assert len(dz) <= v.t_len, (len(dz), v.t_len, bicim_no)
         X[i, :len(dz)] = dz
-        _p, _t = _cevap(v, az, a0)
+        _p, _t = _cevap(v, az, a0, son)
         P.append(_p)
         T.append(_t)
     return X, np.array(P, np.int64), np.array(T, np.int64)

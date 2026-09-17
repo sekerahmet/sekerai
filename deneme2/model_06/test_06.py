@@ -338,10 +338,23 @@ _ekler = [_d.jeton_ad(i) for i in range(_d.v.ek0, _d.v.vocab)]
 # ek_kip="tr2" ek blogu:  '  + tamlayan allomorflari (8) +
 # bildirme allomorflari (8) + soru sozcukleri.  Hicbiri <SOYUT>
 # isaretleyici DEGIL -- hepsi GERCEK Turkce ek ya da kelime.
+# model_06 UC JETON EKLEDI, hepsi sozlugun SONUNDA (REL_OFF ve ent_off
+# KAYMASIN diye):
+#   <BOS>   bosluk doldurmada cikarilan parcanin yeri
+#   <AYIR>  "cumle bitti, simdi o parca geliyor"
+#   ,       devrik cumlede OGE SINIRI -- onsuz "Kardesidir Ozlem Yilmaz
+#           Ibrahim Yilmaz'in"da iki ad yan yana geliyor ve cevabin
+#           nerede bittigi BELIRSIZ kaliyordu (havuz_06 yakaladi).
 _bek = (["'"] + list(V00.EK_NIN) + list(V00.EK_DIR)
-        + sorted(set(V00.SORU_SOZ.values())))
-ok(_ekler == _bek, "analiz_05.jeton_ad EK JETONLARINI adlandiriyor",
+        + sorted(set(V00.SORU_SOZ.values()))
+        + ["<BOS>", "<AYIR>", ","])
+ok(_ekler == _bek, "analiz_06.jeton_ad EK JETONLARINI adlandiriyor",
    f"{len(_ekler)} jeton")
+ok(_d.v.vocab - _d.v.ek0 == 23, "ek blogu 20 -> 23 jeton (BOSLUK + virgul)",
+   f"{_d.v.vocab - _d.v.ek0}")
+ok(M.REL_OFF == 3 and _d.v.ent_off == 3 + _d.v.n_rel,
+   "REL_OFF ve ent_off KAYMADI (yeni jetonlar SONA eklendi)",
+   f"REL_OFF {M.REL_OFF}  ent_off {_d.v.ent_off}")
 # Allomorf SECIMI dogru mu -- unlu uyumu ve sert unsuz.
 _G05 = V00.kur(0)
 _es = V00.ek_secim(_G05)
@@ -382,8 +395,15 @@ from model_b15 import AYAR as B15                            # noqa: E402
 from ayar_06 import GOREV_ALAN                               # noqa: E402
 
 ok(M.ESKI_VARSAYILAN == MA.ESKI_VARSAYILAN, "ESKI_VARSAYILAN AYNI")
-ok([f.name for f in M.dc.fields(M.Ayar)]
-   == [f.name for f in MA.dc.fields(MA.Ayar)], "Ayar ALANLARI ayni")
+# model_06 BIR ALAN EKLEDI: `fim_kat` (bosluk doldurma varyant sayisi).
+# Bilerek ve TEK alan; baska bir ayrisma olmamali.
+_alan06 = [f.name for f in M.dc.fields(M.Ayar)]
+_alanA = [f.name for f in MA.dc.fields(MA.Ayar)]
+ok(set(_alan06) - set(_alanA) == {"fim_kat"},
+   "Ayar alanlari model_a ile AYNI, YALNIZ fim_kat eklendi",
+   f"fazla {sorted(set(_alan06) - set(_alanA))}")
+ok(not (set(_alanA) - set(_alan06)), "model_a'nin hicbir alani SILINMEDI",
+   f"eksik {sorted(set(_alanA) - set(_alan06))}")
 # !! `SPECIAL` BILEREK AYRILDI (17 Eylul). model_a'da 8, burada 3.
 # Olculdu: sekiz ozel jetonun BESI havuzda HIC gecmiyordu --
 #   [S1] [S2] [KIMLIK] ve iki adlandirilmamis yuva.
@@ -406,10 +426,17 @@ ok(M.REL_OFF == M.SPECIAL, "REL_OFF hala SPECIAL'a bagli", str(M.REL_OFF))
 # KULLANILMIYOR -- `ayar_oku` eksik alanlari ESKI_VARSAYILAN'dan
 # dolduruyor -- ama sapma yine de GORULSUN.)
 import dataclasses as _dcc                                   # noqa: E402
+# !! YALNIZ IKISINDE DE OLAN alanlar kiyaslanir. `fim_kat` model_06'nin
+# YENI alani; `getattr(MA.Ayar(), "fim_kat")` AttributeError verirdi.
+_ortak = {f.name for f in _dcc.fields(MA.Ayar)}
 _vf = sorted(f.name for f in _dcc.fields(M.Ayar)
-             if getattr(M.Ayar(), f.name) != getattr(MA.Ayar(), f.name))
+             if f.name in _ortak
+             and getattr(M.Ayar(), f.name) != getattr(MA.Ayar(), f.name))
 ok(_vf == ["ad", "veri_ad"],
-   "Ayar VARSAYILANLARI yalniz ad + veri_ad'da farkli", str(_vf))
+   "ORTAK alanlarin varsayilanlari yalniz ad + veri_ad'da farkli", str(_vf))
+ok(M.Ayar().fim_kat == 0,
+   "fim_kat VARSAYILANI 0 -- bosluk doldurma KAPALI gelir",
+   "acan sey ayar_06, yani BU KOLUN karari")
 
 # BILDIRILMIS AYRISMA. `GOREV_ALAN` "sinavin AYNI kalmasi GEREKEN
 # alanlari" listesi ve model_03'e kadar hepsi model_b15 ile birebirdi.
@@ -467,8 +494,16 @@ ok(X0.shape != X1.shape,
 # Sinanan sey artik "ayni kaldi" DEGIL, "TURETIMLE TUTUYOR".
 # t_len = 3*yuva + 15: soru (yuva+7) + TAM CUMLE cevap (2*yuva+8).
 # Kullanici karari 17 Eylul: cevap soruyu YENIDEN YAZIP oyle cevapliyor.
-ok(X0.shape[1] == A.t_len == 3 * v.yuva + 15,
-   "t_len TURETIMLE tutuyor (3*yuva + 15)", f"{A.t_len} (model_b15 {X1.shape[1]})")
+# model_06: SORU BICIMI YOK (kullanici, 17 Eylul: "yalniz bildirim
+# kullanalim"). En uzun satir DEVRIK bildirim:
+#   a(3) ' <DIR> ,  e(3) ' <NIN> r1 <NIN> r2 .  = 2*yuva + 9 = 15
+# BOSLUK DOLDURMA +2 (bosluk isareti + ayirac). t_len = 2*yuva + 11.
+# model_05'te 3*yuva + 15 = 24 idi; farkin tamami cevabin soruyu
+# birebir tekrar etmesiydi (o 7 jetonun kosullu entropisi 0,000).
+ok(X0.shape[1] == A.t_len == 2 * v.yuva + 11,
+   "t_len TURETIMLE tutuyor (2*yuva + 11)", f"{A.t_len} (model_b15 {X1.shape[1]})")
+ok(A.t_len < 24, "t_len model_05'ten KUCUK (soru bicimi kalkti)",
+   f"{A.t_len} < 24")
 # !! CEVAP YUVA SAYISI 3 -> 4, ve bu BILEREK (17 Eylul, kullanici:
 # "<YOK> sil, gereksiz"). Adlar artik DEGISKEN uzunlukta; cevap
 # hedefleri "adin kelimeleri + KESME ISARETI" oldu, yani en fazla
@@ -477,8 +512,17 @@ ok(X0.shape[1] == A.t_len == 3 * v.yuva + 15,
 # "dogru adi yazdi VE dogru yerde bitirdi".
 ok(P0.shape[1] == T0.shape[1] == v.cevap_yuva == v.yuva + 1,
    "cevap yuvasi = yuva + 1 (ad + KESME)", f"{P0.shape[1]} (model_b15 {P1.shape[1]})")
-ok(int((T0 < 0).any(1).sum()) > 0 and int((T0[:, 0] < 0).sum()) == 0,
-   "kisa adlarda MASKE var, ilk yuva HIC maskeli degil",
+# !! model_06: IKI bicim TAMAMEN maskeli (cevap yuvasi olcumune
+# girmiyor) -- devrik bildirim ve bosluk doldurma. Ikisinde de cevap
+# oznesinden ONCE geliyor, yani soldan tahmin EDILEMEZ; olcseydik
+# sahte dusuk sayi uretirdi. "Ilk yuva maskeli degil" iddiasi artik
+# YALNIZ OLCULEN satirlar icin gecerli.
+_tam0 = (T0 < 0).all(1)
+ok(int(_tam0.sum()) > 0, "TAM MASKELI satirlar VAR (devrik + bosluk)",
+   f"{int(_tam0.sum()):,}/{len(T0):,}")
+ok(int((T0[~_tam0] < 0).any(1).sum()) > 0
+   and int((T0[~_tam0][:, 0] < 0).sum()) == 0,
+   "kisa adlarda MASKE var, ilk yuva HIC maskeli degil (OLCULEN satirlar)",
    f"maskeli satir {int((T0 < 0).any(1).sum()):,}/{len(T0):,}")
 _kes = v.ek0
 ok(all(int(t[int((t >= 0).sum()) - 1]) == _kes for t in T0[:500]),
@@ -508,8 +552,12 @@ ok(int(X0.max()) < v.vocab and int(X0.min()) >= 0,
 # durursa ilk bakilacak yer burasi.
 _ep0 = A.batch * A.adim / X0.shape[0]
 _ep1 = B15.batch * B15.adim / X1.shape[0]
-ok(X0.shape[0] < X1.shape[0],
-   "havuz KUCULDU -- epok sayisi ARTTI, RAPORLANIR (hukum DEGIL)",
+# !! model_06'da havuz BUYUDU (model_05'te kuculmustu): bosluk
+# doldurma her bildirim satirindan `fim_kat` varyant uretiyor.
+# Epok sayisi DUSUYOR ve bu RAPORLANIR -- hukum vermez, ama `seen`
+# yukselirken `comp` durursa ilk bakilacak yer burasi.
+ok(X0.shape[0] > X1.shape[0],
+   "havuz BUYUDU -- epok sayisi DUSTU, RAPORLANIR (hukum DEGIL)",
    f"{X0.shape[0]} dizi / ~{_ep0:.0f} epok   vs   "
    f"{X1.shape[0]} / ~{_ep1:.0f} epok")
 

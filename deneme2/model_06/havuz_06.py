@@ -168,10 +168,35 @@ bak("kimlik satirinda ILISKI jetonu YOK", True, "tanim geregi (n_rel == 0)")
 # !! 4) ve 5) BOLUMLERI (BELGE) KALDIRILDI: `belge_pay` ve
 # `kodla_belge` 17 Eylul silindi -- belge satiri ek isaretleyici
 # tasimiyordu, yani ek_kip ile ZATEN birlikte kurulamiyordu.
+# --- TAM MASKELI SATIRLAR (model_06) ----------------------------------
+# Iki bicim cevap yuvasi olcumune KATILMAZ ve hedefleri tamamen -1:
+#   YUKLEM BASTA   "Ozlem Yilmaz'dir, Ibrahim Yilmaz'in kardesi."
+#                  cevap cumlenin BASINDA -> soldan tahmin EDILEMEZ.
+#                  O bicimin isi zaten ters yon: cevaptan OZNEYI cikarmak.
+#   BOSLUK DOLDURMA  hedef dizinin SONUNDA, tam kayip onu zaten ogretiyor.
+# Asagidaki uc denetim bu satirlari DISARIDA BIRAKIR; yoksa "cevap
+# yuvasi" varsaymayan satirlari cevap yuvasi kuralina sokmus oluruz.
+_tam_mask = (T < 0).all(1)
+_fim = (X == v.bosluk).any(1) if getattr(v, "bosluk", 0) else np.zeros(len(X), bool)
+bak("TAM MASKELI satirlar = yuklem-basta + bosluk doldurma",
+    bool((_fim <= _tam_mask).all()),
+    f"tam maskeli {int(_tam_mask.sum()):,}  ({int((_tam_mask & ~_fim).sum()):,} "
+    f"yuklem-basta + {int(_fim.sum()):,} bosluk)")
+_ol = np.nonzero(~_tam_mask)[0]          # OLCULEN satirlar
+
 print("\n6) CELISKI -- ayni soru, FARKLI cevap")
+# !! YALNIZ OLCULEN SATIRLAR. Tam maskeli satirlarda `P[i][0]` anlamli
+# bir "soru sonu" DEGIL (cevap ya basta ya dizinin sonunda), o yuzden
+# onek bos ya da yanlis cikiyor ve hepsi ayni anahtara duserdi.
 soz = collections.defaultdict(set)
-for i in np.concatenate([i1[:6000], i2[:6000]]):
-    soru = tuple(int(t) for t in X[i][:P[i][0]])
+for i in np.intersect1d(np.concatenate([i1[:6000], i2[:6000]]), _ol):
+    # !! `P[i][0] + 1`. P[0] = a0 - 1, yani cevaptan ONCEKI konum --
+    # dilim `[:P[0]]` o konumu DISARIDA birakiyordu ve model_06'da orasi
+    # ILISKI jetonu. Sonuc: "Ibrahim Yilmaz ' ın" oneki butun iliskilerde
+    # ayni cikip 2140 sahte celiski uretiyordu. model_05'te zararsizdi,
+    # cunku orada cevap cumlesi soruyu tekrar ediyordu ve a0 dizinin
+    # cok ilerisindeydi -- iliskiler onekte zaten kaliyordu.
+    soru = tuple(int(t) for t in X[i][:P[i][0] + 1])
     soz[soru].add(tuple(int(t) for t in T[i]))
 cel = {k: cv for k, cv in soz.items() if len(cv) > 1}
 bak("ayni soruya IKI FARKLI cevap veren satir YOK", not cel,
@@ -182,14 +207,24 @@ print("\n7) KAYIP HEDEFLERI")
 # ISARETI. Adlar degisken uzunlukta (<YOK> silindi, 17 Eylul):
 #   "Kocaeli'dir."      -> [Kocaeli, ', -1, -1]
 #   "Ozlem Yilmaz'dir." -> [Ozlem, Yilmaz, ', -1]
-bak("maskesiz hedefler CEVAP blogunda (varlik kelimesi + kesme)",
-    bool(((T < 0) | ((T >= v.cevap_ara[0]) & (T < v.cevap_ara[1]))).all()),
-    f"T min {int(T[T >= 0].min())} max {int(T.max())}, blok {v.cevap_ara}")
-bak("her cevabin SON maskesiz hedefi KESME ISARETI",
-    bool(all(int(t[int((t >= 0).sum()) - 1]) == v.ek0 for t in T[:5000])),
-    f"kesme jetonu {v.ek0}")
-bak("ILK hedef HIC maskeli degil (her adin en az bir kelimesi var)",
-    bool((T[:, 0] >= 0).all()))
+# SONLANDIRICI bicimden bicime degisiyor: kanonik bicimde KESME
+# ("...Ozlem Yilmaz ' dir"), devrik bicimde VIRGUL ("...Ozlem Yilmaz ,
+# Ibrahim Yilmaz'in"). Ikisi de gecerli sinir isareti.
+_sonlar = {v.ek0} | ({v.virgul} if getattr(v, "virgul", 0) else set())
+_gec = (T < 0) | ((T >= v.cevap_ara[0]) & (T < v.cevap_ara[1]))
+for _t in _sonlar:
+    _gec |= (T == _t)
+bak("maskesiz hedefler CEVAP blogunda (varlik kelimesi + sinir isareti)",
+    bool(_gec.all()),
+    f"T min {int(T[T >= 0].min())} max {int(T.max())}, blok {v.cevap_ara}, "
+    f"sinir {sorted(_sonlar)}")
+bak("her cevabin SON maskesiz hedefi SINIR ISARETI (kesme ya da virgul)",
+    bool(all(int(t[int((t >= 0).sum()) - 1]) in _sonlar
+             for t in T[_ol[:5000]])),
+    f"kesme {v.ek0}" + (f", virgul {v.virgul}" if getattr(v, "virgul", 0) else ""))
+bak("ILK hedef HIC maskeli degil (OLCULEN satirlarda)",
+    bool((T[_ol, 0] >= 0).all()),
+    f"olculen {len(_ol):,}/{len(T):,}")
 bak("P pozisyonlari next-token sozlesmesine uyuyor (maskesizlerde)",
     bool(all(((X[i, P[i] + 1] == T[i]) | (T[i] < 0)).all()
              for i in np.random.RandomState(0).randint(0, len(X), 3000))))
