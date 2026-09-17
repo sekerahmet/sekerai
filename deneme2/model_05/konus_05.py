@@ -443,7 +443,21 @@ def main():
         if jeton_goster[0]:
             print("  jeton: " + " ".join(D.jeton_ad(t) for t in jet)
                   + "  ||  " + " ".join(D.jeton_ad(t) for t in cikti[len(jet):]))
-        print(D.oku(cikti[len(jet):]))
+        # MODEL CUMLEYI TAMAMLIYORSA BASINI DA BAS. Yazilan sey `?` ya da
+        # `.` ile bitmisse model YENI bir cumleye basliyor demektir ve
+        # yalniz onu basmak dogru. Bitmemisse model SENIN cumleni
+        # suruduruyor -- o durumda yalniz devami basmak okunamaz bir sey
+        # uretir ve MODELIN HATASI SANILIR:
+        #
+        #   yazilan  "Ibrahim Yilmaz'in kardesi"
+        #   model    "nin memleketi Konya'dir."      <- BILDIRIM bicimi,
+        #                                              dilbilgisi KUSURSUZ
+        #   ekranda  "Nin memleketi Konya'dir."      <- sacma GORUNUYOR
+        #
+        # (kullanici, 17 Eylul: "bu sekilde yaptigim zaman neyi yanlis
+        # yapiyorum?" -- yanlis yapan kendisi degil, bu satirdi.)
+        yeni_cumle = jet[-1] in (M.QM, M.EOS)
+        print(D.oku(cikti[len(jet):] if yeni_cumle else cikti))
 
     if a.soru:
         for q in a.soru:
