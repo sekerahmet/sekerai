@@ -124,7 +124,21 @@ def main():
     if a.hiz_dogrula:
         import tempfile, torch
         _sonuc = {}
-        for _ad, _bayrak in (("GPU havuzu", "1"), ("CPU havuzu", "0")):
+        # !! ISINMA KOSUSU, SONUCU ATILIR. Ilk olcumde GPU dali 0.79x
+        # cikti -- yani YAVAS. Sebep olcumun kendisiydi: ilk kosan dal
+        # CUDA baglaminin, bellek ayiricisinin ve cuDNN secimlerinin
+        # bedelini ODUYOR, ikincisi hazir ortamdan yararlaniyor. Sira
+        # etkisini kaldirmadan hiz kiyasi YAPILAMAZ.
+        # Ayrica her dal IKI KEZ olculup EN IYISI alinir (gurultu).
+        for _ad, _bayrak in (("ISINMA", "1"),):
+            os.environ["GPU_HAVUZ"] = _bayrak
+            importlib.reload(M.M); importlib.reload(M)
+            with tempfile.TemporaryDirectory() as _d:
+                M.egit(M.AYAR.degistir(tohum=a.tohum[0], adim=max(10, a.hiz_dogrula // 3),
+                                       olc_her=10**9),
+                       alt=_d, yaz=lambda *x: None, commit="isinma")
+        for _ad, _bayrak in (("CPU havuzu", "0"), ("GPU havuzu", "1"),
+                             ("CPU havuzu", "0"), ("GPU havuzu", "1")):
             os.environ["GPU_HAVUZ"] = _bayrak
             importlib.reload(M.M)          # taban_06'yi tazele
             importlib.reload(M)
@@ -136,7 +150,8 @@ def main():
                 _sn = time.time() - t0
                 _sd = torch.load(sorted(glob.glob(f"{_d}/snap/*.pt"))[-1],
                                  map_location="cpu")
-            _sonuc[_ad] = (_sd, _sn)
+            if _ad not in _sonuc or _sn < _sonuc[_ad][1]:
+                _sonuc[_ad] = (_sd, _sn)
             print(f"  {_ad:<12} {a.hiz_dogrula} adim  {_sn:.1f} sn"
                   f"  ({_sn/a.hiz_dogrula*1000:.1f} ms/adim)", flush=True)
         (g, gs), (c, cs) = _sonuc["GPU havuzu"], _sonuc["CPU havuzu"]
