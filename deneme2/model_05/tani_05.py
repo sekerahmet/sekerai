@@ -34,10 +34,27 @@ KATEGORI = ("DOGRU", "KOPRU", "KISAYOL", "VARLIK", "KOPRU_YANLIS",
 
 
 def varlik_sozlugu(v: M.Veri):
-    """(yuva jetonlari) -> varlik id.  Birebirlik `veri_kur`da ASSERT'li."""
+    """(CEVAP JETONLARI) -> varlik id.  Birebirlik `veri_kur`da ASSERT'li.
+
+    !! YENIDEN YAZILDI, 17 Eylul.  Once anahtar `v.par[e]` idi, yani
+    SABIT `yuva` uzunlukta ve bos yuvada -1 tasiyan bir demet:
+
+        Ozlem Yilmaz  ->  (142, 238, -1)
+
+    `ek_kip="tr2"`de <YOK> dolgusu SILINDI ve cozucu her yuvaya argmax
+    uyguladigi icin tahmin HIC -1 uretmiyor -- yani 1 ve 2 kelimelik
+    butun cevaplar sozlukte ESLESEMIYORDU. Olculdu (model_05, pencere
+    16000-24000): `seen` icin arac DOGRU 0.150 basiyordu, gercegi
+    1.0000; `ent`te VARLIK_DEGIL 2447 ve bu sayi 1-jetonlu (390) ile
+    2-jetonlu (2057) cevaplarin TOPLAMINA birebir esitti.
+
+    Dogrusu `dogruluk()`un kurali: cevap = kelimeler + KESME ISARETI,
+    kalan pozisyonlar maskeli. Anahtar da o dizi.
+    """
     if v.par is None:
         return None
-    return {tuple(int(x) for x in v.par[e]): e for e in range(v.n_ent)}
+    K = M._kesme(v)
+    return {tuple(M._e(v, e)) + (K,): e for e in range(v.n_ent)}
 
 
 def yuva_araliklari(v: M.Veri, yuva: int):
@@ -62,11 +79,28 @@ def tahmin_ve_sira(net, v: M.Veri, lst, bs=512):
     Sira 0 = model dogru cevabi ilk siraya koydu. Varlik-kisitli:
     iliski/ozel token'lar yarismaya SOKULMAZ (dogruluk() ile ayni kural)."""
     X, Pz, _T = M.kodla_2hop(v, lst)
-    ARA = yuva_araliklari(v, Pz.shape[1])
+    # !! CEVAP ARALIGI, yuva araligi DEGIL. `dogruluk()` TEK KAYNAK:
+    # her cevap pozisyonunda ayni kume yarisir -- VARLIK KELIMELERI +
+    # KESME ISARETI (`v.cevap_ara`). Yuva basina ayri aralik kullanmak
+    # degisken uzunluklu adlarda cozumlemeyi bozuyordu (bkz.
+    # `varlik_sozlugu` notu).
+    ARA = ([v.cevap_ara] * Pz.shape[1] if v.par is not None
+           else yuva_araliklari(v, Pz.shape[1]))
     soz = varlik_sozlugu(v)
-    # EJ[e, j] = e varliginin j. yuvadaki jetonunun YUVA ICI indisi.
-    EJ = (np.arange(v.n_ent, dtype=np.int64)[:, None] if v.par is None
-          else v.par[:, :len(ARA)])
+    # EJ[e, j] = e varliginin j. CEVAP pozisyonundaki jetonunun aralik
+    # ici indisi; ad bittikten sonra -1 (o pozisyon PUANA KATILMAZ).
+    # Onceden `v.par[:, :yuva]` idi ve bos yuvadaki -1 numpy'da SON
+    # kelimeyi indeksliyordu -- `kelimeler()` notundaki hatanin aynisi,
+    # burada SIRALAMA puanini bozuyordu.
+    if v.par is None:
+        EJ = np.arange(v.n_ent, dtype=np.int64)[:, None]
+    else:
+        lo0 = v.cevap_ara[0]
+        K = M._kesme(v)
+        EJ = np.full((v.n_ent, len(ARA)), -1, np.int64)
+        for e in range(v.n_ent):
+            dz = M._e(v, e) + [K]
+            EJ[e, :len(dz)] = [t - lo0 for t in dz]
     EJt = torch.from_numpy(np.ascontiguousarray(EJ)).to(M.DEV)
     onceki = net.training
     net.eval()
@@ -87,15 +121,33 @@ def tahmin_ve_sira(net, v: M.Veri, lst, bs=512):
         if soz is None:
             tah.append(pj[:, 0])
         else:
-            tah.append(np.array([soz.get(tuple(int(x) for x in r), -1)
-                                 for r in pj], np.int64))
+            # ARALIK ICI indis -> MUTLAK jeton, ve KESME ISARETINDE KES.
+            # Model adi nerede bitirdigini kendisi soyluyor; 2 kelimelik
+            # bir cevapta 3. pozisyonun argmax'i ANLAMSIZDIR ve tam
+            # demetle arama yapmak butun kisa adlari dusuruyordu.
+            _lo, _K = v.cevap_ara[0], M._kesme(v)
+            _t = []
+            for r in pj:
+                dz = []
+                for x in r:
+                    dz.append(int(x) + _lo)
+                    if dz[-1] == _K:
+                        break
+                _t.append(soz.get(tuple(dz), -1))
+            tah.append(np.array(_t, np.int64))
         # SIRA: varlik puani = yuvalarin LOG-OLASILIKLARI TOPLAMI. Kayip
         # yuvalari bagimsiz kabul ediyor, puan da oyle. Tek yuvada
         # log_softmax siralamayi DEGISTIRMEZ -> eski sira ile ayni.
+        # ADIN DIZI LOG-OLASILIGI: kelimeler + kesme isareti. Ad bittikten
+        # SONRAKI pozisyonlar katilmaz (EJ orada -1) -- egitimde de
+        # maskeliler. Kisa adlar dogal olarak yuksek puan alir; bu
+        # carpitma degil, modelin o adi yazma olasiliginin kendisi.
         puan = None
         for j, (lo, hi) in enumerate(ARA):
-            lp = torch.log_softmax(lgp[:, j, lo:hi], -1)     # (B, slot)
-            p = lp[:, EJt[:, j]]                             # (B, n_ent)
+            lp = torch.log_softmax(lgp[:, j, lo:hi], -1)     # (B, aralik)
+            gec = EJt[:, j]                                  # (n_ent,)
+            p = lp[:, gec.clamp(min=0)]                      # (B, n_ent)
+            p = p * (gec >= 0).to(p.dtype)                   # bitmisse 0 ekle
             puan = p if puan is None else puan + p
         g = torch.as_tensor([x[4] for x in lst[i:i + bs]], device=M.DEV)
         dogru_skor = puan.gather(1, g[:, None])
