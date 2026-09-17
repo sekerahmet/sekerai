@@ -1321,9 +1321,17 @@ def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
             "olurdu ve OGRENILEMEZ")
     _n_tab = sum(len(a) for a, _, _ in parca)
     if _bic > 1:
+        # KUSUR (17 Eylul, kullanici "niye her sey FIM olmus?" diye
+        # sorunca bulundu): burada `_n_tab` basiliyordu ve o sayi FIM
+        # satirlarini DA iceriyor -- yani "(1hop+2hop) x3" diye
+        # etiketlenen sayi 93.648 degil 280.944 cikiyordu. Kosu kutugu
+        # havuzun bilesimini UC KAT yanlis gosteriyordu.
+        _n_duz = (len(v.one) + len(v.tr2)) * _bic
         yaz(f"  BICIM CESITLILIGI: {_bic} yuzey bicimi -- OLGU ve SORU "
             f"satirlarinin IKISINDE de")
-        yaz(f"     (1hop {len(v.one)} + 2hop {len(v.tr2)}) x{_bic} = {_n_tab}")
+        yaz(f"     (1hop {len(v.one)} + 2hop {len(v.tr2)}) x{_bic} "
+            f"= {_n_duz:,} duz bildirim satiri")
+        yaz(f"     havuzun tablo kismi (duz + FIM) = {_n_tab:,}")
         yaz("     SINAV hep bicim 0 -- egitim daha cok yuzey gorur, sinav TEK.")
     kimlik = None
     if ayar.ident_frac > 0:
