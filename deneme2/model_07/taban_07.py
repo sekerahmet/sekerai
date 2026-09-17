@@ -278,6 +278,19 @@ class Ayar:
     # <SI> KALKTI, yerine SORU SOZCUGU geldi (kim / neresi / hangisi).
     ek_kip: str = ""           # "" | "tr" | "tr2"
     bicim: int = 1
+    soru_kat: int = 0    # SORU BICIMI: her zincir icin kac SORU satiri.
+    #                      0 = kapali (model_06'nin durumu).
+    #
+    #   Ibrahim Yilmaz'in danismaninin arkadasi kimdir? Derya Yilmaz'dir.
+    #
+    #   NEDEN (kullanici, 17 Eylul): *"benim amacim EK YAPMAKTI, tum
+    #   formati degistirmek degil. bosluk doldurma olsun, bu dil bilgisini
+    #   ogrenmek icin su an iyi. ama ben su soruyu da sorabilmeliyim."*
+    #
+    #   !! PAY BURADA SECILIR, TUREMEZ. `fim_kat`ta ders olculdu: 2
+    #   varyant secildi ve FIM havuzun %53,3'u OLDU -- kimse "yarisi
+    #   olsun" demedi, sayi `fim_kat`tan DUSTU (OLCULENLER §1g).
+    #   `egitim_havuzu` bu yuzden her kosuda SORU PAYINI da basiyor.
     fim_kat: int = 0     # BOSLUK DOLDURMA: bildirim satiri basina kac
     #                      varyant. 0 = kapali. Konum HER SATIRDA rastgele
     #                      (kullanici karari, 17 Eylul: "her konum esit
@@ -352,6 +365,15 @@ class Ayar:
         # BOSLUK DOLDURMA +2 ekler (bosluk isareti + ayirac; cikarilan
         # parca sona tasinir, uzunluk L - u + 1 + 1 + u = L + 2).
         #   TOPLAM = 2*yuva + 11 = 17   (yuva 3)
+        #
+        # !! model_07 SORU BICIMI de ekliyor ve o da TAM 17'ye oturuyor:
+        #   e1 e2 e3 ' NIN r1 NIN r2  kim dir ?  a1 a2 a3 ' DIR .
+        #   = (yuva+2) + 3 + 3 + (yuva+3) = 2*yuva + 11 = 17
+        # Yani `t_len` DEGISMIYOR -- kol gercekten bir "ek". Ama PAY
+        # SIFIR: yuvasi 3 olan bir ozne + yuvasi 3 olan bir cevap tam
+        # 17 eder. Yuva buyurse (ya da soru satirina FIM uygulanirsa,
+        # +2) bu turetim yeniden yazilmalidir; `kodla_soru`daki assert
+        # sessiz kalmaz.
         # kimlik: e SORU DIR ? e ' DIR .                = 2*yuva + 6 = 12
         #
         # model_05'te 3*yuva + 15 = 24 idi. Farkin TAMAMI, cevabin soruyu
@@ -398,6 +420,10 @@ ESKI_VARSAYILAN = {
     "ort_bas": 0,
     "ort_her": 0,
     "ort_alfa": 0.5,
+    # fim_kat / soru_kat model_06 ve model_07'de eklendi; ondan once
+    # BOYLE BIR SATIR TIPI YOKTU -> ikisi de kapali.
+    "fim_kat": 0,
+    "soru_kat": 0,
     # ent_kati bolmesi 15 Eylul'de eklendi; ondan once YOKTU -> kapali.
     "kati_pay": 0.0,
     "ood_pay": 0.0,
@@ -1123,6 +1149,79 @@ def kodla_2hop(v: Veri, batch, bicim_no: int = 0):
     return X, np.array(P, np.int64), np.array(T, np.int64)
 
 
+def kodla_soru(v: Veri, batch, hop: int):
+    """SORU + KISA CEVAP. `model_07`nin tek eklentisi.
+
+        1-hop  Ibrahim Yilmaz'in kardesi kimdir? Ozlem Yilmaz'dir.
+        2-hop  Ibrahim Yilmaz'in danismaninin arkadasi kimdir?
+               Derya Yilmaz'dir.
+
+    Kullanici, 17 Eylul: *"ben su soruyu da sorabilmeliyim: Ibrahim
+    Yilmaz'in danismanin arkadasi kimdir?"*
+
+    !! BU SATIR TIPI EKLENIYOR, BASKA HICBIR SEY DEGISMIYOR. Duz
+    bildirimin uc bicimi de, bosluk doldurma da oldugu gibi duruyor
+    (kullanici: *"benim amacim EK YAPMAKTI, tum formati degistirmek
+    degil"*).
+
+    UC TASARIM KARARI, gerekceleriyle:
+
+    1) CEVAP KISA -- soru TEKRAR EDILMIYOR. `model_05` soruyu sorup
+       ardindan cumlenin TAMAMINI tekrar yaziyordu:
+
+         model_05  ... arkadasi kimdir? Ibrahim Yilmaz'in danismaninin
+                       arkadasi Derya Yilmaz'dir.      (21 jeton)
+         model_07  ... arkadasi kimdir? Derya Yilmaz'dir.   (<=17)
+
+       Sebebi OLCULDU: o tekrar modele 9 fazladan konum veriyor ve
+       `comp` kiyasinda bir karisiklik kaynagiydi (OLCULENLER §1g'deki
+       yuzey kontrolu). Ayrica 21 jeton `t_len`i 17'den 21'e cikarir,
+       yani pos gommesi ve adim suresi degisir -- kol "ek" olmaktan
+       cikar. Kisa cevap `t_len`e DOKUNMUYOR.
+
+    2) `kimdir`, `kim` DEGIL. Kullanicinin yazdigi bicim bu, ve
+       OLCULMUS bir arizayi da duzeltiyor: `model_06`da soru sozcugu
+       70.655/70.655 kez KIMLIK satirinda geciyordu, yani `kimdir?`
+       dilde "adi tekrar yaz" demekti. Artik ayni jeton ikiliyi
+       ONCESINDEKI jeton ayiriyor:
+
+         ... Yilmaz kim dir ?      -> KIMLIK   (varliktan sonra)
+         ... arkadasi kim dir ?    -> SORU     (iliskiden sonra)
+
+    3) SORU SOZCUGU CEVABIN TIPINDEN (`_soru(v, a)`), `model_05`teki
+       gibi. Yeni bilgi tasimaz -- cevabin tipi zaten iliskiden belli
+       (olculdu: 27/27 iliskide hedef tip TEK).
+
+    SINAV DEGISMIYOR: olcum `kodla_2hop(..., bicim_no=0)` ile, yani DUZ
+    BILDIRIMLE yapiliyor. `olcme_listeleri` zincir listeleri tutuyor,
+    yuzey tutmuyor -> `olcme_izi` f4ce53fd1555 AYNI KALIR ve model_05 /
+    model_06 / model_07 ayni tabloda okunur.
+    """
+    assert hop in (1, 2), hop
+    X = _bos(len(batch), v)
+    P, T = [], []
+    for i, satir in enumerate(batch):
+        if hop == 1:
+            e, r, a = satir
+            il = [REL_OFF + r]
+        else:
+            e, r1, r2, _b, a = satir
+            il = [REL_OFF + r1, _nin(v, r=r1), REL_OFF + r2]
+        ez, az = _e(v, e), _e(v, a)
+        oz = ez + [_kesme(v), _nin(v, e=e)]
+        sz = _soru(v, a)
+        dz = (oz + il + [sz, _dir_soru(v, sz), QM]
+              + az + [_kesme(v), _dir(v, a), EOS])
+        a0 = len(oz) + len(il) + 3
+        assert len(dz) <= v.t_len, (
+            f"soru dizisi {len(dz)} jeton, t_len {v.t_len} -- hop {hop}")
+        X[i, :len(dz)] = dz
+        _p, _t = _cevap(v, az, a0)
+        P.append(_p)
+        T.append(_t)
+    return X, np.array(P, np.int64), np.array(T, np.int64)
+
+
 def kodla_fim(v: Veri, dz, poz, uzunluk: int = 1):
     """BILDIRIM dizisini BOSLUK DOLDURMA dizisine cevirir.
 
@@ -1319,12 +1418,44 @@ def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
             "cevriliyor)")
         yaz("     -- olculdu: <BOS>'un YERINI tahmin etmek kaybin %75'i "
             "olurdu ve OGRENILEMEZ")
+    # --- SORU BICIMI (model_07'nin EKLENTISI) ---------------------------
+    # Kullanici, 17 Eylul: *"ben su soruyu da sorabilmeliyim: Ibrahim
+    # Yilmaz'in danismanin arkadasi kimdir?"*
+    #
+    # !! FIM BLOGUNDAN SONRA. Yani soru satirlari BOSLUK DOLDURMAYA
+    # GIRMIYOR -- bilerek: FIM'in isi dil bilgisi (ek, sira, sinir) ve
+    # onu duz bildirimin satirlari zaten ogretiyor. Soru satirini da
+    # FIM'lemek hem payi ikiye katlardi hem de dizi 19 jetona cikip
+    # `t_len`i (17) asardi.
+    _n_soru = 0
+    if getattr(ayar, "soru_kat", 0) > 0:
+        for _k in range(ayar.soru_kat):
+            for _hop, _lst in ((1, v.one), (2, v.tr2)):
+                parca.append(kodla_soru(v, _lst, _hop))
+                _kt.append(np.full((len(_lst), _nk), -1, np.int64))
+                _n_soru += len(_lst)
+
     _n_tab = sum(len(a) for a, _, _ in parca)
     if _bic > 1:
+        # KUSUR (17 Eylul, kullanici "niye her sey FIM olmus?" diye
+        # sorunca bulundu): burada `_n_tab` basiliyordu ve o sayi FIM
+        # (ve artik SORU) satirlarini DA iceriyor -- yani "(1hop+2hop)
+        # x3" diye etiketlenen sayi 93.648 degil 280.944 cikiyordu.
+        # Kosu kutugu havuzun bilesimini UC KAT yanlis gosteriyordu.
+        _n_duz = (len(v.one) + len(v.tr2)) * _bic
         yaz(f"  BICIM CESITLILIGI: {_bic} yuzey bicimi -- OLGU ve SORU "
             f"satirlarinin IKISINDE de")
-        yaz(f"     (1hop {len(v.one)} + 2hop {len(v.tr2)}) x{_bic} = {_n_tab}")
+        yaz(f"     (1hop {len(v.one)} + 2hop {len(v.tr2)}) x{_bic} "
+            f"= {_n_duz:,} duz bildirim satiri")
+        yaz(f"     havuzun tablo kismi (duz + FIM + SORU) = {_n_tab:,}")
         yaz("     SINAV hep bicim 0 -- egitim daha cok yuzey gorur, sinav TEK.")
+    if _n_soru:
+        yaz(f"  SORU BICIMI: zincir basina {ayar.soru_kat} satir "
+            f"-> {_n_soru:,} satir")
+        yaz("     \"Ibrahim Yilmaz'in danismaninin arkadasi kimdir? "
+            "Derya Yilmaz'dir.\"")
+        yaz("     SINAV BUNU KULLANMIYOR -- olcum duz bildirimle; "
+            "olcme_izi DEGISMEZ.")
     kimlik = None
     if ayar.ident_frac > 0:
         assert ayar.ident_kip in ("q1", "q2son"), \

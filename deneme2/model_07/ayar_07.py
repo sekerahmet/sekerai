@@ -116,8 +116,31 @@ AYAR = Ayar(
     #                      (1-3). Dolgu YOK -- sinirI kesme isareti tasir.
     ek_kip="tr2",        # iliski KELIMENIN KENDISI (fakultesi), ek jetonu
     #                      '  <NIN>  <DIR>  + kim/neresi/hangisi. <SI> YOK.
-    bicim=3,             # UC TURKCE SIRA (soru bicimi YOK -- model_07)
-    fim_kat=2,           # bildirim satiri basina 2 bosluk varyanti             # 3 yuzey bicimi (ek_kip olmadan ANLAMSIZ)
+    bicim=3,             # UC TURKCE SIRA: kanonik / yuklem basta /
+    #                      iliski basta. Hepsi BILDIRIM.
+    fim_kat=2,           # bildirim satiri basina 2 bosluk varyanti
+    soru_kat=1,          # !! model_07'NIN TEK EKLENTISI: her zincir icin
+    #                      BIR soru satiri.
+    #                      "... arkadasi kimdir? Derya Yilmaz'dir."
+    #
+    #   1 SECILDI, TUREMEDI. `fim_kat=2` dersi (OLCULENLER §1g): oradaki
+    #   2, FIM'i havuzun %53,3'u yapti ve kimse bu payi secmemisti.
+    #   Burada pay ONCEDEN hesaplandi:
+    #
+    #     duz BILDIRIM (3 bicim)   93.648   %24,0
+    #     BOSLUK DOLDURMA (FIM)   187.296   %48,0
+    #     SORU (YENI)              31.216   % 8,0
+    #     KIMLIK                   78.264   %20,0
+    #     TOPLAM                  390.424
+    #
+    #   (KIMLIK havuzla birlikte buyur: `ident_frac=0.2` bir SAYI degil
+    #   PAY. model_06'da 70.655'ti, havuz buyudugu icin 78.264 oldu --
+    #   payi %20'de kaldi. SORU eklemek KIMLIGI seyreltmiyor.)
+    #
+    #   %8,2 az gorunuyor ama `kimdir`in anlamini KIMLIK satirlarindan
+    #   ayirmak icin PAY degil BAGLAM gerekiyor: soru sozcugunden ONCEKI
+    #   jeton ikisini zaten ayiriyor (varlik -> kimlik, iliski -> soru).
+    #   Buyutmek ayri bir dugme olur; once BU olculur.
     ood_pay=0.05,        # dagitim disi bolme
     ident_frac=0.2,      # kimlik koprusu
     ident_kip="q1",

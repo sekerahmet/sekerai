@@ -394,13 +394,26 @@ import model_a as MA                                         # noqa: E402
 from model_b15 import AYAR as B15                            # noqa: E402
 from ayar_07 import GOREV_ALAN                               # noqa: E402
 
-ok(M.ESKI_VARSAYILAN == MA.ESKI_VARSAYILAN, "ESKI_VARSAYILAN AYNI")
-# model_07 BIR ALAN EKLEDI: `fim_kat` (bosluk doldurma varyant sayisi).
-# Bilerek ve TEK alan; baska bir ayrisma olmamali.
+# BILDIRILMIS AYRISMA -- IKI YENI ALAN, ve ikisi de KAPALI GELIYOR:
+#   fim_kat   bosluk doldurma varyant sayisi   (model_06)
+#   soru_kat  soru satiri sayisi               (model_07)
+# ESKI_VARSAYILAN'a ikisi de 0 diye girildi, cunku alanlar eklenmeden
+# ONCE kodun FIILEN yaptigi sey buydu: boyle bir satir tipi yoktu.
+# Yani eski kosular SESSIZCE yanlis etiketlenmiyor.
+_YENI_ALAN = {"fim_kat", "soru_kat"}
+ok(set(MA.ESKI_VARSAYILAN) | _YENI_ALAN == set(M.ESKI_VARSAYILAN),
+   "ESKI_VARSAYILAN model_a ile AYNI, YALNIZ yeni alanlar eklendi",
+   f"fazla {sorted(set(M.ESKI_VARSAYILAN) - set(MA.ESKI_VARSAYILAN))}")
+ok(all(M.ESKI_VARSAYILAN[k] == 0 for k in _YENI_ALAN),
+   "yeni alanlarin ESKI VARSAYILANI 0 -- eskiden boyle satir YOKTU",
+   f"{ {k: M.ESKI_VARSAYILAN[k] for k in sorted(_YENI_ALAN)} }")
+ok(all(MA.ESKI_VARSAYILAN[k] == M.ESKI_VARSAYILAN[k]
+       for k in MA.ESKI_VARSAYILAN),
+   "model_a'nin ESKI VARSAYILANLARININ HICBIRI degismedi")
 _alan06 = [f.name for f in M.dc.fields(M.Ayar)]
 _alanA = [f.name for f in MA.dc.fields(MA.Ayar)]
-ok(set(_alan06) - set(_alanA) == {"fim_kat"},
-   "Ayar alanlari model_a ile AYNI, YALNIZ fim_kat eklendi",
+ok(set(_alan06) - set(_alanA) == _YENI_ALAN,
+   "Ayar alanlari model_a ile AYNI, YALNIZ fim_kat + soru_kat eklendi",
    f"fazla {sorted(set(_alan06) - set(_alanA))}")
 ok(not (set(_alanA) - set(_alan06)), "model_a'nin hicbir alani SILINMEDI",
    f"eksik {sorted(set(_alanA) - set(_alan06))}")

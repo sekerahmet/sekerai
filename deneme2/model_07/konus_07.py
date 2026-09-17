@@ -29,8 +29,15 @@ verilir (onkayit `belge/onkayit/model_07.md`).
     python konus_07.py --genislik 5         son 5'in agirlik ortalamasi
     python konus_07.py --klasor <yol>       baska bir kosu
 
-model_07'DA SORU BICIMI YOK -- dil yalniz BILDIRIM. Yani dogal girdi
-soru sozcuksuz bir ONEK, ya da BOSLUKLU bir cumle:
+model_07'DE UC TURLU KONUSABILIRSIN. `model_06`da yalniz ilk ikisi
+vardi; UCUNCUSU bu kolun eklentisi (kullanici, 17 Eylul: *"ben su
+soruyu da sorabilmeliyim: Ibrahim Yilmaz'in danismanin arkadasi
+kimdir?"*).
+
+    > Ibrahim Yilmaz'in danismaninin arkadasi kimdir?
+    Ibrahim Yilmaz'in danismaninin arkadasi kimdir? Derya Yilmaz'dir.
+
+Digerleri duruyor -- soru sozcuksuz bir ONEK, ya da BOSLUKLU cumle:
 
     > Ayse Yilmaz'in annesi
     Ayse Yilmaz'in annesi Fatma Yilmaz'dir.
@@ -410,9 +417,17 @@ def dene(D, S, n=300):
     import random
     rs = random.Random(7)
     v, kotu, hep = D.v, 0, 0
+    # !! SORU satiri da sinaniyor (model_07'nin eklentisi). `bicim`
+    # parametresi orada ANLAMSIZ -- soru tek bicimde kuruluyor -- o
+    # yuzden `kodla_soru` hop'u kapatilmis olarak geliyor ve yalniz
+    # bicim 0 turunde kosuyor.
+    _soru1 = lambda _v, _b, _bic: M.kodla_soru(_v, _b, 1)
+    _soru2 = lambda _v, _b, _bic: M.kodla_soru(_v, _b, 2)
     for etiket, lst, kodla in (("1hop", v.one, M.kodla_1hop),
-                               ("2hop", v.tr2, M.kodla_2hop)):
-        for bicim in range(3):
+                               ("2hop", v.tr2, M.kodla_2hop),
+                               ("soru1", v.one, _soru1),
+                               ("soru2", v.tr2, _soru2)):
+        for bicim in range(1 if etiket.startswith("soru") else 3):
             k = 0
             for x in rs.sample(list(lst), min(n, len(lst))):
                 dizi = [int(t) for t in kodla(v, [x], bicim)[0][0]
@@ -466,7 +481,9 @@ def main():
              else f"{sec[0]}-{sec[-1]} ortalamasi"))
     print("soru yaz, bos satir cikar.")
     print("  /ara <parca>  varlik adi ara        /iliski  iliskiler")
-    print("  _ yaz -> BOSLUK sor:  Fatma _ 'in annesi Ayse Yilmaz'dir.")
+    print("  SORU:   Ibrahim Yilmaz'in danismaninin arkadasi kimdir?")
+    print("  ONEK:   Ibrahim Yilmaz'in danismaninin arkadasi")
+    print("  BOSLUK: Fatma _ 'in annesi Ayse Yilmaz'dir.")
     print("  /o <cumle basi>  SONRAKI jetonun DAGILIMI    "
           "/j  jetonlari goster")
     print("  /s  ORNEKLEME ac/kapa (argmax HEP ayni cevabi verir)\n")
