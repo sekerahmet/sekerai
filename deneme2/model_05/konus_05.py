@@ -306,6 +306,27 @@ def kur(klasor, genislik=1, adim=None):
 
 
 @torch.no_grad()
+def olasilik(v, net, jet, k=8):
+    """Bir SONRAKI jetonun dagilimi -- `/o` komutu.
+
+    Kullanici, 17 Eylul: *"Furkan'dan sonra Kaya da gelebilir Yilmaz da
+    gelebilir... ama hep Demir'i seciyor."* Haklı, ve model de oyle
+    diyor: ARGMAX gizliyordu. Olculdu (adim 20000, "Furkan" onekiyle):
+    grafta 8 "Furkan X" varligi var, modelin gecerli sekiz soyada
+    verdigi toplam kutle %99,1 ve entropi 2,073 nat -- 8 uzerinde
+    duzgun dagilimin (2,079) neredeyse tamami. Tepedeki %15,4, ikinci
+    %14,5. Yani karar tek basina yorumlanamaz; dagilim yorumlanir.
+    """
+    satir = np.zeros((1, v.t_len), dtype=np.int64)
+    satir[0, :len(jet)] = jet
+    lg = net(torch.from_numpy(satir).to(M.DEV)).float()
+    p = torch.softmax(lg[0, len(jet) - 1], -1).cpu().numpy()
+    sira = np.argsort(-p)[:k]
+    ent = float(-(p[p > 0] * np.log(p[p > 0])).sum())
+    return [(int(t), float(p[t])) for t in sira], ent
+
+
+@torch.no_grad()
 def devam(v, net, jet):
     """Diziyi MODELE YAZDIRIR. Kisit YOK: argmax butun sozluk uzerinde.
 
@@ -402,8 +423,9 @@ def main():
           + (f"{sec[0]}" if len(sec) == 1
              else f"{sec[0]}-{sec[-1]} ortalamasi"))
     print("soru yaz, bos satir cikar.")
-    print("  /ara <parca>   varlik adi ara      /iliski   iliskiler"
-          "      /j   jetonlari goster\n")
+    print("  /ara <parca>  varlik adi ara        /iliski  iliskiler")
+    print("  /o <cumle basi>  SONRAKI jetonun DAGILIMI    "
+          "/j  jetonlari goster\n")
     jeton_goster = [False]
     # Adlari ARAMAK gerekiyor: 1087 varlik var ve olmayan bir ad
     # yazildiginda model degil ARAC susuyor. Dokumun tamami zaten
@@ -416,6 +438,25 @@ def main():
         if q == "/j":
             jeton_goster[0] = not jeton_goster[0]
             print("jeton gosterimi", "ACIK" if jeton_goster[0] else "KAPALI")
+            return
+        if q.startswith("/o"):
+            # ARGMAX TEK CEVAP VERIR, model ise DAGILIM tasir. Bu komut
+            # olmadan "hep ayni cevabi veriyor" diye okunan sey aslinda
+            # "ikinci aday 0,9 puan geride" olabiliyor.
+            jet, bil, _ = S.jetonla(q[2:].strip())
+            if bil:
+                print(f"  bilmiyorum: {', '.join(bil)}")
+                return
+            if not jet or len(jet) >= v.t_len:
+                print("  kullanim:  /o <cumlenin BASI>   ornek:  /o Furkan")
+                return
+            ad, ent = olasilik(v, net, jet)
+            for t, pr in ad:
+                cb = "#" * int(round(pr * 40))
+                print(f"   {pr:7.2%}  {D.jeton_ad(t):<14} {cb}")
+            print(f"   entropi {ent:.3f} nat"
+                  f"   (duzgun dagilim {len(ad)} aday uzerinde olsaydi"
+                  f" {np.log(len(ad)):.3f})")
             return
         if q == "/iliski":
             print("  " + "  ".join(D.VM.TR_ILISKI.get(r, r)
