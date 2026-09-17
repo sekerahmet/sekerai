@@ -200,6 +200,30 @@ def olc(ayar: M.Ayar, veri: M.Veri, kod: dict, L: dict, sd: dict) -> dict:
     r = {k: M.dogruluk(net, veri, *kod[k]) for k in kod}
     r["ent_kisayol"] = M.kisayol_orani(net, veri, L["ent"])
     r["ent_yok_kisayol"] = M.kisayol_orani(net, veri, L["ent_yok"])
+    # SORU BICIMI -- IKINCIL, ayri adla (`soru_`), ayri tabloda.
+    #
+    # Kullanici, 17 Eylul: *"ben su soruyu da sorabilmeliyim: Ibrahim
+    # Yilmaz'in danismanin arkadasi kimdir?"* Bu kolun eklentisi o, ve
+    # ISE YARAYIP YARAMADIGI olculmeli.
+    #
+    # !! HUKUM VERMEZ. Birincil olcu DUZ BILDIRIM (`kodla_2hop`,
+    # bicim 0), cunku olcme izi `f4ce53fd1555` model_05 ve model_06 ile
+    # AYNI ve o kiyas yalniz orada gecerli. Soru bicimi YENI bir yuzey;
+    # onu birincil yapmak, uc kolu ayni tabloda okuma imkanini bitirir.
+    # "Hangi olcu iyi ciktiysa onu sectik" durumuna dusmemek icin ayri
+    # adla ve ayri tabloda duruyor.
+    #
+    # BEKLENEN GERILIM, onceden yaziliyor: soru satiri EGITIMDE var
+    # (havuzun %8,0'i) ama SINAV zincirlerinin `ent` kismi icin
+    # ZINCIR BASI olarak YOK -- `ent` tanimi yuzeyden bagimsiz. Yani
+    # `soru_ent` ile `ent` ARASINDAKI FARK, yuzeyin tek basina ne
+    # getirdigini soyler.
+    if getattr(ayar, "soru_kat", 0) > 0:
+        for _b in ("one", "seen", "comp", "ent", "ent_yok", "ood"):
+            if L.get(_b):
+                _hop = 1 if _b == "one" else 2
+                r[f"soru_{_b}"] = M.dogruluk(
+                    net, veri, *M.kodla_soru(veri, L[_b], _hop))
     # BOSLUK DOLDURMA -- IKINCIL, ayri adla (`fim_`), ayri tabloda.
     if getattr(veri, "bosluk", 0):
         for _b in ("comp", "ent", "ent_yok", "ood"):
@@ -292,6 +316,28 @@ def main():
         print(f"  {etiket:<18}"
               + "".join(f"{r.get(k, float('nan')):>9.4f}" for k in SUT)
               + f"{r['ent_kisayol']:>9.4f}{r['ent_yok_kisayol']:>9.4f}")
+
+    # --- SORU BICIMI TABLOSU (IKINCIL -- HUKUM VERMEZ) -----------------
+    _sk = [k for k in sonuc[-1] if k.startswith("soru_")]
+    if _sk:
+        _sb = [b for b in ("one", "seen", "comp", "ent", "ent_yok", "ood")
+               if f"soru_{b}" in sonuc[-1]]
+        print()
+        print("=" * 62)
+        print("SORU BICIMI -- AYNI zincirler, '... kimdir?' diye sorulmus")
+        print("  !! HUKUM VERMEZ. Birincil olcu yukaridaki DUZ BILDIRIM;")
+        print("     olcme izi f4ce53fd1555 ile model_05/06 kiyasi YALNIZ")
+        print("     orada gecerli. Burasi EKLENTININ ISE YARAYIP")
+        print("     YARAMADIGINI soyler, kolun hukmunu DEGIL.")
+        print(f"  {'pencere':<18}" + "".join(f"{b:>11}" for b in _sb))
+        for r in sonuc:
+            print(f"  {r['pencere']:<18}"
+                  + "".join(f"{r.get('soru_'+b, float('nan')):>11.4f}"
+                            for b in _sb))
+        print("  KIYAS -- ayni satirin DUZ BILDIRIM hali:")
+        for r in sonuc[-1:]:
+            print(f"  {'(son pencere)':<18}"
+                  + "".join(f"{r.get(b, float('nan')):>11.4f}" for b in _sb))
 
     # --- BOSLUK DOLDURMA TABLOSU (IKINCIL -- HUKUM VERMEZ) -------------
     _fk = [k for k in sonuc[-1] if k.startswith("fim_")]
