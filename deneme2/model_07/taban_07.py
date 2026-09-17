@@ -1149,6 +1149,38 @@ def kodla_2hop(v: Veri, batch, bicim_no: int = 0):
     return X, np.array(P, np.int64), np.array(T, np.int64)
 
 
+def kodla_fim_sinav(v: Veri, batch, hangi: str):
+    """SINAV zincirlerini BOSLUK DOLDURMA dizisine cevirir. TEK KAYNAK.
+
+        ILERI   Ibrahim Yilmaz'in arkadasinin memleketi ___   (kodla_2hop)
+        OZNE    <BOS>'in arkadasinin memleketi Kocaeli'dir.   -> Ibrahim Yilmaz
+        ILISKI  Ibrahim Yilmaz'in <BOS>nin memleketi Kocaeli'dir. -> arkadasi
+
+    Doner: (X, hedef_uzunluklari). Hedef jetonlar dizinin SONUNDA.
+
+    !! NEDEN AYRI FONKSIYON: bu dizi kurulumu `pencere_07.fim_dogruluk`in
+    ICINDE yaziliydi ve dokum betigi ayni seyi IKINCI KEZ yazmak
+    zorunda kalacakti. Iki kopya birbirinden kayinca olcum bir seyi,
+    dosya baska bir seyi gosterirdi -- ve kimse fark etmezdi. Ayni
+    kusur `olcme_listeleri` icin arsivde FIILEN olmustu."""
+    assert hangi in ("ozne", "iliski"), hangi
+    dizi, hedef_n = [], []
+    for x in batch:
+        e, r1, r2, _b, a = (int(z) for z in x)
+        ez, az = _e(v, e), _e(v, a)
+        oz = ez + [_kesme(v), _nin(v, e=e)]
+        il = [REL_OFF + r1, _nin(v, r=r1), REL_OFF + r2]
+        dz = oz + il + az + [_kesme(v), _dir(v, a=a), EOS]
+        poz, uz = (0, len(ez)) if hangi == "ozne" else (len(ez) + 2, 1)
+        dizi.append(kodla_fim(v, dz, poz, uz))
+        hedef_n.append(uz)
+    X = np.zeros((len(dizi), v.t_len), np.int64)
+    for i, _d in enumerate(dizi):
+        assert len(_d) <= v.t_len, (len(_d), v.t_len, hangi)
+        X[i, :len(_d)] = _d
+    return X, hedef_n
+
+
 def kodla_soru(v: Veri, batch, hop: int):
     """SORU + KISA CEVAP. `model_07`nin tek eklentisi.
 

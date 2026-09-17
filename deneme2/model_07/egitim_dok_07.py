@@ -93,6 +93,20 @@ PLAN = [
     ("43", "sinavsoru_ent",      "AYNI zincir, SORU bicimi (ikincil)"),
     ("44", "sinavsoru_ent_yok",  "AYNI zincir, SORU bicimi (ikincil)"),
     ("45", "sinavsoru_ood",      "AYNI zincir, SORU bicimi (ikincil)"),
+
+    # !! AYNI ZINCIRLER, BOSLUK DOLDURMA. Kullanici, 17 Eylul: *"ama bu
+    # da bosluk doldurma tipinde ent, diger tipte ent nerede?"*
+    # pencere_07 bunlari `fim_ozne_` / `fim_rel_` diye OLCUYORDU ama
+    # dosyaya dokmuyordu. Diziyi `taban_07.kodla_fim_sinav` kuruyor --
+    # olcumle AYNI KAYNAK, iki kopya olmasin diye.
+    ("50", "sinavbosluk_ozne_comp",    "AYNI zincir, OZNE bosluklu (ikincil)"),
+    ("51", "sinavbosluk_ozne_ent",     "AYNI zincir, OZNE bosluklu (ikincil)"),
+    ("52", "sinavbosluk_ozne_ent_yok", "AYNI zincir, OZNE bosluklu (ikincil)"),
+    ("53", "sinavbosluk_ozne_ood",     "AYNI zincir, OZNE bosluklu (ikincil)"),
+    ("54", "sinavbosluk_rel_comp",     "AYNI zincir, ILISKI bosluklu (ikincil)"),
+    ("55", "sinavbosluk_rel_ent",      "AYNI zincir, ILISKI bosluklu (ikincil)"),
+    ("56", "sinavbosluk_rel_ent_yok",  "AYNI zincir, ILISKI bosluklu (ikincil)"),
+    ("57", "sinavbosluk_rel_ood",      "AYNI zincir, ILISKI bosluklu (ikincil)"),
 ]
 
 
@@ -191,6 +205,18 @@ def main():
                 return []
             kodla = M.kodla_1hop if bol == "one" else M.kodla_2hop
             X = kodla(v, list(lst), 0)[0]
+            return [d.oku(r) for r in X]
+
+        # --- sinav bolmeleri, BOSLUK DOLDURMA (IKINCIL) ---
+        if ad.startswith("sinavbosluk_"):
+            if getattr(ayar, "fim_kat", 0) <= 0:
+                return []
+            _y, bol = ad[12:].split("_", 1)
+            lst = d.L.get(bol) or []
+            if not lst:
+                return []
+            X = M.kodla_fim_sinav(
+                v, list(lst), "ozne" if _y == "ozne" else "iliski")[0]
             return [d.oku(r) for r in X]
 
         # --- sinav bolmeleri, SORU bicimi (IKINCIL) ---

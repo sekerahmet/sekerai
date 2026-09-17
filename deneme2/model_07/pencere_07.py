@@ -153,19 +153,11 @@ def fim_dogruluk(net, v, lst, hangi, bs=256):
         return float("nan")
     onceki = net.training
     net.eval()
-    dizi, hedef_n = [], []
-    for x in lst:
-        e, r1, r2, b, a = (int(z) for z in x)
-        ez, az = M._e(v, e), M._e(v, a)
-        oz = ez + [M._kesme(v), M._nin(v, e=e)]
-        il = [M.REL_OFF + r1, M._nin(v, r=r1), M.REL_OFF + r2]
-        dz = oz + il + az + [M._kesme(v), M._dir(v, a=a), M.EOS]
-        poz, uz = (0, len(ez)) if hangi == "ozne" else (len(ez) + 2, 1)
-        dizi.append(M.kodla_fim(v, dz, poz, uz))
-        hedef_n.append(uz)
-    X = np.zeros((len(dizi), v.t_len), np.int64)
-    for i, d in enumerate(dizi):
-        X[i, :len(d)] = d
+    # !! DIZI KURULUMU `taban_07.kodla_fim_sinav`DA -- burada DEGIL.
+    # Ayni kurulum dokum betigine de lazim; iki kopya birbirinden
+    # kayarsa olcum bir seyi, dosya baska seyi gosterirdi.
+    X, hedef_n = M.kodla_fim_sinav(v, lst, hangi)
+    dizi = [[int(t) for t in r if int(t) != M.PAD] for r in X]
     ok = []
     for i in range(0, len(X), bs):
         xb = torch.from_numpy(X[i:i + bs]).to(M.DEV)
