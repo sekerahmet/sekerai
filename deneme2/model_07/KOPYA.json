@@ -1,0 +1,30 @@
+{
+  "ebeveyn": "model_06",
+  "not": "Bu dosya KOPYA KAPISININ beyan defteri. `python deneme2/kopya_kapisi.py model_07` her farki sorar; burada gerekcesi olmayan dosya kapiyi DUSURUR. Gerekce 'bilerek degistirdim' demek icin -- 'kopyalarken kaybettim' demek icin DEGIL. Oyle olanlar TASINIR.",
+  "tasinanlar": [
+    "konus.bat        -> 95494b0, betik adi klasorden turetiliyor",
+    "konus_07.py      -> fcda786 (bosluk cevabi TEK JETON) + 3b67a7b (--genislik 5)",
+    "kos_07.py        -> a48d9d5 + edb8ec8 (--hiz-dogrula, eksik import, sira etkisi)",
+    "taban_07.py      -> 90fc4cd'nin karsiligi (havuz bilesimi kutugu) elle uygulandi"
+  ],
+  "beyan": {
+    "ayar_07.py": "soru_kat=1 eklendi ve iki yorum satiri yeniden yazildi ('soru bicimi YOK' artik TERSI). Ebeveynde kalan iki satir o yorumlarin ESKI hali.",
+    "taban_07.py": "kodla_soru + kodla_fim_sinav + ek_dogruluk eklendi; havuz kutugu 'duz+FIM' yerine 'duz+FIM+SORU' basiyor; havuz_06/model_06 PROVENANS satirlari bilerek cevrilmedi. !! GPU_HAVUZ VARSAYILANI ayrica beyanli: ebeveynde 0 (dd24d6b), burada 1. Yorunge BIT DUZEYINDE ayni (agirlik farki 0.000e+00, kos_06 --hiz-dogrula 60) ve hiz kazanci YOK (0.98x), o yuzden sonucu degistirmiyor. KOSAN IS commit 2a88697 ile basladi; simdi degistirmek kod/kunye uyusmazligi yaratir. BU KOSUDAN SONRA tasinacak.",
+    "pencere_07.py": "fim_dogruluk'un icindeki dizi kurulumu taban_07.kodla_fim_sinav'a TASINDI (tek kaynak); yerine cagri geldi. Ayrica soru_ ve ek_ ikincil tablolari eklendi.",
+    "konus_07.py": "model_07'de SORU BICIMI VAR -- dokumantasyon ve ekran yardimi yeniden yazildi; --dene'ye soru satirlari eklendi; 20.000/20.000 sayisi 187.296/187.296 oldu.",
+    "konus.bat": "yorum satirlari kola bagimli olmaktan cikarildi (ad zaten klasorden turetiliyor).",
+    "test_07.py": "bildirilmis ayrisma fim_kat'tan {fim_kat, soru_kat}'a genisledi; 8. bolum (kopyalamada kaybolan duzeltmeler) eklendi.",
+    "egitim_dok_07.py": "URETME MODELI YENIDEN YAZILDI (kullanici karari, 17 Eylul: 'bir formatta olmali'). Dosya listesi tek bir PLAN tablosundan turuyor; ebeveyndeki elle yazilmis 04/05/12/13/14 duzeni ve satir-ici detay basimi KALDIRILDI.",
+    "kontrol_yuzey_05.py": "model_06'da duran bu betik model_05'i model_06'nin YUZEYIYLE olcuyor -- model_07'ye ait bir is DEGIL, bilerek kopyalanmadi."
+  },
+  "satir": {
+    "ayar_07.py": 2,
+    "egitim_dok_07.py": 72,
+    "kontrol_yuzey_05.py": 1,
+    "konus.bat": 3,
+    "konus_07.py": 8,
+    "pencere_07.py": 19,
+    "taban_07.py": 20,
+    "test_07.py": 6
+  }
+}

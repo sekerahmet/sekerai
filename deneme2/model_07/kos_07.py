@@ -18,7 +18,7 @@ kullanmamali."*
 """
 from __future__ import annotations
 
-import argparse, importlib, os, sys
+import argparse, glob, importlib, os, sys, time
 
 KOK = os.path.dirname(os.path.abspath(__file__))       # deneme2/model_05/
 MODEL = "model_07"
@@ -91,6 +91,11 @@ def main():
     ap.add_argument("--surdur", action="store_true",
                     help="surdurme_t<N>.pt'den KALDIGI YERDEN devam et. "
                          "--adim ile birlikte kullanilir.")
+    ap.add_argument("--hiz-dogrula", type=int, default=0, metavar="N",
+                    dest="hiz_dogrula",
+                    help="HIZ OPTIMIZASYONU YORUNGEYI DEGISTIRIYOR MU? "
+                         "N adim iki kez kosar (havuz GPU'da / CPU'da) ve "
+                         "agirliklari BIT DUZEYINDE kiyaslar. Egitim YAPMAZ.")
     a = ap.parse_args()
 
     if KOK not in sys.path:
@@ -106,6 +111,59 @@ def main():
 
     print(f"kos.py   model {a.model}   ev {a.ev}   tohum {a.tohum}   "
           f"commit {a.commit or '(yerel)'}", flush=True)
+
+    # --- HIZ DOGRULAMASI ------------------------------------------------
+    # "Hizlandirdim" demek yetmez; YORUNGE AYNI MI, o kanitlanir.
+    # Bu projede daha once ayni sey surdurme icin yapildi: 8+8 surdurulmus
+    # kosu ile kesintisiz 16 adimlik kosu BIT DUZEYINDE ayni cikti,
+    # agirlik farki 0.000e+00 (CLAUDE.md kural 1).
+    #
+    # Batch indisleri `rs.randint` ile NUMPY tarafinda uretiliyor; havuzun
+    # GPU'da olmasi hangi satirlarin secildigini DEGISTIRMEZ. Beklenen
+    # sonuc TAM SIFIR fark.
+    if a.hiz_dogrula:
+        import tempfile, torch
+        _sonuc = {}
+        # !! ISINMA KOSUSU, SONUCU ATILIR. Ilk olcumde GPU dali 0.79x
+        # cikti -- yani YAVAS. Sebep olcumun kendisiydi: ilk kosan dal
+        # CUDA baglaminin, bellek ayiricisinin ve cuDNN secimlerinin
+        # bedelini ODUYOR, ikincisi hazir ortamdan yararlaniyor. Sira
+        # etkisini kaldirmadan hiz kiyasi YAPILAMAZ.
+        # Ayrica her dal IKI KEZ olculup EN IYISI alinir (gurultu).
+        for _ad, _bayrak in (("ISINMA", "1"),):
+            os.environ["GPU_HAVUZ"] = _bayrak
+            importlib.reload(M.M); importlib.reload(M)
+            with tempfile.TemporaryDirectory() as _d:
+                M.egit(M.AYAR.degistir(tohum=a.tohum[0], adim=max(10, a.hiz_dogrula // 3),
+                                       olc_her=10**9),
+                       alt=_d, yaz=lambda *x: None, commit="isinma")
+        for _ad, _bayrak in (("CPU havuzu", "0"), ("GPU havuzu", "1"),
+                             ("CPU havuzu", "0"), ("GPU havuzu", "1")):
+            os.environ["GPU_HAVUZ"] = _bayrak
+            importlib.reload(M.M)          # taban_07'yi tazele
+            importlib.reload(M)
+            _ayar = M.AYAR.degistir(tohum=a.tohum[0], adim=a.hiz_dogrula,
+                                    olc_her=a.hiz_dogrula)
+            with tempfile.TemporaryDirectory() as _d:
+                t0 = time.time()
+                M.egit(_ayar, alt=_d, yaz=lambda *x: None, commit="hiz")
+                _sn = time.time() - t0
+                _sd = torch.load(sorted(glob.glob(f"{_d}/snap/*.pt"))[-1],
+                                 map_location="cpu")
+            if _ad not in _sonuc or _sn < _sonuc[_ad][1]:
+                _sonuc[_ad] = (_sd, _sn)
+            print(f"  {_ad:<12} {a.hiz_dogrula} adim  {_sn:.1f} sn"
+                  f"  ({_sn/a.hiz_dogrula*1000:.1f} ms/adim)", flush=True)
+        (g, gs), (c, cs) = _sonuc["GPU havuzu"], _sonuc["CPU havuzu"]
+        _fark = max(float((g[k].float() - c[k].float()).abs().max())
+                    for k in g if k in c)
+        print(f"\n  EN BUYUK AGIRLIK FARKI: {_fark:.3e}")
+        print("  " + ("YORUNGE BIREBIR AYNI -- optimizasyon GUVENLI"
+                      if _fark == 0.0 else
+                      "!! YORUNGE DEGISTI -- optimizasyon KULLANILMAZ"))
+        print(f"  HIZLANMA: {cs/gs:.2f}x  ({cs:.1f} sn -> {gs:.1f} sn)")
+        os.environ.pop("GPU_HAVUZ", None)
+        return 0
 
     # Klasor KENDINI anlatsin: Drive'i uc ay sonra acan kisi (biz) hangi
     # dosyaya once bakacagini bilmeli. Her kosuda yenilenir, tohum

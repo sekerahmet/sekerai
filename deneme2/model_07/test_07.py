@@ -660,5 +660,31 @@ ok("KLASOR:~6" in _bat, "konus.bat betik adini KLASORDEN turetiyor",
 ok(_cagri and all("konus_0" not in c for c in _cagri),
    "konus.bat CAGRISI elle yazilmis bir ad TASIMIYOR", str(_cagri))
 
+# --- 9) KOPYA KAPISI -----------------------------------------------------
+# 8. bolum UC BILINEN gerilemeyi kilitliyor. Bu bolum GENEL olani sorar:
+# ebeveyn klasorde (model_06) OLUP burada OLMAYAN her satir ya TASINMIS
+# ya da KOPYA.json'da BEYAN EDILMIS mi?
+#
+# Kapinin kendisi `deneme2/kopya_kapisi.py` -- kol DISINDA, cunku iki
+# klasore birden bakiyor. Buradan ALT SUREC olarak cagriliyor; boylece
+# `0) BAGIMSIZLIK` taramasi bozulmuyor (o tarama test_*.py'yi zaten
+# disarida birakiyor).
+print("\n=== 9) KOPYA KAPISI ===")
+_kk = os.path.join(os.path.dirname(_B), "kopya_kapisi.py")
+if not os.path.exists(_kk):
+    print("    --   kopya_kapisi.py YOK -- atlandi")
+else:
+    _r3 = subprocess.run([sys.executable, _kk, os.path.basename(_B)],
+                         capture_output=True, text=True,
+                         cwd=os.path.dirname(_B))
+    _ozet = [x for x in _r3.stdout.splitlines()
+             if x.strip().startswith(("!!", "GECTI", "KAPI"))
+             or "GECTI --" in x]
+    for x in _ozet[:12]:
+        print("   ", x.strip()[:110])
+    ok(_r3.returncode == 0,
+       "ebeveynde OLUP burada OLMAYAN her satir TASINMIS ya da BEYANLI",
+       (_r3.stdout + _r3.stderr).strip()[-600:])
+
 print(f"\n{_gecti} gecti, {_bozuk} BOZUK")
 sys.exit(1 if _bozuk else 0)
