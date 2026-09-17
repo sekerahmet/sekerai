@@ -531,7 +531,12 @@ def main():
         return 0
     while True:
         try:
-            q = input("> ").strip()
+            # ISTEM KIPI GOSTERIR. Kullanici, 17 Eylul: "hicbir sey
+            # degismedi, rastgele bir soyad secmedi" -- `/s` yazilmamisti
+            # ve ekranda argmax'ta mi ornekte mi oldugunu gosteren
+            # HICBIR SEY yoktu. Yardim satirinda yazmasi yetmiyor:
+            # kipi tasiyan yer, kipin kullanildigi yer olmali.
+            q = input("ornek> " if ornek[0] else "argmax> ").strip()
         except (EOFError, KeyboardInterrupt):
             break
         if not q:
