@@ -1906,8 +1906,24 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
     # --- HAVUZU GPU'YA AL (hiz) -----------------------------------------
     # Yorunge DEGISMEZ (yukaridaki nota bak). Sigmazsa SESSIZCE CPU'da
     # kalir -- hiz optimizasyonu bir kosuyu DUSURMEMELI.
+    # !! VARSAYILAN KAPALI -- OLCULDU VE ISE YARAMADI.
+    #
+    # Iddia: adimin %29'u sabit gider, sebebi host->device kopya.
+    # O sayi IKI FARKLI KOLDAN `t = a + b*T` cozulerek cikarilmisti ve
+    # fazla comert bir varsayimdi: model_05 ile model_06 yalniz t_len'de
+    # degil, havuz boyutunda, sozlukte ve veri dagiliminda da farkli.
+    # "T disindaki her sey" tek bir sabite yikilamaz.
+    #
+    # DOGRUDAN OLCUM (T4, `--hiz-dogrula 60`, sira etkisi kaldirilmis,
+    # her dal iki kez):
+    #     CPU havuzu  10.1 / 11.4 sn      GPU havuzu  10.3 / 10.4 sn
+    #     HIZLANMA 0.98x  -> KAZANC YOK
+    #
+    # Kod DURUYOR (GPU_HAVUZ=1 ile acilir) cunku dogrulugu KANITLI
+    # (agirlik farki 0.000e+00) ve baska bir donanimda ise yarayabilir.
+    # Ama varsayilan OLCULMEMIS bir iyilestirme OLAMAZ.
     _GPU_HAVUZ = None
-    if DEV == "cuda" and os.environ.get("GPU_HAVUZ", "1") != "0":
+    if DEV == "cuda" and os.environ.get("GPU_HAVUZ", "0") == "1":
         try:
             _mb = (Xtr.nbytes + Ptr.nbytes + Ttr.nbytes) / 1e6
             assert int(Xtr.max()) < 32767 and int(Ptr.max()) < 32767
