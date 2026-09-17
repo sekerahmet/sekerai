@@ -78,6 +78,21 @@ PLAN = [
     ("33", "sinav_ent",         "SINAV bolmesi: hic zincir basi olmamis"),
     ("34", "sinav_ent_yok",     "SINAV bolmesi: kisayol TIP OLARAK imkansiz"),
     ("35", "sinav_ood",         "SINAV bolmesi: dagitim disi"),
+
+    # !! AYNI ZINCIRLER, SORU BICIMINDE. Kullanici, 17 Eylul:
+    # *"tamam da bu soru degil ki, bu cumle. soru 'kimdir' diye biter.
+    # burda ne soruluyor, cevap ne?"* Hakli: 30..35 yarim birakilmis
+    # BILDIRIM. Soru bicimli hali OLCULUYOR (pencere_07 `soru_` tablosu)
+    # ama DOSYAYA DOKULMUYORDU -- eksikti.
+    #
+    # HUKMU 30..35 VERIR: olcme izi f4ce53fd1555 ile model_05/06 kiyasi
+    # YALNIZ orada gecerli. 40..45 IKINCIL, eklentinin kendi isi.
+    ("40", "sinavsoru_one",      "AYNI zincir, SORU bicimi (ikincil)"),
+    ("41", "sinavsoru_seen",     "AYNI zincir, SORU bicimi (ikincil)"),
+    ("42", "sinavsoru_comp",     "AYNI zincir, SORU bicimi (ikincil)"),
+    ("43", "sinavsoru_ent",      "AYNI zincir, SORU bicimi (ikincil)"),
+    ("44", "sinavsoru_ent_yok",  "AYNI zincir, SORU bicimi (ikincil)"),
+    ("45", "sinavsoru_ood",      "AYNI zincir, SORU bicimi (ikincil)"),
 ]
 
 
@@ -168,7 +183,7 @@ def main():
             X = M.kodla_kimlik_q1(v, range(v.n_ent))[0]
             return [d.oku(r) for r in X]
 
-        # --- sinav bolmeleri ---
+        # --- sinav bolmeleri, BILDIRIM (HUKMU BUNLAR VERIR) ---
         if ad.startswith("sinav_"):
             bol = ad[6:]
             lst = d.L.get(bol) or []
@@ -176,6 +191,17 @@ def main():
                 return []
             kodla = M.kodla_1hop if bol == "one" else M.kodla_2hop
             X = kodla(v, list(lst), 0)[0]
+            return [d.oku(r) for r in X]
+
+        # --- sinav bolmeleri, SORU bicimi (IKINCIL) ---
+        if ad.startswith("sinavsoru_"):
+            if getattr(ayar, "soru_kat", 0) <= 0:
+                return []
+            bol = ad[10:]
+            lst = d.L.get(bol) or []
+            if not lst:
+                return []
+            X = M.kodla_soru(v, list(lst), 1 if bol == "one" else 2)[0]
             return [d.oku(r) for r in X]
 
         raise AssertionError("PLANDA var, uretici YOK: " + ad)
@@ -217,6 +243,33 @@ def main():
         f.write(NL + "20_egitim_kimlik BENZERSIZ satirlari verir; havuzda "
                 f"payi %{ayar.ident_frac:.0%} olana" + NL)
         f.write("kadar TEKRARLANIR. Digerlerinde tekrar yoktur." + NL)
+        # !! Kullanici 33_sinav_ent.txt'e bakip sordu (17 Eylul): "bu
+        # nasil bir soru? ent sorulari bunlar mi?" Dosyada TAM CUMLE
+        # duruyor, cunku sinav dizisi odur; modele yalniz ONEK veriliyor.
+        # Bu ayrim dosyanin icine yazilamaz (orada aciklama yok), buraya
+        # yaziliyor.
+        f.write(NL + "SINAV DOSYALARI -- nasil okunur:" + NL)
+        f.write("  Satirda TAM CUMLE var; modele yalniz BASI verilir, "
+                "gerisini O yazar." + NL + NL)
+        f.write("  30..35  BILDIRIM -- HUKMU BUNLAR VERIR" + NL)
+        f.write("     satir  : Kaan Arslan'in annesinin tezi "
+                "Niceliksel Optik'tir." + NL)
+        f.write("     SORU   : Kaan Arslan'in annesinin tezi ______" + NL)
+        f.write("     CEVAP  : Niceliksel Optik'tir." + NL + NL)
+        f.write("  40..45  AYNI ZINCIR, SORU BICIMI -- IKINCIL" + NL)
+        f.write("     satir  : Kaan Arslan'in annesinin tezi hangisidir? "
+                "Niceliksel Optik'tir." + NL)
+        f.write("     SORU   : Kaan Arslan'in annesinin tezi hangisidir?" + NL)
+        f.write("     CEVAP  : Niceliksel Optik'tir." + NL + NL)
+        f.write("  Neden ikisi birden: hukum 30..35'te, cunku model_05 ve "
+                "model_06 da" + NL)
+        f.write("  o yuzeyde olculdu ve ucu ancak oyle AYNI TABLODA "
+                "okunur. 40..45" + NL)
+        f.write("  eklentinin kendi isini gosterir." + NL + NL)
+        f.write("  HER IKISINDE DE KOPRU CUMLEDE GECMIYOR:" + NL)
+        f.write("     Kaan Arslan --annesi--> Tugce Arslan   (bu ad hicbir "
+                "satirda YOK)" + NL)
+        f.write("     Tugce Arslan --tezi--> Niceliksel Optik" + NL)
         for ln in _dogrula(icerik, ayar, v, a.ornek):
             f.write(ln + NL)
     print(f"{NL}klasor: {kl}")
