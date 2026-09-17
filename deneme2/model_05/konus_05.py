@@ -327,7 +327,7 @@ def olasilik(v, net, jet, k=8):
 
 
 @torch.no_grad()
-def devam(v, net, jet):
+def devam(v, net, jet, ornekle=False, isi=1.0, tohum=None):
     """Diziyi MODELE YAZDIRIR. Kisit YOK: argmax butun sozluk uzerinde.
 
     Sozlesme `dogruluk()` ile AYNI: satir t_len genisliginde verilir,
@@ -335,12 +335,26 @@ def devam(v, net, jet):
     satira geri yazilir (ozyineli cozum), yani model kendi yazdigini
     okur -- sor_05'te bunun neden onemli oldugu olculmustu.
     """
+    # ARGMAX mi ORNEKLEME mi -- ve NEDEN secenek:
+    # Kullanici, 17 Eylul: *"Furkan yazinca niye Demir ile devam
+    # ediyor?"* Cunku argmax farkin buyuklugune bakmaz. Olculdu (adim
+    # 20000, onek "Furkan"): Demir %15,40  Sahin %14,53  Kaya %14,32 --
+    # 0,87 puanlik bir fark ciktinin %100'unu belirliyor. Model "Demir"
+    # demiyor, "sekizinden biri" diyor. Ornekleme dagilimi OLDUGU GIBI
+    # gosterir; hukum yine `pencere_05`in (o ARGMAX olcer, olcum
+    # tekrarlanabilir olsun diye).
+    rs = np.random.default_rng(tohum)
     x = list(jet)
     while len(x) < v.t_len:
         satir = np.zeros((1, v.t_len), dtype=np.int64)
         satir[0, :len(x)] = x
         lg = net(torch.from_numpy(satir).to(M.DEV)).float()
-        t = int(lg[0, len(x) - 1].argmax())
+        z = lg[0, len(x) - 1]
+        if ornekle:
+            p = torch.softmax(z / max(isi, 1e-6), -1).cpu().numpy()
+            t = int(rs.choice(len(p), p=p / p.sum()))
+        else:
+            t = int(z.argmax())
         x.append(t)
         if t in (M.EOS, M.PAD):
             break
@@ -425,8 +439,10 @@ def main():
     print("soru yaz, bos satir cikar.")
     print("  /ara <parca>  varlik adi ara        /iliski  iliskiler")
     print("  /o <cumle basi>  SONRAKI jetonun DAGILIMI    "
-          "/j  jetonlari goster\n")
+          "/j  jetonlari goster")
+    print("  /s  ORNEKLEME ac/kapa (argmax HEP ayni cevabi verir)\n")
     jeton_goster = [False]
+    ornek = [False]          # /s -- argmax yerine DAGILIMDAN cek
     # Adlari ARAMAK gerekiyor: 1087 varlik var ve olmayan bir ad
     # yazildiginda model degil ARAC susuyor. Dokumun tamami zaten
     # `veri/model_05/` altinda; bu yalniz elin altinda dursun diye.
@@ -438,6 +454,13 @@ def main():
         if q == "/j":
             jeton_goster[0] = not jeton_goster[0]
             print("jeton gosterimi", "ACIK" if jeton_goster[0] else "KAPALI")
+            return
+        if q == "/s":
+            ornek[0] = not ornek[0]
+            print("ORNEKLEME " + ("ACIK -- ayni soru her seferinde BASKA "
+                                  "cevap verebilir (dagilimdan cekiliyor)"
+                                  if ornek[0] else
+                                  "KAPALI -- argmax, ayni soru HEP ayni cevap"))
             return
         if q.startswith("/o"):
             # ARGMAX TEK CEVAP VERIR, model ise DAGILIM tasir. Bu komut
@@ -480,7 +503,7 @@ def main():
             return
         for n in notlar:
             print(f"  ({n})")
-        cikti = devam(v, net, jet)
+        cikti = devam(v, net, jet, ornekle=ornek[0])
         if jeton_goster[0]:
             print("  jeton: " + " ".join(D.jeton_ad(t) for t in jet)
                   + "  ||  " + " ".join(D.jeton_ad(t) for t in cikti[len(jet):]))
