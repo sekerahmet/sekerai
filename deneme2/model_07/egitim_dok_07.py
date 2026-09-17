@@ -114,6 +114,31 @@ PLAN = [
 ]
 
 
+def _ayrim(d, v, X, P=None, T=None, i=0, fim=False):
+    """Bir ornek satir icin (MODELE VERILEN, MODELDEN ISTENEN).
+
+    Elle yazilmiyor: diziyi ve `kodla_*`in dondurdugu P/T'yi okuyor.
+    Kullanici, 17 Eylul: *"iki kolonda modele ne veriyoruz ne
+    istiyoruz diye ekler misin"*.
+
+    !! `tam_kayip=True` -- KAYIP HER KONUMDA hesaplaniyor. Burasi
+    kaybin sekli DEGIL, satirin NE OGRETTIGI: olculen cevap yuvasi.
+    Devrik bicimlerde o yuva YOK (cevap kendi baglamindan once gelir),
+    ve bu bir kusur degil, TANIM -- orada satir yalniz dil bilgisi
+    ogretiyor."""
+    import numpy as _np
+    r = [int(t) for t in X[i] if int(t) != M.PAD]
+    if fim:
+        j = r.index(v.ayir)
+        return d.oku(r[:j + 1]), d.oku(r[j + 1:])
+    if T is not None and int((_np.asarray(T[i]) >= 0).sum()) > 0:
+        p0 = int(P[i][0])
+        return d.oku(r[:p0 + 1]), d.oku(r[p0 + 1:])
+    return ("(cumlenin tamami)",
+            "HER KONUMDA sonraki jeton -- cevap yuvasi YOK "
+            "(cevap kendi baglamindan ONCE geliyor)")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--klasor", default=None)
@@ -125,7 +150,7 @@ def main():
     d = AZ.Dok("model_07")
     v, ayar = d.v, d.ayar
     n_bic = max(1, ayar.bicim)
-    icerik = {}
+    icerik, AYRIM = {}, {}
 
     def satirlar(ad):
         """`ad` icin CUMLE LISTESI. Tek yerden, tek bicimde."""
@@ -156,7 +181,8 @@ def main():
             kodla = M.kodla_1hop if hop == 1 else M.kodla_2hop
             if tip >= n_bic:
                 return []
-            X = kodla(v, list(lst), tip)[0]
+            X, P, T = kodla(v, list(lst), tip)
+            AYRIM[ad] = _ayrim(d, v, X, P, T)
             return [d.oku(r) for r in X]
 
         # --- egitim: bosluk doldurma ---
@@ -182,7 +208,12 @@ def main():
                                            size=min(ayar.fim_kat, len(dz)),
                                            replace=False):
                             if _h == hop:
-                                cik.append(d.oku(M.kodla_fim(v, dz, int(p))))
+                                _f = M.kodla_fim(v, dz, int(p))
+                                if ad not in AYRIM:
+                                    _XX = np.zeros((1, v.t_len), np.int64)
+                                    _XX[0, :len(_f)] = _f
+                                    AYRIM[ad] = _ayrim(d, v, _XX, fim=True)
+                                cik.append(d.oku(_f))
             return cik
 
         # --- egitim: soru bicimi ---
@@ -191,14 +222,16 @@ def main():
                 return []
             hop = int(ad[-1])
             lst = v.one if hop == 1 else v.tr2
-            X = M.kodla_soru(v, list(lst), hop)[0]
+            X, P, T = M.kodla_soru(v, list(lst), hop)
+            AYRIM[ad] = _ayrim(d, v, X, P, T)
             return [d.oku(r) for r in X]
 
         # --- egitim: kimlik ---
         if ad == "egitim_kimlik":
             if ayar.ident_frac <= 0:
                 return []
-            X = M.kodla_kimlik_q1(v, range(v.n_ent))[0]
+            X, P, T = M.kodla_kimlik_q1(v, range(v.n_ent))
+            AYRIM[ad] = _ayrim(d, v, X, P, T)
             return [d.oku(r) for r in X]
 
         # --- sinav bolmeleri, BILDIRIM (HUKMU BUNLAR VERIR) ---
@@ -208,7 +241,8 @@ def main():
             if not lst:
                 return []
             kodla = M.kodla_1hop if bol == "one" else M.kodla_2hop
-            X = kodla(v, list(lst), 0)[0]
+            X, P, T = kodla(v, list(lst), 0)
+            AYRIM[ad] = _ayrim(d, v, X, P, T)
             return [d.oku(r) for r in X]
 
         # --- sinav bolmeleri, BOSLUK DOLDURMA (IKINCIL) ---
@@ -221,6 +255,7 @@ def main():
                 return []
             X = M.kodla_fim_sinav(
                 v, list(lst), "ozne" if _y == "ozne" else "iliski")[0]
+            AYRIM[ad] = _ayrim(d, v, X, fim=True)
             return [d.oku(r) for r in X]
 
         # --- sinav bolmeleri, SORU bicimi (IKINCIL) ---
@@ -231,7 +266,8 @@ def main():
             lst = d.L.get(bol) or []
             if not lst:
                 return []
-            X = M.kodla_soru(v, list(lst), 1 if bol == "one" else 2)[0]
+            X, P, T = M.kodla_soru(v, list(lst), 1 if bol == "one" else 2)
+            AYRIM[ad] = _ayrim(d, v, X, P, T)
             return [d.oku(r) for r in X]
 
         raise AssertionError("PLANDA var, uretici YOK: " + ad)
@@ -267,14 +303,30 @@ def main():
         # *"burdaki dosyalarda dosya adi, ornek ve amac diye bir tablo
         # hazirla."* Ornek DOSYANIN KENDISINDEN okunuyor, elle
         # yazilmiyor -- dosya degisirse tablo da degisir.
+        # TABLO. Kullanici, 17 Eylul: *"iki kolonda modele ne veriyoruz
+        # ne istiyoruz diye ekler misin bu tablolara, ilk 3'e gerek
+        # yok."*  01/02/03 SOZLUK dosyalari; onlarda "verilen/istenen"
+        # diye bir sey yok, o yuzden TABLOYA GIRMIYORLAR (dosyalar
+        # DURUYOR, yalniz tabloda yer almiyorlar).
         f.write(NL + "TABLO" + NL + "-" * 70 + NL)
         for dosya in sorted(icerik):
+            if dosya[:2] in ("01", "02", "03"):
+                continue
             n, ne = icerik[dosya]
+            _ad = dosya[3:-4]
             with io.open(os.path.join(kl, dosya), encoding="utf-8") as g:
                 ilk = g.readline().rstrip(NL)
+            ver, ist = AYRIM.get(_ad, ("?", "?"))
             f.write(f"{dosya}   ({n:,} satir)" + NL)
-            f.write(f"   amac  : {ne}" + NL)
-            f.write(f"   ornek : {ilk}" + NL + NL)
+            f.write(f"   amac    : {ne}" + NL)
+            f.write(f"   ornek   : {ilk}" + NL)
+            f.write(f"   VERILEN : {ver}" + NL)
+            f.write(f"   ISTENEN : {ist}" + NL + NL)
+        f.write("01/02/03 sozluk dosyalaridir; 'verilen/istenen' yok." + NL)
+        f.write(NL + "!! tam_kayip=True -- KAYIP HER KONUMDA hesaplanir."
+                " Yukaridaki ISTENEN" + NL)
+        f.write("   sutunu kaybin sekli DEGIL, satirin NE OGRETTIGI:"
+                " olculen cevap yuvasi." + NL)
         f.write(NL + "EGITIM HAVUZU = 10..20 arasi dosyalar." + NL)
         f.write("SINAV = 30..35. Sinav DUZ BILDIRIMLE yapilir (tip1); "
                 "soru bicimi ve" + NL)
