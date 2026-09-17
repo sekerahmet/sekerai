@@ -1158,19 +1158,35 @@ def kodla_fim_sinav(v: Veri, batch, hangi: str):
 
     Doner: (X, hedef_uzunluklari). Hedef jetonlar dizinin SONUNDA.
 
-    !! UYARI -- `ozne` yonu EGITIMLE UYUMSUZ, ve bu OLCULDU (17 Eylul,
-    kullanici sordu: "tek token nasil iki token cevap verecek?").
+    !! HER IKI YON DE TEK JETON BOSALTIR. Bu, 17 Eylul'de DUZELTILDI.
 
-        EGITIM  <AYIR> sonrasi jeton sayisi  {1: 187296}   ISTISNASIZ
-        ozne    {2: 2976, 1: 17, 3: 7}   -- %99,2'si IKI jeton
-        iliski  {1: 3000}                -- egitimle UYUMLU
+    Once `ozne` yonu OZNENIN TAMAMINI bosaltiyordu ve olculdu ki bu
+    EGITIMLE UYUMSUZ (kullanici sordu: "tek token nasil iki token
+    cevap verecek?"):
 
-    `kodla_fim` boslugun uzunlugu ne olursa olsun TEK `<BOS>` koyuyor,
-    ve egitimde her bosluk tam 1 jetonluk. Yani model "`<BOS>` = bir
-    jeton" ogreniyor; `ozne` sinavi ondan 2-3 jetonluk bir AD istiyor.
-    `ozne` sutunu DAGITIM DISI bir gorevi olcer, `iliski` sutunu olcmez.
-    Ikisi AYNI OLCEKTE okunmamali. Sayilar hukum vermiyor (ikincil),
-    ama "ozne dustu" cumlesi bu notsuz kurulamaz.
+        EGITIM         <AYIR> sonrasi jeton sayisi {1: 187296}  ISTISNASIZ
+        ozne (ESKI)    {2: 2976, 1: 17, 3: 7}  -- %99,2'si IKI jeton
+        iliski         {1: 3000}               -- uyumlu
+
+    `kodla_fim` boslugun uzunlugu ne olursa olsun TEK `<BOS>` koyuyor
+    ve egitimdeki her bosluk tam 1 jetonluk; yani model "`<BOS>` = bir
+    jeton" ogreniyor. Eski `ozne` sinavi ondan 2-3 jetonluk bir AD
+    istiyordu -- DAGITIM DISI bir gorev, ve dusuk cikan sayinin ne
+    kadarinin gorevden ne kadarinin bu uyumsuzluktan geldigi
+    AYRILAMIYORDU.
+
+    Simdi `ozne` OZNENIN SON JETONUNU bosaltiyor (cok kelimeli adlarda
+    SOYAD). Kullanici karari, 17 Eylul. Boylece bosluk her yerde 1
+    jeton ve iki sutun AYNI OLCEKTE okunur.
+
+        Kaan <BOS>'in annesinin tezi Niceliksel Optik'tir. <AYIR> Arslan
+
+    !! `model_06`nin kayitli `fim_ozne_*` sayilari ESKI tanimla
+    olculdu; bu yuzden anahtar adi da DEGISTI (`fim_ozne1_`), sessizce
+    kiyaslanmasin diye.
+
+    Tek jetonlu adlarda (1087'nin 40'i) bosluk ADIN TAMAMI olur; bu
+    kacinilmaz ve zaten 1 jetondur.
 
     !! NEDEN AYRI FONKSIYON: bu dizi kurulumu `pencere_07.fim_dogruluk`in
     ICINDE yaziliydi ve dokum betigi ayni seyi IKINCI KEZ yazmak
@@ -1185,7 +1201,10 @@ def kodla_fim_sinav(v: Veri, batch, hangi: str):
         oz = ez + [_kesme(v), _nin(v, e=e)]
         il = [REL_OFF + r1, _nin(v, r=r1), REL_OFF + r2]
         dz = oz + il + az + [_kesme(v), _dir(v, a=a), EOS]
-        poz, uz = (0, len(ez)) if hangi == "ozne" else (len(ez) + 2, 1)
+        # ozne  -> oznenin SON jetonu (soyad), TEK jeton
+        # iliski -> r1 jetonu, TEK jeton
+        poz, uz = ((len(ez) - 1, 1) if hangi == "ozne"
+                   else (len(ez) + 2, 1))
         dizi.append(kodla_fim(v, dz, poz, uz))
         hedef_n.append(uz)
     X = np.zeros((len(dizi), v.t_len), np.int64)

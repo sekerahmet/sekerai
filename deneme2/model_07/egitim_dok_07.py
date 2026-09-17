@@ -96,17 +96,21 @@ PLAN = [
 
     # !! AYNI ZINCIRLER, BOSLUK DOLDURMA. Kullanici, 17 Eylul: *"ama bu
     # da bosluk doldurma tipinde ent, diger tipte ent nerede?"*
-    # pencere_07 bunlari `fim_ozne_` / `fim_rel_` diye OLCUYORDU ama
+    # !! IKISI DE TEK JETON bosaltir (kullanici karari, 17 Eylul).
+    # Once `ozne` OZNENIN TAMAMINI bosaltiyordu ve egitimle UYUMSUZDU:
+    # egitimdeki 187.296 boslugun 187.296'si tek jetonluk, ama o sinav
+    # 2-3 jeton istiyordu.
+    # pencere_07 bunlari `fim_ozne1_` / `fim_rel_` diye OLCUYORDU ama
     # dosyaya dokmuyordu. Diziyi `taban_07.kodla_fim_sinav` kuruyor --
     # olcumle AYNI KAYNAK, iki kopya olmasin diye.
-    ("50", "sinavbosluk_ozne_comp",    "AYNI zincir, OZNE bosluklu (ikincil)"),
-    ("51", "sinavbosluk_ozne_ent",     "AYNI zincir, OZNE bosluklu (ikincil)"),
-    ("52", "sinavbosluk_ozne_ent_yok", "AYNI zincir, OZNE bosluklu (ikincil)"),
-    ("53", "sinavbosluk_ozne_ood",     "AYNI zincir, OZNE bosluklu (ikincil)"),
-    ("54", "sinavbosluk_rel_comp",     "AYNI zincir, ILISKI bosluklu (ikincil)"),
-    ("55", "sinavbosluk_rel_ent",      "AYNI zincir, ILISKI bosluklu (ikincil)"),
-    ("56", "sinavbosluk_rel_ent_yok",  "AYNI zincir, ILISKI bosluklu (ikincil)"),
-    ("57", "sinavbosluk_rel_ood",      "AYNI zincir, ILISKI bosluklu (ikincil)"),
+    ("50", "sinavbosluk_ozne_comp",    "AYNI zincir, SOYAD (oznenin son jetonu) bosluklu"),
+    ("51", "sinavbosluk_ozne_ent",     "AYNI zincir, SOYAD bosluklu (ikincil)"),
+    ("52", "sinavbosluk_ozne_ent_yok", "AYNI zincir, SOYAD (oznenin son jetonu) bosluklu"),
+    ("53", "sinavbosluk_ozne_ood",     "AYNI zincir, SOYAD (oznenin son jetonu) bosluklu"),
+    ("54", "sinavbosluk_rel_comp",     "AYNI zincir, ILISKI jetonu bosluklu"),
+    ("55", "sinavbosluk_rel_ent",      "AYNI zincir, ILISKI jetonu bosluklu"),
+    ("56", "sinavbosluk_rel_ent_yok",  "AYNI zincir, ILISKI jetonu bosluklu"),
+    ("57", "sinavbosluk_rel_ood",      "AYNI zincir, ILISKI jetonu bosluklu"),
 ]
 
 
@@ -259,9 +263,18 @@ def main():
         f.write(f"<BOS> {v.bosluk}   <AYIR> {v.ayir}" + NL + NL)
         f.write("Her dosya: BIR SATIR = BIR CUMLE. Dosyalarin icinde "
                 "aciklama YOK." + NL + NL)
+        # TABLO: dosya adi | satir | ORNEK | amac. Kullanici, 17 Eylul:
+        # *"burdaki dosyalarda dosya adi, ornek ve amac diye bir tablo
+        # hazirla."* Ornek DOSYANIN KENDISINDEN okunuyor, elle
+        # yazilmiyor -- dosya degisirse tablo da degisir.
+        f.write(NL + "TABLO" + NL + "-" * 70 + NL)
         for dosya in sorted(icerik):
             n, ne = icerik[dosya]
-            f.write(f"{dosya:<28} {n:>9,}  {ne}" + NL)
+            with io.open(os.path.join(kl, dosya), encoding="utf-8") as g:
+                ilk = g.readline().rstrip(NL)
+            f.write(f"{dosya}   ({n:,} satir)" + NL)
+            f.write(f"   amac  : {ne}" + NL)
+            f.write(f"   ornek : {ilk}" + NL + NL)
         f.write(NL + "EGITIM HAVUZU = 10..20 arasi dosyalar." + NL)
         f.write("SINAV = 30..35. Sinav DUZ BILDIRIMLE yapilir (tip1); "
                 "soru bicimi ve" + NL)

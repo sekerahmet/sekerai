@@ -220,7 +220,11 @@ def olc(ayar: M.Ayar, veri: M.Veri, kod: dict, L: dict, sd: dict) -> dict:
     if getattr(veri, "bosluk", 0):
         for _b in ("comp", "ent", "ent_yok", "ood"):
             if L.get(_b):
-                r[f"fim_ozne_{_b}"] = fim_dogruluk(net, veri, L[_b], "ozne")
+                # !! ANAHTAR `fim_ozne1_` -- model_06'nin `fim_ozne_`
+                # sayilari OZNENIN TAMAMINI bosaltan ESKI tanimla
+                # olculdu. Ad ayni kalsa iki AYRI gorev ayni sutunda
+                # okunurdu.
+                r[f"fim_ozne1_{_b}"] = fim_dogruluk(net, veri, L[_b], "ozne")
                 r[f"fim_rel_{_b}"] = fim_dogruluk(net, veri, L[_b], "iliski")
     return r
 
@@ -335,23 +339,23 @@ def main():
     _fk = [k for k in sonuc[-1] if k.startswith("fim_")]
     if _fk:
         _bol = [b for b in ("comp", "ent", "ent_yok", "ood")
-                if f"fim_ozne_{b}" in sonuc[-1]]
+                if f"fim_ozne1_{b}" in sonuc[-1]]
         print(f"\n{'='*62}")
         print("BOSLUK DOLDURMA -- AYNI zincirler, BASKA yonden sorulmus")
         print("  !! HUKUM VERMEZ. Birincil olcu yukaridaki ILERI yon;")
         print("     olcme izi f4ce53fd1555 ile model_05 kiyasi YALNIZ orada")
         print("     gecerli.")
-        print("  !! OZNE sutunu EGITIMLE UYUMSUZ -- olculdu: egitimdeki")
-        print("     187.296 boslugun 187.296'si TEK jetonluk, ama ozne")
-        print("     sinavinin %99'u IKI jeton istiyor. Tek <BOS> kac jeton")
-        print("     eksildigini SOYLEMIYOR. ozne ile rel AYNI OLCEKTE")
-        print("     OKUNMAZ; rel sutunu egitimle uyumlu.")
+        print("  IKI SUTUN DA TEK JETONLUK bosluk sorar -- egitimle uyumlu")
+        print("  (egitimdeki 187.296 boslugun 187.296'si tek jetonluk).")
+        print("  ozne1 = oznenin SON jetonu (soyad). model_06'nin kayitli")
+        print("  `fim_ozne_` sayilari OZNENIN TAMAMINI bosaltiyordu ve")
+        print("  DAGITIM DISIYDI -- bu sutunla KIYASLANMAZ, adi da ayri.")
 
         print(f"  {'pencere':<18}"
-              + "".join(f"{'ozne:'+b:>13}{'rel:'+b:>13}" for b in _bol))
+              + "".join(f"{'ozne1:'+b:>13}{'rel:'+b:>13}" for b in _bol))
         for r in sonuc:
             print(f"  {r['pencere']:<18}"
-                  + "".join(f"{r.get('fim_ozne_'+b, float('nan')):>13.4f}"
+                  + "".join(f"{r.get('fim_ozne1_'+b, float('nan')):>13.4f}"
                             f"{r.get('fim_rel_'+b, float('nan')):>13.4f}"
                             for b in _bol))
 
