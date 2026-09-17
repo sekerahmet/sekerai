@@ -20,6 +20,7 @@ KESKIN TEST. Yuva hatalari BAGIMSIZ mi?
 from __future__ import annotations
 
 import argparse
+import importlib
 import dataclasses as dc
 import glob
 import io
@@ -34,22 +35,29 @@ ap = argparse.ArgumentParser()
 ap.add_argument("klasor")
 ap.add_argument("--aile", required=True)
 ap.add_argument("--genislik", type=int, default=5)
+ap.add_argument("--son", type=int, default=None,
+                help="pencerenin BITTIGI adim (esit butce kiyasi)")
 a = ap.parse_args()
 
 KOK = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(KOK, a.aile))
 sys.path.insert(0, KOK)
 
-if a.aile == "model_00":
-    import taban_00 as M
-    from model_00 import ModelSade as SINIF
-    import pencere_00 as P
-elif a.aile == "model_02":
-    import taban_02 as M
-    from model_02 import ModelSade as SINIF
-    import pencere_02 as P
-else:
-    raise SystemExit(f"bilinmeyen aile: {a.aile}")
+# AILE ADINDAN TURETILIR, elle listelenmez. Onceki surumde sabit bir
+# if-zinciri vardi (model_00/model_02) ve her yeni kolda "bilinmeyen aile"
+# diye duruyordu -- 17 Eylul'de model_01 ve model_03'u olcemedi.
+# Turetme GUVENLI: modul GERCEKTEN o klasorden mi geldi diye denetleniyor,
+# yani yanlislikla baska bir kolun tabanini yuklemek imkansiz.
+_AD = os.path.join(KOK, a.aile)
+assert os.path.isdir(_AD), f"aile klasoru YOK: {_AD}"
+_N = a.aile.split("_")[1]
+M = importlib.import_module(f"taban_{_N}")
+P = importlib.import_module(f"pencere_{_N}")
+SINIF = importlib.import_module(a.aile).ModelSade
+for _m in (M, P):
+    assert os.path.dirname(os.path.abspath(_m.__file__)) == _AD, (
+        f"{_m.__name__} {a.aile} DISINDAN geldi: {_m.__file__} -- "
+        "sys.path kirli, olcum BASKA bir kolun tabaniyla yapilirdi")
 
 ham = json.load(io.open(glob.glob(os.path.join(a.klasor, "ayar_t*.json"))[0],
                         encoding="utf-8"))
@@ -63,6 +71,13 @@ ayar = M.Ayar(**d)
 v = M.veri_kur(ayar, yaz=lambda *x: None)
 
 snaps = sorted(glob.glob(os.path.join(a.klasor, "snap", "snap_*.pt")))
+if a.son is not None:
+    # ESIT BUTCE KIYASI: model_00 80.000'e kadar kostu, model_01/03 20.000'de
+    # durdu. Son pencereyi almak 72-80k ile 12-20k'yi kiyaslardi -- DORT KAT
+    # butce farki. --son 20000 penceresi AYNI butceye getirir.
+    _hedef = [y for y in snaps if y.endswith(f"{a.son:08d}.pt")]
+    assert len(_hedef) == 1, f"{a.son} adiminda anlik goruntu YOK"
+    snaps = snaps[:snaps.index(_hedef[0]) + 1]
 pen = snaps[-a.genislik:]
 net = SINIF(ayar, v.vocab)
 net.load_state_dict(P.agirlik_ortalamasi(pen))
