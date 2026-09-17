@@ -1,28 +1,28 @@
 # -*- coding: utf-8 -*-
-"""tani_03 — model_03'in KENDI AYRISTIRMASI. TEK BASINA DURUR.
+"""tani_05 — model_05'in KENDI AYRISTIRMASI. TEK BASINA DURUR.
 
-Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_03 folderi
-altinda olmali. model_03 diger hicbir model ile ayni seyi
+Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_05 folderi
+altinda olmali. model_05 diger hicbir model ile ayni seyi
 kullanmamali."*
 
 `model_a/tani_a.py`nin KOPYASI (uretici: scratchpad/kur_okuma00.py). Modeli
 `ModelSade` ile kurar. Paylasilan surumde yapilan bir degisiklik buraya
-GECMEZ; `test_03.py` ikisinin AYNI SEYI olctugunu her kosuda siniyor.
+GECMEZ; `test_05.py` ikisinin AYNI SEYI olctugunu her kosuda siniyor.
 """
 from __future__ import annotations
 
 import argparse, os, sys
 
-# `tani_b` bunu doldurur; None -> model_03.ModelSade. `pencere_a`daki kancanin
+# `tani_b` bunu doldurur; None -> model_05.ModelSade. `pencere_a`daki kancanin
 # AYNISI. 16 Eylul: burada YOKTU ve `tani_a`, model_b anlik goruntusunu
 # "Unexpected key(s): dar_norm.g" ile REDDEDERDI.
 import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import taban_03 as M                                          # noqa: E402
-import pencere_03 as P                                        # noqa: E402
-from model_03 import ModelSade                                # noqa: E402
+import taban_05 as M                                          # noqa: E402
+import pencere_05 as P                                        # noqa: E402
+from model_05 import ModelSade                                # noqa: E402
 
 MODEL_SINIFI = ModelSade
 
@@ -52,8 +52,7 @@ def cevap_uzunlugu(v: M.Veri, e: int) -> int:
     """Varligin KAC jetonla yazildigi (<YOK> dolgusu sayilmaz)."""
     if v.par is None:
         return 1
-    return sum(1 for j in range(v.yuva)
-               if v.par_ad[j][int(v.par[e, j])] != "<YOK>")
+    return len(M.kelimeler(v, e))
 
 
 @torch.no_grad()

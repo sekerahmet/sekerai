@@ -1,49 +1,108 @@
 # -*- coding: utf-8 -*-
-"""veri_03 — model_03'in KENDI verisi. TEK BASINA DURUR.
+"""veri_05 — model_05'in KENDI verisi. TEK BASINA DURUR.
 
-Kullanici karari, 16 Eylul 2026:
-    *"bunlarin hepsi model_03 folderi altinda olmali. model_03 diger
-    hicbir model ile ayni seyi kullanmamali."*
+Kullanici karari, 17 Eylul 2026:
+    *"ben artik GERCEK bir veri istiyorum ve mantikli. yani sacma
+    iliskiler yok, dil bilgisi dogru vs. phi yuksek yapalim tabi ki ama
+    burda kritik nokta verimiz gercekten bu ornekte DUZGUN olmali."*
 
-Bu dosya `veri_okul*` modullerinin HICBIRINI import ETMEZ. Govdesi
-onlardan KOPYALANDI (uretici: scratchpad/kur_veri00.py) ve artik
-model_03'a aittir: `model_b` ailesi icin yapilan bir degisiklik buraya
-GECMEZ.
+ve yapinin kendisi icin:
+    *"okul yerine universite desek, ders yerine fakulte desek, sonrada
+    bolum mantikli olur o zaman"*
 
-==========================================================================
-ICERIK -- bugun `veri_okul4` ile AYNI, ve bu KASITLI
-
-Bagimsizlik MIMARI icin gecerli, veri icin DEGIL: ayni veriyi gormezse
-kol hicbir sey olcmez (sinav bolmeleri ayrisir, `olcme_izi` degisir,
-sayilar ayni tabloda okunamaz).
-
-    veri_okul  (1x taban graf)  +  veri_okul3'un SEKIZ ALAN ACILIMI
-    1060 varlik   10.960 olgu   104.940 zincir   |R| 17
-    phi TAVANI 9,57
-
-Kopyanin DOGRULUGU goz karariyla degil, OLCUMLE tutuluyor:
-
-    IZ            grafin parmak izi, `kur()` her cagrilista denetler
-    test_03.py    veri_03.kur(0) ile veri_okul4.kur(0) DERIN
-                  KARSILASTIRMA ile birebir ayni mi -- olgu sozlugu,
-                  varlik listeleri, sema, sozluk, zincirler
-
-Yani `veri_okul4` bir gun degisirse bu dosya DEGISMEZ (kopya), ama
-kilit farki GORUR ve soyler: o gun ya fark bilerek kabul edilir
-(onkayda not duselir) ya da kopya guncellenir.
+`veri_04` ile arasindaki fark ICERIK farkidir, kopya farki degil. Bu
+dosya hicbir `veri_*` modulunu import ETMEZ.
 
 ==========================================================================
-YAPI
+NEDEN YENI VERI -- veri_04'te OLCULEN KUSURLAR
 
-    _taban_kur(tohum)   veri_okul.kur -- 1x graf
-    genislet(G, tohum)  veri_okul3.genislet -- sekiz alan acilimi
-    kur(tohum)          ikisi arka arkaya + IZ denetimi   <- KULLANILAN
+`veri_04` (= `veri_okul4`) yuksek phi'yi (9,57) SEMA'yi zorlayarak
+aliyordu: `kardes` iliskisi OKUL ve SEHIR'e, `komsu` KISI'ye, `kurucu`
+DERS'e de aciliyordu. Olculdu:
 
-IKI SEMA var, orijinaldeki gibi: `SEMA_TABAN` (taban grafin semasi) ve
-`SEMA` (sekiz alan acilimiyla genisletilmis). `_taban_kur` birincisini,
-`genislet` ikincisini `G["sema"]`ya koyar. Ilk birlestirmede tek sozluk
-vardi ve taban graf kendi basina TUTARSIZ kaliyordu -- ayrinti asagida,
-SEMA tanimlarinin yaninda.
+    "Matematik dersinin kurucusu kim"     400 / 10.960 olgu
+    "Ankara sehrinin dersi ne"            bu tur, KENDI ICINDE celiskili
+
+Ayrica:
+
+    200 / 200 OKUL adi kendi sehrini SIZDIRIYOR   (Ankara_Lisesi -> Ankara)
+    "Ali Yildiz'in kardesinin kardesi"            AYNI havuzdan rastgele
+    "Fatma Dogan'in annesi Huseyin Dogan"         cinsiyet TUTMUYOR
+
+Son ikisi `veri_04`te gercekten vardi: aile baglari rastgele baglaniyordu,
+soy agaci DEGILDI.
+
+==========================================================================
+BU VERIDE NE VAR
+
+Yedi tip, GERCEK bir universite hiyerarsisi + GERCEK bir soy agaci:
+
+    BOLGE  <--bolgesi--  SEHIR  <--sehri--  UNIVERSITE
+                                                ^
+                                          universitesi
+                                                |
+      DERS  --bolumu-->  BOLUM  --fakultesi-->  FAKULTE
+
+Zincir ustte YUKARI, altta ASAGI ("amiral" kenarlar) gidiyor:
+`ana_fakultesi`, `ana_bolumu`, `ana_dersi`, `merkezi`. Bunlar gercek
+("fakultenin amiral bolumu") ve phi'yi yukseltiyor -- SEMA'yi zorlamadan.
+
+--------------------------------------------------------------------------
+NOTR ADLANDIRMA -- kasitli, ve SIZINTIYI OLCUYORUZ
+
+FAKULTE ve BOLUM onekleri SEMT listesinden geliyor, ustundeki varligin
+adiyla ILGISIZ:
+
+    Cerrahpasa Muhendislik Fakultesi  ->  universitesi  Bogazici Uni.
+                ^ Bogazici DEGIL -- cevabin yarisi soruda DURMUYOR
+
+Gercek hayatta da boyle: Cerrahpasa Tip Fakultesi Istanbul
+Universitesi'ne baglidir ve adinda "Istanbul" GECMEZ.
+
+KISI soyadi ise BILEREK gercekci, yani AILE ICINDE PAYLASILIYOR. Bu bir
+sizintidir ve KALIYOR: gercek hayatta da vardir, ve `sizinti()` onu
+zincir zincir olcuyor ki bolme kodu `kopyalanabilir` / `kopyalanamaz`
+diye AYIRABILSIN.
+
+--------------------------------------------------------------------------
+SOY AGACI -- cinsiyet ve kusak TUTARLI
+
+Her soyadi blogunda 3 kusak x 16 kisi (8 erkek + 8 kadin):
+
+    kusak 0   M0_0..M0_7   F0_0..F0_7      ebeveyni KAYITLI DEGIL
+    kusak 1   M1_0..M1_7   F1_0..F1_7      ebeveyni kusak 0
+    kusak 2   M2_0..M2_7   F2_0..F2_7      ebeveyni kusak 1
+
+    kardes ciftleri   (M_i , F_{i+1})      <- ters cinsiyet, ayni ebeveyn
+    ebeveyn ciftleri  (M_i , F_i)          <- kardes ciftinden KAYIK
+
+Kayiklik SART: (M_i, F_i) hem es hem kardes olsaydi soy agaci ensest
+cikardi. Kaydirma bunu yapisal olarak imkansiz kiliyor, `_denetle`
+ayrica sinar.
+
+Bundan cikanlar:
+
+    annesi  HER ZAMAN kadin        babasi  HER ZAMAN erkek
+    kardesler ayni anne VE ayni babadan
+    cocugu, annesi/babasi'nin TERSI
+    "annesinin annesi" = buyukanne -- ANLAMLI, rastgele DEGIL
+    "kardesinin kardesi" = KENDISI -- DONUS sinifi, sinav disi
+
+--------------------------------------------------------------------------
+EKSIK OLGU -- kasitli, ve KENDI SINIFI var
+
+Gercek bir soy agacinin KENARI vardir: kusak 0'in ebeveyni, kusak 2'nin
+cocugu kayitli DEGIL. Bunlari uydurmuyoruz.
+
+`veri_04`te her varligin semasindaki HER iliski doluydu; burada degil.
+O yuzden zincir sinifi SEMAYA bakar, sozluge DEGIL:
+
+    YOK     kisayol TIP OLARAK imkansiz          <- `ent_yok` bolmesi
+    EKSIK   tip mumkun ama OLGU kayitli degil    <- SINAV DISI
+
+Ikisi ayrilmazsa `ent_yok` sessizce kirlenirdi: "kisayol imkansiz" diye
+sayilan zincirin bir kismi aslinda "kisayol var ama biz yazmadik"
+olurdu. (CLAUDE.md, `ent_yok` tanimi.)
 """
 from __future__ import annotations
 
@@ -51,105 +110,361 @@ import hashlib
 
 import numpy as np
 
-ERKEK = ["Ahmet", "Mehmet", "Mustafa", "Ali", "Huseyin", "Hasan", "Ibrahim",
-         "Osman", "Yusuf", "Murat", "Omer", "Ramazan", "Suleyman", "Halil",
-         "Ismail", "Riza", "Fatih", "Kemal", "Salih", "Emre", "Serkan",
-         "Burak", "Cem", "Deniz", "Ege", "Furkan", "Gokhan", "Hakan",
-         "Ilker", "Kaan", "Levent", "Metin", "Nihat", "Onur", "Polat",
-         "Rafet", "Sinan", "Tolga", "Ufuk", "Volkan", "Yigit", "Zeki",
-         "Baris", "Caner", "Dogan", "Erdem", "Ferhat", "Galip", "Haluk",
-         "Ismet"]
+# ======================================================================
+# SOZLUKLER
+# (jeton, TURKCE YAZIM) -- model ASCII jetonu gorur, insan dogru yazimi.
+# Turkce yazim YALNIZ `yuzey()` icin; grafta ve sozlukte yeri YOK.
+# ======================================================================
+ERKEK = [
+    ("Ahmet", "Ahmet"), ("Mehmet", "Mehmet"), ("Mustafa", "Mustafa"),
+    ("Ali", "Ali"), ("Huseyin", "Hüseyin"), ("Hasan", "Hasan"),
+    ("Ibrahim", "İbrahim"), ("Osman", "Osman"), ("Yusuf", "Yusuf"),
+    ("Murat", "Murat"), ("Omer", "Ömer"), ("Suleyman", "Süleyman"),
+    ("Halil", "Halil"), ("Ismail", "İsmail"), ("Fatih", "Fatih"),
+    ("Kemal", "Kemal"), ("Salih", "Salih"), ("Emre", "Emre"),
+    ("Burak", "Burak"), ("Cem", "Cem"), ("Furkan", "Furkan"),
+    ("Gokhan", "Gökhan"), ("Hakan", "Hakan"), ("Kaan", "Kaan"),
+    ("Levent", "Levent"), ("Onur", "Onur"), ("Sinan", "Sinan"),
+    ("Tolga", "Tolga"), ("Volkan", "Volkan"), ("Yigit", "Yiğit"),
+    ("Baris", "Barış"), ("Caner", "Caner"),
+]
+KADIN = [
+    ("Ayse", "Ayşe"), ("Fatma", "Fatma"), ("Emine", "Emine"),
+    ("Hatice", "Hatice"), ("Zeynep", "Zeynep"), ("Elif", "Elif"),
+    ("Meryem", "Meryem"), ("Zehra", "Zehra"), ("Hulya", "Hülya"),
+    ("Melek", "Melek"), ("Ozlem", "Özlem"), ("Yasemin", "Yasemin"),
+    ("Sevim", "Sevim"), ("Gulay", "Gülay"), ("Filiz", "Filiz"),
+    ("Derya", "Derya"), ("Ebru", "Ebru"), ("Gamze", "Gamze"),
+    ("Hande", "Hande"), ("Irem", "İrem"), ("Kubra", "Kübra"),
+    ("Leyla", "Leyla"), ("Merve", "Merve"), ("Nazli", "Nazlı"),
+    ("Oya", "Oya"), ("Pinar", "Pınar"), ("Rabia", "Rabia"),
+    ("Selin", "Selin"), ("Tugce", "Tuğçe"), ("Yagmur", "Yağmur"),
+    ("Asli", "Aslı"), ("Ceren", "Ceren"),
+]
+SOYAD = [
+    ("Yilmaz", "Yılmaz"), ("Kaya", "Kaya"), ("Demir", "Demir"),
+    ("Sahin", "Şahin"), ("Celik", "Çelik"), ("Yildiz", "Yıldız"),
+    ("Aydin", "Aydın"), ("Ozturk", "Öztürk"), ("Arslan", "Arslan"),
+    ("Dogan", "Doğan"),
+]
 
-KADIN = ["Ayse", "Fatma", "Emine", "Hatice", "Zeynep", "Elif", "Meryem",
-         "Sultan", "Zehra", "Hulya", "Melek", "Ozlem", "Yasemin", "Nurten",
-         "Sevim", "Gulay", "Filiz", "Derya", "Ebru", "Funda", "Gamze",
-         "Hande", "Irem", "Jale", "Kubra", "Leyla", "Merve", "Nazli", "Oya",
-         "Pinar", "Rabia", "Selin", "Tugce", "Ulku", "Vildan", "Yagmur",
-         "Zuhal", "Asli", "Berna", "Ceren", "Damla", "Esra", "Feride",
-         "Gonca", "Hilal", "Ipek", "Kader", "Lale", "Mine", "Nehir"]
+SEHIR_AD = [
+    ("Adana", "Adana"), ("Ankara", "Ankara"), ("Antalya", "Antalya"),
+    ("Aydin", "Aydın"), ("Balikesir", "Balıkesir"), ("Bursa", "Bursa"),
+    ("Canakkale", "Çanakkale"), ("Denizli", "Denizli"),
+    ("Diyarbakir", "Diyarbakır"), ("Edirne", "Edirne"), ("Elazig", "Elazığ"),
+    ("Erzurum", "Erzurum"), ("Eskisehir", "Eskişehir"),
+    ("Gaziantep", "Gaziantep"), ("Giresun", "Giresun"), ("Hatay", "Hatay"),
+    ("Isparta", "Isparta"), ("Istanbul", "İstanbul"), ("Izmir", "İzmir"),
+    ("Kars", "Kars"), ("Kastamonu", "Kastamonu"), ("Kayseri", "Kayseri"),
+    ("Kocaeli", "Kocaeli"), ("Konya", "Konya"), ("Kutahya", "Kütahya"),
+    ("Malatya", "Malatya"), ("Manisa", "Manisa"), ("Mardin", "Mardin"),
+    ("Mersin", "Mersin"), ("Mugla", "Muğla"), ("Ordu", "Ordu"),
+    ("Rize", "Rize"), ("Sakarya", "Sakarya"), ("Samsun", "Samsun"),
+    ("Sivas", "Sivas"), ("Tekirdag", "Tekirdağ"), ("Trabzon", "Trabzon"),
+    ("Urfa", "Urfa"), ("Van", "Van"), ("Zonguldak", "Zonguldak"),
+]
+# 40 sehir: `komsusu` SIMETRIK eslesme, tek sayi olsaydi bir sehir
+# eslesmeden kalir ve komsulugu tek yonlu olurdu.
 
-SOYAD = ["Yilmaz", "Kaya", "Demir", "Sahin", "Celik", "Yildiz", "Aydin"]
+BOLGE_AD = [
+    ("Marmara", "Marmara"), ("Ege", "Ege"), ("Akdeniz", "Akdeniz"),
+    ("Karadeniz", "Karadeniz"), ("Icanadolu", "İç Anadolu"),
+    ("Doguanadolu", "Doğu Anadolu"), ("Guneydogu", "Güneydoğu Anadolu"),
+]
 
-IL = ["Adana", "Adiyaman", "Afyon", "Agri", "Amasya", "Ankara", "Antalya",
-      "Artvin", "Aydin", "Balikesir", "Bilecik", "Bingol", "Bitlis", "Bolu",
-      "Burdur", "Bursa", "Canakkale", "Cankiri", "Corum", "Denizli",
-      "Diyarbakir", "Edirne", "Elazig", "Erzincan", "Erzurum", "Eskisehir",
-      "Gaziantep", "Giresun", "Gumushane", "Hakkari", "Hatay", "Isparta",
-      "Mersin", "Istanbul", "Izmir", "Kars", "Kastamonu", "Kayseri",
-      "Kirklareli", "Kirsehir", "Kocaeli", "Konya", "Kutahya", "Malatya",
-      "Manisa", "Maras", "Mardin", "Mugla", "Mus", "Nevsehir", "Nigde",
-      "Ordu", "Rize", "Sakarya", "Samsun", "Siirt", "Sinop", "Sivas",
-      "Tekirdag", "Tokat", "Trabzon", "Tunceli", "Urfa", "Usak", "Van",
-      "Yozgat", "Zonguldak", "Aksaray", "Bayburt", "Karaman", "Kirikkale",
-      "Batman", "Sirnak", "Bartin", "Ardahan", "Igdir", "Yalova", "Karabuk",
-      "Kilis", "Osmaniye"]
-# 80 il: komsuluk SIMETRIK eslesme ile kuruluyor, tek sayi olsaydi bir il
-# eslesmeden kalir ve o ilin komsulugu tek yonlu olurdu.
+# SEHIR -> BOLGE: GERCEK cografya. Rastgele dagitilmiyordu ve ilk olcum
+# "Gaziantep'in bolgesi Marmara Bolgesi'dir" uretti -- cumle Turkce
+# olarak kusursuz ama DUNYA hakkinda yanlis, yani tam da kullanicinin
+# istemedigi turden. Bu tek kenar TAM OLARAK belirli oldugu icin
+# uydurmaya gerek YOK.
+#
+# !! `komsusu` ve UNIVERSITE -> SEHIR hala RASTGELE, ve bu KASITLI:
+#    - gercek komsuluk kullanilsaydi komsular cogunlukla AYNI bolgede
+#      olur, "komsusunun bolgesi" = "bolgesi" cikar ve o zincirler
+#      turetilebilir olup SINAVDAN DUSERDI.
+#    - universite -> sehir BIREBIR (her sehrin bir universitesi olsun
+#      diye). Gercek dagilimda universiteler Istanbul/Ankara'da yigilir
+#      ve sehirlerin yarisi bos kalirdi.
+SEHIR_BOLGE = {
+    "Balikesir": "Marmara", "Bursa": "Marmara", "Canakkale": "Marmara",
+    "Edirne": "Marmara", "Istanbul": "Marmara", "Kocaeli": "Marmara",
+    "Sakarya": "Marmara", "Tekirdag": "Marmara",
+    "Aydin": "Ege", "Denizli": "Ege", "Izmir": "Ege", "Kutahya": "Ege",
+    "Manisa": "Ege", "Mugla": "Ege",
+    "Adana": "Akdeniz", "Antalya": "Akdeniz", "Hatay": "Akdeniz",
+    "Isparta": "Akdeniz", "Mersin": "Akdeniz",
+    "Giresun": "Karadeniz", "Kastamonu": "Karadeniz", "Ordu": "Karadeniz",
+    "Rize": "Karadeniz", "Samsun": "Karadeniz", "Trabzon": "Karadeniz",
+    "Zonguldak": "Karadeniz",
+    "Ankara": "Icanadolu", "Eskisehir": "Icanadolu", "Kayseri": "Icanadolu",
+    "Konya": "Icanadolu", "Sivas": "Icanadolu",
+    "Elazig": "Doguanadolu", "Erzurum": "Doguanadolu", "Kars": "Doguanadolu",
+    "Malatya": "Doguanadolu", "Van": "Doguanadolu",
+    "Diyarbakir": "Guneydogu", "Gaziantep": "Guneydogu",
+    "Mardin": "Guneydogu", "Urfa": "Guneydogu",
+}
+assert set(SEHIR_BOLGE) == {a for a, _ in SEHIR_AD}, (
+    "SEHIR_BOLGE eksik/fazla -- her sehrin bolgesi YAZILI olmali")
+assert set(SEHIR_BOLGE.values()) == {a for a, _ in BOLGE_AD}, (
+    "bos bolge var -- `merkezi` kenari kurulamaz")
 
-DERS = ["Matematik", "Geometri", "Analiz", "Cebir", "Istatistik", "Olasilik",
-        "Fizik", "Mekanik", "Optik", "Termodinamik", "Elektrik", "Manyetizma",
-        "Kimya", "Organik_Kimya", "Anorganik_Kimya", "Biyokimya",
-        "Biyoloji", "Genetik", "Botanik", "Zooloji", "Ekoloji", "Anatomi",
-        "Tarih", "Cografya", "Jeoloji", "Arkeoloji", "Antropoloji",
-        "Edebiyat", "Dilbilgisi", "Kompozisyon", "Siir", "Roman",
-        "Felsefe", "Mantik", "Sosyoloji", "Psikoloji", "Ekonomi", "Hukuk",
-        "Muzik", "Resim", "Heykel", "Tiyatro", "Sinema", "Fotograf",
-        "Beden_Egitimi", "Yuzme", "Atletizm", "Basketbol", "Futbol",
-        "Ingilizce", "Almanca", "Fransizca", "Arapca", "Rusca", "Ispanyolca",
-        "Bilgisayar", "Algoritma", "Veritabani", "Ag_Sistemleri", "Robotik",
-        "Muhendislik", "Mimarlik", "Tasarim", "Elektronik", "Makine",
-        "Tip", "Eczacilik", "Hemsirelik", "Veterinerlik", "Dishekimligi",
-        "Tarim", "Bahcecilik", "Ormancilik", "Balikcilik", "Hayvancilik",
-        "Muhasebe", "Isletme", "Pazarlama", "Lojistik", "Turizm"]
+UNI_AD = [
+    ("Bogazici", "Boğaziçi"), ("Hacettepe", "Hacettepe"), ("Gazi", "Gazi"),
+    ("Selcuk", "Selçuk"), ("Dicle", "Dicle"), ("Firat", "Fırat"),
+    ("Uludag", "Uludağ"), ("Anadolu", "Anadolu"), ("Cukurova", "Çukurova"),
+    ("Ihlara", "Ihlara"), ("Atilim", "Atılım"), ("Bilkent", "Bilkent"),
+    ("Kocatepe", "Kocatepe"), ("Pamukkale", "Pamukkale"),
+    ("Harran", "Harran"), ("Inonu", "İnönü"), ("Erciyes", "Erciyes"),
+    ("Sogut", "Söğüt"), ("Trakya", "Trakya"), ("Mimarsinan", "Mimar Sinan"),
+    ("Galatasaray", "Galatasaray"), ("Yeditepe", "Yeditepe"),
+    ("Bahcesehir", "Bahçeşehir"), ("Isikli", "Işıklı"), ("Baskent", "Başkent"),
+    ("Cankaya", "Çankaya"), ("Ufuk", "Ufuk"), ("Nigde", "Niğde"),
+    ("Munzur", "Munzur"), ("Bandirma", "Bandırma"), ("Toros", "Toros"),
+    ("Alanya", "Alanya"), ("Bozok", "Bozok"), ("Artuklu", "Artuklu"),
+    ("Recepbey", "Recep Bey"), ("Hitit", "Hitit"), ("Kapadokya", "Kapadokya"),
+    ("Sanko", "Sanko"), ("Beykoz", "Beykoz"), ("Esenyurt", "Esenyurt"),
+]
 
-OKUL_TUR = ["Lisesi", "Fen_Lisesi", "Anadolu_Lisesi"]
+# NOTR onek havuzu: semt / mahalle adlari. FAKULTE ve BOLUM adlarinin ilk
+# yuvasi buradan gelir ve USTUNDEKI varligin adiyla ILGISI YOKTUR.
+SEMT = [
+    ("Cerrahpasa", "Cerrahpaşa"), ("Kandilli", "Kandilli"),
+    ("Beytepe", "Beytepe"), ("Tandogan", "Tandoğan"), ("Goztepe", "Göztepe"),
+    ("Bornova", "Bornova"), ("Cayirova", "Çayırova"), ("Alasehir", "Alaşehir"),
+    ("Karabaglar", "Karabağlar"), ("Bahcelievler", "Bahçelievler"),
+    ("Sariyer", "Sarıyer"), ("Kadikoy", "Kadıköy"),
+    ("Etimesgut", "Etimesgut"), ("Kecioren", "Keçiören"),
+    ("Balcova", "Balçova"), ("Yenimahalle", "Yenimahalle"),
+    ("Maltepe", "Maltepe"), ("Osmangazi", "Osmangazi"),
+    ("Sehitkamil", "Şehitkamil"), ("Melikgazi", "Melikgazi"),
+]
+# Havuz IKIYE BOLUNUYOR: FAKULTE onekleri ile BOLUM onekleri AYRIK.
+# Sebep OLCULDU (17 Eylul, `_denetle` yakaladi): ortak havuzda
+# `Alasehir_Elektrik_Bolumu` rastgele `Alasehir_..._Fakultesi`ye baglandi
+# ve bolumun adi kendi fakultesini SIZDIRDI. Ayrik havuzda bu YAPISAL
+# OLARAK imkansiz, reddet-tekrar dene gerekmiyor.
+SEMT_FAK = SEMT[:10]
+SEMT_BOL = SEMT[10:]
+
+FAK_ALAN = [
+    ("Muhendislik", "Mühendislik"), ("Tip", "Tıp"), ("Hukuk", "Hukuk"),
+    ("Fen", "Fen"), ("Edebiyat", "Edebiyat"), ("Iktisat", "İktisat"),
+    ("Egitim", "Eğitim"), ("Ilahiyat", "İlahiyat"), ("Ziraat", "Ziraat"),
+    ("Mimarlik", "Mimarlık"),
+]
+BOL_ALAN = [
+    ("Bilgisayar", "Bilgisayar"), ("Makine", "Makine"),
+    ("Elektrik", "Elektrik"), ("Kimya", "Kimya"), ("Fizik", "Fizik"),
+    ("Matematik", "Matematik"), ("Tarih", "Tarih"), ("Felsefe", "Felsefe"),
+    ("Isletme", "İşletme"), ("Maliye", "Maliye"), ("Biyoloji", "Biyoloji"),
+    ("Cografya", "Coğrafya"), ("Psikoloji", "Psikoloji"),
+    ("Sosyoloji", "Sosyoloji"), ("Insaat", "İnşaat"),
+    ("Endustri", "Endüstri"),
+]
+
+DERS_ONEK = [
+    ("Genel", "Genel"), ("Ileri", "İleri"), ("Temel", "Temel"),
+    ("Uygulamali", "Uygulamalı"), ("Kuramsal", "Kuramsal"),
+    ("Modern", "Modern"), ("Klasik", "Klasik"), ("Sayisal", "Sayısal"),
+    ("Deneysel", "Deneysel"), ("Karsilastirmali", "Karşılaştırmalı"),
+    ("Cagdas", "Çağdaş"), ("Niceliksel", "Niceliksel"),
+    ("Bolgesel", "Bölgesel"), ("Evrensel", "Evrensel"), ("Analitik", "Analitik"),
+]
+DERS_KOK = [
+    ("Analiz", "Analiz"), ("Cebir", "Cebir"), ("Istatistik", "İstatistik"),
+    ("Mekanik", "Mekanik"), ("Optik", "Optik"), ("Termodinamik", "Termodinamik"),
+    ("Anatomi", "Anatomi"), ("Genetik", "Genetik"), ("Ekoloji", "Ekoloji"),
+    ("Arkeoloji", "Arkeoloji"), ("Dilbilgisi", "Dilbilgisi"),
+    ("Mantik", "Mantık"), ("Ekonometri", "Ekonometri"),
+    ("Muhasebe", "Muhasebe"), ("Algoritma", "Algoritma"),
+    ("Veritabani", "Veritabanı"), ("Robotik", "Robotik"),
+    ("Malzeme", "Malzeme"), ("Akiskanlar", "Akışkanlar"),
+    ("Kartografya", "Kartografya"),
+]
+
+# TURKCE YAZIM TABLOSU -- yalniz `yuzey()` kullanir.
+TR = {a: b for lst in (ERKEK, KADIN, SOYAD, SEHIR_AD, BOLGE_AD, UNI_AD,
+                       SEMT, FAK_ALAN, BOL_ALAN, DERS_ONEK, DERS_KOK)
+      for a, b in lst}
+TR.update({"Universitesi": "Üniversitesi", "Fakultesi": "Fakültesi",
+           "Bolumu": "Bölümü", "Bolgesi": "Bölgesi"})
+
+# ILISKI jetonu KOKTUR, iyelik ekini dizideki <SI> verir:
+#     cocuk <SI>        -> "cocugu"
+#     cocuk <SI> <NIN>  -> "cocugunun"
+# (taban_05.py 808 ve 843 bunu boyle kuruyor, veri_04 de boyleydi.)
+#
+# !! ILK SURUMDE BU KACIRILDI: iliskiler "annesi", "fakultesi" diye
+# EK YAPISIK adlandirilmisti, yani dizi fiilen "annesi" + <SI> =
+# "annesisi" diyordu. Kullanici yuzeyden yakaladi (17 Eylul).
+#
+# Yuzey bicimleri TABLODA, uretilmiyor: Turkce'de unsuz yumusamasi var
+# ve kural tabanli uretim burada yanlis sonuc verir --
+#     rakip -> rakibi   (p -> b)      cocuk -> cocugu  (k -> g)
+#     sehir -> sehri    (unlu duser)
+TR_ILISKI = {
+    "bolumu": "bölümü", "fakultesi": "fakültesi", "universitesi": "üniversitesi",
+    "sehri": "şehri", "bolgesi": "bölgesi",
+    "dersi": "dersi", "merkezi": "merkezi",
+    "rektoru": "rektörü", "kurucusu": "kurucusu", "dekani": "dekanı",
+    "baskani": "başkanı", "hocasi": "hocası", "valisi": "valisi",
+    "annesi": "annesi", "babasi": "babası", "kardesi": "kardeşi",
+    "cocugu": "çocuğu", "danismani": "danışmanı", "ogrencisi": "öğrencisi",
+    "arkadasi": "arkadaşı", "memleketi": "memleketi",
+    "tezi": "tezi", "komsusu": "komşusu", "rakibi": "rakibi",
+    "onkosulu": "ön koşulu",
+}
+
+# EK BICIMLERI -- kullanici karari, 17 Eylul:
+#   *"bazilarinda 'in bazilarinda 'nin olmasi lazim, bunlar da ayri
+#    token degil mi?"*
+# Evet. Ilk surumde tamlayan eki TEK jetondu (<NIN>) ve butun
+# allomorflari orturuyordu. Turkce'de sekiz bicimi var; hangisinin
+# gelecegi ONCEKI KELIMEDEN belirli (unlu uyumu + son harf sesli mi).
+# Yani YENI BILGI TASIMIYOR -- dilin gercek yuzeyi oldugu icin var.
+EK_NIN = ("in", "ın", "un", "ün", "nin", "nın", "nun", "nün")
+EK_DIR = ("dir", "dır", "dur", "dür", "tir", "tır", "tur", "tür")
+
+
+def _ek_nin(k):
+    """`k` (TURKCE yazim) den sonra gelen tamlayan ekinin EK_NIN indeksi.
+        Yilmaz -> 'in   Kaya -> 'nin   Demir -> 'in   Ozturk -> 'un
+        kardesi -> nin  bolumu -> nun            (cins isim, kesme YOK)"""
+    i = "iıuü".index(_dort(k))
+    return i + (4 if k[-1].lower() in SESLI else 0)
+
+
+def _ek_dir(k):
+    """`k` den sonra gelen bildirme ekinin EK_DIR indeksi.
+        Yilmaz -> 'dir   Celik -> 'tir (sert unsuz)   Kocaeli -> 'dir"""
+    i = "iıuü".index(_dort(k))
+    return i + (4 if k[-1].lower() in SERT else 0)
+
+
+def ek_secim(G):
+    """Motor icin: hangi varliktan/iliskiden sonra HANGI ek bicimi gelir.
+
+    Motor Turkce bilmez -- unlu uyumunu VERI MODULU hesaplar ve
+    indeks olarak verir. `taban_05.veri_kur` bunu okur.
+
+    Ek, ismin SON gercek yuvasina takilir ("Cerrahpasa Muhendislik
+    Fakultesi'nin" -> son yuva "Fakultesi").
+    """
+    son = lambda a: TR.get(a.split("_")[-1], a.split("_")[-1])
+    return dict(
+        nin_varlik={a: _ek_nin(son(a)) for a in G["tip"]},
+        dir_varlik={a: _ek_dir(son(a)) for a in G["tip"]},
+        nin_iliski={r: _ek_nin(TR_ILISKI[r]) for r in ILISKI},
+        # "kimdir" / "neresidir" / "hangisidir" -- kimlik satiri icin.
+        dir_soru={w: _ek_dir(w) for w in set(SORU_SOZ.values())},
+    )
+
+
+# SORU SOZCUGU -- cevabin TIPINE gore. Kullanici karari, 17 Eylul:
+# dizide `?` bir KELIME degil, cumle siniri; soru sozcugu ONUN ONUNE gelir.
+#     "Hatice Yilmaz'in kardesi kim? Sinan Yilmaz'dir."
+# `yuzey()` bunu basiyor. DIZIYE eklenmesi AYRI bir karar (A duğmesi) --
+# Diziye EKLENDI (ek_kip='tr2'), t_len turetimine dahil.
+SORU_SOZ = {"KISI": "kim", "SEHIR": "neresi", "BOLGE": "neresi",
+            "UNIVERSITE": "hangisi", "FAKULTE": "hangisi",
+            "BOLUM": "hangisi", "DERS": "hangisi"}
 
 # ===================================================================== SEMA
-# iliski -> {kaynak tipi: hedef tipi}.  TIP ORTUSMESI KASITLI:
-# `sehir` ve `ders` uc ayri tipten cikiyor -> kisayolun MUMKUN oldugu
-# zincirler olusuyor. Ortusme olmazsa gomulu kontrol %100 olur ve AYIRT
-# sinifi (sinavin yapildigi yer) kalmaz.
-SEMA_TABAN = {
-    "kardes":   {"KISI": "KISI"},                 # simetrik
-    "baba":     {"KISI": "KISI"},
-    "anne":     {"KISI": "KISI"},
-    "cocuk":    {"KISI": "KISI"},                 # baba/anne TERSI
-    "ogretmen": {"KISI": "KISI"},
-    "ogrenci":  {"KISI": "KISI"},                 # ogretmen'in TERSI
-    "arkadas":  {"KISI": "KISI"},                 # simetrik
-    "okul":     {"KISI": "OKUL", "SEHIR": "OKUL"},
-    "sehir":    {"KISI": "SEHIR", "OKUL": "SEHIR"},
-    "ders":     {"KISI": "DERS", "OKUL": "DERS"},
-    "mudur":    {"OKUL": "KISI"},
-    "kurucu":   {"OKUL": "KISI"},
-    "rakip":    {"OKUL": "OKUL"},
-    "komsu":    {"SEHIR": "SEHIR"},
-    "vali":     {"SEHIR": "KISI"},
-    "hoca":     {"DERS": "KISI"},
-    "onkosul":  {"DERS": "DERS"},
+# iliski -> {kaynak tipi: hedef tipi}.
+#
+# TIP ORTUSMESI KASITLI ve SINIRLI: `bolumu` hem DERS hem KISI'den,
+# `universitesi` hem FAKULTE hem SEHIR'den, `baskani` hem BOLUM hem
+# BOLGE'den cikiyor. Ortusme olmadan kisayol TIP OLARAK hep imkansiz
+# olur, AYIRT sinifi (sinavin yapildigi yer) kalmaz.
+#
+# !! veri_04'ten FARK: ortusme UYDURULMADI. Orada `kardes` OKUL'a,
+# `kurucu` DERS'e aciliyordu ("Matematik dersinin kurucusu") -- 400 olgu
+# bu turdendi. Burada her (kaynak, iliski) cifti Turkce'de SOYLENEBILIR.
+SEMA = {
+    # --- HIYERARSI, YUKARI (cok -> bir)
+    # !! ASAGI YONLU KENAR AYRI BIR SEMBOL DEGIL -- kullanici, 17 Eylul:
+    # *"ben duzgun bir turkce ile egitim istiyorum."*  Ilk surumde
+    # `ana_fakultesi` / `ana_bolumu` / `ana_dersi` diye UC ayri iliski
+    # vardi; uclu de Turkce'de IKI KELIME ve tek jetona sikismislardi.
+    # Turkce zaten AYNI kelimeyi kullaniyor:
+    #     "bolumun fakultesi"        (asagidan yukari)
+    #     "universitenin fakultesi"  (yukaridan asagi)
+    # Ayni sembol, KAYNAK TIPI farkli. |R| 27 -> 25.
+    "bolumu":        {"DERS": "BOLUM", "KISI": "BOLUM", "FAKULTE": "BOLUM"},
+    "fakultesi":     {"BOLUM": "FAKULTE", "UNIVERSITE": "FAKULTE"},
+    "universitesi":  {"FAKULTE": "UNIVERSITE", "SEHIR": "UNIVERSITE"},
+    "sehri":         {"UNIVERSITE": "SEHIR"},
+    "bolgesi":       {"SEHIR": "BOLGE"},
+    # --- HIYERARSI, ASAGI ("amiral" kenar -- phi'yi buradan aliyoruz)
+    "dersi":         {"BOLUM": "DERS"},
+    "merkezi":       {"BOLGE": "SEHIR"},
+    # --- GOREV (X -> KISI)
+    "rektoru":       {"UNIVERSITE": "KISI"},
+    "kurucusu":      {"UNIVERSITE": "KISI"},
+    "dekani":        {"FAKULTE": "KISI"},
+    "baskani":       {"BOLUM": "KISI", "BOLGE": "KISI"},
+    "hocasi":        {"DERS": "KISI"},
+    "valisi":        {"SEHIR": "KISI"},
+    # --- AILE (GERCEK soy agaci -- cinsiyet ve kusak tutarli)
+    "annesi":        {"KISI": "KISI"},
+    "babasi":        {"KISI": "KISI"},
+    "kardesi":       {"KISI": "KISI"},     # simetrik, TERS cinsiyet
+    "cocugu":        {"KISI": "KISI"},     # annesi/babasi TERSI
+    # --- KISININ GERI KALANI
+    "danismani":     {"KISI": "KISI"},
+    "ogrencisi":     {"KISI": "KISI"},     # danismani TERSI
+    "arkadasi":  {"KISI": "KISI"},     # simetrik
+    "memleketi":    {"KISI": "SEHIR"},
+    "tezi":    {"KISI": "DERS"},
+    # --- YATAY
+    "komsusu":       {"SEHIR": "SEHIR"},   # simetrik
+    "rakibi":        {"UNIVERSITE": "UNIVERSITE"},   # simetrik
+    "onkosulu":      {"DERS": "DERS"},
 }
-ILISKI = list(SEMA_TABAN)
-TIPLER = ["KISI", "OKUL", "SEHIR", "DERS"]
+ILISKI = list(SEMA)
+TIPLER = ["KISI", "UNIVERSITE", "FAKULTE", "BOLUM", "DERS", "SEHIR", "BOLGE"]
 
-# Anlamca BIRBIRINI GEREKTIREN cifler: (r1, r2) -> r_esdeger
-# "kardesinin babasi" = "babasi".  Bunlar AYNI sinifina duser; burada
-# listelenmesinin sebebi belgede SAYILABILMESI.
-GEREKTIRIR = {("kardes", "baba"): "baba", ("kardes", "anne"): "anne"}
-BLOK = 100         # bir SOYADI blogunda kac kisi (50 erkek + 50 kadin)
+# Anlamca BIRBIRINI GEREKTIREN ciftler: (r1, r2) -> r_esdeger.
+# "kardesinin annesi" = "annesi", cunku kardesler ayni ebeveynden.
+# Bunlar AYNI sinifina duser ve sinav disi kalir; burada listelenmelerinin
+# sebebi BELGEDE SAYILABILMELERI.
+GEREKTIRIR = {
+    ("kardesi", "annesi"): "annesi",
+    ("kardesi", "babasi"): "babasi",
+    ("annesi", "cocugu"): "kardesi",   # ya KENDISI (DONUS) ya kardes
+    ("babasi", "cocugu"): "kardesi",
+}
 
-# 14 EYLUL -- SABIT KAYDIRMALAR KALDIRILDI.
-# Ilk surumde kardes i<->i+1, arkadas i<->i+350, ogretmen i->i+211 idi.
-# Tutarliydi ve 23 kontrolun hepsi geciyordu, ama GOREVI COZULMUS KILIYORDU:
-# iki kaydirmanin BILESKESI yine bir kaydirmadir, yani "kardes ogretmen"
-# = "+212" demek. Model bunu 848 egitim varligindan KURAL olarak ogrenip
-# hic gormedigi varliga uyguluyordu -- kopruyu kullanmadan.
-#   OLCULDU (kosu iptal, belge/bulgu/egri_G_iptal_20260914.json):
-#     ENT-AYIRT  r1,r2 IKISI DE kaydirma %58  ->  ent 0.882
-#     ENT-YOK    r1,r2 IKISI DE kaydirma  %0  ->  ent 0.070
-#   D3.3'un rastgele grafinda ayni olcu 0.009 idi. Yani ENT-YOK dogru
-#   zorlugu olcuyordu, ENT-AYIRT aritmetikle cozulmustu.
-# Simdi HER esleme RASTGELE. Yapi kisitlari (kardesler ayni ebeveyn, ters
-# ciftler, soyadi kalitimi, simetri) DURUYOR -- onlar aritmetik degil.
+# TERS CIFT ADAYLARI: "X -r1-> Y, sonra Y -r2-> ?  ... X'e DONER MI".
+# `graf_05` bunlarin oranini olcer. Liste BURADA duruyor cunku SEMADAN
+# TURETILEMEZ: hangi ciftin geri donmesi BEKLENDIGI anlamsal bir iddia,
+# yapisal degil. Araca gomulu kalsaydi (veri_04'te oyleydi) veri
+# degisince arac SESSIZCE bos tablo basardi -- fiilen oldu, 17 Eylul:
+# graf_05 `kardes` arayip KeyError verdi.
+TERS_ADAY = [
+    ("annesi", "cocugu"), ("babasi", "cocugu"),
+    ("cocugu", "annesi"), ("cocugu", "babasi"),
+    ("danismani", "ogrencisi"), ("ogrencisi", "danismani"),
+    ("kardesi", "kardesi"), ("arkadasi", "arkadasi"),
+    ("komsusu", "komsusu"), ("rakibi", "rakibi"),
+    ("universitesi", "fakultesi"), ("fakultesi", "universitesi"),
+    ("fakultesi", "bolumu"), ("bolumu", "fakultesi"),
+    ("bolumu", "dersi"), ("dersi", "bolumu"),
+    ("bolgesi", "merkezi"), ("merkezi", "bolgesi"),
+]
+assert all(a in SEMA and b in SEMA for a, b in TERS_ADAY), "TERS_ADAY semada YOK"
+
+# Bir kisinin cocuklari BU iliskilerin kayitlarindan turetilir.
+EBEVEYN = ("annesi", "babasi")
+
+# --- OLCEK -------------------------------------------------------------
+# Kullanici onayi, 17 Eylul: 480 kisi / 300 ders / 160 bolum / 60 fakulte
+# / 40 universite / 40 sehir / 7 bolge.
+BLOK = 48          # bir SOYADI blogunda kac kisi (3 kusak x 16)
+KUSAK_EN = 16      # bir kusakta kac kisi (8 erkek + 8 kadin)
+N_BLOK = 10        # kac soyadi blogu   -> 480 kisi
+N_DERS, N_BOLUM, N_FAKULTE, N_UNI = 300, 160, 60, 40
 
 
 def _esle(rng, idx):
@@ -164,417 +479,398 @@ def _esle(rng, idx):
 def _devirsiz(rng, idx):
     """Sabit noktasiz birebir esleme (derangement). Tersi de dondurulur."""
     idx = list(idx)
-    for _ in range(1000):
+    for _ in range(2000):
         p = list(rng.permutation(idx))
         if all(x != y for x, y in zip(idx, p)):
             return dict(zip(idx, p)), dict(zip(p, idx))
     raise RuntimeError("devirsiz esleme bulunamadi")
 
 
-N_KISI, N_OKUL = 700, 200
-
-
-def _taban_kur(tohum=0, olcek=None):
-    """`olcek=None` -> BUGUNKU graf, BIREBIR. Baska bir sey verilirse
-    havuzlar buyur/kucultulur ve graf olceklenir.
-
-    ```
-    kur(0)                                  # 1060 varlik,  8400 olgu
-    kur(0, veri_okul2.OLCEK2)               # 2120 varlik, 16800 olgu
-    ```
-
-    Havuzlar MODUL GLOBALI olarak duruyor; burada YEREL isme baglaniyor.
-    `globals()` ile okunmasinin sebebi teknik: ayni ismi yerel olarak
-    atayinca Python butun govdeyi yerel sayar, yani asagidaki 130 satirin
-    HICBIRINE dokunmadan olcek degistirilebiliyor. Alternatifi 9 ayri
-    yerde arama-degistirme yapmakti; biri atlanirsa graf SESSIZCE karisik
-    olcekte cikardi.
-
-    SABIT KALAN: iliski semasi, yapisal kisitlar, BLOK=100, tur sayilari.
-    Yani bu bir OLCEK dugmesidir, GOREV dugmesi degil.
-    """
-    o = olcek or {}
-    N_KISI = o.get("n_kisi", globals()["N_KISI"])
-    N_OKUL = o.get("n_okul", globals()["N_OKUL"])
-    SOYAD = o.get("soyad", globals()["SOYAD"])
-    IL = o.get("il", globals()["IL"])
-    DERS = o.get("ders", globals()["DERS"])
-    assert N_KISI % BLOK == 0, f"N_KISI ({N_KISI}) BLOK'a ({BLOK}) bolunmeli"
-    assert N_KISI <= 2 * 50 * len(SOYAD), (
-        f"N_KISI={N_KISI} isim havuzunu asiyor: 2*50*{len(SOYAD)} soyad "
-        f"= {2 * 50 * len(SOYAD)}. SOYAD listesini buyut.")
-    assert N_OKUL <= len(IL) * len(OKUL_TUR), (
-        f"N_OKUL={N_OKUL} > {len(IL)}*{len(OKUL_TUR)}={len(IL)*len(OKUL_TUR)}. "
-        f"IL listesini ya da OKUL_TUR'u buyut.")
-    assert len(IL) % 2 == 0, "komsu esitlemesi icin IL sayisi CIFT olmali"
-
-    rng = np.random.RandomState(tohum)
-
-    # cift indeks ERKEK, tek indeks KADIN; her 100 kisi bir SOYADI blogu.
-    kisi = [f"{(ERKEK if i % 2 == 0 else KADIN)[(i // 2) % 50]}"
-            f"_{SOYAD[(i // 2) // 50]}" for i in range(N_KISI)]
-    assert len(set(kisi)) == N_KISI, "kisi adi tekrari"
-    sehir, ders = list(IL), list(DERS)
-    okul = [f"{sehir[i % len(sehir)]}_{OKUL_TUR[(i // len(sehir)) % 3]}"
-            for i in range(N_OKUL)]
-    assert len(set(okul)) == N_OKUL, "okul adi tekrari"
-
-    ad = {"KISI": kisi, "OKUL": okul, "SEHIR": sehir, "DERS": ders}
-    hepsi = [a for t in TIPLER for a in ad[t]]
-    assert len(hepsi) == len(set(hepsi)),         "TEKRAR EDEN AD: " + str([a for a in set(hepsi) if hepsi.count(a) > 1])
-
-    olgu = {}
-    n = N_KISI
-
-    # --- AILE: her SOYADI blogu KENDI ICINDE, hepsi RASTGELE --------------
-    # Kisitlar (aritmetik degil, YAPISAL):
-    #   kardesler ayni anne-babayi paylasir
-    #   baba erkek, anne kadin, ikisi de AYNI soyadi blogundan
-    #   kimse kendi cocugunun ebeveyni degil; anne ile baba KARDES degil
-    #   her erkek TAM 1 ciftin babasi, her kadin TAM 1 ciftin annesi
-    #     -> `cocuk` (baba/anne tersi) her kiside TANIMLI
-    for b0 in range(n // BLOK):
-        blok = list(range(b0 * BLOK, (b0 + 1) * BLOK))
-        erk = [i for i in blok if i % 2 == 0]
-        kad = [i for i in blok if i % 2 == 1]
-        for deneme in range(2000):
-            kp = list(rng.permutation(blok))
-            cift = [(kp[2 * k], kp[2 * k + 1]) for k in range(len(blok) // 2)]
-            uye = {x: j for j, c in enumerate(cift) for x in c}
-            ba = list(rng.permutation(erk))      # cift j'nin babasi ba[j]
-            an = list(rng.permutation(kad))      # cift j'nin annesi an[j]
-            if not all(uye[ba[j]] != j and uye[an[j]] != j       # kendi cocugu degil
-                       and uye[ba[j]] != uye[an[j]]             # es ile kardes degil
-                       for j in range(len(cift))):
-                continue
-            # RASTGELE esleme KISA DONGU uretebiliyor; kaydirmali surumde
-            # bunlar yapisal olarak imkansizdi, simdi ACIKCA elenmeli.
-            # Olculdu: ilk denemede 10 kisinin babasi ayni zamanda cocugu,
-            # 6 kisinin dedesi kendisiydi.
-            _ba = {x: ba[uye[x]] for x in blok}          # x -> babasi
-            _an = {x: an[uye[x]] for x in blok}          # x -> annesi
-            _co = {}
-            for j2, (x2, y2) in enumerate(cift):
-                _co[ba[j2]] = x2
-                _co[an[j2]] = x2
-            if all(_ba[x] != _co[x] and _an[x] != _co[x]         # baba/anne = cocuk
-                   and _ba[_ba[x]] != x and _an[_an[x]] != x     # dede/nine = kendisi
-                   and _co[_co[x]] != x                          # torun = kendisi
-                   for x in blok):
-                break
-        else:
-            raise RuntimeError(f"blok {b0}: aile kurulamadi")
-        for j, (x, y) in enumerate(cift):
-            olgu[(kisi[x], "kardes")] = kisi[y]
-            olgu[(kisi[y], "kardes")] = kisi[x]
-            for c in (x, y):
-                olgu[(kisi[c], "baba")] = kisi[ba[j]]
-                olgu[(kisi[c], "anne")] = kisi[an[j]]
-            olgu[(kisi[ba[j]], "cocuk")] = kisi[x]     # kayitli cocuk: ciftin ILKI
-            olgu[(kisi[an[j]], "cocuk")] = kisi[x]
-    assert all((c, "cocuk") in olgu for c in kisi), "cocuk eksik"
-
-    # --- ogretmen / ogrenci: RASTGELE devirsiz esleme, tersi KESIN --------
-    ogr, ters = _devirsiz(rng, range(n))
-    for i, c in enumerate(kisi):
-        olgu[(c, "ogretmen")] = kisi[ogr[i]]
-        olgu[(c, "ogrenci")] = kisi[ters[i]]
-
-    # --- arkadas: RASTGELE simetrik esleme, kardesten FARKLI --------------
-    for _ in range(200):
-        ark = _esle(rng, range(n))
-        if all(kisi[ark[i]] != olgu[(kisi[i], "kardes")] for i in range(n)):
-            break
-    else:
-        raise RuntimeError("arkadas eslemesi kurulamadi")
-    for i, c in enumerate(kisi):
-        olgu[(c, "arkadas")] = kisi[ark[i]]
-
-    # --- okul / sehir / ders ---------------------------------------------
-    # Kisinin sehri, OKULUNUN sehrinden BAGIMSIZ. Bagimli olsaydi
-    # "X okul sehir" = "X sehir" olurdu ve zincir olculemezdi.
-    for i, c in enumerate(kisi):
-        olgu[(c, "okul")] = okul[int(rng.randint(N_OKUL))]
-        olgu[(c, "sehir")] = sehir[int(rng.randint(len(sehir)))]
-        olgu[(c, "ders")] = ders[int(rng.randint(len(ders)))]
-    rak = _esle(rng, range(N_OKUL))
-    for i, o in enumerate(okul):
-        olgu[(o, "mudur")] = kisi[int(rng.randint(n))]
-        olgu[(o, "kurucu")] = kisi[int(rng.randint(n))]
-        olgu[(o, "sehir")] = sehir[i % len(sehir)]      # okul ADINDAKI il
-        olgu[(o, "rakip")] = okul[rak[i]]
-        olgu[(o, "ders")] = ders[int(rng.randint(len(ders)))]
-    kom = _esle(rng, range(len(sehir)))
-    for i, s_ in enumerate(sehir):
-        olgu[(s_, "komsu")] = sehir[kom[i]]
-        olgu[(s_, "vali")] = kisi[int(rng.randint(n))]
-        olgu[(s_, "okul")] = okul[int(rng.randint(N_OKUL))]
-    onk, _t = _devirsiz(rng, range(len(ders)))
-    for i, d in enumerate(ders):
-        olgu[(d, "hoca")] = kisi[int(rng.randint(n))]
-        olgu[(d, "onkosul")] = ders[onk[i]]
-
-    # --- DENETIMLER -------------------------------------------------------
-    _soy = lambda a: a.rsplit("_", 1)[1]
-    for c in kisi:
-        for r in ("kardes", "baba", "anne", "cocuk"):
-            assert _soy(olgu[(c, r)]) == _soy(c),                 f"soyadi kalitimi bozuk: {c} {r} {olgu[(c, r)]}"
-        assert olgu[(olgu[(c, "baba")], "kardes")] != olgu[(c, "anne")],             f"anne-baba kardes cikti: {c}"
-    for grup, r in ((sehir, "komsu"), (okul, "rakip"),
-                    (kisi, "kardes"), (kisi, "arkadas")):
-        bozuk = [x for x in grup if olgu[(olgu[(x, r)], r)] != x]
-        assert not bozuk, f"{r} simetrik degil: {bozuk[:3]}"
-    kendi = [(e, r) for (e, r), h in olgu.items() if h == e]
-    assert not kendi, f"kendine giden olgu: {kendi[:5]}"
-
-    ozel = ["<pad>", "<soru>", "?", "<son>"]
-    sozluk = ozel + ILISKI + hepsi
-    return dict(ad=ad, n={t: len(ad[t]) for t in TIPLER}, sozluk=sozluk,
-                kim={s: i for i, s in enumerate(sozluk)},
-                tip={a: t for t in TIPLER for a in ad[t]},
-                olgu=olgu, sema=SEMA_TABAN, iliski=ILISKI)
-
-
-
-def zincirler(G):
-    """Tip olarak gecerli 2 adimli zincirler, DORT SINIFA ayrilmis.
-    Siniflarin tanimi `veri_gercek.zincirler` ile AYNI -- iki veri kumesi
-    ayni olcum hattindan gecsin diye."""
-    out = []
-    for (e, r1), b in G["olgu"].items():
-        for r2 in G["iliski"]:
-            if r2 == r1:
-                continue
-            if G["tip"][b] not in G["sema"][r2]:
-                continue
-            cev = G["olgu"][(b, r2)]
-            ks = G["olgu"].get((e, r2))
-            sinif = ("DONUS" if cev == e else
-                     "YOK" if ks is None else
-                     "AYNI" if ks == cev else "AYIRT")
-            out.append((e, r1, r2, b, cev, ks, sinif))
-    return out
-
-
-def yaz(G, z, f=print):
-    S = {k: [x for x in z if x[6] == k]
-         for k in ("AYIRT", "YOK", "AYNI", "DONUS")}
-    f("=" * 76)
-    f("OKUL / AILE DUNYASI")
-    f("=" * 76)
-    f("  tip buyuklukleri : " + "  ".join(f"{k}={v}" for k, v in G["n"].items()))
-    f(f"  SOZLUK           : {len(G['sozluk'])} token  "
-      f"({len(G['iliski'])} iliski + {sum(G['n'].values())} varlik + 4 ozel)")
-    f(f"  ATOMIK OLGU      : {len(G['olgu'])}")
-    f(f"  2-ADIMLI ZINCIR  : {len(z)}")
-    f(f"  phi TAVANI       : {len(z)/len(G['olgu']):.2f}")
-    for k, ac in (("AYIRT", "kisayol VAR, cevaptan FARKLI -> SINAV burada"),
-                  ("YOK",   "kisayol IMKANSIZ           -> gomulu kontrol"),
-                  ("AYNI",  "kisayol = cevap            -> sinavda KULLANILMAZ"),
-                  ("DONUS", "cevap = sorulan varlik     -> sinavda KULLANILMAZ")):
-        f(f"     {k:6s} {len(S[k]):6d}  ({100*len(S[k])/len(z):2.0f}%)   {ac}")
-
-    f("\n--- SEMA ---")
-    for r, m in G["sema"].items():
-        f(f"   {r:10s} " + ",  ".join(f"{k}->{v}" for k, v in m.items()))
-
-    f("\n--- BIR AILE ---")
-    for c in G["ad"]["KISI"][:4]:
-        for r in ("kardes", "baba", "anne", "cocuk", "ogretmen", "ogrenci",
-                  "arkadas", "okul", "sehir", "ders"):
-            f(f"   {c:18s} {r:9s} {G['olgu'][(c, r)]}")
-        f("")
-
-    f("--- ANLAMCA GEREKTIREN CIFTLER (AYNI olmak ZORUNDA) ---")
-    for (r1, r2), esd in GEREKTIRIR.items():
-        ad_ = [x for x in z if x[1] == r1 and x[2] == r2]
-        kac = sum(1 for x in ad_ if x[6] == "AYNI")
-        f(f"   '{r1} {r2}' = '{esd}'   {kac}/{len(ad_)} zincir AYNI cikti")
-
-    f("\n--- TERS CIFTLER (DONUS uretir, ama hepsi degil) ---")
-    for r1, r2 in (("baba", "cocuk"), ("anne", "cocuk"), ("cocuk", "baba"),
-                   ("ogretmen", "ogrenci"), ("ogrenci", "ogretmen")):
-        ad_ = [x for x in z if x[1] == r1 and x[2] == r2]
-        dn = sum(1 for x in ad_ if x[6] == "DONUS")
-        f(f"   {r1:9s} {r2:9s}  {dn}/{len(ad_)} DONUS, "
-          f"{len(ad_)-dn} gercek kompozisyon")
-
-    f("\n--- ZINCIR TURLERI ---")
-    tur = {}
-    for e, r1, r2, b, a, ks, s in z:
-        d = tur.setdefault((r1, r2),
-                           {"AYIRT": 0, "YOK": 0, "AYNI": 0, "DONUS": 0})
-        d[s] += 1
-    f(f"   {'r1':10s} {'r2':10s} {'AYIRT':>7s} {'YOK':>7s} {'AYNI':>7s}"
-      f" {'DONUS':>7s}")
-    for (r1, r2), d in sorted(tur.items()):
-        f(f"   {r1:10s} {r2:10s} {d['AYIRT']:7d} {d['YOK']:7d} {d['AYNI']:7d}"
-          f" {d['DONUS']:7d}")
-
-    ornek = {"AYIRT": "model kisayola saparsa YAKALARIZ",
-             "YOK": "kisayol imkansiz (tip izin vermiyor)",
-             "AYNI": "kisayol dogru cevabi veriyor -- sinavda kullanilamaz",
-             "DONUS": "cevap sorulan varligin kendisi -- kopyalamak yetiyor"}
-    for k in ("AYIRT", "YOK", "AYNI", "DONUS"):
-        f(f"\n--- ZINCIR / {k}  ({ornek[k]}) ---")
-        for e, r1, r2, b, a, ks, _s in S[k][:8]:
-            f(f"   {e} {r1} {r2} ?   ->  {a}")
-            f(f"       kopru: {b:20s} |  KISAYOL '{e} {r2}' = {ks or 'YOK'}")
-
-    f("\n--- TOKEN DIZILIMI (her varlik TEK token) ---")
-    for e, r1, r2, b, a, ks, _s in S["AYIRT"][:3]:
-        d = ["<soru>", e, r1, r2, "?", a, "<son>"]
-        f(f"   {' '.join(d)}")
-        f(f"       -> {[G['kim'][t] for t in d]}")
-
-
-# --- veri_okul3: SEKIZ ALAN ACILIMININ SEMASI --------------------------
-# Eski girdiler AYNEN; yalniz yeni (tip -> tip) satirlari eklendi.
-#
-# !! KUSUR ve DUZELTMESI (16 Eylul hakemligi). Ilk birlestirmede TEK bir
-# `SEMA` vardi: taban semanin USTUNE yaziliyordu. Sonuc grafi dogruydu
-# (derin karsilastirma gecti) ama TABAN GRAF kendi basina TUTARSIZ
-# kaliyordu -- `_taban_kur()` semasi henuz olgusu OLMAYAN tip ciftleri
-# vaat ediyordu:
-#
-#     ORIJINAL  VO.zincirler(VO.kur(0))       -> 59.140 zincir
-#     ILK KOPYA zincirler(_taban_kur(0))      -> KeyError ('...', 'rakip')
-#
-# Bugun kimse `_taban_kur`u tek basina cagirmiyor, ama bu bir MAYINDI.
-# Orijinaldeki gibi IKI AYRI sozluk tutuluyor.
-SEMA = {r: dict(m) for r, m in SEMA_TABAN.items()}
-SEMA["kardes"].update({"OKUL": "OKUL", "SEHIR": "SEHIR"})
-SEMA["komsu"].update({"KISI": "KISI", "OKUL": "OKUL"})
-SEMA["rakip"].update({"KISI": "KISI", "SEHIR": "SEHIR"})
-SEMA["kurucu"].update({"SEHIR": "KISI", "DERS": "KISI"})
-SEMA["hoca"].update({"OKUL": "KISI"})
-SEMA["okul"].update({"DERS": "OKUL"})
-SEMA["sehir"].update({"DERS": "SEHIR"})
-SEMA["ders"].update({"SEHIR": "DERS"})
-
-assert set(SEMA) == set(SEMA_TABAN), "YENI SEMBOL EKLENMIS -- arama uzayi bozulur"
-assert len(ILISKI) == 17, f"|R| 17 olmali: {len(ILISKI)}"
-
-
-# ======================================================================
-# veri_okul3 — SEKIZ ALAN ACILIMI
-# ======================================================================
-def _farkli_esle(rng, idx, yasak, ad, deneme=400):
-    """Simetrik esleme kur, ama `yasak` sozluklerinin HICBIRIYLE ayni
-    olmasin. `arkadas`in veri_okul.py'deki kurulusunun aynisi -- iki
-    iliski ayni eslemeyse model birini digerinden OKUR."""
+def _farkli_esle(rng, idx, yasak, ad, deneme=600):
+    """Simetrik esleme kur, ama `yasak` eslemelerinin HICBIRIYLE ayni
+    olmasin. Iki iliski ayni eslemeyse model birini digerinden OKUR."""
     idx = list(idx)
     for _ in range(deneme):
         e = _esle(rng, idx)
-        if all(all(e[i] != y[i] for i in idx) for y in yasak):
+        if all(all(e.get(i) != y.get(i) for i in idx) for y in yasak):
             return e
-    raise RuntimeError(f"{ad}: yasaklardan farkli esleme kurulamadi")
+    raise RuntimeError(f"{ad}: farkli simetrik esleme bulunamadi")
 
 
+# ======================================================================
+# GRAF
+# ======================================================================
+def _kur_hiyerarsi(rng, ad, olgu):
+    """BOLGE -> SEHIR -> UNIVERSITE -> FAKULTE -> BOLUM -> DERS.
 
-def genislet(G, tohum=0):
-    """Verilen grafa SEKIZ ALAN ACILIMINI ekler. OLCEKTEN BAGIMSIZ --
-    `veri_okul2` (2x) ile de `veri_okul` (1x) ile de calisir; phi
-    OLCEK-DEGISMEZ oldugu icin tavan iki durumda da 9,57.
+    Yukari kenarlar COK->BIR (her fakultenin bir universitesi), asagi
+    kenarlar BIR->BIR ("amiral"): universitenin ana fakultesi, fakultenin
+    ana bolumu, bolumun ana dersi, bolgenin merkezi.
+    """
+    bolge = [f"{a}_Bolgesi" for a, _ in BOLGE_AD]
+    sehir = [a for a, _ in SEHIR_AD]
+    uni = [f"{a}_Universitesi" for a, _ in UNI_AD][:N_UNI]
 
-    Eski olgular BIREBIR korunur: gelen sozluge yalnizca EKLEME
-    yapilir. Yeni olgular ayri bir RNG akisindan (tohum + 7777) gelir
-    ki taban grafin akisi kaymasin."""
-    ad, olgu = G["ad"], G["olgu"]
-    kisi, okul, sehir, ders = ad["KISI"], ad["OKUL"], ad["SEHIR"], ad["DERS"]
-    for t, v in (("KISI", kisi), ("OKUL", okul), ("SEHIR", sehir), ("DERS", ders)):
-        assert len(v) % 2 == 0, f"{t} sayisi ({len(v)}) CIFT olmali (_esle)"
-    eski = dict(olgu)                  # sonunda DEGISMEDIGI sinanir
-    rng = np.random.RandomState(tohum + 7777)
+    # --- FAKULTE: onek SEMT'ten, universitenin adiyla ILGISIZ (NOTR).
+    fak = []
+    for i in range(N_FAKULTE):
+        on = SEMT_FAK[i % len(SEMT_FAK)][0]
+        al = FAK_ALAN[(i // len(SEMT_FAK)) % len(FAK_ALAN)][0]
+        fak.append(f"{on}_{al}_Fakultesi")
+    bol = []
+    for i in range(N_BOLUM):
+        on = SEMT_BOL[i % len(SEMT_BOL)][0]
+        al = BOL_ALAN[(i // len(SEMT_BOL)) % len(BOL_ALAN)][0]
+        bol.append(f"{on}_{al}_Bolumu")
+    ders = []
+    for i in range(N_DERS):
+        on = DERS_ONEK[i % len(DERS_ONEK)][0]
+        kk = DERS_KOK[(i // len(DERS_ONEK)) % len(DERS_KOK)][0]
+        ders.append(f"{on}_{kk}")
+    for nm, lst in (("FAKULTE", fak), ("BOLUM", bol), ("DERS", ders)):
+        assert len(set(lst)) == len(lst), f"{nm} adlari TEKRAR ediyor"
 
-    n_k, n_o, n_s, n_d = len(kisi), len(okul), len(sehir), len(ders)
-    # mevcut simetrik eslemeler -- yenileri bunlardan FARKLI olmali
-    _ind = lambda grup: {a: i for i, a in enumerate(grup)}
-    ik, io, isz = _ind(kisi), _ind(okul), _ind(sehir)
-    kardes_k = {i: ik[olgu[(c, "kardes")]] for i, c in enumerate(kisi)}
-    arkadas_k = {i: ik[olgu[(c, "arkadas")]] for i, c in enumerate(kisi)}
-    rakip_o = {i: io[olgu[(o, "rakip")]] for i, o in enumerate(okul)}
-    komsu_s = {i: isz[olgu[(s, "komsu")]] for i, s in enumerate(sehir)}
+    ad.update(BOLGE=bolge, SEHIR=sehir, UNIVERSITE=uni,
+              FAKULTE=fak, BOLUM=bol, DERS=ders)
 
-    # --- KISI uzerine: komsu, rakip (kardes/arkadas ile CAKISMASIN) ------
-    komsu_kisi = _farkli_esle(rng, range(n_k), [kardes_k, arkadas_k], "komsu/KISI")
-    rakip_kisi = _farkli_esle(rng, range(n_k),
-                              [kardes_k, arkadas_k, komsu_kisi], "rakip/KISI")
-    for i, c in enumerate(kisi):
-        olgu[(c, "komsu")] = kisi[komsu_kisi[i]]
-        olgu[(c, "rakip")] = kisi[rakip_kisi[i]]
+    # --- YUKARI kenarlar. Dengeli dagitim: i % len(ust).
+    #     `rng.permutation` ile karistiriliyor ki "i. bolum i%60. fakulte"
+    #     gibi ARITMETIK bir kural dogmasin (veri_04'te sabit kaydirmalar
+    #     tam bu yuzden kaldirilmisti).
+    def bagla(alt, ust, r):
+        p = list(rng.permutation(len(alt)))
+        for k, i in enumerate(p):
+            olgu[(alt[i], r)] = ust[k % len(ust)]
 
-    # --- OKUL uzerine: kardes, komsu (rakip ile CAKISMASIN), hoca --------
-    kardes_okul = _farkli_esle(rng, range(n_o), [rakip_o], "kardes/OKUL")
-    komsu_okul = _farkli_esle(rng, range(n_o), [rakip_o, kardes_okul], "komsu/OKUL")
-    for i, o in enumerate(okul):
-        olgu[(o, "kardes")] = okul[kardes_okul[i]]
-        olgu[(o, "komsu")] = okul[komsu_okul[i]]
-        olgu[(o, "hoca")] = kisi[int(rng.randint(n_k))]
+    # GERCEK cografya -- `bagla` ile DAGITILMIYOR (SEHIR_BOLGE'ye bak).
+    for s in sehir:
+        olgu[(s, "bolgesi")] = f"{SEHIR_BOLGE[s]}_Bolgesi"
+    bagla(uni, sehir, "sehri")
+    bagla(fak, uni, "universitesi")
+    bagla(bol, fak, "fakultesi")
+    bagla(ders, bol, "bolumu")
+    bagla(sehir, uni, "universitesi")      # sehrin (ana) universitesi
 
-    # --- SEHIR uzerine: kardes, rakip (komsu ile CAKISMASIN), kurucu, ders
-    kardes_sehir = _farkli_esle(rng, range(n_s), [komsu_s], "kardes/SEHIR")
-    rakip_sehir = _farkli_esle(rng, range(n_s), [komsu_s, kardes_sehir], "rakip/SEHIR")
+    # --- ASAGI kenarlar: ustteki varligin "amiral" alti. Altindakiler
+    #     arasindan secilir -- yani `ana_fakultesi`nin `universitesi`
+    #     KENDISIDIR (DONUS sinifi, sinav disi) ve bu DOGRU.
+    def amiral(ust, alt, r_yukari, r_asagi):
+        alti = {}
+        for a in alt:
+            alti.setdefault(olgu[(a, r_yukari)], []).append(a)
+        for u in ust:
+            g = alti.get(u)
+            assert g, f"{u} altinda hic {r_asagi} yok -- dagitim bozuk"
+            olgu[(u, r_asagi)] = g[int(rng.randint(len(g)))]
+
+    amiral(uni, fak, "universitesi", "fakultesi")
+    amiral(fak, bol, "fakultesi", "bolumu")
+    amiral(bol, ders, "bolumu", "dersi")
+    amiral(bolge, sehir, "bolgesi", "merkezi")
+
+    # --- YATAY
+    kom = _esle(rng, range(len(sehir)))
     for i, s in enumerate(sehir):
-        olgu[(s, "kardes")] = sehir[kardes_sehir[i]]
-        olgu[(s, "rakip")] = sehir[rakip_sehir[i]]
-        olgu[(s, "kurucu")] = kisi[int(rng.randint(n_k))]
-        olgu[(s, "ders")] = ders[int(rng.randint(n_d))]
-
-    # --- DERS uzerine: kurucu, okul, sehir -------------------------------
+        olgu[(s, "komsusu")] = sehir[kom[i]]
+    rak = _esle(rng, range(len(uni)))
+    for i, u in enumerate(uni):
+        olgu[(u, "rakibi")] = uni[rak[i]]
+    onk, _ = _devirsiz(rng, range(len(ders)))
     for i, d in enumerate(ders):
-        olgu[(d, "kurucu")] = kisi[int(rng.randint(n_k))]
-        olgu[(d, "okul")] = okul[int(rng.randint(n_o))]
-        olgu[(d, "sehir")] = sehir[int(rng.randint(n_s))]
+        olgu[(d, "onkosulu")] = ders[onk[i]]
 
-    G["sema"] = SEMA
 
-    # --- DENETIMLER -------------------------------------------------------
-    for (e, r), h in eski.items():
-        assert olgu[(e, r)] == h, f"ESKI OLGU DEGISTI: {e} {r}"
+def _kur_aile(rng, ad, olgu):
+    """GERCEK soy agaci. Her soyadi blogu = 3 kusak x 16 kisi.
+
+    Kusak icinde 8 erkek (M) + 8 kadin (F). Iki AYRI eslesme var ve
+    KAYIK olmalari SART:
+
+        kardes ciftleri   (M_i , F_{i+1})
+        ebeveyn ciftleri  (M_i , F_i)     -> kusak+1'in i. kardes cifti
+
+    Kayik olmasaydi ayni iki kisi hem kardes hem ebeveyn olurdu. `_denetle`
+    bunu ayrica sinar.
+
+    KENARDA BIRAKILANLAR (uydurulmuyor):
+        kusak 0  ->  annesi / babasi YOK
+        kusak 2  ->  cocugu YOK
+    """
+    kisi, cinsiyet, kusak = [], {}, {}
+    n2 = KUSAK_EN // 2
+    for b in range(N_BLOK):
+        soy = SOYAD[b % len(SOYAD)][0]
+        blok = []                    # blok[k][0]=erkekler, blok[k][1]=kadinlar
+        # Ad havuzlari blok BASINA karistiriliyor: ayni ad iki blokta
+        # farkli kusakta cikabilsin, "Ahmet hep dede" olmasin.
+        em = list(rng.permutation(len(ERKEK)))
+        km = list(rng.permutation(len(KADIN)))
+        s = 0
+        for k in range(3):
+            e_, k_ = [], []
+            for j in range(n2):
+                e_.append(f"{ERKEK[em[s + j]][0]}_{soy}")
+                k_.append(f"{KADIN[km[s + j]][0]}_{soy}")
+            s += n2
+            for x in e_:
+                cinsiyet[x] = "E"
+                kusak[x] = k
+            for x in k_:
+                cinsiyet[x] = "K"
+                kusak[x] = k
+            blok.append((e_, k_))
+            kisi += e_ + k_
+        # --- kardes: (M_i , F_{i+1})  simetrik, TERS cinsiyet
+        for k in range(3):
+            e_, k_ = blok[k]
+            for i in range(n2):
+                a, c = e_[i], k_[(i + 1) % n2]
+                olgu[(a, "kardesi")] = c
+                olgu[(c, "kardesi")] = a
+        # --- ebeveyn: (M_i , F_i) kusak k  ->  kusak k+1'in i. kardes cifti
+        for k in range(2):
+            pe, pk = blok[k]
+            ce, ck = blok[k + 1]
+            for i in range(n2):
+                baba, anne = pe[i], pk[i]
+                ogul, kiz = ce[i], ck[(i + 1) % n2]     # AYNI kardes cifti
+                for c in (ogul, kiz):
+                    olgu[(c, "babasi")] = baba
+                    olgu[(c, "annesi")] = anne
+                # `cocugu` TERSI. Baba oglu, anne kizi gosteriyor -- ikisi
+                # AYRI cocuk. Ayni cocugu gosterselerdi "annesinin cocugu"
+                # ile "babasinin cocugu" birebir ayni olur, iki iliski
+                # birbirinden OKUNURDU.
+                olgu[(baba, "cocugu")] = ogul
+                olgu[(anne, "cocugu")] = kiz
+    ad["KISI"] = kisi
+    return cinsiyet, kusak
+
+
+def _kur_roller(rng, ad, olgu, kusak):
+    """Kisileri gorevlere ve KISI->X baglarina yerlestir."""
+    kisi = ad["KISI"]
+    n = len(kisi)
+    sec = lambda: kisi[int(rng.randint(n))]
+
+    for u in ad["UNIVERSITE"]:
+        olgu[(u, "rektoru")] = sec()
+        olgu[(u, "kurucusu")] = sec()
+    for f in ad["FAKULTE"]:
+        olgu[(f, "dekani")] = sec()
+    for b in ad["BOLUM"]:
+        olgu[(b, "baskani")] = sec()
+    for d in ad["DERS"]:
+        olgu[(d, "hocasi")] = sec()
+    for s in ad["SEHIR"]:
+        olgu[(s, "valisi")] = sec()
+    for g in ad["BOLGE"]:
+        olgu[(g, "baskani")] = sec()
+
+    for k in kisi:
+        olgu[(k, "memleketi")] = ad["SEHIR"][int(rng.randint(len(ad["SEHIR"])))]
+        olgu[(k, "bolumu")] = ad["BOLUM"][int(rng.randint(len(ad["BOLUM"])))]
+        olgu[(k, "tezi")] = ad["DERS"][int(rng.randint(len(ad["DERS"])))]
+
+    # --- danismani / ogrencisi: TERS cift, sabit noktasiz.
+    # Kusak KISITI YOK ve bu kasitli: `kusak` AILE ICI bir kavram, iki
+    # ayri ailenin kusaklari kiyaslanamaz. Tek kisit AYNI AILE OLMAMASI
+    # -- "kendi cocugunun ogrencisi" cikmasin diye.
+    #
+    # !! REDDET-TEKRAR DENE ILE KURULAMAZ: 480 kisinin HEPSININ birden
+    # aile disina dusme olasiligi ~0.9^480, yani sifir. BLOK duzeyinde
+    # kuruluyor -- once bloklar sabit noktasiz eslesiyor, sonra her blok
+    # kendi hedef blogunun icine RASTGELE dagiliyor.
+    # Blok eslemesi de SABIT KAYDIRMA DEGIL (veri_04'te kaydirmalar tam
+    # bu yuzden kaldirilmisti: iki kaydirmanin BILESKESI yine kaydirmadir
+    # ve model kopruyu kullanmadan cozer).
+    sig, _ = _devirsiz(rng, range(N_BLOK))
+    dan = {}
+    for b in range(N_BLOK):
+        hedef = list(rng.permutation(
+            np.arange(sig[b] * BLOK, (sig[b] + 1) * BLOK)))
+        for j, i in enumerate(range(b * BLOK, (b + 1) * BLOK)):
+            dan[i] = int(hedef[j])
+    ogr = {v: k for k, v in dan.items()}
+    assert len(ogr) == len(kisi), "danismani birebir DEGIL"
+    for i, k in enumerate(kisi):
+        olgu[(k, "danismani")] = kisi[dan[i]]
+        olgu[(k, "ogrencisi")] = kisi[ogr[i]]
+
+    # --- oda_arkadasi: simetrik, `kardesi` ile AYNI OLMAYAN.
+    yer = {k: i for i, k in enumerate(kisi)}
+    kar = {i: yer[olgu[(k, "kardesi")]] for i, k in enumerate(kisi)}
+    oda = _farkli_esle(rng, range(len(kisi)), [kar], "arkadasi")
+    for i, k in enumerate(kisi):
+        olgu[(k, "arkadasi")] = kisi[oda[i]]
+
+
+def _denetle(ad, olgu, tip, cinsiyet, kusak):
+    """Verinin SOYLEDIGI seyi gercekten yaptigini sinar.
+
+    Bunlarin hepsi `veri_04`te ya YOKTU ya da TUTMUYORDU -- soy agaci
+    orada rastgele bagliydi ve "Fatma'nin annesi Huseyin" uretebiliyordu.
+    """
+    # 1) SEMA disi olgu YOK
+    for (e, r), h in olgu.items():
+        assert r in SEMA, f"semada olmayan iliski: {r}"
+        assert tip[e] in SEMA[r], f"{tip[e]} tipinden {r} CIKAMAZ: {e}"
+        assert tip[h] == SEMA[r][tip[e]], (
+            f"{e} {r} -> {h}: tip {tip[h]}, beklenen {SEMA[r][tip[e]]}")
+    # 2) kendine giden olgu YOK
     kendi = [(e, r) for (e, r), h in olgu.items() if h == e]
     assert not kendi, f"kendine giden olgu: {kendi[:5]}"
-    for grup, r in ((kisi, "komsu"), (kisi, "rakip"), (okul, "kardes"),
-                    (okul, "komsu"), (sehir, "kardes"), (sehir, "rakip")):
+    # 3) CINSIYET: annesi hep kadin, babasi hep erkek
+    for (e, r), h in olgu.items():
+        if r == "annesi":
+            assert cinsiyet[h] == "K", f"{e} annesi ERKEK cikti: {h}"
+        if r == "babasi":
+            assert cinsiyet[h] == "E", f"{e} babasi KADIN cikti: {h}"
+    # 4) KUSAK: ebeveyn tam BIR ust kusak
+    for (e, r), h in olgu.items():
+        if r in ("annesi", "babasi"):
+            assert kusak[h] == kusak[e] - 1, (
+                f"{e} (kusak {kusak[e]}) {r} -> {h} (kusak {kusak[h]})")
+        if r == "cocugu":
+            assert kusak[h] == kusak[e] + 1, f"{e} cocugu kusak atladi: {h}"
+        if r == "kardesi":
+            assert kusak[h] == kusak[e], f"{e} kardesi baska kusakta: {h}"
+    # 5) KARDESLER ayni anne VE ayni babadan
+    for k in ad["KISI"]:
+        ks = olgu[(k, "kardesi")]
+        for r in ("annesi", "babasi"):
+            a, b = olgu.get((k, r)), olgu.get((ks, r))
+            assert a == b, f"kardes {k}/{ks} farkli {r}: {a} / {b}"
+    # 6) ENSEST YOK: ebeveyn cifti kardes OLAMAZ
+    for k in ad["KISI"]:
+        an, ba = olgu.get((k, "annesi")), olgu.get((k, "babasi"))
+        if an and ba:
+            assert olgu.get((an, "kardesi")) != ba, (
+                f"{k}: annesi ve babasi KARDES ({an} / {ba})")
+    # 7) cocugu, annesi/babasi'nin TERSI
+    for k in ad["KISI"]:
+        c = olgu.get((k, "cocugu"))
+        if c:
+            r = "annesi" if cinsiyet[k] == "K" else "babasi"
+            assert olgu[(c, r)] == k, f"{k} cocugu {c}, ama tersi tutmuyor"
+    # 8) SIMETRI
+    for grup, r in ((ad["KISI"], "kardesi"), (ad["KISI"], "arkadasi"),
+                    (ad["SEHIR"], "komsusu"), (ad["UNIVERSITE"], "rakibi")):
         bozuk = [x for x in grup if olgu[(olgu[(x, r)], r)] != x]
         assert not bozuk, f"{r} simetrik degil: {bozuk[:3]}"
-    for (e, r) in olgu:
-        assert e in G["tip"], f"bilinmeyen varlik: {e}"
-        assert G["tip"][e] in SEMA[r], f"SEMA disi olgu: {G['tip'][e]} {r}"
-        assert G["tip"][olgu[(e, r)]] == SEMA[r][G["tip"][e]], \
-            f"TIP ihlali: {e} {r} {olgu[(e, r)]}"
-    for t in TIPLER:
-        gec = [r for r in ILISKI if t in SEMA[r]]
-        for a in ad[t]:
-            eksik = [r for r in gec if (a, r) not in olgu]
-            assert not eksik, f"{a} ({t}) icin eksik olgu: {eksik}"
+    # 9) TERS CIFT: danismani / ogrencisi
+    bozuk = [k for k in ad["KISI"]
+             if olgu[(olgu[(k, "danismani")], "ogrencisi")] != k]
+    assert not bozuk, f"danismani/ogrencisi ters degil: {bozuk[:3]}"
+    # 10) AMIRAL kenar gercekten ALTINDAN secilmis
+    for u, ra, ry in (("UNIVERSITE", "fakultesi", "universitesi"),
+                      ("FAKULTE", "bolumu", "fakultesi"),
+                      ("BOLUM", "dersi", "bolumu"),
+                      ("BOLGE", "merkezi", "bolgesi")):
+        for x in ad[u]:
+            assert olgu[(olgu[(x, ra)], ry)] == x, (
+                f"{x} {ra} -> {olgu[(x, ra)]}, ama {ry} geri gelmiyor")
+    # 11) NOTRLUK: FAKULTE/BOLUM adinin ilk yuvasi ustundekini SIZDIRMASIN
+    for a in ad["FAKULTE"]:
+        u = olgu[(a, "universitesi")]
+        assert a.split("_")[0] != u.split("_")[0], f"fakulte adi sizdiriyor: {a}"
+    for a in ad["BOLUM"]:
+        f = olgu[(a, "fakultesi")]
+        assert a.split("_")[0] != f.split("_")[0], f"bolum adi sizdiriyor: {a}"
+
+
+def kur(tohum=0):
+    """model_05'in grafi."""
+    rng = np.random.RandomState(1000 + tohum)
+    ad, olgu = {}, {}
+    cinsiyet, kusak = _kur_aile(rng, ad, olgu)
+    _kur_hiyerarsi(rng, ad, olgu)
+    _kur_roller(rng, ad, olgu, kusak)
+
+    tip = {a: t for t in TIPLER for a in ad[t]}
+    _denetle(ad, olgu, tip, cinsiyet, kusak)
+
+    hepsi = [a for t in TIPLER for a in ad[t]]
+    assert len(set(hepsi)) == len(hepsi), "varlik adi TEKRAR ediyor"
+    parca = sorted({p for a in hepsi for p in a.split("_")})
+    ozel = ["<pad>", "<soru>", "?", "<son>"]
+    sozluk = ozel + ILISKI + parca
+    G = dict(ad=ad, n={t: len(ad[t]) for t in TIPLER}, sozluk=sozluk,
+             kim={s: i for i, s in enumerate(sozluk)}, tip=tip,
+             olgu=olgu, sema=SEMA, iliski=ILISKI,
+             cinsiyet=cinsiyet, kusak=kusak)
+    if tohum == 0 and IZ:
+        _iz = graf_izi(G)
+        assert _iz == IZ, (
+            f"veri_05: graf DEGISTI  {IZ} -> {_iz}\n"
+            "  Kasitliysa IZ yenilenir ve onkayda not duselir; degilse\n"
+            "  degisiklik geri alinir. model_05 sessizce baska bir\n"
+            "  veriyle KOSMAZ.")
     return G
 
+
+# ======================================================================
+# ZINCIRLER
+# ======================================================================
+def zincirler(G):
+    """Tip olarak gecerli 2 adimli zincirler, BES SINIFA ayrilmis.
+
+    !! veri_04'ten FARK: sinif SEMAYA bakiyor, `olgu` sozluguNE degil.
+    Orada her varligin semadaki her iliskisi DOLUYDU, burada degil --
+    soy agacinin KENARI var (kusak 0'in annesi, kusak 2'nin cocugu).
+
+        DONUS   cevap = ozne                       (kardesinin kardesi)
+        YOK     kisayol TIP OLARAK imkansiz        -> `ent_yok` bolmesi
+        EKSIK   tip mumkun, OLGU kayitli degil     -> SINAV DISI
+        AYNI    kisayol cevabin AYNISI             (kardesinin annesi)
+        AYIRT   kisayol VAR ve FARKLI              -> sinav BURADA
+
+    YOK ile EKSIK ayrilmazsa `ent_yok` kirlenir: "kisayol imkansiz" diye
+    sayilan zincirin bir kismi aslinda "kisayol var ama biz yazmadik"
+    olurdu (CLAUDE.md, `ent_yok` tanimi).
+    """
+    olgu, tip, sema = G["olgu"], G["tip"], G["sema"]
+    out = []
+    for (e, r1), b in olgu.items():
+        for r2 in G["iliski"]:
+            if r2 == r1 or tip[b] not in sema[r2]:
+                continue
+            cev = olgu.get((b, r2))
+            if cev is None:
+                continue                      # KOPRUNUN kendisi eksik
+            mumkun = tip[e] in sema[r2]
+            ks = olgu.get((e, r2))
+            sinif = ("DONUS" if cev == e else
+                     "YOK" if not mumkun else
+                     "EKSIK" if ks is None else
+                     "AYNI" if ks == cev else "AYIRT")
+            out.append((e, r1, r2, b, cev, ks, sinif))
+    return out
 
 
 def turetilebilir(G, esik=0.5):
     """(r1, r2) ciftinin sonucu, TEK bir r3 olgusuyla AYNI mi?
 
     Boyle bir cift varsa o zincir 2-hop DEGILDIR: model r3'u ezberleyip
-    gecer. Var olan tek ornek `kardes`+`baba` -> `baba` (GEREKTIRIR'de
-    yazili, `zincirler` bunu AYNI sinifina atip sinav disi birakiyor).
-    Bu tarama YENI bir tane dogmadigini sinar.
-
-    Donus: [(r1, r2, r3, oran)] -- oran `esik`i ASANLAR.
+    gecer. `GEREKTIRIR`de yazili olanlar BEKLENEN; bu tarama YENI bir
+    tane dogmadigini sinar.
     """
     olgu, tip, sema = G["olgu"], G["tip"], G["sema"]
     out = []
     for r1 in ILISKI:
         for r2 in ILISKI:
-            pay = {}
-            top = 0
+            if r1 == r2:
+                continue
+            pay, top = {}, 0
             for (e, r), b in olgu.items():
                 if r != r1 or tip[b] not in sema[r2]:
                     continue
-                c = olgu[(b, r2)]
+                c = olgu.get((b, r2))
+                if c is None:
+                    continue
                 top += 1
                 for r3 in ILISKI:
-                    if tip[e] in sema[r3] and olgu[(e, r3)] == c:
+                    if tip[e] in sema[r3] and olgu.get((e, r3)) == c:
                         pay[r3] = pay.get(r3, 0) + 1
             for r3, k in pay.items():
                 if top and k / top > esik:
@@ -582,31 +878,42 @@ def turetilebilir(G, esik=0.5):
     return sorted(out, key=lambda x: -x[3])
 
 
-# ======================================================================
-# model_03'IN VERISI — iki adim + PARMAK IZI
-# ======================================================================
+def sizinti(G, z):
+    """Zincir zincir: cevabin kac yuvasi SORUDA zaten duruyor.
 
-# tohum 0 grafinin parmak izi. Olculdu 16 Eylul 2026; uc ayri surecte
-# ayni cikti (sozluk sirasina bagli DEGIL, her sey siralanip karilir).
-IZ = "3f6751c4ccd4"
+    Aile soyadi BILEREK paylasiliyor (gercek hayatta da oyle), yani
+    "Ahmet Yilmaz'in kardesi" sorusunda cevabin 2. yuvasi hazir. Bunu
+    silmiyoruz -- SAYIYORUZ, ki bolme kodu `kopyalanabilir` /
+    `kopyalanamaz` diye AYIRABILSIN.
+
+    Doner: (kopyalanabilir_zincir_sayisi, yuva bazinda sayac).
+    """
+    say, kop = {}, 0
+    for e, r1, r2, b, cev, ks, sinif in z:
+        ep = set(e.split("_"))
+        cp = cev.split("_")
+        ortak = [j for j, p in enumerate(cp) if p in ep]
+        for j in ortak:
+            say[j] = say.get(j, 0) + 1
+        if ortak:
+            kop += 1
+    return kop, say
+
+
+# ======================================================================
+# PARMAK IZI
+# ======================================================================
+# tohum 0 grafinin parmak izi. BOS iken `kur()` denetim YAPMAZ ve bu
+# dosya "ilk kurulum" kipindedir. Ilk olcumden sonra DOLDURULUR.
+IZ = "3431c633b6b1"
 
 
 def graf_izi(G):
     """Grafin ICERIGINDEN tureyen sabit parmak izi.
 
-    !! ILK SURUMUN IKI KOR NOKTASI VARDI (16 Eylul hakemligi, olculdu):
-
-      1. `ad` listeleri SIRALANARAK karilyordu. Oysa varlik SIRASI
-         `sozluk`u, `sozluk` da JETON ID'lerini belirliyor. KISI
-         listesini ters cevirdim -- IZ KIPIRDAMADI, ama butun kodlama
-         kaymis olurdu.
-      2. `sema` hic karilmiyordu. SEMA'ya bir tip cifti ekledim --
-         IZ yine ayni cikti, oysa gecerli zincir kumesi (SINAVIN
-         KENDISI) degisirdi.
-
-    Simdi: `olgu` SIRALI (sozluk sirasi Python surumune gore oynayabilir,
-    icerik oynamaz), `ad` / `sozluk` / `iliski` SIRASIYLA, `sema` da
-    dahil. Determinizm uc ayri surecte sinandi.
+    `ad` listeleri SIRASIYLA karisiyor -- varlik sirasi `sozluk`u,
+    `sozluk` da JETON ID'lerini belirliyor, yani siralamak korlestirirdi.
+    `sema` de dahil: gecerli zincir kumesi (SINAVIN KENDISI) ona bagli.
     """
     h = hashlib.sha256()
     h.update(repr(sorted(map(str, G["olgu"].items()))).encode())
@@ -618,31 +925,160 @@ def graf_izi(G):
     return h.hexdigest()[:12]
 
 
-def kur(tohum=0):
-    """model_03'in grafi: 1x taban + sekiz alan acilimi."""
-    G = genislet(_taban_kur(tohum), tohum)
-    if tohum == 0:
-        _iz = graf_izi(G)
-        assert _iz == IZ, (
-            f"veri_03: graf DEGISTI  {IZ} -> {_iz}\n"
-            "  Bu dosya TEK BASINA duruyor -- degisiklik BURADA yapildi.\n"
-            "  Kasitliysa IZ yenilenir ve onkayda not duselir; degilse\n"
-            "  degisiklik geri alinir. model_03 sessizce baska bir\n"
-            "  veriyle KOSMAZ.")
-    return G
+# ======================================================================
+# YUZEY -- INSAN icin dogru Turkce. Model bunu GORMEZ.
+# ======================================================================
+KALIN_DUZ, KALIN_YUV, INCE_DUZ, INCE_YUV = "aı", "ou", "ei", "öü"
+SESLI = KALIN_DUZ + KALIN_YUV + INCE_DUZ + INCE_YUV
+SERT = "pçtkfhsş"
 
 
+def _son_sesli(k):
+    for h in reversed(k.lower()):
+        if h in SESLI:
+            return h
+    return "a"
+
+
+def _dort(k):
+    s = _son_sesli(k)
+    return ("ı" if s in KALIN_DUZ else "u" if s in KALIN_YUV
+            else "i" if s in INCE_DUZ else "ü")
+
+
+def _tamlayan(k, ozel=True):
+    """-in / -ın / -un / -ün. Ozel isimde KESME ISARETI, cins isimde YOK."""
+    e = _dort(k)
+    ek = ("n" + e + "n") if k[-1].lower() in SESLI else (e + "n")
+    return ("'" if ozel else "") + ek
+
+
+def _bildirme(k):
+    """-dir / -dır / -dur / -dür, sert unsuzden sonra -tir."""
+    e = _dort(k)
+    return ("'t" + e + "r") if k[-1].lower() in SERT else ("'d" + e + "r")
+
+
+def tr_ad(a):
+    """Jeton dizisini dogru Turkce yazima cevir."""
+    return " ".join(TR.get(p, p) for p in a.split("_"))
+
+
+def yuzey(G, e, r1, r2=None, cev=None, soru_soz=False):
+    """2-hop (r2 verilirse) ya da 1-hop soru-cevap, dogru Turkce ekle.
+
+    Iliski KOK olarak geliyor; iyelik ekini `TR_ILISKI` veriyor -- dizide
+    o eki `<SI>` jetonu tasiyor.
+
+        yuzey(G, e, "memleketi", "valisi", cev)
+          -> Omer Demir'in doğum yerinin valisi?  Osman Doğan'dır
+
+    `soru_soz=True` cevabin tipine gore soru sozcugunu de koyar:
+          -> Hatice Yılmaz'ın kardeşi kim?  Sinan Yılmaz'dır
+    Soru sozcugu DIZIDE de var (ek_kip='tr2').
+    """
+    s = tr_ad(e) + _tamlayan(tr_ad(e))
+    son_r = r2 or r1
+    if r2 is not None:
+        # ARA iliski: iyelikli bicim + tamlayan.  "bölümü" -> "bölümünün"
+        ara = TR_ILISKI[r1]
+        s += " " + ara + _tamlayan(ara, ozel=False)
+    s += " " + TR_ILISKI[son_r]
+    if soru_soz:
+        _t = G["tip"][cev] if cev else SEMA[son_r][
+            G["tip"][G["olgu"][(e, r1)]] if r2 else G["tip"][e]]
+        s += " " + SORU_SOZ[_t]
+    s += "?"
+    if cev is None:
+        return s
+    return s + "  " + tr_ad(cev) + _bildirme(tr_ad(cev))
+
+
+# ======================================================================
 if __name__ == "__main__":
     import collections
+
     G = kur(0)
     z = zincirler(G)
-    print("veri_03  varlik %d  olgu %d  zincir %d  |R| %d  phi TAVANI %.2f"
-          % (sum(G["n"].values()), len(G["olgu"]), len(z), len(ILISKI),
-             len(z) / len(G["olgu"])))
-    print("   sinif", dict(collections.Counter(x[6] for x in z)))
-    print("   graf izi", graf_izi(G), " (beklenen", IZ + ")")
-    print("\nTURETILEBILIR CIFTLER (oran > 0.5):")
-    for r1, r2, r3, o in turetilebilir(G):
-        print("   %-10s %-10s -> %-10s  %.3f   %s"
-              % (r1, r2, r3, o, "BEKLENEN (GEREKTIRIR)"
-                 if (r1, r2) in GEREKTIRIR else "!! YENI"))
+    sn = collections.Counter(x[6] for x in z)
+    sinav = len(z) - sn["DONUS"] - sn["AYNI"] - sn["EKSIK"]
+
+    print("=" * 74)
+    print("VARLIKLAR")
+    for t in TIPLER:
+        print(f"   {t:<12}{G['n'][t]:>5}   ornek: "
+              + ", ".join(tr_ad(a) for a in G["ad"][t][:2]))
+    print(f"   {'TOPLAM':<12}{sum(G['n'].values()):>5}"
+          f"   sozluk {len(G['sozluk'])} jeton"
+          f"   yuva {max(len(a.split('_')) for a in G['tip'])}")
+
+    print()
+    print("=" * 74)
+    print("SAYILAR")
+    print(f"   olgu {len(G['olgu'])}   zincir {len(z)}   |R| {len(ILISKI)}")
+    print(f"   phi TAVANI {len(z)/len(G['olgu']):.2f}"
+          f"   (veri_04: 9.57)")
+    print("   sinif " + "  ".join(f"{k} {sn[k]}" for k in
+                                  ("AYIRT", "YOK", "AYNI", "DONUS", "EKSIK")))
+    print(f"   SINAVA GIREN (AYIRT + YOK) {sinav}")
+    kop, yv = sizinti(G, z)
+    print(f"   SIZINTI  {kop}/{len(z)} zincirde cevabin en az bir yuvasi")
+    print(f"            soruda ZATEN var.  yuva bazinda {dict(sorted(yv.items()))}")
+    print("            (aile soyadi -- BILEREK, `sizinti()` ile ayrilabilir)")
+
+    print()
+    print("=" * 74)
+    print("OLGU ORNEKLERI -- dogru Turkce")
+    _g = [("Cerrahpasa", "universitesi"), ("Kecioren", "fakultesi")]
+    gos = []
+    for r in ("universitesi", "fakultesi", "bolumu", "ana_fakultesi",
+              "sehri", "bolgesi", "merkezi", "annesi", "babasi", "kardesi",
+              "cocugu", "valisi", "dekani", "onkosulu"):
+        for (e, rr), h in G["olgu"].items():
+            if rr == r:
+                gos.append((e, r, h))
+                break
+    for e, r, h in gos:
+        print("   " + yuzey(G, e, r, cev=h))
+
+    print()
+    print("=" * 74)
+    print("2-HOP ZINCIR ORNEKLERI -- SINAVA GIRENLER")
+    rs = np.random.RandomState(7)
+    for et in ("AYIRT", "YOK"):
+        alt = [x for x in z if x[6] == et]
+        print(f"   --- {et}  ({len(alt)} zincir)")
+        for i in rs.permutation(len(alt))[:6]:
+            e, r1, r2, b, cev, ks, _ = alt[int(i)]
+            print("   " + yuzey(G, e, r1, r2, cev))
+            print(f"        KOPRU {tr_ad(b):<34}"
+                  + (f"KISAYOL {tr_ad(ks)}" if ks else "kisayol TIP OLARAK YOK"))
+
+    print()
+    print("=" * 74)
+    print("SOY AGACI -- tek bir kisinin cevresi")
+    k = G["ad"]["KISI"][0]
+    print(f"   {tr_ad(k)}   cinsiyet {G['cinsiyet'][k]}  kusak {G['kusak'][k]}")
+    for r in ("annesi", "babasi", "kardesi", "cocugu", "danismani",
+              "arkadasi", "bolumu", "memleketi", "tezi"):
+        h = G["olgu"].get((k, r))
+        print(f"      {r:<14}{tr_ad(h) if h else '(kayitli degil -- KENAR)'}")
+    an = G["olgu"].get((k, "annesi"))
+    if an:
+        print(f"   {tr_ad(k)} -> annesi {tr_ad(an)} -> annesi "
+              f"{tr_ad(G['olgu'].get((an,'annesi'))) if G['olgu'].get((an,'annesi')) else '(KENAR)'}"
+              "   <- BUYUKANNE, anlamli")
+
+    print()
+    print("=" * 74)
+    print("TURETILEBILIR CIFTLER (oran > 0.5)")
+    t = turetilebilir(G)
+    if not t:
+        print("   (yok)")
+    for r1, r2, r3, o in t:
+        print("   %-14s %-14s -> %-14s  %.3f   %s"
+              % (r1, r2, r3, o,
+                 "BEKLENEN (GEREKTIRIR)" if (r1, r2) in GEREKTIRIR else "!! YENI"))
+
+    print()
+    print("   graf izi", graf_izi(G), " (IZ alani:", repr(IZ) + ")")

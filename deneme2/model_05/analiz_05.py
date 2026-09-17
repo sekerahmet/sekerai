@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""analiz_03 — model_03'in KENDI VERI DOKUMU + SAGLIK DENETIMI. TEK BASINA DURUR.
+"""analiz_05 — model_05'in KENDI VERI DOKUMU + SAGLIK DENETIMI. TEK BASINA DURUR.
 
-Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_03 folderi
-altinda olmali. model_03 diger hicbir model ile ayni seyi kullanmamali.
-Analiz icinde analiz_03 kullanalim mesela, digerleri icin de."*
+Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_05 folderi
+altinda olmali. model_05 diger hicbir model ile ayni seyi kullanmamali.
+Analiz icinde analiz_05 kullanalim mesela, digerleri icin de."*
 
 `veri_dok.py`nin KOPYASI (uretici: scratchpad/kur_analiz00.py). Iki fark:
-motor `taban_03`, ve `--model` secenegi YOK -- bu arac yalniz model_03'i
-tanir. Dokum `model_03/veri/model_03/` altina gider (depoya girmez).
+motor `taban_05`, ve `--model` secenegi YOK -- bu arac yalniz model_05'i
+tanir. Dokum `model_05/veri/model_05/` altina gider (depoya girmez).
 
-    python analiz_03.py [--tam] [--klasor <yol>]
+    python analiz_05.py [--tam] [--klasor <yol>]
 """
 from __future__ import annotations
 
@@ -25,10 +25,19 @@ _K = os.path.dirname(os.path.abspath(__file__))
 if _K not in sys.path:
     sys.path.insert(0, _K)
 
-import taban_03 as M                                          # noqa: E402
+import taban_05 as M                                          # noqa: E402
 
-OZEL = {0: "<PAD>", 1: "[S1]", 2: "[S2]", 3: "?", 4: "<SON>", 5: "[KIMLIK]",
-        6: "<KULLANILMIYOR>", 7: "<KULLANILMIYOR>"}
+# OZEL BLOK: UC jeton. [S1]/[S2]/[KIMLIK] ve iki bos yuva
+# 17 Eylul'de SILINDI -- olculmustu ki besi de egitim
+# havuzunda HIC gecmiyordu (kullanici: "bunlar niye var?").
+# OZEL BLOK: UC jeton, ve IKISI NOKTALAMA.
+#   ?   soru isareti   "...kardesi kim?"
+#   .   nokta          "...Sinan Yilmaz'dir."
+# Ucuncusu <PAD>: DILIN PARCASI DEGIL. Satirlar 8-16 jeton
+# uzunlugunda ve tensor SABIT GENISLIK ister, o yuzden kisa
+# satirlar sagdan doldurulur. Kayipta atlanir
+# (ignore_index=PAD) ve model onu HIC uretmez.
+OZEL = {0: "<PAD>", 1: "?", 2: "."}
 
 
 class Dok:
@@ -60,23 +69,89 @@ class Dok:
         v = self.v
         if v.par is None:
             return [self.E[int(e)]]
-        return [v.par_ad[j][int(v.par[e, j])] for j in range(v.yuva)]
+        return M.kelimeler(v, e)
 
     def jeton_ad(self, i):
         v, i = self.v, int(i)
         if i < M.SPECIAL:
             return OZEL[i]
         if i < M.SPECIAL + v.n_rel:
-            return "@" + self.R[i - M.SPECIAL]
+            # `@` ONEKI KALDIRILDI (kullanici, 17 Eylul: "niye basinda
+            # @ isareti var? token dediğin boyle olmaz ki").
+            # Iliskiyi varlik kelimesinden ayiran sey ZATEN YAZIM:
+            #   kucuk harf = iliski (cins isim)   fakulte, anne, vali
+            #   BUYUK harf = varlik adi           Fakultesi, Ahmet
+            # Olculdu: iliskilerin 27/27'si kucuk, varlik
+            # kelimelerinin 241/242'si buyuk harfle basliyor.
+            # `@` bu ayrimin uzerine binen FAZLADAN bir isaretti ve
+            # dokumu okuyani "bu nasil bir token" diye durduruyordu.
+            return self.R[i - M.SPECIAL]
         # EK JETONLARI sozlugun SONUNDA (ek_kip="tr" -> 4 tane).
         # KUSUR (16 Eylul hakemligi): burada bu dal YOKTU ve `i` ek
         # jetonuysa varlik tablosunda aranip IndexError veriyordu. Yani
-        # bu arac `ek_kip` gelen HER kolda (model_b15, model_03) coker,
+        # bu arac `ek_kip` gelen HER kolda (model_b15, model_05) coker,
         # model_b13'te calisirdi -- model_b15'in verisi hic DOKULMEMIS.
         if getattr(v, "ek0", 0) and i >= v.ek0:
-            return ("'", "<NIN>", "<SI>", "<DIR>")[i - v.ek0]
+            # ek_kip="tr2":  '  + tamlayan allomorflari
+            # + bildirme allomorflari + soru sozcukleri.
+            # ("tr" kodlamasi 17 Eylul SILINDI.)
+            return (("'",) + tuple(v.ek_nin_ad)
+                    + tuple(v.ek_dir_ad)
+                    + tuple(v.soru_ad))[i - v.ek0]
         lo = v.yuva_ara[0][0]
         return v.par_ad[0][i - lo] if v.par is not None else self.ad(i - lo)
+
+    def oku(self, X0):
+        """Jeton dizisini OKUNABILIR TURKCE'ye cevir.
+
+        Kullanici, 17 Eylul: *"benim egitim diye gordugum hep soru var."*
+        Bildirim satirlari havuzda VARDI ama jeton halinde
+            Ibrahim Yilmaz ' in kardesi Ozlem Yilmaz ' dir .
+        diye gorunuyordu ve cumle oldugu anlasilmiyordu. Burasi tam
+        olarak MODELIN GORDUGU diziyi okur -- yeniden uretmez.
+
+        Kural: ek jetonlari (' , tamlayan, bildirme) ve noktalama
+        ONCEKI kelimeye YAPISIR; kelimeler bosluklu.
+        """
+        v, VM = self.v, self.VM
+        yapisik = {M.QM, M.EOS}
+        if getattr(v, "ek0", 0):
+            yapisik |= set(range(v.ek0, v.ek0 + 1 + len(v.ek_nin_ad)
+                                 + len(v.ek_dir_ad)))
+        par = []
+        for t in X0:
+            t = int(t)
+            if t == M.PAD:
+                break
+            if t < M.SPECIAL:
+                w = {M.QM: "?", M.EOS: "."}[t]
+            elif t < M.SPECIAL + v.n_rel:
+                w = VM.TR_ILISKI[self.R[t - M.SPECIAL]]
+            elif getattr(v, "ek0", 0) and t >= v.ek0:
+                w = self.jeton_ad(t)
+            else:
+                w = VM.TR.get(self.jeton_ad(t), self.jeton_ad(t))
+            if t in yapisik and par:
+                par[-1] += w
+            else:
+                par.append(w)
+        # CUMLE BASI buyuk harf -- YALNIZ okumada. Jeton kucuk harfli
+        # kalir (cins isim), yoksa "kim" ile "Kim" iki ayri jeton olurdu.
+        _c = " ".join(par)
+        for _i, _h in enumerate(_c):
+            if _h.isalpha():
+                _c = _c[:_i] + _h.upper() + _c[_i + 1:]
+                break
+        # cevap cumlesi de buyuk harfle basliyor -- "? " ya da ". "dan sonra
+        _o = []
+        _bas = False
+        for _h in _c:
+            _o.append(_h.upper() if _bas and _h.isalpha() else _h)
+            if _h.isalpha():
+                _bas = False
+            elif _h in "?.":
+                _bas = True
+        return "".join(_o)
 
     def dizi(self, X0):
         return " ".join(self.jeton_ad(t) for t in X0)
@@ -91,7 +166,8 @@ class Dok:
         return self.O.get((a1, self.R[r2])), a1
 
     def uzunluk(self, e):
-        return sum(1 for p in self.jetonlar(e) if p != "<YOK>")
+        # <YOK> SILINDI: `kelimeler()` zaten dolgu URETMIYOR.
+        return len(self.jetonlar(e))
 
 
 # ======================================================================
@@ -111,9 +187,10 @@ def yaz_tokenlar(d, yol):
         f.write("=" * 74 + "\n")
         f.write(f"toplam {v.vocab} jeton = {M.SPECIAL} ozel + {v.n_rel} "
                 f"iliski + {v.vocab - M.SPECIAL - v.n_rel} varlik parcasi\n")
-        f.write("NOT: id 6 ve 7 HICBIR YERDE kullanilmiyor (SPECIAL=8 ama\n")
-        f.write("     yalniz 6 ozel jeton adlandirilmis). Zararsiz, ama\n")
-        f.write("     sozlukte iki olu satir demek.\n\n")
+        f.write("OZEL blok UC jeton: <PAD> (satir dolgusu),"
+                " ? ve <SON> (noktalama)." + chr(10))
+        f.write("Olu jeton YOK -- [S1]/[S2]/[KIMLIK] ve iki bos"
+                " yuva 17 Eylul silindi." + chr(10) + chr(10))
         f.write(f"{'id':>4}  {'jeton':<22} {'gectigi varlik':>14}  aciklama\n")
         f.write("-" * 74 + "\n")
         for i in range(v.vocab):
@@ -189,19 +266,35 @@ def yaz_iliskiler(d, yol):
 
 
 def _satir(d, x, iki=True):
+    """Bir olguyu/zinciri, EGITIMDE GORUNEN BUTUN YUZEY BICIMLERIYLE yaz.
+
+    !! KUSUR (17 Eylul, kullanici fark etti): burada `kodla_*(v, [x])`
+    cagriliyordu ve `bicim_no` varsayilani 0 -- yani dokum HER SATIRI
+    kanonik SORU biciminde basiyordu. Havuzda bildirim satirlari
+    (117.562'nin 31.216'si) VARDI ama dokumde HIC GORUNMUYORDU, ve
+    veri "hep soru" gibi okunuyordu. Artik `ayar.bicim` kadar bicimin
+    HEPSI basiliyor."""
     v = d.v
+    _n = max(1, d.ayar.bicim)
+    _ad = ("KANONIK", "DEVRIK", "BILDIRIM")
     if iki:
         e, r1, r2, b, a = x
-        X, P, T = M.kodla_2hop(v, [x])
         ks = d.O.get((d.ham(e), d.R[r2]))
-        return (f"{d.ad(e):<26} --{d.R[r1]:<9}--> {d.ad(b):<26} "
-                f"--{d.R[r2]:<9}--> {d.ad(a):<26} | "
-                f"kisayol({d.R[r2]})={d.ad(d.E.index(ks)) if ks else '-':<24} | "
-                f"jeton: {d.dizi(X[0])}")
-    e, r1, a = x
-    X, P, T = M.kodla_1hop(v, [x])
-    return (f"{d.ad(e):<26} --{d.R[r1]:<9}--> {d.ad(a):<26} | "
-            f"jeton: {d.dizi(X[0])}")
+        bas = (f"{d.ad(e):<26} --{d.R[r1]:<9}--> {d.ad(b):<26} "
+               f"--{d.R[r2]:<9}--> {d.ad(a):<26} | "
+               f"kisayol({d.R[r2]})={d.ad(d.E.index(ks)) if ks else '-':<24}")
+        ic = []
+        for i in range(_n):
+            _x = M.kodla_2hop(v, [x], i)[0][0]
+            ic += [f"{_ad[i]:<9}{d.oku(_x)}", f"{'':<9}{d.dizi(_x)}"]
+    else:
+        e, r1, a = x
+        bas = (f"{d.ad(e):<26} --{d.R[r1]:<9}--> {d.ad(a):<26}")
+        ic = []
+        for i in range(_n):
+            _x = M.kodla_1hop(v, [x], i)[0][0]
+            ic += [f"{_ad[i]:<9}{d.oku(_x)}", f"{'':<9}{d.dizi(_x)}"]
+    return bas + (chr(10) + "      ").join([""] + ic)
 
 
 def yaz_liste(d, yol, lst, baslik, aciklama, iki=True, tam=True):
@@ -413,8 +506,8 @@ def saglik(d, f):
         olu = [i for i in range(len(v.par_ad[0])) if i not in kul]
         bak("sozlukte KULLANILMAYAN varlik jetonu yok", not olu,
             f"olu: {[v.par_ad[0][i] for i in olu][:5]}")
-    bak("ozel jeton id 6 ve 7 kullanilmiyor (BILINEN, zararsiz)", True,
-        "SPECIAL=8 ama 6 ozel jeton var -> iki olu satir")
+    bak("OZEL blok: olu jeton YOK", M.SPECIAL == 3,
+        "SPECIAL=3 -- <PAD>, ? ve <SON>, ucu de kullaniliyor")
 
     f.write("\n8) SINAV BOLMESI HOMOJEN MI\n" + "-" * 74 + "\n")
     f.write("   Tek sayi olarak okunan bir bolme icinde KOLAY ve ZOR vaka\n")
@@ -487,8 +580,8 @@ def yaz_taban(d, yol):
             if v.par is not None:
                 tam = kis = 0
                 for e, r1, r2, b, a in lst:
-                    sj = [p for p in d.jetonlar(e) if p != "<YOK>"]
-                    aj = [p for p in d.jetonlar(a) if p != "<YOK>"]
+                    sj = [p for p in d.jetonlar(e)]
+                    aj = [p for p in d.jetonlar(a)]
                     ort = sum(1 for p in aj if p in sj)
                     tam += (ort == len(aj))
                     kis += (ort > 0)
@@ -500,8 +593,8 @@ def yaz_taban(d, yol):
                 # 6) soyadi + dogru ad tahmini
                 pay = collections.Counter()
                 for e, r1, r2, b, a in lst:
-                    sj = [p for p in d.jetonlar(e) if p != "<YOK>"]
-                    aj = [p for p in d.jetonlar(a) if p != "<YOK>"]
+                    sj = [p for p in d.jetonlar(e)]
+                    aj = [p for p in d.jetonlar(a)]
                     pay[sum(1 for p in aj if p in sj)] += 1
                 f.write("       ortak jeton sayisi: " + "  ".join(
                     f"{k}->{100*x/n:.1f}%" for k, x in sorted(pay.items()))
@@ -513,17 +606,32 @@ def yaz_taban(d, yol):
                 #             kalitimi: baba/anne/kardes/cocuk AYNI soyad)
                 #      SABIT  o yuvanin EN SIK jetonu (cogu zaman <YOK>)
                 f.write("  6) YUVA BASINA taban (dogruluk UCUNU DE ister):\n")
+                # !! ADLAR DEGISKEN UZUNLUKTA (<YOK> silindi, 17 Eylul):
+                # "Adana"nin 2. yuvasi YOK. Eskiden dolgu vardi ve
+                # jetonlar(e)[j] her zaman donerdi; artik IndexError.
+                # Yuvasi olmayan ornek o yuvanin TABANINA GIRMEZ ve
+                # PAYDAYA da girmez -- yoksa oran sessizce kucuk cikardi.
+                _yuv = lambda e, j: (d.jetonlar(e)[j]
+                                     if j < len(d.jetonlar(e)) else None)
                 for j in range(v.yuva):
-                    kop = sum(1 for x in lst
-                              if d.jetonlar(x[4])[j] == d.jetonlar(x[0])[j])
-                    sk = collections.Counter(d.jetonlar(x[4])[j] for x in lst)
+                    _var = [x for x in lst if _yuv(x[4], j) is not None
+                            and _yuv(x[0], j) is not None]
+                    if not _var:
+                        continue
+                    _n = len(_var)
+                    kop = sum(1 for x in _var
+                              if _yuv(x[4], j) == _yuv(x[0], j))
+                    sk = collections.Counter(_yuv(x[4], j) for x in _var)
                     t_, n_ = sk.most_common(1)[0]
-                    f.write(f"       yuva {j}: SORUDAN KOPYA {kop/n:.4f}"
-                            f"   EN SIK '{t_}' {n_/n:.4f}\n")
+                    f.write(f"       yuva {j}: SORUDAN KOPYA {kop/_n:.4f}"
+                            f"   EN SIK '{t_}' {n_/_n:.4f}\n")
                 # 7) iliski bazinda kopya -- soyadi kalitiminin YERI
                 f.write("  7) SORUDAN KOPYA, iliskiye gore (yuva 1 = soyad):\n")
                 per = collections.defaultdict(lambda: [0, 0])
                 for x in lst:
+                    if min(len(d.jetonlar(x[4])),
+                           len(d.jetonlar(x[0]))) < 2:
+                        continue   # tek kelimeli ad: soyad YOK
                     k = per[d.R[x[2]]]
                     k[0] += (d.jetonlar(x[4])[1] == d.jetonlar(x[0])[1])
                     k[1] += 1
@@ -539,8 +647,8 @@ def yaz_taban(d, yol):
 
 def main():
     ap = argparse.ArgumentParser()
-    # `--model` YOK: bu arac yalniz model_03'i tanir.
-    ap.set_defaults(model="model_03")
+    # `--model` YOK: bu arac yalniz model_05'i tanir.
+    ap.set_defaults(model="model_05")
     ap.add_argument("--klasor", default=None,
                     help="varsayilan: <AILE>/veri/<model>")
     ap.add_argument("--tam", action="store_true",
@@ -556,24 +664,20 @@ def main():
         # model_b1 ("") ile model_b6 ("tam") AYNI grafi FARKLI dokerdi.
         a.klasor = os.path.join(_K, "veri", a.model)
     os.makedirs(a.klasor, exist_ok=True)
+    # TEK KLASOR, dosyalar AYRI AYRI -- kullanici karari,
+    # 17 Eylul: "hepsi ayri ayri dosya". Alt klasor denendi
+    # (denetim/) ve istenmedi.
     yol = lambda n: os.path.join(a.klasor, n)
     v = d.v
 
     yaz_tokenlar(d, yol("01_tokenlar.txt"))
     yaz_varliklar(d, yol("02_varliklar.txt"))
     yaz_iliskiler(d, yol("03_iliskiler.txt"))
-    yaz_liste(d, yol("04_egitim_1hop.txt"), v.one,
-              "EGITIM -- ATOMIK OLGULAR (1 hop)",
-              "Modelin EZBERLEMESI beklenen ham bilgi. Her olgu tek basina\n"
-              "[S1] cercevesinde soruluyor. Sinavdaki her zincirin iki hopu\n"
-              "da BU listede var -- yoksa soru cevaplanamaz olurdu.",
-              iki=False)
-    yaz_liste(d, yol("05_egitim_2hop.txt"), v.tr2,
-              "EGITIM -- GORULEN ZINCIRLER (2 hop)",
-              "Egitimde GORULEN 2-hop zincirler. Bunlar EZBER havuzu:\n"
-              "`seen` bolmesi buradan orneklenir ve SAGLIK olcer, genelleme\n"
-              "OLCMEZ. Sinav bolmeleri bu listeyle KESISMEZ (00_OZET 2).",
-              tam=a.tam)
+    # !! 04/05 (EGITIM dokumu) KALDIRILDI -- kullanici, 17 Eylul:
+    # "niye iki tane egitim var?". `egitim_dok_05` zaten EGITIM_*.txt
+    # olarak DUZ halini yaziyor; bu ikisi ayni icerigin aciklamali
+    # kopyasiydi. SINAV dokumleri (06-09) KALIYOR cunku onlarda KOPRU
+    # ve KISAYOL var -- sinav sorusu onlarsiz okunmaz.
     for ad, dosya, ack in (
         ("comp", "06_sinav_comp.txt",
          "Bu (varlik, r1, r2) UCLUSU egitimde hic gorulmedi. Ama varlik\n"
@@ -656,20 +760,23 @@ def main():
                 + "\n")
         f.write("   -> tek jetonlu cevaplarda COK JETONLU BAGLAMA hic\n")
         f.write("      sinanmiyor. tani_b uzunluga gore AYIRIR (onkayit 2.6).\n\n")
-        f.write("3. YUVA 2 NEREDEYSE BEDAVA\n")
+        f.write("3. YUVA DOLGUSU KALKTI" + '\\n')
+        f.write("   Bu baslik eskiden <YOK> dolgusunu olcuyordu: adlar" + '\\n')
+        f.write("   TAM 3 yuvaydi ve kisa adlarda son yuva HEP <YOK>" + '\\n')
+        f.write("   oldugu icin BEDAVA geliyordu. 17 Eylul: dolgu" + '\\n')
+        f.write("   SILINDI, ad kac kelimeyse o kadar jeton. Bedava" + '\\n')
+        f.write("   yuva diye bir sey KALMADI." + '\\n')
         if v.par is not None:
-            for bol in ("ood",):
-                lst = d.L.get(bol) or []
-                for j in range(v.yuva):
-                    sk = collections.Counter(d.jetonlar(x[4])[j] for x in lst)
-                    t_, n_ = sk.most_common(1)[0]
-                    f.write(f"   {bol} yuva {j}: en sik '{t_}' "
-                            f"%{100*n_/len(lst):.1f}\n")
-        f.write("   -> dogruluk UC yuvayi da ister ama son yuva cogu zaman\n")
-        f.write("      <YOK>. Gercek yuk yuva 0'da (ad/ilk parca).\n\n")
+            import collections as _c
+            _d = _c.Counter(len(d.jetonlar(e)) for e in range(v.n_ent))
+            f.write("   ad uzunlugu dagilimi: " + str(dict(sorted(_d.items())))
+                    + '\\n')
         f.write("4. SOYADI KALITIMI -- yuva 1 kismen KOPYALANABILIR\n")
         lst = d.L.get("ood") or []
         if v.par is not None and lst:
+            lst = [x for x in lst
+                   if min(len(d.jetonlar(x[4])),
+                          len(d.jetonlar(x[0]))) >= 2]
             kop = sum(1 for x in lst
                       if d.jetonlar(x[4])[1] == d.jetonlar(x[0])[1])
             f.write(f"   ood: yuva 1, sorudan kopyalayarak "
@@ -677,9 +784,11 @@ def main():
             f.write("   (kardes/anne/cocuk'ta %45-54). AMA cevabin BUTUN\n")
             f.write("   jetonlarinin soruda oldugu ornek: %0.0 -- yani\n")
             f.write("   kopyalama TEK BASINA hicbir soruyu gecirmiyor.\n\n")
-        f.write("5. SOZLUKTE IKI OLU SATIR\n")
-        f.write("   SPECIAL=8 ama yalniz 6 ozel jeton adlandirilmis; id 6\n")
-        f.write("   ve 7 hicbir yerde kullanilmiyor. Zararsiz.\n\n")
+        f.write("5. OZEL BLOK TEMIZ" + chr(10))
+        f.write("   SPECIAL=3 -- <PAD>, ? ve <SON>. Eskiden 8 idi"
+                " ve besi olu" + chr(10))
+        f.write("   duruyordu ([S1], [S2], [KIMLIK] ve iki bos"
+                " yuva); 17 Eylul silindi." + chr(10) + chr(10))
         f.write("6. `ent_yok`, `ent`in ALT KUMESI DEGIL\n")
         f.write("   CLAUDE.md boyle yaziyordu; OLCULDU ve YANLIS. Ikisi de\n")
         f.write("   ayni varlik havuzundan (ortak 310) ama ZINCIR kumeleri\n")

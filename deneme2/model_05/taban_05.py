@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""taban_03 — model_03'in KENDI motoru. TEK BASINA DURUR.
+"""taban_05 — model_05'in KENDI motoru. TEK BASINA DURUR.
 
 Kullanici karari, 16 Eylul 2026:
-    *"bunlarin hepsi model_03 folderi altinda olmali. model_03 diger
+    *"bunlarin hepsi model_05 folderi altinda olmali. model_05 diger
     hicbir model ile ayni seyi kullanmamali."*
 
-Bu dosya `model_a.py`nin KOPYASIDIR ve artik model_03'a aittir.
+Bu dosya `model_a.py`nin KOPYASIDIR ve artik model_05'a aittir.
 `model_a`/`model_b` icin yapilan bir degisiklik buraya GECMEZ.
 
 Icindekiler: `Ayar`, `Veri`, `veri_kur`, kodlayicilar, `egitim_havuzu`,
@@ -16,13 +16,13 @@ goruntu + surdurme, ve `egit`.
 !! KOPYANIN BEDELI -- ve nasil odendigi
 
 Paylasilan motorda bir olcum hatasi duzeltilirse, o duzeltme buraya
-KENDILIGINDEN gelmez; model_03 ile model_b15 O GUNDEN SONRA FARKLI
+KENDILIGINDEN gelmez; model_05 ile model_b15 O GUNDEN SONRA FARKLI
 KODLA olculmus olur. Bu, kopyanin gercek riski ve gozden kacarsa
 sayilari sessizce karsilastirilamaz hale getirir.
 
-Bunun icin `test_03.py` her kosuda DAVRANIS ESDEGERLIGI siniyor:
+Bunun icin `test_05.py` her kosuda DAVRANIS ESDEGERLIGI siniyor:
 
-    egitim havuzu       taban_03 vs model_a  -> BIT DUZEYINDE ayni
+    egitim havuzu       taban_05 vs model_a  -> BIT DUZEYINDE ayni
     olcme listeleri     olcme_izi            -> AYNI
     Ayar alanlari       ESKI_VARSAYILAN      -> AYNI
     kodlayici ciktilari ayni girdi           -> AYNI dizi
@@ -45,16 +45,29 @@ import torch.nn.functional as F
 # etkisidir ve deterministiktir: ortam degiskeni okumuyor, ayar tasimiyor
 # (sifirdan.py'nin arizasi oydu, bkz. ISIMLENDIRME.md).
 # NOT: `model_a.py` burada bir ust klasoru yola ekleyip `veri_okul`u
-# import ediyordu. `taban_03` bunu YAPMIYOR: model_03'in verisi
-# `veri_03.py`, ve o BU klasorde. Veri modulu `veri_kur` icinde
+# import ediyordu. `taban_05` bunu YAPMIYOR: model_05'in verisi
+# `veri_05.py`, ve o BU klasorde. Veri modulu `veri_kur` icinde
 # `ayar.veri_ad`dan import ediliyor (asagida), burada degil.
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Ozel token'lar. ENT_OFF/VOCAB veriden TURER (Veri.__post_init__), burada
 # sabit YAZILMAZ -- arsivde `ENT_OFF` bir kez elle 14 yazilmis, 16'ymis.
-PAD, Q1, Q2, QM, EOS, IDENT = 0, 1, 2, 3, 4, 5
-SPECIAL = 8
+# !! OZEL BLOK 8'DEN 3'E INDI -- kullanici karari, 17 Eylul:
+#     "bunlar niye var?"  ...  "silinsin tabii ki"
+# Olculdu: sekiz ozel jetonun BESI havuzda HIC gecmiyordu.
+#     [S1]  [S2]  [KIMLIK]  <KULLANILMIYOR> x2
+# [S1]/[S2] ekli olmayan kodlamanin soru isaretcileriydi; gercek eklerle
+# gereksizler (tamlayan eki zaten zinciri isaretliyor). [KIMLIK] kimlik
+# satirinin isaretcisiydi; o satir artik Turkce yazildigi icin
+# ("Ibrahim Yilmaz kimdir?") ona da gerek kalmadi.
+#
+# Sonuc: `ek_kip=""` (eksiz) ve `ek_kip="tr"` KODLAMA YOLLARI SILINDI --
+# Q1/Q2/IDENT sabitleri yalniz onlar icindi. Bu kol yalniz "tr2" kosar.
+# Bedeli: `taban_05` artik ortak motorun BIREBIR KOPYASI DEGIL, yani
+# `test_05`in model_a kopya-sapma bekcisi BILDIRILMIS AYRISMAYA dondu.
+PAD, QM, EOS = 0, 1, 2      # dolgu,  soru isareti '?',  nokta '.'
+SPECIAL = 3
 REL_OFF = SPECIAL
 T_LEN = 8
 
@@ -62,11 +75,11 @@ T_LEN = 8
 # ======================= AYAR ============================================
 @dc.dataclass(frozen=True)
 class Ayar:
-    ad: str = "model_03"
+    ad: str = "model_05"
 
     # --- veri (bir ailenin butun kollarinda AYNI olmali, yoksa
     #     'sartlar esit' bozulur ve kollar farkli veri gorur)
-    veri_ad: str = "veri_03"     # HANGI GRAF. "veri_okul2" = tam IKI KATI.
+    veri_ad: str = "veri_05"     # HANGI GRAF. "veri_okul2" = tam IKI KATI.
     #   15 Eylul'de eklendi. Modul adi olarak yaziliyor ki `ayar_t<N>.json`a
     #   girsin: "bu kosu hangi veriyi gordu" sorusu SONRADAN cevaplanabilsin.
     #   Alan eklemek SURDURMEYI bozabilirdi (eski paketlerde bu anahtar YOK
@@ -254,7 +267,16 @@ class Ayar:
     #   <DIR> yuklem (cevap)
     # Jetonlar SOZLUGUN SONUNA ekleniyor -> REL_OFF/ent_off KAYMAZ,
     # ek_kip="" ile uretilen diziler BIT AYNI kalir.
-    ek_kip: str = ""           # "" | "tr"
+    # ek_kip="tr2" -- KULLANICI KARARI, 17 Eylul:
+    #   *"ben duzgun bir turkce ile egitim istiyorum. Fakultesi ile
+    #    fakultesi ayri seyler, o da ilk harften ayrisiyor."*
+    # "tr" kipinde iliski KOK jetonuydu ve iyeligi ayri bir <SI> jetonu
+    # tasiyordu (fakulte + <SI>). "tr2"de iliski KELIMENIN KENDISI:
+    #   fakultesi   kucuk harf, CINS isim   <- iliski
+    #   Fakultesi   BUYUK harf, OZEL adin parcasi
+    # Ikisini ayiran sey YAZIM; fazladan isaretleyici GEREKMIYOR.
+    # <SI> KALKTI, yerine SORU SOZCUGU geldi (kim / neresi / hangisi).
+    ek_kip: str = ""           # "" | "tr" | "tr2"
     bicim: int = 1             # kac YUZEY BICIMI (1..3), ek_kip GEREKTIRIR
     #   0 = KAPALI. >0 ise egitim havuzuna BELGE satirlari eklenir:
     #   ZINCIRLENEN IKI ATOMIK OLGU AYNI DIZIDE.
@@ -303,22 +325,24 @@ class Ayar:
         """Dizi uzunlugu. ALAN DEGIL, TURETILMIS -- `jeton_ad`dan duser,
         yani iki yerde iki deger olamaz.
 
-            [Q2] e        r1 r2 ?  a       EOS       ->  8
-            [Q2] e1 e2    r1 r2 ?  a1 a2   EOS       -> 11
+        Yalniz ek_kip="tr2" kuruldu; eksiz ve "tr" yollari SILINDI.
         """
-        if self.ek_kip:
-            # bicim 0 (en uzun): 2-hop
-            #   e1 e2 e3 ' <NIN> r1 <SI> <NIN> r2 <SI> ? a1 a2 a3 ' <DIR> EOS
-            #   = 2*yuva + 11 = 17   (yuva 3)
-            # 1-hop bicim 0: e ' <NIN> r <SI> ? a ' <DIR> EOS = 14
-            # kimlik satiri (eksiz, degismedi) = 10 -- ikisi de siginir.
-            assert self.jeton_ad == "tam", (
-                f"ek_kip su an yalniz jeton_ad='tam' ile KURULDU: "
-                f"{self.jeton_ad!r}")
-            assert self.belge_pay == 0, (
-                "ek_kip + belge_pay BIRLIKTE KURULMADI: belge satirina ek "
-                "isaretleyici eklenmedi, t_len turetimi yanlis olur.")
-            return 17
+        assert self.ek_kip == "tr2", (
+            f"model_05 yalniz ek_kip='tr2' kosar; eksiz ve 'tr' kodlama "
+            f"yollari SILINDI (17 Eylul). Gelen: {self.ek_kip!r}")
+        assert self.jeton_ad == "tam", (
+            f"ek_kip yalniz jeton_ad='tam' ile KURULDU: {self.jeton_ad!r}")
+        assert self.belge_pay == 0, (
+            "belge satiri ek isaretleyici TASIMIYOR; t_len turetimi "
+            "yanlis olurdu. `kodla_belge` de SILINDI.")
+        # !! SORU + TAM CUMLE CEVAP (17 Eylul). En uzun satir 2-hop
+        # bicim 0:
+        #   SORU   e1 e2 e3 ' NIN r1 NIN r2 SORU ?          = yuva + 7
+        #   CEVAP  e1 e2 e3 ' NIN r1 NIN r2 a1 a2 a3 ' DIR . = 2*yuva + 8
+        #   TOPLAM = 3*yuva + 15 = 24   (yuva 3)
+        # 1-hop bicim 0: (yuva+5) + (2*yuva+6) = 3*yuva + 11 = 20
+        # kimlik      : e SORU DIR ? e ' DIR .              = 2*yuva + 6
+        return 3 * 3 + 15
         if not self.jeton_ad:
             return T_LEN
         # "ilk" 2 yuva, "tam" 3 yuva. Ikisinde de 2-hop 11'e siginiyor:
@@ -435,7 +459,24 @@ class Veri:
     #   jeton_ad=False ise None ve hicbir sey degismez.
     par_ad: tuple = ()                 # (yuva1 adlari, yuva2 adlari)
     t_len: int = 0                     # veri_kur doldurur (ayar.t_len)
-    ek_kip: str = ""                   # "" | "tr"  (ayar.ek_kip)
+    ek_kip: str = ""                   # "" | "tr" | "tr2"  (ayar.ek_kip)
+    soru_ad: tuple = ()                # ek_kip="tr2": SORU SOZCUKLERI,
+    #   veri modulunun `SORU_SOZ`undan, SIRALI (determinizm).
+    soru_tip: tuple = ()               # tip indeksi -> soru_ad indeksi.
+    dir_soru: tuple = ()               # soru sozcugu -> ek_dir_ad indeksi
+    #   ("kimdir", "neresidir") -- kimlik satiri icin.
+    #   Motor tip ADLARINI BILMEZ; esleme VERI MODULUNDEN gelir.
+    # --- EK ALLOMORFLARI (ek_kip="tr2") ---------------------------------
+    # Turkce'de tamlayan eki sekiz bicimde: -in/-in/-un/-un ve sesliden
+    # sonra -nin/... Ilk surumde TEK <NIN> jetonu hepsini ortuyordu;
+    # kullanici fark etti (17 Eylul). Hangi bicimin gelecegi ONCEKI
+    # KELIMEDEN belirli, yani YENI BILGI DEGIL -- dilin yuzeyi.
+    # Unlu uyumunu VERI MODULU hesaplar, motor yalniz INDEKS tasir.
+    ek_nin_ad: tuple = ()              # ("in","in","un",... ) 8 bicim
+    ek_dir_ad: tuple = ()              # ("dir","dir","dur",...) 8 bicim
+    nin_ent: tuple = ()                # varlik -> ek_nin_ad indeksi
+    dir_ent: tuple = ()                # varlik -> ek_dir_ad indeksi
+    nin_rel: tuple = ()                # iliski -> ek_nin_ad indeksi
 
     def __post_init__(self):
         self.n_ent, self.n_rel = self.facts.shape
@@ -475,9 +516,43 @@ class Veri:
         # BIT AYNI kalir, eski kosular gecerliligini korur.
         self.ek0 = 0
         if self.ek_kip:
-            assert self.ek_kip == "tr", f"ek_kip: {self.ek_kip!r}"
+            assert self.ek_kip == "tr2", (
+                f"eksiz ve 'tr' kodlama yollari SILINDI: {self.ek_kip!r}")
             self.ek0 = self.vocab
-            self.vocab += 4            # '  <NIN>  <SI>  <DIR>
+            if True:
+                # '  + NIN allomorflari + DIR allomorflari + SORU SOZCUKLERI
+                assert self.soru_ad, "tr2 SORU_SOZ ister -- veri modulu vermeli"
+                assert len(self.soru_tip) == len(self.tip_ad), (
+                    "soru_tip her TIP icin bir deger tasimali")
+                assert self.ek_nin_ad and self.ek_dir_ad, (
+                    "tr2 EK ALLOMORFLARINI ister -- veri modulu vermeli")
+                assert len(self.nin_ent) == len(self.dir_ent) == self.n_ent, (
+                    "her VARLIK icin ek bicimi belli olmali")
+                assert len(self.nin_rel) == self.n_rel, (
+                    "her ILISKI icin ek bicimi belli olmali")
+                self.nin0 = self.ek0 + 1
+                self.dir0 = self.nin0 + len(self.ek_nin_ad)
+                self.soru0 = self.dir0 + len(self.ek_dir_ad)
+                self.vocab += (1 + len(self.ek_nin_ad) + len(self.ek_dir_ad)
+                               + len(self.soru_ad))
+        # --- DEGISKEN UZUNLUKLU AD (17 Eylul, kullanici: "<YOK> sil,
+        # gereksiz"). Once her varlik TAM `yuva` jeton kapliyordu ve kisa
+        # adlar <YOK> ile SAGDAN dolduruluyordu -- havuzdaki butun
+        # jetonlarin %11,5'i dolguydu ve "Adana <YOK> <YOK>" Turkce
+        # DEGILDI. Artik ad kac kelimeyse o kadar jeton.
+        #
+        # SINIR ZATEN ISARETLI: her adin ardindan KESME ISARETI geliyor
+        # ("Adana'nin"). Yani dolguya gerek yok -- model adi bitirip `'`
+        # demeyi ogrenmek zorunda, ki bu DAHA GERCEK bir dil gorevi.
+        if self.par is not None and self.ek_kip == "tr2":
+            self.n_yuva = tuple(
+                int((self.par[e] >= 0).sum()) for e in range(self.n_ent))
+            assert min(self.n_yuva) >= 1, "her adin en az bir kelimesi olmali"
+            # CEVAP pozisyonlarinda izin verilen kume: VARLIK kelimeleri
+            # ARTI kesme isareti. Ikisi BITISIK (ent_off .. ek0 .. ek0+1),
+            # yani tek aralik yetiyor.
+            self.cevap_ara = (self.ent_off, self.ek0 + 1)
+            self.cevap_yuva = self.yuva + 1      # en uzun ad + `'`
         if not self.t_len:
             self.t_len = 11 if self.par is not None else T_LEN
         # phi: TURETILMIS TANI SAYISI, kontrol parametresi DEGIL. Ayarlanamaz;
@@ -531,17 +606,21 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
     _par = _par_ad = None
     if ayar.jeton_ad == "tam":
         # DOGRU KODLAMA: butun alt cizgiler, TEK PAYLASILAN sozluk.
+        # !! `<YOK>` SOZLUKTEN CIKTI (17 Eylul, kullanici: "sil,
+        # gereksiz"). Kisa adlar artik SAGDAN DOLDURULMUYOR; `par`in
+        # bos yuvalari -1 tasiyor ve `_e` onlari HIC uretmiyor.
+        # Sinir zaten KESME ISARETI ile isaretli ("Adana'nin").
         _yuva = max(len(a.split("_")) for a in E)
         _pl = sorted({p for a in E for p in a.split("_")})
-        _ix = {p: i + 1 for i, p in enumerate(_pl)}      # 0 = <YOK>
-        _par = np.array([[_ix.get(p, 0) for p in
-                          (a.split("_") + ["<YOK>"] * _yuva)[:_yuva]]
+        _ix = {p: i for i, p in enumerate(_pl)}
+        _par = np.array([[(_ix[p] if p is not None else -1) for p in
+                          (a.split("_") + [None] * _yuva)[:_yuva]]
                          for a in E], np.int64)
-        _sz = ("<YOK>",) + tuple(_pl)
+        _sz = tuple(_pl)
         _par_ad = (_sz,) * _yuva                         # AYNI sozluk, her yuva
         assert not any("_" in p for p in _pl), "jeton icinde ALT CIZGI kaldi"
         assert len({tuple(r) for r in _par}) == len(E),             "BIREBIR DEGIL -- ayni jeton dizisi birden cok varliga denk"
-        _coz = lambda r: "_".join(_sz[i] for i in r if i)
+        _coz = lambda r: "_".join(_sz[i] for i in r if i >= 0)
         _kt = [(E[i], _coz(_par[i])) for i in range(len(E))
                if _coz(_par[i]) != E[i]]
         assert not _kt, f"GIDIS-DONUS BOZUK: {_kt[:3]}"
@@ -686,6 +765,26 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
             f"egitim zinciri {_n0} -> {len(tr2)} "
             f"(-{_n0 - len(tr2)}, %{100*(_n0-len(tr2))/max(1,_n0):.1f})")
 
+    # --- SORU SOZCUKLERI (ek_kip="tr2") -- VERI MODULUNDEN --------------
+    # Motor tip ADLARINI bilmez: "KISI'ye kim denir"i veri modulu soyler.
+    # Sirali, cunku jeton id'leri buradan duser ve DETERMINIST olmali.
+    _soru_ad, _soru_tip = (), ()
+    _ek_nin_ad = _ek_dir_ad = _nin_ent = _dir_ent = _nin_rel = ()
+    _dir_soru = ()
+    if ayar.ek_kip == "tr2":
+        _SS = getattr(_V, "SORU_SOZ", None)
+        assert isinstance(_SS, dict) and set(_SS) == set(_V.TIPLER), (
+            f"{ayar.veri_ad}.SORU_SOZ her TIP icin bir soru sozcugu "
+            f"vermeli (ek_kip='tr2'): {_SS}")
+        _soru_ad = tuple(sorted(set(_SS.values())))
+        _soru_tip = tuple(_soru_ad.index(_SS[t]) for t in _V.TIPLER)
+        _ES = _V.ek_secim(G)
+        _ek_nin_ad, _ek_dir_ad = tuple(_V.EK_NIN), tuple(_V.EK_DIR)
+        _nin_ent = tuple(_ES["nin_varlik"][a] for a in E)
+        _dir_ent = tuple(_ES["dir_varlik"][a] for a in E)
+        _nin_rel = tuple(_ES["nin_iliski"][r] for r in _V.ILISKI)
+        _dir_soru = tuple(_ES["dir_soru"][w] for w in _soru_ad)
+
     say = lambda L: [(eid[x[0]], rid[x[1]], rid[x[2]], eid[x[3]], eid[x[4]])
                      for x in L]
     v = Veri(facts=facts, one=[(eid[e], rid[r], eid[h])
@@ -694,7 +793,11 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
              ent_yok=say(ent_yk), ent_arama=say(ent_ar),
              tip=E_tip, tip_ad=tuple(_V.TIPLER), ent_kati=say(ent_kt),
              ood=say(ood_ay), par=_par, par_ad=_par_ad or (),
-             t_len=ayar.t_len, ek_kip=ayar.ek_kip)
+             t_len=ayar.t_len, ek_kip=ayar.ek_kip,
+             soru_ad=_soru_ad, soru_tip=_soru_tip,
+             ek_nin_ad=_ek_nin_ad, ek_dir_ad=_ek_dir_ad,
+             nin_ent=_nin_ent, dir_ent=_dir_ent, nin_rel=_nin_rel,
+             dir_soru=_dir_soru)
 
     # --- SIZINTI DENETIMI -- sessiz gecmesin
     trset = {(e, a, b) for e, a, b, _, _ in v.tr2}
@@ -790,124 +893,163 @@ def _e(v, e):
     blogu gosterir, ayrik sozlukte her yuva kendi blogunu."""
     if v.par is None:
         return [v.ent_off + e]
-    return [v.yuva_ara[j][0] + int(v.par[e, j]) for j in range(v.yuva)]
+    n = v.n_yuva[int(e)] if getattr(v, "n_yuva", None) else v.yuva
+    return [v.yuva_ara[j][0] + int(v.par[e, j]) for j in range(n)]
 
 
-def _ekler(v):
-    """(KESME, NIN, SI, DIR) -- sozlugun SONUNA eklendi (Veri.__post_init__).
-    Eski jeton id'leri KAYMADI."""
-    assert v.ek_kip == "tr", "ek_kip kapali, ek isaretleyici YOK"
-    return v.ek0, v.ek0 + 1, v.ek0 + 2, v.ek0 + 3
+def _cevap(v, az, a0):
+    """Cevabin KAYIP POZISYONLARI ve HEDEFLERI, degisken uzunlukta.
+
+    Ad kac kelimeyse o kadar hedef, ARDINDAN kesme isareti -- yani model
+    "adi dogru yaz" VE "dogru yerde bitir" diye olculuyor. Kalan yuvalar
+    -1 ile MASKELENIR (kayipta da, dogruluk()'ta da atlanir).
+
+        Kocaeli ' dir           -> hedef [Kocaeli, ', -1, -1]
+        Ozlem Yilmaz ' dir      -> hedef [Ozlem, Yilmaz, ', -1]
+    """
+    n = v.cevap_yuva
+    hedef = list(az) + [_kesme(v)] + [-1] * (n - len(az) - 1)
+    assert len(hedef) == n, (len(az), n)
+    return list(range(a0 - 1, a0 - 1 + n)), hedef
+
+
+def kelimeler(v, e):
+    """Varligin AD KELIMELERI, DOLGU YOK. Araclar icin TEK KAYNAK.
+
+    !! `v.par[e, j]` bos yuvada -1 tasiyor (<YOK> 17 Eylul'de silindi).
+    Python'da -1 SON ELEMANI verir, yani `par_ad[j][par[e,j]]` diye
+    dogrudan indekslemek SESSIZCE sozlugun son kelimesini basar.
+    FIILEN OLDU: dokumde "Ibrahim Yilmaz" varligi
+        Ibrahim | Yilmaz | Zonguldak
+    diye cikti ("Zonguldak" alfabetik olarak son kelime). Kullanici
+    fark etti, 17 Eylul. Alti ayri arac ayni indekslemeyi kopyalamisti;
+    hepsi artik BURAYI cagiriyor.
+    """
+    if v.par is None:
+        return [str(int(e))]
+    return [v.par_ad[j][int(v.par[e, j])] for j in range(v.yuva)
+            if int(v.par[e, j]) >= 0]
+
+
+def _kesme(v):
+    """KESME ISARETI -- ek_kip='tr2'. <SI> YOK: iliski jetonu kendi
+    iyelik ekini tasiyor ('fakultesi')."""
+    assert v.ek_kip == "tr2", "ek_kip 'tr2' degil"
+    return v.ek0
+
+
+def _nin(v, e=None, r=None):
+    """Tamlayan eki jetonu, ONCEKI KELIMEYE gore (unlu uyumu).
+        Yilmaz -> 'in    Kaya -> 'nin    kardesi -> nin"""
+    i = v.nin_rel[int(r)] if r is not None else v.nin_ent[int(e)]
+    return v.nin0 + int(i)
+
+
+def _dir(v, a):
+    """Bildirme eki jetonu.  Yilmaz -> 'dir   Celik -> 'tir"""
+    return v.dir0 + int(v.dir_ent[int(a)])
+
+
+def _dir_soru(v, sz_jeton):
+    """SORU SOZCUGUNDEN sonraki bildirme eki: "kim" + "dir" = "kimdir".
+    Indeks veri modulunden -- motor unlu uyumu HESAPLAMAZ."""
+    return v.dir0 + int(v.dir_soru[sz_jeton - v.soru0])
+
+
+def _soru(v, e):
+    """`e` varliginin TIPINE gore soru sozcugu jetonu (kim/neresi/hangisi).
+
+    Cevabin tipi zaten ILISKIDEN belirli (olculdu: 27/27 iliskide hedef
+    tip TEK). Yani bu jeton YENI BILGI TASIMAZ -- dilin dogal parcasi
+    oldugu icin var, gorevi kolaylastirmak icin degil."""
+    # !! ADRES `v.soru0`DAN -- elle "ek0 + 3" YAZILMAZ. Ek blogu
+    # allomorflar eklenince 3 jetondan 17'ye cikti ve elle yazilan
+    # kayma sessizce EK JETONU basmaya basladi (olculdu: "kardesi un ?").
+    return v.soru0 + int(v.soru_tip[int(v.tip[int(e)])])
 
 
 def kodla_1hop(v: Veri, batch, bicim_no: int = 0):
-    """[Q1] e r ? cevap EOS   -> hedef pozisyon 3
-    jeton_ad: [Q1] e1 e2 r ? a1 a2 EOS -> hedefler 4 ve 5.
+    """1-HOP satiri -- soru + TAM CUMLE cevap.
 
-    ek_kip="tr": rolu POZISYON degil EK tasir, o yuzden SIRA DEGISEBILIR.
-        0  Ayse Yilmaz <YOK> ' <NIN> anne <SI> ? Fatma Yilmaz <YOK> ' <DIR> EOS
-        1  anne <SI> Ayse Yilmaz <YOK> ' <NIN> ? Fatma Yilmaz <YOK> ' <DIR> EOS
-        2  Ayse Yilmaz <YOK> ' <NIN> anne <SI> Fatma Yilmaz <YOK> ' <DIR> EOS
-           ^ bildirim: soru isareti YOK
+    Kullanici karari, 17 Eylul: *"sorular ve cevaplar su sekilde olmali:
+    'Ayse Yilmaz'in annesi kim? cevap: Ayse Yilmaz'in annesi Fatma
+    Yilmaz' gibi, bu sayede olguyu da ogrenmis olur."*
 
-    Ucunde de CEVAP SONDA. "Fatma'dir Ayse'nin annesi" gibi cevap-basta
-    bir bicim KURULMADI: o dizide cevap hicbir seyden turemiyor, yani
-    cevap pozisyonu bir sey OLCMUYOR olurdu.
+        0 KANONIK   Ibrahim Yilmaz'in kardesi kim?
+                    Ibrahim Yilmaz'in kardesi Ozlem Yilmaz'dir.
+        1 DEVRIK    Kim Ibrahim Yilmaz'in kardesi?
+                    Ibrahim Yilmaz'in kardesi Ozlem Yilmaz'dir.
+        2 BILDIRIM  Ibrahim Yilmaz'in kardesi Ozlem Yilmaz'dir.
+
+    UCUNDE DE cevap cumlesi AYNI. Soru varsa ONUNE geliyor, yoksa cumle
+    tek basina duruyor. Yani "olgu" her bicimde ayni geciste ogretiliyor:
+        "Ibrahim Yilmaz ' in kardesi"  ->  Ozlem
+
+    BEDELI OLCULDU: t_len 16 -> 24, ve soruyla cevap arasinda 8 jetona
+    kadar BIREBIR KOPYA var (ozne + iliskiler yeniden yaziliyor). Model
+    icin bedava; zor jetonun dizideki payi %19'dan %12'ye duser.
+
+    CEVAP HEP SONDA. "Fatma'dir Ayse'nin annesi" gibi cevap-basta bir
+    bicim KURULMADI: o dizide cevap hicbir seyden turemiyor.
     """
     X = _bos(len(batch), v)
     P, T = [], []
     for i, (e, r, a) in enumerate(batch):
         ez, az = _e(v, e), _e(v, a)
-        if not v.ek_kip:
-            dz = [Q1] + ez + [REL_OFF + r, QM] + az + [EOS]
-            a0 = 3 + v.yuva                  # ILK cevap jetonunun yeri
-        else:
-            K, N, S, D = _ekler(v)
-            oz, il = ez + [K, N], [REL_OFF + r, S]
-            on = {0: oz + il + [QM], 1: il + oz + [QM], 2: oz + il}[bicim_no % 3]
-            dz = on + az + [K, D, EOS]
-            a0 = len(on)
+        K = _kesme(v)
+        oz, il = ez + [K, _nin(v, e=e)], [REL_OFF + r]
+        sz, D = _soru(v, a), _dir(v, a)
+        bil = oz + il + az + [K, D, EOS]        # CEVAP CUMLESI
+        soru = {0: oz + il + [sz, QM],
+                1: [sz] + oz + il + [QM],
+                2: []}[bicim_no % 3]
+        dz = soru + bil
+        a0 = len(soru) + len(oz) + len(il)      # cevabin ILK jetonu
         assert len(dz) <= v.t_len, (len(dz), v.t_len, bicim_no)
         X[i, :len(dz)] = dz
-        # next-token: a0'daki jeton a0-1'den tahmin edilir
-        P.append(list(range(a0 - 1, a0 - 1 + v.yuva)))
-        T.append(az)
+        _p, _t = _cevap(v, az, a0)
+        P.append(_p)
+        T.append(_t)
     return X, np.array(P, np.int64), np.array(T, np.int64)
 
 
 def kodla_2hop(v: Veri, batch, bicim_no: int = 0):
-    """[Q2] e r1 r2 ? cevap EOS   -> hedef pozisyon 4
-    jeton_ad: [Q2] e1 e2 r1 r2 ? a1 a2 EOS -> hedefler 5 ve 6.
+    """2-HOP satiri -- soru + TAM CUMLE cevap. Ayrinti: `kodla_1hop`.
 
-    ek_kip="tr": "Ayse Yilmaz'in cocugunun kardesi ...dir"
-        cocugunun = cocuk <SI> <NIN>   -- zincir DIZIDE isaretli
-        0  e ' <NIN> r1 <SI> <NIN> r2 <SI> ? a ' <DIR> EOS      (KANONIK)
-        1  r2 <SI> r1 <SI> <NIN> e ' <NIN> ? a ' <DIR> EOS      (devrik)
-        2  e ' <NIN> r1 <SI> <NIN> r2 <SI> a ' <DIR> EOS        (bildirim)
+        0 KANONIK   Ibrahim Yilmaz'in arkadasinin memleketi neresi?
+                    Ibrahim Yilmaz'in arkadasinin memleketi Kocaeli'dir.
+        1 DEVRIK    Neresi Ibrahim Yilmaz'in arkadasinin memleketi?
+                    Ibrahim Yilmaz'in arkadasinin memleketi Kocaeli'dir.
+        2 BILDIRIM  Ibrahim Yilmaz'in arkadasinin memleketi Kocaeli'dir.
 
-    !! OLCME HEP bicim 0 ile yapilir (onkayit). Egitim `ayar.bicim`
-    kadar bicim gorur; sinav TEK bicimdir, yoksa "cesitlilik ogretti mi"
-    sorusu "cesitlilikle mi sinandi" sorusuna karisirdi.
+    KOPRU DIZIDE YOK -- ne soruda ne cevapta. Model onu YAZMADAN
+    kullanmak zorunda; bu kolun BUTUN sorusu bu.
     """
     X = _bos(len(batch), v)
     P, T = [], []
     for i, (e, r1, r2, _b, a) in enumerate(batch):
         ez, az = _e(v, e), _e(v, a)
-        if not v.ek_kip:
-            dz = [Q2] + ez + [REL_OFF + r1, REL_OFF + r2, QM] + az + [EOS]
-            a0 = 4 + v.yuva
-        else:
-            K, N, S, D = _ekler(v)
-            oz = ez + [K, N]
-            i1, i2 = [REL_OFF + r1, S], [REL_OFF + r2, S]
-            on = {0: oz + i1 + [N] + i2 + [QM],
-                  1: i2 + i1 + [N] + oz + [QM],
-                  2: oz + i1 + [N] + i2}[bicim_no % 3]
-            dz = on + az + [K, D, EOS]
-            a0 = len(on)
+        K = _kesme(v)
+        oz = ez + [K, _nin(v, e=e)]
+        il = [REL_OFF + r1, _nin(v, r=r1), REL_OFF + r2]
+        sz, D = _soru(v, a), _dir(v, a)
+        bil = oz + il + az + [K, D, EOS]
+        soru = {0: oz + il + [sz, QM],
+                1: [sz] + oz + il + [QM],
+                2: []}[bicim_no % 3]
+        dz = soru + bil
+        a0 = len(soru) + len(oz) + len(il)
         assert len(dz) <= v.t_len, (len(dz), v.t_len, bicim_no)
         X[i, :len(dz)] = dz
-        P.append(list(range(a0 - 1, a0 - 1 + v.yuva)))
-        T.append(az)
-    return X, np.array(P, np.int64), np.array(T, np.int64)
-
-
-def kodla_belge(v: Veri, batch):
-    """BELGE: zincirlenen IKI atomik olgu AYNI DIZIDE.
-
-        [S1] e r1 ? b <EOS>  [S1] b r2 ? a <EOS>
-
-    Gercek metinde "Ayse'nin cocugu Fatma. Fatma'nin kardesi Emre."
-    ayni paragraftadir. Bizde hicbir dizi iki olguyu birden tasimiyordu.
-    YENI OLGU YOK -- ikisi de `one` icinde ZATEN var; eklenen tek sey
-    BITISIKLIK.
-
-    KAYIP: butun pozisyonlarda (next-token). Yani bu kodlayici ancak
-    `tam_kayip` ile ANLAMLI -- yoksa belgenin ortasi hic ogrenilmez.
-    `egitim_havuzu` bunu assert ile denetler.
-
-    P/T doner ama ikinci olgunun CEVAP yuvalarini gosterir: `tam_kayip`
-    kapaliyken bile satir CÖP olmasin diye. (Kolun kendisi tam_kayip
-    ACIK kosuyor; bu yalniz saglamlik.)
-    """
-    X = _bos(len(batch), v)
-    P, T = [], []
-    for i, (e, r1, r2, b, a) in enumerate(batch):
-        ez, bz, az = _e(v, e), _e(v, b), _e(v, a)
-        d1 = [Q1] + ez + [REL_OFF + r1, QM] + bz + [EOS]
-        d2 = [Q1] + bz + [REL_OFF + r2, QM] + az + [EOS]
-        dz = d1 + d2
-        assert len(dz) <= v.t_len, (
-            f"belge {len(dz)} jeton, t_len {v.t_len} -- t_len TURETIMI YANLIS")
-        X[i, :len(dz)] = dz
-        p0 = len(d1) + 2 + v.yuva          # 2. olgunun QM pozisyonu
-        P.append(list(range(p0, p0 + v.yuva)))
-        T.append(az)
+        _p, _t = _cevap(v, az, a0)
+        P.append(_p)
+        T.append(_t)
     return X, np.array(P, np.int64), np.array(T, np.int64)
 
 
 def kodla_kimlik_q1(v: Veri, ents):
-    """[Q1] e IDENT ? e EOS  -> hedef = varligin KENDISI (SIFIR-HOP).
+    """SIFIR-HOP ozdeslik: "Ibrahim Yilmaz kimdir? Ibrahim Yilmaz'dir."
+    Hedef varligin KENDISI.
 
     DUZELTME (15 Eylul hakemligi): bunu daha once "ise yaramaz kontrol" diye
     anlatmistim. YANLIS. arXiv 2509.24653'un onerdigi identity bridge TAM
@@ -922,10 +1064,9 @@ def kodla_kimlik_q1(v: Veri, ents):
     `assert v.par is None` vardi -- yani identity bridge TAM DA bizim
     rejimimizde (cok jetonlu varlik) KAPALIYDI ve hic kosulmadi.
 
-        tek jeton   [Q1] e        IDENT ? e        EOS    6 jeton
-        cok jeton   [Q1] e1 e2 e3 IDENT ? e1 e2 e3 EOS   10 jeton
+        e1 e2 e3 SORU DIR ? e1 e2 e3 ' DIR EOS   = 12 jeton
 
-    t_len 11'e SIGIYOR, yani bu kol `t_len`e DOKUNMAZ.
+    t_len 24'e SIGIYOR, yani bu kol `t_len`e DOKUNMAZ.
 
     NEDEN -- kahin testimiz (belge/bulgu/kahin_testi.md) makalenin
     teshisini DOGRULADI. arXiv 2509.24653 4.1, birebir:
@@ -946,40 +1087,31 @@ def kodla_kimlik_q1(v: Veri, ents):
     ents = list(ents)
     X = _bos(len(ents), v)
     P, T = [], []
-    p0 = 2 + v.yuva                          # QM'nin pozisyonu
     for i, e in enumerate(ents):
         ez = _e(v, e)
-        dz = [Q1] + ez + [IDENT, QM] + ez + [EOS]
+        if True:
+            # !! TURKCE YAZILDI (kullanici, 17 Eylul: "bunlar niye var?").
+            # Once  [S1] e [KIMLIK] ? e <SON>  idi -- iki SOYUT
+            # isaretleyici ve olculdu ki [S1] ile [KIMLIK] YALNIZ bu
+            # satirda geciyordu. Turkce'de bu cumle ZATEN var:
+            #     "Ibrahim Yilmaz kimdir?  Ibrahim Yilmaz'dir."
+            # Gorev DEGISMEDI -- hala e -> e ozdeslik eslemesi
+            # (arXiv 2509.24653 identity bridge). Degisen yalniz
+            # cumlenin dille yazilmasi.
+            sz = _soru(v, e)
+            dz = ez + [sz, _dir_soru(v, sz), QM] + ez + [_kesme(v),
+                                                         _dir(v, e), EOS]
+            # !! `v.yuva` DEGIL `len(ez)`. Adlar degisken uzunlukta
+            # (<YOK> silindi); sabit 3 varsaymak kisa adlarda cevap
+            # pozisyonunu KAYDIRIYORDU -- havuz_05 yakaladi, 17 Eylul.
+            p0 = len(ez) + 2                 # QM'nin pozisyonu
         assert len(dz) <= v.t_len, (
             f"kimlik dizisi {len(dz)} jeton, t_len {v.t_len}")
         X[i, :len(dz)] = dz
-        P.append(list(range(p0, p0 + v.yuva)))
-        T.append(ez)
+        _p, _t = _cevap(v, ez, p0 + 1)
+        P.append(_p)
+        T.append(_t)
     return X, np.array(P, np.int64), np.array(T, np.int64)
-
-
-def kodla_kimlik_q2son(v: Veri, batch):
-    """[Q2] e r1 IDENT ? kopru EOS  -> hedef = facts[e,r1], yani BIRINCI HOP.
-
-    DUZELTME (15 Eylul hakemligi): bu, makalenin identity bridge'i DEGILDIR.
-    Makale SIFIR-HOP self-mapping oneriyor (e -> e; yukaridaki q1). Bu ise
-    BIRINCI HOP DENETIMI -- daha guclu ve FARKLI bir mudahale.
-
-    !! BEDELI VAR: ENT varliklari burada [Q2] cercevesinde ZINCIR BASI
-    oluyor. ENT bolmesinin tanimi "varlik hic zincir basi olmamis" idi;
-    q2son ile bu tanim BOZULUR. Olculdu: 8.400 kimlik orneginin 1.274'u
-    (%15) bir ENT varligini zincir basi yapiyor. `egitim_havuzu` bunu her
-    kosuda BASAR, sessiz gecmez.
-
-    Cevap (kopru) girdide gecmiyor -> kopyalamayla cozulemez. kodla_2hop ile
-    AYNI cerceve ve AYNI hedef pozisyonu (4)."""
-    X = _bos(len(batch))
-    for i, (e, r1, b) in enumerate(batch):
-        assert v.par is None, "kimlik kollari jeton_ad ile KOSULMADI"
-        X[i, :7] = [Q2, v.ent_off + e, REL_OFF + r1, IDENT, QM,
-                    v.ent_off + b, EOS]
-    return X, np.full((len(batch), 1), 4, np.int64), \
-        np.array([[v.ent_off + b] for _, _, b in batch], np.int64)
 
 
 def kopru_hedefi(v: Veri):
@@ -996,6 +1128,9 @@ def kopru_hedefi(v: Veri):
                           ^^         ^^
     !! BICIM 0'A gore. Baska bicimde r1/r2 baska yerde -- o yuzden
     `egitim_havuzu` bicim>1 iken kopru_kayip'i REDDEDIYOR."""
+    if v.ek_kip == "tr2":
+        # e(yuva) ' <NIN> r1 <NIN> r2 ...  -> r1 yuva+2, r2 yuva+4
+        return [v.yuva + 2, v.yuva + 4][:min(v.yuva, 2)], min(v.yuva, 2)
     if v.ek_kip:
         return [v.yuva + 2, v.yuva + 5][:min(v.yuva, 2)], min(v.yuva, 2)
     return [1 + v.yuva, 2 + v.yuva][:min(v.yuva, 2)], min(v.yuva, 2)
@@ -1033,7 +1168,10 @@ def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
         parca.append(kodla_1hop(v, v.one, _b))
         _kt.append(np.full((len(v.one), _nk), -1, np.int64))
         parca.append(kodla_2hop(v, v.tr2, _b))
-        _kt.append(np.array([_e(v, x[3])[:_nk] for x in v.tr2], np.int64))
+        # KOPRU hedefi de degisken uzunlukta artik: tek kelimeli
+        # kopruler (sehirler) `_nk`ye YETISMIYOR -> -1 ile maskelenir.
+        _kt.append(np.array(
+            [(_e(v, x[3]) + [-1] * _nk)[:_nk] for x in v.tr2], np.int64))
     _n_tab = sum(len(a) for a, _, _ in parca)
     if _bic > 1:
         yaz(f"  BICIM CESITLILIGI: {_bic} yuzey bicimi -- OLGU ve SORU "
@@ -1044,13 +1182,13 @@ def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
     if ayar.ident_frac > 0:
         assert ayar.ident_kip in ("q1", "q2son"), \
             f"ident_kip 'q1' ya da 'q2son' olmali: {ayar.ident_kip!r}"
-        if ayar.ident_kip == "q1":
-            kimlik = kodla_kimlik_q1(v, range(v.n_ent))
-        else:
-            ik = [(e, r, int(v.facts[e, r]))
-                  for e in range(v.n_ent) for r in range(v.n_rel)
-                  if v.facts[e, r] >= 0]        # -1 = olgu YOK, atla
-            kimlik = kodla_kimlik_q2son(v, ik)
+        # !! `q2son` SILINDI (17 Eylul). [Q2] ve IDENT jetonlarini
+        # istiyordu, ve zaten BEDELLIYDI: ENT varliklarini [Q2]
+        # cercevesinde ZINCIR BASI yapiyor, `ent` bolmesinin TANIMINI
+        # bozuyordu. Bu kolda hic kullanilmadi (`ident_kip="q1"`).
+        assert ayar.ident_kip == "q1", (
+            f"ident_kip yalniz 'q1': 'q2son' SILINDI. {ayar.ident_kip!r}")
+        kimlik = kodla_kimlik_q1(v, range(v.n_ent))
         tekrar = max(1, int(round(ayar.ident_frac / max(1e-9, 1 - ayar.ident_frac)
                                   * _n_tab / len(kimlik[0]))))
         parca.append(tuple(np.tile(z, (tekrar,) + (1,) * (z.ndim - 1))
@@ -1088,18 +1226,10 @@ def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
         assert not ayar.ek_kip, (
             "belge + ek_kip KURULMADI (kodla_belge'ye ek isaretleyici "
             "eklenmedi)")
-        n_tab = _n_tab
-        n_bel = int(round(ayar.belge_pay / max(1e-9, 1 - ayar.belge_pay)
-                          * n_tab))
-        rs_b = np.random.RandomState(ayar.veri_tohum + 7717)
-        idx = rs_b.randint(0, len(_kaynak), n_bel)
-        belge = kodla_belge(v, [_kaynak[j] for j in idx])
-        parca.append(belge)
-        # BELGE satirlarinda kopru hedefi YOK: kopru zaten dizide YAZILI,
-        # ayrica tahmin ettirmenin anlami yok. -1 -> maskelenir.
-        _kt.append(np.full((len(belge[0]), _nk), -1, np.int64))
-        yaz(f"  BELGE: {n_bel} satir (havuzun %{100*n_bel/(n_tab+n_bel):.0f}'i)"
-            f"  kaynak tr2 ({len(_kaynak)} zincir)  t_len {v.t_len}")
+        raise AssertionError(
+            "belge_pay SILINDI (17 Eylul): `kodla_belge` [Q1] jetonunu "
+            "istiyordu, ve belge satiri ek isaretleyici TASIMIYORDU -- "
+            "yani ek_kip ile ZATEN BIRLIKTE KURULAMIYORDU.")
         yaz(f"     sizinti denetimi GECTI: sinav zincirinden belge YOK")
 
     X = np.concatenate([a for a, _, _ in parca])
@@ -1256,8 +1386,9 @@ def dogruluk(model, v: Veri, X, P, T, bs=512):
     # ama biri dropout eklerse olcum SESSIZCE rastgelelesirdi.
     onceki = model.training
     model.eval()
-    # YUVA BASINA KISITLI argmax. yuva=1 iken eski davranisla AYNI.
-    ARA = v.yuva_ara[:P.shape[1]]
+    # CEVAP pozisyonLARINDA kisitli argmax: VARLIK kelimeleri + kesme
+    # isareti. Hedefi -1 olan pozisyon MASKELI (ad daha kisa) -- atlanir.
+    ARA = [v.cevap_ara] * P.shape[1]
     ok = []
     for i in range(0, len(X), bs):
         xb = torch.from_numpy(X[i:i + bs]).to(DEV)
@@ -1269,7 +1400,8 @@ def dogruluk(model, v: Veri, X, P, T, bs=512):
         tb = torch.from_numpy(T[i:i + bs]).to(DEV)
         dogru = None
         for j, (lo, hi) in enumerate(ARA):
-            d = lgp[:, j, lo:hi].argmax(-1) == (tb[:, j] - lo)
+            m = tb[:, j] >= 0                       # MASKELI mi
+            d = ((lgp[:, j, lo:hi].argmax(-1) == (tb[:, j] - lo)) & m) | ~m
             dogru = d if dogru is None else (dogru & d)
         ok.append(dogru.cpu().numpy())
     model.train(onceki)
@@ -1288,15 +1420,23 @@ def kisayol_orani(model, v: Veri, lst, bs=512):
     # yeniden turetilmiyor. facts -1 ise ent_off-1 (bir ILISKI token'i)
     # cikar ve hicbir varlik tahminiyle eslesmez; yuva kipinde de oyle
     # olmasi icin -1 ozel olarak ele alinir.
+    # !! DEGISKEN UZUNLUK (17 Eylul): adlar artik <YOK> ile
+    # doldurulmuyor, yani kisayol cevabi 1-3 jeton olabilir. `dogruluk`
+    # ile AYNI bicimde kodlaniyor: ad + KESME ISARETI, kalani -1.
+    # Boylece "kisayolu soyledi" demek "kisayolun adini yazdi VE ayni
+    # yerde bitirdi" demek olur -- yoksa "Kocaeli" ile "Kocaeli Ili"
+    # ayni sayilirdi.
+    _n = v.cevap_yuva
+
     def _ksy(e, r2):
         h = int(v.facts[e, r2])
         if h < 0:
-            return [v.ent_off - 1] * v.yuva      # ESLESMEZ, oran 0.000
-        return _e(v, h)
+            return [v.ent_off - 1] * _n          # ESLESMEZ, oran 0.000
+        return (_e(v, h) + [_kesme(v)] + [-1] * _n)[:_n]
     ksy = np.array([_ksy(e, r2) for e, _, r2, _, _ in lst], np.int64)
     onceki = model.training            # bkz. dogruluk()'taki ayni kusur
     model.eval()
-    ARA = v.yuva_ara[:P.shape[1]]
+    ARA = [v.cevap_ara] * P.shape[1]
     ok = []
     for i in range(0, len(X), bs):
         xb = torch.from_numpy(X[i:i + bs]).to(DEV)
@@ -1304,11 +1444,12 @@ def kisayol_orani(model, v: Veri, lst, bs=512):
             lg = model(xb)
         idx = torch.from_numpy(P[i:i + bs]).to(DEV)
         ar = torch.arange(len(idx), device=DEV)[:, None]
-        lgp = lg.float()[ar, idx]                        # (n, yuva, V)
+        lgp = lg.float()[ar, idx]                        # (n, yuva+1, V)
         esit = None
         for j, (lo, hi) in enumerate(ARA):
             p = lgp[:, j, lo:hi].argmax(-1).cpu().numpy() + lo
-            d = p == ksy[i:i + bs, j]
+            k = ksy[i:i + bs, j]
+            d = (p == k) | (k < 0)          # -1 = MASKELI yuva, atla
             esit = d if esit is None else (esit & d)
         ok.append(esit)
     model.train(onceki)
@@ -1807,8 +1948,12 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
                 # `ana` DEGIL, ama egriye ikisi de yazilir. (model_b8'de
                 # `kayip` sutunu kirlenmisti ve b6 ile kiyaslanamaz hale
                 # gelmisti -- ayni hataya dusmemek icin.)
+                # ignore_index=-1: kisa adlarda kalan cevap yuvalari
+                # MASKELI. Onceden butun adlar `yuva` jetondu ve maske
+                # YOKTU; <YOK> dolgusu kalkinca gerekli oldu.
                 ana = F.cross_entropy(
-                    lg.float().reshape(-1, lg.shape[-1]), tb.reshape(-1))
+                    lg.float().reshape(-1, lg.shape[-1]), tb.reshape(-1),
+                    ignore_index=-1)
                 if ayar.tam_kayip:
                     # DIL MODELI KAYBI: pozisyon t, X[t+1]'i tahmin eder.
                     # PAD (=0) hedefleri atlanir; PAD dizinin yalniz
@@ -1955,5 +2100,5 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
 
 
 # NOT: `model_a.py` burada `AYAR = Ayar()` tanimlayip dogrudan
-# kosulabiliyordu. `taban_03` bir MOTOR; model_03'in ayari `ayar_03.py`de,
-# kosuyu baslatan `model_03.py`. Burada calistirilacak bir sey YOK.
+# kosulabiliyordu. `taban_05` bir MOTOR; model_05'in ayari `ayar_05.py`de,
+# kosuyu baslatan `model_05.py`. Burada calistirilacak bir sey YOK.

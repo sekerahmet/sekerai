@@ -1,27 +1,27 @@
 # -*- coding: utf-8 -*-
-"""kos_03 — model_03'in KENDI kosucusu. TEK BASINA DURUR.
+"""kos_05 — model_05'in KENDI kosucusu. TEK BASINA DURUR.
 
-Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_03 folderi
-altinda olmali. model_03 diger hicbir model ile ayni seyi
+Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_05 folderi
+altinda olmali. model_05 diger hicbir model ile ayni seyi
 kullanmamali."*
 
 `deneme2/kos.py`nin KOPYASI (uretici: elle, tek seferlik). Farklar:
 
-    --model YOK       bu kosucu yalniz model_03'i baslatir; aile klasoru
+    --model YOK       bu kosucu yalniz model_05'i baslatir; aile klasoru
                       ARANMAZ (paylasilan kos.py `deneme2/*/<ad>.py`
-                      glob'u yapiyordu -- model_03 artik o aramaya
+                      glob'u yapiyordu -- model_05 artik o aramaya
                       girmiyor bile)
     yol               yalniz KENDI klasoru sys.path'e girer
 
-    python kos_03.py --ev <cikti koku> [--tohum 0] [--commit X]
+    python kos_05.py --ev <cikti koku> [--tohum 0] [--commit X]
                      [--ustune] [--adim N] [--surdur]
 """
 from __future__ import annotations
 
 import argparse, importlib, os, sys
 
-KOK = os.path.dirname(os.path.abspath(__file__))       # deneme2/model_03/
-MODEL = "model_03"
+KOK = os.path.dirname(os.path.abspath(__file__))       # deneme2/model_05/
+MODEL = "model_05"
 
 
 OKU = """# {model} — ham koşu çıktısı
@@ -77,7 +77,7 @@ hangi sürüm olduğunu söyler.
 
 def main():
     ap = argparse.ArgumentParser()
-    # --model YOK: bu kosucu yalniz model_03'i baslatir.
+    # --model YOK: bu kosucu yalniz model_05'i baslatir.
     ap.set_defaults(model=MODEL)
     ap.add_argument("--ev", required=True, help="cikti koku; t<N>/ altina yazar")
     ap.add_argument("--tohum", type=int, nargs="+", default=[0])

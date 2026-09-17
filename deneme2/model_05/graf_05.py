@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""graf_03 — model_03'in KENDI GRAF TUTARLILIK DENETIMI. TEK BASINA DURUR.
+"""graf_05 — model_05'in KENDI GRAF TUTARLILIK DENETIMI. TEK BASINA DURUR.
 
-Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_03 folderi
-altinda olmali. model_03 diger hicbir model ile ayni seyi kullanmamali.
-Analiz icinde analiz_03 kullanalim mesela, digerleri icin de."*
+Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_05 folderi
+altinda olmali. model_05 diger hicbir model ile ayni seyi kullanmamali.
+Analiz icinde analiz_05 kullanalim mesela, digerleri icin de."*
 
 `graf_dok.py`nin KOPYASI (uretici: scratchpad/kur_analiz00.py). Iki fark:
-motor `taban_03`, ve `--model` secenegi YOK -- bu arac yalniz model_03'i
-tanir. Dokum `model_03/veri/model_03/` altina gider (depoya girmez).
+motor `taban_05`, ve `--model` secenegi YOK -- bu arac yalniz model_05'i
+tanir. Dokum `model_05/veri/model_05/` altina gider (depoya girmez).
 
-    python graf_03.py
+    python graf_05.py
 """
 import sys
 import collections
@@ -21,19 +21,17 @@ import os
 _D = os.path.dirname(os.path.abspath(__file__))
 if _D not in sys.path:
     sys.path.insert(0, _D)
-import taban_03 as M         # noqa: E402
+import taban_05 as M         # noqa: E402
 
-# `--model` YOK: bu arac yalniz model_03'i tanir.
+# `--model` YOK: bu arac yalniz model_05'i tanir.
 argparse.ArgumentParser().parse_args()
-from ayar_03 import AYAR     # noqa: E402
+from ayar_05 import AYAR     # noqa: E402
 VO = importlib.import_module(AYAR.veri_ad)
 
 v = M.veri_kur(AYAR, yaz=lambda *a: None)
 G = VO.kur(AYAR.veri_tohum)
 IL = G["iliski"]
-ad = lambda e, j: v.par_ad[j][int(v.par[e, j])]
-soz = lambda e: " ".join(x for x in (ad(e, j) for j in range(v.yuva))
-                         if x != "<YOK>")
+soz = lambda e: " ".join(M.kelimeler(v, e))
 R_ = {n: i for i, n in enumerate(IL)}
 
 print("ILISKILER:", ", ".join(IL))
@@ -42,10 +40,9 @@ print(f"varlik {v.n_ent}, iliski {v.n_rel}\n")
 print("=" * 76)
 print("1) TERS CIFT: X -r-> Y ise Y -r'-> X mi?")
 print("=" * 76)
-CIFT = [("anne", "cocuk"), ("baba", "cocuk"), ("cocuk", "anne"),
-        ("cocuk", "baba"), ("ogretmen", "ogrenci"), ("ogrenci", "ogretmen"),
-        ("okul", "mudur"), ("sehir", "vali"), ("ders", "hoca"),
-        ("mudur", "okul"), ("vali", "sehir"), ("hoca", "ders")]
+# VERIDEN geliyor, burada GOMULU DEGIL. Gomuluyken veri degisince bu
+# arac KeyError verdi (17 Eylul) -- liste artik veri_05'in yaninda.
+CIFT = list(VO.TERS_ADAY)
 print(f"   {'X -r-> Y, Y -r2-> ?':<26}{'n':>7}{'== X':>8}{'oran':>9}   ornek")
 for r, r2 in CIFT:
     if r not in R_ or r2 not in R_:
@@ -105,7 +102,7 @@ print(f"   ham grafta ayni (X,r) icin birden cok kayit: "
       f"{sum(1 for c in cok.values() if c > 1)}  (sozluk zaten tek tutar)")
 ters_say = collections.defaultdict(set)
 for (x, r), y in G["olgu"].items():
-    if r in ("anne", "baba"):
+    if r in VO.EBEVEYN:
         ters_say[y].add(x)          # y'nin COCUKLARI
 d = collections.Counter(len(s) for s in ters_say.values())
 print(f"   bir kisinin KAC cocugu var (anne/baba kayitlarindan turetilen):")
@@ -113,29 +110,35 @@ for k in sorted(d):
     print(f"      {k} cocuk: {d[k]} kisi")
 birden = [y for y, s in ters_say.items() if len(s) > 1]
 print(f"   -> {len(birden)} kisinin BIRDEN COK cocugu var; `cocuk` iliskisi")
-print(f"      onlardan YALNIZ BIRINI gosteriyor (veri_okul: 'kayitli cocuk:")
-print(f"      ciftin ILKI'). Yani anne/cocuk TERS CIFTI TAM DEGIL.")
+print(f"      onlardan YALNIZ BIRINI gosteriyor. veri_05'te bu SECIM")
+print(f"      KASITLI: baba OGLU, anne KIZI gosteriyor. Ikisi de AYNI")
+print(f"      cocugu gosterseydi `annesi+cocugu` ile `babasi+cocugu`")
+print(f"      birebir ayni olur, iki iliski birbirinden OKUNURDU.")
 
 print()
 print("=" * 76)
-print("4) MANTIKSAL GEREKTIRME: kardes+baba = baba (siblingler ayni ebeveyn)")
+print("4) MANTIKSAL GEREKTIRME: (r1,r2) zinciri TEK bir r3 kenariyla ayni mi")
 print("=" * 76)
-GER = [("kardes", "baba"), ("kardes", "anne")]
-for r1, r2 in GER:
-    i, j = R_[r1], R_[r2]
+# !! r3 ARTIK r2 VARSAYILMIYOR. veri_04'te iki gerektirme de
+# (kardes,baba)->baba bicimindeydi, yani r3 == r2 idi ve dongu r2'yi
+# r3 yerine kullaniyordu. veri_05'te (annesi,cocugu)->kardesi var:
+# r3 != r2. Eski kod bu cifti "0.0%" diye basiyordu, yani GERCEK
+# gerektirmeyi GORMUYORDU. r3 artik GEREKTIRIR'in DEGERINDEN geliyor.
+for (r1, r2), r3 in VO.GEREKTIRIR.items():
+    i, j, k3 = R_[r1], R_[r2], R_[r3]
     n = ayni = 0
     for e in range(v.n_ent):
         b = int(v.facts[e, i])
         if b < 0:
             continue
         a = int(v.facts[b, j])
-        d2 = int(v.facts[e, j])
+        d2 = int(v.facts[e, k3])
         if a < 0 or d2 < 0:
             continue
         n += 1
         ayni += int(a == d2)
     print(f"   {r1}+{r2}: {ayni}/{n} = {ayni/max(1,n):.1%} zincirin cevabi "
-          f"= facts[e,{r2}]  -> TEK KENARLA ulasilir")
+          f"= facts[e,{r3}]  -> TEK KENARLA ulasilir")
 print("   ^ bu bir VERI KUSURU DEGIL, grafin mantigi. Ama o zincirler")
 print("     kopru KURMADAN cozulebilir. veri_dok bunu 'TEK KENAR acigi'")
 print("     diye olcuyor ve %2 esigi koyuyor.")

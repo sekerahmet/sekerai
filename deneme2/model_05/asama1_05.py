@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-"""asama1_03 — model_03'in KENDI ASAMA-1 TESHISI. TEK BASINA DURUR.
+"""asama1_05 — model_05'in KENDI ASAMA-1 TESHISI. TEK BASINA DURUR.
 
-Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_03 folderi
-altinda olmali. model_03 diger hicbir model ile ayni seyi
+Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_05 folderi
+altinda olmali. model_05 diger hicbir model ile ayni seyi
 kullanmamali."*
 
 `model_a/asama1.py`nin KOPYASI (uretici: scratchpad/kur_okuma00.py). Modeli
 `ModelSade` ile kurar. Paylasilan surumde yapilan bir degisiklik buraya
-GECMEZ; `test_03.py` ikisinin AYNI SEYI olctugunu her kosuda siniyor.
+GECMEZ; `test_05.py` ikisinin AYNI SEYI olctugunu her kosuda siniyor.
 """
 from __future__ import annotations
 
@@ -18,12 +18,12 @@ import sys
 import numpy as np
 import torch
 
-# `asama1_b` bunu doldurur; None -> model_03.ModelSade. `pencere_a` ve
+# `asama1_b` bunu doldurur; None -> model_05.ModelSade. `pencere_a` ve
 # `tani_a`daki kancanin AYNISI.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import taban_03 as M                                          # noqa: E402
-import pencere_03 as P                                        # noqa: E402
-from model_03 import ModelSade                                # noqa: E402
+import taban_05 as M                                          # noqa: E402
+import pencere_05 as P                                        # noqa: E402
+from model_05 import ModelSade                                # noqa: E402
 
 MODEL_SINIFI = ModelSade
 
@@ -174,8 +174,7 @@ def uzunluga_gore(v, lst, mat, poz, yaz=print):
     import collections
     if v.par is None:
         return {}
-    uz = [sum(1 for j in range(v.yuva)
-              if v.par_ad[j][int(v.par[x[3], j])] != "<YOK>") for x in lst]
+    uz = [len(M.kelimeler(v, x[3])) for x in lst]
     tip = [v.tip_ad[v.tip[x[3]]] for x in lst]
     yaz(f"    KOPRUNUN token sayisina gore (poz {poz}):")
     yaz(f"    {'kopru':<9}{'n':>6}{'ASAMA-1':>10}   kopru tipi")
@@ -301,16 +300,26 @@ def bas(ad, mat, as2, v, yaz=print):
     10. `model_b13`/`b14`te orada 0.0275 cikmisti.
     """
     eniyi = int(mat[:, 0].argmax())
-    # SORU SONU = ilk cevap jetonunun BIR ONCESI. `kopru_hedefi` DEGIL
-    # (o r1/r2 pozisyonlarini veriyor).  2-hop bicim 0:
-    #   eksiz  [S2] e(yuva) r1 r2 ?  -> 3 + yuva
-    #   ek_kip e(yuva) ' <NIN> r1 <SI> <NIN> r2 <SI> ?  -> yuva + 7
-    _son = min(mat.shape[0] - 1, (v.yuva + 7) if v.ek_kip else (3 + v.yuva))
+    # SORU SONU = ilk cevap jetonunun BIR ONCESI.
+    #
+    # !! ELLE HESAPLANMIYOR ARTIK (17 Eylul). Once `v.yuva + 7` yaziliydi;
+    # o sayi `ek_kip="tr"` duzenine aitti ve iki kez YANLISLASTI:
+    #   - "tr2"de <SI> kalkti, soru sozcugu geldi
+    #   - cevap artik soruyu YENIDEN YAZIP oyle cevapliyor, yani cevap
+    #     dizinin ORTASINDA basliyor
+    # Ustelik adlar DEGISKEN uzunlukta oldugu icin TEK bir "soru sonu"
+    # pozisyonu YOK. `kodla_2hop` P'nin ilk sutununda tam o pozisyonu
+    # veriyor; EN SIK olani aliniyor ve kac ornekte tuttugu YAZILIYOR.
+    _P = M.kodla_2hop(v, lst)[1][:, 0]
+    _vals, _say = np.unique(_P, return_counts=True)
+    _son = int(min(mat.shape[0] - 1, _vals[int(_say.argmax())]))
+    _pay = float(_say.max()) / len(_P)
     yaz(f"\n  {ad}")
     yaz(f"    ASAMA-1 kopru YUVA 0 (ayirt edici):  "
         f"en iyi poz {eniyi} -> {mat[eniyi, 0]:.4f}")
     yaz(f"    SORU SONU poz {_son} -> {mat[_son, 0]:.4f}"
-        + ("   <- KODLAMALAR ARASI KIYASTA BU OKUNUR" if v.ek_kip else ""))
+        f"   (orneklerin %{100*_pay:.0f}'inde cevap TAM burada basliyor;"
+        f" adlar degisken uzunlukta)")
     if v.ek_kip and eniyi != _son:
         yaz("    !! en iyi poz, BILDIRIM biciminin OGRETTIGI yer olabilir")
         yaz("       (1-hop bildiriminde cevap tam orada baslar).")

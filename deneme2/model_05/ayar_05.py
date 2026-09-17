@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""ayar_03 — model_03'in KENDI ayari. TEK BASINA DURUR.
+"""ayar_05 — model_05'in KENDI ayari. TEK BASINA DURUR.
 
 Kullanici karari, 16 Eylul 2026:
-    *"bunlarin hepsi model_03 folderi altinda olmali. model_03 diger
+    *"bunlarin hepsi model_05 folderi altinda olmali. model_05 diger
     hicbir model ile ayni seyi kullanmamali."*
 
 Onceki surum `from model_b15 import AYAR as TABAN` diyordu; yani
-model_03'in ayari model_b15 -> model_b14 -> model_b13 -> ... zincirinden
+model_05'in ayari model_b15 -> model_b14 -> model_b13 -> ... zincirinden
 DEVRALINIYORDU ve zincirin herhangi bir halkasi degisince sessizce
 kayardi. Artik oyle degil: her alan ASAGIDA, `Ayar()` varsayilaninin
 uzerine, TEK TEK ve gerekcesiyle yaziliyor.
@@ -17,10 +17,15 @@ GIZLIYORDU, acik yazim GOSTERIYOR.
 ==========================================================================
 IKI GRUP, IKI GEREKCE
 
-  GOREV alanlari    -> model_b15'in gordugu SINAVIN AYNISI olmali.
-                       Ayni veriyi gormezse kol hicbir sey olcmez;
-                       sinav ve egitim havuzu BIT DUZEYINDE ayni kalmali.
-                       `test_03.py` bunu her kosuda siniyor.
+  GOREV alanlari    -> model_b15'in gordugu sinavla AYNI KALMASI
+                       BEKLENEN alanlar. model_03'e kadar hepsi
+                       birebirdi. model_05 IKISINI BILEREK degistiriyor
+                       ve ikisi de BU KOLUN TANIMI:
+                         veri_ad  yeni veri (GOREV_ALAN'da zaten yok)
+                         ek_kip   "tr" -> "tr2"
+                       `test_05.py` bunlari BILDIRILMIS AYRISMA diye
+                       listeler; LISTEDE OLMAYAN bir alan kayarsa test
+                       yine duser.
 
   MIMARI + OPTIMIZASYON -> STANDART TARIF, referanslariyla.
 
@@ -35,7 +40,7 @@ STANDART TARIFE GORE: NE DEVRALINMADI
    (Lookahead, Zhang ve ark. 2019) ve nanoGPT'de, Llama'da, Pythia'da,
    GPT-2/GPT-3 tarifinde YOK.
 
-   `model_03` standart bir transformerin ne yaptigini olcecekse,
+   `model_05` standart bir transformerin ne yaptigini olcecekse,
    standart olmayan bir optimizasyon numarasiyla kosamaz. KAPALI.
    (`Ayar()` varsayilani zaten 0; model_b15 onu 10000 yapiyordu.)
 
@@ -78,27 +83,39 @@ ZATEN STANDART OLANLAR (varsayilandan gelenler de dahil)
 """
 from __future__ import annotations
 
-from taban_03 import Ayar                                    # noqa: E402
+from taban_05 import Ayar                                    # noqa: E402
 
-# Sinavin AYNI kalmasi GEREKEN alanlari. `test_03.py` bunlari model_b15
+# Sinavin AYNI kalmasi GEREKEN alanlari. `test_05.py` bunlari model_b15
 # ile karsilastirir: biri kayarsa sinav/egitim havuzu ayrisir ve sayilar
 # ayni tabloda okunamaz.
 #
-# !! `veri_ad` bu listede YOK ve olmamali: model_03 "veri_03" diyor,
-# model_b15 "veri_okul4". Ad farkli, ICERIK ayni -- ve kilit adi degil
-# ICERIGI siniyor (graf derin karsilastirma + egitim havuzu + olcme izi).
+# !! `veri_ad` bu listede YOK ve olmamali -- ama SEBEBI DEGISTI.
+# model_03'e kadar ad farkliydi, ICERIK ayniydi ve kilit icerigi
+# siniyordu. model_05'te ICERIK DE FARKLI: bu kolun DUGMESI veri.
+# Dolayisiyla `test_05` artik "veri_05 == veri_okul4" demiyor;
+# `veri_05`in KENDI IDDIALARINI siniyor (sema, soy agaci, zincir
+# siniflari, notrluk, cografya, IZ).
+#
+# `ek_kip` LISTEDE ve BILEREK ayrisiyor ("tr" -> "tr2"): iliski
+# jetonu kelimenin kendisi, ekler gercek allomorf, soru sozcugu var,
+# <YOK> dolgusu yok. `test_05` bunu bildirilmis ayrisma diye isler.
 GOREV_ALAN = ("veri_tohum", "ent_pay", "comp_pay", "arama_pay",
               "ood_pay", "kati_pay", "jeton_ad", "ek_kip", "bicim",
               "ident_frac", "ident_kip", "belge_pay", "tam_kayip",
               "batch", "adim", "tohum", "olc_her", "n_olcum_max")
 
 AYAR = Ayar(
-    ad="model_03",
+    ad="model_05",
 
     # --- GOREV: model_b15'in gordugu SINAVIN AYNISI --------------------
-    veri_ad="veri_03",   # KENDI veri modulu; ICERIK veri_okul4 ile AYNI
-    jeton_ad="tam",      # varlik = JETON DIZISI (3 yuva), tek jeton DEGIL
-    ek_kip="tr",         # Turkce ek jetonlari:  '  <NIN>  <SI>  <DIR>
+    veri_ad="veri_05",   # KENDI veri modulu -- ve BU KOLUN DUGMESI.
+    #                      ICERIK model_03'tekinden FARKLI: universite
+    #                      hiyerarsisi + gercek soy agaci + gercek
+    #                      cografya, 25 iliski / 7 tip / 1087 varlik.
+    jeton_ad="tam",      # varlik = JETON DIZISI; ad kac kelimeyse o kadar
+    #                      (1-3). Dolgu YOK -- sinirI kesme isareti tasir.
+    ek_kip="tr2",        # iliski KELIMENIN KENDISI (fakultesi), ek jetonu
+    #                      '  <NIN>  <DIR>  + kim/neresi/hangisi. <SI> YOK.
     bicim=3,             # 3 yuzey bicimi (ek_kip olmadan ANLAMSIZ)
     ood_pay=0.05,        # dagitim disi bolme
     ident_frac=0.2,      # kimlik koprusu
@@ -169,5 +186,5 @@ assert AYAR.dar_alfa == 0.0 and not AYAR.dar_kapi, "Phi DARBOGAZI YOK"
 assert AYAR.kopru_kayip == 0.0, "YARDIMCI KAYIP YOK"
 assert AYAR.mask_poz is None and not AYAR.mask_blok, "MASKE YOK"
 assert AYAR.dongu == 1 and AYAR.l == 8, "8 AYRI katman, dongu YOK"
-assert AYAR.veri_ad == "veri_03", "model_03 KENDI veri modulunu okur"
+assert AYAR.veri_ad == "veri_05", "model_05 KENDI veri modulunu okur"
 assert "veri_ad" not in GOREV_ALAN, "ad DEGIL, ICERIK sinanir"

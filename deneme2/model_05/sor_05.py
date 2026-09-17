@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-"""sor_03 — model_03'in KENDI ELLE SORU ARACI. TEK BASINA DURUR.
+"""sor_05 — model_05'in KENDI ELLE SORU ARACI. TEK BASINA DURUR.
 
-Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_03 folderi
-altinda olmali. model_03 diger hicbir model ile ayni seyi
+Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_05 folderi
+altinda olmali. model_05 diger hicbir model ile ayni seyi
 kullanmamali."*
 
 `model_b/sor.py`nin KOPYASI (uretici: scratchpad/kur_okuma00.py). Modeli
 `ModelSade` ile kurar. Paylasilan surumde yapilan bir degisiklik buraya
-GECMEZ; `test_03.py` ikisinin AYNI SEYI olctugunu her kosuda siniyor.
+GECMEZ; `test_05.py` ikisinin AYNI SEYI olctugunu her kosuda siniyor.
 """
 from __future__ import annotations
 
@@ -23,22 +23,22 @@ _B = os.path.dirname(os.path.abspath(__file__))
 if _B not in sys.path:
     sys.path.insert(0, _B)
 
-import taban_03 as M                                         # noqa: E402
-import pencere_03 as P                                       # noqa: E402
-from model_03 import ModelSade                               # noqa: E402
+import taban_05 as M                                         # noqa: E402
+import pencere_05 as P                                       # noqa: E402
+from model_05 import ModelSade                               # noqa: E402
 
-# model_03'in TEK modeli var; kanca yok, dogrudan yazili.
+# model_05'in TEK modeli var; kanca yok, dogrudan yazili.
 MODEL_SINIFI = ModelSade
 
 
 def _ad(v, e):
     """Varlik id -> okunabilir ad.  YUVA SAYISINA BAGIMSIZ.
 
-    Onceden IKI yuvaya sabitliydi; jeton_ad="tam" 3 yuva kullaniyor ve
+    Onceden IKI yuvaya sabitliydi; simdi ad kac kelimeyse o kadar ve
     ucuncu jeton SESSIZCE DUSUYORDU (Ankara_Fen_Lisesi -> Ankara_Fen)."""
     if v.par is None:
         return f"e{e}"
-    return _birlestir(v.par_ad[j][int(v.par[e, j])] for j in range(v.yuva))
+    return _birlestir(M.kelimeler(v, e))
 
 
 _TR = str.maketrans("çğıöşüÇĞIİÖŞÜ", "cgiosucgiiosu")
@@ -98,7 +98,8 @@ def _varlik_sadele(kelimeler):
 
 
 def _birlestir(parcalar):
-    """<YOK> dolgusunu atar, kalanini BOSLUKLA birlestirir.
+    """Kelimeleri BOSLUKLA birlestirir. (<YOK> dolgusu 17 Eylul
+    SILINDI; `kelimeler()` zaten dolgu uretmiyor.)
 
     ALT CIZGI YOK. Kullanici, 16 Eylul: "ahmet_kilic denediysen sikinti
     cunku _ yok." Dogru: alt cizgi ham grafin ad dizgesinde var, MODELIN
@@ -228,8 +229,7 @@ def sor(v, net, metin, yaz=print):
     g_ad = _ad(v, gercek) if gercek >= 0 else "(olgu YOK)"
     bol = _bolme(v, e, rid[0], rid[1] if len(rid) > 1 else None)
     if v.par is not None:
-        yaz("  jeton   soru: " + " | ".join(
-            v.par_ad[j][int(v.par[e, j])] for j in range(v.yuva)))
+        yaz("  jeton   soru: " + " | ".join(M.kelimeler(v, e)))
     # COZUMLEME geri okunur. Turkce EK URETMIYORUZ -- uretseydik
     # "anne" + "u" = "anneu" gibi sacmaliklar cikardi (ilk surumde
     # tam bu oldu). Onun yerine NE ANLASILDIGI acikca yazilir.
