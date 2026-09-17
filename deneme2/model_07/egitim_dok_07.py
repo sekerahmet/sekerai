@@ -132,8 +132,16 @@ def _ayrim(d, v, X, P=None, T=None, i=0, fim=False):
         j = r.index(v.ayir)
         return d.oku(r[:j + 1]), d.oku(r[j + 1:])
     if T is not None and int((_np.asarray(T[i]) >= 0).sum()) > 0:
+        # !! ISTENEN, KUYRUGUN TAMAMI DEGIL -- T'nin MASKESIZ hedefleri.
+        # Kullanici sordu (17 Eylul): "13'te son 3 jetonu mu istiyoruz?"
+        # Hayir: olculen sey AD JETONLARI + SINIR ISARETI. Sondaki
+        # bildirme eki (`dir`) ve nokta MASKELI -- adin son unlusu belli
+        # olunca `dir` zaten belli, sifir kosullu bilgi tasiyor.
+        # Once buraya `r[p0+1:]` yaziliydi ve `Kocaeli'dir.` diye
+        # gosteriyordu; olculen `Kocaeli'`.
         p0 = int(P[i][0])
-        return d.oku(r[:p0 + 1]), d.oku(r[p0 + 1:])
+        hedef = [int(t) for t in _np.asarray(T[i]) if int(t) >= 0]
+        return d.oku(r[:p0 + 1]), d.oku(hedef)
     return ("(cumlenin tamami)",
             "HER KONUMDA sonraki jeton -- cevap yuvasi YOK "
             "(cevap kendi baglamindan ONCE geliyor)")
