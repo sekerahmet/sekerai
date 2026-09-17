@@ -111,6 +111,16 @@ PLAN = [
     ("55", "sinavbosluk_rel_ent",      "AYNI zincir, ILISKI jetonu bosluklu"),
     ("56", "sinavbosluk_rel_ent_yok",  "AYNI zincir, ILISKI jetonu bosluklu"),
     ("57", "sinavbosluk_rel_ood",      "AYNI zincir, ILISKI jetonu bosluklu"),
+
+    # !! BILDIRME EKI SINAVI (unlu uyumu). Kullanici, 17 Eylul:
+    # "verileri ona gore uretmedin ki." Hakli -- `pencere_07`ye `ek_`
+    # sutunu eklendi ama KARSILIK GELEN DOSYA URETILMEDI. Ucuncu kez
+    # ayni hata (once `sorular`, sonra `sinavbosluk`).
+    # Bicim: <onek><TAB><beklenen ek>   -- 01_jetonlar ile ayni duzen.
+    ("60", "sinavek_one",   "ad yazildiktan sonra DOGRU EK mi (unlu uyumu)"),
+    ("61", "sinavek_seen",  "ad yazildiktan sonra DOGRU EK mi (unlu uyumu)"),
+    ("62", "sinavek_comp",  "ad yazildiktan sonra DOGRU EK mi (unlu uyumu)"),
+    ("63", "sinavek_ent",   "ad yazildiktan sonra DOGRU EK mi (unlu uyumu)"),
 ]
 
 
@@ -260,6 +270,31 @@ def main():
             AYRIM[ad] = _ayrim(d, v, X, P, T)
             return [d.oku(r) for r in X]
 
+        # --- sinav bolmeleri, BILDIRME EKI (IKINCIL) ---
+        if ad.startswith("sinavek_"):
+            bol = ad[8:]
+            lst = d.L.get(bol) or []
+            if not lst:
+                return []
+            kodla = M.kodla_1hop if bol == "one" else M.kodla_2hop
+            X, P, T = kodla(v, list(lst), 0)
+            # `ek_dogruluk` ile AYNI konum hesabi: sinir isaretinin
+            # konumundan SONRAKI jeton. Iki yerde iki hesap olmasin
+            # diye burada da T'nin son maskesiz hedefinden turetiliyor.
+            son_j = (T >= 0).sum(1) - 1
+            poz = P[np.arange(len(P)), np.maximum(son_j, 0)] + 1
+            cik = []
+            for i in range(len(X)):
+                r = [int(t) for t in X[i] if int(t) != M.PAD]
+                p = int(poz[i])
+                if p + 1 >= len(r):
+                    continue
+                cik.append(d.oku(r[:p + 1]) + chr(9) + d.jeton_ad(r[p + 1]))
+            if ad not in AYRIM and cik:
+                _o, _e = cik[0].split(chr(9))
+                AYRIM[ad] = (_o, _e, _e)
+            return cik
+
         # --- sinav bolmeleri, BOSLUK DOLDURMA (IKINCIL) ---
         if ad.startswith("sinavbosluk_"):
             if getattr(ayar, "fim_kat", 0) <= 0:
@@ -354,7 +389,18 @@ def main():
                 " onu maskeliyor." + NL)
         f.write("Ama determinizm MATEMATIKTE; MODELDE olup olmadigini"
                 " `pencere_07`nin" + NL)
-        f.write("`ek_` sutunu AYRICA olcer (unlu uyumu)." + NL)
+        f.write("`ek_` sutunu AYRICA olcer (unlu uyumu) -- ve o olcunun"
+                " verisi 60..63'te." + NL + NL)
+        f.write("60..63 BILDIRME EKI SINAVI -- iki sutun, TAB ile ayrik:"
+                + NL)
+        f.write("     onek                                          | ek"
+                + NL)
+        f.write("     Kaan Arslan'in annesinin tezi Niceliksel Optik'"
+                " | tir" + NL)
+        f.write("  VERILEN kesme isaretine KADAR, ISTENEN tek jeton:"
+                " dogru allomorf." + NL)
+        f.write("  `ek_dogruluk` ile AYNI hedef -- mekanik olarak"
+                " dogrulandi." + NL)
         f.write(NL + "EGITIM HAVUZU = 10..20 arasi dosyalar." + NL)
         f.write("SINAV = 30..35. Sinav DUZ BILDIRIMLE yapilir (tip1); "
                 "soru bicimi ve" + NL)
@@ -391,7 +437,52 @@ def main():
         f.write("     Tugce Arslan --tezi--> Niceliksel Optik" + NL)
         for ln in _dogrula(icerik, ayar, v, a.ornek):
             f.write(ln + NL)
+    _olcu_kapisi()
     print(f"{NL}klasor: {kl}")
+
+
+# ÖLÇÜ AİLESİ -> DOSYA ÖNEKİ. `pencere_07`nin urettigi her ikincil
+# olcu ailesinin BURADA bir karsiligi olmali.
+#
+# !! NEDEN VAR: ayni hata UC KEZ yapildi (kullanici, 17 Eylul).
+#   1) `soru_` olculuyordu, dosyasi YOKTU   -> "bu soru degil ki"
+#   2) `fim_` olculuyordu, dosyasi YOKTU    -> "bosluk doldurmada ent nerede"
+#   3) `ek_` olculuyordu, dosyasi YOKTU     -> "verileri ona gore uretmedin ki"
+# Ucunde de olcu vardi, BAKILACAK SEY yoktu. Artik kod SORUYOR.
+OLCU_DOSYA = {
+    "soru_":      "sinavsoru_",
+    "fim_ozne1_": "sinavbosluk_ozne_",
+    "fim_rel_":   "sinavbosluk_rel_",
+    "ek_":        "sinavek_",
+}
+
+
+def _olcu_kapisi(yaz=print):
+    """`pencere_07` hangi ikincil olculeri uretiyor -- hepsinin dosyasi var mi?
+
+    Kaynagi OKUYARAK buluyor: `r[f"<aile>_{...}"]` kaliplari. Modeli
+    yuklemeye gerek yok, ve yeni bir olcu eklenince BURASI patlar."""
+    import re
+    kaynak = io.open(os.path.join(_K, "pencere_07.py"), encoding="utf-8").read()
+    # !! [A-Za-z] -- yalniz kucuk harf arayan bir desen, sinama
+    # sirasinda UYDURMA_ adli sahte olcuyu KACIRDI (17 Eylul).
+    aile = set(re.findall(r'r\[f"([A-Za-z0-9_]+_)\{', kaynak))
+    aile -= {"fim_ozne_"}          # ESKI ad, artik uretilmiyor
+    planda = {ad for _n, ad, _ne in PLAN}
+    eksik = []
+    for a in sorted(aile):
+        onek = OLCU_DOSYA.get(a)
+        if onek is None:
+            eksik.append(f"{a}  -> OLCU_DOSYA tablosunda YOK")
+        elif not any(p.startswith(onek) for p in planda):
+            eksik.append(f"{a}  -> '{onek}*' dosyasi PLAN'da YOK")
+    if eksik:
+        yaz("!! OLCU KAPISI DUSTU -- olculen ama DOKULMEYEN sey var:")
+        for e in eksik:
+            yaz("     " + e)
+        raise AssertionError("olculen her sey DOKULMELI: " + "; ".join(eksik))
+    yaz(f"  olcu kapisi GECTI: {len(aile)} ikincil olcu ailesinin "
+        f"{len(aile)}'sinin dosyasi var")
 
 
 def _dogrula(icerik, ayar, v, ornek):
