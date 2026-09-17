@@ -156,6 +156,18 @@ def sor(v, net, metin, yaz=print):
     # (Ahmet | Kilic), yani "Ahmet_Kilic" TEK bir kelime degil; kullanici
     # da "Ahmet Kilic cocuk sehir" yazabilmeli. Alt cizgi yazarsa da olur.
     p = metin.replace(",", " ").replace("_", " ").split()
+    # !! SORU SOZCUGUNU VE SORU ISARETINI AT. Kullanici, 17 Eylul:
+    # "burdaki sorular yanlis, sonunda kim? vs olmasi gerekiyor."
+    # Dilde artik soru sozcugu VAR ("...annesi kim?"), yani insanin
+    # yazacagi dogal cumle de oyle. Ama COZUMLEME icin bilgi tasimiyor:
+    # cevabin tipi zaten ILISKIDEN belirli (olculdu: 25/25 iliskide
+    # hedef tip TEK). Soruldugu bicimde kabul edilir, atilir; DIZIYI
+    # `kodla_*` zaten dogru soru sozcuguyle kuruyor.
+    _sz = {x.lower() for x in getattr(v, "soru_ad", ())}
+    while p and p[-1].rstrip("?").lower() in _sz | {""}:
+        p.pop()
+    if p:
+        p[-1] = p[-1].rstrip("?")
     ad2id = {_sade(_ad(v, e)): e for e in range(v.n_ent)}
     yaz2id = _iliski_sozluk(v) if hasattr(v, "iliski") else None
     # COZUMLEME SAGDAN: sondaki ILISKI kelimeleri (en fazla 2) ayrilir,
