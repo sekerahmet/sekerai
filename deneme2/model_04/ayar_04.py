@@ -175,6 +175,7 @@ AYAR = Ayar(
     # mimari, veri, havuz, sinav, wd, LR -- hepsi AYNI.
     odul_ac=True,
     odul_bolme="ent_arama",   # `ent` HUKUM bolmesi, uzerinde EGITILMEZ
+    odul_batch=64,            # odul adiminin soru sayisi (batch DEGIL)
     odul_g=8,                 # grup boyutu; olculdu: G=8'de sorularin
     #                           %66'si gradyan uretiyor (ikili odulde %5,4)
     odul_sicaklik=1.0,

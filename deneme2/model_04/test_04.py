@@ -285,7 +285,8 @@ from ayar_04 import GOREV_ALAN                               # noqa: E402
 # (Onceki surum "alanlar AYNI" diyordu ve odul eklenince dustu -- kilit
 #  dogru davrandi, tanim guncellendi.)
 ODUL_ALANLARI = {
-    "odul_ac", "odul_bolme", "odul_g", "odul_sicaklik", "odul_denetimli",
+    "odul_ac", "odul_bolme", "odul_g", "odul_batch", "odul_sicaklik",
+    "odul_denetimli",
     "odul_kl", "odul_zemin", "odul_kisayol", "odul_e", "odul_f",
     "odul_g_aile", "odul_h",
 }
@@ -413,6 +414,10 @@ ok(A.odul_kl == 0.0, "KL KAPALI -- acilirsa 'odul mu KL mi' ayrilamaz")
 ok(A.lr == 1e-5, "ODUL ASAMASI LR'i 1e-5",
    f"{A.lr} -- 1e-3 modeli 30 adimda siliyor (olculdu 17 Eylul)")
 ok(A.wd == 0.5, "wd 0.5 DEGISMEDI -- model_03 recetesi tasiniyor")
+ok(A.odul_batch < A.batch,
+   "odul_batch < batch -- zincirleme ornekleme yuva basina bir gecis",
+   f"odul_batch {A.odul_batch} vs batch {A.batch}")
+ok(A.batch == 512, "batch DEGISMEDI -- GOREV_ALAN'da, b15 kiyasi")
 
 # ODUL BOLMESI ile HUKUM BOLMESI AYRI VARLIKLARDAN OLMALI.
 # Bu kolun gecerliligi TAMAMEN buna dayaniyor: odul, ent_arama

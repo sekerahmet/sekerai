@@ -308,6 +308,11 @@ class Ayar:
     #   `ent` gercek bir tutulmus sinav olarak KALIR.
     odul_g: int = 8            # grup boyutu (GRPO). Olculdu: G=8'de
     #                            gruplarin ~%29'u gradyan uretiyor.
+    odul_batch: int = 64       # ODUL adiminin soru sayisi -- `batch`ten
+    #   AYRI. Zincirleme ornekleme yuva basina bir ileri gecis istiyor
+    #   (ilki B, sonraki ikisi B*G dizi uzerinde). batch=512 ile bu ~17
+    #   kat maliyet olurdu. `batch` DEGISMEDI: o egitim havuzunun alani
+    #   ve GOREV_ALAN'da -- model_b15 kiyasini kirmasin.
     odul_sicaklik: float = 1.0
     odul_denetimli: bool = False
     #   False = denetimli kayip KAPALI, ODUL TEK OGRETMEN. Kullanici,
@@ -414,6 +419,7 @@ ESKI_VARSAYILAN = {
     # alanlarinin HICBIRI okunmuyor, ama alan olarak var olmalilar
     # yoksa eski `ayar_t<N>.json` ve `surdurme_t<N>.pt` okunamaz.
     "odul_ac": False, "odul_bolme": "ent_arama", "odul_g": 8,
+    "odul_batch": 64,
     "odul_sicaklik": 1.0, "odul_denetimli": False, "odul_kl": 0.0,
     "odul_zemin": -0.50, "odul_kisayol": -0.30, "odul_e": 0.12,
     "odul_f": 0.34, "odul_g_aile": 0.67, "odul_h": 1.00,
@@ -1904,23 +1910,24 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
             # !! OPTIMIZER ADIMI ORTAK: asagidaki `kayip_top` blogu iki
             # dal icin de aynen kosuyor. Iki ayri adim YAZILMAZ.
             if ayar.odul_ac and not ayar.odul_denetimli:
-                jo = rs.randint(0, len(_od_X), ayar.batch)
+                jo = rs.randint(0, len(_od_X), ayar.odul_batch)
                 xb = torch.from_numpy(_od_X[jo]).to(DEV)
                 pb = torch.from_numpy(_od_P[jo]).to(DEV)
                 _lo, _hi = v.yuva_ara[0]
-                with torch.autocast(DEV, dtype=torch.float16,
-                                    enabled=(DEV == "cuda")):
-                    lg_tam = model(xb)
-                    _ar = torch.arange(xb.shape[0], device=DEV)[:, None]
-                    lg_y = lg_tam[_ar, pb][:, :, _lo:_hi]      # (B, 3, n)
+                # !! autocast YOK: ornekleme ve log-softmax float32'de
+                # yapilir. fp16'da dusuk olasilikli jetonlarin log'u
+                # tasar ve REINFORCE tahmincisi gurultulenir.
                 kayip, _o_ort, _o_ayr = _O.adim(
-                    lg_y, _od, _od_ozne[jo], _od_ksy[jo], _od_dogru[jo],
+                    model, xb, pb, _lo, _hi, _od, _od_ozne[jo],
+                    _od_ksy[jo], _od_dogru[jo],
                     ayar.odul_g, ayar.odul_sicaklik)
                 with torch.no_grad():
+                    _ar = torch.arange(xb.shape[0], device=DEV)[:, None]
+                    lg_y = model(xb).float()[_ar, pb][:, :, _lo:_hi]
                     _hedef = torch.from_numpy(
                         _od.par[_od_dogru[jo]]).to(DEV)        # (B, 3)
                     ana = F.cross_entropy(
-                        lg_y.detach().float().reshape(-1, lg_y.shape[-1]),
+                        lg_y.reshape(-1, lg_y.shape[-1]),
                         _hedef.reshape(-1))
                 # !! `ana_top` KIRLETILMIYOR. O sayac "egitim havuzunun
                 # cevap yuvalarindaki cross-entropy" demek ve butun

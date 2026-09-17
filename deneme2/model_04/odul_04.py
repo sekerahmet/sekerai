@@ -199,41 +199,77 @@ class Puanlayici:
         return odul.reshape(B, G).astype(np.float32), ayr
 
 
-def adim(lg_yuva: torch.Tensor, puanlayici: "Puanlayici", ozne: np.ndarray,
-         kisayol: np.ndarray, dogru: np.ndarray, g: int, sicaklik: float,
-         gen: torch.Generator | None = None) -> tuple:
-    """BIR ODUL ADIMI.  lg_yuva (B, 3, n) = cevap yuvalarinin logitleri.
+def adim(net, xb: torch.Tensor, pb: torch.Tensor, lo: int, hi: int,
+         puanlayici: "Puanlayici", ozne: np.ndarray, kisayol: np.ndarray,
+         dogru: np.ndarray, g: int, sicaklik: float) -> tuple:
+    """BIR ODUL ADIMI -- YUVALARI ZINCIRLEME ceker.
 
+    xb (B, T) kodlanmis sorular, pb (B, 3) cevap yuvalarinin ONCEKI
+    pozisyonlari (pozisyon p'nin logiti p+1'deki jetonu tahmin eder).
     DONER: (kayip, ortalama_odul, ayrinti)
 
-    Neden dizi uretimi YOK: cevap SABIT UC POZISYONDA duruyor (`kodla_2hop`
-    onlari veriyor). Yani politika, uc bagimsiz kategorik dagilimdir ve
-    bir ornek cekmek tek ileri gecisle olur -- otoregresif cozumleme
-    gerekmiyor. Bu, RLVR'nin LLM'lerdeki halinden ucuz olmasinin sebebi.
+    !! NEDEN ZINCIRLEME -- OLCULDU, 17 Eylul.
+    Ilk surum uc yuvayi BAGIMSIZ cekiyordu: tek ileri gecis, `lg[ar, pb]`
+    ile uc logit, uc ayri multinomial. Ucuzdu ve YANLISTI. Dizi
+        [S2] ... ? a1 a2 a3 <EOS>
+    ve `a2`nin logiti `a1`e BAKAR. Ogretmen zorlamali girdide oradaki
+    jeton GERCEK `a1` -- yani bagimsiz cekimde `a2` ve `a3`, modelin
+    kendi sectigi `a1`e degil DOGRU CEVABIN `a1`ine kosullu kaliyordu.
+    Cekilen ucluler modelin POLITIKASINDAN GELMIYORDU; REINFORCE
+    tahmincisi de bu yuzden YANLIYDI.
 
-    !! YUVALAR BAGIMSIZ CEKILIYOR. Olculdu (17 Eylul): model_03'un
-    ornekleri %92 oraninda gecerli bir varlik veriyor, %8'i `Diyarbakir
-    Lisesi Lisesi` gibi OLMAYAN varliklar. Bunlari kirpmiyoruz -- KAPI 3
-    onlari zemine dusuruyor, yani model duzgun varlik uretmeyi ODULDEN
-    ogrenmek zorunda. Gecerli kumeye KISITLI ornekleme, o dersi
-    modelin elinden alirdi (onkayit model_04.md 5).
+    Bedeli olculdu (model_03, ent, 8 cekim):
+        BAGIMSIZ   gecerli varlik orani 0.9289
+        ZINCIRLEME gecerli varlik orani 0.9914
+    Yani KAPI 3'te takilanlarin cogu modelin kusuru degil, ORNEKLEMENIN
+    kusuruymus -- ve OKUL tipinde ceza yikiciydi (kapilarda %47.6,
+    ortalama odul -0.166). Uc yuvali okullarda etki en buyuk cunku uc
+    icerik yuvasi da tutarli olmak zorunda.
+
+    Bedel: yuva basina bir ileri gecis. Ilki B dizi uzerinde (butun G
+    kopya o noktada AYNI), sonraki ikisi B*G uzerinde. `odul_batch`
+    bu yuzden `batch`ten kucuk.
+
+    KIRPMA YOK: gecersiz uclu uretilirse KAPI 3 onu zemine dusurur ve
+    model duzgun varlik uretmeyi ODULDEN ogrenir. Gecerli kumeye
+    kisitli ornekleme o dersi modelin elinden alirdi.
     """
-    B, yuva, n = lg_yuva.shape
-    assert yuva == 3, f"bu odul UC YUVA icin yazildi, gelen {yuva}"
-    lp = torch.log_softmax(lg_yuva.float() / sicaklik, dim=-1)   # (B,3,n)
+    B = xb.shape[0]
+    dev = xb.device
+    ar_b = torch.arange(B, device=dev)
+    # --- YUVA 1: tek ileri gecis, G kopya icin ORTAK -------------------
+    lg1 = net(xb).float()[ar_b, pb[:, 0], lo:hi]                 # (B, n)
+    lp1 = torch.log_softmax(lg1 / sicaklik, dim=-1)
     with torch.no_grad():
-        p = lp.exp().reshape(B * yuva, n)
-        cek = torch.multinomial(p, g, replacement=True, generator=gen)
-        cek = cek.reshape(B, yuva, g).permute(0, 2, 1).contiguous()  # (B,G,3)
-    # secilen jetonlarin log-olasiligi: yuvalar bagimsiz -> TOPLANIR
-    logp = lp.gather(2, cek.permute(0, 2, 1)).sum(1)              # (B,G)
+        s1 = torch.multinomial(lp1.exp(), g, replacement=True)   # (B, g)
+    logp = lp1.gather(1, s1)                                     # (B, g)
+    # --- G kopyaya ac, secilen jetonu DIZIYE yaz ----------------------
+    pg = pb.repeat_interleave(g, 0)                              # (B*g, 3)
+    ar_g = torch.arange(B * g, device=dev)
+    cek = [s1.reshape(-1)]
+    xg = xb.repeat_interleave(g, 0).clone()                      # (B*g, T)
+    xg[ar_g, pg[:, 0] + 1] = s1.reshape(-1) + lo
+    for j in (1, 2):
+        lgj = net(xg).float()[ar_g, pg[:, j], lo:hi]             # (B*g, n)
+        lpj = torch.log_softmax(lgj / sicaklik, dim=-1)
+        with torch.no_grad():
+            sj = torch.multinomial(lpj.exp(), 1).squeeze(1)      # (B*g,)
+        logp = logp + lpj.gather(1, sj[:, None]).reshape(B, g)
+        # !! KLON SART. `xg` bir onceki ileri gecisin GIRDISI ve autograd
+        # onu tutuyor; YERINDE degistirmek o gecisin gradyanini gecersiz
+        # kilar ("modified by an inplace operation"). Her yuva icin YENI
+        # bir tensor yazilir.
+        xg = xg.clone()
+        xg[ar_g, pg[:, j] + 1] = sj + lo
+        cek.append(sj)
+    ornek = torch.stack(cek, 1).reshape(B, g, 3)                 # (B,G,3)
 
-    od_np, ayr = puanlayici.puanla(cek.cpu().numpy(), ozne, kisayol, dogru)
-    od = torch.from_numpy(od_np).to(lg_yuva.device)
+    od_np, ayr = puanlayici.puanla(ornek.cpu().numpy(), ozne, kisayol, dogru)
+    od = torch.from_numpy(od_np).to(dev)
     a = avantaj(od)
     # REINFORCE, grup-goreli taban ile. Tek adimlik ve ON-POLICY oldugu
-    # icin PPO orani/kirpmasi YOK: ornekler tam da guncellenen politikadan
-    # geliyor, yani oran birebir 1.
+    # icin PPO orani/kirpmasi YOK: ornekler tam da guncellenen
+    # politikadan geliyor, yani oran birebir 1.
     kayip = -(a.detach() * logp).mean()
     ayr["odul_ort"] = float(od.mean())
     ayr["avantajli_soru"] = float((od.std(dim=1) > 1e-6).float().mean())
