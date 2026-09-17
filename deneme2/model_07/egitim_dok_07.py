@@ -1,29 +1,38 @@
 # -*- coding: utf-8 -*-
-"""egitim_dok_07 — VERININ KENDISI, duz metin, ACIKLAMA YOK.
+"""egitim_dok_07 — VERININ KENDISI, duz metin.
 
-Kullanici karari, 17 Eylul 2026: *"ben tum egitim verisini aciklama
-olmadan bu egitim verisidir gormek istiyorum. her satirdaki aciklamaya
-gerek yok."*  Ve model_07 icin: *"verileri olustur bakayim bi."*
+Kullanici karari, 17 Eylul 2026:
+    *"veri dosyalarini uret ama uretme modelini duzelt. BIR FORMATTA
+    olmali. 01. token listesi, 02. varlik listesi, 03. egitim hop1
+    tip1, egitim hop1 tip2, sorular hop1 tip1 gibi bir suru detayda
+    text dosyasi olarak. ama lutfen dizi icinde detay olmadan."*
 
-!! YERLESIM. `analiz_07`in dokumu DENETIM icin (graf oku, kisayol,
-jeton dizisi). Ikisi ayni klasorde durunca hep once o aciliyordu --
-ayrimi ADLANDIRMA degil YERLESIM tasiyor:
+FORMAT -- iki kural, istisnasiz:
 
-    veri/model_07/            VERININ KENDISI -- yalniz cumleler
-        EGITIM_bildirim_1hop.txt   EGITIM_bildirim_2hop.txt
-        EGITIM_bosluk.txt          EGITIM_kimlik.txt
-    veri/model_07/denetim/    `analiz_07`in dokumu (aciklamali)
+  1) HER SATIR TIPI KENDI DOSYASINDA, numarali. Birlestirme yok:
+     "hop1'in uc bicimi tek dosyada" YAPILMAZ, ucu de ayri dosya.
+  2) DOSYANIN ICINDE DETAY YOK. Bir satir = bir cumle. Baslik yok,
+     aciklama yok, jeton numarasi yok. Ne aradigin `00_ICINDEKILER`de.
 
-model_05'TEN FARKI:
-    SORU BICIMI YOK.  Cevap artik soruyu birebir tekrar etmiyor;
-    olculmustu ki o 7 jetonun kosullu entropisi 0,000 idi (gradyan
-    uretmiyorlardi) ve t_len'i 24'te tutuyorlardi. Simdi t_len 16.
-    "Soru sorma" isini BOSLUK DOLDURMA yapiyor.
+    ONCE (bozuktu)                  SIMDI
+    04_egitim_bildirim_1hop.txt     10_egitim_hop1_tip1.txt
+      (3 bicim IC ICE)              11_egitim_hop1_tip2.txt
+                                    12_egitim_hop1_tip3.txt
+    14_diziler_numarali.txt         -- SILINDI: satir basina 4 satir
+      cumle + "jeton:" + "numara:"     detay yaziyordu.
+
+Numaralarda BOSLUK YOK ve dosya listesi TEK BIR TABLODAN (`PLAN`)
+turetiliyor -- eskiden numaralar elle yazilmisti ve 04/05/12/13/14
+diye gidiyordu, arasi bostu.
 
 Cumleler MODELIN GORDUGU DIZIDEN okunuyor (`analiz_07.Dok.oku`),
 yeniden uretilmiyor -- burada ne goruyorsan havuzda o var.
 
-    python egitim_dok_07.py [--klasor <yol>]
+!! YERLESIM. `analiz_07`in dokumu DENETIM icin (graf oku, kisayol,
+taban cizgi) ve `veri/model_07/denetim/` altinda durur. Burasi
+yalniz CUMLELER.
+
+    python egitim_dok_07.py [--klasor <yol>] [--ornek N]
 """
 from __future__ import annotations
 
@@ -43,77 +52,208 @@ import analiz_07 as AZ                                         # noqa: E402
 NL = chr(10)
 
 
+# ===================== DOSYA PLANI — TEK KAYNAK ==========================
+# (numara, ad, ne oldugu)  -- "ne oldugu" YALNIZ 00_ICINDEKILER'e girer,
+# veri dosyasinin icine GIRMEZ.
+PLAN = [
+    ("01", "jetonlar",          "sozlugun tamami: numara + jeton"),
+    ("02", "varliklar",         "varlik adlari"),
+    ("03", "iliskiler",         "iliski adlari"),
+
+    ("10", "egitim_hop1_tip1",  "1-hop bildirim, kanonik sira"),
+    ("11", "egitim_hop1_tip2",  "1-hop bildirim, yuklem basta"),
+    ("12", "egitim_hop1_tip3",  "1-hop bildirim, iliski basta"),
+    ("13", "egitim_hop2_tip1",  "2-hop bildirim, kanonik sira"),
+    ("14", "egitim_hop2_tip2",  "2-hop bildirim, yuklem basta"),
+    ("15", "egitim_hop2_tip3",  "2-hop bildirim, iliski basta"),
+    ("16", "egitim_bosluk_hop1", "1-hop bosluk doldurma"),
+    ("17", "egitim_bosluk_hop2", "2-hop bosluk doldurma"),
+    ("18", "sorular_hop1",      "1-hop soru: '... kardesi kimdir? ...'"),
+    ("19", "sorular_hop2",      "2-hop soru: '... arkadasi kimdir? ...'"),
+    ("20", "egitim_kimlik",     "kimlik koprusu: 'X kimdir? X'dir.'"),
+
+    ("30", "sinav_one",         "SINAV bolmesi: tek adimlik olgu"),
+    ("31", "sinav_seen",        "SINAV bolmesi: gorulmus 2-hop"),
+    ("32", "sinav_comp",        "SINAV bolmesi: gorulmemis uclu"),
+    ("33", "sinav_ent",         "SINAV bolmesi: hic zincir basi olmamis"),
+    ("34", "sinav_ent_yok",     "SINAV bolmesi: kisayol TIP OLARAK imkansiz"),
+    ("35", "sinav_ood",         "SINAV bolmesi: dagitim disi"),
+]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--klasor", default=None)
+    ap.add_argument("--ornek", type=int, default=0,
+                    help="her dosyadan en fazla N satir (0 = HEPSI)")
     a = ap.parse_args()
     kl = a.klasor or os.path.join(_K, "veri", "model_07")
     os.makedirs(kl, exist_ok=True)
     d = AZ.Dok("model_07")
     v, ayar = d.v, d.ayar
     n_bic = max(1, ayar.bicim)
+    icerik = {}
 
-    def yaz(ad, satirlar, not_=""):
-        yol = os.path.join(kl, ad)
+    def satirlar(ad):
+        """`ad` icin CUMLE LISTESI. Tek yerden, tek bicimde."""
+        # --- sozlukler ---
+        # !! CUMLELERDEKI YAZIMLA AYNI. `d.ad()` ve `d.R` graf'in ASCII
+        # adlarini veriyor (Ibrahim, bolumu); cumleler ise Turkce
+        # basiliyor (Ibrahim -> İbrahim, bolumu -> bölümü). Liste
+        # ASCII kalirsa dosyadaki adi cumlelerde ARAYAMAZSIN.
+        if ad == "jetonlar":
+            def _tr(i):
+                # `oku()` CUMLE BASI buyuk harf yapar; tek jetonluk bir
+                # listede bu YANLIS okunur ("bolumu" -> "Bölümü", oysa
+                # jeton cins isim ve kucuk harfli). Cevirilere DOGRUDAN
+                # bakiliyor.
+                w = d.jeton_ad(i)
+                return d.VM.TR_ILISKI.get(w) or d.VM.TR.get(w, w)
+            return [f"{i}\t{d.jeton_ad(i)}\t{_tr(i)}" for i in range(v.vocab)]
+        if ad == "varliklar":
+            return [" ".join(d.VM.TR.get(w, w) for w in M.kelimeler(v, e))
+                    for e in range(v.n_ent)]
+        if ad == "iliskiler":
+            return [d.VM.TR_ILISKI[r] for r in d.R]
+
+        # --- egitim: bildirim, uc sira ---
+        if ad.startswith("egitim_hop"):
+            hop, tip = int(ad[10]), int(ad[-1]) - 1
+            lst = v.one if hop == 1 else v.tr2
+            kodla = M.kodla_1hop if hop == 1 else M.kodla_2hop
+            if tip >= n_bic:
+                return []
+            X = kodla(v, list(lst), tip)[0]
+            return [d.oku(r) for r in X]
+
+        # --- egitim: bosluk doldurma ---
+        if ad.startswith("egitim_bosluk_hop"):
+            if getattr(ayar, "fim_kat", 0) <= 0:
+                return []
+            hop = int(ad[-1])
+            lst = v.one if hop == 1 else v.tr2
+            kodla = M.kodla_1hop if hop == 1 else M.kodla_2hop
+            # !! HAVUZDAKININ AYNI TOHUMU. `egitim_havuzu` tek bir
+            # uretec kullaniyor ve 1hop'u 2hop'tan ONCE tuketiyor; ayni
+            # sirayla ilerlenmezse buradaki bosluk KONUMLARI havuzdan
+            # kayar ve dosya "egitimde olan" olmaktan cikar.
+            rs = np.random.default_rng(1000 + ayar.veri_tohum)
+            cik = []
+            for _h, _l, _k in ((1, v.one, M.kodla_1hop),
+                               (2, v.tr2, M.kodla_2hop)):
+                for b in range(n_bic):
+                    X = _k(v, list(_l), b)[0]
+                    for r in X:
+                        dz = [int(t) for t in r if int(t) != M.PAD]
+                        for p in rs.choice(len(dz),
+                                           size=min(ayar.fim_kat, len(dz)),
+                                           replace=False):
+                            if _h == hop:
+                                cik.append(d.oku(M.kodla_fim(v, dz, int(p))))
+            return cik
+
+        # --- egitim: soru bicimi ---
+        if ad.startswith("sorular_hop"):
+            if getattr(ayar, "soru_kat", 0) <= 0:
+                return []
+            hop = int(ad[-1])
+            lst = v.one if hop == 1 else v.tr2
+            X = M.kodla_soru(v, list(lst), hop)[0]
+            return [d.oku(r) for r in X]
+
+        # --- egitim: kimlik ---
+        if ad == "egitim_kimlik":
+            if ayar.ident_frac <= 0:
+                return []
+            X = M.kodla_kimlik_q1(v, range(v.n_ent))[0]
+            return [d.oku(r) for r in X]
+
+        # --- sinav bolmeleri ---
+        if ad.startswith("sinav_"):
+            bol = ad[6:]
+            lst = d.L.get(bol) or []
+            if not lst:
+                return []
+            kodla = M.kodla_1hop if bol == "one" else M.kodla_2hop
+            X = kodla(v, list(lst), 0)[0]
+            return [d.oku(r) for r in X]
+
+        raise AssertionError("PLANDA var, uretici YOK: " + ad)
+
+    for no, ad, ne in PLAN:
+        s = satirlar(ad)
+        if not s:
+            print(f"atlandi: {no}_{ad}  (bu kolda YOK)")
+            continue
+        tam = len(s)
+        if a.ornek:
+            s = s[:a.ornek]
+        dosya = f"{no}_{ad}.txt"
+        yol = os.path.join(kl, dosya)
         with io.open(yol, "w", encoding="utf-8") as f:
-            for s in satirlar:
-                f.write(s + NL)
-        print(f"yazildi: {ad:<26} {len(satirlar):>9,} satir"
-              f"   {os.path.getsize(yol)/1024/1024:>5.1f} MB   {not_}")
+            for x in s:
+                f.write(x + NL)
+        icerik[dosya] = (tam, ne)
+        print(f"yazildi: {dosya:<26} {tam:>9,} satir"
+              f"   {os.path.getsize(yol)/1024/1024:>5.1f} MB")
 
-    # --- BILDIRIM satirlari, UC TURKCE SIRADA ---------------------------
-    for ad, lst, kodla in (("04_egitim_bildirim_1hop.txt", v.one, M.kodla_1hop),
-                           ("05_egitim_bildirim_2hop.txt", v.tr2, M.kodla_2hop)):
-        s = []
-        for x in lst:
-            for b in range(n_bic):
-                s.append(d.oku(kodla(v, [x], b)[0][0]))
-        yaz(ad, s, f"({n_bic} sira)")
+    # --- 00_ICINDEKILER: ACIKLAMANIN TEK YERI --------------------------
+    with io.open(os.path.join(kl, "00_ICINDEKILER.txt"), "w",
+                 encoding="utf-8") as f:
+        f.write("model_07 VERISI" + NL)
+        f.write("=" * 70 + NL)
+        f.write(f"t_len {v.t_len}   sozluk {v.vocab}   varlik {v.n_ent}   "
+                f"iliski {v.n_rel}" + NL)
+        f.write(f"<BOS> {v.bosluk}   <AYIR> {v.ayir}" + NL + NL)
+        f.write("Her dosya: BIR SATIR = BIR CUMLE. Dosyalarin icinde "
+                "aciklama YOK." + NL + NL)
+        for dosya in sorted(icerik):
+            n, ne = icerik[dosya]
+            f.write(f"{dosya:<28} {n:>9,}  {ne}" + NL)
+        f.write(NL + "EGITIM HAVUZU = 10..20 arasi dosyalar." + NL)
+        f.write("SINAV = 30..35. Sinav DUZ BILDIRIMLE yapilir (tip1); "
+                "soru bicimi ve" + NL)
+        f.write("bosluk doldurma EGITIMDE var, SINAVDA yok." + NL)
+        f.write(NL + "20_egitim_kimlik BENZERSIZ satirlari verir; havuzda "
+                f"payi %{ayar.ident_frac:.0%} olana" + NL)
+        f.write("kadar TEKRARLANIR. Digerlerinde tekrar yoktur." + NL)
+        for ln in _dogrula(icerik, ayar, v, a.ornek):
+            f.write(ln + NL)
+    print(f"{NL}klasor: {kl}")
 
-    # --- BOSLUK DOLDURMA ------------------------------------------------
-    # Havuzdakinin AYNISI: ayni tohum, ayni konumlar. Yani burada
-    # gordugun satirin birebir esi egitimde var.
-    if getattr(ayar, "fim_kat", 0) > 0:
-        rs = np.random.default_rng(1000 + ayar.veri_tohum)
-        s = []
-        for lst, kodla in ((v.one, M.kodla_1hop), (v.tr2, M.kodla_2hop)):
-            for b in range(n_bic):
-                X = kodla(v, list(lst), b)[0]
-                for r in X:
-                    dz = [int(t) for t in r if int(t) != M.PAD]
-                    for p in rs.choice(len(dz),
-                                       size=min(ayar.fim_kat, len(dz)),
-                                       replace=False):
-                        s.append(d.oku(M.kodla_fim(v, dz, int(p))))
-        yaz("12_egitim_bosluk.txt", s, f"(satir basina {ayar.fim_kat} varyant)")
 
-    # --- KIMLIK ---------------------------------------------------------
-    if ayar.ident_frac > 0:
-        X = M.kodla_kimlik_q1(v, range(v.n_ent))[0]
-        yaz("13_egitim_kimlik.txt", [d.oku(r) for r in X],
-            f"(havuzda x{ayar.ident_frac:.0%} paya kadar tekrarlanir)")
+def _dogrula(icerik, ayar, v, ornek):
+    """DOKUM ILE HAVUZ TUTUYOR MU -- her uretimde, sessizce degil.
 
-    # !! JETON TABLOSU BURADA YAZILMIYOR: `analiz_07` onu
-    # 01_tokenlar.txt olarak zaten yaziyor. Ikinci bir kopya,
-    # kullanicinin 17 Eylul'de sordugu "niye iki tane egitim
-    # var?" durumunun aynisi olurdu.
-    # --- DIZILER: cumle + jeton numaralari yan yana --------------------
-    ornek = []
-    for lst, kodla, et in ((v.one, M.kodla_1hop, "1hop"),
-                           (v.tr2, M.kodla_2hop, "2hop")):
-        for x in list(lst)[:200]:
-            for b in range(n_bic):
-                r = kodla(v, [x], b)[0][0]
-                dz = [int(t) for t in r if int(t) != M.PAD]
-                ornek.append(d.oku(dz))
-                ornek.append("   jeton : " + " ".join(d.jeton_ad(t) for t in dz))
-                ornek.append("   numara: " + " ".join(str(t) for t in dz))
-                ornek.append("")
-    yaz("14_diziler_numarali.txt", ornek, "(ilk 200 olgu, uc sira, numarali)")
-
-    print(f"{NL}t_len {v.t_len}   vocab {v.vocab}   "
-          f"<BOS> {v.bosluk}  <AYIR> {v.ayir}")
-    print(f"klasor: {kl}")
+    Sebep: bu dosyalar "egitimde ne var" diye ELLE okunuyor. Dokum
+    havuzdan kayarsa yanlis bir sey okunur ve bunun hicbir belirtisi
+    olmaz. Burasi sayilari `egitim_havuzu`nun KENDISINE soruyor."""
+    out = ["", "DOGRULAMA (dokum <-> egitim havuzu)"]
+    if ornek:
+        out.append(f"  ATLANDI: --ornek {ornek} ile kirpilmis dokum.")
+        print(out[-1])
+        return out
+    n_bic = max(1, ayar.bicim)
+    n_duz = (len(v.one) + len(v.tr2)) * n_bic
+    bek = {
+        "duz":    (n_duz, sum(icerik[f][0] for f in icerik
+                              if f[:2] in ("10", "11", "12", "13", "14", "15"))),
+        "bosluk": (n_duz * getattr(ayar, "fim_kat", 0),
+                   sum(icerik[f][0] for f in icerik if f[:2] in ("16", "17"))),
+        "soru":   ((len(v.one) + len(v.tr2)) * getattr(ayar, "soru_kat", 0),
+                   sum(icerik[f][0] for f in icerik if f[:2] in ("18", "19"))),
+    }
+    tamam = True
+    for ad, (b, g) in bek.items():
+        iyi = (b == g)
+        tamam &= iyi
+        out.append(f"  {'GECTI ' if iyi else '!! BOZUK'} {ad:<8} "
+                   f"havuz {b:>9,}   dokum {g:>9,}")
+    out.append("  " + ("HEPSI TUTUYOR" if tamam else "!! DOKUM HAVUZDAN KAYDI"))
+    for ln in out[1:]:
+        print(ln)
+    assert tamam, "dokum havuzdan kaydi -- yukariya bak"
+    return out
 
 
 if __name__ == "__main__":
