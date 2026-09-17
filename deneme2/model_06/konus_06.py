@@ -24,7 +24,7 @@ gozlerimle gormek istiyorum."*
 !! BU BIR OLCU DEGIL. Elle secilmis sorulardir; hukum `pencere_06` ile
 verilir (onkayit `belge/onkayit/model_06.md`).
 
-    python konus_06.py                      en son anlik goruntu
+    python konus_06.py                      son 5'in AGIRLIK ORTALAMASI
     python konus_06.py --adim 8000          belli bir adim
     python konus_06.py --genislik 5         son 5'in agirlik ortalamasi
     python konus_06.py --klasor <yol>       baska bir kosu
@@ -316,7 +316,24 @@ class Sozluk:
 
 
 # --- MODEL ---------------------------------------------------------------
-def kur(klasor, genislik=1, adim=None):
+def kur(klasor, genislik=5, adim=None):
+    """Modeli kur. VARSAYILAN: son 5 anlik goruntunun AGIRLIK ORTALAMASI.
+
+    !! ONCEDEN 1 IDI -- yani elimizdeki EN IYI modeli GOSTERMIYORDU.
+    Kullanici sordu (17 Eylul): *"su an konus en guncel agirlikli
+    ortalama iyi olan versiyon mu?"* Degildi. Olculdu (model_06, 20.000):
+
+        tek anlik goruntu   one 0.7530  seen 0.8003  comp 0.3118  ent 0.1977
+        pencere (5 ort.)    one 0.9237  seen 0.9723  comp 0.3970  ent 0.3083
+        FARK                   +0.1707     +0.1720     +0.0852     +0.1106
+
+    `one` 0,75 ile 0,92 arasindaki fark, elle sorulan sorularda gorulen
+    sacma cevaplarin buyuk kismini aciklar. Hukum de zaten pencereyle
+    veriliyor (CLAUDE.md "Birincil okuma"); arac baska bir modeli
+    gosterirse ekranda gorulen sey OLCULEN sey OLMAZ.
+
+    `--genislik 1` ile eski davranisa donulur.
+    """
     ayar = P.ayar_oku(klasor)
     v = M.veri_kur(ayar, yaz=lambda *a: None)
     snap = P.anlik_goruntuler(klasor)
@@ -442,8 +459,9 @@ def main():
     ap.add_argument("--dene", action="store_true",
                     help="jetonlayiciyi egitim satirlarina karsi sina")
     ap.add_argument("--klasor", default=KLASOR)
-    ap.add_argument("--genislik", type=int, default=1,
-                    help="son N anlik goruntunun agirlik ortalamasi")
+    ap.add_argument("--genislik", type=int, default=5,
+                    help="son N anlik goruntunun AGIRLIK ORTALAMASI "
+                         "(varsayilan 5 -- hukum de bununla veriliyor)")
     ap.add_argument("--adim", type=int, default=None)
     ap.add_argument("--soru", action="append", default=None)
     a = ap.parse_args()

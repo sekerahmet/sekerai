@@ -24,7 +24,7 @@ gozlerimle gormek istiyorum."*
 !! BU BIR OLCU DEGIL. Elle secilmis sorulardir; hukum `pencere_05` ile
 verilir (onkayit `belge/onkayit/model_05.md`).
 
-    python konus_05.py                      en son anlik goruntu
+    python konus_05.py                      son 5'in AGIRLIK ORTALAMASI
     python konus_05.py --adim 8000          belli bir adim
     python konus_05.py --genislik 5         son 5'in agirlik ortalamasi
     python konus_05.py --klasor <yol>       baska bir kosu
@@ -414,8 +414,9 @@ def main():
     ap.add_argument("--dene", action="store_true",
                     help="jetonlayiciyi egitim satirlarina karsi sina")
     ap.add_argument("--klasor", default=KLASOR)
-    ap.add_argument("--genislik", type=int, default=1,
-                    help="son N anlik goruntunun agirlik ortalamasi")
+    ap.add_argument("--genislik", type=int, default=5,
+                    help="son N anlik goruntunun AGIRLIK ORTALAMASI "
+                         "(varsayilan 5 -- hukum de bununla veriliyor)")
     ap.add_argument("--adim", type=int, default=None)
     ap.add_argument("--soru", action="append", default=None)
     a = ap.parse_args()
