@@ -92,9 +92,12 @@ def main():
                     help="surdurme_t<N>.pt'den KALDIGI YERDEN devam et. "
                          "--adim ile birlikte kullanilir.")
     ap.add_argument("--baslangic", default=None,
-                    help="BASKA bir kosunun anlik goruntusu (.pt). model_04 "
-                         "odulu model_03'un UZERINE kuruyor -- bu kolda "
-                         "ZORUNLU. Verilmezse kosu REDDEDILIR.")
+                    help="BASKA bir kosunun anlik goruntusu. KLASOR verilirse "
+                         "PENCERE ORTALAMASI alinir (onerilen), DOSYA "
+                         "verilirse tek goruntu. model_04 odulu model_03'un "
+                         "UZERINE kuruyor -- bu kolda ZORUNLU.")
+    ap.add_argument("--baslangic_genislik", type=int, default=5,
+                    help="klasor verildiyse kac anlik goruntu ortalanacak")
     a = ap.parse_args()
 
     if KOK not in sys.path:
@@ -134,13 +137,13 @@ def main():
                 os.linesep + "!! --baslangic ZORUNLU: odul kolu model_03'un "
                 "anlik goruntusu uzerine kurulur." + os.linesep
                 + "   ornek: --baslangic "
-                "/content/drive/MyDrive/model_03/t0/snap/"
-                "snap_model_03_t0_00020000.pt")
+                "/content/drive/MyDrive/model_03/t0/snap")
         if a.baslangic and not os.path.exists(a.baslangic):
             raise SystemExit(f"{os.linesep}!! baslangic dosyasi YOK: "
                              f"{a.baslangic}")
         M.egit(ayar, alt=f"{a.ev}/t{t}", ustune=a.ustune,
-               commit=a.commit, surdur=a.surdur, baslangic=a.baslangic)
+               commit=a.commit, surdur=a.surdur, baslangic=a.baslangic,
+               baslangic_genislik=a.baslangic_genislik)
 
 
 if __name__ == "__main__":

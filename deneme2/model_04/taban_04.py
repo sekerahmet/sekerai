@@ -1645,7 +1645,7 @@ def erken_teshis(r: dict, ayar: Ayar, yaz=print, uyarildi: set | None = None):
 def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
          model_kur=None,   # None -> Model. `model_b` kendi sinifini verir;
          #                   varsayilan davranis BIT DUZEYINDE ayni kalir.
-         surdur=False, baslangic=None) -> list:
+         surdur=False, baslangic=None, baslangic_genislik=5) -> list:
     """`baslangic`: BASKA bir kosunun anlik goruntusunden agirlik yukler.
 
     model_04'un TANIMI bunu gerektiriyor: odul, model_03'un UZERINE
@@ -1729,13 +1729,44 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
     torch.manual_seed(ayar.tohum)
     model = (model_kur or Model)(ayar, v.vocab).to(DEV)
     if baslangic:
-        # fp16 kaydedilmis olabilir -> float32'ye cevrilerek yuklenir.
+        # `baslangic` bir KLASOR ise PENCERE ORTALAMASI alinir (son
+        # `baslangic_genislik` anlik goruntu), bir DOSYA ise o tek
+        # goruntu yuklenir.
+        #
+        # !! VARSAYILAN KLASOR, yani PENCERE. Olculdu (17 Eylul):
+        #     model_03 egri 20.000    one 0.9153  seen 0.9210  comp 0.8113
+        #     model_03 PENCERE 12-20k one 0.9857  seen 0.9960  comp 0.8350
+        # Tek goruntuden baslamak, kosuyu ON KOSULUN ALTINDAN baslatirdi
+        # (one 0.9153 < 0.98) ve sonuc ne cikarsa ciksin YORUMLANAMAZDI.
+        # Ayrica bu kolun butun kiyas sayilari (onkayit model_04.md 2)
+        # PENCERE modelinden olculdu; baska bir agirliktan baslamak
+        # onlari gecersiz kilardi.
+        if os.path.isdir(baslangic):
+            _y = sorted(glob.glob(os.path.join(baslangic, "*.pt")))
+            assert _y, f"anlik goruntu YOK: {baslangic}"
+            _y = _y[-baslangic_genislik:]
+            _t = None
+            for _p in _y:
+                _d = torch.load(_p, map_location="cpu")
+                if _t is None:
+                    _t = {k: x.float() for k, x in _d.items()}
+                else:
+                    assert set(_d) == set(_t), f"anahtar kumesi farkli: {_p}"
+                    for k in _t:
+                        _t[k] += _d[k].float()
+            _sd = {k: x / len(_y) for k, x in _t.items()}
+            yaz(f"  BASLANGIC: PENCERE ORTALAMASI, {len(_y)} anlik goruntu")
+            for _p in _y:
+                yaz(f"     {os.path.basename(_p)}")
+        else:
+            _sd = {k: t.float()
+                   for k, t in torch.load(baslangic, map_location="cpu").items()}
+            yaz(f"  !! BASLANGIC TEK ANLIK GORUNTU: {baslangic}")
+            yaz("     (pencere DEGIL -- on kosul kapilari bu agirlikta")
+            yaz("      GECMEYEBILIR, onkayit model_04.md 1)")
         # `strict=True`: mimari kaydedildiginden farkliysa SESSIZ degil
         # GURULTULU dussun.
-        _sd = torch.load(baslangic, map_location="cpu")
-        _sd = {k: t.float() for k, t in _sd.items()}
         model.load_state_dict(_sd, strict=True)
-        yaz(f"  BASLANGIC AGIRLIGI yuklendi: {baslangic}")
         yaz("     (bu kol SIFIRDAN kosmuyor -- odul, egitilmis bir modelin")
         yaz("      uzerine biniyor. `kayip` sutunu 0. adimda DUSUK baslar.)")
     yaz(f"  parametre {model.n_param():,}  (d={ayar.d} l={ayar.l} "
