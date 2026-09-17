@@ -558,15 +558,27 @@ def main():
         # (kullanici, 17 Eylul: "bu sekilde yaptigim zaman neyi yanlis
         # yapiyorum?" -- yanlis yapan kendisi degil, bu satirdi.)
         if _fim:
-            # Cevap dizinin SONUNDA. Cumleyi bosluk DOLDURULMUS haliyle
-            # geri yaz -- kullanici ne sordugunu ve ne geldigini yan yana
-            # gorsun.
+            # !! EGITIMDE BOSLUK HEP TEK JETON (olculdu: AYIRAC'tan
+            # sonraki jeton sayisi 20.000/20.000 satirda 1). Yani cevap
+            # ILK jeton; devami modelin durmayi ogrenmedigini gosterir,
+            # cevabin parcasi DEGIL.
+            #
+            # Onceden hepsi "bosluga gelen" diye basiliyordu ve modelin
+            # hatasini OLDUGUNDAN BUYUK gosteriyordu: tek jetonluk bir
+            # bosluga 6 jeton basip "Kardesi Fatih Yilmaz'dir." diyordu.
+            # Kullanici sordu ("t_len uyumsuzlugundan mi?") -- degildi,
+            # bosluga 6-8 jetonluk yer kaliyordu; arac sozlesmeyi
+            # bilmiyordu.
             _p = [int(t) for t in cikti[len(jet):]]
             _dolu = [t for t in jet[:-1]]
             _i = _dolu.index(v.bosluk)
-            print("  " + D.oku(_dolu[:_i] + _p + _dolu[_i + 1:]))
-            print("  bosluga gelen: " + D.oku(_p)
-                  + f"   ({' '.join(D.jeton_ad(t) for t in _p)})")
+            _c = _p[:1]
+            print("  " + D.oku(_dolu[:_i] + _c + _dolu[_i + 1:]))
+            print(f"  bosluga gelen: {D.jeton_ad(_c[0]) if _c else '(yok)'}")
+            _fazla = _p[1:]
+            if _fazla and _fazla[0] not in (M.PAD,):
+                print("  !! model DURMADI -- egitimde bosluk HEP tek jeton."
+                      " Devami: " + " ".join(D.jeton_ad(t) for t in _fazla))
             return
         yeni_cumle = jet[-1] in (M.QM, M.EOS)
         print(D.oku(cikti[len(jet):] if yeni_cumle else cikti))
