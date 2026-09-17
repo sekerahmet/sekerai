@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""analiz_03 — model_03'in KENDI VERI DOKUMU + SAGLIK DENETIMI. TEK BASINA DURUR.
+"""analiz_04 — model_04'in KENDI VERI DOKUMU + SAGLIK DENETIMI. TEK BASINA DURUR.
 
-Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_03 folderi
-altinda olmali. model_03 diger hicbir model ile ayni seyi kullanmamali.
-Analiz icinde analiz_03 kullanalim mesela, digerleri icin de."*
+Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_04 folderi
+altinda olmali. model_04 diger hicbir model ile ayni seyi kullanmamali.
+Analiz icinde analiz_04 kullanalim mesela, digerleri icin de."*
 
 `veri_dok.py`nin KOPYASI (uretici: scratchpad/kur_analiz00.py). Iki fark:
-motor `taban_03`, ve `--model` secenegi YOK -- bu arac yalniz model_03'i
-tanir. Dokum `model_03/veri/model_03/` altina gider (depoya girmez).
+motor `taban_04`, ve `--model` secenegi YOK -- bu arac yalniz model_04'i
+tanir. Dokum `model_04/veri/model_04/` altina gider (depoya girmez).
 
-    python analiz_03.py [--tam] [--klasor <yol>]
+    python analiz_04.py [--tam] [--klasor <yol>]
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ _K = os.path.dirname(os.path.abspath(__file__))
 if _K not in sys.path:
     sys.path.insert(0, _K)
 
-import taban_03 as M                                          # noqa: E402
+import taban_04 as M                                          # noqa: E402
 
 OZEL = {0: "<PAD>", 1: "[S1]", 2: "[S2]", 3: "?", 4: "<SON>", 5: "[KIMLIK]",
         6: "<KULLANILMIYOR>", 7: "<KULLANILMIYOR>"}
@@ -71,7 +71,7 @@ class Dok:
         # EK JETONLARI sozlugun SONUNDA (ek_kip="tr" -> 4 tane).
         # KUSUR (16 Eylul hakemligi): burada bu dal YOKTU ve `i` ek
         # jetonuysa varlik tablosunda aranip IndexError veriyordu. Yani
-        # bu arac `ek_kip` gelen HER kolda (model_b15, model_03) coker,
+        # bu arac `ek_kip` gelen HER kolda (model_b15, model_04) coker,
         # model_b13'te calisirdi -- model_b15'in verisi hic DOKULMEMIS.
         if getattr(v, "ek0", 0) and i >= v.ek0:
             return ("'", "<NIN>", "<SI>", "<DIR>")[i - v.ek0]
@@ -539,8 +539,8 @@ def yaz_taban(d, yol):
 
 def main():
     ap = argparse.ArgumentParser()
-    # `--model` YOK: bu arac yalniz model_03'i tanir.
-    ap.set_defaults(model="model_03")
+    # `--model` YOK: bu arac yalniz model_04'i tanir.
+    ap.set_defaults(model="model_04")
     ap.add_argument("--klasor", default=None,
                     help="varsayilan: <AILE>/veri/<model>")
     ap.add_argument("--tam", action="store_true",

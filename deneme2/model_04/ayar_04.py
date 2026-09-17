@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""ayar_03 — model_03'in KENDI ayari. TEK BASINA DURUR.
+"""ayar_04 — model_04'in KENDI ayari. TEK BASINA DURUR.
 
 Kullanici karari, 16 Eylul 2026:
-    *"bunlarin hepsi model_03 folderi altinda olmali. model_03 diger
+    *"bunlarin hepsi model_04 folderi altinda olmali. model_04 diger
     hicbir model ile ayni seyi kullanmamali."*
 
 Onceki surum `from model_b15 import AYAR as TABAN` diyordu; yani
-model_03'in ayari model_b15 -> model_b14 -> model_b13 -> ... zincirinden
+model_04'in ayari model_b15 -> model_b14 -> model_b13 -> ... zincirinden
 DEVRALINIYORDU ve zincirin herhangi bir halkasi degisince sessizce
 kayardi. Artik oyle degil: her alan ASAGIDA, `Ayar()` varsayilaninin
 uzerine, TEK TEK ve gerekcesiyle yaziliyor.
@@ -20,7 +20,7 @@ IKI GRUP, IKI GEREKCE
   GOREV alanlari    -> model_b15'in gordugu SINAVIN AYNISI olmali.
                        Ayni veriyi gormezse kol hicbir sey olcmez;
                        sinav ve egitim havuzu BIT DUZEYINDE ayni kalmali.
-                       `test_03.py` bunu her kosuda siniyor.
+                       `test_04.py` bunu her kosuda siniyor.
 
   MIMARI + OPTIMIZASYON -> STANDART TARIF, referanslariyla.
 
@@ -35,7 +35,7 @@ STANDART TARIFE GORE: NE DEVRALINMADI
    (Lookahead, Zhang ve ark. 2019) ve nanoGPT'de, Llama'da, Pythia'da,
    GPT-2/GPT-3 tarifinde YOK.
 
-   `model_03` standart bir transformerin ne yaptigini olcecekse,
+   `model_04` standart bir transformerin ne yaptigini olcecekse,
    standart olmayan bir optimizasyon numarasiyla kosamaz. KAPALI.
    (`Ayar()` varsayilani zaten 0; model_b15 onu 10000 yapiyordu.)
 
@@ -78,13 +78,13 @@ ZATEN STANDART OLANLAR (varsayilandan gelenler de dahil)
 """
 from __future__ import annotations
 
-from taban_03 import Ayar                                    # noqa: E402
+from taban_04 import Ayar                                    # noqa: E402
 
-# Sinavin AYNI kalmasi GEREKEN alanlari. `test_03.py` bunlari model_b15
+# Sinavin AYNI kalmasi GEREKEN alanlari. `test_04.py` bunlari model_b15
 # ile karsilastirir: biri kayarsa sinav/egitim havuzu ayrisir ve sayilar
 # ayni tabloda okunamaz.
 #
-# !! `veri_ad` bu listede YOK ve olmamali: model_03 "veri_03" diyor,
+# !! `veri_ad` bu listede YOK ve olmamali: model_04 "veri_04" diyor,
 # model_b15 "veri_okul4". Ad farkli, ICERIK ayni -- ve kilit adi degil
 # ICERIGI siniyor (graf derin karsilastirma + egitim havuzu + olcme izi).
 GOREV_ALAN = ("veri_tohum", "ent_pay", "comp_pay", "arama_pay",
@@ -93,10 +93,10 @@ GOREV_ALAN = ("veri_tohum", "ent_pay", "comp_pay", "arama_pay",
               "batch", "adim", "tohum", "olc_her", "n_olcum_max")
 
 AYAR = Ayar(
-    ad="model_03",
+    ad="model_04",
 
     # --- GOREV: model_b15'in gordugu SINAVIN AYNISI --------------------
-    veri_ad="veri_03",   # KENDI veri modulu; ICERIK veri_okul4 ile AYNI
+    veri_ad="veri_04",   # KENDI veri modulu; ICERIK veri_okul4 ile AYNI
     jeton_ad="tam",      # varlik = JETON DIZISI (3 yuva), tek jeton DEGIL
     ek_kip="tr",         # Turkce ek jetonlari:  '  <NIN>  <SI>  <DIR>
     bicim=3,             # 3 yuzey bicimi (ek_kip olmadan ANLAMSIZ)
@@ -149,14 +149,79 @@ AYAR = Ayar(
     wd=0.5,              # model_00: 0.1   -- CLAUDE.md kural 4 DELINIYOR
     sabit_lr=True,       # model_00: False -- cosine KAPALI, LR SABIT
     # ort_bas VARSAYILANDA (0) -> LOOKAHEAD KAPALI
+
+    # !! ODUL ASAMASININ LR'i -- model_03'te 1e-3 (Ayar varsayilani),
+    # burada 1e-5 ve ACIKCA yaziliyor. Bu bir TERCIH DEGIL, olculmus bir
+    # ZORUNLULUK (17 Eylul duman testi, 30 odul adimi, model_03'un
+    # agirliklarindan baslayarak):
+    #       lr        one      seen      comp
+    #   (baslangic)  0.9267   0.9133    0.7867
+    #     1e-3       0.0067   0.0067    0.0067   <- TAM COKME
+    #     1e-4       0.9233   0.8667    0.7267
+    #     1e-5       0.9233   0.9133    0.7867   <- SECILEN (kullanici)
+    #     1e-6       0.9267   0.9133    0.7867
+    # 1e-3 SIFIRDAN egitimin LR'i; odul bir INCE AYAR asamasi ve RLVR
+    # literaturu 1e-6..1e-5 kullaniyor.
+    #
+    # !! ATFETME: model_03'e gore IKI alan degisiyor (odul VE lr) ve
+    # AYRILAMAZ. Ama lr serbest bir dugme DEGIL: 1e-3'te kosu modeli 30
+    # adimda siliyor, yani "odul + lr 1e-3" diye bir kol YOK. Ayirmak
+    # isteyen kol: ODULSUZ, lr 1e-5 ile model_03'u surdurmek
+    # (onkayit model_04.md 8 -- KOSULMADI).
+    lr=1e-5,
+
+    # ===== BU KOLUN TANIMI: ODUL ======================================
+    # Kullanici karari, 17 Eylul 2026. model_03 ile TEK fark bu blok;
+    # mimari, veri, havuz, sinav, wd, LR -- hepsi AYNI.
+    odul_ac=True,
+    odul_bolme="ent_arama",   # `ent` HUKUM bolmesi, uzerinde EGITILMEZ
+    odul_g=8,                 # grup boyutu; olculdu: G=8'de sorularin
+    #                           %66'si gradyan uretiyor (ikili odulde %5,4)
+    odul_sicaklik=1.0,
+    odul_denetimli=False,     # denetimli kayip KAPALI -- ODUL TEK OGRETMEN
+    odul_kl=0.0,              # KL cezasi KAPALI (acilirsa atfetme bozulur)
+    # --- MERDIVEN. Pozitif basamaklar UYDURULMADI: aramanin daralmasindan
+    #     turetildi (onkayit model_04.md 3).
+    #       E 574 aday -> 1.23 bit -> 0.12
+    #       F 104 aday -> 3.38 bit -> 0.34
+    #       G  11 aday -> 6.78 bit -> 0.67
+    #       H   1 aday -> 10.05 bit -> 1.00
+    odul_zemin=-0.50,         # KAPI 1/2/3 dustu -- TURETMESI YOK, ACIK DUGME
+    odul_kisayol=-0.30,       # 1 ADIMDA ulasilan cevap -- ACIK DUGME
+    odul_e=0.12,
+    odul_f=0.34,
+    odul_g_aile=0.67,
+    odul_h=1.00,
 )
 
 # Yukarida ACIKCA yazilmayan ama TASINAN degerler burada sabitleniyor:
 # bir gun `Ayar()` varsayilani degisirse bu assert'ler once duser.
 # --- BU KOLUN DUGMESI ---------------------------------------------
+# --- ODUL: bu kolun TANIMI ----------------------------------------
+assert AYAR.odul_ac is True, "model_04'un TANIMI ODUL -- kapaliysa bu model_03"
+assert AYAR.odul_bolme == "ent_arama", (
+    "odul `ent` uzerinde KOSAMAZ: o bir HUKUM bolmesi. ent_arama'nin "
+    "zincir-basi varliklari ent'inkilerle KESISMIYOR (olculdu, 0).")
+assert AYAR.odul_denetimli is False, (
+    "denetimli kayip KAPALI -- kullanici, 17 Eylul: 'bu egitimde dogru "
+    "cevabi vermeyecegiz'")
+assert AYAR.odul_kl == 0.0, "KL KAPALI -- acilirsa 'odul mu KL mi' ayrilamaz"
+assert AYAR.odul_g >= 2, "grup boyutu en az 2 olmali, yoksa varyans YOK"
+_M = (AYAR.odul_zemin, AYAR.odul_kisayol, AYAR.odul_e,
+      AYAR.odul_f, AYAR.odul_g_aile, AYAR.odul_h)
+assert all(x < y for x, y in zip(_M, _M[1:])), (
+    f"MERDIVEN SIRASI BOZUK: {_M}")
+assert AYAR.odul_h == 1.0, "H olcegi sabitler"
+assert AYAR.odul_zemin < AYAR.odul_kisayol, (
+    "ZEMIN kisayolun ALTINDA olmali. Aksi halde model belirsizlikte "
+    "SACMALAMAYI ogrenir: bozuk cevap, kopruyu atlamaktan karli olur.")
+
+# --- model_03'ten DEVRALINAN RECETE (bu kolda DEGISMEDI) ----------
 assert AYAR.wd == 0.5, "model_a3 RECETESI -- kullanici karari, 17 Eylul"
 assert AYAR.sabit_lr is True, "LR SABIT -- recetenin ikinci yarisi"
-assert AYAR.lr == 1e-3 and AYAR.isinma == 2000, "nanoGPT/Llama MUTLAK 2000"
+assert AYAR.lr == 1e-5, (
+    "ODUL ASAMASININ LR'i -- 1e-3 modeli 30 adimda siliyor (olculdu)")
+assert AYAR.isinma == 2000, "nanoGPT/Llama MUTLAK 2000"
 assert AYAR.d == 256 and AYAR.nh == 4, "head_dim 64"
 assert AYAR.batch == 512 and AYAR.adim == 20000, "kural 1: ILK SINIR"
 assert AYAR.olc_her == 2000 and AYAR.n_olcum_max == 3000, "olcum hatti"
@@ -169,5 +234,5 @@ assert AYAR.dar_alfa == 0.0 and not AYAR.dar_kapi, "Phi DARBOGAZI YOK"
 assert AYAR.kopru_kayip == 0.0, "YARDIMCI KAYIP YOK"
 assert AYAR.mask_poz is None and not AYAR.mask_blok, "MASKE YOK"
 assert AYAR.dongu == 1 and AYAR.l == 8, "8 AYRI katman, dongu YOK"
-assert AYAR.veri_ad == "veri_03", "model_03 KENDI veri modulunu okur"
+assert AYAR.veri_ad == "veri_04", "model_04 KENDI veri modulunu okur"
 assert "veri_ad" not in GOREV_ALAN, "ad DEGIL, ICERIK sinanir"

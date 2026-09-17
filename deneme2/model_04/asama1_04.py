@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-"""asama1_03 — model_03'in KENDI ASAMA-1 TESHISI. TEK BASINA DURUR.
+"""asama1_04 — model_04'in KENDI ASAMA-1 TESHISI. TEK BASINA DURUR.
 
-Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_03 folderi
-altinda olmali. model_03 diger hicbir model ile ayni seyi
+Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_04 folderi
+altinda olmali. model_04 diger hicbir model ile ayni seyi
 kullanmamali."*
 
 `model_a/asama1.py`nin KOPYASI (uretici: scratchpad/kur_okuma00.py). Modeli
 `ModelSade` ile kurar. Paylasilan surumde yapilan bir degisiklik buraya
-GECMEZ; `test_03.py` ikisinin AYNI SEYI olctugunu her kosuda siniyor.
+GECMEZ; `test_04.py` ikisinin AYNI SEYI olctugunu her kosuda siniyor.
 """
 from __future__ import annotations
 
@@ -18,12 +18,12 @@ import sys
 import numpy as np
 import torch
 
-# `asama1_b` bunu doldurur; None -> model_03.ModelSade. `pencere_a` ve
+# `asama1_b` bunu doldurur; None -> model_04.ModelSade. `pencere_a` ve
 # `tani_a`daki kancanin AYNISI.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import taban_03 as M                                          # noqa: E402
-import pencere_03 as P                                        # noqa: E402
-from model_03 import ModelSade                                # noqa: E402
+import taban_04 as M                                          # noqa: E402
+import pencere_04 as P                                        # noqa: E402
+from model_04 import ModelSade                                # noqa: E402
 
 MODEL_SINIFI = ModelSade
 

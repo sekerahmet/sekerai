@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-"""veri_03 — model_03'in KENDI verisi. TEK BASINA DURUR.
+"""veri_04 — model_04'in KENDI verisi. TEK BASINA DURUR.
 
 Kullanici karari, 16 Eylul 2026:
-    *"bunlarin hepsi model_03 folderi altinda olmali. model_03 diger
+    *"bunlarin hepsi model_04 folderi altinda olmali. model_04 diger
     hicbir model ile ayni seyi kullanmamali."*
 
 Bu dosya `veri_okul*` modullerinin HICBIRINI import ETMEZ. Govdesi
 onlardan KOPYALANDI (uretici: scratchpad/kur_veri00.py) ve artik
-model_03'a aittir: `model_b` ailesi icin yapilan bir degisiklik buraya
+model_04'a aittir: `model_b` ailesi icin yapilan bir degisiklik buraya
 GECMEZ.
 
 ==========================================================================
@@ -24,7 +24,7 @@ sayilar ayni tabloda okunamaz).
 Kopyanin DOGRULUGU goz karariyla degil, OLCUMLE tutuluyor:
 
     IZ            grafin parmak izi, `kur()` her cagrilista denetler
-    test_03.py    veri_03.kur(0) ile veri_okul4.kur(0) DERIN
+    test_04.py    veri_04.kur(0) ile veri_okul4.kur(0) DERIN
                   KARSILASTIRMA ile birebir ayni mi -- olgu sozlugu,
                   varlik listeleri, sema, sozluk, zincirler
 
@@ -583,7 +583,7 @@ def turetilebilir(G, esik=0.5):
 
 
 # ======================================================================
-# model_03'IN VERISI — iki adim + PARMAK IZI
+# model_04'IN VERISI — iki adim + PARMAK IZI
 # ======================================================================
 
 # tohum 0 grafinin parmak izi. Olculdu 16 Eylul 2026; uc ayri surecte
@@ -619,15 +619,15 @@ def graf_izi(G):
 
 
 def kur(tohum=0):
-    """model_03'in grafi: 1x taban + sekiz alan acilimi."""
+    """model_04'in grafi: 1x taban + sekiz alan acilimi."""
     G = genislet(_taban_kur(tohum), tohum)
     if tohum == 0:
         _iz = graf_izi(G)
         assert _iz == IZ, (
-            f"veri_03: graf DEGISTI  {IZ} -> {_iz}\n"
+            f"veri_04: graf DEGISTI  {IZ} -> {_iz}\n"
             "  Bu dosya TEK BASINA duruyor -- degisiklik BURADA yapildi.\n"
             "  Kasitliysa IZ yenilenir ve onkayda not duselir; degilse\n"
-            "  degisiklik geri alinir. model_03 sessizce baska bir\n"
+            "  degisiklik geri alinir. model_04 sessizce baska bir\n"
             "  veriyle KOSMAZ.")
     return G
 
@@ -636,7 +636,7 @@ if __name__ == "__main__":
     import collections
     G = kur(0)
     z = zincirler(G)
-    print("veri_03  varlik %d  olgu %d  zincir %d  |R| %d  phi TAVANI %.2f"
+    print("veri_04  varlik %d  olgu %d  zincir %d  |R| %d  phi TAVANI %.2f"
           % (sum(G["n"].values()), len(G["olgu"]), len(z), len(ILISKI),
              len(z) / len(G["olgu"])))
     print("   sinif", dict(collections.Counter(x[6] for x in z)))

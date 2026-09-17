@@ -1,27 +1,27 @@
 # -*- coding: utf-8 -*-
-"""kos_03 — model_03'in KENDI kosucusu. TEK BASINA DURUR.
+"""kos_04 — model_04'in KENDI kosucusu. TEK BASINA DURUR.
 
-Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_03 folderi
-altinda olmali. model_03 diger hicbir model ile ayni seyi
+Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_04 folderi
+altinda olmali. model_04 diger hicbir model ile ayni seyi
 kullanmamali."*
 
 `deneme2/kos.py`nin KOPYASI (uretici: elle, tek seferlik). Farklar:
 
-    --model YOK       bu kosucu yalniz model_03'i baslatir; aile klasoru
+    --model YOK       bu kosucu yalniz model_04'i baslatir; aile klasoru
                       ARANMAZ (paylasilan kos.py `deneme2/*/<ad>.py`
-                      glob'u yapiyordu -- model_03 artik o aramaya
+                      glob'u yapiyordu -- model_04 artik o aramaya
                       girmiyor bile)
     yol               yalniz KENDI klasoru sys.path'e girer
 
-    python kos_03.py --ev <cikti koku> [--tohum 0] [--commit X]
+    python kos_04.py --ev <cikti koku> [--tohum 0] [--commit X]
                      [--ustune] [--adim N] [--surdur]
 """
 from __future__ import annotations
 
 import argparse, importlib, os, sys
 
-KOK = os.path.dirname(os.path.abspath(__file__))       # deneme2/model_03/
-MODEL = "model_03"
+KOK = os.path.dirname(os.path.abspath(__file__))       # deneme2/model_04/
+MODEL = "model_04"
 
 
 OKU = """# {model} — ham koşu çıktısı
@@ -77,7 +77,7 @@ hangi sürüm olduğunu söyler.
 
 def main():
     ap = argparse.ArgumentParser()
-    # --model YOK: bu kosucu yalniz model_03'i baslatir.
+    # --model YOK: bu kosucu yalniz model_04'i baslatir.
     ap.set_defaults(model=MODEL)
     ap.add_argument("--ev", required=True, help="cikti koku; t<N>/ altina yazar")
     ap.add_argument("--tohum", type=int, nargs="+", default=[0])
@@ -91,6 +91,10 @@ def main():
     ap.add_argument("--surdur", action="store_true",
                     help="surdurme_t<N>.pt'den KALDIGI YERDEN devam et. "
                          "--adim ile birlikte kullanilir.")
+    ap.add_argument("--baslangic", default=None,
+                    help="BASKA bir kosunun anlik goruntusu (.pt). model_04 "
+                         "odulu model_03'un UZERINE kuruyor -- bu kolda "
+                         "ZORUNLU. Verilmezse kosu REDDEDILIR.")
     a = ap.parse_args()
 
     if KOK not in sys.path:
@@ -120,8 +124,23 @@ def main():
             # basilir hem ayar_t<N>.json'a yazilir.
             M.fark_bas(M.AYAR, ayar.degistir(adim=a.adim))
             ayar = ayar.degistir(adim=a.adim)
+        # ODUL KOLU SIFIRDAN KOSMAZ. Bu kolun sorusu "odul, EGITILMIS bir
+        # modelin bulamadigi cevabi one cikarabilir mi" -- sifirdan
+        # baslayan bir odul kosusu BASKA bir soru sorar ve olculmus
+        # cevabi zaten var (2504.13837: odul taban modelin dagiliminda
+        # olani one cikarir, yenisini yaratmaz).
+        if ayar.odul_ac and not (a.baslangic or a.surdur):
+            raise SystemExit(
+                os.linesep + "!! --baslangic ZORUNLU: odul kolu model_03'un "
+                "anlik goruntusu uzerine kurulur." + os.linesep
+                + "   ornek: --baslangic "
+                "/content/drive/MyDrive/model_03/t0/snap/"
+                "snap_model_03_t0_00020000.pt")
+        if a.baslangic and not os.path.exists(a.baslangic):
+            raise SystemExit(f"{os.linesep}!! baslangic dosyasi YOK: "
+                             f"{a.baslangic}")
         M.egit(ayar, alt=f"{a.ev}/t{t}", ustune=a.ustune,
-               commit=a.commit, surdur=a.surdur)
+               commit=a.commit, surdur=a.surdur, baslangic=a.baslangic)
 
 
 if __name__ == "__main__":

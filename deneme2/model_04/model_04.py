@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""model_03 — KLASIK decoder-only transformer. Bu projenin HICBIR ozelligi YOK.
+"""model_04 — KLASIK decoder-only transformer. Bu projenin HICBIR ozelligi YOK.
 
 Kullanici istegi, 16 Eylul 2026: *"model 00 kuralim. Bu model her seyden
 bagimsiz, senden istedigim standart kendi bilginle kuracagin 8 katmanli,
@@ -39,12 +39,12 @@ Referanslar: nanoGPT (GPT-2 tarifi), Pythia-70m/160m, Llama tarzi blok.
 zaten bu tarifin kendisi.
 
 --------------------------------------------------------------------------
-AYARLAR `ayar_03.py`DE -- paylasilan tercihlere ESIR DEGIL
+AYARLAR `ayar_04.py`DE -- paylasilan tercihlere ESIR DEGIL
 
     VERI alanlari         model_b15'ten AYNEN (sinav ve havuz BIT AYNI)
     MIMARI + OPTIMIZASYON STANDART TARIF, referanslariyla
 
-Iki ayar BILEREK devralinmadi (gerekce `ayar_03.py`de):
+Iki ayar BILEREK devralinmadi (gerekce `ayar_04.py`de):
 
     ort_bas 10000 -> 0        LOOKAHEAD ORTALAMASI KAPATILDI. Paylasilan
                               ayar 10.000. adimdan sonra yavas agirlik
@@ -56,7 +56,7 @@ Iki ayar BILEREK devralinmadi (gerekce `ayar_03.py`de):
     betas (0.9,0.999) -> (0.9,0.95)   0.999 PyTorch varsayilani; nanoGPT,
                               GPT-3, Llama, Pythia hepsi 0.95.
 
-`test_03.py` her kosuda sinar: VERI alanlari model_b15 ile birebir
+`test_04.py` her kosuda sinar: VERI alanlari model_b15 ile birebir
 tutmali, farklilar da YALNIZ mimari + bu iki optimizasyon alani olmali.
 
 --------------------------------------------------------------------------
@@ -79,7 +79,7 @@ import os
 import sys
 
 # YALNIZ KENDI KLASORU yola eklenir. `model_a` / `model_b` / ust klasor
-# EKLENMEZ -- kullanici karari, 16 Eylul: "model_03 diger hicbir model
+# EKLENMEZ -- kullanici karari, 16 Eylul: "model_04 diger hicbir model
 # ile ayni seyi kullanmamali."
 _B = os.path.dirname(os.path.abspath(__file__))
 if _B not in sys.path:
@@ -89,9 +89,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import taban_03 as M                                         # noqa: E402
+import taban_04 as M                                         # noqa: E402
 assert hasattr(M, "egit"), (
-    f"taban_03 MODUL degil PAKET olarak yuklendi: {getattr(M,'__file__',None)}")
+    f"taban_04 MODUL degil PAKET olarak yuklendi: {getattr(M,'__file__',None)}")
 
 
 # ======================= ROPE ============================================
@@ -159,13 +159,13 @@ class ModelSade(nn.Module):
     def __init__(self, ayar: M.Ayar, vocab: int):
         super().__init__()
         assert ayar.dongu == 1, (
-            f"model_03 DONGUSUZ: dongu={ayar.dongu}. Dongu istiyorsan "
+            f"model_04 DONGUSUZ: dongu={ayar.dongu}. Dongu istiyorsan "
             f"model_b ailesini kullan.")
         assert ayar.dar_alfa == 0 and not ayar.dar_kapi, (
-            "model_03'da Phi DARBOGAZI YOK -- dar_alfa=0, dar_kapi=False")
-        assert ayar.kopru_kayip == 0, "model_03 YARDIMCI KAYIP KULLANMAZ"
+            "model_04'da Phi DARBOGAZI YOK -- dar_alfa=0, dar_kapi=False")
+        assert ayar.kopru_kayip == 0, "model_04 YARDIMCI KAYIP KULLANMAZ"
         assert ayar.mask_poz is None and not ayar.mask_blok, (
-            "model_03'da MASKE YOK")
+            "model_04'da MASKE YOK")
         self.ayar = ayar
         self.emb = nn.Embedding(vocab, ayar.d)
         self.bloklar = nn.ModuleList(
@@ -199,7 +199,7 @@ class ModelSade(nn.Module):
     def govde(self, x):
         """SON katman + son norm -- head ONCESI gizli durum (B, T, d).
 
-        `asama1_03.gizli()` (DOGRUSAL SONDA) bunu cagirir. KUSUR ve
+        `asama1_04.gizli()` (DOGRUSAL SONDA) bunu cagirir. KUSUR ve
         DUZELTMESI (16 Eylul hakemligi): orada ileri gecis ELLE yeniden
         kuruluyordu --
 
@@ -230,9 +230,9 @@ class ModelSade(nn.Module):
 # KENDI ayar dosyasindan okunur -- paylasilan tercihlere ESIR DEGIL.
 # Kullanici, 16 Eylul: "ayar dosyasi ise onu ayar00 diye bir dosya yap,
 # ordan okusun." Hangi alanin nereden geldigi ve NEDEN o degerde oldugu
-# `ayar_03.py`de tek tek yazili -- ve artik `model_b15`ten DEVRALINMIYOR,
+# `ayar_04.py`de tek tek yazili -- ve artik `model_b15`ten DEVRALINMIYOR,
 # `Ayar()` varsayilaninin uzerine acikca yaziliyor.
-from ayar_03 import AYAR, GOREV_ALAN                         # noqa: E402,F401
+from ayar_04 import AYAR, GOREV_ALAN                         # noqa: E402,F401
 
 # Kiyas tabani: MOTORUN VARSAYILANI. (Onceden `model_b15.AYAR` idi; kol
 # artik o zincire bagli degil.)

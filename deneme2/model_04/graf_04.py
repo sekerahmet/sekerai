@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""graf_03 — model_03'in KENDI GRAF TUTARLILIK DENETIMI. TEK BASINA DURUR.
+"""graf_04 — model_04'in KENDI GRAF TUTARLILIK DENETIMI. TEK BASINA DURUR.
 
-Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_03 folderi
-altinda olmali. model_03 diger hicbir model ile ayni seyi kullanmamali.
-Analiz icinde analiz_03 kullanalim mesela, digerleri icin de."*
+Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_04 folderi
+altinda olmali. model_04 diger hicbir model ile ayni seyi kullanmamali.
+Analiz icinde analiz_04 kullanalim mesela, digerleri icin de."*
 
 `graf_dok.py`nin KOPYASI (uretici: scratchpad/kur_analiz00.py). Iki fark:
-motor `taban_03`, ve `--model` secenegi YOK -- bu arac yalniz model_03'i
-tanir. Dokum `model_03/veri/model_03/` altina gider (depoya girmez).
+motor `taban_04`, ve `--model` secenegi YOK -- bu arac yalniz model_04'i
+tanir. Dokum `model_04/veri/model_04/` altina gider (depoya girmez).
 
-    python graf_03.py
+    python graf_04.py
 """
 import sys
 import collections
@@ -21,11 +21,11 @@ import os
 _D = os.path.dirname(os.path.abspath(__file__))
 if _D not in sys.path:
     sys.path.insert(0, _D)
-import taban_03 as M         # noqa: E402
+import taban_04 as M         # noqa: E402
 
-# `--model` YOK: bu arac yalniz model_03'i tanir.
+# `--model` YOK: bu arac yalniz model_04'i tanir.
 argparse.ArgumentParser().parse_args()
-from ayar_03 import AYAR     # noqa: E402
+from ayar_04 import AYAR     # noqa: E402
 VO = importlib.import_module(AYAR.veri_ad)
 
 v = M.veri_kur(AYAR, yaz=lambda *a: None)

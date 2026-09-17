@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-"""pencere_03 — model_03'in KENDI BIRINCIL OKUMASI. TEK BASINA DURUR.
+"""pencere_04 — model_04'in KENDI BIRINCIL OKUMASI. TEK BASINA DURUR.
 
-Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_03 folderi
-altinda olmali. model_03 diger hicbir model ile ayni seyi
+Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_04 folderi
+altinda olmali. model_04 diger hicbir model ile ayni seyi
 kullanmamali."*
 
 `model_a/pencere_a.py`nin KOPYASI (uretici: scratchpad/kur_okuma00.py). Modeli
 `ModelSade` ile kurar. Paylasilan surumde yapilan bir degisiklik buraya
-GECMEZ; `test_03.py` ikisinin AYNI SEYI olctugunu her kosuda siniyor.
+GECMEZ; `test_04.py` ikisinin AYNI SEYI olctugunu her kosuda siniyor.
 """
 from __future__ import annotations
 
@@ -16,10 +16,10 @@ import argparse, glob, json, os, re, sys
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import taban_03 as M                                          # noqa: E402
-from model_03 import ModelSade                                # noqa: E402
+import taban_04 as M                                          # noqa: E402
+from model_04 import ModelSade                                # noqa: E402
 
-# model_03'in TEK modeli var; kanca yok, dogrudan yazili.
+# model_04'in TEK modeli var; kanca yok, dogrudan yazili.
 MODEL_SINIFI = ModelSade
 
 
@@ -54,7 +54,7 @@ def ayar_oku(klasor: str) -> M.Ayar:
     # ALANLAR SONRADAN EKLENEBILIR. Eski `ayar_t<N>.json`larda yeni alan
     # YOKTUR; tablo olmasa bu assert butun eski kosularin OLCULMESINI
     # kirardi. Olculdu (15 Eylul, `veri_ad` eklenince fiilen kirildi).
-    # Tablo `taban_03.ESKI_VARSAYILAN` -- TEK yerde durur, `surdurme_oku`
+    # Tablo `taban_04.ESKI_VARSAYILAN` -- TEK yerde durur, `surdurme_oku`
     # da ayni tabloyu kullanir, ikisi ayrisamaz.
     for k in sorted(eksik & set(M.ESKI_VARSAYILAN)):
         d[k] = M.ESKI_VARSAYILAN[k]
@@ -168,7 +168,7 @@ def main():
     L = M.olcme_listeleri(ayar, veri)
     kod = {k: (M.kodla_1hop(veri, L[k]) if k == "one" else M.kodla_2hop(veri, L[k]))
            for k in L if L[k]}
-    # OLCME SETI PARMAK IZI -- taban_03.olcme_izi()'nden, KOPYA DEGIL.
+    # OLCME SETI PARMAK IZI -- taban_04.olcme_izi()'nden, KOPYA DEGIL.
     iz = M.olcme_izi(L)
     print("  olcme    " + "  ".join(f"{k} {len(L[k])}" for k in L if L[k]))
     print(f"  parmak izi {iz}")
