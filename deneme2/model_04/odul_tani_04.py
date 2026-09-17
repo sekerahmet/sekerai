@@ -43,14 +43,18 @@ import odul_04 as OD                                          # noqa: E402
 import pencere_04 as PEN                                      # noqa: E402
 import veri_04 as V                                           # noqa: E402
 
+# MERDIVEN SIRASI -- `odul_04.Puanlayici.puanla` ile AYNI OLMAK ZORUNDA.
+# KAPI 2 (jeton sayisi) 17 Eylul'de KAPI olmaktan cikip BASAMAK oldu:
+# kapi oldugunda menzile isabet eden cevaplarin %55'i zemine dusuyordu
+# ve "menzilden rastgele sec", "tipten rastgele sec"ten daha az aliyordu.
 BASAMAK = ("ZEMIN KAPI1 <YOK> sagda degil",
-           "ZEMIN KAPI2 jeton sayisi yanlis",
            "ZEMIN KAPI3 olmayan varlik",
            "KISAYOL (1 adimda ulasilir)",
-           "E  menzil disi",
-           "F  2 adimda, aile/tur yanlis",
-           "G  2 adimda + aile/tur dogru",
-           "H  TAM DOGRU")
+           "TIP  gecerli varlik, YANLIS tip",
+           "E    dogru tip, menzil DISI",
+           "F    2 adimda, aile/tur yanlis",
+           "G    2 adimda + aile/tur dogru",
+           "H    TAM DOGRU")
 
 
 def basamakla(pz, u, ozne, ksy, dogru):
@@ -60,16 +64,16 @@ def basamakla(pz, u, ozne, ksy, dogru):
     k1 = pz.sag_hizali(u)
     b[~k1] = 0
     kalan = k1
-    k2 = (u != pz.yok).sum(1) == pz.n_jeton[dogru]
-    b[kalan & ~k2] = 1
-    kalan = kalan & k2
     ent = pz.varlik_ara(u)
-    b[kalan & (ent < 0)] = 2
+    b[kalan & (ent < 0)] = 1
     kalan = kalan & (ent >= 0)
     e_ = np.clip(ent, 0, None)
     ksy_m = pz.menzil.h1[ozne, e_] | ((ksy >= 0) & (ent == ksy))
-    b[kalan & ksy_m] = 3
+    b[kalan & ksy_m] = 2
     kalan = kalan & ~ksy_m
+    dt = (pz.par[e_] != pz.yok).sum(1) == pz.n_jeton[dogru]
+    b[kalan & ~dt] = 3
+    kalan = kalan & dt
     m2 = pz.menzil.h2[ozne, e_]
     b[kalan & ~m2] = 4
     kalan = kalan & m2
@@ -133,10 +137,10 @@ def main():
     par = np.asarray(v.par)
     adlar = v.par_ad[0]
     yok = [i for i, x in enumerate(adlar) if str(x) == "<YOK>"][0]
-    oa = OD.OdulAyar(ayar.odul_zemin, ayar.odul_kisayol, ayar.odul_e,
-                     ayar.odul_f, ayar.odul_g_aile, ayar.odul_h)
+    oa = OD.OdulAyar(ayar.odul_zemin, ayar.odul_kisayol, ayar.odul_tip,
+                     ayar.odul_e, ayar.odul_f, ayar.odul_g_aile, ayar.odul_h)
     pz = OD.Puanlayici(par, yok, v.facts, oa)
-    PUAN = np.array([oa.zemin, oa.zemin, oa.zemin, oa.kisayol,
+    PUAN = np.array([oa.zemin, oa.zemin, oa.kisayol, oa.yanlis_tip,
                      oa.e_menzil_disi, oa.f_menzil, oa.g_aile, oa.h_tam])
     tip = np.asarray(v.tip)
     TA = list(v.tip_ad)
@@ -210,8 +214,8 @@ def main():
     print(f"  {'ORTALAMA ODUL':<34}{'':>9}{'':>8}{float(PUAN[bas].mean()):>9.4f}")
     _tik = int(np.argmax(np.bincount(bas, minlength=8)))
     print(f"  EN COK TIKANDIGI YER: {BASAMAK[_tik]}  (%{100*(bas==_tik).mean():.1f})")
-    _kapi = float((bas <= 2).mean())
-    print(f"  KAPILARDA takilan    : %{100*_kapi:.1f}"
+    _kapi = float((bas <= 1).mean())
+    print(f"  BICIM KAPILARINDA takilan (KAPI 1/3): %{100*_kapi:.1f}"
           + ("   <- kapilar bugun BOS, gradyani onlar uretmiyor"
              if _kapi < 0.02 else "   <- kapilar CALISIYOR"))
 
@@ -219,8 +223,8 @@ def main():
     print("=== 2) NEREDE TIKANIYOR -- cevabin TIPINE gore ===")
     tc = np.repeat(tip[dogru], G)
     print(f"  {'tip':<8}{'n':>7}" + "".join(f"{x:>8}" for x in
-                                            ("KAPI", "KSY", "E", "F", "G", "H"))
-          + f"{'ODUL':>9}")
+                                            ("BICIM", "KSY", "TIP", "E", "F",
+                                             "G", "H")) + f"{'ODUL':>9}")
     for t in range(len(TA)):
         m = tc == t
         if not m.any():
@@ -240,9 +244,9 @@ def main():
         if m.sum() < 30 * G // 8:
             continue
         sat.append((float(PUAN[bas[m]].mean()), REL[r], int(m.sum()),
-                    float((bas[m] == 7).mean()), float((bas[m] == 3).mean()),
-                    float((bas[m] <= 2).mean())))
-    print(f"  {'r2':<11}{'n':>7}{'H (TAM)':>10}{'KISAYOL':>9}{'KAPI':>8}{'ODUL':>9}")
+                    float((bas[m] == 7).mean()), float((bas[m] == 2).mean()),
+                    float((bas[m] <= 1).mean())))
+    print(f"  {'r2':<11}{'n':>7}{'H (TAM)':>10}{'KISAYOL':>9}{'BICIM':>8}{'ODUL':>9}")
     for od, ad, n, h, ks_, kp in sorted(sat):
         print(f"  {ad:<11}{n:>7}{h:>10.4f}{ks_:>9.4f}{kp:>8.4f}{od:>9.4f}")
 

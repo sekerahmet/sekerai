@@ -187,9 +187,15 @@ AYAR = Ayar(
     #       F 104 aday -> 3.38 bit -> 0.34
     #       G  11 aday -> 6.78 bit -> 0.67
     #       H   1 aday -> 10.05 bit -> 1.00
-    odul_zemin=-0.50,         # KAPI 1/2/3 dustu -- TURETMESI YOK, ACIK DUGME
+    odul_zemin=-0.50,         # KAPI 1/3 dustu (BICIM) -- ACIK DUGME
     odul_kisayol=-0.30,       # 1 ADIMDA ulasilan cevap -- ACIK DUGME
-    odul_e=0.12,
+    odul_tip=-0.20,           # gecerli varlik, YANLIS tip -- ACIK DUGME
+    # !! `odul_e` 0.12 -> 0.00, kullanici karari 17 Eylul. Olculdu:
+    # merdivenin gradyani en cok "KISAYOL -> E" gecisine gidiyordu (%39)
+    # ama gruplarda EN SIK ayrisan gecis "E -> F" (menzile girmek, %36)
+    # ve ona verilen aralik EN KUCUKTU (0.22). E=0.00 agirligi kisayoldan
+    # kacmaktan MENZILE GIRMEYE aktariyor: E->F payi %25 -> %38.
+    odul_e=0.00,
     odul_f=0.34,
     odul_g_aile=0.67,
     odul_h=1.00,
@@ -208,7 +214,7 @@ assert AYAR.odul_denetimli is False, (
     "cevabi vermeyecegiz'")
 assert AYAR.odul_kl == 0.0, "KL KAPALI -- acilirsa 'odul mu KL mi' ayrilamaz"
 assert AYAR.odul_g >= 2, "grup boyutu en az 2 olmali, yoksa varyans YOK"
-_M = (AYAR.odul_zemin, AYAR.odul_kisayol, AYAR.odul_e,
+_M = (AYAR.odul_zemin, AYAR.odul_kisayol, AYAR.odul_tip, AYAR.odul_e,
       AYAR.odul_f, AYAR.odul_g_aile, AYAR.odul_h)
 assert all(x < y for x, y in zip(_M, _M[1:])), (
     f"MERDIVEN SIRASI BOZUK: {_M}")

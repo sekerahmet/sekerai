@@ -287,7 +287,8 @@ from ayar_04 import GOREV_ALAN                               # noqa: E402
 ODUL_ALANLARI = {
     "odul_ac", "odul_bolme", "odul_g", "odul_batch", "odul_sicaklik",
     "odul_denetimli",
-    "odul_kl", "odul_zemin", "odul_kisayol", "odul_e", "odul_f",
+    "odul_kl", "odul_zemin", "odul_kisayol", "odul_tip", "odul_e",
+    "odul_f",
     "odul_g_aile", "odul_h",
 }
 _e4 = set(M.ESKI_VARSAYILAN) - set(MA.ESKI_VARSAYILAN)
@@ -411,6 +412,13 @@ ok(A.odul_bolme == "ent_arama", "odul bolmesi ent_arama",
    f"{A.odul_bolme!r} -- `ent` bir HUKUM bolmesi, uzerinde EGITILMEZ")
 ok(A.odul_denetimli is False, "denetimli kayip KAPALI -- ODUL TEK OGRETMEN")
 ok(A.odul_kl == 0.0, "KL KAPALI -- acilirsa 'odul mu KL mi' ayrilamaz")
+ok(A.odul_e == 0.00,
+   "E (menzil disi) = 0.00 -- agirlik MENZILE GIRMEYE kaydirildi",
+   f"{A.odul_e} -- olculdu: E->F gecisi gruplarin %36'sinda ayrisiyor")
+ok(A.odul_tip < A.odul_e,
+   "YANLIS TIP basamagi E'nin ALTINDA")
+ok(A.odul_kisayol < A.odul_tip,
+   "KISAYOL yanlis tipin de ALTINDA -- ana ariza o")
 ok(A.lr == 1e-5, "ODUL ASAMASI LR'i 1e-5",
    f"{A.lr} -- 1e-3 modeli 30 adimda siliyor (olculdu 17 Eylul)")
 ok(A.wd == 0.5, "wd 0.5 DEGISMEDI -- model_03 recetesi tasiniyor")
@@ -435,8 +443,8 @@ _par = np.asarray(v.par)
 _adl = v.par_ad[0]
 _yk = [i for i, x in enumerate(_adl) if str(x) == "<YOK>"]
 ok(len(_yk) == 1, "<YOK> jetonu sozlukte TAM BIR KEZ")
-_oa = OD.OdulAyar(A.odul_zemin, A.odul_kisayol, A.odul_e,
-                  A.odul_f, A.odul_g_aile, A.odul_h)
+_oa = OD.OdulAyar(A.odul_zemin, A.odul_kisayol, A.odul_tip,
+                  A.odul_e, A.odul_f, A.odul_g_aile, A.odul_h)
 _pz = OD.Puanlayici(_par, _yk[0], v.facts, _oa)
 _tip = np.asarray(v.tip)
 _z = None
@@ -468,9 +476,19 @@ if _z is not None:
             _sahte = _u
             break
     ok(_sahte is not None, "KAPI3 icin OLMAYAN bir uclu uretilebildi")
+    # _uc: dogru cevabin tipinden FARKLI jeton sayisi -> artik ZEMIN
+    # DEGIL, TIP basamagi. Ama `_uc` uydurma bir uclu oldugu icin KAPI 3'e
+    # takilir; TIP basamagini GERCEK ama yanlis tipte bir varlikla sinar.
+    _yt = None
+    for _x in range(len(_par)):
+        if (_par[_x] != _yk[0]).sum() != (_par[_cv] != _yk[0]).sum()                 and not _pz.menzil.h1[_e, _x]:
+            _yt = _par[_x]
+            break
+    ok(_yt is not None, "TIP basamagi icin yanlis jeton sayili varlik bulundu")
     _dal = [("KAPI1 <YOK> ortada", _bzk, A.odul_zemin),
-            ("KAPI2 yanlis jeton sayisi", _uc, A.odul_zemin),
+            ("KAPI3 olmayan varlik (uydurma uclu)", _uc, A.odul_zemin),
             ("KAPI3 olmayan varlik", _sahte, A.odul_zemin),
+            ("TIP gecerli ama yanlis jeton sayisi", _yt, A.odul_tip),
             ("KISAYOL", _par[_k], A.odul_kisayol),
             ("menzil disi", _par[_uzl], A.odul_e),
             ("2 adim, aile yanlis", _par[_fkl], A.odul_f),

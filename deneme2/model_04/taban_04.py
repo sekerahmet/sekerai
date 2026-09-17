@@ -324,9 +324,10 @@ class Ayar:
     # yaziyor, yani "hangi odulle kosuldu" sorusu MEKANIK cevaplanir.
     # `odul_04.OdulAyar` bu alti sayiyi alir ve SIRAYI assert eder.
     # Turetmeleri: onkayit model_04.md 3 (aramanin daralmasi, bit).
-    odul_zemin: float = -0.50      # KAPI 1/2/3'ten biri dustu
+    odul_zemin: float = -0.50      # KAPI 1 veya 3 dustu (BICIM bozuk)
     odul_kisayol: float = -0.30    # ozneden 1 ADIMDA ulasilan cevap
-    odul_e: float = 0.12           # gecerli varlik + dogru jeton sayisi
+    odul_tip: float = -0.20        # gecerli varlik, YANLIS jeton sayisi/tip
+    odul_e: float = 0.00           # dogru tip, ama menzil DISI
     odul_f: float = 0.34           # 2 adim menzilinde
     odul_g_aile: float = 0.67      # + dogru aile / tur
     odul_h: float = 1.00           # TAM DOGRU (olcek)
@@ -421,7 +422,8 @@ ESKI_VARSAYILAN = {
     "odul_ac": False, "odul_bolme": "ent_arama", "odul_g": 8,
     "odul_batch": 64,
     "odul_sicaklik": 1.0, "odul_denetimli": False, "odul_kl": 0.0,
-    "odul_zemin": -0.50, "odul_kisayol": -0.30, "odul_e": 0.12,
+    "odul_zemin": -0.50, "odul_kisayol": -0.30, "odul_tip": -0.20,
+    "odul_e": 0.00,
     "odul_f": 0.34, "odul_g_aile": 0.67, "odul_h": 1.00,
 }
 
@@ -1701,7 +1703,8 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
             "tutulmus bir sinav OLMAZ. Kosu BASLAMAMALI.")
         _yok = [i for i, x in enumerate(v.par_ad[0]) if str(x) == "<YOK>"]
         assert len(_yok) == 1, f"<YOK> jetonu tam bir kez olmali: {_yok}"
-        _oa = _O.OdulAyar(ayar.odul_zemin, ayar.odul_kisayol, ayar.odul_e,
+        _oa = _O.OdulAyar(ayar.odul_zemin, ayar.odul_kisayol,
+                          ayar.odul_tip, ayar.odul_e,
                           ayar.odul_f, ayar.odul_g_aile, ayar.odul_h)
         _od = _O.Puanlayici(np.asarray(v.par), _yok[0], v.facts, _oa)
         _od_X, _od_P, _ = kodla_2hop(v, _lst)
@@ -1711,8 +1714,9 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
         yaz(f"  ODUL: bolme {ayar.odul_bolme} {len(_lst)} zincir, "
             f"{len(_b_odul)} zincir-basi varlik (ent ile kesisim 0)")
         yaz(f"        merdiven zemin {_oa.zemin} kisayol {_oa.kisayol} "
-            f"E {_oa.e_menzil_disi} F {_oa.f_menzil} G {_oa.g_aile} "
-            f"H {_oa.h_tam}   G={ayar.odul_g} T={ayar.odul_sicaklik}")
+            f"TIP {_oa.yanlis_tip} E {_oa.e_menzil_disi} F {_oa.f_menzil} "
+            f"G {_oa.g_aile} H {_oa.h_tam}"
+            f"   grup={ayar.odul_g} T={ayar.odul_sicaklik}")
         yaz(f"        denetimli kayip {'ACIK' if ayar.odul_denetimli else 'KAPALI'}"
             f" -- {'odul + cross-entropy' if ayar.odul_denetimli else 'ODUL TEK OGRETMEN'}")
 

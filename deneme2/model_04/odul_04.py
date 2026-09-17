@@ -54,9 +54,10 @@ import torch
 @dc.dataclass(frozen=True)
 class OdulAyar:
     """Merdivenin basamak degerleri. `ayar_04.py` bunlari YAZIYOR."""
-    zemin: float = -0.50      # KAPI 1/2/3'ten biri dustu
+    zemin: float = -0.50      # KAPI 1 veya 3 dustu (BICIM bozuk)
     kisayol: float = -0.30    # ozneden 1 ADIMDA ulasilan cevap
-    e_menzil_disi: float = 0.12
+    yanlis_tip: float = -0.20  # gecerli varlik, ama YANLIS jeton sayisi/tip
+    e_menzil_disi: float = 0.00
     f_menzil: float = 0.34
     g_aile: float = 0.67
     h_tam: float = 1.00
@@ -64,8 +65,8 @@ class OdulAyar:
     def __post_init__(self):
         # SIRA BOZULAMAZ. Bir gun biri basamaklari elle degistirirse
         # merdiven sessizce ters donebilir; o an kosu BASLAMAMALI.
-        s = [self.zemin, self.kisayol, self.e_menzil_disi,
-             self.f_menzil, self.g_aile, self.h_tam]
+        s = [self.zemin, self.kisayol, self.yanlis_tip,
+             self.e_menzil_disi, self.f_menzil, self.g_aile, self.h_tam]
         assert all(a < b for a, b in zip(s, s[1:])), (
             f"MERDIVEN SIRASI BOZUK: {s} -- zemin <= kisayol < E < F < G < H "
             "olmali (onkayit model_04.md 3)")
@@ -154,20 +155,30 @@ class Puanlayici:
 
         # --- KAPI 1: <YOK> SAGDA mi (cevaba BAKMAZ) --------------------
         k1 = self.sag_hizali(u)
-        # --- KAPI 2: JETON SAYISI dogru mu -----------------------------
-        k2 = (u != self.yok).sum(1) == self.n_jeton[dg]
         # --- KAPI 3: GERCEK bir varlik mi (cevaba BAKMAZ) --------------
         ent = self.varlik_ara(u)
         k3 = ent >= 0
-        gecti = k1 & k2 & k3
+        # !! KAPI 2 (jeton sayisi) ARTIK KAPI DEGIL, BASAMAK.
+        # Olculdu (17 Eylul): kapi oldugunda "Adana" (gercek sehir, ama
+        # kisi soruldu) ile "Ipek <YOK> Yildiz" (uydurma dize) AYNI cezayi
+        # aliyordu. Daha kotusu: 2 adim menzilindeki varliklarin yalniz
+        # %45'i dogru tipte, yani MENZILE ISABET EDEN cevaplarin %55'i
+        # zemine dusuyordu -- ve "menzilden rastgele sec", "tipten
+        # rastgele sec"ten DAHA AZ aliyordu (0.0048 vs 0.1048). Merdiven
+        # ters donmustu. KAPI 1 ve 3 BICIM kapisi (ihlal eden sey zaten
+        # bir cevap degil); KAPI 2 ise ICERIK -- ilk icerik basamagi.
+        gecti = k1 & k3
 
         odul = np.full(n, oa.zemin, np.float32)
         if gecti.any():
             g = np.flatnonzero(gecti)
             e_, o_, k_, d_ = ent[g], oz[g], ks[g], dg[g]
-            p = np.full(len(g), oa.e_menzil_disi, np.float32)
-            # 2 ADIM menzili
-            m2 = self.menzil.h2[o_, e_]
+            p = np.full(len(g), oa.yanlis_tip, np.float32)
+            # JETON SAYISI (fiilen TIP) dogru mu -- ilk icerik basamagi
+            dt = (self.par[e_] != self.yok).sum(1) == self.n_jeton[d_]
+            p[dt] = oa.e_menzil_disi
+            # 2 ADIM menzili (yalniz dogru tipte olanlar icin)
+            m2 = self.menzil.h2[o_, e_] & dt
             p[m2] = oa.f_menzil
             # + dogru AILE / TUR (yuva2)
             ai = m2 & (self.par[e_, 1] == self.par[d_, 1])
@@ -186,8 +197,9 @@ class Puanlayici:
         # kendi hattinda hesaplamaya devam ediyor.
         gu = np.flatnonzero(gecti)
         e_g, o_g, k_g = ent[gu], oz[gu], ks[gu]
+        _k2 = ((u != self.yok).sum(1) == self.n_jeton[dg])
         ayr = dict(
-            kapi1=float(k1.mean()), kapi2=float(k2.mean()),
+            kapi1=float(k1.mean()), kapi2=float(_k2.mean()),
             kapi3=float(k3.mean()), kapi=float(gecti.mean()),
             tam=float((gecti & (ent == dg)).mean()),
             ornek_kisayol=float(
