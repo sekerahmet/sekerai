@@ -1158,6 +1158,20 @@ def kodla_fim_sinav(v: Veri, batch, hangi: str):
 
     Doner: (X, hedef_uzunluklari). Hedef jetonlar dizinin SONUNDA.
 
+    !! UYARI -- `ozne` yonu EGITIMLE UYUMSUZ, ve bu OLCULDU (17 Eylul,
+    kullanici sordu: "tek token nasil iki token cevap verecek?").
+
+        EGITIM  <AYIR> sonrasi jeton sayisi  {1: 187296}   ISTISNASIZ
+        ozne    {2: 2976, 1: 17, 3: 7}   -- %99,2'si IKI jeton
+        iliski  {1: 3000}                -- egitimle UYUMLU
+
+    `kodla_fim` boslugun uzunlugu ne olursa olsun TEK `<BOS>` koyuyor,
+    ve egitimde her bosluk tam 1 jetonluk. Yani model "`<BOS>` = bir
+    jeton" ogreniyor; `ozne` sinavi ondan 2-3 jetonluk bir AD istiyor.
+    `ozne` sutunu DAGITIM DISI bir gorevi olcer, `iliski` sutunu olcmez.
+    Ikisi AYNI OLCEKTE okunmamali. Sayilar hukum vermiyor (ikincil),
+    ama "ozne dustu" cumlesi bu notsuz kurulamaz.
+
     !! NEDEN AYRI FONKSIYON: bu dizi kurulumu `pencere_07.fim_dogruluk`in
     ICINDE yaziliydi ve dokum betigi ayni seyi IKINCI KEZ yazmak
     zorunda kalacakti. Iki kopya birbirinden kayinca olcum bir seyi,

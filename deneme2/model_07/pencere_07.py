@@ -340,8 +340,13 @@ def main():
         print("BOSLUK DOLDURMA -- AYNI zincirler, BASKA yonden sorulmus")
         print("  !! HUKUM VERMEZ. Birincil olcu yukaridaki ILERI yon;")
         print("     olcme izi f4ce53fd1555 ile model_05 kiyasi YALNIZ orada")
-        print("     gecerli. OZNE sorusu ayrica DAHA KOLAY: cevap varligi")
-        print("     girdide duruyor, arama uzayi dar.")
+        print("     gecerli.")
+        print("  !! OZNE sutunu EGITIMLE UYUMSUZ -- olculdu: egitimdeki")
+        print("     187.296 boslugun 187.296'si TEK jetonluk, ama ozne")
+        print("     sinavinin %99'u IKI jeton istiyor. Tek <BOS> kac jeton")
+        print("     eksildigini SOYLEMIYOR. ozne ile rel AYNI OLCEKTE")
+        print("     OKUNMAZ; rel sutunu egitimle uyumlu.")
+
         print(f"  {'pencere':<18}"
               + "".join(f"{'ozne:'+b:>13}{'rel:'+b:>13}" for b in _bol))
         for r in sonuc:
