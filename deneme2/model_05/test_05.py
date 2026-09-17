@@ -551,7 +551,7 @@ print("\n=== 7) SOZLESME ===")
 for g in ("AYAR", "egit", "fark_bas", "ModelSade", "TABAN"):
     ok(hasattr(S, g), f"model_05.{g} var", "kos_05.py duser")
 for ad in ("veri_05", "taban_05", "ayar_05", "pencere_05", "tani_05",
-           "asama1_05", "sor_05", "kos_05"):
+           "asama1_05", "sor_05", "kos_05", "konus_05"):
     _r2 = subprocess.run(
         [sys.executable, "-c",
          f"import sys; sys.path.insert(0, {_B!r}); import {ad}"],
