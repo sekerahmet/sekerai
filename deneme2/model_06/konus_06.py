@@ -1,37 +1,47 @@
 # -*- coding: utf-8 -*-
-"""konus_06 — model_05 ile DUZ KONUSMA. Sablon YOK, denetim YOK.
+"""konus_06 — model_06 ile DUZ KONUSMA. Sablon YOK, denetim YOK.
 
 Kullanici karari, 17 Eylul 2026: *"model benim kendimin test edebilmesi
 icin yerelde bir py yaz. calistirinca cikan ekranda ben kendim sorumu
 sorayim o cevap versin, sablon vs istemiyorum. sadece kendim test edip
 gozlerimle gormek istiyorum."*
 
-`sor_05.py` NEDEN YETMEDI -- ikisi AYRI SEY olcuyor:
+`sor_06.py` NEDEN YETMEDI -- ikisi AYRI SEY olcuyor:
 
-    sor_05    soruyu COZUMLER (varlik + iliski), diziyi `kodla_1hop` ile
+    sor_06    soruyu COZUMLER (varlik + iliski), diziyi `kodla_1hop` ile
               KENDI KURAR ve modele yalniz CEVAP YUVALARINI sordurur.
               Yani cumlenin govdesini ARAC yaziyor, model bosluk
               dolduruyor. Yaninda graf'taki dogru cevabi, bolmeyi ve
               kopruyu basar. Bu bir DENETIM araci ve oyle kalmali.
 
-    konus_05  yazdigin cumleyi JETONLAYIP modele verir, gerisini MODEL
+    konus_06  yazdigin cumleyi JETONLAYIP modele verir, gerisini MODEL
               YAZAR: butun sozluk uzerinde argmax, nokta gelene kadar.
               Sablon yok -- cevabin kac kelime olacagini, kesme
               isaretinin nereye gelecegini, cumlenin nerede bitecegini
               model soyler. Arac dogru cevabi BILMEZ ve "dogru/yanlis"
               DEMEZ. Model ne yazdiysa o basilir.
 
-!! BU BIR OLCU DEGIL. Elle secilmis sorulardir; hukum `pencere_05` ile
-verilir (onkayit `belge/onkayit/model_05.md`).
+!! BU BIR OLCU DEGIL. Elle secilmis sorulardir; hukum `pencere_06` ile
+verilir (onkayit `belge/onkayit/model_06.md`).
 
-    python konus_05.py                      en son anlik goruntu
-    python konus_05.py --adim 8000          belli bir adim
-    python konus_05.py --genislik 5         son 5'in agirlik ortalamasi
-    python konus_05.py --klasor <yol>       baska bir kosu
+    python konus_06.py                      en son anlik goruntu
+    python konus_06.py --adim 8000          belli bir adim
+    python konus_06.py --genislik 5         son 5'in agirlik ortalamasi
+    python konus_06.py --klasor <yol>       baska bir kosu
 
-Ekranda:
-    > Ayse Yilmaz'in annesi kim?
+model_06'DA SORU BICIMI YOK -- dil yalniz BILDIRIM. Yani dogal girdi
+soru sozcuksuz bir ONEK, ya da BOSLUKLU bir cumle:
+
+    > Ayse Yilmaz'in annesi
     Ayse Yilmaz'in annesi Fatma Yilmaz'dir.
+
+    > Fatma _ 'in annesi Ayse Yilmaz'dir.
+      Fatma Yilmaz'in annesi Ayse Yilmaz'dir.
+      bosluga gelen: Yilmaz
+
+Ikinci bicim bu kolun DUGMESI: ayni cumlede HER parca sorulabiliyor.
+Nedensel model boslugun sagini goremedigi icin cikarilan parca SONA
+tasiniyor (<BOS> ... <AYIR> parca); arac bunu senin icin yapiyor.
 """
 from __future__ import annotations
 
@@ -108,7 +118,7 @@ class Sozluk:
         # (v.paylasilan) -- yani "Yilmaz" hangi yuvada olursa olsun ayni
         # jeton. Paylasilmazsa cozumleme konuma bagli olurdu; assert ile
         # duruyoruz, sessizce yanlis jeton uretmektense.
-        assert v.paylasilan, "konus_05 PAYLASILAN sozluk bekler"
+        assert v.paylasilan, "konus_06 PAYLASILAN sozluk bekler"
         self.kel = {}
         for i, w in enumerate(v.par_ad[0]):
             ekle(self.kel, w, lo + i, "varlik")
@@ -160,7 +170,13 @@ class Sozluk:
         modelin hatasi sanilmisti; sessiz duzeltme yapmiyoruz.)
         """
         v = self.v
-        parca = re.findall(r"[^\s'?.]+|['?.]", metin)
+        # !! VIRGUL ve ALT CIZGI de ayri jeton.
+        #   ,  devrik cumlede OGE SINIRI (model_06'nin yeni jetonu).
+        #      Onsuz "Yilmaz," tek kelime sayilip sozlukte bulunamazdi.
+        #   _  KULLANICININ BOSLUGU. Dilde <BOS> diye yaziliyor ama
+        #      klavyeden "_" yazmak kolay. Kullanici, 17 Eylul:
+        #      *"Fatma ..... 'in annesi Ayse Yilmaz'dir gibi"*.
+        parca = re.findall(r"[^\s'?.,_]+|['?.,]|_+", metin)
         jet, bilinmeyen, not_ = [], [], []
         ad = []                       # kesme isaretine kadar okunan ad
         i = 0
@@ -173,6 +189,12 @@ class Sozluk:
                 jet.append(M.EOS); ad = []; continue
             if p == "'":
                 jet.append(v.ek0); continue
+            if p == ",":
+                jet.append(v.virgul); ad = []; continue
+            if set(p) == {"_"}:
+                # BOSLUK: "buraya ne gelir?" Dizi kurulurken sona
+                # <AYIR> eklenecek ve model parcayi ORADA yazacak.
+                jet.append(v.bosluk); ad = []; continue
             # KESME ISARETINDEN SONRA gelen ek: 'in / 'dir
             if jet and jet[-1] == v.ek0:
                 t = self._ek(p, kat(p).lower(), ad, not_)
@@ -232,8 +254,14 @@ class Sozluk:
         # dilde bu ikisinin arasinda kesme isareti YOK:
         #   "annesinin"  ->  annesi + nin   (`kodla_2hop`: r1, nin, r2)
         #   "kimdir"     ->  kim + dir      (kimlik satiri)
+        #   "annesidir"  ->  annesi + dir   (model_06 bicim 2: YUKLEM
+        #                                      ONE ALINMIS bildirim)
+        # !! Bu dal YOKTU ve `--dene` yakaladi: biçim 2'nin 600 satirinin
+        # 600'u cozumlenemiyordu ("Annesidir" BILINMEYEN diye donuyordu).
         return (self._bitisik(fl, self.rel, self.nin,
                               self.v.nin_rel, self.v.nin0, M.REL_OFF)
+                or self._bitisik(fl, self.rel, self.dir,
+                                 self.v.dir_rel, self.v.dir0, M.REL_OFF)
                 or self._bitisik(fl, self.soru, self.dir,
                                  self.v.dir_soru, self.v.dir0, self.v.soru0))
 
@@ -327,20 +355,34 @@ def olasilik(v, net, jet, k=8):
 
 
 @torch.no_grad()
-def devam(v, net, jet):
+def devam(v, net, jet, ornekle=False, isi=1.0, tohum=None):
     """Diziyi MODELE YAZDIRIR. Kisit YOK: argmax butun sozluk uzerinde.
 
     Sozlesme `dogruluk()` ile AYNI: satir t_len genisliginde verilir,
     p konumundaki logit p+1'inci jetonu tahmin eder. Uretilen jeton
     satira geri yazilir (ozyineli cozum), yani model kendi yazdigini
-    okur -- sor_05'te bunun neden onemli oldugu olculmustu.
+    okur -- sor_06'te bunun neden onemli oldugu olculmustu.
     """
+    # ARGMAX mi ORNEKLEME mi -- ve NEDEN secenek:
+    # Kullanici, 17 Eylul: *"Furkan yazinca niye Demir ile devam
+    # ediyor?"* Cunku argmax farkin buyuklugune bakmaz. Olculdu (adim
+    # 20000, onek "Furkan"): Demir %15,40  Sahin %14,53  Kaya %14,32 --
+    # 0,87 puanlik bir fark ciktinin %100'unu belirliyor. Model "Demir"
+    # demiyor, "sekizinden biri" diyor. Ornekleme dagilimi OLDUGU GIBI
+    # gosterir; hukum yine `pencere_05`in (o ARGMAX olcer, olcum
+    # tekrarlanabilir olsun diye).
+    rs = np.random.default_rng(tohum)
     x = list(jet)
     while len(x) < v.t_len:
         satir = np.zeros((1, v.t_len), dtype=np.int64)
         satir[0, :len(x)] = x
         lg = net(torch.from_numpy(satir).to(M.DEV)).float()
-        t = int(lg[0, len(x) - 1].argmax())
+        z = lg[0, len(x) - 1]
+        if ornekle:
+            p = torch.softmax(z / max(isi, 1e-6), -1).cpu().numpy()
+            t = int(rs.choice(len(p), p=p / p.sum()))
+        else:
+            t = int(z.argmax())
         x.append(t)
         if t in (M.EOS, M.PAD):
             break
@@ -348,14 +390,14 @@ def devam(v, net, jet):
 
 
 def dene(D, S, n=300):
-    """JETONLAYICI SINAMASI -- `python konus_05.py --dene`.
+    """JETONLAYICI SINAMASI -- `python konus_06.py --dene`.
 
     Olcut: bir EGITIM satirini `oku()` ile okunabilir Turkce'ye cevirip
     elle yazilmis gibi geri jetonlarsak AYNI jetonlar cikmali. Cikmazsa
     arac modele egitimde HIC GORMEDIGI bir dizi veriyor demektir ve
     ekranda "model bilemedi" diye okunacak sey ARACIN kusuru olur.
 
-    Kilit testine (`test_05.py`) KONMADI: o test kosudan once calisan
+    Kilit testine (`test_06.py`) KONMADI: o test kosudan once calisan
     onkayitli 155 denetim, sayisi koldan kola kiyaslaniyor. Bu arac
     hukumde kullanilmiyor, sinamasi da kendi yaninda durur.
 
@@ -415,18 +457,21 @@ def main():
 
     ayar, v, net, sec = kur(a.klasor, a.genislik, a.adim)
     assert (D.v.vocab, D.v.n_ent, D.v.ek0) == (v.vocab, v.n_ent, v.ek0), (
-        "depodaki model_05.AYAR ile KOSUNUN ayari ayristi -- sozluk tutmuyor")
+        "depodaki model_06.AYAR ile KOSUNUN ayari ayristi -- sozluk tutmuyor")
     D.v = v                      # kosunun kendi verisi okunsun
     S = Sozluk(v, D.VM)
 
-    print(f"model_05 t{ayar.tohum}   anlik goruntu "
+    print(f"model_06 t{ayar.tohum}   anlik goruntu "
           + (f"{sec[0]}" if len(sec) == 1
              else f"{sec[0]}-{sec[-1]} ortalamasi"))
     print("soru yaz, bos satir cikar.")
     print("  /ara <parca>  varlik adi ara        /iliski  iliskiler")
+    print("  _ yaz -> BOSLUK sor:  Fatma _ 'in annesi Ayse Yilmaz'dir.")
     print("  /o <cumle basi>  SONRAKI jetonun DAGILIMI    "
-          "/j  jetonlari goster\n")
+          "/j  jetonlari goster")
+    print("  /s  ORNEKLEME ac/kapa (argmax HEP ayni cevabi verir)\n")
     jeton_goster = [False]
+    ornek = [False]          # /s -- argmax yerine DAGILIMDAN cek
     # Adlari ARAMAK gerekiyor: 1087 varlik var ve olmayan bir ad
     # yazildiginda model degil ARAC susuyor. Dokumun tamami zaten
     # `veri/model_05/` altinda; bu yalniz elin altinda dursun diye.
@@ -438,6 +483,13 @@ def main():
         if q == "/j":
             jeton_goster[0] = not jeton_goster[0]
             print("jeton gosterimi", "ACIK" if jeton_goster[0] else "KAPALI")
+            return
+        if q == "/s":
+            ornek[0] = not ornek[0]
+            print("ORNEKLEME " + ("ACIK -- ayni soru her seferinde BASKA "
+                                  "cevap verebilir (dagilimdan cekiliyor)"
+                                  if ornek[0] else
+                                  "KAPALI -- argmax, ayni soru HEP ayni cevap"))
             return
         if q.startswith("/o"):
             # ARGMAX TEK CEVAP VERIR, model ise DAGILIM tasir. Bu komut
@@ -480,7 +532,15 @@ def main():
             return
         for n in notlar:
             print(f"  ({n})")
-        cikti = devam(v, net, jet)
+        # BOSLUK SORULDU MU? Nedensel model boslugun sagini o
+        # konumda goremez; dilde cikarilan parca SONA tasiniyor ve
+        # arasina <AYIR> giriyor. Kullanici "_" yazdiysa diziyi o
+        # duzene sokup modele PARCAYI yazdiriyoruz.
+        _fim = v.bosluk in jet
+        if _fim:
+            assert jet.count(v.bosluk) == 1, "TEK bosluk sorulabilir"
+            jet = jet + [v.ayir]
+        cikti = devam(v, net, jet, ornekle=ornek[0])
         if jeton_goster[0]:
             print("  jeton: " + " ".join(D.jeton_ad(t) for t in jet)
                   + "  ||  " + " ".join(D.jeton_ad(t) for t in cikti[len(jet):]))
@@ -497,6 +557,17 @@ def main():
         #
         # (kullanici, 17 Eylul: "bu sekilde yaptigim zaman neyi yanlis
         # yapiyorum?" -- yanlis yapan kendisi degil, bu satirdi.)
+        if _fim:
+            # Cevap dizinin SONUNDA. Cumleyi bosluk DOLDURULMUS haliyle
+            # geri yaz -- kullanici ne sordugunu ve ne geldigini yan yana
+            # gorsun.
+            _p = [int(t) for t in cikti[len(jet):]]
+            _dolu = [t for t in jet[:-1]]
+            _i = _dolu.index(v.bosluk)
+            print("  " + D.oku(_dolu[:_i] + _p + _dolu[_i + 1:]))
+            print("  bosluga gelen: " + D.oku(_p)
+                  + f"   ({' '.join(D.jeton_ad(t) for t in _p)})")
+            return
         yeni_cumle = jet[-1] in (M.QM, M.EOS)
         print(D.oku(cikti[len(jet):] if yeni_cumle else cikti))
 
@@ -508,7 +579,12 @@ def main():
         return 0
     while True:
         try:
-            q = input("> ").strip()
+            # ISTEM KIPI GOSTERIR. Kullanici, 17 Eylul: "hicbir sey
+            # degismedi, rastgele bir soyad secmedi" -- `/s` yazilmamisti
+            # ve ekranda argmax'ta mi ornekte mi oldugunu gosteren
+            # HICBIR SEY yoktu. Yardim satirinda yazmasi yetmiyor:
+            # kipi tasiyan yer, kipin kullanildigi yer olmali.
+            q = input("ornek> " if ornek[0] else "argmax> ").strip()
         except (EOFError, KeyboardInterrupt):
             break
         if not q:
