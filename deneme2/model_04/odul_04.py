@@ -249,8 +249,18 @@ def adim(net, xb: torch.Tensor, pb: torch.Tensor, lo: int, hi: int,
     B = xb.shape[0]
     dev = xb.device
     ar_b = torch.arange(B, device=dev)
+    # !! ILERI GECIS fp16 (autocast), LOG-SOFTMAX fp32.
+    # Olculdu (17 Eylul, T4): autocast KAPALIYKEN adim > 300 ms ve
+    # 20.000 adim ~2 saat suruyordu -- T4'un fp16 cekirdekleri
+    # kullanilmiyordu. `.float()` zaten logitleri fp32'ye cikariyor,
+    # yani log_softmax ve ornekleme yine tam duyarlikta; fp16 olan
+    # sadece modelin ic hesabi. GradScaler geri gecisi zaten olceklendiriyor.
+    _oc = dict(device_type=dev.type, dtype=torch.float16,
+               enabled=(dev.type == "cuda"))
     # --- YUVA 1: tek ileri gecis, G kopya icin ORTAK -------------------
-    lg1 = net(xb).float()[ar_b, pb[:, 0], lo:hi]                 # (B, n)
+    with torch.autocast(**_oc):
+        _l = net(xb)
+    lg1 = _l.float()[ar_b, pb[:, 0], lo:hi]                      # (B, n)
     lp1 = torch.log_softmax(lg1 / sicaklik, dim=-1)
     with torch.no_grad():
         s1 = torch.multinomial(lp1.exp(), g, replacement=True)   # (B, g)
@@ -262,7 +272,9 @@ def adim(net, xb: torch.Tensor, pb: torch.Tensor, lo: int, hi: int,
     xg = xb.repeat_interleave(g, 0).clone()                      # (B*g, T)
     xg[ar_g, pg[:, 0] + 1] = s1.reshape(-1) + lo
     for j in (1, 2):
-        lgj = net(xg).float()[ar_g, pg[:, j], lo:hi]             # (B*g, n)
+        with torch.autocast(**_oc):
+            _l = net(xg)
+        lgj = _l.float()[ar_g, pg[:, j], lo:hi]                  # (B*g, n)
         lpj = torch.log_softmax(lgj / sicaklik, dim=-1)
         with torch.no_grad():
             sj = torch.multinomial(lpj.exp(), 1).squeeze(1)      # (B*g,)

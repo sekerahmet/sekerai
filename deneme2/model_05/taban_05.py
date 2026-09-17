@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""taban_04 — model_04'in KENDI motoru. TEK BASINA DURUR.
+"""taban_03 — model_03'in KENDI motoru. TEK BASINA DURUR.
 
 Kullanici karari, 16 Eylul 2026:
-    *"bunlarin hepsi model_04 folderi altinda olmali. model_04 diger
+    *"bunlarin hepsi model_03 folderi altinda olmali. model_03 diger
     hicbir model ile ayni seyi kullanmamali."*
 
-Bu dosya `model_a.py`nin KOPYASIDIR ve artik model_04'a aittir.
+Bu dosya `model_a.py`nin KOPYASIDIR ve artik model_03'a aittir.
 `model_a`/`model_b` icin yapilan bir degisiklik buraya GECMEZ.
 
 Icindekiler: `Ayar`, `Veri`, `veri_kur`, kodlayicilar, `egitim_havuzu`,
@@ -16,13 +16,13 @@ goruntu + surdurme, ve `egit`.
 !! KOPYANIN BEDELI -- ve nasil odendigi
 
 Paylasilan motorda bir olcum hatasi duzeltilirse, o duzeltme buraya
-KENDILIGINDEN gelmez; model_04 ile model_b15 O GUNDEN SONRA FARKLI
+KENDILIGINDEN gelmez; model_03 ile model_b15 O GUNDEN SONRA FARKLI
 KODLA olculmus olur. Bu, kopyanin gercek riski ve gozden kacarsa
 sayilari sessizce karsilastirilamaz hale getirir.
 
-Bunun icin `test_04.py` her kosuda DAVRANIS ESDEGERLIGI siniyor:
+Bunun icin `test_03.py` her kosuda DAVRANIS ESDEGERLIGI siniyor:
 
-    egitim havuzu       taban_04 vs model_a  -> BIT DUZEYINDE ayni
+    egitim havuzu       taban_03 vs model_a  -> BIT DUZEYINDE ayni
     olcme listeleri     olcme_izi            -> AYNI
     Ayar alanlari       ESKI_VARSAYILAN      -> AYNI
     kodlayici ciktilari ayni girdi           -> AYNI dizi
@@ -45,8 +45,8 @@ import torch.nn.functional as F
 # etkisidir ve deterministiktir: ortam degiskeni okumuyor, ayar tasimiyor
 # (sifirdan.py'nin arizasi oydu, bkz. ISIMLENDIRME.md).
 # NOT: `model_a.py` burada bir ust klasoru yola ekleyip `veri_okul`u
-# import ediyordu. `taban_04` bunu YAPMIYOR: model_04'in verisi
-# `veri_04.py`, ve o BU klasorde. Veri modulu `veri_kur` icinde
+# import ediyordu. `taban_03` bunu YAPMIYOR: model_03'in verisi
+# `veri_03.py`, ve o BU klasorde. Veri modulu `veri_kur` icinde
 # `ayar.veri_ad`dan import ediliyor (asagida), burada degil.
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
@@ -62,11 +62,11 @@ T_LEN = 8
 # ======================= AYAR ============================================
 @dc.dataclass(frozen=True)
 class Ayar:
-    ad: str = "model_04"
+    ad: str = "model_03"
 
     # --- veri (bir ailenin butun kollarinda AYNI olmali, yoksa
     #     'sartlar esit' bozulur ve kollar farkli veri gorur)
-    veri_ad: str = "veri_04"     # HANGI GRAF. "veri_okul2" = tam IKI KATI.
+    veri_ad: str = "veri_03"     # HANGI GRAF. "veri_okul2" = tam IKI KATI.
     #   15 Eylul'de eklendi. Modul adi olarak yaziliyor ki `ayar_t<N>.json`a
     #   girsin: "bu kosu hangi veriyi gordu" sorusu SONRADAN cevaplanabilsin.
     #   Alan eklemek SURDURMEYI bozabilirdi (eski paketlerde bu anahtar YOK
@@ -293,48 +293,6 @@ class Ayar:
     mask_poz: int | None = None
     mask_blok: tuple = ()
 
-    # --- ODUL KOLU (model_04'un TANIMI) --------------------------------
-    # Kullanici karari, 17 Eylul 2026. `odul_ac=False` iken bu alanlarin
-    # HICBIRI okunmaz ve kosu model_03 ile BIT DUZEYINDE aynidir --
-    # eski kollarin davranisi korunur.
-    odul_ac: bool = False
-    odul_bolme: str = "ent_arama"
-    #   NEDEN ent_arama: `ent` bir HUKUM bolmesi, uzerinde egitmek sinavi
-    #   egitmek olur. `ent_arama` proje tasariminda zaten "hukumde
-    #   kullanilmaz" diye ayrilmis. VE OLCULDU (17 Eylul): ent_arama'nin
-    #   zincir-basi varliklari ile ent'inkiler TAMAMEN AYRIK (kesisim 0;
-    #   53'e karsi 159 varlik). Yani odul ent_arama varliklarini
-    #   zincir-basi YAPAR ama `ent` varliklari hic dokunulmamis kalir --
-    #   `ent` gercek bir tutulmus sinav olarak KALIR.
-    odul_g: int = 8            # grup boyutu (GRPO). Olculdu: G=8'de
-    #                            gruplarin ~%29'u gradyan uretiyor.
-    odul_batch: int = 64       # ODUL adiminin soru sayisi -- `batch`ten
-    #   AYRI. Zincirleme ornekleme yuva basina bir ileri gecis istiyor
-    #   (ilki B, sonraki ikisi B*G dizi uzerinde). batch=512 ile bu ~17
-    #   kat maliyet olurdu. `batch` DEGISMEDI: o egitim havuzunun alani
-    #   ve GOREV_ALAN'da -- model_b15 kiyasini kirmasin.
-    odul_sicaklik: float = 1.0
-    odul_denetimli: bool = False
-    #   False = denetimli kayip KAPALI, ODUL TEK OGRETMEN. Kullanici,
-    #   17 Eylul: "bu egitimde dogru cevabi vermeyeceğiz." Denetimli kayip
-    #   yine de HESAPLANIR ve egriye yazilir -- gradyan almaz, sadece
-    #   "bozuluyor mu" gorunsun diye.
-    # --- MERDIVENIN BASAMAK DEGERLERI ---------------------------------
-    # Kosunun kaydina GIRSIN diye Ayar alani: `ayar_t<N>.json` bunlari
-    # yaziyor, yani "hangi odulle kosuldu" sorusu MEKANIK cevaplanir.
-    # `odul_04.OdulAyar` bu alti sayiyi alir ve SIRAYI assert eder.
-    # Turetmeleri: onkayit model_04.md 3 (aramanin daralmasi, bit).
-    odul_zemin: float = -0.50      # KAPI 1 veya 3 dustu (BICIM bozuk)
-    odul_kisayol: float = -0.30    # ozneden 1 ADIMDA ulasilan cevap
-    odul_tip: float = -0.20        # gecerli varlik, YANLIS jeton sayisi/tip
-    odul_e: float = 0.00           # dogru tip, ama menzil DISI
-    odul_f: float = 0.34           # 2 adim menzilinde
-    odul_g_aile: float = 0.67      # + dogru aile / tur
-    odul_h: float = 1.00           # TAM DOGRU (olcek)
-    odul_kl: float = 0.0       # referans modele KL cezasi. 0 = KAPALI.
-    #   Literaturde standart (RLVR), ama bu kolda ACILMADI: acilirsa
-    #   "odul mu KL mi tuttu" ayrilamaz. Alan duruyor, degeri 0.
-
     def degistir(self, **kw) -> "Ayar":
         bilinmeyen = set(kw) - {f.name for f in dc.fields(self)}
         assert not bilinmeyen, f"Ayar'da boyle alan yok: {bilinmeyen}"
@@ -415,16 +373,6 @@ ESKI_VARSAYILAN = {
     # ek_kip/bicim 16 Eylul'de eklendi; ondan onceki butun kosular TEK
     # bicimde ve eksiz kodlamayla egitildi -> kapali.
     "ek_kip": "", "bicim": 1,
-    # ODUL KOLU 17 Eylul'de eklendi; ondan onceki butun kosularda odul
-    # DIYE BIR SEY YOKTU -> kapali. `odul_ac=False` iken diger odul
-    # alanlarinin HICBIRI okunmuyor, ama alan olarak var olmalilar
-    # yoksa eski `ayar_t<N>.json` ve `surdurme_t<N>.pt` okunamaz.
-    "odul_ac": False, "odul_bolme": "ent_arama", "odul_g": 8,
-    "odul_batch": 64,
-    "odul_sicaklik": 1.0, "odul_denetimli": False, "odul_kl": 0.0,
-    "odul_zemin": -0.50, "odul_kisayol": -0.30, "odul_tip": -0.20,
-    "odul_e": 0.00,
-    "odul_f": 0.34, "odul_g_aile": 0.67, "odul_h": 1.00,
 }
 
 
@@ -1645,15 +1593,7 @@ def erken_teshis(r: dict, ayar: Ayar, yaz=print, uyarildi: set | None = None):
 def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
          model_kur=None,   # None -> Model. `model_b` kendi sinifini verir;
          #                   varsayilan davranis BIT DUZEYINDE ayni kalir.
-         surdur=False, baslangic=None, baslangic_genislik=5) -> list:
-    """`baslangic`: BASKA bir kosunun anlik goruntusunden agirlik yukler.
-
-    model_04'un TANIMI bunu gerektiriyor: odul, model_03'un UZERINE
-    kuruluyor (kullanici karari, 17 Eylul). Sifirdan odul KOSULMAZ --
-    olculdu: odul, taban modelin ornekleme dagiliminda ZATEN olani one
-    cikarir, yenisini YARATMAZ (2504.13837; `OLCULENLER.md` 1e).
-    None ise davranis eskisiyle BIT DUZEYINDE ayni: rastgele baslangic.
-    """
+         surdur=False) -> list:
     alt = alt or f"cikti_{ayar.ad}_t{ayar.tohum}"
     os.makedirs(alt, exist_ok=True)
     _yazilabilir(alt, yaz)              # Drive gercekten bagli mi, saniye 0'da
@@ -1677,49 +1617,6 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
     Xtr, Ptr, Ttr, kimlik, KPOZ, KTR = egitim_havuzu(ayar, v, yaz)
 
     L = olcme_listeleri(ayar, v)
-    # --- ODUL HATTI (ayar.odul_ac) -----------------------------------
-    # Kapaliyken bu blok HIC calismaz -> model_03 ile BIT DUZEYINDE ayni.
-    _od = _od_X = _od_P = _od_ozne = _od_ksy = _od_dogru = None
-    if ayar.odul_ac:
-        import odul_04 as _O
-        _bol = {"ent_arama": v.ent_arama, "comp": v.comp, "ent": v.ent}
-        assert ayar.odul_bolme in _bol, (
-            f"odul_bolme {ayar.odul_bolme!r} taninmiyor: {sorted(_bol)}")
-        assert ayar.odul_bolme != "ent", (
-            "ODUL `ent` UZERINDE KOSAMAZ -- o bir HUKUM bolmesi, uzerinde "
-            "egitmek sinavi egitmek olur (onkayit model_04.md 4)")
-        _lst = _bol[ayar.odul_bolme]
-        assert _lst, f"{ayar.odul_bolme} BOS"
-        # ODUL bolmesi ile HUKUM bolmesi AYRI VARLIKLARDAN olmali.
-        # Olculdu (17 Eylul): ent_arama'nin zincir-basi varliklari ile
-        # ent'inkiler kesisimi 0. Bu assert onu HER KOSUDA tekrar sinar --
-        # veri ureteci degisirse sessizce kirilmasin.
-        _b_odul = {int(z[0]) for z in _lst}
-        _b_ent = {int(z[0]) for z in v.ent}
-        _ortak = _b_odul & _b_ent
-        assert not _ortak, (
-            f"ODUL BOLMESI ile `ent` {len(_ortak)} ZINCIR-BASI VARLIK "
-            "PAYLASIYOR -- odul onlari zincir-basi yapar ve `ent` artik "
-            "tutulmus bir sinav OLMAZ. Kosu BASLAMAMALI.")
-        _yok = [i for i, x in enumerate(v.par_ad[0]) if str(x) == "<YOK>"]
-        assert len(_yok) == 1, f"<YOK> jetonu tam bir kez olmali: {_yok}"
-        _oa = _O.OdulAyar(ayar.odul_zemin, ayar.odul_kisayol,
-                          ayar.odul_tip, ayar.odul_e,
-                          ayar.odul_f, ayar.odul_g_aile, ayar.odul_h)
-        _od = _O.Puanlayici(np.asarray(v.par), _yok[0], v.facts, _oa)
-        _od_X, _od_P, _ = kodla_2hop(v, _lst)
-        _od_ozne = np.array([z[0] for z in _lst], np.int64)
-        _od_dogru = np.array([z[4] for z in _lst], np.int64)
-        _od_ksy = v.facts[_od_ozne, np.array([z[2] for z in _lst], np.int64)]
-        yaz(f"  ODUL: bolme {ayar.odul_bolme} {len(_lst)} zincir, "
-            f"{len(_b_odul)} zincir-basi varlik (ent ile kesisim 0)")
-        yaz(f"        merdiven zemin {_oa.zemin} kisayol {_oa.kisayol} "
-            f"TIP {_oa.yanlis_tip} E {_oa.e_menzil_disi} F {_oa.f_menzil} "
-            f"G {_oa.g_aile} H {_oa.h_tam}"
-            f"   grup={ayar.odul_g} T={ayar.odul_sicaklik}")
-        yaz(f"        denetimli kayip {'ACIK' if ayar.odul_denetimli else 'KAPALI'}"
-            f" -- {'odul + cross-entropy' if ayar.odul_denetimli else 'ODUL TEK OGRETMEN'}")
-
     kod = {k: (kodla_1hop(v, L[k]) if k == "one" else kodla_2hop(v, L[k]))
            for k in L if L[k]}
     iz = olcme_izi(L)
@@ -1728,47 +1625,6 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
 
     torch.manual_seed(ayar.tohum)
     model = (model_kur or Model)(ayar, v.vocab).to(DEV)
-    if baslangic:
-        # `baslangic` bir KLASOR ise PENCERE ORTALAMASI alinir (son
-        # `baslangic_genislik` anlik goruntu), bir DOSYA ise o tek
-        # goruntu yuklenir.
-        #
-        # !! VARSAYILAN KLASOR, yani PENCERE. Olculdu (17 Eylul):
-        #     model_03 egri 20.000    one 0.9153  seen 0.9210  comp 0.8113
-        #     model_03 PENCERE 12-20k one 0.9857  seen 0.9960  comp 0.8350
-        # Tek goruntuden baslamak, kosuyu ON KOSULUN ALTINDAN baslatirdi
-        # (one 0.9153 < 0.98) ve sonuc ne cikarsa ciksin YORUMLANAMAZDI.
-        # Ayrica bu kolun butun kiyas sayilari (onkayit model_04.md 2)
-        # PENCERE modelinden olculdu; baska bir agirliktan baslamak
-        # onlari gecersiz kilardi.
-        if os.path.isdir(baslangic):
-            _y = sorted(glob.glob(os.path.join(baslangic, "*.pt")))
-            assert _y, f"anlik goruntu YOK: {baslangic}"
-            _y = _y[-baslangic_genislik:]
-            _t = None
-            for _p in _y:
-                _d = torch.load(_p, map_location="cpu")
-                if _t is None:
-                    _t = {k: x.float() for k, x in _d.items()}
-                else:
-                    assert set(_d) == set(_t), f"anahtar kumesi farkli: {_p}"
-                    for k in _t:
-                        _t[k] += _d[k].float()
-            _sd = {k: x / len(_y) for k, x in _t.items()}
-            yaz(f"  BASLANGIC: PENCERE ORTALAMASI, {len(_y)} anlik goruntu")
-            for _p in _y:
-                yaz(f"     {os.path.basename(_p)}")
-        else:
-            _sd = {k: t.float()
-                   for k, t in torch.load(baslangic, map_location="cpu").items()}
-            yaz(f"  !! BASLANGIC TEK ANLIK GORUNTU: {baslangic}")
-            yaz("     (pencere DEGIL -- on kosul kapilari bu agirlikta")
-            yaz("      GECMEYEBILIR, onkayit model_04.md 1)")
-        # `strict=True`: mimari kaydedildiginden farkliysa SESSIZ degil
-        # GURULTULU dussun.
-        model.load_state_dict(_sd, strict=True)
-        yaz("     (bu kol SIFIRDAN kosmuyor -- odul, egitilmis bir modelin")
-        yaz("      uzerine biniyor. `kayip` sutunu 0. adimda DUSUK baslar.)")
     yaz(f"  parametre {model.n_param():,}  (d={ayar.d} l={ayar.l} "
         f"nh={ayar.nh} dff={ayar.dff} dongu={ayar.dongu})"
         f"  -> {ayar.l*ayar.dongu} katman-esdegeri hesap")
@@ -1885,10 +1741,6 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
     yrd_say = 0
     ana_top = torch.zeros((), device=DEV)
     ana_say = 0
-    # ODUL SAYACLARI. odul_ac=False iken hep 0 kalir ve egriye YAZILMAZ --
-    # eski kollarin egri semasi degismez.
-    od_top, od_say, od_ayr = 0.0, 0, {}
-    od_ce_top, od_ce_say = 0.0, 0
     # KPOZ her adimda tensora ceviriliyordu; bir kez yeter.
     _KPT = torch.from_numpy(KPOZ).to(DEV)
     # ADIM 0 DA `try` ICINDE. Disaridayken burada coken bir kosu kunyeyi
@@ -1936,99 +1788,57 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
             # full-batch) -- adim sayimiz onlarla DOGRUDAN kiyaslanamaz.
             # Beklenen gecis: adim*batch/len(Xtr) = 20000*512/51120 ~ 200,
             # ama Poisson sacilimli.
-            # ============ ODUL ADIMI (ayar.odul_ac) ==================
-            # Denetimli hat BU DALDA HIC CALISMAZ. Kullanici, 17 Eylul:
-            # "biz modeli zaten dogru cevap vererek egitiyoruz; bu
-            # egitimde dogru cevabi vermeyecegiz."  Cross-entropy yine de
-            # HESAPLANIR ama gradyansiz -- egride "denetimli kayip
-            # bozuluyor mu" gorunsun diye.
-            # !! OPTIMIZER ADIMI ORTAK: asagidaki `kayip_top` blogu iki
-            # dal icin de aynen kosuyor. Iki ayri adim YAZILMAZ.
-            if ayar.odul_ac and not ayar.odul_denetimli:
-                jo = rs.randint(0, len(_od_X), ayar.odul_batch)
-                xb = torch.from_numpy(_od_X[jo]).to(DEV)
-                pb = torch.from_numpy(_od_P[jo]).to(DEV)
-                _lo, _hi = v.yuva_ara[0]
-                # autocast `odul_04.adim` ICINDE, ileri gecise uygulaniyor;
-                # log-softmax ve ornekleme fp32'de kaliyor. Burada
-                # sarmalamiyoruz ki `.float()` sinirini adim() kendisi
-                # cizsin (olculdu: kapaliyken adim > 300 ms, T4).
-                kayip, _o_ort, _o_ayr = _O.adim(
-                    model, xb, pb, _lo, _hi, _od, _od_ozne[jo],
-                    _od_ksy[jo], _od_dogru[jo],
-                    ayar.odul_g, ayar.odul_sicaklik)
-                with torch.no_grad():
-                    _ar = torch.arange(xb.shape[0], device=DEV)[:, None]
-                    lg_y = model(xb).float()[_ar, pb][:, :, _lo:_hi]
-                    _hedef = torch.from_numpy(
-                        _od.par[_od_dogru[jo]]).to(DEV)        # (B, 3)
-                    ana = F.cross_entropy(
-                        lg_y.reshape(-1, lg_y.shape[-1]),
-                        _hedef.reshape(-1))
-                # !! `ana_top` KIRLETILMIYOR. O sayac "egitim havuzunun
-                # cevap yuvalarindaki cross-entropy" demek ve butun
-                # kollarda AYNI SEYI olcuyor. Buradaki CE odul bolmesinin
-                # cevaplari uzerinde -- BASKA bir sey. Ayni kovaya
-                # koymak `kayip_ana` sutununu sessizce baska bir olcuye
-                # cevirirdi (model_b8'de bir kez oldu).
-                od_ce_top += float(ana)
-                od_ce_say += 1
-                od_top += _o_ort
-                od_say += 1
-                for _k, _x in _o_ayr.items():
-                    od_ayr[_k] = od_ayr.get(_k, 0.0) + _x
-            else:
-                j = rs.randint(0, len(Xtr), ayar.batch)
-                xb = torch.from_numpy(Xtr[j]).to(DEV)
-                pb = torch.from_numpy(Ptr[j]).to(DEV)
-                tb = torch.from_numpy(Ttr[j]).to(DEV)
-                with torch.autocast(DEV, dtype=torch.float16,
-                                    enabled=(DEV == "cuda")):
-                    lg_tam = model(xb)
-                    # xb.shape[0], ayar.batch DEGIL: ikisi burada esit ama bir
-                    # varyasyon degisken batch kullanirsa `ayar.batch` sessizce
-                    # yanlis satirlari secerdi.
-                    # pb/tb artik (B, yuva). yuva=1 iken eski davranisla
-                    # AYNI: tek pozisyon, tek hedef, ayni kayip.
-                    _ar = torch.arange(xb.shape[0], device=DEV)[:, None]
-                    lg = lg_tam[_ar, pb]                   # (B, yuva, V)
-                    # `ana` HER ZAMAN hesaplanir: model_b6 ile KIYASLANABILIR
-                    # olan sayi budur. tam_kayip acikken optimize edilen sey
-                    # `ana` DEGIL, ama egriye ikisi de yazilir. (model_b8'de
-                    # `kayip` sutunu kirlenmisti ve b6 ile kiyaslanamaz hale
-                    # gelmisti -- ayni hataya dusmemek icin.)
-                    ana = F.cross_entropy(
-                        lg.float().reshape(-1, lg.shape[-1]), tb.reshape(-1))
-                    if ayar.tam_kayip:
-                        # DIL MODELI KAYBI: pozisyon t, X[t+1]'i tahmin eder.
-                        # PAD (=0) hedefleri atlanir; PAD dizinin yalniz
-                        # KUYRUGUNDA var, arasinda yok.
-                        kayip = F.cross_entropy(
-                            lg_tam[:, :-1].float().reshape(-1, lg_tam.shape[-1]),
-                            xb[:, 1:].reshape(-1), ignore_index=PAD)
-                        ana_top += ana.detach()
-                        ana_say += 1
-                    else:
-                        kayip = ana
-                    # --- YARDIMCI KOPRU KAYBI (kopru_kayip>0 ise) -----------
-                    # kopru_kayip=0'da bu blok HIC calismaz -> eski kollar
-                    # BIT DUZEYINDE ayni kalir.
-                    if ayar.kopru_kayip > 0:
-                        kb = torch.from_numpy(KTR[j]).to(DEV)      # (B, nk)
-                        m = kb[:, 0] >= 0                          # 2hop satirlar
-                        if bool(m.any()):
-                            lgk = lg_tam[m][:, _KPT]               # (Bm, nk, V)
-                            yrd = F.cross_entropy(
-                                lgk.float().reshape(-1, lgk.shape[-1]),
-                                kb[m].reshape(-1))
-                            # ORTALAMA GECERLI SATIRLAR UZERINDE; ana kayip
-                            # BUTUN satirlarda ortalaniyor. Havuzun %82'si
-                            # 2hop, yani yardimci terimin FIILI agirligi
-                            # kopru_kayip'in ~1,22 KATI. Hata degil ama
-                            # "agirlik 1.0" gorunup 1,22 olmasi YANILTIR.
-                            kayip = kayip + ayar.kopru_kayip * yrd
-                            yrd_top += yrd.detach()
-                            yrd_say += 1
+            j = rs.randint(0, len(Xtr), ayar.batch)
+            xb = torch.from_numpy(Xtr[j]).to(DEV)
+            pb = torch.from_numpy(Ptr[j]).to(DEV)
+            tb = torch.from_numpy(Ttr[j]).to(DEV)
+            with torch.autocast(DEV, dtype=torch.float16,
+                                enabled=(DEV == "cuda")):
+                lg_tam = model(xb)
+                # xb.shape[0], ayar.batch DEGIL: ikisi burada esit ama bir
+                # varyasyon degisken batch kullanirsa `ayar.batch` sessizce
+                # yanlis satirlari secerdi.
+                # pb/tb artik (B, yuva). yuva=1 iken eski davranisla
+                # AYNI: tek pozisyon, tek hedef, ayni kayip.
+                _ar = torch.arange(xb.shape[0], device=DEV)[:, None]
+                lg = lg_tam[_ar, pb]                   # (B, yuva, V)
+                # `ana` HER ZAMAN hesaplanir: model_b6 ile KIYASLANABILIR
+                # olan sayi budur. tam_kayip acikken optimize edilen sey
+                # `ana` DEGIL, ama egriye ikisi de yazilir. (model_b8'de
+                # `kayip` sutunu kirlenmisti ve b6 ile kiyaslanamaz hale
+                # gelmisti -- ayni hataya dusmemek icin.)
+                ana = F.cross_entropy(
+                    lg.float().reshape(-1, lg.shape[-1]), tb.reshape(-1))
+                if ayar.tam_kayip:
+                    # DIL MODELI KAYBI: pozisyon t, X[t+1]'i tahmin eder.
+                    # PAD (=0) hedefleri atlanir; PAD dizinin yalniz
+                    # KUYRUGUNDA var, arasinda yok.
+                    kayip = F.cross_entropy(
+                        lg_tam[:, :-1].float().reshape(-1, lg_tam.shape[-1]),
+                        xb[:, 1:].reshape(-1), ignore_index=PAD)
+                    ana_top += ana.detach()
+                    ana_say += 1
+                else:
+                    kayip = ana
+                # --- YARDIMCI KOPRU KAYBI (kopru_kayip>0 ise) -----------
+                # kopru_kayip=0'da bu blok HIC calismaz -> eski kollar
+                # BIT DUZEYINDE ayni kalir.
+                if ayar.kopru_kayip > 0:
+                    kb = torch.from_numpy(KTR[j]).to(DEV)      # (B, nk)
+                    m = kb[:, 0] >= 0                          # 2hop satirlar
+                    if bool(m.any()):
+                        lgk = lg_tam[m][:, _KPT]               # (Bm, nk, V)
+                        yrd = F.cross_entropy(
+                            lgk.float().reshape(-1, lgk.shape[-1]),
+                            kb[m].reshape(-1))
+                        # ORTALAMA GECERLI SATIRLAR UZERINDE; ana kayip
+                        # BUTUN satirlarda ortalaniyor. Havuzun %82'si
+                        # 2hop, yani yardimci terimin FIILI agirligi
+                        # kopru_kayip'in ~1,22 KATI. Hata degil ama
+                        # "agirlik 1.0" gorunup 1,22 olmasi YANILTIR.
+                        kayip = kayip + ayar.kopru_kayip * yrd
+                        yrd_top += yrd.detach()
+                        yrd_say += 1
             kayip_top += kayip.detach()
             kayip_say += 1
             opt.zero_grad(set_to_none=True)
@@ -2079,30 +1889,14 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
                     r["kayip_yrd"] = float(yrd_top.item() / max(1, yrd_say))
                     r["kayip_ana"] = round(
                         r["kayip"] - ayar.kopru_kayip * r["kayip_yrd"], 6)
-                if ayar.tam_kayip and ana_say:
+                if ayar.tam_kayip:
                     # `kayip` = DIL MODELI kaybi (optimize edilen).
                     # `kayip_ana` = yalniz cevap yuvalari -- model_b6'nin
                     # `kayip` sutunuyla AYNI SEY, tek kiyaslanabilir sayi.
                     r["kayip_ana"] = round(
                         float(ana_top.item() / max(1, ana_say)), 6)
-                elif ayar.tam_kayip:
-                    # ODUL KIPINDE denetimli hat HIC kosmadi -> bu sutun
-                    # TANIMSIZ. 0.0 yazmak "kayip sifira dustu" diye
-                    # okunurdu; None yazilir ve rapor "---" basar.
-                    r["kayip_ana"] = None
-                if ayar.odul_ac and od_say:
-                    # ODUL IZLEME SUTUNLARI -- HUKUM DEGIL. Hukum `comp`
-                    # ve `ent` pencere okumasiyla verilir (onkayit
-                    # model_04.md 7). Bunlar "odul ne yapiyor" sorusunu
-                    # kosu SIRASINDA gorunur kilar.
-                    r["odul"] = round(od_top / od_say, 6)
-                    r["odul_ce"] = round(od_ce_top / max(1, od_ce_say), 6)
-                    for _k, _x in od_ayr.items():
-                        r["od_" + _k] = round(_x / od_say, 6)
                 kayip_top = torch.zeros((), device=DEV)
                 kayip_say = 0
-                od_top, od_say, od_ayr = 0.0, 0, {}
-                od_ce_top, od_ce_say = 0.0, 0
                 yrd_top = torch.zeros((), device=DEV)
                 yrd_say = 0
                 ana_top = torch.zeros((), device=DEV)
@@ -2161,5 +1955,5 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
 
 
 # NOT: `model_a.py` burada `AYAR = Ayar()` tanimlayip dogrudan
-# kosulabiliyordu. `taban_04` bir MOTOR; model_04'in ayari `ayar_04.py`de,
-# kosuyu baslatan `model_04.py`. Burada calistirilacak bir sey YOK.
+# kosulabiliyordu. `taban_03` bir MOTOR; model_03'in ayari `ayar_03.py`de,
+# kosuyu baslatan `model_03.py`. Burada calistirilacak bir sey YOK.
