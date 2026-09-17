@@ -1903,6 +1903,24 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
     yaz(f"=== {ayar.ad}  tohum {ayar.tohum} ===  cihaz {DEV}  cikti {alt}/")
     v = veri_kur(ayar, yaz)
     Xtr, Ptr, Ttr, kimlik, KPOZ, KTR = egitim_havuzu(ayar, v, yaz)
+    # --- HAVUZU GPU'YA AL (hiz) -----------------------------------------
+    # Yorunge DEGISMEZ (yukaridaki nota bak). Sigmazsa SESSIZCE CPU'da
+    # kalir -- hiz optimizasyonu bir kosuyu DUSURMEMELI.
+    _GPU_HAVUZ = None
+    if DEV == "cuda" and os.environ.get("GPU_HAVUZ", "1") != "0":
+        try:
+            _mb = (Xtr.nbytes + Ptr.nbytes + Ttr.nbytes) / 1e6
+            assert int(Xtr.max()) < 32767 and int(Ptr.max()) < 32767
+            _GPU_HAVUZ = (torch.from_numpy(Xtr.astype(np.int16)).to(DEV),
+                          torch.from_numpy(Ptr.astype(np.int16)).to(DEV),
+                          torch.from_numpy(Ttr.astype(np.int16)).to(DEV))
+            yaz(f"  HAVUZ GPU'DA: {sum(t.numel()*2 for t in _GPU_HAVUZ)/1e6:.1f} MB"
+                f" (int16; numpy'da {_mb:.1f} MB int64)")
+            yaz("     adim basina host->device KOPYA YOK. Yorunge DEGISMEZ:")
+            yaz("     batch indisleri AYNI numpy RNG'sinden geliyor.")
+        except Exception as _x:
+            yaz(f"  HAVUZ GPU'ya ALINAMADI ({type(_x).__name__}) -- CPU'da devam")
+            _GPU_HAVUZ = None
 
     L = olcme_listeleri(ayar, v)
     kod = {k: (kodla_1hop(v, L[k]) if k == "one" else kodla_2hop(v, L[k]))
@@ -2077,9 +2095,30 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
             # Beklenen gecis: adim*batch/len(Xtr) = 20000*512/51120 ~ 200,
             # ama Poisson sacilimli.
             j = rs.randint(0, len(Xtr), ayar.batch)
-            xb = torch.from_numpy(Xtr[j]).to(DEV)
-            pb = torch.from_numpy(Ptr[j]).to(DEV)
-            tb = torch.from_numpy(Ttr[j]).to(DEV)
+            # !! HAVUZ GPU'DA. Onceden her adimda numpy'da 512 satir
+            # secilip CPU'dan GPU'ya KOPYALANIYORDU. Olculdu: iki gercek
+            # kosudan t = a + b*T cozulunce (model_05 103,2 ms @ t_len 24,
+            # model_06 79,9 ms @ 17) SABIT GIDER a = 23,3 ms/adim cikiyor
+            # -- adimin %29'u, ve dizi uzunlugundan da model boyundan da
+            # BAGIMSIZ. 6,5M'lik bir model icin bu cok.
+            #
+            # Havuz int16'da 12 MB (vocab 292 sigar), T4'te 15.500 MB var.
+            # Tamami GPU'da durabilir; batch secimi bir GPU gather'i olur.
+            #
+            # YORUNGE DEGISMEZ: `j` hala AYNI numpy RNG'sinden geliyor,
+            # yani AYNI satirlar AYNI sirada. Degisen yalniz veriyi
+            # NEREDEN aldigimiz. `kos_06.py --hiz-dogrula` bunu bit
+            # duzeyinde siniyor.
+            if _GPU_HAVUZ is None:
+                xb = torch.from_numpy(Xtr[j]).to(DEV)
+                pb = torch.from_numpy(Ptr[j]).to(DEV)
+                tb = torch.from_numpy(Ttr[j]).to(DEV)
+            else:
+                _jg = torch.from_numpy(j).to(DEV)
+                _gx, _gp, _gt = _GPU_HAVUZ
+                xb = _gx[_jg].long()
+                pb = _gp[_jg].long()
+                tb = _gt[_jg].long()
             with torch.autocast(DEV, dtype=torch.float16,
                                 enabled=(DEV == "cuda")):
                 lg_tam = model(xb)
