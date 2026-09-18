@@ -1,0 +1,40 @@
+{
+ "ebeveyn": "model_08",
+ "not": "model_08'den kopyalandi (18 Eylul). Dosya adlari degismis, ICERIK degismemisti -- ayni kusur model_08 kopyalanirken de olmustu. 254 atif: 166 modul + 14 kod + 92 prose cevrildi.",
+ "kopya_durumu": "model_08/ YALNIZ DOSYA ADI kopyasi olarak gelmisti (18 Eylul sabahi): butun dosyalarin ICI `_08`di, `kos_09.py` model_08'in Drive klasorune YAZACAKTI. Kapi yakaladi, 254 atif elle cevrildi. AYNI GUN OGLEDEN SONRA kol EGITIM PARADIGMASINI degistirdi: satir tablosu -> paketlenmis metin, jeton semasi -> karakter. Asagidaki farklarin hepsi O DEGISIKLIK, ve hicbiri ebeveynden KAYBOLAN bir duzeltme degil -- silinenler model_08'in jeton semasina BAGLI olan kodlardi ve karakter duzeyinde karsiliklari YOK.",
+ "tasinanlar": [],
+ "beyan": {
+  "konus_09.py": "TASINMADI. Hala model_08'in jeton surumu; `TASINMADI=True` bayragi ve `_tasinmadi_kapisi()` eklendi, kosulunca DURUYOR ve sebebini soyluyor. Kosuya engel degil (okuma araci, egitim yolunda yok). Karakter surumu yazilinca bayrak dusecek ve test_09 §8 yeniden DAVRANIS sinayacak.",
+  "null_09.py": "kol numarasi varsayilani '08' -> '09' (ciplak dize, modul yeniden adlandirmasi yakalamadi).",
+  "test_09.py": "kol numarasi dizeleri -> '09'. Tarihsel atiflar KORUNDU. §4 'motor esdegerligi' -> 'BILDIRILMIS AYRISMA': sinanan sey artik YON -- SINAV ve GRAF izleri model_08 ile AYNI kalmali (cfafdcc15a23 / 3cd9a2575e47), EGITIM YOLU degismis olmali. §4b PUANLAMA KAPISI eklendi (sahte ciktiyla; alt-dizge tuzagi). §6 docstring sayilarini ASSERT'e tasidi. §7c'ye DEFTER BAYRAK KAPISI eklendi. §8 konus davranis kapilarindan BEYAN kapisina dondu.",
+  "taban_09.py": "MOTOR. 621 satir SILINDI, 2 blok yeniden yazildi. (1) KODLAYICILAR (_e/_cevap/kelimeler/_nin/_dir/_soru/_bildirim/kodla_1hop/kodla_2hop/kodla_fim/kodla_soru/kodla_kimlik_q1/kopru_hedefi, 453 satir): hepsi 'varlik = 3 jeton yuvasi, iliski = 1 atomik jeton' semasina bagliydi. (2) OLCU (dogruluk/ek_dogruluk/kisayol_orani, 138 satir): KISITLI argmax + teacher forcing; karakterde 'varlik jetonu blogu' yok. Yerine `korpus_09.havuz` ve `olcme_09` (serbest uretim, TAM ESLESME). `egitim_havuzu` (X, S) donduruyor; egitim adimi TEK kayipli (next-token). `Ayar.t_len` property -> ALAN; `kopya`/`tetik` eklendi. `surdurme_*` KORPUS IZI kapisi kazandi.",
+  "pencere_09.py": "BIRINCIL OKUMA. `fim_dogruluk` silindi (FIM cikti, kullanici karari 18 Eylul). `olc` KISITLI argmax yerine `olcme_09.olc` cagiriyor. `ek_*` / `soru_*` / `fim_*` ikincil tablolari dustu -- birincisi karakterde anlamsiz (ek zaten cevabin parcasi), ikincisi gereksiz (sinav ZATEN soru yuzeyinde), ucuncusu FIM'le birlikte gitti. Yerine YAKIN tablosu: varlik dogru, dizge tam degil.",
+  "tani_09.py": "ARIZA SEKLI. Yuva-kisitli argmax ayristirmasi (olc/ornek_bazli/uzunluga_gore/birim_teshisi/hedef_uzayi/iliski_karsilastir/zincir_testi) silindi; hepsi `v.yuva_ara` uzerine kuruluydu. Yerine dizge ONEKI ile ayristirma: DOGRU/YAKIN/KISAYOL/KOPRU/VARLIK_BASKA/VARLIK_DEGIL. En uzun onek ONCE denenir -- 48 varlik adi birbirinin alt-dizgesi (olculdu). BIYOGRAFI OKUMASI eklendi (recall/kesinlik/yeni_sira).",
+  "asama1_09.py": "DOGRUSAL SONDA. POZISYON TARAMASI dustu: model_08'de dizi 17 jetondu ve her pozisyon taraniyordu ('en iyi poz'); karakterde ~100 karakter var ve tek anlamli konum ONEGIN SONU. Sonda MANTIGI korundu -- (e,r1) ayrik bolme, taban = max(en_sik, kopya) -- ama hedef jeton yuvasi yerine ADIN KELIMELERI.",
+  "ayar_09.py": "bicim/fim_kat/soru_kat/kisayol_kat/ident_frac KAPATILDI: hepsini silinen satir tablosu okuyordu, korpus yolunda karsiliklari var (metin_09.BICIM, *_soru belgeleri, kimlik belgeleri) ama BU ALANLAR artik hicbir yerde okunmuyor -- deger birakmak ayar_t0.json'a YALAN yazardi. t_len/kopya/tetik eklendi. BUTCE yeniden turetildi: batch 512->32, adim 20.000->60.000, esit maruziyette (438 vs 442) ve L4'te DAHA KISA duvar saati. Esikler ADIM degil ORAN olarak tasindi (isinma %10, ort_bas %30, 10 olcum noktasi).",
+  "model_09.py": "SwiGLU 'ayni parametre' iddiasi YANLISTI (dis hakemlik, 18 Eylul): 540.672 vs 524.288 = %3,1 fazla, 8 katmanda +131.072. Duzeltildi ve 8/3 oraninin LLaMA'nin, 704'e yuvarlamanin BIZIM oldugu yazildi. `n_param` dedup sozlugu GEREKSIZDI (olculdu: iki yol da 6.443.008), kaldirildi; `bagli_ayri` secenegi eklendi. RoPE'un fp16'da dondugu ve bedelinin OLCULDUGU yazildi (gorelilik yayilimi fp32 4,0e-05, fp16 3,9e-03 -- skorun %0,025'i).",
+  "analiz_09.py": "TASINMADI. model_08'in JETON DOKUMU (v.vocab/v.par_ad/M.SPECIAL/kodla_*). Okunabilir dokum gorevini `dokum_09.py` devraldi; saglik denetimi kismi hala gecerli ama karakter surumu YAZILMADI. Kosuya engel degil.",
+  "egitim_dok_09.py": "TASINMADI. model_08'in egitim havuzu dokumu; havuz artik satir tablosu degil paketlenmis metin. Yerini `dokum_09.py` aldi.",
+  "havuz_09.py": "TASINMADI. model_08'in havuz denetimi; `egitim_havuzu` imzasi (X,P,T,kimlik,KPOZ,KTR) -> (X,S) degisti.",
+  "kayip_tabani_09.py": "TASINMADI. Havuzun kosullu entropisi jeton semasina bagliydi.",
+  "graf_09.py": "degismedi (graf izi 3cd9a2575e47 AYNI)."
+ },
+ "satir": {
+  "asama1_09.py": 340,
+  "ayar_09.py": 45,
+  "konus_09.py": 28,
+  "model_09.py": 5,
+  "null_09.py": 2,
+  "pencere_09.py": 156,
+  "taban_09.py": 843,
+  "tani_09.py": 289,
+  "test_09.py": 289
+ },
+ "yeni_dosya": {
+  "metin_09.py": "graf -> duz Turkce metin. model_08'de yon TERSTI (once jeton, metin ancak analiz.oku ile geri okunurdu).",
+  "jeton_09.py": "KARAKTER tokenizer. BPE olculdu ve ISE YARAMADI: korpusta 227.189 kelimenin yalniz 491 benzersizi var, vocab 1024 BPE `danismaninin`i TEK jetona birlestiriyor -- model_08'in atomik-iliski sorununu yeniden uretiyor.",
+  "korpus_09.py": "belge + paketleme (Physics 3.1 Ek C). Sizinti kapisi BELGEYE degil PENCEREYE bakiyor.",
+  "olcme_09.py": "SINAV: serbest uretim, TAM ESLESME. Puanlama modelden AYRI (`puanla`) ki sahte ciktiyla sinanabilsin.",
+  "dokum_09.py": "korpusun OKUNABILIR dokumu (00-08)."
+ }
+}
