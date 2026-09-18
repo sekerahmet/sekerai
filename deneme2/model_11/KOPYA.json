@@ -1,0 +1,20 @@
+{
+ "ebeveyn": "model_10",
+ "not": "model_10'dan kopyalandi (19 Eylul). KOD cevirisi TAM: modul adlari, import'lar, dosya yollari, basilan dizgeler ve IZ_11 sabiti. Bu kez PROSE DA cevrildi -- model_10'da prose'a dokunulmamisti ve kapi 306 satirlik bir 'beyanli fark' yigini uretmisti. Tek istisna korundu: `ayar_11.py:191` \"model_10 korpusu 9.133.886 jeton\" -- bu model_10 HAKKINDA OLCULMUS bir iddia; model_11 diye cevrilse YALAN olurdu.",
+ "kopya_durumu": "KOD cevirisi TAMAM. ICERIK DEGISIKLIGI HENUZ YAPILMADI -- model_11 su an model_10'un calisan ikizi. Asagidaki 'planlanan' maddeleri uygulanmadan KOSULMAMALI, yoksa model_10'u ikinci kez kosmus oluruz.",
+ "tasinanlar": [],
+ "planlanan": {
+  "ZINCIR KAPSAMASI -- ana mesele": "model_10 OLCTU: `v.tr2`de 29.510 egitim zinciri var, korpusa yalnizca %23,5'i YAZILDI. Slot sayisi 17.582, yani TAVAN %60; gercek %23,5 oldugu icin slotlarin %61'i ISRAF (bazi zincir iki kez yaziliyor, bazilari HIC). Ornekleme sayfa basina rastgele; kopyalar arasinda tekrar ediyor.",
+  "olcme_11.py / veri_11.py -- `seen` OLCUSU BOZUK": "`seen` sinavi `v.tr2`den orneklaniyor ama sorularinin %76,5'i korpusta HIC GECMIYOR. Yani 'egitimde gorulmus' diye olculen sey gorulmemis. TAVAN 0.235 -- `SAGLIK-EZBER seen >= 0.95` kapisi YAPISAL OLARAK GECILEMEZ. Iki yol: (a) sinavi yalnizca YAZILAN zincirlerden kur (olcme izi DEGISIR, model_09/10 kiyasi biter), (b) korpusu buyutup hepsini yaz.",
+  "taban_11.py -- DURUSTLUK ve TUTARLILIK `egit()` ICINE": "model_10'da ikisi de AYRI ARAC olarak yazildi ve rapor IKI PARCA kaldi. Kullanici: *\"niye 6 disinda ek bir rapor alani yaptin? butun kriterleri tek bir yerden gorsek\"*. Olcum `egit()`in olcum noktasina girmeli, `egri_*.json`a yazilmali. Maliyet ~%3 (ana sinav ~14.000 satir, durustluk 400).",
+  "olcme_11.py -- KV ONBELLEGI": "`uret()` her uretilen karakter icin TUM diziyi yeniden isliyor: 48 x 113 = 5.424 pozisyon, oysa 113 + 48 = 161 yeterli (~34 kat). Egitim suresini etkilemez (olcum kosunun %0,5'i) ama `konus_11` ile interaktif konusmada hissedilir.",
+  "ayar_11.py -- KORPUS_JETON YENIDEN OLCULECEK": "9.282.631 model_10'un sayisi. Korpus degisecegi icin yeniden olculmeli; `test_11` §4 zaten %2 toleransla denetliyor.",
+  "DIL BILGISI OLCUSU YOK": "`yakin` yalnizca CEVABIN ekini siniyor. Modelin SERBEST URETTIGI metnin dil bilgisi mekanik olarak HIC olculmuyor -- tek yol `konus_11 --panel` AKICILIK sondalarini gozle okumak. `metin_11.denetle` EGITIM metnini siniyor, modelin ciktisini DEGIL."
+ },
+ "beyan": {
+  "ayar_11.py": "TEK SATIR, BILEREK. `model_10 korpusu 9.133.886 jeton` -- bu model_10 HAKKINDA OLCULMUS bir iddia. Kor cevrilse `model_11 korpusu 9.133.886 jeton` olurdu ve model_11 henuz kosmadigi icin YALAN olurdu. Bu kolda ayni hata bir kez yasandi: toptan yeniden adlandirma `f4ce53fd1555 model_05 ile AYNI` satirini `model_08 ile AYNI`ya cevirmisti (model_08'in izi cfafdcc15a23). KOPYA KAPISI onu gorduyu icin duruyor."
+ },
+ "satir": {
+  "ayar_11.py": 1
+ }
+}

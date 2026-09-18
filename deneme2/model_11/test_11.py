@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""model_10 KILIDI -- "her seyden bagimsiz" iddiasi SINANIR.
+"""model_11 KILIDI -- "her seyden bagimsiz" iddiasi SINANIR.
 
 Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_09 folderi
 altinda olmali. model_09 diger hicbir model ile ayni seyi
@@ -7,11 +7,11 @@ kullanmamali."*
 
 Dort sey tutulur:
 
-  1. BAGIMSIZLIK  model_10/*.py icinde `model_a` / `model_b` /
+  1. BAGIMSIZLIK  model_11/*.py icinde `model_a` / `model_b` /
      `veri_okul*` / `pencere_a` import'u YOK. Statik taramayla.
   2. MIMARI       projenin hicbir ozelligi yok: dongu yok, Phi
      darbogazi yok, maske yok, yardimci kayip yok, miras yok.
-  3. VERI         `veri_10` KENDI iddialarini tutuyor: sema, soy
+  3. VERI         `veri_11` KENDI iddialarini tutuyor: sema, soy
                   agaci (cinsiyet/kusak/ensest), zincir siniflari,
                   turetilebilirlik, notrluk, cografya, IZ.
   4. MOTOR        `taban_09` ile `model_a` AYNI SEYI olcuyor:
@@ -67,8 +67,8 @@ def ok(kosul, ad, ek=""):
 
 
 # --- 0) BAGIMSIZLIK ------------------------------------------------------
-print("=== 0) BAGIMSIZLIK: model_10/ disariya BAGLI MI ===")
-# Metinde arama YAPMIYORUZ -- ilk denemem oyleydi ve `ayar_10.py`nin
+print("=== 0) BAGIMSIZLIK: model_11/ disariya BAGLI MI ===")
+# Metinde arama YAPMIYORUZ -- ilk denemem oyleydi ve `ayar_11.py`nin
 # DOCSTRING'inde gecen "from model_b15 import ..." cumlesini (kaldirilan
 # seyi ANLATAN cumleyi) import sandi. Dogrusu AST: yalnizca gercek
 # import dugumlerine bakilir.
@@ -103,12 +103,12 @@ for _f in sorted(x for x in os.listdir(_B) if x.endswith(".py")):
     _kotu = _disa_bagli(os.path.join(_B, _f))
     ok(not _kotu, f"{_f} paylasilan modul import ETMIYOR", str(_kotu))
 
-print("\n=== 1) model_10 MIMARISI ===")
-import taban_10 as M                                         # noqa: E402
-import model_10 as S                                         # noqa: E402
+print("\n=== 1) model_11 MIMARISI ===")
+import taban_11 as M                                         # noqa: E402
+import model_11 as S                                         # noqa: E402
 
 A = S.AYAR
-ok(S.M is M, "model_10 motoru taban_10", S.M.__name__)
+ok(S.M is M, "model_11 motoru taban_11", S.M.__name__)
 ok(A.dongu == 1, "dongu = 1 (DONGU YOK)", str(A.dongu))
 ok(A.l == 8, "l = 8 katman", str(A.l))
 ok(A.dar_alfa == 0.0 and not A.dar_kapi,
@@ -118,7 +118,7 @@ ok(A.mask_poz is None and not A.mask_blok, "MASKE YOK")
 ok(A.dff == 704, "d_ff 704 (8/3 * 256, 64'un kati)", str(A.dff))
 ok(A.d % A.nh == 0 and A.d // A.nh == 64, "head_dim 64", f"d={A.d} nh={A.nh}")
 ok(not issubclass(S.ModelSade, M.Model),
-   "ModelSade, taban_10.Model'den MIRAS ALMIYOR")
+   "ModelSade, taban_11.Model'den MIRAS ALMIYOR")
 ok(issubclass(S.ModelSade, nn.Module), "ModelSade bir nn.Module")
 
 v = M.veri_kur(A, yaz=lambda *a: None)
@@ -142,12 +142,12 @@ ok(_b0.w1.out_features == A.dff and _b0.w2.in_features == A.dff,
    "SwiGLU gizli boyutu d_ff")
 
 # --- 0b) KORPUS TEK YERDEN KURULUR -------------------------------------
-# `korpus_10.havuz` 10 parametre aliyor. `tani_10` / `asama1_10` /
-# `pencere_10` onu DOGRUDAN cagiriyordu ve 6'sini geciyordu -- kalan
+# `korpus_11.havuz` 10 parametre aliyor. `tani_11` / `asama1_11` /
+# `pencere_11` onu DOGRUDAN cagiriyordu ve 6'sini geciyordu -- kalan
 # dordu (`zincir_pay`, `n3`, `ret_pay`, `ret_tut`) VARSAYILANA dusuyordu.
 # `n3` egitimde 10.000, orada 0: okuma araclari EGITILEN KORPUSTAN BASKA
 # bir korpus kuruyordu ve hicbir sey bunu soylemiyordu. Tek kapi:
-# `KOR.havuz` yalniz `taban_10` icinden cagrilir.
+# `KOR.havuz` yalniz `taban_11` icinden cagrilir.
 # !! YORUM SATIRLARI ATILIR. Duzeltmenin kendi aciklamasi `KOR.havuz(`
 # yaziyor; kapi KODU taramali, DUZYAZIYI degil -- yoksa hatayi
 # anlatan yorum hatanin kendisi sayilirdi.
@@ -159,17 +159,17 @@ NL_ = chr(10)
 _kaynaklar = {os.path.basename(f): _kodsuz(io.open(f, encoding='utf-8').read())
               for f in glob.glob(os.path.join(_B, '*.py'))}
 _dogrudan = sorted(f for f, t in _kaynaklar.items()
-                   if f not in ('taban_10.py', 'korpus_10.py')
+                   if f not in ('taban_11.py', 'korpus_11.py')
                    and re.search(r'KOR\w*\.havuz\(', t))
 ok(not _dogrudan,
-   'korpus YALNIZ taban_10 icinden kurulur (ayardan turer)',
+   'korpus YALNIZ taban_11 icinden kurulur (ayardan turer)',
    str(_dogrudan))
 
 # --- 0c) CAGRILAN NITELIK GERCEKTEN VAR MI (statik) --------------------
 # !! BU KAPI GUNUN EN PAHALI HATA SINIFINI KAPATIYOR. Bir fonksiyon bir
 # dosyada yeniden adlandirilinca, onu CAGIRAN oteki dosya calisana kadar
 # sessiz kaliyor. Bugun uc kez oldu:
-#   KOR.biyografiler -> `sayfalar` oldu; `tani_10 --biyografi` (VARSAYILAN
+#   KOR.biyografiler -> `sayfalar` oldu; `tani_11 --biyografi` (VARSAYILAN
 #                       yol) her kosuda AttributeError ile duserdi
 #   MT.cumle(...,3,tip) -> imza degisti; sinav her halukarda duserdi
 #   _NL.null('09')     -> `veri_09` ariyordu, test CALISMA ZAMANINDA coktu
@@ -204,15 +204,15 @@ for _f in sorted(glob.glob(os.path.join(_B, '*.py'))):
 # TASINMAYAN BORCU -- acikca sayilir, susturulmaz.
 # Bu araclar HALA model_08'in JETON semasinda: `kelimeler`, `kodla_*`,
 # `BICIM` karakter surumunde YOK. Kosulurlarsa duserler ve bu BILINIYOR
-# (`konus_10.TASINMADI` ayni sebeple True). Liste KISALMALI, uzamamali:
+# (`konus_11.TASINMADI` ayni sebeple True). Liste KISALMALI, uzamamali:
 # sayi BUYURSE kapi duser.
 _BORC = {
-    'analiz_10.py': 3,       # M.kelimeler, M.kodla_1hop, M.kodla_2hop
-    'dokum_10.py': 4,        # K.biyografiler, MT.BICIM, MT.N_BICIM
-    'egitim_dok_10.py': 17,  # M.kodla_* ailesi
-    'graf_10.py': 1,         # M.kelimeler
-    'havuz_10.py': 1,        # M.kelimeler
-    # konus_10.py BORCTAN DUSTU (18 Eylul): karakter surumu yazildi,
+    'analiz_11.py': 3,       # M.kelimeler, M.kodla_1hop, M.kodla_2hop
+    'dokum_11.py': 4,        # K.biyografiler, MT.BICIM, MT.N_BICIM
+    'egitim_dok_11.py': 17,  # M.kodla_* ailesi
+    'graf_11.py': 1,         # M.kelimeler
+    'havuz_11.py': 1,        # M.kelimeler
+    # konus_11.py BORCTAN DUSTU (18 Eylul): karakter surumu yazildi,
     # 10 olu cagri kapandi. §8 artik BEYAN degil DAVRANIS siniyor.
 }
 _say = {}
@@ -238,7 +238,7 @@ ok(not _kapanan,
 # her sekil icin YENIDEN DERLER.
 # Kural: `_egit_ag` YALNIZ egitim ileri gecisinde; `state_dict`,
 # `parameters` ve olcum HAM `model`den.
-_tb = _kodsuz(io.open(os.path.join(_B, 'taban_10.py'),
+_tb = _kodsuz(io.open(os.path.join(_B, 'taban_11.py'),
                       encoding='utf-8').read())
 _kot2 = [l.strip() for l in _tb.split(NL_)
          if '_egit_ag' in l and ('state_dict' in l or 'parameters(' in l)]
@@ -251,7 +251,7 @@ ok('torch.cuda.is_bf16_supported()' in _tb,
    '0d bf16 DONANIM KAPISI var (T4 destekLEMEZ)')
 
 # --- 1b) OKUMA ARACLARININ MODELDEN ISTEDIGI YUZEY ----------------------
-# KUSUR (16 Eylul hakemligi): `asama1_10.gizli()` ileri gecisi ELLE
+# KUSUR (16 Eylul hakemligi): `asama1_11.gizli()` ileri gecisi ELLE
 # kuruyordu -- `net1.emb + net1.pos` ve TEK argumanli `blk(h)`. Ikisi de
 # `model_a.Model`e ozgu; ModelSade'de `.pos` YOK (RoPE var) ve
 # `Blok.forward` UC argumanli. DOGRUSAL SONDA, yani bu kolun onkayitta
@@ -267,15 +267,15 @@ with torch.no_grad():
        str(tuple(_g.shape)))
     ok(torch.allclose(net(_gx), net.head(_g), atol=0),
        "forward() == head(govde()) -- sonda modelin GERCEK hesabini goruyor")
-import asama1_10 as A1                                      # noqa: E402
-import olcme_10 as OLC                                      # noqa: E402
-import veri_10 as V00                                       # noqa: E402
+import asama1_11 as A1                                      # noqa: E402
+import olcme_11 as OLC                                      # noqa: E402
+import veri_11 as V00                                       # noqa: E402
 _lst = v.comp[:8]
 # !! MODELI M.DEV'E TASI. `gizli()` girdiyi `.to(M.DEV)` ediyor; model
 # CPU'da kalirsa GPU'lu makinede "index is on cuda:0, other tensors on
 # cpu" ile duser. ILK YAZIMDA BU EKSIKTI ve yerelde (DEV="cpu") FARK
 # EDILMEDI -- kusur Colab'da, kilidin ilk GPU kosusunda cikti.
-# Gercek kullanimda `asama1_10.main` modeli zaten `.to(M.DEV)` ediyor;
+# Gercek kullanimda `asama1_11.main` modeli zaten `.to(M.DEV)` ediyor;
 # yani hata ARACIN degil, BU TESTIN hatasiydi. Sonra CPU'ya geri
 # aliniyor: asagidaki bolumler CPU tensorleriyle devam ediyor.
 try:
@@ -284,7 +284,7 @@ try:
     _net63 = S.ModelSade(A, _Sh.vocab).to(M.DEV)
     _svh = OLC.Sinav(_Sh, v, V00.kur(A.veri_tohum), _lst, 2, "comp")
     _q = A1.gizli(_net63, _svh)
-    ok(_q.shape == (8, A.d), "asama1_10.gizli() KOSUYOR (DOGRUSAL SONDA yolu)",
+    ok(_q.shape == (8, A.d), "asama1_11.gizli() KOSUYOR (DOGRUSAL SONDA yolu)",
        f"{_q.shape} cihaz {M.DEV}")
     # ONEGIN SON KONUMU -- sabit bir poz DEGIL. Oneklerin uzunlugu
     # farkli ("...kimdir? " vs "...neresidir? "), yani sabit poz
@@ -293,7 +293,7 @@ try:
        "onek uzunlugu SATIRDAN SATIRA degisiyor -- sabit poz OLMAZ",
        f"{sorted(set(_svh.bas.tolist()))[:4]}...")
 except Exception as _e:                                      # noqa: BLE001
-    ok(False, "asama1_10.gizli() KOSUYOR (DOGRUSAL SONDA yolu)",
+    ok(False, "asama1_11.gizli() KOSUYOR (DOGRUSAL SONDA yolu)",
        f"{type(_e).__name__}: {_e}")
 finally:
     net.to("cpu")
@@ -331,21 +331,21 @@ ok(not torch.allclose(l1[0, -1], l2[0, -1], atol=1e-5),
    "RoPE POZISYONA duyarli (onekteki takas SON ciktiyi degistiriyor)",
    f"en buyuk fark {(l1[0,-1]-l2[0,-1]).abs().max():.3e}")
 
-# --- 3) VERI: veri_10'in KENDI IDDIALARI --------------------------------
+# --- 3) VERI: veri_11'in KENDI IDDIALARI --------------------------------
 # !! model_03'ten DEVRALINAN "kopya == orijinal" TESTI KALDIRILDI.
 # Orada `veri_03` bir KOPYAYDI (icerigi `veri_okul4` ile birebir) ve test
-# kopyanin kaymadigini siniyordu. `veri_10` KOPYA DEGIL: yeni sema, yeni
+# kopyanin kaymadigini siniyordu. `veri_11` KOPYA DEGIL: yeni sema, yeni
 # tipler, gercek soy agaci, gercek cografya. Kiyaslanacak bir ORIJINAL
 # YOK. O yuzden test artik verinin KENDI IDDIALARINI siniyor -- ve o
 # iddialarin cogu `veri_04`te TUTMUYORDU ("Fatma'nin annesi Huseyin").
-print("\n=== 3) VERI: veri_10 KENDI IDDIALARINI tutuyor mu ===")
-import veri_10 as V00                                        # noqa: E402
+print("\n=== 3) VERI: veri_11 KENDI IDDIALARINI tutuyor mu ===")
+import veri_11 as V00                                        # noqa: E402
 
-ok(A.veri_ad == "veri_10", "BU KOL KENDI veri modulunu okur", A.veri_ad)
+ok(A.veri_ad == "veri_11", "BU KOL KENDI veri modulunu okur", A.veri_ad)
 _G0 = V00.kur(0)
 E05 = [x for t in V00.TIPLER for x in _G0["ad"][t]]
 _z = V00.zincirler(_G0)
-ok(V00.graf_izi(_G0) == V00.IZ, "graf izi veri_10.IZ ile TUTUYOR", V00.IZ)
+ok(V00.graf_izi(_G0) == V00.IZ, "graf izi veri_11.IZ ile TUTUYOR", V00.IZ)
 ok(V00.graf_izi(V00.kur(0)) == V00.IZ, "IZ ikinci kurulusta da AYNI")
 ok(set(_G0["ad"]) == set(V00.TIPLER), "ad sozlugu TIPLER'i tam kapsiyor",
    f"{len(V00.TIPLER)} tip, {sum(_G0['n'].values())} varlik")
@@ -435,12 +435,12 @@ ok(all(_G0["olgu"][(s, "bolgesi")] == V00.SEHIR_BOLGE[s] + "_Bolgesi"
    "sehir -> bolge GERCEK cografya (rastgele DEGIL)")
 
 # --- 3j) METIN DENETIMI: her iliski x her kalip TURKCE mi --------------
-# !! `metin_10.denetle` KOPYALAMADA DUSMUSTU ve KOPYA KAPISI gosterdi
+# !! `metin_11.denetle` KOPYALAMADA DUSMUSTU ve KOPYA KAPISI gosterdi
 # (kullanici: *"diff calistirip bakmadin mi?"*). Geri getirildi, ve ILK
 # KOSUSUNDA bir kusur buldu: BILDIRIM kalibi 5 Turkce degildi
 # ("Kardesidir, Ahmet Aydin'in Elif Aydin."). Buraya bagli ki bir daha
 # sessizce dusmesin -- 600 cumlenin hepsi HER KOSUDA uretilip sinaniyor.
-import metin_10 as MT10                                          # noqa: E402
+import metin_11 as MT10                                          # noqa: E402
 _orn = MT10.denetle(0, yaz=lambda *a, **k: None)
 ok(len(_orn) == len(V00.ILISKI),
    f"3j her iliskiden SINAV cumlesi uretiliyor ({len(_orn)}/{len(V00.ILISKI)})")
@@ -454,8 +454,8 @@ ok(len(_orn) == len(V00.ILISKI),
 #     "Tezin danismani olmaz."    en standart bag
 # Modele DURUSTLUK ogretirken YALAN ogretecektik. Hicbir sayisal kapi
 # bunu gostermedi -- METNI OKUMAK gosterdi. Kapi metni okuyor.
-import korpus_10 as KOR10                                        # noqa: E402
-import metin_10 as MT10                                          # noqa: E402
+import korpus_11 as KOR10                                        # noqa: E402
+import metin_11 as MT10                                          # noqa: E402
 
 _red = [x for b in KOR10.reddetme_belgeleri(None, _G0, 600, tohum=0,
                                             yaz=lambda *a, **k: None)
@@ -509,11 +509,11 @@ ok(V00.N_IMKANSIZ < _tum,
    f"3h-E IMKANSIZ ELLE secilmis ({V00.N_IMKANSIZ} < {_tum} sema disi)")
 
 # --- 3i) RET SEZGISI: `ret_mi` KOKLERI dogru mu -----------------------
-# `olcme_10.RET_KOK` bes kok iceriyor ve DURUSTLUK olcusunun tamami ona
+# `olcme_11.RET_KOK` bes kok iceriyor ve DURUSTLUK olcusunun tamami ona
 # dayaniyor. Kok listesi YANLISSA olcum sessizce bozulur: eksik kok ->
 # dogru ret DUSUK gorunur; fazla kok -> olgu cumlesi "ret" sayilir ve
 # kacamak SISER. O yuzden liste GERCEK KORPUSA karsi sinanir.
-import olcme_10 as OLC10                                          # noqa: E402
+import olcme_11 as OLC10                                          # noqa: E402
 
 _rc = [x for b in KOR10.reddetme_belgeleri(
        None, _G0, 400, tohum=1, bolme=KOR10.reddetme_bolme(_G0, 0.2, 1),
@@ -564,8 +564,8 @@ for _ad, _boz in (
 #     gelen her kolda IndexError veriyordu -- model_b15'in verisi bu
 #     yuzden hic dokulmemisti.
 sys.path.insert(0, _B)
-import analiz_10 as AZ                                       # noqa: E402
-_d = AZ.Dok("model_10")
+import analiz_11 as AZ                                       # noqa: E402
+_d = AZ.Dok("model_11")
 _ekler = [_d.jeton_ad(i) for i in range(_d.v.ek0, _d.v.vocab)]
 # ek_kip="tr2": <SI> YOK (iliski kendi iyelik ekini tasiyor),
 # yerine SORU SOZCUKLERI var. Kullanici karari, 17 Eylul.
@@ -582,7 +582,7 @@ _ekler = [_d.jeton_ad(i) for i in range(_d.v.ek0, _d.v.vocab)]
 _bek = (["'"] + list(V00.EK_NIN) + list(V00.EK_DIR)
         + sorted(set(V00.SORU_SOZ.values()))
         + ["<BOS>", "<AYIR>", ","])
-ok(_ekler == _bek, "analiz_10.jeton_ad EK JETONLARINI adlandiriyor",
+ok(_ekler == _bek, "analiz_11.jeton_ad EK JETONLARINI adlandiriyor",
    f"{len(_ekler)} jeton")
 ok(_d.v.vocab - _d.v.ek0 == 23, "ek blogu 20 -> 23 jeton (BOSLUK + virgul)",
    f"{_d.v.vocab - _d.v.ek0}")
@@ -612,7 +612,7 @@ ok(V00.EK_NIN[_es["nin_iliski"]["kardesi"]] == "nin"
 for _g in ("kur", "zincirler", "TIPLER", "ILISKI", "SEMA", "GEREKTIRIR",
            "BLOK", "turetilebilir", "graf_izi", "IZ", "sizinti",
            "SEHIR_BOLGE", "yuzey"):
-    ok(hasattr(V00, _g), f"veri_10.{_g} var (sozlesme)")
+    ok(hasattr(V00, _g), f"veri_11.{_g} var (sozlesme)")
 
 # `model_a` / `model_b15` YALNIZ BU KILIT icin yukleniyor -- bu bolum
 # motorun eski aileyle AYNI SEYI olctugunu siniyor, kosuda kullanilmaz.
@@ -623,12 +623,12 @@ sys.path.insert(0, os.path.join(_K, 'model_a'))
 sys.path.insert(0, os.path.join(_K, 'model_b'))
 
 # --- 4) MOTOR: taban_09 ile model_a AYNI SEYI mi olcuyor ----------------
-print("\n" + "=== 4) BILDIRILMIS AYRISMA: model_10 <-> model_09 ===")
+print("\n" + "=== 4) BILDIRILMIS AYRISMA: model_11 <-> model_09 ===")
 import model_a as MA                                         # noqa: E402
-import metin_10 as MT                                        # noqa: E402
-import olcme_10 as OLC                                       # noqa: E402
-from ayar_10 import GOREV_ALAN                               # noqa: E402
-import ayar_10 as AY10                                       # noqa: E402
+import metin_11 as MT                                        # noqa: E402
+import olcme_11 as OLC                                       # noqa: E402
+from ayar_11 import GOREV_ALAN                               # noqa: E402
+import ayar_11 as AY10                                       # noqa: E402
 from model_b15 import AYAR as B15    # §5 RECETE KIYASI icin          # noqa: E402
 
 # model_09 model_08'in KOPYASI olarak dogdu ve EGITIM PARADIGMASINI
@@ -680,7 +680,7 @@ ok(not any(hasattr(M, x) for x in
            ("kodla_1hop", "kodla_2hop", "kodla_fim", "kopru_hedefi")),
    "model_08'in KODLAYICILARI silindi (jeton semasi yok)")
 ok(not hasattr(M, "dogruluk") and not hasattr(M, "kisayol_orani"),
-   "KISITLI ARGMAX olcusu silindi -- yerine olcme_10 SERBEST URETIM")
+   "KISITLI ARGMAX olcusu silindi -- yerine olcme_11 SERBEST URETIM")
 _hav = M.egitim_havuzu(A, v, yaz=lambda *a: None)
 ok(isinstance(_hav, tuple) and len(_hav) == 2,
    "egitim_havuzu (X, S) donduruyor -- P/T/kimlik/KPOZ/KTR YOK",
@@ -710,7 +710,7 @@ ok(len(S0.korpus_izi) == 12, "KORPUS IZI kuruldu", S0.korpus_izi)
 _jeton = int((X0 != 0).sum())
 _gecis = A.batch * A.t_len * A.adim / _jeton
 ok(abs(_jeton - AY10.KORPUS_JETON) / AY10.KORPUS_JETON < 0.02,
-   "ayar_10.KORPUS_JETON gercek korpusa UYUYOR -- butce ondan turuyor",
+   "ayar_11.KORPUS_JETON gercek korpusa UYUYOR -- butce ondan turuyor",
    f"olculen {_jeton:,} / yazili {AY10.KORPUS_JETON:,}")
 ok(30 < _gecis < 40,
    "ilk kosu 30..40 epok (Muennighoff 2305.16264: 44 epok BASARISIZ rejim)",
@@ -742,7 +742,7 @@ print("\n" + "=== 4b) PUANLAMA KAPISI: sahte ciktiyla ===")
 #
 # Kusur ancak 20.000 adimlik kosudan SONRA, sayilar "biraz tuhaf"
 # gorununce fark edilirdi. Puanlama bu yuzden modelden AYRILDI
-# (`olcme_10.puanla`) ve burada SAHTE CIKTIYLA sinaniyor.
+# (`olcme_11.puanla`) ve burada SAHTE CIKTIYLA sinaniyor.
 _BEK = ["Sirnak'tir.", "Sirnak'tir.", "Sirnak'tir.", "Aydin'dir.",
         "Aydin'dir.", "Onur Demir'dir."]
 _CEV = ["Sirnak", "Sirnak", "Sirnak", "Aydin", "Aydin", "Onur Demir"]
@@ -806,9 +806,9 @@ ok(not OLC.yeni_siralama((3,), _EGT),
 # --- 5) STANDART TARIF -- DEVRALINMAYANLAR ------------------------------
 print("\n=== 5) STANDART TARIF ===")
 # !! BU KILIT GEVSETILMEDI, HEDEFI DEGISTI (CLAUDE.md'deki wd=0.5
-# emsali). model_10..model_07'de `ort_bas == 0` bekleniyordu: "standart
+# emsali). model_11..model_07'de `ort_bas == 0` bekleniyordu: "standart
 # tarif, projeye ozgu ne varsa KAPALI". model_09'de geri beslemeli
-# ortalama BU KOLUN DUGMESI (onkayit belge/onkayit/model_10.md), o
+# ortalama BU KOLUN DUGMESI (onkayit belge/onkayit/model_11.md), o
 # yuzden kilit artik ACIK olmasini ve DOGRU DEGERDE olmasini bekliyor.
 # !! ESIKLER ADIM DEGIL **ORAN** olarak sinaniyor (18 Eylul). Butce
 # 20.000 -> 60.000'e cikinca (esit maruziyetin cozumu) mutlak 6000
@@ -861,7 +861,7 @@ ok(net.n_param() > 6_000_000, "6M+ parametre (model_b15 3,23M)",
    f"{net.n_param():,}")
 # !! SAYILAR DOCSTRING'DE DEGIL BURADA (dis hakemlik, 18 Eylul:
 # "sayilar docstring'de degil testte olmali -- orada CURUR").
-# Asagidakilerin hepsi `model_10.py` basindaki tabloda YAZILI; yazili
+# Asagidakilerin hepsi `model_11.py` basindaki tabloda YAZILI; yazili
 # olan ile HESAPLANAN ayrilirsa bu satirlar duser.
 _sw = 3 * A.d * A.dff
 _gl = 2 * A.d * 4 * A.d
@@ -925,19 +925,19 @@ ok(max(_p16) - min(_p16) < 1e-2,
 # --- 7) MODUL SOZLESMESI -------------------------------------------------
 print("\n=== 7) SOZLESME ===")
 for g in ("AYAR", "egit", "fark_bas", "ModelSade", "TABAN"):
-    ok(hasattr(S, g), f"model_10.{g} var", "kos_10.py duser")
+    ok(hasattr(S, g), f"model_11.{g} var", "kos_11.py duser")
 # !! `sor_08` LISTEDEN CIKTI (18 Eylul, kullanici dosyayi SILDI:
 # *"sor py sacma olmustu"*). O arac soruyu kendi cozumluyor, diziyi
 # `kodla_1hop` ile KENDI kuruyor ve modele yalniz cevap yuvalarini
 # sorduruyordu -- yani ekranda gorulen sey modelin dil uretimi DEGILDI.
 # Yerini `konus_09` aldi: kisit yok, model kendi yazdigini okur.
-for ad in ("veri_10", "taban_10", "ayar_10", "pencere_10", "tani_10",
-           "asama1_10", "kos_10", "konus_10"):
+for ad in ("veri_11", "taban_11", "ayar_11", "pencere_11", "tani_11",
+           "asama1_11", "kos_11", "konus_11"):
     _r2 = subprocess.run(
         [sys.executable, "-c",
          f"import sys; sys.path.insert(0, {_B!r}); import {ad}"],
         capture_output=True, text=True, cwd=_B)
-    ok(_r2.returncode == 0, f"{ad} TEK BASINA import (yalniz model_10/)",
+    ok(_r2.returncode == 0, f"{ad} TEK BASINA import (yalniz model_11/)",
        _r2.stderr.strip()[-200:])
 
 # --- 8) KOPYALAMADA KAYBOLAN DUZELTMELER ---------------------------------
@@ -965,7 +965,7 @@ for ad in ("veri_10", "taban_10", "ayar_10", "pencere_10", "tani_10",
 #                 67'si yolunu o kenarlardan geciriyordu.
 #
 # !! O KUSUR BU DOSYANIN 175 DENETIMINDEN GECMISTI. Ucu de artik
-# `taban_10.veri_kur` icinde assert'le kapali; burasi BAGIMSIZ olarak
+# `taban_11.veri_kur` icinde assert'le kapali; burasi BAGIMSIZ olarak
 # yeniden turetiyor -- kapi ile denetim AYNI KODDAN gelmesin.
 print("\n=== 7b) KISA YOL TUTULAN VERIYE DOKUNUYOR MU ===")
 _ky = {r: y for r, y in M.KISAYOL_YOLU}
@@ -998,8 +998,8 @@ ok(len(v.kisayol) > 0, "kisa yol satiri URETILIYOR (kapilar hepsini yemedi)",
 # --- 7c) DEFTER KAPISI -----------------------------------------------
 # !! BU BOLUM DE BIR KUSURDAN DOGDU (18 Eylul). Veri gun icinde uc kez
 # degisti ve her seferinde `olcme_izi` yenilendi; ama defterdeki
-# `IZ_10` ELLE YAZILI bir sabit ve kimse onu denetlemiyordu. Defter
-# eski izle kaldi -- 7. hucredeki `assert _iz == IZ_10` KOSUYU
+# `IZ_11` ELLE YAZILI bir sabit ve kimse onu denetlemiyordu. Defter
+# eski izle kaldi -- 7. hucredeki `assert _iz == IZ_11` KOSUYU
 # ORTASINDA DUSURECEKTI, ve bu ancak GPU saati harcandiktan sonra
 # gorulecekti.
 #
@@ -1015,11 +1015,11 @@ else:
     _nb = _json.load(_io.open(_nbY, encoding="utf-8"))
     _src = "".join("".join(c["source"]) for c in _nb["cells"])
     _iz_ger = M.olcme_izi(M.olcme_listeleri(A, v))
-    _m = _re.search(r'IZ_10\s*=\s*"([0-9a-f]+)"', _src)
-    ok(_m is not None, "defterde IZ_10 tanimli")
+    _m = _re.search(r'IZ_11\s*=\s*"([0-9a-f]+)"', _src)
+    ok(_m is not None, "defterde IZ_11 tanimli")
     if _m:
         ok(_m.group(1) == _iz_ger,
-           "defterdeki IZ_10 = GERCEK olcme izi",
+           "defterdeki IZ_11 = GERCEK olcme izi",
            f"defter {_m.group(1)}  veri {_iz_ger}")
     # KIYAS: ya BOS ya da SATIRLARI bu sinavdan. Bos degilse EN AZINDAN
     # eski izleri ANMAMALI.
@@ -1033,7 +1033,7 @@ else:
     ok(V00.IZ in _src, "defter GUNCEL graf izini aniyor", V00.IZ)
 
     # !! DEFTERIN KENDI AYAR KILITLERI. 3. hucre `assert M.AYAR.X == Y`
-    # diye onlarca kilit tasiyor ve bunlar `ayar_10.py`nin KOPYASI --
+    # diye onlarca kilit tasiyor ve bunlar `ayar_11.py`nin KOPYASI --
     # yani ayar degisince SESSIZCE eskiyor.
     #
     # OLDU (18 Eylul): kolun dugmesi `ort_bas` 0 -> 6000 oldu, `test_09`
@@ -1054,7 +1054,7 @@ else:
             continue                       # `a == b == c` zinciri
         if _d != getattr(A, _al):
             _kot.append((_al, f"defter {_bek} != ayar {getattr(A, _al)}"))
-    ok(not _kot, f"defterin {len(_kilit)} AYAR kilidi ayar_10 ile TUTUYOR",
+    ok(not _kot, f"defterin {len(_kilit)} AYAR kilidi ayar_11 ile TUTUYOR",
        str(_kot))
     ok(len(_kilit) >= 20,
        "defter 3. hucresi AYAR kilitlerini hala tasiyor (silinmemis)",
@@ -1072,9 +1072,9 @@ else:
     # satirindan bayraklar cikarilir, aracin `add_argument`larindan
     # tanimlar cikarilir, fark bakilir. Arac yeniden yazilinca defter
     # SESSIZ kalamaz.
-    _ARAC = {"PENCERE": "pencere_10.py", "ASAMA1": "asama1_10.py",
-             "TANI": "tani_10.py", "ANALIZ": "analiz_10.py",
-             "NULL": "null_10.py", "KONUS": "konus_10.py"}
+    _ARAC = {"PENCERE": "pencere_11.py", "ASAMA1": "asama1_11.py",
+             "TANI": "tani_11.py", "ANALIZ": "analiz_11.py",
+             "NULL": "null_11.py", "KONUS": "konus_11.py"}
     _kotu = []
     for _sat in _src.split(chr(10)):
         _t = _sat.strip()
@@ -1109,9 +1109,9 @@ else:
 # DONUS zincirleri KOPYA ile cozulur -- ikisi de saglik kapisi, hukum
 # bolmesi degil.
 print("\n=== 7d) NULL TABANI ===")
-import null_10 as _NL                                       # noqa: E402
+import null_11 as _NL                                       # noqa: E402
 # !! KOL NUMARASI KLASORDEN. Elle yazili "09" burada duruyordu ve
-# `veri_09` modulunu ariyordu -- model_10 klasorunde YOK, test
+# `veri_09` modulunu ariyordu -- model_11 klasorunde YOK, test
 # CALISMA ZAMANINDA coktu ve arkasindaki §7e HIC KOSMADI.
 _kol_no = os.path.basename(_B).split("_")[-1]
 _nl = _NL.null(_kol_no, yaz=lambda *a, **k: None, v=v)
@@ -1145,7 +1145,7 @@ ok(set(_nl) >= {"comp", "ent", "ent_yok"},
 print("\n=== 7e) KOL NUMARASI KAPISI ===")
 import glob as _glob, io as _io2, re as _re2                 # noqa: E402
 # !! ELLE YAZILMAZ, KLASORDEN TURER. Onceki hali `_KOL = "09"` idi:
-# yani model_10 klasorunde kapi "09"u DOGRU kol sayiyor, "10"u YABANCI
+# yani model_11 klasorunde kapi "09"u DOGRU kol sayiyor, "10"u YABANCI
 # sayiyordu -- tam TERSINE calisiyordu. Kapinin kendisi kopyalanirken
 # eskimisti ve bunu gorecek bir sey yoktu.
 _KOL = os.path.basename(_B).split("_")[-1]
@@ -1161,7 +1161,7 @@ assert _KOL.isdigit(), f"kol numarasi klasorden okunamadi: {_B}"
 # kor yeniden adlandirmanin ureteceği cumleler bu listede OLMAZ.
 #
 # Ve bu cumleler KENDI KENDINI DENETLIYOR: `IZ_08_OLCME` sabiti canli
-# degerle karsilastiriliyor. `veri_10` degisirse assert DUSER -- yani
+# degerle karsilastiriliyor. `veri_11` degisirse assert DUSER -- yani
 # cumle eskirse sessiz kalmiyor.
 _GECMIS_MSJ = ("model_b15", "model_05'ten KUCUK", "model_a ",
                "model_08 ile AYNI",
@@ -1174,7 +1174,7 @@ _GECMIS_MSJ = ("model_b15", "model_05'ten KUCUK", "model_a ",
                "model_08'inkine (442) ESIT",
                # §4 BASLIGI: bu bolum gercekten model_09 ile kiyas
                # yapiyor, "model_09" burada KOPYA ARTIGI degil KONU.
-               "BILDIRILMIS AYRISMA: model_10 <-> model_09")
+               "BILDIRILMIS AYRISMA: model_11 <-> model_09")
 _kot = []
 for _f in sorted(_glob.glob(os.path.join(_B, "test_*.py"))):
     for _i, _l in enumerate(_io2.open(_f, encoding="utf-8"), 1):
@@ -1193,9 +1193,9 @@ ok(not _kot,
    "test MESAJLARI BASKA bir kol numarasi ANMIYOR",
    f"{len(_kot)} mesaj: {_kot[:3]}")
 
-print("\n=== 8) KONUS_10 DAVRANISI ===")
+print("\n=== 8) KONUS_11 DAVRANISI ===")
 import io                                                    # noqa: E402
-import konus_10 as _K                                        # noqa: E402
+import konus_11 as _K                                        # noqa: E402
 
 # !! BU BOLUM UC KEZ HEDEF DEGISTIRDI ve ucu de KAYITLI.
 #   1. model_08'de 108 satirdi, JETON surumunu siniyordu (`sinav_coz`,
@@ -1207,25 +1207,25 @@ import konus_10 as _K                                        # noqa: E402
 #   3. 18 Eylul: karakter surumu yazildi, bayrak DUSTU. Not tutuldu --
 #      bu bolum artik DAVRANIS siniyor.
 ok(not getattr(_K, "TASINMADI", False),
-   "konus_10 TASINDI (karakter surumu)",
+   "konus_11 TASINDI (karakter surumu)",
    "bayrak hala True ise arac KOSMAZ ve bu bolum BEYAN kapisina doner")
 ok(not hasattr(_K, "_tasinmadi_kapisi"),
    "tasinma kapisi KALDIRILDI -- arac artik gercekten kosuyor")
 for _g in ("yukle", "sor", "panel", "panel_sorulari"):
-    ok(hasattr(_K, _g), f"konus_10.{_g} var (sozlesme)")
+    ok(hasattr(_K, _g), f"konus_11.{_g} var (sozlesme)")
 
 # --- URETIM SINAVIN KODUYLA AYNI OLMALI ------------------------------
 # Ayri bir uretim yolu yazilsaydi "konusta boyle diyor ama sinavda
 # baska" diye bir ayrisma dogardi ve hangisinin dogru oldugu
 # bilinemezdi. KAYNAK taranir, docstring degil.
-_ks = io.open(os.path.join(_B, "konus_10.py"), encoding="utf-8").read()
+_ks = io.open(os.path.join(_B, "konus_11.py"), encoding="utf-8").read()
 ok("OLC.uret(" in _ks,
-   "konus_10 SINAVIN uretim kodunu kullaniyor (olcme_10.uret)")
+   "konus_11 SINAVIN uretim kodunu kullaniyor (olcme_11.uret)")
 ok("M.egitim_havuzu(" in _ks,
-   "konus_10 korpusu AYARDAN kuruyor (§0b ile ayni kural)")
+   "konus_11 korpusu AYARDAN kuruyor (§0b ile ayni kural)")
 
 # --- NITELIK PANELI: 12 SONDA, DORT BOYUT ----------------------------
-# Onkayit model_10.md §4. Sorular GRAFTAN uretiliyor; elle yazilsaydi
+# Onkayit model_11.md §4. Sorular GRAFTAN uretiliyor; elle yazilsaydi
 # veri degisince "eski soruyu yeni veriye sormak" kusuru dogardi.
 _P = _K.panel_sorulari(_G0)
 ok(len(_P) == 12, f"panel 12 sonda ({len(_P)})")

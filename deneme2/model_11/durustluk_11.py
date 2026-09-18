@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""durustluk_10 — model "yok" diyebiliyor mu, ve YANLIS YERE diyor mu?
+"""durustluk_11 — model "yok" diyebiliyor mu, ve YANLIS YERE diyor mu?
 
-    python durustluk_10.py <kosu klasoru> [--adim N] [--ornek 12]
+    python durustluk_11.py <kosu klasoru> [--adim N] [--ornek 12]
 
 Kullanici karari, 18 Eylul: *"evet bunlari genisletebiliriz. cunku bir
 yapay zeka modelinin bilmiyorum demesi bir yenilik olabilir. yok demesi.
@@ -19,7 +19,7 @@ DOKUM her zaman yanindadir.
 cikar; `kacamak` olmadan bu basari gibi gorunur. Ikisi BIRLIKTE okunur.
 
 !! SINAV TUTULAN VERIDEN. Sorulan uydurma ad ve (tip, iliski) cifti
-egitim reddetmelerinde HIC gecmez (`korpus_10.reddetme_bolme`,
+egitim reddetmelerinde HIC gecmez (`korpus_11.reddetme_bolme`,
 `ret_tut`). Gordugunu reddetmek EZBER, gormedigini reddetmek
 GENELLEME -- olcmek istedigimiz ikincisi.
 """
@@ -34,11 +34,11 @@ import sys
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import korpus_10 as KOR                                       # noqa: E402
-import olcme_10 as OLC                                        # noqa: E402
-import pencere_10 as P                                        # noqa: E402
-import taban_10 as M                                          # noqa: E402
-from model_10 import ModelSade                                # noqa: E402
+import korpus_11 as KOR                                       # noqa: E402
+import olcme_11 as OLC                                        # noqa: E402
+import pencere_11 as P                                        # noqa: E402
+import taban_11 as M                                          # noqa: E402
+from model_11 import ModelSade                                # noqa: E402
 
 SUS = lambda *a, **k: None
 NL_ = chr(10)
@@ -86,7 +86,7 @@ def main():
         # CPU ve ucuz kalir (yalniz json okur) ama butun
         # kriterler TEK YERDEN gorunur.
         _egri = []
-        print(f"=== durustluk_10 EGRI  {ayar.ad} t{ayar.tohum} ===")
+        print(f"=== durustluk_11 EGRI  {ayar.ad} t{ayar.tohum} ===")
         print(f"  sinav: {len(rs_)} cevapsiz soru   TUTULAN veriden")
         print(f"  {'adim':>8}{'DOGRU RET':>11}{'ad':>9}{'cift':>9}"
               f"{'KACAMAK':>10}{'dogru cev':>11}")
@@ -119,7 +119,7 @@ def main():
 
     d = OLC.durustluk_olc(net, S, rs_, bilgi, M.DEV)
 
-    print(f"=== durustluk_10  {ayar.ad} t{ayar.tohum}  adim {adim} ===")
+    print(f"=== durustluk_11  {ayar.ad} t{ayar.tohum}  adim {adim} ===")
     print(f"  sinav: {len(rs_)} cevapsiz soru "
           f"({sum(1 for t in rs_.tur if t == 'ad')} uydurma ad + "
           f"{sum(1 for t in rs_.tur if t == 'cift')} imkansiz cift)"

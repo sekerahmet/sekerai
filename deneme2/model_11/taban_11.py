@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""taban_10 — BU KOLUN KENDI motoru. TEK BASINA DURUR.
+"""taban_11 — BU KOLUN KENDI motoru. TEK BASINA DURUR.
 
 Kullanici karari, 16 Eylul 2026:
     *"bunlarin hepsi model_09 folderi altinda olmali. model_09 diger
@@ -20,7 +20,7 @@ KENDILIGINDEN gelmez; model_09 ile model_b15 O GUNDEN SONRA FARKLI
 KODLA olculmus olur. Bu, kopyanin gercek riski ve gozden kacarsa
 sayilari sessizce karsilastirilamaz hale getirir.
 
-Bunun icin `test_10.py` her kosuda DAVRANIS ESDEGERLIGI siniyor:
+Bunun icin `test_11.py` her kosuda DAVRANIS ESDEGERLIGI siniyor:
 
     egitim havuzu       taban_09 vs model_a  -> BIT DUZEYINDE ayni
     olcme listeleri     olcme_izi            -> AYNI
@@ -46,12 +46,12 @@ import torch.nn.functional as F
 # (sifirdan.py'nin arizasi oydu, bkz. ISIMLENDIRME.md).
 # NOT: `model_a.py` burada bir ust klasoru yola ekleyip `veri_okul`u
 # import ediyordu. `taban_09` bunu YAPMIYOR: model_09'in verisi
-# `veri_10.py`, ve o BU klasorde. Veri modulu `veri_kur` icinde
+# `veri_11.py`, ve o BU klasorde. Veri modulu `veri_kur` icinde
 # `ayar.veri_ad`dan import ediliyor (asagida), burada degil.
 
-import jeton_10 as J
-import korpus_10 as KOR
-import olcme_10 as OLC
+import jeton_11 as J
+import korpus_11 as KOR
+import olcme_11 as OLC
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -79,11 +79,11 @@ T_LEN = 8
 # ======================= AYAR ============================================
 @dc.dataclass(frozen=True)
 class Ayar:
-    ad: str = "model_10"
+    ad: str = "model_11"
 
     # --- veri (bir ailenin butun kollarinda AYNI olmali, yoksa
     #     'sartlar esit' bozulur ve kollar farkli veri gorur)
-    veri_ad: str = "veri_10"     # HANGI GRAF. "veri_okul2" = tam IKI KATI.
+    veri_ad: str = "veri_11"     # HANGI GRAF. "veri_okul2" = tam IKI KATI.
     #   15 Eylul'de eklendi. Modul adi olarak yaziliyor ki `ayar_t<N>.json`a
     #   girsin: "bu kosu hangi veriyi gordu" sorusu SONRADAN cevaplanabilsin.
     #   Alan eklemek SURDURMEYI bozabilirdi (eski paketlerde bu anahtar YOK
@@ -99,7 +99,7 @@ class Ayar:
     t_len: int = 512           # egitim penceresi (karakter)
     kopya: int = 5             # Physics 3.1 `multiM`: varlik basina M belge
     tetik: int = 0             # bu M belgenin kaci BIYOGRAFI SORUSU onegiyle
-    # --- KORPUSUN BILESIMI (model_10). Hepsi AYARDAN gelir ki onkayit
+    # --- KORPUSUN BILESIMI (model_11). Hepsi AYARDAN gelir ki onkayit
     # ve defter tek yerden okusun; `havuz`un varsayilanina GUVENILMEZ.
     zincir_pay: float = 0.20   # sayfa cumlelerinin ~payi ZINCIR cumlesi
     n3: int = 0                # UC adimli zincir havuzu (0 = yok)
@@ -1081,7 +1081,7 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
 #
 # SILINDILER, YORUMA ALINMADILAR: calismayan ama duran kod, dosyayi
 # okuyanin "demek ki hala boyle" diye okumasina sebep olur. Bu kolda
-# ayni hata iki kez oldu (kos_10.py MODEL="model_08", ayar_10.py
+# ayni hata iki kez oldu (kos_11.py MODEL="model_08", ayar_11.py
 # `from taban_08 import Ayar`).
 
 def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
@@ -1248,7 +1248,7 @@ def olcme_izi(L: dict) -> str:
 # yani kisit kurulamaz -- ve kurulmamali da: kisitli sayi modelin
 # serbest birakildiginda ne yazacagini SOYLEMIYOR.
 #
-# Yerine `olcme_10.Sinav` + `olcme_10.olc`: model soruyu alir, gerisini
+# Yerine `olcme_11.Sinav` + `olcme_11.olc`: model soruyu alir, gerisini
 # KENDI yazar, cikan dizge beklenenle TAM ESLESMELI. Gecisin bedelsiz
 # oldugu OLCULDU (model_08, 18 Eylul): belirsizligi olmayan soru
 # yuzeyinde kisitli ile serbest alti bolmede de +0.0000 fark verdi.
@@ -1456,7 +1456,7 @@ def surdurme_oku(yol, ayar: Ayar, model, opt, scaler, rs, iz, yaz=print,
             os.linesep + f"!! SURDURULEMEZ: olcme seti degismis "
             f"(paket {p.get('olcme_izi')}, simdi {iz}).")
     # KORPUS KAPISI. `olcme_izi` SINAVI kolluyor, ayar farki AYARI --
-    # ikisi de EGITIM METNINI kollamiyor. `metin_10.cumle`de tek bir ek
+    # ikisi de EGITIM METNINI kollamiyor. `metin_11.cumle`de tek bir ek
     # degisse korpus bastan asagi degisir ve iki kapi da SESSIZ kalirdi:
     # kosu "surduruldu" diye devam eder, yarisi bir metinle yarisi
     # baskasiyla egitilmis olurdu.
@@ -1513,7 +1513,7 @@ def erken_teshis(r: dict, ayar: Ayar, yaz=print, uyarildi: set | None = None):
             + "YAPISAL OLARAK 0 olmaliydi." + os.linesep
             + "   ENT-YOK'un TANIMI: facts[e, r2] = -1, yani kisayolun"
             + os.linesep
-            + "   isaret edecegi varlik GRAFTA YOK. `olcme_10.sorular` o"
+            + "   isaret edecegi varlik GRAFTA YOK. `olcme_11.sorular` o"
             + os.linesep
             + "   satirlara ksy=None veriyor ve `puanla` None'i saymiyor."
             + os.linesep
@@ -1926,5 +1926,5 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
 
 
 # NOT: `model_a.py` burada `AYAR = Ayar()` tanimlayip dogrudan
-# kosulabiliyordu. `taban_09` bir MOTOR; model_09'in ayari `ayar_10.py`de,
-# kosuyu baslatan `model_10.py`. Burada calistirilacak bir sey YOK.
+# kosulabiliyordu. `taban_09` bir MOTOR; model_09'in ayari `ayar_11.py`de,
+# kosuyu baslatan `model_11.py`. Burada calistirilacak bir sey YOK.
