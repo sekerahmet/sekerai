@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """analiz_08 — BU KOLUN KENDI VERI DOKUMU + SAGLIK DENETIMI. TEK BASINA DURUR.
 
-Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_05 folderi
-altinda olmali. model_05 diger hicbir model ile ayni seyi kullanmamali.
-Analiz icinde analiz_05 kullanalim mesela, digerleri icin de."*
+Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_08 folderi
+altinda olmali. model_08 diger hicbir model ile ayni seyi kullanmamali.
+Analiz icinde analiz_08 kullanalim mesela, digerleri icin de."*
 
 `veri_dok.py`nin KOPYASI (uretici: scratchpad/kur_analiz00.py). Iki fark:
-motor `taban_05`, ve `--model` secenegi YOK -- bu arac yalniz model_05'i
-tanir. Dokum `model_05/veri/model_05/` altina gider (depoya girmez).
+motor `taban_08`, ve `--model` secenegi YOK -- bu arac yalniz model_08'i
+tanir. Dokum `model_08/veri/model_08/` altina gider (depoya girmez).
 
-    python analiz_05.py [--tam] [--klasor <yol>]
+    python analiz_08.py [--tam] [--klasor <yol>]
 """
 from __future__ import annotations
 
@@ -667,7 +667,7 @@ def yaz_taban(d, yol):
 
 def main():
     ap = argparse.ArgumentParser()
-    # `--model` YOK: bu arac yalniz model_05'i tanir.
+    # `--model` YOK: bu arac yalniz model_08'i tanir.
     ap.set_defaults(model="model_08")
     ap.add_argument("--klasor", default=None,
                     help="varsayilan: <AILE>/veri/<model>")
@@ -694,7 +694,7 @@ def main():
     yaz_varliklar(d, yol("02_varliklar.txt"))
     yaz_iliskiler(d, yol("03_iliskiler.txt"))
     # !! 04/05 (EGITIM dokumu) KALDIRILDI -- kullanici, 17 Eylul:
-    # "niye iki tane egitim var?". `egitim_dok_05` zaten EGITIM_*.txt
+    # "niye iki tane egitim var?". `egitim_dok_08` zaten EGITIM_*.txt
     # olarak DUZ halini yaziyor; bu ikisi ayni icerigin aciklamali
     # kopyasiydi. SINAV dokumleri (06-09) KALIYOR cunku onlarda KOPRU
     # ve KISAYOL var -- sinav sorusu onlarsiz okunmaz.

@@ -2,10 +2,10 @@
 """taban_08 — BU KOLUN KENDI motoru. TEK BASINA DURUR.
 
 Kullanici karari, 16 Eylul 2026:
-    *"bunlarin hepsi model_05 folderi altinda olmali. model_05 diger
+    *"bunlarin hepsi model_08 folderi altinda olmali. model_08 diger
     hicbir model ile ayni seyi kullanmamali."*
 
-Bu dosya `model_a.py`nin KOPYASIDIR ve artik model_05'a aittir.
+Bu dosya `model_a.py`nin KOPYASIDIR ve artik model_08'a aittir.
 `model_a`/`model_b` icin yapilan bir degisiklik buraya GECMEZ.
 
 Icindekiler: `Ayar`, `Veri`, `veri_kur`, kodlayicilar, `egitim_havuzu`,
@@ -16,13 +16,13 @@ goruntu + surdurme, ve `egit`.
 !! KOPYANIN BEDELI -- ve nasil odendigi
 
 Paylasilan motorda bir olcum hatasi duzeltilirse, o duzeltme buraya
-KENDILIGINDEN gelmez; model_05 ile model_b15 O GUNDEN SONRA FARKLI
+KENDILIGINDEN gelmez; model_08 ile model_b15 O GUNDEN SONRA FARKLI
 KODLA olculmus olur. Bu, kopyanin gercek riski ve gozden kacarsa
 sayilari sessizce karsilastirilamaz hale getirir.
 
-Bunun icin `test_05.py` her kosuda DAVRANIS ESDEGERLIGI siniyor:
+Bunun icin `test_08.py` her kosuda DAVRANIS ESDEGERLIGI siniyor:
 
-    egitim havuzu       taban_05 vs model_a  -> BIT DUZEYINDE ayni
+    egitim havuzu       taban_08 vs model_a  -> BIT DUZEYINDE ayni
     olcme listeleri     olcme_izi            -> AYNI
     Ayar alanlari       ESKI_VARSAYILAN      -> AYNI
     kodlayici ciktilari ayni girdi           -> AYNI dizi
@@ -45,8 +45,8 @@ import torch.nn.functional as F
 # etkisidir ve deterministiktir: ortam degiskeni okumuyor, ayar tasimiyor
 # (sifirdan.py'nin arizasi oydu, bkz. ISIMLENDIRME.md).
 # NOT: `model_a.py` burada bir ust klasoru yola ekleyip `veri_okul`u
-# import ediyordu. `taban_05` bunu YAPMIYOR: model_05'in verisi
-# `veri_05.py`, ve o BU klasorde. Veri modulu `veri_kur` icinde
+# import ediyordu. `taban_08` bunu YAPMIYOR: model_08'in verisi
+# `veri_08.py`, ve o BU klasorde. Veri modulu `veri_kur` icinde
 # `ayar.veri_ad`dan import ediliyor (asagida), burada degil.
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
@@ -64,8 +64,8 @@ DEV = "cuda" if torch.cuda.is_available() else "cpu"
 #
 # Sonuc: `ek_kip=""` (eksiz) ve `ek_kip="tr"` KODLAMA YOLLARI SILINDI --
 # Q1/Q2/IDENT sabitleri yalniz onlar icindi. Bu kol yalniz "tr2" kosar.
-# Bedeli: `taban_05` artik ortak motorun BIREBIR KOPYASI DEGIL, yani
-# `test_05`in model_a kopya-sapma bekcisi BILDIRILMIS AYRISMAYA dondu.
+# Bedeli: `taban_08` artik ortak motorun BIREBIR KOPYASI DEGIL, yani
+# `test_08`in model_a kopya-sapma bekcisi BILDIRILMIS AYRISMAYA dondu.
 PAD, QM, EOS = 0, 1, 2      # dolgu,  soru isareti '?',  nokta '.'
 SPECIAL = 3
 REL_OFF = SPECIAL
@@ -354,7 +354,7 @@ class Ayar:
         Yalniz ek_kip="tr2" kuruldu; eksiz ve "tr" yollari SILINDI.
         """
         assert self.ek_kip == "tr2", (
-            f"model_05 yalniz ek_kip='tr2' kosar; eksiz ve 'tr' kodlama "
+            f"model_08 yalniz ek_kip='tr2' kosar; eksiz ve 'tr' kodlama "
             f"yollari SILINDI (17 Eylul). Gelen: {self.ek_kip!r}")
         assert self.jeton_ad == "tam", (
             f"ek_kip yalniz jeton_ad='tam' ile KURULDU: {self.jeton_ad!r}")
@@ -1391,13 +1391,14 @@ def kodla_soru(v: Veri, batch, hop: int):
          ... Yilmaz kim dir ?      -> KIMLIK   (varliktan sonra)
          ... arkadasi kim dir ?    -> SORU     (iliskiden sonra)
 
-    3) SORU SOZCUGU CEVABIN TIPINDEN (`_soru(v, a)`), `model_05`teki
+    3) SORU SOZCUGU CEVABIN TIPINDEN (`_soru(v, a)`), `model_08`teki
        gibi. Yeni bilgi tasimaz -- cevabin tipi zaten iliskiden belli
        (olculdu: 24/24 iliskide hedef tip TEK).
 
     SINAV DEGISMIYOR: olcum `kodla_2hop(..., bicim_no=0)` ile, yani DUZ
     BILDIRIMLE yapiliyor. `olcme_listeleri` zincir listeleri tutuyor,
-    yuzey tutmuyor -> `olcme_izi` f4ce53fd1555 AYNI KALIR ve model_05 /
+    yuzey tutmuyor -> `olcme_izi` SORU BICIMINDEN DEGISMEZ.
+    (18 Eylul'e kadar `f4ce53fd1555`ti ve model_05 /
     model_06 / model_07 ayni tabloda okunur.
     """
     assert hop in (1, 2), hop
@@ -1588,7 +1589,7 @@ def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
     # AYNI cumleler, ama her parca sorulabilir. Nedensel model boslugun
     # sagini goremedigi icin cikarilan parca SONA tasinir (`kodla_fim`).
     #
-    # NEDEN OLCULDU (model_05, 1-hop kanonik): soldan bakinca soyadin
+    # NEDEN OLCULDU (model_08, 1-hop kanonik): soldan bakinca soyadin
     # tabani 1,866 nat, iliskininki 2,016 nat -- ikisi de OGRENILEMEZ.
     # Cumlenin tamami gorulunce belirli hale geliyorlar. Bu kolun iddiasi
     # o 4,4 nat'i ogrenilebilir ise cevirmek.
@@ -2680,5 +2681,5 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
 
 
 # NOT: `model_a.py` burada `AYAR = Ayar()` tanimlayip dogrudan
-# kosulabiliyordu. `taban_05` bir MOTOR; model_05'in ayari `ayar_05.py`de,
-# kosuyu baslatan `model_05.py`. Burada calistirilacak bir sey YOK.
+# kosulabiliyordu. `taban_08` bir MOTOR; model_08'in ayari `ayar_08.py`de,
+# kosuyu baslatan `model_08.py`. Burada calistirilacak bir sey YOK.

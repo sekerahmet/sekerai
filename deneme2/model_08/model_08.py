@@ -39,12 +39,12 @@ Referanslar: nanoGPT (GPT-2 tarifi), Pythia-70m/160m, Llama tarzi blok.
 zaten bu tarifin kendisi.
 
 --------------------------------------------------------------------------
-AYARLAR `ayar_05.py`DE -- paylasilan tercihlere ESIR DEGIL
+AYARLAR `ayar_08.py`DE -- paylasilan tercihlere ESIR DEGIL
 
     VERI alanlari         model_b15'ten AYNEN (sinav ve havuz BIT AYNI)
     MIMARI + OPTIMIZASYON STANDART TARIF, referanslariyla
 
-Iki ayar BILEREK devralinmadi (gerekce `ayar_05.py`de):
+Iki ayar BILEREK devralinmadi (gerekce `ayar_08.py`de):
 
     ort_bas 10000 -> 0        LOOKAHEAD ORTALAMASI KAPATILDI. Paylasilan
                               ayar 10.000. adimdan sonra yavas agirlik
@@ -56,7 +56,7 @@ Iki ayar BILEREK devralinmadi (gerekce `ayar_05.py`de):
     betas (0.9,0.999) -> (0.9,0.95)   0.999 PyTorch varsayilani; nanoGPT,
                               GPT-3, Llama, Pythia hepsi 0.95.
 
-`test_05.py` her kosuda sinar: VERI alanlari model_b15 ile birebir
+`test_08.py` her kosuda sinar: VERI alanlari model_b15 ile birebir
 tutmali, farklilar da YALNIZ mimari + bu iki optimizasyon alani olmali.
 
 --------------------------------------------------------------------------
@@ -79,7 +79,7 @@ import os
 import sys
 
 # YALNIZ KENDI KLASORU yola eklenir. `model_a` / `model_b` / ust klasor
-# EKLENMEZ -- kullanici karari, 16 Eylul: "model_05 diger hicbir model
+# EKLENMEZ -- kullanici karari, 16 Eylul: "model_08 diger hicbir model
 # ile ayni seyi kullanmamali."
 _B = os.path.dirname(os.path.abspath(__file__))
 if _B not in sys.path:
@@ -91,7 +91,7 @@ import torch.nn.functional as F
 
 import taban_08 as M                                         # noqa: E402
 assert hasattr(M, "egit"), (
-    f"taban_05 MODUL degil PAKET olarak yuklendi: {getattr(M,'__file__',None)}")
+    f"taban_08 MODUL degil PAKET olarak yuklendi: {getattr(M,'__file__',None)}")
 
 
 # ======================= ROPE ============================================
@@ -159,13 +159,13 @@ class ModelSade(nn.Module):
     def __init__(self, ayar: M.Ayar, vocab: int):
         super().__init__()
         assert ayar.dongu == 1, (
-            f"model_05 DONGUSUZ: dongu={ayar.dongu}. Dongu istiyorsan "
+            f"model_08 DONGUSUZ: dongu={ayar.dongu}. Dongu istiyorsan "
             f"model_b ailesini kullan.")
         assert ayar.dar_alfa == 0 and not ayar.dar_kapi, (
-            "model_05'da Phi DARBOGAZI YOK -- dar_alfa=0, dar_kapi=False")
-        assert ayar.kopru_kayip == 0, "model_05 YARDIMCI KAYIP KULLANMAZ"
+            "model_08'da Phi DARBOGAZI YOK -- dar_alfa=0, dar_kapi=False")
+        assert ayar.kopru_kayip == 0, "model_08 YARDIMCI KAYIP KULLANMAZ"
         assert ayar.mask_poz is None and not ayar.mask_blok, (
-            "model_05'da MASKE YOK")
+            "model_08'da MASKE YOK")
         self.ayar = ayar
         self.emb = nn.Embedding(vocab, ayar.d)
         self.bloklar = nn.ModuleList(
@@ -199,7 +199,7 @@ class ModelSade(nn.Module):
     def govde(self, x):
         """SON katman + son norm -- head ONCESI gizli durum (B, T, d).
 
-        `asama1_05.gizli()` (DOGRUSAL SONDA) bunu cagirir. KUSUR ve
+        `asama1_08.gizli()` (DOGRUSAL SONDA) bunu cagirir. KUSUR ve
         DUZELTMESI (16 Eylul hakemligi): orada ileri gecis ELLE yeniden
         kuruluyordu --
 
@@ -230,7 +230,7 @@ class ModelSade(nn.Module):
 # KENDI ayar dosyasindan okunur -- paylasilan tercihlere ESIR DEGIL.
 # Kullanici, 16 Eylul: "ayar dosyasi ise onu ayar00 diye bir dosya yap,
 # ordan okusun." Hangi alanin nereden geldigi ve NEDEN o degerde oldugu
-# `ayar_05.py`de tek tek yazili -- ve artik `model_b15`ten DEVRALINMIYOR,
+# `ayar_08.py`de tek tek yazili -- ve artik `model_b15`ten DEVRALINMIYOR,
 # `Ayar()` varsayilaninin uzerine acikca yaziliyor.
 from ayar_08 import AYAR, GOREV_ALAN                         # noqa: E402,F401
 

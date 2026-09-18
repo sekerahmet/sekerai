@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """asama1_08 — BU KOLUN KENDI ASAMA-1 TESHISI. TEK BASINA DURUR.
 
-Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_05 folderi
-altinda olmali. model_05 diger hicbir model ile ayni seyi
+Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_08 folderi
+altinda olmali. model_08 diger hicbir model ile ayni seyi
 kullanmamali."*
 
 `model_a/asama1.py`nin KOPYASI (uretici: scratchpad/kur_okuma00.py). Modeli
 `ModelSade` ile kurar. Paylasilan surumde yapilan bir degisiklik buraya
-GECMEZ; `test_05.py` ikisinin AYNI SEYI olctugunu her kosuda siniyor.
+GECMEZ; `test_08.py` ikisinin AYNI SEYI olctugunu her kosuda siniyor.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import sys
 import numpy as np
 import torch
 
-# `asama1_b` bunu doldurur; None -> model_05.ModelSade. `pencere_a` ve
+# `asama1_b` bunu doldurur; None -> model_08.ModelSade. `pencere_a` ve
 # `tani_a`daki kancanin AYNISI.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import taban_08 as M                                          # noqa: E402

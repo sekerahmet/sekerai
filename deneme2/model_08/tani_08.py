@@ -1,19 +1,19 @@
 # -*- coding: utf-8 -*-
 """tani_08 — BU KOLUN KENDI AYRISTIRMASI. TEK BASINA DURUR.
 
-Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_05 folderi
-altinda olmali. model_05 diger hicbir model ile ayni seyi
+Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_08 folderi
+altinda olmali. model_08 diger hicbir model ile ayni seyi
 kullanmamali."*
 
 `model_a/tani_a.py`nin KOPYASI (uretici: scratchpad/kur_okuma00.py). Modeli
 `ModelSade` ile kurar. Paylasilan surumde yapilan bir degisiklik buraya
-GECMEZ; `test_05.py` ikisinin AYNI SEYI olctugunu her kosuda siniyor.
+GECMEZ; `test_08.py` ikisinin AYNI SEYI olctugunu her kosuda siniyor.
 """
 from __future__ import annotations
 
 import argparse, os, sys
 
-# `tani_b` bunu doldurur; None -> model_05.ModelSade. `pencere_a`daki kancanin
+# `tani_b` bunu doldurur; None -> model_08.ModelSade. `pencere_a`daki kancanin
 # AYNISI. 16 Eylul: burada YOKTU ve `tani_a`, model_b anlik goruntusunu
 # "Unexpected key(s): dar_norm.g" ile REDDEDERDI.
 import numpy as np

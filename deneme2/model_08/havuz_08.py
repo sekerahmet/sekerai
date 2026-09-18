@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """havuz_08 — BU KOLUN KENDI EGITIM HAVUZU DENETIMI. TEK BASINA DURUR.
 
-Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_05 folderi
-altinda olmali. model_05 diger hicbir model ile ayni seyi kullanmamali.
-Analiz icinde analiz_05 kullanalim mesela, digerleri icin de."*
+Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_08 folderi
+altinda olmali. model_08 diger hicbir model ile ayni seyi kullanmamali.
+Analiz icinde analiz_08 kullanalim mesela, digerleri icin de."*
 
 `havuz_dok.py`nin KOPYASI (uretici: scratchpad/kur_analiz00.py). Iki fark:
-motor `taban_05`, ve `--model` secenegi YOK -- bu arac yalniz model_05'i
-tanir. Dokum `model_05/veri/model_05/` altina gider (depoya girmez).
+motor `taban_08`, ve `--model` secenegi YOK -- bu arac yalniz model_08'i
+tanir. Dokum `model_08/veri/model_08/` altina gider (depoya girmez).
 
-    python havuz_05.py
+    python havuz_08.py
 """
 import sys
 import collections
@@ -24,7 +24,7 @@ if _D not in sys.path:
     sys.path.insert(0, _D)
 import taban_08 as M         # noqa: E402
 
-# `--model` YOK: bu arac yalniz model_05'i tanir.
+# `--model` YOK: bu arac yalniz model_08'i tanir.
 argparse.ArgumentParser().parse_args()
 from ayar_08 import AYAR     # noqa: E402
 

@@ -1,33 +1,33 @@
 # -*- coding: utf-8 -*-
 """model_08 KILIDI -- "her seyden bagimsiz" iddiasi SINANIR.
 
-Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_05 folderi
-altinda olmali. model_05 diger hicbir model ile ayni seyi
+Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_08 folderi
+altinda olmali. model_08 diger hicbir model ile ayni seyi
 kullanmamali."*
 
 Dort sey tutulur:
 
-  1. BAGIMSIZLIK  model_05/*.py icinde `model_a` / `model_b` /
+  1. BAGIMSIZLIK  model_08/*.py icinde `model_a` / `model_b` /
      `veri_okul*` / `pencere_a` import'u YOK. Statik taramayla.
   2. MIMARI       projenin hicbir ozelligi yok: dongu yok, Phi
      darbogazi yok, maske yok, yardimci kayip yok, miras yok.
-  3. VERI         `veri_05` KENDI iddialarini tutuyor: sema, soy
+  3. VERI         `veri_08` KENDI iddialarini tutuyor: sema, soy
                   agaci (cinsiyet/kusak/ensest), zincir siniflari,
                   turetilebilirlik, notrluk, cografya, IZ.
-  4. MOTOR        `taban_05` ile `model_a` AYNI SEYI olcuyor:
+  4. MOTOR        `taban_08` ile `model_a` AYNI SEYI olcuyor:
      egitim havuzu bit duzeyinde ayni, olcme izi ayni.
 
 --------------------------------------------------------------------------
 !! KILIT, PAYLASILAN MODULLERI IMPORT EDER -- VE ETMELIDIR
 
-3 ve 4, model_05'in kopyalarini ORIJINALLERIYLE karsilastiriyor; bunun
+3 ve 4, model_08'in kopyalarini ORIJINALLERIYLE karsilastiriyor; bunun
 icin `model_a` / `veri_okul4` / `model_b15` buraya yukleniyor. Bu,
 1'deki bagimsizlik iddiasini BOZMAZ: KOSAN kol onlari gormez, yalniz
 KILIT gorur. Kilidin isi zaten bu -- kopyanin sapip sapmadigini
 soylemek.
 
 Kopyanin GERCEK riski buydu: paylasilan motorda bir olcum hatasi
-duzeltilirse buraya kendiliginden GELMEZ, ve model_05 ile model_b15 o
+duzeltilirse buraya kendiliginden GELMEZ, ve model_08 ile model_b15 o
 gunden sonra FARKLI KODLA olculmus olur. 4. bolum bunu sessiz olmaktan
 cikariyor: sapma varsa kilit DUSER ve o gun bilerek karar verilir
 (kopyayi guncelle, ya da farki onkayda yaz).
@@ -63,7 +63,7 @@ def ok(kosul, ad, ek=""):
 
 # --- 0) BAGIMSIZLIK ------------------------------------------------------
 print("=== 0) BAGIMSIZLIK: model_08/ disariya BAGLI MI ===")
-# Metinde arama YAPMIYORUZ -- ilk denemem oyleydi ve `ayar_05.py`nin
+# Metinde arama YAPMIYORUZ -- ilk denemem oyleydi ve `ayar_08.py`nin
 # DOCSTRING'inde gecen "from model_b15 import ..." cumlesini (kaldirilan
 # seyi ANLATAN cumleyi) import sandi. Dogrusu AST: yalnizca gercek
 # import dugumlerine bakilir.
@@ -98,12 +98,12 @@ for _f in sorted(x for x in os.listdir(_B) if x.endswith(".py")):
     _kotu = _disa_bagli(os.path.join(_B, _f))
     ok(not _kotu, f"{_f} paylasilan modul import ETMIYOR", str(_kotu))
 
-print("\n=== 1) model_05 MIMARISI ===")
+print("\n=== 1) model_08 MIMARISI ===")
 import taban_08 as M                                         # noqa: E402
 import model_08 as S                                         # noqa: E402
 
 A = S.AYAR
-ok(S.M is M, "model_05 motoru taban_05", S.M.__name__)
+ok(S.M is M, "model_08 motoru taban_08", S.M.__name__)
 ok(A.dongu == 1, "dongu = 1 (DONGU YOK)", str(A.dongu))
 ok(A.l == 8, "l = 8 katman", str(A.l))
 ok(A.dar_alfa == 0.0 and not A.dar_kapi,
@@ -113,7 +113,7 @@ ok(A.mask_poz is None and not A.mask_blok, "MASKE YOK")
 ok(A.dff == 704, "d_ff 704 (8/3 * 256, 64'un kati)", str(A.dff))
 ok(A.d % A.nh == 0 and A.d // A.nh == 64, "head_dim 64", f"d={A.d} nh={A.nh}")
 ok(not issubclass(S.ModelSade, M.Model),
-   "ModelSade, taban_05.Model'den MIRAS ALMIYOR")
+   "ModelSade, taban_08.Model'den MIRAS ALMIYOR")
 ok(issubclass(S.ModelSade, nn.Module), "ModelSade bir nn.Module")
 
 v = M.veri_kur(A, yaz=lambda *a: None)
@@ -137,7 +137,7 @@ ok(_b0.w1.out_features == A.dff and _b0.w2.in_features == A.dff,
    "SwiGLU gizli boyutu d_ff")
 
 # --- 1b) OKUMA ARACLARININ MODELDEN ISTEDIGI YUZEY ----------------------
-# KUSUR (16 Eylul hakemligi): `asama1_05.gizli()` ileri gecisi ELLE
+# KUSUR (16 Eylul hakemligi): `asama1_08.gizli()` ileri gecisi ELLE
 # kuruyordu -- `net1.emb + net1.pos` ve TEK argumanli `blk(h)`. Ikisi de
 # `model_a.Model`e ozgu; ModelSade'de `.pos` YOK (RoPE var) ve
 # `Blok.forward` UC argumanli. DOGRUSAL SONDA, yani bu kolun onkayitta
@@ -159,16 +159,16 @@ _lst = v.comp[:8]
 # CPU'da kalirsa GPU'lu makinede "index is on cuda:0, other tensors on
 # cpu" ile duser. ILK YAZIMDA BU EKSIKTI ve yerelde (DEV="cpu") FARK
 # EDILMEDI -- kusur Colab'da, kilidin ilk GPU kosusunda cikti.
-# Gercek kullanimda `asama1_05.main` modeli zaten `.to(M.DEV)` ediyor;
+# Gercek kullanimda `asama1_08.main` modeli zaten `.to(M.DEV)` ediyor;
 # yani hata ARACIN degil, BU TESTIN hatasiydi. Sonra CPU'ya geri
 # aliniyor: asagidaki bolumler CPU tensorleriyle devam ediyor.
 try:
     net.to(M.DEV)
     _q = A1.gizli(net, v, _lst, 6)
-    ok(_q.shape == (8, A.d), "asama1_05.gizli() KOSUYOR (DOGRUSAL SONDA yolu)",
+    ok(_q.shape == (8, A.d), "asama1_08.gizli() KOSUYOR (DOGRUSAL SONDA yolu)",
        f"{_q.shape} cihaz {M.DEV}")
 except Exception as _e:                                      # noqa: BLE001
-    ok(False, "asama1_05.gizli() KOSUYOR (DOGRUSAL SONDA yolu)",
+    ok(False, "asama1_08.gizli() KOSUYOR (DOGRUSAL SONDA yolu)",
        f"{type(_e).__name__}: {_e}")
 finally:
     net.to("cpu")
@@ -206,21 +206,21 @@ ok(not torch.allclose(l1[0, -1], l2[0, -1], atol=1e-5),
    "RoPE POZISYONA duyarli (onekteki takas SON ciktiyi degistiriyor)",
    f"en buyuk fark {(l1[0,-1]-l2[0,-1]).abs().max():.3e}")
 
-# --- 3) VERI: veri_05'in KENDI IDDIALARI --------------------------------
+# --- 3) VERI: veri_08'in KENDI IDDIALARI --------------------------------
 # !! model_03'ten DEVRALINAN "kopya == orijinal" TESTI KALDIRILDI.
 # Orada `veri_03` bir KOPYAYDI (icerigi `veri_okul4` ile birebir) ve test
-# kopyanin kaymadigini siniyordu. `veri_05` KOPYA DEGIL: yeni sema, yeni
+# kopyanin kaymadigini siniyordu. `veri_08` KOPYA DEGIL: yeni sema, yeni
 # tipler, gercek soy agaci, gercek cografya. Kiyaslanacak bir ORIJINAL
 # YOK. O yuzden test artik verinin KENDI IDDIALARINI siniyor -- ve o
 # iddialarin cogu `veri_04`te TUTMUYORDU ("Fatma'nin annesi Huseyin").
-print("\n=== 3) VERI: veri_05 KENDI IDDIALARINI tutuyor mu ===")
+print("\n=== 3) VERI: veri_08 KENDI IDDIALARINI tutuyor mu ===")
 import veri_08 as V00                                        # noqa: E402
 
 ok(A.veri_ad == "veri_08", "BU KOL KENDI veri modulunu okur", A.veri_ad)
 _G0 = V00.kur(0)
 E05 = [x for t in V00.TIPLER for x in _G0["ad"][t]]
 _z = V00.zincirler(_G0)
-ok(V00.graf_izi(_G0) == V00.IZ, "graf izi veri_05.IZ ile TUTUYOR", V00.IZ)
+ok(V00.graf_izi(_G0) == V00.IZ, "graf izi veri_08.IZ ile TUTUYOR", V00.IZ)
 ok(V00.graf_izi(V00.kur(0)) == V00.IZ, "IZ ikinci kurulusta da AYNI")
 ok(set(_G0["ad"]) == set(V00.TIPLER), "ad sozlugu TIPLER'i tam kapsiyor",
    f"{len(V00.TIPLER)} tip, {sum(_G0['n'].values())} varlik")
@@ -326,7 +326,7 @@ for _ad, _boz in (
     _boz(_h)
     ok(V00.graf_izi(_h) != _iz0, f"IZ {_ad} degisimini GORUYOR")
 
-# (3) `jeton_ad` EK JETONLARINDA cokmuyor. veri_dok/analiz_05 `ek_kip`
+# (3) `jeton_ad` EK JETONLARINDA cokmuyor. veri_dok/analiz_08 `ek_kip`
 #     gelen her kolda IndexError veriyordu -- model_b15'in verisi bu
 #     yuzden hic dokulmemisti.
 sys.path.insert(0, _B)
@@ -378,7 +378,7 @@ ok(V00.EK_NIN[_es["nin_iliski"]["kardesi"]] == "nin"
 for _g in ("kur", "zincirler", "TIPLER", "ILISKI", "SEMA", "GEREKTIRIR",
            "BLOK", "turetilebilir", "graf_izi", "IZ", "sizinti",
            "SEHIR_BOLGE", "yuzey"):
-    ok(hasattr(V00, _g), f"veri_05.{_g} var (sozlesme)")
+    ok(hasattr(V00, _g), f"veri_08.{_g} var (sozlesme)")
 
 # `model_a` / `model_b15` YALNIZ BU KILIT icin yukleniyor -- bu bolum
 # motorun eski aileyle AYNI SEYI olctugunu siniyor, kosuda kullanilmaz.
@@ -388,8 +388,8 @@ sys.path.insert(0, _K)
 sys.path.insert(0, os.path.join(_K, 'model_a'))
 sys.path.insert(0, os.path.join(_K, 'model_b'))
 
-# --- 4) MOTOR: taban_05 ile model_a AYNI SEYI mi olcuyor ----------------
-print("\n=== 4) MOTOR ESDEGERLIGI: taban_05 vs model_a ===")
+# --- 4) MOTOR: taban_08 ile model_a AYNI SEYI mi olcuyor ----------------
+print("\n=== 4) MOTOR ESDEGERLIGI: taban_08 vs model_a ===")
 import model_a as MA                                         # noqa: E402
 from model_b15 import AYAR as B15                            # noqa: E402
 from ayar_08 import GOREV_ALAN                               # noqa: E402
@@ -424,7 +424,7 @@ ok(not (set(_alanA) - set(_alan06)), "model_a'nin hicbir alani SILINMEDI",
 #   [S1] [S2] [KIMLIK] ve iki adlandirilmamis yuva.
 # Bunlari silmek `ek_kip=""` ve `ek_kip="tr"` kodlama yollarinin da
 # silinmesini gerektirdi (Q1/Q2/IDENT yalniz onlar icindi), yani
-# `taban_05` artik ortak motorun BIREBIR KOPYASI DEGIL.
+# `taban_08` artik ortak motorun BIREBIR KOPYASI DEGIL.
 # Kullanici karari: "silinsin tabii ki".
 #
 # Kopya-sapma bekcisi BU YUZDEN KALDIRILMADI, YON DEGISTIRDI:
@@ -432,7 +432,7 @@ ok(not (set(_alanA) - set(_alan06)), "model_a'nin hicbir alani SILINMEDI",
 ok(M.T_LEN == MA.T_LEN, "T_LEN model_a ile AYNI (eksiz taban)", str(M.T_LEN))
 ok(M.SPECIAL == 3 and MA.SPECIAL == 8,
    "SPECIAL model_a'dan BILEREK ayrildi (olu jetonlar silindi)",
-   f"model_a {MA.SPECIAL} -> model_05 {M.SPECIAL}")
+   f"model_a {MA.SPECIAL} -> model_08 {M.SPECIAL}")
 ok(not hasattr(M, "IDENT") and not hasattr(M, "Q1"),
    "Q1 / Q2 / IDENT sabitleri SILINDI (kodlama yollariyla birlikte)")
 ok(M.REL_OFF == M.SPECIAL, "REL_OFF hala SPECIAL'a bagli", str(M.REL_OFF))
@@ -455,7 +455,7 @@ ok(M.Ayar().fim_kat == 0,
 
 # BILDIRILMIS AYRISMA. `GOREV_ALAN` "sinavin AYNI kalmasi GEREKEN
 # alanlari" listesi ve model_03'e kadar hepsi model_b15 ile birebirdi.
-# model_05 ikisini BILEREK degistiriyor ve ikisi de BU KOLUN TANIMI:
+# model_08 ikisini BILEREK degistiriyor ve ikisi de BU KOLUN TANIMI:
 #   veri_ad  yeni veri (zaten GOREV_ALAN'da degil)
 #   ek_kip   "tr" -> "tr2": iliski jetonu KELIMENIN KENDISI, <SI> YOK,
 #            soru sozcugu VAR. Kullanici, 17 Eylul: "ben duzgun bir
@@ -494,7 +494,7 @@ X1, P1, T1, _, _, _ = MA.egitim_havuzu(B15, v15, yaz=lambda *a: None)
 # BIT DUZEYINDE aynidir diye sinaniyordu -- bu kolun BUTUN degeri de
 # "sayilar ayni tabloda okunuyor" olmasindaydi.
 #
-# `veri_05` bu kolun DUGMESI: yeni sema, yeni tipler, gercek soy agaci.
+# `veri_08` bu kolun DUGMESI: yeni sema, yeni tipler, gercek soy agaci.
 # Sinavin ve havuzun degismesi bu kolun ARIZASI DEGIL, TANIMI. CLAUDE.md:
 #   "olcme izi degisirse -> KOL IPTAL DEGIL. Not duser, devam edilir."
 #
@@ -504,7 +504,7 @@ X1, P1, T1, _, _, _ = MA.egitim_havuzu(B15, v15, yaz=lambda *a: None)
 # gecerdi.
 ok(_iz05 != _iz15,
    "OLCME IZI model_b15'ten AYRILDI -- BEKLENEN (veri bu kolun dugmesi)",
-   f"model_05 {_iz05}  vs  model_b15 {_iz15}")
+   f"model_08 {_iz05}  vs  model_b15 {_iz15}")
 ok(X0.shape != X1.shape,
    "EGITIM HAVUZU da ayrildi -- BEKLENEN", f"{X0.shape} vs {X1.shape}")
 # t_len de DEGISTI (17 -> 16) ve bu da BILEREK: <SI> cikti (-2, iki
@@ -551,7 +551,7 @@ ok(all(int(t[int((t >= 0).sum()) - 1]) == _kes for t in T0[:500]),
 # `par_ad[j][par[e,j]]` diye dogrudan indeksleyen alti arac vardi ve
 # hepsi SESSIZCE sozlugun son kelimesini basiyordu ("Ibrahim Yilmaz"
 # -> "Ibrahim | Yilmaz | Zonguldak", 17 Eylul). Tek kaynak
-# `taban_05.kelimeler`; bu test onu bir daha kacirmamak icin.
+# `taban_08.kelimeler`; bu test onu bir daha kacirmamak icin.
 ok(all(len(M.kelimeler(v, e)) == int(v.n_yuva[e]) for e in range(v.n_ent)),
    "kelimeler() dolgu URETMIYOR -- her ad kendi kelime sayisinda")
 ok(not any("<YOK>" in w for e in range(v.n_ent) for w in M.kelimeler(v, e)),
@@ -566,7 +566,7 @@ ok(v.cevap_ara == (v.ent_off, v.ek0 + 1),
 ok(int(X0.max()) < v.vocab and int(X0.min()) >= 0,
    "havuzdaki her jeton SOZLUK ICINDE", f"max {int(X0.max())} < {v.vocab}")
 
-# HAVUZ KUCULDU ve bu RAPORLANIR: `veri_05` daha kucuk bir graf
+# HAVUZ KUCULDU ve bu RAPORLANIR: `veri_08` daha kucuk bir graf
 # (6254 olgu / 38157 zincir) ve ayni 20.000 adimda ayni batch ile
 # EPOK SAYISI artiyor. Hukum vermez -- ama `seen` yukselirken `comp`
 # durursa ilk bakilacak yer burasi.
@@ -584,7 +584,7 @@ ok(X0.shape[0] > X1.shape[0],
 # --- 5) STANDART TARIF -- DEVRALINMAYANLAR ------------------------------
 print("\n=== 5) STANDART TARIF ===")
 # !! BU KILIT GEVSETILMEDI, HEDEFI DEGISTI (CLAUDE.md'deki wd=0.5
-# emsali). model_05..model_07'de `ort_bas == 0` bekleniyordu: "standart
+# emsali). model_08..model_07'de `ort_bas == 0` bekleniyordu: "standart
 # tarif, projeye ozgu ne varsa KAPALI". model_08'de geri beslemeli
 # ortalama BU KOLUN DUGMESI (onkayit belge/onkayit/model_08.md), o
 # yuzden kilit artik ACIK olmasini ve DOGRU DEGERDE olmasini bekliyor.
@@ -633,14 +633,19 @@ ok(net.n_param() > 6_000_000, "6M+ parametre (model_b15 3,23M)",
 # --- 7) MODUL SOZLESMESI -------------------------------------------------
 print("\n=== 7) SOZLESME ===")
 for g in ("AYAR", "egit", "fark_bas", "ModelSade", "TABAN"):
-    ok(hasattr(S, g), f"model_05.{g} var", "kos_05.py duser")
+    ok(hasattr(S, g), f"model_08.{g} var", "kos_08.py duser")
+# !! `sor_08` LISTEDEN CIKTI (18 Eylul, kullanici dosyayi SILDI:
+# *"sor py sacma olmustu"*). O arac soruyu kendi cozumluyor, diziyi
+# `kodla_1hop` ile KENDI kuruyor ve modele yalniz cevap yuvalarini
+# sorduruyordu -- yani ekranda gorulen sey modelin dil uretimi DEGILDI.
+# Yerini `konus_08` aldi: kisit yok, model kendi yazdigini okur.
 for ad in ("veri_08", "taban_08", "ayar_08", "pencere_08", "tani_08",
-           "asama1_08", "sor_08", "kos_08", "konus_08"):
+           "asama1_08", "kos_08", "konus_08"):
     _r2 = subprocess.run(
         [sys.executable, "-c",
          f"import sys; sys.path.insert(0, {_B!r}); import {ad}"],
         capture_output=True, text=True, cwd=_B)
-    ok(_r2.returncode == 0, f"{ad} TEK BASINA import (yalniz model_05/)",
+    ok(_r2.returncode == 0, f"{ad} TEK BASINA import (yalniz model_08/)",
        _r2.stderr.strip()[-200:])
 
 # --- 8) KOPYALAMADA KAYBOLAN DUZELTMELER ---------------------------------
@@ -781,21 +786,135 @@ for _b, _x in sorted(_nl.items()):
 ok(set(_nl) >= {"comp", "ent", "ent_yok"},
    "null tabani HUKUM bolmelerinin hepsini olcuyor", str(sorted(_nl)))
 
+# --- 7e) KOL NUMARASI KAPISI -----------------------------------------
+# !! BU BOLUM BIR KUSURDAN DOGDU (18 Eylul). Kullanici test CIKTISINDA
+# `model_05.AYAR var`, `veri_05 KENDI IDDIALARINI tutuyor mu` gibi
+# satirlar gordu ve sordu: *"bu niye var model 05?"*
+#
+# SEBEP YAPISALDI: her kopyada yeniden adlandirma BIR NESIL geriye
+# bakiyordu (`_07` -> `_08`). `_05`te kalmis atiflar hicbir nesilde
+# CEVRILMEDI -- model_06'dan beri yanlistilar. Assert'ler DOGRU modulu
+# kullaniyordu (testler GECIYORDU), ama her MESAJ hangi kol oldugunu
+# YANLIS soyluyordu. 137 satir.
+#
+# Daha kotusu: toptan yeniden adlandirma eskimis bir IDDIAYI da cevirdi
+# -- "`f4ce53fd1555` model_05 ile AYNI" satiri "model_08 ile AYNI" oldu,
+# ki model_08'in izi cfafdcc15a23. Kor yeniden adlandirma eskimis bir
+# cumleyi KENDINDEN EMIN bir yalana cevirir.
+#
+# !! KAPI DAR TUTULDU: yalniz EKRANA BASILAN metin (ok(...) aciklamasi
+# ve baslik) taranir. Yorumlardaki gecmise atif (`havuz_06 yakaladi`,
+# `veri_04'te`) MESRU ve cok -- onlari taramak kapiyi gurultuye bogar
+# ve gurultulu kapi kapatilir.
+print("\n=== 7e) KOL NUMARASI KAPISI ===")
+import glob as _glob, io as _io2, re as _re2                 # noqa: E402
+_KOL = "08"
+# EKRANA BASILAN metinde BASKA kol numarasi. Gecmise atif ACIKCA yazilir.
+_GECMIS_MSJ = ("model_b15", "model_05'ten KUCUK", "model_a ")
+_kot = []
+for _f in sorted(_glob.glob(os.path.join(_B, "test_*.py"))):
+    for _i, _l in enumerate(_io2.open(_f, encoding="utf-8"), 1):
+        _t = _l.strip()
+        if _t.startswith("#"):
+            continue
+        for _q in _re2.findall(r'"([^"]*)"', _l) + _re2.findall(r"'([^']*)'", _l):
+            _m = _re2.search(r"(?:model|veri|taban|ayar|asama1|kos|analiz|"
+                             r"pencere|sor|tani|konus|havuz|graf|test)_(0[0-9])",
+                             _q)
+            if _m and _m.group(1) != _KOL and not any(
+                    _g in _q for _g in _GECMIS_MSJ):
+                _kot.append(f"{os.path.basename(_f)}:{_i} {_q[:60]}")
+                break
+ok(not _kot,
+   "test MESAJLARI BASKA bir kol numarasi ANMIYOR",
+   f"{len(_kot)} mesaj: {_kot[:3]}")
+
 print("\n=== 8) KOPYALAMADA KAYBOLAN DUZELTMELER ===")
 import inspect, io                                          # noqa: E402
 import konus_08 as _K                                       # noqa: E402
 
+# !! BU IKI KILIT GEVSETILMEDI, HEDEFI DEGISTI (18 Eylul).
+# CLAUDE.md'deki `wd 0.5` ve `ort_bas 6000` emsali: kilit bir SAYIYI
+# degil bir KURALI koruyor -- *arac, HUKMUN DAYANDIGI modeli
+# gostermeli*. Kural aynen duruyor, bu kolda hukum baska okumaya
+# dayaniyor.
+#
+# Once 5 bekleniyordu, cunku `model_06`da pencere tek anlik goruntuden
+# COK iyiydi (one 0.7530 -> 0.9237) ve varsayilan 1 kalirsa arac
+# olculenden KOTU bir modeli gosteriyordu. O duzeltme kopyalamada IKI
+# KEZ kayboldu, kilit onun icin konuldu.
+#
+# model_08 GERI BESLEMELI: agirlik zaten egitim icinde her 2000 adimda
+# ortalaniyor ve ONKAYIT §3 birincil okumayi EGRI yaziyor. Kilidin
+# hedefi bu yuzden 1 oldu -- ONCEDEN YAZILMIS okuma kurali.
+#
+# !! GEREKCE BIR KEZ YANLIS YAZILDI (ayni gun). "Bu kolda pencere ZARAR
+# veriyor" denmisti; dayanagi 20.000 olcumuydu ve 40.000'de DORT
+# olcude de isaret dondu:
+#     adim   comp EGRI / PENCERE        one EGRI / PENCERE
+#     20000    0.6338 / 0.5774            0.9210 / 0.9030
+#     40000    0.7958 / 0.8100            0.9543 / 0.9703
+# Pencere, egri DIKKEN geri ceker; egri DUZLESINCE yardim eder. Yani
+# "hangisi iyi" ADIMA BAGLI ve varsayilan ona dayandirilamaz.
+# AYAKTA KALAN: bu kolda fark KUCUK (|0.02| civari); model_07'de ayni
+# fark +0.18'e cikiyor. Ayrinti konus_08.kur docstring'inde.
 _sig = inspect.signature(_K.kur).parameters["genislik"].default
-ok(_sig == 5, "konus_08.kur VARSAYILANI 5 (pencere ortalamasi)",
-   f"genislik={_sig} -- 1 ise arac OLCULENDEN BASKA modeli gosterir")
+ok(_sig == 1, "konus_08.kur VARSAYILANI 1 (ORTALAMA YOK -- egri okumasi)",
+   f"genislik={_sig} -- 5 ise arac OLCULENDEN BASKA modeli gosterir")
 
 _ks = io.open(os.path.join(_B, "konus_08.py"), encoding="utf-8").read()
-ok('ap.add_argument("--genislik", type=int, default=5' in _ks,
-   "konus_08 --genislik VARSAYILANI da 5",
+ok('ap.add_argument("--genislik", type=int, default=1' in _ks,
+   "konus_08 --genislik VARSAYILANI da 1",
    "argparse varsayilani `kur`dan AYRI; ikisi ayrisirsa CLI kazanir")
+
+# !! TURKCE CIKTI KAPISI (18 Eylul). `konus.bat` chcp 65001 +
+# PYTHONIOENCODING yaziyordu, yani CIFT TIKLAYINCA dogru basiyordu ama
+# terminalden/IDE'den `Elif Ayd?n'd?r` cikiyordu. Bu arac "gozlerimle
+# gormek istiyorum" diye istendi; okunmayan cikti o isi gormez, ve bozuk
+# metin bir arizayi GIZLEYEBILIR (ayni ders §9'da alinmisti).
+ok("reconfigure(encoding=\"utf-8\"" in _ks,
+   "konus_08 stdout'u KENDI UTF-8'e ceviriyor",
+   "kodlama BASLATICIYA birakilmis -- konus.bat tek giris noktasi DEGIL")
 ok("_c = _p[:1]" in _ks and "model DURMADI" in _ks,
    "bosluk cevabi TEK JETON basiliyor",
    "egitimde bosluk 187.296/187.296 kez tek jetonluk")
+
+# --- SINAV GOZU (18 Eylul) ----------------------------------------------
+# !! BIR KUSURDAN DOGDU. Kullanici sinav dosyasindan satir kopyalayip
+# kisaltarak test etti ("Elif Çelik'in danışmanı"), model 2-hop'a uzatti,
+# ve "konus'un arizasi mi?" diye sordu. Ariza degildi -- olculdu (300
+# olgu): %81,3 2-hop'a uzatiyor, urettigi cumle %92,7 DOGRU. Model
+# olguyu BILIYOR, baska cumle kurmayi SECIYOR. Ama arac bunu
+# soylemiyordu: "bilmiyor" ile "baska soruyu cevapladi" ekranda AYNI
+# goruntuyu veriyordu, ve cevap dogru ciktiginda EZBER mi GENELLEME mi
+# oldugu da gorunmuyordu.
+#
+# Kapi SUBSTRING DEGIL, DAVRANIS siniyor: `sinav_coz` neyi kabul edip
+# neyi reddettigi. Substring kapisi yeniden yazimda sessizce gecerdi.
+_sc = _K.sinav_coz
+_1hop = (M._e(v, 0) + [M._kesme(v), M._nin(v, e=0), M.REL_OFF + 0])
+_2hop = (M._e(v, 0) + [M._kesme(v), M._nin(v, e=0), M.REL_OFF + 0,
+                       M._nin(v, r=0), M.REL_OFF + 1])
+ok(_sc(v, _1hop) == (tuple(M._e(v, 0)), [0]),
+   "sinav_coz 1-hop sorusunu TANIYOR", f"{_sc(v, _1hop)}")
+ok(_sc(v, _2hop) == (tuple(M._e(v, 0)), [0, 1]),
+   "sinav_coz 2-hop sorusunu TANIYOR", f"{_sc(v, _2hop)}")
+# SORU SOZCUGU eklenmisse artik "sinav satiri" degil -> SUSMALI.
+ok(_sc(v, _1hop + [v.soru0]) is None,
+   "sinav_coz soru sozcugu gelince SUSUYOR",
+   "yoksa yarim cumleye sinav notu basar")
+# CEVAP da yazilmissa sorulacak bir sey kalmamis -> SUSMALI.
+ok(_sc(v, _1hop + M._e(v, 1)) is None,
+   "sinav_coz cevap yazilmissa SUSUYOR",
+   "kullanici tam cumle yazdiysa sinav gozu devreye GIRMEMELI")
+# !! DESEN `_sb = sinav_bakisi(` -- CAGRI, tanim DEGIL. Ilk surum
+# "sinav_bakisi(v, net, D, jet, BOL, E2)" ariyordu ve o dize dosyada
+# IKI KEZ geciyor (def satiri + cagri): cagri silinse bile kapi
+# GECIYORDU. Mutasyonla yakalandi, 18 Eylul. Bir kapinin arayacagi dize
+# TEK yerde gecmeli, yoksa kapi degil dekordur.
+ok("_sb = sinav_bakisi(" in _ks,
+   "sinav gozu KONUSMA DONGUSUNDE cagriliyor",
+   "fonksiyon var ama kullanilmiyorsa ekranda hicbir sey degismez")
 
 _bat = io.open(os.path.join(_B, "konus.bat"), encoding="utf-8",
                errors="replace").read()

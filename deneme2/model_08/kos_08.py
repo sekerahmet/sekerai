@@ -1,26 +1,26 @@
 # -*- coding: utf-8 -*-
 """kos_08 — BU KOLUN KENDI kosucusu. TEK BASINA DURUR.
 
-Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_05 folderi
-altinda olmali. model_05 diger hicbir model ile ayni seyi
+Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_08 folderi
+altinda olmali. model_08 diger hicbir model ile ayni seyi
 kullanmamali."*
 
 `deneme2/kos.py`nin KOPYASI (uretici: elle, tek seferlik). Farklar:
 
-    --model YOK       bu kosucu yalniz model_05'i baslatir; aile klasoru
+    --model YOK       bu kosucu yalniz model_08'i baslatir; aile klasoru
                       ARANMAZ (paylasilan kos.py `deneme2/*/<ad>.py`
-                      glob'u yapiyordu -- model_05 artik o aramaya
+                      glob'u yapiyordu -- model_08 artik o aramaya
                       girmiyor bile)
     yol               yalniz KENDI klasoru sys.path'e girer
 
-    python kos_05.py --ev <cikti koku> [--tohum 0] [--commit X]
+    python kos_08.py --ev <cikti koku> [--tohum 0] [--commit X]
                      [--ustune] [--adim N] [--surdur]
 """
 from __future__ import annotations
 
 import argparse, importlib, os, sys
 
-KOK = os.path.dirname(os.path.abspath(__file__))       # deneme2/model_05/
+KOK = os.path.dirname(os.path.abspath(__file__))       # deneme2/model_08/
 MODEL = "model_08"
 
 
@@ -77,7 +77,7 @@ hangi sürüm olduğunu söyler.
 
 def main():
     ap = argparse.ArgumentParser()
-    # --model YOK: bu kosucu yalniz model_05'i baslatir.
+    # --model YOK: bu kosucu yalniz model_08'i baslatir.
     ap.set_defaults(model=MODEL)
     ap.add_argument("--ev", required=True, help="cikti koku; t<N>/ altina yazar")
     ap.add_argument("--tohum", type=int, nargs="+", default=[0])

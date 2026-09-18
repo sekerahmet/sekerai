@@ -2,11 +2,11 @@
 """ayar_08 — BU KOLUN KENDI ayari. TEK BASINA DURUR.
 
 Kullanici karari, 16 Eylul 2026:
-    *"bunlarin hepsi model_05 folderi altinda olmali. model_05 diger
+    *"bunlarin hepsi model_08 folderi altinda olmali. model_08 diger
     hicbir model ile ayni seyi kullanmamali."*
 
 Onceki surum `from model_b15 import AYAR as TABAN` diyordu; yani
-model_05'in ayari model_b15 -> model_b14 -> model_b13 -> ... zincirinden
+model_08'in ayari model_b15 -> model_b14 -> model_b13 -> ... zincirinden
 DEVRALINIYORDU ve zincirin herhangi bir halkasi degisince sessizce
 kayardi. Artik oyle degil: her alan ASAGIDA, `Ayar()` varsayilaninin
 uzerine, TEK TEK ve gerekcesiyle yaziliyor.
@@ -19,11 +19,11 @@ IKI GRUP, IKI GEREKCE
 
   GOREV alanlari    -> model_b15'in gordugu sinavla AYNI KALMASI
                        BEKLENEN alanlar. model_03'e kadar hepsi
-                       birebirdi. model_05 IKISINI BILEREK degistiriyor
+                       birebirdi. model_08 IKISINI BILEREK degistiriyor
                        ve ikisi de BU KOLUN TANIMI:
                          veri_ad  yeni veri (GOREV_ALAN'da zaten yok)
                          ek_kip   "tr" -> "tr2"
-                       `test_05.py` bunlari BILDIRILMIS AYRISMA diye
+                       `test_08.py` bunlari BILDIRILMIS AYRISMA diye
                        listeler; LISTEDE OLMAYAN bir alan kayarsa test
                        yine duser.
 
@@ -40,7 +40,7 @@ STANDART TARIFE GORE: NE DEVRALINMADI
    (Lookahead, Zhang ve ark. 2019) ve nanoGPT'de, Llama'da, Pythia'da,
    GPT-2/GPT-3 tarifinde YOK.
 
-   `model_05` standart bir transformerin ne yaptigini olcecekse,
+   `model_08` standart bir transformerin ne yaptigini olcecekse,
    standart olmayan bir optimizasyon numarasiyla kosamaz. KAPALI.
    (`Ayar()` varsayilani zaten 0; model_b15 onu 10000 yapiyordu.)
 
@@ -85,20 +85,20 @@ from __future__ import annotations
 
 from taban_08 import Ayar                                    # noqa: E402
 
-# Sinavin AYNI kalmasi GEREKEN alanlari. `test_05.py` bunlari model_b15
+# Sinavin AYNI kalmasi GEREKEN alanlari. `test_08.py` bunlari model_b15
 # ile karsilastirir: biri kayarsa sinav/egitim havuzu ayrisir ve sayilar
 # ayni tabloda okunamaz.
 #
 # !! `veri_ad` bu listede YOK ve olmamali -- ama SEBEBI DEGISTI.
 # model_03'e kadar ad farkliydi, ICERIK ayniydi ve kilit icerigi
-# siniyordu. model_05'te ICERIK DE FARKLI: bu kolun DUGMESI veri.
-# Dolayisiyla `test_05` artik "veri_05 == veri_okul4" demiyor;
-# `veri_05`in KENDI IDDIALARINI siniyor (sema, soy agaci, zincir
+# siniyordu. model_08'te ICERIK DE FARKLI: bu kolun DUGMESI veri.
+# Dolayisiyla `test_08` artik "veri_08 == veri_okul4" demiyor;
+# `veri_08`in KENDI IDDIALARINI siniyor (sema, soy agaci, zincir
 # siniflari, notrluk, cografya, IZ).
 #
 # `ek_kip` LISTEDE ve BILEREK ayrisiyor ("tr" -> "tr2"): iliski
 # jetonu kelimenin kendisi, ekler gercek allomorf, soru sozcugu var,
-# <YOK> dolgusu yok. `test_05` bunu bildirilmis ayrisma diye isler.
+# <YOK> dolgusu yok. `test_08` bunu bildirilmis ayrisma diye isler.
 GOREV_ALAN = ("veri_tohum", "ent_pay", "comp_pay", "arama_pay",
               "ood_pay", "kati_pay", "jeton_ad", "ek_kip", "bicim",
               "ident_frac", "ident_kip", "belge_pay", "tam_kayip",

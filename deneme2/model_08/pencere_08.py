@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """pencere_08 — BU KOLUN KENDI BIRINCIL OKUMASI. TEK BASINA DURUR.
 
-Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_05 folderi
-altinda olmali. model_05 diger hicbir model ile ayni seyi
+Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_08 folderi
+altinda olmali. model_08 diger hicbir model ile ayni seyi
 kullanmamali."*
 
 `model_a/pencere_a.py`nin KOPYASI (uretici: scratchpad/kur_okuma00.py). Modeli
 `ModelSade` ile kurar. Paylasilan surumde yapilan bir degisiklik buraya
-GECMEZ; `test_05.py` ikisinin AYNI SEYI olctugunu her kosuda siniyor.
+GECMEZ; `test_08.py` ikisinin AYNI SEYI olctugunu her kosuda siniyor.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import taban_08 as M                                          # noqa: E402
 from model_08 import ModelSade                                # noqa: E402
 
-# model_05'in TEK modeli var; kanca yok, dogrudan yazili.
+# model_08'in TEK modeli var; kanca yok, dogrudan yazili.
 MODEL_SINIFI = ModelSade
 
 
@@ -55,7 +55,7 @@ def ayar_oku(klasor: str) -> M.Ayar:
     # ALANLAR SONRADAN EKLENEBILIR. Eski `ayar_t<N>.json`larda yeni alan
     # YOKTUR; tablo olmasa bu assert butun eski kosularin OLCULMESINI
     # kirardi. Olculdu (15 Eylul, `veri_ad` eklenince fiilen kirildi).
-    # Tablo `taban_05.ESKI_VARSAYILAN` -- TEK yerde durur, `surdurme_oku`
+    # Tablo `taban_08.ESKI_VARSAYILAN` -- TEK yerde durur, `surdurme_oku`
     # da ayni tabloyu kullanir, ikisi ayrisamaz.
     for k in sorted(eksik & set(M.ESKI_VARSAYILAN)):
         d[k] = M.ESKI_VARSAYILAN[k]
@@ -142,7 +142,8 @@ def fim_dogruluk(net, v, lst, hangi, bs=256):
         ILISKI  Ibrahim Yilmaz'in <BOS>nin memleketi Kocaeli'dir -> arkadasi
 
     !! BUNLAR HUKUM VERMEZ. Birincil olcu ILERI yon: olcme izi
-    `f4ce53fd1555` model_05 ile AYNI ve o kiyas yalniz ileri yonde
+    (18 Eylul'e kadar `f4ce53fd1555`ti ve model_05/06/07 ile AYNIYDI;
+    veri duzeltilince `cfafdcc15a23` oldu.) O kiyas yalniz ileri yonde
     gecerli. Burasi ek bilgi; "hangi olcu iyi ciktiysa onu sectik"
     durumuna dusmemek icin ayri tabloda ve ayri adla duruyor.
 
@@ -208,7 +209,7 @@ def olc(ayar: M.Ayar, veri: M.Veri, kod: dict, L: dict, sd: dict) -> dict:
     # ISE YARAYIP YARAMADIGI olculmeli.
     #
     # !! HUKUM VERMEZ. Birincil olcu DUZ BILDIRIM (`kodla_2hop`,
-    # bicim 0), cunku olcme izi `f4ce53fd1555` model_05 ve model_06 ile
+    # bicim 0). Olcme izi 18 Eylul'e kadar model_05/06/07 ile
     # AYNI ve o kiyas yalniz orada gecerli. Soru bicimi YENI bir yuzey;
     # onu birincil yapmak, uc kolu ayni tabloda okuma imkanini bitirir.
     # "Hangi olcu iyi ciktiysa onu sectik" durumuna dusmemek icin ayri
@@ -263,7 +264,7 @@ def main():
     L = M.olcme_listeleri(ayar, veri)
     kod = {k: (M.kodla_1hop(veri, L[k]) if k == "one" else M.kodla_2hop(veri, L[k]))
            for k in L if L[k]}
-    # OLCME SETI PARMAK IZI -- taban_05.olcme_izi()'nden, KOPYA DEGIL.
+    # OLCME SETI PARMAK IZI -- taban_08.olcme_izi()'nden, KOPYA DEGIL.
     iz = M.olcme_izi(L)
     print("  olcme    " + "  ".join(f"{k} {len(L[k])}" for k in L if L[k]))
     print(f"  parmak izi {iz}")
@@ -359,7 +360,7 @@ def main():
         print("=" * 62)
         print("SORU BICIMI -- AYNI zincirler, '... kimdir?' diye sorulmus")
         print("  !! HUKUM VERMEZ. Birincil olcu yukaridaki DUZ BILDIRIM;")
-        print("     olcme izi f4ce53fd1555 ile model_05/06 kiyasi YALNIZ")
+        print("     olcme izi ESKIDEN model_05/06/07 ile ayniydi; 18 Eylul'de")
         print("     orada gecerli. Burasi EKLENTININ ISE YARAYIP")
         print("     YARAMADIGINI soyler, kolun hukmunu DEGIL.")
         print(f"  {'pencere':<18}" + "".join(f"{b:>11}" for b in _sb))
@@ -380,7 +381,7 @@ def main():
         print(f"\n{'='*62}")
         print("BOSLUK DOLDURMA -- AYNI zincirler, BASKA yonden sorulmus")
         print("  !! HUKUM VERMEZ. Birincil olcu yukaridaki ILERI yon;")
-        print("     olcme izi f4ce53fd1555 ile model_05 kiyasi YALNIZ orada")
+        print("     veri degisti, iz cfafdcc15a23. O kiyas ARTIK YAPILAMAZ.")
         print("     gecerli.")
         print("  IKI SUTUN DA TEK JETONLUK bosluk sorar -- egitimle uyumlu")
         print("  (egitimdeki 187.296 boslugun 187.296'si tek jetonluk).")

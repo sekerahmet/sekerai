@@ -6,20 +6,26 @@ icin yerelde bir py yaz. calistirinca cikan ekranda ben kendim sorumu
 sorayim o cevap versin, sablon vs istemiyorum. sadece kendim test edip
 gozlerimle gormek istiyorum."*
 
-`sor_08.py` NEDEN YETMEDI -- ikisi AYRI SEY olcuyor:
+BU ARAC NEDEN VAR -- oncesinde SABLONLU bir sorucu vardi ve ise yaramadi:
 
-    sor_08    soruyu COZUMLER (varlik + iliski), diziyi `kodla_1hop` ile
-              KENDI KURAR ve modele yalniz CEVAP YUVALARINI sordurur.
-              Yani cumlenin govdesini ARAC yaziyor, model bosluk
-              dolduruyor. Yaninda graf'taki dogru cevabi, bolmeyi ve
-              kopruyu basar. Bu bir DENETIM araci ve oyle kalmali.
+    SABLONLU   soruyu COZUMLER (varlik + iliski), diziyi `kodla_1hop` ile
+               KENDI KURAR ve modele yalniz CEVAP YUVALARINI sordurur.
+               Yani cumlenin govdesini ARAC yaziyor, model bosluk
+               dolduruyor. Gordugun sey modelin dil uretimi DEGIL.
 
-    konus_08  yazdigin cumleyi JETONLAYIP modele verir, gerisini MODEL
-              YAZAR: butun sozluk uzerinde argmax, nokta gelene kadar.
-              Sablon yok -- cevabin kac kelime olacagini, kesme
-              isaretinin nereye gelecegini, cumlenin nerede bitecegini
-              model soyler. Arac dogru cevabi BILMEZ ve "dogru/yanlis"
-              DEMEZ. Model ne yazdiysa o basilir.
+    konus_08   yazdigin cumleyi JETONLAYIP modele verir, gerisini MODEL
+               YAZAR: butun sozluk uzerinde argmax, nokta gelene kadar.
+               Sablon yok -- cevabin kac kelime olacagini, kesme
+               isaretinin nereye gelecegini, cumlenin nerede bitecegini
+               model soyler. Arac dogru cevabi BILMEZ ve "dogru/yanlis"
+               DEMEZ. Model ne yazdiysa o basilir.
+
+!! BU AYRIM OLCUME DE BAKAR. `dogruluk()` cevap yuvalarinda KISITLI
+argmax yapiyor (yalniz ad kelimeleri yarisir) ve her konumu GERCEK
+onekle puanliyor -- yani model kendi hatasinin uzerinde yurumek zorunda
+kalmiyor. Burasi ikisini de kaldirir: kisit yok, model kendi yazdigini
+okur. `one = 0.95` ile "duzgun cumle kuruyor" arasindaki fark ancak
+burada gorunur.
 
 !! BU BIR OLCU DEGIL. Elle secilmis sorulardir; hukum `pencere_08` ile
 verilir (onkayit `belge/onkayit/model_08.md`).
@@ -64,6 +70,27 @@ _K = os.path.dirname(os.path.abspath(__file__))
 if _K not in sys.path:
     sys.path.insert(0, _K)
 
+# --- TURKCE CIKTI: KODLAMA BETIGIN ISI, BASLATICININ DEGIL ---------------
+# !! KUSUR (18 Eylul). `konus.bat` `chcp 65001` + PYTHONIOENCODING=utf-8
+# yaziyor, yani CIFT TIKLAYINCA dogru basiliyordu. Baska her yerden --
+# terminalden, IDE'den, duz `python konus_08.py` ile -- Windows yerel
+# kodlamasi (cp1254/cp857) devreye giriyor ve cikti soyle cikiyordu:
+#
+#     Elif Ayd?n'd?r.        yerine       Elif Aydın'dır.
+#
+# Bu araci "kendi gozlerimle gormek istiyorum" diye istendi; okunmayan
+# cikti o isi GORMEZ. Ustelik bozuk metin bir arizayi GIZLEYEBILIR --
+# ayni ders test_08 §9'da alt surec cagrisinda zaten alinmisti
+# (`text=True` tek basina yerel kodlamayi kullaniyordu).
+#
+# Duzeltme BASLATICIDA degil BETIKTE: `konus.bat` tek giris noktasi
+# degil. Kapatilamayan bir hata degil, o yuzden try ile sarili.
+for _akis in (sys.stdout, sys.stderr):
+    try:
+        _akis.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass
+
 import taban_08 as M                                          # noqa: E402
 import pencere_08 as P                                        # noqa: E402
 import analiz_08 as AZ                                        # noqa: E402
@@ -74,7 +101,7 @@ KLASOR = os.path.join("G:" + os.sep, "Drive'ım", "model_08", "t0")
 
 # Turkce harfleri ASCII'ye indirir. Kullanici "Ayse" de yazabilsin
 # "Ayşe" de -- jeton adlari ASCII (par_ad), ekranda gosterilen bicim
-# Turkce (veri_05.TR). Ikisi de ayni anahtara duser.
+# Turkce (veri_08.TR). Ikisi de ayni anahtara duser.
 #
 # !! BUYUK/KUCUK HARF KORUNUR. Kullanici, 17 Eylul: *"Fakultesi ile
 # fakultesi ayri seyler, o da ilk harften ayrisiyor."* Dogru: `fakultesi`
@@ -146,7 +173,7 @@ class Sozluk:
         # EK ALLOMORFLARI. Katlanmis hallerinde CAKISIYORLAR ('in ile 'in,
         # 'dir ile 'dir -- fark yalniz noktasiz i'de), o yuzden burada tek
         # jeton degil LISTE tutulur ve dogrusu ONCEKI KELIMEDEN secilir
-        # (unlu uyumu; `taban_05._nin` / `_dir` ile AYNI tablo).
+        # (unlu uyumu; `taban_08._nin` / `_dir` ile AYNI tablo).
         self.nin, self.dir = {}, {}
         for i, e in enumerate(v.ek_nin_ad):
             self.nin.setdefault(kat(e).lower(), []).append(v.nin0 + i)
@@ -323,27 +350,52 @@ class Sozluk:
 
 
 # --- MODEL ---------------------------------------------------------------
-def kur(klasor, genislik=5, adim=None):
-    """Modeli kur. VARSAYILAN: son 5 anlik goruntunun AGIRLIK ORTALAMASI.
+def kur(klasor, genislik=1, adim=None):
+    """Modeli kur. VARSAYILAN: SON ANLIK GORUNTU, ortalama YOK.
 
-    !! ONCEDEN 1 IDI -- yani elimizdeki EN IYI modeli GOSTERMIYORDU.
-    Kullanici sordu (17 Eylul): *"su an konus en guncel agirlikli
-    ortalama iyi olan versiyon mu?"* Degildi. Olculdu (model_06, 20.000):
+    !! VARSAYILAN BU KOLDA TERSINE DONDU (18 Eylul) -- ve degistiren
+    sey KURAL degil, OLCUM.
+
+    Kural aynen duruyor: *arac, HUKMUN DAYANDIGI modeli gostermeli;
+    baska bir modeli gosterirse ekranda gorulen sey OLCULEN sey OLMAZ.*
+    Degisen, bu kolda hukmun hangi okumaya dayandigi.
+
+    `model_06`da hukum PENCERE ile veriliyordu ve olculmustu (20.000):
 
         tek anlik goruntu   one 0.7530  seen 0.8003  comp 0.3118  ent 0.1977
         pencere (5 ort.)    one 0.9237  seen 0.9723  comp 0.3970  ent 0.3083
         FARK                   +0.1707     +0.1720     +0.0852     +0.1106
 
-    `one` 0,75 ile 0,92 arasindaki fark, elle sorulan sorularda gorulen
-    sacma cevaplarin buyuk kismini aciklar. Hukum de zaten pencereyle
-    veriliyor (CLAUDE.md "Birincil okuma"); arac baska bir modeli
-    gosterirse ekranda gorulen sey OLCULEN sey OLMAZ.
+    O yuzden varsayilan 5 yapilmisti. `model_08` GERI BESLEMELI bir kol:
+    agirlik ZATEN egitim icinde her 2000 adimda ortalaniyor, ve onkayit
+    §3 birincil okumayi EGRI olarak yaziyor. VARSAYILAN 1 OLMASININ
+    SEBEBI BU -- onceden yazilmis okuma kurali.
 
-    !! model_07'ye KOPYALANIRKEN KAYBOLDU: bu klasor, duzeltmeyi
-    tasiyan commit'ten ONCE kopyalandi ve varsayilan 1'e geri dondu.
-    Ayni hata ikinci kez.
+    !! BURAYA ONCE BASKA BIR GEREKCE YAZILDI VE 20 DAKIKA SONRA CURUDU.
+    Yazilan sey: "bu kolda pencere ZARAR veriyor". Dayanagi 20.000
+    olcumuydu ve o adimda dogruydu; 40.000'de ISARET DONDU:
 
-    `--genislik 1` ile eski davranisa donulur.
+        adim   olcu     EGRI   PENCERE(5)   pencere - egri
+        20000  comp   0.6338     0.5774        -0.0564
+        40000  comp   0.7958     0.8100        +0.0142
+        20000  one    0.9210     0.9030        -0.0180
+        40000  one    0.9543     0.9703        +0.0160
+
+    Dort olcude de dondu. Sebep anlasilir: pencere, EGRI DIKKEN eski
+    (kotu) anlik goruntuleri karistirdigi icin geri ceker; egri
+    DUZLESINCE ayni islem yalniz gurultuyu siler ve yardim eder.
+    Yani "hangisi daha iyi" ADIMA BAGLI, ve bir varsayilan ona
+    dayandirilamaz.
+
+    AYAKTA KALAN: bu kolda iki okuma arasindaki fark KUCUK (|0.02|
+    civari, 20.000'de en cok 0.056). `model_07`de ayni fark +0.18'e
+    kadar cikiyor ve BUYUYOR. Yani pencere islemi burada ne kadar
+    kazandirirsa kazandirsin, IHMAL EDILEBILIR -- hangi modeli
+    gosterdigimiz ekranda pek bir sey degistirmiyor. Secim bu yuzden
+    olcume degil ONKAYDA birakildi.
+
+    `--genislik 5` ile pencere okumasi yine alinabilir; iki okumayi yan
+    yana gormek icin ayni soruyu iki kez sor.
     """
     ayar = P.ayar_oku(klasor)
     v = M.veri_kur(ayar, yaz=lambda *a: None)
@@ -397,7 +449,7 @@ def devam(v, net, jet, ornekle=False, isi=1.0, tohum=None):
     # 20000, onek "Furkan"): Demir %15,40  Sahin %14,53  Kaya %14,32 --
     # 0,87 puanlik bir fark ciktinin %100'unu belirliyor. Model "Demir"
     # demiyor, "sekizinden biri" diyor. Ornekleme dagilimi OLDUGU GIBI
-    # gosterir; hukum yine `pencere_05`in (o ARGMAX olcer, olcum
+    # gosterir; hukum yine `pencere_08`in (o ARGMAX olcer, olcum
     # tekrarlanabilir olsun diye).
     rs = np.random.default_rng(tohum)
     x = list(jet)
@@ -473,19 +525,141 @@ def dene(D, S, n=300):
     return 1 if kotu else 0
 
 
+# --- SINAV GOZU ----------------------------------------------------------
+# !! BU BOLUM BIR KUSURDAN DOGDU (18 Eylul). Kullanici sinav dosyasindan
+# (`veri/model_08/10_sinav.txt`) satir kopyalayip kisaltarak test etti:
+#
+#     dosyada : Elif Çelik'in danışmanı Onur Demir'dir.
+#     yazdigi : Elif Çelik'in danışmanı
+#     aldigi  : Elif Çelik'in danışmanının bölümü Etimesgut Maliye Bölümü'dür.
+#
+# ve "cogu zaman dogru cevap alamadim, konus'un arizasi mi?" diye sordu.
+# Ariza DEGILDI: model serbest uretimde en olasi devami seciyor ve
+# havuzda o onekten sonra 2-hop devami 12 kat daha cok. Olculdu (300
+# olgu, adim 40000): %81,3 2-hop'a uzatiyor ve urettigi cumle %92,7
+# DOGRU cikiyor. Yani model olguyu BILIYOR, baska bir cumle kurmayi
+# SECIYOR.
+#
+# Ama arac bunu SOYLEMIYORDU, ve iki ayri sey ekranda ayni goruntuyu
+# veriyordu: "bilmiyor" ile "baska soruyu cevapladi". Ustelik cevap
+# dogru ciktiginda da EZBER mi GENELLEME mi oldugu gorunmuyordu --
+# kullanicinin denedigi dort zincirin dordu de `seen`di ve bunu ancak
+# grafa sorarak ogrendik.
+#
+# Burasi ikisini de ekrana getirir. MOD SECTIRMEZ: hatirlanmasi gereken
+# bir ayar, hatirlanmadigi gun yanlis okunur (CLAUDE.md kural 2'nin
+# yasakladigi sey). Arac girdiye bakip kendisi anlar.
+def sinav_coz(v, jet):
+    """Yazilan sey TAM BIR SINAV SORUSU mu? Oyleyse (ad_jetonlari, [r...]).
+
+    Kalip:  <ad> ' <tamlayan eki> <iliski> [<tamlayan eki> <iliski>]
+    Sonunda BASKA bir sey varsa (soru sozcugu, cevap, nokta) None doner --
+    o zaman kullanici sinav satiri degil baska bir sey yaziyor ve
+    karisiklik cikarmamak icin sinav gozu SUSAR."""
+    if v.ek0 not in jet:
+        return None
+    k = jet.index(v.ek0)
+    kalan = jet[k + 1:]
+    NIN = range(v.nin0, v.nin0 + len(v.ek_nin_ad))
+    REL = range(M.SPECIAL, M.SPECIAL + v.n_rel)
+    if not kalan or kalan[0] not in NIN:
+        return None
+    kalan, rels = kalan[1:], []
+    while kalan and kalan[0] in REL:
+        rels.append(kalan[0] - M.SPECIAL)
+        kalan = kalan[1:]
+        if kalan and kalan[0] in NIN:
+            kalan = kalan[1:]
+        else:
+            break
+    if kalan or not 1 <= len(rels) <= 2:
+        return None
+    return tuple(jet[:k]), rels
+
+
+def sinav_bolmeleri(v):
+    """(e, r1, r2) -> bolme adi. Zincir HANGI sinavda, ya da egitimde."""
+    b = {}
+    for ad, lst in (("seen (EGITIMDE GORULMUS)", v.tr2), ("comp", v.comp),
+                    ("ent", v.ent), ("ent_yok", v.ent_yok),
+                    ("ent_arama (HUKUMDE KULLANILMAZ)", v.ent_arama),
+                    ("ood", v.ood), ("ent_kati", v.ent_kati)):
+        for z in lst:
+            b[(int(z[0]), int(z[1]), int(z[2]))] = ad
+    return b
+
+
+@torch.no_grad()
+def sinav_bakisi(v, net, D, jet, BOL, E2):
+    """`dogruluk()` bu satira ne not verirdi -- SATIR SATIR.
+
+    Serbest uretimi DEGISTIRMEZ, yanina bir okuma ekler."""
+    c = sinav_coz(v, jet)
+    if c is None:
+        return None
+    ez, rels = c
+    e = E2.get(ez)
+    if e is None:
+        return None
+    out = []
+    if len(rels) == 1:
+        r = rels[0]
+        a = int(v.facts[e, r])
+        if a < 0:
+            return [f"  SINAV   : bu olgu grafta YOK ({D.VM.ILISKI[r]})"]
+        X, Pp, T = M.kodla_1hop(v, [(e, r, a)], 0)
+        out.append("  BOLME   : one -- tek adimlik olgu, EGITIMDE GORULMUS")
+    else:
+        r1, r2 = rels
+        kop = int(v.facts[e, r1])
+        a = int(v.facts[kop, r2]) if kop >= 0 else -1
+        if a < 0:
+            return ["  SINAV   : bu zincir grafta YOK "
+                    f"({D.VM.ILISKI[r1]} -> {D.VM.ILISKI[r2]})"]
+        X, Pp, T = M.kodla_2hop(v, [(e, r1, r2, kop, a)], 0)
+        bol = BOL.get((e, r1, r2), "hicbir bolmede YOK (zincir kurulmamis)")
+        out.append(f"  BOLME   : {bol}")
+        out.append(f"  KOPRU   : {D.ad(kop)}   -- cumlede GECMIYOR, model onu "
+                   "YAZMADAN kullanmali")
+    lo, hi = v.cevap_ara
+    lg = net(torch.from_numpy(X).to(M.DEV)).float()[0]
+    sec, tam, kacan = [], True, []
+    for j, (p, t) in enumerate(zip(Pp[0], T[0])):
+        p, t = int(p), int(t)
+        if t < 0:
+            continue
+        k = int(lg[p, lo:hi].argmax()) + lo
+        sec.append(k)
+        if k != t:
+            tam = False
+            kacan.append(f"yuva {j}: '{D.jeton_ad(k)}' "
+                         f"beklenen '{D.jeton_ad(t)}'")
+    bek = [int(t) for t in T[0] if int(t) >= 0]
+    out.append(f"  SINAV   : {D.oku(sec)}   "
+               f"{'DOGRU' if tam else 'YANLIS'}"
+               + ("" if tam else f"   beklenen: {D.oku(bek)}"))
+    if kacan:
+        out.append("            " + " | ".join(kacan))
+    out.append("            (cevap yuvalarinda VARLIK ADAYLARI arasinda "
+               "argmax; -dir ve nokta maskeli)")
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dene", action="store_true",
                     help="jetonlayiciyi egitim satirlarina karsi sina")
     ap.add_argument("--klasor", default=KLASOR)
-    ap.add_argument("--genislik", type=int, default=5,
+    ap.add_argument("--genislik", type=int, default=1,
                     help="son N anlik goruntunun AGIRLIK ORTALAMASI "
-                         "(varsayilan 5 -- hukum de bununla veriliyor)")
+                         "(varsayilan 1 = ORTALAMA YOK; bu kolda hukum "
+                         "EGRI ile veriliyor, cunku agirlik zaten egitim "
+                         "icinde ortalaniyor. 5 = pencere okumasi.)")
     ap.add_argument("--adim", type=int, default=None)
     ap.add_argument("--soru", action="append", default=None)
     a = ap.parse_args()
 
-    # COZUCU: `analiz_05.Dok` jeton dizisini okunabilir Turkce'ye cevirir
+    # COZUCU: `analiz_08.Dok` jeton dizisini okunabilir Turkce'ye cevirir
     # (`oku`). Kendi kopyasini cikarmak yerine O kullaniliyor -- yazim
     # kurali (ekler onceki kelimeye yapisir) TEK yerde dursun.
     D = AZ.Dok("model_08")
@@ -506,6 +680,11 @@ def main():
     print("  SORU:   Ibrahim Yilmaz'in danismaninin arkadasi kimdir?")
     print("  ONEK:   Ibrahim Yilmaz'in danismaninin arkadasi")
     print("  BOSLUK: Fatma _ 'in annesi Ayse Yilmaz'dir.")
+    print("  !! ONEK yazarsan (cevabi yazmadan) SINAV GOZU de acilir:")
+    print("     BOLME = zincir hangi sinav bolmesinde (seen/comp/ent/...)")
+    print("     SINAV = `dogruluk()` o satira ne not verirdi")
+    print("     SERBEST = modelin kendi sectigi devam (eskisi gibi)")
+    print("     Ikisi AYRISABILIR: model olguyu bilip BASKA cumle kurabilir.")
     print("  /o <cumle basi>  SONRAKI jetonun DAGILIMI    "
           "/j  jetonlari goster")
     print("  /s  ORNEKLEME ac/kapa (argmax HEP ayni cevabi verir)\n")
@@ -513,10 +692,15 @@ def main():
     ornek = [False]          # /s -- argmax yerine DAGILIMDAN cek
     # Adlari ARAMAK gerekiyor: 1608 varlik var ve olmayan bir ad
     # yazildiginda model degil ARAC susuyor. Dokumun tamami zaten
-    # `veri/model_05/` altinda; bu yalniz elin altinda dursun diye.
+    # `veri/model_08/` altinda; bu yalniz elin altinda dursun diye.
     TR = D.VM.TR
     adlar = [(" ".join(TR.get(w, w) for w in M.kelimeler(v, e)))
              for e in range(v.n_ent)]
+    # SINAV GOZU icin iki tablo. `E2` ad JETONLARINDAN varliga gider --
+    # `Sozluk.ad2e` kelime dizgelerinden gidiyor ve burada elimizde
+    # jeton var; ikinci bir cozumleme yapmamak icin ayri tablo.
+    E2 = {tuple(M._e(v, e)): e for e in range(v.n_ent)}
+    BOL = sinav_bolmeleri(v)
 
     def bir(q):
         if q == "/j":
@@ -571,6 +755,13 @@ def main():
             return
         for n in notlar:
             print(f"  ({n})")
+        # SINAV GOZU -- serbest uretimden ONCE, cunku kullanicinin sordugu
+        # sey bu. Sinav sorusu degilse SUSAR.
+        _sb = sinav_bakisi(v, net, D, jet, BOL, E2)
+        if _sb:
+            for _l in _sb:
+                print(_l)
+            print("  SERBEST : ", end="")
         # BOSLUK SORULDU MU? Nedensel model boslugun sagini o
         # konumda goremez; dilde cikarilan parca SONA tasiniyor ve
         # arasina <AYIR> giriyor. Kullanici "_" yazdiysa diziyi o

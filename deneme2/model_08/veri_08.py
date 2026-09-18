@@ -337,7 +337,7 @@ TR.update({"Universitesi": "Üniversitesi", "Fakultesi": "Fakültesi",
 # ILISKI jetonu KOKTUR, iyelik ekini dizideki <SI> verir:
 #     cocuk <SI>        -> "cocugu"
 #     cocuk <SI> <NIN>  -> "cocugunun"
-# (taban_05.py 808 ve 843 bunu boyle kuruyor, veri_04 de boyleydi.)
+# (taban_08.py 808 ve 843 bunu boyle kuruyor, veri_04 de boyleydi.)
 #
 # !! ILK SURUMDE BU KACIRILDI: iliskiler "annesi", "fakultesi" diye
 # EK YAPISIK adlandirilmisti, yani dizi fiilen "annesi" + <SI> =
@@ -400,7 +400,7 @@ def ek_secim(G):
     """Motor icin: hangi varliktan/iliskiden sonra HANGI ek bicimi gelir.
 
     Motor Turkce bilmez -- unlu uyumunu VERI MODULU hesaplar ve
-    indeks olarak verir. `taban_05.veri_kur` bunu okur.
+    indeks olarak verir. `taban_08.veri_kur` bunu okur.
 
     Ek, ismin SON gercek yuvasina takilir ("Cerrahpasa Muhendislik
     Fakultesi'nin" -> son yuva "Fakultesi").
@@ -567,11 +567,11 @@ GEREKTIRIR = {
 }
 
 # TERS CIFT ADAYLARI: "X -r1-> Y, sonra Y -r2-> ?  ... X'e DONER MI".
-# `graf_05` bunlarin oranini olcer. Liste BURADA duruyor cunku SEMADAN
+# `graf_08` bunlarin oranini olcer. Liste BURADA duruyor cunku SEMADAN
 # TURETILEMEZ: hangi ciftin geri donmesi BEKLENDIGI anlamsal bir iddia,
 # yapisal degil. Araca gomulu kalsaydi (veri_04'te oyleydi) veri
 # degisince arac SESSIZCE bos tablo basardi -- fiilen oldu, 17 Eylul:
-# graf_05 `kardes` arayip KeyError verdi.
+# graf_08 `kardes` arayip KeyError verdi.
 TERS_ADAY = [
     ("annesi", "cocugu"), ("babasi", "cocugu"),
     ("cocugu", "annesi"), ("cocugu", "babasi"),
@@ -1030,7 +1030,7 @@ def _denetle(ad, olgu, tip, cinsiyet, kusak):
 
 
 def kur(tohum=0):
-    """model_05'in grafi."""
+    """model_08'in grafi."""
     rng = np.random.RandomState(1000 + tohum)
     ad, olgu = {}, {}
     cinsiyet, kusak = _kur_aile(rng, ad, olgu)
@@ -1052,9 +1052,9 @@ def kur(tohum=0):
     if tohum == 0 and IZ:
         _iz = graf_izi(G)
         assert _iz == IZ, (
-            f"veri_05: graf DEGISTI  {IZ} -> {_iz}\n"
+            f"veri_08: graf DEGISTI  {IZ} -> {_iz}\n"
             "  Kasitliysa IZ yenilenir ve onkayda not duselir; degilse\n"
-            "  degisiklik geri alinir. model_05 sessizce baska bir\n"
+            "  degisiklik geri alinir. model_08 sessizce baska bir\n"
             "  veriyle KOSMAZ.")
     return G
 
@@ -1160,7 +1160,7 @@ def sizinti(G, z):
 # ana_fakultesi / ana_bolumu / zorunlu_dersi ayrildi, yasadigi_yer ve
 # TEZ tipi eklendi, bolgenin baskani kaldirildi, on kosul dongusuz
 # kuruldu, kurucu en yasli kusaktan secildi.
-# ESKI: 3431c633b6b1  (model_05 / model_06 / model_07)
+# ESKI: 3431c633b6b1  (model_08 / model_06 / model_07)
 IZ = "3cd9a2575e47"
 
 
