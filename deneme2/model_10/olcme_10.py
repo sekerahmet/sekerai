@@ -365,9 +365,14 @@ def biyografi_sinavi(S, v, G, ents, t_len=640):
         j = S.kodla(o)
         X[i, :len(j)] = j
         bas[i] = len(j)
-        hedef.append({(oo, rr): {MT.cumle(E[oo], V.ILISKI[rr], E[aa], b,
-                                          tipi[E[aa]])
-                                 for b in range(MT.N_BICIM - 1)}
+        # !! ESKI API: `MT.cumle(..., bicim, tip)` + `MT.N_BICIM`.
+        # model_10'da `cumle` 4 parametre aliyor ve bildirim sayisi
+        # `N_BILDIRIM` (17). Kopyadan gelen hali CALISMA ZAMANINDA
+        # duserdi -- model_09'da biyografi olcusu zaten hic
+        # kosmamisti, o yuzden gorulmedi. §0c kapisi artik statik
+        # olarak yakaliyor.
+        hedef.append({(oo, rr): {MT.cumle(E[oo], V.ILISKI[rr], E[aa], b)
+                                 for b in range(MT.N_BILDIRIM)}
                       for oo, rr, aa in ait[e]})
     return X, bas, hedef
 
@@ -382,8 +387,8 @@ def _yuzey_haritasi(v, G):
     h = {}
     for e, r, a in v.one:
         e, r, a = int(e), int(r), int(a)
-        for b in range(MT.N_BICIM - 1):
-            h[MT.cumle(E[e], V.ILISKI[r], E[a], b, tipi[E[a]])] = (e, r)
+        for b in range(MT.N_BILDIRIM):
+            h[MT.cumle(E[e], V.ILISKI[r], E[a], b)] = (e, r)
     return h
 
 

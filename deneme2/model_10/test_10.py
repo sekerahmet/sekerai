@@ -35,6 +35,8 @@ cikariyor: sapma varsa kilit DUSER ve o gun bilerek karar verilir
 AYRINTI=1 -> gecen kontroller de basilir.
 """
 import os
+import ast
+import importlib
 import glob
 import re
 import io
@@ -162,6 +164,69 @@ _dogrudan = sorted(f for f, t in _kaynaklar.items()
 ok(not _dogrudan,
    'korpus YALNIZ taban_10 icinden kurulur (ayardan turer)',
    str(_dogrudan))
+
+# --- 0c) CAGRILAN NITELIK GERCEKTEN VAR MI (statik) --------------------
+# !! BU KAPI GUNUN EN PAHALI HATA SINIFINI KAPATIYOR. Bir fonksiyon bir
+# dosyada yeniden adlandirilinca, onu CAGIRAN oteki dosya calisana kadar
+# sessiz kaliyor. Bugun uc kez oldu:
+#   KOR.biyografiler -> `sayfalar` oldu; `tani_10 --biyografi` (VARSAYILAN
+#                       yol) her kosuda AttributeError ile duserdi
+#   MT.cumle(...,3,tip) -> imza degisti; sinav her halukarda duserdi
+#   _NL.null('09')     -> `veri_09` ariyordu, test CALISMA ZAMANINDA coktu
+# Ucu de ancak KOSUNCA gorunurdu; ikisi GPU saati harcandiktan SONRA.
+#
+# YONTEM: her dosya AST ile ayristirilir, `import X as A` eslemeleri
+# cikarilir, ve `A.nitelik` kullanimlarinin hepsi GERCEK modulde aranir.
+# Yalniz BU KLASORUN modulleri denetlenir (torch/np disarida).
+_yerli = {os.path.splitext(f)[0] for f in os.listdir(_B) if f.endswith('.py')}
+_yok = []
+for _f in sorted(glob.glob(os.path.join(_B, '*.py'))):
+    _ad = os.path.basename(_f)
+    if _ad.startswith('test_'):
+        continue
+    try:
+        _ag = ast.parse(io.open(_f, encoding='utf-8').read())
+    except SyntaxError as _e:
+        _yok.append(f'{_ad}: AYRISTIRILAMADI {_e}')
+        continue
+    _esle = {}
+    for _n in ast.walk(_ag):
+        if isinstance(_n, ast.Import):
+            for _al in _n.names:
+                if _al.name in _yerli:
+                    _esle[_al.asname or _al.name] = _al.name
+    for _n in ast.walk(_ag):
+        if (isinstance(_n, ast.Attribute) and isinstance(_n.value, ast.Name)
+                and _n.value.id in _esle):
+            _mod = importlib.import_module(_esle[_n.value.id])
+            if not hasattr(_mod, _n.attr):
+                _yok.append(f'{_ad}:{_n.lineno} {_n.value.id}.{_n.attr} -> {_esle[_n.value.id]}.{_n.attr} YOK')
+# TASINMAYAN BORCU -- acikca sayilir, susturulmaz.
+# Bu araclar HALA model_08'in JETON semasinda: `kelimeler`, `kodla_*`,
+# `BICIM` karakter surumunde YOK. Kosulurlarsa duserler ve bu BILINIYOR
+# (`konus_10.TASINMADI` ayni sebeple True). Liste KISALMALI, uzamamali:
+# sayi BUYURSE kapi duser.
+_BORC = {
+    'analiz_10.py': 3,       # M.kelimeler, M.kodla_1hop, M.kodla_2hop
+    'dokum_10.py': 4,        # K.biyografiler, MT.BICIM, MT.N_BICIM
+    'egitim_dok_10.py': 17,  # M.kodla_* ailesi
+    'graf_10.py': 1,         # M.kelimeler
+    'havuz_10.py': 1,        # M.kelimeler
+    'konus_10.py': 10,       # TASINMADI=True diye ILAN EDIYOR
+}
+_say = {}
+for _x in _yok:
+    _say[_x.split(':')[0]] = _say.get(_x.split(':')[0], 0) + 1
+_yeni = [f'{_f}: {_n} (borc {_BORC.get(_f, 0)})'
+         for _f, _n in sorted(_say.items()) if _n > _BORC.get(_f, 0)]
+ok(not _yeni,
+   '0c cagrilan her modul niteligi VAR (TASINMAYAN borcu haric)',
+   str(_yeni))
+_kapanan = [f'{_f}: {_n} -> {_say.get(_f, 0)}'
+            for _f, _n in sorted(_BORC.items()) if _say.get(_f, 0) < _n]
+ok(not _kapanan,
+   '0c TASINMAYAN borcu KOPYA.json ile TUTUYOR (kapanan varsa yenile)',
+   str(_kapanan))
 
 # --- 1b) OKUMA ARACLARININ MODELDEN ISTEDIGI YUZEY ----------------------
 # KUSUR (16 Eylul hakemligi): `asama1_10.gizli()` ileri gecisi ELLE

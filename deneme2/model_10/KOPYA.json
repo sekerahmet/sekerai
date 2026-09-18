@@ -3,7 +3,8 @@
  "not": "model_09'dan kopyalandi (18 Eylul). Kod tarafi CEVRILDI (import / modul erisimi / dosya yolu / BASILAN dizgeler / docstring basligi); yorum PROSE'una DOKUNULMADI -- oradaki 'model_09' atiflari GECMISE aittir ve dogrudur. Bu kolda ayni kusurun IKI bicimi de olmustu: (a) 07->08 ve 08->09'da dosya adi degisip ICERIK degismedi, (b) toptan yeniden adlandirma eskimis bir iddiayi yeni kolun adiyla YALANA cevirdi.",
  "kopya_durumu": "ICERIK DEGISIKLIGI YAPILDI (18-19 Eylul). model_10 artik model_09'un ikizi DEGIL: sayfa tabanli korpus, 17+8 kalip, uc adimli zincir, reddetme verisi, DURUSTLUK olcusu, butce 20.000. 'planlanan' maddelerinin hepsi uygulandi; ayrinti belge/onkayit/model_10.md.",
  "tasinanlar": [
-  "metin_10.denetle() + __main__ dokumu -- KOPYADA DUSMUSTU. Kapi gosterdi (kullanici: 'diff calistirip bakmadin mi?'). model_09'da 4 bicim siniyordu; model_10 icin 17 bildirim x 8 soru + tip + zincir + reddetme'ye genisletildi. ILK KOSUSUNDA BIR KUSUR BULDU: BILDIRIM kalibi 5 ('Kardesidir, Ahmet Aydin'in Elif Aydin.') Turkce degildi -- gloss bicimiyle degistirildi."
+  "metin_10.denetle() + __main__ dokumu -- KOPYADA DUSMUSTU. Kapi gosterdi (kullanici: 'diff calistirip bakmadin mi?'). model_09'da 4 bicim siniyordu; model_10 icin 17 bildirim x 8 soru + tip + zincir + reddetme'ye genisletildi. ILK KOSUSUNDA BIR KUSUR BULDU: BILDIRIM kalibi 5 ('Kardesidir, Ahmet Aydin'in Elif Aydin.') Turkce degildi -- gloss bicimiyle degistirildi.",
+  "test_10 §0c: her `MODUL.nitelik` cagrisi AST ile cikarilip GERCEK modulde aranir. Gunun en pahali hata sinifi buydu -- bir fonksiyon yeniden adlandirilinca onu cagiran oteki dosya KOSULANA KADAR sessiz kaliyordu. Ilk kosusunda 38 eksik buldu; 2'si CANLI yoldaydi (olcme_10), 36'si TASINMAYAN araclarin bilinen borcu ve artik SAYIYLA kilitli."
  ],
  "planlanan": {
   "DURUM": "HEPSI UYGULANDI -- asagidakiler KAYIT icin duruyor.",
@@ -23,11 +24,11 @@
   "taban_10.py": "YORUM PROSE'u. Kapi ebeveynin metnini _09 -> _10 CEVIRIP kiyasliyor; bu dosyada 'model_09' atiflari BILEREK duruyor cunku GECMISE aitler ve dogrular. Kor yeniden adlandirma bu kolda bir kez eskimis bir iddiayi YALANA cevirmisti. KOD tarafi cevrildi.",
   "model_10.py": "YORUM PROSE'u. Kapi ebeveynin metnini _09 -> _10 CEVIRIP kiyasliyor; bu dosyada 'model_09' atiflari BILEREK duruyor cunku GECMISE aitler ve dogrular. Kor yeniden adlandirma bu kolda bir kez eskimis bir iddiayi YALANA cevirmisti. KOD tarafi cevrildi.",
   "konus_10.py": "YORUM PROSE'u. Kapi ebeveynin metnini _09 -> _10 CEVIRIP kiyasliyor; bu dosyada 'model_09' atiflari BILEREK duruyor cunku GECMISE aitler ve dogrular. Kor yeniden adlandirma bu kolda bir kez eskimis bir iddiayi YALANA cevirmisti. KOD tarafi cevrildi. konus_10 HALA TASINMADI diye ILAN EDIYOR (test_10 §8 bayragi kilitliyor).",
-  "tani_10.py": "YORUM PROSE'u. Kapi ebeveynin metnini _09 -> _10 CEVIRIP kiyasliyor; bu dosyada 'model_09' atiflari BILEREK duruyor cunku GECMISE aitler ve dogrular. Kor yeniden adlandirma bu kolda bir kez eskimis bir iddiayi YALANA cevirmisti. KOD tarafi cevrildi. Ayrica `KOR.havuz` dogrudan cagrisi kalkti.",
+  "tani_10.py": "YORUM PROSE'u. Kapi ebeveynin metnini _09 -> _10 CEVIRIP kiyasliyor; bu dosyada 'model_09' atiflari BILEREK duruyor cunku GECMISE aitler ve dogrular. Kor yeniden adlandirma bu kolda bir kez eskimis bir iddiayi YALANA cevirmisti. KOD tarafi cevrildi. Ayrica `KOR.havuz` dogrudan cagrisi kalkti. Ve `KOR.biyografiler` -> `KOR.sayfalar`: o fonksiyon ARTIK YOK ve `--biyografi` VARSAYILAN yol oldugu icin tani_10 HER KOSUDA duserdi. `biyografi_sinavi` de artik `t_len`i AYARDAN aliyor (640 varsayilani RoPE tablosunun disina tasiyordu).",
   "metin_10.py": "KALIP TABLOSU BASTAN YAZILDI. `BICIM` (4) -> `BILDIRIM` (17) + `SORU` (8); `cumle`/`zincir` imzalarindan `bicim` ve `tip` dustu, soru yuzeyi AYRI fonksiyona (`soru`, `zincir_soru`, `yol_soru`) tasindi. `denetle` GERI GETIRILDI ve genisletildi.",
   "korpus_10.py": "`biyografiler` + eski `zincirler` + eski `havuz` SILINDI; yerine `sayfalar`, `uclu_yollar`, `uydurma_adlar`, `reddetme_bolme`, `reddetme_belgeleri`. Bu kolun TANIMI bu.",
   "ayar_10.py": "YORUM PROSE'u. Kapi ebeveynin metnini _09 -> _10 CEVIRIP kiyasliyor; bu dosyada 'model_09' atiflari BILEREK duruyor cunku GECMISE aitler ve dogrular. Kor yeniden adlandirma bu kolda bir kez eskimis bir iddiayi YALANA cevirmisti. KOD tarafi cevrildi. Ayrica `adim=60000` blogu ve model_08'e esit maruziyet denklemi KALKTI (gerekcesi coktu, bak 'planlanan'/ayar_10.py).",
-  "olcme_10.py": "`sorular` BILDIRIM ureticisini (`MT.cumle(...,3,tip)`) cagiriyordu -- o imza artik YOK ve bildirim '? ' icermiyor; sinav her halukarda duserdi. `MT.soru` / `MT.zincir_soru` + SINAV_KALIBI ile degistirildi.",
+  "olcme_10.py": "`sorular` BILDIRIM ureticisini (`MT.cumle(...,3,tip)`) cagiriyordu -- o imza artik YOK ve bildirim '? ' icermiyor; sinav her halukarda duserdi. `MT.soru` / `MT.zincir_soru` + SINAV_KALIBI ile degistirildi. Ayrica biyografi yolu ESKI API'deydi (`MT.cumle(...,bicim,tip)` + `MT.N_BICIM`); model_10'da `cumle` 4 parametre aliyor. test_10 §0c statik olarak yakaladi.",
   "asama1_10.py": "`KOR.havuz(...)` DOGRUDAN cagrisi kalkti: 10 parametrenin 6'sini geciyordu ve okuma araci EGITILEN korpustan BASKA bir korpus kuruyordu. Artik `M.egitim_havuzu(ayar, v)`.",
   "pencere_10.py": "Ayni sebeple `KOR.havuz(...)` -> `M.egitim_havuzu(ayar, v)`. test_10 §0b denetliyor.",
   "null_10.py": "Kol numarasi '09' -> '10'. Eski hali `veri_09` ariyordu; model_10 klasorunde YOK ve test CALISMA ZAMANINDA cokuyordu -- arkasindaki §7e HIC KOSMUYORDU.",
@@ -47,10 +48,10 @@
   "metin_10.py": 95,
   "model_10.py": 4,
   "null_10.py": 3,
-  "olcme_10.py": 4,
+  "olcme_10.py": 9,
   "pencere_10.py": 7,
   "taban_10.py": 18,
-  "tani_10.py": 3,
+  "tani_10.py": 6,
   "test_10.py": 26,
   "veri_10.py": 5
  }

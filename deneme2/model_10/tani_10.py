@@ -163,10 +163,23 @@ def main():
             _ait.setdefault(int(_e), []).append(1)
         _cok = [e for e in sorted(_ait) if len(_ait[e]) >= 5][:a.biyografi]
         if _cok:
-            _bb, _ = KOR.biyografiler(v, G, ayar.kopya, ayar.veri_tohum,
-                                      ayar.tetik, ayar.t_len, yaz=SUS)
+            # !! `KOR.biyografiler` ARTIK YOK -- model_10'da `sayfalar`
+            # oldu. Bu satir kopyadan geldi ve `--biyografi`nin
+            # VARSAYILAN yolu oldugu icin `tani_10` HER KOSUDA
+            # AttributeError ile duserdi. §0c kapisi artik bunu
+            # statik olarak denetliyor.
+            _bb, _ = KOR.sayfalar(v, G, kopya=ayar.kopya,
+                                  tohum=ayar.veri_tohum, tetik=ayar.tetik,
+                                  t_len=ayar.t_len,
+                                  zincir_pay=ayar.zincir_pay,
+                                  n3=ayar.n3, yaz=SUS)
             _egt = OLC.egitim_siralari(v, G, _bb)
-            _X, _bas, _hed = OLC.biyografi_sinavi(S, v, G, _cok)
+            # !! t_len AYARDAN. Varsayilani 640'ti ve RoPE tablosu
+            # `ayar.t_len` (512) uzunlugunda kuruluyor -- 640'lik
+            # dizi tablonun DISINA tasardi. model_09'da tam bu
+            # yuzden biyografi olcusu hic calismadi.
+            _X, _bas, _hed = OLC.biyografi_sinavi(S, v, G, _cok,
+                                                  t_len=ayar.t_len)
             biyo = OLC.biyografi_olc(net, S, _X, _bas, _hed,
                                      [_egt.get(e, set()) for e in _cok],
                                      M.DEV)
