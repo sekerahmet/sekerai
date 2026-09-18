@@ -212,7 +212,8 @@ _BORC = {
     'egitim_dok_10.py': 17,  # M.kodla_* ailesi
     'graf_10.py': 1,         # M.kelimeler
     'havuz_10.py': 1,        # M.kelimeler
-    'konus_10.py': 10,       # TASINMADI=True diye ILAN EDIYOR
+    # konus_10.py BORCTAN DUSTU (18 Eylul): karakter surumu yazildi,
+    # 10 olu cagri kapandi. §8 artik BEYAN degil DAVRANIS siniyor.
 }
 _say = {}
 for _x in _yok:
@@ -1170,35 +1171,61 @@ ok(not _kot,
    "test MESAJLARI BASKA bir kol numarasi ANMIYOR",
    f"{len(_kot)} mesaj: {_kot[:3]}")
 
-print("\n" + "=== 8) KONUS_10 BEYANI ===")
+print("\n=== 8) KONUS_10 DAVRANISI ===")
 import io                                                    # noqa: E402
 import konus_10 as _K                                        # noqa: E402
 
-# !! BU BOLUM 108 SATIRDI ve model_08'in JETON surumunu siniyordu:
-# `sinav_coz` hangi jeton dizisini taniyor, `--genislik` varsayilani 1
-# mi, bosluk cevabi tek jeton mu... Hicbiri karakter duzeyinde ANLAMLI
-# DEGIL -- `kodla_1hop`, `v.yuva_ara`, `jeton_ad` semasi SILINDI.
-#
-# Kilit SILINMEDI, HEDEFI DEGISTI: artik sinadigi sey ARACIN KENDISINI
-# NE ILAN ETTIGI. Kosuya engel degil (okuma araci, egitim yolunda yok),
-# ama SESSIZ de kalmamali -- bu kolda ayni kusur iki kez oldu
-# (`kos_10.py` MODEL="model_08", `ayar_10.py` from taban_08).
-#
-# Karakter surumu yazilinca `TASINMADI` False olacak ve BU BOLUM
-# yeniden DAVRANIS sinayacak: asagidaki son kapi tam bunun icin.
-ok(getattr(_K, "TASINMADI", False),
-   "konus_10 KENDINI 'tasinmadi' diye ILAN EDIYOR",
-   "bayrak dusunce bu bolum DAVRANIS kapilariyla yeniden yazilmali")
-ok(hasattr(_K, "_tasinmadi_kapisi"),
-   "konus_10 kosulunca DURUYOR (sessizce yanlis sey basmiyor)")
-_ks = io.open(os.path.join(_B, "konus_10.py"), encoding="utf-8").read()
-ok(_ks.count("_tasinmadi_kapisi()") >= 3,
-   "kapi kur() ve main() ICINDE cagriliyor -- tanim + iki cagri",
-   f"{_ks.count('_tasinmadi_kapisi()')} gecis")
-# BAYRAK DUSERSE BU KAPI DA DUSER -- unutulmasin diye.
-ok(not getattr(_K, "TASINMADI", False) or "sinav_bakisi" in _ks,
-   "sinav gozu kodu DURUYOR (tasima yapilirken yeniden kullanilacak)")
+# !! BU BOLUM UC KEZ HEDEF DEGISTIRDI ve ucu de KAYITLI.
+#   1. model_08'de 108 satirdi, JETON surumunu siniyordu (`sinav_coz`,
+#      `--genislik` varsayilani, bosluk cevabi tek jeton mu).
+#   2. model_09'da hepsi ANLAMSIZ kaldi -- karakter duzeyinde yuva yok.
+#      Kilit SILINMEDI, "arac KENDINI ne ilan ediyor"a cevrildi
+#      (`TASINMADI = True`) ve soyle bir not dusuldu: *"bayrak dusunce
+#      bu bolum DAVRANIS kapilariyla yeniden yazilmali."*
+#   3. 18 Eylul: karakter surumu yazildi, bayrak DUSTU. Not tutuldu --
+#      bu bolum artik DAVRANIS siniyor.
+ok(not getattr(_K, "TASINMADI", False),
+   "konus_10 TASINDI (karakter surumu)",
+   "bayrak hala True ise arac KOSMAZ ve bu bolum BEYAN kapisina doner")
+ok(not hasattr(_K, "_tasinmadi_kapisi"),
+   "tasinma kapisi KALDIRILDI -- arac artik gercekten kosuyor")
+for _g in ("yukle", "sor", "panel", "panel_sorulari"):
+    ok(hasattr(_K, _g), f"konus_10.{_g} var (sozlesme)")
 
+# --- URETIM SINAVIN KODUYLA AYNI OLMALI ------------------------------
+# Ayri bir uretim yolu yazilsaydi "konusta boyle diyor ama sinavda
+# baska" diye bir ayrisma dogardi ve hangisinin dogru oldugu
+# bilinemezdi. KAYNAK taranir, docstring degil.
+_ks = io.open(os.path.join(_B, "konus_10.py"), encoding="utf-8").read()
+ok("OLC.uret(" in _ks,
+   "konus_10 SINAVIN uretim kodunu kullaniyor (olcme_10.uret)")
+ok("M.egitim_havuzu(" in _ks,
+   "konus_10 korpusu AYARDAN kuruyor (§0b ile ayni kural)")
+
+# --- NITELIK PANELI: 12 SONDA, DORT BOYUT ----------------------------
+# Onkayit model_10.md §4. Sorular GRAFTAN uretiliyor; elle yazilsaydi
+# veri degisince "eski soruyu yeni veriye sormak" kusuru dogardi.
+_P = _K.panel_sorulari(_G0)
+ok(len(_P) == 12, f"panel 12 sonda ({len(_P)})")
+_boy = {x[0].split()[0] for x in _P}
+ok(_boy == {"DOGRULUK", "DURUSTLUK", "TUTARLILIK", "AKICILIK"},
+   "panel DORT boyutu da kapsiyor", str(sorted(_boy)))
+# DURUSTLUK sondalari TUTULAN veriden olmali -- gordugunu reddetmek
+# EZBER olurdu, olctugumuz GENELLEME.
+_bl = KOR10.reddetme_bolme(_G0, 0.20, 0)
+_tut_ad = {MT10._tr(x) for L in _bl["ad_tut"].values() for x in L}
+_dur = [x for x in _P if x[0].startswith("DURUSTLUK")]
+ok(len(_dur) == 3, "DURUSTLUK uc sonda: olmayan ad + imkansiz cift + KACAMAK")
+ok(any(any(t in x[1] for t in _tut_ad) for x in _dur),
+   "DURUSTLUK sondasinin adi TUTULAN havuzdan (egitimde GECMEZ)")
+ok(sum(1 for x in _dur if x[2] == "REDDETMELI") == 2
+   and sum(1 for x in _dur if x[2] not in ("REDDETMELI", None)) == 1,
+   "iki sonda REDDETMELI, biri BILIYOR -- kacamak olmadan ret OKUNMAZ")
+# AKICILIK'in beklenen cevabi OLMAMALI: gozle okunur, puanlanmaz.
+ok(all(x[2] is None for x in _P if x[0].startswith("AKICILIK")),
+   "AKICILIK sondalarinin BEKLENENI YOK -- gozle okunur")
+ok(all(x[2] is not None for x in _P if not x[0].startswith("AKICILIK")),
+   "diger dokuz sondanin beklenen cevabi VAR")
 
 print("\n=== 9) KOPYA KAPISI ===")
 _kk = os.path.join(os.path.dirname(_B), "kopya_kapisi.py")

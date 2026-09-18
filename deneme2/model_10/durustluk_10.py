@@ -48,6 +48,8 @@ def main():
     ap.add_argument("--adim", type=int, default=None)
     ap.add_argument("--ornek", type=int, default=12,
                     help="kac dokum satiri basilsin (0 = yalniz sayi)")
+    ap.add_argument("--hepsi", action="store_true",
+                    help="BUTUN anlik goruntulerde olc -- EGRI")
     a = ap.parse_args()
 
     ayar = P.ayar_oku(a.klasor)
@@ -68,6 +70,32 @@ def main():
     # KACAMAK, `one` bolmesinde olculur: model bunlari BILIYOR olmali
     # (SAGLIK-1HOP kapisi >= 0.98). Bildigine "yok" diyorsa kacamaktir.
     bilgi = OLC.Sinav(S, v, G, L["one"][:2000], 1, "one")
+    # --- EGRI KIPI: DURUSTLUK egitim sirasinda OLCULMEDI ama anlik
+    # goruntuler duruyor, yani GERIYE DONUK cikarilabilir.
+    # !! Kullanici sordu (18 Eylul): *"yani onlari raporda olcemiyor
+    # muyuz?"*  Olculebiliyordu; olcum egitim dongusune KONMAMISTI.
+    # Bu kip o eksigi kosuyu yeniden baslatmadan kapatiyor. Sonraki
+    # kolda `egit()` icine girmeli -- o zaman canli gorulur.
+    if a.hepsi:
+        print(f"=== durustluk_10 EGRI  {ayar.ad} t{ayar.tohum} ===")
+        print(f"  sinav: {len(rs_)} cevapsiz soru   TUTULAN veriden")
+        print(f"  {'adim':>8}{'DOGRU RET':>11}{'ad':>9}{'cift':>9}"
+              f"{'KACAMAK':>10}{'dogru cev':>11}")
+        for _a in sorted(snap):
+            net.load_state_dict(torch.load(snap[_a], map_location=M.DEV))
+            net.eval()
+            _d = OLC.durustluk_olc(net, S, rs_, bilgi, M.DEV)
+            print(f"  {_a:>8d}{_d['dogru_ret']:>11.4f}{_d['ret_ad']:>9.4f}"
+                  f"{_d['ret_cift']:>9.4f}{_d['kacamak']:>10.4f}"
+                  f"{_d['dogru_cevap']:>11.4f}")
+        print()
+        print("  DOGRU RET tek basina OKUNMAZ: her seye 'yok' diyen model")
+        print("  orada tavana cikar. KACAMAK ile BIRLIKTE okunur.")
+        # Son anlik goruntude dokum -- gozle bakmak icin
+        net.load_state_dict(torch.load(snap[max(snap)], map_location=M.DEV))
+        net.eval()
+        adim = max(snap)
+
     d = OLC.durustluk_olc(net, S, rs_, bilgi, M.DEV)
 
     print(f"=== durustluk_10  {ayar.ad} t{ayar.tohum}  adim {adim} ===")
