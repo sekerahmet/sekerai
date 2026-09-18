@@ -250,6 +250,37 @@ ok(_tb.count('_egit_ag(') == 1,
 ok('torch.cuda.is_bf16_supported()' in _tb,
    '0d bf16 DONANIM KAPISI var (T4 destekLEMEZ)')
 
+# --- 0e) HER MODUL IMPORT EDILEBILIR YA DA TASINMADI DER --------------
+# !! BU KAPI §0c'NIN BOSLUGUNDAN DOGDU (19 Eylul, model_11 hakemligi).
+# §0c 'cagrilan nitelik VAR MI' diye bakiyor. `havuz_11` soyle bir
+# satir tasiyordu:
+#     X, P, T, kim, KP, KT = M.egitim_havuzu(...)
+# `M.egitim_havuzu` VAR -- ama ALTI deger bekliyor, motor IKI donduruyor.
+# Yani degisen sey niteligin VARLIGI degil SOZLESMESI, ve §0c bunu
+# goremez. Modul import EDILEMIYORDU ve bunu kimse soylemiyordu.
+#
+# KURAL: bir arac ya CALISIR ya da NEDEN calismadigini SOYLER.
+# Sessizce cokmek ucuncu secenek DEGIL.
+_ice, _tsn = [], []
+for _f in sorted(glob.glob(os.path.join(_B, '*_11.py'))):
+    _ad3 = os.path.splitext(os.path.basename(_f))[0]
+    if _ad3.startswith('test_'):
+        continue
+    _r4 = subprocess.run([sys.executable, '-c', f'import {_ad3}'], cwd=_B,
+                         capture_output=True, text=True, encoding='utf-8',
+                         errors='replace')
+    if _r4.returncode == 0:
+        continue
+    _cikti = (_r4.stdout or '') + (_r4.stderr or '')
+    if 'TASINMADI' in _cikti:
+        _tsn.append(_ad3)
+    else:
+        _ice.append(f'{_ad3}: {_cikti.strip().splitlines()[-1][:70]}')
+ok(not _ice,
+   '0e her modul IMPORT EDILEBILIR ya da TASINMADI diye ILAN EDER',
+   str(_ice[:3]))
+print(f'    --   TASINMADI ilan eden: {_tsn}')
+
 # --- 1b) OKUMA ARACLARININ MODELDEN ISTEDIGI YUZEY ----------------------
 # KUSUR (16 Eylul hakemligi): `asama1_11.gizli()` ileri gecisi ELLE
 # kuruyordu -- `net1.emb + net1.pos` ve TEK argumanli `blk(h)`. Ikisi de
@@ -444,6 +475,72 @@ import metin_11 as MT10                                          # noqa: E402
 _orn = MT10.denetle(0, yaz=lambda *a, **k: None)
 ok(len(_orn) == len(V00.ILISKI),
    f"3j her iliskiden SINAV cumlesi uretiliyor ({len(_orn)}/{len(V00.ILISKI)})")
+
+# --- 3k) BOLME ADI ILE KORPUS TUTUYOR MU ------------------------------
+# !! BU KAPI BIR OLCUM YALANINDAN DOGDU (19 Eylul, model_11 kosusundan
+# SONRA). `seen` bolmesinin adi 'EGITIMDE GORULMUS 2-hop' diyor ve
+# kapisi `seen >= 0.95`. Olculdu: sinav sorularinin YALNIZ %23,5'i
+# korpusta GECIYOR. Yani 'gorulmus' diye olculen seyin dortte ucu
+# GORULMEMIS, ve kapinin TAVANI 0.235 -- yapisal olarak GECILEMEZ.
+#
+# Sebep: model_09'da zincir korpusun %75'iydi ve kopya ile CARPILIYORDU,
+# yani `v.tr2`nin hepsi yaziliyordu. model_11'da zincir %20 ve
+# ORNEKLENIYOR. BOLME KODU DEGISMEDI; KORPUS degisti ve bolmenin ANLAMI
+# onunla birlikte KAYDI. Sayisal bir kapi bunu gostermedi -- `seen`
+# dusuk cikiyordu ve biz onu MODELIN basarisizligi saniyorduk.
+#
+# KURAL: bir bolmenin ADI korpus hakkinda bir IDDIA ise, o iddia
+# HER KOSUDA sinanir.
+import korpus_11 as KOR10                                      # noqa: E402
+import metin_11 as MT10                                        # noqa: E402
+_bb3, _bs3 = KOR10.sayfalar(v, _G0, kopya=A.kopya, tohum=A.veri_tohum,
+                            tetik=A.tetik, t_len=A.t_len,
+                            zincir_pay=A.zincir_pay, n3=A.n3,
+                            yaz=lambda *a, **k: None)
+_metin3 = ' '.join(b.metin for b in _bb3)
+_E3 = [x for t in V00.TIPLER for x in _G0['ad'][t]]
+import numpy as _np3                                          # noqa: E402
+_rs3 = _np3.random.default_rng(0)
+
+
+def _var_mi(bolme, hop):
+    """Bolmeden 200 ornek: kac tanesi korpus METNINDE geciyor."""
+    _L3 = M.olcme_listeleri(A, v)[bolme]
+    if not len(_L3):
+        return None
+    _ix3 = _rs3.permutation(len(_L3))[:200]
+    _n3 = 0
+    for _i3 in _ix3:
+        _z3 = _L3[int(_i3)]
+        _e3 = int(_z3[0])
+        _A3 = MT10._tr(_E3[_e3])
+        _A3 = _A3 + MT10._nin(_A3, True) + ' '
+        if hop == 1:
+            _A3 += V00.TR_ILISKI[V00.ILISKI[int(_z3[1])]]
+        else:
+            _r1 = V00.TR_ILISKI[V00.ILISKI[int(_z3[1])]]
+            _A3 += (_r1 + MT10._nin(_r1, False) + ' '
+                    + V00.TR_ILISKI[V00.ILISKI[int(_z3[2])]])
+        _n3 += (_A3 in _metin3)
+    return _n3 / len(_ix3)
+
+
+# ADI 'GORULMUS' diyen bolmeler: korpusta OLMALI.
+for _b3, _h3 in (('one', 1), ('seen', 2)):
+    _p3 = _var_mi(_b3, _h3)
+    if _p3 is None:
+        continue
+    ok(_p3 > 0.95,
+       f"3k '{_b3}' ADI 'ogretilen/gorulen' diyor -> korpusta OLMALI",
+       f'korpusta gecen %{_p3*100:.1f}   (TAVAN da bu: model bundan fazlasini HATIRLAYAMAZ)')
+# ADI 'GORULMEMIS' diyen bolmeler: korpusta OLMAMALI.
+for _b3 in ('comp', 'ent', 'ent_yok'):
+    _p3 = _var_mi(_b3, 2)
+    if _p3 is None:
+        continue
+    ok(_p3 < 0.01,
+       f"3k '{_b3}' ADI 'gorulmemis' diyor -> korpusta OLMAMALI",
+       f'korpusta gecen %{_p3*100:.1f}')
 
 # --- 3h) REDDETME VERISI: modele YALAN ogretmiyor mu -------------------
 # !! BU KAPI BIR HATADAN DOGDU. `reddetme_belgeleri` ilk surumde

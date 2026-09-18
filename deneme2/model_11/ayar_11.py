@@ -221,6 +221,21 @@ AYAR = Ayar(
     ret_pay=0.05,
     ret_tut=0.20,        # reddetme verisinin %20'si SINAVA ayrilir
 
+    # --- HIZ: OLCULDU, 19 Eylul, L4, 4.000 adim x 3 yol
+    #   fp16 + GradScaler     75.7 ms/adim   1.00x   (mevcut yol)
+    #   bf16, scaler YOK      73.7 ms/adim   1.03x
+    #   bf16 + torch.compile  41.3 ms/adim   1.83x
+    # bpc@4000: 0.246 / 0.243 / 0.247 -- YORUNGE AYRISMIYOR.
+    #
+    # !! bf16 KAPALI. Onun icin one surdugum IKI gerekcenin IKISI de
+    # olcumde SIFIR cikti:
+    #   "adim basina GPU-CPU senkronu"  -> kazanc %3, olculemez
+    #   "olcek tasinca adim ATLANIR"    -> ATLANAN adim 0, hic olmadi
+    # Senkron kaynakta GERCEKTEN var (torch 2.14, _maybe_opt_step)
+    # ama MALIYETI yokmus. Dugme duruyor, varsayilan KAPALI.
+    bf16=False,
+    derle=True,          # torch.compile -- 1.83x, YALNIZ egitim ileri gecisi
+
     batch=32,
     adim=20000,          # CLAUDE.md kural 1 -- ILK SINIR, tavan DEGIL
 
@@ -323,6 +338,13 @@ assert AYAR.isinma == AYAR.adim // 10, (
     "ISINMA kosunun %10'u -- model_08 2000/20000. MUTLAK 2000 "
     "tasinsaydi oran %3,3 olur, LR cizelgesinin SEKLI ayrilirdi.")
 assert AYAR.d == 256 and AYAR.nh == 4, "head_dim 64"
+assert AYAR.derle is True, (
+    "torch.compile OLCULDU: 1.83x (L4, 4.000 adim). Kapatmak bir "
+    "SECIM olur ve gerekcesi yazilmali -- sessizce kapanmasin.")
+assert AYAR.bf16 is False, (
+    "bf16 icin one surulen iki gerekce de OLCUMDE SIFIR cikti "
+    "(hiz %3, atlanan adim 0). Acmak bir SECIM olur ve YORUNGEYI "
+    "degistirir -- gerekcesi yazilmali.")
 assert AYAR.batch == 32, (
     "batch 32 OLCULMUS OPTIMUM -- onkayit §6, L4: 226.610 yuva/s. "
     "Buyutmek verimi DUSURUYOR (128'de 159.261).")

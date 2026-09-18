@@ -26,6 +26,26 @@ import taban_11 as M         # noqa: E402
 # `--model` YOK: bu arac yalniz model_09'i tanir.
 argparse.ArgumentParser().parse_args()
 from ayar_11 import AYAR     # noqa: E402
+
+# ======================= !! TASINMADI ===================================
+# Bu dosya HALA model_08'IN JETON SEMASINDA: `taban_11.kelimeler`
+# cagiriyor ve o fonksiyon model_09'dan beri YOK (karakter duzeyinde
+# "kelime" diye bir sey kalmadi).
+#
+# !! BU KUSURU `test_11` §0c YAKALAMISTI ama TASINMAYAN BORCU diye
+# sayiyordu; §0e ise "import edilebilir mi" diye soruyor ve ONU
+# yakaladi. Ikisi AYRI SEY olcuyor ve ikisi de gerekli.
+#
+# !! VE BENIM ELLE TARAMAM BUNU KACIRDI (19 Eylul): modul import
+# sirasinda ONCE tablo BASIYOR, sonra cokuyor. `tail -1` ile bakinca
+# hatayi degil PRINT'i gorduм. Kapi elle taramadan iyi calisti.
+#
+# Kosuya ENGEL DEGIL: bu bir dokum araci, egitim yolunda YOK.
+TASINMADI = True
+raise SystemExit(chr(10) + "!! TASINMADI !!  graf_11 HALA model_08'in "
+                 "JETON surumu: `taban_11.kelimeler` YOK." + chr(10)
+                 + "   Karakter duzeyinde 'kelime' diye bir sey kalmadi. "
+                 "Kosuya ENGEL DEGIL." + chr(10))
 VO = importlib.import_module(AYAR.veri_ad)
 
 v = M.veri_kur(AYAR, yaz=lambda *a: None)

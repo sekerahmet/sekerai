@@ -28,6 +28,33 @@ import taban_11 as M         # noqa: E402
 argparse.ArgumentParser().parse_args()
 from ayar_11 import AYAR     # noqa: E402
 
+# ======================= !! TASINMADI ===================================
+# Bu dosya HALA model_08'IN YUVA SEMASINDA. Asagidaki satir
+#     X, P, T, kim, KP, KT = M.egitim_havuzu(...)
+# ALTI deger bekliyor; model_09'dan beri `egitim_havuzu` IKI deger
+# donuyor (X, S) cunku CEVAP YUVASI diye bir sey kalmadi -- pencerede
+# 7-11 cumle var ve hangisinin cevap oldugu isaretlenmiyor.
+#
+# !! BU KUSURU `test_11` §0c YAKALAYAMAZ, ve bu bir KAPI BOSLUGUDUR:
+# §0c "cagrilan nitelik VAR MI" diye bakiyor -- `M.egitim_havuzu` VAR.
+# Degisen sey niteligin varligi degil SOZLESMESI (kac deger donduruyor).
+# Bu yuzden §0e eklendi: her modul IMPORT EDILEBILIR olmali ya da
+# TASINMADI diye ILAN ETMELI.
+#
+# Kosuya ENGEL DEGIL: bu bir dokum araci, egitim yolunda YOK.
+TASINMADI = True
+_TASINMADI_MESAJ = (
+    "!! TASINMADI !!  havuz_11 HALA model_08'in YUVA surumu: `egitim_havuzu`dan ALTI "
+    "deger bekliyor, motor IKI donduruyor (X, S)." + chr(10)
+    + "   Karakter surumu yazilana kadar bu arac KOSMAZ. Kostursaydi "
+    "ya ValueError" + chr(10)
+    + "   ile duserdi ya da -- daha kotusu -- YANLIS bir seyi dogru "
+    "gibi basardi." + chr(10)
+    + "   Kosuya ENGEL DEGIL: dokum araci, egitim yolunda yok."
+)
+raise SystemExit(chr(10) + "!! " + _TASINMADI_MESAJ)
+
+
 v = M.veri_kur(AYAR, yaz=lambda *a: None)
 X, P, T, kim, KP, KT = M.egitim_havuzu(AYAR, v, yaz=lambda *a: None)
 print(f"=== havuz_dok  {AYAR.ad} ===")

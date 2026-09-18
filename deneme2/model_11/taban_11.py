@@ -1639,6 +1639,27 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
             "Anlik goruntu / olcum / surdurme HAM modelden.")
     if _bf:
         yaz("  bf16 ACIK -- GradScaler YOK (adim basina senkron da yok)")
+    # --- DURUSTLUK ve TUTARLILIK SINAVI: BIR KEZ kurulur.
+    # !! model_10'da ikisi de AYRI ARAC idi ve rapor IKI PARCA
+    # kaldi. Kullanici: *"niye 6 disinda ek bir rapor alani yaptin?
+    # butun kriterleri tek bir yerden gorsek"* ve *"yani ben su an
+    # rapordan model olgun mu degil mi bilmiyorum."*
+    # Artik ana olcum noktasinda, ayni gecise binerek olculuyor ve
+    # `egri_*.json`a yaziliyor -- rapor hucresi onu diger sutunlar
+    # gibi basar. Maliyet ~%3 (ana sinav ~14.000 satir, bu 400).
+    #
+    # SINAV TUTULAN VERIDEN: o uydurma ad ve o (tip, iliski) cifti
+    # egitim reddetmelerinde HIC gecmez (`ret_tut`). Gordugunu
+    # reddetmek EZBER olurdu; olctugumuz GENELLEME.
+    _G_ret = importlib.import_module(ayar.veri_ad).kur(ayar.veri_tohum)
+    _sv_ret = None
+    if ayar.ret_pay:
+        _bl_ret = KOR.reddetme_bolme(_G_ret, ayar.ret_tut,
+                                     ayar.veri_tohum)
+        _sv_ret = OLC.RetSinavi(S, _G_ret, _bl_ret,
+                                tohum=ayar.veri_tohum, ad="ret")
+        yaz(f"  DURUSTLUK sinavi {len(_sv_ret)} cevapsiz soru "
+            f"(TUTULAN veriden, egitimde HIC gecmez)")
     rs = np.random.RandomState(ayar.tohum + 991)
     egri, t0 = [], time.time()
     # Lookahead'in YAVAS agirligi. ort_bas=0 iken hep None kalir ve hicbir
@@ -1687,6 +1708,15 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
         # ki "ortalama mi dustu, gurultu mu" sorusu sonradan sorulabilsin.
         r = dict(adim=adim, kayip=kayip, kayip_son=kayip_son, lr=float(lr),
                  sn=round(time.time() - t0, 1))
+        # DURUSTLUK -- CIFT olcu, AYNI olcum noktasinda.
+        # !! `kacamak` olmadan `dogru_ret` OKUNMAZ: her seye "yok"
+        # diyen model dogru rette TAVANA cikar. Ikisi de yazilir.
+        if _sv_ret is not None and "one" in sinav:
+            _dr = OLC.durustluk_olc(model, S, _sv_ret, sinav["one"], DEV)
+            r["dogru_ret"] = _dr["dogru_ret"]
+            r["ret_ad"] = _dr["ret_ad"]
+            r["ret_cift"] = _dr["ret_cift"]
+            r["kacamak"] = _dr["kacamak"]
         for k, sv in sinav.items():
             d = OLC.olc(model, S, sv, DEV)
             r[k] = d["tam"]
