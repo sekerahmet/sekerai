@@ -1,0 +1,14 @@
+{
+ "ebeveyn": "model_09",
+ "not": "model_09'dan kopyalandi (18 Eylul). Kod tarafi CEVRILDI (import / modul erisimi / dosya yolu / BASILAN dizgeler / docstring basligi); yorum PROSE'una DOKUNULMADI -- oradaki 'model_09' atiflari GECMISE aittir ve dogrudur. Bu kolda ayni kusurun IKI bicimi de olmustu: (a) 07->08 ve 08->09'da dosya adi degisip ICERIK degismedi, (b) toptan yeniden adlandirma eskimis bir iddiayi yeni kolun adiyla YALANA cevirdi.",
+ "kopya_durumu": "KOD cevirisi TAMAM, ICERIK DEGISIKLIGI HENUZ YAPILMADI. model_10 su an model_09'un calisan ikizi; asagidaki 'planlanan' maddeleri uygulanmadan KOSULMAMALI -- yoksa model_09'u ikinci kez kosmus oluruz.",
+ "tasinanlar": [],
+ "planlanan": {
+  "metin_10.py": "KALIP CESITLILIGI 3 -> 20-30. Physics 3.1 (2309.14316) cumle basina ~50 kalip kullaniyor ve olcuyor ki yetersiz cesitlilikte bilgi 'ezberlenir ama cikarilamaz'. SORU kaliplari da cogalir (sohbet modeli hedefi). !! SINAV YUZEYI ACIKCA isaretlenmeli -- su an `bicim 3` soru demek ve kalip eklenince bu kayar.",
+  "korpus_10.py": "HER VARLIGA SAYFA. Olculdu (model_09): kisi 10 olguda anlatiliyor, universite 3, tez 2, BOLGE 0. Kopru olarak basari bunu birebir izliyor (KISI 0.186, TEZ 0.000). TOPLAYICI belge -- varligin GECTIGI her kenar, o varlik KONU olacak sekilde. YENI KENAR YOK. !! SAF hali tutulan zincirlerin %100'unu SIZDIRIR (olculdu, 8.318/8.318): b'nin belgesi hem (b,r2)'yi hem (e,r1)'i tasir. BUDAMA sart; budanmis kazanc SEHIR 2->10.8, BOLUM 2->5.5, BOLGE 0->11.6.",
+  "ayar_10.py": "TEKRAR 44 gecis -> ~11. Muennighoff 2305.16264: 4 epoka kadar bedava, yari omur 16 epok, ve '44 epok' makalede BASARISIZ modellerin ornegi olarak aniliyor. Ayni hesap, daha cok FARKLI metin: kopya buyur, gecis azalir.",
+  "YOK CEVABI": "Kullanici karari 18 Eylul: 'bilmiyorum' yerine 'yok' -- *'Turkce diline uygun... bu bilgiye hakim oldugunu gosterir.'* Iki tur: VARLIK YOK ('Zeynep Kayabasi diye biri yok') ve ILISKI OLMAZ ('Sehrin tezi olmaz'). OLCU CIFT KURULACAK: dogru ret VE kacamak (bildigine 'yok' demek). Ikincisi olmadan birincisi yaniltir."
+ },
+ "beyan": {},
+ "satir": {}
+}
