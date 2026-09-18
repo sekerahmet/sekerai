@@ -40,7 +40,7 @@ STRATEJI = ("SANS-TIP", "EN-SIK", "r2-EN-SIK", "KOPYA", "KOPRU",
             "KISAYOL", "SOYAD")
 
 
-def null(kol: str = "09", yaz=print, v=None):
+def null(kol: str = "10", yaz=print, v=None):
     """`v` verilirse veri YENIDEN KURULMAZ -- `test_09` boyle cagiriyor."""
     V = importlib.import_module("veri_" + kol)
     M = importlib.import_module("taban_" + kol)
@@ -111,5 +111,5 @@ def null(kol: str = "09", yaz=print, v=None):
 
 
 if __name__ == "__main__":
-    for _k in sys.argv[1:] or ["09"]:
+    for _k in sys.argv[1:] or ["10"]:
         null(_k)

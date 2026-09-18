@@ -83,11 +83,20 @@ BILDIRIM = (
     lambda Xn, r, rd, Y, Yd: f"{Y}, {Xn} {rd}.",
     lambda Xn, r, rd, Y, Yd: f"{Xn} {r}, {Yd}.",
     lambda Xn, r, rd, Y, Yd: f"{Y} {Xn} {rd}.",
-    # YUKLEM BASTA, VIRGULLU. model_09'da "kullanici eledi" diye
-    # not dusmustum; kullanici 18 Eylul: *"elediğimi hatırlamıyorum,
-    # ile ayırabiliriz dedim"*. Virgul oge sinirini isaretliyor,
-    # o yuzden ayrastirilabilir -- ayracsiz hali degildi.
-    lambda Xn, r, rd, Y, Yd: f"{rd[0].upper()}{rd[1:]}, {Xn} {Y}.",
+    # !! YUKLEM BASTA, VIRGULLU kalip BURADAYDI ve CIKARILDI.
+    # Uretttigi cumle:  "Kardesidir, Ahmet Aydin'in Elif Aydin."
+    # Bu Turkce DEGIL: "Ahmet Aydin'in Elif Aydin" bir oge degil,
+    # tamlayan ortada ve tamlanan eksiz kaliyor.
+    #
+    # Ben bu kalibi kullanicinin *"ile ayirabiliriz"* sozune dayanarak
+    # koymustum ve virgulun oge sinirini isaretledigini yazmistim.
+    # `denetle()` geri getirilip CIKTI OKUNUNCA gorundu ki virgul
+    # cumleyi kurtarmiyor. Kullanicinin isareti kalibin DOGRU
+    # oldugunu gostermez -- METIN gosterir.
+    #
+    # Yerine GLOSS bicimi: cevap BASTA (CEVAP_BASTA 5'i kullaniyor),
+    # ayri bir kayit/madde register'i, ve dilbilgisi kusursuz.
+    lambda Xn, r, rd, Y, Yd: f"{Y}: {Xn} {r}.",
     lambda Xn, r, rd, Y, Yd: f"Bilindiği gibi {Xn} {r} {Yd}.",
     lambda Xn, r, rd, Y, Yd: f"Kayıtlara göre {Xn} {r} {Yd}.",
     lambda Xn, r, rd, Y, Yd: f"Kaynaklarda {Xn} {r} {Yd}.",
@@ -373,3 +382,120 @@ def yok_iliski(ad: str, tip: str, iliski: str, cevap_tip: str,
     soru_ = f"{A}{_nin(A, True)} {r} {sz}{_dir(sz, False)}?"
     return soru_ + " " + YOK_ILISKI[kalip % len(YOK_ILISKI)](
         t, g + _nin(g, False), r)
+
+
+# ======================= DENETIM =========================================
+# !! BU FONKSIYON KOPYALAMADA DUSMUSTU. `metin_09.denetle` vardi;
+# model_09 -> model_10 kopyasinda tasinmadi ve bunu KOPYA KAPISI
+# gosterdi (kullanici: *"diff calistirip bakmadin mi?"*). Dusmesi
+# model_10'da model_09'dakinden DAHA pahali olurdu: orada 4 bicim
+# vardi, burada 17 bildirim x 8 soru kalibi + tip + zincir + reddetme.
+#
+# !! SAYI DEGIL METIN SINAR. Bu kolda ALTI veri kusuru yalniz METNI
+# OKUYARAK bulundu ve hicbirini sayisal bir kapi gostermedi
+# (zincir cumlesi r1'i dusuruyordu, ders "okuyanlardan biri" oluyordu,
+# tip cumlesi IKI KEZ basiliyordu, "Sehirin" yaziliyordu...).
+
+
+def denetle(tohum: int = 0, yaz=print) -> dict:
+    """Her iliski x her kalip -- uretilen metin TURKCE mi, TEKIL mi.
+
+    Kapilar:
+      1. her (iliski, kalip) bir cumle uretiyor
+      2. BILDIRIM cumlesi TEK nokta, TEK olgu (soru isareti YOK)
+      3. SORU cumlesi TAM BIR soru isareti tasiyor
+      4. cumle BUYUK HARFLE basliyor
+      5. zincir cumlesi KOPRUYU YAZMIYOR   <- sinavin sarti
+      6. cift bosluk / bosluk-noktalama YOK  <- ek tablolarindan gelir
+    """
+    import re as _re
+    G = V.kur(tohum)
+    tipi = {a: t for t in V.TIPLER for a in G["ad"][t]}
+    ilk = {}
+    for (o, r), c in G["olgu"].items():
+        ilk.setdefault(r, (o, c))
+    sayim, ornek = {}, {}
+    for r in V.ILISKI:
+        assert r in ilk, f"{r} icin olgu YOK"
+        o, c = ilk[r]
+        for k in range(N_BILDIRIM):
+            s = cumle(o, r, c, k)
+            assert s.count(".") == 1, f"{r} kalip {k}: TEK OLGU ihlali -> {s}"
+            assert "?" not in s, f"{r} kalip {k}: bildirimde soru -> {s}"
+            assert s[0].isupper(), f"{r} kalip {k}: buyuk harf yok -> {s}"
+            assert not _re.search(r"  |\s[,.?]", s), f"{r} kalip {k}: bosluk -> {s}"
+            sayim[("b", r, k)] = len(s)
+        for k in range(N_SORU):
+            s = soru(o, r, c, tipi[c], k)
+            assert s.count("?") == 1, f"{r} soru {k}: tek soru degil -> {s}"
+            assert s[0].isupper(), f"{r} soru {k}: buyuk harf yok -> {s}"
+            assert not _re.search(r"  |\s[,.?]", s), f"{r} soru {k}: bosluk -> {s}"
+            sayim[("s", r, k)] = len(s)
+        ornek[r] = soru(o, r, c, tipi[c], SINAV_KALIBI)
+    # --- ZINCIR: KOPRU GECMEYECEK
+    n_z = 0
+    for (o, r1), b in G["olgu"].items():
+        for (b2, r2), c in G["olgu"].items():
+            if b2 != b or c in (o, b):
+                continue
+            for k in (0, 5, 11, 16):
+                s = zincir(o, r1, r2, c, k)
+                assert _tr(b) not in s, f"ZINCIR KOPRUYU YAZIYOR: {s}"
+                assert s.count(".") == 1, f"zincir TEK OLGU ihlali -> {s}"
+            sq = zincir_soru(o, r1, r2, c, tipi[c], SINAV_KALIBI)
+            assert _tr(b) not in sq, f"ZINCIR SORUSU KOPRUYU YAZIYOR: {sq}"
+            n_z += 1
+            break
+        if n_z >= 40:
+            break
+    # --- TIP ve REDDETME
+    for t in V.TIPLER:
+        a = G["ad"][t][0]
+        for k in range(len(TIP_KALIP)):
+            s = tip_cumlesi(a, t, k)
+            assert s.count(".") == 1 and s[0].isupper(), f"tip: {s}"
+        for k in range(len(TIP_SORU)):
+            s = tip_sorusu(a, t, k)
+            assert s.count("?") == 1 and s[0].isupper(), f"tip sorusu: {s}"
+    for r, ts in V.IMKANSIZ.items():
+        h = tipi[ilk[r][1]]
+        for t in ts:
+            for k in range(len(YOK_ILISKI)):
+                s = yok_iliski(G["ad"][t][0], t, r, h, k)
+                assert s.count("?") == 1 and s[0].isupper(), f"yok_iliski: {s}"
+                assert not _re.search(r"  |\s[,.?]", s), f"yok_iliski bosluk: {s}"
+    yaz(f"  {len(V.ILISKI)} iliski x ({N_BILDIRIM} bildirim + {N_SORU} soru)"
+        f" = {len(sayim):,} cumle GECTI")
+    yaz(f"  zincir {n_z} ornek: KOPRU hicbirinde GECMIYOR")
+    yaz(f"  uzunluk {min(sayim.values())}..{max(sayim.values())} karakter")
+    return ornek
+
+
+if __name__ == "__main__":
+    print("metin_10 DENETIMI")
+    orn = denetle()
+    G = V.kur(0)
+    tipi = {a: t for t in V.TIPLER for a in G["ad"][t]}
+    print("\nHER ILISKIDEN BIR SINAV SORUSU")
+    for r in V.ILISKI:
+        print("   " + orn[r])
+    o = "Ahmet_Aydin"
+    c = G["olgu"][(o, "kardesi")]
+    print(f"\nAYNI OLGU, {N_BILDIRIM} BILDIRIM KALIBI")
+    for k in range(N_BILDIRIM):
+        print(f"   {k:2d}  {cumle(o, 'kardesi', c, k)}")
+    print(f"\nAYNI OLGU, {N_SORU} SORU KALIBI")
+    for k in range(N_SORU):
+        print(f"   {k:2d}  {soru(o, 'kardesi', c, tipi[c], k)}")
+    k1 = G["olgu"][(o, "bolumu")]
+    f1 = G["olgu"][(k1, "fakultesi")]
+    print(f"\nIKI ADIM -- kopru '{_tr(k1)}' GECMIYOR")
+    print("   " + zincir_soru(o, "bolumu", "fakultesi", f1, tipi[f1]))
+    u1 = G["olgu"][(f1, "universitesi")]
+    print(f"\nUC ADIM -- iki kopru de GECMIYOR")
+    print("   " + yol_soru(o, ("bolumu", "fakultesi", "universitesi"),
+                           u1, tipi[u1]))
+    print("\nTIP")
+    for t in V.TIPLER:
+        print(f"   {tip_cumlesi(G['ad'][t][0], t, 0)}"
+              f"   |   {tip_sorusu(G['ad'][t][0], t, 0)}")

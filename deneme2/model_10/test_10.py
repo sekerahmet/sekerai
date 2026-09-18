@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""model_09 KILIDI -- "her seyden bagimsiz" iddiasi SINANIR.
+"""model_10 KILIDI -- "her seyden bagimsiz" iddiasi SINANIR.
 
 Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_09 folderi
 altinda olmali. model_09 diger hicbir model ile ayni seyi
@@ -106,7 +106,7 @@ import taban_10 as M                                         # noqa: E402
 import model_10 as S                                         # noqa: E402
 
 A = S.AYAR
-ok(S.M is M, "model_09 motoru taban_09", S.M.__name__)
+ok(S.M is M, "model_10 motoru taban_10", S.M.__name__)
 ok(A.dongu == 1, "dongu = 1 (DONGU YOK)", str(A.dongu))
 ok(A.l == 8, "l = 8 katman", str(A.l))
 ok(A.dar_alfa == 0.0 and not A.dar_kapi,
@@ -347,6 +347,17 @@ ok(all(_G0["olgu"][(s, "bolgesi")] == V00.SEHIR_BOLGE[s] + "_Bolgesi"
        for s in _G0["ad"]["SEHIR"]),
    "sehir -> bolge GERCEK cografya (rastgele DEGIL)")
 
+# --- 3j) METIN DENETIMI: her iliski x her kalip TURKCE mi --------------
+# !! `metin_10.denetle` KOPYALAMADA DUSMUSTU ve KOPYA KAPISI gosterdi
+# (kullanici: *"diff calistirip bakmadin mi?"*). Geri getirildi, ve ILK
+# KOSUSUNDA bir kusur buldu: BILDIRIM kalibi 5 Turkce degildi
+# ("Kardesidir, Ahmet Aydin'in Elif Aydin."). Buraya bagli ki bir daha
+# sessizce dusmesin -- 600 cumlenin hepsi HER KOSUDA uretilip sinaniyor.
+import metin_10 as MT10                                          # noqa: E402
+_orn = MT10.denetle(0, yaz=lambda *a, **k: None)
+ok(len(_orn) == len(V00.ILISKI),
+   f"3j her iliskiden SINAV cumlesi uretiliyor ({len(_orn)}/{len(V00.ILISKI)})")
+
 # --- 3h) REDDETME VERISI: modele YALAN ogretmiyor mu -------------------
 # !! BU KAPI BIR HATADAN DOGDU. `reddetme_belgeleri` ilk surumde
 # "ILISKI OLMAZ" ciftlerini SEMANIN TUMLEYENINDEN aliyordu ve uretilen
@@ -581,7 +592,7 @@ ok(not any(hasattr(M, x) for x in
            ("kodla_1hop", "kodla_2hop", "kodla_fim", "kopru_hedefi")),
    "model_08'in KODLAYICILARI silindi (jeton semasi yok)")
 ok(not hasattr(M, "dogruluk") and not hasattr(M, "kisayol_orani"),
-   "KISITLI ARGMAX olcusu silindi -- yerine olcme_09 SERBEST URETIM")
+   "KISITLI ARGMAX olcusu silindi -- yerine olcme_10 SERBEST URETIM")
 _hav = M.egitim_havuzu(A, v, yaz=lambda *a: None)
 ok(isinstance(_hav, tuple) and len(_hav) == 2,
    "egitim_havuzu (X, S) donduruyor -- P/T/kimlik/KPOZ/KTR YOK",
@@ -1011,7 +1022,11 @@ else:
 # bolmesi degil.
 print("\n=== 7d) NULL TABANI ===")
 import null_10 as _NL                                       # noqa: E402
-_nl = _NL.null("09", yaz=lambda *a, **k: None, v=v)
+# !! KOL NUMARASI KLASORDEN. Elle yazili "09" burada duruyordu ve
+# `veri_09` modulunu ariyordu -- model_10 klasorunde YOK, test
+# CALISMA ZAMANINDA coktu ve arkasindaki §7e HIC KOSMADI.
+_kol_no = os.path.basename(_B).split("_")[-1]
+_nl = _NL.null(_kol_no, yaz=lambda *a, **k: None, v=v)
 for _b, _x in sorted(_nl.items()):
     ok(_x <= 0.05, f"{_b}: aptal strateji %5'in ALTINDA", f"{_x:.4f}")
 ok(set(_nl) >= {"comp", "ent", "ent_yok"},
@@ -1041,7 +1056,12 @@ ok(set(_nl) >= {"comp", "ent", "ent_yok"},
 # ve gurultulu kapi kapatilir.
 print("\n=== 7e) KOL NUMARASI KAPISI ===")
 import glob as _glob, io as _io2, re as _re2                 # noqa: E402
-_KOL = "09"
+# !! ELLE YAZILMAZ, KLASORDEN TURER. Onceki hali `_KOL = "09"` idi:
+# yani model_10 klasorunde kapi "09"u DOGRU kol sayiyor, "10"u YABANCI
+# sayiyordu -- tam TERSINE calisiyordu. Kapinin kendisi kopyalanirken
+# eskimisti ve bunu gorecek bir sey yoktu.
+_KOL = os.path.basename(_B).split("_")[-1]
+assert _KOL.isdigit(), f"kol numarasi klasorden okunamadi: {_B}"
 # EKRANA BASILAN metinde BASKA kol numarasi. Gecmise atif ACIKCA yazilir.
 # !! model_09'UN EKLEDIGI UC MUAFIYET. Hepsi §4'te ve hepsi AYNI
 # sebeple: bu kol model_08'den BILEREK ayrildi ve ayrismanin YONU
@@ -1063,7 +1083,10 @@ _GECMIS_MSJ = ("model_b15", "model_05'ten KUCUK", "model_a ",
                "model_08 ORANI (2000/20000)",
                "model_08'de TURETILMIS property idi",
                "model_08'in KODLAYICILARI silindi",
-               "model_08'inkine (442) ESIT")
+               "model_08'inkine (442) ESIT",
+               # §4 BASLIGI: bu bolum gercekten model_09 ile kiyas
+               # yapiyor, "model_09" burada KOPYA ARTIGI degil KONU.
+               "BILDIRILMIS AYRISMA: model_10 <-> model_09")
 _kot = []
 for _f in sorted(_glob.glob(os.path.join(_B, "test_*.py"))):
     for _i, _l in enumerate(_io2.open(_f, encoding="utf-8"), 1):
@@ -1099,10 +1122,10 @@ import konus_10 as _K                                        # noqa: E402
 # Karakter surumu yazilinca `TASINMADI` False olacak ve BU BOLUM
 # yeniden DAVRANIS sinayacak: asagidaki son kapi tam bunun icin.
 ok(getattr(_K, "TASINMADI", False),
-   "konus_09 KENDINI 'tasinmadi' diye ILAN EDIYOR",
+   "konus_10 KENDINI 'tasinmadi' diye ILAN EDIYOR",
    "bayrak dusunce bu bolum DAVRANIS kapilariyla yeniden yazilmali")
 ok(hasattr(_K, "_tasinmadi_kapisi"),
-   "konus_09 kosulunca DURUYOR (sessizce yanlis sey basmiyor)")
+   "konus_10 kosulunca DURUYOR (sessizce yanlis sey basmiyor)")
 _ks = io.open(os.path.join(_B, "konus_10.py"), encoding="utf-8").read()
 ok(_ks.count("_tasinmadi_kapisi()") >= 3,
    "kapi kur() ve main() ICINDE cagriliyor -- tanim + iki cagri",
