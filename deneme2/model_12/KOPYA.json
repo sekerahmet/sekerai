@@ -1,0 +1,57 @@
+{
+  "ebeveyn": "model_11",
+  "not": "model_11'den kopyalandi (19 Eylul), sonra HAKEMLIKTEN gecirildi. Kullanici: *'model mimarisi ve tum dosyalara hakemlik yap. cok fazla aciklama varsa eskiden onlari sil daha oze ve kisa aciklamalar kalsin. kod da eskiden seyler kalmasin. bizi gereksiz yavaslatacak seyler olmasin.'* Kopya 23 dosya / 12.473 satirdi; simdi 19 dosya / 10.374 satir.",
+  "kopya_durumu": "MIMARI DEGISTI. model_12 artik model_11'in ikizi DEGIL: 8 blokta 6 Gated DeltaNet-2 + 2 tam dikkat (3:1), QK-norm, Muon, bf16, Lookahead KAPALI. Veri ve sinav BIT AYNI.",
+  "silinen_moduller": {
+    "gerekce": "DORDU DE HEM BOZUK HEM CAGRISIZ. `test_12`nin TASINMAYAN borc tablosu zaten sayiyordu: artik var olmayan islevleri cagiriyorlar (`M.kelimeler`, `M.kodla_1hop`, `M.kodla_2hop`, `K.biyografiler`, `MT.BICIM`, `MT.N_BICIM`). Hicbiri defterden, `kos_12`den ya da baska bir moduldan cagrilmiyor -- import grafi ile dogrulandi. Hepsi SATIR TABLOSU / JETON YUVASI cagina ait; korpus karakter duzeyine gecince islevsiz kaldilar. Borc tablosundan da dort satir dustu.",
+    "graf_12.py": "189 satir, TASINMADI ilan ediyordu",
+    "havuz_12.py": "271 satir, TASINMADI ilan ediyordu",
+    "dokum_12.py": "154 satir",
+    "egitim_dok_12.py": "1.122 satir",
+    "toplam": "1.732 satir"
+  },
+  "olculdu_temiz_cikti": [
+    "OLU KOD ARANDI, YOK. `taban_12`nin 26 tepe tanimindan hicbiri cagrisiz degil; paket genelinde olu tanim 32 satir (biri `_gdn2_ozyineli`, o da test kapisi icin BILEREK duruyor). Beklentim daha fazlasiydi -- motor yalin.",
+    "ARKEOLOJI YORUMU olculdu: 4+ satirlik, eski kol anlatan blok toplam ~520 satir. `ayar_12`de temizlendi. `test_12`de kalan bloklarin cogu KAPI DOGUM HIKAYESI ('BU KAPI BIR COKMEDEN DOGDU') -- CLAUDE.md'nin yontemi bu, silinmedi.",
+    "HIZ OLCULDU (CPU, batch 4 x 512): model_11 0.130 sn, model_12 0.254 sn -> 1.95x. Parametre 1.49x buyudugu icin parametre basina ~1.3x. 20.000 adim L4'te ~31 dk yerine ~60 dk beklenir."
+  ],
+  "acik_kalan": {
+    "graf jetonu sozlugu": "Her kosuda 377 jetonluk GRAF DUZEYI sozluk kuruluyor (`v.vocab`, `ek0`, `REL_OFF`, `ent_off`) ve EGITILMIYOR -- egitim 64 karakterlik sozlukle. Jeton-yuvasi caginin kalintisi. SOKULMEDI cunku `veri_12`/`taban_12.Veri` icine gomulu ve `olcme_izi`ni riske atar; iz degisirse model_11 kiyasi BITER.",
+    "analiz_12.py": "836 satir, 3 bozuk cagri, ve yalniz TEK bir test kapisi kullaniyor (`jeton_ad`, ek blogu adlandirmasi). O kapi da yukaridaki vestigial sozlugu siniyor. Ikisi birlikte dusurulebilir; ayri bir is.",
+    "olcme_12.uret": "Uretilen her karakter icin TUM diziyi yeniden isliyor (~34 kat israf). model_11'de olcum kosunun %0,5'iydi ve bu yuzden DOKUNULMAMISTI; model_12 ileri gecisi 1.95x pahali oldugu icin bu pay buyuyor. GDN-2'nin ozyineli cozme yolu (makale C.5) bunu kokten cozer -- ayri bir is."
+  },
+  "beyan": {
+    "model_12.py": "KURAL 7 (kisa yorum) UYGULANDI. Silinen satirlarin hepsi YORUM ya da DOCSTRING; kod satiri farki ebeveynle kiyaslanarak dogrulandi ve eksilen her kod satiri ayrica beyanli. MIMARI YENIDEN YAZILDI -- kolun TANIMI. `ModelSade` (8x MHA) yerine `ModelHibrit`: 6 Gated DeltaNet-2 + 2 tam dikkat, desen 'GGGAGGGA'. Yeni: `GDN2` karistirici, `_gdn2_parcali` (arXiv 2605.22791 Ek A, C=64), `_gdn2_ozyineli` (Eq. 9 referansi), `Dikkat` (+QK-norm), `Blok(karistirici)`. FFN'e DOKUNULMADI (SwiGLU dff=704) -- model_11'de aramanin 8. FFN'de yapildigi olculmustu, o olcumu yeni mimaride tekrarlanabilir kilmak icin sabit tutuldu. RoPE ve `govde()` sozlesmesi aynen duruyor. PARCALI FORM OZYINELI REFERANSA KARSI SINANDI: bagil fark 2e-6, chunk boyutundan bagimsiz, gradyan akiyor.",
+    "taban_12.py": "KURAL 7 (kisa yorum) UYGULANDI. Silinen satirlarin hepsi YORUM ya da DOCSTRING; kod satiri farki ebeveynle kiyaslanarak dogrulandi ve eksilen her kod satiri ayrica beyanli. Olu kod yollarinin ve olu ayar alanlarinin anlatimi tek cumleye indi: jeton_ad ''/'ilk' yollari, model_08 kodlayicilari, ozel jeton blogu, Lookahead + darbogaz, kopru_kayip. UC EKLEME, silme YOK. (1) `Ayar.karisim` -- her blogun dizi karistiricisi ('A'/'G'), bos = eski davranis; AYARDA duruyor ki `ayar_t<N>.json` mimariyi kaydetsin. (2) `Ayar.gdn_v_kat` -- GDN-2 deger kafasi carpani. (3) `Ayar.optim` + `IkiliOptim` + `_optim_muon`: Muon YALNIZ 2B parametre kabul ediyor (OLCULDU: 1B'de ValueError), o yuzden gizli matrisler Muon'a, gomme/1B/3B AdamW'ye -- standart Muon tarifi zaten bu. `adjust_lr_fn='match_rms_adamw'` ile `lr` AdamW olceginden TASINABILIYOR.",
+    "ayar_12.py": "498 -> 139 SATIR. Butun degerler AYNI KALDI -- 59 alan tek tek dondurulup yeniden kiyaslandi, fark SIFIR. Silinen sey yalnizca model_05..model_11 gecislerinin anlatimi; o kayit `belge/onkayit/` altinda duruyor ve kaynak kodda ikinci kez yasamasi gerekmiyor. Degisen DEGERLER: bf16 False->True, optim adamw->muon, karisim ''->'GGGAGGGA', gdn_v_kat, ort_bas 6000->0 (Lookahead KAPALI, kullanici karari). Kapilar GEVSEMEDI, yeniden hedeflendi.",
+    "test_12.py": "KURAL 7 (kisa yorum) UYGULANDI. Silinen satirlarin hepsi YORUM ya da DOCSTRING; kod satiri farki ebeveynle kiyaslanarak dogrulandi ve eksilen her kod satiri ayrica beyanli. 7e bolumunun dogum hikayesi 39 satirdan 10'a indi, KAPI AYNEN duruyor. Bes kapi yeniden hedeflendi (gevsemedi): LOOKAHEAD ACIK -> KAPALI (x2), ort_bas esik kapisi dustu (ortalama kapali), parametre formulu -> BLOK BASINA sayim (hibritte 8d^2 formulu tutmuyor), Ayar'a eklenen alanlar listesine karisim/gdn_v_kat/optim eklendi. TASINMAYAN borc tablosundan dort satir dustu (silinen dort modul). Mimari kilitleri ve GDN-2 esdegerlik kapisi HENUZ YAZILMADI -- kosudan once yazilacak.",
+    "dokum_12.py": "SILINDI. Bozuk ve cagrisiz -- gerekce `silinen_moduller`de.",
+    "egitim_dok_12.py": "SILINDI. Bozuk ve cagrisiz -- gerekce `silinen_moduller`de.",
+    "graf_12.py": "SILINDI. Bozuk ve cagrisiz -- gerekce `silinen_moduller`de.",
+    "havuz_12.py": "SILINDI. Bozuk ve cagrisiz -- gerekce `silinen_moduller`de.",
+    "metin_12.py": "TARIHSEL IDDIA GERI ALINDI (1 satir): `model_09 -> model_11 kopyasinda tasinmadi` -- O KOPYA hakkinda bir olgu, model_12 diye cevrilse olmamis bir kopyayi anlatirdi.",
+    "asama1_12.py": "`ModelSade` -> `ModelHibrit`: sinif yeniden adlandirildi (artik 'sade' degil, hibrit).",
+    "dil_12.py": "`ModelSade` -> `ModelHibrit`: sinif yeniden adlandirildi (artik 'sade' degil, hibrit).",
+    "durustluk_12.py": "`ModelSade` -> `ModelHibrit`: sinif yeniden adlandirildi (artik 'sade' degil, hibrit).",
+    "konus_12.py": "`ModelSade` -> `ModelHibrit`: sinif yeniden adlandirildi (artik 'sade' degil, hibrit).",
+    "pencere_12.py": "`ModelSade` -> `ModelHibrit`: sinif yeniden adlandirildi (artik 'sade' degil, hibrit).",
+    "tani_12.py": "`ModelSade` -> `ModelHibrit`: sinif yeniden adlandirildi (artik 'sade' degil, hibrit)."
+  },
+  "satir": {
+    "ayar_12.py": 364,
+    "asama1_12.py": 3,
+    "dil_12.py": 2,
+    "dokum_12.py": 1,
+    "durustluk_12.py": 2,
+    "egitim_dok_12.py": 1,
+    "graf_12.py": 1,
+    "havuz_12.py": 1,
+    "konus_12.py": 2,
+    "metin_12.py": 1,
+    "model_12.py": 154,
+    "pencere_12.py": 3,
+    "taban_12.py": 77,
+    "tani_12.py": 2,
+    "test_12.py": 79
+  }
+}
