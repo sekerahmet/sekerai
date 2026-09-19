@@ -70,18 +70,29 @@ def _rope(x, cos, sin):
 # Gated DeltaNet'e GERI DONER -- yani eski kurallar alt uzay olarak duruyor.
 
 
+# Adim basina log-sonum TABANI. Bu bir KIRPMA DEGIL, modelin TANIMI --
+# ve KUMULATIF olmadigi icin chunk sinirindan bagimsiz: iki uygulamaya da
+# konuldugu icin `parcali == ozyineli` tanim geregi korunuyor.
+#   alpha >= exp(-5) = 0.0067  -> bir kanal adim basina en cok %99,3 unutur
+# Resmi GDN-2 kodunun `safe_gate` yolu da kapi degerlerini [-5, 0) tutuyor.
+# Islevi: pivotlu ustelin fp32'de TASMAMASINI aritmetikle garanti etmek
+# (C * 5 / 2 = 80 < 88). Payi ogrenilen `a`/`delta`nin insafina birakmaz.
+G_TABAN = -5.0
+
+
 @torch.no_grad()
 def _gdn2_ozyineli(q, k, v, b, w, g):
     """Eq. 9 referansi, adim adim. EGITIMDE KULLANILMAZ.
 
     Tek isi `_gdn2_parcali`yi sinamak (test_12): parcali form yanlis
     yazilirsa SESSIZCE calisir -- kayip yine duser ama ogrenilen sey
-    GDN-2 degildir. Korunma: iki bagimsiz uygulama, aralarinda kapi.
+    GDN-2 degildir.
 
     q,k,b,g: (B,H,T,dk)   v,w: (B,H,T,dv)  ->  (B,H,T,dv)
     """
     B, H, T, dk = q.shape
     dv = v.shape[-1]
+    g = g.clamp(min=G_TABAN)
     S = torch.zeros(B, H, dk, dv, device=q.device, dtype=torch.float32)
     cik = []
     for t in range(T):
@@ -97,31 +108,51 @@ def _gdn2_ozyineli(q, k, v, b, w, g):
 
 
 def _gdn2_parcali(q, k, v, b, w, g, C: int = 16):
-    """Parcali form -- arXiv 2605.22791 Ek A, ORAN bicimi (Eq. 41/43).
+    """Parcali form -- arXiv 2605.22791 Ek A, SABIT pivotlu carpanli bicim.
 
-        D[r,s] = G_r - G_s          s <= r icin <= 0, yani exp(D) <= 1
-        T      = tril(sum_j (b*k)_rj exp(D)_rsj k_sj, -1) + I    Eq. 34
-        Aqk    = tril(sum_j  q_rj   exp(D)_rsj k_sj,  0)         Eq. 43
+        G_r    = cumsum(g)          chunk ICINDE, G_0 = g_0
+        Gp     = G - C*G_TABAN/2    pivot SABIT -- hicbir jetona bagli degil
+        T      = tril(exp(Gp)(b*k) . (exp(-Gp)k)^T, -1) + I      Eq. 34
+        Aqk    = tril(exp(Gp)q     . (exp(-Gp)k)^T,  0)          Eq. 43
         [Y|U]  = T^-1 [gamma*(b*k) | w*v]     R = U - Y S0       Eq. 34/35
         O      = gamma*q S0 + Aqk R                              Eq. 44
         S_C    = Diag(gamma_C) S0 + K_tail^T R                   Eq. 40
                  K_tail = exp(G_C - G) (*) k
 
-    `gamma^-1` HIC KURULMAZ -- butun usteller <= 1, tasma imkansiz.
+    PIVOT SADELESIR: T ve Aqk yalniz ORAN tasiyor (exp(Gp_r - Gp_s) =
+    exp(G_r - G_s)), yani sonuc pivottan BAGIMSIZ -- yaklasiklik DEGIL.
+    `gamma`, `K_tail` ve RHS gercek G ile kurulur ve hepsi <= 1.
 
-    !! ONCEKI HALI `G = cumsum(g).clamp(min=-30)` ile gamma^-1 kuruyordu
-    ve Eq. 9'u DEGISTIRIYORDU: modelin kendi ilk degerinde kanal x chunk
-    ciftlerinin %24-57'sinde kirpma devredeydi, cikti gercek Eq. 9'dan
-    bagil L2 0.55-1.17 sapiyordu (19 Eylul hakemligi + olculdu). Kirpmayi
-    silmek de cozum degildi: ayni cebir fp32'de NaN veriyor, fp64'te
-    4.5e-16. Oran bicimi ikisini birden cozuyor.
+    !! PIVOT NEDEN VERIDEN TURETILMIYOR: chunk-ici orta nokta (G_C/2)
+    max|ustel|i en kucuk yapardi ama chunk'in SON konumuna baglidir --
+    matematikte sadelesir, YUVARLAMADA sadelesmez. Olculdu: son jetonu
+    degistirmek ayni chunk'taki onceki konumlari bagil 6.7e-06 oynatiyordu
+    ve test_12'nin `atol=0` nedensellik kapisi dustu. Uretimde model
+    tamponun tamamini gorur ve `p`'den sonrasi COPTUR -- cikti cope
+    baglanamaz. Taban sayesinde G_r'nin araligi ONCEDEN bilindiginden
+    (`[C*G_TABAN, 0]`) o araligin orta noktasi SABIT secilebiliyor:
+    bitwise nedensel, ve |ustel| <= C*|G_TABAN|/2 hala garanti.
 
-    BEDEL: (B,H,n,C,C,dk) ara tensor -- bellek C ile DOGRUSAL. Sonuc
-    C'den BAGIMSIZ oldugu icin C=16 (B=32'de 268 MB; C=64'te 1,07 GB).
+    !! ILK HALI `G = cumsum(g).clamp(min=-30)` idi ve Eq. 9'u
+    DEGISTIRIYORDU (19 Eylul hakemligi): kirpma KUMULATIFTI, yani chunk
+    sinirina bagliydi. Modelin kendi ilk degerinde kanal x chunk
+    ciftlerinin %24-57'sinde devredeydi, cikti fp64 Eq. 9'dan bagil L2
+    0.55-1.17 sapiyordu. IKINCI HALI oran bicimiydi (dogru ama pahali:
+    (B,H,n,C,C,dk) ara tensor -> L4'te 2-8x yavas, 2-8x bellek, OLCULDU).
+    Bu hal ikisini de cozuyor: fp64 Eq. 9'a karsi 2.2e-07.
+
+    C=16 OLCUMLE secildi (L4): sabit pivot butun dinamik araligi PESIN
+    harcadigi icin C buyudukce hem ustel sinira yaklasiyor hem dogruluk
+    dusuyor (C=16 -> +-40, 9.0e-07;  C=32 -> +-80, 2.2e-06). C=16'da
+    `exp(-40)*k` en kucuk k'de bile fp32 NORMAL araliginda kaliyor.
 
     SAGDAN DOLGU: T her zaman C'nin kati degil (sinav dizileri 86/113).
     Nedensel oldugu icin guvenli; dolgu sifir, durumu kirletmez.
     """
+    P = C * G_TABAN / 2.0                    # SABIT pivot
+    assert abs(P) <= 60.0, (
+        f"C={C} ile pivotlu ustel {abs(P)} -- fp32 sinirina (88) cok "
+        f"yakin, alt tarafta da normal-alti risk var. C'yi kucult.")
     Bs, H, T0, dk = q.shape
     T = T0
     if T % C:
@@ -130,20 +161,18 @@ def _gdn2_parcali(q, k, v, b, w, g, C: int = 16):
         q, k, v, b, w, g = (ped(q), ped(k), ped(v), ped(b), ped(w), ped(g))
         T += _p
     n = T // C
-    # !! autocast ALTINDA `.float()` YETMEZ: matmul/einsum girdileri
-    # yeniden bf16'ya iner. Makale D.3 durumu ve biriktiricileri fp32
-    # istiyor -- blok bunu ZORLUYOR.
+    # !! autocast ALTINDA `.float()` YETMEZ: matmul girdileri yeniden
+    # bf16'ya iner. Makale D.3 durumu ve biriktiricileri fp32 istiyor --
+    # blok bunu ZORLUYOR.
     with torch.autocast(device_type=q.device.type, enabled=False):
         rs = lambda t: t.float().reshape(Bs, H, n, C, t.shape[-1])
         q, k, b, g, v, w = rs(q), rs(k), rs(b), rs(g), rs(v), rs(w)
-        G = g.cumsum(-2)                         # chunk-yerel, KIRPMA YOK
-        # Ust ucgen (s > r) clamp ile 1'e sabitlenir ve asagida tril ile
-        # ATILIR; iki islemin de turevi orada 0.
-        D = (G.unsqueeze(-2) - G.unsqueeze(-3)).clamp(max=0.0)
-        KW = D.exp() * k.unsqueeze(-3)           # (gamma_r/gamma_s) (*) k_s
-        Tm = torch.einsum("...rj,...rsj->...rs", b * k, KW).tril(-1)
-        Aqk = torch.einsum("...rj,...rsj->...rs", q, KW).tril(0)
+        G = g.clamp(min=G_TABAN).cumsum(-2)      # chunk-yerel
+        eGp = (G - P).exp()                      # SABIT pivot -> nedensel
+        Kb = k * (P - G).exp()
+        Tm = ((eGp * (b * k)) @ Kb.transpose(-1, -2)).tril(-1)
         Tm = Tm + torch.eye(C, device=q.device, dtype=q.dtype)
+        Aqk = ((eGp * q) @ Kb.transpose(-1, -2)).tril(0)
         gam = G.exp()                                            # <= 1
         Kt = (G[..., -1:, :] - G).exp() * k                      # <= 1
         # Eb ve Z yan yana, TEK ucgen cozum, sonra ikiye ayrilir.

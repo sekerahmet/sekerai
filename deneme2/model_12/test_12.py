@@ -174,7 +174,7 @@ _k = _FN.normalize(torch.randn(2, 3, 128, 16), dim=-1)
 _v = torch.randn(2, 3, 128, 16)
 _bg, _wg = torch.rand(2, 3, 128, 16), torch.rand(2, 3, 128, 16)
 for _ad, _gs in (("orta", 0.05), ("zayif", 0.002), ("guclu", 0.5),
-                 ("sert", 1.6), ("asiri", 5.0)):
+                 ("sert", 1.6), ("asiri", 5.0), ("uc", 20.0)):
     _g = -torch.rand(2, 3, 128, 16) * _gs
     _o1 = S._gdn2_ozyineli(_q, _k, _v, _bg, _wg, _g)
     _o2 = S._gdn2_parcali(_q, _k, _v, _bg, _wg, _g)
@@ -193,22 +193,51 @@ _oz = S._gdn2_ozyineli(*_gir)
 _bag = float((_oz - S._gdn2_parcali(*_gir)).abs().max() / _oz.abs().mean())
 ok(_bag < 1e-3, "GDN-2 parcali == ozyineli (KATMANIN KENDI ilk degeri)",
    f"bagil fark {_bag:.2e}")
-# Kumulatif sonuma uygulanan HER kirpma Eq. 9'u degistirir. YORUMA
-# DEGIL KODA bakilir -- docstring eski kusuru ANLATIYOR, kapi ona takilmaz.
+# KUMULATIF kirpma Eq. 9'u degistirir; ADIM BASINA taban degistirmez
+# (chunk sinirindan bagimsiz, iki uygulamada da var). Yasak olan desen
+# `cumsum(...).clamp(min=...)`. YORUMA DEGIL KODA bakilir -- docstring
+# eski kusuru ANLATIYOR, kapi ona takilmasin.
 _agac12 = ast.parse(io.open(os.path.join(_B, "model_12.py"),
                             encoding="utf-8").read())
-_fn12 = [d for d in ast.walk(_agac12)
-         if isinstance(d, ast.FunctionDef) and d.name == "_gdn2_parcali"]
-_kirp = [c for c in ast.walk(_fn12[0]) if isinstance(c, ast.Call)
-         and getattr(c.func, "attr", "") == "clamp"
-         and any(kw.arg == "min" for kw in c.keywords)] if _fn12 else [1]
-ok(not _kirp, "GDN-2 taramasinda KUMULATIF KIRPMA yok (clamp(min=...))",
-   f"{len(_kirp)} kirpma bulundu")
+_fn12 = {d.name: d for d in ast.walk(_agac12)
+         if isinstance(d, ast.FunctionDef)
+         and d.name in ("_gdn2_parcali", "_gdn2_ozyineli")}
+ok(len(_fn12) == 2, "iki GDN-2 uygulamasi da duruyor", str(sorted(_fn12)))
+_kirp = [c for c in ast.walk(_fn12["_gdn2_parcali"])
+         if isinstance(c, ast.Call) and getattr(c.func, "attr", "") == "clamp"
+         and any(kw.arg == "min" for kw in c.keywords)
+         and isinstance(c.func.value, ast.Call)
+         and getattr(c.func.value.func, "attr", "") == "cumsum"]
+ok(not _kirp, "KUMULATIF kirpma YOK (cumsum(...).clamp(min=...) deseni)",
+   f"{len(_kirp)} bulundu")
+# TABAN IKI UYGULAMADA DA olmali -- yoksa esdegerlik sessizce bozulur.
+_tab = {n: any(isinstance(c, ast.Call)
+               and getattr(c.func, "attr", "") == "clamp"
+               and any(kw.arg == "min" and getattr(kw.value, "id", "")
+                       == "G_TABAN" for kw in c.keywords)
+               for c in ast.walk(d)) for n, d in _fn12.items()}
+ok(all(_tab.values()), "sonum tabani IKI uygulamada da uygulaniyor", str(_tab))
+# SABIT pivot: |ustel| = C*|taban|/2, fp32 siniri 88. Ust tarafta tasma,
+# alt tarafta normal-alti (1.2e-38) riski var -> 60'ta duruyoruz.
+_Cvar = S._gdn2_parcali.__defaults__[0]
+ok(_Cvar * abs(S.G_TABAN) / 2 <= 60.0,
+   f"sabit pivotlu ustel fp32 guvenli: C={_Cvar} * |{S.G_TABAN}| / 2 <= 60",
+   f"{_Cvar * abs(S.G_TABAN) / 2}")
+# PIVOT VERIDEN TURETILMEMELI -- yoksa chunk'in son jetonu onceki
+# konumlari yuvarlamada oynatir ve `atol=0` nedensellik kapisi duser
+# (olculdu: bagil 6.7e-06, yalniz son chunk'ta).
+_piv = [c for c in ast.walk(_fn12["_gdn2_parcali"])
+        if isinstance(c, ast.Subscript)
+        and isinstance(getattr(c, "ctx", None), ast.Load)]
+ok(any(isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "P"
+       and not any(isinstance(d, ast.Subscript) for d in ast.walk(n.value))
+       for n in ast.walk(_fn12["_gdn2_parcali"])),
+   "pivot SABIT (veriden turetilmiyor) -- bitwise nedensellik")
 _g = -torch.rand(2, 3, 128, 16) * 0.05
-ok(float((S._gdn2_parcali(_q, _k, _v, _bg, _wg, _g, C=32)
-          - S._gdn2_parcali(_q, _k, _v, _bg, _wg, _g, C=64)
+ok(float((S._gdn2_parcali(_q, _k, _v, _bg, _wg, _g, C=8)
+          - S._gdn2_parcali(_q, _k, _v, _bg, _wg, _g, C=16)
           ).abs().max()) < 1e-4,
-   "GDN-2 chunk boyutundan BAGIMSIZ (C=32 == C=64)")
+   "GDN-2 chunk boyutundan BAGIMSIZ (C=8 == C=16)")
 _qg = _q.clone().requires_grad_(True)
 S._gdn2_parcali(_qg, _k, _v, _bg, _wg, _g).sum().backward()
 ok(float(_qg.grad.norm()) > 0, "GDN-2 GRADYAN akiyor (kopuk degil)")
