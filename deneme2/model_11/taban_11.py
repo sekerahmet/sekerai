@@ -702,18 +702,30 @@ class Veri:
         # phi: TURETILMIS TANI SAYISI, kontrol parametresi DEGIL. Ayarlanamaz;
         # graf yogunlugundan ve ent_pay/comp_pay'den duser. "phi'yi 7 yapalim"
         # denemez -- veri ureticisi degistirilir.
+        self._phi_hesapla()
+
+    def _phi_hesapla(self):
+        """phi + wang_phi. `tr2` DEGISIRSE yeniden cagrilir.
+
+        !! METOT, cunku `zincir_butcesi` `tr2`yi BUDUYOR. Hesap
+        `__post_init__` icinde tek satir kalsaydi `v.phi` budama ONCESI
+        degeri tasirdi: rapor 4.00 basardi, model 1.12 gorurken.
+
+        phi TURETILMIS bir tani sayisidir, kontrol parametresi DEGIL --
+        graf yogunlugundan ve ent_pay/comp_pay'den duser.
+
+        WANG'IN TANIMI AYNI DEGIL (15 Eylul hakemligi). Wang
+        2405.15071:155 "phi = |train_inferredID| / |atomicID|" ve
+        atomicID, OOD varliklarinin olgularini DISLAR; bizim paydamiz
+        TUM olgular. Olculdu: ayni veride bizimki 5.09, Wang tanimiyla
+        6.36 -- %25 fark. Wang'in 3.6-18.0 taramasina konumlanirken
+        WANG_PHI kullanilmali, phi degil. KATI varliklari paydadan
+        duser -- Wang'in OOD'si tam olarak o."""
         self.phi = len(self.tr2) / max(1, len(self.one))
-        # WANG'IN TANIMI AYNI DEGIL (15 Eylul hakemligi). Wang 2405.15071:155
-        # "phi = |train_inferredID| / |atomicID|" ve atomicID, OOD varliklarinin
-        # olgularini DISLAR. Bizim paydamiz TUM olgular. Olculdu: ayni veride
-        # bizimki 5.09, Wang tanimiyla 6.36 -- %25 fark. Wang'in 3.6-18.0
-        # taramasina konumlanirken WANG_PHI kullanilmali, phi degil.
-        _ent = {e for e, *_ in self.ent} | {e for e, *_ in self.ent_yok} \
-            | {e for e, *_ in self.ent_arama} \
-            | {e for e, *_ in self.ent_kati}
-        # KATI varliklari da paydadan DUSER: Wang'in atomicID tanimi
-        # "OOD varliklarinin olgularini dislar" diyor ve KATI tam
-        # olarak onun OOD'si. Dusurulmezse wang_phi KUCUK gorunur.
+        _ent = ({e for e, *_ in self.ent}
+                | {e for e, *_ in self.ent_yok}
+                | {e for e, *_ in self.ent_arama}
+                | {e for e, *_ in self.ent_kati})
         _id = sum(1 for e, _, _ in self.one if e not in _ent)
         self.wang_phi = len(self.tr2) / max(1, _id)
 
@@ -957,6 +969,24 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
              dir_rel=_dir_rel,
              dir_soru=_dir_soru,
              kisayol=_ksy, kisayol_atilan=tuple(sorted(_ksy_at.items())))
+
+    # --- ZINCIR BUTCESI: `tr2` KORPUSUN YAZABILECEGI KADAR -------------
+    # OLCULDU 19 Eylul: tr2 29.510 zincir tasiyordu, korpus 6.819 tanesini
+    # yazabiliyordu. `zincir` sinavi TAMAMINDAN soruyordu -> tavan 0.23,
+    # esik 0.95. Olcu kendi adini yalanliyordu ("gordugu bilesigi
+    # hatirliyor mu" -- gormedigini soruyordu).
+    #
+    # !! BURADA, `veri_kur`in ICINDE. Cunku iki okuma yolu var ve ikisi
+    # de once BURAYA ugruyor:
+    #     egit()      : egitim_havuzu -> olcme_listeleri
+    #     pencere_11  : olcme_listeleri -> egitim_havuzu   (TERS SIRA)
+    # Budama `havuz`da yapilsaydi pencere BUDANMAMIS tr2 ile sinav
+    # kurardi ve iki yol FARKLI `zincir` olcerdi -- sessizce.
+    if ayar.zincir_pay:
+        v.tr2 = KOR.zincir_butcesi(
+            v.one, v.tr2, KOR.kopru_yasagi(v), ayar.kopya,
+            ayar.zincir_pay, tohum=ayar.veri_tohum, yaz=yaz)
+        v._phi_hesapla()          # tr2 degisti -> phi/wang_phi DE degisir
 
     # --- SIZINTI DENETIMI -- sessiz gecmesin
     trset = {(e, a, b) for e, a, b, _, _ in v.tr2}

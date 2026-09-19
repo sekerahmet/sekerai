@@ -74,6 +74,71 @@ def kopru_yasagi(v):
     return d
 
 
+# --- ZINCIR BUTCESI ------------------------------------------------------
+# OLCULDU 19 Eylul: `v.tr2` 29.510 zincir tasiyor ama korpus bunlarin
+# ancak 6.819'unu YAZABILIYOR (iki-adimli bildirim slotu). Yani `zincir`
+# olcusunun TAVANI %23,1 ve esigi 0.95 -- ULASILAMAZ bir kapiydi.
+# Olculen %19,1; aradaki 4 puan ORNEKLEME ISRAFI (her kopya havuzdan
+# YENIDEN cekiyordu, ayni zinciri iki kez yazip baskasini hic yazmiyordu).
+#
+# !! ONKAYIT §2'DE "ornekleme duzeltilirse %18,5 -> ~%60" YAZIYORDU.
+#    YANLIS. O sayi bildirim + soru slotlarini AYRI saymisti; DISTINCT
+#    zincir slotu 6.819. Duzeltme 4 puan verir, 40 degil.
+#
+# Cozum iki parcali ve ikisi AYNI karar:
+#   1. `tr2` slot kadarina BUDANIR  -> `zincir` YAZILANI sorar
+#   2. `sayfalar` ARTIK ORNEKLEMEZ  -> elindekinin hepsini yazar
+# Korpus BUYUMEZ, yogunluk DEGISMEZ, epok DEGISMEZ. Yazilan FARKLI
+# zincir 5.635 -> ~8.266 (+%47) cikar, tavan 1.00 olur.
+UCLU_PAY = 0.26      # zincir slotlarinin bu kadari UC ADIMLIYA gider
+#                      OLCULDU: yazilan 9.198 zincir cumlesinin 2.379'u
+#                      uc adimli (%25,9). Ayar niyeti %23 idi, tutuyor.
+
+
+def zincir_butcesi(one, tr2, yasak, kopya: int, zincir_pay: float,
+                   uclu_pay: float = UCLU_PAY, tohum: int = 0, yaz=print):
+    """`tr2`yi korpusun YAZABILECEGI kadarina budar.
+
+    Bir varligin sayfasina `len(sat) * zincir_pay` zincir cumlesi
+    giriyor ve sayfa `kopya` kez yaziliyor -> o varlik icin toplam
+    `kopya * zincir_pay * len(sat)` slot. Bunun `1 - uclu_pay` kadari
+    iki adimliya ayrilir.
+
+    Secim TOHUMLU ve SIRALI: ayni ayar ayni budamayi verir."""
+    konu, anilan = {}, {}
+    for e, r, h in one:
+        e, r, h = int(e), int(r), int(h)
+        konu.setdefault(e, []).append((e, r, h))
+        anilan.setdefault(h, []).append((e, r, h))
+    bas = {}
+    for i, x in enumerate(tr2):
+        bas.setdefault(int(x[0]), []).append(i)
+    rs = np.random.default_rng(4400 + tohum)
+    tut, hedef_top = set(), 0
+    for e, ix in sorted(bas.items()):
+        ya = yasak.get(e, ())
+        ge = [t for t in anilan.get(e, []) if (t[0], t[1]) not in ya]
+        n_sat = len(konu.get(e, [])) + len(ge)
+        if not n_sat:
+            continue
+        # !! round, int DEGIL. `int` her varlikta ~0,5 slot kirpar
+        # ve 1.608 sayfada ~800 slot bosa giderdi.
+        hedef = int(round(n_sat * zincir_pay * kopya * (1.0 - uclu_pay)))
+        hedef_top += hedef
+        if hedef >= len(ix):
+            tut.update(ix)
+            continue
+        for j in rs.permutation(len(ix))[:hedef]:
+            tut.add(ix[int(j)])
+    out = [x for i, x in enumerate(tr2) if i in tut]
+    yaz(f"  ZINCIR BUTCESI: {len(tr2):,} -> {len(out):,} "
+        f"(slot {hedef_top:,}; kopya {kopya}, zincir_pay {zincir_pay}, "
+        f"uclu pay {uclu_pay:.0%})")
+    yaz(f"     ARTIK HEPSI YAZILIR -> `zincir` sinavi GORULEN zinciri "
+        f"sorar (tavan 1.00, onceki 0.23)")
+    return out
+
+
 def sayfalar(v, G, kopya: int = 1, tohum: int = 0, tetik: int = 0,
              t_len: int = 512, zincir_pay: float = 0.0, n3: int = 0,
              yaz=print):
@@ -136,11 +201,21 @@ def sayfalar(v, G, kopya: int = 1, tohum: int = 0, tetik: int = 0,
             continue
         # Bu sayfaya kac zincir cumlesi girsin -- ORANLA, tam sayiya
         # yuvarlamadan (0.20 x 7 cumle = 1,4 -> bazi sayfada 1, bazisinda 2).
-        zin = z2.get(e, []) + z3.get(e, [])
+        # !! ARTIK ORNEKLENMIYOR. `veri_kur` `tr2`yi zaten slot kadarina
+        # budadi (`zincir_butcesi`), yani elde ne varsa HEPSI yazilir.
+        # Eski hali her KOPYADA havuzdan yeniden cekiyordu ve ayni zinciri
+        # tekrar yazip baskasini hic yazmiyordu -- olculdu: tavan %23,1
+        # iken gerceklesen %19,1.
+        # UC ADIMLI yollar KALAN slota sigdigi kadar girer; iki adimli
+        # ONCELIKLI cunku olculen bolme o.
+        _z2 = z2.get(e, [])
+        _slot = int(round(len(sat) * zincir_pay * kopya))
+        zin = _z2 + z3.get(e, [])[:max(0, _slot - len(_z2))]
         n_zin = 0
         if zin and zincir_pay:
-            _h = len(sat) * zincir_pay
-            n_zin = min(len(zin), int(_h) + (rs.random() < _h - int(_h)))
+            # kopyalara BOL: tavana yuvarla ki hicbiri disarida kalmasin
+            n_zin = -(-len(zin) // kopya)
+        _zsira = [int(i) for i in rs.permutation(len(zin))] if zin else []
         gorulen = set()
         for k in range(kopya):
             for _ in range(32):
@@ -164,7 +239,12 @@ def sayfalar(v, G, kopya: int = 1, tohum: int = 0, tetik: int = 0,
             # ZINCIR cumleleri: olgu cumleleriyle KARISTIRILIR.
             zc = []
             if n_zin:
-                for _t in rs.permutation(len(zin))[:n_zin]:
+                # TEK karistirma, kopyalara BLOK BLOK. Modulo ile sariyor:
+                # kopya * n_zin >= len(zin) oldugundan her zincir EN AZ
+                # bir kez yazilir, artan slot bastan tekrar eder (sayfa
+                # yogunlugu boylece butun kopyalarda AYNI kalir).
+                for _t in (_zsira[(k * n_zin + _j) % len(_zsira)]
+                           for _j in range(n_zin)):
                     rr, hedef = zin[int(_t)]
                     _k = int(rs.integers(MT.N_BILDIRIM))
                     zc.append((MT.yol(E[e], rr, hedef, _k),

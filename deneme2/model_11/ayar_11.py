@@ -133,9 +133,23 @@ AYAR = Ayar(
     # --- KORPUS -------------------------------------------------------
     t_len=512,           # egitim penceresi (karakter). Physics 3.1 Ek C
     #                      de 512 kullaniyor. Bir pencere 7..11 cumle.
-    kopya=5,             # bioS `multiM`: her varlik icin 5 belge, her
+    kopya=20,            # bioS `multiM`: her varlik icin 20 belge, her
     #                      birinde CUMLE SIRASI ve YUZEY BAGIMSIZ secilir.
-    tetik=2,             # BIYOGRAFI SORUSU: 5 belgenin 2'si
+    #
+    # !! 5 -> 20, model_11 KARARI (19 Eylul). IKI olculmus sayi ayni
+    # dugmeyi isaret etti:
+    #   phi 0.86   Wang 2405.15071'in taradigi 3.6-18 araliginin BIR
+    #              MERTEBE ALTINDA. Ve bu, BUDAMA SONRASI DURUST deger;
+    #              onceki 4.00 kayitliydi ama model 0.76 goruyordu.
+    #   epok 35.3  Muennighoff 2305.16264: 4 epok bedava, 44 acikca
+    #              basarisiz rejim. 35,3 o sinira yakin.
+    # `kopya` IKISINI BIRDEN duzeltir ve DOGALLIGI BOZMAZ: sayfa ICI
+    # yogunluk aynen kalir (zincir_pay 0.20), sadece ayni varlik
+    # hakkinda daha cok BELGE olur -- gercek korpusun yapisi bu.
+    # `zincir_pay`i yukseltmek ayni phi'yi verirdi ama cumlelerin
+    # %40'ini zincir yapardi: model_09'un curutulmus %75'ine dogru.
+    tetik=8,             # BIYOGRAFI SORUSU: 20 belgenin 8'i
+    #                      (ORAN KORUNDU: 2/5 = 8/20 = %40)
     #                      "X hakkinda ne biliyoruz?" onegiyle gelir,
     #                      3'u onekSIZ. Kullanici karari, 18 Eylul:
     #                      *"bu bir dil modeli, dil modelinin basarili
@@ -350,18 +364,33 @@ assert AYAR.batch == 32, (
     "Buyutmek verimi DUSURUYOR (128'de 159.261).")
 # KORPUS JETONU: OLCULDU, elle yazilmadi. `korpus_11` degisirse bu
 # sayi da degisir ve asagidaki kapi bunu SOYLER -- sessizce kaymaz.
-KORPUS_JETON = 9_282_631   # OLCULDU, kopya 5 + n3 10.000 ile
-#   ilk kosu 35,3 epok. n3=0 iken 9.133.886 idi.
+KORPUS_JETON = 37_627_358  # OLCULDU, kopya 20 + zincir butcesi ile
+#   model_10: 9.282.631 (kopya 5, butce YOK). Buyumenin ikisi de
+#   model_11 karari: kopya 5->20 ve `zincir_butcesi` (tr2 artik TAMAMEN
+#   yaziliyor, orneklenmiyor).  tr2 22.832  phi 3,09  wang_phi 3,81
+#   Kurulum 73 sn, tensor 337 MB (82.261 x 512).
 assert AYAR.adim == 20000, (
     "CLAUDE.md kural 1: ILK KOSU 20.000'de durur. Uzatmak kullanici "
     "karari ve SURDURMEDIR (--surdur), sifirdan kosu degil.")
 EPOK = AYAR.batch * AYAR.t_len * AYAR.adim / KORPUS_JETON
-assert 30 < EPOK < 40, (
+# !! ARALIK DEGISTI: 30-40 -> 5-15. Kapi GEVSEMEDI, HEDEFI degisti.
+# model_10 35,3 epok kosuyordu ve bu Muennighoff 2305.16264'un
+# "4 epok bedava, 44 acikca basarisiz" araliginin UST ucuna yakindi --
+# yani veriyi tekrar tekrar okuyup ezberleyen bir rejim. model_11'de
+# `kopya` 5 -> 20 oldu; AYNI hesap butcesi (20.000 adim) artik DORT
+# KAT daha cok BENZERSIZ metin uzerine yayiliyor. Olgu basina toplam
+# maruziyet neredeyse AYNI kaliyor (14,9 cumle x 35,3 epok ~= 60 cumle
+# x 8,8 epok); degisen sey TEKRARIN yerini CESITLILIGIN almasi.
+assert 5 < EPOK < 15, (
     f"ilk kosu {EPOK:.1f} epok. Muennighoff 2305.16264: 4 epok bedava, "
-    f"R_D* ~ 15 yarilanma, 44 epok ACIKCA basarisiz rejim. 20.000 adim "
-    f"bu araligin ustunde ama 44'un ALTINDA; uzatilirsa 40.000 -> 71,8 "
-    f"epok olur ve gerekcesi OLCULENLER §2'ye yazilir.")
-assert AYAR.t_len == 512 and AYAR.kopya == 5, "korpus karari"
+    f"R_D* ~ 15 yarilanma, 44 epok ACIKCA basarisiz rejim. Hedef "
+    f"ARALIK 5-15: 4'un biraz ustu, R_D* yarilanmasinin altinda. "
+    f"Uzatilirsa (--surdur) epok da katlanir ve gerekcesi "
+    f"OLCULENLER §2'ye yazilir.")
+assert AYAR.t_len == 512 and AYAR.kopya == 20, "korpus karari"
+assert AYAR.tetik * 5 == AYAR.kopya * 2, (
+    "tetik/kopya ORANI korunmali: 2/5. Biyografi onegi tasiyan "
+    "belge payi kopya degisince kaymamali.")
 assert AYAR.zincir_pay == 0.20 and AYAR.n3 == 10000, (
     "ZINCIR AZINLIK: model_09'da korpusun %75'i zincirdi, dogal metinde "
     "bilesik yapi basit olgudan cok olmaz (CLAUDE.md kural 5).")
