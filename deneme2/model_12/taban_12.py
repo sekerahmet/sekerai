@@ -1242,9 +1242,16 @@ class IkiliOptim:
 def _optim_muon(model, ayar, yaz=print):
     """Muon + AdamW bolusumu. STANDART TARIF, icat DEGIL.
 
-        MUON    gizli 2B matrisler (izdusumler, FFN, qkv, GDN-2 kapilari)
-        ADAMW   gomme/unembedding (BAGLI, tek tensor), 1B (norm kazanci,
-                GDN-2'nin `a` ve `delta`si), 3B (kisa evrisim cekirdegi)
+        MUON    GERCEK gizli matrisler: 2B VE iki kenari da > 1
+                (izdusumler, FFN, qkv, GDN-2 kapilari)
+        ADAMW   gomme/unembedding (BAGLI, tek tensor) ve 3B evrisim
+                cekirdegi -- weight decay VAR
+                wd YOK: 1B kazanclar, GDN-2'nin `delta`si ve (H,1) `a`si
+
+    !! `a` (H,1) 2 BOYUTLU ama MATRIS DEGIL -- kafa basina log-sonum
+    skaleri. Kenar sinavi olmadan Muon'a dusuyordu (19 Eylul hakemligi):
+    Newton-Schulz bir sutun vektorunu ORTOGONALLESTIRIR, yani ogrenilen
+    buyuklukleri siler; ustune wd 0.5 yerdi.
 
     `torch.optim.Muon` 2B DISINDAKI her seyi REDDEDIYOR -- olculdu:
     `ValueError: Muon only supports 2D parameters`. Bu bir engel degil,
@@ -1260,12 +1267,12 @@ def _optim_muon(model, ayar, yaz=print):
     for p in model.parameters():
         if p is gom:
             ad_dec.append(p)
-        elif p.dim() == 2:
-            muon_p.append(p)
-        elif p.dim() >= 2:
-            ad_dec.append(p)
+        elif p.dim() == 2 and min(p.shape) > 1:
+            muon_p.append(p)                  # gercek gizli MATRIS
+        elif p.dim() >= 3:
+            ad_dec.append(p)                  # kisa evrisim cekirdegi
         else:
-            ad_nodec.append(p)
+            ad_nodec.append(p)                # 1B kazanclar + (H,1) `a`
     n = lambda L: sum(x.numel() for x in L)
     yaz(f"  OPTIM muon: {len(muon_p)} matris {n(muon_p):,} param  |  "
         f"adamw: {len(ad_dec)+len(ad_nodec)} tensor "

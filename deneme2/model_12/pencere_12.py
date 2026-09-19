@@ -1,13 +1,8 @@
 # -*- coding: utf-8 -*-
 """pencere_12 — BU KOLUN KENDI BIRINCIL OKUMASI. TEK BASINA DURUR.
 
-Kullanici karari, 16 Eylul 2026: *"bunlarin hepsi model_09 folderi
-altinda olmali. model_09 diger hicbir model ile ayni seyi
-kullanmamali."*
-
-`model_a/pencere_a.py`nin KOPYASI (uretici: scratchpad/kur_okuma00.py). Modeli
-`ModelHibrit` ile kurar. Paylasilan surumde yapilan bir degisiklik buraya
-GECMEZ; `test_12.py` ikisinin AYNI SEYI olctugunu her kosuda siniyor.
+Anlik goruntulerin agirlik ortalamasini alir, butun bolmelerde olcer.
+Modeli `ModelHibrit` ile kurar; disariya hicbir sey import etmez.
 """
 from __future__ import annotations
 
@@ -22,8 +17,18 @@ import olcme_12 as OLC                                        # noqa: E402
 import taban_12 as M                                          # noqa: E402
 from model_12 import ModelHibrit                                # noqa: E402
 
-# model_09'in TEK modeli var; kanca yok, dogrudan yazili.
 MODEL_SINIFI = ModelHibrit
+
+# EKRAN ADLARI. Bolme KODU anahtar olarak kalir (json, kapilar,
+# test_12 onu okur); EKRANDA kod GORUNMEZ. Ilk dordu CLAUDE.md "Olcu
+# BES ALAN"dan; kalanlari o bolmenin TANIMINDAN:
+#   kisayolsuz  kisayol TIP OLARAK imkansiz (ent_yok)
+#   yeni_kenar  iki kenar da egitim zincirlerinde gecmedi (ood)
+#   kati        varlik HICBIR rolde gorulmemis (ent_kati, bu kolda bos)
+AD = {"one": "olgu", "seen": "zincir", "comp": "gorulmemis",
+      "ent": "yabanci", "ent_yok": "kisayolsuz", "ood": "yeni_kenar",
+      "ent_kati": "kati", "ent_arama": "arama"}
+ALAN = {"one": "HAFIZA", "seen": "HAFIZA"}        # gerisi CIKARIM
 
 
 def anlik_goruntuler(klasor: str) -> dict:
@@ -170,7 +175,7 @@ def main():
     kunye = kunye_oku(a.klasor)
     snap = anlik_goruntuler(a.klasor)
     adimlar = list(snap)
-    print(f"=== pencere_a  {ayar.ad} tohum {ayar.tohum} ===")
+    print(f"=== pencere_12  {ayar.ad} tohum {ayar.tohum} ===")
     print(f"  klasor   {a.klasor}")
     print(f"  ayar     d={ayar.d} l={ayar.l} nh={ayar.nh} dff={ayar.dff} "
           f"dongu={ayar.dongu} lr={ayar.lr} wd={ayar.wd}")
@@ -197,7 +202,8 @@ def main():
              for k in L if len(L[k])}
     # OLCME SETI PARMAK IZI -- taban_12.olcme_izi()'nden, KOPYA DEGIL.
     iz = M.olcme_izi(L)
-    print("  olcme    " + "  ".join(f"{k} {len(L[k])}" for k in L if L[k]))
+    print("  olcme    " + "  ".join(f"{AD.get(k, k)} {len(L[k])}"
+                                    for k in L if L[k]))
     print(f"  parmak izi {iz}")
     # EGITIMIN yazdigi izle KARSILASTIR: olcum, egitimin gordugu ornekleri
     # mi olcuyor? Ayni ayardan turemis olmalari YETMEZ -- veri ureteci ya da
@@ -234,27 +240,31 @@ def main():
                   for i in range(len(adimlar) - a.genislik + 1)]
     print(f"\n{len(pencereler)} kayan pencere, genislik {a.genislik}. "
           f"EN IYISI SECILMIYOR, hepsi raporlaniyor.\n")
-    # SUTUNLAR OLCME SETINDEN TURETILIR, elle yazilmaz. `ent_kati`
-    # (kati_pay > 0) ancak boyle gorunur; sabit liste olsaydi olculur ama
-    # BASILMAZDI -- "olculup gosterilmeyen sayi, yok sayilan sayidir".
-    # !! 15 Eylul: `ood` eklendiginde BU LISTEYE eklenmedi ve model_a8'in
-    # 60.000'lik kosusunda `ood` OLCULDU ama BASILMADI -- json'a yazildi,
-    # tabloya girmedi. Tam olarak bu dosyanin yorumunda yazan tuzak
-    # ("olculup gosterilmeyen sayi, yok sayilan sayidir") ve `ent_yok`un
-    # basina gelenin aynisi. Liste artik OLCME SETINDEN suzuluyor ama
-    # SIRALAMA burada duruyor; YENI BOLME EKLEYEN BU SATIRA DA EKLEMELI.
+    # Sutun listesi olcme setinden suzulur, SIRA burada durur.
+    # YENI BOLME EKLEYEN BU SATIRA DA EKLEMELI -- yoksa olculur, BASILMAZ.
     SUT = tuple(k for k in ("one", "seen", "comp", "ood", "ent", "ent_yok",
                             "ent_kati") if k in sinav)
-    # `_yakin` / `_kisayol` anahtarlari AYRI TABLODA -> bu denetimden muaf.
-    # (Denetimin amaci "olculup HIC gosterilmeyen sayi" yakalamak.)
+    # `_yakin` / `_kisayol` AYRI TABLODA -> bu denetimden muaf.
     _atlanan = [k for k in sinav if k not in SUT]
     assert not _atlanan, (
-        f"OLCULUYOR AMA BASILMIYOR: {_atlanan}. pencere_a.py'deki SUT "
+        f"OLCULUYOR AMA BASILMIYOR: {_atlanan}. pencere_12.py'deki SUT "
         f"listesine ekle -- sessiz kaybolmasin.")
-    bas = f"  {'pencere':<18}" + "".join(f"{k:>9}" for k in SUT)
-    print(bas + f"{'ent_ksy':>9}{'yok_ksy':>9}")
-    print(f"  {'':<18}" + " " * (9 * len(SUT))
-          + "  <- TAM ESLESME (serbest uretim)")
+    # Sutunlar ALANLARINA gore bantlanir; bant genisligi sutundan turer.
+    W = 11
+    _bant, _i = "", 0
+    while _i < len(SUT):
+        _j, _a = _i, ALAN.get(SUT[_i], "CIKARIM")
+        while _j < len(SUT) and ALAN.get(SUT[_j], "CIKARIM") == _a:
+            _j += 1
+        _bant += f" {_a} ".center((_j - _i) * W, "-")
+        _i = _j
+    print(f"  {'':<18}" + _bant + f"{' CIKARIMSIZ ':-^{2 * W}}")
+    print(f"  {'pencere':<18}"
+          + "".join(f"{AD.get(k, k):>{W}}" for k in SUT)
+          + f"{'yabanci':>{W}}{'kisayolsuz':>{W}}")
+    print("  TAM ESLESME.  cikarimsiz = r2 kopruye DEGIL OZNEYE uygulanmis;")
+    print("  cikarimsiz/kisayolsuz bir YETENEK degil, olcunun BIRIM TESTI:")
+    print("  o bolmede kisayol TIP OLARAK imkansiz, deger 0 CIKMAK ZORUNDA.")
 
     sonuc = []
     for p in pencereler:
@@ -263,29 +273,24 @@ def main():
         etiket = f"{p[0]}-{p[-1]}"
         sonuc.append(dict(pencere=etiket, adimlar=p, **r))
         print(f"  {etiket:<18}"
-              + "".join(f"{r.get(k, float('nan')):>9.4f}" for k in SUT)
-              + f"{r['ent_kisayol']:>9.4f}{r['ent_yok_kisayol']:>9.4f}")
+              + "".join(f"{r.get(k, float('nan')):>{W}.4f}" for k in SUT)
+              + f"{r['ent_kisayol']:>{W}.4f}{r['ent_yok_kisayol']:>{W}.4f}")
 
     # --- YAKIN TABLOSU (IKINCIL -- HUKUM VERMEZ) ----------------------
-    # "Varligi buldu ama dizgeyi tam tutturamadi": cikti dogru varligin
-    # adini iceriyor ama beklenene BIREBIR esit degil ("Sirnak'ta" /
-    # "Sirnak'tir", ya da cumleyi noktayla bitirmemis).
-    #
-    # NEDEN AYRI: bu kolun sorusu "bileşim oluyor mu", "Turkce eki dogru
-    # mu" degil. Ikisi ayni sutunda toplanirsa bir ek hatasi bir bileşim
-    # basarisizligi gibi okunur. model_08'de bu ayrimi `ek_*` tablosu
-    # tutuyordu; orada `dir` bir JETONDU ve birincil olcu onu
-    # maskeliyordu. Karakterde maskeleme yok -- ayrim burada.
+    # Varligi buldu ama dizge birebir tutmadi ("Sirnak'ta" /
+    # "Sirnak'tir"). Ayri sutun: bir EK hatasi bir CIKARIM
+    # basarisizligi gibi okunmasin.
     _bol = [k for k in SUT if k + "_yakin" in sonuc[-1]]
     if _bol:
         print()
         print("=" * 62)
         print("YAKIN -- VARLIK DOGRU, DIZGE TAM DEGIL   (IKINCIL, hukum vermez)")
         print("  tam + yakin = 'dogru varligi buldu' ust siniri.")
-        print(f"  {'pencere':<18}" + "".join(f"{k:>11}" for k in _bol))
+        print(f"  {'pencere':<18}"
+              + "".join(f"{AD.get(k, k):>12}" for k in _bol))
         for r in sonuc:
             print(f"  {r['pencere']:<18}"
-                  + "".join(f"{r.get(b + '_yakin', float('nan')):>11.4f}"
+                  + "".join(f"{r.get(b + '_yakin', float('nan')):>12.4f}"
                             for b in _bol))
 
 
@@ -294,10 +299,10 @@ def main():
     #     gevsetilmesin.
     son = sonuc[-1]
     kapilar = [
-        ("SAGLIK-1HOP",  "one >= 0.98",             son.get("one", 0) >= 0.98),
-        ("SAGLIK-EZBER", "seen >= 0.95",            son.get("seen", 0) >= 0.95),
-        ("OLGUNLUK",     "comp >= 0.50",            son.get("comp", 0) >= 0.50),
-        ("BIRIM TESTI",  "ent_yok_kisayol == 0.000",
+        ("SAGLIK-1HOP",  "olgu >= 0.98",            son.get("one", 0) >= 0.98),
+        ("SAGLIK-EZBER", "zincir >= 0.95",          son.get("seen", 0) >= 0.95),
+        ("OLGUNLUK",     "gorulmemis >= 0.50",      son.get("comp", 0) >= 0.50),
+        ("BIRIM TESTI",  "kisayolsuz'da cikarimsiz == 0.000",
          abs(son.get("ent_yok_kisayol", 1)) < 1e-9),
     ]
     # KAPIYA ADIYLA ERIS, SIRA NUMARASIYLA DEGIL (15 Eylul hakemligi).
@@ -310,7 +315,8 @@ def main():
     if not gecti_mi["BIRIM TESTI"]:
         print("  !! BIRIM TESTI KALDI -> OLCUM KODU BOZUK, sayilar okunmaz.")
     if not gecti_mi["OLGUNLUK"]:
-        print("  !! OLGUNLUK KALDI -> kol 'olgunlasmamis', ENT YORUMLANMAZ.")
+        print("  !! OLGUNLUK KALDI -> kol 'olgunlasmamis', "
+              "YABANCI YORUMLANMAZ.")
 
     # --- BUTCE YETTI MI (onkayit 6, son satir)
     #     OLGUNLUK KAPISI GECMEDEN BU SORU SORULMAZ. Hicbir sey ogrenilmemis
@@ -329,7 +335,7 @@ def main():
             onceki, tip = sonuc[0], "ORTUSEN"
         d = sonuc[-1].get("ent", 0) - onceki.get("ent", 0)
         print(f"\nBUTCE: {onceki['pencere']} -> {sonuc[-1]['pencere']} "
-              f"({tip} pencereler) ent degisimi {d:+.4f}")
+              f"({tip} pencereler) yabanci degisimi {d:+.4f}")
         if tip == "ORTUSEN":
             print(f"  !! {len(sonuc)} pencere var, ayrik cift icin "
                   f"{a.genislik + 1} gerekiyor. Bu iki pencere anlik "

@@ -160,23 +160,50 @@ ok(all(isinstance(b.mix, S.GDN2) or hasattr(b.mix, "qkv")
 ok(all(b.w1.out_features == A.dff for b in net.bloklar),
    "SwiGLU FFN HER blokta, dff sabit")
 # --- GDN-2 KAPISI: parcali form == ozyineli referans ------------------
-# !! BU KAPI OLMADAN GDN-2 SESSIZCE YANLIS OLABILIR. Parcali form
-# (2605.22791 Ek A) ucgen coz + WY donusumu iceriyor; yanlis yazilirsa
-# kayip yine duser, model bir sey ogrenir, ama ogrendigi sey GDN-2
-# DEGILDIR. Tek korunma: iki BAGIMSIZ uygulama ve aralarindaki fark.
+# !! BU KAPI OLMADAN GDN-2 SESSIZCE YANLIS OLABILIR: parcali form yanlis
+# yazilirsa kayip yine duser, ogrenilen sey GDN-2 DEGILDIR.
+# !! KAPININ GIRDISI MODELIN URETTIGI g OLMALI. 19 Eylul hakemligi: eski
+# kapinin EN SERT rejimi chunk-ici min G = -19.3 uretiyordu, kod ise
+# -30'da kirpiyordu. Kapi kirpma bolgesine HIC GIRMEDI ve kirpmanin
+# Eq. 9'u degistirdigini (bagil L2 0.55-1.17) goremedi. Ders: esdegerlik
+# kapisi ELLE SECILMIS olcekle degil, MODELIN KENDI dagilimiyla beslenir.
 _FN = torch.nn.functional
 torch.manual_seed(0)
 _q = _FN.normalize(torch.randn(2, 3, 128, 16), dim=-1)
 _k = _FN.normalize(torch.randn(2, 3, 128, 16), dim=-1)
 _v = torch.randn(2, 3, 128, 16)
 _bg, _wg = torch.rand(2, 3, 128, 16), torch.rand(2, 3, 128, 16)
-for _ad, _gs in (("orta", 0.05), ("zayif", 0.002), ("guclu", 0.5)):
+for _ad, _gs in (("orta", 0.05), ("zayif", 0.002), ("guclu", 0.5),
+                 ("sert", 1.6), ("asiri", 5.0)):
     _g = -torch.rand(2, 3, 128, 16) * _gs
     _o1 = S._gdn2_ozyineli(_q, _k, _v, _bg, _wg, _g)
     _o2 = S._gdn2_parcali(_q, _k, _v, _bg, _wg, _g)
     _bag = float((_o1 - _o2).abs().max() / _o1.abs().mean())
     ok(_bag < 1e-3, f"GDN-2 parcali == ozyineli ({_ad} sonum)",
        f"bagil fark {_bag:.2e}")
+# BOS GECMEYE KARSI: kapi fp32'nin tastigi bolgeye GERCEKTEN giriyor mu?
+ok(float((-torch.rand(2, 3, 128, 16) * 5.0)
+         .reshape(2, 3, 2, 64, 16).cumsum(-2).min()) < -88.0,
+   "GDN-2 kapisi fp32 TASMA bolgesine giriyor (exp(88) siniri)")
+# KATMANIN KENDI ilk degeri ve GERCEK boyutlari -- elle secilmis olcek DEGIL.
+torch.manual_seed(0)
+_kat = S.GDN2(A.d, A.nh, A.d // A.nh, A.d // A.nh, A.nh * A.gdn_v_kat)
+_gir = [t.detach() for t in _kat._tarama_girdisi(torch.randn(2, 512, A.d))]
+_oz = S._gdn2_ozyineli(*_gir)
+_bag = float((_oz - S._gdn2_parcali(*_gir)).abs().max() / _oz.abs().mean())
+ok(_bag < 1e-3, "GDN-2 parcali == ozyineli (KATMANIN KENDI ilk degeri)",
+   f"bagil fark {_bag:.2e}")
+# Kumulatif sonuma uygulanan HER kirpma Eq. 9'u degistirir. YORUMA
+# DEGIL KODA bakilir -- docstring eski kusuru ANLATIYOR, kapi ona takilmaz.
+_agac12 = ast.parse(io.open(os.path.join(_B, "model_12.py"),
+                            encoding="utf-8").read())
+_fn12 = [d for d in ast.walk(_agac12)
+         if isinstance(d, ast.FunctionDef) and d.name == "_gdn2_parcali"]
+_kirp = [c for c in ast.walk(_fn12[0]) if isinstance(c, ast.Call)
+         and getattr(c.func, "attr", "") == "clamp"
+         and any(kw.arg == "min" for kw in c.keywords)] if _fn12 else [1]
+ok(not _kirp, "GDN-2 taramasinda KUMULATIF KIRPMA yok (clamp(min=...))",
+   f"{len(_kirp)} kirpma bulundu")
 _g = -torch.rand(2, 3, 128, 16) * 0.05
 ok(float((S._gdn2_parcali(_q, _k, _v, _bg, _wg, _g, C=32)
           - S._gdn2_parcali(_q, _k, _v, _bg, _wg, _g, C=64)

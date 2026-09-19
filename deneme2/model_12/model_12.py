@@ -96,27 +96,33 @@ def _gdn2_ozyineli(q, k, v, b, w, g):
     return torch.stack(cik, dim=2)
 
 
-def _gdn2_parcali(q, k, v, b, w, g, C: int = 64):
-    """Parcali form -- arXiv 2605.22791 Ek A. C=64 (makale C.2).
+def _gdn2_parcali(q, k, v, b, w, g, C: int = 16):
+    """Parcali form -- arXiv 2605.22791 Ek A, ORAN bicimi (Eq. 41/43).
 
-        gamma_r = exp(cumsum(g))          chunk ICINDE, gamma_0 = 1
-        Kb = gamma^-1 (*) K               Ebar = gamma (*) (B (*) K)
-        Z  = W (*) V                      Qg   = gamma (*) Q
-        T  = tril(Ebar Kb^T, -1)          A    = (I + T)^-1
-        Y  = A Ebar                       U    = A Z      R = U - Y S0
-        O  = Qg S0 + tril(Qg Kb^T, 0) R                       (Eq. 44)
-        S_C = Diag(gamma_C) (S0 + Kb^T R)                     (Eq. 36)
+        D[r,s] = G_r - G_s          s <= r icin <= 0, yani exp(D) <= 1
+        T      = tril(sum_j (b*k)_rj exp(D)_rsj k_sj, -1) + I    Eq. 34
+        Aqk    = tril(sum_j  q_rj   exp(D)_rsj k_sj,  0)         Eq. 43
+        [Y|U]  = T^-1 [gamma*(b*k) | w*v]     R = U - Y S0       Eq. 34/35
+        O      = gamma*q S0 + Aqk R                              Eq. 44
+        S_C    = Diag(gamma_C) S0 + K_tail^T R                   Eq. 40
+                 K_tail = exp(G_C - G) (*) k
 
-    HER SEY fp32 (makale D.3): `gamma^-1` chunk boyunca buyur, tasar.
-    Kumulatif toplam bir tabana kirpiliyor; kirpma test_12'de ozyineli
-    referansa karsi sinaniyor.
+    `gamma^-1` HIC KURULMAZ -- butun usteller <= 1, tasma imkansiz.
 
-    SAGDAN DOLGU: `T` her zaman C'nin kati degil (sinav dizileri 86/113).
-    Nedensel oldugu icin guvenli -- sondaki dolgu onceki ciktilari
-    degistiremez; dolgu sifir oldugu icin durum da kirlenmez.
+    !! ONCEKI HALI `G = cumsum(g).clamp(min=-30)` ile gamma^-1 kuruyordu
+    ve Eq. 9'u DEGISTIRIYORDU: modelin kendi ilk degerinde kanal x chunk
+    ciftlerinin %24-57'sinde kirpma devredeydi, cikti gercek Eq. 9'dan
+    bagil L2 0.55-1.17 sapiyordu (19 Eylul hakemligi + olculdu). Kirpmayi
+    silmek de cozum degildi: ayni cebir fp32'de NaN veriyor, fp64'te
+    4.5e-16. Oran bicimi ikisini birden cozuyor.
+
+    BEDEL: (B,H,n,C,C,dk) ara tensor -- bellek C ile DOGRUSAL. Sonuc
+    C'den BAGIMSIZ oldugu icin C=16 (B=32'de 268 MB; C=64'te 1,07 GB).
+
+    SAGDAN DOLGU: T her zaman C'nin kati degil (sinav dizileri 86/113).
+    Nedensel oldugu icin guvenli; dolgu sifir, durumu kirletmez.
     """
     Bs, H, T0, dk = q.shape
-    dv = v.shape[-1]
     T = T0
     if T % C:
         _p = C - T % C
@@ -124,54 +130,61 @@ def _gdn2_parcali(q, k, v, b, w, g, C: int = 64):
         q, k, v, b, w, g = (ped(q), ped(k), ped(v), ped(b), ped(w), ped(g))
         T += _p
     n = T // C
-    rs = lambda t: t.float().reshape(Bs, H, n, C, t.shape[-1])
-    q, k, b, g, v, w = rs(q), rs(k), rs(b), rs(g), rs(v), rs(w)
-
-    G = g.cumsum(-2).clamp(min=-30.0)          # tasma kapisi (bkz. yukari)
-    gam = G.exp()
-    Kb = k * (-G).exp()
-    Eb = gam * (b * k)
-    Z = w * v
-    Qg = gam * q
-
-    Tm = (Eb @ Kb.transpose(-1, -2)).tril(-1)             # (B,H,n,C,C)
-    Tm = Tm + torch.eye(C, device=q.device, dtype=q.dtype)
-    # TERS MATRIS KURULMUYOR. Onceki hali A = (I+T)^-1'i ACIKCA cozup
-    # sonra A@Eb ve A@Z yapiyordu: C x C sagtarafli bir cozum + iki
-    # (C,C)@(C,d) carpim. Ayni sonuc TEK cozumle cikiyor -- Eb ve Z yan
-    # yana konur, bir kez cozulur, ikiye ayrilir. Matematiksel olarak
-    # OZDES; `test_12` ozyineli referansa karsi siniyor.
-    YU = torch.linalg.solve_triangular(
-        Tm, torch.cat([Eb, Z], dim=-1), upper=False)
-    Y, U = YU[..., :dk], YU[..., dk:]
-    Aqk = (Qg @ Kb.transpose(-1, -2)).tril(0)
-
-    S = torch.zeros(Bs, H, dk, dv, device=q.device, dtype=torch.float32)
-    cik = []
-    for c in range(n):
-        R = U[:, :, c] - Y[:, :, c] @ S
-        cik.append(Qg[:, :, c] @ S + Aqk[:, :, c] @ R)
-        S = gam[:, :, c, -1].unsqueeze(-1) * (S + Kb[:, :, c].transpose(-1, -2) @ R)
-    return torch.cat(cik, dim=2)[:, :, :T0]      # dolgu KIRPILIR
+    # !! autocast ALTINDA `.float()` YETMEZ: matmul/einsum girdileri
+    # yeniden bf16'ya iner. Makale D.3 durumu ve biriktiricileri fp32
+    # istiyor -- blok bunu ZORLUYOR.
+    with torch.autocast(device_type=q.device.type, enabled=False):
+        rs = lambda t: t.float().reshape(Bs, H, n, C, t.shape[-1])
+        q, k, b, g, v, w = rs(q), rs(k), rs(b), rs(g), rs(v), rs(w)
+        G = g.cumsum(-2)                         # chunk-yerel, KIRPMA YOK
+        # Ust ucgen (s > r) clamp ile 1'e sabitlenir ve asagida tril ile
+        # ATILIR; iki islemin de turevi orada 0.
+        D = (G.unsqueeze(-2) - G.unsqueeze(-3)).clamp(max=0.0)
+        KW = D.exp() * k.unsqueeze(-3)           # (gamma_r/gamma_s) (*) k_s
+        Tm = torch.einsum("...rj,...rsj->...rs", b * k, KW).tril(-1)
+        Aqk = torch.einsum("...rj,...rsj->...rs", q, KW).tril(0)
+        Tm = Tm + torch.eye(C, device=q.device, dtype=q.dtype)
+        gam = G.exp()                                            # <= 1
+        Kt = (G[..., -1:, :] - G).exp() * k                      # <= 1
+        # Eb ve Z yan yana, TEK ucgen cozum, sonra ikiye ayrilir.
+        YU = torch.linalg.solve_triangular(
+            Tm, torch.cat([gam * (b * k), w * v], dim=-1), upper=False)
+        Y, U = YU[..., :dk], YU[..., dk:]
+        Qg = gam * q
+        S = torch.zeros(Bs, H, dk, v.shape[-1], device=q.device,
+                        dtype=torch.float32)
+        cik = []
+        for c in range(n):
+            R = U[:, :, c] - Y[:, :, c] @ S
+            cik.append(Qg[:, :, c] @ S + Aqk[:, :, c] @ R)
+            S = (gam[:, :, c, -1].unsqueeze(-1) * S
+                 + Kt[:, :, c].transpose(-1, -2) @ R)
+        o = torch.cat(cik, dim=2)
+    return o[:, :, :T0]                          # dolgu KIRPILIR
 
 
 class GDN2(nn.Module):
     """Gated DeltaNet-2 karistirici. FFN ICERMEZ -- o `Blok`ta.
 
     Katman parametrelendirmesi makale C.1: q/k/v kisa evrisimli
-    izdusumler, b = sigma(Proj_b x) SILME (H*dk), w = sigma(Proj_w x)
-    YAZMA (Hv*dv), g = -exp(a) (*) softplus(Proj_f x + delta).
-    q ve k kafa basina L2-NORMALI (D.2). Cikis: RMSNorm + SiLU kapisi,
-    sonra izdusum (D.5).
+    izdusumler + SiLU, sonra kafa basina L2 (D.2). b = sigma(Proj_b x)
+    SILME (H*dk), w = sigma(Proj_w x) YAZMA (Hv*dv),
+    g = -exp(a) (*) softplus(Proj_f x + delta). Cikis: RMSNorm + SiLU
+    kapisi, sonra izdusum (D.5).
 
-    SONUM ILK DEGERI Mamba-2/GDN tarifi: exp(a) ~ U(1,16), dt ~
-    U(0.001,0.1), delta = ters-softplus(dt). Kanal basina yari-omur
-    0.6 .. 438 adim (medyan 3) -- COK ZAMAN OLCEKLI, tasarim boyle.
+    SONUM ILK DEGERI Mamba-2 / resmi GDN-2 tarifi: exp(a) ~ U(1,16),
+    dt LOG-uniform(1e-3, 0.1), delta = ters-softplus(dt).
 
-    SAPMA (beyanli): makale D.5 butun lineer katmanlar icin Xavier
-    uniform + kazanc 2^-2.5 diyor; burada projenin GPT-2 tarifi
-    (normal std=0.02) kullaniliyor, cunku gomme/FFN model_11 ile AYNI
-    kalmali. Etkisi olculmedi.
+    BEYANLI SAPMALAR (hepsi 19 Eylul hakemliginde gorusuldu):
+      ilk deger   makale D.5 Xavier uniform + kazanc 2^-2.5 diyor; burada
+                  projenin GPT-2 tarifi (normal std=0.02). Gomme/FFN
+                  model_11 ile AYNI kalmali. Hakem: zararsiz -- q/k L2
+                  normlu, v'nin olcegini cikis RMSNorm'u yutuyor.
+      dt tabani   resmi kod 1e-4; burada 1e-3 (Megatron uyarlamasi ve
+                  Mamba-2 varsayilani).
+      dusuk rank  resmi uygulamada sonum ve cikis kapisi izdusumleri
+                  dusuk ranklı; makale bunu SOYLEMIYOR. Burada tam rank
+                  -- yalniz parametre butcesi farki.
     """
 
     def __init__(self, d: int, H: int, dk: int, dv: int, Hv: int,
@@ -188,59 +201,66 @@ class GDN2(nn.Module):
         self.pf = nn.Linear(d, H * dk, bias=False)         # log-sonum
         self.kapi = nn.Linear(d, Hv * dv, bias=False)      # cikis kapisi
         self.o = nn.Linear(Hv * dv, d, bias=False)
-        self.nf = M.RMSNorm(Hv * dv)
+        # cikis normu DEGER KAFASI BASINA (resmi kod); makale yalniz
+        # "RMS-normalize" diyor. Birlesik Hv*dv kafada yapilirsa gruplar
+        # birbirinin olcegini tasir.
+        self.nf = M.RMSNorm(dv)
         # kafa basina `a`, kanal basina `delta` (C.1, Eq. 86)
         self.a = nn.Parameter(torch.zeros(H, 1))
         self.delta = nn.Parameter(torch.zeros(H * dk))
-        # !! SONUM ILK DEGERI. Sifir birakilinca g = -exp(0)*softplus(0)
-        # = -0.693, yani alpha = 0.50: durum HER ADIMDA yarilaniyor ve
-        # 64 adim sonra 5e-20'si kaliyor. SSM ilk degerde TEK ADIMLIK
-        # bellekle basliyor -- uzun menzilli durumun butun anlami bu.
-        # OLCULDU ve duzeltildi. Mamba-2 / GDN tarifi: alpha 1'E YAKIN
+        # !! SONUM ILK DEGERI. Sifir birakilinca alpha = 0.50: durum HER
+        # ADIMDA yarilaniyor. Mamba-2 / GDN tarifi: alpha 1'E YAKIN
         # baslar, unutmayi model OGRENIR.
-        #   exp(a) ~ U(1,16)        dt ~ U(0.001, 0.1)
-        #   delta  = ters-softplus(dt)      g ~ -A*dt
+        #   exp(a) ~ U(1,16)     dt ~ LOG-uniform(1e-3, 0.1)
+        # !! dt DUZ uniform olunca yari-omur medyani 2,1 KARAKTERE
+        # dusuyordu (log-uniform'da 8,6) -- 19 Eylul hakemligi, olculdu.
         with torch.no_grad():
             self.a.copy_(torch.empty(H, 1).uniform_(1.0, 16.0).log())
-            _dt = torch.empty(H * dk).uniform_(0.001, 0.1)
+            _dt = torch.empty(H * dk).uniform_(
+                math.log(1e-3), math.log(0.1)).exp()
             self.delta.copy_(torch.expm1(_dt).log())
         # kisa nedensel evrisim (derinlemesine), Nemotron-H: pencere 4
         self.ev = nn.Conv1d(2 * H * dk + Hv * dv, 2 * H * dk + Hv * dv,
                             evrisim, groups=2 * H * dk + Hv * dv,
                             padding=evrisim - 1, bias=False)
 
-    def forward(self, x, cos=None, sin=None):
+    def _tarama_girdisi(self, x):
+        """Taramanin girdisi (q, k, v, b, w, g) -- hepsi fp32, (B,H,T,*).
+
+        forward DA test_12 kapisi DA burayi cagirir. Ayri yazilsaydi kapi
+        modelin URETTIGINDEN BASKA bir dagilimi sinardi -- 19 Eylul
+        hakemliginin bulgusu tam buydu."""
         Bq, T, _ = x.shape
         qkv = torch.cat([self.q(x), self.k(x), self.v(x)], -1)
-        qkv = self.ev(qkv.transpose(1, 2))[..., :T].transpose(1, 2)
+        # kisa evrisim + SiLU (makale 3.5 ve Sekil 1), SONRA L2
+        qkv = F.silu(self.ev(qkv.transpose(1, 2))[..., :T]).transpose(1, 2)
         nq = self.H * self.dk
         q, k, v = qkv.split([nq, nq, self.Hv * self.dv], dim=-1)
         kafa = lambda t, h, dd: t.view(Bq, T, h, dd).transpose(1, 2)
-        q = kafa(q, self.H, self.dk)
-        k = kafa(k, self.H, self.dk)
-        v = kafa(v, self.Hv, self.dv)
-        # D.2: q ve k kafa basina L2-NORMALI
-        q = F.normalize(q.float(), dim=-1)
-        k = F.normalize(k.float(), dim=-1)
+        q = F.normalize(kafa(q, self.H, self.dk).float(), dim=-1)     # D.2
+        k = F.normalize(kafa(k, self.H, self.dk).float(), dim=-1)
+        v = kafa(v, self.Hv, self.dv).float()
         b = torch.sigmoid(kafa(self.pb(x), self.H, self.dk).float())
         w = torch.sigmoid(kafa(self.pw(x), self.Hv, self.dv).float())
         f = kafa(self.pf(x), self.H, self.dk).float()
         g = -self.a.exp()[None, :, None, :] * F.softplus(
             f + self.delta.view(1, self.H, 1, self.dk))
-        # GRUPLANMIS DEGER KAFALARI: anahtar tarafi KOPYALANMIYOR.
-        # Ayni (k, e, alpha) altinda iki deger kafasi, dv IKI KATI TEK
-        # kafayla OZDES -- durum [S_a | S_b] ayni sol carpanla ilerliyor.
-        # Onceki hali q/k/b/g'yi repeat_interleave ile Hv'ye kopyaliyordu:
-        # hem 4 tensor kopyasi, hem taramanin ANAHTAR TARAFI (T matrisi,
-        # ucgen cozum, Aqk) iki kat fazla hesaplaniyordu. Ozdeslik
-        # `test_12`de ozyineli referansa karsi sinaniyor.
+        # GRUPLANMIS DEGER KAFALARI: anahtar tarafi KOPYALANMIYOR. Ayni
+        # (k, e, alpha) altinda iki deger kafasi, dv IKI KATI TEK kafayla
+        # OZDES -- durum [S_a | S_b] ayni sol carpanla ilerliyor. Hakem
+        # dogruladi: sayisal fark 0.0, tile sirasi resmi kodla uyumlu.
         gr, Hk = self.grup, self.H
         kat = lambda t: (t.view(Bq, Hk, gr, T, -1).permute(0, 1, 3, 2, 4)
                          .reshape(Bq, Hk, T, gr * t.shape[-1]).contiguous())
-        o = _gdn2_parcali(q, k, kat(v.float()), b, kat(w), g)
-        o = (o.view(Bq, Hk, T, gr, self.dv).permute(0, 2, 1, 3, 4)
-             .reshape(Bq, T, self.Hv * self.dv).to(x.dtype))
-        return self.o(self.nf(o) * F.silu(self.kapi(x)))
+        return q, k, kat(v), b, kat(w), g
+
+    def forward(self, x, cos=None, sin=None):
+        Bq, T, _ = x.shape
+        o = _gdn2_parcali(*self._tarama_girdisi(x))
+        o = (o.view(Bq, self.H, T, self.grup, self.dv)
+             .permute(0, 2, 1, 3, 4).reshape(Bq, T, self.Hv, self.dv))
+        o = self.nf(o).reshape(Bq, T, self.Hv * self.dv).to(x.dtype)
+        return self.o(o * F.silu(self.kapi(x)))
 
 
 # ======================= TAM DIKKAT =====================================
