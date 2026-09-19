@@ -1115,6 +1115,93 @@ def veri_kur(ayar: Ayar, yaz=print) -> Veri:
 # ayni hata iki kez oldu (kos_11.py MODEL="model_08", ayar_11.py
 # `from taban_08 import Ayar`).
 
+# --- KORPUS ONBELLEGI ----------------------------------------------------
+# Kullanici, 19 Eylul: *"test 11 gpu da kosmasi gereken birsey mi? cpu da
+# cok uzun suruyor."*  GPU yardim etmiyor -- kurulum saf Python/numpy ve
+# `kopya` 40'ta ~272 sn. Ama korpus TOHUMLU ve DETERMINIST: ayni ayar +
+# ayni tohum + ayni kod her seferinde BIT DUZEYINDE ayni 73M jetonu
+# uretiyor. Bir kez kurulup diske yazilabilir.
+#
+#     ilk kosu   ~272 sn (kurar + yazar)
+#     sonraki      ~3 sn (okur)
+#
+# !! TEHLIKE: BAYAT ONBELLEK. `korpus_<N>.py`de bir satir degisse ve
+# onbellek eski korpusu tutsa, BUTUN KAPILAR ESKI VERIYE KARSI SESSIZCE
+# GECERDI. Bu kolda tam o sinif hata birkac kez yasandi -- Colab eski
+# klonu kosturdu; rapor `None`a 0.0000 basti; `seen` olcusu korpus
+# degisince anlamini kaybetti. HICBIRINI sayisal bir kapi gostermedi.
+#
+# KORUNMA: anahtara KAYNAK KOD HASH'I girer. Korpusu ureten dosyalarin
+# BAYT ICERIGI hash'leniyor; tek karakter degisse anahtar degisir,
+# onbellek iskalar, korpus yeniden kurulur. Bayat onbellegi yanlislikla
+# kullanmak IMKANSIZ. `test_<N>` bunu ayrica siniyor.
+#
+# GIT'E GIRMEZ: dosya ~164 MB ve GitHub tek dosyada 100 MB siniri
+# koyuyor; ustelik git her surumu KALICI saklar, korpus her degistiginde
+# depo bir kopya daha buyurdu. `.gitignore`da.
+_K = os.path.dirname(os.path.abspath(__file__))
+ONBELLEK_YOL = os.environ.get(
+    "KORPUS_ONBELLEK", os.path.join(os.path.dirname(_K), "onbellek"))
+ONBELLEK_KAPALI = os.environ.get("KORPUS_ONBELLEK_KAPALI", "") == "1"
+
+# Korpusu URETEN moduller. Biri degisirse onbellek gecersizdir.
+# !! LISTE BURADA, cunku `test_<N>` bunu okuyup "korpus ureten her modul
+# listede mi" diye siniyor. Elle tutulan bir liste sessizce eksilebilir.
+ONBELLEK_KAYNAK = ("korpus", "metin", "jeton", "veri")
+
+
+def _onbellek_anahtari(ayar, v) -> str:
+    """AYAR + VERI + KAYNAK KOD -> 16 haneli anahtar."""
+    import hashlib
+    h = hashlib.sha256()
+    for k in ("kopya", "t_len", "tohum", "veri_tohum", "tetik", "zincir_pay",
+              "n3", "ret_pay", "ret_tut", "veri_ad", "ek_kip", "tam_kayip"):
+        h.update(f"{k}={getattr(ayar, k, None)!r};".encode())
+    for ad in ("one", "tr2", "comp", "ent", "ent_yok", "ent_arama",
+               "ood", "ent_kati"):
+        L = getattr(v, ad, None) or []
+        h.update(f"{ad}={len(L)}:".encode())
+        h.update(repr(L).encode())
+    _kol = os.path.basename(_K).rsplit("_", 1)[-1]
+    for _ad in ONBELLEK_KAYNAK:
+        _f = os.path.join(_K, f"{_ad}_{_kol}.py")
+        if _ad == "veri":
+            _f = os.path.join(_K, ayar.veri_ad + ".py")
+        with open(_f, "rb") as _fh:
+            h.update(_fh.read())
+    return h.hexdigest()[:16]
+
+
+def _onbellek_oku(yol, yaz):
+    """(X, S) ya da None. Bozuk dosya SESSIZCE atlanir, patlamaz."""
+    try:
+        z = np.load(yol, allow_pickle=False)
+        X = z["X"].astype(np.int64)
+        S = J.Sozluk("".join(str(z["harf"])))
+        S.korpus_izi = str(z["korpus_izi"])
+        yaz(f"  KORPUS ONBELLEKTEN: {os.path.basename(yol)}  "
+            f"{X.shape[0]:,} x {X.shape[1]}  iz {S.korpus_izi}")
+        return X, S
+    except Exception as e:                       # pragma: no cover
+        yaz(f"  onbellek OKUNAMADI ({e}) -- yeniden kurulacak")
+        return None
+
+
+def _onbellek_yaz(yol, X, S, yaz):
+    """int16 olarak yazar: sozluk 64 sembol, int64 dort kat israf."""
+    try:
+        os.makedirs(os.path.dirname(yol), exist_ok=True)
+        assert int(X.max()) < 32767, "int16 tasar -- sozluk buyumus"
+        _gec = yol + ".gecici"
+        np.savez(_gec, X=X.astype(np.int16),
+                 harf="".join(S.harf), korpus_izi=S.korpus_izi)
+        os.replace(_gec + ".npz", yol)           # ATOMIK: yarim dosya kalmaz
+        yaz(f"  KORPUS ONBELLEGE YAZILDI: {os.path.basename(yol)}  "
+            f"{os.path.getsize(yol)/1e6:.0f} MB")
+    except Exception as e:                       # pragma: no cover
+        yaz(f"  onbellege YAZILAMADI ({e}) -- kosu etkilenmez")
+
+
 def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
     """KORPUS -> egitim tensoru. model_08'in SATIR TABLOSU YOK.
 
@@ -1136,11 +1223,21 @@ def egitim_havuzu(ayar: Ayar, v: Veri, yaz=print):
     # yuvasina dustu -- korpus sessizce `len(sat) * print` deneyip
     # patladi. Sirasi kayan bir cagri, patlamasaydi YANLIS ORANLA
     # korpus kurardi.
+    # ONBELLEK: anahtar AYAR + VERI + KAYNAK KOD (bkz. yukarisi).
+    _yol = None
+    if not ONBELLEK_KAPALI:
+        _yol = os.path.join(ONBELLEK_YOL,
+                            f"korpus_{_onbellek_anahtari(ayar, v)}.npz")
+        _var = _onbellek_oku(_yol, yaz) if os.path.exists(_yol) else None
+        if _var is not None:
+            return _var
     X, S = KOR.havuz(v, V09.kur(ayar.veri_tohum), kopya=ayar.kopya,
                      t_len=ayar.t_len, tohum=ayar.veri_tohum,
                      tetik=ayar.tetik, zincir_pay=ayar.zincir_pay,
                      n3=ayar.n3, ret_pay=ayar.ret_pay,
                      ret_tut=ayar.ret_tut, yaz=yaz)
+    if _yol:
+        _onbellek_yaz(_yol, X, S, yaz)
     return X, S
 
 # ======================= MODEL ===========================================

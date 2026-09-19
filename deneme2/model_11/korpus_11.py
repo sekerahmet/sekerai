@@ -445,6 +445,26 @@ def uydurma_adlar(G):
             a = sek(*c)
             if a not in olan:
                 out.setdefault(t, []).append(a)
+    # --- HER PARCA GORULMUS OLMALI ------------------------------------
+    # Kullanici, 19 Eylul: *"ben Ahmet Seker'den hicbir yerde bahsetmeyip
+    # bunu soruyorsam model zaten Ahmet Seker'i hicbir yerde gormedigi
+    # icin bilemez. yani bizim her bir varligi eger soruda soruyorsak bir
+    # sekilde gormesi lazim."*
+    #
+    # OLCULDU: 1.460 uydurma adin 160'i (%11) korpusta HIC GECMEYEN bir
+    # kelime tasiyordu -- `Ziraat`, `Mimarlik`, `Ilahiyat`, `Egitim`.
+    # Dordu de `FAK_ALAN` listesinde var ama HICBIR GERCEK fakulte
+    # kullanmiyor, yani korpusa hic girmiyorlar.
+    #
+    # Boyle bir adi reddetmek KOLAY: karakter dizisi bastan yabanci,
+    # modelin "bilmiyorum" demesi icin bilgi tablosuna bakmasi bile
+    # gerekmez. Olcmek istedigimiz sey o DEGIL -- PARCALARI TANIDIK ama
+    # BILESIMI YENI bir adi reddedebiliyor mu. `Alasehir Bilgisayar
+    # Bolumu`nun uc kelimesi de korpusta var; olmayan sey BIRLESIMI.
+    _gorulen = {w for a in olan for w in MT._tr(a).split()}
+    for t in list(out):
+        out[t] = [a for a in out[t]
+                  if all(w in _gorulen for w in MT._tr(a).split())]
     for t in out:
         out[t] = sorted(set(out[t]))
     return out

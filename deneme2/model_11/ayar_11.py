@@ -133,10 +133,10 @@ AYAR = Ayar(
     # --- KORPUS -------------------------------------------------------
     t_len=512,           # egitim penceresi (karakter). Physics 3.1 Ek C
     #                      de 512 kullaniyor. Bir pencere 7..11 cumle.
-    kopya=20,            # bioS `multiM`: her varlik icin 20 belge, her
+    kopya=40,            # bioS `multiM`: her varlik icin 40 belge, her
     #                      birinde CUMLE SIRASI ve YUZEY BAGIMSIZ secilir.
     #
-    # !! 5 -> 20, model_11 KARARI (19 Eylul). IKI olculmus sayi ayni
+    # !! 5 -> 40, model_11 KARARI (19 Eylul). IKI olculmus sayi ayni
     # dugmeyi isaret etti:
     #   phi 0.86   Wang 2405.15071'in taradigi 3.6-18 araliginin BIR
     #              MERTEBE ALTINDA. Ve bu, BUDAMA SONRASI DURUST deger;
@@ -148,8 +148,17 @@ AYAR = Ayar(
     # hakkinda daha cok BELGE olur -- gercek korpusun yapisi bu.
     # `zincir_pay`i yukseltmek ayni phi'yi verirdi ama cumlelerin
     # %40'ini zincir yapardi: model_09'un curutulmus %75'ine dogru.
-    tetik=8,             # BIYOGRAFI SORUSU: 20 belgenin 8'i
-    #                      (ORAN KORUNDU: 2/5 = 8/20 = %40)
+    #
+    # !! 40 SECILDI, 30 DEGIL -- CLAUDE.md kural 6. Olcum egrisi:
+    #      kopya 30  wang_phi 4,80  epok 5,9  55M
+    #      kopya 40  wang_phi 4,92  epok 4,4  73M   <- SECILEN
+    #    Claude once 30'u onerdi ("egrinin dirsegi, otesi bosa") ama o
+    #    bir VERIMLILIK argumaniydi. Kullanici, 19 Eylul: *"az veriyle
+    #    dogru dil modeli olusturmak gibi bir hedefimiz yok."*  40, hedef
+    #    OLAN iki eksende de daha iyi: wang_phi TAVANDA ve epok
+    #    Muennighoff'un "4 epok bedava" bandinda.
+    tetik=16,            # BIYOGRAFI SORUSU: 40 belgenin 16'si
+    #                      (ORAN KORUNDU: 2/5 = 16/40 = %40)
     #                      "X hakkinda ne biliyoruz?" onegiyle gelir,
     #                      3'u onekSIZ. Kullanici karari, 18 Eylul:
     #                      *"bu bir dil modeli, dil modelinin basarili
@@ -364,7 +373,13 @@ assert AYAR.batch == 32, (
     "Buyutmek verimi DUSURUYOR (128'de 159.261).")
 # KORPUS JETONU: OLCULDU, elle yazilmadi. `korpus_11` degisirse bu
 # sayi da degisir ve asagidaki kapi bunu SOYLER -- sessizce kaymaz.
-KORPUS_JETON = 37_627_358  # OLCULDU, kopya 20 + zincir butcesi ile
+KORPUS_JETON = 73_328_521  # OLCULDU, kopya 40 + zincir butcesi +
+#   uydurma ad suzgeci ile.  model_10: 9.282.631 (kopya 5, butce YOK).
+#   tr2 29.499 = tasarim TAVANI (zincir uzayinin %76'si)
+#   phi 4,00   wang_phi 4,92 = TAVAN     EPOK 4,47
+#   tensor 160.518 x 512 = 657 MB, kurulum 272 sn
+#   TEKIL BELGE 74.390/74.712 (%99,57) -- kopya 40'ta bile cumle sirasi
+#   ve yuzey cesitliligi TUKENMIYOR; carpisma yalniz 171 kez reddedildi.
 #   model_10: 9.282.631 (kopya 5, butce YOK). Buyumenin ikisi de
 #   model_11 karari: kopya 5->20 ve `zincir_butcesi` (tr2 artik TAMAMEN
 #   yaziliyor, orneklenmiyor).  tr2 22.832  phi 3,09  wang_phi 3,81
@@ -381,13 +396,13 @@ EPOK = AYAR.batch * AYAR.t_len * AYAR.adim / KORPUS_JETON
 # KAT daha cok BENZERSIZ metin uzerine yayiliyor. Olgu basina toplam
 # maruziyet neredeyse AYNI kaliyor (14,9 cumle x 35,3 epok ~= 60 cumle
 # x 8,8 epok); degisen sey TEKRARIN yerini CESITLILIGIN almasi.
-assert 5 < EPOK < 15, (
+assert 4 < EPOK < 15, (
     f"ilk kosu {EPOK:.1f} epok. Muennighoff 2305.16264: 4 epok bedava, "
     f"R_D* ~ 15 yarilanma, 44 epok ACIKCA basarisiz rejim. Hedef "
     f"ARALIK 5-15: 4'un biraz ustu, R_D* yarilanmasinin altinda. "
     f"Uzatilirsa (--surdur) epok da katlanir ve gerekcesi "
     f"OLCULENLER §2'ye yazilir.")
-assert AYAR.t_len == 512 and AYAR.kopya == 20, "korpus karari"
+assert AYAR.t_len == 512 and AYAR.kopya == 40, "korpus karari"
 assert AYAR.tetik * 5 == AYAR.kopya * 2, (
     "tetik/kopya ORANI korunmali: 2/5. Biyografi onegi tasiyan "
     "belge payi kopya degisince kaymamali.")

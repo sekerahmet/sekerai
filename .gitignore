@@ -22,3 +22,4 @@ arsiv/
 *.pt
 *.npz
 *.parquet
+onbellek/

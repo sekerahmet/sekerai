@@ -122,6 +122,21 @@ ok(not issubclass(S.ModelSade, M.Model),
 ok(issubclass(S.ModelSade, nn.Module), "ModelSade bir nn.Module")
 
 v = M.veri_kur(A, yaz=lambda *a: None)
+
+# !! KORPUS BIR KEZ KURULUR. Kullanici, 19 Eylul: *"test 11 gpu da kosmasi
+# gereken birsey mi? cpu da cok uzun suruyor."*  Sebep GPU degil: bu dosya
+# `egitim_havuzu`yu IKI KEZ cagiriyordu (asama1 sondasi ve SOZLESME
+# bolumu) ve `kopya` 40'ta her cagri ~272 sn suruyor. Kurulum TOHUMLU ve
+# DETERMINIST -- ikinci cagri birincinin AYNISINI uretiyordu, yani ~4,5
+# dakika saf israf. GPU yardim etmez; kurulum saf Python/numpy.
+_HAVUZ = None
+
+
+def _havuz():
+    global _HAVUZ
+    if _HAVUZ is None:
+        _HAVUZ = M.egitim_havuzu(A, v, yaz=lambda *a: None)
+    return _HAVUZ
 net = S.ModelSade(A, v.vocab)
 ok(len(net.bloklar) == 8, "8 AYRI blok kuruldu", str(len(net.bloklar)))
 _ag = {id(b.qkv.weight) for b in net.bloklar}
@@ -311,7 +326,7 @@ _lst = v.comp[:8]
 # aliniyor: asagidaki bolumler CPU tensorleriyle devam ediyor.
 try:
     net.to(M.DEV)
-    _Xh, _Sh = M.egitim_havuzu(A, v, yaz=lambda *a: None)
+    _Xh, _Sh = _havuz()
     _net63 = S.ModelSade(A, _Sh.vocab).to(M.DEV)
     _svh = OLC.Sinav(_Sh, v, V00.kur(A.veri_tohum), _lst, 2, "comp")
     _q = A1.gizli(_net63, _svh)
@@ -542,6 +557,55 @@ for _b3 in ('comp', 'ent', 'ent_yok'):
        f"3k '{_b3}' ADI 'gorulmemis' diyor -> korpusta OLMAMALI",
        f'korpusta gecen %{_p3*100:.1f}')
 
+# --- 3l) KORPUS ONBELLEGI: BAYAT ONBELLEK IMKANSIZ MI -----------------
+# Onbellek `kopya` 40'ta 272 sn'lik kurulumu 0,3 sn'ye indiriyor (olculdu).
+# Kazanc buyuk, ama TEHLIKESI de buyuk: `korpus_<N>.py`de bir satir degisse
+# ve onbellek eskiyi tutsa, BUTUN KAPILAR ESKI VERIYE KARSI SESSIZCE
+# GECERDI. Bu kolda tam o sinif hata birkac kez yasandi ve hicbirini
+# sayisal bir kapi gostermedi. Bu kapi onu mekaniklestiriyor.
+#
+# !! GERCEK DOSYALARA DOKUNULMAZ. Kaynaklar GECICI bir klasore kopyalanip
+# orada degistiriliyor; test yarida kesilse bile depo saglam kalir.
+import dataclasses as _dc3l                                    # noqa: E402
+import shutil as _sh3l                                         # noqa: E402
+import tempfile as _tf3l                                       # noqa: E402
+_a3l = M._onbellek_anahtari(A, v)
+ok(len(_a3l) == 16, "3l onbellek anahtari uretiliyor", _a3l)
+ok(set(M.ONBELLEK_KAYNAK) >= {"korpus", "metin", "jeton", "veri"},
+   "3l ONBELLEK_KAYNAK korpusu ureten DORT modulu de sayiyor",
+   str(M.ONBELLEK_KAYNAK))
+_kok3l = _tf3l.mkdtemp()
+_sah3l = os.path.join(_kok3l, os.path.basename(M._K))
+os.makedirs(_sah3l)
+_kol3l = os.path.basename(M._K).rsplit("_", 1)[-1]
+_dos3l = {}
+for _ad3l in M.ONBELLEK_KAYNAK:
+    _n3l = (A.veri_ad + ".py" if _ad3l == "veri" else f"{_ad3l}_{_kol3l}.py")
+    _sh3l.copy2(os.path.join(M._K, _n3l), os.path.join(_sah3l, _n3l))
+    _dos3l[_ad3l] = os.path.join(_sah3l, _n3l)
+_esk3l = M._K
+try:
+    M._K = _sah3l
+    _t3l = M._onbellek_anahtari(A, v)
+    ok(_t3l == _a3l, "3l kopya klasorde anahtar AYNI (kontrol)", _t3l)
+    for _ad3l, _yol3l in _dos3l.items():
+        _ic3l = io.open(_yol3l, "rb").read()
+        # !! Eklenen bayt onemsiz -- dosya yalniz HASH'leniyor.
+        io.open(_yol3l, "wb").write(_ic3l + b" ")
+        _y3l = M._onbellek_anahtari(A, v)
+        io.open(_yol3l, "wb").write(_ic3l)
+        ok(_y3l != _a3l,
+           f"3l `{_ad3l}` degisince onbellek anahtari DEGISIYOR",
+           f"{_a3l} -> {_y3l}")
+    _ay3l = _dc3l.replace(A, kopya=A.kopya + 1)
+    ok(M._onbellek_anahtari(_ay3l, v) != _a3l,
+       "3l AYAR degisince (kopya+1) anahtar DEGISIYOR")
+finally:
+    M._K = _esk3l
+    _sh3l.rmtree(_kok3l, ignore_errors=True)
+ok(M._onbellek_anahtari(A, v) == _a3l,
+   "3l GERCEK dosyalar DOKUNULMADAN durdu")
+
 # --- 3h) REDDETME VERISI: modele YALAN ogretmiyor mu -------------------
 # !! BU KAPI BIR HATADAN DOGDU. `reddetme_belgeleri` ilk surumde
 # "ILISKI OLMAZ" ciftlerini SEMANIN TUMLEYENINDEN aliyordu ve uretilen
@@ -770,7 +834,7 @@ ok(A.t_len == 512 and "t_len" in A.sozluk(),
 # !! NEYIN degistigi onemli: `comp`/`ent`/`ent_yok` LISTELERI AYNI
 # kaldi (asagida ayrica siniyoruz). Kayan yalniz HAFIZA/zincir, yani
 # CIKARIM tarafindaki model_09 / model_10 kiyasi GECERLILIGINI KORUYOR.
-IZ_11_OLCME = "88f1391dfeb4"     # kopya 20 + zincir butcesi
+IZ_11_OLCME = "44e6262e37f3"     # kopya 40 + zincir butcesi
 IZ_08_OLCME = "cfafdcc15a23"     # model_08..10 -- KAYIT, kiyas icin
 IZ_08_GRAF = "3cd9a2575e47"
 _L09 = M.olcme_listeleri(A, v)
@@ -789,7 +853,7 @@ ok(not any(hasattr(M, x) for x in
    "model_08'in KODLAYICILARI silindi (jeton semasi yok)")
 ok(not hasattr(M, "dogruluk") and not hasattr(M, "kisayol_orani"),
    "KISITLI ARGMAX olcusu silindi -- yerine olcme_11 SERBEST URETIM")
-_hav = M.egitim_havuzu(A, v, yaz=lambda *a: None)
+_hav = _havuz()
 ok(isinstance(_hav, tuple) and len(_hav) == 2,
    "egitim_havuzu (X, S) donduruyor -- P/T/kimlik/KPOZ/KTR YOK",
    f"{len(_hav)} deger")
@@ -821,11 +885,11 @@ ok(abs(_jeton - AY10.KORPUS_JETON) / AY10.KORPUS_JETON < 0.02,
    "ayar_11.KORPUS_JETON gercek korpusa UYUYOR -- butce ondan turuyor",
    f"olculen {_jeton:,} / yazili {AY10.KORPUS_JETON:,}")
 # !! ARALIK 30-40 -> 5-15, 19 Eylul. Kapi GEVSEMEDI, HEDEFI degisti:
-# `kopya` 5 -> 20 ile AYNI hesap butcesi DORT KAT daha cok benzersiz
+# `kopya` 5 -> 40 ile AYNI hesap butcesi SEKIZ KAT daha cok benzersiz
 # metne yayiliyor. 35,3 epok Muennighoff'un "44 acikca basarisiz"
-# sinirina yakindi; 8,7 epok "4 bedava" ile "R_D* ~ 15" arasinda.
-ok(5 < _gecis < 15,
-   "ilk kosu 5..15 epok (Muennighoff 2305.16264: 4 bedava, 44 BASARISIZ)",
+# sinirina yakindi; 4,5 epok tam "4 bedava" bandinda.
+ok(4 < _gecis < 15,
+   "ilk kosu 4..15 epok (Muennighoff 2305.16264: 4 bedava, 44 BASARISIZ)",
    f"{_gecis:.1f} epok / {_jeton:,} jeton / adim {A.adim:,}")
 ok(A.adim == 20000, "CLAUDE.md kural 1: ILK KOSU 20.000", str(A.adim))
 ok((A.fim_kat, A.soru_kat, A.kisayol_kat, A.ident_frac, A.bicim)
