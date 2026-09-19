@@ -1369,8 +1369,77 @@ ok(not _kot,
    "test MESAJLARI BASKA bir kol numarasi ANMIYOR",
    f"{len(_kot)} mesaj: {_kot[:3]}")
 
-print("\n=== 8) KONUS_11 DAVRANISI ===")
 import io                                                    # noqa: E402
+# --- 7f) DEFTERIN KODU: BAYAT KOL NUMARASI / TANIMSIZ AD -------------
+# !! BU KAPI BIR COKMEDEN DOGDU (19 Eylul). Kullanici *"colab ac ve
+# baslatalim"* dedi; defter kuruldugunda 4. hucrede (KAPI hucresi)
+#     M = M_10
+# yaziyordu ve `M_10` HICBIR YERDE TANIMLI DEGILDI. Yani model_11 defteri
+# BASLATILAMAZDI -- NameError ile duserdi. Yaninda iki bayat ad daha
+# vardi: `import veri_11 as _V05` (model_05 KALINTISI) ve `_AY10`.
+#
+# UC KAPI VARDI VE UCU DE GORMEDI:
+#   kopya kapisi  yalniz *.py bakiyor, .ipynb'ye HIC bakmiyor
+#   7e KOL kapisi yalniz `test_*.py` tariyor
+#   7c DEFTER     yalniz IZ_<N> sabitine ve KIYAS sozlugune bakiyor
+# Defterin KODU hicbir kapidan gecmiyordu. Ve bu satir kopya kapisinin
+# YAPISI GEREGI gorunmez: ebeveynde de `M = M_10` yaziyor, yani "eksik
+# satir" degil -- CEVRILMESI GEREKEN ama cevrilmemis bir satir.
+print("\n=== 7f) DEFTERIN KODU (AST) ===")
+import ast as _ast7f                                          # noqa: E402
+import json as _json7f                                        # noqa: E402
+_dft7f = _glob.glob(os.path.join(_B, "*.ipynb"))
+ok(len(_dft7f) == 1, "7f kol klasorunde TEK defter", str(_dft7f))
+_nb7f = _json7f.load(_io2.open(_dft7f[0], encoding="utf-8"))
+_kod7f = [c for c in _nb7f["cells"] if c["cell_type"] == "code"]
+ok(len(_kod7f) >= 5, "7f defterde kod hucresi var", f"{len(_kod7f)} hucre")
+
+# Hucreler SIRAYLA kosuyor: onceki hucrelerin tanimlari sonrakilere gecer.
+_tan7f, _bayat7f, _eksik7f, _atlanan7f = set(dir(__builtins__)) | {
+    "get_ipython", "In", "Out", "exit", "quit"}, [], [], 0
+for _i7f, _c7f in enumerate(_kod7f):
+    _s7f = "".join(_c7f["source"])
+    try:
+        _t7f = _ast7f.parse(_s7f)
+    except SyntaxError:
+        # `!python ...` gibi KABUK SIHRI derlenmez -- bu bir kusur DEGIL.
+        _atlanan7f += 1
+        continue
+    _oku7f = []
+    for _n7f in _ast7f.walk(_t7f):
+        if isinstance(_n7f, _ast7f.Name):
+            (_tan7f.add(_n7f.id) if isinstance(_n7f.ctx, _ast7f.Store)
+             else _oku7f.append((_n7f.id, _n7f.lineno)))
+        elif isinstance(_n7f, (_ast7f.Import, _ast7f.ImportFrom)):
+            for _a7f in _n7f.names:
+                _tan7f.add(_a7f.asname or _a7f.name.split(".")[0])
+        elif isinstance(_n7f, (_ast7f.FunctionDef, _ast7f.ClassDef,
+                               _ast7f.AsyncFunctionDef)):
+            _tan7f.add(_n7f.name)
+        elif isinstance(_n7f, _ast7f.ExceptHandler) and _n7f.name:
+            _tan7f.add(_n7f.name)
+        elif isinstance(_n7f, (_ast7f.comprehension,)):
+            for _x7f in _ast7f.walk(_n7f.target):
+                if isinstance(_x7f, _ast7f.Name):
+                    _tan7f.add(_x7f.id)
+    for _ad7f, _ln7f in _oku7f:
+        if _ad7f not in _tan7f:
+            _eksik7f.append(f"hucre {_i7f} satir {_ln7f}: {_ad7f}")
+    # BAYAT KOL NUMARASI: tanimlayicida BASKA bir kol numarasi.
+    for _ad7f in {x for x, _ in _oku7f} | _tan7f:
+        _no7f = _re2.findall(r"(\d\d)", _ad7f)
+        if _no7f and all(_x != _KOL for _x in _no7f) and "_" in _ad7f:
+            _bayat7f.append(_ad7f)
+ok(not _eksik7f,
+   "7f defterde TANIMSIZ ad YOK (hucreler sirayla kosar)",
+   "; ".join(sorted(set(_eksik7f))[:4]))
+ok(not _bayat7f,
+   f"7f defterde BAYAT kol numarasi tasiyan tanimlayici YOK (kol {_KOL})",
+   ", ".join(sorted(set(_bayat7f))[:6]))
+print(f"    {len(_kod7f)} kod hucresi tarandi, {_atlanan7f} tanesi kabuk "
+      f"sihri iceriyor (AST disi)")
+
+print("\n=== 8) KONUS_11 DAVRANISI ===")
 import konus_11 as _K                                        # noqa: E402
 
 # !! BU BOLUM UC KEZ HEDEF DEGISTIRDI ve ucu de KAYITLI.
