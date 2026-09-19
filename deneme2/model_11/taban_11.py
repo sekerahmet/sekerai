@@ -50,6 +50,7 @@ import torch.nn.functional as F
 # `ayar.veri_ad`dan import ediliyor (asagida), burada degil.
 
 import jeton_11 as J
+import dil_11 as DIL
 import korpus_11 as KOR
 import olcme_11 as OLC
 
@@ -1660,6 +1661,22 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
                                 tohum=ayar.veri_tohum, ad="ret")
         yaz(f"  DURUSTLUK sinavi {len(_sv_ret)} cevapsiz soru "
             f"(TUTULAN veriden, egitimde HIC gecmez)")
+    # DIL KURALI -- WUG. Ayni gerekce: kullanici *"butun kriterleri tek
+    # bir yerden gorsek"*. Ayri bir CLI aracinda kalsaydi rapor yine iki
+    # parca olurdu ve GPU'yu ikinci kez tutmak gerekirdi.
+    #
+    # NE OLCER: kok TAMAMEN uydurma -- hicbir parcasi korpusta YOK.
+    # Eslestirilecek sey olmayinca geriye yalniz EK KURALI kalir.
+    # Havuz DENGELI: her son unluden esit sayida, yarisi uyumlu yarisi
+    # uyumsuz. Rastgele karisim `i`/`a`ya bogulur ve zayif kovalari
+    # (`o`, `ö` -- korpusta %0,20 ve %0,15) gorunmez yapardi.
+    #
+    # Yazilan sayi `unlu`: DOGRU tampon grubundaki dort ESIT UZUNLUKTA
+    # aday, sans 0.25. `tam8` yazilmiyor -- 'in 2, 'nin 3 karakter
+    # oldugu icin uzunluk yanliligi tasir.
+    _sv_wug = DIL.wug_havuzu(S, 320, tohum=ayar.veri_tohum + 7)
+    yaz(f"  DIL KURALI sinavi {len(_sv_wug)} uydurma kok "
+        f"(hicbiri korpusta YOK), sans 0.2500")
     rs = np.random.RandomState(ayar.tohum + 991)
     egri, t0 = [], time.time()
     # Lookahead'in YAVAS agirligi. ort_bas=0 iken hep None kalir ve hicbir
@@ -1717,6 +1734,11 @@ def egit(ayar: Ayar, alt=None, yaz=print, ustune=False, commit=None,
             r["ret_ad"] = _dr["ret_ad"]
             r["ret_cift"] = _dr["ret_cift"]
             r["kacamak"] = _dr["kacamak"]
+        # DIL KURALI -- uydurma kokte ek uyumu. Ucuz: 320 kok x 8 aday.
+        # !! Ek tablosu ve ek fonksiyonu `DIL`in KENDI ice aktarmalarindan
+        # aliniyor -- boylece sinavi kuran ile olcen AYNI modulu kullanir.
+        r["wug"] = DIL.ek_sinavi(model, S, _sv_wug, DEV,
+                                 DIL.V.EK_NIN, DIL.MT._nin)["unlu"]
         for k, sv in sinav.items():
             d = OLC.olc(model, S, sv, DEV)
             r[k] = d["tam"]
