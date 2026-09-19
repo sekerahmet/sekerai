@@ -36,7 +36,8 @@
     "konus_12.py": "`ModelSade` -> `ModelHibrit`: sinif yeniden adlandirildi (artik 'sade' degil, hibrit).",
     "pencere_12.py": "`ModelSade` -> `ModelHibrit`: sinif yeniden adlandirildi. EKRANDA BOLME KODU KALMADI (kullanici, 19 Eylul: \"pencere py hala seen comp falan basiyor onu duzelt\" ve \"ent_yok flan kalmis hala\"): one->olgu, seen->zincir, comp->gorulmemis, ent->yabanci, ent_yok->kisayolsuz, ood->yeni_kenar, ent_kati->kati, ent_arama->arama, *_kisayol->cikarimsiz. Ilk dordu CLAUDE.md \"Olcu BES ALAN\"dan, kalanlari o bolmenin TANIMINDAN turedi. Sutunlar HAFIZA / CIKARIM bandi altinda toplandi. ANAHTARLAR DEGISMEDI: json alanlari, kapi adlari ve test_12 aynen duruyor -- degisen yalniz BASILAN ad. Ayrica bayat ad duzeltildi (`pencere_a` -> `pencere_12`, hem basilan baslikta hem assert metninde) ve kural 7: YAKIN yorumu 10 -> 4 satir, docstring'den artik var olmayan 'paylasilan surum' anlatimi dustu.",
     "tani_12.py": "`ModelSade` -> `ModelHibrit`: sinif yeniden adlandirildi (artik 'sade' degil, hibrit).",
-    "model_12.ipynb": "Iki KILIT eklendi: `G_TABAN == -5.0` ve `_gdn2_parcali` varsayilan chunk == 16. Ikisi de kolun TANIMI -- sessizce kaymasinlar."
+    "model_12.ipynb": "Iki KILIT eklendi: `G_TABAN == -5.0` ve `_gdn2_parcali` varsayilan chunk == 16. Ikisi de kolun TANIMI -- sessizce kaymasinlar.",
+    "olcme_12.py": "URETIM YOLU ONBELLEKLENDI (19 Eylul). `uret` her URETILEN KARAKTER icin 113 karakterlik dizinin TAMAMINI bastan geciriyordu -- ~40 kat fazla is. L4'te OLCULDU: tek olcum noktasi 12,9 dakika, 11 nokta 2,4 saat, yani olcum egitimden pahali. Model nedensel oldugu icin konum j'nin logiti yalniz 0..j'ye bagli; durum tasinirsa AYNI sayi cikar. Yeni `uret` konum konum ilerliyor ve her konumu BIR KEZ isliyor (`ModelHibrit.adim` + blok basina durum: GDN-2'de Eq. 9'un tek adimi ve evrisim tamponu, dikkat bloklarinda KV onbellegi). ESKI YOL SILINMEDI -- `uret_tam` olarak duruyor ve tek isi kapi olmak: test_12 gercek sinav orneklerinde iki yolun BIREBIR AYNI dizgeyi urettigini siniyor (CPU'da 96/96 olculdu), ayrica adim yolunun her konumda tam ileri gecisle AYNI argmax verdigini. Bu OLCUM KODUDUR: onbellek sessizce yanlis olursa butun sayilar yalan olur, o yuzden kapi kaldirilamaz."
   },
   "satir": {
     "ayar_12.py": 364,
@@ -53,6 +54,7 @@
     "pencere_12.py": 45,
     "taban_12.py": 77,
     "tani_12.py": 2,
-    "test_12.py": 79
+    "test_12.py": 79,
+    "olcme_12.py": 13
   }
 }

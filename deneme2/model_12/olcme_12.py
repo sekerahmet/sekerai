@@ -100,21 +100,57 @@ class Sinav:
 
 @torch.no_grad()
 def uret(model, S, X, bas, n_uret, dev, bs=256, nokta_durur=True):
-    """OZYINELI serbest uretim. Kisit YOK: butun sozluk uzerinde argmax.
+    """ONBELLEKLI uretim: her konum BIR KEZ islenir.
 
-    !! SATIR DONGUSU YOK. Ilk surum her satir icin `bool(bitti[r])` ve
-    `int(nx[r])` cagiriyordu; ikisi de GPU->CPU SENKRONU. Olculdu: bir
-    olcum noktasi 2.246 ileri gecis x 256 satir = ~575.000 senkron.
-    Artik tek tensor, tek `.cpu()`.
+    Eski hali (`uret_tam`, asagida) her URETILEN KARAKTER icin dizinin
+    TAMAMINI bastan geciriyordu -- ~40 kat fazla is. L4'te bir olcum
+    noktasi 12,9 dakika suruyordu (OLCULDU, 19 Eylul). Model nedensel
+    oldugu icin konum j'nin logiti yalniz 0..j'ye baglidir; durum
+    tasinirsa ayni sayi cikar. `test_12` iki yolun GERCEK sinav
+    orneklerinde BIREBIR AYNI dizgeyi urettigini siniyor.
 
-    DURMA: nokta, <EOS> ya da <PAD>.
-      nokta   cumle bitti -- beklenen cevap da noktayla bitiyor
-      EOS     belge siniri. `coz` onu SESSIZCE atiyordu, yani
-              "Onur Demir<EOS>'dir." cikti "Onur Demir'dir." diye
-              okunur ve YANLIS cevap DOGRU sayilirdi.
-      PAD     dolgu jetonu. Egitimde hicbir zaman HEDEF degil
-              (ignore_index) ama TAHMIN edilebilir; `coz` onu da
-              atiyordu."""
+    Konum j'nin logiti j+1'i tahmin eder, yani satir i'nin t. karakteri
+    j = bas[i] + t - 1 konumundan gelir. Girdi: j < bas[i] ise SORU
+    metni, degilse bir onceki adimda URETILEN karakter."""
+    _d = [S.ileri["."], J.EOS, J.PAD] if nokta_durur else [J.EOS, J.PAD]
+    dur = torch.tensor(_d, device=dev)
+    cik = []
+    for i in range(0, len(X), bs):
+        xb = torch.from_numpy(X[i:i + bs].copy()).to(dev)
+        p0 = torch.from_numpy(bas[i:i + bs].copy()).to(dev).long()
+        assert int(p0.min()) >= 1, "onek BOS -- bas >= 1 olmali"
+        n, son = len(xb), xb.shape[1]
+        bitti = torch.zeros(n, dtype=torch.bool, device=dev)
+        kayit = torch.full((n, n_uret), J.PAD, dtype=torch.long, device=dev)
+        durum = model.durum_baslat(n, dev)
+        gir = xb[:, 0].clone()
+        # `genislik = en uzun onek + n_uret + 1` -> bu sinir hep < son
+        J_son = min(son, int(p0.max()) + n_uret)
+        for j in range(J_son):
+            with torch.autocast(dev, dtype=torch.float16,
+                                enabled=(dev == "cuda")):
+                lg = model.adim(gir, durum, j)
+            nx = lg.float().argmax(-1)
+            t = j - p0 + 1                       # bu konum kacinci karakter
+            ac = (t >= 0) & (t < n_uret) & (~bitti)
+            if bool(ac.any()):
+                s = ac.nonzero().flatten()
+                kayit[s, t[s]] = nx[s]
+                bitti[s] = bitti[s] | (nx[s, None] == dur[None, :]).any(1)
+            if not bool(((~bitti) & (t < n_uret - 1)).any()):
+                break
+            gir = torch.where(j + 1 < p0, xb[:, j + 1], nx)
+        cik += [S.coz(r) for r in kayit.cpu().numpy()]
+    return cik
+
+
+@torch.no_grad()
+def uret_tam(model, S, X, bas, n_uret, dev, bs=256, nokta_durur=True):
+    """ESKI yol: her karakterde TUM diziyi bastan gecirir. YAVAS.
+
+    Kosuda KULLANILMAZ -- tek isi `uret`in kapisi olmak. Silinmedi cunku
+    onbellekli yol sessizce yanlis olabilir ve o zaman sayilar YALAN olur;
+    tek korunma iki bagimsiz uygulama ve aralarindaki birebir kiyas."""
     # BIYOGRAFI icin `nokta_durur=False`: cevap COK CUMLELI, ilk
     # noktada durmak birinci olgudan sonra kesmek olurdu.
     _d = [S.ileri["."], J.EOS, J.PAD] if nokta_durur else [J.EOS, J.PAD]

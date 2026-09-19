@@ -290,6 +290,52 @@ class GDN2(nn.Module):
              .permute(0, 2, 1, 3, 4).reshape(Bq, T, self.Hv, self.dv))
         o = self.nf(o).reshape(Bq, T, self.Hv * self.dv).to(x.dtype)
         return self.o(o * F.silu(self.kapi(x)))
+    # ---- ADIM ADIM CIKARIM (yalniz olcum yolu) -------------------------
+    def durum_baslat(self, B, dev):
+        """[S, evrisim tamponu]. S fp32 (makale D.3). Tampon ILK adimda
+        kurulur -- dtype autocast'e gore degisiyor."""
+        return [torch.zeros(B, self.H, self.dk, self.grup * self.dv,
+                            device=dev, dtype=torch.float32), None]
+
+    def adim(self, x_t, durum, cos=None, sin=None):
+        """TEK jeton: (B,1,d) -> (B,1,d). Eq. 9'un BIR adimi.
+
+        Hazirlik `_tarama_girdisi` ile AYNI; tek fark kisa evrisimin
+        dolgu yerine TAMPONDAN beslenmesi (nedensel evrisim = son k-1
+        girdi). test_12 iki yolun AYNI dizgeyi urettigini siniyor."""
+        S, evb = durum
+        B = x_t.shape[0]
+        kk = self.ev.kernel_size[0]
+        qkv = torch.cat([self.q(x_t), self.k(x_t), self.v(x_t)], -1)
+        qkv = qkv.transpose(1, 2)                       # (B,D,1)
+        if evb is None:
+            evb = torch.zeros(B, qkv.shape[1], kk - 1,
+                              device=qkv.device, dtype=qkv.dtype)
+        tam = torch.cat([evb, qkv], dim=-1)             # (B,D,k)
+        durum[1] = tam[..., 1:]
+        qkv = F.silu(F.conv1d(tam, self.ev.weight,
+                              groups=self.ev.groups)).transpose(1, 2)
+        nq = self.H * self.dk
+        q, k, v = qkv.split([nq, nq, self.Hv * self.dv], dim=-1)
+        kf = lambda t, h, dd: t.view(B, h, dd).float()
+        q = F.normalize(kf(q, self.H, self.dk), dim=-1)          # (B,H,dk)
+        k = F.normalize(kf(k, self.H, self.dk), dim=-1)
+        v = kf(v, self.Hv, self.dv)                              # (B,Hv,dv)
+        b = torch.sigmoid(kf(self.pb(x_t), self.H, self.dk))
+        w = torch.sigmoid(kf(self.pw(x_t), self.Hv, self.dv))
+        f = kf(self.pf(x_t), self.H, self.dk)
+        g = (-self.a.exp()[None] * F.softplus(
+            f + self.delta.view(1, self.H, self.dk))).clamp(min=G_TABAN)
+        bir = lambda t: t.view(B, self.H, self.grup * self.dv)
+        v, w = bir(v), bir(w)          # gruplanmis deger kafalari
+        Sb = g.exp().unsqueeze(-1) * S                  # Diag(alpha) S
+        r = (Sb * (b * k).unsqueeze(-1)).sum(-2)        # Sb^T e
+        S = Sb + k.unsqueeze(-1) * ((w * v) - r).unsqueeze(-2)
+        durum[0] = S
+        o = (S * q.unsqueeze(-1)).sum(-2)               # (B,H,grup*dv)
+        o = self.nf(o.view(B, 1, self.Hv, self.dv))
+        o = o.reshape(B, 1, self.Hv * self.dv).to(x_t.dtype)
+        return self.o(o * F.silu(self.kapi(x_t)))
 
 
 # ======================= TAM DIKKAT =====================================
@@ -316,6 +362,24 @@ class Dikkat(nn.Module):
         q, k = _rope(q, cos, sin), _rope(k, cos, sin)
         a = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         return self.po(a.transpose(1, 2).contiguous().view(Bq, T, D))
+    # ---- ADIM ADIM CIKARIM (yalniz olcum yolu) -------------------------
+    def durum_baslat(self, B, dev):
+        """[k onbellegi, v onbellegi]. Ilk adimda kurulur."""
+        return [None, None]
+
+    def adim(self, x_t, durum, cos, sin):
+        """TEK jeton, KV onbellegiyle. cos/sin O KONUMA kirpilmis gelir."""
+        B, _, D = x_t.shape
+        q, k, v = self.qkv(x_t).split(D, dim=2)
+        sek = lambda t: t.view(B, 1, self.nh, self.kafa_d).transpose(1, 2)
+        q, k, v = self.nq(sek(q)), self.nk(sek(k)), sek(v)
+        q, k = _rope(q, cos, sin), _rope(k, cos, sin)
+        durum[0] = k if durum[0] is None else torch.cat([durum[0], k], 2)
+        durum[1] = v if durum[1] is None else torch.cat([durum[1], v], 2)
+        # sorgu TEK jeton, onbellekteki HER SEYI gorur -> is_causal=False
+        a = F.scaled_dot_product_attention(q, durum[0], durum[1],
+                                           is_causal=False)
+        return self.po(a.transpose(1, 2).contiguous().view(B, 1, D))
 
 
 # ======================= BLOK ===========================================
@@ -337,6 +401,11 @@ class Blok(nn.Module):
 
     def forward(self, x, cos, sin):
         x = x + self.mix(self.n1(x), cos, sin)
+        h = self.n2(x)
+        return x + self.w2(F.silu(self.w1(h)) * self.w3(h))
+    def adim(self, x, durum, cos, sin):
+        """forward ile AYNI govde, karistirici ADIM yolunda."""
+        x = x + self.mix.adim(self.n1(x), durum, cos, sin)
         h = self.n2(x)
         return x + self.w2(F.silu(self.w1(h)) * self.w3(h))
 
@@ -407,6 +476,26 @@ class ModelHibrit(nn.Module):
 
     def forward(self, x):
         return self.head(self.govde(x))
+    def durum_baslat(self, B, dev=None):
+        """Her blok icin bos durum. Onbellekli uretim BURADAN baslar."""
+        dev = dev or self.emb.weight.device
+        return [b.mix.durum_baslat(B, dev) for b in self.bloklar]
+
+    def adim(self, jeton, durumlar, poz):
+        """TEK jeton -> (B, vocab) logit. ONBELLEKLI cikarim yolu.
+
+        `govde` + `head` ile AYNI sayiyi vermeli; test_12 bunu GERCEK
+        sinav ornekleriyle BIREBIR DIZGE kiyasi yaparak siniyor.
+        Kazanc: her konum BIR KEZ islenir. `uret`in eski hali her
+        uretilen karakterde DIZININ TAMAMINI bastan geciriyordu --
+        L4'te bir olcum noktasi 12,9 dk (OLCULDU)."""
+        assert poz < self.rope_cos.shape[0], f"poz {poz} >= t_len"
+        h = self.emb(jeton).unsqueeze(1)                     # (B,1,d)
+        c = self.rope_cos[poz:poz + 1]
+        s = self.rope_sin[poz:poz + 1]
+        for b, d in zip(self.bloklar, durumlar):
+            h = b.adim(h, d, c, s)
+        return self.head(self.nf(h))[:, 0]
 
 
 # ======================= AYAR ===========================================

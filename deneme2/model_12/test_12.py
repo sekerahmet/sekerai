@@ -1019,6 +1019,41 @@ ok(all(o.endswith("? ") for o, _b, _c, _k in _onek),
 ok(all(b.endswith(".") for _o, b, _c, _k in _onek),
    "beklenen cevap NOKTAYLA bitiyor -- uretim orada duruyor")
 
+# --- URETIM YOLU: ONBELLEKLI == TAM ILERI GECIS -----------------------
+# !! BU OLCUM KODU. `uret` 19 Eylul'de yeniden yazildi: her konum BIR KEZ
+# isleniyor (durum tasiniyor). Eskiden her URETILEN KARAKTER icin dizinin
+# TAMAMI bastan geciyordu -- L4'te tek olcum noktasi 12,9 dakika.
+# Kazanc gercek ama onbellek sessizce yanlis olursa BUTUN SAYILAR YALAN
+# olur. Tek korunma: eski yol (`uret_tam`) DURUYOR ve birebir kiyaslaniyor.
+_netu = S.ModelHibrit(A, S0.vocab).eval()
+_svu = OLC.Sinav(S0, v, V00.kur(A.veri_tohum), _L09["comp"][:16], 2, "comp")
+_ua = OLC.uret(_netu, S0, _svu.X, _svu.bas, _svu.n_uret, "cpu", bs=16)
+_ub = OLC.uret_tam(_netu, S0, _svu.X, _svu.bas, _svu.n_uret, "cpu", bs=16)
+ok(_ua == _ub, "URETIM: onbellekli == tam ileri gecis (BIREBIR DIZGE)",
+   f"{sum(x == y for x, y in zip(_ua, _ub))}/{len(_ua)} ayni")
+# KAPI BOS GECMESIN. Iki yanlis deneme OLCULDU, ikisi de burada durmasin
+# diye yaziliyor: (1) `x.strip()` ISE YARAMAZ -- egitilmemis model BOSLUK
+# uretiyor, strip bos donuyor ve dogru davranis hata sanilir. (2) "baska
+# model baska dizge uretir" de ISE YARAMAZ -- rastgele agirlikta argmax
+# TEK karaktere cokuyor, tohum degisse de cikti ayni.
+# Dogru sinama: `coz` PAD dizisini BOS DIZGEYE ceviriyor (olculdu), yani
+# DOLU dizge = kayda GERCEK jeton yazilmis demek.
+ok(len(_ua) == len(_svu.X), "uretim her satir icin bir cikti donduruyor",
+   f"{len(_ua)} / {len(_svu.X)}")
+ok(all(x != "" for x in _ua),
+   "uretilen satirlar BOS DEGIL -- kayit PAD kalmamis, kiyas vakum degil",
+   f"ornek {_ua[0]!r}")
+# Modelin adim yolu: her konumda tam ileri gecisle AYNI argmax.
+_xu = torch.from_numpy(_svu.X[:8].copy())
+with torch.no_grad():
+    _lt = _netu(_xu)
+    _dd = _netu.durum_baslat(8)
+    _ls = torch.stack([_netu.adim(_xu[:, j], _dd, j)
+                       for j in range(_xu.shape[1])], dim=1)
+ok(bool((_lt.argmax(-1) == _ls.argmax(-1)).all()),
+   "ONBELLEKLI adim == tam ileri gecis (her konumda AYNI argmax)",
+   f"max logit farki {float((_lt - _ls).abs().max()):.2e}")
+
 
 print("\n" + "=== 4b) PUANLAMA KAPISI: sahte ciktiyla ===")
 # !! BU BOLUM BIR KUSURDAN DOGDU (18 Eylul, hakemlik). `olc` once
