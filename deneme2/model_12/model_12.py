@@ -14,8 +14,21 @@ YAPILAMAZ. Veri ve sinav model_11 ile BIT AYNI (olcme izi 44e6262e37f3).
     FFN       DEGISMEDI (SwiGLU dff=704)    model_11'de aramanin 8. FFN'de
                                             yapildigi olculdu; sabit tutuldu
 
-!! Bu olcekte HIZ KAZANCI YOK, beklenmiyor da: t_len=512'de dikkatin
-karesel kismi hesabin ~%25'i. Kazanc uzun baglamda ve cikarimda.
+!! HIZ KAZANCI YOK -- UZUN BAGLAMDA DA YOK. Onceki hali "kazanc uzun
+baglamda ve cikarimda" diyordu; OLCULDU ve YANLIS cikti. L4, B*T=8192
+sabit, ileri gecis, hibrit/saf dikkat orani:
+
+    T      512    1024    2048    4096    8192
+    oran  2,56x   3,25x   5,24x   7,59x  10,12x     (buyudukce KOTULESIYOR)
+
+Iki sebep: (a) kiyasin dikkat tarafinda fuzyonlu flash cekirdegi var,
+bizde duz PyTorch; (b) bu rejim zaten hibritin rejimi degil -- Samba
+(2406.07522): "self-attention with the FlashAttention 2 implementation
+is more training efficient than Mamba when the sequence length is 4096".
+Nemotron-Flash (2511.18890) kazanc sayilarini 8k-32k baglamda, batch 1
+decode'da, FLA cekirdekleriyle veriyor. Bizde t_len 512, sinav 113.
+
+KOLUN GEREKCESI HIZ DEGIL: ikinci BAGIMSIZ referans.
 
 Gerekce ve karar kurali: `belge/onkayit/model_12.md`.
 """
@@ -107,7 +120,7 @@ def _gdn2_ozyineli(q, k, v, b, w, g):
     return torch.stack(cik, dim=2)
 
 
-def _gdn2_parcali(q, k, v, b, w, g, C: int = 16):
+def _gdn2_parcali(q, k, v, b, w, g, C: int = 32):
     """Parcali form -- arXiv 2605.22791 Ek A, SABIT pivotlu carpanli bicim.
 
         G_r    = cumsum(g)          chunk ICINDE, G_0 = g_0
@@ -141,18 +154,24 @@ def _gdn2_parcali(q, k, v, b, w, g, C: int = 16):
     (B,H,n,C,C,dk) ara tensor -> L4'te 2-8x yavas, 2-8x bellek, OLCULDU).
     Bu hal ikisini de cozuyor: fp64 Eq. 9'a karsi 2.2e-07.
 
-    C=16 OLCUMLE secildi (L4): sabit pivot butun dinamik araligi PESIN
-    harcadigi icin C buyudukce hem ustel sinira yaklasiyor hem dogruluk
-    dusuyor (C=16 -> +-40, 9.0e-07;  C=32 -> +-80, 2.2e-06). C=16'da
-    `exp(-40)*k` en kucuk k'de bile fp32 NORMAL araliginda kaliyor.
+    C=32 OLCUMLE secildi (L4): taban -5 ile EN BUYUK guvenli chunk
+    (C=64 -> |ustel| 160, fp32'de tasar). Tarama 9.2 -> 8.0 ms (egitim
+    sekli), 24.3 -> 20.0 ms (uretim sekli).
+
+    ONCE C=16 secilmisti, gerekcesi OLCULMEMIS bir endiseydi: C=32'de
+    `k*exp(P-G)`nin ~1000 degeri fp32 normal-altina dusuyor. Olculdu ve
+    ZARARSIZ cikti -- dogruluk 3 tohum x 3 sonum olceginde 2.15-2.36e-06
+    (kapi esigi 1e-3). Dahasi endise TERSMIS: normal-altilar sonumun SIG
+    oldugu yerden geliyor, `a` buyudukce (2x, 4x) sayilari 985 -> 340'a
+    DUSUYOR. Yani egitim ilerledikce pay ACILIYOR.
 
     SAGDAN DOLGU: T her zaman C'nin kati degil (sinav dizileri 86/113).
     Nedensel oldugu icin guvenli; dolgu sifir, durumu kirletmez.
     """
     P = C * G_TABAN / 2.0                    # SABIT pivot
-    assert abs(P) <= 60.0, (
-        f"C={C} ile pivotlu ustel {abs(P)} -- fp32 sinirina (88) cok "
-        f"yakin, alt tarafta da normal-alti risk var. C'yi kucult.")
+    assert abs(P) <= 85.0, (
+        f"C={C} ile pivotlu ustel {abs(P)} -- fp32'nin exp sinirini (88) "
+        f"asiyor, tarama inf/NaN verir. C'yi kucult ya da tabani yukselt.")
     Bs, H, T0, dk = q.shape
     T = T0
     if T % C:
