@@ -384,14 +384,34 @@ Sıra kısıtı YOK — sıra yolun kendi sırası.
 ### 5.1 Bilinen kusurlar — hepsi ÖLÇÜLDÜ
 
 ```
-A  DELTA GEOMETRININ DISINDA
-   Itme ancak dmin < delta iken ateslenir. OLCULDU (20 Eylul):
+A  DELTA -- INCELENDI, DEGISMIYOR.  KARAR 21 Eylul, §13/K11.
+   Itme ancak dmin < delta iken ateslenir. OLCULDU (20 Eylul, tam
+   korpus, t0):
        hedefin uzakligi           0,9160
        rakiplerin uzakligi  %50   0,8974   %25  0,7611   %5  0,5745
        delta                      0,4000
-   Itilmesi gereken ciftlerin %0,48'i esigin altinda; olculen
-   dis = 0,0048, §0'daki tek cumlede 0,0000.  TERIM YOK HUKMUNDE.
-   Ve rakip hedeften DAHA YAKIN: kayip tatmin, okuma yanlis.
+   Itilmesi gereken ciftlerin %0,48'i esigin altinda; dis = 0,0048.
+   Ilk okumam "delta cok kucuk" idi.  OLCUM AKSINI SOYLEDI.
+
+   OLCULDU (21 Eylul, 20 cumle, 300 adim, MODEL CALISIRKEN):
+       HEDEFIN uzakligi      %50 0,1169   %95 0,2970   ort 0,1406
+       PENCERE DISI birim    %1  0,4530   %50 0,8802   en kucuk 0,3460
+   Yani calisan rejimde hedef 0,117'de, EN YAKIN rakip 0,346'da --
+   ust uste binmeyen, 3 katlik bir ayrim. ITMEYE GEREK YOK ve
+   delta = 0,4 birimlerin yalniz %0,3'unu itiyor: DOGRU davranis.
+
+   BUYUTMENIN BEDELI (ayni olcum):
+       delta 0,6 -> pencere disi birimlerin  %5,9'u itilir  (~25/420)
+       delta 0,8 ->                         %31,9          (~134/420)
+       delta 1,0 ->                         %75,8          (~319/420)
+   d = 8 boyutta, 20 konumluk bir yoldan 319 noktayi birden
+   uzaklastirmak SAGLANAMAZ; yalniz gurultu olur. Ustune §5.1/H.
+
+   ASIL MESELE: tam korpusta hedef 0,9160'ta, yani CEKME basarisiz --
+   itme degil. Ve 0,9160 uzaklik  uye = 0,839  demek; §5.1/J'nin
+   tabanindan geri cozulunce  k ~ 3  cikiyor: tam korpusun ortalama
+   DALLANMASI. Sayi kendi kendini acikliyor.
+   delta basarisiz bir cekmeyi duzeltemez.  DEGISMIYOR.
 
 B  TOPLAM/ORTALAMA KARISIK
    Belge ikisini de TOPLAM yaziyordu; kod `üye`yi konum basina
@@ -480,10 +500,27 @@ J  KAYBIN GUCU DALLANMA CARPANINA BOLUNUYOR
    indirilemez pay var.
    !! ISINMA (§5.2) bunu COZMEZ. O, pencerenin KESIM YERINDEN dogan
    belirsizligi atti; bu, DILIN kendi belirsizligi ve her konumda var.
-   !! Tek noktali okumanin yapisal sinirn: k yollu bir konumda
+   !! Tek noktali okumanin yapisal siniri: k yollu bir konumda
    hedeflerin en fazla 1/k'si 1. siraya cikabilir. Bu MARJLI kayip
    icin de gecerli -- okuma tek nokta oldukca kayip sekli degistirmek
    tavani degistirmez.                                      (kapi 33)
+
+K  TERIM AGIRLIKLARI OKUMAYI GERI CEKIYOR
+   OLCULDU (21 Eylul, 20 cumle ezber sinavi, GERCEK m.kayip):
+       adim   kayip    1.SIRA%   cos_dogru
+        250   0,356     98,1%     0,9801
+        500   0,266     98,6%     0,9886
+        750   0,231     98,2%     0,9904   <- TEPE
+       1000   0,226     97,6%     0,9876
+       1250   0,216     96,4%     0,9849
+       1500   0,204     95,9%     0,9845
+   750'den sonra TOPLAM kayip dusmeye devam ediyor ama hem sira
+   hem cos_dogru KOTULESIYOR. Yani kazanc `uye`den degil, `kod`
+   (VQ) ve `duzen`den geliyor: mimari dogru cevabi biliyor, sonra
+   kod defteri ve duzenleyici onu GERI CEKIYOR.
+   a1 = 1,0  a2 = 1,0  a3 = 1e-4  HICBIRI olculmeden secilmisti
+   (`ayar_14`: "buradakiler baslangic"). Simdi olculmus bir bedeli
+   var.  ACIK -- §13/A1.
 ```
 
 ---
@@ -748,13 +785,18 @@ K9  kod terimi HER ADIMDA                      K    §5.1/C  -- yazildi,
                                                     ama SONUCU acik (A6)
 K10 ISINMA = 4, cop onek PUANLANMIYOR          K    §5.2, kapi 32
     (eski A3; kapandi 20 Eylul)
+K11 delta = 0,40 DEGISMIYOR -- incelendi       K    §5.1/A
+    (eski A2; calisan rejimde hedef 0,117
+     en yakin rakip 0,346'da, itmeye GEREK YOK)
 
 T1  olcum ACGOZLU kosuyor, §7 ISIN diyor       T    §7, A7
 T2  §9.7 "r, delta egitimde yok" YANLIS        T    §9.7 -- duzeltildi
 T3  §3.2 reddetme kodda YOK                    T    A9
 
-A1  uye ORTALAMA / dis TOPLAM -- a1 belirsiz   A    §5.1/B
-A2  delta geometrinin disinda                  A    §5.1/A
+A1  a1/a2/a3 OLCULMEDEN secildi                A    §5.1/B, §5.1/K
+    (uye ORTALAMA, dis TOPLAM; ve OLCULDU:
+     750. adimdan sonra kayip DUSERKEN sira
+     KOTULESIYOR -- kazanc kod+duzen'den)
 A4  L_duzen u, v'yi kapsamiyor                 A    §5.1/F
 A5  p_w yerlesimi rastgele                     A    A8
 A6  ek yuzeyleri AYRI token oldu               K    -- veri katmani;
