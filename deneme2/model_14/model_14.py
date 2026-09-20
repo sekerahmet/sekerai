@@ -254,8 +254,10 @@ class Yol(nn.Module):
         # ceviriyoruz:  2-2s < r^2  <=>  s > 1 - r^2/2.
         esik = 1.0 - 0.5 * r * r
         # Pencere basi: ilk birim okuma uzayina, gizli kisim sifir.
-        # Pencere akistan KEYFI yerden basliyor; bu "cop" durum ilk
-        # capada silinir (DENKLEM.md §9.5).
+        # Pencere akistan KEYFI yerden basliyor, yani bastaki durum COP.
+        # "Ilk capada silinir" IDDIASI KALDIRILDI -- olculdu, capa adim
+        # 1'de tetiklenmiyor (s = 0,5482, esik 0,969) ve kayip copu
+        # adim 1'den itibaren puanliyor.  DENKLEM.md §5.1/G, acik A3.
         z = self.p.new_zeros(B, self.D)
         z[:, :self.d] = self.p[X[:, 0]]
         sf_b = torch.zeros(B, dtype=torch.bool, device=X.device)

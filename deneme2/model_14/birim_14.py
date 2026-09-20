@@ -16,8 +16,9 @@ model_14'e OZGU iki sey var, ikisi de DENKLEM.md'den:
 
   OBEK YOK           Pencere akistan KEYFI yerden baslar. Semantik
                      bolme, varlik capasi, obek siniri -- hicbiri yok.
-                     Pencere basindaki "cop" durum ilk capada silinir
-                     (§9.5). model_13'un `oncul_bul`una gerek kalmadi.
+                     Pencere basindaki durum COP kalir: "ilk capada
+                     silinir" iddiasi olculdu ve yanlis cikti, kayip
+                     onu puanliyor (DENKLEM.md §5.1/G, acik A3).
 
 Bu dosya DISARIYA HICBIR SEY IMPORT ETMEZ -- yalniz kol ici.
 """

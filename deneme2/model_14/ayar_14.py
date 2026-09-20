@@ -133,8 +133,8 @@ BETA = 0.25       # VQ baglilik agirligi -- VQ-VAE'nin standart degeri
 # --- EGITIM -----------------------------------------------------------
 PENCERE = 24
 #  Zincirin uzunlugu -- modelin OGRENEBILECEGINI belirler. Semantik
-#  bolme YOK: pencere keyfi yerden baslar, bastaki "cop" durum ilk
-#  capada silinir (§9.5).
+#  bolme YOK: pencere keyfi yerden baslar ve bastaki cop durum
+#  SILINMIYOR, puanlaniyor (DENKLEM.md §5.1/G, acik A3).
 #  OLCULDU (20 Eylul): sinavin sordugu sey SORU + CEVAP, ve ikisinin
 #  ayni zincirde olmasi gerekiyor -- cevap sorunun OZNESINDEN
 #  uretiliyor. Birim akisinda 648.281 soru-cevap cifti, ortalama 14,7

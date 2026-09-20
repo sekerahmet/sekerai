@@ -412,8 +412,11 @@ F  L_duzen u ve v'yi KAPSAMIYOR
    YONU (u, v) duzenlenmiyor. K_TAM = n iken zaten acik sinif bos.
 
 G  COP ONEK PUANLANIYOR
-   §9.5 pencerenin keyfi yerden basladigini ve bastaki durumun "cop"
-   oldugunu soyluyor; kayip onu adim 1'den itibaren puanliyor.
+   Pencere akistan keyfi yerden basliyor (§9.5), yani bastaki durum
+   cop. Ilk surum bunu "cop durum ILK CAPADA silinir" diye
+   mesrulastiriyordu -- SILINMIYOR: adim 1'de s = 0,5482, esik 0,969,
+   capa hic tetiklenmiyor (§0 tablosu). Yani ortada bir mekanizma hic
+   yoktu; kayip copu adim 1'den itibaren puanliyor.
    OLCULDU: ayni onege kac AYRI hedef dayatildigi --
        konum 1: 9,20 hedef   tavan %45,1
        konum 2: 3,34         tavan %52,9
