@@ -999,6 +999,8 @@ O  §5.1/M'NIN TEZI YANLIS -- FIYAT ZATEN DOGRU  (21 Eylul, ileri gecis)
    NEREYE:  A10 (varlik birimleri durumu oynatmiyor, %73 kendine
    donuyor) ve A11. Ariza TASIYICIDA.
 P  BARIYER d ILE BUYUYOR -- d=8->16 TAKASININ MEKANIZMASI  (21 Eylul)
+   !! ONCEDEN KAYDI CURUDU -- bkz. §5.1/Q.  Donme d ile buyuyor ve
+      d=16'da bariyeri ASIYOR.  Bariyer HESABI gecerli, ACIKLAMA degil.
    §5.1/L: durum okuma uzayinda kendi Voronoi hucresinden cikmiyor;
    olcut EN YAKIN KOMSU acisi, d=8'de 30,5°. O sayi `d`YE BAGLI ve
    §5.1/L d=8'de olculmustu. Kagitta hesaplandi (444 nokta kurede
@@ -1039,6 +1041,44 @@ P  BARIYER d ILE BUYUYOR -- d=8->16 TAKASININ MEKANIZMASI  (21 Eylul)
    orani. ONCEDEN KAYIT: bariyer %55 buyudu, donme buyumediyse
    KENDINE DONEN varlik orani %73'un USTUNDE cikmali. Cikmazsa
    bu aciklama yanlis ve tekrar bakilir.
+Q  §5.1/P'NIN ONCEDEN KAYDI CURUDU -- BARIYER ACIKLAMASI d=16'DA GECMIYOR
+   (21 Eylul, PARAMETRE OKUMA, ileri gecis bile yok)
+   Kayit: "bariyer %55 buyudu, donme buyumediyse kendine donen VARLIK
+   orani %73'un USTUNDE cikmali."   CIKMADI.
+
+   ```
+                         d=8      d=16 hafizasiz   d=16 hafizali
+     komsu araligi      30,5°         47,9°            47,9°
+     VARLIK donme acisi 22,1°         48,9°             1,2°
+     kendine donen       %75           %43             %100
+     ort |a| VARLIK     0,0293        0,0330           0,0072
+   ```
+   (tanimlar §5.1/L ile ayni: z0=[p_w;0], z1=R_w z0, q=norm(Pi z1);
+    aci = <q,p_w>; kendine donen = argmax_v q.p_v == w)
+
+   1) DONME `d` ILE BUYUYOR, hem de bariyerden HIZLI: 2,2 kat vs
+      1,57 kat. d=16'da varlik donmesi (48,9°) komsu araligini (47,9°)
+      ASIYOR.  **Voronoi bariyeri BILGI=0'i d=16'da ACIKLAMIYOR.**
+   2) "R_w RIJIT, yazamaz, R ~ I'de uzlasir" aciklamam (§5.1/P) OLDU.
+      d=16'da I'de uzlasmiyor, tam tersine buyuyor.
+   3) BUNA RAGMEN ozne okunabilirligi %35,1 -> %11,2 DUSTU (§5.1/L).
+      Yani ariza "durum HAREKET ETMIYOR" degil.
+   4) HAFIZALI kosu parametre duzeyinde: 1,2°, %100 kendine donen.
+      §12b'nin cokusu agirlikta da gorunuyor -- SONLU OTOMAT.
+
+   YAN BULGU, ARANMIYORDU:  `p` bir **register_buffer** -- ogrenilmiyor.
+   Rastgele atanip donduruluyor, ve |p_w| = 1,000 (min=ortanca=max),
+   yani `_kos` gercekten kosinus. A5 buyudu: "p_w yerlesimi rastgele"
+   degil, **rastgele VE DONMUS**. 47,9°lik komsu araligi kimsenin
+   optimize edemedigi SABIT bir ozellik.
+
+   NEREYE BIRAKTI: tasima calisiyor, okuma kaybediyor. §3.1b/adim 5
+   zaten olcmustu -- ozne TAM durumdan %11,2 (sans %0,3), okunabilir
+   bloktan %4,7. Yani kimlik durumda VAR, `Pi` atiyor. Darbogaz
+   TASIMA degil OKUMA.
+   Soru netlesti: **gizli alandaki icerik CEVAP ANINDA okumaya nasil
+   ulasacak.**  §12b'nin icgudusu (izometriyi EKLEYEREK kir) TUR
+   olarak dogruymus; yeri ve adresi yanlisti.
 ```
 
 ---
@@ -1547,7 +1587,10 @@ A10 VARLIK birimleri durumu OYNATMIYOR         A    §5.1/L, O
     Kayip tarafindaki butun adaylar (L1..L4) bu
     olcumle KAPANDI.
 A4  L_duzen u, v'yi kapsamiyor                 A    §5.1/F
-A5  p_w yerlesimi rastgele                     A    A8
+A5  p_w RASTGELE ve DONMUS (buffer)            A    A8, §5.1/Q
+    ogrenilmiyor; |p_w| = 1,000 tam, yani `_kos`
+    gercek kosinus. Komsu araligi (d=8 30,5°,
+    d=16 47,9°) kimsenin oynatamadigi SABIT.
 A6  ek yuzeyleri AYRI token oldu               K    -- veri katmani;
     (`-ın` ile `-in` ayri), unlu uyumu               `ek_14`, 20 Eylul
     modelin girdisinde
