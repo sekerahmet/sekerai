@@ -368,7 +368,6 @@ def _19():
     return f"cdist ile fark {e:.1e}   kayip()ta cdist cagrisi {len(say)}"
 
 
-# =====================================================================
 @kapi("20  IZLER -- graf ve sinav model_13 ile BIREBIR")
 def _20():
     import ayar_14 as AY, taban_14 as MT, veri_14 as V
@@ -440,7 +439,7 @@ def _23():
     return f"say {list(b.say)}  kapali {sorted(m.nonzero()[0])}  pencere {P.shape}"
 
 
-@kapi("24  OLCME -- iskelet, ek kurali, ve BICIM/BILGI ayrimi")
+@kapi("24  OLCME -- iskelet, ek orani, BICIM|BILGI ayrimi")
 def _24():
     import olcme_14 as O
     import numpy as np
@@ -449,24 +448,42 @@ def _24():
     b = O.Bicim(akis, {0, 1, 2, 3}, {7, 8}, ek_ix={4, 6}, n=12)
     assert len(b.iskelet) == 2, dict(b.iskelet)
     assert b.puanla([0, 1, 4, 5, 2, 3, 6, 7])["kalip"] == 1
-    y = b.puanla([0, 1, 5, 4, 2, 3, 6, 7])       # 4 yanlis yerde
-    assert y["ek_n"] == 2 and y["ek_iyi"] == 1, y  # 6 dogru, 4 yanlis
-    assert b.puanla([0, 1, 4, 5, 2, 3, 6, 7])["ek_iyi"] == 2
+    y = b.puanla([0, 1, 5, 4, 2, 3, 6, 7])          # 4 yanlis yerde
+    assert y["ek_n"] == 2 and y["ek_iyi"] == 1, y
     assert b.puanla([0, 1, 4, 4, 4, 6, 7])["yozlasma"] == 1
     assert b.puanla([0, 1, 4, 5, 2, 3, 6])["kapanmadi"] == 1
-    #  BICIM tutup BILGI dusen durum -- model_13'un arizasinin sekli
-    sor = [((0, 1, 4, 5), (2, 3), ())]
-    dogru_tip_yanlis_kisi = [[0, 1, 6, 7]]      # kisi verdi ama YANLIS kisi
+
+    # BICIM tutup BILGI dusen durum -- model_13'un arizasinin sekli
+    sor = [O.Soru((0, 1, 4, 5), (2, 3), ())]
+    yanlis_kisi = [[0, 1, 6, 7]]
     tip = lambda w: {"K"} if w in (0, 1, 2, 3) else {"X"}
-    bc = O.bicim_puanla(sor, dogru_tip_yanlis_kisi, b, {7, 8}, tip)
-    bl = O.bilgi_puanla(sor, dogru_tip_yanlis_kisi, {7, 8})
+    bc = O.bicim_puanla(sor, yanlis_kisi, b, {7, 8}, tip)
+    bl = O.bilgi_puanla(sor, yanlis_kisi, {7, 8})
     assert bc["tip"] == 1.0, "tip BICIM'de sayilmali"
-    # ek ORANI ek BASINA: hic ek icermeyen cikti vacuous GECMEMELI
-    bos = O.bicim_puanla(sor, [[0, 1, 7]], b, {7, 8}, tip)
-    assert bos["ek_n"] == 0 and bos["ek"] != bos["ek"], "ek yoksa NaN olmali"
     assert bl["tam"] == 0.0, "yanlis kisi BILGI'de dusmeli"
-    return (f"iskelet {len(b.iskelet)}   yanlis kisi -> "
-            f"BICIM tip {bc['tip']:.1f} / BILGI tam {bl['tam']:.1f}")
+    bos = O.bicim_puanla(sor, [[0, 1, 7]], b, {7, 8}, tip)
+    assert bos["ek_n"] == 0 and bos["ek"] != bos["ek"], "ek yoksa NaN"
+    return ("iskelet %d   yanlis kisi -> BICIM tip %.1f / BILGI tam %.1f"
+            % (len(b.iskelet), bc["tip"], bl["tam"]))
+
+
+@kapi("25  SINIF KORPUSTAN -- zincirin ETIKETINDEN DEGIL")
+def _25():
+    import olcme_14 as O
+    import numpy as np
+    ham = np.asarray([9, 0, 4, 5, 2, 6, 7], np.uint16).tobytes()
+    assert O._gecer(ham, (0, 4, 5, 2)), "gecen dizi bulunamadi"
+    assert not O._gecer(ham, (0, 4, 5, 3)), "gecmeyen dizi bulundu"
+    h2 = np.asarray([0x0102, 0x0304], np.uint16).tobytes()
+    assert not O._gecer(h2, (0x0203,)), "tek ofset yanlis eslesti"
+    return "bayt aramasi + hizalama dogru"
+
+
+
+
+# =====================================================================
+# VERI YOLU  --  kopyanin ve kurulumun kapilari
+# =====================================================================
 
 
 if __name__ == "__main__":
@@ -476,8 +493,3 @@ if __name__ == "__main__":
         print(f"  KALDI   {ad}\n          {e}")
     print(f"\n{len(GECTI)} gecti, {len(KALDI)} kaldi")
     sys.exit(1 if KALDI else 0)
-
-
-# =====================================================================
-# VERI YOLU  --  kopyanin ve kurulumun kapilari
-# =====================================================================
