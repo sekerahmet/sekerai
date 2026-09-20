@@ -802,6 +802,62 @@ L  VARLIK BIRIMLERI DURUMU OYNATMIYOR  --  BILGI=0'IN MEKANIZMASI
    iyi degildir. §13'un kendi kurali: "kapi teoreme degil IHTIYACA
    kurulur" -- ihtiyac "varlik birimi durumu OYNATMALI".
    ACIK -- esik ve care karari verilmedi.
+M  KAYIP OLGUYU SATIN ALAMIYOR -- HESAPLANDI (21 Eylul, kagit, GPU YOK)
+   §12b hafiza kosusu duserken sorulan soru: optimizasyon neden
+   donmeleri sondurmeyi SECTI?  Cevap kayipta, aritmetikle.
+
+   1) OLGU, PUANLANAN KONUMLARIN %15,04'U.
+      Korpusun kendi kalip karisimi (17 bildirim + 8 soru) x 7.381
+      olgu = 184.525 cumle, 2.356.137 birim konumu.
+          SABLON / DIL          %43,2
+          OZNE anilmasi         %23,2
+          CEVAP birimleri       %33,6
+      Cevap birimlerinin hepsi olgu istemiyor: ek UNLU UYUMUNDAN
+      deterministik, soyadin bir kismi addan cikarilabilir. 1.608 ad
+      uzerinde onek-dallanmasi sayildi: ad basina 2,85 birim, bunun
+      1,92'si BELIRSIZ.  184.525 x 1,92 / 2.356.137 = %15,04.
+
+   2) BUTUN OLGULARI BILMENIN KAYIPTAKI DEGERI.
+      uye = 2 - 2*ort(cos), konum basina ORTALAMA (§5.1/B). O %15,04'u
+      cos = 1'e cekmenin kazanci:
+          2 x 0,1504 x (1 - cos_simdi)
+          cos >= 0        ->  EN COK  0,3008
+          cos ~ 0,5       ->  yaklasik 0,1504
+
+   3) DONMELERI SONDURMENIN DEGERI.
+          a3 x (duzen_bas - duzen_son) = 1e-4 x (3056,93 - 45,04)
+                                       = 0,3012
+
+   ```
+   BUTUN korpusu ezberlemek      <= 0,3008   (gercekci ~0,15)
+   donmeleri sondurmek              0,3012   GARANTI, ANINDA, BEDAVA
+   ```
+
+   **Ayni para.** Ve ikincisi 376 parametreyi sifira cekmekle
+   bulunuyor; birincisi 7.381 olguyu adreslenebilir kilmakla.
+   Optimizasyon ucuz olani sectigi icin degil, AYNI FIYATA daha kolay
+   olani sectigi icin sondurdu. Hafiza bunu YARATMADI -- yalnizca
+   uye'nin o ana kadar odettigi bedeli kaldirdi.
+
+   EKSIK SAYI: hafizasiz d=16 kosusunun SON `duzen`i kayitli degil
+   (defterin 3. hucresi sonraki kosuda temizlendi). O sayi, 0,3012'nin
+   ne kadarinin zaten toplanmis oldugunu soylerdi. Yeni kosu gerekmez;
+   bir sonraki kosuda `duzen` egrisi kaydedilsin.
+
+   SONUCU MIMARI: kapasite eklemek bu tabloyu DEGISTIRMEZ. Eklenen her
+   serbestlik, 0,30'u olgu ogrenmeden toplamanin YENI bir yolunu acar
+   -- §12b'de tam bu oldu. Once FIYAT duzelir, sonra kapasite.
+       ADAY L1  a3 = 0.  `duzen` R -> I'yi ODULLENDIRIYOR; §5.1/K zaten
+                "kayip duserken sira kotulesiyor, kazanc kod+duzen'den"
+                diyordu. Tek satir, ucuz.
+       ADAY L2  `uye` konum basina ESIT agirlikli olmasin. Olgu
+                konumlari korpus uretecinden BILINIYOR; maske pencereyle
+                birlikte tasinir.  !! Modele "burasi olgu" sinyali
+                vermek demek -- bu bir TASARIM KARARI, bedava degil.
+       ADAY L3  Etiketsiz surumu: zor konuma agirlik (focal). Olgu
+                konumlari zaten zor oldugu icin kendiliginden agirlik
+                alir; ek sinyal YOK.
+   Ucu de SINANMADI.  L1 en ucuzu ve zaten acik bir kalemi (A1) kapatir.
 ```
 
 ---
@@ -1276,10 +1332,15 @@ T1  olcum ACGOZLU kosuyor, §7 ISIN diyor       T    §7, A7
 T2  §9.7 "r, delta egitimde yok" YANLIS        T    §9.7 -- duzeltildi
 T3  §3.2 reddetme kodda YOK                    T    A9
 
-A1  a1/a2/a3 OLCULMEDEN secildi                A    §5.1/B, §5.1/K
+A1  a1/a2/a3 OLCULMEDEN secildi                A    §5.1/B, K, M
     (uye ORTALAMA, dis TOPLAM; ve OLCULDU:
      750. adimdan sonra kayip DUSERKEN sira
      KOTULESIYOR -- kazanc kod+duzen'den)
+    !! HESAPLANDI (§5.1/M): BUTUN olgulari
+    bilmek kayipta EN COK 0,3008 eder; a3 ile
+    donmeleri sondurmek 0,3012 eder. AYNI PARA.
+    Fiyat duzelmeden kapasite eklemek bosuna --
+    §12b bunun ilk kaniti.
 A12 d TEK BASINA OYNATILMAZ -- TAKAS           A    §5.1/L
     d=8->16 dili kazandi, durum ozne
     kimligini kaybetti (%35,1 -> %11,2).
