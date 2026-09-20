@@ -80,6 +80,46 @@ def bol(b: BR.Birim, satir: str):
     return ix, bilinmeyen, yeni
 
 
+def ters_tablo(b: BR.Birim) -> dict:
+    """birim dizisi -> KELIME.  `b.bolme`nin tersi.
+
+    Model ekleri ayri birim goruyor (`Yılmaz'ın` = Yılmaz +
+    -TAMLAYAN); ekranda okunmasi gereken sey Turkce cumle. Tabloyu
+    korpusun KENDI bolmesinden cikariyoruz -- elle ek kurali
+    yazsaydik ekranda gordugumuz sey modelin gordugu sey olmazdi.
+
+    Ayni birim dizisine birden cok kelime dusuyorsa korpusta SIK
+    olani secilir."""
+    t = {}
+    for w, p in b.bolme.items():
+        k = tuple(p)
+        f = min((b.say[b.ix[x]] for x in p if x in b.ix), default=0)
+        if k not in t or f > t[k][1]:
+            t[k] = (w, f)
+    return {k: v[0] for k, v in t.items()}
+
+
+def turkce(b: BR.Birim, ters: dict, dizi) -> str:
+    """Birim dizisini KELIMELERE geri topla. En uzun eslesme."""
+    d = [int(x) for x in dizi]
+    en = max((len(k) for k in ters), default=1)
+    cik, i = [], 0
+    while i < len(d):
+        for L in range(min(en, len(d) - i), 0, -1):
+            k = tuple(b.ad[x] for x in d[i:i + L])
+            if k in ters:
+                cik.append(ters[k])
+                i += L
+                break
+        else:
+            cik.append(b.ad[d[i]])
+            i += 1
+    s = " ".join(cik)
+    for n in (".", ",", "?", "!", ":", ";"):
+        s = s.replace(" " + n, n)
+    return s
+
+
 @torch.no_grad()
 def uret(m: M.Yol, b: BR.Birim, onek: list[int], n_yeni: int, isin: int,
          r: float, adim_adim: bool, yaz=print):
@@ -154,6 +194,7 @@ def main() -> int:
             return 1
     print("yukleniyor...  (%s)" % dev)
     b, m, a = yukle(by, ay, dev)
+    ters = ters_tablo(b)
     print("model_14   %d birim   D=%d d=%d K=%d   parametre %s"
           % (len(b), a["D_DURUM"], a["D_OKUMA"], a["K_KOD"],
              format(M.n_par(m), ",")))
@@ -238,7 +279,8 @@ def main() -> int:
             continue
         print("   birim     %s" % b.coz(onek))
         cik, puan = uret(m, b, onek, n_yeni, isin, r, adim)
-        print("   URETILEN  %s   (puan %.3f)" % (b.coz(cik), puan))
+        print("   URETILEN  %s" % turkce(b, ters, cik))
+        print("   birim     %s   (puan %.3f)" % (b.coz(cik), puan))
 
 
 if __name__ == "__main__":

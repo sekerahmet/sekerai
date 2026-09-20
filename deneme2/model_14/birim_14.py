@@ -172,18 +172,23 @@ def kur(ayar, v=None, yaz=print, onbellek: str | None = None) -> Birim:
     for s in metin:
         say.update(s.split())
 
-    # KORUNAN: ozel adlarin yuzey bicimleri. Ciplak -a/-e dusurulmustu
-    # ama "Kaya -> Kay" turu kazalar icin ikinci kemer.
-    _yuz = lambda a: [V.TR.get(w, w) for w in a.split("_")]
-    tohum = tuple(w for p in v.par_ad[0] for w in _yuz(p))
-    # !! `_trb`: buyuk/kucuk KORUNUR. `_tr` kucuge indirdigi icin ozel
-    # ad `Bolumu` ortak ad `bolumu`yu da koruyordu ve `bolumunun`
-    # bolunemiyordu.
-    korunan = frozenset(EK._trb(t) for t in tohum)
-    serbest = EK.serbest_kokler(say)     # korpusta TEK BASINA gecenler
+    # OZEL AD yuzeyleri -- HAM, cevrilmemis. `ek_14` bunlari ham
+    # dizeyle karsilastiriyor; `_trb` ile ASCII'ye indirilirse hicbiri
+    # eslesmez ve ozel adlar korunmaz.
+    # !! GRAFTAKI BUTUN adlarin butun parcalari. Once yalniz
+    # `par_ad[0]` alinıyordu; cok kelimeli adlarin kalan parcalari
+    # disarida kaliyordu.
+    _yuz = lambda a: [x for w in a.split("_") for x in V.TR.get(w, w).split()]
+    ozel = frozenset(w for t in V.TIPLER for a in V.kur(ayar.veri_tohum)["ad"][t]
+                     for w in _yuz(a))
 
-    kok = EK.kok_havuzu(say, tohum=tohum)
-    bolme = {w: EK.bol(w, kok, korunan=korunan, serbest=serbest) for w in say}
+    kok = EK.kok_havuzu(say)             # artik ELLE: KOK | BUTUN
+    bolme = {w: EK.bol(w, kok, korunan=ozel) for w in say}
+    iyi, eksik = EK.denetle(say, ozel=ozel)
+    assert not eksik, (
+        "%d kelime BILINEN KOK + BILINEN EK'e cozulemiyor -- `ek_14.KOK` "
+        "ya da `BUTUN` eksik: %s" % (len(eksik), sorted(eksik)[:10]))
+    korunan, serbest = ozel, frozenset()
     ad = sorted({x for p in bolme.values() for x in p})
     ix = {b: i for i, b in enumerate(ad)}
     dizi = np.fromiter((ix[x] for s in metin for w in s.split()

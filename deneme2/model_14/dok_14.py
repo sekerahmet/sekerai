@@ -8,7 +8,7 @@ Gerekce ayrica OLCULDU: bir gunde uc gosterim kusuru yalnizca METNE
 bakilarak bulundu, hicbirini sayisal bir kapi gostermedi. Sayi
 "makul" durabilir; metin duramaz.
 
-    python dok_14.py [klasor]        varsayilan: ../../veri
+    python dok_14.py [klasor]        varsayilan: model_14/veri
 
 DOSYALAR
     00_OZET.txt        kac birim, kac kelime, kac soru -- tek sayfa
@@ -46,7 +46,7 @@ def ac(kls, ad):
 
 def main() -> int:
     kls = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "..", "..", "veri")
+        os.path.dirname(os.path.abspath(__file__)), "veri")
     kls = os.path.abspath(kls)
     os.makedirs(kls, exist_ok=True)
     print("klasor:", kls)

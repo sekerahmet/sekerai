@@ -1,276 +1,247 @@
 # -*- coding: utf-8 -*-
-"""ek_14 -- TURKCE EK SOZLUGU ve kural tabanli bolme.
+"""ek_14 -- TURKCE BOLME.  KOK AYRI TOKEN, EK AYRI TOKEN.
 
-Kullanici karari, 20 Eylul 2026: *"biz bir sozluk kurmaliyiz ana mantik
-bu aslinda... ekleri biliyoruz turkce ozelinde bazi kurallar var. ekleri
-de ayri kelime yapabiliriz. noktalama isaretleri de birer konumu olur."*
+Kullanici, 20 Eylul 2026:
+  *"kok ayri token ek ayri token"*
+  *"ben bunlarin ayri token olmasini net istedim"*      (ek yuzeyleri)
+  *"token listesi cok kritik. bu token ureten yere gerekiyorsa
+   tek tek yazmak lazim."*
 
 Bolme OGRENILMIYOR, BILINIYOR. BPE denendi ve `Bahcelievler`i
 `B|ah|c|eli|ev|l|er` diye dogradi -- istatistik, dilbilgisi degil.
-Turkce ekler KAPALI bir kume; tahmin etmeye gerek yok.
 
-Her ek TEK bir birim olarak diziye yaziliyor; unlu uyumu varyantlari
-AYNI eke baglaniyor ("-in" ve "-un" ayni tamlayan eki).
+IKI SOZLUK, ELLE yazildi:
+    KOK      isim kokleri -- her biri BIR token
+    BUTUN    kalip sozcukler -- hic bolunmez
+ve EK YUZEYLERI.  Bunlarin disinda kalan kelime BUTUN birakilir ve
+`denetle()` onu RAPORLAR -- sessizce uydurma kok uretilmez.
 
-BILINEN SINIRLAR (20 Eylul, olculdu):
-  UNSUZ YUMUSAMASI YOK    `cocugunun` bolunmuyor: kok havuzunda `cocuk`
-                          var, soyulunca kalan `cocug`. Ikisi AYRI birim
-                          oluyor. Duzeltmek kok eslemesine k/g, p/b, t/d,
-                          c/c kurali eklemek demek.
-  IYELIK 1./2. KISI YOK   EKLER yalniz 3. kisi iyeligi tasiyor; bu yuzden
-                          `evlerimdekilerden` de bolunmuyor (`-im` yok).
-                          Korpusta gecmiyor, o yuzden simdilik sorun degil.
+!! EK TOKENI = GERCEK YUZEY.  `-ın` ile `-in` AYRI tokenler; unlu
+uyumu modelin GIRDISINDE. Onceki surum sekiz bicimi tek `-TAMLAYAN`e
+cokertiyordu. Kullanici ayni cokertmeyi 17 Eylul'de KARAKTER
+duzeyinde yakalamisti (tek <NIN> jetonu sekiz bicimi ortuyordu) ve
+orada duzeltilmisti; `ek_14` onu birim duzeyinde geri getirmisti.
+
+!! OZEL AD KENDILIGINDEN KORUNUR.  Ayri bir `korunan` listesine
+gerek yok: soyma ancak kalan BILINEN bir koke inerse kabul ediliyor.
+`Mersin` -> `Mers`+`in` olamaz cunku `Mers` kok degil. Onceki surum
+olcut tabanli bir kok havuzu kuruyordu ve o havuza `Mers`, `Gires`,
+`Fakul`, `Univers`, `ogrencis`, `kurucus`, `cocug`, `sehr` gibi
+UYDURMA kokler giriyordu.
+
+MORFOFONOLOJI -- kok sozlugu ACIK oldugu icin guvenle uygulanabiliyor:
+    YUMUSAMA   cocuk + u  -> cocugu     TOKEN `cocuk` kalir
+    DUSME      sehir + i  -> sehri      TOKEN `sehir` kalir
+    TAMPON     anne + si                (-s-/-n-/-y- yardimci unsuz,
+                                         ek yuzeyinin kendisinde)
+BUYUK/KUCUK:  ortak ad kucuge iner (`Kisidir` -> `kişi -dir`), ozel ad
+buyuk kalir -- cunku ozel ad zaten coz'e girmez.
 """
 from __future__ import annotations
 
-import collections
-import unicodedata
-
-# --- EK SOZLUGU. Sira ONEMLI: uzun bicim once denenir.
-#     Her satir: (ek_adi, yuzey bicimleri)  -- yuzeyler AYNI eke baglanir.
+# =====================================================================
+# 1  EK YUZEYLERI.  Her yuzey AYRI TOKEN; kategori yalniz SIRA icin.
+# =====================================================================
 EKLER = [
     ("ILGI",     ["ki"]),
     ("AYRILMA",  ["ndan", "nden", "dan", "den", "tan", "ten"]),
     ("BULUNMA",  ["nda", "nde", "da", "de", "ta", "te"]),
-    ("TAMLAYAN", ["nin", "nin", "nun", "nun", "in", "in", "un", "un"]),
-    ("BILDIRME", ["dir", "dir", "dur", "dur", "tir", "tir", "tur", "tur"]),
-    ("YONELME",  ["ya", "ye", "na", "ne"]),
-    #  !! CIPLAK "a"/"e" DUSURULDU: ozel adin son unlusunu
-    #  yiyordu (Kaya->Kay, Manisa->Manis, baba->bab) ve
-    #  korpusta ciplak yonelme zaten gecmiyor.
-    ("IYELIK",   ["si", "si", "su", "su", "i", "i", "u", "u"]),
+    ("TAMLAYAN", ["nın", "nin", "nun", "nün", "ın", "in", "un", "ün"]),
+    ("BILDIRME", ["dır", "dir", "dur", "dür", "tır", "tir", "tur", "tür"]),
+    ("YONELME",  ["ya", "ye", "na", "ne", "a", "e"]),
+    #  Ciplak -a/-e ONCEDEN KAPALIYDI: ozel adin son unlusunu yiyordu
+    #  (Kaya->Kay, Manisa->Manis). Artik guvenli -- kalan BILINEN bir
+    #  koke inmezse soyma kabul edilmiyor.
+    ("IYELIK",   ["sı", "si", "su", "sü", "ı", "i", "u", "ü"]),
     ("COGUL",    ["lar", "ler"]),
 ]
 NOKTALAMA = ".,?!:;"
 
-# --- EK SIRASI (morfotaktik).  Turkce'de ekler SABIT bir sirada gelir:
-#       kok + COGUL + IYELIK + DURUM + ILGI + BILDIRME
-# Soldan saga KESIN ARTAN olmali. Bu bir dilbilgisi kurali, hile degil.
-# OLCULDU 20 Eylul: kural olmadan `bolumunun` -> bolum|TAMLAYAN|TAMLAYAN
-# diye ayrisiyordu; Turkce'de arka arkaya iki tamlayan YOKTUR. Dogrusu
-# bolum|IYELIK|TAMLAYAN.
+# EK SIRASI (morfotaktik):  kok + COGUL + IYELIK + DURUM + ILGI + BILDIRME
+# Soldan saga KESIN ARTAN. OLCULDU: kural olmadan `bolumunun` ->
+# bolum|TAMLAYAN|TAMLAYAN cikiyordu; Turkce'de iki tamlayan ard arda yok.
 SIRA = {"COGUL": 1, "IYELIK": 2,
         "AYRILMA": 3, "BULUNMA": 3, "TAMLAYAN": 3, "YONELME": 3,
         "ILGI": 4, "BILDIRME": 5}
-#  !! `-ki`den sonra dongu yeniden baslar (`evdekiler`); bu hal
-#  desteklenmiyor. Korpusta gecmiyor.
 
-# --- KAPALI SINIF: sozlukte BUTUN duran kelimeler, asla bolunmez.
-# Kullanicinin ilkesi: bunlar zaten bildigimiz kelimeler. Olcut tabanli
-# havuz `hangi`yi `hang`+IYELIK, `musun`u `mus`+TAMLAYAN diye bozmustu.
-KAPALI = {
-    "hangi", "hangisi", "kim", "ne", "neresi", "nasil", "kac",
-    "mu", "mi", "mu", "mu", "musun", "midir",
-    "bir", "bu", "su", "o", "boyle", "soyle", "oyle",
-    "gibi", "ile", "icin", "gore", "kadar", "olarak", "peki",
-    "ve", "veya", "ama", "fakat", "cunku", "yani", "de", "da",
-    "biliyor", "bilinir", "bilindigi", "biliyoruz", "kayitlidir",
-    "kayitlarda", "kaynaklarda", "hakkinda", "yasadigi", "soyler",
-    "misin", "acaba", "diye", "yok", "var",
-}
-# --- BILINEN KOKLER.  `EKLER` ve `KAPALI` ile AYNI KATEGORIDE bilgi:
-# sozluk bilgisi. Neden gerekli: `annesi`nin iki ayrismasi da korpus
-# icinden AYIRT EDILEMEZ -- `anne` ve `annes` TAM OLARAK ayni
-# kelimelerde geciyor (annesi, annesinin), yani frekans, serbestlik,
-# kapsama, unlu uyumu, tampon unsuz -- hicbiri ayirmiyor. `kardesi`nin
-# dogru cikmasi TESADUFTU (uzun olan dogruydu); `annesi`de uzun olan
-# YANLIS. Ayirt eden tek sey hangisinin GERCEK kelime oldugu.
-# Kullanici, 20 Eylul: *"Anne ve si kardes i bunlar boyle ayrilir."*
-# !! GENEL bir sistemde burasi bir SOZLUK olurdu. Bizim korpusta
-# iliski ve akrabalik kokleri; hepsi `veri_14.SEMA`nin anahtarlarindan.
-KOK_BILINEN = {
-    "anne", "baba", "kardes", "cocuk", "arkadas", "danisman", "ogrenci",
-    "hoca", "rektor", "dekan", "baskan", "vali", "kurucu", "yazar",
-    "bolum", "fakulte", "universite", "sehir", "bolge", "ders",
-    "memleket", "tez", "konu", "onkosul", "yer",
+# =====================================================================
+# 2  KOK SOZLUGU -- ELLE.  Korpustaki her ortak ad buradan gelir.
+# =====================================================================
+KOK = {
+    # akrabalik ve roller -- veri_14.SEMA iliskilerinin kokleri
+    "anne", "baba", "kardeş", "çocuk", "arkadaş", "danışman", "öğrenci",
+    "hoca", "rektör", "dekan", "başkan", "vali", "kurucu", "yazar",
+    # tipler ve nesneler
+    "bölüm", "fakülte", "üniversite", "şehir", "bölge", "ders",
+    "memleket", "tez", "konu", "koşul", "önkoşul", "yer", "kişi", "il",
+    "kayıt", "kaynak", "şey", "ön", "bilgi",
 }
 
-MIN_KOK = 4          # daha kisa govde kok sayilmaz.
-#  OLCULDU: 3'te `kardesi` -> kar+BULUNMA+IYELIK diye ucе
-#  bolunuyordu; 5'te `annesi` -> annes+IYELIK (kok yanlis).
-#  4'te baba/anne/kardes dogru cikiyor.
+# KALIP SOZCUKLERI -- hic bolunmez. Olcut tabanli havuz `hangi`yi
+# `hang`+IYELIK, `musun`u `mus`+TAMLAYAN diye bozmustu.
+BUTUN = {
+    "hangi", "hangisi", "kim", "ne", "neresi", "nasıl", "kaç",
+    "mu", "mi", "mü", "mı", "musun", "misin", "mıdır", "midir",
+    "bir", "bu", "şu", "o", "böyle", "şöyle", "öyle", "şunu",
+    "gibi", "ile", "için", "göre", "kadar", "olarak", "peki", "merak",
+    "ve", "veya", "ama", "fakat", "çünkü", "yani", "de", "da", "ki",
+    "biliyor", "bilinir", "bilindiği", "biliyoruz", "bilmiyorum",
+    "kayıtlıdır", "hakkında", "yaşadığı", "söyler", "acaba", "diye",
+    "yok", "var", "dersem", "ediyorum", "ekleyelim", "sorayım",
+    "tanımıyorum", "okutulan", "olduğu", "olmaz", "verdiği", "konulu",
+    "okuyanlardan", "olanlardan", "yaşayanlardan",
+    "bilinen", "adlı", "bağlı", "başka", "biri",
+}
 
+# =====================================================================
+# 3  MORFOFONOLOJI.  Kok TOKENI degismez; degisen yalniz ESLESME.
+# =====================================================================
+YUMUSAMA = {"k": "ğ", "p": "b", "t": "d", "ç": "c"}
+#   cocuk + u -> cocugu.  Son unsuz yumusar, TOKEN `cocuk` kalir.
 
+# Unlu dusmesi: ELLE, cunku kural degil SOZLUK bilgisi
+# (sehir -> sehr, ama demir -> demir).
+DUSME = {"şehir": "şehr", "oğul": "oğl", "burun": "burn", "ağız": "ağz",
+         "akıl": "akl", "isim": "ism", "resim": "resm", "beyin": "beyn"}
 
-def _trb(s: str) -> str:
-    """Turkce -> ASCII, BUYUK/KUCUK KORUNARAK.
-
-    `korunan` (ozel ad) eslemesi buyuk harfe DUYARLI olmali: `_tr`
-    kucuk harfe indirdigi icin ozel ad `Bolumu` ortak ad `bolumu`yu da
-    koruyordu ve `bolumunun` -> bolumu|TAMLAYAN diye ayrisiyordu."""
-    d = {"ı": "i", "İ": "I", "ş": "s", "Ş": "S",
-         "ğ": "g", "Ğ": "G", "ü": "u", "Ü": "U",
-         "ö": "o", "Ö": "O", "ç": "c", "Ç": "C"}
-    return "".join(d.get(c, c) for c in s)
-
-
-def _tr(s: str) -> str:
-    """Turkce harfleri ASCII'ye indirger -- YALNIZ eslestirme icin."""
-    d = {"\u0131": "i", "\u0130": "i", "\u015f": "s", "\u015e": "s",
-         "\u011f": "g", "\u011e": "g", "\u00fc": "u", "\u00dc": "u",
-         "\u00f6": "o", "\u00d6": "o", "\u00e7": "c", "\u00c7": "c"}
-    return "".join(d.get(c, c) for c in s).lower()
-
-
-# yuzey -> (ek_adi, uzunluk).  Uzun bicimler once denensin diye sirali.
-_YUZEY = []
+_KAT = {}
 for _ad, _bs in EKLER:
     for _b in _bs:
-        _YUZEY.append((_b, _ad))
-_YUZEY.sort(key=lambda x: -len(x[0]))
+        assert _KAT.setdefault(_b, _ad) == _ad, "yuzey iki kategoride: " + _b
+_YUZEY = sorted(((b, a) for a, bs in EKLER for b in bs),
+                key=lambda x: -len(x[0]))
 
 
-def bol(kelime, kokler, en_cok=4, korunan=frozenset(), serbest=frozenset()):
-    """kelime -> [kok, -EK, -EK, ..., noktalama].
+def _kucuk(s: str) -> str:
+    """Turkce'ye dogru kuculme:  I -> ı,  İ -> i."""
+    return s.replace("I", "ı").replace("İ", "i").lower()
 
-    Ek ancak GERIDE KALAN da kok sozlugunde varsa soyulur; yoksa
-    `anne` -> `ann` + YONELME diye bozulurdu. Kok sozlugu asagidaki
-    `kok_havuzu` ile kurulur, elle yazilmaz."""
+
+def _govde_bicimleri(kok: str) -> set:
+    """Bir kokun ek alirken girebilecegi butun govde bicimleri."""
+    g = {kok}
+    if kok in DUSME:
+        g.add(DUSME[kok])
+    if kok and kok[-1] in YUMUSAMA:
+        g.add(kok[:-1] + YUMUSAMA[kok[-1]])
+    return g
+
+
+_GOVDE = {}          # govde bicimi -> KOK TOKENI
+for _k in KOK:
+    for _g in _govde_bicimleri(_k):
+        _GOVDE[_g] = _k
+
+
+def _cek(k: str, ozel, hak: int, ozel_ac: bool):
+    """Ek soyarak coz.  `ozel_ac` ise OZEL AD da kok sayilir."""
+    kk = _kucuk(k)
+    if kk in BUTUN:
+        return [kk]
+    if kk in _GOVDE:
+        return [_GOVDE[kk]]
+    if ozel_ac and k in ozel:
+        return [k]
+    if hak <= 0:
+        return None
+    en_iyi = None
+    for yuzey, ad in _YUZEY:
+        if len(kk) <= len(yuzey) or not kk.endswith(yuzey):
+            continue
+        alt = _cek(k[:len(k) - len(yuzey)], ozel, hak - 1, ozel_ac)
+        if not alt:
+            continue
+        ic = [x[1:] for x in alt[1:]]
+        if ic and SIRA[ad] <= SIRA[_KAT[ic[-1]]]:          # MORFOTAKTIK
+            continue
+        # !! KALIP SOZCUK YALNIZ BILDIRME ALIR.  `kimdir` = kim|dir
+        # dogru, ama `Kimya` = kim|ya DEGIL; `Oya` = o|ya DEGIL.
+        # Ikisi de ozel ad ve bolucu onlari parcaliyordu (olculdu,
+        # token listesinde gorundu).
+        if _kucuk(alt[0]) in BUTUN and ad != "BILDIRME":
+            continue
+        aday = alt + ["-" + yuzey]
+        # EN AZ EK, esitse EN UZUN KOK:  `kardeşi` -> kardeş|i.
+        if en_iyi is None or (len(aday), -len(aday[0])) < (len(en_iyi),
+                                                           -len(en_iyi[0])):
+            en_iyi = aday
+    return en_iyi
+
+
+def _coz(k: str, ozel=frozenset(), hak: int = 4):
+    """k -> [kok, -ek, ...] ya da None.  UC ASAMA, sirasi ONEMLI.
+
+    1  YALNIZ ORTAK KOK ile ayris.  `Bölgesi` -> bölge|si olmali
+       (kullanici, 20 Eylul) -- ozel ad listesinde olsa bile.
+    2  Kelimenin KENDISI ozel adsa BUTUN birak.  `Osmaniye` boyle
+       korunuyor; yoksa `Osman`+`i`+`ye` diye parcalaniyordu cunku
+       `Osman` da bir ozel ad.
+    3  Ozel adi KOK sayarak ayris.  `Mersin'in` -> Mersin|in.
+       `Mers` kok olmadigi icin daha fazla bolunemez."""
+    r = _cek(k, ozel, hak, False)
+    if r:
+        return r
+    if k in ozel:
+        return [k]
+    return _cek(k, ozel, hak, True)
+
+
+def bol(kelime, kokler=None, en_cok=4, korunan=frozenset(),
+        serbest=frozenset()):
+    """kelime -> [kok, -ek, ..., noktalama].
+
+    `kokler` / `serbest` ARTIK KULLANILMIYOR -- kok sozlugu ELLE
+    (KOK / BUTUN); imza geriye uyumluluk icin duruyor. `korunan` da
+    gerekmiyor: bilinmeyen kok butun kaliyor (bkz. `_coz`)."""
     nok = []
     k = kelime
     while k and k[-1] in NOKTALAMA:
         nok.insert(0, k[-1])
         k = k[:-1]
-    k = k.replace("'", "")          # Turkce yazim ozel ad ekini zaten ayirir
-    if _tr(k) in KAPALI or _trb(k) in korunan:  # sozlukte BUTUN duruyor
-        return [k] + nok
-    coz = _coz(k, kokler, korunan, en_cok, serbest)
-    return (list(coz) if coz else [k]) + nok
+    k = k.replace("'", "")
+    if not k:
+        return nok
+    coz = _coz(k, korunan)
+    return (coz if coz else [k]) + nok
 
 
-def _puan(coz, serbest):
-    """Ayrismalari siralar:
-        1  EK SAYISI        cok ekli ayrisma tercih edilir
-        2  KOK BILINEN MI   sozluk bilgisi -- `anne` evet, `annes` hayir
-        3  KOK SERBEST MI   korpusta tek basina geciyor mu
-        4  kok uzunlugu
+def denetle(kelimeler, ozel=frozenset()):
+    """Her kelime BILINEN KOK + EK'e cozuluyor mu.
 
-    !! KOK UZUNLUGU TEK BASINA YANLIS OLCUT. `kardesi` icin uzun kok
-    dogru (kardes|i), `annesi` icin YANLIS (annes|i cikiyor, dogrusu
-    anne|si). Ayirt eden sey kokun korpusta TEK BASINA gecip
-    gecmedigi: `anne` ve `kardes` geciyor, `annes` ve `karde`
-    gecmiyor. Olcut korpustan, elle yazilmiyor."""
-    k = _tr(coz[0])
-    return (len(coz), k in KOK_BILINEN, k in serbest, len(coz[0]))
-
-
-def _coz(k, kokler, korunan, kalan_hak, serbest=frozenset()):
-    """k -> [kok, -EK, ...] ya da None.  ILERI BAKISLI.
-
-    !! ONCEKI HAL TEK EK SOYABILIYORDU. Kosul "kalan KOK olmali" idi;
-    `kardesinin`de `nin` soyulunca kalan `kardesi` cikiyor, o da kok
-    degil ARA BICIM, ve soyma reddediliyordu. Sonuc: cok ekli her
-    kelime BUTUN kaliyordu -- ve `kardesinin` iki adimli sorunun tam
-    kelimesi. `en_cok` dongusu pratikte olu idi.
-
-    Simdi kalan KOKE INDIRGENEBILIYORSA soyuluyor; indirgeme ozyineli.
-
-    !! EN DERIN AYRISMA secilir, ilk bulunan DEGIL. Ilk surumde
-    "k'nin kendisi kokse hic bolme" diye erken donus vardi ve
-    `kok_havuzu` ara bicimleri de kok sayiyor (`annesi`ye iki kelime
-    indirgeniyor, yani `annesi` bir kok). Sonuc: `annesi` BUTUN
-    kaliyordu, akis 15,2M'den 14,1M'e DUSUYORDU ve -IYELIK ilk bese
-    giremiyordu. Kullanicinin verdigi ayrim `anne|si` tam o kayipti.
-
-    SECIM: once EN COK ek, esitse EN UZUN KOK. Uzun kok tie-break'i
-    olmadan `kardesi` -> karde|si cikiyordu ('si' iki harf, 'i' bir
-    harf; ikisi de derinlik 2). Dogrusu kardes|i.
-
-    Ve MORFOTAKTIK: ek sirasi `SIRA`ya uymali (bkz. yukari)."""
-    t = _tr(k)
-    if t in KAPALI or _trb(k) in korunan:
-        return [k]                       # BUTUN durur, uzerinden soyulmaz
-    en_iyi = [k] if t in kokler else None
-    if kalan_hak > 0:
-        for yuzey, ad in _YUZEY:
-            if len(k) <= len(yuzey) + 1 or not t.endswith(yuzey):
-                continue
-            alt = _coz(k[:-len(yuzey)], kokler, korunan, kalan_hak - 1,
-                       serbest)
-            if not alt:
-                continue
-            ic = [x for x in alt[1:]]                   # icteki ekler
-            if ic and SIRA[ad] <= SIRA[ic[-1][1:]]:     # MORFOTAKTIK
-                continue
-            aday = alt + ["-" + ad]
-            if en_iyi is None or _puan(aday, serbest) > _puan(en_iyi, serbest):
-                en_iyi = aday
-    return en_iyi
+    `ozel` OZEL AD yuzeyleri -- onlarin butun kalmasi DOGRU.
+    Doner: (cozulen, BUTUN kalan ve ozel de OLMAYAN) -- ikincisi
+    sozluge eklenmesi gereken koklerin listesi."""
+    iyi, eksik = {}, {}
+    for w in kelimeler:
+        p = bol(w, korunan=ozel)
+        c = [x for x in p if x not in NOKTALAMA]
+        if c and (c[0] in KOK or c[0] in BUTUN):
+            iyi[w] = p
+        elif c and c[0] in ozel:
+            iyi[w] = p
+        else:
+            eksik[w] = p
+    return iyi, eksik
 
 
-def _govdeler(w):
-    """Bir kelimenin butun olasi govdeleri (ek zinciri soyularak)."""
-    while w and w[-1] in NOKTALAMA:
-        w = w[:-1]
-    w = w.replace("'", "")
-    out, yig = set(), [w]
-    for _ in range(4):
-        yeni = []
-        for k in yig:
-            for yuzey, _ad in _YUZEY:
-                if len(k) > len(yuzey) + 1 and _tr(k).endswith(yuzey):
-                    g = k[:-len(yuzey)]
-                    out.add(_tr(g))
-                    yeni.append(g)
-        yig = yeni
-    return out
+# --- ESKI ARAYUZ.  `birim_14` ve `olcme_14` bunlari cagiriyor. -------
+def kok_havuzu(say, tohum=(), en_az=2):
+    """ARTIK OLCUTE BAKMIYOR -- kok sozlugu ELLE yazildi."""
+    return set(KOK) | set(BUTUN)
 
 
 def serbest_kokler(say):
-    """Korpusta TEK BASINA (eksiz) gecen kelimeler.
-
-    `_puan`in ikinci olcutu. Kok havuzu ara bicimleri de kabul ediyor
-    (`annes`, `karde`); bu kume onlari ayikliyor."""
-    cik = set()
-    for w in say:
-        while w and w[-1] in NOKTALAMA:
-            w = w[:-1]
-        cik.add(_tr(w.replace("'", "")))
-    return cik
+    return frozenset()
 
 
-def kok_havuzu(say, tohum=(), en_az=2):
-    # `tohum` = BILINEN ozel adlar. Hem kok sayilir hem KORUNUR:
-    # uzerinden ek soyulmaz. Yoksa 'Kaya' -> 'Kay'+YONELME olur.
-    """KOK SOZLUGU -- elle yazilmaz, OLCUTLE kurulur.
-
-    Bir govde kok sayilir eger:
-      (a) `tohum`daysa  -- bilinen ozel adlar (varlik parcalari), ya da
-      (b) EN AZ `en_az` FARKLI kelime ona indirgeniyorsa.
-
-    (b) klasik denetimsiz morfoloji olcutu: `bolumu` ve `bolumunun`
-    ayni govdeyi paylasiyorsa `bolum` bir koktur. Tek bir kelimeden
-    govde uydurmayi engelliyor."""
-    kokler = {_tr(t) for t in tohum} | KAPALI | KOK_BILINEN
-    aday = collections.Counter()
-    for w in say:
-        for g in _govdeler(w):
-            if g not in kokler:      # KORUNAN adin govdesi aday DEGIL
-                aday[g] += 1
-    kokler |= {g for g, n in aday.items()
-               if n >= en_az and len(g) >= MIN_KOK}
-    # eksiz gecen kelimeler de koktur
-    for w in say:
-        s_ = w
-        while s_ and s_[-1] in NOKTALAMA:
-            s_ = s_[:-1]
-        s_ = s_.replace("'", "")
-        if s_ and not any(_tr(s_).endswith(y) and _tr(s_[:-len(y)]) in kokler
-                          for y, _ in _YUZEY if len(s_) > len(y) + 1):
-            kokler.add(_tr(s_))
-    return kokler
+def _tr(s: str) -> str:
+    d = {"ı": "i", "İ": "i", "ş": "s", "Ş": "s", "ğ": "g", "Ğ": "g",
+         "ü": "u", "Ü": "u", "ö": "o", "Ö": "o", "ç": "c", "Ç": "c"}
+    return "".join(d.get(c, c) for c in s).lower()
 
 
-def dokum(say, kokler, korunan=frozenset()):
-    """Bolmenin KAPSAMASI -- kac kelime ayristi, kok/ek dagilimi."""
-    kok_say = collections.Counter()
-    ek_say = collections.Counter()
-    ayrisan = 0
-    for w, n in say.items():
-        p = bol(w, kokler, korunan=korunan, serbest=serbest_kokler(say))
-        if len(p) > 1:
-            ayrisan += 1
-        kok_say[p[0]] += n
-        for x in p[1:]:
-            ek_say[x] += n
-    return ayrisan, kok_say, ek_say
+def _trb(s: str) -> str:
+    """Turkce -> ASCII, BUYUK/KUCUK KORUNARAK."""
+    d = {"ı": "i", "İ": "I", "ş": "s", "Ş": "S", "ğ": "g", "Ğ": "G",
+         "ü": "u", "Ü": "U", "ö": "o", "Ö": "O", "ç": "c", "Ç": "C"}
+    return "".join(d.get(c, c) for c in s)
