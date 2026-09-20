@@ -557,14 +557,35 @@ L  VARLIK BIRIMLERI DURUMU OYNATMIYOR  --  BILGI=0'IN MEKANIZMASI
    Yani a3 EN SEYREK birimlerde kiyaslanabilir, VARLIK birimlerinde
    BASKIN DEGIL. Frekansla monotonluk gercek ama sebebi a3 degil.
 
-   NIYE BUYUMUYOR -- HIPOTEZ, sinanmadi: kayip zaten dallanma
-   tabaninda (uye 0,8692, k_etkin 3,13) ve bir ad okunduktan sonra
-   gelecek birim KIM OLURSA OLSUN `-ın` / `-dır`. Yani hedefi
-   ayirt etmek icin R[ad]'in AYIRT EDICI olmasi GEREKMIYOR; kimlik
-   yalniz CEVAP konumunda is goruyor, o da seyrek ve zaten belirsiz.
-   Amac fonksiyonu varliklari ayirt etmeyi HIC ISTEMIYOR olabilir.
-   SINAMA: a3 = 0 ile tek degiskenli kosu (2,3 dk) -- varlik |a| ve
-   kendine donme orani degisiyor mu.
+   NIYE BUYUMUYOR -- BIR HIPOTEZ KURDUM VE MATEMATIK CURUTTU.
+   Hipotez: "amac fonksiyonu varliklari ayirt etmeyi ISTEMIYOR; bir
+   ad okunduktan sonra gelecek birim kim olursa olsun `-ın`/`-dır`."
+   Bu VERININ ozelligi, yani SAYILIR -- egitim gerekmez. Sayildi
+   (21 Eylul, 15,9 M gecis):
+       H(ardil | girdi)          VARLIK 2,434 bit  -> k_etkin 5,41
+                                 en sik ardilin payi %44,5
+       ardil bir AD MI           girdi VARLIK -> ardil VARLIK %56,4
+       iki AYRI adin ardil
+       dagilimi ortusmesi        0,3308 -> AYIRT EDICI bilgi %66,9
+   HIPOTEZ YANLIS. Ad okunduktan sonra ardil belirsiz, kimlik
+   uretilmesi gereken konumlar seyrek degil (yarisindan cok), ve iki
+   ad birbirinden cok farkli devam ediyor. R[ad]'in ayirt edici
+   olmasi icin BOL gradyan basinci VAR.
+   (Bu sayim `a3 = 0` kosusunu da gereksiz kildi.)
+
+   GERIYE KALAN, ve dort ayri izin ciktigi TEK yer:
+       AMAC FONKSIYONU   ayrimi ISTIYOR     %66,9 ayirt edici bilgi
+       TAM DURUM         ayrimi KORUYOR     |za-zb| 0,3164 SABIT (§2.1)
+       OKUMA             ayrimi KAYBEDIYOR  |Pza-Pzb| 0,2151 -> 0,0525
+       SONUC             varlik donmesi okunabilir kismi 23,5°
+                         oynatiyor, komsu araligi 30,5° -> hucreden
+                         cikmiyor -> %73 kendine donuyor
+   Basinc var, tasiyici var, OKUMA TASIMIYOR. §4.1'in `!!` blogu
+   bunu zaten yazmisti: gecirilen miktar SERBEST bir parametre ve
+   onu pinleyen tek sey kayip; §5'in kaybi pinlemiyor.
+   `uye` yalniz Pz'nin YONUNE bakiyor, |Pz|'ye DEGIL -- o yuzden
+   egitim |Pz|'yi 0,96'dan 0,18'e indirirken kayip itiraz etmiyor.
+   ACIK -- care karari verilmedi.
 
    !! CAPA BUNUN SEBEBI DEGIL. Ayni uretimlerde capa HIC tetiklenmedi
    (s en fazla 0,89, esik 0,969) -- §3.1'in "emici durum"u DEGIL.

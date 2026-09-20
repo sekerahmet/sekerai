@@ -349,11 +349,25 @@ MEKANIZMA (GEOMETRIK, olculdu)
               EN SEYREK cekme 2,6e-04 / itme 1,7e-04 = 1,5 kat
           a3 varlik birimlerinde BASKIN DEGIL.
 
-          HIPOTEZ (sinanmadi): amac fonksiyonu varliklari ayirt
-          etmeyi HIC ISTEMIYOR. Bir ad okunduktan sonra gelecek
-          birim kim olursa olsun `-ın`/`-dır`; kimlik yalniz CEVAP
-          konumunda is goruyor, o da seyrek ve zaten belirsiz.
-          SINAMA: a3 = 0 ile tek degiskenli kosu (2,3 dk).
+          HIPOTEZ KURDUM, MATEMATIK CURUTTU.  Kullanici sordu:
+          *"once tezini matematikle sinadin mi yoksa deneme
+            yanilma mi olacak"* -- sinamamistim. Sinadim.
+          Tez VERININ ozelligi oldugu icin SAYILIR (15,9 M gecis):
+              H(ardil|girdi) VARLIK  2,434 bit -> k_etkin 5,41
+              girdi VARLIK -> ardil VARLIK     %56,4
+              iki ayri adin ardil ortusmesi    0,3308
+                                    -> ayirt edici bilgi %66,9
+          TEZ YANLIS. Basinc VAR. Ve bu, planlanan `a3 = 0`
+          kosusunu GEREKSIZ kildi -- matematik bir kosu tasarruf etti.
+
+          GERIYE KALAN (dort izin ciktigi tek yer):
+              amac fonksiyonu ayrimi ISTIYOR      %66,9
+              tam durum ayrimi KORUYOR            |za-zb| sabit
+              OKUMA ayrimi KAYBEDIYOR             |Pza-Pzb| 0,2151->0,0525
+          `uye` yalniz Pz'nin YONUNE bakiyor, |Pz|'ye DEGIL.
+          Egitim |Pz|'yi 0,96 -> 0,18 indirirken kayip itiraz etmiyor.
+          -> §5.1/L, §13/A10.  Sonraki karar: kayba okunabilir
+             kutleyi tutan bir terim. ONCE KAGITTA sinanacak.
 
 ELENEN ACIKLAMALAR
           capa emici durumu   HAYIR: uretimde capa HIC atesmiyor
