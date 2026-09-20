@@ -161,7 +161,7 @@ def egit(mdl, X, Y, epok=30, bs=4096, lr=3e-3, lam=0.5, dev="cuda",
             op.zero_grad(set_to_none=True)
             k.backward()
             op.step()
-            tot += float(ce) * len(b)       # CE, ceza HARIC -- bit okunabilsin
+            tot += ce.item() * len(b)       # CE, ceza HARIC -- bit okunabilsin
         if (t + 1) % max(1, epok // 6) == 0 or t == 0:
             ek = f"   tutulan {bit(mdl, Xd, Yd, dev):.3f}" if Xd is not None else ""
             yaz(f"    epok {t+1:>4}   bit/kelime {tot/N/math.log(2):.4f}"

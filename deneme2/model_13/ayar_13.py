@@ -66,8 +66,13 @@ D_BOYUT = 9          # birim basina koordinat boyutu.
 #                      Belge D=3,8,16,32 olctu ve BUYUDUKCE KOTULESIYOR:
 #                      uzaklikla puanlamada yuksek boyutta butun noktalar
 #                      birbirine esit uzaklasiyor. Tek yuvada DD=D.
-K_PENCERE = 6        # son K birim. Sozlukte kelime basina ~2 birim var,
-#                      yani 6 birim ~ 3 kelime -- belgenin k=3'u.
+K_PENCERE = 16       # son K birim.
+#  !! 6 IDI VE YANLISTI. Sorular 8-12 birim; K=6'da OZNE PENCEREDEN
+#  CIKIYORDU. `Cem Yildiz'in kardesinin bolumu hangisidir?` 12 birim,
+#  model son 6'sini goruyordu: [-TAMLAYAN bolum -IYELIK hangisi
+#  -BILDIRME ?] -- KIMIN soruldugunu hic gormuyordu. Olculdu (20 Eylul):
+#  tip 6/6 dogru, kimlik 0/6. Beklenen sonuc; model dogru tipte
+#  RASTGELE bir varlik veriyordu, elinde baska bilgi yoktu.
 M_BILESEN = 4        # hedef nokta sayisi. Belge 8 ve 16'yi denemis,
 #                      fayda etmemis. Baglam iki yone acikken tek nokta
 #                      ikisinin ortasina duser.
@@ -75,7 +80,10 @@ H_GIZLI = 96         # yonlendirme aginin tek gizli katmani
 LAMBDA = 0.5         # kapanma cezasi. Belgede olmadan iki adim %43.
 LR = 3e-3            # Adam
 BATCH = 8192         # GPU. Belgede 256 (numpy/CPU).
-EPOK = 20
+EPOK = 5
+#  !! 20 IDI. Kayip 3. epokta duzlesti (1.932 -> 1.929) ve 18'de yon
+#  degistirdi (1.895 -> 1.897). 20 epok ayrica CLAUDE.md kural 1'in
+#  20.000 adim sinirini ve ayar_11'in 4<EPOK<15 bandini asiyordu.
 
 # --- KAPILAR: yalniz BU KOLUN dogruladigi seyler ----------------------
 assert AYAR.veri_ad == "veri_13", "kol KENDI veri modulunu okur"

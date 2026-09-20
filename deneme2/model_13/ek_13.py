@@ -26,7 +26,10 @@ EKLER = [
     ("BULUNMA",  ["nda", "nde", "da", "de", "ta", "te"]),
     ("TAMLAYAN", ["nin", "nin", "nun", "nun", "in", "in", "un", "un"]),
     ("BILDIRME", ["dir", "dir", "dur", "dur", "tir", "tir", "tur", "tur"]),
-    ("YONELME",  ["ya", "ye", "na", "ne", "a", "e"]),
+    ("YONELME",  ["ya", "ye", "na", "ne"]),
+    #  !! CIPLAK "a"/"e" DUSURULDU: ozel adin son unlusunu
+    #  yiyordu (Kaya->Kay, Manisa->Manis, baba->bab) ve
+    #  korpusta ciplak yonelme zaten gecmiyor.
     ("IYELIK",   ["si", "si", "su", "su", "i", "i", "u", "u"]),
     ("COGUL",    ["lar", "ler"]),
 ]
@@ -45,7 +48,10 @@ KAPALI = {
     "kayitlarda", "kaynaklarda", "hakkinda", "yasadigi", "soyler",
     "misin", "acaba", "diye", "yok", "var",
 }
-MIN_KOK = 3          # daha kisa govde kok sayilmaz
+MIN_KOK = 4          # daha kisa govde kok sayilmaz.
+#  OLCULDU: 3'te `kardesi` -> kar+BULUNMA+IYELIK diye ucе
+#  bolunuyordu; 5'te `annesi` -> annes+IYELIK (kok yanlis).
+#  4'te baba/anne/kardes dogru cikiyor.
 
 
 
@@ -65,7 +71,7 @@ for _ad, _bs in EKLER:
 _YUZEY.sort(key=lambda x: -len(x[0]))
 
 
-def bol(kelime, kokler, en_cok=4):
+def bol(kelime, kokler, en_cok=4, korunan=frozenset()):
     """kelime -> [kok, -EK, -EK, ..., noktalama].
 
     Ek ancak GERIDE KALAN da kok sozlugunde varsa soyulur; yoksa
@@ -77,7 +83,7 @@ def bol(kelime, kokler, en_cok=4):
         nok.insert(0, k[-1])
         k = k[:-1]
     k = k.replace("'", "")          # Turkce yazim ozel ad ekini zaten ayirir
-    if _tr(k) in KAPALI:            # sozlukte BUTUN duruyor
+    if _tr(k) in KAPALI or _tr(k) in korunan:   # sozlukte BUTUN duruyor
         return [k] + nok
     ekler = []
     for _ in range(en_cok):
@@ -85,7 +91,8 @@ def bol(kelime, kokler, en_cok=4):
         for yuzey, ad in _YUZEY:
             if len(k) > len(yuzey) + 1 and _tr(k).endswith(yuzey):
                 kalan = k[:-len(yuzey)]
-                if _tr(kalan) in kokler and _tr(k) not in KAPALI:
+                if (_tr(kalan) in kokler and _tr(k) not in KAPALI
+                        and _tr(k) not in korunan):
                     ekler.insert(0, "-" + ad)
                     k = kalan
                     bulundu = True
@@ -114,6 +121,8 @@ def _govdeler(w):
 
 
 def kok_havuzu(say, tohum=(), en_az=2):
+    # `tohum` = BILINEN ozel adlar. Hem kok sayilir hem KORUNUR:
+    # uzerinden ek soyulmaz. Yoksa 'Kaya' -> 'Kay'+YONELME olur.
     """KOK SOZLUGU -- elle yazilmaz, OLCUTLE kurulur.
 
     Bir govde kok sayilir eger:
@@ -127,7 +136,8 @@ def kok_havuzu(say, tohum=(), en_az=2):
     aday = collections.Counter()
     for w in say:
         for g in _govdeler(w):
-            aday[g] += 1
+            if g not in kokler:      # KORUNAN adin govdesi aday DEGIL
+                aday[g] += 1
     kokler |= {g for g, n in aday.items()
                if n >= en_az and len(g) >= MIN_KOK}
     # eksiz gecen kelimeler de koktur
@@ -142,13 +152,13 @@ def kok_havuzu(say, tohum=(), en_az=2):
     return kokler
 
 
-def dokum(say, kokler):
+def dokum(say, kokler, korunan=frozenset()):
     """Bolmenin KAPSAMASI -- kac kelime ayristi, kok/ek dagilimi."""
     kok_say = collections.Counter()
     ek_say = collections.Counter()
     ayrisan = 0
     for w, n in say.items():
-        p = bol(w, kokler)
+        p = bol(w, kokler, korunan=korunan)
         if len(p) > 1:
             ayrisan += 1
         kok_say[p[0]] += n
