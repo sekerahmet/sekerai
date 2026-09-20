@@ -11,53 +11,169 @@ Bu belge **genel** bir mimari tarif eder. Grafımızdan, varlık
 listemizden, ilişki şemamızdan hiçbir şey almaz. Korpusumuz mimarinin
 kaynağı değil, **sınavı**.
 
-**Hiçbir şey koşulmadı.** `CLAUDE.md` kural 0.
+---
+
+> ## Bu belgenin ikinci sürümü — ve NİYE
+>
+> İlk sürüm *"hiçbir şey koşulmadı"* diye başlıyordu ve gerçekten hiçbir
+> şey koşmadan yazılmıştı. Sonra kod koştu. Her çarpışmada **kodu**
+> düzelttim, belgeyi değil: `DENKLEM.md` bir kez değişti, `model_14.py`
+> beş kez. Sonuçta ikisi **20 yerde** ayrıştı ve 32 kapının 32'si
+> geçerken bu ayrışmaların hiçbiri görünmedi — çünkü kapılar kodu
+> sınıyordu, belgeyi değil.
+>
+> Kullanıcı, 20 Eylül: *"bir şeyi kodda yaptıysak ve doğru ise aslında
+> onu matematik ile teorik olarak test etmedik demektir. kod çalışıyor,
+> o zaman denklem içine açıklamalı olarak yazalım ve denklemi bir örnek
+> üzerinden çözelim. kod doğru ve teoriyi düzeltiyorsa kalsın."*
+>
+> Bu sürüm o kurala göre yazıldı: **kodun hesapladığı şey**, her
+> sapmanın nereden geldiği yazılı olarak. Ayrışmaların tam listesi ve
+> hangisinde kimin haklı olduğu §13'te.
+
+---
+
+## 0. Denklemin bir örnek üzerinde çözümü
+
+Korpustan gerçek bir cümle, **eğitilmemiş** modelle adım adım:
+
+```
+Cem  Yıldız  -ın  kardeş  -i  Ceren  Yıldız  -dır  .
+D = 32   d = 8   K = 2048   r = 0,25   delta = 0,40
+
+j   girdi w_{j-1}  hedef w_j   |z_j|   |Πz_j|    s_j   çapa  cos_hedef  sıra
+1   Cem           Yıldız      1,0000  0,9638  0,5482   -     -0,3182    353
+2   Yıldız        -ın         1,0000  0,9418  0,5633   -      0,6327     18
+3   -ın           kardeş      1,0000  0,8635  0,6591   -      0,4713     52
+4   kardeş        -i          1,0000  0,7246  0,5775   -      0,1604    159
+5   -i            Ceren       1,0000  0,7221  0,5615   -      0,3089    102
+6   Ceren         Yıldız      1,0000  0,6448  0,5818   -     -0,3081    348
+7   Yıldız        -dır        1,0000  0,5338  0,5587   -      0,4520     56
+8   -dır          .           1,0000  0,5622  0,4929   -     -0,0232    237
+
+kayıp   üye 1,6561   dis 0,0000   kod 0,8643   bağ 0,0000   düzen 1207,73
+        TOPLAM 2,6411
+```
+
+Bu tablo, aşağıdaki iddiaların **üçünü birden** tek bakışta gösteriyor
+ve bu yüzden belgenin başında duruyor:
+
+```
+|z_j| = 1,0000 HER ADIMDA     IZOMETRI dogru (§2.1). Gozle gorunuyor.
+
+|Πz_j| 0,96 -> 0,56           OKUNABILIR kutle her adimda azaliyor.
+                              §4.1 bu bosluğu ZORUNLU kıldı; ayni
+                              bosluk bilginin OKUNMAYAN yere
+                              kacmasinin da yolu.  (§2.1'in NE
+                              DEMEDIGI -- asagida.)
+
+s_j ~ 0,55   esik 0,969       CAPA hic tetiklenmiyor. Esik
+                              1 - r^2/2 = 0,96875; durum hicbir koda
+                              o kadar yakin degil.  §3'un onkosulu
+                              SAGLANMIYOR.
+
+dis = 0,0000                  Itme terimi bu cumlede BIREBIR SIFIR.
+                              §5.1'e bakiniz.
+```
 
 ---
 
 ## 1. Mimari
 
+Kodun hesapladığı şey, birebir:
+
 ```
-z_j  =  capa( R[w_{j-1}] @ z_{j-1} )          durum, kurede
-w_j  =  en yakin birim( PI z_j / ||PI z_j|| ) OKUMA -- ACISAL
+BASLANGIC   z_0  = [ p_{w_0} ; 0_{D-d} ]                    |z_0| = 1
+DONME       zp_j = R_{w_{j-1}} z_{j-1}
+KOD ARAMA   k_j  = argmax_k <zp_j , c_k>,    c_k = C_k/|C_k|
+CAPA        vur_j = [ <zp_j , c_{k_j}> > 1 - r^2/2 ]
+            z_j  = vur_j ? c_{k_j} : zp_j
+OKUMA       q_j  = Π z_j / |Π z_j|
+            w_j  = argmax_w <q_j , p_w>
 ```
 
 ```
 SABIT (ogrenilmez)
-  p_w in R^d, |p|=1     n birim, KUCUK okuma uzayinda
-  PI : R^D -> R^d       ilk d koordinata izdusum
+  p_w ∈ S^{d-1}          n birim, KUCUK okuma uzayinda, tohumdan
+  Π : R^D -> R^d         ilk d koordinata izdusum
 
 OGRENILEN
-  R_w in SO(D)          her birimin donmesi        (bkz. 4.3)
-  C   in R^{K x D}      KOD DEFTERI -- capa hedefleri
-  S   in SO(D)          saat.  OPSIYONEL, bkz. 6
+  R_w ∈ SO(D)            her birimin donmesi          (§4.3, §9.1)
+  C   ∈ R^{K×D}          KOD DEFTERI
+  S   ∈ SO(D)            saat.  OPSIYONEL, §6, VARSAYILAN KAPALI
 
-ESIK (kayipta YOK, tutulanda aranir)
-  r                     capa yaricapi
-  delta                 itme esigi
+ESIK
+  r       capa yaricapi   -- EGITIMDE KULLANILIYOR (§5, §13/A1)
+  delta   itme esigi      -- EGITIMDE KULLANILIYOR (§5, §13/A1)
 ```
 
 Hesap yığını yok: ne dikkat, ne katman, ne çıktı matrisi. İleri
 geçişte yalnız dönme çarpımı ve en yakın komşu.
 
----
-
-## 2. Üç iddia
+**Belgede olmayan, kodda olan üç şey — artık burada:**
 
 ```
-1  IZOMETRIK GECIS   Donme normu ve mesafeyi korur.
-                     -> temsil cokemez, sinyal sonmez, gradyan sonmez.
-                     OLCULDU (model_13): oteleme tabanlisinda ozne
-                     duyarliligi 0,22'ye soniyordu. Donmede
-                     ||Ra-Rb|| = ||a-b||; sonme IMKANSIZ.
+z_0 TANIMI      Ilk surumde YOKTU. Pencere akistan keyfi yerden
+                basliyor; ilk birimin noktasi okuma uzayina konuyor,
+                gizli kisim SIFIR. Yani z_0'da gizli kutle yok, §4.1'in
+                kullandigi bosluk adimlarla olusuyor.
 
-2  NICELEME          Durum periyodik olarak bir KODA oturur.
+C KUREDE        §1 "C ∈ R^{K×D}" diyordu, norm kisiti yoktu. Kod ileri
+                geciste c_k = C_k/|C_k| kullaniyor. GEREKLI: `C` serbest
+                bir parametre, egitimde kureden cikiyor ve o zaman capa
+                durumu kureden atiyor -- "norm korunur" iddiasi duser.
+                OLCULDU (kapi 16): C x2,5 -> |z| = 2,5.
+
+ESIK IC CARPIMDA  |zp - c_k| < r  ile  <zp,c_k> > 1 - r^2/2  ozdes
+                (ikisi de birim normda). Kod ikincisini kullaniyor;
+                (B,K) uzerinde uc elemanwise tensor daha kurmamak icin.
+```
+
+---
+
+## 2. Üç iddia — ve her birinin NE DEMEDİĞİ
+
+```
+1  IZOMETRIK GECIS   Donme normu ve mesafeyi korur:  |R a - R b| = |a - b|
+                     -> temsil cokemez, sinyal sonmez, gradyan sonmez.
+                     OLCULDU: ortogonallik sapmasi 1,5e-06 (kapi 4);
+                     6 adimlik bileskenin tekil degerleri 1 (kapi 6);
+                     §0 tablosunda |z_j| = 1,0000.
+
+   NE DEMIYOR:       |Π a - Π b| hakkinda HICBIR SEY. Okudugumuz sey o.
+                     OLCULDU (20 Eylul): "Ayşe Yılmaz" ile "Ayşe Çelik"
+                     arasindaki fark
+                        adim 2  |za-zb| 0,3164   |Πza-Πzb| 0,2151
+                        adim 3  |za-zb| 0,3164   |Πza-Πzb| 0,0525
+                     Tam mesafe kili kilina sabit -- teorem TUTTU. Ama
+                     okunabilir kismi bir adimda dorde bolundu: farkin
+                     %97'si gizli 24 boyuta gecti. Orada kimse okumuyor
+                     ve KAYIPTA ORAYI CEZALANDIRAN TERIM YOK.
+
+2  NICELEME          Durum PERIYODIK olarak bir koda oturur
                      -> durumlar YENIDEN KULLANILABILIR olur.
                      Gorulmemis bilesim, gorulmus parcalara iner.
-                     ASIL IDDIA BU. Olcusu `comp`.
+                     ASIL IDDIA BU.
 
-3  MESAFEYLE OKUMA   Cikti katmani yok; sozluk buyudukce okuma
-                     maliyeti artar ama PARAMETRE artmaz.
+   NE DEMIYOR:       "Periyodik" DENKLEMDEN CIKMIYOR, VARSAYIM. Capanin
+                     tetiklenip tetiklenmeyecegi r'ye ve kodlarin nereye
+                     oturduguna bagli, ve ikisi de ogrenmenin sonucu.
+                     OLCULDU: §0'da tek bir cumlede HIC tetiklenmedi;
+                     tam korpusta %17,8, ve 2048 kodun 329'u kullanildi.
+
+3  MESAFEYLE OKUMA   Cikti katmani yok; sozluk buyudukce okuma maliyeti
+                     artar ama PARAMETRE artmaz.
+
+   NE DEMIYOR:       SABIT d'de n buyudukce noktalarin sikismasi.
+                     OLCULDU: n=451, d=8'de RASTGELE bir yonun en yakin
+                     noktaya cos'u zaten 0,857 (31 derece); en kotu cift
+                     0,970 (14 derece). Dogru okumak, hedefi rastgeleden
+                     DAHA IYI degil, 450 rakibin EN IYISINDEN daha iyi
+                     yapmak demek.
+                     Noktalari itme ile yaymak en kotu cifti 14,2'den
+                     44,8 dereceye cikariyor (3,2 kat) -- ve d=8 duzgun
+                     yayilmis, d=16 rastgeleden IYI. Kod su an `randn`
+                     kullaniyor.  ACIK SORU A8.
 ```
 
 ---
@@ -65,29 +181,43 @@ geçişte yalnız dönme çarpımı ve en yakın komşu.
 ## 3. Çapa = niceleme (vektör kuantalama)
 
 ```
-k = argmin_k || z - C_k ||
-|| z - C_k || < r   ->   z <- C_k          CAPA
+k_j = argmax_k <zp_j , c_k>
+<zp_j , c_{k_j}> > 1 - r^2/2      ->   z_j <- c_{k_j}        CAPA
 ```
 
 **Varlık listesi yok.** `C` öğrenilir; model hangi durumların yeniden
 kullanılmaya değer olduğunu kendi bulur.
 
-### 3.1 Neden `comp`i veriyor — TEOREM
+### 3.1 Neden `çıkarım`ı veriyor — TEOREM, ve teoremin SINIRI
 
-`j`'de `C_k`'ya çapalandıysa `z_j = C_k`, geçmişten **bağımsız**. O
-hâlde herhangi bir sonek `u = (u_1..u_m)` için
+`j`'de `c_k`'ya çapalandıysa `z_j = c_k`, geçmişten **bağımsız**.
 
 ```
-z_{j+m} = R_{u_m} ... R_{u_1} C_k
+TEOREM     Ara adimlarda capa TETIKLENMEZSE, herhangi bir sonek
+           u = (u_1..u_m) icin
+               z_{j+m} = R_{u_m} ... R_{u_1} c_k
+           yalniz (k, u)'ya baglidir -- oraya nasil gelindigine DEGIL.
 ```
-
-yalnız `(k, u)`'ya bağlı — oraya nasıl gelindiğine **değil**.
 
 > `(k, u)` eğitimde görüldüyse, model onu `k`'ya çapalanan **her**
 > bağlamda birebir tekrarlar.
 
-Sonuç: tek-adım doğruluğu `a` ise **`comp ≈ a²`**. Düşebilir bir
-öngörü; `comp ≥ 0,50` kapısı için `a ≥ 0,71` gerekir.
+Sonuç: tek-adım doğruluğu `a` ise **`çıkarım ≈ a²`**.
+
+```
+!! ILK SURUMDE "ara adimlarda capa tetiklenmezse" KOSULU YOKTU.
+   Formul  z_{j+m} = R_{u_m} ... R_{u_1} c_k  diye yaziliydi, oysa
+   modelin ozyinelemesi  z_{j+1} = capa(R z_j).  Capa BILESKEDEN
+   DUSURULMUSTU.
+
+   Dusurulen sey zararsiz degil: R_{u_1} c_k yine ayni kodun
+   yaricapina duserse  z_{j+1} = c_k  olur ve durum SABIT NOKTA'dir.
+   OLCULDU (20 Eylul), modelin yazdigi:
+       ? -> Şanlıurfa(0,92) -> Şanlıurfa -> Şanlıurfa ... 12 kez
+       |Πz| her adimda TAM AYNI: 0,193
+   Teorem "durum gecmisi unutur" diyor ve dogru soyluyor; biz onu
+   "GEREKSIZ gecmisi unutur" diye okuduk. Soruyu da unuttu.
+```
 
 ### 3.2 Kod defteri üyeliği = DÜRÜSTLÜK
 
@@ -102,9 +232,10 @@ hicbir kodun yakininda degil    ->  capa yok,  "yok"
 Reddetme ayrı bir mekanizma değil, **kod defteri üyeliğinin
 kendisi**. Ve genel: "varlık" kavramı gerektirmiyor.
 
-Talep eden tarafı: paylaşılan dönmelerle gerçek birleşimler kodun
-içine, sahte birleşimler dışına düşmeli. Bu **bileşimsel üyelik** ve
-zor. Sınavın `durustluk` kalemi bunu ölçer.
+```
+!! KODDA YOK. Model "yok" diyemiyor; uretim hep bir birim yaziyor.
+   §3.2 bir TASARIM, bir uygulama degil.  ACIK SORU A9.
+```
 
 ---
 
@@ -116,38 +247,52 @@ zor. Sınavın `durustluk` kalemi bunu ölçer.
 mesafeleri korurdu:
 
 ```
-||q_H - q_A|| = ||p_Fatma  - p_Zehra||        (anne soneki)
-||q_H - q_A|| = ||p_Gorgul - p_Betimsel||     (tezi soneki)
+|q_H - q_A| = |p_Fatma  - p_Zehra|        (anne soneki)
+|q_H - q_A| = |p_Görgül - p_Betimsel|     (tezi soneki)
 ```
 
 Sol taraf ilişkiden bağımsız → sağ taraflar eşit olmak zorunda
 kalırdı. Sabit rastgele noktalarda olmaz.
 
-*Sayi (cember, 475 birim):* gereken hata `< 0,38°`, en iyi uzlaşmada
+*Sayı (çember, 475 birim):* gereken hata `< 0,38°`, en iyi uzlaşmada
 çıkan `~100°`. **250 kat.**
 
-`Π` izometri değildir; `‖Π A (q_x − q_y)‖` artık `A`'nın farkı hangi
+`Π` izometri değildir; `|Π A (q_x − q_y)|` artık `A`'nın farkı hangi
 yöne çevirdiğine bağlıdır. Çelişki kalkar.
 
-### 4.2 Okuma AÇISAL olmali
+```
+!! BU BIR GEREKLILIK KANITI, YETERLILIK DEGIL. "Π'nin ne kadarini
+   gecirecegi A'ya bagli" demek, o miktarin SERBEST BIR PARAMETRE
+   oldugu demektir -- ve onu pinleyen tek sey kayiptir. §5'in kaybi
+   pinlemiyor: §2.1'de olculen %97 sizinti tam buradan geciyor.
+   §0 tablosunda |Πz_j|'nin 0,96'dan 0,56'ya inisi ayni sey.
+```
 
-`‖Π z − hedef‖²` yazılamaz: gizli kütle varken `‖Π z‖ < 1` olur ve
+### 4.2 Okuma AÇISAL olmalı
+
+`|Π z − hedef|²` yazılamaz: gizli kütle varken `|Π z| < 1` olur ve
 terim gizli kütleyi **sıfıra iter** — oysa 4.1 onu zorunlu kılıyor.
-İki terim birbiriyle kavga eder.
+İki terim birbiriyle kavga eder. Bu yüzden:
 
 ```
-q = PI z / ||PI z||
-L_uye = || q - p_w ||^2 = 2 - 2 cos(aci farki)
+q = Π z / |Π z|
+L_üye = |q - p_w|^2 = 2 - 2 cos(açı farkı)
 ```
 
-İş bölümü netleşiyor:
+İş bölümü:
 
 ```
-L_uye, L_dis   OKUMA YONU    -- hangi kelime
-L_capa         TAM DURUM     -- hafiza, yalniz capa noktalarinda
+L_üye, L_dis   OKUMA YONU    -- hangi kelime
+L_çapa         TAM DURUM     -- hafiza, yalniz capa noktalarinda
 ```
 
-### 4.3 Tek düzlem YETMİYOR — ölçeklenme buradan geçmiyor
+```
+!! OKUMA BIR SIRALAMA (argmax), KAYIP BIR MESAFE. Ikisini baglayan
+   sey bir MARJ olmali; §5'te o isi L_dis'in yapmasi bekleniyordu ve
+   yapmiyor (§5.1).
+```
+
+### 4.3 Tek düzlem — ve frekans ayrımının ÖLÇÜLEN hatası
 
 Birim başına tam `SO(D)` gerçek ölçekte imkânsız:
 
@@ -155,37 +300,35 @@ Birim başına tam `SO(D)` gerçek ölçekte imkânsız:
 V=50k, D=256   ->   50.000 x 32.640  =  1,63 MILYAR
 ```
 
-Tek düzlemli (Givens) dönme denendi ve **elendi**: düzleminin dışında
-özdeşliktir.
+Tek düzlemli (Givens) dönme düzleminin dışında özdeşliktir:
 
 ```
-E[ ||delta_duzlem||^2 / ||delta||^2 ]  =  2/D
-D= 32   ->  %6,3     farkin %93,7'si DOKUNULMAZ
+E[ |delta_duzlem|^2 / |delta|^2 ]  =  2/D
+D= 32   ->  %6,3     farkin %93,7'si DOKUNULMAZ      OLCULDU 0,0629
 D=256   ->  %0,8
 ```
 
-4.1'deki kaçış çiftlerin ancak %6'sında çalışır.
-
-*Ornek (D=4):* `anne` düzlemi `(e1,e3)` iken `δ=(0,1,0,1)` çiftinin
-hiçbir bileşeni o düzlemde değil; açı ne olursa olsun izdüşüm ayrımı
-1'de **sabit** kalıyor, ilişki o çiftin geometrisini
-şekillendiremiyor.
-
-**Çözüm dilsel, korpusa özgü değil:**
+İlk sürüm çözümü **frekansa** bağlıyordu: yüksek frekanslı birimler
+tam `SO(D)`, kalanı tek düzlem — *"bir içerik kelimesinin işi durumu
+ayırt edilebilir bir yere taşımak; bunun için tek düzlem yeter."*
 
 ```
-GEOMETRIYI SEKILLENDIREN   kapali sinif = YUKSEK FREKANSLI birimler
-                           ek, noktalama, kalip, iliski sozcugu
-                           ->  TAM SO(D),  D(D-1)/2 parametre
+!! O SON CUMLE ARGUMANSIZDI ve OLCUM YANLISLADI (20 Eylul).
+   451 birimin 328'i VARLIK birimi (ad parcasi). K_TAM=80 iken
+   bunlarin yalniz 24'u (%7,3) tam SO(D) aliyordu; kalan 304 --
+   yani OZNE KIMLIGINI TASIYAN birimlerin tamami -- farkin %6,2'sine
+   dokunan operatore mahkumdu. Modelin yazdiginda birebir gorundu:
+       Mersin -> Mersin(0,98)   Bartın -> Bartın(0,94)
+   yani R[ad] ~ I, ozne degisince cevap degismiyor.
 
-DURUMU BIR YERE KOYAN      acik sinif = kalan
-                           adlar, icerik sozcukleri
-                           ->  TEK DUZLEM,  2D+1 parametre
+   DUZELTILDI: K_TAM = n (hepsi tam SO(D)), parametre 129.331 ->
+   289.232. BICIM acildi (kalip 0,099 -> 0,144, ek 0,554 -> 0,641)
+   ama BILGI 0,0000 kaldi: darbogazdi, TEK darbogaz degildi.
+
+   Bolmenin kendisi (frekans) bir dugme olarak duruyor -- ama artik
+   kapi 31 FREKANSA degil ROLE bakiyor: varlik birimi tam SO(D)
+   almali.
 ```
-
-Bölme **frekanstan** yapılır; etiket, sözlük ya da oracle gerekmez.
-Bir içerik kelimesinin işi durumu ayırt edilebilir bir yere taşımak;
-bunun için tek düzlem yeter.
 
 ---
 
@@ -194,40 +337,97 @@ bunun için tek düzlem yeter.
 Kullanıcı: *"cümlenin tamamını değerlendirmemiz gerekiyor next token
 değil."*
 
-```
-L = L_uye + a1*L_dis + a2*L_capa + a3*L_duzen
-```
+Kodun hesapladığı şey, birebir:
 
 ```
-L_uye   = SUM_j  || q_j - p_{w_j} ||^2               ACISAL (4.2)
+kos_{j,w} = <q_j , p_w>                              j = 1 .. L-1
 
-L_dis   = SUM_{w pencerede DEGIL}  max(0, delta - d(p_w, YOL))^2
-          d(p_w, YOL) = min_j || q_j - p_w ||
+üye   = 2 - 2 · ort_{b,j} kos_{j, w_j}               KONUM BASINA ORTALAMA
 
-L_capa  = || sg[z] - C_k ||^2  +  beta || z - sg[C_k] ||^2
-          YALNIZ capa tetiklendigi adimlarda.  Standart VQ.
+d2_w   = ( 2 - 2 · max_j kos_{j,w} )_+
+iç_w   = [ w bu pencerede geciyor ]
+dmin_w = sqrt( max( iç_w ? delta+1 : d2_w , TABAN ) )       TABAN = 1e-8
+dis   = ort_b  Σ_w (delta - dmin_w)_+^2               BIRIM UZERINDE TOPLAM
 
-L_duzen = donme uretecinin karesi.
-          a3 = EZBER <-> GENELLEME dugmesi
+kod   = ort_{b,j} | sg[zp_j] - c_{k_j} |^2            HER ADIMDA
+bağ   = Σ_{vur} | zp_j - sg[c_{k_j}] |^2 / max(1, #vur)
+
+düzen = |a|^2 + |θ|^2
+
+L = üye + a1·dis + a2·(kod + beta·bağ) + a3·düzen
 ```
 
 `L_dis` **itici kuvvet**. *Gerekçe ÖLÇÜLDÜ (model_13):* saf çekme
 kaybı çöktü — bit 8,32, unigram tabanı 6,58'in üstünde. Çekmek yetmez.
 
-`L_capa` **örtük `comp`in ön koşulu**: onsuz durum kodun yanından
+`L_çapa` **örtük çıkarımın ön koşulu**: onsuz durum kodun yanından
 geçer ama çapa tetiklenmez.
 
 Sıra kısıtı YOK — sıra yolun kendi sırası.
 
-### 5.1 Bilinen tuzaklar
+### 5.1 Bilinen kusurlar — hepsi ÖLÇÜLDÜ
 
 ```
-L_dis HAKSIZ CEZA   pencerede olmayan birimlerin bir kismi GECERLI
-                    alternatif (korpusta 17 bildirim kalibi var).
-                    Mentese softmax'tan sert.  Hafifletici: hepsi
-                    delta'yi gecince terim sifirlanir.
-OLU KOD             VQ'nun klasik arizasi: hic ziyaret edilmeyen kod.
-                    Standart care yeniden baslatma.  A6.
+A  DELTA GEOMETRININ DISINDA
+   Itme ancak dmin < delta iken ateslenir. OLCULDU (20 Eylul):
+       hedefin uzakligi           0,9160
+       rakiplerin uzakligi  %50   0,8974   %25  0,7611   %5  0,5745
+       delta                      0,4000
+   Itilmesi gereken ciftlerin %0,48'i esigin altinda; olculen
+   dis = 0,0048, §0'daki tek cumlede 0,0000.  TERIM YOK HUKMUNDE.
+   Ve rakip hedeften DAHA YAKIN: kayip tatmin, okuma yanlis.
+
+B  TOPLAM/ORTALAMA KARISIK
+   Belge ikisini de TOPLAM yaziyordu; kod `üye`yi konum basina
+   ORTALAMA, `dis`i birim uzerinde TOPLAM aliyor. Yani a1 = 1,0
+   yaziyor ama gercek agirlik ~1/180. Degisiklik olcek/bellek icin
+   yapildi, AMAC FONKSIYONUNU degistirdigi fark edilmedi.
+
+C  L_capa'nin KOD TERIMI HER ADIMDA
+   Belge "yalniz capa tetiklendigi adimlarda" diyordu. Kod `kod`u
+   HER adimda uyguluyor (k-ortalama gibi), `bağ`i yalniz
+   tetiklendiginde. Sonucu: kod defteri 15,9 M durumun TAMAMINA
+   cekiliyor. OLCULDU: 2048 kodun 329'u kullaniliyor, |z-c| ~ 0,56
+   ve r = 0,25 -- yani ortalama durum capa yaricapinin 2,25 katinda.
+
+D  zp, z DEGIL
+   Belge `z` yaziyordu. Capa SONRASI z TAM OLARAK c_k oldugu icin
+   |z - c_k| = 0 ve terim OZDES SIFIR olurdu. Kod capa ONCESI
+   durumu (`zp`) kullaniyor. (Kapi 19/16 yakaladi.)
+
+E  TABAN ve MASKE
+   `sqrt`in turevi 0'da tanimsiz. `kos` bir kosinus ama fp32'de 1'i
+   asiyor (olculen en kucuk 2-2kos: -2,384e-07), clamp onu TAM 0
+   yapiyor. OLCULDU: egitim ADIM 1'de NaN verdi.
+   Duzeltme: pencerede olan birim delta+1'e konuyor (mentese zaten
+   0), ve d2 TABAN=1e-8'e tabanlaniyor -> dmin >= 1e-4, gradyan
+   sonsuz yerine <= 4.000; mentesenin en uc terimi 0,1600 yerine
+   0,1599 (%0,05 sapma).
+   !! CIHAZ FARKI: ClampBackward NaN'i CPU'da yutuyor, CUDA'da
+   yutmuyor. Bu sinif hatayi yerel CPU dongusu GOREMEZ; kapi DEGERI
+   sinamali, NaN'i degil (kapi 28).
+
+F  L_duzen u ve v'yi KAPSAMIYOR
+   Belge "donme ureteci" diyor; kod yalniz `a` ve `θ`. Tek duzlemin
+   YONU (u, v) duzenlenmiyor. K_TAM = n iken zaten acik sinif bos.
+
+G  COP ONEK PUANLANIYOR
+   §9.5 pencerenin keyfi yerden basladigini ve bastaki durumun "cop"
+   oldugunu soyluyor; kayip onu adim 1'den itibaren puanliyor.
+   OLCULDU: ayni onege kac AYRI hedef dayatildigi --
+       konum 1: 9,20 hedef   tavan %45,1
+       konum 2: 3,34         tavan %52,9
+       konum 3: 1,91         tavan %63,2
+       konum 6: 1,10         tavan %90,8
+   Hicbir belirlenimci model bu tavani gecemez, ve tam bu konumlar
+   AD birimlerinin donmesini egiten konumlar.
+
+H  L_dis HAKSIZ CEZA (ilk surumden beri biliniyor)
+   Pencerede olmayan birimlerin bir kismi GECERLI alternatif
+   (korpusta 17 bildirim kalibi var). Mentese softmax'tan sert.
+
+I  OLU KOD
+   VQ'nun klasik arizasi. Standart care yeniden baslatma.  A6.
 ```
 
 ---
@@ -238,9 +438,9 @@ Saat, tekrar eden birim için konmuştu. Çapa geldikten sonra tekrar
 bakıldı ve gereksiz görünüyor:
 
 ```
-Ayse* Yilmaz ... Fatma* Yilmaz    iki Yilmaz FARKLI capalardan gelir
+Ayşe* Yılmaz ... Fatma* Yılmaz    iki Yilmaz FARKLI capalardan gelir
                                   -> ayrimi DURUM yapiyor
-Hasan* -TAM karde -IYE -TAM       arada capa yok, ama D>d boslugu var
+Hasan* -ın kardeş -i -nin         arada capa yok, ama D>d boslugu var
                                   -> yine DURUM yetiyor
 ```
 
@@ -251,11 +451,6 @@ BILDIRIM   cevap capadan 3 adim sonra
 SORU       cevap capadan 6 adim sonra
            -> ayni olgu IKI AYRI geometrik kisit
            -> ~3 soru bicimi  =>  kisitlar 3 KAT
-```
-
-```
-saat VAR   tekrar ayrimi GARANTI     kisitlar 3x
-saat YOK   ayrim OGRENILIR           kisitlar 1x
 ```
 
 Kapasite zaten sınırda. Varsayılan **kapalı**; açmak bir ölçüm kararı.
@@ -275,41 +470,33 @@ konumuna bakar. Böylece köprü **yazılmadan** çapalanır.
 
 Bu ayrım kritik: köprüyü yazdırmak (CoT/scratchpad) `CLAUDE.md`'ye
 göre **ayrı bir sorudur**; bu proje **örtük** çıkarımı araştırıyor.
-İlk `zincir()` tasarımı köprüyü çıktı olarak üretiyordu — yanlış
-soruyu cevaplıyordu, kaldırıldı.
+
+```
+!! OLCUM ACGOZLU KOSUYOR. `olcme_14.uret_toplu` isin aramasi
+   yapmiyor. Yani butun DOGRULUK sayilari, bu bolumun "her seyi
+   bozar" dedigi yontemle alindi.  §13/A4.
+```
 
 ---
 
-## 8. Parametre — ve dürüst kalibrasyon
+## 8. Parametre
 
 ```
-                        bizim (n=475, D=32, d=8, K=2048)
-kapali sinif   80 x 496            39.680
-acik sinif    395 x  65            25.675
-kod defteri  2048 x  32            65.536
+                        n=444, D=32, d=8, K=2048, K_TAM=n
+tam SO(D)     444 x 496          220.224
+kod defteri  2048 x  32           65.536
 -------------------------------------------
-                                  130.891     (saat kapali)
+                                 285.760     (saat kapali)
 ```
 
-**Kıyas yanıltıcıydı, düzeltiyorum:**
+**Kıyas yanıltıcı olur.** Kullanıcı, 20 Eylül: *"çalışamayan bir
+model ile neyi kıyaslayacaksın. kıyas için çalışan bir modelin bir
+yönünü — mesela hız ve ya hacim, parametre etkisi — kıyaslarsın.
+çalışmamış bir model analiz için lazım, o kadar."*
 
-```
-model_11   6,5 M     %98'i 8 BLOK (hesap yigini), %0,3'u gomme
-model_14   131 bin   %100 depolama, hesap yigini YOK
-```
-
-İkisi aynı eksende kıyaslanamaz. Ve "depolama tek başına yeter mi"
-sorusunun bir ölçümü zaten var:
-
-```
-model_13   77.253 parametre, cogu depolama   ->   one 0,0204   COKTU
-```
-
-131 bin, çöktüğünü bildiğimiz noktanın 1,7 katı. Bu sayı
-**savunulmuyor**; kâğıdın verdiği alt sınır. Modelin iddiası "daha az
-parametreyle aynı iş" değil — iddia **hesap yığınının yerine
-nicelemeyi koymak**. Niceleme çalışmazsa parametreyi büyütmek de
-kurtarmaz.
+Modelin iddiası "daha az parametreyle aynı iş" değil — iddia **hesap
+yığınının yerine nicelemeyi koymak**. Niceleme çalışmazsa parametreyi
+büyütmek de kurtarmaz.
 
 ---
 
@@ -318,16 +505,15 @@ kurtarmaz.
 ```
 9.1 PARAMETRELESTIRME
     R dogrudan optimize edilemez (Adam ortogonalligi bozar).
-    kapali sinif  R = exp(ters simetrik),  torch.matrix_exp
-    acik sinif    tek duzlem, KAPALI FORM:
-      R = I + sin0 (v u^T - u v^T) + (cos0 - 1)(u u^T + v v^T)
-      matrix_exp gerekmez; uygulama O(D).
+    tam SO(D)     R = exp(ters simetrik),  torch.matrix_exp
+    tek duzlem    KAPALI FORM (Rodrigues), matrix_exp gerekmez:
+      R = I + sinθ (v u^T - u v^T) + (cosθ - 1)(u u^T + v v^T)
 
 9.2 GRADYAN SONMEZ
-    Capalar arasi dz/dz bir donmedir, tekil degerleri 1.
+    Capalar arasi dz/dz bir donmedir, tekil degerleri 1.  (kapi 6)
 
 9.3 OGRETMEN ZORLAMASI
-    w_{j-1} gercek birim; z_j onekin kapali formlu bileskesi,
+    w_{j-1} gercek birim; z_j onekin kapali formlu bileskesidir,
     ozyineleme yok. Kayip yine YOLUN TAMAMINA.
 
 9.4 BASLANGIC
@@ -335,41 +521,37 @@ kurtarmaz.
       aralik ~ n^(-1/(d-1)),   sigma = aralik / sqrt(D).   HESAP.
 
 9.5 VERI
-    Akistan PENCERE. Semantik bolme YOK -- pencere keyfi yerden
-    baslar, "cop" durum ILK CAPADA silinir.
+    Akistan PENCERE, uzunluk L, kesme araligi `atla`.
+    Semantik bolme YOK -- pencere keyfi yerden baslar.
+    OLCULDU: sinavin sordugu sey SORU + CEVAP ve ikisi AYNI zincirde
+    olmali. 648.281 soru-cevap cifti, ortalama 15,2 birim:
+       L=16 -> %77,2    L=20 -> %97,3    L=24 -> %99,5
+    L=16 OLCULMEDEN secilmisti ve ciftlerin %22,8'inde zincir cevaba
+    varmadan kesiliyordu.  Simdi L=24.
+    `atla` modelin ogrenebilecegini DEGISTIRMEZ, ayni gecisin epok
+    icinde kac kez gradyan verdigini belirler.
 
 9.6 IKI ADIMLI EGITIM YOK
-    comp yalniz cikarimda olusur; boylece 3.1'in ongorusu temiz kalir
-    ve gercekten dusebilir.
+    Cikarim yalniz sinavda olusur; boylece 3.1'in ongorusu temiz
+    kalir ve gercekten dusebilir.
 
-9.7 r, delta EGITIMDE YOK
-    Tutulan bolmede aranir; birer olcumdur.
+9.7 r ve delta EGITIMDE  --  ILK SURUM TERSINI SOYLUYORDU
+    Ilk surum "r, delta egitimde YOK, tutulan bolmede aranir" diyordu
+    IKI YERDE (§1 ve §9.7), ama §5'in L_dis'i delta'yi kullaniyor ve
+    kod `yol(X, r)` ile capayi egitimde calistiriyor. Kod §5'i
+    izliyor. Ikisi de hic ARANMADAN sabit kullanildi.
 
-9.8 MALIYET  -- OLCULDU 20 Eylul, onceki tahmin 26 KAT DUSUKTU
-
-    Ileri gecis carpma sayisi (B=8192, L=16, n=475, d=8, D=32, K=2048):
-      donme() kur         54 M    % 0,6
-      donme uygula       126 M    % 1,4
-      KOD ARAMA        8.053 M    %92,2      <- baskin kalem
-      okuma              498 M    % 5,7
-      TOPLAM            8,73 G  -> epok (342 adim x3)  9,0 TFLOP
-
-    Onceki tahmin 0,35 TFLOP idi; KOD ARAMASI hesaba katilmamisti.
-    L4'te ~1 sn/epok saf hesap, pratikte saniyeler. Tarama HALA
-    karsilanabilir, ama K baskin dugme (olculdu, B=1024):
-      K= 512  26 ms/adim      K=2048  40 ms
-      K=1024  31 ms           K=4096  75 ms
-
-    BELLEK: gather edilmis donme matrisleri geri gecis icin tutulur,
-    B=8192'de 503 MB. Hesabin yalniz %1,4'u ama bellegin buyuk kismi.
-    Kucultmek gerekirse ilk kaldirac B, ikincisi acik sinif icin
-    Rodrigues'i MATRIS KURMADAN uygulamak (%83 birim, 503 -> ~85 MB).
-    Simdilik gerekmiyor.
-
-    NEUTRAL CIKAN: cdist -> ic carpim degisikligi. Mikro-olcum 1,5x
-    vaat ediyordu, ileri+geri olcumu 1,01x verdi (fark yok). Degisiklik
-    TUTULDU ama HIZ ICIN DEGIL: ||z-C||^2 = 2-2 z.C tam esitlik,
-    uzakligi bedava veriyor ve bir bagimlilik eksiliyor.
+9.8 MALIYET  -- OLCULDU 20 Eylul, L4
+    L=24, atla=4, batch 8192, 470 adim/epok:
+      donme()          1,5 ms
+      yol()           17,9 ms
+      + kayip ileri   23,0 ms
+      + geri + adim   87,6 ms        <- geri gecis 65 ms, ileriden 2,8 kat
+      epok            27 sn
+    TF32 fark vermiyor (88,3 vs 87,9): darbogaz FLOP degil BELLEK.
+    Batch supurmesi 4096->32768'de is 8 kat, sure 8,08 kat -> GPU bagli.
+    Sicak dongudeki buyuk gecici tensor: ileri geciste 4,97 GB ->
+    1,23 GB (kod arama no_grad, 2-2x ve clamp reduksiyondan SONRA).
 ```
 
 ---
@@ -377,13 +559,16 @@ kurtarmaz.
 ## 10. Açık sorular
 
 ```
-A1  D, d, K kac?   (32, 8, 2048) kagit onerisi. Tarama ucuz.
+A1  D, d, K kac?   (32, 8, 2048) kagit onerisi.
 A2  r kac?         Kodlar arasi mesafenin yarisindan kucuk olmali.
-A3  delta, a1, a2, a3 kac?   Olculmeden secilmez.
-A4  Saat acilacak mi?        (6) -- 3x kisit maliyeti.
-A5  Kapali/acik sinir NEREDE?  Frekans esigi bir dugme.
-A6  OLU KOD: K kodun kaci kullaniliyor? Yeniden baslatma gerekli mi?
-A7  Isin genisligi.
+A3  delta, a1, a2, a3 kac?   §5.1/A ve /B'den sonra YENIDEN sorulmali.
+A4  Saat acilacak mi?        §6 -- 3x kisit maliyeti.
+A5  Kapali/acik sinir NEREDE?  Artik K_TAM = n; bolme bir dugme.
+A6  OLU KOD: 2048'in 329'u kullaniliyor. Yeniden baslatma?
+A7  Isin genisligi -- ve olcum NIYE acgozlu kosuyor (§7).
+A8  p_w YERLESIMI: `randn` mi, ITME ile yayilmis mi?
+    OLCULDU: en kotu cift 14,2 -> 44,8 derece (3,2 kat).
+A9  §3.2 reddetme kodda YOK.
 ```
 
 ---
@@ -395,22 +580,21 @@ Mimari genel; korpusumuz sınav. Dört düşebilir soru:
 ```
 S1  KOD DEFTERI VARLIKLARI KESFEDIYOR MU?
     Grafi biz yazdik, cevabi BILIYORUZ. Kodlar varliklara oturuyorsa
-    niceleme gercek; oturmuyorsa mekanizma yanlis ve bunu UCUZA
-    ogreniriz.                                  <- HUKUM VEREN SORU
+    niceleme gercek.                            <- HUKUM VEREN SORU
 
-S2  comp ~ a^2 TUTUYOR MU?
-    3.1'in ongorusu. Tutmuyorsa teorem dogru ama onkosulu
-    saglanmiyor demektir (muhtemelen L_capa yetersiz).
+S2  cikarim ~ a^2 TUTUYOR MU?
+    3.1'in ongorusu. Tutmuyorsa teorem dogru ama ONKOSULU
+    saglanmiyor demektir.
 
-S3  OLMAYAN BIRLESIM REDDEDILIYOR MU?
-    3.2. Sahte ad birlesimleri kodun disina dusuyor mu.
+S3  OLMAYAN BIRLESIM REDDEDILIYOR MU?     3.2 -- once kodlanmali (A9).
 
 S4  KAPALI/ACIK BOLMESI FREKANSTAN CIKIYOR MU?
-    4.3. En sik 80 birim gercekten ek/kalip/iliski mi.
+    4.3 -- OLCULDU, CIKMIYOR. Frekans olguyu yanlis tarafa koyuyordu.
 ```
 
 `S1` tek başına hüküm verir: niceleme çalışmazsa mimarinin ana
-iddiası düşer ve parametre sorusu anlamsızlaşır.
+iddiası düşer ve parametre sorusu anlamsızlaşır. **Ve S1'in ön koşulu
+şu an sağlanmıyor** (§0: çapa hiç tetiklenmiyor).
 
 ---
 
@@ -421,10 +605,60 @@ donme ile kompozisyon      RotatE, donme tabanli graf gommeleri
 vektor kuantalama          VQ-VAE ailesi
 en yakin nokta ile okuma   vektor niceleme
 isin aramasi               standart
-kapali/acik sinif ayrimi   dilbilim
 ```
 
 Yeni olan birleşim: **dizi durumunun izometrik olması ve periyodik
 olarak öğrenilmiş bir koda oturması**, kaybın da bir sonraki kelimeye
 değil yolun tamamına bakması. Ölçülmüş bir karşılığını bilmiyorum;
 literatürde aranmalı — "benzerini gördüm" diye yazmıyorum.
+
+---
+
+## 13. Kod ↔ denklem mutabakatı
+
+Ayrışmaların tam listesi. **K** = kod haklı, denkleme yazıldı.
+**T** = teori haklı, kod düzeltilmeli. **A** = açık, karar verilmedi.
+
+```
+    NE                                        KIM   NEREDE
+K1  z_0 = [p_{w_0}; 0] tanimi                  K    §1
+K2  C kurede (c_k = C_k/|C_k|)                 K    §1
+K3  esik ic carpimda (1 - r^2/2)               K    §1
+K4  capa BILESKEDE (3.1'in kosulu)             K    §3.1
+K5  L_capa'da zp, z degil                      K    §5.1/D
+K6  L_dis'te TABAN + maske (NaN)               K    §5.1/E
+K7  K_TAM = n  (frekans ayrimi yanlis)         K    §4.3
+K8  L = 24, atla = 4                           K    §9.5
+K9  kod terimi HER ADIMDA                      K    §5.1/C  -- yazildi,
+                                                    ama SONUCU acik (A6)
+
+T1  olcum ACGOZLU kosuyor, §7 ISIN diyor       T    §7, A7
+T2  §9.7 "r, delta egitimde yok" YANLIS        T    §9.7 -- duzeltildi
+T3  §3.2 reddetme kodda YOK                    T    A9
+
+A1  uye ORTALAMA / dis TOPLAM -- a1 belirsiz   A    §5.1/B
+A2  delta geometrinin disinda                  A    §5.1/A
+A3  cop onek puanlaniyor (§9.5 ile celisik)    A    §5.1/G
+A4  L_duzen u, v'yi kapsamiyor                 A    §5.1/F
+A5  p_w yerlesimi rastgele                     A    A8
+A6  ek yuzeyleri AYRI token oldu               K    -- veri katmani;
+    (`-ın` ile `-in` ayri), unlu uyumu               `ek_14`, 20 Eylul
+    modelin girdisinde
+```
+
+### Bunun tekrarlamaması için
+
+Kapılar **kodu** sınıyordu, belgeyi değil. 32 kapının 32'si geçerken
+20 ayrışma vardı. Kural:
+
+> **Bir iddia `DENKLEM.md`'ye yazılıyorsa, onu sınayan kapının adı
+> yanında yazılır. Kapısı olmayan iddia, iddia değil temennidir.**
+
+Ve kapı **teoreme değil İHTİYACA** kurulur:
+
+```
+teoremi sinayan kapi          ihtiyaci sinayan kapi
+|Ra - Rb| = |a - b|      ->   |ΠRa - ΠRb| COKMEMELI
+capa sonrasi durum ayni  ->   capa EMICI OLMAMALI
+uzaklik kucultuluyor     ->   dogru cevap KACINCI SIRADA
+```
