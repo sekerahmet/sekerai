@@ -644,7 +644,46 @@ L  VARLIK BIRIMLERI DURUMU OYNATMIYOR  --  BILGI=0'IN MEKANIZMASI
    Gercek lever: `d`nin kendisi, kayba |Pz| terimi, ya da dogrusal
    OLMAYAN okuma. Her biri KENDI kagit sinavini ister.
 
-   ACIK -- care karari verilmedi.
+   ADAYLAR SINANDI -- KAGITTA, KOSMADAN (21 Eylul)
+
+   ADAY 1  `d`yi buyutmek.  DESTEKLENDI.
+     Ayni durumlarin ILK d koordinatinda kimlik probu:
+        d      ort sira   1.sira    kazanc/boyut
+        8       50,18      %3,2       -5,4      <- SU AN
+        12      23,08     %10,6       -6,8      <- en buyuk kazanc
+        16      15,37     %16,9       -1,9
+        24       8,80     %26,0       -0,55
+        32       6,09     %35,1       -0,24
+     Keskin dirsek yok ama 16'dan sonra getiri sonuyor.
+     d = 8 -> 16:  sira 3,3 kat, tam isabet 5,3 kat.
+     PARAMETRE MALIYETI SIFIR -- `p` buffer, `Pi` bir dilim.
+     §4.1'in "D > d" sarti korunuyor (32 > 16).
+     !! ALT SINIR: egri d=8 ile EGITILMIS modelden okundu.
+
+     KALABALIK ARGUMANI NOTR, ve ilk dusundugumun TERSI:
+     d buyudukce noktalar UZAKLASIYOR (komsu acisi 24,7° -> 41,8°),
+     yani kendi hucrenden cikmak ZORLASIYOR. Ama `ayar_14`in
+     baslangic olcegi zaten `aralik = n^(-1/(d-1))`, yani komsu
+     araliginin KENDISI -- oran korunuyor. `d` lehine de aleyhine
+     de degil.
+
+   ADAY 2  Kayba |Pz| terimi.  ELENDI.
+     Terim ancak "|Pz| buyuk olan durumlar GERCEKTEN daha iyi
+     okunuyor" ise ise yarar. Olculdu:
+        |Pz| dilimi        KIMLIK sirasi   CEVAP sirasi
+        0,130-0,316            56,26          232,5
+        0,369-0,414            47,81          241,2
+        0,464-0,651            44,58          231,4
+        korelasyon  |Pz|~kimlik -0,068   |Pz|~cevap -0,014
+     Korelasyon SIFIR. Cevap sirasi butun dilimlerde ~235, yani
+     sans (222). Sorun okunabilir kisimdaki KUTLE degil, HANGI
+     YONLERIN o altuzayda oldugu -- `d` egrisi zaten bunu
+     soyluyordu: yardim eden sey daha fazla BOYUT.
+
+   ADAY 3  Dogrusal OLMAYAN okuma.  Sinanmadi; en buyuk degisiklik
+     ve `d` karari verilmeden bakilmasi erken.
+
+   ACIK -- `d` karari KULLANICININ.
 
    !! CAPA BUNUN SEBEBI DEGIL. Ayni uretimlerde capa HIC tetiklenmedi
    (s en fazla 0,89, esik 0,969) -- §3.1'in "emici durum"u DEGIL.
