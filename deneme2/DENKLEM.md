@@ -883,6 +883,59 @@ M  KAYIP OLGUYU SATIN ALAMIYOR -- SAYILDI + OLCULDU (21 Eylul)
                 Cokusun HIZLANDIRICISI budur, kaynagi degil.
    Dordu de SINANMADI.  Kisayolun %44'u `uye`de oldugu icin L2/L3
    dogrudan oraya bakiyor; L1 ve L4 tek baslarina yetmez.
+N  L1..L4 KAGITTA SINANDI -- IKISI DUSTU, BIRI KIRILGAN  (21 Eylul)
+   Olcut tek: degisiklikten sonra KISAYOL hala OLGUDAN cok mu oduyor?
+   Zemin §5.1/M.3'ten:  kisayol 0,6387   butun olgular <= 0,3008.
+
+   ```
+   L1  a3 = 0        0,6387 -> 0,5304   hala 1,76 kat   REDDEDILDI
+   L4  bag kesilir   0,6387 -> 0,6363   hala 2,12 kat   REDDEDILDI
+   ```
+   Ikisi de DEGER muhasebesiyle kapandi, bilinmeyen gerekmedi. L4'un
+   tezi zaten "hizlandirici"ydi; hiz tezi kagitta sinanamaz (gradyan
+   buyuklugu gerekir) ama DEGER olarak hicbir sey degistirmiyor.
+
+   L2 / L3 TEK BILINMEYENE INIYOR:  c_f = olgu konumlarindaki ortalama
+   cos (hafizasiz denge).  Kisit:  f*c_f + g*c_g = 0,5270   (uye'den)
+   Olgu konumlarina w agirligi verilince payda SADELESIR:
+
+       OLGU     2*f*w*(1-c_f) / (f*w+g)
+       KISAYOL  2*g*(c_g'-c_g) / (f*w+g)
+       ->  olgunun kazanmasi icin   w > 0,1411 / (0,1504 * (1-c_f))
+
+   ```
+    c_f    c_g     L2: gereken w    L3: gereken gamma
+   0,20   0,585         1,17              0,24
+   0,40   0,549         1,56              1,56
+   0,50   0,532         1,88              9,58
+   0,60   0,514         2,34           IMKANSIZ
+   0,80   0,479         4,69           IMKANSIZ
+   0,86   0,468         6,70        L2 de kaybeder
+   ```
+
+   **L3 KIRILGAN.** Focal agirlik `(1-cos)^gamma` demek; olgu
+   konumlarina FAZLADAN agirlik verebilmesi icin o konumlarin DAHA ZOR
+   olmasi, yani c_f < c_g olmasi sart. c_g ~ 0,53'te neredeyse sabit
+   (f kucuk). c_f 0,514'u gecerse focal olgu konumlarina DAHA AZ
+   agirlik verir -- duzeltmez, TERS calisir.
+   Ve c_f'nin yuksek olmasi icin sebep var: model "dogru bicimde,
+   dogru turden, yanlis varlik" uretiyor; ayni turden varliklar okuma
+   uzayinda kumeleniyorsa yanlis cevabin cos'u yuksektir.
+
+   ```
+   L2   c_f < 0,86 olan HER yerde calisir, w 1..7.      SAGLAM
+   L3   yalniz c_f < ~0,45'te; gamma hizla patliyor.    KIRILGAN
+   ```
+   L2'nin bedeli ayri: modele "burasi olgu" sinyali vermek, yani
+   deneyin kendi sorusunu zayiflatmak. TASARIM KARARI.
+
+   EKSIK TEK SAYI: c_f.  Kayitli `t0_d16_hafizasiz/model_t0.pt` + birim
+   akisi ile ileri gecis yeter -- EGITIM YOK. Yerelde uretilemez:
+   `metin_14.py` 21 Eylul'de degisti, onbellek anahtari kaydi, yerel
+   uretim kosunun GORDUGU korpusu vermez (kural 9'un tuzagi).
+   KABA AYRIM BILE KARAR VERDIRIR: varlik birimleri (`var_ix`, hucre
+   4'te zaten kuruluyor) ile geri kalanin cos'u. Varlik birimleri DAHA
+   KOLAYSA L3 dogrudan oluyor.
 ```
 
 ---
