@@ -147,7 +147,8 @@ class Yol(nn.Module):
 
     def __init__(self, n: int, D: int = 32, d: int = 8, K: int = 2048,
                  tam: torch.Tensor | None = None, saat: bool = False,
-                 tohum: int = 0):
+                 tohum: int = 0, hafiza: bool = False, haf_n: int = 8,
+                 haf_tau: float = 0.02):
         super().__init__()
         assert d < D, "D > d ZORUNLU -- DENKLEM.md §4.1, izometri celiskisi"
         self.n, self.D, self.d, self.K, self.saat = n, D, d, K, saat
@@ -180,6 +181,10 @@ class Yol(nn.Module):
         self.v = nn.Parameter(rn(len(self.ix_acik), D))
         self.th = nn.Parameter(rn(len(self.ix_acik)) * aralik)
         self.C = nn.Parameter(F.normalize(rn(K, D), dim=-1))        # kod defteri
+        # OLGU HAFIZASI (§12b): C KILIT, V DEGER.  V SIFIRDAN baslar,
+        # yani model tam eskisi gibi baslar ve hafizayi kendi buyutur.
+        self.haf_n, self.haf_tau = haf_n, haf_tau
+        self.V = nn.Parameter(torch.zeros(K, D)) if hafiza else None
         self.s = nn.Parameter(rn(T) * sigma) if saat else None
 
     # ---------------- donmeler ----------------
@@ -248,6 +253,7 @@ class Yol(nn.Module):
         CAPADA GRADYAN KESILIR: `torch.where` ile z kolu kopar, C kolu
         kalir. Durumu koda ceken sey L_capa'nin BAGLILIK terimi."""
         R, C = self.donme(), self.kod()
+        V = self.V
         B, L = X.shape
         # Donme ARAMASI `embedding` ile: ayni ileri gecis, ama geri
         # gecisi `embedding_dense_backward` (siralanmis, segmentli)
@@ -281,9 +287,26 @@ class Yol(nn.Module):
             # C[k] uzerinden gidiyor. no_grad olmadan (B,K) ara tensor
             # geri gecis icin TUTULUYOR: adim basina 67 MB x 15 adim.
             with torch.no_grad():
-                s, k = (zp @ Ct).max(1)
+                sa = zp @ Ct
+                s, k = sa.max(1)
                 vur = s > esik
+                kn = sa.topk(self.haf_n, 1).indices if V is not None else None
             z = torch.where(vur[:, None], C[k], zp)
+            # OLGU HAFIZASI (§12b) -- CAPADAN SONRA, ve EKLEMELI.
+            # !! SORGU `zp`den, yani capa ONCESI durumdan: capa
+            # tetiklendiginde z artik c_k ve ozne kimligi orada YOK
+            # (olculdu: capa tetikleyen orneklerde kimlik 1,10 kat,
+            # tetiklemeyenlerde 11,34 kat sans ustu).
+            # !! CAPADAN SONRA cunku ONCE olsaydi capa hafizayi
+            # SILERDI -- ve tam cevap konumunda %37 tetikliyor.
+            # Bedeli: §3.1'in "capa sonrasi durum gecmisten BAGIMSIZ"
+            # teoremi artik GECERLI DEGIL. Bilerek: o bagimsizlik
+            # ozneyi de unutturuyordu (§3.1'in kendi `!!` blogu).
+            if V is not None:
+                a = torch.softmax(
+                    (C[kn] * zp[:, None]).sum(-1) / self.haf_tau, 1)
+                z = F.normalize(z + (a[..., None]
+                                     * F.embedding(kn, V)).sum(1), dim=-1)
             t = t.masked_fill(vur, 0)
             for ad, v in (("z", z), ("zp", zp), ("t", t), ("vur", vur),
                           ("k", k)):
@@ -397,7 +420,10 @@ class Yol(nn.Module):
                     "dis": dis.detach(), "kod": kod.detach(),
                     "bag": bag.detach(), "duzen": duzen.detach(),
                     "capa": vf.float().mean().detach(),
-                    "Pz_min": y["z"][..., :self.d].norm(dim=-1).min().detach()}
+                    "Pz_min": y["z"][..., :self.d].norm(dim=-1).min().detach(),
+                    "V_max": (self.V.norm(dim=-1).max().detach()
+                              if self.V is not None
+                              else torch.zeros((), device=top.device))}
         return top, uye
 
     # ---------------- uretim ----------------

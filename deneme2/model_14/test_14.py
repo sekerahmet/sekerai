@@ -991,6 +991,97 @@ def _35():
             % (int(t0[0, -1]), B * (L - 1)))
 
 
+@kapi("36  HAFIZA -- V=0'da OZDES, ve §3.1'i BILEREK kiriyor")
+def _36():
+    """§12b olgu hafizasi.  Kapi 18 bunu GOREMEZ: kapilar `Yol`u
+    `hafiza=True` GECMEDEN kuruyor, yani V is None ve hafiza yolu hic
+    kosmuyor. `ayar_14`de HAFIZA = True yaziyor; sinayan yer BURASI.
+
+    Dort sey kilitleniyor:
+      1  V = 0 iken cikti hafizasiz modelle BIREBIR.  Guvenli
+         baslangic: model tam eskisi gibi baslar, hafizayi kendi
+         buyutur.  Bozulursa `V` sifirdan baslamiyordur.
+      2  V != 0 iken cikti DEGISIYOR ve |z| = 1 kaliyor.
+      3  §3.1 KOSULU: hafiza KAPALI iken ayni koda dusen iki durum
+         OZDES (teorem); ACIK iken DEGIL -- cunku okuma capa ONCESI
+         `zp`den adresleniyor.  BU BILEREK: olculdu ki capa
+         tetikleyen orneklerde ozne kimligi 1,10 kat, tetiklemeyende
+         11,34 kat sans ustu; tarih bagimsizligi ozneyi de unutturuyor.
+      4  Sicak dongu bedeli: hafiza GRADYANLI (B,K) tensor EKLEMEZ
+         (kapi 26'nin korudugu sey). Yumusak okuma butun K uzerinde
+         olsaydi adim basina 67 MB x 15 geri gecise kadar tutulurdu."""
+    import ayar_14 as AY
+    n, D, d, K, B, L = 80, 16, 8, 64, 48, 10
+    ort = dict(n=n, D=D, d=d, K=K, tam=torch.ones(n, dtype=torch.bool))
+    g = torch.Generator().manual_seed(36)
+    X = torch.randint(0, n, (B, L), generator=g)
+
+    m0 = M.Yol(**ort)                                   # hafizasiz
+    mh = M.Yol(**ort, hafiza=True, haf_n=AY.HAFIZA_N,
+               haf_tau=AY.HAFIZA_TAU)
+    assert mh.V is not None and float(mh.V.abs().max()) == 0.0,         "V SIFIRDAN baslamali -- guvenli baslangic bozulmus"
+
+    # 1  V = 0 -> OZDES
+    z0, zh = m0.yol(X, 0.25)["z"], mh.yol(X, 0.25)["z"]
+    e = float((z0 - zh).abs().max())
+    assert e < 1e-6, "V=0 iken cikti hafizasizdan AYRILIYOR: %.2e" % e
+
+    # 2  V != 0 -> DEGISIYOR, norm KORUNUYOR
+    with torch.no_grad():
+        mh.V.normal_(0, 0.3, generator=g)
+    zh2 = mh.yol(X, 0.25)["z"]
+    f = float((z0 - zh2).abs().max())
+    assert f > 1e-3, "V dolu ama cikti DEGISMIYOR -- hafiza okunmuyor"
+    nz = float((zh2.norm(dim=-1) - 1).abs().max())
+    assert nz < 1e-5, "|z| = 1 bozuldu: sapma %.2e" % nz
+
+    # 3  §3.1 KOSULU -- AYNI KODA DUSEN cift ARANIR (kapi 18 gibi);
+    #    r=inf capayi her adimda tetikler ama HANGI kod, duruma bagli.
+    y0, yh = m0.yol(X, r=1e6), mh.yol(X, r=1e6)
+    # !! KURULUM SARTI: ayni koda dusen ama CAPA ONCESI DURUMU FARKLI
+    # bir cift. Ilk surum yalniz "ayni kod" ariyordu ve ayni ILK
+    # BIRIMDEN baslayan bir cift buluyordu -- o cift bastan sona
+    # OZDES, hafizanin ayiracagi bir sey YOK, sinama anlamsiz.
+    cift = None
+    for j in range(1, L):
+        kk, zpj = y0["k"][:, j], y0["zp"][:, j]
+        for c in torch.unique(kk):
+            ix = torch.nonzero(kk == c).squeeze(1)
+            for a_ in range(len(ix)):
+                for b_ in range(a_ + 1, len(ix)):
+                    if float((zpj[ix[a_]] - zpj[ix[b_]]).abs().max()) > 1e-3:
+                        cift = (j, int(ix[a_]), int(ix[b_]))
+                        break
+                if cift:
+                    break
+            if cift:
+                break
+        if cift:
+            break
+    assert cift, ("kapi kurulumu: ayni koda dusen ama capa ONCESI durumu "
+                  "FARKLI cift YOK -- sinama anlamsiz")
+    j, i1, i2 = cift
+    dzp = float((y0["zp"][i1, j] - y0["zp"][i2, j]).abs().max())
+    ayni0 = float((y0["z"][i1, j] - y0["z"][i2, j]).abs().max())
+    aynih = float((yh["z"][i1, j] - yh["z"][i2, j]).abs().max())
+    assert ayni0 < 1e-6, (
+        "HAFIZA KAPALI iken §3.1 TUTMALI (ayni kod -> ozdes durum), "
+        "fark %.2e" % ayni0)
+    assert aynih > 1e-3, (
+        "HAFIZA ACIK iken §3.1 tutmamali -- tutuyorsa hafiza capa "
+        "ONCESI durumdan adreslenmiyor, yani ozneyi gormuyor")
+
+    # 4  gradyanli (B,K) EKLENMEDI
+    with _Buyuk(B * K) as sk:
+        mh.kayip(X, isin=2)
+    grad = [x for x in sk.v if x[1] == (B, K) and x[2]]
+    assert not grad, "%d gradyanli (B,K) tensor -- hafiza sicak donguyu "        "bozuyor (kapi 26)" % len(grad)
+    return ("V=0 ozdes (%.1e);  V dolu fark %.3f, |z|=1 sapma %.1e;  "
+            "§3.1 (ayni kod, adim %d, zp farki %.3f) kapali %.1e "
+            "ACIK %.3f;  gradyanli (B,K) 0"
+            % (e, f, nz, j, dzp, ayni0, aynih))
+
+
 # =====================================================================
 # VERI YOLU  --  kopyanin ve kurulumun kapilari
 # =====================================================================

@@ -49,6 +49,8 @@ def yukle(birim_yol: str, agirlik_yol: str, dev: str):
     pk = torch.load(agirlik_yol, map_location=dev, weights_only=False)
     a = pk["ayar"]
     m = M.Yol(len(b), D=a["D_DURUM"], d=a["D_OKUMA"], K=a["K_KOD"],
+              hafiza=a.get("HAFIZA", False), haf_n=a.get("HAFIZA_N", 8),
+              haf_tau=a.get("HAFIZA_TAU", 0.02),
               tam=M.sinif_ayir(b.say, a["K_TAM"]), saat=a["SAAT"]).to(dev)
     m.load_state_dict(pk["model"])
     m.eval()

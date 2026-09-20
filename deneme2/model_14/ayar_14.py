@@ -140,6 +140,31 @@ K_TAM = None      # None = HEPSI tam SO(D)
 #  yeniden acilir -- ama o zaman kesim FREKANSA degil ROLE gore
 #  kurulur (kapi 31'in dersi).
 
+# --- OLGU HAFIZASI  (DENKLEM §12b) ---------------------------------
+HAFIZA = True
+#  Kod defteri KILIT, yeni `V` DEGER. Okuma YUMUSAK ve EKLEMELI:
+#      a = softmax(<zp, C[top-n]> / tau);   z <- norm(z + a @ V[top-n])
+#  GEREKCE OLCULDU (21 Eylul, §3.1b / adim 5): onegin sonundaki durum
+#  SORUYU tasiyor, CEVABI tasimiyor -- ILISKI 7,4 kat sans ustu,
+#  OZNE 4,7 kat, CEVAP 1,8 kat. Ve olguyu tutabilecek yer YOK:
+#      R[iliski]    376 serbestlik vs  4.613 kisit   12 KAT KISA
+#      C         65.536            vs 110.715        1,7 KAT KISA
+#  Kapasite toplamda var ama ADRESLENEMIYOR.
+#  V eklenince hafiza 2048 x 2D = 131.072  -> kisitin 1,18 kati.
+HAFIZA_N = 8
+#  Kac koda BAKILIR. Yumusak okuma butun K uzerinde olsaydi (B,K)
+#  ara tensoru GRADYANLI tutulurdu -- kapi 26'nin engelledigi sey,
+#  adim basina 67 MB x 15. top-n ile (B,n): n=8'de 256 kat kucuk.
+HAFIZA_TAU = 0.02
+#  OLCULDU: top-8 s yayilimi 0,1272.  Etkin slot = exp(entropi):
+#      tau 0,10 -> 6,87   0,05 -> 5,14   0,02 -> 2,66   0,01 -> 1,67
+#  Hedef 2-3: cok yumusakta hafiza ORTALAMA doner (bilgi yok),
+#  cok sertte tek koda coker (niceleyiciye geri doner).
+#  !! Hafizasiz modelden olculdu; durumlar kayinca yeniden bakilacak.
+#  !! `beta` DUGMESI YOK: olcek zaten |V|'de, ikisi GEREKSIZ YERE
+#  ayni seyi soylerdi.  V SIFIRDAN baslar -- model tam eskisi gibi
+#  baslar ve hafizayi kendisi buyutur.
+
 SAAT = False
 #  HESAP (§6): tekrar ayrimini D>d boslugu ve farkli capalar zaten
 #  yapiyor. Acmanin bedeli: ayni olgu bildirimde ve soruda FARKLI adim
