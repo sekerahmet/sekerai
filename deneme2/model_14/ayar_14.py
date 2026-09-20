@@ -103,8 +103,8 @@ D_OKUMA = 16
 #  d'ye karsi bir argüman degildi.)
 
 # --- OPERATOR ---------------------------------------------------------
-K_TAM = 451
-#  Kac birim TAM SO(D) alacak; kalani TEK DUZLEM.
+K_TAM = None      # None = HEPSI tam SO(D)
+#  Kac birim TAM SO(D) alacak; kalani TEK DUZLEM.  None ise AYRIM YOK.
 #  OLCULDU (test_14 §3): tek duzlemli donme, kendi duzleminin disinda
 #  ozdesliktir ve rastgele bir farkin ancak 2/D'sine dokunur --
 #  ongorulen 0,0625, olculen 0,0629.
@@ -123,8 +123,22 @@ K_TAM = 451
 #  duzlem) FREKANSA dayaniyordu; olcum frekans ayriminin olguyu
 #  yanlis tarafa koydugunu gosterdi.
 #
-#  HESAP: 451 x 496 + 2048 x 32 = 289.232 parametre (onceki 129.331).
-#  `donme()` artik 451 matrix_exp: 1,5 ms -> ~5 ms, epok ~30 sn.
+#  HESAP: 444 x 496 + 2048 x 32 = 285.760 parametre (onceki 129.331).
+#  `donme()` artik 444 matrix_exp: 1,5 ms -> ~5 ms, epok ~27 sn.
+#
+#  DEGER 451 IDI, `None` YAPILDI (21 Eylul).  451 sozluk boyunu
+#  (444) ASIYORDU, yani "hepsi" demek istiyor ama bunu TESADUFEN
+#  soyluyordu: sozluk 451'i gecse frekans ayrimi KENDILIGINDEN ve
+#  KEYFI bir kesimle geri gelirdi, hicbir kapi da soylemezdi
+#  (kapi 31 SINIFI siniyordu, degerin kendisini degil).
+#  `None` niyeti dogrudan yaziyor: AYRIM YOK.  Davranis degismedi.
+#  Kapi 31 artik "int ise sozlukten KUCUK olmali" diye yasakliyor.
+#
+#  !! AYRIM OLCEK MESELESI, KALITE DEGIL. §4.3 V=50k D=256'da
+#  1,63 MILYAR parametreyi gerekce gosteriyor; bu olcekte (444 birim,
+#  D=32) tamami 220 bin, yani ayrima GEREK YOK. Olcek buyuyunce
+#  yeniden acilir -- ama o zaman kesim FREKANSA degil ROLE gore
+#  kurulur (kapi 31'in dersi).
 
 SAAT = False
 #  HESAP (§6): tekrar ayrimini D>d boslugu ve farkli capalar zaten
@@ -209,7 +223,8 @@ assert 0 < AYAR.ret_tut < 0.5, (
 assert all(hasattr(AYAR, a) for a in SABIT)
 
 assert D_OKUMA < D_DURUM, "D > d ZORUNLU -- DENKLEM §4.1 izometri celiskisi"
-assert K_TAM >= 1, "hicbiri TAM degilse §4.3'e gore mimari zayif kalir"
+assert K_TAM is None or K_TAM >= 1, (
+    "hicbiri TAM degilse §4.3'e gore mimari zayif kalir")
 assert 0 < R_CAPA and 0 < DELTA and 0 < BETA
 assert PENCERE >= 2 and 1 <= ATLA < PENCERE
 assert 1 <= ISINMA < PENCERE

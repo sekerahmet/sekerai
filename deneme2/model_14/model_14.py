@@ -115,12 +115,20 @@ def _ters_simetrik(v: torch.Tensor, D: int, iu: torch.Tensor) -> torch.Tensor:
     return A - A.transpose(-1, -2)
 
 
-def sinif_ayir(frekans, k_tam: int) -> torch.Tensor:
+def sinif_ayir(frekans, k_tam: int | None) -> torch.Tensor:
     """En sik `k_tam` birim KAPALI SINIF sayilir -> tam SO(D).
+
+    `k_tam = None` HEPSI demek -- niyeti dogrudan soyleyen deger.
+    Onceki hal sozluk boyunu ASAN bir sayi (451 > 444) yaziyordu ve
+    ayni seyi TESADUFEN soyluyordu: sozluk 451'i gecse frekans ayrimi
+    kendiliginden, keyfi bir kesimle geri gelirdi. Kapi 31 artik
+    bunu yasakliyor.
 
     Dilbilimsel kapali sinif (ek, noktalama, kalip, iliski sozcugu)
     yuksek frekansli olandir. Etiket ya da sozluk gerekmez."""
     f = torch.as_tensor(frekans, dtype=torch.float)
+    if k_tam is None:
+        return torch.ones(len(f), dtype=torch.bool)
     m = torch.zeros(len(f), dtype=torch.bool)
     m[f.topk(min(k_tam, len(f))).indices] = True
     return m

@@ -755,7 +755,14 @@ def _31():
 
     §4.3'un ayrimi FREKANSA dayaniyordu; olcum frekansin olguyu
     yanlis tarafa koydugunu gosterdi. Kapi frekansa degil ROLE
-    bakiyor: varlik birimi TAM SO(D) almali."""
+    bakiyor: varlik birimi TAM SO(D) almali.
+
+    !! IKINCI KAPI (21 Eylul): `K_TAM` bir SAYIYSA sozlukten KUCUK
+    olmali. 451 > 444 iken deger "hepsi" demek istiyor ama bunu
+    TESADUFEN soyluyordu; sozluk 451'i gecse ayrim KENDILIGINDEN ve
+    KEYFI bir kesimle geri gelir, ve YUKARIDAKI oran kapisi bunu
+    yakalamaz -- cunku o gun varlik birimleri hala ilk 451'de
+    kalabilir. "Hepsi" demek isteniyorsa `None` yazilir."""
     import numpy as np
     import ayar_14 as AY, veri_14 as V, birim_14 as BR, olcme_14 as O
 
@@ -769,6 +776,13 @@ def _31():
               for w in O.birimle(ad, V.TR, b.kok, b.ix, b.korunan)}
     assert varlik, "varlik birimi bulunamadi -- ad esleme bozuk"
 
+    assert AY.K_TAM is None or AY.K_TAM < len(b.ad), (
+        "K_TAM = %s, sozluk %d -- deger sozlugu ASIYOR, yani 'hepsi'yi "
+        "TESADUFEN soyluyor. Niyet buysa `None` yazin; degilse kesim "
+        "OLCUYLE secilsin. Boyle birakilirsa sozluk buyudugunde frekans "
+        "ayrimi kendiliginden geri gelir ve hicbir kapi soylemez."
+        % (AY.K_TAM, len(b.ad)))
+
     tam = M.sinif_ayir(b.say, AY.K_TAM)
     guclu = {i for i in varlik if bool(tam[i])}
     oran = len(guclu) / len(varlik)
@@ -779,8 +793,9 @@ def _31():
         % (len(varlik), len(guclu), 100 * oran, len(varlik) - len(guclu),
            100 * 2 / AY.D_DURUM, AY.K_TAM))
     return ("%d birimin %d'i varlik birimi; hepsi TAM SO(%d)   "
-            "(K_TAM=%d, acik sinif %d)"
-            % (len(b.ad), len(varlik), AY.D_DURUM, AY.K_TAM,
+            "(K_TAM=%s, acik sinif %d)"
+            % (len(b.ad), len(varlik), AY.D_DURUM,
+               "None (hepsi)" if AY.K_TAM is None else AY.K_TAM,
                int((~tam).sum())))
 
 

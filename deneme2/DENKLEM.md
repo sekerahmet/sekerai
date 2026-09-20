@@ -344,6 +344,18 @@ ayırt edilebilir bir yere taşımak; bunun için tek düzlem yeter."*
    Bolmenin kendisi (frekans) bir dugme olarak duruyor -- ama artik
    kapi 31 FREKANSA degil ROLE bakiyor: varlik birimi tam SO(D)
    almali.
+
+   AYRIM OLCEK MESELESI, KALITE DEGIL (21 Eylul).  Yukaridaki
+   1,63 MILYAR sayisi V=50k, D=256 icin. Bu olcekte -- 444 birim,
+   D=32 -- tamami 220 bin parametre, yani ayrima GEREK YOK.
+   `K_TAM = None` (AYRIM YOK) yazildi; deger 451 idi ve sozluk
+   444 oldugu icin "hepsi"yi TESADUFEN soyluyordu. Sozluk 451'i
+   gecse ayrim KENDILIGINDEN, KEYFI bir kesimle geri gelirdi ve
+   kapi 31'in oran sarti bunu yakalamazdi (o gun varlik birimleri
+   hala ilk 451'de olabilir). Kapi 31'e ikinci sart kondu:
+   `K_TAM` bir SAYIYSA sozlukten KUCUK olmali.
+   Olcek buyuyunce ayrim yeniden acilir -- ama kesim FREKANSA
+   degil ROLE gore kurulur.
 ```
 
 ---
@@ -955,7 +967,12 @@ K3  esik ic carpimda (1 - r^2/2)               K    §1
 K4  capa BILESKEDE (3.1'in kosulu)             K    §3.1
 K5  L_capa'da zp, z degil                      K    §5.1/D
 K6  L_dis'te TABAN + maske (NaN)               K    §5.1/E
-K7  K_TAM = n  (frekans ayrimi yanlis)         K    §4.3
+K7  K_TAM = None (AYRIM YOK), frekans ayrimi   K    §4.3, kapi 31
+    olguyu yanlis tarafa koyuyordu.  Deger
+    451 idi (sozluk 444): "hepsi"yi TESADUFEN
+    soyluyordu; `None` niyeti dogrudan yazar.
+    Kapi 31 artik "int ise sozlukten KUCUK
+    olmali" diye yasakliyor.  (21 Eylul)
 K8  L = 24, atla = 4                           K    §9.5
 K9  kod terimi HER ADIMDA                      K    §5.1/C  -- yazildi,
                                                     ama SONUCU acik (A6)

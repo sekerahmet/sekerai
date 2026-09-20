@@ -29,7 +29,24 @@ dallanır ve hiçbiri bitmez.
 
 ## PARK — bulundu, sırası gelmedi
 
-### P1  `K_TAM = 451` ama sözlük **444** birim
+### P1  `K_TAM = 451` ama sözlük **444** birim   (KAPANDI 21 Eylül)
+
+```
+KARAR   K_TAM = None  -- "AYRIM YOK" niyeti DOGRUDAN yaziliyor.
+        Davranis DEGISMEDI (451 > 444 zaten hepsini veriyordu).
+        `sinif_ayir(None)` hepsini True dondurur.
+KAPI    31'e IKINCI sart: K_TAM bir SAYIYSA sozlukten KUCUK olmali.
+        Yoksa "deger sozlugu ASIYOR, hepsi'yi tesaduften soyluyor --
+        niyet buysa None yazin" diye duser.  Kayma artik imkansiz.
+NOT     Ayrim OLCEK meselesi, kalite degil: §4.3'un 1,63 milyari
+        V=50k D=256 icin; bu olcekte tamami 220 bin. Olcek
+        buyuyunce yeniden acilir, ama kesim FREKANSA degil ROLE
+        gore (kapi 31'in dersi).
+KAPILAR 35 gecti, 0 kaldi.
+```
+
+Asagisi kalemin ilk hali, kayit icin:
+
 
 ```
 BULUNDU   adim 1 sirasinda, kapi 31'in ciktisinda
