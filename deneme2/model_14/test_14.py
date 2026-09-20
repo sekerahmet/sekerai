@@ -792,6 +792,47 @@ def _32():
                next(iter(say.values()))))
 
 
+@kapi("33  DALLANMA -- uye k=1'de siraya HIZALI, k buyudukce degil")
+def _33():
+    """§5.1/J'nin kapisi. Egitim YOK, veri YOK -- sabit okuma
+    geometrisi (p) ve kaybin tanimi uzerinde aritmetik.
+
+    IKI SEY kilitleniyor:
+      k=1  TEOREM. q'yu p_t'ye eta kadar iterken hedefin kazanci
+           eta*1, rakibin kazanci eta*<p_t,p_c> <= eta. Sira ASLA
+           kotulesemez -> bozulma TAM SIFIR olmali.
+      k>1  Gradyan hedeflerin AGIRLIK MERKEZINE gider ve merkez
+           hicbir hedefin yeri degildir -> bozulma SIFIRDAN BUYUK.
+           Bu satir sifirlanirsa §5.1/J'nin dayanagi gitmis demektir.
+
+    !! Kapi p'nin GERCEK dagilimini kullaniyor (modelin kendi
+    buffer'i), elle secilmis bir olcek degil."""
+    import ayar_14 as AY
+    n, d, B, ETA = 444, AY.D_OKUMA, 2000, 0.10
+    m = M.Yol(n, D=AY.D_DURUM, d=d, K=64)
+    p = m.p
+    g = torch.Generator().manual_seed(33)
+    boz = {}
+    for k in (1, 11):
+        q = F.normalize(torch.randn(B, d, generator=g), dim=-1)
+        T = torch.randint(0, n, (B, k), generator=g)
+        q2 = F.normalize(q + ETA * F.normalize(p[T].mean(1), dim=-1), dim=-1)
+        sira = lambda qq: ((qq @ p.T)[:, None, :] > (qq @ p.T).gather(
+            1, T)[..., None]).sum(2) + 1
+        boz[k] = float((sira(q2) > sira(q)).float().mean())
+
+    assert boz[1] == 0.0, (
+        "k=1'de %.4f hedefin sirasi kotulesti -- TEOREME AYKIRI, ya p "
+        "birim normda degil ya adim kureye geri izdusurulmuyor" % boz[1])
+    assert boz[11] > 0.05, (
+        "k=11'de bozulma %.4f -- §5.1/J'nin dayanagi bu satir; sifira "
+        "yakinsa dallanma sulandirmasi YOK demektir" % boz[11])
+    # Erisilebilir taban: k hedefin ortalamasinin boyu ~ 1/sqrt(k)
+    tab = 2 - 2 / (11 ** 0.5)
+    return ("k=1 bozulma %.4f (teorem)   k=11 bozulma %.3f   "
+            "k=11 uye tabani %.4f" % (boz[1], boz[11], tab))
+
+
 # =====================================================================
 # VERI YOLU  --  kopyanin ve kurulumun kapilari
 # =====================================================================

@@ -448,6 +448,42 @@ H  L_dis HAKSIZ CEZA (ilk surumden beri biliniyor)
 
 I  OLU KOD
    VQ'nun klasik arizasi. Standart care yeniden baslatma.  A6.
+
+J  KAYBIN GUCU DALLANMA CARPANINA BOLUNUYOR
+   ISPAT -- egitim YOK, veri YOK, agirlik YOK. Yalnizca sabit okuma
+   geometrisi (p, tohum 0, n=444, d=8) ve kaybin tanimi uzerinde
+   aritmetik. `uye`yi DUSUREN bir gradyan adimi, hedeflerin sirasini:
+       k= 1   %0,0 kotulestirir      ort sira degisimi  -31,3
+       k= 2   %0,2                                      -21,7
+       k= 3   %3,7                                      -17,8
+       k= 5   %9,7                                      -13,6
+       k=11   %19,8                                      -9,0
+   k=1 satiri TEOREM: q'yu p_t'ye eta kadar iterken hedefin kazanci
+   eta*1, herhangi bir rakibin kazanci eta*<p_t,p_c> <= eta. Hedef
+   her rakipten EN AZ KADAR kazanir -> sira ASLA kotulesemez.
+   k>1'de gradyan hedeflerin AGIRLIK MERKEZINE gidiyor, ve merkez
+   hicbir hedefin yeri degil.
+
+   ERISILEBILIR TABAN:   uye >= 2 - 2/sqrt(k)
+       k=1 0,0000    k=3 0,8453    k=5 1,1056
+       k=11 1,3970   k=24 1,5918
+   §0'da olculen (EGITILMEMIS) uye = 1,6561. Yani k=11 bir konumda
+   egitimin TAMAMI uyeyi 1,66'dan ancak 1,40'a indirebilir -- %16.
+
+   SEMADAN GERCEK BIR ORNEK: `<kisi adi> -ın  ???` konumunda KISI
+   oznesinden 11 iliski cikabiliyor (annesi arkadasi babasi bolumu
+   cocugu danismani kardesi memleketi ogrencisi tezi yasadigi_yer).
+
+   SONUC  Kayip YANLIS HIZALI DEGIL -- SULANMIS. Belirlenimci
+   konumda kusursuz. Ve `uye` sayisina bakip "model ogrendi mi"
+   DENEMEZ: sayinin icinde, konumdan konuma degisen, AYRILMAMIS bir
+   indirilemez pay var.
+   !! ISINMA (§5.2) bunu COZMEZ. O, pencerenin KESIM YERINDEN dogan
+   belirsizligi atti; bu, DILIN kendi belirsizligi ve her konumda var.
+   !! Tek noktali okumanin yapisal sinirn: k yollu bir konumda
+   hedeflerin en fazla 1/k'si 1. siraya cikabilir. Bu MARJLI kayip
+   icin de gecerli -- okuma tek nokta oldukca kayip sekli degistirmek
+   tavani degistirmez.                                      (kapi 33)
 ```
 
 ---
