@@ -1676,177 +1676,176 @@ tasarımın değil.
 ## 12c. OLGU ARAMASI — TASARIM 2  (21 Eylül, KOD YAZILMADI)
 
 > `[Ö]` ölçüldü · `[H]` hesap · `[Ç]` çıkarım, sınanmadı.
-> §12b'nin yerine geçmez — §12b **koşuldu ve düştü**; bu tasarım
-> onun ölçülen üç arızasına karşı kurulmuştur.
+> §12b **koşuldu ve düştü**. Bu tasarım onun üç ölçülen arızasına
+> karşı kuruldu, sonra kâğıtta sınandı ve **iki kere düzeltildi**
+> (§5.1/T ve aşağıdaki hesaplar). Düzeltmeler yerinde duruyor.
+
+### Tek cümle
+
+**Çapa kaldırılır, yerine TOPLAMSAL bir okuma konur.** İkisi zaten
+aynı makine — "en yakın anahtara bak" — ama biri durumu **değiştirip**
+adresi yok ediyor, öteki **ekleyip** koruyor.
+
+```
+SIMDI   z = vur ? C[k] : zp            DEGISTIRIR   adres yok olur
+YENI    z = normalize( zp + m )        EKLER        adres korunur
+```
 
 ### Niçin — zincir, hepsi ölçülü
 
 ```
 BILGI tam = 0,0000
- <- cevap hicbir blokta YOK, sansta            §5.1/R
- <- olgu aramasi R_r'nin ICINDE olamaz         §5.1/S  SAYILDI
-      Pi R_r  rank<=d, serbestlik 376
-      kisit   308 ozne/iliski x 15 = 4.620     12,3 KAT KISA
+ <- cevap hicbir blokta YOK, sansta                    §5.1/R
+ <- olgu aramasi R_r'nin ICINDE OLAMAZ -- SAYILDI      §5.1/S
+      Pi R_r rank<=d, serbestlik Stiefel(32,16) = 376
+      kisit  308 ozne/iliski x (d-1) = 4.620      12,3 KAT KISA
       ustune R_r IZOMETRI: butun ikili acilari koruyor,
-      olgu tablosu ise keyfi -- rijit harita yapamaz
- <- ve olcum bunu OLAYIN ICINDE gosteriyor     §5.1/S
-      ozne okunabilirligi j=2'de TEPE (0,308 / 0,235),
-      j=4'te -- tam R[iliski]'den sonra -- COKUS (0,147 / 0,044)
+      olgu tablosu keyfi -- rijit harita yapamaz
+ <- ve olcum bunu OLAYIN ICINDE gosteriyor             §5.1/S
+      ozne okunabilirligi j=2'de TEPE, j=4'te -- tam
+      R[iliski]'den sonra -- COKUS
+ <- FIYAT mesele DEGIL: uye kaybinin %49'u zaten
+    varlik konumlarinda ALINMAMIS duruyor              §5.1/O
 ```
 
-`[Ö]` **Fiyat mesele değil** (§5.1/O): `üye` kaybının %49'u zaten
-varlık konumlarında alınmamış duruyor. Kapasite/ağırlık kolu kapalı.
+### Adres — ölçüldü, kusursuz
 
-### Adres — ve neden tavan 0,044 değil 0,235
-
-`[H]` `R_r` izometri olduğu için, **tek bir ilişki içinde**
-`zp = R_r z_s` konfigürasyonu `z_s` konfigürasyonuna **birebir
-eştir** — bütün ikili açılar korunur. Prob'un j=4'te çökmesi, 24
-ilişkiyi tek bir doğrusal çerçevede okumasından. Bir hafıza
-ilişkileri **ayırmak zorunda değil**: farklı ilişkiler uzayın farklı
-yerlerine düşer ve yuvalar oraya yerleşir.
+`[Ö]` §5.1/T: 7.381 tek adımlı öneğin son durumu, yuva tavanı
+(k-ortalama, her yuva çoğunluk cevabı):
 
 ```
-ADRES = zp_j = R[w_{j-1}] z_{j-1}
-        iliski jetonunda  zp = R[iliski] z_{ozne}
-        yani adres ZATEN (ozne, iliski).  ETIKET GEREKMEZ --
-        jetonun kendisi ikinci bileseni tasiyor.
-TAVAN   tepedeki ozne okunabilirligi:  d=8  0,308   d=16  0,235
-        (capa hasari duselecek: d=16'da o adimda %13 atesliyor)
+                  capa     cakisik(cos>0,999)  M=2048 M=4096 M=7381
+  t0_d8           ACIK          %0,1           0,282  0,556  0,999
+  t0_d8           KAPALI        %0,0           0,282  0,556  1,000
+  t0_d16          ACIK         %41,8           0,172  0,333  0,588
+  t0_d16          KAPALI        %0,0           0,287  0,558  1,000
 ```
 
-`[Ö]` Bu, §12b'nin `%11,2` diye yazdığı tavandan **2,1 kat** yüksek.
-§12b tavanı **çöküşten sonraki** durumdan okumuştu — yanlış yerden.
+```
+DONMELER ADRESI HIC BOZMUYOR    izometri, kayipsiz
+TEK BOZAN CAPA                  d=16'da tavanin %41'i
+`d` ADRES ICIN ONEMSIZ          capa kapaliyken d=8 = d=16 = 1,000
+SIKISTIRMA YOK                  tavan M ile DOGRUSAL
+```
+
+`[Ö]` Adres `zp = R[w_{j-1}] z_{j-1}`. İlişki jetonunda bu **zaten
+`(özne, ilişki)`** — etiket gerekmez, jetonun kendisi ikinci bileşeni
+taşıyor. Doğrusal prob bunu göremiyordu (24 ilişkiyi tek çerçevede
+havuzluyor); yuva ataması ortak çerçeve istemiyor, doğru ölçü bu.
 
 ### Ne eklenir
 
 ```
 zp = R[w_{j-1}] z_{j-1}
-a  = softmax( <zp, K> / tau )        K (M, D)   YENI parametre
-m  = a @ V                           V (M, D)   V(0) = 0
-z  = normalize( capa(zp) + m )
-L += a4 * max(0, ates_orani - B)^2   BUTCE  (duz L1 SINANDI, BOS)
-```
-`M = 8192`, `B = 0,30`, `a4 > 1,30` -- gerekceleri asagida.
+kn = top_n( <zp, K> )                 K (M, D)   YENI, VQ ile EGITILMEZ
+a  = softmax( <zp, K[kn]> / tau )
+m  = a @ V[kn]                        V (M, D)   V(0) = 0
+z  = normalize( zp + m )              CAPA YOK
 
-`[H]` **Boyut — ilk yazdığım sayım YANLIŞ ölçüyü saydı.**
-Önce şöyle yazmıştım: kisit 7.381 × (d−1) = 110.715, `M = 2048`
-→ 131.072 parametre, 1,18 kat. **Parametre sayısı doğru ölçü değil.**
-`tau = 0,02` ile softmax neredeyse TOP-1; üretilebilecek AYRI çıktı
-sayısı ~ `M`.
-
-```
-uretilmesi gereken AYRI cevap yonu       1.577
-ayirt edilmesi gereken ADRES             7.381
-  ayni cevabi paylasan adresler AYNI yuvayi kullanabilir, ama
-  ancak zp uzayinda yakinlarsa -- (ozne,iliski) keyfi, yakin
-  olmalari icin sebep YOK
-EN IYI HAL   M >= 1.577      EN KOTU HAL   M >= 7.381
+L  = uye + a1*dis + a3*duzen + a4 * max(0, ort|m| - B)^2
+                                      kod ve bag TERIMLERI KALKAR
 ```
 
-`M = 2048` en iyi halin ust ucunda, yani IYIMSER. **`M = 8192`**:
-`2 x 8192 x 32 = 524.288` parametre, model `285.760 -> 810.048`
-(**+%184**). Buyuk bir degisiklik ve oyle yazilmali; `M`
-kucultulebilir ama once adreslerin kumelenip kumelenmedigi
-olculmeli (ayni prob makinesi yapar).
+`[H]` **`M = 8192`** — §5.1/T: sıkıştırma yok, olgu başına bir yuva.
+7.381 olgu, yani `M >= 7.381`.
+
+```
+donme 220.224 + K 262.144 + V 262.144 = 744.512    (simdi 285.760, x2,61)
+```
+
+`[H]` **`BATCH = 2048`** — bellek aritmetiğinden, varsayılandan değil.
+Skor matrisi `(B·L, M)`: önceki koşu `8192·24·2048·4 = 1,61 GB`;
+`M = 8192`'de **aynı bütçe** `B = 2048` demek. Adım/epok 486 → 1.943.
+
+`[H]` **`a4 > 0,795`** — ikamenin YENİ kayıptaki değeri:
+
+```
+olculen kisayol  0,6387
+  eksi a2*kod    0,2469     bu terim kalkiyor
+  eksi bag       0,0024     bu da
+  = 0,3894
+butce mentesesi  a4 * max(0, ort|m| - B)^2,   B = 0,30
+  B, olculen varlik konumu payi 0,2643'ten turedi -- SECILMEDI  [O]
+  ikame     ort|m| ~ 1,00  ->  maliyet a4 x 0,49
+  amaclanan ort|m| ~ 0,26  ->  maliyet 0   (BEDAVA)
+  engelle:  a4 > 0,3894 / 0,49 = 0,795.   UST SINIR YOK -- ayrisiyor.
+ILK DEGER a4 = 2,0  (tabanin 2,5 kati).  Yukari hata "hafiza hic
+kullanilmaz" demek; asagi hata IKAME demek ve onu bir kez gorduk.
+```
+
+`[Ç]` **`tau`** taşınmıyor: §12b'nin 0,02'si `K = C` içindi, K değişti.
+İlk değer 0,02 ama bu bir **seçim**, ölçüm değil.
 
 ### §12b'nin ÜÇ arızasına karşı
 
 ```
-1  ADRES YANLISTI.  K = C idi; C, `kod` terimiyle k-ortalama gibi
-   egitiliyor ve OLCULDU (§3.1b): ILISKIYI kodluyor (+1,680 bit),
-   olguyu DEGIL (+0,318). Yani hafiza iliski basina tek satirlik
-   bir tabloya donmustu.
-   -> K artik SERBEST parametre. `kod` terimi ona dokunmaz.
-   -> Ve §12b'nin kapasite hesabi 2048 yuva varsaydi; olculen
-      kullanilan kod sayisi 166 idi, yani hesap 12,3 kat iyimserdi.
-      Serbest K'da bu bagimlilik yok.
+1  ADRES YANLISTI.  K = C idi ve C, `kod` terimiyle k-ortalama gibi
+   egitiliyordu; OLCULDU (§3.1b): ILISKIYI kodluyor (+1,680 bit),
+   olguyu DEGIL (+0,318).  Hafiza iliski basina tek satirlik bir
+   tabloya donmustu.  Ve kapasite hesabi 2048 yuva varsaymisti;
+   kullanilan kod sayisi 166'ydi -- 12,3 kat iyimser.
+   -> K SERBEST.  `kod`/`bag` terimleri KALKIYOR, K'yi hicbir sey
+      niceleyiciye zorlamiyor.
 
 2  HER ADIMDA OKUNUYORDU ve BEDAVAYDI.  Optimizasyon donmeleri
-   sondurup (duzen 3057 -> 45) isi hafizaya yaptirdi; capa %94'e
-   cikti, model SONLU OTOMATA coktu. Parametre duzeyinde de
-   gorunuyor: butun donmeler 1,2°, %100 kendine donen (§5.1/Q).
-   -> `a4 * ort(|m|)`: KULLANIM BEDELLI. R'nin isini elinden almak
-      artik ucuz degil.
-   -> DUZ L1 BEDELI SINANDI ve ARALIGI BOS CIKTI:
-        AMACLANAN kullanim  pay 0,2643 x kalinti 1,7436 x tavan 0,235
-                            = 0,1083 kazanc,  ates orani ~0,264   [O]
-        IKAME               0,6387 kazanc,    ates orani ~1,000   [O]
-        maliyet = a4 x oran  ise
-             ikameyi engelle   a4 > 0,6387 / 1,000 = 0,6387
-             kullanimi birak   a4 < 0,1083 / 0,264 = 0,4097
-             0,6387 > 0,4097  ->  **BOS, 1,56 kat**
-        Ilk yazdigim "(0 , 0,46)" araligi yalniz TAVANI hesapliyordu;
-        IKAME TABANINI hic hesaplamamistim.  Duz L1 CALISMAZ.
-   -> BUTCE MENTESESI:   L_haf = a4 * max(0, ates_orani - B)^2
-        B = 0,30   -- olculen varlik konumu payi 0,2643'un biraz ustu,
-                      SECILMEDI, o sayidan turedi                 [O]
-        amaclanan kullanim  oran 0,264  ->  maliyet 0  (BEDAVA)
-        ikame               oran 1,000  ->  maliyet a4 x 0,49
-             ikameyi engelle   a4 > 0,6387 / 0,49 = 1,30
-             ust sinir YOK -- ikinin maliyeti AYRISIYOR
-        ARALIK  a4 > 1,30.  Ilk deger 3,0 (guvenli tarafta; asagi
-        yonde hata IKAME demek ve onu bir kez gorduk).
+   sondurdu (duzen 3057 -> 45), capa %94'e cikti, model SONLU
+   OTOMATA coktu; parametrede de gorunuyor: 1,2 derece, %100
+   kendine donen (§5.1/Q).
+   -> BUTCE MENTESESI.  Duz L1 SINANDI ve araligi BOS cikti
+      (engelle a4 > 0,639 / birak a4 < 0,410, 1,56 kat).  Mentese
+      ile maliyetler AYRISIYOR.
 
-3  V = 0 BASLANGICI DENGEYI DEGISTIRIYORDU.  Baslangic guvenliydi
-   (kapi 36 dogruladi) ama denge degil.
-   -> Bedel terimi dengeyi de sabitler: V buyumesi artik ucretli.
+3  V = 0 BASLANGICI DENGEYI KAYDIRIYORDU.  Baslangic guvenliydi
+   (kapi 36 dogruladi), denge degil.
+   -> Butce dengeyi de sabitler: V buyumesi ucretli.
 ```
 
 ### Ne ÇÖZMEZ
 
 ```
-[O] ADRESLEME TAVANI -- OLCULDU (§5.1/T), ve ilk yazdigim
-    "0,235" YANLISTI.  O sayi DOGRUSAL PROBun tavani; slot
-    hafizasi ortak bir dogrusal cerceve istemiyor, yani yanlis
-    olcu.  Yuva tavani (M = 7.381, cogunluk cevap):
-        capa ACIK  (d=16)  0,588      capa KAPALI  1,000
-    Donmeler adresi HIC bozmuyor -- izometri.  `d` de onemsiz.
-[O] TEK KAYIP CAPA, ve BUYUK: tavanin %41'i.  d=16'da onek
-    sonunda %37 atesliyor, adreslerin %41,8'ini AYNILASTIRIYOR.
-    -> "capa'ya dokunulmaz" karari DUSTU.  Bu tasarim capayi
-       KALDIRIP yerine toplamsal okumayi koymali (§5.1/T'deki
-       birlestirme).  Bedeli: §3.2 dayanaksiz kalir -- zaten
-       uygulanmamis (T3).
-[H] MODEL 2,8 KATINA CIKIYOR (285.760 -> 810.048).  Bu artik
-    "kucuk bir ekleme" degil; kiyaslarda oyle yazilmali.
-[C] CIKARIM (2 adim) icin hicbir sey yapmiyor. Tek adimli olgu
-    aramasi calisirsa zincir AYRI bir soru olarak acilir.
-```
-
-### Açık kalanlar
-
-```
-[C] `tau`. §12b'de 0,02 idi ve etkin yuva sayisi olculmustu.
-    K degisti, o olcum tasinmaz -- yeniden bakilmali.
-[C] Okuma `capa`dan ONCE mi SONRA mi? Yukarida SONRA yazildi
-    (§12b ile ayni). Ama capa adresi bozuyorsa (yukarida), okuma
-    capa ONCESI zp'den adreslenip SONRA eklenmeli. Ikisi ayri
-    denklem; kagitta ayrilmadi.
-[C] `a4` bir MENTESE mi olmali (belli bir orandan sonra ceza)?
-    Duz L1 az kullanimi da cezalandiriyor.
+[O] TAVAN, capa kalkinca 1,000 -- ADRESLEME tarafinda engel yok.
+    Ama tavan "ogrenilebilir" demek DEGIL; 7.381 yuvanin dogru
+    degerle dolmasi AYRI bir is ve bu tasarim onu GARANTI ETMIYOR.
+[O] MODEL 2,6 KATINA CIKIYOR (285.760 -> 744.512).  Artik "kucuk
+    bir ekleme" degil; her kiyasta oyle yazilacak.
+[H] M kucultulebilir mi: M=4096'da tavan 0,558.  Ilk kosu M=8192
+    ile; mekanizma calisirsa M asagi taranir.
+[C] CIKARIM (2 adim) icin hicbir sey yapmiyor.  Tek adim calisirsa
+    zincir AYRI bir soru olarak acilir.
+[!] §3 GERI CEKILIYOR.  Capa kalkinca §3'un "durum bir koda oturur
+    -> bilesim gorulmus parcalara iner" iddiasi mimaride KALMIYOR.
+    Zaten olculmustu (§3.1b: kod iliskiyi kodluyor, bilesim inmiyor)
+    ama bu bir IDDIA GERI CEKME ve oyle yazilmali.
+    §3.2 (reddetme = kod uyeligi) dayanaksiz kalir -- hic
+    uygulanmamisti (T3).  T3 KAPANIR: artik uygulanamaz.
+    SAAT `t` capaya bagliydi (vur olunca sifirlanir); SAAT=False
+    oldugu icin fiilen etkisiz, ama kod ve kapi 35 temizlenecek.
 ```
 
 ### ÖNCEDEN KAYIT — ilk koşu neye karar verir
 
 ```
-DEGISEN   K (serbest), V, ve a4 bedeli.  d = 16 KALIR.  Tek paket,
-          parcalari ayri ayri taranmaz.
+DEGISEN   capa KALKAR; K serbest (M=8192), V, a4 butcesi;
+          kod/bag terimleri kalkar; BATCH 8192 -> 2048.
+          TEK PAKET -- "capa yerine toplamsal okuma".  Parcalari
+          ayri ayri taranmaz.  d = 16 KALIR.
 
-BIRINCIL  BILGI tam.  Tavan 0,235; 0,0000'dan BUYUK ise tasarim
-          DOGRU yon.  0,0000 ise DUSER.
+BIRINCIL  BILGI tam.  Adresleme tavani 1,000, yani bu kez tavan
+          BAGLAMIYOR.  > 0,0000 ise tasarim DOGRU yon.
+          = 0,0000 ise MIMARI KOL KAPANIR: adres kusursuz,
+          kapasite yeterli, fiyat dogru, ve HALA yok.
 
-IKINCIL -- HUKUM VERMEZ ama tasarimi ACIKLAR
-   duzen   45'e cokerse §12b tekrarlaniyor -> bedel YETMEDI
-           1128 civarinda kalirsa bedel TUTTU
-   |m| nerede ateslyor:  varlik konumlarinda mi?  Tasarimin
-           iddiasi bu.  §5.1/R'nin makinesi bu olcumu zaten yapiyor.
-   BICIM   §12b'de cokmustu (kalip 0,2372 -> 0,0000).  Cokerse
-           yine ikame var demektir.
+IKINCIL -- HUKUM VERMEZ, tasarimi ACIKLAR
+   ort |m|   0,30'un altinda mi (butce tuttu mu)
+   duzen     45'e cokerse IKAME var demektir, butce YETMEDI
+   |m| NEREDE buyuk: varlik konumlarinda mi?  Tasarimin iddiasi
+             bu, ve olcen makine kurulu (§5.1/R).
+   BICIM     §12b'de cokmustu; cokerse yine ikame var.
+   kullanilan yuva sayisi
 
 NE YAPILMAZ
    M, tau, a4 birlikte taranmaz.  Bir kosu, bir karar.
-   capa'ya DOKUNULMAZ -- ayni kosuda iki degisken olmaz.
+   `d` oynatilmaz -- §5.1/T'ye gore adres icin onemsiz zaten.
 ```
 
 ---
@@ -1886,6 +1885,10 @@ K11 delta = 0,40 DEGISMIYOR -- incelendi       K    §5.1/A
 T1  olcum ACGOZLU kosuyor, §7 ISIN diyor       T    §7, A7
 T2  §9.7 "r, delta egitimde yok" YANLIS        T    §9.7 -- duzeltildi
 T3  §3.2 reddetme kodda YOK                    T    A9
+    -> §12c capayi kaldiriyor; kod uyeligi diye
+       bir sey kalmayinca reddetme BU YOLLA
+       UYGULANAMAZ.  Tasarim gecerse T3 KAPANIR
+       ve reddetme AYRI bir mekanizma ister.
 
 A1  a1/a2/a3 OLCULMEDEN secildi                A    §5.1/B, K, M
     (uye ORTALAMA, dis TOPLAM; ve OLCULDU:
