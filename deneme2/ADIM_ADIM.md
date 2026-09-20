@@ -387,3 +387,47 @@ NEREYE BAKILACAK  DENKLEM §5.1/L, §13/A10, §4.3;  kapi 31;
 
 ### Adım 5 — `z_4 -> z_5`, girdi `-i`, hedef `Ceren`   (SIRADA)
     !! BILGI ADIMI -- sinavin sordugu TEK gecis bu.
+
+---
+
+## ARA: adim adim denetim DURDU, teshis zinciri devraldi  (21 Eylul)
+
+Adim 4 kapaninca t0 kosuldu ve `BILGI tam = 0,0000` cikti. Kullanici
+gozle teyit istedi (20 soru tablosu), teyit etti, ve tabloda sayida
+gorunmeyen bir sey gorundu: TEKRARLAR. Oradan adim adim denetim
+yerine bir TESHIS ZINCIRI yurudu. Sirasiyla ELENENLER:
+
+```
+"kayip sirayi bozuyor"        k=1'de TEOREM olarak bozmuyor   (kapi 33)
+"tekrar capa emici durumu"    uretimde capa HIC atesmiyor
+"tek duzlem (§4.3)"           K_TAM = n, acik sinif BOS
+"a3 donmeyi sifira cekiyor"   varlikta cekme itmenin 5,9 kati
+"amac ayrimi istemiyor"       ayirt edici bilgi %66,9 (SAYILDI)
+"egitim bulamamis"            Procrustes fazladan hicbir sey vermiyor
+```
+
+Besi benim hipotezimdi, besi de curudu. Ikisi KOSMADAN, sadece
+sayarak -- kullanici: *"once tezini matematikle sinadin mi yoksa
+deneme yanilma mi olacak"*.  Iki OLCUM HATAM da duzeltildi
+(noktaya uydurma; sifir skorlu sinif yigini).
+
+VARILAN YER -- ve ilk kez SAYISI VAR:
+```
+TASIMA  CALISIYOR   ozne kimligi, onegin sonunda, TAM durumdan
+                    dogrusal probla 6,09/480  (%35,1 tam isabet,
+                    sans 240,5).  §2.1'in izometri iddiasi ISE YARIYOR.
+OKUMA   SUCLU       ayni kimlik, okunabilir 8 boyutta 50,18/480 (%3,2)
+BEDEL               sira 8,2 kat,  tam isabet 11 kat
+```
+
+ADAYLAR, kagitta:
+```
+1  d'yi buyutmek        DESTEKLENDI  d=16'da kimlik 15,37 (%16,9)
+                                     maliyet SIFIR, §4.1 korunuyor
+2  kayba |Pz| terimi    ELENDI       korelasyon -0,068 / -0,014
+3  dogrusal olmayan okuma  sirasi gelmedi
+```
+
+KARAR (kullanici): `D_OKUMA 8 -> 16`, baska hicbir sey.
+Onceden kayit ve kosu: commit `f4df8ae`.
+Adim adim denetim, o kosunun sonucundan sonra ADIM 5'ten devam eder.
