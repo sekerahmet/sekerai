@@ -23,3 +23,9 @@ arsiv/
 *.npz
 *.parquet
 onbellek/
+
+# model_13 uretilmis ciktilari: uretilebilir, depoda durmasin
+deneme2/model_13/*.npz
+deneme2/model_13/*.png
+deneme2/model_13/*.pdf
+deneme2/model_13/*.md
