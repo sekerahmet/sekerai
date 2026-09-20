@@ -646,3 +646,13 @@ M3 (yalnız SON adımda okunur).  Hiçbiri sınanmadı.
 
 SIRADAKI: adım adım denetim **ADIM 6**'dan devam eder
 (`z_5 -> z_6`, Ceren -> Yıldız).
+
+YEDEK ALINDI: `t0_d16_hafizali/` (21 Eylul).  Drive'da dort kosu var:
+`t0`, `t0_d8`, `t0_d16_hafizasiz`, `t0_d16_hafizali`.
+
+Ayni okumada §5.1/M'nin "eksik sayi"si cikti ve BENIM ARITMETIGIMI
+DUZELTTI: hafizasiz kosuda `duzen` COKMEMIS -- epok 1'de 870'e inip
+sonra GERI TIRMANMIS (991, 1078, 1106, 1128). Yani 3056,93'ten
+olcmek yanlisti. Iki DENGE arasi olculunce kisayolun bedeli 0,6387
+cikti (uye %44, kod %39 muhasebe, duzen %17) -- butun olgulari
+ogrenmenin (<= 0,3008) IKI KATI. Hukum degismedi, GUCLENDI.

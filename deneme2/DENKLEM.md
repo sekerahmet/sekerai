@@ -802,62 +802,87 @@ L  VARLIK BIRIMLERI DURUMU OYNATMIYOR  --  BILGI=0'IN MEKANIZMASI
    iyi degildir. §13'un kendi kurali: "kapi teoreme degil IHTIYACA
    kurulur" -- ihtiyac "varlik birimi durumu OYNATMALI".
    ACIK -- esik ve care karari verilmedi.
-M  KAYIP OLGUYU SATIN ALAMIYOR -- HESAPLANDI (21 Eylul, kagit, GPU YOK)
+M  KAYIP OLGUYU SATIN ALAMIYOR -- SAYILDI + OLCULDU (21 Eylul)
    §12b hafiza kosusu duserken sorulan soru: optimizasyon neden
    donmeleri sondurmeyi SECTI?  Cevap kayipta, aritmetikle.
 
-   1) OLGU, PUANLANAN KONUMLARIN %15,04'U.
+   1) OLGU, PUANLANAN KONUMLARIN %15,04'U.  (kagit, GPU YOK)
       Korpusun kendi kalip karisimi (17 bildirim + 8 soru) x 7.381
-      olgu = 184.525 cumle, 2.356.137 birim konumu.
+      olgu = 184.525 cumle, 2.356.137 birim konumu:
           SABLON / DIL          %43,2
           OZNE anilmasi         %23,2
           CEVAP birimleri       %33,6
       Cevap birimlerinin hepsi olgu istemiyor: ek UNLU UYUMUNDAN
       deterministik, soyadin bir kismi addan cikarilabilir. 1.608 ad
-      uzerinde onek-dallanmasi sayildi: ad basina 2,85 birim, bunun
-      1,92'si BELIRSIZ.  184.525 x 1,92 / 2.356.137 = %15,04.
+      uzerinde onek-dallanmasi sayildi -- ad basina 2,85 birim, bunun
+      1,92'si BELIRSIZ.   184.525 x 1,92 / 2.356.137 = %15,04.
 
-   2) BUTUN OLGULARI BILMENIN KAYIPTAKI DEGERI.
+   2) BUTUN OLGULARI BILMENIN DEGERI.
       uye = 2 - 2*ort(cos), konum basina ORTALAMA (§5.1/B). O %15,04'u
-      cos = 1'e cekmenin kazanci:
-          2 x 0,1504 x (1 - cos_simdi)
-          cos >= 0        ->  EN COK  0,3008
-          cos ~ 0,5       ->  yaklasik 0,1504
+      cos = 1'e cekmenin kazanci  2 x 0,1504 x (1 - cos_simdi):
+          cos >= 0   ->  EN COK 0,3008        cos ~ 0,5  ->  ~0,1504
 
-   3) DONMELERI SONDURMENIN DEGERI.
-          a3 x (duzen_bas - duzen_son) = 1e-4 x (3056,93 - 45,04)
-                                       = 0,3012
+   3) KISAYOLUN DEGERI -- iki DENGE arasi, OLCULDU.
+      (t0_d16_hafizasiz / t0_d16_hafizali, ikisi de epok 5)
+
+      ```
+                  hafizasiz   hafizali    kayiptaki fark
+      uye            0,9460     0,6639        +0,2821   %44
+      a2*kod         0,2672     0,0203        +0,2469   %39
+      a3*duzen       0,1128     0,0045        +0,1083   %17
+      a2*beta*bag    0,0062     0,0038        +0,0024    %0
+      a1*dis         0,0003     0,0013        -0,0010    -
+      TOPLAM         1,3325     0,6938        +0,6387
+      ```
 
    ```
-   BUTUN korpusu ezberlemek      <= 0,3008   (gercekci ~0,15)
-   donmeleri sondurmek              0,3012   GARANTI, ANINDA, BEDAVA
+   KISAYOL (olgu SIFIR)          0,6387
+   BUTUN korpusu ezberlemek     <= 0,3008
    ```
 
-   **Ayni para.** Ve ikincisi 376 parametreyi sifira cekmekle
-   bulunuyor; birincisi 7.381 olguyu adreslenebilir kilmakla.
-   Optimizasyon ucuz olani sectigi icin degil, AYNI FIYATA daha kolay
-   olani sectigi icin sondurdu. Hafiza bunu YARATMADI -- yalnizca
-   uye'nin o ana kadar odettigi bedeli kaldirdi.
+   **Kisayol, butun olgulari ogrenmenin IKI KATINDAN fazla oduyor.**
+   Ve yalniz `uye`den aldigi 0,2821, olgunun EN IYI HALDE degdigi
+   0,3008'in **%94'u** -- hicbir olgu ogrenmeden. Optimizasyon yanlis
+   bir sey yapmadi; dogru fiyata bakip kolay olani sectI.
 
-   EKSIK SAYI: hafizasiz d=16 kosusunun SON `duzen`i kayitli degil
-   (defterin 3. hucresi sonraki kosuda temizlendi). O sayi, 0,3012'nin
-   ne kadarinin zaten toplanmis oldugunu soylerdi. Yeni kosu gerekmez;
-   bir sonraki kosuda `duzen` egrisi kaydedilsin.
+   HANGISI TESVIK, HANGISI MUHASEBE:
+   ```
+   uye     zf'ye gradyan VERIR                      TESVIK
+   dis     VERIR                                    TESVIK
+   bag     VERIR ama `vur` ile kapili -- capa %94'e  GERI BESLEME:
+           cikinca neredeyse her adimda uygulanir,   kapandikca
+           zp'yi kodlara ceker, capa daha cok atesler  hizlanir
+   duzen   a, th uzerinde DOGRUDAN                   TESVIK
+   kod     `zf.detach()` -- yalniz C hareket eder.   MUHASEBE
+           0,2469'luk dususu cokusun SONUCU, sebebi DEGIL.
+           !! a2'yi bu sayiya bakip oynatmak HATA olur.
+   ```
+
+   DUZELTME: ilk yazimda 3) "a3 x (3056,93 - 45,04) = 0,3012" diyordu.
+   3056,93 BASLANGIC degeri; hafizasiz kosunun oradan zaten indigi
+   varsayildi. Kayit aksini soyledi -- hafizasiz kosuda `duzen`
+   epok 1'de 870'e inip sonra GERI TIRMANDI (991, 1078, 1106, 1128):
+   cezaya ragmen acilar BUYUYOR, cunku uye odiyordu. a3'un gercek payi
+   0,1083, yani kisayolun %17'si. Sonuc degismedi, GUCLENDI: asil
+   odeme `uye`den geliyor.
 
    SONUCU MIMARI: kapasite eklemek bu tabloyu DEGISTIRMEZ. Eklenen her
-   serbestlik, 0,30'u olgu ogrenmeden toplamanin YENI bir yolunu acar
+   serbestlik, 0,64'u olgu ogrenmeden toplamanin YENI bir yolunu acar
    -- §12b'de tam bu oldu. Once FIYAT duzelir, sonra kapasite.
-       ADAY L1  a3 = 0.  `duzen` R -> I'yi ODULLENDIRIYOR; §5.1/K zaten
-                "kayip duserken sira kotulesiyor, kazanc kod+duzen'den"
-                diyordu. Tek satir, ucuz.
+       ADAY L1  a3 = 0.  Kisayolun yalniz %17'sini alir -- TEK BASINA
+                YETMEZ.  (§5.1/K'yi yine de kapatir.)
        ADAY L2  `uye` konum basina ESIT agirlikli olmasin. Olgu
                 konumlari korpus uretecinden BILINIYOR; maske pencereyle
-                birlikte tasinir.  !! Modele "burasi olgu" sinyali
-                vermek demek -- bu bir TASARIM KARARI, bedava degil.
+                tasinir.  !! Modele "burasi olgu" sinyali vermek --
+                TASARIM KARARI, bedava degil.
        ADAY L3  Etiketsiz surumu: zor konuma agirlik (focal). Olgu
                 konumlari zaten zor oldugu icin kendiliginden agirlik
                 alir; ek sinyal YOK.
-   Ucu de SINANMADI.  L1 en ucuzu ve zaten acik bir kalemi (A1) kapatir.
+       ADAY L4  `bag` geri beslemesini kes: `vur` orani bir tavani
+                asarsa bag'i kapat, ya da bag'i capa oranina bol.
+                Cokusun HIZLANDIRICISI budur, kaynagi degil.
+   Dordu de SINANMADI.  Kisayolun %44'u `uye`de oldugu icin L2/L3
+   dogrudan oraya bakiyor; L1 ve L4 tek baslarina yetmez.
 ```
 
 ---
@@ -1336,11 +1361,11 @@ A1  a1/a2/a3 OLCULMEDEN secildi                A    §5.1/B, K, M
     (uye ORTALAMA, dis TOPLAM; ve OLCULDU:
      750. adimdan sonra kayip DUSERKEN sira
      KOTULESIYOR -- kazanc kod+duzen'den)
-    !! HESAPLANDI (§5.1/M): BUTUN olgulari
-    bilmek kayipta EN COK 0,3008 eder; a3 ile
-    donmeleri sondurmek 0,3012 eder. AYNI PARA.
-    Fiyat duzelmeden kapasite eklemek bosuna --
-    §12b bunun ilk kaniti.
+    !! OLCULDU (§5.1/M): BUTUN olgulari bilmek
+    kayipta EN COK 0,3008 eder; §12b'nin kisayolu
+    OLGUSUZ 0,6387 etti -- iki kati. Payi: uye
+    %44, kod %39 (muhasebe), duzen %17.
+    Fiyat duzelmeden kapasite eklemek bosuna.
 A12 d TEK BASINA OYNATILMAZ -- TAKAS           A    §5.1/L
     d=8->16 dili kazandi, durum ozne
     kimligini kaybetti (%35,1 -> %11,2).
