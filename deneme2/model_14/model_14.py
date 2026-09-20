@@ -234,14 +234,54 @@ class Yol(nn.Module):
                            dim=-1)
 
     # ---------------- yol ----------------
+    @staticmethod
+    def esik(r: float) -> float:
+        """ic carpim esigi.  2-2s < r^2  <=>  s > 1 - r^2/2.
+
+        r = 0  ->  2.0, yani `s > esik` HIC dogru olmaz: CAPA KAPALI
+        (§12c).  s fp32'de 1'i birkac ulp asabiliyor, o yuzden 1.0
+        degil 2.0."""
+        return 1.0 - 0.5 * r * r if r > 0 else 2.0
+
+    def adim(self, z, w, Rd, C, Ct, esik):
+        """TEK ADIM:  zp -> capa -> hafiza.  -> (z, zp, vur, k, m)
+
+        !! EGITIM ve URETIM BU AYNI KODU cagirir.  Ayri yazilmislardi
+        ve uretim tarafi hafizayi HIC okumuyordu; §12b kosusu boylece
+        hafizayla egitilip HAFIZASIZ olculdu ve BICIM sayilari
+        gecersiz cikti (21 Eylul).  Kapi 38 ikisini birbirine baglar.
+
+        ARAMA GRADYANSIZ: `k` indeks, `vur` bool -- geri hicbir sey
+        akmaz. Gradyan C'ye C[k] ve C[kn] uzerinden gidiyor. no_grad
+        olmadan (B,K) ara tensor geri gecis icin TUTULUYOR."""
+        zp = torch.bmm(F.embedding(w, Rd).view(-1, self.D, self.D),
+                       z.unsqueeze(-1)).squeeze(-1)
+        V = self.V
+        with torch.no_grad():
+            sa = zp @ Ct
+            s, k = sa.max(1)
+            vur = s > esik
+            kn = sa.topk(self.haf_n, 1).indices if V is not None else None
+        z = torch.where(vur[:, None], C[k], zp)
+        if V is None:
+            return z, zp, vur, k, None
+        # OLGU HAFIZASI -- EKLEMELI, ve sorgu `zp`den (capa ONCESI):
+        # capa tetiklendiginde z artik c_k ve ozne kimligi orada YOK
+        # (olculdu: capa tetikleyen orneklerde 1,10 kat, otekilerde
+        # 11,34 kat sans ustu).
+        a = torch.softmax((C[kn] * zp[:, None]).sum(-1) / self.haf_tau, 1)
+        m = (a[..., None] * F.embedding(kn, V)).sum(1)
+        return F.normalize(z + m, dim=-1), zp, vur, k, m
+
     def yol(self, X: torch.Tensor, r: float = 0.25) -> dict:
-        """X (B, L) -> sozluk:  z, zp, t, vur, k   (hepsi (B,L,...))
+        """X (B, L) -> sozluk:  z, zp, t, vur, k, mn   (hepsi (B,L,...))
 
             z    capa SONRASI durum      -- okuma bunu kullanir
             zp   capa ONCESI durum       -- VQ kaybi BUNU kullanir
             t    son capadan beri adim
             vur  capa tetiklendi mi
             k    en yakin kodun indeksi
+            mn   hafiza okumasinin normu |m|  (hafiza yoksa 0)
 
         !! `zp` ayri donuyor cunku capa sonrasi z TAM OLARAK C[k]'dir;
         VQ baglilik terimi z uzerinden yazilirsa ||z - C[k]|| = 0 olur
@@ -253,7 +293,6 @@ class Yol(nn.Module):
         CAPADA GRADYAN KESILIR: `torch.where` ile z kolu kopar, C kolu
         kalir. Durumu koda ceken sey L_capa'nin BAGLILIK terimi."""
         R, C = self.donme(), self.kod()
-        V = self.V
         B, L = X.shape
         # Donme ARAMASI `embedding` ile: ayni ileri gecis, ama geri
         # gecisi `embedding_dense_backward` (siralanmis, segmentli)
@@ -263,10 +302,7 @@ class Yol(nn.Module):
         # Kod defteri devrigi DONGU DISINDA: adim basina (D,K) kopyasi
         # cikariliyor.
         Ct = C.t().contiguous()
-        # ||z-C||^2 = 2 - 2 z.C  ve z,C birim normda; en YAKIN kod, ic
-        # carpimi EN BUYUK olandir. Esigi de dogrudan ic carpima
-        # ceviriyoruz:  2-2s < r^2  <=>  s > 1 - r^2/2.
-        esik = 1.0 - 0.5 * r * r
+        esik = self.esik(r)
         # Pencere basi: ilk birim okuma uzayina, gizli kisim sifir.
         # Pencere akistan KEYFI yerden basliyor, yani bastaki durum COP.
         # "Ilk capada silinir" IDDIASI KALDIRILDI -- olculdu, capa adim
@@ -276,42 +312,18 @@ class Yol(nn.Module):
         z[:, :self.d] = self.p[X[:, 0]]
         sf_b = torch.zeros(B, dtype=torch.bool, device=X.device)
         sf_l = torch.zeros(B, dtype=torch.long, device=X.device)
-        o = {"z": [z], "zp": [z], "t": [sf_l], "vur": [sf_b], "k": [sf_l]}
+        sf_f = torch.zeros(B, device=X.device)
+        o = {"z": [z], "zp": [z], "t": [sf_l], "vur": [sf_b], "k": [sf_l],
+             "mn": [sf_f]}
         t = sf_l
         for j in range(1, L):
-            Rg = F.embedding(X[:, j - 1], Rd).view(B, self.D, self.D)
-            zp = torch.bmm(Rg, z.unsqueeze(-1)).squeeze(-1)
-            t = t + 1
-            # !! ARAMA GRADYANSIZ. `k` bir INDEKS, `vur` bir BOOL --
-            # ikisinden de geri hicbir sey akmaz. Gradyan C'ye asagida
-            # C[k] uzerinden gidiyor. no_grad olmadan (B,K) ara tensor
-            # geri gecis icin TUTULUYOR: adim basina 67 MB x 15 adim.
-            with torch.no_grad():
-                sa = zp @ Ct
-                s, k = sa.max(1)
-                vur = s > esik
-                kn = sa.topk(self.haf_n, 1).indices if V is not None else None
-            z = torch.where(vur[:, None], C[k], zp)
-            # OLGU HAFIZASI (§12b) -- CAPADAN SONRA, ve EKLEMELI.
-            # !! SORGU `zp`den, yani capa ONCESI durumdan: capa
-            # tetiklendiginde z artik c_k ve ozne kimligi orada YOK
-            # (olculdu: capa tetikleyen orneklerde kimlik 1,10 kat,
-            # tetiklemeyenlerde 11,34 kat sans ustu).
-            # !! CAPADAN SONRA cunku ONCE olsaydi capa hafizayi
-            # SILERDI -- ve tam cevap konumunda %37 tetikliyor.
-            # Bedeli: §3.1'in "capa sonrasi durum gecmisten BAGIMSIZ"
-            # teoremi artik GECERLI DEGIL. Bilerek: o bagimsizlik
-            # ozneyi de unutturuyordu (§3.1'in kendi `!!` blogu).
-            if V is not None:
-                a = torch.softmax(
-                    (C[kn] * zp[:, None]).sum(-1) / self.haf_tau, 1)
-                z = F.normalize(z + (a[..., None]
-                                     * F.embedding(kn, V)).sum(1), dim=-1)
-            t = t.masked_fill(vur, 0)
-            for ad, v in (("z", z), ("zp", zp), ("t", t), ("vur", vur),
-                          ("k", k)):
-                o[ad].append(v)
-        return {a: torch.stack(v, 1) for a, v in o.items()}
+            z, zp, vur, k, m = self.adim(z, X[:, j - 1], Rd, C, Ct, esik)
+            t = (t + 1).masked_fill(vur, 0)
+            for ad, u in (("z", z), ("zp", zp), ("t", t), ("vur", vur),
+                          ("k", k),
+                          ("mn", sf_f if m is None else m.norm(dim=-1))):
+                o[ad].append(u)
+        return {a: torch.stack(u, 1) for a, u in o.items()}
 
     def _kos(self, z: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """(B,L,n) -- cos(aci).  `oku` bunun 2-2x'i.
@@ -368,10 +380,15 @@ class Yol(nn.Module):
 
     # ---------------- kayip ----------------
     def kayip(self, X, a1=1.0, a2=1.0, a3=1e-4, delta=0.4, beta=0.25,
-              r=0.25, isin=4):
+              r=0.25, isin=4, a4=0.0, haf_b=0.30):
         """YOLUN TAMAMINA bakar -- next token YOK.  DENKLEM.md §5.
 
-        a1..a3 OLCULMEDEN secilmez; buradakiler baslangic.
+        a1..a4 OLCULMEDEN secilmez; buradakiler baslangic.
+
+        `a4`, `haf_b`  HAFIZA BUTCESI (§12c).  Duz L1 bedeli kagitta
+        sinandi ve araligi BOS cikti: ikameyi engellemek a4 > 0,639,
+        amaclanan kullanimi birakmak a4 < 0,410.  Mentese ile ikisi
+        AYRISIYOR -- butcenin altinda BEDAVA, ustunde kareyle artiyor.
 
         `isin` ISINMA: ilk `isin` konum PUANLANMAZ. Pencere akistan
         keyfi yerden basliyor, yani bastaki onek cop. HESAP (§5.2):
@@ -399,27 +416,37 @@ class Yol(nn.Module):
         # (yoksa butun durumlar koda cekilir ve model sonlu otomata coker).
         # !! `zp` -- capa ONCESI durum. `z` kullanilirsa fark sifirdir.
         # !! `k` yol()tan geliyor; yeniden cdist B*(L-1) x K matris demek.
-        zf = y["zp"][:, isin:].reshape(-1, self.D)
+        # !! a2 = 0 iken HIC HESAPLANMAZ.  §12c capayi kaldiriyor ve C'yi
+        # SERBEST ANAHTAR yapiyor; `kod` terimi C'yi k-ortalamaya zorlar
+        # ve OLCULDU (§3.1b) ki o zorlama C'ye OLGUYU degil ILISKIYI
+        # kodlatiyor -- hafizanin adresini bozan sey tam buydu.
         vf = y["vur"][:, isin:].reshape(-1)
-        Ck = F.embedding(y["k"][:, isin:].reshape(-1), self.kod())  # BIR gather
-        kod = (zf.detach() - Ck).pow(2).sum(-1).mean()
-        bag = ((zf - Ck.detach()).pow(2).sum(-1) * vf).sum() \
-            / vf.sum().clamp(min=1)
-        capa = kod + beta * bag
+        if a2:
+            zf = y["zp"][:, isin:].reshape(-1, self.D)
+            Ck = F.embedding(y["k"][:, isin:].reshape(-1), self.kod())
+            kod = (zf.detach() - Ck).pow(2).sum(-1).mean()
+            bag = ((zf - Ck.detach()).pow(2).sum(-1) * vf).sum() \
+                / vf.sum().clamp(min=1)
+        else:
+            kod = bag = uye.new_zeros(())
+
+        # HAFIZA BUTCESI -- butcenin altinda BEDAVA (docstring).
+        mn = y["mn"][:, isin:].mean()
+        haf = (mn - haf_b).clamp(min=0).pow(2) if a4 else mn.new_zeros(())
 
         # a3 = EZBER <-> GENELLEME dugmesi.
         duzen = self.a.pow(2).sum() + self.th.pow(2).sum()
-        top = uye + a1 * dis + a2 * capa + a3 * duzen
+        top = uye + a1 * dis + a2 * (kod + beta * bag) + a3 * duzen \
+            + a4 * haf
 
         # IZ -- her cagride guncellenen kopuk skalerler. Senkron YOK
         # (kimse float() cagirmadikca), maliyeti yok. Kayip sayisal
-        # olarak patlarsa hangi terimde patladigini bu soyler; ve
-        # `capa` sifir kalirsa mimarinin ASIL iddiasi (§3) hic
-        # calismiyor demektir -- o da buradan gorulur.
+        # olarak patlarsa hangi terimde patladigini bu soyler.
+        # `mn` BUTCENIN kendisi: 0,30'u asarsa ikame basliyor demektir.
         self.son = {"top": top.detach(), "uye": uye.detach(),
                     "dis": dis.detach(), "kod": kod.detach(),
                     "bag": bag.detach(), "duzen": duzen.detach(),
-                    "capa": vf.float().mean().detach(),
+                    "capa": vf.float().mean().detach(), "mn": mn.detach(),
                     "Pz_min": y["z"][..., :self.d].norm(dim=-1).min().detach(),
                     "V_max": (self.V.norm(dim=-1).max().detach()
                               if self.V is not None
@@ -438,6 +465,8 @@ class Yol(nn.Module):
         yanlis verir. Kucukse capa hic tetiklenmez ve comp garantisi
         duser. Olculecek esik."""
         R, C = self.donme(), self.kod()
+        Rd, Ct, esik = (R.reshape(self.n, self.D * self.D),
+                        C.t().contiguous(), self.esik(r))
         H = self.hedef(en_cok + len(onek) + 1) if self.saat else None
         dur = set(dur)
         z = self.p.new_zeros(1, self.D)
@@ -447,12 +476,8 @@ class Yol(nn.Module):
         puan = torch.zeros(1, device=z.device)
 
         for j in range(1, len(onek) + en_cok):
-            z = torch.bmm(R[yol[:, -1]], z.unsqueeze(-1)).squeeze(-1)
-            t = t + 1
-            yak2, k = (2 - 2 * (z @ C.T)).clamp(min=0).min(1)   # ICSEL CAPA
-            vur = yak2 < r * r
-            z = torch.where(vur[:, None], C[k], z)
-            t = torch.where(vur, torch.zeros_like(t), t)
+            z, _, vur, _, _ = self.adim(z, yol[:, -1], Rd, C, Ct, esik)
+            t = (t + 1).masked_fill(vur, 0)
 
             q = F.normalize(z[:, :self.d], dim=-1)
             d2 = ((2 - 2 * (q @ self.p.T)) if H is None else
@@ -497,9 +522,10 @@ def saglik(m: Yol) -> str:
     return ("terim  " + "  ".join("%s %.4f" % (k, float(s[k])) for k in
                                   ("uye", "dis", "kod", "bag", "duzen")
                                   if k in s)
-            + "\n       capa %%%.2f   |Pz|min %.2e   |u|min %.2e   "
-              "|v_dik|min %.2e   (acik sinif %d)"
-            % (100 * float(s.get("capa", 0)), float(s.get("Pz_min", 0)),
+            + "\n       capa %%%.2f   |m| %.4f   |V|max %.3f   |Pz|min %.2e"
+              "   |u|min %.2e   |v_dik|min %.2e   (acik sinif %d)"
+            % (100 * float(s.get("capa", 0)), float(s.get("mn", 0)),
+               float(s.get("V_max", 0)), float(s.get("Pz_min", 0)),
                un, vd, len(m.ix_acik)))
 
 

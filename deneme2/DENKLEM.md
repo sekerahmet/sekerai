@@ -1618,7 +1618,14 @@ epok 5 0,6639     45,04    %94,35
 adım aynı birkaç koda oturuyor. Yani `z_j = capa(R[w] z_{j-1})`
 zinciri fiilen çalışmıyor — model YOL olmaktan çıktı.
 
-**ÖLÇÜM:**
+**ÖLÇÜM — !! BU SAYILAR GEÇERSİZ, 21 Eylül'de anlaşıldı.**
+`olcme_14.uret_toplu` adımı KENDİ yazıyordu ve `mdl.V`ye hiç
+dokunmuyordu; koşu hafızayla eğitilip **hafızasız** ölçüldü.
+BİÇİM çöküşü bundan da gelebilir. EğİTİM LOGU geçerli
+(yozlaşma orada ölçüldü), ÇIKTI ölçümü değil.
+Düzeltildi: tek adım artık `Yol.adim`da, iki yol da onu çağırıyor;
+kapı 37 ikisini birbirine bağlıyor.
+
 
 ```
               hafizasiz d=16    hafizali

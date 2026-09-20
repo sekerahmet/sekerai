@@ -1104,6 +1104,148 @@ def _36():
             % (e, f, nz, j, dzp, ayni0, aynih, hz))
 
 
+@kapi("37  EGITIM ve URETIM AYNI ADIMI KOSAR")
+def _37():
+    """OLCULDU 21 Eylul: `uret_toplu` adimi KENDI yaziyordu ve
+    `mdl.V`ye hic dokunmuyordu. §12b kosusu boylece hafizayla
+    egitilip HAFIZASIZ olculdu; BICIM sayilari (kalip 0,0000,
+    kapanmadi 1,0000) o yuzden gecersiz.
+
+    Hicbir kapi bunu goremiyordu cunku hepsi ya yalniz `yol`u ya
+    yalniz uretimi cagiriyordu. Burasi IKISINI BIRBIRINE bagliyor:
+    ayni onek, ayni agirlik -> AYNI jetonlar.  Hafiza ACIK, yoksa
+    fark zaten olmazdi."""
+    import olcme_14 as OL
+    n, D, d, K, B, L = 60, 16, 8, 48, 6, 9
+    g = torch.Generator().manual_seed(37)
+    m = M.Yol(n=n, D=D, d=d, K=K, tam=torch.ones(n, dtype=torch.bool),
+              hafiza=True, haf_n=4, haf_tau=0.02)
+    with torch.no_grad():                  # V = 0 olsa fark GORUNMEZDI
+        m.V.normal_(0, 0.3, generator=g)
+    X = torch.randint(0, n, (B, L), generator=g)
+    r = 0.25
+
+    # !! KONUM HIZASI: `yol`un L-1 indeksli durumu 0..L-2 jetonlarini
+    # yemistir ve L-1'i OKUR.  Ayni yere uretimle varmak icin onek
+    # X[:, :L-1] verilir; ilk URETILEN jeton tam o okumadir.
+    y = m.yol(X, r)
+    q = F.normalize(y["z"][:, :, :d], dim=-1)
+    bek = (q @ m.p.T).argmax(-1)[:, -1]
+    onek = [tuple(int(t) for t in x) for x in X[:, :L - 1]]
+
+    cik = OL.uret_toplu(m, onek, n_yeni=1, r=r, bs=B, dev="cpu")
+    ger = torch.tensor([c[0] for c in cik])
+    assert torch.equal(bek, ger), (
+        "egitim yolu ile uretim AYRISTI: %s vs %s" % (bek.tolist(),
+                                                      ger.tolist()))
+
+    # ve V'yi degistirince uretim de DEGISMELI -- yoksa test bos gecer
+    with torch.no_grad():
+        m.V.mul_(0)
+    cik0 = OL.uret_toplu(m, onek, n_yeni=1, r=r, bs=B, dev="cpu")
+    ger0 = torch.tensor([c[0] for c in cik0])
+    assert not torch.equal(ger, ger0), (
+        "V sifirlaninca uretim DEGISMEDI -- uretim hafizayi okumuyor")
+    return ("ayni onekte yol() ve uret_toplu() AYNI jetonu verdi (%d/%d); "
+            "V sifirlaninca %d jeton degisti"
+            % (int((bek == ger).sum()), B, int((ger != ger0).sum())))
+
+
+@kapi("38  CAPA KAPALI (r=0) -- hic tetiklenmez, VQ terimleri SIFIR")
+def _38():
+    """§12c capayi `R_CAPA = 0` ile kaldiriyor.  Iki sey kilitleniyor:
+
+      1  r = 0'da `vur` HICBIR adimda dogru olmamali.  `esik` 1,0
+         degil 2,0 donduruyor: fp32'de iki birim vektorun ic carpimi
+         1'i birkac ulp asabiliyor ve 1,0 esigi SESSIZCE tetiklerdi.
+      2  a2 = 0'da `kod` ve `bag` TAM SIFIR, ve C'ye VQ gradyani
+         GITMEMELI -- C artik hafizanin ANAHTARI, niceleyici degil
+         (§3.1b: `kod` terimi C'ye olguyu degil ILISKIYI kodlatiyor).
+    """
+    n, D, d, K, B, L = 60, 16, 8, 48, 32, 10
+    g = torch.Generator().manual_seed(38)
+    m = M.Yol(n=n, D=D, d=d, K=K, tam=torch.ones(n, dtype=torch.bool),
+              hafiza=True, haf_n=4)
+    X = torch.randint(0, n, (B, L), generator=g)
+
+    assert M.Yol.esik(0.0) == 2.0, "r=0 esigi 2,0 olmali (fp32 tasmasi)"
+    y0 = m.yol(X, 0.0)
+    assert not bool(y0["vur"].any()), (
+        "r = 0 iken capa %d adimda tetikledi" % int(y0["vur"].sum()))
+    # !! r BUYUK secildi: egitilmemis modelde durumlar kodlara uzak,
+    # r = 0,25 (esik 0,969) hic tetiklemez ve kapi BOS gecerdi.
+    y1 = m.yol(X, 1.5)
+    assert bool(y1["vur"].any()), "r = 1,5'te bile hic tetiklemedi -- kapi bos"
+
+    # a2 = 0  ->  kod/bag tam sifir ve C'ye VQ gradyani yok
+    m.zero_grad(set_to_none=True)
+    top, _ = m.kayip(X, a2=0.0, a3=0.0, a4=0.0, r=0.0, isin=2)
+    top.backward()
+    gC0 = m.C.grad.abs().sum().item()
+    assert float(m.son["kod"]) == 0.0 and float(m.son["bag"]) == 0.0, (
+        "a2 = 0 ama kod %.3e / bag %.3e" % (float(m.son["kod"]),
+                                            float(m.son["bag"])))
+    m.zero_grad(set_to_none=True)
+    m.kayip(X, a2=1.0, a3=0.0, a4=0.0, r=1.5, isin=2)[0].backward()
+    gC1 = m.C.grad.abs().sum().item()
+    assert gC1 > gC0, "a2 acikken C'ye daha cok gradyan gitmeli"
+    return ("r=0'da capa 0/%d adim (r=1,5'te %d);  a2=0'da kod=bag=0 ve "
+            "C gradyani %.3e -> a2=1'de %.3e"
+            % (B * (L - 1), int(y1["vur"].sum()), gC0, gC1))
+
+
+@kapi("39  HAFIZA BUTCESI -- mentese, ve DEGER duzeyinde dogru")
+def _39():
+    """§12c: duz L1 bedelinin araligi BOS cikti (ikameyi engellemek
+    a4 > 0,639, kullanimi birakmak a4 < 0,410).  Mentese ikisini
+    ayiriyor: butcenin ALTINDA maliyet TAM SIFIR, ustunde kareyle.
+
+    Deger duzeyinde sinaniyor -- "terim var" yetmez, SAYISI tutmali:
+        haf = (ort|m| - B)+^2      ve   top = ... + a4 * haf
+    Ayrica `mn` gercekten okumanin normu mu: V'yi olcekleyince
+    ayni oranda buyumeli."""
+    n, D, d, K, B, L = 60, 16, 8, 48, 24, 8
+    g = torch.Generator().manual_seed(39)
+    m = M.Yol(n=n, D=D, d=d, K=K, tam=torch.ones(n, dtype=torch.bool),
+              hafiza=True, haf_n=4)
+    X = torch.randint(0, n, (B, L), generator=g)
+    ort = dict(a1=0.0, a2=0.0, a3=0.0, r=0.0, isin=2)
+
+    with torch.no_grad():
+        m.V.normal_(0, 0.5, generator=g)
+    mn = float(m.yol(X, 0.0)["mn"][:, 2:].mean())
+    assert mn > 0, "V dolu ama |m| = 0"
+
+    # 1) butcenin USTUNDE: top - uye  ==  a4 * (mn - B)^2
+    Bd, a4 = mn / 2, 3.0
+    top, uye = m.kayip(X, a4=a4, haf_b=Bd, **ort)
+    bek = a4 * (mn - Bd) ** 2
+    assert abs(float(top) - float(uye) - bek) < 1e-5, (
+        "ustte: top-uye %.6f, beklenen %.6f" % (float(top) - float(uye), bek))
+    # 2) butcenin ALTINDA: TAM sifir
+    top2, uye2 = m.kayip(X, a4=a4, haf_b=mn * 2, **ort)
+    assert abs(float(top2) - float(uye2)) < 1e-6, (
+        "altta maliyet 0 olmali, %.3e" % (float(top2) - float(uye2)))
+    # 3) a4 = 0 -> terim HIC hesaplanmaz, top = uye
+    top3, uye3 = m.kayip(X, a4=0.0, haf_b=Bd, **ort)
+    assert abs(float(top3) - float(uye3)) < 1e-6
+    # 4) `mn` OKUMANIN normu: V iki katina -> mn iki katina
+    with torch.no_grad():
+        m.V.mul_(2)
+    mn2 = float(m.yol(X, 0.0)["mn"][:, 2:].mean())
+    assert abs(mn2 / mn - 2) < 0.02, "|m| V ile dogrusal degil: %.4f" % (mn2 / mn)
+    # 5) gradyan V'ye AKIYOR
+    m.zero_grad(set_to_none=True)
+    m.kayip(X, a4=a4, haf_b=mn, **ort)[0].backward()
+    assert m.V.grad is not None and float(m.V.grad.abs().sum()) > 0, (
+        "butce terimi V'ye gradyan vermiyor")
+    return ("ort|m| %.4f;  ust: top-uye %.6f = a4(mn-B)^2 %.6f;  alt: %.1e;  "
+            "a4=0: %.1e;  V x2 -> |m| x%.3f;  V gradyani AKIYOR"
+            % (mn, float(top) - float(uye), bek,
+               abs(float(top2) - float(uye2)), abs(float(top3) - float(uye3)),
+               mn2 / mn))
+
+
 # =====================================================================
 # VERI YOLU  --  kopyanin ve kurulumun kapilari
 # =====================================================================

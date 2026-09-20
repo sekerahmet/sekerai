@@ -444,9 +444,16 @@ def uret_toplu(mdl, onekler, n_yeni=10, r=0.25, bs=2048, dev="cuda"):
     zorlanir, sonra model serbest devam eder.
 
     Acgozlu. Isin aramasi `mdl.uret` ile soru basina yapilir ve
-    pahalidir; toplu olcumde acgozlu, isin ORNEKLEMDE."""
+    pahalidir; toplu olcumde acgozlu, isin ORNEKLEMDE.
+
+    !! ADIM `mdl.adim`DAN gelir, burada YENIDEN YAZILMAZ.  Once
+    yazilmisti ve hafizayi okumuyordu: §12b kosusu hafizayla egitilip
+    HAFIZASIZ olculdu, BICIM sayilari gecersiz cikti (21 Eylul).
+    Kapi 38 bu iki yolu birbirine bagliyor."""
     assert not mdl.saat, "saat acikken toplu uretim saat izini tutmali"
     R, C, P = mdl.donme(), mdl.kod(), mdl.p
+    Rd, Ct, esik = (R.reshape(mdl.n, mdl.D * mdl.D), C.t().contiguous(),
+                    mdl.esik(r))
     D, d = mdl.D, mdl.d
     cik = []
     for i in range(0, len(onekler), bs):
@@ -460,9 +467,7 @@ def uret_toplu(mdl, onekler, n_yeni=10, r=0.25, bs=2048, dev="cuda"):
         z[:, :d] = P[pad[:, 0]]
         yol = pad[:, :1]
         for adim in range(1, L + n_yeni):
-            z = torch.bmm(R[yol[:, -1]], z.unsqueeze(-1)).squeeze(-1)
-            yak2, k = (2 - 2 * (z @ C.T)).clamp(min=0).min(1)
-            z = torch.where((yak2 < r * r)[:, None], C[k], z)
+            z = mdl.adim(z, yol[:, -1], Rd, C, Ct, esik)[0]
             q = F.normalize(z[:, :d], dim=-1)
             sec = (2 - 2 * (q @ P.T)).argmin(1)
             if adim < L:

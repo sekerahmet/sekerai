@@ -140,17 +140,21 @@ K_TAM = None      # None = HEPSI tam SO(D)
 #  yeniden acilir -- ama o zaman kesim FREKANSA degil ROLE gore
 #  kurulur (kapi 31'in dersi).
 
-# --- OLGU HAFIZASI  (DENKLEM §12b) ---------------------------------
+# --- OLGU HAFIZASI  (DENKLEM §12c) ---------------------------------
 HAFIZA = True
-#  Kod defteri KILIT, yeni `V` DEGER. Okuma YUMUSAK ve EKLEMELI:
+#  C KILIT, yeni `V` DEGER, okuma EKLEMELI:
 #      a = softmax(<zp, C[top-n]> / tau);   z <- norm(z + a @ V[top-n])
-#  GEREKCE OLCULDU (21 Eylul, §3.1b / adim 5): onegin sonundaki durum
-#  SORUYU tasiyor, CEVABI tasimiyor -- ILISKI 7,4 kat sans ustu,
-#  OZNE 4,7 kat, CEVAP 1,8 kat. Ve olguyu tutabilecek yer YOK:
-#      R[iliski]    376 serbestlik vs  4.613 kisit   12 KAT KISA
-#      C         65.536            vs 110.715        1,7 KAT KISA
-#  Kapasite toplamda var ama ADRESLENEMIYOR.
-#  V eklenince hafiza 2048 x 2D = 131.072  -> kisitin 1,18 kati.
+#  §12b BOYLE KOSULDU VE DUSTU. §12c ucunu birden degistiriyor:
+#  R_CAPA=0 (capa kalkar), A2_CAPA=0 (C serbest ANAHTAR olur),
+#  A4_HAF (kullanim bedelli).  Gerekceler kendi ayarlarinda.
+#  ZINCIR, hepsi olculdu:
+#      cevap hicbir blokta YOK, sansta                    §5.1/R
+#      arama R_r'nin ICINDE OLAMAZ: Pi R_r rank<=d,
+#        376 serbestlik vs 308x15 = 4.620 kisit  12,3 kat  §5.1/S
+#        ustune R_r IZOMETRI -- keyfi tabloyu yapamaz
+#      ozne okunabilirligi tam R[iliski]'de cokuyor        §5.1/S
+#      fiyat mesele DEGIL: uye'nin %49'u varlik
+#        konumlarinda ALINMAMIS duruyor                    §5.1/O
 HAFIZA_N = 8
 #  Kac koda BAKILIR. Yumusak okuma butun K uzerinde olsaydi (B,K)
 #  ara tensoru GRADYANLI tutulurdu -- kapi 26'nin engelledigi sey,
@@ -170,29 +174,56 @@ SAAT = False
 #  yapiyor. Acmanin bedeli: ayni olgu bildirimde ve soruda FARKLI adim
 #  sayisinda gelir, kisitlar ~3 KAT olur. Kapasite zaten sinirda.
 
-# --- KOD DEFTERI ------------------------------------------------------
-K_KOD = 2048
-#  Capa hedefleri. Bu bir VARLIK SAYISI DEGIL -- model neyin kod
-#  olacagina kendi karar veriyor; kodlarin varliklarla ortusmesi
-#  SINANACAK sey (S1), varsayim degil.
-#  OLCULDU: baskin maliyet dugmesi. Is yukunun %92'si kod aramada,
-#  ve arama B*K*D ile buyuyor (B=1024, ileri+geri):
-#     K= 512  26 ms/adim      K=2048  40 ms
-#     K=1024  31 ms           K=4096  75 ms
+# --- ANAHTAR DEFTERI  (eski adiyla KOD DEFTERI) -----------------------
+K_KOD = 8192
+#  §12c: capa kalkinca C artik "capa hedefi" degil, HAFIZANIN ANAHTARI.
+#  OLCULDU (§5.1/T): yuva tavani M ile neredeyse DOGRUSAL --
+#      M=2048  0,282     M=4096  0,556     M=7381  1,000
+#  SIKISTIRMA YOK: cevap adresin keyfi fonksiyonu, olgu basina bir
+#  yuva gerekiyor. 7.381 olgu -> M >= 7.381.  8192 secildi.
+#  BEDELI: model 285.760 -> 744.512 (x2,61). Kucuk bir ekleme DEGIL.
+#  Onceki gerekce (arama maliyeti K ile buyuyor: K=2048 40 ms,
+#  K=4096 75 ms) duruyor -- BATCH bu yuzden dustu, asagi bak.
 
 # --- ESIKLER: kayipta YOK, TUTULAN bolmede aranir ---------------------
-R_CAPA = 0.25
-#  Capa yaricapi. Kodlar arasi mesafenin YARISINDAN kucuk olmali,
-#  yoksa durum iki koda birden yakin dusar.  OLCULMEDI (A2).
+R_CAPA = 0.0
+#  0 = CAPA KAPALI (§12c).  `Yol.esik(0)` 2,0 doner, `s > esik` hic
+#  tutmaz.  OLCULDU (§5.1/T): capa adresin TEK bozucusu --
+#      capa ACIK   adreslerin %41,8'i cakisik (cos>0,999), tavan 0,588
+#      capa KAPALI               %0,0                      tavan 1,000
+#  Donmeler izometri oldugu icin adresi HIC bozmuyor; `d` de onemsiz
+#  (capa kapaliyken d=8 ve d=16 AYNI: 1,000).
+#  BEDELI: §3'un "durum bir koda oturur -> bilesim iner" iddiasi
+#  mimaride KALMIYOR. Zaten olculmustu ki inmiyor (§3.1b). Ve §3.2
+#  (reddetme = kod uyeligi) dayanaksiz kalir -- hic uygulanmamisti.
 DELTA = 0.4
 #  Itme esigi (L_dis menteşesi).  OLCULMEDI (A3).
 
 # --- KAYIP AGIRLIKLARI: HICBIRI OLCULMEDI -----------------------------
 A1_DIS = 1.0      # itme.  Gerekcesi var, degeri yok: saf cekme kaybi
 #                   model_13'te coktu (bit 8,32 > unigram 6,58).
-A2_CAPA = 1.0     # VQ
+A2_CAPA = 0.0     # VQ KAPALI (§12c).  `kod` terimi C'yi k-ortalamaya
+#                   zorluyordu ve OLCULDU (§3.1b) ki o zorlama C'ye
+#                   OLGUYU degil ILISKIYI kodlatiyor (+1,680 bit vs
+#                   +0,318). Hafizanin adresini bozan sey tam buydu:
+#                   C anahtar olacaksa hicbir sey onu niceleyiciye
+#                   itmemeli.  a2 = 0 iken terim HIC HESAPLANMAZ.
 A3_DUZEN = 1e-4   # ezber <-> genelleme dugmesi
-BETA = 0.25       # VQ baglilik agirligi -- VQ-VAE'nin standart degeri
+BETA = 0.25       # VQ baglilik agirligi -- a2 = 0 iken ETKISIZ
+A4_HAF = 2.0      # HAFIZA BUTCESI agirligi (§12c).  HESAPLANDI:
+#                   ikamenin YENI kayiptaki degeri 0,6387 - 0,2469
+#                   (kod) - 0,0024 (bag) = 0,3894.  Mentese ile ikame
+#                   a4 x (1-B)^2 = a4 x 0,49 odiyor -> a4 > 0,795.
+#                   Ust sinir YOK: butcenin altinda maliyet 0.
+#                   2,0 = tabanin 2,5 kati. Yukari hata "hafiza hic
+#                   kullanilmaz", asagi hata IKAME -- ikincisini bir
+#                   kez gorduk (§12b).
+#                   !! DUZ L1 SINANDI, ARALIGI BOS: engellemek icin
+#                   a4 > 0,639, kullanimi birakmak icin a4 < 0,410.
+HAF_BUTCE = 0.30  # ort |m| bu esigin ALTINDA bedava.
+#                   OLCULEN varlik konumu payindan turedi: %26,43
+#                   (§5.1/R).  Amaclanan kullanim varlik konumlarinda
+#                   atesler, yani ~0,26; ikame ~1,0.  SECILMEDI.
 
 # --- EGITIM -----------------------------------------------------------
 PENCERE = 24
@@ -227,7 +258,11 @@ ATLA = 4
 #  olurdu ve pencere basi cop durumu sistematiklesirdi).
 #  Kac katkinin YETTIGI OLCULMEDI.
 LR = 3e-3
-BATCH = 8192
+BATCH = 2048
+#  HESAP, varsayilan degil: hafiza aramasinin skor matrisi (B*L, M).
+#  Onceki kosu B=8192, M=2048 ->  8192*24*2048*4 = 1,61 GB.
+#  M 8192'ye ciktigi icin AYNI bellek butcesi B=2048 demek (1,61 GB).
+#  Adim/epok 486 -> 1.943; adim basina is 4 kat kucuk, toplam benzer.
 EPOK = 5
 #  OLCULDU (20 Eylul, L4): ilk kosu epok 1'i 220 sn'de bitiremedi --
 #  yani >117 ms/adim. Kagit uzerindeki "saniyeler" tahmini YANLISTI:
@@ -250,7 +285,16 @@ assert all(hasattr(AYAR, a) for a in SABIT)
 assert D_OKUMA < D_DURUM, "D > d ZORUNLU -- DENKLEM §4.1 izometri celiskisi"
 assert K_TAM is None or K_TAM >= 1, (
     "hicbiri TAM degilse §4.3'e gore mimari zayif kalir")
-assert 0 < R_CAPA and 0 < DELTA and 0 < BETA
+assert 0 <= R_CAPA and 0 < DELTA and 0 < BETA
+assert R_CAPA > 0 or A2_CAPA == 0, (
+    "capa KAPALI ama VQ kaybi ACIK: `bag` hic tetiklenmez, `kod` ise "
+    "C'yi niceleyiciye zorlar -- §12c tam bunu kaldiriyor")
+assert not HAFIZA or K_KOD >= 7381, (
+    "hafiza ACIK ama yuva sayisi olgu sayisindan az -- §5.1/T: "
+    "sikistirma YOK, tavan M ile dogrusal")
+assert A4_HAF == 0 or A4_HAF > 0.795, (
+    "butce agirligi IKAME tabaninin altinda -- §12c hesabi")
+assert 0 < HAF_BUTCE < 1
 assert PENCERE >= 2 and 1 <= ATLA < PENCERE
 assert 1 <= ISINMA < PENCERE
 assert ISINMA % ATLA == 0, (

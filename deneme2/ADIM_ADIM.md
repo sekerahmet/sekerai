@@ -703,3 +703,28 @@ R_r izometri oldugu icin TEK ILISKI ICINDE ayriklik korunuyor).
 §12b'nin uc arizasina karsi: K serbest (C degil), kullanim
 BEDELLI (a4), V=0 dengesi bedelle sabitlendi.
 Onceden kayit yazildi.  KOD YAZILMADI.
+
+KOD YAZILDI (§12c) -- ve yazarken BIR HATA BULUNDU.
+
+`olcme_14.uret_toplu` tek adimi KENDI yaziyordu ve `mdl.V`ye HIC
+dokunmuyordu.  §12b kosusu hafizayla egitilip HAFIZASIZ olculmus.
+  GECERSIZ  §12b'nin BICIM/BILGI sayilari
+  GECERLI   egitim logu (yozlasma orada olculdu), §5.1/O,Q,R,S,T
+Hicbir kapi goremiyordu cunku hepsi ya yalniz `yol`u ya yalniz
+uretimi cagiriyordu.
+
+DUZELTME: tek adim `Yol.adim`a tasindi, `yol` / `uret` / `uret_toplu`
+ucu de onu cagiriyor.  KAPI 37 ikisini baglar: ayni onek -> ayni
+jeton, ve V sifirlaninca uretim DEGISMELI.
+
+YENI KAPILAR   37 egitim==uretim,  38 capa kapali (r=0) + VQ sifir,
+               39 hafiza butcesi DEGER duzeyinde.   40 kapi geciyor.
+
+AYARLAR, hepsi gerekceli:
+  K_KOD   2048 -> 8192   §5.1/T, sikistirma yok
+  R_CAPA  0,25 -> 0      capa adresin tek bozucusu
+  A2_CAPA 1,0  -> 0      `kod` C'yi niceleyiciye zorluyordu
+  A4_HAF  yeni  2,0      taban 0,795, hesaplandi
+  HAF_BUTCE     0,30     olculen varlik payi 0,2643'ten
+  BATCH   8192 -> 2048   (B*L,M) bellegi onceki kosuyla AYNI
+  parametre 285.760 -> 744.512  (x2,61)
