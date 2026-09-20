@@ -681,3 +681,25 @@ YAPILMADI -- gerek kalmadi.
 
 SIRADAKI: A10.  Ariza tasiyicida -- varlik birimleri durumu
 oynatmiyor, bu yuzden hicbir sey ozneyle adreslenemiyor.
+
+ARA OLCUM -- OZNE EGRISI (21 Eylul, ileri gecis, EGITIM YOK)
+Kimlik j=2'de kuruluyor (tepe 0,308 / 0,235), j=4'te -- tam
+`R[kardes]` sonrasi -- cokuyor (0,147 / 0,044).  TEK ADIMDA.
+Capa katalizor, kaynak degil (d=8'de o adimda capa %0,2).
+
+Sebep SAYILMISTI: `Pi R_r` rank-d, serbestlik 376, kisit 4.620.
+12,3 kat kisa.  Ustune R_r IZOMETRI -- keyfi bir olgu tablosunu
+rijit bir harita yapamaz.  HUKUM: olgu aramasi R_r'nin icinde
+OLAMAZ.
+
+DUSEN IKI TEZIM:
+  §5.1/P "R_w rijit, yazamaz, R ~ I'de uzlasir"   -> d=16'da
+         donme 48,9°, bariyeri ASIYOR.  OLDU.
+  §5.1/R "uye okunan blogu BIRIKIMLI siliyor"     -> kayip tek
+         adimda.  Blok-kosegen gerekcesi de onunla dustu.
+
+TASARIM YAZILDI: §12c.  Adres `zp`, tavan 0,235 (0,044 degil --
+R_r izometri oldugu icin TEK ILISKI ICINDE ayriklik korunuyor).
+§12b'nin uc arizasina karsi: K serbest (C degil), kullanim
+BEDELLI (a4), V=0 dengesi bedelle sabitlendi.
+Onceden kayit yazildi.  KOD YAZILMADI.

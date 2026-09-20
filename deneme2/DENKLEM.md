@@ -1626,6 +1626,150 @@ durumundan **cevabı** getirsin diye tasarlandı, yolu yürüsün diye
 değil. Şu anki kod onu her adımda okuyor — bu kodun kendi hatası,
 tasarımın değil.
 
+## 12c. OLGU ARAMASI — TASARIM 2  (21 Eylül, KOD YAZILMADI)
+
+> `[Ö]` ölçüldü · `[H]` hesap · `[Ç]` çıkarım, sınanmadı.
+> §12b'nin yerine geçmez — §12b **koşuldu ve düştü**; bu tasarım
+> onun ölçülen üç arızasına karşı kurulmuştur.
+
+### Niçin — zincir, hepsi ölçülü
+
+```
+BILGI tam = 0,0000
+ <- cevap hicbir blokta YOK, sansta            §5.1/R
+ <- olgu aramasi R_r'nin ICINDE olamaz         §5.1/S  SAYILDI
+      Pi R_r  rank<=d, serbestlik 376
+      kisit   308 ozne/iliski x 15 = 4.620     12,3 KAT KISA
+      ustune R_r IZOMETRI: butun ikili acilari koruyor,
+      olgu tablosu ise keyfi -- rijit harita yapamaz
+ <- ve olcum bunu OLAYIN ICINDE gosteriyor     §5.1/S
+      ozne okunabilirligi j=2'de TEPE (0,308 / 0,235),
+      j=4'te -- tam R[iliski]'den sonra -- COKUS (0,147 / 0,044)
+```
+
+`[Ö]` **Fiyat mesele değil** (§5.1/O): `üye` kaybının %49'u zaten
+varlık konumlarında alınmamış duruyor. Kapasite/ağırlık kolu kapalı.
+
+### Adres — ve neden tavan 0,044 değil 0,235
+
+`[H]` `R_r` izometri olduğu için, **tek bir ilişki içinde**
+`zp = R_r z_s` konfigürasyonu `z_s` konfigürasyonuna **birebir
+eştir** — bütün ikili açılar korunur. Prob'un j=4'te çökmesi, 24
+ilişkiyi tek bir doğrusal çerçevede okumasından. Bir hafıza
+ilişkileri **ayırmak zorunda değil**: farklı ilişkiler uzayın farklı
+yerlerine düşer ve yuvalar oraya yerleşir.
+
+```
+ADRES = zp_j = R[w_{j-1}] z_{j-1}
+        iliski jetonunda  zp = R[iliski] z_{ozne}
+        yani adres ZATEN (ozne, iliski).  ETIKET GEREKMEZ --
+        jetonun kendisi ikinci bileseni tasiyor.
+TAVAN   tepedeki ozne okunabilirligi:  d=8  0,308   d=16  0,235
+        (capa hasari duselecek: d=16'da o adimda %13 atesliyor)
+```
+
+`[Ö]` Bu, §12b'nin `%11,2` diye yazdığı tavandan **2,1 kat** yüksek.
+§12b tavanı **çöküşten sonraki** durumdan okumuştu — yanlış yerden.
+
+### Ne eklenir
+
+```
+zp = R[w_{j-1}] z_{j-1}
+a  = softmax( <zp, K> / tau )        K (M, D)   YENI parametre
+m  = a @ V                           V (M, D)   V(0) = 0
+z  = normalize( capa(zp) + m )
+L += a4 * ort( |m| )                 KULLANIM BEDELLI
+```
+
+`[H]` **Boyut**, kısıt sayımından: 7.381 olgu × (d−1) = 110.715.
+`M = 2048` → `2 × 2048 × 32 = 131.072` = **1,18 kat**. Dar ama yeter.
+Modele `+%46` (285.760 → 416.832).
+
+### §12b'nin ÜÇ arızasına karşı
+
+```
+1  ADRES YANLISTI.  K = C idi; C, `kod` terimiyle k-ortalama gibi
+   egitiliyor ve OLCULDU (§3.1b): ILISKIYI kodluyor (+1,680 bit),
+   olguyu DEGIL (+0,318). Yani hafiza iliski basina tek satirlik
+   bir tabloya donmustu.
+   -> K artik SERBEST parametre. `kod` terimi ona dokunmaz.
+   -> Ve §12b'nin kapasite hesabi 2048 yuva varsaydi; olculen
+      kullanilan kod sayisi 166 idi, yani hesap 12,3 kat iyimserdi.
+      Serbest K'da bu bagimlilik yok.
+
+2  HER ADIMDA OKUNUYORDU ve BEDAVAYDI.  Optimizasyon donmeleri
+   sondurup (duzen 3057 -> 45) isi hafizaya yaptirdi; capa %94'e
+   cikti, model SONLU OTOMATA coktu. Parametre duzeyinde de
+   gorunuyor: butun donmeler 1,2°, %100 kendine donen (§5.1/Q).
+   -> `a4 * ort(|m|)`: KULLANIM BEDELLI. R'nin isini elinden almak
+      artik ucuz degil.
+   -> `a4` NASIL SECILECEK (hesapla, varsayilanla degil):
+        varlik konumunda bir aramanin KAZANCI  2-2cos = 1,7436  [O]
+        aramanin beklenen orani ~ varlik konumu payi = %26,4  [O]
+        a4, "her adimda atesle" secenegini ZARARLI kilacak kadar
+        buyuk, "varlik konumunda atesle"yi KARLI birakacak kadar
+        kucuk olmali:
+             1,7436 x 0,264  >  a4 x 1,0      ->  a4 < 0,46
+             kullanilmayan adimda kazanc ~ 0   ->  a4 > 0
+        ARALIK (0 , 0,46).  Ilk deger 0,15 -- araligin alt ucte biri,
+        cunku tavan tarafinda hata "hafiza hic kullanilmaz" demek
+        ve o sessiz basarisizlik.  BU BIR SECIM, olcum degil.
+
+3  V = 0 BASLANGICI DENGEYI DEGISTIRIYORDU.  Baslangic guvenliydi
+   (kapi 36 dogruladi) ama denge degil.
+   -> Bedel terimi dengeyi de sabitler: V buyumesi artik ucretli.
+```
+
+### Ne ÇÖZMEZ
+
+```
+[O] ADRESLEME TAVANI 0,235 (d=16) / 0,308 (d=8).  Kusursuz bir
+    hafiza bile olgularin en fazla bu kadarini bulur. BILGI tam
+    icin ust sinir budur -- 1,0 beklenmiyor.
+[O] CAPA HASARI.  d=16'da iliski adiminda capa %13 atesliyor ve
+    zp'yi 2048 koddan birine indiriyor. Adres o orada BOZULUYOR.
+    Bu tasarim capaya dokunmuyor; dokunmak ayri bir karar (§3.2
+    reddetme iddiasi capaya bagli, ve o zaten uygulanmamis -- T3).
+[H] KAPASITE 1,18 KAT.  Dar. Yetmezse M buyur, bedeli dogrusal.
+[C] CIKARIM (2 adim) icin hicbir sey yapmiyor. Tek adimli olgu
+    aramasi calisirsa zincir AYRI bir soru olarak acilir.
+```
+
+### Açık kalanlar
+
+```
+[C] `tau`. §12b'de 0,02 idi ve etkin yuva sayisi olculmustu.
+    K degisti, o olcum tasinmaz -- yeniden bakilmali.
+[C] Okuma `capa`dan ONCE mi SONRA mi? Yukarida SONRA yazildi
+    (§12b ile ayni). Ama capa adresi bozuyorsa (yukarida), okuma
+    capa ONCESI zp'den adreslenip SONRA eklenmeli. Ikisi ayri
+    denklem; kagitta ayrilmadi.
+[C] `a4` bir MENTESE mi olmali (belli bir orandan sonra ceza)?
+    Duz L1 az kullanimi da cezalandiriyor.
+```
+
+### ÖNCEDEN KAYIT — ilk koşu neye karar verir
+
+```
+DEGISEN   K (serbest), V, ve a4 bedeli.  d = 16 KALIR.  Tek paket,
+          parcalari ayri ayri taranmaz.
+
+BIRINCIL  BILGI tam.  Tavan 0,235; 0,0000'dan BUYUK ise tasarim
+          DOGRU yon.  0,0000 ise DUSER.
+
+IKINCIL -- HUKUM VERMEZ ama tasarimi ACIKLAR
+   duzen   45'e cokerse §12b tekrarlaniyor -> bedel YETMEDI
+           1128 civarinda kalirsa bedel TUTTU
+   |m| nerede ateslyor:  varlik konumlarinda mi?  Tasarimin
+           iddiasi bu.  §5.1/R'nin makinesi bu olcumu zaten yapiyor.
+   BICIM   §12b'de cokmustu (kalip 0,2372 -> 0,0000).  Cokerse
+           yine ikame var demektir.
+
+NE YAPILMAZ
+   M, tau, a4 birlikte taranmaz.  Bir kosu, bir karar.
+   capa'ya DOKUNULMAZ -- ayni kosuda iki degisken olmaz.
+```
+
 ---
 
 ## 13. Kod ↔ denklem mutabakatı
@@ -1677,8 +1821,12 @@ A12 d TEK BASINA OYNATILMAZ -- TAKAS           A    §5.1/L
     d=8->16 dili kazandi, durum ozne
     kimligini kaybetti (%35,1 -> %11,2).
     Gizli alan TASIYICI; d buyuyunce kuculuyor.
-A11 OLGU ARAMASI MIMARIDE YOK                  A    §3.1b
+A11 OLGU ARAMASI MIMARIDE YOK                  A    §3.1b, §5.1/S
     -> §12b: tasarim + kod + KOSU.  DUSTU.
+    -> §12c: TASARIM 2, uc arizaya karsi kuruldu.
+       SAYILDI (§5.1/S): Pi R_r 376 serbestlik,
+       4.620 kisit -- arama R_r'nin ICINDE OLAMAZ.
+       Adres zp (= ozne,iliski), tavan 0,235.
        BILGI tam 0,0000 kaldi, BICIM coktu;
        hafiza R'yi IKAME etti (duzen 3057->45).
        Mimaride hala YOK -- ve eklerken yolu
