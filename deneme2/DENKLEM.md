@@ -1079,6 +1079,58 @@ Q  §5.1/P'NIN ONCEDEN KAYDI CURUDU -- BARIYER ACIKLAMASI d=16'DA GECMIYOR
    Soru netlesti: **gizli alandaki icerik CEVAP ANINDA okumaya nasil
    ulasacak.**  §12b'nin icgudusu (izometriyi EKLEYEREK kir) TUR
    olarak dogruymus; yeri ve adresi yanlisti.
+R  `Pi` IYI YARIYI ATIYOR -- ve `uye` OKUNAN BLOGU SILIYOR  (21 Eylul)
+   §5.1/Q "kimlik durumda var, Pi atiyor" diyordu. Nerede durdugu
+   olculdu: 7.381 tek adimli sinav onegi, onegin SONUNDAKI durum,
+   dogrusal prob (one-hot ridge, %70/%30, top-1), KARISIK etiket tabani.
+
+   ```
+   t0_d8     D=32  d=8   -> gizli 24 boyut
+     blok                OZNE           ILISKI         CEVAP
+     TAM z            0,186 / 0,003   0,508 / 0,103   0,003 / 0,000
+     Pi z  (OKUNAN)   0,035 / 0,003   0,199 / 0,108   0,000 / 0,001
+     z_gizli (ATILAN) 0,156 / 0,002   0,385 / 0,104   0,002 / 0,001
+
+   t0_d16    D=32  d=16  -> gizli 16 boyut   (IKI BLOK ESIT BOYUT)
+     TAM z            0,045 / 0,001   0,566 / 0,108   0,003 / 0,002
+     Pi z  (OKUNAN)   0,009 / 0,001   0,231 / 0,108   0,001 / 0,001
+     z_gizli (ATILAN) 0,015 / 0,001   0,532 / 0,107   0,004 / 0,001
+   ```
+
+   1) ATILAN BLOK, OKUNANDAN IYI -- ve d=16'da bu BOYUT FARKINDAN
+      DEGIL, ikisi de 16 boyut:
+          OZNE     okunan 0,009   atilan 0,015   1,7 kat
+          ILISKI   okunan 0,231   atilan 0,532   2,3 kat
+      `Pi` bilgiyi yalnizca ATMIYOR, IYI YARIYI atiyor.
+
+   2) MEKANIZMA -- `uye` OKUNAN BLOGU HER ADIM SABITLIYOR.
+      Kayip Pi z_j'yi p_{w_j}'ye cekiyor; p SABIT ve RASTGELE (A5).
+      Sabit bir hedefe cakilan blokta baska bilgiye yer kalmaz.
+      Gizli blok cakilmiyor, kimlik orada birikiyor.
+      -> `d < D` "atmak" degil, okunan blogu SILMEK.
+
+   3) d 8 -> 16 BILGIYI OKUNAN BLOGA TASIMADI, YOK ETTI.
+      TAM z (ikisinde de 32 boyut, ADIL):  OZNE 0,186 -> 0,045, 4,1 kat.
+      §5.1/L'nin kaydettigi %35,1 -> %11,2 ile ayni yon ve ayni
+      buyukluk mertebesi (3,1 kat) -- AYRI olcu, AYNI sonuc.
+      Silinen alan 8'den 16 boyuta cikinca tasiyici 24'ten 16'ya indi
+      VE icindeki kimlik 10 kat azaldi -- kapasitenin acikladigindan
+      fazla.
+
+   4) CEVAP HER YERDE SANSTA.  0,003 vs 0,000-0,002, her iki modelde,
+      her uc blokta. §3.1b ile ayni: cevap hic olusmuyor.
+      !! ILISKI ise gizli blokta 0,532 -- okumanin ihtiyaci olan sey
+      bile cogunlukla ATILAN tarafta.
+
+   SINIR: prob DOGRUSAL. Dogrusal olmayan yapi gozden kacabilir.
+   Ama hukum "atilan blok daha iyi" KIYASLI bir hukum ve iki blok
+   ayni prob, ayni boyut, ayni ornek -- kiyas gecerli.
+
+   TASARIMA SOYLEDIGI:  tasiyici GIZLI blok. Cevap aninda okumaya
+   ulasmasi gereken sey orada duruyor. Yani aranan mekanizma
+   "kapasite eklemek" degil, **gizli blogu cevap aninda okumaya
+   baglamak**. §12b'nin icgudusu (izometriyi ekleyerek kir) burada
+   dogru yerini buluyor: yeri HER ADIM degil, adresi KOD degil.
 ```
 
 ---
