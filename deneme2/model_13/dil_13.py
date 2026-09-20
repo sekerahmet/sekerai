@@ -27,7 +27,7 @@ import torch.nn.functional as F
 class ParcaDil(nn.Module):
     """Semanin tamami: koordinat katmani -> MLP -> hedef nokta -> uzaklik."""
 
-    def __init__(self, wp, D=3, K=3, M=4, H=96, tohum=0):
+    def __init__(self, wp, D=3, K=3, M=4, H=96, tohum=0, olcek=None):
         """`wp` (V, YUVA) -- birimin her yuvadaki parca indeksi.
 
         YUVA=3  kelime birim,  koordinat concat(kok, ek, nok)  <- bizim korpus
@@ -40,6 +40,13 @@ class ParcaDil(nn.Module):
         if wp.dim() == 1:
             wp = wp[:, None]
         self.K, self.M, self.D = K, M, D
+        # OLCEK SABITLEME. None -> serbest. Bir sayi verilirse
+        # koordinat bulutunun std'si O SAYIYA sabitlenir ve BUZULME
+        # IMKANSIZ olur. Konum egitimi bunsuz cokuyor: `||q-c||^2`
+        # iki yonlu, ve en ucuz cozum her seyi tek noktaya toplamak.
+        # OLCULDU 20 Eylul: lam 2 -> 20 yapinca bulut 0.4666 -> 0.2025
+        # (0.43 kat) buzuldu ve `one` dustu.
+        self.olcek = olcek
         self.yuva = wp.shape[1]
         self.DD = self.yuva * D
 
@@ -67,8 +74,11 @@ class ParcaDil(nn.Module):
         Modelin bir kelimeyi BASTIRAMAMASININ sebebi burasi: o kelimeye
         ait bir parametre yok. Kokunu bozarsa o koku paylasan butun
         kelimeler zarar gorur."""
-        return torch.cat([t[self.wp[:, s]]
-                          for s, t in enumerate(self.tablo)], -1)  # (V, DD)
+        C = torch.cat([t[self.wp[:, s]]
+                       for s, t in enumerate(self.tablo)], -1)   # (V, DD)
+        if self.olcek is not None:                 # SEKIL ogrenilir,
+            C = C / (C.std() + 1e-6) * self.olcek  # OLCEK sabit
+        return C
 
     def forward(self, X):
         """X: (B, K) son K kelimenin id'si -> (B, V) skor."""
@@ -90,27 +100,39 @@ class ParcaDil(nn.Module):
         sc = a[..., None] - d2 * self.lt.exp()
         return torch.logsumexp(sc, dim=1), q, C                # M uzerinden
 
-    def kayip(self, X, Y, lam=0.5):
-        """CE + KAPANMA CEZASI.
+    def kayip(self, X, Y, lam=0.5, kip="ce"):
+        """Uc egitim kipi. Kullanici, 20 Eylul: *"burda next token
+        egitimi olmaz, KONUM egitimi olmali"*.
 
-        Softmax tek basina yalniz SIRALAMA ister: hedef nokta dogru
-        kelimeye uzak kalsa bile tahmin dogrudur, gradyan susar. Ceza
-        noktayi kelimenin UZERINE oturtuyor.
+        MIMARI ile EGITIM uyusmuyordu: cikti uzayda bir NOKTA ama kayip
+        softmax+CE, yani LOGIT dunyasindan odunc. CE yalniz SIRALAMA
+        ister -- dogru cevap en yakinsa gradyan susar, noktanin NEREYE
+        dustugunu umursamaz. Olculen ariza da tam buydu: dogru bolge
+        bulunuyor (tip %98,6, ortanca sira 22/475) ama bolge icinde
+        cozunurluk yok (birincilik %2,6).
 
-        !! EN YAKIN BILESENE, ORTALAMAYA DEGIL. Ilk surum `q.mean(1)`
-        kullaniyordu ve M bilesenin ORTALAMASINI cevaba cekiyordu.
-        Bilesenler uzmanlasmisti (q3 tez sifatlari, q1 yer adlari...) ve
-        ortalamayi tek noktaya cekmek o uzmanlasmayi yok ediyordu.
-        OLCULDU 20 Eylul: lam 0.5 -> 20 yapinca `one` 0.0030'dan
-        0.0006'ya DUSTU ve tip uyumu bozuldu. Belgede sorun yok cunku
-        orada ceza ZINCIR yolunda ve orada karisim YOK.
+          "ce"     CE ASIL + kucuk kapanma cezasi        <- eski hal
+          "konum"  SAF konum: ||q - c_Y||^2              CE YOK
+          "karma"  konum ASIL + kucuk CE yardimci
 
-        `min_m`: bu cevabi tutacak olan bilesen tam ustune otursun,
-        digerleri kendi bolgelerinde kalsin."""
+        !! `konum` ve `karma` OLCEK SABIT ister (`olcek=` ile kurulmus
+        model). Yoksa kayip her seyi tek noktaya buzerek sifirlanir.
+
+        Kapanma EN YAKIN bilesene bakiyor, ortalamaya degil: bilesenler
+        uzmanlasiyor (q3 tez sifatlari, q1 yer adlari) ve ortalamayi tek
+        noktaya cekmek o uzmanlasmayi yok ediyor."""
         lg, q, C = self(X)
         ce = F.cross_entropy(lg, Y)
         kap = (q - C[Y][:, None]).pow(2).sum(-1).min(1).values.mean()
-        return ce + lam * kap, ce
+        if kip == "ce":
+            return ce + lam * kap, ce
+        assert self.olcek is not None, (
+            f"kip={kip} OLCEK SABIT ister -- ParcaDil(..., olcek=1.0)")
+        if kip == "konum":
+            return kap, ce                 # ce YALNIZ raporlama icin
+        if kip == "karma":
+            return kap + lam * ce, ce      # lam burada CE agirligi
+        raise ValueError(kip)
 
 
 # =====================================================================
@@ -150,7 +172,7 @@ class GommeDil(nn.Module):
 # EGITIM VE OLCUM
 # =====================================================================
 def egit(mdl, X, Y, epok=30, bs=4096, lr=3e-3, lam=0.5, dev="cuda",
-         Xd=None, Yd=None, yaz=print):
+         Xd=None, Yd=None, kip="ce", yaz=print):
     """Belge: Adam, lr 3e-3. Batch GPU icin buyutuldu (belgede 256).
 
     `Xd/Yd` verilirse her olcum noktasinda TUTULAN metin de basilir --
@@ -167,7 +189,7 @@ def egit(mdl, X, Y, epok=30, bs=4096, lr=3e-3, lam=0.5, dev="cuda",
         tot = 0.0
         for i in range(0, N, bs):
             b = perm[i:i + bs]
-            k, ce = mdl.kayip(X[b], Y[b], lam)
+            k, ce = mdl.kayip(X[b], Y[b], lam, kip)
             op.zero_grad(set_to_none=True)
             k.backward()
             op.step()
