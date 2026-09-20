@@ -230,4 +230,85 @@ NEREYE BAKILACAK
 
 ---
 
-### Adım 4 — `z_3 -> z_4`, girdi `kardeş`, hedef `-i`   (SIRADA)
+### Adım 4 — `z_3 -> z_4`, girdi `kardeş`, hedef `-i`   (KAPANDI)
+
+```
+1  DENKLEMLER PARALEL   Evet. Bu adimin ayricaligi: ISINMA=4 yuzunden
+                        kaybin BAKTIGI ILK konum. Dort terim de
+                        (uye, dis, kod, bag) buradan basliyor.
+                        Adim 1-3 taniydi, adim 4 EGITIMIN KENDISI.
+
+2-3  NE ISTEDIK / OLDU MU
+   H1 |z_4| = 1                      CALISTI, 1,0000
+   H2 ilk PUANLANAN konumda kayip ise yariyor mu
+      CALISTI. 300 adim sonra sira 159 -> 1, cos 0,9892.
+      Tepede *-i(0,989), ikinci Fatma(0,799) -- hata bicimi
+      UYUM KARISIKLIGI DEGIL.
+   H3 unlu uyumu (`kardeş` -> `-i`, sozlukte 7 iyelik yuzeyi var)
+      KAPSAM DISI -- kullanici karari, 21 Eylul:
+      *"i ü vs odaklanmak cok onemli bir hata degil sonucta bir ek
+        gelmesi gerektigi belli. bizim tokenizer da problemliydi.
+        onu bu modelde bakmak dogru olmaz."*
+      (Veri hazirdi: 9 kok+iyelik cifti, 5 ayri yuzey, 7 aday,
+       rastgele %14,3. Sirasi gelirse buradan kurulur.)
+
+4  ACIK KALEM -> B (capayi uyandirmak).  PARK EDILDI, asagida.
+```
+
+---
+
+## PARK (devam)
+
+### P3  ÇAPA hiç tetiklenmiyor — ve eğitimden sonra GÜVENLİ mesafede
+
+```
+BULUNDU   adim 4'te. Egitilmis modelde s_j en yuksek degerini adim
+          4'te aliyor: 0,9447.  Esik 1 - r^2/2 = 0,96875.
+
+NE        §3 mimarinin ASIL iddiasi ("durum periyodik olarak bir koda
+          oturur, gorulmemis bilesim gorulmus parcalara iner") ve
+          §3.2 (reddetme = kod defteri uyeligi) ikisi de capaya
+          bagli. Capa hic atesmedigi icin IKISI DE UYKUDA.
+
+ADIM 1'DE ELENMISTI, AMA O ELEME EGITILMEMIS MODELE AITTI:
+              tetiklenmesi icin   yari aci   2048 baslik kureyi
+  adim 1, EGITILMEMIS  r >= 0,9506   56,8°    1,1e+00   <- COKME
+  adim 4, EGITILMIS    r >= 0,3326   19,1°    1,5e-13   <- GUVENLI
+  su anki r = 0,25                   14,4°    2,6e-17
+
+PENCERE (kagit)   0,3326 <= r < 0,4156
+  ust sinir: top yari acisi < donme acisi olmali, yoksa R c_k ayni
+  topta kalir ve SABIT NOKTA olur. Donme acisi n^(-1/(d-1)) = 24,0°
+  -> r < 2 sin(12,0°) = 0,4156.   (Kosu 21 Eylul: model "komsu
+  araligi 0.419" basti, hesapla tutuyor.)
+
+!! KARSI KANIT YANLIS ADRESE YAZILMIS OLABILIR
+  §3.1 capaya karsi tek kaniti "Şanlıurfa ×12, |Πz| sabit 0,193"
+  diye gosteriyor. Ama AYNI BELGE §5.1/C'de "ortalama durum capa
+  yaricapinin 2,25 katinda" diyor -- atesmeyen capa sabit nokta
+  uretemez. Alternatif aciklama kodda yazili (`_itme` docstring):
+  "acik sinif donmesi TEK DUZLEM; duzlem z0'a dik dusunce R z0 ~ z0
+  kaliyor." O sirada K_TAM = 80 idi, yani varlik birimlerinin %93'u
+  tek duzlemliydi. Muhtemelen ZAYIF OPERATOR, capa degil -- ve o
+  zaten K_TAM = n ile duzeltildi.
+
+EKSIK SAYI  OGRENILMIS donme acisi. Ust sinir BASLANGIC olceginden;
+  `duzen = |a|^2 + |θ|^2` acilari egitim boyunca KUCULTUYOR. 20
+  cumlede toplam 1207,73 -> 343,20, ama oradan ogrenilmis aciyi
+  cikaramam: 444 birimin yalniz 73'u veride var, dususun cogu HIC
+  KULLANILMAYAN birimlerin sifira cekilmesinden.
+
+NIYE SIMDI DEGIL  Gercek korpustaki aciyi okuyamiyorduk: Drive'daki
+  eski t0 agirliklari OLU 451'lik sozlukle egitilmisti. 21 Eylul'de
+  yeni sozlukle t0 kosusu baslatildi (commit 7f166ea); `model_t0.pt`
+  Drive'a yazilinca acilar ve `s` dagilimi YERELDE okunacak, sonra
+  `r` kagitta secilecek.
+
+NEREYE BAKILACAK  DENKLEM §3, §3.1, §5.1/C;  ayar_14.R_CAPA;
+  model_14.yol (esik), model_14.donme
+```
+
+---
+
+### Adım 5 — `z_4 -> z_5`, girdi `-i`, hedef `Ceren`   (SIRADA)
+    !! BILGI ADIMI -- sinavin sordugu TEK gecis bu.
