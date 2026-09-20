@@ -205,20 +205,27 @@ def puanla(sorular, uretilen, kapanis):
 # =====================================================================
 # URETIM -- model son K birime bakar, birim birim devam eder
 # =====================================================================
-def uret(mdl, sorular, K, n_yeni=8, bs=4096, dev="cuda", dolgu=0):
+def uret(mdl, sorular, K, oncul=(), n_yeni=8, bs=4096, dev="cuda"):
     """Her sorunun onekinden `n_yeni` birim uretir (argmax).
 
-    Model YALNIZ son K birime bakiyor, o yuzden onbellek/dolgu derdi
-    yok: pencereyi kaydirip tekrar cagirmak yeter. Onek K'dan kisaysa
-    SOLDAN `dolgu` ile doldurulur -- dogal olani cumle sonu birimi,
-    cunku soru gercekten bir cumle sinirindan sonra geliyor."""
+    !! `oncul` = soruyu ONCELEYEN GERCEK korpus parcasi. Dolgu DEGIL.
+    Ilk surum pencereyi `.` ile dolduruyordu ve model egitimde arka
+    arkaya on nokta HIC gormemisti: cikti dagiliyordu ("gore gore
+    gore"). OLCULDU, 20 Eylul -- dolgu 10 nokta cikti dagitiyor, gercek
+    baglam verilince ayni model 5/5 dogru TIP uretiyor. Yani dagilma
+    modelin degil ONEGIN arizasiydi.
+
+    Model yalniz son K birime bakiyor, onbellek gerekmez: pencereyi
+    kaydirip tekrar cagirmak yeter."""
     import torch
     mdl.eval()
+    oncul = list(oncul)
     cik = []
     with torch.no_grad():
         for i in range(0, len(sorular), bs):
-            oz = [s[0] for s in sorular[i:i + bs]]
-            pen = [([dolgu] * max(0, K - len(o)) + o)[-K:] for o in oz]
+            pen = [(oncul + s[0])[-K:] for s in sorular[i:i + bs]]
+            assert all(len(p) == K for p in pen), (
+                "oncul KISA -- pencere dolmuyor, dolgu YAPILMAZ")
             x = torch.as_tensor(pen, dtype=torch.long, device=dev)
             uc = []
             for _ in range(n_yeni):
@@ -229,3 +236,17 @@ def uret(mdl, sorular, K, n_yeni=8, bs=4096, dev="cuda", dolgu=0):
             cik += torch.stack(uc, 1).tolist()
     mdl.train()
     return cik
+
+
+def oncul_bul(dizi, bx, K, tohum=0):
+    """Korpustan GERCEK bir onculu secer: NOKTA ile biten bir parca.
+
+    Soru gercek metinde bosta durmuyor; onunde bir cumle var. Uydurma
+    dolgu yerine korpusun kendi akisindan bir dilim aliniyor, boylece
+    onek dagilim ICINDE kaliyor."""
+    import numpy as np
+    d = dizi.tolist() if hasattr(dizi, "tolist") else list(dizi)
+    nok = bx.get(".")
+    yer = [i for i, t in enumerate(d[K:len(d) // 4], start=K) if t == nok]
+    i = yer[np.random.default_rng(tohum).integers(len(yer))]
+    return d[i - K + 1:i + 1]
