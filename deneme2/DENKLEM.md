@@ -678,6 +678,10 @@ literatürde aranmalı — "benzerini gördüm" diye yazmıyorum.
 Ayrışmaların tam listesi. **K** = kod haklı, denkleme yazıldı.
 **T** = teori haklı, kod düzeltilmeli. **A** = açık, karar verilmedi.
 
+> §0 tablosunun **adım adım** denetimi ve o denetimde bulunup sırası
+> gelmediği için park edilen kalemler: `ADIM_ADIM.md`. Buradaki tablo
+> ayrışmaları tutar, oradaki dosya denetimin kendi defteridir.
+
 ```
     NE                                        KIM   NEREDE
 K1  z_0 = [p_{w_0}; 0] tanimi                  K    §1
