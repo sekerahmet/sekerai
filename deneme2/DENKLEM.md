@@ -585,6 +585,42 @@ L  VARLIK BIRIMLERI DURUMU OYNATMIYOR  --  BILGI=0'IN MEKANIZMASI
    onu pinleyen tek sey kayip; §5'in kaybi pinlemiyor.
    `uye` yalniz Pz'nin YONUNE bakiyor, |Pz|'ye DEGIL -- o yuzden
    egitim |Pz|'yi 0,96'dan 0,18'e indirirken kayip itiraz etmiyor.
+
+   NEREDE OLMADIGI DA OLCULDU -- KAPALI FORMLA, EGITIM YOK
+   Bir birimin butun (gelen durum z_i, hedef t_i) ciftleri alinip
+   UC okuma karsilastirildi. Sira, o birimden sonra GORULEN sinif
+   kumesi icinde; sinav dilimi AYRI (%70/%30).
+     SU ANKI      egitilmis donme + sabit p okumasi
+     EN IYI R     Procrustes -- `uye`nin KENDI amacinin (S<PiRz,p_t>)
+                  matematiksel en iyisi; daha iyisi YOK
+     SINIFLANDIR  ayni z'lerden dogrusal siniflandirici (one-hot ridge)
+
+     birim     n_sn | SU ANKI  EN IYI R  SINIFLANDIR |  SANS    k
+     -i        5113 |  47,22    47,93     26,00      |  91,5   182
+     -si       2817 |  44,80    41,46     22,55      |  74,0   147
+     -ü        2922 |  24,14    20,91      9,59      |  46,5    92
+     Akiskanlar 146 |   6,21     5,53      4,08      |   9,5    18
+     -dir      3322 |   1,12     1,13      1,10      |   1,5     2
+
+   UC SONUC
+     1  EGITIM EN IYI DONMEYI ZATEN BULMUS. SU ANKI ~ EN IYI R her
+        satirda. Arizanin optimizasyonla ILGISI YOK -- kanitli.
+     2  OKUMANIN BICIMI ~2 KAT MALIYETLI. Ayni durumlardan dogrusal
+        siniflandirici 47,2 -> 26,0 ve 24,1 -> 9,6. "Sabit rastgele
+        NOKTAYA isabet et" sarti pahali (§4.2 / §13-A5) -- ama tek
+        basina arizayi ACIKLAMIYOR.
+     3  KALAN BOSLUK DURUMDA. En iyi dogrusal okuma bile 26/182'de
+        kaliyor, 1'de degil. Bilgi durumda KISMEN var (2-3,5 kat sans
+        ustu), yetecek kadar DEGIL.
+   Dilbilgisi tarafi CALISIYOR: `-dir` 1,12 / sans 1,5.
+   Hukum veren satirlar `-i`, `-si`, `-ü` -- CEVAP tam oralardan
+   sonra geliyor ve ozne onekte var.  BILGI = 0,0000'in sayisal
+   karsiligi bu.
+
+   !! `Ahmet` gibi AD satirlari hukum VERMEZ: orada siniflandirici da
+   sans seviyesinde (3,45 / sans 3,5), yani modelin arizasi degil --
+   bir addan sonra gelen SOYAD sol baglamda belirlenmiyor olabilir.
+
    ACIK -- care karari verilmedi.
 
    !! CAPA BUNUN SEBEBI DEGIL. Ayni uretimlerde capa HIC tetiklenmedi
