@@ -1678,12 +1678,30 @@ zp = R[w_{j-1}] z_{j-1}
 a  = softmax( <zp, K> / tau )        K (M, D)   YENI parametre
 m  = a @ V                           V (M, D)   V(0) = 0
 z  = normalize( capa(zp) + m )
-L += a4 * ort( |m| )                 KULLANIM BEDELLI
+L += a4 * max(0, ates_orani - B)^2   BUTCE  (duz L1 SINANDI, BOS)
+```
+`M = 8192`, `B = 0,30`, `a4 > 1,30` -- gerekceleri asagida.
+
+`[H]` **Boyut — ilk yazdığım sayım YANLIŞ ölçüyü saydı.**
+Önce şöyle yazmıştım: kisit 7.381 × (d−1) = 110.715, `M = 2048`
+→ 131.072 parametre, 1,18 kat. **Parametre sayısı doğru ölçü değil.**
+`tau = 0,02` ile softmax neredeyse TOP-1; üretilebilecek AYRI çıktı
+sayısı ~ `M`.
+
+```
+uretilmesi gereken AYRI cevap yonu       1.577
+ayirt edilmesi gereken ADRES             7.381
+  ayni cevabi paylasan adresler AYNI yuvayi kullanabilir, ama
+  ancak zp uzayinda yakinlarsa -- (ozne,iliski) keyfi, yakin
+  olmalari icin sebep YOK
+EN IYI HAL   M >= 1.577      EN KOTU HAL   M >= 7.381
 ```
 
-`[H]` **Boyut**, kısıt sayımından: 7.381 olgu × (d−1) = 110.715.
-`M = 2048` → `2 × 2048 × 32 = 131.072` = **1,18 kat**. Dar ama yeter.
-Modele `+%46` (285.760 → 416.832).
+`M = 2048` en iyi halin ust ucunda, yani IYIMSER. **`M = 8192`**:
+`2 x 8192 x 32 = 524.288` parametre, model `285.760 -> 810.048`
+(**+%184**). Buyuk bir degisiklik ve oyle yazilmali; `M`
+kucultulebilir ama once adreslerin kumelenip kumelenmedigi
+olculmeli (ayni prob makinesi yapar).
 
 ### §12b'nin ÜÇ arızasına karşı
 
@@ -1703,17 +1721,25 @@ Modele `+%46` (285.760 → 416.832).
    gorunuyor: butun donmeler 1,2°, %100 kendine donen (§5.1/Q).
    -> `a4 * ort(|m|)`: KULLANIM BEDELLI. R'nin isini elinden almak
       artik ucuz degil.
-   -> `a4` NASIL SECILECEK (hesapla, varsayilanla degil):
-        varlik konumunda bir aramanin KAZANCI  2-2cos = 1,7436  [O]
-        aramanin beklenen orani ~ varlik konumu payi = %26,4  [O]
-        a4, "her adimda atesle" secenegini ZARARLI kilacak kadar
-        buyuk, "varlik konumunda atesle"yi KARLI birakacak kadar
-        kucuk olmali:
-             1,7436 x 0,264  >  a4 x 1,0      ->  a4 < 0,46
-             kullanilmayan adimda kazanc ~ 0   ->  a4 > 0
-        ARALIK (0 , 0,46).  Ilk deger 0,15 -- araligin alt ucte biri,
-        cunku tavan tarafinda hata "hafiza hic kullanilmaz" demek
-        ve o sessiz basarisizlik.  BU BIR SECIM, olcum degil.
+   -> DUZ L1 BEDELI SINANDI ve ARALIGI BOS CIKTI:
+        AMACLANAN kullanim  pay 0,2643 x kalinti 1,7436 x tavan 0,235
+                            = 0,1083 kazanc,  ates orani ~0,264   [O]
+        IKAME               0,6387 kazanc,    ates orani ~1,000   [O]
+        maliyet = a4 x oran  ise
+             ikameyi engelle   a4 > 0,6387 / 1,000 = 0,6387
+             kullanimi birak   a4 < 0,1083 / 0,264 = 0,4097
+             0,6387 > 0,4097  ->  **BOS, 1,56 kat**
+        Ilk yazdigim "(0 , 0,46)" araligi yalniz TAVANI hesapliyordu;
+        IKAME TABANINI hic hesaplamamistim.  Duz L1 CALISMAZ.
+   -> BUTCE MENTESESI:   L_haf = a4 * max(0, ates_orani - B)^2
+        B = 0,30   -- olculen varlik konumu payi 0,2643'un biraz ustu,
+                      SECILMEDI, o sayidan turedi                 [O]
+        amaclanan kullanim  oran 0,264  ->  maliyet 0  (BEDAVA)
+        ikame               oran 1,000  ->  maliyet a4 x 0,49
+             ikameyi engelle   a4 > 0,6387 / 0,49 = 1,30
+             ust sinir YOK -- ikinin maliyeti AYRISIYOR
+        ARALIK  a4 > 1,30.  Ilk deger 3,0 (guvenli tarafta; asagi
+        yonde hata IKAME demek ve onu bir kez gorduk).
 
 3  V = 0 BASLANGICI DENGEYI DEGISTIRIYORDU.  Baslangic guvenliydi
    (kapi 36 dogruladi) ama denge degil.
@@ -1730,7 +1756,8 @@ Modele `+%46` (285.760 → 416.832).
     zp'yi 2048 koddan birine indiriyor. Adres o orada BOZULUYOR.
     Bu tasarim capaya dokunmuyor; dokunmak ayri bir karar (§3.2
     reddetme iddiasi capaya bagli, ve o zaten uygulanmamis -- T3).
-[H] KAPASITE 1,18 KAT.  Dar. Yetmezse M buyur, bedeli dogrusal.
+[H] MODEL 2,8 KATINA CIKIYOR (285.760 -> 810.048).  Bu artik
+    "kucuk bir ekleme" degil; kiyaslarda oyle yazilmali.
 [C] CIKARIM (2 adim) icin hicbir sey yapmiyor. Tek adimli olgu
     aramasi calisirsa zincir AYRI bir soru olarak acilir.
 ```
