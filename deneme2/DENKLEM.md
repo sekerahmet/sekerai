@@ -53,6 +53,11 @@ j   girdi w_{j-1}  hedef w_j   |z_j|   |Πz_j|    s_j   çapa  cos_hedef  sıra
 
 kayıp   üye 1,6561   dis 0,0000   kod 0,8643   bağ 0,0000   düzen 1207,73
         TOPLAM 2,6411
+        !! BU SATIR ISINMA=4 KARARINDAN ONCE, konum 1..8 uzerinden
+           hesaplandi. Simdiki kayip konum 4..8'i puanlar (§5.2).
+           TABLONUN GERISI ETKILENMEZ -- |z|, |Pz|, s, cos, sira
+           ileri gecisin sayilari, kayip dilimine bagli degil.
+           Ilk gercek kosuda tazelenecek.
 ```
 
 Bu tablo, aşağıdaki iddiaların **üçünü birden** tek bakışta gösteriyor
@@ -149,6 +154,17 @@ ESIK IC CARPIMDA  |zp - c_k| < r  ile  <zp,c_k> > 1 - r^2/2  ozdes
                      okunabilir kismi bir adimda dorde bolundu: farkin
                      %97'si gizli 24 boyuta gecti. Orada kimse okumuyor
                      ve KAYIPTA ORAYI CEZALANDIRAN TERIM YOK.
+
+                     VE SIZINTI BIRIMIN DEGIL, DURUMUN OZELLIGI.
+                     §0 tablosunda `Yildiz` IKI kez girdi oluyor, yani
+                     AYNI R_Yildiz matrisi iki kez uygulaniyor:
+                        j=2   |Pz| 0,9638 -> 0,9418   oran 0,9772
+                        j=7   |Pz| 0,6448 -> 0,5338   oran 0,8279
+                     Ayni operator, 7,5 kat farkli kayip. Cunku R tam
+                     durum uzerinde operatordur, OKUNABILIR KISIM
+                     uzerinde DEGIL (§4.1: Pi izometri degil).
+                     SONUC: "o birimin donmesi kotu, daha iyisini
+                     ogrenir" turu butun PER-BIRIM cozumler ELENIR.
 
 2  NICELEME          Durum PERIYODIK olarak bir koda oturur
                      -> durumlar YENIDEN KULLANILABILIR olur.
