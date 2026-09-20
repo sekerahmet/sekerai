@@ -1190,6 +1190,53 @@ S  KIMLIK ILISKI OPERATORUNDE OLUYOR -- ve sayim bunu ONGORMUSTU
    ADRES NEREDE: en iyi ozne okunabilirligi j=2-3'te, yani ILISKI
    OPERATORUNDEN ONCE (d=8 0,308 / d=16 0,235). Adresleme tavani bu,
    ve tavan `R_r`'den SONRA degil ONCE okunursa gecerli.
+T  ADRES KUSURSUZ -- TEK BOZAN `CAPA`.  §12c'nin TAVANI YANLISTI
+   (21 Eylul, ileri gecis + k-ortalama, EGITIM YOK)
+   Olcu: 7.381 tek adimli onek, adres = onegin SONUNDAKI durum.
+   Yuva tavani = M yuvaya k-ortalama, her yuva COGUNLUK cevabini
+   verirse kac olgu dogru olur.
+   !! Bu olcu DOGRUSAL PROB DEGIL -- yuva atamasi ortak bir dogrusal
+   cerceve istemiyor, yani §5.1/S'deki havuzlama sorunu BURADA YOK.
+
+   ```
+                      capa     cakisik(cos>0,999)  M=2048 M=4096 M=7381
+     t0_d8            ACIK          %0,1           0,282  0,556  0,999
+     t0_d8            KAPALI        %0,0           0,282  0,556  1,000
+     t0_d16 hafizasiz ACIK         %41,8           0,172  0,333  0,588
+     t0_d16 hafizasiz KAPALI        %0,0           0,287  0,558  1,000
+   ```
+
+   1) DONMELER ADRESI HIC BOZMUYOR.  Capa kapatilinca cakisma
+      %41,8 -> %0,0 ve tavan 1,000. Izometri teoremi gorunur hale
+      geldi: R_r butun ikili acilari koruyor, adres kayipsiz.
+   2) TEK BOZAN CAPA.  d=16'da onek sonunda %37 atesliyor ve
+      adreslerin %41,8'ini birbirinin AYNISI yapiyor. Bedeli
+      tavanin **%41'i** (1,000 -> 0,588).
+   3) `d` ADRES ICIN ONEMSIZ.  Capa kapaliyken d=8 ve d=16 AYNI:
+      1,000. d=8'in iyi gorunmesi capanin orada atesmemesinden.
+   4) SIKISTIRMA YOK.  Tavan M ile neredeyse DOGRUSAL (0,282 ->
+      0,556 -> 1,000). Cevap adresin keyfi fonksiyonu; **olgu
+      basina bir yuva** gerekiyor. §12c'nin M = 8192 duzeltmesi
+      DOGRU, ve artik tahmin degil.
+      !! M >= N'de saflik ZATEN 1'e gider; oradaki bilgi saflik
+      degil CAKISMA ORANI. Capali halde M ne olursa olsun 0,588'i
+      gecemez.
+
+   §12c'NIN TAVANI YANLISTI -- ve KOTUMSERDI.  "0,235" yazmistim;
+   o sayi DOGRUSAL PROBun tavani ve slot hafizasi icin YANLIS OLCU.
+   Dogru tavan: capa ACIK 0,588, capa KAPALI 1,000.
+   -> "capa'ya DOKUNULMAZ" karari da DUSER: capa artik tasarimin
+      en buyuk tek kaybi.
+
+   [C] BIRLESTIRME -- SINANMADI.  Hafiza okumasi zaten "en yakin
+   anahtar + deger". Capa da "en yakin kod". Ayni makine.
+        capa    z <- C[k]        DEGISTIRIR -- adresi yok eder
+        hafiza  z <- z + V[k]    EKLER      -- adresi korur
+   Ikisi TEK mekanizma yapilabilir: capayi kaldir, yerine toplamsal
+   okuma koy. §4.1'in sarti ("okuma izometri olmasin") boylece
+   ATARAK degil EKLEYEREK saglanir -- §12b'nin icgudusu, dogru yerde.
+   Bedeli: §3.2 (reddetme = kod uyeligi) dayanaksiz kalir; ama o
+   zaten uygulanmamis (T3).
 ```
 
 ---
@@ -1749,13 +1796,18 @@ olculmeli (ayni prob makinesi yapar).
 ### Ne ÇÖZMEZ
 
 ```
-[O] ADRESLEME TAVANI 0,235 (d=16) / 0,308 (d=8).  Kusursuz bir
-    hafiza bile olgularin en fazla bu kadarini bulur. BILGI tam
-    icin ust sinir budur -- 1,0 beklenmiyor.
-[O] CAPA HASARI.  d=16'da iliski adiminda capa %13 atesliyor ve
-    zp'yi 2048 koddan birine indiriyor. Adres o orada BOZULUYOR.
-    Bu tasarim capaya dokunmuyor; dokunmak ayri bir karar (§3.2
-    reddetme iddiasi capaya bagli, ve o zaten uygulanmamis -- T3).
+[O] ADRESLEME TAVANI -- OLCULDU (§5.1/T), ve ilk yazdigim
+    "0,235" YANLISTI.  O sayi DOGRUSAL PROBun tavani; slot
+    hafizasi ortak bir dogrusal cerceve istemiyor, yani yanlis
+    olcu.  Yuva tavani (M = 7.381, cogunluk cevap):
+        capa ACIK  (d=16)  0,588      capa KAPALI  1,000
+    Donmeler adresi HIC bozmuyor -- izometri.  `d` de onemsiz.
+[O] TEK KAYIP CAPA, ve BUYUK: tavanin %41'i.  d=16'da onek
+    sonunda %37 atesliyor, adreslerin %41,8'ini AYNILASTIRIYOR.
+    -> "capa'ya dokunulmaz" karari DUSTU.  Bu tasarim capayi
+       KALDIRIP yerine toplamsal okumayi koymali (§5.1/T'deki
+       birlestirme).  Bedeli: §3.2 dayanaksiz kalir -- zaten
+       uygulanmamis (T3).
 [H] MODEL 2,8 KATINA CIKIYOR (285.760 -> 810.048).  Bu artik
     "kucuk bir ekleme" degil; kiyaslarda oyle yazilmali.
 [C] CIKARIM (2 adim) icin hicbir sey yapmiyor. Tek adimli olgu
