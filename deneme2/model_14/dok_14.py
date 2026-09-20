@@ -56,11 +56,8 @@ def main() -> int:
     L = MT.olcme_listeleri(AY.AYAR, v)
     G = V.kur(AY.AYAR.veri_tohum)
     E_ad = [x for t in V.TIPLER for x in G["ad"][t]]
-    soru_tip = {i: b.ix.get({"KISI": "kim", "SEHIR": "neresi",
-                             "BOLGE": "neresi"}.get(t), b.ix["hangisi"])
-                for i, t in enumerate(V.TIPLER)}
-    S = O.Sorular(v, E_ad, list(V.ILISKI), V.TR, V.TR_ILISKI, b.kok,
-                  b.ix, b.korunan, soru_tip)
+    S = O.Sorular(v, E_ad, list(V.ILISKI), V.TIPLER, V.TR, V.TR_ILISKI,
+                  b.kok, b.ix, b.korunan)
     sor = S.tum(L, b.dizi, yaz=lambda *a: None)
 
     bitis = set(b.ix[x] for x in ".?!" if x in b.ix)

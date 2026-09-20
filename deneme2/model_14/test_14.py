@@ -389,17 +389,50 @@ def _21():
     # !! `ek_14` LISTEDE YOK: artik kopya DEGIL, kolun kendi kodu.
     # Bolucu bastan yazildi (cok ekli kelime bolunmuyordu, morfotaktik
     # yoktu, `Bolumu`/`bolumu` carpisiyordu, KOK_BILINEN eklendi).
-    # Ote yandan veri URETEN dosyalar birebir kalmali -- sinav sabit.
-    for f in ("veri", "korpus", "metin", "jeton"):
-        a = open(f"../model_13/{f}_13.py", encoding="utf-8").read()
-        b = open(f"{f}_14.py", encoding="utf-8").read()
-        if re.sub(r"_13\b", "_14", a).replace("model_13", "model_14") != b:
-            A = re.sub(r"_13\b", "_14", a).replace("model_13", "model_14")
-            fark[f] = sum(1 for x, y in zip(A.split("\n"), b.split("\n"))
-                          if x != y)
-    assert not fark, f"kopya ADLANDIRMADAN BASKA yerde degismis: {fark}"
-    return ("veri korpus metin jeton -- saf yeniden adlandirma"
-            "   (ek_14 haric: kolun KENDI bolucusu)")
+    #
+    # !! `metin` de LISTEDE YOK (21 Eylul). Sinav yuzeyi artik
+    # `metin_14.sinav_yuzeyi`den geliyor -- `olcme_14` jetonu ELLE
+    # dizmeyi birakti, cunku elle dizilen liste tokenizer degisince
+    # sessizce eskidi ve SINAV HIC KOSMADI (kapi 34).
+    # Ama korunmasi gereken sey METNIN ayniligi degil, KORPUSUN
+    # DEGISMEMESI. Asagida metin degil DAVRANIS sinaniyor.
+    for f in ("veri", "korpus", "jeton"):
+        a = open("../model_13/%s_13.py" % f, encoding="utf-8").read()
+        c = open("%s_14.py" % f, encoding="utf-8").read()
+        A = re.sub("_13" + chr(92) + "b", "_14", a).replace("model_13", "model_14")
+        if A != c:
+            fark[f] = sum(1 for x, y in zip(A.split(chr(10)),
+                                            c.split(chr(10))) if x != y)
+    assert not fark, "kopya ADLANDIRMADAN BASKA yerde degismis: %s" % fark
+
+    # --- metin_14 KORPUSA dokunmuyor mu.  Degisiklik:
+    #       eski  " ".join(... for x in w[:-1]) + " " + w[-1]
+    #       yeni  " ".join([... for x in w[:-1]] + [w[-1]])
+    # N>=2'de CEBIRSEL OLARAK ayni; N=1'de eski CIFT BOSLUK uretiyordu
+    # ("Yildiz'in  kardesi"). Korpus `yol()`u hep 2-3 iliskiyle
+    # cagiriyor (korpus_14:250/381/388) -> korpus DEGISMEDI.
+    # Kapi bunu VARSAYMIYOR, her ciftte hesapliyor.
+    import metin_14 as MT, veri_14 as V
+    eski = lambda w: (" ".join(x + MT._nin(x, False) for x in w[:-1])
+                      + " " + w[-1])
+    rl = list(V.ILISKI)
+    n = 0
+    for i in range(len(rl)):
+        for j in range(len(rl)):
+            for rr in ((rl[i], rl[j]),
+                       (rl[i], rl[j], rl[(i + j) % len(rl)])):
+                w = [V.TR_ILISKI[r] for r in rr]
+                assert MT._yol_parca("Cem_Yildiz", rr,
+                                     "Ceren_Yildiz")[1] == eski(w), (
+                    "N=%d KORPUSU DEGISTIRIR: %s" % (len(rr), rr))
+                n += 1
+    w1 = [V.TR_ILISKI[rl[0]]]
+    assert eski(w1).startswith(" "), "N=1 eski hali zaten dogruymus"
+    assert not MT._yol_parca("Cem_Yildiz", (rl[0],),
+                             "Ceren_Yildiz")[1].startswith(" ")
+    return ("veri korpus jeton -- saf yeniden adlandirma   "
+            "metin: %d N>=2 tamlamasi BIREBIR ayni (korpus degismedi), "
+            "N=1 cift boslugu duzeldi" % n)
 
 
 @kapi("22  AYAR -- SABIT alanlar model_13 degerleriyle ayni")
@@ -654,8 +687,11 @@ def _29():
             say[(len(z), adim)] = say.get((len(z), adim), 0) + 1
             return None
 
-    S = _Say(v, [], [], {}, {}, {}, {"?": 0, "-TAMLAYAN": 1,
-                                     "-BILDIRME": 2}, set(), {})
+    # !! Bu kapi `kur`u OVERRIDE ediyor, yani SORU YUZEYINI hic
+    # kurmuyor -- yalniz HAVUZU sayiyor. Yuzeyin kendisini kapi 34
+    # siniyor; 21 Eylul'de sinavin hic kosmadigi tam bu bosluktan
+    # gecmisti.
+    S = _Say(v, [], [], [], {}, {}, {}, {}, set())
     S.tum(L, np.zeros(4, np.int64), yaz=lambda *a: None)
     gecen = sum(say.values())
     assert gecen == bek, (
@@ -831,6 +867,73 @@ def _33():
     tab = 2 - 2 / (11 ** 0.5)
     return ("k=1 bozulma %.4f (teorem)   k=11 bozulma %.3f   "
             "k=11 uye tabani %.4f" % (boz[1], boz[11], tab))
+
+
+@kapi("34  SINAV YUZEYI -- GERCEK sozlukle kurulur, tamami cozulur")
+def _34():
+    """*Gerekce OLCULDU (21 Eylul):* olcum `bx["-TAMLAYAN"]` uzerinde
+    KeyError verdi. Yani `ek_14` yeniden yazildigindan beri SINAV HIC
+    KOSMAMISTI ve 34 kapinin hicbiri gormemisti -- cunku hicbiri
+    `Sorular`i GERCEK `b.ix` ile kurmuyordu. Kapi 29 sahte bir bx
+    veriyor ve `kur`u override ediyor.
+
+    Bu kapi gercegini kuruyor. Sinanan sey: sinav yuzeyi artik
+    `metin_14.sinav_yuzeyi`den geliyor ve uretilen her onek/cevap/
+    kanit sozluge TAM oturuyor. Jetonu elle dizen bir ikinci liste
+    KALMADI -- kalsaydi burada patlardi."""
+    import ayar_14 as AY, taban_14 as MT, veri_14 as V
+    import birim_14 as BR, olcme_14 as O
+
+    yol = os.environ.get("BIRIM_NPZ", r"G:/Drive'ım/model_14/birim_14.npz")
+    if not os.path.exists(yol):
+        return "ATLANDI -- birim dosyasi yok (%s)" % yol
+    b = BR.yukle(yol, yaz=lambda *a: None)
+    v = MT.veri_kur(AY.AYAR, yaz=lambda *a, **k: None)
+    G = V.kur(AY.AYAR.veri_tohum)
+    E_ad = [x for t in V.TIPLER for x in G["ad"][t]]
+    S = O.Sorular(v, E_ad, list(V.ILISKI), V.TIPLER, V.TR, V.TR_ILISKI,
+                  b.kok, b.ix, b.korunan)
+
+    # 1 ve 2 adimli zincirleri ELLE kur -- grafin kendi olgularindan
+    F = v.facts
+    ornek, n1, n2 = [], 0, 0
+    for e in range(min(400, F.shape[0])):
+        for r in range(F.shape[1]):
+            a = int(F[e, r])
+            if a < 0:
+                continue
+            if n1 < 60:
+                ornek.append(((e, r, a), 1)); n1 += 1
+            for r2 in range(F.shape[1]):
+                a2 = int(F[a, r2])
+                if a2 >= 0 and n2 < 60:
+                    ornek.append(((e, r, r2, a, a2), 2)); n2 += 1
+            if n1 >= 60 and n2 >= 60:
+                break
+    assert len(ornek) >= 20, "graftan ornek cikmadi"
+
+    kotu, bos = [], 0
+    for z, adim in ornek:
+        s = S.kur(z, adim)
+        if s is None:
+            bos += 1
+            continue
+        soru, kanit = s
+        for ad, dizi in (("onek", soru.onek), ("cevap", soru.cevap),
+                         ("kanit", kanit)):
+            if not dizi:
+                kotu.append((ad, z))
+        # yuzey KORPUSUN yazdigi bicimde mi -- `?` sonda, ek AYRI
+        if b.ad[soru.onek[-1]] != "?":
+            kotu.append(("onek '?' ile bitmiyor", b.coz(soru.onek)))
+    assert not kotu, "%d sinav yuzeyi bozuk: %s" % (len(kotu), kotu[:3])
+    assert bos * 2 < len(ornek), (
+        "%d/%d ornek KURULAMADI -- yuzey sozlukle tutmuyor"
+        % (bos, len(ornek)))
+
+    o1 = S.kur(ornek[0][0], 1)[0]
+    return ("%d ornek, kurulamayan %d   ornek onek: %s"
+            % (len(ornek), bos, b.coz(o1.onek)))
 
 
 # =====================================================================

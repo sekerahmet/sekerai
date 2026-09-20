@@ -170,9 +170,32 @@ def _yol_parca(ozne: str, iliskiler, cevap: str):
     X, Y = _tr(ozne), _tr(cevap)
     w = [V.TR_ILISKI[r] for r in iliskiler]
     # "kardesinin cocugunun bolumu" -- son harici hepsi tamlayan ekli
-    il = " ".join(x + _nin(x, False) for x in w[:-1]) + " " + w[-1]
+    # !! TEK iliskide `w[:-1]` bos; onceki hal "" + " " + w[-1] ile
+    # CIFT BOSLUK uretiyordu ("Yildiz'in  kardesi").
+    il = " ".join([x + _nin(x, False) for x in w[:-1]] + [w[-1]])
     return (X + _nin(X, True), il, il + _dir(w[-1], False), Y,
             Y + _dir(Y, True))
+
+
+def sinav_yuzeyi(ozne: str, iliskiler, cevap: str, tip: str):
+    """SINAV yuzeyi -- (ONEK, CEVAP, KANIT), hepsi METIN.
+
+    `olcme_14` sinav onegini BURADAN alir, jetonu ELLE DIZMEZ: sinavin
+    yuzeyi korpusunkiyle YAPI GEREGI ayni kalsin diye.
+
+    *Gerekce OLCULDU (21 Eylul):* eski hal `-TAMLAYAN` / `-BILDIRME`
+    diye SABIT jeton koyuyordu. Tokenizer gercek ek yuzeylerine
+    gecince o birimler sozlukten kalkti ve olcum `KeyError` ile
+    dustu -- yani tokenizer yeniden yazildigindan beri SINAV HIC
+    KOSMADI. 34 kapinin hicbiri gormedi, cunku hicbiri `Sorular`i
+    gercek `b.ix` ile kurmuyordu (artik kapi 34 kuruyor).
+
+    KANIT, sinifi (OGRETILEN/CIKARIM) belirlemek icin korpusta ARANAN
+    dizi:  `<ozne>'nin <iliski> <cevap>`."""
+    Xn, il, _rd, Y, _Yd = _yol_parca(ozne, iliskiler, cevap)
+    sz = V.SORU_SOZ[tip]
+    return (SORU[SINAV_KALIBI](Xn, il, sz + _dir(sz, False)), Y,
+            "%s %s %s" % (Xn, il, Y))
 
 
 def yol(ozne: str, iliskiler, cevap: str, kalip: int) -> str:

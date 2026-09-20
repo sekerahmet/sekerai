@@ -137,11 +137,8 @@ def _d4():
     (Yeni siniflandirma zaten bu olcutle yapiliyor, yani bu kapi
     olcutun KENDI KENDINI dogrulamasi -- ama ayni zamanda `_gecer`in
     calistiginin kaniti: CIKARIM 0, OGRETILEN yuksek cikmali.)"""
-    soru_tip = {i: b.ix.get({"KISI": "kim", "SEHIR": "neresi",
-                             "BOLGE": "neresi"}.get(t), b.ix["hangisi"])
-                for i, t in enumerate(V.TIPLER)}
-    S = OL.Sorular(v, E_ad, list(V.ILISKI), V.TR, V.TR_ILISKI, b.kok,
-                   b.ix, b.korunan, soru_tip)
+    S = OL.Sorular(v, E_ad, list(V.ILISKI), V.TIPLER, V.TR, V.TR_ILISKI, b.kok,
+                   b.ix, b.korunan)
     kaynak = {ad: list(zs)[:400] for ad, zs in L.items()
               if hasattr(zs, "__len__")}
     q = S.tum(kaynak, b.dizi, yaz=lambda *a: None)
@@ -173,9 +170,8 @@ def _d6():
     """Bir varlik hic anlatilmiyorsa onunla ilgili soru CEVAPLANAMAZ
     ve sinav haksiz olur. model_09'da tam bu olmustu: BOLGE 0 cumlede
     geciyordu (CLAUDE.md kural 5)."""
-    soru_tip = {i: b.ix["hangisi"] for i in range(len(V.TIPLER))}
-    S = OL.Sorular(v, E_ad, list(V.ILISKI), V.TR, V.TR_ILISKI, b.kok,
-                   b.ix, b.korunan, soru_tip)
+    S = OL.Sorular(v, E_ad, list(V.ILISKI), V.TIPLER, V.TR, V.TR_ILISKI, b.kok,
+                   b.ix, b.korunan)
     eksik = {}
     for t in V.TIPLER:
         adlar = G["ad"][t][:60]

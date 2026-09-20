@@ -51,6 +51,7 @@ import torch
 import torch.nn.functional as F
 
 import ek_14 as EK
+import metin_14 as MT
 
 YUVA = -1          # iskelette VARLIK yuvasi
 
@@ -242,14 +243,11 @@ class Soru:
 class Sorular:
     """Graftan soru kurar, sonra KORPUSA BAKARAK siniflar."""
 
-    def __init__(self, v, E_ad, ILISKI, TR, TR_ILISKI, kokler, bx, korunan,
-                 soru_tip: dict):
+    def __init__(self, v, E_ad, ILISKI, TIPLER, TR, TR_ILISKI, kokler, bx,
+                 korunan):
         self.v, self.E_ad, self.ILISKI = v, E_ad, ILISKI
-        self.TR, self.TR_ILISKI, self.bx = TR, TR_ILISKI, bx
-        self.kokler, self.korunan = kokler, korunan
-        self.soru_tip = soru_tip
-        self.TAMLAYAN, self.BILDIRME = bx["-TAMLAYAN"], bx["-BILDIRME"]
-        self.SORU = bx["?"]
+        self.TIPLER, self.TR, self.TR_ILISKI = TIPLER, TR, TR_ILISKI
+        self.bx, self.kokler, self.korunan = bx, kokler, korunan
         self._nb = {}
 
     def birim(self, ad) -> tuple:
@@ -258,12 +256,13 @@ class Sorular:
                                    self.korunan)
         return self._nb[ad]
 
-    def iliski(self, r) -> tuple:
-        """!! `TR` DEGIL `TR_ILISKI`. Yanlis tabloyla 24 iliskinin 14'u
-        ASCII kaliyordu; bolme dogru cikiyor ama `bolum` diye BIRIM
-        yok, korpusta `bölüm` var."""
+    def jetonla(self, metin: str) -> tuple:
+        """METIN -> birim indeksleri. Bir parca sozlukte yoksa BOS.
+
+        Korpus akisi da boyle kuruldu (`birim_14.kur`): bosluktan bol,
+        her kelimeyi `EK.bol` ile ayir. Ayni yol, ayni sonuc."""
         ix = []
-        for w in _yuzey(self.ILISKI[r], self.TR_ILISKI):
+        for w in metin.split():
             for x in EK.bol(w, self.kokler, korunan=self.korunan):
                 if x not in self.bx:
                     return ()
@@ -271,33 +270,25 @@ class Sorular:
         return tuple(ix)
 
     def kur(self, zincir, adim):
-        """-> (Soru, BILDIRIM dizisi) ya da None.
+        """-> (Soru, KANIT dizisi) ya da None.
 
-        Soru yuzeyi korpusun soru cumlesiyle ayni dizilis:
-            <ozne> -TAMLAYAN <r1> [-TAMLAYAN <r2>] <soru> -BILDIRME ?
-        BILDIRIM dizisi ise `<ozne> -TAMLAYAN <r..> <cevap>` -- sinifi
-        (OGRETILEN/CIKARIM) belirlemek icin korpusta ARANAN sey."""
+        Yuzey `metin_14.sinav_yuzeyi`den gelir, JETON ELLE DIZILMEZ --
+        korpusu yazan modulun ta kendisi. Gerekce orada."""
         z = [int(x) for x in zincir]
         e, rs, ans = z[0], z[1:1 + adim], z[-1]
-        oz, cev = self.birim(self.E_ad[e]), self.birim(self.E_ad[ans])
-        if not oz or not cev:
-            return None
-        govde = oz
-        for r in rs:
-            ri = self.iliski(r)
-            if not ri:
-                return None
-            govde = govde + (self.TAMLAYAN,) + ri
-        sz = self.soru_tip.get(int(self.v.tip[ans]))
-        if sz is None:
+        onek_m, cev_m, kanit_m = MT.sinav_yuzeyi(
+            self.E_ad[e], [self.ILISKI[r] for r in rs], self.E_ad[ans],
+            self.TIPLER[int(self.v.tip[ans])])
+        onek, cev, kanit = (self.jetonla(onek_m), self.jetonla(cev_m),
+                            self.jetonla(kanit_m))
+        if not onek or not cev or not kanit:
             return None
         ksy = ()
         if adim == 2:
             h = int(self.v.facts[e, z[2]])
             if h >= 0 and h != ans:
                 ksy = self.birim(self.E_ad[h])
-        return (Soru(govde + (sz, self.BILDIRME, self.SORU), cev, ksy),
-                govde + cev)
+        return Soru(onek, cev, ksy), kanit
 
     def tum(self, listeler: dict, dizi, yaz=print) -> dict:
         """Butun zincirleri TEK HAVUZDA toplar ve KORPUSA gore siniflar.
