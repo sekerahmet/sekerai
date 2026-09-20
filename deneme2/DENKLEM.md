@@ -521,6 +521,42 @@ K  TERIM AGIRLIKLARI OKUMAYI GERI CEKIYOR
    a1 = 1,0  a2 = 1,0  a3 = 1e-4  HICBIRI olculmeden secilmisti
    (`ayar_14`: "buradakiler baslangic"). Simdi olculmus bir bedeli
    var.  ACIK -- §13/A1.
+
+L  VARLIK BIRIMLERI DURUMU OYNATMIYOR  --  BILGI=0'IN MEKANIZMASI
+   OLCULDU (21 Eylul, t0, commit 46d9b04, 444 birim / 5 epok):
+                      n    ort frek   ort |a|   1-cos   KENDINE DONEN
+       VARLIK       331     18.920    1,0012   0,1085   243   %73
+       EK            34    137.734    1,7551   0,4559     7   %21
+       otekiler      82     74.403    1,9169   0,4111    18   %22
+       HEPSI        444     35.845    1,2184   0,1855   268   %60
+   "KENDINE DONEN": z = [p_w; 0] alinip R_w uygulandiginda okuma YINE
+   w'yi veriyor -- yani R_w, w'nin kendi noktasinin OKUNABILIR yonunu
+   degistirmiyor. Sozlugun %60'i kendi donmesinin SABIT NOKTASI.
+
+   UCUNU BIRDEN ACIKLIYOR:
+       uretimde TEKRAR      kendine donen birime girince cikilmiyor
+                            (Recep x3, Kapadokya x4, Beykoz x3)
+       kapanmadi 0,6967     dongudeyken `.` hic gelmiyor
+       BILGI tam 0,0000     ozne adi SEYREK -> R[ad] ~ I -> oznenin
+                            kimligi duruma HIC GECMIYOR
+
+   SEBEP, sayidan: gradyan FREKANSLA gelir, `duzen = a3*S|a|^2` ise
+   HERKESE ESIT basar -> denge |a| frekansla olcekleniyor. Tabloda
+   monoton: en sik 20 birim |a| 2,44 / %0 kendine;  en seyrek 194
+   birim |a| 0,83 / %84 kendine.
+
+   !! CAPA BUNUN SEBEBI DEGIL. Ayni uretimlerde capa HIC tetiklenmedi
+   (s en fazla 0,89, esik 0,969) -- §3.1'in "emici durum"u DEGIL.
+   Ve K_TAM = n oldugu icin "tek duzlem" aciklamasi da elendi.
+   !! EGITIMDE capa %7,61, URETIMDE %0,00. §3'un mekanizmasi tam
+   IHTIYAC DUYULAN yerde yok.
+
+   !! KAPI 31 BUNU GOREMIYOR: operatorun SINIFINI sinar ("varlik
+   birimi TAM SO(D) almali"), ogrenilen BUYUKLUGUNU degil. Tam
+   SO(32) olup acisi 0,46'da kalan bir donme, tek duzlemli olmaktan
+   iyi degildir. §13'un kendi kurali: "kapi teoreme degil IHTIYACA
+   kurulur" -- ihtiyac "varlik birimi durumu OYNATMALI".
+   ACIK -- esik ve care karari verilmedi.
 ```
 
 ---
@@ -797,6 +833,9 @@ A1  a1/a2/a3 OLCULMEDEN secildi                A    §5.1/B, §5.1/K
     (uye ORTALAMA, dis TOPLAM; ve OLCULDU:
      750. adimdan sonra kayip DUSERKEN sira
      KOTULESIYOR -- kazanc kod+duzen'den)
+A10 VARLIK birimleri durumu OYNATMIYOR         A    §5.1/L
+    (%73 kendine donuyor; kapi 31 SINIFI
+     siniyor, ogrenilen BUYUKLUGU degil)
 A4  L_duzen u, v'yi kapsamiyor                 A    §5.1/F
 A5  p_w yerlesimi rastgele                     A    A8
 A6  ek yuzeyleri AYRI token oldu               K    -- veri katmani;

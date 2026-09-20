@@ -306,6 +306,54 @@ NIYE SIMDI DEGIL  Gercek korpustaki aciyi okuyamiyorduk: Drive'daki
 
 NEREYE BAKILACAK  DENKLEM §3, §3.1, §5.1/C;  ayar_14.R_CAPA;
   model_14.yol (esik), model_14.donme
+
+OLCULDU 21 Eylul (t0, commit 46d9b04) -- P3'UN ONCULU YANLISTI:
+  EGITIMDE  capa %0,00 -> %5,44 -> %6,44 -> %7,74 -> %7,61
+  URETIMDE  capa %0,00  (s en fazla 0,89, esik 0,969)
+  Yani capa r=0,25'te KENDILIGINDEN uyanmis -- ama YALNIZ egitim
+  durumlarinda. Modelin kendi urettigi durumlarda HIC atesmiyor.
+  §3'un mekanizmasi tam IHTIYAC DUYULAN yerde yok.
+  Ve uretimdeki TEKRARLAR capadan DEGIL: bkz P4.
+```
+
+### P4  VARLIK birimlerinin donmesi durumu OYNATMIYOR  (-> §13/A10)
+
+```
+BULUNDU   21 Eylul, t0 ciktisina GOZLE bakarken. Kullanici:
+          *"bir kac ornek soru sorup cevaplara gozle bakarak bu
+            olcumu teyit edebilir miyiz"* -- 20 soruluk tabloda
+          tekrarlar gorundu (Recep x3, Kapadokya x4, Beykoz x3),
+          sayida gorunmuyordu.
+
+OLCULDU                n    ort frek   ort |a|   1-cos   KENDINE
+          VARLIK     331     18.920    1,0012   0,1085   %73
+          EK          34    137.734    1,7551   0,4559   %21
+          otekiler    82     74.403    1,9169   0,4111   %22
+          HEPSI      444     35.845    1,2184   0,1855   %60
+
+NE        z = [p_w; 0] alinip R_w uygulaninca okuma YINE w'yi
+          veriyor. Sozlugun %60'i kendi donmesinin SABIT NOKTASI,
+          varlik birimlerinde %73.
+
+UCUNU BIRDEN ACIKLIYOR
+          tekrarlar / kapanmadi 0,6967 / BILGI tam 0,0000
+
+SEBEP     gradyan FREKANSLA gelir, `duzen = a3*S|a|^2` HERKESE ESIT
+          basar -> denge |a| frekansla olcekleniyor. Varlik birimi
+          ort 18.920 kez geciyor, ek birimi 137.734 -- 7 kat.
+
+ELENEN ACIKLAMALAR
+          capa emici durumu   HAYIR: uretimde capa HIC atesmiyor
+          tek duzlem (§4.3)   HAYIR: K_TAM = n, acik sinif BOS
+
+KAPI 31 BUNU GOREMIYOR
+          Operatorun SINIFINI siniyor ("varlik birimi TAM SO(D)"),
+          ogrenilen BUYUKLUGUNU degil. Tam SO(32) olup acisi 0,46'da
+          kalan donme, tek duzlemli olmaktan iyi degil.
+          §13: "kapi teoreme degil IHTIYACA kurulur."
+
+NEREYE BAKILACAK  DENKLEM §5.1/L, §13/A10, §4.3;  kapi 31;
+                  ayar_14.A3_DUZEN;  model_14.kayip (duzen terimi)
 ```
 
 ---
