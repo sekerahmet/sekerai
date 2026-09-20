@@ -430,4 +430,63 @@ ADAYLAR, kagitta:
 
 KARAR (kullanici): `D_OKUMA 8 -> 16`, baska hicbir sey.
 Onceden kayit ve kosu: commit `f4df8ae`.
-Adim adim denetim, o kosunun sonucundan sonra ADIM 5'ten devam eder.
+
+---
+
+## d = 16 KOSUSU -- SONUC  (21 Eylul, 135 sn)
+
+ONCEDEN KAYIT: "BILGI tam > 0 -> lever dogru / = 0 -> d tek basina
+yetmiyor.  uye HUKUM DEGIL."
+
+```
+BILGI       tam      aile     kisayol  bos
+  OGRETILEN 0.0000   0.0006   0.0000   0.0008
+  CIKARIM   0.0000   0.0017   0.0000   0.0022
+```
+
+HUKUM: `d` TEK BASINA YETMIYOR.  Kayda sadik kaliniyor -- BICIM'deki
+kazanci "lever dogruydu" diye okumak kaydi sonradan degistirmek olur.
+
+KAYITSIZ AMA GERCEK -- DIL DUZELDI:
+```
+              d=8       d=16
+kalip       0.0840 -> 0.2372    2,8 kat
+ek          0.2276 -> 0.4344    1,9 kat
+kapanmadi   0.6967 -> 0.3413    YARIYA
+tip         0.1542 -> 0.0998    DUSTU
+capa        %7,61  -> %18,31    §3 ilk kez ciddi oranda atesliyor
+```
+
+20 ORNEK, GOZLE (kullanici istedi):  TIP dogru 6/20, KAPANAN 11/20,
+ICERIK dogru 0/20.
+```
+16  ... fakülte -si hangisi -dir ?  -> Çayırova Tıp fakülte -si -dir .
+17  ... memleket -i neresi -dir ?   -> Kocaeli -dir .
+18  ... memleket -i neresi -dir ?   -> Aydın -dır .
+11  ... tez -i hangisi -dir ?       -> Aksaray -dır .   (TEZ beklenirken SEHIR)
+```
+Kullanici: *"nerdeyse dogru cevap veriyor ama yanlis bilgiyle"* --
+tam boyle: DOGRU BICIMDE, DOGRU TURDEN, YANLIS VARLIK.
+!! 6/20 ile tam olcumun 0,0998'i AYNI SEYI OLCMUYOR; buradaki kontrol
+gevsek (dizide HERHANGI bir yerde dogru turden birim var mi). Gozun
+gordugunu DOGRULAR, olcuyu degistirmez.
+
+YENI ARIZA -- DONGULER DERINLESTI, azalmadi:
+```
+d=8    Recep x3,  Kapadokya x4
+d=16   Selçuk x12,  Diyarbakır x15,  Selçuk x12   (4/20 saf dongu)
+```
+`kapanmadi` ORTALAMADA yariya indi ama KUYRUK kotulesti. "Donguler
+kirildi" diye okumustum -- tablo duzeltti. `tip`in dusmesinin sebebi
+de bu: dongu tek bir yanlis-tipli birimi onlarca kez basiyor.
+
+ACILAN KALEMLER
+```
+dis = 0,0003    delta yeni geometride TAMAMEN olu -> K11 yeniden acilmali
+tip dustu       0,154 -> 0,100, ongorulmemisti
+dongu           ayri ariza, ayri bakilmali
+capa %18,31     §3 mekanizmasi ilk kez calisiyor -- ne yaptigi belirsiz
+```
+
+SIRADAKI: aday 3 (dogrusal OLMAYAN okuma) ya da olgu hafizasi (§3).
+Adim adim denetim ADIM 5'ten devam eder.
