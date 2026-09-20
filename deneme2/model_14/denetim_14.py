@@ -104,10 +104,18 @@ def _d3():
     `olcme_listeleri`nin dogru zinciri verdigine GUVENMIYORUZ."""
     F = v.facts
     kotu = 0
-    for ad in ("one", "seen", "comp", "ent"):
-        for z in (L.get(ad) or [])[:500]:
+    # !! BOLME ADI YOK. Adim zincirin UZUNLUGUNDAN: (e,r,cevap) ya da
+    # (e,r1,r2,KOPRU,cevap). Burasi eskiden `1 if ad == "one" else 2`
+    # diyordu -- ayni varsayim `olcme_14.tum`da butun 2 adimli
+    # zincirleri sessizce dusurmustu.
+    n_z = 0
+    for ad, zs in L.items():
+        if not hasattr(zs, "__len__"):
+            continue
+        for z in list(zs)[:500]:
             z = [int(x) for x in z]
-            adim = 1 if ad == "one" else 2
+            adim = (len(z) - 1) // 2
+            n_z += 1
             e, rs, ans = z[0], z[1:1 + adim], z[-1]
             cur = e
             for r in rs:
@@ -117,7 +125,7 @@ def _d3():
             if cur != ans:
                 kotu += 1
     assert kotu == 0, "%d zincirin sonu grafla TUTMUYOR" % kotu
-    return "2.000 zincir orneklendi, hepsinin sonu grafla tutuyor"
+    return "%d zincir orneklendi, hepsinin sonu grafla tutuyor" % n_z
 
 
 @kapi("D4  SIZINTI -- CIKARIM gercekten SOYLENMEMIS mi")
@@ -134,10 +142,8 @@ def _d4():
                 for i, t in enumerate(V.TIPLER)}
     S = OL.Sorular(v, E_ad, list(V.ILISKI), V.TR, V.TR_ILISKI, b.kok,
                    b.ix, b.korunan, soru_tip)
-    kaynak = [((L.get("one") or [])[:400], 1),
-              ((L.get("seen") or [])[:400], 2),
-              ((L.get("comp") or [])[:400], 2),
-              ((L.get("ent") or [])[:400], 2)]
+    kaynak = {ad: list(zs)[:400] for ad, zs in L.items()
+              if hasattr(zs, "__len__")}
     q = S.tum(kaynak, b.dizi, yaz=lambda *a: None)
     og, ci = q["OGRETILEN"], q["CIKARIM"]
     kirli = sum(OL._gecer(HAM, s.onek[:-3] + s.cevap) for s in ci)

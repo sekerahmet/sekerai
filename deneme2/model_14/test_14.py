@@ -602,6 +602,66 @@ def _28():
     return (f"cakismada dmin_min {float(dmin.min()):.1e} >= {taban:.0e}   "
             f"tekillik yokken fark 0.0   grad <= {tavan:.0e}")
 
+@kapi("29  ZINCIR DUZENI -- hicbir zincir SESSIZCE dusmemeli")
+def _29():
+    """*Gerekce OLCULDU (20 Eylul):* `tum()` `3 <= len <= 4` suzuyor
+    ve `adim = len-2` diyordu. Gercek duzen:
+
+        1 adim   (e, r, cevap)                uzunluk 3
+        2 adim   (e, r1, r2, KOPRU, cevap)    uzunluk 5
+
+    Uzunluk 5 hicbirine uymuyordu: 14.043 zincirin 11.043'u SESSIZCE
+    dustu, olcum yalniz 1 adimi sindi ve CIKARIM 8 ornege indi.
+    Hicbir sayi bunu gostermedi -- "zincir 3000" satiri makul
+    duruyordu. Kapi HAVUZUN TAMAMINI sayiyor."""
+    import numpy as np
+    import ayar_14 as AY, taban_14 as MT, veri_14 as V, olcme_14 as O
+    v = MT.veri_kur(AY.AYAR, yaz=lambda *a, **k: None)
+    L = MT.olcme_listeleri(AY.AYAR, v)
+
+    bek = 0
+    for ad, zs in L.items():
+        if not hasattr(zs, "__len__"):
+            continue
+        bek += len(zs)
+        uz = sorted({len(z) for z in zs})
+        assert uz and set(uz) <= {3, 5}, f"{ad}: uzunluk {uz}"
+
+    # adim UZUNLUKTAN dogru cikiyor mu -- grafi yuruyerek
+    F = v.facts
+    for ad, zs in L.items():
+        if not hasattr(zs, "__len__"):
+            continue
+        for z in list(zs)[:200]:
+            z = [int(x) for x in z]
+            adim = (len(z) - 1) // 2
+            cur = z[0]
+            for r in z[1:1 + adim]:
+                cur = int(F[cur, r])
+                if cur < 0:
+                    break
+            assert cur == z[-1], f"{ad}: adim {adim} zincirin sonunu vermiyor"
+
+    say = {}
+
+    class _Say(O.Sorular):
+        def kur(self, z, adim):
+            say[(len(z), adim)] = say.get((len(z), adim), 0) + 1
+            return None
+
+    S = _Say(v, [], [], {}, {}, {}, {"?": 0, "-TAMLAYAN": 1,
+                                     "-BILDIRME": 2}, set(), {})
+    S.tum(L, np.zeros(4, np.int64), yaz=lambda *a: None)
+    gecen = sum(say.values())
+    assert gecen == bek, (
+        f"havuza {gecen} zincir girdi, hukumdeki bolmelerde {bek} var -- "
+        f"{bek - gecen} tanesi SESSIZCE dustu")
+    assert not hasattr(O.Sorular, "HUKUM_DISI"), (
+        "olcu bir bolmeyi ADIYLA eliyor -- HUKUM_DISI geri gelmis")
+    assert set(say) == {(3, 1), (5, 2)}, say
+    return f"{bek} zincir, hepsi havuzda   (uzunluk, adim) -> {say}"
+
+
 # =====================================================================
 # VERI YOLU  --  kopyanin ve kurulumun kapilari
 # =====================================================================

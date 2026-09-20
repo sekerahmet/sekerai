@@ -251,32 +251,45 @@ class Sorular:
         return (Soru(govde + (sz, self.BILDIRME, self.SORU), cev, ksy),
                 govde + cev)
 
-    # Hukme girmeyenler. CLAUDE.md: `arama` esik aramasi icin ayrilmis,
-    # `ood` cozunurluksuz (80 ornek, tek ornek ~0,014 oynatiyor).
-    # Bu bir BOLME listesi degil, OLCUM DISI birakilanlarin listesi.
-    HUKUM_DISI = ("arama", "ent_arama", "ood")
-
     def tum(self, listeler: dict, dizi, yaz=print) -> dict:
         """Butun zincirleri TEK HAVUZDA toplar ve KORPUSA gore siniflar.
 
-        !! BOLME ADLARI KULLANILMAZ. `listeler` sozlugunun anahtarlari
-        (one/seen/comp/ent) model_09'un graf bolmeleriydi; buradaki
-        olcunun onlarla isi yok. Adim sayisi ZINCIRIN UZUNLUGUNDAN
-        cikariliyor (e, r.., cevap), sinif ise korpustan."""
+        !! BOLME ADI HICBIR YERDE KULLANILMAZ -- ne secmek ne elemek
+        icin. `listeler` sozlugunun anahtarlari (one/seen/comp/ent/
+        ent_yok/ood) model_09'un graf bolmeleriydi; bu olcunun onlarla
+        isi yok. Adim ZINCIRIN UZUNLUGUNDAN, sinif KORPUSTAN.
+
+        *`ood` de eleniyordu, kaldirildi (20 Eylul):* gerekcesi "80
+        ornek, cozunurluksuz -- tek ornek ~0,014 oynatir" idi ve bu
+        `ood` KENDI SUTUNUYKEN dogruydu. 14.123'luk tek havuzda artik
+        sutun degil; yapisi comp/ent ile ayni (iki adimli zincir), tek
+        farki hangi kenarlarin tutuldugu -- onu da bayt aramasi zaten
+        soyluyor.
+
+        ZINCIR DUZENI -- OLCULDU, varsayilmadi:
+            1 adim   (e, r, cevap)                  uzunluk 3
+            2 adim   (e, r1, r2, KOPRU, cevap)      uzunluk 5
+        Kopru z[3]'te ve soruya GIRMEZ; adim = (len-1)//2.
+
+        *Gerekce OLCULDU (20 Eylul):* burasi `3 <= len <= 4` suzuyor
+        ve `adim = len-2` diyordu. Uzunluk 5 hicbirine uymuyor, yani
+        BUTUN 2 adimli zincirler SESSIZCE dusuyordu: 14.043 zincirin
+        11.043'u. Olcum yalniz 1 adimi siniyordu ve `CIKARIM` 8
+        ornege dusuyordu (comp/ent'in tamami elenmisti)."""
         ham = np.asarray(dizi, np.uint16).tobytes()
         cik = {"OGRETILEN": [], "CIKARIM": []}
         atilan = 0
         havuz, gorulen = [], set()
         for ad, zs in listeler.items():
-            if ad in self.HUKUM_DISI or not hasattr(zs, "__len__"):
+            if not hasattr(zs, "__len__"):
                 continue
             for z in zs:
                 t = tuple(int(x) for x in z)
-                if 3 <= len(t) <= 4 and t not in gorulen:
+                if len(t) in (3, 5) and t not in gorulen:
                     gorulen.add(t)
                     havuz.append(t)
         for z in havuz:
-            adim = len(z) - 2
+            adim = (len(z) - 1) // 2
             s = self.kur(z, adim)
             if s is None:
                 atilan += 1
@@ -284,9 +297,11 @@ class Sorular:
             soru, bildirim = s
             soru.soylenmis = _gecer(ham, bildirim)
             cik["OGRETILEN" if soru.soylenmis else "CIKARIM"].append(soru)
-        yaz("zincir %d (tekil)   OGRETILEN %d   CIKARIM %d   "
-            "kurulamayan %d" % (len(havuz), len(cik["OGRETILEN"]),
-                                len(cik["CIKARIM"]), atilan))
+        bir = sum(1 for z in havuz if len(z) == 3)
+        yaz("zincir %d (tekil: %d bir adim + %d iki adim)   "
+            "OGRETILEN %d   CIKARIM %d   kurulamayan %d"
+            % (len(havuz), bir, len(havuz) - bir, len(cik["OGRETILEN"]),
+               len(cik["CIKARIM"]), atilan))
         return cik
 
 
