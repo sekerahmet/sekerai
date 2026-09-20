@@ -611,3 +611,38 @@ capa %18,31     §3 mekanizmasi ilk kez calisiyor -- ne yaptigi belirsiz
 
 SIRADAKI: aday 3 (dogrusal OLMAYAN okuma) ya da olgu hafizasi (§3).
 Adim adim denetim ADIM 5'ten devam eder.
+
+---
+
+## ARA KOŞU — OLGU HAFIZASI (§12b).  HÜKÜM: HAYIR
+
+Adım adım denetimin dışında, kullanıcı kararıyla: *"mimari ekleme
+kesin yapalım"*. Önceden kayıt §12b'de, koşu commit `6057207`.
+
+```
+              hafizasiz d=16    hafizali
+kalip            0,2372          0,0000
+ek               0,4344          0,0000
+kapanmadi        0,3413          1,0000
+ek uretimi        6.460              63
+BILGI tam        0,0000          0,0000
+```
+
+Eğitimde `duzen` 3056,9 -> 45,0 ve `capa` %0 -> %94,4: dönmeler söndü,
+model YOL olmaktan çıktı. Hafıza `R`'nin işini elinden aldı ve kayıpta
+bunu yasaklayan terim yok.
+
+BENİM HATAM: `V=0` başlangıcı GÜVENLİ BAŞLANGIÇ sağlıyor (kapı 36
+bunu doğruluyor) ama DENGEYİ değiştiriyor. İkisi ayrı şey; tasarımda
+yalnız birincisini düşünmüştüm.
+
+YEDEK: önceki iki koşu Drive'da (`t0_d8/`, `t0_d16_hafizasiz/`).
+Kaybedilen bir şey yok. Bu koşunun yedeği ALINMADI -- kullanıcı onayı
+bekliyor.
+
+AÇILAN KALEM: hafıza tekrar denenecekse `R`'yi koruyan bir şart
+gerekir -- §12b/M1 (kayıpta puanlanmaz), M2 (`R -> I` cezası),
+M3 (yalnız SON adımda okunur).  Hiçbiri sınanmadı.
+
+SIRADAKI: adım adım denetim **ADIM 6**'dan devam eder
+(`z_5 -> z_6`, Ceren -> Yıldız).

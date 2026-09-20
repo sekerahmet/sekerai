@@ -1043,10 +1043,11 @@ literatürde aranmalı — "benzerini gördüm" diye yazmıyorum.
 
 ---
 
-## 12b. OLGU HAFIZASI — TASARIM  (21 Eylül, KOD YAZILMADI)
+## 12b. OLGU HAFIZASI — TASARIM, KOD, ve KOŞU  (21 Eylül)
 
-> Bu bölüm bir **tasarım**dır, uygulama değil. Her satırın yanında
-> dayanağı var: `[Ö]` ölçüldü, `[H]` hesap, `[Ç]` çıkarım — sınanmadı.
+> Tasarım aşağıda OLDUĞU GİBİ duruyor; kod yazıldı, koşuldu ve
+> **düştü** — hüküm bölümün SONUNDA. Dayanaklar: `[Ö]` ölçüldü,
+> `[H]` hesap, `[Ç]` çıkarım — sınanmadı.
 
 ### Niçin
 
@@ -1161,6 +1162,82 @@ NE YAPILMAZ
           M, tau, beta_m birlikte taranmaz. Bir kosu, bir karar.
 ```
 
+### SONUÇ — KOŞULDU, HÜKÜM: **HAYIR**  (21 Eylül, commit `6057207`)
+
+Önceden kayıt uygulandı: tek değişken (`Vmem`), `d=16` kaldı,
+`M, tau` taranmadı. 302 sn, 5 epok.
+
+**EĞİTİM — model yolu BIRAKTI:**
+
+```
+        uye      duzen     capa
+bas    1,9946   3056,93    %0,00
+epok 1 0,6941     77,09    %93,36
+epok 2 0,6832     49,62    %94,79
+epok 3 0,6742     45,80    %94,81
+epok 4 0,6712     41,67    %95,07
+epok 5 0,6639     45,04    %94,35
+```
+
+`duzen` 68 kat düştü, `capa` %95'e çıktı: dönmeler söndü ve durum her
+adım aynı birkaç koda oturuyor. Yani `z_j = capa(R[w] z_{j-1})`
+zinciri fiilen çalışmıyor — model YOL olmaktan çıktı.
+
+**ÖLÇÜM:**
+
+```
+              hafizasiz d=16    hafizali
+kalip            0,2372          0,0000    COKTU
+ek               0,4344          0,0000    COKTU
+kapanmadi        0,3413          1,0000    HICBIR cumle kapanmiyor
+ek uretimi        6.460              63    %99 azaldi
+tip              0,0998          0,3962    yukseldi -- n=63 uzerinde
+BILGI tam        0,0000          0,0000    DEGISMEDI
+```
+
+**HÜKÜM.** Kayda göre `BILGI tam = 0,0000` → hafıza YANLIŞ YÖN.
+Üstelik `d=16`'nın kazandırdığı dili de götürdü: bu bir takas değil,
+**iki alanda birden kayıp**.
+
+`[Ö]` Önceden kayıt iki şık sayıyordu (adresleme tavanı / hafıza yanlış
+kuruldu) ve ayırmak için kimlik probu öngörüyordu. **Eğitim logu üçüncü
+bir şık gösterdi ve probu gereksiz kıldı:** model adreslemeye hiç
+gelmedi, ondan önce çöktü. İki şık da bu koşuda SINANMADI.
+
+**TASARIM HATASI — nerede yanlış düşündüm:**
+
+```
+YAZDIGIM     "V sifirdan baslar, yani kosu hafizasiz modelle
+              OZDES baslar -- guvenli."     (kapi 36 bunu dogruluyor)
+ATLADIGIM    Sifir baslangic BASLANGICI guvenli kilar, DENGEYI degil.
+             `uye` dusurmenin iki yolu var: R'yi dogru dondurmek,
+             ya da V'yi doldurup R'yi bosa cikarmak. Ikincisi DAHA
+             KOLAY ve kayipta onu YASAKLAYAN terim YOK.
+             Optimizasyon kolayini secti.
+```
+
+`[Ö]` Bu, §12b'nin "Ne ÇÖZMEZ" listesinde yazdığım tavandan **farklı**
+bir arıza. Orada "hafıza mükemmel olsa bile adresleme %11'de bağlar"
+demiştim; gerçekte olan, hafızanın yolu **ikame etmesi**.
+
+**BUNDAN SONRASI İÇİN ŞART.** Hafıza tekrar denenecekse, `R`'nin işini
+elinden almasını engelleyen bir şey gerekir. Üç aday, hiçbiri
+sınanmadı:
+
+```
+[C] ADAY M1  Hafiza KAYIPTA puanlanmaz -- yalniz URETIMDE okunur.
+             Ikame guduzu tamamen kalkar; ama V'yi ne egitir?
+[C] ADAY M2  `duzen` / dogrusal-olmayanlik tabani: R kimlige
+             yaklasirsa CEZA. Ikameyi pahalilastirir, yasaklamaz.
+[C] ADAY M3  Hafiza yalnizca SON adimda (cevap uretilirken) okunur;
+             yol adimlarinda kapali. Zincir R'de kalir.
+```
+
+`[Ç]` M3 en ucuzu ve niyeti en iyi karşılayan: hafıza `(özne, ilişki)`
+durumundan **cevabı** getirsin diye tasarlandı, yolu yürüsün diye
+değil. Şu anki kod onu her adımda okuyor — bu kodun kendi hatası,
+tasarımın değil.
+
 ---
 
 ## 13. Kod ↔ denklem mutabakatı
@@ -1208,7 +1285,11 @@ A12 d TEK BASINA OYNATILMAZ -- TAKAS           A    §5.1/L
     kimligini kaybetti (%35,1 -> %11,2).
     Gizli alan TASIYICI; d buyuyunce kuculuyor.
 A11 OLGU ARAMASI MIMARIDE YOK                  A    §3.1b
-    -> TASARIM yazildi: §12b (olgu hafizasi)
+    -> §12b: tasarim + kod + KOSU.  DUSTU.
+       BILGI tam 0,0000 kaldi, BICIM coktu;
+       hafiza R'yi IKAME etti (duzen 3057->45).
+       Mimaride hala YOK -- ve eklerken yolu
+       korumak SART (§12b/M1-M3).
     durum soruyu tasiyor (ozne %63'te 11,3 kat
     sans ustu, iliski neredeyse kusursuz), ama
     CEVAP ne durumda ne kodda. Kod defteri
