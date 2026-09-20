@@ -348,12 +348,16 @@ NEREYE BAKILACAK  DENKLEM §3, §3.1, §5.1/C;  ayar_14.R_CAPA;
   model_14.yol (esik), model_14.donme
 
 OLCULDU 21 Eylul (t0, commit 46d9b04) -- P3'UN ONCULU YANLISTI:
-  EGITIMDE  capa %0,00 -> %5,44 -> %6,44 -> %7,74 -> %7,61
-  URETIMDE  capa %0,00  (s en fazla 0,89, esik 0,969)
-  Yani capa r=0,25'te KENDILIGINDEN uyanmis -- ama YALNIZ egitim
-  durumlarinda. Modelin kendi urettigi durumlarda HIC atesmiyor.
-  §3'un mekanizmasi tam IHTIYAC DUYULAN yerde yok.
-  Ve uretimdeki TEKRARLAR capadan DEGIL: bkz P4.
+  capa r=0,25'te KENDILIGINDEN uyanmis (egitimde %7,61; d=16'da %18,31).
+
+  !! "URETIMDE capa %0,00" DIYE YAZMISTIM -- GERI ALINDI.
+     O rakam IKI uretim izinden, ~34 adimdan geliyordu. 8.000
+     adimda olculdu (t0/d=16):
+         EGITIM penceresi  %8,56    sinav onegi  %10,49
+         URETIM            %11,28
+     Capa uretimde ATESLIYOR, egitimden DAHA COK. Iki ornekten
+     genelleme yapmistim.
+  Uretimdeki TEKRARLAR capadan DEGIL: bkz P4.
 ```
 
 ### P4  VARLIK birimlerinin donmesi durumu OYNATMIYOR  (-> §13/A10)
@@ -425,8 +429,85 @@ NEREYE BAKILACAK  DENKLEM §5.1/L, §13/A10, §4.3;  kapi 31;
 
 ---
 
-### Adım 5 — `z_4 -> z_5`, girdi `-i`, hedef `Ceren`   (SIRADA)
+### Adım 5 — `z_4 -> z_5`, girdi `-i`, hedef `Ceren`   (KAPANDI)
     !! BILGI ADIMI -- sinavin sordugu TEK gecis bu.
+
+```
+1  DENKLEMLER PARALEL   Evet, dongu tekduze.  Ama §0 tablosu artik
+                        IKI KEZ bayat (ISINMA'dan ve d=8->16'dan
+                        once hesaplandi); oradaki "sira 102" bugunun
+                        modeli icin kullanilamaz.
+
+2  NE ISTEDIK           Bundan oncekilerin hepsi DILBILGISIYDI, bu
+                        BILGI. Model bir OLGU getirecek.
+
+3  OLDU MU -- UC PROB, onegin SONUNDAKI durumdan (t0/d=16, TAM 32
+   boyut, dogrusal, ayri tutulan dilim):
+       ILISKI  (24 sinif)     sira   1,68   %66,7   sans  12,5   7,4 kat
+       OZNE  (1601 sinif)     sira 169,19   %10,5   sans 801,0   4,7 kat
+       CEVAP (1577 sinif)     sira 440,15    %0,3   sans 789,0   1,8 kat
+   DURUM SORUYU TASIYOR, CEVABI TASIMIYOR.
+   Ve bu prob COMERT bir ust sinir: 32 boyutun tamamini goruyor,
+   serbest dogrusal harita kullaniyor. "Cevap var ama okuma
+   goremiyor" DENEMEZ -- dogrusal erisilebilir hicbir bicimde
+   orada degil.
+
+4  TESHISI DUZELTIYOR   Butun gun "OKUMA suclu" diye daraltmistik.
+   Adim 5 gosteriyor ki IKI AYRI ariza var:
+       OKUMA sizintisi  GERCEK.  d=16'da bile ozne %10,5 -> %5,7,
+                        iliski %66,7 -> %18,6 dusuyor.
+       OLGU ERISIMI     YOK.  Cevap 32 boyutta bile sansin yaninda.
+   BILGI = 0'in asil sebebi IKINCISI.
+```
+
+---
+
+## ARA 2: "capa uretimde atesmiyor" hipotezi -- ve kod defteri  (21 Eylül)
+
+Adim 5'ten sonra dogal soru: olgu erisimi mimaride NEREDE? Cevap
+§3, kod defteri. Uc olcum, hepsi kapali form / egitim YOK.
+
+```
+1  "CAPA URETIMDE ATESMIYOR"          CURUDU
+   A EGITIM penceresi  %8,56   B sinav onegi %10,49   C URETIM %11,28
+   Capa uretimde DAHA COK atesliyor. Onceki "%0,00" iddiam IKI
+   uretim izinden (~34 adim, d=8) geliyordu.
+
+2  KOD DEFTERI NE KODLUYOR            ILISKIYI, olguyu DEGIL
+   k'den okunan bilgi, KARISTIRILMIS k zeminine gore net:
+       ILISKI  +1,680 bit   en-olasi dogruluk %36,5 vs %12,7
+       OZNE    +0,539       %3,4  vs %2,7
+       CEVAP   +0,318       %3,0  vs %2,8
+   kullanilan AYRI kod 166 / 2048;  onegin sonunda capa %37,0
+
+3  "CAPA OZNE KIMLIGINI SILIYOR"      CURUDU
+   Ayni orneklerde capa ONCESI (zp) ve SONRASI (c_k):
+       CAPA VAR  z = c_k          1,10 kat sans ustu
+       CAPA VAR  zp (ONCESI)      1,18 kat     <- ZATEN yoktu
+       CAPA YOK  z = zp          11,34 kat
+   Capa SILMIYOR; kimligin zaten kayboldugu yerde ATESLIYOR.
+   Sebep degil BELIRTI.
+```
+
+**VARILAN YER**
+```
+IKI NUFUS   %63 kimlik SAGLAM (11,3 kat, %23,6 tam isabet)
+            %37 kimlik ZATEN GITMIS (1,1 kat) -- capa burada atesler
+            BILGI tam = 0,0000  HER IKISINDE de
+
+OZNE     tasiniyor        ILISKI   tasiniyor (kod da kodluyor)
+CEVAP    YOK -- ne durumda, ne kodda
+
+Soruyu tasimak GEREKLI ama YETERLI DEGIL. Eksik olan
+`(ozne, iliski) -> cevap` ARAMASI, ve mimaride bu isi yapan
+mekanizma YOK. Kod defteri bunun icin tasarlanmisti; olculdu,
+ILISKIYI kodluyor.
+-> DENKLEM §3.1b,  §13/A11
+```
+
+---
+
+### Adım 6 — `z_5 -> z_6`, girdi `Ceren`, hedef `Yıldız`   (SIRADA)
 
 ---
 

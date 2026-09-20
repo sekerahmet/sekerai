@@ -248,6 +248,61 @@ Sonuç: tek-adım doğruluğu `a` ise **`çıkarım ≈ a²`**.
    "GEREKSIZ gecmisi unutur" diye okuduk. Soruyu da unuttu.
 ```
 
+### 3.1b KOD DEFTERİ NE KODLUYOR — ÖLÇÜLDÜ, ve §3'ün ASIL İDDİASI DÜŞÜYOR
+
+Ölçüldü (21 Eylül, t0 / d=16, kapalı form, eğitim YOK). 7.381 tek
+adımlı sınav öneği; öneğin **sonundaki** kod indeksi `k` tek bir
+sayı (2048 sınıf) ve ondan ne okunabildiğine bakıldı. Kıyas zemini:
+`k` **karıştırılmış** hâli — 2048 sınıfa bölmenin kendiliğinden
+verdiği düşüşü ayıklamak için.
+
+```
+              GERCEK k     KARISIK k       NET      en-olasi dogruluk
+ILISKI        1,849 bit    0,169 bit    +1,680     %36,5  vs  %12,7
+OZNE          2,244        1,705        +0,539      %3,4  vs   %2,7
+CEVAP         1,958        1,640        +0,318      %3,0  vs   %2,8
+
+kullanilan AYRI kod          166 / 2048
+onegin SONUNDA capa tetikleyen  %37,0
+```
+
+**Kod defteri İLİŞKİYİ kodluyor, OLGUYU değil.** `OZNE` ve `CEVAP`
+kıyas zemininin içinde. 166 kod, ve ayırt ettikleri şey esasen 24
+ilişki.
+
+```
+!! "CAPA OZNE KIMLIGINI SILIYOR" DIYE DUSUNDUM -- OLCULDU, YANLIS.
+   Capa tetiklendiginde z <- c_k, yani durum 166 vektorden biriyle
+   DEGISTIRILIYOR; kimligin silinmesi beklenirdi. Ayni orneklerde
+   capa ONCESI durum (zp) ile SONRASI (c_k) karsilastirildi:
+                                    sira    1.sira   SANSA GORE
+       CAPA VAR  (z = c_k)        142,19     %0,2     1,10 kat
+       CAPA VAR  (zp, capa ONCESI) 132,50    %1,1     1,18 kat
+       CAPA YOK  (z = zp)          14,33    %23,6    11,34 kat
+   Capanin atesledigi orneklerde kimlik ZATEN YOKTU (1,18 kat).
+   CAPA SILMIYOR -- kimligin zaten kayboldugu yerlerde ATESLIYOR.
+   Sebep degil, BELIRTI. Mantikli: kodlar yalniz iliskiyi kodluyor,
+   kimligini yitirmis durum o jenerik cekicilere dogal olarak yaklasir.
+
+!! IKI NUFUS var, ve ikisi de BILGI uretmiyor:
+       %63  kimlik SAGLAM        sansin 11,3 kati, %23,6 tam isabet
+       %37  kimlik ZATEN GITMIS  sansin 1,1 kati -- capa burada atesler
+   BILGI tam = 0,0000 HER IKISINDE de. Yani soruyu tasimak GEREKLI
+   ama YETERLI DEGIL.
+```
+
+**§3'ün asıl iddiası** — *"durum periyodik olarak bir koda oturur →
+durumlar yeniden kullanılabilir olur → görülmemiş bileşim görülmüş
+parçalara iner"* — şu hâliyle **çalışmıyor**: durum oturuyor (%11
+üretimde), ama oturduğu kod olguyu değil ilişkiyi taşıyor, ve
+bileşim inmiyor.
+
+Eksik olan şey `(özne, ilişki) → cevap` **araması**, ve mimaride bu
+işi yapan bir mekanizma **yok**. Kod defteri bunun için tasarlanmıştı;
+ölçüm ilişkiyi kodladığını gösterdi.
+
+---
+
 ### 3.2 Kod defteri üyeliği = DÜRÜSTLÜK
 
 `Zeynep` gerçek bir ad, `Kayabaşı` gerçek bir soyad, ama
@@ -713,8 +768,14 @@ L  VARLIK BIRIMLERI DURUMU OYNATMIYOR  --  BILGI=0'IN MEKANIZMASI
    !! CAPA BUNUN SEBEBI DEGIL. Ayni uretimlerde capa HIC tetiklenmedi
    (s en fazla 0,89, esik 0,969) -- §3.1'in "emici durum"u DEGIL.
    Ve K_TAM = n oldugu icin "tek duzlem" aciklamasi da elendi.
-   !! EGITIMDE capa %7,61, URETIMDE %0,00. §3'un mekanizmasi tam
-   IHTIYAC DUYULAN yerde yok.
+   !! "EGITIMDE capa %7,61, URETIMDE %0,00" DIYE YAZMISTIM -- YANLIS,
+   GERI ALINDI (21 Eylul).  O rakam IKI uretim izinden, toplam ~34
+   adimdan geliyordu ve d=8 modeline aitti. 8.000 adimda olculdu:
+       A  EGITIM penceresi        n 69.000   ATESLEYEN %8,56
+       B  sinav onegi (zorlanmis) n  7.074   ATESLEYEN %10,49
+       C  URETIM (modelin kendi)  n  8.000   ATESLEYEN %11,28
+   Capa uretimde ATESLIYOR, hem de egitimden DAHA COK.  Iki ornekten
+   genelleme yapmistim.
 
    !! KAPI 31 BUNU GOREMIYOR: operatorun SINIFINI sinar ("varlik
    birimi TAM SO(D) almali"), ogrenilen BUYUKLUGUNU degil. Tam
@@ -1003,6 +1064,12 @@ A1  a1/a2/a3 OLCULMEDEN secildi                A    §5.1/B, §5.1/K
     (uye ORTALAMA, dis TOPLAM; ve OLCULDU:
      750. adimdan sonra kayip DUSERKEN sira
      KOTULESIYOR -- kazanc kod+duzen'den)
+A11 OLGU ARAMASI MIMARIDE YOK                  A    §3.1b
+    durum soruyu tasiyor (ozne %63'te 11,3 kat
+    sans ustu, iliski neredeyse kusursuz), ama
+    CEVAP ne durumda ne kodda. Kod defteri
+    ILISKIYI kodluyor (166 kod / 24 iliski).
+    (ozne,iliski)->cevap arayan sey YOK.
 A10 VARLIK birimleri durumu OYNATMIYOR         A    §5.1/L
     (%73 kendine donuyor; kapi 31 SINIFI
      siniyor, ogrenilen BUYUKLUGU degil)
