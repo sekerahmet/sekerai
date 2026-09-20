@@ -119,15 +119,31 @@ A3_DUZEN = 1e-4   # ezber <-> genelleme dugmesi
 BETA = 0.25       # VQ baglilik agirligi -- VQ-VAE'nin standart degeri
 
 # --- EGITIM -----------------------------------------------------------
-PENCERE = 16
-#  Akistan alinan pencere uzunlugu. Semantik bolme YOK: pencere keyfi
-#  yerden baslar, bastaki "cop" durum ilk capada silinir (§9.5).
-#  OLCULMEDI.
+PENCERE = 24
+#  Zincirin uzunlugu -- modelin OGRENEBILECEGINI belirler. Semantik
+#  bolme YOK: pencere keyfi yerden baslar, bastaki "cop" durum ilk
+#  capada silinir (§9.5).
+#  OLCULDU (20 Eylul): sinavin sordugu sey SORU + CEVAP, ve ikisinin
+#  ayni zincirde olmasi gerekiyor -- cevap sorunun OZNESINDEN
+#  uretiliyor. Birim akisinda 648.281 soru-cevap cifti, ortalama 14,7
+#  birim:  L=16 -> %77,2   L=20 -> %97,3   L=24 -> %99,9.
+#  Ilk deger 16 idi ve OLCULMEDEN yazilmisti; ciftlerin %22,8'inde
+#  zincir cevaba varmadan kesiliyordu.
+ATLA = 4
+#  Pencerelerin kesme araligi. Modelin ogrenebilecegini DEGISTIRMEZ,
+#  yalniz ayni gecisin epok icinde kac kez gradyan verdigini belirler:
+#  atla=1'de her gecis L-1 = 23 pencerede, atla=4'te ~6 pencerede.
+#  HESAP: is ~ N(L-1)/atla. atla 1 -> 4 is 4 kata duser, ve her gecis
+#  yine 6 FARKLI ofsetten gorulur (atla=L-1 olsaydi hep tek ofset
+#  olurdu ve pencere basi cop durumu sistematiklesirdi).
+#  Kac katkinin YETTIGI OLCULMEDI.
 LR = 3e-3
 BATCH = 8192
 EPOK = 5
-#  Epok maliyeti OLCULDU: ~9,0 TFLOP (342 adim x3), L4'te saniyeler.
-#  Onceki tahmin 0,35 TFLOP idi -- kod aramasi hesaba katilmamisti.
+#  OLCULDU (20 Eylul, L4): ilk kosu epok 1'i 220 sn'de bitiremedi --
+#  yani >117 ms/adim. Kagit uzerindeki "saniyeler" tahmini YANLISTI:
+#  darbogaz FLOP degil bellek trafigi (bkz. `model_14.yol` yorumlari).
+#  Gercek epok suresi P PROFIL hucresinde olculuyor.
 
 # =====================================================================
 # KAPILAR -- yalniz BU KOLUN dogruladigi seyler
@@ -145,4 +161,4 @@ assert all(hasattr(AYAR, a) for a in SABIT)
 assert D_OKUMA < D_DURUM, "D > d ZORUNLU -- DENKLEM §4.1 izometri celiskisi"
 assert K_TAM >= 1, "hicbiri TAM degilse §4.3'e gore mimari zayif kalir"
 assert 0 < R_CAPA and 0 < DELTA and 0 < BETA
-assert PENCERE >= 2
+assert PENCERE >= 2 and 1 <= ATLA < PENCERE

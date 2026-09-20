@@ -200,7 +200,21 @@ def kur(ayar, v=None, yaz=print, onbellek: str | None = None) -> Birim:
 # =====================================================================
 # KAPI -- kurulumun kendi denetimi.  Sayilar model_13 ile TUTMALI.
 # =====================================================================
-def kapi(b: Birim) -> str:
+def kapsama(b: Birim, L: int) -> tuple:
+    """L uzunlugundaki pencere SORU + CEVABI ayni zincirde tutuyor mu.
+
+    Sinav cevabi sorunun OZNESINDEN uretiyor; ikisi ayni pencereye
+    sigmazsa model o baglantiyi HIC gormez. Pencere uzunlugunun
+    gerekcesi bu sayidir."""
+    bit = [b.ix[c] for c in ".?!" if c in b.ix]
+    son = np.flatnonzero(np.isin(b.dizi, bit))
+    q = np.flatnonzero(b.dizi[son] == b.ix["?"])
+    q = q[(q > 0) & (q < len(son) - 1)]
+    boy = son[q + 1] - son[q - 1]          # soru basindan cevap sonuna
+    return len(boy), float(boy.mean()), float((boy <= L).mean())
+
+
+def kapi(b: Birim, L: int | None = None) -> str:
     """model_13'un Colab kosusunda olculen sayilar:
          1.269 kelime -> 475 BIRIM (2,67x)   dizi 15.198.500
     Bunlar VERI kararina bagli; kayarlarsa korpus degismis demektir."""
@@ -209,6 +223,14 @@ def kapi(b: Birim) -> str:
     assert (b.say > 0).all(), (
         f"{int((b.say == 0).sum())} birim akista HIC gecmiyor")
     tekrar = sorted(zip(b.say, b.ad))[-5:]
-    return (f"birim {len(b.ad)}   dizi {len(b.dizi):,}\n"
-            f"       en sik: " + "  ".join(f"{a}({s:,})" for s, a in
-                                           reversed(tekrar)))
+    s = (f"birim {len(b.ad)}   dizi {len(b.dizi):,}\n"
+         f"       en sik: " + "  ".join(f"{a}({t:,})" for t, a in
+                                        reversed(tekrar)))
+    if L:
+        n, ort, kap = kapsama(b, L)
+        s += (f"\n       soru+cevap {n:,} cift, ort {ort:.1f} birim   "
+              f"L={L} KAPSAMA %{100 * kap:.1f}")
+        assert kap > 0.99, (
+            f"pencere L={L} soru-cevap ciftlerinin yalniz %{100 * kap:.1f}"
+            "'ini kapsiyor -- model baglantiyi goremez")
+    return s
