@@ -1071,6 +1071,28 @@ def _36():
         "HAFIZA ACIK iken §3.1 tutmamali -- tutuyorsa hafiza capa "
         "ONCESI durumdan adreslenmiyor, yani ozneyi gormuyor")
 
+    # 3b HIZALAMA -- a[b,i] agirligi V[kn[b,i]] degeriyle mi eslesiyor.
+    #    Bir boyut kaysa model yine "calisiyor" gorunurdu ve yukaridaki
+    #    kontrollerin HICBIRI gormezdi.  Ic ice DONGUYLE yeniden kurup
+    #    karsilastiriyoruz.
+    with torch.no_grad():
+        R2, C2, P2 = mh.donme(), mh.kod(), mh.p
+        z0 = P2.new_zeros(B, D); z0[:, :d] = P2[X[:, 0]]
+        zp = torch.bmm(R2[X[:, 0]], z0.unsqueeze(-1)).squeeze(-1)
+        sa = zp @ C2.t()
+        kn = sa.topk(mh.haf_n, 1).indices
+        aw = torch.softmax((C2[kn] * zp[:, None]).sum(-1) / mh.haf_tau, 1)
+        mem = (aw[..., None] * F.embedding(kn, mh.V)).sum(1)
+        mem2 = torch.zeros(B, D)
+        for bb in range(B):
+            for ii in range(mh.haf_n):
+                mem2[bb] += float(aw[bb, ii]) * mh.V[int(kn[bb, ii])]
+    assert torch.allclose(aw.sum(1), torch.ones(B), atol=1e-5),         "attention agirliklari 1'e toplanmiyor"
+    assert bool((aw.argmax(1) == sa.gather(1, kn).argmax(1)).all()),         "en buyuk agirlik EN BUYUK ic carpima denk gelmiyor -- softmax "        "yanlis eksende"
+    hz = float((mem - mem2).abs().max())
+    assert hz < 1e-5, ("HIZALAMA BOZUK: a[b,i] ile V[kn[b,i]] eslesmiyor, "
+                       "fark %.2e" % hz)
+
     # 4  gradyanli (B,K) EKLENMEDI
     with _Buyuk(B * K) as sk:
         mh.kayip(X, isin=2)
@@ -1078,8 +1100,8 @@ def _36():
     assert not grad, "%d gradyanli (B,K) tensor -- hafiza sicak donguyu "        "bozuyor (kapi 26)" % len(grad)
     return ("V=0 ozdes (%.1e);  V dolu fark %.3f, |z|=1 sapma %.1e;  "
             "§3.1 (ayni kod, adim %d, zp farki %.3f) kapali %.1e "
-            "ACIK %.3f;  gradyanli (B,K) 0"
-            % (e, f, nz, j, dzp, ayni0, aynih))
+            "ACIK %.3f;  hizalama %.1e;  gradyanli (B,K) 0"
+            % (e, f, nz, j, dzp, ayni0, aynih, hz))
 
 
 # =====================================================================
