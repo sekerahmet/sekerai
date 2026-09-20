@@ -621,6 +621,29 @@ L  VARLIK BIRIMLERI DURUMU OYNATMIYOR  --  BILGI=0'IN MEKANIZMASI
    sans seviyesinde (3,45 / sans 3,5), yani modelin arizasi degil --
    bir addan sonra gelen SOYAD sol baglamda belirlenmiyor olabilir.
 
+   KIMLIK DURUMDA VAR, OKUMA GOREMIYOR -- SIZINTININ FIYATI
+   OLCULDU (21 Eylul, kapali form, egitim YOK): sinav oneginin
+   SONUNDAKI durumdan OZNENIN KIM OLDUGU dogrusal probla okundu.
+   480 ozne, %70/%30 ayri dilim, sans = 240,5.
+       TAM durum (32 boyut)        ort sira   6,09    1.sira %35,1
+       OKUNABILIR kisim (8 boyut)  ort sira  50,18    1.sira  %3,2
+       |Pz| onegin sonunda 0,3901
+   SIZINTININ BEDELI:  sira 8,2 kat,  tam isabet 11 kat.
+
+   IKI SONUC
+     1  TASIMA CALISIYOR -- ve bu MIMARININ LEHINE. Alti adimlik
+        donme bileskesinden sonra kimlik hala durumda ve DOGRUSAL
+        okunabilir. §2.1'in izometri iddiasi ISE YARIYOR.
+     2  OKUMA KAYBEDIYOR. Ayni bilgi okunabilir 8 boyutta 50,18.
+        §4.1'in "gecirilen miktar SERBEST bir parametre ve onu
+        pinleyen tek sey kayip" cumlesinin FIYATI budur.
+
+   !! Pi SABIT: "ilk d koordinat" (§1), ve kimligi tasiyan yonlerin
+   orada olmasi icin hicbir sebep yok. Ama GLOBAL ogrenilebilir Pi
+   kazanc VERMEZ -- ortogonal baz degisimi p ve R'lere sogurulur.
+   Gercek lever: `d`nin kendisi, kayba |Pz| terimi, ya da dogrusal
+   OLMAYAN okuma. Her biri KENDI kagit sinavini ister.
+
    ACIK -- care karari verilmedi.
 
    !! CAPA BUNUN SEBEBI DEGIL. Ayni uretimlerde capa HIC tetiklenmedi
