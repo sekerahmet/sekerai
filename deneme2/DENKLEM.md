@@ -340,7 +340,7 @@ değil."*
 Kodun hesapladığı şey, birebir:
 
 ```
-kos_{j,w} = <q_j , p_w>                              j = 1 .. L-1
+kos_{j,w} = <q_j , p_w>                              j = ISINMA .. L-1
 
 üye   = 2 - 2 · ort_{b,j} kos_{j, w_j}               KONUM BASINA ORTALAMA
 
@@ -411,12 +411,11 @@ F  L_duzen u ve v'yi KAPSAMIYOR
    Belge "donme ureteci" diyor; kod yalniz `a` ve `θ`. Tek duzlemin
    YONU (u, v) duzenlenmiyor. K_TAM = n iken zaten acik sinif bos.
 
-G  COP ONEK PUANLANIYOR
+G  COP ONEK PUANLANIYORDU  --  KAPANDI 20 Eylul, bkz §5.2
    Pencere akistan keyfi yerden basliyor (§9.5), yani bastaki durum
    cop. Ilk surum bunu "cop durum ILK CAPADA silinir" diye
    mesrulastiriyordu -- SILINMIYOR: adim 1'de s = 0,5482, esik 0,969,
-   capa hic tetiklenmiyor (§0 tablosu). Yani ortada bir mekanizma hic
-   yoktu; kayip copu adim 1'den itibaren puanliyor.
+   capa hic tetiklenmiyor (§0 tablosu). Ortada bir mekanizma hic yoktu.
    OLCULDU: ayni onege kac AYRI hedef dayatildigi --
        konum 1: 9,20 hedef   tavan %45,1
        konum 2: 3,34         tavan %52,9
@@ -424,6 +423,8 @@ G  COP ONEK PUANLANIYOR
        konum 6: 1,10         tavan %90,8
    Hicbir belirlenimci model bu tavani gecemez, ve tam bu konumlar
    AD birimlerinin donmesini egiten konumlar.
+   COZUM: ISINMA = 4, kayip konum 4..23'u puanliyor. Hicbir gecis
+   dusmuyor -- gerekce ve alternatifin elenmesi §5.2, kapi 32.
 
 H  L_dis HAKSIZ CEZA (ilk surumden beri biliniyor)
    Pencerede olmayan birimlerin bir kismi GECERLI alternatif
@@ -434,6 +435,61 @@ I  OLU KOD
 ```
 
 ---
+
+### 5.2 ISINMA — ilk konumlar niye puanlanmıyor  (KARAR, §13/A3)
+
+Pencere akıştan **keyfi** yerden başlıyor (§9.5), yani baştaki önek
+çöp. İlk sürüm bunu *"çöp durum ilk çapada silinir"* diye
+meşrulaştırıyordu; **silinmiyor** — adım 1'de `s = 0,5482`, eşik
+`1 − r²/2 = 0,969`, çapa hiç tetiklenmiyor (§0 tablosu). Ortada bir
+mekanizma hiç yoktu.
+
+**Çapayı adım 1'de tetiklemek ELENDİ — aritmetik kendi kendini yiyor:**
+
+```
+s_1 = 0,5482 icin gereken r:  1 - r^2/2 < 0,5482  ->  r > 0,9506   (3,8 kat)
+
+r = 0,2500   baslik yari acisi 14,4 derece   2048 baslik kureyi 2,6e-17 kapliyor
+r = 0,9506   baslik yari acisi 56,8 derece   2048 baslik kureyi 1,05    kapliyor
+```
+
+Kaplama 1'e ulaşınca **her durum bir koda oturur** — §5'in `bağ`
+teriminin kaçındığı hâlin ta kendisi: model sonlu otomata çöker.
+
+**Karar: ilk `ISINMA` konum puanlanmaz.** `ISINMA` keyfî değil,
+`atla`'dan çıkıyor. Akıştaki `i` indisli geçiş, `s ≡ 0 (mod atla)`
+olan her pencerede görülür ve penceredeki konumu `j = i − s`, yani
+**`j ≡ i (mod atla)`** — bir geçiş hep aynı kalıntı sınıfında kalır:
+
+```
+ W   c=0 c=1 c=2 c=3   toplam   atilan konum      (L = 24, atla = 4)
+ 1     5   6   6   6     23     -
+ 2     5   5   6   6     22     1
+ 3     5   5   5   6     21     1,2
+ 4     5   5   5   5     20     1,2,3            <- SECILEN
+ 5     4   5   5   5     19     1,2,3,4
+ 8     4   4   4   4     16     1..7
+```
+
+`W = 4` **tek** değer: tavanı ölçülen üç düşük konumu (`%45,1`,
+`%52,9`, `%63,2` — §5.1/G) atan **ve** dört kalıntı sınıfını da tam
+5 konumda bırakan. Yani **hiçbir geçiş eğitimden düşmüyor**; her
+geçiş yalnızca çöp ofsetten puanlandığı o **tek** pencereyi
+kaybediyor. Böylece "ad birimlerinin dönmesi eğitilemez" itirazı da
+düşüyor: ad birimleri gradyanını almaya devam ediyor, artık çöp
+önekten almıyor.
+
+```
+BEDEL    puanlanan konum  23 -> 20      (%13)
+KAZANC   puanlanan en dusuk tavan  %45,1 -> konum 4
+         (olculen dort nokta monoton artiyor: 45,1 / 52,9 / 63,2 / 90,8)
+GENEL    W, `atla`nin KATI olmali -- degilse bir gecis sinifi
+         otekilerden bir konum az puanlanir.   `ayar_14` assert ediyor.
+```
+
+Kapı **32**: kayıp `uye`si elle kurulanla birebir, ve `isin=1`inkinden
+farklı. Dilim sessizce `1:`e dönerse hiçbir sayı patlamaz — bu yüzden
+kapı değer özdeşliği kuruyor.
 
 ## 6. Saat `S` — ÖLÇÜLECEK DÜĞME, varsayılan KAPALI
 
@@ -634,6 +690,8 @@ K7  K_TAM = n  (frekans ayrimi yanlis)         K    §4.3
 K8  L = 24, atla = 4                           K    §9.5
 K9  kod terimi HER ADIMDA                      K    §5.1/C  -- yazildi,
                                                     ama SONUCU acik (A6)
+K10 ISINMA = 4, cop onek PUANLANMIYOR          K    §5.2, kapi 32
+    (eski A3; kapandi 20 Eylul)
 
 T1  olcum ACGOZLU kosuyor, §7 ISIN diyor       T    §7, A7
 T2  §9.7 "r, delta egitimde yok" YANLIS        T    §9.7 -- duzeltildi
@@ -641,7 +699,6 @@ T3  §3.2 reddetme kodda YOK                    T    A9
 
 A1  uye ORTALAMA / dis TOPLAM -- a1 belirsiz   A    §5.1/B
 A2  delta geometrinin disinda                  A    §5.1/A
-A3  cop onek puanlaniyor (§9.5 ile celisik)    A    §5.1/G
 A4  L_duzen u, v'yi kapsamiyor                 A    §5.1/F
 A5  p_w yerlesimi rastgele                     A    A8
 A6  ek yuzeyleri AYRI token oldu               K    -- veri katmani;

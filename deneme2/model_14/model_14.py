@@ -336,17 +336,26 @@ class Yol(nn.Module):
         return -self.oku(y["z"], y["t"])
 
     # ---------------- kayip ----------------
-    def kayip(self, X, a1=1.0, a2=1.0, a3=1e-4, delta=0.4, beta=0.25, r=0.25):
+    def kayip(self, X, a1=1.0, a2=1.0, a3=1e-4, delta=0.4, beta=0.25,
+              r=0.25, isin=4):
         """YOLUN TAMAMINA bakar -- next token YOK.  DENKLEM.md §5.
 
-        a1..a3 OLCULMEDEN secilmez; buradakiler baslangic."""
+        a1..a3 OLCULMEDEN secilmez; buradakiler baslangic.
+
+        `isin` ISINMA: ilk `isin` konum PUANLANMAZ. Pencere akistan
+        keyfi yerden basliyor, yani bastaki onek cop. HESAP (§5.2):
+        gecis j = i mod `atla` kalinti sinifinda kalir, yani L=24 /
+        atla=4'te her gecis 5-6 AYRI konumda puanlanir ve bunlarin
+        EN COK BIRI 1..3 arasindadir. isin=4 o tek konumu atar --
+        hicbir gecis egitimden dusmez, dort kalinti sinifi da tam 5
+        konum tutar.  (kapi 32)"""
         y = self.yol(X, r)
         # !! DILIMLEME OKUMADAN ONCE. Adim 0 VERILMIS; once okuyup sonra
         # dilimlemek (B,L,n)'in tamamini hesaplamak demek.
         # !! `_kos` -- `oku` degil. Ihtiyacimiz olan her sey cos'tan
-        # cikiyor; 2-2x ve clamp iki (B,L-1,n) tensor daha ekliyordu.
-        kos = self._kos(y["z"][:, 1:], y["t"][:, 1:])
-        uye = 2 - 2 * kos.gather(2, X[:, 1:, None]).squeeze(-1).mean()
+        # cikiyor; 2-2x ve clamp iki (B,L-isin,n) tensor daha ekliyordu.
+        kos = self._kos(y["z"][:, isin:], y["t"][:, isin:])
+        uye = 2 - 2 * kos.gather(2, X[:, isin:, None]).squeeze(-1).mean()
 
         # ITICI kuvvet. Pencerede OLMAYAN birim yolun yanindan gecmemeli.
         # Mentese: hepsi delta'yi gecince terim sifirlanir.
@@ -359,9 +368,9 @@ class Yol(nn.Module):
         # (yoksa butun durumlar koda cekilir ve model sonlu otomata coker).
         # !! `zp` -- capa ONCESI durum. `z` kullanilirsa fark sifirdir.
         # !! `k` yol()tan geliyor; yeniden cdist B*(L-1) x K matris demek.
-        zf = y["zp"][:, 1:].reshape(-1, self.D)
-        vf = y["vur"][:, 1:].reshape(-1)
-        Ck = F.embedding(y["k"][:, 1:].reshape(-1), self.kod())  # BIR gather
+        zf = y["zp"][:, isin:].reshape(-1, self.D)
+        vf = y["vur"][:, isin:].reshape(-1)
+        Ck = F.embedding(y["k"][:, isin:].reshape(-1), self.kod())  # BIR gather
         kod = (zf.detach() - Ck).pow(2).sum(-1).mean()
         bag = ((zf - Ck.detach()).pow(2).sum(-1) * vf).sum() \
             / vf.sum().clamp(min=1)

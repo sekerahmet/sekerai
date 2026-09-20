@@ -141,6 +141,19 @@ PENCERE = 24
 #  birim:  L=16 -> %77,2   L=20 -> %97,3   L=24 -> %99,9.
 #  Ilk deger 16 idi ve OLCULMEDEN yazilmisti; ciftlerin %22,8'inde
 #  zincir cevaba varmadan kesiliyordu.
+ISINMA = 4
+#  Kayip ilk ISINMA konumu PUANLAMAZ -- pencere keyfi yerden basliyor,
+#  bastaki onek cop.  OLCULDU: ayni onege dayatilan AYRI hedef sayisi
+#  ve bunun belirlenimci tavani
+#      konum 1: 9,20 hedef %45,1    konum 2: 3,34 %52,9
+#      konum 3: 1,91  %63,2         konum 6: 1,10 %90,8
+#  HESAP: bir gecis j = i mod ATLA kalinti sinifinda kalir, yani
+#  L=24/ATLA=4'te 5-6 ayri konumda puanlanir ve EN COK BIRI 1..3'te.
+#      W:  1 -> 5 6 6 6 (23)   4 -> 5 5 5 5 (20)   5 -> 4 5 5 5 (19)
+#  W=4 TEK deger: tavani olculen uc dusuk konumu atar VE dort sinifi
+#  da esitler; hicbir gecis egitimden dusmez.  Alternatif (capayi
+#  adim 1'de tetiklemek) ELENDI: r 0,25 -> 0,95 gerekirdi, o yaricapta
+#  2048 baslik kureyi order-1 kapliyor = sonlu otomat.  (§5.2, kapi 32)
 ATLA = 4
 #  Pencerelerin kesme araligi. Modelin ogrenebilecegini DEGISTIRMEZ,
 #  yalniz ayni gecisin epok icinde kac kez gradyan verdigini belirler:
@@ -174,3 +187,7 @@ assert D_OKUMA < D_DURUM, "D > d ZORUNLU -- DENKLEM §4.1 izometri celiskisi"
 assert K_TAM >= 1, "hicbiri TAM degilse §4.3'e gore mimari zayif kalir"
 assert 0 < R_CAPA and 0 < DELTA and 0 < BETA
 assert PENCERE >= 2 and 1 <= ATLA < PENCERE
+assert 1 <= ISINMA < PENCERE
+assert ISINMA % ATLA == 0, (
+    "ISINMA ATLA'nin kati OLMALI: degilse kalinti siniflari esitlenmez "
+    "ve bir gecis sinifi otekilerden bir konum az puanlanir (§5.2)")

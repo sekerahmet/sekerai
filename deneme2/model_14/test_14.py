@@ -502,32 +502,36 @@ def _26():
     tarafinda (B,L,n) uzerinde uc tane kuruluyordu.
 
     Iki sayi kilitleniyor:
-      (B,L-1,n)   1 tane  -- yalniz cos.  2-2x ve clamp REDUKSIYONDAN
-                  SONRA, (B,n) uzerinde yapilir.
-      (B,K)       L-1 tane, ve HICBIRI requires_grad DEGIL.
+      (B,L-W,n)   1 tane  -- yalniz cos.  2-2x ve clamp REDUKSIYONDAN
+                  SONRA, (B,n) uzerinde yapilir.  W = ISINMA.
+      (B,K)       L-1 tane -- ISINMA'dan BAGIMSIZ: yol butun pencere
+                  boyunca kosar, puanlanmayan yalniz KAYIP tarafi.
+                  Ve HICBIRI requires_grad DEGIL.
                   `k` bir indeks, `vur` bir bool; aramadan geri hicbir
                   sey akmaz. Gradyanli olsaydi 15 x 67 MB geri gecise
                   kadar TUTULURDU."""
-    n, D, d, K, B, L = 451, 32, 8, 2048, 512, 16
+    import ayar_14 as AY
+    n, D, d, K, B, L, W = 451, 32, 8, 2048, 512, 16, AY.ISINMA
     tam = torch.zeros(n, dtype=torch.bool)
     tam[:80] = True
     m = M.Yol(n, D=D, d=d, K=K, tam=tam)
     g = torch.Generator().manual_seed(26)
     X = torch.randint(0, n, (B, L), generator=g)
 
-    with _Buyuk(B * (L - 1) * n) as s1:
-        m.kayip(X)
+    with _Buyuk(B * (L - W) * n) as s1:
+        m.kayip(X, isin=W)
     with _Buyuk(B * K) as s2:
-        m.kayip(X)
+        m.kayip(X, isin=W)
     bk = [x for x in s2.v if x[1] == (B, K)]
     grad = [x for x in bk if x[2]]
 
-    assert len(s1.v) == 1, "(B,L-1,n) boyunda %d tensor: %s" % (
+    assert len(s1.v) == 1, "(B,L-W,n) boyunda %d tensor: %s" % (
         len(s1.v), [x[:2] for x in s1.v])
     assert len(bk) == L - 1, "(B,K) boyunda %d tensor (beklenen %d)" % (
         len(bk), L - 1)
     assert not grad, "%d kod-arama tensoru GRADYANLI -- geri gecise kadar tutulur" % len(grad)
-    return "(B,L-1,n) 1 tensor   (B,K) %d tensor, gradyanli 0" % len(bk)
+    return ("(B,L-%d,n) 1 tensor   (B,K) %d tensor, gradyanli 0"
+            % (W, len(bk)))
 
 @kapi("27  IZ -- `son` sozlugu kayipla BIREBIR toplaniyor")
 def _27():
@@ -742,6 +746,50 @@ def _31():
             "(K_TAM=%d, acik sinif %d)"
             % (len(b.ad), len(varlik), AY.D_DURUM, AY.K_TAM,
                int((~tam).sum())))
+
+
+@kapi("32  ISINMA -- kayip ilk ISINMA konumunu GORMUYOR")
+def _32():
+    """§13/A3'un kapisi. Karar: cop onek PUANLANMAZ (§5.2).
+
+    Dilim `y["z"][:, isin:]` sessizce `1:`e donerse hicbir sayi
+    patlamaz -- kayip yine hesaplanir, yalniz konum 1'in %45,1
+    tavani geri gelir. Bu yuzden kapi DEGER ozdesligi kuruyor:
+    elle kurulan `uye` ile kayibin bastigi `uye` ayni mi, VE
+    isin=1'inkinden FARKLI mi."""
+    import ayar_14 as AY
+    n, D, d, K, B, L = 120, 16, 6, 256, 64, 24
+    W = AY.ISINMA
+    m = M.Yol(n, D=D, d=d, K=K, tam=torch.ones(n, dtype=torch.bool))
+    g = torch.Generator().manual_seed(32)
+    X = torch.randint(0, n, (B, L), generator=g)
+
+    y = m.yol(X, 0.25)
+    kos = m._kos(y["z"][:, W:], y["t"][:, W:])
+    assert kos.shape[1] == L - W, "puanlanan konum %d, beklenen %d" % (
+        kos.shape[1], L - W)
+    elde = float(2 - 2 * kos.gather(2, X[:, W:, None]).squeeze(-1).mean())
+
+    m.kayip(X, isin=W)
+    e = abs(float(m.son["uye"]) - elde)
+    assert e < 1e-6, "uye elle hesapla tutmuyor: fark %.2e" % e
+
+    m.kayip(X, isin=1)
+    eski = float(m.son["uye"])
+    assert abs(eski - elde) > 1e-4, (
+        "isin=%d ile isin=1 AYNI uye veriyor -- dilim ise yaramiyor" % W)
+
+    # HESAP: bir gecis j = i mod ATLA sinifinda kalir; ISINMA ATLA'nin
+    # kati oldugu icin dort sinif da ayni sayida konum tutmali.
+    say = {c: len([j for j in range(1, AY.PENCERE)
+                   if j % AY.ATLA == c and j >= W]) for c in range(AY.ATLA)}
+    assert len(set(say.values())) == 1, (
+        "kalinti siniflari esit degil: %s -- bir gecis sinifi otekilerden "
+        "az puanlaniyor" % say)
+    return ("konum %d..%d puanlaniyor (%d/%d)   uye ozdes, isin=1'den "
+            "%.4f farkli   her kalinti sinifi %d konum"
+            % (W, L - 1, L - W, L - 1, abs(eski - elde),
+               next(iter(say.values()))))
 
 
 # =====================================================================
