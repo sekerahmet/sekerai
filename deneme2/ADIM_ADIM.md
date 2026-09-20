@@ -656,3 +656,28 @@ sonra GERI TIRMANMIS (991, 1078, 1106, 1128). Yani 3056,93'ten
 olcmek yanlisti. Iki DENGE arasi olculunce kisayolun bedeli 0,6387
 cikti (uye %44, kod %39 muhasebe, duzen %17) -- butun olgulari
 ogrenmenin (<= 0,3008) IKI KATI. Hukum degismedi, GUCLENDI.
+
+ARA OLCUM -- c_f (21 Eylul, ileri gecis, EGITIM YOK).  Kendi kapisi
+gecti: ort cos 0,5291 -> uye 0,9418, kayitli 0,9460.
+
+```
+  tip       pay      cos hafizasiz  cos hafizali   uye KATKI FARKI
+  VARLIK   26,43%       0,1282        0,1861         +0,0306  %11
+  EK       29,40%       0,7557        0,9458         +0,1118  %40
+  DIGER    44,16%       0,6182        0,7711         +0,1351  %49
+```
+
+BENIM TEZIM DUSTU.  §5.1/M "kayip olguyu satin alamiyor, once fiyat
+duzelir" diyordu. Olcum tersini soyluyor: `uye` kaybinin %49'u
+(0,4609) zaten VARLIK konumlarinda ALINMAMIS duruyor -- kisayolun
+aldigi her seyden (0,2775) buyuk. Ve kisayol oraya dokunmadi
+(kazancinin %89'u EK + DIGER).
+
+Model odulu SECMEDI diye almadi degil, ALAMIYOR.  Fiyat dogru yerde.
+L1..L4'un tamami (hepsi fiyati degistiriyor) KAPANDI.
+
+Bedeli: iki ileri gecis, egitim yok.  L2'nin 5 dakikalik kosusu
+YAPILMADI -- gerek kalmadi.
+
+SIRADAKI: A10.  Ariza tasiyicida -- varlik birimleri durumu
+oynatmiyor, bu yuzden hicbir sey ozneyle adreslenemiyor.

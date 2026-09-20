@@ -803,6 +803,8 @@ L  VARLIK BIRIMLERI DURUMU OYNATMIYOR  --  BILGI=0'IN MEKANIZMASI
    kurulur" -- ihtiyac "varlik birimi durumu OYNATMALI".
    ACIK -- esik ve care karari verilmedi.
 M  KAYIP OLGUYU SATIN ALAMIYOR -- SAYILDI + OLCULDU (21 Eylul)
+   !! TEZI DUSTU -- bkz. §5.1/O.  Fiyat zaten dogru; model
+      odulu ALAMIYOR.  Asagidaki OLCUMLER gecerli, HUKUM degil.
    §12b hafiza kosusu duserken sorulan soru: optimizasyon neden
    donmeleri sondurmeyi SECTI?  Cevap kayipta, aritmetikle.
 
@@ -884,6 +886,8 @@ M  KAYIP OLGUYU SATIN ALAMIYOR -- SAYILDI + OLCULDU (21 Eylul)
    Dordu de SINANMADI.  Kisayolun %44'u `uye`de oldugu icin L2/L3
    dogrudan oraya bakiyor; L1 ve L4 tek baslarina yetmez.
 N  L1..L4 KAGITTA SINANDI -- IKISI DUSTU, BIRI KIRILGAN  (21 Eylul)
+   !! DAL KAPANDI -- bkz. §5.1/O.  Dordu de FIYATI degistiriyor;
+      alinamayan odulu carpanla buyutmek ise yaramaz.
    Olcut tek: degisiklikten sonra KISAYOL hala OLGUDAN cok mu oduyor?
    Zemin §5.1/M.3'ten:  kisayol 0,6387   butun olgular <= 0,3008.
 
@@ -936,6 +940,64 @@ N  L1..L4 KAGITTA SINANDI -- IKISI DUSTU, BIRI KIRILGAN  (21 Eylul)
    KABA AYRIM BILE KARAR VERDIRIR: varlik birimleri (`var_ix`, hucre
    4'te zaten kuruluyor) ile geri kalanin cos'u. Varlik birimleri DAHA
    KOLAYSA L3 dogrudan oluyor.
+O  §5.1/M'NIN TEZI YANLIS -- FIYAT ZATEN DOGRU  (21 Eylul, ileri gecis)
+   M "kayip olguyu satin alamiyor, once FIYAT duzelir" diyordu. Fiyat
+   OLCULDU ve tersi cikti. Iki kayitli agirlik, ayni 131.072 pencere,
+   hedefin cos'u birim TIPINE gore ayrildi. EGITIM YOK.
+   KENDI KAPISI: ortalama cos 0,5291 -> uye 0,9418, kayitli 0,9460.
+
+   ```
+     tip       pay      cos hafizasiz   cos hafizali   uye'ye KATKI FARKI
+     VARLIK   26,43%       0,1282          0,1861         +0,0306   %11
+     EK       29,40%       0,7557          0,9458         +0,1118   %40
+     DIGER    44,16%       0,6182          0,7711         +0,1351   %49
+     TOPLAM                                               +0,2775
+   ```
+
+   1) OLGU ZATEN PAHALI.  Varlik konumlari geri kalandan 5,2 kat zor
+      (kalinti 1,7436 vs 0,4887 / 0,7636). `uye` kaybinin
+      0,2643 x 1,7436 = **0,4609'u**, yani **%49'u**, varlik
+      konumlarinda ELDE EDILMEMIS duruyor.
+
+   2) KISAYOL ORAYA DOKUNMADI.  Kazancinin %89'u EK ve DIGER'den.
+      Varlikta 0,1282 -> 0,1861; 0,128 zaten sansa yakin (444 birim,
+      16 boyutlu kure).
+
+   3) ORTAK HUKUM:
+      ```
+      VARLIK'ta duran alinmamis odul   0,4609
+      kisayolun uye'den aldigi          0,2775
+      ```
+      Model odulu SECMEDI diye almadi degil -- **ALAMIYOR**. Fiyat
+      dogru yerde ve yeterince yuksek; toplayacak mekanizma yok.
+
+   BUNUN KAPATTIGI DAL:  L1, L2, L3, L4 (§5.1/N) -- hepsi FIYATI
+   degistiriyor. Alinamayan bir odulu carpanla buyutmek onu
+   alinabilir yapmaz. L3'un yasadigi da bu olcumle cikti
+   ((1-c_f)/(1-c_g) = 2,667) ama ARTIK ONEMI YOK: 2,667 kat agirlik,
+   sans seviyesindeki bir cos'u yukseltmez.
+   DAL KAPANDI -- yeniden acilmasi icin "model varlik konumlarinda
+   sans ustune cikabiliyor ama cikmiyor" gosterilmeli.
+
+   TEK KAYDA DEGER ITIRAZ: pencere akistan KEYFI yerden basliyor
+   (§9.5), yani penceredeki ILK varlik anilmasi HICBIR modelce
+   bilinemez. 20 puanlanan konumda ~5,3 varlik konumu var; biri
+   ilk-anilma olsa odulun ~%20'si dusulur -> 0,37. Hala 0,2775'in
+   ustunde. Hukum degismiyor.
+
+   YAN BULGU: cokmus model EK konumlarinda cos 0,9458'e cikmis --
+   unlu uyumu / ek morfolojisi fiilen COZULMUS. Ayni model hicbir
+   cumle kapatamiyor (BICIM kapanmadi 1,0000). Morfoloji ile uretim
+   AYRI seyler, ve birincisi ikincisi olmadan da olabiliyor.
+
+   DUZELTME KAYDI: M'nin 1) ve 2) sayimlari (f = %15,04, kagit)
+   GERCEK AKISLA TUTMUYOR -- olculen VARLIK payi %26,43, ve akisin
+   %29,40'i EK birimi. Kagit sayimi izole cumleler + kucuk ornekten
+   kurulmus bir `kok_havuzu` ile yapilmisti; gercek bolme daha cok
+   ek birimi uretiyor. OLCUM GECERLI, SAYIM DEGIL.
+
+   NEREYE:  A10 (varlik birimleri durumu oynatmiyor, %73 kendine
+   donuyor) ve A11. Ariza TASIYICIDA.
 ```
 
 ---
@@ -1434,9 +1496,15 @@ A11 OLGU ARAMASI MIMARIDE YOK                  A    §3.1b
     CEVAP ne durumda ne kodda. Kod defteri
     ILISKIYI kodluyor (166 kod / 24 iliski).
     (ozne,iliski)->cevap arayan sey YOK.
-A10 VARLIK birimleri durumu OYNATMIYOR         A    §5.1/L
+A10 VARLIK birimleri durumu OYNATMIYOR         A    §5.1/L, O
     (%73 kendine donuyor; kapi 31 SINIFI
      siniyor, ogrenilen BUYUKLUGU degil)
+    !! ARTIK BIRINCI SIRADA.  OLCULDU (§5.1/O):
+    varlik konumlarinda cos 0,1282 -- sansa
+    yakin, ve `uye` kaybinin %49'u ORADA
+    ALINMAMIS duruyor. Fiyat dogru, tasiyici yok.
+    Kayip tarafindaki butun adaylar (L1..L4) bu
+    olcumle KAPANDI.
 A4  L_duzen u, v'yi kapsamiyor                 A    §5.1/F
 A5  p_w yerlesimi rastgele                     A    A8
 A6  ek yuzeyleri AYRI token oldu               K    -- veri katmani;
