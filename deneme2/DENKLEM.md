@@ -998,6 +998,47 @@ O  §5.1/M'NIN TEZI YANLIS -- FIYAT ZATEN DOGRU  (21 Eylul, ileri gecis)
 
    NEREYE:  A10 (varlik birimleri durumu oynatmiyor, %73 kendine
    donuyor) ve A11. Ariza TASIYICIDA.
+P  BARIYER d ILE BUYUYOR -- d=8->16 TAKASININ MEKANIZMASI  (21 Eylul)
+   §5.1/L: durum okuma uzayinda kendi Voronoi hucresinden cikmiyor;
+   olcut EN YAKIN KOMSU acisi, d=8'de 30,5°. O sayi `d`YE BAGLI ve
+   §5.1/L d=8'de olculmustu. Kagitta hesaplandi (444 nokta kurede
+   duzgun -- A5: p_w yerlesimi rastgele; 12 tekrar):
+
+   ```
+     d     en yakin komsu acisi     yarisi
+     8            30,6°              15,3°     <- KAPI: olculen 30,5°
+    16            47,3°              23,6°
+    32            59,7°              29,8°
+   ```
+
+   Ornekleme d=8'de olculen degeri BIREBIR uretiyor (30,6 vs 30,5),
+   yani model dogru.
+
+   **d 8 -> 16'da asilmasi gereken aci %55 buyudu.** Varlik donmesinin
+   de %55 buyumesi icin hicbir sebep yok -- ve §5.1/O olctu: varlik
+   konumlarinda cos 0,1282, sansa yakin. Takas boyle calisiyor:
+       d buyudu  -> DIL kazandi (okuma uzayi genis, kaliplar ayriliyor)
+                 -> BARIYER buyudu, ozne kimligi daha da gecmez oldu
+                    (%35,1 -> %11,2, §5.1/L)
+
+   NICIN DONME BUYUMUYOR -- ADAY ACIKLAMA, SINANMADI:
+   `[C]` R_w ORTOGONAL, yani RIJIT. Bir varlik birimi cok farkli
+   baglamlarda geciyor; R[Cem] gelen HER durumu "Cem gorulmus"
+   diyen bir yere tasimali. Rijit bir donme bunu yapamaz -- cok
+   noktayi tek noktaya goturemez. Cok donerse gelen durumlari
+   DAGITIR, az donerse HIC yazmaz. Optimizasyonun uzlasmasi
+   R ~ I, cunku hic yazmamak yanlis yazmaktan ucuz.
+   Eger dogruysa: varlik biriminin isi YAZMAK, ve yazma islemi
+   TOPLAMSAL olmali -- donme degil. (§4.1 ile ayni yer: izometri.)
+   !! Bu, §12b'nin hafizasindan FARKLI bir yer: hafiza KODLA
+   adresleniyordu (= ILISKI, §3.1b) ve HER adimda okunuyordu;
+   burada onerilen sey VARLIK JETONUNDA bir yazma.
+
+   SIRADAKI OLCUM (parametre okuma, ileri gecis bile YOK):
+   d=16 kontrol noktasinda varlik donme acisi ve "kendine donen"
+   orani. ONCEDEN KAYIT: bariyer %55 buyudu, donme buyumediyse
+   KENDINE DONEN varlik orani %73'un USTUNDE cikmali. Cikmazsa
+   bu aciklama yanlis ve tekrar bakilir.
 ```
 
 ---
