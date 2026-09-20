@@ -760,10 +760,29 @@ L  VARLIK BIRIMLERI DURUMU OYNATMIYOR  --  BILGI=0'IN MEKANIZMASI
      YONLERIN o altuzayda oldugu -- `d` egrisi zaten bunu
      soyluyordu: yardim eden sey daha fazla BOYUT.
 
-   ADAY 3  Dogrusal OLMAYAN okuma.  Sinanmadi; en buyuk degisiklik
-     ve `d` karari verilmeden bakilmasi erken.
+   ADAY 3  Dogrusal OLMAYAN okuma.  -> §12b (olgu hafizasi tasarimi),
+     ve orada §4.1'i de cozdugu gosteriliyor.
 
-   ACIK -- `d` karari KULLANICININ.
+   !! d = 8 -> 16 KOSULDU, ve KAZANC DEGIL TAKAS cikti (21 Eylul).
+   Ayni betik, ayni bolme, ayni 480 ozne:
+       model   TAM durum (32)          okunabilir blok
+       d=8     sira   6,09   %35,1     sira  50,18   %3,2
+       d=16    sira 111,08   %11,2     sira 132,01   %4,7
+   DIL kazandi (kalip 2,8 kat, ek 1,9 kat, kapanan cumle 4/20 ->
+   11/20) ama DURUM ozne kimligini KAYBETTI (%35,1 -> %11,2).
+   MEKANIZMA: gizli alan TASIYICIDIR. d 8 -> 16 olunca gizli alan
+   24 -> 16 boyuta indi; okuma buyudu, TASIYICI KUCULDU.
+       d artar   -> okuma iyi,  tasiyici KUCUK
+       d azalir  -> okuma kotu, tasiyici BUYUK
+   CLAUDE.md: "bir alani bozarak baska bir alani iyilestirmek
+   KAZANC DEGIL TAKAStir ve oyle yazilir."
+
+   ADRESLEMENIN TAVANI (LDA, kapali form): en iyi 16 boyutlu
+   altuzay %8,0; tam 32 boyut %11,2. Yani bilgi 16 boyuta SIGIYOR
+   ve donme onu getirebilirdi -- getirmemis. Adresleme EGITIM/KAYIP
+   tarafinda iyilestirilebilir, D buyutmeden.
+
+   ACIK -- `d` bundan sonra TEK BASINA oynatilmaz; §12b ile birlikte.
 
    !! CAPA BUNUN SEBEBI DEGIL. Ayni uretimlerde capa HIC tetiklenmedi
    (s en fazla 0,89, esik 0,969) -- §3.1'in "emici durum"u DEGIL.
@@ -1024,6 +1043,126 @@ literatürde aranmalı — "benzerini gördüm" diye yazmıyorum.
 
 ---
 
+## 12b. OLGU HAFIZASI — TASARIM  (21 Eylül, KOD YAZILMADI)
+
+> Bu bölüm bir **tasarım**dır, uygulama değil. Her satırın yanında
+> dayanağı var: `[Ö]` ölçüldü, `[H]` hesap, `[Ç]` çıkarım — sınanmadı.
+
+### Niçin
+
+`[Ö]` Sınav öneğinin sonundaki durum **soruyu taşıyor, cevabı
+taşımıyor** (§3.1b, adım 5):
+
+```
+ILISKI   7,4 kat sans ustu    OZNE 4,7 kat    CEVAP 1,8 kat
+```
+
+`[Ö]` Ve mimaride olguyu tutabilecek bir yer yok — kapasite sayımı:
+
+```
+                          serbestlik      kisit        durum
+iliski operatoru R[r]            376      4.613     12 KAT KISA
+kod defteri C              65.536      110.715    1,7 KAT KISA
+MODELIN TAMAMI            285.760      110.715    2,6 kat bol
+```
+
+Toplam kapasite yeter, ama **adreslenemiyor**: parametrelerin %77'si
+dönmelerde, her dönme bütün bağlamlarında paylaşılıyor ve ortogonal
+olmak zorunda.
+
+### Ne eklenir
+
+```
+HAFIZA   a_j = softmax( <zp_j , Kmem> / tau )         Kmem  (M, D)
+         m_j = a_j @ Vmem                             Vmem  (M, D)
+         z_j = normalize( z_j + beta_m * m_j )
+```
+
+`[H]` **Boyut**, kısıt sayımından:
+
+```
+kisit  7381 olgu x (d-1) = 110.715
+M=2048  (C yeniden kullanilir)   2048 x 2D = 131.072   1,18 kat
+M=3456  en az                                221.184   2,00 kat
+M=4096  rahat                                262.144   2,37 kat
+```
+
+`[Ç]` **Önerilen: `Kmem = C`** — kod defteri zaten var ve zaten
+adresliyor. Eklenen yalnız `Vmem`: `2048 x 32 = 65.536` parametre,
+modele `+%23`. Kapasite `1,18 kat` — dar ama yeter; yetmezse `M`
+büyür.
+
+### İKİ İŞİ BİRDEN YAPAR
+
+`[Ç]` §4.1'in şartı **`d < D` değil**, "okuma İZOMETRİ OLMASIN".
+Şu anki çözüm bunu **atarak** sağlıyor (`Π`), ve atılan şey kayıp.
+Hafıza okuması izometriyi **ekleyerek** kırar:
+
+```
+z -> q artik izometri DEGIL, cunku m eklemeli/dogrusal-olmayan
+-> §4.1'in celiskisi KALKAR
+-> `d < D` ZORUNLU olmaktan cikar, tasiyici kucultmek gerekmez
+```
+
+`[Ö]` Bu önemli, çünkü `d`'yi oynatmak **takas** olduğu ölçüldü:
+
+```
+d=8 -> 16   DIL kazandi (kalip 2,8 kat, kapanan cumle 4/20 -> 11/20)
+            DURUM kaybetti (ozne %35,1 -> %11,2)
+Mekanizma: gizli alan TASIYICI; d 8->16 olunca 24 -> 16 boyuta indi.
+```
+
+`[Ç]` Hafıza eklenirse `D`'yi 64'e çıkarmaya (4 kat parametre) gerek
+kalmayabilir. **SINANMADI.**
+
+### Ne ÇÖZMEZ
+
+`[Ö]` **Adresleme tavanı.** Hafıza `(özne, ilişki)` ile okunacak;
+ilişki kusursuz taşınıyor ama özne `d=16`'da `%11,2` (tam durumdan),
+`%4,7` (okunabilir bloktan). Mükemmel bir hafıza bile bu tavanı
+aşamaz.
+
+```
+LDA ust siniri (en iyi 16 boyutlu altuzay)   %8,0
+tam 32 boyut                                 %11,2 (d=16) / %35,1 (d=8)
+```
+
+`[Ö]` Bilgi 16 boyuta **sığıyor** (LDA %8,0 ~ tam %11,2); dönme onu
+getirebilirdi, getirmemiş. Yani adresleme **eğitim/kayıp** tarafında
+iyileştirilebilir, `D` büyütmeden.
+
+### Açık kalanlar
+
+```
+[Ç]  C hem KILIT hem NICELEYICI olabilir mi? `kod` terimi C'yi
+     k-ortalama gibi egitiyor; kilit olmak AYIRT EDICILIK ister.
+     Iki amac cakisabilir.
+[Ç]  Capa (sert esik) kalir mi, yoksa yumusak okumaya mi doner?
+     Yumusarsa `vur` kalkar ve §3.2 (reddetme = kod uyeligi)
+     dayanaksiz kalir -- ki zaten uygulanmamis (T3).
+[Ö]  Kapasite 1,18 kat DAR. Yetmezse M buyutulur.
+```
+
+### ÖNCEDEN KAYIT — ilk koşu neye karar verir
+
+```
+DEGISEN   Vmem eklenir, okuma EKLEMELI olur.  d=16 KALIR.
+          Tek degisken; d ile birlikte oynatilmaz.
+
+HUKUM     BILGI tam > 0,0000   -> hafiza DOGRU yon
+          BILGI tam = 0,0000   -> ya adresleme tavani (%11) bagladi,
+                                  ya hafiza yanlis kuruldu; AYIRMAK
+                                  icin kimlik probu birlikte okunur
+BAKILIR AMA HUKUM VERMEZ
+          uye (boyutlar/terimler degisti, kiyaslanamaz)
+          BICIM  (d=16 zaten degistirmisti)
+          capa orani, kullanilan kod sayisi
+NE YAPILMAZ
+          M, tau, beta_m birlikte taranmaz. Bir kosu, bir karar.
+```
+
+---
+
 ## 13. Kod ↔ denklem mutabakatı
 
 Ayrışmaların tam listesi. **K** = kod haklı, denkleme yazıldı.
@@ -1064,7 +1203,12 @@ A1  a1/a2/a3 OLCULMEDEN secildi                A    §5.1/B, §5.1/K
     (uye ORTALAMA, dis TOPLAM; ve OLCULDU:
      750. adimdan sonra kayip DUSERKEN sira
      KOTULESIYOR -- kazanc kod+duzen'den)
+A12 d TEK BASINA OYNATILMAZ -- TAKAS           A    §5.1/L
+    d=8->16 dili kazandi, durum ozne
+    kimligini kaybetti (%35,1 -> %11,2).
+    Gizli alan TASIYICI; d buyuyunce kuculuyor.
 A11 OLGU ARAMASI MIMARIDE YOK                  A    §3.1b
+    -> TASARIM yazildi: §12b (olgu hafizasi)
     durum soruyu tasiyor (ozne %63'te 11,3 kat
     sans ustu, iliski neredeyse kusursuz), ama
     CEVAP ne durumda ne kodda. Kod defteri
