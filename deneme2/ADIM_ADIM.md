@@ -171,4 +171,63 @@ NEREYE BAKILACAK
 
 ---
 
-### Adım 3 — `z_2 -> z_3`, girdi `-ın`, hedef `kardeş`   (SIRADA)
+### Adım 3 — `z_2 -> z_3`, girdi `-ın`, hedef `kardeş`   (KAPANDI)
+
+```
+1  DENKLEMLER PARALEL   Evet. Ama "paralel" bir seyi ORTUYOR: kod
+                        `-ın`a `Cem`e davrandigindan hic farkli
+                        davranmiyor -- ayni SO(32), ayni kayip
+                        agirligi. EK ile KOK mimaride ayirt
+                        EDILMIYOR, ve bu bir karar degil, P1'deki
+                        bayat K_TAM yuzunden FARKINDA OLMADAN boyle.
+
+2-3  NE ISTEDIK / OLDU MU
+   H1 |z_3| = 1                   CALISTI, 1,0000
+   H2 "ek ayri token" -> iliski bir OPERATOR olsun
+      BEKLENTI YANLIS YERE KURULMUS. Cumlenin yapisi:
+         Cem Yıldız  -ın   kardeş   -i   Ceren Yıldız  -dır .
+          <sahip>  SAHIPLIK <ILISKI> IYELIK  <cevap>   kopula
+      Iliskiyi KOK tasiyor (`kardeş`); `-ın` rolu isaretliyor.
+      Yani umut R[kardeş]'e dusuyor, R[-ın]'a degil.
+   H3 okuma  sira 52/444 (egitimsiz);  300 adim sonra 10/444
+
+4  BULGU J -- ISPAT, egitim/veri/agirlik YOK
+   `uye`yi DUSUREN bir gradyan adimi hedeflerin sirasini:
+       k=1 %0,0   k=2 %0,2   k=3 %3,7   k=5 %9,7   k=11 %19,8
+   k=1 TEOREM: hedefin kazanci eta, rakibinki eta<p_t,p_c> <= eta.
+   ILK HIPOTEZIM YANLISTI ("kayip sirayi bozuyor"); ispat duzeltti.
+   DOGRUSU: kayip SULANMIS. Taban uye >= 2 - 2/sqrt(k).
+   DENKLEM §5.1/J, kapi 33.
+
+   OLCUMLE DOGRULANDI, bizim cumlemizde: adim 3'te listenin tepesi
+       bölüm(0,905)  tez(0,884)  ...  *kardeş 10.
+   `Cem Yıldız -ın`den bu 20 cumlede CIKAN 6 iliski:
+       anne  bölüm  danışman  kardeş  tez  yaşadığı
+   Yani tepedeki rakipler KARDES ILISKILER. Model yanlis bir sey
+   ogrenmemis -- "buraya bir iliski gelir"i dogru ogrenmis,
+   HANGISI oldugunu secemiyor. Secemez de.
+
+5  ACIK KALEM -> delta (eski A2).  KAPANDI: DEGISMIYOR.
+   Once YANLIS gerekceyle actim ("adim 1'in sirasi 4"): ISINMA=4
+   ile konum 1,2,3 PUANLANMIYOR, `dis` oraya bakmiyor bile.
+   PUANLANAN her konumda sira 1.  Geri aldim.
+   Sonra DOGRU gerekceyle olctum (calisan model, 20 cumle):
+       HEDEFIN uzakligi   %50 0,1169   ort 0,1406
+       PENCERE DISI       %1  0,4530   en kucuk 0,3460
+   Hedef 0,117, en yakin rakip 0,346 -> itmeye GEREK YOK.
+   Buyutmenin bedeli 0,8 -> %31,9   1,0 -> %75,8 itilir; d=8'de
+   20 konumluk yoldan 319 nokta uzaklastirilamaz.
+   Tam korpustaki 0,9160 basarisiz CEKME demek (uye 0,839 -> k~3),
+   delta onu duzeltemez.   §13  A2 -> K11.
+
+6  YAN URUN -- §5.1/K, 20 cumle sinavinin kendisi gosterdi
+   adim  750: kayip 0,231  1.sira %98,2  cos 0,9904   <- TEPE
+   adim 1500: kayip 0,204  1.sira %95,9  cos 0,9845
+   Kayip DUSERKEN sira KOTULESIYOR; kazanc `uye`den degil
+   `kod`+`duzen`den. Agirliklar (a1,a2,a3) okumayi GERI CEKIYOR.
+   §13/A1 guncellendi -- artik olculmus bedeli var.
+```
+
+---
+
+### Adım 4 — `z_3 -> z_4`, girdi `kardeş`, hedef `-i`   (SIRADA)
