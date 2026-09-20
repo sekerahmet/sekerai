@@ -662,6 +662,43 @@ def _29():
     return f"{bek} zincir, hepsi havuzda   (uzunluk, adim) -> {say}"
 
 
+@kapi("30  ARAMA -- indeksli arama bayt aramasiyla BIREBIR")
+def _30():
+    """`Arama` bir HIZ duzeltmesi ve gerekcesi OLCULDU: `_gecer`
+    BULUNMAYAN bir dizide 30,7 MB'lik akisin tamamini tariyor,
+    sinavin 14.123 sorusunun 11.123'unde cevap korpusta YOK ve olcum
+    5 dakikayi gecti -- her kosuda odenecekti.
+
+    Hiz duzeltmesi ANCAK ayni cevabi veriyorsa duzeltmedir. Kapi
+    ikisini gercek akista karsilastiriyor: gecen diziler (akistan
+    KESILEREK alinir, yani kesin var), gecmeyenler (ayni diziler
+    bozularak) ve kenar durumlar."""
+    import numpy as np
+    import olcme_14 as O
+
+    g = torch.Generator().manual_seed(30)
+    d = torch.randint(0, 60, (200000,), generator=g).numpy().astype(np.int64)
+    ham = np.asarray(d, np.uint16).tobytes()
+    ara = O.Arama(d)
+
+    ornek = []
+    for i in torch.randint(0, len(d) - 20, (400,), generator=g).tolist():
+        for uz in (1, 2, 3, 5, 9):
+            ornek.append(tuple(int(x) for x in d[i:i + uz]))     # VAR
+    for q in list(ornek[:400]):
+        ornek.append(q[:-1] + (60 + 1,) if len(q) > 1 else (60 + 1,))  # YOK
+    ornek += [(int(d[-1]),), tuple(int(x) for x in d[-3:]),
+              tuple(int(x) for x in d[-2:]) + (0,)]              # KENAR
+
+    fark = [q for q in ornek if ara(q) != O._gecer(ham, q)]
+    assert not fark, "%d dizide indeks bayt aramasindan AYRILIYOR: %s" % (
+        len(fark), fark[:3])
+    var = sum(ara(q) for q in ornek)
+    assert 0 < var < len(ornek), "kapi bos: hepsi ayni cevabi veriyor"
+    return "%d dizi, %d var / %d yok -- ikisi de AYNI cevabi verdi" % (
+        len(ornek), var, len(ornek) - var)
+
+
 # =====================================================================
 # VERI YOLU  --  kopyanin ve kurulumun kapilari
 # =====================================================================

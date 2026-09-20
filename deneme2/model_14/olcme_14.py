@@ -82,17 +82,65 @@ def birimle(ad, TR, kokler, bx, korunan) -> tuple:
 
 
 def _gecer(ham: bytes, dizi) -> bool:
-    """`dizi` korpus akisinda geciyor mu.
+    """`dizi` korpus akisinda geciyor mu.  YAVAS AMA BASIT -- REFERANS.
 
-    !! BAYT ARAMASI. Sayilari metne cevirip `in` demek 15,4 M birimde
+    Bayt aramasi: sayilari metne cevirip `in` demek 15,4 M birimde
     ~100 MB'lik bir metin kuruyor ve dakikalarca asiliyordu. uint16
     baytlarinda `bytes.find` C hizinda; hizalama (cift ofset) elle
-    denetleniyor."""
+    denetleniyor.
+
+    Uretimde `Arama` kullanilir; bu, onun kapisidir (test 30)."""
     des = np.asarray(dizi, np.uint16).tobytes()
     i = ham.find(des)
     while i >= 0 and i % 2:
         i = ham.find(des, i + 1)
     return i >= 0
+
+
+class Arama:
+    """Birim akisinda dizi arama -- IKILI indeksle.
+
+    *Gerekce OLCULDU (20 Eylul):* `_gecer` dogru ama BULUNMAYAN bir
+    dizide 30,7 MB'lik akisin TAMAMINI tariyor. Sinavin 14.123
+    sorusunun 11.123'unde cevap korpusta YOK (zaten CIKARIM olmalari
+    bu demek), yani neredeyse hepsi tam tarama: olcum 5 dakikayi
+    gecti ve HER KOSUDA odenecekti.
+
+    Indeks: her (w_j, w_{j+1}) ciftinin gectigi konumlar, sirali.
+    Sorgu ilk ciftin kovasina bakar, kalani vektorel dogrular.
+    Kurulum ~2 sn ve BIR KEZ; sorgu kovanin boyu kadar.
+    """
+
+    def __init__(self, dizi):
+        self.d = d = np.asarray(dizi, np.int64)
+        self.n = n = int(d.max()) + 1
+        anahtar = d[:-1] * n + d[1:]
+        self.sira = np.argsort(anahtar, kind="stable")
+        self.anahtar = anahtar[self.sira]
+
+    def __call__(self, q) -> bool:
+        q = [int(x) for x in q]
+        if not q:
+            return True
+        # !! ARALIK DISI = YOK. Anahtar q0*n + q1 ile kodlaniyor ve n
+        # AKISIN en buyugunden geliyor; sozlukte olup akista hic
+        # gecmeyen bir birim sorulursa kodlama CAKISIR ve baska bir
+        # cift bulunmus gibi olur. (Kapi 30 bunu yakaladi.)
+        if any(x < 0 or x >= self.n for x in q):
+            return False
+        if len(q) == 1:
+            return bool((self.d == q[0]).any())
+        a = q[0] * self.n + q[1]
+        i, j = np.searchsorted(self.anahtar, [a, a + 1])
+        if i == j:
+            return False
+        poz = self.sira[i:j]
+        poz = poz[poz + len(q) <= len(self.d)]
+        for k in range(2, len(q)):
+            if not len(poz):
+                return False
+            poz = poz[self.d[poz + k] == q[k]]
+        return bool(len(poz))
 
 
 # =====================================================================
@@ -276,7 +324,7 @@ class Sorular:
         BUTUN 2 adimli zincirler SESSIZCE dusuyordu: 14.043 zincirin
         11.043'u. Olcum yalniz 1 adimi siniyordu ve `CIKARIM` 8
         ornege dusuyordu (comp/ent'in tamami elenmisti)."""
-        ham = np.asarray(dizi, np.uint16).tobytes()
+        gecer = Arama(dizi)
         cik = {"OGRETILEN": [], "CIKARIM": []}
         atilan = 0
         havuz, gorulen = [], set()
@@ -295,7 +343,7 @@ class Sorular:
                 atilan += 1
                 continue
             soru, bildirim = s
-            soru.soylenmis = _gecer(ham, bildirim)
+            soru.soylenmis = gecer(bildirim)
             cik["OGRETILEN" if soru.soylenmis else "CIKARIM"].append(soru)
         bir = sum(1 for z in havuz if len(z) == 3)
         yaz("zincir %d (tekil: %d bir adim + %d iki adim)   "
@@ -314,9 +362,9 @@ def kapi(sorular: dict, dizi, n=200, en_az=0.5) -> str:
     hep = sorular["OGRETILEN"] + sorular["CIKARIM"]
     if not hep:
         return "SORU YOK"
-    ham = np.asarray(dizi, np.uint16).tobytes()
+    gecer = Arama(dizi)
     ornek = hep[:n]
-    tut = sum(_gecer(ham, s.onek[:-3]) for s in ornek)   # soru kuyrugu haric
+    tut = sum(gecer(s.onek[:-3]) for s in ornek)   # soru kuyrugu haric
     oran = tut / len(ornek)
     assert oran >= en_az, (
         "SORU KAPISI: %d ornegin yalniz %d'u korpusta geciyor (%.1f%%) -- "
