@@ -73,9 +73,34 @@ D_DURUM = 32
 #  uzlasmada cikan ~100 derece -- 250 kat.
 #  OLCULMEDI: 16/32/64 arasinda hangisi (A1).
 
-D_OKUMA = 8
-#  HESAP: 475 nokta S^7'de ortalama 22,5 derece arayla. d=3'te 2,6
-#  derece kaliyor ve durum cozunurlugune yer kalmiyor.
+D_OKUMA = 16
+#  ONCE 8 IDI.  8 -> 16, gerekce OLCULDU (21 Eylul, t0, kapali form,
+#  egitim YOK): sinav oneginin SONUNDAKI durumdan OZNENIN KIM OLDUGU
+#  dogrusal probla okundu. 480 ozne, sans 240,5, %70/%30 ayri dilim,
+#  ve okuma yalnizca durumun ILK d koordinatini goruyor:
+#      d      ort sira   1.sira    kazanc/boyut
+#      8       50,18      %3,2       -5,4
+#      12      23,08     %10,6       -6,8   <- boyut basina en buyuk
+#      16      15,37     %16,9       -1,9
+#      24       8,80     %26,0       -0,55
+#      32       6,09     %35,1       -0,24
+#  KIMLIK DURUMDA VAR (32 boyutta 6,09/480, %35,1 tam isabet) ama
+#  OKUMA GOREMIYOR (8 boyutta 50,18, %3,2). Sizintinin bedeli sirada
+#  8,2 kat. d = 16 kazancin cogunu aliyor, sonrasi sonuyor.
+#  MALIYET SIFIR: `p` bir buffer, `Pi` bir dilim -- parametre artmaz.
+#  §4.1'in "D > d" sarti korunuyor (32 > 16).
+#  !! Egri d=8 ile EGITILMIS modelden okundu, yani ALT SINIR.
+#
+#  ELENEN ALTERNATIF: kayba |Pz| terimi. Terim ancak "|Pz| buyuk olan
+#  ornekler daha iyi okunuyor" ise ise yarar; korelasyon olculdu,
+#  |Pz|~kimlik -0,068, |Pz|~cevap -0,014. SIFIR. Sorun okunabilir
+#  kisimdaki KUTLE degil, HANGI YONLERIN orada oldugu.
+#
+#  KALABALIK NOTR: d buyudukce noktalar UZAKLASIYOR (komsu acisi
+#  24,7 -> 41,8 derece), ama baslangic donme olcegi zaten
+#  `aralik = n^(-1/(d-1))`, yani komsu araliginin kendisi -- oran
+#  korunuyor.  (Eski not "475 nokta S^7'de 22,5 derece" bu yuzden
+#  d'ye karsi bir argüman degildi.)
 
 # --- OPERATOR ---------------------------------------------------------
 K_TAM = 451
