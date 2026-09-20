@@ -540,10 +540,31 @@ L  VARLIK BIRIMLERI DURUMU OYNATMIYOR  --  BILGI=0'IN MEKANIZMASI
        BILGI tam 0,0000     ozne adi SEYREK -> R[ad] ~ I -> oznenin
                             kimligi duruma HIC GECMIYOR
 
-   SEBEP, sayidan: gradyan FREKANSLA gelir, `duzen = a3*S|a|^2` ise
-   HERKESE ESIT basar -> denge |a| frekansla olcekleniyor. Tabloda
-   monoton: en sik 20 birim |a| 2,44 / %0 kendine;  en seyrek 194
-   birim |a| 0,83 / %84 kendine.
+   MEKANIZMA -- GEOMETRIK, ve olculdu:
+       okuma uzayinda EN YAKIN KOMSU acisi   ort 30,5°  (n=444, S^7)
+       R_w'nin p_w'yi tasidigi aci
+           VARLIK   23,5°   <- komsu araligini GECEMIYOR   %73 kendine
+           EK       53,7°   <- rahat geciyor                %21 kendine
+   Durum, basladigi Voronoi hucresinden CIKMIYOR. ("teta < fi/2 ->
+   kendine doner" kestirimi %65,3 tutuyor; kalani YONDEN geliyor,
+   buyukluk tek basina belirlemiyor.)
+
+   !! ILK YAZDIGIM SEBEP YANLISTI: "duzen = a3*S|a|^2 seyrek birimin
+   donmesini sifira cekiyor" demistim. HESAP AKSINI SOYLUYOR --
+   birim basina, uye'nin CEKMESI / duzen'in ITMESI:
+       VARLIK ort (frek  18.920)   1,2e-03 / 2,0e-04 = 5,9 kat
+       EN SEYREK  (frek   4.087)   2,6e-04 / 1,7e-04 = 1,5 kat
+   Yani a3 EN SEYREK birimlerde kiyaslanabilir, VARLIK birimlerinde
+   BASKIN DEGIL. Frekansla monotonluk gercek ama sebebi a3 degil.
+
+   NIYE BUYUMUYOR -- HIPOTEZ, sinanmadi: kayip zaten dallanma
+   tabaninda (uye 0,8692, k_etkin 3,13) ve bir ad okunduktan sonra
+   gelecek birim KIM OLURSA OLSUN `-ın` / `-dır`. Yani hedefi
+   ayirt etmek icin R[ad]'in AYIRT EDICI olmasi GEREKMIYOR; kimlik
+   yalniz CEVAP konumunda is goruyor, o da seyrek ve zaten belirsiz.
+   Amac fonksiyonu varliklari ayirt etmeyi HIC ISTEMIYOR olabilir.
+   SINAMA: a3 = 0 ile tek degiskenli kosu (2,3 dk) -- varlik |a| ve
+   kendine donme orani degisiyor mu.
 
    !! CAPA BUNUN SEBEBI DEGIL. Ayni uretimlerde capa HIC tetiklenmedi
    (s en fazla 0,89, esik 0,969) -- §3.1'in "emici durum"u DEGIL.

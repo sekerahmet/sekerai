@@ -338,9 +338,22 @@ NE        z = [p_w; 0] alinip R_w uygulaninca okuma YINE w'yi
 UCUNU BIRDEN ACIKLIYOR
           tekrarlar / kapanmadi 0,6967 / BILGI tam 0,0000
 
-SEBEP     gradyan FREKANSLA gelir, `duzen = a3*S|a|^2` HERKESE ESIT
-          basar -> denge |a| frekansla olcekleniyor. Varlik birimi
-          ort 18.920 kez geciyor, ek birimi 137.734 -- 7 kat.
+MEKANIZMA (GEOMETRIK, olculdu)
+          okuma uzayinda en yakin komsu acisi   ort 30,5°
+          R_w'nin tasidigi aci  VARLIK 23,5°  /  EK 53,7°
+          Durum basladigi hucreden CIKMIYOR.
+
+          !! ILK SEBEP YAZIM YANLISTI. "a3 seyrek birimin donmesini
+          sifira cekiyor" demistim; hesap aksini soyluyor:
+              VARLIK   cekme 1,2e-03 / itme 2,0e-04 = 5,9 kat
+              EN SEYREK cekme 2,6e-04 / itme 1,7e-04 = 1,5 kat
+          a3 varlik birimlerinde BASKIN DEGIL.
+
+          HIPOTEZ (sinanmadi): amac fonksiyonu varliklari ayirt
+          etmeyi HIC ISTEMIYOR. Bir ad okunduktan sonra gelecek
+          birim kim olursa olsun `-ın`/`-dır`; kimlik yalniz CEVAP
+          konumunda is goruyor, o da seyrek ve zaten belirsiz.
+          SINAMA: a3 = 0 ile tek degiskenli kosu (2,3 dk).
 
 ELENEN ACIKLAMALAR
           capa emici durumu   HAYIR: uretimde capa HIC atesmiyor
