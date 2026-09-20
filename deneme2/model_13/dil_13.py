@@ -94,12 +94,22 @@ class ParcaDil(nn.Module):
         """CE + KAPANMA CEZASI.
 
         Softmax tek basina yalniz SIRALAMA ister: hedef nokta dogru
-        kelimeye uzak kalsa bile tahmin dogrudur, gradyan susar. Zincirde
-        o sapma birikir. Ceza noktayi kelimenin UZERINE oturtuyor --
-        belgede olmadan iki adim %43, oldugunda %100."""
+        kelimeye uzak kalsa bile tahmin dogrudur, gradyan susar. Ceza
+        noktayi kelimenin UZERINE oturtuyor.
+
+        !! EN YAKIN BILESENE, ORTALAMAYA DEGIL. Ilk surum `q.mean(1)`
+        kullaniyordu ve M bilesenin ORTALAMASINI cevaba cekiyordu.
+        Bilesenler uzmanlasmisti (q3 tez sifatlari, q1 yer adlari...) ve
+        ortalamayi tek noktaya cekmek o uzmanlasmayi yok ediyordu.
+        OLCULDU 20 Eylul: lam 0.5 -> 20 yapinca `one` 0.0030'dan
+        0.0006'ya DUSTU ve tip uyumu bozuldu. Belgede sorun yok cunku
+        orada ceza ZINCIR yolunda ve orada karisim YOK.
+
+        `min_m`: bu cevabi tutacak olan bilesen tam ustune otursun,
+        digerleri kendi bolgelerinde kalsin."""
         lg, q, C = self(X)
         ce = F.cross_entropy(lg, Y)
-        kap = (q.mean(1) - C[Y]).pow(2).sum(-1).mean()
+        kap = (q - C[Y][:, None]).pow(2).sum(-1).min(1).values.mean()
         return ce + lam * kap, ce
 
 
