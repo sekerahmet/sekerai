@@ -4,7 +4,7 @@ REM `.py` dosyasina cift tiklayinca Windows duzenleyiciyi aciyor;
 REM calistirmak icin bu kisayol gerekiyor.
 chcp 65001 > nul
 title model_14 -- KONUS
-cd /d "%~dp0deneme2\model_14"
+cd /d "%~dp0"
 
 where python > nul 2>&1
 if errorlevel 1 (
