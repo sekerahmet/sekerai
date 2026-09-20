@@ -951,6 +951,46 @@ def _34():
             % (len(ornek), bos, b.coz(o1.onek)))
 
 
+@kapi("35  SAAT -- t_j = vur_j ? 0 : t_{j-1}+1  (artirma CAPADAN ONCE)")
+def _35():
+    """§1'in "kodun hesapladigi sey, BIREBIR" blogunda `t_j` YOKTU
+    (21 Eylul, adim adim denetim sirasinda bulundu). Yazildi; kapisi
+    bu.
+
+    Ozellikle sinanan sey SIRA: `t = t + 1` capa kontrolunden ONCE,
+    `masked_fill(vur, 0)` SONRA. Ters olsaydi capa adiminda t = 1
+    cikardi ve saat acikken okuma hedefi BIR ADIM KAYARDI (H[t]).
+    Saat varsayilan KAPALI oldugu icin bu sessizce gecerdi."""
+    n, D, d, K, B, L = 60, 16, 6, 128, 32, 12
+    m = M.Yol(n, D=D, d=d, K=K, tam=torch.ones(n, dtype=torch.bool))
+    g = torch.Generator().manual_seed(35)
+    X = torch.randint(0, n, (B, L), generator=g)
+
+    # --- uc rejim: hic capa / hep capa / karisik
+    for ad, r in (("r=0 hic capa", 0.0), ("r=inf hep capa", 1e6),
+                  ("karisik", 0.25)):
+        y = m.yol(X, r)
+        t, vur = y["t"], y["vur"]
+        assert (t[:, 0] == 0).all(), "%s: t_0 sifir degil" % ad
+        # GENEL DEGISMEZ: her adimda t_j == (vur_j ? 0 : t_{j-1}+1)
+        bek = torch.where(vur[:, 1:], torch.zeros_like(t[:, 1:]),
+                          t[:, :-1] + 1)
+        kotu = int((t[:, 1:] != bek).sum())
+        assert not kotu, (
+            "%s: %d adimda t_j denklemi TUTMUYOR -- artirma ile "
+            "sifirlamanin SIRASI ters olabilir" % (ad, kotu))
+    # --- ucun da NE VERDIGI: kapi bos kalmasin
+    t0 = m.yol(X, 0.0)["t"]
+    t1 = m.yol(X, 1e6)["t"]
+    assert (t0[:, -1] == L - 1).all(), "capa yokken t son adimda L-1 olmali"
+    assert (t1[:, 1:] == 0).all(), (
+        "capa HER adimda tetiklendiginde t hep 0 olmali -- 1 cikiyorsa "
+        "artirma sifirlamadan SONRA yapiliyor demektir")
+    return ("t_0 = 0;  hic capa -> t son adimda %d;  hep capa -> t hep 0;"
+            "  karisik rejimde %d adimin hepsi denklemi tutuyor"
+            % (int(t0[0, -1]), B * (L - 1)))
+
+
 # =====================================================================
 # VERI YOLU  --  kopyanin ve kurulumun kapilari
 # =====================================================================

@@ -76,7 +76,30 @@ NEREYE BAKILACAK
           DENKLEM.md §4.3, §13/K7   kapi 31
 ```
 
-### P2  §1'in "birebir" bloğu `t_j`'yi yazmıyor
+### P2  §1'in "birebir" bloğu `t_j`'yi yazmıyor   (KAPANDI 21 Eylül)
+
+```
+YAZILDI  §1'in denklem bloguna iki satir:
+             t_0  = 0
+             t_j  = vur_j ? 0 : t_{j-1} + 1     SON CAPADAN BERI ADIM
+         ve okuma satiri duzeltildi:
+             w_j  = argmax_w <q_j , h_{t_j, w}>   saat KAPALI: h = p
+         "Belgede olmayan, kodda olan UC sey" -> DORT sey.
+
+KAPI 35  Sinanan asil sey SIRA: `t = t + 1` capa kontrolunden ONCE,
+         `masked_fill(vur, 0)` SONRA. Ters olsaydi capa adiminda
+         t = 1 cikardi ve saat acikken okuma hedefi H[t] BIR ADIM
+         KAYARDI -- saat varsayilan KAPALI oldugu icin SESSIZCE
+         gecerdi.  Uc rejimde sinaniyor (r=0 / r=inf / karisik) ve
+         her adimda t_j denklemi tek tek dogrulaniyor.
+         "t_0 = 0; hic capa -> t son adimda 11; hep capa -> t hep 0;
+          karisik rejimde 352 adimin hepsi denklemi tutuyor"
+
+KAPILAR  36 gecti, 0 kaldi.
+```
+
+Asagisi kalemin ilk hali, kayit icin:
+
 
 ```
 BULUNDU   adim 2 sirasinda

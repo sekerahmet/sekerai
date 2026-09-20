@@ -89,12 +89,14 @@ Kodun hesapladığı şey, birebir:
 
 ```
 BASLANGIC   z_0  = [ p_{w_0} ; 0_{D-d} ]                    |z_0| = 1
+            t_0  = 0
 DONME       zp_j = R_{w_{j-1}} z_{j-1}
 KOD ARAMA   k_j  = argmax_k <zp_j , c_k>,    c_k = C_k/|C_k|
 CAPA        vur_j = [ <zp_j , c_{k_j}> > 1 - r^2/2 ]
             z_j  = vur_j ? c_{k_j} : zp_j
+SAAT        t_j  = vur_j ? 0 : t_{j-1} + 1        SON CAPADAN BERI ADIM
 OKUMA       q_j  = Π z_j / |Π z_j|
-            w_j  = argmax_w <q_j , p_w>
+            w_j  = argmax_w <q_j , h_{t_j, w}>    saat KAPALI: h = p
 ```
 
 ```
@@ -115,7 +117,7 @@ ESIK
 Hesap yığını yok: ne dikkat, ne katman, ne çıktı matrisi. İleri
 geçişte yalnız dönme çarpımı ve en yakın komşu.
 
-**Belgede olmayan, kodda olan üç şey — artık burada:**
+**Belgede olmayan, kodda olan dört şey — artık burada:**
 
 ```
 z_0 TANIMI      Ilk surumde YOKTU. Pencere akistan keyfi yerden
@@ -132,6 +134,17 @@ C KUREDE        §1 "C ∈ R^{K×D}" diyordu, norm kisiti yoktu. Kod ileri
 ESIK IC CARPIMDA  |zp - c_k| < r  ile  <zp,c_k> > 1 - r^2/2  ozdes
                 (ikisi de birim normda). Kod ikincisini kullaniyor;
                 (B,K) uzerinde uc elemanwise tensor daha kurmamak icin.
+
+t_j TANIMI      Kod her adimda `t`yi hesaplayip donduruyor ama bu
+                blokta YOKTU (21 Eylul, denetim sirasinda bulundu --
+                blogun basligi "birebir" diyor).
+                    t = t + 1                 CAPA KONTROLUNDEN ONCE
+                    t = t.masked_fill(vur, 0) CAPADAN SONRA
+                yani capa tetiklenen adimda t = 0.
+                YUK TASIYOR: saat acikken okuma hedefi p_w degil
+                H[t_j][w] (§6). Saat VARSAYILAN KAPALI oldugu icin
+                su an atil -- ama `yol()` onu her kosuda hesaplayip
+                donduruyor ve `saglik()` basiyor.
 ```
 
 ---
