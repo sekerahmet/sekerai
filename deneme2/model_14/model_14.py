@@ -92,6 +92,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+# Mesafe TABANI -- `dis`teki sqrt'un 0'da tekilligini kesiyor.
+# HESAP: taban 1e-8 -> dmin >= 1e-4, gradyan <= 0,5/1e-4 = 5.000
+# (sonsuz yerine). Mentesenin en uc terimi (delta-0)^2 = 0,1600
+# yerine (delta-1e-4)^2 = 0,1599 oluyor: %0,05 sapma.
+TABAN = 1e-8
+
+
 def _ust(D: int) -> torch.Tensor:
     """SO(D)'nin serbestlik indeksleri -- ust ucgen, kosegen haric."""
     return torch.triu_indices(D, D, offset=1)
@@ -294,6 +301,34 @@ class Yol(nn.Module):
         """(B,L,n) -- ACISAL uzaklik.  2 - 2cos(aci).  DENKLEM §4.2."""
         return (2 - 2 * self._kos(z, t)).clamp(min=0)
 
+    def _itme(self, kos, X, delta):
+        """L_dis + yolun her birime EN YAKIN gectigi uzaklik.  (dis, dmin)
+
+        AYRI BIR METOT cunku kapisi var (test 28): burada sqrt'un
+        girdisi TABAN'in altina DUSEMEZ, ve kapi bunu cihazdan
+        bagimsiz olarak sinar.
+
+        OLCULDU (20 Eylul), egitim ADIM 1'de NaN verdi. `kos` bir
+        kosinus ama fp32'de 1'i asabiliyor: olculen en kucuk 2-2kos
+        degeri -2,384e-07. clamp(min=0) onu TAM 0 yapiyor ve
+        sqrt'un turevi orada tanimsiz (0/0).
+
+        !! Ve bu CIHAZA GORE DEGISIYOR: CPU'da ClampBackward NaN'i
+        yutuyor, CUDA'da yutmuyor. Yerelde 50 adim temiz kosarken
+        GPU'da adim 1'de patlamasinin sebebi buydu -- yani bu sinif
+        hatayi yerel CPU dongusu GOREMEZ, kapi degeri sinamali.
+
+        Cakisma kaza degil: acik sinif donmesi TEK DUZLEM (§4.3),
+        duzlem z0'a dik dusunce R z0 ~ z0 kaliyor ve q1 onceki
+        birimin KENDI noktasina esitleniyor. B=256'da hic yoktu,
+        B=1024'te 13.888, B=8192'de 26.288 sonsuz gradyan."""
+        d2 = (2 - 2 * kos.amax(1)).clamp(min=0)
+        # Pencerede OLAN birim itilmez: delta'nin otesine koyuluyor,
+        # boylece mentese zaten 0 ve sqrt'e 0 gitmiyor.
+        ic = torch.zeros_like(d2, dtype=torch.bool).scatter_(1, X, True)
+        dmin = d2.masked_fill(ic, delta + 1.).clamp(min=TABAN).sqrt()
+        return (delta - dmin).clamp(min=0).pow(2).sum(1).mean(), dmin
+
     def forward(self, X: torch.Tensor, r: float = 0.25) -> torch.Tensor:
         y = self.yol(X, r)
         return -self.oku(y["z"], y["t"])
@@ -315,9 +350,7 @@ class Yol(nn.Module):
         # Mentese: hepsi delta'yi gecince terim sifirlanir.
         # !! BILINEN TUZAK: bu birimlerin bir kismi GECERLI alternatif
         # (korpusta 17 bildirim kalibi var); mentese softmax'tan serttir.
-        dmin = (2 - 2 * kos.amax(1)).clamp(min=0).sqrt()
-        ic = torch.zeros_like(dmin, dtype=torch.bool).scatter_(1, X, True)
-        dis = (delta - dmin).clamp(min=0).pow(2).masked_fill(ic, 0.).sum(1).mean()
+        dis = self._itme(kos, X, delta)[0]
 
         # VQ. Kod terimi HER ADIMDA (kodlar ziyaret edilen durumlari
         # izlesin, k-ortalama gibi); BAGLILIK yalniz capa tetiklendiginde

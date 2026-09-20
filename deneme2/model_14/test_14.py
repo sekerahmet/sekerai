@@ -552,6 +552,55 @@ def _27():
     assert "capa" in M.saglik(m) and "v_dik" in M.saglik(m)
     return f"iz kayipla birebir (fark {e:.1e})   saglik tablosu 8 alan"
 
+@kapi("28  ITME TEKILLIGI -- sqrt'e SIFIR gidemez")
+def _28():
+    """OLCULDU (20 Eylul), egitim ADIM 1'DE NaN verdi.
+
+    `kos` bir kosinus ama fp32'de 1'i asiyor: olculen en kucuk
+    2-2kos degeri -2,384e-07. clamp(min=0) onu TAM 0 yapiyor ve
+    sqrt'un turevi orada tanimsiz.
+
+    !! KAPI DEGERI SINIYOR, NaN'i DEGIL. Cunku ClampBackward NaN'i
+    CPU'da yutuyor, CUDA'da yutmuyor -- "gradyan sonlu mu" diye
+    soran bir kapi CPU'da BOS cikar (denendi: eski kodu geciriyor).
+    Sinanan sey `dmin >= sqrt(TABAN)`: sqrt'e sifir gitmiyorsa
+    tekillik hicbir cihazda olusamaz."""
+    m = kur(n=60, D=12, d=4, K=64)
+    g = torch.Generator().manual_seed(28)
+    X = torch.randint(0, 60, (8, 9), generator=g)
+    B, L = X.shape
+    taban = M.TABAN ** 0.5 * (1 - 1e-6)   # fp32 sqrt yuvarlamasi
+
+    # 1) TAM cakisma + kosinusun 1'i ASMASI, hem maskeli hem maskesiz
+    kos = torch.full((B, L - 1, 60), 0.3, requires_grad=True)
+    with torch.no_grad():
+        kos[0, 0, int(X[0, 0])] = 1.0          # maskeli birim, TAM 1
+        kos[1, 0, int(X[1, 0])] = 1.0 + 1e-7   # maskeli, 1'i ASIYOR
+        dis_ = {int(v) for v in X[2]}
+        bos = next(i for i in range(60) if i not in dis_)
+        kos[2, 0, bos] = 1.0                   # MASKESIZ birim, TAM 1
+    dis, dmin = m._itme(kos, X, 0.4)
+    assert float(dmin.min()) >= taban, (
+        f"sqrt'e sifir gidiyor: dmin_min = {float(dmin.min()):.3e} "
+        f"< {taban:.3e}")
+    (gk,) = torch.autograd.grad(dis, kos)
+    assert torch.isfinite(dis) and torch.isfinite(gk).all(), "sonsuz"
+
+    # 2) Tekillik YOKKEN sayi degismemeli -- taban bir yaklasim degil
+    kos2 = torch.rand(B, L - 1, 60, generator=g) * 1.6 - 0.8
+    d2 = (2 - 2 * kos2.amax(1)).clamp(min=0)
+    ic = torch.zeros_like(d2, dtype=torch.bool).scatter_(1, X, True)
+    bek = ((0.4 - d2.sqrt()).clamp(min=0).pow(2)
+           .masked_fill(ic, 0.).sum(1).mean())
+    e = float((m._itme(kos2, X, 0.4)[0] - bek).abs())
+    assert e == 0.0, f"taban sayiyi degistirdi: {e:.2e}"
+
+    # 3) Gradyan TAVANI: 2*delta / (2*sqrt(TABAN))
+    tavan = 0.4 / taban
+    assert float(gk.abs().max()) <= tavan, (
+        f"gradyan tavani asildi: {float(gk.abs().max()):.2e} > {tavan:.2e}")
+    return (f"cakismada dmin_min {float(dmin.min()):.1e} >= {taban:.0e}   "
+            f"tekillik yokken fark 0.0   grad <= {tavan:.0e}")
 
 # =====================================================================
 # VERI YOLU  --  kopyanin ve kurulumun kapilari
