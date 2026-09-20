@@ -528,6 +528,30 @@ def _26():
     assert not grad, "%d kod-arama tensoru GRADYANLI -- geri gecise kadar tutulur" % len(grad)
     return "(B,L-1,n) 1 tensor   (B,K) %d tensor, gradyanli 0" % len(bk)
 
+@kapi("27  IZ -- `son` sozlugu kayipla BIREBIR toplaniyor")
+def _27():
+    """Egitim hucresi NaN'i bu sozlukten teshis edecek. Terimler
+    kayiptan AYRI hesaplansaydi ikisi sessizce ayrisirdi; burada
+    ayni ifadeden kopyalandiklari SAYIYLA dogrulaniyor.
+
+    Ayrica `saglik` uc normalize paydasini basiyor: olculdu, bir
+    yonun normu F.normalize'in eps'inin (1e-12) hemen ustune
+    duserse geri gecis 1e12 mertebesinde gradyan uretiyor."""
+    m = kur()
+    g = torch.Generator().manual_seed(27)
+    X = torch.randint(0, m.n, (8, 9), generator=g)
+    a1, a2, a3, beta = 1.3, 0.7, 2e-4, 0.25
+    L, uye = m.kayip(X, a1, a2, a3, 0.4, beta, 0.25)
+    s = m.son
+    bek = s["uye"] + a1 * s["dis"] + a2 * (s["kod"] + beta * s["bag"])         + a3 * s["duzen"]
+    e = float((bek - s["top"]).abs())
+    assert e == 0.0, f"iz toplami kayiptan sapiyor: {e:.2e}"
+    assert float(s["top"]) == float(L) and float(s["uye"]) == float(uye)
+    for ad in ("capa", "Pz_min"):
+        assert ad in s and torch.isfinite(s[ad]), ad
+    assert "capa" in M.saglik(m) and "v_dik" in M.saglik(m)
+    return f"iz kayipla birebir (fark {e:.1e})   saglik tablosu 8 alan"
+
 
 # =====================================================================
 # VERI YOLU  --  kopyanin ve kurulumun kapilari

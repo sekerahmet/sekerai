@@ -334,7 +334,19 @@ class Yol(nn.Module):
 
         # a3 = EZBER <-> GENELLEME dugmesi.
         duzen = self.a.pow(2).sum() + self.th.pow(2).sum()
-        return uye + a1 * dis + a2 * capa + a3 * duzen, uye
+        top = uye + a1 * dis + a2 * capa + a3 * duzen
+
+        # IZ -- her cagride guncellenen kopuk skalerler. Senkron YOK
+        # (kimse float() cagirmadikca), maliyeti yok. Kayip sayisal
+        # olarak patlarsa hangi terimde patladigini bu soyler; ve
+        # `capa` sifir kalirsa mimarinin ASIL iddiasi (§3) hic
+        # calismiyor demektir -- o da buradan gorulur.
+        self.son = {"top": top.detach(), "uye": uye.detach(),
+                    "dis": dis.detach(), "kod": kod.detach(),
+                    "bag": bag.detach(), "duzen": duzen.detach(),
+                    "capa": vf.float().mean().detach(),
+                    "Pz_min": y["z"][..., :self.d].norm(dim=-1).min().detach()}
+        return top, uye
 
     # ---------------- uretim ----------------
     @torch.no_grad()
@@ -383,6 +395,27 @@ class Yol(nn.Module):
 
 def n_par(m: nn.Module) -> int:
     return sum(p.numel() for p in m.parameters())
+
+
+@torch.no_grad()
+def saglik(m: Yol) -> str:
+    """Son `kayip` cagrisinin SAGLIK tablosu.  TEK senkron noktasi.
+
+    Normalize edilen her yon bir tehlike: paydasi sifira yaklasirsa
+    geri gecis 1e12 mertebesinde gradyan uretir (olculdu; F.normalize
+    eps=1e-12'nin hemen ustunde patlar). Uc tane var -- okuma yonu
+    Pz, ve donmenin u / v_dik'i."""
+    u = F.normalize(m.u, dim=-1)
+    vd = (m.v - (m.v * u).sum(-1, keepdim=True) * u).norm(dim=-1)
+    s = getattr(m, "son", {})
+    return ("terim  " + "  ".join("%s %.4f" % (k, float(s[k])) for k in
+                                  ("uye", "dis", "kod", "bag", "duzen")
+                                  if k in s)
+            + "\n       capa %%%.2f   |Pz|min %.2e   |u|min %.2e   "
+              "|v_dik|min %.2e" % (100 * float(s.get("capa", 0)),
+                                   float(s.get("Pz_min", 0)),
+                                   float(m.u.norm(dim=-1).min()),
+                                   float(vd.min())))
 
 
 def kapi(m: Yol, tol: float = 1e-4) -> str:
