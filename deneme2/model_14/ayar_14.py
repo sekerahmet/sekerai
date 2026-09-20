@@ -78,16 +78,28 @@ D_OKUMA = 8
 #  derece kaliyor ve durum cozunurlugune yer kalmiyor.
 
 # --- OPERATOR ---------------------------------------------------------
-K_TAM = 80
+K_TAM = 451
 #  Kac birim TAM SO(D) alacak; kalani TEK DUZLEM.
 #  OLCULDU (test_14 §3): tek duzlemli donme, kendi duzleminin disinda
 #  ozdesliktir ve rastgele bir farkin ancak 2/D'sine dokunur --
-#  ongorulen 0,0625, olculen 0,0629. Yani D>d kacisi ciftlerin
-#  %6'sinda calisir. Geometriyi sekillendirenler TAM olmali.
-#  Bolme FREKANSTAN: etiket, sozluk, oracle gerekmez (§4.3).
-#  !! 80 DOGRULANMADI. Gozle bakildi: en sik 40 birimin 31'i gercekten
-#  kapali sinif ama 9'u SOYADI -- korpusta 480 kisi 10 soyad blogunda,
-#  yani her soyad dogal dilde olacagindan ~48 kat sik. Esik bir dugme (A5).
+#  ongorulen 0,0625, olculen 0,0629.
+#
+#  ONCE 80 IDI ve "!! 80 DOGRULANMADI" diye yaziliydi. OLCULDU
+#  (20 Eylul, t0): 451 birimin 328'i VARLIK birimi (ad parcasi) ve
+#  bunlarin yalniz 24'u (%7,3) frekansla ilk 80'e giriyordu. Yani
+#  OLGUYU TASIMASI GEREKEN 304 birim, farkin %6,2'sine dokunan
+#  operatore mahkumdu. Modelin yazdiginda birebir gorundu:
+#     Mersin -> Mersin(0,98)   Bartin -> Bartin(0,94)
+#     Isikli -> Isikli(0,91)   Sanliurfa x4
+#  yani R[ad] ~ I, durum kimildamiyor ve ozne degisince cevap
+#  degismiyor. DOGRULUK BILGI tam = 0,0000 idi.
+#
+#  §4.3'un "cozum dilsel" ayrimi (kapali sinif tam, acik sinif tek
+#  duzlem) FREKANSA dayaniyordu; olcum frekans ayriminin olguyu
+#  yanlis tarafa koydugunu gosterdi.
+#
+#  HESAP: 451 x 496 + 2048 x 32 = 289.232 parametre (onceki 129.331).
+#  `donme()` artik 451 matrix_exp: 1,5 ms -> ~5 ms, epok ~30 sn.
 
 SAAT = False
 #  HESAP (§6): tekrar ayrimini D>d boslugu ve farkli capalar zaten

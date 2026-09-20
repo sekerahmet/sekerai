@@ -8,6 +8,7 @@ basliginda BELGENIN hangi cumlesini sinadigi yaziyor.
 """
 from __future__ import annotations
 
+import os
 import sys
 
 import torch
@@ -697,6 +698,50 @@ def _30():
     assert 0 < var < len(ornek), "kapi bos: hepsi ayni cevabi veriyor"
     return "%d dizi, %d var / %d yok -- ikisi de AYNI cevabi verdi" % (
         len(ornek), var, len(ornek) - var)
+
+
+@kapi("31  OPERATOR -- OLGUYU TASIYAN birim zayif donmeye dusmemeli")
+def _31():
+    """*Gerekce OLCULDU (20 Eylul, t0):* `K_TAM = 80` iken 451 birimin
+    328'i VARLIK birimiydi (ad parcasi) ve bunlarin yalniz 24'u (%7,3)
+    frekansla ilk 80'e giriyordu. Yani "Elif" ile "Hasan" arasindaki
+    farki yaratmasi gereken 304 birim, rastgele bir farkin %6,2'sine
+    dokunan TEK DUZLEM donmesine mahkumdu (§4.3'un kendi sayisi).
+
+    Modelin yazdiginda birebir gorundu -- R[ad] ~ I:
+        Mersin -> Mersin(0,98)   Bartin -> Bartin(0,94)
+        Isikli -> Isikli(0,91)   Sanliurfa x4
+    ve DOGRULUK BILGI tam = 0,0000 cikti.
+
+    §4.3'un ayrimi FREKANSA dayaniyordu; olcum frekansin olguyu
+    yanlis tarafa koydugunu gosterdi. Kapi frekansa degil ROLE
+    bakiyor: varlik birimi TAM SO(D) almali."""
+    import numpy as np
+    import ayar_14 as AY, veri_14 as V, birim_14 as BR, olcme_14 as O
+
+    yol = os.environ.get("BIRIM_NPZ", r"G:/Drive'ım/model_14/birim_14.npz")
+    if not os.path.exists(yol):
+        return "ATLANDI -- birim dosyasi yok (%s)" % yol
+    b = BR.yukle(yol, yaz=lambda *a: None)
+    G = V.kur(AY.AYAR.veri_tohum)
+    E_ad = [x for t in V.TIPLER for x in G["ad"][t]]
+    varlik = {w for ad in E_ad
+              for w in O.birimle(ad, V.TR, b.kok, b.ix, b.korunan)}
+    assert varlik, "varlik birimi bulunamadi -- ad esleme bozuk"
+
+    tam = M.sinif_ayir(b.say, AY.K_TAM)
+    guclu = {i for i in varlik if bool(tam[i])}
+    oran = len(guclu) / len(varlik)
+    assert oran > 0.99, (
+        "%d varlik biriminin yalniz %d'u (%%%.1f) TAM SO(D) aliyor; "
+        "kalan %d tanesi farkin 2/D = %%%.1f'ine dokunan TEK DUZLEM "
+        "donmesiyle olgu tasimak zorunda (K_TAM=%d)"
+        % (len(varlik), len(guclu), 100 * oran, len(varlik) - len(guclu),
+           100 * 2 / AY.D_DURUM, AY.K_TAM))
+    return ("%d birimin %d'i varlik birimi; hepsi TAM SO(%d)   "
+            "(K_TAM=%d, acik sinif %d)"
+            % (len(b.ad), len(varlik), AY.D_DURUM, AY.K_TAM,
+               int((~tam).sum())))
 
 
 # =====================================================================

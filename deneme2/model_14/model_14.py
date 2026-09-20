@@ -438,17 +438,24 @@ def saglik(m: Yol) -> str:
     geri gecis 1e12 mertebesinde gradyan uretir (olculdu; F.normalize
     eps=1e-12'nin hemen ustunde patlar). Uc tane var -- okuma yonu
     Pz, ve donmenin u / v_dik'i."""
-    u = F.normalize(m.u, dim=-1)
-    vd = (m.v - (m.v * u).sum(-1, keepdim=True) * u).norm(dim=-1)
+    # !! ACIK SINIF BOS OLABILIR (K_TAM = n). Bos tensorde .min()
+    # patliyor; bu satir yalniz TEK DUZLEM kolunu izliyor, o kol yoksa
+    # izlenecek bir sey de yok.
+    if len(m.ix_acik):
+        u = F.normalize(m.u, dim=-1)
+        vd = float((m.v - (m.v * u).sum(-1, keepdim=True) * u)
+                   .norm(dim=-1).min())
+        un = float(m.u.norm(dim=-1).min())
+    else:
+        vd = un = float("nan")
     s = getattr(m, "son", {})
     return ("terim  " + "  ".join("%s %.4f" % (k, float(s[k])) for k in
                                   ("uye", "dis", "kod", "bag", "duzen")
                                   if k in s)
             + "\n       capa %%%.2f   |Pz|min %.2e   |u|min %.2e   "
-              "|v_dik|min %.2e" % (100 * float(s.get("capa", 0)),
-                                   float(s.get("Pz_min", 0)),
-                                   float(m.u.norm(dim=-1).min()),
-                                   float(vd.min())))
+              "|v_dik|min %.2e   (acik sinif %d)"
+            % (100 * float(s.get("capa", 0)), float(s.get("Pz_min", 0)),
+               un, vd, len(m.ix_acik)))
 
 
 def kapi(m: Yol, tol: float = 1e-4) -> str:
