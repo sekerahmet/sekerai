@@ -1080,6 +1080,8 @@ Q  §5.1/P'NIN ONCEDEN KAYDI CURUDU -- BARIYER ACIKLAMASI d=16'DA GECMIYOR
    ulasacak.**  §12b'nin icgudusu (izometriyi EKLEYEREK kir) TUR
    olarak dogruymus; yeri ve adresi yanlisti.
 R  `Pi` IYI YARIYI ATIYOR -- ve `uye` OKUNAN BLOGU SILIYOR  (21 Eylul)
+   !! MEKANIZMA IDDIASI (uye birikimli siliyor) DUSTU -- §5.1/S.
+      Kayip TEK ADIMDA, iliski operatorunde.  OLCUMLER gecerli.
    §5.1/Q "kimlik durumda var, Pi atiyor" diyordu. Nerede durdugu
    olculdu: 7.381 tek adimli sinav onegi, onegin SONUNDAKI durum,
    dogrusal prob (one-hot ridge, %70/%30, top-1), KARISIK etiket tabani.
@@ -1131,6 +1133,63 @@ R  `Pi` IYI YARIYI ATIYOR -- ve `uye` OKUNAN BLOGU SILIYOR  (21 Eylul)
    "kapasite eklemek" degil, **gizli blogu cevap aninda okumaya
    baglamak**. §12b'nin icgudusu (izometriyi ekleyerek kir) burada
    dogru yerini buluyor: yeri HER ADIM degil, adresi KOD degil.
+S  KIMLIK ILISKI OPERATORUNDE OLUYOR -- ve sayim bunu ONGORMUSTU
+   (21 Eylul, ileri gecis + prob, EGITIM YOK)
+   Ozne okunabilirligi onek boyunca, konum konum. Onek yapisi HER
+   ornekte ayni:  `0:Ibrahim 1:Yilmaz 2:-in 3:kardes 4:-i 5:kim 6:-dir 7:?`
+   z_j = R[jeton j-1] uygulandiktan SONRAKI durum.
+
+   ```
+   t0_d8                            t0_d16_hafizasiz
+    j  capa%   TAM    Pi   gizli     j  capa%   TAM    Pi   gizli
+    0   0,0   0,035 0,035 0,000      0   0,0   0,041 0,035 0,000
+    1   0,0   0,048 0,034 0,042      1   0,0   0,053 0,035 0,037
+    2   0,0   0,308 0,067 0,266      2   0,0   0,235 0,062 0,150   TEPE
+    3   0,0   0,289 0,084 0,247      3   0,0   0,242 0,066 0,116
+    4   0,2   0,147 0,022 0,153      4  13,0   0,044 0,009 0,015   COKUS
+    5   0,1   0,179 0,039 0,165      5  22,8   0,070 0,020 0,026
+    8   0,0   0,163 0,027 0,137      8  43,0   0,033 0,013 0,009
+   ```
+
+   1) KIMLIK KURULUYOR. j=2'de (ad tamamlandiginda) tepe: d=8'de
+      0,308, d=16'da 0,235. Sans 0,001-0,003. Yani model ozneyi
+      DOGRU kuruyor.
+   2) SONRA TEK ADIMDA COKUYOR, ve o adim `R[kardes]` -- ILISKI
+      OPERATORU.  d=8: 0,289 -> 0,147.  d=16: 0,242 -> 0,044.
+      Kademeli DEGIL. "uye birikimli olarak siliyor" tezi DUSTU;
+      blok-kosegen gerekcesi de onunla duser.
+   3) CAPA SEBEP DEGIL: d=8'de o adimda capa %0,2 ve dusus yine var.
+      d=16'da capa %13 ile ORADA basliyor ve dususu DERINLESTIRIYOR
+      (5,5 kat vs 2,0 kat) -- katalizor, kaynak degil.
+
+   NEDEN -- ve bu SAYILMIStI.  Model dogru cevabi verebilmek icin
+   her ozne s ve iliski r icin sunu saglamali:
+   ```
+        Pi R_r z_s  ~  p_{f(s,r)}
+   ```
+   `Pi R_r` SABIT, rank <= d bir dogrusal harita. Serbestligi
+   Stiefel(D,d) = Dd - d(d+1)/2 = 32*16 - 136 = **376**.
+   Iliski basina ozne sayisi 7.381/24 ~ 308; her biri d-1 = 15 kisit.
+   ```
+        kisit  308 x 15 = 4.620      serbestlik 376      12,3 KAT KISA
+   ```
+   Bu sayi §12b'de zaten yaziyordu (376 / 4.613). Yeni olan:
+   **prob egrisi onu OLAYIN ICINDE gosteriyor** -- kimlik tam o
+   operatorde olcusuz kaliyor.
+
+   VE DAHA KOTUSU: R_r bir IZOMETRI. <R z1, R z2> = <z1, z2>, yani
+   butun ikili acilari KORUYOR. Olgu tablosu ise keyfi: birbirine
+   yakin iki ozne bambaska cevaplara gidiyor. Rijit bir harita bunu
+   yapamaz. `Pi`nin buzmesi tek kacis yolu (§4.1 tam bunu diyor) ve
+   o da 376 serbestlikle sinirli.
+
+   HUKUM: **olgu aramasi R_r'nin ICINDE OLAMAZ.** Ayar meselesi
+   degil, sayim meselesi. Kendi parametresi ve kendi adresi gerekiyor.
+   -> tasarim §12c.
+
+   ADRES NEREDE: en iyi ozne okunabilirligi j=2-3'te, yani ILISKI
+   OPERATORUNDEN ONCE (d=8 0,308 / d=16 0,235). Adresleme tavani bu,
+   ve tavan `R_r`'den SONRA degil ONCE okunursa gecerli.
 ```
 
 ---
