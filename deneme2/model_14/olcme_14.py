@@ -251,23 +251,42 @@ class Sorular:
         return (Soru(govde + (sz, self.BILDIRME, self.SORU), cev, ksy),
                 govde + cev)
 
-    def tum(self, kaynak, dizi, yaz=print) -> dict:
-        """`kaynak` = [(zincirler, adim), ...].  ETIKET KULLANILMAZ --
-        yalniz zincir kaynagi; sinifi KORPUS belirler."""
+    # Hukme girmeyenler. CLAUDE.md: `arama` esik aramasi icin ayrilmis,
+    # `ood` cozunurluksuz (80 ornek, tek ornek ~0,014 oynatiyor).
+    # Bu bir BOLME listesi degil, OLCUM DISI birakilanlarin listesi.
+    HUKUM_DISI = ("arama", "ent_arama", "ood")
+
+    def tum(self, listeler: dict, dizi, yaz=print) -> dict:
+        """Butun zincirleri TEK HAVUZDA toplar ve KORPUSA gore siniflar.
+
+        !! BOLME ADLARI KULLANILMAZ. `listeler` sozlugunun anahtarlari
+        (one/seen/comp/ent) model_09'un graf bolmeleriydi; buradaki
+        olcunun onlarla isi yok. Adim sayisi ZINCIRIN UZUNLUGUNDAN
+        cikariliyor (e, r.., cevap), sinif ise korpustan."""
         ham = np.asarray(dizi, np.uint16).tobytes()
         cik = {"OGRETILEN": [], "CIKARIM": []}
         atilan = 0
-        for zs, adim in kaynak:
-            for z in zs or ():
-                s = self.kur(z, adim)
-                if s is None:
-                    atilan += 1
-                    continue
-                soru, bildirim = s
-                soru.soylenmis = _gecer(ham, bildirim)
-                cik["OGRETILEN" if soru.soylenmis else "CIKARIM"].append(soru)
-        yaz("soru  OGRETILEN %d   CIKARIM %d   (kurulamayan %d)"
-            % (len(cik["OGRETILEN"]), len(cik["CIKARIM"]), atilan))
+        havuz, gorulen = [], set()
+        for ad, zs in listeler.items():
+            if ad in self.HUKUM_DISI or not hasattr(zs, "__len__"):
+                continue
+            for z in zs:
+                t = tuple(int(x) for x in z)
+                if 3 <= len(t) <= 4 and t not in gorulen:
+                    gorulen.add(t)
+                    havuz.append(t)
+        for z in havuz:
+            adim = len(z) - 2
+            s = self.kur(z, adim)
+            if s is None:
+                atilan += 1
+                continue
+            soru, bildirim = s
+            soru.soylenmis = _gecer(ham, bildirim)
+            cik["OGRETILEN" if soru.soylenmis else "CIKARIM"].append(soru)
+        yaz("zincir %d (tekil)   OGRETILEN %d   CIKARIM %d   "
+            "kurulamayan %d" % (len(havuz), len(cik["OGRETILEN"]),
+                                len(cik["CIKARIM"]), atilan))
         return cik
 
 

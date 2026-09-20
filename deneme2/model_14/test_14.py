@@ -480,6 +480,54 @@ def _25():
 
 
 
+class _Buyuk(torch.overrides.TorchFunctionMode):
+    """Esikten buyuk her tensor uretimini kaydeder (ad, sekil, grad)."""
+
+    def __init__(self, esik):
+        self.esik, self.v = esik, []
+
+    def __torch_function__(self, f, t, a=(), k=None):
+        o = f(*a, **(k or {}))
+        if isinstance(o, torch.Tensor) and o.numel() >= self.esik:
+            self.v.append((f.__name__, tuple(o.shape), o.requires_grad))
+        return o
+
+
+@kapi("26  SICAK DONGU -- buyuk gecici tensor SAYISI")
+def _26():
+    """Bu kapi bir HIZ kapisi, ve gerekcesi OLCULDU: ilk kosuda epok
+    220 sn'yi gecti (>117 ms/adim). Sebep FLOP degil BELLEK TRAFIGI --
+    adim basina (B,K) uzerinde dort elemanwise tensor ve okuma
+    tarafinda (B,L,n) uzerinde uc tane kuruluyordu.
+
+    Iki sayi kilitleniyor:
+      (B,L-1,n)   1 tane  -- yalniz cos.  2-2x ve clamp REDUKSIYONDAN
+                  SONRA, (B,n) uzerinde yapilir.
+      (B,K)       L-1 tane, ve HICBIRI requires_grad DEGIL.
+                  `k` bir indeks, `vur` bir bool; aramadan geri hicbir
+                  sey akmaz. Gradyanli olsaydi 15 x 67 MB geri gecise
+                  kadar TUTULURDU."""
+    n, D, d, K, B, L = 451, 32, 8, 2048, 512, 16
+    tam = torch.zeros(n, dtype=torch.bool)
+    tam[:80] = True
+    m = M.Yol(n, D=D, d=d, K=K, tam=tam)
+    g = torch.Generator().manual_seed(26)
+    X = torch.randint(0, n, (B, L), generator=g)
+
+    with _Buyuk(B * (L - 1) * n) as s1:
+        m.kayip(X)
+    with _Buyuk(B * K) as s2:
+        m.kayip(X)
+    bk = [x for x in s2.v if x[1] == (B, K)]
+    grad = [x for x in bk if x[2]]
+
+    assert len(s1.v) == 1, "(B,L-1,n) boyunda %d tensor: %s" % (
+        len(s1.v), [x[:2] for x in s1.v])
+    assert len(bk) == L - 1, "(B,K) boyunda %d tensor (beklenen %d)" % (
+        len(bk), L - 1)
+    assert not grad, "%d kod-arama tensoru GRADYANLI -- geri gecise kadar tutulur" % len(grad)
+    return "(B,L-1,n) 1 tensor   (B,K) %d tensor, gradyanli 0" % len(bk)
+
 
 # =====================================================================
 # VERI YOLU  --  kopyanin ve kurulumun kapilari

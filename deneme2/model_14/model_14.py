@@ -234,6 +234,18 @@ class Yol(nn.Module):
         kalir. Durumu koda ceken sey L_capa'nin BAGLILIK terimi."""
         R, C = self.donme(), self.kod()
         B, L = X.shape
+        # Donme ARAMASI `embedding` ile: ayni ileri gecis, ama geri
+        # gecisi `embedding_dense_backward` (siralanmis, segmentli)
+        # yapiyor -- genel `index_put` adim basina 8,4 M atomik
+        # toplama demekti.
+        Rd = R.reshape(self.n, self.D * self.D)
+        # Kod defteri devrigi DONGU DISINDA: adim basina (D,K) kopyasi
+        # cikariliyor.
+        Ct = C.t().contiguous()
+        # ||z-C||^2 = 2 - 2 z.C  ve z,C birim normda; en YAKIN kod, ic
+        # carpimi EN BUYUK olandir. Esigi de dogrudan ic carpima
+        # ceviriyoruz:  2-2s < r^2  <=>  s > 1 - r^2/2.
+        esik = 1.0 - 0.5 * r * r
         # Pencere basi: ilk birim okuma uzayina, gizli kisim sifir.
         # Pencere akistan KEYFI yerden basliyor; bu "cop" durum ilk
         # capada silinir (DENKLEM.md §9.5).
@@ -244,31 +256,43 @@ class Yol(nn.Module):
         o = {"z": [z], "zp": [z], "t": [sf_l], "vur": [sf_b], "k": [sf_l]}
         t = sf_l
         for j in range(1, L):
-            zp = torch.bmm(R[X[:, j - 1]], z.unsqueeze(-1)).squeeze(-1)
+            Rg = F.embedding(X[:, j - 1], Rd).view(B, self.D, self.D)
+            zp = torch.bmm(Rg, z.unsqueeze(-1)).squeeze(-1)
             t = t + 1
-            # ||z-C||^2 = 2 - 2 z.C  -- ikisi de birim normda, TAM
-            # esitlik (yaklasim degil). cdist ayni isi 1,5 kat yavas
-            # yapiyordu ve is yukunun %92'si burada. OLCULDU.
-            yak2, k = (2 - 2 * (zp @ C.T)).clamp(min=0).min(1)
-            vur = yak2 < r * r
+            # !! ARAMA GRADYANSIZ. `k` bir INDEKS, `vur` bir BOOL --
+            # ikisinden de geri hicbir sey akmaz. Gradyan C'ye asagida
+            # C[k] uzerinden gidiyor. no_grad olmadan (B,K) ara tensor
+            # geri gecis icin TUTULUYOR: adim basina 67 MB x 15 adim.
+            with torch.no_grad():
+                s, k = (zp @ Ct).max(1)
+                vur = s > esik
             z = torch.where(vur[:, None], C[k], zp)
-            t = torch.where(vur, torch.zeros_like(t), t)
+            t = t.masked_fill(vur, 0)
             for ad, v in (("z", z), ("zp", zp), ("t", t), ("vur", vur),
                           ("k", k)):
                 o[ad].append(v)
         return {a: torch.stack(v, 1) for a, v in o.items()}
 
-    def oku(self, z: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        """(B,L,n) -- ACISAL uzaklik.  2 - 2cos(aci).  DENKLEM §4.2.
+    def _kos(self, z: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """(B,L,n) -- cos(aci).  `oku` bunun 2-2x'i.
+
+        Kayip dogrudan BUNU kullanir: `2-2x` ve `clamp` (B,L,n) boyunda
+        IKI gecici tensor daha demek -- B=8192 L=16 n=451'de her biri
+        222 MB, ve ikisinin de geri gecisi var. Ayni sayi, ucte bir
+        trafik.
 
         !! Saat kapaliyken hedef sabittir ve `q @ p^T` yeter. Genel yol
-        H[t] ile (B,L,n,d) bir tensor kurar -- B=8192 L=16 n=475 d=8'de
-        498 milyon float, 2 GB. (Bu hatayi test 17 yakaladi.)"""
+        H[t] ile (B,L,n,d) bir tensor kurar -- 498 milyon float, 2 GB.
+        (Bu hatayi test 17 yakaladi.)"""
         q = F.normalize(z[..., :self.d], dim=-1)
         if not self.saat:
-            return (2 - 2 * (q @ self.p.T)).clamp(min=0)
+            return q @ self.p.T
         H = self.hedef(int(t.max()) + 1)                     # (T, n, d)
-        return (2 - 2 * (q[:, :, None, :] * H[t]).sum(-1)).clamp(min=0)
+        return (q[:, :, None, :] * H[t]).sum(-1)
+
+    def oku(self, z: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """(B,L,n) -- ACISAL uzaklik.  2 - 2cos(aci).  DENKLEM §4.2."""
+        return (2 - 2 * self._kos(z, t)).clamp(min=0)
 
     def forward(self, X: torch.Tensor, r: float = 0.25) -> torch.Tensor:
         y = self.yol(X, r)
@@ -280,14 +304,18 @@ class Yol(nn.Module):
 
         a1..a3 OLCULMEDEN secilmez; buradakiler baslangic."""
         y = self.yol(X, r)
-        d2 = self.oku(y["z"], y["t"])[:, 1:]         # adim 0 VERILMIS
-        uye = d2.gather(2, X[:, 1:, None]).squeeze(-1).mean()
+        # !! DILIMLEME OKUMADAN ONCE. Adim 0 VERILMIS; once okuyup sonra
+        # dilimlemek (B,L,n)'in tamamini hesaplamak demek.
+        # !! `_kos` -- `oku` degil. Ihtiyacimiz olan her sey cos'tan
+        # cikiyor; 2-2x ve clamp iki (B,L-1,n) tensor daha ekliyordu.
+        kos = self._kos(y["z"][:, 1:], y["t"][:, 1:])
+        uye = 2 - 2 * kos.gather(2, X[:, 1:, None]).squeeze(-1).mean()
 
         # ITICI kuvvet. Pencerede OLMAYAN birim yolun yanindan gecmemeli.
         # Mentese: hepsi delta'yi gecince terim sifirlanir.
         # !! BILINEN TUZAK: bu birimlerin bir kismi GECERLI alternatif
         # (korpusta 17 bildirim kalibi var); mentese softmax'tan serttir.
-        dmin = d2.amin(1).clamp(min=0).sqrt()
+        dmin = (2 - 2 * kos.amax(1)).clamp(min=0).sqrt()
         ic = torch.zeros_like(dmin, dtype=torch.bool).scatter_(1, X, True)
         dis = (delta - dmin).clamp(min=0).pow(2).masked_fill(ic, 0.).sum(1).mean()
 
@@ -298,7 +326,7 @@ class Yol(nn.Module):
         # !! `k` yol()tan geliyor; yeniden cdist B*(L-1) x K matris demek.
         zf = y["zp"][:, 1:].reshape(-1, self.D)
         vf = y["vur"][:, 1:].reshape(-1)
-        Ck = self.kod()[y["k"][:, 1:].reshape(-1)]     # BIR KEZ gather
+        Ck = F.embedding(y["k"][:, 1:].reshape(-1), self.kod())  # BIR gather
         kod = (zf.detach() - Ck).pow(2).sum(-1).mean()
         bag = ((zf - Ck.detach()).pow(2).sum(-1) * vf).sum() \
             / vf.sum().clamp(min=1)
