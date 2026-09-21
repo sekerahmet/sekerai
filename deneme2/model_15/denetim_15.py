@@ -19,7 +19,7 @@ with torch.no_grad():
         w = ix(a[0], *[t for x in a[1:] for t in (ARTI, x)], ESIT)
         o, ag = m.dikkat(w)
         print(f"  {' '.join(AD[i] for i in w.tolist()):<26s}"
-              f" {len(w)} token -> {len(ag)} agirlik -> {AD[m.oku(o)]}")
+              f" {len(w)} token -> {ag.shape[-1]} agirlik -> {AD[m.oku(o)]}")
 
     print()
     print("SIRA GORUNUYOR MU  (toplamada cevap ayni ama DURUM ayrilmali)")
@@ -34,6 +34,7 @@ with torch.no_grad():
     print("AYNI TOKEN IKI KEZ  ayri agirlik aliyor mu")
     w = ix(4, ARTI, 7, ARTI, 4, ESIT)
     _o, ag = m.dikkat(w)
+    ag = ag.sum(0)                     # kafalar toplanir
     y = [i for i, t in enumerate(w.tolist()) if t == 4]
     for i, (t, x) in enumerate(zip(w.tolist(), ag)):
         print(f"  yuva {i} {AD[t]:<3s} {float(x):.4f}")
