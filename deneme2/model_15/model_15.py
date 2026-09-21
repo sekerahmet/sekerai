@@ -48,6 +48,11 @@ COSINE = False
 OLCEK = False        # puan / sqrt(durum) -- transformerdaki gibi
 ESIK = False         # relu(puan + hb), hb OGRENILEN esik
 KAFA = 1             # kac dikkat kafasi
+KATMAN = 1           # kac dikkat BLOGU.  Blok yuvalari GUNCELLER (artik
+                     #   baglanti), havuzlanmis ciktiyi degil -- boylece
+                     #   yuva i, yuva j'nin ZATEN HESAP YAPMIS halini gorur.
+                     #   Derinlik 1'de bilesik hesap yapilamiyor:
+                     #   onlar basamagi butun veri bicimlerinde 0,17-0,31.
 
 WD = 0.03            # ceza.  lr ile birlikte calisiyor: biri zayifsa
                      #   oteki telafi ediyor, ikisi guclu olunca 5/5.
@@ -74,7 +79,8 @@ def lr_ver(i, adim, lr=LR, cosine=COSINE):
 
 class Yol(nn.Module):
     def __init__(self, n, boyut=BOYUT, durum=DURUM, dur=None, tohum=0,
-                 norm=NORM, pay=PAY, olcek=OLCEK, esik=ESIK, kafa=KAFA):
+                 norm=NORM, pay=PAY, olcek=OLCEK, esik=ESIK, kafa=KAFA,
+                 katman=KATMAN):
         """Ayarlar dosyanin basinda -- ayri bir ayar dosyasi YOK."""
         super().__init__()
         g = torch.Generator().manual_seed(tohum)
@@ -82,7 +88,7 @@ class Yol(nn.Module):
         self.n, self.boyut, self.durum, self.dur = n, boyut, durum, dur
         self.norm, self.pay = norm, pay
         self.olcek = durum ** -0.5 if olcek else 1.0
-        self.kafa = kafa
+        self.kafa, self.katman = kafa, katman
 
         self.E = nn.Parameter(r(n, boyut))                  # sozluk: token -> konum
         self.b = nn.Parameter(r(n, durum) / durum ** 0.5)   # token -> duruma giris
@@ -90,10 +96,13 @@ class Yol(nn.Module):
                               + 0.1 * r(n, durum, durum))   # guncelleme
         self.s0 = nn.Parameter(torch.zeros(durum))
 
-        self.Wq = nn.Parameter(r(kafa, durum, boyut) * 0.4)  # yol -> soru
-        self.Wk = nn.Parameter(r(kafa, durum, boyut) * 0.4)  # yuva -> anahtar
-        self.Wv = nn.Parameter(r(kafa, durum, boyut) * 0.4)  # yuva -> deger
-        self.hb = nn.Parameter(torch.zeros(kafa)) if esik else None
+        L = katman
+        self.Wq = nn.Parameter(r(L, kafa, durum, boyut) * 0.4)  # yuva -> soru
+        self.Wk = nn.Parameter(r(L, kafa, durum, boyut) * 0.4)  # yuva -> anahtar
+        self.Wv = nn.Parameter(r(L, kafa, durum, boyut) * 0.4)  # yuva -> deger
+        self.Wo = nn.Parameter(r(L, kafa, boyut, durum) * 0.4)  # geri duruma
+        self.hb = nn.Parameter(torch.zeros(L, kafa)) if esik else None
+        self.Wson = nn.Parameter(r(durum, boyut) * 0.4)         # son -> sozluk
 
     def gez(self, w):
         """w: (T,) ya da (B,T).  Doner: (B,T+1,durum) -- her adimdaki durum."""
@@ -110,23 +119,38 @@ class Yol(nn.Module):
         S = torch.stack(iz, 1)
         return S[0] if tek else S
 
-    def dikkat(self, w):
-        """Yol sorar, yuvalar cevaplar.  Doner: cikti ve agirliklar.
+    def blok(self, S, L):
+        """Bir dikkat blogu.  Yuvalari GUNCELLER, havuzlamaz.
+        Nedensel: yuva i yalniz j <= i'ye bakar (uretim sirasiyla ayni)."""
+        q = torch.einsum("btd,hdc->bhtc", S, self.Wq[L])
+        k = torch.einsum("btd,hdc->bhtc", S, self.Wk[L])
+        v = torch.einsum("btd,hdc->bhtc", S, self.Wv[L])
+        pu = torch.einsum("bhic,bhjc->bhij", q, k) * self.olcek
+        if self.hb is not None:
+            pu = pu + self.hb[L][None, :, None, None]
+        T = S.shape[1]
+        mask = torch.ones(T, T, dtype=torch.bool, device=S.device).tril()
+        pu = pu.masked_fill(~mask, -1e9 if self.pay else -float("inf"))
+        ag = pu.softmax(-1) if self.pay else pu.clamp(min=0)
+        u = torch.einsum("bhij,bhjc->bhic", ag, v)
+        return torch.einsum("bhic,hcd->bid", u, self.Wo[L]), ag
 
-        Anahtar ve deger yuvanin TOKEN'INDAN degil, o ana kadarki DURUMUNDAN
-        uretiliyor -- boylece ayni token iki farkli yerde ayni sey demiyor.
+    def dikkat(self, w):
+        """Yol sorar, yuvalar cevaplar.  katman kadar blok ust uste.
+
+        Anahtar ve deger yuvanin TOKEN'INDAN degil DURUMUNDAN uretiliyor.
         """
         tek = w.dim() == 1
         S = self.gez(w)[..., 1:, :]
-        S = S[None] if tek else S                       # (B,T,durum)
-        q = torch.einsum("bd,hdc->bhc", S[:, -1], self.Wq)      # (B,kafa,boyut)
-        K = torch.einsum("btd,hdc->bhtc", S, self.Wk)
-        pu = (K * q[:, :, None, :]).sum(-1) * self.olcek        # (B,kafa,T)
-        if self.hb is not None:
-            pu = pu + self.hb[None, :, None]
-        ag = pu.softmax(-1) if self.pay else pu.relu()
-        V = torch.einsum("btd,hdc->bhtc", S, self.Wv)
-        o = (ag[..., None] * V).sum(2).sum(1)           # kafalar TOPLANIR
+        S = S[None] if tek else S
+        ag = None
+        for L in range(self.katman):
+            u, ag = self.blok(S, L)
+            S = S + u
+            if self.norm:
+                S = F.normalize(S, dim=-1)
+        o = S[:, -1] @ self.Wson
+        ag = ag[:, :, -1, :]                     # son yuvanin agirliklari
         return (o[0], ag[0]) if tek else (o, ag)
 
     def oku(self, o):
