@@ -12,12 +12,14 @@ import torch.nn.functional as F
 
 
 class Yol(nn.Module):
-    def __init__(self, n, boyut=2, durum=6, dur=None, tohum=0, norm=True):
+    def __init__(self, n, boyut=2, durum=6, dur=None, tohum=0, norm=True, pay=True):
         super().__init__()
         g = torch.Generator().manual_seed(tohum)
         r = lambda *s: torch.randn(*s, generator=g)
         self.n, self.boyut, self.durum, self.dur = n, boyut, durum, dur
-        self.norm = norm       # |s|=1 -- yoksa 7 adimda 49 kat siser (tani_15)
+        self.norm = norm       # |s|=1 -- boyu sifirlar, TOPLAM tasinamaz
+        self.pay = pay         # softmax: agirliklar 1'e toplanir -> cikti ORTALAMA
+                               #   False -> relu: agirlik serbest, TOPLAM cikabilir
 
         self.E = nn.Parameter(r(n, boyut))                  # sozluk
         self.b = nn.Parameter(r(n, durum) / durum ** 0.5)   # token -> duruma giris
@@ -55,7 +57,8 @@ class Yol(nn.Module):
         S = self.gez(w)[..., 1:, :]            # (B,T,durum) her yuvanin durumu
         S = S[None] if tek else S
         q = S[:, -1] @ self.Wq                 # (B,boyut) soru: yolun tamami
-        ag = ((S @ self.Wk) @ q.unsqueeze(-1)).squeeze(-1).softmax(-1)
+        pu = ((S @ self.Wk) @ q.unsqueeze(-1)).squeeze(-1)
+        ag = pu.softmax(-1) if self.pay else pu.relu()
         o = (ag.unsqueeze(-1) * (S @ self.Wv)).sum(1)
         return (o[0], ag[0]) if tek else (o, ag)
 

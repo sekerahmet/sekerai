@@ -45,11 +45,11 @@ def gec(m, W, opt=None):
     return k.item(), float((puan.argmax(-1) == h).float().mean())
 
 
-def kos(pay, durum, tohum, iz=False):
+def kos(pay, durum, tohum, iz=False, norm=False, softmax=False, wd=0.03):
     EG, TU = bol(pay, tohum)
     WE, WT = yig(EG), yig(TU)
-    m = Yol(N, boyut=8, durum=durum, tohum=tohum, norm=True)
-    opt = torch.optim.Adam(m.parameters(), lr=0.02)
+    m = Yol(N, boyut=8, durum=durum, tohum=tohum, norm=norm, pay=softmax)
+    opt = torch.optim.Adam(m.parameters(), lr=0.02, weight_decay=wd)
     for i in range(ADIM):
         gec(m, WE, opt)
         if iz and i % 100 == 0:
@@ -65,14 +65,25 @@ EG0, TU0 = bol(0.5, 0)
 print(f"ikili {len(HEPSI)}   egitim {len(EG0)}   tutulan {len(TU0)}")
 print(f"TABAN {Counter(h for _, h in TU0).most_common(1)[0][1]/len(TU0):.3f}   TAVAN 1.000")
 print()
-print("  egitim payi  durum   HAFIZA   GENELLEME")
+def dizi_puan(E):
+    P = E[:101] - E[:101].mean(0)
+    U, S, _ = torch.linalg.svd(P, full_matrices=False)
+    a = U[:, 0] * S[0]
+    n = 101
+    t = sum(1 for i in range(n) for j in range(i + 1, n) if a[i] > a[j])
+    return t / (n * (n - 1) // 2)
+
+
+print("  norm  softmax   HAFIZA  GENELLEME   E-sira (0=kusursuz, 0.5=rastgele)")
 son = None
-for pay in (0.5,):
-    for durum in (16,):
-        r = [kos(pay, durum, t, iz=(t == 0)) for t in (0, 1)]
-        e = [x[1] for x in r]; u = [x[2] for x in r]
-        print(f"  {pay:^11}  {durum:5d}   {statistics.mean(e):.3f}"
-              f"    {statistics.mean(u):.3f} +- {statistics.stdev(u):.3f}", flush=True)
+for norm, sm in ((True, True), (False, True), (True, False), (False, False)):
+    r = [kos(0.5, 16, t, norm=norm, softmax=sm) for t in (0, 1)]
+    e = statistics.mean(x[1] for x in r); u = statistics.mean(x[2] for x in r)
+    with torch.no_grad():
+        d = statistics.mean(dizi_puan(x[0].E) for x in r)
+    print(f"  {'ACIK ' if norm else 'KAPALI'}  {'ACIK ' if sm else 'RELU ':<7s}  "
+          f"{e:.3f}   {u:.3f}       {d:.3f}", flush=True)
+    if not norm and not sm:
         son = r[0]
 
 m, _, _, TU = son
