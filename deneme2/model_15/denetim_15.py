@@ -4,7 +4,7 @@ from veri_15 import AD, N, ARTI, ESIT
 from model_15 import Yol
 
 ix = lambda *a: torch.tensor(list(a))
-m = Yol(N, boyut=2, durum=16, tohum=0)
+m = Yol(N, tohum=0)
 
 print("PARAMETRE")
 p = dict(m.named_parameters())
@@ -21,13 +21,15 @@ with torch.no_grad():
         print(f"  {' '.join(AD[i] for i in w.tolist()):<26s}"
               f" {len(w)} token -> {ag.shape[-1]} agirlik -> {AD[m.oku(o)]}")
 
-    print()
-    print("SIRA GORUNUYOR MU  (toplamada cevap ayni ama DURUM ayrilmali)")
-    a = ix(3, ARTI, 5, ARTI, 9, ESIT)
-    b = ix(9, ARTI, 5, ARTI, 3, ESIT)
-    f = (m.dikkat(a)[0] - m.dikkat(b)[0]).norm()
-    print(f"  3+5+9= / 9+5+3=   cikti farki {f:.4f}")
-    assert f > 1e-6, "SIRA KOR"
+    print("\nSIRA  --  OPERAND sirasi onemsiz, SAYI ICINDEKI sira ONEMLI")
+    from veri_15 import rak
+    cik = lambda a, b: m.dikkat(
+        torch.tensor(rak(a, 3) + [ARTI] + rak(b, 3) + [ESIT]))[0]
+    f1 = float((cik(53, 65) - cik(65, 53)).norm())
+    f2 = float((cik(53, 65) - cik(35, 65)).norm())
+    print(f"  53+65 / 65+53   fark {f1:.6f}   cevap AYNI   (118 = 118)")
+    print(f"  53+65 / 35+65   fark {f2:.6f}   cevap FARKLI (118 != 100)")
+    assert f2 > 1e-6, "SAYI ICINDEKI SIRA GORUNMUYOR -- yol bir TORBA"
     print("  GECTI")
 
     print()

@@ -1,22 +1,24 @@
-"""model_15 -- YOL TUTULMAZ, HESAPLANIR.
+"""model_15 -- YOL, UGRANAN KONUMLARIN LISTESIDIR.
 
-  gez       s_t = normalize(M[token] @ s_{t-1} + b[token])
-            ozyineleme -- yuvalar soldan saga kuruluyor
-  soru      SON yuva sorar:  q = s_son @ Wq
+Kullanici, 21 Eylul:  "yol su degil mi? istanbul(x,y) U ankara U mersin.
+bu sayede hangi konumdan hangi konuma gittigimi bilirim."
+ve 22 Eylul: "E1 + 6 = E2 oluyor.  ana tasarimin kalbi bu."
+
+  sozluk    E[token] -- her token'in KONUMU.  Girdi de bu, okumanin hedefi de.
+  yol       E[w_0], E[w_1], ... E[w_T]        yuvalar
+  soru      son yuva sorar:  q = E[w_son] @ Wq
   cevap     her yuva Wk ile puanlanir, Wv ile katki verir
-  agirlik   relu(puan + hb) -- softmax DEGIL.  1'e toplanmak zorunda
-            olsaydi cikti hep ORTALAMA olurdu, TOPLAM tasinamazdi.
-  cikti     agirlikli TOPLAM -> sozluk uzayinda nokta -> en yakin E[token]
+  agirlik   relu(puan + hb) -- softmax DEGIL.  1'e toplanmak zorunda olsaydi
+            cikti hep ORTALAMA olurdu, TOPLAM tasinamazdi.
+  cikti     agirlikli TOPLAM -> en yakin E[token]
+  ozyineleme  uretilen token yola EKLENIR, dongu yeni yolla tekrarlanir
 """
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 # BELIRLENIMCI KOSU.  Cok iplikli toplama sirasi her kosuda degisiyordu;
-# ondalik farklar 400 adimda buyuyup sonucu ~0,29 / ~0,99 arasinda
-# ziplatiyordu.  Ayni tohum ayni sonucu vermeliydi, vermiyordu.
-# GPU'da bazi cekirdekler belirlenimci degil; orada ZORLAMIYORUZ,
-# tekrarlanabilirlik CPU kosularinda gecerli.
+# ondalik farklar buyuyup sonucu ziplatiyordu.  GPU'da bazi cekirdekler
+# belirlenimci degil; orada zorlanmiyor.
 if not torch.cuda.is_available():
     torch.use_deterministic_algorithms(True)
     torch.set_num_threads(1)
@@ -30,98 +32,85 @@ if not torch.cuda.is_available():
 
 # --- OLCULDU, GOREV A  (2.601 ikili, olcut: tutulan)
 #   boyut   2:0,051  4:0,088  8:0,841  16:0,901  32:0,878
-#   norm    ACIK 0,782   KAPALI 0,059
 #   pay     softmax 0,289   relu 0,782
-#   lr      0,005:0,008  0,01:0,025  0,02:0,810  0,04:0,930  0,08:0,146
-#           sabit 0,897   cosine->lr/10 0,080   (cosine ZARARLI, cizelge YOK)
-#   lr OLCEGE BAGLI:  2.601 ikili -> 0,04 (0,930)
-#                     251.001     -> 0,004 (0,980); 0,04 ile 0,086'da takiliyor
+#   lr      0,01:0,025  0,02:0,810  0,04:0,930  0,08:0,146
+#           sabit 0,897   cosine->lr/10 0,080   (cosine ZARARLI)
+#   lr OLCEGE BAGLI:  2.601 -> 0,04 ;  251.001 -> 0,004
 #                     veri 96,5 kat, lr 10 kat kucuk.  sqrt(96,5)=9,82.
-#                     TAHMIN lr = 0,04 * sqrt(2601/veri)
-#                     SINIR: yigin da degisti, tek degiskenli yasa DEGIL.
-#   wd      251.001 ikilide:  0,03 OLU (kayip tam ln(1003)'te dondu)
-#                             0,01 calisiyor,  0,001 ezbere kayiyor
+#   wd      251.001'de:  0,03 OLU   0,01 calisiyor   0,001 ezbere kayiyor
 
 # --- OLCULDU, GOREV B  (rakam tokenli, 4000 adim, olcut SAYI)
 #   durum   8:0,0148   16:0,0322   32:0,0342      dirsek 16
-#   esik    kapali 0,0224 -> acik 0,1517  (dolgu "0")
-#           kapali 0,0258 -> acik 0,0356  (dolgu PAD)
-BOYUT = 16           # token kac sayiyla tarif ediliyor
-DURUM = 16           # s kac sayi
-NORM = True          # |s| = 1
+#     NOT: "durum" ESKI tasarimin parametresiydi (M, b ile ozyineleme).
+#     Bu surumde ozyineleme YOK -- olcum yalniz tarihsel kayit.
+BOYUT = 16           # token kac sayiyla tarif ediliyor.  YOL bunlardan olusur.
 PAY = False          # False -> relu   True -> softmax
-LR = 0.002           # SABIT.  Rakam tokenli veride 0,001/0,002/0,004
-                     #   ayirt edilemedi (hepsi ~0,015).
-WD = 0.01            # 0,03 buyuk veride OLDURUYOR, 0,001 ezbere kaydiriyor.
+LR = 0.002           # SABIT.  Cosine olculdu ve zararli.
+WD = 0.01
 
 # YANLILIK (hb) ANAHTAR DEGIL, HER ZAMAN VAR.  Ispat, kosu gerekmez:
 #   ag_j = relu(q.k_j) ise bir yuva ancak q.k_j > 0 iken agirlik alir.
 #   Bu sinir ORIJINDEN GECEN bir duzlem -- secim homojen yarim uzaya
-#   hapsolur.  Anahtarlar k_j = s_j @ Wk ve s_j normalize; anahtar bulutunun
-#   orijini icermesi icin sebep yok.  Bulut tek taraftaysa secim
-#   "HEPSI" ya da "HICBIRI"ne duser, arasi yok.
+#   hapsolur.  Anahtar bulutunun orijini icermesi icin sebep yok; bulut
+#   tek taraftaysa secim "HEPSI" ya da "HICBIRI"ne duser, arasi yok.
 #   Gozlenen (hb eklenmeden ONCE): adim 0'da toplam agirlik 4,66;
 #   adim 2'de 10 yuvanin 9'u sifir, toplam 1,11.  "Hicbiri" hali.
 #   hb ile sinir q.x = -hb olur, genel yarim uzay.  Maliyet: 1 sayi.
 #
-# CIKARILDI (21 Eylul): KATMAN/blok, nedensel maske, artik baglanti,
-#   Wson okuma yolu, OLCEK, KAFA.  Hicbiri olculmedi, hicbirinin kosusuz
-#   gerekcesi yoktu.  Tek ornekte katman 2 kurulur kurulmaz OLUYDU
-#   (butun agirliklar 0) ve |u|=5,8 / |s|=1, yani "artik baglanti"
-#   durumu inceltmiyor UZERINE YAZIYORDU.
-#   Once sorulacak soru: TOPLAMI hangi parca yapacak?
+# CIKARILDI (22 Eylul): M ve b ile OZYINELEME.
+#   Tasarim en bastan "yol = ugranan konumlarin listesi" idi; kodda
+#   yol yerine M[token]/b[token] ile bir durum yurutuluyordu ve E
+#   girdiye HIC girmiyordu.  Olculdu: ayni tokenin b'si ile E'si
+#   arasinda cos = 0,174 -- rastgele 16 boyutta beklenen 0,199.
+#   Yani giren temsil ile cikan temsil birbirinden habersizdi.
+#
+# ACIK SORUN (22 Eylul, olculdu -- denetim_15):
+#   Yol yalniz KONUM LISTESI oldugundan dikkat onu bir TORBA gibi okuyor.
+#     53+65 / 65+53   fark 0,000002   cevap AYNI olmali    -> DOGRU
+#     53+65 / 35+65   fark 0,000000   cevap FARKLI olmali  -> HATA
+#   Operand sirasinin onemsiz olmasi toplamada DOGRU.  Ama bir sayinin
+#   ICINDEKI rakam sirasi bilgi tasiyor ve o kayboluyor: iki girdi ayni
+#   token TORBASINI veriyor, hicbir parametre ayari ayiramaz.
+#   Ayrica q = E[son token] @ Wq -- soru yolun TAMAMINA degil TEK tokene
+#   bakiyor; ayni tokenle biten iki farkli yol ayni soruyu soruyor.
 
 
 class Yol(nn.Module):
-    def __init__(self, n, boyut=BOYUT, durum=DURUM, tohum=0,
-                 norm=NORM, pay=PAY):
+    def __init__(self, n, boyut=BOYUT, tohum=0, pay=PAY):
         """Ayarlar dosyanin basinda -- ayri bir ayar dosyasi YOK."""
         super().__init__()
         g = torch.Generator().manual_seed(tohum)
         r = lambda *s: torch.randn(*s, generator=g)
-        self.n, self.boyut, self.durum = n, boyut, durum
-        self.norm, self.pay = norm, pay
+        self.n, self.boyut, self.pay = n, boyut, pay
 
-        self.E = nn.Parameter(r(n, boyut))                  # sozluk: token -> konum
-        self.b = nn.Parameter(r(n, durum) / durum ** 0.5)   # token -> duruma giris
-        self.M = nn.Parameter(torch.eye(durum).repeat(n, 1, 1)
-                              + 0.1 * r(n, durum, durum))   # guncelleme
-        self.s0 = nn.Parameter(torch.zeros(durum))
-
-        self.Wq = nn.Parameter(r(durum, boyut) * 0.4)   # son yuva -> soru
-        self.Wk = nn.Parameter(r(durum, boyut) * 0.4)   # yuva -> anahtar
-        self.Wv = nn.Parameter(r(durum, boyut) * 0.4)   # yuva -> deger
+        # BASLANGIC OLCEGI  o = 1/sqrt(boyut).  Turetilisi:
+        #   W'nin girisleri bagimsiz, ortalama 0, standart sapma o ise
+        #   (x @ W)_j = toplam_i x_i W_ij  ->  varyansi  |x|^2 * o^2
+        #   yani  |x @ W| ~ |x| * o * sqrt(boyut).
+        #   Cikti boyu girdi boyuyla AYNI kalsin istiyoruz:
+        #     o * sqrt(boyut) = 1   ->   o = 1/sqrt(boyut) = 0,25   (boyut 16)
+        #   Boylece |q| ~ |E| ve |k| ~ |E| olur; puan = q.k ne patlar ne soner.
+        #   ONCEKI DEGER 0,4 idi ve GEREKCESI YOKTU -- elle yazilmisti.
+        o = boyut ** -0.5
+        self.E = nn.Parameter(r(n, boyut))              # token -> KONUM
+        self.Wq = nn.Parameter(r(boyut, boyut) * o)     # son yuva -> soru
+        self.Wk = nn.Parameter(r(boyut, boyut) * o)     # yuva -> anahtar
+        self.Wv = nn.Parameter(r(boyut, boyut) * o)     # yuva -> deger
         self.hb = nn.Parameter(torch.zeros(1))          # YANLILIK -- hep var
 
-    def gez(self, w):
-        """w: (T,) ya da (B,T).  Doner: (B,T+1,durum) -- her adimdaki durum."""
-        tek = w.dim() == 1
-        w = w[None] if tek else w
-        s = self.s0.expand(w.shape[0], self.durum)
-        iz = [s]
-        for t in range(w.shape[1]):
-            wt = w[:, t]
-            s = torch.bmm(self.M[wt], s.unsqueeze(-1)).squeeze(-1) + self.b[wt]
-            if self.norm:
-                s = F.normalize(s, dim=-1)
-            iz.append(s)
-        S = torch.stack(iz, 1)
-        return S[0] if tek else S
+    def yol(self, w):
+        """w: (T,) ya da (B,T)  ->  ugranan konumlar.  (B,T,boyut)"""
+        return self.E[w]
 
     def dikkat(self, w):
-        """Son yuva sorar, butun yuvalar cevaplar.
-
-        Anahtar ve deger yuvanin TOKEN'INDAN degil DURUMUNDAN uretiliyor --
-        boylece ayni token iki farkli yerde ayni sey demiyor.
-        """
+        """Son yuva sorar, butun yuvalar cevaplar."""
         tek = w.dim() == 1
-        S = self.gez(w)[..., 1:, :]
-        S = S[None] if tek else S
-        q = S[:, -1] @ self.Wq
-        pu = (S @ self.Wk) @ q.unsqueeze(-1)
+        Y = self.yol(w[None] if tek else w)             # (B,T,boyut)
+        q = Y[:, -1] @ self.Wq
+        pu = (Y @ self.Wk) @ q.unsqueeze(-1)
         pu = pu.squeeze(-1) + self.hb
         ag = pu.softmax(-1) if self.pay else pu.clamp(min=0)
-        o = (ag.unsqueeze(-1) * (S @ self.Wv)).sum(1)
+        o = (ag.unsqueeze(-1) * (Y @ self.Wv)).sum(1)
         return (o[0], ag[0]) if tek else (o, ag)
 
     def oku(self, o):
@@ -129,7 +118,7 @@ class Yol(nn.Module):
         return int(torch.cdist(o.reshape(1, -1), self.E).argmin())
 
     def uret(self, w, adim):
-        """Cikti girdiye eklenir.  Uzunluk SABIT oldugu icin durma kosulu yok."""
+        """Cikti YOLA eklenir ve dongu yeni yolla tekrarlanir."""
         w, cikan = list(w), []
         for _ in range(adim):
             c = self.oku(self.dikkat(torch.tensor(w))[0])
