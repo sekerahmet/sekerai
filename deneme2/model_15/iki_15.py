@@ -46,7 +46,7 @@ def gec(m, W, opt=None):
 
 
 def kos(pay, durum=None, tohum=0, iz=False, norm=None, softmax=None,
-        wd=WD, boyut=None, cosine=True):
+        wd=WD, boyut=None, cosine=False, lr=LR):
     EG, TU = bol(pay, tohum)
     WE, WT = yig(EG), yig(TU)
     a = {k: v for k, v in dict(boyut=boyut, durum=durum, norm=norm,
@@ -55,7 +55,7 @@ def kos(pay, durum=None, tohum=0, iz=False, norm=None, softmax=None,
     opt = torch.optim.Adam(m.parameters(), lr=LR, weight_decay=wd)
     for i in range(ADIM):
         for gr in opt.param_groups:
-            gr["lr"] = lr_ver(i, ADIM, cosine=cosine)
+            gr["lr"] = lr_ver(i, ADIM, lr=lr, cosine=cosine)
         gec(m, WE, opt)
         if iz and i % 100 == 0:
             with torch.no_grad():
@@ -79,20 +79,19 @@ def dizi_puan(E):
     return t / (n * (n - 1) // 2)
 
 
-print("  lr         HAFIZA  GENELLEME   |hata|   1 fark icinde")
+print("  lr       HAFIZA  GENELLEME   |hata|   1 fark icinde")
 son = None
-for cos in (False, True):
-    r = [kos(0.5, tohum=t, cosine=cos) for t in (0, 1)]
+for lr in (0.005, 0.01, 0.02, 0.04, 0.08):
+    r = [kos(0.5, tohum=t, lr=lr) for t in (0, 1)]
     e = statistics.mean(x[1] for x in r); u = statistics.mean(x[2] for x in r)
     with torch.no_grad():
         m0, TU0 = r[0][0], r[0][3]
         w, h = yig(TU0)
         c = (-((m0.E[None] - m0.dikkat(w)[0][:, None]) ** 2).sum(-1)).argmax(-1)
         d = (c - h).float()
-    ad = "cosine -> lr/10" if cos else "SABIT 0.02    "
-    print(f"  {ad}  {e:.3f}    {u:.3f}      {float(d.abs().mean()):5.2f}"
+    print(f"  {lr:<7} {e:.3f}    {u:.3f}      {float(d.abs().mean()):5.2f}"
           f"     {float((d.abs() <= 1).float().mean()):.3f}", flush=True)
-    if cos:
+    if lr == 0.02:
         son = r[0]
 
 m, _, _, TU = son
