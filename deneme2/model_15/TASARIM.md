@@ -204,3 +204,73 @@ ETIKET   koordinatlar keyfi, butun isi cevirmeler yapar.
 
 Şu anki tablo **harita gibi** yazıldı ama model bunu henüz kullanmıyor.
 Fark ancak ADIM 2'deki okuma kuralı seçilince ortaya çıkacak.
+
+---
+
+## ADIM 2 — YOL TUTULMAZ, HESAPLANIR
+
+Kullanıcı: *"bu yol hesaplanan bir şey olacak. ben modele sadece
+istanbul diyebilirim, istanbul ankara diyebilirim veya istanbul ankara
+mersin diyebilirim."*
+
+Kod: `model_15.py`.
+
+### Sözlük
+
+Her token'a **rastgele** bir konum. Hem girdi hem okumanın hedefi —
+tek tablo.
+
+```python
+self.E = nn.Parameter(r(n, boyut))     # (8, 2)  rastgele, EGITILIR
+```
+
+> ADIM 1'deki harita koordinatları (Istanbul 1,0/1,0 ...) **düştü**.
+> Kullanıcı kararı: konumlar rastgele atanır. `sehir_15.py` artık
+> yalnız ad ve yol listesi taşıyor.
+
+### Güncelleme
+
+```python
+s_t = M[w_t] @ s_{t-1} + E[w_t]
+```
+
+İki terim: *"nerdeydim, dönüştürüldü"* + *"şimdi neredeyim"*.
+
+`M` dönme **değil**, genel matris. Gerekçe ADIM 1: 2B'de dönmeler
+değişmelidir, sırayı göremezdi.
+
+### Girdi değişken uzunlukta
+
+```python
+m.ileri(dizi(["Istanbul"]))
+m.ileri(dizi(["Istanbul", "Ankara"]))
+m.ileri(dizi(["Istanbul", "Ankara", "Mersin"]))
+```
+
+Üçü de ayrı hesap. Hiçbir yerde "yol" diye saklanan bir şey yok —
+yalnız `E`, `M`, `s0` var, ve `s` her çağrıda sıfırdan hesaplanıyor.
+
+### Parametre
+
+```
+E   8 x 2  =  16
+M   8 x 2 x 2 = 32
+s0            =  2
+              -----
+                50
+```
+
+### Eğitilmemiş çıktı
+
+```
+  Istanbul                 s = (-1,126 -1,152)   -> Istanbul
+  Istanbul Ankara          s = (-1,265 -1,761)   -> Istanbul
+  Istanbul Ankara Mersin   s = (-0,870 -3,006)   -> Bursa
+```
+
+Cevaplar rastgele — daha eğitilmedi. Gösterdiği tek şey **mekanizma**:
+önek uzadıkça durum yürüyor, ve her önekten bir cevap okunabiliyor.
+
+### ADIM 3'ün sorusu
+
+Kayıp ne. Yani `Istanbul Ankara Mersin -> Sivas` nasıl öğretilecek.
