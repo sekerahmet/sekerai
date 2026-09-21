@@ -9,7 +9,7 @@ import statistics
 from collections import Counter
 import torch
 import torch.nn.functional as F
-from model_15 import Yol
+from model_15 import Yol, LR, WD
 
 ENB = 50                    # toplananlar 0..50  ->  0+0=0 ... 50+50=100
 SAYI = 101                  # 0..100 -- SOZLUK DEGISMEZ
@@ -45,11 +45,14 @@ def gec(m, W, opt=None):
     return k.item(), float((puan.argmax(-1) == h).float().mean())
 
 
-def kos(pay, durum, tohum, iz=False, norm=True, softmax=False, wd=0.03, boyut=2):
+def kos(pay, durum=None, tohum=0, iz=False, norm=None, softmax=None,
+        wd=WD, boyut=None):
     EG, TU = bol(pay, tohum)
     WE, WT = yig(EG), yig(TU)
-    m = Yol(N, boyut=boyut, durum=durum, tohum=tohum, norm=norm, pay=softmax)
-    opt = torch.optim.Adam(m.parameters(), lr=0.02, weight_decay=wd)
+    a = {k: v for k, v in dict(boyut=boyut, durum=durum, norm=norm,
+                               pay=softmax).items() if v is not None}
+    m = Yol(N, tohum=tohum, **a)
+    opt = torch.optim.Adam(m.parameters(), lr=LR, weight_decay=wd)
     for i in range(ADIM):
         gec(m, WE, opt)
         if iz and i % 100 == 0:

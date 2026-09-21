@@ -16,17 +16,20 @@ import torch.nn.functional as F
 #   boyut   2:0,059   4:0,094   8:0,782
 #   norm    ACIK 0,782   KAPALI 0,059
 #   pay     softmax 0,289   relu 0,782
-BOYUT, DURUM, NORM, PAY = 8, 16, True, False
+BOYUT = 8            # token kac sayiyla tarif ediliyor
+NORM = True          # |s| = 1
+PAY = False          # False -> relu   True -> softmax
 
-# --- OLCULMEMIS  (tasindi, gerekcesi yok)
-#   DURUM 16   sehir doneminde 6'ydi
-#   wd 0,03    sehir verisinde olculdu, toplamada olculmedi
-#   lr 0,02    hic olculmedi
+# --- OLCULMEMIS  -- tasindi, gerekcesi YOK
+DURUM = 16           # s kac sayi.  Sehir doneminde 6'ydi.
+LR = 0.02            # adim buyuklugu.  Ilk betikte yazildi.
+WD = 0.03            # ceza.  Sehir verisinde olculdu, toplamada olculmedi.
 
 
 class Yol(nn.Module):
     def __init__(self, n, boyut=BOYUT, durum=DURUM, dur=None, tohum=0,
                  norm=NORM, pay=PAY):
+        """Ayarlar dosyanin basinda -- ayri bir ayar dosyasi YOK."""
         super().__init__()
         g = torch.Generator().manual_seed(tohum)
         r = lambda *s: torch.randn(*s, generator=g)
