@@ -35,7 +35,7 @@ with torch.no_grad():
     print("  Agirliga degil PUANA bakilir -- relu ikisini de sifirlamis")
     print("  olabilir; o zaman fark gorunmez ama mekanizma calisiyordur.")
     w = ix(4, ARTI, 7, ARTI, 4, ESIT)
-    Y = m.yol(w[None])[0]
+    Y = m.ozet(w[None])[0]
     q = Y[-1] @ m.Wq
     pu = (Y @ m.Wk) @ q + m.hb
     y = [i for i, t in enumerate(w.tolist()) if t == 4]
