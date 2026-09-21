@@ -833,3 +833,41 @@ Ilk iki adimdan iki duzeltme cikti, ikisi de §12c'ye islendi:
 
 ONCEDEN KAYDA EKLENDI: `denge` EGRISI ikincil olcu.  Tirmanirsa a5
 cokusu tutamiyor, duz kalirsa tutuyor.  `YUVA`nin surekli hali.
+
+KOSU OLDU -- cekirdek sifirlandi (00:41 basladi, 04:03'te bos bulundu).
+Hicbir sey olculmedi.  Elde kalan: epok 1 satiri (YUVA 796, denge
+46,68), zaten kaydedilmisti.  t0/ BOS.
+KOK SEBEP: kosu boyunca DISKE HICBIR SEY yazilmiyor; ilk kayit
+hucre 4'un sonunda.  CLAUDE.md kural 1'in `surdurme_t<N>.pt`
+mekanizmasi model_14'un defterine KOPYALANMAMIS.
+
+KULLANICI: "transformer bilgiyi hafizada nasil tutuyor, oradan kopya
+cekebiliriz."  Cekildi -> TASARIM 4, kagitta sinandi.
+
+BULGU: transformer FFN'i zaten anahtar-deger hafizasi ve bizim
+yapimizin AYNISI; tek fark sigma.  Onlar ELEMAN BAZINDA (ReLU),
+biz softmax.  Olu yuva cokusu YARISMANIN KENDISINDEN geliyor:
+softmaxta bir yuva gradyan almak icin 8.184 rakibi yenmeli ve
+kazanan daha cok kazaniyor -- kendini besleyen dongu.  Olculen
+imza uyuyor (8078 -> 796 bir epokta, denge 30 kat).
+
+IKI ESKI SONUCUM DUSTU, ikisi de IYI yonde:
+  "olgu basina bir yuva gerekir"  -> softmax top-1 varsayimindandi.
+     ReLU'da baglayici kisit yine PARAMETRE sayimi: M >= 1730.
+     M=8192 gerekmiyor (ilk kosuda yine de degistirmiyorum).
+  "S3 (tau yumusat) REDDEDILDI"   -> red disbukeyligie dayaniyordu.
+     ReLU'da toplam negatif olmayan, degerler SONMEZ TOPLANIR.
+
+a5 KALKIYOR: ReLU'da top-1 payi anlamsiz.  a4 butcesi AYNEN kaliyor
+ve ReLU'da |m| sinirsiz oldugu icin DAHA GEREKLI.
+
+b0 = -0,29 HESAPLANDI: <z,k> std ~1/sqrt(D) = 0,177; %5 atesleme
+icin -0,291.  b OGRENILEBILIR olmali.
+
+BEDEL: `sa` artik gradyanli, 23 adim tutuluyor -> 1,54 GB, tepe
+~3,1 GB.  KAPI 26'nin sarti ihlal ediliyor; kapi SILINMEZ, sarti
+degisir (kaza degil KASIT).  Hesap maliyeti DUSUYOR (topk + iki
+gather gidiyor).
+
+KAGITTA KANITLANAMAYAN: ReLU'nun pratikte cokmeyi ONLEYECEGI.
+Gosterilebilen sey donguNUN YAPISAL OLARAK kalktigi.

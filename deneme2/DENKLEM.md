@@ -2086,7 +2086,9 @@ tek arıza: **8.192 yuvanın 10'u kullanılıyor** (§5.1/U).
 #### Aday üç yol, kâğıtta ayrıldı
 
 ```
-S3  TAU'yu yumusat        REDDEDILDI -- kendi kendini curutuyor
+S3  TAU'yu yumusat        REDDEDILDI -- ama YALNIZ softmax icin.
+    !! Bu red `softmax`in disbukeyligine dayaniyordu; TASARIM 4
+       (ReLU) o zemini kaldiriyor ve red ORADA GECERSIZ.
     Okuma m = sum a_i V_i.  a yumusarsa m, k rastgele yonun
     ortalamasi olur ve normu ~1/sqrt(k) kuculur:
         etkin yuva  1 -> netlik %100     4 -> %50     8 -> %35
@@ -2210,6 +2212,144 @@ IKINCIL -- HUKUM VERMEZ
 
 NE YAPILMAZ
    a5 taranmaz.  M, tau, a4 oynatilmaz.  Bir kosu, bir karar.
+```
+
+### TASARIM 4 — `softmax` YERİNE `ReLU`  (21 Eylül, KOD YAZILMADI)
+
+Kullanıcı: *"transformer mimarisi bilgiyi hafızada nasıl tutuyor ya da
+çağırıyor, belki oradan kopya çekebiliriz."* Çekilebiliyor, ve çekilen
+şey Tasarım 3'ün `a5`'ini **gereksiz kılıyor**.
+
+#### Nereden kopya
+
+`[Ç]` Transformer'ın ileri-besleme katmanı `W₂·σ(W₁x)` zaten bir
+anahtar-değer hafızası: `W₁`'in satırları anahtar, `W₂`'nin sütunları
+değer, `σ(W₁x)` katsayı. Bizim `a = σ(⟨z,K⟩)`, `m = a@V` yapımızın
+birebir aynısı — **tek bir yer hariç**:
+
+```
+TRANSFORMER   sigma = ReLU/GeLU, ELEMAN BAZINDA, yarisma YOK
+BIZ           softmax(top-8), tau=0,02 -- neredeyse tek-sicak
+```
+
+#### 1) Ölü yuva dinamiği — yarışmanın kendisi sebep
+
+```
+softmax(top-8), tau=0,02
+   bir yuva gradyan almak icin 8.184 rakibi YENMELI (top %0,098)
+   kazanan anahtar z'ye yaklasir -> ayni sorgulari daha guvenli kazanir
+   KENDINI BESLEYEN DONGU
+ReLU(<z,k> + b)
+   yalnizca ESIGI asmak yeter; i'nin ateslemesi j'yi BASTIRMIYOR
+   besleme dongusu YOK
+```
+
+`[Ö]` Ölçülen imza bu okumaya uyuyor: Tasarım 3 koşusunda yuva
+`8078 → 796` (bir epok), `denge 1,54 → 46,68` (30 kat). Üstel
+görünümlü.
+
+`[Ç]` **ReLU'da da ölü yuva mümkün** (`b` çok negatif olursa) ama
+ölme sebebi **göreli değil mutlak**: yalnızca ateşlemenin zararlı
+olduğu yerde. Kendini besleyen döngü yok.
+
+`[Ç]` **SINIR:** ReLU'nun pratikte çökmeyi önleyeceğini kâğıtta
+KANITLAYAMAM. Gösterebildiğim şey döngünün **yapısal olarak**
+kalktığı. Sonuç ölçülecek.
+
+#### 2) "Olgu başına bir yuva" şartı DÜŞÜYOR
+
+```
+softmax ~top-1  cikti M vektorden BIRI        -> M >= 7.381
+                (§5.1/T'nin tavani TAM BU varsayimdan cikmisti)
+ReLU            cikti bir ALT KUMENIN toplami -> ~C(M,k) ayri cikti
+```
+
+Bağlayıcı kısıt yeniden **parametre sayımı** olur:
+
+```
+kisit 7.381 x (d-1) = 110.715
+  M=2048  K+V 131.072  1,18 kat    model 351.296
+  M=4096      262.144  2,37 kat    model 482.368
+  M=8192      524.288  4,74 kat    model 744.512
+```
+
+`M ≥ 1730` yeterli. **`M = 8192` artık gerekmiyor** — ama ilk koşuda
+değiştirmiyorum: bir koşu bir karar, ve fazla kapasite güvenli taraf.
+B1 tutarsa `M` aşağı taranır ve model küçülür.
+
+#### 3) `S3` reddim düşüyor — seyrelme `softmax`'a özgüymüş
+
+`§12c`'de "tau'yu yumuşat"ı şöyle reddetmiştim: dışbükey bileşimde
+`k` yön karışınca norm `1/√k` ile küçülür (k=8'de netlik %35).
+**ReLU'da toplam negatif olmayan ve sınırsız** — değerler sönmez,
+toplanır. Çoklu aktivasyon artık bir bedel değil, **biçim**.
+
+#### 4) Bedel — ve KAPI 26 ile çakışma
+
+```
+`sa` = (B, M) skor matrisi, adim basina 0,067 GB
+softmax top-n   `sa` NO_GRAD, yalniz (B,8) gradyanli
+ReLU            `sa` GRADYANLI, 23 adim TUTULUR
+                tutulan 1,54 GB, tepe ~3,1 GB   (L4'te 23,7 GB var)
+```
+
+`[H]` Hesap maliyeti **düşüyor**: `topk` ve iki `gather` gidiyor.
+
+`[!]` **Kapı 26'nın şartı ihlal ediliyor** (`gradyanli (B,K) tensor
+sayisi = 0`). Kapı **silinmez**: amacı bunun KAZA ile olmasını
+engellemekti, şimdi KASITLI. Şartı "≤ L−1 tane, ve tepe bellek
+aritmetiği yanında yazılı" olarak değişir.
+
+#### 5) Sapma `b` başlangıcı — hesapla, varsayılanla değil
+
+```
+<z,k>, birim vektorler, D=32  ->  std ~ 1/sqrt(D) = 0,1768
+b = 0      -> konum basina ~%50 atesler = 4.096 yuva
+b = -0,149 -> %20   (~1.638 yuva)
+b = -0,291 -> %5    (~409 yuva)
+b = -0,411 -> %1    (~81 yuva)
+```
+
+`[Ç]` **`b₀ = -0,29`** (~%5). Denge seyrekliği kâğıtta öngörülemez,
+ölçülecek. `b` öğrenilebilir olmalı — sabitlenirse seyreklik bir
+varsayım olarak kalır.
+
+#### 6) Bütçe (`a4`) değişmiyor, `a5` kalkıyor
+
+`[H]` `a4`'ün tabanı **ikame kazancından** geliyordu (0,3894) ve
+`σ`'dan bağımsız: `a4 > 0,795` aynen geçerli. `B = 0,30` de geçerli —
+bütçe `|m|` üzerinde, yani hafızanın durumu **ne kadar oynattığı**
+üzerinde; kaç yuvanın katkıda bulunduğundan bağımsız.
+
+`[H]` Ve ReLU'da `|m|` **sınırsız** (softmax'ta `≤ max|V_i|` idi),
+yani bütçe artık **daha gerekli**.
+
+`[Ç]` **`a5 = 0`.** ReLU'da "`f_i` = top-1 payı" anlamsız. Yerine
+izlenecek: **ateşleyen yuva oranı** ve **konum başına ortalama aktif
+yuva**. İkisi de ucuz ve ikisi de `YUVA`'nın doğru genellemesi.
+
+#### ÖNCEDEN KAYIT
+
+```
+DEGISEN   softmax(top-n) -> ReLU(<z,K> + b),  b ogrenilir, b0 = -0,29
+          a5 = 0.  Baska HICBIR SEY: M, a4, butce, d, capa AYNEN.
+
+ONKOSUL   ATESLEYEN yuva orani, KOSU SIRASINDA.
+          Tasarim 3'te bu oran bir epokta 8078 -> 796 dusuyordu.
+          ReLU'da DUSMEMELI (ya da cok daha yavas dusmeli).
+          Dusuyorsa B1 yapisal olarak dogru ama pratikte YETMIYOR
+          demektir ve S2 (olu yuva tohumlama) siraya gecer.
+
+BIRINCIL  BILGI tam, ek-toleransli olcu (kapi 40).
+          Taban 0,0138 (§5.1/V), sansin 21,8 kati.
+          ONCEDEN YAZILAN BEKLENTI (§5.1/U'nun okumasinin sinavi):
+          10 yuva 102 dogru verdi = yuva basina ~10 soru.  Kullanilan
+          yuva n katina cikarsa BILGI de o mertebede artmali.
+          Artmazsa yuva sayisi BAGLAYICI KISIT DEGILMIS demektir ve
+          §5.1/U'nun butun okumasi yeniden yazilir.
+
+IKINCIL   DIL BOZULMAMALI: kalip 0,7223  ek 0,9249  kapanmadi 0,0099.
+          ort |m| (butce tuttu mu), duzen, konum basina aktif yuva.
 ```
 
 ---
