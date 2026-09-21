@@ -1420,6 +1420,55 @@ W  DILIN KAPASITE SORUSU -- ILK KEZ SAYIYA BAGLANDI  (21 Eylul, kagit)
    asiyor ve k=6'daki 1,40 muhtemelen daha yuksek.  Ayni yaklasim
    daha once olgu payini %15,04 vermisti, gercek akista %26,43 cikti.
    **Mertebe dogru, ondalik degil.**  Gercek akista tekrarlanmali.
+
+X  BIRLESTIRME YOK -- capayi kaldirinca NEYI kaybettigimizi yazmamistik
+   (21 Eylul, kagit + kucuk olcum)
+
+   Kullanicinin sorusu:  *"Istanbul -> Ankara -> Mersin, Istanbul ->
+   Izmir -> Mersin, Ankara -> Izmir -> Mersin.  Ayni noktaya da
+   cikabilir, iki farkli noktaya da cikabilir -- modelden istedigimiz
+   zaten bu."*  Yani veri isterse AYIRSIN, isterse BIRLESTIRSIN.
+
+   1) AYIRMA BEDAVA, BIRLESTIRME IMKANSIZ.  Bu bir olcum degil,
+      donmenin tanimi:
+      ```
+      z != z'  =>  R z != R z'        her R, her adim, sonsuza kadar
+      ```
+      Iki FARKLI gecmis ASLA tek duruma inemez.  Model uc yolu
+      ayirabilir; ucunu ayni yere getiremez.
+
+   2) BIRLESTIREN TEK PARCAYI BUGUN KALDIRDIK.  Capa (`z <- C[k]`)
+      birebir DEGILDI: bir baslik icine dusen butun durumlari tek
+      koda indiriyordu -- mimarideki yegane sikistirma oydu.
+      §12c'de `R_CAPA = 0` yapildi (sebep: adreslerin %41,8'i
+      cakisiyordu) ve yerine bir sey KONULMADI.  Toplamsal hafiza
+      (`z + m`) sikistirmaz, sadece iter.  Geriye kalan tek
+      birlestirme yeri OKUMA: `argmax <Pi z, p_w>`.  Yani durum
+      alakasiz butun yol ayrimlarini tasimaya devam ediyor, 32
+      boyutu ozneyle paylasarak.
+
+   3) DILIN ISTEDIGI SIKISTIRMA OLCULDU:  §5.1/W, k=6'da 302.791
+      baglam -> 1.937 ayirt edilecek sinif = **156 kat**.  Bunu
+      yapan mekanizma su an mimaride Pi'nin (32->16) disinda yok,
+      ve Pi sabit bir dogrusal golge: NEYI birlestirecegini
+      veriden ogrenmiyor.
+
+   4) BENIM "ORTAK CEVIRME CAKISIR" TEZIM SINANDI, GOSTERILEMEDI.
+      3B'de, ayni sayida yol iki rejimde:
+      ```
+      A) ara sehirler FARKLI   2/3/4/5 yol -> hepsi dogru, kayip 0,00000
+      B) ayni sehirler, farkli SIRADA   2/3/4/5 yol -> hepsi dogru
+      ```
+      Fark yok.  Sebep: test fazla kolaydi -- 12 sehir x 3 sayi = 36
+      serbestlik, karsisinda 5 kisit.  **Cakisma iddiasi olculmedi**,
+      doygunluga yakin bir kurulumda tekrarlanmali.
+      (Ayni tur tahminim daha once de dustu: `R[?]` 251 ise hizmet
+      ediyor, naif kapasitenin 10 kati, ve calisiyor.)
+
+   ACILAN KAPI:  birebir OLMAYAN bir adim.  Capa geri gelmeden --
+   yani adresi bozmadan.  Aday: durum-bagimli izdusum, ya da
+   yalniz OKUMA tarafinda degil DURUM tarafinda bir buzme.
+   Henuz tasarim yok.
 ```
 
 ---
@@ -2460,6 +2509,14 @@ A1  a1/a2/a3 OLCULMEDEN secildi                A    §5.1/B, K, M
     OLGUSUZ 0,6387 etti -- iki kati. Payi: uye
     %44, kod %39 (muhasebe), duzen %17.
     Fiyat duzelmeden kapasite eklemek bosuna.
+A13 BIRLESTIRME MEKANIZMASI YOK                A    §5.1/X, W
+    Donme birebir: iki farkli gecmis ASLA tek
+    duruma inemez.  Sikistiran tek parca capaydi,
+    §12c'de kaldirildi (adresleri %41,8 cakistiriyordu)
+    ve yerine bir sey konmadi.  Dil 156 kat
+    sikistirma istiyor (§5.1/W, k=6).  Su an
+    birlestirme yalniz OKUMA'da, ve Pi ogrenilmiyor.
+    Tasarim YOK.
 A12 d TEK BASINA OYNATILMAZ -- TAKAS           A    §5.1/L
     d=8->16 dili kazandi, durum ozne
     kimligini kaybetti (%35,1 -> %11,2).
