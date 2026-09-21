@@ -21,15 +21,15 @@ import torch.nn.functional as F
 BOYUT = 16           # token kac sayiyla tarif ediliyor
 NORM = True          # |s| = 1
 PAY = False          # False -> relu   True -> softmax
-
-# --- OLCULMEMIS  -- tasindi, gerekcesi YOK
-DURUM = 16           # s kac sayi.  Sehir doneminde 6'ydi.
 LR = 0.04            # SABIT.  En keskin ayar: 0,01'de genelleme 0,025,
                      #   0,02'de 0,810 -- iki kat lr, 32 kat fark.
                      #   Dusuk lr ilk buldugu cozume (EZBER) yerlesiyor;
                      #   0,01'de hafiza 1,000 ama kural YOK.
                      #   0,08'de egitim cokuyor (hafiza 0,380).
 COSINE = False
+
+# --- OLCULMEMIS  -- tasindi, gerekcesi YOK
+DURUM = 16           # s kac sayi.  Sehir doneminde 6'ydi.
 WD = 0.03            # ceza.  Sehir verisinde olculdu, toplamada olculmedi.
 
 
