@@ -17,83 +17,106 @@ yazılmıyor.
 
 ---
 
-## ADIM 1 — İŞ NE
+## ADIM 1 — ŞEHİRLER BELLİ Mİ
 
-### Şehirler
+**Evet. Belli, sabit, ve eğitilmiyor.** Kod: `sehir_15.py`.
 
-Düzlemde sabit noktalar. Verilen iki tanesi kullanıcının, kalanı örneği
-tamamlamak için:
+Bu bir karar, varsayılan değil. Şehirlerin nerede durduğunu model
+öğrenmiyor — biz veriyoruz, ve bir daha dokunulmuyor. Model'in
+öğreneceği tek şey **yolun kendisi**.
 
-```
-     sehir        x      y
-     Istanbul    1,0    1,0        <- kullanicinin verdigi
-     Ankara      0,5    0,5        <- kullanicinin verdigi
-     Izmir      -1,0    0,3
-     Bursa       0,2    1,1
-     Mersin      0,4   -0,9
-     Sivas       1,4    0,1
-     Adana       0,9   -0,8
-```
-
-Bu noktalar **hiç değişmiyor**. Eğitilmiyor, oynatılmıyor. Dünyanın
-sabit hâli.
-
-### İş
-
-İki güzergâh. İkisi de Mersin'de bitiyor, ve devamları **farklı**:
-
-```
-   Istanbul -> Ankara -> Mersin -> ?        cevap  Sivas
-   Izmir    -> Bursa  -> Mersin -> ?        cevap  Adana
+```python
+SEHIR = {
+    "Istanbul": (1.0, 1.0),      # kullanici
+    "Ankara":   (0.5, 0.5),      # kullanici
+    "Izmir":   (-1.0, 0.3),
+    "Bursa":    (0.2, 1.1),
+    "Mersin":   (0.4, -0.9),
+    "Sivas":    (1.4, 0.1),
+    "Adana":    (0.9, -0.8),
+    "Konya":    (0.6, -0.3),
+}
+KONUM = torch.tensor([...])      # (8, 2)  buffer, Parameter DEGIL
 ```
 
-Model, son şehir aynı olmasına rağmen **nereden geldiğine bakarak**
-ayırmalı.
+Verdiğin iki değer aynen duruyor. Kalan altısı örneği tamamlamak için.
 
-Ve tersi de istenebilir — veri öyle diyorsa **birleştirmeli**:
+### Boyut 2
 
-```
-   Istanbul -> Ankara -> Mersin -> ?        cevap  Sivas
-   Konya    -> Ankara -> Mersin -> ?        cevap  Sivas      AYNI
-```
+*"iki ya da 3 boyut farketmez"* — 2 seçildi. 3'e çıkarmanın şu an bir
+gerekçesi yok; gerekçe doğarsa `BOYUT` tek yerden değişir.
 
-**İkisi de istenecek. Mimari ikisini de yapabilmeli.** Birini yapıp
-ötekini yapamamak, model_14'ün düştüğü yer (§5.1/X).
+> **Ama bir uyarı şimdiden yazılı:** 2 boyutta model_14'ün çevirmesi
+> (dönme) **sırayı göremez** — 2B dönmeler değişmelidir,
+> `R(a)R(b) = R(b)R(a)`, yani durum uğranan şehirlerin **toplamı**
+> olur, sırası değil. Sıra 3 boyutta görünür olmaya başlar. Bu,
+> ADIM 2'deki çevirme kararını doğrudan bağlıyor.
 
-### Başarı ne demek
-
-Tek bir cümle, ve ölçülebilir:
+### Yollar
 
 ```
-   Modele bir yol onekini birim birim verdikten sonra, durumdan
-   OKUNAN sehir, verinin o onekten sonra soyledigi sehir olmali.
+Istanbul -> Ankara -> Mersin -> Sivas        [0, 1, 4, 5]
+Izmir    -> Bursa  -> Mersin -> Adana        [2, 3, 4, 6]
+Konya    -> Ankara -> Mersin -> Sivas        [7, 1, 4, 5]
 ```
 
-Kısmî başarı yok: yol bitene kadar her adımda doğru olmalı, yoksa
-sonraki adımın girdisi zaten bozuk.
+Üçü birlikte işin tamamını tarif ediyor:
+
+```
+1 ve 2   son sehir AYNI (Mersin), devam FARKLI   ->  AYIRMA gerekiyor
+1 ve 3   son iki sehir AYNI, devam AYNI          ->  BIRLESTIRME gerekiyor
+```
+
+**İkisi birden istenecek.** Birini yapıp ötekini yapamamak model_14'ün
+düştüğü yer (§5.1/X).
+
+### Kodun kendi denetimi
+
+`python sehir_15.py`:
+
+```
+  ix  ad          x       y      uzunluk   aci
+   0  Istanbul     1.00    1.00    1.414     45.0
+   1  Ankara       0.50    0.50    0.707     45.0
+   2  Izmir       -1.00    0.30    1.044    163.3
+   3  Bursa        0.20    1.10    1.118     79.7
+   4  Mersin       0.40   -0.90    0.985    -66.0
+   5  Sivas        1.40    0.10    1.404      4.1
+   6  Adana        0.90   -0.80    1.204    -41.6
+   7  Konya        0.60   -0.30    0.671    -26.6
+
+DENETIM
+  en yakin iki sehir  Mersin / Adana   uzaklik 0.510
+  en yakin iki DOGRULTU  cos 1.0000   Istanbul / Ankara
+  !! UZUNLUK ATILIRSA bu iki sehir AYNI NOKTA olur.
+```
+
+**Son satır bir bulgu, süs değil.** Verdiğin iki koordinat aynı
+doğrultuda (ikisi de 45°), yalnız uzunlukları farklı: 1,414 ve 0,707.
+model_14 her durumu birim küreye bastırıp uzunluğu atıyordu — o
+mimaride İstanbul ile Ankara **ayırt edilemezdi**.
+
+```
+model_15 kurali:  OKUMA uzunlugu KULLANIR.  Durum normalize EDILMEZ.
+```
+
+Bunun bir bedeli var ve şimdiden yazılıyor: normalize etmemek, uzun
+yollarda durumun patlaması ya da sönmesi riskini geri getirir.
+model_14 normalize'i tam bu yüzden koymuştu. **ADIM 2'nin çözmesi
+gereken şey bu** — sırayı görebilen, birleştirebilen, ama 4 adımda
+patlamayan bir güncelleme.
 
 ### Adım 1'in açtığı soru
 
 Koordinatlar **harita mı, etiket mi?**
 
 ```
-HARITA olursa    yakin sehirlerin koordinatlari yakin.
-                 Model "Mersin'e yakin bir yer" diyebilir, tam
-                 bilemese de yakin dusebilir.  Ama YANLIS bir
-                 dusunceyi de ucuzlastirir: cografi yakinlik,
-                 GUZERGAH yakinligi DEGIL.
-                 (Ankara-Mersin komsu degil ama yol var;
-                  Bursa-Izmir yakin ama belki yol yok.)
-
-ETIKET olursa    koordinatlar rastgele, aralarinda anlam yok.
-                 model_14 boyle yapti (`p` rastgele ve donmus).
-                 Butun isi cevirmeler yapar.
+HARITA   yakin sehirlerin koordinatlari yakin.  Ama cografi yakinlik
+         GUZERGAH yakinligi DEGIL: Mersin ile Adana 0,510 uzakta
+         (en yakin cift) ama bizim ornekte aralarinda yol yok.
+ETIKET   koordinatlar keyfi, butun isi cevirmeler yapar.
+         model_14 boyleydi (`p` rastgele ve donmus).
 ```
 
-Kullanıcının verdiği iki sayı (`1,0 / 1,0` ve `0,5 / 0,5`) **aynı
-doğrultuda** — açıları eşit, yalnız uzunlukları farklı. Bu tek başına
-bir şey söylüyor: eğer okuma açıya bakarsa bu iki şehir **aynı nokta**.
-model_14 tam bunu yapıyordu (her şeyi birim küreye bastırıp uzunluğu
-atıyordu).
-
-**ADIM 2'de karara bağlanacak.**
+Şu anki tablo **harita gibi** yazıldı ama model bunu henüz kullanmıyor.
+Fark ancak ADIM 2'deki okuma kuralı seçilince ortaya çıkacak.
