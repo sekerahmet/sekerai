@@ -15,8 +15,11 @@ import torch.nn.functional as F
 # BELIRLENIMCI KOSU.  Cok iplikli toplama sirasi her kosuda degisiyordu;
 # ondalik farklar 400 adimda buyuyup sonucu ~0,29 / ~0,99 arasinda
 # ziplatiyordu.  Ayni tohum ayni sonucu vermeliydi, vermiyordu.
-torch.use_deterministic_algorithms(True)
-torch.set_num_threads(1)
+# GPU'da bazi cekirdekler belirlenimci degil; orada ZORLAMIYORUZ,
+# tekrarlanabilirlik CPU kosularinda gecerli.
+if not torch.cuda.is_available():
+    torch.use_deterministic_algorithms(True)
+    torch.set_num_threads(1)
 
 # --- OLCULMUS AYARLAR  (veri_15, 2601 ikili, %50 egitim, taban 0,028)
 #   boyut   2:0,051  4:0,088  8:0,841  16:0,901  32:0,878

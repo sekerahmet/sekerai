@@ -1,7 +1,9 @@
 """VERI + EGITIM + OLCUM.  Iki terimli toplama.  a + b = c,  a,b in 0..50.
 
-Butun ikililer: 51 x 51 = 2601.  Bir kismiyla egit, GORULMEMISLERI sor.
-Cevap araligi 0..100, sozlugun tamami kullaniliyor.
+Butun ikililer: 501 x 501 = 251.001.  Yarisiyla egit, otekini sor.
+Cevap araligi 0..1000, sozlugun tamami kullaniliyor.
+
+Dosya: `python veri_15.py --yaz` -> veri_15.pt  (Drive'a konacak)
   TAVAN 1.000   toplama cikarilabilir
   TABAN         en sik cevap
 """
@@ -11,8 +13,8 @@ import torch
 import torch.nn.functional as F
 from model_15 import Yol, LR, WD, lr_ver
 
-ENB = 50                    # toplananlar 0..50  ->  0+0=0 ... 50+50=100
-SAYI = 101                  # 0..100 -- SOZLUK DEGISMEZ
+ENB = 500                   # toplananlar 0..500  ->  0+0=0 ... 500+500=1000
+SAYI = 1001                 # sozluk 0..1000
 ARTI, ESIT = SAYI, SAYI + 1
 N = SAYI + 2
 AD = [str(i) for i in range(SAYI)] + ["+", "="]
@@ -66,7 +68,32 @@ def kos(pay, durum=None, tohum=0, iz=False, norm=None, softmax=None,
     return m, de, dt, TU
 
 
+def yaz(yol="veri_15.pt", pay=0.5, tohum=0):
+    """Egitim/tutulan bolmesini DOSYAYA yaz.  Colab bunu Drive'dan okur;
+    boylece her kosuda yeniden uretilmez ve bolme SABIT kalir."""
+    EG, TU = bol(pay, tohum)
+    d = dict(ENB=ENB, SAYI=SAYI, N=N, ARTI=ARTI, ESIT=ESIT,
+             pay=pay, tohum=tohum,
+             eg_w=torch.tensor([o for o, _ in EG]),
+             eg_h=torch.tensor([h for _, h in EG]),
+             tu_w=torch.tensor([o for o, _ in TU]),
+             tu_h=torch.tensor([h for _, h in TU]))
+    torch.save(d, yol)
+    return d
+
+
 if __name__ == "__main__":
+    import sys
+    if "--yaz" in sys.argv:
+        import hashlib, os
+        d = yaz()
+        iz = hashlib.sha256(d["eg_w"].numpy().tobytes()
+                            + d["tu_w"].numpy().tobytes()).hexdigest()[:16]
+        print(f"veri_15.pt yazildi   {os.path.getsize('veri_15.pt')/1e6:.1f} MB")
+        print(f"  sozluk {d['N']} token   egitim {len(d['eg_h'])}   tutulan {len(d['tu_h'])}")
+        print(f"  iz {iz}")
+        sys.exit()
+
     EG0, TU0 = bol(0.5, 0)
     print(f"ikili {len(HEPSI)}   egitim {len(EG0)}   tutulan {len(TU0)}")
     print(f"TABAN {Counter(h for _, h in TU0).most_common(1)[0][1]/len(TU0):.3f}   TAVAN 1.000")
