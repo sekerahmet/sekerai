@@ -2,11 +2,11 @@
 
   gez       s_t = normalize(M[token] @ s_{t-1} + b[token])
             ozyineleme -- yuvalar soldan saga kuruluyor
-  blok      HER yuva sorar, j <= i'ye bakar, sonuc yuvaya EKLENIR
-            katman kadar tekrarlanir -> bilesik hesap mumkun
-  agirlik   RELU -- softmax DEGIL.  1'e toplanmak zorunda olsaydi
-            cikti hep ORTALAMA olurdu, TOPLAM tasinamazdi.
-  cikti     son yuvanin durumu @ Wson -> en yakin E[token]
+  soru      SON yuva sorar:  q = s_son @ Wq
+  cevap     her yuva Wk ile puanlanir, Wv ile katki verir
+  agirlik   relu(puan + hb) -- softmax DEGIL.  1'e toplanmak zorunda
+            olsaydi cikti hep ORTALAMA olurdu, TOPLAM tasinamazdi.
+  cikti     agirlikli TOPLAM -> sozluk uzayinda nokta -> en yakin E[token]
 """
 import torch
 import torch.nn as nn
@@ -63,30 +63,24 @@ WD = 0.01            # 0,03 buyuk veride OLDURUYOR, 0,001 ezbere kaydiriyor.
 #   Gozlenen (hb eklenmeden ONCE): adim 0'da toplam agirlik 4,66;
 #   adim 2'de 10 yuvanin 9'u sifir, toplam 1,11.  "Hicbiri" hali.
 #   hb ile sinir q.x = -hb olur, genel yarim uzay.  Maliyet: 1 sayi.
-#   Her afin katmanin yanliligi vardir; anormal olan EKSIKLIKTI.
 #
-# OLCEK ve KAFA SILINDI: ikisi de kucuk fayda verdi ama koşusuz bir
-# gerekce uretilemedi.
-
-# --- OLCULMEDI
-KATMAN = 1           # kac dikkat BLOGU.  Blok yuvalari GUNCELLER (artik
-                     #   baglanti, nedensel maske), havuzlanmis ciktiyi degil:
-                     #   yuva i, yuva j'nin ZATEN HESAP YAPMIS halini gorur.
-                     #   Neden aday: onlar basamagi BUTUN veri bicimlerinde
-                     #   0,17-0,31'de takili, ve ogretmenli gecmis verilse
-                     #   bile duzelmiyor -- bilgi eksikligi, birikme degil.
+# CIKARILDI (21 Eylul): KATMAN/blok, nedensel maske, artik baglanti,
+#   Wson okuma yolu, OLCEK, KAFA.  Hicbiri olculmedi, hicbirinin kosusuz
+#   gerekcesi yoktu.  Tek ornekte katman 2 kurulur kurulmaz OLUYDU
+#   (butun agirliklar 0) ve |u|=5,8 / |s|=1, yani "artik baglanti"
+#   durumu inceltmiyor UZERINE YAZIYORDU.
+#   Once sorulacak soru: TOPLAMI hangi parca yapacak?
 
 
 class Yol(nn.Module):
     def __init__(self, n, boyut=BOYUT, durum=DURUM, tohum=0,
-                 norm=NORM, pay=PAY, katman=KATMAN):
+                 norm=NORM, pay=PAY):
         """Ayarlar dosyanin basinda -- ayri bir ayar dosyasi YOK."""
         super().__init__()
         g = torch.Generator().manual_seed(tohum)
         r = lambda *s: torch.randn(*s, generator=g)
         self.n, self.boyut, self.durum = n, boyut, durum
         self.norm, self.pay = norm, pay
-        self.katman = katman
 
         self.E = nn.Parameter(r(n, boyut))                  # sozluk: token -> konum
         self.b = nn.Parameter(r(n, durum) / durum ** 0.5)   # token -> duruma giris
@@ -94,13 +88,10 @@ class Yol(nn.Module):
                               + 0.1 * r(n, durum, durum))   # guncelleme
         self.s0 = nn.Parameter(torch.zeros(durum))
 
-        L = katman
-        self.Wq = nn.Parameter(r(L, durum, boyut) * 0.4)   # yuva -> soru
-        self.Wk = nn.Parameter(r(L, durum, boyut) * 0.4)   # yuva -> anahtar
-        self.Wv = nn.Parameter(r(L, durum, boyut) * 0.4)   # yuva -> deger
-        self.Wo = nn.Parameter(r(L, boyut, durum) * 0.4)   # geri duruma
-        self.hb = nn.Parameter(torch.zeros(L))             # YANLILIK -- hep var
-        self.Wson = nn.Parameter(r(durum, boyut) * 0.4)    # son -> sozluk
+        self.Wq = nn.Parameter(r(durum, boyut) * 0.4)   # son yuva -> soru
+        self.Wk = nn.Parameter(r(durum, boyut) * 0.4)   # yuva -> anahtar
+        self.Wv = nn.Parameter(r(durum, boyut) * 0.4)   # yuva -> deger
+        self.hb = nn.Parameter(torch.zeros(1))          # YANLILIK -- hep var
 
     def gez(self, w):
         """w: (T,) ya da (B,T).  Doner: (B,T+1,durum) -- her adimdaki durum."""
@@ -117,33 +108,20 @@ class Yol(nn.Module):
         S = torch.stack(iz, 1)
         return S[0] if tek else S
 
-    def blok(self, S, L):
-        """Bir dikkat blogu.  Yuvalari GUNCELLER, havuzlamaz.
-        Nedensel: yuva i yalniz j <= i'ye bakar (uretim sirasiyla ayni)."""
-        q, k, v = S @ self.Wq[L], S @ self.Wk[L], S @ self.Wv[L]
-        pu = q @ k.transpose(-1, -2) + self.hb[L]
-        T = S.shape[1]
-        mask = torch.ones(T, T, dtype=torch.bool, device=S.device).tril()
-        pu = pu.masked_fill(~mask, -1e9 if self.pay else -float("inf"))
-        ag = pu.softmax(-1) if self.pay else pu.clamp(min=0)
-        return (ag @ v) @ self.Wo[L], ag
-
     def dikkat(self, w):
-        """Yol sorar, yuvalar cevaplar.  katman kadar blok ust uste.
+        """Son yuva sorar, butun yuvalar cevaplar.
 
-        Anahtar ve deger yuvanin TOKEN'INDAN degil DURUMUNDAN uretiliyor.
+        Anahtar ve deger yuvanin TOKEN'INDAN degil DURUMUNDAN uretiliyor --
+        boylece ayni token iki farkli yerde ayni sey demiyor.
         """
         tek = w.dim() == 1
         S = self.gez(w)[..., 1:, :]
         S = S[None] if tek else S
-        ag = None
-        for L in range(self.katman):
-            u, ag = self.blok(S, L)
-            S = S + u
-            if self.norm:
-                S = F.normalize(S, dim=-1)
-        o = S[:, -1] @ self.Wson
-        ag = ag[:, -1, :]                        # son yuvanin agirliklari
+        q = S[:, -1] @ self.Wq
+        pu = (S @ self.Wk) @ q.unsqueeze(-1)
+        pu = pu.squeeze(-1) + self.hb
+        ag = pu.softmax(-1) if self.pay else pu.clamp(min=0)
+        o = (ag.unsqueeze(-1) * (S @ self.Wv)).sum(1)
         return (o[0], ag[0]) if tek else (o, ag)
 
     def oku(self, o):

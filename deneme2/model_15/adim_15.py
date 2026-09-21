@@ -20,21 +20,16 @@ def hesapla(a):
         for i, t in enumerate(ad):
             print(f"   s_{i:<2d} {t:<3s} {v(S[0, i])} ...")
 
-        for L in range(m.katman):
-            u, ag = m.blok(S, L)
-            print()
-            print(f"2.{L}) KATMAN {L}   son yuvanin baktigi yerler"
-                  f"  (agirlik toplami {float(ag[0, -1].sum()):.3f})")
-            for i, t in enumerate(ad):
-                a_ = float(ag[0, -1, i])
-                print(f"   yuva {i} {t:<3s} {a_:.4f}  {'#' * int(a_ * 30)}")
-            S = S + u
-            if m.norm:
-                S = torch.nn.functional.normalize(S, dim=-1)
-
-        o = S[0, -1] @ m.Wson
+        o, ag = m.dikkat(w)
         print()
-        print(f"3) CIKTI = s_son @ Wson = {v(o)} ...")
+        print(f"2) DIKKAT   son yuva neye bakiyor"
+              f"  (agirlik toplami {float(ag.sum()):.3f})")
+        for i, t in enumerate(ad):
+            a_ = float(ag[i])
+            print(f"   yuva {i} {t:<3s} {a_:.4f}  {'#' * int(max(a_, 0) * 30)}")
+
+        print()
+        print(f"3) CIKTI = sum(agirlik * deger) = {v(o)} ...")
         print(f"   en yakin token: {AD[m.oku(o)]}")
         print()
 
