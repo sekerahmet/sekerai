@@ -6,38 +6,49 @@ from sehir_15 import AD, IX, N, DUR
 from model_15 import Yol
 from veri_15 import ORNEK
 
-W = [(torch.tensor(o), h) for o, h in ORNEK]
+# 80 / 20 -- TUTULAN kume egitimde HIC gorulmuyor.
+_g = torch.Generator().manual_seed(1)
+_k = torch.randperm(len(ORNEK), generator=_g)
+_b = int(len(ORNEK) * 0.8)
+EGIT = [ORNEK[i] for i in _k[:_b]]
+TUT  = [ORNEK[i] for i in _k[_b:]]
+W  = [(torch.tensor(o), h) for o, h in EGIT]
+WT = [(torch.tensor(o), h) for o, h in TUT]
 m = Yol(N, boyut=2, durum=6, dur=IX[DUR], tohum=0)
 opt = torch.optim.Adam(m.parameters(), lr=0.02)
 
 
-def gec(egit):
+def gec(egit, kume=None):
+    kume = W if kume is None else kume
     t, d = 0.0, 0
-    for w, h in W:
+    for w, h in kume:
         o, _ = m.dikkat(w)
         puan = -((m.E - o) ** 2).sum(-1)
         t = t + F.cross_entropy(puan[None], torch.tensor([h]))
         d += int(puan.argmax()) == h
-    k = t / len(W)
+    k = t / len(kume)
     if egit:
         opt.zero_grad(); k.backward(); opt.step()
-    return k.item(), d / len(W)
+    return k.item(), d / len(kume)
 
 
-print(f"ornek {len(W)}   sans kaybi {math.log(N):.4f}")
-print("adim     kayip   dogruluk")
+print(f"egitim {len(W)}   tutulan {len(WT)}   sans kaybi {math.log(N):.4f}")
+print("adim    EGITIM kayip  dogruluk   TUTULAN kayip  dogruluk")
 for i in range(1201):
     k, d = gec(True)
     if i % 150 == 0:
-        print(f"{i:4d}   {k:.4f}    {d:.3f}")
+        with torch.no_grad():
+            kt, dt = gec(False, WT)
+        print(f"{i:4d}      {k:.4f}     {d:.3f}        {kt:.4f}     {dt:.3f}")
 
 with torch.no_grad():
     k, d = gec(False)
     print(f"\nSON   kayip {k:.4f}   dogruluk {d:.3f}")
 
     print("\nUZUNLUGA GORE DOGRULUK")
-    for L in sorted({len(o) for o, _ in ORNEK}):
-        alt = [(w, h) for (w, h), (o, _) in zip(W, ORNEK) if len(o) == L]
+    print("  (TUTULAN kume)")
+    for L in sorted({len(o) for o, _ in TUT}):
+        alt = [(w, h) for (w, h), (o, _) in zip(WT, TUT) if len(o) == L]
         dd = sum(int((-((m.E - m.dikkat(w)[0]) ** 2).sum(-1)).argmax()) == h
                  for w, h in alt)
         print(f"  girdi {L} sehir   {dd}/{len(alt)}   {dd/len(alt):.3f}")
