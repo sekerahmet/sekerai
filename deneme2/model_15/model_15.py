@@ -8,14 +8,16 @@
 """
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class Yol(nn.Module):
-    def __init__(self, n, boyut=2, durum=6, dur=None, tohum=0):
+    def __init__(self, n, boyut=2, durum=6, dur=None, tohum=0, norm=True):
         super().__init__()
         g = torch.Generator().manual_seed(tohum)
         r = lambda *s: torch.randn(*s, generator=g)
         self.n, self.boyut, self.durum, self.dur = n, boyut, durum, dur
+        self.norm = norm       # |s|=1 -- yoksa 7 adimda 49 kat siser (tani_15)
 
         self.E = nn.Parameter(r(n, boyut))                  # sozluk
         self.b = nn.Parameter(r(n, durum) / durum ** 0.5)   # token -> duruma giris
@@ -37,6 +39,8 @@ class Yol(nn.Module):
         for t in range(w.shape[1]):
             wt = w[:, t]
             s = torch.bmm(self.M[wt], s.unsqueeze(-1)).squeeze(-1) + self.b[wt]
+            if self.norm:
+                s = F.normalize(s, dim=-1)
             iz.append(s)
         S = torch.stack(iz, 1)
         return S[0] if tek else S
