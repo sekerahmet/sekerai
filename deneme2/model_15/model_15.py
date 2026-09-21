@@ -5,7 +5,11 @@ bu sayede hangi konumdan hangi konuma gittigimi bilirim."
 ve 22 Eylul: "E1 + 6 = E2 oluyor.  ana tasarimin kalbi bu."
 
   sozluk    E[token] -- her token'in KONUMU.  Girdi de bu, okumanin hedefi de.
-  yol       E[w_0], E[w_1], ... E[w_T]        yuvalar
+  yer       P[j]     -- j. yuvaya ait konum.  Yol bir LISTE, ve listedeki
+            YER bilgi tasiyor:  "_ 3 4 + _ 5 6 =" ile "_ _ 3 + 4 5 6 ="
+            ayni token TORBASINI verir ama farkli sayilardir (34+56=90,
+            3+456=459).  P olmadan model ikisini ayirt edemiyordu.
+  yol       E[w_j] + P[j]  ...                yuvalar
   soru      son yuva sorar:  q = E[w_son] @ Wq
   cevap     her yuva Wk ile puanlanir, Wv ile katki verir
   agirlik   relu(puan + hb) -- softmax DEGIL.  1'e toplanmak zorunda olsaydi
@@ -44,6 +48,8 @@ if not torch.cuda.is_available():
 #     NOT: "durum" ESKI tasarimin parametresiydi (M, b ile ozyineleme).
 #     Bu surumde ozyineleme YOK -- olcum yalniz tarihsel kayit.
 BOYUT = 16           # token kac sayiyla tarif ediliyor.  YOL bunlardan olusur.
+ENUZUN = 24          # kac yuvaya kadar yer kodu tutulur.  3+3->4 hanede
+                     #   yol en fazla 8+4 = 12 yuva; 24 rahat pay birakir.
 PAY = False          # False -> relu   True -> softmax
 LR = 0.002           # SABIT.  Cosine olculdu ve zararli.
 WD = 0.01
@@ -76,7 +82,7 @@ WD = 0.01
 
 
 class Yol(nn.Module):
-    def __init__(self, n, boyut=BOYUT, tohum=0, pay=PAY):
+    def __init__(self, n, boyut=BOYUT, tohum=0, pay=PAY, enuzun=ENUZUN):
         """Ayarlar dosyanin basinda -- ayri bir ayar dosyasi YOK."""
         super().__init__()
         g = torch.Generator().manual_seed(tohum)
@@ -93,14 +99,19 @@ class Yol(nn.Module):
         #   ONCEKI DEGER 0,4 idi ve GEREKCESI YOKTU -- elle yazilmisti.
         o = boyut ** -0.5
         self.E = nn.Parameter(r(n, boyut))              # token -> KONUM
+        self.P = nn.Parameter(r(enuzun, boyut) * o)     # yuva -> YER
+        #   P, E ile AYNI uzayda ve ona EKLENIYOR; o yuzden E'yi bastirmasin
+        #   diye o=1/sqrt(boyut) ile olcekli basliyor (|P| ~ 1, |E| ~ 4).
         self.Wq = nn.Parameter(r(boyut, boyut) * o)     # son yuva -> soru
         self.Wk = nn.Parameter(r(boyut, boyut) * o)     # yuva -> anahtar
         self.Wv = nn.Parameter(r(boyut, boyut) * o)     # yuva -> deger
         self.hb = nn.Parameter(torch.zeros(1))          # YANLILIK -- hep var
 
     def yol(self, w):
-        """w: (T,) ya da (B,T)  ->  ugranan konumlar.  (B,T,boyut)"""
-        return self.E[w]
+        """w: (T,) ya da (B,T)  ->  ugranan konum + YER.  (B,T,boyut)"""
+        T = w.shape[-1]
+        assert T <= self.P.shape[0], f"yol {T} yuva, ENUZUN {self.P.shape[0]}"
+        return self.E[w] + self.P[:T]
 
     def dikkat(self, w):
         """Son yuva sorar, butun yuvalar cevaplar."""

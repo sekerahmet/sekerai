@@ -32,13 +32,16 @@ with torch.no_grad():
     assert f2 > 1e-6, "SAYI ICINDEKI SIRA GORUNMUYOR -- yol bir TORBA"
     print("  GECTI")
 
-    print()
-    print("AYNI TOKEN IKI KEZ  ayri agirlik aliyor mu")
+    print("\nAYNI TOKEN IKI YERDE  --  ayri PUAN aliyor mu")
+    print("  (agirliga degil PUANA bakilir: relu ikisini de sifirlamis
+           olabilir, o zaman fark gorunmez ama mekanizma calisiyordur)")
     w = ix(4, ARTI, 7, ARTI, 4, ESIT)
-    _o, ag = m.dikkat(w)
+    Y = m.yol(w[None])[0]
+    q = Y[-1] @ m.Wq
+    pu = (Y @ m.Wk) @ q + m.hb
     y = [i for i, t in enumerate(w.tolist()) if t == 4]
-    for i, (t, x) in enumerate(zip(w.tolist(), ag)):
-        print(f"  yuva {i} {AD[t]:<3s} {float(x):.4f}")
-    d = abs(float(ag[y[0]] - ag[y[1]]))
+    for i, t in enumerate(w.tolist()):
+        print(f"  yuva {i} {AD[t]:<3s} puan {float(pu[i]):+8.3f}")
+    d = abs(float(pu[y[0]] - pu[y[1]]))
     assert d > 1e-6, "iki kopya AYIRT EDILMIYOR"
-    print(f"  iki '4' farki {d:.6f}   GECTI")
+    print(f"  iki '4' puan farki {d:.6f}   GECTI")
