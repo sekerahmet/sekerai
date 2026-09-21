@@ -1,6 +1,7 @@
-"""SADECE IKI TERIM.  a + b = c,  a,b in 0..20.
+"""SADECE IKI TERIM.  a + b = c,  a,b in 0..50.
 
-Butun ikililer: 21 x 21 = 441.  Bir kismiyla egit, GORULMEMISLERI sor.
+Butun ikililer: 51 x 51 = 2601.  Bir kismiyla egit, GORULMEMISLERI sor.
+Cevap araligi 0..100, sozlugun tamami kullaniliyor.
   TAVAN 1.000   toplama cikarilabilir
   TABAN         en sik cevap
 """
@@ -10,8 +11,8 @@ import torch
 import torch.nn.functional as F
 from model_15 import Yol
 
-ENB = 20
-SAYI = 2 * ENB + 1          # 0..40  cevaplar bu araliga siginiyor
+ENB = 50                    # toplananlar 0..50  ->  0+0=0 ... 50+50=100
+SAYI = 101                  # 0..100 -- SOZLUK DEGISMEZ
 ARTI, ESIT = SAYI, SAYI + 1
 N = SAYI + 2
 AD = [str(i) for i in range(SAYI)] + ["+", "="]
@@ -60,24 +61,23 @@ def kos(pay, durum, tohum, iz=False):
     return m, de, dt, TU
 
 
-EG0, TU0 = bol(0.8, 0)
+EG0, TU0 = bol(0.5, 0)
 print(f"ikili {len(HEPSI)}   egitim {len(EG0)}   tutulan {len(TU0)}")
 print(f"TABAN {Counter(h for _, h in TU0).most_common(1)[0][1]/len(TU0):.3f}   TAVAN 1.000")
 print()
 print("  egitim payi  durum   HAFIZA   GENELLEME")
 son = None
-for pay in (0.8, 0.5):
+for pay in (0.5,):
     for durum in (16,):
-        r = [kos(pay, durum, t) for t in (0, 1)]
+        r = [kos(pay, durum, t, iz=(t == 0)) for t in (0, 1)]
         e = [x[1] for x in r]; u = [x[2] for x in r]
         print(f"  {pay:^11}  {durum:5d}   {statistics.mean(e):.3f}"
               f"    {statistics.mean(u):.3f} +- {statistics.stdev(u):.3f}", flush=True)
-        if pay == 0.8:
-            son = r[0]
+        son = r[0]
 
 m, _, _, TU = son
 print()
-print("GORULMEMIS TOPLAMLAR  (egitim payi 0.8)")
+print("GORULMEMIS TOPLAMLAR  (egitim payi 0.5)")
 with torch.no_grad():
     w, h = yig(TU)
     o, _ = m.dikkat(w)
