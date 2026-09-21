@@ -45,20 +45,28 @@ if not torch.cuda.is_available():
 # --- OLCULDU, GOREV B  (rakam tokenli, 4000 adim, olcut SAYI)
 #   durum   8:0,0148   16:0,0322   32:0,0342      dirsek 16
 #   esik    kapali 0,0224 -> acik 0,1517  (dolgu "0")
-#           kapali 0,0258 -> acik 0,0356  (dolgu PAD)     EN BUYUK KAZANC
-#   kafa    1:0,0224   4:0,0329
-#   olcek   kapali 0,0224   acik 0,0284
+#           kapali 0,0258 -> acik 0,0356  (dolgu PAD)
 BOYUT = 16           # token kac sayiyla tarif ediliyor
 DURUM = 16           # s kac sayi
 NORM = True          # |s| = 1
 PAY = False          # False -> relu   True -> softmax
-ESIK = True          # relu(puan + hb), hb OGRENILEN esik
-OLCEK = False        # puan / sqrt(durum).  Kucuk fayda, ESIK ile birlikte
-                     #   olculmedi -- acmadan once olcmek gerek.
-KAFA = 1             # kac dikkat kafasi.  4 kucuk fayda verdi, ayni not.
 LR = 0.002           # SABIT.  Rakam tokenli veride 0,001/0,002/0,004
                      #   ayirt edilemedi (hepsi ~0,015).
 WD = 0.01            # 0,03 buyuk veride OLDURUYOR, 0,001 ezbere kaydiriyor.
+
+# YANLILIK (hb) ANAHTAR DEGIL, HER ZAMAN VAR.  Ispat, kosu gerekmez:
+#   ag_j = relu(q.k_j) ise bir yuva ancak q.k_j > 0 iken agirlik alir.
+#   Bu sinir ORIJINDEN GECEN bir duzlem -- secim homojen yarim uzaya
+#   hapsolur.  Anahtarlar k_j = s_j @ Wk ve s_j normalize; anahtar bulutunun
+#   orijini icermesi icin sebep yok.  Bulut tek taraftaysa secim
+#   "HEPSI" ya da "HICBIRI"ne duser, arasi yok.
+#   Gozlenen (hb eklenmeden ONCE): adim 0'da toplam agirlik 4,66;
+#   adim 2'de 10 yuvanin 9'u sifir, toplam 1,11.  "Hicbiri" hali.
+#   hb ile sinir q.x = -hb olur, genel yarim uzay.  Maliyet: 1 sayi.
+#   Her afin katmanin yanliligi vardir; anormal olan EKSIKLIKTI.
+#
+# OLCEK ve KAFA SILINDI: ikisi de kucuk fayda verdi ama koşusuz bir
+# gerekce uretilemedi.
 
 # --- OLCULMEDI
 KATMAN = 1           # kac dikkat BLOGU.  Blok yuvalari GUNCELLER (artik
@@ -71,16 +79,14 @@ KATMAN = 1           # kac dikkat BLOGU.  Blok yuvalari GUNCELLER (artik
 
 class Yol(nn.Module):
     def __init__(self, n, boyut=BOYUT, durum=DURUM, tohum=0,
-                 norm=NORM, pay=PAY, olcek=OLCEK, esik=ESIK, kafa=KAFA,
-                 katman=KATMAN):
+                 norm=NORM, pay=PAY, katman=KATMAN):
         """Ayarlar dosyanin basinda -- ayri bir ayar dosyasi YOK."""
         super().__init__()
         g = torch.Generator().manual_seed(tohum)
         r = lambda *s: torch.randn(*s, generator=g)
         self.n, self.boyut, self.durum = n, boyut, durum
         self.norm, self.pay = norm, pay
-        self.olcek = durum ** -0.5 if olcek else 1.0
-        self.kafa, self.katman = kafa, katman
+        self.katman = katman
 
         self.E = nn.Parameter(r(n, boyut))                  # sozluk: token -> konum
         self.b = nn.Parameter(r(n, durum) / durum ** 0.5)   # token -> duruma giris
@@ -89,12 +95,12 @@ class Yol(nn.Module):
         self.s0 = nn.Parameter(torch.zeros(durum))
 
         L = katman
-        self.Wq = nn.Parameter(r(L, kafa, durum, boyut) * 0.4)  # yuva -> soru
-        self.Wk = nn.Parameter(r(L, kafa, durum, boyut) * 0.4)  # yuva -> anahtar
-        self.Wv = nn.Parameter(r(L, kafa, durum, boyut) * 0.4)  # yuva -> deger
-        self.Wo = nn.Parameter(r(L, kafa, boyut, durum) * 0.4)  # geri duruma
-        self.hb = nn.Parameter(torch.zeros(L, kafa)) if esik else None
-        self.Wson = nn.Parameter(r(durum, boyut) * 0.4)         # son -> sozluk
+        self.Wq = nn.Parameter(r(L, durum, boyut) * 0.4)   # yuva -> soru
+        self.Wk = nn.Parameter(r(L, durum, boyut) * 0.4)   # yuva -> anahtar
+        self.Wv = nn.Parameter(r(L, durum, boyut) * 0.4)   # yuva -> deger
+        self.Wo = nn.Parameter(r(L, boyut, durum) * 0.4)   # geri duruma
+        self.hb = nn.Parameter(torch.zeros(L))             # YANLILIK -- hep var
+        self.Wson = nn.Parameter(r(durum, boyut) * 0.4)    # son -> sozluk
 
     def gez(self, w):
         """w: (T,) ya da (B,T).  Doner: (B,T+1,durum) -- her adimdaki durum."""
@@ -114,18 +120,13 @@ class Yol(nn.Module):
     def blok(self, S, L):
         """Bir dikkat blogu.  Yuvalari GUNCELLER, havuzlamaz.
         Nedensel: yuva i yalniz j <= i'ye bakar (uretim sirasiyla ayni)."""
-        q = torch.einsum("btd,hdc->bhtc", S, self.Wq[L])
-        k = torch.einsum("btd,hdc->bhtc", S, self.Wk[L])
-        v = torch.einsum("btd,hdc->bhtc", S, self.Wv[L])
-        pu = torch.einsum("bhic,bhjc->bhij", q, k) * self.olcek
-        if self.hb is not None:
-            pu = pu + self.hb[L][None, :, None, None]
+        q, k, v = S @ self.Wq[L], S @ self.Wk[L], S @ self.Wv[L]
+        pu = q @ k.transpose(-1, -2) + self.hb[L]
         T = S.shape[1]
         mask = torch.ones(T, T, dtype=torch.bool, device=S.device).tril()
         pu = pu.masked_fill(~mask, -1e9 if self.pay else -float("inf"))
         ag = pu.softmax(-1) if self.pay else pu.clamp(min=0)
-        u = torch.einsum("bhij,bhjc->bhic", ag, v)
-        return torch.einsum("bhic,hcd->bid", u, self.Wo[L]), ag
+        return (ag @ v) @ self.Wo[L], ag
 
     def dikkat(self, w):
         """Yol sorar, yuvalar cevaplar.  katman kadar blok ust uste.
@@ -142,7 +143,7 @@ class Yol(nn.Module):
             if self.norm:
                 S = F.normalize(S, dim=-1)
         o = S[:, -1] @ self.Wson
-        ag = ag[:, :, -1, :]                     # son yuvanin agirliklari
+        ag = ag[:, -1, :]                        # son yuvanin agirliklari
         return (o[0], ag[0]) if tek else (o, ag)
 
     def oku(self, o):

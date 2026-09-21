@@ -24,9 +24,9 @@ def hesapla(a):
             u, ag = m.blok(S, L)
             print()
             print(f"2.{L}) KATMAN {L}   son yuvanin baktigi yerler"
-                  f"  (agirlik toplami {float(ag[0, :, -1].sum()):.3f})")
+                  f"  (agirlik toplami {float(ag[0, -1].sum()):.3f})")
             for i, t in enumerate(ad):
-                a_ = float(ag[0, :, -1, i].sum())
+                a_ = float(ag[0, -1, i])
                 print(f"   yuva {i} {t:<3s} {a_:.4f}  {'#' * int(a_ * 30)}")
             S = S + u
             if m.norm:

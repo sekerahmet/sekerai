@@ -34,7 +34,6 @@ with torch.no_grad():
     print("AYNI TOKEN IKI KEZ  ayri agirlik aliyor mu")
     w = ix(4, ARTI, 7, ARTI, 4, ESIT)
     _o, ag = m.dikkat(w)
-    ag = ag.sum(0)                     # kafalar toplanir
     y = [i for i, t in enumerate(w.tolist()) if t == 4]
     for i, (t, x) in enumerate(zip(w.tolist(), ag)):
         print(f"  yuva {i} {AD[t]:<3s} {float(x):.4f}")
