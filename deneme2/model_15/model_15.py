@@ -12,12 +12,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# BELIRLENIMCI KOSU.  Cok iplikli toplama sirasi her kosuda degisiyordu;
+# ondalik farklar 400 adimda buyuyup sonucu ~0,29 / ~0,99 arasinda
+# ziplatiyordu.  Ayni tohum ayni sonucu vermeliydi, vermiyordu.
+torch.use_deterministic_algorithms(True)
+torch.set_num_threads(1)
+
 # --- OLCULMUS AYARLAR  (iki_15, 2601 ikili, %50 egitim, taban 0,028)
 #   boyut   2:0,051  4:0,088  8:0,841  16:0,901  32:0,878
 #   norm    ACIK 0,782   KAPALI 0,059
 #   pay     softmax 0,289   relu 0,782
 #   lr      0,005:0,008  0,01:0,025  0,02:0,810  0,04:0,930  0,08:0,146
 #           sabit 0,897   cosine->lr/10 0,080
+#   wd x lr  5 tohum, "kac tohumda tutulan > 0,50":
+#           0,01/0,02 1/5   0,01/0,04 5/5
+#           0,03/0,02 4/5   0,03/0,04 5/5 (ort 0,929, en kotu tohum 0,83)
 BOYUT = 16           # token kac sayiyla tarif ediliyor
 NORM = True          # |s| = 1
 PAY = False          # False -> relu   True -> softmax
@@ -28,9 +37,11 @@ LR = 0.04            # SABIT.  En keskin ayar: 0,01'de genelleme 0,025,
                      #   0,08'de egitim cokuyor (hafiza 0,380).
 COSINE = False
 
+WD = 0.03            # ceza.  lr ile birlikte calisiyor: biri zayifsa
+                     #   oteki telafi ediyor, ikisi guclu olunca 5/5.
+
 # --- OLCULMEMIS  -- tasindi, gerekcesi YOK
 DURUM = 16           # s kac sayi.  Sehir doneminde 6'ydi.
-WD = 0.03            # ceza.  Sehir verisinde olculdu, toplamada olculmedi.
 
 
 def lr_ver(i, adim, lr=LR, cosine=COSINE):

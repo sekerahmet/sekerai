@@ -79,20 +79,20 @@ def dizi_puan(E):
     return t / (n * (n - 1) // 2)
 
 
-print("  lr       HAFIZA  GENELLEME   |hata|   1 fark icinde")
+TOH = 5
+print(f"{TOH} tohum.  'BULDU' = tutulan > 0,50 (dagilim iki tepeli).")
+print()
+print("  wd      lr      BULDU   ortalama   tohumlar")
 son = None
-for lr in (0.005, 0.01, 0.02, 0.04, 0.08):
-    r = [kos(0.5, tohum=t, lr=lr) for t in (0, 1)]
-    e = statistics.mean(x[1] for x in r); u = statistics.mean(x[2] for x in r)
-    with torch.no_grad():
-        m0, TU0 = r[0][0], r[0][3]
-        w, h = yig(TU0)
-        c = (-((m0.E[None] - m0.dikkat(w)[0][:, None]) ** 2).sum(-1)).argmax(-1)
-        d = (c - h).float()
-    print(f"  {lr:<7} {e:.3f}    {u:.3f}      {float(d.abs().mean()):5.2f}"
-          f"     {float((d.abs() <= 1).float().mean()):.3f}", flush=True)
-    if lr == 0.02:
-        son = r[0]
+for wd in (0.01, 0.03):
+    for lr in (0.02, 0.04):
+        r = [kos(0.5, tohum=t, lr=lr, wd=wd) for t in range(TOH)]
+        u = [x[2] for x in r]
+        buldu = sum(1 for x in u if x > 0.5)
+        print(f"  {wd:<7} {lr:<7} {buldu}/{TOH}    {statistics.mean(u):.3f}"
+              f"      " + " ".join(f"{x:.2f}" for x in u), flush=True)
+        if wd == 0.03 and lr == 0.04:
+            son = r[0]
 
 m, _, _, TU = son
 print()
