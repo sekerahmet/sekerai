@@ -228,16 +228,32 @@ self.E = nn.Parameter(r(n, boyut))     # (8, 2)  rastgele, EGITILIR
 > Kullanıcı kararı: konumlar rastgele atanır. `sehir_15.py` artık
 > yalnız ad ve yol listesi taşıyor.
 
+### Durum AYRI boyutta
+
+Kullanıcı: *"s iki değerli olmaması lazım bu yanlış."* Doğru —
+ilk yazımda durumu sözlükle aynı boyuta zincirlemiştim.
+
+```
+sozluk   2 sayi    bir SEHRIN konumu
+durum    6 sayi    bir YOLU tasiyor
+```
+
+İkisi aynı şey değil. 6 seçildi çünkü örnekteki yol üç şehir, üçünü
+birden taşıyabilecek kadar yer: `3 x 2 = 6`. Keyfi değil, ama son da
+değil — yol uzarsa yeniden sorulur.
+
 ### Güncelleme
 
 ```python
-s_t = M[w_t] @ s_{t-1} + E[w_t]
+s_t = M[w_t] @ s_{t-1} + b[w_t]         # s: 6 sayi
+golge = s @ Q                            # 6 -> 2, okumak icin
+cevap = argmin_c |golge - E[c]|
 ```
-
-İki terim: *"nerdeydim, dönüştürüldü"* + *"şimdi neredeyim"*.
 
 `M` dönme **değil**, genel matris. Gerekçe ADIM 1: 2B'de dönmeler
 değişmelidir, sırayı göremezdi.
+
+`Q` durumu sözlük uzayına indiriyor — okuma orada yapılıyor.
 
 ### Girdi değişken uzunlukta
 
@@ -248,27 +264,31 @@ m.ileri(dizi(["Istanbul", "Ankara", "Mersin"]))
 ```
 
 Üçü de ayrı hesap. Hiçbir yerde "yol" diye saklanan bir şey yok —
-yalnız `E`, `M`, `s0` var, ve `s` her çağrıda sıfırdan hesaplanıyor.
+yalnız `E`, `b`, `M`, `Q`, `s0` var, ve `s` her çağrıda sıfırdan
+hesaplanıyor.
 
 ### Parametre
 
 ```
-E   8 x 2  =  16
-M   8 x 2 x 2 = 32
-s0            =  2
-              -----
-                50
+  E    (8, 2)      16     sozluk
+  b    (8, 6)      48     token -> duruma giris
+  M    (8, 6, 6)  288     guncelleme
+  Q    (6, 2)      12     okuma izdusumu
+  s0   (6,)         6
+                  ----
+                   370
 ```
 
 ### Eğitilmemiş çıktı
 
 ```
-  Istanbul                 s = (-1,126 -1,152)   -> Istanbul
-  Istanbul Ankara          s = (-1,265 -1,761)   -> Istanbul
-  Istanbul Ankara Mersin   s = (-0,870 -3,006)   -> Bursa
+  Istanbul                 s = [-0,55 -0,69  0,23  0,32  0,24 -0,63]  -> Sivas
+  Istanbul Ankara          s = [-0,42  0,07  0,72  0,18  0,16 -0,41]  -> Sivas
+  Istanbul Ankara Mersin   s = [-0,49  0,47  0,44  0,25  0,30  0,37]  -> Sivas
 ```
 
-Cevaplar rastgele — daha eğitilmedi. Gösterdiği tek şey **mekanizma**:
+Cevaplar rastgele — daha eğitilmedi. Üçü de Sivas diyor çünkü gölge
+henüz orijin civarında dolaşıyor. Gösterdiği tek şey **mekanizma**:
 önek uzadıkça durum yürüyor, ve her önekten bir cevap okunabiliyor.
 
 ### ADIM 3'ün sorusu
