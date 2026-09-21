@@ -1,12 +1,12 @@
 """model_15 -- YOL TUTULMAZ, HESAPLANIR.
 
-  yol       token dizisi; uzunluk serbest
   gez       s_t = normalize(M[token] @ s_{t-1} + b[token])
-  soru      YOLUN TAMAMI sorar:  q = s_son @ Wq
-  cevap     her yuva Wk ile puanlanir, Wv ile katki verir
+            ozyineleme -- yuvalar soldan saga kuruluyor
+  blok      HER yuva sorar, j <= i'ye bakar, sonuc yuvaya EKLENIR
+            katman kadar tekrarlanir -> bilesik hesap mumkun
   agirlik   RELU -- softmax DEGIL.  1'e toplanmak zorunda olsaydi
-            cikti hep ORTALAMA olurdu ve toplam TASINAMAZDI.
-  cikti     agirlikli TOPLAM -> sozluk uzayinda bir nokta -> en yakin token
+            cikti hep ORTALAMA olurdu, TOPLAM tasinamazdi.
+  cikti     son yuvanin durumu @ Wson -> en yakin E[token]
 """
 import torch
 import torch.nn as nn
@@ -21,7 +21,7 @@ if not torch.cuda.is_available():
     torch.use_deterministic_algorithms(True)
     torch.set_num_threads(1)
 
-# --- OLCULMUS AYARLAR  (veri_15, 2601 ikili, %50 egitim, taban 0,028)
+# --- OLCULMUS  |  GOREV A: cevap TEK token, sozluk 1003, 2.601 ikili
 #   boyut   2:0,051  4:0,088  8:0,841  16:0,901  32:0,878
 #   norm    ACIK 0,782   KAPALI 0,059
 #   pay     softmax 0,289   relu 0,782
@@ -33,13 +33,10 @@ if not torch.cuda.is_available():
 BOYUT = 16           # token kac sayiyla tarif ediliyor
 NORM = True          # |s| = 1
 PAY = False          # False -> relu   True -> softmax
-LR = 0.04            # SABIT.  En keskin ayar: 0,01'de genelleme 0,025,
-                     #   0,02'de 0,810 -- iki kat lr, 32 kat fark.
-                     #   Dusuk lr ilk buldugu cozume (EZBER) yerlesiyor;
-                     #   0,01'de hafiza 1,000 ama kural YOK.
-                     #   0,08'de egitim cokuyor (hafiza 0,380).
-COSINE = False
-
+LR = 0.002           # SABIT.  Cosine OLCULDU ve ZARARLI: 0,897 -> 0,080
+                     #   (ikisinde de hafiza ~1,000; cosine erken sogutup
+                     #    modeli EZBERDE birakiyor).  Bu yuzden cizelge YOK.
+                     #   lr OLCEGE bagli, asagiya bak.
 # --- OLCULMEMIS  -- dikkat cokmesine karsi uc aday (21 Eylul)
 #   Olculen ariza: rakam uretimi ilerledikce dikkat operandlardan
 #   kopuyor.  adim 0'da ilk sayinin agirligi 2,31 -- adim 2'de 0,004.
@@ -65,27 +62,21 @@ WD = 0.03            # ceza.  lr ile birlikte calisiyor: biri zayifsa
 #   SINIR: yigin da degisti (1.300 tam -> 25.000), tek degiskenli yasa DEGIL.
 #   wd 0,03 ayni geciste OLDU (kayip tam ln(1003)'te dondu); 0,01 calisiyor.
 
-# --- OLCULMEMIS  -- tasindi, gerekcesi YOK
-DURUM = 16           # s kac sayi.  Sehir doneminde 6'ydi.
-
-
-def lr_ver(i, adim, lr=LR, cosine=COSINE):
-    """Cosine inis, tabani lr/10.  cosine=False -> sabit."""
-    if not cosine:
-        return lr
-    import math
-    return lr / 10 + (lr - lr / 10) * 0.5 * (1 + math.cos(math.pi * i / adim))
+DURUM = 16           # s kac sayi.  OLCULDU (rakam tokenli, 4000 adim):
+                     #   8: SAYI 0,0148   16: 0,0322   32: 0,0342
+                     #   8->16 +0,017 ama 16->32 +0,002 (parametre 3,4 kat).
+                     #   Dirsek 16.
 
 
 class Yol(nn.Module):
-    def __init__(self, n, boyut=BOYUT, durum=DURUM, dur=None, tohum=0,
+    def __init__(self, n, boyut=BOYUT, durum=DURUM, tohum=0,
                  norm=NORM, pay=PAY, olcek=OLCEK, esik=ESIK, kafa=KAFA,
                  katman=KATMAN):
         """Ayarlar dosyanin basinda -- ayri bir ayar dosyasi YOK."""
         super().__init__()
         g = torch.Generator().manual_seed(tohum)
         r = lambda *s: torch.randn(*s, generator=g)
-        self.n, self.boyut, self.durum, self.dur = n, boyut, durum, dur
+        self.n, self.boyut, self.durum = n, boyut, durum
         self.norm, self.pay = norm, pay
         self.olcek = durum ** -0.5 if olcek else 1.0
         self.kafa, self.katman = kafa, katman
@@ -157,14 +148,11 @@ class Yol(nn.Module):
         """Sozluk uzayindaki noktaya en yakin token."""
         return int(torch.cdist(o.reshape(1, -1), self.E).argmin())
 
-    def uret(self, w, en_fazla=8):
-        """Cikti girdiye eklenir; DUR gorunce durur."""
+    def uret(self, w, adim):
+        """Cikti girdiye eklenir.  Uzunluk SABIT oldugu icin durma kosulu yok."""
         w, cikan = list(w), []
-        for _ in range(en_fazla):
-            o, _ag = self.dikkat(torch.tensor(w))
-            c = self.oku(o)
+        for _ in range(adim):
+            c = self.oku(self.dikkat(torch.tensor(w))[0])
             cikan.append(c)
             w.append(c)
-            if c == self.dur:
-                break
         return cikan, w

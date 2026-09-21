@@ -25,7 +25,7 @@ RAKAM SIRASI bir KARAR ve olcum bekliyor:
 import statistics
 import torch
 import torch.nn.functional as F
-from model_15 import Yol, LR, WD, lr_ver
+from model_15 import Yol, LR, WD
 
 ENB = 500                   # toplananlar 0..500
 HA, HC = 3, 4               # toplanan 3 hane, cevap 4 hane
