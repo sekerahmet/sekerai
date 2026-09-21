@@ -328,6 +328,37 @@ Fark **açıkça orada duruyor**, adresli. Geçişler de içinde: ardışık
 > kalmadı. Yerine "bu listeye bakıp cevabı üret" diyen bir parça
 > gerekiyor. **ADIM 3.**
 
+### AÇIK KARARLAR — çözülmedi, yazıldı
+
+**K1 — girdi ve çıktı uzunlukları BAĞIMSIZ ve SERBEST.**
+
+Kullanıcı: *"ben ilk input olarak 2 şehir 5 şehir 10 şehir verebilirim.
+ama model de çıktı olarak 2 veya 3 veya 4 şehir verebilir."*
+
+```
+girdi   2, 5, 10 ...    serbest
+cikti   2, 3, 4 ...     serbest, girdiyle ILGISI YOK
+```
+
+Şu anki `W (6x2)` bunu **karşılamıyor** — tam 3 yuva bekliyor.
+Pencere kaldırılmadan mimari tamamlanmaz.
+
+**K2 — modelin İÇ adımları kısıtlanmaz. Yalnız DURMASI söylenir.**
+
+Kullanıcı: *"ben 4 şehir verdiysem ve eğitimle 2 şehir daha eklemesi
+gerektiğini öğrendiyse ama bu arada kendi iç dünyasında ekstra 3-4
+şehre de uğraması gerekiyorsa bunu biz kısıtlayamayız, sadece bir
+yerde durması gerektiğini söyleyebiliriz."*
+
+```
+URETILEN yol      disariya verilen sehirler
+IC adimlar        modelin kendi hesabi -- SAYISI BIZE AIT DEGIL
+tek mudahale      DUR
+```
+
+Yani "kaç adımda bitir" diye bir kısıt konmaz. Tek sınır `DUR`
+token'ının öğrenilmesi.
+
 ### ADIM 3'ün sorusu
 
 Kayıp ne. Yani `Istanbul Ankara Mersin -> Sivas` nasıl öğretilecek.
