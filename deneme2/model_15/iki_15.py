@@ -45,10 +45,10 @@ def gec(m, W, opt=None):
     return k.item(), float((puan.argmax(-1) == h).float().mean())
 
 
-def kos(pay, durum, tohum, iz=False, norm=False, softmax=False, wd=0.03):
+def kos(pay, durum, tohum, iz=False, norm=True, softmax=False, wd=0.03, boyut=2):
     EG, TU = bol(pay, tohum)
     WE, WT = yig(EG), yig(TU)
-    m = Yol(N, boyut=8, durum=durum, tohum=tohum, norm=norm, pay=softmax)
+    m = Yol(N, boyut=boyut, durum=durum, tohum=tohum, norm=norm, pay=softmax)
     opt = torch.optim.Adam(m.parameters(), lr=0.02, weight_decay=wd)
     for i in range(ADIM):
         gec(m, WE, opt)
@@ -74,16 +74,19 @@ def dizi_puan(E):
     return t / (n * (n - 1) // 2)
 
 
-print("  norm  softmax   HAFIZA  GENELLEME   E-sira (0=kusursuz, 0.5=rastgele)")
+print("  boyut   HAFIZA  GENELLEME   |hata|   1 fark icinde")
 son = None
-for norm, sm in ((True, True), (False, True), (True, False), (False, False)):
-    r = [kos(0.5, 16, t, norm=norm, softmax=sm) for t in (0, 1)]
+for boyut in (2, 4, 8):
+    r = [kos(0.5, 16, t, boyut=boyut) for t in (0, 1)]
     e = statistics.mean(x[1] for x in r); u = statistics.mean(x[2] for x in r)
     with torch.no_grad():
-        d = statistics.mean(dizi_puan(x[0].E) for x in r)
-    print(f"  {'ACIK ' if norm else 'KAPALI'}  {'ACIK ' if sm else 'RELU ':<7s}  "
-          f"{e:.3f}   {u:.3f}       {d:.3f}", flush=True)
-    if not norm and not sm:
+        m0, TU0 = r[0][0], r[0][3]
+        w, h = yig(TU0)
+        c = (-((m0.E[None] - m0.dikkat(w)[0][:, None]) ** 2).sum(-1)).argmax(-1)
+        d = (c - h).float()
+    print(f"  {boyut:5d}   {e:.3f}    {u:.3f}      {float(d.abs().mean()):5.2f}"
+          f"     {float((d.abs() <= 1).float().mean()):.3f}", flush=True)
+    if boyut == 2:
         son = r[0]
 
 m, _, _, TU = son
