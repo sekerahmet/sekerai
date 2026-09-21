@@ -4,7 +4,9 @@ Uc aday, ayni sehir tablosu.  Sorulan tek sey:
   bir sehir HIC okunabilir mi -- yani onu kazandiran bir durum var mi.
 """
 import torch
-from sehir_15 import AD, KONUM, N
+from sehir_15 import AD, KONUM
+
+N = len(KONUM)          # DUR haric -- ADIM 1b yalniz sehirleri kiyasliyor
 
 ACI = torch.linspace(0, 6.2831853, 3601)[:-1]
 YON = torch.stack([ACI.cos(), ACI.sin()], 1)          # (3600, 2) birim yon
@@ -33,7 +35,7 @@ def rapor():
 
     print("  Her sehrin KAZANDIGI bolgenin payi  (0,000 = HIC okunamaz)\n")
     print("  sehir        A ic carpim   B kosinus   C en yakin")
-    for i, ad in enumerate(AD):
+    for i, ad in enumerate(AD[:N]):
         im = lambda v: "  OKUNAMAZ" if v < 1e-9 else f"{v:9.3f}"
         print(f"  {ad:<10s} {im(a[i])}  {im(c[i])}  {im(y[i])}")
 

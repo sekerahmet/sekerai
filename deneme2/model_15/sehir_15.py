@@ -19,19 +19,22 @@ SEHIR = {
     "Konya":    (0.6, -0.3),
 }
 
-AD = list(SEHIR)
+# DUR = gercek dildeki  .  :  ?  !   -- oyuncakta okunabilir olsun diye ad verildi.
+DUR = "DUR"
+
+AD = list(SEHIR) + [DUR]
 IX = {a: i for i, a in enumerate(AD)}
 N = len(AD)
 
 # (N, BOYUT) -- okumanin hedefleri.  buffer olarak tasinacak, Parameter degil.
-KONUM = torch.tensor([SEHIR[a] for a in AD], dtype=torch.float32)
+KONUM = torch.tensor(list(SEHIR.values()), dtype=torch.float32)   # (8,2) ADIM 1b kaydi
 
 # Ornek: son sehir AYNI (Mersin), devam FARKLI -> AYIRMA gerekiyor.
 #        ucuncusu devam AYNI -> BIRLESTIRME gerekiyor.
 YOL = [
-    ["Istanbul", "Ankara", "Mersin", "Sivas"],
-    ["Izmir",    "Bursa",  "Mersin", "Adana"],
-    ["Konya",    "Ankara", "Mersin", "Sivas"],
+    ["Istanbul", "Ankara", "Mersin", "Sivas", DUR],
+    ["Izmir",    "Bursa",  "Mersin", "Adana", DUR],
+    ["Konya",    "Ankara", "Mersin", "Sivas", DUR],
 ]
 
 
@@ -41,9 +44,9 @@ def dizi(yol):
 
 
 def _goster():
-    print(f"SEHIR  {N} adet, boyut {BOYUT}\n")
+    print(f"TOKEN  {N} adet ({N-1} sehir + DUR), boyut {BOYUT}\n")
     print("  ix  ad          x       y      uzunluk   aci")
-    for i, a in enumerate(AD):
+    for i, a in enumerate(SEHIR):
         x, y = SEHIR[a]
         u = (x * x + y * y) ** 0.5
         ac = torch.atan2(torch.tensor(y), torch.tensor(x)).item() * 180 / 3.14159265

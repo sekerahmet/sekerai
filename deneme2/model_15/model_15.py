@@ -43,6 +43,20 @@ class Yol(nn.Module):
         return self.E[w].reshape(-1)
 
 
+    def ekle(self, v, c):
+        """Yola bir sehir ekle -- GUZERGAH BUYUR, yenisi bu olur."""
+        return torch.cat([v, self.E[c]])
+
+    def uret(self, w, adim):
+        """Onekten baslar, her adimda bir sehir ekleyip YENI yolu okur."""
+        v = self.yol(w)
+        cikan = []
+        for _ in range(adim):
+            c = self.oku_yol(v)
+            cikan.append(c)
+            v = self.ekle(v, c)          # <- guzergah buyudu
+        return cikan, v
+
     def ileri(self, w):
         """w: (T,) token dizisi.  Doner: (T+1, durum) -- her adimdaki durum."""
         s = self.s0
