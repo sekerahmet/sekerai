@@ -769,3 +769,47 @@ SIRADAKI KARAR kapasiteyle ilgili DEGIL: hafizanin DAGILIMINI
 zorlamak ayri bir soru, ama zorlamak varlik konumlarini
 ETIKETLEMEK demek (L2) ve o deneyin kendi sorusunu zayiflatiyor
 (§5.1/N).  Karar bu takas.
+
+COK ORNEKLI IZ (21 Eylul) -- kullanici: "mimari izlenebilir, bir kac
+ornek uzerinden ORTAK sorunu bul".  4 ozne x 3 iliski izlendi, sonra
+7.381 onegin tamami.
+
+ORTAK SORUN: 8.192 yuvanin 10'u atesliyor.  12 soruda yalniz IKI
+yuva (7940, 1708), ve hangisi oldugu ne ozneyi ne iliskiyi izliyor.
+Kendi kendini besliyor: V susturulunca 660 yuva, V acikken 10.
+  kullanilan kapasite  10 x 32 = 320 sayi   kisit 110.715
+                                            345 KAT kisa
+
+HIPOTEZIM DUSTU: "toplamsal hafiza capanin yerine gecip adresi yok
+ediyor" -- yuva tavani 1,000, adres SAGLAM.  Sorun adreste degil
+ANAHTARLARDA.
+
+SEBEP BENIM KARARIM:
+  kod terimi ACIK   -> K niceleyici olur, ILISKIYI kodlar (§3.1b)
+  kod terimi KAPALI -> K'yi yayan kuvvet YOK, 10 yuva yasar
+a2=0'i olculmus gerekceyle kapatmistim; gerekce dogruydu ama
+kaldirdigim sey anahtarlari yayan TEK kuvvetti.
+
+§12c'NIN HUKMU GERI ALINDI.  "kapasite yeterli" sartini AYRILAN
+kapasite diye okumustum (8.192 >= 7.381); KULLANILAN 10 yuva.
+Sart saglanmamis, kol ACIK.
+
+IKINCI BULGU -- BUTCE DELIGI: kayip `mn`i [:, isin:] diliminden
+aliyor, yani konum 0..3 butceye GIRMIYOR.  Izde her ornekte
+|m| j=1'de 4,79, sonra 0,4.  Pencerenin %17'sine yazmak BEDAVA.
+
+TASARIM 3 YAZILDI:
+  S3 tau yumusatma  REDDEDILDI (netlik ~1/sqrt(k), butce telafi
+                    edemiyor -- gradyani yaymak cevabi bozuyor)
+  S2 olu yuva yeniden tohumlama  IKINCI SIRADA (K'yi veriye ceker,
+                    §3.1b riski acik)
+  S1 YUK DENGELEME  SECILDI -- K'yi veriye CEKMIYOR
+  a5 = 3e-5.  Ilk yazdigim 3e-4 YANLISTI: yaymaya 0,2454 odemek
+  demekti, olgunun degdigi 0,3008'in neredeyse tamami -- yeni bir
+  ikame kapisi.  Asil gerekce buyukluk degil: olu yuvanin gradyani
+  TAM SIFIR, terimin isi sifiri kirmak.
+  + butce dilimi kalkar (duzeltme, yeni degisken degil)
+
+ONCEDEN KAYIT: ONKOSUL = atesleyen ayri yuva >> 10, KOSU SIRASINDA
+izlenir.  Saglanmazsa BILGI OKUNMAZ.  Saglanirsa ve BILGI yine
+0,0000 ise kol O ZAMAN kapanir.

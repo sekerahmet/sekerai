@@ -1237,6 +1237,75 @@ T  ADRES KUSURSUZ -- TEK BOZAN `CAPA`.  §12c'nin TAVANI YANLISTI
    ATARAK degil EKLEYEREK saglanir -- §12b'nin icgudusu, dogru yerde.
    Bedeli: §3.2 (reddetme = kod uyeligi) dayanaksiz kalir; ama o
    zaten uygulanmamis (T3).
+U  8.192 YUVA AYRILDI, 10'U KULLANILDI -- ve §12c'nin HUKMU ERKENDI
+   (21 Eylul, cok ornekli iz + ileri gecis, EGITIM YOK)
+   Mimari izlenebilir oldugu icin tek ornek yerine 4 OZNE x 3 ILISKI
+   izlendi, sonra 7.381 onegin tamamina bakildi.
+
+   ```
+                            cakisik  ATESLEYEN  M=2048 M=4096 M=7381
+     hafizasiz (capa ACIK)   %41,8      166      0,172  0,333  0,588
+     12c ama V SUSTURULDU     %0,1      660      0,281  0,557  1,000
+     12c GERCEK              %17,9       10      0,289  0,558  1,000
+   ```
+   (ilk satir §5.1/T'nin "capa ACIK" satiriyla birebir: 41,8 / 0,588)
+
+   1) ADRES BOZULMAMIS.  Yuva tavani 1,000, V susturulmus haliyle AYNI.
+      "Toplamsal hafiza capanin yerine gecip adresi yok ediyor" tezi
+      SINANDI ve DUSTU.
+   2) **8.192 yuvanin 10'u atesliyor** -- 7.381 cevap konumunun
+      tamaminda. 4x3 izde 12 sorunun tamami YALNIZ IKI yuvaya dusuyor
+      (7940 ve 1708), ve hangisine dustugu ne ozneyi ne iliskiyi
+      izliyor.
+   3) KENDI KENDINI BESLIYOR: V susturulunca 660 yuva atesliyor, V
+      acikken 10. Ayni K, farkli yorunge -- yani hafizanin CIKTISI
+      durumlari birkac havzaya suruyor.
+
+   FIILEN KULLANILAN KAPASITE:
+   ```
+   ayrilan     8.192 yuva x 32 = 262.144 sayi
+   KULLANILAN     10 yuva x 32 =     320 sayi
+   kisit                          110.715
+                                  346 KAT kisa
+   ```
+
+   SEBEP -- ve bu BENIM KARARIM:
+   ```
+   `kod` terimi ACIK   -> K niceleyiciye zorlanir ve OLCULDU (§3.1b)
+                          ki ILISKIYI kodluyor, olguyu degil
+   `kod` terimi KAPALI -> K'yi YAYAN hicbir kuvvet kalmiyor;
+                          kazanan yuva kazanmaya devam ediyor
+   ```
+   `a2 = 0`'i olculmus bir gerekceyle kapattim (§12c/1). Gerekce
+   dogruydu; ama kaldirdigim sey ayni zamanda **anahtarlari yayan tek
+   kuvvetti**. Iki ucta da olgu yok, ters sebeplerle.
+
+   BUTCENIN BIR KISMI ILK ADIMDA HARCANIYOR:  izde her ornekte
+   `|m|` j=1'de 4,79, sonra 0,4.  Sebep mimaride: pencere basinda
+   `z = [p_{ilk jeton} ; 0]`, gizli yarisi TAM SIFIR -- cok ayirt
+   edici ve HER ZAMAN ayni turden bir durum. Hafiza oraya yigilmis.
+   (ISINMA o konumlari PUANLAMIYOR ama hafizanin oraya yazmasini
+   ENGELLEMIYOR -- ayri sey.)
+
+   ### §12c'NIN HUKMU GERI ALINIYOR
+
+   §12c'nin onceden kaydi uc sart sayiyordu: *adres kusursuz,
+   kapasite yeterli, fiyat dogru*. Hukmu verirken ikincisini
+   "8.192 >= 7.381" diye okudum -- yani AYRILAN kapasiteyi. Iz
+   gosterdi ki KULLANILAN kapasite 10 yuva.
+
+   **Sart saglanmamis. "Mimari kol kapandi" hukmu ERKENDI ve geri
+   aliniyor.**  Kol acik; ama yeniden kosmadan once yeni bir sart
+   yazilir ve bu sart OLCULEBILIR:
+
+   ```
+   YENI SART   hafiza yuvalarini GERCEKTEN kullanmali.
+               olcu: cevap konumunda ATESLEYEN AYRI yuva sayisi
+               taban  10     (bugun)
+               hedef  >> 10  ve kosu SIRASINDA izlenir, sonda degil
+   ```
+   Bu sart bir umut degil, egitim logunda gorunen bir sayi -- `capa`
+   oraninin izlendigi gibi izlenir.
 ```
 
 ---
@@ -1680,7 +1749,7 @@ durumundan **cevabı** getirsin diye tasarlandı, yolu yürüsün diye
 değil. Şu anki kod onu her adımda okuyor — bu kodun kendi hatası,
 tasarımın değil.
 
-## 12c. OLGU ARAMASI — TASARIM 2, KOD, ve KOŞU  (21 Eylül)
+## 12c. OLGU ARAMASI — TASARIM 2 → 3  (21 Eylül)
 
 > `[Ö]` ölçüldü · `[H]` hesap · `[Ç]` çıkarım, sınanmadı.
 > §12b **koşuldu ve düştü**. Bu tasarım onun üç ölçülen arızasına
@@ -1892,7 +1961,13 @@ yazılmaz — **tek yönlü kazanç**.
 tavan 0,30. §12b'de kaçan şey burada kilitlendi. `|V|max` 2,4 → 5,6:
 model daha çok kullanmak istiyor, fiyat bırakmıyor.
 
-**3) BİLGİ tam = 0,0000.  ÖNCEDEN KAYDA GÖRE MİMARİ KOL KAPANIR.**
+**3) BİLGİ tam = 0,0000.**  Önceden kayda göre bu, mimari kolu
+kapatıyordu — **ve ben öyle yazdım. Sonra §5.1/U o hükmü geri
+aldırdı:** kayıt "kapasite yeterli" diyordu, ben bunu AYRILAN
+kapasite (8.192 yuva) diye okudum; iz KULLANILAN kapasitenin **10
+yuva** olduğunu gösterdi. Şart sağlanmamış, kol **açık**.
+Aşağıdaki üç satır o yüzden artık "sağlandı" değil, "sağlandı
+SANILDI" diye okunur:
 Kayıtta aynen şöyle yazıyordu: *"= 0,0000 ise adres kusursuz,
 kapasite yeterli, fiyat doğru, ve HÂLÂ yok."* Üçü de sağlandı:
 
@@ -1928,12 +2003,12 @@ Kayıt bu ara bölgeyi öngörmemişti — **kayıt kusuru, sonuç değil.**
 ### NE KAPANDI, NE AÇIK KALDI
 
 ```
-KAPANDI  "olgu aramasini KAPASITE + ADRES + FIYAT ile cozeriz" kolu.
-         Ucu de saglandi, BILGI yine 0,0000.
-         Yeniden acilmasi icin gereken kanit (§5.1/O olcutu):
-         "model varlik konumlarinda sans ustune cikabiliyor ama
-         cikmiyor" gosterilmeli.  Bu kosu bunun TERSINI gosterdi --
-         model oraya hic gitmiyor.
+ACIK (ilkin KAPANDI yazildi, §5.1/U geri aldirdi)
+         "olgu aramasini KAPASITE + ADRES + FIYAT ile cozeriz" kolu.
+         Adres ve fiyat saglandi; KAPASITE saglanmadi -- 8.192 yuva
+         ayrildi, 10'u kullanildi (§5.1/U).  Kol yeniden kosulabilir
+         ama ONCE yuva kullanimini yayan bir sey gerekiyor, ve o
+         sart kosu SIRASINDA olculur.
 
 ACIK     Hafizanin DAGILIMINI zorlamak AYRI bir soru ve bu kosu onu
          sinamadi.  Ama sinamak icin varlik konumlarini ETIKETLEMEK
@@ -1944,6 +2019,113 @@ ACIK     Hafizanin DAGILIMINI zorlamak AYRI bir soru ve bu kosu onu
 YAN      DIL artik cozulmus sayilir.  Bundan sonraki her kol, dili
          BOZMADIGINI gostermek zorunda -- yeni bir taban var:
          kalip 0,7223  ek 0,9249  kapanmadi 0,0099.
+```
+
+### TASARIM 3 — YUVALAR YAYILSIN  (21 Eylül, KOD YAZILMADI)
+
+§12c'nin mekanizması duruyor ve dili çözdü; değişen tek şey, ölçülen
+tek arıza: **8.192 yuvanın 10'u kullanılıyor** (§5.1/U).
+
+#### Aday üç yol, kâğıtta ayrıldı
+
+```
+S3  TAU'yu yumusat        REDDEDILDI -- kendi kendini curutuyor
+    Okuma m = sum a_i V_i.  a yumusarsa m, k rastgele yonun
+    ortalamasi olur ve normu ~1/sqrt(k) kuculur:
+        etkin yuva  1 -> netlik %100     4 -> %50     8 -> %35
+    Ustelik |m| zaten BUTCEYLE 0,30'a bagli, telafi edemiyor.
+    Gradyani yaymak icin CEVABI bozmak gerekiyor.
+
+S2  Olu yuvayi yeniden tohumla  (VQ-VAE'nin standart hilesi)
+    Agirlik gerektirmiyor, dogrudan olcuLen arizayi hedefliyor.
+    AMA K'yi VERIYE cekiyor -- olu olanlari da olsa. Ve §3.1b
+    olctu ki veriye cekilen K, olguyu degil ILISKIYI kodluyor.
+    Riski ACIK, ikinci sirada.
+
+S1  YUK DENGELEME  (mixture-of-experts'in standart terimi)  <- SECILEN
+        L_denge = M * sum_i f_i * P_i
+        f_i  yuva i'ye giden konum PAYI
+        P_i  yuva i'nin ortalama softmax OLASILIGI
+    Tekduze kullanimda 1, tek yuvada M.
+    !! K'yi VERIYE CEKMIYOR.  "hepsini kullan" diyor, "verinin
+       ustune otur" demiyor -- §3.1b'nin arizasini TASIMIYOR.
+       S2'den ayiran sey bu.
+```
+
+#### `a5` — ve ilk hesabımın hatası
+
+```
+L_denge   bugun (10 yuva)  819,2      hedef (olgu basina bir)  1,110
+```
+
+İlk yazdığım `a5 = 3e-4`, **yaymaya 0,2454 ödüyordu** — olgunun
+değdiği 0,3008'in (§5.1/M) neredeyse tamamı. O ağırlıkla model
+olguyu öğrenmeden yuvaları rastgele dağıtıp parayı alırdı; §12b'nin
+ikame tuzağının aynısı, yeni bir kapıdan.
+
+```
+yayma odulu olgunun  %30'u olsun  ->  a5 <= 1,10e-04
+                     %10'u                3,68e-05
+                      %5'i                1,84e-05
+SECIM   a5 = 3e-5   ->  odul 0,0245  = olgunun %8'i
+```
+
+`[Ç]` **Asıl gerekçe büyüklük değil.** Ölü yuvanın gradyanı **tam
+sıfır** — softmax'ın top-8'ine hiç girmiyor. Terimin işi bir ihaleyi
+kazanmak değil, **sıfırı kırmak**. Küçük olması yeter; büyük olması
+tehlikeli. Bu yüzden üst sınır hesaplandı, alt sınır hesaplanmadı —
+ve bu bir seçim, ölçüm değil.
+
+#### Bütçe deliği — izde görülen `|m| = 4,79`
+
+```
+kayip:  mn = y["mn"][:, isin:].mean()
+```
+
+Konum 0..3 bütçeye **hiç girmiyor**. ISINMA onları `üye`den dışlıyor
+(önek çöp, §5.2) ama hafızanın oraya **yazmasını** engellemiyor —
+oraya yazmak bedava. Ve o konumlardan biri her pencerede
+`z = [p ; 0]`, yani gizli yarısı tam sıfır: çok ayırt edici, hep aynı
+türden bir durum. İzde her örnekte `|m|` j=1'de **4,79**, sonra 0,4.
+
+```
+DUZELTME   butce TUM konumlara bakar, dilim YOK.
+           Pencerenin %17'si (4/24) butce disindaydi.
+BEKLENEN   olculen 0,3086 ortalamasi YUKSELIR (disarida kalan buyuk
+           degerler iceri girince), yani model ayni butceyle daha AZ
+           yazabilir hale gelir.
+```
+
+`[Ç]` Bu bir **düzeltme**, yeni bir değişken değil: mevcut
+mekanizmanın kapsaması gereken yeri kapsaması. Yine de koşuya iki
+şey birden giriyor ve bu yazılır.
+
+#### ÖNCEDEN KAYIT
+
+```
+DEGISEN   a5 * L_denge eklenir (a5 = 3e-5);  butce dilimi kalkar.
+          Baska HICBIR SEY degismez -- M, tau, a4, d, capa aynen.
+
+ONKOSUL -- HUKUMDEN ONCE, ve KOSU SIRASINDA izlenir
+   ATESLEYEN AYRI YUVA sayisi.  taban 10 (§5.1/U).
+   >> 10 olmazsa mekanizma calismamistir ve BILGI okunmaz;
+   kosu yayma sorununu cozmemis demektir, olgu sorusuna
+   cevap VERMEZ.
+
+BIRINCIL  BILGI tam  (onkosul saglanirsa)
+   > 0,0000  -> yayma yetiyormus, kol acik kalir
+   = 0,0000  -> adres kusursuz + kapasite GERCEKTEN kullanilmis +
+                fiyat dogru + butce tuttu, ve hala yok.
+                ISTE O ZAMAN kol kapanir.  §12c'de erken
+                kapatmistim (§5.1/U); bu kez sart olculecek.
+
+IKINCIL -- HUKUM VERMEZ
+   DIL BOZULMAMALI.  Yeni taban: kalip 0,7223  ek 0,9249
+   kapanmadi 0,0099.  Bozulursa TAKAS diye yazilir.
+   ort |m| (butce yeni tanimla), duzen, |m| varlik/diger orani.
+
+NE YAPILMAZ
+   a5 taranmaz.  M, tau, a4 oynatilmaz.  Bir kosu, bir karar.
 ```
 
 ---
