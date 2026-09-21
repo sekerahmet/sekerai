@@ -16,14 +16,27 @@ import torch.nn.functional as F
 #   boyut   2:0,051  4:0,088  8:0,841  16:0,901  32:0,878
 #   norm    ACIK 0,782   KAPALI 0,059
 #   pay     softmax 0,289   relu 0,782
+#   lr      sabit 0,897   cosine 0,080
 BOYUT = 16           # token kac sayiyla tarif ediliyor
 NORM = True          # |s| = 1
 PAY = False          # False -> relu   True -> softmax
 
 # --- OLCULMEMIS  -- tasindi, gerekcesi YOK
 DURUM = 16           # s kac sayi.  Sehir doneminde 6'ydi.
-LR = 0.02            # adim buyuklugu.  Ilk betikte yazildi.
+LR = 0.02            # SABIT -- olculdu: cosine ZARARLI
+                     #   sabit 0,897   cosine->lr/10 0,080
+                     #   ikisinde de hafiza ~1,000; cosine ezberde
+                     #   kalip kurali bulamiyor (erken sogutuyor)
+COSINE = False
 WD = 0.03            # ceza.  Sehir verisinde olculdu, toplamada olculmedi.
+
+
+def lr_ver(i, adim, lr=LR, cosine=COSINE):
+    """Cosine inis, tabani lr/10.  cosine=False -> sabit."""
+    if not cosine:
+        return lr
+    import math
+    return lr / 10 + (lr - lr / 10) * 0.5 * (1 + math.cos(math.pi * i / adim))
 
 
 class Yol(nn.Module):

@@ -9,7 +9,7 @@ import statistics
 from collections import Counter
 import torch
 import torch.nn.functional as F
-from model_15 import Yol, LR, WD
+from model_15 import Yol, LR, WD, lr_ver
 
 ENB = 50                    # toplananlar 0..50  ->  0+0=0 ... 50+50=100
 SAYI = 101                  # 0..100 -- SOZLUK DEGISMEZ
@@ -46,7 +46,7 @@ def gec(m, W, opt=None):
 
 
 def kos(pay, durum=None, tohum=0, iz=False, norm=None, softmax=None,
-        wd=WD, boyut=None):
+        wd=WD, boyut=None, cosine=True):
     EG, TU = bol(pay, tohum)
     WE, WT = yig(EG), yig(TU)
     a = {k: v for k, v in dict(boyut=boyut, durum=durum, norm=norm,
@@ -54,6 +54,8 @@ def kos(pay, durum=None, tohum=0, iz=False, norm=None, softmax=None,
     m = Yol(N, tohum=tohum, **a)
     opt = torch.optim.Adam(m.parameters(), lr=LR, weight_decay=wd)
     for i in range(ADIM):
+        for gr in opt.param_groups:
+            gr["lr"] = lr_ver(i, ADIM, cosine=cosine)
         gec(m, WE, opt)
         if iz and i % 100 == 0:
             with torch.no_grad():
@@ -77,19 +79,20 @@ def dizi_puan(E):
     return t / (n * (n - 1) // 2)
 
 
-print("  boyut   HAFIZA  GENELLEME   |hata|   1 fark icinde")
+print("  lr         HAFIZA  GENELLEME   |hata|   1 fark icinde")
 son = None
-for boyut in (8, 16, 32):
-    r = [kos(0.5, 16, t, boyut=boyut) for t in (0, 1)]
+for cos in (False, True):
+    r = [kos(0.5, tohum=t, cosine=cos) for t in (0, 1)]
     e = statistics.mean(x[1] for x in r); u = statistics.mean(x[2] for x in r)
     with torch.no_grad():
         m0, TU0 = r[0][0], r[0][3]
         w, h = yig(TU0)
         c = (-((m0.E[None] - m0.dikkat(w)[0][:, None]) ** 2).sum(-1)).argmax(-1)
         d = (c - h).float()
-    print(f"  {boyut:5d}   {e:.3f}    {u:.3f}      {float(d.abs().mean()):5.2f}"
+    ad = "cosine -> lr/10" if cos else "SABIT 0.02    "
+    print(f"  {ad}  {e:.3f}    {u:.3f}      {float(d.abs().mean()):5.2f}"
           f"     {float((d.abs() <= 1).float().mean()):.3f}", flush=True)
-    if boyut == 16:
+    if cos:
         son = r[0]
 
 m, _, _, TU = son
