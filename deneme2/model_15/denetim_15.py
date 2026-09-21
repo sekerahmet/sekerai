@@ -1,54 +1,42 @@
 """Yazdigimiz sey calisiyor mu.  Egitim YOK -- yalniz mekanizma."""
 import torch
-from sehir_15 import AD, IX, N, DUR, dizi
+from toplama_15 import AD, N, ARTI, ESIT
 from model_15 import Yol
 
-m = Yol(N, boyut=2, durum=6, dur=IX[DUR], tohum=0)
-p = dict(m.named_parameters())
+ix = lambda *a: torch.tensor(list(a))
+m = Yol(N, boyut=2, durum=16, tohum=0)
+
 print("PARAMETRE")
+p = dict(m.named_parameters())
 for ad, t in p.items():
-    print(f"  {ad:<3s} {str(tuple(t.shape)):<12s} {t.numel():4d}")
+    print(f"  {ad:<3s} {str(tuple(t.shape)):<14s} {t.numel():5d}")
 print(f"  toplam {sum(t.numel() for t in p.values())}")
 
 with torch.no_grad():
     print()
-    print("UZUNLUK SERBEST -- ayni matrislerle 1, 3, 6 sehir")
-    for onek in (["Mersin"], ["Istanbul", "Ankara", "Mersin"],
-                 ["Izmir", "Bursa", "Konya", "Ankara", "Sivas", "Mersin"]):
-        o, ag = m.dikkat(dizi(onek))
-        print(f"  {len(onek)} sehir -> {len(ag)} agirlik, cikti 2 sayi"
-              f"   ({o[0]:+.3f} {o[1]:+.3f}) -> {AD[m.oku(o)]}")
+    print("UZUNLUK SERBEST -- ayni matrislerle farkli uzunluklar")
+    for a in ([3, 5], [3, 5, 9], [3, 5, 9, 2, 7]):
+        w = ix(a[0], *[t for x in a[1:] for t in (ARTI, x)], ESIT)
+        o, ag = m.dikkat(w)
+        print(f"  {' '.join(AD[i] for i in w.tolist()):<26s}"
+              f" {len(w)} token -> {len(ag)} agirlik -> {AD[m.oku(o)]}")
 
     print()
-    print("OZYINELEME -- cikti girdiye ekleniyor mu")
-    onek = ["Istanbul", "Ankara", "Mersin"]
-    w = dizi(onek).tolist()
-    for _ in range(3):
-        o, ag = m.dikkat(torch.tensor(w))
-        c = m.oku(o)
-        onceki = list(w)
-        w.append(c)
-        assert w[:-1] == onceki, "eski yol bozuldu"
-        assert len(ag) == len(onceki), "agirlik sayisi yol uzunluguna esit degil"
-        print(f"  {' '.join(AD[i] for i in onceki):<40s} -> {AD[c]}")
+    print("SIRA GORUNUYOR MU  (toplamada cevap ayni ama DURUM ayrilmali)")
+    a = ix(3, ARTI, 5, ARTI, 9, ESIT)
+    b = ix(9, ARTI, 5, ARTI, 3, ESIT)
+    f = (m.dikkat(a)[0] - m.dikkat(b)[0]).norm()
+    print(f"  3+5+9= / 9+5+3=   cikti farki {f:.4f}")
+    assert f > 1e-6, "SIRA KOR"
+    print("  GECTI")
+
     print()
-    print("  eski yol korunuyor            GECTI")
-    print("  agirlik sayisi = yol uzunlugu GECTI")
-
-    print("\nSIRA GORUNUYOR MU")
-    for a, b in ((["Istanbul", "Ankara", "Mersin"], ["Mersin", "Ankara", "Istanbul"]),):
-        oa, _ = m.dikkat(dizi(a)); ob, _ = m.dikkat(dizi(b))
-        f = (oa - ob).norm()
-        print(f"  {' '.join(a)} / ters   fark {f:.4f}")
-        assert f > 1e-6, "SIRA KOR"
-    print("  ayni sehirler ters sirada FARKLI  GECTI")
-
-    print("\nAYNI SEHIR IKI KEZ")
-    yol = ["Ankara", "Mersin", "Ankara", "Sivas"]
-    _o, ag = m.dikkat(dizi(yol))
-    i0, i2 = [i for i, a in enumerate(yol) if a == "Ankara"]
-    f = abs(float(ag[i0] - ag[i2]))
-    for i, (a, x) in enumerate(zip(yol, ag)):
-        print(f"  yuva {i} {a:<10s} {float(x):.4f}")
-    assert f > 1e-6, "iki kopya AYIRT EDILMIYOR"
-    print(f"  iki Ankara farki {f:.6f}   GECTI")
+    print("AYNI TOKEN IKI KEZ  ayri agirlik aliyor mu")
+    w = ix(4, ARTI, 7, ARTI, 4, ESIT)
+    _o, ag = m.dikkat(w)
+    y = [i for i, t in enumerate(w.tolist()) if t == 4]
+    for i, (t, x) in enumerate(zip(w.tolist(), ag)):
+        print(f"  yuva {i} {AD[t]:<3s} {float(x):.4f}")
+    d = abs(float(ag[y[0]] - ag[y[1]]))
+    assert d > 1e-6, "iki kopya AYIRT EDILMIYOR"
+    print(f"  iki '4' farki {d:.6f}   GECTI")

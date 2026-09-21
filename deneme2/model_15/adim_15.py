@@ -1,69 +1,47 @@
-"""Bir yolun TAM hesabi -- her ara sayi basiliyor."""
+"""Bir islemin TAM hesabi -- her ara sayi basiliyor."""
 import torch
-from sehir_15 import AD, IX, N, DUR, dizi
+from toplama_15 import AD, N, ARTI, ESIT
 from model_15 import Yol
 
-m = Yol(N, boyut=2, durum=6, dur=IX[DUR], tohum=0)
-v6 = lambda t: "[" + " ".join(f"{x:+6.2f}" for x in t) + "]"
+m = Yol(N, boyut=2, durum=16, tohum=0)
+v = lambda t: "[" + " ".join(f"{x:+5.2f}" for x in t) + "]"
 
 
-def hesapla(onek):
-    w = dizi(onek)
-    print("=" * 72)
-    print("YOL  " + " ".join(onek))
-    print("=" * 72)
+def hesapla(a):
+    w = torch.tensor([a[0]] + [t for x in a[1:] for t in (ARTI, x)] + [ESIT])
+    ad = [AD[i] for i in w.tolist()]
+    print("=" * 74)
+    print("ISLEM  " + " ".join(ad) + f"      dogru {sum(a)}")
+    print("=" * 74)
 
     S = m.gez(w)
-    print("1) YOLU GEZ   s_t = M[sehir] @ s_{t-1} + b[sehir]")
-    print(f"   s_0  {v6(S[0])}   baslangic")
-    for i, a in enumerate(onek):
-        print(f"   s_{i+1}  {v6(S[i+1])}   {a} uygulandi")
+    print("1) GEZ   s_t = M[token] @ s_{t-1} + b[token]   (norm ACIK)")
+    for i in range(len(S)):
+        et = "baslangic" if i == 0 else ad[i - 1]
+        print(f"   s_{i:<2d} {et:<9s} {v(S[i][:8])} ...")
     S = S[1:]
 
     q = S[-1] @ m.Wq
     print()
-    print(f"2) SORU   q = s_son @ Wq  =  ({q[0]:+.3f} {q[1]:+.3f})")
+    print(f"2) SORU   q = s_son @ Wq = ({q[0]:+.3f} {q[1]:+.3f})")
 
-    K = S @ m.Wk
-    puan = K @ q
-    print()
-    print("3) ANAHTAR ve PUAN   k_i = s_i @ Wk    puan_i = k_i . q")
-    for i, a in enumerate(onek):
-        print(f"   yuva {i} {a:<10s} k=({K[i,0]:+.3f} {K[i,1]:+.3f})"
-              f"   puan = ({K[i,0]:+.3f})({q[0]:+.3f}) + ({K[i,1]:+.3f})({q[1]:+.3f})"
-              f" = {puan[i]:+.3f}")
-
+    puan = (S @ m.Wk) @ q
     ag = puan.softmax(0)
     print()
-    print("4) AGIRLIK   softmax(puan)")
-    for i, a in enumerate(onek):
-        print(f"   yuva {i} {a:<10s} {ag[i]:.4f}  {'#' * int(ag[i] * 50)}")
+    print("3) PUAN ve AGIRLIK")
+    for i, t in enumerate(ad):
+        print(f"   yuva {i} {t:<3s} puan {puan[i]:+7.3f}   agirlik {ag[i]:.4f}"
+              f"  {'#' * int(ag[i] * 40)}")
 
     V = S @ m.Wv
-    print()
-    print("5) DEGER   v_i = s_i @ Wv")
-    for i, a in enumerate(onek):
-        print(f"   yuva {i} {a:<10s} ({V[i,0]:+.3f} {V[i,1]:+.3f})")
-
     o = ag @ V
     print()
-    print("6) CIKTI = sum agirlik_i * v_i")
-    print("   " + "  +  ".join(f"{ag[i]:.3f}*({V[i,0]:+.3f} {V[i,1]:+.3f})"
-                               for i in range(len(onek))))
-    print(f"   = ({o[0]:+.3f} {o[1]:+.3f})    en yakin token: {AD[m.oku(o)]}")
+    print(f"4) CIKTI = sum agirlik_i * v_i  =  ({o[0]:+.3f} {o[1]:+.3f})")
+    print(f"   en yakin token: {AD[m.oku(o)]}")
     print()
-    return o
 
 
-with torch.no_grad():
-    a = hesapla(["Istanbul", "Ankara", "Mersin"])
-    b = hesapla(["Mersin", "Ankara", "Istanbul"])
-    print(f">>> IKISININ FARKI  {(a - b).norm():.4f}")
-    print()
-    c = hesapla(["Istanbul", "Ankara", "Mersin", "Sivas"])
-    print(">>> 4. SEHIR GELINCE NE DEGISTI")
-    print("    s_4 hesaplandi (M[Sivas] @ s_3 + b[Sivas])")
-    print("    soru q ARTIK s_4'ten geliyor -- tamamen degisti")
-    print("    yuva sayisi 3 -> 4, yani 4 anahtar / 4 puan / 4 agirlik")
-    print("    ilk uc yuvanin k ve v DEGERLERI AYNI kaldi (s_1..s_3 degismedi)")
-    print("    ama AGIRLIKLARI degisti, cunku soru degisti")
+if __name__ == "__main__":
+    with torch.no_grad():
+        hesapla([3, 5])
+        hesapla([3, 5, 9])
