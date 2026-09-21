@@ -244,7 +244,10 @@ class Yol(nn.Module):
         return 1.0 - 0.5 * r * r if r > 0 else 2.0
 
     def adim(self, z, w, Rd, C, Ct, esik):
-        """TEK ADIM:  zp -> capa -> hafiza.  -> (z, zp, vur, k, m)
+        """TEK ADIM:  zp -> capa -> hafiza.  -> (z, zp, vur, k, m, hf)
+
+        `hf` = (kn, a), yuk dengeleme teriminin ihtiyaci (§12c/S1);
+        hafiza kapaliysa None.
 
         !! EGITIM ve URETIM BU AYNI KODU cagirir.  Ayri yazilmislardi
         ve uretim tarafi hafizayi HIC okumuyordu; §12b kosusu boylece
@@ -264,14 +267,14 @@ class Yol(nn.Module):
             kn = sa.topk(self.haf_n, 1).indices if V is not None else None
         z = torch.where(vur[:, None], C[k], zp)
         if V is None:
-            return z, zp, vur, k, None
+            return z, zp, vur, k, None, None
         # OLGU HAFIZASI -- EKLEMELI, ve sorgu `zp`den (capa ONCESI):
         # capa tetiklendiginde z artik c_k ve ozne kimligi orada YOK
         # (olculdu: capa tetikleyen orneklerde 1,10 kat, otekilerde
         # 11,34 kat sans ustu).
         a = torch.softmax((C[kn] * zp[:, None]).sum(-1) / self.haf_tau, 1)
         m = (a[..., None] * F.embedding(kn, V)).sum(1)
-        return F.normalize(z + m, dim=-1), zp, vur, k, m
+        return F.normalize(z + m, dim=-1), zp, vur, k, m, (kn, a)
 
     def yol(self, X: torch.Tensor, r: float = 0.25) -> dict:
         """X (B, L) -> sozluk:  z, zp, t, vur, k, mn   (hepsi (B,L,...))
@@ -313,15 +316,19 @@ class Yol(nn.Module):
         sf_b = torch.zeros(B, dtype=torch.bool, device=X.device)
         sf_l = torch.zeros(B, dtype=torch.long, device=X.device)
         sf_f = torch.zeros(B, device=X.device)
+        sf_n = torch.zeros(B, self.haf_n, device=X.device)
+        sf_i = torch.zeros(B, self.haf_n, dtype=torch.long, device=X.device)
         o = {"z": [z], "zp": [z], "t": [sf_l], "vur": [sf_b], "k": [sf_l],
-             "mn": [sf_f]}
+             "mn": [sf_f], "kn": [sf_i], "ha": [sf_n]}
         t = sf_l
         for j in range(1, L):
-            z, zp, vur, k, m = self.adim(z, X[:, j - 1], Rd, C, Ct, esik)
+            z, zp, vur, k, m, hf = self.adim(z, X[:, j - 1], Rd, C, Ct, esik)
             t = (t + 1).masked_fill(vur, 0)
             for ad, u in (("z", z), ("zp", zp), ("t", t), ("vur", vur),
                           ("k", k),
-                          ("mn", sf_f if m is None else m.norm(dim=-1))):
+                          ("mn", sf_f if m is None else m.norm(dim=-1)),
+                          ("kn", sf_i if hf is None else hf[0]),
+                          ("ha", sf_n if hf is None else hf[1])):
                 o[ad].append(u)
         return {a: torch.stack(u, 1) for a, u in o.items()}
 
@@ -380,7 +387,7 @@ class Yol(nn.Module):
 
     # ---------------- kayip ----------------
     def kayip(self, X, a1=1.0, a2=1.0, a3=1e-4, delta=0.4, beta=0.25,
-              r=0.25, isin=4, a4=0.0, haf_b=0.30):
+              r=0.25, isin=4, a4=0.0, haf_b=0.30, a5=0.0):
         """YOLUN TAMAMINA bakar -- next token YOK.  DENKLEM.md §5.
 
         a1..a4 OLCULMEDEN secilmez; buradakiler baslangic.
@@ -389,6 +396,20 @@ class Yol(nn.Module):
         sinandi ve araligi BOS cikti: ikameyi engellemek a4 > 0,639,
         amaclanan kullanimi birakmak a4 < 0,410.  Mentese ile ikisi
         AYRISIYOR -- butcenin altinda BEDAVA, ustunde kareyle artiyor.
+
+        `a5`  YUK DENGELEME (§12c/S1).  OLCULDU: 8.192 yuvanin 10'u
+        atesliyor (§5.1/U) ve olu yuvanin gradyani TAM SIFIR -- top-n
+        secimine hic girmiyor.  Terimin isi bir ihaleyi kazanmak
+        degil, o SIFIRI kirmak; o yuzden KUCUK.
+        !! `kod` teriminden farki: K'yi VERIYE cekmiyor. "hepsini
+        kullan" diyor, "verinin ustune otur" demiyor -- §3.1b'nin
+        arizasini (K niceleyici olunca ILISKIYI kodluyor) tasimiyor.
+
+        HAFIZA TERIMLERI BUTUN KONUMLARA bakar, `isin` dilimine DEGIL.
+        ISINMA `uye`yi ilgilendirir (bastaki onek cop, §5.2) ama
+        hafiza oraya da YAZIYOR ve yazdigi sey ileri tasiniyor.
+        Onceki hal `[:, isin:]` idi ve pencerenin %17'sine yazmak
+        BEDAVAYDI; izde `|m|` j=1'de 4,79 cikiyordu (§5.1/U).
 
         `isin` ISINMA: ilk `isin` konum PUANLANMAZ. Pencere akistan
         keyfi yerden basliyor, yani bastaki onek cop. HESAP (§5.2):
@@ -431,22 +452,45 @@ class Yol(nn.Module):
             kod = bag = uye.new_zeros(())
 
         # HAFIZA BUTCESI -- butcenin altinda BEDAVA (docstring).
-        mn = y["mn"][:, isin:].mean()
+        # !! DILIM YOK: butun konumlar.  Gerekce docstring'de.
+        mn = y["mn"][:, 1:].mean()
         haf = (mn - haf_b).clamp(min=0).pow(2) if a4 else mn.new_zeros(())
+
+        # YUK DENGELEME -- Switch Transformer bicimi:
+        #   f_i  yuva i'yi TOP-1 secen konum payi   (gradyansiz, sayim)
+        #   P_i  yuva i'ye giden ortalama olasilik  (gradyan BURADAN)
+        # Tekduze kullanimda deger 1, tek yuvada K.
+        if a5 and self.V is not None:
+            kn = y["kn"][:, 1:].reshape(-1)
+            ha = y["ha"][:, 1:].reshape(-1)
+            k1 = y["k"][:, 1:].reshape(-1)
+            N = k1.numel()
+            P = ha.new_zeros(self.K).index_add(0, kn, ha) / N
+            with torch.no_grad():
+                f = P.new_zeros(self.K).index_add(
+                    0, k1, P.new_ones(N)) / N
+            denge = self.K * (f * P).sum()
+        else:
+            denge = uye.new_zeros(())
 
         # a3 = EZBER <-> GENELLEME dugmesi.
         duzen = self.a.pow(2).sum() + self.th.pow(2).sum()
         top = uye + a1 * dis + a2 * (kod + beta * bag) + a3 * duzen \
-            + a4 * haf
+            + a4 * haf + a5 * denge
 
         # IZ -- her cagride guncellenen kopuk skalerler. Senkron YOK
         # (kimse float() cagirmadikca), maliyeti yok. Kayip sayisal
         # olarak patlarsa hangi terimde patladigini bu soyler.
         # `mn` BUTCENIN kendisi: 0,30'u asarsa ikame basliyor demektir.
+        # `yuva` §12c'nin ONKOSULU: kac AYRI yuva atesliyor.  Taban 10
+        # (§5.1/U).  Sonda degil KOSU SIRASINDA izlensin diye burada.
         self.son = {"top": top.detach(), "uye": uye.detach(),
                     "dis": dis.detach(), "kod": kod.detach(),
                     "bag": bag.detach(), "duzen": duzen.detach(),
                     "capa": vf.float().mean().detach(), "mn": mn.detach(),
+                    "denge": denge.detach(),
+                    "yuva": (torch.unique(y["k"][:, 1:]).numel()
+                             if self.V is not None else 0),
                     "Pz_min": y["z"][..., :self.d].norm(dim=-1).min().detach(),
                     "V_max": (self.V.norm(dim=-1).max().detach()
                               if self.V is not None
@@ -476,7 +520,7 @@ class Yol(nn.Module):
         puan = torch.zeros(1, device=z.device)
 
         for j in range(1, len(onek) + en_cok):
-            z, _, vur, _, _ = self.adim(z, yol[:, -1], Rd, C, Ct, esik)
+            z, _, vur, _, _, _ = self.adim(z, yol[:, -1], Rd, C, Ct, esik)
             t = (t + 1).masked_fill(vur, 0)
 
             q = F.normalize(z[:, :self.d], dim=-1)
@@ -522,10 +566,12 @@ def saglik(m: Yol) -> str:
     return ("terim  " + "  ".join("%s %.4f" % (k, float(s[k])) for k in
                                   ("uye", "dis", "kod", "bag", "duzen")
                                   if k in s)
-            + "\n       capa %%%.2f   |m| %.4f   |V|max %.3f   |Pz|min %.2e"
-              "   |u|min %.2e   |v_dik|min %.2e   (acik sinif %d)"
+            + "\n       capa %%%.2f   |m| %.4f   |V|max %.3f   YUVA %d/%d"
+              "   denge %.2f\n       |Pz|min %.2e   |u|min %.2e   "
+              "|v_dik|min %.2e   (acik sinif %d)"
             % (100 * float(s.get("capa", 0)), float(s.get("mn", 0)),
-               float(s.get("V_max", 0)), float(s.get("Pz_min", 0)),
+               float(s.get("V_max", 0)), int(s.get("yuva", 0)), m.K,
+               float(s.get("denge", 0)), float(s.get("Pz_min", 0)),
                un, vd, len(m.ix_acik)))
 
 

@@ -1203,7 +1203,12 @@ def _39():
     Deger duzeyinde sinaniyor -- "terim var" yetmez, SAYISI tutmali:
         haf = (ort|m| - B)+^2      ve   top = ... + a4 * haf
     Ayrica `mn` gercekten okumanin normu mu: V'yi olcekleyince
-    ayni oranda buyumeli."""
+    ayni oranda buyumeli.
+
+    !! ORTALAMA BUTUN KONUMLARDAN, `isin` diliminden DEGIL.
+    Onceki hal `[:, isin:]` idi ve pencerenin %17'sine yazmak
+    BEDAVAYDI; izde `|m|` j=1'de 4,79 cikiyordu (§5.1/U).  Bu kapi
+    o deligi kapali tutar: dilim geri gelirse sayi tutmaz."""
     n, D, d, K, B, L = 60, 16, 8, 48, 24, 8
     g = torch.Generator().manual_seed(39)
     m = M.Yol(n=n, D=D, d=d, K=K, tam=torch.ones(n, dtype=torch.bool),
@@ -1213,8 +1218,11 @@ def _39():
 
     with torch.no_grad():
         m.V.normal_(0, 0.5, generator=g)
-    mn = float(m.yol(X, 0.0)["mn"][:, 2:].mean())
+    mn = float(m.yol(X, 0.0)["mn"][:, 1:].mean())
     assert mn > 0, "V dolu ama |m| = 0"
+    mn_dilim = float(m.yol(X, 0.0)["mn"][:, 2:].mean())
+    assert abs(mn - mn_dilim) > 1e-6, (
+        "dilimli ve dilimsiz ortalama AYNI -- kapi bos gecer")
 
     # 1) butcenin USTUNDE: top - uye  ==  a4 * (mn - B)^2
     Bd, a4 = mn / 2, 3.0
@@ -1232,16 +1240,17 @@ def _39():
     # 4) `mn` OKUMANIN normu: V iki katina -> mn iki katina
     with torch.no_grad():
         m.V.mul_(2)
-    mn2 = float(m.yol(X, 0.0)["mn"][:, 2:].mean())
+    mn2 = float(m.yol(X, 0.0)["mn"][:, 1:].mean())
     assert abs(mn2 / mn - 2) < 0.02, "|m| V ile dogrusal degil: %.4f" % (mn2 / mn)
     # 5) gradyan V'ye AKIYOR
     m.zero_grad(set_to_none=True)
     m.kayip(X, a4=a4, haf_b=mn, **ort)[0].backward()
     assert m.V.grad is not None and float(m.V.grad.abs().sum()) > 0, (
         "butce terimi V'ye gradyan vermiyor")
-    return ("ort|m| %.4f;  ust: top-uye %.6f = a4(mn-B)^2 %.6f;  alt: %.1e;  "
-            "a4=0: %.1e;  V x2 -> |m| x%.3f;  V gradyani AKIYOR"
-            % (mn, float(top) - float(uye), bek,
+    return ("ort|m| %.4f (dilimli olsa %.4f -- delik kapali);  "
+            "ust: top-uye %.6f = a4(mn-B)^2 %.6f;  alt: %.1e;  a4=0: %.1e;  "
+            "V x2 -> |m| x%.3f;  V gradyani AKIYOR"
+            % (mn, mn_dilim, float(top) - float(uye), bek,
                abs(float(top2) - float(uye2)), abs(float(top3) - float(uye3)),
                mn2 / mn))
 
@@ -1288,6 +1297,73 @@ def _40():
     return ("6 halde  tam %.3f  aile %.3f  kisayol %.3f  bos %.3f;  "
             "ek_ix'siz eski hal tam %.3f (ekli cevabi KACIRIYOR)"
             % (r["tam"], r["aile"], r["kisayol"], r["bos"], r0["tam"]))
+
+
+@kapi("41  YUK DENGELEME -- deger duzeyinde, ve ONKOSUL izleniyor")
+def _41():
+    """§12c/S1.  OLCULDU (§5.1/U): 8.192 yuvanin 10'u atesliyor.
+    Terim:  denge = K * sum_i f_i * P_i
+        f_i  yuva i'yi TOP-1 secen konum payi  (gradyansiz sayim)
+        P_i  yuva i'ye giden ortalama olasilik (gradyan BURADAN)
+    Tekduze kullanimda 1, tek yuvada K.
+
+    Uc sey kilitleniyor:
+      1  SINIRLAR: elle kurulmus tekduze dagilim 1, tek yuvaya
+         cokmus dagilim K verir.
+      2  MODELDEKI deger, BAGIMSIZ yeniden hesapla BIREBIR tutar --
+         "terim var" yetmez, SAYISI tutmali (kapi 27'nin yontemi).
+      3  ONKOSUL izleniyor: `son["yuva"]` gercekten kac AYRI yuvanin
+         atestigi.  §12c'nin onceden kaydi bu sayiyi KOSU SIRASINDA
+         okuyor; hesaplanmiyorsa kayit uygulanamaz."""
+    K = 64
+    # 1) SINIRLAR -- saf formul, modelden bagimsiz
+    f = torch.full((K,), 1.0 / K)
+    assert abs(float(K * (f * f).sum()) - 1.0) < 1e-6, "tekduze 1 vermeli"
+    g = torch.zeros(K); g[0] = 1.0
+    assert abs(float(K * (g * g).sum()) - K) < 1e-6, "tek yuva K vermeli"
+
+    # 2) MODELDEKI deger
+    n, D, d, B, L = 60, 16, 8, 24, 9
+    gg = torch.Generator().manual_seed(41)
+    m = M.Yol(n=n, D=D, d=d, K=K, tam=torch.ones(n, dtype=torch.bool),
+              hafiza=True, haf_n=4, haf_tau=0.02)
+    with torch.no_grad():
+        m.V.normal_(0, 0.3, generator=gg)
+    X = torch.randint(0, n, (B, L), generator=gg)
+    ort = dict(a1=0.0, a2=0.0, a3=0.0, a4=0.0, r=0.0, isin=2)
+
+    top0, uye0 = m.kayip(X, a5=0.0, **ort)
+    assert abs(float(top0) - float(uye0)) < 1e-6, "a5=0'da terim OLMAMALI"
+    assert float(m.son["denge"]) == 0.0
+
+    A5 = 0.25
+    top, uye = m.kayip(X, a5=A5, **ort)
+    y = m.yol(X, 0.0)
+    kn, ha, k1 = (y["kn"][:, 1:].reshape(-1), y["ha"][:, 1:].reshape(-1),
+                  y["k"][:, 1:].reshape(-1))
+    N = k1.numel()
+    P = torch.zeros(K).index_add(0, kn, ha) / N
+    fq = torch.zeros(K).index_add(0, k1, torch.ones(N)) / N
+    bek = float(K * (fq * P).sum())
+    assert abs(float(m.son["denge"]) - bek) < 1e-4, (
+        "denge %.6f, bagimsiz hesap %.6f" % (float(m.son["denge"]), bek))
+    assert abs(float(top) - float(uye) - A5 * bek) < 1e-4, (
+        "top-uye %.6f, a5*denge %.6f" % (float(top) - float(uye), A5 * bek))
+    assert 1.0 <= bek <= K, "denge [1,K] disinda: %.4f" % bek
+
+    # 3) ONKOSUL sayaci + gradyan ANAHTARLARA akiyor mu
+    ay = int(torch.unique(k1).numel())
+    assert int(m.son["yuva"]) == ay, (
+        "son['yuva'] %d, gercek %d" % (int(m.son["yuva"]), ay))
+    m.zero_grad(set_to_none=True)
+    m.kayip(X, a5=A5, **ort)[0].backward()
+    assert m.C.grad is not None and float(m.C.grad.abs().sum()) > 0, (
+        "denge terimi ANAHTARLARA (C) gradyan vermiyor -- olu yuva "
+        "olu kalir, terimin tek isi buydu")
+    return ("sinirlar 1 / %d;  modeldeki %.4f = bagimsiz hesap %.4f;  "
+            "top-uye = a5*denge (fark %.1e);  yuva %d/%d;  C gradyani AKIYOR"
+            % (K, float(m.son["denge"]), bek,
+               abs(float(top) - float(uye) - A5 * bek), ay, K))
 
 
 # =====================================================================

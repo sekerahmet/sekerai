@@ -224,6 +224,26 @@ HAF_BUTCE = 0.30  # ort |m| bu esigin ALTINDA bedava.
 #                   OLCULEN varlik konumu payindan turedi: %26,43
 #                   (§5.1/R).  Amaclanan kullanim varlik konumlarinda
 #                   atesler, yani ~0,26; ikame ~1,0.  SECILMEDI.
+#                   !! Ortalama BUTUN konumlardan. Once `[:, isin:]`
+#                   idi ve pencerenin %17'sine yazmak BEDAVAYDI;
+#                   izde |m| j=1'de 4,79 cikiyordu (§5.1/U).
+A5_DENGE = 3e-5   # YUK DENGELEME (§12c/S1).  OLCULDU (§5.1/U):
+#                   8.192 yuvanin 10'u atesliyor; kullanilan kapasite
+#                   320 sayi, kisit 110.715 -- 345 kat kisa.
+#                   denge = K * sum f_i P_i;  tekduzede 1, tek yuvada K.
+#                   BUGUN ~819 (10 yuva), HEDEF ~1,1 (olgu basina bir).
+#                   UST SINIR hesaplandi: yaymayi OGRENMEDEN yapmak
+#                   olgu odulunun (0,3008, §5.1/M) yanina yaklasmamali,
+#                   yoksa yeni bir IKAME kapisi acilir:
+#                     odul olgunun %30'u -> a5 <= 1,10e-4
+#                                   %10'u ->        3,68e-5
+#                                    %5'i ->        1,84e-5
+#                   3e-5 -> odul 0,0245 = olgunun %8'i.
+#                   !! ASIL GEREKCE BUYUKLUK DEGIL: olu yuvanin
+#                   gradyani TAM SIFIR (top-n'e hic girmiyor).
+#                   Terimin isi ihale kazanmak degil, SIFIRI kirmak.
+#                   `kod`dan farki: K'yi VERIYE cekmiyor, §3.1b'nin
+#                   arizasini tasimiyor.
 
 # --- EGITIM -----------------------------------------------------------
 PENCERE = 24
@@ -295,6 +315,10 @@ assert not HAFIZA or K_KOD >= 7381, (
 assert A4_HAF == 0 or A4_HAF > 0.795, (
     "butce agirligi IKAME tabaninin altinda -- §12c hesabi")
 assert 0 < HAF_BUTCE < 1
+assert A5_DENGE == 0 or A5_DENGE <= 1.10e-4, (
+    "denge agirligi UST SINIRIN ustunde: yaymayi ogrenmeden yapmak "
+    "olgu odulunu (0,3008) gecer ve yeni bir IKAME kapisi acar")
+assert not (A5_DENGE and not HAFIZA), "denge terimi hafizasiz ANLAMSIZ"
 assert PENCERE >= 2 and 1 <= ATLA < PENCERE
 assert 1 <= ISINMA < PENCERE
 assert ISINMA % ATLA == 0, (
