@@ -1,7 +1,9 @@
 """VERI + EGITIM + OLCUM.  RAKAM TOKENLI toplama.
 
-Sozluk    0..9  +  "+"  +  "="                 12 token
-Sayilar   SABIT GENISLIK, sifir dolgulu:
+Sozluk    0..9  +  "+"  +  "="  +  "_"          13 token
+          "_" = PAD, "burada basamak YOK" demek.  Onceden dolgu "0" idi
+          ve "sifir rakami" ile "bos yer" ayni tokena dusuyordu.
+Sayilar   SABIT GENISLIK, PAD dolgulu:
             toplanan 3 hane  (000..500)
             toplam   4 hane  (0000..1000)
 Girdi     4 7 2 + 1 8 2 =        8 token, HEP AYNI
@@ -36,16 +38,19 @@ TERS = True                 # birler ONCE.  OLCULDU (21 Eylul, rakam tokenli):
                             #   TERS=True her basamaga zaten hesaplanmis
                             #   bilgiyi verir: elde soldan saga, uretimle AYNI yon.
 
-ARTI, ESIT = 10, 11
-N = 12
-AD = [str(i) for i in range(10)] + ["+", "="]
+ARTI, ESIT, PAD = 10, 11, 12
+N = 13
+AD = [str(i) for i in range(10)] + ["+", "=", "_"]
 
 ADIM = 400
 HEPSI = [(a, b) for a in range(ENB + 1) for b in range(ENB + 1)]
 
 
 def rak(x, hane):
-    d = [int(c) for c in str(x).zfill(hane)]
+    """Sayinin GERCEK rakamlari; bos basamaklar PAD.
+    TERS=True ise birler once, dolayisiyla PAD SONA gider."""
+    t = str(x)
+    d = [PAD] * (hane - len(t)) + [int(c) for c in t]
     return d[::-1] if TERS else d
 
 
