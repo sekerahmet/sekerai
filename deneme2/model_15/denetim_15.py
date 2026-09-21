@@ -1,31 +1,36 @@
-"""Yazdigimiz sey calisiyor mu.  Hesap YOK, egitim YOK -- yalniz mekanizma."""
+"""Yazdigimiz sey calisiyor mu.  Egitim YOK -- yalniz mekanizma."""
 import torch
-from sehir_15 import AD, dizi, N
+from sehir_15 import AD, IX, N, DUR, dizi
 from model_15 import Yol
 
-m = Yol(N, boyut=2, durum=6, tohum=0)
-onek = ["Istanbul", "Ankara", "Mersin"]
+m = Yol(N, boyut=2, durum=6, dur=IX[DUR], tohum=0)
+p = dict(m.named_parameters())
+print("PARAMETRE")
+for ad, t in p.items():
+    print(f"  {ad:<3s} {str(tuple(t.shape)):<12s} {t.numel():4d}")
+print(f"  toplam {sum(t.numel() for t in p.values())}")
 
 with torch.no_grad():
-    v = m.yol(dizi(onek))
-    print(f"girdi   {' '.join(onek):<38s} {len(v)} sayi")
-    for adim in range(3):
-        onceki = v.clone()
-        c = m.oku_yol(v)
-        v = m.ekle(v, c)
-        onek = onek + [AD[c]]
-
-        # DENETIM
-        assert len(v) == len(onceki) + 2,           "uzunluk 2 artmadi"
-        assert torch.equal(v[:-2], onceki),         "eski yol KORUNMADI"
-        assert torch.equal(v[-2:], m.E[c]),         "eklenen sey E[c] degil"
-
-        print(f"  -> {AD[c]:<10s}  eklenen {v[-2].item():6.3f} {v[-1].item():6.3f}"
-              f"   = E[{c}] {'EVET' if torch.equal(v[-2:], m.E[c]) else 'HAYIR'}")
-        print(f"girdi   {' '.join(onek):<38s} {len(v)} sayi")
+    print()
+    print("UZUNLUK SERBEST -- ayni matrislerle 1, 3, 6 sehir")
+    for onek in (["Mersin"], ["Istanbul", "Ankara", "Mersin"],
+                 ["Izmir", "Bursa", "Konya", "Ankara", "Sivas", "Mersin"]):
+        o, ag = m.dikkat(dizi(onek))
+        print(f"  {len(onek)} sehir -> {len(ag)} agirlik, cikti 2 sayi"
+              f"   ({o[0]:+.3f} {o[1]:+.3f}) -> {AD[m.oku(o)]}")
 
     print()
-    print("DENETIM  her adimda:")
-    print("  uzunluk tam 2 artti           GECTI")
-    print("  eski yol degismeden korundu   GECTI")
-    print("  eklenen sayilar E[c] ile ayni GECTI")
+    print("OZYINELEME -- cikti girdiye ekleniyor mu")
+    onek = ["Istanbul", "Ankara", "Mersin"]
+    w = dizi(onek).tolist()
+    for _ in range(3):
+        o, ag = m.dikkat(torch.tensor(w))
+        c = m.oku(o)
+        onceki = list(w)
+        w.append(c)
+        assert w[:-1] == onceki, "eski yol bozuldu"
+        assert len(ag) == len(onceki), "agirlik sayisi yol uzunluguna esit degil"
+        print(f"  {' '.join(AD[i] for i in onceki):<40s} -> {AD[c]}")
+    print()
+    print("  eski yol korunuyor            GECTI")
+    print("  agirlik sayisi = yol uzunlugu GECTI")
