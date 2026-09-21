@@ -15,10 +15,10 @@ def hesapla(a):
     print("=" * 74)
 
     with torch.no_grad():
-        Y = m.yol(w[None])
-        print("1) YOL   ugranan konumlar  E[token]")
+        S = m.gez(w)[1:][None]
+        print("1) GEZ   s_t = normalize(M[token] @ s_{t-1} + b[token])")
         for i, t in enumerate(ad):
-            print(f"   yuva {i:<2d} {t:<3s} {v(Y[0, i])} ...")
+            print(f"   s_{i:<2d} {t:<3s} {v(S[0, i])} ...")
 
         o, ag = m.dikkat(w)
         print()
