@@ -102,9 +102,22 @@ class Yol(nn.Module):
                               + 0.1 * r(n, durum, durum))   # guncelleme
         self.s0 = nn.Parameter(torch.zeros(durum))
 
-        self.Wq = nn.Parameter(r(durum, boyut) * 0.4)   # son yuva -> soru
-        self.Wk = nn.Parameter(r(durum, boyut) * 0.4)   # yuva -> anahtar
-        self.Wv = nn.Parameter(r(durum, boyut) * 0.4)   # yuva -> deger
+        # BASLANGIC OLCEGI  o = 1/sqrt(boyut).  Turetilisi:
+        #   W'nin girisleri bagimsiz, ortalama 0, standart sapma o ise
+        #   (x @ W)_j = toplam_i x_i W_ij  ->  varyansi  |x|^2 * o^2
+        #   ve j uzerinden boyut tane terim var:
+        #     |x @ W| ~ |x| * o * sqrt(boyut)        <- CIKTI boyutu
+        #   Cikti boyu girdi boyuyla AYNI kalsin istiyoruz:
+        #     o * sqrt(boyut) = 1   ->   o = 1/sqrt(boyut) = 0,25   (boyut 16)
+        #   Boylece |q| ~ |s| = 1 ve |k| ~ 1; puan = q.k ne patlar ne soner.
+        #   ONCEKI DEGER 0,4 idi ve GEREKCESI YOKTU -- elle yazilmisti.
+        #   (b zaten 1/sqrt(durum) ile basliyordu; simdi ikisi tutarli.)
+        #   NOT: 0,9416/0,4250 sayilari 0,4 ile olculdu.  Bu degisiklikten
+        #   sonraki kosu o sayilarla BIT DUZEYINDE ayni olmaz.
+        o = boyut ** -0.5
+        self.Wq = nn.Parameter(r(durum, boyut) * o)     # son yuva -> soru
+        self.Wk = nn.Parameter(r(durum, boyut) * o)     # yuva -> anahtar
+        self.Wv = nn.Parameter(r(durum, boyut) * o)     # yuva -> deger
         self.hb = nn.Parameter(torch.zeros(1))          # YANLILIK -- hep var
 
     def gez(self, w):
