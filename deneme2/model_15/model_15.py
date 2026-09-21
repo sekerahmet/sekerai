@@ -1,42 +1,53 @@
 """model_15 -- YOL TUTULMAZ, HESAPLANIR.
 
-  yol       ugranan konumlarin birlesimi; uzunluk yolla buyur
-  soru      YOLUN TAMAMI sorar:  s = gez(yol),  q = s @ Wq
+  yol       token dizisi; uzunluk serbest
+  gez       s_t = normalize(M[token] @ s_{t-1} + b[token])
+  soru      YOLUN TAMAMI sorar:  q = s_son @ Wq
   cevap     her yuva Wk ile puanlanir, Wv ile katki verir
-  cikti     agirlikli toplam -> sozluk uzayinda bir nokta -> en yakin token
-  durma     DUR token'i
+  agirlik   RELU -- softmax DEGIL.  1'e toplanmak zorunda olsaydi
+            cikti hep ORTALAMA olurdu ve toplam TASINAMAZDI.
+  cikti     agirlikli TOPLAM -> sozluk uzayinda bir nokta -> en yakin token
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# --- OLCULMUS AYARLAR  (iki_15, 2601 ikili, %50 egitim, taban 0,028)
+#   boyut   2:0,059   4:0,094   8:0,782
+#   norm    ACIK 0,782   KAPALI 0,059
+#   pay     softmax 0,289   relu 0,782
+BOYUT, DURUM, NORM, PAY = 8, 16, True, False
+
+# --- OLCULMEMIS  (tasindi, gerekcesi yok)
+#   DURUM 16   sehir doneminde 6'ydi
+#   wd 0,03    sehir verisinde olculdu, toplamada olculmedi
+#   lr 0,02    hic olculmedi
+
 
 class Yol(nn.Module):
-    def __init__(self, n, boyut=2, durum=6, dur=None, tohum=0, norm=True, pay=True):
+    def __init__(self, n, boyut=BOYUT, durum=DURUM, dur=None, tohum=0,
+                 norm=NORM, pay=PAY):
         super().__init__()
         g = torch.Generator().manual_seed(tohum)
         r = lambda *s: torch.randn(*s, generator=g)
         self.n, self.boyut, self.durum, self.dur = n, boyut, durum, dur
-        self.norm = norm       # |s|=1 -- boyu sifirlar, TOPLAM tasinamaz
-        self.pay = pay         # softmax: agirliklar 1'e toplanir -> cikti ORTALAMA
-                               #   False -> relu: agirlik serbest, TOPLAM cikabilir
+        self.norm, self.pay = norm, pay
 
-        self.E = nn.Parameter(r(n, boyut))                  # sozluk
+        self.E = nn.Parameter(r(n, boyut))                  # sozluk: token -> konum
         self.b = nn.Parameter(r(n, durum) / durum ** 0.5)   # token -> duruma giris
         self.M = nn.Parameter(torch.eye(durum).repeat(n, 1, 1)
                               + 0.1 * r(n, durum, durum))   # guncelleme
         self.s0 = nn.Parameter(torch.zeros(durum))
 
         self.Wq = nn.Parameter(r(durum, boyut) * 0.4)       # yol -> soru
-        self.Wk = nn.Parameter(r(durum, boyut) * 0.4)       # YUVANIN DURUMU -> anahtar
-        self.Wv = nn.Parameter(r(durum, boyut) * 0.4)       # YUVANIN DURUMU -> deger
+        self.Wk = nn.Parameter(r(durum, boyut) * 0.4)       # yuva -> anahtar
+        self.Wv = nn.Parameter(r(durum, boyut) * 0.4)       # yuva -> deger
 
     def gez(self, w):
         """w: (T,) ya da (B,T).  Doner: (B,T+1,durum) -- her adimdaki durum."""
         tek = w.dim() == 1
         w = w[None] if tek else w
-        B = w.shape[0]
-        s = self.s0.expand(B, self.durum)
+        s = self.s0.expand(w.shape[0], self.durum)
         iz = [s]
         for t in range(w.shape[1]):
             wt = w[:, t]
@@ -50,13 +61,13 @@ class Yol(nn.Module):
     def dikkat(self, w):
         """Yol sorar, yuvalar cevaplar.  Doner: cikti ve agirliklar.
 
-        Anahtar ve deger yuvanin KONUMUNDAN degil, o ana kadarki DURUMUNDAN
-        uretiliyor -- boylece ayni sehir iki farkli yerde ayni sey demiyor.
+        Anahtar ve deger yuvanin TOKEN'INDAN degil, o ana kadarki DURUMUNDAN
+        uretiliyor -- boylece ayni token iki farkli yerde ayni sey demiyor.
         """
         tek = w.dim() == 1
-        S = self.gez(w)[..., 1:, :]            # (B,T,durum) her yuvanin durumu
+        S = self.gez(w)[..., 1:, :]
         S = S[None] if tek else S
-        q = S[:, -1] @ self.Wq                 # (B,boyut) soru: yolun tamami
+        q = S[:, -1] @ self.Wq
         pu = ((S @ self.Wk) @ q.unsqueeze(-1)).squeeze(-1)
         ag = pu.softmax(-1) if self.pay else pu.relu()
         o = (ag.unsqueeze(-1) * (S @ self.Wv)).sum(1)
@@ -73,7 +84,7 @@ class Yol(nn.Module):
             o, _ag = self.dikkat(torch.tensor(w))
             c = self.oku(o)
             cikan.append(c)
-            w.append(c)                        # <- guzergah buyudu
+            w.append(c)
             if c == self.dur:
                 break
         return cikan, w
