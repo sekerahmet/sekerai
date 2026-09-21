@@ -871,3 +871,32 @@ gather gidiyor).
 
 KAGITTA KANITLANAMAYAN: ReLU'nun pratikte cokmeyi ONLEYECEGI.
 Gosterilebilen sey donguNUN YAPISAL OLARAK kalktigi.
+
+DILIN KAPASITESI OLCULDU (21 Eylul) -- kullanicinin sorusuyla acildi:
+"Istanbul'dan Ankara'ya gidiyorsam sonrasi Izmir ya da Bursa;
+Mersin'den Ankara'ya gidiyorsam Sivas ya da Erzurum."
+
+Sezgisi olculdu ve NEREDEYSE BIREBIR tuttu: "3 adim gidince 3-4 yol
+kalir" dedi, olculen dallanma k=3'te 2,49.
+
+```
+ k   AYRI baglam   AYRI DEVAM KUMESI   dallanma   sikistirma
+ 1          412            232          18,87      1,8 kat
+ 3       44.077          2.164           2,49     20,4 kat
+ 6      302.791          1.937           1,40    156,3 kat
+```
+
+ASIL BULGU: baglam patliyor (412 -> 302.791) ama AYIRT EDILMESI
+GEREKEN durum ~2.600'de DOYUYOR.  Dilin 444 cevirmeyle ogrenilmesinin
+sebebi bu.  §5.1/W.
+
+Ve iki kapasite ilk kez yan yana:
+  DIL   ~2.600 durum  ->  COZULDU
+  OLGU   7.381        ->  0,0138
+Olgu butun dilden 2,8 kat fazla ayrim istiyor, ama asil fark SAYIDA
+degil YAPIDA: dilde benzer guzergah benzer devam ister (cevirme
+yapar), olguda benzer ozne alakasiz cevap ister (yapamaz).
+
+`olcu_guzergah.py` kola eklendi -- olcum tekrarlanabilir olsun diye.
+SINIR: izole cumlelerden, gercek akistan DEGIL.  Mertebe dogru,
+ondalik degil.

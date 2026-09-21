@@ -1363,6 +1363,63 @@ V  `BILGI tam` HIC ATESLENEMIYORMUS -- ve bir kosuda GERCEK bir
    hukum veren sayiyi ureten yolun KENDISI sinanmamisti. Kapi 37
    (egitim == uretim) ve kapi 40 (olcu atesleniyor) o iki deligi
    kapatiyor.
+W  DILIN KAPASITE SORUSU -- ILK KEZ SAYIYA BAGLANDI  (21 Eylul, kagit)
+   Olgunun kapasite hesabini (§5.1/S: 376 serbestlik / 4.620 kisit)
+   yaptik; DILINKINI hic yapmamistik.  Kullanicinin sorusu acti:
+
+     *"Istanbul'dan Ankara'ya gidiyorsam sonrasi Izmir ya da Bursa;
+     Mersin'den Ankara'ya gidiyorsam Sivas ya da Erzurum.  Bu
+     guzergah dedigimiz zaten ogrenilmesi gereken sey."*
+
+   Yani durum GECMISI degil, gecmisin DEVAMI BELIRLEYEN kismini
+   tutmali.  Devami ayni olan iki guzergah AYNI duruma dusebilir --
+   ve dusmelidir, sikistirma budur.
+
+   Olculdu: korpusun kendi kalip karisimi (17 bildirim + 8 soru x
+   7.381 olgu), 184.525 cumle, 2.356.137 birim.
+
+   ```
+     k   AYRI baglam   AYRI DEVAM KUMESI   dallanma   sikistirma
+     1          412            232          18,87      1,8 kat
+     2        7.757          1.833           5,70      4,2 kat
+     3       44.077          2.164           2,49     20,4 kat
+     4      108.525          2.608           1,91     41,6 kat
+     5      200.309          2.145           1,63     93,4 kat
+     6      302.791          1.937           1,40    156,3 kat
+   ```
+
+   1) BAGLAM PATLIYOR, DURUM DOYUYOR.  Ayri baglam 412 -> 302.791,
+      ama AYIRT EDILMESI GEREKEN durum ~2.600'de doyup dusmeye
+      basliyor.  Model 302.791 gecmisi degil, 2.608 sinifi ayirmali.
+      **Bedava sikistirma 41 kat.**  444 cevirmeyle dilin
+      ogrenilebilmesinin sebebi bu -- 444^23 ~ 10^61 yol var ama
+      ayirt edilecek o kadar YER yok.
+
+   2) DALLANMA SONUYOR:  18,87 -> 1,40.  Alti birim gecmisten sonra
+      siradaki birim %71 ihtimalle ZATEN BELLI.  §5.1/J'nin dallanma
+      tabani (uye >= 2 - 2/sqrt(k)) bu egrinin ustune oturur.
+
+   3) IKI KAPASITE YAN YANA:
+      ```
+      DIL   ~2.600 ayirt edilecek durum   COZULDU (ek 0,92, kapanmadi 0,01)
+      OLGU   7.381                         0,0138
+      ```
+      Olgu, BUTUN DILDEN 2,8 kat fazla ayrim istiyor.  Ama fark
+      SAYIDA degil YAPIDA:
+      ```
+      DILDE   benzer guzergah -> benzer devam
+              2.600 sinif GEOMETRIK OLARAK UYUMLU yerlesebilir
+      OLGUDA  benzer ozne -> alakasiz cevap
+              7.381 sinif KEYFI yerlere dusmeli
+      ```
+      Cevirme benzerligi KORUDUGU icin birincisini yapar, ikincisini
+      yapamaz.  §5.1/S'in ispati bunun aritmetik hali.
+
+   SINIR: sayilar IZOLE CUMLELERDEN, gercek akistan degil.  Korpusta
+   cumleler sayfa icinde yan yana duruyor, yani baglam cumle sinirini
+   asiyor ve k=6'daki 1,40 muhtemelen daha yuksek.  Ayni yaklasim
+   daha once olgu payini %15,04 vermisti, gercek akista %26,43 cikti.
+   **Mertebe dogru, ondalik degil.**  Gercek akista tekrarlanmali.
 ```
 
 ---
