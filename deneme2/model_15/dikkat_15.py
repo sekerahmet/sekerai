@@ -7,7 +7,7 @@ torch.manual_seed(0)
 m = Yol(N, boyut=2, durum=6, tohum=0)
 E = m.E.detach()
 
-Wq = torch.randn(2, 2) * 0.7
+Wq = torch.randn(6, 2) * 0.4      # durum(6) -> soru(2)
 Wk = torch.randn(2, 2) * 0.7
 Wv = torch.randn(2, 2) * 0.7
 
@@ -19,10 +19,11 @@ for a, p in zip(onek, P):
     print(f"  {a:<10s} konum ({p[0]:+.3f} {p[1]:+.3f})")
 
 print()
-print("1) SORU  -- son sehir soruyu kurar:   q = konum @ Wq")
-print(f"   Wq = {Wq.tolist()}")
-q = P[-1] @ Wq
-print(f"   Mersin ({P[-1,0]:+.3f} {P[-1,1]:+.3f}) @ Wq  ->  q = ({q[0]:+.3f} {q[1]:+.3f})")
+print("1) SORU  -- YOLUN TAMAMI soruyu kurar:   q = s @ Wq")
+sd = m.ileri(dizi(onek))[-1]
+print(f"   s (yolun durumu, 6 sayi) = [{' '.join(f'{x:+.2f}' for x in sd)}]")
+q = sd @ Wq
+print(f"   s @ Wq  ->  q = ({q[0]:+.3f} {q[1]:+.3f})")
 
 print()
 print("2) ANAHTAR -- her yuva kendini tanitir:   k_i = konum_i @ Wk")
