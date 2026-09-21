@@ -28,23 +28,32 @@ class Yol(nn.Module):
         self.Wv = nn.Parameter(r(durum, boyut) * 0.4)       # YUVANIN DURUMU -> deger
 
     def gez(self, w):
-        """Yolu bastan gez, her adimdaki durumu dondur.  (T+1, durum)"""
-        s, iz = self.s0, [self.s0]
-        for t in w:
-            s = self.M[t] @ s + self.b[t]
+        """w: (T,) ya da (B,T).  Doner: (B,T+1,durum) -- her adimdaki durum."""
+        tek = w.dim() == 1
+        w = w[None] if tek else w
+        B = w.shape[0]
+        s = self.s0.expand(B, self.durum)
+        iz = [s]
+        for t in range(w.shape[1]):
+            wt = w[:, t]
+            s = torch.bmm(self.M[wt], s.unsqueeze(-1)).squeeze(-1) + self.b[wt]
             iz.append(s)
-        return torch.stack(iz)
+        S = torch.stack(iz, 1)
+        return S[0] if tek else S
 
     def dikkat(self, w):
-        """Yol sorar, yuvalar cevaplar.  Doner: (boyut,) ve agirliklar (T,).
+        """Yol sorar, yuvalar cevaplar.  Doner: cikti ve agirliklar.
 
         Anahtar ve deger yuvanin KONUMUNDAN degil, o ana kadarki DURUMUNDAN
         uretiliyor -- boylece ayni sehir iki farkli yerde ayni sey demiyor.
         """
-        S = self.gez(w)[1:]                    # (T, durum) her yuvanin durumu
-        q = S[-1] @ self.Wq                    # soru: yolun tamami
-        ag = (S @ self.Wk @ q).softmax(0)      # agirlik -- UZUNLUK SERBEST
-        return ag @ (S @ self.Wv), ag
+        tek = w.dim() == 1
+        S = self.gez(w)[..., 1:, :]            # (B,T,durum) her yuvanin durumu
+        S = S[None] if tek else S
+        q = S[:, -1] @ self.Wq                 # (B,boyut) soru: yolun tamami
+        ag = ((S @ self.Wk) @ q.unsqueeze(-1)).squeeze(-1).softmax(-1)
+        o = (ag.unsqueeze(-1) * (S @ self.Wv)).sum(1)
+        return (o[0], ag[0]) if tek else (o, ag)
 
     def oku(self, o):
         """Sozluk uzayindaki noktaya en yakin token."""
