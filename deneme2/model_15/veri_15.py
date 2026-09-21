@@ -27,7 +27,14 @@ from model_15 import Yol, LR, WD, lr_ver
 
 ENB = 500                   # toplananlar 0..500
 HA, HC = 3, 4               # toplanan 3 hane, cevap 4 hane
-TERS = False                # rakam sirasi -- KARAR, olculmedi
+TERS = True                 # birler ONCE.  OLCULDU (21 Eylul, rakam tokenli):
+                            #   TERS=False'ta kosullu dogruluk
+                            #     onlar  0,2002   <- elde BIRLERDEN gelir
+                            #                        ama birler HENUZ uretilmedi
+                            #     birler 0,8734   <- en son uretiliyor, bilgi TAM
+                            #   Yani model bilgisi olan basamagi yapiyor.
+                            #   TERS=True her basamaga zaten hesaplanmis
+                            #   bilgiyi verir: elde soldan saga, uretimle AYNI yon.
 
 ARTI, ESIT = 10, 11
 N = 12
