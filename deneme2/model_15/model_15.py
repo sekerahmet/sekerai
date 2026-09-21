@@ -40,6 +40,15 @@ LR = 0.04            # SABIT.  En keskin ayar: 0,01'de genelleme 0,025,
                      #   0,08'de egitim cokuyor (hafiza 0,380).
 COSINE = False
 
+# --- OLCULMEMIS  -- dikkat cokmesine karsi uc aday (21 Eylul)
+#   Olculen ariza: rakam uretimi ilerledikce dikkat operandlardan
+#   kopuyor.  adim 0'da ilk sayinin agirligi 2,31 -- adim 2'de 0,004.
+#   Toplam agirlik 4,66 -> 1,11, cikti buyuklugu 4,51 -> 0,83,
+#   dogruluk 1,00 -> 0,10.  Uc aday, ucu de relu'dan BAGIMSIZ:
+OLCEK = False        # puan / sqrt(durum) -- transformerdaki gibi
+ESIK = False         # relu(puan + hb), hb OGRENILEN esik
+KAFA = 1             # kac dikkat kafasi
+
 WD = 0.03            # ceza.  lr ile birlikte calisiyor: biri zayifsa
                      #   oteki telafi ediyor, ikisi guclu olunca 5/5.
 
@@ -65,13 +74,15 @@ def lr_ver(i, adim, lr=LR, cosine=COSINE):
 
 class Yol(nn.Module):
     def __init__(self, n, boyut=BOYUT, durum=DURUM, dur=None, tohum=0,
-                 norm=NORM, pay=PAY):
+                 norm=NORM, pay=PAY, olcek=OLCEK, esik=ESIK, kafa=KAFA):
         """Ayarlar dosyanin basinda -- ayri bir ayar dosyasi YOK."""
         super().__init__()
         g = torch.Generator().manual_seed(tohum)
         r = lambda *s: torch.randn(*s, generator=g)
         self.n, self.boyut, self.durum, self.dur = n, boyut, durum, dur
         self.norm, self.pay = norm, pay
+        self.olcek = durum ** -0.5 if olcek else 1.0
+        self.kafa = kafa
 
         self.E = nn.Parameter(r(n, boyut))                  # sozluk: token -> konum
         self.b = nn.Parameter(r(n, durum) / durum ** 0.5)   # token -> duruma giris
@@ -79,9 +90,10 @@ class Yol(nn.Module):
                               + 0.1 * r(n, durum, durum))   # guncelleme
         self.s0 = nn.Parameter(torch.zeros(durum))
 
-        self.Wq = nn.Parameter(r(durum, boyut) * 0.4)       # yol -> soru
-        self.Wk = nn.Parameter(r(durum, boyut) * 0.4)       # yuva -> anahtar
-        self.Wv = nn.Parameter(r(durum, boyut) * 0.4)       # yuva -> deger
+        self.Wq = nn.Parameter(r(kafa, durum, boyut) * 0.4)  # yol -> soru
+        self.Wk = nn.Parameter(r(kafa, durum, boyut) * 0.4)  # yuva -> anahtar
+        self.Wv = nn.Parameter(r(kafa, durum, boyut) * 0.4)  # yuva -> deger
+        self.hb = nn.Parameter(torch.zeros(kafa)) if esik else None
 
     def gez(self, w):
         """w: (T,) ya da (B,T).  Doner: (B,T+1,durum) -- her adimdaki durum."""
@@ -106,11 +118,15 @@ class Yol(nn.Module):
         """
         tek = w.dim() == 1
         S = self.gez(w)[..., 1:, :]
-        S = S[None] if tek else S
-        q = S[:, -1] @ self.Wq
-        pu = ((S @ self.Wk) @ q.unsqueeze(-1)).squeeze(-1)
+        S = S[None] if tek else S                       # (B,T,durum)
+        q = torch.einsum("bd,hdc->bhc", S[:, -1], self.Wq)      # (B,kafa,boyut)
+        K = torch.einsum("btd,hdc->bhtc", S, self.Wk)
+        pu = (K * q[:, :, None, :]).sum(-1) * self.olcek        # (B,kafa,T)
+        if self.hb is not None:
+            pu = pu + self.hb[None, :, None]
         ag = pu.softmax(-1) if self.pay else pu.relu()
-        o = (ag.unsqueeze(-1) * (S @ self.Wv)).sum(1)
+        V = torch.einsum("btd,hdc->bhtc", S, self.Wv)
+        o = (ag[..., None] * V).sum(2).sum(1)           # kafalar TOPLANIR
         return (o[0], ag[0]) if tek else (o, ag)
 
     def oku(self, o):
