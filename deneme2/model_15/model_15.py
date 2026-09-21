@@ -13,10 +13,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # --- OLCULMUS AYARLAR  (iki_15, 2601 ikili, %50 egitim, taban 0,028)
-#   boyut   2:0,059   4:0,094   8:0,782
+#   boyut   2:0,051  4:0,088  8:0,841  16:0,901  32:0,878
 #   norm    ACIK 0,782   KAPALI 0,059
 #   pay     softmax 0,289   relu 0,782
-BOYUT = 8            # token kac sayiyla tarif ediliyor
+BOYUT = 16           # token kac sayiyla tarif ediliyor
 NORM = True          # |s| = 1
 PAY = False          # False -> relu   True -> softmax
 

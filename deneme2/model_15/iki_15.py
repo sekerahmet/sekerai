@@ -79,7 +79,7 @@ def dizi_puan(E):
 
 print("  boyut   HAFIZA  GENELLEME   |hata|   1 fark icinde")
 son = None
-for boyut in (2, 4, 8):
+for boyut in (8, 16, 32):
     r = [kos(0.5, 16, t, boyut=boyut) for t in (0, 1)]
     e = statistics.mean(x[1] for x in r); u = statistics.mean(x[2] for x in r)
     with torch.no_grad():
@@ -89,7 +89,7 @@ for boyut in (2, 4, 8):
         d = (c - h).float()
     print(f"  {boyut:5d}   {e:.3f}    {u:.3f}      {float(d.abs().mean()):5.2f}"
           f"     {float((d.abs() <= 1).float().mean()):.3f}", flush=True)
-    if boyut == 2:
+    if boyut == 16:
         son = r[0]
 
 m, _, _, TU = son
