@@ -600,12 +600,13 @@ def kapi(m: Yol, tol: float = 1e-4) -> str:
     assert m.d < m.D, "D > d"
     T = m.D * (m.D - 1) // 2
     bek = len(m.ix_tam) * T + len(m.ix_acik) * (2 * m.D + 1) + m.K * m.D \
-        + (T if m.saat else 0) + (m.K * m.D if m.V is not None else 0)
+        + (T if m.saat else 0) \
+        + ((m.K * m.D + m.K) if m.V is not None else 0)   # V + hb
     assert n_par(m) == bek, f"parametre {n_par(m)} != {bek}"
     return (f"GECTI  n={m.n} D={m.D} d={m.d} K={m.K}  saat={m.saat}  "
             f"hafiza={m.V is not None}\n"
             f"       parametre {n_par(m):,}   "
             f"kapali {len(m.ix_tam)} / acik {len(m.ix_acik)}"
-            + (f"   V {m.K * m.D:,}" if m.V is not None else "")
+            + (f"   V {m.K * m.D:,} + hb {m.K:,}" if m.V is not None else "")
             + f"\n       ortogonallik {e:.1e}   "
             f"komsu araligi {m.n ** (-1.0/(m.d-1)):.3f}")

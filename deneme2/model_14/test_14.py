@@ -1104,6 +1104,12 @@ def _36():
             for ii in gk[bb].nonzero().flatten().tolist():
                 mem2[bb] += float(gk[bb, ii]) * mh.V[ii]
     assert bool((gk >= 0).all()), "ReLU negatif deger uretti"
+
+    # 3c  `kapi` HAFIZALI modeli de sayiyor mu.  OLCULDU 21 Eylul:
+    #     `hb` eklendi ve formule yazilmadi; kapi kosunun 0. adiminda
+    #     patlardi.  Ayni sey §12b'de de olmustu (351296 != 285760).
+    #     Hicbir kapi `kapi`yi HAFIZALI cagirmiyordu -- artik cagiriyor.
+    M.kapi(mh)
     hz = float((mem - mem2).abs().max())
     assert hz < 1e-4, ("HIZALAMA BOZUK: g[b,i] ile V[i] eslesmiyor, "
                        "fark %.2e" % hz)
