@@ -2112,8 +2112,22 @@ S1  YUK DENGELEME  (mixture-of-experts'in standart terimi)  <- SECILEN
 #### `a5` — ve ilk hesabımın hatası
 
 ```
-L_denge   bugun (10 yuva)  819,2      hedef (olgu basina bir)  1,110
+L_denge   COKMUS halde (10 yuva)  819,2
+          hedef (olgu basina bir yuva)  1,110
+          BASLANGICTA (olculdu, 21 Eylul, adim 1)  1,54
 ```
+
+`[Ö]` **Bu terim sabit bir itiş değil, GERİ ÇAĞIRICI KUVVET** — ve
+bunu ilk yazışımda gözden kaçırmıştım. Başlangıçta yuvaların
+8.078/8.192'si kullanılıyor ve `denge` 1,54; ceza
+`3e-5 × 1,54 = 4,6e-5`, yani fiilen sıfır. Çöküş başlarsa 10 yuvada
+`3e-5 × 819 = 0,0246`'ya çıkar. Yani terim her şey yolundayken
+bedava, bozulmaya başlayınca devreye giriyor.
+
+`[Ö]` Bunun bir sonucu da şu: **çöküş başlangıçta yok, eğitim
+sırasında oluşuyor.** §5.1/U'nun "10 yuva"sı bir başlangıç durumu
+değil, modelin adım adım vardığı bir yer. `a5`'in işi bir çöküşü
+ONARMAK değil, ENGELLEMEK.
 
 İlk yazdığım `a5 = 3e-4`, **yaymaya 0,2454 ödüyordu** — olgunun
 değdiği 0,3008'in (§5.1/M) neredeyse tamamı. O ağırlıkla model
@@ -2127,9 +2141,19 @@ yayma odulu olgunun  %30'u olsun  ->  a5 <= 1,10e-04
 SECIM   a5 = 3e-5   ->  odul 0,0245  = olgunun %8'i
 ```
 
-`[Ç]` **Asıl gerekçe büyüklük değil.** Ölü yuvanın gradyanı **tam
-sıfır** — softmax'ın top-8'ine hiç girmiyor. Terimin işi bir ihaleyi
-kazanmak değil, **sıfırı kırmak**. Küçük olması yeter; büyük olması
+`[Ö]` **Asıl gerekçe büyüklük değil, ve bu ÖLÇÜLDÜ.** Ölü yuvanın
+gradyanı **tam sıfır** — softmax'ın top-8'ine hiç girmiyor. İki
+koşunun 1. adımındaki eğitim logu, yan yana:
+
+```
+§12c  (a5 = 0)      C  |g|max 0.000e+00      <- TAM SIFIR
+tasarim 3 (a5)      C  |g|max 1.210e-05
+```
+
+`V` sıfırdan başladığı için okuma kayba hiçbir şey katmıyor,
+dolayısıyla softmax üzerinden anahtarlara geri **hiç** gradyan
+akmıyordu. Terimin işi bir ihaleyi kazanmak değil, **o sıfırı
+kırmak** — ve birinci adımda birebir o oldu. Küçük olması yeter; büyük olması
 tehlikeli. Bu yüzden üst sınır hesaplandı, alt sınır hesaplanmadı —
 ve bu bir seçim, ölçüm değil.
 
@@ -2177,6 +2201,9 @@ BIRINCIL  BILGI tam  (onkosul saglanirsa)
                 kapatmistim (§5.1/U); bu kez sart olculecek.
 
 IKINCIL -- HUKUM VERMEZ
+   `denge` EGRISI.  Baslangic 1,54 (olculdu).  Tirmanirsa cokus
+   basliyor demektir ve a5 onu TUTAMIYOR; duz kalirsa tutuyor.
+   Bu, `YUVA` sayisinin SUREKLI halidir -- ikisi birlikte okunur.
    DIL BOZULMAMALI.  Yeni taban: kalip 0,7223  ek 0,9249
    kapanmadi 0,0099.  Bozulursa TAKAS diye yazilir.
    ort |m| (butce yeni tanimla), duzen, |m| varlik/diger orani.

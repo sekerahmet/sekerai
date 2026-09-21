@@ -813,3 +813,23 @@ TASARIM 3 YAZILDI:
 ONCEDEN KAYIT: ONKOSUL = atesleyen ayri yuva >> 10, KOSU SIRASINDA
 izlenir.  Saglanmazsa BILGI OKUNMAZ.  Saglanirsa ve BILGI yine
 0,0000 ise kol O ZAMAN kapanir.
+
+TASARIM 3 KOSUSU BASLADI (commit f348fbf, 21 Eylul 00:41).
+Ilk iki adimdan iki duzeltme cikti, ikisi de §12c'ye islendi:
+
+1  `denge` BASLANGICTA 1,54, yuva 8078/8192.  Kagitta "bugun 819"
+   yazmistim; 819 COKMUS halin degeri.  Yani terim sabit bir itis
+   degil GERI CAGIRICI KUVVET: simdiki cezasi 4,6e-5 (fiilen sifir),
+   cokus baslarsa 0,0246'ya cikar.
+   SONUCU: cokus baslangicta YOK, egitim sirasinda olusuyor.
+   §5.1/U'nun "10 yuva"si varilan bir yer, baslangic degil.
+
+2  Terim tam tasarlandigi yerde ise yaradi, 1. adimda:
+       §12c  (a5=0)   C |g|max 0.000e+00   <- TAM SIFIR
+       tasarim 3      C |g|max 1.210e-05
+   V sifirdan basladigi icin okuma kayba hicbir sey katmiyor ve
+   anahtarlara geri HIC gradyan akmiyordu.  "Terimin isi ihale
+   kazanmak degil sifiri kirmak" demistim -- birebir o oldu.
+
+ONCEDEN KAYDA EKLENDI: `denge` EGRISI ikincil olcu.  Tirmanirsa a5
+cokusu tutamiyor, duz kalirsa tutuyor.  `YUVA`nin surekli hali.
