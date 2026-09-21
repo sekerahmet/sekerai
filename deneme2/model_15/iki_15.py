@@ -66,47 +66,48 @@ def kos(pay, durum=None, tohum=0, iz=False, norm=None, softmax=None,
     return m, de, dt, TU
 
 
-EG0, TU0 = bol(0.5, 0)
-print(f"ikili {len(HEPSI)}   egitim {len(EG0)}   tutulan {len(TU0)}")
-print(f"TABAN {Counter(h for _, h in TU0).most_common(1)[0][1]/len(TU0):.3f}   TAVAN 1.000")
-print()
-def dizi_puan(E):
-    P = E[:101] - E[:101].mean(0)
-    U, S, _ = torch.linalg.svd(P, full_matrices=False)
-    a = U[:, 0] * S[0]
-    n = 101
-    t = sum(1 for i in range(n) for j in range(i + 1, n) if a[i] > a[j])
-    return t / (n * (n - 1) // 2)
-
-
-TOH = 5
-print(f"{TOH} tohum.  'BULDU' = tutulan > 0,50 (dagilim iki tepeli).")
-print()
-print("  wd      lr      BULDU   ortalama   tohumlar")
-son = None
-for wd in (0.01, 0.03):
-    for lr in (0.02, 0.04):
-        r = [kos(0.5, tohum=t, lr=lr, wd=wd) for t in range(TOH)]
-        u = [x[2] for x in r]
-        buldu = sum(1 for x in u if x > 0.5)
-        print(f"  {wd:<7} {lr:<7} {buldu}/{TOH}    {statistics.mean(u):.3f}"
-              f"      " + " ".join(f"{x:.2f}" for x in u), flush=True)
-        if wd == 0.03 and lr == 0.04:
-            son = r[0]
-
-m, _, _, TU = son
-print()
-print("GORULMEMIS TOPLAMLAR  (egitim payi 0.5)")
-with torch.no_grad():
-    w, h = yig(TU)
-    o, _ = m.dikkat(w)
-    c = (-((m.E[None] - o[:, None]) ** 2).sum(-1)).argmax(-1)
-    for i in range(14):
-        print(f"  {AD[w[i,0]]:>2s} + {AD[w[i,2]]:>2s} =  {AD[c[i]]:>3s}"
-              f"   dogru {AD[h[i]]:>3s}  {'DOGRU' if c[i] == h[i] else 'YANLIS'}")
-    d = (c - h).float()
+if __name__ == "__main__":
+    EG0, TU0 = bol(0.5, 0)
+    print(f"ikili {len(HEPSI)}   egitim {len(EG0)}   tutulan {len(TU0)}")
+    print(f"TABAN {Counter(h for _, h in TU0).most_common(1)[0][1]/len(TU0):.3f}   TAVAN 1.000")
     print()
-    print(f"  dogru {float((c==h).float().mean()):.3f}"
-          f"   ort hata {d.mean():+.2f}   |hata| {d.abs().mean():.2f}")
-    print(f"  1 fark icinde {float((d.abs()<=1).float().mean()):.3f}"
-          f"   3 fark icinde {float((d.abs()<=3).float().mean()):.3f}")
+    def dizi_puan(E):
+        P = E[:101] - E[:101].mean(0)
+        U, S, _ = torch.linalg.svd(P, full_matrices=False)
+        a = U[:, 0] * S[0]
+        n = 101
+        t = sum(1 for i in range(n) for j in range(i + 1, n) if a[i] > a[j])
+        return t / (n * (n - 1) // 2)
+
+
+    TOH = 5
+    print(f"{TOH} tohum.  'BULDU' = tutulan > 0,50 (dagilim iki tepeli).")
+    print()
+    print("  wd      lr      BULDU   ortalama   tohumlar")
+    son = None
+    for wd in (0.01, 0.03):
+        for lr in (0.02, 0.04):
+            r = [kos(0.5, tohum=t, lr=lr, wd=wd) for t in range(TOH)]
+            u = [x[2] for x in r]
+            buldu = sum(1 for x in u if x > 0.5)
+            print(f"  {wd:<7} {lr:<7} {buldu}/{TOH}    {statistics.mean(u):.3f}"
+                  f"      " + " ".join(f"{x:.2f}" for x in u), flush=True)
+            if wd == 0.03 and lr == 0.04:
+                son = r[0]
+
+    m, _, _, TU = son
+    print()
+    print("GORULMEMIS TOPLAMLAR  (egitim payi 0.5)")
+    with torch.no_grad():
+        w, h = yig(TU)
+        o, _ = m.dikkat(w)
+        c = (-((m.E[None] - o[:, None]) ** 2).sum(-1)).argmax(-1)
+        for i in range(14):
+            print(f"  {AD[w[i,0]]:>2s} + {AD[w[i,2]]:>2s} =  {AD[c[i]]:>3s}"
+                  f"   dogru {AD[h[i]]:>3s}  {'DOGRU' if c[i] == h[i] else 'YANLIS'}")
+        d = (c - h).float()
+        print()
+        print(f"  dogru {float((c==h).float().mean()):.3f}"
+              f"   ort hata {d.mean():+.2f}   |hata| {d.abs().mean():.2f}")
+        print(f"  1 fark icinde {float((d.abs()<=1).float().mean()):.3f}"
+              f"   3 fark icinde {float((d.abs()<=3).float().mean()):.3f}")

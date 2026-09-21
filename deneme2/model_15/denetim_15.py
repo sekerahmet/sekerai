@@ -1,6 +1,6 @@
 """Yazdigimiz sey calisiyor mu.  Egitim YOK -- yalniz mekanizma."""
 import torch
-from toplama_15 import AD, N, ARTI, ESIT
+from iki_15 import AD, N, ARTI, ESIT
 from model_15 import Yol
 
 ix = lambda *a: torch.tensor(list(a))
