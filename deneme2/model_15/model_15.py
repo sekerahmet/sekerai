@@ -21,51 +21,52 @@ if not torch.cuda.is_available():
     torch.use_deterministic_algorithms(True)
     torch.set_num_threads(1)
 
-# --- OLCULMUS  |  GOREV A: cevap TEK token, sozluk 1003, 2.601 ikili
+# ============================================================
+# AYARLAR.  Ayri bir ayar dosyasi YOK.
+# Iki ayri gorevde olculdu, karistirilmasin:
+#   GOREV A  cevap TEK token   sozluk 1003
+#   GOREV B  cevap RAKAM RAKAM sozluk 13, 251.001 cift, olcut SAYI
+# ============================================================
+
+# --- OLCULDU, GOREV A  (2.601 ikili, olcut: tutulan)
 #   boyut   2:0,051  4:0,088  8:0,841  16:0,901  32:0,878
 #   norm    ACIK 0,782   KAPALI 0,059
 #   pay     softmax 0,289   relu 0,782
 #   lr      0,005:0,008  0,01:0,025  0,02:0,810  0,04:0,930  0,08:0,146
-#           sabit 0,897   cosine->lr/10 0,080
-#   wd x lr  5 tohum, "kac tohumda tutulan > 0,50":
-#           0,01/0,02 1/5   0,01/0,04 5/5
-#           0,03/0,02 4/5   0,03/0,04 5/5 (ort 0,929, en kotu tohum 0,83)
+#           sabit 0,897   cosine->lr/10 0,080   (cosine ZARARLI, cizelge YOK)
+#   lr OLCEGE BAGLI:  2.601 ikili -> 0,04 (0,930)
+#                     251.001     -> 0,004 (0,980); 0,04 ile 0,086'da takiliyor
+#                     veri 96,5 kat, lr 10 kat kucuk.  sqrt(96,5)=9,82.
+#                     TAHMIN lr = 0,04 * sqrt(2601/veri)
+#                     SINIR: yigin da degisti, tek degiskenli yasa DEGIL.
+#   wd      251.001 ikilide:  0,03 OLU (kayip tam ln(1003)'te dondu)
+#                             0,01 calisiyor,  0,001 ezbere kayiyor
+
+# --- OLCULDU, GOREV B  (rakam tokenli, 4000 adim, olcut SAYI)
+#   durum   8:0,0148   16:0,0322   32:0,0342      dirsek 16
+#   esik    kapali 0,0224 -> acik 0,1517  (dolgu "0")
+#           kapali 0,0258 -> acik 0,0356  (dolgu PAD)     EN BUYUK KAZANC
+#   kafa    1:0,0224   4:0,0329
+#   olcek   kapali 0,0224   acik 0,0284
 BOYUT = 16           # token kac sayiyla tarif ediliyor
+DURUM = 16           # s kac sayi
 NORM = True          # |s| = 1
 PAY = False          # False -> relu   True -> softmax
-LR = 0.002           # SABIT.  Cosine OLCULDU ve ZARARLI: 0,897 -> 0,080
-                     #   (ikisinde de hafiza ~1,000; cosine erken sogutup
-                     #    modeli EZBERDE birakiyor).  Bu yuzden cizelge YOK.
-                     #   lr OLCEGE bagli, asagiya bak.
-# --- OLCULMEMIS  -- dikkat cokmesine karsi uc aday (21 Eylul)
-#   Olculen ariza: rakam uretimi ilerledikce dikkat operandlardan
-#   kopuyor.  adim 0'da ilk sayinin agirligi 2,31 -- adim 2'de 0,004.
-#   Toplam agirlik 4,66 -> 1,11, cikti buyuklugu 4,51 -> 0,83,
-#   dogruluk 1,00 -> 0,10.  Uc aday, ucu de relu'dan BAGIMSIZ:
-OLCEK = False        # puan / sqrt(durum) -- transformerdaki gibi
-ESIK = False         # relu(puan + hb), hb OGRENILEN esik
-KAFA = 1             # kac dikkat kafasi
+ESIK = True          # relu(puan + hb), hb OGRENILEN esik
+OLCEK = False        # puan / sqrt(durum).  Kucuk fayda, ESIK ile birlikte
+                     #   olculmedi -- acmadan once olcmek gerek.
+KAFA = 1             # kac dikkat kafasi.  4 kucuk fayda verdi, ayni not.
+LR = 0.002           # SABIT.  Rakam tokenli veride 0,001/0,002/0,004
+                     #   ayirt edilemedi (hepsi ~0,015).
+WD = 0.01            # 0,03 buyuk veride OLDURUYOR, 0,001 ezbere kaydiriyor.
+
+# --- OLCULMEDI
 KATMAN = 1           # kac dikkat BLOGU.  Blok yuvalari GUNCELLER (artik
-                     #   baglanti), havuzlanmis ciktiyi degil -- boylece
+                     #   baglanti, nedensel maske), havuzlanmis ciktiyi degil:
                      #   yuva i, yuva j'nin ZATEN HESAP YAPMIS halini gorur.
-                     #   Derinlik 1'de bilesik hesap yapilamiyor:
-                     #   onlar basamagi butun veri bicimlerinde 0,17-0,31.
-
-WD = 0.03            # ceza.  lr ile birlikte calisiyor: biri zayifsa
-                     #   oteki telafi ediyor, ikisi guclu olunca 5/5.
-
-# --- LR OLCEGE BAGLI  (21 Eylul, Colab)
-#   2.601 ikili   ->  lr 0,04     tutulan 0,930
-#   251.001 ikili ->  lr 0,004    tutulan 0,980   (0,04 ile 0,086'da takiliyor)
-#   veri 96,5 kat buyudu, lr 10 kat kuculdu.  sqrt(96,5) = 9,82.
-#   TAHMIN:  lr = 0,04 * sqrt(2601 / veri)
-#   SINIR: yigin da degisti (1.300 tam -> 25.000), tek degiskenli yasa DEGIL.
-#   wd 0,03 ayni geciste OLDU (kayip tam ln(1003)'te dondu); 0,01 calisiyor.
-
-DURUM = 16           # s kac sayi.  OLCULDU (rakam tokenli, 4000 adim):
-                     #   8: SAYI 0,0148   16: 0,0322   32: 0,0342
-                     #   8->16 +0,017 ama 16->32 +0,002 (parametre 3,4 kat).
-                     #   Dirsek 16.
+                     #   Neden aday: onlar basamagi BUTUN veri bicimlerinde
+                     #   0,17-0,31'de takili, ve ogretmenli gecmis verilse
+                     #   bile duzelmiyor -- bilgi eksikligi, birikme degil.
 
 
 class Yol(nn.Module):
