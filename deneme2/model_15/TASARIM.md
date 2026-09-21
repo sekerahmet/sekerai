@@ -106,6 +106,90 @@ model_14 normalize'i tam bu yüzden koymuştu. **ADIM 2'nin çözmesi
 gereken şey bu** — sırayı görebilen, birleştirebilen, ama 4 adımda
 patlamayan bir güncelleme.
 
+### ADIM 1b — UZUNLUĞUN VE AÇININ ÖNEMİ VAR MI
+
+Kullanıcı sordu. Cevap koordinatlarda değil, **okuma kuralında**.
+Üç aday var, ve önemi olup olmadığını kural belirliyor. Kod:
+`okuma_15.py`.
+
+```
+A  IC CARPIM   argmax <s, x_c>            uzunluk = ONEM PUANI
+B  KOSINUS     argmax <s, x_c / |x_c|>    uzunluk ATILIYOR
+C  EN YAKIN    argmin |s - x_c|           uzunluk + aci = KONUM
+```
+
+Sorulan tek şey: bir şehri kazandıran **herhangi** bir durum var mı.
+
+```
+  sehir        A ic carpim   B kosinus   C en yakin
+  Istanbul       0,164        0,105        0,136
+  Ankara       OKUNAMAZ     OKUNAMAZ       0,021
+  Izmir          0,294        0,298        0,309
+  Bursa          0,113        0,164        0,120
+  Mersin         0,144        0,215        0,166
+  Sivas          0,147        0,099        0,097
+  Adana          0,138        0,055        0,132
+  Konya        OKUNAMAZ       0,063        0,020
+```
+
+**İki kural, daha model kurulmadan ölüyor:**
+
+```
+A  Ankara ve Konya HIC uretilemez.  Sebep: ic carpimda ancak DISBUKEY
+   KABUK KOSESI olan noktalar kazanabilir.  Ikisi de kabugun ICINDE.
+   Ankara 1. ve 3. yolda var -> yol daha basta imkansiz.
+
+B  Ankara HIC uretilemez.  Sebep: x_Istanbul = 2 * x_Ankara, yani
+   uzunluk atilinca AYNI NOKTA oluyorlar.  Berabere kalip kaybediyor.
+
+C  Sekiz sehrin sekizi de okunabiliyor.
+```
+
+### Cevap
+
+**Uzunluğun ve açının ayrı ayrı önemi yok — birlikte KONUM oldukları
+için önemliler.** İki başarısız kural, konumu daha azına indirgediği
+için ölüyor:
+
+```
+kosinus     konumu ACIYA indirgiyor        -> uzunluk farki kayboluyor
+ic carpim   uzunlugu ONEM PUANI yapiyor    -> uzun olan hep kazaniyor,
+                                              icerideki hic kazanamiyor
+en yakin    konumu KONUM olarak birakiyor  -> herkes yasiyor
+```
+
+```
+KARAR:  okuma  =  argmin_c |s - x_c|
+```
+
+### Bunun model_14 için söylediği
+
+model_14 okumayı `argmax <Pi z / |Pi z|, p_w>` ile yapıyor — yani
+**tam olarak B**. Orada patlamamasının tek sebebi `p_w`'nin **rastgele**
+olması: yüksek boyutta rastgele birim vektörlerin hemen hepsi kabuk
+köşesidir ve hiçbiri bir diğeriyle aynı doğrultuda değildir.
+
+> **Kosinus okumasi ANLAMLI koordinatla calismiyor, ANLAMSIZ
+> koordinatla calisiyor.**  Haritaya benzeyen her yerlesim onu kirar.
+
+Bu, ADIM 1'in açtığı "harita mı etiket mi" sorusunu da çözüyor:
+**harita olabilir**, ama ancak `en yakin` okumasıyla.
+
+### Bedeli — yazılıyor, gizlenmiyor
+
+`en yakin` kimseyi öldürmüyor ama eşit de davranmıyor:
+
+```
+Izmir   0,309   duzlemin ucta biri        -- kenardaki sehir, BUYUK hedef
+Ankara  0,021   yuzde iki                 -- iceride kalan sehir, KUCUK hedef
+Konya   0,020
+```
+
+Kabuğun içinde kalan şehirlerin hücresi küçük: durumun oraya **isabet
+etmesi** gerekiyor, yaklaşması yetmiyor. Ankara iki yolumuzda da var.
+Bu bir arıza değil, **doğruluk talebi**: ADIM 2'deki güncelleme
+Ankara'yı 0,021'lik bir hücreye koyabilmeli.
+
 ### Adım 1'in açtığı soru
 
 Koordinatlar **harita mı, etiket mi?**
