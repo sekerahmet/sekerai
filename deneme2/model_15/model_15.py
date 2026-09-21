@@ -43,6 +43,14 @@ COSINE = False
 WD = 0.03            # ceza.  lr ile birlikte calisiyor: biri zayifsa
                      #   oteki telafi ediyor, ikisi guclu olunca 5/5.
 
+# --- LR OLCEGE BAGLI  (21 Eylul, Colab)
+#   2.601 ikili   ->  lr 0,04     tutulan 0,930
+#   251.001 ikili ->  lr 0,004    tutulan 0,980   (0,04 ile 0,086'da takiliyor)
+#   veri 96,5 kat buyudu, lr 10 kat kuculdu.  sqrt(96,5) = 9,82.
+#   TAHMIN:  lr = 0,04 * sqrt(2601 / veri)
+#   SINIR: yigin da degisti (1.300 tam -> 25.000), tek degiskenli yasa DEGIL.
+#   wd 0,03 ayni geciste OLDU (kayip tam ln(1003)'te dondu); 0,01 calisiyor.
+
 # --- OLCULMEMIS  -- tasindi, gerekcesi YOK
 DURUM = 16           # s kac sayi.  Sehir doneminde 6'ydi.
 
