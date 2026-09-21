@@ -1306,6 +1306,63 @@ U  8.192 YUVA AYRILDI, 10'U KULLANILDI -- ve §12c'nin HUKMU ERKENDI
    ```
    Bu sart bir umut degil, egitim logunda gorunen bir sayi -- `capa`
    oraninin izlendigi gibi izlenir.
+V  `BILGI tam` HIC ATESLENEMIYORMUS -- ve bir kosuda GERCEK bir
+   sinyali sifir diye raporladik  (21 Eylul, uretim, EGITIM YOK)
+   Kullanici: *"ama dogru baglamda cevap vermemis ki"* -- 20 ornege
+   bakarken sorulan soru olcunun kendisine gitti.
+
+   `bilgi_puanla` BIREBIR esitlik ariyordu.  Beklenen cevap CIPLAK ad
+   (`sinav_yuzeyi` `_parca`nin 3. elemanini, yani `Y`yi donduruyor);
+   modelin urettigi ise dilbilgisel Turkce, bildirme ekini tasiyor:
+
+   ```
+   beklenen [Agri]           span [Agri -dir]
+   beklenen [Irem Ozturk]    span [Irem Ozturk -tur]
+   beklenen [Melek Yilmaz]   span [Melek Yilmaz -dir]
+   ```
+
+   Yani `tam`in ateslemesi icin modelin adi yazip EK KOYMADAN noktayi
+   basmasi gerekiyordu -- korpusta dilbilgisi disi bir yuzey, ve model
+   tam tersini yapmaya EGITILIYOR.
+
+   DORT KOSU EK-TOLERANSLI YENIDEN PUANLANDI (ayni kontrol noktalari,
+   ayni 7.381 onek; sans 1/1577 = 0,00063):
+   ```
+     kosu                BIREBIR   EK-TOLERANSLI   sans kati
+     t0_d8                0,0001      0,0003         0,4 x
+     t0_d16_hafizasiz     0,0000      0,0004         0,6 x
+     t0_d16_hafizali      0,0000      0,0008         1,3 x
+     t0_d16_12c           0,0000      0,0138        21,8 x
+   ```
+
+   1) ILK UC KOSUDA HATA BIR SEY GIZLEMEMIS.  Ek toleransiyla da sansin
+      altinda ya da tam sansta. O kosular hakkindaki hukumler ozunde
+      DOGRUYMUS.
+   2) **DORDUNCUSUNDE GERCEK BIR SINYAL SIFIR DIYE RAPORLANDI.**
+      §12c, bu kolun sans ustune cikan ILK mimarisi: 21,8 kat.
+      Mutlak deger hala dusuk (%1,38) ama "tam sifir" ile "sansin
+      22 kati" NITEL olarak farkli iki iddia.
+
+   BAGIMSIZ DOGRULAMA -- dogrusal prob, olcuden tamamen ayri:
+   ```
+                      OZNE (gercek/karisik)   CEVAP
+     12c       TAM z  0,133 / 0,000           0,009 / 0,002
+     hafizasiz TAM z  0,045 / 0,001           0,003 / 0,002
+   ```
+   Ozne 2,9 kat, cevap 3 kat iyilesmis.  Iki bagimsiz olcu ayni yonu
+   gosteriyor: hafiza durumun ICERIGINI gercekten degistirdi.
+
+   DUZELTILDI: `bilgi_puanla` kuyruktaki eki IKI TARAFTA da atiyor
+   (`dogruluk` `bicim.ek`i geciriyor).  Morfoloji zaten AYRI bir
+   sutunda olculuyor (`ek`); burasi BILGIYI olcer.
+   KAPI 40 eklendi: dogru cevabi EKIYLE veren bir hal olcude DOGRU
+   sayilmali.  Hicbir kapi bunu goremiyordu cunku hicbiri
+   `bilgi_puanla`yi gercek bir cevapla cagirmiyordu.
+
+   !! BUNUN DERSI, uretim hatasiyla (§12b) AYNI: iki kez ust uste,
+   hukum veren sayiyi ureten yolun KENDISI sinanmamisti. Kapi 37
+   (egitim == uretim) ve kapi 40 (olcu atesleniyor) o iki deligi
+   kapatiyor.
 ```
 
 ---

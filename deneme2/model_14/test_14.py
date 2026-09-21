@@ -1246,6 +1246,50 @@ def _39():
                mn2 / mn))
 
 
+@kapi("40  BILGI OLCUSU ATESLENEBILIYOR MU")
+def _40():
+    """OLCULDU 21 Eylul: `bilgi_puanla` BIREBIR esitlik ariyordu.
+    Beklenen cevap CIPLAK ad (`sinav_yuzeyi` `Y` donduruyor) ama
+    modelin urettigi dilbilgisel Turkce, yani bildirme ekini tasiyor:
+        beklenen [Agri]        span [Agri -dir]
+    `tam` DORT kosuda da 0,0000 verdi ve bu SIFIR diye okundu; ek
+    toleransiyla ucuncu kosu 0,0008, dorduncu 0,0138 (21,8 kat sans
+    ustu).  Yani GERCEK bir sinyal sifir diye raporlandi.
+
+    Hicbir kapi goremiyordu: hepsi `bilgi_puanla`yi ya hic cagirmiyor
+    ya da UYDURMA cikti veriyordu.  Burasi DOGRU cevabi ekiyle
+    birlikte veriyor -- olcu bunu DOGRU saymali."""
+    import olcme_14 as OL
+
+    class S:                                  # minik sahte soru
+        def __init__(self, c, k=()):
+            self.cevap, self.kisayol = c, k
+    BITIS, EK = {9}, {7, 8}                   # 7,8 = ek;  9 = nokta
+    #            cevap        model ne uretti
+    hal = [(S((1, 2)),        [1, 2, 7, 9]),      # dogru + bildirme eki
+           (S((1, 2)),        [1, 2, 9]),         # dogru, eksiz
+           (S((1, 2)),        [3, 4, 7, 9]),      # bambaska
+           (S((1, 2)),        [5, 2, 7, 9]),      # AILE: son parca dogru
+           (S((1, 2), (3,)),  [3, 8, 9]),         # KISAYOL, ekli
+           (S((1, 2)),        [9])]              # BOS
+    r = OL.bilgi_puanla([h[0] for h in hal], [h[1] for h in hal],
+                        BITIS, EK)
+    n = len(hal)
+    assert abs(r["tam"] - 2 / n) < 1e-9, (
+        "ekli ve eksiz DOGRU cevabin ikisi de sayilmali, tam=%.4f" % r["tam"])
+    assert abs(r["aile"] - 1 / n) < 1e-9, "aile %.4f" % r["aile"]
+    assert abs(r["kisayol"] - 1 / n) < 1e-9, "kisayol %.4f" % r["kisayol"]
+    assert abs(r["bos"] - 1 / n) < 1e-9, "bos %.4f" % r["bos"]
+
+    # ek_ix VERILMEZSE eski (bozuk) davranis: ekli olan sayilmaz.
+    r0 = OL.bilgi_puanla([h[0] for h in hal], [h[1] for h in hal], BITIS)
+    assert r0["tam"] < r["tam"], (
+        "ek_ix'siz cagri ekliyi saymamali -- kapi BOS")
+    return ("6 halde  tam %.3f  aile %.3f  kisayol %.3f  bos %.3f;  "
+            "ek_ix'siz eski hal tam %.3f (ekli cevabi KACIRIYOR)"
+            % (r["tam"], r["aile"], r["kisayol"], r["bos"], r0["tam"]))
+
+
 # =====================================================================
 # VERI YOLU  --  kopyanin ve kurulumun kapilari
 # =====================================================================

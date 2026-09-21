@@ -407,10 +407,10 @@ def bicim_puanla(sorular, uretilen, bicim: Bicim, bitis, tip_of=None) -> dict:
     return d
 
 
-def bilgi_puanla(sorular, uretilen, bitis) -> dict:
+def bilgi_puanla(sorular, uretilen, bitis, ek_ix=frozenset()) -> dict:
     """Cumledeki bilgi dogru mu. KIMLIK uzerinden.
 
-        tam      cevap araligi BIREBIR dogru        <- HUKUM
+        tam      cevap araligi dogru                <- HUKUM
         aile     SON parca dogru, varlik yanlis     -- tani
                  480 kisi / 10 soyad: aileyi bulup icinden secmek
                  1/48 = %2,08 verir; bu sutun onu DOGRUDAN sayar
@@ -419,17 +419,36 @@ def bilgi_puanla(sorular, uretilen, bitis) -> dict:
                  soyluyor; sutun o iddiayi SINAR
         bos      hic birim uretmemis                -- bosluga karsi
 
+    !! KUYRUKTAKI EK ATILIR, iki tarafta da.  Onceki hal BIREBIR
+    esitlik ariyordu: beklenen cevap CIPLAK ad (`sinav_yuzeyi` `Y`yi
+    donduruyor) ama modelin urettigi dilbilgisel Turkce, yani
+    bildirme ekini tasiyor -- `[Agri]` vs `[Agri -dir]`.  OLCULDU
+    (21 Eylul): `tam` DORT kosuda da BIREBIR 0,0000 verdi; ek
+    toleransiyla 0,0003 / 0,0004 / 0,0008 / 0,0138.  Ilk uc kosuda
+    fark yoktu (zaten sansin altinda) ama dorduncude GERCEK bir
+    sinyal sifir diye raporlandi.  Kapi 40.
+    Morfoloji ayri bir sutunda zaten olculuyor (`ek`); burasi
+    BILGIYI olcer.
+
     SIRA ONEMLI: kisayol dogru cevabin oneki olabilir, once `tam`."""
+    def kirp(p):
+        p = list(p)
+        while p and int(p[-1]) in ek_ix:
+            p.pop()
+        return tuple(p)
+
     t = a = k = b = 0
     for s, u in zip(sorular, uretilen):
         sp = _span(u, bitis)
         if not sp:
             b += 1
-        elif sp == s.cevap:
+            continue
+        sk, ck = kirp(sp), kirp(tuple(s.cevap))
+        if sk and sk == ck:
             t += 1
-        elif s.kisayol and sp == s.kisayol:
+        elif s.kisayol and sk == kirp(tuple(s.kisayol)):
             k += 1
-        elif s.cevap and sp[-1] == s.cevap[-1]:
+        elif ck and sk and sk[-1] == ck[-1]:
             a += 1
     n = max(1, len(sorular))
     return dict(tam=t / n, aile=a / n, kisayol=k / n, bos=b / n, n=n)
@@ -483,7 +502,10 @@ def uret_toplu(mdl, onekler, n_yeni=10, r=0.25, bs=2048, dev="cuda"):
 # =====================================================================
 def dogruluk(mdl, bicim: Bicim, sorular: dict, bitis, tip_of=None,
              n_yeni=10, r=0.25, dev="cuda") -> dict:
-    """Tek cagri, tam agac. BICIM ayni uretimden okunur."""
+    """Tek cagri, tam agac. BICIM ayni uretimden okunur.
+
+    `bicim.ek` BILGIYE de gidiyor: kuyruktaki bildirme eki iki
+    tarafta da atilsin diye (bkz. `bilgi_puanla`)."""
     s = {"BICIM": {}, "BILGI": {}}
     for grup in ("OGRETILEN", "CIKARIM"):
         q = sorular.get(grup) or []
@@ -491,7 +513,7 @@ def dogruluk(mdl, bicim: Bicim, sorular: dict, bitis, tip_of=None,
             continue
         u = uret_toplu(mdl, [x.onek for x in q], n_yeni, r, dev=dev)
         s["BICIM"][grup] = bicim_puanla(q, u, bicim, bitis, tip_of)
-        s["BILGI"][grup] = bilgi_puanla(q, u, bitis)
+        s["BILGI"][grup] = bilgi_puanla(q, u, bitis, bicim.ek)
     return s
 
 
