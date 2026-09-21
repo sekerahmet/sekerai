@@ -1,4 +1,4 @@
-"""Ozyineleme gercekten oluyor mu -- ciktı bir sonraki adimin girdisi mi."""
+"""Yazdigimiz sey calisiyor mu.  Hesap YOK, egitim YOK -- yalniz mekanizma."""
 import torch
 from sehir_15 import AD, dizi, N
 from model_15 import Yol
