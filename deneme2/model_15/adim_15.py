@@ -1,6 +1,6 @@
 """Bir islemin TAM hesabi -- her ara sayi basiliyor."""
 import torch
-from iki_15 import AD, N, ARTI, ESIT
+from veri_15 import AD, N, ARTI, ESIT
 from model_15 import Yol
 
 m = Yol(N, tohum=0)        # ayarlar model_15'ten

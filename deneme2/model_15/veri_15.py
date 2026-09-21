@@ -1,4 +1,4 @@
-"""SADECE IKI TERIM.  a + b = c,  a,b in 0..50.
+"""VERI + EGITIM + OLCUM.  Iki terimli toplama.  a + b = c,  a,b in 0..50.
 
 Butun ikililer: 51 x 51 = 2601.  Bir kismiyla egit, GORULMEMISLERI sor.
 Cevap araligi 0..100, sozlugun tamami kullaniliyor.
