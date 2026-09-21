@@ -728,3 +728,44 @@ AYARLAR, hepsi gerekceli:
   HAF_BUTCE     0,30     olculen varlik payi 0,2643'ten
   BATCH   8192 -> 2048   (B*L,M) bellegi onceki kosuyla AYNI
   parametre 285.760 -> 744.512  (x2,61)
+
+KOSU: §12c  (21 Eylul, commit f1b0ac9, 725 sn + 23 sn)
+Capa KALDIRILDI (r=0), VQ kaldirildi (a2=0), C serbest anahtar
+(M=8192), okuma TOPLAMSAL, kullanim BEDELLI (a4=2,0, butce 0,30).
+
+```
+              d=8      hafizasiz   §12b      §12c
+kalip        0,0840    0,2372     0,0000    0,7223
+ek           0,2276    0,4344     0,0000    0,9249
+kapanmadi    0,6967    0,3413     1,0000    0,0099
+BILGI tam    0,0000    0,0000     0,0000    0,0000
+```
+
+DIL COZULDU SAYILIR -- ve TAKAS DEGIL, cunku BILGI zaten 0'di.
+Yeni taban: kalip 0,7223  ek 0,9249  kapanmadi 0,0099.
+
+BUTCE TUTTU: ort|m| 0,3068 -> 0,3086, tavan 0,30.  §12b'de kacan
+sey kilitlendi.
+
+BILGI tam = 0,0000  ->  ONCEDEN KAYDA GORE MIMARI KOL KAPANDI.
+Adres tavani 1,000, kapasite 8.192 >= 7.381, fiyat dogru, butce
+tuttu.  Ucu de saglandi ve bilgi yine yok.
+
+TASARIMIN KENDI IDDIASI CURUDU:
+  ort|m| 0,3482   VARLIK 0,3094   DIGER 0,3799   oran 0,81
+Hafiza varlik konumlarinda DAHA AZ atesliyor.  Butcesinin tamamini
+DILE harcadi.  Butce TOPLAMI sinirladi, DAGILIMI zorlamadi.
+§5.1/O'nun "alinmamis odul" argumaninin siniri da bu: alinmamis
+odul ancak ALINABILIYORSA bir sey ifade ediyor.
+
+KAYIT KUSURU: `duzen` 147,5 cikti; kayitta "1128 = butce tuttu,
+45 = ikame" yaziyordu, ikisine de uymuyor.  yozlasma 0,0064 ve
+BICIM sicramasi §12b'deki otomat cokusunun burada OLMADIGINI
+soyluyor.  Kayit ara bolgeyi ongormemis.
+
+YEDEK: t0_d16_12c/.  Drive'da bes kosu.
+
+SIRADAKI KARAR kapasiteyle ilgili DEGIL: hafizanin DAGILIMINI
+zorlamak ayri bir soru, ama zorlamak varlik konumlarini
+ETIKETLEMEK demek (L2) ve o deneyin kendi sorusunu zayiflatiyor
+(§5.1/N).  Karar bu takas.

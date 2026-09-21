@@ -1680,12 +1680,14 @@ durumundan **cevabı** getirsin diye tasarlandı, yolu yürüsün diye
 değil. Şu anki kod onu her adımda okuyor — bu kodun kendi hatası,
 tasarımın değil.
 
-## 12c. OLGU ARAMASI — TASARIM 2  (21 Eylül, KOD YAZILMADI)
+## 12c. OLGU ARAMASI — TASARIM 2, KOD, ve KOŞU  (21 Eylül)
 
 > `[Ö]` ölçüldü · `[H]` hesap · `[Ç]` çıkarım, sınanmadı.
 > §12b **koşuldu ve düştü**. Bu tasarım onun üç ölçülen arızasına
-> karşı kuruldu, sonra kâğıtta sınandı ve **iki kere düzeltildi**
-> (§5.1/T ve aşağıdaki hesaplar). Düzeltmeler yerinde duruyor.
+> karşı kuruldu, kâğıtta sınandı, iki kere düzeltildi (§5.1/T ve
+> aşağıdaki hesaplar), sonra **koşuldu**. Tasarım aşağıda OLDUĞU
+> GİBİ duruyor; hüküm bölümün SONUNDA. **DİL sıçradı, BİLGİ
+> sıfır kaldı, kol kapandı.**
 
 ### Tek cümle
 
@@ -1855,6 +1857,95 @@ NE YAPILMAZ
    `d` oynatilmaz -- §5.1/T'ye gore adres icin onemsiz zaten.
 ```
 
+### SONUÇ — KOŞULDU.  DİL SIÇRADI, BİLGİ SIFIR, KOL KAPANDI
+(21 Eylül, commit `f1b0ac9`, 725 sn eğitim + 23 sn ölçüm)
+
+Önceden kayıt uygulandı: tek paket, `d = 16` kaldı, `M / tau / a4`
+taranmadı. **Ölçüm bu kez geçerli** — §12b'yi geçersiz kılan üretim
+hatası düzeltildi ve kapı 37 ile bağlandı (`soru kapısı 200/200`,
+`yozlaşma 0,0064`, yani çıktı dejenere değil).
+
+```
+BICIM       kalip    ek       tip      kapanmadi  yozlasma  (ek n)
+  OGRETILEN 0,7223   0,9249   0,2553   0,0099     0,0064     6.816
+  CIKARIM   0,7180   0,9190   0,2447   0,0122     0,0058    11.590
+BILGI       tam      aile     kisayol  bos
+  OGRETILEN 0,0000   0,0000   0,0000   0,0002
+  CIKARIM   0,0000   0,0001   0,0000   0,0000
+```
+
+**1) DİL — projenin gördüğü en iyi sonuç, ve TAKAS DEĞİL.**
+
+```
+              d=8      hafizasiz d=16   §12b      §12c
+kalip        0,0840       0,2372       0,0000    0,7223
+ek           0,2276       0,4344       0,0000    0,9249
+tip          0,1542       0,0998       0,3962    0,2553
+kapanmadi    0,6967       0,3413       1,0000    0,0099
+```
+
+Cümlelerin %99'u kapanıyor, ekler %92 doğru. Bozulan alan YOK:
+BİLGİ zaten 0,0000'dı ve 0,0000 kaldı. Kural gereği takas diye
+yazılmaz — **tek yönlü kazanç**.
+
+**2) BÜTÇE TUTTU.** `ort |m|` beş epok boyunca 0,3068 → 0,3086;
+tavan 0,30. §12b'de kaçan şey burada kilitlendi. `|V|max` 2,4 → 5,6:
+model daha çok kullanmak istiyor, fiyat bırakmıyor.
+
+**3) BİLGİ tam = 0,0000.  ÖNCEDEN KAYDA GÖRE MİMARİ KOL KAPANIR.**
+Kayıtta aynen şöyle yazıyordu: *"= 0,0000 ise adres kusursuz,
+kapasite yeterli, fiyat doğru, ve HÂLÂ yok."* Üçü de sağlandı:
+
+```
+adres      tavan 1,000 (§5.1/T, capa kapali)
+kapasite   8.192 yuva >= 7.381 olgu
+fiyat      uye'nin %49'u varlik konumlarinda ALINMAMIS (§5.1/O)
+butce      tuttu (yukarida)
+```
+
+**4) TASARIMIN KENDİ İDDİASI ÇÜRÜDÜ — ve sebebi söylüyor.**
+§12c "hafıza varlık konumlarında ateşleyecek" diyordu; ölçüldü:
+
+```
+ort|m| 0,3482    VARLIK 0,3094    DIGER 0,3799    oran 0,81
+```
+
+Varlık konumlarında geri kalandan **daha AZ** ateşliyor. Hafıza
+çalıştı ama bütçesinin tamamını **dile** harcadı.
+
+`[H]` Neden: dil konumları puanlananların %74'ü ve getirileri kolay;
+varlık konumları %26 ve orada problem gerçekten zor. Bütçe TOPLAMI
+sınırladı, **DAĞILIMI zorlamadı**. §5.1/O'nun "alınmamış ödül"
+argümanının sınırı da buymuş: alınmamış ödül ancak **alınabiliyorsa**
+bir şey ifade ediyor; optimizasyon kolay %74'e gitti.
+
+**5) `duzen` 147,5 — kayıtta yazan iki değerin ARASINDA.**
+"1128 = bütçe tuttu, 45 = ikame" demiştim; 147 ikisine de uymuyor ve
+45'e daha yakın. Tek başına okunamaz; `yozlaşma 0,0064` ve BİÇİM'in
+sıçraması §12b'deki otomat çöküşünün BURADA OLMADIĞINI söylüyor.
+Kayıt bu ara bölgeyi öngörmemişti — **kayıt kusuru, sonuç değil.**
+
+### NE KAPANDI, NE AÇIK KALDI
+
+```
+KAPANDI  "olgu aramasini KAPASITE + ADRES + FIYAT ile cozeriz" kolu.
+         Ucu de saglandi, BILGI yine 0,0000.
+         Yeniden acilmasi icin gereken kanit (§5.1/O olcutu):
+         "model varlik konumlarinda sans ustune cikabiliyor ama
+         cikmiyor" gosterilmeli.  Bu kosu bunun TERSINI gosterdi --
+         model oraya hic gitmiyor.
+
+ACIK     Hafizanin DAGILIMINI zorlamak AYRI bir soru ve bu kosu onu
+         sinamadi.  Ama sinamak icin varlik konumlarini ETIKETLEMEK
+         gerekir (L2) -- ve o, deneyin kendi sorusunu zayiflatiyor
+         (§5.1/N).  Bir sonraki karar bu takasla ilgili, kapasiteyle
+         degil.
+
+YAN      DIL artik cozulmus sayilir.  Bundan sonraki her kol, dili
+         BOZMADIGINI gostermek zorunda -- yeni bir taban var:
+         kalip 0,7223  ek 0,9249  kapanmadi 0,0099.
+```
+
 ---
 
 ## 13. Kod ↔ denklem mutabakatı
@@ -1891,11 +1982,11 @@ K11 delta = 0,40 DEGISMIYOR -- incelendi       K    §5.1/A
 
 T1  olcum ACGOZLU kosuyor, §7 ISIN diyor       T    §7, A7
 T2  §9.7 "r, delta egitimde yok" YANLIS        T    §9.7 -- duzeltildi
-T3  §3.2 reddetme kodda YOK                    T    A9
-    -> §12c capayi kaldiriyor; kod uyeligi diye
-       bir sey kalmayinca reddetme BU YOLLA
-       UYGULANAMAZ.  Tasarim gecerse T3 KAPANIR
-       ve reddetme AYRI bir mekanizma ister.
+T3  §3.2 reddetme kodda YOK                    K    A9
+    -> §12c KOSULDU: capa kalkti (r=0).  Kod
+       uyeligi diye bir sey kalmadi, reddetme BU
+       YOLLA artik UYGULANAMAZ.  T3 KAPANDI;
+       reddetme AYRI bir mekanizma ister.
 
 A1  a1/a2/a3 OLCULMEDEN secildi                A    §5.1/B, K, M
     (uye ORTALAMA, dis TOPLAM; ve OLCULDU:
@@ -1912,10 +2003,15 @@ A12 d TEK BASINA OYNATILMAZ -- TAKAS           A    §5.1/L
     Gizli alan TASIYICI; d buyuyunce kuculuyor.
 A11 OLGU ARAMASI MIMARIDE YOK                  A    §3.1b, §5.1/S
     -> §12b: tasarim + kod + KOSU.  DUSTU.
-    -> §12c: TASARIM 2, uc arizaya karsi kuruldu.
-       SAYILDI (§5.1/S): Pi R_r 376 serbestlik,
-       4.620 kisit -- arama R_r'nin ICINDE OLAMAZ.
-       Adres zp (= ozne,iliski), tavan 0,235.
+    -> §12c: capa kaldirildi, toplamsal hafiza
+       konuldu, KOSULDU.  DIL SICRADI (kapanmadi
+       0,3413 -> 0,0099) ama BILGI 0,0000 KALDI.
+       Adres kusursuz (tavan 1,000), kapasite
+       yeterli (8.192 yuva), fiyat dogru, butce
+       tuttu -- ve hala yok.  KAPASITE+ADRES+FIYAT
+       KOLU KAPANDI (onceden kayit geregi).
+       Sebep olculdu: hafiza butcesini DILE
+       harcadi (varlik 0,3094 / diger 0,3799).
        BILGI tam 0,0000 kaldi, BICIM coktu;
        hafiza R'yi IKAME etti (duzen 3057->45).
        Mimaride hala YOK -- ve eklerken yolu
