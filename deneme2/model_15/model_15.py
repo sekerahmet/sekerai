@@ -43,6 +43,11 @@ class Yol(nn.Module):
         return self.E[w].reshape(-1)
 
 
+    def oku_yol(self, v):
+        """GECICI -- ADIM 3 kararli degil.  Son sehrin golgesine en yakin token.
+        Burada yalniz ozyineleme denetlenebilsin diye var."""
+        return int(self.oku(torch.cat([v[-2:], torch.zeros(self.durum - 2)])))
+
     def ekle(self, v, c):
         """Yola bir sehir ekle -- GUZERGAH BUYUR, yenisi bu olur."""
         return torch.cat([v, self.E[c]])
