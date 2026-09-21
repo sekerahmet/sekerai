@@ -13,10 +13,12 @@ g = torch.Generator().manual_seed(7)
 # T[a][b] = a'dan sonra b'ye gelindiyse SIRADAKI
 T = torch.randint(0, S, (S, S), generator=g)
 # bazi ciftler yolu bitirir
-BIT = torch.rand(S, S, generator=g) < 0.22
+# 0.22'de rotalar kisaliyordu ve cevaplarin %34'u DUR oluyordu --
+# "hep DUR de" diyen model tutulanda 0,394 aliyordu.  0.08 ile rota uzuyor.
+BIT = torch.rand(S, S, generator=g) < 0.08
 
 
-def uret_rota(bas, ikinci, en_fazla=8):
+def uret_rota(bas, ikinci, en_fazla=14):
     """BIT tetiklenmeden en_fazla'ya ulasirsa rota ATILIR -- yoksa
     ayni (a,b) cifti bir yerde devam, baska yerde DUR verirdi."""
     r = [bas, ikinci]
@@ -70,6 +72,15 @@ def _rapor():
         print(f"  {ad:<4s} {len(d):8d}   {bel:10d}   {enk:8d}")
     print()
     print("  BELIRSIZ = o kadar geriye bakmak YETMIYOR")
+    print()
+    from collections import Counter
+    c = Counter(h for _, h in ORNEK)
+    print(f"CEVAP DAGILIMI   DUR payi {c[DI]/len(ORNEK):.3f}"
+          f"   -> 'HEP DUR DE' TABANI")
+    ce = Counter(tuple(o[-2:]) for o, _ in ORNEK)
+    tek = sum(1 for v in ce.values() if v == 1)
+    print(f"IKILILER  {len(ce)} ayri   tek kez gecen {tek}"
+          f" ({tek/len(ce):.3f})   ortalama {len(ORNEK)/len(ce):.1f} kez")
 
 
 if __name__ == "__main__":

@@ -28,6 +28,13 @@ def obek(S):
     return [(torch.tensor(w), torch.tensor(h)) for w, h in d.values()]
 
 
+def taban(TU):
+    """Hicbir sey ogrenmeyen model: HEP en sik cevabi soyler."""
+    from collections import Counter
+    c = Counter(h for _, h in TU)
+    return c.most_common(1)[0][1] / len(TU)
+
+
 def tavan(EG, TU):
     """Kurali EZBERLEYEN bir modelin tutulanda alabilecegi en iyi sonuc."""
     c = {tuple(o[-2:]): h for o, h in EG}
@@ -62,7 +69,8 @@ def kos(norm, wd, tohum):
 
 eg0, tu0 = bol(0)
 print(f"ROTA {len(ROTA)}   egitim ornegi {len(eg0)}   tutulan {len(tu0)}")
-print(f"TAVAN (5 tohum ort) {statistics.mean(tavan(*bol(t)) for t in range(TOHUM)):.3f}")
+print(f"TABAN (hep en sik cevap)  {statistics.mean(taban(bol(t)[1]) for t in range(TOHUM)):.3f}")
+print(f"TAVAN (kurali ezberleyen) {statistics.mean(tavan(*bol(t)) for t in range(TOHUM)):.3f}")
 print()
 print("                      egitim            tutulan")
 for norm in (False, True):
