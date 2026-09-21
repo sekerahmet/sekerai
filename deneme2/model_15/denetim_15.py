@@ -31,10 +31,9 @@ with torch.no_grad():
     print(f"  53+65 / 35+65   fark {f2:.6f}   cevap FARKLI (118 != 100)")
     assert f2 > 1e-6, "SAYI ICINDEKI SIRA GORUNMUYOR -- yol bir TORBA"
     print("  GECTI")
-
     print("\nAYNI TOKEN IKI YERDE  --  ayri PUAN aliyor mu")
-    print("  (agirliga degil PUANA bakilir: relu ikisini de sifirlamis
-           olabilir, o zaman fark gorunmez ama mekanizma calisiyordur)")
+    print("  Agirliga degil PUANA bakilir -- relu ikisini de sifirlamis")
+    print("  olabilir; o zaman fark gorunmez ama mekanizma calisiyordur.")
     w = ix(4, ARTI, 7, ARTI, 4, ESIT)
     Y = m.yol(w[None])[0]
     q = Y[-1] @ m.Wq
@@ -44,4 +43,4 @@ with torch.no_grad():
         print(f"  yuva {i} {AD[t]:<3s} puan {float(pu[i]):+8.3f}")
     d = abs(float(pu[y[0]] - pu[y[1]]))
     assert d > 1e-6, "iki kopya AYIRT EDILMIYOR"
-    print(f"  iki '4' puan farki {d:.6f}   GECTI")
+    print(f"  iki 4 puan farki {d:.6f}   GECTI")
