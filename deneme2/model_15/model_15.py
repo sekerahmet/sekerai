@@ -9,7 +9,12 @@ ve 22 Eylul: "E1 + 6 = E2 oluyor.  ana tasarimin kalbi bu."
             YER bilgi tasiyor:  "_ 3 4 + _ 5 6 =" ile "_ _ 3 + 4 5 6 ="
             ayni token TORBASINI verir ama farkli sayilardir (34+56=90,
             3+456=459).  P olmadan model ikisini ayirt edemiyordu.
-  yol       E[w_j] + P[j]  ...                yuvalar
+  yol       yuva_j = E[w_j] + P[j]            konum + yer
+  ozet      s_j = normalize(A @ s_{j-1} + yuva_j)
+            Her yuva hem KENDINI hem ONEKINI tasir.  A PAYLASIMLI tek
+            matris -- token diziye kendi E'siyle giriyor, ayri bir
+            b[token] yok.  (Eski surumde M[token]/b[token] vardi ve E
+            girdiye hic girmiyordu: cos(b,E)=0,174, rastgeleyle ayni.)
   soru      son yuva sorar:  q = E[w_son] @ Wq
   cevap     her yuva Wk ile puanlanir, Wv ile katki verir
   agirlik   relu(puan + hb) -- softmax DEGIL.  1'e toplanmak zorunda olsaydi
@@ -19,6 +24,7 @@ ve 22 Eylul: "E1 + 6 = E2 oluyor.  ana tasarimin kalbi bu."
 """
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 # BELIRLENIMCI KOSU.  Cok iplikli toplama sirasi her kosuda degisiyordu;
 # ondalik farklar buyuyup sonucu ziplatiyordu.  GPU'da bazi cekirdekler
@@ -70,6 +76,13 @@ WD = 0.01
 #   arasinda cos = 0,174 -- rastgele 16 boyutta beklenen 0,199.
 #   Yani giren temsil ile cikan temsil birbirinden habersizdi.
 #
+# OZET (A) NEDEN VAR -- OLCULDU, 22 Eylul, 4000 adim, ayni veri:
+#   yalniz E+P, ozet YOK :  yuva 1,0000  0,1810  0,1024  0,0987
+#   eski M/b ozyineleme  :  yuva 1,0000  0,9416  0,4250  0,1207  (8000 adim)
+#   Yani "her yuva kendi ONEGINI tasisin" kismi belirleyici.  Sadece
+#   yer kodu vermek yetmiyor: sira gorunur oluyor ama tek dikkat turu
+#   onu kullanamiyor.  A bu ozeti PAYLASIMLI tek matrisle geri getiriyor.
+#
 # ACIK SORUN (22 Eylul, olculdu -- denetim_15):
 #   Yol yalniz KONUM LISTESI oldugundan dikkat onu bir TORBA gibi okuyor.
 #     53+65 / 65+53   fark 0,000002   cevap AYNI olmali    -> DOGRU
@@ -100,6 +113,9 @@ class Yol(nn.Module):
         o = boyut ** -0.5
         self.E = nn.Parameter(r(n, boyut))              # token -> KONUM
         self.P = nn.Parameter(r(enuzun, boyut) * o)     # yuva -> YER
+        self.A = nn.Parameter(torch.eye(boyut) + 0.1 * r(boyut, boyut))
+        #   A: ozet matrisi, PAYLASIMLI (token basina degil).  Birim
+        #   matrise yakin basliyor -> baslangicta ozet ~ birikimli toplam.
         #   P, E ile AYNI uzayda ve ona EKLENIYOR; o yuzden E'yi bastirmasin
         #   diye o=1/sqrt(boyut) ile olcekli basliyor (|P| ~ 1, |E| ~ 4).
         self.Wq = nn.Parameter(r(boyut, boyut) * o)     # son yuva -> soru
@@ -113,10 +129,21 @@ class Yol(nn.Module):
         assert T <= self.P.shape[0], f"yol {T} yuva, ENUZUN {self.P.shape[0]}"
         return self.E[w] + self.P[:T]
 
+    def ozet(self, Y):
+        """Y: (B,T,boyut) -> (B,T,boyut).  s_j = normalize(A s_{j-1} + yuva_j).
+        Her yuva kendi ONEGINI tasir; dikkat isterse hami isterse ozeti okur."""
+        B, T, C = Y.shape
+        s = Y.new_zeros(B, C)
+        iz = []
+        for j in range(T):
+            s = F.normalize(s @ self.A.T + Y[:, j], dim=-1)
+            iz.append(s)
+        return torch.stack(iz, 1)
+
     def dikkat(self, w):
         """Son yuva sorar, butun yuvalar cevaplar."""
         tek = w.dim() == 1
-        Y = self.yol(w[None] if tek else w)             # (B,T,boyut)
+        Y = self.ozet(self.yol(w[None] if tek else w))  # (B,T,boyut)
         q = Y[:, -1] @ self.Wq
         pu = (Y @ self.Wk) @ q.unsqueeze(-1)
         pu = pu.squeeze(-1) + self.hb
