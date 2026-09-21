@@ -515,7 +515,14 @@ def _25():
 
 
 class _Buyuk(torch.overrides.TorchFunctionMode):
-    """Esikten buyuk her tensor uretimini kaydeder (ad, sekil, grad)."""
+    """Esikten buyuk her tensor uretimini kaydeder (ad, sekil, grad).
+
+    !! YERINDE ISLEM TAHSIS ETMEZ.  `add_` / `relu_` kendi tensorunu
+    dondurur ve buraya AYRI bir olay olarak duser, ama yeni bellek
+    ayirmaz.  Bu kapilarin olctugu sey BELLEK oldugu icin `tahsis()`
+    onlari eliyor -- ad sonu `_` olanlar.  (21 Eylul: ReLU kapisi
+    yerinde yazilinca kapi 36 sayiyi 3 kat gorup dustu; sayilan sey
+    yanlisti, kod degil.)"""
 
     def __init__(self, esik):
         self.esik, self.v = esik, []
@@ -525,6 +532,13 @@ class _Buyuk(torch.overrides.TorchFunctionMode):
         if isinstance(o, torch.Tensor) and o.numel() >= self.esik:
             self.v.append((f.__name__, tuple(o.shape), o.requires_grad))
         return o
+
+    def tahsis(self, sekil=None, grad=None):
+        """YENI BELLEK ayiran olaylar."""
+        return [x for x in self.v
+                if not x[0].endswith("_")
+                and (sekil is None or x[1] == sekil)
+                and (grad is None or x[2] == grad)]
 
 
 @kapi("26  SICAK DONGU -- buyuk gecici tensor SAYISI")
@@ -541,8 +555,12 @@ def _26():
                   boyunca kosar, puanlanmayan yalniz KAYIP tarafi.
                   Ve HICBIRI requires_grad DEGIL.
                   `k` bir indeks, `vur` bir bool; aramadan geri hicbir
-                  sey akmaz. Gradyanli olsaydi 15 x 67 MB geri gecise
-                  kadar TUTULURDU."""
+                  sey akmaz.
+
+    !! BU KAPI HAFIZASIZ YOLU SINIYOR.  Hafiza ACIKKEN kapi ReLU ve
+    skor matrisi GRADYANLI olmak ZORUNDA (§12c/Tasarim 4) -- orada
+    sayi 0 degil, adim basina 1.  Onu KAPI 36/4 kilitliyor.
+    Yani "gradyanli 0" EVRENSEL DEGIL, hafizasiz yolun sarti."""
     import ayar_14 as AY
     n, D, d, K, B, L, W = 451, 32, 8, 2048, 512, 16, AY.ISINMA
     tam = torch.zeros(n, dtype=torch.bool)
@@ -1013,12 +1031,12 @@ def _36():
     import ayar_14 as AY
     n, D, d, K, B, L = 80, 16, 8, 64, 48, 10
     ort = dict(n=n, D=D, d=d, K=K, tam=torch.ones(n, dtype=torch.bool))
+    HB = AY.HAF_B0
     g = torch.Generator().manual_seed(36)
     X = torch.randint(0, n, (B, L), generator=g)
 
     m0 = M.Yol(**ort)                                   # hafizasiz
-    mh = M.Yol(**ort, hafiza=True, haf_n=AY.HAFIZA_N,
-               haf_tau=AY.HAFIZA_TAU)
+    mh = M.Yol(**ort, hafiza=True, haf_b0=HB)
     assert mh.V is not None and float(mh.V.abs().max()) == 0.0,         "V SIFIRDAN baslamali -- guvenli baslangic bozulmus"
 
     # 1  V = 0 -> OZDES
@@ -1071,7 +1089,7 @@ def _36():
         "HAFIZA ACIK iken §3.1 tutmamali -- tutuyorsa hafiza capa "
         "ONCESI durumdan adreslenmiyor, yani ozneyi gormuyor")
 
-    # 3b HIZALAMA -- a[b,i] agirligi V[kn[b,i]] degeriyle mi eslesiyor.
+    # 3b HIZALAMA -- kapi ReLU(<zp,C> + hb) @ V'yi BIREBIR uyguluyor mu.
     #    Bir boyut kaysa model yine "calisiyor" gorunurdu ve yukaridaki
     #    kontrollerin HICBIRI gormezdi.  Ic ice DONGUYLE yeniden kurup
     #    karsilastiriyoruz.
@@ -1079,28 +1097,37 @@ def _36():
         R2, C2, P2 = mh.donme(), mh.kod(), mh.p
         z0 = P2.new_zeros(B, D); z0[:, :d] = P2[X[:, 0]]
         zp = torch.bmm(R2[X[:, 0]], z0.unsqueeze(-1)).squeeze(-1)
-        sa = zp @ C2.t()
-        kn = sa.topk(mh.haf_n, 1).indices
-        aw = torch.softmax((C2[kn] * zp[:, None]).sum(-1) / mh.haf_tau, 1)
-        mem = (aw[..., None] * F.embedding(kn, mh.V)).sum(1)
+        gk = F.relu(zp @ C2.t() + mh.hb)
+        mem = gk @ mh.V
         mem2 = torch.zeros(B, D)
         for bb in range(B):
-            for ii in range(mh.haf_n):
-                mem2[bb] += float(aw[bb, ii]) * mh.V[int(kn[bb, ii])]
-    assert torch.allclose(aw.sum(1), torch.ones(B), atol=1e-5),         "attention agirliklari 1'e toplanmiyor"
-    assert bool((aw.argmax(1) == sa.gather(1, kn).argmax(1)).all()),         "en buyuk agirlik EN BUYUK ic carpima denk gelmiyor -- softmax "        "yanlis eksende"
+            for ii in gk[bb].nonzero().flatten().tolist():
+                mem2[bb] += float(gk[bb, ii]) * mh.V[ii]
+    assert bool((gk >= 0).all()), "ReLU negatif deger uretti"
     hz = float((mem - mem2).abs().max())
-    assert hz < 1e-5, ("HIZALAMA BOZUK: a[b,i] ile V[kn[b,i]] eslesmiyor, "
+    assert hz < 1e-4, ("HIZALAMA BOZUK: g[b,i] ile V[i] eslesmiyor, "
                        "fark %.2e" % hz)
 
-    # 4  gradyanli (B,K) EKLENMEDI
+    # 4  gradyanli (B,K) sayisi: ADIM BASINA TAM BIR TANE
+    #    §12c/Tasarim 4 bunu BILEREK degistirdi: ReLU kapisi butun K
+    #    uzerinde calisiyor, yani skor matrisi artik gradyanli ve
+    #    geri gecis icin tutuluyor.  Kapi KALDIRILMADI, SARTI degisti:
+    #    kaza ile UCE cikmasini engelliyor.
+    #    HESAP  B=2048, K=8192 -> her tensor 67 MB.
+    #           adim basina 1 -> 23 adimda 1,54 GB   (L4'te 23,7 GB)
+    #           adim basina 3 -> 4,63 GB.  `sa.add_().relu_()` yerinde
+    #           calistigi icin BIR tane.
     with _Buyuk(B * K) as sk:
         mh.kayip(X, isin=2)
-    grad = [x for x in sk.v if x[1] == (B, K) and x[2]]
-    assert not grad, "%d gradyanli (B,K) tensor -- hafiza sicak donguyu "        "bozuyor (kapi 26)" % len(grad)
+    grad = sk.tahsis((B, K), True)
+    assert len(grad) == L - 1, (
+        "adim basina TAM BIR gradyanli (B,K) TAHSISI bekleniyor: %d "
+        "adimda %d tane.  Yerinde islem bozulduysa bellek 3 katina "
+        "cikar (67 MB -> 201 MB/adim).  Tahsis edenler: %s"
+        % (L - 1, len(grad), [x[0] for x in grad]))
     return ("V=0 ozdes (%.1e);  V dolu fark %.3f, |z|=1 sapma %.1e;  "
             "§3.1 (ayni kod, adim %d, zp farki %.3f) kapali %.1e "
-            "ACIK %.3f;  hizalama %.1e;  gradyanli (B,K) 0"
+            "ACIK %.3f;  hizalama %.1e;  gradyanli (B,K) adim basina 1"
             % (e, f, nz, j, dzp, ayni0, aynih, hz))
 
 
@@ -1119,7 +1146,7 @@ def _37():
     n, D, d, K, B, L = 60, 16, 8, 48, 6, 9
     g = torch.Generator().manual_seed(37)
     m = M.Yol(n=n, D=D, d=d, K=K, tam=torch.ones(n, dtype=torch.bool),
-              hafiza=True, haf_n=4, haf_tau=0.02)
+              hafiza=True)
     with torch.no_grad():                  # V = 0 olsa fark GORUNMEZDI
         m.V.normal_(0, 0.3, generator=g)
     X = torch.randint(0, n, (B, L), generator=g)
@@ -1165,7 +1192,7 @@ def _38():
     n, D, d, K, B, L = 60, 16, 8, 48, 32, 10
     g = torch.Generator().manual_seed(38)
     m = M.Yol(n=n, D=D, d=d, K=K, tam=torch.ones(n, dtype=torch.bool),
-              hafiza=True, haf_n=4)
+              hafiza=True)
     X = torch.randint(0, n, (B, L), generator=g)
 
     assert M.Yol.esik(0.0) == 2.0, "r=0 esigi 2,0 olmali (fp32 tasmasi)"
@@ -1212,7 +1239,7 @@ def _39():
     n, D, d, K, B, L = 60, 16, 8, 48, 24, 8
     g = torch.Generator().manual_seed(39)
     m = M.Yol(n=n, D=D, d=d, K=K, tam=torch.ones(n, dtype=torch.bool),
-              hafiza=True, haf_n=4)
+              hafiza=True)
     X = torch.randint(0, n, (B, L), generator=g)
     ort = dict(a1=0.0, a2=0.0, a3=0.0, r=0.0, isin=2)
 
@@ -1299,71 +1326,136 @@ def _40():
             % (r["tam"], r["aile"], r["kisayol"], r["bos"], r0["tam"]))
 
 
-@kapi("41  YUK DENGELEME -- deger duzeyinde, ve ONKOSUL izleniyor")
+@kapi("41  ReLU KAPISI -- yarisma YOK, ve seyreklik HESAPLANDIGI gibi")
 def _41():
-    """§12c/S1.  OLCULDU (§5.1/U): 8.192 yuvanin 10'u atesliyor.
-    Terim:  denge = K * sum_i f_i * P_i
-        f_i  yuva i'yi TOP-1 secen konum payi  (gradyansiz sayim)
-        P_i  yuva i'ye giden ortalama olasilik (gradyan BURADAN)
-    Tekduze kullanimda 1, tek yuvada K.
+    """TASARIM 4.  Once softmax(top-8), tau=0,02 idi ve DUSTU:
+    OLCULDU (§5.1/U) ki 8.192 yuvanin 10'u atesliyor.  Sebep
+    YARISMANIN KENDISI -- bir yuva gradyan almak icin 8.184 rakibi
+    yenmeli, kazanan anahtar sorgulara yaklasip daha cok kazaniyor.
 
-    Uc sey kilitleniyor:
-      1  SINIRLAR: elle kurulmus tekduze dagilim 1, tek yuvaya
-         cokmus dagilim K verir.
-      2  MODELDEKI deger, BAGIMSIZ yeniden hesapla BIREBIR tutar --
-         "terim var" yetmez, SAYISI tutmali (kapi 27'nin yontemi).
-      3  ONKOSUL izleniyor: `son["yuva"]` gercekten kac AYRI yuvanin
-         atestigi.  §12c'nin onceden kaydi bu sayiyi KOSU SIRASINDA
-         okuyor; hesaplanmiyorsa kayit uygulanamaz."""
-    K = 64
-    # 1) SINIRLAR -- saf formul, modelden bagimsiz
-    f = torch.full((K,), 1.0 / K)
-    assert abs(float(K * (f * f).sum()) - 1.0) < 1e-6, "tekduze 1 vermeli"
-    g = torch.zeros(K); g[0] = 1.0
-    assert abs(float(K * (g * g).sum()) - K) < 1e-6, "tek yuva K vermeli"
-
-    # 2) MODELDEKI deger
-    n, D, d, B, L = 60, 16, 8, 24, 9
-    gg = torch.Generator().manual_seed(41)
+    Dort sey kilitleniyor:
+      1  YARISMA YOK.  i'nin degeri degisince j'nin AKTIVASYONU
+         degismemeli.  softmaxta degisirdi (payda ortak); kapinin
+         eleman bazinda oldugunu sinayan sey budur.
+      2  SEYREKLIK HESAPLANDIGI GIBI.  <z,k> std ~ 1/sqrt(D), yani
+         hb0 = -0,29 -> ~%5 atesleme.  Kagit tutmuyorsa ya olcek
+         yanlis ya kapi.
+      3  |m| SINIRSIZ.  softmaxta disbukey bilesimdi (|m| <= max|V_i|)
+         ve k yon karisinca 1/sqrt(k) SONUYORDU -- `S3` reddim buna
+         dayaniyordu.  ReLU'da degerler TOPLANIR; sinir yok.
+      4  GRADYAN ATESLEYEN HER yuvaya gidiyor, yalniz en iyisine
+         degil.  Olu yuva dinamigini kiran sey bu."""
+    n, D, d, K, B, L = 60, 32, 16, 4096, 64, 8
+    g = torch.Generator().manual_seed(41)
     m = M.Yol(n=n, D=D, d=d, K=K, tam=torch.ones(n, dtype=torch.bool),
-              hafiza=True, haf_n=4, haf_tau=0.02)
+              hafiza=True, haf_b0=-0.29)
+    X = torch.randint(0, n, (B, L), generator=g)
+
+    # 1) YARISMA YOK -- TEK ADIMDA sinanir.
+    # !! `yol` ile sinamak YANLIS olurdu: V[i] degisince m degisir, z
+    # degisir, SONRAKI adimin aktivasyonu da mesru olarak degisir.
+    # O OZYINELEME, yarisma degil.  Tek adimda durum SABIT tutulur.
+    R, C = m.donme(), m.kod()
+    Rd, Ct = R.reshape(n, D * D), C.t().contiguous()
+    z0 = m.p.new_zeros(B, D)
+    z0[:, :d] = m.p[X[:, 0]]
+    w0 = X[:, 0]
     with torch.no_grad():
-        m.V.normal_(0, 0.3, generator=gg)
-    X = torch.randint(0, n, (B, L), generator=gg)
-    ort = dict(a1=0.0, a2=0.0, a3=0.0, a4=0.0, r=0.0, isin=2)
+        g0 = m.adim(z0, w0, Rd, C, Ct, m.esik(0.0))[5].clone()
+        m.V[7].normal_(0, 5.0, generator=g)
+        g1 = m.adim(z0, w0, Rd, C, Ct, m.esik(0.0))[5]
+    assert torch.equal(g0, g1), (
+        "AYNI durumda bir yuvanin DEGERI otekilerin AKTIVASYONUNU "
+        "degistirdi -- kapi eleman bazinda DEGIL")
+    a0 = (g0 > 0).sum(1).float()
 
-    top0, uye0 = m.kayip(X, a5=0.0, **ort)
-    assert abs(float(top0) - float(uye0)) < 1e-6, "a5=0'da terim OLMAMALI"
-    assert float(m.son["denge"]) == 0.0
+    # 2) SEYREKLIK -- kagit: hb0 = -0,29 -> ~%5
+    oran = float(a0.mean()) / K
+    assert 0.02 < oran < 0.10, (
+        "hb0=-0,29 icin beklenen ~%%5, olculen %%%.1f" % (100 * oran))
 
-    A5 = 0.25
-    top, uye = m.kayip(X, a5=A5, **ort)
-    y = m.yol(X, 0.0)
-    kn, ha, k1 = (y["kn"][:, 1:].reshape(-1), y["ha"][:, 1:].reshape(-1),
-                  y["k"][:, 1:].reshape(-1))
-    N = k1.numel()
-    P = torch.zeros(K).index_add(0, kn, ha) / N
-    fq = torch.zeros(K).index_add(0, k1, torch.ones(N)) / N
-    bek = float(K * (fq * P).sum())
-    assert abs(float(m.son["denge"]) - bek) < 1e-4, (
-        "denge %.6f, bagimsiz hesap %.6f" % (float(m.son["denge"]), bek))
-    assert abs(float(top) - float(uye) - A5 * bek) < 1e-4, (
-        "top-uye %.6f, a5*denge %.6f" % (float(top) - float(uye), A5 * bek))
-    assert 1.0 <= bek <= K, "denge [1,K] disinda: %.4f" % bek
+    # 3) |m| SINIRSIZ -- disbukey olsaydi |m| <= max|V_i| olurdu
+    with torch.no_grad():
+        m.V.normal_(0, 0.5, generator=g)
+    y2 = m.yol(X, 0.0)
+    enb = float(m.V.norm(dim=-1).max())
+    mmax = float(y2["mn"][:, 1:].max())
+    assert mmax > enb, (
+        "|m|max %.3f <= max|V_i| %.3f -- hala disbukey bilesim gibi"
+        % (mmax, enb))
 
-    # 3) ONKOSUL sayaci + gradyan ANAHTARLARA akiyor mu
-    ay = int(torch.unique(k1).numel())
-    assert int(m.son["yuva"]) == ay, (
-        "son['yuva'] %d, gercek %d" % (int(m.son["yuva"]), ay))
+    # 4) GRADYAN cok yuvaya, ve `ates` sayaci dogru
     m.zero_grad(set_to_none=True)
-    m.kayip(X, a5=A5, **ort)[0].backward()
-    assert m.C.grad is not None and float(m.C.grad.abs().sum()) > 0, (
-        "denge terimi ANAHTARLARA (C) gradyan vermiyor -- olu yuva "
-        "olu kalir, terimin tek isi buydu")
-    return ("sinirlar 1 / %d;  modeldeki %.4f = bagimsiz hesap %.4f;  "
-            "top-uye = a5*denge (fark %.1e);  yuva %d/%d;  C gradyani AKIYOR"
-            % (K, float(m.son["denge"]), bek,
-               abs(float(top) - float(uye) - A5 * bek), ay, K))
+    m.kayip(X, a1=0.0, a2=0.0, a3=0.0, a4=0.0, r=0.0, isin=2)[0].backward()
+    dokunan = int((m.V.grad.abs().sum(-1) > 0).sum())
+    assert dokunan > 8, (
+        "gradyan yalniz %d yuvaya gitti -- top-n gibi davraniyor" % dokunan)
+    assert int(y2["ates"].sum()) >= dokunan, "`ates` sayaci tutarsiz"
+    return ("yarisma YOK (aktivasyon ozdes);  seyreklik %%%.1f (hb0=-0,29, "
+            "kagit ~%%5);  |m|max %.3f > max|V_i| %.3f;  gradyan %d/%d "
+            "yuvaya;  atesleyen %d"
+            % (100 * oran, mmax, enb, dokunan, K, int(y2["ates"].sum())))
+
+
+@kapi("42  DEFTER -- uretilmis, derleniyor, ve AYARLA tutuyor")
+def _42():
+    """OLCULDU 21 Eylul: yerel defter 6 hucrede takili kalmisti,
+    Colab'daki 24 hucreye cikmisti (13'u tek seferlik olcum hucresi),
+    ve ikisi arasinda hicbir bag yoktu.  Defteri sinayan hicbir kapi
+    da yoktu -- kayma bu yuzden gorunmedi.
+
+    Defter artik ELLE DUZENLENMEZ: `defter_kur.py` uretir.  Bu kapi
+    uc sey kilitliyor:
+      1  diskteki .ipynb, `defter_kur`un URETTIGININ AYNISI
+         (yani biri defteri elle duzenlemis olamaz)
+      2  her kod hucresi DERLENIYOR
+         (iki kez defter `unterminated string literal` ile
+          hic kosmadan durmustu)
+      3  egitim hucresi `kayip`i AYARDAKI imzayla cagiriyor
+         (a5 kaldirildiginda bu baglanti sessizce kopmustu)"""
+    import json as _json
+    import defter_kur as DK
+
+    yol = os.path.join(os.path.dirname(os.path.abspath(M.__file__)),
+                       "model_14.ipynb")
+    assert os.path.exists(yol), "model_14.ipynb YOK"
+    disk = open(yol, encoding="utf-8").read()
+
+    # 1) uretilenle BIREBIR mi
+    gec = yol + ".kapi"
+    try:
+        DK.kur(gec)
+        uret = open(gec, encoding="utf-8").read()
+    finally:
+        if os.path.exists(gec):
+            os.remove(gec)
+    assert disk == uret, (
+        "diskteki defter `defter_kur.py`nin urettiginden FARKLI -- "
+        "defter elle duzenlenmis.  `python defter_kur.py` kosun.")
+
+    # 2) her kod hucresi derleniyor
+    nb = _json.loads(disk)
+    kod = [c for c in nb["cells"] if c["cell_type"] == "code"]
+    for i, c in enumerate(kod):
+        compile("".join(c["source"]), "<hucre %d>" % i, "exec")
+
+    # 3) egitim hucresi AYARDAKI imzayla cagiriyor mu
+    import inspect
+    import ayar_14 as AY
+    par = list(inspect.signature(M.Yol.kayip).parameters)[2:]   # self, X
+    eg = next(c for c in kod if "".join(c["source"]).startswith("# 3 EGITIM"))
+    cag = "".join(eg["source"])
+    i = cag.index("m.kayip(X,")
+    arg = cag[i:cag.index(")", i)]
+    ayd = [x.strip().split(".")[-1] for x in arg.split(",")[1:]]
+    assert len(ayd) == len(par), (
+        "egitim hucresi %d ayar geciriyor, `kayip` %d bekliyor: %s vs %s"
+        % (len(ayd), len(par), ayd, par))
+    for a in ayd:
+        assert hasattr(AY, a), "egitim hucresi `ayar_14.%s` istiyor, YOK" % a
+    return ("%d hucre (%d kod), hepsi derleniyor;  disk == defter_kur;  "
+            "egitim hucresi %d ayar geciriyor, imza %d bekliyor"
+            % (len(nb["cells"]), len(kod), len(ayd), len(par)))
 
 
 # =====================================================================

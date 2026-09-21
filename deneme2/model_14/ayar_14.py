@@ -142,11 +142,12 @@ K_TAM = None      # None = HEPSI tam SO(D)
 
 # --- OLGU HAFIZASI  (DENKLEM §12c) ---------------------------------
 HAFIZA = True
-#  C KILIT, yeni `V` DEGER, okuma EKLEMELI:
-#      a = softmax(<zp, C[top-n]> / tau);   z <- norm(z + a @ V[top-n])
-#  §12b BOYLE KOSULDU VE DUSTU. §12c ucunu birden degistiriyor:
-#  R_CAPA=0 (capa kalkar), A2_CAPA=0 (C serbest ANAHTAR olur),
-#  A4_HAF (kullanim bedelli).  Gerekceler kendi ayarlarinda.
+#  C ANAHTAR, V DEGER, okuma EKLEMELI ve kapi ELEMAN BAZINDA:
+#      g = ReLU(<zp, C> + hb);    z <- norm(z + g @ V)
+#  TASARIM 4 (§12c).  Once softmax(top-n) idi ve DUSTU: yuvalar
+#  yarisiyordu, 8.192'nin 10'u kaliyordu (§5.1/U).  Transformer'in
+#  FFN'i de bir anahtar-deger hafizasi ve bizim yapimizin aynisi;
+#  tek fark sigma'nin ELEMAN BAZINDA olmasi.  Kopya oradan.
 #  ZINCIR, hepsi olculdu:
 #      cevap hicbir blokta YOK, sansta                    §5.1/R
 #      arama R_r'nin ICINDE OLAMAZ: Pi R_r rank<=d,
@@ -155,19 +156,12 @@ HAFIZA = True
 #      ozne okunabilirligi tam R[iliski]'de cokuyor        §5.1/S
 #      fiyat mesele DEGIL: uye'nin %49'u varlik
 #        konumlarinda ALINMAMIS duruyor                    §5.1/O
-HAFIZA_N = 8
-#  Kac koda BAKILIR. Yumusak okuma butun K uzerinde olsaydi (B,K)
-#  ara tensoru GRADYANLI tutulurdu -- kapi 26'nin engelledigi sey,
-#  adim basina 67 MB x 15. top-n ile (B,n): n=8'de 256 kat kucuk.
-HAFIZA_TAU = 0.02
-#  OLCULDU: top-8 s yayilimi 0,1272.  Etkin slot = exp(entropi):
-#      tau 0,10 -> 6,87   0,05 -> 5,14   0,02 -> 2,66   0,01 -> 1,67
-#  Hedef 2-3: cok yumusakta hafiza ORTALAMA doner (bilgi yok),
-#  cok sertte tek koda coker (niceleyiciye geri doner).
-#  !! Hafizasiz modelden olculdu; durumlar kayinca yeniden bakilacak.
-#  !! `beta` DUGMESI YOK: olcek zaten |V|'de, ikisi GEREKSIZ YERE
-#  ayni seyi soylerdi.  V SIFIRDAN baslar -- model tam eskisi gibi
-#  baslar ve hafizayi kendisi buyutur.
+#  !! HAFIZA_N ve HAFIZA_TAU KALDIRILDI -- top-n ve softmax yok.
+#     Kapasite sarti da degisti: 'olgu basina bir yuva' softmax
+#     top-1 varsayimindan geliyordu.  ReLU'da cikti bir ALT KUMENIN
+#     toplami, baglayici kisit yine PARAMETRE sayimi: M >= 1.730.
+#     M = 8192 ARTIK GEREKMIYOR ama ilk kosuda degismiyor (bir kosu
+#     bir karar, ve fazla kapasite guvenli taraf).
 
 SAAT = False
 #  HESAP (§6): tekrar ayrimini D>d boslugu ve farkli capalar zaten
@@ -227,23 +221,20 @@ HAF_BUTCE = 0.30  # ort |m| bu esigin ALTINDA bedava.
 #                   !! Ortalama BUTUN konumlardan. Once `[:, isin:]`
 #                   idi ve pencerenin %17'sine yazmak BEDAVAYDI;
 #                   izde |m| j=1'de 4,79 cikiyordu (§5.1/U).
-A5_DENGE = 3e-5   # YUK DENGELEME (§12c/S1).  OLCULDU (§5.1/U):
-#                   8.192 yuvanin 10'u atesliyor; kullanilan kapasite
-#                   320 sayi, kisit 110.715 -- 345 kat kisa.
-#                   denge = K * sum f_i P_i;  tekduzede 1, tek yuvada K.
-#                   BUGUN ~819 (10 yuva), HEDEF ~1,1 (olgu basina bir).
-#                   UST SINIR hesaplandi: yaymayi OGRENMEDEN yapmak
-#                   olgu odulunun (0,3008, §5.1/M) yanina yaklasmamali,
-#                   yoksa yeni bir IKAME kapisi acilir:
-#                     odul olgunun %30'u -> a5 <= 1,10e-4
-#                                   %10'u ->        3,68e-5
-#                                    %5'i ->        1,84e-5
-#                   3e-5 -> odul 0,0245 = olgunun %8'i.
-#                   !! ASIL GEREKCE BUYUKLUK DEGIL: olu yuvanin
-#                   gradyani TAM SIFIR (top-n'e hic girmiyor).
-#                   Terimin isi ihale kazanmak degil, SIFIRI kirmak.
-#                   `kod`dan farki: K'yi VERIYE cekmiyor, §3.1b'nin
-#                   arizasini tasimiyor.
+HAF_B0 = -0.29    # HAFIZA KAPISININ sapma baslangici (Tasarim 4).
+#                   Kapi artik ReLU(<z,K> + hb), softmax DEGIL.
+#                   OLCULDU (§5.1/U): softmaxta yuvalar YARISIYOR ve
+#                   bir yuva gradyan almak icin 8.184 rakibi yenmeli;
+#                   kazanan daha cok kazaniyor -- kendini besleyen
+#                   dongu, 8.192 yuvanin 10'u kaliyor.  ReLU'da i'nin
+#                   ateslemesi j'yi BASTIRMIYOR, dongu YOK.
+#                   HESAP: <z,k> birim vektorlerde std ~ 1/sqrt(D) =
+#                   0,177.  %p atesleme icin hb0 = -z_p / sqrt(D):
+#                      %20 -> -0,149    %5 -> -0,291    %1 -> -0,411
+#                   -0,29 = ~%5 (transformer FFN'lerinin tipik
+#                   seyrekligi).  `hb` OGRENILIR -- sabitlenirse
+#                   seyreklik bir VARSAYIM olarak kalirdi.
+#                   !! Denge seyrekligi kagitta ONGORULEMEZ, olculecek.
 
 # --- EGITIM -----------------------------------------------------------
 PENCERE = 24
@@ -315,10 +306,9 @@ assert not HAFIZA or K_KOD >= 7381, (
 assert A4_HAF == 0 or A4_HAF > 0.795, (
     "butce agirligi IKAME tabaninin altinda -- §12c hesabi")
 assert 0 < HAF_BUTCE < 1
-assert A5_DENGE == 0 or A5_DENGE <= 1.10e-4, (
-    "denge agirligi UST SINIRIN ustunde: yaymayi ogrenmeden yapmak "
-    "olgu odulunu (0,3008) gecer ve yeni bir IKAME kapisi acar")
-assert not (A5_DENGE and not HAFIZA), "denge terimi hafizasiz ANLAMSIZ"
+assert -1.0 < HAF_B0 <= 0.0, (
+    "kapi sapmasi: pozitif olursa konumlarin YARISINDAN fazlasi "
+    "atesler, cok negatif olursa hicbiri")
 assert PENCERE >= 2 and 1 <= ATLA < PENCERE
 assert 1 <= ISINMA < PENCERE
 assert ISINMA % ATLA == 0, (
