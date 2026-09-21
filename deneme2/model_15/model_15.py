@@ -24,8 +24,8 @@ class Yol(nn.Module):
         self.s0 = nn.Parameter(torch.zeros(durum))
 
         self.Wq = nn.Parameter(r(durum, boyut) * 0.4)       # yol -> soru
-        self.Wk = nn.Parameter(r(boyut, boyut) * 0.7)       # yuva -> anahtar
-        self.Wv = nn.Parameter(r(boyut, boyut) * 0.7)       # yuva -> deger
+        self.Wk = nn.Parameter(r(durum, boyut) * 0.4)       # YUVANIN DURUMU -> anahtar
+        self.Wv = nn.Parameter(r(durum, boyut) * 0.4)       # YUVANIN DURUMU -> deger
 
     def gez(self, w):
         """Yolu bastan gez, her adimdaki durumu dondur.  (T+1, durum)"""
@@ -36,11 +36,15 @@ class Yol(nn.Module):
         return torch.stack(iz)
 
     def dikkat(self, w):
-        """Yol sorar, yuvalar cevaplar.  Doner: (boyut,) ve agirliklar (T,)."""
-        q = self.gez(w)[-1] @ self.Wq          # soru
-        P = self.E[w]                          # (T, boyut) yuvalarin konumu
-        ag = (P @ self.Wk @ q).softmax(0)      # agirlik -- UZUNLUK SERBEST
-        return ag @ (P @ self.Wv), ag
+        """Yol sorar, yuvalar cevaplar.  Doner: (boyut,) ve agirliklar (T,).
+
+        Anahtar ve deger yuvanin KONUMUNDAN degil, o ana kadarki DURUMUNDAN
+        uretiliyor -- boylece ayni sehir iki farkli yerde ayni sey demiyor.
+        """
+        S = self.gez(w)[1:]                    # (T, durum) her yuvanin durumu
+        q = S[-1] @ self.Wq                    # soru: yolun tamami
+        ag = (S @ self.Wk @ q).softmax(0)      # agirlik -- UZUNLUK SERBEST
+        return ag @ (S @ self.Wv), ag
 
     def oku(self, o):
         """Sozluk uzayindaki noktaya en yakin token."""
