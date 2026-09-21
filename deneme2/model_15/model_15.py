@@ -34,6 +34,15 @@ class Yol(nn.Module):
 
         self.s0 = nn.Parameter(torch.zeros(durum))
 
+    def yol(self, w):
+        """w: (T,) token dizisi  ->  (T*2,) ugranan KONUMLARIN birlesimi.
+
+        Istanbul U Ankara U Mersin  =  [x_Ist y_Ist x_Ank y_Ank x_Mer y_Mer]
+        Uzunluk yolla birlikte buyur.  Hicbir sey sikismaz, hicbir sey atilmaz.
+        """
+        return self.E[w].reshape(-1)
+
+
     def ileri(self, w):
         """w: (T,) token dizisi.  Doner: (T+1, durum) -- her adimdaki durum."""
         s = self.s0
@@ -50,6 +59,20 @@ class Yol(nn.Module):
     def oku(self, s):
         """argmin_c |golge(s) - E[c]|   (okuma kurali: TASARIM ADIM 1b)."""
         return torch.cdist(self.golge(s), self.E).argmin(-1)
+
+
+def _goster_yol():
+    from sehir_15 import AD, N, dizi
+    m = Yol(N, boyut=2, durum=6, tohum=0)
+    print("YOL = ugranan konumlarin birlesimi")
+    print()
+    for onek in (["Istanbul"], ["Istanbul", "Ankara"],
+                 ["Istanbul", "Ankara", "Mersin"],
+                 ["Izmir", "Bursa", "Mersin"],
+                 ["Konya", "Ankara", "Mersin"]):
+        v = m.yol(dizi(onek))
+        d = " ".join(f"{x:6.2f}" for x in v)
+        print(f"  {' '.join(onek):<24s} {len(v)} sayi   [{d}]")
 
 
 def _goster():

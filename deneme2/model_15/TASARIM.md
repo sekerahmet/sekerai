@@ -291,6 +291,43 @@ Cevaplar rastgele — daha eğitilmedi. Üçü de Sivas diyor çünkü gölge
 henüz orijin civarında dolaşıyor. Gösterdiği tek şey **mekanizma**:
 önek uzadıkça durum yürüyor, ve her önekten bir cevap okunabiliyor.
 
+### YOL — kullanıcının tarifi
+
+Kullanıcı: *"yol şu değil mi? istanbul(x,y) U ankara U mersin. bu
+sayede hangi konumdan hangi konuma gittiğimi bilirim. bu bilgi ya da
+input."*
+
+```python
+def yol(self, w):
+    return self.E[w].reshape(-1)        # (T,) -> (T*2,)
+```
+
+```
+  Istanbul                 2 sayi   [ -1,13  -1,15]
+  Istanbul Ankara          4 sayi   [ -1,13  -1,15  -0,25  -0,43]
+  Istanbul Ankara Mersin   6 sayi   [ -1,13  -1,15  -0,25  -0,43   0,32  -1,26]
+  Izmir Bursa Mersin       6 sayi   [  0,85   0,69  -0,32  -2,12   0,32  -1,26]
+  Konya Ankara Mersin      6 sayi   [  1,12  -0,25  -0,25  -0,43   0,32  -1,26]
+```
+
+Uzunluk **yolla birlikte büyüyor**. Hiçbir şey sıkışmıyor, hiçbir şey
+atılmıyor.
+
+Son üç satır işin tamamını gösteriyor:
+
+```
+son iki sayi UCUNDE DE AYNI      hepsi Mersin'de bitiyor
+1. ve 3. satir yalniz ILK CIFTTE ayriliyor   -> ayni cevap verilecek
+2. satir ILK DORTTE ayriliyor                -> farkli cevap verilecek
+```
+
+Fark **açıkça orada duruyor**, adresli. Geçişler de içinde: ardışık
+çiftler `(Istanbul -> Ankara)` ve `(Ankara -> Mersin)`.
+
+> Bu seçim `M` matrisini işsiz bırakıyor — güncellenecek bir durum
+> kalmadı. Yerine "bu listeye bakıp cevabı üret" diyen bir parça
+> gerekiyor. **ADIM 3.**
+
 ### ADIM 3'ün sorusu
 
 Kayıp ne. Yani `Istanbul Ankara Mersin -> Sivas` nasıl öğretilecek.
