@@ -1,6 +1,6 @@
 """TOPLAMA -- rastgele tablonun yerine YAPILI kural.
 
-Sozluk    1..100  +  "+"  +  "="                102 token
+Sozluk    0..100  +  "+"  +  "="                103 token
 Girdi     islemin KENDISI, token token
 Hedef     esitligin sagi
 
@@ -18,15 +18,15 @@ BILINEBILIR -- kural cikarilabilir.  TAVAN tam 1.000.
 """
 import torch
 
-SAYI = 100          # 1..100
-ENB = 20            # toplanan en fazla 20
+SAYI = 101          # 0..100  -- 0 da SART: "sifir eklemek degistirmez"
+ENB = 20            # toplanan 0..20
 ADET = 5            # en fazla 5 toplanan
 ARTI = SAYI         # "+"  token indeksi
 ESIT = SAYI + 1     # "="  token indeksi
 N = SAYI + 2
 
-AD = [str(i + 1) for i in range(SAYI)] + ["+", "="]
-ix = lambda s: s - 1            # sayi -> token indeksi
+AD = [str(i) for i in range(SAYI)] + ["+", "="]
+ix = lambda s: s               # sayi -> token indeksi  (0 -> 0)
 
 
 def islem(a):
@@ -42,7 +42,7 @@ def uret(kac=400, tohum=3):
     d, gor = [], set()
     while len(d) < kac:
         k = int(torch.randint(2, ADET + 1, (1,), generator=g))
-        a = torch.randint(1, ENB + 1, (k,), generator=g).tolist()
+        a = torch.randint(0, ENB + 1, (k,), generator=g).tolist()
         t = tuple(a)
         if t in gor:
             continue
@@ -62,7 +62,7 @@ for a in DIZI:
 
 def _rapor():
     from collections import Counter
-    print(f"SOZLUK {N} token (1..{SAYI} + '+' + '=')"
+    print(f"SOZLUK {N} token (0..{SAYI-1} + '+' + '=')"
           f"   DIZI {len(DIZI)}   ORNEK {len(ORNEK)}")
     uz = Counter(len(o) for o, _ in ORNEK)
     print("  girdi uzunlugu: " + "  ".join(f"{k}:{v}" for k, v in sorted(uz.items())))
