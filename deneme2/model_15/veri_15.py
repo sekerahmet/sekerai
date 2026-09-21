@@ -29,8 +29,15 @@ from model_15 import Yol, LR, WD, lr_ver
 
 ENB = 500                   # toplananlar 0..500
 HA, HC = 3, 4               # toplanan 3 hane, cevap 4 hane
-TERS = False                # rakam sirasi -- KARAR.  TERS ve PAD ayni anda
-                            # degistirilirse katkilari ayirt edilemez.
+TERS = False                # IPTAL -- kullanici karari, 21 Eylul.
+                            # Sinanmadi.  Gerekcesi kayitli: TERS=False'ta
+                            # kosullu dogruluk onlar 0,1754 / birler 0,8152.
+PADLI = True                # dolgu "_" mi "0" mi.  OLCULDU, ve PAD KOTU:
+                            #   dolgu "0"  esik SAYI 0,1517   temel 0,0224
+                            #   dolgu "_"  esik SAYI 0,0356   temel 0,0174
+                            # PAD ilk iki basamagi iyilestirdi
+                            #   (0,868->0,956 ve 0,175->0,295)
+                            # ama BIRLER basamagini cokertti (0,815 -> 0,098).
 
 ARTI, ESIT, PAD = 10, 11, 12
 N = 13
@@ -44,7 +51,8 @@ def rak(x, hane):
     """Sayinin GERCEK rakamlari; bos basamaklar PAD.
     TERS=True ise birler once, dolayisiyla PAD SONA gider."""
     t = str(x)
-    d = [PAD] * (hane - len(t)) + [int(c) for c in t]
+    dolgu = PAD if PADLI else 0
+    d = [dolgu] * (hane - len(t)) + [int(c) for c in t]
     return d[::-1] if TERS else d
 
 
