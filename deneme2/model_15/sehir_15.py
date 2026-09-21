@@ -17,6 +17,16 @@ SEHIR = {
     "Sivas":    (1.4, 0.1),
     "Adana":    (0.9, -0.8),
     "Konya":    (0.6, -0.3),
+    # Tutulan kume 21 ornekti -- bir ornek %4,8 oynatiyordu, hicbir fark
+    # olculemiyordu.  Sehir sayisi ikiye katlandi (veri_15 ~7 kat buyuyor).
+    "Trabzon":  (1.6, 0.9),
+    "Antalya":  (-0.2, -1.0),
+    "Erzurum":  (1.9, 0.6),
+    "Gaziantep":(1.2, -0.7),
+    "Samsun":   (1.0, 1.2),
+    "Van":      (2.1, -0.1),
+    "Eskisehir":(0.1, 0.4),
+    "Denizli":  (-0.6, -0.5),
 }
 
 # DUR = gercek dildeki  .  :  ?  !   -- oyuncakta okunabilir olsun diye ad verildi.

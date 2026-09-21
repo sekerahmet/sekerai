@@ -34,3 +34,21 @@ with torch.no_grad():
     print()
     print("  eski yol korunuyor            GECTI")
     print("  agirlik sayisi = yol uzunlugu GECTI")
+
+    print("\nSIRA GORUNUYOR MU")
+    for a, b in ((["Istanbul", "Ankara", "Mersin"], ["Mersin", "Ankara", "Istanbul"]),):
+        oa, _ = m.dikkat(dizi(a)); ob, _ = m.dikkat(dizi(b))
+        f = (oa - ob).norm()
+        print(f"  {' '.join(a)} / ters   fark {f:.4f}")
+        assert f > 1e-6, "SIRA KOR"
+    print("  ayni sehirler ters sirada FARKLI  GECTI")
+
+    print("\nAYNI SEHIR IKI KEZ")
+    yol = ["Ankara", "Mersin", "Ankara", "Sivas"]
+    _o, ag = m.dikkat(dizi(yol))
+    i0, i2 = [i for i, a in enumerate(yol) if a == "Ankara"]
+    f = abs(float(ag[i0] - ag[i2]))
+    for i, (a, x) in enumerate(zip(yol, ag)):
+        print(f"  yuva {i} {a:<10s} {float(x):.4f}")
+    assert f > 1e-6, "iki kopya AYIRT EDILMIYOR"
+    print(f"  iki Ankara farki {f:.6f}   GECTI")

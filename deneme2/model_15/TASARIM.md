@@ -109,8 +109,8 @@ patlamayan bir güncelleme.
 ### ADIM 1b — UZUNLUĞUN VE AÇININ ÖNEMİ VAR MI
 
 Kullanıcı sordu. Cevap koordinatlarda değil, **okuma kuralında**.
-Üç aday var, ve önemi olup olmadığını kural belirliyor. Kod:
-`okuma_15.py`.
+Üç aday var, ve önemi olup olmadığını kural belirliyor.
+(Hesap bir kerelikti, sonuç aşağıda; betik silindi.)
 
 ```
 A  IC CARPIM   argmax <s, x_c>            uzunluk = ONEM PUANI
