@@ -1,12 +1,14 @@
 """TOPLAMA -- rastgele tablonun yerine YAPILI kural.
 
-Sozluk    1..100  +  DUR                       101 token
-Girdi     en fazla 5 sayi, her biri 1..20      toplam <= 100
-Hedef     onekin TOPLAMI
+Sozluk    1..100  +  "+"  +  "="                102 token
+Girdi     islemin KENDISI, token token
+Hedef     esitligin sagi
 
-  [7, 13]        -> 20
-  [7, 13, 4]     -> 24
-  [7, 13, 4, 19] -> 43
+  7 + 13 =           -> 20
+  7 + 13 + 4 =       -> 24
+  7 + 13 + 4 + 19 =  -> 43
+
+"=" cevabin nerede basladigini isaretliyor -- K2'deki CEVAP isareti.
 
 DUR yok: is "bu sayilari topla", durma karari degil.  (DUR olsaydi
 orneklerin %28'i DUR olurdu ve taban sisirdi.)
@@ -19,12 +21,20 @@ import torch
 SAYI = 100          # 1..100
 ENB = 20            # toplanan en fazla 20
 ADET = 5            # en fazla 5 toplanan
-DI = SAYI           # DUR'un indeksi
-N = SAYI + 1
+ARTI = SAYI         # "+"  token indeksi
+ESIT = SAYI + 1     # "="  token indeksi
+N = SAYI + 2
 
-# token i  ->  sayi i+1   (DUR haric)
-AD = [str(i + 1) for i in range(SAYI)] + ["DUR"]
+AD = [str(i + 1) for i in range(SAYI)] + ["+", "="]
 ix = lambda s: s - 1            # sayi -> token indeksi
+
+
+def islem(a):
+    """[7, 13, 4]  ->  token dizisi  7 + 13 + 4 ="""
+    d = [ix(a[0])]
+    for x in a[1:]:
+        d += [ARTI, ix(x)]
+    return d + [ESIT]
 
 
 def uret(kac=400, tohum=3):
@@ -46,13 +56,14 @@ DIZI = uret()
 ORNEK = []
 for a in DIZI:
     for i in range(2, len(a) + 1):
-        ORNEK.append(([ix(x) for x in a[:i]], ix(sum(a[:i]))))
+        ORNEK.append((islem(a[:i]), ix(sum(a[:i]))))
 
 
 
 def _rapor():
     from collections import Counter
-    print(f"SOZLUK {N} token (1..{SAYI} + DUR)   DIZI {len(DIZI)}   ORNEK {len(ORNEK)}")
+    print(f"SOZLUK {N} token (1..{SAYI} + '+' + '=')"
+          f"   DIZI {len(DIZI)}   ORNEK {len(ORNEK)}")
     uz = Counter(len(o) for o, _ in ORNEK)
     print("  girdi uzunlugu: " + "  ".join(f"{k}:{v}" for k, v in sorted(uz.items())))
     c = Counter(h for _, h in ORNEK)
@@ -62,10 +73,11 @@ def _rapor():
     print(f"  son-ikili {len(ce)} ayri   tek kez gecen "
           f"{sum(1 for v in ce.values() if v == 1)}")
     print("  !! son ikili YETMEZ -- toplam BUTUN onege bagli")
+    print("     (ve son token her zaman '=' -- tek basina hicbir sey soylemiyor)")
     print()
     print("ORNEK")
     for o, h in ORNEK[:7]:
-        print("  " + " + ".join(AD[i] for i in o) + "   ->  " + AD[h])
+        print("  " + " ".join(AD[i] for i in o) + "  " + AD[h])
 
 
 if __name__ == "__main__":
