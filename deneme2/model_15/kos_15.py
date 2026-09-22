@@ -34,8 +34,14 @@ def olc(m, OBEK, en=20000):
     return dog / say
 
 
-def olc_yuva(m, OBEK, en=20000):
-    """YUVA 1 = ilk uretilen cikti tokeni ... YUVA 4 = sonuncusu."""
+def olc_obek(m, OBEK, en=20000):
+    """OBEK BASINA dogruluk.  Obek = GIRDI UZUNLUGU, tensor sekli geregi.
+
+    Sabit genislikli sinavda obek "cevabin kacinci rakami" demekti
+    (yuva1..yuva4).  Dolgu kalkinca bu anlam GITTI: obek artik yalnizca
+    "kac token" demek.  Bu yuzden TANI amaclidir, HUKUM vermez -- hukum
+    SAYI olcutuyle verilir (DUR'a kadar uretilen dizinin tamami dogru mu).
+    """
     r = []
     with torch.no_grad():
         for w, h in OBEK:
@@ -91,27 +97,38 @@ def _kos(ad, EG, TU, N, aygit, kok, ek, boyut, durum,
     opt = torch.optim.Adam(m.parameters(), lr=lr, weight_decay=wd)
     t0, ob = time.time(), len(EG)
     par = sum(p.numel() for p in m.parameters())
+    uret = torch.Generator(device=aygit).manual_seed(tohum)
+    pay = torch.tensor([float(len(h)) for _, h in EG], device=aygit)
+    pay = pay / pay.sum()                    # obek buyuklugu kadar sik
     not_(f"[{ad}] boyut {boyut} durum {durum} lr {lr} wd {wd} tohum {tohum}"
          f"  parametre {par}")
-    not_(f"[{ad}]   adim   egitim  tutulan   yuva1  yuva2  yuva3  yuva4     sn")
+    not_(f"[{ad}]   adim   egitim  tutulan   "
+     + " ".join(f"{int(w.shape[1]):2d}tk" for w, _ in EG) + "     sn")
 
     i = 0
     for i in range(adim + 1):
         if ad in DURDUR:
             not_(f"[{ad}] DURDURULDU  adim {i}")
             break
-        w, h = EG[i % ob]
-        j = torch.randint(0, len(h), (yigin,), device=aygit)
+        # OBEK SECIMI ORANTILI -- "hepsini karistirip cek" ile ayni sey.
+        # Obekler yalnizca TENSOR SEKLI icin var (dolgu kalkinca ayni
+        # uzunluktakiler bir arada yiginlanmak zorunda); bir mufredat
+        # DEGIL.  Sirayla gezmek her obege esit sure veriyordu ve bu,
+        # kimsenin vermedigi bir agirliklandirmaydi: 83 ornekli obek ile
+        # 125.419 ornekli obek ayni sureyi aliyordu.
+        g = int(torch.multinomial(pay, 1, generator=uret))
+        w, h = EG[g]
+        j = torch.randint(0, len(h), (yigin,), device=aygit, generator=uret)
         o, _ = m.dikkat(w[j])
         puan = -((m.E[None] - o[:, None]) ** 2).sum(-1)
         k = F.cross_entropy(puan, h[j])
         opt.zero_grad(); k.backward(); opt.step()
         if i % bas == 0:
             de, dt = olc(m, EG), olc(m, TU)
-            r = olc_yuva(m, TU)
+            r = olc_obek(m, TU)
             bilgi = dict(ek or {}, n=N, boyut=boyut, durum=durum, adim=i,
                          lr=lr, wd=wd, tohum=tohum, parametre=par,
-                         egitim=de, tutulan=dt, yuva=r)
+                         egitim=de, tutulan=dt, obek=r)
             SONUC[ad] = dict(bilgi, model=m)
             iz = ""
             if i % yedek == 0:                   # YEDEK -- kosunun ICINDE
@@ -122,13 +139,13 @@ def _kos(ad, EG, TU, N, aygit, kok, ek, boyut, durum,
                  + f"   {time.time()-t0:5.0f}{iz}")
 
     de, dt = olc(m, EG, 10**9), olc(m, TU, 10**9)
-    r = olc_yuva(m, TU, 10**9)
+    r = olc_obek(m, TU, 10**9)
     bilgi = dict(ek or {}, n=N, boyut=boyut, durum=durum, adim=i,
                  lr=lr, wd=wd, tohum=tohum, parametre=par,
-                 egitim=de, tutulan=dt, yuva=r, biti=True)
+                 egitim=de, tutulan=dt, obek=r, biti=True)
     SONUC[ad] = dict(bilgi, model=m)
     _yaz(kok, ad, m, bilgi)
-    not_(f"[{ad}] BITTI  egitim {de:.4f}  tutulan {dt:.4f}  yuva "
+    not_(f"[{ad}] BITTI  egitim {de:.4f}  tutulan {dt:.4f}  obek "
          + " ".join(f"{x:.4f}" for x in r) + f"  ({time.time()-t0:.0f} sn)")
 
 
