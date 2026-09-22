@@ -60,8 +60,27 @@ if not torch.cuda.is_available():
 #   okunuyor ve bu ikisi AYRI parametre.  Olculdu: cos(b,E) = 0,174,
 #   rastgele 16 boyutta beklenen 0,199 -- yani bagsizlar.  Birlestirmek
 #   DENENDI (yukarida M+E) ve yuva2'yi 0,9416'dan 0,8702'ye dusurdu.
-BOYUT = 16           # token kac sayiyla tarif ediliyor
-DURUM = 16           # s kac sayi
+# --- HESAPLANDI, 22 Eylul.  TinyStories icin 16 -> 32.
+#   ETKIN OKUMA BOYUTU = min(durum, boyut).  Wv (durum, boyut) ve
+#   o = toplam(ag_j * s_j @ Wv); rank <= min(durum, boyut), yani cikti
+#   o alt uzaydan CIKAMIYOR.  Olculdu (rastgele dizilerde o'nun ranki):
+#     boyut 16 durum 16 -> 16     boyut 32 durum 16 -> 16   (boyut BOSA)
+#     boyut 32 durum 32 -> 32     boyut 64 durum 16 -> 16
+#   boyut > durum'un tek getirisi E_c'nin dik bileseni: sinif basina
+#   SABIT ekler, yani ogrenilebilir yanlilik -- ayirt etmez.
+#
+#   4.000 kelime etkin boyuta yerlestirilince en yakin komsu ne kadar
+#   uzakta (rastgele E, okuma payi = komsu uzakligi / 2|E_c|):
+#     16 -> 0,342     32 -> 0,443     64 -> 0,517
+#   16'da cikti hedefin %34'u icinde kalmak zorunda.  Kiyas: yayinlanan
+#   TinyStories-1M gizli boyut 64, 33M ise 768 kullaniyor.
+#   Bedel: durum 16 -> 32, jeton basi 288 -> 1.088 sayi (M durum^2).
+#
+#   A / B2 / C 16/16 ile OLCULDU; onlarin yedekleri kendi degerlerini
+#   tasiyor (Yol(n, boyut=p['boyut'], ...)), etkilenmiyorlar.  Ama
+#   yeniden kosulurlarsa 32/32 olur -- ayni ad, baska kol.
+BOYUT = 32           # token kac sayiyla tarif ediliyor
+DURUM = 32           # s kac sayi
 NORM = True          # |s| = 1
 PAY = False          # False -> relu   True -> softmax
 LR = 0.002           # SABIT.  Rakam tokenli veride 0,001/0,002/0,004
@@ -135,39 +154,64 @@ class Yol(nn.Module):
         S = torch.stack(iz, 1)
         return S[0] if tek else S
 
-    def dikkat(self, w, maske=None):
-        """Son yuva sorar, butun yuvalar cevaplar.
+    def dikkat(self, w):
+        """SON yuva sorar, butun yuvalar cevaplar.  w (B,T) -> o (B,boyut).
 
         Anahtar ve deger yuvanin TOKEN'INDAN degil DURUMUNDAN uretiliyor --
         boylece ayni token iki farkli yerde ayni sey demiyor.
-
-        maske (B,T) bool: gercek jetonlarda True.  Dolgu yuvalari hem
-        SORUDAN hem TOPLAMDAN duser.  Verilmezse kod birebir eski yol.
-        Gerekce olculdu: C'de uzunluk 88 farkli deger aliyor, obek basina
-        tek gecis kosulmaz; dolgu sart, dolgulu yuva da toplama girerse
-        her ornege BASKA sayida sahte katki biner.
         """
         tek = w.dim() == 1
         S = self.gez(w)[..., 1:, :]
         S = S[None] if tek else S
-        if maske is None:
-            q = S[:, -1] @ self.Wq
-        else:
-            m = maske[None] if tek else maske
-            son = m.sum(1).clamp(min=1) - 1          # SON GERCEK yuva
-            q = S[torch.arange(S.shape[0], device=S.device), son] @ self.Wq
+        q = S[:, -1] @ self.Wq
         pu = (S @ self.Wk) @ q.unsqueeze(-1)
         pu = pu.squeeze(-1) + self.hb
-        if maske is not None:
-            # -inf: softmax'ta agirlik 0, relu'da clamp(min=0) yine 0.
-            pu = pu.masked_fill(~m, float("-inf"))
         ag = pu.softmax(-1) if self.pay else pu.clamp(min=0)
         o = (ag.unsqueeze(-1) * (S @ self.Wv)).sum(1)
         return (o[0], ag[0]) if tek else (o, ag)
 
+    def dizi(self, w):
+        """HER yuva kendi sorusunu sorar.  w (B,T) -> puan (B,T,n).
+
+        `dikkat`in cogul hali; mekanizma AYNI, degisen tek sey kimin
+        sordugu.  Sonraki-jeton egitimi konum basina okuma ister; her
+        onek icin ayri ileri gecis T kat is ederdi.
+
+        NEDENSEL MASKE ZORUNLU: butun yuvalar ayni dizide soruyor, maske
+        gelecegi gormemeyi geri koyuyor.  relu yolunda agirlik dogrudan
+        0'lanir (pay yok); softmax yolunda -inf ile.
+        """
+        assert w.dim() == 2, "dizi() (B,T) bekler"
+        S = self.gez(w)[:, 1:]                       # (B,T,durum)
+        Q, K, V = S @ self.Wq, S @ self.Wk, S @ self.Wv
+        P = Q @ K.transpose(1, 2) + self.hb          # (B,T,T)
+        gec = torch.ones(w.shape[1], w.shape[1], dtype=torch.bool,
+                         device=w.device).tril()     # j yalniz <= j'ye bakar
+        A = (P.masked_fill(~gec, -torch.inf).softmax(-1) if self.pay
+             else P.clamp(min=0) * gec)
+        # A @ V carpim olarak yazilmali: yayilimla (B,T,T,boyut) ara tensor
+        # cikar ve B=2048, T=128'de tek basina GB'lara gider.
+        return self.puan(A @ V)
+
+    def puan(self, O):
+        """Cikti noktasindan SOZLUK PUANI.  Buyuk = yakin.
+
+        Tek yerde durmasi sart: dizi/oku/uret ucu de bunu cagirir, yoksa
+        egitim bir kuralla, uretim baskasiyla calisir."""
+        E = self.E.expand(O.shape[0], -1, -1) if O.dim() == 3 else self.E
+        return -torch.cdist(O, E) ** 2
+
+    def kayip(self, w):
+        """SONRAKI JETON, her konumda.  w (B,T) -> SKALER.
+
+        Konum j, j+1'i tahmin eder; son konumun hedefi yok.  Dolgu YOK:
+        pencereler sabit T ve akis kesintisiz."""
+        p = self.dizi(w)[:, :-1]
+        return F.cross_entropy(p.reshape(-1, self.n), w[:, 1:].reshape(-1))
+
     def oku(self, o):
         """Sozluk uzayindaki noktaya en yakin token."""
-        return int(torch.cdist(o.reshape(1, -1), self.E).argmin())
+        return int(self.puan(o.reshape(1, -1)).argmax())
 
     def uret(self, w, adim):
         """Cikti girdiye eklenir.  Uzunluk SABIT oldugu icin durma kosulu yok."""

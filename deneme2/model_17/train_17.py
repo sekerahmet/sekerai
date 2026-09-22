@@ -1,19 +1,13 @@
 # -*- coding: utf-8 -*-
 """train_17 -- egitim dongusu: optimizer, yigin, kayit, SURDURME.
 
-AMAC model_15'inki: onek -> TEK hedef.  Uretim yok; bir zincir verilir,
-bilesik iliski TEK bir etiket olarak okunur.
+GOREV SONRAKI JETON.  Etiket yok; her konum bir sonrakini tahmin eder.
 
-    o, _ = m.dikkat(w)                onek -> tek cikti noktasi
-    puan = -||o - E||^2
-    kayip = cross_entropy(puan, h)
+    kayip = m.kayip(w)          w (B,T) pencere
+                                dizi() her yuvayi okur, nedensel maske
 
-YIGIN HER OBEKTEN PAY ALIR.  k degisken (2..10) ve tensor dikdortgen
-olmak zorunda, o yuzden obek var; ama obek yalnizca TENSOR SEKLI.
-Bir adimda tek obek secmek kucuk obegi "ya hepsi ya hicbiri" yapar --
-kos_15'te OLCULDU: 8000 adimda 4 tokenlik obek SIFIR kez secilmisti.
-Gradyan obekler boyunca BIRIKIR, sonra TEK optimizer adimi; kayip
-toplam paya bolundugu icin hepsi tek bir yigin gibi davranir.
+Veri TEK TENSOR: (n, T) pencere yigini, hepsi ayni uzunlukta.  Obek YOK
+-- akis kesintisiz ve pencereler sabit T, yani dolgu da yok.
 
 AdamW, Adam DEGIL.  Adam'in weight_decay'i L2'yi gradyana katar ve
 1/sqrt(v) ile normalize eder; gorev gradyani sadelesen bir bilesende
@@ -23,7 +17,7 @@ silinir.  model_16'da olculdu: token basina parametreler cokuyordu
 dim < 2 (s0, hb) decay disinda.
 
 KOSU ARKA PLANDA (CLAUDE.md kural 8).  `baslat` hemen doner, ilerleme
-`nabiz` ile OKUNUR.
+`nabiz` ile OKUNUR.  Gunluk her `yedek` adimda diske de yazilir.
 """
 from __future__ import annotations
 
@@ -33,11 +27,10 @@ import threading
 import time
 
 import torch
-import torch.nn.functional as F
 
 from model_17 import Yol, BOYUT, DURUM, LR, WD
 
-YIGIN = 4096
+YIGIN = 512
 GUNLUK, SONUC, DURDUR = [], {}, set()
 
 
@@ -81,19 +74,10 @@ def _koru(kok, ad):
 
 
 def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
-         lr, wd, adim, tohum, yigin, bas, yedek, surdur, etiket):
+         lr, wd, adim, tohum, yigin, bas, yedek, surdur):
     not_ = GUNLUK.append
     torch.manual_seed(tohum)
     m = Yol(N, boyut=boyut, durum=durum, tohum=tohum).to(aygit)
-
-    # CEVAP UZAYI.  etiket verilmezse kayip BUTUN sozluk uzerinde ve
-    # cevap olamayacak birimlerden uzaklasmak gradyani seyreltiyor.
-    # C'de olculdu: 2.890 sinifin 2.872'si asla cevap degil.
-    ET = None if etiket is None else torch.as_tensor(etiket, device=aygit)
-    YER = None
-    if ET is not None:
-        YER = torch.full((N,), -1, dtype=torch.long, device=aygit)
-        YER[ET] = torch.arange(len(ET), device=aygit)
     dec = [p for p in m.parameters() if p.dim() >= 2]
     nodec = [p for p in m.parameters() if p.dim() < 2]
     opt = torch.optim.AdamW([{"params": dec, "weight_decay": wd},
@@ -110,81 +94,62 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
         bas_adim = p["adim"]
         not_(f"[{ad}] SURDURULUYOR  {os.path.basename(surdur)}  adim {bas_adim}")
 
-    # Obek (w, h) ya da (w, h, maske) -- C'de diziler dolgulu geliyor.
-    OB = [(k, v[0].to(aygit), v[1].to(aygit),
-           v[2].to(aygit) if len(v) > 2 else None)
-          for k, v in sorted(EG.items())]
-    n = [w.shape[0] for _, w, _, _ in OB]
-    T = sum(n)
-    # Obek basina cekilis: satir sayisiyla ORANTILI, ama EN AZ 1 --
-    # tek satirlik obek bile her adimda gelir.
-    CEK = [max(1, int(round(yigin * k / T))) for k in n]
+    W = EG.to(aygit)
+    n, T = W.shape
     par = sum(p.numel() for p in m.parameters())
-    not_(f"[{ad}] {len(OB)} obek (k = " + ", ".join(str(k) for k, *_ in OB)
-         + f")   {T:,} ornek")
-    not_(f"[{ad}] YIGIN {sum(CEK):,} = her obekten pay "
-         f"({min(CEK)}..{max(CEK)})   en kucuk obek {min(n)} ornek")
+    not_(f"[{ad}] pencere {n:,} x {T}   {n * T:,} jeton")
     not_(f"[{ad}] boyut {boyut} durum {durum} lr {lr} wd {wd} tohum {tohum}"
-         f"  sozluk {N}  parametre {par}")
-    _c = N if ET is None else len(ET)
-    not_(f"[{ad}] TEK OLCUT: zincir verildi, bilesik iliski DOGRU MU."
-         f"  cevap uzayi {_c}  sans {1/_c:.4f}")
-    not_(f"[{ad}]   adim    kayip   egitim  dogrulama  sinav      sn")
+         f"  sozluk {N}  parametre {par:,}")
+    not_(f"[{ad}] yigin {yigin}   adim basina {yigin * (T - 1):,} tahmin"
+         f"   epok = {n / yigin:,.0f} adim")
+    not_(f"[{ad}] OLCUT: SONRAKI JETON dogrulugu.  sans {1 / N:.5f}")
+    not_(f"[{ad}]   adim    kayip   egitim  dogrulama      sn")
 
     t0, i = time.time(), bas_adim
     for i in range(bas_adim, adim + 1):
         if ad in DURDUR:
             not_(f"[{ad}] DURDURULDU  adim {i}")
             break
+        j = torch.randint(0, n, (yigin,), generator=uret)
         opt.zero_grad()
-        top = 0.0
-        for b, (k, w, h, mk) in enumerate(OB):
-            j = torch.randint(0, w.shape[0], (CEK[b],), generator=uret)
-            o, _ = m.dikkat(w[j], None if mk is None else mk[j])
-            puan = -torch.cdist(o, m.E if ET is None else m.E[ET]) ** 2
-            hh = h[j] if YER is None else YER[h[j]]
-            kay = F.cross_entropy(puan, hh, reduction="sum") / sum(CEK)
-            kay.backward()
-            top += float(kay.detach())
+        kay = m.kayip(W[j])
+        kay.backward()
         opt.step()
 
         if i % bas == 0:
             gecen = time.time() - t0
-            e, d, s = (olcut(m, "eg"), olcut(m, "dg"), olcut(m, "si"))
+            e, d = olcut(m, "eg"), olcut(m, "dg")
             bilgi = dict(ek or {}, n=N, adim=i, boyut=boyut, durum=durum,
-                         lr=lr, wd=wd, tohum=tohum, yigin=sum(CEK),
-                         parametre=par, kayip=top, egitim=e,
-                         dogrulama=d, sinav=s)
+                         lr=lr, wd=wd, tohum=tohum, yigin=yigin, T=T,
+                         parametre=par, kayip=float(kay.detach()),
+                         egitim=e, dogrulama=d)
             SONUC[ad] = dict(bilgi, model=m)
             im = ""
             if i % yedek == 0:
                 _yaz(kok, ad, _tam(m, opt, uret, bilgi)); im = "  yedek"
-            not_(f"[{ad}] {i:6d}  {top:7.4f}  {e:7.4f}  {d:9.4f}  {s:5.4f}"
+            not_(f"[{ad}] {i:6d}  {bilgi['kayip']:7.3f}  {e:7.4f}  {d:9.4f}"
                  f"  {gecen:6.0f}{im}")
 
-    e, d, s = (olcut(m, "eg", tam=True), olcut(m, "dg", tam=True),
-               olcut(m, "si", tam=True))
+    e, d = olcut(m, "eg", tam=True), olcut(m, "dg", tam=True)
     bilgi = dict(ek or {}, n=N, adim=i, boyut=boyut, durum=durum, lr=lr,
-                 wd=wd, tohum=tohum, yigin=sum(CEK), parametre=par,
-                 kayip=top, egitim=e, dogrulama=d, sinav=s, biti=True)
+                 wd=wd, tohum=tohum, yigin=yigin, T=T, parametre=par,
+                 kayip=float(kay.detach()), egitim=e, dogrulama=d, biti=True)
     SONUC[ad] = dict(bilgi, model=m)
     _yaz(kok, ad, _tam(m, opt, uret, bilgi))
     not_(f"[{ad}] BITTI   egitim {e:.4f}   dogrulama {d:.4f}   "
-         f"sinav {s:.4f}   ({time.time()-t0:.0f} sn)")
+         f"({time.time() - t0:.0f} sn)")
 
 
 def baslat(ad, EG, N, *, olcut=_olcut_yok, aygit="cuda", kok=None, ek=None,
            boyut=BOYUT, durum=DURUM, lr=LR, wd=WD,
-           adim=20000, tohum=0, yigin=YIGIN, bas=200, yedek=1000,
-           surdur=None, etiket=None):
+           adim=20000, tohum=0, yigin=YIGIN, bas=100, yedek=500,
+           surdur=None):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
-    EG      {k: (w, h)}  --  w (n, k+1) girdi, h (n,) hedef
-    olcut   olcut(m, "eg"|"dg"|"si", tam=False) -> oran
+    EG      (n, T) pencere yigini -- hepsi ayni uzunlukta, dolgu YOK
+    olcut   olcut(m, "eg"|"dg", tam=False) -> sonraki jeton dogrulugu
     surdur  bir anlik goruntu yolu verilirse KALDIGI YERDEN devam eder
             (agirlik + optimizer + RNG).  Kural 1: uzatma SURDURMEDIR.
-    etiket  cevap uzayini bu birimlerle SINIRLAR (olcme_17.etiketler).
-            Verilmezse butun sozluk -- kucuk sozlukte zararsiz, C'de degil.
     """
     if kok is None:
         GUNLUK.append(f"[{ad}] UYARI: kok YOK, agirlik KAYDEDILMIYOR")
@@ -197,7 +162,7 @@ def baslat(ad, EG, N, *, olcut=_olcut_yok, aygit="cuda", kok=None, ek=None,
     threading.Thread(
         target=_kos, daemon=True,
         args=(ad, EG, N, olcut, aygit, kok, ek, boyut, durum, lr, wd,
-              adim, tohum, yigin, bas, yedek, surdur, etiket)).start()
+              adim, tohum, yigin, bas, yedek, surdur)).start()
     return f"{ad} basladi" + (f"  ({os.path.basename(surdur)}'den)"
                               if surdur else "")
 

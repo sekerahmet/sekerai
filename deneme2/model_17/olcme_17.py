@@ -1,117 +1,93 @@
 # -*- coding: utf-8 -*-
-"""olcme_17 -- TEK OLCUT: zincir verildi, bilesik iliski DOGRU MU.
+"""olcme_17 -- SONRAKI JETON.  Etiket yok, tek sayi yok: SAYI + METIN.
 
-Uretim yok, uzunluk yok, kismi puan yok.  Cevap tek bir etiket:
-    o, _ = m.dikkat(w)          onek -> tek cikti noktasi
-    tahmin = en yakin E[c]
-    dogru mu = (tahmin == hedef)
+KAYIP PERPLEXITY DEGIL.  Puan -||o - E||^2, yani olcegi kalibre degil;
+baslangicta sozluk 50 iken kayip 20,8 cikiyor, ln(50)=3,91 degil.
+Kayip egrisi izlenir ama BIR SEY SOYLEMEZ; hukum dogruluktan okunur.
 
-VE OLCU TEK SAYI DEGIL, k'YA GORE TABLO.  Sorunun tamami bu:
-    k = 2,3     egitimde GORULDU        -> ezber
-    k >= 4      HIC gorulmedi           -> bilesimsel genelleme
-Tek ortalama ikisini karistirir ve egriyi gizler.
-
-Sans seviyesi 1/18 = 0,056 (18 hedef etiketi).
+IKI ALAN, birlikte okunur (CLAUDE.md):
+    SAYI   sonraki jeton dogrulugu -- egitim ve DOGRULAMA ayri
+    METIN  istemden URETIM, GOZLE.  Makalenin 44 degerlendirme istemi
+           (Evaluation prompts.yaml) hazir duruyor.
 """
 from __future__ import annotations
 
 import torch
 
 
-def etiketler(*kumeler) -> list:
-    """Hedef olarak GECEN birimler -- cevap uzayi.  Veriden cikar."""
-    return sorted(set(int(x) for O in kumeler for v in O.values()
-                      for x in v[1]))
-
-
-def tahmin(m, w, parca: int = 4096, maske=None, etiket=None):
-    """w (n, T) -> (n,) tahmin edilen etiket.  maske: dolgu yuvalari.
-
-    etiket verilirse okuma YALNIZ o birimler uzerinde.  Verilmezse butun
-    sozluk -- C'de olculdu: sinav cevaplarinin %42,6'si etiket bile
-    degildi ("necklace", "exactly"), sinav 0,0454 yerine 0,0829'du.
-    A (sozluk 21) ve B2 (41) etkilenmiyor: %0,0 ve %0,8."""
-    ET = None if etiket is None else torch.as_tensor(etiket,
-                                                     device=m.E.device)
-    cik = []
+def dogruluk(m, W, parca: int = 256) -> float:
+    """Sonraki jeton dogrulugu.  W (n, T) -> oran."""
+    dg = tp = 0
     with torch.no_grad():
-        E = m.E if ET is None else m.E[ET]
-        for i in range(0, w.shape[0], parca):
-            mm = None if maske is None else maske[i:i + parca]
-            o, _ = m.dikkat(w[i:i + parca], mm)
-            j = torch.cdist(o, E).argmin(-1)
-            cik.append(j if ET is None else ET[j])
-    return torch.cat(cik)
+        for i in range(0, W.shape[0], parca):
+            w = W[i:i + parca]
+            t = m.dizi(w)[:, :-1].argmax(-1)
+            dg += int((t == w[:, 1:]).sum())
+            tp += t.numel()
+    return dg / max(tp, 1)
 
 
-def _ac(v, aygit):
-    """Obek (w, h) ya da (w, h, maske) olabilir -- C'de dolgu var."""
-    mk = v[2].to(aygit) if len(v) > 2 else None
-    return v[0].to(aygit), v[1].to(aygit), mk
+def olcut(EG, DG, aygit="cuda", en=2000):
+    """train_17'nin bekledigi bicim:  olcut(m, "eg"|"dg") -> oran.
 
-
-def oran(m, O, aygit="cuda", parca=4096, etiket=None) -> dict:
-    """{k: (dogru, toplam)} -- obek obek."""
-    d = {}
-    for k, v in O.items():
-        w, h, mk = _ac(v, aygit)
-        t = tahmin(m, w, parca, mk, etiket)
-        d[k] = (int((t == h).sum()), int(w.shape[0]))
-    return d
-
-
-def olcut(EG, DG, SI, aygit="cuda", en=None, etiket=None):
-    """train_17'nin bekledigi bicim:  olcut(m, "eg"|"dg"|"si") -> oran.
-
-    `en` verilirse her obekten en fazla o kadar ornek -- egitim
-    sirasindaki olcum ucuzlasir, SON olcum tam veriyle yapilir."""
-    kume = {"eg": EG, "dg": DG, "si": SI}
+    `en` egitim SIRASINDA ornek sayisini kisar; son olcum TAM veriyle."""
+    kume = {"eg": EG, "dg": DG}
 
     def f(m, taraf, tam=False):
-        O = kume[taraf]
-        if en and not tam:
-            O = {k: tuple(t[:en] for t in v) for k, v in O.items()}
-        d = oran(m, O, aygit, etiket=etiket)
-        dg = sum(a for a, _ in d.values())
-        tp = sum(b for _, b in d.values())
-        return dg / max(tp, 1)
+        W = kume[taraf]
+        if not tam:
+            W = W[:en]
+        return dogruluk(m, W.to(aygit))
 
     return f
 
 
-def tablo(m, O, aygit="cuda", yaz=print, gorulen=(2, 3), etiket=None):
-    """k'ya gore doguruluk tablosu -- HUKUM BURADAN OKUNUR."""
-    d = oran(m, O, aygit, etiket=etiket)
-    yaz(f"{'k':>4} {'dogru':>7} {'toplam':>7} {'oran':>7}   durum")
-    yaz("-" * 46)
-    for k in sorted(d):
-        a, b = d[k]
-        yaz(f"{k:>4} {a:>7} {b:>7} {a/b:>7.4f}   "
-            + ("gorulen k" if k in gorulen else "GORULMEMIS"))
-    yaz("-" * 46)
-    ga = sum(a for k, (a, _) in d.items() if k in gorulen)
-    gb = sum(b for k, (_, b) in d.items() if k in gorulen)
-    ya = sum(a for k, (a, _) in d.items() if k not in gorulen)
-    yb = sum(b for k, (_, b) in d.items() if k not in gorulen)
-    if gb:
-        yaz(f"{'GORULEN':>12} {ga:>7} {gb:>7} {ga/gb:>7.4f}")
-    if yb:
-        yaz(f"{'GORULMEMIS':>12} {ya:>7} {yb:>7} {ya/yb:>7.4f}")
-    yaz(f"{'sans':>12} {'':>7} {'':>7} {1/18:>7.4f}")
-    return d
+def kirilim(m, W, ad, aygit="cuda", parca=256):
+    """Dogrulugu KONUMA gore boler -- onek uzadikca duzeliyor mu?
+
+    Ilk konumlarda onek kisa; model orada zayif olabilir ve tek ortalama
+    bunu gizler."""
+    T = W.shape[1]
+    dg = torch.zeros(T - 1)
+    tp = 0
+    with torch.no_grad():
+        for i in range(0, W.shape[0], parca):
+            w = W[i:i + parca].to(aygit)
+            t = m.dizi(w)[:, :-1].argmax(-1)
+            dg += (t == w[:, 1:]).sum(0).float().cpu()
+            tp += w.shape[0]
+    return (dg / tp).tolist()
 
 
-def kirilim(m, O, ad, aygit="cuda", en=12):
-    """Ornek ornek dokum -- sayi degil, MODELIN SECTIGI okunur."""
-    cik = []
-    for k in sorted(O):
-        v = O[k]
-        w, h = v[0], v[1]
-        mk = None if len(v) < 3 else v[2][:en].to(aygit)
-        t = tahmin(m, w[:en].to(aygit), maske=mk)
-        for i in range(min(en, w.shape[0])):
-            g = w[i] if len(v) < 3 else w[i][v[2][i]]
-            zincir = " ".join(ad[int(x)] for x in g[:-1])
-            cik.append((k, zincir, ad[int(t[i])], ad[int(h[i])],
-                        int(t[i]) == int(h[i])))
-    return cik
+def tablo(m, W, aygit="cuda", yaz=print, dilim=8):
+    """Konum dilimlerine gore dogruluk -- HUKUM BURADAN OKUNUR."""
+    o = kirilim(m, W, None, aygit)
+    n = len(o)
+    yaz(f"{'konum':>12} {'dogruluk':>10}")
+    yaz("-" * 24)
+    for k in range(dilim):
+        a, b = k * n // dilim, (k + 1) * n // dilim
+        yaz(f"{f'{a}-{b}':>12} {sum(o[a:b]) / (b - a):>10.4f}")
+    yaz("-" * 24)
+    yaz(f"{'TUMU':>12} {sum(o) / n:>10.4f}")
+    return o
+
+
+def devam(m, onek, ad, ix, coz, adim=60, aygit="cuda", tohum=None,
+          sicaklik=0.0):
+    """Istemin devamini URET.  Sayi degil METIN -- gozle okunur.
+
+    sicaklik 0 -> hep en yakin token (belirlenimci).
+    """
+    g = None if tohum is None else torch.Generator().manual_seed(tohum)
+    w = [ix.get(t, ix["<bilinmeyen>"]) for t in onek]
+    with torch.no_grad():
+        for _ in range(adim):
+            p = m.dizi(torch.tensor([w], device=aygit))[0, -1]
+            if sicaklik <= 0:
+                c = int(p.argmax())
+            else:
+                c = int(torch.multinomial((p / sicaklik).softmax(-1), 1,
+                                          generator=g))
+            w.append(c)
+    return coz(torch.tensor(w), ad)
