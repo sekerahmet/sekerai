@@ -139,11 +139,25 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
         not_(f"[{ad}] SURDURULUYOR  {os.path.basename(surdur)}  adim {bas_adim}")
 
     par = sum(p.numel() for p in m.parameters())
+    # X bir SOZLUK ise TEKER TEKER egitim: {uzunluk: (X, OFS)}.  Yigin
+    # TEK uzunluktan cekilir, tensor tam dolu -- DOLGU YOK.  Obek
+    # buyuklugune ORANTILI seciliyor ki her parca esit sansla gelsin.
+    OBEK = None
+    if isinstance(X, dict):
+        OBEK = sorted(X.items())
+        _n = torch.tensor([float(a.shape[0]) for _, (a, _) in OBEK])
+        PAY = _n / _n.sum()
+        N = int(_n.sum().item())
+        T = float((_n * torch.tensor([float(L) for L, _ in OBEK])).sum() / N)
+        not_(f"[{ad}] TEKER TEKER: {len(OBEK)} uzunluk obegi, {N:,} parca"
+             f"   ort {T:.1f} birim   DOLGU YOK")
     # X ya PENCERE TABLOSU (B,T) ya da tek uzun AKIS (N,).  Akis verilirse
     # pencere BURADA aciliyor: sliding_window_view bir GORUNUM, kopya yok.
     # Birim dosyasi akis sakliyor cunku atla=4 ile pencereler 20 birim
     # ortusuyor ve tablo 6 kat sisiyordu (192 MB -> 32,8 MB).
-    if X.dim() == 1:
+    if OBEK is not None:
+        pass
+    elif X.dim() == 1:
         import numpy as np
         P = np.lib.stride_tricks.sliding_window_view(X.numpy(), t_len)
         X = torch.from_numpy(P)                    # TAM gorunum
@@ -170,7 +184,8 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
              f"{len(bs):,} x {t_len}  ({nasil}, GORUNUM)")
     else:
         BAS = torch.arange(X.shape[0])
-    N, T = len(BAS), X.shape[1]
+    if OBEK is None:
+        N, T = len(BAS), X.shape[1]
     not_(f"[{ad}] boyut {boyut} durum {durum} lr {lr} wd {wd} tohum {tohum}"
          f"  parametre {par}")
     not_(f"[{ad}] pencere {N} x {T}   yigin {yigin}"
@@ -182,9 +197,17 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
         if ad in DURDUR:
             not_(f"[{ad}] DURDURULDU  adim {i}")
             break
-        j = BAS[torch.randint(0, N, (yigin,), generator=uret)]
-        k = m.kayip(X[j].to(aygit).long(), PAD,
-                    None if ofset is None else ofset[j].to(aygit).long())
+        if OBEK is not None:
+            _b = int(torch.multinomial(PAY, 1, generator=uret))
+            _L, (_X, _O) = OBEK[_b]
+            j = torch.randint(0, _X.shape[0], (yigin,), generator=uret)
+            _w, _o = _X[j], _O[j]
+        else:
+            j = BAS[torch.randint(0, N, (yigin,), generator=uret)]
+            _w, _o = X[j], (None if ofset is None else ofset[j])
+        k = m.kayip(_w.to(aygit).long(), PAD,
+                    None if _o is None or ofset is None
+                    else _o.to(aygit).long())
         opt.zero_grad(); k.backward(); opt.step()
 
         if i % bas == 0:

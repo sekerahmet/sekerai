@@ -38,6 +38,7 @@ import os
 import sys
 
 import numpy as np
+import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -133,6 +134,56 @@ def cumle_basi(d, yaz=print):
     yaz(f"pencere basi {len(b):,}   ortalama parca "
         f"{len(dz) / max(len(b), 1):.1f} birim")
     return b
+
+
+def parca_tablo(d, t_len=None, yaz=print):
+    """TEKER TEKER egitim icin PARCA OBEKLERI.  Doner: {L: (X, OFS)}.
+
+    Bir satir = bir PARCA (iki nokta arasi): ya bir bildirim, ya bir
+    SORU + CEVABI.  Satirlar UZUNLUGA GORE obeklenir, yani her tensor
+    TAM DOLU -- DOLGU YOK.
+
+    Neden dolgu degil obek: dolgu sonucu degistirmiyordu (hedefi dolgu
+    olan konum `ignore_index` ile duser, nedensel maske yuzunden gercek
+    konumlar dolguya bakamaz) ama HESABI harciyordu.  OLCULDU: tek
+    pencere T=32 ile dolgu %56,9, yani 2,32 kat bosa hesap.  Obeklenince
+    %0.  Bedeli: bir yigin TEK uzunluktan gelir.
+
+    Akistan FARKI: hicbir satir baska bir parcadan tek birim tasimaz.
+    Model "sonraki soru"yu gormez; buna karsilik her ornek sinavin
+    verdigi seyin AYNISI olur.
+
+    Durma isareti kaybolmaz: parca "." ile bitiyor, yani son hedef
+    nokta.  Model cevabi yazip noktayi koymayi ogrenir.
+    """
+    dz = d["dizi"].numpy()
+    ix = d["ix"]
+    t_len = t_len or d["t_len"]
+    son = np.flatnonzero(dz == ix["."])
+    bas = np.concatenate([[0], son[:-1] + 1])
+    # Belge siniri ONCEKI belgenin sonuna ait; teker teker egitimde
+    # belge diye bir sey yok, o yuzden parcanin BASINDAN dusuruluyor.
+    sin = ix.get("<belge>")
+    if sin is not None:
+        bas = bas + (dz[np.minimum(bas, len(dz) - 1)] == sin)
+    uz = son - bas + 1
+    tut = uz <= t_len
+    if not tut.all():
+        yaz(f"parca_tablo: {int((~tut).sum()):,} parca t_len={t_len}'e "
+            f"sigmiyor, DUSTU (en uzun {int(uz.max())})")
+    bas, uz = bas[tut], uz[tut]
+    ofs_tam = ofset(d, yaz=lambda *a: None)
+    obek = {}
+    for L in np.unique(uz):
+        b = bas[uz == L]
+        p = b[:, None] + np.arange(L)[None, :]
+        obek[int(L)] = (torch.from_numpy(dz[p].astype(np.int16)),
+                        torch.from_numpy(ofs_tam[p]))
+    n = sum(X.shape[0] for X, _ in obek.values())
+    ab = sum(int((O == 0).any(1).sum()) for _, O in obek.values())
+    yaz(f"parca obegi {len(obek)} uzunluk   {n:,} satir   DOLGU YOK"
+        f"   cevap araligi basi {ab:,} satirda")
+    return obek
 
 
 def denetle(d, n=2000, yaz=print):
