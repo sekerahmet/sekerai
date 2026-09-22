@@ -49,6 +49,7 @@ import numpy as np
 SINIR = "<|endoftext|>"       # dosyadaki ayrac
 HIKAYE = "<hikaye>"           # bizim jetonumuz
 BILINMEYEN = "<bilinmeyen>"
+DOLGU = "<dolgu>"          # hikaye bitince kalan yer; maske ile duser
 # Kesme isaretli kisaltma TEK birim (don't, Lily's); noktalama AYRI.
 JETON = re.compile(r"[A-Za-z]+'[A-Za-z]+|[A-Za-z]+|[0-9]+|[^\sA-Za-z0-9]")
 
@@ -96,7 +97,7 @@ def sozluk(yol, en: int, parca_mb=64, en_mb=None, yaz=print):
     for h in _hikayeler(yol, parca_mb, en_mb):
         say.update(JETON.findall(h))
     top = sum(say.values())
-    ad = [HIKAYE, BILINMEYEN] + [a for a, _ in say.most_common(en)]
+    ad = [DOLGU, HIKAYE, BILINMEYEN] + [a for a, _ in say.most_common(en)]
     kap = sum(c for _, c in say.most_common(en)) / top
     yaz("  sozluk  %s farkli kelime gorundu -> en sik %s tutuldu"
         % ("{:,}".format(len(say)), "{:,}".format(en)))
@@ -121,36 +122,42 @@ def akis(yol, ix, parca_mb=64, en_mb=None, yaz=print):
     return a
 
 
-def pencere(a: np.ndarray, T: int, uret=None, hikaye=None):
-    """Akisi T uzunlugunda pencerelere kes.
+def pencere(a: np.ndarray, T: int, uret=None, hikaye=None, dolgu=0):
+    """HER HIKAYE = BIR PENCERE.  Doner: (P, M) -- P (n,T), M (n,T) bool.
 
-    hikaye verilirse (<hikaye> jetonunun kodu) pencereler HIKAYE BASINA
-    HIZALANIR: her hikayenin ILK jetonundan baslayan bir pencere.
-    Verilmezse akis duz kesilir.
+    Kullanici: *"her hikaye bence 1 pencere olmali yoksa modele dogru tam
+    hikaye ogretmemis oluruz"*.  Pencere hikayenin ILK jetonundan baslar,
+    SON jetonunda biter; kalan yer <dolgu> ve maskede False.  Tasma YOK --
+    yani hicbir pencerede ikinci bir hikayenin parcasi bulunmaz.
 
-    NEDEN HIZALI.  OLCULDU (TS2, 765.000 tahmin): duz kesimde tahminlerin
-    %40,8'i, icinde bulundugu hikayenin BASINI GORMEYEN bir konumdaydi.
-    Hikayeler ortalama 192 kelime ve %89,8'i T=256'ya sigiyor -- yani
-    sorun uzunluk degil, HIZALAMA.  Model hikayeyi bastan gormeden
-    ortasindan tahmin etmeye calisiyordu, ve "hikayeden beri" olcusunun
-    %41'i atilmak zorunda kalmisti.
+    T'den UZUN hikayeler ATILIR (bolmek "tam hikaye" ilkesini bozardi).
+    OLCULDU, T=256: hikayelerin %89,8'i kaliyor, jetonlarin %79,4'u;
+    dolgu orani %33,7, yani etkin is %66,3.
+      T=384 -> %95,7 kalir ama dolgu %53,5
+      T=512 -> %98,5 kalir ama dolgu %63,7  (hesabin ucte ikisi bosa)
 
-    Dolgu YOK: pencere 256'ya kadar akistan devam eder, siradaki hikayeye
-    tasarsa <hikaye> jetonu sinirI zaten isaretliyor.  Sondaki T'den kisa
-    kalan hikayeler atilir.
-
-    KARISTIRILIR: model_16'da akis blok dizilimliydi ve soru orani ilk
-    %40'ta %0,54, sonrasinda %6,64 cikmisti."""
+    hikaye verilmezse akis DUZ kesilir (eski davranis, maske hep True).
+    """
     if hikaye is None:
         n = len(a) // T
         P = a[:n * T].reshape(n, T)
+        M = np.ones(P.shape, dtype=bool)
     else:
-        # <hikaye> AYRACTIR: hikaye ondan SONRA baslar.  Ilk hikaye
-        # dosyanin basinda, ayracsiz.
-        bas = np.concatenate([[0], np.flatnonzero(a == hikaye) + 1])
-        bas = bas[bas + T <= len(a)]
-        P = a[bas[:, None] + np.arange(T)]
-    return P if uret is None else P[uret.permutation(len(P))]
+        sn = np.flatnonzero(a == hikaye)
+        bas = np.concatenate([[0], sn + 1])[:len(sn)]   # her hikayenin basi
+        son = sn                                        # ayractan ONCEsi
+        uz = son - bas
+        tut = (uz > 0) & (uz <= T)
+        bas, uz = bas[tut], uz[tut]
+        P = np.full((len(bas), T), dolgu, dtype=a.dtype)
+        M = np.zeros((len(bas), T), dtype=bool)
+        for i, (b, L) in enumerate(zip(bas, uz)):
+            P[i, :L] = a[b:b + L]
+            M[i, :L] = True
+    if uret is not None:
+        j = uret.permutation(len(P))
+        P, M = P[j], M[j]
+    return P, M
 
 
 def coz(P, ad, i=0, en=None) -> str:
@@ -202,7 +209,9 @@ def kur(kok: str, T: int = 128, en: int = 4000, en_mb=None, tohum: int = 0,
     os.makedirs(ob, exist_ok=True)
     yol = {b: os.path.join(kok, "TinyStoriesV2-GPT4-%s.txt" % b)
            for b in ("train", "valid")}
-    etiket = "%s_n%d" % ("tam" if en_mb is None else "%dmb" % en_mb, en)
+    # SURUM onbellek anahtarinda: sozluk yapisi degisirse (ornegin
+    # <dolgu> eklenince) eski onbellek SESSIZCE kullanilmasin.
+    etiket = "%s_n%d_v2" % ("tam" if en_mb is None else "%dmb" % en_mb, en)
 
     ps = os.path.join(ob, "sozluk_%s.npy" % etiket)
     if os.path.exists(ps):
@@ -226,21 +235,24 @@ def kur(kok: str, T: int = 128, en: int = 4000, en_mb=None, tohum: int = 0,
 
     uret = np.random.default_rng(tohum)
     hk = ix[HIKAYE] if hizali else None
-    EG, DG = (pencere(A["train"], T, uret, hk),
-              pencere(A["valid"], T, uret, hk))
+    EG, EM = pencere(A["train"], T, uret, hk, ix[DOLGU])
+    DG, DM = pencere(A["valid"], T, uret, hk, ix[DOLGU])
     yaz("  pencere T=%d   %s   egitim %s   dogrulama %s"
-        % (T, "HIKAYE BASINA HIZALI" if hizali else "duz kesim",
+        % (T, "HER HIKAYE BIR PENCERE" if hizali else "duz kesim",
            "{:,}".format(len(EG)), "{:,}".format(len(DG))))
-    yaz("  hikaye siniri egitimde %s kez"
-        % "{:,}".format(int((EG == ix[HIKAYE]).sum())))
-    return ad, EG, DG
+    yaz("  dolgu %%%.1f   etkin is %%%.1f   (T'den uzun hikayeler atildi)"
+        % (100 * (1 - EM.mean()), 100 * EM.mean()))
+    return ad, (EG, EM), (DG, DM)
 
 
 if __name__ == "__main__":
     KOK = r"G:\Drive'ım\tinystories"
-    ad, EG, DG = kur(KOK, T=128, en=4000, en_mb=64)
+    ad, (EG, EM), (DG, DM) = kur(KOK, T=256, en=4000, en_mb=64)
     print()
-    print("iz", iz(ad, EG[:1000], DG[:1000]))
+    print("iz", iz(ad, EG[:1000], EM[:1000], DG[:1000]))
     print()
-    print("ORNEK PENCERE  (egitim, T=128)")
-    print(coz(EG, ad, 0))
+    for i in (0, 1):
+        print("ORNEK PENCERE %d   %d kelime + %d dolgu"
+              % (i, int(EM[i].sum()), int((~EM[i]).sum())))
+        print(coz(EG[i][EM[i]], ad))
+        print()

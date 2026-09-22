@@ -125,10 +125,17 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
     # tumu GPU'ya sigiyordu (253 MB) ama tam korpusta 8,8 GB eder ve
     # aktivasyonlarin yanina sigmaz.  Tasima maliyeti adim basina
     # 512x256 int32 = 0,5 MB -- olcusuz.
-    W = EG if EG.device.type == "cpu" else EG.cpu()
+    # EG ya (W, M) ya da tek W.  M dolgu maskesi -- HER HIKAYE BIR
+    # PENCERE oldugu icin hikaye bitince kalan yer <dolgu>.
+    W, M = EG if isinstance(EG, (tuple, list)) else (EG, None)
+    W = W if W.device.type == "cpu" else W.cpu()
+    M = M if M is None or M.device.type == "cpu" else M.cpu()
     n, T = W.shape
     par = sum(p.numel() for p in m.parameters())
-    not_(f"[{ad}] pencere {n:,} x {T}   {n * T:,} jeton")
+    _et = 1.0 if M is None else float(M.float().mean())
+    not_(f"[{ad}] pencere {n:,} x {T}   {n * T:,} yuva"
+         + ("" if M is None else f"   dolgu %{100 * (1 - _et):.1f}"
+                                 f"   ETKIN {n * T * _et:,.0f}"))
     not_(f"[{ad}] boyut {boyut} durum {durum} lr {lr} wd {wd} tohum {tohum}"
          f"  sozluk {N}  parametre {par:,}")
     not_(f"[{ad}] yigin {yigin}   adim basina {yigin * (T - 1):,} tahmin"
@@ -143,7 +150,9 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
             break
         j = torch.randint(0, n, (yigin,), generator=uret)
         opt.zero_grad()
-        kay = egit(W[j].to(aygit, non_blocking=True).long())
+        w_ = W[j].to(aygit, non_blocking=True).long()
+        m_ = None if M is None else M[j].to(aygit, non_blocking=True)
+        kay = egit(w_, m_)
         kay.backward()
         opt.step()
 

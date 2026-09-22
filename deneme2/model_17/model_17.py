@@ -170,7 +170,7 @@ class Yol(nn.Module):
         o = (ag.unsqueeze(-1) * (S @ self.Wv)).sum(1)
         return (o[0], ag[0]) if tek else (o, ag)
 
-    def dizi(self, w):
+    def dizi(self, w, maske=None):
         """HER yuva kendi sorusunu sorar.  w (B,T) -> puan (B,T,n).
 
         `dikkat`in cogul hali; mekanizma AYNI, degisen tek sey kimin
@@ -180,6 +180,11 @@ class Yol(nn.Module):
         NEDENSEL MASKE ZORUNLU: butun yuvalar ayni dizide soruyor, maske
         gelecegi gormemeyi geri koyuyor.  relu yolunda agirlik dogrudan
         0'lanir (pay yok); softmax yolunda -inf ile.
+
+        maske (B,T) bool: gercek jetonlarda True.  HER HIKAYE BIR PENCERE
+        oldugu icin hikaye bitince kalan yer <dolgu>; o yuvalar cevap
+        VEREMEZ.  Maskelenmezse dolgu yuvalari toplama girer ve her
+        ornege BASKA sayida sahte katki biner.
         """
         assert w.dim() == 2, "dizi() (B,T) bekler"
         S = self.gez(w)[:, 1:]                       # (B,T,durum)
@@ -187,6 +192,8 @@ class Yol(nn.Module):
         P = Q @ K.transpose(1, 2) + self.hb          # (B,T,T)
         gec = torch.ones(w.shape[1], w.shape[1], dtype=torch.bool,
                          device=w.device).tril()     # j yalniz <= j'ye bakar
+        if maske is not None:
+            gec = gec & maske[:, None, :]            # dolgu CEVAP VEREMEZ
         A = (P.masked_fill(~gec, -torch.inf).softmax(-1) if self.pay
              else P.clamp(min=0) * gec)
         # A @ V carpim olarak yazilmali: yayilimla (B,T,T,boyut) ara tensor
@@ -201,13 +208,23 @@ class Yol(nn.Module):
         E = self.E.expand(O.shape[0], -1, -1) if O.dim() == 3 else self.E
         return -torch.cdist(O, E) ** 2
 
-    def kayip(self, w):
+    def kayip(self, w, maske=None):
         """SONRAKI JETON, her konumda.  w (B,T) -> SKALER.
 
-        Konum j, j+1'i tahmin eder; son konumun hedefi yok.  Dolgu YOK:
-        pencereler sabit T ve akis kesintisiz."""
-        p = self.dizi(w)[:, :-1]
-        return F.cross_entropy(p.reshape(-1, self.n), w[:, 1:].reshape(-1))
+        Konum j, j+1'i tahmin eder; son konumun hedefi yok.
+
+        maske verilirse HEDEFI DOLGU olan konumlar hem paydan hem
+        PAYDADAN duser -- yani kayip, dolgusuz haliyle ayni olcekte
+        kalir.  Dolgu sayilsaydi gradyanin bir kismi "dolgu tahmin et"
+        ogretirdi ve hikaye basina farkli sayida dolgu oldugu icin
+        ornekler esit agirlikta olmazdi."""
+        p = self.dizi(w, maske)[:, :-1].reshape(-1, self.n)
+        h = w[:, 1:].reshape(-1)
+        if maske is None:
+            return F.cross_entropy(p, h)
+        a = maske[:, 1:].reshape(-1)
+        k = F.cross_entropy(p, h, reduction="none")
+        return (k * a).sum() / a.sum()
 
     def oku(self, o):
         """Sozluk uzayindaki noktaya en yakin token."""

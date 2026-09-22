@@ -15,19 +15,30 @@ from __future__ import annotations
 import torch
 
 
+def _ac(X):
+    """(W, M) ya da tek W -- ikisini de kabul et."""
+    return X if isinstance(X, (tuple, list)) else (X, None)
+
+
 def dogruluk(m, W, parca: int = 256, aygit=None) -> float:
     """Sonraki jeton dogrulugu.  W (n, T) -> oran.
 
     W CPU'da olabilir: PARCA PARCA tasinir.  Tam korpusta egitim
     penceresi 8,8 GB eder, tumunu GPU'ya koymak OOM demektir."""
+    W, M = _ac(W)
     dg = tp = 0
     aygit = aygit or next(m.parameters()).device
     with torch.no_grad():
         for i in range(0, W.shape[0], parca):
             w = W[i:i + parca].to(aygit).long()
-            t = m.dizi(w)[:, :-1].argmax(-1)
-            dg += int((t == w[:, 1:]).sum())
-            tp += t.numel()
+            mk = None if M is None else M[i:i + parca].to(aygit)
+            t = m.dizi(w, mk)[:, :-1].argmax(-1)
+            d = t == w[:, 1:]
+            if mk is None:
+                dg += int(d.sum()); tp += d.numel()
+            else:                         # DOLGU SAYILMAZ
+                a = mk[:, 1:]
+                dg += int((d & a).sum()); tp += int(a.sum())
     return dg / max(tp, 1)
 
 
@@ -38,10 +49,10 @@ def olcut(EG, DG, aygit="cuda", en=2000):
     kume = {"eg": EG, "dg": DG}
 
     def f(m, taraf, tam=False):
-        W = kume[taraf]
+        W, M = _ac(kume[taraf])
         if not tam:
-            W = W[:en]
-        return dogruluk(m, W, aygit=aygit)
+            W, M = W[:en], (None if M is None else M[:en])
+        return dogruluk(m, (W, M), aygit=aygit)
 
     return f
 
@@ -51,16 +62,19 @@ def kirilim(m, W, ad, aygit="cuda", parca=256):
 
     Ilk konumlarda onek kisa; model orada zayif olabilir ve tek ortalama
     bunu gizler."""
+    W, M = _ac(W)
     T = W.shape[1]
-    dg = torch.zeros(T - 1)
-    tp = 0
+    dg, tp = torch.zeros(T - 1), torch.zeros(T - 1)
     with torch.no_grad():
         for i in range(0, W.shape[0], parca):
             w = W[i:i + parca].to(aygit).long()
-            t = m.dizi(w)[:, :-1].argmax(-1)
-            dg += (t == w[:, 1:]).sum(0).float().cpu()
-            tp += w.shape[0]
-    return (dg / tp).tolist()
+            mk = None if M is None else M[i:i + parca].to(aygit)
+            t = m.dizi(w, mk)[:, :-1].argmax(-1)
+            d = t == w[:, 1:]
+            a = torch.ones_like(d) if mk is None else mk[:, 1:]
+            dg += (d & a).sum(0).float().cpu()
+            tp += a.sum(0).float().cpu()   # konum basina GERCEK hedef
+    return (dg / tp.clamp(min=1)).tolist()
 
 
 def tablo(m, W, aygit="cuda", yaz=print, dilim=8):
