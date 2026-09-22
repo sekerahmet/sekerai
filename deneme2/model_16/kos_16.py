@@ -169,7 +169,7 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
             # Agirlik AKISLA ayni uzunlukta; pencereler AYNI gorunumle
             # aciliyor ki konumlar birebir ortussun.
             AG = np.lib.stride_tricks.sliding_window_view(agirlik, t_len)
-            agirlik = torch.from_numpy(AG[::atla].copy())
+            agirlik = torch.from_numpy(AG[::atla])   # GORUNUM, kopya yok
             not_(f"[{ad}] AGIRLIK acik: ortalama {float(agirlik.mean()):.3f}"
                  f"   en buyuk {float(agirlik.max()):.0f}")
         not_(f"[{ad}] akis {len(P) + t_len - 1:,} -> pencere {X.shape}"

@@ -57,8 +57,12 @@ def isaretle(d, yaz=print):
     dz = d["dizi"].numpy()
     ix = d["ix"]
     kop = np.array([ix[e] for e in KOPULA if e in ix])
-    nokta = ix["."]
-    bitis = np.isin(dz, kop)[:-1] & (dz == nokta)[1:]      # kopula, ardindan nokta
+    son_im = [ix[x] for x in (".", ",") if x in ix]
+    # Kopuladan sonra NOKTA ya da VIRGUL: duz cumlelerin bir kismi
+    # "... -dir , bu boyle bilinir ." diye devam ediyor ve yalniz nokta
+    # aransa o gecisler KACIYORDU.  Kesinlik yine tam, cunku ad eslesmesi
+    # 1.608 varlikla birebir.
+    bitis = np.isin(dz, kop)[:-1] & np.isin(dz, son_im)[1:]
     son = np.flatnonzero(bitis)                            # kopulanin konumu
     # uzunluga gore grupla: her varlik adi icin o uzunlukta dilim karsilastir
     ad_uz = collections.defaultdict(set)
