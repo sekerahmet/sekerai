@@ -45,6 +45,11 @@ def _yaz(kok, ad, m, bilgi):
     p["agirlik"] = {k: v.detach().cpu() for k, v in m.state_dict().items()}
     torch.save(p, f"{d}/t{bilgi['adim']}.pt")
     torch.save(p, f"{kok}/model_{ad}.pt")          # konus.py bunu okur
+    # GUNLUK de yazilir: yalniz bellekte kalirsa cekirdekle birlikte gider
+    # ve kosunun EGRISI kaybolur -- agirlik kalir ama nasil gelindigi gitmis
+    # olur.  Ayni ders, ayni yer: kaydetme kosunun ICINDE.
+    with open(f"{d}/gunluk.txt", "w") as f:
+        f.write("\n".join(GUNLUK) + "\n")
 
 
 def _koru(kok, ad):
