@@ -108,12 +108,21 @@ def sor(m, ciftler, aygit="cuda", en=20000, parca=20000):
       fazla rakam      YANLIS
       rakam yanlis     YANLIS
     """
+    # ALT KUME RASTGELE.  bol() ciftleri cevap uzunluguna gore SIRALI
+    # dondurdugu icin ilk N'i almak temsili DEGILDI: egitim tarafinin ilk
+    # 20.000'i %19 iki haneli cikiyordu, gercekte %3.  Tohum sabit --
+    # olcum kosudan kosuya ayni alt kumeyi kullanir.
+    if en < len(ciftler):
+        g = torch.Generator().manual_seed(12345)
+        k = torch.randperm(len(ciftler), generator=g)[:en].tolist()
+        ciftler = [ciftler[j] for j in k]
+
     kova = {}
-    for a, b in ciftler[:en]:
+    for a, b in ciftler:
         q = soru(a, b)
         kova.setdefault(len(q), []).append((q, rak(a + b)))
 
-    K = max(len(c) for c in map(rak, (a + b for a, b in ciftler[:en]))) + 1
+    K = max(len(rak(a + b)) for a, b in ciftler) + 1
     dog = say = 0
     with torch.no_grad():
         for kalem in kova.values():
