@@ -121,7 +121,11 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
         bas_adim = p["adim"]
         not_(f"[{ad}] SURDURULUYOR  {os.path.basename(surdur)}  adim {bas_adim}")
 
-    W = EG.to(aygit)
+    # PENCERELER CPU'DA KALIR, yigin yigin tasinir.  64 MB dilimde
+    # tumu GPU'ya sigiyordu (253 MB) ama tam korpusta 8,8 GB eder ve
+    # aktivasyonlarin yanina sigmaz.  Tasima maliyeti adim basina
+    # 512x256 int32 = 0,5 MB -- olcusuz.
+    W = EG if EG.device.type == "cpu" else EG.cpu()
     n, T = W.shape
     par = sum(p.numel() for p in m.parameters())
     not_(f"[{ad}] pencere {n:,} x {T}   {n * T:,} jeton")
@@ -139,7 +143,7 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
             break
         j = torch.randint(0, n, (yigin,), generator=uret)
         opt.zero_grad()
-        kay = egit(W[j])
+        kay = egit(W[j].to(aygit, non_blocking=True).long())
         kay.backward()
         opt.step()
 

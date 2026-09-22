@@ -121,14 +121,36 @@ def akis(yol, ix, parca_mb=64, en_mb=None, yaz=print):
     return a
 
 
-def pencere(a: np.ndarray, T: int, uret=None):
-    """Akisi T uzunlugunda pencerelere kes.  Dolgu YOK, artan atilir.
+def pencere(a: np.ndarray, T: int, uret=None, hikaye=None):
+    """Akisi T uzunlugunda pencerelere kes.
+
+    hikaye verilirse (<hikaye> jetonunun kodu) pencereler HIKAYE BASINA
+    HIZALANIR: her hikayenin ILK jetonundan baslayan bir pencere.
+    Verilmezse akis duz kesilir.
+
+    NEDEN HIZALI.  OLCULDU (TS2, 765.000 tahmin): duz kesimde tahminlerin
+    %40,8'i, icinde bulundugu hikayenin BASINI GORMEYEN bir konumdaydi.
+    Hikayeler ortalama 192 kelime ve %89,8'i T=256'ya sigiyor -- yani
+    sorun uzunluk degil, HIZALAMA.  Model hikayeyi bastan gormeden
+    ortasindan tahmin etmeye calisiyordu, ve "hikayeden beri" olcusunun
+    %41'i atilmak zorunda kalmisti.
+
+    Dolgu YOK: pencere 256'ya kadar akistan devam eder, siradaki hikayeye
+    tasarsa <hikaye> jetonu sinirI zaten isaretliyor.  Sondaki T'den kisa
+    kalan hikayeler atilir.
 
     KARISTIRILIR: model_16'da akis blok dizilimliydi ve soru orani ilk
     %40'ta %0,54, sonrasinda %6,64 cikmisti."""
-    n = len(a) // T
-    P = a[:n * T].reshape(n, T)
-    return P if uret is None else P[uret.permutation(n)]
+    if hikaye is None:
+        n = len(a) // T
+        P = a[:n * T].reshape(n, T)
+    else:
+        # <hikaye> AYRACTIR: hikaye ondan SONRA baslar.  Ilk hikaye
+        # dosyanin basinda, ayracsiz.
+        bas = np.concatenate([[0], np.flatnonzero(a == hikaye) + 1])
+        bas = bas[bas + T <= len(a)]
+        P = a[bas[:, None] + np.arange(T)]
+    return P if uret is None else P[uret.permutation(len(P))]
 
 
 def coz(P, ad, i=0, en=None) -> str:
@@ -164,13 +186,15 @@ def iz(*diziler) -> str:
 
 
 def kur(kok: str, T: int = 128, en: int = 4000, en_mb=None, tohum: int = 0,
-        yaz=print):
+        hizali: bool = True, yaz=print):
     """TinyStories -> (ad, EG, DG).
 
     kok    TinyStories dosyalarinin durdugu klasor (Drive)
     T      pencere uzunlugu.  dizi() dikkati (B,T,T) -- T ile KARESEL.
     en     sozluk kirpmasi (+ <hikaye> + <bilinmeyen>)
     en_mb  yalniz ilk N MB (deneme icin).  None -> hepsi.
+    hizali pencereler HIKAYE BASINA hizalansin mi.  Duz kesimde
+           tahminlerin %40,8'i hikayesinin basini GORMUYORDU (olculdu).
 
     Uretilen akis onbellege yazilir; ikinci cagri OKUR (kural 9).
     Iz her cagrida YENIDEN hesaplanir."""
@@ -201,10 +225,14 @@ def kur(kok: str, T: int = 128, en: int = 4000, en_mb=None, tohum: int = 0,
             np.save(p, A[b])
 
     uret = np.random.default_rng(tohum)
-    EG, DG = pencere(A["train"], T, uret), pencere(A["valid"], T, uret)
-    yaz("  pencere T=%d   egitim %s   dogrulama %s   hikaye siniri %s kez"
-        % (T, "{:,}".format(len(EG)), "{:,}".format(len(DG)),
-           "{:,}".format(int((EG == ix[HIKAYE]).sum()))))
+    hk = ix[HIKAYE] if hizali else None
+    EG, DG = (pencere(A["train"], T, uret, hk),
+              pencere(A["valid"], T, uret, hk))
+    yaz("  pencere T=%d   %s   egitim %s   dogrulama %s"
+        % (T, "HIKAYE BASINA HIZALI" if hizali else "duz kesim",
+           "{:,}".format(len(EG)), "{:,}".format(len(DG))))
+    yaz("  hikaye siniri egitimde %s kez"
+        % "{:,}".format(int((EG == ix[HIKAYE]).sum())))
     return ad, EG, DG
 
 

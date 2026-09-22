@@ -15,12 +15,16 @@ from __future__ import annotations
 import torch
 
 
-def dogruluk(m, W, parca: int = 256) -> float:
-    """Sonraki jeton dogrulugu.  W (n, T) -> oran."""
+def dogruluk(m, W, parca: int = 256, aygit=None) -> float:
+    """Sonraki jeton dogrulugu.  W (n, T) -> oran.
+
+    W CPU'da olabilir: PARCA PARCA tasinir.  Tam korpusta egitim
+    penceresi 8,8 GB eder, tumunu GPU'ya koymak OOM demektir."""
     dg = tp = 0
+    aygit = aygit or next(m.parameters()).device
     with torch.no_grad():
         for i in range(0, W.shape[0], parca):
-            w = W[i:i + parca]
+            w = W[i:i + parca].to(aygit).long()
             t = m.dizi(w)[:, :-1].argmax(-1)
             dg += int((t == w[:, 1:]).sum())
             tp += t.numel()
@@ -37,7 +41,7 @@ def olcut(EG, DG, aygit="cuda", en=2000):
         W = kume[taraf]
         if not tam:
             W = W[:en]
-        return dogruluk(m, W.to(aygit))
+        return dogruluk(m, W, aygit=aygit)
 
     return f
 
@@ -52,7 +56,7 @@ def kirilim(m, W, ad, aygit="cuda", parca=256):
     tp = 0
     with torch.no_grad():
         for i in range(0, W.shape[0], parca):
-            w = W[i:i + parca].to(aygit)
+            w = W[i:i + parca].to(aygit).long()
             t = m.dizi(w)[:, :-1].argmax(-1)
             dg += (t == w[:, 1:]).sum(0).float().cpu()
             tp += w.shape[0]
