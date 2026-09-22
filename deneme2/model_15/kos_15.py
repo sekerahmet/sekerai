@@ -10,6 +10,7 @@ Kural 8: baslat() ARKA PLANDA calisir ve HEMEN doner.  Izleme, GUNLUK'u
 basan nabiz hucresiyle OKUYARAK yapilir.
 """
 import os
+import shutil
 import time
 import threading
 
@@ -59,6 +60,27 @@ def _yaz(kok, ad, m, bilgi):
     p["agirlik"] = {k: v.detach().cpu() for k, v in m.state_dict().items()}
     torch.save(p, f"{d}/t{bilgi['adim']}.pt")
     torch.save(p, f"{kok}/model_{ad}.pt")          # konus.py bunu okur
+
+
+def _koru(kok, ad):
+    """Ayni adla yeni kosu ESKI YEDEKLERI SILMEZ -- yan klasore tasir.
+
+    CLAUDE.md kural 1 ile ayni yaklasim: `--ustune` de silmiyor, eskisini
+    `t<N>_eski_<zaman>/` diye kenara aliyor.  Burada da oyle; kaybedilen
+    bir kosu geri getirilemiyor, ama 21 KB'lik bir klasor hep saklanabilir.
+    Kosu BASLAMADAN once, IPLIK DISINDA calisir ki hata gorunur olsun.
+    """
+    if not kok:
+        return None
+    d = f"{kok}/{ad}"
+    if not os.path.isdir(d) or not os.listdir(d):
+        return None
+    yeni = f"{kok}/{ad}_eski_{time.strftime('%Y%m%d_%H%M%S')}"
+    shutil.move(d, yeni)
+    son = f"{kok}/model_{ad}.pt"
+    if os.path.exists(son):
+        shutil.move(son, f"{yeni}/model_{ad}.pt")
+    return os.path.basename(yeni)
 
 
 def _kos(ad, EG, TU, N, aygit, kok, ek, boyut, durum,
@@ -122,6 +144,10 @@ def baslat(ad, EG, TU, N, *, aygit="cuda", kok=None, ek=None,
     """
     if kok is None:
         GUNLUK.append(f"[{ad}] UYARI: kok YOK, agirlik KAYDEDILMIYOR")
+    tasinan = _koru(kok, ad)           # iplikten ONCE -- hata gorunur olsun
+    if tasinan:
+        print(f"  ESKI YEDEKLER KORUNDU -> {tasinan}/")
+        GUNLUK.append(f"[{ad}] eski yedekler tasindi -> {tasinan}/")
     DURDUR.discard(ad)
     threading.Thread(
         target=_kos, daemon=True,
