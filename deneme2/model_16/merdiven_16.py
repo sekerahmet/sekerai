@@ -32,7 +32,7 @@ ZINCIRDEKI YERI.  Kim kimi cagiriyor, bu dosya nerede:
   veri_16 / metin_16 / korpus_16 / jeton_16 / birim_16 / ek_16
   taban_16 / ayar_16 / hazirla_16 / dok_16 / denetim_16
   model_16    MIMARI
-  kos_16      egitim dongusu
+  train_16    egitim dongusu
   olcme_16    olcu
   adim_16     TEK SORU, ADIM ADIM
   merdiven_16 YAPI NEREDE TASIYAMIYOR   <-- BU DOSYA

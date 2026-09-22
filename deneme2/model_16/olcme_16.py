@@ -36,7 +36,7 @@ ZINCIRDEKI YERI.  Kim kimi cagiriyor, bu dosya nerede:
   hazirla_16  veriyi dosyaya yazar, Colab Drive'dan OKUR
 
   model_16    MIMARI -- model_15'ten
-  kos_16      egitim dongusu
+  train_16    egitim dongusu
   olcme_16    olcu: soru soruldu, cevap dogru mu   <-- BU DOSYA
 """
 import torch
@@ -145,7 +145,7 @@ def _esit(uretilen, cevap, birim):
 
 
 def olcut(d, aygit="cuda", en=2000, tam_en=10 ** 9):
-    """kos_16'nin bekledigi bicim:  olcut(m, "ezber"|"cikarim", tam=False)"""
+    """train_16'nin bekledigi bicim:  olcut(m, "ezber"|"cikarim", tam=False)"""
     def f(m, taraf, tam=False):
         adlar = EZBER if taraf == "ezber" else CIKARIM
         n = tam_en if tam else en

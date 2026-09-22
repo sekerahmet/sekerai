@@ -23,7 +23,7 @@ ZINCIRDEKI YERI.  Kim kimi cagiriyor, bu dosya nerede:
   hazirla_16  veriyi dosyaya yazar, Colab Drive'dan OKUR
 
   model_16    MIMARI -- model_15'ten   <-- BU DOSYA
-  kos_16      egitim dongusu
+  train_16    egitim dongusu
   olcme_16    olcu: soru soruldu, cevap dogru mu
 """
 import torch
@@ -222,6 +222,35 @@ class Yol(nn.Module):
         #   ara (B,T,T,boyut) tensor URETMEZ; carpim olarak yazilmasi sart,
         #   yayilimla yazilsaydi B=64'te bile 1 GB olurdu.
         return self.puan(O)
+
+    def kayip(self, w, PAD=None, ag=None):
+        """SONRAKI JETON, her konumda.  KAYIP MODELDE DURUR:
+        nanoGPT `GPT.forward` da, HuggingFace
+        `model(input_ids, labels=...)` da boyle.  Optimizer,
+        yigin, kayit ve surdurme `train_16`in isi.
+
+
+        w (B,T) -> puan (B,T,n).  Konum j, j+1'i tahmin eder; son konumun
+        hedefi yok.
+
+        PAD BICIME BAGLI, ZORUNLU DEGIL:
+          KARAKTER  pencereler paketlenmis, kuyrukta dolgu var (%10,8) ve
+                    sayilsaydi gradyanin %10,8'i 'dolgu tahmin et' ogretirdi.
+          BIRIM     akis KESINTISIZ, kayan pencereyle kesiliyor -- DOLGU YOK.
+                    PAD=None verilir ve hicbir konum atlanmaz.
+        """
+        puan = self.dizi(w)                       # (B,T,n)
+        ek = {} if PAD is None else {'ignore_index': PAD}
+        if ag is None:
+            return F.cross_entropy(puan[:, :-1].reshape(-1, puan.shape[-1]),
+                                   w[:, 1:].reshape(-1), **ek)
+        # S1 -- ONEK AGIRLIKLI AMAC.  ag[t] = o konumdaki tokenin agirligi;
+        # cevabin i. tokeni L-i+1 aliyor, yani "ilk k token BIRDEN dogru mu"
+        # sorusunun k uzerinden toplami.  Turetim: agirlik_16 basligi.
+        k = F.cross_entropy(puan[:, :-1].reshape(-1, puan.shape[-1]),
+                            w[:, 1:].reshape(-1), reduction="none", **ek)
+        a = ag[:, 1:].reshape(-1)
+        return (k * a).sum() / a.sum()
 
     def uret_dizi(self, w, adim):
         """w (B,L) -> uretilen (B,adim).  DURUM TASINIR.

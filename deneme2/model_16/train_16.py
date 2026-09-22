@@ -44,7 +44,7 @@ ZINCIRDEKI YERI.  Kim kimi cagiriyor, bu dosya nerede:
   hazirla_16  veriyi dosyaya yazar, Colab Drive'dan OKUR
 
   model_16    MIMARI -- model_15'ten
-  kos_16      egitim dongusu   <-- BU DOSYA
+  train_16    egitim dongusu   <-- BU DOSYA
   olcme_16    olcu: soru soruldu, cevap dogru mu
 """
 import os
@@ -110,32 +110,6 @@ def _koru(kok, ad):
     return os.path.basename(yeni)
 
 
-def kayip(m, w, PAD=None, ag=None):
-    """SONRAKI JETON, her konumda.
-
-    w (B,T) -> puan (B,T,n).  Konum j, j+1'i tahmin eder; son konumun
-    hedefi yok.
-
-    PAD BICIME BAGLI, ZORUNLU DEGIL:
-      KARAKTER  pencereler paketlenmis, kuyrukta dolgu var (%10,8) ve
-                sayilsaydi gradyanin %10,8'i 'dolgu tahmin et' ogretirdi.
-      BIRIM     akis KESINTISIZ, kayan pencereyle kesiliyor -- DOLGU YOK.
-                PAD=None verilir ve hicbir konum atlanmaz.
-    """
-    puan = m.dizi(w)                       # (B,T,n)
-    ek = {} if PAD is None else {'ignore_index': PAD}
-    if ag is None:
-        return F.cross_entropy(puan[:, :-1].reshape(-1, puan.shape[-1]),
-                               w[:, 1:].reshape(-1), **ek)
-    # S1 -- ONEK AGIRLIKLI AMAC.  ag[t] = o konumdaki tokenin agirligi;
-    # cevabin i. tokeni L-i+1 aliyor, yani "ilk k token BIRDEN dogru mu"
-    # sorusunun k uzerinden toplami.  Turetim: agirlik_16 basligi.
-    k = F.cross_entropy(puan[:, :-1].reshape(-1, puan.shape[-1]),
-                        w[:, 1:].reshape(-1), reduction="none", **ek)
-    a = ag[:, 1:].reshape(-1)
-    return (k * a).sum() / a.sum()
-
-
 def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
          lr, wd, adim, tohum, yigin, bas, yedek, surdur, t_len, atla,
          okuma, agirlik):
@@ -187,8 +161,8 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
             not_(f"[{ad}] DURDURULDU  adim {i}")
             break
         j = torch.randint(0, N, (yigin,), generator=uret)
-        k = kayip(m, X[j].to(aygit).long(), PAD,
-                  None if agirlik is None else agirlik[j].to(aygit))
+        k = m.kayip(X[j].to(aygit).long(), PAD,
+                    None if agirlik is None else agirlik[j].to(aygit))
         opt.zero_grad(); k.backward(); opt.step()
 
         if i % bas == 0:

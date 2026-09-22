@@ -34,7 +34,7 @@ ZINCIRDEKI YERI.  Kim kimi cagiriyor, bu dosya nerede:
   denetim_16  KAPILAR
 
   model_16    MIMARI -- model_15'ten
-  kos_16      egitim dongusu
+  train_16    egitim dongusu
   olcme_16    olcu: soru soruldu, cevap dogru mu
   adim_16     TEK SORU, ADIM ADIM   <-- BU DOSYA
 """

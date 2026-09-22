@@ -28,7 +28,7 @@ ZINCIRDEKI YERI.  Kim kimi cagiriyor, bu dosya nerede:
   hazirla_16  veriyi dosyaya yazar, Colab Drive'dan OKUR
 
   model_16    MIMARI -- model_15'ten
-  kos_16      egitim dongusu
+  train_16    egitim dongusu
   olcme_16    olcu: soru soruldu, cevap dogru mu
 """
 from __future__ import annotations

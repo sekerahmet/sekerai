@@ -29,7 +29,7 @@ cumlelerini `bir tez -dir` yanlislikla isaretliyordu).
 KAPI: `denetle` isaretlerin gercekten olgu cevabi oldugunu ornekle
 sinar ve kapsamı basar.
 
-ZINCIRDEKI YERI:  birim_16 (akis) -> agirlik_16 (agirlik dizisi) -> kos_16
+ZINCIRDEKI YERI:  birim_16 (akis) -> agirlik_16 (agirlik dizisi) -> train_16
 """
 import collections
 import os
