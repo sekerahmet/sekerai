@@ -68,14 +68,14 @@ def kopru_yasagi(v):
     egitim dagilimina gomer. Model bundan CEVABI cikaramaz (atomik
     olgu kendi sayfasinda duruyor) ama istatistiksel bir imza kalir."""
     d = {}
-    for lst in (v.comp, v.ent, v.ent_yok, v.ent_arama, v.ood, v.ent_kati):
+    for lst in (v.cikarim_gorulmemis, v.cikarim_yabanci, v.kapi_kisayolsuz, v.ayrik_arama, v.ayrik_ood, v.ayrik_kati):
         for z in lst:
             d.setdefault(int(z[3]), set()).add((int(z[0]), int(z[1])))
     return d
 
 
 # --- ZINCIR BUTCESI ------------------------------------------------------
-# OLCULDU 19 Eylul: `v.tr2` 29.510 zincir tasiyor ama korpus bunlarin
+# OLCULDU 19 Eylul: `v.ezber_zincir` 29.510 zincir tasiyor ama korpus bunlarin
 # ancak 6.819'unu YAZABILIYOR (iki-adimli bildirim slotu). Yani `zincir`
 # olcusunun TAVANI %23,1 ve esigi 0.95 -- ULASILAMAZ bir kapiydi.
 # Olculen %19,1; aradaki 4 puan ORNEKLEME ISRAFI (her kopya havuzdan
@@ -86,7 +86,7 @@ def kopru_yasagi(v):
 #    zincir slotu 6.819. Duzeltme 4 puan verir, 40 degil.
 #
 # Cozum iki parcali ve ikisi AYNI karar:
-#   1. `tr2` slot kadarina BUDANIR  -> `zincir` YAZILANI sorar
+#   1. `ezber_zincir` slot kadarina BUDANIR  -> `zincir` YAZILANI sorar
 #   2. `sayfalar` ARTIK ORNEKLEMEZ  -> elindekinin hepsini yazar
 # Korpus BUYUMEZ, yogunluk DEGISMEZ, epok DEGISMEZ. Yazilan FARKLI
 # zincir 5.635 -> ~8.266 (+%47) cikar, tavan 1.00 olur.
@@ -95,9 +95,9 @@ UCLU_PAY = 0.26      # zincir slotlarinin bu kadari UC ADIMLIYA gider
 #                      uc adimli (%25,9). Ayar niyeti %23 idi, tutuyor.
 
 
-def zincir_butcesi(one, tr2, yasak, kopya: int, zincir_pay: float,
+def zincir_butcesi(ezber_olgu, ezber_zincir, yasak, kopya: int, zincir_pay: float,
                    uclu_pay: float = UCLU_PAY, tohum: int = 0, yaz=print):
-    """`tr2`yi korpusun YAZABILECEGI kadarina budar.
+    """`ezber_zincir`yi korpusun YAZABILECEGI kadarina budar.
 
     Bir varligin sayfasina `len(sat) * zincir_pay` zincir cumlesi
     giriyor ve sayfa `kopya` kez yaziliyor -> o varlik icin toplam
@@ -106,12 +106,12 @@ def zincir_butcesi(one, tr2, yasak, kopya: int, zincir_pay: float,
 
     Secim TOHUMLU ve SIRALI: ayni ayar ayni budamayi verir."""
     konu, anilan = {}, {}
-    for e, r, h in one:
+    for e, r, h in ezber_olgu:
         e, r, h = int(e), int(r), int(h)
         konu.setdefault(e, []).append((e, r, h))
         anilan.setdefault(h, []).append((e, r, h))
     bas = {}
-    for i, x in enumerate(tr2):
+    for i, x in enumerate(ezber_zincir):
         bas.setdefault(int(x[0]), []).append(i)
     rs = np.random.default_rng(4400 + tohum)
     tut, hedef_top = set(), 0
@@ -130,8 +130,8 @@ def zincir_butcesi(one, tr2, yasak, kopya: int, zincir_pay: float,
             continue
         for j in rs.permutation(len(ix))[:hedef]:
             tut.add(ix[int(j)])
-    out = [x for i, x in enumerate(tr2) if i in tut]
-    yaz(f"  ZINCIR BUTCESI: {len(tr2):,} -> {len(out):,} "
+    out = [x for i, x in enumerate(ezber_zincir) if i in tut]
+    yaz(f"  ZINCIR BUTCESI: {len(ezber_zincir):,} -> {len(out):,} "
         f"(slot {hedef_top:,}; kopya {kopya}, zincir_pay {zincir_pay}, "
         f"uclu pay {uclu_pay:.0%})")
     yaz(f"     ARTIK HEPSI YAZILIR -> `zincir` sinavi GORULEN zinciri "
@@ -171,11 +171,11 @@ def sayfalar(v, G, kopya: int = 1, tohum: int = 0, tetik: int = 0,
     # arkaya sekiz tane iki-uc katli tamlama okurdu -- gercek metinde
     # zincir cumlesi BASIT cumlelerin ARASINDA gecer.
     #
-    # !! YALNIZ EGITIM zincirleri (`v.tr2`). Tutulanlar zaten disarida;
+    # !! YALNIZ EGITIM zincirleri (`v.ezber_zincir`). Tutulanlar zaten disarida;
     # ve zincir cumlesi KOPRUYU YAZMADIGI icin hicbir ATOMIK olguyu ele
     # vermez -> `olgu` kumesine GIRMEZ, sizinti kapisinda notrdur.
     z2 = {}
-    for x in v.tr2:
+    for x in v.ezber_zincir:
         e_, r1_, r2_, _b_, a_ = (int(t) for t in x)
         z2.setdefault(e_, []).append(((V.ILISKI[r1_], V.ILISKI[r2_]), E[a_]))
     z3 = {}
@@ -184,7 +184,7 @@ def sayfalar(v, G, kopya: int = 1, tohum: int = 0, tetik: int = 0,
         for x, rr, hedef in uclu_yollar(v, G, n3, tohum, yasak):
             z3.setdefault(ix[x], []).append((rr, hedef))
     konu, anilan = {}, {}
-    for e, r, h in v.one:
+    for e, r, h in v.ezber_olgu:
         e, r, h = int(e), int(r), int(h)
         konu.setdefault(e, []).append((e, r, h))
         anilan.setdefault(h, []).append((e, r, h))
@@ -201,7 +201,7 @@ def sayfalar(v, G, kopya: int = 1, tohum: int = 0, tetik: int = 0,
             continue
         # Bu sayfaya kac zincir cumlesi girsin -- ORANLA, tam sayiya
         # yuvarlamadan (0.20 x 7 cumle = 1,4 -> bazi sayfada 1, bazisinda 2).
-        # !! ARTIK ORNEKLENMIYOR. `veri_kur` `tr2`yi zaten slot kadarina
+        # !! ARTIK ORNEKLENMIYOR. `veri_kur` `ezber_zincir`yi zaten slot kadarina
         # budadi (`zincir_butcesi`), yani elde ne varsa HEPSI yazilir.
         # Eski hali her KOPYADA havuzdan yeniden cekiyordu ve ayni zinciri
         # tekrar yazip baskasini hic yazmiyordu -- olculdu: tavan %23,1
@@ -374,9 +374,9 @@ def zincirler(v, G, n2: int, n3: int = 0, tohum: int = 0, grup=6,
     E, tipi = _adlar(G)
     rs = np.random.default_rng(7500 + tohum)
     d, s = [], []
-    ix = rs.permutation(len(v.tr2))[:n2]
+    ix = rs.permutation(len(v.ezber_zincir))[:n2]
     for i in ix:
-        e, r1, r2, _b, a = (int(x) for x in v.tr2[int(i)])
+        e, r1, r2, _b, a = (int(x) for x in v.ezber_zincir[int(i)])
         k = int(rs.integers(MT.N_BILDIRIM))
         d.append(MT.yol(E[e], (V.ILISKI[r1], V.ILISKI[r2]), E[a], k))
         s.append(MT.yol_soru(E[e], (V.ILISKI[r1], V.ILISKI[r2]), E[a],
@@ -617,7 +617,7 @@ def yasak_ciftler(v):
     OLCULDU (18 Eylul): sahip duzeyinde kisitla 16 zincir pencereden
     kopyalanabilir cikti (belge duzeyinde 0'di). Kapi yakaladi."""
     d = {}
-    for lst in (v.comp, v.ent, v.ent_yok, v.ent_arama, v.ood, v.ent_kati):
+    for lst in (v.cikarim_gorulmemis, v.cikarim_yabanci, v.kapi_kisayolsuz, v.ayrik_arama, v.ayrik_ood, v.ayrik_kati):
         for z in lst:
             e, r1, r2, b = int(z[0]), int(z[1]), int(z[2]), int(z[3])
             d.setdefault((e, r1), set()).add((b, r2))
@@ -631,7 +631,7 @@ def cakisan_ciftler(v):
     Bu iki varligin biyografisi ayni dilime duserse, zincir bileşim
     yapilmadan KOPYALANARAK cevaplanabilir hale gelir."""
     c = set()
-    for lst in (v.comp, v.ent, v.ent_yok, v.ent_arama, v.ood, v.ent_kati):
+    for lst in (v.cikarim_gorulmemis, v.cikarim_yabanci, v.kapi_kisayolsuz, v.ayrik_arama, v.ayrik_ood, v.ayrik_kati):
         for z in lst:
             c.add((int(z[0]), int(z[3])))
             c.add((int(z[3]), int(z[0])))
@@ -743,8 +743,8 @@ def sizinti_kapisi(v, olgular, yaz=print):
     pencerede hem (e, r1) hem (b, r2) olgusunun SOYLENMIS olmasi gerek.
     Ikisi de varsa model bileşim yapmadan cevabi okuyabilir."""
     toplam = 0
-    for ad, lst in (("comp", v.comp), ("ent", v.ent),
-                    ("ent_yok", v.ent_yok), ("ood", v.ood)):
+    for ad, lst in (("cikarim_gorulmemis", v.cikarim_gorulmemis), ("cikarim_yabanci", v.cikarim_yabanci),
+                    ("kapi_kisayolsuz", v.kapi_kisayolsuz), ("ayrik_ood", v.ayrik_ood)):
         if not lst:
             continue
         n = 0
