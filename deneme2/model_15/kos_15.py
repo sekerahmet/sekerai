@@ -46,9 +46,9 @@ def olc_yuva(m, OBEK, en=20000):
 
 
 def _yaz(kok, ad, m, bilgi):
-    """Agirligi Drive'a yaz.  Her olcum noktasi AYRI dosya + 'son' kopyasi.
+    """Agirligi Drive'a yaz.  Her yedek noktasi AYRI dosya + 'son' kopyasi.
 
-    Anlik goruntuler seyreltilmez: model 21 KB, Drive'da 2 TB var, ve
+    Eski anlik goruntuler SILINMEZ: model 21 KB, Drive'da 2 TB var, ve
     seyreltmek bu projede daha once uc kez kosu yeniden baslatmaya mal oldu.
     """
     if not kok:
@@ -62,7 +62,7 @@ def _yaz(kok, ad, m, bilgi):
 
 
 def _kos(ad, EG, TU, N, aygit, kok, ek, boyut, durum,
-         lr, wd, adim, tohum, yigin, bas):
+         lr, wd, adim, tohum, yigin, bas, yedek):
     not_ = GUNLUK.append
     torch.manual_seed(tohum)
     m = Yol(N, boyut=boyut, durum=durum, tohum=tohum).to(aygit)
@@ -91,9 +91,13 @@ def _kos(ad, EG, TU, N, aygit, kok, ek, boyut, durum,
                          lr=lr, wd=wd, tohum=tohum, parametre=par,
                          egitim=de, tutulan=dt, yuva=r)
             SONUC[ad] = dict(bilgi, model=m)
-            _yaz(kok, ad, m, bilgi)              # <-- KOSUNUN ICINDE
+            iz = ""
+            if i % yedek == 0:                   # YEDEK -- kosunun ICINDE
+                _yaz(kok, ad, m, bilgi)
+                iz = "  yedek"
             not_(f"[{ad}] {i:6d}  {de:.4f}  {dt:.4f}  "
-                 + " ".join(f"{x:.4f}" for x in r) + f"   {time.time()-t0:5.0f}")
+                 + " ".join(f"{x:.4f}" for x in r)
+                 + f"   {time.time()-t0:5.0f}{iz}")
 
     de, dt = olc(m, EG, 10**9), olc(m, TU, 10**9)
     r = olc_yuva(m, TU, 10**9)
@@ -108,11 +112,13 @@ def _kos(ad, EG, TU, N, aygit, kok, ek, boyut, durum,
 
 def baslat(ad, EG, TU, N, *, aygit="cuda", kok=None, ek=None,
            boyut=BOYUT, durum=DURUM, lr=LR, wd=WD,
-           adim=8000, tohum=0, yigin=25000, bas=200):
+           adim=8000, tohum=0, yigin=25000, bas=200, yedek=2000):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).  DURDUR.add(ad) durdurur.
 
-    kok: Drive klasoru.  Verilirse her olcum noktasinda agirlik oraya
-    yazilir -- ayrica bir sey calistirmak GEREKMEZ.
+    bas    kac adimda bir OLCULUR   -- gunluge satir duser
+    yedek  kac adimda bir KAYDEDILIR -- Drive'a yazilir.  Kosu bitince
+           her halukarda yazilir; oturum duserse son yedekten devam edilir.
+    kok    Drive klasoru.  Verilmezse HICBIR SEY kaydedilmez ve uyarilir.
     """
     if kok is None:
         GUNLUK.append(f"[{ad}] UYARI: kok YOK, agirlik KAYDEDILMIYOR")
@@ -120,7 +126,7 @@ def baslat(ad, EG, TU, N, *, aygit="cuda", kok=None, ek=None,
     threading.Thread(
         target=_kos, daemon=True,
         args=(ad, EG, TU, N, aygit, kok, ek, boyut, durum,
-              lr, wd, adim, tohum, yigin, bas)).start()
+              lr, wd, adim, tohum, yigin, bas, yedek)).start()
     return f"{ad} basladi"
 
 
