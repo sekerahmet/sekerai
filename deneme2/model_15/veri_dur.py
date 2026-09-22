@@ -89,6 +89,55 @@ def bol(tohum=0):
     return eg, tu
 
 
+def sor(m, ciftler, aygit="cuda", en=20000, parca=20000):
+    """TEK ANALIZ: soruyu sor, cevabi al, DOGRU MU.
+
+    Kullanici, 22 Eylul: "yuva 1 hic bir zaman olcu olmadi, o bir analizdi.
+    burda tek analiz var: soru sorduk, cevap dogru mu yanlis mi, bu kadar."
+
+    Serbest uretim -- her adimin CIKTISI bir sonraki adimin GIRDISI.
+    DUR'a kadar uretilen dizi dogru cevaba BIREBIR esit olmali:
+      erken durmak     YANLIS
+      fazla rakam      YANLIS
+      rakam yanlis     YANLIS
+    """
+    kova = {}
+    for a, b in ciftler[:en]:
+        q = soru(a, b)
+        kova.setdefault(len(q), []).append((q, rak(a + b)))
+
+    K = max(len(c) for c in map(rak, (a + b for a, b in ciftler[:en]))) + 1
+    dog = say = 0
+    with torch.no_grad():
+        for kalem in kova.values():
+            for i in range(0, len(kalem), parca):
+                oh = kalem[i:i + parca]
+                W = torch.tensor([q for q, _ in oh], device=aygit)
+                B = len(oh)
+                U = torch.tensor([len(c) for _, c in oh], device=aygit)
+                T = torch.full((B, K), -1, dtype=torch.long, device=aygit)
+                for r, (_, c) in enumerate(oh):
+                    T[r, :len(c)] = torch.tensor(c, device=aygit)
+
+                yol = W
+                cik = []
+                for _ in range(K):
+                    o, _ag = m.dikkat(yol)
+                    t = (-((m.E[None] - o[:, None]) ** 2).sum(-1)).argmax(-1)
+                    cik.append(t)
+                    yol = torch.cat([yol, t[:, None]], 1)
+                C = torch.stack(cik, 1)                      # (B, K)
+
+                var = C == DUR
+                ilk = torch.where(var.any(1), var.float().argmax(1),
+                                  torch.full_like(U, K))     # ilk DUR nerede
+                p = torch.arange(K, device=aygit)
+                gec = p[None] < U[:, None]                   # rakam olan yerler
+                dog += int((((C == T) | ~gec).all(1) & (ilk == U)).sum())
+                say += B
+    return dog / say
+
+
 def yaz(yol="veri_dur.pt", tohum=0):
     """Bolmeyi DOSYAYA yaz.  Colab bunu Drive'dan okur, uretmez (kural 9)."""
     EG, TU = bol(tohum)

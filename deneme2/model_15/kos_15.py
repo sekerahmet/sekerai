@@ -22,34 +22,8 @@ from model_15 import Yol, BOYUT, DURUM, LR, WD
 GUNLUK, SONUC, DURDUR = [], {}, set()
 
 
-def olc(m, OBEK, en=20000):
-    """Butun yuvalarin ortalamasi.  Okuma: en yakin E[token]."""
-    dog = say = 0
-    with torch.no_grad():
-        for w, h in OBEK:
-            w, h = w[:en], h[:en]
-            o, _ = m.dikkat(w)
-            c = (-((m.E[None] - o[:, None]) ** 2).sum(-1)).argmax(-1)
-            dog += int((c == h).sum()); say += len(h)
-    return dog / say
-
-
-def olc_obek(m, OBEK, en=20000):
-    """OBEK BASINA dogruluk.  Obek = GIRDI UZUNLUGU, tensor sekli geregi.
-
-    Sabit genislikli sinavda obek "cevabin kacinci rakami" demekti
-    (yuva1..yuva4).  Dolgu kalkinca bu anlam GITTI: obek artik yalnizca
-    "kac token" demek.  Bu yuzden TANI amaclidir, HUKUM vermez -- hukum
-    SAYI olcutuyle verilir (DUR'a kadar uretilen dizinin tamami dogru mu).
-    """
-    r = []
-    with torch.no_grad():
-        for w, h in OBEK:
-            w, h = w[:en], h[:en]
-            o, _ = m.dikkat(w)
-            c = (-((m.E[None] - o[:, None]) ** 2).sum(-1)).argmax(-1)
-            r.append(float((c == h).float().mean()))
-    return r
+def _olcut_yok(m, taraf):
+    raise RuntimeError("olcut verilmedi -- baslat(..., olcut=...) sart")
 
 
 def _yaz(kok, ad, m, bilgi):
@@ -89,7 +63,7 @@ def _koru(kok, ad):
     return os.path.basename(yeni)
 
 
-def _kos(ad, EG, TU, N, aygit, kok, ek, boyut, durum,
+def _kos(ad, EG, TU, N, olcut, aygit, kok, ek, boyut, durum,
          lr, wd, adim, tohum, yigin, bas, yedek):
     not_ = GUNLUK.append
     torch.manual_seed(tohum)
@@ -102,8 +76,9 @@ def _kos(ad, EG, TU, N, aygit, kok, ek, boyut, durum,
     pay = pay / pay.sum()                    # obek buyuklugu kadar sik
     not_(f"[{ad}] boyut {boyut} durum {durum} lr {lr} wd {wd} tohum {tohum}"
          f"  parametre {par}")
-    not_(f"[{ad}]   adim   egitim  tutulan   "
-     + " ".join(f"{int(w.shape[1]):2d}tk" for w, _ in EG) + "     sn")
+    not_(f"[{ad}]   adim   egitim  tutulan     sn")
+    not_(f"[{ad}]   TEK OLCUT: soru soruldu, cevap DOGRU MU.  "
+         f"Serbest uretim, DUR'a kadar, tamami birebir.")
 
     i = 0
     for i in range(adim + 1):
@@ -124,36 +99,35 @@ def _kos(ad, EG, TU, N, aygit, kok, ek, boyut, durum,
         k = F.cross_entropy(puan, h[j])
         opt.zero_grad(); k.backward(); opt.step()
         if i % bas == 0:
-            de, dt = olc(m, EG), olc(m, TU)
-            r = olc_obek(m, TU)
+            de, dt = olcut(m, "eg"), olcut(m, "tu")
             bilgi = dict(ek or {}, n=N, boyut=boyut, durum=durum, adim=i,
                          lr=lr, wd=wd, tohum=tohum, parametre=par,
-                         egitim=de, tutulan=dt, obek=r)
+                         egitim=de, tutulan=dt)
             SONUC[ad] = dict(bilgi, model=m)
             iz = ""
             if i % yedek == 0:                   # YEDEK -- kosunun ICINDE
                 _yaz(kok, ad, m, bilgi)
                 iz = "  yedek"
-            not_(f"[{ad}] {i:6d}  {de:.4f}  {dt:.4f}  "
-                 + " ".join(f"{x:.4f}" for x in r)
-                 + f"   {time.time()-t0:5.0f}{iz}")
+            not_(f"[{ad}] {i:6d}   {de:.4f}   {dt:.4f}"
+                 f"   {time.time()-t0:5.0f}{iz}")
 
-    de, dt = olc(m, EG, 10**9), olc(m, TU, 10**9)
-    r = olc_obek(m, TU, 10**9)
+    de, dt = olcut(m, "eg", tam=True), olcut(m, "tu", tam=True)
     bilgi = dict(ek or {}, n=N, boyut=boyut, durum=durum, adim=i,
                  lr=lr, wd=wd, tohum=tohum, parametre=par,
-                 egitim=de, tutulan=dt, obek=r, biti=True)
+                 egitim=de, tutulan=dt, biti=True)
     SONUC[ad] = dict(bilgi, model=m)
     _yaz(kok, ad, m, bilgi)
-    not_(f"[{ad}] BITTI  egitim {de:.4f}  tutulan {dt:.4f}  obek "
-         + " ".join(f"{x:.4f}" for x in r) + f"  ({time.time()-t0:.0f} sn)")
+    not_(f"[{ad}] BITTI   egitim {de:.4f}   tutulan {dt:.4f}"
+         f"   ({time.time()-t0:.0f} sn)")
 
 
-def baslat(ad, EG, TU, N, *, aygit="cuda", kok=None, ek=None,
+def baslat(ad, EG, TU, N, *, olcut, aygit="cuda", kok=None, ek=None,
            boyut=BOYUT, durum=DURUM, lr=LR, wd=WD,
            adim=8000, tohum=0, yigin=25000, bas=200, yedek=2000):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).  DURDUR.add(ad) durdurur.
 
+    olcut  olcut(m, "eg"|"tu", tam=False) -> oran.  TEK analiz:
+           soru soruldu, cevap dogru mu.  Yuva/obek kirilimi YOK.
     bas    kac adimda bir OLCULUR   -- gunluge satir duser
     yedek  kac adimda bir KAYDEDILIR -- Drive'a yazilir.  Kosu bitince
            her halukarda yazilir; oturum duserse son yedekten devam edilir.
@@ -168,7 +142,7 @@ def baslat(ad, EG, TU, N, *, aygit="cuda", kok=None, ek=None,
     DURDUR.discard(ad)
     threading.Thread(
         target=_kos, daemon=True,
-        args=(ad, EG, TU, N, aygit, kok, ek, boyut, durum,
+        args=(ad, EG, TU, N, olcut, aygit, kok, ek, boyut, durum,
               lr, wd, adim, tohum, yigin, bas, yedek)).start()
     return f"{ad} basladi"
 
