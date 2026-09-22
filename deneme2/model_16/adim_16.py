@@ -80,7 +80,8 @@ def yurut(m, w, adim):
             kayit.append(dict(ag=ag[0].cpu(), o=o[0].cpu(),
                               mesafe=mes.cpu(), secilen=t))
             tt = torch.tensor([t], device=w.device)
-            s = torch.bmm(m.M[tt], s.unsqueeze(-1)).squeeze(-1) + m.b[tt]
+            s = (s + torch.bmm(m.D[tt], s.unsqueeze(-1)).squeeze(-1)
+                 + m.b[tt])
             if m.norm:
                 s = F.normalize(s, dim=-1)
             S = torch.cat([S, s[:, None]], 1)

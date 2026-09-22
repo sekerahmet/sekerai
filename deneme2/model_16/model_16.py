@@ -1,6 +1,6 @@
 """model_16 -- YOL TUTULMAZ, HESAPLANIR.
 
-  gez       s_t = normalize(M[token] @ s_{t-1} + b[token])
+  gez       s_t = normalize(s_{t-1} + D[token] @ s_{t-1} + b[token])
   dikkat    SON yuva sorar; her yuva Wk ile puanlanir, Wv ile katki verir
   dizi      `dikkat`in COGUL hali: HER yuva kendi sorusunu sorar,
             nedensel maske gelecegi kapatir
@@ -72,9 +72,9 @@ class Yol(nn.Module):
 
         # TOKEN BASINA UC PARAMETRE -- ikisi ICERI, biri DISARI:
         #   b[w]  okununca duruma EKLENEN vektor     -> s = ... + b[w]
-        #   M[w]  okununca duruma UYGULANAN matris   -> s = M[w] @ s + ...
-        #         birim matris + kucuk tedirginlik: ogrenilmemis token
-        #         durumu bozmaz, oldugu gibi gecirir
+        #   D[w]  okununca duruma UYGULANAN matris   -> s = (I+D[w]) @ s
+        #         Carpimsal kanal M = I + D; TUTULAN parametre D.
+        #         Ogrenilmemis token (D~0) durumu bozmaz, gecirir.
         #   E[c]  token YAZILIRKEN hedeflenen konum; okuma en yakin E
         # b ile E AYRI parametre: iceri giren gomme disari cikanla bagli
         # degil.  Baglamak denendi, aritmetik gorevinde daha kotuydu.
@@ -97,8 +97,12 @@ class Yol(nn.Module):
         #   olsun sabit.  Duz 0,1 yazilsaydi oran durumla buyurdu
         #   (16'da 0,40 ama 256'da 1,60) ve kimligi bastirirdi.
         #   durum=16'da TEDIRGIN/sqrt(16) = 0,1 -- bugunku deger.
-        self.M = nn.Parameter(torch.eye(durum).repeat(n, 1, 1)  # GIRIS, carpimsal
-                              + (TEDIRGIN / durum ** 0.5) * r(n, durum, durum))
+        # Neden D tutuluyor, M degil: weight decay DAIMA sifira ceker.
+        # M tutulsaydi cezanin en kucugu M = 0 olurdu -- "onceki
+        # durumu at", yani mimarinin HAFIZASIZ hali.  D uzerinden ayni
+        # ceza M'yi I'ya, "duruma dokunma"ya ceker.  Baslangic ayni.
+        self.D = nn.Parameter((TEDIRGIN / durum ** 0.5)     # GIRIS, carpimsal
+                              * r(n, durum, durum))
         self.s0 = nn.Parameter(torch.zeros(durum))          # baslangic durumu
 
         o = boyut ** -0.5                # |q| ~ |k| ~ |s| = 1 olsun diye
@@ -117,7 +121,9 @@ class Yol(nn.Module):
         iz = [s]
         for t in range(w.shape[1]):
             wt = w[:, t]
-            s = torch.bmm(self.M[wt], s.unsqueeze(-1)).squeeze(-1) + self.b[wt]
+            # (I + D) @ s = s + D @ s -- birim matris hic maddelesmiyor
+            s = (s + torch.bmm(self.D[wt], s.unsqueeze(-1)).squeeze(-1)
+                 + self.b[wt])
             if self.norm:
                 s = F.normalize(s, dim=-1)
             iz.append(s)
@@ -240,7 +246,8 @@ class Yol(nn.Module):
             o = (ag.unsqueeze(-1) * (S @ self.Wv)).sum(1)
             t = self.puan(o).argmax(-1)              # (B,)
             cikan.append(t)
-            s = torch.bmm(self.M[t], s.unsqueeze(-1)).squeeze(-1) + self.b[t]
+            s = (s + torch.bmm(self.D[t], s.unsqueeze(-1)).squeeze(-1)
+                 + self.b[t])
             if self.norm:
                 s = F.normalize(s, dim=-1)
             S = torch.cat([S, s[:, None]], 1)
