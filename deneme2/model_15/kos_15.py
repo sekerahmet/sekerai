@@ -1,0 +1,139 @@
+"""EGITIM DONGUSU.  Defterde DEGIL, depoda -- defter sifirlaninca kaybolmasin.
+
+Kullanici, 22 Eylul: defteri sifirdan kurarken "MODELI DRIVE'A KAYDET"
+hucresi silindi ve 8000 adimlik kosu (449 sn) kayboldu.  Kaydetme artik
+AYRI BIR HUCRE DEGIL, kosunun ICINDE:  her olcum noktasinda Drive'a
+yaziliyor.  Gerekce CLAUDE.md kural 2 ile ayni -- ayri hucredeki adim,
+hucre sirasina bagli bir kuraldir, insan hatirlarsa calisir.
+
+Kural 8: baslat() ARKA PLANDA calisir ve HEMEN doner.  Izleme, GUNLUK'u
+basan nabiz hucresiyle OKUYARAK yapilir.
+"""
+import os
+import time
+import threading
+
+import torch
+import torch.nn.functional as F
+
+from model_15 import Yol, BOYUT, DURUM, LR, WD
+
+GUNLUK, SONUC, DURDUR = [], {}, set()
+
+
+def olc(m, OBEK, en=20000):
+    """Butun yuvalarin ortalamasi.  Okuma: en yakin E[token]."""
+    dog = say = 0
+    with torch.no_grad():
+        for w, h in OBEK:
+            w, h = w[:en], h[:en]
+            o, _ = m.dikkat(w)
+            c = (-((m.E[None] - o[:, None]) ** 2).sum(-1)).argmax(-1)
+            dog += int((c == h).sum()); say += len(h)
+    return dog / say
+
+
+def olc_yuva(m, OBEK, en=20000):
+    """YUVA 1 = ilk uretilen cikti tokeni ... YUVA 4 = sonuncusu."""
+    r = []
+    with torch.no_grad():
+        for w, h in OBEK:
+            w, h = w[:en], h[:en]
+            o, _ = m.dikkat(w)
+            c = (-((m.E[None] - o[:, None]) ** 2).sum(-1)).argmax(-1)
+            r.append(float((c == h).float().mean()))
+    return r
+
+
+def _yaz(kok, ad, m, bilgi):
+    """Agirligi Drive'a yaz.  Her olcum noktasi AYRI dosya + 'son' kopyasi.
+
+    Anlik goruntuler seyreltilmez: model 21 KB, Drive'da 2 TB var, ve
+    seyreltmek bu projede daha once uc kez kosu yeniden baslatmaya mal oldu.
+    """
+    if not kok:
+        return
+    d = f"{kok}/{ad}"
+    os.makedirs(d, exist_ok=True)
+    p = dict(bilgi)
+    p["agirlik"] = {k: v.detach().cpu() for k, v in m.state_dict().items()}
+    torch.save(p, f"{d}/t{bilgi['adim']}.pt")
+    torch.save(p, f"{kok}/model_{ad}.pt")          # konus.py bunu okur
+
+
+def _kos(ad, EG, TU, N, aygit, kok, ek, boyut, durum,
+         lr, wd, adim, tohum, yigin, bas):
+    not_ = GUNLUK.append
+    torch.manual_seed(tohum)
+    m = Yol(N, boyut=boyut, durum=durum, tohum=tohum).to(aygit)
+    opt = torch.optim.Adam(m.parameters(), lr=lr, weight_decay=wd)
+    t0, ob = time.time(), len(EG)
+    par = sum(p.numel() for p in m.parameters())
+    not_(f"[{ad}] boyut {boyut} durum {durum} lr {lr} wd {wd} tohum {tohum}"
+         f"  parametre {par}")
+    not_(f"[{ad}]   adim   egitim  tutulan   yuva1  yuva2  yuva3  yuva4     sn")
+
+    i = 0
+    for i in range(adim + 1):
+        if ad in DURDUR:
+            not_(f"[{ad}] DURDURULDU  adim {i}")
+            break
+        w, h = EG[i % ob]
+        j = torch.randint(0, len(h), (yigin,), device=aygit)
+        o, _ = m.dikkat(w[j])
+        puan = -((m.E[None] - o[:, None]) ** 2).sum(-1)
+        k = F.cross_entropy(puan, h[j])
+        opt.zero_grad(); k.backward(); opt.step()
+        if i % bas == 0:
+            de, dt = olc(m, EG), olc(m, TU)
+            r = olc_yuva(m, TU)
+            bilgi = dict(ek or {}, n=N, boyut=boyut, durum=durum, adim=i,
+                         lr=lr, wd=wd, tohum=tohum, parametre=par,
+                         egitim=de, tutulan=dt, yuva=r)
+            SONUC[ad] = dict(bilgi, model=m)
+            _yaz(kok, ad, m, bilgi)              # <-- KOSUNUN ICINDE
+            not_(f"[{ad}] {i:6d}  {de:.4f}  {dt:.4f}  "
+                 + " ".join(f"{x:.4f}" for x in r) + f"   {time.time()-t0:5.0f}")
+
+    de, dt = olc(m, EG, 10**9), olc(m, TU, 10**9)
+    r = olc_yuva(m, TU, 10**9)
+    bilgi = dict(ek or {}, n=N, boyut=boyut, durum=durum, adim=i,
+                 lr=lr, wd=wd, tohum=tohum, parametre=par,
+                 egitim=de, tutulan=dt, yuva=r, biti=True)
+    SONUC[ad] = dict(bilgi, model=m)
+    _yaz(kok, ad, m, bilgi)
+    not_(f"[{ad}] BITTI  egitim {de:.4f}  tutulan {dt:.4f}  yuva "
+         + " ".join(f"{x:.4f}" for x in r) + f"  ({time.time()-t0:.0f} sn)")
+
+
+def baslat(ad, EG, TU, N, *, aygit="cuda", kok=None, ek=None,
+           boyut=BOYUT, durum=DURUM, lr=LR, wd=WD,
+           adim=8000, tohum=0, yigin=25000, bas=200):
+    """ARKA PLANDA baslatir, HEMEN doner (kural 8).  DURDUR.add(ad) durdurur.
+
+    kok: Drive klasoru.  Verilirse her olcum noktasinda agirlik oraya
+    yazilir -- ayrica bir sey calistirmak GEREKMEZ.
+    """
+    if kok is None:
+        GUNLUK.append(f"[{ad}] UYARI: kok YOK, agirlik KAYDEDILMIYOR")
+    DURDUR.discard(ad)
+    threading.Thread(
+        target=_kos, daemon=True,
+        args=(ad, EG, TU, N, aygit, kok, ek, boyut, durum,
+              lr, wd, adim, tohum, yigin, bas)).start()
+    return f"{ad} basladi"
+
+
+def nabiz(son=40):
+    """Gunlugu bas.  HICBIR SEY KOSTURMAZ."""
+    print(f"gunluk {len(GUNLUK)} satir   SONUC: {list(SONUC)}"
+          f"   DURDUR: {sorted(DURDUR)}")
+    for s in GUNLUK[-son:]:
+        print(s)
+
+
+def durdur(ad=None):
+    """Bayrak koyar; iplik bir sonraki adimda kendi kendine cikar."""
+    for a in ([ad] if ad else list(SONUC)):
+        DURDUR.add(a)
+    print("durdurma bayragi:", sorted(DURDUR))
