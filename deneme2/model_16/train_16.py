@@ -152,6 +152,17 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
     # Gradyan obekler boyunca BIRIKIR, sonra TEK optimizer adimi:
     # kayip `yigin`a bolundugu icin butun obekler tek bir yigin gibi
     # davranir.
+    # X bir UCLU ise TEK GECIS: (X, OFS, MASKE) doldurulmus tensorler.
+    # Kayip obekli haliyle BIREBIR ayni; fark yalniz kac cekirdek
+    # baslatildigi.  Gerekce: `agirlik_16.parca_dolu`.
+    MASKE = None
+    if isinstance(X, tuple):
+        X, _of, MASKE = X
+        if ofset is not None:
+            ofset = _of
+        not_(f"[{ad}] TEK GECIS: {X.shape[0]:,} ornek x {X.shape[1]}"
+             f"   puanlanan konum {int(MASKE.sum()):,}"
+             f"   dolgu %{100*(1-float(MASKE.mean())):.1f}")
     OBEK = None
     if isinstance(X, dict):
         OBEK = sorted(X.items())
@@ -230,7 +241,8 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
             j = BAS[torch.randint(0, N, (yigin,), generator=uret)]
             _o = None if ofset is None else ofset[j]
             k = m.kayip(X[j].to(aygit).long(), PAD,
-                        None if _o is None else _o.to(aygit).long())
+                        None if _o is None else _o.to(aygit).long(),
+                        None if MASKE is None else MASKE[j].to(aygit))
             k.backward()
         opt.step()
 

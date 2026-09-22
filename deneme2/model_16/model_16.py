@@ -178,7 +178,7 @@ class Yol(nn.Module):
         #   yayilimla yazilsaydi B=64'te bile 1 GB olurdu.
         return self.puan(O)
 
-    def kayip(self, w, PAD=None, ofs=None):
+    def kayip(self, w, PAD=None, ofs=None, maske=None):
         """SONRAKI JETON, her konumda.  w (B,T) -> SKALER kayip.
 
         Konum j, j+1'i tahmin eder; son konumun hedefi yok.
@@ -186,6 +186,9 @@ class Yol(nn.Module):
         PAD  bicime bagli, zorunlu degil.  Paketlenmis pencerelerde dolgu
              sayilsaydi gradyanin bir kismi 'dolgu tahmin et' ogretirdi;
              kesintisiz akista dolgu YOK ve PAD=None verilir.
+        maske (B,T-1) 0/1.  Puanlanacak konumlar.  DOLGU icin: dolgu
+             konumlari 0 verilir, hem paydan hem paydadan duserler --
+             yani kayip dolgusuz haliyle BIREBIR ayni cikar.
         ofs  (B,T) cevap araligi ici sira (0 = ilk token, 1+ = devam,
              -1 = disari).  None -> butun konumlar esit (duz kayip).
              Verilirse CEVAP KAPISI acilir: bir yuva, ayni araliktaki
@@ -198,12 +201,16 @@ class Yol(nn.Module):
         """
         puan = self.dizi(w)                       # (B,T,n)
         ek = {} if PAD is None else {'ignore_index': PAD}
-        if ofs is None:
+        if ofs is None and maske is None:
             return F.cross_entropy(puan[:, :-1].reshape(-1, puan.shape[-1]),
                                    w[:, 1:].reshape(-1), **ek)
         k = F.cross_entropy(puan[:, :-1].reshape(-1, puan.shape[-1]),
                             w[:, 1:].reshape(-1), reduction="none", **ek)
-        a = self._kapi(puan, w, ofs).reshape(-1)
+        a = (self._kapi(puan, w, ofs) if ofs is not None
+             else torch.ones_like(puan[:, :-1, 0]))
+        if maske is not None:
+            a = a * maske
+        a = a.reshape(-1)
         return (k * a).sum() / a.sum()
 
     @staticmethod

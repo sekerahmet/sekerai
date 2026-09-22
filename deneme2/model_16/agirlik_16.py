@@ -186,6 +186,44 @@ def parca_tablo(d, t_len=None, yaz=print):
     return obek
 
 
+def parca_dolu(d, t_len=None, yaz=print):
+    """parca_tablo'nun TEK TENSOR hali.  Doner: (X, OFS, MASKE).
+
+    27 obek tek (N, t_len) tensore doldurulur.  Kayip BIREBIR AYNI
+    kalir: dolgu konumlari MASKE ile hem paydan hem paydadan duser,
+    nedensel maske gercek konumlarin dolguya bakmasini engeller
+    (dolgu hep sonda), ve dolgu birimlerine gradyan akmaz.
+
+    Neden: obekleme adim basina 27 kucuk ileri/geri gecis uretiyor ve
+    kucuk tensorlerde GPU baslatma maliyeti hesabin onune geciyor.
+    Tek gecis 2,32 kat FLOP eder ama 27 kat az cekirdek baslatir.
+
+    Sozluge DOLGU BIRIMI EKLENMEZ -- doldurucu olarak 0. indeks
+    kullanilir, o konumlar zaten puanlanmiyor.  Sozluk 445 kalir,
+    veri izi degismez.
+
+    Satirlar TEK havuzda oldugu icin duzgun rastgele cekilis her
+    satira esit sans verir; obek secmedeki aclik sorunu YOK.
+    """
+    OB = parca_tablo(d, t_len, yaz=lambda *a: None)
+    t_len = t_len or d["t_len"]
+    N = sum(X.shape[0] for X, _ in OB.values())
+    X = torch.zeros((N, t_len), dtype=torch.int16)
+    O = torch.full((N, t_len), -1, dtype=torch.int8)
+    M = torch.zeros((N, t_len - 1), dtype=torch.float32)
+    i = 0
+    for L in sorted(OB):
+        x, o = OB[L]
+        n = x.shape[0]
+        X[i:i + n, :L] = x
+        O[i:i + n, :L] = o
+        M[i:i + n, :L - 1] = 1.0          # konum j, j+1'i tahmin eder
+        i += n
+    yaz(f"tek tensor {N:,} x {t_len}   puanlanan konum "
+        f"{int(M.sum()):,}   dolgu %{100 * (1 - M.mean()):.1f}")
+    return X, O, M
+
+
 def denetle(d, n=2000, yaz=print):
     """KAPI -- isaretler gercekten OLGU CEVABI mi, ve kapsam ne."""
     import metin_16 as MT
