@@ -74,10 +74,22 @@ def _koru(kok, ad):
 
 
 def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
-         lr, wd, adim, tohum, yigin, bas, yedek, surdur):
+         lr, wd, adim, tohum, yigin, bas, yedek, surdur, derle):
     not_ = GUNLUK.append
     torch.manual_seed(tohum)
     m = Yol(N, boyut=boyut, durum=durum, tohum=tohum).to(aygit)
+
+    # torch.compile.  model_11'de OLCULDU: 41,3 ms/adim yerine 75,7 --
+    # 1,83 kat, ve yorunge AYRISMADI (bpc@4000: 0,246 / 0,247).
+    # BURADA AYNI CIKACAGI GARANTI DEGIL: model_11 katmanli bir mimariydi,
+    # bizim sicak nokta gez()'in T kez donen PYTHON dongusu.  Derleyici
+    # 256 yinelemeyi grafa acmak zorunda -- ya baslatma maliyeti coger
+    # (daha fazla kazanc) ya derleme dakikalar surer.  OLCULMEDEN acik
+    # birakilmaz; kapi olarak varsayilan KAPALI.
+    egit = m.kayip
+    if derle:
+        egit = torch.compile(m.kayip)
+        not_(f"[{ad}] torch.compile ACIK -- ilk adim DERLEME yuzunden yavas")
     dec = [p for p in m.parameters() if p.dim() >= 2]
     nodec = [p for p in m.parameters() if p.dim() < 2]
     opt = torch.optim.AdamW([{"params": dec, "weight_decay": wd},
@@ -112,7 +124,7 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
             break
         j = torch.randint(0, n, (yigin,), generator=uret)
         opt.zero_grad()
-        kay = m.kayip(W[j])
+        kay = egit(W[j])
         kay.backward()
         opt.step()
 
@@ -122,7 +134,7 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
             bilgi = dict(ek or {}, n=N, adim=i, boyut=boyut, durum=durum,
                          lr=lr, wd=wd, tohum=tohum, yigin=yigin, T=T,
                          parametre=par, kayip=float(kay.detach()),
-                         egitim=e, dogrulama=d)
+                         egitim=e, dogrulama=d, derle=derle)
             SONUC[ad] = dict(bilgi, model=m)
             im = ""
             if i % yedek == 0:
@@ -133,7 +145,8 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
     e, d = olcut(m, "eg", tam=True), olcut(m, "dg", tam=True)
     bilgi = dict(ek or {}, n=N, adim=i, boyut=boyut, durum=durum, lr=lr,
                  wd=wd, tohum=tohum, yigin=yigin, T=T, parametre=par,
-                 kayip=float(kay.detach()), egitim=e, dogrulama=d, biti=True)
+                 kayip=float(kay.detach()), egitim=e, dogrulama=d,
+                 derle=derle, biti=True)
     SONUC[ad] = dict(bilgi, model=m)
     _yaz(kok, ad, _tam(m, opt, uret, bilgi))
     not_(f"[{ad}] BITTI   egitim {e:.4f}   dogrulama {d:.4f}   "
@@ -143,13 +156,15 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
 def baslat(ad, EG, N, *, olcut=_olcut_yok, aygit="cuda", kok=None, ek=None,
            boyut=BOYUT, durum=DURUM, lr=LR, wd=WD,
            adim=20000, tohum=0, yigin=YIGIN, bas=100, yedek=500,
-           surdur=None):
+           surdur=None, derle=False):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
     EG      (n, T) pencere yigini -- hepsi ayni uzunlukta, dolgu YOK
     olcut   olcut(m, "eg"|"dg", tam=False) -> sonraki jeton dogrulugu
     surdur  bir anlik goruntu yolu verilirse KALDIGI YERDEN devam eder
             (agirlik + optimizer + RNG).  Kural 1: uzatma SURDURMEDIR.
+    derle   torch.compile.  model_11'de 1,83 kat OLCULDU ama BASKA bir
+            mimaride; burada olculmeden acilmaz.
     """
     if kok is None:
         GUNLUK.append(f"[{ad}] UYARI: kok YOK, agirlik KAYDEDILMIYOR")
@@ -162,7 +177,7 @@ def baslat(ad, EG, N, *, olcut=_olcut_yok, aygit="cuda", kok=None, ek=None,
     threading.Thread(
         target=_kos, daemon=True,
         args=(ad, EG, N, olcut, aygit, kok, ek, boyut, durum, lr, wd,
-              adim, tohum, yigin, bas, yedek, surdur)).start()
+              adim, tohum, yigin, bas, yedek, surdur, derle)).start()
     return f"{ad} basladi" + (f"  ({os.path.basename(surdur)}'den)"
                               if surdur else "")
 
