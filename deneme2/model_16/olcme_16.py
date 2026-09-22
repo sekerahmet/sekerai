@@ -45,9 +45,11 @@ import ek_16 as EK
 import metin_16 as MT
 
 BITIS = "."          # cevap cumlesi noktayla biter -- BIRIM olarak da "."
-ENUZUN = 12          # bir cevap icin en fazla kac BIRIM uretilir.
-                     #   Karakterde 48 gerekiyordu; birimde en uzun ad
-                     #   birkac birim, 12 bol pay.
+# EN FAZLA KAC ADIM URETILIR -- BICIME BAGLI.  Tek sayi yazmak HATAYDI:
+# 12 birim bol pay ama 12 KARAKTER yetmiyor; "Sariyer Psikoloji Bolumu"
+# 24 karakter, cevap yarida kesilir ve olcu sessizce YANLIS sayar.
+# Hicbir kapi gormezdi, cunku kapilar uretim yapmiyor.
+ENUZUN = {"karakter": 48, "birim": 12}
 
 EZBER = ("ezber_olgu", "ezber_zincir")
 CIKARIM = ("cikarim_gorulmemis", "cikarim_yabanci")
@@ -103,6 +105,7 @@ def sor(m, d, ad, aygit="cuda", en=2000, tohum=0, parca=1000, ayrinti=False):
         return (float("nan"), []) if ayrinti else float("nan")
 
     birim = "ad" in d
+    enuzun = ENUZUN["birim" if birim else "karakter"]
     kova = {}
     for onek, cev in yuz:
         j = kodla(onek)
@@ -117,7 +120,7 @@ def sor(m, d, ad, aygit="cuda", en=2000, tohum=0, parca=1000, ayrinti=False):
             for i in range(0, len(kalem), parca):
                 oh = kalem[i:i + parca]
                 w = torch.tensor([j for j, _, _ in oh], device=aygit)
-                U = m.uret_dizi(w, ENUZUN).cpu()
+                U = m.uret_dizi(w, enuzun).cpu()
                 for (_, cev, onek), u in zip(oh, U):
                     s = coz(u.tolist()).split(BITIS)[0].strip()
                     ok = _esit(s, cev, birim)

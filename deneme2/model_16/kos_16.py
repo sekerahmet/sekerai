@@ -110,19 +110,26 @@ def _koru(kok, ad):
     return os.path.basename(yeni)
 
 
-def kayip(m, w, PAD):
-    """SONRAKI KARAKTER, her konumda, PAD haric.
+def kayip(m, w, PAD=None):
+    """SONRAKI JETON, her konumda.
 
     w (B,T) -> puan (B,T,n).  Konum j, j+1'i tahmin eder; son konumun
-    hedefi yok.  `ignore_index=PAD` hem kuyruk dolgusunu hem dolgudan
-    sonra gelen her seyi kayiptan duser."""
+    hedefi yok.
+
+    PAD BICIME BAGLI, ZORUNLU DEGIL:
+      KARAKTER  pencereler paketlenmis, kuyrukta dolgu var (%10,8) ve
+                sayilsaydi gradyanin %10,8'i 'dolgu tahmin et' ogretirdi.
+      BIRIM     akis KESINTISIZ, kayan pencereyle kesiliyor -- DOLGU YOK.
+                PAD=None verilir ve hicbir konum atlanmaz.
+    """
     puan = m.dizi(w)                       # (B,T,n)
+    ek = {} if PAD is None else {'ignore_index': PAD}
     return F.cross_entropy(puan[:, :-1].reshape(-1, puan.shape[-1]),
-                           w[:, 1:].reshape(-1), ignore_index=PAD)
+                           w[:, 1:].reshape(-1), **ek)
 
 
-def _kos(ad, X, PAD, olcut, aygit, kok, ek,
-         boyut, durum, lr, wd, adim, tohum, yigin, bas, yedek, surdur):
+def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
+         lr, wd, adim, tohum, yigin, bas, yedek, surdur, t_len, atla):
     not_ = GUNLUK.append
     torch.manual_seed(tohum)
     m = Yol(ek["n"], boyut=boyut, durum=durum, tohum=tohum).to(aygit)
@@ -140,6 +147,16 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek,
         not_(f"[{ad}] SURDURULUYOR  {os.path.basename(surdur)}  adim {bas_adim}")
 
     par = sum(p.numel() for p in m.parameters())
+    # X ya PENCERE TABLOSU (B,T) ya da tek uzun AKIS (N,).  Akis verilirse
+    # pencere BURADA aciliyor: sliding_window_view bir GORUNUM, kopya yok.
+    # Birim dosyasi akis sakliyor cunku atla=4 ile pencereler 20 birim
+    # ortusuyor ve tablo 6 kat sisiyordu (192 MB -> 32,8 MB).
+    if X.dim() == 1:
+        import numpy as np
+        P = np.lib.stride_tricks.sliding_window_view(X.numpy(), t_len)
+        X = torch.from_numpy(P[::atla])
+        not_(f"[{ad}] akis {len(P) + t_len - 1:,} -> pencere {X.shape}"
+             f"  (t_len {t_len}, atla {atla}, GORUNUM)")
     N, T = X.shape
     not_(f"[{ad}] boyut {boyut} durum {durum} lr {lr} wd {wd} tohum {tohum}"
          f"  parametre {par}")
@@ -186,11 +203,13 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek,
 def baslat(ad, X, PAD, n, *, olcut, aygit="cuda", kok=None, ek=None,
            boyut=BOYUT, durum=DURUM, lr=LR, wd=WD,
            adim=20000, tohum=0, yigin=YIGIN, bas=200, yedek=1000,
-           surdur=None):
+           surdur=None, t_len=None, atla=1):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
-    X       (N, T) int8 pencere tablosu -- CPU'da durur, yigin GPU'ya gider
-    PAD     kayiptan dusulecek jeton
+    X       (N,T) PENCERE TABLOSU ya da (N,) tek uzun AKIS.  Akis
+            verilirse t_len/atla ile pencere BURADA acilir (gorunum).
+            CPU'da durur, yigin GPU'ya gider.
+    PAD     kayiptan dusulecek jeton.  BIRIM akisinda dolgu YOK -> None.
     n       sozluk boyu
     olcut   olcut(m, "ezber"|"cikarim", tam=False) -> oran.
             TEK ANALIZ: soru soruldu, cevap dogru mu.
@@ -209,7 +228,7 @@ def baslat(ad, X, PAD, n, *, olcut, aygit="cuda", kok=None, ek=None,
         target=_kos, daemon=True,
         args=(ad, X, PAD, olcut, aygit, kok, dict(ek or {}, n=n),
               boyut, durum, lr, wd, adim, tohum, yigin, bas, yedek,
-              surdur)).start()
+              surdur, t_len, atla)).start()
     return f"{ad} basladi" + (f"  ({os.path.basename(surdur)}'den)" if surdur else "")
 
 
