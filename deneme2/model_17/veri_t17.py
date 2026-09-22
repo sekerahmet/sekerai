@@ -107,13 +107,16 @@ def sozluk(yol, en: int, parca_mb=64, en_mb=None, yaz=print):
 
 
 def akis(yol, ix, parca_mb=64, en_mb=None, yaz=print):
-    """Hikayeleri TEK akisa diz, aralarina <hikaye>.  int32 dizi."""
+    """Hikayeleri TEK akisa diz, aralarina <hikaye>.  int16 dizi.
+
+    int16: en buyuk kimlik 4.002 < 32.767, KAYIPSIZ.  Yarim dosya,
+    yarim yukleme, Colab'da yarim RAM."""
     bl, hk = ix[BILINMEYEN], ix[HIKAYE]
     cik, n = [], 0
     for h in _hikayeler(yol, parca_mb, en_mb):
         cik.append(np.fromiter((ix.get(t, bl) for t in JETON.findall(h)),
-                               dtype=np.int32))
-        cik.append(np.array([hk], dtype=np.int32))
+                               dtype=np.int16))
+        cik.append(np.array([hk], dtype=np.int16))
         n += 1
     a = np.concatenate(cik)
     yaz("  akis    %s hikaye   %s jeton   bilinmeyen %%%.2f"
