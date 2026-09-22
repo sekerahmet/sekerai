@@ -116,7 +116,16 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
     not_ = GUNLUK.append
     torch.manual_seed(tohum)
     m = Yol(ek["n"], boyut=boyut, durum=durum, tohum=tohum).to(aygit)
-    opt = torch.optim.Adam(m.parameters(), lr=lr, weight_decay=wd)
+    # AdamW, Adam DEGIL: Adam'in weight_decay'i L2'yi gradyana katar ve
+    # 1/sqrt(v) ile normalize eder -- gorev gradyani sadelesen bir
+    # bilesende adim -lr*sign(t) olur, yani bilesen wd'den BAGIMSIZ
+    # olarak lr hiziyla silinir.  AdamW decay'i agirliga AYRI uygular.
+    # dim < 2 (s0, hb) decay disinda -- model_00..02 ile ayni bolme.
+    dec = [p for p in m.parameters() if p.dim() >= 2]
+    nodec = [p for p in m.parameters() if p.dim() < 2]
+    opt = torch.optim.AdamW([{"params": dec, "weight_decay": wd},
+                             {"params": nodec, "weight_decay": 0.0}],
+                            lr=lr)
     uret = torch.Generator(device="cpu").manual_seed(tohum)
     bas_adim = 0
 
