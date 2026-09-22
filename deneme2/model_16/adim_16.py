@@ -38,6 +38,7 @@ ZINCIRDEKI YERI.  Kim kimi cagiriyor, bu dosya nerede:
   olcme_16    olcu: soru soruldu, cevap dogru mu
   adim_16     TEK SORU, ADIM ADIM   <-- BU DOSYA
 """
+import math
 import os
 import sys
 
@@ -120,9 +121,31 @@ def dok(m, d, ad="ezber_olgu", i=0, onek=None, cevap="", adim=None,
     yaz(f"\n1) GIRDI -- soru {len(j)} birime bolundu.  Yol s0'dan basliyor,")
     yaz("   her birim durumu kaydiriyor.  |s_t - s_(t-1)| BUYUKSE o birim")
     yaz("   yolu cok degistirdi, KUCUKSE neredeyse hic dokunmadi.")
-    yaz(f"   {'#':>3s}  {'BIRIM':<18s}{'NO':>5s}{'KAYMA':>9s}")
+    yaz("   |s|=1 oldugu icin kayma en fazla 2 olabilir; 1,41 dik acidir.")
+    yaz("   Son sutun: o yuvanin durumu Wv'den gecirilse SOZLUKTE neyi")
+    yaz("   gosterirdi (cosine).  Dikkat o yuvaya tam agirlik verseydi")
+    yaz("   okunacak sey budur -- bilginin NEREDE oldugunu soyler.")
+    with torch.no_grad():
+        S0 = m.gez(w)[0, 1:]                                  # (L,durum)
+        V0 = S0 @ m.Wv                                        # (L,boyut)
+        C0 = F.normalize(V0, dim=-1) @ F.normalize(m.E, dim=-1).T
+    hedef = ix.get(bek[0]) if bek else None
+    # cos(s_t, s_0): 0. yuva varligi okuyan durum.  Iliski tokeni (kardes)
+    # okundugunda varliktan geriye ne kaldi -- M[kardes] onu donusturecekse
+    # once elinde olmasi gerekir.
+    cs0 = F.normalize(S0, dim=-1) @ F.normalize(S0[0], dim=0)
+    yaz(f"   {'#':>3s}  {'BIRIM':<16s}{'KAYMA':>7s}{'cos(s,s0)':>10s}"
+        "   BU YUVA NEYI GOSTERIYOR"
+        + (f"   [{bek[0]} kacinci]" if hedef is not None else ""))
     for t, (b, u) in enumerate(zip(j, kayma.tolist())):
-        yaz(f"   {t:>3d}  {adlar[b]:<18s}{b:>5d}{u:>9.3f}")
+        c = C0[t]
+        et = "  ".join(f"{adlar[q]}({float(c[q]):.2f})"
+                       for q in c.argsort(descending=True)[:3].tolist())
+        im = ""
+        if hedef is not None:
+            im = f"   [{int((c > c[hedef]).sum()) + 1}.]"
+        yaz(f"   {t:>3d}  {adlar[b]:<16s}{u:>7.3f}{float(cs0[t]):>10.3f}"
+            f"   {et}{im}")
 
     yaz(f"\n2) URETIM -- {adim} adim.  Dikkat RELU (softmax DEGIL): agirliklar")
     yaz("   1'e toplanmaz, sifir olabilir.  Okuma en yakin E[c].")
@@ -141,19 +164,26 @@ def dok(m, d, ad="ezber_olgu", i=0, onek=None, cevap="", adim=None,
             yaz(f"        agirlik {float(ag[p]):7.3f}   yuva {p:3d}  "
                 f"{et}{im}")
         mes = r["mesafe"]
+        # Kayip tam olarak bu dagilimi kullaniyor: puan = -mesafe^2.
+        # Mesafe farki 0,013 kulaga kucuk gelir; olasiliga cevrilince
+        # ne kadar oldugu GORUNUR.
+        ol = (-mes ** 2).softmax(-1)
+        H = float(-(ol * (ol + 1e-30).log()).sum())
         en = mes.argsort()[:ust]
-        yaz(f"        okuma  |o| = {float(r['o'].norm()):.3f}")
+        yaz(f"        okuma  |o| = {float(r['o'].norm()):.3f}"
+            f"   entropi {H:.3f} nat   (duz dagilim {math.log(len(mes)):.3f})")
         for p in en.tolist():
             im = "   <- SECILDI" if p == sec else ""
-            yaz(f"        mesafe {float(mes[p]):7.3f}   {adlar[p]}{im}")
+            yaz(f"        mesafe {float(mes[p]):7.3f}  olasilik {float(ol[p]):.4f}"
+                f"   {adlar[p]}{im}")
         if k < len(bek):
             dg = ix.get(bek[k])
             if dg is None:
                 yaz(f"        DOGRUSU {bek[k]!r} SOZLUKTE YOK")
             else:
-                s = int((mes < mes[dg]).sum()) + 1
+                sr = int((mes < mes[dg]).sum()) + 1
                 yaz(f"        DOGRUSU {bek[k]:<16s} mesafe {float(mes[dg]):7.3f}"
-                    f"   {s}. sirada / {len(mes)}")
+                    f"  olasilik {float(ol[dg]):.4f}   {sr}. sirada / {len(mes)}")
         uretilen.append(sec)
 
     urun = coz(uretilen)
@@ -175,7 +205,8 @@ if __name__ == "__main__":
     import model_16
     m = model_16.Yol(d["vocab"])
     if agirlik:
-        m.load_state_dict(torch.load(agirlik, weights_only=False)["agirlik"])
+        m.load_state_dict(torch.load(agirlik, weights_only=False,
+                                map_location="cpu")["agirlik"])
     else:
         print("UYARI: AGIRLIK verilmedi -- EGITILMEMIS model iz suruluyor\n")
     m.eval()
