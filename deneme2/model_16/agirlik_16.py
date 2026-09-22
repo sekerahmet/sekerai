@@ -106,6 +106,25 @@ def ofset(d, yaz=print):
     return o
 
 
+def cumle_basi(d, yaz=print):
+    """Cumle BASI konumlari -- noktadan SONRAKI her konum.
+
+    Pencere buradan acilirsa hicbir pencere cumle ortasindan baslamaz.
+    Gerekce OLCULDU: bugunku atla=4 ile pencerelerin %71'i cumle
+    ORTASINDAN basliyor; onek, ait olmadigi bir cumlenin kuyrugunu
+    tasiyor ve dikkat onu GORUYOR (sinir maskesi yok).
+
+    Akisa DOKUNMAZ -- yalniz hangi konumlardan pencere acilacagini
+    soyler.  Dosya ve izi aynen kalir (kural 9).
+    """
+    dz = d["dizi"].numpy()
+    b = np.flatnonzero(dz == d["ix"]["."]) + 1
+    b = b[b < len(dz)].astype(np.int64)
+    yaz(f"cumle basi {len(b):,}   ortalama cumle "
+        f"{len(dz) / max(len(b), 1):.1f} birim")
+    return b
+
+
 def denetle(d, n=2000, yaz=print):
     """KAPI -- isaretler gercekten OLGU CEVABI mi, ve kapsam ne."""
     import metin_16 as MT

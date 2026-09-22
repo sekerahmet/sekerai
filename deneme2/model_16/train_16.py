@@ -112,7 +112,7 @@ def _koru(kok, ad):
 
 def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
          lr, wd, adim, tohum, yigin, bas, yedek, surdur, t_len, atla,
-         ofset):
+         ofset, hiza):
     not_ = GUNLUK.append
     torch.manual_seed(tohum)
     m = Yol(ek["n"], boyut=boyut, durum=durum, tohum=tohum).to(aygit)
@@ -146,17 +146,31 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
     if X.dim() == 1:
         import numpy as np
         P = np.lib.stride_tricks.sliding_window_view(X.numpy(), t_len)
-        X = torch.from_numpy(P[::atla])
+        X = torch.from_numpy(P)                    # TAM gorunum
+        # BAS: pencerenin hangi konumdan acilacagi.  hiza yoksa eski
+        # davranis (her `atla` birimde bir) -- ayni sayida, ayni sirada,
+        # yani RNG tuketimi ve cekilen yigin BIT DUZEYINDE ayni.
+        if hiza is None:
+            bs = np.arange(0, len(P), atla, dtype=np.int64)
+            nasil = f"atla {atla}"
+        else:
+            bs = np.asarray(hiza, dtype=np.int64)
+            bs = bs[bs < len(P)]
+            nasil = "CUMLE BASI"
+        BAS = torch.from_numpy(bs)
         if ofset is not None:
             # ofset AKISLA ayni uzunlukta; pencereler X ile AYNI
             # gorunumle aciliyor ki konumlar birebir ortussun.
+            o1 = np.asarray(ofset)
             OF = np.lib.stride_tricks.sliding_window_view(ofset, t_len)
-            ofset = torch.from_numpy(OF[::atla])   # GORUNUM, kopya yok
+            ofset = torch.from_numpy(OF)           # GORUNUM, kopya yok
             not_(f"[{ad}] CEVAP KAPISI acik: aralik basi "
-                 f"{int((ofset[:, 0] == 0).sum()):,} pencerede")
-        not_(f"[{ad}] akis {len(P) + t_len - 1:,} -> pencere {X.shape}"
-             f"  (t_len {t_len}, atla {atla}, GORUNUM)")
-    N, T = X.shape
+                 f"{int((o1[bs] == 0).sum()):,} pencerede")
+        not_(f"[{ad}] akis {len(P) + t_len - 1:,} -> pencere "
+             f"{len(bs):,} x {t_len}  ({nasil}, GORUNUM)")
+    else:
+        BAS = torch.arange(X.shape[0])
+    N, T = len(BAS), X.shape[1]
     not_(f"[{ad}] boyut {boyut} durum {durum} lr {lr} wd {wd} tohum {tohum}"
          f"  parametre {par}")
     not_(f"[{ad}] pencere {N} x {T}   yigin {yigin}"
@@ -168,7 +182,7 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
         if ad in DURDUR:
             not_(f"[{ad}] DURDURULDU  adim {i}")
             break
-        j = torch.randint(0, N, (yigin,), generator=uret)
+        j = BAS[torch.randint(0, N, (yigin,), generator=uret)]
         k = m.kayip(X[j].to(aygit).long(), PAD,
                     None if ofset is None else ofset[j].to(aygit).long())
         opt.zero_grad(); k.backward(); opt.step()
@@ -203,7 +217,7 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
 def baslat(ad, X, PAD, n, *, olcut, aygit="cuda", kok=None, ek=None,
            boyut=BOYUT, durum=DURUM, lr=LR, wd=WD,
            adim=20000, tohum=0, yigin=YIGIN, bas=200, yedek=1000,
-           surdur=None, t_len=None, atla=1, ofset=None):
+           surdur=None, t_len=None, atla=1, ofset=None, hiza=None):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
     X       (N,T) PENCERE TABLOSU ya da (N,) tek uzun AKIS.  Akis
@@ -213,6 +227,9 @@ def baslat(ad, X, PAD, n, *, olcut, aygit="cuda", kok=None, ek=None,
     n       sozluk boyu
     olcut   olcut(m, "ezber"|"cikarim", tam=False) -> oran.
             TEK ANALIZ: soru soruldu, cevap dogru mu.
+    hiza    pencere BASLANGIC konumlari (agirlik_16.cumle_basi).
+            None -> her `atla` birimde bir, eski davranis.  Verilirse
+            hicbir pencere cumle ortasindan baslamaz.
     surdur  bir anlik goruntu yolu verilirse KALDIGI YERDEN devam eder
             (agirlik + optimizer + RNG).  Kural 1: uzatma SURDURMEDIR.
     """
@@ -228,7 +245,7 @@ def baslat(ad, X, PAD, n, *, olcut, aygit="cuda", kok=None, ek=None,
         target=_kos, daemon=True,
         args=(ad, X, PAD, olcut, aygit, kok, dict(ek or {}, n=n),
               boyut, durum, lr, wd, adim, tohum, yigin, bas, yedek,
-              surdur, t_len, atla, ofset)).start()
+              surdur, t_len, atla, ofset, hiza)).start()
     return f"{ad} basladi" + (f"  ({os.path.basename(surdur)}'den)" if surdur else "")
 
 
