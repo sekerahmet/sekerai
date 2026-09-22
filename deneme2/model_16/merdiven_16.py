@@ -215,8 +215,7 @@ def main(yaz=None, yol=None, kok=None):
     yaz(f"sans: varlik 1/{v['NE']} = {1/v['NE']:.4f}"
         f"   ilk token 1/{v['NT']} = {1/v['NT']:.4f}")
     yaz("model_16'nin AYNI karardaki sayisi: 0.020  (konum 0, t20000)")
-    yaz("R3c parametre sayisi model_16 ile AYNI olmali: 128.657
-")
+    yaz("R3c parametre sayisi model_16 ile AYNI olmali: 128.657\n")
     g = torch.Generator().manual_seed(1)
     kar = {}
     for ad, cfg in BASAMAK.items():
@@ -236,15 +235,12 @@ def main(yaz=None, yol=None, kok=None):
         tb = kos("KARISIK hedef (taban)", v, cfg, kar[n_sinif], 0.01,
                  2000, yaz=yaz)
         SONUC[ad] = dict(top1=t1, taban=tb)
-        yaz(f"  ==> {ad} EN IYI TOP-1 {t1:.3f}   (karisik taban {tb:.3f})
-")
+        yaz(f"  ==> {ad} EN IYI TOP-1 {t1:.3f}   (karisik taban {tb:.3f})\n")
     if kok:
         d = f"{kok}/MERDIVEN"
         os.makedirs(d, exist_ok=True)
         with open(f"{d}/kayit.txt", "w", encoding="utf-8") as f:
-            f.write("
-".join(GUNLUK) + "
-")
+            f.write("\n".join(GUNLUK) + "\n")
         yaz(f"yazildi -> {d}/kayit.txt")
     yaz("MERDIVEN BITTI")
 
