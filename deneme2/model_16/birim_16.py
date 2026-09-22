@@ -50,22 +50,71 @@ import os
 import numpy as np
 
 import ek_16 as EK
-import jeton_16 as J
 import taban_16 as MT
 import veri_16 as V
 
 
-def metin_coz(X, S, n=None) -> list[str]:
-    """Egitim tensoru -> metin dilimleri. EOS satir sonu olur.
+SINIR = "<belge>"     # BELGE SINIRI -- sozlukte AYRI birim.
+#   Karakter yolunda <EOS> vardi ama birim cevriminde DUSUYORDU:
+#   metin_coz <EOS>'u chr(10) yapiyordu, `s.split()` onu BOSLUK sayip
+#   atiyordu.  Akista belge siniri kalmiyor, pencerelerin %12,9'u iki
+#   ayri varligin sayfasini birlestiriyordu.  Sozluge girer cunku model
+#   "burada sayfa bitti"yi GORMELI.
 
-    `kelime_14`ten TASINDI: o modulun 219 satirinin yalniz bu 6'si
-    kullaniliyordu; gerisi model_13'un parca-koordinat makinesi ve
-    elenmis BPE'siydi (elenme gerekcesi `ek_16` docstring'inde)."""
-    geri = dict(S.geri)
-    geri[J.EOS] = "\n"
-    sat = X if n is None else X[:n]
-    return ["".join(geri[int(t)] for t in r if int(t) != J.PAD)
-            for r in sat]
+
+def belgeler(ayar, v=None, yaz=print):
+    """KORPUS -> Belge listesi.  512'lik paketleme YOK, karakter YOK.
+
+    `korpus_16.havuz()` dort grubu (bildirim / soru / kimlik / reddetme)
+    AYRI paketleyip arka arkaya ekliyordu.  OLCULDU: akisin ilk %40'inda
+    soru orani %0,54, sonrasinda %6,64 -- bir varligin olgulari ile o
+    varliga sorulan sorular ~6M birim uzakta kaliyor ve ayni pencerede
+    ASLA bulusmuyorlardi.  Burada dort grup TEK havuzda karisiyor."""
+    import korpus_16 as KP
+    if v is None:
+        v = MT.veri_kur(ayar, yaz=yaz)
+    G = V.kur(ayar.veri_tohum)
+    bb, bs = KP.sayfalar(v, G, ayar.kopya, ayar.tohum, ayar.tetik,
+                         ayar.t_len, ayar.zincir_pay, ayar.n3, yaz)
+    kim = KP.kimlik_belgeleri(v, G, tohum=ayar.tohum, yaz=yaz)
+    _ns = sum(len(b.cumle) for b in bs)
+    red = KP.reddetme_belgeleri(
+        v, G, int(_ns * ayar.ret_pay), ayar.tohum,
+        bolme=KP.reddetme_bolme(G, ayar.ret_tut, ayar.tohum),
+        yaz=yaz) if ayar.ret_pay else []
+    yaz(f"  belge {len(bb):,} bildirim + {len(bs):,} soru + "
+        f"{len(kim):,} kimlik + {len(red):,} reddetme")
+    return bb + bs + kim + red, KP.cakisan_ciftler(v)
+
+
+def sirala(bel, yasak, tohum=0, yaz=print):
+    """Belgeleri KARISTIR, cakisan ikisini YAN YANA koyma.
+
+    Eski kural "ayni 512'lik dilime dusemez" idi.  Paketleme kalkinca
+    karsiligi "birim penceresi menziline dusemez" oluyor; menzil belge
+    cinsinden tutuluyor cunku bir belge zaten bir pencereden uzun."""
+    rs = np.random.default_rng(9000 + tohum)
+    sira = [int(i) for i in rs.permutation(len(bel))]
+    if not yasak:
+        return sira
+    GERI, ILERI = 4, 64
+    son, yer, kalan, cakis = [], [], sira, 0
+    while kalan:
+        sec = 0
+        for j in range(min(ILERI, len(kalan))):
+            e = bel[kalan[j]].e
+            if e < 0 or not any((e, x) in yasak for x in son):
+                sec = j
+                break
+        else:
+            cakis += 1
+        i = kalan[sec]
+        kalan = kalan[:sec] + kalan[sec + 1:] if sec else kalan[1:]
+        yer.append(i)
+        son = (son + [bel[i].e])[-GERI:]
+    yaz(f"  siralama {len(yer):,} belge   {cakis:,} yerde cakisma "
+        f"kacinilamadi (menzil {GERI} belge)")
+    return yer
 
 
 class Birim:
@@ -184,8 +233,8 @@ def kur(ayar, v=None, yaz=print, onbellek: str | None = None) -> Birim:
         return yukle(onbellek, yaz)
     if v is None:
         v = MT.veri_kur(ayar, yaz=yaz)
-    X, S = MT.egitim_havuzu(ayar, v, yaz=yaz)
-    metin = metin_coz(X, S)
+    bel, yasak = belgeler(ayar, v, yaz)
+    metin = [bel[i].metin for i in sirala(bel, yasak, ayar.tohum, yaz)]
 
     say = collections.Counter()
     for s in metin:
@@ -208,10 +257,13 @@ def kur(ayar, v=None, yaz=print, onbellek: str | None = None) -> Birim:
         "%d kelime BILINEN KOK + BILINEN EK'e cozulemiyor -- `ek_16.KOK` "
         "ya da `BUTUN` eksik: %s" % (len(eksik), sorted(eksik)[:10]))
     korunan, serbest = ozel, frozenset()
-    ad = sorted({x for p in bolme.values() for x in p})
+    ad = sorted({x for p in bolme.values() for x in p} | {SINIR})
     ix = {b: i for i, b in enumerate(ad)}
-    dizi = np.fromiter((ix[x] for s in metin for w in s.split()
-                        for x in bolme[w]), np.int64)
+    # Her belgenin SONUNA sinir birimi -- akista "sayfa bitti" gorunur.
+    dizi = np.fromiter(
+        (ix[x] for s in metin
+         for x in [y for w in s.split() for y in bolme[w]] + [SINIR]),
+        np.int64)
 
     yaz(f"birim: {len(say):,} kelime -> {len(ad)} BIRIM "
         f"({len(say)/len(ad):.2f}x)   dizi {len(dizi):,}")

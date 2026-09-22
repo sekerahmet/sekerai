@@ -107,20 +107,30 @@ def ofset(d, yaz=print):
 
 
 def cumle_basi(d, yaz=print):
-    """Cumle BASI konumlari -- noktadan SONRAKI her konum.
+    """Pencere BASI konumlari -- noktadan SONRAKI her konum.
 
-    Pencere buradan acilirsa hicbir pencere cumle ortasindan baslamaz.
-    Gerekce OLCULDU: bugunku atla=4 ile pencerelerin %71'i cumle
-    ORTASINDAN basliyor; onek, ait olmadigi bir cumlenin kuyrugunu
-    tasiyor ve dikkat onu GORUYOR (sinir maskesi yok).
+    Parca = iki nokta arasi; CUMLE DEGIL, ya bir bildirim ya bir
+    SORU + CEVABI ('?' parca ICI, soruyu cevabindan ayirmaz).
 
-    Akisa DOKUNMAZ -- yalniz hangi konumlardan pencere acilacagini
-    soyler.  Dosya ve izi aynen kalir (kural 9).
+    Gerekce OLCULDU: kayan pencere (atla=4) ile pencerelerin %71'i
+    parca ORTASINDAN basliyordu; onek, ait olmadigi bir parcanin
+    kuyrugunu tasiyor ve dikkat onu GORUYOR.
+
+    Belge siniri ATLANIR: bir belgenin son noktasindan sonra `<belge>`
+    gelir ve pencere oradan acilsa ilk yuvada "sayfa bitti"den baska
+    bir sey olmazdi.  Sinir bir sonraki pencerenin ICINDE, yani
+    bilgilendirici oldugu yerde kalir.
+
+    Akisa DOKUNMAZ -- yalniz hangi konumdan pencere acilacagini soyler.
     """
     dz = d["dizi"].numpy()
     b = np.flatnonzero(dz == d["ix"]["."]) + 1
+    sin = d["ix"].get("<belge>")
+    if sin is not None:
+        atla = (b < len(dz)) & (dz[np.minimum(b, len(dz) - 1)] == sin)
+        b = b + atla                       # sinirin BIR SONRASI
     b = b[b < len(dz)].astype(np.int64)
-    yaz(f"cumle basi {len(b):,}   ortalama cumle "
+    yaz(f"pencere basi {len(b):,}   ortalama parca "
         f"{len(dz) / max(len(b), 1):.1f} birim")
     return b
 
