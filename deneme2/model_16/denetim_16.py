@@ -148,6 +148,8 @@ def _4():
     ogrenemedi' deriz."""
     import olcme_16 as O
     d = _veri()
+    if "harf" not in d:
+        return "ATLANDI -- bu dosya BIRIM bicimde (kapi 5 onu sinar)"
     harf = set(d["harf"])
     eksik = set()
     n = 0

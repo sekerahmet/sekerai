@@ -75,6 +75,17 @@ AYAR = Ayar(
     n_olcum_max=3000,
 )
 
+# =====================================================================
+# BIRIM PENCERESI.  VERI ayari, mimari DEGIL.
+# `t_len` KARAKTER paketleme penceresi; bunlar BIRIM akisininki.
+# model_14'un mimari sabitlerini cikarirken bu ikisini de atmistim --
+# yanlis siniflandirma, geri konuldu.
+# =====================================================================
+PENCERE = 24         # bir egitim penceresi kac BIRIM
+ATLA = 4             # kayan pencerenin adimi.  1 her konumdan bir
+                     #   pencere demek; buyutmek ortusmeyi azaltir ama
+                     #   ayni olguyu daha az kez gosterir.
+
 # Kayarsa sinav ayrisir. `test_14` bunlari izlerle birlikte denetler.
 SABIT = ("veri_tohum", "tohum", "jeton_ad", "ek_kip", "t_len", "kopya",
          "tetik", "zincir_pay", "n3", "ret_pay", "ret_tut", "tam_kayip",

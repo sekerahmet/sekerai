@@ -42,6 +42,7 @@ import taban_16 as T         # noqa: E402
 import veri_16 as V          # noqa: E402
 
 CIKTI = "korpus_16.pt"
+CIKTI_BIRIM = "birim_16.pt"
 
 # Bolmeler.  Ayrim TEK SORUDA: cevap korpusta YAZIYOR MU?
 BOLME = ("ezber_olgu", "ezber_zincir",          # yaziyor  -> EZBER
@@ -76,17 +77,72 @@ def kur(yaz=print):
     return d
 
 
+def kur_birim(yaz=print):
+    """BIRIM verisi -- model_14'un GERCEKTEN egitildigi bicim.
+
+    Karakter dosyasindan FARKI:
+      sozluk   444 birim (34 ek, 83 kok+butun, 4 noktalama, 323 ozel ad)
+      pencere  PENCERE birim (karakterde 512 idi)
+      DOLGU YOK -- akis kesintisiz, kayan pencereyle kesiliyor
+
+    ISIM: `bolme` SINAV bolmeleri (ezber_*/cikarim_*), karakter
+    dosyasiyla ayni anahtar.  Kelime -> birim eslemesi AYRI ad:
+    `kelime_bolme`.  Ikisine ayni adi verirsem olcu sessizce yanlis
+    sozlugu okur.
+    """
+    import birim_16 as BR
+    v = T.veri_kur(A.AYAR, yaz=lambda *a: None)
+    b = BR.kur(A.AYAR, v, yaz=yaz, onbellek='birim_16.npz')
+    G = V.kur(A.AYAR.veri_tohum)
+
+    assert len(b) < 2 ** 15, f'{len(b)} birim int16 ya sigmaz'
+    d = dict(
+        dizi=torch.from_numpy(b.dizi.astype(np.int16)),  # AKIS, tek uzun
+        t_len=A.PENCERE, atla=A.ATLA, vocab=len(b),
+        ad=b.ad, ix=b.ix, kelime_bolme=b.bolme,      # KELIME -> birim
+        birim_izi=BR.iz(b), akis=len(b.dizi),
+        varlik=[a for t in V.TIPLER for a in G['ad'][t]],
+        iliski=list(V.ILISKI),
+        tip=v.tip, tip_ad=v.tip_ad, n_ent=v.n_ent, n_rel=v.n_rel,
+        bolme={k: list(getattr(v, k)) for k in BOLME},   # SINAV bolmeleri
+        ayar={k: getattr(A.AYAR, k) for k in A.SABIT},
+        graf_izi=V.IZ,
+    )
+    d['iz'] = iz(d)
+    return d, b
+
+
+
 def iz(d):
     """X ve BOLMELER uzerinden.  Bolmeler de ize girer: X ayni kalip
     bolme kayarsa olcum sessizce baska bir sinav olur."""
     h = hashlib.sha256()
-    h.update(d["X"].numpy().tobytes())
+    h.update(d[("dizi" if "dizi" in d else "X")].numpy().tobytes())
     for k in BOLME:
         h.update(repr(d["bolme"][k]).encode())
     return h.hexdigest()[:16]
 
 
 if __name__ == "__main__":
+    if "--birim" in sys.argv:
+        d, b = kur_birim()
+        if "--yaz" in sys.argv:
+            torch.save(d, CIKTI_BIRIM)
+            print(f"{CIKTI_BIRIM} yazildi   "
+                  f"{os.path.getsize(CIKTI_BIRIM)/1e6:.1f} MB")
+        Z = d["dizi"]
+        print(f"  dizi {tuple(Z.shape)} {Z.dtype}   pencere {d['t_len']} birim"
+              f"   atla {d['atla']}")
+        print(f"  pencere sayisi {(len(Z)-d['t_len'])//d['atla']+1:,}"
+              f"   (yuklerken sliding_window_view ile ACILIR, KOPYA YOK)")
+        print(f"  sozluk {d['vocab']} birim   birim izi {d['birim_izi']}"
+              f"   graf izi {d['graf_izi']}")
+        print(f"  ornek: {b.coz(Z[:24].tolist())}")
+        for k in BOLME:
+            if d["bolme"][k]:
+                print(f"    {k:<20s} {len(d['bolme'][k]):7d}")
+        print(f"  IZ {d['iz']}")
+        sys.exit(0)
     d = kur()
     if "--yaz" not in sys.argv:
         print("KURU CALISMA -- yazmak icin --yaz")

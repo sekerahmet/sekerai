@@ -41,21 +41,35 @@ ZINCIRDEKI YERI.  Kim kimi cagiriyor, bu dosya nerede:
 """
 import torch
 
+import ek_16 as EK
 import metin_16 as MT
 
-BITIS = "."          # cevap cumlesi noktayla biter
-ENUZUN = 48          # bir cevap icin en fazla kac karakter uretilir
+BITIS = "."          # cevap cumlesi noktayla biter -- BIRIM olarak da "."
+ENUZUN = 12          # bir cevap icin en fazla kac BIRIM uretilir.
+                     #   Karakterde 48 gerekiyordu; birimde en uzun ad
+                     #   birkac birim, 12 bol pay.
 
 EZBER = ("ezber_olgu", "ezber_zincir")
 CIKARIM = ("cikarim_gorulmemis", "cikarim_yabanci")
 
 
 def _kodlayici(d):
-    ileri = {c: i + 2 for i, c in enumerate(d["harf"])}
+    """METIN <-> JETON.  Veri dosyasi hangi bicimdeyse o.
+
+    BIRIM dosyasinda `ad`/`ix`/`bolme` var: metin KELIME KELIME cozulur,
+    her kelime ek_16 ile kok+eke ayrilir.  Bir kelime sozlukte yoksa
+    sinav SESSIZCE kosmaz -- denetim_16 kapi 5 bunu sinar.
+    KARAKTER dosyasinda `harf` var: harf harf."""
+    if "ad" in d:                                   # BIRIM
+        ix, ad, bolme = d["ix"], d["ad"], d["kelime_bolme"]
+        return (lambda s: [ix[x] for w in s.split() for x in bolme[w]],
+                lambda js: " ".join(ad[int(t)] for t in js))
+
+    ileri = {c: i + 2 for i, c in enumerate(d["harf"])}   # KARAKTER
     geri = {i + 2: c for i, c in enumerate(d["harf"])}
-    geri[d["PAD"]] = "\x00"
-    geri[d["EOS"]] = "\n"
-    return ileri, geri
+    geri[d["PAD"]], geri[d["EOS"]] = chr(0), chr(10)
+    return (lambda s: [ileri[c] for c in s],
+            lambda js: "".join(geri.get(int(t), "?") for t in js))
 
 
 def yuzeyler(d, ad, en=None, tohum=0):
@@ -83,14 +97,17 @@ def sor(m, d, ad, aygit="cuda", en=2000, tohum=0, parca=1000, ayrinti=False):
     Onekler farkli uzunlukta oldugu icin UZUNLUGA GORE obeklenip
     yiginlaniyor -- tensor dikdortgen olmak zorunda.  Obek bir mufredat
     degil, yalniz sekil."""
-    ileri, geri = _kodlayici(d)
+    kodla, coz = _kodlayici(d)
     yuz = yuzeyler(d, ad, en, tohum)
     if not yuz:
         return (float("nan"), []) if ayrinti else float("nan")
 
+    birim = "ad" in d
     kova = {}
     for onek, cev in yuz:
-        j = [ileri[c] for c in onek]
+        j = kodla(onek)
+        # BIRIMDE beklenen cevap da birim dizisi -- karsilastirma
+        # METIN uzerinden yapiliyor, bicim ikisinde de ayni kalsin diye.
         kova.setdefault(len(j), []).append((j, cev, onek))
 
     dog = say = 0
@@ -102,14 +119,26 @@ def sor(m, d, ad, aygit="cuda", en=2000, tohum=0, parca=1000, ayrinti=False):
                 w = torch.tensor([j for j, _, _ in oh], device=aygit)
                 U = m.uret_dizi(w, ENUZUN).cpu()
                 for (_, cev, onek), u in zip(oh, U):
-                    s = "".join(geri.get(int(t), "?") for t in u.tolist())
-                    s = s.split(BITIS)[0].lstrip()   # cevap araligi
-                    ok = s == cev or s.startswith(cev + "'")
+                    s = coz(u.tolist()).split(BITIS)[0].strip()
+                    ok = _esit(s, cev, birim)
                     dog += ok; say += 1
                     if ayrinti and len(ornek) < 12:
                         ornek.append((onek, s, cev, ok))
     oran = dog / say
     return (oran, ornek) if ayrinti else oran
+
+
+def _esit(uretilen, cevap, birim):
+    """KUYRUKTAKI EK TOLERE EDILIR -- gerekce modul basliginda.
+
+    KARAKTER: uretilen ya adin kendisi, ya ad + "'" ile devam eder.
+    BIRIM:    uretilen birimler bosluklu; adin birimleri ONEK olmali,
+              kalanlar EK olmali (hepsi "-" ile baslar)."""
+    if not birim:
+        return uretilen == cevap or uretilen.startswith(cevap + "'")
+    u = uretilen.split()
+    c = [x for w in cevap.split() for x in EK.bol(w)]
+    return u[:len(c)] == c and all(x.startswith("-") for x in u[len(c):])
 
 
 def olcut(d, aygit="cuda", en=2000, tam_en=10 ** 9):
@@ -135,8 +164,14 @@ def etiket_kapisi(d, ornek=60, yaz=print):
     `cikarim_*` demek "cevap korpusta YOK" demek.  Dogruysa kanit dizisi
     korpusta BULUNMAMALI; `ezber_zincir`inki ise BULUNMALI.  Tersi cikarsa
     etiketler yalan ve BUTUN sayilar okunamaz."""
-    _, geri = _kodlayici(d)
-    metin = "".join(geri.get(int(t), "?") for t in d["X"].reshape(-1).tolist())
+    kodla, coz = _kodlayici(d)
+    # BIRIM dosyasinda akis `dizi`de; KARAKTER dosyasinda pencereler `X`te.
+    ham = d["dizi"] if "dizi" in d else d["X"].reshape(-1)
+    metin = coz(ham.tolist())
+    # Kanit da AYNI bicime cevrilmeli: birimde "Cem Yildiz -in anne -si",
+    # karakterde duz metin.  Cevrilmezse hicbiri eslesmez ve kapi
+    # "cikarim dogru" diye YANLIS gecerdi.
+    ayni = (lambda t: coz(kodla(t))) if "ad" in d else (lambda t: t)
     E, IL, TIP = d["varlik"], d["iliski"], d["tip_ad"]
     tip = d["tip"]
     sonuc = {}
@@ -150,7 +185,7 @@ def etiket_kapisi(d, ornek=60, yaz=print):
             _o, _c, kanit = MT.sinav_yuzeyi(
                 E[z[0]], [IL[r] for r in z[1:3]], E[z[-1]],
                 TIP[int(tip[z[-1]])])
-            n += kanit in metin
+            n += ayni(kanit) in metin
         sonuc[ad] = (n, len(L), beklenen)
         yaz(f"  {ad:<20s} {n:3d}/{len(L):<3d} korpusta"
             f"   beklenen {'VAR' if beklenen else 'YOK'}"
