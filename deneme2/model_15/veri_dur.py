@@ -56,19 +56,26 @@ def soru(a, b):
 def ornekler(ciftler):
     """Her cift -> hane(a+b)+1 ornek; sonuncusunun hedefi DUR.
 
+    Doner: obek basina (w, h, u).
+      w  girdi
+      h  hedef token
+      u  CEVABIN kac haneli oldugu -- cekiliste sinif olarak kullaniliyor.
+
     Girdi uzunlugu hem toplananlarin hem uretilmis onekin uzunluguna gore
-    degisiyor, o yuzden UZUNLUGA GORE gruplanip yiginlaniyor."""
+    degisiyor, o yuzden UZUNLUGA GORE gruplanip yiginlaniyor.  Obek bir
+    MUFREDAT DEGIL, yalnizca tensor sekli; cekilis obekten bagimsiz."""
     g = {}
     for a, b in ciftler:
         q, c = soru(a, b), rak(a + b)
         for i in range(len(c) + 1):
             w = q + c[:i]
             h = c[i] if i < len(c) else DUR
-            g.setdefault(len(w), ([], []))
+            g.setdefault(len(w), ([], [], []))
             g[len(w)][0].append(w)
             g[len(w)][1].append(h)
-    return [(torch.tensor(w), torch.tensor(h))
-            for _, (w, h) in sorted(g.items())]
+            g[len(w)][2].append(len(c))
+    return [(torch.tensor(w), torch.tensor(h), torch.tensor(u))
+            for _, (w, h, u) in sorted(g.items())]
 
 
 def bol(tohum=0):
@@ -180,14 +187,17 @@ if __name__ == "__main__":
         import hashlib, os
         d = yaz()
         hh = hashlib.sha256()
-        for w, _ in d["eg"] + d["tu"]:
+        # IZ, girdilerin YANINDA sinif alanini da kapsar -- alan eklenince
+        # dosya degisip iz ayni kalmasin diye.
+        for w, _, u in d["eg"] + d["tu"]:
             hh.update(w.numpy().tobytes())
+            hh.update(u.numpy().tobytes())
         print(f"veri_dur.pt yazildi   "
               f"{os.path.getsize('veri_dur.pt')/1e6:.1f} MB")
-        print(f"  egitim {sum(len(h) for _, h in d['eg'])}"
-              f"   tutulan {sum(len(h) for _, h in d['tu'])}")
+        print(f"  egitim {sum(len(h) for _, h, _ in d['eg'])}"
+              f"   tutulan {sum(len(h) for _, h, _ in d['tu'])}")
         print("  obekler: " + "  ".join(
-            f"{w.shape[1]}tk:{len(h)}" for w, h in d["eg"]))
+            f"{w.shape[1]}tk:{len(h)}" for w, h, _ in d["eg"]))
         print(f"  iz {hh.hexdigest()[:16]}")
     else:
         _ozet()

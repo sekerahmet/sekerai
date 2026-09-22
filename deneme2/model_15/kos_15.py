@@ -19,6 +19,11 @@ import torch.nn.functional as F
 
 from model_15 import Yol, BOYUT, DURUM, LR, WD
 
+# Cevabi bu kadar ya da daha az haneli olan ornekler HER yigina TAMAMI ile
+# girer.  Kullanici karari, 22 Eylul.  Bedeli olculdu ve soylendi: 2 haneli
+# toplamlar gercek dagilimda %2,23 iken yiginda ~%45 olacak.
+SABIT_SINIF = 2
+
 GUNLUK, SONUC, DURDUR = [], {}, set()
 
 
@@ -72,8 +77,27 @@ def _kos(ad, EG, TU, N, olcut, aygit, kok, ek, boyut, durum,
     t0, ob = time.time(), len(EG)
     par = sum(p.numel() for p in m.parameters())
     uret = torch.Generator(device=aygit).manual_seed(tohum)
-    pay = torch.tensor([float(len(h)) for _, h in EG], device=aygit)
-    pay = pay / pay.sum()                    # obek buyuklugu kadar sik
+    # --- YIGIN KURULUSU.  Kullanici karari, 22 Eylul:
+    #   "25.000'lik yigin icinde 1+1 ve iki hanelerin hepsi her seferinde
+    #    olsun."
+    # Kisa cevapli ornekler (u <= SABIT_SINIF) HER adimda TAMAMI ile
+    # yigina giriyor; kalan yer uzun cevaplilardan CEKILIYOR.
+    # Obek yalnizca tensor sekli oldugu icin her obekten pay aliniyor --
+    # tek obek secmek kucuk obegi "ya hepsi ya hicbiri" yapiyordu ve
+    # 8000 adimda 4 tokenlik obek SIFIR kez secilmisti.
+    sabit, havuz = [], []
+    for _w, _h, _u in EG:
+        m_ = _u <= SABIT_SINIF
+        sabit.append(m_.nonzero(as_tuple=True)[0])
+        havuz.append((~m_).nonzero(as_tuple=True)[0])
+    n_sabit = sum(len(x) for x in sabit)
+    n_havuz = sum(len(x) for x in havuz)
+    kalan = yigin - n_sabit
+    assert kalan > 0, (f"sabit sinif {n_sabit} ornek, yigin {yigin} -- "
+                       f"yigini buyut ya da SABIT_SINIF'i kucult")
+    cek = [int(round(kalan * len(x) / n_havuz)) for x in havuz]
+    not_(f"[{ad}] YIGIN {yigin}: sabit {n_sabit} (cevap <= {SABIT_SINIF} hane, "
+         f"HEPSI her adimda) + cekilis {sum(cek)}")
     not_(f"[{ad}] boyut {boyut} durum {durum} lr {lr} wd {wd} tohum {tohum}"
          f"  parametre {par}")
     not_(f"[{ad}]   adim   egitim  tutulan     sn")
@@ -85,19 +109,23 @@ def _kos(ad, EG, TU, N, olcut, aygit, kok, ek, boyut, durum,
         if ad in DURDUR:
             not_(f"[{ad}] DURDURULDU  adim {i}")
             break
-        # OBEK SECIMI ORANTILI -- "hepsini karistirip cek" ile ayni sey.
-        # Obekler yalnizca TENSOR SEKLI icin var (dolgu kalkinca ayni
-        # uzunluktakiler bir arada yiginlanmak zorunda); bir mufredat
-        # DEGIL.  Sirayla gezmek her obege esit sure veriyordu ve bu,
-        # kimsenin vermedigi bir agirliklandirmaydi: 83 ornekli obek ile
-        # 125.419 ornekli obek ayni sureyi aliyordu.
-        g = int(torch.multinomial(pay, 1, generator=uret))
-        w, h = EG[g]
-        j = torch.randint(0, len(h), (yigin,), device=aygit, generator=uret)
-        o, _ = m.dikkat(w[j])
-        puan = -((m.E[None] - o[:, None]) ** 2).sum(-1)
-        k = F.cross_entropy(puan, h[j])
-        opt.zero_grad(); k.backward(); opt.step()
+        # HER OBEKTEN pay alinir: sabit kisim tamami, gerisi cekilis.
+        opt.zero_grad()
+        toplam = 0.0
+        for g, (w, h, _u) in enumerate(EG):
+            j = sabit[g]
+            if cek[g] and len(havuz[g]):
+                r = torch.randint(0, len(havuz[g]), (cek[g],),
+                                  device=aygit, generator=uret)
+                j = torch.cat([j, havuz[g][r]])
+            if not len(j):
+                continue
+            o, _ = m.dikkat(w[j])
+            puan = -((m.E[None] - o[:, None]) ** 2).sum(-1)
+            # 'sum' -> butun obeklerin toplami tek yigin gibi davranir
+            (F.cross_entropy(puan, h[j], reduction="sum") / yigin).backward()
+            toplam += len(j)
+        opt.step()
         if i % bas == 0:
             de, dt = olcut(m, "eg"), olcut(m, "tu")
             bilgi = dict(ek or {}, n=N, boyut=boyut, durum=durum, adim=i,
