@@ -139,18 +139,32 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
         not_(f"[{ad}] SURDURULUYOR  {os.path.basename(surdur)}  adim {bas_adim}")
 
     par = sum(p.numel() for p in m.parameters())
-    # X bir SOZLUK ise TEKER TEKER egitim: {uzunluk: (X, OFS)}.  Yigin
-    # TEK uzunluktan cekilir, tensor tam dolu -- DOLGU YOK.  Obek
-    # buyuklugune ORANTILI seciliyor ki her parca esit sansla gelsin.
+    # X bir SOZLUK ise TEKER TEKER egitim: {uzunluk: (X, OFS)}.
+    # Her uzunluk AYRI tensor, hepsi tam dolu -- DOLGU YOK.
+    #
+    # !! HER ADIMDA HER OBEKTEN PAY ALINIR.  Obek yalnizca tensorun
+    # SEKLI; bir adimda tek obek secmek kucuk obegi "ya hepsi ya
+    # hicbiri" yapar.  model_15'te OLCULDU: 8000 adimda 4 tokenlik obek
+    # SIFIR kez secilmisti.  Bizde 30 birimlik obekte 1 satir var ve
+    # orantili secimle 20.000 adimda beklentisi 0,02 idi -- en uzun
+    # parcalar, yani cok adimli sorular, egitime HIC girmezdi.
+    #
+    # Gradyan obekler boyunca BIRIKIR, sonra TEK optimizer adimi:
+    # kayip `yigin`a bolundugu icin butun obekler tek bir yigin gibi
+    # davranir.
     OBEK = None
     if isinstance(X, dict):
         OBEK = sorted(X.items())
-        _n = torch.tensor([float(a.shape[0]) for _, (a, _) in OBEK])
-        PAY = _n / _n.sum()
-        N = int(_n.sum().item())
-        T = float((_n * torch.tensor([float(L) for L, _ in OBEK])).sum() / N)
+        _n = [a.shape[0] for _, (a, _) in OBEK]
+        N = sum(_n)
+        T = sum(k * L for k, (L, _) in zip(_n, OBEK)) / N
+        # Obek basina cekilis: satir sayisiyla ORANTILI, ama EN AZ 1 --
+        # tek satirlik obek bile her adimda gelir.
+        CEK = [max(1, int(round(yigin * k / N))) for k in _n]
         not_(f"[{ad}] TEKER TEKER: {len(OBEK)} uzunluk obegi, {N:,} parca"
              f"   ort {T:.1f} birim   DOLGU YOK")
+        not_(f"[{ad}] YIGIN {sum(CEK):,} = her obekten pay "
+             f"({min(CEK)}..{max(CEK)})   en kucuk obek {min(_n)} satir")
     # X ya PENCERE TABLOSU (B,T) ya da tek uzun AKIS (N,).  Akis verilirse
     # pencere BURADA aciliyor: sliding_window_view bir GORUNUM, kopya yok.
     # Birim dosyasi akis sakliyor cunku atla=4 ile pencereler 20 birim
@@ -188,8 +202,9 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
         N, T = len(BAS), X.shape[1]
     not_(f"[{ad}] boyut {boyut} durum {durum} lr {lr} wd {wd} tohum {tohum}"
          f"  parametre {par}")
-    not_(f"[{ad}] pencere {N} x {T}   yigin {yigin}"
-         f"   adim basina {yigin * T / 1e6:.1f}M jeton")
+    _jt = sum(c * L for c, (L, _) in zip(CEK, OBEK)) if OBEK else yigin * T
+    not_(f"[{ad}] ornek {N:,} x {T:.1f} birim   yigin "
+         f"{sum(CEK) if OBEK else yigin:,}   adim basina {_jt/1e6:.3f}M birim")
     not_(f"[{ad}]   adim    kayip   ezber  cikarim   jeton/sn      sn")
 
     t0, i = time.time(), bas_adim
@@ -197,18 +212,27 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
         if ad in DURDUR:
             not_(f"[{ad}] DURDURULDU  adim {i}")
             break
+        opt.zero_grad()
         if OBEK is not None:
-            _b = int(torch.multinomial(PAY, 1, generator=uret))
-            _L, (_X, _O) = OBEK[_b]
-            j = torch.randint(0, _X.shape[0], (yigin,), generator=uret)
-            _w, _o = _X[j], _O[j]
+            # HER obekten pay; gradyan birikir, adim SONDA atilir.
+            _top, _n_ok = 0.0, 0
+            for _b, (_L, (_X, _O)) in enumerate(OBEK):
+                j = torch.randint(0, _X.shape[0], (CEK[_b],), generator=uret)
+                _k = m.kayip(_X[j].to(aygit).long(), PAD,
+                             None if ofset is None else _O[j].to(aygit).long())
+                # `yigin`a degil, obeklerin TOPLAM payina bolunur ki
+                # butun obekler tek bir yigin gibi davransin.
+                (_k * (CEK[_b] / sum(CEK))).backward()
+                _top += float(_k.detach()) * CEK[_b]
+                _n_ok += CEK[_b]
+            k = torch.tensor(_top / _n_ok)
         else:
             j = BAS[torch.randint(0, N, (yigin,), generator=uret)]
-            _w, _o = X[j], (None if ofset is None else ofset[j])
-        k = m.kayip(_w.to(aygit).long(), PAD,
-                    None if _o is None or ofset is None
-                    else _o.to(aygit).long())
-        opt.zero_grad(); k.backward(); opt.step()
+            _o = None if ofset is None else ofset[j]
+            k = m.kayip(X[j].to(aygit).long(), PAD,
+                        None if _o is None else _o.to(aygit).long())
+            k.backward()
+        opt.step()
 
         if i % bas == 0:
             gecen = time.time() - t0
