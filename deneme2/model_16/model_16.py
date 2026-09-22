@@ -151,6 +151,44 @@ class Yol(nn.Module):
         o = (ag.unsqueeze(-1) * (S @ self.Wv)).sum(1)
         return (o[0], ag[0]) if tek else (o, ag)
 
+    def dizi(self, w):
+        """HER yuva kendi sorusunu sorar.  w (B,T) -> puan (B,T,n).
+
+        `dikkat`in COGUL hali.  Mekanizma AYNI -- relu dikkat, soru
+        durumdan, cevap durumlardan, okuma en yakin E.  Degisen tek sey
+        KIMIN sordugu: son yuva yerine hepsi.
+
+        NEDEN GEREKLI.  Aritmetikte bir soruyu AYRI SATIRLARA boluyorduk:
+          4 7 2 + 1 8 2 =        -> 6      8 token
+          4 7 2 + 1 8 2 = 6      -> 5      9 token   ...
+        yani "her onek icin bir ileri gecis".  Onek 4 taneydi ve kisaydi:
+        8+9+10+11 = 38 token-adimi, tek satirda 11 olurdu -- 3,5 kat.
+        512'lik pencerede ayni yontem 1+2+...+511 = 130.816 token-adimi
+        demek; tek satirda 512.  Oran T/2 = 256.  Ayni hesap, 256 kat is.
+
+        NEDENSEL MASKE.  Ayri satir yonteminde `= 6` satiri `5`i
+        GOREMIYORDU, cunku satirda yoktu.  Tek satira gecince hepsi ayni
+        dizide; maske tam olarak o goremezligi geri koyuyor.  `dikkat`te
+        gerekmiyordu (yalniz son yuva soruyor, gelecegi yok) ve o yuzden
+        21 Eylul'de "gerekcesiz" diye cikarilmisti -- dogru karardi.
+
+        relu ONCE maskelenir: puan gelecege bakmasin, sonra relu.
+        Maskelenen yere -inf DEGIL, dogrudan agirlik 0 verilir; softmax
+        olsaydi -inf gerekirdi ama burada pay YOK (relu).
+        """
+        assert w.dim() == 2, "dizi() (B,T) bekler"
+        S = self.gez(w)[:, 1:]                      # (B,T,durum)
+        Q, K, V = S @ self.Wq, S @ self.Wk, S @ self.Wv
+        P = Q @ K.transpose(1, 2) + self.hb         # (B,T,T)
+        gec = torch.ones(w.shape[1], w.shape[1], dtype=torch.bool,
+                         device=w.device).tril()    # j yalniz <= j'ye bakar
+        A = (P.masked_fill(~gec, -torch.inf).softmax(-1) if self.pay
+             else P.clamp(min=0) * gec)
+        O = A @ V                                   # (B,T,boyut)  bmm --
+        #   ara (B,T,T,boyut) tensor URETMEZ; carpim olarak yazilmasi sart,
+        #   yayilimla yazilsaydi B=64'te bile 1 GB olurdu.
+        return -torch.cdist(O, self.E.expand(w.shape[0], -1, -1)) ** 2
+
     def oku(self, o):
         """Sozluk uzayindaki noktaya en yakin token."""
         return int(torch.cdist(o.reshape(1, -1), self.E).argmin())

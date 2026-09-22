@@ -143,25 +143,25 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek,
             e, c = olcut(m, "ezber"), olcut(m, "cikarim")
             bilgi = dict(ek, adim=i, boyut=boyut, durum=durum, lr=lr, wd=wd,
                          tohum=tohum, yigin=yigin, parametre=par,
-                         kayip=float(k), ezber=e, cikarim=c,
+                         kayip=float(k.detach()), ezber=e, cikarim=c,
                          jeton_sn=(i - bas_adim + 1) * yigin * T / max(gecen, 1e-9))
             SONUC[ad] = dict(bilgi, model=m)
             im = ""
             if i % yedek == 0:
                 _yaz(kok, ad, _tam(m, opt, uret, bilgi)); im = "  yedek"
-            not_(f"[{ad}] {i:6d}   {float(k):.4f}  {e:.4f}   {c:.4f}"
+            not_(f"[{ad}] {i:6d}   {float(k.detach()):.4f}  {e:.4f}   {c:.4f}"
                  f"   {bilgi['jeton_sn']/1e6:8.2f}M  {gecen:6.0f}{im}")
 
     gecen = time.time() - t0
     bilgi = dict(ek, adim=i, boyut=boyut, durum=durum, lr=lr, wd=wd,
-                 tohum=tohum, yigin=yigin, parametre=par, kayip=float(k),
+                 tohum=tohum, yigin=yigin, parametre=par, kayip=float(k.detach()),
                  ezber=olcut(m, "ezber", tam=True),
                  cikarim=olcut(m, "cikarim", tam=True),
                  jeton_sn=(i - bas_adim + 1) * yigin * T / max(gecen, 1e-9),
                  biti=True)
     SONUC[ad] = dict(bilgi, model=m)
     _yaz(kok, ad, _tam(m, opt, uret, bilgi))
-    not_(f"[{ad}] BITTI   kayip {float(k):.4f}   ezber {bilgi['ezber']:.4f}"
+    not_(f"[{ad}] BITTI   kayip {float(k.detach()):.4f}   ezber {bilgi['ezber']:.4f}"
          f"   cikarim {bilgi['cikarim']:.4f}   ({gecen:.0f} sn)")
 
 
