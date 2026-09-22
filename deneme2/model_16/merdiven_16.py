@@ -50,6 +50,8 @@ import olcme_16 as OL      # noqa: E402
 
 D = int(os.environ.get("MERDIVEN_D", 16))
 AYGIT = os.environ.get("MERDIVEN_AYGIT", "cuda")
+OKUMA = os.environ.get("MERDIVEN_OKUMA", "carpim")   # "carpim" | "mesafe"
+SADECE = [x for x in os.environ.get("MERDIVEN_SADECE", "").split(",") if x]
 if AYGIT == "cuda":
     assert torch.cuda.is_available(), "GPU YOK -- MERDIVEN_AYGIT=cpu ile zorla"
     _bos = torch.cuda.mem_get_info()[0] / 1e9
@@ -172,7 +174,11 @@ def ileri(p, v, cfg, T):
             q = (a.unsqueeze(-1) * S).sum(1)
     if wv:
         q = q @ p["Wv"]
-    return q @ (p["E"] if et else cik).T
+    E_ = p["E"] if et else cik
+    # OKUMA KURALI: merdivenin ilk kosusu "carpim" ile yapildi ve
+    # model_16 "mesafe" kullaniyor -- fark ayri bir basamak olarak
+    # olculuyor, karistirilmasin.
+    return q @ E_.T if OKUMA == "carpim" else -torch.cdist(q, E_) ** 2
 
 
 def kos(ad, v, cfg, hedef, lr, adim, tohum=0, yaz=print):
@@ -218,7 +224,11 @@ def main(yaz=None, yol=None, kok=None):
     yaz("R3c parametre sayisi model_16 ile AYNI olmali: 128.657\n")
     g = torch.Generator().manual_seed(1)
     kar = {}
+    yaz(f"OKUMA KURALI: {OKUMA}"
+        + ("   (model_16 ile ayni)" if OKUMA == "mesafe" else ""))
     for ad, cfg in BASAMAK.items():
+        if SADECE and ad.strip() not in SADECE:
+            continue
         et = cfg[2]
         hedef = v["HT"] if et else v["Y"]
         n_sinif = v["NT"] if et else v["NE"]

@@ -84,6 +84,11 @@ NORM = True          # |s| = 1
 PAY = False          # False -> relu   True -> softmax
 LR = 0.002           # SABIT.  Rakam tokenli veride 0,001/0,002/0,004
                      #   ayirt edilemedi (hepsi ~0,015).
+OKUMA = "mesafe"     # "mesafe" -> -||o - E_c||^2   "carpim" -> o . E_c
+                     # Varsayilan MESAFE: bugune kadarki butun olcumler
+                     # onunla alindi.  "carpim" transformerin okumasi ve
+                     # YALNIZ bir olcum secenegi -- hangisinin ne kadar
+                     # katki verdigi 2x2 tabloda ayriliyor.
 WD = 0.01            # 0,03 buyuk veride OLDURUYOR, 0,001 ezbere kaydiriyor.
 
 # YANLILIK (hb) ANAHTAR DEGIL, HER ZAMAN VAR.  Ispat, kosu gerekmez:
@@ -106,13 +111,14 @@ WD = 0.01            # 0,03 buyuk veride OLDURUYOR, 0,001 ezbere kaydiriyor.
 
 class Yol(nn.Module):
     def __init__(self, n, boyut=BOYUT, durum=DURUM, tohum=0,
-                 norm=NORM, pay=PAY):
+                 norm=NORM, pay=PAY, okuma=None):
         """Ayarlar dosyanin basinda -- ayri bir ayar dosyasi YOK."""
         super().__init__()
         g = torch.Generator().manual_seed(tohum)
         r = lambda *s: torch.randn(*s, generator=g)
         self.n, self.boyut, self.durum = n, boyut, durum
         self.norm, self.pay = norm, pay
+        self.okuma = okuma or OKUMA      # None -> modul ayari
 
         self.E = nn.Parameter(r(n, boyut))                  # sozluk: token -> konum
         self.b = nn.Parameter(r(n, durum) / durum ** 0.5)   # token -> duruma giris
@@ -152,6 +158,16 @@ class Yol(nn.Module):
             iz.append(s)
         S = torch.stack(iz, 1)
         return S[0] if tek else S
+
+    def puan(self, O):
+        """Cikti noktasindan SOZLUK PUANI.  Buyuk = yakin.
+
+        Tek yerde durmasi sart: dizi/uret_dizi/oku ucu de bunu
+        cagirir, yoksa egitim bir kuralla, uretim baskasiyla calisir."""
+        if self.okuma == "carpim":
+            return O @ self.E.T
+        E = self.E.expand(O.shape[0], -1, -1) if O.dim() == 3 else self.E
+        return -torch.cdist(O, E) ** 2
 
     def dikkat(self, w):
         """Son yuva sorar, butun yuvalar cevaplar.
@@ -205,7 +221,7 @@ class Yol(nn.Module):
         O = A @ V                                   # (B,T,boyut)  bmm --
         #   ara (B,T,T,boyut) tensor URETMEZ; carpim olarak yazilmasi sart,
         #   yayilimla yazilsaydi B=64'te bile 1 GB olurdu.
-        return -torch.cdist(O, self.E.expand(w.shape[0], -1, -1)) ** 2
+        return self.puan(O)
 
     def uret_dizi(self, w, adim):
         """w (B,L) -> uretilen (B,adim).  DURUM TASINIR.
@@ -224,8 +240,7 @@ class Yol(nn.Module):
             pu = pu.squeeze(-1) + self.hb
             ag = pu.softmax(-1) if self.pay else pu.clamp(min=0)
             o = (ag.unsqueeze(-1) * (S @ self.Wv)).sum(1)
-            t = torch.cdist(o[:, None], self.E.expand(w.shape[0], -1, -1))
-            t = t.squeeze(1).argmin(-1)              # (B,)
+            t = self.puan(o).argmax(-1)              # (B,)
             cikan.append(t)
             s = torch.bmm(self.M[t], s.unsqueeze(-1)).squeeze(-1) + self.b[t]
             if self.norm:
@@ -235,7 +250,7 @@ class Yol(nn.Module):
 
     def oku(self, o):
         """Sozluk uzayindaki noktaya en yakin token."""
-        return int(torch.cdist(o.reshape(1, -1), self.E).argmin())
+        return int(self.puan(o.reshape(1, -1)).argmax())
 
     def uret(self, w, adim):
         """Cikti girdiye eklenir.  Uzunluk SABIT oldugu icin durma kosulu yok."""
