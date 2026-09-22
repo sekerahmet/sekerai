@@ -182,10 +182,11 @@ class Yol(nn.Module):
              kesintisiz akista dolgu YOK ve PAD=None verilir.
         ofs  (B,T) cevap araligi ici sira (0 = ilk token, 1+ = devam,
              -1 = disari).  None -> butun konumlar esit (duz kayip).
-             Verilirse CEVAP KAPISI acilir: bir araligin ILK tokeni
-             yanlis bilindiyse o araligin devami PUANLANMAZ.  Sinav
-             cevabin TAMAMINA bakiyor; konum 0 yanlissa devamin
-             dogrulugu sifir kazandiriyor.  Kapi argmax ile kuruluyor
+             Verilirse CEVAP KAPISI acilir: bir yuva, ayni araliktaki
+             BUTUN onceki yuvalar dogru bilindiyse puanlanir; biri
+             yanlissa araligin kalani PUANLANMAZ.  Sinav cevabin
+             TAMAMINA bakiyor; onek bozulduysa devaminin dogrulugu
+             sifir kazandiriyor.  Kapi argmax ile kuruluyor
              -- turevi yok, gradyan yalniz cross-entropy'den akar,
              ek ileri gecis YOK.  Aralik kurulumu: `agirlik_16`.
         """
@@ -201,21 +202,25 @@ class Yol(nn.Module):
 
     @staticmethod
     def _kapi(puan, w, ofs):
-        """S2 kapisi -> (B,T-1) 0/1.  Araligin ILK tokeni yanlissa
-        devami kapanir.  Pencerenin BASINDAN once baslayan bir aralikin
-        ilk tokeni gorunmuyor; orada kapi ACIK birakilir (bilmedigimiz
-        icin cezalandirmiyoruz)."""
+        """CEVAP KAPISI -> (B,T-1) 0/1.  Bir yuva ancak ayni araliktaki
+        BUTUN onceki yuvalar dogru bilindiyse puanlanir; ilk hatada
+        araligin kalani kapanir.  Pencerenin BASINDAN once baslayan bir
+        aralikin gorunmeyen yuvalari BILINMIYOR sayilir, kapi ACIK
+        birakilir (bilmedigimiz icin cezalandirmiyoruz)."""
         hed = w[:, 1:]
         dogru = puan[:, :-1].argmax(-1) == hed      # (B,T-1) bool
         o1 = ofs[:, 1:]                             # hedefin aralik ici sirasi
         kapi = torch.ones_like(o1, dtype=torch.bool)
+        # birikim: adim turunda "son `adim` yuvanin hepsi dogru mu".
+        # o1 == adim olan yuva icin bu, aralikin 0..adim-1 onekidir.
+        birikim = torch.ones_like(o1, dtype=torch.bool)
         for adim in range(1, int(o1.max().item()) + 1 if o1.numel() else 1):
-            sec = o1 == adim
-            if not sec.any():
-                continue
             geri = torch.roll(dogru, shifts=adim, dims=1)
             geri[:, :adim] = True                   # pencere disi -> kapi ACIK
-            kapi = torch.where(sec, geri, kapi)
+            birikim = birikim & geri                # her turda BIR ONCEKI yuva
+            sec = o1 == adim
+            if sec.any():
+                kapi = torch.where(sec, birikim, kapi)
         return kapi.to(puan.dtype)
 
     def uret_dizi(self, w, adim):

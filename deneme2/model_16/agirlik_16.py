@@ -90,10 +90,10 @@ def ofset(d, yaz=print):
     """Konum basina ARALIK ICI SIRA: 0 = cevabin ILK tokeni,
     1..L-1 = devami, -1 = cevap araligi disi.
 
-    S2'nin kapisi bununla kuruluyor: konum 0 yanlis bilindiyse ayni
-    araligin 1..L-1 tokenleri puanlanmaz.  Gerekce: sinav cevabin
-    TAMAMINA bakiyor, konum 0 yanlissa soru sifir aliyor ve
-    devaminin dogru olmasi hicbir sey kazandirmiyor."""
+    CEVAP KAPISI bununla kuruluyor: konum k, 0..k-1'in HEPSI dogru
+    bilindiyse puanlanir; ilk hatadan sonrasi kapanir.  Gerekce:
+    sinav cevabin TAMAMINA bakiyor, onek bozulduysa soru sifir
+    aliyor ve devaminin dogru olmasi hicbir sey kazandirmiyor."""
     dz = d["dizi"].numpy()
     o = np.full(len(dz), -1, np.int8)
     bas, uz = isaretle(d, yaz)
