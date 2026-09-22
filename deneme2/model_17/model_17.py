@@ -135,18 +135,32 @@ class Yol(nn.Module):
         S = torch.stack(iz, 1)
         return S[0] if tek else S
 
-    def dikkat(self, w):
+    def dikkat(self, w, maske=None):
         """Son yuva sorar, butun yuvalar cevaplar.
 
         Anahtar ve deger yuvanin TOKEN'INDAN degil DURUMUNDAN uretiliyor --
         boylece ayni token iki farkli yerde ayni sey demiyor.
+
+        maske (B,T) bool: gercek jetonlarda True.  Dolgu yuvalari hem
+        SORUDAN hem TOPLAMDAN duser.  Verilmezse kod birebir eski yol.
+        Gerekce olculdu: C'de uzunluk 88 farkli deger aliyor, obek basina
+        tek gecis kosulmaz; dolgu sart, dolgulu yuva da toplama girerse
+        her ornege BASKA sayida sahte katki biner.
         """
         tek = w.dim() == 1
         S = self.gez(w)[..., 1:, :]
         S = S[None] if tek else S
-        q = S[:, -1] @ self.Wq
+        if maske is None:
+            q = S[:, -1] @ self.Wq
+        else:
+            m = maske[None] if tek else maske
+            son = m.sum(1).clamp(min=1) - 1          # SON GERCEK yuva
+            q = S[torch.arange(S.shape[0], device=S.device), son] @ self.Wq
         pu = (S @ self.Wk) @ q.unsqueeze(-1)
         pu = pu.squeeze(-1) + self.hb
+        if maske is not None:
+            # -inf: softmax'ta agirlik 0, relu'da clamp(min=0) yine 0.
+            pu = pu.masked_fill(~m, float("-inf"))
         ag = pu.softmax(-1) if self.pay else pu.clamp(min=0)
         o = (ag.unsqueeze(-1) * (S @ self.Wv)).sum(1)
         return (o[0], ag[0]) if tek else (o, ag)

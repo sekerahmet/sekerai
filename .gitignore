@@ -32,3 +32,9 @@ deneme2/model_13/*.md
 
 # model_15 veri dosyasi -- Drive da durur, depoda degil
 deneme2/model_15/*.pt
+
+# kosu ciktilari: anlik goruntu (.pt) + gunluk.  Depo PUBLIC, ikili dosya girmez.
+deneme2/*/kosu/
+
+# CLUTRR ham CSV'leri: CC-BY-NC, ve veri_17.indir() bir komutla getiriyor.
+deneme2/*/veri_ham/
