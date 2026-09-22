@@ -110,7 +110,7 @@ def _koru(kok, ad):
     return os.path.basename(yeni)
 
 
-def kayip(m, w, PAD=None):
+def kayip(m, w, PAD=None, ag=None):
     """SONRAKI JETON, her konumda.
 
     w (B,T) -> puan (B,T,n).  Konum j, j+1'i tahmin eder; son konumun
@@ -124,13 +124,21 @@ def kayip(m, w, PAD=None):
     """
     puan = m.dizi(w)                       # (B,T,n)
     ek = {} if PAD is None else {'ignore_index': PAD}
-    return F.cross_entropy(puan[:, :-1].reshape(-1, puan.shape[-1]),
-                           w[:, 1:].reshape(-1), **ek)
+    if ag is None:
+        return F.cross_entropy(puan[:, :-1].reshape(-1, puan.shape[-1]),
+                               w[:, 1:].reshape(-1), **ek)
+    # S1 -- ONEK AGIRLIKLI AMAC.  ag[t] = o konumdaki tokenin agirligi;
+    # cevabin i. tokeni L-i+1 aliyor, yani "ilk k token BIRDEN dogru mu"
+    # sorusunun k uzerinden toplami.  Turetim: agirlik_16 basligi.
+    k = F.cross_entropy(puan[:, :-1].reshape(-1, puan.shape[-1]),
+                        w[:, 1:].reshape(-1), reduction="none", **ek)
+    a = ag[:, 1:].reshape(-1)
+    return (k * a).sum() / a.sum()
 
 
 def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
          lr, wd, adim, tohum, yigin, bas, yedek, surdur, t_len, atla,
-         okuma):
+         okuma, agirlik):
     not_ = GUNLUK.append
     torch.manual_seed(tohum)
     m = Yol(ek["n"], boyut=boyut, durum=durum, tohum=tohum,
@@ -157,6 +165,13 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
         import numpy as np
         P = np.lib.stride_tricks.sliding_window_view(X.numpy(), t_len)
         X = torch.from_numpy(P[::atla])
+        if agirlik is not None:
+            # Agirlik AKISLA ayni uzunlukta; pencereler AYNI gorunumle
+            # aciliyor ki konumlar birebir ortussun.
+            AG = np.lib.stride_tricks.sliding_window_view(agirlik, t_len)
+            agirlik = torch.from_numpy(AG[::atla].copy())
+            not_(f"[{ad}] AGIRLIK acik: ortalama {float(agirlik.mean()):.3f}"
+                 f"   en buyuk {float(agirlik.max()):.0f}")
         not_(f"[{ad}] akis {len(P) + t_len - 1:,} -> pencere {X.shape}"
              f"  (t_len {t_len}, atla {atla}, GORUNUM)")
     N, T = X.shape
@@ -172,7 +187,8 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
             not_(f"[{ad}] DURDURULDU  adim {i}")
             break
         j = torch.randint(0, N, (yigin,), generator=uret)
-        k = kayip(m, X[j].to(aygit).long(), PAD)
+        k = kayip(m, X[j].to(aygit).long(), PAD,
+                  None if agirlik is None else agirlik[j].to(aygit))
         opt.zero_grad(); k.backward(); opt.step()
 
         if i % bas == 0:
@@ -205,7 +221,7 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
 def baslat(ad, X, PAD, n, *, olcut, aygit="cuda", kok=None, ek=None,
            boyut=BOYUT, durum=DURUM, lr=LR, wd=WD,
            adim=20000, tohum=0, yigin=YIGIN, bas=200, yedek=1000,
-           surdur=None, t_len=None, atla=1, okuma=None):
+           surdur=None, t_len=None, atla=1, okuma=None, agirlik=None):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
     X       (N,T) PENCERE TABLOSU ya da (N,) tek uzun AKIS.  Akis
@@ -230,7 +246,7 @@ def baslat(ad, X, PAD, n, *, olcut, aygit="cuda", kok=None, ek=None,
         target=_kos, daemon=True,
         args=(ad, X, PAD, olcut, aygit, kok, dict(ek or {}, n=n),
               boyut, durum, lr, wd, adim, tohum, yigin, bas, yedek,
-              surdur, t_len, atla, okuma)).start()
+              surdur, t_len, atla, okuma, agirlik)).start()
     return f"{ad} basladi" + (f"  ({os.path.basename(surdur)}'den)" if surdur else "")
 
 
