@@ -78,7 +78,16 @@ class Yol(nn.Module):
         #   E[c]  token YAZILIRKEN hedeflenen konum; okuma en yakin E
         # b ile E AYRI parametre: iceri giren gomme disari cikanla bagli
         # degil.  Baglamak denendi, aritmetik gorevinde daha kotuydu.
-        self.E = nn.Parameter(r(n, boyut))                  # CIKIS gommesi
+        #   E'nin satirlari TAM birim norm.  Puan acilinca
+        #   -||o-E_c||^2 = -||o||^2 + 2 o.E_c - ||E_c||^2 olur; ilk terim
+        #   c'den bagimsiz, softmaxta duser.  ||E_c||^2 de SABIT olursa o da
+        #   duser ve siralamayi YALNIZ o.E_c belirler -- okuma ilk adimdan
+        #   itibaren girdiye bagli olur.
+        #   Olculdu (t0): duz randn ile |E|~3,94 ve girdiden BAGIMSIZ terimin
+        #   yayilimi girdiye baglinin 19 KATI; model her soruya ayni tokeni
+        #   veriyordu.  Bolmek yetmez -- olcek orani 1/k duzeltir ama
+        #   ||E_c||^2'nin SIRALAMASINI degistirmez, secim yine ayni kalir.
+        self.E = nn.Parameter(F.normalize(r(n, boyut), dim=-1))   # CIKIS gommesi
         self.b = nn.Parameter(r(n, durum) / durum ** 0.5)   # GIRIS, toplamsal
         #   /sqrt(durum) -> |b| ~ 1 = |s|: eklenen sey eklendigiyle ayni
         #   buyuklukte, biri otekini bastirmiyor
