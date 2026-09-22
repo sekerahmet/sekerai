@@ -145,6 +145,18 @@ def sor(m, ciftler, aygit="cuda", en=20000, parca=20000):
     return dog / say
 
 
+def kirilim(m, ciftler, aygit="cuda", en=10**9):
+    """SONUC istatistigi: SAYI, cevabin hane sayisina gore ayri ayri.
+
+    Yuva/basamak kirilimi DEGIL -- yine "cevap dogru mu", sadece hangi
+    uzunluktaki sorularda dogru oldugunu gosteriyor."""
+    g = {}
+    for a, b in ciftler[:en]:
+        g.setdefault(hane(a + b), []).append((a, b))
+    return {h: (sor(m, c, aygit=aygit, en=10**9), len(c))
+            for h, c in sorted(g.items())}
+
+
 def yaz(yol="veri_dur.pt", tohum=0):
     """Bolmeyi DOSYAYA yaz.  Colab bunu Drive'dan okur, uretmez (kural 9)."""
     EG, TU = bol(tohum)
