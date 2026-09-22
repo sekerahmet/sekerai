@@ -28,6 +28,24 @@ Burada anlik goruntu TAM: agirlik + optimizer + iki RNG durumu.
 
 Kural 8: baslat() ARKA PLANDA calisir ve HEMEN doner; izleme nabiz()
 hucresiyle OKUYARAK yapilir.
+
+ZINCIRDEKI YERI.  Kim kimi cagiriyor, bu dosya nerede:
+(model BIRIM goruyor -- karakter yalnizca ara adim ve kapi)
+
+  veri_16     graf: 1608 varlik, 24 iliski, olgular
+  metin_16    graf -> duz Turkce cumle
+  korpus_16   cumle -> belge -> paketlenmis akis
+  jeton_16    KARAKTER sozlugu + GIDIS-DONUS KAPISI
+  birim_16    metin -> sayim -> kok havuzu -> BIRIM AKISI -> pencere
+  ek_16       kelime -> kok + ek    (Turkce morfolojisi)
+
+  taban_16    bolmeler (ezber_* / cikarim_*) + Ayar tanimi
+  ayar_16     dugmeler
+  hazirla_16  veriyi dosyaya yazar, Colab Drive'dan OKUR
+
+  model_16    MIMARI -- model_15'ten
+  kos_16      egitim dongusu   <-- BU DOSYA
+  olcme_16    olcu: soru soruldu, cevap dogru mu
 """
 import os
 import shutil
