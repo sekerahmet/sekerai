@@ -103,6 +103,24 @@ def agirlik(d, bicim="onek", taban=1.0, yaz=print):
     return w
 
 
+def ofset(d, yaz=print):
+    """Konum basina ARALIK ICI SIRA: 0 = cevabin ILK tokeni,
+    1..L-1 = devami, -1 = cevap araligi disi.
+
+    S2'nin kapisi bununla kuruluyor: konum 0 yanlis bilindiyse ayni
+    araligin 1..L-1 tokenleri puanlanmaz.  Gerekce: sinav cevabin
+    TAMAMINA bakiyor, konum 0 yanlissa soru sifir aliyor ve
+    devaminin dogru olmasi hicbir sey kazandirmiyor."""
+    dz = d["dizi"].numpy()
+    o = np.full(len(dz), -1, np.int8)
+    bas, uz = isaretle(d, yaz)
+    for b, L in zip(bas.tolist(), uz.tolist()):
+        o[b:b + L] = np.arange(L, dtype=np.int8)
+    yaz(f"ofset: aralik basi {int((o == 0).sum()):,}"
+        f"   devam {int((o > 0).sum()):,}   disari {int((o < 0).sum()):,}")
+    return o
+
+
 def denetle(d, n=2000, yaz=print):
     """KAPI -- isaretler gercekten OLGU CEVABI mi, ve kapsam ne."""
     import metin_16 as MT

@@ -53,6 +53,11 @@ NORM = True          # |s| = 1
 PAY = False          # False -> relu dikkat   True -> softmax
 LR = 0.002
 WD = 0.01
+TEDIRGIN = 0.4       # M'nin tedirginligi, tokenin TOPLAMSAL kanalina gore.
+                     # |b| = 1 oldugu icin bu dogrudan bir ORAN: 0,4 =
+                     # "carpimsal kanal toplamsalin %40'i".  Boyuta bagli
+                     # kismi asagida aritmetikle (1/sqrt(durum)); ORANIN
+                     # KENDISI secildi, olculmedi.
 
 
 class Yol(nn.Module):
@@ -65,11 +70,27 @@ class Yol(nn.Module):
         self.boyut, self.durum = boyut, durum
         self.norm, self.pay = norm, pay
 
-        self.E = nn.Parameter(r(n, boyut))                  # sozluk: token -> konum
-        self.b = nn.Parameter(r(n, durum) / durum ** 0.5)   # token -> duruma giris
-        self.M = nn.Parameter(torch.eye(durum).repeat(n, 1, 1)
-                              + 0.1 * r(n, durum, durum))   # guncelleme
-        self.s0 = nn.Parameter(torch.zeros(durum))
+        # TOKEN BASINA UC PARAMETRE -- ikisi ICERI, biri DISARI:
+        #   b[w]  okununca duruma EKLENEN vektor     -> s = ... + b[w]
+        #   M[w]  okununca duruma UYGULANAN matris   -> s = M[w] @ s + ...
+        #         birim matris + kucuk tedirginlik: ogrenilmemis token
+        #         durumu bozmaz, oldugu gibi gecirir
+        #   E[c]  token YAZILIRKEN hedeflenen konum; okuma en yakin E
+        # b ile E AYRI parametre: iceri giren gomme disari cikanla bagli
+        # degil.  Baglamak denendi, aritmetik gorevinde daha kotuydu.
+        self.E = nn.Parameter(r(n, boyut))                  # CIKIS gommesi
+        self.b = nn.Parameter(r(n, durum) / durum ** 0.5)   # GIRIS, toplamsal
+        #   /sqrt(durum) -> |b| ~ 1 = |s|: eklenen sey eklendigiyle ayni
+        #   buyuklukte, biri otekini bastirmiyor
+        #   TEDIRGINLIK olcegi b ile AYNI aritmetikten: N(0,s^2) girisli
+        #   d x d matris icin |A@x| ~ s*sqrt(d)*|x|, yani s = TEDIRGIN/sqrt(d)
+        #   verince |tedirginlik @ s| ~ TEDIRGIN * |s| -- oran d ne olursa
+        #   olsun sabit.  Duz 0,1 yazilsaydi oran durumla buyurdu
+        #   (16'da 0,40 ama 256'da 1,60) ve kimligi bastirirdi.
+        #   durum=16'da TEDIRGIN/sqrt(16) = 0,1 -- bugunku deger.
+        self.M = nn.Parameter(torch.eye(durum).repeat(n, 1, 1)  # GIRIS, carpimsal
+                              + (TEDIRGIN / durum ** 0.5) * r(n, durum, durum))
+        self.s0 = nn.Parameter(torch.zeros(durum))          # baslangic durumu
 
         o = boyut ** -0.5                # |q| ~ |k| ~ |s| = 1 olsun diye
         self.Wq = nn.Parameter(r(durum, boyut) * o)     # son yuva -> soru
@@ -142,7 +163,7 @@ class Yol(nn.Module):
         #   yayilimla yazilsaydi B=64'te bile 1 GB olurdu.
         return self.puan(O)
 
-    def kayip(self, w, PAD=None, ag=None):
+    def kayip(self, w, PAD=None, ag=None, ofs=None):
         """SONRAKI JETON, her konumda.  w (B,T) -> SKALER kayip.
 
         Konum j, j+1'i tahmin eder; son konumun hedefi yok.
@@ -152,6 +173,13 @@ class Yol(nn.Module):
              kesintisiz akista dolgu YOK ve PAD=None verilir.
         ag   (B,T) konum agirliklari.  None -> hepsi 1.  Agirlik kurulumu
              ve gerekcesi: `agirlik_16`.
+        ofs  (B,T) cevap araligi ici sira (0 = ilk token, 1+ = devam,
+             -1 = disari).  Verilirse S2 KAPISI acilir: bir araligin
+             ILK tokeni yanlis bilindiyse o araligin devami
+             PUANLANMAZ.  Sinav cevabin tamamina bakiyor; konum 0
+             yanlissa devamin dogrulugu sifir kazandiriyor.
+             Kapi argmax ile kuruluyor -- turevi yok, gradyan yalniz
+             agirlikli cross-entropy'den akar.  Ek ileri gecis YOK.
         """
         puan = self.dizi(w)                       # (B,T,n)
         ek = {} if PAD is None else {'ignore_index': PAD}
@@ -160,8 +188,30 @@ class Yol(nn.Module):
                                    w[:, 1:].reshape(-1), **ek)
         k = F.cross_entropy(puan[:, :-1].reshape(-1, puan.shape[-1]),
                             w[:, 1:].reshape(-1), reduction="none", **ek)
-        a = ag[:, 1:].reshape(-1)
+        a = ag[:, 1:]
+        if ofs is not None:
+            a = a * self._kapi(puan, w, ofs)
+        a = a.reshape(-1)
         return (k * a).sum() / a.sum()
+
+    @staticmethod
+    def _kapi(puan, w, ofs):
+        """S2 kapisi -> (B,T-1) 0/1.  Araligin ILK tokeni yanlissa
+        devami kapanir.  Pencerenin BASINDAN once baslayan bir aralikin
+        ilk tokeni gorunmuyor; orada kapi ACIK birakilir (bilmedigimiz
+        icin cezalandirmiyoruz)."""
+        hed = w[:, 1:]
+        dogru = puan[:, :-1].argmax(-1) == hed      # (B,T-1) bool
+        o1 = ofs[:, 1:]                             # hedefin aralik ici sirasi
+        kapi = torch.ones_like(o1, dtype=torch.bool)
+        for adim in range(1, int(o1.max().item()) + 1 if o1.numel() else 1):
+            sec = o1 == adim
+            if not sec.any():
+                continue
+            geri = torch.roll(dogru, shifts=adim, dims=1)
+            geri[:, :adim] = True                   # pencere disi -> kapi ACIK
+            kapi = torch.where(sec, geri, kapi)
+        return kapi.to(puan.dtype)
 
     def uret_dizi(self, w, adim):
         """w (B,L) -> uretilen (B,adim).  DURUM TASINIR.
