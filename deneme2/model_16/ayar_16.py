@@ -53,10 +53,13 @@ AYAR = Ayar(
     ek_kip="ezber_zincir",        # iliski kelimenin kendisi, gercek ek allomorflari
 
     t_len=512,           # paketleme penceresi (KARAKTER).
-    #                      !! model_16 karakter gormuyor ama bu deger
-    #                      cumlelerin hangi dilime dustugunu, yani
-    #                      akista kimin kimin yanina geldigini
-    #                      belirliyor -- kayan pencere onu goruyor.
+    #                      Birim akisinda ARTIK PAKETLEME YOK; akis
+    #                      satir satir kuruluyor (`birim_16.belgeler`).
+    #                      Bu deger yalniz IKI yerde kaldi:
+    #                        - hazirla_16.kur()  KARAKTER korpusu
+    #                        - korpus_16.sayfalar() TETIKLENMIS dalda
+    #                          belgeyi boluyor -- hala KARAKTER sayiyor,
+    #                          acik kalem.
     kopya=40,            # her varlik icin 40 belge
     tetik=16,            # 40 belgenin 16'si biyografi onegi (oran 2/5)
     zincir_pay=0.20,     # sayfa cumlelerinin ~%20'si zincir
@@ -81,7 +84,18 @@ AYAR = Ayar(
 # model_14'un mimari sabitlerini cikarirken bu ikisini de atmistim --
 # yanlis siniflandirma, geri konuldu.
 # =====================================================================
-PENCERE = 24         # bir egitim penceresi kac BIRIM
+PENCERE = 32         # bir egitim penceresi kac BIRIM.
+#                      OLCULDU: en uzun soru+cevap parcasi TAM 32 birim.
+#                      Daha kisa pencere o cifti boler -- model soruyu
+#                      gorur, cevabi gormez.  24'te 3.485 cift boluyordu
+#                      ve HEPSI soru cumlesiydi.  32'de 0.
+#                        L  kesilen parca (hepsi sorulu)
+#                       24           3.485
+#                       28              21
+#                       31               3
+#                       32               0
+#                      32'nin ustu kapsama kazandirmiyor, yalniz baglam;
+#                      ve bu mimaride pencere = OZYINELEME DERINLIGI.
 ATLA = 4             # kayan pencerenin adimi.  1 her konumdan bir
                      #   pencere demek; buyutmek ortusmeyi azaltir ama
                      #   ayni olguyu daha az kez gosterir.
