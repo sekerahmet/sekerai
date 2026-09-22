@@ -189,6 +189,32 @@ class Yol(nn.Module):
         #   yayilimla yazilsaydi B=64'te bile 1 GB olurdu.
         return -torch.cdist(O, self.E.expand(w.shape[0], -1, -1)) ** 2
 
+    def uret_dizi(self, w, adim):
+        """w (B,L) -> uretilen (B,adim).  DURUM TASINIR.
+
+        `dizi`nin SON satirini adim adim yurutur.  Naif yol her yeni
+        karakter icin ozyinelemeyi bastan calistirirdi: L uzunlugunda bir
+        onekten k karakter uretmek k*L adim eder (L=60, k=30 -> 1.800).
+        Burada durum tasindigi icin k adim yeter -- 60 kat.
+        """
+        S = self.gez(w)[:, 1:]                       # (B,L,durum)
+        s = S[:, -1]
+        cikan = []
+        for _ in range(adim):
+            q = s @ self.Wq
+            pu = (S @ self.Wk) @ q.unsqueeze(-1)
+            pu = pu.squeeze(-1) + self.hb
+            ag = pu.softmax(-1) if self.pay else pu.clamp(min=0)
+            o = (ag.unsqueeze(-1) * (S @ self.Wv)).sum(1)
+            t = torch.cdist(o[:, None], self.E.expand(w.shape[0], -1, -1))
+            t = t.squeeze(1).argmin(-1)              # (B,)
+            cikan.append(t)
+            s = torch.bmm(self.M[t], s.unsqueeze(-1)).squeeze(-1) + self.b[t]
+            if self.norm:
+                s = F.normalize(s, dim=-1)
+            S = torch.cat([S, s[:, None]], 1)
+        return torch.stack(cikan, 1)
+
     def oku(self, o):
         """Sozluk uzayindaki noktaya en yakin token."""
         return int(torch.cdist(o.reshape(1, -1), self.E).argmin())
