@@ -143,8 +143,11 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
     not_(f"[{ad}] OLCUT: SONRAKI JETON dogrulugu.  sans {1 / N:.5f}")
     not_(f"[{ad}]   adim    kayip   egitim  dogrulama      sn")
 
-    t0, i = time.time(), bas_adim
-    for i in range(bas_adim, adim + 1):
+    # Yedek, o adimin opt.step()'i BITTIKTEN sonra yazilir.  Yani t<N>
+    # N adimi ICERIR ve surdurme N+1'den baslar; bas_adim'dan baslamak
+    # o adimi IKI KEZ atar ve yorunge kayar (surdurme kapisi 2,1e-03).
+    t0, i, kay = time.time(), bas_adim, None
+    for i in range(bas_adim + 1 if surdur else 0, adim + 1):
         if ad in DURDUR:
             not_(f"[{ad}] DURDURULDU  adim {i}")
             break
@@ -170,6 +173,10 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
             not_(f"[{ad}] {i:6d}  {bilgi['kayip']:7.3f}  {e:7.4f}  {d:9.4f}"
                  f"  {gecen:6.0f}{im}")
 
+    if kay is None:                       # bitmis kosudan surduruldu
+        with torch.no_grad():
+            kay = m.kayip(W[:yigin].to(aygit).long(),
+                          None if M is None else M[:yigin].to(aygit))
     e, d = olcut(m, "eg", tam=True), olcut(m, "dg", tam=True)
     bilgi = dict(ek or {}, n=N, adim=i, boyut=boyut, durum=durum, lr=lr,
                  wd=wd, tohum=tohum, yigin=yigin, T=T, parametre=par,
