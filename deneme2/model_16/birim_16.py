@@ -23,13 +23,12 @@ model_16'e OZGU iki sey var, ikisi de DENKLEM.md'den:
 Bu dosya DISARIYA HICBIR SEY IMPORT ETMEZ -- yalniz kol ici.
 
 ZINCIRDEKI YERI.  Kim kimi cagiriyor, bu dosya nerede:
-(model BIRIM goruyor -- karakter yalnizca ara adim ve kapi)
+(birim yolunda KARAKTER YOK -- jeton_16 yalniz karakter korpusunda)
 
   veri_16     graf: 1608 varlik, 24 iliski, olgular
   metin_16    graf -> duz Turkce cumle
-  korpus_16   cumle -> belge -> paketlenmis akis
-  jeton_16    KARAKTER sozlugu + GIDIS-DONUS KAPISI
-  birim_16    metin -> sayim -> kok havuzu -> BIRIM AKISI -> pencere   <-- BU DOSYA
+  korpus_16   cumle -> BELGE          (sayfalar / kimlik / reddetme)
+  birim_16    belge -> satir satir BIRIM AKISI + <belge> siniri   <-- BU DOSYA
   ek_16       kelime -> kok + ek    (Turkce morfolojisi)
 
   taban_16    bolmeler (ezber_* / cikarim_*) + Ayar tanimi
@@ -54,6 +53,13 @@ import taban_16 as MT
 import veri_16 as V
 
 
+BELGE_KELIME = 62     # TETIKLENMIS belge en cok kac KELIME.
+#   Eskiden 512 KARAKTER'di ve karakter yolu kalkinca anlamsiz kaldi.
+#   OLCULDU: 8,206 karakter/kelime, 1,788 birim/kelime -- yani
+#   512 karakter ~= 62 kelime ~= 112 birim.  Sayi ayni buyuklukte
+#   tutuldu ki korpus sessizce degismesin; DEGERIN KENDISI hala
+#   olculmedi, acik kalem (bir belge kac PENCEREYE sigsin?).
+
 SINIR = "<belge>"     # BELGE SINIRI -- sozlukte AYRI birim.
 #   Karakter yolunda <EOS> vardi ama birim cevriminde DUSUYORDU:
 #   metin_coz <EOS>'u chr(10) yapiyordu, `s.split()` onu BOSLUK sayip
@@ -74,8 +80,11 @@ def belgeler(ayar, v=None, yaz=print):
     if v is None:
         v = MT.veri_kur(ayar, yaz=yaz)
     G = V.kur(ayar.veri_tohum)
+    # KELIME sayilir, karakter DEGIL -- birim yolunda karakter yok.
+    # BELGE_KELIME'nin gerekcesi ve birim karsiligi ayar_16'da.
     bb, bs = KP.sayfalar(v, G, ayar.kopya, ayar.tohum, ayar.tetik,
-                         ayar.t_len, ayar.zincir_pay, ayar.n3, yaz)
+                         BELGE_KELIME, ayar.zincir_pay, ayar.n3, yaz,
+                         olc=lambda c: len(c.split()))
     kim = KP.kimlik_belgeleri(v, G, tohum=ayar.tohum, yaz=yaz)
     _ns = sum(len(b.cumle) for b in bs)
     red = KP.reddetme_belgeleri(

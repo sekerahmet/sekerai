@@ -158,8 +158,8 @@ def zincir_butcesi(ezber_olgu, ezber_zincir, yasak, kopya: int, zincir_pay: floa
 
 
 def sayfalar(v, G, kopya: int = 1, tohum: int = 0, tetik: int = 0,
-             t_len: int = 512, zincir_pay: float = 0.0, n3: int = 0,
-             yaz=print):
+             belge_uz: int = 512, zincir_pay: float = 0.0, n3: int = 0,
+             yaz=print, olc=len):
     """HER VARLIGIN kendi sayfasi. model_09'da yalniz OLGU SAHIBI vardi.
 
     model_09 OLCTU: kisi 10 olguda anlatiliyor, universite 3, tez 2,
@@ -294,21 +294,26 @@ def sayfalar(v, G, kopya: int = 1, tohum: int = 0, tetik: int = 0,
             if k >= tetik:
                 bil.append(Belge(e, [_tc] + d, olgu))
                 continue
-            # TETIKLENMIS: onek + olgular, t_len'e SIGACAK parcalar.
+            # TETIKLENMIS: onek + olgular, `belge_uz`e SIGACAK parcalar.
             # Sigmayan sayfa ATILMAZ, IKI CEVABA bolunur -- gercek bir
-            # cevap da her zaman eksiksiz degildir.
+            # cevap da her zaman eksiksiz degildir.  Her parca ONEGI
+            # TEKRAR ALIR, yani her biri kendi basina okunabilir.
+            #
+            # `olc` NE SAYILDIGINI disaridan alir.  Karakter korpusu
+            # `len` (karakter) verir; BIRIM akisi kelime sayar --
+            # karakter o yolda hic gecmiyor.
             onek = MT.biyografi_sorusu(E[e])
-            assert len(onek) + 1 + len(_tc) + 1 + max(
-                len(c) for c in d) <= t_len, E[e]
-            kur, n, olg = [onek, _tc], len(onek) + 1 + len(_tc), set()
+            _o, _t = olc(onek), olc(_tc)
+            assert _o + 1 + _t + 1 + max(olc(c) for c in d) <= belge_uz, E[e]
+            kur, n, olg = [onek, _tc], _o + 1 + _t, set()
             for j, i in enumerate(sira):
                 c = d[j]
-                if n + 1 + len(c) > t_len:
+                if n + 1 + olc(c) > belge_uz:
                     bil.append(Belge(e, kur, olg, butun=True))
                     n_parca += 1
-                    kur, n, olg = [onek], len(onek), set()
+                    kur, n, olg = [onek], _o, set()
                 kur.append(c)
-                n += 1 + len(c)
+                n += 1 + olc(c)
                 olg.add((sat[i][0], sat[i][1]))
             bil.append(Belge(e, kur, olg, butun=True))
             n_tet += 1
@@ -792,7 +797,8 @@ def havuz(v, G, kopya: int = 5, t_len: int = 512, tohum: int = 0,
     # SAYFALARIN ICINE serpiliyor (`zincir_pay`). Ayri akista paketlense
     # model arka arkaya sekiz tane iki-uc katli tamlama okurdu; gercek
     # metinde zincir BASIT cumlelerin ARASINDA gecer.
-    bb, bs = sayfalar(v, G, kopya, tohum, tetik, t_len, zincir_pay, n3, yaz)
+    bb, bs = sayfalar(v, G, kopya, tohum, tetik, t_len, zincir_pay, n3,
+                      yaz)          # olc=len -> KARAKTER (bu yol karakter)
     kim = kimlik_belgeleri(v, G, tohum=tohum, yaz=yaz)
     # REDDETME: soru cumlelerinin ~ret_pay'i. SECILDI, turetilmedi.
     _ns = sum(len(b.cumle) for b in bs)
