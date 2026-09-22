@@ -112,11 +112,10 @@ def _koru(kok, ad):
 
 def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
          lr, wd, adim, tohum, yigin, bas, yedek, surdur, t_len, atla,
-         okuma, agirlik):
+         agirlik):
     not_ = GUNLUK.append
     torch.manual_seed(tohum)
-    m = Yol(ek["n"], boyut=boyut, durum=durum, tohum=tohum,
-            okuma=okuma).to(aygit)
+    m = Yol(ek["n"], boyut=boyut, durum=durum, tohum=tohum).to(aygit)
     opt = torch.optim.Adam(m.parameters(), lr=lr, weight_decay=wd)
     uret = torch.Generator(device="cpu").manual_seed(tohum)
     bas_adim = 0
@@ -195,7 +194,7 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
 def baslat(ad, X, PAD, n, *, olcut, aygit="cuda", kok=None, ek=None,
            boyut=BOYUT, durum=DURUM, lr=LR, wd=WD,
            adim=20000, tohum=0, yigin=YIGIN, bas=200, yedek=1000,
-           surdur=None, t_len=None, atla=1, okuma=None, agirlik=None):
+           surdur=None, t_len=None, atla=1, agirlik=None):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
     X       (N,T) PENCERE TABLOSU ya da (N,) tek uzun AKIS.  Akis
@@ -220,7 +219,7 @@ def baslat(ad, X, PAD, n, *, olcut, aygit="cuda", kok=None, ek=None,
         target=_kos, daemon=True,
         args=(ad, X, PAD, olcut, aygit, kok, dict(ek or {}, n=n),
               boyut, durum, lr, wd, adim, tohum, yigin, bas, yedek,
-              surdur, t_len, atla, okuma, agirlik)).start()
+              surdur, t_len, atla, agirlik)).start()
     return f"{ad} basladi" + (f"  ({os.path.basename(surdur)}'den)" if surdur else "")
 
 

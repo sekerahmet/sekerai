@@ -6,8 +6,8 @@
             nedensel maske gelecegi kapatir
   agirlik   relu(puan + hb) -- softmax DEGIL.  1'e toplanmak zorunda
             olsaydi cikti hep ORTALAMA olurdu, TOPLAM tasinamazdi.
-  puan      cikti noktasi -> sozluk puani.  TEK okuma noktasi; mesafe ya
-            da nokta carpimi (OKUMA).
+  puan      cikti noktasi -> sozluk puani.  TEK okuma noktasi:
+            en yakin E[token].
   kayip     sonraki jeton, her konumda; `ag` ile konum agirlikli
 
 OLCUMLER BU DOSYADA DEGIL -> `belge/onkayit/model_16.md`.
@@ -53,19 +53,17 @@ NORM = True          # |s| = 1
 PAY = False          # False -> relu dikkat   True -> softmax
 LR = 0.002
 WD = 0.01
-OKUMA = "mesafe"     # "mesafe" -> -||o - E_c||^2    "carpim" -> o . E_c
 
 
 class Yol(nn.Module):
     def __init__(self, n, boyut=BOYUT, durum=DURUM, tohum=0,
-                 norm=NORM, pay=PAY, okuma=None):
+                 norm=NORM, pay=PAY):
         """Ayarlar dosyanin basinda -- ayri bir ayar dosyasi YOK."""
         super().__init__()
         g = torch.Generator().manual_seed(tohum)
         r = lambda *s: torch.randn(*s, generator=g)
         self.boyut, self.durum = boyut, durum
         self.norm, self.pay = norm, pay
-        self.okuma = okuma or OKUMA      # None -> modul ayari
 
         self.E = nn.Parameter(r(n, boyut))                  # sozluk: token -> konum
         self.b = nn.Parameter(r(n, durum) / durum ** 0.5)   # token -> duruma giris
@@ -101,8 +99,6 @@ class Yol(nn.Module):
 
         Tek yerde durmasi sart: dizi/uret_dizi/oku ucu de bunu cagirir,
         yoksa egitim bir kuralla, uretim baskasiyla calisir."""
-        if self.okuma == "carpim":
-            return O @ self.E.T
         E = self.E.expand(O.shape[0], -1, -1) if O.dim() == 3 else self.E
         return -torch.cdist(O, E) ** 2
 
