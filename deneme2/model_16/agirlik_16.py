@@ -4,16 +4,17 @@ Kullanici, 22 Eylul: *"ilk cevap token u dogru mu, sonra ilk ve ikinci bir
 arada dogru mu, sonra ilk ikinci ve ucuncu dogru mu diye her sirada tum
 cevaba kadar kontrol etmek"*.
 
-Bu amac kapali bicimde yazilir.  L uzunlugunda bir cevap icin:
+Bu, kaybi AGIRLIKLANDIRARAK da yazilabilirdi (agirliklar L..1) ve
+once oyle yazildi; olculdu, kaldirildi.  Bugunku bicim bir KAPI:
 
-    amac = toplam_{k=1..L} log p(ilk k token TAMAMEN dogru)
-         = toplam_{k=1..L} toplam_{i<=k} log p_i        (zincir kurali)
-         = toplam_{i=1..L} (L - i + 1) * log p_i
+    konum k puanlanir  <=>  0..k-1'in HEPSI dogru bilindi
 
-Yani MEVCUT kaybin konum agirlikli hali; agirliklar L, L-1, ..., 1.
-Ilk token L kat agir -- tikanan token tam o.  Ve ogretmen zorlamasiyla
-hesaplanan bu carpim, modelin o diziyi SERBEST URETIMDE uretme
-olasiliginin ta kendisidir; uretim gerekmez, tek ileri gecis yeter.
+Kullanici, ayni gun: *"yuva 8 dogru cevabi almadiysa yuva 9 soru sorma
+hakki yok."*  Gerekce: sinav cevabin TAMAMINA bakiyor; onek bozulduysa
+soru sifir aliyor ve devaminin dogru olmasi hicbir sey kazandirmiyor.
+
+Bu modul kapinin GIRDISINI uretir: konum basina aralik ici sira.
+Kapinin kendisi `model_16._kapi`.
 
 CEVAP ARALIGI NEREDEN GELIYOR.  Akis duz bir birim dizisi; kayip
 cevabin nerede oldugunu bilmiyor.  Boru hattini degistirmek yerine
@@ -29,7 +30,8 @@ cumlelerini `bir tez -dir` yanlislikla isaretliyordu).
 KAPI: `denetle` isaretlerin gercekten olgu cevabi oldugunu ornekle
 sinar ve kapsamı basar.
 
-ZINCIRDEKI YERI:  birim_16 (akis) -> agirlik_16 (agirlik dizisi) -> train_16
+ZINCIRDEKI YERI:  birim_16 (akis) -> agirlik_16 (ofset dizisi) -> train_16
+                  -> model_16._kapi
 """
 import collections
 import os
