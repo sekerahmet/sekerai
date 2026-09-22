@@ -112,7 +112,7 @@ def _koru(kok, ad):
 
 def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
          lr, wd, adim, tohum, yigin, bas, yedek, surdur, t_len, atla,
-         agirlik, ofset):
+         ofset):
     not_ = GUNLUK.append
     torch.manual_seed(tohum)
     m = Yol(ek["n"], boyut=boyut, durum=durum, tohum=tohum).to(aygit)
@@ -138,17 +138,12 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
         import numpy as np
         P = np.lib.stride_tricks.sliding_window_view(X.numpy(), t_len)
         X = torch.from_numpy(P[::atla])
-        if agirlik is not None:
-            # Agirlik AKISLA ayni uzunlukta; pencereler AYNI gorunumle
-            # aciliyor ki konumlar birebir ortussun.
-            AG = np.lib.stride_tricks.sliding_window_view(agirlik, t_len)
-            agirlik = torch.from_numpy(AG[::atla])   # GORUNUM, kopya yok
-            not_(f"[{ad}] AGIRLIK acik: ortalama {float(agirlik.mean()):.3f}"
-                 f"   en buyuk {float(agirlik.max()):.0f}")
         if ofset is not None:
+            # ofset AKISLA ayni uzunlukta; pencereler X ile AYNI
+            # gorunumle aciliyor ki konumlar birebir ortussun.
             OF = np.lib.stride_tricks.sliding_window_view(ofset, t_len)
             ofset = torch.from_numpy(OF[::atla])   # GORUNUM, kopya yok
-            not_(f"[{ad}] S2 KAPISI acik: cevap araligi basi "
+            not_(f"[{ad}] CEVAP KAPISI acik: aralik basi "
                  f"{int((ofset[:, 0] == 0).sum()):,} pencerede")
         not_(f"[{ad}] akis {len(P) + t_len - 1:,} -> pencere {X.shape}"
              f"  (t_len {t_len}, atla {atla}, GORUNUM)")
@@ -166,7 +161,6 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
             break
         j = torch.randint(0, N, (yigin,), generator=uret)
         k = m.kayip(X[j].to(aygit).long(), PAD,
-                    None if agirlik is None else agirlik[j].to(aygit),
                     None if ofset is None else ofset[j].to(aygit).long())
         opt.zero_grad(); k.backward(); opt.step()
 
@@ -200,7 +194,7 @@ def _kos(ad, X, PAD, olcut, aygit, kok, ek, boyut, durum,
 def baslat(ad, X, PAD, n, *, olcut, aygit="cuda", kok=None, ek=None,
            boyut=BOYUT, durum=DURUM, lr=LR, wd=WD,
            adim=20000, tohum=0, yigin=YIGIN, bas=200, yedek=1000,
-           surdur=None, t_len=None, atla=1, agirlik=None, ofset=None):
+           surdur=None, t_len=None, atla=1, ofset=None):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
     X       (N,T) PENCERE TABLOSU ya da (N,) tek uzun AKIS.  Akis
@@ -225,7 +219,7 @@ def baslat(ad, X, PAD, n, *, olcut, aygit="cuda", kok=None, ek=None,
         target=_kos, daemon=True,
         args=(ad, X, PAD, olcut, aygit, kok, dict(ek or {}, n=n),
               boyut, durum, lr, wd, adim, tohum, yigin, bas, yedek,
-              surdur, t_len, atla, agirlik, ofset)).start()
+              surdur, t_len, atla, ofset)).start()
     return f"{ad} basladi" + (f"  ({os.path.basename(surdur)}'den)" if surdur else "")
 
 

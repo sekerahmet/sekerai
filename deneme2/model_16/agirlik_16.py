@@ -1,4 +1,4 @@
-"""agirlik_16 -- S1: ONEK AGIRLIKLI KAYIP.
+"""agirlik_16 -- CEVAP ARALIKLARI.
 
 Kullanici, 22 Eylul: *"ilk cevap token u dogru mu, sonra ilk ve ikinci bir
 arada dogru mu, sonra ilk ikinci ve ucuncu dogru mu diye her sirada tum
@@ -84,23 +84,6 @@ def isaretle(d, yaz=print):
     yaz(f"CEVAP araligi {len(bas):,}   akisin %{100*uz.sum()/len(dz):.2f}'i"
         f"   uzunluklar {dict(sorted(collections.Counter(uz.tolist()).items()))}")
     return bas, uz
-
-
-def agirlik(d, bicim="onek", taban=1.0, yaz=print):
-    """Konum basina agirlik dizisi (akisla AYNI uzunlukta, float32).
-
-    bicim "onek"  -> cevabin i. tokeni L-i+1 agirlik alir  (S1)
-    bicim "duz"   -> butun cevap tokenleri 1 (bugunku hal; kontrol icin)
-    `taban` cevap DISI konumlarin agirligi."""
-    dz = d["dizi"].numpy()
-    w = np.full(len(dz), taban, np.float32)
-    bas, uz = isaretle(d, yaz)
-    for b, L in zip(bas.tolist(), uz.tolist()):
-        w[b:b + L] = np.arange(L, 0, -1, dtype=np.float32) if bicim == "onek" \
-            else 1.0
-    yaz(f"agirlik: ortalama {w.mean():.3f}   en buyuk {w.max():.0f}"
-        f"   cevap disi {taban}")
-    return w
 
 
 def ofset(d, yaz=print):

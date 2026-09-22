@@ -8,7 +8,7 @@
             olsaydi cikti hep ORTALAMA olurdu, TOPLAM tasinamazdi.
   puan      cikti noktasi -> sozluk puani.  TEK okuma noktasi:
             en yakin E[token].
-  kayip     sonraki jeton, her konumda; `ag` ile konum agirlikli
+  kayip     sonraki jeton, her konumda; `ofs` ile CEVAP KAPISI
 
 OLCUMLER BU DOSYADA DEGIL -> `belge/onkayit/model_16.md`.
 (CLAUDE.md kural 7: tarihsel kayit belgede durur, kaynak kodda ikinci
@@ -27,7 +27,7 @@ ZINCIRDEKI YERI.  Kim kimi cagiriyor, bu dosya nerede:
   taban_16    bolmeler (ezber_* / cikarim_*) + Ayar tanimi
   ayar_16     dugmeler
   hazirla_16  veriyi dosyaya yazar, Colab Drive'dan OKUR
-  agirlik_16  cevap araliklari -> konum agirliklari
+  agirlik_16  cevap araliklari -> aralik ici sira (kapinin girdisi)
   dok_16      goz ile okunur dokum
   denetim_16  KAPILAR
 
@@ -172,7 +172,7 @@ class Yol(nn.Module):
         #   yayilimla yazilsaydi B=64'te bile 1 GB olurdu.
         return self.puan(O)
 
-    def kayip(self, w, PAD=None, ag=None, ofs=None):
+    def kayip(self, w, PAD=None, ofs=None):
         """SONRAKI JETON, her konumda.  w (B,T) -> SKALER kayip.
 
         Konum j, j+1'i tahmin eder; son konumun hedefi yok.
@@ -180,27 +180,23 @@ class Yol(nn.Module):
         PAD  bicime bagli, zorunlu degil.  Paketlenmis pencerelerde dolgu
              sayilsaydi gradyanin bir kismi 'dolgu tahmin et' ogretirdi;
              kesintisiz akista dolgu YOK ve PAD=None verilir.
-        ag   (B,T) konum agirliklari.  None -> hepsi 1.  Agirlik kurulumu
-             ve gerekcesi: `agirlik_16`.
         ofs  (B,T) cevap araligi ici sira (0 = ilk token, 1+ = devam,
-             -1 = disari).  Verilirse S2 KAPISI acilir: bir araligin
-             ILK tokeni yanlis bilindiyse o araligin devami
-             PUANLANMAZ.  Sinav cevabin tamamina bakiyor; konum 0
-             yanlissa devamin dogrulugu sifir kazandiriyor.
-             Kapi argmax ile kuruluyor -- turevi yok, gradyan yalniz
-             agirlikli cross-entropy'den akar.  Ek ileri gecis YOK.
+             -1 = disari).  None -> butun konumlar esit (duz kayip).
+             Verilirse CEVAP KAPISI acilir: bir araligin ILK tokeni
+             yanlis bilindiyse o araligin devami PUANLANMAZ.  Sinav
+             cevabin TAMAMINA bakiyor; konum 0 yanlissa devamin
+             dogrulugu sifir kazandiriyor.  Kapi argmax ile kuruluyor
+             -- turevi yok, gradyan yalniz cross-entropy'den akar,
+             ek ileri gecis YOK.  Aralik kurulumu: `agirlik_16`.
         """
         puan = self.dizi(w)                       # (B,T,n)
         ek = {} if PAD is None else {'ignore_index': PAD}
-        if ag is None:
+        if ofs is None:
             return F.cross_entropy(puan[:, :-1].reshape(-1, puan.shape[-1]),
                                    w[:, 1:].reshape(-1), **ek)
         k = F.cross_entropy(puan[:, :-1].reshape(-1, puan.shape[-1]),
                             w[:, 1:].reshape(-1), reduction="none", **ek)
-        a = ag[:, 1:]
-        if ofs is not None:
-            a = a * self._kapi(puan, w, ofs)
-        a = a.reshape(-1)
+        a = self._kapi(puan, w, ofs).reshape(-1)
         return (k * a).sum() / a.sum()
 
     @staticmethod
