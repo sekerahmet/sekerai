@@ -87,23 +87,41 @@ def yukle(yol):
     return m, k
 
 
-def sozluk(k):
+def sozluk(k, m):
     """Sozluk KAYITTAN degil, ONBELLEKTEN -- kayit yalniz boyutu tasiyor.
-    Iz tutmazsa DURUR: yanlis sozlukle uretilen metin sessizce sacmalar."""
-    for d in TS:
-        p = os.path.join(d, "onbellek")
-        if not os.path.isdir(p):
-            continue
-        for f in sorted(os.listdir(p)):
-            if f.startswith("sozluk_"):
-                import numpy as np
-                ad = list(np.load(os.path.join(p, f), allow_pickle=True))
-                if len(ad) == k["n"]:
-                    return ad, f
-    print("SOZLUK BULUNAMADI (%d birim).  Aranan: <tinystories>\\onbellek\\"
-          "sozluk_*.npy" % k["n"])
-    sys.exit(1)
 
+    Uzunluk YETMEZ: 64mb ve tam sozluklerinin ikisi de 4.003 birim ama
+    4.003 konumun 3.784'u farkli kelime (olculdu).  O yuzden MODELE
+    SORULUR -- her adayin kendi dogrulama akisindan bir pencere alinip
+    kayip hesaplanir; dogru sozluk belirgin dusuk cikar."""
+    import numpy as np
+    aday = []
+    for d in TS:
+        ob = os.path.join(d, "onbellek")
+        if not os.path.isdir(ob):
+            continue
+        for f in sorted(os.listdir(ob)):
+            if not f.startswith("sozluk_"):
+                continue
+            ad = list(np.load(os.path.join(ob, f), allow_pickle=True))
+            if len(ad) != k["n"]:
+                continue
+            av = os.path.join(ob, f.replace("sozluk_", "akis_valid_"))
+            if not os.path.exists(av):
+                continue
+            a_ = np.asarray(np.load(av, mmap_mode="r")[:16 * 256], "int64")
+            with torch.no_grad():
+                kay = float(m.kayip(torch.from_numpy(a_.reshape(16, 256))))
+            aday.append((kay, f, ad))
+    if not aday:
+        print("SOZLUK BULUNAMADI (%d birim)." % k["n"])
+        sys.exit(1)
+    aday.sort()
+    if len(aday) > 1:
+        print("sozluk adaylari (kayip -- KUCUK olan secilir):")
+        for kay, f, _ in aday:
+            print("   %8.4f  %s" % (kay, f))
+    return aday[0][2], aday[0][1]
 
 def istemler():
     """Makalenin 44 degerlendirme istemi -- varsa."""
@@ -126,7 +144,7 @@ def yaz(baslik, metin, g=70):
 def main():
     yol = bul(sys.argv[1] if len(sys.argv) > 1 else None)
     m, k = yukle(yol)
-    AD, sz = sozluk(k)
+    AD, sz = sozluk(k, m)
     IX = {a: i for i, a in enumerate(AD)}
     IST = istemler()
 
