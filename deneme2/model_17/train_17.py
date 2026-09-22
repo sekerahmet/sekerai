@@ -79,13 +79,28 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
     torch.manual_seed(tohum)
     m = Yol(N, boyut=boyut, durum=durum, tohum=tohum).to(aygit)
 
-    # torch.compile.  model_11'de OLCULDU: 41,3 ms/adim yerine 75,7 --
-    # 1,83 kat, ve yorunge AYRISMADI (bpc@4000: 0,246 / 0,247).
-    # BURADA AYNI CIKACAGI GARANTI DEGIL: model_11 katmanli bir mimariydi,
-    # bizim sicak nokta gez()'in T kez donen PYTHON dongusu.  Derleyici
-    # 256 yinelemeyi grafa acmak zorunda -- ya baslatma maliyeti coger
-    # (daha fazla kazanc) ya derleme dakikalar surer.  OLCULMEDEN acik
-    # birakilmaz; kapi olarak varsayilan KAPALI.
+    # torch.compile.  BURADA OLCULDU, 22 Eylul, L4
+    # (T=256, yigin 512, sozluk 4002, boyut=durum=32, 5 isinma + 500 adim):
+    #
+    #                 sn/adim    kayip@100  @200    @300    @400    @500
+    #   derlemesiz      0,557     8,6488  6,0457  5,2187  4,8805  4,6358
+    #   DERLEMELI       0,143     8,6488  6,0457  5,2187  4,8805  4,6358
+    #                   3,90x     BES OLCUMUN BESI DE BIREBIR AYNI
+    #
+    #   derleme maliyeti 466,8 sn (7,8 dk).  Adim basina tasarruf 0,415 sn
+    #   -> BASABAS 1.125 ADIM.  Kisa kosuda ZARARLI:
+    #        500 adim   derlemesiz 279 sn   DERLEMELI 538 sn
+    #      2.000 adim            1.114 sn              751 sn
+    #      8.400 adim            4.679 sn            1.660 sn   (tam korpus 1 epok)
+    #
+    # model_11'de 1,83 kat cikmisti; burada daha buyuk cunku darbogaz tam
+    # olarak derlemenin cozdugu sey -- gez()'in T kez donen dongusunde
+    # cok sayida KUCUK cekirdek baslatma.
+    #
+    # KALICI OLSUN DIYE BURAYA YAZILDI.  model_10/11/12'de olculup
+    # model_13'ten sonra dusmustu: her kol kodunu ebeveyninden kopyaliyor
+    # ve model_15 sifirdan yazildi.  Olculmus kazanc, olculmemis
+    # varsayimlarla birlikte gitmisti.
     egit = m.kayip
     if derle:
         egit = torch.compile(m.kayip)
