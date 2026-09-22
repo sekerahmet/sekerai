@@ -18,14 +18,29 @@ from __future__ import annotations
 import torch
 
 
-def tahmin(m, w, parca: int = 4096, maske=None):
-    """w (n, T) -> (n,) tahmin edilen etiket.  maske: dolgu yuvalari."""
+def etiketler(*kumeler) -> list:
+    """Hedef olarak GECEN birimler -- cevap uzayi.  Veriden cikar."""
+    return sorted(set(int(x) for O in kumeler for v in O.values()
+                      for x in v[1]))
+
+
+def tahmin(m, w, parca: int = 4096, maske=None, etiket=None):
+    """w (n, T) -> (n,) tahmin edilen etiket.  maske: dolgu yuvalari.
+
+    etiket verilirse okuma YALNIZ o birimler uzerinde.  Verilmezse butun
+    sozluk -- C'de olculdu: sinav cevaplarinin %42,6'si etiket bile
+    degildi ("necklace", "exactly"), sinav 0,0454 yerine 0,0829'du.
+    A (sozluk 21) ve B2 (41) etkilenmiyor: %0,0 ve %0,8."""
+    ET = None if etiket is None else torch.as_tensor(etiket,
+                                                     device=m.E.device)
     cik = []
     with torch.no_grad():
+        E = m.E if ET is None else m.E[ET]
         for i in range(0, w.shape[0], parca):
             mm = None if maske is None else maske[i:i + parca]
             o, _ = m.dikkat(w[i:i + parca], mm)
-            cik.append(torch.cdist(o, m.E).argmin(-1))
+            j = torch.cdist(o, E).argmin(-1)
+            cik.append(j if ET is None else ET[j])
     return torch.cat(cik)
 
 
@@ -35,17 +50,17 @@ def _ac(v, aygit):
     return v[0].to(aygit), v[1].to(aygit), mk
 
 
-def oran(m, O, aygit="cuda", parca=4096) -> dict:
+def oran(m, O, aygit="cuda", parca=4096, etiket=None) -> dict:
     """{k: (dogru, toplam)} -- obek obek."""
     d = {}
     for k, v in O.items():
         w, h, mk = _ac(v, aygit)
-        t = tahmin(m, w, parca, mk)
+        t = tahmin(m, w, parca, mk, etiket)
         d[k] = (int((t == h).sum()), int(w.shape[0]))
     return d
 
 
-def olcut(EG, DG, SI, aygit="cuda", en=None):
+def olcut(EG, DG, SI, aygit="cuda", en=None, etiket=None):
     """train_17'nin bekledigi bicim:  olcut(m, "eg"|"dg"|"si") -> oran.
 
     `en` verilirse her obekten en fazla o kadar ornek -- egitim
@@ -56,7 +71,7 @@ def olcut(EG, DG, SI, aygit="cuda", en=None):
         O = kume[taraf]
         if en and not tam:
             O = {k: tuple(t[:en] for t in v) for k, v in O.items()}
-        d = oran(m, O, aygit)
+        d = oran(m, O, aygit, etiket=etiket)
         dg = sum(a for a, _ in d.values())
         tp = sum(b for _, b in d.values())
         return dg / max(tp, 1)
@@ -64,9 +79,9 @@ def olcut(EG, DG, SI, aygit="cuda", en=None):
     return f
 
 
-def tablo(m, O, aygit="cuda", yaz=print, gorulen=(2, 3)):
+def tablo(m, O, aygit="cuda", yaz=print, gorulen=(2, 3), etiket=None):
     """k'ya gore doguruluk tablosu -- HUKUM BURADAN OKUNUR."""
-    d = oran(m, O, aygit)
+    d = oran(m, O, aygit, etiket=etiket)
     yaz(f"{'k':>4} {'dogru':>7} {'toplam':>7} {'oran':>7}   durum")
     yaz("-" * 46)
     for k in sorted(d):

@@ -81,10 +81,19 @@ def _koru(kok, ad):
 
 
 def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
-         lr, wd, adim, tohum, yigin, bas, yedek, surdur):
+         lr, wd, adim, tohum, yigin, bas, yedek, surdur, etiket):
     not_ = GUNLUK.append
     torch.manual_seed(tohum)
     m = Yol(N, boyut=boyut, durum=durum, tohum=tohum).to(aygit)
+
+    # CEVAP UZAYI.  etiket verilmezse kayip BUTUN sozluk uzerinde ve
+    # cevap olamayacak birimlerden uzaklasmak gradyani seyreltiyor.
+    # C'de olculdu: 2.890 sinifin 2.872'si asla cevap degil.
+    ET = None if etiket is None else torch.as_tensor(etiket, device=aygit)
+    YER = None
+    if ET is not None:
+        YER = torch.full((N,), -1, dtype=torch.long, device=aygit)
+        YER[ET] = torch.arange(len(ET), device=aygit)
     dec = [p for p in m.parameters() if p.dim() >= 2]
     nodec = [p for p in m.parameters() if p.dim() < 2]
     opt = torch.optim.AdamW([{"params": dec, "weight_decay": wd},
@@ -117,8 +126,9 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
          f"({min(CEK)}..{max(CEK)})   en kucuk obek {min(n)} ornek")
     not_(f"[{ad}] boyut {boyut} durum {durum} lr {lr} wd {wd} tohum {tohum}"
          f"  sozluk {N}  parametre {par}")
+    _c = N if ET is None else len(ET)
     not_(f"[{ad}] TEK OLCUT: zincir verildi, bilesik iliski DOGRU MU."
-         f"  sans {1/18:.4f}")
+         f"  cevap uzayi {_c}  sans {1/_c:.4f}")
     not_(f"[{ad}]   adim    kayip   egitim  dogrulama  sinav      sn")
 
     t0, i = time.time(), bas_adim
@@ -131,8 +141,9 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
         for b, (k, w, h, mk) in enumerate(OB):
             j = torch.randint(0, w.shape[0], (CEK[b],), generator=uret)
             o, _ = m.dikkat(w[j], None if mk is None else mk[j])
-            puan = -torch.cdist(o, m.E) ** 2
-            kay = F.cross_entropy(puan, h[j], reduction="sum") / sum(CEK)
+            puan = -torch.cdist(o, m.E if ET is None else m.E[ET]) ** 2
+            hh = h[j] if YER is None else YER[h[j]]
+            kay = F.cross_entropy(puan, hh, reduction="sum") / sum(CEK)
             kay.backward()
             top += float(kay.detach())
         opt.step()
@@ -165,13 +176,15 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
 def baslat(ad, EG, N, *, olcut=_olcut_yok, aygit="cuda", kok=None, ek=None,
            boyut=BOYUT, durum=DURUM, lr=LR, wd=WD,
            adim=20000, tohum=0, yigin=YIGIN, bas=200, yedek=1000,
-           surdur=None):
+           surdur=None, etiket=None):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
     EG      {k: (w, h)}  --  w (n, k+1) girdi, h (n,) hedef
     olcut   olcut(m, "eg"|"dg"|"si", tam=False) -> oran
     surdur  bir anlik goruntu yolu verilirse KALDIGI YERDEN devam eder
             (agirlik + optimizer + RNG).  Kural 1: uzatma SURDURMEDIR.
+    etiket  cevap uzayini bu birimlerle SINIRLAR (olcme_17.etiketler).
+            Verilmezse butun sozluk -- kucuk sozlukte zararsiz, C'de degil.
     """
     if kok is None:
         GUNLUK.append(f"[{ad}] UYARI: kok YOK, agirlik KAYDEDILMIYOR")
@@ -184,7 +197,7 @@ def baslat(ad, EG, N, *, olcut=_olcut_yok, aygit="cuda", kok=None, ek=None,
     threading.Thread(
         target=_kos, daemon=True,
         args=(ad, EG, N, olcut, aygit, kok, ek, boyut, durum, lr, wd,
-              adim, tohum, yigin, bas, yedek, surdur)).start()
+              adim, tohum, yigin, bas, yedek, surdur, etiket)).start()
     return f"{ad} basladi" + (f"  ({os.path.basename(surdur)}'den)"
                               if surdur else "")
 

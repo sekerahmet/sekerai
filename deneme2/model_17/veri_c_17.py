@@ -100,13 +100,20 @@ def obekler(bolme, ix, gorev=GOREV, tohum=TOHUM, basamak=BASAMAK):
     return cik
 
 
-def kur(gorev=GOREV, yaz=print, tohum=TOHUM):
-    """CLUTRR -> (ad, ix, EG, DG, SI).  Tek cagri."""
+def kur(gorev=GOREV, yaz=print, tohum=TOHUM, basamak=BASAMAK):
+    """CLUTRR -> (ad, ix, EG, DG, SI).  Tek cagri.
+
+    basamak buyurse obek sayisi duser.  OLCULDU:
+        16   9 obek,  sirali derinlik 720,  dolgu %17,4
+       144   1 obek,  sirali derinlik 144,  dolgu %75,2
+    Sirali derinlik adim suresini belirliyor: gez dongusu birbirine bagli,
+    GPU paralellestiremiyor.  Dolgunun FLOP israfi bunun yaninda kucuk
+    (model_16'da olculmustu: 27 kucuk gecis -> 1 buyuk gecis, 4,2 kat)."""
     indir(gorev, yaz)
     ad, ix = sozluk(gorev, tohum)
-    EG = obekler("train", ix, gorev, tohum)
-    DG = obekler("validation", ix, gorev, tohum)
-    SI = obekler("test", ix, gorev, tohum)
+    EG = obekler("train", ix, gorev, tohum, basamak)
+    DG = obekler("validation", ix, gorev, tohum, basamak)
+    SI = obekler("test", ix, gorev, tohum, basamak)
     for et, O in (("egitim", EG), ("dogrulama", DG), ("sinav", SI)):
         n = sum(w.shape[0] for w, _, _ in O.values())
         dol = sum(int((~m).sum()) for _, _, m in O.values())
