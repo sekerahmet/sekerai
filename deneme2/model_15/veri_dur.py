@@ -96,7 +96,7 @@ def bol(tohum=0):
     return eg, tu
 
 
-def sor(m, ciftler, aygit="cuda", en=20000, parca=20000):
+def sor(m, ciftler, aygit="cuda", en=20000, parca=20000, ayrinti=False):
     """TEK ANALIZ: soruyu sor, cevabi al, DOGRU MU.
 
     Kullanici, 22 Eylul: "yuva 1 hic bir zaman olcu olmadi, o bir analizdi.
@@ -107,6 +107,10 @@ def sor(m, ciftler, aygit="cuda", en=20000, parca=20000):
       erken durmak     YANLIS
       fazla rakam      YANLIS
       rakam yanlis     YANLIS
+
+    ayrinti=True ise (SAYI, UZUNLUK) doner.  UZUNLUK = rakamlar dogru olsun
+    ya da olmasin, DOGRU YERDE durdu mu.  Ikisi birlikte "nerede duracagini
+    biliyor ama rakamlari bilmiyor" ile "ikisini de bilmiyor"u ayirir.
     """
     # ALT KUME RASTGELE.  bol() ciftleri cevap uzunluguna gore SIRALI
     # dondurdugu icin ilk N'i almak temsili DEGILDI: egitim tarafinin ilk
@@ -123,7 +127,7 @@ def sor(m, ciftler, aygit="cuda", en=20000, parca=20000):
         kova.setdefault(len(q), []).append((q, rak(a + b)))
 
     K = max(len(rak(a + b)) for a, b in ciftler) + 1
-    dog = say = 0
+    dog = uzn = say = 0
     with torch.no_grad():
         for kalem in kova.values():
             for i in range(0, len(kalem), parca):
@@ -150,19 +154,21 @@ def sor(m, ciftler, aygit="cuda", en=20000, parca=20000):
                 p = torch.arange(K, device=aygit)
                 gec = p[None] < U[:, None]                   # rakam olan yerler
                 dog += int((((C == T) | ~gec).all(1) & (ilk == U)).sum())
+                uzn += int((ilk == U).sum())
                 say += B
-    return dog / say
+    return (dog / say, uzn / say) if ayrinti else dog / say
 
 
 def kirilim(m, ciftler, aygit="cuda", en=10**9):
-    """SONUC istatistigi: SAYI, cevabin hane sayisina gore ayri ayri.
+    """SONUC istatistigi, cevabin hane sayisina gore: {hane: (SAYI, UZUNLUK, n)}
 
     Yuva/basamak kirilimi DEGIL -- yine "cevap dogru mu", sadece hangi
-    uzunluktaki sorularda dogru oldugunu gosteriyor."""
+    uzunluktaki sorularda dogru oldugunu gosteriyor.  UZUNLUK ayrica
+    "nerede duracagini biliyor mu"yu rakamlardan bagimsiz olcer."""
     g = {}
     for a, b in ciftler[:en]:
         g.setdefault(hane(a + b), []).append((a, b))
-    return {h: (sor(m, c, aygit=aygit, en=10**9), len(c))
+    return {h: (*sor(m, c, aygit=aygit, en=10**9, ayrinti=True), len(c))
             for h, c in sorted(g.items())}
 
 
