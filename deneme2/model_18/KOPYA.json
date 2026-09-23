@@ -6,10 +6,10 @@
     "train_18.py": "train.py olarak TASINDI; Yol/DT dallari, bos_kimligi ve hikaye alanlari cikti, PV kuruldu, kayip m.loss ile.",
     "test_18.py": "tests.py olarak yeniden yazildi; PV kapilari yeni, surdurme/durdur/matematik/defter kapilari ebeveynden tasindi. Yol, DT ve gecici bellek kapilari o mimarilerle birlikte dustu.",
     "veri_mat17.py": "data.py olarak TASINDI; SON yerel tanimlandi (veri_t17 import edilmez), m.dizi -> m.scoreboard.",
-    "veri_t17.py": "TASINMADI: TinyStories verisi; model_18 yalniz matematik.",
-    "olcme_18.py": "TASINMADI: hikaye olcumu; matematik olcutu data.py icinde (sor, cevap_ce, basamak).",
+    "veri_t17.py": "data_stories.py olarak TASINDI (kullanici, 24 Eylul: TinyStories'i PV'de gormek); sozluk/akis/pencere/coz/kur AYNEN, ust aciklama yeni, __main__ dustu.",
+    "olcme_18.py": "olc/olcut/devam ve konum tablosu data_stories.py'ye TASINDI (m.dizi -> m.scoreboard, olcut accuracy/ce/diag bicimine); bos_kimligi, _turler, tani, kirilim TASINMADI -- DT'ye ozgu tani.",
     "sinav_18.py": "TASINMADI: hikaye sinavi.",
-    "konus.py": "TASINMADI: hikaye uretimi icin konusma araci.",
+    "konus.py": "istemler() data_stories.py'ye TASINDI; paket bulma ve konusma dongusu TASINMADI -- defterde 5 HIKAYE YAZ.",
     "konus.bat": "TASINMADI: konus.py'nin kisayolu."
   }
 }

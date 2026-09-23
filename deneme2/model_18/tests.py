@@ -252,6 +252,49 @@ def t_skor():
 
 
 # ============================================================
+# DATA_STORIES -- TinyStories (model_17 veri_t17 + olcme_17'den).
+# ============================================================
+def t_stories():
+    import numpy as np
+    import data_stories as DS
+    hk, dl = 1, 0
+    a = np.array([5, 6, hk, 7, 8, 9, hk, 3, hk], dtype=np.int16)
+    P, M = DS.pencere(a, 5, None, hk, dl)
+    ok = (len(P) == 3 and list(M.sum(1)) == [4, 5, 3]
+          and list(P[1]) == [hk, 7, 8, 9, hk] and (P[~M] == dl).all())
+    P4, _ = DS.pencere(a, 4, None, hk, dl)           # L+2 > T olan ATILIR
+    kapi("hikaye penceresi <eos> basta ve sonda", ok and len(P4) == 2,
+         "%d pencere; T=4'te %d" % (len(P), len(P4)))
+
+    # olc: bantlar ve eos_ok, elle sayimla ayni
+    torch.manual_seed(0)
+    m = PV(12, t_max=16, **KUCUK)
+    W = torch.randint(3, 12, (6, 16))
+    Mk = torch.zeros(6, 16, dtype=torch.bool)
+    for i, L in enumerate((16, 9, 12, 5, 16, 7)):
+        W[i, 0], W[i, L - 1] = hk, hk
+        W[i, L:] = dl
+        Mk[i, :L] = True
+    DS.BANTLAR, eski = ((0, 4), (4, 10), (10, 16)), DS.BANTLAR
+    try:
+        r = DS.olc(m, W, Mk, hk, aygit="cpu", parca=4)
+    finally:
+        DS.BANTLAR = eski
+    with torch.no_grad():
+        d = (m.scoreboard(W)[:, :-1].argmax(-1) == W[:, 1:]) & Mk[:, 1:]
+    k = torch.arange(1, 16)
+    bek = [float(d[:, (k >= a_) & (k < b_)].sum() / Mk[:, 1:][:, (k >= a_) & (k < b_)].sum())
+           for a_, b_ in ((0, 4), (4, 10), (10, 16))]
+    e = Mk[:, 1:] & (W[:, 1:] == hk)
+    ok = (abs(r["accuracy"] - float(d.sum() / Mk[:, 1:].sum())) < 1e-9
+          and all(abs(r["diag"][n] - b) < 1e-9 for n, b in
+                  zip(("acc_0_4", "acc_4_10", "acc_10_16"), bek))
+          and abs(r["diag"]["eos_ok"] - float(d[e].sum() / e.sum())) < 1e-9)
+    kapi("hikaye olcutu: accuracy, bantlar, eos_ok", ok,
+         "accuracy %.3f  eos_ok %.3f" % (r["accuracy"], r["diag"]["eos_ok"]))
+
+
+# ============================================================
 # DATA -- matematik (model_17'den).
 # ============================================================
 
@@ -404,7 +447,9 @@ if __name__ == "__main__":
     print("tests (model_18)")
     for f in (t_zincir, t_nedensel, t_sessiz, t_cm, t_payda, t_gradyan,
               t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_mat_pencere,
-              t_mat_sor, t_mat_basamak, t_mat_egitim, t_notebook):
+              t_mat_sor, t_mat_basamak, t_mat_egitim, t_stories, t_notebook):
         f()
+    t_notebook(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "notebook_stories.ipynb"))
     print("\n%d GECTI   %d KALDI" % (len(GECTI), len(KALDI)))
     sys.exit(1 if KALDI else 0)
