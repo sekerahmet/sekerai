@@ -18,7 +18,7 @@ import olcme_17 as OL                                           # noqa: E402
 import train_17 as TR                                           # noqa: E402
 import veri_mat17 as VM                                         # noqa: E402
 import veri_t17 as V                                            # noqa: E402
-from model_17 import Yol, DT, durum_gecisi                      # noqa: E402
+from model_17 import Yol, DT, durum_gecisi, GeciciBellek        # noqa: E402
 
 GECTI, KALDI = [], []
 
@@ -314,6 +314,135 @@ def t_dt_surdurme():
 
 
 # ============================================================
+# GECICI BELLEK (TASARIM.md §GECICI BELLEK) -- iddialari tek tek.
+# ============================================================
+def _gb(W=6, kafa=4):
+    """Gecici bellegi ACIK (Wo rastgele) kucuk DT."""
+    m = DT(20, genislik=16, durum=8, blok=2, bellek=32, tohum=0, gb_W=W,
+           gb_kafa=kafa)
+    g = torch.Generator().manual_seed(41)
+    with torch.no_grad():
+        for b in m.bloklar:
+            b.gecici.Wo.normal_(0.0, 0.3, generator=g)
+    return m
+
+
+# --- G1.  SESSIZ BASLANGIC: Wo = 0 -> gecici belleksiz modelin AYNISI
+# Tek dugmeli kiyas bunun ustunde duruyor: fark YALNIZ ogrenilenden gelmeli.
+def t_gb_sessiz():
+    a = DT(20, genislik=16, durum=8, blok=2, bellek=32, tohum=0)
+    b = DT(20, genislik=16, durum=8, blok=2, bellek=32, tohum=0, gb_W=6, gb_kafa=4)
+    sa, sb = a.state_dict(), b.state_dict()
+    ayni = set(sa) < set(sb) and all(torch.equal(sa[k], sb[k]) for k in sa)
+    w = torch.randint(1, 20, (3, 12), generator=torch.Generator().manual_seed(8))
+    with torch.no_grad():
+        fark = float((a.dizi(w) - b.dizi(w)).abs().max())
+    kapi("gecici bellek: sessiz baslangic", ayni and fark == 0.0,
+         "ortak agirliklar ayni, cikti farki %.1e" % fark)
+
+
+# --- G2.  "k GERI" GERCEKTEN k GERI
+def t_gb_k_geri():
+    d, W, h, T = 8, 6, 4, 10
+    g = torch.Generator().manual_seed(31)
+    gb = GeciciBellek(d, W, h, lambda *s: torch.randn(*s, generator=g))
+    kk = [1, 2, 3, 0]
+    with torch.no_grad():
+        gb.Wq.zero_()
+        gb.Wk.zero_()
+        gb.Wv.copy_(torch.eye(d))
+        gb.Wo.copy_(torch.eye(d))
+        gb.b.fill_(-50.0)
+        for i, k in enumerate(kk):
+            gb.b[i, k] = 50.0
+        kayit = torch.randn(1, T, d, generator=g)
+        cik = gb(torch.randn(1, T, d, generator=g), kayit)
+    dk = d // h
+    ok = all(torch.allclose(cik[0, t, i * dk:(i + 1) * dk],
+                            kayit[0, t - k, i * dk:(i + 1) * dk], atol=1e-6)
+             for i, k in enumerate(kk) for t in range(3, T))
+    kapi("gecici bellek: k geri == k geri", ok, "kafalar %s geri" % kk)
+
+
+# --- G3.  PENCERE: W'den geride kalan okunmaz
+def t_gb_pencere():
+    d, W, h, T, t = 8, 4, 2, 12, 10
+    g = torch.Generator().manual_seed(33)
+    gb = GeciciBellek(d, W, h, lambda *s: torch.randn(*s, generator=g))
+    with torch.no_grad():
+        gb.Wo.normal_(0.0, 1.0, generator=g)
+        q, kayit = torch.randn(1, T, d, generator=g), torch.randn(1, T, d, generator=g)
+        taban = gb(q, kayit)[0, t]
+        dis, ic = kayit.clone(), kayit.clone()
+        dis[0, t - W] += 5.0                   # pencerenin HEMEN disi
+        ic[0, t - W + 1] += 5.0                # pencerenin en eski ici
+        a = float((gb(q, dis)[0, t] - taban).abs().max())
+        b = float((gb(q, ic)[0, t] - taban).abs().max())
+    kapi("gecici bellek: pencere disi okunmaz", a == 0.0 and b > 0,
+         "disi %.1e  ici %.1e" % (a, b))
+
+
+# --- G4.  NEDENSELLIK, gecici bellek acik
+def t_gb_nedensel():
+    m = _gb()
+    w = torch.randint(1, 20, (2, 12), generator=torch.Generator().manual_seed(5))
+    w2 = w.clone()
+    w2[:, 8] = (w[:, 8] % 19) + 1
+    with torch.no_grad():
+        a, b = m.dizi(w), m.dizi(w2)
+    once = float((a[:, :8] - b[:, :8]).abs().max())
+    sonra = float((a[:, 8:] - b[:, 8:]).abs().max())
+    kapi("gecici bellek: gelecek gecmisi degistirmez", once == 0.0 and sonra > 0,
+         "once %.1e  sonra %.1e" % (once, sonra))
+
+
+# --- G5.  PARAMETRE == KAGIT: blok basina 4 d^2 + kafa W + d
+def t_gb_parametre():
+    n, d, s, mb, W, h, L = 13, 16, 16, 64, 16, 4, 2
+    taban = sum(p.numel() for p in DT(n, genislik=d, durum=s, bellek=mb).parameters())
+    kod = sum(p.numel() for p in DT(n, genislik=d, durum=s, bellek=mb, gb_W=W,
+                                     gb_kafa=h).parameters())
+    kagit = taban + L * (4 * d * d + h * W + d)
+    kapi("gecici bellek: parametre == kagit", kod == kagit,
+         "%s / %s" % (f"{kod:,}", f"{kagit:,}"))
+
+
+# --- G5b.  KONUM YANLILIGI DECAY DISINDA -- aksi halde "k geri" her adim
+# sifira cekilir.  Gecici belleksiz modelde ayrim DEGISMEZ.
+def t_gb_sonum():
+    m = DT(13, genislik=16, durum=16, bellek=64, gb_W=16, gb_kafa=4)
+    dis = {a for a, p in m.named_parameters() if not TR.sonumlu(a, p)}
+    eski = DT(13, genislik=16, durum=16, bellek=64)
+    ayni = all(TR.sonumlu(a, p) == (p.dim() >= 2) for a, p in eski.named_parameters())
+    ok = ({"bloklar.0.gecici.b", "bloklar.1.gecici.b"} <= dis
+          and not any(a.endswith(("gecici.Wq", "gecici.Wo")) for a in dis) and ayni)
+    kapi("gecici bellek: b decay disinda", ok,
+         "decay disi: %s" % ", ".join(sorted(a for a in dis if "gecici" in a)))
+
+
+# --- G6.  SURDURME == KESINTISIZ, gecici bellek acik
+def t_gb_surdurme():
+    N, W, M = _veri()
+
+    def kos(ad, kok, adim, surdur=None):
+        _temizle()
+        TR._kos(ad, (W, M), N, lambda *a, **k: 0.0, "cpu", kok, None,
+                8, 8, 2e-3, 0.01, adim, 0, 8, 2, 2, surdur, False,
+                mimari="dt", genislik=16, blok=2, bellek=32, gb_W=6, gb_kafa=4)
+        return _agirlik(ad)
+
+    kok = tempfile.mkdtemp()
+    try:
+        A = kos("KESINTISIZ", kok, 8)
+        kos("BOLUK", kok, 4)
+        B = kos("BOLUK", kok, 8, surdur=kok + "/BOLUK/t4.pt")
+        en = max(float((A[k] - B[k]).abs().max()) for k in A)
+    finally:
+        shutil.rmtree(kok, ignore_errors=True)
+    kapi("gecici bellek: surdurme == kesintisiz", en == 0.0, "fark %.3e" % en)
+
+
+# ============================================================
 # DUZ MATEMATIK SINAVI (veri_mat17) -- olcutun KENDISI sinaniyor.
 # ============================================================
 # --- 13.  PENCERE: <eos> soru cevap <eos>, hedef YALNIZ cevapta
@@ -329,8 +458,9 @@ def t_mat_pencere():
 
 
 class _Kahin(torch.nn.Module):
-    """Cevabi BILEN sahte model.  kip: dogru / erken (hemen EOS) /
-    fazla (rakamlardan sonra EOS yerine fazladan bir rakam)."""
+    """Cevabi BILEN sahte model; '='den sonraki HER konumu doldurur.  kip:
+    dogru / erken (hemen EOS) / fazla (EOS yerine fazladan bir rakam) /
+    birler (yalniz birler basamagi yanlis)."""
 
     def __init__(self, kip):
         super().__init__()
@@ -347,14 +477,17 @@ class _Kahin(torch.nn.Module):
                 else:
                     say += str(t)
             hedef = VM.rak(sum(ter + [int(say)])) + [VM.EOS]
-            yazilan = len(s) - e - 1
-            if self.kip == "erken":
-                t = VM.EOS
-            elif self.kip == "fazla" and yazilan == len(hedef) - 1:
-                t = 7
-            else:
-                t = hedef[min(yazilan, len(hedef) - 1)]
-            cik[r, -1, t] = 10.0
+            for j in range(e, len(s)):
+                yazilan = j - e
+                if self.kip == "erken":
+                    t = VM.EOS
+                elif self.kip == "fazla" and yazilan == len(hedef) - 1:
+                    t = 7
+                elif self.kip == "birler" and yazilan == len(hedef) - 2:
+                    t = (hedef[-2] + 1) % 10
+                else:
+                    t = hedef[min(yazilan, len(hedef) - 1)]
+                cik[r, j, t] = 10.0
         return cik
 
 
@@ -368,6 +501,22 @@ def t_mat_sor():
     kapi("sor: dogru 1, erken 0, fazla rakam 0", ok,
          "dogru %s  erken %s  fazla %s" % tuple(
              (r["sayi"], r["uzunluk"], r["ilk"]) for r in (d, e, f)))
+
+
+# --- 14b.  BASAMAK TANISI: saga hizali, birler AYRI okunur
+# Hizalama kayarsa "birler ogrenilmedi" hukmu baska basamagin sayisiyla verilir.
+def t_mat_basamak():
+    s = [(1, 1), (21, 23), (472, 182), (1, 1, 5), (23, 1, 120),
+         (500, 500, 500), (9, 1), (99, 1)]
+    d = VM.basamak(_Kahin("dogru"), s)
+    b = VM.basamak(_Kahin("birler"), s)
+    ok = (all(v["og"] == 1.0 and v["ser"] == 1.0 for v in d.values())
+          and all((v["og"], v["ser"]) == ((0.0, 0.0) if k[1] == "birler"
+                                          else (1.0, 1.0))
+                  for k, v in b.items())
+          and sorted(k[0] for k in d if k[1] == "eos") == [1, 2, 3, 4])
+    kapi("basamak: saga hizali, birler ayri", ok,
+         "%d yuva; birler-yanlis kahinde yalniz birler 0" % len(d))
 
 
 # --- 15.  CEVAP MASKELI EGITIM: surdurme == kesintisiz
@@ -452,7 +601,11 @@ if __name__ == "__main__":
     for f in (t_surdurme, t_dolgu, t_akis, t_pencere, t_durdur, t_coz, t_olc,
               t_dt_parametre, t_dt_bardak, t_dt_delta, t_dt_nedensel,
               lambda: t_dolgu(_dt(), "DT maskeli kayip == hikaye hikaye"),
-              t_dt_surdurme, t_mat_pencere, t_mat_sor, t_mat_egitim, t_defter):
+              t_dt_surdurme, t_gb_sessiz, t_gb_k_geri, t_gb_pencere,
+              t_gb_nedensel,
+              lambda: t_dolgu(_gb(), "gecici bellek: maskeli kayip == hikaye"),
+              t_gb_parametre, t_gb_sonum, t_gb_surdurme,
+              t_mat_pencere, t_mat_sor, t_mat_basamak, t_mat_egitim, t_defter):
         f()
     print("\n%d GECTI   %d KALDI" % (len(GECTI), len(KALDI)))
     sys.exit(1 if KALDI else 0)

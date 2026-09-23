@@ -106,7 +106,7 @@ def yukle(yol):
     if k.get("mimari") == "dt":
         m = DT(k["n"], genislik=k["genislik"], durum=k["durum"],
                blok=k["blok"], bellek=k["bellek"], yansima=k["yansima"],
-               pay=k["pay"])
+               pay=k["pay"], gb_W=k.get("gb_W", 0), gb_kafa=k.get("gb_kafa", 4))
     else:
         m = Yol(k["n"], boyut=k["boyut"], durum=k["durum"],
                 **{a: k[a] for a in ("norm", "pay") if k.get(a) is not None})

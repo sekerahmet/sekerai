@@ -172,6 +172,57 @@ def kirilim(m, sorular, aygit="cuda", olcu="terim"):
     return {a: sor(m, c, aygit=aygit, en=len(c)) for a, c in sorted(g.items())}
 
 
+KONUM = ("birler", "onlar", "yuzler", "binler")
+
+
+def basamak(m, sorular, aygit="cpu", parca=4096):
+    """TANI, olcut degil: HANGI BASAMAK ogrenildi.  Anahtar (cevap hanesi,
+    konum); konum SAGDAN (birler, onlar, yuzler, binler) ya da "eos".
+      og    dogru onek verilince o token dogru mu (ogretmen zorlamali)
+      ser   serbest uretim, SAGA hizali: modelin yazdigi o basamak dogru mu
+      cog   taban: o yuvada hep EN SIK token'i soyleyen
+      n     soru sayisi"""
+    W, M, _ = pencereler(sorular)
+    L = torch.tensor([len(rak(sum(ts))) for ts in sorular])
+    a0 = M.sum(1) - L - 1                     # cevabin ilk rakaminin yeri
+    tah = []
+    with torch.no_grad():
+        for i in range(0, len(W), parca):
+            tah.append(m.dizi(W[i:i + parca].to(aygit), M[i:i + parca]
+                              .to(aygit)).argmax(-1).cpu())
+    tah = torch.cat(tah).tolist()
+    yaz = {ts: c[:c.index(EOS)] if EOS in c else c
+           for ts, c in _uret(m, sorular, aygit)[0]}
+    say = {}
+
+    def ekle(k, og, ser, h):
+        s = say.setdefault(k, {"og": 0, "ser": 0, "n": 0, "sik": {}})
+        s["og"] += og
+        s["ser"] += ser
+        s["n"] += 1
+        s["sik"][h] = s["sik"].get(h, 0) + 1
+
+    for i, ts in enumerate(sorular):
+        c, b, g, t = rak(sum(ts)), int(a0[i]), yaz[ts], tah[i]
+        for q, h in enumerate(c):
+            r = len(c) - 1 - q
+            ekle((len(c), KONUM[r]), t[b + q - 1] == h,
+                 r < len(g) and g[len(g) - 1 - r] == h, h)
+        ekle((len(c), "eos"), t[b + len(c) - 1] == EOS, len(g) == len(c), EOS)
+    return {k: {"og": s["og"] / s["n"], "ser": s["ser"] / s["n"],
+                "cog": max(s["sik"].values()) / s["n"], "n": s["n"]}
+            for k, s in say.items()}
+
+
+def basamak_tablo(r, yaz=print):
+    yaz("  hane  konum         n       og      ser      cog")
+    for L in sorted({k[0] for k in r}):
+        for ad in KONUM[:L][::-1] + ("eos",):
+            v = r[(L, ad)]
+            yaz("  %4d  %-7s %8d   %6.4f   %6.4f   %6.4f"
+                % (L, ad, v["n"], v["og"], v["ser"], v["cog"]))
+
+
 def goster(m, sorular, aygit="cpu"):
     """GOZLE: soru, dogru cevap, modelin yazdigi."""
     cik, _ = _uret(m, list(sorular), aygit)

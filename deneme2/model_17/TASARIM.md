@@ -108,7 +108,7 @@ tani() bir ölçümdür: kullanıcı onayıyla koşulur, her sürümde aynı
 ## YOL HARİTASI — sıra önerisi, kararlar işaretli
 
 ```
-0  MAT     DUZ MATEMATIK SINAVI -- DT'nin ilk sinavi         [KOD HAZIR, KARAR]
+0  MAT     DUZ MATEMATIK SINAVI -- DT'nin ilk sinavi         [KOSULDU 1a/1b; A/B]
            model_15'in toplama verisi, onkayit belge/onkayit/model_17_MAT.md
 1  TAM2    YALNIZ BOS/EOS -- mimari ve egitim TAM1'le AYNI    [KOD HAZIR, KARAR]
 2  DT1     HEDEF MIMARI (asagida): durum + attention + bellek  [KOD HAZIR, KARAR]
@@ -121,6 +121,7 @@ tani() bir ölçümdür: kullanıcı onayıyla koşulur, her sürümde aynı
 5  bellek ne kadar kucuk olabilir: guzergahlari K sinifa birlestir;
            buyurse seyrek bellek (product keys)
 6  transformer kiyasi -- cok sonra
+7  GECICI BELLEK -- sirali kisa sureli bellek (asagida)    [ONERI, A/B sonrasi]
 ```
 
 **0 — Düz matematik neden ilk.** Kullanıcı: *"Düz matematik sayılır en
@@ -283,6 +284,123 @@ ikinci adım. TAM2 eski mimariyle koşacağı için eski sınıf da model_17'de
 kalır; paket `mimari` alanıyla ayrılır, konus ve `tani()` ikisini de tanır.
 
 İlk taslak (bellek katmanı yok, 0,54 M): `belge/analiz/model_17_TAM1/model_17_dt1_taslak.py`.
+
+---
+
+## GEÇİCİ BELLEK — sıralı kısa süreli bellek (ÖNERİ, koşulmadı)
+
+Kullanıcı, 23 Eylül: *"şu kısımda geçici bellek token sırasını tutmak ve
+paylaşmak nasıl bir fikir"* ve *"geçici bellek tasarımını kağıda dök yaz
+unutmayalım sonra döneriz"*. DURUM: öneri; MAT'ın A ve B koşularından
+sonra dönülecek.
+
+**Nereden çıktı** (ölçümler: `belge/onkayit/model_17_MAT.md`):
+
+- Okuma testi: DT'nin not defteri güzergâhı TUTUYOR — eğitimsiz bile
+  (`+`'da birler 0,99, yüzler 1,00). DT16'da blok ÇIKIŞI tutmuyor (birler
+  0,30; eğitimsizde 0,54). Darboğaz tutmak değil, OKUMAK.
+- Basamak testi: DT16 birler basamağında şansta (0,10); model_15 0,98.
+- Kağıt üstü: ayraçta okuma `h = β v(birler) + β(1−β) v(onlar) +
+  β(1−β)² v(yüzler)`. Terimler cevapta üst üste biniyor; basit eşikle
+  ayrılabilmeleri `m(r + r²) < 1`, `r = 1 − β` ister. Altında çözümleme
+  MLP'ye yükleniyor ve bunun bedeli var: kaybolan bilgiyi geri getirmez,
+  ezberi büyütür, MLP'nin bilgi rolüne karışır, her token'a maliyet.
+- İpucu: model_15'in attention'ı konum başına bir DURUM okuyordu ve her
+  durum, M[w] çarpımıyla güzergâhı SIRALI içeriyordu. Pratikte sıralı bir
+  geçici bellek; token başına matris olmadan geri getirilecek olan bu.
+
+**Fikir: üç bellek, üç iş**
+
+```
+gecici bellek   son W token'in KENDISI + SIRA etiketi   kesin, sirali, karismaz; pencere sinirli
+durum (delta)   baglamin ozeti                          sikistirilmis, ust uste binen
+bellek (MLP)    kalici bilgi                            agirliklarda
+```
+
+"Paylaşmak": sıra BİR KEZ kesin tutulur; her blok ve bileşen aynı kaydı
+okur.
+
+**Kritik ayrıntı — sıra DOĞRU YERDEN okunur.** Soruya göre uzaklık cevap
+konumunda yanlış hizalı: terimler cevaptan değişken uzaklıkta. Doğru
+hizalama ayraçta: `+`'da "1 geri = birler, 2 geri = onlar, 3 geri =
+yüzler".
+
+```
+1  ayrac, gecici bellekten KENDI teriminin rakamlarini SIRAYLA okur (goreli uzaklik)
+2  sirali sonuc paylasilir (durum ya da ayri kayit)
+3  cevap konumlari onu icerikle bulur, sutun sutun toplar
+```
+
+Bu adım yapılmazsa fikir, zayıf bulunan "konumu bilen okuma"ya (seçenek 4)
+geri düşer.
+
+**Beklenen etkiler** (kağıt üstü, ölçülmedi):
+
+```
+kaybolan bilgi   pencere ICINDE cozulur; disi icin yine durum
+ezber            azalmasi beklenir: kural ("hizali rakamlari al, topla") ezberden ucuzlar
+MLP rolu         sirayi gecici bellek tasir, MLP bilgiye doner
+maliyet          okuma W kayit uzerinde; W = 16-64 ile token basina sabit
+```
+
+**Açık tasarım soruları** — kod yazılmadan önce karar:
+
+- Kayıt ne taşır: X[w] (token kimliği) mi, durum okuması mı, ikisi mi?
+- Sıra etiketi: okuyana göre göreli uzaklık. Mutlak konum işe yaramaz.
+- W kaç: toplama için 16 yeter (en uzun soru 18 token); dil için ayrı karar.
+- Okuma kafası kaç: sütun başına bir mi, tek kafa + sıra etiketi mi?
+- Paylaşım: tek tampon, her blok okur mu; yoksa blok başına ayrı mı?
+- Pencere dışı bilgi durumda kalır; ikisi nasıl birleşir?
+
+**Sınama önerisi** (önkayıt koşudan ÖNCE): tek düğmeli — DT16 + sıralı
+tampon (W = 16, bir okuma kafası), diğer her şey 1a ile aynı. Tahmin:
+model_15 4,5 bin parametreyle birlerde 0,98 yaptı; sıralı kayıt verilen
+DT16 birler sütununu şanstan kaldırmalı. Eşik önkayıtta yazılır. Zemin A ve
+B: A (bellek 512) kalkarsa darboğazın okuma/çözümleme olduğu kesinleşir;
+B (yansıma 2) kalkarsa durumun içinde ayırma yetebilir.
+
+**Literatür** (23 Eylül; yalnız makalelerin ÖZETİ indirilip okundu, tam
+metin değil — özette olmayan ayrıntı iddia edilmez):
+
+```
+KONUM: kesin yakin bellek + sikistirilmis uzun bellek -- VAR, olceklenmis
+  Gated DeltaNet (Yang+ 2024, 2412.06464)  delta kurali + kayan pencere
+      attention hibriti -- BIZIM AILE.  Ayrica: kapi hizli silme, delta
+      kurali hedefli guncelleme icin (secerek yazma)
+  Infini-attention (Munkhdalai+ 2024, 2404.07143)  ayni blokta maskeli
+      YEREL attention + sikistirici bellek (dogrusal attention)
+  Samba (Ren+ 2024, 2406.07522)  Mamba + kayan pencere: diziyi durumda
+      sikistirir, yakini attention ile KESIN hatirlar; 3,8B
+  Griffin (De+ 2024, 2402.19427)  kapili dogrusal tekrarlama + yerel
+      attention; 14B'ye kadar
+  BASED (Arora+ 2024, 2402.18668)  dogrusal + kayan pencere; durum boyu
+      ile hatirlama arasinda ODUNLESME (bizim ust uste binme bulgusu)
+  eskiler: Transformer-XL (1901.02860), Compressive Transformer (1911.05507)
+TOPLAMADA HIZALAMA -- VAR, ama gorevin yapisi konuma ELLE verilerek
+  Abacus (McLeish+ 2024, 2405.17399)  sorun: her rakamin kesin konumunu
+      izleyememek; cozum: rakama sayinin basina gore konum gomulmesi
+  Position coupling (Cho+ 2024, 2405.20671)  ayni basamaktaki rakamlara
+      AYNI konum kimligi; kuram: konum bilgisi olmayan 1 katmanli
+      Transformer toplamayi tam cozemez
+PAYLASIM: katmanlar arasi ortak bellek -- VAR
+  YOCO (Sun+ 2024, 2405.05254)  global KV bir kez kurulur, ust katmanlar
+      cross-attention ile YENIDEN kullanir
+  CLA (Brandon+ 2024, 2405.12981)  komsu katmanlar anahtar/deger paylasir
+BILGI BELLEGI (MLP'nin rolu)
+  Memory Layers at Scale (Berges+ 2024, 2412.09764)  ayri, seyrek
+      anahtar-deger bellek; kazanc ozellikle olgusal gorevlerde
+```
+
+Bu taramada GÖRÜLMEYEN (yok demek değil): hizalamanın elle konum
+kimliğiyle verilmek yerine ayraçtan göreli okumayla ÖĞRENİLMESİ ve bu
+sıralı sonucun bloklarca paylaşılması. Dil için genel bir mekanizma
+iddiası buradan doğar; ayrıca aranmalı.
+
+**Konumu:** sınırlı pencereli attention + konum etiketi transformer'a
+yaklaşan bir adım. Fark: pencere SINIRLI, bağlamın geri kalanı delta
+durumunda, bilgi bellekte — üç ayrı bellek. (Yorum, ölçülmedi: kullanıcının
+*"insan beyni de her zaman mantık ve ya her zaman ezber kullanmaz. ihtiyaç
+duyduğunda kullanır"* ilkesi bu üçlüye karşılık geliyor olabilir.)
 
 ---
 

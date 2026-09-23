@@ -297,10 +297,42 @@ class RMS(nn.Module):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6) * self.g
 
 
-class Blok(nn.Module):
-    """durum -> attention -> bellek, artik akisa ekleyerek."""
+class GeciciBellek(nn.Module):
+    """Son W kaydi KESIN tutar; okuyan, goreli uzakliga gore secer (TASARIM.md
+    §GECICI BELLEK).  b[kafa, k]: o kafanin "k adim geri"ye egilimi.
+    Wo SIFIRDAN baslar: baslangicta model, gecici bellegi olmayanin AYNISI.
+    Dolgu maskelenmez: dolgu yalniz sagda, gercek konum onu hic okumaz."""
 
-    def __init__(self, d, durum, bellek, yansima, pay, r):
+    def __init__(self, d, W, kafa, r):
+        super().__init__()
+        assert d % kafa == 0, "genislik kafa sayisina bolunmeli"
+        o = d ** -0.5
+        self.Wq = nn.Parameter(r(d, d) * o)
+        self.Wk = nn.Parameter(r(d, d) * o)
+        self.Wv = nn.Parameter(r(d, d) * o)
+        self.Wo = nn.Parameter(torch.zeros(d, d))
+        self.b = nn.Parameter(torch.zeros(kafa, W))
+        self.W, self.kafa = W, kafa
+
+    def forward(self, r_, kayit):
+        B, T, d = r_.shape
+        h = self.kafa
+        bol = lambda x: x.reshape(B, T, h, d // h).transpose(1, 2)
+        q, k, v = bol(r_ @ self.Wq), bol(kayit @ self.Wk), bol(kayit @ self.Wv)
+        i = torch.arange(T, device=r_.device)
+        u = i[:, None] - i[None]                       # okuyan - kayit
+        izin = (u >= 0) & (u < self.W)                 # nedensel + pencere
+        P = ((q @ k.transpose(-1, -2)) * (d // h) ** -0.5
+             + self.b[:, u.clamp(0, self.W - 1)])
+        A = P.masked_fill(~izin, -torch.inf).softmax(-1)
+        return (A @ v).transpose(1, 2).reshape(B, T, d) @ self.Wo
+
+
+class Blok(nn.Module):
+    """durum -> attention -> [gecici bellek] -> bellek, artik akisa ekleyerek."""
+
+    def __init__(self, d, durum, bellek, yansima, pay, r, gb_W=0, gb_kafa=4,
+                 r2=None):
         super().__init__()
         o = d ** -0.5                  # birim RMS girdi -> birim RMS cikti
         self.n1, self.n2 = RMS(d), RMS(d)
@@ -319,6 +351,11 @@ class Blok(nn.Module):
         self.W2 = nn.Parameter(r(bellek, d) * bellek ** -0.5)  # bellek degerleri
         self.b2 = nn.Parameter(torch.zeros(d))
         self.pay = pay
+        # Gecici bellek AYRI ureteciyle (r2): yukaridakiler onsuz modelle AYNI baslar.
+        self.gecici = None
+        if gb_W:
+            self.n3 = RMS(d)
+            self.gecici = GeciciBellek(d, gb_W, gb_kafa, r2)
 
     def ic(self, r_, maske=None):
         """(durum okumasi H, P, A, izin) -- forward ve tani() ayni hesabi okur."""
@@ -340,8 +377,11 @@ class Blok(nn.Module):
         return H, P, A, gec
 
     def forward(self, r_, maske=None):
+        kayit = self.n1(r_)            # blogun GIRDISI: 1. blokta token kimligi
         H, _, A, _ = self.ic(r_, maske)
         r_ = r_ + A @ (H @ self.Av)
+        if self.gecici is not None:
+            r_ = r_ + self.gecici(self.n3(r_), kayit)
         return r_ + F.relu(self.n2(r_) @ self.W1 + self.b1) @ self.W2 + self.b2
 
 
@@ -351,15 +391,20 @@ class DT(nn.Module):
     mimari = "dt"
 
     def __init__(self, n, genislik=DT_GENISLIK, durum=DT_DURUM, blok=DT_BLOK,
-                 bellek=DT_BELLEK, yansima=DT_YANSIMA, tohum=0, pay=PAY):
+                 bellek=DT_BELLEK, yansima=DT_YANSIMA, tohum=0, pay=PAY,
+                 gb_W=0, gb_kafa=4):
         super().__init__()
         g = torch.Generator().manual_seed(tohum)
         r = lambda *s: torch.randn(*s, generator=g)
+        g2 = torch.Generator().manual_seed(tohum + 7919)
+        r2 = lambda *s: torch.randn(*s, generator=g2)
         self.n, self.genislik, self.durum = n, genislik, durum
         self.blok, self.bellek, self.yansima, self.pay = blok, bellek, yansima, pay
+        self.gb_W, self.gb_kafa = gb_W, gb_kafa
         self.X = nn.Parameter(r(n, genislik))                 # token -> akis
         self.bloklar = nn.ModuleList(
-            Blok(genislik, durum, bellek, yansima, pay, r) for _ in range(blok))
+            Blok(genislik, durum, bellek, yansima, pay, r, gb_W, gb_kafa, r2)
+            for _ in range(blok))
         self.ns = RMS(genislik)
         # |E| ~ 1: baslangicta puanlar O(1), ilk kayip patlamasin.
         self.E = nn.Parameter(r(n, genislik) * genislik ** -0.5)
