@@ -106,6 +106,8 @@ WD = 0.01            # 0,03 buyuk veride OLDURUYOR, 0,001 ezbere kaydiriyor.
 
 
 class Yol(nn.Module):
+    mimari = "kelime_matris"      # TAM1/TAM2; hedef mimari asagida (DT)
+
     def __init__(self, n, boyut=BOYUT, durum=DURUM, tohum=0,
                  norm=NORM, pay=PAY):
         """Ayarlar dosyanin basinda -- ayri bir ayar dosyasi YOK."""
@@ -200,6 +202,19 @@ class Yol(nn.Module):
         # cikar ve B=2048, T=128'de tek basina GB'lara gider.
         return self.puan(A @ V)
 
+    def ic(self, w, maske=None):
+        """tani() icin ic okuma: [(durum, P, A, izin)] -- tek blok.  Egitimi
+        etkilemez; dizi() ile ayni hesap."""
+        S = self.gez(w)[:, 1:]
+        P = (S @ self.Wq) @ (S @ self.Wk).transpose(1, 2) + self.hb
+        gec = torch.ones(w.shape[1], w.shape[1], dtype=torch.bool,
+                         device=w.device).tril()
+        if maske is not None:
+            gec = gec & maske[:, None, :]
+        A = (P.masked_fill(~gec, -torch.inf).softmax(-1) if self.pay
+             else P.clamp(min=0) * gec)
+        return [(S, P, A, gec)]
+
     def puan(self, O):
         """Cikti noktasindan SOZLUK PUANI.  Buyuk = yakin.
 
@@ -238,3 +253,136 @@ class Yol(nn.Module):
             cikan.append(c)
             w.append(c)
         return cikan, w
+
+
+# ============================================================
+# HEDEF MIMARI -- DT (durum takibi + attention + bellek).  TASARIM.md.
+# Kullanici, 23 Eylul: "derinlik olsun, küçük bütçeyle başla, DT1'i yaz".
+# ============================================================
+DT_GENISLIK = 256    # artik akis
+DT_DURUM = 64        # S: 64 x 64 anahtar-deger yuvasi
+DT_BLOK = 2          # kopru DERINLIKLE: cozulebilen adim <= blok sayisi
+DT_BELLEK = 1024     # bellek yuvasi (MLP gizli boyu)
+DT_YANSIMA = 1       # token basina gecis; 3'lu donme icin 2 gerekir
+
+
+def durum_gecisi(k, v, be, q):
+    """S_t = S_{t-1} (I - be k k^T) + be v k^T,  okuma h_t = S_t q_t.
+
+    k (B,T,Y,d) birim, v (B,T,Y,d), be (B,T,Y), q (B,T,d) -> h (B,T,d), HAM.
+    Y: token basina gecis sayisi.  S sifirdan baslar, normalize EDILMEZ:
+    be (0,2)'de gecisin ozdegerleri [-1,1].  SIRALI; parcali paralel hali
+    (Yang 2024) sonraki adim, bu fonksiyon onun kapisi olacak."""
+    B, T, Y, d = k.shape
+    S = k.new_zeros(B, d, d)
+    iz = []
+    for t in range(T):
+        for i in range(Y):
+            kt = k[:, t, i]
+            Sk = torch.bmm(S, kt.unsqueeze(-1)).squeeze(-1)
+            S = S - ((be[:, t, i, None] * (Sk - v[:, t, i])).unsqueeze(-1)
+                     * kt.unsqueeze(1))
+        iz.append(torch.bmm(S, q[:, t].unsqueeze(-1)).squeeze(-1))
+    return torch.stack(iz, 1)
+
+
+class RMS(nn.Module):
+    """Konum basina olcek.  Zamanda bir sey karistirmaz, paralelligi bozmaz."""
+
+    def __init__(self, d):
+        super().__init__()
+        self.g = nn.Parameter(torch.ones(d))
+
+    def forward(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6) * self.g
+
+
+class Blok(nn.Module):
+    """durum -> attention -> bellek, artik akisa ekleyerek."""
+
+    def __init__(self, d, durum, bellek, yansima, pay, r):
+        super().__init__()
+        o = d ** -0.5                  # birim RMS girdi -> birim RMS cikti
+        self.n1, self.n2 = RMS(d), RMS(d)
+        self.Gk = nn.Parameter(r(yansima, d, durum) * o)  # yazma anahtari
+        self.Gv = nn.Parameter(r(yansima, d, durum) * o)  # yazma degeri
+        self.gb = nn.Parameter(torch.zeros(yansima, d))   # beta egimi
+        self.gb0 = nn.Parameter(torch.zeros(yansima))     # beta 1'den baslar
+        self.Gq = nn.Parameter(r(d, durum) * o)           # okuma sorusu
+        a = durum ** -0.5                  # birim boylu h -> birim boylu q, k
+        self.Aq = nn.Parameter(r(durum, durum) * a)       # attention sorusu
+        self.Ak = nn.Parameter(r(durum, durum) * a)       # attention anahtari
+        self.Av = nn.Parameter(r(durum, d) * a)           # attention degeri
+        self.hb = nn.Parameter(torch.zeros(1))            # relu esigi
+        self.W1 = nn.Parameter(r(d, bellek) * o)          # bellek anahtarlari
+        self.b1 = nn.Parameter(torch.zeros(bellek))
+        self.W2 = nn.Parameter(r(bellek, d) * bellek ** -0.5)  # bellek degerleri
+        self.b2 = nn.Parameter(torch.zeros(d))
+        self.pay = pay
+
+    def ic(self, r_, maske=None):
+        """(durum okumasi H, P, A, izin) -- forward ve tani() ayni hesabi okur."""
+        x = self.n1(r_)
+        k = F.normalize(torch.einsum("btd,yde->btye", x, self.Gk), dim=-1)
+        v = torch.einsum("btd,yde->btye", x, self.Gv)
+        be = 2 * torch.sigmoid(torch.einsum("btd,yd->bty", x, self.gb)
+                               + self.gb0)
+        q = F.normalize(x @ self.Gq, dim=-1)
+        # eps 1e-3: bos yuvadan okunan kucuk gurultu birim boya sisirilmesin.
+        H = F.normalize(durum_gecisi(k, v, be, q), dim=-1, eps=1e-3)
+        P = (H @ self.Aq) @ (H @ self.Ak).transpose(1, 2) + self.hb
+        T = r_.shape[1]
+        gec = torch.ones(T, T, dtype=torch.bool, device=r_.device).tril()
+        if maske is not None:
+            gec = gec & maske[:, None, :]
+        A = (P.masked_fill(~gec, -torch.inf).softmax(-1) if self.pay
+             else P.clamp(min=0) * gec)
+        return H, P, A, gec
+
+    def forward(self, r_, maske=None):
+        H, _, A, _ = self.ic(r_, maske)
+        r_ = r_ + A @ (H @ self.Av)
+        return r_ + F.relu(self.n2(r_) @ self.W1 + self.b1) @ self.W2 + self.b2
+
+
+class DT(nn.Module):
+    """HEDEF MIMARI.  Baglam DURUMDA (her hikayede sifirdan), bilgi BELLEKTE
+    (kalici, benzerlikle eslesir).  Kelime basina matris YOK."""
+    mimari = "dt"
+
+    def __init__(self, n, genislik=DT_GENISLIK, durum=DT_DURUM, blok=DT_BLOK,
+                 bellek=DT_BELLEK, yansima=DT_YANSIMA, tohum=0, pay=PAY):
+        super().__init__()
+        g = torch.Generator().manual_seed(tohum)
+        r = lambda *s: torch.randn(*s, generator=g)
+        self.n, self.genislik, self.durum = n, genislik, durum
+        self.blok, self.bellek, self.yansima, self.pay = blok, bellek, yansima, pay
+        self.X = nn.Parameter(r(n, genislik))                 # token -> akis
+        self.bloklar = nn.ModuleList(
+            Blok(genislik, durum, bellek, yansima, pay, r) for _ in range(blok))
+        self.ns = RMS(genislik)
+        # |E| ~ 1: baslangicta puanlar O(1), ilk kayip patlamasin.
+        self.E = nn.Parameter(r(n, genislik) * genislik ** -0.5)
+
+    def dizi(self, w, maske=None):
+        """w (B,T) -> puan (B,T,n).  Nedensel: durum soldan saga, attention
+        yalniz j <= t."""
+        assert w.dim() == 2, "dizi() (B,T) bekler"
+        r_ = self.X[w]
+        for b in self.bloklar:
+            r_ = b(r_, maske)
+        return self.puan(self.ns(r_))
+
+    def ic(self, w, maske=None):
+        """tani() icin blok basina (durum, P, A, izin)."""
+        r_, cik = self.X[w], []
+        for b in self.bloklar:
+            cik.append(b.ic(r_, maske))
+            r_ = b(r_, maske)
+        return cik
+
+    def puan(self, O):
+        """En yakin E: -|o-E|^2 = 2 o.E - |E|^2 - |o|^2, son terim satir sabiti."""
+        return 2 * O @ self.E.T - (self.E * self.E).sum(-1)
+
+    kayip = Yol.kayip          # ayni sonraki-jeton kaybi, ayni maske kurali

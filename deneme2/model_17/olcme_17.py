@@ -159,36 +159,39 @@ def tani(m, DG, n=256, aygit="cpu", yaz=print, tohum=0):
     T = w.shape[1]
 
     r["olc"] = olc(m, (w, mk), aygit=aygit, hk=hk)
+    wa, ma = w.to(aygit), mk.to(aygit)
     with torch.no_grad():
-        S = m.gez(w.to(aygit))[:, 1:]
-        Q, K = S @ m.Wq, S @ m.Wk
-        P = Q @ K.transpose(1, 2) + m.hb
-        izin = torch.ones(T, T, dtype=torch.bool, device=aygit).tril() \
-            & mk.to(aygit)[:, None, :]
-        A = (P.masked_fill(~izin, -torch.inf).softmax(-1) if m.pay
-             else P.clamp(min=0) * izin)
-        lp = m.dizi(w.to(aygit), mk.to(aygit)).log_softmax(-1)
+        ic = m.ic(wa, ma)                         # blok basina (durum, P, A, izin)
+        lp = m.dizi(wa, ma).log_softmax(-1)
     ara = torch.arange(T, device=aygit)
     uzak = (ara[:, None] - ara[None, :]).clamp(min=0).float()
-    hedef = torch.zeros_like(mk)
-    hedef[:, :-1] = mk[:, 1:]
+    hedef = torch.zeros_like(ma)
+    hedef[:, :-1] = ma[:, 1:]
     ce = torch.zeros(w.shape, device=aygit)
-    ce[:, :-1] = -lp[:, :-1].gather(-1, w[:, 1:].to(aygit).unsqueeze(-1)).squeeze(-1)
-    r["konum"] = {}
-    for ad_, (a, b) in {"0-15": (0, 16), "16-63": (16, 64),
-                        "64-127": (64, 128), "128+": (128, T)}.items():
-        s = hedef[:, a:b].to(aygit)
-        if not bool(s.any()):
-            continue
-        kut = A[:, a:b].sum(-1).clamp(min=1e-12)
-        r["konum"][ad_] = {
-            "hedef": int(s.sum()),
-            "ppl": float(ce[:, a:b][s].mean().exp()),
-            "ateslenen": float(((P[:, a:b] > 0) & izin[:, a:b]).sum(-1)[s]
-                               .float().mean()),
-            "uzaklik": float(((A[:, a:b] * uzak[a:b]).sum(-1) / kut)[s].mean())}
+    ce[:, :-1] = -lp[:, :-1].gather(-1, wa[:, 1:].unsqueeze(-1)).squeeze(-1)
+    dilim = {"0-15": (0, 16), "16-63": (16, 64), "64-127": (64, 128),
+             "128+": (128, T)}
+    r["konum"], r["blok"] = {}, []
+    for ad_, (a, b) in dilim.items():
+        s = hedef[:, a:b]
+        if bool(s.any()):
+            r["konum"][ad_] = {"hedef": int(s.sum()),
+                               "ppl": float(ce[:, a:b][s].mean().exp())}
+    for _, P, A, izin in ic:
+        bl = {}
+        for ad_, (a, b) in dilim.items():
+            s = hedef[:, a:b]
+            if not bool(s.any()):
+                continue
+            kut = A[:, a:b].sum(-1).clamp(min=1e-12)
+            bl[ad_] = {
+                "ateslenen": float(((P[:, a:b] > 0) & izin[:, a:b]).sum(-1)[s]
+                                   .float().mean()),
+                "uzaklik": float(((A[:, a:b] * uzak[a:b]).sum(-1) / kut)[s]
+                                 .mean())}
+        r["blok"].append(bl)
 
-    # durum: konum 10'daki kelime degisince
+    # durum: konum 10'daki kelime degisince, blok basina
     g = torch.Generator().manual_seed(tohum)
     sec = torch.nonzero(L >= 70).squeeze(1)[:128]
     if len(sec):
@@ -197,10 +200,14 @@ def tani(m, DG, n=256, aygit="cpu", yaz=print, tohum=0):
         yeni = torch.randint(3, m.n, (len(sec),), generator=g)
         w2[:, 10] = torch.where(yeni == w1[:, 10], (yeni % (m.n - 3)) + 3, yeni)
         with torch.no_grad():
-            S1, S2 = m.gez(w1.to(aygit))[:, 1:], m.gez(w2.to(aygit))[:, 1:]
-        cos = F.cosine_similarity(S1, S2, dim=-1).clamp(-1, 1)
-        aci = torch.rad2deg(torch.acos(cos)).mean(0)
-        r["durum_aci"] = {o: float(aci[10 + o]) for o in (0, 1, 5, 10, 20, 50)}
+            H1 = [x[0] for x in m.ic(w1.to(aygit))]
+            H2 = [x[0] for x in m.ic(w2.to(aygit))]
+        r["durum_aci"] = []
+        for a1, a2 in zip(H1, H2):
+            aci = torch.rad2deg(torch.acos(
+                F.cosine_similarity(a1, a2, dim=-1).clamp(-1, 1))).mean(0)
+            r["durum_aci"].append({o: float(aci[10 + o])
+                                   for o in (0, 1, 5, 10, 20, 50)})
 
     # uzak baglam: 181..220 arasi 40 hedef, oncesi baska hikaye
     uzn = torch.nonzero(L >= 221).squeeze(1)[:128]
@@ -228,17 +235,20 @@ def tani(m, DG, n=256, aygit="cpu", yaz=print, tohum=0):
                                .float().mean())}
 
     o = r["olc"]
-    yaz(f"TANI  {n} pencere   BOS/EOS {'VAR' if hk is not None else 'YOK'}")
+    yaz(f"TANI  {getattr(m, 'mimari', '?')}   {n} pencere   "
+        f"BOS/EOS {'VAR' if hk is not None else 'YOK'}")
     yaz(f"  perplexity  hepsi {math.exp(o['ce']):.3f}"
         + "".join(f"   {k} {math.exp(o['ce_' + k]):.3f} ({o['n_' + k]:,})"
                   for k in ("bas", "govde", "son") if o["ce_" + k] is not None))
-    yaz(f"  {'konum':>8} {'hedef':>7} {'ppl':>8} {'ateslenen':>10} {'uzaklik':>8}")
+    yaz(f"  {'konum':>8} {'hedef':>7} {'ppl':>8}" + "".join(
+        f"   b{i + 1} ates  uzak" for i in range(len(r["blok"]))))
     for k, v in r["konum"].items():
-        yaz(f"  {k:>8} {v['hedef']:>7,} {v['ppl']:>8.3f} {v['ateslenen']:>10.1f}"
-            f" {v['uzaklik']:>8.1f}")
-    if "durum_aci" in r:
-        yaz("  durum izi (derece)  " + "  ".join(
-            f"+{o_}:{v:.1f}" for o_, v in r["durum_aci"].items()))
+        yaz(f"  {k:>8} {v['hedef']:>7,} {v['ppl']:>8.3f}" + "".join(
+            f"   {bl[k]['ateslenen']:>7.1f} {bl[k]['uzaklik']:>5.1f}"
+            for bl in r["blok"] if k in bl))
+    for i, d_ in enumerate(r.get("durum_aci", [])):
+        yaz(f"  durum izi b{i + 1} (derece)  " + "  ".join(
+            f"+{o_}:{v:.1f}" for o_, v in d_.items()))
     if "uzak" in r:
         yaz("  uzak baglam CE  hepsi {:.3f}  ".format(r["uzak"]["hepsi"])
             + "  ".join(f"son {k}: {r['uzak'][k]:.3f}" for k in (16, 64, 128)))

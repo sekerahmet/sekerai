@@ -33,7 +33,8 @@ import math
 
 import torch
 
-from model_17 import Yol, BOYUT, DURUM, LR, WD
+from model_17 import (Yol, DT, BOYUT, DURUM, LR, WD, DT_GENISLIK,
+                      DT_DURUM, DT_BLOK, DT_BELLEK, DT_YANSIMA)
 from olcme_17 import bos_kimligi
 
 YIGIN = 512
@@ -43,8 +44,9 @@ _DISKE = {}     # ad -> gunluk.txt'ye henuz yazilmamis satirlar
 
 # Surdurmede paketteki degerle AYNI olmali.  Farkliysa yorunge sessizce
 # baskalasir: opt.load_state_dict lr/wd'yi paketten alir, gunluk cagriyi yazar.
-SURDUR_ESIT = ("n", "T", "yigin", "lr", "wd", "tohum", "boyut", "durum",
-               "norm", "pay", "egitim_iz", "sozluk")
+SURDUR_ESIT = ("mimari", "n", "T", "yigin", "lr", "wd", "tohum", "boyut",
+               "durum", "norm", "pay", "genislik", "blok", "bellek",
+               "yansima", "egitim_iz", "sozluk")
 
 
 def _olcut_yok(m, taraf, tam=False):
@@ -141,10 +143,15 @@ def _denetle(p, sabit):
 
 
 def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
-         lr, wd, adim, tohum, yigin, bas, yedek, surdur, derle, sozluk=None):
+         lr, wd, adim, tohum, yigin, bas, yedek, surdur, derle, sozluk=None,
+         mimari="kelime_matris", genislik=DT_GENISLIK, blok=DT_BLOK,
+         bellek=DT_BELLEK, yansima=DT_YANSIMA):
     not_ = lambda s: _not(ad, s)
     torch.manual_seed(tohum)
-    m = Yol(N, boyut=boyut, durum=durum, tohum=tohum).to(aygit)
+    dt = mimari == "dt"
+    m = (DT(N, genislik=genislik, durum=durum, blok=blok, bellek=bellek,
+            yansima=yansima, tohum=tohum) if dt
+         else Yol(N, boyut=boyut, durum=durum, tohum=tohum)).to(aygit)
 
     # torch.compile.  BURADA OLCULDU, 22 Eylul, L4
     # (T=256, yigin 512, sozluk 4002, boyut=durum=32, 5 isinma + 500 adim):
@@ -192,7 +199,9 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
     # Pakete giden kimlik: sozluk ve iz pakette durursa konus tahmin etmez,
     # surdurme de ayni veriyi dogrular.
     hk = bos_kimligi(W, M)
-    sabit = dict(ek or {}, n=N, boyut=boyut, durum=durum, norm=m.norm,
+    mim = (dict(genislik=genislik, blok=blok, bellek=bellek, yansima=yansima)
+           if dt else dict(boyut=boyut, norm=m.norm))
+    sabit = dict(ek or {}, mimari=m.mimari, n=N, durum=durum, **mim,
                  pay=m.pay, lr=lr, wd=wd, tohum=tohum, yigin=yigin, T=T,
                  parametre=par, derle=derle, egitim_iz=_iz(W, M),
                  bos_eos=hk is not None, hikaye_id=hk,
@@ -215,8 +224,11 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
     not_(f"pencere {n:,} x {T}   {n * T:,} yuva"
          + ("" if M is None else f"   dolgu %{100 * (1 - _et):.1f}"
                                  f"   ETKIN {n * T * _et:,.0f}"))
-    not_(f"boyut {boyut} durum {durum} lr {lr} wd {wd} tohum {tohum}"
-         f"  sozluk {N}  parametre {par:,}")
+    not_(f"mimari {m.mimari}  "
+         + (f"genislik {genislik} durum {durum}x{durum} blok {blok} "
+            f"bellek {bellek} yansima {yansima}" if dt
+            else f"boyut {boyut} durum {durum}")
+         + f"  lr {lr} wd {wd} tohum {tohum}  sozluk {N}  parametre {par:,}")
     not_(f"yigin {yigin}   adim basina {yigin * (T - 1):,} tahmin"
          f"   epok = {n / yigin:,.0f} adim")
     not_(f"veri izi {sabit['egitim_iz']}   olcum her {bas}   yedek her {yedek}"
@@ -329,9 +341,11 @@ def _korumali(**k):
 
 
 def baslat(ad, EG, N, *, olcut=_olcut_yok, aygit="cuda", kok=None, ek=None,
-           boyut=BOYUT, durum=DURUM, lr=LR, wd=WD,
+           boyut=BOYUT, durum=None, lr=LR, wd=WD,
            adim=20000, tohum=0, yigin=YIGIN, bas=100, yedek=500,
-           surdur=None, derle=False, sozluk=None):
+           surdur=None, derle=False, sozluk=None, mimari="kelime_matris",
+           genislik=DT_GENISLIK, blok=DT_BLOK, bellek=DT_BELLEK,
+           yansima=DT_YANSIMA):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
     EG      (W, M) ya da tek W -- W (n, T) pencere yigini, M dolgu maskesi
@@ -342,9 +356,13 @@ def baslat(ad, EG, N, *, olcut=_olcut_yok, aygit="cuda", kok=None, ek=None,
             (agirlik + optimizer + RNG).  Kural 1: uzatma SURDURMEDIR.
             Paketteki ayar ya da veri bu cagriyla tutmazsa kosu BASLAMAZ.
     sozluk  kelime listesi -- pakete yazilir, konus tahmin etmek zorunda kalmaz
-    derle   torch.compile.  Burada 3,90 kat olculdu (_kos'taki not);
-            kisa kosuda zararli.
+    derle   torch.compile.  Eski mimaride 3,90 kat olculdu (_kos'taki not);
+            kisa kosuda zararli.  DT'de OLCULMEDI.
+    mimari  "kelime_matris" (TAM1/TAM2, varsayilan) ya da "dt" (hedef mimari:
+            genislik, blok, bellek, yansima; durum verilmezse 64)
     """
+    if durum is None:
+        durum = DT_DURUM if mimari == "dt" else DURUM
     t = IPLIK.get(ad)
     if t is not None and t.is_alive():
         raise RuntimeError(f"{ad} hala kosuyor -- once durdur('{ad}')")
@@ -361,7 +379,8 @@ def baslat(ad, EG, N, *, olcut=_olcut_yok, aygit="cuda", kok=None, ek=None,
         ad=ad, EG=EG, N=N, olcut=olcut, aygit=aygit, kok=kok, ek=ek,
         boyut=boyut, durum=durum, lr=lr, wd=wd, adim=adim, tohum=tohum,
         yigin=yigin, bas=bas, yedek=yedek, surdur=surdur, derle=derle,
-        sozluk=sozluk))
+        sozluk=sozluk, mimari=mimari, genislik=genislik, blok=blok,
+        bellek=bellek, yansima=yansima))
     IPLIK[ad] = t
     t.start()
     return f"{ad} basladi" + (f"  ({os.path.basename(surdur)}'den)"

@@ -29,7 +29,7 @@ import textwrap
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from model_17 import Yol                                     # noqa: E402
+from model_17 import Yol, DT                                 # noqa: E402
 import veri_t17 as V                                         # noqa: E402
 import olcme_17 as OL                                        # noqa: E402
 
@@ -101,9 +101,15 @@ def bul(desen=None):
 
 
 def yukle(yol):
+    """Paketin mimarisine gore: "dt" hedef mimari, yoksa kelime = matris."""
     k = torch.load(yol, weights_only=False, map_location="cpu")
-    m = Yol(k["n"], boyut=k["boyut"], durum=k["durum"],
-            **{a: k[a] for a in ("norm", "pay") if a in k})
+    if k.get("mimari") == "dt":
+        m = DT(k["n"], genislik=k["genislik"], durum=k["durum"],
+               blok=k["blok"], bellek=k["bellek"], yansima=k["yansima"],
+               pay=k["pay"])
+    else:
+        m = Yol(k["n"], boyut=k["boyut"], durum=k["durum"],
+                **{a: k[a] for a in ("norm", "pay") if k.get(a) is not None})
     m.load_state_dict(k["agirlik"])
     m.eval()
     return m, k
@@ -177,9 +183,10 @@ def main():
 
     print("=" * 74)
     print("yedek   %s" % os.path.basename(yol))
-    print("adim    %s   parametre %s   sozluk %d"
+    print("adim    %s   parametre %s   sozluk %d   mimari %s"
           % ("{:,}".format(k.get("adim", -1)),
-             "{:,}".format(k.get("parametre", 0)), k["n"]))
+             "{:,}".format(k.get("parametre", 0)), k["n"],
+             k.get("mimari", "kelime_matris")))
     print("olcum   egitim %.4f   dogrulama %.4f   (sonraki jeton dogrulugu)"
           % (k.get("egitim", float("nan")), k.get("dogrulama", float("nan"))))
     if k.get("dogrulama_ce") is not None:

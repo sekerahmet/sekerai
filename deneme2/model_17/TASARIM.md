@@ -98,17 +98,28 @@ tani() bir ölçümdür: kullanıcı onayıyla koşulur, her sürümde aynı
 
 ---
 
-## YOL HARİTASI — karar verilmedi, sıra önerisi
+## YOL HARİTASI — sıra önerisi, kararlar işaretli
 
 ```
-1  TAM2    ADIM 1 + ADIM 2, ayni mimari, 20.000 adim          [KOD HAZIR]
-2  goz testi, EGITIMSIZ: guzergah tablosu konus'ta dis depo --
+1  TAM2    YALNIZ BOS/EOS -- mimari ve egitim TAM1'le AYNI    [KOD HAZIR, KARAR]
+2  DT1     HEDEF MIMARI (asagida): durum + attention + bellek  [KOD HAZIR, KARAR]
+           derinlik, kucuk butce (~3,25 M); ayni veri, ayni olcu
+           (govde ppl, tani) -> TAM2'yle KENDI ICINDE
+3  secim noktalari: t+1'in yaninda t+2, t+3 tahmini           [ONERI]
+4  goz testi, EGITIMSIZ: guzergah tablosu konus'ta dis depo --
            depo yok / sabit oran / "ihtiyac kapisi"; hangisi olgun,
-           kullanici bakar
-3  depo ne kadar kucuk olabilir: guzergahlari K sinifa birlestir
-4  ogrenen depo + kapi, DONGUNUN ICINDE
-5  transformer kiyasi -- cok sonra
+           kullanici bakar.  Egitim istemez, 1-3 ile paralel olabilir.
+5  bellek ne kadar kucuk olabilir: guzergahlari K sinifa birlestir;
+           buyurse seyrek bellek (product keys)
+6  transformer kiyasi -- cok sonra
 ```
+
+Kullanıcı: *"TAM2 yalnız BOS/EOS olsun"*. TAM2'de değişen tek şey veri
+penceresi. Mimari (`model_17.py`) dokunulmadı; MLP ya da yeni katman YOK.
+Defterde TAM1'in ayarları aynen: boyut 32, durum 64, lr 0,002, wd 0,01,
+tohum 0, yığın 512, T 256, 20.000 adım, bas 100, yedek 250, derle açık.
+Kaçınılmaz iki fark: `L + 2 > T` süzgeci (254 kelimeden uzun hikâye
+düşer) ve pencere sayısı değiştiği için karışık sıra.
 
 Bu sıranın dayandığı tartışma (23 Eylül):
 
@@ -130,15 +141,178 @@ Bu sıranın dayandığı tartışma (23 Eylül):
 
 ---
 
-## BEKLEYEN — ölçeklenebilir kodlayıcı
+## SEÇİM NOKTALARI (öneri, yol haritası 3)
 
-"LLM potansiyeli" için kelime başına matris ölçeklenmez: V·d² (V=50K,
-d=1024'te yalnız M 52 milyar). Aday: token'dan üretilen yansıma geçişi,
-`S <- S(I - beta k k^T) + beta v k^T`, beta (0,2) (DeltaNet ailesi).
+Kullanıcı, 23 Eylül: *"bir güzergah bazlı bir model olduğumuz için eğer
+model girdiye göre 20 tane güzergah üretecekse ( 20 next token) ilk
+döngüde belirlenecek token herşeyi belirleyen olduğu için onun doğru
+belirlenmesi en kritik olan."*
 
-Taslak kodlandı ve DURDURULDU. Kullanıcının itirazı — *"parametre sayısı
-az. bu durumda bilgi nerede taşınacak"* — doğru çıktı: 0,54 M parametre,
-bilgi deposu yok. Taslak: `belge/analiz/model_17_TAM1/model_17_dt1_taslak.py`.
+**Bugünkü geri besleme:** her konumda gerçek önekten sonraki token.
+Kayıp `−ln p`, doğruyu yukarı itme `1 − p`: bilmediğinde tam güç,
+bildiğinde sıfıra yakın. Her token ortalamada EŞİT ağırlıkta.
+
+**İki boşluk:**
+
+- Seçimin SONUCU sayılmıyor: yanlış "Lily/Tom" ile yanlış "the/a" aynı
+  kuralla cezalanıyor; biri hikâyeyi belirliyor, öteki hiçbir şeyi.
+- Model kendi hatasından sonrasını hiç görmüyor; eğitimde sıradaki
+  konuma hep gerçek token geliyor. Ranzato 2016 buna exposure bias
+  diyor: *"errors may accumulate along the way."*
+
+**İnceltme:** kritik olan "ilk token" değil, SEÇİM NOKTALARI — nerede
+olurlarsa. İstemden sonraki ilk token çoğu zaman bir seçim noktası ama
+her zaman değil. Seçimin sonucu ölçülebilir: TAM1'de bir kelime
+değişince tahmin KL'si 1 token sonra 2,18, 10 token sonra 0,16
+(onkayıt §A4).
+
+**Öneri:** her durumdan t+1'in yanında t+2 ve t+3 de tahmin edilir
+(küçük ek okuma başları). Gloeckle 2024 §5.1: böyle bir kayıp *"can
+place more emphasis on consequential transitions than inconsequential
+ones during teacher-forced training."* Durum yalnız sonraki adımı değil,
+güzergâhın nereye gittiğini de taşımak zorunda kalır.
+
+**Ölçü (kendi içinde):** gövde perplexity'si ve "seçim noktalarında
+doğruluk". Seçim noktası: güzergâh tablosunda penceresi geniş olan ve
+sonrasını değiştiren token. Tanım ve karar kuralı TAM3 koşulmadan ÖNCE
+onkayıta yazılır.
+
+Kendi hatasından öğrenme (scheduled sampling, dizi düzeyinde eğitim)
+hata birikmesine doğrudan dokunur ama paralel eğitimi bozar; sona kaldı.
+
+---
+
+## HEDEF MİMARİ — durum takibi + attention + bellek katmanı
+
+Kullanıcı, 23 Eylül: *"tasarıma karar vermiştik ben sadece bellek eksik
+deyince ... ben o mimari çok beğendim sadece bir hafıza katmanı ... sonra
+benzerlik izleri taşısın vs ayrıca normalizasyon kalkacak ve paralel
+eşleme gelecek"*
+
+Çalışma adı DT (durum takibi). TAM1'in `M[w]` tablosu gidiyor; yerine
+token'dan ÜRETİLEN geçiş geliyor. Bilgi paylaşılan katmanlara taşınıyor.
+
+```
+blok (L kez ust uste), artik akis r_t (genislik d):
+
+  durum      k = norm(r Wk)  v = r Wv  q = norm(r Wq)  beta = 2 sigmoid(r wb)
+             S_t = S_{t-1} (I - beta k k^T) + beta v k^T      S: 64 x 64
+             beta 1: k yuvasi v ile DEGISIR   beta 2: k boyunca YANSIR
+             DURUM NORMALIZE EDILMEZ -> ozyineleme dogrusal -> PARALEL egitim
+             h_t = S_t q_t                    (normalize yalniz okumada)
+  attention  her h_t, j <= t icin h_j'lere sorar      uzak baglam
+  bellek     r += W2 . relu(W1 . norm(r))    anahtar = guzergah izi (BENZERLIK),
+                                             deger = pencereyi iten vektor
+cikis       en yakin E[w]  ==  2 r.E_w - |E_w|^2        (model_15 ADIM 1b kurali)
+```
+
+**Bilgi nerede:** kullanıcının itirazına (*"parametre sayısı az. bu durumda
+bilgi nerede taşınacak"*) cevap bellek katmanı. Bağlam (bu hikâyede kim,
+nerede) DURUMDA, her hikâyede sıfırdan; bilgi (dil, kalıplar, güzergâh
+pencereleri) BELLEKTE, kalıcı. Anahtarlar benzerlikle eşleşir: benzer
+güzergâh aynı yuvayı açar — kullanıcının *"farklı güzergah aynı sonuca
+çıkıyorsa ... tek bir bilgi olarak saklamak"* ilkesi. Büyüdüğünde yoğun
+bellek yerine seyrek bellek (product keys, Lample 2019).
+
+**Normalize neden kalkıyor:** her adımda normalize etmek özyinelemeyi
+doğrusal olmaktan çıkarıyor, dizi boyunca sıralı hesabı zorunlu kılıyordu
+(TAM1'de 0,32 sn/adım). `I - beta k k^T`'nin özdeğerleri 1 ve 1-beta;
+beta (0,2)'de hepsi [-1,1] içinde: patlamaz. Konum başına normalize
+(artık akışta) paralelliği bozmaz, kalabilir.
+
+**KARAR: DERİNLİK.** Kullanıcı, 23 Eylül: *"derinlik olsun, küçük
+bütçeyle başla, DT1'i yaz"*. Kod: `model_17.DT` (`baslat(...,
+mimari="dt")`), 2 blok, genişlik 256, bellek 1.024, durum 64 x 64:
+3.249.924 parametre (test_17 bunu kağıt üstü formülle sınıyor).
+
+Gerilim şuydu — köprü için belleğin, ikinci adım gelmeden okunması
+gerekiyor. İki yol var:
+
+```
+dongu ICINDE   bellek okumasi durumu degistirir   -> sinirsiz adim, ama
+               ozyineleme dogrusal degil          -> PARALEL EGITIM YOK
+DERINLIK       1. blok kopruyu cozer ("baskenti" -> Ankara), ayni konuma
+               yazar; 2. blogun durumu onu okur    -> paralel korunur, ama
+               cozulebilen adim sayisi <= blok sayisi
+```
+
+Transformer'da ölçülen de derinlik yolu: köprü erken katmanda çözülüyor,
+ikinci adım geç katmanda (Biran 2024). Öneri: DERİNLİK (L = 2-4 blok).
+
+**Kağıt üstü hesap** (sohbette yapıldı, `python` ile sınandı):
+
+```
+patlamaz       I - beta k k^T: ozdegerler 1 (d-1 kez) ve 1-beta; beta (0,2) -> [-1,1]
+durum takibi   bardak oyunu: beta=2, k=(e_i-e_j)/sqrt2 -> H = takas; 1.000 hamlede
+               kayipsiz; H12.H23 != H23.H12 (SIRA onemli)
+sulanma yok    beta=1: S_yeni k = v,  k'ya dik her sey AYNEN
+               (TAM1 tipi "ekle + normalize"de top sinyali 10 adimda %3'e iniyordu)
+donme          tek yansimanin determinanti -1, 3'lu donmenin +1 -> 2 yansima gerekir
+maliyet        gecisi uygulamak satir basina 2d (tam matriste d^2)
+parametre      kelime basina V.d (TAM1'de V.d^2: V=50K, d=1024'te 52 milyar)
+```
+
+**Parametre (kağıt üstü, V = 4.003, durum 64 x 64):**
+
+```
+genislik 256, L=2, bellek 1.024 yuva        ~3,3 M   (TAM1'in beste biri)
+genislik 512, L=4, bellek 2.048 yuva        ~13 M    (TAM1 duzeyi, 16,8 M)
+                                            hepsi PAYLASILAN + kelime vektoru
+```
+
+**Uygulama sırası:** önce sıralı döngü (TAM1 gibi, `torch.compile` ile)
+ve doğruluk kapıları; DeltaNet'in parçalı paralel hesabı (Yang 2024)
+ikinci adım. TAM2 eski mimariyle koşacağı için eski sınıf da model_17'de
+kalır; paket `mimari` alanıyla ayrılır, konus ve `tani()` ikisini de tanır.
+
+İlk taslak (bellek katmanı yok, 0,54 M): `belge/analiz/model_17_TAM1/model_17_dt1_taslak.py`.
+
+---
+
+## SABİTLER — her sayının gerekçesi
+
+Kullanıcı, 23 Eylül: *"model içinde sabit rakamlar var formülasyonda
+onları belirli bir mantığı oturtmaya çalıştık ama bazılarınn mantığı
+olmayabilir bakarsın onlara."*
+
+```
+sabit                   deger        gerekce                                      durum
+--- DT
+beta = 2 sigmoid(.)     (0, 2)       ozdegerler [-1,1]: patlamaz, yansiyabilir    TURETILDI (Grazzi 2025)
+beta baslangici         1 (gb0=0)    araligin ortasi, klasik delta kurali         SECIM, olculmedi
+genislik                256          okuma rank siniri 32 -> 256, kucuk butce     KARAR + HESAP
+durum                   64 x 64      64 yuva; geri yayilim 2,1 GB/blok (B=512)    HESAP
+blok                    2            kopru derinlikle: 1 adim = 2 blok            KARAR
+bellek                  1.024        genisligin 4 kati                            GELENEK, olculmedi
+yansima                 1            3'lu donme 2 ister; ucuz baslangic           HESAP var, secim olculmedi
+init 1/sqrt(giris)      Gk Gv Gq W1  birim RMS girdi -> birim RMS cikti           TURETILDI
+init 1/sqrt(durum)      Aq Ak Av     birim boylu h -> birim boylu q, k            TURETILDI
+init 1/sqrt(bellek)     W2           bellek ciktisi akisla ayni olcekte           TURETILDI
+init 1/sqrt(genislik)   E            baslangic puanlari O(1)                      TURETILDI
+init N(0,1)             X            akis birim RMS'le baslar                     TURETILDI
+hb = 0                  relu esigi   esigin VARLIGI ispatli (eski not); 0 secim    KISMEN
+eps 1e-3                okuma norm   bos yuvanin gurultusu sisirilmesin; tipik    GEREKCE VAR,
+                                     |Sq| 1-8, yalniz bos yuvada devreye girer    deger keyfi
+eps 1e-6                RMS          sifira bolme                                  SAYISAL
+relu attention          PAY=False    Gorev A: 0,782/0,289; TAM1'de seyrek, |o|    OLCULDU, ama
+                                     sabit kaldi (onkayit §A5)                    BASKA gorevde
+lr 0,002, wd 0,01       sabit lr     eski gorevlerden (rakam, 1003 sozluk)        DEVRALINDI, DT'de
+                                     TAM1 egrisi 20K'da dusuyordu: cizelge acik   OLCULMEDI
+--- VERI / OLCU
+T = 256                 pencere      kalan hikaye %89,8 / dolgu %33,7             OLCULDU
+sozluk 4.000            kirpma       kapsama %99,26                               OLCULDU
+egitim ici olcum        2.000 pncr   ~340 bin hedef: dogrulukta std hata ~0,001   HESAP
+                                     (pencere ici bagimlilik haric)
+--- ESKI MIMARI -- TAM2 icin DOKUNULMADI ("TAM2 yalniz BOS/EOS")
+M = I + 0,1 randn       baslangic    0,1'in gerekcesi YOK                         GEREKCESIZ
+E ~ N(0,1)              baslangic    ilk kayip ~26: cok sivri dagilim             GEREKCESIZ (DT'de duzeldi)
+boyut 32                okuma        rank siniri 32 (Yang 2018, onkayit #2)       OLCULDU, DAR
+```
+
+**Kelime vektörleri.** Boyutları eğitimde DEĞİŞMEZ, bir ayardır; değerleri
+rastgele başlar ve her adımda güncellenir. Kelime başına sayı:
+TAM1'de 32 (E) + 64 (b) + 4.096 (M) = 4.192; DT'de 256 (X) + 256 (E) =
+512. Kelimeye özgü sayı 8 kat azaldı, bilgi paylaşılan katmanlara geçti.
 
 ---
 
@@ -160,6 +334,8 @@ kopru            Biran vd. 2024  Hopping Too Late                        2406.12
 baglam           Khandelwal vd. 2018  Sharp Nearby, Fuzzy Far Away       1805.04623
                  Daniluk vd. 2017  kisa attention erimi                  1702.04521
 okuma            Yang vd. 2018  softmax darbogazi                        1711.03953
+secim noktalari  Gloeckle vd. 2024  multi-token prediction, §5.1         2404.19737
+                 Ranzato vd. 2016  exposure bias                         1511.06732
 ```
 
 Metinler ve alıntıları yeniden arayan betik:
@@ -169,5 +345,8 @@ Metinler ve alıntıları yeniden arayan betik:
 
 ## Kodun kendi denetimi
 
-`python test_17.py` — 9 kapı: sürdürme, dolgu, akış (int16, okuma sınırı),
-pencere (BOS/EOS), durdur (3), `coz` gidiş-dönüş, ölçü kendi içinde.
+`python test_17.py` — 15 kapı. Eski mimari ve altyapı (9): sürdürme,
+dolgu, akış (int16, okuma sınırı), pencere (BOS/EOS), durdur (3), `coz`
+gidiş-dönüş, ölçü kendi içinde. DT (6): parametre == kağıt üstü hesap,
+bardak oyunu (1.000 takas), delta kuralı (yuva sulanmaz), nedensellik,
+dolgu, sürdürme.
