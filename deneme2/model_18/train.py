@@ -72,13 +72,16 @@ class Run:
                 f.write("\n".join(self._pending) + "\n")
         self._pending.clear()
 
-    def save(self, package):
-        """Anlik goruntuyu diske yaz -- KOSUNUN ICINDE.  Eskiler silinmez."""
+    def save(self, package, full=True):
+        """Diske yaz -- KOSUNUN ICINDE.  Eskiler silinmez.
+        full: t<adim>.pt, surdurmeye yeten TAM yedek (+ model_<ad>.pt son hal).
+        degilse: w<adim>.pt, yalniz agirliklar ve olcum -- analiz icin."""
         if not self.root:
             return
         os.makedirs(self.folder, exist_ok=True)
-        torch.save(package, f"{self.folder}/t{package['step']}.pt")
-        torch.save(package, f"{self.root}/model_{self.name}.pt")
+        torch.save(package, f"{self.folder}/{'t' if full else 'w'}{package['step']}.pt")
+        if full:
+            torch.save(package, f"{self.root}/model_{self.name}.pt")
 
     def archive_old(self):
         """Ayni adla yeni kosu eskiyi EZMEZ, yan klasore TASIR."""
@@ -145,7 +148,7 @@ def _line(record, elapsed, mark=""):
 
 
 def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
-         eval_every, save_every, resume=None, compile=False, vocab=None,
+         eval_every, save_every, weights_every=100, resume=None, compile=False, vocab=None,
          extra=None, d=M18.d, vectors=M18.VECTORS, active=M18.ACTIVE,
          layers=M18.LAYERS, t_max=M18.T_MAX):
     torch.manual_seed(seed)
@@ -196,7 +199,8 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
              f"layers {layers}  lr {lr} seed {seed}  sozluk {n_vocab}  "
              f"parametre {n_params:,}")
     run.note(f"batch {batch}   epok = {n_questions / batch:,.0f} adim   veri izi "
-             f"{fixed['data_fingerprint']}   olcum her {eval_every}   yedek her {save_every}")
+             f"{fixed['data_fingerprint']}   olcum her {eval_every}   tam yedek her "
+             f"{save_every}   agirlik her {weights_every}")
     run.note("OLCUT: accuracy (train / heldout); kayip yalniz hedeflerde")
     run.flush()
 
@@ -230,12 +234,15 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
         loss.backward()
         optimizer.step()
         last_step = step
-        # yedek eval_every'nin katina bagli DEGIL: 100 ve 250 -> 250'de yazar.
-        if step % eval_every == 0 or step % save_every == 0:
+        # Uc aralik birbirinden BAGIMSIZ: olcum, tam yedek (surdurme), agirlik (analiz).
+        full_save, weights_save = step % save_every == 0, step % weights_every == 0
+        if step % eval_every == 0 or full_save or weights_save:
             record, mark = evaluate(step), ""
-            if step % save_every == 0:
+            if full_save:
                 run.save(_snapshot(model, optimizer, sampler, record))
                 last_saved_step, mark = step, "  yedek"
+            elif weights_save:
+                run.save(dict(record, weights=model.state_dict()), full=False)
             run.note(_line(record, time.time() - started_at, mark))
             run.flush()
 
@@ -289,7 +296,8 @@ def _run_safe(run, **settings):
 
 def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=None,
           extra=None, lr=LR, steps=20000, seed=0, batch=BATCH,
-          eval_every=100, save_every=500, resume=None, compile=True, vocab=None,
+          eval_every=100, save_every=1000, weights_every=100, resume=None,
+          compile=True, vocab=None,
           d=M18.d, vectors=M18.VECTORS, active=M18.ACTIVE, layers=M18.LAYERS,
           t_max=M18.T_MAX):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
@@ -297,8 +305,11 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
     data        (questions, filled_mask, targets_mask)
     metric      metric(model, "train"|"heldout", full=False) -> dict: accuracy (ANA OLCUT),
                 ce, diag (veriye ozgu analiz olculeri; gunlukte sutun olur)
-    eval_every  olcum araligi;  save_every  anlik goruntu araligi -- birbirinden BAGIMSIZ.
-                HER ADIMIN kaybi ikisinden de bagimsiz: pakette `step_losses`.
+    eval_every     olcum araligi
+    save_every     TAM yedek araligi (t<adim>.pt, surdurme bundan; 3,2 MB)
+    weights_every  agirlik kaydi araligi (w<adim>.pt, analiz icin; ~1 MB)
+                   Kullanici, 24 Eylul: "bu kadar yedek çok fazla".
+                   Uc aralik BAGIMSIZ; HER ADIMIN kaybi hepsinden bagimsiz: `step_losses`.
     resume      bir anlik goruntu yolu verilirse KALDIGI YERDEN devam eder
                 (agirlik + optimizer + RNG).  Kural 1: uzatma SURDURMEDIR.
                 Paketteki ayar ya da veri bu cagriyla tutmazsa kosu BASLAMAZ.
@@ -321,7 +332,8 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
     run.thread = threading.Thread(target=_run_safe, args=(run,), daemon=True, kwargs=dict(
         data=data, n_vocab=n_vocab, metric=metric, device=device, lr=lr,
         steps=steps, seed=seed, batch=batch, eval_every=eval_every,
-        save_every=save_every, resume=resume, compile=compile, vocab=vocab,
+        save_every=save_every, weights_every=weights_every, resume=resume,
+        compile=compile, vocab=vocab,
         extra=extra, d=d, vectors=vectors, active=active, layers=layers,
         t_max=t_max))
     run.thread.start()
