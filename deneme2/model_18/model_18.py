@@ -17,7 +17,8 @@ arasında ki uzaklık" ve "her vektör her an aktif olmamalı bunu model
                W_v,a = e^(-D_s,a^2 S_v) / sum_B e^(-D_s,B^2 S_v)  a. vektorun agirligi
                V_a   = finish_a - start_a                        a. vektor
                C_m   = C + sum_a W_v,a V_a                       tasinmis C
-    score    -D^2 S_p, D = |C_m - P|: en yakin P en yuksek puan.
+    score    -D^2, D = |C_m - P|: en yakin P en yuksek puan.  Carpan YOK:
+             Kullanici, 24 Eylul: "S_p kaldir" -- secimi degistirmiyordu.
     CM       countermarch, geriye yuruyus: C_(t-1) = C_t - RM_t*P[w_t].
              Izleme araci; modelin hesabina girmez.
 """
@@ -37,18 +38,20 @@ LAYERS = 4     # Kullanici: "4 katman olsun"
 T_MAX = 64     # RM sayisi = en uzun dizi
 
 
-def distance(x, Q):
-    """Uzakligin KARESI |x - Q|^2.  x (..., d), Q (m, d) -> (..., m)."""
-    return (x * x).sum(-1, keepdim=True) - 2 * x @ Q.T + (Q * Q).sum(-1)
+def distance(points, anchors):
+    """Uzakligin KARESI |points - anchors|^2.  points (..., d), anchors (m, d) -> (..., m).
+    anchors: karsilastirilan noktalar (start'lar ya da P'ler)."""
+    return ((points * points).sum(-1, keepdim=True) - 2 * points @ anchors.T
+            + (anchors * anchors).sum(-1))
 
 
 class VectorLayer(nn.Module):
     """Bir layer: `vectors` tane (start, finish).  C'ye en yakin `active`
     tane start AKTIF; C, aktif vektorlerin agirlikli ortalamasiyla tasinir."""
 
-    def __init__(self, d, vectors, active, r):
+    def __init__(self, d, vectors, active, randn):
         super().__init__()
-        self.start = nn.Parameter(r(vectors, d))
+        self.start = nn.Parameter(randn(vectors, d))
         self.finish = nn.Parameter(self.start.detach().clone())   # V_a = 0: baslangicta C yerinde kalir
         self.S_v = nn.Parameter(torch.zeros(()))                   # log olcek: kullanilan e^S_v > 0
         self.active = active
@@ -62,66 +65,66 @@ class VectorLayer(nn.Module):
 
 
 class PV(nn.Module):
-    """NOKTA ve VEKTOR.  Ogrenilen YALNIZ vektorler (start, finish), S_v'ler ve S_p."""
-    mimari = "pv"
+    """NOKTA ve VEKTOR.  Ogrenilen YALNIZ vektorler (start, finish) ve S_v'ler."""
+    arch = "pv"
 
     def __init__(self, n, d=d, vectors=VECTORS, active=ACTIVE, layers=LAYERS,
                  t_max=T_MAX, seed=0):
         super().__init__()
-        g = torch.Generator().manual_seed(seed)
-        r = lambda *s: torch.randn(*s, generator=g)
+        generator = torch.Generator().manual_seed(seed)
+        randn = lambda *shape: torch.randn(*shape, generator=generator)
         self.n, self.d, self.vectors = n, d, vectors
         self.active, self.layers, self.t_max = active, layers, t_max
-        P = r(n, d)
+        P = randn(n, d)
         self.register_buffer("P", P / P.norm(dim=-1, keepdim=True))
-        RM = torch.randint(0, 2, (t_max, d), generator=g).float() * 2 - 1
+        RM = torch.randint(0, 2, (t_max, d), generator=generator).float() * 2 - 1
         self.register_buffer("RM", RM)
-        self.V = nn.ModuleList(VectorLayer(d, vectors, active, r) for _ in range(layers))
-        self.S_p = nn.Parameter(torch.zeros(()))   # log olcek; en yakin P ondan BAGIMSIZ
+        self.V = nn.ModuleList(VectorLayer(d, vectors, active, randn) for _ in range(layers))
 
-    def C(self, w):
-        """w (B,T) -> zincir (B,T,d).  Nedensel: C_t yalniz <= t'yi toplar."""
-        assert w.shape[1] <= self.t_max, "dizi RM sayisindan uzun"
-        return (self.RM[:w.shape[1]] * self.P[w]).cumsum(1)
+    def C(self, tokens):
+        """tokens (B,T) -> zincir (B,T,d).  Nedensel: C_t yalniz <= t'yi toplar."""
+        length = tokens.shape[1]
+        assert length <= self.t_max, "dizi RM sayisindan uzun"
+        return (self.RM[:length] * self.P[tokens]).cumsum(1)
 
-    def move(self, w):
+    def move(self, tokens):
         """(C_m, layer basina active_ids) -- trace() ve scoreboard() ayni hesabi okur."""
-        C_m, ids = self.C(w), []
+        C_m, active_ids = self.C(tokens), []
         for layer in self.V:
-            C_m, a = layer(C_m)
-            ids.append(a)
-        return C_m, ids
+            C_m, layer_ids = layer(C_m)
+            active_ids.append(layer_ids)
+        return C_m, active_ids
 
     def score(self, C_m):
-        """-D^2 S_p, D = |C_m - P|.  Buyuk = yakin."""
-        return -distance(C_m, self.P) * self.S_p.exp()
+        """-D^2, D = |C_m - P|.  Buyuk = yakin."""
+        return -distance(C_m, self.P)
 
-    def scoreboard(self, w, mask=None):
-        """w (B,T) -> (B,T,n): her konumda SONRAKI token'in puani.  Konumlar
-        arasi karisma yok, dolgu yalniz sagda: mask arayuz icin, hesabi degistirmez."""
-        return self.score(self.move(w)[0])
+    def scoreboard(self, tokens, targets_mask=None):
+        """tokens (B,T) -> (B,T,n): her konumda SONRAKI token'in puani.  Konumlar
+        arasi karisma yok, dolgu yalniz sagda: targets_mask arayuz icin, hesabi degistirmez."""
+        return self.score(self.move(tokens)[0])
 
-    def loss(self, w, mask=None):
-        """SONRAKI TOKEN: konum j, j+1'i tahmin eder; mask verilirse yalniz
-        mask'teki hedefler sayilir."""
-        p = self.scoreboard(w, mask)[:, :-1].reshape(-1, self.n)
-        h = w[:, 1:].reshape(-1)
-        if mask is None:
-            return F.cross_entropy(p, h)
-        m = mask[:, 1:].reshape(-1)
-        k = F.cross_entropy(p, h, reduction="none")
-        return (k * m).sum() / m.sum()
+    def loss(self, tokens, targets_mask=None):
+        """SONRAKI TOKEN: konum j, j+1'i tahmin eder; targets_mask verilirse
+        yalniz orada isaretli hedefler sayilir."""
+        scores = self.scoreboard(tokens, targets_mask)[:, :-1].reshape(-1, self.n)   # son konumun hedefi yok
+        targets = tokens[:, 1:].reshape(-1)                                            # bir kaydirilmis: gercek sonraki token
+        if targets_mask is None:
+            return F.cross_entropy(scores, targets)
+        counted = targets_mask[:, 1:].reshape(-1)
+        losses = F.cross_entropy(scores, targets, reduction="none")
+        return (losses * counted).sum() / counted.sum()
 
-    def trace(self, w):
+    def trace(self, tokens):
         """Izlenebilirlik: her konumda her layer'da hangi vektorler aktifti."""
-        return self.move(w)[1]
+        return self.move(tokens)[1]
 
-    def CM(self, w, K=None):
-        """Countermarch: tek dizi w (T,), son halkadan K adim geri (None: basa kadar).
-        Her adim: C_(t-1) = C_t - RM_t*P[w_t].  Doner: [(t, C_t)], yeniden eskiye."""
-        T = w.shape[0]
-        c, yol = self.C(w[None])[0, -1], []
-        for t in range(T - 1, -1 if K is None else max(-1, T - 1 - K), -1):
-            yol.append((t, c))
-            c = c - self.RM[t] * self.P[w[t]]
-        return yol
+    def CM(self, tokens, K=None):
+        """Countermarch: tek dizi tokens (T,), son halkadan K adim geri (None: basa kadar).
+        Her adim: C_(t-1) = C_t - RM_t*P[tokens_t].  Doner: path = [(position, C_position)], yeniden eskiye."""
+        length = tokens.shape[0]
+        link, path = self.C(tokens[None])[0, -1], []
+        for position in range(length - 1, -1 if K is None else max(-1, length - 1 - K), -1):
+            path.append((position, link))
+            link = link - self.RM[position] * self.P[tokens[position]]
+        return path

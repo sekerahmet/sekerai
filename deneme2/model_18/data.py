@@ -111,11 +111,11 @@ def _uret(m, sorular, aygit, parca=4096):
 
 
 def sor(m, sorular, aygit="cuda", en=20000):
-    """TEK OLCUT: soru soruldu, cevap DOGRU MU.  Doner: sayi, uzunluk, ilk, n.
+    """TEK OLCUT: soru soruldu, cevap DOGRU MU.  Doner: accuracy, length_ok, first_digit, n.
 
-      sayi      cevap BIREBIR ve EOS dogru yerde
-      uzunluk   rakamlardan bagimsiz, DOGRU YERDE durdu mu
-      ilk       cevabin ILK rakami dogru mu (en buyuk basamak)"""
+      accuracy     cevap BIREBIR ve EOS dogru yerde
+      length_ok    rakamlardan bagimsiz, DOGRU YERDE durdu mu
+      first_digit  cevabin ILK rakami dogru mu (en buyuk basamak)"""
     sorular = _ornekle(sorular, en)
     cik, K = _uret(m, sorular, aygit)
     dog = uzn = ilk = 0
@@ -126,7 +126,7 @@ def sor(m, sorular, aygit="cuda", en=20000):
         dog += dur == len(hedef) and c[:len(hedef)] == hedef
         ilk += c[0] == hedef[0]
     n = len(cik)
-    return {"sayi": dog / n, "uzunluk": uzn / n, "ilk": ilk / n, "n": n}
+    return {"accuracy": dog / n, "length_ok": uzn / n, "first_digit": ilk / n, "n": n}
 
 
 def cevap_ce(m, WMH, aygit="cuda", parca=4096):
@@ -145,16 +145,18 @@ def cevap_ce(m, WMH, aygit="cuda", parca=4096):
 
 
 def olcut(eg, tu, aygit="cuda", en=2000):
-    """train'in bekledigi bicim: olcut(m, "eg"|"dg", tam) -> dict.
-    dogruluk = sor'un SAYI'si; ce = cevap CE'si (ayni alt kume)."""
-    kume = {"eg": eg, "dg": tu}
+    """train'in bekledigi metric(m, "train"|"heldout", full) -> dict.
+      accuracy  ANA OLCUT: cevap birebir dogru (exact match)
+      ce        cevap token'larinda kayip (ayni alt kume)
+      diag      ANALIZ icin, matematige ozgu: first_digit, length_ok"""
+    kume = {"train": eg, "heldout": tu}
 
-    def f(m, taraf, tam=False):
-        s = kume[taraf]
-        alt = _ornekle(s, len(s) if tam else en)
+    def f(m, side, full=False):
+        s = kume[side]
+        alt = _ornekle(s, len(s) if full else en)
         r = sor(m, alt, aygit=aygit, en=len(alt))
-        return {"dogruluk": r["sayi"], "ce": cevap_ce(m, pencereler(alt), aygit),
-                "uzunluk": r["uzunluk"], "ilk": r["ilk"]}
+        return {"accuracy": r["accuracy"], "ce": cevap_ce(m, pencereler(alt), aygit),
+                "diag": {"first_digit": r["first_digit"], "length_ok": r["length_ok"]}}
 
     return f
 

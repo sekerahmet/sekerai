@@ -30,13 +30,20 @@ def _dizi(s):
     return torch.tensor([VM.AD.index(a) if a != "E" else VM.EOS for a in s])
 
 
-def _temizle():
-    for x in (TR.GUNLUK, TR.SONUC, TR.DURDUR, TR._DISKE):
-        x.clear()
+def _kos(ad, kok, data, n_vocab, adim, metric=None, resume=None, lr=2e-3):
+    """_run'i kucuk PV ile, ayni iplikte kosturur; Run'i doner."""
+    r = TR.RUNS[ad] = TR.Run(ad, kok)
+    TR._run(r, data, n_vocab, metric or _sifir, "cpu", lr, adim, 0, 8,
+            2, 2, resume=resume, **KUCUK)
+    return r
 
 
-def _agirlik(ad):
-    return {k: v.clone() for k, v in TR.SONUC[ad]["model"].state_dict().items()}
+def _sifir(m, side, full=False):
+    return {"accuracy": 0.0}
+
+
+def _agirlik(r):
+    return {k: v.clone() for k, v in r.result["model"].state_dict().items()}
 
 
 # ============================================================
@@ -101,10 +108,10 @@ def t_gradyan():
     kapi("gradyan yalniz aktif vektorlere", ok, "%d layer" % m.layers)
 
 
-# --- 7.  PARAMETRE == hesap: vectors x 2 x d x layers + layers (S_v) + 1 (S_p)
+# --- 7.  PARAMETRE == hesap: vectors x 2 x d x layers + layers (S_v)
 def t_parametre():
     m = PV(VM.N)
-    bek = m.vectors * 2 * m.d * m.layers + m.layers + 1
+    bek = m.vectors * 2 * m.d * m.layers + m.layers
     par = sum(p.numel() for p in m.parameters())
     sabit = sorted(a for a, _ in m.named_buffers())
     kapi("parametre == hesap; P ve RM sabit", par == bek and sabit == ["P", "RM"],
@@ -132,28 +139,21 @@ def t_mask():
 # TRAIN -- surdurme ve durdurma (model_17'den).
 # ============================================================
 def _veri():
-    """Kucuk rastgele egitim verisi: (N, W, M)."""
+    """Kucuk rastgele egitim verisi: (N, (W, M, H)); her konum hedef."""
     N, T, n = 20, 16, 64
     g = torch.Generator().manual_seed(7)
-    return (N, torch.randint(0, N, (n, T), generator=g),
-            torch.ones(n, T, dtype=torch.bool))
+    M = torch.ones(n, T, dtype=torch.bool)
+    return N, (torch.randint(0, N, (n, T), generator=g), M, M)
 
 
 # --- 9.  SURDURME == KESINTISIZ (kural 1: uzatma surdurmedir)
 def t_surdurme():
-    N, W, M = _veri()
-
-    def kos(ad, kok, adim, surdur=None):
-        _temizle()
-        TR._kos(ad, (W, M), N, lambda *a, **k: 0.0, "cpu", kok, None,
-                2e-3, 0.01, adim, 0, 8, 2, 2, surdur, False, **KUCUK)
-        return _agirlik(ad)
-
+    N, data = _veri()
     kok = tempfile.mkdtemp()
     try:
-        A = kos("KESINTISIZ", kok, 8)
-        kos("BOLUK", kok, 4)
-        B = kos("BOLUK", kok, 8, surdur=kok + "/BOLUK/t4.pt")
+        A = _agirlik(_kos("KESINTISIZ", kok, data, N, 8))
+        _kos("BOLUK", kok, data, N, 4)
+        B = _agirlik(_kos("BOLUK", kok, data, N, 8, resume=kok + "/BOLUK/t4.pt"))
         en = max(float((A[k] - B[k]).abs().max()) for k in A)
     finally:
         shutil.rmtree(kok, ignore_errors=True)
@@ -162,22 +162,22 @@ def t_surdurme():
 
 # --- 10.  DURDUR: son tamamlanan adim yazilir; durdur + surdur == kesintisiz
 def t_durdur():
-    N, W, M = _veri()
+    N, data = _veri()
     kok = tempfile.mkdtemp()
 
     def kos(ad, adim, surdur=None, dur=None, lr=2e-3):
-        _temizle()
+        r = TR.RUNS[ad] = TR.Run(ad, kok)
         say = [0]
 
-        def olcut(m, taraf, tam=False):
+        def metric(m, side, full=False):
             say[0] += 1
             if dur is not None and say[0] == 2 * (dur + 1):
-                TR.DURDUR.add(ad)               # `dur` adiminin olcumu bitti
-            return 0.0
+                r.stop()                        # `dur` adiminin olcumu bitti
+            return {"accuracy": 0.0}
 
-        TR._kos(ad, (W, M), N, olcut, "cpu", kok, None, lr, 0.01,
-                adim, 0, 8, 1, 3, surdur, False, **KUCUK)
-        return _agirlik(ad)
+        TR._run(r, data, N, metric, "cpu", lr, adim, 0, 8, 1, 3,
+                resume=surdur, **KUCUK)
+        return _agirlik(r)
 
     try:
         A = kos("KESINTISIZ", 8)
@@ -252,12 +252,11 @@ class _Kahin(torch.nn.Module):
 def t_mat_sor():
     s = [(1, 1), (21, 23), (472, 182), (1, 1, 5), (23, 1, 120), (500, 500, 500)]
     d, e, f = (VM.sor(_Kahin(k), s, aygit="cpu") for k in ("dogru", "erken", "fazla"))
-    ok = ((d["sayi"], d["uzunluk"], d["ilk"]) == (1.0, 1.0, 1.0)
-          and (e["sayi"], e["uzunluk"], e["ilk"]) == (0.0, 0.0, 0.0)
-          and (f["sayi"], f["uzunluk"], f["ilk"]) == (0.0, 0.0, 1.0))
+    alan = lambda r: (r["accuracy"], r["length_ok"], r["first_digit"])
+    ok = (alan(d) == (1.0, 1.0, 1.0) and alan(e) == (0.0, 0.0, 0.0)
+          and alan(f) == (0.0, 0.0, 1.0))
     kapi("sor: dogru 1, erken 0, fazla rakam 0", ok,
-         "dogru %s  erken %s  fazla %s" % tuple(
-             (r["sayi"], r["uzunluk"], r["ilk"]) for r in (d, e, f)))
+         "dogru %s  erken %s  fazla %s" % tuple(alan(r) for r in (d, e, f)))
 
 
 # --- 13.  BASAMAK: saga hizali, birler AYRI okunur
@@ -282,10 +281,8 @@ def t_mat_egitim():
     W, M, H = VM.pencereler(sorular)
 
     def kos(ad, kok, adim, surdur=None):
-        _temizle()
-        TR._kos(ad, (W, M, H), VM.N, lambda *a, **k: 0.0, "cpu", kok, None,
-                2e-3, 0.01, adim, 0, 8, 2, 2, surdur, False, **KUCUK)
-        return _agirlik(ad), TR.SONUC[ad]["kayip_iz"]
+        r = _kos(ad, kok, (W, M, H), VM.N, adim, resume=surdur)
+        return _agirlik(r), r.result["step_losses"]
 
     kok = tempfile.mkdtemp()
     try:
