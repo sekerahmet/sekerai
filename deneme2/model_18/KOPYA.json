@@ -1,0 +1,15 @@
+{
+  "ebeveyn": "model_17",
+  "not": "Kullanici, 24 Eylul: 'bunları kopyala ama matematik kopyala veri olarak ve adını data yap eğitim değil artık train notebook tests'. model_18 sifirdan yazilan PV mimarisi; ebeveynden yalniz matematik verisi, egitim dongusu, kapilar ve defter tasindi, yeni adlarla.",
+  "beyan": {
+    "model_18.py": "PV (nokta ve vektor) SIFIRDAN yazildi; ebeveynin Yol, DT, durum_gecisi ve GeciciBellek kodu bilerek TASINMADI.",
+    "train_18.py": "train.py olarak TASINDI; Yol/DT dallari, bos_kimligi ve hikaye alanlari cikti, PV kuruldu, kayip m.loss ile.",
+    "test_18.py": "tests.py olarak yeniden yazildi; PV kapilari yeni, surdurme/durdur/matematik/defter kapilari ebeveynden tasindi. Yol, DT ve gecici bellek kapilari o mimarilerle birlikte dustu.",
+    "veri_mat17.py": "data.py olarak TASINDI; SON yerel tanimlandi (veri_t17 import edilmez), m.dizi -> m.scoreboard.",
+    "veri_t17.py": "TASINMADI: TinyStories verisi; model_18 yalniz matematik.",
+    "olcme_18.py": "TASINMADI: hikaye olcumu; matematik olcutu data.py icinde (sor, cevap_ce, basamak).",
+    "sinav_18.py": "TASINMADI: hikaye sinavi.",
+    "konus.py": "TASINMADI: hikaye uretimi icin konusma araci.",
+    "konus.bat": "TASINMADI: konus.py'nin kisayolu."
+  }
+}
