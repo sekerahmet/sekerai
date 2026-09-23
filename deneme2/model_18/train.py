@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
-"""train -- PV'nin egitim dongusu: optimizer, yigin, kayit, SURDURME (model_17 train_17'den).
+"""train -- PV'nin egitim dongusu: optimizer, batch, kayit, SURDURME (model_17 train_17'den).
 
 GOREV SONRAKI TOKEN, kayip YALNIZ hedeflerde:
 
-    loss = m.loss(w, H)     w (B,T) pencere, H hedef maskesi (cevabin rakamlari ve EOS)
+    loss = model.loss(tokens, targets_mask)    tokens (B,T) sorular,
+                                                targets_mask cevabin rakamlari ve EOS
 
-data = (W, M, H): W (n, T) pencereler, M dolgu maskesi (yalniz gunluk icin;
-PV'de konumlar birbirini gormez), H hedef maskesi.
+data = (questions, filled_mask, targets_mask): questions (n, T) sorular,
+filled_mask gercek token'lar (yalniz gunluk icin; PV'de konumlar birbirini
+gormez), targets_mask kayba sayilacak hedefler.
 
 Adam, weight decay YOK.  Kullanici, 24 Eylul: "weight decay sanki anlamsiz
 gerek yok" -- start ve finish nokta; onlari 0'a cekmenin anlami yok.
@@ -32,10 +34,10 @@ from model_18 import PV
 
 LR = 0.002       # model_17'den: rakam tokenli veride 0,001/0,002/0,004 ayirt edilemedi
 BATCH = 512
-RUNS = {}        # ad -> Run
+RUNS = {}        # run_name -> Run
 
 # Surdurmede paketteki degerle AYNI olmali.  Farkliysa yorunge sessizce
-# baskalasir: opt.load_state_dict lr'yi paketten alir, gunluk cagriyi yazar.
+# baskalasir: optimizer.load_state_dict lr'yi paketten alir, gunluk cagriyi yazar.
 MUST_MATCH = ("arch", "n", "T", "batch", "lr", "seed", "d", "vectors",
               "active", "layers", "t_max", "data_fingerprint", "vocab")
 
@@ -56,11 +58,11 @@ class Run:
     def folder(self):
         return f"{self.root}/{self.name}"
 
-    def note(self, s):
+    def note(self, line):
         """Satir hem kosunun gunlugune (show_log) hem disk kuyruguna."""
-        s = f"[{self.name}] {s}"
-        self.log.append(s)
-        self._pending.append(s)
+        line = f"[{self.name}] {line}"
+        self.log.append(line)
+        self._pending.append(line)
 
     def flush(self):
         """Yeni satirlari gunluk.txt'ye EKLER -- uzerine yazmaz."""
@@ -70,13 +72,13 @@ class Run:
                 f.write("\n".join(self._pending) + "\n")
         self._pending.clear()
 
-    def save(self, pkg):
+    def save(self, package):
         """Anlik goruntuyu diske yaz -- KOSUNUN ICINDE.  Eskiler silinmez."""
         if not self.root:
             return
         os.makedirs(self.folder, exist_ok=True)
-        torch.save(pkg, f"{self.folder}/t{pkg['step']}.pt")
-        torch.save(pkg, f"{self.root}/model_{self.name}.pt")
+        torch.save(package, f"{self.folder}/t{package['step']}.pt")
+        torch.save(package, f"{self.root}/model_{self.name}.pt")
 
     def archive_old(self):
         """Ayni adla yeni kosu eskiyi EZMEZ, yan klasore TASIR."""
@@ -94,7 +96,7 @@ class Run:
         self.stop_requested = True
 
 
-def _no_metric(m, side, full=False):
+def _no_metric(model, side, full=False):
     raise RuntimeError("metric verilmedi -- start(..., metric=...) sart")
 
 
@@ -102,191 +104,198 @@ def _ppl(ce):
     return "      -" if ce is None else f"{math.exp(ce):7.2f}"
 
 
-def _fingerprint(*t):
+def _fingerprint(*tensors):
     """Egitim tensorlerinin parmak izi -- surdurme AYNI veriyle mi."""
     h = hashlib.sha256()
-    for x in t:
+    for x in tensors:
         h.update(f"{tuple(x.shape)} {x.dtype}".encode())
         h.update(x.contiguous().numpy())
     return h.hexdigest()[:16]
 
 
-def _snapshot(m, opt, sampler, info):
+def _snapshot(model, optimizer, sampler, record):
     """TAM anlik goruntu -- surdurmeye yeten her sey."""
-    return dict(info, weights=m.state_dict(), opt=opt.state_dict(),
+    return dict(record, weights=model.state_dict(), opt=optimizer.state_dict(),
                 rng=torch.get_rng_state(), sampler_rng=sampler.get_state())
 
 
-def _check_resume(pkg, fixed):
+def _check_resume(package, fixed):
     """Surdurme paketi bu cagriyla AYNI kosu mu?  Degilse kosu BASLAMAZ."""
     short = lambda v: f"<{len(v)} birim>" if isinstance(v, list) else repr(v)
-    diffs = [f"{a}: paket {short(pkg[a])}, cagri {short(fixed[a])}"
+    diffs = [f"{a}: paket {short(package[a])}, cagri {short(fixed[a])}"
              for a in MUST_MATCH
-             if pkg.get(a) is not None and fixed.get(a) is not None
-             and pkg[a] != fixed[a]]
+             if package.get(a) is not None and fixed.get(a) is not None
+             and package[a] != fixed[a]]
     if diffs:
         raise ValueError("surdurme paketi bu cagriyla uyusmuyor -- "
                          + "; ".join(diffs))
 
 
-def _header(info):
+def _header(record):
     """Sutun adlari; diag sutunlari verinin metric'inden gelir."""
     return ("  step     loss    train    heldout      ppl  "
-            + "".join(f"{k:>12}" for k in info["heldout_diag"]) + "       s")
+            + "".join(f"{k:>12}" for k in record["heldout_diag"]) + "       s")
 
 
-def _line(info, elapsed, mark=""):
-    return (f"{info['step']:6d}  {info['loss']:7.3f}  {info['train_acc']:7.4f}  "
-            f"{info['heldout_acc']:9.4f}  {_ppl(info['heldout_ce'])}  "
-            + "".join(f"{v:12.4f}" for v in info["heldout_diag"].values())
+def _line(record, elapsed, mark=""):
+    return (f"{record['step']:6d}  {record['loss']:7.3f}  {record['train_acc']:7.4f}  "
+            f"{record['heldout_acc']:9.4f}  {_ppl(record['heldout_ce'])}  "
+            + "".join(f"{v:12.4f}" for v in record["heldout_diag"].values())
             + f"  {elapsed:6.0f}{mark}")
 
 
-def _run(r, data, n_vocab, metric, device, lr, steps, seed, batch,
+def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
          eval_every, save_every, resume=None, compile=False, vocab=None,
          extra=None, d=M18.d, vectors=M18.VECTORS, active=M18.ACTIVE,
          layers=M18.LAYERS, t_max=M18.T_MAX):
     torch.manual_seed(seed)
-    m = PV(n_vocab, d=d, vectors=vectors, active=active, layers=layers,
-           t_max=t_max, seed=seed).to(device)
+    model = PV(n_vocab, d=d, vectors=vectors, active=active, layers=layers,
+               t_max=t_max, seed=seed).to(device)
     # torch.compile: eski mimaride 3,90 kat olculdu (model_17 train_17); PV'de OLCULMEDI.
-    loss_fn = torch.compile(m.loss) if compile else m.loss
+    loss_fn = torch.compile(model.loss) if compile else model.loss
     if compile:
-        r.note("torch.compile ACIK -- ilk adim DERLEME yuzunden yavas")
-    opt = torch.optim.Adam(m.parameters(), lr=lr)
+        run.note("torch.compile ACIK -- ilk adim DERLEME yuzunden yavas")
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     sampler = torch.Generator(device="cpu").manual_seed(seed)
 
-    # PENCERELER CPU'DA KALIR, yigin yigin tasinir.
-    W, M, H = (x.cpu() for x in data)
-    n, T = W.shape
-    assert T <= t_max, f"pencere {T} > t_max {t_max}"
-    n_params = sum(p.numel() for p in m.parameters())
-    fixed = dict(extra or {}, arch=m.arch, n=n_vocab, d=d, vectors=vectors,
+    # SORULAR CPU'DA KALIR, batch batch tasinir.
+    questions, filled_mask, targets_mask = (x.cpu() for x in data)
+    n_questions, max_length = questions.shape
+    assert max_length <= t_max, f"soru {max_length} token > t_max {t_max}"
+    n_params = sum(p.numel() for p in model.parameters())
+    fixed = dict(extra or {}, arch=model.arch, n=n_vocab, d=d, vectors=vectors,
                  active=active, layers=layers, t_max=t_max, lr=lr,
-                 seed=seed, batch=batch, T=T, n_params=n_params, compile=compile,
-                 data_fingerprint=_fingerprint(W, M, H),
+                 seed=seed, batch=batch, T=max_length, n_params=n_params,
+                 compile=compile,
+                 data_fingerprint=_fingerprint(questions, filled_mask, targets_mask),
                  vocab=None if vocab is None else [str(a) for a in vocab])
 
-    last, prev, loss_t = -1, None, None   # son TAMAMLANAN adim
+    last_step, prev_step_losses, loss = -1, None, None   # son TAMAMLANAN adim
     if resume:
-        pkg = torch.load(resume, weights_only=False, map_location=device)
-        _check_resume(pkg, fixed)
-        fixed["vocab"] = fixed["vocab"] or pkg.get("vocab")
-        m.load_state_dict(pkg["weights"])
-        opt.load_state_dict(pkg["opt"])
-        torch.set_rng_state(pkg["rng"].cpu())
-        sampler.set_state(pkg["sampler_rng"].cpu())
-        last, prev = pkg["step"], pkg.get("step_losses")
-        loss_t = torch.tensor(pkg["loss"])      # yeni adim atilmazsa pakettekini tasir
-        r.note(f"SURDURULUYOR  {os.path.basename(resume)}  adim {last}")
-    last_saved = last                     # paket o adimin kaydi zaten
+        package = torch.load(resume, weights_only=False, map_location=device)
+        _check_resume(package, fixed)
+        fixed["vocab"] = fixed["vocab"] or package.get("vocab")
+        model.load_state_dict(package["weights"])
+        optimizer.load_state_dict(package["opt"])
+        torch.set_rng_state(package["rng"].cpu())
+        sampler.set_state(package["sampler_rng"].cpu())
+        last_step, prev_step_losses = package["step"], package.get("step_losses")
+        loss = torch.tensor(package["loss"])     # yeni adim atilmazsa pakettekini tasir
+        run.note(f"SURDURULUYOR  {os.path.basename(resume)}  adim {last_step}")
+    last_saved_step = last_step           # paket o adimin kaydi zaten
 
     # HER ADIMIN kaybi: egrinin tam cozunurlugu.  GPU'da birikir (adim basina
     # senkron yok), olcum noktasinda pakete girer, surdurmede geri yuklenir.
-    step_losses = torch.full((max(steps, last) + 1,), float("nan"), device=device)
-    if prev is not None:
-        step_losses[:len(prev)] = prev.to(device)
+    step_losses = torch.full((max(steps, last_step) + 1,), float("nan"), device=device)
+    if prev_step_losses is not None:
+        step_losses[:len(prev_step_losses)] = prev_step_losses.to(device)
 
-    fill = float(M.sum()) / M.numel()
-    r.note(f"pencere {n:,} x {T}   {n * T:,} yuva   dolgu %{100 * (1 - fill):.1f}")
-    r.note(f"arch {m.arch}  d {d} vectors {vectors} active {active} "
-           f"layers {layers}  lr {lr} seed {seed}  sozluk {n_vocab}  "
-           f"parametre {n_params:,}")
-    r.note(f"yigin {batch}   epok = {n / batch:,.0f} adim   veri izi "
-           f"{fixed['data_fingerprint']}   olcum her {eval_every}   yedek her {save_every}")
-    r.note("OLCUT: accuracy (train / heldout); kayip yalniz hedeflerde")
-    r.flush()
+    fill_ratio = float(filled_mask.sum()) / filled_mask.numel()
+    run.note(f"sorular {n_questions:,} x {max_length}   dolgu %{100 * (1 - fill_ratio):.1f}")
+    run.note(f"arch {model.arch}  d {d} vectors {vectors} active {active} "
+             f"layers {layers}  lr {lr} seed {seed}  sozluk {n_vocab}  "
+             f"parametre {n_params:,}")
+    run.note(f"batch {batch}   epok = {n_questions / batch:,.0f} adim   veri izi "
+             f"{fixed['data_fingerprint']}   olcum her {eval_every}   yedek her {save_every}")
+    run.note("OLCUT: accuracy (train / heldout); kayip yalniz hedeflerde")
+    run.flush()
 
-    def evaluate(i, full=False):
-        e, h = metric(m, "train", full=full), metric(m, "heldout", full=full)
-        info = dict(fixed, step=i, loss=float(loss_t.detach()),
-                    step_losses=step_losses[:i + 1].cpu(),
-                    train_acc=e["accuracy"], heldout_acc=h["accuracy"],
-                    train_ce=e.get("ce"), heldout_ce=h.get("ce"),
-                    train_diag=e.get("diag", {}), heldout_diag=h.get("diag", {}))
-        if not r.result:
-            r.note(_header(info))
-        r.result = dict(info, model=m)
-        return info
+    def evaluate(step, full=False):
+        train_result = metric(model, "train", full=full)
+        heldout_result = metric(model, "heldout", full=full)
+        record = dict(fixed, step=step, loss=float(loss.detach()),
+                      step_losses=step_losses[:step + 1].cpu(),
+                      train_acc=train_result["accuracy"],
+                      heldout_acc=heldout_result["accuracy"],
+                      train_ce=train_result.get("ce"), heldout_ce=heldout_result.get("ce"),
+                      train_diag=train_result.get("diag", {}),
+                      heldout_diag=heldout_result.get("diag", {}))
+        if not run.result:
+            run.note(_header(record))
+        run.result = dict(record, model=model)
+        return record
 
-    # Yedek, o adimin opt.step()'i BITTIKTEN sonra yazilir.  Yani t<N>
+    # Yedek, o adimin optimizer.step()'i BITTIKTEN sonra yazilir.  Yani t<N>
     # N adimi ICERIR ve surdurme N+1'den baslar; N'den baslamak o adimi
     # IKI KEZ atar ve yorunge kayar (tests: surdurme == kesintisiz).
-    t0, info = time.time(), None
-    for i in range(last + 1, steps + 1):
-        if r.stop_requested:
+    started_at, record = time.time(), None
+    for step in range(last_step + 1, steps + 1):
+        if run.stop_requested:
             break
-        j = torch.randint(0, n, (batch,), generator=sampler)
-        opt.zero_grad()
-        loss_t = loss_fn(W[j].to(device, non_blocking=True).long(),
-                         H[j].to(device, non_blocking=True))
-        step_losses[i] = loss_t.detach()
-        loss_t.backward()
-        opt.step()
-        last = i
+        batch_ids = torch.randint(0, n_questions, (batch,), generator=sampler)
+        optimizer.zero_grad()
+        loss = loss_fn(questions[batch_ids].to(device, non_blocking=True).long(),
+                       targets_mask[batch_ids].to(device, non_blocking=True))
+        step_losses[step] = loss.detach()
+        loss.backward()
+        optimizer.step()
+        last_step = step
         # yedek eval_every'nin katina bagli DEGIL: 100 ve 250 -> 250'de yazar.
-        if i % eval_every == 0 or i % save_every == 0:
-            info, mark = evaluate(i), ""
-            if i % save_every == 0:
-                r.save(_snapshot(m, opt, sampler, info))
-                last_saved, mark = i, "  yedek"
-            r.note(_line(info, time.time() - t0, mark))
-            r.flush()
+        if step % eval_every == 0 or step % save_every == 0:
+            record, mark = evaluate(step), ""
+            if step % save_every == 0:
+                run.save(_snapshot(model, optimizer, sampler, record))
+                last_saved_step, mark = step, "  yedek"
+            run.note(_line(record, time.time() - started_at, mark))
+            run.flush()
 
-    if last < 0:
-        r.note("DURDURULDU -- hic adim atilmadi, kayit yok")
-        r.flush()
+    if last_step < 0:
+        run.note("DURDURULDU -- hic adim atilmadi, kayit yok")
+        run.flush()
         return
-    _finish(r, m, opt, sampler, evaluate, info, last, last_saved, t0)
+    _finish(run, model, optimizer, sampler, evaluate, record, last_step,
+            last_saved_step, started_at)
 
 
-def _finish(r, m, opt, sampler, evaluate, info, last, last_saved, t0):
+def _finish(run, model, optimizer, sampler, evaluate, record, last_step,
+            last_saved_step, started_at):
     """Kosunun sonu.  ONCE KAYDET, SONRA OLC: tam olcum uzun surebilir; o arada
     oturum duserse son yedekten beri yapilan is giderdi."""
-    if last_saved != last:
-        if info is None or info["step"] != last:
-            info = evaluate(last)
-        r.save(_snapshot(m, opt, sampler, info))
-        r.note(_line(info, time.time() - t0, "  yedek"))
-    if r.stop_requested:
+    if last_saved_step != last_step:
+        if record is None or record["step"] != last_step:
+            record = evaluate(last_step)
+        run.save(_snapshot(model, optimizer, sampler, record))
+        run.note(_line(record, time.time() - started_at, "  yedek"))
+    if run.stop_requested:
         # Durdurmanin amaci GPU'yu HEMEN birakmak; tam olcum ATLANIR.
-        r.result = dict(info or r.result, model=m, done=True, stopped=True)
-        r.note(f"DURDURULDU  son tamamlanan adim {last} kaydedildi  -- tam olcum ATLANDI")
-        r.flush()
+        run.result = dict(record or run.result, model=model, done=True, stopped=True)
+        run.note(f"DURDURULDU  son tamamlanan adim {last_step} kaydedildi"
+                 "  -- tam olcum ATLANDI")
+        run.flush()
         return
-    info = dict(evaluate(last, full=True), done=True)
-    r.result = dict(info, model=m)
-    r.save(_snapshot(m, opt, sampler, info))
-    r.note(f"BITTI   train {info['train_acc']:.4f}   heldout "
-           f"{info['heldout_acc']:.4f}   ppl {_ppl(info['heldout_ce']).strip()}"
-           f"   ({time.time() - t0:.0f} sn)")
-    r.flush()
+    record = dict(evaluate(last_step, full=True), done=True)
+    run.result = dict(record, model=model)
+    run.save(_snapshot(model, optimizer, sampler, record))
+    run.note(f"BITTI   train {record['train_acc']:.4f}   heldout "
+             f"{record['heldout_acc']:.4f}   ppl {_ppl(record['heldout_ce']).strip()}"
+             f"   ({time.time() - started_at:.0f} sn)")
+    run.flush()
 
 
-def _run_safe(r, **k):
+def _run_safe(run, **settings):
     """_run'i sarar: iplik olurse show_log bunu GORSUN, kosu suruyor sanilmasin."""
     try:
-        _run(r, **k)
+        _run(run, **settings)
     except Exception:
-        tb = traceback.format_exc()
-        for s in tb.rstrip().splitlines():
-            r.note("HATA  " + s)
-        r.result = dict(r.result, error=tb)
+        error = traceback.format_exc()
+        for line in error.rstrip().splitlines():
+            run.note("HATA  " + line)
+        run.result = dict(run.result, error=error)
         try:
-            r.flush()
+            run.flush()
         except Exception:
             pass
 
 
-def start(run, data, n_vocab, *, metric=_no_metric, device="cuda", root=None,
+def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=None,
           extra=None, lr=LR, steps=20000, seed=0, batch=BATCH,
           eval_every=100, save_every=500, resume=None, compile=True, vocab=None,
           d=M18.d, vectors=M18.VECTORS, active=M18.ACTIVE, layers=M18.LAYERS,
           t_max=M18.T_MAX):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
-    data        (W, M, H) -- W (n, T) pencereler, M dolgu maskesi, H hedef maskesi
-    metric      metric(m, "train"|"heldout", full=False) -> dict: accuracy (ANA OLCUT),
+    data        (questions, filled_mask, targets_mask)
+    metric      metric(model, "train"|"heldout", full=False) -> dict: accuracy (ANA OLCUT),
                 ce, diag (veriye ozgu analiz olculeri; gunlukte sutun olur)
     eval_every  olcum araligi;  save_every  anlik goruntu araligi -- birbirinden BAGIMSIZ.
                 HER ADIMIN kaybi ikisinden de bagimsiz: pakette `step_losses`.
@@ -298,40 +307,40 @@ def start(run, data, n_vocab, *, metric=_no_metric, device="cuda", root=None,
                 Ilk adim derleme yuzunden yavas.
     d, vectors, active, layers, t_max   PV'nin ayarlari (model_18)
     """
-    old = RUNS.get(run)
+    old = RUNS.get(run_name)
     if old is not None and old.alive:
-        raise RuntimeError(f"{run} hala kosuyor -- once stop('{run}')")
-    r = RUNS[run] = Run(run, root)
+        raise RuntimeError(f"{run_name} hala kosuyor -- once stop('{run_name}')")
+    run = RUNS[run_name] = Run(run_name, root)
     if root is None:
-        r.note("UYARI: root YOK, agirlik KAYDEDILMIYOR")
+        run.note("UYARI: root YOK, agirlik KAYDEDILMIYOR")
     if not resume:
-        moved = r.archive_old()
+        moved = run.archive_old()
         if moved:
             print(f"  ESKI YEDEKLER KORUNDU -> {moved}/")
-            r.note(f"eski yedekler tasindi -> {moved}/")
-    r.thread = threading.Thread(target=_run_safe, args=(r,), daemon=True, kwargs=dict(
+            run.note(f"eski yedekler tasindi -> {moved}/")
+    run.thread = threading.Thread(target=_run_safe, args=(run,), daemon=True, kwargs=dict(
         data=data, n_vocab=n_vocab, metric=metric, device=device, lr=lr,
         steps=steps, seed=seed, batch=batch, eval_every=eval_every,
         save_every=save_every, resume=resume, compile=compile, vocab=vocab,
         extra=extra, d=d, vectors=vectors, active=active, layers=layers,
         t_max=t_max))
-    r.thread.start()
-    return f"{run} basladi" + (f"  ({os.path.basename(resume)}'den)" if resume else "")
+    run.thread.start()
+    return f"{run_name} basladi" + (f"  ({os.path.basename(resume)}'den)" if resume else "")
 
 
 def show_log(last=40):
     """Her kosunun durumu ve son satirlari.  HICBIR SEY KOSTURMAZ (kural 8)."""
-    for r in RUNS.values():
-        state = ("CANLI" if r.alive else "HATA" if r.result.get("error") else "bitti")
-        print(f"{r.name}: {state}   gunluk {len(r.log)} satir"
-              + ("   DURDUR istendi" if r.stop_requested else ""))
-        for s in r.log[-last:]:
-            print(s)
+    for run in RUNS.values():
+        state = ("CANLI" if run.alive else "HATA" if run.result.get("error") else "bitti")
+        print(f"{run.name}: {state}   gunluk {len(run.log)} satir"
+              + ("   DURDUR istendi" if run.stop_requested else ""))
+        for line in run.log[-last:]:
+            print(line)
 
 
-def stop(run=None):
+def stop(run_name=None):
     """Dur istegi: adi verilen kosuya, yoksa canli olanlarin hepsine.
     Tam olcum ATLANIR -- durdurmanin amaci GPU'yu hemen birakmak."""
-    for r in ([RUNS[run]] if run else [r for r in RUNS.values() if r.alive]):
-        r.stop()
+    for run in ([RUNS[run_name]] if run_name else [r for r in RUNS.values() if r.alive]):
+        run.stop()
     print("durdurma istendi:", sorted(r.name for r in RUNS.values() if r.stop_requested))
