@@ -16,6 +16,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import olcme_17 as OL                                           # noqa: E402
 import train_17 as TR                                           # noqa: E402
+import veri_mat17 as VM                                         # noqa: E402
 import veri_t17 as V                                            # noqa: E402
 from model_17 import Yol, DT, durum_gecisi                      # noqa: E402
 
@@ -106,13 +107,13 @@ def t_akis():
         n300 = sum(1 for _ in V._hikayeler_kar(yol, 100, 300))
     finally:
         shutil.rmtree(d, ignore_errors=True)
-    say = int((a == ix[V.HIKAYE]).sum())
+    say = int((a == ix[V.SON]).sum())
     kapi("akis int16, hikaye sayisi, okuma siniri",
          a.dtype == np.int16 and say == len(hik) and n300 == 10,
          "%d hikaye; 300 karakterde %d (10 olmali)" % (say, n300))
 
 
-# --- 4.  HER HIKAYE BIR PENCERE, <hikaye> BASTA ve SONDA
+# --- 4.  HER HIKAYE BIR PENCERE, <eos> BASTA ve SONDA
 def t_pencere():
     hk, dl = 1, 0
     a = np.array([5, 6, hk, 7, 8, 9, hk, 3, hk], dtype=np.int16)
@@ -121,7 +122,7 @@ def t_pencere():
           and list(P[1]) == [hk, 7, 8, 9, hk] and list(P[2][:3]) == [hk, 3, hk]
           and (P[~M] == dl).all())
     P4, _ = V.pencere(a, 4, None, hk, dl)           # L+2 > T olan ATILIR
-    kapi("pencere <hikaye> basta ve sonda", ok and len(P4) == 2,
+    kapi("pencere <eos> basta ve sonda", ok and len(P4) == 2,
          "%d pencere; T=4'te %d" % (len(P), len(P4)))
 
 
@@ -172,7 +173,7 @@ def t_coz():
     cumle = ('Lily\'s mom said, "Don\'t go!" (It was 3 o\'clock.) '
              'The girls\' toys -- café... ok?')
     j = V.JETON.findall(cumle)
-    ad = [V.DOLGU, V.HIKAYE, V.BILINMEYEN] + sorted(set(j) | {"'", '"', "s"})
+    ad = [V.DOLGU, V.SON, V.BILINMEYEN] + sorted(set(j) | {"'", '"', "s"})
     ix = {a: i for i, a in enumerate(ad)}
     ok = V.JETON.findall(V.coz(np.array([ix[t] for t in j]), ad)) == j
     r = np.random.default_rng(0)
@@ -312,12 +313,93 @@ def t_dt_surdurme():
     kapi("DT surdurme == kesintisiz", en == 0.0, "fark %.3e" % en)
 
 
+# ============================================================
+# DUZ MATEMATIK SINAVI (veri_mat17) -- olcutun KENDISI sinaniyor.
+# ============================================================
+# --- 13.  PENCERE: <eos> soru cevap <eos>, hedef YALNIZ cevapta
+def t_mat_pencere():
+    W, M, H = VM.pencereler([(1, 1), (21, 23)])
+    E_ = VM.EOS
+    ok = (W[0].tolist() == [E_, 1, 10, 1, 11, 2, E_, E_, E_, E_]
+          and W[1].tolist() == [E_, 2, 1, 10, 2, 3, 11, 4, 4, E_]
+          and M.sum(1).tolist() == [7, 10]
+          and torch.nonzero(H[0]).squeeze(1).tolist() == [5, 6]
+          and torch.nonzero(H[1]).squeeze(1).tolist() == [7, 8, 9])
+    kapi("matematik penceresi ve hedef maskesi", ok, "cevap + EOS hedef")
+
+
+class _Kahin(torch.nn.Module):
+    """Cevabi BILEN sahte model.  kip: dogru / erken (hemen EOS) /
+    fazla (rakamlardan sonra EOS yerine fazladan bir rakam)."""
+
+    def __init__(self, kip):
+        super().__init__()
+        self.kip = kip
+
+    def dizi(self, w, maske=None):
+        cik = torch.zeros(w.shape[0], w.shape[1], VM.N)
+        for r, s in enumerate(w.tolist()):
+            e = s.index(VM.ESIT)
+            ter, say = [], ""
+            for t in s[1:e]:
+                if t == VM.ARTI:
+                    ter, say = ter + [int(say)], ""
+                else:
+                    say += str(t)
+            hedef = VM.rak(sum(ter + [int(say)])) + [VM.EOS]
+            yazilan = len(s) - e - 1
+            if self.kip == "erken":
+                t = VM.EOS
+            elif self.kip == "fazla" and yazilan == len(hedef) - 1:
+                t = 7
+            else:
+                t = hedef[min(yazilan, len(hedef) - 1)]
+            cik[r, -1, t] = 10.0
+        return cik
+
+
+# --- 14.  OLCUT: dogruyu 1, erken durani ve fazla yazani 0 saymali
+def t_mat_sor():
+    s = [(1, 1), (21, 23), (472, 182), (1, 1, 5), (23, 1, 120), (500, 500, 500)]
+    d, e, f = (VM.sor(_Kahin(k), s, aygit="cpu") for k in ("dogru", "erken", "fazla"))
+    ok = ((d["sayi"], d["uzunluk"], d["ilk"]) == (1.0, 1.0, 1.0)
+          and (e["sayi"], e["uzunluk"], e["ilk"]) == (0.0, 0.0, 0.0)
+          and (f["sayi"], f["uzunluk"], f["ilk"]) == (0.0, 0.0, 1.0))
+    kapi("sor: dogru 1, erken 0, fazla rakam 0", ok,
+         "dogru %s  erken %s  fazla %s" % tuple(
+             (r["sayi"], r["uzunluk"], r["ilk"]) for r in (d, e, f)))
+
+
+# --- 15.  CEVAP MASKELI EGITIM: surdurme == kesintisiz
+def t_mat_egitim():
+    g = torch.Generator().manual_seed(21)
+    sorular = [tuple(x) for x in torch.randint(0, 60, (64, 2), generator=g).tolist()]
+    W, M, H = VM.pencereler(sorular)
+
+    def kos(ad, kok, adim, surdur=None):
+        _temizle()
+        TR._kos(ad, (W, M, H), VM.N, lambda *a, **k: 0.0, "cpu", kok, None,
+                8, 8, 2e-3, 0.01, adim, 0, 8, 2, 2, surdur, False,
+                mimari="dt", genislik=16, blok=2, bellek=32)
+        return _agirlik(ad)
+
+    kok = tempfile.mkdtemp()
+    try:
+        A = kos("KESINTISIZ", kok, 8)
+        kos("BOLUK", kok, 4)
+        B = kos("BOLUK", kok, 8, surdur=kok + "/BOLUK/t4.pt")
+        en = max(float((A[k] - B[k]).abs().max()) for k in A)
+    finally:
+        shutil.rmtree(kok, ignore_errors=True)
+    kapi("cevap maskeli egitim, surdurme", en == 0.0, "fark %.3e" % en)
+
+
 if __name__ == "__main__":
     print("test_17")
     for f in (t_surdurme, t_dolgu, t_akis, t_pencere, t_durdur, t_coz, t_olc,
               t_dt_parametre, t_dt_bardak, t_dt_delta, t_dt_nedensel,
               lambda: t_dolgu(_dt(), "DT maskeli kayip == hikaye hikaye"),
-              t_dt_surdurme):
+              t_dt_surdurme, t_mat_pencere, t_mat_sor, t_mat_egitim):
         f()
     print("\n%d GECTI   %d KALDI" % (len(GECTI), len(KALDI)))
     sys.exit(1 if KALDI else 0)

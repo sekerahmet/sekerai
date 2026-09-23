@@ -32,6 +32,7 @@ import traceback
 import math
 
 import torch
+import torch.nn.functional as F
 
 from model_17 import (Yol, DT, BOYUT, DURUM, LR, WD, DT_GENISLIK,
                       DT_DURUM, DT_BLOK, DT_BELLEK, DT_YANSIMA)
@@ -175,9 +176,19 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
     # model_13'ten sonra dusmustu: her kol kodunu ebeveyninden kopyaliyor
     # ve model_15 sifirdan yazildi.  Olculmus kazanc, olculmemis
     # varsayimlarla birlikte gitmisti.
-    egit = m.kayip
+    def _kayip(w, mk, hd):
+        """hd yoksa modelin kendi kaybi; varsa YALNIZ hd'deki hedefler sayilir
+        (matematikte: cevabin rakamlari ve EOS, soru rakamlari degil)."""
+        if hd is None:
+            return m.kayip(w, mk)
+        p = m.dizi(w, mk)[:, :-1].reshape(-1, m.n)
+        a = hd[:, 1:].reshape(-1)
+        k = F.cross_entropy(p, w[:, 1:].reshape(-1), reduction="none")
+        return (k * a).sum() / a.sum()
+
+    egit = _kayip
     if derle:
-        egit = torch.compile(m.kayip)
+        egit = torch.compile(_kayip)
         not_("torch.compile ACIK -- ilk adim DERLEME yuzunden yavas")
     dec = [p for p in m.parameters() if p.dim() >= 2]
     nodec = [p for p in m.parameters() if p.dim() < 2]
@@ -189,11 +200,14 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
     # tumu GPU'ya sigiyordu (253 MB) ama tam korpusta 8,8 GB eder ve
     # aktivasyonlarin yanina sigmaz.  Tasima maliyeti adim basina
     # 512x256 int32 = 0,5 MB -- olcusuz.
-    # EG ya (W, M) ya da tek W.  M dolgu maskesi -- HER HIKAYE BIR
-    # PENCERE oldugu icin hikaye bitince kalan yer <dolgu>.
-    W, M = EG if isinstance(EG, (tuple, list)) else (EG, None)
+    # EG: tek W, (W, M) ya da (W, M, H).  M dolgu maskesi -- HER HIKAYE BIR
+    # PENCERE oldugu icin hikaye bitince kalan yer <dolgu>.  H hedef maskesi:
+    # verilirse kayip YALNIZ orada sayilir.
+    W, M, H = ((list(EG) + [None, None])[:3] if isinstance(EG, (tuple, list))
+               else (EG, None, None))
     W = W if W.device.type == "cpu" else W.cpu()
     M = M if M is None or M.device.type == "cpu" else M.cpu()
+    H = H if H is None or H.device.type == "cpu" else H.cpu()
     n, T = W.shape
     par = sum(p.numel() for p in m.parameters())
     # Pakete giden kimlik: sozluk ve iz pakette durursa konus tahmin etmez,
@@ -203,7 +217,7 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
            if dt else dict(boyut=boyut, norm=m.norm))
     sabit = dict(ek or {}, mimari=m.mimari, n=N, durum=durum, **mim,
                  pay=m.pay, lr=lr, wd=wd, tohum=tohum, yigin=yigin, T=T,
-                 parametre=par, derle=derle, egitim_iz=_iz(W, M),
+                 parametre=par, derle=derle, egitim_iz=_iz(W, M, H),
                  bos_eos=hk is not None, hikaye_id=hk,
                  sozluk=None if sozluk is None else [str(a) for a in sozluk])
 
@@ -235,9 +249,12 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
          f"   BOS/EOS {'VAR' if hk is not None else 'YOK'}"
          + ("" if sabit["sozluk"] else
             "   UYARI: sozluk YOK, konus tahmin etmek zorunda"))
-    not_(f"OLCUT: SONRAKI JETON.  dogruluk (sans {1 / N:.5f}) ve dogrulama "
+    not_("OLCUT: soru soruldu, cevap BIREBIR dogru mu (EOS'a kadar serbest "
+         "uretim); kayip yalniz cevapta" if H is not None else
+         f"OLCUT: SONRAKI JETON.  dogruluk (sans {1 / N:.5f}) ve dogrulama "
          "perplexity'si; 'govde' TAM1'le AYNI hedefler")
-    not_("  adim    kayip   egitim  dogrulama   dg ppl   govde      sn")
+    not_("  adim    kayip   egitim  dogrulama   dg ppl   "
+         + ("  ilk" if H is not None else "govde") + "      sn")
     _gunluk(kok, ad)
 
     def olc(i, tam=False):
@@ -247,14 +264,17 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
                  egitim=e["dogruluk"], dogrulama=d["dogruluk"],
                  egitim_ce=e.get("ce"), dogrulama_ce=d.get("ce"),
                  dogrulama_tur={k: v for k, v in d.items()
-                                if k.startswith(("ce_", "n_"))})
+                                if k not in ("dogruluk", "ce")})
         SONUC[ad] = dict(b, model=m)
         return b
 
     def satir(b, gecen, im=""):
+        t = b["dogrulama_tur"]
+        son_ = (f"{t['ilk']:7.4f}" if "ilk" in t      # matematik: ilk rakam
+                else _ppl(t.get("ce_govde")))
         return (f"{b['adim']:6d}  {b['kayip']:7.3f}  {b['egitim']:7.4f}  "
                 f"{b['dogrulama']:9.4f}  {_ppl(b['dogrulama_ce'])} "
-                f"{_ppl(b['dogrulama_tur'].get('ce_govde'))}  {gecen:6.0f}{im}")
+                f"{son_}  {gecen:6.0f}{im}")
 
     # Yedek, o adimin opt.step()'i BITTIKTEN sonra yazilir.  Yani t<N>
     # N adimi ICERIR ve surdurme N+1'den baslar; N'den baslamak o adimi
@@ -268,7 +288,8 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
         opt.zero_grad()
         w_ = W[j].to(aygit, non_blocking=True).long()
         m_ = None if M is None else M[j].to(aygit, non_blocking=True)
-        kay = egit(w_, m_)
+        h_ = None if H is None else H[j].to(aygit, non_blocking=True)
+        kay = egit(w_, m_, h_)
         kay.backward()
         opt.step()
         son = i
@@ -289,8 +310,9 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
         return
     if kay is None:                       # surdurulen kosuda yeni adim yok
         with torch.no_grad():
-            kay = m.kayip(W[:yigin].to(aygit).long(),
-                          None if M is None else M[:yigin].to(aygit))
+            kay = _kayip(W[:yigin].to(aygit).long(),
+                         None if M is None else M[:yigin].to(aygit),
+                         None if H is None else H[:yigin].to(aygit))
 
     # ONCE KAYDET, SONRA OLC.  Tam olcum TAM1'de ~15 dk surdu; o arada
     # oturum duserse son yedekten beri yapilan is giderdi.

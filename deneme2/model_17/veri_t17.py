@@ -31,8 +31,8 @@ sinav 0,083 -> 0,145.
 
 SURUM V2.  README: "GPT-3.5 uretimleri daha dusuk kalitede".
 
-HIKAYE SINIRI AKISTA ve PENCEREDE.  <hikaye> akista ayrac; pencerede hem
-BOS hem EOS (pencere()).  model_16'da tam burasi kaybolmustu: ardisik
+HIKAYE SINIRI AKISTA ve PENCEREDE.  <eos> (eski adi <hikaye>) akista ayrac;
+pencerede hem BOS hem EOS (pencere()).  model_16'da tam burasi kaybolmustu: ardisik
 birimlerin %12,9'u farkli varliklara aitti ve hicbir sey onu
 isaretlemiyordu.
 
@@ -48,7 +48,11 @@ import re
 import numpy as np
 
 SINIR = "<|endoftext|>"       # dosyadaki ayrac
-HIKAYE = "<hikaye>"           # bizim jetonumuz
+# GENEL SINIR: her birimin (hikaye, soru) basi ve sonu -- BOS ve EOS ayni
+# token.  Kullanici: "hikaye ve ya sinir yerine genel bir terim. model nerde
+# durması gerektiğini öğrenmesi adına".
+SON = "<eos>"
+HIKAYE = "<hikaye>"           # ESKI ad: onbellekteki sozluklerde bu yaziyor
 BILINMEYEN = "<bilinmeyen>"
 DOLGU = "<dolgu>"          # hikaye bitince kalan yer; maske ile duser
 # Kesme isaretli kisaltma TEK birim (don't, Lily's); noktalama AYRI.
@@ -96,13 +100,19 @@ def _hikayeler_kar(yol, parca, dur=None):
                     yield h.translate(DUZLE)
 
 
+def genel(ad):
+    """Eski sozlukteki <hikaye>'yi genel <eos>'a cevir.  Kimlik AYNI kalir,
+    yani onbellekteki akislar ve eski paketler oldugu gibi gecerli."""
+    return [SON if a == HIKAYE else a for a in ad]
+
+
 def sozluk(yol, en: int, parca_mb=64, en_mb=None, yaz=print):
-    """En sik `en` kelime + <hikaye> + <bilinmeyen>.  EGITIMDEN cikar."""
+    """En sik `en` kelime + <dolgu> + <eos> + <bilinmeyen>.  EGITIMDEN cikar."""
     say = collections.Counter()
     for h in _hikayeler(yol, parca_mb, en_mb):
         say.update(JETON.findall(h))
     top = sum(say.values())
-    ad = [DOLGU, HIKAYE, BILINMEYEN] + [a for a, _ in say.most_common(en)]
+    ad = [DOLGU, SON, BILINMEYEN] + [a for a, _ in say.most_common(en)]
     kap = sum(c for _, c in say.most_common(en)) / top
     yaz("  sozluk  %s farkli kelime gorundu -> en sik %s tutuldu"
         % ("{:,}".format(len(say)), "{:,}".format(en)))
@@ -112,12 +122,12 @@ def sozluk(yol, en: int, parca_mb=64, en_mb=None, yaz=print):
 
 
 def akis(yol, ix, parca_mb=64, en_mb=None, yaz=print):
-    """Hikayeleri TEK akisa diz, aralarina <hikaye>.  int16 dizi.
+    """Hikayeleri TEK akisa diz, aralarina <eos>.  int16 dizi.
 
     int16: en buyuk kimlik 4.002 < 32.767, KAYIPSIZ.  Yarim dosya,
     yarim yukleme, Colab'da yarim RAM."""
     assert len(ix) <= np.iinfo(np.int16).max + 1, "sozluk int16'ya sigmiyor"
-    bl, hk = ix[BILINMEYEN], ix[HIKAYE]
+    bl, hk = ix[BILINMEYEN], ix[SON]
     cik, n = [], 0
     for h in _hikayeler(yol, parca_mb, en_mb):
         cik.append(np.fromiter((ix.get(t, bl) for t in JETON.findall(h)),
@@ -132,12 +142,13 @@ def akis(yol, ix, parca_mb=64, en_mb=None, yaz=print):
 
 
 def pencere(a: np.ndarray, T: int, uret=None, hikaye=None, dolgu=0):
-    """HER HIKAYE = BIR PENCERE, basinda ve sonunda <hikaye>.  Doner: (P, M).
+    """HER HIKAYE = BIR PENCERE, basinda ve sonunda <eos>.  Doner: (P, M).
 
     Kullanici: *"her hikaye bence 1 pencere olmali yoksa modele dogru tam
-    hikaye ogretmemis oluruz"* ve *"bos ve eos gerekli"*.
+    hikaye ogretmemis oluruz"* ve *"bos ve eos gerekli"*.  `hikaye`: <eos>'un
+    kimligi.
 
-        <hikaye> w1 w2 ... wL <hikaye> <dolgu> ...
+        <eos> w1 w2 ... wL <eos> <dolgu> ...
         bastaki BOS: w1 de tahmin edilir.  sondaki EOS: model bitisi
         ogrenir, uretim durabilir.
 
@@ -178,7 +189,7 @@ def coz(P, ad, i=0, en=None) -> str:
     s, acik, tirnak = "", False, False
     for x in d:
         t = ad[int(x)]
-        if t == HIKAYE:
+        if t in (SON, HIKAYE):
             s += "\n\n---\n\n"
             tirnak = False
             continue
@@ -209,7 +220,7 @@ def kur(kok: str, T: int = 128, en: int = 4000, en_mb=None, tohum: int = 0,
 
     kok    TinyStories dosyalarinin durdugu klasor (Drive)
     T      pencere uzunlugu.  dizi() dikkati (B,T,T) -- T ile KARESEL.
-    en     sozluk kirpmasi (+ <hikaye> + <bilinmeyen>)
+    en     sozluk kirpmasi (+ <dolgu> + <eos> + <bilinmeyen>)
     en_mb  yalniz ilk N MB (deneme icin).  None -> hepsi.
     hizali pencereler HIKAYE BASINA hizalansin mi.  Duz kesimde
            tahminlerin %40,8'i hikayesinin basini GORMUYORDU (olculdu).
@@ -227,7 +238,7 @@ def kur(kok: str, T: int = 128, en: int = 4000, en_mb=None, tohum: int = 0,
 
     ps = os.path.join(ob, "sozluk_%s.npy" % etiket)
     if os.path.exists(ps):
-        ad = list(np.load(ps, allow_pickle=True))
+        ad = genel(list(np.load(ps, allow_pickle=True)))
         yaz("  sozluk  onbellekten  %s birim" % "{:,}".format(len(ad)))
     else:
         ad, _ = sozluk(yol["train"], en, en_mb=en_mb, yaz=yaz)
@@ -246,11 +257,11 @@ def kur(kok: str, T: int = 128, en: int = 4000, en_mb=None, tohum: int = 0,
             np.save(p, A[b])
 
     uret = np.random.default_rng(tohum)
-    hk = ix[HIKAYE] if hizali else None
+    hk = ix[SON] if hizali else None
     EG, EM = pencere(A["train"], T, uret, hk, ix[DOLGU])
     DG, DM = pencere(A["valid"], T, uret, hk, ix[DOLGU])
     yaz("  pencere T=%d   %s   egitim %s   dogrulama %s"
-        % (T, "HER HIKAYE BIR PENCERE, <hikaye> ... <hikaye>" if hizali
+        % (T, "HER HIKAYE BIR PENCERE, <eos> ... <eos>" if hizali
            else "duz kesim", "{:,}".format(len(EG)), "{:,}".format(len(DG))))
     yaz("  dolgu %%%.1f   etkin is %%%.1f   (L+2 > T olan hikayeler atildi)"
         % (100 * (1 - EM.mean()), 100 * EM.mean()))

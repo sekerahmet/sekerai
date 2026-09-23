@@ -26,7 +26,7 @@ def _ac(X):
 
 
 def bos_kimligi(W, M):
-    """Pencereler <hikaye> ile basliyor VE bitiyorsa onun kimligi, yoksa None."""
+    """Pencereler <eos> ile basliyor VE bitiyorsa onun kimligi, yoksa None."""
     if M is None or len(W) == 0:
         return None
     t0 = W[0, 0]
@@ -266,7 +266,7 @@ def devam(m, onek, ad, ix, coz, adim=60, aygit="cuda", tohum=None,
     yasak       okunmayacak jeton kimlikleri.  <bilinmeyen> uretimde
                 korpustaki oranin 4,8 katina cikiyor (olculdu) ve
                 sicaklik 0'da ust uste kilitleniyor.
-    bos         <hikaye> kimligi: BOS/EOS'la egitilmis modelde istemin basina
+    bos         <eos> kimligi: BOS/EOS'la egitilmis modelde istemin basina
                 konur, model onu URETINCE durulur.  None -> eski davranis.
     """
     # Uretec aygitla ayni yerde olmali; CPU ureteci CUDA'da multinomial'i dusurur.

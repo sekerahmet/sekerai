@@ -5,8 +5,8 @@ Model CPU'da calisir, GPU gerekmez.
 
 Sayi degil METIN: hukum CLAUDE.md'nin DIL alaninda gozle veriliyor.
 Sayilar (dogrulama perplexity'si) basliktaki paketten; burada yalniz
-modelin YAZDIGI.  BOS/EOS'la egitilmis model <hikaye>'den baslar ve kendi
-<hikaye>'sini yazinca durur (sonda "---").
+modelin YAZDIGI.  BOS/EOS'la egitilmis model <eos>'tan baslar ve kendi
+<eos>'unu yazinca durur (sonda "---").
 
   Once upon a time           yaz, devamini gorursun
   <bos satir>                makalenin 44 degerlendirme isteminden RASTGELE biri
@@ -124,7 +124,7 @@ def sozluk(k, m):
     kayip hesaplanir; dogru sozluk belirgin dusuk cikar."""
     if k.get("sozluk"):
         assert len(k["sozluk"]) == k["n"], "paketteki sozluk n ile tutmuyor"
-        return list(k["sozluk"]), "paketten"
+        return V.genel(list(k["sozluk"])), "paketten"
     import numpy as np
     aday = []
     for d in TS:
@@ -134,7 +134,7 @@ def sozluk(k, m):
         for f in sorted(os.listdir(ob)):
             if not f.startswith("sozluk_"):
                 continue
-            ad = list(np.load(os.path.join(ob, f), allow_pickle=True))
+            ad = V.genel(list(np.load(os.path.join(ob, f), allow_pickle=True)))
             if len(ad) != k["n"]:
                 continue
             av = os.path.join(ob, f.replace("sozluk_", "akis_valid_"))
@@ -194,7 +194,7 @@ def main():
         print("        dogrulama perplexity %.3f%s" % (
             math.exp(k["dogrulama_ce"]),
             "   govde %.3f" % math.exp(g_) if g_ is not None else ""))
-    print("BOS/EOS %s" % ("VAR -- <hikaye>'den baslar, <hikaye>'de durur"
+    print("BOS/EOS %s" % ("VAR -- <eos>'tan baslar, <eos>'ta durur"
                           if k.get("bos_eos") else "YOK (eski paket)"))
     print("sozluk  %s   |   %d degerlendirme istemi" % (sz, len(IST)))
     print("=" * 74)

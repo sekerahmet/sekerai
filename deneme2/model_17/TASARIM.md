@@ -42,10 +42,17 @@ kelimelerin matrisi rastgele yürüyüş.
 ```
 ONCE    Once upon a time , ... happy .  <dolgu> ...
         ilk kelime hic HEDEF degil, bitis hic sorulmuyor
-SIMDI   <hikaye> Once upon a time , ... happy . <hikaye> <dolgu> ...
-        <hikaye> -> Once        hikaye nasil BASLAR
-        .        -> <hikaye>    hikaye nerede BITER
+SIMDI   <eos> Once upon a time , ... happy . <eos> <dolgu> ...
+        <eos> -> Once           birim nasil BASLAR
+        .     -> <eos>          birim nerede BITER
 ```
+
+**Sınır token'ı GENEL: `<eos>`.** Kullanıcı: *"hikaye ve ya sinir yerine
+genel bir terim. model nerde durması gerektiğini öğrenmesi adına"*. Hikâye,
+soru, hangi birim olursa olsun başı ve sonu aynı token (GPT'nin
+`<|endoftext|>`'i gibi). Tek sabit: `veri_t17.SON`. Kimlik değişmedi;
+önbellekteki eski ad `<hikaye>` yüklenirken `<eos>`'a çevrilir
+(`veri_t17.genel`), veri dosyaları olduğu gibi geçerli.
 
 - Kod: `veri_t17.pencere()`. `L + 2 > T` olan hikâye atılır.
 - Üretim: `konus` `<hikaye>`'den başlar, model kendi `<hikaye>`'sini
@@ -101,6 +108,8 @@ tani() bir ölçümdür: kullanıcı onayıyla koşulur, her sürümde aynı
 ## YOL HARİTASI — sıra önerisi, kararlar işaretli
 
 ```
+0  MAT     DUZ MATEMATIK SINAVI -- DT'nin ilk sinavi         [KOD HAZIR, KARAR]
+           model_15'in toplama verisi, onkayit belge/onkayit/model_17_MAT.md
 1  TAM2    YALNIZ BOS/EOS -- mimari ve egitim TAM1'le AYNI    [KOD HAZIR, KARAR]
 2  DT1     HEDEF MIMARI (asagida): durum + attention + bellek  [KOD HAZIR, KARAR]
            derinlik, kucuk butce (~3,25 M); ayni veri, ayni olcu
@@ -113,6 +122,14 @@ tani() bir ölçümdür: kullanıcı onayıyla koşulur, her sürümde aynı
            buyurse seyrek bellek (product keys)
 6  transformer kiyasi -- cok sonra
 ```
+
+**0 — Düz matematik neden ilk.** Kullanıcı: *"Düz matematik sayılır en
+kolay en güzel test o olabilir"*. Doğru cevap hesapla bilinir, ölçü
+kendi içinde; DT'nin her iddiasını ayrı sınar (elde ve hizalama: durum
+takibi; toplama tablosu: bellek; EOS: durmak; 3 terim: yol uzayabilir).
+Cevap en büyük basamaktan yazıldığı için İLK rakam bütün eldelere bağlı:
+seçim noktası tezi burada harfiyen doğru. 13 token'lık sözlük, kısa
+diziler: koşu dakikalar sürer. Karar kuralı koşudan önce onkayıtta.
 
 Kullanıcı: *"TAM2 yalnız BOS/EOS olsun"*. TAM2'de değişen tek şey veri
 penceresi. Mimari (`model_17.py`) dokunulmadı; MLP ya da yeni katman YOK.
@@ -345,8 +362,10 @@ Metinler ve alıntıları yeniden arayan betik:
 
 ## Kodun kendi denetimi
 
-`python test_17.py` — 15 kapı. Eski mimari ve altyapı (9): sürdürme,
+`python test_17.py` — 18 kapı. Eski mimari ve altyapı (9): sürdürme,
 dolgu, akış (int16, okuma sınırı), pencere (BOS/EOS), durdur (3), `coz`
 gidiş-dönüş, ölçü kendi içinde. DT (6): parametre == kağıt üstü hesap,
 bardak oyunu (1.000 takas), delta kuralı (yuva sulanmaz), nedensellik,
-dolgu, sürdürme.
+dolgu, sürdürme. Düz matematik (3): pencere ve hedef maskesi, ölçütün
+kendisi (cevabı bilen sahte model 1, erken duran ve fazla rakam yazan 0),
+cevap maskeli eğitimin sürdürmesi.
