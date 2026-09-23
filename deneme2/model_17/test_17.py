@@ -381,17 +381,70 @@ def t_mat_egitim():
         TR._kos(ad, (W, M, H), VM.N, lambda *a, **k: 0.0, "cpu", kok, None,
                 8, 8, 2e-3, 0.01, adim, 0, 8, 2, 2, surdur, False,
                 mimari="dt", genislik=16, blok=2, bellek=32)
-        return _agirlik(ad)
+        return _agirlik(ad), TR.SONUC[ad]["kayip_iz"]
 
     kok = tempfile.mkdtemp()
     try:
-        A = kos("KESINTISIZ", kok, 8)
+        A, ka = kos("KESINTISIZ", kok, 8)
         kos("BOLUK", kok, 4)
-        B = kos("BOLUK", kok, 8, surdur=kok + "/BOLUK/t4.pt")
+        B, kb = kos("BOLUK", kok, 8, surdur=kok + "/BOLUK/t4.pt")
         en = max(float((A[k] - B[k]).abs().max()) for k in A)
     finally:
         shutil.rmtree(kok, ignore_errors=True)
     kapi("cevap maskeli egitim, surdurme", en == 0.0, "fark %.3e" % en)
+    # Egri her adimda okunur; surdurulen kosuda delik ya da kayma olmamali.
+    kapi("her adimin kaybi: surdurmede eksiksiz",
+         len(ka) == 9 and not bool(ka.isnan().any()) and torch.equal(ka, kb),
+         "%d adim, surdurulen == kesintisiz" % len(ka))
+
+
+# --- 16.  DEFTER (mat_17.ipynb): kural 2 ve kural 8 MEKANIK
+# GPU hucresi GPU'yu kendi icinde sorar; her kosu kendi hucresinde baslar;
+# hucrelerde tanimsiz ad yok (Colab'da NameError bir gidis-donus demek).
+def t_defter(yol=None):
+    import ast
+    import builtins
+    import json
+    yol = yol or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "mat_17.ipynb")
+    hucre = [("".join(c["source"])) for c in
+             json.load(open(yol, encoding="utf-8"))["cells"]
+             if c["cell_type"] == "code"]
+    tanimli, kusur = set(dir(builtins)) | {"display", "get_ipython"}, []
+    for s in hucre:
+        kunye = s.splitlines()[0]
+        py = "\n".join(x for x in s.splitlines() if not x.lstrip().startswith("!"))
+        try:
+            agac = ast.parse(py)
+        except SyntaxError as h:
+            kusur.append("%s: sozdizimi %s" % (kunye[:30], h))
+            continue
+        if not kunye.startswith("# ") or kunye.count("|") < 2:
+            kusur.append("kunye yok: " + kunye[:30])
+        gpu = "|  GPU  |" in kunye
+        if gpu and "torch.cuda.is_available()" not in py:
+            kusur.append("GPU kapisi yok: " + kunye[:30])
+        if py.count(".baslat(") > 1 or (".baslat(" in py and not gpu):
+            kusur.append("baslat kurali: " + kunye[:30])
+        bu = set()
+        for d in ast.walk(agac):
+            if isinstance(d, ast.Name) and isinstance(d.ctx, (ast.Store, ast.Del)):
+                bu.add(d.id)
+            elif isinstance(d, (ast.FunctionDef, ast.ClassDef)):
+                bu.add(d.name)
+            elif isinstance(d, ast.arg):
+                bu.add(d.arg)
+            elif isinstance(d, (ast.Import, ast.ImportFrom)):
+                bu |= {(a.asname or a.name).split(".")[0] for a in d.names}
+            elif isinstance(d, ast.ExceptHandler) and d.name:
+                bu.add(d.name)
+        eksik = sorted({d.id for d in ast.walk(agac) if isinstance(d, ast.Name)
+                        and isinstance(d.ctx, ast.Load)} - tanimli - bu)
+        if eksik:
+            kusur.append("%s: tanimsiz %s" % (kunye[:30], eksik))
+        tanimli |= bu
+    kapi("defter: GPU kapisi, tek kosu, tanimsiz ad", not kusur,
+         "; ".join(kusur) if kusur else "%d kod hucresi" % len(hucre))
 
 
 if __name__ == "__main__":
@@ -399,7 +452,7 @@ if __name__ == "__main__":
     for f in (t_surdurme, t_dolgu, t_akis, t_pencere, t_durdur, t_coz, t_olc,
               t_dt_parametre, t_dt_bardak, t_dt_delta, t_dt_nedensel,
               lambda: t_dolgu(_dt(), "DT maskeli kayip == hikaye hikaye"),
-              t_dt_surdurme, t_mat_pencere, t_mat_sor, t_mat_egitim):
+              t_dt_surdurme, t_mat_pencere, t_mat_sor, t_mat_egitim, t_defter):
         f()
     print("\n%d GECTI   %d KALDI" % (len(GECTI), len(KALDI)))
     sys.exit(1 if KALDI else 0)

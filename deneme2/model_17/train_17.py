@@ -221,7 +221,7 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
                  bos_eos=hk is not None, hikaye_id=hk,
                  sozluk=None if sozluk is None else [str(a) for a in sozluk])
 
-    son = -1                              # son TAMAMLANAN adim
+    son, onceki = -1, None                # son TAMAMLANAN adim
     if surdur:
         p = torch.load(surdur, weights_only=False, map_location=aygit)
         _denetle(p, sabit)
@@ -230,9 +230,15 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
         opt.load_state_dict(p["opt"])
         torch.set_rng_state(p["rng"].cpu())
         uret.set_state(p["uret_rng"].cpu())
-        son = p["adim"]
+        son, onceki = p["adim"], p.get("kayip_iz")
         not_(f"SURDURULUYOR  {os.path.basename(surdur)}  adim {son}")
     son_kayit = son                       # paket o adimin kaydi zaten
+
+    # HER ADIMIN kaybi: egrinin tam cozunurlugu.  GPU'da birikir (adim basina
+    # senkron yok), olcum noktasinda pakete girer, surdurmede geri yuklenir.
+    kiz = torch.full((max(adim, son) + 1,), float("nan"), device=aygit)
+    if onceki is not None:
+        kiz[:len(onceki)] = onceki.to(aygit)
 
     _et = 1.0 if M is None else float(M.sum()) / M.numel()
     not_(f"pencere {n:,} x {T}   {n * T:,} yuva"
@@ -254,13 +260,14 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
          f"OLCUT: SONRAKI JETON.  dogruluk (sans {1 / N:.5f}) ve dogrulama "
          "perplexity'si; 'govde' TAM1'le AYNI hedefler")
     not_("  adim    kayip   egitim  dogrulama   dg ppl   "
-         + ("  ilk" if H is not None else "govde") + "      sn")
+         + ("  ilk  uzunluk" if H is not None else "govde") + "      sn")
     _gunluk(kok, ad)
 
     def olc(i, tam=False):
         e = _sonuc(olcut(m, "eg", tam=tam))
         d = _sonuc(olcut(m, "dg", tam=tam))
         b = dict(sabit, adim=i, kayip=float(kay.detach()),
+                 kayip_iz=kiz[:i + 1].cpu(),
                  egitim=e["dogruluk"], dogrulama=d["dogruluk"],
                  egitim_ce=e.get("ce"), dogrulama_ce=d.get("ce"),
                  dogrulama_tur={k: v for k, v in d.items()
@@ -270,8 +277,8 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
 
     def satir(b, gecen, im=""):
         t = b["dogrulama_tur"]
-        son_ = (f"{t['ilk']:7.4f}" if "ilk" in t      # matematik: ilk rakam
-                else _ppl(t.get("ce_govde")))
+        son_ = (f"{t['ilk']:7.4f}  {t['uzunluk']:7.4f}" if "ilk" in t
+                else _ppl(t.get("ce_govde")))         # matematik: ilk rakam
         return (f"{b['adim']:6d}  {b['kayip']:7.3f}  {b['egitim']:7.4f}  "
                 f"{b['dogrulama']:9.4f}  {_ppl(b['dogrulama_ce'])} "
                 f"{son_}  {gecen:6.0f}{im}")
@@ -290,6 +297,7 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
         m_ = None if M is None else M[j].to(aygit, non_blocking=True)
         h_ = None if H is None else H[j].to(aygit, non_blocking=True)
         kay = egit(w_, m_, h_)
+        kiz[i] = kay.detach()
         kay.backward()
         opt.step()
         son = i
@@ -373,7 +381,8 @@ def baslat(ad, EG, N, *, olcut=_olcut_yok, aygit="cuda", kok=None, ek=None,
     EG      (W, M) ya da tek W -- W (n, T) pencere yigini, M dolgu maskesi
     olcut   olcut(m, "eg"|"dg", tam=False) -> olcme_17.olc sozlugu
             (dogruluk, ce, ce_bas/govde/son) ya da yalniz dogruluk
-    bas     olcum araligi;  yedek  anlik goruntu araligi -- birbirinden BAGIMSIZ
+    bas     olcum araligi;  yedek  anlik goruntu araligi -- birbirinden BAGIMSIZ.
+            HER ADIMIN kaybi ikisinden de bagimsiz: pakette `kayip_iz`.
     surdur  bir anlik goruntu yolu verilirse KALDIGI YERDEN devam eder
             (agirlik + optimizer + RNG).  Kural 1: uzatma SURDURMEDIR.
             Paketteki ayar ya da veri bu cagriyla tutmazsa kosu BASLAMAZ.
