@@ -198,6 +198,59 @@ def t_durdur():
     kapi("surdurme ayar farkini yakalar", ayar, "lr 2e-3 -> 4e-3")
 
 
+# --- 11.  SKOR: sozluk tablosu, karesiz == -S_p*D, ogrenilen S_p, surdurme skoru ayirt eder
+def t_skor():
+    import model_18 as M
+    kural = [M.score_rule(n) for n in (13, 49, 50, 99, 100, 499, 500, 1999, 2000, 50000)]
+    bek = [(False, 10.0), (False, 10.0), (False, 5.0), (False, 5.0), (False, 2.0),
+           (False, 2.0), (True, 2.0), (True, 2.0), (True, M.LEARNED), (True, M.LEARNED)]
+    kapi("skor tablosu: sinir ust satira", kural == bek, "13 -> karesiz 10, 2000 -> ogrenilen")
+
+    torch.manual_seed(0)
+    kare = PV(13, squared=True, S_p=1.0, **KUCUK)
+    karesiz = PV(13, **KUCUK)                                  # tablodan: karesiz, S_p 10
+    C_m = torch.randn(4, 16)
+    D = torch.cdist(C_m, kare.P)
+    fark = float((karesiz.score(C_m) + 10.0 * D).abs().max())
+    fark2 = float((kare.score(C_m) + D * D).abs().max())
+    sira = torch.equal(kare.score(C_m).argsort(-1), karesiz.score(C_m).argsort(-1))
+    kapi("karesiz == -10*D, kare == -D^2", fark < 1e-4 and fark2 < 1e-3 and sira,
+         "fark %.1e / %.1e, sira ayni" % (fark, fark2))
+
+    m = PV(2500, **KUCUK)
+    m.score(C_m).sum().backward()
+    ok = (m.squared and m.S_p_learned and float(m.S_p) == 0.0 and m.S_p.grad is not None
+          and sum(p.numel() for p in m.parameters())
+          == m.vectors * 2 * m.d * m.layers + m.layers + 1)
+    kapi("ogrenilen S_p: e^0 = 1, gradyan alir", ok, "parametre +1")
+
+    N, data = _veri()
+    kok = tempfile.mkdtemp()
+    try:
+        r = TR.RUNS["KARE"] = TR.Run("KARE", kok)
+        TR._run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3,
+                squared=True, S_p=1.0, **KUCUK)
+        yol = kok + "/KARE/t3.pt"
+        eski = torch.load(yol, weights_only=False)
+        del eski["S_p"], eski["squared"]         # alanlar gelmeden yazilmis paket
+        torch.save(eski, yol)
+        r = TR.RUNS["KARE"] = TR.Run("KARE", kok)
+        TR._run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3,
+                resume=yol, squared=True, S_p=1.0, **KUCUK)
+        kabul = r.result.get("step") == 6
+        try:
+            r = TR.RUNS["KARE"] = TR.Run("KARE", kok)
+            TR._run(r, data, N, _sifir, "cpu", 2e-3, 9, 0, 8, 3, 3,
+                    resume=yol, **KUCUK)             # tablodan: karesiz 10
+            yakaladi = False
+        except ValueError as h:
+            yakaladi = "S_p" in str(h) and "squared" in str(h)
+    finally:
+        shutil.rmtree(kok, ignore_errors=True)
+    kapi("surdurme skor farkini yakalar", kabul and yakaladi,
+         "eski kare paket: kare ile surer, tabloyla durur")
+
+
 # ============================================================
 # DATA -- matematik (model_17'den).
 # ============================================================
@@ -324,8 +377,8 @@ def t_notebook(yol=None):
         gpu = "|  GPU  |" in kunye
         if gpu and "torch.cuda.is_available()" not in py:
             kusur.append("GPU kapisi yok: " + kunye[:30])
-        if py.count(".baslat(") > 1 or (".baslat(" in py and not gpu):
-            kusur.append("baslat kurali: " + kunye[:30])
+        if py.count(".start(") > 1 or (".start(" in py and not gpu):
+            kusur.append("start kurali: " + kunye[:30])
         bu = set()
         for d in ast.walk(agac):
             if isinstance(d, ast.Name) and isinstance(d.ctx, (ast.Store, ast.Del)):
@@ -350,7 +403,7 @@ def t_notebook(yol=None):
 if __name__ == "__main__":
     print("tests (model_18)")
     for f in (t_zincir, t_nedensel, t_sessiz, t_cm, t_payda, t_gradyan,
-              t_parametre, t_mask, t_surdurme, t_durdur, t_mat_pencere,
+              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_mat_pencere,
               t_mat_sor, t_mat_basamak, t_mat_egitim, t_notebook):
         f()
     print("\n%d GECTI   %d KALDI" % (len(GECTI), len(KALDI)))

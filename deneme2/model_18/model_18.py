@@ -17,8 +17,11 @@ arasında ki uzaklık" ve "her vektör her an aktif olmamalı bunu model
                W_v,a = e^(-D_s,a^2 S_v) / sum_B e^(-D_s,B^2 S_v)  a. vektorun agirligi
                V_a   = finish_a - start_a                        a. vektor
                C_m   = C + sum_a W_v,a V_a                       tasinmis C
-    score    -D^2, D = |C_m - P|: en yakin P en yuksek puan.  Carpan YOK:
-             Kullanici, 24 Eylul: "S_p kaldir" -- secimi degistirmiyordu.
+    score    en yakin P en yuksek puan, D = |C_m - P|:  -S_p*D^2 (squared) ya da -S_p*D.
+               kare     |C_m|^2 softmax'ta sadelesir, geriye C_m.P kalir: C_m noktadan
+                        UZAKLASARAK emin olur (MAT_COK_PV).
+               karesiz  kaybin en iyi yeri C_m = P (ucgen esitsizligi).
+             squared ve S_p sozluk sayisindan: SCORE_BY_VOCAB.
     CM       countermarch, geriye yuruyus: C_(t-1) = C_t - RM_t*P[w_t].
              Izleme araci; modelin hesabina girmez.
 """
@@ -36,6 +39,27 @@ VECTORS = 256  # layer basina vektor.  Kullanici: "V sayısı da 256 şimdilik"
 ACTIVE = 8     # her C'de aktif vektor; gerisi pasif.  OLCULMEDI.
 LAYERS = 4     # Kullanici: "4 katman olsun"
 T_MAX = 64     # RM sayisi = en uzun dizi
+EPS = 1e-6     # karekok D=0'da turevlenmez
+LEARNED = "learned"
+
+# Skor sozluk sayisina (n) gore.  Satir: (n BUNDAN KUCUKSE, squared, S_p).
+# Sinirdaki n UST satira girer (tam 50 -> S_p 5).  LEARNED: e^s, s = 0 (1'den) baslar.
+# Kullanici, 24 Eylul: "sözlük sayısına göre karar veceğiz ... bu değerleri ben
+# değiştirebilirim aralıkları sen ona göre model içinde yaz".
+SCORE_BY_VOCAB = (
+    (50,           False, 10.0),
+    (100,          False, 5.0),
+    (500,          False, 2.0),
+    (2000,         True,  2.0),
+    (float("inf"), True,  LEARNED),
+)
+
+
+def score_rule(n):
+    """n token'lik sozluk -> (squared, S_p)."""
+    for upper, squared, S_p in SCORE_BY_VOCAB:
+        if n < upper:
+            return squared, S_p
 
 
 def distance(points, anchors):
@@ -69,12 +93,18 @@ class PV(nn.Module):
     arch = "pv"
 
     def __init__(self, n, d=d, vectors=VECTORS, active=ACTIVE, layers=LAYERS,
-                 t_max=T_MAX, seed=0):
+                 t_max=T_MAX, seed=0, squared=None, S_p=None):
+        """squared, S_p None: SCORE_BY_VOCAB'dan.  Verilirse tabloyu ezer."""
         super().__init__()
         generator = torch.Generator().manual_seed(seed)
         randn = lambda *shape: torch.randn(*shape, generator=generator)
         self.n, self.d, self.vectors = n, d, vectors
         self.active, self.layers, self.t_max = active, layers, t_max
+        rule = score_rule(n)
+        self.squared = rule[0] if squared is None else squared
+        S_p = rule[1] if S_p is None else S_p
+        self.S_p_learned = S_p == LEARNED
+        self.S_p = nn.Parameter(torch.zeros(())) if self.S_p_learned else float(S_p)
         P = randn(n, d)
         self.register_buffer("P", P / P.norm(dim=-1, keepdim=True))
         RM = torch.randint(0, 2, (t_max, d), generator=generator).float() * 2 - 1
@@ -96,8 +126,10 @@ class PV(nn.Module):
         return C_m, active_ids
 
     def score(self, C_m):
-        """-D^2, D = |C_m - P|.  Buyuk = yakin."""
-        return -distance(C_m, self.P)
+        """-S_p*D^2 (squared) ya da -S_p*D.  Buyuk = yakin."""
+        D2 = distance(C_m, self.P)
+        D = D2 if self.squared else (D2.clamp_min(0) + EPS).sqrt()
+        return -(self.S_p.exp() if self.S_p_learned else self.S_p) * D
 
     def scoreboard(self, tokens, targets_mask=None):
         """tokens (B,T) -> (B,T,n): her konumda SONRAKI token'in puani.  Konumlar
