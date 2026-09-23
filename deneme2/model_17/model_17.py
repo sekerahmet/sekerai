@@ -303,7 +303,7 @@ class GeciciBellek(nn.Module):
     Wo SIFIRDAN baslar: baslangicta model, gecici bellegi olmayanin AYNISI.
     Dolgu maskelenmez: dolgu yalniz sagda, gercek konum onu hic okumaz."""
 
-    def __init__(self, d, W, kafa, r):
+    def __init__(self, d, W, kafa, r, oncul=0.0):
         super().__init__()
         assert d % kafa == 0, "genislik kafa sayisina bolunmeli"
         o = d ** -0.5
@@ -311,7 +311,11 @@ class GeciciBellek(nn.Module):
         self.Wk = nn.Parameter(r(d, d) * o)
         self.Wv = nn.Parameter(r(d, d) * o)
         self.Wo = nn.Parameter(torch.zeros(d, d))
-        self.b = nn.Parameter(torch.zeros(kafa, W))
+        # oncul > 0: kafa h "h+1 geri"den baslar (birler, onlar, ...); ogrenilir.
+        b = torch.zeros(kafa, W)
+        for h in range(min(kafa, W - 1)):
+            b[h, h + 1] = oncul
+        self.b = nn.Parameter(b)
         self.W, self.kafa = W, kafa
 
     def forward(self, r_, kayit):
@@ -332,7 +336,7 @@ class Blok(nn.Module):
     """durum -> attention -> [gecici bellek] -> bellek, artik akisa ekleyerek."""
 
     def __init__(self, d, durum, bellek, yansima, pay, r, gb_W=0, gb_kafa=4,
-                 r2=None):
+                 r2=None, gb_oncul=0.0):
         super().__init__()
         o = d ** -0.5                  # birim RMS girdi -> birim RMS cikti
         self.n1, self.n2 = RMS(d), RMS(d)
@@ -355,7 +359,7 @@ class Blok(nn.Module):
         self.gecici = None
         if gb_W:
             self.n3 = RMS(d)
-            self.gecici = GeciciBellek(d, gb_W, gb_kafa, r2)
+            self.gecici = GeciciBellek(d, gb_W, gb_kafa, r2, gb_oncul)
 
     def ic(self, r_, maske=None):
         """(durum okumasi H, P, A, izin) -- forward ve tani() ayni hesabi okur."""
@@ -392,7 +396,7 @@ class DT(nn.Module):
 
     def __init__(self, n, genislik=DT_GENISLIK, durum=DT_DURUM, blok=DT_BLOK,
                  bellek=DT_BELLEK, yansima=DT_YANSIMA, tohum=0, pay=PAY,
-                 gb_W=0, gb_kafa=4):
+                 gb_W=0, gb_kafa=4, gb_oncul=0.0):
         super().__init__()
         g = torch.Generator().manual_seed(tohum)
         r = lambda *s: torch.randn(*s, generator=g)
@@ -400,10 +404,11 @@ class DT(nn.Module):
         r2 = lambda *s: torch.randn(*s, generator=g2)
         self.n, self.genislik, self.durum = n, genislik, durum
         self.blok, self.bellek, self.yansima, self.pay = blok, bellek, yansima, pay
-        self.gb_W, self.gb_kafa = gb_W, gb_kafa
+        self.gb_W, self.gb_kafa, self.gb_oncul = gb_W, gb_kafa, gb_oncul
         self.X = nn.Parameter(r(n, genislik))                 # token -> akis
         self.bloklar = nn.ModuleList(
-            Blok(genislik, durum, bellek, yansima, pay, r, gb_W, gb_kafa, r2)
+            Blok(genislik, durum, bellek, yansima, pay, r, gb_W, gb_kafa, r2,
+                 gb_oncul)
             for _ in range(blok))
         self.ns = RMS(genislik)
         # |E| ~ 1: baslangicta puanlar O(1), ilk kayip patlamasin.

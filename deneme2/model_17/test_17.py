@@ -341,6 +341,23 @@ def t_gb_sessiz():
          "ortak agirliklar ayni, cikti farki %.1e" % fark)
 
 
+# --- G1b.  ONCUL: kafa h "h+1 geri"den baslar; sessiz baslangic bozulmaz
+def t_gb_oncul():
+    m = DT(20, genislik=16, durum=8, blok=2, bellek=32, tohum=0, gb_W=6,
+           gb_kafa=4, gb_oncul=3.0)
+    beklenen = torch.zeros(4, 6)
+    for h in range(4):
+        beklenen[h, h + 1] = 3.0
+    ok = all(torch.equal(b.gecici.b.detach(), beklenen) for b in m.bloklar)
+    a = DT(20, genislik=16, durum=8, blok=2, bellek=32, tohum=0)
+    w = torch.randint(1, 20, (3, 12), generator=torch.Generator().manual_seed(8))
+    with torch.no_grad():
+        fark = float((a.dizi(w) - m.dizi(w)).abs().max())
+    pay = float(torch.softmax(torch.tensor([3.0] + [0.0] * 15), 0)[0])
+    kapi("gecici bellek: oncul h+1 geri, sessiz", ok and fark == 0.0,
+         "W=16'da baslangic payi %.2f, cikti farki %.1e" % (pay, fark))
+
+
 # --- G2.  "k GERI" GERCEKTEN k GERI
 def t_gb_k_geri():
     d, W, h, T = 8, 6, 4, 10
@@ -601,7 +618,7 @@ if __name__ == "__main__":
     for f in (t_surdurme, t_dolgu, t_akis, t_pencere, t_durdur, t_coz, t_olc,
               t_dt_parametre, t_dt_bardak, t_dt_delta, t_dt_nedensel,
               lambda: t_dolgu(_dt(), "DT maskeli kayip == hikaye hikaye"),
-              t_dt_surdurme, t_gb_sessiz, t_gb_k_geri, t_gb_pencere,
+              t_dt_surdurme, t_gb_sessiz, t_gb_oncul, t_gb_k_geri, t_gb_pencere,
               t_gb_nedensel,
               lambda: t_dolgu(_gb(), "gecici bellek: maskeli kayip == hikaye"),
               t_gb_parametre, t_gb_sonum, t_gb_surdurme,

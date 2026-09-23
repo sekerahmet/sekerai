@@ -47,7 +47,7 @@ _DISKE = {}     # ad -> gunluk.txt'ye henuz yazilmamis satirlar
 # baskalasir: opt.load_state_dict lr/wd'yi paketten alir, gunluk cagriyi yazar.
 SURDUR_ESIT = ("mimari", "n", "T", "yigin", "lr", "wd", "tohum", "boyut",
                "durum", "norm", "pay", "genislik", "blok", "bellek",
-               "yansima", "gb_W", "gb_kafa", "egitim_iz", "sozluk")
+               "yansima", "gb_W", "gb_kafa", "gb_oncul", "egitim_iz", "sozluk")
 
 
 def sonumlu(ad, p):
@@ -152,12 +152,14 @@ def _denetle(p, sabit):
 def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
          lr, wd, adim, tohum, yigin, bas, yedek, surdur, derle, sozluk=None,
          mimari="kelime_matris", genislik=DT_GENISLIK, blok=DT_BLOK,
-         bellek=DT_BELLEK, yansima=DT_YANSIMA, gb_W=0, gb_kafa=4):
+         bellek=DT_BELLEK, yansima=DT_YANSIMA, gb_W=0, gb_kafa=4,
+         gb_oncul=0.0):
     not_ = lambda s: _not(ad, s)
     torch.manual_seed(tohum)
     dt = mimari == "dt"
     m = (DT(N, genislik=genislik, durum=durum, blok=blok, bellek=bellek,
-            yansima=yansima, tohum=tohum, gb_W=gb_W, gb_kafa=gb_kafa) if dt
+            yansima=yansima, tohum=tohum, gb_W=gb_W, gb_kafa=gb_kafa,
+            gb_oncul=gb_oncul) if dt
          else Yol(N, boyut=boyut, durum=durum, tohum=tohum)).to(aygit)
 
     # torch.compile.  BURADA OLCULDU, 22 Eylul, L4
@@ -220,7 +222,7 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
     # surdurme de ayni veriyi dogrular.
     hk = bos_kimligi(W, M)
     mim = (dict(genislik=genislik, blok=blok, bellek=bellek, yansima=yansima,
-                gb_W=gb_W, gb_kafa=gb_kafa)
+                gb_W=gb_W, gb_kafa=gb_kafa, gb_oncul=gb_oncul)
            if dt else dict(boyut=boyut, norm=m.norm))
     sabit = dict(ek or {}, mimari=m.mimari, n=N, durum=durum, **mim,
                  pay=m.pay, lr=lr, wd=wd, tohum=tohum, yigin=yigin, T=T,
@@ -254,7 +256,8 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
     not_(f"mimari {m.mimari}  "
          + (f"genislik {genislik} durum {durum}x{durum} blok {blok} "
             f"bellek {bellek} yansima {yansima}"
-            + (f" gecici W {gb_W} kafa {gb_kafa}" if gb_W else "") if dt
+            + (f" gecici W {gb_W} kafa {gb_kafa}" if gb_W else "")
+            + (f" oncul {gb_oncul}" if gb_oncul else "") if dt
             else f"boyut {boyut} durum {durum}")
          + f"  lr {lr} wd {wd} tohum {tohum}  sozluk {N}  parametre {par:,}")
     not_(f"yigin {yigin}   adim basina {yigin * (T - 1):,} tahmin"
@@ -383,7 +386,7 @@ def baslat(ad, EG, N, *, olcut=_olcut_yok, aygit="cuda", kok=None, ek=None,
            adim=20000, tohum=0, yigin=YIGIN, bas=100, yedek=500,
            surdur=None, derle=False, sozluk=None, mimari="kelime_matris",
            genislik=DT_GENISLIK, blok=DT_BLOK, bellek=DT_BELLEK,
-           yansima=DT_YANSIMA, gb_W=0, gb_kafa=4):
+           yansima=DT_YANSIMA, gb_W=0, gb_kafa=4, gb_oncul=0.0):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
     EG      (W, M) ya da tek W -- W (n, T) pencere yigini, M dolgu maskesi
@@ -399,7 +402,8 @@ def baslat(ad, EG, N, *, olcut=_olcut_yok, aygit="cuda", kok=None, ek=None,
             kisa kosuda zararli.  DT'de OLCULMEDI.
     mimari  "kelime_matris" (TAM1/TAM2, varsayilan) ya da "dt" (hedef mimari:
             genislik, blok, bellek, yansima; durum verilmezse 64)
-    gb_W    DT'de gecici bellek penceresi (0 = yok), gb_kafa okuma kafasi
+    gb_W    DT'de gecici bellek penceresi (0 = yok), gb_kafa okuma kafasi,
+            gb_oncul kafa h'nin 'h+1 geri' baslangic egilimi (0 = duz)
     """
     if durum is None:
         durum = DT_DURUM if mimari == "dt" else DURUM
@@ -420,7 +424,8 @@ def baslat(ad, EG, N, *, olcut=_olcut_yok, aygit="cuda", kok=None, ek=None,
         boyut=boyut, durum=durum, lr=lr, wd=wd, adim=adim, tohum=tohum,
         yigin=yigin, bas=bas, yedek=yedek, surdur=surdur, derle=derle,
         sozluk=sozluk, mimari=mimari, genislik=genislik, blok=blok,
-        bellek=bellek, yansima=yansima, gb_W=gb_W, gb_kafa=gb_kafa))
+        bellek=bellek, yansima=yansima, gb_W=gb_W, gb_kafa=gb_kafa,
+        gb_oncul=gb_oncul))
     IPLIK[ad] = t
     t.start()
     return f"{ad} basladi" + (f"  ({os.path.basename(surdur)}'den)"
