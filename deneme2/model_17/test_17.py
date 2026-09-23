@@ -14,6 +14,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import olcme_17 as OL                                           # noqa: E402
 import train_17 as TR                                           # noqa: E402
 import veri_t17 as V                                            # noqa: E402
 from model_17 import Yol                                        # noqa: E402
@@ -91,22 +92,38 @@ def t_dolgu():
          "%.6f / %.6f" % (a, b))
 
 
-# --- 3.  int16 KAYIPSIZ
-def t_int16():
-    a = np.arange(4003, dtype=np.int32)
-    kapi("sozluk int16'ya sigar", a.max() < np.iinfo(np.int16).max
-         and (a.astype(np.int16).astype(np.int32) == a).all(),
-         "en buyuk %d < %d" % (a.max(), np.iinfo(np.int16).max))
+# --- 3.  AKIS: int16, hikaye sayisi, okuma siniri
+# en_mb eskiden iki katini okuyordu: bolumden artan karakter sayilmiyordu.
+def t_akis():
+    d = tempfile.mkdtemp()
+    try:
+        yol = os.path.join(d, "ornek.txt")
+        hik = ["Lily had a red ball.", "Tom saw a big dog.", "The cat sat."] * 50
+        with open(yol, "w", encoding="utf-8") as f:
+            f.write(V.SINIR.join(hik) + V.SINIR)
+        sus = lambda *a: None
+        _, ix = V.sozluk(yol, 20, yaz=sus)
+        a = V.akis(yol, ix, yaz=sus)
+        n300 = sum(1 for _ in V._hikayeler_kar(yol, 100, 300))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    say = int((a == ix[V.HIKAYE]).sum())
+    kapi("akis int16, hikaye sayisi, okuma siniri",
+         a.dtype == np.int16 and say == len(hik) and n300 == 10,
+         "%d hikaye; 300 karakterde %d (10 olmali)" % (say, n300))
 
 
-# --- 4.  HER HIKAYE BIR PENCERE
+# --- 4.  HER HIKAYE BIR PENCERE, <hikaye> BASTA ve SONDA
 def t_pencere():
     hk, dl = 1, 0
     a = np.array([5, 6, hk, 7, 8, 9, hk, 3, hk], dtype=np.int16)
     P, M = V.pencere(a, 5, None, hk, dl)
-    ok = (len(P) == 3 and list(M.sum(1)) == [2, 3, 1]
-          and list(P[1][:3]) == [7, 8, 9] and (P[~M] == dl).all())
-    kapi("pencere hikaye sinirinda", ok, "%d pencere" % len(P))
+    ok = (len(P) == 3 and list(M.sum(1)) == [4, 5, 3]
+          and list(P[1]) == [hk, 7, 8, 9, hk] and list(P[2][:3]) == [hk, 3, hk]
+          and (P[~M] == dl).all())
+    P4, _ = V.pencere(a, 4, None, hk, dl)           # L+2 > T olan ATILIR
+    kapi("pencere <hikaye> basta ve sonda", ok and len(P4) == 2,
+         "%d pencere; T=4'te %d" % (len(P), len(P4)))
 
 
 # --- 5.  DURDUR + SURDUR  ==  KESINTISIZ
@@ -167,9 +184,34 @@ def t_coz():
          "%d birim, 300 rastgele dizi" % (len(ad) - 3))
 
 
+# --- 7.  OLCU KENDI ICINDE
+# Kullanici: "bizim ölçümlerimiz kendi içinde olmalı".  bas + govde + son
+# hepsini vermeli (surumler govdede kiyaslanir); tablo'nun TUMU dogrulukla
+# ayni olmali (eskiden konumlar esit sayiliyordu).
+def t_olc():
+    hk, dl = 1, 0
+    g = torch.Generator().manual_seed(9)
+    akis = []
+    for L in (1, 4, 9, 13):
+        akis += torch.randint(3, 20, (L,), generator=g).tolist() + [hk]
+    P, M = V.pencere(np.array(akis, dtype=np.int16), 16, None, hk, dl)
+    W, M = torch.from_numpy(P.astype(np.int64)), torch.from_numpy(M)
+    m = Yol(20, boyut=8, durum=8, tohum=0)
+    r = OL.olc(m, (W, M), aygit="cpu", hk=OL.bos_kimligi(W, M))
+    n = r["n_bas"] + r["n_govde"] + r["n_son"]
+    ort = sum(r["ce_" + k] * r["n_" + k] for k in ("bas", "govde", "son")) / n
+    satir = []
+    OL.tablo(m, (W, M), aygit="cpu", yaz=satir.append)
+    tumu = float(satir[-1].split()[1])
+    ok = (r["n_bas"] == 4 and r["n_son"] == 4 and r["n_govde"] == 23
+          and abs(ort - r["ce"]) < 1e-6 and abs(tumu - r["dogruluk"]) < 1e-4)
+    kapi("olcu: turler toplami, agirlikli tablo", ok,
+         "bas %d  govde %d  son %d" % (r["n_bas"], r["n_govde"], r["n_son"]))
+
+
 if __name__ == "__main__":
     print("test_17")
-    for f in (t_surdurme, t_dolgu, t_int16, t_pencere, t_durdur, t_coz):
+    for f in (t_surdurme, t_dolgu, t_akis, t_pencere, t_durdur, t_coz, t_olc):
         f()
     print("\n%d GECTI   %d KALDI" % (len(GECTI), len(KALDI)))
     sys.exit(1 if KALDI else 0)

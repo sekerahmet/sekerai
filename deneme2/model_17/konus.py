@@ -4,11 +4,13 @@ Egitilmis agirlik Colab'da uretilip Drive'a yaziliyor; burasi sadece okuyor.
 Model CPU'da calisir, GPU gerekmez.
 
 Sayi degil METIN: hukum CLAUDE.md'nin DIL alaninda gozle veriliyor.
-Kayip perplexity DEGIL (puan -||o-E||^2, olcegi kalibre degil), o yuzden
-burada kayip gosterilmiyor -- yalniz modelin YAZDIGI.
+Sayilar (dogrulama perplexity'si) basliktaki paketten; burada yalniz
+modelin YAZDIGI.  BOS/EOS'la egitilmis model <hikaye>'den baslar ve kendi
+<hikaye>'sini yazinca durur (sonda "---").
 
   Once upon a time           yaz, devamini gorursun
   <bos satir>                makalenin 44 degerlendirme isteminden RASTGELE biri
+  serbest                    istemsiz, bos sayfadan bir hikaye (BOS/EOS'lu model)
   n=120                      kac kelime uretilecek  (varsayilan 80, istem+n <= T)
   s=0.8                      sicaklik.  0 = hep en yakin kelime (belirlenimci)
   yasak                      <bilinmeyen>/<dolgu> uretimi kapat (varsayilan) / ac
@@ -17,6 +19,7 @@ burada kayip gosterilmiyor -- yalniz modelin YAZDIGI.
   ?                          yardim
   q                          cik
 """
+import math
 import os
 import random
 import re
@@ -177,8 +180,15 @@ def main():
     print("adim    %s   parametre %s   sozluk %d"
           % ("{:,}".format(k.get("adim", -1)),
              "{:,}".format(k.get("parametre", 0)), k["n"]))
-    print("olcum   egitim %.4f   dogrulama %.4f   (sonraki jeton)"
+    print("olcum   egitim %.4f   dogrulama %.4f   (sonraki jeton dogrulugu)"
           % (k.get("egitim", float("nan")), k.get("dogrulama", float("nan"))))
+    if k.get("dogrulama_ce") is not None:
+        g_ = (k.get("dogrulama_tur") or {}).get("ce_govde")
+        print("        dogrulama perplexity %.3f%s" % (
+            math.exp(k["dogrulama_ce"]),
+            "   govde %.3f" % math.exp(g_) if g_ is not None else ""))
+    print("BOS/EOS %s" % ("VAR -- <hikaye>'den baslar, <hikaye>'de durur"
+                          if k.get("bos_eos") else "YOK (eski paket)"))
     print("sozluk  %s   |   %d degerlendirme istemi" % (sz, len(IST)))
     print("=" * 74)
     print(__doc__.split("\n\n")[-1].rstrip())
@@ -228,7 +238,13 @@ def main():
                       % (os.path.basename(yol),
                          "{:,}".format(k.get("adim", -1)), sz))
             continue
-        if not g:
+        bos = k.get("hikaye_id") if k.get("bos_eos") else None
+        if g == "serbest":
+            if bos is None:
+                print("   bu paket BOS/EOS'suz egitildi; istemsiz uretemez")
+                continue
+            g = ""
+        elif not g:
             if not IST:
                 print("   istem dosyasi yok; kendin bir seyler yaz")
                 continue
@@ -236,9 +252,9 @@ def main():
 
         # Model yalniz hikaye BASINDAN baslayan pencere gordu: istemin
         # basi kesilmez, sigmazsa uretim kisalir.
-        T = k.get("T", 256)
+        T = k.get("T", 256) - (1 if bos is not None else 0)
         onek = V.JETON.findall(g.translate(V.DUZLE))
-        if not onek:
+        if not onek and bos is None:
             continue
         if len(onek) >= T:
             print("   UYARI: istem %d kelime, T=%d -- BASI kesildi; model "
@@ -251,9 +267,9 @@ def main():
         kod = [IX.get(t, IX[V.BILINMEYEN]) for t in onek]
         bil = sum(1 for t in onek if t not in IX)
         Y = [IX[t] for t in (V.BILINMEYEN, V.DOLGU) if yasak and t in IX]
-        bas = V.coz(torch.tensor(kod), AD)
+        bas = V.coz(torch.tensor(kod, dtype=torch.long), AD)
         hep = OL.devam(m, onek, AD, IX, V.coz, adim=n_, aygit="cpu",
-                       sicaklik=sic, yasak=Y)
+                       sicaklik=sic, yasak=Y, bos=bos)
         print()
         yaz("ISTEM%s" % ("   (%d kelime sozlukte YOK)" % bil if bil else ""),
             bas)

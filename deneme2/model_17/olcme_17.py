@@ -1,18 +1,23 @@
 # -*- coding: utf-8 -*-
-"""olcme_17 -- SONRAKI JETON.  Etiket yok, tek sayi yok: SAYI + METIN.
+"""olcme_17 -- SONRAKI JETON.  Etiket yok: SAYI + TANI + METIN.
 
-KAYIP PERPLEXITY DEGIL.  Puan -||o - E||^2, yani olcegi kalibre degil;
-baslangicta sozluk 50 iken kayip 20,8 cikiyor, ln(50)=3,91 degil.
-Kayip egrisi izlenir ama BIR SEY SOYLEMEZ; hukum dogruluktan okunur.
-
-IKI ALAN, birlikte okunur (CLAUDE.md):
-    SAYI   sonraki jeton dogrulugu -- egitim ve DOGRULAMA ayri
-    METIN  istemden URETIM, GOZLE.  Makalenin 44 degerlendirme istemi
-           (Evaluation prompts.yaml) hazir duruyor.
+SAYI   dogrulama PERPLEXITY (exp CE) -- BIRINCIL.  softmax(-|o-E|^2) duzgun
+       bir dagilim, CE onun NLL'si.  Dogruluk yalniz en ustteki tahmini
+       gorur; TAM1'de o duz gorunurken perplexity dusuyordu (onkayit §A1).
+       Hedefler TURUNE gore ayrilir ki surumler ayni hedefte kiyaslansin
+       (kullanici: "bizim ölçümlerimiz kendi içinde olmalı"):
+         bas    BOS'tan sonraki ilk kelime        BOS'suz veride yok
+         govde  hikayenin 2..L. kelimeleri        TAM1'le AYNI hedefler
+         son    EOS: hikaye bitti                 BOS'suz veride yok
+TANI   mimarinin her parcasina ayri geri bildirim -- tani().
+METIN  istemden URETIM, GOZLE (konus.py).
 """
 from __future__ import annotations
 
+import math
+
 import torch
+import torch.nn.functional as F
 
 
 def _ac(X):
@@ -20,48 +25,81 @@ def _ac(X):
     return X if isinstance(X, (tuple, list)) else (X, None)
 
 
-def dogruluk(m, W, parca: int = 256, aygit=None) -> float:
-    """Sonraki jeton dogrulugu.  W (n, T) -> oran.
+def bos_kimligi(W, M):
+    """Pencereler <hikaye> ile basliyor VE bitiyorsa onun kimligi, yoksa None."""
+    if M is None or len(W) == 0:
+        return None
+    t0 = W[0, 0]
+    if not bool((W[:, 0] == t0).all()):
+        return None
+    son = M.sum(1).long() - 1
+    return int(t0) if bool((W[torch.arange(len(W)), son] == t0).all()) else None
 
-    W CPU'da olabilir: PARCA PARCA tasinir.  Tam korpusta egitim
-    penceresi 8,8 GB eder, tumunu GPU'ya koymak OOM demektir."""
+
+def _turler(a, h, hk):
+    """Hedef maskeleri (B,T-1): bas, govde, son.  hk None ise hepsi govde."""
+    if hk is None:
+        z = torch.zeros_like(a)
+        return {"bas": z, "govde": a, "son": z}
+    bas = torch.zeros_like(a)
+    bas[:, 0] = a[:, 0]
+    son = a & (h == hk)
+    return {"bas": bas, "govde": a & ~bas & ~son, "son": son}
+
+
+def olc(m, W, parca: int = 256, aygit=None, hk=None) -> dict:
+    """Dogruluk ve CE, hedef turune gore de.  W CPU'da olabilir: parca parca
+    tasinir (tam korpusta egitim penceresi GPU'ya sigmaz)."""
     W, M = _ac(W)
-    dg = tp = 0
     aygit = aygit or next(m.parameters()).device
+    dg = tp = 0
+    top = {k: [0.0, 0] for k in ("bas", "govde", "son")}
     with torch.no_grad():
         for i in range(0, W.shape[0], parca):
             w = W[i:i + parca].to(aygit).long()
             mk = None if M is None else M[i:i + parca].to(aygit)
-            t = m.dizi(w, mk)[:, :-1].argmax(-1)
-            d = t == w[:, 1:]
-            if mk is None:
-                dg += int(d.sum()); tp += d.numel()
-            else:                         # DOLGU SAYILMAZ
-                a = mk[:, 1:]
-                dg += int((d & a).sum()); tp += int(a.sum())
-    return dg / max(tp, 1)
+            p = m.dizi(w, mk)[:, :-1]
+            h = w[:, 1:]
+            a = (torch.ones_like(h, dtype=torch.bool) if mk is None
+                 else mk[:, 1:])
+            ce = F.cross_entropy(p.transpose(1, 2), h, reduction="none")
+            dg += int(((p.argmax(-1) == h) & a).sum())
+            tp += int(a.sum())
+            for k, s in _turler(a, h, hk).items():
+                top[k][0] += float(ce[s].sum())
+                top[k][1] += int(s.sum())
+    r = {"dogruluk": dg / max(tp, 1),
+         "ce": sum(v[0] for v in top.values()) / max(tp, 1)}
+    for k, (c, n) in top.items():
+        r["n_" + k] = n
+        r["ce_" + k] = c / n if n else None
+    return r
+
+
+def dogruluk(m, W, parca: int = 256, aygit=None) -> float:
+    """Sonraki jeton dogrulugu (eski arayuz)."""
+    return olc(m, W, parca, aygit)["dogruluk"]
 
 
 def olcut(EG, DG, aygit="cuda", en=2000):
-    """train_17'nin bekledigi bicim:  olcut(m, "eg"|"dg") -> oran.
+    """train_17'nin bekledigi bicim:  olcut(m, "eg"|"dg", tam=False) -> dict.
 
-    `en` egitim SIRASINDA ornek sayisini kisar; son olcum TAM veriyle."""
-    kume = {"eg": EG, "dg": DG}
+    `en` egitim SIRASINDA ornek sayisini kisar; son olcum TAM veriyle.
+    BOS/EOS bir kez, butun pencerelere bakilarak anlasilir."""
+    kume = {"eg": _ac(EG), "dg": _ac(DG)}
+    hk = {t: bos_kimligi(*kume[t]) for t in kume}
 
     def f(m, taraf, tam=False):
-        W, M = _ac(kume[taraf])
+        W, M = kume[taraf]
         if not tam:
             W, M = W[:en], (None if M is None else M[:en])
-        return dogruluk(m, (W, M), aygit=aygit)
+        return olc(m, (W, M), aygit=aygit, hk=hk[taraf])
 
     return f
 
 
-def kirilim(m, W, ad, aygit="cuda", parca=256):
-    """Dogrulugu KONUMA gore boler -- onek uzadikca duzeliyor mu?
-
-    Ilk konumlarda onek kisa; model orada zayif olabilir ve tek ortalama
-    bunu gizler."""
+def _konum_say(m, W, aygit="cuda", parca=256):
+    """Konum basina (dogru, hedef) sayilari."""
     W, M = _ac(W)
     T = W.shape[1]
     dg, tp = torch.zeros(T - 1), torch.zeros(T - 1)
@@ -73,37 +111,159 @@ def kirilim(m, W, ad, aygit="cuda", parca=256):
             d = t == w[:, 1:]
             a = torch.ones_like(d) if mk is None else mk[:, 1:]
             dg += (d & a).sum(0).float().cpu()
-            tp += a.sum(0).float().cpu()   # konum basina GERCEK hedef
+            tp += a.sum(0).float().cpu()
+    return dg, tp
+
+
+def kirilim(m, W, ad=None, aygit="cuda", parca=256):
+    """Dogrulugu KONUMA gore boler (hedefi olmayan konum 0)."""
+    dg, tp = _konum_say(m, W, aygit, parca)
     return (dg / tp.clamp(min=1)).tolist()
 
 
 def tablo(m, W, aygit="cuda", yaz=print, dilim=8):
-    """Konum dilimlerine gore dogruluk -- HUKUM BURADAN OKUNUR."""
-    o = kirilim(m, W, None, aygit)
-    n = len(o)
-    yaz(f"{'konum':>12} {'dogruluk':>10}")
-    yaz("-" * 24)
+    """Konum dilimlerine gore dogruluk.  Dilim ortalamasi HEDEF SAYISIYLA
+    agirlikli; eskiden konumlar esit sayiliyor, bos konum 0 giriyordu."""
+    dg, tp = _konum_say(m, W, aygit)
+    n = len(dg)
+    yaz(f"{'konum':>12} {'dogruluk':>10} {'hedef':>9}")
+    yaz("-" * 33)
     for k in range(dilim):
         a, b = k * n // dilim, (k + 1) * n // dilim
-        yaz(f"{f'{a}-{b}':>12} {sum(o[a:b]) / (b - a):>10.4f}")
-    yaz("-" * 24)
-    yaz(f"{'TUMU':>12} {sum(o) / n:>10.4f}")
-    return o
+        s = float(tp[a:b].sum())
+        yaz(f"{f'{a}-{b}':>12} {float(dg[a:b].sum()) / max(s, 1):>10.4f} "
+            f"{int(s):>9,}")
+    yaz("-" * 33)
+    yaz(f"{'TUMU':>12} {float(dg.sum() / tp.sum().clamp(min=1)):>10.4f} "
+        f"{int(tp.sum()):>9,}")
+    return (dg / tp.clamp(min=1)).tolist()
+
+
+def tani(m, DG, n=256, aygit="cpu", yaz=print, tohum=0):
+    """Mimariye GERI BILDIRIM -- her parca kendi isini yapiyor mu.
+
+    kayip        hedef turune ve konuma gore
+    durum        konum 10'daki kelime degisince durumdaki izi kac token surer
+    attention    kac konum ateslenir, kutle ne kadar uzakta
+    uzak baglam  son k token ayni, oncesi BASKA hikaye: CE ne kadar artar
+    bitis        EOS gercek sonda ne olasilik aliyor, govdede kac kez one cikiyor
+    Olcumdur: kullanici onayiyla kosulur (CLAUDE.md kural 0).  Ayni n ve
+    tohumla her kosu AYNI orneklemde olculur."""
+    W, M = _ac(DG)
+    W, M = W.cpu(), (torch.ones_like(W, dtype=torch.bool) if M is None
+                     else M.cpu())
+    hk = bos_kimligi(W, M)
+    L = M.sum(1)
+    r = {"n": n}
+    w, mk = W[:n].long(), M[:n]
+    T = w.shape[1]
+
+    r["olc"] = olc(m, (w, mk), aygit=aygit, hk=hk)
+    with torch.no_grad():
+        S = m.gez(w.to(aygit))[:, 1:]
+        Q, K = S @ m.Wq, S @ m.Wk
+        P = Q @ K.transpose(1, 2) + m.hb
+        izin = torch.ones(T, T, dtype=torch.bool, device=aygit).tril() \
+            & mk.to(aygit)[:, None, :]
+        A = (P.masked_fill(~izin, -torch.inf).softmax(-1) if m.pay
+             else P.clamp(min=0) * izin)
+        lp = m.dizi(w.to(aygit), mk.to(aygit)).log_softmax(-1)
+    ara = torch.arange(T, device=aygit)
+    uzak = (ara[:, None] - ara[None, :]).clamp(min=0).float()
+    hedef = torch.zeros_like(mk)
+    hedef[:, :-1] = mk[:, 1:]
+    ce = torch.zeros(w.shape, device=aygit)
+    ce[:, :-1] = -lp[:, :-1].gather(-1, w[:, 1:].to(aygit).unsqueeze(-1)).squeeze(-1)
+    r["konum"] = {}
+    for ad_, (a, b) in {"0-15": (0, 16), "16-63": (16, 64),
+                        "64-127": (64, 128), "128+": (128, T)}.items():
+        s = hedef[:, a:b].to(aygit)
+        if not bool(s.any()):
+            continue
+        kut = A[:, a:b].sum(-1).clamp(min=1e-12)
+        r["konum"][ad_] = {
+            "hedef": int(s.sum()),
+            "ppl": float(ce[:, a:b][s].mean().exp()),
+            "ateslenen": float(((P[:, a:b] > 0) & izin[:, a:b]).sum(-1)[s]
+                               .float().mean()),
+            "uzaklik": float(((A[:, a:b] * uzak[a:b]).sum(-1) / kut)[s].mean())}
+
+    # durum: konum 10'daki kelime degisince
+    g = torch.Generator().manual_seed(tohum)
+    sec = torch.nonzero(L >= 70).squeeze(1)[:128]
+    if len(sec):
+        w1 = W[sec].long()
+        w2 = w1.clone()
+        yeni = torch.randint(3, m.n, (len(sec),), generator=g)
+        w2[:, 10] = torch.where(yeni == w1[:, 10], (yeni % (m.n - 3)) + 3, yeni)
+        with torch.no_grad():
+            S1, S2 = m.gez(w1.to(aygit))[:, 1:], m.gez(w2.to(aygit))[:, 1:]
+        cos = F.cosine_similarity(S1, S2, dim=-1).clamp(-1, 1)
+        aci = torch.rad2deg(torch.acos(cos)).mean(0)
+        r["durum_aci"] = {o: float(aci[10 + o]) for o in (0, 1, 5, 10, 20, 50)}
+
+    # uzak baglam: 181..220 arasi 40 hedef, oncesi baska hikaye
+    uzn = torch.nonzero(L >= 221).squeeze(1)[:128]
+    ver = torch.nonzero(L >= 181).squeeze(1)
+    ver = ver[~torch.isin(ver, uzn)][:len(uzn)]
+    if len(uzn) and len(ver) == len(uzn):
+        Aw, Bw = W[uzn, :221].long(), W[ver, :221].long()
+
+        def _ce(x):
+            with torch.no_grad():
+                q = m.dizi(x.to(aygit)).log_softmax(-1)[:, 180:220]
+            return float(-q.gather(-1, Aw[:, 181:221].to(aygit).unsqueeze(-1))
+                         .mean())
+        r["uzak"] = {"hepsi": _ce(Aw)}
+        for k in (16, 64, 128):
+            r["uzak"][k] = _ce(torch.cat([Bw[:, :181 - k], Aw[:, 181 - k:]], 1))
+
+    # bitis: gercek sonda EOS olasiligi, govdede erken EOS
+    if hk is not None:
+        t = _turler(mk[:, 1:], w[:, 1:], hk)
+        p_hk = lp[:, :-1, hk].exp()
+        r["bitis"] = {
+            "p_eos_sonda": float(p_hk[t["son"].to(aygit)].mean()),
+            "erken_eos": float((lp[:, :-1].argmax(-1) == hk)[t["govde"].to(aygit)]
+                               .float().mean())}
+
+    o = r["olc"]
+    yaz(f"TANI  {n} pencere   BOS/EOS {'VAR' if hk is not None else 'YOK'}")
+    yaz(f"  perplexity  hepsi {math.exp(o['ce']):.3f}"
+        + "".join(f"   {k} {math.exp(o['ce_' + k]):.3f} ({o['n_' + k]:,})"
+                  for k in ("bas", "govde", "son") if o["ce_" + k] is not None))
+    yaz(f"  {'konum':>8} {'hedef':>7} {'ppl':>8} {'ateslenen':>10} {'uzaklik':>8}")
+    for k, v in r["konum"].items():
+        yaz(f"  {k:>8} {v['hedef']:>7,} {v['ppl']:>8.3f} {v['ateslenen']:>10.1f}"
+            f" {v['uzaklik']:>8.1f}")
+    if "durum_aci" in r:
+        yaz("  durum izi (derece)  " + "  ".join(
+            f"+{o_}:{v:.1f}" for o_, v in r["durum_aci"].items()))
+    if "uzak" in r:
+        yaz("  uzak baglam CE  hepsi {:.3f}  ".format(r["uzak"]["hepsi"])
+            + "  ".join(f"son {k}: {r['uzak'][k]:.3f}" for k in (16, 64, 128)))
+    if "bitis" in r:
+        yaz(f"  bitis  p(EOS) gercek sonda {r['bitis']['p_eos_sonda']:.3f}   "
+            f"govdede erken EOS {r['bitis']['erken_eos']:.4f}")
+    return r
 
 
 def devam(m, onek, ad, ix, coz, adim=60, aygit="cuda", tohum=None,
-          sicaklik=0.0, yasak=()):
+          sicaklik=0.0, yasak=(), bos=None):
     """Istemin devamini URET.  Sayi degil METIN -- gozle okunur.
 
     sicaklik 0 -> hep en yakin token (belirlenimci).
     yasak       okunmayacak jeton kimlikleri.  <bilinmeyen> uretimde
                 korpustaki oranin 4,8 katina cikiyor (olculdu) ve
                 sicaklik 0'da ust uste kilitleniyor.
+    bos         <hikaye> kimligi: BOS/EOS'la egitilmis modelde istemin basina
+                konur, model onu URETINCE durulur.  None -> eski davranis.
     """
     # Uretec aygitla ayni yerde olmali; CPU ureteci CUDA'da multinomial'i dusurur.
     g = (None if tohum is None
          else torch.Generator(device=aygit).manual_seed(tohum))
-    w = [ix.get(t, ix["<bilinmeyen>"]) for t in onek]
+    w = (([bos] if bos is not None else [])
+         + [ix.get(t, ix["<bilinmeyen>"]) for t in onek])
     y = torch.tensor(list(yasak), dtype=torch.long, device=aygit)
     with torch.no_grad():
         for _ in range(adim):
@@ -116,4 +276,6 @@ def devam(m, onek, ad, ix, coz, adim=60, aygit="cuda", tohum=None,
                 c = int(torch.multinomial((p / sicaklik).softmax(-1), 1,
                                           generator=g))
             w.append(c)
-    return coz(torch.tensor(w), ad)
+            if bos is not None and c == bos:
+                break
+    return coz(torch.tensor(w[1:] if bos is not None else w), ad)

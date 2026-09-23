@@ -29,9 +29,12 @@ import threading
 import time
 import traceback
 
+import math
+
 import torch
 
 from model_17 import Yol, BOYUT, DURUM, LR, WD
+from olcme_17 import bos_kimligi
 
 YIGIN = 512
 GUNLUK, SONUC, DURDUR = [], {}, set()
@@ -46,6 +49,19 @@ SURDUR_ESIT = ("n", "T", "yigin", "lr", "wd", "tohum", "boyut", "durum",
 
 def _olcut_yok(m, taraf, tam=False):
     raise RuntimeError("olcut verilmedi -- baslat(..., olcut=...) sart")
+
+
+def _sonuc(r):
+    """olcut dogruluk (float), (dogruluk, ce) ya da dict donebilir."""
+    if isinstance(r, dict):
+        return r
+    if isinstance(r, (tuple, list)):
+        return {"dogruluk": float(r[0]), "ce": float(r[1])}
+    return {"dogruluk": float(r)}
+
+
+def _ppl(ce):
+    return "      -" if ce is None else f"{math.exp(ce):7.2f}"
 
 
 def _not(ad, s):
@@ -175,9 +191,11 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
     par = sum(p.numel() for p in m.parameters())
     # Pakete giden kimlik: sozluk ve iz pakette durursa konus tahmin etmez,
     # surdurme de ayni veriyi dogrular.
+    hk = bos_kimligi(W, M)
     sabit = dict(ek or {}, n=N, boyut=boyut, durum=durum, norm=m.norm,
                  pay=m.pay, lr=lr, wd=wd, tohum=tohum, yigin=yigin, T=T,
                  parametre=par, derle=derle, egitim_iz=_iz(W, M),
+                 bos_eos=hk is not None, hikaye_id=hk,
                  sozluk=None if sozluk is None else [str(a) for a in sozluk])
 
     son = -1                              # son TAMAMLANAN adim
@@ -202,22 +220,29 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
     not_(f"yigin {yigin}   adim basina {yigin * (T - 1):,} tahmin"
          f"   epok = {n / yigin:,.0f} adim")
     not_(f"veri izi {sabit['egitim_iz']}   olcum her {bas}   yedek her {yedek}"
+         f"   BOS/EOS {'VAR' if hk is not None else 'YOK'}"
          + ("" if sabit["sozluk"] else
             "   UYARI: sozluk YOK, konus tahmin etmek zorunda"))
-    not_(f"OLCUT: SONRAKI JETON dogrulugu.  sans {1 / N:.5f}")
-    not_("  adim    kayip   egitim  dogrulama      sn")
+    not_(f"OLCUT: SONRAKI JETON.  dogruluk (sans {1 / N:.5f}) ve dogrulama "
+         "perplexity'si; 'govde' TAM1'le AYNI hedefler")
+    not_("  adim    kayip   egitim  dogrulama   dg ppl   govde      sn")
     _gunluk(kok, ad)
 
     def olc(i, tam=False):
-        e, d = olcut(m, "eg", tam=tam), olcut(m, "dg", tam=tam)
-        b = dict(sabit, adim=i, kayip=float(kay.detach()), egitim=e,
-                 dogrulama=d)
+        e = _sonuc(olcut(m, "eg", tam=tam))
+        d = _sonuc(olcut(m, "dg", tam=tam))
+        b = dict(sabit, adim=i, kayip=float(kay.detach()),
+                 egitim=e["dogruluk"], dogrulama=d["dogruluk"],
+                 egitim_ce=e.get("ce"), dogrulama_ce=d.get("ce"),
+                 dogrulama_tur={k: v for k, v in d.items()
+                                if k.startswith(("ce_", "n_"))})
         SONUC[ad] = dict(b, model=m)
         return b
 
     def satir(b, gecen, im=""):
         return (f"{b['adim']:6d}  {b['kayip']:7.3f}  {b['egitim']:7.4f}  "
-                f"{b['dogrulama']:9.4f}  {gecen:6.0f}{im}")
+                f"{b['dogrulama']:9.4f}  {_ppl(b['dogrulama_ce'])} "
+                f"{_ppl(b['dogrulama_tur'].get('ce_govde'))}  {gecen:6.0f}{im}")
 
     # Yedek, o adimin opt.step()'i BITTIKTEN sonra yazilir.  Yani t<N>
     # N adimi ICERIR ve surdurme N+1'den baslar; N'den baslamak o adimi
@@ -277,13 +302,13 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
         _gunluk(kok, ad)
         return
 
-    e, d = olcut(m, "eg", tam=True), olcut(m, "dg", tam=True)
-    bilgi = dict(sabit, adim=son, kayip=float(kay.detach()), egitim=e,
-                 dogrulama=d, biti=True)
+    bilgi = dict(olc(son, tam=True), biti=True)
     SONUC[ad] = dict(bilgi, model=m)
     _yaz(kok, ad, _tam(m, opt, uret, bilgi))
-    not_(f"BITTI   egitim {e:.4f}   dogrulama {d:.4f}   "
-         f"({time.time() - t0:.0f} sn)")
+    not_(f"BITTI   egitim {bilgi['egitim']:.4f}   dogrulama "
+         f"{bilgi['dogrulama']:.4f}   dg ppl {_ppl(bilgi['dogrulama_ce']).strip()}"
+         f"   govde {_ppl(bilgi['dogrulama_tur'].get('ce_govde')).strip()}"
+         f"   ({time.time() - t0:.0f} sn)")
     _gunluk(kok, ad)
 
 
@@ -310,7 +335,8 @@ def baslat(ad, EG, N, *, olcut=_olcut_yok, aygit="cuda", kok=None, ek=None,
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
     EG      (W, M) ya da tek W -- W (n, T) pencere yigini, M dolgu maskesi
-    olcut   olcut(m, "eg"|"dg", tam=False) -> sonraki jeton dogrulugu
+    olcut   olcut(m, "eg"|"dg", tam=False) -> olcme_17.olc sozlugu
+            (dogruluk, ce, ce_bas/govde/son) ya da yalniz dogruluk
     bas     olcum araligi;  yedek  anlik goruntu araligi -- birbirinden BAGIMSIZ
     surdur  bir anlik goruntu yolu verilirse KALDIGI YERDEN devam eder
             (agirlik + optimizer + RNG).  Kural 1: uzatma SURDURMEDIR.

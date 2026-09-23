@@ -31,9 +31,10 @@ sinav 0,083 -> 0,145.
 
 SURUM V2.  README: "GPT-3.5 uretimleri daha dusuk kalitede".
 
-HIKAYE SINIRI AKISTA.  <hikaye> jetonu sozlukte duruyor.  model_16'da
-tam burasi kaybolmustu: ardisik birimlerin %12,9'u farkli varliklara
-aitti ve hicbir sey onu isaretlemiyordu.
+HIKAYE SINIRI AKISTA ve PENCEREDE.  <hikaye> akista ayrac; pencerede hem
+BOS hem EOS (pencere()).  model_16'da tam burasi kaybolmustu: ardisik
+birimlerin %12,9'u farkli varliklara aitti ve hicbir sey onu
+isaretlemiyordu.
 
 LISANS.  cdla-sharing-1.0.   Eldan & Li, arXiv 2305.07759
 """
@@ -67,28 +68,32 @@ ACAN = set("([{")                  # sonrasina bosluk KOYMA
 
 def _hikayeler(yol, parca_mb=64, en_mb=None):
     """Dosyayi parca parca oku, HIKAYE SINIRINDA kes, hikaye hikaye ver."""
+    return _hikayeler_kar(yol, parca_mb * 1024 * 1024,
+                          None if en_mb is None else en_mb * 1024 * 1024)
+
+
+def _hikayeler_kar(yol, parca, dur=None):
+    """parca/dur KARAKTER.  En fazla `dur` karakter okunur, yarim kalan son
+    hikaye atilir.  Eskiden bolumden artan sayilmiyordu: en_mb=64 fiilen
+    128 MB okuyordu (onkayit model_17_TAM1)."""
     art, okunan = "", 0
-    n = parca_mb * 1024 * 1024
-    dur = None if en_mb is None else en_mb * 1024 * 1024
     with open(yol, encoding="utf-8", errors="replace") as f:
-        while True:
-            p = f.read(n)
+        while dur is None or okunan < dur:
+            p = f.read(parca if dur is None else min(parca, dur - okunan))
             if not p:
-                break
+                if art.strip():
+                    yield art.translate(DUZLE)          # dosya bitti: son hikaye tam
+                return
+            okunan += len(p)
             p = art + p
             k = p.rfind(SINIR)
             if k < 0:
                 art = p
                 continue
             art, p = p[k + len(SINIR):], p[:k]
-            okunan += len(p)
             for h in p.split(SINIR):
                 if h.strip():
                     yield h.translate(DUZLE)
-            if dur and okunan >= dur:
-                return
-    if art.strip():
-        yield art.translate(DUZLE)
 
 
 def sozluk(yol, en: int, parca_mb=64, en_mb=None, yaz=print):
@@ -111,6 +116,7 @@ def akis(yol, ix, parca_mb=64, en_mb=None, yaz=print):
 
     int16: en buyuk kimlik 4.002 < 32.767, KAYIPSIZ.  Yarim dosya,
     yarim yukleme, Colab'da yarim RAM."""
+    assert len(ix) <= np.iinfo(np.int16).max + 1, "sozluk int16'ya sigmiyor"
     bl, hk = ix[BILINMEYEN], ix[HIKAYE]
     cik, n = [], 0
     for h in _hikayeler(yol, parca_mb, en_mb):
@@ -126,20 +132,21 @@ def akis(yol, ix, parca_mb=64, en_mb=None, yaz=print):
 
 
 def pencere(a: np.ndarray, T: int, uret=None, hikaye=None, dolgu=0):
-    """HER HIKAYE = BIR PENCERE.  Doner: (P, M) -- P (n,T), M (n,T) bool.
+    """HER HIKAYE = BIR PENCERE, basinda ve sonunda <hikaye>.  Doner: (P, M).
 
     Kullanici: *"her hikaye bence 1 pencere olmali yoksa modele dogru tam
-    hikaye ogretmemis oluruz"*.  Pencere hikayenin ILK jetonundan baslar,
-    SON jetonunda biter; kalan yer <dolgu> ve maskede False.  Tasma YOK --
-    yani hicbir pencerede ikinci bir hikayenin parcasi bulunmaz.
+    hikaye ogretmemis oluruz"* ve *"bos ve eos gerekli"*.
 
-    T'den UZUN hikayeler ATILIR (bolmek "tam hikaye" ilkesini bozardi).
-    OLCULDU, T=256: hikayelerin %89,8'i kaliyor, jetonlarin %79,4'u;
-    dolgu orani %33,7, yani etkin is %66,3.
-      T=384 -> %95,7 kalir ama dolgu %53,5
-      T=512 -> %98,5 kalir ama dolgu %63,7  (hesabin ucte ikisi bosa)
+        <hikaye> w1 w2 ... wL <hikaye> <dolgu> ...
+        bastaki BOS: w1 de tahmin edilir.  sondaki EOS: model bitisi
+        ogrenir, uretim durabilir.
 
-    hikaye verilmezse akis DUZ kesilir (eski davranis, maske hep True).
+    Kalan yer <dolgu>, maskede False.  Tasma YOK.  L + 2 > T olan hikayeler
+    ATILIR (bolmek "tam hikaye" ilkesini bozardi).
+    OLCULDU, T=256, BOS/EOS'SUZ hali: hikayelerin %89,8'i kaliyor, dolgu
+    %33,7.  T=384 -> %95,7 ama dolgu %53,5;  T=512 -> %98,5 ama dolgu %63,7.
+
+    hikaye verilmezse akis DUZ kesilir (maske hep True).
     """
     if hikaye is None:
         n = len(a) // T
@@ -148,15 +155,16 @@ def pencere(a: np.ndarray, T: int, uret=None, hikaye=None, dolgu=0):
     else:
         sn = np.flatnonzero(a == hikaye)
         bas = np.concatenate([[0], sn + 1])[:len(sn)]   # her hikayenin basi
-        son = sn                                        # ayractan ONCEsi
-        uz = son - bas
-        tut = (uz > 0) & (uz <= T)
+        uz = sn - bas                                   # ayrac haric kelime
+        tut = (uz > 0) & (uz + 2 <= T)                  # + BOS + EOS
         bas, uz = bas[tut], uz[tut]
         P = np.full((len(bas), T), dolgu, dtype=a.dtype)
         M = np.zeros((len(bas), T), dtype=bool)
+        P[:, 0] = hikaye
         for i, (b, L) in enumerate(zip(bas, uz)):
-            P[i, :L] = a[b:b + L]
-            M[i, :L] = True
+            P[i, 1:L + 1] = a[b:b + L]
+            P[i, L + 1] = hikaye
+            M[i, :L + 2] = True
     if uret is not None:
         j = uret.permutation(len(P))
         P, M = P[j], M[j]
@@ -207,14 +215,15 @@ def kur(kok: str, T: int = 128, en: int = 4000, en_mb=None, tohum: int = 0,
            tahminlerin %40,8'i hikayesinin basini GORMUYORDU (olculdu).
 
     Uretilen akis onbellege yazilir; ikinci cagri OKUR (kural 9).
-    Iz her cagrida YENIDEN hesaplanir."""
+    Veri izini train_17 egitim tensorunden hesaplayip pakete yazar."""
     ob = os.path.join(kok, "onbellek")
     os.makedirs(ob, exist_ok=True)
     yol = {b: os.path.join(kok, "TinyStoriesV2-GPT4-%s.txt" % b)
            for b in ("train", "valid")}
-    # SURUM onbellek anahtarinda: sozluk yapisi degisirse (ornegin
-    # <dolgu> eklenince) eski onbellek SESSIZCE kullanilmasin.
-    etiket = "%s_n%d_v2" % ("tam" if en_mb is None else "%dmb" % en_mb, en)
+    # SURUM onbellek anahtarinda: yapi degisince eski onbellek SESSIZCE
+    # kullanilmasin.  en_mb'li akislar v3: eskisi (v2) iki kati okumustu.
+    etiket = ("tam_n%d_v2" % en if en_mb is None
+              else "%dmb_n%d_v3" % (en_mb, en))
 
     ps = os.path.join(ob, "sozluk_%s.npy" % etiket)
     if os.path.exists(ps):
@@ -241,9 +250,9 @@ def kur(kok: str, T: int = 128, en: int = 4000, en_mb=None, tohum: int = 0,
     EG, EM = pencere(A["train"], T, uret, hk, ix[DOLGU])
     DG, DM = pencere(A["valid"], T, uret, hk, ix[DOLGU])
     yaz("  pencere T=%d   %s   egitim %s   dogrulama %s"
-        % (T, "HER HIKAYE BIR PENCERE" if hizali else "duz kesim",
-           "{:,}".format(len(EG)), "{:,}".format(len(DG))))
-    yaz("  dolgu %%%.1f   etkin is %%%.1f   (T'den uzun hikayeler atildi)"
+        % (T, "HER HIKAYE BIR PENCERE, <hikaye> ... <hikaye>" if hizali
+           else "duz kesim", "{:,}".format(len(EG)), "{:,}".format(len(DG))))
+    yaz("  dolgu %%%.1f   etkin is %%%.1f   (L+2 > T olan hikayeler atildi)"
         % (100 * (1 - EM.mean()), 100 * EM.mean()))
     return ad, (EG, EM), (DG, DM)
 
