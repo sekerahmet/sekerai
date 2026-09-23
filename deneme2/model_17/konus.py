@@ -9,10 +9,11 @@ burada kayip gosterilmiyor -- yalniz modelin YAZDIGI.
 
   Once upon a time           yaz, devamini gorursun
   <bos satir>                makalenin 44 degerlendirme isteminden RASTGELE biri
-  n=120                      kac kelime uretilecek  (varsayilan 80)
+  n=120                      kac kelime uretilecek  (varsayilan 80, istem+n <= T)
   s=0.8                      sicaklik.  0 = hep en yakin kelime (belirlenimci)
+  yasak                      <bilinmeyen>/<dolgu> uretimi kapat (varsayilan) / ac
   yedek                      hangi yedekler var, hangisi yuklu
-  yedek t500                 baska bir ani yukle -- egri boyunca gezinmek icin
+  yedek TAM1/t500            baska bir ani yukle -- ad BIREBIR (t500, t5000 degil)
   ?                          yardim
   q                          cik
 """
@@ -58,42 +59,63 @@ def yedekler():
     return sorted(cik, key=lambda x: os.path.getmtime(x[1]), reverse=True)
 
 
+def _ad(x):
+    """Yedegin goreli yolu, '/' ile ve .pt'siz: TAM1/t500."""
+    return x[0].replace("\\", "/")[:-3]
+
+
 def bul(desen=None):
-    """Agirlik dosyasini bul.  Desen verilmezse EN YENISI."""
+    """Agirlik dosyasini bul.  Desen verilmezse EN YENISI.
+
+    Desen dosya adiyla BIREBIR eslesir: t500 -> t500.pt, t5000 DEGIL.
+    Birden cok kosuda varsa klasorle yazilir (TAM1/t500); TS2 gibi bir
+    kosu adi model_TS2.pt'yi getirir."""
     hepsi = yedekler()
     if not hepsi:
         print("AGIRLIK DOSYASI YOK.  Arananlar:")
         for d in ADAY:
             print("   %s\\*\\t*.pt" % d)
         print()
-        print("Colab defterinde kosuyu baslat; yedek her 50 adimda")
+        print("Colab defterinde kosuyu baslat; yedek her `yedek` adimda")
         print("Drive'a yaziliyor, eslesince buraya duser.")
         sys.exit(1)
-    if desen:
-        e = [x for x in hepsi if desen in x[0]]
-        if not e:
-            print("'%s' ile eslesen yedek yok.  'yedek' yazip listeye bak."
-                  % desen)
-            return None
-        return e[0][1]
-    return hepsi[0][1]
+    if not desen:
+        return hepsi[0][1]
+    d = desen.replace("\\", "/")
+    d = d[:-3] if d.endswith(".pt") else d
+    e = [x for x in hepsi if _ad(x) == d or _ad(x).endswith("/" + d)]
+    e = e or [x for x in hepsi if _ad(x) == "model_" + d]
+    if not e:
+        print("'%s' ile eslesen yedek yok.  'yedek' yazip listeye bak."
+              % desen)
+        return None
+    if len(e) > 1:
+        print("'%s' birden cok yerde var, klasorle yaz:" % desen)
+        for x in e:
+            print("   " + _ad(x))
+        return None
+    return e[0][1]
 
 
 def yukle(yol):
     k = torch.load(yol, weights_only=False, map_location="cpu")
-    m = Yol(k["n"], boyut=k["boyut"], durum=k["durum"])
+    m = Yol(k["n"], boyut=k["boyut"], durum=k["durum"],
+            **{a: k[a] for a in ("norm", "pay") if a in k})
     m.load_state_dict(k["agirlik"])
     m.eval()
     return m, k
 
 
 def sozluk(k, m):
-    """Sozluk KAYITTAN degil, ONBELLEKTEN -- kayit yalniz boyutu tasiyor.
+    """Sozluk PAKETTEN.  Eski paketler tasimiyor; onlar icin ONBELLEKTEN.
 
     Uzunluk YETMEZ: 64mb ve tam sozluklerinin ikisi de 4.003 birim ama
     4.003 konumun 3.784'u farkli kelime (olculdu).  O yuzden MODELE
     SORULUR -- her adayin kendi dogrulama akisindan bir pencere alinip
     kayip hesaplanir; dogru sozluk belirgin dusuk cikar."""
+    if k.get("sozluk"):
+        assert len(k["sozluk"]) == k["n"], "paketteki sozluk n ile tutmuyor"
+        return list(k["sozluk"]), "paketten"
     import numpy as np
     aday = []
     for d in TS:
@@ -143,6 +165,8 @@ def yaz(baslik, metin, g=70):
 
 def main():
     yol = bul(sys.argv[1] if len(sys.argv) > 1 else None)
+    if not yol:
+        sys.exit(1)
     m, k = yukle(yol)
     AD, sz = sozluk(k, m)
     IX = {a: i for i, a in enumerate(AD)}
@@ -160,7 +184,7 @@ def main():
     print(__doc__.split("\n\n")[-1].rstrip())
     print()
 
-    n, sic = 80, 0.0
+    n, sic, yasak = 80, 0.0, True
     while True:
         try:
             g = input("> ").strip()
@@ -180,19 +204,29 @@ def main():
             print("   sicaklik %.2f%s" % (sic, "  (belirlenimci)" if not sic
                                           else ""))
             continue
+        if g == "yasak":
+            yasak = not yasak
+            print("   <bilinmeyen>/<dolgu> %s"
+                  % ("URETILMEZ" if yasak else "uretilebilir"))
+            continue
         if g.startswith("yedek"):
             p = g[5:].strip()
             if not p:
-                for ad_, _, _ in yedekler()[:12]:
+                for ad_, p_, _ in yedekler()[:12]:
                     print("   %s%s" % (ad_, "   <- yuklu"
-                                       if ad_ in yol else ""))
+                                       if os.path.normcase(p_)
+                                       == os.path.normcase(yol) else ""))
                 continue
             y2 = bul(p)
             if y2:
                 yol = y2
                 m, k = yukle(yol)
-                print("   yuklendi %s   adim %s"
-                      % (os.path.basename(yol), "{:,}".format(k.get("adim", -1))))
+                # Baska kosunun paketi baska sozlukle egitilmis olabilir.
+                AD, sz = sozluk(k, m)
+                IX = {a: i for i, a in enumerate(AD)}
+                print("   yuklendi %s   adim %s   sozluk %s"
+                      % (os.path.basename(yol),
+                         "{:,}".format(k.get("adim", -1)), sz))
             continue
         if not g:
             if not IST:
@@ -200,18 +234,31 @@ def main():
                 continue
             g = random.choice(IST)
 
-        onek = V.JETON.findall(g.translate(V.DUZLE))[-60:]
+        # Model yalniz hikaye BASINDAN baslayan pencere gordu: istemin
+        # basi kesilmez, sigmazsa uretim kisalir.
+        T = k.get("T", 256)
+        onek = V.JETON.findall(g.translate(V.DUZLE))
         if not onek:
             continue
+        if len(onek) >= T:
+            print("   UYARI: istem %d kelime, T=%d -- BASI kesildi; model "
+                  "hikaye ortasindan baslayan pencere gormedi" % (len(onek), T))
+            onek = onek[-(T - 1):]
+        n_ = min(n, T - len(onek))
+        if n_ < n:
+            print("   uretim %d -> %d kelime: istem + uretim T=%d'yi asamaz"
+                  % (n, n_, T))
         kod = [IX.get(t, IX[V.BILINMEYEN]) for t in onek]
         bil = sum(1 for t in onek if t not in IX)
+        Y = [IX[t] for t in (V.BILINMEYEN, V.DOLGU) if yasak and t in IX]
         bas = V.coz(torch.tensor(kod), AD)
-        hep = OL.devam(m, onek, AD, IX, V.coz, adim=n, aygit="cpu",
-                       sicaklik=sic)
+        hep = OL.devam(m, onek, AD, IX, V.coz, adim=n_, aygit="cpu",
+                       sicaklik=sic, yasak=Y)
         print()
         yaz("ISTEM%s" % ("   (%d kelime sozlukte YOK)" % bil if bil else ""),
             bas)
-        yaz("MODEL  (%d kelime, sicaklik %.2f)" % (n, sic),
+        yaz("MODEL  (%d kelime, sicaklik %.2f%s)"
+            % (n_, sic, "   yasak: " + " ".join(AD[i] for i in Y) if Y else ""),
             hep[len(bas):].strip())
         print()
 

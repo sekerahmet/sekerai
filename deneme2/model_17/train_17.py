@@ -3,11 +3,11 @@
 
 GOREV SONRAKI JETON.  Etiket yok; her konum bir sonrakini tahmin eder.
 
-    kayip = m.kayip(w)          w (B,T) pencere
+    kayip = m.kayip(w, maske)   w (B,T) pencere, maske dolgu disi yuvalar
                                 dizi() her yuvayi okur, nedensel maske
 
-Veri TEK TENSOR: (n, T) pencere yigini, hepsi ayni uzunlukta.  Obek YOK
--- akis kesintisiz ve pencereler sabit T, yani dolgu da yok.
+Veri (W, M): W (n, T) pencere yigini, M ayni bicimde dolgu maskesi.
+HER HIKAYE BIR PENCERE; hikaye bitince kalan yer <dolgu>.
 
 AdamW, Adam DEGIL.  Adam'in weight_decay'i L2'yi gradyana katar ve
 1/sqrt(v) ile normalize eder; gorev gradyani sadelesen bir bilesende
@@ -17,14 +17,17 @@ silinir.  model_16'da olculdu: token basina parametreler cokuyordu
 dim < 2 (s0, hb) decay disinda.
 
 KOSU ARKA PLANDA (CLAUDE.md kural 8).  `baslat` hemen doner, ilerleme
-`nabiz` ile OKUNUR.  Gunluk her `yedek` adimda diske de yazilir.
+`nabiz` ile OKUNUR.  Her kosu KENDI gunluk.txt'sine her olcumde EKLER;
+surdurmede eski satirlar durur.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import threading
 import time
+import traceback
 
 import torch
 
@@ -32,10 +35,48 @@ from model_17 import Yol, BOYUT, DURUM, LR, WD
 
 YIGIN = 512
 GUNLUK, SONUC, DURDUR = [], {}, set()
+IPLIK = {}      # ad -> Thread; nabiz canli mi diye bakar
+_DISKE = {}     # ad -> gunluk.txt'ye henuz yazilmamis satirlar
+
+# Surdurmede paketteki degerle AYNI olmali.  Farkliysa yorunge sessizce
+# baskalasir: opt.load_state_dict lr/wd'yi paketten alir, gunluk cagriyi yazar.
+SURDUR_ESIT = ("n", "T", "yigin", "lr", "wd", "tohum", "boyut", "durum",
+               "norm", "pay", "egitim_iz", "sozluk")
 
 
 def _olcut_yok(m, taraf, tam=False):
     raise RuntimeError("olcut verilmedi -- baslat(..., olcut=...) sart")
+
+
+def _not(ad, s):
+    """Satir hem ortak gunluge (nabiz) hem kosunun disk kuyruguna."""
+    s = f"[{ad}] {s}"
+    GUNLUK.append(s)
+    _DISKE.setdefault(ad, []).append(s)
+
+
+def _gunluk(kok, ad):
+    """Kosunun yeni satirlarini KENDI gunluk.txt'sine EKLER -- uzerine
+    yazmaz, baska kosunun satirini tasimaz."""
+    bek = _DISKE.get(ad)
+    if not bek:
+        return
+    if kok:
+        d = f"{kok}/{ad}"
+        os.makedirs(d, exist_ok=True)
+        with open(f"{d}/gunluk.txt", "a", encoding="utf-8") as f:
+            f.write("\n".join(bek) + "\n")
+    bek.clear()
+
+
+def _iz(*t):
+    """Egitim tensorlerinin parmak izi -- surdurme AYNI veriyle mi."""
+    h = hashlib.sha256()
+    for x in t:
+        if x is not None:
+            h.update(f"{tuple(x.shape)} {x.dtype}".encode())
+            h.update(x.contiguous().numpy())
+    return h.hexdigest()[:16]
 
 
 def _tam(m, opt, uret, bilgi):
@@ -45,7 +86,7 @@ def _tam(m, opt, uret, bilgi):
 
 
 def _yaz(kok, ad, p):
-    """Anlik goruntuyu ve gunlugu diske yaz -- KOSUNUN ICINDE.
+    """Anlik goruntuyu diske yaz -- KOSUNUN ICINDE.
     Ayri hucre olarak dururken unutulur; model_16'da 8000 adimlik bir
     kosu oyle gitmisti.  Eskiler silinmez."""
     if not kok:
@@ -54,8 +95,6 @@ def _yaz(kok, ad, p):
     os.makedirs(d, exist_ok=True)
     torch.save(p, f"{d}/t{p['adim']}.pt")
     torch.save(p, f"{kok}/model_{ad}.pt")
-    with open(f"{d}/gunluk.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(GUNLUK) + "\n")
 
 
 def _koru(kok, ad):
@@ -73,9 +112,21 @@ def _koru(kok, ad):
     return os.path.basename(yeni)
 
 
+def _denetle(p, sabit):
+    """Surdurme paketi bu cagriyla AYNI kosu mu?  Degilse kosu BASLAMAZ."""
+    kisa = lambda v: f"<{len(v)} birim>" if isinstance(v, list) else repr(v)
+    fark = [f"{a}: paket {kisa(p[a])}, cagri {kisa(sabit[a])}"
+            for a in SURDUR_ESIT
+            if p.get(a) is not None and sabit.get(a) is not None
+            and p[a] != sabit[a]]
+    if fark:
+        raise ValueError("surdurme paketi bu cagriyla uyusmuyor -- "
+                         + "; ".join(fark))
+
+
 def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
-         lr, wd, adim, tohum, yigin, bas, yedek, surdur, derle):
-    not_ = GUNLUK.append
+         lr, wd, adim, tohum, yigin, bas, yedek, surdur, derle, sozluk=None):
+    not_ = lambda s: _not(ad, s)
     torch.manual_seed(tohum)
     m = Yol(N, boyut=boyut, durum=durum, tohum=tohum).to(aygit)
 
@@ -104,22 +155,12 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
     egit = m.kayip
     if derle:
         egit = torch.compile(m.kayip)
-        not_(f"[{ad}] torch.compile ACIK -- ilk adim DERLEME yuzunden yavas")
+        not_("torch.compile ACIK -- ilk adim DERLEME yuzunden yavas")
     dec = [p for p in m.parameters() if p.dim() >= 2]
     nodec = [p for p in m.parameters() if p.dim() < 2]
     opt = torch.optim.AdamW([{"params": dec, "weight_decay": wd},
                              {"params": nodec, "weight_decay": 0.0}], lr=lr)
     uret = torch.Generator(device="cpu").manual_seed(tohum)
-    bas_adim = 0
-
-    if surdur:
-        p = torch.load(surdur, weights_only=False, map_location=aygit)
-        m.load_state_dict(p["agirlik"])
-        opt.load_state_dict(p["opt"])
-        torch.set_rng_state(p["rng"].cpu())
-        uret.set_state(p["uret_rng"].cpu())
-        bas_adim = p["adim"]
-        not_(f"[{ad}] SURDURULUYOR  {os.path.basename(surdur)}  adim {bas_adim}")
 
     # PENCERELER CPU'DA KALIR, yigin yigin tasinir.  64 MB dilimde
     # tumu GPU'ya sigiyordu (253 MB) ama tam korpusta 8,8 GB eder ve
@@ -132,24 +173,59 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
     M = M if M is None or M.device.type == "cpu" else M.cpu()
     n, T = W.shape
     par = sum(p.numel() for p in m.parameters())
-    _et = 1.0 if M is None else float(M.float().mean())
-    not_(f"[{ad}] pencere {n:,} x {T}   {n * T:,} yuva"
+    # Pakete giden kimlik: sozluk ve iz pakette durursa konus tahmin etmez,
+    # surdurme de ayni veriyi dogrular.
+    sabit = dict(ek or {}, n=N, boyut=boyut, durum=durum, norm=m.norm,
+                 pay=m.pay, lr=lr, wd=wd, tohum=tohum, yigin=yigin, T=T,
+                 parametre=par, derle=derle, egitim_iz=_iz(W, M),
+                 sozluk=None if sozluk is None else [str(a) for a in sozluk])
+
+    son = -1                              # son TAMAMLANAN adim
+    if surdur:
+        p = torch.load(surdur, weights_only=False, map_location=aygit)
+        _denetle(p, sabit)
+        sabit["sozluk"] = sabit["sozluk"] or p.get("sozluk")
+        m.load_state_dict(p["agirlik"])
+        opt.load_state_dict(p["opt"])
+        torch.set_rng_state(p["rng"].cpu())
+        uret.set_state(p["uret_rng"].cpu())
+        son = p["adim"]
+        not_(f"SURDURULUYOR  {os.path.basename(surdur)}  adim {son}")
+    son_kayit = son                       # paket o adimin kaydi zaten
+
+    _et = 1.0 if M is None else float(M.sum()) / M.numel()
+    not_(f"pencere {n:,} x {T}   {n * T:,} yuva"
          + ("" if M is None else f"   dolgu %{100 * (1 - _et):.1f}"
                                  f"   ETKIN {n * T * _et:,.0f}"))
-    not_(f"[{ad}] boyut {boyut} durum {durum} lr {lr} wd {wd} tohum {tohum}"
+    not_(f"boyut {boyut} durum {durum} lr {lr} wd {wd} tohum {tohum}"
          f"  sozluk {N}  parametre {par:,}")
-    not_(f"[{ad}] yigin {yigin}   adim basina {yigin * (T - 1):,} tahmin"
+    not_(f"yigin {yigin}   adim basina {yigin * (T - 1):,} tahmin"
          f"   epok = {n / yigin:,.0f} adim")
-    not_(f"[{ad}] OLCUT: SONRAKI JETON dogrulugu.  sans {1 / N:.5f}")
-    not_(f"[{ad}]   adim    kayip   egitim  dogrulama      sn")
+    not_(f"veri izi {sabit['egitim_iz']}   olcum her {bas}   yedek her {yedek}"
+         + ("" if sabit["sozluk"] else
+            "   UYARI: sozluk YOK, konus tahmin etmek zorunda"))
+    not_(f"OLCUT: SONRAKI JETON dogrulugu.  sans {1 / N:.5f}")
+    not_("  adim    kayip   egitim  dogrulama      sn")
+    _gunluk(kok, ad)
+
+    def olc(i, tam=False):
+        e, d = olcut(m, "eg", tam=tam), olcut(m, "dg", tam=tam)
+        b = dict(sabit, adim=i, kayip=float(kay.detach()), egitim=e,
+                 dogrulama=d)
+        SONUC[ad] = dict(b, model=m)
+        return b
+
+    def satir(b, gecen, im=""):
+        return (f"{b['adim']:6d}  {b['kayip']:7.3f}  {b['egitim']:7.4f}  "
+                f"{b['dogrulama']:9.4f}  {gecen:6.0f}{im}")
 
     # Yedek, o adimin opt.step()'i BITTIKTEN sonra yazilir.  Yani t<N>
-    # N adimi ICERIR ve surdurme N+1'den baslar; bas_adim'dan baslamak
-    # o adimi IKI KEZ atar ve yorunge kayar (surdurme kapisi 2,1e-03).
-    t0, i, kay = time.time(), bas_adim, None
-    for i in range(bas_adim + 1 if surdur else 0, adim + 1):
+    # N adimi ICERIR ve surdurme N+1'den baslar; N'den baslamak o adimi
+    # IKI KEZ atar ve yorunge kayar (test_17 §1).
+    t0, kay, bilgi, durdu = time.time(), None, None, False
+    for i in range(son + 1, adim + 1):
         if ad in DURDUR:
-            not_(f"[{ad}] DURDURULDU  adim {i}")
+            durdu = True
             break
         j = torch.randint(0, n, (yigin,), generator=uret)
         opt.zero_grad()
@@ -158,75 +234,128 @@ def _kos(ad, EG, N, olcut, aygit, kok, ek, boyut, durum,
         kay = egit(w_, m_)
         kay.backward()
         opt.step()
+        son = i
 
-        if i % bas == 0:
+        # yedek bas'in katina bagli DEGIL: bas 100, yedek 250 -> 250'de yazar.
+        if i % bas == 0 or i % yedek == 0:
             gecen = time.time() - t0
-            e, d = olcut(m, "eg"), olcut(m, "dg")
-            bilgi = dict(ek or {}, n=N, adim=i, boyut=boyut, durum=durum,
-                         lr=lr, wd=wd, tohum=tohum, yigin=yigin, T=T,
-                         parametre=par, kayip=float(kay.detach()),
-                         egitim=e, dogrulama=d, derle=derle)
-            SONUC[ad] = dict(bilgi, model=m)
-            im = ""
+            bilgi, im = olc(i), ""
             if i % yedek == 0:
-                _yaz(kok, ad, _tam(m, opt, uret, bilgi)); im = "  yedek"
-            not_(f"[{ad}] {i:6d}  {bilgi['kayip']:7.3f}  {e:7.4f}  {d:9.4f}"
-                 f"  {gecen:6.0f}{im}")
+                _yaz(kok, ad, _tam(m, opt, uret, bilgi))
+                son_kayit, im = i, "  yedek"
+            not_(satir(bilgi, gecen, im))
+            _gunluk(kok, ad)
 
-    if kay is None:                       # bitmis kosudan surduruldu
+    if son < 0:
+        not_("DURDURULDU -- hic adim atilmadi, kayit yok")
+        _gunluk(kok, ad)
+        return
+    if kay is None:                       # surdurulen kosuda yeni adim yok
         with torch.no_grad():
             kay = m.kayip(W[:yigin].to(aygit).long(),
                           None if M is None else M[:yigin].to(aygit))
+
+    # ONCE KAYDET, SONRA OLC.  Tam olcum TAM1'de ~15 dk surdu; o arada
+    # oturum duserse son yedekten beri yapilan is giderdi.
+    if son_kayit != son:
+        if bilgi is None or bilgi["adim"] != son:
+            gecen = time.time() - t0
+            bilgi = olc(son)
+            _yaz(kok, ad, _tam(m, opt, uret, bilgi))
+            not_(satir(bilgi, gecen, "  yedek"))
+        else:
+            _yaz(kok, ad, _tam(m, opt, uret, bilgi))
+            not_(f"{son:6d}  yedek")
+        _gunluk(kok, ad)
+
+    if durdu:
+        # Durdurmanin amaci GPU'yu HEMEN birakmak; tam olcum paketten alinir.
+        SONUC[ad] = dict(bilgi or dict(sabit, adim=son), model=m,
+                         biti=True, durduruldu=True)
+        not_(f"DURDURULDU  son tamamlanan adim {son} kaydedildi"
+             "  -- tam olcum ATLANDI")
+        _gunluk(kok, ad)
+        return
+
     e, d = olcut(m, "eg", tam=True), olcut(m, "dg", tam=True)
-    bilgi = dict(ek or {}, n=N, adim=i, boyut=boyut, durum=durum, lr=lr,
-                 wd=wd, tohum=tohum, yigin=yigin, T=T, parametre=par,
-                 kayip=float(kay.detach()), egitim=e, dogrulama=d,
-                 derle=derle, biti=True)
+    bilgi = dict(sabit, adim=son, kayip=float(kay.detach()), egitim=e,
+                 dogrulama=d, biti=True)
     SONUC[ad] = dict(bilgi, model=m)
     _yaz(kok, ad, _tam(m, opt, uret, bilgi))
-    not_(f"[{ad}] BITTI   egitim {e:.4f}   dogrulama {d:.4f}   "
+    not_(f"BITTI   egitim {e:.4f}   dogrulama {d:.4f}   "
          f"({time.time() - t0:.0f} sn)")
+    _gunluk(kok, ad)
+
+
+def _korumali(**k):
+    """_kos'u sarar: iplik olurse nabiz bunu GORSUN, kosu suruyor sanilmasin."""
+    ad = k["ad"]
+    try:
+        _kos(**k)
+    except Exception:
+        tb = traceback.format_exc()
+        for s in tb.rstrip().splitlines():
+            _not(ad, "HATA  " + s)
+        SONUC[ad] = dict(SONUC.get(ad, {}), hata=tb)
+        try:
+            _gunluk(k["kok"], ad)
+        except Exception:
+            pass
 
 
 def baslat(ad, EG, N, *, olcut=_olcut_yok, aygit="cuda", kok=None, ek=None,
            boyut=BOYUT, durum=DURUM, lr=LR, wd=WD,
            adim=20000, tohum=0, yigin=YIGIN, bas=100, yedek=500,
-           surdur=None, derle=False):
+           surdur=None, derle=False, sozluk=None):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
-    EG      (n, T) pencere yigini -- hepsi ayni uzunlukta, dolgu YOK
+    EG      (W, M) ya da tek W -- W (n, T) pencere yigini, M dolgu maskesi
     olcut   olcut(m, "eg"|"dg", tam=False) -> sonraki jeton dogrulugu
+    bas     olcum araligi;  yedek  anlik goruntu araligi -- birbirinden BAGIMSIZ
     surdur  bir anlik goruntu yolu verilirse KALDIGI YERDEN devam eder
             (agirlik + optimizer + RNG).  Kural 1: uzatma SURDURMEDIR.
-    derle   torch.compile.  model_11'de 1,83 kat OLCULDU ama BASKA bir
-            mimaride; burada olculmeden acilmaz.
+            Paketteki ayar ya da veri bu cagriyla tutmazsa kosu BASLAMAZ.
+    sozluk  kelime listesi -- pakete yazilir, konus tahmin etmek zorunda kalmaz
+    derle   torch.compile.  Burada 3,90 kat olculdu (_kos'taki not);
+            kisa kosuda zararli.
     """
+    t = IPLIK.get(ad)
+    if t is not None and t.is_alive():
+        raise RuntimeError(f"{ad} hala kosuyor -- once durdur('{ad}')")
+    _DISKE.pop(ad, None)          # onceki kosunun yazilamamis satiri karismasin
     if kok is None:
-        GUNLUK.append(f"[{ad}] UYARI: kok YOK, agirlik KAYDEDILMIYOR")
+        _not(ad, "UYARI: kok YOK, agirlik KAYDEDILMIYOR")
     if not surdur:
         tasinan = _koru(kok, ad)
         if tasinan:
             print(f"  ESKI YEDEKLER KORUNDU -> {tasinan}/")
-            GUNLUK.append(f"[{ad}] eski yedekler tasindi -> {tasinan}/")
+            _not(ad, f"eski yedekler tasindi -> {tasinan}/")
     DURDUR.discard(ad)
-    threading.Thread(
-        target=_kos, daemon=True,
-        args=(ad, EG, N, olcut, aygit, kok, ek, boyut, durum, lr, wd,
-              adim, tohum, yigin, bas, yedek, surdur, derle)).start()
+    t = threading.Thread(target=_korumali, daemon=True, kwargs=dict(
+        ad=ad, EG=EG, N=N, olcut=olcut, aygit=aygit, kok=kok, ek=ek,
+        boyut=boyut, durum=durum, lr=lr, wd=wd, adim=adim, tohum=tohum,
+        yigin=yigin, bas=bas, yedek=yedek, surdur=surdur, derle=derle,
+        sozluk=sozluk))
+    IPLIK[ad] = t
+    t.start()
     return f"{ad} basladi" + (f"  ({os.path.basename(surdur)}'den)"
                               if surdur else "")
 
 
 def nabiz(son=40):
     """Gunlugu bas.  HICBIR SEY KOSTURMAZ (kural 8)."""
-    print(f"gunluk {len(GUNLUK)} satir   SONUC: {list(SONUC)}"
+    hal = {a: ("CANLI" if t.is_alive()
+               else "HATA" if SONUC.get(a, {}).get("hata") else "bitti")
+           for a, t in IPLIK.items()}
+    print(f"gunluk {len(GUNLUK)} satir   iplik: {hal}"
           f"   DURDUR: {sorted(DURDUR)}")
     for s in GUNLUK[-son:]:
         print(s)
 
 
 def durdur(ad=None):
-    """Bayrak koyar; iplik bir sonraki adimda cikar ve cikmadan KAYDEDER."""
-    for a in ([ad] if ad else list(SONUC)):
+    """Bayrak koyar; iplik bir sonraki adimda cikar ve cikmadan KAYDEDER.
+    Tam olcum ATLANIR -- durdurmanin amaci GPU'yu hemen birakmak."""
+    for a in ([ad] if ad else [a for a, t in IPLIK.items() if t.is_alive()]):
         DURDUR.add(a)
     print("durdurma bayragi:", sorted(DURDUR))

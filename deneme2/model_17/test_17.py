@@ -26,23 +26,37 @@ def kapi(ad, sart, not_=""):
     print("  %-40s %s  %s" % (ad, "GECTI" if sart else "KALDI", not_))
 
 
+def _veri():
+    """Kucuk rastgele egitim verisi: (N, W, M)."""
+    N, T, n = 20, 16, 64
+    g = torch.Generator().manual_seed(7)
+    return (N, torch.randint(0, N, (n, T), generator=g),
+            torch.ones(n, T, dtype=torch.bool))
+
+
+def _temizle():
+    for x in (TR.GUNLUK, TR.SONUC, TR.DURDUR, TR._DISKE):
+        x.clear()
+
+
+def _agirlik(ad):
+    return {k: v.clone()
+            for k, v in TR.SONUC[ad]["model"].state_dict().items()}
+
+
 # --- 1.  SURDURME  ==  KESINTISIZ
 # Kural 1: uzatma SURDURMEDIR.  Ayni yorunge cikmazsa surdurme bir
 # yanilsamadir -- sessizce BASKA bir model uretir.  22 Eylul'de
 # kalmisti: yedek o adimin step()'inden SONRA yazildigi icin dongu
 # kaydedilen adimi ikinci kez atiyordu (fark 2,061e-03).
 def t_surdurme():
-    N, T, n = 20, 16, 64
-    g = torch.Generator().manual_seed(7)
-    W = torch.randint(0, N, (n, T), generator=g)
-    M = torch.ones(n, T, dtype=torch.bool)
+    N, W, M = _veri()
 
     def kos(ad, kok, adim, surdur=None):
-        TR.GUNLUK.clear(); TR.SONUC.clear(); TR.DURDUR.clear()
+        _temizle()
         TR._kos(ad, (W, M), N, lambda *a, **k: 0.0, "cpu", kok, None,
                 8, 8, 2e-3, 0.01, adim, 0, 8, 2, 2, surdur, False)
-        return {k: v.clone()
-                for k, v in TR.SONUC[ad]["model"].state_dict().items()}
+        return _agirlik(ad)
 
     kok = tempfile.mkdtemp()
     try:
@@ -95,9 +109,67 @@ def t_pencere():
     kapi("pencere hikaye sinirinda", ok, "%d pencere" % len(P))
 
 
+# --- 5.  DURDUR + SURDUR  ==  KESINTISIZ
+# Durdurulan kosu son TAMAMLANAN adimi yazmali.  Atilmamis adimi yazarsa
+# surdurme bir adim eksik atar -- §1'in durdurma yolundaki esi.
+def t_durdur():
+    N, W, M = _veri()
+    kok = tempfile.mkdtemp()
+
+    def kos(ad, adim, surdur=None, dur=None, lr=2e-3):
+        _temizle()
+        say = [0]
+
+        def olcut(m, taraf, tam=False):
+            say[0] += 1
+            if dur is not None and say[0] == 2 * (dur + 1):
+                TR.DURDUR.add(ad)               # `dur` adiminin olcumu bitti
+            return 0.0
+
+        TR._kos(ad, (W, M), N, olcut, "cpu", kok, None, 8, 8, lr, 0.01,
+                adim, 0, 8, 1, 3, surdur, False)
+        return _agirlik(ad)
+
+    try:
+        A = kos("KESINTISIZ", 8)
+        kos("DUR", 8, dur=4)
+        pt = sorted(f for f in os.listdir(kok + "/DUR") if f.endswith(".pt"))
+        B = kos("DUR", 8, surdur=kok + "/DUR/t4.pt")
+        en = max(float((A[k] - B[k]).abs().max()) for k in A)
+        try:
+            kos("DUR", 8, surdur=kok + "/DUR/t4.pt", lr=4e-3)
+            ayar = False
+        except ValueError as h:
+            ayar = "lr" in str(h)
+    finally:
+        shutil.rmtree(kok, ignore_errors=True)
+    kapi("durdur: son TAMAMLANAN adim yazilir",
+         pt == ["t0.pt", "t3.pt", "t4.pt"], " ".join(pt))
+    kapi("durdur + surdur == kesintisiz", en == 0.0, "fark %.3e" % en)
+    kapi("surdurme ayar farkini yakalar", ayar, "lr 2e-3 -> 4e-3")
+
+
+# --- 6.  coz GIDIS-DONUS
+# Gozle bakilan metin jetonlari BIREBIR tasimali; tasimazsa kusur
+# ekranda "model sacmaladi" gibi gorunur.
+def t_coz():
+    cumle = ('Lily\'s mom said, "Don\'t go!" (It was 3 o\'clock.) '
+             'The girls\' toys -- café... ok?')
+    j = V.JETON.findall(cumle)
+    ad = [V.DOLGU, V.HIKAYE, V.BILINMEYEN] + sorted(set(j) | {"'", '"', "s"})
+    ix = {a: i for i, a in enumerate(ad)}
+    ok = V.JETON.findall(V.coz(np.array([ix[t] for t in j]), ad)) == j
+    r = np.random.default_rng(0)
+    for _ in range(300):
+        d = r.integers(3, len(ad), 25)                  # ozel jetonlar HARIC
+        ok = ok and V.JETON.findall(V.coz(d, ad)) == [ad[i] for i in d]
+    kapi("coz: jeton -> metin -> jeton", ok,
+         "%d birim, 300 rastgele dizi" % (len(ad) - 3))
+
+
 if __name__ == "__main__":
     print("test_17")
-    for f in (t_surdurme, t_dolgu, t_int16, t_pencere):
+    for f in (t_surdurme, t_dolgu, t_int16, t_pencere, t_durdur, t_coz):
         f()
     print("\n%d GECTI   %d KALDI" % (len(GECTI), len(KALDI)))
     sys.exit(1 if KALDI else 0)

@@ -92,16 +92,24 @@ def tablo(m, W, aygit="cuda", yaz=print, dilim=8):
 
 
 def devam(m, onek, ad, ix, coz, adim=60, aygit="cuda", tohum=None,
-          sicaklik=0.0):
+          sicaklik=0.0, yasak=()):
     """Istemin devamini URET.  Sayi degil METIN -- gozle okunur.
 
     sicaklik 0 -> hep en yakin token (belirlenimci).
+    yasak       okunmayacak jeton kimlikleri.  <bilinmeyen> uretimde
+                korpustaki oranin 4,8 katina cikiyor (olculdu) ve
+                sicaklik 0'da ust uste kilitleniyor.
     """
-    g = None if tohum is None else torch.Generator().manual_seed(tohum)
+    # Uretec aygitla ayni yerde olmali; CPU ureteci CUDA'da multinomial'i dusurur.
+    g = (None if tohum is None
+         else torch.Generator(device=aygit).manual_seed(tohum))
     w = [ix.get(t, ix["<bilinmeyen>"]) for t in onek]
+    y = torch.tensor(list(yasak), dtype=torch.long, device=aygit)
     with torch.no_grad():
         for _ in range(adim):
             p = m.dizi(torch.tensor([w], device=aygit))[0, -1]
+            if len(y):
+                p = p.index_fill(0, y, -float("inf"))
             if sicaklik <= 0:
                 c = int(p.argmax())
             else:
