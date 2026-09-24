@@ -107,6 +107,13 @@ S_V_INIT = 0.0      # vektor keskinligi S_v: kullanilan e^S_v, 1'den baslar
 S_C_INIT = 3.0      # defter keskinligi S_c: e^3 = 20, kagit ustu testteki carpan
 GATE_0_INIT = -2.0  # gate'in baslangici: sigmoid(-2) = 0,12; kagit ustu en iyi sabit gate 0,1
 S_P_INIT = 0.0      # ogrenilen S_p (SCORE_BY_VOCAB LEARNED): e^0 = 1'den baslar
+# Load balancing (Shazeer ve ark. 2017 "importance"; Switch Transformer'in denge kaybinin akrabasi):
+# kayba LOAD_BALANCE * sum_katman vectors * sum_a Pbar_a^2.  Farkli C'lerin farkli vektor kullanmasini
+# ister; butun vektorler uzerinden P oldugu icin top-k'da hic secilmeyen start'lar da gradyan alir.
+# Olculdu (t2000, secim sagligi): top-8 derin katmanlarda butun C'ler 4-26 vektor; hepsi aktif +
+# uzaklik 2-21 (start'lar merkeze yapisiyor).  0,01 MoE'nin standart degeri, bizde OLCULMEDI.
+# Kullanici, 24 Eylul: "load balancing ekle, select ile birlikte koş".
+LOAD_BALANCE = 0.01
 # Q: defteri arayan sorgu.  Kullanici, 24 Eylul: "query (Q_t)", "64 ok, 8 aktif".
 QUERY = True        # defteri Q ile ara.  False: Q = C
 QUERY_VECTORS = 64  # QUERY acikken: Q'yu tasiyan ok sayisi
@@ -162,20 +169,24 @@ class VectorLayer(nn.Module):
         self.S_v = nn.Parameter(torch.tensor(float(s_v_init)))     # log olcek: kullanilan e^S_v > 0
         self.active = active
 
-    def forward(self, C, by=None):
-        """C (..., d) -> (C_m, active_ids (..., active); hepsi aktifse None).  by: aktifleri secen nokta (None: C)."""
+    def forward(self, C, by=None, probs=False):
+        """C (..., d) -> (C_m, active_ids (..., active); hepsi aktifse None).  by: aktifleri secen nokta (None: C).
+        probs: ucuncu cikti P (..., vectors) = softmax(-D^2 e^S_v) BUTUN vektorler uzerinde (LOAD_BALANCE)."""
         by = C if by is None else by
         if self.direction:                                        # 2 - 2 cos: boy secimi ezmez
             by, start = F.normalize(by, dim=-1), F.normalize(self.start, dim=-1)
         else:
             start = self.start
+        D2 = distance(by, start)
         if self.active >= self.start.shape[0]:                    # hepsi: tek matris carpimi
-            W_v = torch.softmax(-distance(by, start) * self.S_v.exp(), -1)
-            return C + W_v @ (self.finish - self.start), None
-        D_s2, active_ids = distance(by, start).topk(self.active, dim=-1, largest=False)
+            W_v = torch.softmax(-D2 * self.S_v.exp(), -1)
+            out = C + W_v @ (self.finish - self.start), None
+            return out + (W_v,) if probs else out
+        D_s2, active_ids = D2.topk(self.active, dim=-1, largest=False)
         W_v = torch.softmax(-D_s2 * self.S_v.exp(), -1)          # payda: aktiflerin toplami 1
         V_a = (self.finish - self.start)[active_ids]             # (..., active, d)
-        return C + (W_v.unsqueeze(-1) * V_a).sum(-2), active_ids
+        out = C + (W_v.unsqueeze(-1) * V_a).sum(-2), active_ids
+        return out + (torch.softmax(-D2 * self.S_v.exp(), -1),) if probs else out
 
 
 class CCache(nn.Module):
@@ -255,6 +266,7 @@ class PV(nn.Module):
                  cache_skip=CACHE_SKIP, s_v_init=S_V_INIT, s_c_init=S_C_INIT,
                  gate_0_init=GATE_0_INIT, s_p_init=S_P_INIT, query=QUERY, query_vectors=QUERY_VECTORS,
                  query_active=QUERY_ACTIVE, query_by=QUERY_BY, c_content=C_CONTENT, select=SELECT,
+                 load_balance=LOAD_BALANCE,
                  lam_w_init=LAM_W_INIT, beta_w_init=BETA_W_INIT):
         """d_order + d_content = d_sum, nokta uzayinin boyutu.  squared, S_p None: SCORE_BY_VOCAB'dan.  Verilirse tabloyu ezer.
         start_norm: start'larin baslangic boyu (None: randn).  lam: zincirin solma carpani.
@@ -274,7 +286,7 @@ class PV(nn.Module):
         self.start_norm, self.lam = start_norm, float(lam)
         assert chain in ("absolute", "relative"), chain
         assert select in ("distance", "direction"), select
-        self.select = select
+        self.select, self.load_balance = select, float(load_balance)
         self.chain = chain
         rule = score_rule(n)
         self.squared = rule[0] if squared is None else squared
@@ -354,12 +366,20 @@ class PV(nn.Module):
         """(C_m, layer basina active_ids) -- trace() ve scoreboard() ayni hesabi okur."""
         return self._layers(self.C(tokens))
 
-    def _layers(self, C):
-        C_m, active_ids = C, []
+    def _layers(self, C, probs=False):
+        """-> (C_m, layer basina active_ids) ; probs: + layer basina P (LOAD_BALANCE)."""
+        C_m, active_ids, P = C, [], []
         for layer in self.V:
-            C_m, layer_ids = layer(C_m)
+            C_m, layer_ids, *p = layer(C_m, probs=probs)
             active_ids.append(layer_ids)
-        return C_m, active_ids
+            P += p
+        return (C_m, active_ids, P) if probs else (C_m, active_ids)
+
+    def balance(self, P, counted):
+        """Load balancing: katman basina vectors * sum_a Pbar_a^2, Pbar = sayilan konumlarda ortalama P.
+        En kucuk 1: kullanim esit.  Her konum keskin kalabilir; yalniz ORTALAMA dengelenir."""
+        w = counted.to(P[0].dtype).unsqueeze(-1)
+        return sum(p.shape[-1] * (((p[:, :-1] * w).sum((0, 1)) / w.sum()) ** 2).sum() for p in P)
 
     def score(self, C_m):
         """-S_p*D^2 (squared) ya da -S_p*D.  Buyuk = yakin."""
@@ -378,22 +398,21 @@ class PV(nn.Module):
 
     def loss(self, tokens, targets_mask=None):
         """SONRAKI TOKEN: konum j, j+1'i tahmin eder; targets_mask verilirse
-        yalniz orada isaretli hedefler sayilir."""
+        yalniz orada isaretli hedefler sayilir.  load_balance > 0: + load_balance * balance."""
+        counted = (torch.ones_like(tokens[:, 1:], dtype=torch.bool) if targets_mask is None
+                   else targets_mask[:, 1:].bool())
+        C = self.C(tokens)
+        C_m, _, *P = self._layers(C, probs=self.load_balance > 0)
+        scores = self.score(C_m)
         if self.cache is not None:                        # hizli yol: yalniz dogru kelimenin log p'si
-            C = self.C(tokens)
-            C_m = self._layers(C)[0]
-            nll = -self.cache.target_logp(tokens, C, C_m, self.score(C_m))
-            if targets_mask is None:
-                return nll.mean()
-            counted = targets_mask[:, 1:].to(nll.dtype)
-            return (nll * counted).sum() / counted.sum()
-        scores = self.scoreboard(tokens, targets_mask)[:, :-1].reshape(-1, self.n)   # son konumun hedefi yok
-        targets = tokens[:, 1:].reshape(-1)                                            # bir kaydirilmis: gercek sonraki token
-        if targets_mask is None:
-            return F.cross_entropy(scores, targets)
-        counted = targets_mask[:, 1:].reshape(-1)
-        losses = F.cross_entropy(scores, targets, reduction="none")
-        return (losses * counted).sum() / counted.sum()
+            nll = -self.cache.target_logp(tokens, C, C_m, scores)
+        else:                                             # son konumun hedefi yok; hedef bir kaydirilmis
+            nll = F.cross_entropy(scores[:, :-1].transpose(1, 2), tokens[:, 1:], reduction="none")
+        w = counted.to(nll.dtype)
+        loss = (nll * w).sum() / w.sum()
+        if self.load_balance > 0:
+            loss = loss + self.load_balance * self.balance(P[0], counted)
+        return loss
 
     def trace(self, tokens):
         """Izlenebilirlik: her konumda her layer'da hangi vektorler aktifti."""

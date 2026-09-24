@@ -22,7 +22,7 @@ KUCUK = dict(d_order=16, d_content=0, vectors=8, active=2, layers=2)   # egitim 
 # Kapilar parcalari TEK TEK sinar: tepedeki tasarimin (model_18) ozellikleri burada KAPALI baslar,
 # her kapi sinadigini acar.  Tepenin kendisi t_tepe'de.
 SADE = dict(d_order=128, d_content=0, t_max=64, start_norm=None, lam=1.0, chain="absolute",
-            c_cache=False, cache_topk=8, query=False, c_content=False, select="distance", active=8)
+            c_cache=False, cache_topk=8, query=False, c_content=False, select="distance", active=8, load_balance=0.0)
 
 
 def PV(n, **ayar):
@@ -676,6 +676,57 @@ def t_hepsi():
     kapi("hepsi egitilir (8 vektorun 8'i aktif)", bool(egitim))
 
 
+# --- 22.  LOAD BALANCE: 0 -> kayip ayni; esit kullanimda terim 1; top-k'da secilmeyen start'lar gradyan alir
+def t_balance():
+    import model_18 as M
+    torch.manual_seed(0)
+    w = torch.randint(0, 50, (2, 12))                              # az konum, cok vektor: secilmeyen kalir
+    kw = dict(d_order=32, vectors=64, active=2, t_max=64, lam=0.7, chain="relative", start_norm=1.0,
+              c_cache=True, select="direction")
+    a, b = PV(50, **kw), PV(50, load_balance=0.5, **kw)
+    with torch.no_grad():
+        for m_ in (a, b):
+            for L in m_.V:
+                L.finish.add_(0.5 * torch.randn(L.finish.shape, generator=torch.Generator().manual_seed(1)))
+        C = b.C(w)
+        C_m, ids, P = b._layers(C, probs=True)
+        say = torch.ones(2, 11, dtype=torch.bool)
+        terim = float(b.balance(P, say))
+        esit = float(b.balance([torch.full((2, 12, 64), 1 / 64)], say))
+        fark = float(b.loss(w)) - float(a.loss(w))
+    ayni_0 = torch.equal(a._layers(C)[0], C_m)                      # probs ciktiyi degistirmez
+    b.loss(w).backward()
+    L = b.V[1]
+    secilen = set(ids[1][:, :-1].flatten().tolist())
+    olu = [i for i in range(64) if i not in secilen]
+    olu_grad = bool(olu) and bool((L.start.grad[olu].abs().sum(-1) > 0).all())
+    a.loss(w).backward()
+    olu_0 = bool((a.V[1].start.grad[olu].abs().sum(-1) == 0).all()) if olu else True
+    kapi("load balance: esitte 1, kayip + katsayi*terim, secilmeyen start gradyan alir",
+         abs(esit - 1) < 1e-9 and abs(fark - 0.5 * terim) < 1e-4 and terim >= len(P) - 1e-6
+         and ayni_0 and olu_grad and olu_0 and M.LOAD_BALANCE > 0,
+         "terim %.2f (4 katman, en az 4); secilmeyen %d start: dengeyle gradyan var, dengesiz yok"
+         % (terim, len(olu)))
+
+    N, data = _veri()
+    kok = tempfile.mkdtemp()
+    try:
+        r = TR.RUNS["LB"] = TR.Run("LB", kok)
+        _run(r, data, N, _sifir, "cpu", 2e-3, 4, 0, 8, 2, 4, chain="relative", lam=0.7, start_norm=1.0,
+             c_cache=True, select="direction", load_balance=0.01, **KUCUK)
+        egitim = r.result.get("step") == 4 and torch.isfinite(r.result["step_losses"]).all()
+        try:
+            r = TR.RUNS["LB"] = TR.Run("LB", kok)
+            _run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 2, 4, resume=kok + "/LB/t4.pt", chain="relative",
+                 lam=0.7, start_norm=1.0, c_cache=True, select="direction", **KUCUK)
+            yakaladi = False
+        except ValueError as h:
+            yakaladi = "load_balance" in str(h)
+    finally:
+        shutil.rmtree(kok, ignore_errors=True)
+    kapi("load balance egitilir; surdurme farki yakalar", bool(egitim) and yakaladi, "0,01 -> 0")
+
+
 # ============================================================
 # DATA_STORIES -- TinyStories (model_17 veri_t17 + olcme_17'den).
 # ============================================================
@@ -871,7 +922,7 @@ def t_notebook(yol=None):
 if __name__ == "__main__":
     print("tests (model_18)")
     for f in (t_zincir, t_nedensel, t_sessiz, t_cm, t_payda, t_gradyan,
-              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_tepe, t_select, t_hepsi, t_mat_pencere,
+              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_tepe, t_select, t_hepsi, t_balance, t_mat_pencere,
               t_mat_sor, t_mat_basamak, t_mat_egitim, t_stories, t_notebook):
         f()
     t_notebook(os.path.join(os.path.dirname(os.path.abspath(__file__)),
