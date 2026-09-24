@@ -59,6 +59,74 @@ defter     top-8, skip 3, gate
 
 ---
 
+## Zincir ve positional embedding — karşılaştırma
+
+Kullanıcı, 24 Eylül: *"pozisyon gömmesi vs parametresiz lineer zincir yapsana avantaj ve dezavantaj
+olarak"*.
+
+Adil kıyas **zincir** ile **PE + attention** arasındadır. PE yalnız etikettir ("neredesin"), bağlamı
+attention toplar. Zincir ikisini birden yapar: etiket (roll = yaş) ve toplama (λ^yaş ağırlıklı toplam).
+
+```
+C_order_t = Σ 0,7^yaş · roll^yaş(P[w])
+
+sabit desenli attention   içerik skoru SIFIR, eğimi m = ln(1/0,7) = 0,357 olan normalize edilmemiş ALiBi
+roll = dönme              DFT tabanında 512 eşit aralıklı frekans; RoPE'nin akrabası, iki farkla:
+                            RoPE yalnız q·k'yı döndürür, değer saf kalır -- bizde kelimenin KENDİSİ döner
+                            RoPE frekansları geometrik, yakında benzerlik yavaş düşer
+                            -- bizde eşit aralıklı: aynı kelime yaş 3'te ve yaş 4'te DİK
+```
+
+| ölçüt | lineer zincir (C_order) | PE + attention |
+|---|---|---|
+| parametre | 0 | mutlak PE T×d (bizde 524.288); RoPE, ALiBi, NoPE 0; + attention ağırlıkları |
+| bağlamdan ne seçilir | hiçbir şey: ağırlık yalnız yaşa bağlı | içeriğe göre (q·k), öğrenilir |
+| erişilebilir menzil | doğrusal okumayla ~son 4 kelime (hesap aşağıda) | pencerenin tamamı |
+| üretimde token başı | sabit, O(d); ama `devam` bugün her adımda öneki baştan hesaplıyor | KV cache, O(T·d) |
+| aynı bağlam başka konumda | aynı nokta (ölçüldü: kNN %13,3 → %34,8) | mutlak PE'de farklı; RoPE/ALiBi'de göreli |
+| sıra kesinliği | çok yüksek: yaşlar dik | öğrenilir |
+| araya bir kelime girerse | eski kelimelerin katkısı başka vektöre döner | attention o kelimeyi yine bulur |
+| uzun girdi | yapıda sınır yok (kodda `assert t_max`); ÖLÇÜLMEDİ | mutlak PE: yok; kopyada ALiBi ve NoPE, RoPE'yi belirgin geçiyor ¹ |
+| izlenebilirlik | CM ile geri yürünür | yok |
+| attention'a anahtar olarak | induction anahtarı hazır ² | induction için 2 katman ² |
+
+¹ Jelassi ve ark. 2024 (2402.01032): Hard-ALiBi ile ≤50 uzunlukta eğitilip 1000'de neredeyse kusursuz.
+² Olsson ve ark. 2022, "smeared key": anahtara bir önceki token'ın anahtarı karışınca in-context
+learning tek katmanlı modelde de oluşuyor. Zincir bunun üstel, çok adımlı hâli; defterin anahtarları
+(C_j) bunu zaten kullanıyor.
+
+**Hesap** (eğitimsiz; P rastgele, yaşlar dik, tekrar eden kelime yok):
+
+```
+|C_order|² payı, yaş k    λ^(2k)·(1 − λ²)
+                          yaş 0 %51 · 1 %25 · 2 %12 · 3 %6 · 4 %3      ilk iki %76, ilk dört %94
+doğrusal okuma, yaş k     sinyal 0,5·λ^k  >  4003 aday içinde en büyük gürültü ≈ 0,031 × 4,07 = 0,126
+                          -> k ≤ 3: son ~4 kelime
+```
+
+- Uzaklık ya da yön ölçen her seçim fiilen son 1-2 kelimeye bakar: yakın C'lerin aynı kelime ve
+  vektörlere kilitlenmesinin geometrik sebebi.
+- ~4 kelime, "farklı kelime isteyen yakın çiftlerin %80'inde son 4 kelime aynı" bulgusuyla (2) uyumlu.
+- Bilgi kaybolmuyor, ölçeğin altına gömülüyor: ardışık soyma (CM gibi: çöz, çıkar, λ'ya böl, geri
+  kaydır) her adımda aynı sinyal/gürültüyü görür, float32 hassasiyetine kadar onlarca kelime geri
+  alınır. Katmanlar (softmax RBF) bunu yapamaz; medyan hikâye (171 kelime) buna da sığmaz.
+
+**Sonuç (öneri):**
+- Zincir kalır: parametresiz, üretimde sabit maliyetli, sırayı kesin kodlar, attention'a hazır
+  induction anahtarı verir.
+- Eksik olan içerikle seçim, yani attention. Konum **nereye bakılacağını** belirlesin, **ne
+  getirileceğini** değil: anahtar zincirden, değer saf içerikten.
+- Attention'a ayrı PE gerekmeyebilir (ÖLÇÜLMEDİ). Kimi Linear (2510.26692) bütün global attention
+  katmanlarında NoPE kullanıyor, konumu ve yakınlık yanlılığını tümüyle lineer katmana bırakıyor.
+  Griffin (2402.19427): lineer recurrence + local attention, mutlak PE yok, RoPE yalnız attention'da.
+- Khandelwal ve ark. 2018 (1805.04623): LSTM ~200 token kullanıyor; sıra yalnız son ~20 token'da
+  önemli, 50'nin ötesi kaba bir anlam alanı. Zincir (yakın sıra) + içerik / attention (uzak) ayrımı
+  buna uyuyor.
+- Zincir içi seçenek: roll yerine geometrik frekanslı dönme. Yaşlar arası kademeli benzerlik verir,
+  yine parametresizdir. Relative zinciri öngören kNN kâğıt testiyle sınanır.
+
+---
+
 ## Kâğıt üstünde ELENENLER
 
 | aday | neden |
