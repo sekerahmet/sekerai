@@ -379,6 +379,53 @@ def t_relative():
          "eski paket (absolute) -> relative")
 
 
+# --- 15.  C_CACHE + GATE: nedensel, normalize log p, gate 0 == modelin kendisi, kopya calisir
+def t_ccache():
+    torch.manual_seed(0)
+    kw = dict(d=256, t_max=64, lam=0.5, chain="relative")
+    m = PV(50, c_cache=True, **kw)
+    g = torch.Generator().manual_seed(4)
+    w = torch.randint(0, 50, (1, 30), generator=g)
+    a = m.scoreboard(w)
+    w2 = w.clone(); w2[0, -1] = (w2[0, -1] + 1) % 50
+    nedensel = torch.allclose(a[0, :-1], m.scoreboard(w2)[0, :-1], atol=1e-6)
+    normal = float((a.logsumexp(-1)).abs().max()) < 1e-4
+    yalin = PV(50, c_cache=False, **kw)
+    with torch.no_grad():
+        m.cache.gate_b.fill_(-60.0)
+        kapali = torch.allclose(m.scoreboard(w), torch.log_softmax(yalin.scoreboard(w), -1), atol=1e-4)
+        m.cache.gate_b.fill_(60.0)
+        seri = torch.randperm(50, generator=g)[:12]
+        tekrar = torch.cat([seri, seri[:9]])[None]            # ikinci kez: ...x9 -> x10 bekleniyor
+        kopya = int(m.scoreboard(tekrar)[0, -1].argmax()) == int(seri[9])
+    kapi("c_cache: nedensel, log p, gate 0 == model, kopya", nedensel and normal and kapali and kopya,
+         "tekrar eden dizide gate 1 -> sonraki kelime defterden")
+
+    N, data = _veri()
+    kok = tempfile.mkdtemp()
+    try:
+        r = TR.RUNS["CC"] = TR.Run("CC", kok)
+        TR._run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3, **KUCUK)
+        yol = kok + "/CC/t3.pt"
+        p = torch.load(yol, weights_only=False)
+        del p["c_cache"]                         # alan gelmeden yazilmis paket
+        torch.save(p, yol)
+        try:
+            r = TR.RUNS["CC"] = TR.Run("CC", kok)
+            TR._run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3, resume=yol, c_cache=True, **KUCUK)
+            yakaladi = False
+        except ValueError as h:
+            yakaladi = "c_cache" in str(h)
+        r = TR.RUNS["CC2"] = TR.Run("CC2", kok)
+        TR._run(r, data, N, _sifir, "cpu", 2e-3, 4, 0, 8, 2, 4, chain="relative", lam=0.7,
+                start_norm=1.0, c_cache=True, **KUCUK)
+        egitim = r.result.get("step") == 4 and torch.isfinite(r.result["step_losses"]).all()
+    finally:
+        shutil.rmtree(kok, ignore_errors=True)
+    kapi("c_cache egitilir; surdurme farki yakalar", yakaladi and bool(egitim),
+         "eski paket (c_cache yok) -> c_cache")
+
+
 # ============================================================
 # DATA_STORIES -- TinyStories (model_17 veri_t17 + olcme_17'den).
 # ============================================================
@@ -574,7 +621,7 @@ def t_notebook(yol=None):
 if __name__ == "__main__":
     print("tests (model_18)")
     for f in (t_zincir, t_nedensel, t_sessiz, t_cm, t_payda, t_gradyan,
-              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_mat_pencere,
+              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_ccache, t_mat_pencere,
               t_mat_sor, t_mat_basamak, t_mat_egitim, t_stories, t_notebook):
         f()
     t_notebook(os.path.join(os.path.dirname(os.path.abspath(__file__)),

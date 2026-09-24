@@ -25,6 +25,11 @@ arasında ki uzaklık" ve "her vektör her an aktif olmamalı bunu model
                         UZAKLASARAK emin olur (MAT_COK_PV).
                karesiz  kaybin en iyi yeri C_m = P (ucgen esitsizligi).
              squared ve S_p sozluk sayisindan: SCORE_BY_VOCAB.
+    C_cache  hikayenin KENDI gecmisi: her konumda (anahtar C_j, deger w_(j+1)).  Simdiki C_t'ye
+             en yakin CACHE_TOPK anahtar (son CACHE_SKIP haric), agirliklari ile p_cache.
+             gate g_t = sigmoid(u . C_m/|C_m| + c * en_yakin_benzerlik + b), ogrenilir:
+               p = (1 - g) * softmax(score) + g * p_cache          (pointer-generator)
+             Kagit ustu (REL07 t2000, sabit g 0,1): ppl 30,3 -> 25,9; gecmis ismi getirme %3,9 -> %16.
     CM       countermarch, geriye yuruyus: C_(t-1) = (C_t - RM_t*P[w_t]) / lam
              (relative: C_(t-1) = geri_kaydir((C_t - P[w_t]) / lam)).
              Izleme araci; modelin hesabina girmez.
@@ -58,6 +63,9 @@ LAM = 1.0
 # Hesap (egitimsiz kNN, 1.500 hikaye depo, d 256, 24 Eylul): absolute lam 0,9 %13,3
 # (egitilmis LAM09 %14,8), relative lam 0,7 %34,8; hikayenin ortasinda %8,0 -> %31,0.
 CHAIN = "absolute"
+C_CACHE = False
+CACHE_TOPK = 8      # defterden kac komsu (kagit ustu testteki gibi)
+CACHE_SKIP = 3      # son kac konum aranmaz: en yakin anahtar hep bir onceki adim olurdu
 EPS = 1e-6     # karekok D=0'da turevlenmez
 LEARNED = "learned"
 
@@ -110,16 +118,51 @@ class VectorLayer(nn.Module):
         return C + (W_v.unsqueeze(-1) * V_a).sum(-2), active_ids
 
 
+class CCache(nn.Module):
+    """C_cache ve gate.  Kullanici, 24 Eylul: "c_cche ve gate olsun"."""
+
+    def __init__(self, d, topk=CACHE_TOPK, skip=CACHE_SKIP):
+        super().__init__()
+        self.topk, self.skip = topk, skip
+        self.S_c = nn.Parameter(torch.tensor(3.0))          # benzerlik keskinligi, e^3 = 20 baslar
+        self.gate_u = nn.Parameter(torch.zeros(d))          # g'yi o anki durum soyler
+        self.gate_c = nn.Parameter(torch.zeros(()))         # ... ve en yakin anahtarin benzerligi
+        self.gate_b = nn.Parameter(torch.tensor(-2.0))      # g ~0,12 baslar (kagit ustu en iyi 0,1)
+
+    def forward(self, tokens, C, C_m, scores):
+        """-> log p (B,T,n).  p = (1-g) softmax(scores) + g p_cache.  Nedensel: t, yalniz
+        j < t - skip anahtarlarini ve onlardan sonra gelen w_(j+1) <= w_t'yi gorur."""
+        B, T = tokens.shape
+        Cn = F.normalize(C, dim=-1)
+        S = Cn @ Cn.transpose(1, 2)                                  # (B, t, j)
+        pos = torch.arange(T, device=C.device)
+        allowed = pos[None, :] < pos[:, None] - self.skip            # j < t - skip
+        k = max(1, min(self.topk, T))
+        v, j = S.masked_fill(~allowed, -2.0).topk(k, dim=-1)
+        valid = v > -1.5
+        w = torch.softmax((v * self.S_c.exp()).masked_fill(~valid, -1e4), -1) * valid
+        nxt = torch.roll(tokens, -1, dims=1)                         # anahtar j'nin degeri w_(j+1)
+        ids = nxt.gather(1, j.reshape(B, -1)).reshape(B, T, k)
+        p_cache = torch.zeros_like(scores).scatter_add_(-1, ids, w)
+        any_valid = valid.any(-1)
+        g = torch.sigmoid(F.normalize(C_m, dim=-1) @ self.gate_u
+                          + self.gate_c * torch.where(any_valid, v[..., 0], torch.zeros_like(v[..., 0]))
+                          + self.gate_b) * any_valid
+        g = g.unsqueeze(-1)
+        return torch.logaddexp(torch.log1p(-g) + torch.log_softmax(scores, -1),
+                               torch.log(g + 1e-12) + torch.log(p_cache + 1e-12))
+
+
 class PV(nn.Module):
     """NOKTA ve VEKTOR.  Ogrenilen YALNIZ vektorler (start, finish) ve S_v'ler."""
     arch = "pv"
 
     def __init__(self, n, d=d, vectors=VECTORS, active=ACTIVE, layers=LAYERS,
                  t_max=T_MAX, seed=0, squared=None, S_p=None, start_norm=START_NORM,
-                 lam=LAM, chain=CHAIN):
+                 lam=LAM, chain=CHAIN, c_cache=C_CACHE):
         """squared, S_p None: SCORE_BY_VOCAB'dan.  Verilirse tabloyu ezer.
         start_norm: start'larin baslangic boyu (None: randn).  lam: zincirin solma carpani.
-        chain: "absolute" (RM_t) ya da "relative" (kaydirma)."""
+        chain: "absolute" (RM_t) ya da "relative" (kaydirma).  c_cache: hikayenin gecmisi + gate."""
         super().__init__()
         generator = torch.Generator().manual_seed(seed)
         randn = lambda *shape: torch.randn(*shape, generator=generator)
@@ -139,6 +182,7 @@ class PV(nn.Module):
         self.register_buffer("RM", RM)
         self.V = nn.ModuleList(VectorLayer(d, vectors, active, randn, start_norm)
                                for _ in range(layers))
+        self.cache = CCache(d) if c_cache else None
 
     def C(self, tokens):
         """tokens (B,T) -> zincir (B,T,d).  Nedensel: C_t yalniz <= t'yi toplar."""
@@ -168,7 +212,10 @@ class PV(nn.Module):
 
     def move(self, tokens):
         """(C_m, layer basina active_ids) -- trace() ve scoreboard() ayni hesabi okur."""
-        C_m, active_ids = self.C(tokens), []
+        return self._layers(self.C(tokens))
+
+    def _layers(self, C):
+        C_m, active_ids = C, []
         for layer in self.V:
             C_m, layer_ids = layer(C_m)
             active_ids.append(layer_ids)
@@ -182,8 +229,12 @@ class PV(nn.Module):
 
     def scoreboard(self, tokens, targets_mask=None):
         """tokens (B,T) -> (B,T,n): her konumda SONRAKI token'in puani.  Konumlar
-        arasi karisma yok, dolgu yalniz sagda: targets_mask arayuz icin, hesabi degistirmez."""
-        return self.score(self.move(tokens)[0])
+        arasi karisma yok, dolgu yalniz sagda: targets_mask arayuz icin, hesabi degistirmez.
+        C_cache varsa donen deger log p (normalize); argmax ve cross_entropy ayni calisir."""
+        C = self.C(tokens)
+        C_m = self._layers(C)[0]
+        scores = self.score(C_m)
+        return scores if self.cache is None else self.cache(tokens, C, C_m, scores)
 
     def loss(self, tokens, targets_mask=None):
         """SONRAKI TOKEN: konum j, j+1'i tahmin eder; targets_mask verilirse

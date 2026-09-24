@@ -76,7 +76,7 @@ def yukle(yol):
     m = PV(k["n"], d=k["d"], vectors=k["vectors"], active=k["active"], layers=k["layers"],
            t_max=k["t_max"], seed=k["seed"], squared=k.get("squared", True),
            S_p=k.get("S_p", 1.0), lam=k.get("lam", 1.0),
-           chain=k.get("chain", "absolute"))
+           chain=k.get("chain", "absolute"), c_cache=k.get("c_cache", False))
     m.load_state_dict(k["weights"])
     return m.eval(), k
 
