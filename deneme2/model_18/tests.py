@@ -426,6 +426,34 @@ def t_ccache():
          "eski paket (c_cache yok) -> c_cache")
 
 
+# --- 16.  BASLANGIC AYARLARI: S_v, S_c, gate_0, S_p tepeden ve kosudan; surdurme farki
+def t_init():
+    import model_18 as M
+    m = PV(4003, d=32, t_max=16, c_cache=True, s_v_init=0.5, s_c_init=2.0, gate_0_init=-1.0,
+           s_p_init=0.25)
+    v = [float(m.V[0].S_v), float(m.cache.S_c), float(m.cache.gate_0), float(m.S_p)]
+    d0 = PV(4003, d=32, t_max=16, c_cache=True)
+    v0 = [float(d0.V[0].S_v), float(d0.cache.S_c), float(d0.cache.gate_0), float(d0.S_p)]
+    ok = (v == [0.5, 2.0, -1.0, 0.25]
+          and v0 == [M.S_V_INIT, M.S_C_INIT, M.GATE_0_INIT, M.S_P_INIT])
+    N, data = _veri()
+    kok = tempfile.mkdtemp()
+    try:
+        r = TR.RUNS["I"] = TR.Run("I", kok)
+        TR._run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3, **KUCUK)
+        try:
+            r = TR.RUNS["I"] = TR.Run("I", kok)
+            TR._run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3, resume=kok + "/I/t3.pt",
+                    s_v_init=0.5, **KUCUK)
+            yakaladi = False
+        except ValueError as h:
+            yakaladi = "s_v_init" in str(h)
+    finally:
+        shutil.rmtree(kok, ignore_errors=True)
+    kapi("baslangic ayarlari: tepeden, kosudan, surdurmede", ok and yakaladi,
+         "S_v 0 / S_c 3 / gate_0 -2 / S_p 0; s_v_init farki yakalanir")
+
+
 # ============================================================
 # DATA_STORIES -- TinyStories (model_17 veri_t17 + olcme_17'den).
 # ============================================================
@@ -621,7 +649,7 @@ def t_notebook(yol=None):
 if __name__ == "__main__":
     print("tests (model_18)")
     for f in (t_zincir, t_nedensel, t_sessiz, t_cm, t_payda, t_gradyan,
-              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_ccache, t_mat_pencere,
+              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_ccache, t_init, t_mat_pencere,
               t_mat_sor, t_mat_basamak, t_mat_egitim, t_stories, t_notebook):
         f()
     t_notebook(os.path.join(os.path.dirname(os.path.abspath(__file__)),

@@ -40,11 +40,13 @@ RUNS = {}        # run_name -> Run
 # baskalasir: optimizer.load_state_dict lr'yi paketten alir, gunluk cagriyi yazar.
 MUST_MATCH = ("arch", "n", "T", "batch", "lr", "seed", "d", "vectors",
               "active", "layers", "t_max", "squared", "S_p", "start_norm", "lam", "chain", "c_cache", "cache_topk",
-              "cache_skip", "data_fingerprint", "vocab")
+              "cache_skip", "s_v_init", "s_c_init", "gate_0_init", "s_p_init",
+              "data_fingerprint", "vocab")
 # Alan eklenmeden once yazilan paketlerdeki deger: skor -D^2, carpansiz.
 BEFORE_FIELD = {"squared": True, "S_p": 1.0, "start_norm": "randn", "lam": 1.0,
                 "chain": "absolute", "c_cache": False,
-                "cache_topk": M18.CACHE_TOPK, "cache_skip": M18.CACHE_SKIP}
+                "cache_topk": M18.CACHE_TOPK, "cache_skip": M18.CACHE_SKIP,
+                "s_v_init": 0.0, "s_c_init": 3.0, "gate_0_init": -2.0, "s_p_init": 0.0}
 
 
 class Run:
@@ -158,12 +160,14 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
          extra=None, d=M18.d, vectors=M18.VECTORS, active=M18.ACTIVE,
          layers=M18.LAYERS, t_max=M18.T_MAX, squared=None, S_p=None,
          start_norm=M18.START_NORM, lam=M18.LAM, chain=M18.CHAIN, c_cache=M18.C_CACHE,
-         cache_topk=M18.CACHE_TOPK, cache_skip=M18.CACHE_SKIP):
+         cache_topk=M18.CACHE_TOPK, cache_skip=M18.CACHE_SKIP, s_v_init=M18.S_V_INIT,
+         s_c_init=M18.S_C_INIT, gate_0_init=M18.GATE_0_INIT, s_p_init=M18.S_P_INIT):
     torch.manual_seed(seed)
     model = PV(n_vocab, d=d, vectors=vectors, active=active, layers=layers,
                t_max=t_max, seed=seed, squared=squared, S_p=S_p,
                start_norm=start_norm, lam=lam, chain=chain, c_cache=c_cache,
-               cache_topk=cache_topk, cache_skip=cache_skip).to(device)
+               cache_topk=cache_topk, cache_skip=cache_skip, s_v_init=s_v_init,
+               s_c_init=s_c_init, gate_0_init=gate_0_init, s_p_init=s_p_init).to(device)
     # torch.compile: eski mimaride 3,90 kat olculdu (model_17 train_17); PV'de OLCULMEDI.
     loss_fn = torch.compile(model.loss) if compile else model.loss
     if compile:
@@ -183,6 +187,8 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
                  start_norm="randn" if start_norm is None else float(start_norm),
                  lam=float(lam), chain=chain, c_cache=bool(c_cache),
                  cache_topk=int(cache_topk), cache_skip=int(cache_skip),
+                 s_v_init=float(s_v_init), s_c_init=float(s_c_init),
+                 gate_0_init=float(gate_0_init), s_p_init=float(s_p_init),
                  seed=seed, batch=batch, T=max_length, n_params=n_params,
                  compile=compile,
                  data_fingerprint=_fingerprint(questions, filled_mask, targets_mask),
@@ -317,7 +323,8 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
           d=M18.d, vectors=M18.VECTORS, active=M18.ACTIVE, layers=M18.LAYERS,
           t_max=M18.T_MAX, squared=None, S_p=None, start_norm=M18.START_NORM,
           lam=M18.LAM, chain=M18.CHAIN, c_cache=M18.C_CACHE,
-          cache_topk=M18.CACHE_TOPK, cache_skip=M18.CACHE_SKIP):
+          cache_topk=M18.CACHE_TOPK, cache_skip=M18.CACHE_SKIP, s_v_init=M18.S_V_INIT,
+          s_c_init=M18.S_C_INIT, gate_0_init=M18.GATE_0_INIT, s_p_init=M18.S_P_INIT):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
     data        (questions, filled_mask, targets_mask)
@@ -341,6 +348,7 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
     chain       "absolute" (RM_t, mutlak konum) ya da "relative" (kaydirma, kelimenin yasi)
     c_cache     hikayenin kendi gecmisinden kopya + ogrenilen gate (model_18.CCache)
     cache_topk, cache_skip   defterden kac komsu; son kac konum aranmaz
+    s_v_init, s_c_init, gate_0_init, s_p_init   ogrenilen S_v, S_c, gate_0, S_p'nin baslangici
     """
     old = RUNS.get(run_name)
     if old is not None and old.alive:
@@ -360,7 +368,8 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
         compile=compile, vocab=vocab,
         extra=extra, d=d, vectors=vectors, active=active, layers=layers,
         t_max=t_max, squared=squared, S_p=S_p, start_norm=start_norm, lam=lam,
-        chain=chain, c_cache=c_cache, cache_topk=cache_topk, cache_skip=cache_skip))
+        chain=chain, c_cache=c_cache, cache_topk=cache_topk, cache_skip=cache_skip,
+        s_v_init=s_v_init, s_c_init=s_c_init, gate_0_init=gate_0_init, s_p_init=s_p_init))
     run.thread.start()
     return f"{run_name} basladi" + (f"  ({os.path.basename(resume)}'den)" if resume else "")
 

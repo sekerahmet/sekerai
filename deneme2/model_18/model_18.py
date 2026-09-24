@@ -64,9 +64,14 @@ LAM = 1.0
 # Hesap (egitimsiz kNN, 1.500 hikaye depo, d 256, 24 Eylul): absolute lam 0,9 %13,3
 # (egitilmis LAM09 %14,8), relative lam 0,7 %34,8; hikayenin ortasinda %8,0 -> %31,0.
 CHAIN = "absolute"
-C_CACHE = False
+C_CACHE = False     # hikayenin kendi gecmisinden kopya (CCache) + gate
 CACHE_TOPK = 8      # defterden kac komsu (kagit ustu testteki gibi); vektorlerdeki ACTIVE'in karsiligi
 CACHE_SKIP = 3      # son kac konum aranmaz: en yakin C_j hep bir onceki adim olurdu
+# Ogrenilen parametrelerin BASLANGIC degerleri.  Kullanici, 24 Eylul: "tepeye al, koşu ayarı olsunlar".
+S_V_INIT = 0.0      # vektor keskinligi S_v: kullanilan e^S_v, 1'den baslar
+S_C_INIT = 3.0      # defter keskinligi S_c: e^3 = 20, kagit ustu testteki carpan
+GATE_0_INIT = -2.0  # gate'in baslangici: sigmoid(-2) = 0,12; kagit ustu en iyi sabit gate 0,1
+S_P_INIT = 0.0      # ogrenilen S_p (SCORE_BY_VOCAB LEARNED): e^0 = 1'den baslar
 EPS = 1e-6     # karekok D=0'da turevlenmez
 LEARNED = "learned"
 
@@ -101,14 +106,14 @@ class VectorLayer(nn.Module):
     """Bir layer: `vectors` tane (start, finish).  C'ye en yakin `active`
     tane start AKTIF; C, aktif vektorlerin agirlikli ortalamasiyla tasinir."""
 
-    def __init__(self, d, vectors, active, randn, start_norm=None):
+    def __init__(self, d, vectors, active, randn, start_norm=None, s_v_init=S_V_INIT):
         super().__init__()
         start = randn(vectors, d)
         if start_norm is not None:
             start = start * (start_norm / d ** 0.5)               # boy ~start_norm: secimi C belirler
         self.start = nn.Parameter(start)
         self.finish = nn.Parameter(self.start.detach().clone())   # V_a = 0: baslangicta C yerinde kalir
-        self.S_v = nn.Parameter(torch.zeros(()))                   # log olcek: kullanilan e^S_v > 0
+        self.S_v = nn.Parameter(torch.tensor(float(s_v_init)))     # log olcek: kullanilan e^S_v > 0
         self.active = active
 
     def forward(self, C):
@@ -122,13 +127,14 @@ class VectorLayer(nn.Module):
 class CCache(nn.Module):
     """C_cache ve gate.  Kullanici, 24 Eylul: "c_cche ve gate olsun"."""
 
-    def __init__(self, d, topk=CACHE_TOPK, skip=CACHE_SKIP):
+    def __init__(self, d, topk=CACHE_TOPK, skip=CACHE_SKIP, s_c_init=S_C_INIT,
+                 gate_0_init=GATE_0_INIT):
         super().__init__()
         self.topk, self.skip = topk, skip
-        self.S_c = nn.Parameter(torch.tensor(3.0))          # benzerlik keskinligi, e^3 = 20 baslar
+        self.S_c = nn.Parameter(torch.tensor(float(s_c_init)))     # benzerlik keskinligi
         self.gate_d = nn.Parameter(torch.zeros(d))          # gate'i o anki durumun YONU soyler
         self.gate_s = nn.Parameter(torch.zeros(()))         # ... ve en yakin C_j'nin sim'i
-        self.gate_0 = nn.Parameter(torch.tensor(-2.0))      # gate ~0,12 baslar (kagit ustu en iyi 0,1)
+        self.gate_0 = nn.Parameter(torch.tensor(float(gate_0_init)))  # gate'in baslangici
 
     def forward(self, tokens, C, C_m, scores):
         """-> log p (B,T,n).  p = (1-gate) softmax(scores) + gate p_cache.  Nedensel: t, yalniz
@@ -161,7 +167,8 @@ class PV(nn.Module):
     def __init__(self, n, d=d, vectors=VECTORS, active=ACTIVE, layers=LAYERS,
                  t_max=T_MAX, seed=0, squared=None, S_p=None, start_norm=START_NORM,
                  lam=LAM, chain=CHAIN, c_cache=C_CACHE, cache_topk=CACHE_TOPK,
-                 cache_skip=CACHE_SKIP):
+                 cache_skip=CACHE_SKIP, s_v_init=S_V_INIT, s_c_init=S_C_INIT,
+                 gate_0_init=GATE_0_INIT, s_p_init=S_P_INIT):
         """squared, S_p None: SCORE_BY_VOCAB'dan.  Verilirse tabloyu ezer.
         start_norm: start'larin baslangic boyu (None: randn).  lam: zincirin solma carpani.
         chain: "absolute" (RM_t) ya da "relative" (kaydirma).  c_cache: hikayenin gecmisi + gate."""
@@ -177,15 +184,17 @@ class PV(nn.Module):
         self.squared = rule[0] if squared is None else squared
         S_p = rule[1] if S_p is None else S_p
         self.S_p_learned = S_p == LEARNED
-        self.S_p = nn.Parameter(torch.zeros(())) if self.S_p_learned else float(S_p)
+        self.S_p = (nn.Parameter(torch.tensor(float(s_p_init))) if self.S_p_learned
+                    else float(S_p))
         P = randn(n, d)
         self.register_buffer("P", P / P.norm(dim=-1, keepdim=True))
         RM = torch.randint(0, 2, (t_max, d), generator=generator).float() * 2 - 1
         self.register_buffer("RM", RM)
-        self.V = nn.ModuleList(VectorLayer(d, vectors, active, randn, start_norm)
+        self.V = nn.ModuleList(VectorLayer(d, vectors, active, randn, start_norm, s_v_init)
                                for _ in range(layers))
         self.cache_topk, self.cache_skip = cache_topk, cache_skip
-        self.cache = CCache(d, cache_topk, cache_skip) if c_cache else None
+        self.cache = (CCache(d, cache_topk, cache_skip, s_c_init, gate_0_init) if c_cache
+                      else None)
 
     def C(self, tokens):
         """tokens (B,T) -> zincir (B,T,d).  Nedensel: C_t yalniz <= t'yi toplar."""
