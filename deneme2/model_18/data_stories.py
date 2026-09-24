@@ -257,6 +257,9 @@ BANTLAR = ((0, 64), (64, 256), (256, 512))     # hedefin penceredeki konumu
 # REL07 sicaklik 0'da "The dog was very happy." dongusune giriyordu (24 Eylul).
 TEKRAR_CEZASI = 1.0
 TEKRAR_PENCERESI = 20
+# URETIM ayari: nucleus (top-p).  Olasiliklari buyukten kucuge toplami TOP_P'ye ulasan kume
+# disindaki kelimeler atilir, kalanlardan secilir.  1,0 = kapali.  Holtzman ve ark. 2019.
+TOP_P = 1.0
 
 
 def olc(m, W, M, eos, aygit="cuda", parca=64):
@@ -349,10 +352,12 @@ def istemler(kok):
 
 
 def devam(m, istem, ad, ix, adim=120, aygit="cuda", sicaklik=0.0, tohum=None,
-          yasak=(DOLGU, BILINMEYEN), tekrar=TEKRAR_CEZASI, pencere=TEKRAR_PENCERESI):
+          yasak=(DOLGU, BILINMEYEN), tekrar=TEKRAR_CEZASI, pencere=TEKRAR_PENCERESI,
+          top_p=TOP_P):
     """Istemin devamini URET; model <eos> uretince durur.
     sicaklik 0: hep en yuksek puan.  yasak: uretilmeyecek token'lar.
-    tekrar: son `pencere` token'da gecmis kelimelerin olasiligi tekrar'a bolunur."""
+    tekrar: son `pencere` token'da gecmis kelimelerin olasiligi tekrar'a bolunur.
+    top_p: sicaklik > 0 iken yalniz olasilik toplami top_p'ye ulasan en olasi kelimelerden secilir."""
     kelime = torch.tensor([any(ch.isalpha() for ch in a) for a in ad], device=aygit)
     g = None if tohum is None else torch.Generator(device=aygit).manual_seed(tohum)
     w = [ix[SON]] + [ix.get(t, ix[BILINMEYEN]) for t in JETON.findall(istem.translate(DUZLE))]
@@ -367,8 +372,15 @@ def devam(m, istem, ad, ix, adim=120, aygit="cuda", sicaklik=0.0, tohum=None,
                 son = son[kelime[son]]
                 p = p.index_add(0, son.unique(), torch.full((len(son.unique()),),
                                                             -math.log(tekrar), device=aygit))
-            c = (int(p.argmax()) if sicaklik <= 0 else
-                 int(torch.multinomial((p / sicaklik).softmax(-1), 1, generator=g)))
+            if sicaklik <= 0:
+                c = int(p.argmax())
+            else:
+                q = (p / sicaklik).softmax(-1)
+                if top_p < 1.0:
+                    qs, qi = q.sort(descending=True)
+                    at = (qs.cumsum(0) - qs) >= top_p            # kumeden once toplam top_p'yi gecti
+                    q = q.index_fill(0, qi[at], 0.0)
+                c = int(torch.multinomial(q / q.sum(), 1, generator=g))
             w.append(c)
             if c == ix[SON]:
                 break
