@@ -39,6 +39,11 @@ arasında ki uzaklık" ve "her vektör her an aktif olmamalı bunu model
              ilk d_order boyut C_order: bugunku relative zincir (sira), kendi icinde kaydirilir.
              Nokta uzayi her zaman D_SUM = d_order + d_content; C_CONTENT kapaliyken hepsi relative.
              Kaydirmali zincirde boyutlu solma icerigi izleyemez (icerik her adim boyut degistirir).
+    Attention  Gecmisten, sozluk katmani ATTN_AFTER'den sonra:
+               q_t = W_q norm(C_m,t)   k_j = W_k norm(C_(j-1))   v_j = W_v norm(C_m,j)  ("point": P[w_j])
+               C_m += W_o softmax_nedensel(q.k / sqrt(ATTN_DIM)) v.  Anahtar bir ONCEKI konumun zinciri:
+               eslesme baglam-baglam, getirilen j'deki kelime (tek katmanda induction).  Konum zincirde (NoPE).
+               W_o = 0 baslar: adim 0'da model attention'siz ile ayni.
     CM       countermarch, geriye yuruyus: C_(t-1) = (C_t - RM_t*P[w_t]) / lam
              (relative: C_(t-1) = geri_kaydir((C_t - P[w_t]) / lam)).
              Izleme araci; modelin hesabina girmez.
@@ -136,6 +141,14 @@ LAM_W_INIT = 0.9    # lam_w'nin baslangici, her token her boyut.  OLCULMEDI.
 BETA_W_INIT = 0.5   # beta_w'nin baslangici.  OLCULMEDI.
 LAM_W_MIN = math.exp(-5)  # lam_w'nin alt siniri: parca hesabi fp32'de tasmasin (16 adim x 5 -> e^80)
 CONTENT_CHUNK = 16
+# Attention (Gecmisten): defterin C'leri icerikle secilir, getirilen C_m'ye EKLENIR (cikista karismaz).
+# Zoology (2312.04927): attention'siz modellerin ppl farkinin %82'si baglamda gecmis ikiliyi tamamlayan
+# token'larda.  Kullanici, 25 Eylul: "önceliğimiz attention tasarımı", "state ve point ok".
+ATTENTION = False      # tepede kapali: once tek degiskenli kosu (TS_PV_ATTN)
+ATTN_HEADS = 4         # bas sayisi.  OLCULMEDI.
+ATTN_DIM = 64          # bas basina boyut; skor olcegi 1/sqrt(ATTN_DIM)
+ATTN_AFTER = 0         # sozluk katmani ATTN_AFTER'den sonra: sorgu bir katmandan gecmis, getirileni sonrakiler isler
+ATTN_VALUE = "state"   # getirilen: "state" C_m,j (kelime + baglam) | "point" P[w_j] (kelimenin sabit noktasi)
 EPS = 1e-6     # karekok D=0'da turevlenmez
 LEARNED = "learned"
 
@@ -166,6 +179,18 @@ def distance(points, anchors):
             + (anchors * anchors).sum(-1))
 
 
+def entropy(p):
+    """Son eksende entropi (nat); 0 log 0 = 0."""
+    return -(p * p.clamp_min(1e-30).log()).sum(-1)
+
+
+def directions90(X, rows=4096):
+    """X (N,d): ortalanmis X'in varyansinin %90'ini tasiyan yon sayisi (ilk `rows` satir)."""
+    X = X[:rows].float()
+    s2 = torch.linalg.svdvals(X - X.mean(0)) ** 2
+    return int((s2.cumsum(0) / s2.sum() < 0.9).sum()) + 1
+
+
 class VectorLayer(nn.Module):
     """Bir layer: `vectors` tane (start, finish).  C'ye en yakin `active`
     tane start AKTIF; C, aktif vektorlerin agirlikli ortalamasiyla tasinir."""
@@ -186,21 +211,29 @@ class VectorLayer(nn.Module):
         probs: ucuncu cikti P (..., vectors) = softmax(-D^2 e^S_v) BUTUN vektorler uzerinde (LOAD_BALANCE).
         P'de S_v SABIT (detach): denge terimi sicakligi dusurup (P'yi duzlestirip) kucultulemez, yalniz
         start'lari oynatarak.  Olculdu (t4000): SELECT_LB'de derin katmanlarin e^S_v'si SELECT'ten dusuktu."""
+        D2 = self._distance(C, by)
+        P = (torch.softmax(-D2 * self.S_v.exp().detach(), -1),) if probs else ()
+        W, active_ids = self._weights(D2)
+        return (C + W @ (self.finish - self.start), active_ids) + P
+
+    def weights(self, C, by=None):
+        """(..., vectors): forward'in kullandigi secim agirliklari, secilmeyen 0 -- saglik icin."""
+        return self._weights(self._distance(C, by))[0]
+
+    def _distance(self, C, by):
         by = C if by is None else by
         if self.direction:                                        # 2 - 2 cos: boy secimi ezmez
-            by, start = F.normalize(by, dim=-1), F.normalize(self.start, dim=-1)
-        else:
-            start = self.start
-        D2 = distance(by, start)
-        P = (torch.softmax(-D2 * self.S_v.exp().detach(), -1),) if probs else ()
+            return distance(F.normalize(by, dim=-1), F.normalize(self.start, dim=-1))
+        return distance(by, self.start)
+
+    def _weights(self, D2):
+        """-> (W (..., vectors), active_ids): secilmeyen 0; hepsi aktifse ids None."""
         if self.active >= self.start.shape[0]:                    # hepsi: tek matris carpimi
-            W_v = torch.softmax(-D2 * self.S_v.exp(), -1)
-            return (C + W_v @ (self.finish - self.start), None) + P
+            return torch.softmax(-D2 * self.S_v.exp(), -1), None
         D_s2, active_ids = D2.topk(self.active, dim=-1, largest=False)
         W_v = torch.softmax(-D_s2 * self.S_v.exp(), -1)          # payda: aktiflerin toplami 1
         # Aktif agirliklar vectors'luk satira (digerleri 0), tek matris carpimi: (..., active, d) kopyasi yok.
-        W = torch.zeros_like(D2).scatter(-1, active_ids, W_v)
-        return (C + W @ (self.finish - self.start), active_ids) + P
+        return torch.zeros_like(D2).scatter(-1, active_ids, W_v), active_ids
 
 
 class CCache(nn.Module):
@@ -283,8 +316,47 @@ class CCache(nn.Module):
         return (logp, P_q[0]) if probs else logp
 
 
+class Attention(nn.Module):
+    """Gecmisten.  q_t = W_q norm(C_m,t), k_j = W_k norm(C_(j-1)), v_j = W_v norm(C_m,j ya da P[w_j]);
+    C_m += W_o softmax_nedensel(q.k / sqrt(dim)) v.  W_o = 0 baslar."""
+
+    def __init__(self, d, heads=ATTN_HEADS, dim=ATTN_DIM, value=ATTN_VALUE):
+        super().__init__()
+        assert value in ("state", "point"), value
+        self.heads, self.dim, self.value = heads, dim, value
+        self.W_q = nn.Linear(d, heads * dim, bias=False)
+        self.W_k = nn.Linear(d, heads * dim, bias=False)
+        self.W_v = nn.Linear(d, heads * dim, bias=False)
+        self.W_o = nn.Linear(heads * dim, d, bias=False)
+        nn.init.zeros_(self.W_o.weight)
+
+    def forward(self, C, C_m, P_w=None):
+        """C (B,T,d) ham zincir, C_m (B,T,d) islenmis nokta, P_w (B,T,d) sabit noktalar ("point") -> yeni C_m.
+        Nedensel: t yalniz j <= t'yi gorur.  Konum 0'in anahtari sifir (oncesi yok): bos yuva."""
+        B, T, _ = C.shape
+        q, k = self._qk(C, C_m)
+        v = self._split(self.W_v(F.normalize(C_m if self.value == "state" else P_w, dim=-1)))
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        return C_m + self.W_o(out.transpose(1, 2).reshape(B, T, -1))
+
+    def weights(self, C, C_m):
+        """(B, heads, T, T): forward'in nedensel dikkat agirliklari -- saglik icin."""
+        q, k = self._qk(C, C_m)
+        T = q.shape[2]
+        ust = torch.ones(T, T, dtype=torch.bool, device=q.device).triu(1)
+        return (q @ k.transpose(-1, -2) / self.dim ** 0.5).masked_fill(ust, float("-inf")).softmax(-1)
+
+    def _qk(self, C, C_m):
+        prev = torch.cat([torch.zeros_like(C[:, :1]), C[:, :-1]], 1)            # k_j icin C_(j-1)
+        return self._split(self.W_q(F.normalize(C_m, dim=-1))), self._split(self.W_k(F.normalize(prev, dim=-1)))
+
+    def _split(self, x):
+        B, T, _ = x.shape
+        return x.view(B, T, self.heads, self.dim).transpose(1, 2)
+
+
 class PV(nn.Module):
-    """NOKTA ve VEKTOR.  P sabit; ogrenilen vektorler, S_v, S_p (LEARNED), defter ve lam_w/beta_w."""
+    """NOKTA ve VEKTOR.  P sabit; ogrenilen vektorler, S_v, S_p (LEARNED), defter, lam_w/beta_w ve attention."""
     arch = "pv"
 
     def __init__(self, n, d_order=D_ORDER, d_content=D_CONTENT, vectors=VECTORS, active=ACTIVE, layers=LAYERS,
@@ -294,14 +366,16 @@ class PV(nn.Module):
                  gate_0_init=GATE_0_INIT, s_p_init=None, query=QUERY, query_vectors=QUERY_VECTORS,
                  query_active=QUERY_ACTIVE, query_by=QUERY_BY, c_content=C_CONTENT, select=SELECT,
                  load_balance=LOAD_BALANCE, c_m_norm=C_M_NORM,
-                 lam_w_init=LAM_W_INIT, beta_w_init=BETA_W_INIT):
+                 lam_w_init=LAM_W_INIT, beta_w_init=BETA_W_INIT, attention=ATTENTION, attn_heads=ATTN_HEADS,
+                 attn_dim=ATTN_DIM, attn_after=ATTN_AFTER, attn_value=ATTN_VALUE):
         """d_order + d_content = d_sum, nokta uzayinin boyutu.  squared, S_p None: SCORE_BY_VOCAB'dan.  Verilirse tabloyu ezer.
         start_norm: start'larin baslangic boyu (None: randn).  lam: zincirin solma carpani.
         chain: "absolute" (RM_t) ya da "relative" (kaydirma).  c_cache: hikayenin gecmisi + gate.
         query: defteri Q ile ara (query_*).  c_content: C = [C_order | C_content]; C_content
         kaydirmasiz, lam_w/beta_w ile solar.  Kapaliyken d_sum'in tamami relative.
         select: aktif vektor secimi, "distance" ya da "direction" (katman 1'den itibaren).
-        c_m_norm: puan C_m/|C_m| ile (kure); s_p_init None: C_M_NORM_P formulunden, kapaliyken S_P_INIT."""
+        c_m_norm: puan C_m/|C_m| ile (kure); s_p_init None: C_M_NORM_P formulunden, kapaliyken S_P_INIT.
+        attention: sozluk katmani attn_after'den sonra Gecmisten (attn_heads x attn_dim, attn_value)."""
         super().__init__()
         d_sum = int(d_order) + int(d_content)
         if c_content:
@@ -342,6 +416,9 @@ class PV(nn.Module):
         self.cache_topk, self.cache_skip = cache_topk, cache_skip
         self.cache = (CCache(d_sum, cache_topk, cache_skip, s_c_init, gate_0_init, query, query_vectors,
                              query_active, query_by, randn, start_norm, select) if c_cache else None)
+        assert 0 <= attn_after < layers, (attn_after, layers)
+        self.attn_after = int(attn_after)
+        self.attn = Attention(d_sum, attn_heads, attn_dim, attn_value) if attention else None
 
     def C(self, tokens):
         """tokens (B,T) -> zincir (B,T,d).  Nedensel: C_t yalniz <= t'yi toplar."""
@@ -396,15 +473,18 @@ class PV(nn.Module):
 
     def move(self, tokens):
         """(C_m, layer basina active_ids) -- trace() ve scoreboard() ayni hesabi okur."""
-        return self._layers(self.C(tokens))
+        return self._layers(self.C(tokens), tokens=tokens)
 
-    def _layers(self, C, probs=False):
-        """-> (C_m, layer basina active_ids) ; probs: + layer basina P (LOAD_BALANCE)."""
+    def _layers(self, C, probs=False, tokens=None):
+        """-> (C_m, layer basina active_ids) ; probs: + layer basina P (LOAD_BALANCE).
+        attention: sozluk katmani attn_after'den sonra; tokens yalniz "point" icin."""
         C_m, active_ids, P = C, [], []
-        for layer in self.V:
+        for i, layer in enumerate(self.V):
             C_m, layer_ids, *p = layer(C_m, probs=probs)
             active_ids.append(layer_ids)
             P += p
+            if self.attn is not None and i == self.attn_after:
+                C_m = self.attn(C, C_m, self.P[tokens] if self.attn.value == "point" else None)
         return (C_m, active_ids, P) if probs else (C_m, active_ids)
 
     def balance(self, P, counted):
@@ -422,11 +502,11 @@ class PV(nn.Module):
         return -(self.S_p.exp() if self.S_p_learned else self.S_p) * D
 
     def scoreboard(self, tokens, targets_mask=None):
-        """tokens (B,T) -> (B,T,n): her konumda SONRAKI token'in puani.  Konumlar
-        arasi karisma yok, dolgu yalniz sagda: targets_mask arayuz icin, hesabi degistirmez.
+        """tokens (B,T) -> (B,T,n): her konumda SONRAKI token'in puani.  Konumlar arasi
+        karisma yalniz geriye (nedensel), dolgu yalniz sagda: targets_mask arayuz icin, hesabi degistirmez.
         C_cache varsa donen deger log p (normalize); argmax ve cross_entropy ayni calisir."""
         C = self.C(tokens)
-        C_m = self._layers(C)[0]
+        C_m = self._layers(C, tokens=tokens)[0]
         scores = self.score(C_m)
         return scores if self.cache is None else self.cache(tokens, C, C_m, scores)
 
@@ -441,7 +521,7 @@ class PV(nn.Module):
                    else targets_mask[:, 1:].bool())
         C = self.C(tokens)
         dengeli = self.load_balance > 0
-        C_m, _, *P = self._layers(C, probs=dengeli)
+        C_m, _, *P = self._layers(C, probs=dengeli, tokens=tokens)
         P = P[0] if dengeli else []
         w = counted
         if rows is not None:
@@ -468,6 +548,58 @@ class PV(nn.Module):
         """Izlenebilirlik: her konumda her layer'da hangi vektorler aktifti."""
         return self.move(tokens)[1]
 
+    @torch.no_grad()
+    def inspect(self, tokens):
+        """Yalniz okur -- ara degerler.  -> C (B,T,d), C_m (B,T,d) son nokta (move() ile ayni),
+        W [katman] (B,T,vectors) secim agirliklari (secilmeyen 0), attn (B,heads,T,T) ya da None, gate (B,T) ya da None."""
+        C = self.C(tokens)
+        C_m, W, A = C, [], None
+        for i, layer in enumerate(self.V):
+            W.append(layer.weights(C_m))
+            C_m = layer(C_m)[0]
+            if self.attn is not None and i == self.attn_after:
+                A = self.attn.weights(C, C_m)
+                C_m = self.attn(C, C_m, self.P[tokens] if self.attn.value == "point" else None)
+        gate = self.cache.parts(tokens, C, C_m)[0] if self.cache is not None else None
+        return {"C": C, "C_m": C_m, "W": W, "attn": A, "gate": gate}
+
+    @torch.no_grad()
+    def health(self, tokens, mask):
+        """Saglik: sabit bir sondada modelin ici.  tokens (B,T), mask (B,T) gercek konumlar -> sozluk.
+          vec_each_l / vec_all_l   katman l'de etkin vektor: her konumda e^H(W_t) ortalamasi / butun konumlarda
+                                   e^H(ortalama W).  vec_all kucukse farkli C'ler ayni vektorlere gidiyor (cokus)
+          dead_l                   ortalama payi esit payin %1'inden az vektor sayisi (olu)
+          dir_C / dir_Cm           varyansin %90'ini tasiyan yon sayisi;  norm_C / norm_Cm  ortalama boy
+          exp_S_v, exp_S_p, exp_S_c, gate, lam_c   ogrenilen olcekler, defterin gate'i, icerik solmasi (lam_w)
+          attn_ent / attn_first / attn_dist   bas basina: entropi (nat), konum 0'a dusen pay, ortalama bakis mesafesi
+          pred_distinct / pred_ent  en yuksek puani alan farkli kelime sayisi, tahminin entropisi (nat)"""
+        a = mask.bool()
+        ic, h = self.inspect(tokens), {}
+        for i, W in enumerate(ic["W"]):
+            W_bar = W[a].mean(0)
+            h["vec_each_%d" % i] = float(entropy(W[a]).exp().mean())
+            h["vec_all_%d" % i] = float(entropy(W_bar).exp())
+            h["dead_%d" % i] = int((W_bar < 0.01 / W_bar.numel()).sum())
+        for ad, X in (("C", ic["C"][a]), ("Cm", ic["C_m"][a])):
+            h["norm_" + ad], h["dir_" + ad] = float(X.norm(dim=-1).mean()), directions90(X)
+        h["exp_S_v"] = [float(L.S_v.exp()) for L in self.V]
+        if self.S_p_learned:
+            h["exp_S_p"] = float(self.S_p.exp())
+        if self.c_content:
+            h["lam_c"] = float(self.lam_beta(tokens)[0][a].mean())
+        if ic["gate"] is not None:
+            h["gate"], h["exp_S_c"] = float(ic["gate"][a].mean()), float(self.cache.S_c.exp())
+        if ic["attn"] is not None:
+            A = ic["attn"]
+            pos = torch.arange(A.shape[-1], device=A.device)
+            age = (pos[:, None] - pos[None, :]).clamp(min=0).to(A.dtype)
+            for ad, x in (("attn_ent", entropy(A)), ("attn_first", A[..., 0]), ("attn_dist", (A * age).sum(-1))):
+                h[ad] = [float(x[:, k][a].mean()) for k in range(A.shape[1])]
+        lp = torch.log_softmax(self.scoreboard(tokens), -1)[a]
+        h["pred_distinct"] = int(lp.argmax(-1).unique().numel())
+        h["pred_ent"] = float(-(lp.exp() * lp).sum(-1).mean())
+        return h
+
     @classmethod
     def from_package(cls, k):
         """Kayitli paketten (t/w) model, agirliklari yuklu.  Alan gelmeden yazilmis pakette o ozellik
@@ -480,7 +612,9 @@ class PV(nn.Module):
                 query=k.get("query", False), query_vectors=k.get("query_vectors", QUERY_VECTORS),
                 query_active=k.get("query_active", QUERY_ACTIVE), query_by=k.get("query_by", QUERY_BY),
                 c_content=k.get("c_content", False), select=k.get("select", "distance"),
-                c_m_norm=k.get("c_m_norm", False))
+                c_m_norm=k.get("c_m_norm", False), attention=k.get("attention", False),
+                attn_heads=k.get("attn_heads", ATTN_HEADS), attn_dim=k.get("attn_dim", ATTN_DIM),
+                attn_after=k.get("attn_after", ATTN_AFTER), attn_value=k.get("attn_value", ATTN_VALUE))
         m.load_state_dict(k["weights"])
         return m.eval()
 

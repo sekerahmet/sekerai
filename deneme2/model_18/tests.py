@@ -22,7 +22,8 @@ KUCUK = dict(d_order=16, d_content=0, vectors=8, active=2, layers=2)   # egitim 
 # Kapilar parcalari TEK TEK sinar: tepedeki tasarimin (model_18) ozellikleri burada KAPALI baslar,
 # her kapi sinadigini acar.  Tepenin kendisi t_tepe'de.
 SADE = dict(d_order=128, d_content=0, t_max=64, start_norm=None, lam=1.0, chain="absolute",
-            c_cache=False, cache_topk=8, query=False, c_content=False, select="distance", active=8, load_balance=0.0, c_m_norm=False)
+            c_cache=False, cache_topk=8, query=False, c_content=False, select="distance", active=8, load_balance=0.0, c_m_norm=False,
+            attention=False)
 
 
 def PV(n, **ayar):
@@ -847,6 +848,138 @@ def t_speed():
          "T 40 -> %d, satir %d; " % (t.shape[1], len(rows)) + ", ".join(sonuc))
 
 
+# --- 25.  ATTENTION: W_o = 0 -> attention'siz ile ayni; nedensel; anahtar C_(j-1); gradyan; point; paket
+def t_attention():
+    F = torch.nn.functional
+    g = torch.Generator().manual_seed(12)
+    kw = dict(d_order=32, d_content=32, t_max=64, lam=0.7, chain="relative", c_content=True, c_cache=True,
+              select="direction", start_norm=1.0, vectors=16, c_m_norm=True)
+    w = torch.randint(0, 50, (2, 30), generator=g)
+    torch.manual_seed(0)
+    yok = PV(50, **kw)
+    torch.manual_seed(0)
+    var = PV(50, attention=True, attn_heads=2, attn_dim=8, **kw)
+    ek = sum(p.numel() for p in var.parameters()) - sum(p.numel() for p in yok.parameters())
+    with torch.no_grad():
+        sessiz = torch.equal(yok.scoreboard(w), var.scoreboard(w))
+        var.attn.W_o.weight.normal_(0, 0.3, generator=g)
+        a = var.scoreboard(w)
+        w2 = w.clone(); w2[:, 20] = (w2[:, 20] + 1) % 50
+        b = var.scoreboard(w2)
+        nedensel = torch.allclose(a[:, :20], b[:, :20], atol=1e-6) and not torch.allclose(a[:, 20:], b[:, 20:])
+        # elle: t, j <= t'ye bakar; k_j = W_k norm(C_(j-1)), k_0 = 0; v_j = W_v norm(C_m,j)
+        L, C = var.attn, var.C(w)
+        C_m0 = var.V[0](C)[0]
+        prev = torch.cat([torch.zeros_like(C[:, :1]), C[:, :-1]], 1)
+        q = L.W_q(F.normalize(C_m0, dim=-1)).view(2, 30, 2, 8)
+        k = L.W_k(F.normalize(prev, dim=-1)).view(2, 30, 2, 8)
+        v = L.W_v(F.normalize(C_m0, dim=-1)).view(2, 30, 2, 8)
+        el = torch.stack([torch.stack([C_m0[i, t] + L.W_o(torch.cat([
+            torch.softmax(k[i, :t + 1, h] @ q[i, t, h] / 8 ** 0.5, 0) @ v[i, :t + 1, h] for h in range(2)]))
+            for t in range(30)]) for i in range(2)])
+        kaydir = torch.allclose(L(C, C_m0), el, atol=1e-5)
+        torch.manual_seed(0)
+        nokta = PV(50, attention=True, attn_heads=2, attn_dim=8, attn_value="point", **kw)
+        nokta.load_state_dict(var.state_dict())
+        p_ = nokta.scoreboard(w)
+        point = bool(torch.isfinite(p_).all()) and not torch.allclose(p_, a, atol=1e-5)
+    var.loss(w).backward()
+    grad = all(bool(x.grad.abs().sum() > 0) for x in (L.W_q.weight, L.W_k.weight, L.W_v.weight, L.W_o.weight))
+    kapi("attention: W_o 0 -> attention'siz ile ayni, nedensel, anahtar C_(j-1)",
+         sessiz and nedensel and kaydir and ek == 4 * 64 * 16,
+         "elle hesapla ayni; 20. konum degisince oncekiler ayni; +%d parametre" % ek)
+    kapi("attention: gradyan W_q/W_k/W_v/W_o'ya ulasir, point calisir", grad and point)
+
+    N, data = _veri()
+    kok = tempfile.mkdtemp()
+    try:
+        r = TR.RUNS["AT"] = TR.Run("AT", kok)
+        _run(r, data, N, _sifir, "cpu", 2e-3, 4, 0, 8, 2, 4, chain="relative", lam=0.7, start_norm=1.0,
+             c_cache=True, attention=True, attn_heads=2, attn_dim=4, **KUCUK)
+        egitim = r.result.get("step") == 4 and torch.isfinite(r.result["step_losses"]).all()
+        pk = torch.load(kok + "/AT/t4.pt", weights_only=False)
+        paket = pk["attention"] is True and pk["attn_heads"] == 2 and _PV.from_package(pk).attn is not None
+        try:
+            r = TR.RUNS["AT"] = TR.Run("AT", kok)
+            _run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 2, 4, resume=kok + "/AT/t4.pt", chain="relative",
+                 lam=0.7, start_norm=1.0, c_cache=True, **KUCUK)
+            yakaladi = False
+        except ValueError as h:
+            yakaladi = "attention" in str(h)
+    finally:
+        shutil.rmtree(kok, ignore_errors=True)
+    kapi("attention egitilir; pakete yazilir, surdurme farki yakalar", bool(egitim) and paket and yakaladi,
+         "attention acik paket -> kapali cagri")
+
+
+# --- 26.  SAGLIK: cevabi bilinen durumlar; inspect == move; dikkat nedensel; olcut ve egitim butunlesmesi
+def t_health():
+    import model_18 as M
+    import data_stories as DS
+    g = torch.Generator().manual_seed(21)
+    esit = float(M.entropy(torch.full((16,), 1 / 16)).exp())
+    tek = float(M.entropy(torch.eye(16)[3]).exp())
+    uc = M.directions90(torch.randn(500, 3, generator=g) @ torch.randn(3, 64, generator=g))
+    bilinen = abs(esit - 16) < 1e-4 and abs(tek - 1) < 1e-6 and uc <= 3
+
+    kw = dict(d_order=32, d_content=32, t_max=64, lam=0.7, chain="relative", c_content=True, c_cache=True,
+              select="direction", start_norm=1.0, vectors=16, active=4, c_m_norm=True)
+    w = torch.randint(3, 50, (2, 30), generator=g)
+    mask = torch.ones(2, 30, dtype=torch.bool)
+    torch.manual_seed(0)
+    m = PV(50, attention=True, attn_heads=2, attn_dim=8, **kw)
+    with torch.no_grad():
+        m.attn.W_o.weight.normal_(0, 0.3, generator=g)
+        ic = m.inspect(w)
+        ayni = torch.allclose(ic["C_m"], m.move(w)[0], atol=1e-6)
+        secim = all(bool(((W > 0).sum(-1) == 4).all() and torch.allclose(W.sum(-1), torch.ones(2, 30), atol=1e-5))
+                    for W in ic["W"])
+        A = ic["attn"]
+        nedensel = (torch.allclose(A.sum(-1), torch.ones_like(A[..., 0]), atol=1e-5)
+                    and float(A.triu(1).abs().sum()) == 0.0)
+        h = m.health(w, mask)
+        for L in m.V:
+            L.S_v.fill_(-30.0)                                # neredeyse duz: etkin = aktif sayisi
+        duz = m.health(w, mask)
+        for L in m.V:
+            L.S_v.fill_(30.0)                                 # keskin: her konumda 1
+        keskin = m.health(w, mask)
+    anahtar = (all(("vec_each_%d" % i) in h and ("dead_%d" % i) in h for i in range(4))
+               and {"dir_C", "dir_Cm", "norm_C", "gate", "lam_c", "attn_ent", "attn_first", "pred_distinct"} <= set(h)
+               and len(h["attn_ent"]) == 2)
+    sayim = (all(abs(duz["vec_each_%d" % i] - 4) < 0.05 for i in range(4))
+             and all(abs(keskin["vec_each_%d" % i] - 1) < 0.05 for i in range(4)))
+    kapi("saglik: bilinen durumlar, inspect == move, dikkat nedensel", bilinen and ayni and secim and nedensel,
+         "duz 16 -> %.2f, tek -> %.2f, rank 3 -> %d yon" % (esit, tek, uc))
+    kapi("saglik: anahtarlar, etkin vektor duzde aktif / keskinde 1", anahtar and sayim,
+         "aktif 4: duz %.2f, keskin %.2f" % (duz["vec_each_0"], keskin["vec_each_0"]))
+
+    ad = [DS.DOLGU, DS.SON, DS.BILINMEYEN] + ["k" + c for c in "abcdefghi"]      # JETON rakami ayri boler
+    W = torch.randint(3, 12, (6, 16), generator=g)
+    Mk = torch.zeros(6, 16, dtype=torch.bool)
+    for i, n in enumerate((16, 9, 12, 5, 16, 7)):
+        W[i, 0], W[i, n - 1], W[i, n:] = 1, 1, 0
+        Mk[i, :n] = True
+    olcut = DS.olcut((W, Mk), (W, Mk), eos=1, aygit="cpu", en=6, ad=ad, istemler=["ka kb kc", "kd yok"])
+    torch.manual_seed(0)
+    k = PV(12, t_max=16, c_cache=True, chain="relative", lam=0.7, start_norm=1.0, **KUCUK)
+    duz_olcum, tam = olcut(k, "heldout"), olcut(k, "heldout", save=True)
+    butun = (olcut.health and "health" not in olcut(k, "train") and "farkli4" not in duz_olcum["health"]
+             and len(tam["health"]["metin"]) == 2 and 0 <= tam["health"]["farkli4"] <= 1)
+    kok = tempfile.mkdtemp()
+    try:
+        r = TR.RUNS["SA"] = TR.Run("SA", kok)
+        _run(r, (W, Mk, Mk), 12, olcut, "cpu", 2e-3, 4, 0, 8, 2, 4, t_max=16, c_cache=True, chain="relative",
+             lam=0.7, start_norm=1.0, **KUCUK)
+        pk = torch.load(kok + "/SA/t4.pt", weights_only=False)
+        egitim = (any("saglik  vektor" in s for s in r.log) and any("saglik ozeti" in s for s in r.log)
+                  and "farkli4" in pk["health"] and "vektor" in pk["grads"])
+    finally:
+        shutil.rmtree(kok, ignore_errors=True)
+    kapi("saglik: olcut ve egitim -- gunlukte satir, pakette sozluk ve gradyan", butun and egitim,
+         "sonda: %d istem (bilinmeyenli istem elendi)" % len(tam["health"]["metin"]))
+
+
 # ============================================================
 # DATA_STORIES -- TinyStories (model_17 veri_t17 + olcme_17'den).
 # ============================================================
@@ -888,6 +1021,23 @@ def t_stories():
           and abs(r["diag"]["eos_ok"] - float(d[e].sum() / e.sum())) < 1e-9)
     kapi("hikaye olcutu: accuracy, bantlar, eos_ok", ok,
          "accuracy %.3f  eos_ok %.3f" % (r["accuracy"], r["diag"]["eos_ok"]))
+
+    # acc_ar: hedef, hikayede daha once tamamlanmis bir ikiliyi tamamliyor; elle sayimla ayni
+    ornek = DS.tekrar_ikili(torch.tensor([[1, 5, 6, 5, 6, 2, 5, 6]]), torch.ones(1, 7, dtype=torch.bool))
+    elle = ornek[0].tolist() == [False, False, False, True, False, False, True]
+    ar = torch.zeros(6, 15, dtype=torch.bool)
+    for i in range(6):
+        gor = set()
+        for t in range(15):
+            if Mk[i, t + 1]:
+                ik = (int(W[i, t]), int(W[i, t + 1]))
+                ar[i, t] = ik in gor
+                gor.add(ik)
+    a_ = Mk[:, 1:]
+    bek = {ad: float(d[s].sum() / s.sum()) for ad, s in (("acc_ar", a_ & ar), ("acc_other", a_ & ~ar))}
+    kapi("hikaye olcutu: acc_ar / acc_other (tekrar eden ikili)",
+         elle and int(ar.sum()) > 0 and all(abs(r["diag"][ad] - b) < 1e-9 for ad, b in bek.items()),
+         "%d tekrar ikili; acc_ar %.3f  acc_other %.3f" % (int(ar.sum()), r["diag"]["acc_ar"], r["diag"]["acc_other"]))
 
 
 # ============================================================
@@ -1042,7 +1192,7 @@ def t_notebook(yol=None):
 if __name__ == "__main__":
     print("tests (model_18)")
     for f in (t_zincir, t_nedensel, t_sessiz, t_cm, t_payda, t_gradyan,
-              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_tepe, t_select, t_hepsi, t_balance, t_cmnorm, t_speed, t_mat_pencere,
+              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_tepe, t_select, t_hepsi, t_balance, t_cmnorm, t_speed, t_attention, t_health, t_mat_pencere,
               t_mat_sor, t_mat_basamak, t_mat_egitim, t_stories, t_notebook):
         f()
     t_notebook(os.path.join(os.path.dirname(os.path.abspath(__file__)),

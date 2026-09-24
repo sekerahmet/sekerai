@@ -260,6 +260,26 @@ TEKRAR_PENCERESI = 20
 # URETIM ayari: nucleus (top-p).  Olasiliklari buyukten kucuge toplami TOP_P'ye ulasan kume
 # disindaki kelimeler atilir, kalanlardan secilir.  1,0 = kapali.  Holtzman ve ark. 2019.
 TOP_P = 1.0
+# SAGLIK sondasi, her kosuda AYNI: ilk SONDA_PENCERE tutulan pencere (m.health) ve sabit istemler (dongu).
+# Kullanici, 25 Eylul: "nereye bakacağımızı anlamak için ölçüm ... eğitim boyunca takip edebilmek için".
+SONDA_PENCERE = 64
+SONDA_ISTEM = 3        # istem dosyasindan butun kelimeleri sozlukte olan ilk 3 + isim istemi
+ISIM_ISTEMI = ("Once upon a time, there was a girl named Lily. She had a red ball. One day, Lily went to the "
+               "park with her ball. At the park, she met a boy named Tom. Tom asked,")
+
+
+def tekrar_ikili(w, a):
+    """w (B,T) token, a (B,T-1) sayilan hedef -> (B,T-1) bool: hedef w_(t+1), (w_t, w_(t+1)) ikilisini BU
+    hikayede daha once tamamlanmis -- Zoology'nin (2312.04927) "AR hit"i, egitimdeki siklik suzgeci olmadan."""
+    B, L = a.shape
+    n = int(w.max()) + 1
+    sira = torch.arange(B * L, device=w.device).view(B, L)
+    satir = torch.arange(B, device=w.device)[:, None] * n * n
+    anahtar = torch.where(a, satir + w[:, :-1] * n + w[:, 1:], -1 - sira).reshape(-1)   # sayilmayan eslesmez
+    o = torch.sort(anahtar, stable=True).indices          # esit anahtarlar konum sirasini korur
+    tekrar = torch.zeros_like(anahtar, dtype=torch.bool)
+    tekrar[o[1:]] = anahtar[o[1:]] == anahtar[o[:-1]]     # ilk gecis haric hepsi
+    return tekrar.view(B, L)
 
 
 def olc(m, W, M, eos, aygit="cuda", parca=64):
@@ -269,11 +289,14 @@ def olc(m, W, M, eos, aygit="cuda", parca=64):
       ce             ayni hedeflerde kayip; ppl = e^ce
       acc_a_b        hedef konumu a..b arasinda olanlarda accuracy --
                      C hikayenin neresinde doyuyor
-      eos_ok         hikaye BITTIGINDE en yuksek puan EOS mu"""
+      eos_ok         hikaye BITTIGINDE en yuksek puan EOS mu
+      acc_ar         hedef, hikayede daha once gecmis bir ikiliyi tamamliyor (tekrar_ikili): geri cagirma
+      acc_other      geri kalan hedefler"""
     dg = tp = 0
     ce_top = 0.0
     bant = {b: [0, 0] for b in BANTLAR}
     eo = [0, 0]
+    ar = {"ar": [0, 0], "other": [0, 0]}
     with torch.no_grad():
         for i in range(0, W.shape[0], parca):
             w = W[i:i + parca].to(aygit).long()
@@ -293,26 +316,44 @@ def olc(m, W, M, eos, aygit="cuda", parca=64):
             s = a & (h == eos)
             eo[0] += int((d & s).sum())
             eo[1] += int(s.sum())
+            r = tekrar_ikili(w, a)
+            for ad, s in (("ar", a & r), ("other", a & ~r)):
+                ar[ad][0] += int((d & s).sum())
+                ar[ad][1] += int(s.sum())
     diag = {"acc_%d_%d" % b: (c / n if n else float("nan")) for b, (c, n) in bant.items()}
     diag["eos_ok"] = eo[0] / max(eo[1], 1)
+    for ad, (c, n) in ar.items():
+        diag["acc_" + ad] = c / n if n else float("nan")
     return {"accuracy": dg / max(tp, 1), "ce": ce_top / max(tp, 1), "diag": diag}
 
 
-def olcut(EG, DG, eos, aygit="cuda", en=2000, en_tam=None):
-    """train'in bekledigi metric(m, "train"|"heldout", full) -> dict.
+def olcut(EG, DG, eos, aygit="cuda", en=2000, en_tam=None, ad=None, istemler=()):
+    """train'in bekledigi metric(m, "train"|"heldout", full, save) -> dict.
     Egitim sirasinda ilk `en` pencere.  full: held-out HEPSI; egitim bolmesinden
     `en_tam` pencere (None: held-out kadar) -- 2,6 milyon pencerenin tamami
-    bir epokluk ileri gecis olurdu."""
+    bir epokluk ileri gecis olurdu.
+    health: held-out'ta her olcumde sabit sondada m.health(); ad (sozluk) verilirse tam yedekte (save)
+    ve sonda (full) sabit istemlerle dongu ve metin de."""
     kume = {"train": EG, "heldout": DG}
+    ix = {a: i for i, a in enumerate(ad)} if ad is not None else None
+    sonda = sonda_istemleri(istemler, ix) if ix is not None else []
+    w, mk = DG[0][:SONDA_PENCERE], DG[1][:SONDA_PENCERE]
+    L = int(mk.any(0).nonzero().max()) + 1                    # sondanin en uzun hikayesine kirpilir
 
-    def f(m, side, full=False):
+    def f(m, side, full=False, save=False):
         W, M = kume[side]
         if full:
             n = len(W) if side == "heldout" else (en_tam or len(DG[0]))
         else:
             n = en
-        return olc(m, W[:n], M[:n], eos, aygit)
+        r = olc(m, W[:n], M[:n], eos, aygit)
+        if side == "heldout" and hasattr(m, "health"):
+            r["health"] = m.health(w[:, :L].to(aygit).long(), mk[:, :L].to(aygit))
+            if sonda and (save or full):
+                r["health"].update(dongu(m, ad, ix, sonda, aygit=aygit))
+        return r
 
+    f.health = True
     return f
 
 
@@ -385,3 +426,25 @@ def devam(m, istem, ad, ix, adim=120, aygit="cuda", sicaklik=0.0, tohum=None,
             if c == ix[SON]:
                 break
     return coz(np.array(w[1:n_istem]), ad), coz(np.array(w[n_istem:]), ad)
+
+
+def sonda_istemleri(istemler, ix, k=SONDA_ISTEM):
+    """Sabit istemler: kelimelerinin hepsi sozlukte olan ilk k istem + isim istemi.  <bilinmeyen> uretimde
+    yasak; istemdeki bir isim <bilinmeyen> ise model onu hic yazamaz (CMNORM t4000 okumasi, 25 Eylul)."""
+    temiz = [s for s in istemler if all(t in ix for t in JETON.findall(s.translate(DUZLE)))]
+    return temiz[:k] + [ISIM_ISTEMI]
+
+
+def dongu(m, ad, ix, istemler, adim=60, aygit="cuda"):
+    """Acgozlu uretim (sicaklik 0).  farkli4: farkli 4'lulerin orani (1: hic tekrar yok);
+    dongu: tekrar eden 8'lisi olan istemlerin payi; metin: yazilanlar (pakete girer, sonradan gozle okunur)."""
+    f4, d8, metin = [], [], []
+    for istem in istemler:
+        _, yazdi = devam(m, istem, ad, ix, adim=adim, aygit=aygit)
+        t = JETON.findall(yazdi.replace("---", " "))
+        g4 = [tuple(t[i:i + 4]) for i in range(len(t) - 3)]
+        g8 = [tuple(t[i:i + 8]) for i in range(len(t) - 7)]
+        f4.append(len(set(g4)) / len(g4) if g4 else 1.0)
+        d8.append(len(set(g8)) < len(g8))
+        metin.append(yazdi)
+    return {"farkli4": sum(f4) / len(f4), "dongu": sum(d8) / len(d8), "metin": metin}
