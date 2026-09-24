@@ -57,6 +57,10 @@ if not torch.cuda.is_available():
 # TEPE = MODELIN SON YAPISI.  Kullanici, 24 Eylul: "bu yaptı modelin son yapısı olsun. ama farklı
 # değerler kullandığımızda bu ayrı bir yere yazarız".  Her kosunun degerleri defterindeki KOSU
 # satirinda ve kendi paketinde; tepeden farkli olan orada yazilir.
+# Kullanici, 24 Eylul (kendi koydugumuz kurallarin etrafinda dolasmayi birakip): FIKRIN KENDISI kalir
+# (P sabit noktalar, zincir C, vektor sozlugu, uzaklikla secim, defter); yolda koydugumuz UYGULAMA
+# KURALLARI yerine transformer ailesinin sinanmis cozumu: butun vektorler aktif (FFN / MoE), secimden
+# once normalize (pre-norm), ogrenilen solma (C_content), ogrenilen sorgu (Q).  "evet katılıyorum".
 #
 # Nokta uzayinin boyutu (dimension) D_SUM = D_ORDER + D_CONTENT; P, C, vektorler ve Q hep D_SUM.
 # Kullanici, 24 Eylul: "order 512 ve content 512 diye değerlere karar verdik ama sabit değil
@@ -66,13 +70,17 @@ D_ORDER = 512       # C_order'in boyutu: kaydirmali, sira
 D_CONTENT = 512     # C_content'in boyutu: kaydirmasiz, lam_w/beta_w ile solar (C_CONTENT acikken)
 D_SUM = D_ORDER + D_CONTENT
 VECTORS = 256  # layer basina vektor.  Kullanici: "V sayısı da 256 şimdilik"
-ACTIVE = 8     # her C'de aktif vektor; gerisi pasif.  OLCULMEDI.
+# Her C'de aktif vektor; gerisi pasif.  ACTIVE = VECTORS: nokta BUTUN vektorlerden gecer, agirliklar
+# softmax(-D^2 e^S_v) -- seyreklik dayatilmaz, S_v ile OGRENILIR.  Olculdu (CCACHE / SELECT, egitimsiz
+# okuma): top-8'de secilmeyen vektor gradyan almaz, derin katmanlarda 256'nin 120-230'u hic secilmiyor.
+# Kullanici, 24 Eylul: "bunu ben kodda bu etkisi olduğunu bilmeden yazdım ... bence hepsinden geçsin".
+ACTIVE = VECTORS
 # Aktif vektorler nasil secilir.  "distance": en yakin start (ham uzaklik).  "direction": katman 1'den
 # itibaren tasinmis nokta ve start'lar birim boya indirilir, en yakin ACI (katman 0 C'yi uzakliga gore).
 # Olculdu (CCACHE t10000, egitimsiz): tasinmis noktanin boyu (|C| 1,4 -> 14) secimi eziyor; derin
 # katmanlarda isin %90'ini 10 / 6 vektor yapiyor, C_m 1024 boyutun 40 yonunde.  "direction" ile ayni
 # vektorler: 17 / 12 vektor, C_m 113 yon.  Kullanici, 24 Eylul: "b'yi ekle, adı SELECT olsun".
-SELECT = "distance"
+SELECT = "direction"
 LAYERS = 4     # Kullanici: "4 katman olsun"
 T_MAX = 512    # RM sayisi = en uzun dizi (TinyStories hikayelerinin %98,6'si sigar)
 # start'in baslangic boyu.  None: randn, boy ~sqrt(D_SUM) (MAT_* ve TS_PV_D1024 boyle kostu).
@@ -102,7 +110,7 @@ S_P_INIT = 0.0      # ogrenilen S_p (SCORE_BY_VOCAB LEARNED): e^0 = 1'den baslar
 # Q: defteri arayan sorgu.  Kullanici, 24 Eylul: "query (Q_t)", "64 ok, 8 aktif".
 QUERY = True        # defteri Q ile ara.  False: Q = C
 QUERY_VECTORS = 64  # QUERY acikken: Q'yu tasiyan ok sayisi
-QUERY_ACTIVE = 8
+QUERY_ACTIVE = QUERY_VECTORS   # Q'nun oklari da hepsi aktif (ACTIVE ile ayni gerekce)
 QUERY_BY = "C_m"    # oklar neye en yakin secilir: "C_m" (modelin dusuncesi) ya da "C".  OLCULMEDI.
 # C_content.  Kullanici, 24 Eylul: "lam_w mantıklı beta_w mantıklı tam boyut olsun".
 LAM_W_INIT = 0.9    # lam_w'nin baslangici, her token her boyut.  OLCULMEDI.
@@ -155,12 +163,15 @@ class VectorLayer(nn.Module):
         self.active = active
 
     def forward(self, C, by=None):
-        """C (..., d) -> (C_m, active_ids (..., active)).  by: aktifleri secen nokta (None: C)."""
+        """C (..., d) -> (C_m, active_ids (..., active); hepsi aktifse None).  by: aktifleri secen nokta (None: C)."""
         by = C if by is None else by
         if self.direction:                                        # 2 - 2 cos: boy secimi ezmez
             by, start = F.normalize(by, dim=-1), F.normalize(self.start, dim=-1)
         else:
             start = self.start
+        if self.active >= self.start.shape[0]:                    # hepsi: tek matris carpimi
+            W_v = torch.softmax(-distance(by, start) * self.S_v.exp(), -1)
+            return C + W_v @ (self.finish - self.start), None
         D_s2, active_ids = distance(by, start).topk(self.active, dim=-1, largest=False)
         W_v = torch.softmax(-D_s2 * self.S_v.exp(), -1)          # payda: aktiflerin toplami 1
         V_a = (self.finish - self.start)[active_ids]             # (..., active, d)

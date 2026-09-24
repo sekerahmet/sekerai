@@ -22,7 +22,7 @@ KUCUK = dict(d_order=16, d_content=0, vectors=8, active=2, layers=2)   # egitim 
 # Kapilar parcalari TEK TEK sinar: tepedeki tasarimin (model_18) ozellikleri burada KAPALI baslar,
 # her kapi sinadigini acar.  Tepenin kendisi t_tepe'de.
 SADE = dict(d_order=128, d_content=0, t_max=64, start_norm=None, lam=1.0, chain="absolute",
-            c_cache=False, cache_topk=8, query=False, c_content=False, select="distance")
+            c_cache=False, cache_topk=8, query=False, c_content=False, select="distance", active=8)
 
 
 def PV(n, **ayar):
@@ -521,9 +521,10 @@ def t_tepe():
     m = _PV(60)
     ok = (m.chain == "relative" and m.lam == M.LAM and m.c_content and m.d_sum == M.D_SUM
           and m.cache is not None and m.cache.query is not None and m.cache.topk is M.CACHE_TOPK
-          and m.t_max == M.T_MAX and hasattr(m, "lam_w"))
+          and m.t_max == M.T_MAX and hasattr(m, "lam_w") and m.select == "direction"
+          and all(L.active == len(L.start) for L in m.V) and m.cache.query.active == len(m.cache.query.start))
     kapi("tepe: ayarsiz PV == son yapi", ok,
-         "chain %s lam %g, D_SUM %d = %d + %d, defter topk %s + Q %d ok, T_MAX %d"
+         "chain %s lam %g, D_SUM %d = %d + %d, defter topk %s + Q %d ok, T_MAX %d; hepsi aktif, secim yon"
          % (m.chain, m.lam, m.d_sum, m.d_order, m.d_content, m.cache.topk,
             len(m.cache.query.start) if m.cache.query is not None else 0, m.t_max))
 
@@ -617,7 +618,7 @@ def t_select():
     boydan = torch.equal(L1(x)[1], L1(x, by=5.0 * x)[1])               # yone bakar: 5 kat boy ayni secim
     uz_boy = not torch.equal(uz.V[1](x)[1], uz.V[1](x, by=5.0 * x)[1])  # distance: boy secimi degistirir
     q = PV(50, c_cache=True, query=True, query_vectors=16, query_active=4, select="direction", **kw)
-    varsayilan = M.SELECT == "distance" and PV(50, **kw).V[1].direction is False
+    varsayilan = M.SELECT == "direction" and PV(50, **kw).V[1].direction is False   # tepe yon; SADE uzaklik
     kapi("SELECT direction: katman 1+ boydan bagimsiz, katman 0 ayni",
          ayni0 and boydan and uz_boy and q.cache.query.direction and varsayilan,
          "distance'ta 5 kat boy secimi degistiriyor, direction'da degistirmiyor")
@@ -639,6 +640,40 @@ def t_select():
     finally:
         shutil.rmtree(kok, ignore_errors=True)
     kapi("SELECT egitilir; surdurme farki yakalar", bool(egitim) and yakaladi, "direction -> distance")
+
+
+# --- 21.  HEPSI (ACTIVE = VECTORS): C_m = C + sum_butun softmax(-D^2 e^S_v) V; her vektor gradyan alir
+def t_hepsi():
+    import model_18 as M
+    torch.manual_seed(0)
+    w = torch.randint(0, 50, (2, 30))
+    m = PV(50, d_order=32, vectors=16, active=16, t_max=64, lam=0.7, chain="relative", start_norm=1.0,
+           select="direction")
+    with torch.no_grad():
+        for L in m.V:
+            L.finish.add_(0.5 * torch.randn_like(L.finish))
+    x = m.C(w)
+    L0, L1 = m.V[0], m.V[1]
+    elle = x + torch.softmax(-M.distance(x, L0.start) * L0.S_v.exp(), -1) @ (L0.finish - L0.start)
+    y = L0(x)[0]
+    yon = M.distance(torch.nn.functional.normalize(y, dim=-1), torch.nn.functional.normalize(L1.start, dim=-1))
+    elle1 = y + torch.softmax(-yon * L1.S_v.exp(), -1) @ (L1.finish - L1.start)
+    formul = torch.allclose(y, elle, atol=1e-5) and torch.allclose(L1(y)[0], elle1, atol=1e-5)
+    m.loss(w).backward()
+    hepsi = all(bool(((L.start.grad.abs().sum(-1) > 0) & (L.finish.grad.abs().sum(-1) > 0)).all()) for L in m.V)
+    kapi("hepsi: C_m = C + sum softmax V (distance / direction); her vektor gradyan alir", formul and hepsi,
+         "16 vektorun 16'si, 2 katman")
+
+    N, data = _veri()
+    kok = tempfile.mkdtemp()
+    try:
+        r = TR.RUNS["H"] = TR.Run("H", kok)
+        _run(r, data, N, _sifir, "cpu", 2e-3, 4, 0, 8, 2, 4, chain="relative", lam=0.7, start_norm=1.0,
+             c_cache=True, select="direction", **dict(KUCUK, active=8))
+        egitim = r.result.get("step") == 4 and torch.isfinite(r.result["step_losses"]).all()
+    finally:
+        shutil.rmtree(kok, ignore_errors=True)
+    kapi("hepsi egitilir (8 vektorun 8'i aktif)", bool(egitim))
 
 
 # ============================================================
@@ -836,7 +871,7 @@ def t_notebook(yol=None):
 if __name__ == "__main__":
     print("tests (model_18)")
     for f in (t_zincir, t_nedensel, t_sessiz, t_cm, t_payda, t_gradyan,
-              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_tepe, t_select, t_mat_pencere,
+              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_tepe, t_select, t_hepsi, t_mat_pencere,
               t_mat_sor, t_mat_basamak, t_mat_egitim, t_stories, t_notebook):
         f()
     t_notebook(os.path.join(os.path.dirname(os.path.abspath(__file__)),
