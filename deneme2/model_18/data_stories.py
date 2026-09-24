@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import collections
 import hashlib
+import math
 import os
 import re
 
@@ -251,6 +252,11 @@ def kur(kok: str, T: int = 128, en: int = 4000, en_mb=None, tohum: int = 0,
 # OLCUT -- olcme_17'den.  Hedef: SONRAKI KELIME, dolgu disinda her konum.
 # ============================================================
 BANTLAR = ((0, 64), (64, 256), (256, 512))     # hedefin penceredeki konumu
+# URETIM ayari (egitimi degistirmez): son TEKRAR_PENCERESI token'da gecmis KELIMELERIN
+# olasiligi TEKRAR_CEZASI'na bolunur; noktalama cezasiz.  1,0 = kapali.
+# REL07 sicaklik 0'da "The dog was very happy." dongusune giriyordu (24 Eylul).
+TEKRAR_CEZASI = 1.0
+TEKRAR_PENCERESI = 20
 
 
 def olc(m, W, M, eos, aygit="cuda", parca=64):
@@ -343,9 +349,11 @@ def istemler(kok):
 
 
 def devam(m, istem, ad, ix, adim=120, aygit="cuda", sicaklik=0.0, tohum=None,
-          yasak=(DOLGU, BILINMEYEN)):
+          yasak=(DOLGU, BILINMEYEN), tekrar=TEKRAR_CEZASI, pencere=TEKRAR_PENCERESI):
     """Istemin devamini URET; model <eos> uretince durur.
-    sicaklik 0: hep en yuksek puan.  yasak: uretilmeyecek token'lar."""
+    sicaklik 0: hep en yuksek puan.  yasak: uretilmeyecek token'lar.
+    tekrar: son `pencere` token'da gecmis kelimelerin olasiligi tekrar'a bolunur."""
+    kelime = torch.tensor([any(ch.isalpha() for ch in a) for a in ad], device=aygit)
     g = None if tohum is None else torch.Generator(device=aygit).manual_seed(tohum)
     w = [ix[SON]] + [ix.get(t, ix[BILINMEYEN]) for t in JETON.findall(istem.translate(DUZLE))]
     n_istem = len(w)
@@ -353,7 +361,12 @@ def devam(m, istem, ad, ix, adim=120, aygit="cuda", sicaklik=0.0, tohum=None,
     with torch.no_grad():
         for _ in range(min(adim, m.t_max - len(w))):
             p = m.scoreboard(torch.tensor([w], device=aygit))[0, -1]
-            p = p.index_fill(0, y, -float("inf"))
+            p = torch.log_softmax(p.index_fill(0, y, -float("inf")), -1)
+            if tekrar > 1.0:
+                son = torch.tensor(w[-pencere:], device=aygit)
+                son = son[kelime[son]]
+                p = p.index_add(0, son.unique(), torch.full((len(son.unique()),),
+                                                            -math.log(tekrar), device=aygit))
             c = (int(p.argmax()) if sicaklik <= 0 else
                  int(torch.multinomial((p / sicaklik).softmax(-1), 1, generator=g)))
             w.append(c)

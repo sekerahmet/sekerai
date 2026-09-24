@@ -9,6 +9,7 @@ baslar ve kendi <eos>'unu yazinca durur (sonda "---").
   serbest                    istemsiz, bos sayfadan bir hikaye
   n=120                      en fazla kac kelime (varsayilan 120, istem+n <= T)
   s=0.8                      sicaklik.  0 = hep en yuksek puan (belirlenimci)
+  r=1.3                      tekrar cezasi: son 20 kelimede gecenler 1,3'e bolunur (1 = kapali)
   yasak                      <bilinmeyen>/<dolgu> uretimi kapat (varsayilan) / ac
   yedek                      hangi paketler var, hangisi yuklu
   yedek t4000                baska bir ani yukle (ayni kosuda); TS_PV_D1024/w500 da olur
@@ -122,7 +123,7 @@ def main():
     print(__doc__.split("\n\n")[-1].rstrip())
     print()
 
-    n, sic, yasak = 120, 0.0, True
+    n, sic, yasak, ceza = 120, 0.0, True, DS.TEKRAR_CEZASI
     while True:
         try:
             g = input("> ").strip()
@@ -140,6 +141,10 @@ def main():
         if g.startswith("s="):
             sic = max(0.0, float(g[2:]))
             print("   sicaklik %.2f%s" % (sic, "  (belirlenimci)" if not sic else ""))
+            continue
+        if g.startswith("r="):
+            ceza = max(1.0, float(g[2:]))
+            print("   tekrar cezasi %.2f%s" % (ceza, "  (kapali)" if ceza == 1 else ""))
             continue
         if g == "yasak":
             yasak = not yasak
@@ -170,10 +175,11 @@ def main():
         bil = sum(1 for t in DS.JETON.findall(g.translate(DS.DUZLE)) if t not in IX)
         y = (DS.DOLGU, DS.BILINMEYEN) if yasak else ()
         bas, hep = DS.devam(m, g, SOZ, IX, adim=n, aygit="cpu", sicaklik=sic,
-                            tohum=random.randrange(10 ** 6) if sic else None, yasak=y)
+                            tohum=random.randrange(10 ** 6) if sic else None, yasak=y,
+                            tekrar=ceza)
         print()
         yaz("ISTEM%s" % ("   (%d kelime sozlukte YOK)" % bil if bil else ""), bas or "(bos)")
-        yaz("MODEL  (sicaklik %.2f)" % sic, hep)
+        yaz("MODEL  (sicaklik %.2f, tekrar cezasi %.2f)" % (sic, ceza), hep)
         print()
 
 
