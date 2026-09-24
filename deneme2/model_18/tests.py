@@ -328,6 +328,57 @@ def t_lam():
     kapi("surdurme lam farkini yakalar", yakaladi, "eski paket (lam 1) -> lam 0,9")
 
 
+# --- 14.  RELATIVE: C_t = lam*kaydir(C_(t-1)) + P[w_t]; ayni baglam her konumda ayni nokta
+def t_relative():
+    m = PV(VM.N, lam=0.7, chain="relative")
+    w = _dizi("E31+52=8")
+    C = m.C(w[None])[0]
+    zincir = torch.allclose(C[0], m.P[w[0]], atol=1e-6) and all(
+        torch.allclose(C[t], 0.7 * torch.roll(C[t - 1], 1) + m.P[w[t]], atol=1e-5)
+        for t in range(1, len(w)))
+    cm = all(torch.allclose(c, C[t], atol=1e-4) for t, c in m.CM(w))
+    a, b = m.scoreboard(_dizi("E31+52=8")[None]), m.scoreboard(_dizi("E31+52=9")[None])
+    nedensel = torch.equal(a[0, :-1], b[0, :-1])
+    # ayni son 3 token, farkli konum: solma sayesinde C'ler neredeyse ayni (absolute'ta degil)
+    g = torch.Generator().manual_seed(9)
+    on = torch.randint(0, 50, (40,), generator=g)
+    uc = torch.tensor([7, 8, 9])
+    kisa, uzun = torch.cat([on[:5], uc]), torch.cat([on, uc])
+    cos = {}
+    for zin in ("relative", "absolute"):
+        mm = PV(50, d=256, t_max=64, lam=0.5, chain=zin)
+        cos[zin] = float(torch.cosine_similarity(mm.C(kisa[None])[0, -1], mm.C(uzun[None])[0, -1], dim=0))
+    kapi("relative: zincir, CM, nedensel, konumdan bagimsiz",
+         zincir and cm and nedensel and cos["relative"] > 0.9 and cos["absolute"] < 0.5,
+         "ayni son 3 kelime, 8. ve 43. konum: cos relative %.2f, absolute %.2f"
+         % (cos["relative"], cos["absolute"]))
+
+    N, data = _veri()
+    kok = tempfile.mkdtemp()
+    try:
+        r = TR.RUNS["R"] = TR.Run("R", kok)
+        TR._run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3, **KUCUK)
+        yol = kok + "/R/t3.pt"
+        p = torch.load(yol, weights_only=False)
+        del p["chain"]                           # alan gelmeden yazilmis paket
+        torch.save(p, yol)
+        try:
+            r = TR.RUNS["R"] = TR.Run("R", kok)
+            TR._run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3, resume=yol,
+                    chain="relative", **KUCUK)
+            yakaladi = False
+        except ValueError as h:
+            yakaladi = "chain" in str(h)
+        r = TR.RUNS["R2"] = TR.Run("R2", kok)
+        TR._run(r, data, N, _sifir, "cpu", 2e-3, 4, 0, 8, 2, 4, chain="relative", lam=0.7,
+                start_norm=1.0, **KUCUK)
+        egitim = r.result.get("step") == 4
+    finally:
+        shutil.rmtree(kok, ignore_errors=True)
+    kapi("relative egitilir; surdurme chain farkini yakalar", yakaladi and egitim,
+         "eski paket (absolute) -> relative")
+
+
 # ============================================================
 # DATA_STORIES -- TinyStories (model_17 veri_t17 + olcme_17'den).
 # ============================================================
@@ -523,7 +574,7 @@ def t_notebook(yol=None):
 if __name__ == "__main__":
     print("tests (model_18)")
     for f in (t_zincir, t_nedensel, t_sessiz, t_cm, t_payda, t_gradyan,
-              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_mat_pencere,
+              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_mat_pencere,
               t_mat_sor, t_mat_basamak, t_mat_egitim, t_stories, t_notebook):
         f()
     t_notebook(os.path.join(os.path.dirname(os.path.abspath(__file__)),

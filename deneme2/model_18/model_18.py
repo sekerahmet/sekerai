@@ -9,7 +9,9 @@ arasında ki uzaklık" ve "her vektör her an aktif olmamalı bunu model
 
     P        token noktalari.  SABIT.
     RM       rank multiplier, sira carpani (+-1).  SABIT.
-    C        zincir: C_t = lam*C_(t-1) + RM_t*P[w_t]    (lam 1: hepsinin toplami)
+    C        zincir, chain "absolute": C_t = lam*C_(t-1) + RM_t*P[w_t]    (lam 1: hepsinin toplami)
+                     chain "relative": C_t = lam*kaydir(C_(t-1)) + P[w_t]  (sira = kelimenin YASI)
+             relative'de ayni baglam hikayenin her yerinde ayni noktaya duser.
              yeni token gelince yalniz bir terim eklenir; C_m zincire GIRMEZ.
              lam < 1: eski terimler solar, |C| sinirli kalir, ardisik C'ler ayrisir.
     V        layer basina vektor sozlugu; her vektor (start, finish), ogrenilir.
@@ -23,7 +25,8 @@ arasında ki uzaklık" ve "her vektör her an aktif olmamalı bunu model
                         UZAKLASARAK emin olur (MAT_COK_PV).
                karesiz  kaybin en iyi yeri C_m = P (ucgen esitsizligi).
              squared ve S_p sozluk sayisindan: SCORE_BY_VOCAB.
-    CM       countermarch, geriye yuruyus: C_(t-1) = (C_t - RM_t*P[w_t]) / lam.
+    CM       countermarch, geriye yuruyus: C_(t-1) = (C_t - RM_t*P[w_t]) / lam
+             (relative: C_(t-1) = geri_kaydir((C_t - P[w_t]) / lam)).
              Izleme araci; modelin hesabina girmez.
 """
 import torch
@@ -50,6 +53,11 @@ START_NORM = None
 # ardisik secimde 8 vektorun 7,2'si ayni; lam 0,9'da cos 0,90 ve 4,7 -- her yerde ayni.
 # Kullanici: "λ da bizim için alsında Lr gibi birşey ... şu an 0.9 ile başlayabiliriz".
 LAM = 1.0
+# Sira nasil kodlanir.  "absolute": RM_t mutlak konuma bagli (onceki butun kosular).
+# "relative": her adimda eskiler bir kaydirilir; kaydirma sayisi kelimenin yasi.
+# Hesap (egitimsiz kNN, 1.500 hikaye depo, d 256, 24 Eylul): absolute lam 0,9 %13,3
+# (egitilmis LAM09 %14,8), relative lam 0,7 %34,8; hikayenin ortasinda %8,0 -> %31,0.
+CHAIN = "absolute"
 EPS = 1e-6     # karekok D=0'da turevlenmez
 LEARNED = "learned"
 
@@ -108,15 +116,18 @@ class PV(nn.Module):
 
     def __init__(self, n, d=d, vectors=VECTORS, active=ACTIVE, layers=LAYERS,
                  t_max=T_MAX, seed=0, squared=None, S_p=None, start_norm=START_NORM,
-                 lam=LAM):
+                 lam=LAM, chain=CHAIN):
         """squared, S_p None: SCORE_BY_VOCAB'dan.  Verilirse tabloyu ezer.
-        start_norm: start'larin baslangic boyu (None: randn).  lam: zincirin solma carpani."""
+        start_norm: start'larin baslangic boyu (None: randn).  lam: zincirin solma carpani.
+        chain: "absolute" (RM_t) ya da "relative" (kaydirma)."""
         super().__init__()
         generator = torch.Generator().manual_seed(seed)
         randn = lambda *shape: torch.randn(*shape, generator=generator)
         self.n, self.d, self.vectors = n, d, vectors
         self.active, self.layers, self.t_max = active, layers, t_max
         self.start_norm, self.lam = start_norm, float(lam)
+        assert chain in ("absolute", "relative"), chain
+        self.chain = chain
         rule = score_rule(n)
         self.squared = rule[0] if squared is None else squared
         S_p = rule[1] if S_p is None else S_p
@@ -133,12 +144,24 @@ class PV(nn.Module):
         """tokens (B,T) -> zincir (B,T,d).  Nedensel: C_t yalniz <= t'yi toplar."""
         length = tokens.shape[1]
         assert length <= self.t_max, "dizi RM sayisindan uzun"
-        terms = self.RM[:length] * self.P[tokens]
+        if self.chain == "absolute":
+            return self._decayed_sum(self.RM[:length] * self.P[tokens])
+        # relative: C_t = sum_i lam^(t-i) kaydir^(t-i) P[w_i] = kaydir^t( sum_i lam^(t-i) kaydir^-i P[w_i] ).
+        # kaydir^k x [j] = x[j - k]  (torch.roll(x, k)).
+        x = self.P[tokens]
+        pos = torch.arange(length, device=x.device)[:, None]
+        dim = torch.arange(self.d, device=x.device)[None, :]
+        back = ((dim + pos) % self.d).expand(x.shape)            # kaydir^-i: y_i[j] = x_i[j + i]
+        z = self._decayed_sum(x.gather(-1, back))
+        forward = ((dim - pos) % self.d).expand(x.shape)         # kaydir^t:  C_t[j] = z_t[j - t]
+        return z.gather(-1, forward)
+
+    def _decayed_sum(self, terms):
+        """sum_(i<=t) lam^(t-i) terms_i.  lam^-t ile olcekli cumsum 512'de tasar (0,7^-512);
+        (T,T) alt ucgen carpan matrisi kesin ve kararli."""
         if self.lam == 1.0:
             return terms.cumsum(1)
-        # C_t = sum_(i<=t) lam^(t-i) x_i.  lam^-t ile olcekli cumsum 512'de tasar (0,7^-512);
-        # (T,T) alt ucgen carpan matrisi kesin ve kararli.
-        age = torch.arange(length, device=terms.device)
+        age = torch.arange(terms.shape[1], device=terms.device)
         age = age[:, None] - age[None, :]
         decay = torch.where(age >= 0, self.lam ** age.clamp(min=0).float(), torch.zeros(()))
         return torch.einsum("ti,bid->btd", decay.to(terms.dtype), terms)
@@ -179,11 +202,15 @@ class PV(nn.Module):
 
     def CM(self, tokens, K=None):
         """Countermarch: tek dizi tokens (T,), son halkadan K adim geri (None: basa kadar).
-        Her adim: C_(t-1) = (C_t - RM_t*P[tokens_t]) / lam.  Doner: path = [(position, C_position)],
+        Her adim: C_(t-1) = (C_t - RM_t*P[tokens_t]) / lam  (relative: geri kaydirilir).
+        Doner: path = [(position, C_position)],
         yeniden eskiye.  lam < 1'de uzun geriye yuruyuste sayisal hata 1/lam kadar buyur."""
         length = tokens.shape[0]
         link, path = self.C(tokens[None])[0, -1], []
         for position in range(length - 1, -1 if K is None else max(-1, length - 1 - K), -1):
             path.append((position, link))
-            link = (link - self.RM[position] * self.P[tokens[position]]) / self.lam
+            if self.chain == "absolute":
+                link = (link - self.RM[position] * self.P[tokens[position]]) / self.lam
+            else:
+                link = torch.roll((link - self.P[tokens[position]]) / self.lam, -1)
         return path
