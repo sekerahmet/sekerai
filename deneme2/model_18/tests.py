@@ -392,9 +392,9 @@ def t_ccache():
     normal = float((a.logsumexp(-1)).abs().max()) < 1e-4
     yalin = PV(50, c_cache=False, **kw)
     with torch.no_grad():
-        m.cache.gate_b.fill_(-60.0)
+        m.cache.gate_0.fill_(-60.0)
         kapali = torch.allclose(m.scoreboard(w), torch.log_softmax(yalin.scoreboard(w), -1), atol=1e-4)
-        m.cache.gate_b.fill_(60.0)
+        m.cache.gate_0.fill_(60.0)
         seri = torch.randperm(50, generator=g)[:12]
         tekrar = torch.cat([seri, seri[:9]])[None]            # ikinci kez: ...x9 -> x10 bekleniyor
         kopya = int(m.scoreboard(tekrar)[0, -1].argmax()) == int(seri[9])

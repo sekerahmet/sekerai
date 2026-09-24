@@ -39,10 +39,12 @@ RUNS = {}        # run_name -> Run
 # Surdurmede paketteki degerle AYNI olmali.  Farkliysa yorunge sessizce
 # baskalasir: optimizer.load_state_dict lr'yi paketten alir, gunluk cagriyi yazar.
 MUST_MATCH = ("arch", "n", "T", "batch", "lr", "seed", "d", "vectors",
-              "active", "layers", "t_max", "squared", "S_p", "start_norm", "lam", "chain", "c_cache", "data_fingerprint", "vocab")
+              "active", "layers", "t_max", "squared", "S_p", "start_norm", "lam", "chain", "c_cache", "cache_topk",
+              "cache_skip", "data_fingerprint", "vocab")
 # Alan eklenmeden once yazilan paketlerdeki deger: skor -D^2, carpansiz.
 BEFORE_FIELD = {"squared": True, "S_p": 1.0, "start_norm": "randn", "lam": 1.0,
-                "chain": "absolute", "c_cache": False}
+                "chain": "absolute", "c_cache": False,
+                "cache_topk": M18.CACHE_TOPK, "cache_skip": M18.CACHE_SKIP}
 
 
 class Run:
@@ -155,11 +157,13 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
          eval_every, save_every, weights_every=100, resume=None, compile=False, vocab=None,
          extra=None, d=M18.d, vectors=M18.VECTORS, active=M18.ACTIVE,
          layers=M18.LAYERS, t_max=M18.T_MAX, squared=None, S_p=None,
-         start_norm=M18.START_NORM, lam=M18.LAM, chain=M18.CHAIN, c_cache=M18.C_CACHE):
+         start_norm=M18.START_NORM, lam=M18.LAM, chain=M18.CHAIN, c_cache=M18.C_CACHE,
+         cache_topk=M18.CACHE_TOPK, cache_skip=M18.CACHE_SKIP):
     torch.manual_seed(seed)
     model = PV(n_vocab, d=d, vectors=vectors, active=active, layers=layers,
                t_max=t_max, seed=seed, squared=squared, S_p=S_p,
-               start_norm=start_norm, lam=lam, chain=chain, c_cache=c_cache).to(device)
+               start_norm=start_norm, lam=lam, chain=chain, c_cache=c_cache,
+               cache_topk=cache_topk, cache_skip=cache_skip).to(device)
     # torch.compile: eski mimaride 3,90 kat olculdu (model_17 train_17); PV'de OLCULMEDI.
     loss_fn = torch.compile(model.loss) if compile else model.loss
     if compile:
@@ -178,6 +182,7 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
                  S_p=M18.LEARNED if model.S_p_learned else model.S_p,
                  start_norm="randn" if start_norm is None else float(start_norm),
                  lam=float(lam), chain=chain, c_cache=bool(c_cache),
+                 cache_topk=int(cache_topk), cache_skip=int(cache_skip),
                  seed=seed, batch=batch, T=max_length, n_params=n_params,
                  compile=compile,
                  data_fingerprint=_fingerprint(questions, filled_mask, targets_mask),
@@ -207,7 +212,7 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
     run.note(f"sorular {n_questions:,} x {max_length}   dolgu %{100 * (1 - fill_ratio):.1f}")
     run.note(f"arch {model.arch}  d {d} vectors {vectors} active {active} "
              f"layers {layers}  squared {fixed['squared']} S_p {fixed['S_p']}  "
-             f"start_norm {fixed['start_norm']}  lam {fixed['lam']}  chain {chain}  c_cache {c_cache}  lr {lr} seed {seed}  sozluk {n_vocab}  "
+             f"start_norm {fixed['start_norm']}  lam {fixed['lam']}  chain {chain}  c_cache {c_cache} (topk {cache_topk} skip {cache_skip})  lr {lr} seed {seed}  sozluk {n_vocab}  "
              f"parametre {n_params:,}")
     run.note(f"batch {batch}   epok = {n_questions / batch:,.0f} adim   veri izi "
              f"{fixed['data_fingerprint']}   olcum her {eval_every}   tam yedek her "
@@ -311,7 +316,8 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
           compile=True, vocab=None,
           d=M18.d, vectors=M18.VECTORS, active=M18.ACTIVE, layers=M18.LAYERS,
           t_max=M18.T_MAX, squared=None, S_p=None, start_norm=M18.START_NORM,
-          lam=M18.LAM, chain=M18.CHAIN, c_cache=M18.C_CACHE):
+          lam=M18.LAM, chain=M18.CHAIN, c_cache=M18.C_CACHE,
+          cache_topk=M18.CACHE_TOPK, cache_skip=M18.CACHE_SKIP):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
     data        (questions, filled_mask, targets_mask)
@@ -334,6 +340,7 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
     lam         zincirin solma carpani: C_t = lam*C_(t-1) + RM_t*P[w_t]  (1: solmaz)
     chain       "absolute" (RM_t, mutlak konum) ya da "relative" (kaydirma, kelimenin yasi)
     c_cache     hikayenin kendi gecmisinden kopya + ogrenilen gate (model_18.CCache)
+    cache_topk, cache_skip   defterden kac komsu; son kac konum aranmaz
     """
     old = RUNS.get(run_name)
     if old is not None and old.alive:
@@ -353,7 +360,7 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
         compile=compile, vocab=vocab,
         extra=extra, d=d, vectors=vectors, active=active, layers=layers,
         t_max=t_max, squared=squared, S_p=S_p, start_norm=start_norm, lam=lam,
-        chain=chain, c_cache=c_cache))
+        chain=chain, c_cache=c_cache, cache_topk=cache_topk, cache_skip=cache_skip))
     run.thread.start()
     return f"{run_name} basladi" + (f"  ({os.path.basename(resume)}'den)" if resume else "")
 
