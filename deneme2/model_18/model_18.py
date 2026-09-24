@@ -25,9 +25,9 @@ arasında ki uzaklık" ve "her vektör her an aktif olmamalı bunu model
                         UZAKLASARAK emin olur (MAT_COK_PV).
                karesiz  kaybin en iyi yeri C_m = P (ucgen esitsizligi).
              squared ve S_p sozluk sayisindan: SCORE_BY_VOCAB.
-    C_cache  hikayenin KENDI gecmisi: her konumda (anahtar C_j, deger w_(j+1)).  Simdiki C_t'ye
-             en yakin CACHE_TOPK anahtar (son CACHE_SKIP haric), agirliklari ile p_cache.
-               sim_j = cos(C_t, C_j)    W_c = softmax(e^S_c * sim)    p_cache(k) = sum W_c [w_(j+1) = k]
+    C_cache  hikayenin KENDI gecmisi: her konumda (C_j, nxt_j = w_(j+1)).  Simdiki C_t'ye
+             en yakin CACHE_TOPK C_j (son CACHE_SKIP haric), agirliklari ile p_cache.
+               sim_j = cos(C_t, C_j)    W_c = softmax(e^S_c * sim)    p_cache(k) = sum W_c [nxt_j = k]
              gate = sigmoid(gate_d . C_m/|C_m| + gate_s * en_yakin_sim + gate_0), ogrenilir:
                p = (1 - gate) * softmax(score) + gate * p_cache      (pointer-generator)
              Kagit ustu (REL07 t2000, sabit g 0,1): ppl 30,3 -> 25,9; gecmis ismi getirme %3,9 -> %16.
@@ -66,7 +66,7 @@ LAM = 1.0
 CHAIN = "absolute"
 C_CACHE = False
 CACHE_TOPK = 8      # defterden kac komsu (kagit ustu testteki gibi); vektorlerdeki ACTIVE'in karsiligi
-CACHE_SKIP = 3      # son kac konum aranmaz: en yakin anahtar hep bir onceki adim olurdu
+CACHE_SKIP = 3      # son kac konum aranmaz: en yakin C_j hep bir onceki adim olurdu
 EPS = 1e-6     # karekok D=0'da turevlenmez
 LEARNED = "learned"
 
@@ -127,12 +127,12 @@ class CCache(nn.Module):
         self.topk, self.skip = topk, skip
         self.S_c = nn.Parameter(torch.tensor(3.0))          # benzerlik keskinligi, e^3 = 20 baslar
         self.gate_d = nn.Parameter(torch.zeros(d))          # gate'i o anki durumun YONU soyler
-        self.gate_s = nn.Parameter(torch.zeros(()))         # ... ve en yakin anahtarin sim'i
+        self.gate_s = nn.Parameter(torch.zeros(()))         # ... ve en yakin C_j'nin sim'i
         self.gate_0 = nn.Parameter(torch.tensor(-2.0))      # gate ~0,12 baslar (kagit ustu en iyi 0,1)
 
     def forward(self, tokens, C, C_m, scores):
         """-> log p (B,T,n).  p = (1-gate) softmax(scores) + gate p_cache.  Nedensel: t, yalniz
-        j < t - skip anahtarlarini ve onlardan sonra gelen w_(j+1) <= w_t'yi gorur."""
+        j < t - skip C_j'lerini ve onlardan sonra gelen nxt_j = w_(j+1) <= w_t'yi gorur."""
         B, T = tokens.shape
         Cn = F.normalize(C, dim=-1)
         sim_all = Cn @ Cn.transpose(1, 2)                            # (B, t, j): cos(C_t, C_j)
@@ -142,7 +142,7 @@ class CCache(nn.Module):
         sim, j = sim_all.masked_fill(~allowed, -2.0).topk(k, dim=-1)
         valid = sim > -1.5
         W_c = torch.softmax((sim * self.S_c.exp()).masked_fill(~valid, -1e4), -1) * valid
-        nxt = torch.roll(tokens, -1, dims=1)                         # anahtar j'nin degeri w_(j+1)
+        nxt = torch.roll(tokens, -1, dims=1)                         # nxt_j = w_(j+1): C_j'den sonra gelen kelime
         ids = nxt.gather(1, j.reshape(B, -1)).reshape(B, T, k)
         p_cache = torch.zeros_like(scores).scatter_add_(-1, ids, W_c)
         any_valid = valid.any(-1)
