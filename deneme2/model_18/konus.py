@@ -30,6 +30,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from model_18 import PV                                       # noqa: E402
 import data_stories as DS                                     # noqa: E402
 
+# Sohbette belirlenimcilik gerekmez; model_18 GPU yokken 1 iplik ayarliyor (uretim ~4 kat yavas).
+torch.set_num_threads(min(10, os.cpu_count() or 1))
+
 ADAY = [r"G:\Drive'ım\model_18", r"G:\Drivem\model_18"]
 TS = [r"G:\Drive'ım\tinystories", r"G:\Drivem\tinystories"]
 
@@ -38,16 +41,23 @@ def _kok(liste):
     return next((d for d in liste if os.path.isdir(d)), None)
 
 
-def paketler():
-    """(kosu/dosya, yol) -- yeniden eskiye.  Yalniz kosu klasorlerindeki t/w paketleri."""
+_ONBELLEK = {}       # yol -> paket: bul() bir kez yukler, yukle() yeniden okumaz
+
+
+def _kosular():
+    """Kosu klasorleri, en son degiseni once (Drive'da yuzlerce dosyanin tarihine bakmaktan hizli)."""
     k = _kok(ADAY)
     if not k:
         return []
+    d = [os.path.join(k, x) for x in os.listdir(k) if "_eski_" not in x]
+    return sorted((x for x in d if os.path.isdir(x)), key=os.path.getmtime, reverse=True)
+
+
+def paketler(kosular=None):
+    """(kosu/dosya, yol) -- yeniden eskiye.  Yalniz kosu klasorlerindeki t/w paketleri."""
     cik = []
-    for kosu in os.listdir(k):
-        d = os.path.join(k, kosu)
-        if not os.path.isdir(d) or "_eski_" in kosu:
-            continue
+    for d in (_kosular() if kosular is None else kosular):
+        kosu = os.path.basename(d)
         for f in os.listdir(d):
             if re.fullmatch(r"[tw]\d+\.pt", f):
                 cik.append(("%s/%s" % (kosu, f[:-3]), os.path.join(d, f)))
@@ -57,13 +67,17 @@ def paketler():
 def bul(desen=None, kosu=None):
     """Desen yoksa EN YENI hikaye paketi.  'w500' yuklu kosuda, 'KOSU/w500' her yerde;
     ad BIREBIR (t500, t5000 degil)."""
-    hepsi = paketler()
     if not desen:
-        for ad, yol in hepsi:
-            if len(torch.load(yol, weights_only=False, map_location="cpu").get("vocab") or []) > 13:
-                return yol
+        for kosu in _kosular():                         # en son degisen kosu klasoru once
+            for ad, yol in paketler([kosu]):
+                k = torch.load(yol, weights_only=False, map_location="cpu", mmap=True)
+                if len(k.get("vocab") or []) > 13:
+                    _ONBELLEK[yol] = k
+                    return yol
+                break                                   # matematik kosusu: sonraki klasor
         print("HIKAYE PAKETI YOK.  Arananlar: %s\\<kosu>\\t*.pt, w*.pt" % " ya da ".join(ADAY))
         sys.exit(1)
+    hepsi = paketler()
     d = desen.replace("\\", "/")
     d = d[:-3] if d.endswith(".pt") else d
     e = [y for a, y in hepsi if a == d or (kosu and a == "%s/%s" % (kosu, d))]
@@ -74,7 +88,7 @@ def bul(desen=None, kosu=None):
 
 
 def yukle(yol):
-    k = torch.load(yol, weights_only=False, map_location="cpu")
+    k = _ONBELLEK.pop(yol, None) or torch.load(yol, weights_only=False, map_location="cpu", mmap=True)
     return PV.from_package(k), k
 
 

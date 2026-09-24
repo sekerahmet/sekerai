@@ -22,7 +22,7 @@ KUCUK = dict(d_order=16, d_content=0, vectors=8, active=2, layers=2)   # egitim 
 # Kapilar parcalari TEK TEK sinar: tepedeki tasarimin (model_18) ozellikleri burada KAPALI baslar,
 # her kapi sinadigini acar.  Tepenin kendisi t_tepe'de.
 SADE = dict(d_order=128, d_content=0, t_max=64, start_norm=None, lam=1.0, chain="absolute",
-            c_cache=False, cache_topk=8, query=False, c_content=False, select="distance", active=8, load_balance=0.0)
+            c_cache=False, cache_topk=8, query=False, c_content=False, select="distance", active=8, load_balance=0.0, c_m_norm=False)
 
 
 def PV(n, **ayar):
@@ -748,6 +748,105 @@ def t_balance():
          "denge terimi S_v'ye 0 gradyan; NLL denge kapaliyla ayni")
 
 
+# --- 23.  C_M_NORM: puan yalniz C_m'nin YONUNE bakar; = 2 e^S_p cos + sabit; S_p baslangici formulden
+def t_cmnorm():
+    import math
+    import model_18 as M
+    torch.manual_seed(0)
+    m = PV(4003, d_order=64, t_max=64, lam=0.7, chain="relative", c_cache=True, c_m_norm=True)
+    x = torch.randn(2, 5, 64)
+    s1, s5 = m.score(x), m.score(5.0 * x)
+    boy = torch.allclose(s1, s5, atol=1e-4)
+    cos = torch.nn.functional.normalize(x, dim=-1) @ m.P.T
+    formul = torch.allclose(torch.log_softmax(s1, -1), torch.log_softmax(2 * m.S_p.exp() * cos, -1), atol=1e-4)
+    bek = math.log(math.log(M.C_M_NORM_P / (1 - M.C_M_NORM_P) * 4002) / 2)
+    baslangic = abs(float(m.S_p) - bek) < 1e-6 and abs(m.s_p_init - bek) < 1e-6
+    p = torch.softmax(2 * m.S_p.exp() * torch.cat([torch.ones(1), torch.zeros(4002)]), 0)[0]
+    kapali = PV(4003, d_order=64, t_max=64, lam=0.7, chain="relative", c_cache=True)
+    kapali_ok = not kapali.c_m_norm and float(kapali.S_p) == M.S_P_INIT and not M.C_M_NORM
+    kapi("C_M_NORM: boydan bagimsiz, 2e^S_p cos, S_p formulden",
+         boy and formul and baslangic and abs(float(p) - M.C_M_NORM_P) < 1e-3 and kapali_ok,
+         "n 4003: S_p %.3f, kusursuz eslesmede p %.3f" % (float(m.S_p), float(p)))
+
+    N, data = _veri()
+    kok = tempfile.mkdtemp()
+    try:
+        r = TR.RUNS["CN"] = TR.Run("CN", kok)
+        _run(r, data, N, _sifir, "cpu", 2e-3, 4, 0, 8, 2, 4, chain="relative", lam=0.7, start_norm=1.0,
+             c_cache=True, c_m_norm=True, **KUCUK)
+        egitim = r.result.get("step") == 4 and torch.isfinite(r.result["step_losses"]).all()
+        pk = torch.load(kok + "/CN/t4.pt", weights_only=False)
+        paket = pk["c_m_norm"] is True and abs(pk["s_p_init"] - PV(N, c_m_norm=True).s_p_init) < 1e-9
+        try:
+            r = TR.RUNS["CN"] = TR.Run("CN", kok)
+            _run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 2, 4, resume=kok + "/CN/t4.pt", chain="relative",
+                 lam=0.7, start_norm=1.0, c_cache=True, **KUCUK)
+            yakaladi = False
+        except ValueError as h:
+            yakaladi = "c_m_norm" in str(h)
+    finally:
+        shutil.rmtree(kok, ignore_errors=True)
+    kapi("C_M_NORM egitilir; pakete yazilir, surdurme farki yakalar", bool(egitim) and paket and yakaladi)
+
+
+# --- 24.  SPEED: hizlandirmalar hesabi DEGISTIRMEZ -- top-k seyrek carpim, siralamasiz butun gecmis,
+# en uzun hikayeye kirpma ve yalniz hedefli konumlarda puan: kayip ve BUTUN gradyanlar ayni
+def t_speed():
+    import model_18 as M
+    F = torch.nn.functional
+    g = torch.Generator().manual_seed(11)
+    L = M.VectorLayer(32, 16, 4, lambda *s: torch.randn(*s, generator=g), 1.0, direction=True)
+    with torch.no_grad():
+        L.finish.add_(0.1 * torch.randn(L.finish.shape, generator=g))
+    C = torch.randn(3, 7, 32, generator=g, requires_grad=True)
+    yeni, ids = L(C)
+    D_s2 = M.distance(F.normalize(C, dim=-1), F.normalize(L.start, dim=-1)).gather(-1, ids)
+    W_v = torch.softmax(-D_s2 * L.S_v.exp(), -1)
+    eski = C + (W_v.unsqueeze(-1) * (L.finish - L.start)[ids]).sum(-2)     # onceki (..., active, d) yolu
+    par = [C, L.start, L.finish, L.S_v]
+    ga, gb = (torch.autograd.grad(x.square().sum(), par) for x in (yeni, eski))
+    topk = torch.allclose(yeni, eski, atol=1e-5) and all(torch.allclose(a, b, atol=1e-5) for a, b in zip(ga, gb))
+    kapi("speed: top-k seyrek satir x matris == kopya yolu", topk, "cikti ve gradyanlar")
+
+    kw = dict(d_order=64, d_content=64, t_max=64, lam=0.7, chain="relative", c_content=True, c_cache=True,
+              cache_topk=None, query=True, query_vectors=8, select="direction", load_balance=0.01,
+              start_norm=1.0, vectors=32)
+    uz = [22, 17, 9]
+    w = torch.randint(0, 50, (3, 40), generator=g)            # dolgu RASTGELE: kirpma onu hic gormemeli
+    Mk = torch.zeros(3, 40, dtype=torch.bool)
+    for i, n in enumerate(uz):
+        Mk[i, :n] = True
+    t, mk, rows = TR.trim(w, Mk, Mk, shapes=8)
+    kirp = t.shape[1] == 25 and len(rows) % max(1, 3 * 40 // 64) == 0 and int((rows >= 0).sum()) == sum(uz) - 3
+
+    def grad(m, *a, **k):
+        top, nll = m.loss(*a, parts=True, **k)
+        p = list(m.parameters())
+        gr = torch.autograd.grad(top, p, allow_unused=True)
+        return top, nll, [torch.zeros_like(x) if y is None else y for x, y in zip(p, gr)]
+
+    sonuc = []
+    for ad, ayar in (("butun gecmis + Q + denge", kw), ("defter top-8", dict(kw, cache_topk=8, query=False)),
+                     ("deftersiz", dict(kw, c_cache=False))):
+        torch.manual_seed(0)
+        m = PV(50, **ayar)
+        with torch.no_grad():
+            for p in m.parameters():
+                p.add_(0.05 * torch.randn(p.shape, generator=g))
+        a, b = grad(m, w, Mk), grad(m, t, mk, rows=rows)
+        ayni = (abs(float(a[0] - b[0])) < 1e-5 and abs(float(a[1] - b[1])) < 1e-5
+                and all(torch.allclose(x, y, atol=1e-5) for x, y in zip(a[2], b[2])))
+        if ayar["c_cache"] and ayar["cache_topk"] is None:      # siralamasiz yol == siralayan (k = T) yol
+            with torch.no_grad():
+                s1 = m.scoreboard(w)
+                m.cache.topk = 10 ** 6
+                ayni &= torch.allclose(s1, m.scoreboard(w), atol=1e-5)
+                m.cache.topk = None
+        sonuc.append("%s %s" % (ad, "ayni" if ayni else "FARKLI"))
+    kapi("speed: kirpma + yalniz hedefte puan == tam kayip", kirp and all(s.endswith("ayni") for s in sonuc),
+         "T 40 -> %d, satir %d; " % (t.shape[1], len(rows)) + ", ".join(sonuc))
+
+
 # ============================================================
 # DATA_STORIES -- TinyStories (model_17 veri_t17 + olcme_17'den).
 # ============================================================
@@ -943,7 +1042,7 @@ def t_notebook(yol=None):
 if __name__ == "__main__":
     print("tests (model_18)")
     for f in (t_zincir, t_nedensel, t_sessiz, t_cm, t_payda, t_gradyan,
-              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_tepe, t_select, t_hepsi, t_balance, t_mat_pencere,
+              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_tepe, t_select, t_hepsi, t_balance, t_cmnorm, t_speed, t_mat_pencere,
               t_mat_sor, t_mat_basamak, t_mat_egitim, t_stories, t_notebook):
         f()
     t_notebook(os.path.join(os.path.dirname(os.path.abspath(__file__)),

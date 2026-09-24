@@ -41,7 +41,7 @@ RUNS = {}        # run_name -> Run
 MUST_MATCH = ("arch", "n", "T", "batch", "lr", "seed", "d_sum", "vectors",
               "active", "layers", "t_max", "squared", "S_p", "start_norm", "lam", "chain", "c_cache", "cache_topk",
               "cache_skip", "s_v_init", "s_c_init", "gate_0_init", "s_p_init", "query", "query_vectors",
-              "query_active", "query_by", "c_content", "d_order", "d_content", "lam_w_init", "beta_w_init", "select", "load_balance",
+              "query_active", "query_by", "c_content", "d_order", "d_content", "lam_w_init", "beta_w_init", "select", "load_balance", "c_m_norm",
               "data_fingerprint", "vocab")
 # Alan eklenmeden once yazilan paketlerdeki deger: skor -D^2, carpansiz.
 BEFORE_FIELD = {"squared": True, "S_p": 1.0, "start_norm": "randn", "lam": 1.0,
@@ -49,8 +49,28 @@ BEFORE_FIELD = {"squared": True, "S_p": 1.0, "start_norm": "randn", "lam": 1.0,
                 "cache_topk": M18.CACHE_TOPK, "cache_skip": M18.CACHE_SKIP,
                 "s_v_init": 0.0, "s_c_init": 3.0, "gate_0_init": -2.0, "s_p_init": 0.0,
                 "query": False, "query_vectors": 0, "query_active": 8, "query_by": "C_m",
-                "c_content": False, "d_order": 0, "d_content": 0, "select": "distance", "load_balance": 0.0,
+                "c_content": False, "d_order": 0, "d_content": 0, "select": "distance", "load_balance": 0.0, "c_m_norm": False,
                 "lam_w_init": 0.9, "beta_w_init": 0.5}
+
+# HIZ, hesap AYNI (tests: t_speed): batch en uzun hikayesine kirpilir (nedensel, dolgu sagda), puan
+# tablosu yalniz sayilan hedeflerde kurulur.  Boylar SHAPES basamaga yuvarlanir: torch.compile her
+# batch'te yeniden derlemesin.  Kullanici, 24 Eylul: "Düzelt bunları".
+SHAPES = 8
+
+
+def trim(questions, filled_mask, targets_mask, shapes=SHAPES):
+    """CPU'daki batch -> (tokens, targets_mask, rows): en uzun hikayeye kirpilmis, rows sayilan hedeflerin
+    duz konumlari (B*(T-1)), -1 ile yuvarlanmis.  GPU'ya dokunmaz: senkron yok."""
+    B, T = questions.shape
+    step = max(1, T // shapes)
+    real = (filled_mask.bool() | targets_mask.bool()).any(0).nonzero()
+    L = min(T, -(-(int(real.max()) + 1 if len(real) else 1) // step) * step)
+    tokens, mask = questions[:, :L], targets_mask[:, :L]
+    rows = mask[:, 1:].bool().reshape(-1).nonzero()[:, 0]
+    unit = max(1, B * T // shapes ** 2)                  # satir sayisi bu birime yuvarlanir
+    R = -(-max(1, len(rows)) // unit) * unit
+    rows = torch.cat([rows, rows.new_full((R - len(rows),), -1)])
+    return tokens, mask, rows
 
 
 class Run:
@@ -172,11 +192,11 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
          layers=M18.LAYERS, t_max=M18.T_MAX, squared=None, S_p=None,
          start_norm=M18.START_NORM, lam=M18.LAM, chain=M18.CHAIN, c_cache=M18.C_CACHE,
          cache_topk=M18.CACHE_TOPK, cache_skip=M18.CACHE_SKIP, s_v_init=M18.S_V_INIT,
-         s_c_init=M18.S_C_INIT, gate_0_init=M18.GATE_0_INIT, s_p_init=M18.S_P_INIT,
+         s_c_init=M18.S_C_INIT, gate_0_init=M18.GATE_0_INIT, s_p_init=None,
          query=M18.QUERY, query_vectors=M18.QUERY_VECTORS, query_active=M18.QUERY_ACTIVE,
          query_by=M18.QUERY_BY, c_content=M18.C_CONTENT,
          d_order=M18.D_ORDER, d_content=M18.D_CONTENT, lam_w_init=M18.LAM_W_INIT, beta_w_init=M18.BETA_W_INIT,
-         select=M18.SELECT, load_balance=M18.LOAD_BALANCE):
+         select=M18.SELECT, load_balance=M18.LOAD_BALANCE, c_m_norm=M18.C_M_NORM):
     torch.manual_seed(seed)
     model = PV(n_vocab, vectors=vectors, active=active, layers=layers,
                t_max=t_max, seed=seed, squared=squared, S_p=S_p,
@@ -185,10 +205,12 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
                s_c_init=s_c_init, gate_0_init=gate_0_init, s_p_init=s_p_init,
                query=query, query_vectors=query_vectors, query_active=query_active, query_by=query_by,
                c_content=c_content, d_order=d_order, d_content=d_content, lam_w_init=lam_w_init, beta_w_init=beta_w_init,
-               select=select, load_balance=load_balance).to(device)
+               select=select, load_balance=load_balance, c_m_norm=c_m_norm).to(device)
     # torch.compile: eski mimaride 3,90 kat olculdu (model_17 train_17); PV'de OLCULMEDI.
     loss_fn = torch.compile(model.loss) if compile else model.loss
     if compile:
+        # trim: en cok SHAPES farkli boy; her biri bir derleme (C_content dongusu boya ozgulenir).
+        torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 2 * SHAPES)
         run.note("torch.compile ACIK -- ilk adim DERLEME yuzunden yavas")
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     sampler = torch.Generator(device="cpu").manual_seed(seed)
@@ -206,10 +228,10 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
                  lam=float(lam), chain=chain, c_cache=bool(c_cache),
                  cache_topk=None if cache_topk is None else int(cache_topk), cache_skip=int(cache_skip),
                  s_v_init=float(s_v_init), s_c_init=float(s_c_init),
-                 gate_0_init=float(gate_0_init), s_p_init=float(s_p_init),
+                 gate_0_init=float(gate_0_init), s_p_init=model.s_p_init,
                  query=bool(query), query_vectors=int(query_vectors), query_active=int(query_active),
                  query_by=query_by, c_content=bool(c_content), d_order=model.d_order, d_content=model.d_content, lam_w_init=float(lam_w_init), beta_w_init=float(beta_w_init), select=select,
-                 load_balance=float(load_balance),
+                 load_balance=float(load_balance), c_m_norm=bool(c_m_norm),
                  seed=seed, batch=batch, T=max_length, n_params=n_params,
                  compile=compile,
                  data_fingerprint=_fingerprint(questions, filled_mask, targets_mask),
@@ -239,7 +261,7 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
     run.note(f"sorular {n_questions:,} x {max_length}   dolgu %{100 * (1 - fill_ratio):.1f}")
     run.note(f"arch {model.arch}  D_SUM {model.d_sum} ({model.d_order}+{model.d_content}) vectors {vectors} active {active} "
              f"layers {layers}  squared {fixed['squared']} S_p {fixed['S_p']}  "
-             f"start_norm {fixed['start_norm']}  lam {fixed['lam']}  chain {chain}  c_cache {c_cache} (topk {cache_topk} skip {cache_skip} Q {query} {query_vectors}/{query_active} {query_by})  c_content {c_content} (lam_w {lam_w_init} beta_w {beta_w_init})  select {select}  load_balance {load_balance}  lr {lr} seed {seed}  sozluk {n_vocab}  "
+             f"start_norm {fixed['start_norm']}  lam {fixed['lam']}  chain {chain}  c_cache {c_cache} (topk {cache_topk} skip {cache_skip} Q {query} {query_vectors}/{query_active} {query_by})  c_content {c_content} (lam_w {lam_w_init} beta_w {beta_w_init})  select {select}  load_balance {load_balance}  c_m_norm {c_m_norm} (S_p {model.s_p_init:.3f})  lr {lr} seed {seed}  sozluk {n_vocab}  "
              f"parametre {n_params:,}")
     run.note(f"batch {batch}   epok = {n_questions / batch:,.0f} adim   veri izi "
              f"{fixed['data_fingerprint']}   olcum her {eval_every}   tam yedek her "
@@ -273,8 +295,9 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
         optimizer.zero_grad()
         # total: geri yayilan (NLL + load balance); loss: NLL -- gunluk ve step_losses bunu yazar,
         # kosular denge teriminden bagimsiz kiyaslanir.
-        total, loss = loss_fn(questions[batch_ids].to(device, non_blocking=True).long(),
-                              targets_mask[batch_ids].to(device, non_blocking=True), parts=True)
+        tokens, mask, rows = trim(questions[batch_ids], filled_mask[batch_ids], targets_mask[batch_ids])
+        total, loss = loss_fn(tokens.to(device, non_blocking=True).long(), mask.to(device, non_blocking=True),
+                              parts=True, rows=rows.to(device, non_blocking=True))
         step_losses[step] = loss.detach()
         total.backward()
         optimizer.step()
@@ -347,11 +370,11 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
           t_max=M18.T_MAX, squared=None, S_p=None, start_norm=M18.START_NORM,
           lam=M18.LAM, chain=M18.CHAIN, c_cache=M18.C_CACHE,
           cache_topk=M18.CACHE_TOPK, cache_skip=M18.CACHE_SKIP, s_v_init=M18.S_V_INIT,
-          s_c_init=M18.S_C_INIT, gate_0_init=M18.GATE_0_INIT, s_p_init=M18.S_P_INIT,
+          s_c_init=M18.S_C_INIT, gate_0_init=M18.GATE_0_INIT, s_p_init=None,
           query=M18.QUERY, query_vectors=M18.QUERY_VECTORS, query_active=M18.QUERY_ACTIVE,
          query_by=M18.QUERY_BY, c_content=M18.C_CONTENT,
           d_order=M18.D_ORDER, d_content=M18.D_CONTENT, lam_w_init=M18.LAM_W_INIT, beta_w_init=M18.BETA_W_INIT,
-         select=M18.SELECT, load_balance=M18.LOAD_BALANCE):
+         select=M18.SELECT, load_balance=M18.LOAD_BALANCE, c_m_norm=M18.C_M_NORM):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
     data        (questions, filled_mask, targets_mask)
@@ -381,6 +404,7 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
                 (lam_w_init, beta_w_init).  Kapali: D_SUM'in tamami relative
     select      aktif vektor secimi: "distance" ya da "direction" (katman 1'den itibaren yon)
     load_balance  kayba eklenen denge terimi katsayisi (0: yok): farkli C'ler farkli vektor kullansin
+    c_m_norm    puan C_m/|C_m| ile (kelimelerin kuresi); s_p_init None iken C_M_NORM_P formulunden
     s_v_init, s_c_init, gate_0_init, s_p_init   ogrenilen S_v, S_c, gate_0, S_p'nin baslangici
     """
     old = RUNS.get(run_name)
@@ -405,7 +429,7 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
         s_v_init=s_v_init, s_c_init=s_c_init, gate_0_init=gate_0_init, s_p_init=s_p_init,
         query=query, query_vectors=query_vectors, query_active=query_active, query_by=query_by,
         c_content=c_content, d_order=d_order, d_content=d_content, lam_w_init=lam_w_init, beta_w_init=beta_w_init,
-        select=select, load_balance=load_balance))
+        select=select, load_balance=load_balance, c_m_norm=c_m_norm))
     run.thread.start()
     return f"{run_name} basladi" + (f"  ({os.path.basename(resume)}'den)" if resume else "")
 

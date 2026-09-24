@@ -107,6 +107,18 @@ S_V_INIT = 0.0      # vektor keskinligi S_v: kullanilan e^S_v, 1'den baslar
 S_C_INIT = 3.0      # defter keskinligi S_c: e^3 = 20, kagit ustu testteki carpan
 GATE_0_INIT = -2.0  # gate'in baslangici: sigmoid(-2) = 0,12; kagit ustu en iyi sabit gate 0,1
 S_P_INIT = 0.0      # ogrenilen S_p (SCORE_BY_VOCAB LEARNED): e^0 = 1'den baslar
+# C_m'yi kelimelerin KURESINE indir: puan = -e^S_p |C_m/|C_m| - P|^2 = 2 e^S_p cos(C_m, P) + sabit.
+# Guven |C_m| buyutulerek degil yalniz S_p ile ifade edilir; cevap kurede en yakin sabit nokta.
+# Olculdu (CCACHE t10000): |C| 1,4 -> |C_m| 17, e^S_p ~2,8 -- model noktalardan UZAKLASARAK emin oluyor;
+# bu boy ara katmanlarda secimi eziyordu ve son katman ortak "guven hareketi" ogreniyordu.
+# Hoffer, Hubara, Soudry 2018 (1801.04540): sabit sinif noktalari + birim kure + ogrenilen tek olcek.
+# Kullanici, 24 Eylul: "C_M_NORM".
+C_M_NORM = False
+# C_M_NORM acikken S_p'nin baslangici FORMULDEN (sozluk degisince kendisi ayarlanir): kusursuz eslesmede
+# (cos 1, digerleri ~0) dogru kelimeye C_M_NORM_P olasilik:  e^S_p = ln(p/(1-p) * (n-1)) / 2.
+# n 4003 -> S_p 1,66.  Olcek sabit 2,8 kalsaydi kayip tabani ppl 15,8 olurdu (NormFace sinirindan hesap).
+# Kullanici, 24 Eylul: "bu belirlediğimiz sayı sonra başımıza bela olmasın" ve "evet formülle uygula".
+C_M_NORM_P = 0.9
 # Load balancing (Shazeer ve ark. 2017 "importance"; Switch Transformer'in denge kaybinin akrabasi):
 # kayba LOAD_BALANCE * sum_katman vectors * sum_a Pbar_a^2.  Farkli C'lerin farkli vektor kullanmasini
 # ister; butun vektorler uzerinden P oldugu icin top-k'da hic secilmeyen start'lar da gradyan alir.
@@ -186,8 +198,9 @@ class VectorLayer(nn.Module):
             return (C + W_v @ (self.finish - self.start), None) + P
         D_s2, active_ids = D2.topk(self.active, dim=-1, largest=False)
         W_v = torch.softmax(-D_s2 * self.S_v.exp(), -1)          # payda: aktiflerin toplami 1
-        V_a = (self.finish - self.start)[active_ids]             # (..., active, d)
-        return (C + (W_v.unsqueeze(-1) * V_a).sum(-2), active_ids) + P
+        # Aktif agirliklar vectors'luk satira (digerleri 0), tek matris carpimi: (..., active, d) kopyasi yok.
+        W = torch.zeros_like(D2).scatter(-1, active_ids, W_v)
+        return (C + W @ (self.finish - self.start), active_ids) + P
 
 
 class CCache(nn.Module):
@@ -225,14 +238,20 @@ class CCache(nn.Module):
         sim_all = Qn @ Cn.transpose(1, 2)                            # (B, t, j): cos(Q_t, C_j)
         pos = torch.arange(T, device=C.device)
         allowed = pos[None, :] < pos[:, None] - self.skip            # j < t - skip
-        k = T if self.topk is None else max(1, min(self.topk, T))
-        sim, j = sim_all.masked_fill(~allowed, -2.0).topk(k, dim=-1)
+        nxt = torch.roll(tokens, -1, dims=1)                         # nxt_j = w_(j+1): C_j'den sonra gelen kelime
+        sim = sim_all.masked_fill(~allowed, -2.0)
+        if self.topk is None:                                        # butun gecmis: siralamaya gerek yok
+            ids = nxt[:, None, :].expand(B, T, T)
+            sim_max = sim.max(-1).values
+        else:
+            k = max(1, min(self.topk, T))
+            sim, j = sim.topk(k, dim=-1)
+            ids = nxt.gather(1, j.reshape(B, -1)).reshape(B, T, k)
+            sim_max = sim[..., 0]
         valid = sim > -1.5
         W_c = torch.softmax((sim * self.S_c.exp()).masked_fill(~valid, -1e4), -1) * valid
-        nxt = torch.roll(tokens, -1, dims=1)                         # nxt_j = w_(j+1): C_j'den sonra gelen kelime
-        ids = nxt.gather(1, j.reshape(B, -1)).reshape(B, T, k)
         any_valid = valid.any(-1)
-        sim_max = torch.where(any_valid, sim[..., 0], torch.zeros_like(sim[..., 0]))
+        sim_max = torch.where(any_valid, sim_max, torch.zeros_like(sim_max))
         gate = torch.sigmoid(F.normalize(C_m, dim=-1) @ self.gate_d
                              + self.gate_s * sim_max + self.gate_0) * any_valid
         return (gate, W_c, ids, P_q) if probs else (gate, W_c, ids)
@@ -245,16 +264,20 @@ class CCache(nn.Module):
         return torch.logaddexp(torch.log1p(-gate) + torch.log_softmax(scores, -1),
                                torch.log(gate + 1e-12) + torch.log(p_cache + 1e-12))
 
-    def target_logp(self, tokens, C, C_m, scores, probs=False):
+    def target_logp(self, tokens, C, C_m, score, rows=None, probs=False):
         """-> log p(w_(t+1)) (B,T-1): EGITIM yolu.  Kayip yalniz dogru kelimeyi ister: defter
         tarafi k komsudan hesaplanir, (B,T,n) p_cache ve karisim tablosu KURULMAZ.
-        forward()'un dogru kelimedeki degeriyle ayni (tests: t_ccache).  probs: + Q oklarinin P'si."""
+        score: C_m -> puan.  rows: (B*(T-1)) duz konumlardan secilenler -> (R,); puan tablosu YALNIZ orada.
+        forward()'un dogru kelimedeki degeriyle ayni (tests: t_ccache, t_speed).  probs: + Q oklarinin P'si."""
         gate, W_c, ids, *P_q = self.parts(tokens, C, C_m, probs=probs)
         target = tokens[:, 1:]
-        s = scores[:, :-1]
-        log_model = s.gather(-1, target[..., None])[..., 0] - s.logsumexp(-1)
         p_cache = (W_c[:, :-1] * (ids[:, :-1] == target[..., None])).sum(-1)
-        gate = gate[:, :-1]
+        gate, C_m = gate[:, :-1], C_m[:, :-1]
+        if rows is not None:
+            flat = lambda x: x.reshape(-1, *x.shape[2:])[rows]
+            target, p_cache, gate, C_m = flat(target), flat(p_cache), flat(gate), flat(C_m)
+        s = score(C_m)
+        log_model = s.gather(-1, target[..., None])[..., 0] - s.logsumexp(-1)
         logp = torch.logaddexp(torch.log1p(-gate) + log_model,
                                torch.log(gate + 1e-12) + torch.log(p_cache + 1e-12))
         return (logp, P_q[0]) if probs else logp
@@ -268,16 +291,17 @@ class PV(nn.Module):
                  t_max=T_MAX, seed=0, squared=None, S_p=None, start_norm=START_NORM,
                  lam=LAM, chain=CHAIN, c_cache=C_CACHE, cache_topk=CACHE_TOPK,
                  cache_skip=CACHE_SKIP, s_v_init=S_V_INIT, s_c_init=S_C_INIT,
-                 gate_0_init=GATE_0_INIT, s_p_init=S_P_INIT, query=QUERY, query_vectors=QUERY_VECTORS,
+                 gate_0_init=GATE_0_INIT, s_p_init=None, query=QUERY, query_vectors=QUERY_VECTORS,
                  query_active=QUERY_ACTIVE, query_by=QUERY_BY, c_content=C_CONTENT, select=SELECT,
-                 load_balance=LOAD_BALANCE,
+                 load_balance=LOAD_BALANCE, c_m_norm=C_M_NORM,
                  lam_w_init=LAM_W_INIT, beta_w_init=BETA_W_INIT):
         """d_order + d_content = d_sum, nokta uzayinin boyutu.  squared, S_p None: SCORE_BY_VOCAB'dan.  Verilirse tabloyu ezer.
         start_norm: start'larin baslangic boyu (None: randn).  lam: zincirin solma carpani.
         chain: "absolute" (RM_t) ya da "relative" (kaydirma).  c_cache: hikayenin gecmisi + gate.
         query: defteri Q ile ara (query_*).  c_content: C = [C_order | C_content]; C_content
         kaydirmasiz, lam_w/beta_w ile solar.  Kapaliyken d_sum'in tamami relative.
-        select: aktif vektor secimi, "distance" ya da "direction" (katman 1'den itibaren)."""
+        select: aktif vektor secimi, "distance" ya da "direction" (katman 1'den itibaren).
+        c_m_norm: puan C_m/|C_m| ile (kure); s_p_init None: C_M_NORM_P formulunden, kapaliyken S_P_INIT."""
         super().__init__()
         d_sum = int(d_order) + int(d_content)
         if c_content:
@@ -290,7 +314,11 @@ class PV(nn.Module):
         self.start_norm, self.lam = start_norm, float(lam)
         assert chain in ("absolute", "relative"), chain
         assert select in ("distance", "direction"), select
-        self.select, self.load_balance = select, float(load_balance)
+        self.select, self.load_balance, self.c_m_norm = select, float(load_balance), bool(c_m_norm)
+        if s_p_init is None:
+            s_p_init = (math.log(math.log(C_M_NORM_P / (1 - C_M_NORM_P) * (n - 1)) / 2) if self.c_m_norm
+                        else S_P_INIT)
+        self.s_p_init = float(s_p_init)
         self.chain = chain
         rule = score_rule(n)
         self.squared = rule[0] if squared is None else squared
@@ -386,7 +414,9 @@ class PV(nn.Module):
         return sum(p.shape[-1] * (((p[:, :-1] * w).sum((0, 1)) / w.sum()) ** 2).sum() for p in P)
 
     def score(self, C_m):
-        """-S_p*D^2 (squared) ya da -S_p*D.  Buyuk = yakin."""
+        """-S_p*D^2 (squared) ya da -S_p*D.  Buyuk = yakin.  c_m_norm: C_m once kureye iner."""
+        if self.c_m_norm:
+            C_m = F.normalize(C_m, dim=-1)
         D2 = distance(C_m, self.P)
         D = D2 if self.squared else (D2.clamp_min(0) + EPS).sqrt()
         return -(self.S_p.exp() if self.S_p_learned else self.S_p) * D
@@ -400,28 +430,36 @@ class PV(nn.Module):
         scores = self.score(C_m)
         return scores if self.cache is None else self.cache(tokens, C, C_m, scores)
 
-    def loss(self, tokens, targets_mask=None, parts=False):
+    def loss(self, tokens, targets_mask=None, parts=False, rows=None):
         """SONRAKI TOKEN: konum j, j+1'i tahmin eder; targets_mask verilirse
         yalniz orada isaretli hedefler sayilir.  load_balance > 0: + load_balance * balance
         (vektor katmanlari ve Q'nun oklari).  parts: (toplam, NLL) -- gunluk NLL'yi yazar, kosular
-        denge teriminden bagimsiz kiyaslanir."""
+        denge teriminden bagimsiz kiyaslanir.
+        rows: (R,) duz konum (B*(T-1)) listesi, -1 dolgu -- puan tablosu yalniz orada kurulur; sayilan
+        her hedef rows'ta olmali (train.trim).  Kayip rows'suz ile AYNI (tests: t_speed)."""
         counted = (torch.ones_like(tokens[:, 1:], dtype=torch.bool) if targets_mask is None
                    else targets_mask[:, 1:].bool())
         C = self.C(tokens)
         dengeli = self.load_balance > 0
         C_m, _, *P = self._layers(C, probs=dengeli)
         P = P[0] if dengeli else []
-        scores = self.score(C_m)
+        w = counted
+        if rows is not None:
+            keep, rows = rows >= 0, rows.clamp(min=0)
+            w = counted.reshape(-1)[rows] & keep
         if self.cache is not None:                        # hizli yol: yalniz dogru kelimenin log p'si
             if dengeli:
-                logp, P_q = self.cache.target_logp(tokens, C, C_m, scores, probs=True)
+                logp, P_q = self.cache.target_logp(tokens, C, C_m, self.score, rows=rows, probs=True)
                 P = P + ([P_q] if P_q is not None else [])
                 nll = -logp
             else:
-                nll = -self.cache.target_logp(tokens, C, C_m, scores)
+                nll = -self.cache.target_logp(tokens, C, C_m, self.score, rows=rows)
         else:                                             # son konumun hedefi yok; hedef bir kaydirilmis
-            nll = F.cross_entropy(scores[:, :-1].transpose(1, 2), tokens[:, 1:], reduction="none")
-        w = counted.to(nll.dtype)
+            C_m, target = C_m[:, :-1].reshape(-1, C_m.shape[-1]), tokens[:, 1:].reshape(-1)
+            if rows is not None:
+                C_m, target = C_m[rows], target[rows]
+            nll = F.cross_entropy(self.score(C_m), target, reduction="none").reshape(w.shape)
+        w = w.to(nll.dtype)
         nll = (nll * w).sum() / w.sum()
         loss = nll + self.load_balance * self.balance(P, counted) if dengeli else nll
         return (loss, nll) if parts else loss
@@ -441,7 +479,8 @@ class PV(nn.Module):
                 cache_topk=k.get("cache_topk", 8), cache_skip=k.get("cache_skip", 3),
                 query=k.get("query", False), query_vectors=k.get("query_vectors", QUERY_VECTORS),
                 query_active=k.get("query_active", QUERY_ACTIVE), query_by=k.get("query_by", QUERY_BY),
-                c_content=k.get("c_content", False), select=k.get("select", "distance"))
+                c_content=k.get("c_content", False), select=k.get("select", "distance"),
+                c_m_norm=k.get("c_m_norm", False))
         m.load_state_dict(k["weights"])
         return m.eval()
 
