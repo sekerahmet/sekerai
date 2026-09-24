@@ -251,6 +251,48 @@ def t_skor():
          "eski kare paket: kare ile surer, tabloyla durur")
 
 
+# --- 12.  START BOYU: start_norm ile secimi C belirler; surdurme farki yakalar
+def t_start():
+    torch.manual_seed(0)
+    eski = PV(4003, d=256, vectors=64, t_max=256)
+    yeni = PV(4003, d=256, vectors=64, t_max=256, start_norm=1.0)
+    L = yeni.V[0]
+    boy = float(L.start.detach().norm(dim=-1).median())
+    ayni = torch.equal(eski.V[0].start * (1.0 / 256 ** 0.5), L.start) and torch.equal(L.start, L.finish)
+    w = torch.randint(3, 4003, (8, 200))
+    C = yeni.C(w).reshape(-1, 256)
+    kisa = set(L.start.norm(dim=-1).argsort()[:L.active].tolist())
+
+    def kisa_payi(Ls):
+        from model_18 import distance
+        sec = distance(C, Ls.start).topk(Ls.active, dim=-1, largest=False).indices
+        k = set(Ls.start.norm(dim=-1).argsort()[:Ls.active].tolist())
+        return sum(len(k & set(r)) for r in sec.tolist()) / sec.numel()
+    a, b = kisa_payi(eski.V[0]), kisa_payi(L)
+    kapi("start_norm: boy 1, secimi C belirler", abs(boy - 1) < 0.1 and ayni and b < a / 3,
+         "boy %.2f; en kisa 8'in payi randn %%%.0f -> %%%.0f" % (boy, 100 * a, 100 * b))
+
+    N, data = _veri()
+    kok = tempfile.mkdtemp()
+    try:
+        r = TR.RUNS["S"] = TR.Run("S", kok)
+        TR._run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3, **KUCUK)
+        yol = kok + "/S/t3.pt"
+        p = torch.load(yol, weights_only=False)
+        del p["start_norm"]                      # alan gelmeden yazilmis paket
+        torch.save(p, yol)
+        try:
+            r = TR.RUNS["S"] = TR.Run("S", kok)
+            TR._run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3, resume=yol,
+                    start_norm=1.0, **KUCUK)
+            yakaladi = False
+        except ValueError as h:
+            yakaladi = "start_norm" in str(h)
+    finally:
+        shutil.rmtree(kok, ignore_errors=True)
+    kapi("surdurme start_norm farkini yakalar", yakaladi, "eski randn paket -> start_norm 1")
+
+
 # ============================================================
 # DATA_STORIES -- TinyStories (model_17 veri_t17 + olcme_17'den).
 # ============================================================
@@ -446,7 +488,7 @@ def t_notebook(yol=None):
 if __name__ == "__main__":
     print("tests (model_18)")
     for f in (t_zincir, t_nedensel, t_sessiz, t_cm, t_payda, t_gradyan,
-              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_mat_pencere,
+              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_mat_pencere,
               t_mat_sor, t_mat_basamak, t_mat_egitim, t_stories, t_notebook):
         f()
     t_notebook(os.path.join(os.path.dirname(os.path.abspath(__file__)),

@@ -39,6 +39,11 @@ VECTORS = 256  # layer basina vektor.  Kullanici: "V sayısı da 256 şimdilik"
 ACTIVE = 8     # her C'de aktif vektor; gerisi pasif.  OLCULMEDI.
 LAYERS = 4     # Kullanici: "4 katman olsun"
 T_MAX = 64     # RM sayisi = en uzun dizi
+# start'in baslangic boyu.  None: randn, boy ~sqrt(d) (MAT_* ve TS_PV_D1024 boyle kostu).
+# Olculdu (TS_PV_D1024, 24 Eylul): boy ~32 iken |C| ~10; secimi start'larin KENDI boyu
+# belirliyordu -- secilenlerin %62'si (egitimde %82) en kisa 8 start, baglamdan bagimsiz.
+# Kullanici: "Startları küçük başlat".
+START_NORM = None
 EPS = 1e-6     # karekok D=0'da turevlenmez
 LEARNED = "learned"
 
@@ -73,9 +78,12 @@ class VectorLayer(nn.Module):
     """Bir layer: `vectors` tane (start, finish).  C'ye en yakin `active`
     tane start AKTIF; C, aktif vektorlerin agirlikli ortalamasiyla tasinir."""
 
-    def __init__(self, d, vectors, active, randn):
+    def __init__(self, d, vectors, active, randn, start_norm=None):
         super().__init__()
-        self.start = nn.Parameter(randn(vectors, d))
+        start = randn(vectors, d)
+        if start_norm is not None:
+            start = start * (start_norm / d ** 0.5)               # boy ~start_norm: secimi C belirler
+        self.start = nn.Parameter(start)
         self.finish = nn.Parameter(self.start.detach().clone())   # V_a = 0: baslangicta C yerinde kalir
         self.S_v = nn.Parameter(torch.zeros(()))                   # log olcek: kullanilan e^S_v > 0
         self.active = active
@@ -93,13 +101,15 @@ class PV(nn.Module):
     arch = "pv"
 
     def __init__(self, n, d=d, vectors=VECTORS, active=ACTIVE, layers=LAYERS,
-                 t_max=T_MAX, seed=0, squared=None, S_p=None):
-        """squared, S_p None: SCORE_BY_VOCAB'dan.  Verilirse tabloyu ezer."""
+                 t_max=T_MAX, seed=0, squared=None, S_p=None, start_norm=START_NORM):
+        """squared, S_p None: SCORE_BY_VOCAB'dan.  Verilirse tabloyu ezer.
+        start_norm: start'larin baslangic boyu (None: randn)."""
         super().__init__()
         generator = torch.Generator().manual_seed(seed)
         randn = lambda *shape: torch.randn(*shape, generator=generator)
         self.n, self.d, self.vectors = n, d, vectors
         self.active, self.layers, self.t_max = active, layers, t_max
+        self.start_norm = start_norm
         rule = score_rule(n)
         self.squared = rule[0] if squared is None else squared
         S_p = rule[1] if S_p is None else S_p
@@ -109,7 +119,8 @@ class PV(nn.Module):
         self.register_buffer("P", P / P.norm(dim=-1, keepdim=True))
         RM = torch.randint(0, 2, (t_max, d), generator=generator).float() * 2 - 1
         self.register_buffer("RM", RM)
-        self.V = nn.ModuleList(VectorLayer(d, vectors, active, randn) for _ in range(layers))
+        self.V = nn.ModuleList(VectorLayer(d, vectors, active, randn, start_norm)
+                               for _ in range(layers))
 
     def C(self, tokens):
         """tokens (B,T) -> zincir (B,T,d).  Nedensel: C_t yalniz <= t'yi toplar."""
