@@ -623,6 +623,12 @@ def t_select():
     kapi("SELECT direction: katman 1+ boydan bagimsiz, katman 0 ayni",
          ayni0 and boydan and uz_boy and q.cache.query.direction and varsayilan,
          "distance'ta 5 kat boy secimi degistiriyor, direction'da degistirmiyor")
+    hep = PV(50, select="direction_all", **kw)
+    C = hep.C(w)
+    boy0 = torch.equal(hep.V[0](C)[1], hep.V[0](C, by=5.0 * C)[1])          # katman 0 da yone bakar
+    kapi("SELECT direction_all: katman 0 da boydan bagimsiz",
+         boy0 and all(L.direction for L in hep.V) and not yon.V[0].direction,
+         "5 kat boy katman 0'da secimi degistirmiyor; direction'da katman 0 uzaklik")
 
     N, data = _veri()
     kok = tempfile.mkdtemp()

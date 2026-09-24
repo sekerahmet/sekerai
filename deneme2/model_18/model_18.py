@@ -86,6 +86,8 @@ ACTIVE = VECTORS
 # Olculdu (CCACHE t10000, egitimsiz): tasinmis noktanin boyu (|C| 1,4 -> 14) secimi eziyor; derin
 # katmanlarda isin %90'ini 10 / 6 vektor yapiyor, C_m 1024 boyutun 40 yonunde.  "direction" ile ayni
 # vektorler: 17 / 12 vektor, C_m 113 yon.  Kullanici, 24 Eylul: "b'yi ekle, adı SELECT olsun".
+# "direction_all": katman 0 da yone gore.  Kayitli (ATTN t2000 ve t4000): olu vektorlerin hepsi katman 0'da
+# (21 / 0 / 0 / 0).  Hakem notu 1.3; kullanici, 25 Eylul: "grup 3 için colabda sırayla kurup başlatabilirsin".
 SELECT = "direction"
 LAYERS = 4     # Kullanici: "4 katman olsun"
 T_MAX = 512    # RM sayisi = en uzun dizi (TinyStories hikayelerinin %98,6'si sigar)
@@ -255,7 +257,7 @@ class CCache(nn.Module):
         assert query_by in ("C", "C_m"), query_by
         self.query_by = query_by
         self.query = (VectorLayer(d, query_vectors, min(query_active, query_vectors), randn, start_norm,
-                                  direction=select == "direction") if query else None)
+                                  direction=select != "distance") if query else None)
 
     def Q(self, C, C_m, probs=False):
         """Sorgu Q_t (B,T,d): oklar yokken C_t.  probs: + oklarin P'si (LOAD_BALANCE; ok yoksa None)."""
@@ -385,7 +387,7 @@ class PV(nn.Module):
         chain: "absolute" (RM_t) ya da "relative" (kaydirma).  c_cache: hikayenin gecmisi + gate.
         query: defteri Q ile ara (query_*).  c_content: C = [C_order | C_content]; C_content
         kaydirmasiz, lam_w/beta_w ile solar.  Kapaliyken d_sum'in tamami relative.
-        select: aktif vektor secimi, "distance" ya da "direction" (katman 1'den itibaren).
+        select: aktif vektor secimi, "distance", "direction" (katman 1'den itibaren) ya da "direction_all".
         c_m_norm: puan C_m/|C_m| ile (kure); s_p_init None: C_M_NORM_P formulunden, kapaliyken S_P_INIT.
         attention: sozluk katmani attn_after'den sonra Gecmisten (attn_heads x attn_dim, attn_value)."""
         super().__init__()
@@ -399,7 +401,7 @@ class PV(nn.Module):
         self.active, self.layers, self.t_max = active, layers, t_max
         self.start_norm, self.lam = start_norm, float(lam)
         assert chain in ("absolute", "relative"), chain
-        assert select in ("distance", "direction"), select
+        assert select in ("distance", "direction", "direction_all"), select
         self.select, self.load_balance, self.c_m_norm = select, float(load_balance), bool(c_m_norm)
         if s_p_init is None:
             s_p_init = (math.log(math.log(C_M_NORM_P / (1 - C_M_NORM_P) * (n - 1)) / 2) if self.c_m_norm
@@ -417,7 +419,7 @@ class PV(nn.Module):
         RM = torch.randint(0, 2, (t_max, d_sum), generator=generator).float() * 2 - 1
         self.register_buffer("RM", RM)
         self.V = nn.ModuleList(VectorLayer(d_sum, vectors, active, randn, start_norm, s_v_init,
-                                           direction=select == "direction" and i > 0)
+                                           direction=select == "direction_all" or (select == "direction" and i > 0))
                                for i in range(layers))
         if self.c_content:
             # lam_w, beta_w: token x boyut, sigmoid'den once (logit).  Sabit baslangic, randn cekmez.
