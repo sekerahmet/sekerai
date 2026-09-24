@@ -75,15 +75,7 @@ def bul(desen=None, kosu=None):
 
 def yukle(yol):
     k = torch.load(yol, weights_only=False, map_location="cpu")
-    m = PV(k["n"], d=k["d"], vectors=k["vectors"], active=k["active"], layers=k["layers"],
-           t_max=k["t_max"], seed=k["seed"], squared=k.get("squared", True),
-           S_p=k.get("S_p", 1.0), lam=k.get("lam", 1.0),
-           chain=k.get("chain", "absolute"), c_cache=k.get("c_cache", False),
-           cache_topk=k.get("cache_topk", 8), cache_skip=k.get("cache_skip", 3),
-           query_vectors=k.get("query_vectors", 0), query_active=k.get("query_active", 8),
-           query_by=k.get("query_by", "C_m"), d_order=k.get("d_order", 0), d_content=k.get("d_content", 0))
-    m.load_state_dict(k["weights"])
-    return m.eval(), k
+    return PV.from_package(k), k
 
 
 def istemler():
@@ -103,8 +95,8 @@ def ozet(yol, k):
     print("=" * 74)
     print("paket   %s/%s%s" % (os.path.basename(os.path.dirname(yol)), os.path.basename(yol),
                                "   (BITTI)" if k.get("done") else ""))
-    print("adim    %s   parametre %s   sozluk %d   d %d   T %d"
-          % ("{:,}".format(k["step"]), "{:,}".format(k.get("n_params", 0)), k["n"], k["d"],
+    print("adim    %s   parametre %s   sozluk %d   D_SUM %d   T %d"
+          % ("{:,}".format(k["step"]), "{:,}".format(k.get("n_params", 0)), k["n"], k.get("d_sum", k.get("d")),
              k["t_max"]))
     print("olcum   accuracy train %.4f   heldout %.4f   ppl %s"
           % (k["train_acc"], k["heldout_acc"], "-" if ce is None else "%.1f" % math.exp(ce)))

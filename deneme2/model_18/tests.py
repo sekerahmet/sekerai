@@ -15,10 +15,22 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import data as VM                                               # noqa: E402
 import train as TR                                              # noqa: E402
-from model_18 import PV                                         # noqa: E402
+from model_18 import PV as _PV                                  # noqa: E402
 
 GECTI, KALDI = [], []
-KUCUK = dict(d=16, vectors=8, active=2, layers=2)      # egitim kapilari icin kucuk PV
+KUCUK = dict(d_order=16, d_content=0, vectors=8, active=2, layers=2)   # egitim kapilari icin kucuk PV
+# Kapilar parcalari TEK TEK sinar: tepedeki tasarimin (model_18) ozellikleri burada KAPALI baslar,
+# her kapi sinadigini acar.  Tepenin kendisi t_tepe'de.
+SADE = dict(d_order=128, d_content=0, t_max=64, start_norm=None, lam=1.0, chain="absolute",
+            c_cache=False, cache_topk=8, query=False, c_content=False)
+
+
+def PV(n, **ayar):
+    return _PV(n, **dict(SADE, **ayar))
+
+
+def _run(*a, **ayar):
+    return TR._run(*a, **dict(SADE, **ayar))
 
 
 def kapi(ad, sart, not_=""):
@@ -33,7 +45,7 @@ def _dizi(s):
 def _kos(ad, kok, data, n_vocab, adim, metric=None, resume=None, lr=2e-3):
     """_run'i kucuk PV ile, ayni iplikte kosturur; Run'i doner."""
     r = TR.RUNS[ad] = TR.Run(ad, kok)
-    TR._run(r, data, n_vocab, metric or _sifir, "cpu", lr, adim, 0, 8,
+    _run(r, data, n_vocab, metric or _sifir, "cpu", lr, adim, 0, 8,
             2, 2, resume=resume, **KUCUK)
     return r
 
@@ -85,7 +97,7 @@ def t_cm():
 # --- 5.  PAYDA: W_v toplami 1 -- butun vektorler ayni V_a ise tasima tam V_a
 def t_payda():
     m, w = PV(VM.N), _dizi("E31+52=8")[None]
-    u = torch.randn(m.d, generator=torch.Generator().manual_seed(5))
+    u = torch.randn(m.d_sum, generator=torch.Generator().manual_seed(5))
     with torch.no_grad():
         for L in m.V:
             L.finish.copy_(L.start + u)
@@ -111,7 +123,7 @@ def t_gradyan():
 # --- 7.  PARAMETRE == hesap: vectors x 2 x d x layers + layers (S_v)
 def t_parametre():
     m = PV(VM.N)
-    bek = m.vectors * 2 * m.d * m.layers + m.layers
+    bek = m.vectors * 2 * m.d_sum * m.layers + m.layers
     par = sum(p.numel() for p in m.parameters())
     sabit = sorted(a for a, _ in m.named_buffers())
     kapi("parametre == hesap; P ve RM sabit", par == bek and sabit == ["P", "RM"],
@@ -175,7 +187,7 @@ def t_durdur():
                 r.stop()                        # `dur` adiminin olcumu bitti
             return {"accuracy": 0.0}
 
-        TR._run(r, data, N, metric, "cpu", lr, adim, 0, 8, 1, 3,
+        _run(r, data, N, metric, "cpu", lr, adim, 0, 8, 1, 3,
                 resume=surdur, **KUCUK)
         return _agirlik(r)
 
@@ -221,26 +233,26 @@ def t_skor():
     m.score(C_m).sum().backward()
     ok = (m.squared and m.S_p_learned and float(m.S_p) == 0.0 and m.S_p.grad is not None
           and sum(p.numel() for p in m.parameters())
-          == m.vectors * 2 * m.d * m.layers + m.layers + 1)
+          == m.vectors * 2 * m.d_sum * m.layers + m.layers + 1)
     kapi("ogrenilen S_p: e^0 = 1, gradyan alir", ok, "parametre +1")
 
     N, data = _veri()
     kok = tempfile.mkdtemp()
     try:
         r = TR.RUNS["KARE"] = TR.Run("KARE", kok)
-        TR._run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3,
+        _run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3,
                 squared=True, S_p=1.0, **KUCUK)
         yol = kok + "/KARE/t3.pt"
         eski = torch.load(yol, weights_only=False)
         del eski["S_p"], eski["squared"]         # alanlar gelmeden yazilmis paket
         torch.save(eski, yol)
         r = TR.RUNS["KARE"] = TR.Run("KARE", kok)
-        TR._run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3,
+        _run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3,
                 resume=yol, squared=True, S_p=1.0, **KUCUK)
         kabul = r.result.get("step") == 6
         try:
             r = TR.RUNS["KARE"] = TR.Run("KARE", kok)
-            TR._run(r, data, N, _sifir, "cpu", 2e-3, 9, 0, 8, 3, 3,
+            _run(r, data, N, _sifir, "cpu", 2e-3, 9, 0, 8, 3, 3,
                     resume=yol, **KUCUK)             # tablodan: karesiz 10
             yakaladi = False
         except ValueError as h:
@@ -254,8 +266,8 @@ def t_skor():
 # --- 12.  START BOYU: start_norm ile secimi C belirler; surdurme farki yakalar
 def t_start():
     torch.manual_seed(0)
-    eski = PV(4003, d=256, vectors=64, t_max=256)
-    yeni = PV(4003, d=256, vectors=64, t_max=256, start_norm=1.0)
+    eski = PV(4003, d_order=256, d_content=0, vectors=64, t_max=256)
+    yeni = PV(4003, d_order=256, d_content=0, vectors=64, t_max=256, start_norm=1.0)
     L = yeni.V[0]
     boy = float(L.start.detach().norm(dim=-1).median())
     ayni = torch.equal(eski.V[0].start * (1.0 / 256 ** 0.5), L.start) and torch.equal(L.start, L.finish)
@@ -276,14 +288,14 @@ def t_start():
     kok = tempfile.mkdtemp()
     try:
         r = TR.RUNS["S"] = TR.Run("S", kok)
-        TR._run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3, **KUCUK)
+        _run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3, **KUCUK)
         yol = kok + "/S/t3.pt"
         p = torch.load(yol, weights_only=False)
         del p["start_norm"]                      # alan gelmeden yazilmis paket
         torch.save(p, yol)
         try:
             r = TR.RUNS["S"] = TR.Run("S", kok)
-            TR._run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3, resume=yol,
+            _run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3, resume=yol,
                     start_norm=1.0, **KUCUK)
             yakaladi = False
         except ValueError as h:
@@ -304,7 +316,7 @@ def t_lam():
     bir = torch.equal(PV(VM.N, lam=1.0).C(w[None]), PV(VM.N).C(w[None]))
     a, b = m.scoreboard(_dizi("E31+52=8")[None]), m.scoreboard(_dizi("E31+52=9")[None])
     nedensel = torch.equal(a[0, :-1], b[0, :-1])
-    uzun = PV(50, d=32, t_max=512, lam=0.7).C(torch.randint(0, 50, (2, 512)))
+    uzun = PV(50, d_order=32, d_content=0, t_max=512, lam=0.7).C(torch.randint(0, 50, (2, 512)))
     kapi("lam: zincir, CM, nedensel, lam 1 == cumsum", zincir and cm and bir and nedensel
          and bool(torch.isfinite(uzun).all()), "0,9; T=512'de lam 0,7 sonlu")
 
@@ -312,14 +324,14 @@ def t_lam():
     kok = tempfile.mkdtemp()
     try:
         r = TR.RUNS["L"] = TR.Run("L", kok)
-        TR._run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3, **KUCUK)
+        _run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3, **KUCUK)
         yol = kok + "/L/t3.pt"
         p = torch.load(yol, weights_only=False)
         del p["lam"]                             # alan gelmeden yazilmis paket
         torch.save(p, yol)
         try:
             r = TR.RUNS["L"] = TR.Run("L", kok)
-            TR._run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3, resume=yol, lam=0.9, **KUCUK)
+            _run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3, resume=yol, lam=0.9, **KUCUK)
             yakaladi = False
         except ValueError as h:
             yakaladi = "lam" in str(h)
@@ -346,7 +358,7 @@ def t_relative():
     kisa, uzun = torch.cat([on[:5], uc]), torch.cat([on, uc])
     cos = {}
     for zin in ("relative", "absolute"):
-        mm = PV(50, d=256, t_max=64, lam=0.5, chain=zin)
+        mm = PV(50, d_order=256, d_content=0, t_max=64, lam=0.5, chain=zin)
         cos[zin] = float(torch.cosine_similarity(mm.C(kisa[None])[0, -1], mm.C(uzun[None])[0, -1], dim=0))
     kapi("relative: zincir, CM, nedensel, konumdan bagimsiz",
          zincir and cm and nedensel and cos["relative"] > 0.9 and cos["absolute"] < 0.5,
@@ -357,20 +369,20 @@ def t_relative():
     kok = tempfile.mkdtemp()
     try:
         r = TR.RUNS["R"] = TR.Run("R", kok)
-        TR._run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3, **KUCUK)
+        _run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3, **KUCUK)
         yol = kok + "/R/t3.pt"
         p = torch.load(yol, weights_only=False)
         del p["chain"]                           # alan gelmeden yazilmis paket
         torch.save(p, yol)
         try:
             r = TR.RUNS["R"] = TR.Run("R", kok)
-            TR._run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3, resume=yol,
+            _run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3, resume=yol,
                     chain="relative", **KUCUK)
             yakaladi = False
         except ValueError as h:
             yakaladi = "chain" in str(h)
         r = TR.RUNS["R2"] = TR.Run("R2", kok)
-        TR._run(r, data, N, _sifir, "cpu", 2e-3, 4, 0, 8, 2, 4, chain="relative", lam=0.7,
+        _run(r, data, N, _sifir, "cpu", 2e-3, 4, 0, 8, 2, 4, chain="relative", lam=0.7,
                 start_norm=1.0, **KUCUK)
         egitim = r.result.get("step") == 4
     finally:
@@ -382,7 +394,7 @@ def t_relative():
 # --- 15.  C_CACHE + GATE: nedensel, normalize log p, gate 0 == modelin kendisi, kopya calisir
 def t_ccache():
     torch.manual_seed(0)
-    kw = dict(d=256, t_max=64, lam=0.5, chain="relative")
+    kw = dict(d_order=256, d_content=0, t_max=64, lam=0.5, chain="relative")
     m = PV(50, c_cache=True, **kw)
     g = torch.Generator().manual_seed(4)
     w = torch.randint(0, 50, (1, 30), generator=g)
@@ -411,19 +423,19 @@ def t_ccache():
     kok = tempfile.mkdtemp()
     try:
         r = TR.RUNS["CC"] = TR.Run("CC", kok)
-        TR._run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3, **KUCUK)
+        _run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3, **KUCUK)
         yol = kok + "/CC/t3.pt"
         p = torch.load(yol, weights_only=False)
         del p["c_cache"]                         # alan gelmeden yazilmis paket
         torch.save(p, yol)
         try:
             r = TR.RUNS["CC"] = TR.Run("CC", kok)
-            TR._run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3, resume=yol, c_cache=True, **KUCUK)
+            _run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3, resume=yol, c_cache=True, **KUCUK)
             yakaladi = False
         except ValueError as h:
             yakaladi = "c_cache" in str(h)
         r = TR.RUNS["CC2"] = TR.Run("CC2", kok)
-        TR._run(r, data, N, _sifir, "cpu", 2e-3, 4, 0, 8, 2, 4, chain="relative", lam=0.7,
+        _run(r, data, N, _sifir, "cpu", 2e-3, 4, 0, 8, 2, 4, chain="relative", lam=0.7,
                 start_norm=1.0, c_cache=True, **KUCUK)
         egitim = r.result.get("step") == 4 and torch.isfinite(r.result["step_losses"]).all()
     finally:
@@ -435,10 +447,10 @@ def t_ccache():
 # --- 16.  BASLANGIC AYARLARI: S_v, S_c, gate_0, S_p tepeden ve kosudan; surdurme farki
 def t_init():
     import model_18 as M
-    m = PV(4003, d=32, t_max=16, c_cache=True, s_v_init=0.5, s_c_init=2.0, gate_0_init=-1.0,
+    m = PV(4003, d_order=32, d_content=0, t_max=16, c_cache=True, s_v_init=0.5, s_c_init=2.0, gate_0_init=-1.0,
            s_p_init=0.25)
     v = [float(m.V[0].S_v), float(m.cache.S_c), float(m.cache.gate_0), float(m.S_p)]
-    d0 = PV(4003, d=32, t_max=16, c_cache=True)
+    d0 = PV(4003, d_order=32, d_content=0, t_max=16, c_cache=True)
     v0 = [float(d0.V[0].S_v), float(d0.cache.S_c), float(d0.cache.gate_0), float(d0.S_p)]
     ok = (v == [0.5, 2.0, -1.0, 0.25]
           and v0 == [M.S_V_INIT, M.S_C_INIT, M.GATE_0_INIT, M.S_P_INIT])
@@ -446,10 +458,10 @@ def t_init():
     kok = tempfile.mkdtemp()
     try:
         r = TR.RUNS["I"] = TR.Run("I", kok)
-        TR._run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3, **KUCUK)
+        _run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3, **KUCUK)
         try:
             r = TR.RUNS["I"] = TR.Run("I", kok)
-            TR._run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3, resume=kok + "/I/t3.pt",
+            _run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3, resume=kok + "/I/t3.pt",
                     s_v_init=0.5, **KUCUK)
             yakaladi = False
         except ValueError as h:
@@ -465,7 +477,7 @@ def t_content():
     import model_18 as M
     torch.manual_seed(0)
     n, d, dc = 60, 64, 32
-    m = PV(n, t_max=64, lam=0.7, chain="relative", d_order=d - dc, d_content=dc)
+    m = PV(n, t_max=64, lam=0.7, chain="relative", c_content=True, d_order=d - dc, d_content=dc)
     with torch.no_grad():                       # ogrenilmis gibi: token ve boyuta gore farkli, bazisi ~0
         m.lam_w.normal_(0, 3); m.beta_w.normal_(0, 1)
         m.lam_w[:, :4] = -40.0                  # alt sinir: LAM_W_MIN
@@ -477,7 +489,7 @@ def t_content():
         h = lam[:, t] * h + beta[:, t] * m.P[w[:, t], d - dc:]
         adim.append(h)
     icerik = torch.allclose(C[..., d - dc:], torch.stack(adim, 1), atol=1e-5)
-    rel = PV(n, d=d - dc, t_max=64, lam=0.7, chain="relative")
+    rel = PV(n, d_order=d - dc, d_content=0, t_max=64, lam=0.7, chain="relative")
     rel.P = m.P[:, :d - dc]
     sira = torch.allclose(C[..., :d - dc], rel.C(w), atol=1e-5)
     w2 = w.clone(); w2[:, 30] = (w2[:, 30] + 1) % n
@@ -491,25 +503,41 @@ def t_content():
          "45 adim, 16'lik parcalar, lam_w alt sinirda (e^-5) dahil")
     kapi("C_content: CM geri yuruyus, lam_w/beta_w gradyan alir", cm and grad)
 
-    yok = PV(n, d=d, t_max=64, lam=0.7, chain="relative")
-    ayni = torch.equal(yok.C(w), PV(n, d=d, t_max=64, lam=0.7, chain="relative", d_content=0).C(w))
-    bas = PV(n, t_max=64, lam=0.7, chain="relative", d_order=d - dc, d_content=dc)
+    yok = PV(n, d_order=d, d_content=0, t_max=64, lam=0.7, chain="relative")
+    kapali = PV(n, t_max=64, lam=0.7, chain="relative", d_order=d - dc, d_content=dc)
+    ayni = torch.equal(yok.C(w), kapali.C(w)) and not hasattr(kapali, "lam_w")
+    bas = _PV(n, t_max=64, c_cache=False)                  # boyutlar tepeden
     l0, b0 = bas.lam_beta(w)
-    baslangic = (abs(float(l0.mean()) - M.LAM_W_INIT) < 1e-5 and abs(float(b0.mean()) - M.BETA_W_INIT) < 1e-5)
-    kapi("C_content 0 == bugunku zincir; baslangic tepeden", ayni and baslangic,
-         "lam_w %.2f beta_w %.2f" % (float(l0.mean()), float(b0.mean())))
+    baslangic = (abs(float(l0.mean()) - M.LAM_W_INIT) < 1e-5 and abs(float(b0.mean()) - M.BETA_W_INIT) < 1e-5
+                 and (bas.d_order, bas.d_content, bas.d_sum) == (M.D_ORDER, M.D_CONTENT, M.D_SUM))
+    kapi("C_content kapali == bugunku zincir; ayarlar tepeden", ayni and baslangic,
+         "D_SUM %d = %d + %d, lam_w %.2f beta_w %.2f"
+         % (bas.d_sum, bas.d_order, bas.d_content, float(l0.mean()), float(b0.mean())))
+
+
+# --- 19.  TEPE = MODELIN SON YAPISI: ayarsiz PV, tepedeki tasarimi kurar
+def t_tepe():
+    import model_18 as M
+    m = _PV(60)
+    ok = (m.chain == "relative" and m.lam == M.LAM and m.c_content and m.d_sum == M.D_SUM
+          and m.cache is not None and m.cache.query is not None and m.cache.topk is M.CACHE_TOPK
+          and m.t_max == M.T_MAX and hasattr(m, "lam_w"))
+    kapi("tepe: ayarsiz PV == son yapi", ok,
+         "chain %s lam %g, D_SUM %d = %d + %d, defter topk %s + Q %d ok, T_MAX %d"
+         % (m.chain, m.lam, m.d_sum, m.d_order, m.d_content, m.cache.topk,
+            len(m.cache.query.start) if m.cache.query is not None else 0, m.t_max))
 
 
 # --- 18.  Q: oklar bosken Q == C (defter aynen); butun gecmis == k=T; gradyan oklara ulasir
 def t_query():
     torch.manual_seed(0)
-    kw = dict(d=64, t_max=64, lam=0.5, chain="relative", start_norm=1.0, c_cache=True)
+    kw = dict(d_order=64, d_content=0, t_max=64, lam=0.5, chain="relative", start_norm=1.0, c_cache=True)
     w = torch.randint(0, 50, (2, 40))
     a = PV(50, **kw)
-    b = PV(50, query_vectors=16, query_active=4, **kw)
+    b = PV(50, query=True, query_vectors=16, query_active=4, **kw)
     bos = torch.allclose(a.scoreboard(w), b.scoreboard(w), atol=1e-5)
-    hepsi = PV(50, cache_topk=None, query_vectors=16, query_active=4, **kw)
-    kT = PV(50, cache_topk=40, query_vectors=16, query_active=4, **kw)
+    hepsi = PV(50, cache_topk=None, query=True, query_vectors=16, query_active=4, **kw)
+    kT = PV(50, cache_topk=40, query=True, query_vectors=16, query_active=4, **kw)
     tum = torch.allclose(hepsi.scoreboard(w), kT.scoreboard(w), atol=1e-5)
     with torch.no_grad():
         hepsi.cache.gate_0.fill_(0.0)
@@ -523,8 +551,9 @@ def t_query():
     nedensel = torch.allclose(lp[:, :-1], hepsi.scoreboard(w2)[:, :-2], atol=1e-6)
     hepsi.loss(w).backward()
     grad = bool(hepsi.cache.query.finish.grad.abs().sum() > 0)
-    Cm = PV(50, query_vectors=16, query_active=4, query_by="C", **kw)
-    secim = torch.allclose(Cm.scoreboard(w), a.scoreboard(w), atol=1e-5)
+    Cm = PV(50, query=True, query_vectors=16, query_active=4, query_by="C", **kw)
+    secim = (torch.allclose(Cm.scoreboard(w), a.scoreboard(w), atol=1e-5)
+             and PV(50, query_vectors=16, **kw).cache.query is None)          # kapaliyken ok yok
     kapi("Q: oklar bos -> bugunku defter; butun gecmis == k=T", bos and tum and secim)
     kapi("Q: hizli kayip == tam tablo, nedensel, oklar gradyan alir", hizli and nedensel and grad)
 
@@ -532,33 +561,43 @@ def t_query():
     kok = tempfile.mkdtemp()
     try:
         r = TR.RUNS["QC"] = TR.Run("QC", kok)
-        TR._run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3, chain="relative", lam=0.7,
+        _run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3, chain="relative", lam=0.7,
                 start_norm=1.0, c_cache=True, **KUCUK)
         yol = kok + "/QC/t3.pt"
         p = torch.load(yol, weights_only=False)
-        del p["d_content"], p["query_vectors"]      # alan gelmeden yazilmis paket
+        for a in ("query", "query_vectors", "query_active", "query_by", "c_content", "d_order",
+                  "d_content", "lam_w_init", "beta_w_init"):
+            del p[a]                                # alanlar gelmeden yazilmis paket
+        p["d"] = p.pop("d_sum")                     # eski paket boyutu 'd' diye yazardi
         torch.save(p, yol)
+        okur = _PV.from_package(p)
+        okur_ok = okur.d_sum == 16 and not okur.c_content and okur.cache.query is None
+        r = TR.RUNS["QC"] = TR.Run("QC", kok)       # kapaliyken eski paket SURDURULUR
+        _run(r, data, N, _sifir, "cpu", 2e-3, 4, 0, 8, 2, 4, resume=yol, chain="relative",
+                lam=0.7, start_norm=1.0, c_cache=True, **KUCUK)
+        eski = r.result.get("step") == 4
         try:
             r = TR.RUNS["QC"] = TR.Run("QC", kok)
-            TR._run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3, resume=yol, chain="relative",
-                    lam=0.7, start_norm=1.0, c_cache=True, d_order=8, d_content=8, **KUCUK)
+            _run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3, resume=yol, chain="relative",
+                    lam=0.7, start_norm=1.0, c_cache=True, c_content=True, **dict(KUCUK, d_order=8, d_content=8))
             yakaladi = False
         except ValueError as h:
-            yakaladi = "d_content" in str(h)
+            yakaladi = "c_content" in str(h)
         r = TR.RUNS["QC2"] = TR.Run("QC2", kok)
-        TR._run(r, data, N, _sifir, "cpu", 2e-3, 4, 0, 8, 2, 4, chain="relative", lam=0.7,
-                start_norm=1.0, c_cache=True, cache_topk=None, query_vectors=8, query_active=2,
-                d_order=8, d_content=8, **KUCUK)
+        _run(r, data, N, _sifir, "cpu", 2e-3, 4, 0, 8, 2, 4, chain="relative", lam=0.7,
+                start_norm=1.0, c_cache=True, cache_topk=None, query=True, query_vectors=8, query_active=2,
+                c_content=True, **dict(KUCUK, d_order=8, d_content=8))
         egitim = r.result.get("step") == 4 and torch.isfinite(r.result["step_losses"]).all()
         r = TR.RUNS["QC3"] = TR.Run("QC3", kok)
-        TR._run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 2, 4, resume=kok + "/QC2/t4.pt",
+        _run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 2, 4, resume=kok + "/QC2/t4.pt",
                 chain="relative", lam=0.7, start_norm=1.0, c_cache=True, cache_topk=None,
-                query_vectors=8, query_active=2, d_order=8, d_content=8, **KUCUK)
+                query=True, query_vectors=8, query_active=2, c_content=True, **dict(KUCUK, d_order=8, d_content=8))
         surdu = r.result.get("step") == 6
     finally:
         shutil.rmtree(kok, ignore_errors=True)
-    kapi("Q + C_content egitilir, surdurulur; eski paket farki yakalanir",
-         yakaladi and bool(egitim) and surdu, "cache_topk None, 8 ok, d_order 8 + d_content 8")
+    kapi("Q + C_content egitilir, surdurulur; eski paket: surer / farki yakalanir",
+         eski and okur_ok and yakaladi and bool(egitim) and surdu,
+         "kapaliyken eski paket surer; cache_topk None, 8 ok, d_order 8 + d_content 8")
 
 
 # ============================================================
@@ -756,7 +795,7 @@ def t_notebook(yol=None):
 if __name__ == "__main__":
     print("tests (model_18)")
     for f in (t_zincir, t_nedensel, t_sessiz, t_cm, t_payda, t_gradyan,
-              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_mat_pencere,
+              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_tepe, t_mat_pencere,
               t_mat_sor, t_mat_basamak, t_mat_egitim, t_stories, t_notebook):
         f()
     t_notebook(os.path.join(os.path.dirname(os.path.abspath(__file__)),

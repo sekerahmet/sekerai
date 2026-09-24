@@ -38,17 +38,18 @@ RUNS = {}        # run_name -> Run
 
 # Surdurmede paketteki degerle AYNI olmali.  Farkliysa yorunge sessizce
 # baskalasir: optimizer.load_state_dict lr'yi paketten alir, gunluk cagriyi yazar.
-MUST_MATCH = ("arch", "n", "T", "batch", "lr", "seed", "d", "vectors",
+MUST_MATCH = ("arch", "n", "T", "batch", "lr", "seed", "d_sum", "vectors",
               "active", "layers", "t_max", "squared", "S_p", "start_norm", "lam", "chain", "c_cache", "cache_topk",
-              "cache_skip", "s_v_init", "s_c_init", "gate_0_init", "s_p_init", "query_vectors",
-              "query_active", "query_by", "d_order", "d_content", "lam_w_init", "beta_w_init",
+              "cache_skip", "s_v_init", "s_c_init", "gate_0_init", "s_p_init", "query", "query_vectors",
+              "query_active", "query_by", "c_content", "d_order", "d_content", "lam_w_init", "beta_w_init",
               "data_fingerprint", "vocab")
 # Alan eklenmeden once yazilan paketlerdeki deger: skor -D^2, carpansiz.
 BEFORE_FIELD = {"squared": True, "S_p": 1.0, "start_norm": "randn", "lam": 1.0,
                 "chain": "absolute", "c_cache": False,
                 "cache_topk": M18.CACHE_TOPK, "cache_skip": M18.CACHE_SKIP,
                 "s_v_init": 0.0, "s_c_init": 3.0, "gate_0_init": -2.0, "s_p_init": 0.0,
-                "query_vectors": 0, "query_active": 8, "query_by": "C_m", "d_order": 0, "d_content": 0,
+                "query": False, "query_vectors": 0, "query_active": 8, "query_by": "C_m",
+                "c_content": False, "d_order": 0, "d_content": 0,
                 "lam_w_init": 0.9, "beta_w_init": 0.5}
 
 
@@ -132,13 +133,20 @@ def _snapshot(model, optimizer, sampler, record):
                 rng=torch.get_rng_state(), sampler_rng=sampler.get_state())
 
 
+# Kapali ozelligin ayarlari modele girmez: iki taraf da kapaliysa karsilastirilmaz.
+SWITCHED = {"query": ("query_vectors", "query_active", "query_by"),
+            "c_content": ("d_order", "d_content", "lam_w_init", "beta_w_init")}
+
+
 def _check_resume(package, fixed):
     """Surdurme paketi bu cagriyla AYNI kosu mu?  Degilse kosu BASLAMAZ."""
     short = lambda v: f"<{len(v)} birim>" if isinstance(v, list) else repr(v)
     packed = {a: package.get(a, BEFORE_FIELD.get(a)) for a in MUST_MATCH}
+    packed["d_sum"] = package.get("d_sum", package.get("d"))        # eski paketin 'd' alani
+    off = {a for s, alt in SWITCHED.items() if not packed[s] and not fixed.get(s) for a in alt}
     diffs = [f"{a}: paket {short(packed[a])}, cagri {short(fixed[a])}"
              for a in MUST_MATCH
-             if packed[a] is not None and fixed.get(a) is not None
+             if a not in off and packed[a] is not None and fixed.get(a) is not None
              and packed[a] != fixed[a]]
     if diffs:
         raise ValueError("surdurme paketi bu cagriyla uyusmuyor -- "
@@ -160,21 +168,22 @@ def _line(record, elapsed, mark=""):
 
 def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
          eval_every, save_every, weights_every=100, resume=None, compile=False, vocab=None,
-         extra=None, d=M18.d, vectors=M18.VECTORS, active=M18.ACTIVE,
+         extra=None, vectors=M18.VECTORS, active=M18.ACTIVE,
          layers=M18.LAYERS, t_max=M18.T_MAX, squared=None, S_p=None,
          start_norm=M18.START_NORM, lam=M18.LAM, chain=M18.CHAIN, c_cache=M18.C_CACHE,
          cache_topk=M18.CACHE_TOPK, cache_skip=M18.CACHE_SKIP, s_v_init=M18.S_V_INIT,
          s_c_init=M18.S_C_INIT, gate_0_init=M18.GATE_0_INIT, s_p_init=M18.S_P_INIT,
-         query_vectors=M18.QUERY_VECTORS, query_active=M18.QUERY_ACTIVE, query_by=M18.QUERY_BY,
+         query=M18.QUERY, query_vectors=M18.QUERY_VECTORS, query_active=M18.QUERY_ACTIVE,
+         query_by=M18.QUERY_BY, c_content=M18.C_CONTENT,
          d_order=M18.D_ORDER, d_content=M18.D_CONTENT, lam_w_init=M18.LAM_W_INIT, beta_w_init=M18.BETA_W_INIT):
     torch.manual_seed(seed)
-    model = PV(n_vocab, d=d, vectors=vectors, active=active, layers=layers,
+    model = PV(n_vocab, vectors=vectors, active=active, layers=layers,
                t_max=t_max, seed=seed, squared=squared, S_p=S_p,
                start_norm=start_norm, lam=lam, chain=chain, c_cache=c_cache,
                cache_topk=cache_topk, cache_skip=cache_skip, s_v_init=s_v_init,
                s_c_init=s_c_init, gate_0_init=gate_0_init, s_p_init=s_p_init,
-               query_vectors=query_vectors, query_active=query_active, query_by=query_by,
-               d_order=d_order, d_content=d_content, lam_w_init=lam_w_init, beta_w_init=beta_w_init).to(device)
+               query=query, query_vectors=query_vectors, query_active=query_active, query_by=query_by,
+               c_content=c_content, d_order=d_order, d_content=d_content, lam_w_init=lam_w_init, beta_w_init=beta_w_init).to(device)
     # torch.compile: eski mimaride 3,90 kat olculdu (model_17 train_17); PV'de OLCULMEDI.
     loss_fn = torch.compile(model.loss) if compile else model.loss
     if compile:
@@ -187,7 +196,7 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
     n_questions, max_length = questions.shape
     assert max_length <= t_max, f"soru {max_length} token > t_max {t_max}"
     n_params = sum(p.numel() for p in model.parameters())
-    fixed = dict(extra or {}, arch=model.arch, n=n_vocab, d=model.d, vectors=vectors,
+    fixed = dict(extra or {}, arch=model.arch, n=n_vocab, d_sum=model.d_sum, vectors=vectors,
                  active=active, layers=layers, t_max=t_max, lr=lr,
                  squared=model.squared,
                  S_p=M18.LEARNED if model.S_p_learned else model.S_p,
@@ -196,8 +205,8 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
                  cache_topk=None if cache_topk is None else int(cache_topk), cache_skip=int(cache_skip),
                  s_v_init=float(s_v_init), s_c_init=float(s_c_init),
                  gate_0_init=float(gate_0_init), s_p_init=float(s_p_init),
-                 query_vectors=int(query_vectors), query_active=int(query_active), query_by=query_by,
-                 d_order=model.d_order, d_content=model.d_content, lam_w_init=float(lam_w_init), beta_w_init=float(beta_w_init),
+                 query=bool(query), query_vectors=int(query_vectors), query_active=int(query_active),
+                 query_by=query_by, c_content=bool(c_content), d_order=model.d_order, d_content=model.d_content, lam_w_init=float(lam_w_init), beta_w_init=float(beta_w_init),
                  seed=seed, batch=batch, T=max_length, n_params=n_params,
                  compile=compile,
                  data_fingerprint=_fingerprint(questions, filled_mask, targets_mask),
@@ -225,9 +234,9 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
 
     fill_ratio = float(filled_mask.sum()) / filled_mask.numel()
     run.note(f"sorular {n_questions:,} x {max_length}   dolgu %{100 * (1 - fill_ratio):.1f}")
-    run.note(f"arch {model.arch}  d {model.d} vectors {vectors} active {active} "
+    run.note(f"arch {model.arch}  D_SUM {model.d_sum} ({model.d_order}+{model.d_content}) vectors {vectors} active {active} "
              f"layers {layers}  squared {fixed['squared']} S_p {fixed['S_p']}  "
-             f"start_norm {fixed['start_norm']}  lam {fixed['lam']}  chain {chain}  c_cache {c_cache} (topk {cache_topk} skip {cache_skip} Q {query_vectors}/{query_active} {query_by})  d_order {model.d_order} d_content {model.d_content} (lam_w {lam_w_init} beta_w {beta_w_init})  lr {lr} seed {seed}  sozluk {n_vocab}  "
+             f"start_norm {fixed['start_norm']}  lam {fixed['lam']}  chain {chain}  c_cache {c_cache} (topk {cache_topk} skip {cache_skip} Q {query} {query_vectors}/{query_active} {query_by})  c_content {c_content} (lam_w {lam_w_init} beta_w {beta_w_init})  lr {lr} seed {seed}  sozluk {n_vocab}  "
              f"parametre {n_params:,}")
     run.note(f"batch {batch}   epok = {n_questions / batch:,.0f} adim   veri izi "
              f"{fixed['data_fingerprint']}   olcum her {eval_every}   tam yedek her "
@@ -329,12 +338,13 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
           extra=None, lr=LR, steps=20000, seed=0, batch=BATCH,
           eval_every=100, save_every=1000, weights_every=100, resume=None,
           compile=True, vocab=None,
-          d=M18.d, vectors=M18.VECTORS, active=M18.ACTIVE, layers=M18.LAYERS,
+          vectors=M18.VECTORS, active=M18.ACTIVE, layers=M18.LAYERS,
           t_max=M18.T_MAX, squared=None, S_p=None, start_norm=M18.START_NORM,
           lam=M18.LAM, chain=M18.CHAIN, c_cache=M18.C_CACHE,
           cache_topk=M18.CACHE_TOPK, cache_skip=M18.CACHE_SKIP, s_v_init=M18.S_V_INIT,
           s_c_init=M18.S_C_INIT, gate_0_init=M18.GATE_0_INIT, s_p_init=M18.S_P_INIT,
-          query_vectors=M18.QUERY_VECTORS, query_active=M18.QUERY_ACTIVE, query_by=M18.QUERY_BY,
+          query=M18.QUERY, query_vectors=M18.QUERY_VECTORS, query_active=M18.QUERY_ACTIVE,
+         query_by=M18.QUERY_BY, c_content=M18.C_CONTENT,
           d_order=M18.D_ORDER, d_content=M18.D_CONTENT, lam_w_init=M18.LAM_W_INIT, beta_w_init=M18.BETA_W_INIT):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
@@ -352,16 +362,17 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
     vocab       token listesi -- pakete yazilir
     compile     torch.compile, ACIK.  Eski mimaride 3,90 kat olculdu; PV'de OLCULMEDI.
                 Ilk adim derleme yuzunden yavas.
-    d, vectors, active, layers, t_max   PV'nin ayarlari (model_18)
+    vectors, active, layers, t_max   PV'nin ayarlari (model_18)
     squared, S_p   skor; None ise sozluk sayisindan (model_18.SCORE_BY_VOCAB)
     start_norm  start'larin baslangic boyu (None: randn, boy ~sqrt(d))
     lam         zincirin solma carpani: C_t = lam*C_(t-1) + RM_t*P[w_t]  (1: solmaz)
     chain       "absolute" (RM_t, mutlak konum) ya da "relative" (kaydirma, kelimenin yasi)
     c_cache     hikayenin kendi gecmisinden kopya + ogrenilen gate (model_18.CCache)
     cache_topk, cache_skip   defterden kac komsu (None: butun gecmis); son kac konum aranmaz
-    query_vectors, query_active, query_by   defteri arayan Q'nun oklari (0: Q = C)
-    d_order, d_content, lam_w_init, beta_w_init   C = [C_order | C_content]; d_content > 0 iken
-                d = d_order + d_content, C_content kaydirmasiz ve lam_w/beta_w ile solar (0: yok)
+    query       defteri Q ile ara; query_vectors, query_active, query_by Q'nun oklari (kapali: Q = C)
+    d_order, d_content   nokta uzayi D_SUM = d_order + d_content
+    c_content   C = [C_order | C_content]; C_content kaydirmasiz, lam_w/beta_w ile solar
+                (lam_w_init, beta_w_init).  Kapali: D_SUM'in tamami relative
     s_v_init, s_c_init, gate_0_init, s_p_init   ogrenilen S_v, S_c, gate_0, S_p'nin baslangici
     """
     old = RUNS.get(run_name)
@@ -380,12 +391,12 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
         steps=steps, seed=seed, batch=batch, eval_every=eval_every,
         save_every=save_every, weights_every=weights_every, resume=resume,
         compile=compile, vocab=vocab,
-        extra=extra, d=d, vectors=vectors, active=active, layers=layers,
+        extra=extra, vectors=vectors, active=active, layers=layers,
         t_max=t_max, squared=squared, S_p=S_p, start_norm=start_norm, lam=lam,
         chain=chain, c_cache=c_cache, cache_topk=cache_topk, cache_skip=cache_skip,
         s_v_init=s_v_init, s_c_init=s_c_init, gate_0_init=gate_0_init, s_p_init=s_p_init,
-        query_vectors=query_vectors, query_active=query_active, query_by=query_by,
-        d_order=d_order, d_content=d_content, lam_w_init=lam_w_init, beta_w_init=beta_w_init))
+        query=query, query_vectors=query_vectors, query_active=query_active, query_by=query_by,
+        c_content=c_content, d_order=d_order, d_content=d_content, lam_w_init=lam_w_init, beta_w_init=beta_w_init))
     run.thread.start()
     return f"{run_name} basladi" + (f"  ({os.path.basename(resume)}'den)" if resume else "")
 

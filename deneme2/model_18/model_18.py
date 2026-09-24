@@ -37,7 +37,7 @@ arasında ki uzaklık" ve "her vektör her an aktif olmamalı bunu model
     C_content  C'nin son d_content boyutu KAYDIRMASIZ, kelimeye ve boyuta gore solar:
                C_content_t = lam_w[w_t] * C_content_(t-1) + beta_w[w_t] * P_content[w_t]
              ilk d_order boyut C_order: bugunku relative zincir (sira), kendi icinde kaydirilir.
-             d = d_order + d_content.
+             Nokta uzayi her zaman D_SUM = d_order + d_content; C_CONTENT kapaliyken hepsi relative.
              Kaydirmali zincirde boyutlu solma icerigi izleyemez (icerik her adim boyut degistirir).
     CM       countermarch, geriye yuruyus: C_(t-1) = (C_t - RM_t*P[w_t]) / lam
              (relative: C_(t-1) = geri_kaydir((C_t - P[w_t]) / lam)).
@@ -54,28 +54,38 @@ if not torch.cuda.is_available():
     torch.use_deterministic_algorithms(True)
     torch.set_num_threads(1)
 
-d = 128        # dimension, nokta uzayi: sabit kodda 13 token'in %89'u okunur (belge/analiz/model_17_MAT/sabit_kod_cok.py)
+# TEPE = MODELIN SON YAPISI.  Kullanici, 24 Eylul: "bu yaptı modelin son yapısı olsun. ama farklı
+# değerler kullandığımızda bu ayrı bir yere yazarız".  Her kosunun degerleri defterindeki KOSU
+# satirinda ve kendi paketinde; tepeden farkli olan orada yazilir.
+#
+# Nokta uzayinin boyutu (dimension) D_SUM = D_ORDER + D_CONTENT; P, C, vektorler ve Q hep D_SUM.
+# Kullanici, 24 Eylul: "order 512 ve content 512 diye değerlere karar verdik ama sabit değil
+# değişken. D_sum da bunların toplamı".
+C_CONTENT = True    # C = [C_order | C_content].  False: D_SUM'in tamami relative (sira)
+D_ORDER = 512       # C_order'in boyutu: kaydirmali, sira
+D_CONTENT = 512     # C_content'in boyutu: kaydirmasiz, lam_w/beta_w ile solar (C_CONTENT acikken)
+D_SUM = D_ORDER + D_CONTENT
 VECTORS = 256  # layer basina vektor.  Kullanici: "V sayısı da 256 şimdilik"
 ACTIVE = 8     # her C'de aktif vektor; gerisi pasif.  OLCULMEDI.
 LAYERS = 4     # Kullanici: "4 katman olsun"
-T_MAX = 64     # RM sayisi = en uzun dizi
-# start'in baslangic boyu.  None: randn, boy ~sqrt(d) (MAT_* ve TS_PV_D1024 boyle kostu).
+T_MAX = 512    # RM sayisi = en uzun dizi (TinyStories hikayelerinin %98,6'si sigar)
+# start'in baslangic boyu.  None: randn, boy ~sqrt(D_SUM) (MAT_* ve TS_PV_D1024 boyle kostu).
 # Olculdu (TS_PV_D1024, 24 Eylul): boy ~32 iken |C| ~10; secimi start'larin KENDI boyu
 # belirliyordu -- secilenlerin %62'si (egitimde %82) en kisa 8 start, baglamdan bagimsiz.
 # Kullanici: "Startları küçük başlat".
-START_NORM = None
+START_NORM = 1.0
 # Zincirin solma carpani.  1: hic solmaz (lam gelmeden once kosan her sey).
 # Hesap (egitimsiz, 48 hikaye, 24 Eylul): lam 1'de 100. kelimede cos(C_t, C_t+1) 0,995 ve
 # ardisik secimde 8 vektorun 7,2'si ayni; lam 0,9'da cos 0,90 ve 4,7 -- her yerde ayni.
 # Kullanici: "λ da bizim için alsında Lr gibi birşey ... şu an 0.9 ile başlayabiliriz".
-LAM = 1.0
+LAM = 0.7
 # Sira nasil kodlanir.  "absolute": RM_t mutlak konuma bagli (onceki butun kosular).
 # "relative": her adimda eskiler bir kaydirilir; kaydirma sayisi kelimenin yasi.
 # Hesap (egitimsiz kNN, 1.500 hikaye depo, d 256, 24 Eylul): absolute lam 0,9 %13,3
 # (egitilmis LAM09 %14,8), relative lam 0,7 %34,8; hikayenin ortasinda %8,0 -> %31,0.
-CHAIN = "absolute"
-C_CACHE = False     # hikayenin kendi gecmisinden kopya (CCache) + gate
-CACHE_TOPK = 8      # defterden kac komsu; vektorlerdeki ACTIVE'in karsiligi.  None: butun gecmis
+CHAIN = "relative"
+C_CACHE = True      # hikayenin kendi gecmisinden kopya (CCache) + gate
+CACHE_TOPK = None   # defterden kac komsu (8: vektorlerdeki ACTIVE'in karsiligi).  None: butun gecmis
                     # (tavan, 24 Eylul: hedefin 8'in disinda kaldigi %47'ye top-8'de gradyan ulasmaz)
 CACHE_SKIP = 3      # son kac konum aranmaz: en yakin C_j hep bir onceki adim olurdu
 # Ogrenilen parametrelerin BASLANGIC degerleri.  Kullanici, 24 Eylul: "tepeye al, koşu ayarı olsunlar".
@@ -84,13 +94,11 @@ S_C_INIT = 3.0      # defter keskinligi S_c: e^3 = 20, kagit ustu testteki carpa
 GATE_0_INIT = -2.0  # gate'in baslangici: sigmoid(-2) = 0,12; kagit ustu en iyi sabit gate 0,1
 S_P_INIT = 0.0      # ogrenilen S_p (SCORE_BY_VOCAB LEARNED): e^0 = 1'den baslar
 # Q: defteri arayan sorgu.  Kullanici, 24 Eylul: "query (Q_t)", "64 ok, 8 aktif".
-QUERY_VECTORS = 0   # Q'yu tasiyan ok sayisi; 0: Q = C (sorgu yok)
+QUERY = True        # defteri Q ile ara.  False: Q = C
+QUERY_VECTORS = 64  # QUERY acikken: Q'yu tasiyan ok sayisi
 QUERY_ACTIVE = 8
 QUERY_BY = "C_m"    # oklar neye en yakin secilir: "C_m" (modelin dusuncesi) ya da "C".  OLCULMEDI.
-# C_content.  Kullanici, 24 Eylul: "512/512 mantıklı", "lam_w mantıklı beta_w mantıklı tam boyut olsun".
-D_ORDER = 0         # C_order'in boyutu: kaydirmali, sira
-D_CONTENT = 0       # C_content'in boyutu: kaydirmasiz; 0: yok, butun C relative ve boyutu d
-                    # D_CONTENT > 0 iken d = D_ORDER + D_CONTENT (d verilmez)
+# C_content.  Kullanici, 24 Eylul: "lam_w mantıklı beta_w mantıklı tam boyut olsun".
 LAM_W_INIT = 0.9    # lam_w'nin baslangici, her token her boyut.  OLCULMEDI.
 BETA_W_INIT = 0.5   # beta_w'nin baslangici.  OLCULMEDI.
 LAM_W_MIN = math.exp(-5)  # lam_w'nin alt siniri: parca hesabi fp32'de tasmasin (16 adim x 5 -> e^80)
@@ -152,8 +160,8 @@ class CCache(nn.Module):
     """C_cache ve gate.  Kullanici, 24 Eylul: "c_cche ve gate olsun"."""
 
     def __init__(self, d, topk=CACHE_TOPK, skip=CACHE_SKIP, s_c_init=S_C_INIT,
-                 gate_0_init=GATE_0_INIT, query_vectors=QUERY_VECTORS, query_active=QUERY_ACTIVE,
-                 query_by=QUERY_BY, randn=None, start_norm=None):
+                 gate_0_init=GATE_0_INIT, query=QUERY, query_vectors=QUERY_VECTORS,
+                 query_active=QUERY_ACTIVE, query_by=QUERY_BY, randn=None, start_norm=None):
         super().__init__()
         self.topk, self.skip = topk, skip
         self.S_c = nn.Parameter(torch.tensor(float(s_c_init)))     # benzerlik keskinligi
@@ -163,7 +171,7 @@ class CCache(nn.Module):
         assert query_by in ("C", "C_m"), query_by
         self.query_by = query_by
         self.query = (VectorLayer(d, query_vectors, min(query_active, query_vectors), randn, start_norm)
-                      if query_vectors else None)
+                      if query else None)
 
     def Q(self, C, C_m):
         """Sorgu Q_t (B,T,d): oklar yokken C_t."""
@@ -218,26 +226,26 @@ class PV(nn.Module):
     """NOKTA ve VEKTOR.  P sabit; ogrenilen vektorler, S_v, S_p (LEARNED), defter ve lam_w/beta_w."""
     arch = "pv"
 
-    def __init__(self, n, d=d, vectors=VECTORS, active=ACTIVE, layers=LAYERS,
+    def __init__(self, n, d_order=D_ORDER, d_content=D_CONTENT, vectors=VECTORS, active=ACTIVE, layers=LAYERS,
                  t_max=T_MAX, seed=0, squared=None, S_p=None, start_norm=START_NORM,
                  lam=LAM, chain=CHAIN, c_cache=C_CACHE, cache_topk=CACHE_TOPK,
                  cache_skip=CACHE_SKIP, s_v_init=S_V_INIT, s_c_init=S_C_INIT,
-                 gate_0_init=GATE_0_INIT, s_p_init=S_P_INIT, query_vectors=QUERY_VECTORS,
-                 query_active=QUERY_ACTIVE, query_by=QUERY_BY, d_order=D_ORDER, d_content=D_CONTENT,
+                 gate_0_init=GATE_0_INIT, s_p_init=S_P_INIT, query=QUERY, query_vectors=QUERY_VECTORS,
+                 query_active=QUERY_ACTIVE, query_by=QUERY_BY, c_content=C_CONTENT,
                  lam_w_init=LAM_W_INIT, beta_w_init=BETA_W_INIT):
-        """squared, S_p None: SCORE_BY_VOCAB'dan.  Verilirse tabloyu ezer.
+        """d_order + d_content = d_sum, nokta uzayinin boyutu.  squared, S_p None: SCORE_BY_VOCAB'dan.  Verilirse tabloyu ezer.
         start_norm: start'larin baslangic boyu (None: randn).  lam: zincirin solma carpani.
         chain: "absolute" (RM_t) ya da "relative" (kaydirma).  c_cache: hikayenin gecmisi + gate.
-        query_*: defteri arayan Q.  d_content: C'nin kaydirmasiz, lam_w/beta_w ile solan kismi;
-        verilirse d = d_order + d_content."""
+        query: defteri Q ile ara (query_*).  c_content: C = [C_order | C_content]; C_content
+        kaydirmasiz, lam_w/beta_w ile solar.  Kapaliyken d_sum'in tamami relative."""
         super().__init__()
-        if d_content:
-            assert chain == "relative" and d_order > 0, (chain, d_order, d_content)
-            d = d_order + d_content
-        self.d_order, self.d_content = (int(d_order), int(d_content)) if d_content else (d, 0)
+        d_sum = int(d_order) + int(d_content)
+        if c_content:
+            assert chain == "relative" and d_order > 0 and d_content > 0, (chain, d_order, d_content)
+        self.c_content, self.d_order, self.d_content, self.d_sum = bool(c_content), int(d_order), int(d_content), d_sum
         generator = torch.Generator().manual_seed(seed)
         randn = lambda *shape: torch.randn(*shape, generator=generator)
-        self.n, self.d, self.vectors = n, d, vectors
+        self.n, self.vectors = n, vectors
         self.active, self.layers, self.t_max = active, layers, t_max
         self.start_norm, self.lam = start_norm, float(lam)
         assert chain in ("absolute", "relative"), chain
@@ -248,20 +256,20 @@ class PV(nn.Module):
         self.S_p_learned = S_p == LEARNED
         self.S_p = (nn.Parameter(torch.tensor(float(s_p_init))) if self.S_p_learned
                     else float(S_p))
-        P = randn(n, d)
+        P = randn(n, d_sum)
         self.register_buffer("P", P / P.norm(dim=-1, keepdim=True))
-        RM = torch.randint(0, 2, (t_max, d), generator=generator).float() * 2 - 1
+        RM = torch.randint(0, 2, (t_max, d_sum), generator=generator).float() * 2 - 1
         self.register_buffer("RM", RM)
-        self.V = nn.ModuleList(VectorLayer(d, vectors, active, randn, start_norm, s_v_init)
+        self.V = nn.ModuleList(VectorLayer(d_sum, vectors, active, randn, start_norm, s_v_init)
                                for _ in range(layers))
-        if self.d_content:
+        if self.c_content:
             # lam_w, beta_w: token x boyut, sigmoid'den once (logit).  Sabit baslangic, randn cekmez.
             lam0 = (lam_w_init - LAM_W_MIN) / (1 - LAM_W_MIN)
             self.lam_w = nn.Parameter(torch.full((n, self.d_content), math.log(lam0 / (1 - lam0))))
             self.beta_w = nn.Parameter(torch.full((n, self.d_content),
                                                   math.log(beta_w_init / (1 - beta_w_init))))
         self.cache_topk, self.cache_skip = cache_topk, cache_skip
-        self.cache = (CCache(d, cache_topk, cache_skip, s_c_init, gate_0_init, query_vectors,
+        self.cache = (CCache(d_sum, cache_topk, cache_skip, s_c_init, gate_0_init, query, query_vectors,
                              query_active, query_by, randn, start_norm) if c_cache else None)
 
     def C(self, tokens):
@@ -271,7 +279,7 @@ class PV(nn.Module):
         if self.chain == "absolute":
             return self._decayed_sum(self.RM[:length] * self.P[tokens])
         x = self.P[tokens]
-        if not self.d_content:
+        if not self.c_content:
             return self._relative(x)
         d_o = self.d_order
         return torch.cat([self._relative(x[..., :d_o]), self._content(tokens, x[..., d_o:])], -1)
@@ -364,6 +372,21 @@ class PV(nn.Module):
         """Izlenebilirlik: her konumda her layer'da hangi vektorler aktifti."""
         return self.move(tokens)[1]
 
+    @classmethod
+    def from_package(cls, k):
+        """Kayitli paketten (t/w) model, agirliklari yuklu.  Alan gelmeden yazilmis pakette o ozellik
+        kapali; eski paketin 'd' alani d_sum'dir (hepsi relative)."""
+        m = cls(k["n"], d_order=k.get("d_order", k.get("d")), d_content=k.get("d_content", 0),
+                vectors=k["vectors"], active=k["active"], layers=k["layers"], t_max=k["t_max"],
+                seed=k["seed"], squared=k.get("squared", True), S_p=k.get("S_p", 1.0),
+                lam=k.get("lam", 1.0), chain=k.get("chain", "absolute"), c_cache=k.get("c_cache", False),
+                cache_topk=k.get("cache_topk", 8), cache_skip=k.get("cache_skip", 3),
+                query=k.get("query", False), query_vectors=k.get("query_vectors", QUERY_VECTORS),
+                query_active=k.get("query_active", QUERY_ACTIVE), query_by=k.get("query_by", QUERY_BY),
+                c_content=k.get("c_content", False))
+        m.load_state_dict(k["weights"])
+        return m.eval()
+
     def CM(self, tokens, K=None):
         """Countermarch: tek dizi tokens (T,), son halkadan K adim geri (None: basa kadar).
         Her adim: C_(t-1) = (C_t - RM_t*P[tokens_t]) / lam  (relative: geri kaydirilir).
@@ -376,7 +399,7 @@ class PV(nn.Module):
             w, p = tokens[position], self.P[tokens[position]]
             if self.chain == "absolute":
                 link = (link - self.RM[position] * p) / self.lam
-            elif not self.d_content:
+            elif not self.c_content:
                 link = torch.roll((link - p) / self.lam, -1)
             else:                                   # C_order geri kaydirilir, C_content lam_w'ye bolunur
                 lam, beta = self.lam_beta(w)
