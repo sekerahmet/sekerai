@@ -398,8 +398,14 @@ def t_ccache():
         seri = torch.randperm(50, generator=g)[:12]
         tekrar = torch.cat([seri, seri[:9]])[None]            # ikinci kez: ...x9 -> x10 bekleniyor
         kopya = int(m.scoreboard(tekrar)[0, -1].argmax()) == int(seri[9])
+        m.cache.gate_0.fill_(-1.0)
+        M = torch.ones(1, 30, dtype=torch.bool); M[0, 20:] = False
+        tam = float(torch.nn.functional.cross_entropy(m.scoreboard(w)[0, :-1], w[0, 1:],
+                                                      reduction="none")[:19].mean())
+        hizli = abs(float(m.loss(w, M)) - tam) < 1e-5
     kapi("c_cache: nedensel, log p, gate 0 == model, kopya", nedensel and normal and kapali and kopya,
          "tekrar eden dizide gate 1 -> sonraki kelime defterden")
+    kapi("c_cache hizli kayip == tam tablo", hizli, "egitim yolu (B,T,n) kurmadan ayni kayip")
 
     N, data = _veri()
     kok = tempfile.mkdtemp()

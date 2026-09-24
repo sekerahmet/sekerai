@@ -136,9 +136,9 @@ class CCache(nn.Module):
         self.gate_s = nn.Parameter(torch.zeros(()))         # ... ve en yakin C_j'nin sim'i
         self.gate_0 = nn.Parameter(torch.tensor(float(gate_0_init)))  # gate'in baslangici
 
-    def forward(self, tokens, C, C_m, scores):
-        """-> log p (B,T,n).  p = (1-gate) softmax(scores) + gate p_cache.  Nedensel: t, yalniz
-        j < t - skip C_j'lerini ve onlardan sonra gelen nxt_j = w_(j+1) <= w_t'yi gorur."""
+    def parts(self, tokens, C, C_m):
+        """-> (gate (B,T), W_c (B,T,k), ids (B,T,k)): defterin komsulari ve agirliklari.
+        Nedensel: t, yalniz j < t - skip C_j'lerini ve nxt_j = w_(j+1) <= w_t'yi gorur."""
         B, T = tokens.shape
         Cn = F.normalize(C, dim=-1)
         sim_all = Cn @ Cn.transpose(1, 2)                            # (B, t, j): cos(C_t, C_j)
@@ -150,13 +150,31 @@ class CCache(nn.Module):
         W_c = torch.softmax((sim * self.S_c.exp()).masked_fill(~valid, -1e4), -1) * valid
         nxt = torch.roll(tokens, -1, dims=1)                         # nxt_j = w_(j+1): C_j'den sonra gelen kelime
         ids = nxt.gather(1, j.reshape(B, -1)).reshape(B, T, k)
-        p_cache = torch.zeros_like(scores).scatter_add_(-1, ids, W_c)
         any_valid = valid.any(-1)
         sim_max = torch.where(any_valid, sim[..., 0], torch.zeros_like(sim[..., 0]))
         gate = torch.sigmoid(F.normalize(C_m, dim=-1) @ self.gate_d
                              + self.gate_s * sim_max + self.gate_0) * any_valid
+        return gate, W_c, ids
+
+    def forward(self, tokens, C, C_m, scores):
+        """-> log p (B,T,n), TAM tablo: olcum ve uretim icin.  p = (1-gate) softmax(scores) + gate p_cache."""
+        gate, W_c, ids = self.parts(tokens, C, C_m)
+        p_cache = torch.zeros_like(scores).scatter_add_(-1, ids, W_c)
         gate = gate.unsqueeze(-1)
         return torch.logaddexp(torch.log1p(-gate) + torch.log_softmax(scores, -1),
+                               torch.log(gate + 1e-12) + torch.log(p_cache + 1e-12))
+
+    def target_logp(self, tokens, C, C_m, scores):
+        """-> log p(w_(t+1)) (B,T-1): EGITIM yolu.  Kayip yalniz dogru kelimeyi ister: defter
+        tarafi k komsudan hesaplanir, (B,T,n) p_cache ve karisim tablosu KURULMAZ.
+        forward()'un dogru kelimedeki degeriyle ayni (tests: t_ccache)."""
+        gate, W_c, ids = self.parts(tokens, C, C_m)
+        target = tokens[:, 1:]
+        s = scores[:, :-1]
+        log_model = s.gather(-1, target[..., None])[..., 0] - s.logsumexp(-1)
+        p_cache = (W_c[:, :-1] * (ids[:, :-1] == target[..., None])).sum(-1)
+        gate = gate[:, :-1]
+        return torch.logaddexp(torch.log1p(-gate) + log_model,
                                torch.log(gate + 1e-12) + torch.log(p_cache + 1e-12))
 
 
@@ -251,6 +269,14 @@ class PV(nn.Module):
     def loss(self, tokens, targets_mask=None):
         """SONRAKI TOKEN: konum j, j+1'i tahmin eder; targets_mask verilirse
         yalniz orada isaretli hedefler sayilir."""
+        if self.cache is not None:                        # hizli yol: yalniz dogru kelimenin log p'si
+            C = self.C(tokens)
+            C_m = self._layers(C)[0]
+            nll = -self.cache.target_logp(tokens, C, C_m, self.score(C_m))
+            if targets_mask is None:
+                return nll.mean()
+            counted = targets_mask[:, 1:].to(nll.dtype)
+            return (nll * counted).sum() / counted.sum()
         scores = self.scoreboard(tokens, targets_mask)[:, :-1].reshape(-1, self.n)   # son konumun hedefi yok
         targets = tokens[:, 1:].reshape(-1)                                            # bir kaydirilmis: gercek sonraki token
         if targets_mask is None:
