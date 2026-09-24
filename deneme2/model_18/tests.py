@@ -22,7 +22,7 @@ KUCUK = dict(d_order=16, d_content=0, vectors=8, active=2, layers=2)   # egitim 
 # Kapilar parcalari TEK TEK sinar: tepedeki tasarimin (model_18) ozellikleri burada KAPALI baslar,
 # her kapi sinadigini acar.  Tepenin kendisi t_tepe'de.
 SADE = dict(d_order=128, d_content=0, t_max=64, start_norm=None, lam=1.0, chain="absolute",
-            c_cache=False, cache_topk=8, query=False, c_content=False)
+            c_cache=False, cache_topk=8, query=False, c_content=False, select="distance")
 
 
 def PV(n, **ayar):
@@ -600,6 +600,47 @@ def t_query():
          "kapaliyken eski paket surer; cache_topk None, 8 ok, d_order 8 + d_content 8")
 
 
+# --- 20.  SELECT: "direction" katman 1'den itibaren boydan bagimsiz secer; katman 0 ve "distance" ayni
+def t_select():
+    import model_18 as M
+    torch.manual_seed(0)
+    w = torch.randint(0, 50, (2, 30))
+    kw = dict(d_order=64, t_max=64, lam=0.7, chain="relative", start_norm=1.0)
+    uz, yon = PV(50, **kw), PV(50, select="direction", **kw)
+    with torch.no_grad():
+        for m_ in (uz, yon):
+            for L in m_.V:
+                L.finish.add_(3.0 * torch.randn_like(L.finish))     # hareket buyuk: boy secimi ezer
+    ayni0 = torch.equal(uz.V[0](uz.C(w))[1], yon.V[0](yon.C(w))[1])  # katman 0 C'ye uzakliga gore
+    x = yon.V[0](yon.C(w))[0]
+    L1 = yon.V[1]
+    boydan = torch.equal(L1(x)[1], L1(x, by=5.0 * x)[1])               # yone bakar: 5 kat boy ayni secim
+    uz_boy = not torch.equal(uz.V[1](x)[1], uz.V[1](x, by=5.0 * x)[1])  # distance: boy secimi degistirir
+    q = PV(50, c_cache=True, query=True, query_vectors=16, query_active=4, select="direction", **kw)
+    varsayilan = M.SELECT == "distance" and PV(50, **kw).V[1].direction is False
+    kapi("SELECT direction: katman 1+ boydan bagimsiz, katman 0 ayni",
+         ayni0 and boydan and uz_boy and q.cache.query.direction and varsayilan,
+         "distance'ta 5 kat boy secimi degistiriyor, direction'da degistirmiyor")
+
+    N, data = _veri()
+    kok = tempfile.mkdtemp()
+    try:
+        r = TR.RUNS["S"] = TR.Run("S", kok)
+        _run(r, data, N, _sifir, "cpu", 2e-3, 4, 0, 8, 2, 4, chain="relative", lam=0.7, start_norm=1.0,
+             c_cache=True, select="direction", **KUCUK)
+        egitim = r.result.get("step") == 4 and torch.isfinite(r.result["step_losses"]).all()
+        try:
+            r = TR.RUNS["S"] = TR.Run("S", kok)
+            _run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 2, 4, resume=kok + "/S/t4.pt", chain="relative",
+                 lam=0.7, start_norm=1.0, c_cache=True, select="distance", **KUCUK)
+            yakaladi = False
+        except ValueError as h:
+            yakaladi = "select" in str(h)
+    finally:
+        shutil.rmtree(kok, ignore_errors=True)
+    kapi("SELECT egitilir; surdurme farki yakalar", bool(egitim) and yakaladi, "direction -> distance")
+
+
 # ============================================================
 # DATA_STORIES -- TinyStories (model_17 veri_t17 + olcme_17'den).
 # ============================================================
@@ -795,7 +836,7 @@ def t_notebook(yol=None):
 if __name__ == "__main__":
     print("tests (model_18)")
     for f in (t_zincir, t_nedensel, t_sessiz, t_cm, t_payda, t_gradyan,
-              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_tepe, t_mat_pencere,
+              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_tepe, t_select, t_mat_pencere,
               t_mat_sor, t_mat_basamak, t_mat_egitim, t_stories, t_notebook):
         f()
     t_notebook(os.path.join(os.path.dirname(os.path.abspath(__file__)),

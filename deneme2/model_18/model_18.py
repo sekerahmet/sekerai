@@ -67,6 +67,12 @@ D_CONTENT = 512     # C_content'in boyutu: kaydirmasiz, lam_w/beta_w ile solar (
 D_SUM = D_ORDER + D_CONTENT
 VECTORS = 256  # layer basina vektor.  Kullanici: "V sayısı da 256 şimdilik"
 ACTIVE = 8     # her C'de aktif vektor; gerisi pasif.  OLCULMEDI.
+# Aktif vektorler nasil secilir.  "distance": en yakin start (ham uzaklik).  "direction": katman 1'den
+# itibaren tasinmis nokta ve start'lar birim boya indirilir, en yakin ACI (katman 0 C'yi uzakliga gore).
+# Olculdu (CCACHE t10000, egitimsiz): tasinmis noktanin boyu (|C| 1,4 -> 14) secimi eziyor; derin
+# katmanlarda isin %90'ini 10 / 6 vektor yapiyor, C_m 1024 boyutun 40 yonunde.  "direction" ile ayni
+# vektorler: 17 / 12 vektor, C_m 113 yon.  Kullanici, 24 Eylul: "b'yi ekle, adı SELECT olsun".
+SELECT = "distance"
 LAYERS = 4     # Kullanici: "4 katman olsun"
 T_MAX = 512    # RM sayisi = en uzun dizi (TinyStories hikayelerinin %98,6'si sigar)
 # start'in baslangic boyu.  None: randn, boy ~sqrt(D_SUM) (MAT_* ve TS_PV_D1024 boyle kostu).
@@ -137,8 +143,9 @@ class VectorLayer(nn.Module):
     """Bir layer: `vectors` tane (start, finish).  C'ye en yakin `active`
     tane start AKTIF; C, aktif vektorlerin agirlikli ortalamasiyla tasinir."""
 
-    def __init__(self, d, vectors, active, randn, start_norm=None, s_v_init=S_V_INIT):
+    def __init__(self, d, vectors, active, randn, start_norm=None, s_v_init=S_V_INIT, direction=False):
         super().__init__()
+        self.direction = direction                                # secim yalniz yone bakar (SELECT)
         start = randn(vectors, d)
         if start_norm is not None:
             start = start * (start_norm / d ** 0.5)               # boy ~start_norm: secimi C belirler
@@ -149,8 +156,12 @@ class VectorLayer(nn.Module):
 
     def forward(self, C, by=None):
         """C (..., d) -> (C_m, active_ids (..., active)).  by: aktifleri secen nokta (None: C)."""
-        D_s2, active_ids = distance(C if by is None else by, self.start).topk(
-            self.active, dim=-1, largest=False)
+        by = C if by is None else by
+        if self.direction:                                        # 2 - 2 cos: boy secimi ezmez
+            by, start = F.normalize(by, dim=-1), F.normalize(self.start, dim=-1)
+        else:
+            start = self.start
+        D_s2, active_ids = distance(by, start).topk(self.active, dim=-1, largest=False)
         W_v = torch.softmax(-D_s2 * self.S_v.exp(), -1)          # payda: aktiflerin toplami 1
         V_a = (self.finish - self.start)[active_ids]             # (..., active, d)
         return C + (W_v.unsqueeze(-1) * V_a).sum(-2), active_ids
@@ -161,7 +172,8 @@ class CCache(nn.Module):
 
     def __init__(self, d, topk=CACHE_TOPK, skip=CACHE_SKIP, s_c_init=S_C_INIT,
                  gate_0_init=GATE_0_INIT, query=QUERY, query_vectors=QUERY_VECTORS,
-                 query_active=QUERY_ACTIVE, query_by=QUERY_BY, randn=None, start_norm=None):
+                 query_active=QUERY_ACTIVE, query_by=QUERY_BY, randn=None, start_norm=None,
+                 select=SELECT):
         super().__init__()
         self.topk, self.skip = topk, skip
         self.S_c = nn.Parameter(torch.tensor(float(s_c_init)))     # benzerlik keskinligi
@@ -170,8 +182,8 @@ class CCache(nn.Module):
         self.gate_0 = nn.Parameter(torch.tensor(float(gate_0_init)))  # gate'in baslangici
         assert query_by in ("C", "C_m"), query_by
         self.query_by = query_by
-        self.query = (VectorLayer(d, query_vectors, min(query_active, query_vectors), randn, start_norm)
-                      if query else None)
+        self.query = (VectorLayer(d, query_vectors, min(query_active, query_vectors), randn, start_norm,
+                                  direction=select == "direction") if query else None)
 
     def Q(self, C, C_m):
         """Sorgu Q_t (B,T,d): oklar yokken C_t."""
@@ -231,13 +243,14 @@ class PV(nn.Module):
                  lam=LAM, chain=CHAIN, c_cache=C_CACHE, cache_topk=CACHE_TOPK,
                  cache_skip=CACHE_SKIP, s_v_init=S_V_INIT, s_c_init=S_C_INIT,
                  gate_0_init=GATE_0_INIT, s_p_init=S_P_INIT, query=QUERY, query_vectors=QUERY_VECTORS,
-                 query_active=QUERY_ACTIVE, query_by=QUERY_BY, c_content=C_CONTENT,
+                 query_active=QUERY_ACTIVE, query_by=QUERY_BY, c_content=C_CONTENT, select=SELECT,
                  lam_w_init=LAM_W_INIT, beta_w_init=BETA_W_INIT):
         """d_order + d_content = d_sum, nokta uzayinin boyutu.  squared, S_p None: SCORE_BY_VOCAB'dan.  Verilirse tabloyu ezer.
         start_norm: start'larin baslangic boyu (None: randn).  lam: zincirin solma carpani.
         chain: "absolute" (RM_t) ya da "relative" (kaydirma).  c_cache: hikayenin gecmisi + gate.
         query: defteri Q ile ara (query_*).  c_content: C = [C_order | C_content]; C_content
-        kaydirmasiz, lam_w/beta_w ile solar.  Kapaliyken d_sum'in tamami relative."""
+        kaydirmasiz, lam_w/beta_w ile solar.  Kapaliyken d_sum'in tamami relative.
+        select: aktif vektor secimi, "distance" ya da "direction" (katman 1'den itibaren)."""
         super().__init__()
         d_sum = int(d_order) + int(d_content)
         if c_content:
@@ -249,6 +262,8 @@ class PV(nn.Module):
         self.active, self.layers, self.t_max = active, layers, t_max
         self.start_norm, self.lam = start_norm, float(lam)
         assert chain in ("absolute", "relative"), chain
+        assert select in ("distance", "direction"), select
+        self.select = select
         self.chain = chain
         rule = score_rule(n)
         self.squared = rule[0] if squared is None else squared
@@ -260,8 +275,9 @@ class PV(nn.Module):
         self.register_buffer("P", P / P.norm(dim=-1, keepdim=True))
         RM = torch.randint(0, 2, (t_max, d_sum), generator=generator).float() * 2 - 1
         self.register_buffer("RM", RM)
-        self.V = nn.ModuleList(VectorLayer(d_sum, vectors, active, randn, start_norm, s_v_init)
-                               for _ in range(layers))
+        self.V = nn.ModuleList(VectorLayer(d_sum, vectors, active, randn, start_norm, s_v_init,
+                                           direction=select == "direction" and i > 0)
+                               for i in range(layers))
         if self.c_content:
             # lam_w, beta_w: token x boyut, sigmoid'den once (logit).  Sabit baslangic, randn cekmez.
             lam0 = (lam_w_init - LAM_W_MIN) / (1 - LAM_W_MIN)
@@ -270,7 +286,7 @@ class PV(nn.Module):
                                                   math.log(beta_w_init / (1 - beta_w_init))))
         self.cache_topk, self.cache_skip = cache_topk, cache_skip
         self.cache = (CCache(d_sum, cache_topk, cache_skip, s_c_init, gate_0_init, query, query_vectors,
-                             query_active, query_by, randn, start_norm) if c_cache else None)
+                             query_active, query_by, randn, start_norm, select) if c_cache else None)
 
     def C(self, tokens):
         """tokens (B,T) -> zincir (B,T,d).  Nedensel: C_t yalniz <= t'yi toplar."""
@@ -383,7 +399,7 @@ class PV(nn.Module):
                 cache_topk=k.get("cache_topk", 8), cache_skip=k.get("cache_skip", 3),
                 query=k.get("query", False), query_vectors=k.get("query_vectors", QUERY_VECTORS),
                 query_active=k.get("query_active", QUERY_ACTIVE), query_by=k.get("query_by", QUERY_BY),
-                c_content=k.get("c_content", False))
+                c_content=k.get("c_content", False), select=k.get("select", "distance"))
         m.load_state_dict(k["weights"])
         return m.eval()
 
