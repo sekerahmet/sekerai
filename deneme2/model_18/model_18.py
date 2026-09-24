@@ -144,6 +144,9 @@ QUERY_BY = "C_m"    # oklar neye en yakin secilir: "C_m" (modelin dusuncesi) ya 
 # C_content.  Kullanici, 24 Eylul: "lam_w mantıklı beta_w mantıklı tam boyut olsun".
 LAM_W_INIT = 0.9    # lam_w'nin baslangici, her token her boyut.  OLCULMEDI.
 BETA_W_INIT = 0.5   # beta_w'nin baslangici.  OLCULMEDI.
+# lam_w / beta_w kelime x boyut (4.099.072 parametre, modelin %57'si) ya da kelime basina TEK deger (True).
+# Incelik hic kiyaslanmadi (hakem notu 1.8).
+CONTENT_SCALAR = False
 LAM_W_MIN = math.exp(-5)  # lam_w'nin alt siniri: parca hesabi fp32'de tasmasin (16 adim x 5 -> e^80)
 CONTENT_CHUNK = 16
 # Attention (Gecmisten): defterin C'leri icerikle secilir, getirilen C_m'ye EKLENIR (cikista karismaz).
@@ -380,13 +383,15 @@ class PV(nn.Module):
                  gate_0_init=GATE_0_INIT, s_p_init=None, query=QUERY, query_vectors=QUERY_VECTORS,
                  query_active=QUERY_ACTIVE, query_by=QUERY_BY, c_content=C_CONTENT, select=SELECT,
                  load_balance=LOAD_BALANCE, c_m_norm=C_M_NORM,
-                 lam_w_init=LAM_W_INIT, beta_w_init=BETA_W_INIT, attention=ATTENTION, attn_heads=ATTN_HEADS,
+                 lam_w_init=LAM_W_INIT, beta_w_init=BETA_W_INIT, content_scalar=CONTENT_SCALAR,
+                 attention=ATTENTION, attn_heads=ATTN_HEADS,
                  attn_dim=ATTN_DIM, attn_after=ATTN_AFTER, attn_value=ATTN_VALUE):
         """d_order + d_content = d_sum, nokta uzayinin boyutu.  squared, S_p None: SCORE_BY_VOCAB'dan.  Verilirse tabloyu ezer.
         start_norm: start'larin baslangic boyu (None: randn).  lam: zincirin solma carpani.
         chain: "absolute" (RM_t) ya da "relative" (kaydirma).  c_cache: hikayenin gecmisi + gate.
         query: defteri Q ile ara (query_*).  c_content: C = [C_order | C_content]; C_content
-        kaydirmasiz, lam_w/beta_w ile solar.  Kapaliyken d_sum'in tamami relative.
+        kaydirmasiz, lam_w/beta_w ile solar (content_scalar: kelime basina tek deger).  Kapaliyken d_sum'in
+        tamami relative.
         select: aktif vektor secimi, "distance", "direction" (katman 1'den itibaren) ya da "direction_all".
         c_m_norm: puan C_m/|C_m| ile (kure); s_p_init None: C_M_NORM_P formulunden, kapaliyken S_P_INIT.
         attention: sozluk katmani attn_after'den sonra Gecmisten (attn_heads x attn_dim, attn_value)."""
@@ -421,12 +426,14 @@ class PV(nn.Module):
         self.V = nn.ModuleList(VectorLayer(d_sum, vectors, active, randn, start_norm, s_v_init,
                                            direction=select == "direction_all" or (select == "direction" and i > 0))
                                for i in range(layers))
+        self.content_scalar = bool(content_scalar)
         if self.c_content:
-            # lam_w, beta_w: token x boyut, sigmoid'den once (logit).  Sabit baslangic, randn cekmez.
+            # lam_w, beta_w: token x boyut (ya da token basina tek deger), sigmoid'den once (logit).  Sabit
+            # baslangic, randn cekmez.
             lam0 = (lam_w_init - LAM_W_MIN) / (1 - LAM_W_MIN)
-            self.lam_w = nn.Parameter(torch.full((n, self.d_content), math.log(lam0 / (1 - lam0))))
-            self.beta_w = nn.Parameter(torch.full((n, self.d_content),
-                                                  math.log(beta_w_init / (1 - beta_w_init))))
+            genis = 1 if self.content_scalar else self.d_content
+            self.lam_w = nn.Parameter(torch.full((n, genis), math.log(lam0 / (1 - lam0))))
+            self.beta_w = nn.Parameter(torch.full((n, genis), math.log(beta_w_init / (1 - beta_w_init))))
         self.cache_topk, self.cache_skip = cache_topk, cache_skip
         self.cache = (CCache(d_sum, cache_topk, cache_skip, s_c_init, gate_0_init, query, query_vectors,
                              query_active, query_by, randn, start_norm, select) if c_cache else None)
@@ -641,7 +648,8 @@ class PV(nn.Module):
                 cache_topk=k.get("cache_topk", 8), cache_skip=k.get("cache_skip", 3),
                 query=k.get("query", False), query_vectors=k.get("query_vectors", QUERY_VECTORS),
                 query_active=k.get("query_active", QUERY_ACTIVE), query_by=k.get("query_by", QUERY_BY),
-                c_content=k.get("c_content", False), select=k.get("select", "distance"),
+                c_content=k.get("c_content", False), content_scalar=k.get("content_scalar", False),
+                select=k.get("select", "distance"),
                 load_balance=k.get("load_balance", 0.0), c_m_norm=k.get("c_m_norm", False),
                 attention=k.get("attention", False),
                 attn_heads=k.get("attn_heads", ATTN_HEADS), attn_dim=k.get("attn_dim", ATTN_DIM),

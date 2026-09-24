@@ -41,7 +41,8 @@ RUNS = {}        # run_name -> Run
 MUST_MATCH = ("arch", "n", "T", "batch", "lr", "seed", "d_sum", "vectors",
               "active", "layers", "t_max", "squared", "S_p", "start_norm", "lam", "chain", "c_cache", "cache_topk",
               "cache_skip", "s_v_init", "s_c_init", "gate_0_init", "s_p_init", "query", "query_vectors",
-              "query_active", "query_by", "c_content", "d_order", "d_content", "lam_w_init", "beta_w_init", "select", "load_balance", "c_m_norm",
+              "query_active", "query_by", "c_content", "d_order", "d_content", "lam_w_init", "beta_w_init",
+              "content_scalar", "select", "load_balance", "c_m_norm",
               "attention", "attn_heads", "attn_dim", "attn_after", "attn_value",
               "data_fingerprint", "vocab")
 # Alan eklenmeden once yazilan paketlerdeki deger: skor -D^2, carpansiz.
@@ -51,7 +52,8 @@ BEFORE_FIELD = {"squared": True, "S_p": 1.0, "start_norm": "randn", "lam": 1.0,
                 "s_v_init": 0.0, "s_c_init": 3.0, "gate_0_init": -2.0, "s_p_init": 0.0,
                 "query": False, "query_vectors": 0, "query_active": 8, "query_by": "C_m",
                 "c_content": False, "d_order": 0, "d_content": 0, "select": "distance", "load_balance": 0.0, "c_m_norm": False,
-                "lam_w_init": 0.9, "beta_w_init": 0.5, "attention": False, "attn_heads": 0, "attn_dim": 0,
+                "lam_w_init": 0.9, "beta_w_init": 0.5, "content_scalar": False, "attention": False, "attn_heads": 0,
+                "attn_dim": 0,
                 "attn_after": 0, "attn_value": "state"}
 
 # HIZ, hesap AYNI (tests: t_speed): batch en uzun hikayesine kirpilir (nedensel, dolgu sagda), puan
@@ -157,7 +159,7 @@ def _snapshot(model, optimizer, sampler, record):
 
 # Kapali ozelligin ayarlari modele girmez: iki taraf da kapaliysa karsilastirilmaz.
 SWITCHED = {"query": ("query_vectors", "query_active", "query_by"),
-            "c_content": ("d_order", "d_content", "lam_w_init", "beta_w_init"),
+            "c_content": ("d_order", "d_content", "lam_w_init", "beta_w_init", "content_scalar"),
             "attention": ("attn_heads", "attn_dim", "attn_after", "attn_value")}
 
 
@@ -174,6 +176,11 @@ def _check_resume(package, fixed):
     if diffs:
         raise ValueError("surdurme paketi bu cagriyla uyusmuyor -- "
                          + "; ".join(diffs))
+    # LR sogutma plani: planli paket AYNI planla surer; plansiz (sabit LR) paketten yeni planla dal acilabilir.
+    plan = lambda k: (k.get("decay_start"), k.get("decay_end"), k.get("decay_floor"))
+    if package.get("decay_start") is not None and plan(package) != plan(fixed):
+        raise ValueError("surdurme paketi bu cagriyla uyusmuyor -- LR sogutma plani (baslangic, son, taban): "
+                         "paket %s, cagri %s" % (plan(package), plan(fixed)))
 
 
 def _header(record):
@@ -188,7 +195,8 @@ def _line(record, elapsed, mark=""):
     return (f"{record['step']:6d}  {record['loss']:7.3f}  {record['train_acc']:7.4f}  "
             f"{record['heldout_acc']:9.4f}  {_ppl(record['heldout_ce'])}  "
             + "".join(f"{v:12.4f}" for v in record["heldout_diag"].values())
-            + f"  {elapsed:6.0f}{mark}" + (f"  olcum {s['train'] + s['heldout']:.1f} sn" if s else ""))
+            + f"  {elapsed:6.0f}{mark}" + (f"  olcum {s['train'] + s['heldout']:.1f} sn" if s else "")
+            + (f"  lr {record['lr_now']:.2e}" if record.get("decay_start") is not None else ""))
 
 
 # Parca basina gradyan normu, yalniz olcum adimlarinda: olu parca (0) ve patlama gorunsun.
@@ -264,8 +272,10 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
          query=M18.QUERY, query_vectors=M18.QUERY_VECTORS, query_active=M18.QUERY_ACTIVE,
          query_by=M18.QUERY_BY, c_content=M18.C_CONTENT,
          d_order=M18.D_ORDER, d_content=M18.D_CONTENT, lam_w_init=M18.LAM_W_INIT, beta_w_init=M18.BETA_W_INIT,
+         content_scalar=M18.CONTENT_SCALAR,
          select=M18.SELECT, load_balance=M18.LOAD_BALANCE, c_m_norm=M18.C_M_NORM, attention=M18.ATTENTION,
-         attn_heads=M18.ATTN_HEADS, attn_dim=M18.ATTN_DIM, attn_after=M18.ATTN_AFTER, attn_value=M18.ATTN_VALUE):
+         attn_heads=M18.ATTN_HEADS, attn_dim=M18.ATTN_DIM, attn_after=M18.ATTN_AFTER, attn_value=M18.ATTN_VALUE,
+         decay_start=None, decay_floor=0.1):
     torch.manual_seed(seed)
     model = PV(n_vocab, vectors=vectors, active=active, layers=layers,
                t_max=t_max, seed=seed, squared=squared, S_p=S_p,
@@ -274,6 +284,7 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
                s_c_init=s_c_init, gate_0_init=gate_0_init, s_p_init=s_p_init,
                query=query, query_vectors=query_vectors, query_active=query_active, query_by=query_by,
                c_content=c_content, d_order=d_order, d_content=d_content, lam_w_init=lam_w_init, beta_w_init=beta_w_init,
+               content_scalar=content_scalar,
                select=select, load_balance=load_balance, c_m_norm=c_m_norm, attention=attention,
                attn_heads=attn_heads, attn_dim=attn_dim, attn_after=attn_after, attn_value=attn_value).to(device)
     # torch.compile: eski mimaride 3,90 kat olculdu (model_17 train_17); PV'de OLCULMEDI.
@@ -300,11 +311,15 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
                  s_v_init=float(s_v_init), s_c_init=float(s_c_init),
                  gate_0_init=float(gate_0_init), s_p_init=model.s_p_init,
                  query=bool(query), query_vectors=int(query_vectors), query_active=int(query_active),
-                 query_by=query_by, c_content=bool(c_content), d_order=model.d_order, d_content=model.d_content, lam_w_init=float(lam_w_init), beta_w_init=float(beta_w_init), select=select,
+                 query_by=query_by, c_content=bool(c_content), d_order=model.d_order, d_content=model.d_content, lam_w_init=float(lam_w_init), beta_w_init=float(beta_w_init),
+                 content_scalar=bool(content_scalar), select=select,
                  load_balance=float(load_balance), c_m_norm=bool(c_m_norm), attention=bool(attention),
                  attn_heads=int(attn_heads), attn_dim=int(attn_dim), attn_after=int(attn_after), attn_value=attn_value,
                  seed=seed, batch=batch, T=max_length, n_params=n_params,
                  compile=compile,
+                 decay_start=None if decay_start is None else int(decay_start),
+                 decay_end=None if decay_start is None else int(steps),
+                 decay_floor=None if decay_start is None else float(decay_floor),
                  data_fingerprint=_fingerprint(questions, filled_mask, targets_mask),
                  vocab=None if vocab is None else [str(a) for a in vocab])
 
@@ -332,11 +347,12 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
     run.note(f"sorular {n_questions:,} x {max_length}   dolgu %{100 * (1 - fill_ratio):.1f}")
     run.note(f"arch {model.arch}  D_SUM {model.d_sum} ({model.d_order}+{model.d_content}) vectors {vectors} active {active} "
              f"layers {layers}  squared {fixed['squared']} S_p {fixed['S_p']}  "
-             f"start_norm {fixed['start_norm']}  lam {fixed['lam']}  chain {chain}  c_cache {c_cache} (topk {cache_topk} skip {cache_skip} Q {query} {query_vectors}/{query_active} {query_by})  c_content {c_content} (lam_w {lam_w_init} beta_w {beta_w_init})  select {select}  load_balance {load_balance}  c_m_norm {c_m_norm} (S_p {model.s_p_init:.3f})  attention {attention} ({attn_heads}x{attn_dim} katman {attn_after}'dan sonra, {attn_value})  lr {lr} seed {seed}  sozluk {n_vocab}  "
+             f"start_norm {fixed['start_norm']}  lam {fixed['lam']}  chain {chain}  c_cache {c_cache} (topk {cache_topk} skip {cache_skip} Q {query} {query_vectors}/{query_active} {query_by})  c_content {c_content} (lam_w {lam_w_init} beta_w {beta_w_init}, {'kelime basina tek deger' if content_scalar else 'kelime x boyut'})  select {select}  load_balance {load_balance}  c_m_norm {c_m_norm} (S_p {model.s_p_init:.3f})  attention {attention} ({attn_heads}x{attn_dim} katman {attn_after}'dan sonra, {attn_value})  lr {lr} seed {seed}  sozluk {n_vocab}  "
              f"parametre {n_params:,}")
     run.note(f"batch {batch}   epok = {n_questions / batch:,.0f} adim   veri izi "
              f"{fixed['data_fingerprint']}   olcum her {eval_every}   tam yedek her "
-             f"{save_every}   agirlik her {weights_every}")
+             f"{save_every}   agirlik her {weights_every}"
+             + (f"   LR SOGUTMA cosine {decay_start} -> {steps}, taban lr x {decay_floor}" if decay_start is not None else ""))
     run.note("OLCUT: accuracy (train / heldout); kayip yalniz hedeflerde")
     run.flush()
 
@@ -360,7 +376,8 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
                       train_ce=train_result.get("ce"), heldout_ce=heldout_result.get("ce"),
                       train_diag=train_result.get("diag", {}),
                       heldout_diag=heldout_result.get("diag", {}),
-                      health=heldout_result.get("health"), grads=grads, olcum_sn=sure)
+                      health=heldout_result.get("health"), grads=grads, olcum_sn=sure,
+                      lr_now=optimizer.param_groups[0]["lr"])
         if not run.result:
             run.note(_header(record))
         run.result = dict(record, model=model)
@@ -388,6 +405,10 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
         full_save, weights_save = step % save_every == 0, step % weights_every == 0
         measure = step % eval_every == 0 or full_save or weights_save
         grads = _grad_norms(model) if measure else None       # yalniz olcum adiminda senkron
+        if decay_start is not None:                            # cosine: decay_start'ta lr, steps'te lr x taban
+            k = min(1.0, max(0.0, (step - decay_start) / max(1, steps - decay_start)))
+            for g in optimizer.param_groups:
+                g["lr"] = lr * (decay_floor + (1 - decay_floor) * 0.5 * (1 + math.cos(math.pi * k)))
         optimizer.step()
         last_step = step
         if measure:
@@ -468,8 +489,10 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
           query=M18.QUERY, query_vectors=M18.QUERY_VECTORS, query_active=M18.QUERY_ACTIVE,
          query_by=M18.QUERY_BY, c_content=M18.C_CONTENT,
           d_order=M18.D_ORDER, d_content=M18.D_CONTENT, lam_w_init=M18.LAM_W_INIT, beta_w_init=M18.BETA_W_INIT,
+          content_scalar=M18.CONTENT_SCALAR,
          select=M18.SELECT, load_balance=M18.LOAD_BALANCE, c_m_norm=M18.C_M_NORM, attention=M18.ATTENTION,
-          attn_heads=M18.ATTN_HEADS, attn_dim=M18.ATTN_DIM, attn_after=M18.ATTN_AFTER, attn_value=M18.ATTN_VALUE):
+          attn_heads=M18.ATTN_HEADS, attn_dim=M18.ATTN_DIM, attn_after=M18.ATTN_AFTER, attn_value=M18.ATTN_VALUE,
+          decay_start=None, decay_floor=0.1):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
     data        (questions, filled_mask, targets_mask)
@@ -496,12 +519,14 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
     query       defteri Q ile ara; query_vectors, query_active, query_by Q'nun oklari (kapali: Q = C)
     d_order, d_content   nokta uzayi D_SUM = d_order + d_content
     c_content   C = [C_order | C_content]; C_content kaydirmasiz, lam_w/beta_w ile solar
-                (lam_w_init, beta_w_init).  Kapali: D_SUM'in tamami relative
-    select      aktif vektor secimi: "distance" ya da "direction" (katman 1'den itibaren yon)
+                (lam_w_init, beta_w_init; content_scalar: kelime basina tek deger).  Kapali: D_SUM'in tamami relative
+    select      aktif vektor secimi: "distance", "direction" (katman 1'den itibaren yon) ya da "direction_all"
     load_balance  kayba eklenen denge terimi katsayisi (0: yok): farkli C'ler farkli vektor kullansin
     c_m_norm    puan C_m/|C_m| ile (kelimelerin kuresi); s_p_init None iken C_M_NORM_P formulunden
     attention   sozluk katmani attn_after'den sonra Gecmisten (attn_heads x attn_dim; attn_value "state" / "point")
     s_v_init, s_c_init, gate_0_init, s_p_init   ogrenilen S_v, S_c, gate_0, S_p'nin baslangici
+    decay_start LR sogutmasi (None: sabit LR): decay_start'tan steps'e cosine, lr'den lr x decay_floor'a
+                (CLAUDE.md kural 4'un varsayilani: taban lr/10).  Plansiz pakette yeni planla dal acilabilir.
     """
     old = RUNS.get(run_name)
     if old is not None and old.alive:
@@ -525,8 +550,10 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
         s_v_init=s_v_init, s_c_init=s_c_init, gate_0_init=gate_0_init, s_p_init=s_p_init,
         query=query, query_vectors=query_vectors, query_active=query_active, query_by=query_by,
         c_content=c_content, d_order=d_order, d_content=d_content, lam_w_init=lam_w_init, beta_w_init=beta_w_init,
+        content_scalar=content_scalar,
         select=select, load_balance=load_balance, c_m_norm=c_m_norm, attention=attention, attn_heads=attn_heads,
-        attn_dim=attn_dim, attn_after=attn_after, attn_value=attn_value))
+        attn_dim=attn_dim, attn_after=attn_after, attn_value=attn_value,
+        decay_start=decay_start, decay_floor=decay_floor))
     run.thread.start()
     return f"{run_name} basladi" + (f"  ({os.path.basename(resume)}'den)" if resume else "")
 

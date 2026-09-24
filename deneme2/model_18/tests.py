@@ -504,6 +504,23 @@ def t_content():
          "45 adim, 16'lik parcalar, lam_w alt sinirda (e^-5) dahil")
     kapi("C_content: CM geri yuruyus, lam_w/beta_w gradyan alir", cm and grad)
 
+    torch.manual_seed(0)
+    s = PV(n, t_max=64, lam=0.7, chain="relative", c_content=True, d_order=d - dc, d_content=dc, content_scalar=True)
+    with torch.no_grad():
+        s.lam_w.normal_(0, 3); s.beta_w.normal_(0, 1)
+    Cs, (ls, bs) = s.C(w), s.lam_beta(w)
+    h, adim = torch.zeros(2, dc), []
+    for t in range(w.shape[1]):
+        h = ls[:, t] * h + bs[:, t] * s.P[w[:, t], d - dc:]
+        adim.append(h)
+    with torch.no_grad():
+        s.lam_w.clamp_(0, 3)
+    skaler = (s.lam_w.shape == (n, 1) and s.beta_w.shape == (n, 1)
+              and torch.allclose(Cs[..., d - dc:], torch.stack(adim, 1), atol=1e-5)
+              and all(torch.allclose(c, s.C(w[:1])[0, t], atol=1e-3) for t, c in s.CM(w[0], K=10)))
+    kapi("C_content kelime basina tek deger: parca == adim adim, CM", skaler,
+         "lam_w, beta_w (%d, 1): %d parametre" % (n, 2 * n))
+
     yok = PV(n, d_order=d, d_content=0, t_max=64, lam=0.7, chain="relative")
     kapali = PV(n, t_max=64, lam=0.7, chain="relative", d_order=d - dc, d_content=dc)
     ayni = torch.equal(yok.C(w), kapali.C(w)) and not hasattr(kapali, "lam_w")
@@ -1001,6 +1018,34 @@ def t_health():
          "%d saglik satiri" % satir)
 
 
+# --- 27.  LR SOGUTMASI: cosine decay_start -> steps, taban lr x floor; plansiz paketten dal acilir,
+# planli paket yalniz AYNI planla surer
+def t_decay():
+    N, data = _veri()
+    kok = tempfile.mkdtemp()
+    try:
+        r = TR.RUNS["LR"] = TR.Run("LR", kok)
+        _run(r, data, N, _sifir, "cpu", 2e-3, 4, 0, 8, 2, 4, **KUCUK)                       # sabit LR, t4
+        sabit = r.result["lr_now"] == 2e-3 and r.result["decay_start"] is None
+        r = TR.RUNS["LRD"] = TR.Run("LRD", kok)
+        _run(r, data, N, _sifir, "cpu", 2e-3, 8, 0, 8, 2, 4, resume=kok + "/LR/t4.pt", decay_start=4,
+             decay_floor=0.1, **KUCUK)                                                      # dal: 4 -> 8
+        satir = {s.split()[1]: s for s in r.log if len(s.split()) > 2 and s.split()[1].isdigit()}
+        plan = ("lr 1.10e-03" in satir.get("6", "") and "lr 2.00e-04" in satir.get("8", "")
+                and abs(r.result["lr_now"] - 2e-4) < 1e-12)               # adim 6: cos(pi/2); adim 8: taban
+        try:
+            r = TR.RUNS["LRD"] = TR.Run("LRD", kok)
+            _run(r, data, N, _sifir, "cpu", 2e-3, 10, 0, 8, 2, 4, resume=kok + "/LRD/t8.pt", decay_start=4,
+                 decay_floor=0.1, **KUCUK)                                  # plan (4, 8) -> (4, 10): durmali
+            yakaladi = False
+        except ValueError as h:
+            yakaladi = "sogutma" in str(h)
+    finally:
+        shutil.rmtree(kok, ignore_errors=True)
+    kapi("LR sogutmasi: cosine, taban lr x 0,1; sabitten dal, planli ayni planla", sabit and plan and yakaladi,
+         "adim 6: 1,10e-3, adim 8: 2,00e-4; plan degisince surdurme durur")
+
+
 # ============================================================
 # DATA_STORIES -- TinyStories (model_17 veri_t17 + olcme_17'den).
 # ============================================================
@@ -1224,7 +1269,7 @@ def t_notebook(yol=None):
 if __name__ == "__main__":
     print("tests (model_18)")
     for f in (t_zincir, t_nedensel, t_sessiz, t_cm, t_payda, t_gradyan,
-              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_tepe, t_select, t_hepsi, t_balance, t_cmnorm, t_speed, t_attention, t_health, t_mat_pencere,
+              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_tepe, t_select, t_hepsi, t_balance, t_cmnorm, t_speed, t_attention, t_health, t_decay, t_mat_pencere,
               t_mat_sor, t_mat_basamak, t_mat_egitim, t_stories, t_notebook):
         f()
     t_notebook(os.path.join(os.path.dirname(os.path.abspath(__file__)),
