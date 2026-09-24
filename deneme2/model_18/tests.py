@@ -827,8 +827,10 @@ def t_speed():
         return top, nll, [torch.zeros_like(x) if y is None else y for x, y in zip(p, gr)]
 
     sonuc = []
+    at = dict(kw, cache_topk=8, query=False, attention=True, attn_heads=2, attn_dim=8)
     for ad, ayar in (("butun gecmis + Q + denge", kw), ("defter top-8", dict(kw, cache_topk=8, query=False)),
-                     ("deftersiz", dict(kw, c_cache=False))):
+                     ("deftersiz", dict(kw, c_cache=False)), ("attention katman 0'dan sonra", at),
+                     ("attention son katmandan sonra", dict(at, attn_after=3))):
         torch.manual_seed(0)
         m = PV(50, **ayar)
         with torch.no_grad():
@@ -837,6 +839,9 @@ def t_speed():
         a, b = grad(m, w, Mk), grad(m, t, mk, rows=rows)
         ayni = (abs(float(a[0] - b[0])) < 1e-5 and abs(float(a[1] - b[1])) < 1e-5
                 and all(torch.allclose(x, y, atol=1e-5) for x, y in zip(a[2], b[2])))
+        if not (ayar["query"] and ayar["c_cache"]):     # attention'dan sonraki katmanlar yalniz rows'ta
+            with torch.no_grad():
+                ayni &= m._layers(m.C(t), tokens=t, rows=rows.clamp(min=0))[0].shape == (len(rows), m.d_sum)
         if ayar["c_cache"] and ayar["cache_topk"] is None:      # siralamasiz yol == siralayan (k = T) yol
             with torch.no_grad():
                 s1 = m.scoreboard(w)
@@ -844,7 +849,7 @@ def t_speed():
                 ayni &= torch.allclose(s1, m.scoreboard(w), atol=1e-5)
                 m.cache.topk = None
         sonuc.append("%s %s" % (ad, "ayni" if ayni else "FARKLI"))
-    kapi("speed: kirpma + yalniz hedefte puan == tam kayip", kirp and all(s.endswith("ayni") for s in sonuc),
+    kapi("speed: kirpma + yalniz hedefte katman ve puan == tam kayip", kirp and all(s.endswith("ayni") for s in sonuc),
          "T 40 -> %d, satir %d; " % (t.shape[1], len(rows)) + ", ".join(sonuc))
 
 
@@ -898,7 +903,9 @@ def t_attention():
              c_cache=True, attention=True, attn_heads=2, attn_dim=4, **KUCUK)
         egitim = r.result.get("step") == 4 and torch.isfinite(r.result["step_losses"]).all()
         pk = torch.load(kok + "/AT/t4.pt", weights_only=False)
-        paket = pk["attention"] is True and pk["attn_heads"] == 2 and _PV.from_package(pk).attn is not None
+        yuk = _PV.from_package(pk)
+        paket = (pk["attention"] is True and pk["attn_heads"] == 2 and yuk.attn is not None
+                 and yuk.load_balance == pk["load_balance"])
         try:
             r = TR.RUNS["AT"] = TR.Run("AT", kok)
             _run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 2, 4, resume=kok + "/AT/t4.pt", chain="relative",
@@ -974,10 +981,18 @@ def t_health():
         pk = torch.load(kok + "/SA/t4.pt", weights_only=False)
         egitim = (any("saglik  vektor" in s for s in r.log) and any("saglik ozeti" in s for s in r.log)
                   and "farkli4" in pk["health"] and "vektor" in pk["grads"])
+        # olcum 0, 2, 4: uc saglik satiri; BITTI 4'un sagligini yeniden hesaplamaz, satiri tekrar yazmaz
+        satir = sum("saglik  vektor" in s for s in r.log)
+        adimlar = [s for s in r.log if len(s.split()) > 2 and s.split()[1].isdigit()]
+        sure = (pk["done"] and {"train", "heldout"} <= set(pk["olcum_sn"]) and len(adimlar) == 3
+                and all("  olcum " in s for s in adimlar) and any("tam olcum" in s for s in r.log)
+                and any("adim 0 haric" in s for s in r.log))
     finally:
         shutil.rmtree(kok, ignore_errors=True)
     kapi("saglik: olcut ve egitim -- gunlukte satir, pakette sozluk ve gradyan", butun and egitim,
          "sonda: %d istem (bilinmeyenli istem elendi)" % len(tam["health"]["metin"]))
+    kapi("saglik: kosu sonu sagligi tekrar olcmez; olcum suresi gunlukte ve pakette", satir == 3 and sure,
+         "%d saglik satiri" % satir)
 
 
 # ============================================================
@@ -995,32 +1010,43 @@ def t_stories():
     kapi("hikaye penceresi <eos> basta ve sonda", ok and len(P4) == 2,
          "%d pencere; T=4'te %d" % (len(P), len(P4)))
 
-    # olc: bantlar ve eos_ok, elle sayimla ayni
-    torch.manual_seed(0)
-    m = PV(12, t_max=16, **KUCUK)
-    W = torch.randint(3, 12, (6, 16))
+    # olc: bantlar, eos_ok ve ce, KIRPMASIZ tam tabloyla ayni (olc pencereleri siralayip kirpiyor);
+    # ikinci model defterli + attention'li: konumlar arasi karisma varken de kirpma sonucu degistirmez.
+    # Beklenen oranlar TAM bolmeyle (float32 bolme 1e-9'u asar: 2/55'te 1,2e-9).
+    oran = lambda c, n: int(c.sum()) / int(n.sum())
+    W = torch.randint(3, 12, (6, 16), generator=torch.Generator().manual_seed(3))    # iki modelde de acc_ar 0,5
     Mk = torch.zeros(6, 16, dtype=torch.bool)
     for i, L in enumerate((16, 9, 12, 5, 16, 7)):
         W[i, 0], W[i, L - 1] = hk, hk
         W[i, L:] = dl
         Mk[i, :L] = True
-    DS.BANTLAR, eski = ((0, 4), (4, 10), (10, 16)), DS.BANTLAR
-    try:
-        r = DS.olc(m, W, Mk, hk, aygit="cpu", parca=4)
-    finally:
-        DS.BANTLAR = eski
-    with torch.no_grad():
-        d = (m.scoreboard(W)[:, :-1].argmax(-1) == W[:, 1:]) & Mk[:, 1:]
     k = torch.arange(1, 16)
-    bek = [float(d[:, (k >= a_) & (k < b_)].sum() / Mk[:, 1:][:, (k >= a_) & (k < b_)].sum())
-           for a_, b_ in ((0, 4), (4, 10), (10, 16))]
     e = Mk[:, 1:] & (W[:, 1:] == hk)
-    ok = (abs(r["accuracy"] - float(d.sum() / Mk[:, 1:].sum())) < 1e-9
-          and all(abs(r["diag"][n] - b) < 1e-9 for n, b in
-                  zip(("acc_0_4", "acc_4_10", "acc_10_16"), bek))
-          and abs(r["diag"]["eos_ok"] - float(d[e].sum() / e.sum())) < 1e-9)
-    kapi("hikaye olcutu: accuracy, bantlar, eos_ok", ok,
-         "accuracy %.3f  eos_ok %.3f" % (r["accuracy"], r["diag"]["eos_ok"]))
+    ok, cik = True, []
+    for ayar in (dict(), dict(chain="relative", lam=0.7, start_norm=1.0, c_cache=True, attention=True,
+                              attn_heads=2, attn_dim=4)):
+        torch.manual_seed(0)
+        m = PV(12, t_max=16, **dict(KUCUK, **ayar))
+        if ayar:
+            with torch.no_grad():
+                m.attn.W_o.weight.normal_(0, 0.3)
+        DS.BANTLAR, eski = ((0, 4), (4, 10), (10, 16)), DS.BANTLAR
+        try:
+            r = DS.olc(m, W, Mk, hk, aygit="cpu", parca=4)
+        finally:
+            DS.BANTLAR = eski
+        with torch.no_grad():
+            p = m.scoreboard(W)[:, :-1]
+            d = (p.argmax(-1) == W[:, 1:]) & Mk[:, 1:]
+            ce = torch.nn.functional.cross_entropy(p.transpose(1, 2), W[:, 1:], reduction="none")[Mk[:, 1:]].mean()
+        bek = [oran(d[:, (k >= a_) & (k < b_)], Mk[:, 1:][:, (k >= a_) & (k < b_)])
+               for a_, b_ in ((0, 4), (4, 10), (10, 16))]
+        ok &= (abs(r["accuracy"] - oran(d, Mk[:, 1:])) < 1e-9
+               and all(abs(r["diag"][n] - b) < 1e-9 for n, b in zip(("acc_0_4", "acc_4_10", "acc_10_16"), bek))
+               and abs(r["diag"]["eos_ok"] - oran(d[e], e)) < 1e-9
+               and abs(r["ce"] - float(ce)) < 1e-5)
+        cik.append("accuracy %.3f ce %.3f" % (r["accuracy"], r["ce"]))
+    kapi("hikaye olcutu: accuracy, bantlar, eos_ok, ce (kirpilmis)", ok, "; ".join(cik))
 
     # acc_ar: hedef, hikayede daha once tamamlanmis bir ikiliyi tamamliyor; elle sayimla ayni
     ornek = DS.tekrar_ikili(torch.tensor([[1, 5, 6, 5, 6, 2, 5, 6]]), torch.ones(1, 7, dtype=torch.bool))
@@ -1034,7 +1060,7 @@ def t_stories():
                 ar[i, t] = ik in gor
                 gor.add(ik)
     a_ = Mk[:, 1:]
-    bek = {ad: float(d[s].sum() / s.sum()) for ad, s in (("acc_ar", a_ & ar), ("acc_other", a_ & ~ar))}
+    bek = {ad: oran(d[s], s) for ad, s in (("acc_ar", a_ & ar), ("acc_other", a_ & ~ar))}
     kapi("hikaye olcutu: acc_ar / acc_other (tekrar eden ikili)",
          elle and int(ar.sum()) > 0 and all(abs(r["diag"][ad] - b) < 1e-9 for ad, b in bek.items()),
          "%d tekrar ikili; acc_ar %.3f  acc_other %.3f" % (int(ar.sum()), r["diag"]["acc_ar"], r["diag"]["acc_other"]))

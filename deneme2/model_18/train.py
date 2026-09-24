@@ -3,12 +3,12 @@
 
 GOREV SONRAKI TOKEN, kayip YALNIZ hedeflerde:
 
-    loss = model.loss(tokens, targets_mask)    tokens (B,T) sorular,
-                                                targets_mask cevabin rakamlari ve EOS
+    loss = model.loss(tokens, targets_mask)    tokens (B,T) diziler (hikaye ya da soru),
+                                                targets_mask kayba sayilacak hedefler
 
-data = (questions, filled_mask, targets_mask): questions (n, T) sorular,
-filled_mask gercek token'lar (yalniz gunluk icin; PV'de konumlar birbirini
-gormez), targets_mask kayba sayilacak hedefler.
+data = (questions, filled_mask, targets_mask): questions (n, T) diziler,
+filled_mask gercek token'lar (gunluk ve trim), targets_mask kayba sayilacak
+hedefler (hikayede her gercek token, rakam verisinde cevap ve EOS).
 
 Adam, weight decay YOK.  Kullanici, 24 Eylul: "weight decay sanki anlamsiz
 gerek yok" -- start ve finish nokta; onlari 0'a cekmenin anlami yok.
@@ -33,7 +33,7 @@ import model_18 as M18
 from model_18 import PV
 
 LR = 0.002       # model_17'den: rakam tokenli veride 0,001/0,002/0,004 ayirt edilemedi
-BATCH = 512
+BATCH = 64       # hikaye kosularinin degeri (defterde ORTAK); rakam defteri kendi degerini verir
 RUNS = {}        # run_name -> Run
 
 # Surdurmede paketteki degerle AYNI olmali.  Farkliysa yorunge sessizce
@@ -183,10 +183,12 @@ def _header(record):
 
 
 def _line(record, elapsed, mark=""):
+    """elapsed: baslangictan beri sn (olcum dahil); olcum: bu olcum noktasinin kendi suresi."""
+    s = record.get("olcum_sn")
     return (f"{record['step']:6d}  {record['loss']:7.3f}  {record['train_acc']:7.4f}  "
             f"{record['heldout_acc']:9.4f}  {_ppl(record['heldout_ce'])}  "
             + "".join(f"{v:12.4f}" for v in record["heldout_diag"].values())
-            + f"  {elapsed:6.0f}{mark}")
+            + f"  {elapsed:6.0f}{mark}" + (f"  olcum {s['train'] + s['heldout']:.1f} sn" if s else ""))
 
 
 # Parca basina gradyan normu, yalniz olcum adimlarinda: olu parca (0) ve patlama gorunsun.
@@ -203,9 +205,9 @@ def _grad_norms(model):
     return {part: float(v.sqrt()) for part, v in top.items()}
 
 
-def _health_line(h, grads=None):
+def _health_line(h, grads=None, sure=None):
     """Saglik sozlugu -> tek satir (gunluk, NABIZ): vektor her/butun konum, olu, yon, boy, olcekler,
-    attention, cikis, gradyan; tam yedekte dongu."""
+    attention, cikis, gradyan; tam yedekte dongu; olcumun suresi (heldout, saglik ve donguyu icerir)."""
     L = sum(1 for k in h if k.startswith("vec_all_"))
     mean = lambda x: sum(x) / len(x)
     s = ["saglik  vektor " + " ".join("%.0f/%.0f" % (h["vec_each_%d" % i], h["vec_all_%d" % i]) for i in range(L)),
@@ -226,6 +228,9 @@ def _health_line(h, grads=None):
         s.append("grad " + " ".join("%s %.2g" % kv for kv in sorted(grads.items())))
     if "farkli4" in h:
         s.append("farkli4 %.2f dongu %.2f" % (h["farkli4"], h["dongu"]))
+    if sure:
+        ek = " ".join("%s %.1f" % (k, sure[k]) for k in ("saglik", "dongu") if k in sure)
+        s.append("olcum sn train %.1f heldout %.1f%s" % (sure["train"], sure["heldout"], " (%s)" % ek if ek else ""))
     return "  |  ".join(s)
 
 
@@ -233,15 +238,20 @@ def _note(run, record, elapsed, mark=""):
     """Olcum satiri ve (varsa) saglik satiri."""
     run.note(_line(record, elapsed, mark))
     if record.get("health") is not None:
-        run.note(_health_line(record["health"], record.get("grads")))
+        run.note(_health_line(record["health"], record.get("grads"), record.get("olcum_sn")))
 
 
 def _health_summary(history):
-    """Bu bolumde ilk olu vektor ve ilk dongu hangi adimda goruldu."""
-    dead = next((s for s, h in history if any(v for k, v in h.items() if k.startswith("dead_"))), None)
-    loop = next((s for s, h in history if h.get("dongu", 0) > 0), None)
-    return "saglik ozeti (bu bolum): ilk olu vektor %s  |  ilk dongu %s" % (
-        "yok" if dead is None else "adim %d" % dead, "yok" if loop is None else "adim %d" % loop)
+    """Bu bolumde ilk olu vektor ve ilk dongu hangi adimda goruldu, son olcumde ne durumda.  Adim 0
+    sayilmaz: egitilmemis model acgozlu uretimde hep doner, ozet hep "adim 0" derdi."""
+    h = [(s, x) for s, x in history if s > 0]
+    olu = lambda x: [x["dead_%d" % i] for i in range(sum(1 for k in x if k.startswith("dead_")))]
+    dead = next((s for s, x in h if any(olu(x))), None)
+    loop = next((s for s, x in h if x.get("dongu", 0) > 0), None)
+    son_dongu = next((x["dongu"] for _, x in reversed(h) if "dongu" in x), None)
+    return "saglik ozeti (bu bolum, adim 0 haric): ilk olu vektor %s (son %s)  |  ilk dongu %s (son %s)" % (
+        "yok" if dead is None else "adim %d" % dead, "/".join(map(str, olu(h[-1][1]))) if h else "-",
+        "yok" if loop is None else "adim %d" % loop, "-" if son_dongu is None else "%.2f" % son_dongu)
 
 
 def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
@@ -332,11 +342,17 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
 
     history = []                          # (adim, saglik): kosu sonu ozeti
 
-    def evaluate(step, full=False, save=False, grads=None):
-        """save: tam yedek adimi -- saglik olcutu varsa (metric.health) dongu ve metin de."""
+    def evaluate(step, full=False, save=False, grads=None, health=None):
+        """save: tam yedek adimi -- saglik olcutu varsa (metric.health) dongu ve metin de.
+        health: ayni agirlikla olculmus saglik sozlugu; yeniden hesaplanmaz (kosu sonu).
+        olcum_sn: bu olcumun suresi -- train, heldout (saglik ve dongu dahil) ve parcalari."""
+        kw = {"save": save, "health": health} if getattr(metric, "health", False) else {}
+        t0 = time.time()
         train_result = metric(model, "train", full=full)
-        heldout_result = metric(model, "heldout", full=full,
-                                **({"save": save} if getattr(metric, "health", False) else {}))
+        t1 = time.time()
+        heldout_result = metric(model, "heldout", full=full, **kw)
+        sure = {"train": t1 - t0, "heldout": time.time() - t1}
+        sure.update((k, v) for k, v in (heldout_result.get("sure") or {}).items() if k != "olc")
         record = dict(fixed, step=step, loss=float(loss.detach()),
                       step_losses=step_losses[:step + 1].cpu(),
                       train_acc=train_result["accuracy"],
@@ -344,7 +360,7 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
                       train_ce=train_result.get("ce"), heldout_ce=heldout_result.get("ce"),
                       train_diag=train_result.get("diag", {}),
                       heldout_diag=heldout_result.get("diag", {}),
-                      health=heldout_result.get("health"), grads=grads)
+                      health=heldout_result.get("health"), grads=grads, olcum_sn=sure)
         if not run.result:
             run.note(_header(record))
         run.result = dict(record, model=model)
@@ -408,13 +424,17 @@ def _finish(run, model, optimizer, sampler, evaluate, record, last_step,
                  "  -- tam olcum ATLANDI")
         run.flush()
         return
-    record = dict(evaluate(last_step, full=True, grads=(record or {}).get("grads")), done=True)   # son adimin gradyani
+    # Son adimin sagligi ayni agirlikla zaten olculduyse tam olcumde yeniden hesaplanmaz.
+    once = record.get("health") if record is not None and record["step"] == last_step else None
+    record = dict(evaluate(last_step, full=True, grads=(record or {}).get("grads"), health=once),   # son adimin gradyani
+                  done=True)
     run.result = dict(record, model=model)
     run.save(_snapshot(model, optimizer, sampler, record))
+    s = record["olcum_sn"]
     run.note(f"BITTI   train {record['train_acc']:.4f}   heldout "
              f"{record['heldout_acc']:.4f}   ppl {_ppl(record['heldout_ce']).strip()}"
-             f"   ({time.time() - started_at:.0f} sn)")
-    if record.get("health") is not None:
+             f"   ({time.time() - started_at:.0f} sn, tam olcum {s['train'] + s['heldout']:.0f} sn)")
+    if record.get("health") is not None and record["health"] != once:     # ayniysa satiri zaten yukarida
         run.note(_health_line(record["health"]))
     if history:
         run.note(_health_summary(history))
@@ -456,8 +476,8 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
     metric      metric(model, "train"|"heldout", full=False) -> dict: accuracy (ANA OLCUT),
                 ce, diag (veriye ozgu analiz olculeri; gunlukte sutun olur)
     eval_every     olcum araligi
-    save_every     TAM yedek araligi (t<adim>.pt, surdurme bundan; 3,2 MB)
-    weights_every  agirlik kaydi araligi (w<adim>.pt, analiz icin; ~1 MB)
+    save_every     TAM yedek araligi (t<adim>.pt, surdurme bundan: agirlik + optimizer + RNG)
+    weights_every  agirlik kaydi araligi (w<adim>.pt, analiz icin: yalniz agirlik)
                    Kullanici, 24 Eylul: "bu kadar yedek çok fazla".
                    Uc aralik BAGIMSIZ; HER ADIMIN kaybi hepsinden bagimsiz: `step_losses`.
     resume      bir anlik goruntu yolu verilirse KALDIGI YERDEN devam eder

@@ -22,6 +22,7 @@ import hashlib
 import math
 import os
 import re
+import time
 
 import numpy as np
 import torch
@@ -283,7 +284,9 @@ def tekrar_ikili(w, a):
 
 
 def olc(m, W, M, eos, aygit="cuda", parca=64):
-    """accuracy, ce ve tani.  W, M CPU'da; parca parca tasinir.
+    """accuracy, ce ve tani.  W, M CPU'da; parca parca tasinir.  Pencereler boya gore siralanip parcalanir,
+    her parca kendi en uzun penceresine kirpilir: dolgu hesaplanmaz, sonuc ayni (pencereler birbirini
+    gormez, dolgu sagda ve nedensel).
 
       accuracy       sonraki kelime BIREBIR (en yuksek puan)
       ce             ayni hedeflerde kayip; ppl = e^ce
@@ -297,10 +300,14 @@ def olc(m, W, M, eos, aygit="cuda", parca=64):
     bant = {b: [0, 0] for b in BANTLAR}
     eo = [0, 0]
     ar = {"ar": [0, 0], "other": [0, 0]}
+    son = (M * torch.arange(1, M.shape[1] + 1)).max(1).values        # son gercek konum + 1
+    sira = torch.sort(son, stable=True).indices
     with torch.no_grad():
         for i in range(0, W.shape[0], parca):
-            w = W[i:i + parca].to(aygit).long()
-            a = M[i:i + parca].to(aygit)[:, 1:]
+            j = sira[i:i + parca]
+            L = max(2, int(son[j].max()))
+            w = W[j, :L].to(aygit).long()
+            a = M[j, :L].to(aygit)[:, 1:]
             p = m.scoreboard(w)[:, :-1]
             h = w[:, 1:]
             ce = F.cross_entropy(p.transpose(1, 2), h, reduction="none")
@@ -333,24 +340,35 @@ def olcut(EG, DG, eos, aygit="cuda", en=2000, en_tam=None, ad=None, istemler=())
     `en_tam` pencere (None: held-out kadar) -- 2,6 milyon pencerenin tamami
     bir epokluk ileri gecis olurdu.
     health: held-out'ta her olcumde sabit sondada m.health(); ad (sozluk) verilirse tam yedekte (save)
-    ve sonda (full) sabit istemlerle dongu ve metin de."""
+    ve sonda (full) sabit istemlerle dongu ve metin de.  f(..., health=h): ayni agirlikla olculmus
+    saglik -- yeniden hesaplanmaz, eksikse yalniz dongu eklenir.  Sonucta "sure": olc / saglik / dongu sn."""
     kume = {"train": EG, "heldout": DG}
     ix = {a: i for i, a in enumerate(ad)} if ad is not None else None
     sonda = sonda_istemleri(istemler, ix) if ix is not None else []
     w, mk = DG[0][:SONDA_PENCERE], DG[1][:SONDA_PENCERE]
     L = int(mk.any(0).nonzero().max()) + 1                    # sondanin en uzun hikayesine kirpilir
 
-    def f(m, side, full=False, save=False):
+    def f(m, side, full=False, save=False, health=None):
         W, M = kume[side]
         if full:
             n = len(W) if side == "heldout" else (en_tam or len(DG[0]))
         else:
             n = en
+        t = time.time()
         r = olc(m, W[:n], M[:n], eos, aygit)
+        r["sure"] = {"olc": time.time() - t}
         if side == "heldout" and hasattr(m, "health"):
-            r["health"] = m.health(w[:, :L].to(aygit).long(), mk[:, :L].to(aygit))
-            if sonda and (save or full):
-                r["health"].update(dongu(m, ad, ix, sonda, aygit=aygit))
+            if health is None:
+                t = time.time()
+                h = m.health(w[:, :L].to(aygit).long(), mk[:, :L].to(aygit))
+                r["sure"]["saglik"] = time.time() - t
+            else:
+                h = dict(health)
+            if sonda and (save or full) and "farkli4" not in h:
+                t = time.time()
+                h.update(dongu(m, ad, ix, sonda, aygit=aygit))
+                r["sure"]["dongu"] = time.time() - t
+            r["health"] = h
         return r
 
     f.health = True
