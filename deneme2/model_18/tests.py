@@ -460,6 +460,107 @@ def t_init():
          "S_v 0 / S_c 3 / gate_0 -2 / S_p 0; s_v_init farki yakalanir")
 
 
+# --- 17.  C_CONTENT: parca hesabi == adim adim; C_order == relative; nedensel; CM; gradyan
+def t_content():
+    import model_18 as M
+    torch.manual_seed(0)
+    n, d, dc = 60, 64, 32
+    m = PV(n, t_max=64, lam=0.7, chain="relative", d_order=d - dc, d_content=dc)
+    with torch.no_grad():                       # ogrenilmis gibi: token ve boyuta gore farkli, bazisi ~0
+        m.lam_w.normal_(0, 3); m.beta_w.normal_(0, 1)
+        m.lam_w[:, :4] = -40.0                  # alt sinir: LAM_W_MIN
+    w = torch.randint(0, n, (2, 45))            # 45: parca sinirlari (16) icinden gecer
+    C = m.C(w)
+    lam, beta = m.lam_beta(w)
+    h, adim = torch.zeros(2, dc), []
+    for t in range(w.shape[1]):
+        h = lam[:, t] * h + beta[:, t] * m.P[w[:, t], d - dc:]
+        adim.append(h)
+    icerik = torch.allclose(C[..., d - dc:], torch.stack(adim, 1), atol=1e-5)
+    rel = PV(n, d=d - dc, t_max=64, lam=0.7, chain="relative")
+    rel.P = m.P[:, :d - dc]
+    sira = torch.allclose(C[..., :d - dc], rel.C(w), atol=1e-5)
+    w2 = w.clone(); w2[:, 30] = (w2[:, 30] + 1) % n
+    nedensel = torch.equal(C[:, :30], m.C(w2)[:, :30])
+    with torch.no_grad():
+        m.lam_w.clamp_(0, 3)                    # CM lam'a boler: cok kucuk lam sayisal hatayi buyutur
+    cm = all(torch.allclose(c, m.C(w[:1])[0, t], atol=1e-3) for t, c in m.CM(w[0], K=10))
+    m.loss(w).backward()
+    grad = bool(m.lam_w.grad.abs().sum() > 0 and m.beta_w.grad.abs().sum() > 0)
+    kapi("C_content: parca == adim adim, C_order == relative", icerik and sira and nedensel,
+         "45 adim, 16'lik parcalar, lam_w alt sinirda (e^-5) dahil")
+    kapi("C_content: CM geri yuruyus, lam_w/beta_w gradyan alir", cm and grad)
+
+    yok = PV(n, d=d, t_max=64, lam=0.7, chain="relative")
+    ayni = torch.equal(yok.C(w), PV(n, d=d, t_max=64, lam=0.7, chain="relative", d_content=0).C(w))
+    bas = PV(n, t_max=64, lam=0.7, chain="relative", d_order=d - dc, d_content=dc)
+    l0, b0 = bas.lam_beta(w)
+    baslangic = (abs(float(l0.mean()) - M.LAM_W_INIT) < 1e-5 and abs(float(b0.mean()) - M.BETA_W_INIT) < 1e-5)
+    kapi("C_content 0 == bugunku zincir; baslangic tepeden", ayni and baslangic,
+         "lam_w %.2f beta_w %.2f" % (float(l0.mean()), float(b0.mean())))
+
+
+# --- 18.  Q: oklar bosken Q == C (defter aynen); butun gecmis == k=T; gradyan oklara ulasir
+def t_query():
+    torch.manual_seed(0)
+    kw = dict(d=64, t_max=64, lam=0.5, chain="relative", start_norm=1.0, c_cache=True)
+    w = torch.randint(0, 50, (2, 40))
+    a = PV(50, **kw)
+    b = PV(50, query_vectors=16, query_active=4, **kw)
+    bos = torch.allclose(a.scoreboard(w), b.scoreboard(w), atol=1e-5)
+    hepsi = PV(50, cache_topk=None, query_vectors=16, query_active=4, **kw)
+    kT = PV(50, cache_topk=40, query_vectors=16, query_active=4, **kw)
+    tum = torch.allclose(hepsi.scoreboard(w), kT.scoreboard(w), atol=1e-5)
+    with torch.no_grad():
+        hepsi.cache.gate_0.fill_(0.0)
+        hepsi.cache.query.finish.add_(0.3 * torch.randn_like(hepsi.cache.query.finish))
+        M_ = torch.ones_like(w, dtype=torch.bool); M_[1, 25:] = False
+        lp = hepsi.scoreboard(w)[:, :-1]
+        ce = torch.nn.functional.cross_entropy(lp.transpose(1, 2), w[:, 1:], reduction="none")
+        tam = float(ce[M_[:, 1:]].mean())
+    hizli = abs(float(hepsi.loss(w, M_)) - tam) < 1e-5
+    w2 = w.clone(); w2[:, -1] = (w2[:, -1] + 1) % 50
+    nedensel = torch.allclose(lp[:, :-1], hepsi.scoreboard(w2)[:, :-2], atol=1e-6)
+    hepsi.loss(w).backward()
+    grad = bool(hepsi.cache.query.finish.grad.abs().sum() > 0)
+    Cm = PV(50, query_vectors=16, query_active=4, query_by="C", **kw)
+    secim = torch.allclose(Cm.scoreboard(w), a.scoreboard(w), atol=1e-5)
+    kapi("Q: oklar bos -> bugunku defter; butun gecmis == k=T", bos and tum and secim)
+    kapi("Q: hizli kayip == tam tablo, nedensel, oklar gradyan alir", hizli and nedensel and grad)
+
+    N, data = _veri()
+    kok = tempfile.mkdtemp()
+    try:
+        r = TR.RUNS["QC"] = TR.Run("QC", kok)
+        TR._run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3, chain="relative", lam=0.7,
+                start_norm=1.0, c_cache=True, **KUCUK)
+        yol = kok + "/QC/t3.pt"
+        p = torch.load(yol, weights_only=False)
+        del p["d_content"], p["query_vectors"]      # alan gelmeden yazilmis paket
+        torch.save(p, yol)
+        try:
+            r = TR.RUNS["QC"] = TR.Run("QC", kok)
+            TR._run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3, resume=yol, chain="relative",
+                    lam=0.7, start_norm=1.0, c_cache=True, d_order=8, d_content=8, **KUCUK)
+            yakaladi = False
+        except ValueError as h:
+            yakaladi = "d_content" in str(h)
+        r = TR.RUNS["QC2"] = TR.Run("QC2", kok)
+        TR._run(r, data, N, _sifir, "cpu", 2e-3, 4, 0, 8, 2, 4, chain="relative", lam=0.7,
+                start_norm=1.0, c_cache=True, cache_topk=None, query_vectors=8, query_active=2,
+                d_order=8, d_content=8, **KUCUK)
+        egitim = r.result.get("step") == 4 and torch.isfinite(r.result["step_losses"]).all()
+        r = TR.RUNS["QC3"] = TR.Run("QC3", kok)
+        TR._run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 2, 4, resume=kok + "/QC2/t4.pt",
+                chain="relative", lam=0.7, start_norm=1.0, c_cache=True, cache_topk=None,
+                query_vectors=8, query_active=2, d_order=8, d_content=8, **KUCUK)
+        surdu = r.result.get("step") == 6
+    finally:
+        shutil.rmtree(kok, ignore_errors=True)
+    kapi("Q + C_content egitilir, surdurulur; eski paket farki yakalanir",
+         yakaladi and bool(egitim) and surdu, "cache_topk None, 8 ok, d_order 8 + d_content 8")
+
+
 # ============================================================
 # DATA_STORIES -- TinyStories (model_17 veri_t17 + olcme_17'den).
 # ============================================================
@@ -655,7 +756,7 @@ def t_notebook(yol=None):
 if __name__ == "__main__":
     print("tests (model_18)")
     for f in (t_zincir, t_nedensel, t_sessiz, t_cm, t_payda, t_gradyan,
-              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_ccache, t_init, t_mat_pencere,
+              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_mat_pencere,
               t_mat_sor, t_mat_basamak, t_mat_egitim, t_stories, t_notebook):
         f()
     t_notebook(os.path.join(os.path.dirname(os.path.abspath(__file__)),

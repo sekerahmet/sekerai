@@ -79,7 +79,9 @@ def yukle(yol):
            t_max=k["t_max"], seed=k["seed"], squared=k.get("squared", True),
            S_p=k.get("S_p", 1.0), lam=k.get("lam", 1.0),
            chain=k.get("chain", "absolute"), c_cache=k.get("c_cache", False),
-           cache_topk=k.get("cache_topk", 8), cache_skip=k.get("cache_skip", 3))
+           cache_topk=k.get("cache_topk", 8), cache_skip=k.get("cache_skip", 3),
+           query_vectors=k.get("query_vectors", 0), query_active=k.get("query_active", 8),
+           query_by=k.get("query_by", "C_m"), d_order=k.get("d_order", 0), d_content=k.get("d_content", 0))
     m.load_state_dict(k["weights"])
     return m.eval(), k
 

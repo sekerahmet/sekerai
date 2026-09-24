@@ -40,13 +40,16 @@ RUNS = {}        # run_name -> Run
 # baskalasir: optimizer.load_state_dict lr'yi paketten alir, gunluk cagriyi yazar.
 MUST_MATCH = ("arch", "n", "T", "batch", "lr", "seed", "d", "vectors",
               "active", "layers", "t_max", "squared", "S_p", "start_norm", "lam", "chain", "c_cache", "cache_topk",
-              "cache_skip", "s_v_init", "s_c_init", "gate_0_init", "s_p_init",
+              "cache_skip", "s_v_init", "s_c_init", "gate_0_init", "s_p_init", "query_vectors",
+              "query_active", "query_by", "d_order", "d_content", "lam_w_init", "beta_w_init",
               "data_fingerprint", "vocab")
 # Alan eklenmeden once yazilan paketlerdeki deger: skor -D^2, carpansiz.
 BEFORE_FIELD = {"squared": True, "S_p": 1.0, "start_norm": "randn", "lam": 1.0,
                 "chain": "absolute", "c_cache": False,
                 "cache_topk": M18.CACHE_TOPK, "cache_skip": M18.CACHE_SKIP,
-                "s_v_init": 0.0, "s_c_init": 3.0, "gate_0_init": -2.0, "s_p_init": 0.0}
+                "s_v_init": 0.0, "s_c_init": 3.0, "gate_0_init": -2.0, "s_p_init": 0.0,
+                "query_vectors": 0, "query_active": 8, "query_by": "C_m", "d_order": 0, "d_content": 0,
+                "lam_w_init": 0.9, "beta_w_init": 0.5}
 
 
 class Run:
@@ -161,13 +164,17 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
          layers=M18.LAYERS, t_max=M18.T_MAX, squared=None, S_p=None,
          start_norm=M18.START_NORM, lam=M18.LAM, chain=M18.CHAIN, c_cache=M18.C_CACHE,
          cache_topk=M18.CACHE_TOPK, cache_skip=M18.CACHE_SKIP, s_v_init=M18.S_V_INIT,
-         s_c_init=M18.S_C_INIT, gate_0_init=M18.GATE_0_INIT, s_p_init=M18.S_P_INIT):
+         s_c_init=M18.S_C_INIT, gate_0_init=M18.GATE_0_INIT, s_p_init=M18.S_P_INIT,
+         query_vectors=M18.QUERY_VECTORS, query_active=M18.QUERY_ACTIVE, query_by=M18.QUERY_BY,
+         d_order=M18.D_ORDER, d_content=M18.D_CONTENT, lam_w_init=M18.LAM_W_INIT, beta_w_init=M18.BETA_W_INIT):
     torch.manual_seed(seed)
     model = PV(n_vocab, d=d, vectors=vectors, active=active, layers=layers,
                t_max=t_max, seed=seed, squared=squared, S_p=S_p,
                start_norm=start_norm, lam=lam, chain=chain, c_cache=c_cache,
                cache_topk=cache_topk, cache_skip=cache_skip, s_v_init=s_v_init,
-               s_c_init=s_c_init, gate_0_init=gate_0_init, s_p_init=s_p_init).to(device)
+               s_c_init=s_c_init, gate_0_init=gate_0_init, s_p_init=s_p_init,
+               query_vectors=query_vectors, query_active=query_active, query_by=query_by,
+               d_order=d_order, d_content=d_content, lam_w_init=lam_w_init, beta_w_init=beta_w_init).to(device)
     # torch.compile: eski mimaride 3,90 kat olculdu (model_17 train_17); PV'de OLCULMEDI.
     loss_fn = torch.compile(model.loss) if compile else model.loss
     if compile:
@@ -180,15 +187,17 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
     n_questions, max_length = questions.shape
     assert max_length <= t_max, f"soru {max_length} token > t_max {t_max}"
     n_params = sum(p.numel() for p in model.parameters())
-    fixed = dict(extra or {}, arch=model.arch, n=n_vocab, d=d, vectors=vectors,
+    fixed = dict(extra or {}, arch=model.arch, n=n_vocab, d=model.d, vectors=vectors,
                  active=active, layers=layers, t_max=t_max, lr=lr,
                  squared=model.squared,
                  S_p=M18.LEARNED if model.S_p_learned else model.S_p,
                  start_norm="randn" if start_norm is None else float(start_norm),
                  lam=float(lam), chain=chain, c_cache=bool(c_cache),
-                 cache_topk=int(cache_topk), cache_skip=int(cache_skip),
+                 cache_topk=None if cache_topk is None else int(cache_topk), cache_skip=int(cache_skip),
                  s_v_init=float(s_v_init), s_c_init=float(s_c_init),
                  gate_0_init=float(gate_0_init), s_p_init=float(s_p_init),
+                 query_vectors=int(query_vectors), query_active=int(query_active), query_by=query_by,
+                 d_order=model.d_order, d_content=model.d_content, lam_w_init=float(lam_w_init), beta_w_init=float(beta_w_init),
                  seed=seed, batch=batch, T=max_length, n_params=n_params,
                  compile=compile,
                  data_fingerprint=_fingerprint(questions, filled_mask, targets_mask),
@@ -216,9 +225,9 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
 
     fill_ratio = float(filled_mask.sum()) / filled_mask.numel()
     run.note(f"sorular {n_questions:,} x {max_length}   dolgu %{100 * (1 - fill_ratio):.1f}")
-    run.note(f"arch {model.arch}  d {d} vectors {vectors} active {active} "
+    run.note(f"arch {model.arch}  d {model.d} vectors {vectors} active {active} "
              f"layers {layers}  squared {fixed['squared']} S_p {fixed['S_p']}  "
-             f"start_norm {fixed['start_norm']}  lam {fixed['lam']}  chain {chain}  c_cache {c_cache} (topk {cache_topk} skip {cache_skip})  lr {lr} seed {seed}  sozluk {n_vocab}  "
+             f"start_norm {fixed['start_norm']}  lam {fixed['lam']}  chain {chain}  c_cache {c_cache} (topk {cache_topk} skip {cache_skip} Q {query_vectors}/{query_active} {query_by})  d_order {model.d_order} d_content {model.d_content} (lam_w {lam_w_init} beta_w {beta_w_init})  lr {lr} seed {seed}  sozluk {n_vocab}  "
              f"parametre {n_params:,}")
     run.note(f"batch {batch}   epok = {n_questions / batch:,.0f} adim   veri izi "
              f"{fixed['data_fingerprint']}   olcum her {eval_every}   tam yedek her "
@@ -324,7 +333,9 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
           t_max=M18.T_MAX, squared=None, S_p=None, start_norm=M18.START_NORM,
           lam=M18.LAM, chain=M18.CHAIN, c_cache=M18.C_CACHE,
           cache_topk=M18.CACHE_TOPK, cache_skip=M18.CACHE_SKIP, s_v_init=M18.S_V_INIT,
-          s_c_init=M18.S_C_INIT, gate_0_init=M18.GATE_0_INIT, s_p_init=M18.S_P_INIT):
+          s_c_init=M18.S_C_INIT, gate_0_init=M18.GATE_0_INIT, s_p_init=M18.S_P_INIT,
+          query_vectors=M18.QUERY_VECTORS, query_active=M18.QUERY_ACTIVE, query_by=M18.QUERY_BY,
+          d_order=M18.D_ORDER, d_content=M18.D_CONTENT, lam_w_init=M18.LAM_W_INIT, beta_w_init=M18.BETA_W_INIT):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
     data        (questions, filled_mask, targets_mask)
@@ -347,7 +358,10 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
     lam         zincirin solma carpani: C_t = lam*C_(t-1) + RM_t*P[w_t]  (1: solmaz)
     chain       "absolute" (RM_t, mutlak konum) ya da "relative" (kaydirma, kelimenin yasi)
     c_cache     hikayenin kendi gecmisinden kopya + ogrenilen gate (model_18.CCache)
-    cache_topk, cache_skip   defterden kac komsu; son kac konum aranmaz
+    cache_topk, cache_skip   defterden kac komsu (None: butun gecmis); son kac konum aranmaz
+    query_vectors, query_active, query_by   defteri arayan Q'nun oklari (0: Q = C)
+    d_order, d_content, lam_w_init, beta_w_init   C = [C_order | C_content]; d_content > 0 iken
+                d = d_order + d_content, C_content kaydirmasiz ve lam_w/beta_w ile solar (0: yok)
     s_v_init, s_c_init, gate_0_init, s_p_init   ogrenilen S_v, S_c, gate_0, S_p'nin baslangici
     """
     old = RUNS.get(run_name)
@@ -369,7 +383,9 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
         extra=extra, d=d, vectors=vectors, active=active, layers=layers,
         t_max=t_max, squared=squared, S_p=S_p, start_norm=start_norm, lam=lam,
         chain=chain, c_cache=c_cache, cache_topk=cache_topk, cache_skip=cache_skip,
-        s_v_init=s_v_init, s_c_init=s_c_init, gate_0_init=gate_0_init, s_p_init=s_p_init))
+        s_v_init=s_v_init, s_c_init=s_c_init, gate_0_init=gate_0_init, s_p_init=s_p_init,
+        query_vectors=query_vectors, query_active=query_active, query_by=query_by,
+        d_order=d_order, d_content=d_content, lam_w_init=lam_w_init, beta_w_init=beta_w_init))
     run.thread.start()
     return f"{run_name} basladi" + (f"  ({os.path.basename(resume)}'den)" if resume else "")
 

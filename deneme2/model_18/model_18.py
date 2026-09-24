@@ -31,10 +31,20 @@ arasında ki uzaklık" ve "her vektör her an aktif olmamalı bunu model
              gate = sigmoid(gate_d . C_m/|C_m| + gate_s * en_yakin_sim + gate_0), ogrenilir:
                p = (1 - gate) * softmax(score) + gate * p_cache      (pointer-generator)
              Kagit ustu (REL07 t2000, sabit g 0,1): ppl 30,3 -> 25,9; gecmis ismi getirme %3,9 -> %16.
+    Q        sorgu: defter C_t ile degil Q_t ile aranir.  Q_t = C_t + sum W_q (finish - start),
+             kendi ok sozlugu (VectorLayer); oklar C_m'ye (QUERY_BY) en yakin start'lardan.
+             finish = start baslar: Q_t = C_t, bugunku defter.  gate'in sim'i de Q'nun aramasindan.
+    C_content  C'nin son d_content boyutu KAYDIRMASIZ, kelimeye ve boyuta gore solar:
+               C_content_t = lam_w[w_t] * C_content_(t-1) + beta_w[w_t] * P_content[w_t]
+             ilk d_order boyut C_order: bugunku relative zincir (sira), kendi icinde kaydirilir.
+             d = d_order + d_content.
+             Kaydirmali zincirde boyutlu solma icerigi izleyemez (icerik her adim boyut degistirir).
     CM       countermarch, geriye yuruyus: C_(t-1) = (C_t - RM_t*P[w_t]) / lam
              (relative: C_(t-1) = geri_kaydir((C_t - P[w_t]) / lam)).
              Izleme araci; modelin hesabina girmez.
 """
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -65,13 +75,26 @@ LAM = 1.0
 # (egitilmis LAM09 %14,8), relative lam 0,7 %34,8; hikayenin ortasinda %8,0 -> %31,0.
 CHAIN = "absolute"
 C_CACHE = False     # hikayenin kendi gecmisinden kopya (CCache) + gate
-CACHE_TOPK = 8      # defterden kac komsu (kagit ustu testteki gibi); vektorlerdeki ACTIVE'in karsiligi
+CACHE_TOPK = 8      # defterden kac komsu; vektorlerdeki ACTIVE'in karsiligi.  None: butun gecmis
+                    # (tavan, 24 Eylul: hedefin 8'in disinda kaldigi %47'ye top-8'de gradyan ulasmaz)
 CACHE_SKIP = 3      # son kac konum aranmaz: en yakin C_j hep bir onceki adim olurdu
 # Ogrenilen parametrelerin BASLANGIC degerleri.  Kullanici, 24 Eylul: "tepeye al, koşu ayarı olsunlar".
 S_V_INIT = 0.0      # vektor keskinligi S_v: kullanilan e^S_v, 1'den baslar
 S_C_INIT = 3.0      # defter keskinligi S_c: e^3 = 20, kagit ustu testteki carpan
 GATE_0_INIT = -2.0  # gate'in baslangici: sigmoid(-2) = 0,12; kagit ustu en iyi sabit gate 0,1
 S_P_INIT = 0.0      # ogrenilen S_p (SCORE_BY_VOCAB LEARNED): e^0 = 1'den baslar
+# Q: defteri arayan sorgu.  Kullanici, 24 Eylul: "query (Q_t)", "64 ok, 8 aktif".
+QUERY_VECTORS = 0   # Q'yu tasiyan ok sayisi; 0: Q = C (sorgu yok)
+QUERY_ACTIVE = 8
+QUERY_BY = "C_m"    # oklar neye en yakin secilir: "C_m" (modelin dusuncesi) ya da "C".  OLCULMEDI.
+# C_content.  Kullanici, 24 Eylul: "512/512 mantıklı", "lam_w mantıklı beta_w mantıklı tam boyut olsun".
+D_ORDER = 0         # C_order'in boyutu: kaydirmali, sira
+D_CONTENT = 0       # C_content'in boyutu: kaydirmasiz; 0: yok, butun C relative ve boyutu d
+                    # D_CONTENT > 0 iken d = D_ORDER + D_CONTENT (d verilmez)
+LAM_W_INIT = 0.9    # lam_w'nin baslangici, her token her boyut.  OLCULMEDI.
+BETA_W_INIT = 0.5   # beta_w'nin baslangici.  OLCULMEDI.
+LAM_W_MIN = math.exp(-5)  # lam_w'nin alt siniri: parca hesabi fp32'de tasmasin (16 adim x 5 -> e^80)
+CONTENT_CHUNK = 16
 EPS = 1e-6     # karekok D=0'da turevlenmez
 LEARNED = "learned"
 
@@ -116,9 +139,10 @@ class VectorLayer(nn.Module):
         self.S_v = nn.Parameter(torch.tensor(float(s_v_init)))     # log olcek: kullanilan e^S_v > 0
         self.active = active
 
-    def forward(self, C):
-        """C (..., d) -> (C_m, active_ids (..., active))."""
-        D_s2, active_ids = distance(C, self.start).topk(self.active, dim=-1, largest=False)
+    def forward(self, C, by=None):
+        """C (..., d) -> (C_m, active_ids (..., active)).  by: aktifleri secen nokta (None: C)."""
+        D_s2, active_ids = distance(C if by is None else by, self.start).topk(
+            self.active, dim=-1, largest=False)
         W_v = torch.softmax(-D_s2 * self.S_v.exp(), -1)          # payda: aktiflerin toplami 1
         V_a = (self.finish - self.start)[active_ids]             # (..., active, d)
         return C + (W_v.unsqueeze(-1) * V_a).sum(-2), active_ids
@@ -128,23 +152,35 @@ class CCache(nn.Module):
     """C_cache ve gate.  Kullanici, 24 Eylul: "c_cche ve gate olsun"."""
 
     def __init__(self, d, topk=CACHE_TOPK, skip=CACHE_SKIP, s_c_init=S_C_INIT,
-                 gate_0_init=GATE_0_INIT):
+                 gate_0_init=GATE_0_INIT, query_vectors=QUERY_VECTORS, query_active=QUERY_ACTIVE,
+                 query_by=QUERY_BY, randn=None, start_norm=None):
         super().__init__()
         self.topk, self.skip = topk, skip
         self.S_c = nn.Parameter(torch.tensor(float(s_c_init)))     # benzerlik keskinligi
         self.gate_d = nn.Parameter(torch.zeros(d))          # gate'i o anki durumun YONU soyler
-        self.gate_s = nn.Parameter(torch.zeros(()))         # ... ve en yakin C_j'nin sim'i
+        self.gate_s = nn.Parameter(torch.zeros(()))         # ... ve Q'ya en yakin C_j'nin sim'i
         self.gate_0 = nn.Parameter(torch.tensor(float(gate_0_init)))  # gate'in baslangici
+        assert query_by in ("C", "C_m"), query_by
+        self.query_by = query_by
+        self.query = (VectorLayer(d, query_vectors, min(query_active, query_vectors), randn, start_norm)
+                      if query_vectors else None)
+
+    def Q(self, C, C_m):
+        """Sorgu Q_t (B,T,d): oklar yokken C_t."""
+        if self.query is None:
+            return C
+        return self.query(C, by=C_m if self.query_by == "C_m" else C)[0]
 
     def parts(self, tokens, C, C_m):
         """-> (gate (B,T), W_c (B,T,k), ids (B,T,k)): defterin komsulari ve agirliklari.
         Nedensel: t, yalniz j < t - skip C_j'lerini ve nxt_j = w_(j+1) <= w_t'yi gorur."""
         B, T = tokens.shape
         Cn = F.normalize(C, dim=-1)
-        sim_all = Cn @ Cn.transpose(1, 2)                            # (B, t, j): cos(C_t, C_j)
+        Qn = F.normalize(self.Q(C, C_m), dim=-1)
+        sim_all = Qn @ Cn.transpose(1, 2)                            # (B, t, j): cos(Q_t, C_j)
         pos = torch.arange(T, device=C.device)
         allowed = pos[None, :] < pos[:, None] - self.skip            # j < t - skip
-        k = max(1, min(self.topk, T))
+        k = T if self.topk is None else max(1, min(self.topk, T))
         sim, j = sim_all.masked_fill(~allowed, -2.0).topk(k, dim=-1)
         valid = sim > -1.5
         W_c = torch.softmax((sim * self.S_c.exp()).masked_fill(~valid, -1e4), -1) * valid
@@ -179,18 +215,26 @@ class CCache(nn.Module):
 
 
 class PV(nn.Module):
-    """NOKTA ve VEKTOR.  Ogrenilen YALNIZ vektorler (start, finish) ve S_v'ler."""
+    """NOKTA ve VEKTOR.  P sabit; ogrenilen vektorler, S_v, S_p (LEARNED), defter ve lam_w/beta_w."""
     arch = "pv"
 
     def __init__(self, n, d=d, vectors=VECTORS, active=ACTIVE, layers=LAYERS,
                  t_max=T_MAX, seed=0, squared=None, S_p=None, start_norm=START_NORM,
                  lam=LAM, chain=CHAIN, c_cache=C_CACHE, cache_topk=CACHE_TOPK,
                  cache_skip=CACHE_SKIP, s_v_init=S_V_INIT, s_c_init=S_C_INIT,
-                 gate_0_init=GATE_0_INIT, s_p_init=S_P_INIT):
+                 gate_0_init=GATE_0_INIT, s_p_init=S_P_INIT, query_vectors=QUERY_VECTORS,
+                 query_active=QUERY_ACTIVE, query_by=QUERY_BY, d_order=D_ORDER, d_content=D_CONTENT,
+                 lam_w_init=LAM_W_INIT, beta_w_init=BETA_W_INIT):
         """squared, S_p None: SCORE_BY_VOCAB'dan.  Verilirse tabloyu ezer.
         start_norm: start'larin baslangic boyu (None: randn).  lam: zincirin solma carpani.
-        chain: "absolute" (RM_t) ya da "relative" (kaydirma).  c_cache: hikayenin gecmisi + gate."""
+        chain: "absolute" (RM_t) ya da "relative" (kaydirma).  c_cache: hikayenin gecmisi + gate.
+        query_*: defteri arayan Q.  d_content: C'nin kaydirmasiz, lam_w/beta_w ile solan kismi;
+        verilirse d = d_order + d_content."""
         super().__init__()
+        if d_content:
+            assert chain == "relative" and d_order > 0, (chain, d_order, d_content)
+            d = d_order + d_content
+        self.d_order, self.d_content = (int(d_order), int(d_content)) if d_content else (d, 0)
         generator = torch.Generator().manual_seed(seed)
         randn = lambda *shape: torch.randn(*shape, generator=generator)
         self.n, self.d, self.vectors = n, d, vectors
@@ -210,9 +254,15 @@ class PV(nn.Module):
         self.register_buffer("RM", RM)
         self.V = nn.ModuleList(VectorLayer(d, vectors, active, randn, start_norm, s_v_init)
                                for _ in range(layers))
+        if self.d_content:
+            # lam_w, beta_w: token x boyut, sigmoid'den once (logit).  Sabit baslangic, randn cekmez.
+            lam0 = (lam_w_init - LAM_W_MIN) / (1 - LAM_W_MIN)
+            self.lam_w = nn.Parameter(torch.full((n, self.d_content), math.log(lam0 / (1 - lam0))))
+            self.beta_w = nn.Parameter(torch.full((n, self.d_content),
+                                                  math.log(beta_w_init / (1 - beta_w_init))))
         self.cache_topk, self.cache_skip = cache_topk, cache_skip
-        self.cache = (CCache(d, cache_topk, cache_skip, s_c_init, gate_0_init) if c_cache
-                      else None)
+        self.cache = (CCache(d, cache_topk, cache_skip, s_c_init, gate_0_init, query_vectors,
+                             query_active, query_by, randn, start_norm) if c_cache else None)
 
     def C(self, tokens):
         """tokens (B,T) -> zincir (B,T,d).  Nedensel: C_t yalniz <= t'yi toplar."""
@@ -220,15 +270,40 @@ class PV(nn.Module):
         assert length <= self.t_max, "dizi RM sayisindan uzun"
         if self.chain == "absolute":
             return self._decayed_sum(self.RM[:length] * self.P[tokens])
-        # relative: C_t = sum_i lam^(t-i) kaydir^(t-i) P[w_i] = kaydir^t( sum_i lam^(t-i) kaydir^-i P[w_i] ).
-        # kaydir^k x [j] = x[j - k]  (torch.roll(x, k)).
         x = self.P[tokens]
+        if not self.d_content:
+            return self._relative(x)
+        d_o = self.d_order
+        return torch.cat([self._relative(x[..., :d_o]), self._content(tokens, x[..., d_o:])], -1)
+
+    def _relative(self, x):
+        """C_order: C_t = sum_i lam^(t-i) kaydir^(t-i) P[w_i] = kaydir^t( sum_i lam^(t-i) kaydir^-i P[w_i] ).
+        kaydir^k x [j] = x[j - k]  (torch.roll(x, k)), x'in kendi boyutu icinde."""
+        length, D = x.shape[1], x.shape[-1]
         pos = torch.arange(length, device=x.device)[:, None]
-        dim = torch.arange(self.d, device=x.device)[None, :]
-        back = ((dim + pos) % self.d).expand(x.shape)            # kaydir^-i: y_i[j] = x_i[j + i]
+        dim = torch.arange(D, device=x.device)[None, :]
+        back = ((dim + pos) % D).expand(x.shape)                 # kaydir^-i: y_i[j] = x_i[j + i]
         z = self._decayed_sum(x.gather(-1, back))
-        forward = ((dim - pos) % self.d).expand(x.shape)         # kaydir^t:  C_t[j] = z_t[j - t]
+        forward = ((dim - pos) % D).expand(x.shape)              # kaydir^t:  C_t[j] = z_t[j - t]
         return z.gather(-1, forward)
+
+    def lam_beta(self, tokens):
+        """-> (lam_w[w], beta_w[w]) (..., d_content): lam (LAM_W_MIN, 1), beta (0, 1)."""
+        lam = LAM_W_MIN + (1 - LAM_W_MIN) * torch.sigmoid(self.lam_w[tokens])
+        return lam, torch.sigmoid(self.beta_w[tokens])
+
+    def _content(self, tokens, x):
+        """C_content_t = lam_w[w_t] * C_content_(t-1) + beta_w[w_t] * x_t, CONTENT_CHUNK'lik parcalarla:
+        parca icinde L_t = sum log lam, h_t = e^L_t (h_bas + sum_(i<=t) e^-L_i u_i).  fp32."""
+        lam, beta = self.lam_beta(tokens)
+        u, log_lam = (beta * x).float(), lam.float().log()
+        h, out = u.new_zeros(u.shape[0], u.shape[-1]), []
+        for s in range(0, u.shape[1], CONTENT_CHUNK):
+            L = log_lam[:, s:s + CONTENT_CHUNK].cumsum(1)
+            y = L.exp() * (h[:, None] + ((-L).exp() * u[:, s:s + CONTENT_CHUNK]).cumsum(1))
+            out.append(y)
+            h = y[:, -1]
+        return torch.cat(out, 1).to(x.dtype)
 
     def _decayed_sum(self, terms):
         """sum_(i<=t) lam^(t-i) terms_i.  lam^-t ile olcekli cumsum 512'de tasar (0,7^-512);
@@ -294,12 +369,17 @@ class PV(nn.Module):
         Her adim: C_(t-1) = (C_t - RM_t*P[tokens_t]) / lam  (relative: geri kaydirilir).
         Doner: path = [(position, C_position)],
         yeniden eskiye.  lam < 1'de uzun geriye yuruyuste sayisal hata 1/lam kadar buyur."""
-        length = tokens.shape[0]
+        length, d_o = tokens.shape[0], self.d_order
         link, path = self.C(tokens[None])[0, -1], []
         for position in range(length - 1, -1 if K is None else max(-1, length - 1 - K), -1):
             path.append((position, link))
+            w, p = tokens[position], self.P[tokens[position]]
             if self.chain == "absolute":
-                link = (link - self.RM[position] * self.P[tokens[position]]) / self.lam
-            else:
-                link = torch.roll((link - self.P[tokens[position]]) / self.lam, -1)
+                link = (link - self.RM[position] * p) / self.lam
+            elif not self.d_content:
+                link = torch.roll((link - p) / self.lam, -1)
+            else:                                   # C_order geri kaydirilir, C_content lam_w'ye bolunur
+                lam, beta = self.lam_beta(w)
+                link = torch.cat([torch.roll((link[:d_o] - p[:d_o]) / self.lam, -1),
+                                  (link[d_o:] - beta * p[d_o:]) / lam])
         return path
