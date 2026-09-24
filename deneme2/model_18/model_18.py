@@ -171,22 +171,23 @@ class VectorLayer(nn.Module):
 
     def forward(self, C, by=None, probs=False):
         """C (..., d) -> (C_m, active_ids (..., active); hepsi aktifse None).  by: aktifleri secen nokta (None: C).
-        probs: ucuncu cikti P (..., vectors) = softmax(-D^2 e^S_v) BUTUN vektorler uzerinde (LOAD_BALANCE)."""
+        probs: ucuncu cikti P (..., vectors) = softmax(-D^2 e^S_v) BUTUN vektorler uzerinde (LOAD_BALANCE).
+        P'de S_v SABIT (detach): denge terimi sicakligi dusurup (P'yi duzlestirip) kucultulemez, yalniz
+        start'lari oynatarak.  Olculdu (t4000): SELECT_LB'de derin katmanlarin e^S_v'si SELECT'ten dusuktu."""
         by = C if by is None else by
         if self.direction:                                        # 2 - 2 cos: boy secimi ezmez
             by, start = F.normalize(by, dim=-1), F.normalize(self.start, dim=-1)
         else:
             start = self.start
         D2 = distance(by, start)
+        P = (torch.softmax(-D2 * self.S_v.exp().detach(), -1),) if probs else ()
         if self.active >= self.start.shape[0]:                    # hepsi: tek matris carpimi
             W_v = torch.softmax(-D2 * self.S_v.exp(), -1)
-            out = C + W_v @ (self.finish - self.start), None
-            return out + (W_v,) if probs else out
+            return (C + W_v @ (self.finish - self.start), None) + P
         D_s2, active_ids = D2.topk(self.active, dim=-1, largest=False)
         W_v = torch.softmax(-D_s2 * self.S_v.exp(), -1)          # payda: aktiflerin toplami 1
         V_a = (self.finish - self.start)[active_ids]             # (..., active, d)
-        out = C + (W_v.unsqueeze(-1) * V_a).sum(-2), active_ids
-        return out + (torch.softmax(-D2 * self.S_v.exp(), -1),) if probs else out
+        return (C + (W_v.unsqueeze(-1) * V_a).sum(-2), active_ids) + P
 
 
 class CCache(nn.Module):
@@ -207,18 +208,20 @@ class CCache(nn.Module):
         self.query = (VectorLayer(d, query_vectors, min(query_active, query_vectors), randn, start_norm,
                                   direction=select == "direction") if query else None)
 
-    def Q(self, C, C_m):
-        """Sorgu Q_t (B,T,d): oklar yokken C_t."""
+    def Q(self, C, C_m, probs=False):
+        """Sorgu Q_t (B,T,d): oklar yokken C_t.  probs: + oklarin P'si (LOAD_BALANCE; ok yoksa None)."""
         if self.query is None:
-            return C
-        return self.query(C, by=C_m if self.query_by == "C_m" else C)[0]
+            return (C, None) if probs else C
+        Q, _, *P = self.query(C, by=C_m if self.query_by == "C_m" else C, probs=probs)
+        return (Q, P[0]) if probs else Q
 
-    def parts(self, tokens, C, C_m):
-        """-> (gate (B,T), W_c (B,T,k), ids (B,T,k)): defterin komsulari ve agirliklari.
+    def parts(self, tokens, C, C_m, probs=False):
+        """-> (gate (B,T), W_c (B,T,k), ids (B,T,k)): defterin komsulari ve agirliklari; probs: + Q oklarinin P.
         Nedensel: t, yalniz j < t - skip C_j'lerini ve nxt_j = w_(j+1) <= w_t'yi gorur."""
         B, T = tokens.shape
         Cn = F.normalize(C, dim=-1)
-        Qn = F.normalize(self.Q(C, C_m), dim=-1)
+        Q, P_q = self.Q(C, C_m, probs=True) if probs else (self.Q(C, C_m), None)
+        Qn = F.normalize(Q, dim=-1)
         sim_all = Qn @ Cn.transpose(1, 2)                            # (B, t, j): cos(Q_t, C_j)
         pos = torch.arange(T, device=C.device)
         allowed = pos[None, :] < pos[:, None] - self.skip            # j < t - skip
@@ -232,7 +235,7 @@ class CCache(nn.Module):
         sim_max = torch.where(any_valid, sim[..., 0], torch.zeros_like(sim[..., 0]))
         gate = torch.sigmoid(F.normalize(C_m, dim=-1) @ self.gate_d
                              + self.gate_s * sim_max + self.gate_0) * any_valid
-        return gate, W_c, ids
+        return (gate, W_c, ids, P_q) if probs else (gate, W_c, ids)
 
     def forward(self, tokens, C, C_m, scores):
         """-> log p (B,T,n), TAM tablo: olcum ve uretim icin.  p = (1-gate) softmax(scores) + gate p_cache."""
@@ -242,18 +245,19 @@ class CCache(nn.Module):
         return torch.logaddexp(torch.log1p(-gate) + torch.log_softmax(scores, -1),
                                torch.log(gate + 1e-12) + torch.log(p_cache + 1e-12))
 
-    def target_logp(self, tokens, C, C_m, scores):
+    def target_logp(self, tokens, C, C_m, scores, probs=False):
         """-> log p(w_(t+1)) (B,T-1): EGITIM yolu.  Kayip yalniz dogru kelimeyi ister: defter
         tarafi k komsudan hesaplanir, (B,T,n) p_cache ve karisim tablosu KURULMAZ.
-        forward()'un dogru kelimedeki degeriyle ayni (tests: t_ccache)."""
-        gate, W_c, ids = self.parts(tokens, C, C_m)
+        forward()'un dogru kelimedeki degeriyle ayni (tests: t_ccache).  probs: + Q oklarinin P'si."""
+        gate, W_c, ids, *P_q = self.parts(tokens, C, C_m, probs=probs)
         target = tokens[:, 1:]
         s = scores[:, :-1]
         log_model = s.gather(-1, target[..., None])[..., 0] - s.logsumexp(-1)
         p_cache = (W_c[:, :-1] * (ids[:, :-1] == target[..., None])).sum(-1)
         gate = gate[:, :-1]
-        return torch.logaddexp(torch.log1p(-gate) + log_model,
+        logp = torch.logaddexp(torch.log1p(-gate) + log_model,
                                torch.log(gate + 1e-12) + torch.log(p_cache + 1e-12))
+        return (logp, P_q[0]) if probs else logp
 
 
 class PV(nn.Module):
@@ -376,7 +380,7 @@ class PV(nn.Module):
         return (C_m, active_ids, P) if probs else (C_m, active_ids)
 
     def balance(self, P, counted):
-        """Load balancing: katman basina vectors * sum_a Pbar_a^2, Pbar = sayilan konumlarda ortalama P.
+        """Load balancing: katman (ve Q) basina vectors * sum_a Pbar_a^2, Pbar = sayilan konumlarda ortalama P.
         En kucuk 1: kullanim esit.  Her konum keskin kalabilir; yalniz ORTALAMA dengelenir."""
         w = counted.to(P[0].dtype).unsqueeze(-1)
         return sum(p.shape[-1] * (((p[:, :-1] * w).sum((0, 1)) / w.sum()) ** 2).sum() for p in P)
@@ -396,23 +400,31 @@ class PV(nn.Module):
         scores = self.score(C_m)
         return scores if self.cache is None else self.cache(tokens, C, C_m, scores)
 
-    def loss(self, tokens, targets_mask=None):
+    def loss(self, tokens, targets_mask=None, parts=False):
         """SONRAKI TOKEN: konum j, j+1'i tahmin eder; targets_mask verilirse
-        yalniz orada isaretli hedefler sayilir.  load_balance > 0: + load_balance * balance."""
+        yalniz orada isaretli hedefler sayilir.  load_balance > 0: + load_balance * balance
+        (vektor katmanlari ve Q'nun oklari).  parts: (toplam, NLL) -- gunluk NLL'yi yazar, kosular
+        denge teriminden bagimsiz kiyaslanir."""
         counted = (torch.ones_like(tokens[:, 1:], dtype=torch.bool) if targets_mask is None
                    else targets_mask[:, 1:].bool())
         C = self.C(tokens)
-        C_m, _, *P = self._layers(C, probs=self.load_balance > 0)
+        dengeli = self.load_balance > 0
+        C_m, _, *P = self._layers(C, probs=dengeli)
+        P = P[0] if dengeli else []
         scores = self.score(C_m)
         if self.cache is not None:                        # hizli yol: yalniz dogru kelimenin log p'si
-            nll = -self.cache.target_logp(tokens, C, C_m, scores)
+            if dengeli:
+                logp, P_q = self.cache.target_logp(tokens, C, C_m, scores, probs=True)
+                P = P + ([P_q] if P_q is not None else [])
+                nll = -logp
+            else:
+                nll = -self.cache.target_logp(tokens, C, C_m, scores)
         else:                                             # son konumun hedefi yok; hedef bir kaydirilmis
             nll = F.cross_entropy(scores[:, :-1].transpose(1, 2), tokens[:, 1:], reduction="none")
         w = counted.to(nll.dtype)
-        loss = (nll * w).sum() / w.sum()
-        if self.load_balance > 0:
-            loss = loss + self.load_balance * self.balance(P[0], counted)
-        return loss
+        nll = (nll * w).sum() / w.sum()
+        loss = nll + self.load_balance * self.balance(P, counted) if dengeli else nll
+        return (loss, nll) if parts else loss
 
     def trace(self, tokens):
         """Izlenebilirlik: her konumda her layer'da hangi vektorler aktifti."""

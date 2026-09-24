@@ -726,6 +726,27 @@ def t_balance():
         shutil.rmtree(kok, ignore_errors=True)
     kapi("load balance egitilir; surdurme farki yakalar", bool(egitim) and yakaladi, "0,01 -> 0")
 
+    # sicaklik SABIT: denge terimi S_v'ye gradyan vermez; Q'nun oklari da dengelenir; parts NLL'yi ayirir
+    torch.manual_seed(0)
+    q = PV(50, load_balance=0.5, query=True, query_vectors=16, query_active=16, **kw)
+    with torch.no_grad():
+        q.cache.query.finish.add_(0.3 * torch.randn_like(q.cache.query.finish))
+    C = q.C(w)
+    C_m, _, P = q._layers(C, probs=True)
+    q.balance(P, torch.ones(2, 11, dtype=torch.bool)).backward()
+    sicaklik = all(L.S_v.grad is None or float(L.S_v.grad.abs()) == 0 for L in q.V)
+    start = all(bool(L.start.grad.abs().sum() > 0) for L in q.V)
+    q.zero_grad()
+    toplam, nll = q.loss(w, parts=True)
+    yalin = PV(50, query=True, query_vectors=16, query_active=16, **kw)
+    yalin.load_state_dict(q.state_dict())
+    ayni_nll = abs(float(nll) - float(yalin.loss(w))) < 1e-5 and float(toplam) > float(nll)
+    toplam.backward()
+    q_denge = bool(q.cache.query.start.grad.abs().sum() > 0)
+    kapi("load balance: sicaklik sabit, Q oklari dengelenir, parts NLL'yi ayirir",
+         sicaklik and start and ayni_nll and q_denge,
+         "denge terimi S_v'ye 0 gradyan; NLL denge kapaliyla ayni")
+
 
 # ============================================================
 # DATA_STORIES -- TinyStories (model_17 veri_t17 + olcme_17'den).

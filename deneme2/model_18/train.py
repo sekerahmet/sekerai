@@ -271,10 +271,12 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
             break
         batch_ids = torch.randint(0, n_questions, (batch,), generator=sampler)
         optimizer.zero_grad()
-        loss = loss_fn(questions[batch_ids].to(device, non_blocking=True).long(),
-                       targets_mask[batch_ids].to(device, non_blocking=True))
+        # total: geri yayilan (NLL + load balance); loss: NLL -- gunluk ve step_losses bunu yazar,
+        # kosular denge teriminden bagimsiz kiyaslanir.
+        total, loss = loss_fn(questions[batch_ids].to(device, non_blocking=True).long(),
+                              targets_mask[batch_ids].to(device, non_blocking=True), parts=True)
         step_losses[step] = loss.detach()
-        loss.backward()
+        total.backward()
         optimizer.step()
         last_step = step
         # Uc aralik birbirinden BAGIMSIZ: olcum, tam yedek (surdurme), agirlik (analiz).
