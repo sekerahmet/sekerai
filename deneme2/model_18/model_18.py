@@ -9,8 +9,9 @@ arasında ki uzaklık" ve "her vektör her an aktif olmamalı bunu model
 
     P        token noktalari.  SABIT.
     RM       rank multiplier, sira carpani (+-1).  SABIT.
-    C        zincir: C_t = RM_1*P[w_1] + ... + RM_t*P[w_t]
+    C        zincir: C_t = lam*C_(t-1) + RM_t*P[w_t]    (lam 1: hepsinin toplami)
              yeni token gelince yalniz bir terim eklenir; C_m zincire GIRMEZ.
+             lam < 1: eski terimler solar, |C| sinirli kalir, ardisik C'ler ayrisir.
     V        layer basina vektor sozlugu; her vektor (start, finish), ogrenilir.
     layer    C'ye en yakin ACTIVE tane start AKTIF, gerisi PASIF:
                D_s,a = |C - start_a|                            a. aktif vektorun start'ina uzaklik
@@ -22,7 +23,7 @@ arasında ki uzaklık" ve "her vektör her an aktif olmamalı bunu model
                         UZAKLASARAK emin olur (MAT_COK_PV).
                karesiz  kaybin en iyi yeri C_m = P (ucgen esitsizligi).
              squared ve S_p sozluk sayisindan: SCORE_BY_VOCAB.
-    CM       countermarch, geriye yuruyus: C_(t-1) = C_t - RM_t*P[w_t].
+    CM       countermarch, geriye yuruyus: C_(t-1) = (C_t - RM_t*P[w_t]) / lam.
              Izleme araci; modelin hesabina girmez.
 """
 import torch
@@ -44,6 +45,11 @@ T_MAX = 64     # RM sayisi = en uzun dizi
 # belirliyordu -- secilenlerin %62'si (egitimde %82) en kisa 8 start, baglamdan bagimsiz.
 # Kullanici: "Startları küçük başlat".
 START_NORM = None
+# Zincirin solma carpani.  1: hic solmaz (lam gelmeden once kosan her sey).
+# Hesap (egitimsiz, 48 hikaye, 24 Eylul): lam 1'de 100. kelimede cos(C_t, C_t+1) 0,995 ve
+# ardisik secimde 8 vektorun 7,2'si ayni; lam 0,9'da cos 0,90 ve 4,7 -- her yerde ayni.
+# Kullanici: "λ da bizim için alsında Lr gibi birşey ... şu an 0.9 ile başlayabiliriz".
+LAM = 1.0
 EPS = 1e-6     # karekok D=0'da turevlenmez
 LEARNED = "learned"
 
@@ -101,15 +107,16 @@ class PV(nn.Module):
     arch = "pv"
 
     def __init__(self, n, d=d, vectors=VECTORS, active=ACTIVE, layers=LAYERS,
-                 t_max=T_MAX, seed=0, squared=None, S_p=None, start_norm=START_NORM):
+                 t_max=T_MAX, seed=0, squared=None, S_p=None, start_norm=START_NORM,
+                 lam=LAM):
         """squared, S_p None: SCORE_BY_VOCAB'dan.  Verilirse tabloyu ezer.
-        start_norm: start'larin baslangic boyu (None: randn)."""
+        start_norm: start'larin baslangic boyu (None: randn).  lam: zincirin solma carpani."""
         super().__init__()
         generator = torch.Generator().manual_seed(seed)
         randn = lambda *shape: torch.randn(*shape, generator=generator)
         self.n, self.d, self.vectors = n, d, vectors
         self.active, self.layers, self.t_max = active, layers, t_max
-        self.start_norm = start_norm
+        self.start_norm, self.lam = start_norm, float(lam)
         rule = score_rule(n)
         self.squared = rule[0] if squared is None else squared
         S_p = rule[1] if S_p is None else S_p
@@ -126,7 +133,15 @@ class PV(nn.Module):
         """tokens (B,T) -> zincir (B,T,d).  Nedensel: C_t yalniz <= t'yi toplar."""
         length = tokens.shape[1]
         assert length <= self.t_max, "dizi RM sayisindan uzun"
-        return (self.RM[:length] * self.P[tokens]).cumsum(1)
+        terms = self.RM[:length] * self.P[tokens]
+        if self.lam == 1.0:
+            return terms.cumsum(1)
+        # C_t = sum_(i<=t) lam^(t-i) x_i.  lam^-t ile olcekli cumsum 512'de tasar (0,7^-512);
+        # (T,T) alt ucgen carpan matrisi kesin ve kararli.
+        age = torch.arange(length, device=terms.device)
+        age = age[:, None] - age[None, :]
+        decay = torch.where(age >= 0, self.lam ** age.clamp(min=0).float(), torch.zeros(()))
+        return torch.einsum("ti,bid->btd", decay.to(terms.dtype), terms)
 
     def move(self, tokens):
         """(C_m, layer basina active_ids) -- trace() ve scoreboard() ayni hesabi okur."""
@@ -164,10 +179,11 @@ class PV(nn.Module):
 
     def CM(self, tokens, K=None):
         """Countermarch: tek dizi tokens (T,), son halkadan K adim geri (None: basa kadar).
-        Her adim: C_(t-1) = C_t - RM_t*P[tokens_t].  Doner: path = [(position, C_position)], yeniden eskiye."""
+        Her adim: C_(t-1) = (C_t - RM_t*P[tokens_t]) / lam.  Doner: path = [(position, C_position)],
+        yeniden eskiye.  lam < 1'de uzun geriye yuruyuste sayisal hata 1/lam kadar buyur."""
         length = tokens.shape[0]
         link, path = self.C(tokens[None])[0, -1], []
         for position in range(length - 1, -1 if K is None else max(-1, length - 1 - K), -1):
             path.append((position, link))
-            link = link - self.RM[position] * self.P[tokens[position]]
+            link = (link - self.RM[position] * self.P[tokens[position]]) / self.lam
         return path

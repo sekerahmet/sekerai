@@ -293,6 +293,41 @@ def t_start():
     kapi("surdurme start_norm farkini yakalar", yakaladi, "eski randn paket -> start_norm 1")
 
 
+# --- 13.  LAM: C_t = lam*C_(t-1) + RM_t*P[w_t]; CM geri yurur; nedensel; surdurme farki
+def t_lam():
+    m = PV(VM.N, lam=0.9)
+    w = _dizi("E31+52=8")
+    C = m.C(w[None])[0]
+    zincir = all(torch.allclose(C[t] - m.RM[t] * m.P[w[t]], 0.9 * C[t - 1], atol=1e-5)
+                 for t in range(1, len(w)))
+    cm = all(torch.allclose(c, C[t], atol=1e-4) for t, c in m.CM(w))
+    bir = torch.equal(PV(VM.N, lam=1.0).C(w[None]), PV(VM.N).C(w[None]))
+    a, b = m.scoreboard(_dizi("E31+52=8")[None]), m.scoreboard(_dizi("E31+52=9")[None])
+    nedensel = torch.equal(a[0, :-1], b[0, :-1])
+    uzun = PV(50, d=32, t_max=512, lam=0.7).C(torch.randint(0, 50, (2, 512)))
+    kapi("lam: zincir, CM, nedensel, lam 1 == cumsum", zincir and cm and bir and nedensel
+         and bool(torch.isfinite(uzun).all()), "0,9; T=512'de lam 0,7 sonlu")
+
+    N, data = _veri()
+    kok = tempfile.mkdtemp()
+    try:
+        r = TR.RUNS["L"] = TR.Run("L", kok)
+        TR._run(r, data, N, _sifir, "cpu", 2e-3, 3, 0, 8, 3, 3, **KUCUK)
+        yol = kok + "/L/t3.pt"
+        p = torch.load(yol, weights_only=False)
+        del p["lam"]                             # alan gelmeden yazilmis paket
+        torch.save(p, yol)
+        try:
+            r = TR.RUNS["L"] = TR.Run("L", kok)
+            TR._run(r, data, N, _sifir, "cpu", 2e-3, 6, 0, 8, 3, 3, resume=yol, lam=0.9, **KUCUK)
+            yakaladi = False
+        except ValueError as h:
+            yakaladi = "lam" in str(h)
+    finally:
+        shutil.rmtree(kok, ignore_errors=True)
+    kapi("surdurme lam farkini yakalar", yakaladi, "eski paket (lam 1) -> lam 0,9")
+
+
 # ============================================================
 # DATA_STORIES -- TinyStories (model_17 veri_t17 + olcme_17'den).
 # ============================================================
@@ -488,7 +523,7 @@ def t_notebook(yol=None):
 if __name__ == "__main__":
     print("tests (model_18)")
     for f in (t_zincir, t_nedensel, t_sessiz, t_cm, t_payda, t_gradyan,
-              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_mat_pencere,
+              t_parametre, t_mask, t_surdurme, t_durdur, t_skor, t_start, t_lam, t_mat_pencere,
               t_mat_sor, t_mat_basamak, t_mat_egitim, t_stories, t_notebook):
         f()
     t_notebook(os.path.join(os.path.dirname(os.path.abspath(__file__)),

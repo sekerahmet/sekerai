@@ -75,7 +75,7 @@ def yukle(yol):
     k = torch.load(yol, weights_only=False, map_location="cpu")
     m = PV(k["n"], d=k["d"], vectors=k["vectors"], active=k["active"], layers=k["layers"],
            t_max=k["t_max"], seed=k["seed"], squared=k.get("squared", True),
-           S_p=k.get("S_p", 1.0))
+           S_p=k.get("S_p", 1.0), lam=k.get("lam", 1.0))
     m.load_state_dict(k["weights"])
     return m.eval(), k
 

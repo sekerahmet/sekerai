@@ -39,9 +39,9 @@ RUNS = {}        # run_name -> Run
 # Surdurmede paketteki degerle AYNI olmali.  Farkliysa yorunge sessizce
 # baskalasir: optimizer.load_state_dict lr'yi paketten alir, gunluk cagriyi yazar.
 MUST_MATCH = ("arch", "n", "T", "batch", "lr", "seed", "d", "vectors",
-              "active", "layers", "t_max", "squared", "S_p", "start_norm", "data_fingerprint", "vocab")
+              "active", "layers", "t_max", "squared", "S_p", "start_norm", "lam", "data_fingerprint", "vocab")
 # Alan eklenmeden once yazilan paketlerdeki deger: skor -D^2, carpansiz.
-BEFORE_FIELD = {"squared": True, "S_p": 1.0, "start_norm": "randn"}
+BEFORE_FIELD = {"squared": True, "S_p": 1.0, "start_norm": "randn", "lam": 1.0}
 
 
 class Run:
@@ -154,11 +154,11 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
          eval_every, save_every, weights_every=100, resume=None, compile=False, vocab=None,
          extra=None, d=M18.d, vectors=M18.VECTORS, active=M18.ACTIVE,
          layers=M18.LAYERS, t_max=M18.T_MAX, squared=None, S_p=None,
-         start_norm=M18.START_NORM):
+         start_norm=M18.START_NORM, lam=M18.LAM):
     torch.manual_seed(seed)
     model = PV(n_vocab, d=d, vectors=vectors, active=active, layers=layers,
                t_max=t_max, seed=seed, squared=squared, S_p=S_p,
-               start_norm=start_norm).to(device)
+               start_norm=start_norm, lam=lam).to(device)
     # torch.compile: eski mimaride 3,90 kat olculdu (model_17 train_17); PV'de OLCULMEDI.
     loss_fn = torch.compile(model.loss) if compile else model.loss
     if compile:
@@ -176,6 +176,7 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
                  squared=model.squared,
                  S_p=M18.LEARNED if model.S_p_learned else model.S_p,
                  start_norm="randn" if start_norm is None else float(start_norm),
+                 lam=float(lam),
                  seed=seed, batch=batch, T=max_length, n_params=n_params,
                  compile=compile,
                  data_fingerprint=_fingerprint(questions, filled_mask, targets_mask),
@@ -205,7 +206,7 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
     run.note(f"sorular {n_questions:,} x {max_length}   dolgu %{100 * (1 - fill_ratio):.1f}")
     run.note(f"arch {model.arch}  d {d} vectors {vectors} active {active} "
              f"layers {layers}  squared {fixed['squared']} S_p {fixed['S_p']}  "
-             f"start_norm {fixed['start_norm']}  lr {lr} seed {seed}  sozluk {n_vocab}  "
+             f"start_norm {fixed['start_norm']}  lam {fixed['lam']}  lr {lr} seed {seed}  sozluk {n_vocab}  "
              f"parametre {n_params:,}")
     run.note(f"batch {batch}   epok = {n_questions / batch:,.0f} adim   veri izi "
              f"{fixed['data_fingerprint']}   olcum her {eval_every}   tam yedek her "
@@ -308,7 +309,8 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
           eval_every=100, save_every=1000, weights_every=100, resume=None,
           compile=True, vocab=None,
           d=M18.d, vectors=M18.VECTORS, active=M18.ACTIVE, layers=M18.LAYERS,
-          t_max=M18.T_MAX, squared=None, S_p=None, start_norm=M18.START_NORM):
+          t_max=M18.T_MAX, squared=None, S_p=None, start_norm=M18.START_NORM,
+          lam=M18.LAM):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
     data        (questions, filled_mask, targets_mask)
@@ -328,6 +330,7 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
     d, vectors, active, layers, t_max   PV'nin ayarlari (model_18)
     squared, S_p   skor; None ise sozluk sayisindan (model_18.SCORE_BY_VOCAB)
     start_norm  start'larin baslangic boyu (None: randn, boy ~sqrt(d))
+    lam         zincirin solma carpani: C_t = lam*C_(t-1) + RM_t*P[w_t]  (1: solmaz)
     """
     old = RUNS.get(run_name)
     if old is not None and old.alive:
@@ -346,7 +349,7 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
         save_every=save_every, weights_every=weights_every, resume=resume,
         compile=compile, vocab=vocab,
         extra=extra, d=d, vectors=vectors, active=active, layers=layers,
-        t_max=t_max, squared=squared, S_p=S_p, start_norm=start_norm))
+        t_max=t_max, squared=squared, S_p=S_p, start_norm=start_norm, lam=lam))
     run.thread.start()
     return f"{run_name} basladi" + (f"  ({os.path.basename(resume)}'den)" if resume else "")
 
