@@ -1,0 +1,421 @@
+<title>__TITLE__</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600&display=swap">
+<style>
+:root{
+  --bg:#F3F5F4; --panel:#FFFFFF; --ink:#18201D; --muted:#5B6863; --faint:#8B9691; --rule:#D5DCD8;
+  --accent:#1E5E86; --accent-soft:#D6E6F1; --fork:#E9A93A; --fork-soft:#F7E2B5; --copy:#A8386A; --copy-soft:#F1D5E1;
+  --pos:#1D7457; --neg:#B24A3C; --look:#6A4FB3; --look-soft:#E4DDF6; --shadow:0 1px 2px rgba(20,30,25,.06);
+  --pick:#1E7B53; --pick-ink:#FFFFFF; --pick-soft:#D3EEE1;
+  --mono:"IBM Plex Mono",ui-monospace,Consolas,monospace; --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --cond:"IBM Plex Sans Condensed","IBM Plex Sans",system-ui,sans-serif;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#121715; --panel:#1A211E; --ink:#E4EAE7; --muted:#9AA7A1; --faint:#6E7B75; --rule:#2C3531;
+    --accent:#6FB0DA; --accent-soft:#1D3444; --fork:#E3AE52; --fork-soft:#4A3A1C; --copy:#E07AA6; --copy-soft:#46233A;
+    --pos:#5CC39B; --neg:#E7836F; --look:#A996F0; --look-soft:#302854; --shadow:none; color-scheme:dark;
+    --pick:#4CC08D; --pick-ink:#0B1A13; --pick-soft:#173A2B;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#121715; --panel:#1A211E; --ink:#E4EAE7; --muted:#9AA7A1; --faint:#6E7B75; --rule:#2C3531;
+  --accent:#6FB0DA; --accent-soft:#1D3444; --fork:#E3AE52; --fork-soft:#4A3A1C; --copy:#E07AA6; --copy-soft:#46233A;
+  --pos:#5CC39B; --neg:#E7836F; --look:#A996F0; --look-soft:#302854; --shadow:none; color-scheme:dark;
+    --pick:#4CC08D; --pick-ink:#0B1A13; --pick-soft:#173A2B;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.5}
+.wrap{max-width:1320px;margin:0 auto;padding-inline:16px;padding-block:18px 40px;display:grid;gap:14px}
+header h1{font-family:var(--cond);font-weight:600;font-size:22px;letter-spacing:.01em;margin:0;text-wrap:balance}
+header p{margin:4px 0 0;color:var(--muted);max-width:78ch}
+.picker{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
+.picker .grp{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.picker .gl{font-family:var(--mono);font-size:12px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase}
+.chip{font:inherit;font-size:13px;border:1px solid var(--rule);background:var(--panel);color:var(--ink);border-radius:6px;padding:3px 9px;cursor:pointer;display:inline-flex;gap:6px;align-items:center}
+.chip:hover{border-color:var(--accent)}
+.chip[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--bg)}
+.chip .dot{width:7px;height:7px;border-radius:50%;background:var(--copy)}
+.chip:focus-visible,.tok:focus-visible,.seg button:focus-visible,.bar:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;color:var(--muted);font-size:12.5px}
+.legend span{display:inline-flex;gap:6px;align-items:center}
+.sw{width:18px;height:12px;border-radius:3px;display:inline-block}
+.main{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:14px;align-items:start}
+@media (max-width:900px){.main{grid-template-columns:minmax(0,1fr)}}
+.card{background:var(--panel);border:1px solid var(--rule);border-radius:8px;box-shadow:var(--shadow);padding:14px 16px;min-width:0}
+.card h2{font-family:var(--cond);font-size:15px;font-weight:600;margin:0 0 8px;letter-spacing:.01em}
+.meta{font-size:12.5px;color:var(--muted);display:grid;gap:3px;margin-bottom:10px}
+.meta b{color:var(--ink);font-weight:500}
+.focus{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}
+.focus button{font:inherit;font-size:12px;border:1px dashed var(--muted);background:transparent;color:var(--ink);border-radius:5px;padding:2px 8px;cursor:pointer}
+.focus button:hover{border-style:solid}
+.story{font-family:var(--mono);font-size:13.5px;line-height:2.05;word-break:break-word}
+.tok{font:inherit;background:transparent;border:0;color:inherit;padding:1px 1px;border-radius:3px;cursor:pointer;border-bottom:2px solid transparent}
+.tok.prompt{color:var(--faint);cursor:default}
+.tok.f1{background:var(--fork-soft)}
+.tok.f0{background:var(--fork);color:#1b1407}
+.tok.cp{border-bottom-color:var(--copy)}
+.tok.fc{outline:1px dashed var(--muted);outline-offset:1px}
+.tok.sel{background:var(--accent);color:var(--bg)}
+.tok.look{background:var(--look-soft);box-shadow:0 0 0 1px var(--look)}
+.spark{margin-top:12px;overflow-x:auto}
+.spark svg{display:block;height:92px;min-width:100%}
+.spark text{font-family:var(--mono);font-size:9px;fill:var(--muted)}
+.bar{cursor:pointer}
+.det-head{font-family:var(--mono);font-size:13px;line-height:1.7;word-break:break-word}
+.det-head .ctx{color:var(--muted)}
+.det-head .arrow{color:var(--muted);padding-inline:4px}
+.det-head .pick{background:var(--accent);color:var(--bg);border-radius:3px;padding:1px 4px}
+.stats{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 12px}
+.stat{border:1px solid var(--rule);border-radius:6px;padding:3px 8px;font-size:12.5px;display:inline-flex;gap:6px;align-items:baseline}
+.stat .k{color:var(--muted)}
+.stat .v{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.stat.warn{border-color:var(--fork);background:var(--fork-soft)}
+.stat.loop{border-color:var(--copy);background:var(--copy-soft)}
+.sec{margin-top:14px}
+.sec h3{font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin:0 0 6px;font-family:var(--sans)}
+.seg{display:inline-flex;border:1px solid var(--rule);border-radius:6px;overflow:hidden;margin-bottom:8px}
+.seg button{font:inherit;font-size:12px;border:0;background:transparent;color:var(--muted);padding:3px 10px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--accent-soft);color:var(--ink)}
+.parts{display:grid;grid-template-columns:minmax(92px,auto) minmax(0,1fr) 56px;gap:3px 8px;align-items:center;font-size:12.5px}
+.parts .lab{color:var(--ink);white-space:nowrap}
+.parts .lab.sub{color:var(--muted)}
+.parts .num{font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right}
+.parts .track{position:relative;height:12px}
+.parts .axis{position:absolute;top:-2px;bottom:-2px;width:1px;background:var(--rule)}
+.parts .fill{position:absolute;top:1px;height:10px;border-radius:2px}
+.parts .total{font-weight:600;border-top:1px solid var(--rule);padding-top:4px}
+.note{font-size:12px;color:var(--muted);margin-top:6px;max-width:70ch}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th{font-weight:500;color:var(--muted);text-align:left;padding:3px 6px;border-bottom:1px solid var(--rule);white-space:nowrap}
+td{padding:3px 6px;border-bottom:1px solid var(--rule);vertical-align:top}
+td.n{font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+td.w{font-family:var(--mono)}
+tr.go{cursor:pointer}
+tr.go:hover td{background:var(--look-soft)}
+.tbl{overflow-x:auto}
+.pos{color:var(--pos)} .neg{color:var(--neg)}
+.heads{display:grid;gap:8px}
+.headrow{display:grid;grid-template-columns:62px minmax(0,1fr);gap:8px;align-items:start}
+.headrow .hn{font-family:var(--mono);font-size:12.5px}
+.looks{display:flex;flex-wrap:wrap;gap:5px}
+.looks button{font:inherit;font-family:var(--mono);font-size:12px;border:1px solid var(--rule);background:transparent;color:var(--ink);border-radius:5px;padding:1px 6px;cursor:pointer}
+.looks button:hover{border-color:var(--look);background:var(--look-soft)}
+.muted{color:var(--muted)}
+.topbar{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between}
+.views{display:inline-flex;border:1px solid var(--rule);border-radius:8px;overflow:hidden;background:var(--panel)}
+.views button{font:inherit;font-size:13px;font-weight:500;border:0;background:transparent;color:var(--muted);padding:6px 16px;cursor:pointer}
+.views button[aria-pressed="true"]{background:var(--ink);color:var(--bg)}
+.views button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.treecard{max-width:780px;margin:0 auto;width:100%}
+details.flowbox{border-block:1px solid var(--rule);padding-block:8px;margin:4px 0 12px}
+details.flowbox summary{cursor:pointer;color:var(--muted);font-size:12.5px}
+.flow{font-family:var(--mono);font-size:13px;line-height:1.95;word-break:break-word;margin-top:6px}
+.flow button{font:inherit;border:0;background:transparent;color:var(--ink);padding:0 1px;border-radius:3px;cursor:pointer}
+.flow button:hover,.flow button:focus-visible{background:var(--pick-soft);outline:none}
+.flow button.nar{box-shadow:inset 0 -2px 0 var(--fork)}
+.flow button.cp{color:var(--copy)}
+.tlegend{display:flex;flex-wrap:wrap;gap:6px 16px;color:var(--muted);font-size:12px;margin-bottom:6px}
+.tlegend span{display:inline-flex;gap:6px;align-items:center}
+.mini{display:inline-block;border-radius:5px;padding:0 6px;font-family:var(--mono);font-size:11px;font-style:normal;line-height:17px;border:1px solid var(--rule);background:var(--panel);color:var(--muted)}
+.mini.pick{background:var(--pick);border-color:var(--pick);color:var(--pick-ink)}
+.mini.nar{box-shadow:0 0 0 2px var(--fork)}
+.mini.cp{border:0;width:18px;height:3px;padding:0;background:var(--copy);border-radius:2px}
+.tree{padding:6px 0 10px}
+.root{margin:0 auto;max-width:56ch;border:1px solid var(--rule);background:var(--bg);border-radius:10px;padding:10px 14px;font-family:var(--mono);font-size:12.5px;line-height:1.6;text-align:center}
+.root .rl{display:block;font-family:var(--sans);font-size:10.5px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:3px}
+.lvl{position:relative;padding-top:30px}
+.lvl .edges{position:absolute;top:0;left:0;width:100%;height:30px}
+.lvl .edges path{fill:none;stroke:var(--rule);stroke-width:1.3;vector-effect:non-scaling-stroke}
+.lvl .edges .spine{stroke:var(--pick);stroke-width:2.4}
+.lvl.loop .edges .spine{stroke:var(--copy)}
+.row3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));justify-items:center;align-items:center}
+.node{position:relative;font:inherit;display:inline-flex;flex-direction:column;align-items:center;min-width:72px;max-width:calc(100% - 8px);padding:3px 12px 6px;border:1px solid var(--rule);border-radius:9px;background:var(--panel);color:var(--muted);cursor:pointer;overflow:hidden;transition:transform .12s,border-color .12s}
+.node:hover{transform:translateY(-1px);border-color:var(--muted)}
+.node:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.node .w{font-family:var(--mono);font-size:13px;font-weight:500;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.node .p{font-family:var(--mono);font-size:10.5px;line-height:1.2;font-variant-numeric:tabular-nums}
+.node .pb{position:absolute;left:0;bottom:0;height:3px;background:var(--muted);opacity:.35}
+.node.pick{background:var(--pick);border-color:var(--pick);color:var(--pick-ink)}
+.node.pick .p{opacity:.85}
+.node.pick .pb{background:var(--pick-ink);opacity:.45}
+.lvl.narrow .node.pick{box-shadow:0 0 0 3px var(--fork)}
+.lvl.narrow .node.close{border:2px solid var(--fork);color:var(--ink)}
+.lvl .step{position:absolute;left:0;top:37px;font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+.lvl.flash .node.pick{outline:3px solid var(--accent);outline-offset:3px}
+@media (max-width:560px){.lvl .step{display:none}.node{min-width:54px;padding:3px 8px 6px}}
+@media (prefers-reduced-motion: reduce){*{transition:none!important}}
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>__TITLE__</h1>
+    <p>Açgözlü üretimin (sıcaklık 0) her seçimi. <b>Ağaç</b>: her adımda ilk üç aday ve olasılıkları; seçilen yeşil, dal onun altından sürer. <b>Döküm</b>: seçilen token'ın puanını oluşturan parçalar; toplamları seçilen ile ikinci aday arasındaki model farkını birebir verir, defterin katkısı ayrıca yazılı.</p>
+  </header>
+  <div class="topbar">
+    <nav class="picker" id="picker" aria-label="Hikâye seç"></nav>
+    <div class="views" role="group" aria-label="Görünüm"><button type="button" data-v="tree">Ağaç</button><button type="button" data-v="dokum">Döküm</button></div>
+  </div>
+  <section id="v-tree" class="card treecard" aria-label="Seçim ağacı">
+    <h2 id="t-title"></h2>
+    <div class="meta" id="t-meta"></div>
+    <div class="tlegend">
+      <span><i class="mini pick">seçilen</i>en yüksek olasılık (açgözlü)</span>
+      <span><i class="mini">aday</i>2. aday solda, 3. sağda</span>
+      <span><i class="mini pick nar">dar</i>ikinci aday yakın: log p farkı &lt; 0,5</span>
+      <span><i class="mini cp"></i>kopya: önceki ≥ 4 token'lık parçanın tekrarı</span>
+      <span>olasılıklar üretimdeki gibi, &lt;dolgu&gt; ve &lt;bilinmeyen&gt; hariç · düğüme tıkla: dökümü</span>
+    </div>
+    <details class="flowbox"><summary>Üretilen metin · bir kelimeye tıkla, ağaçta o adıma git</summary><div class="flow" id="flow"></div></details>
+    <div class="tree" id="tree"></div>
+  </section>
+  <div id="v-dokum" hidden>
+  <div class="legend">
+    <span><i class="sw" style="background:var(--fork)"></i>dar seçim: fark &lt; 0,25</span>
+    <span><i class="sw" style="background:var(--fork-soft)"></i>fark &lt; 0,5</span>
+    <span><i class="sw" style="border-bottom:3px solid var(--copy);height:9px;border-radius:0"></i>kopya: önceki ≥ 4 token'lık parçanın tekrarı</span>
+    <span><i class="sw" style="outline:1px dashed var(--muted)"></i>odak: raporda açılan token</span>
+    <span><i class="sw" style="background:var(--look-soft);box-shadow:0 0 0 1px var(--look)"></i>seçilen konumun baktığı yer</span>
+  </div>
+  <div class="main">
+    <section class="card" aria-label="Hikâye">
+      <h2 id="s-title"></h2>
+      <div class="meta" id="s-meta"></div>
+      <div class="focus" id="s-focus"></div>
+      <div class="story" id="story"></div>
+      <div class="spark" id="spark" aria-label="Fark çizgisi"></div>
+    </section>
+    <section class="card" aria-label="Seçimin dökümü" id="detail"></section>
+  </div>
+  </div>
+</div>
+
+<script type="application/json" id="data">__DATA__</script>
+<script>
+(function(){
+const DATA = JSON.parse(document.getElementById('data').textContent);
+const LABEL = {chain_order:'zincir · sıra', chain_content:'zincir · içerik', layer_0:'katman 0', layer_1:'katman 1',
+  layer_2:'katman 2', layer_3:'katman 3', head_0:'attention baş 0', head_1:'attention baş 1', head_2:'attention baş 2',
+  head_3:'attention baş 3'};
+const NO_BEFORE = new Set(['.',',','!','?',';',':',')',']','}',"'"]);
+const NO_AFTER = new Set(['(','[','{']);
+const fmt = (x, d=2) => (x >= 0 ? '+' : '−') + Math.abs(x).toFixed(d).replace('.', ',');
+const num = (x, d=3) => x.toFixed(d).replace('.', ',');
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+let S = 0, K = null, MODE = 'b', VIEW = 'tree';
+try { const h = location.hash.slice(1); if (/^s\d+$/.test(h)) S = Math.min(+h.slice(1), DATA.length - 1); } catch(e) {}
+
+function picker(){
+  const nav = document.getElementById('picker'); nav.innerHTML = '';
+  const models = [...new Set(DATA.map(s => s.model))];
+  for (const m of models){
+    const g = document.createElement('div'); g.className = 'grp';
+    g.innerHTML = '<span class="gl">' + esc(m) + '</span>';
+    DATA.forEach((s, i) => {
+      if (s.model !== m) return;
+      const b = document.createElement('button'); b.className = 'chip'; b.type = 'button';
+      b.setAttribute('aria-pressed', i === S);
+      b.innerHTML = esc(s.label.replace('ornek', 'örnek')) + (s.runs.length ? '<i class="dot" title="kopya döngüsü var"></i>' : '');
+      b.onclick = () => { S = i; K = null; try { history.replaceState(null, '', '#s' + i); } catch(e) {} render(); };
+      g.appendChild(b);
+    });
+    nav.appendChild(g);
+  }
+}
+
+function storyView(){
+  const s = DATA[S];
+  document.getElementById('s-title').textContent = s.model + ' · ' + s.label.replace('ornek', 'örnek');
+  const gen = s.rows.length, forks = s.rows.filter(r => r.margin < 0.5).length, cp = s.rows.filter(r => r.copy >= 4).length;
+  let meta = '<div>istem: <b>' + esc(s.prompt) + '</b></div>' +
+    '<div>' + gen + ' seçim · dar (fark &lt; 0,5): <b>' + forks + '</b> · kopya içinde: <b>' + cp + '</b>' +
+    (s.runs.length ? ' · kopya koşuları: ' + s.runs.map(r => r[0] + '–' + r[1] + ' (' + r[2] + ' geriden)').join(', ') : '') + '</div>';
+  if (s.gpu_same !== undefined) meta += '<div>Colab GPU\'daki kayıtlı metinle ilk 60 token: <b>' + (s.gpu_same ? 'aynı' : 'farklı') + '</b></div>';
+  document.getElementById('s-meta').innerHTML = meta;
+  const fb = document.getElementById('s-focus'); fb.innerHTML = '';
+  for (const [t, why] of s.focus){
+    const b = document.createElement('button'); b.type = 'button';
+    b.textContent = (t + 1) + ' · ' + why.toLowerCase().replace('ornek', 'örnek');
+    b.onclick = () => select(t + 1 - s.n_prompt);
+    fb.appendChild(b);
+  }
+  const box = document.getElementById('story'); box.innerHTML = '';
+  let inQuote = false, prev = null;
+  const focusSet = new Set(s.focus.map(f => f[0] + 1));
+  s.tokens.forEach((w, i) => {
+    if (i === 0 && w === '<eos>') return;
+    if (w === '<nl>'){ box.appendChild(document.createElement('br')); prev = '<nl>'; inQuote = false; return; }
+    let space = prev !== null && prev !== '<nl>' && !NO_AFTER.has(prev) && !NO_BEFORE.has(w);
+    if (w === '"'){ if (inQuote) space = false; inQuote = !inQuote; }
+    if (prev === '"' && inQuote) space = false;
+    if (space) box.appendChild(document.createTextNode(' '));
+    const el = document.createElement(i >= s.n_prompt ? 'button' : 'span');
+    el.className = 'tok'; el.textContent = w; el.dataset.i = i;
+    if (i >= s.n_prompt){
+      el.type = 'button';
+      const r = s.rows[i - s.n_prompt];
+      if (r.margin < 0.25) el.classList.add('f0'); else if (r.margin < 0.5) el.classList.add('f1');
+      if (r.copy >= 4) el.classList.add('cp');
+      if (focusSet.has(i)) el.classList.add('fc');
+      el.title = 'fark ' + num(r.margin, 2) + ' · p ' + num(r.p) + ' · ikinci ' + r.b;
+      el.onclick = () => select(i - s.n_prompt);
+    } else el.classList.add('prompt');
+    box.appendChild(el); prev = w;
+  });
+  spark();
+}
+
+function spark(){
+  const s = DATA[S], n = s.rows.length, bw = 6, gap = 1, H = 80, top = 6, cap = 6;
+  const W = Math.max(n * (bw + gap) + 30, 200);
+  const y = v => top + (H - top) * (1 - Math.min(v, cap) / cap);
+  let svg = '<svg viewBox="0 0 ' + W + ' 92" width="' + W + '" role="img" aria-label="Seçim başına fark (log p, ikinci adaya karşı), üst sınır 6">';
+  for (const v of [0.5, 2, 4, 6]) svg += '<line x1="26" x2="' + W + '" y1="' + y(v) + '" y2="' + y(v) + '" stroke="var(--rule)" stroke-width="' + (v === 0.5 ? 1.2 : 0.6) + '"' + (v === 0.5 ? ' stroke-dasharray="3 2"' : '') + '/><text x="22" y="' + (y(v) + 3) + '" text-anchor="end">' + String(v).replace('.', ',') + '</text>';
+  s.rows.forEach((r, k) => {
+    const x = 28 + k * (bw + gap), h = Math.max(1, H - y(r.margin));
+    const c = r.margin < 0.25 ? 'var(--fork)' : r.copy >= 4 ? 'var(--copy)' : r.margin < 0.5 ? 'var(--fork)' : 'var(--faint)';
+    svg += '<rect class="bar" data-k="' + k + '" x="' + x + '" y="' + (H - h) + '" width="' + bw + '" height="' + h + '" fill="' + c + '"' + (k === K ? ' stroke="var(--accent)" stroke-width="2"' : '') + ' opacity="' + (r.margin < 0.5 ? 1 : 0.75) + '"><title>' + esc(r.a) + ' · fark ' + num(r.margin, 2) + '</title></rect>';
+  });
+  svg += '<text x="28" y="90">seçim sırası →</text></svg>';
+  const el = document.getElementById('spark'); el.innerHTML = svg;
+  el.querySelectorAll('.bar').forEach(b => b.addEventListener('click', () => select(+b.dataset.k)));
+}
+
+function partsChart(r){
+  const src = MODE === 'b' ? r.parts : r.mean_parts;
+  const rows = Object.entries(src).map(([k, v]) => [LABEL[k] || k, v, k.startsWith('head') ? 'sub' : '']);
+  if (MODE === 'b' && r.cache_shift !== undefined) rows.push(['defter (karışım)', r.cache_shift, '']);
+  const total = rows.reduce((a, x) => a + x[1], 0);
+  const M = Math.max(1, ...rows.map(x => Math.abs(x[1])));
+  const pct = v => 50 + 50 * v / M;
+  let h = '<div class="parts">';
+  for (const [lab, v, cls] of rows){
+    const a = Math.min(pct(0), pct(v)), w = Math.abs(pct(v) - pct(0));
+    h += '<span class="lab ' + cls + '">' + lab + '</span><span class="track"><i class="axis" style="left:50%"></i><i class="fill" style="left:' + a + '%;width:' + w + '%;background:' + (v >= 0 ? 'var(--pos)' : 'var(--neg)') + '"></i></span><span class="num ' + (v >= 0 ? 'pos' : 'neg') + '">' + fmt(v) + '</span>';
+  }
+  h += '<span class="lab total">toplam</span><span class="track total"></span><span class="num total">' + fmt(total) + '</span></div>';
+  h += '<p class="note">' + (MODE === 'b'
+    ? 'Pozitif: seçilen <b>' + esc(r.a) + '</b> lehine, negatif: ikinci aday <b>' + esc(r.b) + '</b> lehine (logit). Toplam = log p farkı ' + num(r.margin, 2) + '. Defter satırı karışımın farka etkisi: model farkı defterinkinden büyükse eksi çıkar, defter aynı kelimeyi desteklese bile; defterin kendi olasılığı üstte (p_defter).'
+    : 'Seçilen <b>' + esc(r.a) + '</b> kelimesinin puanı, sözlüğün ortalama kelimesine karşı: kelimeyi aday yapan parçalar.') + '</p>';
+  return h;
+}
+
+function lookAt(i){
+  document.querySelectorAll('.tok.look').forEach(e => e.classList.remove('look'));
+  const el = document.querySelector('.tok[data-i="' + i + '"]');
+  if (el){ el.classList.add('look'); el.scrollIntoView({block:'nearest', behavior:'smooth'}); }
+}
+
+function detail(){
+  const s = DATA[S], box = document.getElementById('detail');
+  if (K === null){ box.innerHTML = '<h2>Seçimin dökümü</h2><p class="muted">Soldaki hikâyede üretilmiş bir token\'a ya da fark çizgisindeki bir çubuğa tıkla. Kesik çizgili düğmeler raporda açılan token\'lar.</p>'; return; }
+  const r = s.rows[K], i = r.t + 1;
+  const ctx = s.tokens.slice(Math.max(1, i - 12), i).filter(w => w !== '<eos>').map(w => w === '<nl>' ? '⏎' : w).join(' ');
+  let h = '<h2>Konum ' + i + '</h2><div class="det-head"><span class="ctx">…' + esc(ctx) + '</span><span class="arrow">→</span><span class="pick">' + esc(r.a) + '</span></div>';
+  h += '<div class="stats"><span class="stat"><span class="k">p</span><span class="v">' + num(r.p) + '</span></span>' +
+    '<span class="stat"><span class="k">ikinci</span><span class="v">' + esc(r.b) + ' ' + num(r.p_b) + '</span></span>' +
+    '<span class="stat' + (r.margin < 0.5 ? ' warn' : '') + '"><span class="k">fark</span><span class="v">' + num(r.margin, 2) + '</span></span>' +
+    '<span class="stat' + (r.copy >= 4 ? ' loop' : '') + '"><span class="k">kopya</span><span class="v">' + r.copy + (r.period ? ' · ' + r.period + ' geriden' : '') + '</span></span>' +
+    (r.gate !== undefined ? '<span class="stat"><span class="k">gate</span><span class="v">' + num(r.gate) + '</span></span><span class="stat"><span class="k">p_defter</span><span class="v">' + num(r.p_cache) + '</span></span>' : '') + '</div>';
+  h += '<div class="sec"><h3>İlk 5 aday</h3><div class="tbl"><table><tr><th>kelime</th><th style="text-align:right">p</th></tr>' +
+    r.top.map(([w, p]) => '<tr><td class="w">' + esc(w) + (w === r.a ? ' <span class="muted">(seçilen)</span>' : '') + '</td><td class="n">' + num(p) + '</td></tr>').join('') + '</table></div></div>';
+  h += '<div class="sec"><h3>Parçalar</h3><div class="seg" role="group"><button type="button" data-m="b" aria-pressed="' + (MODE === 'b') + '">ikinci adaya karşı</button><button type="button" data-m="mean" aria-pressed="' + (MODE === 'mean') + '">sözlük ortalamasına karşı</button></div>' + partsChart(r) +
+    '<p class="note">Seçilen kelimenin geçtiği konumlardan gelen pay (ikinci adaya karşı): zincir ' + fmt(r.chain_same) + ', attention ' + fmt(r.attn_same) + '.</p></div>';
+  h += '<div class="sec"><h3>Zincir · en çok iten geçmiş konumlar</h3><div class="tbl"><table><tr><th>konum</th><th>kelime</th><th style="text-align:right">yaş</th><th style="text-align:right">pay</th><th style="text-align:right">sıra</th><th style="text-align:right">içerik</th></tr>' +
+    r.chain.map(([j, w, age, v, o, c]) => '<tr class="go" data-j="' + j + '"><td class="n">' + j + '</td><td class="w">' + esc(w) + '</td><td class="n">' + age + '</td><td class="n ' + (v >= 0 ? 'pos' : 'neg') + '">' + fmt(v) + '</td><td class="n">' + fmt(o) + '</td><td class="n">' + fmt(c) + '</td></tr>').join('') + '</table></div></div>';
+  h += '<div class="sec"><h3>Attention · baş başına en büyük üç pay</h3><div class="heads">' + r.heads.map(([tot, list], hd) =>
+    '<div class="headrow"><span class="hn ' + (tot >= 0 ? 'pos' : 'neg') + '">baş ' + hd + '<br>' + fmt(tot) + '</span><div class="looks">' +
+    list.map(([j, w, A, v]) => '<button type="button" data-j="' + j + '">' + j + ' ' + esc(w) + ' · A ' + num(A, 2) + ' · <span class="' + (v >= 0 ? 'pos' : 'neg') + '">' + fmt(v) + '</span></button>').join('') + '</div></div>').join('') + '</div></div>';
+  h += '<div class="sec"><h3>Vektörler · katman başına en büyük dört pay</h3><div class="tbl"><table><tr><th>katman</th><th>vektör</th><th style="text-align:right">ağırlık</th><th style="text-align:right">pay</th><th>en çok ittiği</th></tr>' +
+    r.vectors.map(([tot, list], L) => list.map(([id, w, v, pu], q) => '<tr><td>' + (q === 0 ? 'k' + L + ' <span class="' + (tot >= 0 ? 'pos' : 'neg') + '">' + fmt(tot) + '</span>' : '') + '</td><td class="n">v' + id + '</td><td class="n">' + num(w, 2) + '</td><td class="n ' + (v >= 0 ? 'pos' : 'neg') + '">' + fmt(v) + '</td><td class="w">' + esc(pu.join(' ')) + '</td></tr>').join('')).join('') + '</table></div></div>';
+  if (r.cache) h += '<div class="sec"><h3>Defter · gate ' + num(r.gate) + '</h3>' + (r.cache.length ? '<div class="looks">' + r.cache.map(([j, w, a]) => '<button type="button" data-j="' + j + '">' + j + ' → ' + esc(w) + ' · ' + num(a, 2) + '</button>').join('') + '</div>' : '<p class="muted">Ağırlığı 0,01\'i geçen komşu yok.</p>') + '</div>';
+  box.innerHTML = h;
+  box.querySelectorAll('.seg button').forEach(b => b.onclick = () => { MODE = b.dataset.m; detail(); });
+  box.querySelectorAll('[data-j]').forEach(b => b.addEventListener('click', () => lookAt(+b.dataset.j)));
+}
+
+function select(k){
+  K = k;
+  document.querySelectorAll('.tok.sel').forEach(e => e.classList.remove('sel'));
+  document.querySelectorAll('.tok.look').forEach(e => e.classList.remove('look'));
+  const s = DATA[S], el = document.querySelector('.tok[data-i="' + (k + s.n_prompt) + '"]');
+  if (el) el.classList.add('sel');
+  spark(); detail();
+}
+
+const SHOWTOK = w => w === '<nl>' ? '⏎' : w === '<eos>' ? '∎' : w;
+const pct = p => p < 0.001 ? '<%0,1' : p >= 0.095 ? '%' + Math.round(100 * p) : '%' + (100 * p).toFixed(1).replace('.', ',');
+const EDGE = '<svg class="edges" viewBox="0 0 300 30" preserveAspectRatio="none" aria-hidden="true">' +
+  '<path d="M150 0 C150 18 50 12 50 30"/><path d="M150 0 C150 18 250 12 250 30"/><path class="spine" d="M150 0 L150 30"/></svg>';
+
+function tnode(x, cls, k, tip){
+  const [w, p] = x;
+  return '<button type="button" class="node ' + cls + '" data-k="' + k + '" title="' + esc(tip) + '"><span class="w">' +
+    esc(SHOWTOK(w)) + '</span><span class="p">' + pct(p) + '</span><i class="pb" style="width:' + Math.max(2, 100 * p).toFixed(1) + '%"></i></button>';
+}
+
+function treeView(){
+  const s = DATA[S];
+  document.getElementById('t-title').textContent = s.model + ' · ' + s.label.replace('ornek', 'örnek');
+  const forks = s.rows.filter(r => r.margin < 0.5).length, cp = s.rows.filter(r => r.copy >= 4).length;
+  document.getElementById('t-meta').innerHTML = '<div>' + s.rows.length + ' adım · dar seçim: <b>' + forks + '</b> · kopya içinde: <b>' + cp + '</b></div>';
+  const flow = document.getElementById('flow'); flow.innerHTML = '';
+  let inQuote = s.tokens.slice(1, s.n_prompt).filter(w => w === '"').length % 2 === 1, prev = null;
+  s.rows.forEach((r, k) => {
+    const w = r.a;
+    if (w === '<nl>'){ flow.appendChild(document.createElement('br')); prev = '<nl>'; inQuote = false; return; }
+    let space = prev !== null && prev !== '<nl>' && !NO_AFTER.has(prev) && !NO_BEFORE.has(w);
+    if (w === '"'){ if (inQuote) space = false; inQuote = !inQuote; }
+    if (prev === '"' && inQuote) space = false;
+    if (space) flow.appendChild(document.createTextNode(' '));
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = SHOWTOK(w);
+    if (r.margin < 0.5) b.classList.add('nar');
+    if (r.copy >= 4) b.classList.add('cp');
+    b.onclick = () => jump(k);
+    flow.appendChild(b); prev = w;
+  });
+  let h = '<div class="root"><span class="rl">girdi</span>' + esc(s.prompt) + '</div>';
+  s.rows.forEach((r, k) => {
+    const pick = r.top.find(x => x[0] === r.a) || [r.a, r.p];
+    const alts = r.top.filter(x => x[0] !== r.a).slice(0, 2);
+    const i = r.t + 1, ctx = s.tokens.slice(Math.max(1, i - 8), i).map(SHOWTOK).join(' ');
+    const cell = (x, cls) => x ? tnode(x, cls, k, '…' + ctx + ' → ' + SHOWTOK(x[0]) + '  p ' + num(x[1])) : '<span></span>';
+    h += '<div class="lvl' + (r.margin < 0.5 ? ' narrow' : '') + (r.copy >= 4 ? ' loop' : '') + '" id="lvl-' + k + '">' + EDGE +
+      '<div class="row3">' + cell(alts[0], 'alt close') + cell(pick, 'pick') + cell(alts[1], 'alt') + '</div>' +
+      '<span class="step">' + (k + 1) + '</span></div>';
+  });
+  const tree = document.getElementById('tree'); tree.innerHTML = h;
+  tree.querySelectorAll('.node').forEach(b => b.addEventListener('click', () => openDokum(+b.dataset.k)));
+}
+
+function jump(k){
+  const el = document.getElementById('lvl-' + k); if (!el) return;
+  const still = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  el.scrollIntoView({block:'center', behavior: still ? 'auto' : 'smooth'});
+  document.querySelectorAll('.lvl.flash').forEach(e => e.classList.remove('flash'));
+  el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1600);
+}
+
+function views(){
+  document.querySelectorAll('.views button').forEach(b => b.setAttribute('aria-pressed', b.dataset.v === VIEW));
+  document.getElementById('v-tree').hidden = VIEW !== 'tree';
+  document.getElementById('v-dokum').hidden = VIEW !== 'dokum';
+}
+
+function openDokum(k){
+  VIEW = 'dokum'; views(); storyView(); select(k);
+  const d = document.getElementById('detail'); if (d) d.scrollIntoView({block:'start'});
+}
+
+function render(){
+  picker(); views();
+  if (VIEW === 'tree'){ treeView(); return; }
+  storyView();
+  const s = DATA[S];
+  if (K !== null) select(K); else if (s.focus.length) select(s.focus[0][0] + 1 - s.n_prompt); else detail();
+}
+document.querySelectorAll('.views button').forEach(b => b.addEventListener('click', () => { VIEW = b.dataset.v; render(); }));
+render();
+})();
+</script>

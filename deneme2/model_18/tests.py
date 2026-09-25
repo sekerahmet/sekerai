@@ -948,6 +948,125 @@ def t_attention():
          "attention acik paket -> kapali cagri")
 
 
+# --- 25b.  DOKUM (decompose.py): parcalarin toplami modelin kendi C_m'si, puan farki ve log p'si
+def t_decompose():
+    import numpy as np
+    import data_stories as DS
+    import decompose as DC
+    g = torch.Generator().manual_seed(31)
+    vocab = list(DS.SPECIAL) + [a + b for a in "abcdefgh" for b in "abcdefg"]
+    ix = {a: i for i, a in enumerate(vocab)}
+    torch.manual_seed(0)
+    m = PV(len(vocab), d_order=32, d_content=32, lam=0.7, chain="relative", c_content=True, c_cache=True,
+           cache_topk=4, select="direction_all", start_norm=1.0, vectors=16, active=4, layers=3, c_m_norm=True,
+           squared=True, S_p="learned", attention=True, attn_heads=2, attn_dim=8)
+    with torch.no_grad():                         # egitilmis gibi: vektorler, attention, solma, gate sifirdan farkli
+        for L in m.V:
+            L.finish.add_(torch.randn(L.finish.shape, generator=g) * 0.5)
+        m.attn.W_o.weight.normal_(0, 0.3, generator=g)
+        m.lam_w.add_(torch.randn(m.lam_w.shape, generator=g))
+        m.beta_w.add_(torch.randn(m.beta_w.shape, generator=g))
+        m.cache.gate_0.fill_(0.0)
+    w = torch.randint(4, len(vocab), (40,), generator=g)
+    t = 30
+    with torch.no_grad():
+        R = DC.forward_parts(m, w)
+        same_Cm = torch.allclose(R["C_m"], m.move(w[None])[0][0], atol=1e-5)
+        same_logp = torch.allclose(R["logp"], m.scoreboard(w[None])[0], atol=1e-5)
+        o, c = DC.chain_terms(m, w, t)
+        same_chain = torch.allclose(torch.cat([o.sum(0), c.sum(0)]).float(), m.C(w[None])[0, t], atol=1e-5)
+        a, b = R["score"][t].argsort(descending=True)[:2].tolist()
+        ex = DC.explain(m, R, w, t, a, b)
+        exact = abs(ex["total"] - float(R["score"][t, a] - R["score"][t, b])) < 1e-4
+        sums = abs(sum(ex["parts"].values()) - ex["total"]) < 1e-6 * max(1.0, abs(ex["total"]))
+        vs_mean = abs(DC.explain(m, R, w, t, a)["total"] - float(R["score"][t, a] - R["score"][t].mean())) < 1e-4
+        cache_ok = torch.equal(R["cache_next"][t], w[R["cache_j"][t] + 1])
+    check("decompose: parcalarin toplami C_m; puan farki ve log p birebir",
+          same_Cm and same_logp and same_chain and exact and sums and vs_mean and cache_ok,
+          "fark %+.4f = %d parca; defterin kelimesi j+1" % (ex["total"], len(ex["parts"])))
+    prompt = " ".join(vocab[i] for i in w[:6].tolist())
+    ids, n_prompt = DC.greedy(m, prompt, vocab, ix, steps=12)
+    same_text = (DS.decode(np.array(ids[n_prompt:]), vocab)
+                 == DS.generate(m, prompt, vocab, ix, steps=12, device="cpu")[1])
+    _, rows = DC.trajectory(m, ids, n_prompt, torch.tensor([ix[DS.PAD_TOKEN], ix[DS.UNK_TOKEN]]))
+    rows_ok = len(rows) == len(ids) - n_prompt and all(r["argmax"] and r["margin"] >= 0 for r in rows)
+    copy_ok = [DC.copy_length([1, 2, 3, 1, 2, 3, 1], i) for i in range(7)] == [0, 0, 0, 1, 2, 3, 4]
+    check("decompose: greedy == DS.generate; her secim argmax; kopya boyu", same_text and rows_ok and copy_ok,
+          "%d secim" % len(rows))
+    # mudahale: logp_cut'in dustugu tam olarak dokumdeki zincir paylari (deftersiz: fark log p'de dogrusal)
+    cache, m.cache = m.cache, None
+    try:
+        with torch.no_grad():
+            R0 = DC.forward_parts(m, w)
+            full, cut, age0 = (DC.logp_cut(m, w, c) for c in (None, "chain", "age0"))
+            same_full = torch.allclose(full, torch.log_softmax(m.scoreboard(w[None])[0], -1), atol=1e-5)
+            a, b = R0["score"][t].argsort(descending=True)[:2].tolist()
+            ex0 = DC.explain(m, R0, w, t, a, b)
+            drop = float((full[t, a] - full[t, b]) - (cut[t, a] - cut[t, b]))
+            drop0 = float((full[t, a] - full[t, b]) - (age0[t, a] - age0[t, b]))
+            cut_ok = (abs(drop - ex0["parts"]["chain_order"] - ex0["parts"]["chain_content"]) < 1e-4
+                      and abs(drop0 - float(ex0["chain"][t].sum())) < 1e-4)
+    finally:
+        m.cache = cache
+    with torch.no_grad():                                # defterle: mudahalesiz logp_cut == scoreboard (log p)
+        same_full = same_full and torch.allclose(DC.logp_cut(m, w), m.scoreboard(w[None])[0], atol=1e-5)
+    forced_ids, _ = DC.greedy(m, prompt, vocab, ix, steps=12, forced={3: ix["hg"]})
+    base_ids, _ = DC.greedy(m, prompt, vocab, ix, steps=12)
+    same_before = torch.equal(forced_ids[:n_prompt + 3], base_ids[:n_prompt + 3]) and int(forced_ids[n_prompt + 3]) == ix["hg"]
+    check("decompose: logp_cut dokumdeki zincir payini duser; greedy catal zorlar",
+          same_full and cut_ok and same_before, "zincir %+.3f, yas0 %+.3f" % (drop, drop0))
+
+
+# --- 25c.  TESHIS (diagnose.py): kayittan rapor, ozet ve sayfa; dokum modelle tutmazsa durur
+def t_diagnose():
+    import json as _json
+    import data_stories as DS
+    import decompose as DC
+    import diagnose as DG
+    g = torch.Generator().manual_seed(32)
+    vocab = list(DS.SPECIAL) + [a + b for a in "abcdefgh" for b in "abcdefg"]
+    torch.manual_seed(0)
+    m = PV(len(vocab), d_order=32, d_content=32, lam=0.7, chain="relative", c_content=True, c_cache=True,
+           cache_topk=4, select="direction_all", start_norm=1.0, vectors=16, active=4, layers=3, c_m_norm=True,
+           squared=True, S_p="learned", attention=True, attn_heads=2, attn_dim=8)
+    with torch.no_grad():
+        for L in m.V:
+            L.finish.add_(torch.randn(L.finish.shape, generator=g) * 0.5)
+        m.attn.W_o.weight.normal_(0, 0.3, generator=g)
+    prompts = [["ornek 1", "aa ab ac ad ae"], ["sonda 1", "ba bb bc"]]
+    stories = DG.compute(m, vocab, "KUCUK t0", prompts, steps=10, probe_texts=["-"], log=lambda s: None)
+    s0 = stories[0]
+    pattern = tuple(s0["tokens"][s0["n_prompt"]:s0["n_prompt"] + 2])
+    for s in stories:
+        s["focus"] = DG.focus(s, [pattern])
+    rows = [r for s in stories for r in s["rows"]]
+    exact = all(abs(sum(r["parts"].values()) - r["model_margin"]) < 1e-3 * len(r["parts"]) for r in rows)
+    native = _json.loads(_json.dumps(stories)) == stories
+    focus_ok = (s0["focus"][0][0] == s0["n_prompt"] and s0["focus"][0][1].startswith("HEDEF: " + " ".join(pattern))
+                and "gpu_same" in stories[1])
+    report_ok = "HEDEF: " + " ".join(pattern) in "\n".join(DG.report(stories))
+    page = DG.page(stories, "KUCUK Token Dökümü")
+    start = page.index('id="data">') + len('id="data">')
+    page_ok = (_json.loads(page[start:page.index("</script>", start)])[0]["label"] == "ornek 1"
+               and "<title>KUCUK Token Dökümü</title>" in page)
+    summary_ok = any("KUCUK t0" in line for line in DG.summary(stories))
+    key_ok = DG.cache_key(prompts, 10) == _json.loads(_json.dumps(DG.cache_key(prompts, 10)))
+    check("diagnose: dokum JSON'a hazir; rapor, ozet ve sayfa kayittan",
+          exact and native and focus_ok and report_ok and page_ok and summary_ok and key_ok and len(rows) >= 2,
+          "%d secim, odak %s" % (len(rows), s0["focus"][0][1]))
+    w = torch.randint(4, len(vocab), (20,), generator=g)
+    R = DC.forward_parts(m, w)
+    DC.verify(m, R, w)                                   # tutuyor: sessiz
+    with torch.no_grad():
+        m.V[1].finish.add_(1.0)                          # model degisti, dokum eskidi
+    try:
+        DC.verify(m, R, w)
+        fired = False
+    except AssertionError:
+        fired = True
+    check("diagnose: dokum modelle tutmazsa durur (verify)", fired)
+
+
 # --- 26.  SAGLIK: cevabi bilinen durumlar; inspect == move; dikkat nedensel; olcut ve egitim butunlesmesi
 def t_health():
     import model_18 as M
@@ -1346,7 +1465,7 @@ def t_notebook(path=None):
 if __name__ == "__main__":
     print("tests (model_18)")
     for f in (t_chain, t_causal, t_silent, t_cm, t_denominator, t_gradient,
-              t_params, t_mask, t_resume, t_stop, t_score, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_top, t_select, t_all_active, t_balance, t_cmnorm, t_speed, t_attention, t_health, t_decay, t_finish, t_math_windows,
+              t_params, t_mask, t_resume, t_stop, t_score, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_top, t_select, t_all_active, t_balance, t_cmnorm, t_speed, t_attention, t_decompose, t_diagnose, t_health, t_decay, t_finish, t_math_windows,
               t_math_ask, t_math_digits, t_math_training, t_stories, t_notebook):
         f()
     t_notebook(os.path.join(os.path.dirname(os.path.abspath(__file__)),
