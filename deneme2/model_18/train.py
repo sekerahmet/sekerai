@@ -176,9 +176,12 @@ def _check_resume(package, fixed):
     if diffs:
         raise ValueError("surdurme paketi bu cagriyla uyusmuyor -- "
                          + "; ".join(diffs))
-    # LR sogutma plani: planli paket AYNI planla surer; plansiz (sabit LR) paketten yeni planla dal acilabilir.
+    # LR sogutma plani: planli paket AYNI planla surer; plansiz (sabit LR) paketten yeni planla dal acilabilir.  Planin
+    # henuz LR'ye dokunmadigi paket de (adim <= decay_start: o adimda LR tabandi) plansiz sayilir -- kullanici, 25 Eylul:
+    # "A. TS_PV_V4'ü uzatmak kabul ediyorum. 40.000 e uzat bence" (dal t16000'dan: TS_PV_V4_40K).
     plan = lambda k: (k.get("decay_start"), k.get("decay_end"), k.get("decay_floor"))
-    if package.get("decay_start") is not None and plan(package) != plan(fixed):
+    started = package.get("decay_start") is not None and package.get("step", 0) > package["decay_start"]
+    if started and plan(package) != plan(fixed):
         raise ValueError("surdurme paketi bu cagriyla uyusmuyor -- LR sogutma plani (baslangic, son, taban): "
                          "paket %s, cagri %s" % (plan(package), plan(fixed)))
 

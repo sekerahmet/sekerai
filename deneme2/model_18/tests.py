@@ -1273,10 +1273,18 @@ def t_decay():
             caught = False
         except ValueError as h:
             caught = "sogutma" in str(h)
+        # plan henuz LR'ye dokunmamisken (adim <= decay_start) yeni planla dal acilir (TS_PV_V4_40K: t16000'dan)
+        r = TR.RUNS["LRP"] = TR.Run("LRP", root)
+        _run(r, data, N, _zero_metric, "cpu", 2e-3, 8, 0, 8, 2, 4, decay_start=6, decay_floor=0.1, **SMALL)
+        r = TR.RUNS["LRX"] = TR.Run("LRX", root)
+        _run(r, data, N, _zero_metric, "cpu", 2e-3, 12, 0, 8, 2, 4, resume=root + "/LRP/t4.pt", decay_start=10,
+             decay_floor=0.1, **SMALL)                                      # t4 < 6: plan baslamamisti
+        branched = r.result.get("step") == 12 and abs(r.result["lr_now"] - 2e-4) < 1e-12
     finally:
         shutil.rmtree(root, ignore_errors=True)
     check("LR sogutmasi: cosine, taban lr x 0,1; sabitten dal, planli ayni planla", constant_ok and plan and caught,
          "adim 6: 1,10e-3, adim 8: 2,00e-4; plan degisince surdurme durur")
+    check("LR sogutmasi: plan baslamadan (adim <= decay_start) yeni planla dal", branched, "t4 (plan 6) -> 12, plan 10")
 
 
 # --- 28.  KOSU SONU: son adim olculmus ama tam yedek adimi degilse olcum satiri IKINCI kez yazilmaz
