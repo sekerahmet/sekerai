@@ -1065,6 +1065,15 @@ def t_diagnose():
     check("diagnose: decompose JSON'a hazir; rapor, ozet ve sayfa kayittan",
           exact and native and focus_ok and report_ok and page_ok and summary_ok and key_ok and len(rows) >= 2,
           "%d secim, odak %s" % (len(rows), s0["focus"][0][1]))
+    # okuma: decompose'suz ayni devam (takilan hikaye sonra decompose edilir); istemler sonda disi, sozlukte, sirayla
+    rd = DG.read(m, vocab, "KUCUK t0", prompts, steps=10, log=lambda s: None)
+    same = len(rd) == 2 and all(r["tokens"] == s["tokens"] and r["text"] == s["text"] for r, s in zip(rd, stories))
+    lines = "\n".join(DG.reading_lines(rd + [dict(rd[0], model="KUCUK t1")]))
+    ev = DG.reading_prompts(["aa ab", "zz aa", "ba bb", "ac ad", "ae af", "ag ba", "bc bd"],
+                            {a: i for i, a in enumerate(vocab)}, n=2)
+    check("diagnose: okuma decompose'la ayni devami yazar; istemler sonda disi, sozlukte, dosya sirasiyla",
+          same and "ISTEM: aa ab ac ad ae" in lines and "-- KUCUK t1" in lines
+          and ev == [["eval 1", "ae af"], ["eval 2", "ag ba"]], str(ev))
     w = torch.randint(4, len(vocab), (20,), generator=g)
     R = DC.forward_parts(m, w)
     DC.verify(m, R, w)                                   # tutuyor: sessiz

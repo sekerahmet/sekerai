@@ -12,6 +12,11 @@ Egitimde her tam yedekte kendiliginden, kosunun GPU'sunda (train._decompose_back
 olsun hatta kod için de default açık ayarı ile olabilir"): <kosu>/decompose/t<N>.json, .html, _ozet.txt.
 
     python diagnose.py <paket.pt> [<paket.pt> ...] [--out KLASOR] [--steps 120] [--focus "Thank you , Spike"] [--force]
+    python diagnose.py <paket.pt> [<paket.pt> ...] --read [--eval]     okuma: yalniz acgozlu devam, decompose yok
+
+--eval: istemler EXAMPLES + sonda yerine okuma istemleri (sonda olmayan ilk READ degerlendirme istemi).
+--read: okuma_[eval_]<ad>.txt (istem istem, paketler alt alta; insan gozuyle) ve .json.  Takilan hikaye ayni
+paket ve istem setiyle (--eval) decompose edilir; ikisi de DC.greedy, ayni token'lar.
 
 Cikti (--out; yoksa ilk paketin <kosu>/decompose/ klasoru), <ad> = paket adlari:
     <ad>.txt       hikaye hikaye secim tablosu + odak secimlerin decompose'u
@@ -54,6 +59,7 @@ COPY = 4         # kopya: onceki >= COPY token'lik bir parcanin tekrari
 TIGHT = 30       # sik dongu: kopyanin kaynagi en cok TIGHT token geride
 FORMAT = 1       # kayitli decompose'un bicimi; compute/detail degisirse artirilir (eski kayitlar yeniden hesaplanir)
 FOLDER = "decompose"     # <kosu>/decompose/: paket basina kayit, rapor, ozet, sayfa
+READ = 10        # okuma istemi sayisi (kullanici, 25 Eylul: "farklı tipler de 10 farklı hikaye")
 NOT_NAMES = {"The", "He", "She", "They", "It", "One", "When", "But", "Then", "So", "Once", "Suddenly", "After", "At",
              "In", "His", "Her", "Their", "Mom", "Dad", "I", "Yes", "No", "What", "Let's", "Thank", "Wow", "Look", "Can",
              "We", "You", "This", "That", "There", "From", "Every", "Just", "As", "On", "Finally", "Soon", "Today",
@@ -160,6 +166,58 @@ def prompt_set(probes=()):
             + [["sonda %d" % (i + 1), p] for i, p in enumerate(probes)])
 
 
+def reading_prompts(all_prompts, token_index, n=READ):
+    """Okuma istemleri [[etiket, istem]]: degerlendirme istemlerinden kelimelerinin hepsi sozlukte olan ve sonda
+    olmayan ilk n'i, dosya sirasiyla -- secim uretilen metne bakmadan."""
+    probes = set(DS.probe_prompts(all_prompts, token_index))
+    clean = [s for s in all_prompts if s not in probes
+             and all(t in token_index for t in DS.tokenize(DS.normalize(s)))]
+    return [["eval %d" % (i + 1), p] for i, p in enumerate(clean[:n])]
+
+
+def package_prompts(ts_dir, token_index, use_eval=False):
+    """Paketin istem seti: standart (EXAMPLES + sonda) ya da okuma istemleri."""
+    all_prompts = DS.prompts(ts_dir)
+    return reading_prompts(all_prompts, token_index) if use_eval else prompt_set(DS.probe_prompts(all_prompts, token_index))
+
+
+@torch.no_grad()
+def read(m, vocab, name, prompts, steps=STEPS, log=print):
+    """Okuma: istem basina acgozlu devam, decompose YOK.  compute ile ayni token'lar (ikisi de DC.greedy)."""
+    ix = {a: i for i, a in enumerate(vocab)}
+    out = []
+    for label, prompt in prompts:
+        tokens, n_prompt = DC.greedy(m, prompt, vocab, ix, steps)
+        tl = tokens.tolist()
+        out.append({"model": name, "label": label, "prompt": prompt, "tokens": [vocab[x] for x in tl], "n_prompt": n_prompt,
+                    "text": DS.decode(np.array(tl[n_prompt:]), vocab),
+                    "eos": len(tl) > n_prompt and tl[-1] == ix[DS.EOS_TOKEN]})
+    log("  %s: %d istem okundu" % (name, len(prompts)))
+    return out
+
+
+def read_package(path, steps=STEPS, ts_dir=TS_DIR, use_eval=False, log=print):
+    """Paketin okumasi (kayit yok; hizli)."""
+    from model_18 import PV
+    k = torch.load(path, weights_only=False, map_location="cpu")
+    vocab = list(k["vocab"])
+    name = "%s %s" % (os.path.basename(os.path.dirname(os.path.abspath(path))), os.path.splitext(os.path.basename(path))[0])
+    prompts = package_prompts(ts_dir, {a: i for i, a in enumerate(vocab)}, use_eval)
+    return read(PV.from_package(k), vocab, name, prompts, steps, log)
+
+
+def reading_lines(stories):
+    """Okuma dosyasi: istem istem, paketlerin devamlari alt alta."""
+    L = []
+    for label in dict.fromkeys(s["label"] for s in stories):
+        S = [s for s in stories if s["label"] == label]
+        L += ["=" * 100, "%s | ISTEM: %s" % (label, S[0]["prompt"]), ""]
+        for s in S:
+            L += ["-- %s  [%d token%s]" % (s["model"], len(s["tokens"]) - s["n_prompt"], ", <eos> ile bitti" if s["eos"] else ""),
+                  s["text"].strip(), ""]
+    return L
+
+
 def save_record(path, key, step, stories):
     """Kayit: {key, step, stories}; yarim yazilmis dosya kalmaz."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -168,8 +226,9 @@ def save_record(path, key, step, stories):
     os.replace(path + ".tmp", path)
 
 
-def diagnose_package(path, steps=STEPS, ts_dir=TS_DIR, force=False, log=print):
-    """Paketin hikayeleri: <kosu>/decompose/<paket>.json varsa ve anahtari tutuyorsa OKUNUR, yoksa hesaplanip yazilir."""
+def diagnose_package(path, steps=STEPS, ts_dir=TS_DIR, force=False, log=print, use_eval=False):
+    """Paketin hikayeleri: <kosu>/decompose/<paket>[_eval].json varsa ve anahtari tutuyorsa OKUNUR, yoksa hesaplanip
+    yazilir.  use_eval: okuma istemleri, ayri kayit (standart kayit ezilmez)."""
     from model_18 import PV
     run_dir = os.path.dirname(os.path.abspath(path))
     stem = os.path.splitext(os.path.basename(path))[0]
@@ -177,9 +236,9 @@ def diagnose_package(path, steps=STEPS, ts_dir=TS_DIR, force=False, log=print):
     k = torch.load(path, weights_only=False, map_location="cpu")
     vocab = list(k["vocab"])
     ix = {a: i for i, a in enumerate(vocab)}
-    prompts = prompt_set(DS.probe_prompts(DS.prompts(ts_dir), ix))
+    prompts = package_prompts(ts_dir, ix, use_eval)
     key = cache_key(prompts, steps)
-    jf = os.path.join(run_dir, FOLDER, stem + ".json")
+    jf = os.path.join(run_dir, FOLDER, stem + ("_eval" if use_eval else "") + ".json")
     if not force and os.path.exists(jf):
         with open(jf, encoding="utf-8") as f:
             saved = json.load(f)
@@ -385,14 +444,28 @@ def main():
     ap.add_argument("--focus", action="append", default=[], help='acilacak dizi, token\'lar bosluklu: "Thank you , Spike"')
     ap.add_argument("--force", action="store_true", help="kayit olsa da yeniden hesapla")
     ap.add_argument("--ts-dir", default=TS_DIR)
+    ap.add_argument("--eval", action="store_true", help="istemler: sonda olmayan ilk %d degerlendirme istemi" % READ)
+    ap.add_argument("--read", action="store_true", help="yalniz acgozlu devam, decompose yok: okuma_<ad>.txt ve .json")
     a = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    stories = []
-    for p in a.packages:
-        stories += diagnose_package(p, a.steps, a.ts_dir, a.force)
     out = a.out or os.path.join(os.path.dirname(os.path.abspath(a.packages[0])), FOLDER)
     os.makedirs(out, exist_ok=True)
-    base = os.path.join(out, "_".join(os.path.splitext(os.path.basename(p))[0] for p in a.packages))
+    names = "_".join(os.path.splitext(os.path.basename(p))[0] for p in a.packages)
+    if a.read:
+        stories = []
+        for p in a.packages:
+            stories += read_package(p, a.steps, a.ts_dir, a.eval)
+        base = os.path.join(out, "okuma_" + ("eval_" if a.eval else "") + names)
+        with open(base + ".txt", "w", encoding="utf-8") as f:
+            f.write("\n".join(reading_lines(stories)) + "\n")
+        with open(base + ".json", "w", encoding="utf-8") as f:
+            json.dump(stories, f, ensure_ascii=False)
+        print("yazildi: %s.txt  %s.json" % (base, base))
+        return
+    stories = []
+    for p in a.packages:
+        stories += diagnose_package(p, a.steps, a.ts_dir, a.force, use_eval=a.eval)
+    base = os.path.join(out, names + ("_eval" if a.eval else ""))
     title = "%s Decompose" % " · ".join(dict.fromkeys(os.path.basename(os.path.dirname(os.path.abspath(p)))
                                                       for p in a.packages))
     write_outputs(base, stories, title, [tuple(f.split()) for f in a.focus])
