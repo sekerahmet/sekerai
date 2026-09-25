@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""decompose -- TEK TOKEN DOKUMU.  Okuma araci; modelin hesabina girmez.
+"""decompose -- TEK TOKEN DECOMPOSE.  Okuma araci; modelin hesabina girmez.
 
 Kullanici, 25 Eylul: "Tek token dökümü mantıklı bence hatta en kuvvetli ölçüm olabilir."
 
@@ -11,9 +11,10 @@ Zincir de gecmis kelimelere ayrilir: C_order'da lam^yas roll^yas P[w_i], C_conte
 Defter olasilikta karisir, p = (1 - gate) softmax(puan) + gate p_cache: payi ayri yazilir.
 Tepe ayari icin: relative zincir + C_content + C_M_NORM (squared).  Kapi: tests.t_decompose.  Her kullanimda verify:
 parcalarin toplami modelin kendi hesabiyla tutmazsa durur (model_18'e yeni parca eklenirse burasi da genisletilir).
-Hazir teshis (istem seti, kopya ve dar secim, ozet, gezgin, pakete gore kayit): diagnose.py.
+Hazir teshis (istem seti, kopya ve dar secim, ozet, gezgin, pakete gore kayit): diagnose.py.  Cihazdan bagimsiz:
+model hangi cihazdaysa orada calisir (egitimde tam yedekte GPU'da, train._decompose_backup).
 
-    python decompose.py <paket.pt> "<istem>" [adim]     acgozlu uretir, her secimin dokumunu basar
+    python decompose.py <paket.pt> "<istem>" [adim]     acgozlu uretir, her secimin decompose'unu basar
 """
 import sys
 import weakref
@@ -25,6 +26,11 @@ import torch.nn.functional as F
 import data_stories as DS
 
 BANNED = (DS.PAD_TOKEN, DS.UNK_TOKEN)      # DS.generate'in yasaklari
+
+
+def supported(m):
+    """decompose bu ayari tam ayirabiliyor mu: relative zincir, C_content, C_M_NORM, squared puan."""
+    return m.chain == "relative" and m.c_content and m.c_m_norm and m.squared
 
 
 def _mult(m):
@@ -40,7 +46,7 @@ def forward_parts(m, tokens):
          C_m (T,d); score (T,n) ham puan; logp (T,n) defterle karisik log p
          gate (T,); cache_j, cache_next, cache_w (T,k): defterin konumlari, getirdigi kelime, agirligi
        Parcalarin toplami modelin C_m'si, logp == scoreboard (tests: t_decompose)."""
-    assert m.chain == "relative" and m.c_content and m.c_m_norm and m.squared, "dokum tepe ayari icin"
+    assert supported(m), "decompose tepe ayari icin: relative zincir, C_content, C_M_NORM"
     tok, T = tokens[None], tokens.shape[0]
     C = m.C(tok)[0]
     C_m, R = C, {"C": C, "layers": []}
@@ -67,7 +73,7 @@ def forward_parts(m, tokens):
         return R
     R["logp"] = m.cache(tok, C[None], C_m[None], score)[0]
     gate, W_c, nxt = m.cache.parts(tok, C[None], C_m[None])
-    Cn, pos = F.normalize(C, dim=-1), torch.arange(T)
+    Cn, pos = F.normalize(C, dim=-1), torch.arange(T, device=tokens.device)
     sim = (Cn @ Cn.T).masked_fill(~(pos[None, :] < pos[:, None] - m.cache.skip), -2.0)
     R.update(gate=gate[0], cache_w=W_c[0], cache_next=nxt[0], cache_j=sim.topk(W_c.shape[-1], dim=-1).indices)
     return R
@@ -79,8 +85,8 @@ def chain_terms(m, tokens, t):
     Toplamlari C_t."""
     x = m.P[tokens[:t + 1]].double()
     d_o = m.d_order
-    age = t - torch.arange(t + 1)
-    shifted = (torch.arange(d_o)[None, :] - age[:, None]) % d_o             # roll^yas x [j] = x[j - yas]
+    age = t - torch.arange(t + 1, device=tokens.device)
+    shifted = (torch.arange(d_o, device=tokens.device)[None, :] - age[:, None]) % d_o     # roll^yas x [j] = x[j - yas]
     order = (m.lam ** age.double())[:, None] * x[:, :d_o].gather(1, shifted)
     lam, beta = m.lam_beta(tokens[:t + 1])
     L = lam.double().log().cumsum(0)                                         # solma(i -> t) = e^(L_t - L_i)
@@ -100,7 +106,7 @@ def explain(m, R, tokens, t, a, b=None):
     order, content = chain_terms(m, tokens, t)
     d_o = m.d_order
     chain = scale * torch.stack([order @ u[:d_o], content @ u[d_o:]], 1)
-    if m.direct_chain == "none":                        # cikistan dusen zincir payi dokumde de yok
+    if m.direct_chain == "none":                        # cikistan dusen zincir payi decompose'da da yok
         chain = torch.zeros_like(chain)
     elif m.direct_chain == "no_self":
         chain[t] = 0
@@ -157,34 +163,35 @@ def logp_cut(m, tokens, cut=None):
 def greedy(m, prompt, vocab, token_index, steps=60, banned=BANNED, logp=None, forced=None):
     """DS.generate'in sicaklik 0 yolu, token kimlikleriyle -> (tokens (T,), n_prompt).  <eos> ile durur.
     logp(m, tokens (T,)) -> (T, n): mudahaleli puan (None: m.scoreboard).  forced {k: token}: uretilen k. token
-    (0'dan) acgozlu secim yerine zorlanir -- catal cevirme."""
+    (0'dan) acgozlu secim yerine zorlanir -- catal cevirme.  tokens modelin cihazinda."""
+    dev = m.P.device
     w = [token_index[DS.EOS_TOKEN]] + [token_index.get(x, token_index[DS.UNK_TOKEN])
                                        for x in DS.tokenize(DS.normalize(prompt))]
     n_prompt = len(w)
-    y = torch.tensor([token_index[x] for x in banned])
+    y = torch.tensor([token_index[x] for x in banned], device=dev)
     for k in range(min(steps, m.t_max - len(w))):
         if forced and k in forced:
             c = int(forced[k])
         else:
-            x = torch.tensor(w)
+            x = torch.tensor(w, device=dev)
             p = (m.scoreboard(x[None])[0] if logp is None else logp(m, x))[-1]
             c = int(torch.log_softmax(p.index_fill(0, y, -float("inf")), -1).argmax())
         w.append(c)
         if c == token_index[DS.EOS_TOKEN]:
             break
-    return torch.tensor(w), n_prompt
+    return torch.tensor(w, device=dev), n_prompt
 
 
 @torch.no_grad()
 def verify(m, R, tokens, tol=1e-4):
-    """Dokum modelin kendisiyle tutuyor mu: parcalarin toplami m'in C_m'si, log p'si m.scoreboard.  Tutmazsa DURUR --
+    """decompose modelin kendisiyle tutuyor mu: parcalarin toplami m'in C_m'si, log p'si m.scoreboard.  Tutmazsa DURUR --
     model_18'e yeni bir parca eklendiyse forward_parts'a da eklenmeli (bulgu koda aittir, kural 11)."""
     tok = tokens[None]
     C_m, logp = m.move(tok)[0][0], m.scoreboard(tok)[0]
     dC = float((R["C_m"] - C_m).abs().max()) / (1 + float(C_m.abs().max()))
     dp = float((R["logp"] - logp).abs().max()) / (1 + float(logp.abs().max()))
     if not (dC < tol and dp < tol):
-        raise AssertionError("dokum modelle tutmuyor: C_m farki %.1e, log p farki %.1e (goreli)" % (dC, dp))
+        raise AssertionError("decompose modelle tutmuyor: C_m farki %.1e, log p farki %.1e (goreli)" % (dC, dp))
 
 
 @torch.no_grad()
@@ -192,10 +199,10 @@ def trajectory(m, tokens, n_prompt, banned_ids):
     """Uretilen her token icin bir satir: secilen a, p, fark (log p, ikinci adaya karsi), ikinci b, ilk 5, entropi,
     kopya boyu, argmax mi, gate, p_cache(a), defterin farka katkisi, parca paylari (a - b).
     banned_ids: uretimde yasak kimlikler; olasiliklar DS.generate gibi onlarsiz yeniden normalize.
-    Her cagrida verify: dokum modelle tutmazsa satir yazilmaz."""
+    Her cagrida verify: decompose modelle tutmazsa satir yazilmaz."""
     R = forward_parts(m, tokens)
     verify(m, R, tokens)
-    lp = torch.log_softmax(R["logp"].index_fill(-1, banned_ids, -float("inf")), -1)
+    lp = torch.log_softmax(R["logp"].index_fill(-1, banned_ids.to(R["logp"].device), -float("inf")), -1)
     rows = []
     for t in range(n_prompt - 1, len(tokens) - 1):
         a = int(tokens[t + 1])
@@ -211,7 +218,7 @@ def trajectory(m, tokens, n_prompt, banned_ids):
                "entropy": float(-(lp[t].exp() * lp[t].clamp_min(-1e4)).sum()),
                "copy": copy_length(tokens.tolist(), t + 1), "model_margin": ex["total"], "parts": ex["parts"]}
         if "gate" in R:
-            p_cache = torch.zeros(lp.shape[-1]).scatter_add_(0, R["cache_next"][t], R["cache_w"][t])
+            p_cache = torch.zeros(lp.shape[-1], device=lp.device).scatter_add_(0, R["cache_next"][t], R["cache_w"][t])
             row.update(gate=float(R["gate"][t]), p_cache=float(p_cache[a]),
                        cache_shift=row["margin"] - ex["total"])
         rows.append(row)
@@ -219,7 +226,7 @@ def trajectory(m, tokens, n_prompt, banned_ids):
 
 
 def show(m, R, tokens, vocab, t, a, b, log=print, top=4):
-    """Konum t'de a'nin b'ye karsi dokumu, okunur."""
+    """Konum t'de a'nin b'ye karsi decompose'u, okunur."""
     word = lambda i: vocab[int(i)]
     ex = explain(m, R, tokens, t, a, b)
     log("  PARCALAR (%s - %s, logit):  toplam %+.2f  =  %s" % (word(a), word(b), ex["total"], "  ".join(

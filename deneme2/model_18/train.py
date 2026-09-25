@@ -275,7 +275,7 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
          content_scalar=M18.CONTENT_SCALAR,
          select=M18.SELECT, load_balance=M18.LOAD_BALANCE, c_m_norm=M18.C_M_NORM, attention=M18.ATTENTION,
          attn_heads=M18.ATTN_HEADS, attn_dim=M18.ATTN_DIM, attn_after=M18.ATTN_AFTER, attn_value=M18.ATTN_VALUE,
-         direct_chain=M18.DIRECT_CHAIN, decay_start=None, decay_floor=0.1):
+         direct_chain=M18.DIRECT_CHAIN, decay_start=None, decay_floor=0.1, decompose=True):
     torch.manual_seed(seed)
     model = PV(n_vocab, vectors=vectors, active=active, layers=layers,
                t_max=t_max, seed=seed, squared=squared, S_p=S_p,
@@ -358,6 +358,14 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
     run.flush()
 
     history = []                          # (adim, saglik): kosu sonu ozeti
+    decomposed, notes = set(), {}
+
+    def decompose_hook(at, texts=None):
+        """Tam yedekte decompose (bir adimda bir kez).  decompose False: hic."""
+        if decompose and at not in decomposed:
+            decomposed.add(at)
+            _decompose_backup(run, model, fixed["vocab"], metric, at, texts, notes)
+            run.flush()
 
     def evaluate(step, full=False, save=False, grads=None, health=None):
         """save: tam yedek adimi -- saglik olcutu varsa (metric.health) dongu ve metin de.
@@ -421,17 +429,19 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
                 run.save(dict(record, weights=model.state_dict()), full=False)
             _note(run, record, time.time() - started_at, mark)
             run.flush()
+            if full_save:
+                decompose_hook(step, (record.get("health") or {}).get("texts"))
 
     if last_step < 0:
         run.note("DURDURULDU -- hic adim atilmadi, kayit yok")
         run.flush()
         return
     _finish(run, model, optimizer, sampler, evaluate, record, last_step,
-            last_saved_step, started_at, history)
+            last_saved_step, started_at, history, decompose_hook)
 
 
 def _finish(run, model, optimizer, sampler, evaluate, record, last_step,
-            last_saved_step, started_at, history=()):
+            last_saved_step, started_at, history=(), decompose_hook=None):
     """Kosunun sonu.  ONCE KAYDET, SONRA OLC: tam olcum uzun surebilir; o arada
     oturum duserse son yedekten beri yapilan is giderdi."""
     if last_saved_step != last_step:
@@ -465,6 +475,39 @@ def _finish(run, model, optimizer, sampler, evaluate, record, last_step,
     if history:
         run.note(_health_summary(history))
     run.flush()
+    if decompose_hook is not None:                  # son adim tam yedek degildiyse (yedekteyse zaten yapildi)
+        decompose_hook(last_step, (record.get("health") or {}).get("texts"))
+
+
+def _decompose_backup(run, model, vocab, metric, step, texts=None, notes=None):
+    """Tam yedekte decompose (diagnose.py): istem setinde acgozlu uretim, her secim parcalarina.  Yazar:
+    <kosu>/decompose/t<adim>.json -- diagnose'un yerel kaydiyla ayni bicim ve anahtar, yerelde yeniden hesaplanmaz --
+    .html (gezgin), _ozet.txt; gunluge tek satir.  Kosunun kendi cihazinda; hata egitimi DURDURMAZ.
+    Kullanici, 25 Eylul: "Bence otomatik olsun hatta kod için de default açık ayarı ile olabilir eğitim bitince yada
+    yedek sırasında"."""
+    if not run.root or not vocab:
+        return
+    import decompose as DC
+    import diagnose as DG
+    if not DC.supported(model):
+        if notes is not None and not notes.get("unsupported"):
+            run.note("decompose: bu ayari ayiramiyor (relative zincir + C_content + C_M_NORM gerekir) -- atlandi")
+            notes["unsupported"] = True
+        return
+    precision = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision("highest")          # TF32 yuvarlamasi verify'i haksiz yere dusurmesin
+    try:
+        t0 = time.time()
+        prompts = DG.prompt_set(getattr(metric, "probes", ()))
+        stories = DG.compute(model, list(vocab), f"{run.name} t{step}", prompts, DG.STEPS, texts, log=lambda s: None)
+        base = f"{run.folder}/{DG.FOLDER}/t{step}"
+        DG.save_record(base + ".json", DG.cache_key(prompts, DG.STEPS), step, stories)
+        DG.write_outputs(base, stories, f"{run.name} t{step} Decompose")
+        run.note(f"decompose t{step}: {DG.headline(stories)}  ({time.time() - t0:.0f} sn) -> {DG.FOLDER}/t{step}.html")
+    except Exception as h:
+        run.note(f"decompose t{step} HATA: {h!r}")
+    finally:
+        torch.set_float32_matmul_precision(precision)
 
 
 def _run_safe(run, **settings):
@@ -497,7 +540,7 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
           content_scalar=M18.CONTENT_SCALAR,
          select=M18.SELECT, load_balance=M18.LOAD_BALANCE, c_m_norm=M18.C_M_NORM, attention=M18.ATTENTION,
           attn_heads=M18.ATTN_HEADS, attn_dim=M18.ATTN_DIM, attn_after=M18.ATTN_AFTER, attn_value=M18.ATTN_VALUE,
-          direct_chain=M18.DIRECT_CHAIN, decay_start=None, decay_floor=0.1):
+          direct_chain=M18.DIRECT_CHAIN, decay_start=None, decay_floor=0.1, decompose=True):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
     data        (questions, filled_mask, targets_mask)
@@ -530,6 +573,8 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
     c_m_norm    puan C_m/|C_m| ile (kelimelerin kuresi); s_p_init None iken C_M_NORM_P formulunden
     attention   sozluk katmani attn_after'den sonra Gecmisten (attn_heads x attn_dim; attn_value "state" / "point")
     direct_chain  zincirin puana dogrudan oyu: "all" (hep boyleydi), "no_self" (yas 0 duser), "none" (zincir duser)
+    decompose   her tam yedekte (ve bitiste) decompose: <kosu>/decompose/t<adim>.json, .html, _ozet.txt; gunlukte tek
+                satir.  Varsayilan ACIK; ayiramadigi ayarda bir kez not duser, atlar.  Egitimin yorungesine dokunmaz
     s_v_init, s_c_init, gate_0_init, s_p_init   ogrenilen S_v, S_c, gate_0, S_p'nin baslangici
     decay_start LR sogutmasi (None: sabit LR): decay_start'tan steps'e cosine, lr'den lr x decay_floor'a
                 (CLAUDE.md kural 4'un varsayilani: taban lr/10).  Plansiz pakette yeni planla dal acilabilir.
@@ -559,7 +604,7 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
         content_scalar=content_scalar,
         select=select, load_balance=load_balance, c_m_norm=c_m_norm, attention=attention, attn_heads=attn_heads,
         attn_dim=attn_dim, attn_after=attn_after, attn_value=attn_value, direct_chain=direct_chain,
-        decay_start=decay_start, decay_floor=decay_floor))
+        decay_start=decay_start, decay_floor=decay_floor, decompose=decompose))
     run.thread.start()
     return f"{run_name} basladi" + (f"  ({os.path.basename(resume)}'den)" if resume else "")
 

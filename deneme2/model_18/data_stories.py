@@ -502,6 +502,7 @@ def make_metric(TRAIN, HELDOUT, eos, device="cuda", limit=2000, limit_full=None,
         return r
 
     f.health = True
+    f.probes = probe                 # sonda istemleri: egitimdeki decompose ayni istem setini kullanir (diagnose.prompt_set)
     return f
 
 

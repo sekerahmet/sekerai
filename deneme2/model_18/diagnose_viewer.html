@@ -151,11 +151,11 @@ details.flowbox summary{cursor:pointer;color:var(--muted);font-size:12.5px}
 <div class="wrap">
   <header>
     <h1>__TITLE__</h1>
-    <p>Açgözlü üretimin (sıcaklık 0) her seçimi. <b>Ağaç</b>: her adımda ilk üç aday ve olasılıkları; seçilen yeşil, dal onun altından sürer. <b>Döküm</b>: seçilen token'ın puanını oluşturan parçalar; toplamları seçilen ile ikinci aday arasındaki model farkını birebir verir, defterin katkısı ayrıca yazılı.</p>
+    <p>Açgözlü üretimin (sıcaklık 0) her seçimi. <b>Ağaç</b>: her adımda ilk üç aday ve olasılıkları; seçilen yeşil, dal onun altından sürer. <b>Decompose</b>: seçilen token'ın puanını oluşturan parçalar; toplamları seçilen ile ikinci aday arasındaki model farkını birebir verir, defterin katkısı ayrıca yazılı.</p>
   </header>
   <div class="topbar">
     <nav class="picker" id="picker" aria-label="Hikâye seç"></nav>
-    <div class="views" role="group" aria-label="Görünüm"><button type="button" data-v="tree">Ağaç</button><button type="button" data-v="dokum">Döküm</button></div>
+    <div class="views" role="group" aria-label="Görünüm"><button type="button" data-v="tree">Ağaç</button><button type="button" data-v="decompose">Decompose</button></div>
   </div>
   <section id="v-tree" class="card treecard" aria-label="Seçim ağacı">
     <h2 id="t-title"></h2>
@@ -165,12 +165,12 @@ details.flowbox summary{cursor:pointer;color:var(--muted);font-size:12.5px}
       <span><i class="mini">aday</i>2. aday solda, 3. sağda</span>
       <span><i class="mini pick nar">dar</i>ikinci aday yakın: log p farkı &lt; 0,5</span>
       <span><i class="mini cp"></i>kopya: önceki ≥ 4 token'lık parçanın tekrarı</span>
-      <span>olasılıklar üretimdeki gibi, &lt;dolgu&gt; ve &lt;bilinmeyen&gt; hariç · düğüme tıkla: dökümü</span>
+      <span>olasılıklar üretimdeki gibi, &lt;dolgu&gt; ve &lt;bilinmeyen&gt; hariç · düğüme tıkla: decompose</span>
     </div>
     <details class="flowbox"><summary>Üretilen metin · bir kelimeye tıkla, ağaçta o adıma git</summary><div class="flow" id="flow"></div></details>
     <div class="tree" id="tree"></div>
   </section>
-  <div id="v-dokum" hidden>
+  <div id="v-decompose" hidden>
   <div class="legend">
     <span><i class="sw" style="background:var(--fork)"></i>dar seçim: fark &lt; 0,25</span>
     <span><i class="sw" style="background:var(--fork-soft)"></i>fark &lt; 0,5</span>
@@ -186,7 +186,7 @@ details.flowbox summary{cursor:pointer;color:var(--muted);font-size:12.5px}
       <div class="story" id="story"></div>
       <div class="spark" id="spark" aria-label="Fark çizgisi"></div>
     </section>
-    <section class="card" aria-label="Seçimin dökümü" id="detail"></section>
+    <section class="card" aria-label="Seçimin decompose'u" id="detail"></section>
   </div>
   </div>
 </div>
@@ -309,7 +309,7 @@ function lookAt(i){
 
 function detail(){
   const s = DATA[S], box = document.getElementById('detail');
-  if (K === null){ box.innerHTML = '<h2>Seçimin dökümü</h2><p class="muted">Soldaki hikâyede üretilmiş bir token\'a ya da fark çizgisindeki bir çubuğa tıkla. Kesik çizgili düğmeler raporda açılan token\'lar.</p>'; return; }
+  if (K === null){ box.innerHTML = '<h2>Seçimin decompose'u</h2><p class="muted">Soldaki hikâyede üretilmiş bir token\'a ya da fark çizgisindeki bir çubuğa tıkla. Kesik çizgili düğmeler raporda açılan token\'lar.</p>'; return; }
   const r = s.rows[K], i = r.t + 1;
   const ctx = s.tokens.slice(Math.max(1, i - 12), i).filter(w => w !== '<eos>').map(w => w === '<nl>' ? '⏎' : w).join(' ');
   let h = '<h2>Konum ' + i + '</h2><div class="det-head"><span class="ctx">…' + esc(ctx) + '</span><span class="arrow">→</span><span class="pick">' + esc(r.a) + '</span></div>';
@@ -386,7 +386,7 @@ function treeView(){
       '<span class="step">' + (k + 1) + '</span></div>';
   });
   const tree = document.getElementById('tree'); tree.innerHTML = h;
-  tree.querySelectorAll('.node').forEach(b => b.addEventListener('click', () => openDokum(+b.dataset.k)));
+  tree.querySelectorAll('.node').forEach(b => b.addEventListener('click', () => openDecompose(+b.dataset.k)));
 }
 
 function jump(k){
@@ -400,11 +400,11 @@ function jump(k){
 function views(){
   document.querySelectorAll('.views button').forEach(b => b.setAttribute('aria-pressed', b.dataset.v === VIEW));
   document.getElementById('v-tree').hidden = VIEW !== 'tree';
-  document.getElementById('v-dokum').hidden = VIEW !== 'dokum';
+  document.getElementById('v-decompose').hidden = VIEW !== 'decompose';
 }
 
-function openDokum(k){
-  VIEW = 'dokum'; views(); storyView(); select(k);
+function openDecompose(k){
+  VIEW = 'decompose'; views(); storyView(); select(k);
   const d = document.getElementById('detail'); if (d) d.scrollIntoView({block:'start'});
 }
 

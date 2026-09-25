@@ -6,16 +6,18 @@ Kullanici, 25 Eylul: "bu araç kalıcı bir diagnostic aracı oldu mu ? her sefe
 Acgozlu uretir (sicaklik 0, DS.generate ile ayni), her secimi decompose ile parcalara ayirir (her hikayede verify:
 parcalarin toplami modelle tutmazsa durur), kopya kosularini ve dar secimleri bulur, ozetler, gezgin sayfasi yazar.
 
-Paket basina hesap paketin yanina yazilir, <kosu>/dokum/<paket>.json, ve bir daha YAPILMAZ: istemler, adim sayisi ve
-hesabi belirleyen kod ayniysa kayit okunur.  Rapor, ozet ve sayfa kayittan uretilir; model gerekmez.
+Paket basina hesap paketin yanina yazilir, <kosu>/decompose/<paket>.json, ve bir daha YAPILMAZ: istemler, adim sayisi
+ve hesabi belirleyen kod ayniysa kayit okunur.  Rapor, ozet ve sayfa kayittan uretilir; model gerekmez.
+Egitimde her tam yedekte kendiliginden, kosunun GPU'sunda (train._decompose_backup; kullanici, 25 Eylul: "Bence otomatik
+olsun hatta kod için de default açık ayarı ile olabilir"): <kosu>/decompose/t<N>.json, .html, _ozet.txt.
 
     python diagnose.py <paket.pt> [<paket.pt> ...] [--out KLASOR] [--steps 120] [--focus "Thank you , Spike"] [--force]
 
-Cikti (--out; yoksa ilk paketin <kosu>/dokum/ klasoru), <ad> = paket adlari:
-    <ad>.txt       hikaye hikaye secim tablosu + odak secimlerin dokumu
-    <ad>_ozet.txt  secimlerin darligi, karsit kuvvetler, adlar, hemen tekrar, sik dongu tur tur
+Cikti (--out; yoksa ilk paketin <kosu>/decompose/ klasoru), <ad> = paket adlari:
+    <ad>.txt       hikaye hikaye secim tablosu + odak secimlerin decompose'u
+    <ad>_ozet.txt  dongu olculeri, secimlerin darligi, karsit kuvvetler, adlar, hemen tekrar, sik dongu tur tur
     <ad>.html      gezgin, tarayicida acilir.  Agac: istem tepede, her adimda ilk uc aday ve olasiliklari, secilen
-                   yesil (kullanici, 25 Eylul: "ağaç gibi seçimleri gösterme").  Dokum: token'a tikla, parcalarini gor
+                   yesil (kullanici, 25 Eylul: "ağaç gibi seçimleri gösterme").  Decompose: token'a tikla, parcalarini gor
 Istemler her pakette ayni -- EXAMPLES + kosunun sabit sonda istemleri -- ki paketler yan yana okunsun.
 """
 import argparse
@@ -50,7 +52,8 @@ EXAMPLES = (
 NARROW = 0.5     # dar secim: ikinci adaya log p farki bundan kucuk
 COPY = 4         # kopya: onceki >= COPY token'lik bir parcanin tekrari
 TIGHT = 30       # sik dongu: kopyanin kaynagi en cok TIGHT token geride
-FORMAT = 1       # kayitli dokumun bicimi; compute/detail degisirse artirilir (eski kayitlar yeniden hesaplanir)
+FORMAT = 1       # kayitli decompose'un bicimi; compute/detail degisirse artirilir (eski kayitlar yeniden hesaplanir)
+FOLDER = "decompose"     # <kosu>/decompose/: paket basina kayit, rapor, ozet, sayfa
 NOT_NAMES = {"The", "He", "She", "They", "It", "One", "When", "But", "Then", "So", "Once", "Suddenly", "After", "At",
              "In", "His", "Her", "Their", "Mom", "Dad", "I", "Yes", "No", "What", "Let's", "Thank", "Wow", "Look", "Can",
              "We", "You", "This", "That", "There", "From", "Every", "Just", "As", "On", "Finally", "Soon", "Today",
@@ -58,11 +61,12 @@ NOT_NAMES = {"The", "He", "She", "They", "It", "One", "When", "But", "Then", "So
 
 
 def cache_key(prompts, steps):
-    """Kayitli dokumun anahtari: bicim, hesabi belirleyen kodun izi, adim sayisi, istemler."""
+    """Kayitli decompose'un anahtari: bicim, hesabi belirleyen kodun izi, adim sayisi, istemler.  Iz satir sonundan
+    bagimsiz: Colab'daki kopya (LF) ile yereldeki (CRLF) ayni kodsa ayni iz."""
     h = hashlib.sha1()
     for f in ("decompose.py", "model_18.py", "data_stories.py"):
         with open(os.path.join(HERE, f), "rb") as fh:
-            h.update(fh.read())
+            h.update(fh.read().replace(b"\r\n", b"\n"))
     return json.loads(json.dumps({"format": FORMAT, "code": h.hexdigest()[:12], "steps": steps, "prompts": prompts}))
 
 
@@ -123,7 +127,7 @@ def compute(m, vocab, name, prompts, steps=STEPS, probe_texts=None, log=print):
     """-> hikayeler: istem basina acgozlu uretim, her secimin satiri ve ayrintisi (JSON'a hazir).
     probe_texts: paketin kendi sonda metinleri (Colab'daki uretim); "sonda i" ilk 60 token'da onunla karsilastirilir."""
     ix = {a: i for i, a in enumerate(vocab)}
-    banned = torch.tensor([ix[x] for x in DC.BANNED])
+    banned = torch.tensor([ix[x] for x in DC.BANNED], device=m.P.device)
     stories = []
     for label, prompt in prompts:
         t0 = time.time()
@@ -150,8 +154,22 @@ def compute(m, vocab, name, prompts, steps=STEPS, probe_texts=None, log=print):
     return stories
 
 
+def prompt_set(probes=()):
+    """Istem seti [[etiket, istem]]: EXAMPLES + kosunun sonda istemleri (DS.probe_prompts; egitimde metric.probes)."""
+    return ([["ornek %d" % (i + 1), p] for i, p in enumerate(EXAMPLES)]
+            + [["sonda %d" % (i + 1), p] for i, p in enumerate(probes)])
+
+
+def save_record(path, key, step, stories):
+    """Kayit: {key, step, stories}; yarim yazilmis dosya kalmaz."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump({"key": key, "step": step, "stories": stories}, f, ensure_ascii=False)
+    os.replace(path + ".tmp", path)
+
+
 def diagnose_package(path, steps=STEPS, ts_dir=TS_DIR, force=False, log=print):
-    """Paketin hikayeleri: <kosu>/dokum/<paket>.json varsa ve anahtari tutuyorsa OKUNUR, yoksa hesaplanip yazilir."""
+    """Paketin hikayeleri: <kosu>/decompose/<paket>.json varsa ve anahtari tutuyorsa OKUNUR, yoksa hesaplanip yazilir."""
     from model_18 import PV
     run_dir = os.path.dirname(os.path.abspath(path))
     stem = os.path.splitext(os.path.basename(path))[0]
@@ -159,24 +177,20 @@ def diagnose_package(path, steps=STEPS, ts_dir=TS_DIR, force=False, log=print):
     k = torch.load(path, weights_only=False, map_location="cpu")
     vocab = list(k["vocab"])
     ix = {a: i for i, a in enumerate(vocab)}
-    prompts = ([["ornek %d" % (i + 1), p] for i, p in enumerate(EXAMPLES)]
-               + [["sonda %d" % (i + 1), p] for i, p in enumerate(DS.probe_prompts(DS.prompts(ts_dir), ix))])
+    prompts = prompt_set(DS.probe_prompts(DS.prompts(ts_dir), ix))
     key = cache_key(prompts, steps)
-    jf = os.path.join(run_dir, "dokum", stem + ".json")
+    jf = os.path.join(run_dir, FOLDER, stem + ".json")
     if not force and os.path.exists(jf):
         with open(jf, encoding="utf-8") as f:
             saved = json.load(f)
         if saved.get("key") == key:
-            log("kayitli dokum okundu: %s" % jf)
+            log("kayitli decompose okundu: %s" % jf)
             return saved["stories"]
-        log("kayitli dokum eski (kod, istem ya da adim degismis), yeniden hesaplaniyor: %s" % jf)
+        log("kayitli decompose eski (kod, istem ya da adim degismis), yeniden hesaplaniyor: %s" % jf)
     m = PV.from_package(k)
     log("%s: adim %s, %d istem, %d adim, CPU" % (name, k.get("step"), len(prompts), steps))
     stories = compute(m, vocab, name, prompts, steps, (k.get("health") or {}).get("texts"), log)
-    os.makedirs(os.path.dirname(jf), exist_ok=True)
-    with open(jf + ".tmp", "w", encoding="utf-8") as f:
-        json.dump({"key": key, "step": k.get("step"), "stories": stories}, f, ensure_ascii=False)
-    os.replace(jf + ".tmp", jf)
+    save_record(jf, key, k.get("step"), stories)
     return stories
 
 
@@ -199,7 +213,7 @@ def focus(s, patterns=()):
 
 
 def dissection(r):
-    """Kayitli ayrintidan bir secimin dokumu, okunur satirlar."""
+    """Kayitli ayrintidan bir secimin decompose'u, okunur satirlar."""
     L = ["   ilk 5: " + "  ".join("%s %.3f" % (w, p) for w, p in r["top"]),
          "   PARCALAR (%s - %s, logit): toplam %+.2f = %s" % (r["a"], r["b"], r["model_margin"], "  ".join(
              "%s %+.2f" % (k, v) for k, v in r["parts"].items()))]
@@ -219,7 +233,7 @@ def dissection(r):
 
 
 def report(stories):
-    """Hikaye hikaye: uretilen metin, kopya kosulari, secim tablosu, odak secimlerin dokumu."""
+    """Hikaye hikaye: uretilen metin, kopya kosulari, secim tablosu, odak secimlerin decompose'u."""
     L = []
     for s in stories:
         L += ["", "=" * 110, "%s | %s | istem: %s" % (s["model"], s["label"], s["prompt"]),
@@ -247,6 +261,31 @@ def report(stories):
     return L
 
 
+def loop_measures(S):
+    """Hikayeler -> dongu olculeri (uretilen kisim): anlik tekrar (harfli token onceki token'la ayni), sik dongu payi
+    (kopya >= COPY, kaynak <= TIGHT), uzak kalip payi (kopya >= 8, kaynak > TIGHT), dongu60 (ilk 60'ta tekrar eden 8'li),
+    dar secim payi (fark < NARROW)."""
+    rows = [r for s in S for r in s["rows"]]
+    n = max(len(rows), 1)
+    rep = sum(1 for s in S for r in s["rows"] if r["a"] == s["tokens"][r["t"]] and r["a"][:1].isalpha())
+    tight = sum(1 for r in rows if r["copy"] >= COPY and r["period"] and r["period"] <= TIGHT)
+    far = sum(1 for r in rows if r["copy"] >= 8 and r["period"] and r["period"] > TIGHT)
+    loops = 0
+    for s in S:
+        g = [w for w in s["tokens"][s["n_prompt"]:s["n_prompt"] + 60] if w != "<nl>"]
+        g8 = [tuple(g[i:i + 8]) for i in range(len(g) - 7)]
+        loops += len(set(g8)) < len(g8)
+    return {"rep": rep, "tight": tight / n, "far": far / n, "loops60": loops, "stories": len(S),
+            "narrow": sum(r["margin"] < NARROW for r in rows) / n}
+
+
+def headline(S):
+    """Egitim gunlugu icin tek satir."""
+    x = loop_measures(S)
+    return "dar %%%.0f  sik dongu %%%.1f  uzak kalip %%%.1f  anlik tekrar %d  dongu60 %d/%d" % (
+        100 * x["narrow"], 100 * x["tight"], 100 * x["far"], x["rep"], x["loops60"], x["stories"])
+
+
 def is_name(w):
     return bool(re.fullmatch(r"[A-Z][a-z]+", w)) and w not in NOT_NAMES
 
@@ -267,7 +306,7 @@ def summary(stories):
         big = np.array([np.abs(x).max() for x in v])
         keys = list(rows[0]["parts"])
         top = [max(r["parts"], key=lambda k: abs(r["parts"][k])) for r in rows]
-        L += ["=" * 100, "%s: %d hikaye, %d secim" % (model, len(S), len(rows)),
+        L += ["=" * 100, "%s: %d hikaye, %d secim" % (model, len(S), len(rows)), "  dongu: " + headline(S),
               "  fark (log p, ikinciye karsi): < 0,25 %%%.0f   < %.1f %%%.0f   < 1 %%%.0f   medyan %.2f" % (
                   100 * (m < 0.25).mean(), NARROW, 100 * (m < NARROW).mean(), 100 * (m < 1).mean(), np.median(m)),
               "  karsit kuvvet orani sum|parca| / |fark|: medyan %.1f   dar secimlerde %.1f" % (
@@ -327,10 +366,21 @@ def page(stories, title):
         return f.read().replace("__TITLE__", html.escape(title)).replace("__DATA__", blob)
 
 
+def write_outputs(base, stories, title, patterns=()):
+    """<base>.txt (rapor), <base>_ozet.txt, <base>.html (gezgin).  Odaklar burada hesaplanir (kayda girmez)."""
+    for s in stories:
+        s["focus"] = focus(s, patterns)
+    for suffix, lines in ((".txt", report(stories)), ("_ozet.txt", summary(stories))):
+        with open(base + suffix, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    with open(base + ".html", "w", encoding="utf-8") as f:
+        f.write(page(stories, title))
+
+
 def main():
     ap = argparse.ArgumentParser(description="Kayitli paketin tek token teshisi (decompose).")
     ap.add_argument("packages", nargs="+", help="t<N>.pt ya da w<N>.pt paketleri")
-    ap.add_argument("--out", help="rapor, ozet ve sayfanin klasoru (yoksa ilk paketin <kosu>/dokum/)")
+    ap.add_argument("--out", help="rapor, ozet ve sayfanin klasoru (yoksa ilk paketin <kosu>/decompose/)")
     ap.add_argument("--steps", type=int, default=STEPS)
     ap.add_argument("--focus", action="append", default=[], help='acilacak dizi, token\'lar bosluklu: "Thank you , Spike"')
     ap.add_argument("--force", action="store_true", help="kayit olsa da yeniden hesapla")
@@ -340,19 +390,12 @@ def main():
     stories = []
     for p in a.packages:
         stories += diagnose_package(p, a.steps, a.ts_dir, a.force)
-    patterns = [tuple(f.split()) for f in a.focus]
-    for s in stories:
-        s["focus"] = focus(s, patterns)
-    out = a.out or os.path.join(os.path.dirname(os.path.abspath(a.packages[0])), "dokum")
+    out = a.out or os.path.join(os.path.dirname(os.path.abspath(a.packages[0])), FOLDER)
     os.makedirs(out, exist_ok=True)
     base = os.path.join(out, "_".join(os.path.splitext(os.path.basename(p))[0] for p in a.packages))
-    title = "%s Token Dökümü" % " · ".join(dict.fromkeys(os.path.basename(os.path.dirname(os.path.abspath(p)))
-                                                         for p in a.packages))
-    for suffix, lines in ((".txt", report(stories)), ("_ozet.txt", summary(stories))):
-        with open(base + suffix, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n")
-    with open(base + ".html", "w", encoding="utf-8") as f:
-        f.write(page(stories, title))
+    title = "%s Decompose" % " · ".join(dict.fromkeys(os.path.basename(os.path.dirname(os.path.abspath(p)))
+                                                      for p in a.packages))
+    write_outputs(base, stories, title, [tuple(f.split()) for f in a.focus])
     print("\n".join(summary(stories)))
     print("\nyazildi: %s.txt  %s_ozet.txt  %s.html" % (base, base, base))
 

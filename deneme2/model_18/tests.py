@@ -948,7 +948,7 @@ def t_attention():
          "attention acik paket -> kapali cagri")
 
 
-# --- 25b.  DOKUM (decompose.py): parcalarin toplami modelin kendi C_m'si, puan farki ve log p'si
+# --- 25b.  DECOMPOSE (decompose.py): parcalarin toplami modelin kendi C_m'si, puan farki ve log p'si
 def t_decompose():
     import numpy as np
     import data_stories as DS
@@ -993,7 +993,7 @@ def t_decompose():
     copy_ok = [DC.copy_length([1, 2, 3, 1, 2, 3, 1], i) for i in range(7)] == [0, 0, 0, 1, 2, 3, 4]
     check("decompose: greedy == DS.generate; her secim argmax; kopya boyu", same_text and rows_ok and copy_ok,
           "%d secim" % len(rows))
-    # mudahale: logp_cut'in dustugu tam olarak dokumdeki zincir paylari (deftersiz: fark log p'de dogrusal)
+    # mudahale: logp_cut'in dustugu tam olarak decompose'daki zincir paylari (deftersiz: fark log p'de dogrusal)
     cache, m.cache = m.cache, None
     try:
         with torch.no_grad():
@@ -1013,11 +1013,11 @@ def t_decompose():
     forced_ids, _ = DC.greedy(m, prompt, vocab, ix, steps=12, forced={3: ix["hg"]})
     base_ids, _ = DC.greedy(m, prompt, vocab, ix, steps=12)
     same_before = torch.equal(forced_ids[:n_prompt + 3], base_ids[:n_prompt + 3]) and int(forced_ids[n_prompt + 3]) == ix["hg"]
-    check("decompose: logp_cut dokumdeki zincir payini duser; greedy catal zorlar",
+    check("decompose: logp_cut zincir payini birebir duser; greedy catal zorlar",
           same_full and cut_ok and same_before, "zincir %+.3f, yas0 %+.3f" % (drop, drop0))
 
 
-# --- 25c.  TESHIS (diagnose.py): kayittan rapor, ozet ve sayfa; dokum modelle tutmazsa durur
+# --- 25c.  TESHIS (diagnose.py): kayittan rapor, ozet ve sayfa; decompose modelle tutmazsa durur
 def t_diagnose():
     import json as _json
     import data_stories as DS
@@ -1045,29 +1045,68 @@ def t_diagnose():
     focus_ok = (s0["focus"][0][0] == s0["n_prompt"] and s0["focus"][0][1].startswith("HEDEF: " + " ".join(pattern))
                 and "gpu_same" in stories[1])
     report_ok = "HEDEF: " + " ".join(pattern) in "\n".join(DG.report(stories))
-    page = DG.page(stories, "KUCUK Token Dökümü")
+    page = DG.page(stories, "KUCUK Decompose")
     start = page.index('id="data">') + len('id="data">')
     page_ok = (_json.loads(page[start:page.index("</script>", start)])[0]["label"] == "ornek 1"
-               and "<title>KUCUK Token Dökümü</title>" in page)
+               and "<title>KUCUK Decompose</title>" in page)
     summary_ok = any("KUCUK t0" in line for line in DG.summary(stories))
     key_ok = DG.cache_key(prompts, 10) == _json.loads(_json.dumps(DG.cache_key(prompts, 10)))
-    check("diagnose: dokum JSON'a hazir; rapor, ozet ve sayfa kayittan",
+    check("diagnose: decompose JSON'a hazir; rapor, ozet ve sayfa kayittan",
           exact and native and focus_ok and report_ok and page_ok and summary_ok and key_ok and len(rows) >= 2,
           "%d secim, odak %s" % (len(rows), s0["focus"][0][1]))
     w = torch.randint(4, len(vocab), (20,), generator=g)
     R = DC.forward_parts(m, w)
     DC.verify(m, R, w)                                   # tutuyor: sessiz
     with torch.no_grad():
-        m.V[1].finish.add_(1.0)                          # model degisti, dokum eskidi
+        m.V[1].finish.add_(1.0)                          # model degisti, decompose eskidi
     try:
         DC.verify(m, R, w)
         fired = False
     except AssertionError:
         fired = True
-    check("diagnose: dokum modelle tutmazsa durur (verify)", fired)
+    check("diagnose: decompose modelle tutmazsa durur (verify)", fired)
 
 
-# --- 25d.  ZINCIRIN DOGRUDAN OYU (direct_chain): cikis C_m - d; kayip hizli yolla ayni; pakette; dokum tutar
+# --- 25e.  EGITIMDE DECOMPOSE: her tam yedekte kayit (diagnose'un anahtariyla), sayfa, gunlukte satir; ayiramadigi ayarda
+# bir kez not; kapaliyken hic
+def t_train_decompose():
+    import json as _json
+    import data_stories as DS
+    import diagnose as DG
+    vocab = list(DS.SPECIAL) + [a + b for a in "abcdefgh" for b in "abcdefg"]
+    g = torch.Generator().manual_seed(34)
+    q = torch.randint(4, len(vocab), (40, 24), generator=g)
+    q[:, 0] = vocab.index(DS.EOS_TOKEN)
+    filled = torch.ones_like(q, dtype=torch.bool)
+    cfg = dict(chain="relative", lam=0.7, start_norm=1.0, c_cache=True, c_content=True, d_order=16, d_content=16,
+               c_m_norm=True, squared=True, S_p="learned", attention=True, attn_heads=2, attn_dim=4,
+               select="direction_all", vectors=8, active=2, layers=2)
+    root = tempfile.mkdtemp()
+    try:
+        r = TR.RUNS["TD"] = TR.Run("TD", root)
+        _run(r, (q, filled, filled), len(vocab), _zero_metric, "cpu", 2e-3, 4, 0, 8, 2, 2, vocab=vocab, **cfg)
+        files = set(os.listdir(root + "/TD/decompose"))
+        log = open(root + "/TD/gunluk.txt", encoding="utf-8").read()
+        saved = _json.load(open(root + "/TD/decompose/t4.json", encoding="utf-8"))
+        written = {"t2.json", "t4.json", "t4.html", "t4_ozet.txt"} <= files and "decompose t4:" in log
+        key_ok = saved["key"] == DG.cache_key(DG.prompt_set(), DG.STEPS) and saved["step"] == 4 and len(saved["stories"]) == 5
+        once = log.count("decompose t4:") == 1                     # bitis t4 yedegiyle ayni: ikinci kez yapilmaz
+        r = TR.RUNS["TD0"] = TR.Run("TD0", root)
+        _run(r, (q, filled, filled), len(vocab), _zero_metric, "cpu", 2e-3, 2, 0, 8, 2, 2, vocab=vocab, decompose=False,
+             **cfg)
+        off = not os.path.exists(root + "/TD0/decompose")
+        r = TR.RUNS["TDS"] = TR.Run("TDS", root)
+        _run(r, (q, filled, filled), len(vocab), _zero_metric, "cpu", 2e-3, 4, 0, 8, 2, 2, vocab=vocab, **SMALL)
+        small_log = open(root + "/TDS/gunluk.txt", encoding="utf-8").read()
+        skipped = small_log.count("decompose: bu ayari ayiramiyor") == 1 and not os.path.exists(root + "/TDS/decompose")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    check("egitimde decompose: tam yedekte kayit + sayfa + gunluk satiri", written and key_ok and once,
+          "t2, t4; anahtar diagnose'unki")
+    check("egitimde decompose: kapaliyken yok, ayiramadigi ayarda bir not", off and skipped)
+
+
+# --- 25d.  ZINCIRIN DOGRUDAN OYU (direct_chain): cikis C_m - d; kayip hizli yolla ayni; pakette; decompose tutar
 def t_direct():
     import decompose as DC
     g = torch.Generator().manual_seed(33)
@@ -1095,13 +1134,13 @@ def t_direct():
         inspect_ok = all(torch.allclose(m.inspect(w)["C_m"], m.move(w)[0], atol=1e-5) for m in models.values())
         for dc in ("no_self", "none"):
             R = DC.forward_parts(models[dc], w[0])
-            DC.verify(models[dc], R, w[0])                    # dokum yeni cikisla tutuyor (tutmazsa durur)
+            DC.verify(models[dc], R, w[0])                    # decompose yeni cikisla tutuyor (tutmazsa durur)
         ex = DC.explain(models["none"], DC.forward_parts(models["none"], w[0]), w[0], 20, 5, 6)
         chain_gone = ex["parts"]["chain_order"] == 0 and ex["parts"]["chain_content"] == 0
     filled = torch.ones_like(w, dtype=torch.bool)
     tok, mask, rows = TR.trim(w, filled, filled)
     loss_ok = all(torch.allclose(m.loss(tok, mask, rows=rows), m.loss(tok, mask), atol=1e-5) for m in models.values())
-    check("direct_chain: cikis C_m - d, inspect ayni, kayip hizli yolla ayni, dokum tutar",
+    check("direct_chain: cikis C_m - d, inspect ayni, kayip hizli yolla ayni, decompose tutar",
           out_ok and inspect_ok and chain_gone and loss_ok, "no_self: yas 0 duser, none: zincir duser")
     N, data = _data()
     root = tempfile.mkdtemp()
@@ -1523,7 +1562,7 @@ def t_notebook(path=None):
 if __name__ == "__main__":
     print("tests (model_18)")
     for f in (t_chain, t_causal, t_silent, t_cm, t_denominator, t_gradient,
-              t_params, t_mask, t_resume, t_stop, t_score, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_top, t_select, t_all_active, t_balance, t_cmnorm, t_speed, t_attention, t_decompose, t_diagnose, t_direct, t_health, t_decay, t_finish, t_math_windows,
+              t_params, t_mask, t_resume, t_stop, t_score, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_top, t_select, t_all_active, t_balance, t_cmnorm, t_speed, t_attention, t_decompose, t_diagnose, t_train_decompose, t_direct, t_health, t_decay, t_finish, t_math_windows,
               t_math_ask, t_math_digits, t_math_training, t_stories, t_notebook):
         f()
     t_notebook(os.path.join(os.path.dirname(os.path.abspath(__file__)),
