@@ -43,7 +43,7 @@ MUST_MATCH = ("arch", "n", "T", "batch", "lr", "seed", "d_sum", "vectors",
               "cache_skip", "s_v_init", "s_c_init", "gate_0_init", "s_p_init", "query", "query_vectors",
               "query_active", "query_by", "c_content", "d_order", "d_content", "lam_w_init", "beta_w_init",
               "content_scalar", "select", "load_balance", "c_m_norm",
-              "attention", "attn_heads", "attn_dim", "attn_after", "attn_value",
+              "attention", "attn_heads", "attn_dim", "attn_after", "attn_value", "direct_chain",
               "data_fingerprint", "vocab")
 # Alan eklenmeden once yazilan paketlerdeki deger: skor -D^2, carpansiz.
 BEFORE_FIELD = {"squared": True, "S_p": 1.0, "start_norm": "randn", "lam": 1.0,
@@ -54,7 +54,7 @@ BEFORE_FIELD = {"squared": True, "S_p": 1.0, "start_norm": "randn", "lam": 1.0,
                 "c_content": False, "d_order": 0, "d_content": 0, "select": "distance", "load_balance": 0.0, "c_m_norm": False,
                 "lam_w_init": 0.9, "beta_w_init": 0.5, "content_scalar": False, "attention": False, "attn_heads": 0,
                 "attn_dim": 0,
-                "attn_after": 0, "attn_value": "state"}
+                "attn_after": 0, "attn_value": "state", "direct_chain": "all"}
 
 # HIZ, hesap AYNI (tests: t_speed): batch en uzun hikayesine kirpilir (nedensel, dolgu sagda), puan
 # tablosu yalniz sayilan hedeflerde kurulur.  Boylar SHAPES basamaga yuvarlanir: torch.compile her
@@ -275,7 +275,7 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
          content_scalar=M18.CONTENT_SCALAR,
          select=M18.SELECT, load_balance=M18.LOAD_BALANCE, c_m_norm=M18.C_M_NORM, attention=M18.ATTENTION,
          attn_heads=M18.ATTN_HEADS, attn_dim=M18.ATTN_DIM, attn_after=M18.ATTN_AFTER, attn_value=M18.ATTN_VALUE,
-         decay_start=None, decay_floor=0.1):
+         direct_chain=M18.DIRECT_CHAIN, decay_start=None, decay_floor=0.1):
     torch.manual_seed(seed)
     model = PV(n_vocab, vectors=vectors, active=active, layers=layers,
                t_max=t_max, seed=seed, squared=squared, S_p=S_p,
@@ -286,7 +286,8 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
                c_content=c_content, d_order=d_order, d_content=d_content, lam_w_init=lam_w_init, beta_w_init=beta_w_init,
                content_scalar=content_scalar,
                select=select, load_balance=load_balance, c_m_norm=c_m_norm, attention=attention,
-               attn_heads=attn_heads, attn_dim=attn_dim, attn_after=attn_after, attn_value=attn_value).to(device)
+               attn_heads=attn_heads, attn_dim=attn_dim, attn_after=attn_after, attn_value=attn_value,
+               direct_chain=direct_chain).to(device)
     # torch.compile: eski mimaride 3,90 kat olculdu (model_17 train_17); PV'de OLCULMEDI.
     loss_fn = torch.compile(model.loss) if compile else model.loss
     if compile:
@@ -315,7 +316,7 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch,
                  content_scalar=bool(content_scalar), select=select,
                  load_balance=float(load_balance), c_m_norm=bool(c_m_norm), attention=bool(attention),
                  attn_heads=int(attn_heads), attn_dim=int(attn_dim), attn_after=int(attn_after), attn_value=attn_value,
-                 seed=seed, batch=batch, T=max_length, n_params=n_params,
+                 direct_chain=direct_chain, seed=seed, batch=batch, T=max_length, n_params=n_params,
                  compile=compile,
                  decay_start=None if decay_start is None else int(decay_start),
                  decay_end=None if decay_start is None else int(steps),
@@ -496,7 +497,7 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
           content_scalar=M18.CONTENT_SCALAR,
          select=M18.SELECT, load_balance=M18.LOAD_BALANCE, c_m_norm=M18.C_M_NORM, attention=M18.ATTENTION,
           attn_heads=M18.ATTN_HEADS, attn_dim=M18.ATTN_DIM, attn_after=M18.ATTN_AFTER, attn_value=M18.ATTN_VALUE,
-          decay_start=None, decay_floor=0.1):
+          direct_chain=M18.DIRECT_CHAIN, decay_start=None, decay_floor=0.1):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
     data        (questions, filled_mask, targets_mask)
@@ -528,6 +529,7 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
     load_balance  kayba eklenen denge terimi katsayisi (0: yok): farkli C'ler farkli vektor kullansin
     c_m_norm    puan C_m/|C_m| ile (kelimelerin kuresi); s_p_init None iken C_M_NORM_P formulunden
     attention   sozluk katmani attn_after'den sonra Gecmisten (attn_heads x attn_dim; attn_value "state" / "point")
+    direct_chain  zincirin puana dogrudan oyu: "all" (hep boyleydi), "no_self" (yas 0 duser), "none" (zincir duser)
     s_v_init, s_c_init, gate_0_init, s_p_init   ogrenilen S_v, S_c, gate_0, S_p'nin baslangici
     decay_start LR sogutmasi (None: sabit LR): decay_start'tan steps'e cosine, lr'den lr x decay_floor'a
                 (CLAUDE.md kural 4'un varsayilani: taban lr/10).  Plansiz pakette yeni planla dal acilabilir.
@@ -556,7 +558,7 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
         c_content=c_content, d_order=d_order, d_content=d_content, lam_w_init=lam_w_init, beta_w_init=beta_w_init,
         content_scalar=content_scalar,
         select=select, load_balance=load_balance, c_m_norm=c_m_norm, attention=attention, attn_heads=attn_heads,
-        attn_dim=attn_dim, attn_after=attn_after, attn_value=attn_value,
+        attn_dim=attn_dim, attn_after=attn_after, attn_value=attn_value, direct_chain=direct_chain,
         decay_start=decay_start, decay_floor=decay_floor))
     run.thread.start()
     return f"{run_name} basladi" + (f"  ({os.path.basename(resume)}'den)" if resume else "")

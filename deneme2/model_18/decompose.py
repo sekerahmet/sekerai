@@ -57,6 +57,9 @@ def forward_parts(m, tokens):
             ov = torch.einsum("dhk,jhk->hjd", L.W_o.weight.view(-1, L.heads, L.dim), v)
             R.update(A=A, ov=ov, attn=torch.einsum("htj,hjd->td", A, ov))
             C_m = C_m + R["attn"]
+    if m.direct_chain != "all":                         # cikis zincirin dogrudan oyunu tasimaz (model_18.DIRECT_CHAIN)
+        R["direct"] = m.direct_part(C[None], tokens[None])[0]
+        C_m = C_m - R["direct"]
     score = m.score(C_m[None])
     R.update(C_m=C_m, score=score[0])
     if m.cache is None:
@@ -97,6 +100,10 @@ def explain(m, R, tokens, t, a, b=None):
     order, content = chain_terms(m, tokens, t)
     d_o = m.d_order
     chain = scale * torch.stack([order @ u[:d_o], content @ u[d_o:]], 1)
+    if m.direct_chain == "none":                        # cikistan dusen zincir payi dokumde de yok
+        chain = torch.zeros_like(chain)
+    elif m.direct_chain == "no_self":
+        chain[t] = 0
     out = {"parts": {"chain_order": float(chain[:, 0].sum()), "chain_content": float(chain[:, 1].sum())},
            "chain": chain, "vectors": [], "total": scale * float(C_m @ u)}
     for i, (layer, Ly) in enumerate(zip(m.V, R["layers"])):
@@ -129,6 +136,7 @@ def logp_cut(m, tokens, cut=None):
     """MUDAHALE: zincirin puana DOGRUDAN oyu cikarilmis log p (T, n) -- explain'deki chain_* paylari duser.  Katmanlar,
     attention ve defter zinciri gormeye devam eder.  cut: None (mudahale yok, scoreboard ile ayni), "chain" (butun
     zincir), "age0" (yalniz simdiki kelimenin kendi terimi: P_order[w_t] ve beta_w * P_content[w_t])."""
+    assert cut is None or m.direct_chain == "all", "zincirin oyu modelde zaten dusmus (direct_chain)"
     tok = tokens[None]
     C = m.C(tok)
     C_m = m._layers(C, tokens=tok)[0]

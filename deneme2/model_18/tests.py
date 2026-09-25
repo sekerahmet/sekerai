@@ -1067,6 +1067,64 @@ def t_diagnose():
     check("diagnose: dokum modelle tutmazsa durur (verify)", fired)
 
 
+# --- 25d.  ZINCIRIN DOGRUDAN OYU (direct_chain): cikis C_m - d; kayip hizli yolla ayni; pakette; dokum tutar
+def t_direct():
+    import decompose as DC
+    g = torch.Generator().manual_seed(33)
+    kw = dict(d_order=32, d_content=32, lam=0.7, chain="relative", c_content=True, c_cache=True, cache_topk=4,
+              select="direction_all", start_norm=1.0, vectors=16, active=4, layers=3, c_m_norm=True, squared=True,
+              S_p="learned", attention=True, attn_heads=2, attn_dim=8)
+    w = torch.randint(4, 60, (2, 30), generator=g)
+    models = {}
+    for dc in ("all", "no_self", "none"):
+        torch.manual_seed(0)
+        models[dc] = PV(60, direct_chain=dc, **kw)
+    base_model = models["all"]
+    with torch.no_grad():
+        for L in base_model.V:
+            L.finish.add_(torch.randn(L.finish.shape, generator=g) * 0.5)
+        base_model.attn.W_o.weight.normal_(0, 0.3, generator=g)
+        base_model.beta_w.add_(torch.randn(base_model.beta_w.shape, generator=g))
+        for dc in ("no_self", "none"):
+            models[dc].load_state_dict(base_model.state_dict())      # yeni parametre yok: ayni agirliklar
+        base, C, x = base_model.move(w)[0], base_model.C(w), base_model.P[w]
+        age0 = torch.cat([x[..., :32], base_model.lam_beta(w)[1] * x[..., 32:]], -1)
+        out_ok = (torch.allclose(models["none"].move(w)[0], base - C, atol=1e-5)
+                  and torch.allclose(models["no_self"].move(w)[0], base - age0, atol=1e-5)
+                  and not torch.allclose(models["none"].scoreboard(w), base_model.scoreboard(w), atol=1e-4))
+        inspect_ok = all(torch.allclose(m.inspect(w)["C_m"], m.move(w)[0], atol=1e-5) for m in models.values())
+        for dc in ("no_self", "none"):
+            R = DC.forward_parts(models[dc], w[0])
+            DC.verify(models[dc], R, w[0])                    # dokum yeni cikisla tutuyor (tutmazsa durur)
+        ex = DC.explain(models["none"], DC.forward_parts(models["none"], w[0]), w[0], 20, 5, 6)
+        chain_gone = ex["parts"]["chain_order"] == 0 and ex["parts"]["chain_content"] == 0
+    filled = torch.ones_like(w, dtype=torch.bool)
+    tok, mask, rows = TR.trim(w, filled, filled)
+    loss_ok = all(torch.allclose(m.loss(tok, mask, rows=rows), m.loss(tok, mask), atol=1e-5) for m in models.values())
+    check("direct_chain: cikis C_m - d, inspect ayni, kayip hizli yolla ayni, dokum tutar",
+          out_ok and inspect_ok and chain_gone and loss_ok, "no_self: yas 0 duser, none: zincir duser")
+    N, data = _data()
+    root = tempfile.mkdtemp()
+    try:
+        r = TR.RUNS["DC"] = TR.Run("DC", root)
+        _run(r, data, N, _zero_metric, "cpu", 2e-3, 4, 0, 8, 2, 4, chain="relative", lam=0.7, start_norm=1.0,
+             c_cache=True, direct_chain="none", **SMALL)
+        trained = r.result.get("step") == 4 and torch.isfinite(r.result["step_losses"]).all()
+        pk = torch.load(root + "/DC/t4.pt", weights_only=False)
+        package_ok = pk["direct_chain"] == "none" and _PV.from_package(pk).direct_chain == "none"
+        try:
+            r = TR.RUNS["DC"] = TR.Run("DC", root)
+            _run(r, data, N, _zero_metric, "cpu", 2e-3, 6, 0, 8, 2, 4, resume=root + "/DC/t4.pt", chain="relative",
+                 lam=0.7, start_norm=1.0, c_cache=True, **SMALL)
+            caught = False
+        except ValueError as h:
+            caught = "direct_chain" in str(h)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    check("direct_chain egitilir; pakete yazilir, surdurme farki yakalar", bool(trained) and package_ok and caught,
+          "none paket -> all cagri")
+
+
 # --- 26.  SAGLIK: cevabi bilinen durumlar; inspect == move; dikkat nedensel; olcut ve egitim butunlesmesi
 def t_health():
     import model_18 as M
@@ -1465,7 +1523,7 @@ def t_notebook(path=None):
 if __name__ == "__main__":
     print("tests (model_18)")
     for f in (t_chain, t_causal, t_silent, t_cm, t_denominator, t_gradient,
-              t_params, t_mask, t_resume, t_stop, t_score, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_top, t_select, t_all_active, t_balance, t_cmnorm, t_speed, t_attention, t_decompose, t_diagnose, t_health, t_decay, t_finish, t_math_windows,
+              t_params, t_mask, t_resume, t_stop, t_score, t_start, t_lam, t_relative, t_ccache, t_init, t_content, t_query, t_top, t_select, t_all_active, t_balance, t_cmnorm, t_speed, t_attention, t_decompose, t_diagnose, t_direct, t_health, t_decay, t_finish, t_math_windows,
               t_math_ask, t_math_digits, t_math_training, t_stories, t_notebook):
         f()
     t_notebook(os.path.join(os.path.dirname(os.path.abspath(__file__)),

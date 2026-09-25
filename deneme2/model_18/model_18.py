@@ -145,6 +145,12 @@ ATTN_HEADS = 4         # bas sayisi.  OLCULMEDI.
 ATTN_DIM = 64          # bas basina boyut; skor olcegi 1/sqrt(ATTN_DIM)
 ATTN_AFTER = 0         # sozluk katmani ATTN_AFTER'den sonra: sorgu bir katmandan gecmis, getirileni sonrakiler isler
 ATTN_VALUE = "state"   # getirilen: "state" C_m,j (kelime + baglam) | "point" P[w_j] (kelimenin sabit noktasi)
+# Zincirin puana DOGRUDAN oyu.  "all": cikis C + katmanlar + attention (bugune kadarki her kosu).  "no_self": cikistan
+# simdiki kelimenin kendi terimi duser (yas 0: P_order[w_t], beta_w * P_content[w_t]).  "none": zincirin tamami duser;
+# puan ve gate yalniz katmanlarin ve attention'in katkisini gorur, zinciri onlar okumaya devam eder.
+# Olculdu (TS_PV_V4 t20000, cikarim aninda kesme, 25 Eylul): anlik tekrar 9 -> 0; "none" sik donguyu %76 azaltti,
+# held-out -1,03 puan.  Egitimle sinaniyor: TS_PV_V4_NOSELF, TS_PV_V4_NOCHAIN.
+DIRECT_CHAIN = "all"
 EPS = 1e-6     # karekok D=0'da turevlenmez
 LEARNED = "learned"
 
@@ -376,7 +382,7 @@ class PV(nn.Module):
                  load_balance=LOAD_BALANCE, c_m_norm=C_M_NORM,
                  lam_w_init=LAM_W_INIT, beta_w_init=BETA_W_INIT, content_scalar=CONTENT_SCALAR,
                  attention=ATTENTION, attn_heads=ATTN_HEADS,
-                 attn_dim=ATTN_DIM, attn_after=ATTN_AFTER, attn_value=ATTN_VALUE):
+                 attn_dim=ATTN_DIM, attn_after=ATTN_AFTER, attn_value=ATTN_VALUE, direct_chain=DIRECT_CHAIN):
         """d_order + d_content = d_sum, nokta uzayinin boyutu.  squared, S_p None: SCORE_BY_VOCAB'dan.  Verilirse tabloyu ezer.
         start_norm: start'larin baslangic boyu (None: randn).  lam: zincirin solma carpani.
         chain: "absolute" (RM_t) ya da "relative" (kaydirma).  c_cache: hikayenin gecmisi + gate.
@@ -385,8 +391,11 @@ class PV(nn.Module):
         tamami relative.
         select: aktif vektor secimi, "distance", "direction" (katman 1'den itibaren) ya da "direction_all".
         c_m_norm: puan C_m/|C_m| ile (kure); s_p_init None: C_M_NORM_P formulunden, kapaliyken S_P_INIT.
-        attention: sozluk katmani attn_after'den sonra Gecmisten (attn_heads x attn_dim, attn_value)."""
+        attention: sozluk katmani attn_after'den sonra Gecmisten (attn_heads x attn_dim, attn_value).
+        direct_chain: zincirin puana dogrudan oyu, "all" / "no_self" / "none" (DIRECT_CHAIN)."""
         super().__init__()
+        assert direct_chain in ("all", "no_self", "none"), direct_chain
+        self.direct_chain = direct_chain
         d_sum = int(d_order) + int(d_content)
         if c_content:
             assert chain == "relative" and d_order > 0 and d_content > 0, (chain, d_order, d_content)
@@ -505,7 +514,21 @@ class PV(nn.Module):
                 C_m = self.attn(C, C_m, self.P[tokens] if self.attn.value == "point" else None)
         if rows is not None and first == len(self.V):
             C_m = compact(C_m)
+        if self.direct_chain != "all":                         # cikis zincirin dogrudan oyunu tasimaz
+            d = self.direct_part(C, tokens)
+            C_m = C_m - (compact(d) if C_m.dim() == 2 else d)
         return (C_m, active_ids, P) if probs else (C_m, active_ids)
+
+    def direct_part(self, C, tokens):
+        """Cikistan dusen zincir payi (B,T,d): "none" butun C, "no_self" simdiki kelimenin kendi terimi (yas 0)."""
+        if self.direct_chain == "none":
+            return C
+        x = self.P[tokens]
+        if self.chain == "absolute":
+            return self.RM[:tokens.shape[1]] * x
+        if not self.c_content:
+            return x
+        return torch.cat([x[..., :self.d_order], self.lam_beta(tokens)[1] * x[..., self.d_order:]], -1)
 
     def balance(self, P, counted, w=None):
         """Load balancing: katman (ve Q) basina vectors * sum_a Pbar_a^2, Pbar = sayilan konumlarda ortalama P.
@@ -588,6 +611,8 @@ class PV(nn.Module):
             if self.attn is not None and i == self.attn_after:
                 A = self.attn.weights(C, C_m)
                 C_m = self.attn(C, C_m, self.P[tokens] if self.attn.value == "point" else None)
+        if self.direct_chain != "all":
+            C_m = C_m - self.direct_part(C, tokens)
         gate = self.cache.parts(tokens, C, C_m)[0] if self.cache is not None else None
         return {"C": C, "C_m": C_m, "W": W, "attn": A, "gate": gate}
 
@@ -644,7 +669,8 @@ class PV(nn.Module):
                 load_balance=k.get("load_balance", 0.0), c_m_norm=k.get("c_m_norm", False),
                 attention=k.get("attention", False),
                 attn_heads=k.get("attn_heads", ATTN_HEADS), attn_dim=k.get("attn_dim", ATTN_DIM),
-                attn_after=k.get("attn_after", ATTN_AFTER), attn_value=k.get("attn_value", ATTN_VALUE))
+                attn_after=k.get("attn_after", ATTN_AFTER), attn_value=k.get("attn_value", ATTN_VALUE),
+                direct_chain=k.get("direct_chain", "all"))
         m.load_state_dict(k["weights"])
         return m.eval()
 
