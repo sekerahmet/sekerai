@@ -186,7 +186,7 @@ details.flowbox summary{cursor:pointer;color:var(--muted);font-size:12.5px}
       <div class="story" id="story"></div>
       <div class="spark" id="spark" aria-label="Fark çizgisi"></div>
     </section>
-    <section class="card" aria-label="Seçimin decompose'u" id="detail"></section>
+    <section class="card" aria-label="Seçimin decompose sonucu" id="detail"></section>
   </div>
   </div>
 </div>
@@ -309,7 +309,7 @@ function lookAt(i){
 
 function detail(){
   const s = DATA[S], box = document.getElementById('detail');
-  if (K === null){ box.innerHTML = '<h2>Seçimin decompose'u</h2><p class="muted">Soldaki hikâyede üretilmiş bir token\'a ya da fark çizgisindeki bir çubuğa tıkla. Kesik çizgili düğmeler raporda açılan token\'lar.</p>'; return; }
+  if (K === null){ box.innerHTML = '<h2>Seçimin decompose sonucu</h2><p class="muted">Soldaki hikâyede üretilmiş bir token\'a ya da fark çizgisindeki bir çubuğa tıkla. Kesik çizgili düğmeler raporda açılan token\'lar.</p>'; return; }
   const r = s.rows[K], i = r.t + 1;
   const ctx = s.tokens.slice(Math.max(1, i - 12), i).filter(w => w !== '<eos>').map(w => w === '<nl>' ? '⏎' : w).join(' ');
   let h = '<h2>Konum ' + i + '</h2><div class="det-head"><span class="ctx">…' + esc(ctx) + '</span><span class="arrow">→</span><span class="pick">' + esc(r.a) + '</span></div>';

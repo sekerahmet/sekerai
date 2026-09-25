@@ -1051,6 +1051,17 @@ def t_diagnose():
                and "<title>KUCUK Decompose</title>" in page)
     summary_ok = any("KUCUK t0" in line for line in DG.summary(stories))
     key_ok = DG.cache_key(prompts, 10) == _json.loads(_json.dumps(DG.cache_key(prompts, 10)))
+    # sayfanin betigi JS olarak gecerli mi (25 Eylul: bir kesme isareti betigi dusurdu, sayfa bos acildi)
+    js_ok, js_note = True, "node yok, JS sinamasi atlandi"
+    if shutil.which("node"):
+        import subprocess
+        code = page[page.rindex("<script>") + len("<script>"):page.rindex("</script>")]
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
+            f.write(code)
+        r = subprocess.run(["node", "--check", f.name], capture_output=True, text=True)
+        os.remove(f.name)
+        js_ok, js_note = r.returncode == 0, "node --check " + ("temiz" if r.returncode == 0 else r.stderr[:160])
+    check("diagnose: gezgin sayfasinin betigi JS olarak gecerli", js_ok, js_note)
     check("diagnose: decompose JSON'a hazir; rapor, ozet ve sayfa kayittan",
           exact and native and focus_ok and report_ok and page_ok and summary_ok and key_ok and len(rows) >= 2,
           "%d secim, odak %s" % (len(rows), s0["focus"][0][1]))
