@@ -1084,6 +1084,54 @@ def t_stories():
     check("hikaye penceresi <eos> basta ve sonda", ok and len(P4) == 2,
          "%d pencere; T=4'te %d" % (len(P), len(P4)))
 
+    # v4: normalizasyon, satir sonu TEK <nl>, kusur suzgeci (sebep sirasi: karakter, bas, son), decode'da satir basi
+    toks = DS.tokenize(DS.normalize("Tom said, “Hi.”\n\nLily ran to the café… It´s fun."))
+    ok_tok = toks == ["Tom", "said", ",", '"', "Hi", ".", '"', DS.NL_TOKEN, "Lily", "ran", "to", "the", "cafe",
+                      ".", ".", ".", "It's", "fun", "."]
+    why = [DS.defect(DS.normalize(s).strip()) for s in
+           ("u don't know.", "Once upon a time, there was a", "Tim ran.\n巴恩.", "Tim saw a tree\U0001F334.",
+            "-\nOnce upon a time.", "Moral of the Story: be kind.", "Tim ran!")]
+    ok_def = why == ["bas", "son", "karakter", "karakter", "bas", None, None]
+    v = [DS.PAD_TOKEN, DS.EOS_TOKEN, DS.UNK_TOKEN, DS.NL_TOKEN, '"', "Hi", ".", "Tom", "said"]
+    txt = DS.decode(np.array([4, 5, 6, 4, 3, 7, 8, 6]), v)
+    check("v4: normalizasyon, <nl>, kusur suzgeci, decode satir basi", ok_tok and ok_def and txt == '"Hi."\nTom said.',
+          "%d token; sebepler %s; %r" % (len(toks), why, txt))
+
+    # v4 uctan uca: kusurlular atilir, <nl> akista, ikinci cagri onbellekten, eski surum URETILMEZ
+    root = tempfile.mkdtemp()
+    try:
+        good = ["Tim ran to the park.\nHe saw a dog.", "Tom saw a cat.\n\n\"Hi,\" said Tom."]
+        bad = ["u don't go.", "Tim ran to the"]
+        with open(os.path.join(root, "TinyStoriesV2-GPT4-train.txt"), "w", encoding="utf-8") as f:
+            f.write(DS.SEPARATOR.join((good + bad) * 3))
+        with open(os.path.join(root, "TinyStoriesV2-GPT4-valid.txt"), "w", encoding="utf-8") as f:
+            f.write(DS.SEPARATOR.join(["Tim saw a dog.", "Tom ran."]))
+        logs = []
+        vocab, (P, M), (Q, _) = DS.build(root, T=16, limit=8, log=logs.append)
+        nl_id = vocab.index(DS.NL_TOKEN)
+        built = (vocab[:4] == list(DS.SPECIAL) and len(P) == 6 and len(Q) == 2 and int((P == nl_id).sum()) == 6
+                 and any("'bas': 3" in s and "'son': 3" in s for s in logs))
+        logs2 = []
+        vocab2, (P2, _), _ = DS.build(root, T=16, limit=8, log=logs2.append)
+        cached = vocab2 == vocab and np.array_equal(P2, P) and sum("onbellekten" in s for s in logs2) == 3
+        try:
+            DS.build(root, T=16, limit=8, version="v2", log=logs.append)
+            old_refused = False
+        except FileNotFoundError:
+            old_refused = True
+        # paralel yol == tek surec: kucuk bloklar (cok blok) ve 2 surec; build'in yazdigi akisla da ayni
+        tr, quiet = os.path.join(root, "TinyStoriesV2-GPT4-train.txt"), (lambda *a: None)
+        v1, ix1 = DS.build_vocab(tr, 8, chunk_mb=0.00005, log=quiet)
+        v2, _ = DS.build_vocab(tr, 8, chunk_mb=0.00005, workers=2, log=quiet)
+        a1 = DS.build_stream(tr, ix1, chunk_mb=0.00005, log=quiet)
+        a2 = DS.build_stream(tr, ix1, chunk_mb=0.00005, workers=2, log=quiet)
+        cached_a = np.load(os.path.join(root, "onbellek", "akis_train_tam_n8_%s.npy" % DS.DATA_VERSION))
+        parallel_same = v1 == v2 == vocab and np.array_equal(a1, a2) and np.array_equal(a1, cached_a)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    check("v4 build: kusurlular atilir, <nl> akista, onbellek okunur, eski surum uretilmez; paralel == tek surec",
+          built and cached and old_refused and parallel_same, "6 + 2 pencere, 6 <nl>; ikinci cagri onbellekten")
+
     # decode: istemin actigi tirnak devamda kapanis olarak okunur (eskiden devam ters bosluklu basiliyordu)
     vocab = ["<dolgu>", DS.EOS_TOKEN, DS.UNK_TOKEN, '"', "?", "The", "cat", "said", ",", "Hi"]
     cont = [4, 3, 5, 6, 7, 8, 3, 9, 3]                            # ? " The cat said , " Hi "

@@ -182,7 +182,7 @@ def main():
                 print("   istem dosyasi yok; kendin bir seyler yaz")
                 continue
             g = random.choice(PROMPTS)
-        n_unknown = sum(1 for t in DS.TOKEN_RE.findall(g.translate(DS.QUOTE_MAP)) if t not in TOKEN_ID)
+        n_unknown = sum(1 for t in DS.tokenize(DS.normalize(g)) if t not in TOKEN_ID)
         banned_tokens = (DS.PAD_TOKEN, DS.UNK_TOKEN) if banned else ()
         prompt_text, generated = DS.generate(m, g, VOCAB, TOKEN_ID, steps=n, device="cpu", temperature=temp,
                             seed=random.randrange(10 ** 6) if temp else None, banned=banned_tokens,

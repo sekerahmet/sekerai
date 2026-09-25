@@ -4,9 +4,10 @@
 Kullanici, 24 Eylul: "matematik de çok aritmetik bir işlem var ama dil de bağlam
 ve ilişki matematik gibi değil. o yüzden görmek istiyorum."
 
-Veri Drive'daki onbellekten (kural 9): model_17'nin 4.000 kelimelik sozlugu
-(+ <dolgu> <eos> <bilinmeyen> = 4.003), akis ve pencere AYNEN onunki.
-Dosyadaki eski ad <hikaye> == <eos> (to_general_eos()), kimlik 1.
+Veri Drive'daki onbellekten (kural 9).  v2: model_17'nin 4.000 kelimelik sozlugu (+ <dolgu> <eos>
+<bilinmeyen> = 4.003); dosyadaki eski ad <hikaye> == <eos> (to_general_eos()), kimlik 1.
+v4 (DATA_VERSION): satir sonu <nl>, kusurlu hikaye suzgeci, genis karakter duzeltmesi --
+belge/bulgu/model_18_veri.md §7.
 
 OLCUT  accuracy (sonraki kelime birebir), ce (ppl = e^ce), tani: konuma gore
        accuracy (acc_0_64, acc_64_256, acc_256_512) ve eos_ok.
@@ -23,6 +24,7 @@ import math
 import os
 import re
 import time
+import unicodedata
 
 import numpy as np
 import torch
@@ -35,6 +37,10 @@ EOS_TOKEN = "<eos>"
 OLD_STORY_TOKEN = "<hikaye>"           # ESKI ad: onbellekteki sozluklerde bu yaziyor
 UNK_TOKEN = "<bilinmeyen>"
 PAD_TOKEN = "<dolgu>"          # hikaye bitince kalan yer; maske ile duser
+# Satir sonu (v4).  Olculdu (valid): hikaye basina 3,3, satirlarin %10'u konusma satiri; eskiden bosluk gibi atiliyordu.
+NL_TOKEN = "<nl>"
+SPECIAL = (PAD_TOKEN, EOS_TOKEN, UNK_TOKEN, NL_TOKEN)     # v4 sozlugunun basi, bu sirayla (kimlik 0-3)
+DATA_VERSION = "v4"            # onbellek etiketi; eski surum (v2) yalniz onbellekten okunur
 # Kesme isaretli kisaltma TEK birim (don't, Lily's); noktalama AYRI.
 TOKEN_RE = re.compile(r"[A-Za-z]+'[A-Za-z]+|[A-Za-z]+|[0-9]+|[^\sA-Za-z0-9]")
 
@@ -44,29 +50,72 @@ TOKEN_RE = re.compile(r"[A-Za-z]+'[A-Za-z]+|[A-Za-z]+|[0-9]+|[^\sA-Za-z0-9]")
 #   "Let's" bazen tek birim, bazen  Let | ' | s
 # Ayni kelimenin iki ayri jetonlanmasi.  Tire (- , en, em) DOKUNULMUYOR:
 # kurali bozmuyorlar ve anlamlari ayri.
-QUOTE_MAP = str.maketrans({"’": "'", "‘": "'",
-                       "“": '"', "”": '"'})
+# v4: cp1252 kacaklari ve kesme yerine yazilan aksan (it´s) da duz tirnak; bosluk turleri bosluk; uc nokta "...".
+QUOTE_MAP = str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"',
+                           "\x91": "'", "\x92": "'", "\x93": '"', "\x94": '"', "´": "'",
+                           "\xa0": " ", " ": " ", "\t": " ", "​": "", "…": "..."})
 NO_SPACE_BEFORE = set(".,!?;:)]}'\"")      # oncesine bosluk KOYMA
 NO_SPACE_AFTER = set("([{")                  # sonrasina bosluk KOYMA
+# Kusurlu hikaye (v4).  Olculdu (ilk 320 MB): cumle ortasinda kesik %0,38; basi kopuk ("u don't ...") ya da
+# kucuk harfle baslayan 14; Cince ceviri satiri / emoji tasiyan 12.
+_BAD_CHAR_RE = re.compile(r"[^\x20-\x7e\n–—]")
+_START_RE = re.compile(r"[A-Z0-9\"']")
+_END = set(".!?\"')")
 
 
-def _stories(path, chunk_mb=64, limit_mb=None):
-    """Dosyayi parca parca oku, HIKAYE SINIRINDA kes, hikaye hikaye ver."""
-    return _stories_chars(path, chunk_mb * 1024 * 1024,
-                          None if limit_mb is None else limit_mb * 1024 * 1024)
+def normalize(s):
+    """Tirnak, bosluk ve aksan duzeltmesi (cafe'); satir sonlari KORUNUR."""
+    s = s.translate(QUOTE_MAP)
+    if not s.isascii():
+        s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+    return s
 
 
-def _stories_chars(path, chunk, stop_at=None):
-    """parca/dur KARAKTER.  En fazla `dur` karakter okunur, yarim kalan son
-    hikaye atilir.  Eskiden bolumden artan sayilmiyordu: en_mb=64 fiilen
-    128 MB okuyordu (onkayit model_17_TAM1)."""
+def defect(s):
+    """Normalize edilmis, bastan sona kirpilmis hikaye -> kusur sebebi ya da None."""
+    if _BAD_CHAR_RE.search(s):
+        return "karakter"
+    if not _START_RE.match(s):
+        return "bas"
+    if s[-1] not in _END:
+        return "son"
+    return None
+
+
+def tokenize(s):
+    """Hikaye -> token'lar: satirlar TOKEN_RE ile, aralarinda TEK <nl> (bos satirlar birlesir)."""
+    out = []
+    for line in s.split("\n"):
+        t = TOKEN_RE.findall(line)
+        if t:
+            if out:
+                out.append(NL_TOKEN)
+            out += t
+    return out
+
+
+def stories(path, chunk_mb=64, limit_mb=None, dropped=None):
+    """Normalize edilmis, kusurlulari atilmis hikayeler; dropped (dict) verilirse sebep -> sayi."""
+    for b in _blocks(path, chunk_mb, limit_mb):
+        good, d = _clean_block(b)
+        if dropped is not None:
+            for k, v in d.items():
+                dropped[k] = dropped.get(k, 0) + v
+        yield from good
+
+
+def _blocks(path, chunk_mb=64, limit_mb=None):
+    """Ham metin bloklari, HIKAYE SINIRINDA kesilmis.  En fazla limit_mb okunur, yarim kalan son
+    hikaye atilir.  Eskiden bolumden artan sayilmiyordu: en_mb=64 fiilen 128 MB okuyordu
+    (onkayit model_17_TAM1)."""
+    chunk, stop_at = int(chunk_mb * 1024 * 1024), None if limit_mb is None else int(limit_mb * 1024 * 1024)
     rest, n_read = "", 0
     with open(path, encoding="utf-8", errors="replace") as f:
         while stop_at is None or n_read < stop_at:
             p = f.read(chunk if stop_at is None else min(chunk, stop_at - n_read))
             if not p:
                 if rest.strip():
-                    yield rest.translate(QUOTE_MAP)          # dosya bitti: son hikaye tam
+                    yield rest                               # dosya bitti: son hikaye tam
                 return
             n_read += len(p)
             p = rest + p
@@ -75,9 +124,68 @@ def _stories_chars(path, chunk, stop_at=None):
                 rest = p
                 continue
             rest, p = p[k + len(SEPARATOR):], p[:k]
-            for h in p.split(SEPARATOR):
-                if h.strip():
-                    yield h.translate(QUOTE_MAP)
+            yield p
+
+
+def _clean_block(text):
+    """Blok -> (saglam hikayeler: normalize edilmis ve kirpilmis, atilanlar: sebep -> sayi)."""
+    good, dropped = [], collections.Counter()
+    for h in text.split(SEPARATOR):
+        if h.strip():
+            h = normalize(h).strip()
+            why = defect(h)
+            if why is None:
+                good.append(h)
+            else:
+                dropped[why] += 1
+    return good, dropped
+
+
+def _count_block(text):
+    """Isci: blok -> (kelime sayimi, atilanlar, hikaye sayisi)."""
+    good, dropped = _clean_block(text)
+    counts = collections.Counter()
+    for h in good:
+        counts.update(tokenize(h))
+    return counts, dropped, len(good)
+
+
+_INDEX = {}                     # isci sureclerin sozlugu (_ids_block); _set_index kurar
+
+
+def _set_index(token_index):
+    global _INDEX
+    _INDEX = token_index
+
+
+def _ids_block(text):
+    """Isci: blok -> (kimlikler, her hikayeden sonra <eos>; atilanlar; hikaye sayisi)."""
+    good, dropped = _clean_block(text)
+    unk, eos, out = _INDEX[UNK_TOKEN], _INDEX[EOS_TOKEN], []
+    for h in good:
+        out.extend(_INDEX.get(t, unk) for t in tokenize(h))
+        out.append(eos)
+    return np.array(out, dtype=np.int16), dropped, len(good)
+
+
+def _map_blocks(fn, blocks, workers=1, init=None, initargs=()):
+    """fn'i bloklara SIRAYLA uygular.  workers > 1: surec havuzu, sonuc sirasi ayni; bellekte en fazla
+    `workers` blok."""
+    if workers <= 1:
+        if init is not None:
+            init(*initargs)
+        yield from map(fn, blocks)
+        return
+    import multiprocessing as mp
+    with mp.get_context("spawn").Pool(workers, initializer=init, initargs=initargs) as pool:
+        batch = []
+        for b in blocks:
+            batch.append(b)
+            if len(batch) == workers:
+                yield from pool.map(fn, batch)
+                batch = []
+        if batch:
+            yield from pool.map(fn, batch)
 
 
 def to_general_eos(vocab):
@@ -86,38 +194,41 @@ def to_general_eos(vocab):
     return [EOS_TOKEN if a == OLD_STORY_TOKEN else a for a in vocab]
 
 
-def build_vocab(path, limit: int, chunk_mb=64, limit_mb=None, log=print):
-    """En sik `en` kelime + <dolgu> + <eos> + <bilinmeyen>.  EGITIMDEN cikar."""
-    counts = collections.Counter()
-    for h in _stories(path, chunk_mb, limit_mb):
-        counts.update(TOKEN_RE.findall(h))
-    top = sum(counts.values())
-    vocab = [PAD_TOKEN, EOS_TOKEN, UNK_TOKEN] + [a for a, _ in counts.most_common(limit)]
-    coverage = sum(c for _, c in counts.most_common(limit)) / top
-    log("  sozluk  %s farkli kelime gorundu -> en sik %s tutuldu"
-        % ("{:,}".format(len(counts)), "{:,}".format(limit)))
+def build_vocab(path, limit: int, chunk_mb=64, limit_mb=None, workers=1, log=print):
+    """En sik `limit` kelime + ozel token'lar (SPECIAL).  EGITIMDEN cikar.  Esit sayida olanlar alfabetik:
+    sonuc surec sayisindan bagimsiz."""
+    counts, dropped, n = collections.Counter(), collections.Counter(), 0
+    for c, d, k in _map_blocks(_count_block, _blocks(path, chunk_mb, limit_mb), workers):
+        counts.update(c)
+        dropped.update(d)
+        n += k
+    counts.pop(NL_TOKEN, None)
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    vocab = list(SPECIAL) + [a for a, _ in ranked[:limit]]
+    coverage = sum(c for _, c in ranked[:limit]) / sum(counts.values())
+    log("  sozluk  %s hikaye, %s farkli kelime -> en sik %s tutuldu   kusurlu hikaye atildi: %s"
+        % ("{:,}".format(n), "{:,}".format(len(counts)), "{:,}".format(limit), dict(dropped) or "yok"))
     log("          kapsama %%%.3f   disarda %s kelime"
         % (100 * coverage, "{:,}".format(max(0, len(counts) - limit))))
     return vocab, {a: i for i, a in enumerate(vocab)}
 
 
-def build_stream(path, token_index, chunk_mb=64, limit_mb=None, log=print):
-    """Hikayeleri TEK akisa diz, aralarina <eos>.  int16 dizi.
+def build_stream(path, token_index, chunk_mb=64, limit_mb=None, workers=1, log=print):
+    """Hikayeleri TEK akisa diz, her hikayeden sonra <eos>.  int16 dizi.
 
-    int16: en buyuk kimlik 4.002 < 32.767, KAYIPSIZ.  Yarim dosya,
+    int16: en buyuk kimlik < 32.767, KAYIPSIZ.  Yarim dosya,
     yarim yukleme, Colab'da yarim RAM."""
     assert len(token_index) <= np.iinfo(np.int16).max + 1, "sozluk int16'ya sigmiyor"
-    unk_id, eos_id = token_index[UNK_TOKEN], token_index[EOS_TOKEN]
-    parts, n = [], 0
-    for h in _stories(path, chunk_mb, limit_mb):
-        parts.append(np.fromiter((token_index.get(t, unk_id) for t in TOKEN_RE.findall(h)),
-                               dtype=np.int16))
-        parts.append(np.array([eos_id], dtype=np.int16))
-        n += 1
+    parts, n, dropped = [], 0, collections.Counter()
+    for a, d, k in _map_blocks(_ids_block, _blocks(path, chunk_mb, limit_mb), workers,
+                               _set_index, (token_index,)):
+        parts.append(a)
+        dropped.update(d)
+        n += k
     a = np.concatenate(parts)
-    log("  akis    %s hikaye   %s jeton   bilinmeyen %%%.2f"
+    log("  akis    %s hikaye   %s jeton   bilinmeyen %%%.2f   kusurlu hikaye atildi: %s"
         % ("{:,}".format(n), "{:,}".format(len(a)),
-           100 * float((a == unk_id).mean())))
+           100 * float((a == token_index[UNK_TOKEN]).mean()), dict(dropped) or "yok"))
     return a
 
 
@@ -174,6 +285,10 @@ def decode(P, vocab, i=0, limit=None, in_quote=False) -> str:
             s += "\n\n---\n\n"
             in_quote = False
             continue
+        if t == NL_TOKEN:                                  # satir basi: tirnak durumu sifirlanir
+            s += "\n"
+            in_quote = open_ = False
+            continue
         # Tirnak hem acar hem kapar; sirayi sayarak ayiriyoruz.
         if t in "\"'" and t != "'":
             attached, opens = in_quote, not in_quote
@@ -196,33 +311,57 @@ def fingerprint(*arrays) -> str:
 
 
 def build(root: str, T: int = 128, limit: int = 4000, limit_mb=None, seed: int = 0,
-        aligned: bool = True, log=print):
-    """TinyStories -> (ad, EG, DG).
+          aligned: bool = True, version: str = DATA_VERSION, workers: int = 1, log=print):
+    """TinyStories -> (vocab, (TRAIN, TRAIN_MASK), (HELDOUT, HELDOUT_MASK)).
 
-    kok    TinyStories dosyalarinin durdugu klasor (Drive)
-    T      pencere uzunlugu.  dizi() dikkati (B,T,T) -- T ile KARESEL.
-    en     sozluk kirpmasi (+ <dolgu> + <eos> + <bilinmeyen>)
-    en_mb  yalniz ilk N MB (deneme icin).  None -> hepsi.
-    hizali pencereler HIKAYE BASINA hizalansin mi.  Duz kesimde
-           tahminlerin %40,8'i hikayesinin basini GORMUYORDU (olculdu).
+    T         pencere uzunlugu
+    aligned   pencereler HIKAYE BASINA hizalansin mi.  Duz kesimde
+              tahminlerin %40,8'i hikayesinin basini GORMUYORDU (olculdu).
+    Gerisi build_cache'in."""
+    vocab, A, _ = build_cache(root, limit, limit_mb, version, workers, log)
+    token_index = {a: i for i, a in enumerate(vocab)}
+    rng = np.random.default_rng(seed)
+    eos_id = token_index[EOS_TOKEN] if aligned else None
+    TRAIN, TRAIN_MASK = make_windows(A["train"], T, rng, eos_id, token_index[PAD_TOKEN])
+    HELDOUT, HELDOUT_MASK = make_windows(A["valid"], T, rng, eos_id, token_index[PAD_TOKEN])
+    log("  pencere T=%d   %s   egitim %s   dogrulama %s"
+        % (T, "HER HIKAYE BIR PENCERE, <eos> ... <eos>" if aligned
+           else "duz kesim", "{:,}".format(len(TRAIN)), "{:,}".format(len(HELDOUT))))
+    log("  dolgu %%%.1f   etkin is %%%.1f   (L+2 > T olan hikayeler atildi)"
+        % (100 * (1 - TRAIN_MASK.mean()), 100 * TRAIN_MASK.mean()))
+    return vocab, (TRAIN, TRAIN_MASK), (HELDOUT, HELDOUT_MASK)
 
-    Uretilen akis onbellege yazilir; ikinci cagri OKUR (kural 9).
-    Veri izini train_17 egitim tensorunden hesaplayip pakete yazar."""
+
+def build_cache(root: str, limit: int = 4000, limit_mb=None, version: str = DATA_VERSION, workers: int = 1,
+                log=print):
+    """Sozluk ve akislar -> (vocab, {"train": akis, "valid": akis}, etiket).
+
+    root      TinyStories dosyalarinin durdugu klasor (Drive)
+    limit     sozluk kirpmasi (+ ozel token'lar)
+    limit_mb  yalniz ilk N MB (deneme icin).  None -> hepsi.
+    version   onbellek surumu.  DATA_VERSION disindaki (eski) surum YALNIZ onbellekten okunur: bugunku kod onu uretmez.
+    workers   uretimde surec sayisi (onbellek yoksa); sonuc ayni, yalniz hiz.
+
+    Uretilen akis onbellege yazilir; ikinci cagri OKUR (kural 9)."""
     cache_dir = os.path.join(root, "onbellek")
     os.makedirs(cache_dir, exist_ok=True)
     path = {b: os.path.join(root, "TinyStoriesV2-GPT4-%s.txt" % b)
            for b in ("train", "valid")}
-    # SURUM onbellek anahtarinda: yapi degisince eski onbellek SESSIZCE
-    # kullanilmasin.  en_mb'li akislar v3: eskisi (v2) iki kati okumustu.
-    tag = ("tam_n%d_v2" % limit if limit_mb is None
-              else "%dmb_n%d_v3" % (limit_mb, limit))
+    # SURUM onbellek anahtarinda: yapi degisince eski onbellek SESSIZCE kullanilmasin.
+    # v2: <nl>'siz, suzgecsiz (tam); en_mb'li eski akislar v3.  v4: bugunku isleme.
+    tag = ("tam_n%d_%s" % (limit, version) if limit_mb is None
+           else "%dmb_n%d_%s" % (limit_mb, limit, version))
 
     vocab_file = os.path.join(cache_dir, "sozluk_%s.npy" % tag)
+    files = [vocab_file] + [os.path.join(cache_dir, "akis_%s_%s.npy" % (b, tag)) for b in ("train", "valid")]
+    if version != DATA_VERSION and not all(os.path.exists(f) for f in files):
+        raise FileNotFoundError("surum %s onbellekte eksik (%s); bugunku kod yalniz %s uretir"
+                                % (version, tag, DATA_VERSION))
     if os.path.exists(vocab_file):
         vocab = to_general_eos(list(np.load(vocab_file, allow_pickle=True)))
         log("  sozluk  onbellekten  %s birim" % "{:,}".format(len(vocab)))
     else:
-        vocab, _ = build_vocab(path["train"], limit, limit_mb=limit_mb, log=log)
+        vocab, _ = build_vocab(path["train"], limit, limit_mb=limit_mb, workers=workers, log=log)
         np.save(vocab_file, np.array(vocab, dtype=object))
     token_index = {a: i for i, a in enumerate(vocab)}
 
@@ -234,19 +373,9 @@ def build(root: str, T: int = 128, limit: int = 4000, limit_mb=None, seed: int =
             log("  %-6s onbellekten  %s jeton" % (b, "{:,}".format(len(A[b]))))
         else:
             A[b] = build_stream(path[b], token_index, limit_mb=limit_mb if b == "train" else None,
-                        log=log)
+                                workers=workers, log=log)
             np.save(p, A[b])
-
-    rng = np.random.default_rng(seed)
-    eos_id = token_index[EOS_TOKEN] if aligned else None
-    TRAIN, TRAIN_MASK = make_windows(A["train"], T, rng, eos_id, token_index[PAD_TOKEN])
-    HELDOUT, HELDOUT_MASK = make_windows(A["valid"], T, rng, eos_id, token_index[PAD_TOKEN])
-    log("  pencere T=%d   %s   egitim %s   dogrulama %s"
-        % (T, "HER HIKAYE BIR PENCERE, <eos> ... <eos>" if aligned
-           else "duz kesim", "{:,}".format(len(TRAIN)), "{:,}".format(len(HELDOUT))))
-    log("  dolgu %%%.1f   etkin is %%%.1f   (L+2 > T olan hikayeler atildi)"
-        % (100 * (1 - TRAIN_MASK.mean()), 100 * TRAIN_MASK.mean()))
-    return vocab, (TRAIN, TRAIN_MASK), (HELDOUT, HELDOUT_MASK)
+    return vocab, A, tag
 
 
 # ============================================================
@@ -420,7 +549,7 @@ def generate(m, prompt, vocab, token_index, steps=120, device="cuda", temperatur
     top_p: sicaklik > 0 iken yalniz olasilik toplami top_p'ye ulasan en olasi kelimelerden secilir."""
     is_word = torch.tensor([any(ch.isalpha() for ch in a) for a in vocab], device=device)
     g = None if seed is None else torch.Generator(device=device).manual_seed(seed)
-    w = [token_index[EOS_TOKEN]] + [token_index.get(t, token_index[UNK_TOKEN]) for t in TOKEN_RE.findall(prompt.translate(QUOTE_MAP))]
+    w = [token_index[EOS_TOKEN]] + [token_index.get(t, token_index[UNK_TOKEN]) for t in tokenize(normalize(prompt))]
     n_prompt = len(w)
     y = torch.tensor([token_index[t] for t in banned], dtype=torch.long, device=device)
     with torch.no_grad():
@@ -453,7 +582,7 @@ def generate(m, prompt, vocab, token_index, steps=120, device="cuda", temperatur
 def probe_prompts(prompts, token_index, k=PROBE_PROMPTS):
     """Sabit istemler: kelimelerinin hepsi sozlukte olan ilk k istem + isim istemi.  <bilinmeyen> uretimde
     yasak; istemdeki bir isim <bilinmeyen> ise model onu hic yazamaz (CMNORM t4000 okumasi, 25 Eylul)."""
-    clean = [s for s in prompts if all(t in token_index for t in TOKEN_RE.findall(s.translate(QUOTE_MAP)))]
+    clean = [s for s in prompts if all(t in token_index for t in tokenize(normalize(s)))]
     return clean[:k] + [NAME_PROMPT]
 
 
