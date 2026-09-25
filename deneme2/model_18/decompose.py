@@ -43,37 +43,42 @@ def forward_parts(m, tokens):
     """tokens (T,) -> butun konumlarin parcalari:
          C (T,d); layers: katman basina ids, w (T,k) secilen vektorler ve agirliklari, delta (T,d)
          A (H,T,T) dikkat; ov (H,T,d) bas h'nin konum j'den getirdigi (dikkat agirligindan once); attn (T,d)
-         C_m (T,d); score (T,n) ham puan; logp (T,n) defterle karisik log p
-         gate (T,); cache_j, cache_next, cache_w (T,k): defterin konumlari, getirdigi kelime, agirligi
-       Parcalarin toplami modelin C_m'si, logp == scoreboard (tests: t_decompose)."""
+         C_m (T,d) modelin kendi durumu; C_m_parts (T,d) parcalarin toplami; score (T,n) ham puan; logp (T,n) defterle
+         karisik log p; gate (T,); cache_j, cache_next, cache_w (T,k): defterin konumlari, getirdigi kelime, agirligi
+       Durum modelin KENDI hesabiyla ilerler (layer, attn, direct_part ayni cagri, ayni sira): secimler birebir onunki.
+       Kendi yeniden toplamimla ilerleseydim kayan nokta farki top-k'da esite yakin iki vektoru degistirebiliyordu
+       (TS_PV_V4_NOSELF t4000, 25 Eylul: verify durdurdu).  Parcalar yanda hesaplanir; toplamlari C_m'ye esit
+       (verify, tests: t_decompose)."""
     assert supported(m), "decompose tepe ayari icin: relative zincir, C_content, C_M_NORM"
     tok, T = tokens[None], tokens.shape[0]
-    C = m.C(tok)[0]
-    C_m, R = C, {"C": C, "layers": []}
+    C = m.C(tok)                                        # (1,T,d): modelin _layers'i gibi
+    C_m, R = C, {"C": C[0], "layers": []}
     for i, layer in enumerate(m.V):
         D_s2, ids = layer._distance(C_m, None).topk(layer.active, dim=-1, largest=False)
-        w = torch.softmax(-D_s2 * layer.S_v.exp(), -1)
-        delta = torch.einsum("tk,tkd->td", w, (layer.finish - layer.start)[ids])
-        R["layers"].append({"ids": ids, "w": w, "delta": delta})
-        C_m = C_m + delta
+        w = torch.softmax(-D_s2 * layer.S_v.exp(), -1)[0]
+        delta = torch.einsum("tk,tkd->td", w, (layer.finish - layer.start)[ids[0]])
+        R["layers"].append({"ids": ids[0], "w": w, "delta": delta})
+        C_m = layer(C_m)[0]
         if m.attn is not None and i == m.attn_after:
             L = m.attn
-            A = L.weights(C[None], C_m[None])[0]
-            v = L.W_v(F.normalize(C_m if L.value == "state" else m.P[tokens], dim=-1)).view(T, L.heads, L.dim)
+            A = L.weights(C, C_m)[0]
+            v = L.W_v(F.normalize(C_m if L.value == "state" else m.P[tok], dim=-1))[0].view(T, L.heads, L.dim)
             ov = torch.einsum("dhk,jhk->hjd", L.W_o.weight.view(-1, L.heads, L.dim), v)
             R.update(A=A, ov=ov, attn=torch.einsum("htj,hjd->td", A, ov))
-            C_m = C_m + R["attn"]
+            C_m = L(C, C_m, m.P[tok] if L.value == "point" else None)
+    parts = R["C"] + sum(Ly["delta"] for Ly in R["layers"]) + R.get("attn", 0)
     if m.direct_chain != "all":                         # cikis zincirin dogrudan oyunu tasimaz (model_18.DIRECT_CHAIN)
-        R["direct"] = m.direct_part(C[None], tokens[None])[0]
-        C_m = C_m - R["direct"]
-    score = m.score(C_m[None])
-    R.update(C_m=C_m, score=score[0])
+        R["direct"] = m.direct_part(C, tok)[0]
+        C_m = C_m - R["direct"][None]
+        parts = parts - R["direct"]
+    score = m.score(C_m)
+    R.update(C_m=C_m[0], C_m_parts=parts, score=score[0])
     if m.cache is None:
         R["logp"] = torch.log_softmax(score[0], -1)
         return R
-    R["logp"] = m.cache(tok, C[None], C_m[None], score)[0]
-    gate, W_c, nxt = m.cache.parts(tok, C[None], C_m[None])
-    Cn, pos = F.normalize(C, dim=-1), torch.arange(T, device=tokens.device)
+    R["logp"] = m.cache(tok, C, C_m, score)[0]
+    gate, W_c, nxt = m.cache.parts(tok, C, C_m)
+    Cn, pos = F.normalize(C[0], dim=-1), torch.arange(T, device=tokens.device)
     sim = (Cn @ Cn.T).masked_fill(~(pos[None, :] < pos[:, None] - m.cache.skip), -2.0)
     R.update(gate=gate[0], cache_w=W_c[0], cache_next=nxt[0], cache_j=sim.topk(W_c.shape[-1], dim=-1).indices)
     return R
@@ -184,11 +189,11 @@ def greedy(m, prompt, vocab, token_index, steps=60, banned=BANNED, logp=None, fo
 
 @torch.no_grad()
 def verify(m, R, tokens, tol=1e-4):
-    """decompose modelin kendisiyle tutuyor mu: parcalarin toplami m'in C_m'si, log p'si m.scoreboard.  Tutmazsa DURUR --
+    """decompose modelin kendisiyle tutuyor mu: PARCALARIN toplami m'in C_m'si, log p'si m.scoreboard.  Tutmazsa DURUR --
     model_18'e yeni bir parca eklendiyse forward_parts'a da eklenmeli (bulgu koda aittir, kural 11)."""
     tok = tokens[None]
     C_m, logp = m.move(tok)[0][0], m.scoreboard(tok)[0]
-    dC = float((R["C_m"] - C_m).abs().max()) / (1 + float(C_m.abs().max()))
+    dC = float(torch.maximum((R["C_m"] - C_m).abs().max(), (R["C_m_parts"] - C_m).abs().max())) / (1 + float(C_m.abs().max()))
     dp = float((R["logp"] - logp).abs().max()) / (1 + float(logp.abs().max()))
     if not (dC < tol and dp < tol):
         raise AssertionError("decompose modelle tutmuyor: C_m farki %.1e, log p farki %.1e (goreli)" % (dC, dp))

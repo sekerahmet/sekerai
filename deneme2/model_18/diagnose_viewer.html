@@ -165,6 +165,7 @@ details.flowbox summary{cursor:pointer;color:var(--muted);font-size:12.5px}
       <span><i class="mini">aday</i>2. aday solda, 3. sağda</span>
       <span><i class="mini pick nar">dar</i>ikinci aday yakın: log p farkı &lt; 0,5</span>
       <span><i class="mini cp"></i>kopya: önceki ≥ 4 token'lık parçanın tekrarı</span>
+      <span><i class="sw" style="width:7px;height:7px;border-radius:50%;background:var(--copy)"></i>hikâye düğmesinde: döngü var (en az 8 ardışık sık döngü token'ı)</span>
       <span>olasılıklar üretimdeki gibi, &lt;dolgu&gt; ve &lt;bilinmeyen&gt; hariç · düğüme tıkla: decompose</span>
     </div>
     <details class="flowbox"><summary>Üretilen metin · bir kelimeye tıkla, ağaçta o adıma git</summary><div class="flow" id="flow"></div></details>
@@ -206,6 +207,16 @@ const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>
 let S = 0, K = null, MODE = 'b', VIEW = 'tree';
 try { const h = location.hash.slice(1); if (/^s\d+$/.test(h)) S = Math.min(+h.slice(1), DATA.length - 1); } catch(e) {}
 
+function loopInfo(s){
+  // dongu: en az 8 ardisik sik dongu token'i (kopya >= 4, kaynak <= 30); pay: sik dongu token'larinin orani
+  let run = 0, best = 0, tight = 0;
+  for (const r of s.rows){
+    const t = r.copy >= 4 && r.period && r.period <= 30;
+    if (t){ run++; tight++; best = Math.max(best, run); } else run = 0;
+  }
+  return {loop: best >= 8, share: s.rows.length ? tight / s.rows.length : 0};
+}
+
 function picker(){
   const nav = document.getElementById('picker'); nav.innerHTML = '';
   const models = [...new Set(DATA.map(s => s.model))];
@@ -216,7 +227,8 @@ function picker(){
       if (s.model !== m) return;
       const b = document.createElement('button'); b.className = 'chip'; b.type = 'button';
       b.setAttribute('aria-pressed', i === S);
-      b.innerHTML = esc(s.label.replace('ornek', 'örnek')) + (s.runs.length ? '<i class="dot" title="kopya döngüsü var"></i>' : '');
+      const li = loopInfo(s);
+      b.innerHTML = esc(s.label.replace('ornek', 'örnek')) + (li.loop ? '<i class="dot" title="döngü var: sık döngü payı %' + Math.round(100 * li.share) + '"></i>' : '');
       b.onclick = () => { S = i; K = null; try { history.replaceState(null, '', '#s' + i); } catch(e) {} render(); };
       g.appendChild(b);
     });
@@ -359,7 +371,8 @@ function treeView(){
   const s = DATA[S];
   document.getElementById('t-title').textContent = s.model + ' · ' + s.label.replace('ornek', 'örnek');
   const forks = s.rows.filter(r => r.margin < 0.5).length, cp = s.rows.filter(r => r.copy >= 4).length;
-  document.getElementById('t-meta').innerHTML = '<div>' + s.rows.length + ' adım · dar seçim: <b>' + forks + '</b> · kopya içinde: <b>' + cp + '</b></div>';
+  const li = loopInfo(s);
+  document.getElementById('t-meta').innerHTML = '<div>' + s.rows.length + ' adım · dar seçim: <b>' + forks + '</b> · kopya içinde: <b>' + cp + '</b> · sık döngü payı: <b>%' + Math.round(100 * li.share) + '</b>' + (li.loop ? ' · <b>döngü var</b>' : '') + '</div>';
   const flow = document.getElementById('flow'); flow.innerHTML = '';
   let inQuote = s.tokens.slice(1, s.n_prompt).filter(w => w === '"').length % 2 === 1, prev = null;
   s.rows.forEach((r, k) => {
