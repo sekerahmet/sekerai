@@ -10,7 +10,8 @@
     p         (1 - gate) softmax(puan) + gate p_defter
 
 Yeni parcalar (embed, readout, chain_sim, distance, ikinci attention) sifir etkiyle ve AYRI bir ureteçten
-baslar: hepsi kapaliyken model_19'un kendi zemini, acikken adim 0'da zeminle ayni puan (TASARIM_19 Oe4).
+baslar: acikken adim 0'da zeminle ayni puan (TASARIM_19 Oe4).  VARSAYILAN ZEMIN: yeni parca yalniz acikca
+istenince acilir (model denemesi zeminden tek degisiklik).
 """
 import math
 
@@ -23,9 +24,11 @@ D_CONTENT = 512        # icerik yarisi: kaydirmasiz, kelime basina ogrenilen son
 VECTORS = 256          # katman basina hareket
 ACTIVE = 8             # her noktada aktif hareket (yone gore top-k)
 LAYERS = 4
-ATTN_AFTER = (0, 2)    # attention bu katmanlardan sonra; ikincisi yeni parca (Oe13)
+ATTN_AFTER = (0,)      # attention bu katmanlardan sonra; ikinci attention yeni parca: (0, 2) (Oe13)
 ATTN_HEADS = 4
 ATTN_DIM = 64
+# En uzun dizi.  Modelin konum siniri DEGIL (goreli zincirin konum tablosu yok): (T,T) zincir, attention ve defter
+# belleğine karsi koruma; uretim de bu boyda durur.
 T_MAX = 512
 LAM = 0.7              # sira yarisinin sonmesi
 LAM_W_INIT = 0.9       # icerik yarisinin sonme baslangici (kelime x boyut)
@@ -184,9 +187,11 @@ class Ledger(nn.Module):
         sim = q @ Cn.transpose(1, 2)
         pos = torch.arange(T, device=C.device)
         allowed = pos[None, :] < pos[:, None] - self.skip                # j < t - skip
-        W_c = torch.softmax((sim * self.S_c.exp()).masked_fill(~allowed, -1e4), -1) * allowed
+        # gecersiz j dtype'in en kucugu: S_c ne kadar buyurse buyusun gercek komsunun altinda kalir
+        logits = (sim * self.S_c.exp()).masked_fill(~allowed, torch.finfo(sim.dtype).min)
+        W_c = torch.softmax(logits, -1) * allowed
         valid = allowed.any(-1).expand(C.shape[0], T)
-        sim_max = torch.where(valid, sim.masked_fill(~allowed, -1.0).max(-1).values, torch.zeros(()))
+        sim_max = torch.where(valid, sim.masked_fill(~allowed, -1.0).max(-1).values, sim.new_zeros(()))
         return W_c, sim_max, valid
 
     def gate_inputs(self, C_m, sim_max):
@@ -197,15 +202,25 @@ class Ledger(nn.Module):
         a, b = self.gate_inputs(C_m, sim_max)
         return torch.sigmoid(a + b + self.gate_0) * valid
 
+    def log_gates(self, C_m, sim_max, valid):
+        """-> (log(1 - gate), log gate), log uzayinda: gate 1'e doyunca log1p(-gate)'in turevi NaN olurdu."""
+        a, b = self.gate_inputs(C_m, sim_max)
+        x = a + b + self.gate_0
+        return (torch.where(valid, F.logsigmoid(-x), x.new_zeros(())),
+                torch.where(valid, F.logsigmoid(x), x.new_full((), -float("inf"))))
+
+    def mixed_logp(self, log_model, p_cache, log_1mg, log_g):
+        """log[(1 - gate) p_model + gate p_defter]."""
+        return torch.logaddexp(log_1mg + log_model, log_g + torch.log(p_cache + 1e-12))
+
     def mix(self, tokens, C, C_m, scores):
         """Tam tablo: log p (B,T,n) = log[(1 - gate) softmax(scores) + gate p_defter]."""
         W_c, sim_max, valid = self.neighbors(C)
         T = tokens.shape[1]
         nxt = torch.roll(tokens, -1, 1)[:, None, :].expand(-1, T, -1)
         p_cache = torch.zeros_like(scores).scatter_add_(-1, nxt, W_c)
-        gate = self.gate(C_m, sim_max, valid).unsqueeze(-1)
-        return torch.logaddexp(torch.log1p(-gate) + torch.log_softmax(scores, -1),
-                               torch.log(gate + 1e-12) + torch.log(p_cache + 1e-12))
+        log_1mg, log_g = self.log_gates(C_m, sim_max, valid)
+        return self.mixed_logp(torch.log_softmax(scores, -1), p_cache, log_1mg.unsqueeze(-1), log_g.unsqueeze(-1))
 
 
 class PointRelation(nn.Module):
@@ -216,10 +231,10 @@ class PointRelation(nn.Module):
                  attn_after=ATTN_AFTER, attn_heads=ATTN_HEADS, attn_dim=ATTN_DIM, t_max=T_MAX, lam=LAM,
                  lam_w_init=LAM_W_INIT, beta_w_init=BETA_W_INIT, start_norm=START_NORM, s_v_init=S_V_INIT,
                  load_balance=LOAD_BALANCE, ledger=True, cache_skip=CACHE_SKIP, s_c_init=S_C_INIT,
-                 gate_0_init=GATE_0_INIT, rank=RANK, embed=True, readout=True, chain_sim=True, distance=True,
+                 gate_0_init=GATE_0_INIT, rank=RANK, embed=False, readout=False, chain_sim=False, distance=False,
                  seed=0):
         """Yeni parcalar: embed (E), readout (R_PC), chain_sim (R_CC), distance (mesafe egilimi), attn_after'in
-        ilkinden sonrakiler (ikinci attention).  Hepsi kapali: zemin."""
+        ilkinden sonrakiler (ikinci attention).  Varsayilan: hepsi kapali, zemin."""
         super().__init__()
         attn_after = tuple(sorted(int(i) for i in attn_after))
         assert all(0 <= i < layers for i in attn_after), (attn_after, layers)
@@ -286,7 +301,7 @@ class PointRelation(nn.Module):
 
     def chain(self, tokens):
         """tokens (B,T) -> C (B,T,d) = [sira | icerik].  Nedensel: C_t yalniz <= t'yi toplar."""
-        assert tokens.shape[1] <= self.t_max, "dizi t_max'tan uzun"
+        assert tokens.shape[1] <= self.t_max, "dizi t_max'tan uzun (bellek korumasi; konum siniri degil)"
         x = self.embed(tokens)
         return torch.cat([self._order(x[..., :self.d_order]), self._content(tokens, x[..., self.d_order:])], -1)
 
@@ -302,7 +317,7 @@ class PointRelation(nn.Module):
         """sum_(i<=t) lam^(t-i) terms_i, (T,T) alt ucgen carpanla (lam^-t'li cumsum 512'de tasar)."""
         age = torch.arange(terms.shape[1], device=terms.device)
         age = age[:, None] - age[None, :]
-        decay = torch.where(age >= 0, self.lam ** age.clamp(min=0).float(), torch.zeros(()))
+        decay = torch.where(age >= 0, self.lam ** age.clamp(min=0).float(), terms.new_zeros((), dtype=torch.float))
         return torch.einsum("ti,bid->btd", decay.to(terms.dtype), terms)
 
     def lam_beta(self, tokens):
@@ -345,11 +360,11 @@ class PointRelation(nn.Module):
         return z if self.readout is None else z + self.readout(C)
 
     def scoreboard(self, tokens, targets_mask=None):
-        """tokens (B,T) -> (B,T,n): her konumda SONRAKI token.  Defter varsa log p (normalize)."""
+        """tokens (B,T) -> (B,T,n): her konumda SONRAKI token'in log p'si (defterli ya da deftersiz, hep normalize)."""
         C = self.chain(tokens)
         C_m = self._layers(C)[0]
         scores = self.point(C_m, C) @ self.P.T
-        return scores if self.ledger is None else self.ledger.mix(tokens, C, C_m, scores)
+        return torch.log_softmax(scores, -1) if self.ledger is None else self.ledger.mix(tokens, C, C_m, scores)
 
     def loss(self, tokens, targets_mask=None, parts=False, rows=None):
         """SONRAKI TOKEN: konum j, j+1'i tahmin eder; targets_mask verilirse yalniz isaretli hedefler.
@@ -377,10 +392,9 @@ class PointRelation(nn.Module):
             W_c, sim_max, valid = self.ledger.neighbors(C)
             nxt = torch.roll(tokens, -1, 1)                                  # nxt_j = w_(j+1); t'nin hedefi nxt_t
             p_cache = pick((W_c * (nxt[:, None, :] == nxt[:, :, None])).sum(-1))
-            gate = self.ledger.gate(C_m, pick(sim_max), pick(valid))
+            log_1mg, log_g = self.ledger.log_gates(C_m, pick(sim_max), pick(valid))
             log_model = s.gather(-1, target[:, None])[:, 0] - s.logsumexp(-1)
-            nll = -torch.logaddexp(torch.log1p(-gate) + log_model,
-                                   torch.log(gate + 1e-12) + torch.log(p_cache + 1e-12))
+            nll = -self.ledger.mixed_logp(log_model, p_cache, log_1mg, log_g)
         w = w.to(nll.dtype)
         nll = (nll * w).sum() / w.sum()
         loss = nll + self.load_balance * self._balance(P, counted, w) if balanced else nll

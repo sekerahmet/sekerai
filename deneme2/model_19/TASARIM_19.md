@@ -219,6 +219,30 @@ Parametre:
 - Matematik (V = 13, D = 128): ΔE 1.664, R_PC 16.384, R_CC 16.384, m_h baş başına 1.
 - Hikâye (V = 8004, D = 1024 ise, r = 256): ΔE 2.311.168, R_PC 524.288, R_CC 524.288.
 
+## Eğitim (kabul edildi)
+
+Kullanıcı: *"doğru eğitim doğru sonuç verir"* ve *"Evet eğitim kısmı onaylıyorum ama çok belirgin bir arıza varsa tek
+tohum"*.
+
+| karar | değer |
+|---|---|
+| hedef | sonraki token; matematikte kayıp yalnız cevap rakamları ve EOS'ta, hikâyede bütün token'larda |
+| optimizer | Adam, weight decay yok |
+| LR programı | sabit + son %20 cosine soğutma; ısınma ve taban Aşama 0'da seçilir (`train_19.lr_at`) |
+| yeni parçalar | sıfır etkiyle başlar; boyları sağlık satırında izlenir (Ö6), gerekirse ayrı LR |
+| bütçe (matematik) | batch 4096, 20.000 adım (kural 1'in ilk sınırı) |
+| tohum | kol başına 3; tohum 0'da belirgin arıza varsa tek tohum |
+| karar | tutulan sorularda birebir doğru; kurallar koşudan önce `belge/onkayit/model_19.md`'de |
+| iki tür deneme | ayrı izlenir. **Eğitim denemesi** (`*_TRAIN_*`) yalnız tarifi değiştirir, model = zemin. **Model denemesi** (`*_ARCH_*`) yalnız modeli değiştirir, tarif sabit. İkisini birden değiştiren koşu başlamaz; tür pakette ve günlükte. Kullanıcı: *"model içinde denediklerimiz ve eğitimde denediklerimiz ayrı şekilde takip etmeliyiz"* |
+
+**Aşamalar:**
+1. **Aşama 0: tarif.** Yalnız zemin, tohum 0. LR tepesi 0,001 / 0,002 / 0,004 / 0,01; seçilen LR ile ısınma ve 0,0001
+   tabanı.
+2. **Aşama 1: kollar.** Tarif sabit: zemin, +E, +R_PC, +mesafe eğilimi, +ikinci attention.
+3. **Aşama 2: hikâye.** Önce tarifin zeminde doğrulanması, sonra kollar ve R_CC. Döngü için eğitim tarafında bir aday
+   sonraya bırakıldı: DITTO (Xu 2022, klasörde): *"the model learns to penalize probabilities of sentence-level
+   repetitions from pseudo repetitive data"*.
+
 ## Transformer ile karşılaştırma: avantajlar ve dezavantajlar
 
 Her satırda dayanağın türü yazılı:

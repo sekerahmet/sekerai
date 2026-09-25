@@ -1,0 +1,17 @@
+{
+  "ebeveyn": "model_18",
+  "not": "Kullanici, 25 Eylul: 'model 18 bizi bağlayan birşey değil' ve 'yeni birşey yazıyoruz ama herşeyi sıfırdan yazmayalım model 18 de ortak ise kullanabiliriz'; dosya adlari _19 ekli ('bir sonraki ile ayrışabilsin'). model_19 SIFIRDAN yazilan PointRelation; ebeveynden yalniz secilmis yol tasindi, denenip birakilmis secenekler tasinmadi.",
+  "beyan": {
+    "model_19.py": "PointRelation SIFIRDAN yazildi (TASARIM_19.md): E, R_PC, R_CC, iki attention, mesafe egilimi. Ebeveynin mutlak zinciri, uzaklikla secimi, Q oklari, direct_chain, kareli puan tablosu, content_scalar ve CM bilerek TASINMADI.",
+    "data.py": "data_mat_19.py olarak AYNEN kopyalandi (kullanici: 'data_mat_19 olarak kopyala').",
+    "data_stories.py": "data_stories_19.py olarak AYNEN kopyalandi.",
+    "decompose.py": "decompose_19.py olarak yeniden yazildi: parcalar model_19'a gore (E'li zincir, iki attention, R_PC, R_CC'li defter). logp_cut ve supported TASINMADI: model_18'in mudahale ve ayar kapisi.",
+    "diagnose.py": "diagnose_19.py olarak tasindi: detail/summary yeni parcalarla; matematik istem seti, --prompts eklendi; gpu_same (sonda metni kiyasi) TASINMADI.",
+    "konus.py": "TASINMADI: okuma diagnose_19 --read ile.",
+    "konus.bat": "TASINMADI: konus.py'nin kisayolu.",
+    "tests.py": "tests_19.py olarak yeniden yazildi: model, decompose, diagnose ve egitim kapilari model_19'a gore; ebeveynin PV secenek kapilari (zincir turleri, Q, direct_chain, eski paketler) o seceneklerle birlikte dustu.",
+    "train.py": "train_19.py olarak tasindi: model ayarlari config() ile pakete, MUST_MATCH listesi yerine config esitligi; isinma eklendi; olcut saglik vermezse model.health egitim sondasinda; BEFORE_FIELD/SWITCHED ve eski paket uyumlulugu TASINMADI."
+  },
+  "satir": {"data.py": 1, "data_stories.py": 1, "decompose.py": 1, "diagnose.py": 1, "konus.bat": 1, "konus.py": 1,
+            "model_19.py": 576, "tests.py": 1, "train.py": 1}
+}

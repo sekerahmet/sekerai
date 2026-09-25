@@ -60,6 +60,13 @@ def t_model():
             d = float((PointRelation(**BASE, **OFF, rank=rank).scoreboard(tokens)
                        - PointRelation(**BASE, **ON, rank=rank).scoreboard(tokens)).abs().max())
             check("model: rank %s, yeni parcalar acik, adim 0'da zeminle ayni puan (Oe4)" % rank, d < 1e-5, "fark %.1e" % d)
+    d = PointRelation(**BASE, rank=8)
+    zemin = (d.embed_delta is None and d.readout is None and d.ledger.relation is None and len(d.attns) == 1
+             and d.attns[0].m is None and d.config() == PointRelation(**BASE, **OFF, rank=8).config())
+    with torch.no_grad():
+        nl = PointRelation(**BASE, **OFF, rank=8, ledger=False).scoreboard(tokens)
+    check("model: varsayilan zemin; scoreboard deftersiz de log p (normalize)",
+          zemin and float(nl.logsumexp(-1).abs().max()) < 1e-5)
     a = PointRelation(**BASE, **dict(OFF, embed=True), rank=8)
     b = PointRelation(**BASE, **ON, rank=8)
     check("model: bir parcanin baslangici digerlerinin acik olmasina bagli degil",
@@ -89,6 +96,21 @@ def t_model():
     need = {"vec_each_0", "norm_in_3", "gate", "gate_dir", "gate_sim", "ledger_eff", "attn0_m", "attn1_dist",
             "embed_shift", "readout", "chain_sim", "pred_distinct"}
     check("model: saglik anahtarlari (Oe3, Oe6, Oe9, Oe15)", need <= set(h), ", ".join(sorted(need - set(h))))
+    # gate 1'e doyunca (logit > ~17, fp32'de sigmoid = 1) gradyan NaN olmamali; S_c cok buyuse de defter agirliklari 1'e toplanmali
+    x = trained(BASE, rank=8, **ON)
+    with torch.no_grad():
+        x.ledger.gate_0.fill_(40.0)
+        x.ledger.S_c.fill_(12.0)
+    x.zero_grad()
+    x.loss(tokens, mask).backward()
+    finite = all(torch.isfinite(p.grad).all() for p in x.parameters() if p.grad is not None)
+    with torch.no_grad():
+        W_c, _, valid = x.ledger.neighbors(x.chain(tokens))
+        rows = W_c.sum(-1)
+        sums = bool(((rows[valid] - 1).abs() < 1e-5).all()) and bool((rows[~valid] == 0).all())
+        lp = x.scoreboard(tokens)
+    check("model: gate doyunca gradyan sonlu; S_c buyukken defter agirliklari 1'e toplaniyor; tablo sonlu",
+          finite and sums and bool(torch.isfinite(lp).all()))
 
 
 # --- 2. DECOMPOSE: parcalarin toplami modelin kendisi; puan farki parcalara TAM ayrilir; model degisince durur
@@ -181,18 +203,19 @@ def t_train():
     targets = torch.zeros_like(filled)
     targets[:, 9:] = True
     metric = lambda m, side, full=False: {"accuracy": 0.0, "ce": 1.0, "diag": {}}
-    cfg = dict(d_order=16, d_content=16, vectors=8, active=2, layers=4, attn_heads=2, attn_dim=4, t_max=40, rank=8)
+    cfg = dict(d_order=16, d_content=16, vectors=8, active=2, layers=4, attn_heads=2, attn_dim=4, t_max=40, rank=8, **ON)
     root = tempfile.mkdtemp()
     try:
-        def go(name, steps, resume=None, **kw):
+        def go(name, steps, resume=None, extra=None, **kw):
             run = TR.RUNS[name] = TR.Run(name, root)
             TR._run(run, (q, filled, targets), len(vocab), metric, "cpu", 2e-3, steps, 0, 8, 4, 4, weights_every=4,
-                    resume=resume, vocab=vocab, model_kw=dict(cfg, **kw))
+                    resume=resume, vocab=vocab, extra=extra, model_kw=dict(cfg, **kw))
             return torch.load(f"{root}/{name}/t{steps}.pt", weights_only=False)
-        full = go("A", 8)
+        full = go("A", 8, extra=dict(trial="egitim", changed={"lr": 0.002}))
         files = set(os.listdir(f"{root}/A/decompose"))
         log = open(f"{root}/A/gunluk.txt", encoding="utf-8").read()
-        written = {"t4_math.json", "t8_math.json", "t8_math.html"} <= files and "decompose t8:" in log
+        written = ({"t4_math.json", "t8_math.json", "t8_math.html"} <= files and "decompose t8:" in log
+                   and "DENEME EGITIM   degisen {'lr': 0.002}" in log and full["trial"] == "egitim")
         health = "saglik  hareket" in log and "yeni |dE|" in log
         go("B", 4)
         resumed = go("B", 8, resume=f"{root}/B/t4.pt")
@@ -206,10 +229,16 @@ def t_train():
             refused = True
     finally:
         shutil.rmtree(root, ignore_errors=True)
-    check("egitim: tam yedekte decompose (matematik istemleri) + gunlukte satir", written, "")
+    check("egitim: tam yedekte decompose (matematik istemleri) + gunlukte satir; deneme turu pakette ve gunlukte", written)
     check("egitim: olcut saglik vermese de saglik satiri (yeni parcalarin boyu)", health)
     check("egitim: surdurme (4 + 4) == kesintisiz 8 adim", diff == 0.0, "agirlik farki %.1e" % diff)
     check("egitim: zemin ayariyla kosu; config farkliysa surdurme BASLAMAZ", base_ok and refused)
+    f = lambda s, **k: TR.lr_at(s, 2e-3, 100, **k)
+    plan = (abs(f(0, warmup=10) - 2e-4) < 1e-12 and abs(f(9, warmup=10) - 2e-3) < 1e-12 and f(50) == 2e-3
+            and abs(f(80, decay_start=80) - 2e-3) < 1e-12 and abs(f(100, decay_start=80) - 2e-4) < 1e-12
+            and abs(f(100, decay_start=80, decay_floor=0.05) - 1e-4) < 1e-12)
+    check("egitim: LR plani -- isinma dogrusal, sabit, sogutma lr -> lr x taban", plan,
+          "adim 0 %.1e, 9 %.1e, 100 %.1e" % (f(0, warmup=10), f(9, warmup=10), f(100, decay_start=80)))
 
 
 if __name__ == "__main__":

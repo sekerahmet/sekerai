@@ -124,10 +124,22 @@ def _snapshot(model, optimizer, sampler, record):
                 rng=torch.get_rng_state(), sampler_rng=sampler.get_state())
 
 
+def lr_at(step, lr, steps, warmup=0, decay_start=None, decay_floor=0.1):
+    """Adimin LR'si: ilk `warmup` adimda dogrusal isinma (lr (adim+1)/warmup), sonra sabit; decay_start'tan steps'e
+    cosine sogutma lr -> lr x decay_floor."""
+    w = min(1.0, (step + 1) / warmup) if warmup else 1.0
+    if decay_start is None:
+        return lr * w
+    k = min(1.0, max(0.0, (step - decay_start) / max(1, steps - decay_start)))
+    return lr * w * (decay_floor + (1 - decay_floor) * 0.5 * (1 + math.cos(math.pi * k)))
+
+
 def _check_resume(package, fixed):
-    """Surdurme paketi bu cagriyla AYNI kosu mu?  Degilse kosu BASLAMAZ.  LR plani: planin LR'ye dokundugu
-    paket (adim > decay_start) ayni planla surer; dokunmadigindan yeni planla dal acilabilir."""
+    """Surdurme paketi bu cagriyla AYNI kosu mu?  Degilse kosu BASLAMAZ.  Isinma birebir ayni olmali.  LR plani:
+    planin LR'ye dokundugu paket (adim > decay_start) ayni planla surer; dokunmadigindan yeni planla dal acilabilir."""
     diffs = [a for a in MUST_MATCH if package.get(a) is not None and fixed.get(a) is not None and package[a] != fixed[a]]
+    if package.get("warmup", 0) != fixed.get("warmup", 0):
+        diffs.append("warmup")
     if diffs:
         raise ValueError("surdurme paketi bu cagriyla uyusmuyor: " + ", ".join(diffs))
     plan = lambda k: (k.get("decay_start"), k.get("decay_end"), k.get("decay_floor"))
@@ -156,7 +168,7 @@ def _line(record, elapsed, mark=""):
             f"{record['heldout_acc']:9.4f}  {_ppl(record['heldout_ce'])}  "
             + "".join(f"{v:12.4f}" for v in record["heldout_diag"].values())
             + f"  {elapsed:6.0f}{mark}" + (f"  olcum {s['train'] + s['heldout']:.1f} sn" if s else "")
-            + (f"  lr {record['lr_now']:.2e}" if record.get("decay_start") is not None else ""))
+            + (f"  lr {record['lr_now']:.2e}" if record.get("decay_start") is not None or record.get("warmup") else ""))
 
 
 def _health_line(h, grads=None, timing=None):
@@ -198,7 +210,7 @@ def _note(run, record, elapsed, mark=""):
 
 
 def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch, eval_every, save_every, weights_every=100,
-         resume=None, compile=False, vocab=None, extra=None, decay_start=None, decay_floor=0.1, decompose=True,
+         resume=None, compile=False, vocab=None, extra=None, warmup=0, decay_start=None, decay_floor=0.1, decompose=True,
          model_kw=None):
     torch.manual_seed(seed)
     model = PointRelation(n_vocab, seed=seed, **(model_kw or {})).to(device)
@@ -214,7 +226,7 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch, eval_every,
     assert max_length <= model.t_max, f"dizi {max_length} token > t_max {model.t_max}"
     n_params = sum(p.numel() for p in model.parameters())
     fixed = dict(extra or {}, arch=model.arch, config=model.config(), n=n_vocab, lr=lr, seed=seed, batch=batch,
-                 T=max_length, n_params=n_params, compile=compile,
+                 T=max_length, n_params=n_params, compile=compile, warmup=int(warmup),
                  decay_start=None if decay_start is None else int(decay_start),
                  decay_end=None if decay_start is None else int(steps),
                  decay_floor=None if decay_start is None else float(decay_floor),
@@ -250,7 +262,10 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch, eval_every,
              f"parametre {n_params:,}")
     run.note(f"batch {batch}   epok = {n_questions / batch:,.0f} adim   veri izi {fixed['data_fingerprint']}   olcum her "
              f"{eval_every}   tam yedek her {save_every}   agirlik her {weights_every}   lr {lr}"
+             + (f"   ISINMA {warmup} adim" if warmup else "")
              + (f"   LR SOGUTMA cosine {decay_start} -> {steps}, taban lr x {decay_floor}" if decay_start is not None else ""))
+    if "trial" in fixed:     # egitim ve model denemeleri AYRI izlenir (kullanici, 25 Eylul)
+        run.note(f"DENEME {str(fixed['trial']).upper()}   degisen {fixed.get('changed')}")
     run.note("OLCUT: accuracy (train / heldout); kayip yalniz hedeflerde")
     run.flush()
     decomposed = set()
@@ -296,10 +311,8 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch, eval_every,
         full_save, weights_save = step % save_every == 0, step % weights_every == 0
         measure = step % eval_every == 0 or full_save or weights_save
         grads = _grad_norms(model) if measure else None
-        if decay_start is not None:
-            k = min(1.0, max(0.0, (step - decay_start) / max(1, steps - decay_start)))
-            for g in optimizer.param_groups:
-                g["lr"] = lr * (decay_floor + (1 - decay_floor) * 0.5 * (1 + math.cos(math.pi * k)))
+        for g in optimizer.param_groups:
+            g["lr"] = lr_at(step, lr, steps, warmup, decay_start, decay_floor)
         optimizer.step()
         last_step = step
         if measure:
@@ -395,16 +408,17 @@ def _run_safe(run, **settings):
 
 def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=None, extra=None, lr=LR, steps=20000,
           seed=0, batch=BATCH, eval_every=100, save_every=1000, weights_every=100, resume=None, compile=True, vocab=None,
-          decay_start=None, decay_floor=0.1, decompose=True, **model_kw):
+          warmup=0, decay_start=None, decay_floor=0.1, decompose=True, **model_kw):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
     data        (questions, filled_mask, targets_mask)
     metric      metric(model, "train"|"heldout", full=False) -> accuracy (ANA OLCUT), ce, diag (gunlukte sutun)
     model_kw    PointRelation'in ayarlari (d_order, d_content, embed, readout, chain_sim, distance, attn_after, rank ...);
-                verilmeyen model_19'un varsayilani.  Zemin: embed=False, readout=False, chain_sim=False, distance=False,
-                attn_after=(0,).
+                verilmeyen model_19'un varsayilani.  Varsayilan ZEMIN: yeni parcalar yalniz acikca verilince acilir
+                (embed=True, readout=True, chain_sim=True, distance=True, attn_after=(0, 2)).
     eval_every / save_every / weights_every   olcum, TAM yedek (t<adim>.pt, surdurme), agirlik (w<adim>.pt) araliklari
     resume      tam yedekten KALDIGI YERDEN (kural 1: uzatma surdurmedir); config, veri ya da plan tutmazsa BASLAMAZ
+    warmup      ilk kac adim dogrusal isinma (0: yok)
     decay_start LR sogutmasi (None: sabit): decay_start'tan steps'e cosine, lr'den lr x decay_floor'a
     decompose   her tam yedekte ve bitiste decompose_19 (varsayilan ACIK; egitimin yorungesine dokunmaz)"""
     old = RUNS.get(run_name)
@@ -421,7 +435,7 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
     run.thread = threading.Thread(target=_run_safe, args=(run,), daemon=True, kwargs=dict(
         data=data, n_vocab=n_vocab, metric=metric, device=device, lr=lr, steps=steps, seed=seed, batch=batch,
         eval_every=eval_every, save_every=save_every, weights_every=weights_every, resume=resume, compile=compile,
-        vocab=vocab, extra=extra, decay_start=decay_start, decay_floor=decay_floor, decompose=decompose,
+        vocab=vocab, extra=extra, warmup=warmup, decay_start=decay_start, decay_floor=decay_floor, decompose=decompose,
         model_kw=model_kw))
     run.thread.start()
     return f"{run_name} basladi" + (f"  ({os.path.basename(resume)}'den)" if resume else "")
