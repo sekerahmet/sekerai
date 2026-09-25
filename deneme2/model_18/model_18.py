@@ -55,18 +55,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# BELIRLENIMCI KOSU (model_17'den; olculmus gerekce orada).
-if not torch.cuda.is_available():
-    torch.use_deterministic_algorithms(True)
-    torch.set_num_threads(1)
-
-# TEPE = MODELIN SON YAPISI.  Kullanici, 24 Eylul: "bu yaptı modelin son yapısı olsun. ama farklı
-# değerler kullandığımızda bu ayrı bir yere yazarız".  Her kosunun degerleri defterindeki KOSU
-# satirinda ve kendi paketinde; tepeden farkli olan orada yazilir.
-# Kullanici, 24 Eylul (kendi koydugumuz kurallarin etrafinda dolasmayi birakip): FIKRIN KENDISI kalir
-# (P sabit noktalar, zincir C, vektor sozlugu, uzaklikla secim, defter); yolda koydugumuz UYGULAMA
-# KURALLARI yerine transformer ailesinin sinanmis cozumu: butun vektorler aktif (FFN / MoE), secimden
-# once normalize (pre-norm), ogrenilen solma (C_content), ogrenilen sorgu (Q).  "evet katılıyorum".
+# TEPE = EN IYI OLCULEN YAPI (grup 3'ten sonra, 25 Eylul).  Kullanici, 25 Eylul: "grup 4 için ben
+# belirledim ama en iyi ayarlara getirilmesi gerekiyor".  Kullanici, 24 Eylul: "farklı değerler
+# kullandığımızda bu ayrı bir yere yazarız" -- her kosunun tepeden farkli degeri defterdeki KOSU satirinda.
+# Onceki tepe (hepsi aktif + Q + butun gecmis; hic kosulmadi): belge/bulgu/model_18_hakem.md §6.
 #
 # Nokta uzayinin boyutu (dimension) D_SUM = D_ORDER + D_CONTENT; P, C, vektorler ve Q hep D_SUM.
 # Kullanici, 24 Eylul: "order 512 ve content 512 diye değerlere karar verdik ama sabit değil
@@ -76,19 +68,14 @@ D_ORDER = 512       # C_order'in boyutu: kaydirmali, sira
 D_CONTENT = 512     # C_content'in boyutu: kaydirmasiz, lam_w/beta_w ile solar (C_CONTENT acikken)
 D_SUM = D_ORDER + D_CONTENT
 VECTORS = 256  # layer basina vektor.  Kullanici: "V sayısı da 256 şimdilik"
-# Her C'de aktif vektor; gerisi pasif.  ACTIVE = VECTORS: nokta BUTUN vektorlerden gecer, agirliklar
-# softmax(-D^2 e^S_v) -- seyreklik dayatilmaz, S_v ile OGRENILIR.  Olculdu (CCACHE / SELECT, egitimsiz
-# okuma): top-8'de secilmeyen vektor gradyan almaz, derin katmanlarda 256'nin 120-230'u hic secilmiyor.
-# Kullanici, 24 Eylul: "bunu ben kodda bu etkisi olduğunu bilmeden yazdım ... bence hepsinden geçsin".
-ACTIVE = VECTORS
-# Aktif vektorler nasil secilir.  "distance": en yakin start (ham uzaklik).  "direction": katman 1'den
-# itibaren tasinmis nokta ve start'lar birim boya indirilir, en yakin ACI (katman 0 C'yi uzakliga gore).
-# Olculdu (CCACHE t10000, egitimsiz): tasinmis noktanin boyu (|C| 1,4 -> 14) secimi eziyor; derin
-# katmanlarda isin %90'ini 10 / 6 vektor yapiyor, C_m 1024 boyutun 40 yonunde.  "direction" ile ayni
-# vektorler: 17 / 12 vektor, C_m 113 yon.  Kullanici, 24 Eylul: "b'yi ekle, adı SELECT olsun".
-# "direction_all": katman 0 da yone gore.  Kayitli (ATTN t2000 ve t4000): olu vektorlerin hepsi katman 0'da
-# (21 / 0 / 0 / 0).  Hakem notu 1.3; kullanici, 25 Eylul: "grup 3 için colabda sırayla kurup başlatabilirsin".
-SELECT = "direction"
+# Her C'de aktif vektor (top-k); ACTIVE = VECTORS: hepsi, softmax(-D^2 e^S_v).  Olculen hep 8; hepsi aktif
+# yalniz uzaklik seciminde ve dengesiz kostu (DENSE).  Hepsi aktif + yon + denge KOSULMADI -- kullanici,
+# 24 Eylul: "bence hepsinden geçsin".
+ACTIVE = 8
+# Aktif vektorler nasil secilir.  "distance": en yakin start.  "direction": katman 1'den itibaren birim boyda
+# en yakin ACI (katman 0 uzaklikla).  "direction_all": katman 0 da yone gore.
+# Olculdu (DIR_ALL 4.000, ATTN'e karsi): +0,4 puan, olu vektor 21 -> 0 (hakem notu 1.3'un kurali tuttu).
+SELECT = "direction_all"
 LAYERS = 4     # Kullanici: "4 katman olsun"
 T_MAX = 512    # RM sayisi = en uzun dizi (TinyStories hikayelerinin %98,6'si sigar)
 # start'in baslangic boyu.  None: randn, boy ~sqrt(D_SUM) (MAT_* ve TS_PV_D1024 boyle kostu).
@@ -106,9 +93,10 @@ LAM = 0.7
 # Hesap (egitimsiz kNN, 1.500 hikaye depo, d 256, 24 Eylul): absolute lam 0,9 %13,3
 # (egitilmis LAM09 %14,8), relative lam 0,7 %34,8; hikayenin ortasinda %8,0 -> %31,0.
 CHAIN = "relative"
-C_CACHE = True      # hikayenin kendi gecmisinden kopya (CCache) + gate
-CACHE_TOPK = None   # defterden kac komsu (8: vektorlerdeki ACTIVE'in karsiligi).  None: butun gecmis
-                    # (tavan, 24 Eylul: hedefin 8'in disinda kaldigi %47'ye top-8'de gradyan ulasmaz)
+# Hikayenin kendi gecmisinden kopya (CCache) + gate.  Olculdu (NOCACHE 4.000): kapaliyken -0,25 puan,
+# geri cagirmada (acc_ar) -2,6 puan.
+C_CACHE = True
+CACHE_TOPK = 8      # defterden kac komsu.  None (butun gecmis) KOSULMADI
 # Son kac konum aranmaz.  Gerekce lam 1 zincirinden (ardisik C'ler cos 0,995); relative'de ardisik
 # C_order'lar neredeyse dik, C_content yakinligi geri getiriyor.  Deger taranmadi (yalniz 20: CCSKIP20).
 CACHE_SKIP = 3
@@ -122,8 +110,8 @@ S_P_INIT = 0.0      # ogrenilen S_p (SCORE_BY_VOCAB LEARNED): e^0 = 1'den baslar
 # Olculdu (CCACHE t10000): |C| 1,4 -> |C_m| 17, e^S_p ~2,8 -- model noktalardan UZAKLASARAK emin oluyor;
 # bu boy ara katmanlarda secimi eziyordu ve son katman ortak "guven hareketi" ogreniyordu.
 # Hoffer, Hubara, Soudry 2018 (1801.04540): sabit sinif noktalari + birim kure + ogrenilen tek olcek.
-# Kullanici, 24 Eylul: "C_M_NORM".
-C_M_NORM = False
+# Kullanici, 24 Eylul: "C_M_NORM".  Olculdu (CMNORM 4.000): +2,0 puan (0,4450 -> 0,4649).
+C_M_NORM = True
 # C_M_NORM acikken S_p'nin baslangici FORMULDEN (sozluk degisince kendisi ayarlanir): kusursuz eslesmede
 # (cos 1, digerleri ~0) dogru kelimeye C_M_NORM_P olasilik:  e^S_p = ln(p/(1-p) * (n-1)) / 2.
 # n 4003 -> S_p 1,66.  Olcek sabit 2,8 kalsaydi kayip tabani ppl 15,8 olurdu (NormFace sinirindan hesap).
@@ -136,10 +124,10 @@ C_M_NORM_P = 0.9
 # uzaklik 2-21 (start'lar merkeze yapisiyor).  0,01 MoE'nin standart degeri, bizde OLCULMEDI.
 # Kullanici, 24 Eylul: "load balancing ekle, select ile birlikte koş".
 LOAD_BALANCE = 0.01
-# Q: defteri arayan sorgu.  Kullanici, 24 Eylul: "query (Q_t)", "64 ok, 8 aktif".
-QUERY = True        # defteri Q ile ara.  False: Q = C
+# Q: defteri arayan sorgu.  Kullanici, 24 Eylul: "query (Q_t)", "64 ok, 8 aktif".  Q ile KOSULMADI.
+QUERY = False       # defteri Q ile ara.  False: Q = C
 QUERY_VECTORS = 64  # QUERY acikken: Q'yu tasiyan ok sayisi
-QUERY_ACTIVE = QUERY_VECTORS   # Q'nun oklari da hepsi aktif (ACTIVE ile ayni gerekce)
+QUERY_ACTIVE = QUERY_VECTORS   # QUERY acikken oklarin hepsi aktif
 QUERY_BY = "C_m"    # oklar neye en yakin secilir: "C_m" (modelin dusuncesi) ya da "C".  OLCULMEDI.
 # C_content.  Kullanici, 24 Eylul: "lam_w mantıklı beta_w mantıklı tam boyut olsun".
 LAM_W_INIT = 0.9    # lam_w'nin baslangici, her token her boyut.  OLCULMEDI.
@@ -152,7 +140,7 @@ CONTENT_CHUNK = 16
 # Attention (Gecmisten): defterin C'leri icerikle secilir, getirilen C_m'ye EKLENIR (cikista karismaz).
 # Zoology (2312.04927): attention'siz modellerin ppl farkinin %82'si baglamda gecmis ikiliyi tamamlayan
 # token'larda.  Kullanici, 25 Eylul: "önceliğimiz attention tasarımı", "state ve point ok".
-ATTENTION = False      # tepede kapali: once tek degiskenli kosu (TS_PV_ATTN)
+ATTENTION = True       # olculdu (ATTN 4.000, CMNORM'a karsi): +2,7 puan (0,4649 -> 0,4920)
 ATTN_HEADS = 4         # bas sayisi.  OLCULMEDI.
 ATTN_DIM = 64          # bas basina boyut; skor olcegi 1/sqrt(ATTN_DIM)
 ATTN_AFTER = 0         # sozluk katmani ATTN_AFTER'den sonra: sorgu bir katmandan gecmis, getirileni sonrakiler isler
@@ -276,7 +264,7 @@ class CCache(nn.Module):
         B, T = tokens.shape
         Cn = F.normalize(C, dim=-1)
         Q, P_q = self.Q(C, C_m, probs=True) if probs else (self.Q(C, C_m), None)
-        Qn = F.normalize(Q, dim=-1)
+        Qn = Cn if self.query is None else F.normalize(Q, dim=-1)       # ok yoksa Q = C
         sim_all = Qn @ Cn.transpose(1, 2)                            # (B, t, j): cos(Q_t, C_j)
         pos = torch.arange(T, device=C.device)
         allowed = pos[None, :] < pos[:, None] - self.skip            # j < t - skip
@@ -315,16 +303,16 @@ class CCache(nn.Module):
         score: C_m -> puan.  rows: (B*(T-1)) duz konumlardan secilenler -> (R,); puan tablosu YALNIZ orada.
         C_m (R, d) gelirse zaten rows'a indirilmistir (PV._layers).
         forward()'un dogru kelimedeki degeriyle ayni (tests: t_ccache, t_speed).  probs: + Q oklarinin P'si."""
-        indi = C_m.dim() == 2
-        gate, W_c, ids, *P_q = self.parts(tokens, C, C_m, probs=probs, rows=rows if indi else None)
+        compacted = C_m.dim() == 2
+        gate, W_c, ids, *P_q = self.parts(tokens, C, C_m, probs=probs, rows=rows if compacted else None)
         target = tokens[:, 1:]
         p_cache = (W_c[:, :-1] * (ids[:, :-1] == target[..., None])).sum(-1)
-        if not indi:
+        if not compacted:
             gate, C_m = gate[:, :-1], C_m[:, :-1]
         if rows is not None:
             flat = lambda x: x.reshape(-1, *x.shape[2:])[rows]
             target, p_cache = flat(target), flat(p_cache)
-            if not indi:
+            if not compacted:
                 gate, C_m = flat(gate), flat(C_m)
         s = score(C_m)
         log_model = s.gather(-1, target[..., None])[..., 0] - s.logsumexp(-1)
@@ -351,21 +339,24 @@ class Attention(nn.Module):
         """C (B,T,d) ham zincir, C_m (B,T,d) islenmis nokta, P_w (B,T,d) sabit noktalar ("point") -> yeni C_m.
         Nedensel: t yalniz j <= t'yi gorur.  Konum 0'in anahtari sifir (oncesi yok): bos yuva."""
         B, T, _ = C.shape
-        q, k = self._qk(C, C_m)
-        v = self._split(self.W_v(F.normalize(C_m if self.value == "state" else P_w, dim=-1)))
+        C_mn = F.normalize(C_m, dim=-1)
+        q, k = self._qk(C, C_mn)
+        v = self._split(self.W_v(C_mn if self.value == "state" else F.normalize(P_w, dim=-1)))
         out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         return C_m + self.W_o(out.transpose(1, 2).reshape(B, T, -1))
 
     def weights(self, C, C_m):
         """(B, heads, T, T): forward'in nedensel dikkat agirliklari -- saglik icin."""
-        q, k = self._qk(C, C_m)
+        q, k = self._qk(C, F.normalize(C_m, dim=-1))
         T = q.shape[2]
-        ust = torch.ones(T, T, dtype=torch.bool, device=q.device).triu(1)
-        return (q @ k.transpose(-1, -2) / self.dim ** 0.5).masked_fill(ust, float("-inf")).softmax(-1)
+        upper_mask = torch.ones(T, T, dtype=torch.bool, device=q.device).triu(1)
+        return (q @ k.transpose(-1, -2) / self.dim ** 0.5).masked_fill(upper_mask, float("-inf")).softmax(-1)
 
-    def _qk(self, C, C_m):
-        prev = torch.cat([torch.zeros_like(C[:, :1]), C[:, :-1]], 1)            # k_j icin C_(j-1)
-        return self._split(self.W_q(F.normalize(C_m, dim=-1))), self._split(self.W_k(F.normalize(prev, dim=-1)))
+    def _qk(self, C, C_mn):
+        """C_mn = norm(C_m).  k_j = W_k norm(C_(j-1)): izdusumden SONRA kaydirilir (W_k biassiz, konum 0 sifir)."""
+        k = self.W_k(F.normalize(C, dim=-1))
+        k = torch.cat([torch.zeros_like(k[:, :1]), k[:, :-1]], 1)
+        return self._split(self.W_q(C_mn)), self._split(k)
 
     def _split(self, x):
         B, T, _ = x.shape
@@ -431,9 +422,9 @@ class PV(nn.Module):
             # lam_w, beta_w: token x boyut (ya da token basina tek deger), sigmoid'den once (logit).  Sabit
             # baslangic, randn cekmez.
             lam0 = (lam_w_init - LAM_W_MIN) / (1 - LAM_W_MIN)
-            genis = 1 if self.content_scalar else self.d_content
-            self.lam_w = nn.Parameter(torch.full((n, genis), math.log(lam0 / (1 - lam0))))
-            self.beta_w = nn.Parameter(torch.full((n, genis), math.log(beta_w_init / (1 - beta_w_init))))
+            width = 1 if self.content_scalar else self.d_content
+            self.lam_w = nn.Parameter(torch.full((n, width), math.log(lam0 / (1 - lam0))))
+            self.beta_w = nn.Parameter(torch.full((n, width), math.log(beta_w_init / (1 - beta_w_init))))
         self.cache_topk, self.cache_skip = cache_topk, cache_skip
         self.cache = (CCache(d_sum, cache_topk, cache_skip, s_c_init, gate_0_init, query, query_vectors,
                              query_active, query_by, randn, start_norm, select) if c_cache else None)
@@ -502,29 +493,29 @@ class PV(nn.Module):
         rows: (R,) duz konum (B*(T-1)) -- konumlar arasi karisma (attention) bittikten sonraki katmanlar YALNIZ
         orada calisir, dolgu hesaplanmaz: C_m (R, d), o katmanlarin P'si (R, vectors).  Kayip yolu."""
         first = self.attn_after + 1 if self.attn is not None else 0     # buradan sonra her katman konum basina
-        indir = lambda x: x[:, :-1].reshape(-1, x.shape[-1])[rows]
+        compact = lambda x: x[:, :-1].reshape(-1, x.shape[-1])[rows]
         C_m, active_ids, P = C, [], []
         for i, layer in enumerate(self.V):
             if rows is not None and i == first:
-                C_m = indir(C_m)
+                C_m = compact(C_m)
             C_m, layer_ids, *p = layer(C_m, probs=probs)
             active_ids.append(layer_ids)
             P += p
             if self.attn is not None and i == self.attn_after:
                 C_m = self.attn(C, C_m, self.P[tokens] if self.attn.value == "point" else None)
         if rows is not None and first == len(self.V):
-            C_m = indir(C_m)
+            C_m = compact(C_m)
         return (C_m, active_ids, P) if probs else (C_m, active_ids)
 
     def balance(self, P, counted, w=None):
         """Load balancing: katman (ve Q) basina vectors * sum_a Pbar_a^2, Pbar = sayilan konumlarda ortalama P.
         P (B,T,vectors) ya da rows'a indirilmis (R,vectors); w (R,) o satirlardan sayilanlar.
         En kucuk 1: kullanim esit.  Her konum keskin kalabilir; yalniz ORTALAMA dengelenir."""
-        def ort(p):
+        def mean_p(p):
             a, x = (counted, p[:, :-1]) if p.dim() == 3 else (w, p)
             a = a.to(p.dtype).unsqueeze(-1)
             return (x * a).sum(tuple(range(x.dim() - 1))) / a.sum()
-        return sum(p.shape[-1] * (ort(p) ** 2).sum() for p in P)
+        return sum(p.shape[-1] * (mean_p(p) ** 2).sum() for p in P)
 
     def score(self, C_m):
         """-S_p*D^2 (squared) ya da -S_p*D.  Buyuk = yakin.  c_m_norm: C_m once kureye iner."""
@@ -553,17 +544,17 @@ class PV(nn.Module):
         counted = (torch.ones_like(tokens[:, 1:], dtype=torch.bool) if targets_mask is None
                    else targets_mask[:, 1:].bool())
         C = self.C(tokens)
-        dengeli = self.load_balance > 0
+        balanced = self.load_balance > 0
         w = counted
         if rows is not None:
             keep, rows = rows >= 0, rows.clamp(min=0)
             w = counted.reshape(-1)[rows] & keep
         # Q'nun oklari C_m'ye gore seciliyorsa defter BUTUN konumlarda C_m ister: o zaman katmanlar indirilmez.
-        indir = rows is not None and (self.cache is None or self.cache.query is None or self.cache.query_by == "C")
-        C_m, _, *P = self._layers(C, probs=dengeli, tokens=tokens, rows=rows if indir else None)
-        P = P[0] if dengeli else []
+        use_rows = rows is not None and (self.cache is None or self.cache.query is None or self.cache.query_by == "C")
+        C_m, _, *P = self._layers(C, probs=balanced, tokens=tokens, rows=rows if use_rows else None)
+        P = P[0] if balanced else []
         if self.cache is not None:                        # hizli yol: yalniz dogru kelimenin log p'si
-            if dengeli:
+            if balanced:
                 logp, P_q = self.cache.target_logp(tokens, C, C_m, self.score, rows=rows, probs=True)
                 P = P + ([P_q] if P_q is not None else [])
                 nll = -logp
@@ -578,7 +569,7 @@ class PV(nn.Module):
             nll = F.cross_entropy(self.score(C_m), target, reduction="none").reshape(w.shape)
         w = w.to(nll.dtype)
         nll = (nll * w).sum() / w.sum()
-        loss = nll + self.load_balance * self.balance(P, counted, w) if dengeli else nll
+        loss = nll + self.load_balance * self.balance(P, counted, w) if balanced else nll
         return (loss, nll) if parts else loss
 
     def trace(self, tokens):
@@ -611,27 +602,27 @@ class PV(nn.Module):
           attn_ent / attn_first / attn_dist   bas basina: entropi (nat), konum 0'a dusen pay, ortalama bakis mesafesi
           pred_distinct / pred_ent  en yuksek puani alan farkli kelime sayisi, tahminin entropisi (nat)"""
         a = mask.bool()
-        ic, h = self.inspect(tokens), {}
-        for i, W in enumerate(ic["W"]):
+        ins, h = self.inspect(tokens), {}
+        for i, W in enumerate(ins["W"]):
             W_bar = W[a].mean(0)
             h["vec_each_%d" % i] = float(entropy(W[a]).exp().mean())
             h["vec_all_%d" % i] = float(entropy(W_bar).exp())
             h["dead_%d" % i] = int((W_bar < 0.01 / W_bar.numel()).sum())
-        for ad, X in (("C", ic["C"][a]), ("Cm", ic["C_m"][a])):
-            h["norm_" + ad], h["dir_" + ad] = float(X.norm(dim=-1).mean()), directions90(X)
+        for name, X in (("C", ins["C"][a]), ("Cm", ins["C_m"][a])):
+            h["norm_" + name], h["dir_" + name] = float(X.norm(dim=-1).mean()), directions90(X)
         h["exp_S_v"] = [float(L.S_v.exp()) for L in self.V]
         if self.S_p_learned:
             h["exp_S_p"] = float(self.S_p.exp())
         if self.c_content:
             h["lam_c"] = float(self.lam_beta(tokens)[0][a].mean())
-        if ic["gate"] is not None:
-            h["gate"], h["exp_S_c"] = float(ic["gate"][a].mean()), float(self.cache.S_c.exp())
-        if ic["attn"] is not None:
-            A = ic["attn"]
+        if ins["gate"] is not None:
+            h["gate"], h["exp_S_c"] = float(ins["gate"][a].mean()), float(self.cache.S_c.exp())
+        if ins["attn"] is not None:
+            A = ins["attn"]
             pos = torch.arange(A.shape[-1], device=A.device)
             age = (pos[:, None] - pos[None, :]).clamp(min=0).to(A.dtype)
-            for ad, x in (("attn_ent", entropy(A)), ("attn_first", A[..., 0]), ("attn_dist", (A * age).sum(-1))):
-                h[ad] = [float(x[:, k][a].mean()) for k in range(A.shape[1])]
+            for name, x in (("attn_ent", entropy(A)), ("attn_first", A[..., 0]), ("attn_dist", (A * age).sum(-1))):
+                h[name] = [float(x[:, k][a].mean()) for k in range(A.shape[1])]
         lp = torch.log_softmax(self.scoreboard(tokens), -1)[a]
         h["pred_distinct"] = int(lp.argmax(-1).unique().numel())
         h["pred_ent"] = float(-(lp.exp() * lp).sum(-1).mean())

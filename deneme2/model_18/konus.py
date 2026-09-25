@@ -30,84 +30,81 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from model_18 import PV                                       # noqa: E402
 import data_stories as DS                                     # noqa: E402
 
-# Sohbette belirlenimcilik gerekmez; model_18 GPU yokken 1 iplik ayarliyor (uretim ~4 kat yavas).
-torch.set_num_threads(min(10, os.cpu_count() or 1))
-
-ADAY = [r"G:\Drive'ım\model_18", r"G:\Drivem\model_18"]
-TS = [r"G:\Drive'ım\tinystories", r"G:\Drivem\tinystories"]
+MODEL_DIRS = [r"G:\Drive'ım\model_18", r"G:\Drivem\model_18"]
+TS_DIRS = [r"G:\Drive'ım\tinystories", r"G:\Drivem\tinystories"]
 
 
-def _kok(liste):
-    return next((d for d in liste if os.path.isdir(d)), None)
+def _first_existing(candidates):
+    return next((d for d in candidates if os.path.isdir(d)), None)
 
 
-_ONBELLEK = {}       # yol -> paket: bul() bir kez yukler, yukle() yeniden okumaz
+_CACHE = {}       # path -> paket: find_package() bir kez yukler, load_package() yeniden okumaz
 
 
-def _kosular():
+def _run_dirs():
     """Kosu klasorleri, en son degiseni once (Drive'da yuzlerce dosyanin tarihine bakmaktan hizli)."""
-    k = _kok(ADAY)
+    k = _first_existing(MODEL_DIRS)
     if not k:
         return []
     d = [os.path.join(k, x) for x in os.listdir(k) if "_eski_" not in x]
     return sorted((x for x in d if os.path.isdir(x)), key=os.path.getmtime, reverse=True)
 
 
-def paketler(kosular=None):
+def packages(run_dirs=None):
     """(kosu/dosya, yol) -- yeniden eskiye.  Yalniz kosu klasorlerindeki t/w paketleri."""
-    cik = []
-    for d in (_kosular() if kosular is None else kosular):
-        kosu = os.path.basename(d)
+    found = []
+    for d in (_run_dirs() if run_dirs is None else run_dirs):
+        run_name = os.path.basename(d)
         for f in os.listdir(d):
             if re.fullmatch(r"[tw]\d+\.pt", f):
-                cik.append(("%s/%s" % (kosu, f[:-3]), os.path.join(d, f)))
-    return sorted(cik, key=lambda x: os.path.getmtime(x[1]), reverse=True)
+                found.append(("%s/%s" % (run_name, f[:-3]), os.path.join(d, f)))
+    return sorted(found, key=lambda x: os.path.getmtime(x[1]), reverse=True)
 
 
-def bul(desen=None, kosu=None):
+def find_package(pattern=None, run_name=None):
     """Desen yoksa EN YENI hikaye paketi.  'w500' yuklu kosuda, 'KOSU/w500' her yerde;
     ad BIREBIR (t500, t5000 degil)."""
-    if not desen:
-        for kosu in _kosular():                         # en son degisen kosu klasoru once
-            for ad, yol in paketler([kosu]):
-                k = torch.load(yol, weights_only=False, map_location="cpu", mmap=True)
+    if not pattern:
+        for run_name in _run_dirs():                         # en son degisen kosu klasoru once
+            for name, path in packages([run_name]):
+                k = torch.load(path, weights_only=False, map_location="cpu", mmap=True)
                 if len(k.get("vocab") or []) > 13:
-                    _ONBELLEK[yol] = k
-                    return yol
+                    _CACHE[path] = k
+                    return path
                 break                                   # matematik kosusu: sonraki klasor
-        print("HIKAYE PAKETI YOK.  Arananlar: %s\\<kosu>\\t*.pt, w*.pt" % " ya da ".join(ADAY))
+        print("HIKAYE PAKETI YOK.  Arananlar: %s\\<kosu>\\t*.pt, w*.pt" % " ya da ".join(MODEL_DIRS))
         sys.exit(1)
-    hepsi = paketler()
-    d = desen.replace("\\", "/")
+    all_packages = packages()
+    d = pattern.replace("\\", "/")
     d = d[:-3] if d.endswith(".pt") else d
-    e = [y for a, y in hepsi if a == d or (kosu and a == "%s/%s" % (kosu, d))]
+    e = [y for a, y in all_packages if a == d or (run_name and a == "%s/%s" % (run_name, d))]
     if not e:
-        print("'%s' ile eslesen paket yok.  'yedek' yazip listeye bak." % desen)
+        print("'%s' ile eslesen paket yok.  'yedek' yazip listeye bak." % pattern)
         return None
     return e[0]
 
 
-def yukle(yol):
-    k = _ONBELLEK.pop(yol, None) or torch.load(yol, weights_only=False, map_location="cpu", mmap=True)
+def load_package(path):
+    k = _CACHE.pop(path, None) or torch.load(path, weights_only=False, map_location="cpu", mmap=True)
     return PV.from_package(k), k
 
 
-def istemler():
-    d = _kok(TS)
-    return DS.istemler(d) if d else []
+def prompts():
+    d = _first_existing(TS_DIRS)
+    return DS.prompts(d) if d else []
 
 
-def yaz(baslik, metin, g=70):
-    print(baslik)
-    for s in textwrap.wrap(metin, g) or [""]:
+def print_wrapped(title, text, g=70):
+    print(title)
+    for s in textwrap.wrap(text, g) or [""]:
         print("   " + s)
 
 
-def ozet(yol, k):
+def summary(path, k):
     g = k.get("heldout_diag") or {}
     ce = k.get("heldout_ce")
     print("=" * 74)
-    print("paket   %s/%s%s" % (os.path.basename(os.path.dirname(yol)), os.path.basename(yol),
+    print("paket   %s/%s%s" % (os.path.basename(os.path.dirname(path)), os.path.basename(path),
                                "   (BITTI)" if k.get("done") else ""))
     print("adim    %s   parametre %s   sozluk %d   D_SUM %d   T %d"
           % ("{:,}".format(k["step"]), "{:,}".format(k.get("n_params", 0)), k["n"], k.get("d_sum", k.get("d")),
@@ -120,19 +117,19 @@ def ozet(yol, k):
 
 
 def main():
-    yol = bul(sys.argv[1] if len(sys.argv) > 1 else None)
-    if not yol:
+    path = find_package(sys.argv[1] if len(sys.argv) > 1 else None)
+    if not path:
         sys.exit(1)
-    m, k = yukle(yol)
-    SOZ = DS.genel(list(k["vocab"]))
-    IX = {a: i for i, a in enumerate(SOZ)}
-    IST = istemler()
-    ozet(yol, k)
-    print("%d degerlendirme istemi" % len(IST))
+    m, k = load_package(path)
+    VOCAB = DS.to_general_eos(list(k["vocab"]))
+    TOKEN_ID = {a: i for i, a in enumerate(VOCAB)}
+    PROMPTS = prompts()
+    summary(path, k)
+    print("%d degerlendirme istemi" % len(PROMPTS))
     print(__doc__.split("\n\n")[-1].rstrip())
     print()
 
-    n, sic, yasak, ceza, top_p = 120, 0.0, True, DS.TEKRAR_CEZASI, DS.TOP_P
+    n, temp, banned, penalty, top_p = 120, 0.0, True, DS.REPEAT_PENALTY, DS.TOP_P
     while True:
         try:
             g = input("> ").strip()
@@ -148,51 +145,51 @@ def main():
             print("   en fazla %d kelime" % n)
             continue
         if g.startswith("s="):
-            sic = max(0.0, float(g[2:]))
-            print("   sicaklik %.2f%s" % (sic, "  (belirlenimci)" if not sic else ""))
+            temp = max(0.0, float(g[2:]))
+            print("   sicaklik %.2f%s" % (temp, "  (belirlenimci)" if not temp else ""))
             continue
         if g.startswith("r="):
-            ceza = max(1.0, float(g[2:]))
-            print("   tekrar cezasi %.2f%s" % (ceza, "  (kapali)" if ceza == 1 else ""))
+            penalty = max(1.0, float(g[2:]))
+            print("   tekrar cezasi %.2f%s" % (penalty, "  (kapali)" if penalty == 1 else ""))
             continue
         if g.startswith("p="):
             top_p = min(1.0, max(0.01, float(g[2:])))
             print("   top-p %.2f%s" % (top_p, "  (kapali)" if top_p == 1 else ""))
             continue
         if g == "yasak":
-            yasak = not yasak
-            print("   <bilinmeyen>/<dolgu> %s" % ("URETILMEZ" if yasak else "uretilebilir"))
+            banned = not banned
+            print("   <bilinmeyen>/<dolgu> %s" % ("URETILMEZ" if banned else "uretilebilir"))
             continue
         if g.startswith("yedek"):
             p = g[5:].strip()
             if not p:
-                for ad_, p_ in paketler()[:15]:
-                    print("   %s%s" % (ad_, "   <- yuklu" if os.path.normcase(p_)
-                                       == os.path.normcase(yol) else ""))
+                for name_, path_ in packages()[:15]:
+                    print("   %s%s" % (name_, "   <- yuklu" if os.path.normcase(path_)
+                                       == os.path.normcase(path) else ""))
                 continue
-            y2 = bul(p, os.path.basename(os.path.dirname(yol)))
-            if y2:
-                yol = y2
-                m, k = yukle(yol)
-                SOZ = DS.genel(list(k["vocab"]))
-                IX = {a: i for i, a in enumerate(SOZ)}
-                ozet(yol, k)
+            path2 = find_package(p, os.path.basename(os.path.dirname(path)))
+            if path2:
+                path = path2
+                m, k = load_package(path)
+                VOCAB = DS.to_general_eos(list(k["vocab"]))
+                TOKEN_ID = {a: i for i, a in enumerate(VOCAB)}
+                summary(path, k)
             continue
         if g == "serbest":
             g = ""
         elif not g:
-            if not IST:
+            if not PROMPTS:
                 print("   istem dosyasi yok; kendin bir seyler yaz")
                 continue
-            g = random.choice(IST)
-        bil = sum(1 for t in DS.JETON.findall(g.translate(DS.DUZLE)) if t not in IX)
-        y = (DS.DOLGU, DS.BILINMEYEN) if yasak else ()
-        bas, hep = DS.devam(m, g, SOZ, IX, adim=n, aygit="cpu", sicaklik=sic,
-                            tohum=random.randrange(10 ** 6) if sic else None, yasak=y,
-                            tekrar=ceza, top_p=top_p)
+            g = random.choice(PROMPTS)
+        n_unknown = sum(1 for t in DS.TOKEN_RE.findall(g.translate(DS.QUOTE_MAP)) if t not in TOKEN_ID)
+        banned_tokens = (DS.PAD_TOKEN, DS.UNK_TOKEN) if banned else ()
+        prompt_text, generated = DS.generate(m, g, VOCAB, TOKEN_ID, steps=n, device="cpu", temperature=temp,
+                            seed=random.randrange(10 ** 6) if temp else None, banned=banned_tokens,
+                            penalty=penalty, top_p=top_p)
         print()
-        yaz("ISTEM%s" % ("   (%d kelime sozlukte YOK)" % bil if bil else ""), bas or "(bos)")
-        yaz("MODEL  (sicaklik %.2f, top-p %.2f, tekrar cezasi %.2f)" % (sic, top_p, ceza), hep)
+        print_wrapped("ISTEM%s" % ("   (%d kelime sozlukte YOK)" % n_unknown if n_unknown else ""), prompt_text or "(bos)")
+        print_wrapped("MODEL  (sicaklik %.2f, top-p %.2f, tekrar cezasi %.2f)" % (temp, top_p, penalty), generated)
         print()
 
 

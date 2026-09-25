@@ -25,207 +25,207 @@ import hashlib
 import torch
 import torch.nn.functional as F
 
-SON = "<eos>"
-ARTI, ESIT, EOS = 10, 11, 12
+EOS_TOKEN = "<eos>"
+PLUS, EQUALS, EOS = 10, 11, 12
 N = 13
-AD = [str(i) for i in range(10)] + ["+", "=", SON]
+VOCAB = [str(i) for i in range(10)] + ["+", "=", EOS_TOKEN]
 
-# model_15'in kayit.txt'sindeki izler -- dosya kayarsa yukle() durur.
-IZ = {"dur": "eb4c73ab05178e18", "cok": "8d0f89938c67e0e7"}
+# model_15'in kayit.txt'sindeki izler -- dosya kayarsa load() durur.
+FINGERPRINTS = {"dur": "eb4c73ab05178e18", "cok": "8d0f89938c67e0e7"}
 
 
-def rak(x):
+def digits(x):
     """Sayinin KENDI rakamlari.  Dolgu YOK."""
     return [int(c) for c in str(x)]
 
 
-def soru(ts):
+def question(terms):
     """ts: terimler -> d..d + d..d [+ d..d] ="""
     w = []
-    for i, x in enumerate(ts):
+    for i, x in enumerate(terms):
         if i:
-            w.append(ARTI)
-        w += rak(x)
-    return w + [ESIT]
+            w.append(PLUS)
+        w += digits(x)
+    return w + [EQUALS]
 
 
-def yukle(yol, ad):
+def load(path, name):
     """model_15'in veri dosyasi -> (egitim sorulari, tutulan sorular).
     ad: "dur" (2 terim) ya da "cok" (2+3 terim)."""
-    d = torch.load(yol, weights_only=False)
-    hh = hashlib.sha256()
+    d = torch.load(path, weights_only=False)
+    hasher = hashlib.sha256()
     for w, _, u in d["eg"] + d["tu"]:
-        hh.update(w.numpy().tobytes())
-        hh.update(u.numpy().tobytes())
-    iz = hh.hexdigest()[:16]
-    if iz != IZ[ad]:
-        raise ValueError(f"veri izi tutmuyor: {iz} != {IZ[ad]} ({yol})")
-    eg = d["soru_eg"] if "soru_eg" in d else d["cift_eg"]
-    tu = d["soru_tu"] if "soru_tu" in d else d["cift_tu"]
-    return [tuple(x) for x in eg], [tuple(x) for x in tu]
+        hasher.update(w.numpy().tobytes())
+        hasher.update(u.numpy().tobytes())
+    fp = hasher.hexdigest()[:16]
+    if fp != FINGERPRINTS[name]:
+        raise ValueError(f"veri izi tutmuyor: {fp} != {FINGERPRINTS[name]} ({path})")
+    train_q = d["soru_eg"] if "soru_eg" in d else d["cift_eg"]
+    heldout_q = d["soru_tu"] if "soru_tu" in d else d["cift_tu"]
+    return [tuple(x) for x in train_q], [tuple(x) for x in heldout_q]
 
 
-def pencereler(sorular):
+def make_windows(questions):
     """(W, M, H), n x T.  W: <eos> soru cevap <eos>, sagdan dolgu.
     M: gercek token'lar.  H: HEDEF konumlar -- cevabin rakamlari ve EOS."""
-    diz = [[EOS] + soru(ts) + rak(sum(ts)) + [EOS] for ts in sorular]
-    T = max(len(d) for d in diz)
-    W = torch.full((len(diz), T), EOS, dtype=torch.long)
-    M = torch.zeros(len(diz), T, dtype=torch.bool)
-    H = torch.zeros(len(diz), T, dtype=torch.bool)
-    for i, (d, ts) in enumerate(zip(diz, sorular)):
+    seqs = [[EOS] + question(terms) + digits(sum(terms)) + [EOS] for terms in questions]
+    T = max(len(d) for d in seqs)
+    W = torch.full((len(seqs), T), EOS, dtype=torch.long)
+    M = torch.zeros(len(seqs), T, dtype=torch.bool)
+    H = torch.zeros(len(seqs), T, dtype=torch.bool)
+    for i, (d, terms) in enumerate(zip(seqs, questions)):
         W[i, :len(d)] = torch.tensor(d)
         M[i, :len(d)] = True
-        H[i, len(d) - len(rak(sum(ts))) - 1:len(d)] = True
+        H[i, len(d) - len(digits(sum(terms))) - 1:len(d)] = True
     return W, M, H
 
 
-def _ornekle(sorular, en, tohum=12345):
+def _sample(questions, limit, seed=12345):
     """Olcum alt kumesi RASTGELE, tohum sabit -- her kosu ayni kumeyi olcer."""
-    if en >= len(sorular):
-        return list(sorular)
-    g = torch.Generator().manual_seed(tohum)
-    return [sorular[j] for j in torch.randperm(len(sorular), generator=g)[:en]
+    if limit >= len(questions):
+        return list(questions)
+    g = torch.Generator().manual_seed(seed)
+    return [questions[j] for j in torch.randperm(len(questions), generator=g)[:limit]
             .tolist()]
 
 
-def _uret(m, sorular, aygit, parca=4096):
+def _generate(m, questions, device, chunk=4096):
     """Serbest uretim: (soru, uretilen K token) ciftleri.  EOS'ta kesmez,
-    K = en uzun cevap + 1 adim yurur; nerede durdugunu sor() okur."""
-    kova = {}
-    for ts in sorular:
-        kova.setdefault(len(soru(ts)), []).append(ts)
-    K = max(len(rak(sum(ts))) for ts in sorular) + 1
-    cik = []
+    K = en uzun cevap + 1 adim yurur; nerede durdugunu ask() okur."""
+    buckets = {}
+    for terms in questions:
+        buckets.setdefault(len(question(terms)), []).append(terms)
+    K = max(len(digits(sum(terms))) for terms in questions) + 1
+    out = []
     with torch.no_grad():
-        for grup in kova.values():
-            for i in range(0, len(grup), parca):
-                oh = grup[i:i + parca]
-                yol = torch.tensor([[EOS] + soru(ts) for ts in oh],
-                                   device=aygit)
+        for group in buckets.values():
+            for i in range(0, len(group), chunk):
+                part = group[i:i + chunk]
+                seq = torch.tensor([[EOS] + question(terms) for terms in part],
+                                   device=device)
                 for _ in range(K):
-                    t = m.scoreboard(yol)[:, -1].argmax(-1)
-                    yol = torch.cat([yol, t[:, None]], 1)
-                cik += [(ts, yol[r, -K:].tolist()) for r, ts in enumerate(oh)]
-    return cik, K
+                    t = m.scoreboard(seq)[:, -1].argmax(-1)
+                    seq = torch.cat([seq, t[:, None]], 1)
+                out += [(terms, seq[r, -K:].tolist()) for r, terms in enumerate(part)]
+    return out, K
 
 
-def sor(m, sorular, aygit="cuda", en=20000):
+def ask(m, questions, device="cuda", limit=20000):
     """TEK OLCUT: soru soruldu, cevap DOGRU MU.  Doner: accuracy, length_ok, first_digit, n.
 
       accuracy     cevap BIREBIR ve EOS dogru yerde
       length_ok    rakamlardan bagimsiz, DOGRU YERDE durdu mu
       first_digit  cevabin ILK rakami dogru mu (en buyuk basamak)"""
-    sorular = _ornekle(sorular, en)
-    cik, K = _uret(m, sorular, aygit)
-    dog = uzn = ilk = 0
-    for ts, c in cik:
-        hedef = rak(sum(ts))
-        dur = c.index(EOS) if EOS in c else K
-        uzn += dur == len(hedef)
-        dog += dur == len(hedef) and c[:len(hedef)] == hedef
-        ilk += c[0] == hedef[0]
-    n = len(cik)
-    return {"accuracy": dog / n, "length_ok": uzn / n, "first_digit": ilk / n, "n": n}
+    questions = _sample(questions, limit)
+    out, K = _generate(m, questions, device)
+    n_correct = n_length = n_first = 0
+    for terms, c in out:
+        target = digits(sum(terms))
+        stop = c.index(EOS) if EOS in c else K
+        n_length += stop == len(target)
+        n_correct += stop == len(target) and c[:len(target)] == target
+        n_first += c[0] == target[0]
+    n = len(out)
+    return {"accuracy": n_correct / n, "length_ok": n_length / n, "first_digit": n_first / n, "n": n}
 
 
-def cevap_ce(m, WMH, aygit="cuda", parca=4096):
+def answer_ce(m, windows, device="cuda", chunk=4096):
     """Cevap token'larinda (rakamlar + EOS) ortalama CE."""
-    W, M, H = WMH
-    top = say = 0.0
+    W, M, H = windows
+    total = count = 0.0
     with torch.no_grad():
-        for i in range(0, len(W), parca):
-            w, mk = W[i:i + parca].to(aygit), M[i:i + parca].to(aygit)
-            a = H[i:i + parca, 1:].to(aygit)
+        for i in range(0, len(W), chunk):
+            w, mk = W[i:i + chunk].to(device), M[i:i + chunk].to(device)
+            a = H[i:i + chunk, 1:].to(device)
             p = m.scoreboard(w, mk)[:, :-1]
             ce = F.cross_entropy(p.transpose(1, 2), w[:, 1:], reduction="none")
-            top += float(ce[a].sum())
-            say += int(a.sum())
-    return top / max(say, 1)
+            total += float(ce[a].sum())
+            count += int(a.sum())
+    return total / max(count, 1)
 
 
-def olcut(eg, tu, aygit="cuda", en=2000):
+def make_metric(train_q, heldout_q, device="cuda", limit=2000):
     """train'in bekledigi metric(m, "train"|"heldout", full) -> dict.
       accuracy  ANA OLCUT: cevap birebir dogru (exact match)
       ce        cevap token'larinda kayip (ayni alt kume)
       diag      ANALIZ icin, matematige ozgu: first_digit, length_ok"""
-    kume = {"train": eg, "heldout": tu}
+    splits = {"train": train_q, "heldout": heldout_q}
 
     def f(m, side, full=False):
-        s = kume[side]
-        alt = _ornekle(s, len(s) if full else en)
-        r = sor(m, alt, aygit=aygit, en=len(alt))
-        return {"accuracy": r["accuracy"], "ce": cevap_ce(m, pencereler(alt), aygit),
+        s = splits[side]
+        subset = _sample(s, len(s) if full else limit)
+        r = ask(m, subset, device=device, limit=len(subset))
+        return {"accuracy": r["accuracy"], "ce": answer_ce(m, make_windows(subset), device),
                 "diag": {"first_digit": r["first_digit"], "length_ok": r["length_ok"]}}
 
     return f
 
 
-def kirilim(m, sorular, aygit="cuda", olcu="terim"):
+def breakdown(m, questions, device="cuda", measure="terim"):
     """{anahtar: sor sonucu}.  olcu "terim" (2/3) ya da "hane" (cevap hanesi)."""
-    f = (lambda ts: len(ts)) if olcu == "terim" else (lambda ts: len(rak(sum(ts))))
+    f = (lambda terms: len(terms)) if measure == "terim" else (lambda terms: len(digits(sum(terms))))
     g = {}
-    for ts in sorular:
-        g.setdefault(f(ts), []).append(ts)
-    return {a: sor(m, c, aygit=aygit, en=len(c)) for a, c in sorted(g.items())}
+    for terms in questions:
+        g.setdefault(f(terms), []).append(terms)
+    return {a: ask(m, c, device=device, limit=len(c)) for a, c in sorted(g.items())}
 
 
-KONUM = ("birler", "onlar", "yuzler", "binler")
+PLACES = ("birler", "onlar", "yuzler", "binler")
 
 
-def basamak(m, sorular, aygit="cpu", parca=4096):
+def digit_check(m, questions, device="cpu", chunk=4096):
     """TANI, olcut degil: HANGI BASAMAK ogrenildi.  Anahtar (cevap hanesi,
     konum); konum SAGDAN (birler, onlar, yuzler, binler) ya da "eos".
       og    dogru onek verilince o token dogru mu (ogretmen zorlamali)
       ser   serbest uretim, SAGA hizali: modelin yazdigi o basamak dogru mu
       cog   taban: o yuvada hep EN SIK token'i soyleyen
       n     soru sayisi"""
-    W, M, _ = pencereler(sorular)
-    L = torch.tensor([len(rak(sum(ts))) for ts in sorular])
+    W, M, _ = make_windows(questions)
+    L = torch.tensor([len(digits(sum(terms))) for terms in questions])
     a0 = M.sum(1) - L - 1                     # cevabin ilk rakaminin yeri
-    tah = []
+    preds = []
     with torch.no_grad():
-        for i in range(0, len(W), parca):
-            tah.append(m.scoreboard(W[i:i + parca].to(aygit), M[i:i + parca]
-                                    .to(aygit)).argmax(-1).cpu())
-    tah = torch.cat(tah).tolist()
-    yaz = {ts: c[:c.index(EOS)] if EOS in c else c
-           for ts, c in _uret(m, sorular, aygit)[0]}
-    say = {}
+        for i in range(0, len(W), chunk):
+            preds.append(m.scoreboard(W[i:i + chunk].to(device), M[i:i + chunk]
+                                    .to(device)).argmax(-1).cpu())
+    preds = torch.cat(preds).tolist()
+    outputs = {terms: c[:c.index(EOS)] if EOS in c else c
+           for terms, c in _generate(m, questions, device)[0]}
+    stats = {}
 
-    def ekle(k, og, ser, h):
-        s = say.setdefault(k, {"og": 0, "ser": 0, "n": 0, "sik": {}})
-        s["og"] += og
-        s["ser"] += ser
+    def add(k, teacher, free, h):
+        s = stats.setdefault(k, {"teacher": 0, "free": 0, "n": 0, "freq": {}})
+        s["teacher"] += teacher
+        s["free"] += free
         s["n"] += 1
-        s["sik"][h] = s["sik"].get(h, 0) + 1
+        s["freq"][h] = s["freq"].get(h, 0) + 1
 
-    for i, ts in enumerate(sorular):
-        c, b, g, t = rak(sum(ts)), int(a0[i]), yaz[ts], tah[i]
+    for i, terms in enumerate(questions):
+        c, b, g, t = digits(sum(terms)), int(a0[i]), outputs[terms], preds[i]
         for q, h in enumerate(c):
             r = len(c) - 1 - q
-            ekle((len(c), KONUM[r]), t[b + q - 1] == h,
+            add((len(c), PLACES[r]), t[b + q - 1] == h,
                  r < len(g) and g[len(g) - 1 - r] == h, h)
-        ekle((len(c), "eos"), t[b + len(c) - 1] == EOS, len(g) == len(c), EOS)
-    return {k: {"og": s["og"] / s["n"], "ser": s["ser"] / s["n"],
-                "cog": max(s["sik"].values()) / s["n"], "n": s["n"]}
-            for k, s in say.items()}
+        add((len(c), "eos"), t[b + len(c) - 1] == EOS, len(g) == len(c), EOS)
+    return {k: {"teacher": s["teacher"] / s["n"], "free": s["free"] / s["n"],
+                "majority": max(s["freq"].values()) / s["n"], "n": s["n"]}
+            for k, s in stats.items()}
 
 
-def basamak_tablo(r, yaz=print):
-    yaz("  hane  konum         n       og      ser      cog")
+def digit_table(r, log=print):
+    log("  hane  konum         n       teacher  free  majority")
     for L in sorted({k[0] for k in r}):
-        for ad in KONUM[:L][::-1] + ("eos",):
-            v = r[(L, ad)]
-            yaz("  %4d  %-7s %8d   %6.4f   %6.4f   %6.4f"
-                % (L, ad, v["n"], v["og"], v["ser"], v["cog"]))
+        for name in PLACES[:L][::-1] + ("eos",):
+            v = r[(L, name)]
+            log("  %4d  %-7s %8d   %6.4f   %6.4f   %6.4f"
+                % (L, name, v["n"], v["teacher"], v["free"], v["majority"]))
 
 
-def goster(m, sorular, aygit="cpu"):
+def show(m, questions, device="cpu"):
     """GOZLE: soru, dogru cevap, modelin yazdigi."""
-    cik, _ = _uret(m, list(sorular), aygit)
-    for ts, c in cik:
-        dur = c.index(EOS) if EOS in c else len(c)
-        yaz = "".join(AD[t] for t in c[:dur]) + ("" if dur < len(c) else " (durmadi)")
-        print(f"  {' + '.join(map(str, ts))} = {sum(ts):<5}  model: {yaz}"
-              f"  {'DOGRU' if yaz == str(sum(ts)) else 'yanlis'}")
+    out, _ = _generate(m, list(questions), device)
+    for terms, c in out:
+        stop = c.index(EOS) if EOS in c else len(c)
+        written = "".join(VOCAB[t] for t in c[:stop]) + ("" if stop < len(c) else " (durmadi)")
+        print(f"  {' + '.join(map(str, terms))} = {sum(terms):<5}  model: {written}"
+              f"  {'DOGRU' if written == str(sum(terms)) else 'yanlis'}")
