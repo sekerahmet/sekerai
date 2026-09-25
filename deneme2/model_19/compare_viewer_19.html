@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kör Okuma</title>
+<style>
+:root {
+  --bg: #fafaf7; --card: #ffffff; --fg: #1d1d1b; --muted: #6b6b66; --line: #e3e2dc;
+  --accent: #2f6f4f; --accent-bg: #e6f1eb; --warn: #8a5a00;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161615; --card: #1f1f1d; --fg: #ecebe6; --muted: #a3a29b; --line: #34332f;
+    --accent: #7fc4a0; --accent-bg: #203a2d; --warn: #e0b060;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #161615; --card: #1f1f1d; --fg: #ecebe6; --muted: #a3a29b; --line: #34332f;
+  --accent: #7fc4a0; --accent-bg: #203a2d; --warn: #e0b060;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.55 system-ui, sans-serif; }
+header { position: sticky; top: 0; background: var(--bg); border-bottom: 1px solid var(--line); padding: 12px 16px; z-index: 2; }
+header h1 { font-size: 17px; margin: 0 0 4px; }
+header p { margin: 0; color: var(--muted); font-size: 13px; }
+.bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+button, select { font: inherit; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); cursor: pointer; }
+button.on { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+.item { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 16px; }
+.head { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 13px; }
+.prompt { margin: 6px 0 10px; font-weight: 600; }
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 720px) { .pair { grid-template-columns: 1fr; } }
+.out { border: 1px solid var(--line); border-radius: 8px; padding: 10px; white-space: pre-wrap; }
+.out b { color: var(--accent); }
+.end { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.end.cut { color: var(--warn); }
+.vote { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; align-items: center; }
+textarea { flex: 1 1 240px; min-height: 34px; font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); }
+#msg { color: var(--accent); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Kör okuma: iki model, aynı istem</h1>
+  <p>Hangi çıktının hangi modele ait olduğu bu sayfada yok. Her çiftte daha iyi hikâyeyi seç; bitince oylarını kopyalayıp gönder.</p>
+  <div class="bar">
+    <select id="mode"><option value="">bütün kipler</option><option value="acgozlu">açgözlü</option><option value="ornekleme">örnekleme</option></select>
+    <span id="count"></span>
+    <button id="copy">Oylarımı kopyala</button>
+    <span id="msg"></span>
+  </div>
+</header>
+<main id="list"></main>
+<script id="data" type="application/json">__DATA__</script>
+<script>
+const ITEMS = JSON.parse(document.getElementById("data").textContent);
+const KEY = "kor_okuma_oylar_" + (ITEMS.length ? ITEMS[0].run : "");
+let votes = {};
+try { votes = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) { votes = {}; }
+
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(votes)); } catch (e) { /* saklama yoksa bellekte kalir */ }
+  const n = ITEMS.filter(it => votes[it.id] && votes[it.id].choice).length;
+  document.getElementById("count").textContent = n + " / " + ITEMS.length + " oylandı";
+}
+
+function card(it) {
+  const el = document.createElement("section");
+  el.className = "item";
+  el.dataset.mode = it.mode;
+  const head = document.createElement("div");
+  head.className = "head";
+  head.innerHTML = "<span></span><span></span>";
+  head.children[0].textContent = it.label;
+  head.children[1].textContent = it.mode === "acgozlu" ? "açgözlü" : "örnekleme (0,8)";
+  const prompt = document.createElement("div");
+  prompt.className = "prompt";
+  prompt.textContent = it.prompt;
+  const pair = document.createElement("div");
+  pair.className = "pair";
+  for (const ab of ["A", "B"]) {
+    const box = document.createElement("div");
+    box.className = "out";
+    const tag = document.createElement("b");
+    tag.textContent = ab + "  ";
+    box.appendChild(tag);
+    box.appendChild(document.createTextNode(it[ab].text));
+    const end = document.createElement("div");
+    end.className = "end" + (it[ab].ended ? "" : " cut");
+    end.textContent = it[ab].ended ? "hikâyeyi kendisi bitirdi" : "kesildi (120 kelime)";
+    box.appendChild(end);
+    pair.appendChild(box);
+  }
+  const vote = document.createElement("div");
+  vote.className = "vote";
+  const v = votes[it.id] || {};
+  for (const [val, lab] of [["A", "A daha iyi"], ["=", "eşit"], ["B", "B daha iyi"]]) {
+    const b = document.createElement("button");
+    b.textContent = lab;
+    if (v.choice === val) b.classList.add("on");
+    b.onclick = () => {
+      votes[it.id] = Object.assign(votes[it.id] || {}, { choice: val });
+      for (const x of vote.querySelectorAll("button")) x.classList.remove("on");
+      b.classList.add("on");
+      save();
+    };
+    vote.appendChild(b);
+  }
+  const note = document.createElement("textarea");
+  note.placeholder = "not (isteğe bağlı)";
+  note.value = v.note || "";
+  note.oninput = () => { votes[it.id] = Object.assign(votes[it.id] || {}, { note: note.value }); save(); };
+  vote.appendChild(note);
+  el.append(head, prompt, pair, vote);
+  return el;
+}
+
+const list = document.getElementById("list");
+for (const it of ITEMS) list.appendChild(card(it));
+document.getElementById("mode").onchange = e => {
+  for (const el of list.children) el.style.display = !e.target.value || el.dataset.mode === e.target.value ? "" : "none";
+};
+document.getElementById("copy").onclick = async () => {
+  const text = JSON.stringify(votes);
+  const msg = document.getElementById("msg");
+  try { await navigator.clipboard.writeText(text); msg.textContent = "kopyalandı -- sohbete yapıştır"; }
+  catch (e) { prompt("Kopyala:", text); }
+};
+save();
+</script>
+</body>
+</html>

@@ -7,6 +7,7 @@ kayba sayilan hedefler (hikayede her gercek token, matematikte cevap ve EOS).
 
 Model kurucu ayarlari (model_kw) paketin "config" alanina model.config() olarak yazilir; surdurmede config birebir
 ayni olmali.  Adam, weight decay YOK (model_18'den; kullanici, 24 Eylul: "weight decay sanki anlamsiz gerek yok").
+weight_decay > 0 (egitim denemesi L1): AdamW, decay YALNIZ hareket (start/finish) ve attention matrislerinde.
 KOSU ARKA PLANDA (kural 8): `start` hemen doner, ilerleme `show_log` ile OKUNUR; her kosu kendi gunluk.txt'sine EKLER.
 """
 from __future__ import annotations
@@ -14,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import re
 import shutil
 import threading
 import time
@@ -26,7 +28,8 @@ from model_19 import PointRelation
 LR = 0.002
 BATCH = 64
 RUNS = {}
-MUST_MATCH = ("arch", "config", "T", "batch", "lr", "data_fingerprint", "vocab")   # surdurmede birebir ayni
+MUST_MATCH = ("arch", "config", "T", "batch", "lr", "data_fingerprint", "vocab", "weight_decay")   # surdurmede ayni
+DECAY = re.compile(r"^(moves\.\d+\.(start|finish)|attns\.\d+\.W_(q|k|v|o|qc))$")   # L1: agirlik buyumesi burada olculdu
 SHAPES = 8           # trim: boylar bu kadar basamaga yuvarlanir (torch.compile her batch'te yeniden derlemesin)
 HEALTH_PROBE = 64    # olcut saglik vermiyorsa (matematik) model.health bu kadar egitim penceresinde olculur
 # Parca basina gradyan normu, olcum adimlarinda (ilk eslesen onek): olu parca ve patlama gorunsun.
@@ -159,14 +162,19 @@ def _grad_norms(model):
 
 def _header(record):
     return ("  step     loss    train    heldout      ppl  "
-            + "".join(f"{k:>12}" for k in record["heldout_diag"]) + "       s")
+            + "".join(f"{k:>{_width(k)}}" for k in record["heldout_diag"]) + "       s")
+
+
+def _width(key):
+    """Sutun genisligi: en az 12, uzun ad (cikarim_gorulmemis) bir bosluk birakir -- yapismasin."""
+    return max(12, len(key) + 1)
 
 
 def _line(record, elapsed, mark=""):
     s = record.get("eval_sec")
     return (f"{record['step']:6d}  {record['loss']:7.3f}  {record['train_acc']:7.4f}  "
             f"{record['heldout_acc']:9.4f}  {_ppl(record['heldout_ce'])}  "
-            + "".join(f"{v:12.4f}" for v in record["heldout_diag"].values())
+            + "".join(f"{v:{_width(k)}.4f}" for k, v in record["heldout_diag"].items())
             + f"  {elapsed:6.0f}{mark}" + (f"  olcum {s['train'] + s['heldout']:.1f} sn" if s else "")
             + (f"  lr {record['lr_now']:.2e}" if record.get("decay_start") is not None or record.get("warmup") else ""))
 
@@ -189,7 +197,7 @@ def _health_line(h, grads=None, timing=None):
             k + 1, mean(h["attn%d_ent" % k]), mean(h["attn%d_first" % k]), mean(h["attn%d_dist" % k]),
             " m " + "/".join("%+.3f" % x for x in h["attn%d_m" % k]) if "attn%d_m" % k in h else ""))
         k += 1
-    new = [("embed_shift", "|dE|"), ("readout", "|R_PC|"), ("chain_sim", "|R_CC|")]
+    new = [("embed_shift", "|dE|"), ("readout", "|R_PC|"), ("chain_sim", "|R_CC|"), ("induction_q", "|W_qc|")]
     if any(a in h for a, _ in new):
         s.append("yeni " + " ".join("%s %.3f" % (lab, h[a]) for a, lab in new if a in h))
     s.append("cikis %d kelime ent %.2f" % (h["pred_distinct"], h["pred_ent"]))
@@ -209,16 +217,28 @@ def _note(run, record, elapsed, mark=""):
         run.note(_health_line(record["health"], record.get("grads"), record.get("eval_sec")))
 
 
+def _optimizer(model, lr, weight_decay):
+    """weight_decay 0: Adam, butun parametreler (zemin).  > 0: AdamW; decay YALNIZ DECAY'e uyanlarda -- kelime basina
+    tablolar (lam_w, beta_w), olcekler (S_*) ve gate disarida: seyrek gradyanli tablolar sifira cekilmesin."""
+    if not weight_decay:
+        return torch.optim.Adam(model.parameters(), lr=lr)
+    named = list(model.named_parameters())
+    decay = [p for n, p in named if DECAY.match(n)]
+    rest = [p for n, p in named if not DECAY.match(n)]
+    return torch.optim.AdamW([{"params": decay, "weight_decay": weight_decay}, {"params": rest, "weight_decay": 0.0}],
+                             lr=lr)
+
+
 def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch, eval_every, save_every, weights_every=100,
          resume=None, compile=False, vocab=None, extra=None, warmup=0, decay_start=None, decay_floor=0.1, decompose=True,
-         model_kw=None):
+         weight_decay=0.0, model_kw=None):
     torch.manual_seed(seed)
     model = PointRelation(n_vocab, seed=seed, **(model_kw or {})).to(device)
     loss_fn = torch.compile(model.loss) if compile else model.loss
     if compile:
         torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 2 * SHAPES)
         run.note("torch.compile ACIK -- ilk adim DERLEME yuzunden yavas")
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = _optimizer(model, lr, weight_decay)
     sampler = torch.Generator(device="cpu").manual_seed(seed)
 
     questions, filled_mask, targets_mask = (x.cpu() for x in data)
@@ -226,7 +246,7 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch, eval_every,
     assert max_length <= model.t_max, f"dizi {max_length} token > t_max {model.t_max}"
     n_params = sum(p.numel() for p in model.parameters())
     fixed = dict(extra or {}, arch=model.arch, config=model.config(), n=n_vocab, lr=lr, seed=seed, batch=batch,
-                 T=max_length, n_params=n_params, compile=compile, warmup=int(warmup),
+                 T=max_length, n_params=n_params, compile=compile, warmup=int(warmup), weight_decay=float(weight_decay),
                  decay_start=None if decay_start is None else int(decay_start),
                  decay_end=None if decay_start is None else int(steps),
                  decay_floor=None if decay_start is None else float(decay_floor),
@@ -258,6 +278,12 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch, eval_every,
     new_parts = [k for k in ("embed", "readout", "chain_sim", "distance") if fixed["config"][k]]
     if len(fixed["config"]["attn_after"]) > 1:
         new_parts.append("ikinci attention")
+    if fixed["config"].get("induction_query"):
+        new_parts.append("induction sorgusu")
+    if fixed["config"].get("gate_sim") is False:
+        new_parts.append("gate'te benzerlik YOK")
+    if weight_decay:
+        run.note(f"AdamW  weight decay {weight_decay} YALNIZ hareket ve attention matrislerinde (DECAY)")
     run.note(f"arch {model.arch}  config {fixed['config']}  yeni parcalar: {', '.join(new_parts) or 'YOK (zemin)'}  "
              f"parametre {n_params:,}")
     run.note(f"batch {batch}   epok = {n_questions / batch:,.0f} adim   veri izi {fixed['data_fingerprint']}   olcum her "
@@ -378,6 +404,8 @@ def _decompose_backup(run, model, vocab, metric, step):
         vocab = list(vocab)
         if DG.is_math(vocab):
             prompts, tag = DG.package_prompts(None, vocab)
+        elif DG.is_bpe(vocab):                             # Turkce iliski verisi: olcutun sinav sorulari, token'lari hazir
+            prompts, tag = [list(p) for p in getattr(metric, "probes", ())], "_tr"
         else:
             prompts, tag = DG.prompt_set(getattr(metric, "probes", ())), ""
         stories = DG.compute(model, vocab, f"{run.name} t{step}", prompts, DG.STEPS, log=lambda s: None)
@@ -408,7 +436,7 @@ def _run_safe(run, **settings):
 
 def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=None, extra=None, lr=LR, steps=20000,
           seed=0, batch=BATCH, eval_every=100, save_every=1000, weights_every=100, resume=None, compile=True, vocab=None,
-          warmup=0, decay_start=None, decay_floor=0.1, decompose=True, **model_kw):
+          warmup=0, decay_start=None, decay_floor=0.1, decompose=True, weight_decay=0.0, **model_kw):
     """ARKA PLANDA baslatir, HEMEN doner (kural 8).
 
     data        (questions, filled_mask, targets_mask)
@@ -420,7 +448,8 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
     resume      tam yedekten KALDIGI YERDEN (kural 1: uzatma surdurmedir); config, veri ya da plan tutmazsa BASLAMAZ
     warmup      ilk kac adim dogrusal isinma (0: yok)
     decay_start LR sogutmasi (None: sabit): decay_start'tan steps'e cosine, lr'den lr x decay_floor'a
-    decompose   her tam yedekte ve bitiste decompose_19 (varsayilan ACIK; egitimin yorungesine dokunmaz)"""
+    decompose   her tam yedekte ve bitiste decompose_19 (varsayilan ACIK; egitimin yorungesine dokunmaz)
+    weight_decay 0: Adam (zemin).  > 0: AdamW, yalniz DECAY'e uyan parametrelerde (egitim denemesi L1)"""
     old = RUNS.get(run_name)
     if old is not None and old.alive:
         raise RuntimeError(f"{run_name} hala kosuyor -- once stop('{run_name}')")
@@ -436,7 +465,7 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
         data=data, n_vocab=n_vocab, metric=metric, device=device, lr=lr, steps=steps, seed=seed, batch=batch,
         eval_every=eval_every, save_every=save_every, weights_every=weights_every, resume=resume, compile=compile,
         vocab=vocab, extra=extra, warmup=warmup, decay_start=decay_start, decay_floor=decay_floor, decompose=decompose,
-        model_kw=model_kw))
+        weight_decay=weight_decay, model_kw=model_kw))
     run.thread.start()
     return f"{run_name} basladi" + (f"  ({os.path.basename(resume)}'den)" if resume else "")
 

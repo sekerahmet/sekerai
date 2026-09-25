@@ -66,9 +66,23 @@ NOT_NAMES = {"The", "He", "She", "They", "It", "One", "When", "But", "Then", "So
              "Now", "Oh", "Hello", "Hi", "Please", "Don't", "Why", "How", "Where"}
 
 
+def is_bpe(vocab):
+    """BPE sozlugu (data_tr_19): kelime basi token'lari ▁ ile baslar."""
+    return any(t.startswith("▁") for t in vocab[:200] if t)
+
+
 def is_math(vocab):
-    """Matematik sozlugu: '=' var, bilinmeyen token yok."""
-    return "=" in vocab and DS.UNK_TOKEN not in vocab
+    """Matematik sozlugu: '=' var, bilinmeyen token yok, BPE degil."""
+    return "=" in vocab and DS.UNK_TOKEN not in vocab and not is_bpe(vocab)
+
+
+def detok(ids, vocab):
+    """Token kimlikleri -> okunur metin.  BPE'de ▁ bosluktur; <eos> hikaye ayiracina doner."""
+    if not is_bpe(vocab):
+        return DS.decode(np.array(ids), vocab)
+    text = "".join("\n---\n" if vocab[i] == DS.EOS_TOKEN else "" if vocab[i] == DS.PAD_TOKEN else vocab[i]
+                   for i in ids)
+    return text.replace("▁", " ").strip()
 
 
 def cache_key(prompts, steps):
@@ -165,7 +179,7 @@ def compute(m, vocab, name, prompts, steps=STEPS, log=print):
                 if k in r:
                     r[k] = round(r[k], 4)
         stories.append({"model": name, "label": label, "prompt": prompt, "tokens": [vocab[x] for x in tl],
-                        "n_prompt": n_prompt, "text": DS.decode(np.array(tl[n_prompt:]), vocab), "rows": rows,
+                        "n_prompt": n_prompt, "text": detok(tl[n_prompt:], vocab), "rows": rows,
                         "runs": copy_runs(rows, n_prompt)})
         log("  %s | %s: %d secim, %.0f sn" % (name, label, len(rows), time.time() - t0))
     return stories
@@ -247,7 +261,7 @@ def read(m, vocab, name, prompts, steps=STEPS, log=print):
         tokens, n_prompt = DC.greedy(m, prompt, vocab, ix, steps)
         tl = tokens.tolist()
         out.append({"model": name, "label": label, "prompt": prompt, "tokens": [vocab[x] for x in tl], "n_prompt": n_prompt,
-                    "text": DS.decode(np.array(tl[n_prompt:]), vocab),
+                    "text": detok(tl[n_prompt:], vocab),
                     "eos": len(tl) > n_prompt and tl[-1] == ix[DS.EOS_TOKEN]})
     log("  %s: %d istem okundu" % (name, len(prompts)))
     return out
@@ -357,6 +371,68 @@ def headline(S):
         100 * x["narrow"], 100 * x["tight"], 100 * x["far"], x["rep"], x["loops60"], x["stories"])
 
 
+GROUPS = (("zincir", lambda k: k.startswith("chain_")), ("katman 0", lambda k: k == "layer_0"),
+          ("attention", lambda k: "_head_" in k), ("katman 1-3", lambda k: k.startswith("layer_") and k != "layer_0"),
+          ("R_PC", lambda k: k == "readout"))
+
+
+def part_groups(r):
+    """Satirin parcalari gruplara toplanir (secilen - ikinci, log p); defter (cache_shift) ayri grup."""
+    g = {name: sum(v for k, v in r["parts"].items() if f(k)) for name, f in GROUPS if any(f(k) for k in r["parts"])}
+    g["defter"] = r.get("cache_shift", 0.0)
+    return g
+
+
+def loop_anatomy(S):
+    """Dongu anatomisi (betimleyici): kopya icinde / disinda gruplarin ortalama payi ve kopya kaniti (chain_same,
+    attn_same); her hikayede ilk kosunun GIRISI -- tekrari baslatan secim -- ve onu en cok iten uc grup."""
+    rows_in = [r for s in S for r in s["rows"] if r["copy"] >= COPY]
+    rows_out = [r for s in S for r in s["rows"] if r["copy"] < COPY]
+    if not rows_in or not rows_out:
+        return ["  dongu anatomisi: kopya icinde %d, disinda %d secim -- karsilastirma yok" % (len(rows_in), len(rows_out))]
+    names = list(part_groups(rows_in[0]))
+    mean = lambda rows, k: np.mean([part_groups(r)[k] for r in rows])
+    n_gen = sum(len(s["rows"]) for s in S)
+    L = ["  dongu anatomisi (secilen - ikinci, log p; kopya >= %d; uretimin %%%.0f'i kopya icinde):"
+         % (COPY, 100 * len(rows_in) / max(n_gen, 1)),
+         "    %-13s%s   chain_same  attn_same      p" % ("", "".join("%11s" % k for k in names))]
+    for lab, rows in (("kopya icinde", rows_in), ("disinda", rows_out)):
+        L.append("    %-13s%s   %+9.2f  %+9.2f   %.2f   n %d" % (
+            lab, "".join("%+11.2f" % mean(rows, k) for k in names), np.mean([r["chain_same"] for r in rows]),
+            np.mean([r["attn_same"] for r in rows]), np.mean([r["p"] for r in rows]), len(rows)))
+    for s in S:
+        if not s["runs"]:
+            continue
+        a, e, period = s["runs"][0]
+        r = next((x for x in s["rows"] if x["t"] == a - 1), None)
+        if r is None:
+            continue
+        top = sorted(part_groups(r).items(), key=lambda kv: -abs(kv[1]))[:3]
+        L.append("    %-9s giris uretimin %3d. token'i  donem %-4s kosu %3d token   '%s' > '%s' fark %.2f   itenler %s" % (
+            s["label"], a - s["n_prompt"] + 1, period, e - a, r["a"], r["b"], r["margin"],
+            "  ".join("%s %+.2f" % kv for kv in top)))
+    return L
+
+
+def repeat_profile(seqs, n=4, kmax=4):
+    """Tekrar profili.  seqs: [(token'lar, baslangic)] -- yalniz baslangic ve sonrasindaki token'lar sayilir.  Son n
+    token'lik parca daha once k kez gectiyse (k = kmax: kmax ve fazlasi), sonraki token son gecisin devamini tekrarladi
+    mi.  -> {k: (tekrarladi, firsat)}.  Altin metin ve uretilen metin ayni olcuyle: veri k buyudukce tekrari azaltiyor
+    mu, model artiriyor mu."""
+    out = {k: [0, 0] for k in range(1, kmax + 1)}
+    for s, start in seqs:
+        seen = {}
+        for t in range(n - 1, len(s) - 1):
+            g = tuple(s[t - n + 1:t + 1])
+            prev = seen.setdefault(g, [])
+            if prev and t + 1 >= start:
+                k = min(len(prev), kmax)
+                out[k][1] += 1
+                out[k][0] += s[t + 1] == s[prev[-1] + 1]
+            prev.append(t)
+    return {k: tuple(v) for k, v in out.items()}
+
+
 def is_name(w):
     return bool(re.fullmatch(r"[A-Z][a-z]+", w)) and w not in NOT_NAMES
 
@@ -399,6 +475,7 @@ def summary(stories):
             L.append("  gate'in girdileri, kopya icinde / disinda: yon %+.2f / %+.2f   benzerlik %+.2f / %+.2f" % (
                 np.mean([r["gate_dir"] for r in cp]), np.mean([r["gate_dir"] for r in nc]),
                 np.mean([r["gate_sim"] for r in cp]), np.mean([r["gate_sim"] for r in nc])))
+        L += loop_anatomy(S)
         for s in S:
             L.append("  %-10s secim %3d  dar %2d  kopya icinde %3d  kosu %d" % (
                 s["label"], len(s["rows"]), sum(r["margin"] < NARROW for r in s["rows"]),

@@ -153,8 +153,11 @@ def greedy(m, prompt, vocab, token_index, steps=60, forced=None):
     (matematikte rakamlar boslukla ayrik yazilir: "4 7 2 + 1 8 2 =")."""
     dev = m.P.device
     unk = token_index.get(DS.UNK_TOKEN)
-    w = [token_index[DS.EOS_TOKEN]] + [token_index[x] if unk is None else token_index.get(x, unk)
-                                       for x in DS.tokenize(DS.normalize(prompt))]
+    if isinstance(prompt, str):
+        body = [token_index[x] if unk is None else token_index.get(x, unk) for x in DS.tokenize(DS.normalize(prompt))]
+    else:                                                  # onceden token'lanmis (BPE: data_tr_19)
+        body = [int(x) for x in prompt]
+    w = [token_index[DS.EOS_TOKEN]] + body
     n_prompt = len(w)
     y = banned_ids(token_index, dev)
     for k in range(min(steps, m.t_max - len(w))):

@@ -117,13 +117,15 @@ class Attention(nn.Module):
     first: anahtar bir ONCEKI konumun ham zinciri (induction'in ilk basi gomulu).  Degilse q, k, v islenmis
     durumdan: onceki katmanlarin yazdigini okur (Oe13).  distance: bas basina mesafe egilimi m_h, 0'dan (Oe14)."""
 
-    def __init__(self, d, heads, dim, gen, first, distance):
+    def __init__(self, d, heads, dim, gen, first, distance, induction=False):
         super().__init__()
         self.heads, self.dim, self.first = heads, dim, first
         init = lambda: nn.Parameter(torch.randn(heads * dim, d, generator=gen) / math.sqrt(d))
         self.W_q, self.W_k, self.W_v = init(), init(), init()
         self.W_o = nn.Parameter(torch.zeros(d, heads * dim))
         self.m = nn.Parameter(torch.zeros(heads)) if distance else None
+        # induction (C1): sorguya ham zincir, 0'dan.  Anahtar C_(j-1)'in son kelimesini tasiyor, sorgu C_m ile tasimiyordu
+        self.W_qc = nn.Parameter(torch.zeros(heads * dim, d)) if induction and first else None
 
     def forward(self, C, C_m):
         B, T, _ = C_m.shape
@@ -150,7 +152,10 @@ class Attention(nn.Module):
             k = torch.cat([torch.zeros_like(k[:, :1]), k[:, :-1]], 1)
         else:
             k = C_mn @ self.W_k.T
-        return self._split(C_mn @ self.W_q.T), self._split(k), self._split(C_mn @ self.W_v.T)
+        q = C_mn @ self.W_q.T
+        if self.W_qc is not None:
+            q = q + F.normalize(C, dim=-1) @ self.W_qc.T
+        return self._split(q), self._split(k), self._split(C_mn @ self.W_v.T)
 
     def _bias(self, T, dtype, device):
         """(heads, T, T): -m_h (t - j), gelecek -inf.  Mesafe egilimi yoksa None (yalniz nedensel)."""
@@ -170,12 +175,13 @@ class Ledger(nn.Module):
     gelen kelime (nxt_j = w_(j+1)) oy alir.  Butun gecmis (Oe3: R_CC her j'den gradyan alir).
     sim(t,j) = cos(norm(Ĉ_t + R_CC(Ĉ_t)), Ĉ_j): sinirli (Oe2).  gate = sigmoid(Ĉ_m.g_d + g_s max_j sim + g_0)."""
 
-    def __init__(self, d, skip, s_c_init, gate_0_init, relation):
+    def __init__(self, d, skip, s_c_init, gate_0_init, relation, gate_sim=True):
         super().__init__()
         self.skip = skip
         self.S_c = nn.Parameter(torch.tensor(float(s_c_init)))        # benzerlik keskinligi
         self.gate_d = nn.Parameter(torch.zeros(d))                      # gate'in 1. girdisi: durumun yonu
-        self.gate_s = nn.Parameter(torch.zeros(()))                     # 2. girdisi: en yuksek benzerlik
+        # 2. girdisi: en yuksek benzerlik.  gate_sim=False (R1): yok -- tekrarda sim ~ 1 gate'i aciyordu
+        self.gate_s = nn.Parameter(torch.zeros(())) if gate_sim else None
         self.gate_0 = nn.Parameter(torch.tensor(float(gate_0_init)))
         self.relation = relation                                        # R_CC ya da None
 
@@ -196,7 +202,8 @@ class Ledger(nn.Module):
 
     def gate_inputs(self, C_m, sim_max):
         """-> (yon payi, benzerlik payi): gate = sigmoid(ikisinin toplami + g_0) (Oe9: ayri okunur)."""
-        return F.normalize(C_m, dim=-1) @ self.gate_d, self.gate_s * sim_max
+        sim_part = self.gate_s * sim_max if self.gate_s is not None else torch.zeros_like(sim_max)
+        return F.normalize(C_m, dim=-1) @ self.gate_d, sim_part
 
     def gate(self, C_m, sim_max, valid):
         a, b = self.gate_inputs(C_m, sim_max)
@@ -232,9 +239,10 @@ class PointRelation(nn.Module):
                  lam_w_init=LAM_W_INIT, beta_w_init=BETA_W_INIT, start_norm=START_NORM, s_v_init=S_V_INIT,
                  load_balance=LOAD_BALANCE, ledger=True, cache_skip=CACHE_SKIP, s_c_init=S_C_INIT,
                  gate_0_init=GATE_0_INIT, rank=RANK, embed=False, readout=False, chain_sim=False, distance=False,
-                 seed=0):
+                 induction_query=False, gate_sim=True, seed=0):
         """Yeni parcalar: embed (E), readout (R_PC), chain_sim (R_CC), distance (mesafe egilimi), attn_after'in
-        ilkinden sonrakiler (ikinci attention).  Varsayilan: hepsi kapali, zemin."""
+        ilkinden sonrakiler (ikinci attention), induction_query (C1: ilk attention'in sorgusuna ham zincir).
+        gate_sim=False (R1): defter gate'inde benzerlik girdisi yok.  Varsayilan: zemin."""
         super().__init__()
         attn_after = tuple(sorted(int(i) for i in attn_after))
         assert all(0 <= i < layers for i in attn_after), (attn_after, layers)
@@ -244,7 +252,8 @@ class PointRelation(nn.Module):
                             t_max=t_max, lam=lam, lam_w_init=lam_w_init, beta_w_init=beta_w_init,
                             start_norm=start_norm, s_v_init=s_v_init, load_balance=load_balance, ledger=ledger,
                             cache_skip=cache_skip, s_c_init=s_c_init, gate_0_init=gate_0_init, rank=rank,
-                            embed=embed, readout=readout, chain_sim=chain_sim, distance=distance, seed=seed)
+                            embed=embed, readout=readout, chain_sim=chain_sim, distance=distance,
+                            induction_query=induction_query, gate_sim=gate_sim, seed=seed)
         self.n, self.d_order, self.d_content, self.t_max = n, d_order, d_content, t_max
         self.d = d = d_order + d_content
         self.lam, self.load_balance, self.attn_after = float(lam), float(load_balance), attn_after
@@ -256,7 +265,8 @@ class PointRelation(nn.Module):
         self.register_buffer("P", P / P.norm(dim=-1, keepdim=True))
         self.moves = nn.ModuleList(MoveLayer(d, vectors, active, gen, start_norm, s_v_init) for _ in range(layers))
         self.attns = nn.ModuleList(
-            Attention(d, attn_heads, attn_dim, gen if k == 0 else part(3 + k), first=k == 0, distance=distance)
+            Attention(d, attn_heads, attn_dim, gen if k == 0 else part(3 + k), first=k == 0, distance=distance,
+                      induction=induction_query)
             for k in range(len(attn_after)))
         lam0 = (lam_w_init - LAM_W_MIN) / (1 - LAM_W_MIN)
         self.lam_w = nn.Parameter(torch.full((n, d_content), math.log(lam0 / (1 - lam0))))
@@ -274,8 +284,8 @@ class PointRelation(nn.Module):
                 self.embed_delta = nn.Parameter(torch.randn(n, rank, generator=part(1)) / math.sqrt(rank))
                 self.embed_up = nn.Parameter(torch.zeros(d, rank))
         self.readout = Relation(d, rank, part(2)) if readout else None   # R_PC
-        self.ledger = (Ledger(d, cache_skip, s_c_init, gate_0_init, Relation(d, rank, part(3)) if chain_sim else None)
-                       if ledger else None)
+        self.ledger = (Ledger(d, cache_skip, s_c_init, gate_0_init, Relation(d, rank, part(3)) if chain_sim else None,
+                              gate_sim=gate_sim) if ledger else None)
 
     def config(self):
         return dict(self._config)
@@ -438,7 +448,7 @@ class PointRelation(nn.Module):
           exp_S_v, exp_S_p, lam_c           ogrenilen olcekler, icerik sonmesi
           gate, gate_dir, gate_sim, exp_S_c, ledger_eff   defter: gate ve iki girdisi, etkin komsu sayisi (Oe3)
           attn<k>_ent / _first / _dist / _m bas basina: entropi, konum 0 payi, bakis mesafesi, mesafe egilimi
-          embed_shift, readout, chain_sim   yeni parcalarin boyu (Oe6)
+          embed_shift, readout, chain_sim, induction_q   yeni parcalarin boyu (Oe6)
           pred_distinct, pred_ent           en yuksek puani alan farkli kelime, tahmin entropisi"""
         a = mask.bool()
         ins, h = self.inspect(tokens), {}
@@ -472,6 +482,8 @@ class PointRelation(nn.Module):
             h["readout"] = self.readout.size()
         if self.ledger is not None and self.ledger.relation is not None:
             h["chain_sim"] = self.ledger.relation.size()
+        if self.attns and self.attns[0].W_qc is not None:
+            h["induction_q"] = float(self.attns[0].W_qc.norm())
         lp = torch.log_softmax(self.scoreboard(tokens), -1)[a]
         h["pred_distinct"] = int(lp.argmax(-1).unique().numel())
         h["pred_ent"] = float(-(lp.exp() * lp).sum(-1).mean())

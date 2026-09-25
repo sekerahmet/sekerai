@@ -7,11 +7,30 @@
     "data_stories.py": "data_stories_19.py olarak AYNEN kopyalandi.",
     "decompose.py": "decompose_19.py olarak yeniden yazildi: parcalar model_19'a gore (E'li zincir, iki attention, R_PC, R_CC'li defter). logp_cut ve supported TASINMADI: model_18'in mudahale ve ayar kapisi.",
     "diagnose.py": "diagnose_19.py olarak tasindi: detail/summary yeni parcalarla; matematik istem seti, --prompts eklendi; gpu_same (sonda metni kiyasi) TASINMADI.",
-    "konus.py": "TASINMADI: okuma diagnose_19 --read ile.",
-    "konus.bat": "TASINMADI: konus.py'nin kisayolu.",
+    "konus.py": "konus_19.py olarak tasindi (25 Eylul, kullanici: 'bir konus py ve konus bat yazar ısın'): PV yerine PointRelation, data_stories_19, Drive klasoru model_19; ozet satiri config'ten (D, yeni parcalar, deneme turu).",
+    "konus.bat": "konus_19.bat olarak tasindi: konus_19.py'yi calistirir.",
+    "notebook_stories.ipynb": "notebook_stories_19.ipynb olarak kuruldu (25 Eylul): HAZIRLIK (v4 onbellegi, metric), SURDUR, NABIZ, HIKAYE YAZ, SONUC, DURDUR ebeveynden; 27 eski kosu hucresi ve CONFIGS TASINMADI. Iki tur deneme (trial) ve kosu hucresi kalibi notebook_19'dan; H1 KARARI yeni (onkayit HIKAYE).",
     "tests.py": "tests_19.py olarak yeniden yazildi: model, decompose, diagnose ve egitim kapilari model_19'a gore; ebeveynin PV secenek kapilari (zincir turleri, Q, direct_chain, eski paketler) o seceneklerle birlikte dustu.",
     "train.py": "train_19.py olarak tasindi: model ayarlari config() ile pakete, MUST_MATCH listesi yerine config esitligi; isinma eklendi; olcut saglik vermezse model.health egitim sondasinda; BEFORE_FIELD/SWITCHED ve eski paket uyumlulugu TASINMADI."
   },
-  "satir": {"data.py": 1, "data_stories.py": 1, "decompose.py": 1, "diagnose.py": 1, "konus.bat": 1, "konus.py": 1,
-            "model_19.py": 576, "tests.py": 1, "train.py": 1}
+  "satir": {
+    "data.py": 1,
+    "data_stories.py": 1,
+    "decompose.py": 1,
+    "diagnose.py": 1,
+    "konus.bat": 1,
+    "konus.py": 1,
+    "model_19.py": 576,
+    "tests.py": 1,
+    "train.py": 1
+  },
+  "diger_kaynak": {
+    "model_16/veri_16.py": "tr_graph_19.py -- icerik birebir, yalniz modul adlari (izler data_tr_19.REF_* ile sinanir)",
+    "model_16/metin_16.py": "tr_text_19.py -- icerik birebir",
+    "model_16/korpus_16.py": "tr_corpus_19.py -- icerik birebir",
+    "model_16/taban_16.py": "tr_splits_19.py -- icerik birebir",
+    "model_16/jeton_16.py": "tr_chars_19.py -- icerik birebir (korpus ve bolmeler sabitlerini kullaniyor)",
+    "model_16/birim_16.py + olcme_16.py + ayar_16.py": "data_tr_19.py'ye alinanlar: belgeler/sirala (documents/order), sinav yuzeyi (surfaces), cevap kurali (correct), AYAR (SETTINGS). Kok+ek birimleri (ek_16, birim_16'nin geri kalani) TASINMADI: kullanici BPE secti.",
+    "not": "Kullanici, 25 Eylul: 'Veri 16 en düzgün hali olabilir onu bpe tokenizer kullanabiliriz'. Kopya kapisi yalniz ebeveyn model_18'i denetler; bu dosyalarin dogrulugu parca/sinav izleriyle (model_16'nin kendi kodunun urettigiyle ayni) sinanir."
+  }
 }
