@@ -15,7 +15,7 @@ torch.set_num_threads(1)
 
 import data_20 as D  # noqa: E402
 import train_20 as TR  # noqa: E402
-from model_20 import NextTokenModel, deviation, scale_for  # noqa: E402
+from model_20 import BigramModel, deviation, scale_for  # noqa: E402
 
 RESULTS = []
 FINGERPRINT = "90024739fb8f"      # veri degisirse burasi bilerek guncellenir
@@ -145,9 +145,9 @@ def reference_logits(PF, shift, W, scale, ids):
 
 def perturbed(n=12, d=6, seed=1, **kw):
     g = torch.Generator().manual_seed(seed)
-    m = NextTokenModel(n, d=d, **kw)
+    m = BigramModel(n, d=d, **kw)
     with torch.no_grad():
-        m.next.W.copy_(torch.randn(d, d, generator=g))
+        m.next.W_next.copy_(torch.randn(d, d, generator=g))
         if m.tokens.learn:
             m.tokens.shift.copy_(0.3 * torch.randn(n, d, generator=g))
     return m, g
@@ -176,7 +176,7 @@ def toy_wall(scale, grid=3600):
 
 def toy(learn, steps=3000):
     """Konusmadaki ornek: 4 token, 2 boyut, 0/90/180/270 derece; Alice->Smith, Tom->Smith, Smith->'s."""
-    m = NextTokenModel(4, d=2, learn_points=learn)
+    m = BigramModel(4, d=2, learn_points=learn)
     with torch.no_grad():
         m.tokens.fixed_points.copy_(toy_points().float())
     inputs, targets = torch.tensor([p[0] for p in TOY_PAIRS]), torch.tensor([p[1] for p in TOY_PAIRS])
@@ -191,7 +191,7 @@ def toy(learn, steps=3000):
 
 def t_model():
     n = 12
-    m = NextTokenModel(n, d=6)
+    m = BigramModel(n, d=6)
     ids = torch.arange(n)
     want = math.log(0.99 * (n - 1) / 0.01)
     check("model: baslangicta PL = PF; scale = ln(0,99 (n-1) / 0,01), elle girilmez",
@@ -200,7 +200,7 @@ def t_model():
 
     before = m.logits(ids).detach()
     with torch.no_grad():
-        m.next.W.mul_(3.0)
+        m.next.W_next.mul_(3.0)
     after = m.logits(ids).detach()
     q = m.next(m.tokens.points()[ids]).detach()
     check("model: W'nin boyu skoru degistirmez (W x 3), q'nun boyu hep 1",
@@ -209,7 +209,7 @@ def t_model():
     for kw in (dict(learn_points=True), dict(learn_points=False)):
         m, g = perturbed(n, **kw)
         ids = torch.randint(0, n, (40,), generator=g)
-        ref = reference_logits(m.tokens.fixed_points, m.tokens.shift, m.next.W, m.scale, ids)
+        ref = reference_logits(m.tokens.fixed_points, m.tokens.shift, m.next.W_next, m.scale, ids)
         err = float((m.logits(ids).detach().double() - ref).abs().max())
         check("model: skor = tasarim formulu (bagimsiz float64 referans), %s" % ("ogrenilen" if kw["learn_points"] else "sabit"),
               err < 1e-5, "fark %.1e" % err)
@@ -219,7 +219,7 @@ def t_model():
     m.zero_grad()
     m.loss(inputs, targets)[1].backward()
     P = m.tokens.points().detach().double()
-    Wd = m.next.W.detach().double()
+    Wd = m.next.W_next.detach().double()
     pi = torch.softmax(reference_logits(m.tokens.fixed_points, m.tokens.shift.detach(), Wd, m.scale, inputs), -1)
     raw = P[inputs] @ Wd.T
     size = raw.norm(dim=-1, keepdim=True)
@@ -227,7 +227,7 @@ def t_model():
     g = m.scale * ((pi @ P) - P[targets])                         # s (p_ort - p_hedef): kuredeki q'ya gore
     g = (g - (g * qh).sum(-1, keepdim=True) * qh) / size          # norm'dan geri: yalniz q'ya dik kismi, 1/|Wp| ile
     formula = g.T @ P[inputs] / len(inputs)
-    err = float((m.next.W.grad.double() - formula).abs().max())
+    err = float((m.next.W_next.grad.double() - formula).abs().max())
     check("model: dL/dW = [s (p_ort - p_hedef)]_dik / |W p| . p_i^T (normdan gecen kural)", err < 1e-5, "fark %.1e" % err)
 
     m, _ = perturbed(n, learn_points=True, anchor=0.05)
@@ -241,7 +241,7 @@ def t_model():
     nv = len(d["vocab"])
     ok = []
     for name in ("fixed", "free"):
-        before = NextTokenModel(nv, **TR.SETTINGS[name]).tokens.fixed_points.clone()
+        before = BigramModel(nv, **TR.SETTINGS[name]).tokens.fixed_points.clone()
         m, curve = TR.train(name, inputs, targets, nv, steps=20, log_at=(0, 20))
         ok.append(torch.equal(m.tokens.fixed_points, before) and curve[-1]["nll"] < curve[0]["nll"])
         if name == "fixed":
@@ -250,7 +250,7 @@ def t_model():
             ok.append(float(m.tokens.shift.abs().max()) > 0 and float(deviation(m).max()) > 0)
     check("model: egitimde PF bit duzeyinde degismez; sabitte PL = PF, serbestte PL kayar; kayip iner", all(ok))
 
-    m = NextTokenModel(3, d=4)
+    m = BigramModel(3, d=4)
     with torch.no_grad():
         m.tokens.fixed_points.copy_(torch.eye(4)[:3])
         m.tokens.shift[0] = torch.tensor([math.cos(math.radians(17)) - 1, math.sin(math.radians(17)), 0, 0])
@@ -266,9 +266,85 @@ def t_model():
           abs(wall - floor) < 0.01 and free < 0.05, "sabit %.3f (duvar %.3f)  ogrenilen %.3f" % (wall, floor, free))
 
 
+def reference_sequence(m, ids):
+    """Adim 2 formulu, float64, modelden bagimsiz: a_tj = softmax_{j<=t}(s_att cos(W_query x_t, W_key x_j)), c_t = sum a_tj x_j,
+    skor = scale <norm(W_next x_t + W_context c_t), PL>."""
+    PL = m.tokens.fixed_points.double() + m.tokens.shift.detach().double()
+    PL = PL / PL.norm(dim=-1, keepdim=True)
+    x = PL[ids]
+    unit = lambda v: v / v.norm(dim=-1, keepdim=True)
+    lk = m.attention
+    q, k = unit(x @ lk.W_query.detach().double().T), unit(x @ lk.W_key.detach().double().T)
+    T = ids.shape[-1]
+    s = lk.scale * q @ k.transpose(-1, -2)
+    s = s.masked_fill(torch.ones(T, T, dtype=torch.bool).triu(1), float("-inf"))
+    a = torch.softmax(s, -1)
+    raw = x @ m.next.W_next.detach().double().T + (a @ x) @ lk.W_context.detach().double().T
+    return m.scale * unit(raw) @ PL.T, a
+
+
+def t_step2():
+    from model_20 import SequenceModel, T_MAX
+    n, d = 12, 6
+    g = torch.Generator().manual_seed(5)
+    ids = torch.randint(0, n, (3, 9), generator=g)
+
+    one, seq = BigramModel(n, d=d), SequenceModel(n, d=d, attention=False)
+    err = float((seq.logits(ids).detach() - one.logits(ids.reshape(-1)).detach().reshape(3, 9, n)).abs().max())
+    check("adim 2: attention kapaliyken her konumda Adim 1 ile ayni", err < 1e-6, "fark %.1e" % err)
+
+    on = SequenceModel(n, d=d, attention=True)
+    check("adim 2: baslangicta (W_context = 0) attention hicbir seyi degistirmez",
+          torch.equal(on.logits(ids).detach(), seq.logits(ids).detach()))
+    check("adim 2: attention olcegi = ln(0,99 (T_MAX-1) / 0,01)",
+          abs(on.attention.scale - math.log(0.99 * (T_MAX - 1) / 0.01)) < 1e-12, "%.3f" % on.attention.scale)
+
+    with torch.no_grad():
+        on.attention.W_context.copy_(torch.randn(d, d, generator=g))
+        on.tokens.shift.copy_(0.3 * torch.randn(n, d, generator=g))
+    ref, a_ref = reference_sequence(on, ids)
+    err = float((on.logits(ids).detach().double() - ref).abs().max())
+    a = on.attention.weights(on.tokens.points()[ids]).detach().double()
+    werr = float((a - a_ref).abs().max())
+    check("adim 2: skor (SDPA yolu) = tasarim formulu (bagimsiz float64); okuma agirliklari da ayni",
+          err < 1e-5 and werr < 1e-6 and float(a.triu(1).abs().max()) == 0 and float((a.sum(-1) - 1).abs().max()) < 1e-6,
+          "skor %.1e  agirlik %.1e" % (err, werr))
+
+    base = on.logits(ids).detach()
+    changed = ids.clone()
+    changed[:, 5] = (changed[:, 5] + 1) % n
+    after = on.logits(changed).detach()
+    check("adim 2: nedensellik -- konum 5 degisince 0-4 aynen kalir, 5 ve sonrasi degisir",
+          float((after[:, :5] - base[:, :5]).abs().max()) < 1e-6 and float((after[:, 5:] - base[:, 5:]).abs().max()) > 1e-3)
+
+    vocab = ["<pad>", "<eos>"] + [str(i) for i in range(n - 2)]
+    rows = [[1, 3, 4, 5, 1], [1, 6, 7, 1], [1, 8, 9, 10, 11, 3, 1]]
+    padded, mask = TR.pad(rows, vocab)
+    lp = on.logits(padded).detach()
+    alone = [on.logits(torch.tensor([r])).detach()[0] for r in rows]
+    err = max(float((lp[i, :len(r)] - alone[i]).abs().max()) for i, r in enumerate(rows))
+    nll = on.loss(padded, mask)[1].item()
+    parts = [F_ce(on.logits(torch.tensor([r[:-1]])).detach()[0], torch.tensor(r[1:])) for r in rows]
+    want = sum(p * (len(r) - 1) for p, r in zip(parts, rows)) / sum(len(r) - 1 for r in rows)
+    check("adim 2: sagdaki dolgu sonucu degistirmez; kayip yalniz gercek hedeflerin ortalamasi",
+          err < 1e-6 and abs(nll - want) < 1e-6, "fark %.1e  kayip %.6f / %.6f" % (err, nll, want))
+
+    data = D.build()
+    sids, smask = TR.sequences(data)
+    nv = len(data["vocab"])
+    before = SequenceModel(nv).tokens.fixed_points.clone()
+    m, curve = TR.train_seq("step2", sids, smask, nv, steps=20, log_at=(0, 20))
+    check("adim 2: egitimde PF bit duzeyinde degismez, W_context 0'dan ayrilir, kayip iner",
+          torch.equal(m.tokens.fixed_points, before) and curve[-1]["W_context"] > 0 and curve[-1]["nll"] < curve[0]["nll"])
+
+
+def F_ce(logits, targets):
+    return float(torch.nn.functional.cross_entropy(logits, targets))
+
+
 if __name__ == "__main__":
     print("tests (model_20)")
-    for f in (t_data, t_model):
+    for f in (t_data, t_model, t_step2):
         f()
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)
