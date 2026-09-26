@@ -3,6 +3,8 @@
 
 Bir konumdaki hesap yalniz toplama:
     C_m = C + katman 0 + attention 1 + katman 1 + katman 2 + attention 2 + katman 3
+norm_inputs (Oe15) acikken her girdi kureye iner (x <- x / |x|): o ana kadarki butun parcalar ayni sayiyla carpilir,
+toplam yine TAM; her parcanin carpani (factor) kaydedilir.
     puan(w) = P[w] . z,   z = 2 e^S_p C_m / |C_m|  +  R_PC(C)
 Bu yuzden iki kelimenin puan farki parcalara TAM ayrilir:
     s_a - s_b = 2 e^S_p / |C_m| * sum_parca <parca, P[a] - P[b]>  +  <R_PC(C), P[a] - P[b]>
@@ -43,16 +45,27 @@ def _relation_matrix(rel):
 @torch.no_grad()
 def forward_parts(m, tokens):
     """tokens (T,) -> butun konumlarin parcalari:
-         C (T,d); layers: katman basina ids, w (T,k), delta (T,d)
-         attns: attention basina after (katman), A (H,T,T), ov (H,T,d) bas h'nin j'den getirdigi, out (T,d)
+         C (T,d), C_factor (T,); layers: katman basina ids, w (T,k), delta (T,d), factor (T,)
+         attns: attention basina after (katman), A (H,T,T), ov (H,T,d) bas h'nin j'den getirdigi, out (T,d), factor
+         factor: parcanin C_m'ye girerken carpani (norm_inputs'un sonraki kure inisleri; kapaliyken 1)
          C_m (T,d) modelin kendi durumu; C_m_parts (T,d) parcalarin toplami; readout (T,d) R_PC(C) ya da None
          score (T,n) ham puan; logp (T,n) defterle karisik; defter: gate, gate_dir, gate_sim (T,), cache_w (T,T),
          cache_next (T,)
        Durum modelin KENDI cagrilariyla ilerler (secimler birebir onunki); parcalar yanda hesaplanir."""
     tok, T = tokens[None], tokens.shape[0]
     C = m.chain(tok)
-    C_m, R = C, {"C": C[0], "layers": [], "attns": []}
+    C_m, R = C, {"C": C[0], "C_factor": torch.ones(T, device=C.device), "layers": [], "attns": []}
+    factors = [R["C_factor"]]
+
+    def enter(x):
+        """Girdi kureye iner (Oe15): o ana kadar eklenen her parca ayni sayiyla olceklenir."""
+        if getattr(m, "norm_inputs", False):
+            s = 1 / x[0].norm(dim=-1).clamp_min(1e-12)
+            for f in factors:
+                f.mul_(s)
+
     for i, layer in enumerate(m.moves):
+        enter(C_m)
         D2 = layer._distance(C_m)
         if layer.active >= D2.shape[-1]:
             ids = torch.arange(D2.shape[-1], device=D2.device).expand(D2.shape)
@@ -61,16 +74,22 @@ def forward_parts(m, tokens):
             d, ids = D2.topk(layer.active, dim=-1, largest=False)
             w = torch.softmax(-d * layer.S_v.exp(), -1)
         delta = torch.einsum("tk,tkd->td", w[0], (layer.finish - layer.start)[ids[0]])
-        R["layers"].append({"ids": ids[0], "w": w[0], "delta": delta})
+        R["layers"].append({"ids": ids[0], "w": w[0], "delta": delta, "factor": torch.ones(T, device=C.device)})
+        factors.append(R["layers"][-1]["factor"])
         C_m = layer(C_m)[0]
         if i in m.attn_after:
             att = m.attns[m.attn_after.index(i)]
+            enter(C_m)
             A = att.weights(C, C_m)[0]
             v = (F.normalize(C_m, dim=-1) @ att.W_v.T)[0].view(T, att.heads, att.dim)
             ov = torch.einsum("dhk,jhk->hjd", att.W_o.view(-1, att.heads, att.dim), v)
-            R["attns"].append({"after": i, "A": A, "ov": ov, "out": torch.einsum("htj,hjd->td", A, ov)})
+            R["attns"].append({"after": i, "A": A, "ov": ov, "out": torch.einsum("htj,hjd->td", A, ov),
+                              "factor": torch.ones(T, device=C.device)})
+            factors.append(R["attns"][-1]["factor"])
             C_m = att(C, C_m)
-    parts = R["C"] + sum(L["delta"] for L in R["layers"]) + sum(a["out"] for a in R["attns"])
+    f = lambda x, s: x * s[:, None]
+    parts = (f(R["C"], R["C_factor"]) + sum(f(L["delta"], L["factor"]) for L in R["layers"])
+             + sum(f(a["out"], a["factor"]) for a in R["attns"]))
     score = m.point(C_m, C) @ m.P.T
     R.update(C_m=C_m[0], C_m_parts=parts, score=score[0],
              readout=None if m.readout is None else m.readout(C)[0])
@@ -111,17 +130,18 @@ def explain(m, R, tokens, t, a, b=None):
     scale = 2 * _mult(m) / float(C_m.norm())
     order, content = chain_terms(m, tokens, t)
     d_o = m.d_order
-    chain = scale * torch.stack([order @ u[:d_o], content @ u[d_o:]], 1)
+    chain = scale * float(R["C_factor"][t]) * torch.stack([order @ u[:d_o], content @ u[d_o:]], 1)
     out = {"parts": {"chain_order": float(chain[:, 0].sum()), "chain_content": float(chain[:, 1].sum())},
            "chain": chain, "vectors": [], "heads": [], "total": scale * float(C_m @ u)}
     for i, (layer, L) in enumerate(zip(m.moves, R["layers"])):
         ids = L["ids"][t]
-        c = scale * L["w"][t].double() * ((layer.finish - layer.start)[ids].double() @ u)
+        c = scale * float(L["factor"][t]) * L["w"][t].double() * ((layer.finish - layer.start)[ids].double() @ u)
         out["vectors"].append(torch.stack([ids.double(), L["w"][t].double(), c], 1))
         out["parts"]["layer_%d" % i] = float(c.sum())
         for k, att in enumerate(R["attns"]):
             if att["after"] == i:
-                heads = scale * att["A"][:, t, :t + 1].double() * (att["ov"][:, :t + 1].double() @ u)
+                heads = (scale * float(att["factor"][t]) * att["A"][:, t, :t + 1].double()
+                         * (att["ov"][:, :t + 1].double() @ u))
                 out["heads"].append(heads)
                 for h in range(heads.shape[0]):
                     out["parts"]["attn%d_head_%d" % (k, h)] = float(heads[h].sum())

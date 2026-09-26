@@ -23,19 +23,24 @@ import traceback
 
 import torch
 
+from looped_19 import LoopedRelation
 from model_19 import PointRelation
+
+ARCHS = {PointRelation.arch: PointRelation, LoopedRelation.arch: LoopedRelation}     # model_kw'de arch; verilmezse point_relation
 
 LR = 0.002
 BATCH = 64
 RUNS = {}
 MUST_MATCH = ("arch", "config", "T", "batch", "lr", "data_fingerprint", "vocab", "weight_decay")   # surdurmede ayni
-DECAY = re.compile(r"^(moves\.\d+\.(start|finish)|attns\.\d+\.W_(q|k|v|o|qc))$")   # L1: agirlik buyumesi burada olculdu
+DECAY = re.compile(r"^(moves\.\d+\.(start|finish)|attns\.\d+\.W_(q|k|v|o|qc)"      # L1: agirlik buyumesi burada olculdu
+                   r"|lookups\.\d+\.(start|finish)|find\.W_(q|k|v|o))$")             # LoopedRelation'da ayni roller
 SHAPES = 8           # trim: boylar bu kadar basamaga yuvarlanir (torch.compile her batch'te yeniden derlemesin)
 HEALTH_PROBE = 64    # olcut saglik vermiyorsa (matematik) model.health bu kadar egitim penceresinde olculur
 # Parca basina gradyan normu, olcum adimlarinda (ilk eslesen onek): olu parca ve patlama gorunsun.
 GRAD_PARTS = (("moves.", "hareket"), ("lam_w", "icerik"), ("beta_w", "icerik"), ("attns.0.", "attn1"),
               ("attns.", "attn2"), ("ledger.relation.", "R_CC"), ("ledger.", "defter"), ("readout.", "R_PC"),
-              ("embed_", "E"))
+              ("embed_", "E"), ("find.", "find"), ("lookups.", "lookup"), ("source_weights", "kaynak"), ("alpha", "alpha"),
+              ("gate_", "gate"))
 
 
 def trim(questions, filled_mask, targets_mask, shapes=SHAPES):
@@ -161,7 +166,7 @@ def _grad_norms(model):
 
 
 def _header(record):
-    return ("  step     loss    train    heldout      ppl  "
+    return ("  step   epok     loss    train    heldout      ppl  "
             + "".join(f"{k:>{_width(k)}}" for k in record["heldout_diag"]) + "       s")
 
 
@@ -172,7 +177,8 @@ def _width(key):
 
 def _line(record, elapsed, mark=""):
     s = record.get("eval_sec")
-    return (f"{record['step']:6d}  {record['loss']:7.3f}  {record['train_acc']:7.4f}  "
+    epoch = record["step"] * record["batch"] / record["windows"] if record.get("windows") else float("nan")
+    return (f"{record['step']:6d}  {epoch:5.2f}  {record['loss']:7.3f}  {record['train_acc']:7.4f}  "
             f"{record['heldout_acc']:9.4f}  {_ppl(record['heldout_ce'])}  "
             + "".join(f"{v:{_width(k)}.4f}" for k, v in record["heldout_diag"].items())
             + f"  {elapsed:6.0f}{mark}" + (f"  olcum {s['train'] + s['heldout']:.1f} sn" if s else "")
@@ -182,6 +188,8 @@ def _line(record, elapsed, mark=""):
 def _health_line(h, grads=None, timing=None):
     """Saglik sozlugu -> tek satir: hareketler, boy (Oe15), olcekler, defter (Oe3, Oe9), attention, yeni parcalarin
     boyu (Oe6), cikis, gradyan, dongu, olcum suresi."""
+    if "passes" in h:
+        return _health_line_looped(h, grads, timing)
     L = sum(1 for k in h if k.startswith("vec_all_"))
     mean = lambda x: sum(x) / len(x)
     s = ["saglik  hareket " + " ".join("%.0f/%.0f" % (h["vec_each_%d" % i], h["vec_all_%d" % i]) for i in range(L)),
@@ -211,6 +219,31 @@ def _health_line(h, grads=None, timing=None):
     return "  |  ".join(s)
 
 
+def _health_line_looped(h, grads=None, timing=None):
+    """LoopedRelation saglik satiri: gecis (durma kuraliyla), gecis basina degisim ve boy, lookup kullanimi, find,
+    kaynaklar."""
+    K = sum(1 for k in h if k.startswith("change_"))
+    s = ["saglik  gecis %.2f (K_MAX'a varan %%%.0f)" % (h["passes"], 100 * h["passes_at_max"]),
+         "degisim " + "/".join("%.3f" % h["change_%d" % k] for k in range(K)),
+         "boy C %.2f x %s" % (h["norm_C"], "/".join("%.1f" % h["norm_x_%d" % k] for k in range(K))),
+         "lookup " + " ".join("%.0f/%.0f olu %d" % (h["vec_each_%d" % i], h["vec_all_%d" % i], h["dead_%d" % i])
+                         for i in range(2)),
+         "find ent " + "/".join("%.2f" % h["attn_ent_%d" % k] for k in range(K))
+         + " mesafe " + "/".join("%.1f" % h["attn_dist_%d" % k] for k in range(K))
+         + " m " + "/".join("%+.3f" % v for v in h["attn_m"]),
+         "ayni yon %.2f" % h["same_dir"] + ("  alpha " + "/".join("%.3f" % v for v in h["alpha"]) if "alpha" in h else ""),
+         "kaynak a %+.3f b %+.3f  defter komsu %.1f e^S_c %.1f" % (h["src_a"], h["src_b"], h["ledger_eff"], h["exp_S_c"]),
+         "e^S_p %.1f  |dE| %.3f |R_PC| %.2f |R_CC| %.2f" % (h["exp_S_p"], h["embed_shift"], h["readout"], h["chain_sim"])]
+    if "gate" in h:
+        s.append("gate %.3f" % h["gate"])
+    s.append("cikis %d kelime ent %.2f" % (h["pred_distinct"], h["pred_ent"]))
+    if grads:
+        s.append("grad " + " ".join("%s %.2g" % kv for kv in sorted(grads.items())))
+    if timing:
+        s.append("olcum sn train %.1f heldout %.1f" % (timing["train"], timing["heldout"]))
+    return "  |  ".join(s)
+
+
 def _note(run, record, elapsed, mark=""):
     run.note(_line(record, elapsed, mark))
     if record.get("health") is not None:
@@ -233,7 +266,8 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch, eval_every,
          resume=None, compile=False, vocab=None, extra=None, warmup=0, decay_start=None, decay_floor=0.1, decompose=True,
          weight_decay=0.0, model_kw=None):
     torch.manual_seed(seed)
-    model = PointRelation(n_vocab, seed=seed, **(model_kw or {})).to(device)
+    kw = dict(model_kw or {})
+    model = ARCHS[kw.pop("arch", PointRelation.arch)](n_vocab, seed=seed, **kw).to(device)
     loss_fn = torch.compile(model.loss) if compile else model.loss
     if compile:
         torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 2 * SHAPES)
@@ -246,6 +280,7 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch, eval_every,
     assert max_length <= model.t_max, f"dizi {max_length} token > t_max {model.t_max}"
     n_params = sum(p.numel() for p in model.parameters())
     fixed = dict(extra or {}, arch=model.arch, config=model.config(), n=n_vocab, lr=lr, seed=seed, batch=batch,
+                 windows=int(n_questions),
                  T=max_length, n_params=n_params, compile=compile, warmup=int(warmup), weight_decay=float(weight_decay),
                  decay_start=None if decay_start is None else int(decay_start),
                  decay_end=None if decay_start is None else int(steps),
@@ -275,13 +310,18 @@ def _run(run, data, n_vocab, metric, device, lr, steps, seed, batch, eval_every,
     probe = trim(questions[:HEALTH_PROBE], filled_mask[:HEALTH_PROBE], filled_mask[:HEALTH_PROBE])[:2]
     fill_ratio = float(filled_mask.sum()) / filled_mask.numel()
     run.note(f"sorular {n_questions:,} x {max_length}   dolgu %{100 * (1 - fill_ratio):.1f}")
-    new_parts = [k for k in ("embed", "readout", "chain_sim", "distance") if fixed["config"][k]]
-    if len(fixed["config"]["attn_after"]) > 1:
+    cfg = fixed["config"]
+    new_parts = [k for k in ("embed", "readout", "chain_sim", "distance") if cfg.get(k)]
+    if len(cfg.get("attn_after", ())) > 1:
         new_parts.append("ikinci attention")
     if fixed["config"].get("induction_query"):
         new_parts.append("induction sorgusu")
     if fixed["config"].get("gate_sim") is False:
         new_parts.append("gate'te benzerlik YOK")
+    if fixed["config"].get("norm_inputs"):
+        new_parts.append("girdi kureye (Oe15)")
+    if model.arch != PointRelation.arch:
+        new_parts = ["mimari " + model.arch]
     if weight_decay:
         run.note(f"AdamW  weight decay {weight_decay} YALNIZ hareket ve attention matrislerinde (DECAY)")
     run.note(f"arch {model.arch}  config {fixed['config']}  yeni parcalar: {', '.join(new_parts) or 'YOK (zemin)'}  "
@@ -394,6 +434,9 @@ def _decompose_backup(run, model, vocab, metric, step):
     gunluge tek satir.  Kosunun cihazinda; hata egitimi DURDURMAZ."""
     if not run.root or not vocab:
         return
+    if model.arch != PointRelation.arch:
+        run.note(f"decompose t{step}: {model.arch} icin yok (diagnose_19 PointRelation'a ozgu)")
+        return
     import diagnose_19 as DG
     precision = torch.get_float32_matmul_precision()
     torch.set_float32_matmul_precision("highest")          # TF32 yuvarlamasi verify'i haksiz yere dusurmesin
@@ -441,7 +484,8 @@ def start(run_name, data, n_vocab, *, metric=_no_metric, device="cuda", root=Non
 
     data        (questions, filled_mask, targets_mask)
     metric      metric(model, "train"|"heldout", full=False) -> accuracy (ANA OLCUT), ce, diag (gunlukte sutun)
-    model_kw    PointRelation'in ayarlari (d_order, d_content, embed, readout, chain_sim, distance, attn_after, rank ...);
+    model_kw    arch ("point_relation" varsayilan ya da "looped_relation") ve o modelin ayarlari; PointRelation icin
+                (d_order, d_content, embed, readout, chain_sim, distance, attn_after, rank ...);
                 verilmeyen model_19'un varsayilani.  Varsayilan ZEMIN: yeni parcalar yalniz acikca verilince acilir
                 (embed=True, readout=True, chain_sim=True, distance=True, attn_after=(0, 2)).
     eval_every / save_every / weights_every   olcum, TAM yedek (t<adim>.pt, surdurme), agirlik (w<adim>.pt) araliklari

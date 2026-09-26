@@ -25,8 +25,9 @@ from model_19 import PointRelation  # noqa: E402
 
 RESULTS = []
 BASE = dict(n=30, d_order=16, d_content=16, vectors=8, active=2, layers=4, attn_heads=2, attn_dim=4, t_max=40, seed=3)
-OFF = dict(embed=False, readout=False, chain_sim=False, distance=False, attn_after=(0,))
-ON = dict(embed=True, readout=True, chain_sim=True, distance=True, attn_after=(0, 2), induction_query=True)
+OFF = dict(embed=False, readout=False, chain_sim=False, distance=False, attn_after=(0,), norm_inputs=False)
+ON = dict(embed=True, readout=True, chain_sim=True, distance=True, attn_after=(0, 2), induction_query=True,
+          norm_inputs=True)
 
 
 def check(name, ok, note=""):
@@ -40,6 +41,94 @@ def tokens_and_mask(n=30, B=3, T=24, seed=7):
     mask = torch.ones_like(tokens, dtype=torch.bool)
     mask[-1, T - 6:] = False
     return tokens, mask
+
+
+def reference_logp(m, tokens):
+    """TASARIM_19'un formulleri, model_19'un kodundan BAGIMSIZ ve en saf haliyle (konum konum donguler, float64):
+    tokens (T,) -> log p (T, n), konum t'de SONRAKI token.  Kod tasarimdan saparsa scoreboard'la tutmaz."""
+    import model_19 as M
+    f = lambda x: x.detach().double()
+    unit = lambda x: x / x.norm()
+    T, Do, n = len(tokens), m.d_order, m.n
+    P = f(m.P)
+    E = []                                                   # E[w] = norm(P[w] + dE[w]),  dE[w] = W U[w]
+    for w in tokens.tolist():
+        x = P[w].clone()
+        if m.embed_delta is not None:
+            x = x + (f(m.embed_delta[w]) if m.embed_up is None else f(m.embed_up) @ f(m.embed_delta[w]))
+        E.append(unit(x))
+    C = []                                                   # zincir: [sira | icerik]
+    h = torch.zeros(m.d_content, dtype=torch.float64)
+    for t in range(T):
+        order = sum(m.lam ** (t - i) * torch.roll(E[i][:Do], t - i) for i in range(t + 1))  # yasi kadar kaydir, lam^yas
+        w = int(tokens[t])
+        lam = M.LAM_W_MIN + (1 - M.LAM_W_MIN) * torch.sigmoid(f(m.lam_w[w]))
+        h = lam * h + torch.sigmoid(f(m.beta_w[w])) * E[t][Do:]                            # kelime basina sonme
+        C.append(torch.cat([order, h]))
+    X = [c.clone() for c in C]
+    enter = (lambda x: unit(x)) if getattr(m, "norm_inputs", False) else (lambda x: x)   # Oe15: girdi kureye
+    for i, L in enumerate(m.moves):                          # hareket: yone gore en yakin `active` start
+        S, F_ = f(L.start), f(L.finish)
+        X = [enter(x) for x in X]
+        for t in range(T):
+            cos = torch.stack([unit(X[t]) @ unit(s) for s in S])
+            order_ = sorted(range(len(S)), key=lambda a: -float(cos[a]))[:L.active]
+            a = torch.softmax(torch.stack([-(2 - 2 * cos[j]) * math.exp(float(L.S_v)) for j in order_]), 0)
+            X[t] = X[t] + sum(a[q] * (F_[j] - S[j]) for q, j in enumerate(order_))
+        if i in m.attn_after:                                # attention: butun konumlar ayni onceki durumdan
+            att = m.attns[m.attn_after.index(i)]
+            Wq, Wk, Wv, Wo = f(att.W_q), f(att.W_k), f(att.W_v), f(att.W_o)
+            before = [unit(x) for x in X]
+            X = [enter(x) for x in X]
+            new = []
+            for t in range(T):
+                add = torch.zeros(m.d, dtype=torch.float64)
+                for hd in range(att.heads):
+                    r = slice(hd * att.dim, (hd + 1) * att.dim)
+                    q = Wq[r] @ before[t]
+                    if att.W_qc is not None:
+                        q = q + f(att.W_qc)[r] @ unit(C[t])
+                    s = []
+                    for j in range(t + 1):
+                        if att.first:                         # anahtar bir ONCEKI konumun ham zinciri; konum 0: 0
+                            k = Wk[r] @ unit(C[j - 1]) if j > 0 else torch.zeros(att.dim, dtype=torch.float64)
+                        else:
+                            k = Wk[r] @ before[j]
+                        s.append(q @ k / math.sqrt(att.dim) - (float(att.m[hd]) * (t - j) if att.m is not None else 0))
+                    a = torch.softmax(torch.stack(s), 0)
+                    add = add + Wo[:, r] @ sum(a[j] * (Wv[r] @ before[j]) for j in range(t + 1))
+                new.append(X[t] + add)
+            X = new
+    out = []
+    for t in range(T):                                       # puan(w) = P[w] . (2 e^S_p norm(C_m) + R_PC C_t)
+        z = 2 * math.exp(float(m.S_p)) * unit(X[t])
+        if m.readout is not None:
+            R = f(m.readout.M) if m.readout.M is not None else f(m.readout.A) @ f(m.readout.B).T
+            z = z + R @ C[t]
+        lp = torch.log_softmax(P @ z, 0)
+        led = m.ledger
+        if led is not None:                                  # defter: j < t - skip, benzer zincirden sonra gelen kelime
+            cand = [j for j in range(T) if j < t - led.skip]
+            p_cache = torch.zeros(n, dtype=torch.float64)
+            sim_max = 0.0
+            if cand:
+                qn = unit(C[t])
+                if led.relation is not None:
+                    RC = f(led.relation.M) if led.relation.M is not None else f(led.relation.A) @ f(led.relation.B).T
+                    qn = unit(qn + RC @ qn)
+                sims = torch.stack([qn @ unit(C[j]) for j in cand])
+                wts = torch.softmax(sims * math.exp(float(led.S_c)), 0)
+                for q_, j in enumerate(cand):
+                    p_cache[int(tokens[j + 1])] += wts[q_]
+                sim_max = float(sims.max())
+            if cand:
+                g_in = unit(X[t]) @ f(led.gate_d) + float(led.gate_0) + (float(led.gate_s) * sim_max if led.gate_s is not None else 0)
+                g = torch.sigmoid(g_in)
+            else:
+                g = torch.tensor(0.0, dtype=torch.float64)
+            lp = torch.log((1 - g) * lp.exp() + g * p_cache)
+        out.append(lp)
+    return torch.stack(out)
 
 
 def trained(cfg, steps=5, **kw):
@@ -100,6 +189,17 @@ def t_model():
         m2 = PointRelation.from_package({"config": m.config(), "weights": m.state_dict()})
         check("model: config + agirliklar -> ayni model",
               float((m.scoreboard(tokens) - m2.scoreboard(tokens)).abs().max()) == 0.0)
+    models = (("butun parcalar acik", m), ("zemin", trained(BASE, rank=8, **OFF)),
+              ("tam rank", trained(BASE, rank=None, **ON)))
+    with torch.no_grad():
+        for label, mm in models:
+            ref = reference_logp(mm, tokens[0])
+            got = mm.double().scoreboard(tokens[:1])[0]
+            mm.float()
+            # olasilikta ve log p > -15'te: defter karisimindaki p_defter + 1e-12 tabani log p ~ -36'yi -27,6'da tutar
+            dp, dl = float((ref.exp() - got.exp()).abs().max()), float((ref - got).abs()[ref > -15].max())
+            check("model: tasarimin formulleri bagimsiz ve saf yazilinca (dongulerle) ayni p -- %s" % label,
+                  dp < 1e-6 and dl < 1e-5, "p farki %.1e  log p farki %.1e (icerik yarisi fp32)" % (dp, dl))
     h = m.health(tokens, mask)
     need = {"vec_each_0", "norm_in_3", "gate", "gate_dir", "gate_sim", "ledger_eff", "attn0_m", "attn1_dist",
             "embed_shift", "readout", "chain_sim", "induction_q", "pred_distinct"}
@@ -353,7 +453,7 @@ def t_tr():
     # tasarim modeli (iki attention, R_PC, E, R_CC, mesafe): yeni parcalar sifirdan oynatilir ki etkileri olsun
     md = PointRelation(len(vocab), d_order=16, d_content=16, vectors=8, active=2, layers=4, attn_heads=2, attn_dim=4,
                        t_max=40, rank=8, seed=5, embed=True, readout=True, chain_sim=True, distance=True,
-                       attn_after=(0, 2)).eval()
+                       attn_after=(0, 2), norm_inputs=True).eval()
     g = torch.Generator().manual_seed(3)
     with torch.no_grad():
         for p_ in md.parameters():
@@ -379,7 +479,24 @@ def t_tr():
           and "att2 ad" in ap and 0 <= ap["A2 odak"] <= 1 and patched[1].split("ilk 5: ")[1].split()[0] == top
           and ("2R", "okuma") in ranks and ("kopru", "r1 kelimesi", "attention 2") in lens,
           "toplam %.4f  ust %s  %s" % (ap["toplam"], top, patched[1][:60]))
-    gparts = ["Ali Kaya'nın annesinin kardeşi Can Kaya'dır.", "Can Kaya'nın yaşadığı yerin bölgesi Marmara Bölgesi'dir."]
+    R2 = DC.forward_parts(md, t2s)
+    t2 = len(t2s) - 1
+    same, moved = TR.reroute(md, R2, t2, 1, []), TR.reroute(md, R2, t2, 1, [(t2 - 1, 1)])
+    check("tr: yeniden yonlendirme -- mudahalesiz modelin kendi puani, agirlik tasinca puan degisir",
+          torch.allclose(same, R2["score"][t2], atol=1e-4) and not torch.allclose(moved, same, atol=1e-4),
+          "fark %.2e / %.2e" % (float((same - R2["score"][t2]).abs().max()), float((moved - same).abs().max())))
+    Gc = {"olgu": {("X", "r2"): "A"}, "tip": {"X": "KISI", "Y": "SEHIR", "Z": "KISI"}, "sema": {"r2": {"KISI"}}}
+    got = [TR.chain_class(Gc, x, "r2", a) for x, a in (("X", "X"), ("X", "A"), ("X", "B"), ("Y", "B"), ("Z", "B"))]
+    check("tr: 2R zincir sinifi (DONUS, AYNI, AYIRT, YOK, EKSIK)", got == ["DONUS", "AYNI", "AYIRT", "YOK", "EKSIK"],
+          " ".join(got))
+    from looped_19 import LoopedRelation
+    mb = LoopedRelation(len(vocab), d=16, rank=4, vectors=8, active=2, heads=2, head_dim=4, k_max=3, t_max=40, seed=2).eval()
+    fake = {"exam": {"ezber_olgu": [("Ali Kaya'nın annesi kimdir?", "Ayşe Kaya"), ("Ayşe Kaya'nın kardeşi kimdir?", "Can Kaya"),
+                                    ("Ali Kaya'nın annesinin kardeşi kimdir?", "Can Kaya")]}}
+    rep = TR.passes_report(mb, tok, fake, splits=("ezber_olgu",))
+    check("tr: LoopedRelation durma raporu -- bolme basina son konumun gecisi (baslangicta hepsi 1)",
+          len(rep) == 2 and rep[1].split()[1] == "3" and rep[1].split()[4] == "1.0" and rep[1].split()[8] == "1.0", rep[1])
+    gparts =["Ali Kaya'nın annesinin kardeşi Can Kaya'dır.", "Can Kaya'nın yaşadığı yerin bölgesi Marmara Bölgesi'dir."]
     gtok = TR.train_bpe(parts + gparts * 3, target=300, split_genitive=True)
     gv = TR.vocab_of(gtok)
     g1, g2 = ([gv[i] for i in TR.encode(gtok, [p])[0]] for p in gparts)
@@ -409,9 +526,272 @@ def t_tr():
           and all(0 <= p <= 1 for p in ps) and isinstance(cont, str), str(ev))
 
 
+def reference_looped(m, tokens, stop):
+    """LoopedRelation'in formulleri (TASARIM_19 "Bul-Bak Dongusu"), looped_19'un kodundan BAGIMSIZ, konum konum donguler,
+    float64: tokens (T,) -> (log p (T, n), konum basina gecis).  Kod tasarimdan saparsa scoreboard'la tutmaz."""
+    f = lambda z: z.detach().double()
+    unit = lambda z: z / z.norm() if float(z.norm()) > 0 else z * 0
+    T, d, P = len(tokens), m.d, f(m.P)
+    dE = lambda w: f(m.embed_delta[w]) if m.embed_up is None else f(m.embed_up) @ f(m.embed_delta[w])
+    E = [unit(P[w] + dE(w)) for w in tokens.tolist()]
+    C = [sum(m.lam ** (t - i) * torch.roll(E[i], t - i) for i in range(t + 1)) for t in range(T)]   # yasi kadar kaydir
+    mat = lambda rel: f(rel.M) if rel.M is not None else f(rel.A) @ f(rel.B).T      # carpim float64'te
+    R = [mat(m.readout) @ c for c in C]
+    RCC, skip = mat(m.ledger.relation), m.ledger.skip
+    Dv = []
+    for t in range(T):
+        cand = [j for j in range(T) if j < t - skip]
+        if not cand:
+            Dv.append(torch.zeros(d, dtype=torch.float64))
+            continue
+        q = unit(unit(C[t]) + RCC @ unit(C[t]))
+        wts = torch.softmax(torch.stack([q @ unit(C[j]) for j in cand]) * math.exp(float(m.ledger.S_c)), 0)
+        Dv.append(sum(wts[i] * E[j + 1] for i, j in enumerate(cand)))           # benzer zincirden SONRA gelen
+    a, b = f(m.source_weights)
+    X = [unit(unit(C[t]) + a * unit(R[t]) + b * unit(Dv[t])) for t in range(T)]
+    find = m.find
+    Wq, Wk, Wv, Wo, dim = f(find.W_q), f(find.W_k), f(find.W_v), f(find.W_o), find.dim
+
+    def move(layer, y):
+        S, F_ = f(layer.start), f(layer.finish)
+        cos = torch.stack([unit(y) @ unit(s) for s in S])
+        best = sorted(range(len(S)), key=lambda j: -float(cos[j]))[:layer.active]
+        w = torch.softmax(torch.stack([-(2 - 2 * cos[j]) * math.exp(float(layer.S_v)) for j in best]), 0)
+        return sum(w[i] * (F_[j] - S[j]) for i, j in enumerate(best))
+
+    alpha = None if m.alpha is None else f(m.alpha)
+
+    def step(x, part, i):                                                      # 'input' ya da 'bounded' (nGPT)
+        return unit(x) + part if alpha is None else unit(unit(x) + alpha[i] * unit(part))
+
+    done, passes = [False] * T, [0] * T
+    for _ in range(m.k_max):
+        base = [unit(x) for x in X]
+        Y = []
+        for t in range(T):                                                     # find
+            add = torch.zeros(d, dtype=torch.float64)
+            for h in range(find.heads):
+                r = slice(h * dim, (h + 1) * dim)
+                s = []
+                for j in range(t + 1):
+                    if h < find.trace:                                          # anahtar: bir onceki konumun zinciri
+                        k = Wk[r] @ unit(C[j - 1]) if j > 0 else torch.zeros(dim, dtype=torch.float64)
+                    else:
+                        k = Wk[r] @ base[j]
+                    s.append((Wq[r] @ base[t]) @ k / math.sqrt(dim) - float(find.m[h]) * (t - j))
+                A = torch.softmax(torch.stack(s), 0)
+                add = add + Wo[:, r] @ sum(A[j] * (Wv[r] @ base[j]) for j in range(t + 1))
+            Y.append(step(X[t], add, 0))
+        for i, layer in enumerate(m.lookups):                                  # lookup 1, lookup 2
+            Y = [step(y, move(layer, y), i + 1) for y in Y]
+        new = [X[t] if done[t] else Y[t] for t in range(T)]
+        for t in range(T):
+            passes[t] += 0 if done[t] else 1
+        if stop:
+            change = [float((unit(new[t]) - unit(X[t])).norm()) for t in range(T)]
+            worst = 0.0
+            for t in range(T):                                                 # t'nin kendisi ve oncesi
+                worst = max(worst, change[t])
+                done[t] = done[t] or worst < m.stop_eps
+            X = new
+            if all(done):
+                break
+        else:
+            X = new
+    lp = torch.stack([torch.log_softmax(P @ (2 * math.exp(float(m.S_p)) * unit(x)), 0) for x in X])
+    if m.gate_d is not None:                                                   # acik kopya: (1 - g) p + g p_defter
+        rows = []
+        for t in range(T):
+            p = lp[t].exp()
+            cand = [j for j in range(T) if j < t - skip]
+            if cand:
+                q = unit(unit(C[t]) + RCC @ unit(C[t]))
+                wts = torch.softmax(torch.stack([q @ unit(C[j]) for j in cand]) * math.exp(float(m.ledger.S_c)), 0)
+                pc = torch.zeros(len(P), dtype=torch.float64)
+                for i, j in enumerate(cand):
+                    pc[int(tokens[j + 1])] += wts[i]
+                g = torch.sigmoid(unit(X[t]) @ f(m.gate_d) + float(m.gate_0))
+                p = (1 - g) * p + g * pc
+            rows.append(torch.log(p))
+        lp = torch.stack(rows)
+    return lp, passes
+
+
+LOOP_CFG = dict(n=30, d=32, rank=8, vectors=16, active=4, heads=2, head_dim=4, trace_heads=1, k_max=3, t_max=40)
+
+
+# --- 8. LOOPED RELATION (Bul-Bak Dongusu): adim 0'da etkisiz, gradyan akar, tasarimla ayni, nedensel (durma dahil), kayip == tablo, ayrisma tam
+def t_looped():
+    import train_19 as TR
+    from looped_19 import LoopedRelation, model_from_package
+    tokens, mask = tokens_and_mask()
+    with torch.no_grad():
+        m0 = LoopedRelation(**LOOP_CFG, seed=3).eval()
+        C = m0.sources(tokens)["C"]
+        ref = torch.log_softmax(m0.point(C) @ m0.P.T, -1)
+        d0 = float((m0.scoreboard(tokens, stop=False) - ref).abs().max())
+        p0 = m0.run(tokens, stop=True)[1]["passes"]
+    check("looped: adim 0'da etkisiz (kaynak agirliklari, W_o, hareketler 0): puan = norm(C)'nin okumasi; durma 1. geciste",
+          d0 < 1e-5 and bool((p0 == 1).all()), "fark %.1e  gecis %s" % (d0, p0.unique().tolist()))
+    m = LoopedRelation(**LOOP_CFG, seed=3)
+    start = {k: v.detach().clone() for k, v in m.state_dict().items()}
+    opt = torch.optim.Adam(m.parameters(), lr=1e-2)
+    for _ in range(5):
+        opt.zero_grad()
+        m.loss(tokens, mask).backward()
+        opt.step()
+    moved = {k: float((v - start[k]).abs().max()) for k, v in m.state_dict().items() if k in start}
+    need = ("source_weights", "find.W_o", "find.m", "lookups.0.finish", "lookups.1.finish", "ledger.relation.B",
+            "embed_up", "readout.B", "ledger.S_c", "S_p")
+    check("looped: 5 adimda her yeni parca 0'dan ayrildi (kaynaklar, bul, iki bak, R_CC, E, R_PC)",
+          all(moved[k] > 0 for k in need), " ".join("%s %.0e" % (k, moved[k]) for k in need if moved[k] == 0))
+    g = torch.Generator().manual_seed(4)
+    with torch.no_grad():
+        for p_ in m.parameters():
+            p_.add_(0.1 * torch.randn(p_.shape, generator=g))
+    m.eval()
+    with torch.no_grad():
+        mixed = None                           # durma yolu gercekten sinansin: bazi konumlar erken dursun, bazilari degil
+        for e in (0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2):
+            m.stop_eps = e
+            if len(m.run(tokens[:1], stop=True)[1]["passes"][0].unique()) > 1:
+                mixed = e
+                break
+        check("looped: durma kuralinin sinanacagi karisik bir esik var (konumlar farkli gecislerde duruyor)",
+              mixed is not None, "esik %s" % mixed)
+        mixed = mixed or 0.5
+        for stop, eps in ((False, LOOP_CFG.get("stop_eps", 0.01)), (True, mixed)):
+            m.stop_eps = eps
+            ref, ref_passes = reference_looped(m, tokens[0], stop)
+            got = m.double().scoreboard(tokens[:1], stop=stop)[0]
+            passes = m.run(tokens[:1], stop=stop)[1]["passes"][0].tolist()
+            m.float()
+            dp = float((ref.exp() - got.exp()).abs().max())
+            check("looped: tasarimin formulleri bagimsiz ve saf yazilinca ayni p, durma kurali %s" % ("ACIK" if stop else "yok"),
+                  dp < 1e-10 and passes == ref_passes, "p farki %.1e  gecis %s" % (dp, passes))
+        for label, extra in (("tam rank", dict(rank=None)), ("acik kopya kanali", dict(copy_gate=True)),
+                             ("bounded adim (nGPT)", dict(step_norm="bounded"))):
+            mx = LoopedRelation(**dict(LOOP_CFG, **extra), seed=6).eval()
+            for p_ in mx.parameters():
+                p_.add_(0.1 * torch.randn(p_.shape, generator=g))
+            ref, _ = reference_looped(mx, tokens[0], False)
+            got = mx.double().scoreboard(tokens[:1], stop=False)[0]
+            dp = float((ref.exp() - got.exp()).abs().max())
+            check("looped: tasarimin formulleri bagimsiz ve saf yazilinca ayni p -- %s" % label, dp < 1e-10, "p farki %.1e" % dp)
+        m.stop_eps = mixed
+        t2 = tokens.clone()
+        t2[:, 15] = (t2[:, 15] + 1) % 30
+        dc = float((m.scoreboard(tokens)[:, :15] - m.scoreboard(t2)[:, :15]).abs().max())
+        check("looped: nedensel -- 15. token degisince onceki konumlar ayni, durma kurali dahil", dc < 1e-5, "fark %.1e" % dc)
+        tr = m.trace(tokens[0], stop=True)
+        whole = sum(q[2] * q[3][:, None] for q in tr["parts"])
+        x_run = m.run(tokens[:1], stop=True)[0][0]
+        dx = float((whole - x_run).abs().max()) / (1 + float(x_run.abs().max()))
+        check("looped: tam ayrisma -- kaynaklar + her gecisin her adimi (carpanlariyla) son durumu birebir verir",
+              dx < 1e-4 and torch.equal(tr["passes"], m.run(tokens[:1], stop=True)[1]["passes"][0]), "fark %.1e" % dx)
+    # bounded adim: adim 0'da etkisiz (alpha 0), gradyan akar, durma acikken tasarimla ayni, nedensel, ayrisma tam
+    with torch.no_grad():
+        mb0 = LoopedRelation(**LOOP_CFG, step_norm="bounded", seed=3).eval()
+        Cb = mb0.sources(tokens)["C"]
+        db0 = float((mb0.scoreboard(tokens, stop=False) - torch.log_softmax(mb0.point(Cb) @ mb0.P.T, -1)).abs().max())
+    mb = LoopedRelation(**LOOP_CFG, step_norm="bounded", seed=3)
+    start_b = {k: v.detach().clone() for k, v in mb.state_dict().items()}
+    opt = torch.optim.Adam(mb.parameters(), lr=1e-2)
+    for _ in range(5):
+        opt.zero_grad()
+        mb.loss(tokens, mask).backward()
+        opt.step()
+    moved_b = {k: float((v - start_b[k]).abs().max()) for k, v in mb.state_dict().items() if k in start_b}
+    need_b = ("alpha", "find.W_o", "find.W_q", "lookups.0.finish", "lookups.1.start", "source_weights", "embed_up")
+    check("looped bounded: adim 0'da etkisiz (alpha 0); 5 adimda alpha ve parcalar degisti",
+          db0 < 1e-5 and all(moved_b[k] > 0 for k in need_b), "fark %.1e  %s" % (db0, " ".join(k for k in need_b if moved_b[k] == 0)))
+    with torch.no_grad():
+        for p_ in mb.parameters():
+            p_.add_(0.1 * torch.randn(p_.shape, generator=g))
+        mb.eval()
+        eps_b = None
+        for e in (0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0):
+            mb.stop_eps = e
+            if len(mb.run(tokens[:1], stop=True)[1]["passes"][0].unique()) > 1:
+                eps_b = e
+                break
+        mb.stop_eps = eps_b or 0.3
+        ref, ref_passes = reference_looped(mb, tokens[0], True)
+        got = mb.double().scoreboard(tokens[:1], stop=True)[0]
+        passes_b = mb.run(tokens[:1], stop=True)[1]["passes"][0].tolist()
+        mb.float()
+        dpb = float((ref.exp() - got.exp()).abs().max())
+        t2 = tokens.clone()
+        t2[:, 15] = (t2[:, 15] + 1) % 30
+        dcb = float((mb.scoreboard(tokens)[:, :15] - mb.scoreboard(t2)[:, :15]).abs().max())
+        trb = mb.trace(tokens[0], stop=True)
+        xb = mb.run(tokens[:1], stop=True)[0][0]
+        dxb = float((sum(q[2] * q[3][:, None] for q in trb["parts"]) - xb).abs().max())
+    check("looped bounded: durma acik tasarimla ayni p, nedensel, tam ayrisma (karisik esik %s)" % eps_b,
+          eps_b is not None and dpb < 1e-10 and passes_b == ref_passes and dcb < 1e-5 and dxb < 1e-4,
+          "p %.1e  gecis %s  nedensel %.1e  ayrisma %.1e" % (dpb, sorted(set(passes_b)), dcb, dxb))
+    for copy_gate in (False, True):
+        mc = LoopedRelation(**LOOP_CFG, copy_gate=copy_gate, seed=5)
+        with torch.no_grad():
+            for p_ in mc.parameters():
+                p_.add_(0.1 * torch.randn(p_.shape, generator=g))
+            total, nll = mc.loss(tokens, mask, parts=True)
+            lp = mc.scoreboard(tokens, stop=False)[:, :-1].gather(-1, tokens[:, 1:, None])[..., 0]
+            w = mask[:, 1:].float()
+            ref_nll = float(-(lp * w).sum() / w.sum())
+            rows = torch.cat([torch.nonzero(mask[:, 1:].reshape(-1))[:, 0], torch.full((5,), -1)])
+            l_rows = float(mc.loss(tokens, mask, rows=rows))
+        check("looped: kayip yolu == scoreboard'un dogru kelimedeki log p'si (K_MAX gecis), rows'lu ayni, acik kopya %s"
+              % ("ACIK" if copy_gate else "yok"),
+              abs(float(nll) - ref_nll) < 1e-5 and abs(l_rows - float(total)) < 1e-5, "%.6f / %.6f" % (float(nll), ref_nll))
+    # denetimin buldugu kenarlar: gecersiz defter satiri, hedefsiz batch, arch'siz eski paket, kendi degisimi olcusu
+    from looped_19 import unit_or_zero
+    v = torch.zeros(1, 3, 4, requires_grad=True)
+    valid = torch.tensor([[False, False, True]])
+    out = unit_or_zero(v + torch.tensor([0.0, 0.0, 1.0])[None, :, None], valid)
+    out.sum().backward()
+    empty = LoopedRelation(**LOOP_CFG, seed=3).loss(tokens, torch.zeros_like(mask))
+    old_pk = {"config": PointRelation(**BASE, **OFF, rank=8).config(), "weights": PointRelation(**BASE, **OFF, rank=8).state_dict()}
+    settle0 = LoopedRelation(**LOOP_CFG, seed=3).eval().settle_passes(tokens)
+    check("looped: gecersiz defter satiri 0 ve gradyani sinirli; hedefsiz batch kaybi sonlu; arch'siz paket PointRelation;"
+          " kendi degisimi olcusu baslangicta 1",
+          float(out[0, :2].abs().max()) == 0.0 and float(v.grad.abs().max()) < 10 and bool(torch.isfinite(empty))
+          and isinstance(model_from_package(old_pk), PointRelation) and bool((settle0 == 1).all()),
+          "grad %.1e  bos kayip %.3f" % (float(v.grad.abs().max()), float(empty)))
+    m.stop_eps = m.config()["stop_eps"]                # esik yukarida sinama icin degistirildi; paketteki deger
+    k = {"arch": m.arch, "config": m.config(), "weights": m.state_dict()}
+    m2 = model_from_package(k)
+    h = m.health(tokens, mask)
+    line = TR._health_line(h, {"find": 0.1}, {"train": 0.1, "heldout": 0.2})
+    check("looped: paketten ayni model (arch ile), saglik anahtarlari ve gunluk satiri",
+          isinstance(m2, LoopedRelation) and float((m.scoreboard(tokens) - m2.scoreboard(tokens)).abs().max()) == 0.0
+          and {"passes", "passes_at_max", "change_0", "vec_all_1", "src_a", "ledger_eff", "attn_m"} <= set(h)
+          and line.startswith("saglik  gecis"), line[:70])
+    vocab = [str(i) for i in range(10)] + ["+", "=", "<eos>"]
+    gq = torch.Generator().manual_seed(11)
+    q = torch.randint(0, 12, (40, 14), generator=gq)
+    q[:, 0] = 12
+    filled = torch.ones_like(q, dtype=torch.bool)
+    metric = lambda mm, side, full=False: {"accuracy": 0.0, "ce": 1.0, "diag": {}}
+    root = tempfile.mkdtemp()
+    try:
+        cfg = dict(LOOP_CFG, arch="looped_relation")
+        cfg.pop("n")
+        run = TR.RUNS["LOOP"] = TR.Run("LOOP", root)
+        TR._run(run, (q, filled, filled), len(vocab), metric, "cpu", 2e-3, 4, 0, 8, 2, 4, weights_every=2,
+                vocab=vocab, model_kw=cfg)
+        pk = torch.load(f"{root}/LOOP/t4.pt", weights_only=False)
+        log = open(f"{root}/LOOP/gunluk.txt", encoding="utf-8").read()
+        ok = (pk["arch"] == "looped_relation" and isinstance(model_from_package(pk), LoopedRelation) and "saglik  gecis" in log
+              and "mimari looped_relation" in log and "decompose t4: looped_relation icin yok" in log)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    check("looped: egitim dongusu arch='looped_relation' ile kurar, kaydeder, saglik satiri yazar", ok)
+
+
 if __name__ == "__main__":
     print("tests (model_19)")
-    for f in (t_model, t_decompose, t_diagnose, t_train, t_stories, t_tr):
+    for f in (t_model, t_decompose, t_diagnose, t_train, t_stories, t_tr, t_looped):
         f()
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)

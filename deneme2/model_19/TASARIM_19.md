@@ -61,6 +61,7 @@ E[w]       = norm( P[w] + ΔE[w] )                             giriş noktası, 
                ΔE: hikâyede U[w]·Wᵀ (U: V×r, W: D×r, r = 256); matematikte tam tablo V×D (Ö8)
 C_t        = [ sıra yarısı | içerik yarısı ] ( E[w_0..t] )     zincir, iki yarı (aşağıda)
 C_m        = V0 → attention_1 → V1 → V2 → attention_2 → V3 (C_t)                 (Ö13: ikinci attention)
+               her adımın girdisi küreye:  x ← norm(x) + parça                         (Ö15, `norm_inputs`)
                attention puanı:  q·k/√d − m_h · (t − j),   m_h baş başına öğrenilir  (Ö14: mesafe eğilimi)
 puan(w)    = P[w]ᵀ · ( s · Ĉ_m  +  A_PC · B_PCᵀ · C_t )                                TOPLAM
 sim(t, j)  = cos( (I + A_CC · B_CCᵀ) · Ĉ_t ,  Ĉ_j ),   j < t − 3                       (Ö2)
@@ -117,7 +118,7 @@ belirlemiş oluruz"*.
 | Nedensel maske | geleceği görmeden eğitim | zincir, attention, defter nedensel | var |
 | FFN | konum başına doğrusal olmayan hesap; bilgi deposu | V sözlüğü: yöne göre seçilen başlangıç (anahtar) ve hareket (değer) | var; seyrek (top-8) |
 | Artık bağlantı | her katman ekler, bilgi kaybolmaz, gradyan akar | hareketler ve attention çıktısı noktaya eklenir | var |
-| LayerNorm | ölçek kontrolü, kararlı eğitim | C_m çıkışta küreye; E küreye (Ö1); katman girdileri ölçülür (Ö15) | kısmen, ölçülecek |
+| LayerNorm | ölçek kontrolü, kararlı eğitim | E küreye (Ö1); her katmanın ve attention'ın girdisi küreye (Ö15); C_m çıkışta küreye | var (Ö15, 26 Eylül); öğrenilen kazanç yok, yalnız yön |
 | Derinlik (blok tekrarı) | bir attention'ın bulduğunu başka birinin kullanması | iki attention bloğu | var (Ö13 ile) |
 | Çıkış (unembedding) | durumdan kelime dağılımına | sabit P ile cos + R_PC | var; sabit rastgele taban bilinçli seçim |
 | Paralel eğitim | RNN'in sıralı eğitim darboğazı | zincir doğrusal, bütün dizi paralel | var |
@@ -190,6 +191,16 @@ benzerliği.
 
 **Ö15. Katman girdilerinin ölçeği ölçülür; sorun çıkarsa her katmanın girdisi normalize edilir.** model_18'de |C_m|
 ~17'ye büyüyordu; hareketlerin göreli etkisi küçülüyor olabilir.
+- **Sorun çıktı** (TR_DATA_MORPH t4552, 26 Eylül): 2R cevap konumunda attention 2 durumu ~40 boyunda, sorudan bağımsız
+  bir vektörle eziyor (1R'de ~6); durum 80–86° dönüyor, ardındaki katman 3 yalnız 3° (1R'de 41–45°). Sağlık satırı
+  eğitim boyunca "girdi 1,3 / 7,4 / 7,9 / 20,2" yazıyordu. `OLCULENLER.md` §1l.
+- **Uygulandı:** `norm_inputs` — her hareket katmanının ve attention'ın girdisi küreye iner, parça eklenir:
+  x ← norm(x) + parça. Adım 0'da zeminle aynı puan (hareket ve W_o sıfırdan; okuma ve gate zaten yön okur).
+- **Ayrışma kesin kalır:** küreye iniş konum başına tek bir sayıyla çarpmak; o ana kadarki her parça aynı sayıyla
+  ölçeklenir, `decompose_19` her parçanın çarpanını kaydeder, toplam yine birebir.
+- Dayanak: nGPT (`2024/loshchilov2024_ngpt.txt`): *"any update that causes the hidden state h to deviate from the
+  manifold is followed by a normalization step"*. nGPT ayrıca bloğun çıktısını da küreye indirip öğrenilen adım
+  boyuyla karıştırıyor; burada yalnız girdi (Ö15'in kendi cümlesi).
 
 ## Sıra
 
@@ -256,7 +267,7 @@ model_18'de ölçülenler o koda aittir (kural 11). model_19'a taşınmadan önc
 
 | avantaj | açıklama | dayanak |
 |---|---|---|
-| Kesin ayrışma | Bir kelimenin puanı parçalarına kesin ayrılıyor: geçmiş kelime başına zincir payı, baş başına attention, vektör başına hareket, defter. Transformer'da LayerNorm ve MLP yüzünden ayrışma yaklaşık. | ölçüldü: decompose + verify (model_18) |
+| Kesin ayrışma | Bir kelimenin puanı parçalarına kesin ayrılıyor: geçmiş kelime başına zincir payı, baş başına attention, vektör başına hareket, defter. Küreye iniş (Ö15) yalnız sayıyla çarpma, ayrışmayı bozmaz. Transformer'da LayerNorm ve MLP yüzünden ayrışma yaklaşık. | ölçüldü: decompose + verify (model_18) |
 | Açık kopyalama | Kopyalama ayrı bir kaynakta (defter) ve ne kadar kullanıldığı gate'te görünüyor; kapatılabilir, ölçülebilir. Transformer'da kopyalama başlara dağılmış. | ölçüldü: döngünün defter ve zincir kaynaklı olduğu müdahalelerle gösterildi |
 | Yakın sıra öğrenmesiz | Sıra yarısı konumu kaydırmayla, öğrenilen parametre olmadan veriyor; göreli olduğu için mutlak bir uzunluk sınırı yok. | yapısal; uzun metne genellemesi beklenti |
 | Sabit cevap noktaları | Çıkış tarafı eğitimle kaymıyor; "en yakın sabit nokta" geometrisi okunabilir. | yapısal |
@@ -300,6 +311,84 @@ model_18'de ölçülenler o koda aittir (kural 11). model_19'a taşınmadan önc
 - **Khandelwal ve ark. 2019 (kNN-LM)**, `2019/p_1911.00172.txt`: *"linearly interpolating its next word distribution
   with a k-nearest neighbors (kNN) model"*.
 - **Sonraya:** `2024/p_2404.19737.txt`, *Better & Faster Large Language Models via Multi-token Prediction*. Okunmadı.
+
+## Bul–Bak Döngüsü (26 Eylül) — ikinci mimari, `looped_19.LoopedRelation`
+
+Kullanıcı: *"Ayşe yılmaz'ın annesi Fatma Yılmaz. Fatma yılmazın kardeşi Zehra yılmaz. bu iki bilgiyi tutabilmek. daha
+sonra Ayşe yılmazın annesinin kardeşi Zehra Yılmazdır diye annenin kardeşinin Zehraya çıktığını örnek ile öğretmek.
+sonrada modelin anne ve kardes in birer ilişki anlayıp bunu daha önce görmediği bir ilişkiye bağlayabilmesi."* Ve:
+*"tamam bu mimarinin tamamını model 19 olarak kod la lütfen ve eskiden taşınan sabitler vs varsa onalra da bekle."*
+Görsel: artifact "Bul–Bak Döngüsü" (sürüm 3).
+
+**Neden:** PointRelation'da (TR_DATA_MORPH t4552) köprü r1'de ancak V2'den sonra oluşuyor; ikinci arama için olguların
+saklı olduğu katmanlar geride kalıyor. Tek bir bloğu aynı ağırlıklarla tekrar çalıştırmak, aynı olgu tablosunu her
+adımda kullandırır. Üç ilişki (R_PP, R_PC, R_CC) girişte kaynak olur; blok onları okur (kullanıcı, 25 Eylül: *"Model
+bunların değerlerini ve ne zaman kullanacağını öğrenir bunu da attention ile yapar."*).
+
+```
+E[w]    = norm(P[w] + U[w]·Wᵀ)                                         R_PP
+C_t     = Σ_(i≤t) 0,7^(t−i) · kaydır^(t−i) · E_i                        sıra zinciri (içerik yarısı YOK)
+R_t     = R_PC · C_t                                                    zincirden kelimeye
+W(t,j)  = softmax_(j<t−3)( e^S_c · cos(norm(Ĉ_t + R_CC·Ĉ_t), Ĉ_j) )     defter, R_CC
+D_t     = Σ_j W(t,j) · E[w_(j+1)]                                       defterin önerisi
+x⁰      = norm( norm(C) + a·norm(R) + b·norm(D) )                       a = b = 0 başlar
+blok    x ← norm(x)+bul(x);  x ← norm(x)+bak₁(x);  x ← norm(x)+bak₂(x)   ağırlıklar paylaşılır, en çok 4 geçiş
+dur     konum t, geçiş k:  max_(j≤t) ‖norm(x^k_j) − norm(x^(k−1)_j)‖ < ε   ya da  k = 4
+p(w)    = softmax( P[w] · 2e^S_p · norm(x) )                            seçenek: (1−g)·p + g·p_defter
+```
+
+- **Tanımlar** (bağımsız denetim metinde eksik buldu; kod bunları uygular):
+  - find: q, k, v norm(x)'ten; baş h, W_q, W_k, W_v'nin ardışık `head_dim` satırı; ilk `trace_heads` başın anahtarı
+    W_k·norm(C_(j−1)), j = 0'da sıfır vektör (j = 0 softmax'ta kalır, puanı −m_h·t); puan q·k/√head_dim − m_h (t−j),
+    m_h sınırsız (negatifse uzağı yeğler); çıktı W_o·[başlar].
+  - lookup: D2_a = 2 − 2cos(x, başlangıç_a) (yalnız yön); en küçük `active` D2; ağırlık softmax(−D2·e^S_v); parça
+    Σ w_a (bitiş_a − başlangıç_a). Adımlar sırayla: find, lookup1, lookup2; her biri güncel x'i okur.
+  - Zincirin kaydırması döngüsel (mod D); R_PC ham C'ye uygulanır (yalnız norm(R) kullanıldığından fark yok).
+  - Defter penceresi j < t − `cache_skip` (katı); pencere boşsa D_t = 0, norm(0) = 0, açık kopya gate'i 0.
+  - Durma: donmuş konumun değişimi 0 sayılır; donmuş konum attention'da donmuş durumuyla okunur; kontrol her geçişten
+    sonra, batch'te dizi başına.
+  - Kayıp: hep K_MAX geçiş; `targets_mask[:, 1:]` ile işaretli hedeflerde token başına ortalama; toplama
+    `load_balance`·denge eklenir. Açık kopya kanalında log(p_defter + 1e-12): log 0'a karşı koruma, olasılıkta ≤ 4e-13.
+- **Durma nedensel:** artifact'teki kural bütün cümleye bakıyordu (max_t). Kodlarken görüldü: bu, bir konumun geçiş
+  sayısını sonraki token'lara bağlar, öğretmen zorlamalı ölçümde geleceği sızdırır. Kod max_(j≤t) kullanır; durmuş
+  konum değişmez. Test: 15. token değişince önceki konumlar birebir aynı, durma kuralı açıkken.
+- **Kayıp hep 4 geçişle:** 1R iki, 2R bir fazladan geçiş görür; cevabı korumayı böyle öğrenir. Durma yalnız
+  `scoreboard`'da (ölçüm ve üretim).
+- **Ayrışma kesin:** `trace()` kaynakları ve her geçişin her adımını çarpanlarıyla verir; toplam son durum (test).
+- **Adım kuralı, CPU'da bulunan kusur** (`OLCULENLER.md`, "LoopedRelation CPU sınaması"): yalnız girdiyi küreye indirmek
+  (`step_norm="input"`, x ← norm(x) + parça) geçişler boyunca bütün konumları aynı duruma çökertti (4. geçişte cos 1,00,
+  8 yuva, kayıp takılı). nGPT gibi çıktıyı da küreye indirip öğrenilen adım boyuyla eklemek (`step_norm="bounded"`,
+  x ← norm(x̂ + α ⊙ norm(parça)), α = 0 başlar, 3 × D parametre) çöküşü gideriyor. İkisi de kodda; varsayılan kullanıcı
+  kararı bekliyor.
+- **Kod = tasarım:** `tests_19.reference_looped` formülleri döngülerle, float64'te yazar; durma kuralı açık ve kapalı
+  modelle aynı (olasılık farkı ~1e-16; zincir katsayıları artık modelin dtype'ında). İkinci, bağımsız bir referans
+  (ayrı ajan, yalnız tasarım metninden) 96 yapılandırmada aynı sonucu verdi.
+
+**Sabitler — nereden geldi, ölçüldü mü** (kural 11; `olcumsuz-secimler` belleği):
+
+| sabit | değer | nereden | durum |
+|---|---|---|---|
+| D | 1.024 | kullanıcı, 25 Eylül | karar |
+| RANK | 256 | kullanıcı: *"R 256"* | karar |
+| K_MAX | 4 | kullanıcı, 26 Eylül: *"K_4 şimdilik max koyalım"* | karar |
+| T_MAX | 512 | kullanıcı: *"512 limiti"* | bellek koruması, konum sınırı değil |
+| VECTORS (lookup katmanı başına yuva) | 1.024 | Bul–Bak tasarımı | ölçülmedi |
+| TRACE_HEADS | 1 / 4 | Bul–Bak tasarımı | ölçülmedi |
+| STOP_EPS | 0,01 | seçildi | **ölçülmedi**; ölçümle seçilecek |
+| ACTIVE (en yakın k) | 8 | model_18 | **ölçülmedi** |
+| HEADS × HEAD_DIM | 4 × 64 | model_18 | ölçülmedi |
+| LAM | 0,7 | model_18 | ölçülmedi |
+| CACHE_SKIP | 3 | model_18 | ölçülmedi |
+| S_C_INIT, START_NORM, S_V_INIT | 3,0 · 1,0 · 0,0 | model_18 | başlangıç değerleri; S_c ve S_v öğrenilir |
+| LOAD_BALANCE | 0,01 | model_18'de top-k çöküşüne karşı ölçüldü | Bul–Bak'ta doğrulanmadı |
+| S_P_P | 0,9 | model_19 (S_p başlangıç formülü) | S_p öğrenilir |
+| GATE_0_INIT | −2 | model_18 | yalnız açık kopya kanalı (seçenek) |
+| LR | 0,002 | Aşama 0, PointRelation matematikte | Bul–Bak'ta doğrulanmadı |
+| STEP_NORM | "input" | Ö15 | CPU'da çöktü; "bounded" önerildi, karar bekliyor |
+
+PointRelation'dan **kalkanlar:** sıra/içerik ayrımı ve içerik yarısı (D_ORDER, D_CONTENT, LAM_W_INIT, BETA_W_INIT,
+LAM_W_MIN, CONTENT_CHUNK), LAYERS ve ATTN_AFTER (yerine blok + döngü), induction_query, gate_sim, R_PC'nin çıkıştaki
+terimi (artık girişte kaynak).
 
 ## Sonraya bırakılan
 

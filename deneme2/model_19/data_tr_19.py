@@ -157,7 +157,7 @@ def build_text(log=print, with_audit=True):
     parts = [p for d in texts for p in re.split(r"(?<=\.)\s+", d.strip()) if p]
     G = V.kur(SETTINGS.veri_tohum)
     exam = {k: surfaces(v, G, k) for k in EXAMS}
-    out = dict(parts=parts, exam=exam, graph=V.IZ, parts_fp=fingerprint("\n".join(parts)),
+    out = dict(parts=parts, documents=texts, exam=exam, graph=V.IZ, parts_fp=fingerprint("\n".join(parts)),
                exam_fp=fingerprint({k: [list(x) for x in exam[k]] for k in EXAMS}))
     log("metin: %d belge -> %d parca   sinav %s   %.0f sn" % (
         len(texts), len(parts), "  ".join("%s %d" % (k, len(exam[k])) for k in EXAMS[:4]), time.time() - t0))
@@ -372,9 +372,11 @@ def detok(tok, ids):
 
 
 # --- dosya (kural 9) ---
-def write(folder, log=print, split_genitive=False, morph=False):
+def write(folder, log=print, split_genitive=False, morph=False, unit="part"):
     """Metin + tokenizer + token'lar -> <folder>/tr_bpe.json, tr_data.pt.  Izler REF_*'la tutmazsa YAZMAZ.
-    morph: kok ayri ek ayri (MorphTokenizer); split_genitive: BPE + tamlayan eki ayri; ikisi de yoksa doygun BPE."""
+    morph: kok ayri ek ayri (MorphTokenizer); split_genitive: BPE + tamlayan eki ayri; ikisi de yoksa doygun BPE.
+    unit: egitim birimi -- "part" (cumle ya da soru+cevap) ya da "document" (BUTUN belge: sayfa, biyografi; model_16
+    gibi, belge bolunmez).  Izler, denetim ve sinav her iki halde CUMLE duzeyinde."""
     t = build_text(log)
     for got, want, what in ((t["graph"], REF_GRAPH, "graf"), (t["parts_fp"], REF_PARTS, "parca"),
                             (t["exam_fp"], REF_EXAM, "sinav")):
@@ -390,13 +392,14 @@ def write(folder, log=print, split_genitive=False, morph=False):
         tok = MorphTokenizer.build(texts, ozel)
     else:
         tok = train_bpe(t["parts"], split_genitive=split_genitive)
-    ids = encode(tok, t["parts"])
-    back = sum(tok.decode(x) == p for x, p in zip(ids, t["parts"]))
+    units = t["parts"] if unit == "part" else t["documents"]
+    ids = encode(tok, units)
+    back = sum(tok.decode(x) == p for x, p in zip(ids, units))
     assert back == len(ids), "gidis-donus %d / %d" % (back, len(ids))
     flat = np.fromiter((i for x in ids for i in x), np.int16, sum(len(x) for x in ids))
     offsets = np.cumsum([0] + [len(x) for x in ids]).astype(np.int64)
     js = tok.to_str()
-    d = dict(ids=torch.from_numpy(flat), offsets=torch.from_numpy(offsets), exam=t["exam"], tokenizer=js,
+    d = dict(ids=torch.from_numpy(flat), offsets=torch.from_numpy(offsets), exam=t["exam"], tokenizer=js, unit=unit,
              vocab=vocab_of(tok), graph=t["graph"], parts_fp=t["parts_fp"], exam_fp=t["exam_fp"],
              ids_fp=fingerprint(flat.tobytes()), tokenizer_fp=fingerprint(js))
     os.makedirs(folder, exist_ok=True)
@@ -570,6 +573,87 @@ def chain_items(d, splits=HOP_SPLITS):
     return out, surface, G, tip
 
 
+def chain_class(G, x, r2, a):
+    """2R zincirinin sinifi (tr_splits_19): DONUS cevap basin kendisi; AYNI kisayol r2(bas) ayni cevabi verir;
+    AYIRT kisayol baska cevap; YOK basin r2'si yok; EKSIK tip r2'yi alir ama olgu yok.  ezber_zincir hepsini alir,
+    cikarim bolmeleri yalniz AYIRT / YOK."""
+    cut = G["olgu"].get((x, r2))
+    if a == x:
+        return "DONUS"
+    if cut == a:
+        return "AYNI"
+    if cut is None:
+        return "EKSIK" if G["tip"][x] in G["sema"][r2] else "YOK"
+    return "AYIRT"
+
+
+def class_accuracy(m, tok, items, surface, G, limit=200, seed=5, device="cpu"):
+    """Bolme basina 2R dogrulugu zincir sinifina gore (sinif basina en cok `limit` soru, sabit tohum): DONUS ve AYNI
+    iki adim istemez, bolme ortalamasini sisirir."""
+    lines = ["bolme                sinif    pay     dogru   (soru)"]
+    for split, its in items.items():
+        cls = [chain_class(G, x, rr[1], a) for x, rr, _, a in its]
+        rng = random.Random(seed)
+        for c in sorted(set(cls)):
+            idx = [i for i, z in enumerate(cls) if z == c]
+            pick = rng.sample(idx, min(limit, len(idx)))
+            qa = [surface(its[i][0], its[i][1], its[i][3]) for i in pick]
+            said = ask(m, tok, [q for q, _ in qa], device=device)
+            acc = np.mean([correct(x, g) for x, (_, g) in zip(said, qa)])
+            lines.append("%-20s %-7s %6.3f %8.3f   (%d)" % (split, c, len(idx) / len(cls), acc, len(pick)))
+    return lines
+
+
+@torch.no_grad()
+def passes_report(m, tok, d, splits=SHOW, limit=200, device="cpu"):
+    """LoopedRelation: soru isteminin son konumunda (cevabin ilk token'ini tahmin eden) gecis; bolme basina medyan,
+    ortalama, K_MAX'a varan pay.  IKI olcu: durma kurali (onek: bir konum oncekiler durmadan duramaz, istem boyuyla
+    kendiliginden artar -- 2R istemi 1R'den uzun) ve konumun KENDI degisiminin esik altina ilk dustugu gecis (boydan
+    bagimsiz).  Hop sayisini izleyip izlemedigi ikincisiyle okunur."""
+    vocab = tok.get_vocab()
+    lines = ["bolme                 soru  boy |  durma kurali: medyan  ort  K_MAX'a  |  kendi degisimi: medyan  ort"]
+    for split in splits:
+        groups = collections.defaultdict(list)
+        for q, _ in exam_pairs(d, split, limit):
+            e = [vocab[EOS]] + encode(tok, [q])[0]
+            groups[len(e)].append(e)
+        got, own, lens = [], [], []
+        for L, rows in groups.items():
+            t = torch.tensor(rows, device=device)
+            got += m.run(t, stop=True)[1]["passes"][:, -1].tolist()
+            own += m.settle_passes(t)[:, -1].tolist()
+            lens += [L] * len(rows)
+        lines.append("%-20s %5d %4.1f |  %20.1f %5.2f %7.0f%%  |  %22.1f %4.2f" % (
+            split, len(got), float(np.mean(lens)), float(np.median(got)), float(np.mean(got)),
+            100 * float(np.mean([g == m.k_max for g in got])), float(np.median(own)), float(np.mean(own))))
+    return lines
+
+
+def classes_cli(run_dir, step=None):
+    """python data_tr_19.py --classes <kosu klasoru> [--adim N]: 2R dogrulugu zincir sinifina gore (iki mimari de);
+    LoopedRelation'da ayrica bolme basina durma gecisi.  -> <kosu>/sinav/<paket>_classes.txt"""
+    from looped_19 import model_from_package
+    path = latest_package(run_dir, step)
+    k = torch.load(path, weights_only=False, map_location="cpu")
+    m = model_from_package(k)
+    d, tok = run_data(run_dir, k)
+    t0 = time.time()
+    items, surface, G, tip = chain_items(d)
+    lines = ["%s   %s   adim %s   %s, CPU" % (os.path.basename(os.path.abspath(run_dir)), os.path.basename(path),
+                                        f"{k['step']:,}", k.get("arch")), "",
+             "2R DOGRULUK x ZINCIR SINIFI (sinif basina 200 soru, tohum 5)"] + class_accuracy(m, tok, items, surface, G)
+    if getattr(m, "arch", None) == "looped_relation":
+        lines += ["", "DURMA: soru isteminin son konumunda gecis (esik %g, en cok %d)" % (m.stop_eps, m.k_max)]
+        lines += passes_report(m, tok, d)
+    lines.append("(%.0f sn)" % (time.time() - t0))
+    out = os.path.join(run_dir, "sinav", os.path.splitext(os.path.basename(path))[0] + "_classes.txt")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print("\n".join(lines))
+    print("-> " + out)
+
+
 def hop_report(m, tok, items, surface, G, device="cpu"):
     """Her 2R sorusu: 2R cevabi, 1. adim (bas r1 -> kopru), 2. adim (kopru r2 -> cevap), kisayol (bas r2) ve yanlisin
     turu (kopru: 1. adimda kaldi, kisayol: r2'yi basa uyguladi, diger).  Sonra modelin dogru cevaptan ILK AYRILDIGI
@@ -628,10 +712,8 @@ def hops_cli(run_dir, step=None, per_split=6, seed=7):
     from model_19 import PointRelation
     path = latest_package(run_dir, step)
     k = torch.load(path, weights_only=False, map_location="cpu")
-    m = PointRelation.from_package(k)
-    d = load(os.path.join(os.path.dirname(os.path.abspath(run_dir)), "data_tr"))
-    tok = tokenizer_from(d["tokenizer"])
-    assert list(k["vocab"]) == d["vocab"], "paketin sozlugu data_tr'ninkiyle tutmuyor"
+    m = point_relation_only(k)
+    d, tok = run_data(run_dir, k)
     t0 = time.time()
     items, surface, G, _ = chain_items(d)
     lines = ["%s   %s   adim %s   2R teshisi: bolme basina %d soru, tohum %d, CPU" % (
@@ -658,17 +740,65 @@ def hops_cli(run_dir, step=None, per_split=6, seed=7):
 # --- 2R analizi: katman katman, konum konum, tek adimlarla karsilastirma, egitimdeki siklik ---
 @torch.no_grad()
 def stages(m, R, t):
-    """Konum t'de ara durumlar modelin kendi sirasiyla: C, +katman 0, +attention, ..., son = C_m."""
+    """Konum t'de ara durumlar modelin kendi sirasiyla: C, +katman 0, +attention, ..., son = C_m.
+    norm_inputs (Oe15): her girdi once kureye."""
+    enter = unit_input(m)
     x, out = R["C"][t], [("C", R["C"][t])]
     for i, L in enumerate(R["layers"]):
-        x = x + L["delta"][t]
+        x = enter(x) + L["delta"][t]
         out.append(("katman %d" % i, x))
         for k, a in enumerate(R["attns"]):
             if a["after"] == i:
-                x = x + a["out"][t]
+                x = enter(x) + a["out"][t]
                 out.append(("attention %d" % (k + 1), x))
     assert torch.allclose(x, R["C_m"][t], atol=1e-4 * (1 + float(x.abs().max()))), "asamalar C_m'yi vermiyor"
     return out
+
+
+def unit_input(m):
+    """Katman / attention girdisi: norm_inputs (Oe15) acikken kureye, degilse oldugu gibi."""
+    return (lambda x: torch.nn.functional.normalize(x, dim=-1)) if getattr(m, "norm_inputs", False) else (lambda x: x)
+
+
+def stage_turns(m, R, t):
+    """Konum t'de asama basina: (ad, eklenenin boyu, girdinin boyu, durumun dondugu aci derece).  Bir parca oncekileri
+    ezerse aci ~90, ondan sonraki parca ~0 (Oe15)."""
+    enter = unit_input(m)
+    out, prev = [], None
+    for name, x in stages(m, R, t):
+        if prev is not None:
+            base = enter(prev)
+            cos = torch.nn.functional.cosine_similarity(x, base, dim=0).clamp(-1, 1)
+            out.append((name, float((x - base).norm()), float(prev.norm()), float(torch.rad2deg(torch.arccos(cos)))))
+        prev = x
+    return out
+
+
+def turn_report(m, tok, items, surface, per_split=60, seed=7):
+    """Cevap konumunda asama basina medyan: eklenen boy / girdi boyu ve aci; 2R ve iki tek adim (Oe15 okumasi)."""
+    import decompose_19 as DC
+    vocab = vocab_of(tok)
+    ix = {a: i for i, a in enumerate(vocab)}
+    lines = []
+    for split, its in items.items():
+        pick = random.Random(seed).sample(range(len(its)), min(per_split, len(its)))
+        got = collections.defaultdict(list)
+        for i in pick:
+            x, (r1, r2), b, a = its[i]
+            for kind, q in (("2R", surface(x, (r1, r2), a)[0]), ("adim 1", surface(x, (r1,), b)[0]),
+                            ("adim 2", surface(b, (r2,), a)[0])):
+                tokens = torch.tensor([ix[EOS]] + encode(tok, [q])[0])
+                R = DC.forward_parts(m, tokens)
+                for name, add, base, deg in stage_turns(m, R, len(tokens) - 1):
+                    got[(kind, name)].append((add, base, deg))
+        names = [n for (k, n) in got if k == "2R"]
+        lines.append("%-20s cevap konumu, medyan  eklenen boy / girdi boyu ; aci derece" % split)
+        for kind in ("2R", "adim 1", "adim 2"):
+            lines.append("   %-8s %s" % (kind, "   ".join("%s %.1f/%.1f ;%3.0f" % (
+                n.replace("attention ", "att").replace("katman ", "k"),
+                np.median([v[0] for v in got[(kind, n)]]), np.median([v[1] for v in got[(kind, n)]]),
+                np.median([v[2] for v in got[(kind, n)]])) for n in names)))
+    return lines
 
 
 def stage_rank(m, x, w, pool=None):
@@ -773,9 +903,10 @@ def embedding_report(m, tok, pools, pairs=(("▁Ayşe", "▁Fatma"), ("▁Ayşe"
 
 
 def training_parts(d, tok):
-    """tr_data token'larindan egitim parcalarinin metni (gidis-donus write'ta birebir sinandi)."""
+    """tr_data token'larindan egitim parcalarinin (cumle) metni; belge birimi cumlelere bolunur (build_text'teki gibi)."""
     ids, off = d["ids"].numpy(), d["offsets"].numpy()
-    return tok.decode_batch([ids[off[i]:off[i + 1]].tolist() for i in range(len(off) - 1)])
+    texts = tok.decode_batch([ids[off[i]:off[i + 1]].tolist() for i in range(len(off) - 1)])
+    return [p for x in texts for p in re.split(r"(?<=\.)\s+", x.strip()) if p]      # belge birimi -> cumleler
 
 
 def count_written(idx, parts, head, rels, answer):
@@ -893,10 +1024,8 @@ def analysis_cli(run_dir, step=None, per_split=60, detail=6, seed=7):
     from model_19 import PointRelation
     path = latest_package(run_dir, step)
     k = torch.load(path, weights_only=False, map_location="cpu")
-    m = PointRelation.from_package(k)
-    d = load(os.path.join(os.path.dirname(os.path.abspath(run_dir)), "data_tr"))
-    tok = tokenizer_from(d["tokenizer"])
-    assert list(k["vocab"]) == d["vocab"], "paketin sozlugu data_tr'ninkiyle tutmuyor"
+    m = point_relation_only(k)
+    d, tok = run_data(run_dir, k)
     t0 = time.time()
     items, surface, G, tip = chain_items(d)
     pools = type_pools(tok, tip)
@@ -910,6 +1039,9 @@ def analysis_cli(run_dir, step=None, per_split=60, detail=6, seed=7):
     head += ["", "EGITIMDE KAC KEZ YAZILI (cevabiyla, butun bolme)"] + frequency_report(idx, parts, items)
     head += ["", "EZBER 2R: DOGRULUK x SIKLIK (3.000 soru, tohum 11)"] + accuracy_by_frequency(
         m, tok, idx, parts, items["ezber_zincir"], surface)
+    head += ["", "2R DOGRULUK x ZINCIR SINIFI (sinif basina 200 soru, tohum 5)"] + class_accuracy(m, tok, items, surface, G)
+    head += ["", "OLCEK (Oe15): asama basina eklenen boy ve aci, cevap konumunda (bolme basina %d soru)" % per_split] + \
+        turn_report(m, tok, items, surface, per_split, seed)
     summary, body = [], []
     for split in HOP_SPLITS:
         pick = random.Random(seed).sample(range(len(items[split])), per_split)
@@ -1115,7 +1247,7 @@ def patch_name_head(m, tok, q2, q1, watch):
     att = next(i for i, a in enumerate(R2["attns"]) if a["after"] == 0)
     A2, A1, ov = R2["attns"][att]["A"], R1["attns"][att]["A"], R2["attns"][att]["ov"]
     h = int(A1[:, t1, 1:apos + 2].sum(-1).argmax())
-    after0 = dict(stages(m, R2, t2))["katman 0"]
+    after0 = unit_input(m)(dict(stages(m, R2, t2))["katman 0"])
     C = R2["C"][None]
 
     def read(A_row):
@@ -1145,16 +1277,109 @@ def patch_name_head(m, tok, q2, q1, watch):
         "   oldugu gibi   " + read(None), "   mudaheleli    " + read(row)]
 
 
+@torch.no_grad()
+def reroute(m, R, t, k, moves):
+    """Mudahale: konum t'de attention k'nin (butun baslar) agirligi src'den dst'ye tasinir (moves: [(src, dst)]); model
+    o konumda bu durumla ilerler (sonraki katmanlar ve attention'lar dahil).  -> puan (n,), R_PC dahil, defter haric."""
+    A = R["attns"][k]["A"][:, t, :t + 1].clone()
+    for src, dst in moves:
+        A[:, dst] += A[:, src]
+        A[:, src] = 0
+    after = R["attns"][k]["after"]
+    fixed = (unit_input(m)(dict(stages(m, R, t))["katman %d" % after])
+             + torch.einsum("hj,hjd->d", A, R["attns"][k]["ov"][:, :t + 1]))
+    C = R["C"][None]
+    x = C
+    for i, layer in enumerate(m.moves):
+        x = layer(x)[0]
+        if i in m.attn_after:
+            x = m.attns[m.attn_after.index(i)](C, x)
+            if i == after:
+                x = x.clone()
+                x[0, t] = fixed
+    return (m.point(x, C) @ m.P.T)[0, t]
+
+
+def reroute_cli(run_dir, step=None, per_split=60, seed=7):
+    """python data_tr_19.py --reroute <kosu klasoru> [--adim N] [--n 60]: 2R sorusunda cevap konumunda SON attention'in
+    r1'in tamlayan ekine ("▁kardeş i nin" -> "nin") giden agirligi r1'in arama konumuna ("i": kopru orada) tasinirsa
+    dogru cevap ve kopru kacinci; kontrol: ayni agirlik <eos>'a.  Ayrica ekin ve arama konumunun durumunda kopru
+    (tip ici sira, asama asama).  -> <kosu>/sinav/<paket>_reroute.txt"""
+    import decompose_19 as DC
+    from model_19 import PointRelation
+    path = latest_package(run_dir, step)
+    k = torch.load(path, weights_only=False, map_location="cpu")
+    m = point_relation_only(k)
+    d, tok = run_data(run_dir, k)
+    t0 = time.time()
+    items, surface, G, tip = chain_items(d)
+    pools = type_pools(tok, tip)
+    vocab = vocab_of(tok)
+    ix = {w: i for i, w in enumerate(vocab)}
+    first = lambda s: encode(tok, [s])[0][0]
+    att = len(m.attns) - 1
+    variants = (("oldugu gibi", lambda key, gen: []), ("ek -> arama", lambda key, gen: [(gen, key)]),
+                ("kontrol ek -> <eos>", lambda key, gen: [(gen, 0)]))
+    lines = ["%s   %s   adim %s   yeniden yonlendirme: cevap konumunda attention %d, bolme basina %d soru, tohum %d, CPU" % (
+        os.path.basename(os.path.abspath(run_dir)), os.path.basename(path), f"{k['step']:,}", att + 1, per_split, seed),
+        "okuma R_PC dahil, defter haric; ilk token dogrulugu = en ust token dogru cevabin ilk token'i"]
+    for split in HOP_SPLITS:
+        pick = random.Random(seed).sample(range(len(items[split])), per_split)
+        res = collections.defaultdict(list)
+        at_pos = collections.defaultdict(list)
+        moved = []
+        for n in pick:
+            x, (r1, r2), b, a = items[split][n]
+            q2, a2 = surface(x, (r1, r2), a)
+            b1 = surface(x, (r1,), b)[1]
+            tokens = torch.tensor([ix[EOS]] + encode(tok, [q2])[0])
+            R = DC.forward_parts(m, tokens)
+            t = len(tokens) - 1
+            key = relation_keys(tokens.tolist(), vocab)[0]
+            gen = key + 1
+            assert vocab[int(tokens[gen])].lstrip("▁") in GENITIVE, "r1'den sonra tamlayan eki yok: %s" % q2
+            wa, wb = first(a2), first(b1)
+            pa, pb = pools[tip[a]], pools[tip[b]]
+            moved.append(float(R["attns"][att]["A"][:, t, gen].mean()))
+            for label, mv in variants:
+                sc = reroute(m, R, t, att, mv(key, gen))
+                if not mv(key, gen):
+                    assert torch.allclose(sc, R["score"][t], atol=1e-3 * (1 + float(sc.abs().max()))), "mudahalesiz puan tutmuyor"
+                res[(label, "dogru")].append(int((sc[pa] > sc[wa]).sum()) + 1)
+                res[(label, "kopru")].append(int((sc[pb] > sc[wb]).sum()) + 1)
+                res[(label, "ilk token")].append(int(sc.argmax()) == wa)
+                res[(label, "p")].append(float(torch.softmax(sc, -1)[wa]))
+            for where, pos in (("arama (%s)" % "i", key), ("ek", gen)):
+                for stage, v in stages(m, R, pos):
+                    at_pos[(where, stage)].append(stage_rank(m, v, wb, pb)[1])
+        lines += ["", "-- %s  (%d soru)   son attention'in cevap konumunda eke agirligi (baslar ortalamasi) %.2f" % (
+            split, per_split, np.mean(moved)),
+            "   %-22s %10s %12s %14s %12s" % ("", "ilk token", "p(dogru)", "dogru tip ici", "kopru tip ici")]
+        for label, _ in variants:
+            lines.append("   %-22s %10.3f %12.3f %14d %12d" % (
+                label, np.mean(res[(label, "ilk token")]), np.mean(res[(label, "p")]),
+                np.median(res[(label, "dogru")]), np.median(res[(label, "kopru")])))
+        stage_names = [s for s, _ in stages(m, R, key)]
+        lines.append("   kopru tip ici sira, medyan   " + "  ".join("%-11s" % s for s in stage_names))
+        for where in ("arama (i)", "ek"):
+            lines.append("   %-28s %s" % (where, "  ".join("%-11d" % np.median(at_pos[(where, s)]) for s in stage_names)))
+    lines.append("(%.0f sn)" % (time.time() - t0))
+    out = os.path.join(run_dir, "sinav", os.path.splitext(os.path.basename(path))[0] + "_reroute.txt")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print("\n".join(lines))
+    print("-> " + out)
+
+
 def debug_cli(run_dir, questions, step=None):
     """python data_tr_19.py --debug <kosu klasoru> --soru "<2R soru>" [--soru ...] [--adim N]: her 2R soru ve iki tek
     adimi icin debug_one; basta butun ezber 2R icin yon x dogruluk.  -> <kosu>/sinav/<paket>_debug.txt"""
     from model_19 import PointRelation
     path = latest_package(run_dir, step)
     k = torch.load(path, weights_only=False, map_location="cpu")
-    m = PointRelation.from_package(k)
-    d = load(os.path.join(os.path.dirname(os.path.abspath(run_dir)), "data_tr"))
-    tok = tokenizer_from(d["tokenizer"])
-    assert list(k["vocab"]) == d["vocab"], "paketin sozlugu data_tr'ninkiyle tutmuyor"
+    m = point_relation_only(k)
+    d, tok = run_data(run_dir, k)
     t0 = time.time()
     items, surface, G, tip = chain_items(d)
     parts = training_parts(d, tok)
@@ -1187,8 +1412,7 @@ def history_cli(run_dir, questions, steps=(0, 500, 1000, 1500, 2000, 3000, 5000,
     -> <kosu>/sinav/history.txt"""
     import decompose_19 as DC
     from model_19 import PointRelation
-    d = load(os.path.join(os.path.dirname(os.path.abspath(run_dir)), "data_tr"))
-    tok = tokenizer_from(d["tokenizer"])
+    d, tok = run_data(run_dir)
     vocab = vocab_of(tok)
     ix = {w: i for i, w in enumerate(vocab)}
     items, surface, _, _ = chain_items(d)
@@ -1205,7 +1429,7 @@ def history_cli(run_dir, questions, steps=(0, 500, 1000, 1500, 2000, 3000, 5000,
             path = latest_package(run_dir, step)
         except AssertionError:
             continue
-        m = PointRelation.from_package(torch.load(path, weights_only=False, map_location="cpu"))
+        m = point_relation_only(torch.load(path, weights_only=False, map_location="cpu"))
         for i, (kind, q, gold) in enumerate(probes):
             tokens = [ix[EOS]] + encode(tok, [q])[0]
             t = len(tokens) - 1
@@ -1233,10 +1457,8 @@ def ablation_cli(run_dir, step=None, limit=500):
     from model_19 import PointRelation
     path = latest_package(run_dir, step)
     k = torch.load(path, weights_only=False, map_location="cpu")
-    m = PointRelation.from_package(k)
-    d = load(os.path.join(os.path.dirname(os.path.abspath(run_dir)), "data_tr"))
-    tok = tokenizer_from(d["tokenizer"])
-    assert list(k["vocab"]) == d["vocab"], "paketin sozlugu data_tr'ninkiyle tutmuyor"
+    m = point_relation_only(k)
+    d, tok = run_data(run_dir, k)
     t0 = time.time()
     conds = [("tam", ())]
     if m.readout is not None:
@@ -1266,6 +1488,24 @@ def ablation_cli(run_dir, step=None, limit=500):
     print("-> " + out)
 
 
+def run_data(run_dir, k=None):
+    """Kosunun egitildigi veri (paketteki ad: data_tr, data_tr_morph ...) ve tokenizer; sozluk pakettekiyle tutmazsa durur."""
+    k = k if k is not None else torch.load(latest_package(run_dir), weights_only=False, map_location="cpu")
+    name = k["data"].split()[0]
+    d = load(os.path.join(os.path.dirname(os.path.abspath(run_dir)), name))
+    assert list(k["vocab"]) == d["vocab"], "paketin sozlugu %s'ninkiyle tutmuyor" % name
+    return d, tokenizer_from(d["tokenizer"])
+
+
+def point_relation_only(k):
+    """PointRelation'a ozgu araclar (--analysis, --debug, --history, --ablation, --reroute, --hops) icin paketten
+    model; baska mimaride acik hata."""
+    from model_19 import PointRelation
+    if k.get("arch", PointRelation.arch) != PointRelation.arch:
+        raise SystemExit("bu arac PointRelation'a ozgu, paket %s -- --sinav ya da --classes kullan" % k.get("arch"))
+    return PointRelation.from_package(k)
+
+
 def latest_package(run_dir, step=None):
     """Kosu klasorundeki EN YENI agirlik (w<N>.pt ya da t<N>.pt); step verilirse o adimin paketi."""
     found = sorted((int(re.findall("[0-9]+", f)[0]), f) for f in os.listdir(run_dir) if re.match("[tw][0-9]+[.]pt$", f))
@@ -1276,14 +1516,13 @@ def latest_package(run_dir, step=None):
 
 
 def exam_cli(run_dir, step=None, per_split=6):
-    """python data_tr_19.py --sinav <kosu klasoru> [--adim N] [--n 6]: CPU'da sorar, <kosu>/sinav/<paket>.txt'ye yazar."""
-    from model_19 import PointRelation
+    """python data_tr_19.py --sinav <kosu klasoru> [--adim N] [--n 6]: CPU'da sorar, <kosu>/sinav/<paket>.txt'ye yazar.
+    Iki mimari de (paketteki arch)."""
+    from looped_19 import model_from_package
     path = latest_package(run_dir, step)
     k = torch.load(path, weights_only=False, map_location="cpu")
-    m = PointRelation.from_package(k)
-    d = load(os.path.join(os.path.dirname(os.path.abspath(run_dir)), "data_tr"))
-    tok = tokenizer_from(d["tokenizer"])
-    assert list(k["vocab"]) == d["vocab"], "paketin sozlugu data_tr'ninkiyle tutmuyor"
+    m = model_from_package(k)
+    d, tok = run_data(run_dir, k)
     t0 = time.time()
     lines = ["%s   %s   adim %s   bolme basina %d soru, tohum 7, CPU" % (
         os.path.basename(os.path.abspath(run_dir)), os.path.basename(path), f"{k['step']:,}", per_split)]
@@ -1300,7 +1539,8 @@ def exam_cli(run_dir, step=None, per_split=6):
 if __name__ == "__main__":
     arg = lambda key, default=None: sys.argv[sys.argv.index(key) + 1] if key in sys.argv else default
     if "--yaz" in sys.argv:
-        write(arg("--yaz"), split_genitive="--split-genitive" in sys.argv, morph="--morph" in sys.argv)
+        write(arg("--yaz"), split_genitive="--split-genitive" in sys.argv, morph="--morph" in sys.argv,
+              unit="document" if "--document" in sys.argv else "part")
     elif "--sinav" in sys.argv:
         exam_cli(arg("--sinav"), None if arg("--adim") is None else int(arg("--adim")), int(arg("--n", 6)))
     elif "--hops" in sys.argv:
@@ -1312,6 +1552,10 @@ if __name__ == "__main__":
     elif "--debug" in sys.argv:
         debug_cli(arg("--debug"), [sys.argv[i + 1] for i, a in enumerate(sys.argv) if a == "--soru"],
                   None if arg("--adim") is None else int(arg("--adim")))
+    elif "--reroute" in sys.argv:
+        reroute_cli(arg("--reroute"), None if arg("--adim") is None else int(arg("--adim")), int(arg("--n", 60)))
+    elif "--classes" in sys.argv:
+        classes_cli(arg("--classes"), None if arg("--adim") is None else int(arg("--adim")))
     elif "--analysis" in sys.argv:
         analysis_cli(arg("--analysis"), None if arg("--adim") is None else int(arg("--adim")), int(arg("--n", 60)))
     else:

@@ -5,11 +5,12 @@
     E[w]      giris noktasi = norm(P[w] + dE[w])                              R_PP'nin yeri (embed)
     C_t       zincir = [sira yarisi | icerik yarisi](E[w_0..t])
     C_m       V0 -> attention -> V1 -> V2 -> attention -> V3 (C_t)          hareketler + iki attention
+              norm_inputs: her katmanin ve attention'in girdisi kureye, x <- norm(x) + parca (Oe15)
     puan(w)   P[w] . z,  z = 2 e^S_p norm(C_m) + R_PC(C_t)                    cevap: z'ye en yakin P (readout)
     defter    sim(t,j) = cos(norm(Ĉ_t + R_CC(Ĉ_t)), Ĉ_j),  j < t - skip       zincir benzerligi (chain_sim)
     p         (1 - gate) softmax(puan) + gate p_defter
 
-Yeni parcalar (embed, readout, chain_sim, distance, ikinci attention) sifir etkiyle ve AYRI bir ureteçten
+Yeni parcalar (embed, readout, chain_sim, distance, ikinci attention, norm_inputs) sifir etkiyle ve AYRI bir ureteçten
 baslar: acikken adim 0'da zeminle ayni puan (TASARIM_19 Oe4).  VARSAYILAN ZEMIN: yeni parca yalniz acikca
 istenince acilir (model denemesi zeminden tek degisiklik).
 """
@@ -91,11 +92,13 @@ class MoveLayer(nn.Module):
         self.finish = nn.Parameter(start.clone())              # hareket 0: nokta yerinde baslar
         self.S_v = nn.Parameter(torch.tensor(float(s_v_init)))
         self.active = active
+        self.norm_inputs = False                                # Oe15: girdi kureye (PointRelation kurar)
 
     def forward(self, C_m, probs=False):
         """-> C_m tasinmis; probs: + BUTUN hareketler uzerinde softmax (denge terimi, S_v sabit)."""
         D2 = self._distance(C_m)
-        out = C_m + self._weights(D2) @ (self.finish - self.start)
+        x = F.normalize(C_m, dim=-1) if self.norm_inputs else C_m
+        out = x + self._weights(D2) @ (self.finish - self.start)
         return (out, torch.softmax(-D2 * self.S_v.exp().detach(), -1)) if probs else (out, None)
 
     def weights(self, C_m):
@@ -120,6 +123,7 @@ class Attention(nn.Module):
     def __init__(self, d, heads, dim, gen, first, distance, induction=False):
         super().__init__()
         self.heads, self.dim, self.first = heads, dim, first
+        self.norm_inputs = False                                # Oe15: girdi kureye (PointRelation kurar)
         init = lambda: nn.Parameter(torch.randn(heads * dim, d, generator=gen) / math.sqrt(d))
         self.W_q, self.W_k, self.W_v = init(), init(), init()
         self.W_o = nn.Parameter(torch.zeros(d, heads * dim))
@@ -132,7 +136,8 @@ class Attention(nn.Module):
         q, k, v = self._qkv(C, C_m)
         bias = self._bias(T, q.dtype, q.device)
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=bias, is_causal=bias is None)
-        return C_m + out.transpose(1, 2).reshape(B, T, -1) @ self.W_o.T
+        x = F.normalize(C_m, dim=-1) if self.norm_inputs else C_m
+        return x + out.transpose(1, 2).reshape(B, T, -1) @ self.W_o.T
 
     def weights(self, C, C_m):
         """(B, heads, T, T): forward'in agirliklari -- saglik icin."""
@@ -239,10 +244,12 @@ class PointRelation(nn.Module):
                  lam_w_init=LAM_W_INIT, beta_w_init=BETA_W_INIT, start_norm=START_NORM, s_v_init=S_V_INIT,
                  load_balance=LOAD_BALANCE, ledger=True, cache_skip=CACHE_SKIP, s_c_init=S_C_INIT,
                  gate_0_init=GATE_0_INIT, rank=RANK, embed=False, readout=False, chain_sim=False, distance=False,
-                 induction_query=False, gate_sim=True, seed=0):
+                 induction_query=False, gate_sim=True, norm_inputs=False, seed=0):
         """Yeni parcalar: embed (E), readout (R_PC), chain_sim (R_CC), distance (mesafe egilimi), attn_after'in
         ilkinden sonrakiler (ikinci attention), induction_query (C1: ilk attention'in sorgusuna ham zincir).
-        gate_sim=False (R1): defter gate'inde benzerlik girdisi yok.  Varsayilan: zemin."""
+        gate_sim=False (R1): defter gate'inde benzerlik girdisi yok.  norm_inputs (Oe15): her hareket katmaninin ve
+        attention'in girdisi kureye -- bir parcanin buyuk ciktisi sonrakileri ezmesin; adim 0'da zeminle ayni (hareket
+        ve W_o sifirdan, okuma ve gate zaten yon okur).  Varsayilan: zemin."""
         super().__init__()
         attn_after = tuple(sorted(int(i) for i in attn_after))
         assert all(0 <= i < layers for i in attn_after), (attn_after, layers)
@@ -253,7 +260,7 @@ class PointRelation(nn.Module):
                             start_norm=start_norm, s_v_init=s_v_init, load_balance=load_balance, ledger=ledger,
                             cache_skip=cache_skip, s_c_init=s_c_init, gate_0_init=gate_0_init, rank=rank,
                             embed=embed, readout=readout, chain_sim=chain_sim, distance=distance,
-                            induction_query=induction_query, gate_sim=gate_sim, seed=seed)
+                            induction_query=induction_query, gate_sim=gate_sim, norm_inputs=norm_inputs, seed=seed)
         self.n, self.d_order, self.d_content, self.t_max = n, d_order, d_content, t_max
         self.d = d = d_order + d_content
         self.lam, self.load_balance, self.attn_after = float(lam), float(load_balance), attn_after
@@ -268,6 +275,9 @@ class PointRelation(nn.Module):
             Attention(d, attn_heads, attn_dim, gen if k == 0 else part(3 + k), first=k == 0, distance=distance,
                       induction=induction_query)
             for k in range(len(attn_after)))
+        self.norm_inputs = bool(norm_inputs)
+        for mod in list(self.moves) + list(self.attns):              # uretec cekimi degismez (Oe4)
+            mod.norm_inputs = self.norm_inputs
         lam0 = (lam_w_init - LAM_W_MIN) / (1 - LAM_W_MIN)
         self.lam_w = nn.Parameter(torch.full((n, d_content), math.log(lam0 / (1 - lam0))))
         self.beta_w = nn.Parameter(torch.full((n, d_content), math.log(beta_w_init / (1 - beta_w_init))))
