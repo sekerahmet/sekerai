@@ -325,6 +325,88 @@ def t_tr():
     check("tr: sinav uretimi (ask) ve BPE istemiyle decompose; diagnose BPE metnini cozer",
           len(said) == 2 and all(isinstance(s, str) for s in said) and n_prompt == 1 + len(TR.encode(tok, ["Ali Kaya'nın annesi kimdir?"])[0])
           and DG.is_bpe(vocab) and not DG.is_math(vocab) and text_ok, str(said))
+    d["exam"] = {k: [("Ali Kaya'nın annesi kimdir?", "Ayşe Kaya"), ("Can Kaya'nın annesi kimdir?", "Ayşe Kaya")] * 2
+                 for k in TR.SHOW}
+    lines = TR.exam_text(m, tok, d, per_split=3)
+    with tempfile.TemporaryDirectory() as root:
+        for f in ("w4.pt", "t8.pt", "w12.pt", "model_x.pt"):
+            open(os.path.join(root, f), "w").close()
+        pick = (os.path.basename(TR.latest_package(root)), os.path.basename(TR.latest_package(root, 8)))
+    check("tr: nitel sinav (exam_text) bolme basina baslik + soru/model/dogru; latest_package en yeni ya da istenen adim",
+          len(lines) == 4 * len(TR.SHOW) and all(lines[4 * i].startswith("-- " + k) for i, k in enumerate(TR.SHOW))
+          and pick == ("w12.pt", "t8.pt"), "%d satir %s" % (len(lines), pick))
+    surface = lambda x, rr, a: ("%s'nın %s kimdir?" % (x, " ".join(rr)), a)
+    G = {"olgu": {("Ali Kaya", "kardeşi"): "Can Kaya"}}
+    lines, st = TR.hop_report(m, tok, [("Ali Kaya", ("annesi", "kardeşi"), "Ayşe Kaya", "Can Kaya")], surface, G)
+    check("tr: 2R teshisi (hop_report) -- iki adim + kisayol sorulur, ayrilan token'da decompose (verify'li)",
+          len(st) == 1 and st[0][3] in ("dogru", "kopru", "kisayol", "diger") and any("PARCALAR" in s for s in lines)
+          and any(s.strip().startswith("kisayol") for s in lines), str(st))
+    tokens = torch.tensor([eos] + TR.encode(tok, ["Ali Kaya'nın annesi kimdir?"])[0])
+    R = DC.forward_parts(m, tokens)
+    t = len(tokens) - 1
+    st = TR.stages(m, R, t)
+    ap = TR.answer_parts(m, R, tokens, t, vocab.index("▁Ayşe"), [1, 2])
+    n = TR.count_written(TR.possessor_index(parts), parts, "Ali_Kaya", ("annesi",), "Ayse_Kaya")
+    check("tr: 2R analizi -- asamalar C_m'de biter, dogru token'in parcalari toplami tutar, egitimde kac kez yazili",
+          [s for s, _ in st][-1] == "katman 3" and abs(sum(ap[k] for k in TR.part_rows(m)[:-1]) - ap["toplam"]) < 1e-3
+          and 0 <= ap["A1 ad"] <= 1 and n == 10, "asama %s  toplam %.4f  yazili %d" % ([s for s, _ in st], ap["toplam"], n))
+    # tasarim modeli (iki attention, R_PC, E, R_CC, mesafe): yeni parcalar sifirdan oynatilir ki etkileri olsun
+    md = PointRelation(len(vocab), d_order=16, d_content=16, vectors=8, active=2, layers=4, attn_heads=2, attn_dim=4,
+                       t_max=40, rank=8, seed=5, embed=True, readout=True, chain_sim=True, distance=True,
+                       attn_after=(0, 2)).eval()
+    g = torch.Generator().manual_seed(3)
+    with torch.no_grad():
+        for p_ in md.parameters():
+            p_.add_(0.05 * torch.randn(p_.shape, generator=g))
+    R = DC.forward_parts(md, tokens)
+    DC.verify(md, R, tokens)
+    ap = TR.answer_parts(md, R, tokens, t, vocab.index("▁Ayşe"), [1, 2], focus=[5])
+    q2 = "Ali Kaya'nın annesinin kardeşi kimdir?"
+    t2s = torch.tensor([eos] + TR.encode(tok, [q2])[0])
+    top = vocab[int(DC.forward_parts(md, t2s)["score"][-1].argmax())]
+    patched = TR.patch_name_head(md, tok, q2, "Ali Kaya'nın annesi kimdir?", [("dogru", "Can Kaya")])
+    import tr_graph_19 as V19
+    surf = lambda x, rr, a: ("%s'nın %s kimdir?" % (x.replace("_", " "), " ".join(V19.TR_ILISKI[r] for r in rr)),
+                             a.replace("_", " "))
+    tip = {e: "KISI" for e in ("Ali_Kaya", "Ayse_Kaya", "Can_Kaya")}
+    pools = {"KISI": torch.tensor(sorted({TR.encode(tok, [e.replace("_", " ")])[0][0] for e in tip}))}
+    lines, table, ranks, type_ranks, lens = TR.hop_analysis(
+        md, tok, [("Ali_Kaya", ("annesi", "kardesi"), "Ayse_Kaya", "Can_Kaya")], surf,
+        {"olgu": {("Ali_Kaya", "kardesi"): "Can_Kaya"}}, tip, pools, TR.possessor_index(parts), parts, detail=1)
+    check("tr: tasarim modelinde analiz -- parcalar toplami (R_PC, iki attention dahil), mudahalesiz ileri hesap modelin "
+          "kendi puani, konum x asama okumasi",
+          abs(sum(ap[k] for k in TR.part_rows(md)[:-1]) - ap["toplam"]) < 1e-3 and "readout" in TR.part_rows(md)
+          and "att2 ad" in ap and 0 <= ap["A2 odak"] <= 1 and patched[1].split("ilk 5: ")[1].split()[0] == top
+          and ("2R", "okuma") in ranks and ("kopru", "r1 kelimesi", "attention 2") in lens,
+          "toplam %.4f  ust %s  %s" % (ap["toplam"], top, patched[1][:60]))
+    gparts = ["Ali Kaya'nın annesinin kardeşi Can Kaya'dır.", "Can Kaya'nın yaşadığı yerin bölgesi Marmara Bölgesi'dir."]
+    gtok = TR.train_bpe(parts + gparts * 3, target=300, split_genitive=True)
+    gv = TR.vocab_of(gtok)
+    g1, g2 = ([gv[i] for i in TR.encode(gtok, [p])[0]] for p in gparts)
+    check("tr: tamlayan eki ayri token (kardesi|nin, yer|in), ozel ad eki ve gidis-donus bozulmaz",
+          g1[4:6] == ["▁annesi", "nin"] and g2[5:7] == ["▁yer", "in"] and g1[2:4] == ["'", "nın"]
+          and all(gtok.decode(TR.encode(gtok, [p])[0]) == p for p in parts + gparts), str(g1))
+    q1s, q2s = "Ali Kaya'nın kardeşi kimdir?", "Ali Kaya'nın kardeşinin yaşadığı yerin bölgesi neresidir?"
+    mt = TR.MorphTokenizer.build(parts + gparts + [q1s, q2s], frozenset({"Ali", "Kaya", "Can", "Ayşe", "Marmara"}))
+    mv = TR.vocab_of(mt)
+    q1, q2 = ([mt.ix[TR.EOS]] + TR.encode(mt, [q])[0] for q in (q1s, q2s))
+    k1, k2 = TR.relation_keys(q1, mv), TR.relation_keys(q2, mv)
+    check("tr: kok ayri ek ayri (MorphTokenizer, tr_morph_19) -- gidis-donus birebir; 2R'de r1'in arama konumuna kadar onek "
+          "1R'dekiyle AYNI; iliski arama konumlari (kardes i|nin, yer|in, bolge si)",
+          all(mt.decode(TR.encode(mt, [p])[0]) == p for p in parts + gparts + [q1s, q2s])
+          and [mv[x] for x in q2[5:8]] == ["▁kardeş", "i", "nin"] and q2[:k2[0] + 1] == q1[:k1[0] + 1]
+          and [mv[q2[j]] for j in k2] == ["i", "▁yer", "si"], str([mv[x] for x in q2]))
+    d2 = {"exam": {"x": [(str(i), str(i)) for i in range(40)]}}
+    s1, s2 = TR.exam_pairs(d2, "x", 8), TR.exam_pairs(d2, "x", 8)
+    check("tr: sinirli sinav sabit tohumlu ORNEK (ilk N degil: bolmeler iliskiye gore sirali); sinirsiz = butun bolme",
+          s1 == s2 and len(s1) == 8 and s1 != d2["exam"]["x"][:8] and TR.exam_pairs(d2, "x") == d2["exam"]["x"],
+          str([q for q, _ in s1]))
+    two = ["Ali Kaya'nın annesi Ayşe Kaya'dır.", "Ayşe Kaya, Ali Kaya'nın annesidir."]
+    ev = TR.training_evidence(TR.possessor_index(two), two, "Ali_Kaya", ("annesi",), "Ayse_Kaya")
+    ps, cont = TR.answer_in_context(m, tok, two[0], "Ayşe Kaya")
+    check("tr: hata ayiklama -- egitimdeki yon (cevap ifadeden sonra = ileri), cumlede cevaba kadar ogretmen zorlamasi",
+          [f for _, f in ev] == [True, False] and len(ps) == len(TR.encode(tok, ["Ayşe Kaya"])[0])
+          and all(0 <= p <= 1 for p in ps) and isinstance(cont, str), str(ev))
 
 
 if __name__ == "__main__":

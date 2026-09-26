@@ -39,7 +39,7 @@ Hücreler yönlü: R_P1_P2 ile R_P2_P1 ayrı.
 | **E[w]** | Kelimenin **giriş noktası** (embedding): kelime okunup zincire girerken kullandığı yer. | evet |
 | **C_t** | Zincir: t'ye kadar okunan kelimelerin E'lerinden kurulan bağlam noktası. Kullanıcı: *"modelde oluşan zincirler"*. | kurulum kuralı |
 | **C_m** | Zincirin katmanlardan (hareketler, attention) geçmiş hâli. | katmanlar evet |
-| **R_PC** | Zincirden kelimeye ilişki: "once upon" → "a". | evet |
+| **R_PC** | Zincirden kelimeye ilişki: "once upon" → "a". Yön C → P: ham zinciri (C_t) alır, kelime uzayına götürür (ad matris düzeninden: satır P, sütun C). | evet |
 | **R_CC** | Zincirden zincire benzerlik: "The little" ~ "a little". Kullanıcı: *"evet benzerlik zincir benzerliği"*. | evet |
 | **defter** | Hikâyenin kendi geçmişi: şimdiki zincire benzeyen eski zincirden sonra gelen kelimeye oy verir. | benzerliği evet |
 | **gate** | Konum başına 0–1 arası tek sayı: deftere ne kadar güvenilecek. | evet |

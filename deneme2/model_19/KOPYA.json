@@ -30,7 +30,8 @@
     "model_16/korpus_16.py": "tr_corpus_19.py -- icerik birebir",
     "model_16/taban_16.py": "tr_splits_19.py -- icerik birebir",
     "model_16/jeton_16.py": "tr_chars_19.py -- icerik birebir (korpus ve bolmeler sabitlerini kullaniyor)",
-    "model_16/birim_16.py + olcme_16.py + ayar_16.py": "data_tr_19.py'ye alinanlar: belgeler/sirala (documents/order), sinav yuzeyi (surfaces), cevap kurali (correct), AYAR (SETTINGS). Kok+ek birimleri (ek_16, birim_16'nin geri kalani) TASINMADI: kullanici BPE secti.",
-    "not": "Kullanici, 25 Eylul: 'Veri 16 en düzgün hali olabilir onu bpe tokenizer kullanabiliriz'. Kopya kapisi yalniz ebeveyn model_18'i denetler; bu dosyalarin dogrulugu parca/sinav izleriyle (model_16'nin kendi kodunun urettigiyle ayni) sinanir."
+    "model_16/birim_16.py + olcme_16.py + ayar_16.py": "data_tr_19.py'ye alinanlar: belgeler/sirala (documents/order), sinav yuzeyi (surfaces), cevap kurali (correct), AYAR (SETTINGS), ozel ad kumesi (proper_names).  26 Eylul'e kadar kok+ek birimleri tasinmamisti (doygun BPE); artik data_tr_morph kok ayri ek ayri.",
+    "not": "Kullanici, 25 Eylul: 'Veri 16 en düzgün hali olabilir onu bpe tokenizer kullanabiliriz'. Kopya kapisi yalniz ebeveyn model_18'i denetler; bu dosyalarin dogrulugu parca/sinav izleriyle (model_16'nin kendi kodunun urettigiyle ayni) sinanir.",
+    "model_16/ek_16.py": "tr_morph_19.py -- icerik birebir (yalniz baslik); data_tr_19.MorphTokenizer kokun YUZEY bicimini ve kesme isaretini ayri token tutar (birebir geri cozum)"
   }
 }
