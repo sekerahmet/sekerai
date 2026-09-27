@@ -14,21 +14,10 @@ import math
 import torch
 import torch.nn.functional as F
 
-from model_20 import D, FACT_UNITS, POINTS_SEED
+from model_20 import D, FACT_UNITS, POINTS_SEED, apply_rope   # RoPE model_20 ile ayni hesap
 
 LAYERS = 2           # model_20'nin 2 turu gibi; ama her katmanin kendi agirligi (transformer standardi)
 HEADS = 1            # model_20 gibi tek head (kullanici: "bizim modele benzeyen"); parametre sayisi head sayisindan bagimsiz
-
-
-def apply_rope(x):
-    """RoPE, x (B, H, T, d_head): konum t'de her boyut cifti t · 10000^(-2i/d_head) acisiyla dondurulur; iki konumun
-    <q, k> skoru yalniz aradaki mesafeye bagli kalir.  Parametresi yok."""
-    T, dh = x.shape[-2], x.shape[-1]
-    freq = 10000.0 ** (-torch.arange(0, dh, 2, device=x.device, dtype=x.dtype) / dh)          # (d_head/2,)
-    angle = torch.arange(T, device=x.device, dtype=x.dtype)[:, None] * freq[None, :]          # (T, d_head/2)
-    cos, sin = angle.cos(), angle.sin()
-    x1, x2 = x[..., 0::2], x[..., 1::2]
-    return torch.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], -1).flatten(-2)
 
 
 class TransformerLayer(torch.nn.Module):

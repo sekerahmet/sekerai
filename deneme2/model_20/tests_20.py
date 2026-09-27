@@ -394,7 +394,8 @@ def t_step2():
 
 def reference_blocks(m, ids):
     """Adim 3 formulu, float64, modelden bagimsiz: h = PL; her turda attention (durumlari getirir), W_context, FactUnits;
-    cikis h (W_next yok).  Oneri A acikken: + g · W_copy · Σ a PL, g = sigmoid(W_copy_gate h + copy_gate_bias)."""
+    cikis h (W_next yok).  Oneri A acikken: + g · W_copy · Σ a PL, g = sigmoid(W_copy_gate h + copy_gate_bias).
+    rope: q ve k karmasik sayi carpimiyla dondurulur (apply_rope'tan bagimsiz)."""
     unit = lambda v: v / v.norm(dim=-1, keepdim=True)
     dd = lambda t: t.detach().double()
     PL = unit(dd(m.tokens.fixed_points) + dd(m.tokens.shift))
@@ -412,6 +413,12 @@ def reference_blocks(m, ids):
         nf = (lambda v, mod=getattr(b, "norm_facts", None): ln(v, mod)) if m.layer_norm else unit
         x = h if m.stream_norm else na(h)                       # akis normalize edilmiyorsa okunan kopya normalize
         q, k = unit(x @ dd(at.W_query).T), unit(x @ dd(at.W_key).T)
+        if getattr(m, "rope", False):
+            dh = q.shape[-1]
+            theta = torch.arange(T, dtype=torch.float64)[:, None] * 10000.0 ** (-torch.arange(0, dh, 2, dtype=torch.float64) / dh)
+            rot = lambda y: torch.view_as_real(torch.view_as_complex(y.reshape(*y.shape[:-1], dh // 2, 2).contiguous())
+                                               * torch.polar(torch.ones_like(theta), theta)).flatten(-2)
+            q, k = rot(q), rot(k)
         a = torch.softmax((at.scale * q @ k.transpose(-1, -2)).masked_fill(future, float("-inf")), -1)
         added = (a @ x) @ dd(at.W_context).T
         if m.copy_path:
@@ -514,9 +521,39 @@ def t_step3():
           and cnt(BlockModel(238, layer_norm=True, stream_norm=False)) - cnt(BlockModel(238)) == 384
           and cnt(BlockModel(238, shared=False, layer_norm=True, stream_norm=False)) - cnt(BlockModel(238, shared=False)) == 640)
 
+    # ROPE=True: attention'da q ve k konuma gore dondurulur
+    for kw in (dict(shared=True), dict(shared=False, stream_norm=False, layer_norm=True)):
+        mr = BlockModel(n, d=d, units=10, rope=True, **kw)
+        with torch.no_grad():
+            for p_ in mr.parameters():
+                if p_.requires_grad:
+                    p_.copy_(0.5 * torch.randn(p_.shape, generator=g))
+        err = float((mr.logits(ids).detach().double() - reference_blocks(mr, ids)).abs().max())
+        check("adim 3, rope=True: skor = tasarim formulu (bagimsiz float64; RoPE karmasik carpimla), %s" % kw, err < 1e-4,
+              "fark %.1e" % err)
+    at, x = mr.blocks[0].attention, mr.blocks[0].norm_attention(mr.hidden(ids)[0])
+    q_, k_ = at.queries_keys(x)
+    err_w = float((at.weights(x) @ x - at(x)).abs().max())
+    rb = mr.logits(ids).detach()
+    ch = ids.clone()
+    ch[:, 5] = (ch[:, 5] + 1) % n
+    ra = mr.logits(ch).detach()
+    check("adim 3, rope=True: varsayilan False; sayi degismez; q, k boyu 1 kalir; weights() ileri hesapla ayni; nedensellik",
+          not BlockModel(n, d=d, units=10).rope and all(not b.attention.rope for b in BlockModel(n, d=d, units=10).blocks)
+          and cnt(BlockModel(238, rope=True)) == cnt(BlockModel(238))
+          and float((q_.norm(dim=-1) - 1).abs().max()) < 1e-5 and float((k_.norm(dim=-1) - 1).abs().max()) < 1e-5
+          and err_w < 1e-5
+          and float((ra[:, :5] - rb[:, :5]).abs().max()) < 1e-5 and float((ra[:, 5:] - rb[:, 5:]).abs().max()) > 1e-3,
+          "weights farki %.1e" % err_w)
+
     data = D.build()
     sids, smask = TR.sequences(data)
     nv = len(data["vocab"])
+    mr, curve_r = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), rope=True)
+    md, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=())
+    check("adim 3, rope=True: train_seq ayari modele ulasir, kayip iner; train_seq varsayilani (None) BlockModel'de ROPE",
+          all(b.attention.rope for b in mr.blocks) and curve_r[-1]["nll"] < curve_r[0]["nll"]
+          and all(not b.attention.rope for b in md.blocks), "%.3f -> %.3f" % (curve_r[0]["nll"], curve_r[-1]["nll"]))
     ml, curve_l = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), stream_norm=False, layer_norm=True)
     check("adim 3, layer_norm=True: train_seq ile egitilir, kayip iner", ml.layer_norm and curve_l[-1]["nll"] < curve_l[0]["nll"],
           "%.3f -> %.3f" % (curve_l[0]["nll"], curve_l[-1]["nll"]))
@@ -762,15 +799,9 @@ def t_transformer():
           "%.3f -> %.3f; V'siz %.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"], curve_v[0]["nll"], curve_v[-1]["nll"]))
 
     mr, curve_r = TR.train_seq("transformer_novalue", sids, smask, nv, steps=20, log_at=(0, 20), rope=False)
-    try:
-        TR.train_seq("shared", sids, smask, nv, steps=1, log_at=(), rope=False)
-        refused = False
-    except AssertionError:
-        refused = True
-    check("transformer, rope=False: train_seq ayari modele ulasir (her katmanda rope False), kayip iner; BlockModel'de "
-          "reddedilir; varsayilan True",
+    check("transformer, rope=False: train_seq ayari modele ulasir (her katmanda rope False), kayip iner; varsayilan True",
           all(not layer.rope for layer in mr.layers) and all(layer.rope for layer in mv.layers)
-          and curve_r[-1]["nll"] < curve_r[0]["nll"] and refused,
+          and curve_r[-1]["nll"] < curve_r[0]["nll"],
           "%.3f -> %.3f" % (curve_r[0]["nll"], curve_r[-1]["nll"]))
 
 
@@ -859,8 +890,9 @@ def t_colab():
     run = C.start("TEST", s, out_dir + "/r", steps=2, every=100, device="cpu", compile=False)
     run["thread"].join(600)
     files = sorted(os.listdir(out_dir + "/r"))
-    check("colab_20: CPU'da start -> sinav, model, son olcum dosyalari; pulse/stop hatasiz",
-          run["done"] and not run["error"] and files == ["config.json", "exams.json", "final.json", "log.txt", "model.pt"],
+    check("colab_20: CPU'da start -> sinav, model, son olcum dosyalari; pulse/stop hatasiz; config'de rope False (ROPE)",
+          run["done"] and not run["error"] and files == ["config.json", "exams.json", "final.json", "log.txt", "model.pt"]
+          and json.load(open(out_dir + "/r/config.json"))["rope"] is False,
           str(run["error"] or files))
     C.pulse(1)
     C.stop()

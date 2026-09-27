@@ -32,6 +32,9 @@ STREAM_NORM=False: akis normalize edilmez, okunan kopya normalize edilir (transf
       h_t = h_t + W_context sum_j a_tj norm(h_j)        (q, k da norm(h)'dan)
       h_t = h_t + W_fact_out ReLU(W_fact_in norm(h_t) - fact_threshold)
     cikis: skor = scale <norm(h_son), PL>
+
+ROPE=True: attention'da q ve k konuma gore dondurulur (RoPE, transformer'daki apply_rope); iki konumun skoru aradaki mesafeye
+de bagli olur.  Ogrenilen sayi yok; donme boyu degistirmez, cosine ve sabit att_scale aynen.
 """
 import math
 
@@ -54,6 +57,19 @@ STREAM_NORM = True   # True: durum her eklemeden sonra kureye (bugunku).  False:
                      # ve FactUnits'in okudugu kopya normalize edilir (transformer gibi); cikis <norm(h), PL> (27 Eylul)
 LAYER_NORM = False   # True: L2 norm yerine LayerNorm (norm_attention, norm_facts, norm_final; ogrenilen kazanc ve kayma);
                      # cikis <norm_final(h), PL>, sabit scale yok (kullanici, 27 Eylul: "Layernorm yapalım")
+ROPE = False         # True: attention'in q ve k'sina RoPE (konum bilgisi); False = bugunku model, konum bilgisi yok
+                     # (kullanici, 27 Eylul: "şimdi rope olan model yap")
+
+
+def apply_rope(x):
+    """RoPE, x (..., T, d): konum t'de her boyut cifti t · 10000^(-2i/d) acisiyla dondurulur; iki konumun
+    <q, k> skoru yalniz aradaki mesafeye bagli kalir.  Parametresi yok."""
+    T, dh = x.shape[-2], x.shape[-1]
+    freq = 10000.0 ** (-torch.arange(0, dh, 2, device=x.device, dtype=x.dtype) / dh)          # (d/2,)
+    angle = torch.arange(T, device=x.device, dtype=x.dtype)[:, None] * freq[None, :]          # (T, d/2)
+    cos, sin = angle.cos(), angle.sin()
+    x1, x2 = x[..., 0::2], x[..., 1::2]
+    return torch.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], -1).flatten(-2)
 
 
 def scale_for(n, confidence=CONFIDENCE):
@@ -123,9 +139,10 @@ class BigramModel(torch.nn.Module):
 class CausalAttention(torch.nn.Module):
     """Nedensel tam attention; getirdigi sey girdinin kendisi (Adim 2: PL noktalari, Adim 3: durumlar).  W_context 0'dan."""
 
-    def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, seed=POINTS_SEED + 2, copy_path=False):
+    def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, seed=POINTS_SEED + 2, copy_path=False, rope=False):
         super().__init__()
         g = torch.Generator().manual_seed(seed)
+        self.rope = rope
         # W_query, W_key: d x d, rastgele / √d baslar, egitimle degisir.  PL'yi baska bir yone ceviren dogrusal donusum
         # (dondurur, gerer, sikistirir); ardindan norm geldigi icin yalniz yon kalir.
         self.W_query = torch.nn.Parameter(torch.randn(d, d, generator=g) / d ** 0.5)   # "ne ariyorum"
@@ -142,7 +159,10 @@ class CausalAttention(torch.nn.Module):
 
     def queries_keys(self, x):
         # q_t = W_query·PL_t / |W_query·PL_t|      k_j = W_key·PL_j / |W_key·PL_j|      (ara sonuc, saklanmaz)
-        return F.normalize(x @ self.W_query.T, dim=-1), F.normalize(x @ self.W_key.T, dim=-1)
+        q, k = F.normalize(x @ self.W_query.T, dim=-1), F.normalize(x @ self.W_key.T, dim=-1)
+        if self.rope:                                     # konuma gore dondur; boy 1 kalir
+            q, k = apply_rope(q), apply_rope(k)
+        return q, k
 
     def forward(self, x, points=None):
         """x (B, T, d) PL ya da durum dizisi -> c (B, T, d).  points verilirse (Oneri A) ayni agirliklarla (c, c')."""
@@ -217,9 +237,9 @@ class Block(torch.nn.Module):
     """Adim 3 bir tur: attention durumlara bakar ve getirdigini duruma yazar; FactUnits durumu donusturur."""
 
     def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, units=FACT_UNITS, seed=POINTS_SEED + 2, copy_path=False,
-                 stream_norm=True, layer_norm=False):
+                 stream_norm=True, layer_norm=False, rope=False):
         super().__init__()
-        self.attention = CausalAttention(d, t_max, confidence, seed, copy_path=copy_path)
+        self.attention = CausalAttention(d, t_max, confidence, seed, copy_path=copy_path, rope=rope)
         self.facts = FactUnits(d, units, seed + 1)
         self.stream_norm, self.layer_norm = stream_norm, layer_norm
         if layer_norm:                                    # L2 normun yerine: ortalama cikar, ogrenilen kazanc ve kayma
@@ -251,14 +271,15 @@ class BlockModel(torch.nn.Module):
 
     def __init__(self, n, d=D, turns=TURNS, shared=SHARED_BLOCK, learn_points=LEARN_POINTS, anchor=ANCHOR,
                  confidence=CONFIDENCE, t_max=T_MAX, units=FACT_UNITS, seed=POINTS_SEED, copy_path=COPY_PATH,
-                 stream_norm=STREAM_NORM, layer_norm=LAYER_NORM):
+                 stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=ROPE):
         super().__init__()
         self.tokens = TokenPoints(n, d, learn_points, anchor, seed)
         count = 1 if shared else turns
         self.blocks = torch.nn.ModuleList(Block(d, t_max, confidence, units, seed + 10 + 2 * i, copy_path=copy_path,
-                                                stream_norm=stream_norm, layer_norm=layer_norm) for i in range(count))
+                                                stream_norm=stream_norm, layer_norm=layer_norm, rope=rope)
+                                          for i in range(count))
         self.turns, self.shared, self.copy_path, self.stream_norm = turns, shared, copy_path, stream_norm
-        self.layer_norm = layer_norm
+        self.layer_norm, self.rope = layer_norm, rope
         if layer_norm:                                    # cikista: keskinligi kazanc ogrenir, sabit scale kullanilmaz
             self.norm_final = torch.nn.LayerNorm(d)
         self.scale = scale_for(n, confidence)
