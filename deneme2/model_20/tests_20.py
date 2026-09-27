@@ -412,6 +412,33 @@ def t_step3():
           all(b.attention.rope for b in mr.blocks) and curve_r[-1]["nll"] < curve_r[0]["nll"]
           and all(b.attention.rope for b in md.blocks) and all(not b.attention.rope for b in mo.blocks),
           "%.3f -> %.3f" % (curve_r[0]["nll"], curve_r[-1]["nll"]))
+    # batches: mini-batch; model_kw: model ayarlari
+    import copy
+    whole, _ = TR.train_seq("shared", sids, smask, nv, steps=5, log_at=())
+    via, _ = TR.train_seq("shared", None, None, nv, steps=5, log_at=(), batches=lambda step: (sids, smask))
+    pick = lambda step: (sids[(step * 16) % 480:(step * 16) % 480 + 32], smask[(step * 16) % 480:(step * 16) % 480 + 32])
+    packs = {}
+    keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
+                                                                   optimizer=copy.deepcopy(opt.state_dict())))
+    full, curve_b = TR.train_seq("shared", None, None, nv, steps=6, log_at=(0, 6), batches=pick, save_every=2, save=keep)
+    resumed, _ = TR.train_seq("shared", None, None, nv, steps=6, log_at=(), batches=pick, checkpoint=packs[4])
+    try:
+        TR.train_seq("shared", None, None, nv, steps=1, log_at=())
+        refused = False
+    except AssertionError:
+        refused = True
+    same = lambda a, b: all(torch.equal(x, y) for x, y in zip(a.state_dict().values(), b.state_dict().values()))
+    check("train_seq, batches: her adimda butun veri = batches'siz egitim, bit duzeyinde; parcali egitimde 4. adim paketinden "
+          "surdurulen = kesintisiz; ids ve batches yoksa reddeder",
+          same(whole, via) and same(full, resumed) and refused and curve_b[-1]["nll"] < curve_b[0]["nll"],
+          "%.3f -> %.3f" % (curve_b[0]["nll"], curve_b[-1]["nll"]))
+    mk, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), model_kw=dict(d=32, turns=3, units=64))
+    mt, _ = TR.train_seq("transformer", sids[:8], smask[:8], nv, steps=1, log_at=(), model_kw=dict(d=32, layers=1))
+    check("train_seq, model_kw: ayarlar modele ulasir (BlockModel d 32, 3 tur, 64 birim; transformer d 32, 1 katman)",
+          tuple(mk.blocks[0].attention.W_query.shape) == (32, 32) and mk.turns == 3 and len(mk.hidden(sids[:2])) == 4
+          and tuple(mk.blocks[0].facts.W_fact_in.shape) == (64, 32)
+          and len(mt.layers) == 1 and mt.embedding.weight.shape[1] == 32)
+
     ml, curve_l = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), stream_norm=False, layer_norm=True)
     check("adim 3, layer_norm=True: train_seq ile egitilir, kayip iner", ml.layer_norm and curve_l[-1]["nll"] < curve_l[0]["nll"],
           "%.3f -> %.3f" % (curve_l[0]["nll"], curve_l[-1]["nll"]))

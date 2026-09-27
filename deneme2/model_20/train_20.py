@@ -71,7 +71,8 @@ def pad(rows, vocab):
 
 def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, lr_floor=LR_FLOOR, grad_clip=GRAD_CLIP,
               weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None, compile=False, copy_path=COPY_PATH,
-              save_every=None, save=None, checkpoint=None, stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=None):
+              save_every=None, save=None, checkpoint=None, stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=None,
+              batches=None, model_kw=None):
     """Standart tarif: cosine decay (LR -> LR x lr_floor) + gradient clipping.  lr_floor=None, grad_clip=None: eski tarif
     (sabit lr); 27 Eylul oncesi kayitli Adim 2-3 sonuclari onunla uretildi.  weight_decay > 0: AdamW, yalniz W_ matrisleri.
     callback(step, model, nll): her `every` adimda, o adimin guncellemesinden ONCE (sinav, kayit, durdurma).
@@ -81,7 +82,11 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     BlockModel ROPE).
     save(step, model, opt): her save_every adimda, callback'ten sonra, guncellemeden ONCE -- adim s paketi s guncelleme
     gormus modeli ve optimizer'i tasir.  checkpoint {step, model, optimizer}: o adimdan surdurur (ayni steps ve tarifle
-    kesintisiz kosuyla bit duzeyinde ayni); o adimin callback'i ve kaydi tekrarlanmaz."""
+    kesintisiz kosuyla bit duzeyinde ayni); o adimin callback'i ve kaydi tekrarlanmaz.
+    batches(step) -> (ids, mask): buyuk veri icin her adimda bir parca (mini-batch); verilirse ids, mask kullanilmaz (None
+    olabilir).  Adimin fonksiyonu olmali (surdurmede ayni parca gelsin); compile icin parcalarin sekli sabit olmali.
+    model_kw: modele gecen ayarlar (BlockModel: d, turns, units, t_max ...; transformer: d, layers, heads, units)."""
+    assert batches is not None or ids is not None, "ids/mask ya da batches verilmeli"
     assert setting in STEP3 or not copy_path, "copy_path yalniz Adim 3 (BlockModel) icin"
     assert setting in STEP3 or stream_norm, "stream_norm=False yalniz Adim 3 (BlockModel) icin"
     assert setting in STEP3 or not layer_norm, "layer_norm yalniz Adim 3 (BlockModel) icin"
@@ -90,14 +95,15 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
         rope = True if setting.startswith("transformer") else ROPE if setting in STEP3 else False
     assert setting in STEP3 or setting.startswith("transformer") or not rope, "rope yalniz Adim 3 ve transformer icin"
     if setting in ("transformer", "transformer_novalue"):   # novalue: V matrisi yok (tek head'de V.O tek matris)
-        model = TransformerModel(n, seed=seed, value_matrix=setting == "transformer", rope=rope)
+        model = TransformerModel(n, seed=seed, value_matrix=setting == "transformer", rope=rope, **(model_kw or {}))
     elif setting in STEP3:
         model = BlockModel(n, seed=seed, copy_path=copy_path, stream_norm=stream_norm, layer_norm=layer_norm, rope=rope,
-                           **STEP3[setting])
+                           **STEP3[setting], **(model_kw or {}))
     else:
-        model = SequenceModel(n, seed=seed, **STEP2[setting])
+        model = SequenceModel(n, seed=seed, **STEP2[setting], **(model_kw or {}))
     model = model.to(device)
-    ids, mask = ids.to(device), mask.to(device)
+    if ids is not None:
+        ids, mask = ids.to(device), mask.to(device)
     # ogrenilenler: Δ (shift), W_query, W_key, W_context; Adim 1-2: + W_next; Adim 3: + FactUnits (W_next yok)
     # (PF buffer, listede yok)
     params = [p for p in model.parameters() if p.requires_grad]
@@ -122,7 +128,9 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
         if lr_floor is not None:                           # lr_t = lr · (floor + (1 - floor) · (1 + cos(π t / T)) / 2)
             for group in opt.param_groups:
                 group["lr"] = lr * (lr_floor + (1 - lr_floor) * 0.5 * (1 + math.cos(math.pi * step / max(steps, 1))))
-        total, nll = loss_fn(ids, mask)                    # butun cumleler, butun konumlar
+        if batches is not None:                            # mini-batch: bu adimin parcasi
+            ids, mask = (t.to(device) for t in batches(step))
+        total, nll = loss_fn(ids, mask)                    # butun cumleler (ya da adimin parcasi), butun konumlar
         if step in log_at:
             curve.append(dict(step=step, nll=nll.item(), dev=deviation(model).clone() if hasattr(model, "tokens") else None,
                               W_context=(sum(b.attention.W_context.norm().item() for b in model.blocks)
