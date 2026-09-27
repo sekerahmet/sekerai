@@ -11,6 +11,7 @@ import math
 import threading
 
 import torch
+import torch._inductor.config
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from model_20 import (COPY_PATH, LAYER_NORM, NORMALIZED_UPDATE, ROPE, SPHERE_WEIGHTS, STREAM_NORM, AttentionCache,
@@ -34,6 +35,9 @@ OPTIMIZER = "muon"   # "muon": gizli matrisler (W_context, W_fact_in, W_fact_out
                      # W_mlp_out) Muon, gerisi Adam | "adam": hepsi Adam (27 Eylul'e kadarki butun kosular).
                      # Kullanici, 27 Eylul: "WSD ve muon uygun", varsayilan "Hemen Muon + WSD"
 SCHEDULE = "wsd"     # "wsd": lr sabit, son COOLDOWN kisminda 1 - sqrt ile LR x LR_FLOOR'a | "cosine": 27 Eylul'e kadarki
+# Inductor'un bellek yerlesimi analizi dinamik sekilde (bucket) ic kontrolde patladi (Colab, 28 Eylul); yalniz tiling
+# sezgisi, kapatmak sonucu degistirmez
+torch._inductor.config.triton.coalesce_tiling_analysis = False
 COMPILE_LOCK = threading.Lock()   # torch.compile iplikler arasi guvenli degil: bir kosu derlerken digerinin derlenmis
                                   # cagrisi "FX ile izleme" hatasi verdi (Colab, 27 Eylul); ileri hesap bu kilit altinda
 COOLDOWN = 0.2       # WSD'de inisin payi (son %20).  Hagele 2024: <= %20 yeter, 1 - sqrt dogrusaldan iyi
