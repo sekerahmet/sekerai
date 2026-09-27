@@ -1,0 +1,440 @@
+<title>Model X</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+:root{
+  --paper:#F5F6F2; --ink:#1B232C; --muted:#5B6773; --line:#3A4552;
+  --cell:#FFFFFF; --cellb:#C9D0D6;
+  --learn-f:#F4E4C4; --learn-s:#A5641A;
+  --op-f:#FFFFFF; --op-s:#3A4552;
+  --fixed-f:#E6E9EC; --fixed-s:#7A8793;
+  --rope:#0A7A83; --rope-f:#D3EEF0;
+  --stream:#2E5596; --loop:#7B5AA6; --tied:#8A6D3B;
+  --block-f:#EBEFF4; --block-s:#9AA8B8; --panel-f:#F8FAFC; --panel-s:#C3CDD8;
+  --out-f:#E3EFE0; --out-s:#3F7A45;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --paper:#101418; --ink:#DCE3EA; --muted:#94A1AE; --line:#B7C2CD;
+    --cell:#171C22; --cellb:#39424C;
+    --learn-f:#3A2B12; --learn-s:#E2A24C;
+    --op-f:#161B21; --op-s:#AEB9C4;
+    --fixed-f:#20262D; --fixed-s:#7F8C98;
+    --rope:#4CC8D1; --rope-f:#0E3134;
+    --stream:#86A8E6; --loop:#B79BE0; --tied:#CDAE74;
+    --block-f:#151A21; --block-s:#3B4652; --panel-f:#12161B; --panel-s:#323C47;
+    --out-f:#15261A; --out-s:#76C07E;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --paper:#101418; --ink:#DCE3EA; --muted:#94A1AE; --line:#B7C2CD;
+  --cell:#171C22; --cellb:#39424C;
+  --learn-f:#3A2B12; --learn-s:#E2A24C;
+  --op-f:#161B21; --op-s:#AEB9C4;
+  --fixed-f:#20262D; --fixed-s:#7F8C98;
+  --rope:#4CC8D1; --rope-f:#0E3134;
+  --stream:#86A8E6; --loop:#B79BE0; --tied:#CDAE74;
+  --block-f:#151A21; --block-s:#3B4652; --panel-f:#12161B; --panel-s:#323C47;
+  --out-f:#15261A; --out-s:#76C07E;
+}
+body{background:var(--paper);color:var(--ink);font-family:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:1280px;margin:0 auto;padding-inline:16px;padding-block:20px 28px}
+header{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 18px;margin-bottom:10px}
+h1{font-family:"IBM Plex Sans Condensed","IBM Plex Sans",system-ui,sans-serif;font-weight:600;font-size:28px;letter-spacing:.01em;margin:0;text-wrap:balance}
+.meta{font-family:"IBM Plex Mono",ui-monospace,Consolas,monospace;font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.fig{margin:0;overflow-x:auto}
+.fig svg{display:block;width:100%;min-width:1040px;height:auto;color:var(--ink)}
+figcaption{font-size:13px;color:var(--muted);max-width:75ch;margin-top:8px;line-height:1.5}
+svg text{fill:var(--ink);font-family:"IBM Plex Sans",system-ui,sans-serif}
+.eyebrow{font-size:11px;letter-spacing:.14em;font-weight:600;fill:var(--muted)}
+.sect{font-family:"IBM Plex Sans Condensed","IBM Plex Sans",sans-serif;font-size:16px;font-weight:600}
+.pt{font-family:"IBM Plex Sans Condensed","IBM Plex Sans",sans-serif;font-size:15px;font-weight:600}
+.bt{font-size:13px;font-weight:500}
+.btm{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:12px;font-weight:500}
+.btr{font-size:13px;font-weight:600;fill:var(--rope)!important}
+.bs{font-size:11px;fill:var(--muted)!important}
+.form{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11.5px;fill:var(--muted)!important}
+.hl{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:12px;font-weight:600;fill:var(--stream)!important}
+.tok{font-size:10px}
+.tokb{font-weight:700}
+.idx{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:9px;fill:var(--muted)!important}
+.tgl{font-size:10px;font-weight:600;fill:var(--out-s)!important}
+.arcl{font-size:10px;font-weight:600;fill:var(--rope)!important}
+.ropel{font-size:12.5px;font-weight:600;fill:var(--rope)!important}
+.ropes{font-size:10.5px;fill:var(--rope)!important}
+.ropek{fill:var(--rope)!important;font-weight:600}
+.rk{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:12px}
+.rs{font-size:12px}
+.num{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:12px;font-variant-numeric:tabular-nums}
+.numm{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11.5px}
+.bold{font-weight:700}
+.vl{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11px}
+.loopl{font-size:11px;fill:var(--loop)!important;font-weight:500}
+.tiedl{font-size:11px;fill:var(--tied)!important;font-weight:500}
+rect.cell{fill:var(--cell);stroke:var(--cellb);stroke-width:1}
+rect.query{stroke:var(--rope);stroke-width:2}
+rect.keyhl{fill:var(--rope-f);stroke:var(--rope)}
+rect.target{fill:var(--out-f);stroke:var(--out-s)}
+rect.learn{fill:var(--learn-f);stroke:var(--learn-s);stroke-width:1.4}
+rect.op{fill:var(--op-f);stroke:var(--op-s);stroke-width:1.2}
+rect.fixed{fill:var(--fixed-f);stroke:var(--fixed-s);stroke-width:1.2;stroke-dasharray:4 3}
+rect.rope{fill:var(--rope-f);stroke:var(--rope);stroke-width:2}
+rect.out{fill:var(--out-f);stroke:var(--out-s);stroke-width:1.4}
+rect.block{fill:var(--block-f);stroke:var(--block-s);stroke-width:1.4;stroke-dasharray:7 4}
+rect.panel{fill:var(--panel-f);stroke:var(--panel-s);stroke-width:1}
+rect.ropebox{fill:var(--panel-f);stroke:var(--rope);stroke-width:1.2}
+path.ar{fill:none;stroke:var(--line);stroke-width:1.4}
+path.st{fill:none;stroke:var(--stream);stroke-width:2.6}
+path.loop{fill:none;stroke:var(--loop);stroke-width:1.8;stroke-dasharray:6 4}
+path.tied{fill:none;stroke:var(--tied);stroke-width:1.6;stroke-dasharray:3 4}
+path.arc{fill:none;stroke:var(--rope);stroke-width:2}
+path.arc.weak{stroke-width:1.2;stroke-dasharray:4 3;opacity:.8}
+path.brk{fill:none;stroke:var(--muted);stroke-width:1}
+path.rule{stroke:var(--panel-s);stroke-width:1}
+path.vec{stroke:var(--ink);stroke-width:1.8}
+path.vec.rot{stroke:var(--rope);stroke-width:2.2}
+path.angle{fill:none;stroke:var(--rope);stroke-width:1.2}
+path.plusx{stroke:var(--ink);stroke-width:1.6}
+circle.plus{fill:var(--op-f);stroke:var(--ink);stroke-width:1.4}
+circle.dot{fill:var(--stream)}
+circle.unit{fill:none;stroke:var(--muted);stroke-width:1;stroke-dasharray:3 3}
+.mk{fill:var(--line)} .mks{fill:var(--stream)} .mkr{fill:var(--rope)} .mkl{fill:var(--loop)} .mkt{fill:var(--tied)}
+</style>
+<div class="wrap">
+<header>
+<h1>Model X</h1>
+<span class="meta">model_20 · C′ + RoPE · koşu shared_steps_long1r_rope_s0 · kod 6262c99 · 27 Eylül 2026</span>
+</header>
+<figure class="fig">
+<svg viewBox="0 0 1240 1330" role="img" aria-label="Model X (model_20 C′ + RoPE) mimarisi: token noktaları PL, iki tur aynı Block (RoPE'lu nedensel attention ve FactUnits, her eklemeden sonra L2 norm), çıkışta aynı PL ile skor."><defs>
+<marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk"/></marker>
+<marker id="ahs" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mks"/></marker>
+<marker id="ahr" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mkr"/></marker>
+<marker id="ahl" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mkl"/></marker>
+<marker id="aht" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mkt"/></marker>
+</defs><text x="40" y="30" class="eyebrow" text-anchor="start">GİRDİ</text>
+<text x="40" y="50" class="bs" text-anchor="start">bir eğitim dizisi, 28 konum</text>
+<text x="40" y="66" class="bs" text-anchor="start">(hiç görülmemiş torun sorusu biçiminde)</text>
+<rect x="41" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="60.5" y="104" class="tok" text-anchor="middle">&lt;eos&gt;</text>
+<text x="60.5" y="130" class="idx" text-anchor="middle">0</text>
+<rect x="82" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="101.5" y="104" class="tok" text-anchor="middle">&lt;steps&gt;</text>
+<text x="101.5" y="130" class="idx" text-anchor="middle">1</text>
+<rect x="123" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="142.5" y="104" class="tok" text-anchor="middle">Who</text>
+<text x="142.5" y="130" class="idx" text-anchor="middle">2</text>
+<rect x="164" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="183.5" y="104" class="tok" text-anchor="middle">is</text>
+<text x="183.5" y="130" class="idx" text-anchor="middle">3</text>
+<rect x="205" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="224.5" y="104" class="tok" text-anchor="middle">Owen</text>
+<text x="224.5" y="130" class="idx" text-anchor="middle">4</text>
+<rect x="246" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="265.5" y="104" class="tok" text-anchor="middle">Evans</text>
+<text x="265.5" y="130" class="idx" text-anchor="middle">5</text>
+<rect x="287" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="306.5" y="104" class="tok" text-anchor="middle">'s</text>
+<text x="306.5" y="130" class="idx" text-anchor="middle">6</text>
+<rect x="328" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="347.5" y="104" class="tok" text-anchor="middle">mother</text>
+<text x="347.5" y="130" class="idx" text-anchor="middle">7</text>
+<rect x="369" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="388.5" y="104" class="tok" text-anchor="middle">'s</text>
+<text x="388.5" y="130" class="idx" text-anchor="middle">8</text>
+<rect x="410" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="429.5" y="104" class="tok" text-anchor="middle">father</text>
+<text x="429.5" y="130" class="idx" text-anchor="middle">9</text>
+<rect x="451" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="470.5" y="104" class="tok" text-anchor="middle">?</text>
+<text x="470.5" y="130" class="idx" text-anchor="middle">10</text>
+<rect x="492" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="511.5" y="104" class="tok" text-anchor="middle">Owen</text>
+<text x="511.5" y="130" class="idx" text-anchor="middle">11</text>
+<rect x="533" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="552.5" y="104" class="tok" text-anchor="middle">Evans</text>
+<text x="552.5" y="130" class="idx" text-anchor="middle">12</text>
+<rect x="574" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="593.5" y="104" class="tok" text-anchor="middle">'s</text>
+<text x="593.5" y="130" class="idx" text-anchor="middle">13</text>
+<rect x="615" y="84" width="39" height="32" rx="3" class="cell keyhl"/>
+<text x="634.5" y="104" class="tok tokb" text-anchor="middle">mother</text>
+<text x="634.5" y="130" class="idx" text-anchor="middle">14</text>
+<rect x="656" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="675.5" y="104" class="tok" text-anchor="middle">is</text>
+<text x="675.5" y="130" class="idx" text-anchor="middle">15</text>
+<rect x="697" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="716.5" y="104" class="tok" text-anchor="middle">Julia</text>
+<text x="716.5" y="130" class="idx" text-anchor="middle">16</text>
+<rect x="738" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="757.5" y="104" class="tok" text-anchor="middle">Evans</text>
+<text x="757.5" y="130" class="idx" text-anchor="middle">17</text>
+<rect x="779" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="798.5" y="104" class="tok" text-anchor="middle">.</text>
+<text x="798.5" y="130" class="idx" text-anchor="middle">18</text>
+<rect x="820" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="839.5" y="104" class="tok" text-anchor="middle">Julia</text>
+<text x="839.5" y="130" class="idx" text-anchor="middle">19</text>
+<rect x="861" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="880.5" y="104" class="tok" text-anchor="middle">Evans</text>
+<text x="880.5" y="130" class="idx" text-anchor="middle">20</text>
+<rect x="902" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="921.5" y="104" class="tok" text-anchor="middle">'s</text>
+<text x="921.5" y="130" class="idx" text-anchor="middle">21</text>
+<rect x="943" y="84" width="39" height="32" rx="3" class="cell keyhl"/>
+<text x="962.5" y="104" class="tok tokb" text-anchor="middle">father</text>
+<text x="962.5" y="130" class="idx" text-anchor="middle">22</text>
+<rect x="984" y="84" width="39" height="32" rx="3" class="cell query"/>
+<text x="1003.5" y="104" class="tok tokb" text-anchor="middle">is</text>
+<text x="1003.5" y="130" class="idx" text-anchor="middle">23</text>
+<rect x="1025" y="84" width="39" height="32" rx="3" class="cell target"/>
+<text x="1044.5" y="104" class="tok tokb" text-anchor="middle">Harold</text>
+<text x="1044.5" y="130" class="idx" text-anchor="middle">24</text>
+<rect x="1066" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="1085.5" y="104" class="tok" text-anchor="middle">Fisher</text>
+<text x="1085.5" y="130" class="idx" text-anchor="middle">25</text>
+<rect x="1107" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="1126.5" y="104" class="tok" text-anchor="middle">.</text>
+<text x="1126.5" y="130" class="idx" text-anchor="middle">26</text>
+<rect x="1148" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="1167.5" y="104" class="tok" text-anchor="middle">&lt;eos&gt;</text>
+<text x="1167.5" y="130" class="idx" text-anchor="middle">27</text>
+<path d="M1003.5,82 C1003.5,64 962.5,64 962.5,81" class="arc" marker-end="url(#ahr)"/>
+<text x="983" y="58" class="arcl" text-anchor="middle">1 önce</text>
+<path d="M1003.5,82 C1003.5,40 634.5,40 634.5,81" class="arc weak" marker-end="url(#ahr)"/>
+<text x="819" y="35" class="arcl" text-anchor="middle">9 önce</text>
+<text x="1018" y="26" class="ropel" text-anchor="start">RoPE: skor mesafeye de bağlı</text>
+<text x="1018" y="42" class="bs" text-anchor="start">'is' (23) yakındaki 'father'ı</text>
+<text x="1018" y="56" class="bs" text-anchor="start">sorudaki 'mother'dan ayırır</text>
+<path d="M84,135 L84,140 L488,140 L488,135" class="brk"/>
+<text x="286" y="155" class="bs" text-anchor="middle">soru</text>
+<path d="M494,135 L494,140 L1144,140 L1144,135" class="brk"/>
+<text x="819" y="155" class="bs" text-anchor="middle">cevap: iki cümle (model yazar)</text>
+<text x="1044.5" y="76" class="tgl" text-anchor="middle">hedef</text>
+<rect x="40" y="196" width="170" height="50" rx="6" class="fixed"/>
+<text x="125" y="218" class="bt" text-anchor="middle">PF · 238 × 64</text>
+<text x="125" y="234" class="bs" text-anchor="middle">sabit noktalar, öğrenilmez</text>
+<circle cx="236" cy="221" r="11" class="plus"/>
+<path d="M230,221 L242,221 M236,215 L236,227" class="plusx"/>
+<rect x="262" y="196" width="170" height="50" rx="6" class="learn"/>
+<text x="347" y="218" class="bt" text-anchor="middle">shift · 238 × 64</text>
+<text x="347" y="234" class="bs" text-anchor="middle">öğrenilir, 0'dan</text>
+<path d="M210,221 L224,221" class="ar" marker-end="url(#ah)"/>
+<path d="M262,221 L248,221" class="ar" marker-end="url(#ah)"/>
+<rect x="150" y="270" width="172" height="44" rx="6" class="op"/>
+<text x="236" y="289" class="bt" text-anchor="middle">PL = norm(PF + shift)</text>
+<text x="236" y="305" class="bs" text-anchor="middle">238 nokta, kürede</text>
+<path d="M236,232 L236,270" class="ar" marker-end="url(#ah)"/>
+<rect x="470" y="270" width="230" height="44" rx="6" class="op"/>
+<text x="585" y="289" class="bt" text-anchor="middle">h₀ = PL[ids]</text>
+<text x="585" y="305" class="bs" text-anchor="middle">(B, 28, 64) · konum başına nokta</text>
+<path d="M322,292 L470,292" class="ar" marker-end="url(#ah)"/>
+<path d="M585,170 L585,268" class="ar" marker-end="url(#ah)"/>
+<text x="596" y="250" class="bs" text-anchor="start">ids</text>
+<text x="40" y="186" class="sect" text-anchor="start">TokenPoints</text>
+<rect x="36" y="340" width="764" height="720" rx="10" class="block"/>
+<text x="140" y="364" class="sect" text-anchor="start">Block</text>
+<text x="196" y="364" class="bs" text-anchor="start">tek blok, 2 tur, aynı ağırlıklar (SHARED_BLOCK)</text>
+<path d="M585,314 L585,328 L120,328 L120,392" class="st"/>
+<text x="128" y="386" class="hl" text-anchor="start">h</text>
+<circle cx="120" cy="1046" r="3.5" class="dot"/>
+<path d="M120,1046 L58,1046 L58,360 L114,360" class="loop" marker-end="url(#ahl)"/>
+<text x="50" y="700" class="loopl" text-anchor="middle" transform="rotate(-90 50 700)">tur 2: çıkış aynı Block'a yeniden girer</text>
+<rect x="170" y="380" width="614" height="412" rx="8" class="panel"/>
+<text x="186" y="402" class="pt" text-anchor="start">CausalAttention</text>
+<text x="312" y="402" class="bs" text-anchor="start">nedensel · tek head · V yok</text>
+<circle cx="120" cy="420" r="3.5" class="dot"/>
+<path d="M120,420 L200,420" class="st"/>
+<path d="M200,420 L200,690" class="st"/>
+<path d="M200,458 L226,458" class="st" marker-end="url(#ahs)"/>
+<rect x="228" y="440" width="128" height="36" rx="6" class="learn"/>
+<text x="292" y="462.5" class="btm" text-anchor="middle">W_query · 64×64</text>
+<path d="M356,458 L372,458" class="ar" marker-end="url(#ah)"/>
+<rect x="374" y="440" width="62" height="36" rx="6" class="op"/>
+<text x="405" y="462.5" class="bt" text-anchor="middle">norm</text>
+<path d="M436,458 L452,458" class="ar" marker-end="url(#ah)"/>
+<rect x="454" y="440" width="76" height="36" rx="6" class="rope"/>
+<text x="492" y="462.5" class="btr" text-anchor="middle">RoPE</text>
+<text x="540" y="463" class="hl" text-anchor="start">q_t</text>
+<path d="M200,524 L226,524" class="st" marker-end="url(#ahs)"/>
+<rect x="228" y="506" width="128" height="36" rx="6" class="learn"/>
+<text x="292" y="528.5" class="btm" text-anchor="middle">W_key · 64×64</text>
+<path d="M356,524 L372,524" class="ar" marker-end="url(#ah)"/>
+<rect x="374" y="506" width="62" height="36" rx="6" class="op"/>
+<text x="405" y="528.5" class="bt" text-anchor="middle">norm</text>
+<path d="M436,524 L452,524" class="ar" marker-end="url(#ah)"/>
+<rect x="454" y="506" width="76" height="36" rx="6" class="rope"/>
+<text x="492" y="528.5" class="btr" text-anchor="middle">RoPE</text>
+<text x="540" y="529" class="hl" text-anchor="start">k_j</text>
+<text x="492" y="562" class="ropes" text-anchor="middle">yeni: konuma göre döndür</text>
+<text x="492" y="576" class="ropes" text-anchor="middle">boy 1 kalır · 0 sayı</text>
+<rect x="592" y="444" width="186" height="50" rx="6" class="op"/>
+<text x="685" y="466" class="btm" text-anchor="middle">s_tj = 10,83 · ⟨q_t, k_j⟩</text>
+<text x="685" y="482" class="bs" text-anchor="middle">cosine × sabit ölçek</text>
+<path d="M566,458 L590,462" class="ar" marker-end="url(#ah)"/>
+<path d="M566,524 L590,480" class="ar" marker-end="url(#ah)"/>
+<rect x="592" y="520" width="186" height="40" rx="6" class="op"/>
+<text x="685" y="537" class="btm" text-anchor="middle">j &gt; t  →  −∞</text>
+<text x="685" y="553" class="bs" text-anchor="middle">nedensel maske</text>
+<path d="M685,494 L685,518" class="ar" marker-end="url(#ah)"/>
+<rect x="592" y="586" width="186" height="44" rx="6" class="op"/>
+<text x="685" y="605" class="btm" text-anchor="middle">a_tj = softmax_j</text>
+<text x="685" y="621" class="bs" text-anchor="middle">(T × T) · satır toplamı 1</text>
+<path d="M685,560 L685,584" class="ar" marker-end="url(#ah)"/>
+<rect x="400" y="660" width="370" height="48" rx="6" class="op"/>
+<text x="585" y="681" class="btm" text-anchor="middle">c_t = Σ_j a_tj · h_j</text>
+<text x="585" y="697" class="bs" text-anchor="middle">getirilen: durumların kendisi (V yok)</text>
+<path d="M685,630 L685,658" class="ar" marker-end="url(#ah)"/>
+<path d="M200,690 L398,690" class="st" marker-end="url(#ahs)"/>
+<text x="300" y="682" class="bs" text-anchor="middle">değer = h</text>
+<rect x="480" y="730" width="210" height="44" rx="6" class="learn"/>
+<text x="585" y="749" class="btm" text-anchor="middle">W_context · 64×64</text>
+<text x="585" y="765" class="bs" text-anchor="middle">0'dan başlar</text>
+<path d="M585,708 L585,728" class="ar" marker-end="url(#ah)"/>
+<circle cx="120" cy="752" r="11" class="plus"/>
+<path d="M114,752 L126,752 M120,746 L120,758" class="plusx"/>
+<path d="M480,752 L133,752" class="ar" marker-end="url(#ah)"/>
+<text x="300" y="744" class="bs" text-anchor="middle">W_context · c_t</text>
+<path d="M120,392 L120,739" class="st" marker-end="url(#ahs)"/>
+<rect x="72" y="810" width="96" height="40" rx="6" class="op"/>
+<text x="120" y="827" class="bt" text-anchor="middle">L2 norm</text>
+<text x="120" y="843" class="bs" text-anchor="middle">boy 1</text>
+<path d="M120,763 L120,808" class="st" marker-end="url(#ahs)"/>
+<text x="178" y="834" class="form" text-anchor="start">h = norm(h + W_context c)</text>
+<rect x="170" y="868" width="614" height="92" rx="8" class="panel"/>
+<text x="186" y="890" class="pt" text-anchor="start">FactUnits</text>
+<text x="266" y="890" class="bs" text-anchor="start">her konumda ayrı · 256 birim</text>
+<circle cx="120" cy="918" r="3.5" class="dot"/>
+<path d="M120,850 L120,973" class="st" marker-end="url(#ahs)"/>
+<path d="M120,918 L226,918" class="st" marker-end="url(#ahs)"/>
+<rect x="228" y="898" width="140" height="40" rx="6" class="learn"/>
+<text x="298" y="922.5" class="btm" text-anchor="middle">W_fact_in · 256×64</text>
+<path d="M368,918 L384,918" class="ar" marker-end="url(#ah)"/>
+<rect x="386" y="898" width="140" height="40" rx="6" class="learn"/>
+<text x="456" y="915" class="btm" text-anchor="middle">− fact_threshold</text>
+<text x="456" y="931" class="bs" text-anchor="middle">256</text>
+<path d="M526,918 L542,918" class="ar" marker-end="url(#ah)"/>
+<rect x="544" y="898" width="66" height="40" rx="6" class="op"/>
+<text x="577" y="915" class="bt" text-anchor="middle">ReLU</text>
+<text x="577" y="931" class="bs" text-anchor="middle">u · 256</text>
+<path d="M610,918 L626,918" class="ar" marker-end="url(#ah)"/>
+<rect x="628" y="898" width="142" height="40" rx="6" class="learn"/>
+<text x="699" y="915" class="btm" text-anchor="middle">W_fact_out · 64×256</text>
+<text x="699" y="931" class="bs" text-anchor="middle">0'dan başlar</text>
+<circle cx="120" cy="985" r="11" class="plus"/>
+<path d="M114,985 L126,985 M120,979 L120,991" class="plusx"/>
+<path d="M699,938 L699,985 L133,985" class="ar" marker-end="url(#ah)"/>
+<text x="420" y="978" class="bs" text-anchor="middle">W_fact_out · u</text>
+<rect x="72" y="1004" width="96" height="32" rx="6" class="op"/>
+<text x="120" y="1024.5" class="bt" text-anchor="middle">L2 norm</text>
+<path d="M120,996 L120,1002" class="st"/>
+<text x="178" y="1025" class="form" text-anchor="start">h = norm(h + FactUnits(h))</text>
+<path d="M120,1036 L120,1098" class="st" marker-end="url(#ahs)"/>
+<text x="128" y="1084" class="hl" text-anchor="start">h₂</text>
+<rect x="60" y="1100" width="330" height="50" rx="6" class="op"/>
+<text x="225" y="1122" class="btm" text-anchor="middle">skor_j = 10,06 · ⟨h₂, PL_j⟩</text>
+<text x="225" y="1138" class="bs" text-anchor="middle">238 token · 10,06 = ln(0,99 · 237 / 0,01)</text>
+<path d="M390,1125 L428,1125" class="ar" marker-end="url(#ah)"/>
+<rect x="430" y="1100" width="110" height="50" rx="6" class="op"/>
+<text x="485" y="1122" class="bt" text-anchor="middle">softmax</text>
+<text x="485" y="1138" class="bs" text-anchor="middle">olasılık</text>
+<path d="M540,1125 L578,1125" class="ar" marker-end="url(#ah)"/>
+<rect x="580" y="1100" width="220" height="50" rx="6" class="out"/>
+<text x="690" y="1122" class="bt" text-anchor="middle">sonraki token</text>
+<text x="690" y="1138" class="bs" text-anchor="middle">konum 23 → 'Harold'</text>
+<path d="M150,292 L22,292 L22,1125 L58,1125" class="tied" marker-end="url(#aht)"/>
+<text x="15" y="720" class="tiedl" text-anchor="middle" transform="rotate(-90 15 720)">aynı PL: giriş ve çıkış aynı noktalar</text>
+<text x="40" y="1090" class="sect" text-anchor="start">Çıkış</text>
+<path d="M690,1150 L690,1184" class="ar" marker-end="url(#ah)"/>
+<rect x="60" y="1184" width="740" height="46" rx="6" class="op"/>
+<text x="430" y="1204" class="btm" text-anchor="middle">kayıp = cross-entropy(skor, hedef) + 1e-3 · Σ‖shift‖²</text>
+<text x="430" y="1220" class="bs" text-anchor="middle">bütün konumlarda (&lt;pad&gt; hariç) · Adam</text>
+<text x="840" y="196" class="sect" text-anchor="start">Öğrenilen sayılar</text>
+<text x="840" y="222" class="rk " text-anchor="start">shift · 238 × 64</text>
+<text x="1210" y="222" class="num " text-anchor="end">15.232</text>
+<text x="840" y="243" class="rk " text-anchor="start">W_query · 64 × 64</text>
+<text x="1210" y="243" class="num " text-anchor="end">4.096</text>
+<text x="840" y="264" class="rk " text-anchor="start">W_key · 64 × 64</text>
+<text x="1210" y="264" class="num " text-anchor="end">4.096</text>
+<text x="840" y="285" class="rk " text-anchor="start">W_context · 64 × 64</text>
+<text x="1210" y="285" class="num " text-anchor="end">4.096</text>
+<text x="840" y="306" class="rk " text-anchor="start">W_fact_in · 256 × 64</text>
+<text x="1210" y="306" class="num " text-anchor="end">16.384</text>
+<text x="840" y="327" class="rk " text-anchor="start">fact_threshold · 256</text>
+<text x="1210" y="327" class="num " text-anchor="end">256</text>
+<text x="840" y="348" class="rk " text-anchor="start">W_fact_out · 64 × 256</text>
+<text x="1210" y="348" class="num " text-anchor="end">16.384</text>
+<text x="840" y="369" class="rk ropek" text-anchor="start">RoPE</text>
+<text x="1210" y="369" class="num ropek" text-anchor="end">0</text>
+<path d="M840,377 L1210,377" class="rule"/>
+<text x="840" y="396" class="rk bold" text-anchor="start">toplam</text>
+<text x="1210" y="396" class="num bold" text-anchor="end">60.544</text>
+<text x="840" y="419" class="bs" text-anchor="start">tek blok: iki tur aynı sayıları kullanır</text>
+<text x="840" y="434" class="bs" text-anchor="start">(transformer 115.328 · V'siz 107.008)</text>
+<text x="840" y="500" class="sect" text-anchor="start">Ayarlar</text>
+<text x="840" y="526" class="rk ropek" text-anchor="start">ROPE</text>
+<text x="1210" y="526" class="numm ropek" text-anchor="end">True · yeni</text>
+<text x="840" y="547" class="rk " text-anchor="start">SHARED_BLOCK · TURNS</text>
+<text x="1210" y="547" class="numm " text-anchor="end">True · 2</text>
+<text x="840" y="568" class="rk " text-anchor="start">STREAM_NORM</text>
+<text x="1210" y="568" class="numm " text-anchor="end">True</text>
+<text x="840" y="589" class="rk " text-anchor="start">LAYER_NORM</text>
+<text x="1210" y="589" class="numm " text-anchor="end">False</text>
+<text x="840" y="610" class="rk " text-anchor="start">COPY_PATH</text>
+<text x="1210" y="610" class="numm " text-anchor="end">False</text>
+<text x="840" y="631" class="rk " text-anchor="start">D · FACT_UNITS</text>
+<text x="1210" y="631" class="numm " text-anchor="end">64 · 256</text>
+<text x="840" y="652" class="rk " text-anchor="start">ANCHOR</text>
+<text x="1210" y="652" class="numm " text-anchor="end">1e-3</text>
+<text x="840" y="700" class="sect" text-anchor="start">RoPE nasıl</text>
+<rect x="840" y="712" width="370" height="196" rx="8" class="ropebox"/>
+<circle cx="910" cy="800" r="50" class="unit"/>
+<path d="M910,800 L956.985,782.899" class="vec" marker-end="url(#ah)"/>
+<text x="964.985" y="778.899" class="vl" text-anchor="start">q</text>
+<path d="M910,800 L918.682,750.76" class="vec rot" marker-end="url(#ahr)"/>
+<text x="914.682" y="746.76" class="vl ropek" text-anchor="end">R_t q</text>
+<path d="M934.432,791.107 A26,26 0 0 0 914.515,774.395" class="angle"/>
+<text x="940" y="770" class="vl ropek" text-anchor="start">θ</text>
+<text x="910" y="868" class="bs" text-anchor="middle">bir boyut çifti</text>
+<text x="980" y="740" class="rs" text-anchor="start">q, k: 32 boyut çifti, her biri</text>
+<text x="980" y="761" class="rs" text-anchor="start">θ = t · 10000^(−2i/64) döner</text>
+<text x="980" y="782" class="rs" text-anchor="start">i = 0: 1 rad / konum</text>
+<text x="980" y="803" class="rs" text-anchor="start">i = 31: 0,00013 rad / konum</text>
+<text x="980" y="824" class="rs" text-anchor="start">⟨R_t q, R_j k⟩ yalnız j − t'ye bağlı</text>
+<text x="980" y="845" class="rs" text-anchor="start">boy değişmez: cosine ve 10,83</text>
+<text x="980" y="866" class="rs" text-anchor="start">aynen kalır · iki turda da</text>
+<text x="840" y="940" class="sect" text-anchor="start">Eğitim ve sonuç</text>
+<text x="840" y="966" class="rk " text-anchor="start">Adam · lr</text>
+<text x="1210" y="966" class="numm " text-anchor="end">0,01 → cosine → 0,001</text>
+<text x="840" y="987" class="rk " text-anchor="start">gradient clipping</text>
+<text x="1210" y="987" class="numm " text-anchor="end">1,0</text>
+<text x="840" y="1008" class="rk " text-anchor="start">adım · batch</text>
+<text x="1210" y="1008" class="numm " text-anchor="end">4.000 · full (2.240)</text>
+<text x="840" y="1029" class="rk " text-anchor="start">tohum · veri</text>
+<text x="1210" y="1029" class="numm " text-anchor="end">0 · 240bdd2aaebf</text>
+<path d="M840,1037 L1210,1037" class="rule"/>
+<text x="840" y="1056" class="rk bold" text-anchor="start">hiç görülmemiş 2R, EX</text>
+<text x="1210" y="1056" class="numm bold" text-anchor="end">187 / 192</text>
+<text x="840" y="1077" class="rk " text-anchor="start">C′ (RoPE'suz)</text>
+<text x="1210" y="1077" class="numm " text-anchor="end">89 / 192</text>
+<text x="840" y="1098" class="rk " text-anchor="start">transformer · V'siz</text>
+<text x="1210" y="1098" class="numm " text-anchor="end">171 · 175</text>
+<rect x="60" y="1270" width="22" height="14" rx="3" class="learn"/>
+<text x="90" y="1281" class="bs" text-anchor="start">öğrenilen parametre</text>
+<rect x="254.8" y="1270" width="22" height="14" rx="3" class="op"/>
+<text x="284.8" y="1281" class="bs" text-anchor="start">parametresiz hesap</text>
+<rect x="442.4" y="1270" width="22" height="14" rx="3" class="fixed"/>
+<text x="472.4" y="1281" class="bs" text-anchor="start">sabit (PF)</text>
+<rect x="572.4" y="1270" width="22" height="14" rx="3" class="rope"/>
+<text x="602.4" y="1281" class="bs" text-anchor="start">RoPE (yeni)</text>
+<path d="M709.6,1277 L739.6,1277" class="st"/>
+<text x="747.6" y="1281" class="bs" text-anchor="start">akış h</text>
+<path d="M809.6,1277 L839.6,1277" class="tied"/>
+<text x="847.6" y="1281" class="bs" text-anchor="start">aynı PL (tied)</text></svg>
+<figcaption>Bir konumun yolu: token noktası PL'den başlar, aynı Block'tan iki kez geçer (attention durumlara bakar, FactUnits
+dönüştürür, her eklemeden sonra L2 norm), son durum aynı PL noktalarıyla karşılaştırılıp sonraki token seçilir. C′'den tek
+fark RoPE: q ve k konuma göre döndürülür, öğrenilen sayı eklenmez.</figcaption>
+</figure>
+</div>
