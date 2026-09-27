@@ -866,9 +866,118 @@ def t_generate_cached():
           "fark %.1e  kayip %.3f -> %.3f" % (err, curve[0]["nll"], curve[-1]["nll"]))
 
 
+def t_normalized_update():
+    """Kusur 1a (normalized_update) ve 2a (sphere_weights): kapaliyken bugunku model; formul bagimsiz float64 hesapla ayni;
+    blok ciktisi ne kadar buyurse buyusun durum alpha kadar doner; agirliklar her adimdan sonra birim; surdurme ayni."""
+    import copy
+    import torch.nn.functional as F
+    from model_20 import ALPHA_INIT, BlockModel, apply_rope
+    data = D.build()
+    sids, smask = EK.sequences(data)
+    nv = len(data["vocab"])
+
+    today, off = BlockModel(nv), BlockModel(nv, normalized_update=False, sphere_weights=False)
+    both = BlockModel(nv, normalized_update=True, sphere_weights=True)
+    b0 = both.blocks[0]
+    unit_rows = lambda w: float((w.norm(dim=1) - 1).abs().max())
+    unit_cols = lambda w: float((w.norm(dim=0) - 1).abs().max())
+    check("anahtarlar kapali = bugunku model (ayni agirliklar, alpha yok, W_context ve W_fact_out 0); acikken alpha (tur, d) = "
+          "ALPHA_INIT, W_context / W_fact_out rastgele, satir / sutunlar birim",
+          all(torch.equal(a, b) for a, b in zip(today.state_dict().values(), off.state_dict().values()))
+          and not hasattr(off, "alpha_attention") and not off.blocks[0].attention.W_context.any()
+          and both.alpha_attention.shape == (both.turns, 64) and bool((both.alpha_facts == ALPHA_INIT).all())
+          and max(unit_rows(b0.attention.W_query), unit_rows(b0.attention.W_key), unit_rows(b0.facts.W_fact_in),
+                  unit_cols(b0.attention.W_context), unit_cols(b0.facts.W_fact_out)) < 1e-6)
+
+    # bagimsiz float64 referans (tasarim formulu): rastgele parametrelerle
+    g = torch.Generator().manual_seed(41)
+    m = BlockModel(nv, d=32, units=48, normalized_update=True, sphere_weights=True).double()
+    with torch.no_grad():
+        for name, p_ in m.named_parameters():
+            if name.startswith("alpha"):
+                p_.copy_(0.5 * torch.rand(p_.shape, generator=g, dtype=torch.float64))
+            else:
+                p_.add_(0.3 * torch.randn(p_.shape, generator=g, dtype=torch.float64))
+        m.normalize_weights()
+    ids = sids[:6, :20]
+    with torch.no_grad():
+        P = F.normalize(m.tokens.fixed_points + m.tokens.shift, dim=-1)
+        h = P[ids]
+        blk = m.blocks[0]
+        at, fu = blk.attention, blk.facts
+        T = ids.shape[1]
+        for i in range(m.turns):
+            q = apply_rope(F.normalize(h @ at.W_query.T, dim=-1))
+            k = apply_rope(F.normalize(h @ at.W_key.T, dim=-1))
+            s_ = at.scale * q @ k.transpose(-1, -2)
+            s_ = s_.masked_fill(torch.ones(T, T, dtype=torch.bool).triu(1), float("-inf"))
+            c = torch.softmax(s_, -1) @ h
+            u = c @ at.W_context.T
+            h = F.normalize(h + m.alpha_attention[i] * (F.normalize(u, dim=-1) - h), dim=-1)
+            f = torch.relu(32 ** 0.5 * h @ fu.W_fact_in.T - fu.fact_threshold) @ fu.W_fact_out.T
+            h = F.normalize(h + m.alpha_facts[i] * (F.normalize(f, dim=-1) - h), dim=-1)
+        ref = m.scale * h @ P.T
+        err = float((m.logits(ids) - ref).abs().max())
+    check("normalized_update + sphere_weights: skor = tasarim formulu (bagimsiz float64; h <- norm(h + a (norm(u) - h)), "
+          "FactUnits girdisi sqrt(d) x kosinus)", err < 1e-10, "fark %.1e" % err)
+
+    # kusur 1: FactUnits ciktisi 1000 kat buyutulse de durum alpha kadar doner (bugunku modelde silinir)
+    def turn_cos(model):
+        with torch.no_grad():
+            hs = model.hidden(sids[:16])
+            return min(float((a * b).sum(-1)[smask[:16]].min()) for a, b in zip(hs[:-1], hs[1:]))
+    fixed = BlockModel(nv, normalized_update=True)
+    now = BlockModel(nv)
+    with torch.no_grad():
+        for mm in (fixed, now):
+            mm.blocks[0].attention.W_context.copy_(torch.randn(64, 64, generator=g) / 8)
+            mm.blocks[0].facts.W_fact_out.copy_(1000 * torch.randn(64, 256, generator=g) / 16)
+    c_fixed, c_now = turn_cos(fixed), turn_cos(now)
+    check("kusur 1: FactUnits ciktisi 1000 kat buyukken normalized_update'te tur basina cos(h_once, h_sonra) >= 0,95 (alpha "
+          "0,1); bugunku guncellemede durum siliniyor", c_fixed >= 0.95 and c_now < 0.5, "en kucuk cos %.3f / bugun %.3f"
+          % (c_fixed, c_now))
+
+    # egitim: kayip iner, agirliklar her adimdan sonra birim, alpha Adam'da ve ogreniyor; surdurme bit duzeyinde
+    opts = []
+    grab = lambda step, model, opt: opts.append(opt)
+    kw = dict(normalized_update=True, sphere_weights=True)
+    trained, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), save_every=1, save=grab, **kw)
+    tb = trained.blocks[0]
+    names = {id(p_): k for k, p_ in trained.named_parameters()}
+    in_adam = sorted(names[id(p_)] for g_ in opts[-1].param_groups if not g_["use_muon"] for p_ in g_["params"])
+    check("egitim (normalized_update + sphere_weights, Muon + WSD): kayip iner; 20 adimdan sonra satir / sutunlar birim; "
+          "alpha Adam'da ve baslangictan ayrildi",
+          curve[-1]["nll"] < curve[0]["nll"] and "alpha_attention" in in_adam and "alpha_facts" in in_adam
+          and max(unit_rows(tb.attention.W_query), unit_rows(tb.attention.W_key), unit_rows(tb.facts.W_fact_in),
+                  unit_cols(tb.attention.W_context), unit_cols(tb.facts.W_fact_out)) < 1e-5
+          and float((trained.alpha_facts - ALPHA_INIT).abs().max()) > 1e-4,
+          "%.3f -> %.3f  alpha %.4f..%.4f" % (curve[0]["nll"], curve[-1]["nll"], float(trained.alpha_facts.min()),
+                                              float(trained.alpha_facts.max())))
+    packs = {}
+    keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
+                                                                   optimizer=copy.deepcopy(opt.state_dict())))
+    full, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), save_every=2, save=keep, **kw)
+    res, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs[4], **kw)
+    qs = [[1] + sids[i, 1:9].tolist() for i in range(12)]
+    try:
+        TR.train_seq("transformer", sids[:8], smask[:8], nv, steps=1, log_at=(), normalized_update=True)
+        refused = False
+    except AssertionError:
+        refused = True
+    try:
+        BlockModel(nv, normalized_update=True, stream_norm=False, layer_norm=True)
+        refused_ln = False
+    except AssertionError:
+        refused_ln = True
+    check("normalized_update + sphere_weights: 4. adim paketinden surdurulen = kesintisiz, bit duzeyinde; onbellekli uretim = "
+          "tam yeniden hesap; transformer'da ve LayerNorm'la reddedilir",
+          all(torch.equal(a, b) for a, b in zip(full.state_dict().values(), res.state_dict().values()))
+          and TR.generate(trained, qs, 10) == TR.generate(trained, qs, 10, cached=False) and refused and refused_ln)
+
+
 if __name__ == "__main__":
     print("tests (model_20)")
-    for f in (t_model, t_step2, t_step3, t_copy, t_transformer, t_generate_cached):
+    for f in (t_model, t_step2, t_step3, t_copy, t_transformer, t_generate_cached, t_normalized_update):
         f()
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)

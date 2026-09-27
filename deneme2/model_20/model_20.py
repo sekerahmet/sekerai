@@ -57,6 +57,13 @@ STREAM_NORM = True   # True: durum her eklemeden sonra kureye (bugunku).  False:
                      # ve FactUnits'in okudugu kopya normalize edilir (transformer gibi); cikis <norm(h), PL> (27 Eylul)
 LAYER_NORM = False   # True: L2 norm yerine LayerNorm (norm_attention, norm_facts, norm_final; ogrenilen kazanc ve kayma);
                      # cikis <norm_final(h), PL>, sabit scale yok (kullanici, 27 Eylul: "Layernorm yapalım")
+NORMALIZED_UPDATE = False   # True: h <- norm(h + alpha (norm(u) - h)), u blok ciktisi; alpha ogrenilen, tur ve alt blok
+                            # basina d sayi (nGPT).  False: h <- norm(h + u) (bugunku).  Kusur 1: FactUnits durumu eziyordu
+                            # (|u| ~ 10-178, |h| = 1; kullanici, 27 Eylul: "kusur 1 a kabul")
+ALPHA_INIT = 0.1            # alpha'nin baslangici: nGPT 2026 tarifi (derinlikten bagimsiz 0,1)
+SPHERE_WEIGHTS = False      # True: W_query, W_key, W_fact_in satirlari ve W_context, W_fact_out sutunlari baslangicta ve her
+                            # optimizer adimindan sonra birim boya (nGPT); FactUnits girdisi sqrt(d) x kosinus.  Kusur 2:
+                            # agirliklar ~20 kat buyuyor, adim sonuyordu (kullanici, 27 Eylul: "kusur 2 a kanul")
 ROPE = True          # attention'in q ve k'sina RoPE (konum bilgisi).  Varsayilanlar = Model X (C' + RoPE; kullanici, 27 Eylul:
                      # "Model X varsayilan model olsun" onayi); False = RoPE'suz C'
 
@@ -292,16 +299,18 @@ class Block(torch.nn.Module):
     """Adim 3 bir tur: attention durumlara bakar ve getirdigini duruma yazar; FactUnits durumu donusturur."""
 
     def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, units=FACT_UNITS, seed=POINTS_SEED + 2, copy_path=False,
-                 stream_norm=True, layer_norm=False, rope=False):
+                 stream_norm=True, layer_norm=False, rope=False, normalized_update=False, sphere_weights=False):
         super().__init__()
         self.attention = CausalAttention(d, t_max, confidence, seed, copy_path=copy_path, rope=rope)
         self.facts = FactUnits(d, units, seed + 1)
         self.stream_norm, self.layer_norm = stream_norm, layer_norm
+        self.normalized_update, self.sphere_weights = normalized_update, sphere_weights
         if layer_norm:                                    # L2 normun yerine: ortalama cikar, ogrenilen kazanc ve kayma
             self.norm_attention = torch.nn.LayerNorm(d)
             self.norm_facts = torch.nn.LayerNorm(d)
 
-    def forward(self, h, points=None, cache=None):
+    def forward(self, h, points=None, cache=None, alpha_attention=None, alpha_facts=None):
+        """alpha_attention, alpha_facts (d,): normalized_update'te bu turun alpha'lari."""
         at = self.attention
         unit = lambda v: F.normalize(v, dim=-1)
         norm_a, norm_f = (self.norm_attention, self.norm_facts) if self.layer_norm else (unit, unit)
@@ -313,11 +322,16 @@ class Block(torch.nn.Module):
             added = c @ at.W_context.T + gate * (c_copy @ at.W_copy.T)             # W_context · c_t + g_t · W_copy · c'_t
         else:
             added = at(x, cache=cache) @ at.W_context.T                            # W_context · c_t
+        # sphere_weights: W_fact_in satirlari birim, h birim -> girdi kosinus (tipik ±1/√d); √d ile esik O(1) olcekte
+        facts = (lambda v: self.facts(v * v.shape[-1] ** 0.5)) if self.sphere_weights else self.facts
+        if self.normalized_update:                                                 # u'nun boyu silinir, adimi alpha belirler
+            h = unit(h + alpha_attention * (unit(added) - h))                     # h = norm(h + α_A ⊙ (norm(W_context c) - h))
+            return unit(h + alpha_facts * (unit(facts(h)) - h))                   # h = norm(h + α_F ⊙ (norm(olgu(h)) - h))
         if self.stream_norm:
             h = norm_a(h + added)                                                  # h_t = norm(h_t + W_context · c_t)
-            return norm_f(h + self.facts(h))                                       # h_t = norm(h_t + olgu(h_t))
+            return norm_f(h + facts(h))                                            # h_t = norm(h_t + olgu(h_t))
         h = h + added                                                              # akis normalize edilmez:
-        return h + self.facts(norm_f(h))                                           # h_t = h_t + olgu(norm(h_t))
+        return h + facts(norm_f(h))                                                # h_t = h_t + olgu(norm(h_t))
 
 
 class BlockModel(torch.nn.Module):
@@ -326,15 +340,30 @@ class BlockModel(torch.nn.Module):
 
     def __init__(self, n, d=D, turns=TURNS, shared=SHARED_BLOCK, learn_points=LEARN_POINTS, anchor=ANCHOR,
                  confidence=CONFIDENCE, t_max=T_MAX, units=FACT_UNITS, seed=POINTS_SEED, copy_path=COPY_PATH,
-                 stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=ROPE):
+                 stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=ROPE, normalized_update=NORMALIZED_UPDATE,
+                 sphere_weights=SPHERE_WEIGHTS):
         super().__init__()
+        assert not normalized_update or (stream_norm and not layer_norm), "normalized_update akis normuyla (L2) calisir"
         self.tokens = TokenPoints(n, d, learn_points, anchor, 100 * seed)          # 100 * seed: BigramModel'deki gibi
         count = 1 if shared else turns
         self.blocks = torch.nn.ModuleList(Block(d, t_max, confidence, units, 100 * seed + 10 + 2 * i, copy_path=copy_path,
-                                                stream_norm=stream_norm, layer_norm=layer_norm, rope=rope)
+                                                stream_norm=stream_norm, layer_norm=layer_norm, rope=rope,
+                                                normalized_update=normalized_update, sphere_weights=sphere_weights)
                                           for i in range(count))
         self.turns, self.shared, self.copy_path, self.stream_norm = turns, shared, copy_path, stream_norm
         self.layer_norm, self.rope = layer_norm, rope
+        self.normalized_update, self.sphere_weights = normalized_update, sphere_weights
+        if normalized_update or sphere_weights:           # sifir yon normalize edilemez: W_context, W_fact_out rastgele baslar
+            g = torch.Generator().manual_seed(100 * seed + 9)
+            with torch.no_grad():
+                for b in self.blocks:
+                    b.attention.W_context.copy_(torch.randn(d, d, generator=g) / d ** 0.5)
+                    b.facts.W_fact_out.copy_(torch.randn(d, units, generator=g) / units ** 0.5)
+        if normalized_update:                             # tur basina (paylasilan blokta da): (tur, d)
+            self.alpha_attention = torch.nn.Parameter(torch.full((turns, d), ALPHA_INIT))
+            self.alpha_facts = torch.nn.Parameter(torch.full((turns, d), ALPHA_INIT))
+        if sphere_weights:
+            self.normalize_weights()
         if layer_norm:                                    # cikista: keskinligi kazanc ogrenir, sabit scale kullanilmaz
             self.norm_final = torch.nn.LayerNorm(d)
         self.scale = scale_for(n, confidence)
@@ -349,9 +378,22 @@ class BlockModel(torch.nn.Module):
         points = h if self.copy_path else None                # Oneri A: kelimelerin kendi noktalari, turlarda degismez
         out = [h]
         for i, block in enumerate(self.turn_blocks()):
-            h = block(h, points, None if caches is None else caches[i])
+            alphas = (dict(alpha_attention=self.alpha_attention[i], alpha_facts=self.alpha_facts[i])
+                      if self.normalized_update else {})
+            h = block(h, points, None if caches is None else caches[i], **alphas)
             out.append(h)
         return out
+
+    @torch.no_grad()
+    def normalize_weights(self):
+        """sphere_weights: girdisi durum olan matrislerin satirlari (W_query, W_key, W_fact_in), duruma yazanlarin sutunlari
+        (W_context, W_copy, W_fact_out) birim boya; baslangicta ve her optimizer adimindan sonra (train_seq)."""
+        for b in self.blocks:
+            at, f = b.attention, b.facts
+            for w in (at.W_query, at.W_key, f.W_fact_in):
+                w.copy_(F.normalize(w, dim=1))
+            for w in (at.W_context, f.W_fact_out) + ((at.W_copy,) if at.copy_path else ()):
+                w.copy_(F.normalize(w, dim=0))
 
     def logits(self, ids, caches=None):
         P = self.tokens.points()

@@ -59,6 +59,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
                               optimizer=TR.OPTIMIZER, schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,
                               copy_path=TR.COPY_PATH, stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
+                              normalized_update=TR.NORMALIZED_UPDATE, sphere_weights=TR.SPHERE_WEIGHTS,
                               rope=True if setting.startswith("transformer") else TR.ROPE if setting in TR.STEP3 else False),
                          **train_kw))
     checkpoint = None
@@ -69,7 +70,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         saved = json.load(open(os.path.join(out, "config.json")))
         # 27 Eylul oncesi config'lerde optimizer / takvim / bucket yok: o kosular Adam + cosine, rastgele batch idi.
         # compile sonucu degistirir: karsilastirilir
-        saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN, bucket=None), **saved)
+        saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN, normalized_update=False, sphere_weights=False, bucket=None), **saved)
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)

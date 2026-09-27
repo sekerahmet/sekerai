@@ -11,8 +11,8 @@ import math
 import torch
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from model_20 import (COPY_PATH, LAYER_NORM, ROPE, STREAM_NORM, AttentionCache, BigramModel, BlockModel, SequenceModel,
-                      deviation)
+from model_20 import (COPY_PATH, LAYER_NORM, NORMALIZED_UPDATE, ROPE, SPHERE_WEIGHTS, STREAM_NORM, AttentionCache,
+                      BigramModel, BlockModel, SequenceModel, deviation)
 from model_20_transformer import TransformerModel
 
 SETTINGS = {                      # capa lr/wd gibi deneme sayisi; 1e-2 fazla sertti (kayip 1,284 > 1,270)
@@ -127,7 +127,8 @@ def pad(rows, vocab):
 def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, lr_floor=LR_FLOOR, grad_clip=GRAD_CLIP,
               weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None, compile=True, copy_path=COPY_PATH,
               save_every=None, save=None, checkpoint=None, stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=None,
-              batches=None, model_kw=None, optimizer=OPTIMIZER, schedule=SCHEDULE, cooldown=COOLDOWN):
+              batches=None, model_kw=None, optimizer=OPTIMIZER, schedule=SCHEDULE, cooldown=COOLDOWN,
+              normalized_update=NORMALIZED_UPDATE, sphere_weights=SPHERE_WEIGHTS):
     """Standart tarif (27 Eylul'den): Muon (gizli matrisler) + Adam, WSD takvimi (lr sabit, son cooldown kisminda
     1 - sqrt ile LR x lr_floor'a), gradient clipping.  optimizer="adam", schedule="cosine": 27 Eylul'e kadarki tarif.
     lr_floor=None, grad_clip=None: en eski tarif (sabit lr).  weight_decay > 0: AdamW, yalniz W_ matrisleri (yalniz adam).
@@ -149,6 +150,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     assert setting in STEP3 or not copy_path, "copy_path yalniz Adim 3 (BlockModel) icin"
     assert setting in STEP3 or stream_norm, "stream_norm=False yalniz Adim 3 (BlockModel) icin"
     assert setting in STEP3 or not layer_norm, "layer_norm yalniz Adim 3 (BlockModel) icin"
+    assert setting in STEP3 or not (normalized_update or sphere_weights), "normalized_update / sphere_weights yalniz Adim 3 icin"
     assert not setting.startswith("transformer") or not weight_decay, "transformer icin weight decay gruplari tanimli degil"
     assert optimizer in ("muon", "adam") and schedule in ("wsd", "cosine") and 0 < cooldown <= 1
     assert optimizer == "adam" or not weight_decay, "weight_decay yalniz optimizer='adam' ile (AdamW)"
@@ -159,7 +161,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
         model = TransformerModel(n, seed=seed, value_matrix=setting == "transformer", rope=rope, **(model_kw or {}))
     elif setting in STEP3:
         model = BlockModel(n, seed=seed, copy_path=copy_path, stream_norm=stream_norm, layer_norm=layer_norm, rope=rope,
-                           **STEP3[setting], **(model_kw or {}))
+                           normalized_update=normalized_update, sphere_weights=sphere_weights, **STEP3[setting],
+                           **(model_kw or {}))
     else:
         model = SequenceModel(n, seed=seed, **STEP2[setting], **(model_kw or {}))
     model = model.to(device)
@@ -233,6 +236,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
         if grad_clip is not None:                          # butun gradyanlarin toplam boyu > grad_clip ise olcekle indir
             torch.nn.utils.clip_grad_norm_(params, grad_clip)
         opt.step()                                         # Adam: x <- x - lr · m / (√v + eps); Muon: ortogonal adim
+        if sphere_weights:                                 # kusur 2: agirlik kureye geri; adim boyunu yalniz lr belirler
+            model.normalize_weights()
     return model, curve
 
 
