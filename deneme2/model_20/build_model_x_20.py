@@ -249,9 +249,10 @@ for i, s in enumerate(["q, k: 32 boyut çifti, her biri", "θ = t · 10000^(−2
 EY = 940
 y = panel_rows(EY, "Eğitim ve sonuç", [
     ("Adam · lr", "0,01 → cosine → 0,001"), ("gradient clipping", "1,0"), ("adım · batch", "4.000 · full (2.240)"),
-    ("tohum · veri", "0 · 240bdd2aaebf"), None,
-    ("hiç görülmemiş 2R, EX", "187 / 192", "bold"), ("C′ (RoPE'suz)", "89 / 192"),
-    ("transformer · V'siz", "171 · 175")], valcls="numm")
+    ("tohum · veri", "0–3 · 240bdd2aaebf"), None,
+    ("görülmemiş 2R, EX (4 tohum)", "175–187 · ort 183,8", "bold"),
+    ("V'siz transformer (4 tohum)", "175–192 · ort 187,5"),
+    ("C′ (RoPE'suz, tohum 0)", "89 / 192")], valcls="numm")
 
 # lejant
 LG = 1270
