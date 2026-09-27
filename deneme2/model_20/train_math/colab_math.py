@@ -68,7 +68,8 @@ def start(name, data, out, steps, seed=0, every=EVERY, device="cuda", compile=Tr
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
                               optimizer=TR.OPTIMIZER, schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,
                               copy_path=TR.COPY_PATH, stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
-                              normalized_update=TR.NORMALIZED_UPDATE, sphere_weights=TR.SPHERE_WEIGHTS,
+                              normalized_update=TR.NORMALIZED_UPDATE if setting in TR.STEP3 else False,
+                              sphere_weights=TR.SPHERE_WEIGHTS if setting in TR.STEP3 else False,
                               rope=True if setting.startswith("transformer") else TR.ROPE if setting in TR.STEP3 else False),
                          **train_kw))
     config = json.loads(json.dumps(config))

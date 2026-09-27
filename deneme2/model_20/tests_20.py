@@ -278,7 +278,11 @@ def reference_blocks(m, ids):
 
 
 def t_step3():
-    from model_20 import BlockModel, TURNS
+    import functools
+    import model_20
+    from model_20 import TURNS
+    # 28 Eylul oncesi tasarimin testleri: paket (normalized_update, sphere_weights) kapali; paket t_normalized_update'te
+    BlockModel = functools.partial(model_20.BlockModel, normalized_update=False, sphere_weights=False)
     n, d = 12, 6
     g = torch.Generator().manual_seed(9)
     ids = torch.randint(0, n, (3, 9), generator=g)
@@ -439,10 +443,10 @@ def t_step3():
           and tuple(mk.blocks[0].facts.W_fact_in.shape) == (64, 32)
           and len(mt.layers) == 1 and mt.embedding.weight.shape[1] == 32)
 
-    ml, curve_l = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), stream_norm=False, layer_norm=True)
+    ml, curve_l = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), stream_norm=False, normalized_update=False, sphere_weights=False, layer_norm=True)
     check("adim 3, layer_norm=True: train_seq ile egitilir, kayip iner", ml.layer_norm and curve_l[-1]["nll"] < curve_l[0]["nll"],
           "%.3f -> %.3f" % (curve_l[0]["nll"], curve_l[-1]["nll"]))
-    mf, curve_f = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), stream_norm=False)
+    mf, curve_f = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), stream_norm=False, normalized_update=False, sphere_weights=False)
     check("adim 3, stream_norm=False: train_seq ile egitilir, kayip iner", not mf.stream_norm and curve_f[-1]["nll"] < curve_f[0]["nll"],
           "%.3f -> %.3f" % (curve_f[0]["nll"], curve_f[-1]["nll"]))
     before = BlockModel(nv).tokens.fixed_points.clone()
@@ -499,7 +503,7 @@ def t_step3():
     kept = sorted(names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.0 for p_ in g_["params"])
     check("weight decay: yalniz W_ matrislerine; shift ve fact_threshold haric",
           decayed == sorted(["W_query", "W_key", "W_context", "W_fact_in", "W_fact_out"])
-          and kept == ["fact_threshold", "shift"], "%s | %s" % (decayed, kept))
+          and kept == ["alpha_attention", "alpha_facts", "fact_threshold", "shift"], "%s | %s" % (decayed, kept))
 
     # 27 Eylul tarifi: Muon (gizli matrisler) + Adam, WSD takvimi, compile varsayilan acik; masked_nll; RoPE en az fp32
     import inspect
@@ -558,7 +562,7 @@ def t_step3():
     check("Muon + WSD (varsayilan): Muon'da W_context, W_fact_in, W_fact_out; Adam'da noktalar, esik, W_query, W_key; "
           "lr 8. adima kadar sabit, sonra 1 - sqrt ile LR x LR_FLOOR'a; kayip iner",
           isinstance(opts[0], TR.Muon) and in_muon == ["W_context", "W_fact_in", "W_fact_out"]
-          and in_adam == ["W_key", "W_query", "fact_threshold", "shift"]
+          and in_adam == ["W_key", "W_query", "alpha_attention", "alpha_facts", "fact_threshold", "shift"]
           and all(abs(lrs[t] - w) < 1e-12 for t, w in zip(range(1, 11), wsd)) and curve_m[-1]["nll"] < curve_m[0]["nll"],
           "%s | %s | lr %s" % (in_muon, in_adam, [round(lrs[t], 5) for t in range(1, 11)]))
 
@@ -607,7 +611,9 @@ def t_step3():
 
 
 def t_copy():
-    from model_20 import BlockModel
+    import functools
+    import model_20
+    BlockModel = functools.partial(model_20.BlockModel, normalized_update=False, sphere_weights=False)   # 28 Eylul oncesi
     n, d = 12, 6
     g = torch.Generator().manual_seed(11)
     ids = torch.randint(0, n, (3, 9), generator=g)
@@ -687,7 +693,7 @@ def t_copy():
     kept = sorted(names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.0 for p_ in g_["params"])
     check("kopya yolu, weight decay: W_copy ve W_copy_gate'e uygulanir; copy_gate_bias haric",
           decayed == sorted(["W_query", "W_key", "W_context", "W_fact_in", "W_fact_out", "W_copy", "W_copy_gate"])
-          and kept == ["copy_gate_bias", "fact_threshold", "shift"], "%s | %s" % (decayed, kept))
+          and kept == ["alpha_attention", "alpha_facts", "copy_gate_bias", "fact_threshold", "shift"], "%s | %s" % (decayed, kept))
 
 
 def reference_transformer(m, ids):
@@ -828,8 +834,10 @@ def t_generate_cached():
     n = 40
     prompts = [torch.randint(0, n, (int(k),), generator=g).tolist() for k in torch.randint(1, 21, (12,), generator=g)]
     worst, same, runs = 0.0, True, 0
-    for kw in (dict(), dict(shared=False), dict(rope=False), dict(stream_norm=False), dict(stream_norm=False, layer_norm=True),
-               dict(copy_path=True), dict(shared=False, copy_path=True, stream_norm=False, layer_norm=True)):
+    off = dict(normalized_update=False, sphere_weights=False)          # 28 Eylul oncesi guncelleme (LayerNorm / normsuz akis icin sart)
+    for kw in (dict(), dict(shared=False), dict(rope=False), dict(off), dict(off, stream_norm=False),
+               dict(off, stream_norm=False, layer_norm=True), dict(copy_path=True),
+               dict(off, shared=False, copy_path=True, stream_norm=False, layer_norm=True)):
         m = BlockModel(n, d=16, units=24, t_max=64, **kw)
         with torch.no_grad():
             for p_ in m.parameters():
@@ -878,7 +886,8 @@ def t_normalized_update():
     sids, smask = EK.sequences(data)
     nv = len(data["vocab"])
 
-    today, off = BlockModel(nv), BlockModel(nv, normalized_update=False, sphere_weights=False)
+    today, off = BlockModel(nv, normalized_update=False, sphere_weights=False), BlockModel(nv, normalized_update=False,
+                                                                                             sphere_weights=False)
     both = BlockModel(nv, normalized_update=True, sphere_weights=True)
     b0 = both.blocks[0]
     unit_rows = lambda w: float((w.norm(dim=1) - 1).abs().max())
@@ -929,7 +938,7 @@ def t_normalized_update():
             hs = model.hidden(sids[:16])
             return min(float((a * b).sum(-1)[smask[:16]].min()) for a, b in zip(hs[:-1], hs[1:]))
     fixed = BlockModel(nv, normalized_update=True)
-    now = BlockModel(nv)
+    now = BlockModel(nv, normalized_update=False, sphere_weights=False)             # 28 Eylul oncesi guncelleme
     with torch.no_grad():
         for mm in (fixed, now):
             mm.blocks[0].attention.W_context.copy_(torch.randn(64, 64, generator=g) / 8)

@@ -57,13 +57,14 @@ STREAM_NORM = True   # True: durum her eklemeden sonra kureye (bugunku).  False:
                      # ve FactUnits'in okudugu kopya normalize edilir (transformer gibi); cikis <norm(h), PL> (27 Eylul)
 LAYER_NORM = False   # True: L2 norm yerine LayerNorm (norm_attention, norm_facts, norm_final; ogrenilen kazanc ve kayma);
                      # cikis <norm_final(h), PL>, sabit scale yok (kullanici, 27 Eylul: "Layernorm yapalım")
-NORMALIZED_UPDATE = False   # True: h <- norm(h + alpha (norm(u) - h)), u blok ciktisi; alpha ogrenilen, tur ve alt blok
-                            # basina d sayi (nGPT).  False: h <- norm(h + u) (bugunku).  Kusur 1: FactUnits durumu eziyordu
-                            # (|u| ~ 10-178, |h| = 1; kullanici, 27 Eylul: "kusur 1 a kabul")
+NORMALIZED_UPDATE = True    # h <- norm(h + alpha (norm(u) - h)), u blok ciktisi; alpha ogrenilen, tur ve alt blok basina
+                            # d sayi (nGPT).  False: h <- norm(h + u) (28 Eylul'e kadar).  Kusur 1: FactUnits durumu eziyordu
+                            # (|u| ~ 10-178, |h| = 1).  Varsayilan (kullanici, 28 Eylul: "evet ikisi de varsayılan olsun";
+                            # akrabalik paket 188,3 / taban 178,5)
 ALPHA_INIT = 0.1            # alpha'nin baslangici: nGPT 2026 tarifi (derinlikten bagimsiz 0,1)
-SPHERE_WEIGHTS = False      # True: W_query, W_key, W_fact_in satirlari ve W_context, W_fact_out sutunlari baslangicta ve her
+SPHERE_WEIGHTS = True       # W_query, W_key, W_fact_in satirlari ve W_context, W_fact_out sutunlari baslangicta ve her
                             # optimizer adimindan sonra birim boya (nGPT); FactUnits girdisi sqrt(d) x kosinus.  Kusur 2:
-                            # agirliklar ~20 kat buyuyor, adim sonuyordu (kullanici, 27 Eylul: "kusur 2 a kanul")
+                            # agirliklar ~20 kat buyuyor, adim sonuyordu.  Varsayilan (kullanici, 28 Eylul)
 ROPE = True          # attention'in q ve k'sina RoPE (konum bilgisi).  Varsayilanlar = Model X (C' + RoPE; kullanici, 27 Eylul:
                      # "Model X varsayilan model olsun" onayi); False = RoPE'suz C'
 
@@ -335,8 +336,9 @@ class Block(torch.nn.Module):
 
 
 class BlockModel(torch.nn.Module):
-    """Adim 3: durum (hidden) PL ile baslar, TURNS tur Block; cikis son durumun kendisi (W_next yok).  Baslangicta
-    (W_context = 0, W_fact_out = 0) durum PL'de kalir: skor = scale <PL_t, PL>."""
+    """Adim 3: durum (hidden) PL ile baslar, TURNS tur Block; cikis son durumun kendisi (W_next yok).
+    normalized_update ve sphere_weights kapaliyken (28 Eylul'e kadarki model) W_context = W_fact_out = 0 baslar, durum PL'de
+    kalir: skor = scale <PL_t, PL>."""
 
     def __init__(self, n, d=D, turns=TURNS, shared=SHARED_BLOCK, learn_points=LEARN_POINTS, anchor=ANCHOR,
                  confidence=CONFIDENCE, t_max=T_MAX, units=FACT_UNITS, seed=POINTS_SEED, copy_path=COPY_PATH,
