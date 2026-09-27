@@ -42,6 +42,7 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
     config = dict(name=name, setting=setting, steps=steps, seed=seed, every=every, device=device, compile=compile,
                   fingerprint=data["fingerprint"], train=len(data["train"]), sizes=n, save_every=save_every,
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
+                              optimizer=TR.OPTIMIZER, schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,
                               copy_path=TR.COPY_PATH, stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
                               rope=True if setting.startswith("transformer") else TR.ROPE if setting in TR.STEP3 else False),
                          **train_kw))
@@ -51,7 +52,9 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
         if not packs:
             raise RuntimeError("%s: surdurme paketi yok; bastan kosmak ayri karar (resume=False)" % out)
         saved = json.load(open(os.path.join(out, "config.json")))
-        differ = sorted(k for k in set(saved) | set(config) if k not in ("device", "compile") and saved.get(k) != config.get(k))
+        # 27 Eylul oncesi config'lerde optimizer / takvim yok: o kosular Adam + cosine idi.  compile sonucu degistirir: karsilastirilir
+        saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN), **saved)
+        differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)
         checkpoint = torch.load(os.path.join(out, packs[-1]), map_location=device)

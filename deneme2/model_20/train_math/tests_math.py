@@ -204,9 +204,9 @@ def t_windows(tmp):
         def keep(step, model, opt):
             packs[step] = dict(step=step, model=copy.deepcopy(model.state_dict()), optimizer=copy.deepcopy(opt.state_dict()))
         whole, curve = TR.train_seq("shared", None, None, DM.N, steps=10, log_at=(0, 10), save_every=3, save=keep, model_kw=TINY,
-                                    batches=DM.batches(data, B, 1, answer_only))
+                                    batches=DM.batches(data, B, 1, answer_only), compile=False)
         resumed, _ = TR.train_seq("shared", None, None, DM.N, steps=10, log_at=(), checkpoint=packs[6], model_kw=TINY,
-                                  batches=DM.batches(data, B, 1, answer_only))
+                                  batches=DM.batches(data, B, 1, answer_only), compile=False)
         bit = all(torch.equal(a, b) for a, b in zip(whole.state_dict().values(), resumed.state_dict().values()))
         check("surdurme, batches: yedek araligi (3) epoku (4 adim) bolmuyor; 6. adim paketinden surdurulen = kesintisiz 10 adim, "
               "bit duzeyinde (answer_only %s)" % answer_only, bit and sorted(packs) == [3, 6, 9],

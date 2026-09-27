@@ -3,11 +3,13 @@
 (akrabalik: train_kinship/exam_kinship.py).
     train       Adim 1: ardisik token ciftleri (BigramModel)
     train_seq   dizi egitimi: Model X (varsayilan), deneme ayarlari ve kiyas transformer'i; yedek ve surdurme
+    Muon        optimizer: gizli matrisler Muon, gerisi Adam (tek sinif, tek state_dict)
     pad         id listeleri -> (ids, mask);  generate: acgozlu uretim
 """
 import math
 
 import torch
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from model_20 import (COPY_PATH, LAYER_NORM, ROPE, STREAM_NORM, BigramModel, BlockModel, SequenceModel, deviation)
 from model_20_transformer import TransformerModel
@@ -25,6 +27,58 @@ LOG_AT = (0, 10, 50, 200, 500, 1000)
 LR_FLOOR = 0.1       # cosine decay: lr sonda LR x LR_FLOOR (taban lr/10); train_seq standardi
 GRAD_CLIP = 1.0      # gradient clipping: adimdaki gradient'in boyu bunu gecerse buna indirilir; train_seq standardi
 WEIGHT_DECAY = 0.0   # weight decay (AdamW), yalniz W_ matrislerine; 0 = kapali (standart).  Deger olculuyor
+OPTIMIZER = "muon"   # "muon": gizli matrisler (W_context, W_fact_in, W_fact_out; transformer'da W_value, W_out, W_mlp_in,
+                     # W_mlp_out) Muon, gerisi Adam | "adam": hepsi Adam (27 Eylul'e kadarki butun kosular).
+                     # Kullanici, 27 Eylul: "WSD ve muon uygun", varsayilan "Hemen Muon + WSD"
+SCHEDULE = "wsd"     # "wsd": lr sabit, son COOLDOWN kisminda 1 - sqrt ile LR x LR_FLOOR'a | "cosine": 27 Eylul'e kadarki
+COOLDOWN = 0.2       # WSD'de inisin payi (son %20).  Hagele 2024: <= %20 yeter, 1 - sqrt dogrusaldan iyi
+
+
+class Muon(torch.optim.Optimizer):
+    """Muon (K. Jordan 2024, MIT) ve ayni sinifta Adam.  use_muon=True gruplar: momentum (Nesterov) -> Newton-Schulz ile
+    ortogonallestirme (5 adim, fp32) -> 0,2 x sqrt(max(satir, sutun)) olcegi (Liu 2025: boylece AdamW'nin lr'si aynen
+    kullanilir).  use_muon=False gruplar: torch.optim.Adam ile ayni formul (beta 0,9 / 0,999, eps 1e-8)."""
+
+    def __init__(self, groups, lr, momentum=0.95, betas=(0.9, 0.999), eps=1e-8):
+        super().__init__(groups, dict(lr=lr, momentum=momentum, betas=betas, eps=eps, use_muon=False))
+
+    @staticmethod
+    def orthogonalize(G, steps=5):
+        """G'ye en yakin yari-ortogonal matris (tekil degerler ~1), besinci derece Newton-Schulz."""
+        a, b, c = 3.4445, -4.7750, 2.0315
+        X = G / (G.norm() + 1e-7)
+        tall = X.shape[0] > X.shape[1]
+        if tall:
+            X = X.T
+        for _ in range(steps):
+            A = X @ X.T
+            X = a * X + (b * A + c * A @ A) @ X
+        return X.T if tall else X
+
+    @torch.no_grad()
+    def step(self):
+        for g in self.param_groups:
+            for p in g["params"]:
+                if p.grad is None:
+                    continue
+                state = self.state[p]
+                if g["use_muon"]:
+                    if "momentum_buffer" not in state:
+                        state["momentum_buffer"] = torch.zeros_like(p)
+                    buf = state["momentum_buffer"]
+                    buf.mul_(g["momentum"]).add_(p.grad)
+                    update = self.orthogonalize(p.grad.add(buf, alpha=g["momentum"]))     # Nesterov
+                    p.add_(update, alpha=-g["lr"] * 0.2 * max(p.shape) ** 0.5)
+                    continue
+                if not state:
+                    state["step"] = 0
+                    state["exp_avg"], state["exp_avg_sq"] = torch.zeros_like(p), torch.zeros_like(p)
+                state["step"] += 1
+                (b1, b2), m, v = g["betas"], state["exp_avg"], state["exp_avg_sq"]
+                m.mul_(b1).add_(p.grad, alpha=1 - b1)
+                v.mul_(b2).addcmul_(p.grad, p.grad, value=1 - b2)
+                denom = (v.sqrt() / math.sqrt(1 - b2 ** state["step"])).add_(g["eps"])
+                p.addcdiv_(m, denom, value=-g["lr"] / (1 - b1 ** state["step"]))
 
 
 def bigram_floor(inputs, targets, n):
@@ -70,13 +124,15 @@ def pad(rows, vocab):
 
 
 def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, lr_floor=LR_FLOOR, grad_clip=GRAD_CLIP,
-              weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None, compile=False, copy_path=COPY_PATH,
+              weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None, compile=True, copy_path=COPY_PATH,
               save_every=None, save=None, checkpoint=None, stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=None,
-              batches=None, model_kw=None):
-    """Standart tarif: cosine decay (LR -> LR x lr_floor) + gradient clipping.  lr_floor=None, grad_clip=None: eski tarif
-    (sabit lr); 27 Eylul oncesi kayitli Adim 2-3 sonuclari onunla uretildi.  weight_decay > 0: AdamW, yalniz W_ matrisleri.
+              batches=None, model_kw=None, optimizer=OPTIMIZER, schedule=SCHEDULE, cooldown=COOLDOWN):
+    """Standart tarif (27 Eylul'den): Muon (gizli matrisler) + Adam, WSD takvimi (lr sabit, son cooldown kisminda
+    1 - sqrt ile LR x lr_floor'a), gradient clipping.  optimizer="adam", schedule="cosine": 27 Eylul'e kadarki tarif.
+    lr_floor=None, grad_clip=None: en eski tarif (sabit lr).  weight_decay > 0: AdamW, yalniz W_ matrisleri (yalniz adam).
     callback(step, model, nll): her `every` adimda, o adimin guncellemesinden ONCE (sinav, kayit, durdurma).
-    compile: yalniz kayip hesabi torch.compile ile (model_19'daki gibi); full batch'te sekil sabit, bir kez derlenir.
+    compile: kayip hesabi (ileri + geri) torch.compile ile; VARSAYILAN ACIK (kullanici: "bu sabit ayar ve yes olsun").  CPU'da
+    C++ derleyicisi ister; bu makinede yok, testler compile=False verir.
     copy_path: Oneri A (kopya yolu ve kapisi), yalniz Adim 3 modelinde.  setting "transformer": kiyas modeli
     (model_20_transformer), ayni tarif.  rope: attention'da RoPE; None = modelin kendi varsayilani (transformer True,
     BlockModel ROPE).
@@ -91,6 +147,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     assert setting in STEP3 or stream_norm, "stream_norm=False yalniz Adim 3 (BlockModel) icin"
     assert setting in STEP3 or not layer_norm, "layer_norm yalniz Adim 3 (BlockModel) icin"
     assert not setting.startswith("transformer") or not weight_decay, "transformer icin weight decay gruplari tanimli degil"
+    assert optimizer in ("muon", "adam") and schedule in ("wsd", "cosine") and 0 < cooldown <= 1
+    assert optimizer == "adam" or not weight_decay, "weight_decay yalniz optimizer='adam' ile (AdamW)"
     if rope is None:                                       # modelin kendi varsayilani; Adim 1-2 modellerinde RoPE yok
         rope = True if setting.startswith("transformer") else ROPE if setting in STEP3 else False
     assert setting in STEP3 or setting.startswith("transformer") or not rope, "rope yalniz Adim 3 ve transformer icin"
@@ -107,10 +165,17 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     # ogrenilenler: Δ (shift), W_query, W_key, W_context; Adim 1-2: + W_next; Adim 3: + FactUnits (W_next yok)
     # (PF buffer, listede yok)
     params = [p for p in model.parameters() if p.requires_grad]
-    if weight_decay:
+    named = [(k, p) for k, p in model.named_parameters() if p.requires_grad]
+    if optimizer == "muon":
+        # Muon yalniz gizli 2 boyutlu matrislerde ("VO + FFN" duzeni, Wang 2025); token noktalari, esikler, W_query, W_key,
+        # bias ve norm katsayilari Adam'da
+        hidden = ("W_context", "W_fact_in", "W_fact_out", "W_value.weight", "W_out.weight", "W_mlp_in.weight",
+                  "W_mlp_out.weight")
+        opt = Muon([dict(params=[p for k, p in named if k.endswith(hidden)], use_muon=True),
+                    dict(params=[p for k, p in named if not k.endswith(hidden)], use_muon=False)], lr=lr)
+    elif weight_decay:
         # her adimda once W <- W - lr · weight_decay · W (kaybin desteklemedigi agirlik soner), sonra Adam adimi.
         # shift'in capasi var, fact_threshold bir esik: ikisine uygulanmaz
-        named = [(k, p) for k, p in model.named_parameters() if p.requires_grad]
         opt = torch.optim.AdamW([dict(params=[p for k, p in named if k.split(".")[-1].startswith("W_")], weight_decay=weight_decay),
                                  dict(params=[p for k, p in named if not k.split(".")[-1].startswith("W_")], weight_decay=0.0)],
                                 lr=lr)
@@ -122,15 +187,24 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
         opt.load_state_dict(checkpoint["optimizer"])
         first = checkpoint["step"]
     loss_fn = torch.compile(model.loss) if compile else model.loss
+    start = round((1 - cooldown) * steps)                  # WSD: inis bu adimda baslar
     curve = []
     for step in range(first, steps + 1):
         resumed_here = checkpoint is not None and step == first
-        if lr_floor is not None:                           # lr_t = lr · (floor + (1 - floor) · (1 + cos(π t / T)) / 2)
+        if lr_floor is not None:
+            if schedule == "cosine":                       # lr_t = lr · (floor + (1 - floor) · (1 + cos(π t / T)) / 2)
+                factor = lr_floor + (1 - lr_floor) * 0.5 * (1 + math.cos(math.pi * step / max(steps, 1)))
+            else:                                          # WSD: t < start: lr;  sonra lr · (floor + (1 - floor)(1 - sqrt(p)))
+                factor = 1.0 if step < start else (
+                    lr_floor + (1 - lr_floor) * (1 - math.sqrt((step - start) / max(steps - start, 1))))
             for group in opt.param_groups:
-                group["lr"] = lr * (lr_floor + (1 - lr_floor) * 0.5 * (1 + math.cos(math.pi * step / max(steps, 1))))
+                group["lr"] = lr * factor
         if batches is not None:                            # mini-batch: bu adimin parcasi
             ids, mask = (t.to(device) for t in batches(step))
-        total, nll = loss_fn(ids, mask)                    # butun cumleler (ya da adimin parcasi), butun konumlar
+        # attention hep math yolunda: torch 2.14'ten itibaren SDPA kendiliginden flash / mem-efficient'e gidiyor, onlarin
+        # geri yayilimi deterministik degil (surdurme bit duzeyinde ayni kalmaz; hiz ajani, 27 Eylul)
+        with sdpa_kernel([SDPBackend.MATH]):
+            total, nll = loss_fn(ids, mask)                # butun cumleler (ya da adimin parcasi), butun konumlar
         if step in log_at:
             curve.append(dict(step=step, nll=nll.item(), dev=deviation(model).clone() if hasattr(model, "tokens") else None,
                               W_context=(sum(b.attention.W_context.norm().item() for b in model.blocks)
@@ -144,11 +218,11 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
         if step == steps:
             break
         opt.zero_grad()                                    # onceki adimin gradyanlarini sil
-        total.backward()                                   # her ogrenilen sayi x icin ∂kayip/∂x (zincir kurali, otomatik)
+        with sdpa_kernel([SDPBackend.MATH]):
+            total.backward()                               # her ogrenilen sayi x icin ∂kayip/∂x (zincir kurali, otomatik)
         if grad_clip is not None:                          # butun gradyanlarin toplam boyu > grad_clip ise olcekle indir
             torch.nn.utils.clip_grad_norm_(params, grad_clip)
-        opt.step()                                         # Adam: x <- x - lr · m / (√v + eps); m, v gradyanin
-                                                           # yuruyen ortalamasi ve karesininki (her sayi kendi adimini atar)
+        opt.step()                                         # Adam: x <- x - lr · m / (√v + eps); Muon: ortogonal adim
     return model, curve
 
 

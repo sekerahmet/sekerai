@@ -196,15 +196,15 @@ def t_resume():
     ids, mask = EK.sequences(s)
     ids, mask = ids[:40], mask[:40]
     nv = len(s["vocab"])
-    for kw in (dict(), dict(copy_path=True), dict(weight_decay=0.1)):
+    for kw in (dict(), dict(copy_path=True), dict(weight_decay=0.1, optimizer="adam")):
         packs, seen_full, seen_resumed = {}, [], []
 
         def keep(step, model, opt):
             packs[step] = dict(step=step, model=copy.deepcopy(model.state_dict()), optimizer=copy.deepcopy(opt.state_dict()))
         full, _ = TR.train_seq("shared", ids, mask, nv, steps=6, log_at=(), save_every=2, save=keep, every=2,
-                               callback=lambda st, m, nll: seen_full.append(st), **kw)
+                               callback=lambda st, m, nll: seen_full.append(st), **kw, compile=False)
         resumed, _ = TR.train_seq("shared", ids, mask, nv, steps=6, log_at=(), checkpoint=packs[4], every=2,
-                                  callback=lambda st, m, nll: seen_resumed.append(st), **kw)
+                                  callback=lambda st, m, nll: seen_resumed.append(st), **kw, compile=False)
         same = all(torch.equal(a, b) for a, b in zip(full.state_dict().values(), resumed.state_dict().values()))
         check("surdurme: 4. adim paketinden surdurulen = kesintisiz 6 adim, bit duzeyinde; paketler 2, 4, 6; sinav tekrarlanmaz %s"
               % (kw or ""), same and sorted(packs) == [2, 4, 6] and seen_full == [0, 2, 4, 6] and seen_resumed == [6],
@@ -266,7 +266,7 @@ def t_colab():
     seen = []
     ids, mask = EK.sequences(s)
     TR.train_seq("shared", ids[:20], mask[:20], len(s["vocab"]), steps=4, log_at=(), every=2,
-                 callback=lambda step, model, nll: seen.append(step))
+                 callback=lambda step, model, nll: seen.append(step), compile=False)
     check("train_seq: callback her every adimda, guncellemeden once (0, 2, 4)", seen == [0, 2, 4], str(seen))
 
     out_dir = tempfile.mkdtemp()

@@ -34,11 +34,11 @@ FINAL_STORIES = 8        # sonda ilk yarisi verilen valid hikayesi (sabit alt ku
 RUNS = {}
 
 
-def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=False, setting="shared", save_every=None,
+def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True, setting="shared", save_every=None,
           resume=False, batch_size=BATCH_SIZE, model_kw=None, **train_kw):
     """Egitimi arka planda baslatir, hemen doner.  out doluysa once out_eski_<zaman>'a TASINIR, silinmez.
     setting "shared": Model X; model_kw bos kalan ayarlar model_20 varsayilanlari (config'e acik yazilir).
-    compile=False: kinship'te Inductor ilk adimda AssertionError verdi (27 Eylul); yalniz hiz etkilenir.
+    compile=True (varsayilan; kullanici: "bu sabit ayar ve yes olsun").
     save_every: her save_every adimda out/checkpoint_tNNNNNN.pt {step, model, optimizer}.  resume=True: out'taki son
     paketten surdurur -- klasor tasinmaz, gunluk uzar, paketten sonraki sinavlar atilir; ayarlar config.json ile ayni olmali."""
     if name in RUNS and RUNS[name]["thread"].is_alive():
@@ -54,6 +54,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=Fals
                   train_windows=len(data["train_start"]), exam_stories=len(rows), batch_size=batch_size,
                   steps_per_epoch=per_epoch, epochs=round(steps / per_epoch, 4), save_every=save_every, model_kw=model_kw,
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
+                              optimizer=TR.OPTIMIZER, schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,
                               copy_path=TR.COPY_PATH, stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
                               rope=True if setting.startswith("transformer") else TR.ROPE if setting in TR.STEP3 else False),
                          **train_kw))
@@ -63,7 +64,9 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=Fals
         if not packs:
             raise RuntimeError("%s: surdurme paketi yok; bastan kosmak ayri karar (resume=False)" % out)
         saved = json.load(open(os.path.join(out, "config.json")))
-        differ = sorted(k for k in set(saved) | set(config) if k not in ("device", "compile") and saved.get(k) != config.get(k))
+        # 27 Eylul oncesi config'lerde optimizer / takvim yok: o kosular Adam + cosine idi.  compile sonucu degistirir: karsilastirilir
+        saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN), **saved)
+        differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)
         checkpoint = torch.load(os.path.join(out, packs[-1]), map_location=device)

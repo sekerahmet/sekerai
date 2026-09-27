@@ -275,7 +275,7 @@ if __name__ == "__main__":
         results = {}
         for name in STEP2:
             t0 = time.time()
-            results[name] = train_seq(name, ids, mask, n)
+            results[name] = train_seq(name, ids, mask, n, compile=False)
             print("%s %.1f sn" % (name, time.time() - t0), flush=True)
         print()
         print(report_step2(results, data))
@@ -285,7 +285,7 @@ if __name__ == "__main__":
         results = {}
         for name in ["step2"] + list(STEP3):
             t0 = time.time()
-            results[name] = train_seq(name, ids, mask, n)
+            results[name] = train_seq(name, ids, mask, n, compile=False)
             print("%s %.1f sn" % (name, time.time() - t0), flush=True)
         print()
         print(report_step3(results, data))

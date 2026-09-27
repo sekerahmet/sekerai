@@ -227,7 +227,7 @@ def t_step2():
     sids, smask = EK.sequences(data)
     nv = len(data["vocab"])
     before = SequenceModel(nv).tokens.fixed_points.clone()
-    m, curve = TR.train_seq("step2", sids, smask, nv, steps=20, log_at=(0, 20))
+    m, curve = TR.train_seq("step2", sids, smask, nv, steps=20, log_at=(0, 20), compile=False)
     check("adim 2: egitimde PF bit duzeyinde degismez, W_context 0'dan ayrilir, kayip iner",
           torch.equal(m.tokens.fixed_points, before) and curve[-1]["W_context"] > 0 and curve[-1]["nll"] < curve[0]["nll"])
 
@@ -404,9 +404,9 @@ def t_step3():
     data = D.build()
     sids, smask = EK.sequences(data)
     nv = len(data["vocab"])
-    mr, curve_r = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), rope=True)
-    md, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=())
-    mo, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=(), rope=False)
+    mr, curve_r = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), rope=True, compile=False)
+    md, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=(), compile=False)
+    mo, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=(), rope=False, compile=False)
     check("adim 3, rope=True: train_seq ayari modele ulasir, kayip iner; train_seq varsayilani (None) BlockModel'de ROPE (True); "
           "rope=False kapatir",
           all(b.attention.rope for b in mr.blocks) and curve_r[-1]["nll"] < curve_r[0]["nll"]
@@ -414,16 +414,16 @@ def t_step3():
           "%.3f -> %.3f" % (curve_r[0]["nll"], curve_r[-1]["nll"]))
     # batches: mini-batch; model_kw: model ayarlari
     import copy
-    whole, _ = TR.train_seq("shared", sids, smask, nv, steps=5, log_at=())
-    via, _ = TR.train_seq("shared", None, None, nv, steps=5, log_at=(), batches=lambda step: (sids, smask))
+    whole, _ = TR.train_seq("shared", sids, smask, nv, steps=5, log_at=(), compile=False)
+    via, _ = TR.train_seq("shared", None, None, nv, steps=5, log_at=(), batches=lambda step: (sids, smask), compile=False)
     pick = lambda step: (sids[(step * 16) % 480:(step * 16) % 480 + 32], smask[(step * 16) % 480:(step * 16) % 480 + 32])
     packs = {}
     keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
                                                                    optimizer=copy.deepcopy(opt.state_dict())))
-    full, curve_b = TR.train_seq("shared", None, None, nv, steps=6, log_at=(0, 6), batches=pick, save_every=2, save=keep)
-    resumed, _ = TR.train_seq("shared", None, None, nv, steps=6, log_at=(), batches=pick, checkpoint=packs[4])
+    full, curve_b = TR.train_seq("shared", None, None, nv, steps=6, log_at=(0, 6), batches=pick, save_every=2, save=keep, compile=False)
+    resumed, _ = TR.train_seq("shared", None, None, nv, steps=6, log_at=(), batches=pick, checkpoint=packs[4], compile=False)
     try:
-        TR.train_seq("shared", None, None, nv, steps=1, log_at=())
+        TR.train_seq("shared", None, None, nv, steps=1, log_at=(), compile=False)
         refused = False
     except AssertionError:
         refused = True
@@ -432,21 +432,21 @@ def t_step3():
           "surdurulen = kesintisiz; ids ve batches yoksa reddeder",
           same(whole, via) and same(full, resumed) and refused and curve_b[-1]["nll"] < curve_b[0]["nll"],
           "%.3f -> %.3f" % (curve_b[0]["nll"], curve_b[-1]["nll"]))
-    mk, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), model_kw=dict(d=32, turns=3, units=64))
-    mt, _ = TR.train_seq("transformer", sids[:8], smask[:8], nv, steps=1, log_at=(), model_kw=dict(d=32, layers=1))
+    mk, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), model_kw=dict(d=32, turns=3, units=64), compile=False)
+    mt, _ = TR.train_seq("transformer", sids[:8], smask[:8], nv, steps=1, log_at=(), model_kw=dict(d=32, layers=1), compile=False)
     check("train_seq, model_kw: ayarlar modele ulasir (BlockModel d 32, 3 tur, 64 birim; transformer d 32, 1 katman)",
           tuple(mk.blocks[0].attention.W_query.shape) == (32, 32) and mk.turns == 3 and len(mk.hidden(sids[:2])) == 4
           and tuple(mk.blocks[0].facts.W_fact_in.shape) == (64, 32)
           and len(mt.layers) == 1 and mt.embedding.weight.shape[1] == 32)
 
-    ml, curve_l = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), stream_norm=False, layer_norm=True)
+    ml, curve_l = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), stream_norm=False, layer_norm=True, compile=False)
     check("adim 3, layer_norm=True: train_seq ile egitilir, kayip iner", ml.layer_norm and curve_l[-1]["nll"] < curve_l[0]["nll"],
           "%.3f -> %.3f" % (curve_l[0]["nll"], curve_l[-1]["nll"]))
-    mf, curve_f = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), stream_norm=False)
+    mf, curve_f = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), stream_norm=False, compile=False)
     check("adim 3, stream_norm=False: train_seq ile egitilir, kayip iner", not mf.stream_norm and curve_f[-1]["nll"] < curve_f[0]["nll"],
           "%.3f -> %.3f" % (curve_f[0]["nll"], curve_f[-1]["nll"]))
     before = BlockModel(nv).tokens.fixed_points.clone()
-    m, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20))
+    m, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), compile=False)
     check("adim 3: egitimde PF bit duzeyinde degismez, W_context 0'dan ayrilir, kayip iner",
           torch.equal(m.tokens.fixed_points, before) and curve[-1]["W_context"] > 0 and curve[-1]["nll"] < curve[0]["nll"])
 
@@ -460,24 +460,24 @@ def t_step3():
             return super().step(*a, **k)
     torch.optim.Adam = Spy
     try:
-        TR.train_seq("shared", sids, smask, nv, steps=4, log_at=(), lr=0.01, lr_floor=0.1, grad_clip=0.5)
+        TR.train_seq("shared", sids, smask, nv, steps=4, log_at=(), lr=0.01, lr_floor=0.1, grad_clip=0.5, optimizer="adam", schedule="cosine", compile=False)
         cosine = [0.01 * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * t / 4))) for t in range(4)]
         ok_sched = all(abs(lr_ - c) < 1e-12 for (lr_, _), c in zip(seen, cosine))
         ok_clip = all(g <= 0.5 + 1e-5 for _, g in seen)
         seen.clear()
-        TR.train_seq("shared", sids, smask, nv, steps=4, log_at=(), lr=0.01)
+        TR.train_seq("shared", sids, smask, nv, steps=4, log_at=(), lr=0.01, optimizer="adam", schedule="cosine", compile=False)
         standard = [0.01 * (TR.LR_FLOOR + (1 - TR.LR_FLOOR) * 0.5 * (1 + math.cos(math.pi * t / 4))) for t in range(4)]
         ok_default = (all(abs(lr_ - c) < 1e-12 for (lr_, _), c in zip(seen, standard))
                       and all(g <= TR.GRAD_CLIP + 1e-5 for _, g in seen))
         seen.clear()
-        TR.train_seq("shared", sids, smask, nv, steps=3, log_at=(), lr=0.01, lr_floor=None, grad_clip=None)
+        TR.train_seq("shared", sids, smask, nv, steps=3, log_at=(), lr=0.01, lr_floor=None, grad_clip=None, optimizer="adam", schedule="cosine", compile=False)
         ok_old = all(lr_ == 0.01 for lr_, _ in seen) and any(g > 0.5 for _, g in seen)
     finally:
         torch.optim.Adam = real_adam
-    check("egitim tarifi: cosine decay ile lr LR'den LR x lr_floor'a iner, gradient boyu grad_clip'i gecmez; standart LR_FLOOR ve "
+    check("egitim tarifi (optimizer='adam', schedule='cosine', 27 Eylul oncesi): cosine decay ile lr LR'den LR x lr_floor'a iner, gradient boyu grad_clip'i gecmez; standart LR_FLOOR ve "
           "GRAD_CLIP; None verilirse sabit lr", ok_sched and ok_clip and ok_default and ok_old)
-    a1, _ = TR.train_seq("shared", sids, smask, nv, steps=3, log_at=(), seed=0)
-    a2, _ = TR.train_seq("shared", sids, smask, nv, steps=3, log_at=(), seed=1)
+    a1, _ = TR.train_seq("shared", sids, smask, nv, steps=3, log_at=(), seed=0, compile=False)
+    a2, _ = TR.train_seq("shared", sids, smask, nv, steps=3, log_at=(), seed=1, compile=False)
     check("egitim tarifi: seed modeli degistirir (PF dahil), seed=0 varsayilanla ayni",
           not torch.equal(a1.tokens.fixed_points, a2.tokens.fixed_points)
           and torch.equal(a1.tokens.fixed_points, before))
@@ -491,7 +491,7 @@ def t_step3():
             groups.extend(self.param_groups)
     torch.optim.AdamW = SpyW
     try:
-        mw, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=(), weight_decay=0.1)
+        mw, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=(), weight_decay=0.1, optimizer="adam", compile=False)
     finally:
         torch.optim.AdamW = real_adamw
     names = {id(p_): k.split(".")[-1] for k, p_ in mw.named_parameters()}
@@ -500,6 +500,82 @@ def t_step3():
     check("weight decay: yalniz W_ matrislerine; shift ve fact_threshold haric",
           decayed == sorted(["W_query", "W_key", "W_context", "W_fact_in", "W_fact_out"])
           and kept == ["fact_threshold", "shift"], "%s | %s" % (decayed, kept))
+
+    # 27 Eylul tarifi: Muon (gizli matrisler) + Adam, WSD takvimi, compile varsayilan acik; masked_nll; RoPE en az fp32
+    import inspect
+    from model_20 import apply_rope, masked_nll
+    sig = inspect.signature(TR.train_seq).parameters
+    check("tarif varsayilanlari: optimizer 'muon', schedule 'wsd', cooldown 0,2, compile True (kullanici, 27 Eylul)",
+          sig["optimizer"].default == TR.OPTIMIZER == "muon" and sig["schedule"].default == TR.SCHEDULE == "wsd"
+          and sig["cooldown"].default == TR.COOLDOWN == 0.2 and sig["compile"].default is True)
+
+    mb = BlockModel(nv)
+    with torch.no_grad():
+        for p_ in mb.parameters():
+            if p_.requires_grad:
+                p_.copy_(0.3 * torch.randn(p_.shape, generator=g))
+    ids_, mask_ = sids[:16], smask[:16]
+    lg = mb.logits(ids_[:, :-1])
+    old = torch.nn.functional.cross_entropy(lg[mask_[:, 1:]], ids_[:, 1:][mask_[:, 1:]])
+    new = masked_nll(lg, ids_[:, 1:], mask_[:, 1:])
+    ga = torch.autograd.grad(old, [mb.blocks[0].attention.W_context, mb.tokens.shift], retain_graph=True)
+    gb = torch.autograd.grad(new, [mb.blocks[0].attention.W_context, mb.tokens.shift])
+    gerr = max(float((a_ - b_).abs().max()) for a_, b_ in zip(ga, gb))
+    check("masked_nll = logits[valid] ile eski kayip (deger ve gradyan), sekil sabit", abs(float(old - new)) < 1e-6 and gerr < 1e-7,
+          "fark %.1e, gradyan %.1e" % (abs(float(old - new)), gerr))
+
+    xr = torch.randn(2, 600, 64, generator=g)
+    T_, dh_ = 600, 64
+    fr = 10000.0 ** (-torch.arange(0, dh_, 2, dtype=torch.float32) / dh_)
+    an = torch.arange(T_, dtype=torch.float32)[:, None] * fr[None, :]
+    x1_, x2_ = xr[..., 0::2], xr[..., 1::2]
+    ref_ = torch.stack([x1_ * an.cos() - x2_ * an.sin(), x1_ * an.sin() + x2_ * an.cos()], -1).flatten(-2)
+    bf = float((apply_rope(xr.bfloat16()).float() - ref_).abs().max())
+    check("RoPE: fp32'de onceki formulle birebir; bf16 girdide acilar fp32'de (konum > 256 dogru)",
+          torch.equal(apply_rope(xr), ref_) and bf < 0.05, "bf16 fark %.3f" % bf)
+
+    Gm = torch.randn(64, 256, generator=g)
+    sv = torch.linalg.svdvals(TR.Muon.orthogonalize(Gm))
+    check("Muon: Newton-Schulz ciktisinin tekil degerleri ~1 (yari-ortogonal)", float((sv - 1).abs().max()) < 0.35,
+          "tekil deger %.3f..%.3f" % (float(sv.min()), float(sv.max())))
+
+    opts, lrs = [], {}
+
+    def grab(step, model, opt):
+        opts.append(opt)
+        lrs[step] = opt.param_groups[0]["lr"]
+    mm, curve_m = TR.train_seq("shared", sids, smask, nv, steps=10, log_at=(0, 10), save_every=1, save=grab, compile=False)
+    names_m = {id(p_): k.split(".")[-1] for k, p_ in mm.named_parameters()}
+    in_muon = sorted(names_m[id(p_)] for g_ in opts[0].param_groups if g_["use_muon"] for p_ in g_["params"])
+    in_adam = sorted(names_m[id(p_)] for g_ in opts[0].param_groups if not g_["use_muon"] for p_ in g_["params"])
+    wsd = [0.01 * (1.0 if t < 8 else TR.LR_FLOOR + (1 - TR.LR_FLOOR) * (1 - math.sqrt((t - 8) / 2))) for t in range(1, 11)]
+    check("Muon + WSD (varsayilan): Muon'da W_context, W_fact_in, W_fact_out; Adam'da noktalar, esik, W_query, W_key; "
+          "lr 8. adima kadar sabit, sonra 1 - sqrt ile LR x LR_FLOOR'a; kayip iner",
+          isinstance(opts[0], TR.Muon) and in_muon == ["W_context", "W_fact_in", "W_fact_out"]
+          and in_adam == ["W_key", "W_query", "fact_threshold", "shift"]
+          and all(abs(lrs[t] - w) < 1e-12 for t, w in zip(range(1, 11), wsd)) and curve_m[-1]["nll"] < curve_m[0]["nll"],
+          "%s | %s | lr %s" % (in_muon, in_adam, [round(lrs[t], 5) for t in range(1, 11)]))
+
+    import copy
+    packs_m = {}
+    keep_m = lambda step, model, opt: packs_m.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
+                                                                     optimizer=copy.deepcopy(opt.state_dict())))
+    full_m, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), save_every=2, save=keep_m, compile=False)
+    res_m, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs_m[4], compile=False)
+    ta, _ = TR.train_seq("transformer_novalue", sids[:8], smask[:8], nv, steps=1, log_at=(), save_every=1, save=grab,
+                         compile=False)
+    names_t = {id(p_): k for k, p_ in ta.named_parameters()}
+    t_muon = sorted(names_t[id(p_)] for g_ in opts[-1].param_groups if g_["use_muon"] for p_ in g_["params"])
+    try:
+        TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), weight_decay=0.1, compile=False)
+        refused_wd = False
+    except AssertionError:
+        refused_wd = True
+    check("Muon + WSD: 4. adim paketinden surdurulen = kesintisiz, bit duzeyinde; transformer'da Muon W_out ve MLP'de; "
+          "weight_decay yalniz adam ile",
+          all(torch.equal(a_, b_) for a_, b_ in zip(full_m.state_dict().values(), res_m.state_dict().values()))
+          and t_muon == sorted("layers.%d.%s.weight" % (i, w) for i in range(2) for w in ("W_out", "W_mlp_in", "W_mlp_out"))
+          and refused_wd, str(t_muon))
 
 
 def t_copy():
@@ -560,7 +636,7 @@ def t_copy():
     sids, smask = EK.sequences(data)
     nv = len(data["vocab"])
     before = BlockModel(nv).tokens.fixed_points.clone()
-    m, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), copy_path=True)
+    m, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), copy_path=True, compile=False)
     at = m.blocks[0].attention
     check("kopya yolu: egitimde PF bit duzeyinde degismez, W_copy 0'dan ayrilir, kapi degisir, kayip iner",
           torch.equal(m.tokens.fixed_points, before) and at.W_copy.norm().item() > 0 and at.W_copy_gate.norm().item() > 0
@@ -575,7 +651,7 @@ def t_copy():
             groups.extend(self.param_groups)
     torch.optim.AdamW = SpyW
     try:
-        mw, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=(), weight_decay=0.1, copy_path=True)
+        mw, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=(), weight_decay=0.1, copy_path=True, optimizer="adam", compile=False)
     finally:
         torch.optim.AdamW = real_adamw
     names = {id(p_): k.split(".")[-1] for k, p_ in mw.named_parameters()}
@@ -670,20 +746,20 @@ def t_transformer():
     data = D.build()
     sids, smask = EK.sequences(data)
     nv = len(data["vocab"])
-    m, curve = TR.train_seq("transformer", sids, smask, nv, steps=20, log_at=(0, 20))
+    m, curve = TR.train_seq("transformer", sids, smask, nv, steps=20, log_at=(0, 20), compile=False)
     try:
-        TR.train_seq("transformer", sids, smask, nv, steps=1, log_at=(), weight_decay=0.1)
+        TR.train_seq("transformer", sids, smask, nv, steps=1, log_at=(), weight_decay=0.1, compile=False)
         refused = False
     except AssertionError:
         refused = True
-    mv, curve_v = TR.train_seq("transformer_novalue", sids, smask, nv, steps=20, log_at=(0, 20))
+    mv, curve_v = TR.train_seq("transformer_novalue", sids, smask, nv, steps=20, log_at=(0, 20), compile=False)
     check("transformer: train_seq ayni tarifle egitir, kayip iner ('transformer' ve 'transformer_novalue'); weight decay "
           "istenirse reddedilir (gruplar tanimsiz)",
           isinstance(m, TransformerModel) and curve[-1]["nll"] < curve[0]["nll"] and refused
           and all(layer.W_value is None for layer in mv.layers) and curve_v[-1]["nll"] < curve_v[0]["nll"],
           "%.3f -> %.3f; V'siz %.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"], curve_v[0]["nll"], curve_v[-1]["nll"]))
 
-    mr, curve_r = TR.train_seq("transformer_novalue", sids, smask, nv, steps=20, log_at=(0, 20), rope=False)
+    mr, curve_r = TR.train_seq("transformer_novalue", sids, smask, nv, steps=20, log_at=(0, 20), rope=False, compile=False)
     check("transformer, rope=False: train_seq ayari modele ulasir (her katmanda rope False), kayip iner; varsayilan True",
           all(not layer.rope for layer in mr.layers) and all(layer.rope for layer in mv.layers)
           and curve_r[-1]["nll"] < curve_r[0]["nll"],

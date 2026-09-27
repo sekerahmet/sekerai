@@ -14,7 +14,7 @@ import math
 import torch
 import torch.nn.functional as F
 
-from model_20 import D, FACT_UNITS, POINTS_SEED, apply_rope   # RoPE model_20 ile ayni hesap
+from model_20 import D, FACT_UNITS, POINTS_SEED, apply_rope, masked_nll   # RoPE ve kayip model_20 ile ayni hesap
 
 LAYERS = 2           # model_20'nin 2 turu gibi; ama her katmanin kendi agirligi (transformer standardi)
 HEADS = 1            # model_20 gibi tek head (kullanici: "bizim modele benzeyen"); parametre sayisi head sayisindan bagimsiz
@@ -76,7 +76,5 @@ class TransformerModel(torch.nn.Module):
         return self.norm_final(h) @ self.embedding.weight.T
 
     def loss(self, ids, mask):
-        logits = self.logits(ids[:, :-1])
-        valid = mask[:, 1:]
-        nll = F.cross_entropy(logits[valid], ids[:, 1:][valid])
+        nll = masked_nll(self.logits(ids[:, :-1]), ids[:, 1:], mask[:, 1:])
         return nll, nll                                          # capa yok: toplam = nll

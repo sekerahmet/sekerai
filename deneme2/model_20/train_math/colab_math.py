@@ -45,7 +45,7 @@ def _total(parts):
     return dict({k: sum(p[k] * p["n"] for p in parts.values()) / n for k in ("accuracy", "length_ok", "first_digit")}, n=n)
 
 
-def start(name, data, out, steps, seed=0, every=EVERY, device="cuda", compile=False, setting="shared", save_every=EVERY,
+def start(name, data, out, steps, seed=0, every=EVERY, device="cuda", compile=True, setting="shared", save_every=EVERY,
           resume=False, batch_size=BATCH_SIZE, answer_only=True, exam_limit=EXAM_LIMIT, model_kw=None, **train_kw):
     """Egitimi arka planda baslatir, hemen doner.  out doluysa once out_eski_<zaman>'a TASINIR, silinmez.
     answer_only: kayip yalniz cevap rakamlarinda ve son <eos>'ta (mask H); False: butun gercek token'lar (mask M).
@@ -65,6 +65,7 @@ def start(name, data, out, steps, seed=0, every=EVERY, device="cuda", compile=Fa
                   heldout=len(data["heldout"]), batch_size=batch_size, steps_per_epoch=per, epochs=round(steps / per, 4),
                   answer_only=answer_only, exam_limit=exam_limit, save_every=save_every, model_kw=model_kw,
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
+                              optimizer=TR.OPTIMIZER, schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,
                               copy_path=TR.COPY_PATH, stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
                               rope=True if setting.startswith("transformer") else TR.ROPE if setting in TR.STEP3 else False),
                          **train_kw))
@@ -75,7 +76,9 @@ def start(name, data, out, steps, seed=0, every=EVERY, device="cuda", compile=Fa
         if not packs:
             raise RuntimeError("%s: surdurme paketi yok; bastan kosmak ayri karar (resume=False)" % out)
         saved = json.load(open(os.path.join(out, "config.json")))
-        differ = sorted(k for k in set(saved) | set(config) if k not in ("device", "compile") and saved.get(k) != config.get(k))
+        # 27 Eylul oncesi config'lerde optimizer / takvim yok: o kosular Adam + cosine idi.  compile sonucu degistirir: karsilastirilir
+        saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN), **saved)
+        differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)
         checkpoint = torch.load(os.path.join(out, packs[-1]), map_location=device)
