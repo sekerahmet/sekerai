@@ -18,7 +18,7 @@ import train_20 as TR  # noqa: E402
 from model_20 import BigramModel, deviation, scale_for  # noqa: E402
 
 RESULTS = []
-FINGERPRINT = "90024739fb8f"      # veri degisirse burasi bilerek guncellenir
+FINGERPRINT = "454d53e81c67"      # veri degisirse burasi bilerek guncellenir (27 Eylul: 32 aile; once 90024739fb8f)
 
 
 def check(name, ok, note=""):
@@ -60,15 +60,15 @@ def t_data():
     d = D.build()
     check("veri: iz sabit (degisirse bilerek guncellenir)", d["fingerprint"] == FINGERPRINT, d["fingerprint"])
     check("veri: iki kurulus birebir ayni", D.build()["train"] == d["train"] and D.build()["exam"] == d["exam"])
-    check("veri: audit gecer (tutulan zincir metinde yok, donen zincir yok, adlar benzersiz)", D.audit(d) == 120)
+    check("veri: audit gecer (tutulan zincir metinde yok, donen zincir yok, adlar benzersiz)", D.audit(d) == 480)
 
     people = d["people"]
     classes = {}
     for e in d["exam"]:
         classes[e["cls"]] = classes.get(e["cls"], 0) + 1
-    ok = (len(people) == 48 and len(d["train"]) == 640 and len(d["vocab"]) == 74
-          and classes == dict(memory_base=160, memory_derived=120, chain2=48, chain3=32, named2=32, named3=8))
-    check("veri: sayilar (48 kisi, 640 cumle, sozluk 74, sinif sayilari)", ok, str(classes))
+    ok = (len(people) == 192 and len(d["train"]) == 2560 and len(d["vocab"]) == 242
+          and classes == dict(memory_base=640, memory_derived=480, chain2=192, chain3=128, named2=128, named3=32))
+    check("veri: sayilar (192 kisi, 2560 cumle, sozluk 242, sinif sayilari)", ok, str(classes))
 
     texts = [D.detokenize(s) for s in d["train"]] + [D.detokenize(e["prompt"]) for e in d["exam"]]
     check("veri: tokenize(detokenize(x)) == x butun cumle ve sorularda",
@@ -105,7 +105,7 @@ def t_data():
             if r in DEFINITIONS:
                 named_written.setdefault((x, r), set()).add(y)
     ok = all(ys == set().union(*(walk(g, x, p) for p in DEFINITIONS[r])) for (x, r), ys in named_written.items())
-    check("veri: yazili adli olgular (aunt, cousin ...) tanimin birlesimine esit", ok and len(named_written) == 40,
+    check("veri: yazili adli olgular (aunt, cousin ...) tanimin birlesimine esit", ok and len(named_written) == 160,
           "%d adli soru" % len(named_written))
 
     held = set(d["held"])
@@ -113,7 +113,7 @@ def t_data():
     for x, p in people.items():
         if p["household"]:
             households.setdefault(p["household"], set()).add(x)
-    split_ok = all(h <= held or not h & held for h in households.values()) and len(held) == 8
+    split_ok = all(h <= held or not h & held for h in households.values()) and len(held) == 32
     leak = [D.detokenize(s) for s in d["train"] if s[0] + " " + s[1] in held and ("'s" in s[3:] or s[3] in DEFINITIONS)]
     leak += [D.detokenize(s) for s in d["train"] if s[0] == "Who" and s[2] + " " + s[3] in held
              and ("'s" in s[5:s.index("?")] or s[5] in DEFINITIONS)]
@@ -168,12 +168,12 @@ def t_data():
     for e in s["exam"]:
         if e["cls"].endswith("_steps"):
             counts[e["cls"]] = counts.get(e["cls"], 0) + 1
-    check("veri, STEP_ANSWERS: adimlar yazili 1R cumleleri, zincir dogru yurunur, son ad cevap; 40 ozne, tutulan torun "
+    check("veri, STEP_ANSWERS: adimlar yazili 1R cumleleri, zincir dogru yurunur, son ad cevap; 160 ozne, tutulan torun "
           "hic ozne degil, tutulan sorunun adim dizisi metinde yok; audit gecer",
-          not bad and not leak and want <= {tuple(t) for t in trained} and len(trained) == 824
-          and len({" ".join(t[3:5]) for t in trained}) == 40 and not {" ".join(t[3:5]) for t in trained} & held
-          and len(s["train"]) == 1464 and D.audit(s) == 200
-          and counts == dict(memory_steps=72, chain2_steps=48, chain3_steps=32), str(bad[:2] or leak[:1] or counts))
+          not bad and not leak and want <= {tuple(t) for t in trained} and len(trained) == 3320
+          and len({" ".join(t[3:5]) for t in trained}) == 160 and not {" ".join(t[3:5]) for t in trained} & held
+          and len(s["train"]) == 5880 and D.audit(s) == 800
+          and counts == dict(memory_steps=312, chain2_steps=192, chain3_steps=128), str(bad[:2] or leak[:1] or counts))
 
 
 def reference_logits(PF, shift, W, scale, ids):
@@ -537,7 +537,7 @@ def t_colab():
     check("train_seq: callback her every adimda, guncellemeden once (0, 2, 4)", seen == [0, 2, 4], str(seen))
 
     out_dir = tempfile.mkdtemp()
-    run = C.start("TEST", s, out_dir + "/r", steps=2, every=100, device="cpu")
+    run = C.start("TEST", s, out_dir + "/r", steps=2, every=100, device="cpu", compile=False)
     run["thread"].join(600)
     files = sorted(os.listdir(out_dir + "/r"))
     check("colab_20: CPU'da start -> sinav, model, son olcum dosyalari; pulse/stop hatasiz",

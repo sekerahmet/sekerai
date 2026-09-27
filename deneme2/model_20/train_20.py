@@ -21,8 +21,8 @@ SETTINGS = {                      # capa lr/wd gibi deneme sayisi; 1e-2 fazla se
     "free": dict(learn_points=True, anchor=0.0),
     "anchored": dict(learn_points=True, anchor=1e-3),
 }
-STEPS, LR = 1000, 0.01  # full batch: 1 adim = 1 epoch.  STEPS data_20 (iz 90024739fb8f) icin: ezber 600'de tam
-                         # (Adim 3, tohum 0) + pay; veri buyurse yeniden belirlenir.  27 Eylul oncesi kosular 2000.
+STEPS, LR = 4000, 0.01  # full batch: 1 adim = 1 epoch.  32 aile icin ilk deger (kullanici, 27 Eylul: "ilk olarak 4.000");
+                         # 8 ailede 1000 idi (ezber 600'de tam), ondan once 2000.  Veri buyurse yeniden belirlenir.
 LOG_AT = (0, 10, 50, 200, 500, 1000)
 LR_FLOOR = 0.1       # cosine decay: lr sonda LR x LR_FLOOR (taban lr/10); train_seq standardi
 GRAD_CLIP = 1.0      # gradient clipping: adimdaki gradient'in boyu bunu gecerse buna indirilir; train_seq standardi
@@ -121,10 +121,11 @@ def sequences(data):
 
 
 def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, lr_floor=LR_FLOOR, grad_clip=GRAD_CLIP,
-              weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None):
+              weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None, compile=False):
     """Standart tarif: cosine decay (LR -> LR x lr_floor) + gradient clipping.  lr_floor=None, grad_clip=None: eski tarif
     (sabit lr); 27 Eylul oncesi kayitli Adim 2-3 sonuclari onunla uretildi.  weight_decay > 0: AdamW, yalniz W_ matrisleri.
-    callback(step, model, nll): her `every` adimda, o adimin guncellemesinden ONCE (sinav, kayit, durdurma)."""
+    callback(step, model, nll): her `every` adimda, o adimin guncellemesinden ONCE (sinav, kayit, durdurma).
+    compile: yalniz kayip hesabi torch.compile ile (model_19'daki gibi); full batch'te sekil sabit, bir kez derlenir."""
     model = (BlockModel(n, seed=seed, **STEP3[setting]) if setting in STEP3
              else SequenceModel(n, seed=seed, **STEP2[setting])).to(device)
     ids, mask = ids.to(device), mask.to(device)
@@ -140,12 +141,13 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
                                 lr=lr)
     else:
         opt = torch.optim.Adam(params, lr=lr)
+    loss_fn = torch.compile(model.loss) if compile else model.loss
     curve = []
     for step in range(steps + 1):
         if lr_floor is not None:                           # lr_t = lr · (floor + (1 - floor) · (1 + cos(π t / T)) / 2)
             for group in opt.param_groups:
                 group["lr"] = lr * (lr_floor + (1 - lr_floor) * 0.5 * (1 + math.cos(math.pi * step / steps)))
-        total, nll = model.loss(ids, mask)                 # butun cumleler, butun konumlar
+        total, nll = loss_fn(ids, mask)                    # butun cumleler, butun konumlar
         if step in log_at:
             curve.append(dict(step=step, nll=nll.item(), dev=deviation(model).clone(),
                               W_context=(sum(b.attention.W_context.norm().item() for b in model.blocks)

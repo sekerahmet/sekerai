@@ -2,7 +2,7 @@
 """colab_20 -- model_20 Colab kosulari.  Egitim arka planda bir iplikte; hucre hemen doner (CLAUDE.md kural 8).
 
     import colab_20 as C
-    C.start(NAME, DATA, OUT, steps=S, seed=0, every=100, device="cuda")
+    C.start(NAME, DATA, OUT, steps=S, seed=0, every=100, device="cuda")     compile=True varsayilan (model_19 gibi)
     C.pulse()      her kosunun durumu ve son satirlari
     C.stop()       bayrak: iplik bir sonraki sinavda modeli kaydedip cikar
 
@@ -24,7 +24,7 @@ STEPS_CLS = ("memory_steps", "chain2_steps", "chain3_steps")
 RUNS = {}
 
 
-def start(name, data, out, steps, seed=0, every=100, device="cuda", **train_kw):
+def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True, **train_kw):
     """Egitimi arka planda baslatir, hemen doner.  out doluysa once out_eski_<zaman>'a TASINIR, silinmez."""
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
@@ -33,7 +33,7 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", **train_kw):
     os.makedirs(out, exist_ok=True)
     n = {c: len(TR.questions(data, c)) for c in SHORT + STEPS_CLS}
     run = dict(name=name, out=out, lines=[], exams=[], stop=False, error=None, done=False, t0=time.time())
-    json.dump(dict(name=name, steps=steps, seed=seed, every=every, device=device, fingerprint=data["fingerprint"],
+    json.dump(dict(name=name, steps=steps, seed=seed, every=every, device=device, compile=compile, fingerprint=data["fingerprint"],
                    train=len(data["train"]), sizes=n, **train_kw), open(os.path.join(out, "config.json"), "w"), indent=1)
 
     class Stopped(Exception):
@@ -69,7 +69,7 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", **train_kw):
         try:
             ids, mask = TR.sequences(data)
             model, _ = TR.train_seq("shared", ids, mask, len(data["vocab"]), steps=steps, seed=seed, device=device,
-                                    every=every, callback=callback, log_at=(), **train_kw)
+                                    every=every, callback=callback, log_at=(), compile=compile, **train_kw)
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             final = {}
             for c in STEPS_CLS:

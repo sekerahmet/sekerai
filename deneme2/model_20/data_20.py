@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """data_20 -- model_20 adim 0: kucuk Ingilizce akrabalik dunyasi.
 
-8 aile, 3 nesil, 48 kisi.  Her ciftin bir oglu bir kizi var; aile i'nin oglu aile i+1'in kiziyla evlenir (halka), evlenen
+32 aile, 3 nesil, 192 kisi (27 Eylul; once 8 aile, 48 kisi).  Her ciftin bir oglu bir kizi var; aile i'nin oglu aile i+1'in kiziyla evlenir (halka), evlenen
 kadin kocasinin soyadini alir, her ad benzersiz.  Boylece her torunun aunt'u babasinin kiz kardesi, uncle'i annesinin erkek
 kardesi.  Ogretme hanelerinin torunlarinda turemis iliskiler zincir ve adiyla yazilir; tutulan hanelerde HIC yazilmaz,
 sorulur.
@@ -13,20 +13,50 @@ import hashlib
 import itertools
 import sys
 
-FAMILIES = ("Smith", "Brown", "Clark", "Davis", "Evans", "Fisher", "Green", "Hill")
+# 32 aile (27 Eylul, kullanici: "32 aile 192 kişi olabilr bence"); ilk 8 aile ve sirasi Adim 0-4'teki gibi, yeni aileler
+# araya: halka Smith .. Davis, 12 ogretme, Evans .. Hill, 12 tutulan.  8 aileli dunya: commit a436369.
+FAMILIES = ("Smith", "Brown", "Clark", "Davis",
+            "Adams", "Baker", "Carter", "Dixon", "Edwards", "Foster", "Gray", "Harris", "Jones", "King", "Lewis", "Moore",
+            "Evans", "Fisher", "Green", "Hill",
+            "Nelson", "Parker", "Quinn", "Reed", "Scott", "Turner", "Walker", "Young", "Ward", "Cooper", "Bell", "Hughes")
 # aile basina: dede, nine, ogul, kiz, torun oglan, torun kiz (torunlar ailenin OGLUNUN hanesinde)
 NAMES = {
     "Smith": ("George", "Mary", "John", "Emma", "Tom", "Alice"),
     "Brown": ("Henry", "Rose", "Peter", "Linda", "Jack", "Lily"),
     "Clark": ("Walter", "Ruth", "Paul", "Kate", "Sam", "Grace"),
     "Davis": ("Frank", "Helen", "Mark", "Sarah", "Luke", "Chloe"),
+    "Adams": ("Alan", "Abigail", "Alfred", "Ada", "Andrew", "Amy"),
+    "Baker": ("Anthony", "Andrea", "Barry", "Angela", "Bernard", "Anna"),
+    "Carter": ("Bruce", "Anne", "Carl", "Audrey", "Charles", "Barbara"),
+    "Dixon": ("Chris", "Beatrice", "Colin", "Bella", "Craig", "Beth"),
+    "Edwards": ("Daniel", "Carol", "Dennis", "Caroline", "Derek", "Catherine"),
+    "Foster": ("Donald", "Clara", "Douglas", "Daisy", "Edward", "Dora"),
+    "Gray": ("Eric", "Dorothy", "Felix", "Eileen", "Fred", "Eleanor"),
+    "Harris": ("Gary", "Elsie", "Gavin", "Emily", "Gordon", "Esther"),
+    "Jones": ("Graham", "Eva", "Harry", "Fiona", "Hugh", "Florence"),
+    "King": ("Ian", "Frances", "Isaac", "Gloria", "Jacob", "Hannah"),
+    "Lewis": ("Jason", "Hazel", "Joel", "Heidi", "Joseph", "Holly"),
+    "Moore": ("Keith", "Iris", "Kevin", "Isabel", "Liam", "Ivy"),
     "Evans": ("Arthur", "Edith", "David", "Laura", "Owen", "Ella"),
     "Fisher": ("Harold", "Doris", "Simon", "Julia", "Adam", "Ruby"),
     "Green": ("Albert", "Irene", "James", "Claire", "Leo", "Zoe"),
     "Hill": ("Ernest", "Agnes", "Robert", "Diana", "Ben", "Mia"),
+    "Nelson": ("Martin", "Jane", "Matthew", "Janet", "Max", "Jean"),
+    "Parker": ("Michael", "Joan", "Neil", "Judith", "Nick", "June"),
+    "Quinn": ("Noah", "Karen", "Oliver", "Lucy", "Oscar", "Mabel"),
+    "Reed": ("Patrick", "Maggie", "Philip", "Margaret", "Ralph", "Maria"),
+    "Scott": ("Ray", "Martha", "Richard", "Megan", "Roger", "Molly"),
+    "Turner": ("Ronald", "Nancy", "Roy", "Naomi", "Ryan", "Nina"),
+    "Walker": ("Sean", "Nora", "Stanley", "Olivia", "Stephen", "Pamela"),
+    "Young": ("Stuart", "Paula", "Ted", "Pearl", "Terry", "Peggy"),
+    "Ward": ("Thomas", "Penny", "Tim", "Phoebe", "Tony", "Rachel"),
+    "Cooper": ("Victor", "Rebecca", "Vincent", "Rita", "Wayne", "Sally"),
+    "Bell": ("William", "Sophie", "Aaron", "Stella", "Brian", "Susan"),
+    "Hughes": ("Dean", "Sylvia", "Howard", "Vera", "Nathan", "Violet"),
 }
-# Bitisik: kuzenleri iki yandaki haneler oldugu icin kenardaki iki hanenin (Evans, Hill) kuzen sorulari co_written olur.
-HELD_HOUSEHOLDS = ("Evans", "Fisher", "Green", "Hill")
+# Bitisik: kuzenleri iki yandaki haneler oldugu icin kenardaki iki hanenin (Evans, Hughes) kuzen sorulari co_written olur.
+HELD_HOUSEHOLDS = ("Evans", "Fisher", "Green", "Hill",
+                   "Nelson", "Parker", "Quinn", "Reed", "Scott", "Turner", "Walker", "Young", "Ward", "Cooper", "Bell", "Hughes")
 # Adim 4: tutulan torunlar disindaki herkesin 2 ve 3 adimli temel-iliski zincirleri "<steps>" ile ara adimli yazilir
 # ("<steps> Who is X 's r1 's r2 ? X 's r1 is B . B 's r2 is Y ."); sinava tutulan hanelerin ara adimli sorulari
 # eklenir.  False: veri Adim 0-3 ile birebir ayni

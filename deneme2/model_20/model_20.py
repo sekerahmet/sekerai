@@ -31,8 +31,8 @@ D = 64               # nokta boyutu; olculmedi (sozluk 74 > 64)
 CONFIDENCE = 0.99    # hedef tam q yonundeyken, rakipler dikken verilebilecek olasilik -> scale
 POINTS_SEED = 0
 LEARN_POINTS = True  # False: PL = PF (sabit noktalar)
-ANCHOR = 1e-3        # PF'den uzaklasmanin bedeli (0 = serbest); data_20 (iz 90024739fb8f) icin olculdu:
-                     # kayip <= tavan + 0,01; veri degisirse yeniden olculur
+ANCHOR = 1e-3        # PF'den uzaklasmanin bedeli (0 = serbest); 8 aileli data_20 (iz 90024739fb8f) icin olculdu:
+                     # kayip <= tavan + 0,01.  32 ailede (27 Eylul) yeniden olculmedi
 ATTENTION = True     # Adim 2: attention; False = Adim 1 (yalniz son token)
 T_MAX = 512          # baglam siniri (hedef); attention olcegi bundan: 512 konum arasindan 0,99 guvenle secebilsin
 TURNS = 2            # Adim 3: blok tur sayisi (kullanici karari: 2)
