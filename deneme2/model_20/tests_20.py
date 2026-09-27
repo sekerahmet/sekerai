@@ -474,6 +474,20 @@ def t_step3():
     err = max(float((lp[i, :len(r)] - m.logits(torch.tensor([r])).detach()[0]).abs().max()) for i, r in enumerate(rows))
     check("adim 3: sagdaki dolgu sonucu degistirmez", err < 1e-5, "fark %.1e" % err)
 
+    import itertools
+    starts = [(s_, k_, tuple(t_.flatten()[:8].tolist())) for s_ in range(4)
+              for k_, t_ in BlockModel(238, seed=s_, shared=False).state_dict().items() if t_.abs().sum() > 0]
+    shared_start = [(a_[:2], b_[:2]) for a_, b_ in itertools.combinations(starts, 2) if a_[2] == b_[2]]
+    m0 = BlockModel(238)
+    kept = [m0.tokens.fixed_points[0, :3].tolist(), m0.blocks[0].attention.W_query[0, :3].tolist(),
+            m0.blocks[0].facts.W_fact_in[0, :3].tolist()]
+    ref = [[-0.134501650929451, -0.13766998052597046, -0.029936080798506737],
+           [-0.10216674953699112, -0.06944606453180313, -0.10333619266748428],
+           [-0.06384969502687454, 0.1285339742898941, -0.04414394870400429]]
+    check("adim 3: tohumlar rastgele sayi paylasmaz (0-3 arasinda ayni baslayan tensor yok); tohum 0'in baslangici degismedi",
+          not shared_start and all(abs(a_ - b_) < 1e-7 for ka, kb in zip(kept, ref) for a_, b_ in zip(ka, kb)),
+          str(shared_start[:3]))
+
     sh, se = BlockModel(n, d=d, units=10, shared=True), BlockModel(n, d=d, units=10, shared=False)
     per_block = sum(p_.numel() for p_ in sh.blocks[0].parameters())
     count = lambda mm: sum(p_.numel() for p_ in mm.parameters())

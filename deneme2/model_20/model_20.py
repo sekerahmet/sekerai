@@ -120,8 +120,9 @@ class NextRelation(torch.nn.Module):
 class BigramModel(torch.nn.Module):
     def __init__(self, n, d=D, learn_points=LEARN_POINTS, anchor=ANCHOR, confidence=CONFIDENCE, seed=POINTS_SEED):
         super().__init__()
-        self.tokens = TokenPoints(n, d, learn_points, anchor, seed)
-        self.next = NextRelation(d, seed + 1)
+        # 100 * seed: her tohum kendi 100'luk araliginda -- tohumlar rastgele sayi paylasmaz (denetim, 27 Eylul); tohum 0 aynen
+        self.tokens = TokenPoints(n, d, learn_points, anchor, 100 * seed)
+        self.next = NextRelation(d, 100 * seed + 1)
         self.scale = scale_for(n, confidence)
 
     def logits(self, ids):
@@ -193,9 +194,9 @@ class SequenceModel(torch.nn.Module):
     def __init__(self, n, d=D, attention=ATTENTION, learn_points=LEARN_POINTS, anchor=ANCHOR, confidence=CONFIDENCE,
                  t_max=T_MAX, seed=POINTS_SEED):
         super().__init__()
-        self.tokens = TokenPoints(n, d, learn_points, anchor, seed)
-        self.next = NextRelation(d, seed + 1)
-        self.attention = CausalAttention(d, t_max, confidence, seed + 2) if attention else None
+        self.tokens = TokenPoints(n, d, learn_points, anchor, 100 * seed)          # 100 * seed: BigramModel'deki gibi
+        self.next = NextRelation(d, 100 * seed + 1)
+        self.attention = CausalAttention(d, t_max, confidence, 100 * seed + 2) if attention else None
         self.scale = scale_for(n, confidence)
 
     def logits(self, ids):
@@ -273,9 +274,9 @@ class BlockModel(torch.nn.Module):
                  confidence=CONFIDENCE, t_max=T_MAX, units=FACT_UNITS, seed=POINTS_SEED, copy_path=COPY_PATH,
                  stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=ROPE):
         super().__init__()
-        self.tokens = TokenPoints(n, d, learn_points, anchor, seed)
+        self.tokens = TokenPoints(n, d, learn_points, anchor, 100 * seed)          # 100 * seed: BigramModel'deki gibi
         count = 1 if shared else turns
-        self.blocks = torch.nn.ModuleList(Block(d, t_max, confidence, units, seed + 10 + 2 * i, copy_path=copy_path,
+        self.blocks = torch.nn.ModuleList(Block(d, t_max, confidence, units, 100 * seed + 10 + 2 * i, copy_path=copy_path,
                                                 stream_norm=stream_norm, layer_norm=layer_norm, rope=rope)
                                           for i in range(count))
         self.turns, self.shared, self.copy_path, self.stream_norm = turns, shared, copy_path, stream_norm
