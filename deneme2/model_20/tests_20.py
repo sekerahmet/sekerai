@@ -133,6 +133,48 @@ def t_data():
           all(not e["co_written"] or e["path"][-1] in ("son", "daughter", "cousin")
               for e in d["exam"] if not e["cls"].startswith("memory")))
 
+    # Adim 4: ara adimli cevaplar; her adim Adim 0-3 metninde yazili bir 1R cumlesi olmali
+    s = D.build(step_answers=True)
+    stmts = {D.detokenize(t) for t in d["train"] if t[0] != "Who"}
+    bad = []
+    for e in (e for e in s["exam"] if e["cls"].endswith("_steps")):
+        sents, cur = [], []
+        for t in e["steps"]:
+            cur.append(t)
+            if t == ".":
+                sents.append(D.detokenize(cur))
+                cur = []
+        who = e["subject"]
+        for txt in sents:
+            if txt not in stmts or not txt.startswith(who + "'s "):
+                bad.append(txt)
+            who = txt[:-1].split(" is ")[1]
+        if who not in e["answers"] or len(sents) != len(e["path"]):
+            bad.append(D.detokenize(e["prompt"]))
+    trained = [t for t in s["train"] if t[0] == "<steps>"]
+    for t in trained:                            # egitimdeki her ara adimli zincir de yazili 1R cumlelerinden
+        q_end = t.index("?")
+        who, rest = " ".join(t[3:5]), t[q_end + 1:]
+        for i in range(0, len(rest), 8):
+            txt = D.detokenize(rest[i:i + 8])
+            if txt not in stmts or not txt.startswith(who + "'s "):
+                bad.append(txt)
+            who = txt[:-1].split(" is ")[1]
+    held = set(d["held"])
+    text = "\n".join(D.detokenize(t) for t in s["train"])
+    leak = [e for e in s["exam"] if e["cls"] in ("chain2_steps", "chain3_steps") and D.detokenize(e["steps"]) in text]
+    want = {tuple(e["prompt"] + e["steps"]) for e in s["exam"] if e["cls"] == "memory_steps"}
+    counts = {}
+    for e in s["exam"]:
+        if e["cls"].endswith("_steps"):
+            counts[e["cls"]] = counts.get(e["cls"], 0) + 1
+    check("veri, STEP_ANSWERS: adimlar yazili 1R cumleleri, zincir dogru yurunur, son ad cevap; 40 ozne, tutulan torun "
+          "hic ozne degil, tutulan sorunun adim dizisi metinde yok; audit gecer",
+          not bad and not leak and want <= {tuple(t) for t in trained} and len(trained) == 824
+          and len({" ".join(t[3:5]) for t in trained}) == 40 and not {" ".join(t[3:5]) for t in trained} & held
+          and len(s["train"]) == 1464 and D.audit(s) == 200
+          and counts == dict(memory_steps=72, chain2_steps=48, chain3_steps=32), str(bad[:2] or leak[:1] or counts))
+
 
 def reference_logits(PF, shift, W, scale, ids):
     """Tasarim formulu, float64, modelden bagimsiz: PL = norm(PF+shift), q = norm(W PL_i), skor_j = scale <q, PL_j>."""
@@ -338,13 +380,180 @@ def t_step2():
           torch.equal(m.tokens.fixed_points, before) and curve[-1]["W_context"] > 0 and curve[-1]["nll"] < curve[0]["nll"])
 
 
+def reference_blocks(m, ids):
+    """Adim 3 formulu, float64, modelden bagimsiz: h = PL; her turda attention (durumlari getirir), W_context, FactUnits;
+    cikis h (W_next yok)."""
+    unit = lambda v: v / v.norm(dim=-1, keepdim=True)
+    dd = lambda t: t.detach().double()
+    PL = unit(dd(m.tokens.fixed_points) + dd(m.tokens.shift))
+    h = PL[ids]
+    T = ids.shape[-1]
+    future = torch.ones(T, T, dtype=torch.bool).triu(1)
+    blocks = [m.blocks[0]] * m.turns if m.shared else list(m.blocks)
+    for b in blocks:
+        at = b.attention
+        q, k = unit(h @ dd(at.W_query).T), unit(h @ dd(at.W_key).T)
+        a = torch.softmax((at.scale * q @ k.transpose(-1, -2)).masked_fill(future, float("-inf")), -1)
+        h = unit(h + (a @ h) @ dd(at.W_context).T)
+        u = torch.relu(h @ dd(b.facts.W_fact_in).T - dd(b.facts.fact_threshold))
+        h = unit(h + u @ dd(b.facts.W_fact_out).T)
+    return m.scale * h @ PL.T
+
+
+def t_step3():
+    from model_20 import BlockModel, TURNS
+    n, d = 12, 6
+    g = torch.Generator().manual_seed(9)
+    ids = torch.randint(0, n, (3, 9), generator=g)
+
+    for shared in (True, False):
+        m = BlockModel(n, d=d, units=10, shared=shared)
+        P = m.tokens.points().detach()
+        err = float((m.logits(ids).detach() - m.scale * P[ids] @ P.T).abs().max())
+        check("adim 3: baslangicta (W_context = 0, W_fact_out = 0) durum PL'de kalir, skor = scale <PL_t, PL>, %s" % (
+            "shared" if shared else "separate"), err < 1e-5, "fark %.1e" % err)
+    check("adim 3: W_next yok", not any("W_next" in k for k in BlockModel(n, d=d, units=10).state_dict()))
+
+    for kw in (dict(shared=True), dict(shared=False)):
+        m = BlockModel(n, d=d, units=10, **kw)
+        with torch.no_grad():
+            for p_ in m.parameters():
+                if p_.requires_grad:
+                    p_.copy_(0.5 * torch.randn(p_.shape, generator=g))
+        err = float((m.logits(ids).detach().double() - reference_blocks(m, ids)).abs().max())
+        check("adim 3: skor = tasarim formulu (bagimsiz float64), %s" % kw, err < 1e-4, "fark %.1e" % err)
+
+    base_logits = m.logits(ids).detach()
+    changed = ids.clone()
+    changed[:, 5] = (changed[:, 5] + 1) % n
+    after = m.logits(changed).detach()
+    check("adim 3: nedensellik iki turda da -- konum 5 degisince 0-4 aynen kalir",
+          float((after[:, :5] - base_logits[:, :5]).abs().max()) < 1e-5 and float((after[:, 5:] - base_logits[:, 5:]).abs().max()) > 1e-3)
+
+    vocab = ["<pad>", "<eos>"] + [str(i) for i in range(n - 2)]
+    rows = [[1, 3, 4, 5, 1], [1, 6, 7, 1], [1, 8, 9, 10, 11, 3, 1]]
+    padded, mask = TR.pad(rows, vocab)
+    lp = m.logits(padded).detach()
+    err = max(float((lp[i, :len(r)] - m.logits(torch.tensor([r])).detach()[0]).abs().max()) for i, r in enumerate(rows))
+    check("adim 3: sagdaki dolgu sonucu degistirmez", err < 1e-5, "fark %.1e" % err)
+
+    sh, se = BlockModel(n, d=d, units=10, shared=True), BlockModel(n, d=d, units=10, shared=False)
+    per_block = sum(p_.numel() for p_ in sh.blocks[0].parameters())
+    count = lambda mm: sum(p_.numel() for p_ in mm.parameters())
+    tb = sh.turn_blocks()
+    check("adim 3: shared tek Block'u her turda kullanir, separate her tura ayri Block",
+          len(sh.blocks) == 1 and len(tb) == TURNS and all(b is tb[0] for b in tb) and len(se.blocks) == TURNS
+          and count(se) - count(sh) == (TURNS - 1) * per_block and len(sh.hidden(ids)) == TURNS + 1)
+
+    data = D.build()
+    sids, smask = TR.sequences(data)
+    nv = len(data["vocab"])
+    before = BlockModel(nv).tokens.fixed_points.clone()
+    m, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20))
+    check("adim 3: egitimde PF bit duzeyinde degismez, W_context 0'dan ayrilir, kayip iner",
+          torch.equal(m.tokens.fixed_points, before) and curve[-1]["W_context"] > 0 and curve[-1]["nll"] < curve[0]["nll"])
+
+    # egitim tarifi: cosine decay + gradient clipping standart; None verilirse eski tarif birebir
+    seen = []
+    real_adam = torch.optim.Adam
+
+    class Spy(real_adam):
+        def step(self, *a, **k):
+            seen.append((self.param_groups[0]["lr"], float(torch.nn.utils.clip_grad_norm_(self.param_groups[0]["params"], 1e9))))
+            return super().step(*a, **k)
+    torch.optim.Adam = Spy
+    try:
+        TR.train_seq("shared", sids, smask, nv, steps=4, log_at=(), lr=0.01, lr_floor=0.1, grad_clip=0.5)
+        cosine = [0.01 * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * t / 4))) for t in range(4)]
+        ok_sched = all(abs(lr_ - c) < 1e-12 for (lr_, _), c in zip(seen, cosine))
+        ok_clip = all(g <= 0.5 + 1e-5 for _, g in seen)
+        seen.clear()
+        TR.train_seq("shared", sids, smask, nv, steps=4, log_at=(), lr=0.01)
+        standard = [0.01 * (TR.LR_FLOOR + (1 - TR.LR_FLOOR) * 0.5 * (1 + math.cos(math.pi * t / 4))) for t in range(4)]
+        ok_default = (all(abs(lr_ - c) < 1e-12 for (lr_, _), c in zip(seen, standard))
+                      and all(g <= TR.GRAD_CLIP + 1e-5 for _, g in seen))
+        seen.clear()
+        TR.train_seq("shared", sids, smask, nv, steps=3, log_at=(), lr=0.01, lr_floor=None, grad_clip=None)
+        ok_old = all(lr_ == 0.01 for lr_, _ in seen) and any(g > 0.5 for _, g in seen)
+    finally:
+        torch.optim.Adam = real_adam
+    check("egitim tarifi: cosine decay ile lr LR'den LR x lr_floor'a iner, gradient boyu grad_clip'i gecmez; standart LR_FLOOR ve "
+          "GRAD_CLIP; None verilirse sabit lr", ok_sched and ok_clip and ok_default and ok_old)
+    a1, _ = TR.train_seq("shared", sids, smask, nv, steps=3, log_at=(), seed=0)
+    a2, _ = TR.train_seq("shared", sids, smask, nv, steps=3, log_at=(), seed=1)
+    check("egitim tarifi: seed modeli degistirir (PF dahil), seed=0 varsayilanla ayni",
+          not torch.equal(a1.tokens.fixed_points, a2.tokens.fixed_points)
+          and torch.equal(a1.tokens.fixed_points, before))
+
+    groups = []
+    real_adamw = torch.optim.AdamW
+
+    class SpyW(real_adamw):
+        def __init__(self, param_groups, **k):
+            super().__init__(param_groups, **k)
+            groups.extend(self.param_groups)
+    torch.optim.AdamW = SpyW
+    try:
+        mw, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=(), weight_decay=0.1)
+    finally:
+        torch.optim.AdamW = real_adamw
+    names = {id(p_): k.split(".")[-1] for k, p_ in mw.named_parameters()}
+    decayed = sorted(names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.1 for p_ in g_["params"])
+    kept = sorted(names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.0 for p_ in g_["params"])
+    check("weight decay: yalniz W_ matrislerine; shift ve fact_threshold haric",
+          decayed == sorted(["W_query", "W_key", "W_context", "W_fact_in", "W_fact_out"])
+          and kept == ["fact_threshold", "shift"], "%s | %s" % (decayed, kept))
+
+
+def t_colab():
+    import tempfile
+    import colab_20 as C
+    from model_20 import BlockModel
+    s = D.build(step_answers=True)
+    e = next(e for e in s["exam"] if e["cls"] == "chain2_steps")
+    good = TR.score_steps(list(e["steps"]), e)
+    bad = list(e["steps"])
+    bad[-3] = "Tom"
+    worse = TR.score_steps(bad, e)
+    check("adim 4: score_steps -- dogru cevapta hepsi evet; son ad yanlissa yalniz son cevap ve birebir hayir",
+          all(good.values()) and not worse["final"] and not worse["exact"] and worse["bridge"] and worse["form"])
+
+    m = BlockModel(len(s["vocab"]), d=16, units=8)
+    prompts = [TR.questions(s, "chain2_steps")[i][0] for i in (0, 1)] + [TR.questions(s, "chain3_steps")[0][0]]
+    out = TR.generate(m, prompts, 5)
+    manual = []
+    with torch.no_grad():
+        for p in prompts:
+            ids = list(p)
+            for _ in range(5):
+                ids.append(int(m.logits(torch.tensor([ids]))[0, -1].argmax()))
+            manual.append(ids[len(p):])
+    check("adim 4: generate toplu uretim = tek tek acgozlu uretim (farkli uzunluklar birlikte)", out == manual)
+
+    seen = []
+    ids, mask = TR.sequences(s)
+    TR.train_seq("shared", ids[:20], mask[:20], len(s["vocab"]), steps=4, log_at=(), every=2,
+                 callback=lambda step, model, nll: seen.append(step))
+    check("train_seq: callback her every adimda, guncellemeden once (0, 2, 4)", seen == [0, 2, 4], str(seen))
+
+    out_dir = tempfile.mkdtemp()
+    run = C.start("TEST", s, out_dir + "/r", steps=2, every=100, device="cpu")
+    run["thread"].join(600)
+    files = sorted(os.listdir(out_dir + "/r"))
+    check("colab_20: CPU'da start -> sinav, model, son olcum dosyalari; pulse/stop hatasiz",
+          run["done"] and not run["error"] and files == ["config.json", "exams.json", "final.json", "log.txt", "model.pt"],
+          str(run["error"] or files))
+    C.pulse(1)
+    C.stop()
+
+
 def F_ce(logits, targets):
     return float(torch.nn.functional.cross_entropy(logits, targets))
 
 
 if __name__ == "__main__":
     print("tests (model_20)")
-    for f in (t_data, t_model, t_step2):
+    for f in (t_data, t_model, t_step2, t_step3, t_colab):
         f()
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)

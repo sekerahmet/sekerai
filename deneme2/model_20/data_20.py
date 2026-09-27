@@ -10,6 +10,7 @@ sorulur.
     python data_20.py --all    butun cumleler ve sorular
 """
 import hashlib
+import itertools
 import sys
 
 FAMILIES = ("Smith", "Brown", "Clark", "Davis", "Evans", "Fisher", "Green", "Hill")
@@ -26,6 +27,10 @@ NAMES = {
 }
 # Bitisik: kuzenleri iki yandaki haneler oldugu icin kenardaki iki hanenin (Evans, Hill) kuzen sorulari co_written olur.
 HELD_HOUSEHOLDS = ("Evans", "Fisher", "Green", "Hill")
+# Adim 4: tutulan torunlar disindaki herkesin 2 ve 3 adimli temel-iliski zincirleri "<steps>" ile ara adimli yazilir
+# ("<steps> Who is X 's r1 's r2 ? X 's r1 is B . B 's r2 is Y ."); sinava tutulan hanelerin ara adimli sorulari
+# eklenir.  False: veri Adim 0-3 ile birebir ayni
+STEP_ANSWERS = False
 BASE = ("father", "mother", "brother", "sister", "son", "daughter")
 # turemis iliski = bu zincirlerin birlesimi; dunyada var olan zincirler yazilir/sorulur
 DERIVED = {
@@ -128,6 +133,17 @@ def qa(x, path, y):
     return question(x, path) + y.split() + ["."]
 
 
+def step_sentences(rel, x, path):
+    """Zinciri 1R cumleleriyle yurur: 'X 's r1 is B . B 's r2 is Y .'  Her adimda tek kisi olmali."""
+    toks = []
+    for r in path:
+        nxt = follow(rel, x, (r,))
+        assert len(nxt) == 1, (x, r, nxt)
+        toks += statement(x, (r,), nxt[0])
+        x = nxt[0]
+    return toks
+
+
 def detokenize(tokens):
     s = " ".join(tokens)
     for p in PUNCT:
@@ -145,7 +161,7 @@ def hops(path):
     return 3 if path == ("cousin",) else 2 if path[0] in DERIVED else len(path)
 
 
-def build():
+def build(step_answers=STEP_ANSWERS):
     """Butun veri: dunya, egitim cumleleri (token listeleri), sinav, sozluk, iz."""
     people, rel = build_world()
     all_facts = facts(people, rel)
@@ -154,6 +170,19 @@ def build():
     train = []
     for x, path, y, kind in written:
         train += [statement(x, path, y), qa(x, path, y)]
+    if step_answers:
+        # her adimda tek kisi; cevap ozne ya da son iliskinin ozneye uygulanmasi degil; zincirde tutulan torun HIC gecmez
+        # (gecerse "David 's son 's mother 's father" tutulan "Owen 's mother 's father"in adimlarini aynen yazar)
+        for x in people:
+            if x in held:
+                continue
+            for n in (2, 3):
+                for path in itertools.product(BASE, repeat=n):
+                    walk = [follow(rel, x, path[:i]) for i in range(1, n + 1)]
+                    if all(len(w) == 1 for w in walk):
+                        walk = [w[0] for w in walk]
+                        if walk[-1] != x and walk[-1] not in follow(rel, x, path[-1:]) and not held & set(walk):
+                            train.append(["<steps>"] + question(x, path) + step_sentences(rel, x, path))
     pairs = {(a, b) for a, _, b, _ in written} | {(b, a) for a, _, b, _ in written}
 
     exam = []
@@ -169,6 +198,13 @@ def build():
             cls = "%s%d" % (kind, hops(path))
         exam.append(dict(cls=cls, subject=x, path=path, prompt=question(x, path), answers=sorted(ys),
                          co_written=any((x, y) in pairs for y in ys)))
+    if step_answers:                             # ayni zincir sorulari "<steps>" ile; beklenen ara adimlar "steps"te
+        for (x, path, kind), ys in grouped.items():
+            walk = {follow(rel, x, path[:i])[0] for i in range(1, len(path) + 1)} if kind == "chain" else set()
+            if kind == "chain" and (x in held or not held & walk):     # ogretmede yalniz egitimde olan zincirler
+                exam.append(dict(cls="chain%d_steps" % len(path) if x in held else "memory_steps", subject=x, path=path,
+                                 prompt=["<steps>"] + question(x, path), answers=sorted(ys),
+                                 steps=step_sentences(rel, x, path), co_written=any((x, y) in pairs for y in ys)))
 
     vocab = [PAD, EOS] + sorted({t for s in train for t in s} | {t for e in exam for t in e["prompt"]})
     h = hashlib.sha256()
@@ -196,6 +232,10 @@ def audit(data):
     for x, path, y, kind in data["facts"]:
         if kind == "chain":
             assert y != x and y not in follow(data["rel"], x, path[-1:]), (x, path, y)
+    held = set(data["held"])
+    for s in data["train"]:
+        if s[0] == "<steps>":                    # ara adimli zincirde tutulan torun gecmez
+            assert not {" ".join(s[i:i + 2]) for i in range(len(s) - 1)} & held, detokenize(s)
     firsts = [p["first"] for p in data["people"].values()]
     assert len(set(firsts)) == len(firsts)
     assert not set(firsts) & set(FAMILIES)

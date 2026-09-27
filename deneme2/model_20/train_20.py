@@ -5,22 +5,28 @@ Adim 2: butun cumleler dizi olarak; Adim 1 (geriye bakmaz) ile Adim 2 (attention
 
     python train_20.py            adim 1, secili token'lar     (--all: butun token'lar)
     python train_20.py --step2    adim 2
+    python train_20.py --step3    adim 3 (step2 ile yan yana: shared, separate)
 """
+import math
 import sys
 import time
 
 import torch
 
 import data_20
-from model_20 import CONFIDENCE, BigramModel, SequenceModel, deviation, neighbors, transitions
+from model_20 import CONFIDENCE, BigramModel, BlockModel, SequenceModel, deviation, neighbors, transitions
 
 SETTINGS = {                      # capa lr/wd gibi deneme sayisi; 1e-2 fazla sertti (kayip 1,284 > 1,270)
     "fixed": dict(learn_points=False),
     "free": dict(learn_points=True, anchor=0.0),
     "anchored": dict(learn_points=True, anchor=1e-3),
 }
-STEPS, LR = 2000, 0.01
-LOG_AT = (0, 10, 50, 200, 500, 1000, 2000)
+STEPS, LR = 1000, 0.01  # full batch: 1 adim = 1 epoch.  STEPS data_20 (iz 90024739fb8f) icin: ezber 600'de tam
+                         # (Adim 3, tohum 0) + pay; veri buyurse yeniden belirlenir.  27 Eylul oncesi kosular 2000.
+LOG_AT = (0, 10, 50, 200, 500, 1000)
+LR_FLOOR = 0.1       # cosine decay: lr sonda LR x LR_FLOOR (taban lr/10); train_seq standardi
+GRAD_CLIP = 1.0      # gradient clipping: adimdaki gradient'in boyu bunu gecerse buna indirilir; train_seq standardi
+WEIGHT_DECAY = 0.0   # weight decay (AdamW), yalniz W_ matrislerine; 0 = kapali (standart).  Deger olculuyor
 SHOW = ("Alice", "Tom", "Smith", "Hill", "'s", "father", "aunt", "is", "Who", "?", ".")
 
 
@@ -95,6 +101,7 @@ def report(results, vocab, floor, n_pairs, fingerprint, show):
 # ---- adim 2
 
 STEP2 = {"step1": dict(attention=False), "step2": dict(attention=True)}
+STEP3 = {"shared": dict(shared=True), "separate": dict(shared=False)}
 PROMPT_1R = {"<eos>": [0], "Who/is": [1, 2], "ozne adi": [3], "soyadi": [4], "'s": [5], "iliski": [6], "? (kendisi)": [7]}
 
 
@@ -113,20 +120,45 @@ def sequences(data):
     return pad([data_20.encode(s, data["vocab"]) for s in data["train"]], data["vocab"])
 
 
-def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT):
-    model = SequenceModel(n, **STEP2[setting])
-    # ogrenilenler: Δ (shift), W_next, W_query, W_key, W_context  (PF buffer, listede yok)
-    opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=lr)
+def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, lr_floor=LR_FLOOR, grad_clip=GRAD_CLIP,
+              weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None):
+    """Standart tarif: cosine decay (LR -> LR x lr_floor) + gradient clipping.  lr_floor=None, grad_clip=None: eski tarif
+    (sabit lr); 27 Eylul oncesi kayitli Adim 2-3 sonuclari onunla uretildi.  weight_decay > 0: AdamW, yalniz W_ matrisleri.
+    callback(step, model, nll): her `every` adimda, o adimin guncellemesinden ONCE (sinav, kayit, durdurma)."""
+    model = (BlockModel(n, seed=seed, **STEP3[setting]) if setting in STEP3
+             else SequenceModel(n, seed=seed, **STEP2[setting])).to(device)
+    ids, mask = ids.to(device), mask.to(device)
+    # ogrenilenler: Δ (shift), W_query, W_key, W_context; Adim 1-2: + W_next; Adim 3: + FactUnits (W_next yok)
+    # (PF buffer, listede yok)
+    params = [p for p in model.parameters() if p.requires_grad]
+    if weight_decay:
+        # her adimda once W <- W - lr · weight_decay · W (kaybin desteklemedigi agirlik soner), sonra Adam adimi.
+        # shift'in capasi var, fact_threshold bir esik: ikisine uygulanmaz
+        named = [(k, p) for k, p in model.named_parameters() if p.requires_grad]
+        opt = torch.optim.AdamW([dict(params=[p for k, p in named if k.split(".")[-1].startswith("W_")], weight_decay=weight_decay),
+                                 dict(params=[p for k, p in named if not k.split(".")[-1].startswith("W_")], weight_decay=0.0)],
+                                lr=lr)
+    else:
+        opt = torch.optim.Adam(params, lr=lr)
     curve = []
     for step in range(steps + 1):
+        if lr_floor is not None:                           # lr_t = lr · (floor + (1 - floor) · (1 + cos(π t / T)) / 2)
+            for group in opt.param_groups:
+                group["lr"] = lr * (lr_floor + (1 - lr_floor) * 0.5 * (1 + math.cos(math.pi * step / steps)))
         total, nll = model.loss(ids, mask)                 # butun cumleler, butun konumlar
         if step in log_at:
             curve.append(dict(step=step, nll=nll.item(), dev=deviation(model).clone(),
-                              W_context=model.attention.W_context.norm().item() if model.attention is not None else 0.0))
+                              W_context=(sum(b.attention.W_context.norm().item() for b in model.blocks)
+                                         if isinstance(model, BlockModel) else
+                                         model.attention.W_context.norm().item() if model.attention is not None else 0.0)))
+        if callback is not None and every and step % every == 0:
+            callback(step, model, nll.item())
         if step == steps:
             break
         opt.zero_grad()                                    # onceki adimin gradyanlarini sil
         total.backward()                                   # her ogrenilen sayi x icin ∂kayip/∂x (zincir kurali, otomatik)
+        if grad_clip is not None:                          # butun gradyanlarin toplam boyu > grad_clip ise olcekle indir
+            torch.nn.utils.clip_grad_norm_(params, grad_clip)
         opt.step()                                         # Adam: x <- x - lr · m / (√v + eps); m, v gradyanin
                                                            # yuruyen ortalamasi ve karesininki (her sayi kendi adimini atar)
     return model, curve
@@ -142,11 +174,13 @@ def questions(data, cls):
 @torch.no_grad()
 def read_questions(model, qs, vocab):
     """'?' konumunda: tahmin edilen ilk token, attention agirliklari ve getirilen c (attention yoksa None)."""
+    device = model.tokens.fixed_points.device
     ids, mask = pad([q[0] for q in qs], vocab)
+    ids, mask = ids.to(device), mask.to(device)
     last = mask.sum(1) - 1
-    rows = torch.arange(len(qs))
+    rows = torch.arange(len(qs), device=device)
     pred = model.logits(ids)[rows, last].argmax(-1)
-    if model.attention is None:
+    if getattr(model, "attention", None) is None:
         return pred, None, None
     x = model.tokens.points()[ids]
     return pred, model.attention.weights(x)[rows, last], model.attention(x)[rows, last]
@@ -157,8 +191,57 @@ def answer(model, prompt, vocab, k=2):
     """Acgozlu k token."""
     ids = list(prompt)
     for _ in range(k):
-        ids.append(int(model.logits(torch.tensor([ids]))[0, -1].argmax()))
+        ids.append(int(model.logits(torch.tensor([ids], device=model.tokens.fixed_points.device))[0, -1].argmax()))
     return " ".join(vocab[i] for i in ids[len(prompt):])
+
+
+# ---- adim 4: ara adimli cevaplar ("<steps>"); cumle 8 token: X1 X2 's r is Y1 Y2 .
+
+@torch.no_grad()
+def generate(model, prompts, n):
+    """Acgozlu uretim: ayni uzunluktaki istemler birlikte, her birine n token.  -> id listeleri (yalniz uretilen)."""
+    device = model.tokens.fixed_points.device
+    out = [None] * len(prompts)
+    groups = {}
+    for i, p in enumerate(prompts):
+        groups.setdefault(len(p), []).append(i)
+    for idx in groups.values():
+        ids = torch.tensor([prompts[i] for i in idx], device=device)
+        for _ in range(n):
+            ids = torch.cat([ids, model.logits(ids)[:, -1].argmax(-1, keepdim=True)], 1)
+        for row, i in zip(ids[:, ids.shape[1] - n:].tolist(), idx):
+            out[i] = row
+    return out
+
+
+def score_steps(said, entry):
+    """Ara adimli cevap (token listesi, 8 x adim): birebir; bicim (her cumle 'A B 's r_i is C D .', r_i sorudaki);
+    ozne (ilk cumlenin oznesi); kopru (ilk cumlenin nesnesi); son cevap (son cumlenin nesnesi)."""
+    want, path = entry["steps"], entry["path"]
+    form = all(said[8 * i + 2] == "'s" and said[8 * i + 3] == r and said[8 * i + 4] == "is" and said[8 * i + 7] == "."
+               for i, r in enumerate(path))
+    return dict(exact=said == want, form=form, subject=said[0:2] == want[0:2], bridge=said[5:7] == want[5:7],
+                final=said[-3:-1] == want[-3:-1])
+
+
+def exam_steps(model, data, cls, given=0):
+    """<steps> sinifi: model cevabi yazar; given > 0 ise dogru cevabin ilk given token'i verilir (2: ozne, 8: ilk cumle).
+    -> (sayimlar, [(soru, modelin yazdigi, dogrusu)])."""
+    vocab = data["vocab"]
+    ix = {w: i for i, w in enumerate(vocab)}
+    counts = dict(exact=0, form=0, subject=0, bridge=0, final=0)
+    rows = []
+    by_hops = {}
+    for q in questions(data, cls):
+        by_hops.setdefault(len(q[2]["path"]), []).append(q)
+    for hops, group in by_hops.items():
+        gens = generate(model, [q[0] + [ix[t] for t in q[2]["steps"][:given]] for q in group], 8 * hops - given)
+        for q, g in zip(group, gens):
+            said = q[2]["steps"][:given] + [vocab[t] for t in g]
+            for k, v in score_steps(said, q[2]).items():
+                counts[k] += v
+            rows.append((data_20.detokenize(q[2]["prompt"]), data_20.detokenize(said), data_20.detokenize(q[2]["steps"])))
+    return counts, rows
 
 
 def report_step2(results, data):
@@ -219,6 +302,75 @@ def report_step2(results, data):
     return "\n".join(out)
 
 
+def report_step3(results, data):
+    vocab = data["vocab"]
+    ix = {w: i for i, w in enumerate(vocab)}
+    people, rel = data["people"], data["rel"]
+    firsts = torch.tensor(sorted({ix[p["first"]] for p in people.values()}))
+    m0 = results["shared"][0]
+    out = ["ADIM 3  veri iz %s  cumle %d  TURNS %d  FACT_UNITS %d  scale %.3f" % (
+        data["fingerprint"], len(data["train"]), m0.turns, m0.blocks[0].facts.W_fact_in.shape[0], m0.scale), ""]
+    out.append("ayar           " + "  ".join("%10s" % ("adim %d" % c["step"]) for c in results["step2"][1]))
+    for name, (model, curve) in results.items():
+        out.append("%-13s  " % name + "  ".join("%10s" % ("%.3f" % c["nll"]) for c in curve) + "   nll")
+        out.append("%-13s  " % "" + "  ".join("%10s" % ("%.1f°" % float(c["dev"].mean())) for c in curve) + "   ort. sapma")
+        out.append("%-13s  " % "" + "  ".join("%10s" % ("%.1f" % c["W_context"]) for c in curve) + "   |W_context|")
+
+    out += ["", "ILK TOKEN DOGRULUGU ('?'ten sonra, dogru cevaplardan birinin adi)"]
+    out.append("  %-15s %5s   %s" % ("sinif", "soru", "  ".join("%13s" % k for k in results)))
+    for cls in ("memory_base", "memory_derived", "chain2", "named2", "chain3", "named3"):
+        qs = questions(data, cls)
+        accs = []
+        for model, _ in results.values():
+            pred = read_questions(model, qs, vocab)[0]
+            accs.append(sum(int(p) in q[1] for p, q in zip(pred.tolist(), qs)) / len(qs))
+        out.append("  %-15s %5d   %s" % (cls, len(qs), "  ".join("%13.3f" % a for a in accs)))
+
+    qs1 = questions(data, "memory_base")
+    out += ["", "1R ILISKIYE GORE (memory_base)"]
+    for r in data_20.BASE:
+        sub = [q for q in qs1 if q[2]["path"] == (r,)]
+        accs = []
+        for model, _ in results.values():
+            pred = read_questions(model, sub, vocab)[0]
+            accs.append(sum(int(p) in q[1] for p, q in zip(pred.tolist(), sub)) / len(sub))
+        out.append("  %-9s %4d   %s" % (r, len(sub), "  ".join("%13.3f" % a for a in accs)))
+
+    # kopru: 2R istemi <eos> Who is X1 X2 's r1 's r2 ?  ->  ozne adi 3, r1 konumu 6, r2 konumu 8, '?' 9
+    out += ["", "KOPRU OKUMASI (2R zincir sorulari; kopru = oznenin r1'i; 48 ilk ad icinde en yakin)",
+            "  %-13s %-15s %5s  %19s  %19s   %s" % ("ayar", "sinif", "soru", "tur1 durum = kopru", "tur1 olgu = kopru",
+                                                 "'?' tur2 bakisi: ozne / r1 / r2")]
+    with torch.no_grad():
+        for cls in ("memory_derived", "chain2"):
+            qs = [q for q in questions(data, cls) if len(q[2]["path"]) == 2]
+            ids, _ = pad([q[0] for q in qs], vocab)
+            bridge = torch.tensor([ix[people[data_20.follow(rel, q[2]["subject"], q[2]["path"][:1])[0]]["first"]] for q in qs])
+            for name, (model, _) in results.items():
+                if not isinstance(model, BlockModel):
+                    continue
+                P = model.tokens.points()
+                hs = model.hidden(ids)
+                blocks = model.turn_blocks()
+                mid = torch.nn.functional.normalize(hs[0] + blocks[0].attention(hs[0]) @ blocks[0].attention.W_context.T, dim=-1)
+                fact = torch.nn.functional.normalize(blocks[0].facts(mid)[:, 6], dim=-1)
+                state = hs[1][:, 6]
+                top_state = firsts[(state @ P[firsts].T).argmax(-1)]
+                top_fact = firsts[(fact @ P[firsts].T).argmax(-1)]
+                w = blocks[1].attention.weights(hs[1])[:, 9]
+                out.append("  %-13s %-15s %5d  %19.2f  %19.2f   %.2f / %.2f / %.2f" % (
+                    name, cls, len(qs), float((top_state == bridge).float().mean()), float((top_fact == bridge).float().mean()),
+                    float(w[:, 3].mean()), float(w[:, 6].mean()), float(w[:, 8].mean())))
+
+    out += ["", "NITEL (acgozlu 2 token)"]
+    samples = [q for q in questions(data, "memory_base") if q[2]["subject"] == "Owen Evans"][:2]
+    samples += [q for q in questions(data, "chain2") if q[2]["subject"] == "Owen Evans"][:4]
+    samples += [q for q in questions(data, "memory_derived") if q[2]["subject"] == "Alice Smith" and len(q[2]["path"]) == 2][:2]
+    for prompt, _, e in samples:
+        answers = "  ".join("%s: %-14s" % (name, answer(model, prompt, vocab)) for name, (model, _) in results.items())
+        out.append("  %-44s dogru: %-14s %s" % (data_20.detokenize(e["prompt"]), " | ".join(e["answers"]), answers))
+    return "\n".join(out)
+
+
 if __name__ == "__main__":
     torch.set_num_threads(1)
     data = data_20.build()
@@ -233,6 +385,16 @@ if __name__ == "__main__":
             print("%s %.1f sn" % (name, time.time() - t0), flush=True)
         print()
         print(report_step2(results, data))
+        sys.exit(0)
+    if "--step3" in sys.argv:
+        ids, mask = sequences(data)
+        results = {}
+        for name in ["step2"] + list(STEP3):
+            t0 = time.time()
+            results[name] = train_seq(name, ids, mask, n)
+            print("%s %.1f sn" % (name, time.time() - t0), flush=True)
+        print()
+        print(report_step3(results, data))
         sys.exit(0)
     inputs, targets = token_pairs(data)
     results = {}

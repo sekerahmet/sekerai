@@ -136,6 +136,17 @@ tr:last-child td { border-bottom: 0; }
 .kv code { font-size: 13px; }
 .muted { color: var(--muted); }
 a { color: var(--w); }
+svg .frame1 { fill: var(--pl-tint); fill-opacity: .3; stroke: var(--pl); stroke-width: 1.4; }
+svg .frame2 { fill: var(--w-tint); fill-opacity: .3; stroke: var(--w); stroke-width: 1.4; }
+svg .framelbl { font-family: var(--mono); font-size: 12px; font-weight: 600; letter-spacing: .06em; }
+svg .framelbl.f1 { fill: var(--pl); } svg .framelbl.f2 { fill: var(--w); }
+svg .frame3 { fill: var(--anchor-tint); fill-opacity: .25; stroke: var(--anchor); stroke-width: 1.4; stroke-dasharray: 6 4; }
+svg .framelbl.f3 { fill: var(--anchor); }
+svg .box.an { fill: var(--anchor-tint); stroke: var(--anchor); }
+svg .carry { stroke: var(--line); stroke-width: 1.2; fill: none; }
+svg .readarrow { stroke: var(--w); stroke-width: 2; fill: none; }
+svg .trap { stroke: var(--bad); stroke-width: 1.6; stroke-dasharray: 5 4; fill: none; }
+svg .arrowhead-bad { fill: var(--bad); }
 {{EXTRA_CSS}}
 </style>
 
@@ -154,113 +165,202 @@ a { color: var(--w); }
     <li class="done"><a href="#adim0"><b>Adım 0 · tamam</b><span>Veri: sekiz aile</span></a></li>
     <li class="done"><a href="#adim1"><b>Adım 1 · tamam</b><span>Token noktaları + sonraki ilişkisi</span></a></li>
     <li class="done"><a href="#adim2"><b>Adım 2 · tamam</b><span>Geriye bakan parça: attention</span></a></li>
-    <li class="next"><a href="#adim3"><b>Adım 3 · sırada</b><span>Köprü için yer</span></a></li>
+    <li class="next"><a href="#adim3"><b>Adım 3 · öneri</b><span>Köprü için yer</span></a></li>
   </ol>
 </nav>
 
 <!-- ============================== TUM RESIM ============================== -->
 <section class="step" id="tum">
   <div class="stephead">
-    <div class="eyebrow">tüm resim · Adım 1 + Adım 2 · 21.120 öğrenilen sayı</div>
-    <h2>Şu anki model, birleşik</h2>
-    <p>Adımlarda eklenen parçaların hepsi bir arada. Cümlenin her konumunda aynı hesap yapılır; her konum yalnız kendisine ve öncekilere bakar, ardından gelecek token'ı tahmin eder.</p>
+    <div class="eyebrow">tüm resim · Adım 1 + 2 + 3 · 50.048 öğrenilen sayı</div>
+    <h2>Şu anki model</h2>
+    <p>Her konumun bir durumu var; durum token'ın noktasıyla başlar. Aynı Block iki tur uygulanır: attention önceki konumların durumlarını okuyup duruma yazar, FactUnits durumu dönüştürür. Son durum doğrudan token noktalarıyla karşılaştırılır. Her konum yalnız kendisine ve öncekilere bakar.</p>
   </div>
 
+  <div class="part">
+    <h3>Adım 3 dahil, bugünkü model</h3>
+    <figure>
+      <div class="draw">
+        <svg viewBox="0 0 900 560" role="img" aria-label="Şu anki model. Giriş Adım 1'deki gibi: token PL noktasına gider ve her konumun durumu h, PL ile başlar. Adım 3 bloğu: attention önceki konumların durumlarına bakar, getirdiğini W_context ile duruma yazar, sonra FactUnits durumu dönüştürür; aynı Block iki tur tekrar eder. Son turdan sonra durum doğrudan PL noktalarıyla karşılaştırılır ve sonraki token tahmin edilir (W_next yok).">
+          <defs>
+            <marker id="p1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrowhead"/></marker>
+          </defs>
+          <rect class="frame1" x="10" y="10" width="880" height="96" rx="6"/>
+          <text class="framelbl f1" x="22" y="30">ADIM 1 · giriş</text>
+          <rect class="frame3" x="10" y="126" width="880" height="294" rx="6"/>
+          <text class="framelbl f3" x="22" y="146">ADIM 3 · Block (shared, 2 tur)</text>
+          <rect class="frame2" x="232" y="156" width="326" height="234" rx="6"/>
+          <text class="framelbl f2" x="244" y="174">attention · Adım 2</text>
+          <rect class="frame1" x="10" y="440" width="880" height="110" rx="6"/>
+          <text class="framelbl f1" x="22" y="460">ADIM 1 · çıkış</text>
+
+          <rect class="box" x="40" y="44" width="120" height="44" rx="3"/>
+          <text class="lbl" x="100" y="63" text-anchor="middle">token</text>
+          <text class="sub" x="100" y="79" text-anchor="middle">konum t</text>
+          <rect class="box pl" x="200" y="44" width="200" height="44" rx="3"/>
+          <text class="lbl" x="300" y="63" text-anchor="middle">PL = norm(PF + Δ)</text>
+          <text class="sub" x="300" y="79" text-anchor="middle">Adım 1'deki gibi</text>
+
+          <rect class="box an" x="40" y="238" width="170" height="56" rx="3"/>
+          <text class="lbl" x="125" y="261" text-anchor="middle">durum h</text>
+          <text class="sub" x="125" y="279" text-anchor="middle">her konumda; başta h = PL</text>
+
+          <rect class="box w" x="250" y="184" width="160" height="44" rx="3"/>
+          <text class="lbl" x="330" y="203" text-anchor="middle">q_t</text>
+          <text class="sub" x="330" y="219" text-anchor="middle">norm(W_query · h_t)</text>
+          <rect class="box w" x="250" y="244" width="160" height="44" rx="3"/>
+          <text class="lbl" x="330" y="263" text-anchor="middle">k_j (j ≤ t)</text>
+          <text class="sub" x="330" y="279" text-anchor="middle">norm(W_key · h_j)</text>
+          <rect class="box" x="425" y="212" width="125" height="60" rx="3"/>
+          <text class="lbl" x="487" y="235" text-anchor="middle">a_tj</text>
+          <text class="sub" x="487" y="252" text-anchor="middle">softmax(⟨q, k⟩)</text>
+          <text class="sub" x="487" y="265" text-anchor="middle">10,83 ölçekli</text>
+          <rect class="box" x="250" y="316" width="300" height="56" rx="3"/>
+          <text class="lbl" x="400" y="338" text-anchor="middle">c_t = Σ a_tj · h_j</text>
+          <text class="sub" x="400" y="356" text-anchor="middle">durumların kendisi getirilir (V matrisi yok)</text>
+
+          <rect class="box w" x="600" y="184" width="270" height="48" rx="3"/>
+          <text class="lbl" x="735" y="204" text-anchor="middle">topla: h ← norm(h + W_context · c)</text>
+          <text class="sub" x="735" y="222" text-anchor="middle">okunan artık DURUMA yazılıyor</text>
+          <rect class="box an" x="600" y="262" width="270" height="62" rx="3"/>
+          <text class="lbl" x="735" y="282" text-anchor="middle">FactUnits: h ← norm(h + olgu(h))</text>
+          <text class="sub" x="735" y="300" text-anchor="middle">256 birim · iki bilgi birlikteyse yanar (VE gibi)</text>
+          <text class="sub" x="735" y="314" text-anchor="middle">olgu(h) = W_fact_out · ReLU(W_fact_in·h − eşik)</text>
+
+          <rect class="box w" x="200" y="476" width="220" height="48" rx="3"/>
+          <text class="lbl" x="310" y="496" text-anchor="middle">çıkış: h_son (W_next yok)</text>
+          <text class="sub" x="310" y="514" text-anchor="middle">ölçüldü, kullanıcı kararıyla kaldırıldı</text>
+          <rect class="box" x="470" y="476" width="390" height="48" rx="3"/>
+          <text class="lbl" x="665" y="496" text-anchor="middle">8,886 · ⟨h_son, PL⟩ → softmax</text>
+          <text class="sub" x="665" y="514" text-anchor="middle">sonraki token</text>
+
+          <line class="flow" x1="160" y1="66" x2="198" y2="66" marker-end="url(#p1)"/>
+          <line class="flow" x1="300" y1="88" x2="142" y2="236" marker-end="url(#p1)"/>
+          <text class="sub" x="276" y="117">h = PL</text>
+          <line class="flow" x1="210" y1="256" x2="248" y2="210" marker-end="url(#p1)"/>
+          <line class="flow" x1="210" y1="272" x2="248" y2="266" marker-end="url(#p1)"/>
+          <line class="flow" x1="410" y1="206" x2="423" y2="230" marker-end="url(#p1)"/>
+          <line class="flow" x1="410" y1="266" x2="423" y2="254" marker-end="url(#p1)"/>
+          <line class="flow" x1="487" y1="272" x2="487" y2="314" marker-end="url(#p1)"/>
+          <polyline class="flow" points="550,344 578,344 578,208 598,208" marker-end="url(#p1)"/>
+          <line class="flow" x1="735" y1="232" x2="735" y2="260" marker-end="url(#p1)"/>
+          <polyline class="flow" points="735,324 735,402 125,402 125,296" marker-end="url(#p1)"/>
+          <text class="sub" x="430" y="415" text-anchor="middle">×2 tur (TURNS) · her turda aynı Block (shared)</text>
+          <polyline class="flow" points="40,280 26,280 26,500 198,500" marker-end="url(#p1)"/>
+          <line class="flow" x1="420" y1="500" x2="468" y2="500" marker-end="url(#p1)"/>
+        </svg>
+      </div>
+      <figcaption>Yeşil çerçeveler Adım 1, lacivert Adım 2 (attention), kesikli kehribar çerçeve Adım 3. Kehribar kutular Adım 3'te gelenler: durum ve FactUnits. Adım 2'ye göre değişen iki şey: attention noktaları değil durumları okuyor ve okuduğunu sonuca değil duruma yazıyor. W_next yok: son durum doğrudan PL noktalarıyla karşılaştırılıyor (3 tohumda ölçüldü, kullanıcı kararıyla kaldırıldı). Ayrı bir V (W_value) matrisi yok: W_context ile çarpımı tek bir matrise eşitti.</figcaption>
+    </figure>
+  </div>
+
+  <div class="part">
+    <h3>Önceki model: Adım 1 + Adım 2</h3>
+    <p class="muted" style="font-size:14px">Adım 3'ten önceki hâl. Bugünkü modelde W_next ve "kendi payı" kolu yok; attention noktaları değil durumları okuyor.</p>
   <figure>
     <div class="draw">
-      <svg viewBox="0 0 960 395" role="img" aria-label="Birleşik mimari: cümledeki her konumun token'ı PF ve Δ'dan hesaplanan PL noktasına gider. PL'den W_query ile soru, önceki konumların PL'lerinden W_key ile etiket hesaplanır; ağırlıklar önceki noktaları karıştırır. Karışım W_context ile, konumun kendi noktası W_next ile toplanır, normalize edilip 74 token noktasıyla karşılaştırılır ve sonraki token olasılıkları çıkar. Adım 3 için köprünün tutulacağı yer boş.">
+      <svg viewBox="0 0 980 500" role="img" aria-label="Birleşik mimari, iki çerçeve. Adım 1 çerçevesi: PF ve Δ'dan PL noktası, W_next ile kendi payı, toplama ve sonraki token tahmini. Adım 2 çerçevesi, attention: PL'den W_query ile soru, önceki konumların PL'lerinden W_key ile etiket, ağırlıklar, getirilen karışım ve W_context ile okunanın payı. İki çerçeve PL'den attention'a giden ve W_context'ten toplamaya dönen oklarla bağlı. Adım 3 için köprünün yeri boş.">
         <defs>
           <marker id="t1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrowhead"/></marker>
         </defs>
-        <rect class="box read" x="10" y="20" width="100" height="44" rx="3"/>
-        <text class="lbl" x="60" y="39" text-anchor="middle">okuma</text>
-        <text class="sub" x="60" y="55" text-anchor="middle">hesaba girmez</text>
+        <!-- cerceveler -->
+        <rect class="frame1" x="130" y="10" width="250" height="482" rx="6"/>
+        <text class="framelbl f1" x="142" y="30">ADIM 1 · noktalar ve tahmin</text>
+        <rect class="frame2" x="400" y="110" width="572" height="242" rx="6"/>
+        <text class="framelbl f2" x="412" y="130">ADIM 2 · attention</text>
 
-        <rect class="box pf" x="130" y="20" width="100" height="44" rx="3"/>
-        <text class="lbl" x="180" y="39" text-anchor="middle">PF</text>
-        <text class="sub" x="180" y="55" text-anchor="middle">sabit · adım 1</text>
-        <rect class="box pl" x="240" y="20" width="100" height="44" rx="3"/>
-        <text class="lbl" x="290" y="39" text-anchor="middle">Δ (shift)</text>
-        <text class="sub" x="290" y="55" text-anchor="middle">öğrenilir · adım 1</text>
-
+        <!-- disarida -->
+        <rect class="box read" x="10" y="30" width="100" height="44" rx="3"/>
+        <text class="lbl" x="60" y="49" text-anchor="middle">okuma</text>
+        <text class="sub" x="60" y="65" text-anchor="middle">hesaba girmez</text>
         <rect class="box" x="10" y="150" width="100" height="44" rx="3"/>
         <text class="lbl" x="60" y="169" text-anchor="middle">token</text>
         <text class="sub" x="60" y="185" text-anchor="middle">cümlede konum t</text>
-        <rect class="box pl" x="160" y="150" width="150" height="44" rx="3"/>
-        <text class="lbl" x="235" y="169" text-anchor="middle">PL = norm(PF+Δ)</text>
-        <text class="sub" x="235" y="185" text-anchor="middle">modelin kullandığı · adım 1</text>
+        <rect class="box read" x="790" y="20" width="170" height="56" rx="3" style="stroke:var(--anchor)"/>
+        <text class="lbl" x="875" y="42" text-anchor="middle" style="fill:var(--anchor)">Adım 3 · eklendi</text>
+        <text class="sub" x="875" y="60" text-anchor="middle">yukarıdaki model</text>
 
-        <rect class="box w" x="350" y="80" width="120" height="44" rx="3"/>
-        <text class="lbl" x="410" y="99" text-anchor="middle">W_query</text>
-        <text class="sub" x="410" y="115" text-anchor="middle">ne arıyorum · adım 2</text>
-        <rect class="box w" x="350" y="150" width="120" height="44" rx="3"/>
-        <text class="lbl" x="410" y="169" text-anchor="middle">W_key</text>
-        <text class="sub" x="410" y="185" text-anchor="middle">bende ne var · adım 2</text>
-        <rect class="box" x="495" y="80" width="90" height="44" rx="3"/>
-        <text class="lbl" x="540" y="99" text-anchor="middle">q_t</text>
-        <text class="sub" x="540" y="115" text-anchor="middle">ara sonuç</text>
-        <rect class="box" x="495" y="150" width="90" height="44" rx="3"/>
-        <text class="lbl" x="540" y="169" text-anchor="middle">k_j (j ≤ t)</text>
-        <text class="sub" x="540" y="185" text-anchor="middle">ara sonuç</text>
+        <!-- adim 1 -->
+        <rect class="box pf" x="145" y="44" width="110" height="44" rx="3"/>
+        <text class="lbl" x="200" y="63" text-anchor="middle">PF</text>
+        <text class="sub" x="200" y="79" text-anchor="middle">sabit</text>
+        <rect class="box pl" x="265" y="44" width="105" height="44" rx="3"/>
+        <text class="lbl" x="317" y="63" text-anchor="middle">Δ (shift)</text>
+        <text class="sub" x="317" y="79" text-anchor="middle">öğrenilir</text>
+        <rect class="box pl" x="165" y="150" width="190" height="44" rx="3"/>
+        <text class="lbl" x="260" y="169" text-anchor="middle">PL = norm(PF+Δ)</text>
+        <text class="sub" x="260" y="185" text-anchor="middle">modelin kullandığı</text>
+        <rect class="box w" x="165" y="290" width="190" height="44" rx="3"/>
+        <text class="lbl" x="260" y="309" text-anchor="middle">W_next · PL_t</text>
+        <text class="sub" x="260" y="325" text-anchor="middle">kendi payı</text>
+        <circle class="plus" cx="260" cy="390" r="16"/>
+        <text class="lbl" x="260" y="395" text-anchor="middle">+</text>
+        <rect class="box" x="145" y="430" width="225" height="50" rx="3"/>
+        <text class="lbl" x="257" y="450" text-anchor="middle">norm(raw) · 8,886 · ⟨ , PL⟩</text>
+        <text class="sub" x="257" y="468" text-anchor="middle">softmax → sonraki token</text>
 
-        <rect class="box" x="610" y="110" width="150" height="60" rx="3"/>
-        <text class="lbl" x="685" y="133" text-anchor="middle">a_tj</text>
-        <text class="sub" x="685" y="150" text-anchor="middle">softmax(10,83·⟨q,k⟩)</text>
-        <text class="sub" x="685" y="164" text-anchor="middle">adım 2</text>
-        <rect class="box" x="790" y="110" width="160" height="60" rx="3"/>
-        <text class="lbl" x="870" y="133" text-anchor="middle">c_t = Σ a_tj·PL_j</text>
-        <text class="sub" x="870" y="150" text-anchor="middle">getirilen karışım</text>
-        <text class="sub" x="870" y="164" text-anchor="middle">adım 2</text>
+        <!-- adim 2 -->
+        <rect class="box w" x="415" y="140" width="120" height="44" rx="3"/>
+        <text class="lbl" x="475" y="159" text-anchor="middle">W_query</text>
+        <text class="sub" x="475" y="175" text-anchor="middle">ne arıyorum</text>
+        <rect class="box w" x="415" y="210" width="120" height="44" rx="3"/>
+        <text class="lbl" x="475" y="229" text-anchor="middle">W_key</text>
+        <text class="sub" x="475" y="245" text-anchor="middle">bende ne var</text>
+        <rect class="box" x="560" y="140" width="90" height="44" rx="3"/>
+        <text class="lbl" x="605" y="159" text-anchor="middle">q_t</text>
+        <text class="sub" x="605" y="175" text-anchor="middle">ara sonuç</text>
+        <rect class="box" x="560" y="210" width="90" height="44" rx="3"/>
+        <text class="lbl" x="605" y="229" text-anchor="middle">k_j (j ≤ t)</text>
+        <text class="sub" x="605" y="245" text-anchor="middle">ara sonuç</text>
+        <rect class="box" x="675" y="165" width="140" height="64" rx="3"/>
+        <text class="lbl" x="745" y="190" text-anchor="middle">a_tj</text>
+        <text class="sub" x="745" y="208" text-anchor="middle">softmax(10,83·⟨q,k⟩)</text>
+        <rect class="box" x="830" y="165" width="132" height="64" rx="3"/>
+        <text class="lbl" x="896" y="190" text-anchor="middle">c_t = Σ a_tj·PL_j</text>
+        <text class="sub" x="896" y="208" text-anchor="middle">getirilen karışım</text>
+        <rect class="box w" x="790" y="285" width="172" height="44" rx="3"/>
+        <text class="lbl" x="876" y="304" text-anchor="middle">W_context · c_t</text>
+        <text class="sub" x="876" y="320" text-anchor="middle">okunanın payı, 0'dan</text>
 
-        <rect class="box read" x="790" y="14" width="160" height="56" rx="3" style="stroke:var(--anchor)"/>
-        <text class="lbl" x="870" y="36" text-anchor="middle" style="fill:var(--anchor)">Adım 3 · sırada</text>
-        <text class="sub" x="870" y="54" text-anchor="middle">köprü için yer?</text>
-
-        <rect class="box w" x="160" y="270" width="170" height="44" rx="3"/>
-        <text class="lbl" x="245" y="289" text-anchor="middle">W_next · PL_t</text>
-        <text class="sub" x="245" y="305" text-anchor="middle">kendi payı · adım 1</text>
-        <rect class="box w" x="780" y="270" width="170" height="44" rx="3"/>
-        <text class="lbl" x="865" y="289" text-anchor="middle">W_context · c_t</text>
-        <text class="sub" x="865" y="305" text-anchor="middle">okunanın payı · adım 2</text>
-        <circle class="plus" cx="560" cy="292" r="16"/>
-        <text class="lbl" x="560" y="297" text-anchor="middle">+</text>
-        <rect class="box" x="410" y="338" width="300" height="48" rx="3"/>
-        <text class="lbl" x="560" y="357" text-anchor="middle">norm(raw) · 8,886 · ⟨ , PL_token⟩</text>
-        <text class="sub" x="560" y="375" text-anchor="middle">softmax → sonraki token · adım 1</text>
-
-        <line class="dash" x1="130" y1="42" x2="112" y2="42" marker-end="url(#t1)"/>
-        <line class="flow" x1="110" y1="172" x2="158" y2="172" marker-end="url(#t1)"/>
-        <line class="flow" x1="180" y1="64" x2="215" y2="148" marker-end="url(#t1)"/>
-        <line class="flow" x1="290" y1="64" x2="255" y2="148" marker-end="url(#t1)"/>
-        <line class="flow" x1="310" y1="162" x2="348" y2="112" marker-end="url(#t1)"/>
-        <line class="flow" x1="310" y1="172" x2="348" y2="172" marker-end="url(#t1)"/>
-        <line class="flow" x1="470" y1="102" x2="493" y2="102" marker-end="url(#t1)"/>
-        <line class="flow" x1="470" y1="172" x2="493" y2="172" marker-end="url(#t1)"/>
-        <line class="flow" x1="585" y1="102" x2="608" y2="125" marker-end="url(#t1)"/>
-        <line class="flow" x1="585" y1="172" x2="608" y2="155" marker-end="url(#t1)"/>
-        <line class="flow" x1="760" y1="140" x2="788" y2="140" marker-end="url(#t1)"/>
-        <polyline class="dash" points="235,194 235,222 830,222 830,172" marker-end="url(#t1)"/>
-        <text class="sub" x="530" y="216" text-anchor="middle">PL_j: getirilen şey önceki noktaların kendisi</text>
-        <line class="dash" x1="870" y1="110" x2="870" y2="72" marker-end="url(#t1)"/>
-        <line class="flow" x1="190" y1="194" x2="190" y2="268" marker-end="url(#t1)"/>
-        <line class="flow" x1="910" y1="170" x2="910" y2="268" marker-end="url(#t1)"/>
-        <line class="flow" x1="330" y1="292" x2="542" y2="292" marker-end="url(#t1)"/>
-        <line class="flow" x1="780" y1="292" x2="578" y2="292" marker-end="url(#t1)"/>
-        <line class="flow" x1="560" y1="308" x2="560" y2="336" marker-end="url(#t1)"/>
+        <!-- oklar -->
+        <line class="dash" x1="145" y1="62" x2="112" y2="54" marker-end="url(#t1)"/>
+        <line class="flow" x1="110" y1="172" x2="163" y2="172" marker-end="url(#t1)"/>
+        <line class="flow" x1="200" y1="88" x2="238" y2="148" marker-end="url(#t1)"/>
+        <line class="flow" x1="317" y1="88" x2="285" y2="148" marker-end="url(#t1)"/>
+        <line class="flow" x1="355" y1="162" x2="413" y2="162" marker-end="url(#t1)"/>
+        <line class="flow" x1="355" y1="182" x2="413" y2="226" marker-end="url(#t1)"/>
+        <line class="flow" x1="535" y1="162" x2="558" y2="162" marker-end="url(#t1)"/>
+        <line class="flow" x1="535" y1="232" x2="558" y2="232" marker-end="url(#t1)"/>
+        <line class="flow" x1="650" y1="162" x2="673" y2="184" marker-end="url(#t1)"/>
+        <line class="flow" x1="650" y1="232" x2="673" y2="212" marker-end="url(#t1)"/>
+        <line class="flow" x1="815" y1="197" x2="828" y2="197" marker-end="url(#t1)"/>
+        <polyline class="dash" points="300,194 300,270 860,270 860,231" marker-end="url(#t1)"/>
+        <text class="sub" x="580" y="264" text-anchor="middle">PL_j: getirilen şey önceki noktaların kendisi</text>
+        <line class="dash" x1="896" y1="165" x2="896" y2="78" marker-end="url(#t1)"/>
+        <line class="flow" x1="930" y1="229" x2="930" y2="283" marker-end="url(#t1)"/>
+        <line class="flow" x1="230" y1="194" x2="230" y2="288" marker-end="url(#t1)"/>
+        <line class="flow" x1="260" y1="334" x2="260" y2="372" marker-end="url(#t1)"/>
+        <polyline class="flow" points="876,329 876,390 278,390" marker-end="url(#t1)"/>
+        <text class="sub" x="580" y="384" text-anchor="middle">okunanın payı</text>
+        <line class="flow" x1="260" y1="406" x2="260" y2="428" marker-end="url(#t1)"/>
       </svg>
     </div>
-    <figcaption>Kutuların rengi kavramı gösteriyor: gri PF, yeşil noktalar, lacivert matrisler. Her kutuda hangi adımda eklendiği yazılı. Kesikli oklar: okumanın PF'yi kullanması, attention'ın önceki noktaları getirmesi ve Adım 3'ün yeri (köprü, getirilenin bir konumun durumuna yazılması).</figcaption>
+    <figcaption>Sol çerçeve Adım 1, sağ çerçeve Adım 2 (attention). İki çerçeve yalnız iki okla bağlı: PL'den attention'a giden ve W_context'ten toplamaya dönen. Kutuların rengi kavramı gösteriyor: gri PF, yeşil noktalar, lacivert matrisler. Kesikli oklar: okumanın PF'yi kullanması, attention'ın önceki noktaları getirmesi ve Adım 3'ün yeri.</figcaption>
   </figure>
+  </div>
+
 
   <div class="part">
     <h3>Hesap, baştan sona</h3>
     <div class="formula">1  <span class="pl">PL</span>_i  = norm(<span class="pf">PF</span>_i + <span class="pl">Δ</span>_i)                        <span class="c">her token · adım 1</span>
-2  <span class="w">q_t</span>   = norm(<span class="w">W_query</span> · <span class="pl">PL</span>_t)   <span class="w">k_j</span> = norm(<span class="w">W_key</span> · <span class="pl">PL</span>_j)   <span class="c">adım 2</span>
-3  a_tj  = softmax_{j≤t}(10,83 · ⟨<span class="w">q_t</span>, <span class="w">k_j</span>⟩)             <span class="c">t'nin j'ye bakma ağırlığı · adım 2</span>
-4  c_t   = Σ_j a_tj · <span class="pl">PL</span>_j                           <span class="c">getirilen · adım 2</span>
-5  raw_t = <span class="w">W_next</span> · <span class="pl">PL</span>_t + <span class="w">W_context</span> · c_t         <span class="c">kendi payı + okunanın payı</span>
-6  p(sonraki = token) = softmax(8,886 · ⟨norm(raw_t), <span class="pl">PL</span>_token⟩)   <span class="c">adım 1</span>
-7  kayıp = ortalama(−log p(doğru sonraki)) + <span class="an">1e-3</span> · Σ Δ²   <span class="c">eğitim · adım 1</span></div>
+2  <span class="an">h</span>_t   = <span class="pl">PL</span>_t                                       <span class="c">durum başlar · adım 3</span>
+   <span class="c">her turda (2 tur, aynı Block):</span>
+3  <span class="w">q_t</span>   = norm(<span class="w">W_query</span> · <span class="an">h</span>_t)   <span class="w">k_j</span> = norm(<span class="w">W_key</span> · <span class="an">h</span>_j)     <span class="c">adım 2</span>
+4  a_tj  = softmax_{j≤t}(10,83 · ⟨<span class="w">q_t</span>, <span class="w">k_j</span>⟩)             <span class="c">t'nin j'ye bakma ağırlığı · adım 2</span>
+5  <span class="an">h</span>_t  ← norm(<span class="an">h</span>_t + <span class="w">W_context</span> · Σ_j a_tj · <span class="an">h</span>_j)       <span class="c">okunan duruma yazılır · adım 3</span>
+6  <span class="an">h</span>_t  ← norm(<span class="an">h</span>_t + <span class="w">W_fact_out</span> · ReLU(<span class="w">W_fact_in</span> · <span class="an">h</span>_t − eşik))   <span class="c">FactUnits · adım 3</span>
+7  p(sonraki = token) = softmax(8,886 · ⟨<span class="an">h</span>_t, <span class="pl">PL</span>_token⟩)      <span class="c">W_next yok</span>
+8  kayıp = ortalama(−log p(doğru sonraki)) + <span class="an">1e-3</span> · Σ Δ²   <span class="c">eğitim · adım 1</span></div>
   </div>
 
   <div class="part">
@@ -270,16 +370,34 @@ a { color: var(--w); }
       <tbody>
         <tr><td class="mono pf">fixed_points (PF)</td><td>tablo</td><td class="num">74 × 64</td><td>hayır, hiç değişmez</td><td>1</td><td>PL'nin başlangıcı, okumada referans, çapanın hedefi</td></tr>
         <tr><td class="mono pl">shift (Δ)</td><td>tablo</td><td class="num">74 × 64</td><td>evet</td><td>1</td><td>PF'yi PL'ye kaydırır, her token kendi başına</td></tr>
-        <tr><td class="mono w">W_next</td><td>matris</td><td class="num">64 × 64</td><td>evet</td><td>1</td><td>kendi noktasından sonraki token'ın yönüne</td></tr>
         <tr><td class="mono w">W_query</td><td>matris</td><td class="num">64 × 64</td><td>evet</td><td>2</td><td>ne arıyorum</td></tr>
         <tr><td class="mono w">W_key</td><td>matris</td><td class="num">64 × 64</td><td>evet</td><td>2</td><td>bende ne var</td></tr>
-        <tr><td class="mono w">W_context</td><td>matris</td><td class="num">64 × 64</td><td>evet, 0'dan</td><td>2</td><td>okunanı tahmine çevirir</td></tr>
+        <tr><td class="mono w">W_context</td><td>matris</td><td class="num">64 × 64</td><td>evet, 0'dan</td><td>2</td><td>okunanı duruma yazar</td></tr>
+        <tr><td class="mono w">W_fact_in</td><td>matris</td><td class="num">256 × 64</td><td>evet</td><td>3</td><td>durumdan birimlere: hangi bileşim</td></tr>
+        <tr><td class="mono">fact_threshold</td><td>sayılar</td><td class="num">256</td><td>evet</td><td>3</td><td>her birimin yanma eşiği</td></tr>
+        <tr><td class="mono w">W_fact_out</td><td>matris</td><td class="num">64 × 256</td><td>evet, 0'dan</td><td>3</td><td>birimlerden duruma: ne yazılır</td></tr>
         <tr><td class="mono">scale</td><td>sayı</td><td class="num">8,886</td><td>hayır, formülden</td><td>1</td><td>sonraki token güveni: ln(0,99 · 73 / 0,01)</td></tr>
         <tr><td class="mono">attention ölçeği</td><td>sayı</td><td class="num">10,83</td><td>hayır, formülden</td><td>2</td><td>bakma güveni: ln(0,99 · 511 / 0,01)</td></tr>
         <tr><td class="mono an">ANCHOR (λ)</td><td>sayı</td><td class="num">1e-3</td><td>hayır, deneme</td><td>1</td><td>çapa: kayıp ≤ tavan + 0,01 ölçütüyle seçildi</td></tr>
+        <tr><td class="mono">TURNS</td><td>sayı</td><td class="num">2</td><td>hayır, kullanıcı kararı</td><td>3</td><td>Block kaç tur uygulanır</td></tr>
+        <tr><td class="mono">FACT_UNITS</td><td>sayı</td><td class="num">256</td><td>hayır, 4 × 64</td><td>3</td><td>transformer alışkanlığı, ölçülmedi; 256'nın hepsi kullanılıyor</td></tr>
       </tbody>
     </table></div>
-    <p class="muted" style="font-size:14px">Öğrenilen: Δ 4.736 + dört matris × 4.096 = 21.120 sayı.</p>
+    <p class="muted" style="font-size:14px">Öğrenilen: Δ 4.736 + üç matris × 4.096 + FactUnits 33.024 = 50.048 sayı. W_next (Adım 1–2) bugünkü modelde yok.</p>
+  </div>
+
+  <div class="part">
+    <h3>Eğitim</h3>
+    <div class="scroll"><table>
+      <thead><tr><th>ayar</th><th class="num">değer</th><th>not</th></tr></thead>
+      <tbody>
+        <tr><td>optimizer, lr</td><td class="num">Adam, 0,01</td><td>Adım 1'den; full batch: her adımda 640 cümlenin hepsi</td></tr>
+        <tr><td class="mono">cosine decay (LR_FLOOR)</td><td class="num">0,1</td><td>lr 0,01'den 0,001'e iner. <q>kosinüs ve ve kırpma yapalım modelin standart ayarı olsun</q></td></tr>
+        <tr><td class="mono">gradient clipping (GRAD_CLIP)</td><td class="num">1,0</td><td>gradient'in boyu 1'i geçerse 1'e indirilir; hangisinin kararlılığı getirdiği ayrı ölçülmedi</td></tr>
+        <tr><td class="mono">STEPS</td><td class="num">1.000</td><td>1 adım = 1 epoch; ezber 600'de tamdı. <q>1000 olarak belirledim bu veri seti için ama. duruma özel veri büyürse biz de büyütürüz.</q></td></tr>
+        <tr><td>weight decay</td><td class="num">yok</td><td>henüz denenmedi</td></tr>
+      </tbody>
+    </table></div>
   </div>
 
   <div class="part">
@@ -287,13 +405,13 @@ a { color: var(--w); }
     <div class="scroll"><table>
       <thead><tr><th>iş</th><th class="num">sonuç</th><th>hangi adımla</th><th>not</th></tr></thead>
       <tbody>
-        <tr><td>sözcük sırası (ad → soyad, "Who" → "is")</td><td class="num">0,99</td><td>1</td><td>yalnız son token yetiyor</td></tr>
-        <tr><td>1R: "Who is Alice Smith's father?"</td><td class="num">0,950</td><td>2</td><td>kardeşlerde 0,69–0,81</td></tr>
-        <tr><td>yazılı 2R/3R zincirler</td><td class="num">0,917</td><td>2</td><td>tavan 0,933: sırayı görmüyor</td></tr>
-        <tr><td>hiç yazılmamış zincirler (çıkarım)</td><td class="num">0,00–0,16</td><td>—</td><td>köprüyü tutacak yer yok</td></tr>
+        <tr><td>sözcük sırası ("Who" → "is", "'s" → ilişki)</td><td class="num">0,99</td><td>1–3</td><td>W_next olmadan da</td></tr>
+        <tr><td>1R: "Who is Alice Smith's father?"</td><td class="num">1,000</td><td>3</td><td>400. adımda tam (Adım 2: 0,950)</td></tr>
+        <tr><td>yazılı 2R/3R zincirler</td><td class="num">1,000</td><td>3</td><td>600. adımda tam; sıra görünür oldu (Adım 2 tavanı 0,933)</td></tr>
+        <tr><td>hiç yazılmamış zincirler (çıkarım)</td><td class="num">0,00–0,04</td><td>—</td><td>köprü okuması 0,00: model ezberliyor</td></tr>
       </tbody>
     </table></div>
-    <p class="limit"><b>Sıradaki:</b> köprü (örneğin Julia) cümlede yazılı değil; okunan şey hiçbir konuma yazılmıyor. Adım 3 bunun için yer açacak.</p>
+    <p class="limit"><b>Sıradaki:</b> köprü (Julia) için yer açıldı ama hiçbir turda oluşmuyor; tutulan hanede model öznenin anne ya da babasını söylüyor. Modeli ezber yerine hesaplamaya itmek gerekiyor; ilk aday weight decay.</p>
   </div>
 </section>
 
@@ -817,21 +935,243 @@ q             = (0,79 ; -0,61)</div>
 <!-- ============================== ADIM 3 ============================== -->
 <section class="step" id="adim3">
   <div class="stephead">
-    <div class="eyebrow">Adım 3 · sırada</div>
-    <h2>Köprü için yer</h2>
+    <div class="eyebrow">Adım 3 · kodlandı · BlockModel, Block, FactUnits</div>
+    <h2>Köprü için yer: durum, dönüştürme, ikinci tur</h2>
+    <p>Adım 1'in bilgisi (konumun kendi noktası) ile Adım 2'nin bilgisi (attention'ın getirdiği) bir <b>durumda</b> buluşup kalır. Durum, olgu bilgisiyle <b>dönüştürülür</b>; böylece cümlede yazılı olmayan köprü (Julia) bir konumda oluşur. <b>İkinci tur</b> o durumu okur.</p>
   </div>
-  <ul class="quotes">
-    <li><b>köprü</b><div><q>aslında Julia Evans burada köprü ama model bu köprü bilgisini bir yerde tutmazsa nasıl bağlantı kuracak ?</q></div></li>
-    <li><b>durum</b><div><q>ama vektör başı ve sonu olan birşey PL ise yönü olmayan bir nokta</q> · <q>katman aslında yeni bir durum bilgisini vektörler aracılığıyla oluştuyor. bunu şöyle ifade etsek PL1 yani 1. katmandaki PL nin durumu doğru olur mu ?</q></div><div class="then">Durum (hidden state) bir nokta: başta PL, her katmanda okuduğu şeyle bir vektör kadar kayar. Adı karar bekliyor (PL1 / S1 / hidden).</div></li>
-  </ul>
-  <p>Konuşulan üç yol; seçim yapılmadı:</p>
-  <ul>
-    <li><b>Üst üste katman</b> (transformer'ın yolu): her konumun durumu katman katman güncellenir; 1. katmanda "mother" konumu Julia'yı tutar, 2. katmanda "?" onu okur. Nedensellik sayesinde sıra da görünür olur.</li>
-    <li><b>Tekrar eden blok</b> (model_19'un döngü fikri): aynı matrisler her turda kullanılır; "katmanlar yetmedi" sorununa bir cevap.</li>
-    <li><b>CoT</b>: köprü metin olarak yazılır, ikinci adım sıradan bir 1R olur.</li>
-  </ul>
-  <p class="limit"><b>Ölçüt:</b> "?" konumuna getirilen şey Julia mı? Adım 2'deki "getirilen Alice mi" okumasının aynısı.</p>
+
+  <div class="part">
+    <h3>Sorular ve kararlar, sizin sözlerinizle</h3>
+    <ul class="quotes">
+      <li><b>köprü</b><div><q>aslında Julia Evans burada köprü ama model bu köprü bilgisini bir yerde tutmazsa nasıl bağlantı kuracak ?</q></div></li>
+      <li><b>harmanlama</b><div><q>aslında 3. adım bu iki adımdan gelen bilgiyi harmanlayacak bir yer olmalı değil mi ?</q></div><div class="then">Evet: durum. Harmanlama toplama + dönüştürme.</div></li>
+      <li><b>W_next</b><div><q>sadece bunun doğrudan sonuca etki eden bir ağırlık olmalı mı yoksa katmana gidecek paylaşılan bir bilgi olması gerekiyor emin değilim</q></div><div class="then">Katmanlı yapıda konumun kendi bilgisi durumda taşınır; W_next yalnız en sonda, durumu sonraki token yönüne çeviren çıkış olur; gerekli olup olmadığı ölçülecek.</div></li>
+      <li><b>yapı ve adlar</b><div>tur yapısı <q>İkisini de koş, kıyasla</q> · tur sayısı <q>2</q> · adlar <q>hidden · FactUnits · Block</q></div><div class="then">shared ve separate yazıldı, TURNS = 2. separate eski tarifle patladı; yeni tarifle kıyaslanmadı.</div></li>
+      <li><b>W_value</b><div><q>biz W_value eklemedik</q> · <q>eklemek ve ya eklememek mantıklı mı gerekli mi hiç fikrim yok</q></div><div class="then">Claude'un önerisiydi, gerekçesi yanlıştı (W_context ile çarpımı tek matris). Koddan çıkarıldı.</div></li>
+      <li><b>eğitim</b><div><q>aslında işe yaradığını gördüğümüz birşey var ama test etmediğimiz bir durum var. bu durumda kosinüs ve ve kırpma yapalım modelin standart ayarı olsun.</q></div><div class="then">cosine decay + gradient clipping standart.</div></li>
+      <li><b>adım sayısı</b><div><q>1000 olarak belirledim bu veri seti için ama. duruma özel veri büyürse biz de büyütürüz.</q></div><div class="then">STEPS = 1000 (data_20 için).</div></li>
+      <li><b>FactUnits</b><div><q>yani hepsi kullanılmışsa kalsın.</q></div><div class="then">256 birimin hepsi kullanılıyor; FACT_UNITS = 256 kaldı.</div></li>
+      <li><b>W_next kaldırıldı</b><div><q>w_next kaldır farklar ihmal edilecek kadar düşük % sahip</q></div><div class="then">3 tohumda W_next'li ve W_next'siz ölçüldü; önceden yazılan kurala göre sonuç "belirsiz" (bir tohum sınırı aştı), karar kullanıcının. Adım 3'te çıkış son durumun kendisi.</div></li>
+      <li><b>durum</b><div><q>ama vektör başı ve sonu olan birşey PL ise yönü olmayan bir nokta</q> · <q>katman aslında yeni bir durum bilgisini vektörler aracılığıyla oluştuyor. bunu şöyle ifade etsek PL1 yani 1. katmandaki PL nin durumu doğru olur mu ?</q></div><div class="then">Durum bir nokta: başta PL, her turda okuduğuyla bir vektör kadar kayar. Adı: hidden.</div></li>
+    </ul>
+  </div>
+
+  <div class="part">
+    <h3>Tasarım, bir cümle üzerinde: konum × tur (elle kuruldu)</h3>
+    <figure>
+      <div class="draw">
+        <svg viewBox="0 0 900 480" role="img" aria-label="Owen mother father soru işareti cümlesi. Sütunlar konum, satırlar tur. Tur 1'de mother konumu Owen'a bakar ve Owen artı mother'dan Julia'yı hesaplar; father konumu mother'a bakar, kişi olmadığı için birim yanmaz. Tur 2'de soru işareti mother konumundan Julia'yı, father konumundan ilişkiyi okur ve Harold'ı hesaplar; son durum Harold'a en yakın. Tuzak: father konumu tur 1'de Owen'a bakarsa David hesaplanır.">
+          <defs>
+            <marker id="g1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrowhead-w"/></marker>
+            <marker id="g2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrowhead-bad"/></marker>
+            <marker id="g3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arrowhead"/></marker>
+          </defs>
+          <text class="tick" x="185" y="36" text-anchor="middle">1 · Owen</text>
+          <text class="tick" x="385" y="36" text-anchor="middle">2 · mother</text>
+          <text class="tick" x="585" y="36" text-anchor="middle">3 · father</text>
+          <text class="tick" x="785" y="36" text-anchor="middle">4 · ?</text>
+          <text class="framelbl" x="12" y="86">tur 0</text>
+          <text class="framelbl" x="12" y="216">tur 1</text>
+          <text class="framelbl" x="12" y="356">tur 2</text>
+
+          <!-- tur 0 -->
+          <rect class="box pl" x="100" y="60" width="170" height="44" rx="3"/>
+          <text class="lbl" x="185" y="79" text-anchor="middle">Owen</text>
+          <text class="sub" x="185" y="95" text-anchor="middle">h = PL</text>
+          <rect class="box pl" x="300" y="60" width="170" height="44" rx="3"/>
+          <text class="lbl" x="385" y="79" text-anchor="middle">mother</text>
+          <text class="sub" x="385" y="95" text-anchor="middle">h = PL</text>
+          <rect class="box pl" x="500" y="60" width="170" height="44" rx="3"/>
+          <text class="lbl" x="585" y="79" text-anchor="middle">father</text>
+          <text class="sub" x="585" y="95" text-anchor="middle">h = PL</text>
+          <rect class="box pl" x="700" y="60" width="170" height="44" rx="3"/>
+          <text class="lbl" x="785" y="79" text-anchor="middle">?</text>
+          <text class="sub" x="785" y="95" text-anchor="middle">h = PL</text>
+
+          <!-- tur 1 -->
+          <rect class="box" x="100" y="184" width="170" height="60" rx="3"/>
+          <text class="lbl" x="185" y="208" text-anchor="middle">Owen</text>
+          <text class="sub" x="185" y="226" text-anchor="middle">değişmez</text>
+          <rect class="box an" x="300" y="184" width="170" height="60" rx="3"/>
+          <text class="lbl" x="385" y="206" text-anchor="middle">mother + 0,9·Owen</text>
+          <text class="sub" x="385" y="224" text-anchor="middle">VE → Julia 0,9</text>
+          <text class="sub" x="385" y="238" text-anchor="middle">köprü burada</text>
+          <rect class="box" x="500" y="184" width="170" height="60" rx="3"/>
+          <text class="lbl" x="585" y="206" text-anchor="middle">father + 0,9·mother</text>
+          <text class="sub" x="585" y="224" text-anchor="middle">kişi yok, birim yanmaz</text>
+          <rect class="box" x="700" y="184" width="170" height="60" rx="3"/>
+          <text class="lbl" x="785" y="208" text-anchor="middle">?</text>
+          <text class="sub" x="785" y="226" text-anchor="middle">bu turda önemsiz</text>
+
+          <!-- tur 2 -->
+          <rect class="box read" x="100" y="324" width="170" height="60" rx="3"/>
+          <text class="sub" x="185" y="358" text-anchor="middle">…</text>
+          <rect class="box read" x="300" y="324" width="170" height="60" rx="3"/>
+          <text class="sub" x="385" y="358" text-anchor="middle">…</text>
+          <rect class="box read" x="500" y="324" width="170" height="60" rx="3"/>
+          <text class="sub" x="585" y="358" text-anchor="middle">…</text>
+          <rect class="box an" x="700" y="324" width="170" height="60" rx="3"/>
+          <text class="lbl" x="785" y="346" text-anchor="middle">Julia 0,54 + father 0,4</text>
+          <text class="sub" x="785" y="364" text-anchor="middle">VE → Harold 0,44</text>
+          <rect class="box w" x="700" y="422" width="170" height="44" rx="3"/>
+          <text class="lbl" x="785" y="441" text-anchor="middle">h_son → Harold</text>
+          <text class="sub" x="785" y="457" text-anchor="middle">sonraki token</text>
+
+          <!-- durum bir sonraki tura tasinir -->
+          <line class="carry" x1="185" y1="104" x2="185" y2="182" marker-end="url(#g3)"/>
+          <line class="carry" x1="385" y1="104" x2="385" y2="182" marker-end="url(#g3)"/>
+          <line class="carry" x1="585" y1="104" x2="585" y2="182" marker-end="url(#g3)"/>
+          <line class="carry" x1="785" y1="104" x2="785" y2="182" marker-end="url(#g3)"/>
+          <line class="carry" x1="185" y1="244" x2="185" y2="322" marker-end="url(#g3)"/>
+          <line class="carry" x1="385" y1="244" x2="385" y2="322" marker-end="url(#g3)"/>
+          <line class="carry" x1="585" y1="244" x2="585" y2="322" marker-end="url(#g3)"/>
+          <line class="carry" x1="785" y1="244" x2="785" y2="322" marker-end="url(#g3)"/>
+          <line class="carry" x1="785" y1="384" x2="785" y2="420" marker-end="url(#g3)"/>
+
+          <!-- attention okumalari -->
+          <line class="readarrow" x1="262" y1="104" x2="306" y2="182" marker-end="url(#g1)"/>
+          <text class="sub" x="282" y="150" text-anchor="end" style="fill:var(--w)">0,9</text>
+          <line class="readarrow" x1="462" y1="104" x2="506" y2="182" marker-end="url(#g1)"/>
+          <text class="sub" x="500" y="130" style="fill:var(--w)">0,9</text>
+          <line class="readarrow" x1="470" y1="236" x2="704" y2="330" marker-end="url(#g1)"/>
+          <text class="sub" x="560" y="268" style="fill:var(--w)">0,6 · Julia</text>
+          <line class="readarrow" x1="664" y1="244" x2="720" y2="322" marker-end="url(#g1)"/>
+          <text class="sub" x="706" y="300" style="fill:var(--w)">0,4 · father</text>
+
+          <!-- tuzak -->
+          <line class="trap" x1="236" y1="104" x2="520" y2="182" marker-end="url(#g2)"/>
+          <text class="sub" x="330" y="162" style="fill:var(--bad)">tuzak → David</text>
+        </svg>
+      </div>
+      <figcaption>Sütunlar konum, satırlar tur. Gri oklar: her konumun durumu bir sonraki tura taşınır. Lacivert oklar: attention'ın okudukları ve ağırlıkları. Kehribar kutular: dönüştürmenin (VE) yandığı yerler. Kırmızı kesikli: tuzak. Ağırlıkları doğru yere bakacak şekilde elle koydum; modelin öğrenmesi gereken tam bu seçimler. Eğitilen model bunu öğrenmedi: tur 1'de "mother" konumunda Julia hiç oluşmadı (köprü okuması 0,00, aşağıda).</figcaption>
+    </figure>
+  </div>
+
+  <div class="part">
+    <h3>Sayısal örnek</h3>
+    <p>Her token kendi yönünde, birbirine dik. Durumun iki bölmesi var: [ token | hesaplanan kişi ]. ReLU(x): x negatifse 0, değilse x.</p>
+    <div class="two">
+      <div class="formula"><span class="c">tur 1 · "mother" konumu</span>
+bakar:      Owen 0,9 · mother (kendisi) 0,1
+topla:      token = mother + 0,9 · Owen
+dönüştür:   Julia birimi = ReLU(Owen + mother − 1)
+                        = ReLU(0,9 + 1 − 1) = 0,9
+durum:      [ mother + 0,9 Owen | Julia 0,9 ]
+
+<span class="c">karşılaştırma: "Owen's father" sorusunda</span>
+<span class="c">aynı birim ReLU(0,9 + 0 − 1) = 0 → Julia yok</span></div>
+      <div class="formula"><span class="c">tur 2 · "?" konumu</span>
+bakar:      mother konumu 0,6 · father konumu 0,4
+getirir:    kişi    0,6 · Julia 0,9 = Julia 0,54
+            ilişki  0,4 · father    = father 0,4
+dönüştür:   Harold birimi = ReLU(Julia + father − 0,5)
+                         = ReLU(0,54 + 0,4 − 0,5) = 0,44
+okuma:      h_son → Harold</div>
+    </div>
+  </div>
+
+  <div class="part">
+    <h3>Modelin kaçınmayı öğrenmesi gereken tuzaklar</h3>
+    <div class="scroll"><table>
+      <thead><tr><th>tuzak</th><th>ne olur</th><th>cevap</th><th>gördüğümüz hata</th></tr></thead>
+      <tbody>
+        <tr><td>tur 1'de "father" konumu Owen'a bakar</td><td>"Owen + father" → David birimi yanar</td><td style="color:var(--bad)">David</td><td>r1'i atlayıp r2(X): ajan B'de %5–17</td></tr>
+        <tr><td>tur 2'de "?" hesaplanan kişi yerine Owen token'ını okur</td><td>aynı</td><td style="color:var(--bad)">David</td><td>aynı</td></tr>
+        <tr><td>"?" Julia'yı okur ama father'ı uygulamaz</td><td>köprünün kendisi söylenir</td><td style="color:var(--bad)">Julia</td><td>köprüyü söyleme: %5–15</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="part">
+    <h3>Ölçümler</h3>
+    <p>İlk koşu: eski tarif (sabit lr 0,01), W_next ve W_value'lu, 2.000 adım, tek tohum.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>ayar</th><th class="num">kayıp t500 / t1000 / t2000</th><th class="num">1R</th><th class="num">yazılı zincir</th><th class="num">chain2</th><th class="num">named2</th></tr></thead>
+      <tbody>
+        <tr><td>step2 (Adım 2)</td><td class="num">0,699 / 0,678 / 0,670</td><td class="num">0,950</td><td class="num">0,917</td><td class="num">0,042</td><td class="num">0,156</td></tr>
+        <tr><td>shared</td><td class="num">0,877 / 0,623 / 0,617</td><td class="num">1,000</td><td class="num">1,000</td><td class="num">0,062</td><td class="num">0,344</td></tr>
+        <tr><td>separate</td><td class="num" style="color:var(--bad)">0,768 / 0,713 / 1,346</td><td class="num">0,131</td><td class="num">0,183</td><td class="num">0,000</td><td class="num">0,000</td></tr>
+        <tr><td>shared, W_next'siz</td><td class="num" style="color:var(--bad)">0,626 / 0,621 / 1,313</td><td class="num">0,169</td><td class="num">0,200</td><td class="num">0,000</td><td class="num">0,000</td></tr>
+      </tbody>
+    </table></div>
+    <p class="muted" style="font-size:14px">Kırmızılar eğitimde patladı: kayıp sonda yükseldi. Bu yüzden cosine decay ve gradient clipping geldi.</p>
+
+    <p>W_next testi: cosine decay + gradient clipping, W_value'lu, 3 tohum, 2.000 adım. 1R her koşuda 160/160, dil bilgisi yoklamaları her koşuda doğru.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>tohum</th><th class="num">kayıp: W_next'li → W_next'siz</th><th class="num">token doğruluğu</th><th class="num">yazılı zincir</th></tr></thead>
+      <tbody>
+        <tr><td>0</td><td class="num">0,616 → 0,622</td><td class="num">0,807 → 0,801</td><td class="num">120 → 112</td></tr>
+        <tr><td>1</td><td class="num">0,618 → 0,616</td><td class="num">0,804 → 0,807</td><td class="num">120 → 120</td></tr>
+        <tr><td>2</td><td class="num">0,621 → 0,617</td><td class="num">0,804 → 0,805</td><td class="num">120 → 120</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Bugünkü model: W_next yok, W_value yok, cosine decay + gradient clipping, tohum 0, 2.000 adım (STEPS 1.000'den önce). Sınav her 100 adımda soruldu.</p>
+    <div class="scroll"><table>
+      <thead><tr><th class="num">adım</th><th class="num">kayıp</th><th class="num">1R</th><th class="num">yazılı zincir</th><th class="num">chain2</th><th class="num">named2</th><th class="num">köprü</th></tr></thead>
+      <tbody>
+        <tr><td class="num">0</td><td class="num">8,78</td><td class="num">0/160</td><td class="num">0/120</td><td class="num">0/48</td><td class="num">0/32</td><td class="num">0,00</td></tr>
+        <tr><td class="num">100</td><td class="num">0,82</td><td class="num">45/160</td><td class="num">44/120</td><td class="num">0/48</td><td class="num">0/32</td><td class="num">0,00</td></tr>
+        <tr><td class="num">200</td><td class="num">0,69</td><td class="num">127/160</td><td class="num">109/120</td><td class="num">0/48</td><td class="num">1/32</td><td class="num">0,00</td></tr>
+        <tr><td class="num">300</td><td class="num">0,67</td><td class="num">158/160</td><td class="num">86/120</td><td class="num">0/48</td><td class="num">0/32</td><td class="num">0,00</td></tr>
+        <tr><td class="num">400</td><td class="num">0,63</td><td class="num"><b>160/160</b></td><td class="num">120/120</td><td class="num">0/48</td><td class="num">3/32</td><td class="num">0,00</td></tr>
+        <tr><td class="num">500</td><td class="num">0,65</td><td class="num">160/160</td><td class="num">106/120</td><td class="num">1/48</td><td class="num">1/32</td><td class="num">0,00</td></tr>
+        <tr><td class="num">600</td><td class="num">0,62</td><td class="num">160/160</td><td class="num"><b>120/120</b></td><td class="num">1/48</td><td class="num">0/32</td><td class="num">0,00</td></tr>
+        <tr><td class="num">2.000</td><td class="num">0,617</td><td class="num">160/160</td><td class="num">120/120</td><td class="num">2/48</td><td class="num">0/32</td><td class="num">0,00</td></tr>
+      </tbody>
+    </table></div>
+    <p class="muted" style="font-size:14px">Köprü: tur 1'den sonra "mother" gibi ilk ilişki konumunun durumu, 48 kişi içinde köprüye (Julia) en yakın mı. FactUnits: 256 birimin hepsi kullanılıyor.</p>
+
+    <p>Gözle okuma, bugünkü model:</p>
+    <div class="scroll"><table>
+      <thead><tr><th>soru</th><th>model</th><th>doğru</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">Who is Owen Evans's father's father?</td><td style="color:var(--bad)">David Evans</td><td>Arthur Evans</td></tr>
+        <tr><td class="mono">Who is Owen Evans's mother's father?</td><td style="color:var(--bad)">Julia Evans</td><td>Harold Fisher</td></tr>
+        <tr><td class="mono">Who is Owen Evans's father's mother?</td><td style="color:var(--bad)">Julia Evans</td><td>Edith Evans</td></tr>
+        <tr><td class="mono">Who is Owen Evans's mother's mother?</td><td style="color:var(--bad)">Julia Evans</td><td>Doris Fisher</td></tr>
+        <tr><td class="mono">Who is Alice Smith's mother's father?</td><td>Henry Brown</td><td>Henry Brown</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="part">
+    <h3>Sonuç</h3>
+    <ol class="finding">
+      <li><span>Ezber tam: 1R 400. adımda, yazılı zincirler 600. adımda 1,000. Sıra artık görünüyor: "father's mother" ile "mother's father" ayrılıyor (Adım 2'de tavan 0,933).</span></li>
+      <li><span>Köprü oluşmadı: tur 1'de "mother" konumunda Julia hiçbir adımda yok (0,00). Model hesaplamıyor, ezberliyor.</span></li>
+      <li><span>Tutulan hanede (Owen Evans) dört 2R sorusunun dördünde cevap Owen'ın annesi ya da babası: iki adım yerine tek adım.</span></li>
+      <li><span>W_next ve W_value bu yapıda iş yapmıyordu; ikisi de çıkarıldı. Çıkış son durumun kendisi.</span></li>
+      <li><span>Sabit lr bu derinlikte kararsızdı; cosine decay + gradient clipping ile altı koşunun altısı kararlı.</span></li>
+    </ol>
+    <p class="limit"><b>Sıradaki:</b> modeli ezber yerine hesaplamaya itmek. İlk aday weight decay: ezberin "kirasını" artırır.</p>
+  </div>
+
+  <div class="part">
+    <h3>Kararların durumu</h3>
+    <ol class="finding">
+      <li><span><b>Tekrar eden blok mu, üst üste katman mı?</b> İki olgu birimi ("Owen'ın annesi", "Julia'nın babası") 1R olguları. Dönüştürme her turda aynıysa, 1R'den öğrenilen olgu ikinci turda da hazır olur; hiç yazılmamış zincirlere genelleme buradan gelebilir. Ayrı katmanlarda her olgu iki kez öğrenilmeli ("Hopping Too Late" sorunu). <b>Durum:</b> shared kullanılıyor. separate eski tarifle patladı; yeni tarifle kıyas yapılmadı, açık.</span></li>
+      <li><span><b>Tur sayısı:</b> 2 (<q>2</q>), sabit. 3R için 3 gerekir; 3R soruları 0.</span></li>
+      <li><span><b>Dönüştürme parçası:</b> FactUnits: ReLU(W_fact_in · h − fact_threshold), çıktısı W_fact_out ile duruma. Transformer'daki MLP'nin karşılığı. 256 birim (4 × 64, transformer alışkanlığı); hepsi kullanılıyor, kaldı.</span></li>
+      <li><span><b>Değer matrisi (W_value, transformer'daki V):</b> soru şuydu: getirilen şeyin Owen'ı değil hesaplanan kişiyi taşıması için ayrı bir matris gerekli mi? Cevap: hayır. Hesaplanan kişiyi taşıyan şey, attention'ın PL'ye değil durumlara (h) bakması. Arada ReLU ya da norm olmadığı için W_context · W_value tek bir 64×64 matrise eşit, yani W_value yeni bir hesap eklemiyor. Bu tek head ve tam boyut için geçerli; birden fazla head gelirse V anlamlı olur. Yeni bir hesap eklemediği için koddan çıkarıldı (Claude'un önerisi). Kullanıcı: <q>biz W_value eklemedik</q> · <q>eklemek ve ya eklememek mantıklı mı gerekli mi hiç fikrim yok</q></span></li>
+      <li><span><b>Durumun adı:</b> hidden.</span></li>
+      <li><span><b>W_next: kaldırıldı.</b> 3 tohumda ölçüldü (cosine decay + gradient clipping, hepsi kararlı). W_next'siz kayıp −0,004 ile +0,006 arası, token doğruluğu −0,006 ile +0,003 arası, 1R her tohumda 160/160, dil bilgisi yoklamaları (Who → is, 's → ilişki) her tohumda doğru. Tek fark: tohum 0'da 8 yazılı zincir eksik. Kurala göre "belirsiz"; kullanıcı: <q>w_next kaldır farklar ihmal edilecek kadar düşük % sahip</q></span></li>
+    </ol>
+    <p class="limit"><b>Ölçüt ve sonuç:</b> tur 1'de "mother" konumunun durumunda Julia oluşuyor mu? Her 100 adımda okundu: hep 0,00. Asıl hedef hiç yazılmamış zincirler: chain2 2/48, named2 0/32.</p>
+  </div>
+
+  <div class="part">
+    <h3>Kod</h3>
+    <div class="kv">
+      <span class="muted">sınıflar</span><span><code>BlockModel</code> · <code>Block</code> · <code>FactUnits</code> · <code>CausalAttention</code> · <code>TokenPoints</code></span>
+      <span class="muted">matrisler</span><span><code>W_query</code> · <code>W_key</code> · <code>W_context</code> (64 × 64) · <code>W_fact_in</code> (256 × 64) · <code>W_fact_out</code> (64 × 256); <code>fact_threshold</code> (256); tablo <code>shift</code> (74 × 64)</span>
+      <span class="muted">ayarlar</span><span>model_20.py: <code>TURNS = 2</code> · <code>SHARED_BLOCK = True</code> · <code>FACT_UNITS = 256</code>; train_20.py: <code>STEPS = 1000</code> · <code>LR_FLOOR = 0.1</code> · <code>GRAD_CLIP = 1.0</code></span>
+      <span class="muted">koşu</span><span><code>python train_20.py --step3</code></span>
+      <span class="muted">testler</span><span>39/39: başlangıçta durum PL'de kalır, iki turlu hesap = bağımsız float64 formül, nedensellik, dolgu, shared/separate, W_next yok, eğitim tarifi</span>
+    </div>
+  </div>
 </section>
+
 
 
 </div>
