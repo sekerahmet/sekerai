@@ -27,6 +27,11 @@ yazilmayacagina karar verir.
       c'_t = sum_j a_tj PL_j                            kelime noktalari: turlarda degismez
       g_t  = sigmoid(W_copy_gate h_t + copy_gate_bias)  kapi: bu konumda kopyala mi (0-1)
       h_t  = norm(h_t + W_context c_t + g_t W_copy c'_t) (W_copy 0'dan)
+
+STREAM_NORM=False: akis normalize edilmez, okunan kopya normalize edilir (transformer'daki gibi; L2 norm, ogrenilen sayi yok).
+      h_t = h_t + W_context sum_j a_tj norm(h_j)        (q, k da norm(h)'dan)
+      h_t = h_t + W_fact_out ReLU(W_fact_in norm(h_t) - fact_threshold)
+    cikis: skor = scale <norm(h_son), PL>
 """
 import math
 
@@ -45,6 +50,8 @@ TURNS = 2            # Adim 3: blok tur sayisi (kullanici karari: 2)
 SHARED_BLOCK = True  # True: ayni Block her turda; False: her tura ayri Block (ayri katmanlar)
 FACT_UNITS = 256     # FactUnits birim sayisi; 4 x D (transformer aliskanligi), olculmedi
 COPY_PATH = False    # Oneri A: kopya yolu ve kapisi; False = bugunku model birebir (kullanici onayi, 27 Eylul)
+STREAM_NORM = True   # True: durum her eklemeden sonra kureye (bugunku).  False: akis normalize edilmez, yalniz attention'in
+                     # ve FactUnits'in okudugu kopya normalize edilir (transformer gibi); cikis <norm(h), PL> (27 Eylul)
 
 
 def scale_for(n, confidence=CONFIDENCE):
@@ -207,21 +214,28 @@ class FactUnits(torch.nn.Module):
 class Block(torch.nn.Module):
     """Adim 3 bir tur: attention durumlara bakar ve getirdigini duruma yazar; FactUnits durumu donusturur."""
 
-    def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, units=FACT_UNITS, seed=POINTS_SEED + 2, copy_path=False):
+    def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, units=FACT_UNITS, seed=POINTS_SEED + 2, copy_path=False,
+                 stream_norm=True):
         super().__init__()
         self.attention = CausalAttention(d, t_max, confidence, seed, copy_path=copy_path)
         self.facts = FactUnits(d, units, seed + 1)
+        self.stream_norm = stream_norm
 
     def forward(self, h, points=None):
         at = self.attention
+        x = h if self.stream_norm else F.normalize(h, dim=-1)   # attention'in okudugu; stream_norm'da h zaten kurede
         if at.copy_path:
             assert points is not None, "kopya yolu acik: kelime noktalari (points) verilmeli"   # yoksa c, c' batch'ten bolunur
-            c, c_copy = at(h, points)
-            gate = torch.sigmoid(h @ at.W_copy_gate.T + at.copy_gate_bias)          # g_t, (B, T, 1): konumun kendi durumundan
-            h = F.normalize(h + c @ at.W_context.T + gate * (c_copy @ at.W_copy.T), dim=-1)   # + g_t · W_copy · c'_t
+            c, c_copy = at(x, points)
+            gate = torch.sigmoid(x @ at.W_copy_gate.T + at.copy_gate_bias)          # g_t, (B, T, 1): konumun kendi durumundan
+            added = c @ at.W_context.T + gate * (c_copy @ at.W_copy.T)             # W_context · c_t + g_t · W_copy · c'_t
         else:
-            h = F.normalize(h + at(h) @ at.W_context.T, dim=-1)                   # h_t = norm(h_t + W_context · c_t)
-        return F.normalize(h + self.facts(h), dim=-1)                                # h_t = norm(h_t + olgu(h_t))
+            added = at(x) @ at.W_context.T                                         # W_context · c_t
+        if self.stream_norm:
+            h = F.normalize(h + added, dim=-1)                                     # h_t = norm(h_t + W_context · c_t)
+            return F.normalize(h + self.facts(h), dim=-1)                          # h_t = norm(h_t + olgu(h_t))
+        h = h + added                                                              # akis normalize edilmez:
+        return h + self.facts(F.normalize(h, dim=-1))                              # h_t = h_t + olgu(norm(h_t))
 
 
 class BlockModel(torch.nn.Module):
@@ -229,13 +243,14 @@ class BlockModel(torch.nn.Module):
     (W_context = 0, W_fact_out = 0) durum PL'de kalir: skor = scale <PL_t, PL>."""
 
     def __init__(self, n, d=D, turns=TURNS, shared=SHARED_BLOCK, learn_points=LEARN_POINTS, anchor=ANCHOR,
-                 confidence=CONFIDENCE, t_max=T_MAX, units=FACT_UNITS, seed=POINTS_SEED, copy_path=COPY_PATH):
+                 confidence=CONFIDENCE, t_max=T_MAX, units=FACT_UNITS, seed=POINTS_SEED, copy_path=COPY_PATH,
+                 stream_norm=STREAM_NORM):
         super().__init__()
         self.tokens = TokenPoints(n, d, learn_points, anchor, seed)
         count = 1 if shared else turns
-        self.blocks = torch.nn.ModuleList(Block(d, t_max, confidence, units, seed + 10 + 2 * i, copy_path=copy_path)
-                                          for i in range(count))
-        self.turns, self.shared, self.copy_path = turns, shared, copy_path
+        self.blocks = torch.nn.ModuleList(Block(d, t_max, confidence, units, seed + 10 + 2 * i, copy_path=copy_path,
+                                                stream_norm=stream_norm) for i in range(count))
+        self.turns, self.shared, self.copy_path, self.stream_norm = turns, shared, copy_path, stream_norm
         self.scale = scale_for(n, confidence)
 
     def turn_blocks(self):
@@ -253,7 +268,9 @@ class BlockModel(torch.nn.Module):
 
     def logits(self, ids):
         P = self.tokens.points()
-        h = self.hidden(ids)[-1]                               # son durum, zaten kurede
+        h = self.hidden(ids)[-1]                               # son durum; stream_norm'da zaten kurede
+        if not self.stream_norm:
+            h = F.normalize(h, dim=-1)                         # akis normalize edilmediyse cikista bir kez
         return self.scale * h @ P.T                            # skor_tj = scale · <h_t, PL_j>
 
     def loss(self, ids, mask):

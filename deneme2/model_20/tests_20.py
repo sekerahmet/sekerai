@@ -404,16 +404,22 @@ def reference_blocks(m, ids):
     blocks = [m.blocks[0]] * m.turns if m.shared else list(m.blocks)
     for b in blocks:
         at = b.attention
-        q, k = unit(h @ dd(at.W_query).T), unit(h @ dd(at.W_key).T)
+        x = h if m.stream_norm else unit(h)                     # akis normalize edilmiyorsa okunan kopya normalize
+        q, k = unit(x @ dd(at.W_query).T), unit(x @ dd(at.W_key).T)
         a = torch.softmax((at.scale * q @ k.transpose(-1, -2)).masked_fill(future, float("-inf")), -1)
+        added = (a @ x) @ dd(at.W_context).T
         if m.copy_path:
-            gate = 1 / (1 + torch.exp(-(h @ dd(at.W_copy_gate).T + dd(at.copy_gate_bias))))
-            h = unit(h + (a @ h) @ dd(at.W_context).T + gate * ((a @ PL[ids]) @ dd(at.W_copy).T))
+            gate = 1 / (1 + torch.exp(-(x @ dd(at.W_copy_gate).T + dd(at.copy_gate_bias))))
+            added = added + gate * ((a @ PL[ids]) @ dd(at.W_copy).T)
+        if m.stream_norm:
+            h = unit(h + added)
+            u = torch.relu(h @ dd(b.facts.W_fact_in).T - dd(b.facts.fact_threshold))
+            h = unit(h + u @ dd(b.facts.W_fact_out).T)
         else:
-            h = unit(h + (a @ h) @ dd(at.W_context).T)
-        u = torch.relu(h @ dd(b.facts.W_fact_in).T - dd(b.facts.fact_threshold))
-        h = unit(h + u @ dd(b.facts.W_fact_out).T)
-    return m.scale * h @ PL.T
+            h = h + added
+            u = torch.relu(unit(h) @ dd(b.facts.W_fact_in).T - dd(b.facts.fact_threshold))
+            h = h + u @ dd(b.facts.W_fact_out).T
+    return m.scale * (h if m.stream_norm else unit(h)) @ PL.T
 
 
 def t_step3():
@@ -461,9 +467,35 @@ def t_step3():
           len(sh.blocks) == 1 and len(tb) == TURNS and all(b is tb[0] for b in tb) and len(se.blocks) == TURNS
           and count(se) - count(sh) == (TURNS - 1) * per_block and len(sh.hidden(ids)) == TURNS + 1)
 
+    # STREAM_NORM=False: akis normalize edilmez
+    base, free = BlockModel(n, d=d, units=10), BlockModel(n, d=d, units=10, stream_norm=False)
+    err0 = float((base.logits(ids) - free.logits(ids)).detach().abs().max())
+    for kw in (dict(shared=True), dict(shared=False), dict(shared=True, copy_path=True)):
+        mf = BlockModel(n, d=d, units=10, stream_norm=False, **kw)
+        with torch.no_grad():
+            for p_ in mf.parameters():
+                if p_.requires_grad:
+                    p_.copy_(0.5 * torch.randn(p_.shape, generator=g))
+        err = float((mf.logits(ids).detach().double() - reference_blocks(mf, ids)).abs().max())
+        check("adim 3, stream_norm=False: skor = tasarim formulu (bagimsiz float64; akis normalize edilmez), %s" % kw,
+              err < 1e-4, "fark %.1e" % err)
+    hs = mf.hidden(ids)
+    grows = float(hs[-1].norm(dim=-1).mean()) > 1.01
+    bl = mf.logits(ids).detach()
+    ch = ids.clone()
+    ch[:, 5] = (ch[:, 5] + 1) % n
+    af = mf.logits(ch).detach()
+    check("adim 3, stream_norm=False: baslangicta varsayilanla ayni skor; varsayilan True; akis boyu 1'den ayrilir; nedensellik",
+          err0 < 1e-6 and BlockModel(n, d=d, units=10).stream_norm and grows
+          and float((af[:, :5] - bl[:, :5]).abs().max()) < 1e-5 and float((af[:, 5:] - bl[:, 5:]).abs().max()) > 1e-3,
+          "baslangic farki %.1e" % err0)
+
     data = D.build()
     sids, smask = TR.sequences(data)
     nv = len(data["vocab"])
+    mf, curve_f = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), stream_norm=False)
+    check("adim 3, stream_norm=False: train_seq ile egitilir, kayip iner", not mf.stream_norm and curve_f[-1]["nll"] < curve_f[0]["nll"],
+          "%.3f -> %.3f" % (curve_f[0]["nll"], curve_f[-1]["nll"]))
     before = BlockModel(nv).tokens.fixed_points.clone()
     m, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20))
     check("adim 3: egitimde PF bit duzeyinde degismez, W_context 0'dan ayrilir, kayip iner",
