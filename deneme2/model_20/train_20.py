@@ -27,6 +27,8 @@ SETTINGS = {                      # capa lr/wd gibi deneme sayisi; 1e-2 fazla se
 
 STEPS, LR = 4000, 0.01  # full batch: 1 adim = 1 epoch.  32 aile icin ilk deger (kullanici, 27 Eylul: "ilk olarak 4.000");
                          # 8 ailede 1000 idi (ezber 600'de tam), ondan once 2000.  Veri buyurse yeniden belirlenir.
+                         # lr dayanagi (kure agirliklari + Muon): adim basina donme ~ LR x 0,2 x sqrt(d) (D=384'te ~2,2
+                         # derece); nGPT 2026 tepe lr 0,24 / sqrt(d).  Veri / batch / D degisince yeniden hesaplanir.
 LOG_AT = (0, 10, 50, 200, 500, 1000)
 LR_FLOOR = 0.1       # cosine decay: lr sonda LR x LR_FLOOR (taban lr/10); train_seq standardi
 GRAD_CLIP = 1.0      # gradient clipping: adimdaki gradient'in boyu bunu gecerse buna indirilir; train_seq standardi
