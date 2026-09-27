@@ -796,9 +796,79 @@ def F_ce(logits, targets):
     return float(torch.nn.functional.cross_entropy(logits, targets))
 
 
+@torch.no_grad()
+def cached_scores(m, prompts, tails):
+    """AttentionCache ile, token'lar SIRAYLA verilerek (acgozlu degil): satir basina istemin son konumunun ve tails'in
+    her token'indan sonraki skorlar, (B, k + 1, n); ve istem hesabinin butun skorlari."""
+    from model_20 import AttentionCache
+    L = [len(p) for p in prompts]
+    ids = torch.zeros(len(prompts), max(L), dtype=torch.long)
+    for i, p in enumerate(prompts):
+        ids[i, :len(p)] = torch.tensor(p)
+    caches = [AttentionCache(torch.tensor(L), max(L) + len(tails[0]) + 1) for _ in range(m.turns)]
+    first = m.logits(ids, caches)
+    rows = [first[torch.arange(len(prompts)), torch.tensor(L) - 1]]
+    for j in range(len(tails[0])):
+        rows.append(m.logits(torch.tensor([t[j] for t in tails])[:, None], caches)[:, 0])
+    return torch.stack(rows, 1), first
+
+
+def t_generate_cached():
+    from model_20 import BlockModel, apply_rope
+    g = torch.Generator().manual_seed(21)
+    pos = torch.tensor([[0], [5], [16]])
+    x = torch.randn(3, 17, 12, generator=g)
+    at_pos = apply_rope(x[torch.arange(3), pos[:, 0]][:, None], pos)
+    err_p = float((at_pos[:, 0] - apply_rope(x)[torch.arange(3), pos[:, 0]]).abs().max())
+    check("apply_rope: positions verilince o konumdaki donusun aynisi", err_p < 1e-6, "fark %.1e" % err_p)
+
+    # onbellekli uretim = tam yeniden hesap: rastgele agirlik, butun Block ayarlari, farkli uzunlukta istemler
+    n = 40
+    prompts = [torch.randint(0, n, (int(k),), generator=g).tolist() for k in torch.randint(1, 21, (12,), generator=g)]
+    worst, same, runs = 0.0, True, 0
+    for kw in (dict(), dict(shared=False), dict(rope=False), dict(stream_norm=False), dict(stream_norm=False, layer_norm=True),
+               dict(copy_path=True), dict(shared=False, copy_path=True, stream_norm=False, layer_norm=True)):
+        m = BlockModel(n, d=16, units=24, t_max=64, **kw)
+        with torch.no_grad():
+            for p_ in m.parameters():
+                if p_.requires_grad:
+                    p_.copy_(0.5 * torch.randn(p_.shape, generator=g))
+        old, new = TR.generate(m, prompts, 15, cached=False), TR.generate(m, prompts, 15)
+        alone = [TR.generate(m, [p], 15)[0] for p in prompts[:4]]
+        same &= old == new and alone == new[:4]
+        scores, first = cached_scores(m, prompts, new)
+        for i, p in enumerate(prompts):
+            full = m.logits(torch.tensor([p + new[i]])).detach()[0]
+            worst = max(worst, float((scores[i] - full[len(p) - 1:]).abs().max()),
+                        float((first[i, :len(p)] - full[:len(p)]).abs().max()))
+        runs += 1
+    check("generate: onbellekli (AttentionCache) = tam yeniden hesap -- ayni token'lar, %d ayar x 12 istem (1-20 token) x 15; "
+          "tek basina = batch icinde; her konumun skoru tolerans icinde" % runs, same and worst < 1e-4, "en buyuk fark %.1e" % worst)
+    edge = BlockModel(n, d=16, units=24, t_max=64)
+    check("generate: n = 0 bos, n = 1 istem hesabinin son konumu; transformer eski yoldan",
+          TR.generate(edge, prompts[:3], 0) == [[], [], []]
+          and TR.generate(edge, prompts[:3], 1) == TR.generate(edge, prompts[:3], 1, cached=False)
+          and len(TR.generate(TR.TransformerModel(n, d=16, layers=1), prompts[:3], 4)[2]) == 4)
+
+    # egitilmis agirlik: akrabalik verisinde 60 adim; sinav sorulari (<steps> dahil) ve uzun devam
+    data = D.build()
+    sids, smask = EK.sequences(data)
+    nv = len(data["vocab"])
+    trained, curve = TR.train_seq("shared", sids[:256], smask[:256], nv, steps=60, log_at=(0, 60))
+    ix = {w: i for i, w in enumerate(data["vocab"])}
+    qs = [[ix[D.EOS]] + [ix[t] for t in e["prompt"]] for e in data["exam"]][:96]
+    old, new = TR.generate(trained, qs, 24, cached=False), TR.generate(trained, qs, 24)
+    scores, _ = cached_scores(trained, qs[:24], new[:24])
+    err = max(float((scores[i] - trained.logits(torch.tensor([q + new[i]])).detach()[0, len(q) - 1:]).abs().max())
+              for i, q in enumerate(qs[:24]))
+    check("generate, egitilmis Model X (akrabalik, 256 cumle, 60 adim): 96 sinav sorusu x 24 token onbellekli = tam yeniden "
+          "hesap; skorlar tolerans icinde", old == new and err < 1e-4 and curve[-1]["nll"] < curve[0]["nll"],
+          "fark %.1e  kayip %.3f -> %.3f" % (err, curve[0]["nll"], curve[-1]["nll"]))
+
+
 if __name__ == "__main__":
     print("tests (model_20)")
-    for f in (t_model, t_step2, t_step3, t_copy, t_transformer):
+    for f in (t_model, t_step2, t_step3, t_copy, t_transformer, t_generate_cached):
         f()
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)

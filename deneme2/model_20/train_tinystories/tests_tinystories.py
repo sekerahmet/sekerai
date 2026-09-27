@@ -186,6 +186,45 @@ def t_batches():
     shutil.rmtree(root)
 
 
+def t_bucket():
+    """bucket: epokta ayni hikayeler ve ayni adim sayisi, batch'ler boya gore; genislik WIDTH_MULTIPLE'in kati ve en uzun
+    pencere sigar; adimin fonksiyonu (surdurme bit duzeyinde)."""
+    root, d = fixture()
+    n_rows, bs = len(d["train_start"]), 4
+    per_epoch = n_rows // bs
+    rows = {DT.sequences(d, "train", [i])[0][0, :int(d["train_length"][i]) + 2].numpy().tobytes(): i
+            for i in range(n_rows)}
+    taken = lambda ids, mask: [rows[r[:int(m_.sum())].numpy().tobytes()] for r, m_ in zip(ids, mask)]
+    full = DT.batches(d, bs, 0)
+    b1, b2 = DT.batches(d, bs, 0, bucket=2), DT.batches(d, bs, 0, bucket=2)
+    order = [5, 0, 3, 5, 1, 2, 4]                                         # karisik sira (surdurme gibi)
+    determ = all(torch.equal(b1(s)[0], b2(s)[0]) for s in order)
+    ep = lambda fn, e: sorted(r for s in range(e * per_epoch, (e + 1) * per_epoch) for r in taken(*fn(s)))
+    lens = d["train_length"]
+    spread = lambda fn: np.mean([np.ptp(lens[taken(*fn(s))]) for s in range(per_epoch)])
+    widths = [b1(s)[0].shape[1] for s in range(per_epoch)]
+    fits = all(w % DT.WIDTH_MULTIPLE == 0 or w == SEQ for w in widths) and all(
+        int(b1(s)[1].sum(1).max()) <= b1(s)[0].shape[1] < int(b1(s)[1].sum(1).max()) + DT.WIDTH_MULTIPLE
+        or b1(s)[0].shape[1] == SEQ for s in range(per_epoch))
+    check("batches bucket: adimin fonksiyonu (cagri sirasindan bagimsiz); her epok bucket=None ile AYNI hikayeler, ayni "
+          "adim sayisi; batch ici boy farki daha kucuk; genislik WIDTH_MULTIPLE'in kati, en uzun pencere sigar",
+          determ and ep(b1, 0) == ep(full, 0) and ep(b1, 1) == ep(full, 1) and len(set(ep(b1, 0))) == per_epoch * bs
+          and spread(b1) < spread(full) and fits,
+          "boy farki bucket %.1f, rastgele %.1f; genislik %s" % (spread(b1), spread(full), widths))
+
+    packs = {}
+    keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
+                                                                   optimizer=copy.deepcopy(opt.state_dict())))
+    n = len(d["vocab"])
+    whole, _ = TR.train_seq("shared", None, None, n, steps=8, log_at=(), batches=DT.batches(d, bs, 0, bucket=2),
+                            save_every=2, save=keep, model_kw=TINY)
+    resumed, _ = TR.train_seq("shared", None, None, n, steps=8, log_at=(), batches=DT.batches(d, bs, 0, bucket=2),
+                              checkpoint=packs[4], model_kw=TINY)
+    check("surdurme, bucket: 4. adim paketinden surdurulen = kesintisiz, bit duzeyinde",
+          all(torch.equal(x, y) for x, y in zip(whole.state_dict().values(), resumed.state_dict().values())))
+    shutil.rmtree(root)
+
+
 def t_exam():
     root, d = fixture()
     rows = ET.exam_rows(d)
@@ -264,6 +303,14 @@ def t_colab():
 
     first = torch.load(out + "/model.pt")
     os.remove(out + "/checkpoint_t000003.pt")                        # 2. adimdan sonra kesilmis gibi
+    old_cfg = {k: v for k, v in cfg.items() if k != "bucket"}        # bucket'tan onceki config: rastgele batch'le kosmustu
+    json.dump(old_cfg, open(out + "/config.json", "w"), indent=1)
+    try:
+        C.start("TEST", d, out, steps=3, every=1, device="cpu", batch_size=4, model_kw=TINY, save_every=1, resume=True,
+                bucket=2)
+        refused_bucket = False
+    except RuntimeError:
+        refused_bucket = True
     run2 = C.start("TEST", d, out, steps=3, every=1, device="cpu", batch_size=4, model_kw=TINY, save_every=1, resume=True)
     run2["thread"].join(600)
     log = open(out + "/log.txt", encoding="utf-8").read()
@@ -274,11 +321,11 @@ def t_colab():
         refused = False
     except RuntimeError:
         refused = True
-    check("colab_tinystories, surdurme: son paketten devam, model = kesintisiz kosununki (bit duzeyinde), sinav satiri "
-          "cift degil; ayar farkliysa reddeder",
+    check("colab_tinystories, surdurme: son paketten devam (bucket anahtarsiz eski config dahil), model = kesintisiz "
+          "kosununki (bit duzeyinde), sinav satiri cift degil; ayar (steps, bucket) farkliysa reddeder",
           run2["done"] and not run2["error"] and "SURDURULDU adim 2'den" in log
           and [e["step"] for e in ex2] == [0, 1, 2, 3]
-          and all(torch.equal(first[k], second[k]) for k in first) and refused,
+          and all(torch.equal(first[k], second[k]) for k in first) and refused and refused_bucket,
           str(run2["error"] or [e["step"] for e in ex2]))
 
     run3 = C.start("TEST3", d, tmp + "/s", steps=500, every=1, device="cpu", batch_size=4, model_kw=TINY)
@@ -294,7 +341,7 @@ def t_colab():
 
 if __name__ == "__main__":
     print("tests (train_tinystories)")
-    for f in (t_tokens, t_data, t_batches, t_exam, t_colab):
+    for f in (t_tokens, t_data, t_batches, t_bucket, t_exam, t_colab):
         f()
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)

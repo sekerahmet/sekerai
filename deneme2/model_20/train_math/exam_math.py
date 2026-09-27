@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 
 from data_math import EOS, VOCAB, digits, question
+from train_20 import generate
 
 HEALTH = 0.99            # saglik: egitim sorularinin sabit orneginde accuracy (kullanici onayi; gecen en kucuk boyut secilir)
 # model_19'un 8 tani sorusu (belge/OLCULENLER.md §1l); ikisi terim araliginin (0..500) disinda
@@ -31,15 +32,11 @@ def _generate(m, questions, device, chunk=4096):
     for terms in questions:
         buckets.setdefault(len(question(terms)), []).append(terms)
     K = max(len(digits(sum(terms))) for terms in questions) + 1
+    order = [terms for group in buckets.values() for terms in group]   # soru boyuna gore sira: show()'un satirlari
     out = []
-    for group in buckets.values():
-        for i in range(0, len(group), chunk):
-            part = group[i:i + chunk]
-            seq = torch.tensor([[EOS] + question(terms) for terms in part], device=device)
-            for _ in range(K):
-                t = m.logits(seq)[:, -1].argmax(-1)
-                seq = torch.cat([seq, t[:, None]], 1)
-            out += [(terms, seq[r, -K:].tolist()) for r, terms in enumerate(part)]
+    for i in range(0, len(order), chunk):              # farkli boylar ayni parcada (onbellekli uretim satir basina konum tutar)
+        part = order[i:i + chunk]
+        out += list(zip(part, generate(m, [[EOS] + question(terms) for terms in part], K)))
     return out, K
 
 

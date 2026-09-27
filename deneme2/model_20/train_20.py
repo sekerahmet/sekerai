@@ -11,7 +11,8 @@ import math
 import torch
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from model_20 import (COPY_PATH, LAYER_NORM, ROPE, STREAM_NORM, BigramModel, BlockModel, SequenceModel, deviation)
+from model_20 import (COPY_PATH, LAYER_NORM, ROPE, STREAM_NORM, AttentionCache, BigramModel, BlockModel, SequenceModel,
+                      deviation)
 from model_20_transformer import TransformerModel
 
 SETTINGS = {                      # capa lr/wd gibi deneme sayisi; 1e-2 fazla sertti (kayip 1,284 > 1,270)
@@ -141,7 +142,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     kesintisiz kosuyla bit duzeyinde ayni -- CPU'da; GPU'da compile token gradyanini atomik toplar, son bitler oynayabilir);
     o adimin callback'i ve kaydi tekrarlanmaz.
     batches(step) -> (ids, mask): buyuk veri icin her adimda bir parca (mini-batch); verilirse ids, mask kullanilmaz (None
-    olabilir).  Adimin fonksiyonu olmali (surdurmede ayni parca gelsin); compile icin parcalarin sekli sabit olmali.
+    olabilir).  Adimin fonksiyonu olmali (surdurmede ayni parca gelsin).  Sekil adimdan adima degisebilir (bucket):
+    compile ikinci sekilde dinamik sekilli tek grafige gecer.
     model_kw: modele gecen ayarlar (BlockModel: d, turns, units, t_max ...; transformer: d, layers, heads, units)."""
     assert batches is not None or ids is not None, "ids/mask ya da batches verilmeli"
     assert setting in STEP3 or not copy_path, "copy_path yalniz Adim 3 (BlockModel) icin"
@@ -235,8 +237,13 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
 
 
 @torch.no_grad()
-def generate(model, prompts, n):
-    """Acgozlu uretim: ayni uzunluktaki istemler birlikte, her birine n token.  -> id listeleri (yalniz uretilen)."""
+def generate(model, prompts, n, cached=True):
+    """Acgozlu uretim, her isteme n token.  -> id listeleri (yalniz uretilen).
+    cached (BlockModel): istem bir kez, sonra her token yalniz kendi konumunu hesaplar (AttentionCache); butun istemler
+    tek batch'te (farkli uzunluk: sagdan dolgu, satir basina konum).  Degilse: ayni uzunluktaki istemler birlikte ve her
+    token'da butun dizi yeniden hesaplanir (transformer; ayni token'lar, skorlar float yuvarlamasina kadar)."""
+    if cached and isinstance(model, BlockModel):
+        return generate_cached(model, prompts, n)
     device = next(model.parameters()).device
     out = [None] * len(prompts)
     groups = {}
@@ -249,3 +256,24 @@ def generate(model, prompts, n):
         for row, i in zip(ids[:, ids.shape[1] - n:].tolist(), idx):
             out[i] = row
     return out
+
+
+@torch.no_grad()
+def generate_cached(model, prompts, n):
+    """generate'in onbellekli hali (BlockModel): istem ileri hesabi bir kez (tur basina AttentionCache doldurulur), sonra
+    her adimda satir basina tek yeni konum turlardan gecer.  Is: istem + n - 1 konum (tam yeniden hesapta sum(L + i))."""
+    if n <= 0:
+        return [[] for _ in prompts]
+    device = next(model.parameters()).device
+    lengths = [len(p) for p in prompts]
+    ids = torch.zeros(len(prompts), max(lengths), dtype=torch.long)
+    for i, p in enumerate(prompts):
+        ids[i, :len(p)] = torch.tensor(p)
+    ids, L = ids.to(device), torch.tensor(lengths, device=device)
+    caches = [AttentionCache(L, max(lengths) + n) for _ in range(model.turns)]
+    token = model.logits(ids, caches)[torch.arange(len(prompts), device=device), L - 1].argmax(-1)
+    out = [token]
+    for _ in range(n - 1):
+        token = model.logits(token[:, None], caches)[:, 0].argmax(-1)
+        out.append(token)
+    return torch.stack(out, 1).tolist()
