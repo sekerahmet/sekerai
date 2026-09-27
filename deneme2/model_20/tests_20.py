@@ -163,6 +163,30 @@ def t_data():
           and len(s["train"]) == 2240 and D.audit(s) == 192
           and counts == {"1R_T": 640, "2R_T": 192, "2R_UT": 192}, str(bad[:2] or leak[:1] or short[:1] or counts))
 
+    u = D.build(step_answers=True, step_marker=False)
+    same_chains = sorted(tuple(t[1:]) for t in trained) == sorted(tuple(t) for t in u["train"] if t[0] == "Who" and t.index("?") == 8)
+    same_exam = [(e["cls"], e["prompt"][1:] if e["prompt"][0] == "<steps>" else e["prompt"], e["answers"]) for e in s["exam"]] \
+        == [(e["cls"], e["prompt"], e["answers"]) for e in u["exam"]]
+    check("veri, STEP_MARKER=False: ayni zincirler ve sinav, yalniz '<steps>' yok (sozluk 237, iz 3898f9b3d551); audit gecer; "
+          "varsayilan (True) iz degismedi",
+          same_chains and same_exam and "<steps>" not in u["vocab"] and len(u["vocab"]) == 237 and u["fingerprint"] == "3898f9b3d551"
+          and D.audit(u) == 192 and s["fingerprint"] == "7ae5615623aa" and len(u["train"]) == 2240, u["fingerprint"])
+
+    L = D.build(step_answers=True, long_1r=True)
+    one = [e for e in L["exam"] if e["cls"] == "1R_T"]
+    long_qa = [t for t in L["train"] if t[0] == "Who" and t.index("?") == 6]
+    textL = "\n".join(D.detokenize(t) for t in L["train"])
+    owen = "Who is Owen Evans's father? Owen Evans's father is David Evans."
+    check("veri, LONG_1R: 1R soru-cevabi tam cumle (640, tutulanlar dahil); zincirler ve 2R sinavi ayni; 1R_T'de beklenen "
+          "cumle; 2R_UT adimlari metinde yok; audit gecer; kapaliyken iz degismedi",
+          len(long_qa) == 640 and all(t[7:9] == t[2:4] and t[9:11] == ["'s", t[5]] for t in long_qa) and owen in textL
+          and [t for t in L["train"] if t[0] == "<steps>"] == trained
+          and [e for e in L["exam"] if e["cls"] != "1R_T"] == [e for e in s["exam"] if e["cls"] != "1R_T"]
+          and all(e["steps"] == e["subject"].split() + ["'s", e["path"][0], "is"] + e["answers"][0].split() + ["."] for e in one)
+          and not [e for e in L["exam"] if e["cls"] == "2R_UT" and D.detokenize(e["steps"]) in textL]
+          and D.audit(L) == 192 and L["long_1r"] and not s["long_1r"] and s["fingerprint"] == "7ae5615623aa",
+          L["fingerprint"])
+
 
 def reference_logits(PF, shift, W, scale, ids):
     """Tasarim formulu, float64, modelden bagimsiz: PL = norm(PF+shift), q = norm(W PL_i), skor_j = scale <q, PL_j>."""
@@ -665,6 +689,49 @@ def t_transformer():
           "%.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"]))
 
 
+def t_resume():
+    import copy
+    import tempfile
+    import colab_20 as C
+    s = D.build(step_answers=True)
+    ids, mask = TR.sequences(s)
+    ids, mask = ids[:40], mask[:40]
+    nv = len(s["vocab"])
+    for kw in (dict(), dict(copy_path=True), dict(weight_decay=0.1)):
+        packs, seen_full, seen_resumed = {}, [], []
+
+        def keep(step, model, opt):
+            packs[step] = dict(step=step, model=copy.deepcopy(model.state_dict()), optimizer=copy.deepcopy(opt.state_dict()))
+        full, _ = TR.train_seq("shared", ids, mask, nv, steps=6, log_at=(), save_every=2, save=keep, every=2,
+                               callback=lambda st, m, nll: seen_full.append(st), **kw)
+        resumed, _ = TR.train_seq("shared", ids, mask, nv, steps=6, log_at=(), checkpoint=packs[4], every=2,
+                                  callback=lambda st, m, nll: seen_resumed.append(st), **kw)
+        same = all(torch.equal(a, b) for a, b in zip(full.state_dict().values(), resumed.state_dict().values()))
+        check("surdurme: 4. adim paketinden surdurulen = kesintisiz 6 adim, bit duzeyinde; paketler 2, 4, 6; sinav tekrarlanmaz %s"
+              % (kw or ""), same and sorted(packs) == [2, 4, 6] and seen_full == [0, 2, 4, 6] and seen_resumed == [6],
+              "%s %s %s" % (sorted(packs), seen_full, seen_resumed))
+
+    out = tempfile.mkdtemp() + "/r"
+    run = C.start("TEST_R", s, out, steps=3, every=100, device="cpu", compile=False, save_every=1)
+    run["thread"].join(600)
+    files = sorted(f for f in os.listdir(out) if f.startswith("checkpoint_t"))
+    os.remove(os.path.join(out, "checkpoint_t00003.pt"))            # 2. adimdan sonra kesilmis gibi
+    lines_before = open(os.path.join(out, "log.txt"), encoding="utf-8").read().count("\n")
+    run2 = C.start("TEST_R", s, out, steps=3, every=100, device="cpu", compile=False, save_every=1, resume=True)
+    run2["thread"].join(600)
+    log = open(os.path.join(out, "log.txt"), encoding="utf-8").read()
+    try:
+        C.start("TEST_R2", s, out, steps=5, every=100, device="cpu", compile=False, save_every=1, resume=True)
+        refused = False
+    except RuntimeError:
+        refused = True
+    check("surdurme, colab_20: her adimda checkpoint_tNNNNN.pt; resume=True son paketten devam eder, gunluge yazar, "
+          "klasoru tasimaz; ayar farkliysa reddeder",
+          files == ["checkpoint_t00001.pt", "checkpoint_t00002.pt", "checkpoint_t00003.pt"] and run2["done"]
+          and not run2["error"] and "SURDURULDU adim 2'den" in log and log.count("\n") > lines_before
+          and os.path.exists(os.path.join(out, "checkpoint_t00003.pt")) and refused, str(run2["error"] or files))
+
+
 def t_colab():
     import tempfile
     import colab_20 as C
@@ -713,6 +780,15 @@ def t_colab():
     C.pulse(1)
     C.stop()
 
+    L = D.build(step_answers=True, long_1r=True)
+    run = C.start("TEST_L", L, out_dir + "/l", steps=1, every=100, device="cpu", compile=False)
+    run["thread"].join(600)
+    fin = json.load(open(out_dir + "/l/final.json", encoding="utf-8")) if os.path.exists(out_dir + "/l/final.json") else {}
+    ex = json.load(open(out_dir + "/l/exams.json")) if os.path.exists(out_dir + "/l/exams.json") else [{}]
+    check("colab_20: LONG_1R verisinde 1R_T tam cumleyle puanlanir (AC, EX), final.json'da 1R_T_given0",
+          run["done"] and not run["error"] and "1R_T_given0" in fin and "1R_T_EX" in ex[0]
+          and len(fin["1R_T_given0"]["rows"]) == 640, str(run["error"] or sorted(fin)))
+
     run = C.start("TEST_T", s, out_dir + "/t", steps=2, every=100, device="cpu", compile=False, setting="transformer")
     run["thread"].join(600)
     cfg = json.load(open(out_dir + "/t/config.json"))
@@ -728,7 +804,7 @@ def F_ce(logits, targets):
 
 if __name__ == "__main__":
     print("tests (model_20)")
-    for f in (t_data, t_model, t_step2, t_step3, t_copy, t_transformer, t_colab):
+    for f in (t_data, t_model, t_step2, t_step3, t_copy, t_transformer, t_resume, t_colab):
         f()
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)

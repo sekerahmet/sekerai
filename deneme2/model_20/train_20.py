@@ -122,13 +122,17 @@ def sequences(data):
 
 
 def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, lr_floor=LR_FLOOR, grad_clip=GRAD_CLIP,
-              weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None, compile=False, copy_path=COPY_PATH):
+              weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None, compile=False, copy_path=COPY_PATH,
+              save_every=None, save=None, checkpoint=None):
     """Standart tarif: cosine decay (LR -> LR x lr_floor) + gradient clipping.  lr_floor=None, grad_clip=None: eski tarif
     (sabit lr); 27 Eylul oncesi kayitli Adim 2-3 sonuclari onunla uretildi.  weight_decay > 0: AdamW, yalniz W_ matrisleri.
     callback(step, model, nll): her `every` adimda, o adimin guncellemesinden ONCE (sinav, kayit, durdurma).
     compile: yalniz kayip hesabi torch.compile ile (model_19'daki gibi); full batch'te sekil sabit, bir kez derlenir.
     copy_path: Oneri A (kopya yolu ve kapisi), yalniz Adim 3 modelinde.  setting "transformer": kiyas modeli
-    (model_20_transformer), ayni tarif."""
+    (model_20_transformer), ayni tarif.
+    save(step, model, opt): her save_every adimda, callback'ten sonra, guncellemeden ONCE -- adim s paketi s guncelleme
+    gormus modeli ve optimizer'i tasir.  checkpoint {step, model, optimizer}: o adimdan surdurur (ayni steps ve tarifle
+    kesintisiz kosuyla bit duzeyinde ayni); o adimin callback'i ve kaydi tekrarlanmaz."""
     assert setting in STEP3 or not copy_path, "copy_path yalniz Adim 3 (BlockModel) icin"
     assert setting != "transformer" or not weight_decay, "transformer icin weight decay gruplari tanimli degil (W_ adlari Linear)"
     if setting == "transformer":
@@ -151,9 +155,15 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
                                 lr=lr)
     else:
         opt = torch.optim.Adam(params, lr=lr)
+    first = 0
+    if checkpoint is not None:                             # surdurme: agirlik + Adam momentleri + adim
+        model.load_state_dict(checkpoint["model"])
+        opt.load_state_dict(checkpoint["optimizer"])
+        first = checkpoint["step"]
     loss_fn = torch.compile(model.loss) if compile else model.loss
     curve = []
-    for step in range(steps + 1):
+    for step in range(first, steps + 1):
+        resumed_here = checkpoint is not None and step == first
         if lr_floor is not None:                           # lr_t = lr · (floor + (1 - floor) · (1 + cos(π t / T)) / 2)
             for group in opt.param_groups:
                 group["lr"] = lr * (lr_floor + (1 - lr_floor) * 0.5 * (1 + math.cos(math.pi * step / max(steps, 1))))
@@ -164,8 +174,10 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
                                          if isinstance(model, BlockModel) else
                                          model.attention.W_context.norm().item() if getattr(model, "attention", None) is not None
                                          else 0.0)))
-        if callback is not None and every and step % every == 0:
+        if callback is not None and every and step % every == 0 and not resumed_here:
             callback(step, model, nll.item())
+        if save is not None and save_every and step > 0 and step % save_every == 0 and not resumed_here:
+            save(step, model, opt)
         if step == steps:
             break
         opt.zero_grad()                                    # onceki adimin gradyanlarini sil

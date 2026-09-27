@@ -7,7 +7,8 @@
     C.stop()       bayrak: iplik bir sonraki sinavda modeli kaydedip cikar
 
 OUT/config.json kosu ayarlari, OUT/log.txt her sinavin satiri, OUT/exams.json butun sinavlar, OUT/model.pt son agirlik,
-OUT/final.json sonda <steps> siniflari uc kosulla (model yazar / ozne verilir / ilk cumle verilir) ve yazilanlar.
+OUT/final.json sonda <steps> siniflari uc kosulla (model yazar / ozne verilir / ilk cumle verilir) ve yazilanlar,
+OUT/checkpoint_tNNNNN.pt her save_every adimda surdurme paketi (kesilirse start(..., resume=True)).
 """
 import json
 import os
@@ -24,22 +25,37 @@ STEPS_CLS = ("2R_T", "2R_UT")         # "<steps>" ile uretim: egitimde gorulen /
 RUNS = {}
 
 
-def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True, setting="shared", **train_kw):
+def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True, setting="shared", save_every=None,
+          resume=False, **train_kw):
     """Egitimi arka planda baslatir, hemen doner.  out doluysa once out_eski_<zaman>'a TASINIR, silinmez.
-    setting: "shared" (model_20) ya da "transformer" (kiyas modeli, model_20_transformer)."""
+    setting: "shared" (model_20) ya da "transformer" (kiyas modeli, model_20_transformer).
+    save_every: her save_every adimda out/checkpoint_tNNNNN.pt {step, model, optimizer}.  resume=True: out'taki son
+    paketten surdurur -- klasor tasinmaz, gunluk ve sinavlar uzar; ayarlar config.json ile ayni olmali."""
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
-    if os.path.isdir(out) and os.listdir(out):
-        os.rename(out, out + "_eski_" + time.strftime("%Y%m%d_%H%M%S"))
-    os.makedirs(out, exist_ok=True)
     n = {c: len(TR.questions(data, c)) for c in SHORT + STEPS_CLS}
-    run = dict(name=name, out=out, lines=[], exams=[], stop=False, error=None, done=False, t0=time.time())
     # varsayilanlar da yazilir (lr, cosine tabani, clip, wd, kopya yolu): config tek basina koşuyu tarif etsin
-    json.dump(dict(name=name, setting=setting, steps=steps, seed=seed, every=every, device=device, compile=compile,
-                   fingerprint=data["fingerprint"], train=len(data["train"]), sizes=n,
-                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
-                               copy_path=TR.COPY_PATH), **train_kw)),
-              open(os.path.join(out, "config.json"), "w"), indent=1)
+    config = dict(name=name, setting=setting, steps=steps, seed=seed, every=every, device=device, compile=compile,
+                  fingerprint=data["fingerprint"], train=len(data["train"]), sizes=n, save_every=save_every,
+                  **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
+                              copy_path=TR.COPY_PATH), **train_kw))
+    checkpoint = None
+    if resume:
+        packs = sorted(f for f in os.listdir(out) if f.startswith("checkpoint_t")) if os.path.isdir(out) else []
+        if not packs:
+            raise RuntimeError("%s: surdurme paketi yok; bastan kosmak ayri karar (resume=False)" % out)
+        saved = json.load(open(os.path.join(out, "config.json")))
+        differ = sorted(k for k in set(saved) | set(config) if k not in ("device", "compile") and saved.get(k) != config.get(k))
+        if differ:
+            raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)
+        checkpoint = torch.load(os.path.join(out, packs[-1]), map_location=device)
+    else:
+        if os.path.isdir(out) and os.listdir(out):
+            os.rename(out, out + "_eski_" + time.strftime("%Y%m%d_%H%M%S"))
+        os.makedirs(out, exist_ok=True)
+        json.dump(config, open(os.path.join(out, "config.json"), "w"), indent=1)
+    run = dict(name=name, out=out, lines=[], stop=False, error=None, done=False, t0=time.time(),
+               exams=json.load(open(os.path.join(out, "exams.json"))) if resume else [])
 
     class Stopped(Exception):
         pass
@@ -52,6 +68,10 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
     def callback(step, model, nll):
         e = dict(step=step, nll=nll, secs=round(time.time() - run["t0"], 1))
         for c in SHORT:
+            if data.get("long_1r"):              # 1R cevabi tam cumle: yakinin adi cevapta dogru mu (AC)
+                counts, _ = TR.exam_steps(model, data, c)
+                e[c], e[c + "_EX"] = counts["AC"], counts["EX"]
+                continue
             qs = TR.questions(data, c)
             pred = TR.read_questions(model, qs, data["vocab"])[0].tolist()
             e[c] = sum(int(p) in q[1] for p, q in zip(pred, qs))
@@ -67,15 +87,22 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             raise Stopped()
 
+    def save(step, model, opt):
+        torch.save(dict(step=step, model=model.state_dict(), optimizer=opt.state_dict()),
+                   os.path.join(out, "checkpoint_t%05d.pt" % step))
+
     def job():
         try:
+            if checkpoint is not None:
+                note("SURDURULDU adim %d'den (%s)" % (checkpoint["step"], "checkpoint_t%05d.pt" % checkpoint["step"]))
             ids, mask = TR.sequences(data)
             model, _ = TR.train_seq(setting, ids, mask, len(data["vocab"]), steps=steps, seed=seed, device=device,
-                                    every=every, callback=callback, log_at=(), compile=compile, **train_kw)
+                                    every=every, callback=callback, log_at=(), compile=compile, save_every=save_every,
+                                    save=save, checkpoint=checkpoint, **train_kw)
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             final = {}
-            for c in STEPS_CLS:
-                for given in (0, 2, 8):
+            for c, givens in [(c, (0,)) for c in SHORT if data.get("long_1r")] + [(c, (0, 2, 8)) for c in STEPS_CLS]:
+                for given in givens:
                     counts, rows = TR.exam_steps(model, data, c, given)
                     final["%s_given%d" % (c, given)] = dict(counts=counts, rows=rows)
                     note("SON %-13s verilen %d: %s" % (c, given, "  ".join("%s %d" % kv for kv in counts.items())))
