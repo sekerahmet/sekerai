@@ -133,28 +133,14 @@ def t_data():
           all(not e["co_written"] or e["path"][-1] in ("son", "daughter", "cousin")
               for e in d["exam"] if not e["cls"].startswith("memory")))
 
-    # Adim 4: ara adimli cevaplar; her adim Adim 0-3 metninde yazili bir 1R cumlesi olmali
+    # Adim 4: yalniz 1R + ara adimli 2R; her adim Adim 0-3 metninde yazili bir 1R cumlesi olmali
     s = D.build(step_answers=True)
     stmts = {D.detokenize(t) for t in d["train"] if t[0] != "Who"}
     bad = []
-    for e in (e for e in s["exam"] if e["cls"].endswith("_steps")):
-        sents, cur = [], []
-        for t in e["steps"]:
-            cur.append(t)
-            if t == ".":
-                sents.append(D.detokenize(cur))
-                cur = []
-        who = e["subject"]
-        for txt in sents:
-            if txt not in stmts or not txt.startswith(who + "'s "):
-                bad.append(txt)
-            who = txt[:-1].split(" is ")[1]
-        if who not in e["answers"] or len(sents) != len(e["path"]):
-            bad.append(D.detokenize(e["prompt"]))
     trained = [t for t in s["train"] if t[0] == "<steps>"]
-    for t in trained:                            # egitimdeki her ara adimli zincir de yazili 1R cumlelerinden
-        q_end = t.index("?")
-        who, rest = " ".join(t[3:5]), t[q_end + 1:]
+    walks = [(e["subject"], e["steps"]) for e in s["exam"] if e["cls"] in ("2R_T", "2R_UT")]
+    walks += [(" ".join(t[3:5]), t[t.index("?") + 1:]) for t in trained]
+    for who, rest in walks:
         for i in range(0, len(rest), 8):
             txt = D.detokenize(rest[i:i + 8])
             if txt not in stmts or not txt.startswith(who + "'s "):
@@ -162,18 +148,19 @@ def t_data():
             who = txt[:-1].split(" is ")[1]
     held = set(d["held"])
     text = "\n".join(D.detokenize(t) for t in s["train"])
-    leak = [e for e in s["exam"] if e["cls"] in ("chain2_steps", "chain3_steps") and D.detokenize(e["steps"]) in text]
-    want = {tuple(e["prompt"] + e["steps"]) for e in s["exam"] if e["cls"] == "memory_steps"}
+    leak = [e for e in s["exam"] if e["cls"] == "2R_UT" and D.detokenize(e["steps"]) in text]
+    short = [t for t in s["train"] if t[0] != "<steps>" and (t.count("'s") > 1 or any(r in t for r in DEFINITIONS))]
+    want = {tuple(e["prompt"] + e["steps"]) for e in s["exam"] if e["cls"] == "2R_T"}
     counts = {}
     for e in s["exam"]:
-        if e["cls"].endswith("_steps"):
-            counts[e["cls"]] = counts.get(e["cls"], 0) + 1
-    check("veri, STEP_ANSWERS: adimlar yazili 1R cumleleri, zincir dogru yurunur, son ad cevap; 160 ozne, tutulan torun "
-          "hic ozne degil, tutulan sorunun adim dizisi metinde yok; audit gecer",
-          not bad and not leak and want <= {tuple(t) for t in trained} and len(trained) == 3320
+        counts[e["cls"]] = counts.get(e["cls"], 0) + 1
+    check("veri, STEP_ANSWERS: egitimde yalniz 1R + 2 adimli ara adimli 2R (kisa 2R, adli, 3R yok); adimlar yazili 1R "
+          "cumleleri; 160 ozne, tutulan torun hic ozne degil, 2R_UT adimlari metinde yok; 2R_T egitimde; audit gecer",
+          not bad and not leak and not short and want <= {tuple(t) for t in trained} and len(trained) == 960
+          and all(t.index("?") == 9 for t in trained)
           and len({" ".join(t[3:5]) for t in trained}) == 160 and not {" ".join(t[3:5]) for t in trained} & held
-          and len(s["train"]) == 5880 and D.audit(s) == 800
-          and counts == dict(memory_steps=312, chain2_steps=192, chain3_steps=128), str(bad[:2] or leak[:1] or counts))
+          and len(s["train"]) == 2240 and D.audit(s) == 192
+          and counts == {"1R_T": 640, "2R_T": 192, "2R_UT": 192}, str(bad[:2] or leak[:1] or short[:1] or counts))
 
 
 def reference_logits(PF, shift, W, scale, ids):
@@ -510,7 +497,7 @@ def t_colab():
     import colab_20 as C
     from model_20 import BlockModel
     s = D.build(step_answers=True)
-    e = next(e for e in s["exam"] if e["cls"] == "chain2_steps")
+    e = next(e for e in s["exam"] if e["cls"] == "2R_UT")
     good = TR.score_steps(list(e["steps"]), e)
     bad = list(e["steps"])
     bad[-3] = "Tom"
@@ -519,7 +506,7 @@ def t_colab():
           all(good.values()) and not worse["final"] and not worse["exact"] and worse["bridge"] and worse["form"])
 
     m = BlockModel(len(s["vocab"]), d=16, units=8)
-    prompts = [TR.questions(s, "chain2_steps")[i][0] for i in (0, 1)] + [TR.questions(s, "chain3_steps")[0][0]]
+    prompts = [TR.questions(s, "2R_UT")[i][0] for i in (0, 1)] + [TR.questions(s, "1R_T")[0][0]]
     out = TR.generate(m, prompts, 5)
     manual = []
     with torch.no_grad():

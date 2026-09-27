@@ -57,9 +57,10 @@ NAMES = {
 # Bitisik: kuzenleri iki yandaki haneler oldugu icin kenardaki iki hanenin (Evans, Hughes) kuzen sorulari co_written olur.
 HELD_HOUSEHOLDS = ("Evans", "Fisher", "Green", "Hill",
                    "Nelson", "Parker", "Quinn", "Reed", "Scott", "Turner", "Walker", "Young", "Ward", "Cooper", "Bell", "Hughes")
-# Adim 4: tutulan torunlar disindaki herkesin 2 ve 3 adimli temel-iliski zincirleri "<steps>" ile ara adimli yazilir
-# ("<steps> Who is X 's r1 's r2 ? X 's r1 is B . B 's r2 is Y ."); sinava tutulan hanelerin ara adimli sorulari
-# eklenir.  False: veri Adim 0-3 ile birebir ayni
+# Adim 4: egitimde YALNIZ 1R cumleleri + tutulan torunlar disindaki herkesin 2 adimli temel-iliski zincirleri "<steps>" ile
+# ara adimli ("<steps> Who is X 's r1 's r2 ? X 's r1 is B . B 's r2 is Y .").  Kisa cevapli 2R, adli iliskiler
+# (grandfather ...) ve 3R YOK (kullanici, 27 Eylul).  Sinav: 1R_T, 2R_T (egitimde), 2R_UT (tutulan, hic gorulmemis).
+# False: veri Adim 0-3 ile birebir ayni
 STEP_ANSWERS = False
 BASE = ("father", "mother", "brother", "sister", "son", "daughter")
 # turemis iliski = bu zincirlerin birlesimi; dunyada var olan zincirler yazilir/sorulur
@@ -196,7 +197,8 @@ def build(step_answers=STEP_ANSWERS):
     people, rel = build_world()
     all_facts = facts(people, rel)
     held = {x for x, p in people.items() if p["household"] in HELD_HOUSEHOLDS}
-    written = [(x, path, y, kind) for x, path, y, kind in all_facts if kind == "base" or x not in held]
+    # step_answers: turemis olgular (kisa 2R, adli, 3R) yazilmaz
+    written = [(x, path, y, kind) for x, path, y, kind in all_facts if kind == "base" or (x not in held and not step_answers)]
     train = []
     for x, path, y, kind in written:
         train += [statement(x, path, y), qa(x, path, y)]
@@ -206,13 +208,12 @@ def build(step_answers=STEP_ANSWERS):
         for x in people:
             if x in held:
                 continue
-            for n in (2, 3):
-                for path in itertools.product(BASE, repeat=n):
-                    walk = [follow(rel, x, path[:i]) for i in range(1, n + 1)]
-                    if all(len(w) == 1 for w in walk):
-                        walk = [w[0] for w in walk]
-                        if walk[-1] != x and walk[-1] not in follow(rel, x, path[-1:]) and not held & set(walk):
-                            train.append(["<steps>"] + question(x, path) + step_sentences(rel, x, path))
+            for path in itertools.product(BASE, repeat=2):
+                walk = [follow(rel, x, path[:i]) for i in (1, 2)]
+                if all(len(w) == 1 for w in walk):
+                    walk = [w[0] for w in walk]
+                    if walk[-1] != x and walk[-1] not in follow(rel, x, path[-1:]) and not held & set(walk):
+                        train.append(["<steps>"] + question(x, path) + step_sentences(rel, x, path))
     pairs = {(a, b) for a, _, b, _ in written} | {(b, a) for a, _, b, _ in written}
 
     exam = []
@@ -220,21 +221,20 @@ def build(step_answers=STEP_ANSWERS):
     for x, path, y, kind in all_facts:
         grouped.setdefault((x, path, kind), []).append(y)
     for (x, path, kind), ys in grouped.items():
-        if kind == "base":
-            cls = "memory_base"
-        elif x not in held:
-            cls = "memory_derived"
-        else:
-            cls = "%s%d" % (kind, hops(path))
-        exam.append(dict(cls=cls, subject=x, path=path, prompt=question(x, path), answers=sorted(ys),
-                         co_written=any((x, y) in pairs for y in ys)))
-    if step_answers:                             # ayni zincir sorulari "<steps>" ile; beklenen ara adimlar "steps"te
-        for (x, path, kind), ys in grouped.items():
-            walk = {follow(rel, x, path[:i])[0] for i in range(1, len(path) + 1)} if kind == "chain" else set()
-            if kind == "chain" and (x in held or not held & walk):     # ogretmede yalniz egitimde olan zincirler
-                exam.append(dict(cls="chain%d_steps" % len(path) if x in held else "memory_steps", subject=x, path=path,
+        co = any((x, y) in pairs for y in ys)
+        if not step_answers:
+            cls = "memory_base" if kind == "base" else "memory_derived" if x not in held else "%s%d" % (kind, hops(path))
+            exam.append(dict(cls=cls, subject=x, path=path, prompt=question(x, path), answers=sorted(ys), co_written=co))
+        elif kind == "base":                     # 1R_T: egitimde yazili tek adim
+            exam.append(dict(cls="1R_T", subject=x, path=path, prompt=question(x, path), answers=sorted(ys), co_written=co))
+        elif kind == "chain" and len(path) == 2:
+            # "<steps>" ile; beklenen ara adimlar "steps"te.  2R_T: ogretme torunu, zincir egitimde (tutulan torundan
+            # gecenler egitimde yok, sinavda da yok); 2R_UT: tutulan torun, hic gorulmemis
+            walk = {follow(rel, x, path[:i])[0] for i in (1, 2)}
+            if x in held or not held & walk:
+                exam.append(dict(cls="2R_UT" if x in held else "2R_T", subject=x, path=path,
                                  prompt=["<steps>"] + question(x, path), answers=sorted(ys),
-                                 steps=step_sentences(rel, x, path), co_written=any((x, y) in pairs for y in ys)))
+                                 steps=step_sentences(rel, x, path), co_written=co))
 
     vocab = [PAD, EOS] + sorted({t for s in train for t in s} | {t for e in exam for t in e["prompt"]})
     h = hashlib.sha256()
@@ -256,7 +256,7 @@ def audit(data):
     """Tutulan sorunun zinciri ya da adi egitim metninde HIC gecmez; zincir cevabi ozneye ya da son iliskinin ozneye
     uygulanmasina donmez; her ad benzersiz.  Bozuksa DURUR."""
     text = "\n".join(detokenize(s) for s in data["train"])
-    held_q = [e for e in data["exam"] if not e["cls"].startswith("memory")]
+    held_q = [e for e in data["exam"] if not (e["cls"].startswith("memory") or e["cls"] in ("1R_T", "2R_T"))]
     for e in held_q:
         assert detokenize(phrase(e["subject"], e["path"])) not in text, e["prompt"]
     for x, path, y, kind in data["facts"]:

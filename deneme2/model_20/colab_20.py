@@ -19,8 +19,8 @@ import torch
 
 import train_20 as TR
 
-SHORT = ("memory_base", "memory_derived", "chain2", "chain3", "named2")
-STEPS_CLS = ("memory_steps", "chain2_steps", "chain3_steps")
+SHORT = ("1R_T",)                    # ilk token: tek adimli bilgi, egitimde yazili
+STEPS_CLS = ("2R_T", "2R_UT")         # "<steps>" ile uretim: egitimde gorulen / hic gorulmemis 2R
 RUNS = {}
 
 
@@ -55,12 +55,9 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
             e.update({"%s_%s" % (c, k): v for k, v in counts.items()})
         run["exams"].append(e)
         json.dump(run["exams"], open(os.path.join(out, "exams.json"), "w"), indent=1)
-        note("adim %5d  nll %.3f  1R %d/%d  zincir %d/%d  chain2 %d/%d | memory_steps %d/%d | chain2_steps son %d kopru %d "
-             "ozne %d /%d | chain3_steps son %d /%d  (%.0f sn)" % (
-                 step, nll, e["memory_base"], n["memory_base"], e["memory_derived"], n["memory_derived"], e["chain2"],
-                 n["chain2"], e["memory_steps_exact"], n["memory_steps"], e["chain2_steps_final"],
-                 e["chain2_steps_bridge"], e["chain2_steps_subject"], n["chain2_steps"], e["chain3_steps_final"],
-                 n["chain3_steps"], e["secs"]))
+        note("adim %5d  nll %.3f  1R_T %d/%d | 2R_T birebir %d/%d | 2R_UT son %d birebir %d kopru %d ozne %d /%d  (%.0f sn)" % (
+                 step, nll, e["1R_T"], n["1R_T"], e["2R_T_exact"], n["2R_T"], e["2R_UT_final"], e["2R_UT_exact"],
+                 e["2R_UT_bridge"], e["2R_UT_subject"], n["2R_UT"], e["secs"]))
         if run["stop"]:
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             raise Stopped()
