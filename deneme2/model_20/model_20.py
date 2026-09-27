@@ -21,6 +21,12 @@ Adim 3: BlockModel.  Her konumun bir durumu var (hidden, h); TURNS tur boyunca B
                                                         (W_fact_out 0'dan)
     cikis: skor = scale <h, PL>                         son durum dogrudan noktalarla karsilastirilir (W_next yok)
     SHARED_BLOCK: ayni Block her turda (True) ya da her tura ayri Block (False)
+
+Oneri A, COPY_PATH: attention ayni agirliklarla o konumlardaki kelimelerin kendisini de getirir, bir kapi yazilip
+yazilmayacagina karar verir.
+      c'_t = sum_j a_tj PL_j                            kelime noktalari: turlarda degismez
+      g_t  = sigmoid(W_copy_gate h_t + copy_gate_bias)  kapi: bu konumda kopyala mi (0-1)
+      h_t  = norm(h_t + W_context c_t + g_t W_copy c'_t) (W_copy 0'dan)
 """
 import math
 
@@ -38,6 +44,7 @@ T_MAX = 512          # baglam siniri (hedef); attention olcegi bundan: 512 konum
 TURNS = 2            # Adim 3: blok tur sayisi (kullanici karari: 2)
 SHARED_BLOCK = True  # True: ayni Block her turda; False: her tura ayri Block (ayri katmanlar)
 FACT_UNITS = 256     # FactUnits birim sayisi; 4 x D (transformer aliskanligi), olculmedi
+COPY_PATH = False    # Oneri A: kopya yolu ve kapisi; False = bugunku model birebir (kullanici onayi, 27 Eylul)
 
 
 def scale_for(n, confidence=CONFIDENCE):
@@ -107,7 +114,7 @@ class BigramModel(torch.nn.Module):
 class CausalAttention(torch.nn.Module):
     """Nedensel tam attention; getirdigi sey girdinin kendisi (Adim 2: PL noktalari, Adim 3: durumlar).  W_context 0'dan."""
 
-    def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, seed=POINTS_SEED + 2):
+    def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, seed=POINTS_SEED + 2, copy_path=False):
         super().__init__()
         g = torch.Generator().manual_seed(seed)
         # W_query, W_key: d x d, rastgele / √d baslar, egitimle degisir.  PL'yi baska bir yone ceviren dogrusal donusum
@@ -118,20 +125,29 @@ class CausalAttention(torch.nn.Module):
         self.scale = scale_for(t_max, confidence)                                  # ln(0,99 · 511 / 0,01) = 10,83
         # V (value) matrisi yok: W_context'ten once ikinci bir matris, arada dogrusal olmayan adim olmadigi icin
         # W_context ile carpimi tek bir d x d matrise esit olurdu
+        self.copy_path = copy_path
+        if copy_path:                                     # Oneri A; sifirlar uretecten sayi cekmez, diger baslangiclar ayni
+            self.W_copy = torch.nn.Parameter(torch.zeros(d, d))                  # getirilen kelimeleri duruma yazar, 0'dan
+            self.W_copy_gate = torch.nn.Parameter(torch.zeros(1, d))             # kapi: bu konumda kopyala mi
+            self.copy_gate_bias = torch.nn.Parameter(torch.zeros(1))             # baslangicta kapi yari acik (0,5)
 
     def queries_keys(self, x):
         # q_t = W_query·PL_t / |W_query·PL_t|      k_j = W_key·PL_j / |W_key·PL_j|      (ara sonuc, saklanmaz)
         return F.normalize(x @ self.W_query.T, dim=-1), F.normalize(x @ self.W_key.T, dim=-1)
 
-    def forward(self, x):
-        """x (B, T, d) PL ya da durum dizisi -> c (B, T, d)."""
+    def forward(self, x, points=None):
+        """x (B, T, d) PL ya da durum dizisi -> c (B, T, d).  points verilirse (Oneri A) ayni agirliklarla (c, c')."""
         q, k = self.queries_keys(x)
         # scaled_dot_product_attention (SDPA) su hesabi yapar, weights() ile ayni:
         #   s_tj = scale · <q_t, k_j>                 her konum t, her konum j icin
         #   j > t ise s_tj = -∞                       is_causal: sonrakilere bakilmaz
         #   a_tj = e^s_tj / Σ_{i<=t} e^s_ti            softmax, satir toplami 1
         #   c_t  = Σ_{j<=t} a_tj · x_j                getirilen: agirlikli karisim (Adim 2: x = PL, Adim 3: x = h)
-        return F.scaled_dot_product_attention(q, k, x, is_causal=True, scale=self.scale)
+        if points is None:
+            return F.scaled_dot_product_attention(q, k, x, is_causal=True, scale=self.scale)
+        # c'_t = Σ a_tj · PL_j: iki deger yan yana tek SDPA'dan, ayni a_tj ile
+        both = F.scaled_dot_product_attention(q, k, torch.cat([x, points], -1), is_causal=True, scale=self.scale)
+        return both[..., :x.shape[-1]], both[..., x.shape[-1]:]
 
     def weights(self, x):
         """Okuma icin acik hesap: a (B, T, T), satir t yalniz j <= t."""
@@ -191,13 +207,20 @@ class FactUnits(torch.nn.Module):
 class Block(torch.nn.Module):
     """Adim 3 bir tur: attention durumlara bakar ve getirdigini duruma yazar; FactUnits durumu donusturur."""
 
-    def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, units=FACT_UNITS, seed=POINTS_SEED + 2):
+    def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, units=FACT_UNITS, seed=POINTS_SEED + 2, copy_path=False):
         super().__init__()
-        self.attention = CausalAttention(d, t_max, confidence, seed)
+        self.attention = CausalAttention(d, t_max, confidence, seed, copy_path=copy_path)
         self.facts = FactUnits(d, units, seed + 1)
 
-    def forward(self, h):
-        h = F.normalize(h + self.attention(h) @ self.attention.W_context.T, dim=-1)   # h_t = norm(h_t + W_context · c_t)
+    def forward(self, h, points=None):
+        at = self.attention
+        if at.copy_path:
+            assert points is not None, "kopya yolu acik: kelime noktalari (points) verilmeli"   # yoksa c, c' batch'ten bolunur
+            c, c_copy = at(h, points)
+            gate = torch.sigmoid(h @ at.W_copy_gate.T + at.copy_gate_bias)          # g_t, (B, T, 1): konumun kendi durumundan
+            h = F.normalize(h + c @ at.W_context.T + gate * (c_copy @ at.W_copy.T), dim=-1)   # + g_t · W_copy · c'_t
+        else:
+            h = F.normalize(h + at(h) @ at.W_context.T, dim=-1)                   # h_t = norm(h_t + W_context · c_t)
         return F.normalize(h + self.facts(h), dim=-1)                                # h_t = norm(h_t + olgu(h_t))
 
 
@@ -206,12 +229,13 @@ class BlockModel(torch.nn.Module):
     (W_context = 0, W_fact_out = 0) durum PL'de kalir: skor = scale <PL_t, PL>."""
 
     def __init__(self, n, d=D, turns=TURNS, shared=SHARED_BLOCK, learn_points=LEARN_POINTS, anchor=ANCHOR,
-                 confidence=CONFIDENCE, t_max=T_MAX, units=FACT_UNITS, seed=POINTS_SEED):
+                 confidence=CONFIDENCE, t_max=T_MAX, units=FACT_UNITS, seed=POINTS_SEED, copy_path=COPY_PATH):
         super().__init__()
         self.tokens = TokenPoints(n, d, learn_points, anchor, seed)
         count = 1 if shared else turns
-        self.blocks = torch.nn.ModuleList(Block(d, t_max, confidence, units, seed + 10 + 2 * i) for i in range(count))
-        self.turns, self.shared = turns, shared
+        self.blocks = torch.nn.ModuleList(Block(d, t_max, confidence, units, seed + 10 + 2 * i, copy_path=copy_path)
+                                          for i in range(count))
+        self.turns, self.shared, self.copy_path = turns, shared, copy_path
         self.scale = scale_for(n, confidence)
 
     def turn_blocks(self):
@@ -220,9 +244,10 @@ class BlockModel(torch.nn.Module):
     def hidden(self, ids):
         """Her turdan sonraki durumlar: [h0 = PL, h1, ..., h_TURNS], her biri (B, T, d)."""
         h = self.tokens.points()[ids]
+        points = h if self.copy_path else None                # Oneri A: kelimelerin kendi noktalari, turlarda degismez
         out = [h]
         for block in self.turn_blocks():
-            h = block(h)
+            h = block(h, points)
             out.append(h)
         return out
 

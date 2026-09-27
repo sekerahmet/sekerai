@@ -17,7 +17,7 @@ e = html.escape
 
 
 def world():
-    d = D.build()
+    d = D.build(step_answers=True)             # bugunku egitim verisi: 1R + ara adimli 2R
     D.audit(d)
     people, rel = d["people"], d["rel"]
     held = set(d["held"])
@@ -29,35 +29,47 @@ def world():
         return e(x)
 
     n = len(D.FAMILIES)
-    cx = cy = 380
+    cx = cy = 450
+
+    def at(r, k):
+        a = math.radians(90 - k * 360 / n)
+        return cx + r * math.cos(a), cy - r * math.sin(a)
+
+    def label(r, k, text, cls, outward):
+        """Yaricap boyunca yazi: 32 aile yan yana yatay yazilamiyor; sol yarida ters donmesin diye 180 cevrilir."""
+        a = 90 - k * 360 / n
+        x, y = at(r, k)
+        right = math.cos(math.radians(a)) > -1e-9
+        rot = -a if right else 180 - a
+        side = ("start" if outward else "end") if right else ("end" if outward else "start")
+        return ('<text x="%.1f" y="%.1f" class="%s" text-anchor="%s" dominant-baseline="middle" transform="rotate(%.1f %.1f %.1f)">%s</text>'
+                % (x, y, cls, side, rot, x, y, text))
+
     parts, fam_pos, hh_pos = [], {}, {}
     for i, f in enumerate(D.FAMILIES):
-        a = math.radians(90 - i * 360 / n)
-        fam_pos[f] = (cx + 300 * math.cos(a), cy - 300 * math.sin(a))
-        b = math.radians(90 - (i + 0.5) * 360 / n)
-        hh_pos[f] = (cx + 172 * math.cos(b), cy - 172 * math.sin(b))
+        fam_pos[f] = at(355, i)
+        hh_pos[f] = at(250, i + 0.5)
     for i, f in enumerate(D.FAMILIES):
         nxt = D.FAMILIES[(i + 1) % n]
         hx, hy = hh_pos[f]
         for src, cls in ((f, "son"), (nxt, "dau")):
             x, y = fam_pos[src]
             parts.append('<line class="ln %s" x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f"/>' % (cls, x, y, hx, hy))
-    for f in D.FAMILIES:
+    for i, f in enumerate(D.FAMILIES):
         x, y = fam_pos[f]
         gf, gm = D.NAMES[f][:2]
-        parts.append('<g class="fam"><rect x="%.1f" y="%.1f" width="124" height="44" rx="3"/>'
-                     '<text x="%.1f" y="%.1f" class="t1">%s</text><text x="%.1f" y="%.1f" class="t2">%s &amp; %s</text></g>'
-                     % (x - 62, y - 22, x, y - 4, f, x, y + 13, gf, gm))
-    for f in D.FAMILIES:
+        parts.append('<g class="fam"><title>%s: %s &amp; %s</title><circle cx="%.1f" cy="%.1f" r="5"/>%s</g>'
+                     % (f, gf, gm, x, y, label(368, i, f, "t1", outward=True)))
+    for i, f in enumerate(D.FAMILIES):
         x, y = hh_pos[f]
         kids = [k for k, p in people.items() if p["household"] == f]
         fa, mo = rel[kids[0]]["father"][0].split()[0], rel[kids[0]]["mother"][0].split()[0]
         cls = "hh held" if f in D.HELD_HOUSEHOLDS else "hh teach"
-        parts.append('<g class="%s"><rect x="%.1f" y="%.1f" width="124" height="48" rx="3"/>'
-                     '<text x="%.1f" y="%.1f" class="t1">%s + %s</text><text x="%.1f" y="%.1f" class="t2">%s, %s</text></g>'
-                     % (cls, x - 62, y - 24, x, y - 5, fa, mo, x, y + 13, kids[0].split()[0], kids[1].split()[0]))
-    svg = ('<svg viewBox="0 0 760 760" role="img" aria-label="Sekiz aile halka biçiminde evleniyor: her ailenin oğlu bir '
-           'sonrakinin kızıyla evli, torunlar bu hanelerde.">%s</svg>' % "".join(parts))
+        parts.append('<g class="%s"><title>%s hanesi: %s + %s, torunlar %s</title><rect x="%.1f" y="%.1f" width="12" height="12" rx="2"/>%s</g>'
+                     % (cls, f, fa, mo, " ve ".join(kids), x - 6, y - 6,
+                        label(236, i + 0.5, "%s, %s" % (kids[0].split()[0], kids[1].split()[0]), "t2", outward=False)))
+    svg = ('<svg viewBox="0 0 900 900" role="img" aria-label="32 aile halka biçiminde evleniyor: her ailenin oğlu bir '
+           'sonrakinin kızıyla evli, torunlar bu hanelerde. Yeşil haneler öğretme, mavi haneler tutulan.">%s</svg>' % "".join(parts))
 
     rows = []
     for f in D.FAMILIES:
@@ -65,20 +77,16 @@ def world():
         k0 = kids[0]
 
         def names(key):
-            if isinstance(key, str):
-                ys = sorted(set().union(*(D.follow(rel, k0, p) for p in D.DERIVED[key])))
-            else:
-                ys = D.follow(rel, k0, key)
-            return ", ".join(e(y) for y in ys)
+            return ", ".join(e(y) for y in sorted(set().union(*(D.follow(rel, k0, p) for p in D.DERIVED[key]))))
         group = '<span class="pill held">tutulan</span>' if f in D.HELD_HOUSEHOLDS else '<span class="pill teach">öğretme</span>'
-        rows.append("<tr><td><b>%s</b><br>%s</td><td>%s<br>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+        rows.append("<tr><td><b>%s</b><br>%s</td><td>%s<br>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
             e(f), group, shown(rel[k0]["father"][0]), shown(rel[k0]["mother"][0]), ", ".join(e(k) for k in kids),
-            names("aunt"), names("uncle"), names("grandfather") + "<br>" + names("grandmother"), names("cousin")))
+            names("aunt"), names("uncle"), names("grandfather") + "<br>" + names("grandmother")))
 
     by_subject = {}
     for s_ in d["train"]:
-        subj = " ".join(s_[2:4]) if s_[0] == "Who" else " ".join(s_[:2])
-        by_subject.setdefault(subj, []).append(D.detokenize(s_))
+        start = s_.index("Who") + 2 if "Who" in s_[:2] else 0          # "<steps> Who is X ..." / "Who is X ..." / "X 's ..."
+        by_subject.setdefault(" ".join(s_[start:start + 2]), []).append(D.detokenize(s_))
     order = sorted(people, key=lambda x: (people[x]["generation"],
                                           D.FAMILIES.index(people[x]["household"] or people[x]["birth_family"]),
                                           people[x]["gender"] != "m"))
@@ -94,71 +102,67 @@ def world():
         lines = "".join("<li>%s</li>" % e(t) for t in by_subject[x])
         blocks.append('<details class="person" data-name="%s"%s><summary><span class="gen">%s</span> %s %s'
                       '<span class="count">%d cümle</span></summary><ol>%s</ol></details>'
-                      % (e(x.lower()), " open" if x == "Alice Smith" else "", gen_label[p["generation"]], shown(x), tag,
+                      % (e(x.lower()), " open" if x == "Tom Smith" else "", gen_label[p["generation"]], shown(x), tag,
                          len(by_subject[x]), lines))
 
-    CLS = [("chain2", "çıkarım · 2 adım, zincir"), ("named2", "çıkarım · 2 adım, adıyla"), ("chain3", "çıkarım · 3 adım, zincir"),
-           ("named3", "çıkarım · 3 adım, adıyla"), ("memory_derived", "hafıza · yazılı türemiş"), ("memory_base", "hafıza · temel olgu")]
+    CLS = [("2R_UT", "2R_UT · hiç görülmemiş 2R"), ("2R_T", "2R_T · eğitimdeki 2R")]      # 1R_T (640) kisi listesinde
     counts = {c: sum(1 for q in d["exam"] if q["cls"] == c) for c, _ in CLS}
     chips = "".join('<button type="button" class="chip%s" data-cls="%s" aria-pressed="%s">%s <b>%d</b></button>'
-                    % (" on" if not c.startswith("memory") else "", c, "true" if not c.startswith("memory") else "false",
-                       label, counts[c]) for c, label in CLS)
+                    % (" on" if c == "2R_UT" else "", c, "true" if c == "2R_UT" else "false", name, counts[c]) for c, name in CLS)
     qrows = []
     for c, _ in CLS:
         for q in d["exam"]:
             if q["cls"] != c:
                 continue
-            qrows.append('<tr class="q" data-cls="%s" data-name="%s"%s><td class="cls">%s</td><td class="mono">%s</td>'
-                         '<td>%s</td><td>%s</td></tr>' % (
-                             c, e((" ".join([q["subject"]] + q["answers"])).lower()), " hidden" if c.startswith("memory") else "",
-                             c, e(D.detokenize(q["prompt"])), " · ".join(e(a) for a in q["answers"]),
-                             '<span class="pill warn">aynı cümlede</span>' if q["co_written"] and not c.startswith("memory") else ""))
+            want = D.detokenize(q["steps"]) if "steps" in q else " · ".join(q["answers"])
+            qrows.append('<tr class="q" data-cls="%s" data-name="%s"%s><td class="cls">%s</td><td class="mono">%s</td><td>%s</td></tr>' % (
+                c, e((" ".join([q["subject"]] + q["answers"])).lower()), "" if c == "2R_UT" else " hidden",
+                c, e(D.detokenize(q["prompt"])), e(want)))
 
     return """  <div class="world">
     <div class="ring">
       <figure>
         <div class="draw">%s</div>
-        <figcaption>Dış halkada aileler ve dedeleri–nineleri (I. nesil). İçte haneler: bir ailenin oğlu (düz çizgi) sonraki ailenin kızıyla (kesikli) evli, torunlar (III. nesil) bu hanelerde. Yeşil haneler öğretme, mavi haneler tutulan grup.</figcaption>
+        <figcaption>Dış halkada 32 aile (I. nesil; üstüne gelince dede ve nine). İçte haneler: bir ailenin oğlu (düz çizgi) sonraki ailenin kızıyla (kesikli) evli; torunlar (III. nesil) bu hanelerde, adları hanenin yanında. Yeşil haneler öğretme, mavi haneler tutulan grup.</figcaption>
       </figure>
       <div class="part">
         <h3>Dünyanın kuralları</h3>
         <ul class="rules">
           <li>Her çiftin bir oğlu, bir kızı var. Evlenen kadın kocasının soyadını alır; bir kişinin tek bir tam adı var ve her ad benzersiz.</li>
-          <li>Bu yüzden her torunda <code>aunt</code> tek kişi ve hep babanın kız kardeşi (hala); <code>uncle</code> tek kişi ve hep annenin erkek kardeşi (dayı).</li>
-          <li>Her torunun 2 <code>grandfather</code>'ı, 2 <code>grandmother</code>'ı, 4 <code>cousin</code>'i var. Kuzenler iki yandaki hanelerin çocukları.</li>
-          <li>Temel ilişkiler herkes için yazılır: father, mother, brother, sister, son, daughter.</li>
-          <li><span class="pill teach">öğretme</span> hanelerinin torunlarında türemiş ilişki iki biçimde yazılır: zincir (<code>father's sister</code>) ve adıyla (<code>aunt</code>).</li>
-          <li><span class="pill held">tutulan</span> hanelerin torunlarında türemiş ilişki hiçbir biçimde yazılmaz; sorulur.</li>
-          <li><span class="pill warn">aynı cümlede</span>: cevap ile özne bir eğitim cümlesinde birlikte geçmiş, yalnız kenar hanelerin kuzen sorularında. Bu sorular ayrı okunur.</li>
+          <li>Bu yüzden her torunda hala (<code>father's sister</code>) ve dayı (<code>mother's brother</code>) tek kişi; iki dede, iki nine var.</li>
+          <li>Temel ilişkiler herkes için yazılır: father, mother, brother, sister, son, daughter. Her olgu bir cümle ve bir soru–cevap.</li>
+          <li>2R yalnız ara adımlarıyla yazılır: <code>&lt;steps&gt; Who is X 's r1 's r2 ? X 's r1 is B . B 's r2 is Y .</code> Tutulan torunlar dışındaki 160 kişi için, kişi başına 6.</li>
+          <li><span class="pill held">tutulan</span> hanelerin torunları (32 kişi) hiçbir 2R cümlesinde geçmez; zinciri onlardan geçen 2R de yazılmaz. Onların 2R'si sorulur.</li>
+          <li>Kısa cevaplı 2R, adlı ilişkiler (aunt, uncle, grandfather, grandmother, cousin) ve 3R yazılmaz.</li>
         </ul>
-        <p class="fp">veri izi %s · data_20.py'den üretildi</p>
+        <p class="fp">veri izi %s · data_20.py'den üretildi (STEP_ANSWERS açık)</p>
       </div>
     </div>
 
     <div class="part">
       <h3>Haneler ve torunların akrabaları</h3>
       <div class="scroll"><table class="houses">
-        <thead><tr><th>hane</th><th>anne–baba</th><th>torunlar</th><th>aunt</th><th>uncle</th><th>grandfather / grandmother</th><th>cousin</th></tr></thead>
+        <thead><tr><th>hane</th><th>anne–baba</th><th>torunlar</th><th>hala</th><th>dayı</th><th>dedeler / nineler</th></tr></thead>
         <tbody>%s</tbody>
       </table></div>
     </div>
 
     <div class="part">
       <h3>Sorular</h3>
-      <p>Varsayılan görünüm, tutulan torunlara sorulan ve cevabı hiçbir biçimde yazılmamış sorular. Hafıza sınıfları düğmeyle açılır. Adlı sorularda birden çok doğru cevap var; herhangi biri doğru sayılır.</p>
+      <p>Varsayılan görünüm, tutulan torunlara sorulan ve hiç görülmemiş 2R soruları; doğru cevap ara adımlarıyla. Eğitimdeki 2R düğmeyle açılır; 1R_T soruları (640) aşağıda, kişinin eğitim cümlelerinde.</p>
       <div class="tools">
         <input id="search" type="search" placeholder="ad ara, örn. owen" aria-label="Ada göre süz">
         %s
       </div>
       <div class="scroll"><table>
-        <thead><tr><th>sınıf</th><th>soru</th><th>doğru cevap(lar)</th><th></th></tr></thead>
+        <thead><tr><th>sınıf</th><th>soru</th><th>doğru cevap</th></tr></thead>
         <tbody id="qbody">%s</tbody>
       </table></div>
     </div>
 
     <div class="part">
       <h3>Eğitim cümleleri, kişiye göre</h3>
-      <p>Her olgu bir cümle ve bir soru–cevap olarak yazılı. Nesil I–III. Arama kutusu bu listeyi de süzer.</p>
+      <p>Her 1R olgu bir cümle ve bir soru–cevap; 2R ara adımlı cevaplar sorudaki kişinin altında. Nesil I–III. Arama kutusu bu listeyi de süzer.</p>
       <div class="people" id="people">%s</div>
     </div>
   </div>
@@ -175,17 +179,18 @@ EXTRA_CSS = """
 .steps a[aria-current="page"] { background: var(--ink); border-color: var(--ink); color: var(--bg); }
 .steps a[aria-current="page"] b { color: var(--bg); }
 .world { display: grid; gap: 22px; }
-.world .ring { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 28px; align-items: start; }
-@media (max-width: 820px) { .world .ring { grid-template-columns: 1fr; } }
+.world .ring { display: grid; gap: 22px; }
+.world .ring figure { max-width: 780px; }
 .world svg .ln { stroke: var(--line); stroke-width: 1.4; fill: none; }
 .world svg .ln.dau { stroke-dasharray: 5 4; }
 .world svg rect { stroke-width: 1.2; }
-.world svg .fam rect { fill: var(--surface); stroke: var(--rule); }
+.world svg .fam circle { fill: var(--surface); stroke: var(--ink); stroke-width: 1.4; }
 .world svg .hh.teach rect { fill: var(--teach-tint); stroke: var(--teach); }
 .world svg .hh.held rect { fill: var(--held-tint); stroke: var(--held); }
-.world svg text { text-anchor: middle; }
-.world svg .t1 { font-size: 13px; font-weight: 600; }
-.world svg .t2 { font-size: 11.5px; fill: var(--muted); }
+.world svg text { fill: var(--ink); }
+.world svg .t1 { font-size: 17px; font-weight: 600; }
+.world svg .t2 { font-size: 14px; fill: var(--muted); }
+.world svg .hh.held .t2 { fill: var(--held); }
 .world .rules { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
 .world .rules li { padding-left: 14px; border-left: 2px solid var(--rule); font-size: 14.5px; }
 .pill.teach { background: var(--teach-tint); color: var(--teach); }

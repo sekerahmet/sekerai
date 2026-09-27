@@ -3,6 +3,7 @@
 
     python tests_20.py
 """
+import json
 import math
 import os
 import sys
@@ -369,7 +370,7 @@ def t_step2():
 
 def reference_blocks(m, ids):
     """Adim 3 formulu, float64, modelden bagimsiz: h = PL; her turda attention (durumlari getirir), W_context, FactUnits;
-    cikis h (W_next yok)."""
+    cikis h (W_next yok).  Oneri A acikken: + g · W_copy · Σ a PL, g = sigmoid(W_copy_gate h + copy_gate_bias)."""
     unit = lambda v: v / v.norm(dim=-1, keepdim=True)
     dd = lambda t: t.detach().double()
     PL = unit(dd(m.tokens.fixed_points) + dd(m.tokens.shift))
@@ -381,7 +382,11 @@ def reference_blocks(m, ids):
         at = b.attention
         q, k = unit(h @ dd(at.W_query).T), unit(h @ dd(at.W_key).T)
         a = torch.softmax((at.scale * q @ k.transpose(-1, -2)).masked_fill(future, float("-inf")), -1)
-        h = unit(h + (a @ h) @ dd(at.W_context).T)
+        if m.copy_path:
+            gate = 1 / (1 + torch.exp(-(h @ dd(at.W_copy_gate).T + dd(at.copy_gate_bias))))
+            h = unit(h + (a @ h) @ dd(at.W_context).T + gate * ((a @ PL[ids]) @ dd(at.W_copy).T))
+        else:
+            h = unit(h + (a @ h) @ dd(at.W_context).T)
         u = torch.relu(h @ dd(b.facts.W_fact_in).T - dd(b.facts.fact_threshold))
         h = unit(h + u @ dd(b.facts.W_fact_out).T)
     return m.scale * h @ PL.T
@@ -492,6 +497,174 @@ def t_step3():
           and kept == ["fact_threshold", "shift"], "%s | %s" % (decayed, kept))
 
 
+def t_copy():
+    from model_20 import BlockModel
+    n, d = 12, 6
+    g = torch.Generator().manual_seed(11)
+    ids = torch.randint(0, n, (3, 9), generator=g)
+
+    off, on = BlockModel(n, d=d, units=10), BlockModel(n, d=d, units=10, copy_path=True)
+    so, sn = off.state_dict(), on.state_dict()
+    added = sorted(k.split(".")[-1] for k in set(sn) - set(so))
+    same_start = all(torch.equal(so[k], sn[k]) for k in so)
+    with torch.no_grad():                        # baslangicta W_context = W_fact_out = 0: iki model zaten ayni olurdu
+        for k, p_ in off.named_parameters():
+            if p_.requires_grad:
+                v = 0.5 * torch.randn(p_.shape, generator=g)
+                p_.copy_(v)
+                dict(on.named_parameters())[k].copy_(v)
+        on.blocks[0].attention.W_copy_gate.copy_(torch.randn(1, d, generator=g))
+    err = float((on.logits(ids) - off.logits(ids)).detach().abs().max())
+    check("kopya yolu: varsayilan kapali ve parametresi yok; acikken yalniz W_copy, W_copy_gate, copy_gate_bias eklenir, "
+          "digerleri ayni baslar; rastgele parametrelerle W_copy = 0 iken skor kapaliyla ayni",
+          not any("copy" in k for k in so) and added == ["W_copy", "W_copy_gate", "copy_gate_bias"]
+          and same_start and err < 1e-5, "%s, fark %.1e" % (added, err))
+
+    for kw in (dict(shared=True), dict(shared=False)):
+        m = BlockModel(n, d=d, units=10, copy_path=True, **kw)
+        with torch.no_grad():
+            for p_ in m.parameters():
+                if p_.requires_grad:
+                    p_.copy_(0.5 * torch.randn(p_.shape, generator=g))
+        err = float((m.logits(ids).detach().double() - reference_blocks(m, ids)).abs().max())
+        check("kopya yolu: skor = tasarim formulu (bagimsiz float64; c' = sum a PL, g = sigmoid(W_copy_gate h + b)), %s" % kw,
+              err < 1e-4, "fark %.1e" % err)
+
+    with torch.no_grad():
+        for b in m.blocks:
+            b.attention.copy_gate_bias.fill_(-50.0)                   # kapi kapali: g ~ 2e-22
+        closed = m.logits(ids).detach()
+        for b in m.blocks:
+            b.attention.W_copy.zero_()
+        err = float((closed - m.logits(ids).detach()).abs().max())
+    check("kopya yolu: kapi kapaliyken (g ~ 0) kopya katkisi yok, W_copy = 0 ile ayni skor", err < 1e-5, "fark %.1e" % err)
+
+    m = BlockModel(n, d=d, units=10, copy_path=True)
+    with torch.no_grad():
+        for p_ in m.parameters():
+            if p_.requires_grad:
+                p_.copy_(0.5 * torch.randn(p_.shape, generator=g))
+    base_logits = m.logits(ids).detach()
+    changed = ids.clone()
+    changed[:, 5] = (changed[:, 5] + 1) % n
+    after = m.logits(changed).detach()
+    check("kopya yolu: nedensellik -- konum 5 degisince 0-4 aynen kalir",
+          float((after[:, :5] - base_logits[:, :5]).abs().max()) < 1e-5 and float((after[:, 5:] - base_logits[:, 5:]).abs().max()) > 1e-3)
+
+    data = D.build()
+    sids, smask = TR.sequences(data)
+    nv = len(data["vocab"])
+    before = BlockModel(nv).tokens.fixed_points.clone()
+    m, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), copy_path=True)
+    at = m.blocks[0].attention
+    check("kopya yolu: egitimde PF bit duzeyinde degismez, W_copy 0'dan ayrilir, kapi degisir, kayip iner",
+          torch.equal(m.tokens.fixed_points, before) and at.W_copy.norm().item() > 0 and at.W_copy_gate.norm().item() > 0
+          and curve[-1]["nll"] < curve[0]["nll"])
+
+    groups = []
+    real_adamw = torch.optim.AdamW
+
+    class SpyW(real_adamw):
+        def __init__(self, param_groups, **k):
+            super().__init__(param_groups, **k)
+            groups.extend(self.param_groups)
+    torch.optim.AdamW = SpyW
+    try:
+        mw, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=(), weight_decay=0.1, copy_path=True)
+    finally:
+        torch.optim.AdamW = real_adamw
+    names = {id(p_): k.split(".")[-1] for k, p_ in mw.named_parameters()}
+    decayed = sorted(names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.1 for p_ in g_["params"])
+    kept = sorted(names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.0 for p_ in g_["params"])
+    check("kopya yolu, weight decay: W_copy ve W_copy_gate'e uygulanir; copy_gate_bias haric",
+          decayed == sorted(["W_query", "W_key", "W_context", "W_fact_in", "W_fact_out", "W_copy", "W_copy_gate"])
+          and kept == ["copy_gate_bias", "fact_threshold", "shift"], "%s | %s" % (decayed, kept))
+
+
+def reference_transformer(m, ids):
+    """model_20_transformer formulu, float64, modelden bagimsiz: LayerNorm, RoPE (karmasik sayi carpimiyla), nedensel
+    softmax attention, GELU (erf), tied cikis."""
+    dd = lambda t: t.detach().double()
+
+    def ln(x, mod):
+        mu, var = x.mean(-1, keepdim=True), x.var(-1, unbiased=False, keepdim=True)
+        return (x - mu) / torch.sqrt(var + mod.eps) * dd(mod.weight) + dd(mod.bias)
+
+    lin = lambda x, mod: x @ dd(mod.weight).T + dd(mod.bias)
+    E = dd(m.embedding.weight)
+    h = E[ids]
+    B, T = ids.shape
+    future = torch.ones(T, T, dtype=torch.bool).triu(1)
+    for layer in m.layers:
+        H = layer.heads
+        dh = h.shape[-1] // H
+        x = ln(h, layer.norm_attention)
+        split = lambda y: y.view(B, T, H, dh).transpose(1, 2)
+        q, k, v = split(lin(x, layer.W_query)), split(lin(x, layer.W_key)), split(lin(x, layer.W_value))
+        theta = torch.arange(T, dtype=torch.float64)[:, None] * 10000.0 ** (-torch.arange(0, dh, 2, dtype=torch.float64) / dh)
+        rot = lambda y: torch.view_as_real(torch.view_as_complex(y.reshape(B, H, T, dh // 2, 2).contiguous())
+                                           * torch.polar(torch.ones_like(theta), theta)).flatten(-2)
+        s = (rot(q) @ rot(k).transpose(-1, -2) / math.sqrt(dh)).masked_fill(future, float("-inf"))
+        a = torch.softmax(s, -1) @ v
+        h = h + lin(a.transpose(1, 2).reshape(B, T, -1), layer.W_out)
+        u = lin(ln(h, layer.norm_mlp), layer.W_mlp_in)
+        h = h + lin(0.5 * u * (1 + torch.erf(u / math.sqrt(2))), layer.W_mlp_out)
+    return ln(h, m.norm_final) @ E.T
+
+
+def t_transformer():
+    from model_20_transformer import HEADS, LAYERS, TransformerModel, apply_rope
+    count = lambda mm: sum(p_.numel() for p_ in mm.parameters() if p_.requires_grad)
+    check("transformer: 238 token, D 64, MLP 256, 2 katman -> 115.328 ogrenilen sayi; head sayisi degistirmez; LAYERS 2, HEADS 1",
+          count(TransformerModel(238)) == 115328 and count(TransformerModel(238, heads=4)) == 115328
+          and LAYERS == 2 and HEADS == 1, str(count(TransformerModel(238))))
+
+    n, d = 12, 8
+    g = torch.Generator().manual_seed(13)
+    ids = torch.randint(0, n, (3, 9), generator=g)
+    for heads in (1, 4):
+        m = TransformerModel(n, d=d, units=12, heads=heads)
+        with torch.no_grad():
+            for p_ in m.parameters():
+                p_.copy_(0.5 * torch.randn(p_.shape, generator=g))
+        err = float((m.logits(ids).detach().double() - reference_transformer(m, ids)).abs().max())
+        check("transformer: skor = tasarim formulu (bagimsiz float64; RoPE karmasik carpimla), %d head" % heads,
+              err < 1e-4, "fark %.1e" % err)
+
+    q0, k0 = torch.randn(4, generator=g), torch.randn(4, generator=g)
+    rq, rk = apply_rope(q0.expand(1, 1, 7, 4)), apply_rope(k0.expand(1, 1, 7, 4))
+    S = (rq @ rk.transpose(-1, -2))[0, 0]
+    err = float((S[1:, 1:] - S[:-1, :-1]).abs().max())
+    check("transformer: RoPE -- ayni q, k vektorlerinin skoru yalniz konum farkina bagli", err < 1e-5 and float(S.std()) > 1e-3,
+          "fark %.1e" % err)
+
+    base_logits = m.logits(ids).detach()
+    changed = ids.clone()
+    changed[:, 5] = (changed[:, 5] + 1) % n
+    after = m.logits(changed).detach()
+    vocab = ["<pad>", "<eos>"] + [str(i) for i in range(n - 2)]
+    rows = [[1, 3, 4, 5, 1], [1, 6, 7, 1], [1, 8, 9, 10, 11, 3, 1]]
+    padded, _ = TR.pad(rows, vocab)
+    lp = m.logits(padded).detach()
+    err = max(float((lp[i, :len(r)] - m.logits(torch.tensor([r])).detach()[0]).abs().max()) for i, r in enumerate(rows))
+    check("transformer: nedensellik (konum 5 degisince 0-4 aynen kalir) ve sagdaki dolgu sonucu degistirmez",
+          float((after[:, :5] - base_logits[:, :5]).abs().max()) < 1e-5 and float((after[:, 5:] - base_logits[:, 5:]).abs().max()) > 1e-3
+          and err < 1e-5, "dolgu farki %.1e" % err)
+
+    data = D.build()
+    sids, smask = TR.sequences(data)
+    nv = len(data["vocab"])
+    m, curve = TR.train_seq("transformer", sids, smask, nv, steps=20, log_at=(0, 20))
+    try:
+        TR.train_seq("transformer", sids, smask, nv, steps=1, log_at=(), weight_decay=0.1)
+        refused = False
+    except AssertionError:
+        refused = True
+    check("transformer: train_seq ayni tarifle egitir, kayip iner; weight decay istenirse reddedilir (gruplar tanimsiz)",
+          isinstance(m, TransformerModel) and curve[-1]["nll"] < curve[0]["nll"] and refused,
+          "%.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"]))
+
+
 def t_colab():
     import tempfile
     import colab_20 as C
@@ -507,6 +680,11 @@ def t_colab():
           and not worse["AC"] and not worse["EX"] and worse["BC"] and worse["SC"] and worse["FC"])
 
     m = BlockModel(len(s["vocab"]), d=16, units=8)
+    gr = torch.Generator().manual_seed(5)
+    with torch.no_grad():                        # egitilmemis model birim donusum gibi: '?'tan '?' uretir, test bos gecerdi
+        for p_ in m.parameters():
+            if p_.requires_grad:
+                p_.copy_(0.5 * torch.randn(p_.shape, generator=gr))
     prompts = [TR.questions(s, "2R_UT")[i][0] for i in (0, 1)] + [TR.questions(s, "1R_T")[0][0]]
     out = TR.generate(m, prompts, 5)
     manual = []
@@ -516,7 +694,8 @@ def t_colab():
             for _ in range(5):
                 ids.append(int(m.logits(torch.tensor([ids]))[0, -1].argmax()))
             manual.append(ids[len(p):])
-    check("adim 4: generate toplu uretim = tek tek acgozlu uretim (farkli uzunluklar birlikte)", out == manual)
+    check("adim 4: generate toplu uretim = tek tek acgozlu uretim (farkli uzunluklar birlikte, rastgele model)",
+          out == manual and len({tuple(o) for o in out}) > 1, str(out))
 
     seen = []
     ids, mask = TR.sequences(s)
@@ -534,6 +713,14 @@ def t_colab():
     C.pulse(1)
     C.stop()
 
+    run = C.start("TEST_T", s, out_dir + "/t", steps=2, every=100, device="cpu", compile=False, setting="transformer")
+    run["thread"].join(600)
+    cfg = json.load(open(out_dir + "/t/config.json"))
+    check("colab_20: setting='transformer' ile start; config ayarlarin tamamini yazar (varsayilanlar dahil)",
+          run["done"] and not run["error"] and cfg["setting"] == "transformer" and cfg["copy_path"] is False
+          and cfg["lr"] == TR.LR and cfg["grad_clip"] == TR.GRAD_CLIP and "final.json" in os.listdir(out_dir + "/t"),
+          str(run["error"] or cfg))
+
 
 def F_ce(logits, targets):
     return float(torch.nn.functional.cross_entropy(logits, targets))
@@ -541,7 +728,7 @@ def F_ce(logits, targets):
 
 if __name__ == "__main__":
     print("tests (model_20)")
-    for f in (t_data, t_model, t_step2, t_step3, t_colab):
+    for f in (t_data, t_model, t_step2, t_step3, t_copy, t_transformer, t_colab):
         f()
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)

@@ -14,7 +14,8 @@ import time
 import torch
 
 import data_20
-from model_20 import CONFIDENCE, BigramModel, BlockModel, SequenceModel, deviation, neighbors, transitions
+from model_20 import CONFIDENCE, COPY_PATH, BigramModel, BlockModel, SequenceModel, deviation, neighbors, transitions
+from model_20_transformer import TransformerModel
 
 SETTINGS = {                      # capa lr/wd gibi deneme sayisi; 1e-2 fazla sertti (kayip 1,284 > 1,270)
     "fixed": dict(learn_points=False),
@@ -121,13 +122,22 @@ def sequences(data):
 
 
 def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, lr_floor=LR_FLOOR, grad_clip=GRAD_CLIP,
-              weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None, compile=False):
+              weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None, compile=False, copy_path=COPY_PATH):
     """Standart tarif: cosine decay (LR -> LR x lr_floor) + gradient clipping.  lr_floor=None, grad_clip=None: eski tarif
     (sabit lr); 27 Eylul oncesi kayitli Adim 2-3 sonuclari onunla uretildi.  weight_decay > 0: AdamW, yalniz W_ matrisleri.
     callback(step, model, nll): her `every` adimda, o adimin guncellemesinden ONCE (sinav, kayit, durdurma).
-    compile: yalniz kayip hesabi torch.compile ile (model_19'daki gibi); full batch'te sekil sabit, bir kez derlenir."""
-    model = (BlockModel(n, seed=seed, **STEP3[setting]) if setting in STEP3
-             else SequenceModel(n, seed=seed, **STEP2[setting])).to(device)
+    compile: yalniz kayip hesabi torch.compile ile (model_19'daki gibi); full batch'te sekil sabit, bir kez derlenir.
+    copy_path: Oneri A (kopya yolu ve kapisi), yalniz Adim 3 modelinde.  setting "transformer": kiyas modeli
+    (model_20_transformer), ayni tarif."""
+    assert setting in STEP3 or not copy_path, "copy_path yalniz Adim 3 (BlockModel) icin"
+    assert setting != "transformer" or not weight_decay, "transformer icin weight decay gruplari tanimli degil (W_ adlari Linear)"
+    if setting == "transformer":
+        model = TransformerModel(n, seed=seed)
+    elif setting in STEP3:
+        model = BlockModel(n, seed=seed, copy_path=copy_path, **STEP3[setting])
+    else:
+        model = SequenceModel(n, seed=seed, **STEP2[setting])
+    model = model.to(device)
     ids, mask = ids.to(device), mask.to(device)
     # ogrenilenler: Δ (shift), W_query, W_key, W_context; Adim 1-2: + W_next; Adim 3: + FactUnits (W_next yok)
     # (PF buffer, listede yok)
@@ -146,13 +156,14 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     for step in range(steps + 1):
         if lr_floor is not None:                           # lr_t = lr · (floor + (1 - floor) · (1 + cos(π t / T)) / 2)
             for group in opt.param_groups:
-                group["lr"] = lr * (lr_floor + (1 - lr_floor) * 0.5 * (1 + math.cos(math.pi * step / steps)))
+                group["lr"] = lr * (lr_floor + (1 - lr_floor) * 0.5 * (1 + math.cos(math.pi * step / max(steps, 1))))
         total, nll = loss_fn(ids, mask)                    # butun cumleler, butun konumlar
         if step in log_at:
-            curve.append(dict(step=step, nll=nll.item(), dev=deviation(model).clone(),
+            curve.append(dict(step=step, nll=nll.item(), dev=deviation(model).clone() if hasattr(model, "tokens") else None,
                               W_context=(sum(b.attention.W_context.norm().item() for b in model.blocks)
                                          if isinstance(model, BlockModel) else
-                                         model.attention.W_context.norm().item() if model.attention is not None else 0.0)))
+                                         model.attention.W_context.norm().item() if getattr(model, "attention", None) is not None
+                                         else 0.0)))
         if callback is not None and every and step % every == 0:
             callback(step, model, nll.item())
         if step == steps:
@@ -176,7 +187,7 @@ def questions(data, cls):
 @torch.no_grad()
 def read_questions(model, qs, vocab):
     """'?' konumunda: tahmin edilen ilk token, attention agirliklari ve getirilen c (attention yoksa None)."""
-    device = model.tokens.fixed_points.device
+    device = next(model.parameters()).device
     ids, mask = pad([q[0] for q in qs], vocab)
     ids, mask = ids.to(device), mask.to(device)
     last = mask.sum(1) - 1
@@ -193,7 +204,7 @@ def answer(model, prompt, vocab, k=2):
     """Acgozlu k token."""
     ids = list(prompt)
     for _ in range(k):
-        ids.append(int(model.logits(torch.tensor([ids], device=model.tokens.fixed_points.device))[0, -1].argmax()))
+        ids.append(int(model.logits(torch.tensor([ids], device=next(model.parameters()).device))[0, -1].argmax()))
     return " ".join(vocab[i] for i in ids[len(prompt):])
 
 
@@ -202,7 +213,7 @@ def answer(model, prompt, vocab, k=2):
 @torch.no_grad()
 def generate(model, prompts, n):
     """Acgozlu uretim: ayni uzunluktaki istemler birlikte, her birine n token.  -> id listeleri (yalniz uretilen)."""
-    device = model.tokens.fixed_points.device
+    device = next(model.parameters()).device
     out = [None] * len(prompts)
     groups = {}
     for i, p in enumerate(prompts):
@@ -312,6 +323,8 @@ def report_step3(results, data):
     people, rel = data["people"], data["rel"]
     firsts = torch.tensor(sorted({ix[p["first"]] for p in people.values()}))
     m0 = results["shared"][0]
+    # kopru okumasi tur 1'in ara durumunu elle kuruyor; kopya yolu katkisini icermez
+    assert not any(getattr(m, "copy_path", False) for m, _ in results.values()), "report_step3 kopya yolu kapali modeller icin"
     out = ["ADIM 3  veri iz %s  cumle %d  TURNS %d  FACT_UNITS %d  scale %.3f" % (
         data["fingerprint"], len(data["train"]), m0.turns, m0.blocks[0].facts.W_fact_in.shape[0], m0.scale), ""]
     out.append("ayar           " + "  ".join("%10s" % ("adim %d" % c["step"]) for c in results["step2"][1]))

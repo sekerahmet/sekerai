@@ -24,8 +24,9 @@ STEPS_CLS = ("2R_T", "2R_UT")         # "<steps>" ile uretim: egitimde gorulen /
 RUNS = {}
 
 
-def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True, **train_kw):
-    """Egitimi arka planda baslatir, hemen doner.  out doluysa once out_eski_<zaman>'a TASINIR, silinmez."""
+def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True, setting="shared", **train_kw):
+    """Egitimi arka planda baslatir, hemen doner.  out doluysa once out_eski_<zaman>'a TASINIR, silinmez.
+    setting: "shared" (model_20) ya da "transformer" (kiyas modeli, model_20_transformer)."""
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
     if os.path.isdir(out) and os.listdir(out):
@@ -33,8 +34,12 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
     os.makedirs(out, exist_ok=True)
     n = {c: len(TR.questions(data, c)) for c in SHORT + STEPS_CLS}
     run = dict(name=name, out=out, lines=[], exams=[], stop=False, error=None, done=False, t0=time.time())
-    json.dump(dict(name=name, steps=steps, seed=seed, every=every, device=device, compile=compile, fingerprint=data["fingerprint"],
-                   train=len(data["train"]), sizes=n, **train_kw), open(os.path.join(out, "config.json"), "w"), indent=1)
+    # varsayilanlar da yazilir (lr, cosine tabani, clip, wd, kopya yolu): config tek basina koşuyu tarif etsin
+    json.dump(dict(name=name, setting=setting, steps=steps, seed=seed, every=every, device=device, compile=compile,
+                   fingerprint=data["fingerprint"], train=len(data["train"]), sizes=n,
+                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
+                               copy_path=TR.COPY_PATH), **train_kw)),
+              open(os.path.join(out, "config.json"), "w"), indent=1)
 
     class Stopped(Exception):
         pass
@@ -65,7 +70,7 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
     def job():
         try:
             ids, mask = TR.sequences(data)
-            model, _ = TR.train_seq("shared", ids, mask, len(data["vocab"]), steps=steps, seed=seed, device=device,
+            model, _ = TR.train_seq(setting, ids, mask, len(data["vocab"]), steps=steps, seed=seed, device=device,
                                     every=every, callback=callback, log_at=(), compile=compile, **train_kw)
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             final = {}

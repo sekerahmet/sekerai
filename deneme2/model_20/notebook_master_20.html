@@ -10,6 +10,7 @@
   --w: #3A47A3; --w-tint: #E0E3F5;
   --anchor: #946510; --anchor-tint: #F3E7CC;
   --bad: #A33A3A;
+  --prop: #8B3A9E; --prop-tint: #F3E6F6;
   --serif: "Source Serif 4", Georgia, "Times New Roman", serif;
   --sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
@@ -23,6 +24,7 @@
     --w: #A3ADF2; --w-tint: #1D2244;
     --anchor: #E1B35C; --anchor-tint: #372B12;
     --bad: #E58B8B;
+    --prop: #D69BE6; --prop-tint: #2F1D36;
   }
 }
 :root[data-theme="dark"] {
@@ -33,6 +35,7 @@
   --w: #A3ADF2; --w-tint: #1D2244;
   --anchor: #E1B35C; --anchor-tint: #372B12;
   --bad: #E58B8B;
+  --prop: #D69BE6; --prop-tint: #2F1D36;
 }
 body { background: var(--bg); color: var(--ink); font: 15.5px/1.6 var(--sans); }
 .wrap { max-width: 1000px; margin: 0 auto; padding-inline: 20px; padding-block: 32px 72px; display: grid; gap: 44px; }
@@ -73,6 +76,7 @@ section.step { display: grid; gap: 22px; padding-top: 28px; border-top: 2px soli
 .pl { color: var(--pl); font-weight: 500; }
 .w { color: var(--w); font-weight: 500; }
 .an { color: var(--anchor); font-weight: 500; }
+.prop { color: var(--prop); font-weight: 600; }
 
 figure { margin: 0; display: grid; gap: 8px; }
 figure .draw { overflow-x: auto; background: var(--surface); border: 1px solid var(--rule); padding: 10px; }
@@ -147,6 +151,11 @@ svg .carry { stroke: var(--line); stroke-width: 1.2; fill: none; }
 svg .readarrow { stroke: var(--w); stroke-width: 2; fill: none; }
 svg .trap { stroke: var(--bad); stroke-width: 1.6; stroke-dasharray: 5 4; fill: none; }
 svg .arrowhead-bad { fill: var(--bad); }
+svg .box.prop { fill: var(--prop-tint); stroke: var(--prop); stroke-width: 1.6; stroke-dasharray: 5 3; }
+svg .flow.prop { stroke: var(--prop); stroke-width: 1.6; stroke-dasharray: 5 3; }
+svg .arrowhead-prop { fill: var(--prop); }
+svg .frameprop { fill: var(--prop-tint); fill-opacity: .35; stroke: var(--prop); stroke-width: 1.4; stroke-dasharray: 6 4; }
+svg .framelbl.fp, svg .lbl.prop, svg .sub.prop { fill: var(--prop); }
 {{EXTRA_CSS}}
 </style>
 
@@ -162,19 +171,23 @@ svg .arrowhead-bad { fill: var(--bad); }
 <nav class="stepnav" aria-label="Sekmeler">
   <ol class="steps">
     <li class="all"><a href="#tum"><b>Tüm resim</b><span>Birleşik mimari</span></a></li>
-    <li class="done"><a href="#adim0"><b>Adım 0 · tamam</b><span>Veri: sekiz aile</span></a></li>
+    <li class="done"><a href="#adim0"><b>Adım 0 · tamam</b><span>Veri: 32 aile</span></a></li>
     <li class="done"><a href="#adim1"><b>Adım 1 · tamam</b><span>Token noktaları + sonraki ilişkisi</span></a></li>
     <li class="done"><a href="#adim2"><b>Adım 2 · tamam</b><span>Geriye bakan parça: attention</span></a></li>
-    <li class="next"><a href="#adim3"><b>Adım 3 · öneri</b><span>Köprü için yer</span></a></li>
+    <li class="done"><a href="#adim3"><b>Adım 3 · tamam</b><span>Köprü için yer</span></a></li>
+    <li class="done"><a href="#adim4"><b>Adım 4 · koşuldu</b><span>Not defteri: ara adımlı cevap</span></a></li>
+    <li class="next"><a href="#oneriA"><b>Öneri A</b><span>Kopya yolu</span></a></li>
   </ol>
 </nav>
 
 <!-- ============================== TUM RESIM ============================== -->
 <section class="step" id="tum">
   <div class="stephead">
-    <div class="eyebrow">tüm resim · Adım 1 + 2 + 3 · 50.048 öğrenilen sayı</div>
+    <div class="eyebrow">tüm resim · Adım 1 + 2 + 3 · 60.544 öğrenilen sayı · 32 aile, 238 token</div>
     <h2>Şu anki model</h2>
-    <p>Her konumun bir durumu var; durum token'ın noktasıyla başlar. Aynı Block iki tur uygulanır: attention önceki konumların durumlarını okuyup duruma yazar, FactUnits durumu dönüştürür. Son durum doğrudan token noktalarıyla karşılaştırılır. Her konum yalnız kendisine ve öncekilere bakar.</p>
+    <p>Her konumun bir durumu var; durum token'ın noktasıyla başlar. Aynı Block iki tur uygulanır: attention önceki konumların durumlarını okuyup duruma yazar, FactUnits durumu dönüştürür. Son durum doğrudan token noktalarıyla karşılaştırılır. Her konum yalnız kendisine ve öncekilere bakar. Adım 4 mimariyi değiştirmedi, veri biçimini değiştirdi: 2R cevabı ara adımlarıyla yazılıyor.</p>
+    <p class="note">PF ve PL, modelin bir hedefi değil, bir okuma aracı. Kullanıcı, 27 Eylül: <q>bizim için kriter PL , PF sadece okuma ve analiz için.</q></p>
+    <p class="muted" style="font-size:14px">Adım 1–3 sekmelerindeki ölçümler 8 aileli dünyada (48 kişi, 74 token). Adım 4'ten bu yana dünya 32 aile, 192 kişi.</p>
   </div>
 
   <div class="part">
@@ -231,7 +244,7 @@ svg .arrowhead-bad { fill: var(--bad); }
           <text class="lbl" x="310" y="496" text-anchor="middle">çıkış: h_son (W_next yok)</text>
           <text class="sub" x="310" y="514" text-anchor="middle">ölçüldü, kullanıcı kararıyla kaldırıldı</text>
           <rect class="box" x="470" y="476" width="390" height="48" rx="3"/>
-          <text class="lbl" x="665" y="496" text-anchor="middle">8,886 · ⟨h_son, PL⟩ → softmax</text>
+          <text class="lbl" x="665" y="496" text-anchor="middle">10,06 · ⟨h_son, PL⟩ → softmax</text>
           <text class="sub" x="665" y="514" text-anchor="middle">sonraki token</text>
 
           <line class="flow" x1="160" y1="66" x2="198" y2="66" marker-end="url(#p1)"/>
@@ -359,7 +372,7 @@ svg .arrowhead-bad { fill: var(--bad); }
 4  a_tj  = softmax_{j≤t}(10,83 · ⟨<span class="w">q_t</span>, <span class="w">k_j</span>⟩)             <span class="c">t'nin j'ye bakma ağırlığı · adım 2</span>
 5  <span class="an">h</span>_t  ← norm(<span class="an">h</span>_t + <span class="w">W_context</span> · Σ_j a_tj · <span class="an">h</span>_j)       <span class="c">okunan duruma yazılır · adım 3</span>
 6  <span class="an">h</span>_t  ← norm(<span class="an">h</span>_t + <span class="w">W_fact_out</span> · ReLU(<span class="w">W_fact_in</span> · <span class="an">h</span>_t − eşik))   <span class="c">FactUnits · adım 3</span>
-7  p(sonraki = token) = softmax(8,886 · ⟨<span class="an">h</span>_t, <span class="pl">PL</span>_token⟩)      <span class="c">W_next yok</span>
+7  p(sonraki = token) = softmax(10,06 · ⟨<span class="an">h</span>_t, <span class="pl">PL</span>_token⟩)      <span class="c">W_next yok · 238 token</span>
 8  kayıp = ortalama(−log p(doğru sonraki)) + <span class="an">1e-3</span> · Σ Δ²   <span class="c">eğitim · adım 1</span></div>
   </div>
 
@@ -368,22 +381,22 @@ svg .arrowhead-bad { fill: var(--bad); }
     <div class="scroll"><table>
       <thead><tr><th>kodda</th><th>tür</th><th class="num">boyut</th><th>öğrenilir mi</th><th>adım</th><th>görevi</th></tr></thead>
       <tbody>
-        <tr><td class="mono pf">fixed_points (PF)</td><td>tablo</td><td class="num">74 × 64</td><td>hayır, hiç değişmez</td><td>1</td><td>PL'nin başlangıcı, okumada referans, çapanın hedefi</td></tr>
-        <tr><td class="mono pl">shift (Δ)</td><td>tablo</td><td class="num">74 × 64</td><td>evet</td><td>1</td><td>PF'yi PL'ye kaydırır, her token kendi başına</td></tr>
+        <tr><td class="mono pf">fixed_points (PF)</td><td>tablo</td><td class="num">238 × 64</td><td>hayır, hiç değişmez</td><td>1</td><td>PL'nin başlangıcı, okumada referans, çapanın hedefi</td></tr>
+        <tr><td class="mono pl">shift (Δ)</td><td>tablo</td><td class="num">238 × 64</td><td>evet</td><td>1</td><td>PF'yi PL'ye kaydırır, her token kendi başına</td></tr>
         <tr><td class="mono w">W_query</td><td>matris</td><td class="num">64 × 64</td><td>evet</td><td>2</td><td>ne arıyorum</td></tr>
         <tr><td class="mono w">W_key</td><td>matris</td><td class="num">64 × 64</td><td>evet</td><td>2</td><td>bende ne var</td></tr>
         <tr><td class="mono w">W_context</td><td>matris</td><td class="num">64 × 64</td><td>evet, 0'dan</td><td>2</td><td>okunanı duruma yazar</td></tr>
         <tr><td class="mono w">W_fact_in</td><td>matris</td><td class="num">256 × 64</td><td>evet</td><td>3</td><td>durumdan birimlere: hangi bileşim</td></tr>
         <tr><td class="mono">fact_threshold</td><td>sayılar</td><td class="num">256</td><td>evet</td><td>3</td><td>her birimin yanma eşiği</td></tr>
         <tr><td class="mono w">W_fact_out</td><td>matris</td><td class="num">64 × 256</td><td>evet, 0'dan</td><td>3</td><td>birimlerden duruma: ne yazılır</td></tr>
-        <tr><td class="mono">scale</td><td>sayı</td><td class="num">8,886</td><td>hayır, formülden</td><td>1</td><td>sonraki token güveni: ln(0,99 · 73 / 0,01)</td></tr>
+        <tr><td class="mono">scale</td><td>sayı</td><td class="num">10,06</td><td>hayır, formülden</td><td>1</td><td>sonraki token güveni: ln(0,99 · 237 / 0,01)</td></tr>
         <tr><td class="mono">attention ölçeği</td><td>sayı</td><td class="num">10,83</td><td>hayır, formülden</td><td>2</td><td>bakma güveni: ln(0,99 · 511 / 0,01)</td></tr>
-        <tr><td class="mono an">ANCHOR (λ)</td><td>sayı</td><td class="num">1e-3</td><td>hayır, deneme</td><td>1</td><td>çapa: kayıp ≤ tavan + 0,01 ölçütüyle seçildi</td></tr>
+        <tr><td class="mono an">ANCHOR (λ)</td><td>sayı</td><td class="num">1e-3</td><td>hayır, deneme</td><td>1</td><td>çapa: kayıp ≤ tavan + 0,01 ölçütüyle seçildi (8 ailede; 32 ailede yeniden ölçülmedi)</td></tr>
         <tr><td class="mono">TURNS</td><td>sayı</td><td class="num">2</td><td>hayır, kullanıcı kararı</td><td>3</td><td>Block kaç tur uygulanır</td></tr>
         <tr><td class="mono">FACT_UNITS</td><td>sayı</td><td class="num">256</td><td>hayır, 4 × 64</td><td>3</td><td>transformer alışkanlığı, ölçülmedi; 256'nın hepsi kullanılıyor</td></tr>
       </tbody>
     </table></div>
-    <p class="muted" style="font-size:14px">Öğrenilen: Δ 4.736 + üç matris × 4.096 + FactUnits 33.024 = 50.048 sayı. W_next (Adım 1–2) bugünkü modelde yok.</p>
+    <p class="muted" style="font-size:14px">Öğrenilen: Δ 15.232 + üç matris × 4.096 + FactUnits 33.024 = 60.544 sayı. W_next (Adım 1–2) bugünkü modelde yok.</p>
   </div>
 
   <div class="part">
@@ -391,11 +404,12 @@ svg .arrowhead-bad { fill: var(--bad); }
     <div class="scroll"><table>
       <thead><tr><th>ayar</th><th class="num">değer</th><th>not</th></tr></thead>
       <tbody>
-        <tr><td>optimizer, lr</td><td class="num">Adam, 0,01</td><td>Adım 1'den; full batch: her adımda 640 cümlenin hepsi</td></tr>
+        <tr><td>optimizer, lr</td><td class="num">Adam, 0,01</td><td>Adım 1'den; full batch: her adımda 2.240 cümlenin hepsi</td></tr>
         <tr><td class="mono">cosine decay (LR_FLOOR)</td><td class="num">0,1</td><td>lr 0,01'den 0,001'e iner. <q>kosinüs ve ve kırpma yapalım modelin standart ayarı olsun</q></td></tr>
         <tr><td class="mono">gradient clipping (GRAD_CLIP)</td><td class="num">1,0</td><td>gradient'in boyu 1'i geçerse 1'e indirilir; hangisinin kararlılığı getirdiği ayrı ölçülmedi</td></tr>
-        <tr><td class="mono">STEPS</td><td class="num">1.000</td><td>1 adım = 1 epoch; ezber 600'de tamdı. <q>1000 olarak belirledim bu veri seti için ama. duruma özel veri büyürse biz de büyütürüz.</q></td></tr>
-        <tr><td>weight decay</td><td class="num">yok</td><td>henüz denenmedi</td></tr>
+        <tr><td class="mono">STEPS</td><td class="num">4.000</td><td>1 adım = 1 epoch. 32 aile için: <q>adım olarak da ilk olarak 4.000 toplam adım çalıştıralım</q> (8 ailede 1.000 idi)</td></tr>
+        <tr><td>weight decay</td><td class="num">yok (0)</td><td>denendi, standarda girmedi: 8 ailede 0,1 ve 0,5 köprü oluşturmadı; 32 ailede 0,01 zarar verdi (2R_UT son ad 89 → 56). Açılırsa AdamW, yalnız W_ matrislerine.</td></tr>
+        <tr><td>torch.compile</td><td class="num">kapalı</td><td>seçenek var (model_19'daki gibi yalnız kayıp); 2.240 cümlelik veride Inductor ilk adımda hata verdi, çözülmedi. Yalnız hızı etkiler; bir koşu Colab L4'te ~2,5 dakika.</td></tr>
       </tbody>
     </table></div>
   </div>
@@ -405,13 +419,17 @@ svg .arrowhead-bad { fill: var(--bad); }
     <div class="scroll"><table>
       <thead><tr><th>iş</th><th class="num">sonuç</th><th>hangi adımla</th><th>not</th></tr></thead>
       <tbody>
-        <tr><td>sözcük sırası ("Who" → "is", "'s" → ilişki)</td><td class="num">0,99</td><td>1–3</td><td>W_next olmadan da</td></tr>
-        <tr><td>1R: "Who is Alice Smith's father?"</td><td class="num">1,000</td><td>3</td><td>400. adımda tam (Adım 2: 0,950)</td></tr>
-        <tr><td>yazılı 2R/3R zincirler</td><td class="num">1,000</td><td>3</td><td>600. adımda tam; sıra görünür oldu (Adım 2 tavanı 0,933)</td></tr>
-        <tr><td>hiç yazılmamış zincirler (çıkarım)</td><td class="num">0,00–0,04</td><td>—</td><td>köprü okuması 0,00: model ezberliyor</td></tr>
+        <tr><td>1R_T: "Who is Tom Smith's father?"</td><td class="num">640/640</td><td>3</td><td>900. adımda tam</td></tr>
+        <tr><td>2R_T: eğitimde gördüğü ara adımlı 2R</td><td class="num">192/192</td><td>3 + 4</td><td>birebir; 800. adımda tam</td></tr>
+        <tr><td>2R_UT: hiç görmediği 2R, cevabın tamamı doğru (EX)</td><td class="num">6/192</td><td>3 + 4</td><td><b>ana ölçü</b> (27 Eylül'den)</td></tr>
+        <tr><td>2R_UT: son ad doğru (AC)</td><td class="num">89/192</td><td>3 + 4</td><td>fazla cömert: 75'inde en az bir cümle yanlış</td></tr>
+        <tr><td>2R_UT: cevaba sorudaki kişiyle başlamak</td><td class="num">6/192</td><td>—</td><td>asıl tıkanma: sorudaki adı geri yazamıyor</td></tr>
+        <tr><td>2R_UT: özne verilince son ad doğru</td><td class="num">151/192</td><td>3 + 4</td><td>iki adımlık mantık yeni kişilere uygulanıyor</td></tr>
       </tbody>
     </table></div>
-    <p class="limit"><b>Sıradaki:</b> köprü (Julia) için yer açıldı ama hiçbir turda oluşmuyor; tutulan hanede model öznenin anne ya da babasını söylüyor. Modeli ezber yerine hesaplamaya itmek gerekiyor; ilk aday weight decay.</p>
+    <p class="muted" style="font-size:14px">Koşu shared_steps_s0: 32 aile, 1R + ara adımlı 2R, 4.000 adım, tohum 0, wd yok. Ayrıntı Adım 4'te.</p>
+    <p class="limit"><b>Sıradaki:</b> model sorudaki adı (Owen) cevaba geri yazamıyor; bu kopyayı her ad için ayrı ezberlemiş. Kopyayı genel yapacak parça (kopya yolu ve kapısı) Öneri A sekmesinde; kodlandı, koşu shared_steps_copy_s0.</p>
+    <p class="muted" style="font-size:14px">Kıyas modeli, kodlandı, koşulmadı: <code>model_20_transformer.py</code> (TransformerModel). GPT-2 tipi, 2 ayrı katman, 1 head, RoPE, 115.328 öğrenilen sayı; aynı veri, aynı sınav, aynı tarif (<code>setting="transformer"</code>). Soru: kopya sorunu bizim mimarimize mi özgü, verinin kendisinde mi?</p>
   </div>
 </section>
 
@@ -419,15 +437,17 @@ svg .arrowhead-bad { fill: var(--bad); }
 <section class="step" id="adim0">
   <div class="stephead">
     <div class="eyebrow">Adım 0 · veri · data_20.py</div>
-    <h2>Sekiz aile, 48 kişi, İngilizce akrabalık</h2>
+    <h2>32 aile, 192 kişi, İngilizce akrabalık</h2>
   </div>
-  <p>Karmaşık veri analizi zorlaştırdığı için küçük ve elle okunabilir bir dünya. Sekiz aile halka biçiminde evleniyor, her çiftin bir oğlu ve bir kızı var, her ad benzersiz. Temel ilişkiler herkes için yazılı: father, mother, brother, sister, son, daughter. Türemiş ilişkiler (aunt, uncle, grandfather, grandmother, cousin) öğretme hanelerinde zincir ve adıyla yazılı; tutulan hanelerde hiçbir biçimde yazılmıyor, sorulacak.</p>
+  <p>Karmaşık veri analizi zorlaştırdığı için küçük ve elle okunabilir bir dünya. 32 aile halka biçiminde evleniyor, her çiftin bir oğlu ve bir kızı var, her ad benzersiz. Temel ilişkiler (father, mother, brother, sister, son, daughter) herkes için yazılı. 2R yalnız ara adımlarıyla yazılı ve yalnız 160 kişi için; tutulan 16 hanenin 32 torunu hiçbir 2R cümlesinde geçmiyor, onların 2R'si sorulur. İlk 8 aile ve sırası Adım 1–3'teki dünyayla aynı.</p>
   <div class="scroll"><table>
-    <thead><tr><th>kişi</th><th class="num">eğitim cümlesi</th><th class="num">hiç yazılmamış soru</th><th class="num">token (nokta)</th><th>veri izi</th></tr></thead>
-    <tbody><tr><td class="num" style="text-align:left">48</td><td class="num">640</td><td class="num">120</td><td class="num">74</td><td class="mono">90024739fb8f</td></tr></tbody>
+    <thead><tr><th>kişi</th><th class="num">eğitim cümlesi</th><th class="num">hiç görülmemiş soru (2R_UT)</th><th class="num">token (nokta)</th><th>veri izi</th></tr></thead>
+    <tbody><tr><td class="num" style="text-align:left">192</td><td class="num">2.240</td><td class="num">192</td><td class="num">238</td><td class="mono">7ae5615623aa</td></tr></tbody>
   </table></div>
   <ul class="quotes">
     <li><b>veri</b><div><q>ilk konu data: data ingilzce olsun. Konu relatives olsun. küçük olsun.</q></div></li>
+    <li><b>büyüklük</b><div><q>32 aile 192 kişi olabilr bence.</q></div></li>
+    <li><b>sadeleştirme</b><div><q>Bence 2R kısa olanları bir kaldırıp onsuz bakalım.</q> · <q>3R de şu an çok gereksiz onu da kaldır</q></div><div class="then">Kısa cevaplı 2R, adlı ilişkiler (aunt, uncle, grandfather, grandmother, cousin) ve 3R eğitimden ve sınavdan çıktı.</div></li>
   </ul>
 {{WORLD}}
 </section>
@@ -935,7 +955,7 @@ q             = (0,79 ; -0,61)</div>
 <!-- ============================== ADIM 3 ============================== -->
 <section class="step" id="adim3">
   <div class="stephead">
-    <div class="eyebrow">Adım 3 · kodlandı · BlockModel, Block, FactUnits</div>
+    <div class="eyebrow">Adım 3 · tamam · BlockModel, Block, FactUnits · ölçümler 8 ailede</div>
     <h2>Köprü için yer: durum, dönüştürme, ikinci tur</h2>
     <p>Adım 1'in bilgisi (konumun kendi noktası) ile Adım 2'nin bilgisi (attention'ın getirdiği) bir <b>durumda</b> buluşup kalır. Durum, olgu bilgisiyle <b>dönüştürülür</b>; böylece cümlede yazılı olmayan köprü (Julia) bir konumda oluşur. <b>İkinci tur</b> o durumu okur.</p>
   </div>
@@ -1172,7 +1192,430 @@ okuma:      h_son → Harold</div>
   </div>
 </section>
 
+<!-- ============================== ADIM 4 ============================== -->
+<section class="step" id="adim4">
+  <div class="stephead">
+    <div class="eyebrow">Adım 4 · koşuldu · veri biçimi: data_20 STEP_ANSWERS · Colab</div>
+    <h2>Not defteri: cevabı ara adımlarıyla yazmak</h2>
+    <p>Adım 3'te köprü (Julia) modelin içinde oluşmadı. Adım 4 köprüyü dışarı, cevabın içine taşıyor: model 2R sorusunu iki 1R cümlesiyle cevaplıyor ve ikinci cümle, birincinin yazdığı köprüden başlıyor. Mimari aynı; değişen yalnız veri biçimi.</p>
+  </div>
 
+  <div class="part">
+    <h3>Biçim</h3>
+    <div class="formula"><span class="c">soru</span>
+&lt;steps&gt; Who is Owen Evans 's mother 's father ?
+<span class="c">cevap, 8 + 8 token</span>
+Owen Evans 's mother is Julia Evans .        <span class="c">1. adım: bir 1R olgusu</span>
+Julia Evans 's father is Harold Fisher .     <span class="c">2. adım: köprüden başlayan 1R olgusu</span></div>
+    <p>Cevabın her cümlesi eğitimde zaten yazılı bir 1R olgusu. Hiç görülmemiş bir 2R'yi cevaplamak için model iki şey yapmalı: bildiği iki olguyu doğru sırayla yazmak ve her cümleye doğru kişiyle başlamak, yani sorudaki adı ve köprüyü geri yazmak (kopya).</p>
+  </div>
+
+  <div class="part">
+    <h3>Sorular ve kararlar, sizin sözlerinizle</h3>
+    <ul class="quotes">
+      <li><b>not defteri</b><div><q>Peki model de Julia Evan's yazıp aklında tutacak bir not defteri gibi kullanabileceği birşey var mı</q></div></li>
+      <li><b>biçim</b><div><q>Steps olsun ve dene</q></div></li>
+      <li><b>veri ve adım</b><div><q>32 aile 192 kişi olabilr bence. adım olarak da ilk olarak 4.000 toplam adım çalıştıralım.</q></div></li>
+      <li><b>sadeleştirme</b><div><q>Bence 2R kısa olanları bir kaldırıp onsuz bakalım. Bu da modelin yanlış bilgi öğrenmesi sebeplerinden birisi olabilir.</q></div></li>
+      <li><b>sınıf adları</b><div><q>1R_T 2R_T yani trained ve 2R_UT untrained kalıbında yazar mısın?</q></div></li>
+      <li><b>ölçü adları</b><div><q>2R_UT için de 2R_UT_SC subject ve 2R_UT_AC yani answer correct gibi mi yapsak</q> · <q>Olur onaylıyorum</q></div></li>
+      <li><b>weight decay</b><div><q>sen wd li bir koşu yap istersen yine 4000 adım ama wd=0.01 olabilir belki</q></div></li>
+    </ul>
+  </div>
+
+  <div class="part">
+    <h3>Veri</h3>
+    <div class="scroll"><table>
+      <thead><tr><th>eğitimde</th><th class="num">cümle</th><th>örnek</th></tr></thead>
+      <tbody>
+        <tr><td>1R olgu cümlesi + soru–cevabı (192 kişi, 640 olgu)</td><td class="num">1.280</td><td class="mono">Owen Evans's father is David Evans.</td></tr>
+        <tr><td>ara adımlı 2R (160 kişi × 6; tutulan torunlar hariç)</td><td class="num">960</td><td class="mono">&lt;steps&gt; Who is Tom Smith's father's father? Tom Smith's father is John Smith. John Smith's father is George Smith.</td></tr>
+      </tbody>
+    </table></div>
+    <p>2R uzayı: 192 kişide 1.536 geçerli 2 adımlı olgu (kişinin kendisine ya da aynı 1R cevabına çıkanlar sayılmaz). Öğretilen 960 (%62,5). Öznesi tutulan torun olan 256 hiç yazılmıyor; sınav bunların 192'sini soruyor (dede, nine, hala, dayı). Zinciri tutulan bir torundan geçen 320 olgu da yazılmıyor, yoksa tutulan sorunun adımlarını açık ederdi.</p>
+  </div>
+
+  <div class="part">
+    <h3>Sınav ve ölçüler</h3>
+    <div class="scroll"><table>
+      <thead><tr><th>sınıf</th><th class="num">soru</th><th>ne</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">1R_T</td><td class="num">640</td><td>eğitimde yazılı 1R; cevabın ilk token'ı</td></tr>
+        <tr><td class="mono">2R_T</td><td class="num">192</td><td>öğretme torunlarının 2R'si; eğitimde gördü</td></tr>
+        <tr><td class="mono">2R_UT</td><td class="num">192</td><td>tutulan torunların 2R'si; hiç görmedi. <b>Asıl sınav.</b></td></tr>
+      </tbody>
+    </table></div>
+    <div class="scroll"><table>
+      <thead><tr><th>ölçü</th><th>soru</th><th>Owen'ın annesinin babası sorusunda doğru olan</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">SC</td><td>subject correct: cevap sorudaki kişiyle mi başlıyor</td><td class="mono">Owen Evans</td></tr>
+        <tr><td class="mono">BC</td><td>bridge correct: 1. cümlenin sonundaki kişi köprü mü</td><td class="mono">Julia Evans</td></tr>
+        <tr><td class="mono">AC</td><td>answer correct: son ad doğru mu (27 Eylül'e kadar ana ölçü)</td><td class="mono">Harold Fisher</td></tr>
+        <tr><td class="mono">EX</td><td>exact: cevabın tamamı birebir mi (<b>ana ölçü</b>, 27 Eylül'den)</td><td>16 token</td></tr>
+        <tr><td class="mono">FC</td><td>format correct: cümle kalıbı doğru mu</td><td class="mono">X 's r is Y . Y 's r is Z .</td></tr>
+      </tbody>
+    </table></div>
+    <p><b>Verilen</b>, cevabın başından kaç token'ı bizim yazdığımız. <b>0</b>: model hepsini kendisi yazar; asıl not bu. <b>2</b>: özne ("Owen Evans") bizden; soruda zaten yazılı olduğu için yeni bilgi vermez, yalnız kopyayı modelin elinden alır. <b>8</b>: ilk cümle bizden; köprüyü de söyler. 2 ve 8 teşhis içindir: zincirin hangi adımda koptuğunu gösterir. Verilen 8'de BC tanım gereği tam çıkar, çünkü o kısmı biz yazarız.</p>
+  </div>
+
+  <div class="part">
+    <h3>Ölçümler</h3>
+    <p>32 aile, 4.000 adım, tohum 0, Colab L4. Her koşudan önce karar kuralı yazıldı.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>koşu</th><th>eğitimde</th><th class="num">1R_T</th><th class="num">2R_T EX</th><th class="num">2R_UT AC</th><th class="num">SC</th><th class="num">EX</th><th class="num">özne verilince AC</th></tr></thead>
+      <tbody>
+        <tr><td>kısa 2R'li</td><td>+ kısa cevaplı 2R, adlı, 3R</td><td class="num">639/640</td><td class="num">—</td><td class="num">57</td><td class="num">12</td><td class="num">5</td><td class="num">83</td></tr>
+        <tr><td><b>kısa 2R'siz</b></td><td>1R + ara adımlı 2R</td><td class="num">640/640</td><td class="num">192/192</td><td class="num"><b>89</b></td><td class="num">6</td><td class="num">6</td><td class="num">151</td></tr>
+        <tr><td>kısa 2R'siz + wd 0,01</td><td>aynı</td><td class="num">640/640</td><td class="num">192/192</td><td class="num" style="color:var(--bad)">56</td><td class="num">0</td><td class="num">0</td><td class="num">131</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note"><b>AC fazla cömert</b> (kod incelemesi, 27 Eylül). AC yalnız son ada bakıyor. Kısa 2R'siz koşuda AC 89'un dökümü: cevabın tamamı doğru 6; iki cümle doğru ama özne yanlış 8; en az bir cümle yanlış, son ad tutmuş <b>75</b> ("David Evans's father is David Evans. David Evans's father is Arthur Evans."). Sebep: bu veride her 2R cevabı soyadı ve yoldan tek başına çıkıyor ("Evans + father's father" hep Arthur Evans); model Owen'ı tanımadan son adı tutturabiliyor. Önceki kıyaslar aynı ölçüyle yapıldığı için geçerli; ama sıradaki koşuların ana ölçüsü EX (kullanıcı kararı).</p>
+    <p class="muted" style="font-size:14px">Kurala göre: kısa 2R'yi çıkarmak yaradı (57 → 89; eşik 67), mutlak bant kısmi (96'nın altı). wd 0,01 zarar verdi (eşik 78) ve kopyayı değiştirmedi (SC 0). İlk koşunun sağlığı bir soruyla kaldı (1R 639/640), yorumlanmadı; sayıları o günkü ölçü adlarıyla alındı.</p>
+
+    <p>Gözle okuma, kısa 2R'siz koşu:</p>
+    <div class="scroll"><table>
+      <thead><tr><th>soru</th><th>model</th><th>doğru</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">Owen Evans's father's father?</td><td><span style="color:var(--bad)">David Evans</span>'s father is David Evans. David Evans's father is Arthur Evans.</td><td>Owen Evans's father is David Evans. David Evans's father is Arthur Evans.</td></tr>
+        <tr><td class="mono">Owen Evans's mother's father?</td><td><span style="color:var(--bad)">David Evans</span>'s mother is Edith Evans. Edith Evans's father is David Evans.</td><td>Owen Evans's mother is Julia Evans. Julia Evans's father is Harold Fisher.</td></tr>
+        <tr><td class="mono">Owen Evans's mother's brother? (özne verildi)</td><td>Owen Evans's mother is Julia Evans. Julia Evans's brother is Simon Fisher.</td><td>aynı</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="part">
+    <h3>Nerede tıkanıyor: sorudaki adı geri yazmak</h3>
+    <p>Üç alt ajan eğitilmiş modeli yerelde, eğitim yapmadan inceledi (kısa 2R'siz koşu).</p>
+    <ol class="finding">
+      <li><span><b>Doğru yere bakıyor.</b> Cevabın ilk adı "?" konumunda üretiliyor; tur 2'de attention orada Owen'ın adına 0,97 bakıyor (öğretme torunlarında 0,90).</span></li>
+      <li><span><b>Okuduğu şey yanlış.</b> Bakılan, Owen'ın ad konumunun tur 1'den sonraki durumu. Öğretme adlarında o durumda bir "beni yaz" kodu var: W_context okuması 192 sorunun 126'sında adın kendisi. Tutulan adlarda yok; yerine 1R eğitiminden kalan yakınlar var: adın kendisi 0, baba/anne/kardeş 108.</span></li>
+      <li><span><b>Çıkış tarafı sağlam.</b> Öğretme torununun durumunu tutulan soruya koyunca model bağışçının adını yazıyor (187/192). "?" konumuna doğrudan Owen'ın noktası konunca 180/192 Owen yazıyor.</span></li>
+      <li><span><b>Adı biliyor, kopyalayamıyor.</b> "Who is David Evans's son?" → Owen Evans: 96/96. Ama 1 adımlı yeni biçimde ("&lt;steps&gt; Who is Owen Evans's mother?") cevaba Owen'la başlaması 4/96; eğitimde görülen 544 soruda 544.</span></li>
+      <li><span><b>Soruya bakmadan sabit bir ad.</b> 32 tutulan torunun 31'inde altı sorunun hepsi aynı adla başlıyor, çoğu babası. "Köprüyle başladı" sayısının çoğu bu sabit adın tesadüfen köprü olması.</span></li>
+      <li><span><b>Mantık yeni kişilere uygulanıyor.</b> Özne verilince son ad 151/192. Kalan 41 hatanın 27'si ikinci adımda: model B'yi tekrar yazıyor ya da öbür ebeveyne kayıyor; aynı olgu tek başına sorulunca doğru. Ayrı sorun, sonraya.</span></li>
+    </ol>
+    <p class="limit"><b>Okuma:</b> kopya genel bir işlem değil, ad başına öğrenilmiş bir kod. Eğitimde cevaba kopyalanmış her adın konumuna tur 1 bir "beni yaz" kodu yazıyor; kopyalanmamış adın konumunda 1R'nin bıraktığı yakın bilgisi kalıyor. Kopyayı genel yapacak parça: Öneri A.</p>
+  </div>
+
+  <div class="part">
+    <h3>Kod</h3>
+    <div class="kv">
+      <span class="muted">veri</span><span>data_20.py: <code>STEP_ANSWERS</code> · <code>step_sentences</code> · <code>HELD_HOUSEHOLDS</code>; iz <code>7ae5615623aa</code></span>
+      <span class="muted">sınav</span><span>train_20.py: <code>generate</code> · <code>score_steps</code> (SC, BC, AC, EX, FC) · <code>exam_steps</code> (verilen 0 / 2 / 8)</span>
+      <span class="muted">koşu</span><span>colab_20.py: <code>start</code> · <code>pulse</code> · <code>stop</code> (arka planda, Drive'a kayıt); defter colab_20.ipynb</span>
+      <span class="muted">testler</span><span>45/45</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== ONERI A ============================== -->
+<section class="step" id="oneriA">
+  <div class="stephead">
+    <div class="eyebrow">öneri · kodlandı, varsayılan kapalı (COPY_PATH = False) · koşulmadı</div>
+    <h2>Öneri A: kopya yolu ve kapısı</h2>
+    <p>Attention baktığı konumdan bugün yalnız o konumun <b>durumunu</b> getiriyor ve o durum tur 1'de değişmiş oluyor: Owen'ın konumunda artık "Owen" değil "Owen'ın babası" var. Öneri A: attention aynı bakışla o konumdaki <b>kelimenin kendisini</b> (değişmemiş noktası PL) de getirsin, bunu yeni bir matristen geçirip duruma yazsın; bir <b>kapı</b> da bunun hangi konumda yazılacağına karar versin.</p>
+  </div>
+
+  <div class="part">
+    <h3>Sorular ve kararlar, sizin sözlerinizle</h3>
+    <ul class="quotes">
+      <li><b>yer</b><div><q>Öneri A büyük resimde nereye oturuyor</q></div><div class="then">Yalnız attention'ın çıkışına: aşağıdaki çizim.</div></li>
+      <li><b>risk</b><div><q>neyi bozma ihtimali var ?</q> · <q>bu bir tahmin mi yüksek bir risk mi ?</q></div><div class="then">Ölçüldü: yakını yazan konumlarda model ada yarım ağırlıkla bakıyor; kapısız kopya orada adı iterdi.</div></li>
+      <li><b>kapı</b><div><q>ben de bu riski gördüm çünkü bir öğrenme koymadık doğrudan formüle ekledik. basit bir toplama işlemine döndü. birşey eklerken bu tarz toplamlar bir kapı ya da bir öğrenme yoksa genelde hata ile sonuçlanıyor.</q></div><div class="then">Kopya yolu kapıyla çarpılıyor; kapı konumdan konuma açılıp kapanmayı öğreniyor.</div></li>
+      <li><b>sinyal</b><div><q>gate açıp kapatmayı öğrenebilecek gerekli sinyal var mı ?</q></div><div class="then">Ölçüldü: tur 2'ye giren durumda var ve hiç görülmemiş adlara taşınıyor (282/288); tur 1'de yok.</div></li>
+    </ul>
+  </div>
+
+  <div class="part">
+    <h3>Büyük resimde yeri</h3>
+    <p>Tüm resim sekmesindeki model, aynı çizim. Mor kesikli olanlar Öneri A'nın eklediği; geri kalan her şey aynen duruyor.</p>
+    <figure>
+      <div class="draw">
+        <svg viewBox="0 0 900 670" role="img" aria-label="Öneri A ile model. Giriş aynı: token PL noktasına gider, durum h PL ile başlar. Block iki tur tekrar eder. Attention içinde q, k ve a_tj aynı; bugün getirilen c, durumların karışımı. Öneri A attention'a ikinci bir çıktı ekler: aynı a_tj ağırlıklarıyla o konumlardaki kelimelerin kendi noktaları PL_j karıştırılır. Bu c′, bir kapı g_t ile çarpılıp W_copy ile toplamaya eklenir; kapı o konumun kendi durumuna bakar. FactUnits, tur sayısı ve çıkış değişmez.">
+          <defs>
+            <marker id="oa1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrowhead"/></marker>
+            <marker id="oa2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrowhead-prop"/></marker>
+          </defs>
+          <rect class="frame1" x="10" y="10" width="880" height="96" rx="6"/>
+          <text class="framelbl f1" x="22" y="30">ADIM 1 · giriş</text>
+          <rect class="frame3" x="10" y="126" width="880" height="404" rx="6"/>
+          <text class="framelbl f3" x="22" y="146">ADIM 3 · Block (shared, 2 tur)</text>
+          <rect class="frame2" x="232" y="156" width="326" height="324" rx="6"/>
+          <text class="framelbl f2" x="244" y="174">attention · Adım 2</text>
+          <rect class="frame1" x="10" y="550" width="880" height="110" rx="6"/>
+          <text class="framelbl f1" x="22" y="570">ADIM 1 · çıkış</text>
+
+          <rect class="box" x="40" y="44" width="120" height="44" rx="3"/>
+          <text class="lbl" x="100" y="63" text-anchor="middle">token</text>
+          <text class="sub" x="100" y="79" text-anchor="middle">konum t</text>
+          <rect class="box pl" x="200" y="44" width="200" height="44" rx="3"/>
+          <text class="lbl" x="300" y="63" text-anchor="middle">PL = norm(PF + Δ)</text>
+          <text class="sub" x="300" y="79" text-anchor="middle">kelimenin noktası</text>
+
+          <rect class="box an" x="40" y="238" width="170" height="56" rx="3"/>
+          <text class="lbl" x="125" y="261" text-anchor="middle">durum h</text>
+          <text class="sub" x="125" y="279" text-anchor="middle">her konumda; başta h = PL</text>
+
+          <rect class="box w" x="250" y="184" width="160" height="44" rx="3"/>
+          <text class="lbl" x="330" y="203" text-anchor="middle">q_t</text>
+          <text class="sub" x="330" y="219" text-anchor="middle">norm(W_query · h_t)</text>
+          <rect class="box w" x="250" y="244" width="160" height="44" rx="3"/>
+          <text class="lbl" x="330" y="263" text-anchor="middle">k_j (j ≤ t)</text>
+          <text class="sub" x="330" y="279" text-anchor="middle">norm(W_key · h_j)</text>
+          <rect class="box" x="425" y="212" width="125" height="60" rx="3"/>
+          <text class="lbl" x="487" y="235" text-anchor="middle">a_tj</text>
+          <text class="sub" x="487" y="252" text-anchor="middle">nereye bakıyor</text>
+          <text class="sub" x="487" y="265" text-anchor="middle">değişmiyor</text>
+          <rect class="box" x="250" y="316" width="300" height="48" rx="3"/>
+          <text class="lbl" x="400" y="336" text-anchor="middle">c_t = Σ a_tj · h_j</text>
+          <text class="sub" x="400" y="353" text-anchor="middle">durumlar getirilir (bugün)</text>
+
+          <rect class="box pl" x="250" y="404" width="110" height="56" rx="3"/>
+          <text class="lbl" x="305" y="426" text-anchor="middle">PL_j</text>
+          <text class="sub" x="305" y="444" text-anchor="middle">kelimenin kendisi</text>
+          <rect class="box prop" x="375" y="404" width="175" height="56" rx="3"/>
+          <text class="lbl prop" x="462" y="426" text-anchor="middle">c′_t = Σ a_tj · PL_j</text>
+          <text class="sub prop" x="462" y="444" text-anchor="middle">aynı a_tj · ÖNERİ A</text>
+
+          <rect class="box w" x="600" y="176" width="270" height="74" rx="3"/>
+          <text class="lbl" x="735" y="196" text-anchor="middle">topla</text>
+          <text class="sub" x="735" y="215" text-anchor="middle" style="fill:var(--ink)">h ← norm(h + W_context · c</text>
+          <text class="sub prop" x="735" y="235" text-anchor="middle" style="font-weight:600">+ g_t · W_copy · c′ )   ← ÖNERİ A</text>
+          <rect class="box an" x="600" y="276" width="270" height="62" rx="3"/>
+          <text class="lbl" x="735" y="296" text-anchor="middle">FactUnits: h ← norm(h + olgu(h))</text>
+          <text class="sub" x="735" y="314" text-anchor="middle">256 birim · değişmiyor</text>
+          <text class="sub" x="735" y="328" text-anchor="middle">olgu(h) = W_fact_out · ReLU(W_fact_in·h − eşik)</text>
+
+          <rect class="box prop" x="628" y="398" width="212" height="68" rx="3"/>
+          <text class="lbl prop" x="734" y="420" text-anchor="middle">kapı g_t</text>
+          <text class="sub prop" x="734" y="438" text-anchor="middle">sigmoid(w · h_t + b): 0 ile 1</text>
+          <text class="sub" x="734" y="454" text-anchor="middle">girdi: bu konumun durumu h_t</text>
+          <circle class="plus" cx="585" cy="432" r="11"/>
+          <text class="lbl" x="585" y="437" text-anchor="middle">×</text>
+
+          <rect class="box w" x="200" y="586" width="220" height="48" rx="3"/>
+          <text class="lbl" x="310" y="606" text-anchor="middle">çıkış: h_son</text>
+          <text class="sub" x="310" y="624" text-anchor="middle">değişmiyor</text>
+          <rect class="box" x="470" y="586" width="390" height="48" rx="3"/>
+          <text class="lbl" x="665" y="606" text-anchor="middle">10,06 · ⟨h_son, PL⟩ → softmax</text>
+          <text class="sub" x="665" y="624" text-anchor="middle">sonraki token</text>
+
+          <line class="flow" x1="160" y1="66" x2="198" y2="66" marker-end="url(#oa1)"/>
+          <line class="flow" x1="300" y1="88" x2="142" y2="236" marker-end="url(#oa1)"/>
+          <text class="sub" x="276" y="117">h = PL</text>
+          <line class="flow" x1="210" y1="256" x2="248" y2="210" marker-end="url(#oa1)"/>
+          <line class="flow" x1="210" y1="272" x2="248" y2="266" marker-end="url(#oa1)"/>
+          <line class="flow" x1="410" y1="206" x2="423" y2="230" marker-end="url(#oa1)"/>
+          <line class="flow" x1="410" y1="266" x2="423" y2="254" marker-end="url(#oa1)"/>
+          <line class="flow" x1="487" y1="272" x2="487" y2="314" marker-end="url(#oa1)"/>
+          <polyline class="flow" points="550,340 570,340 570,204 598,204" marker-end="url(#oa1)"/>
+          <line class="flow prop" x1="360" y1="432" x2="373" y2="432" marker-end="url(#oa2)"/>
+          <line class="flow prop" x1="550" y1="432" x2="572" y2="432" marker-end="url(#oa2)"/>
+          <line class="flow prop" x1="628" y1="432" x2="598" y2="432" marker-end="url(#oa2)"/>
+          <polyline class="flow prop" points="585,421 585,228 598,228" marker-end="url(#oa2)"/>
+          <line class="flow" x1="735" y1="250" x2="735" y2="274" marker-end="url(#oa1)"/>
+          <polyline class="flow" points="858,338 858,500 125,500 125,296" marker-end="url(#oa1)"/>
+          <text class="sub" x="430" y="516" text-anchor="middle">×2 tur (TURNS) · her turda aynı Block (shared)</text>
+          <polyline class="flow" points="40,280 26,280 26,610 198,610" marker-end="url(#oa1)"/>
+          <line class="flow" x1="420" y1="610" x2="468" y2="610" marker-end="url(#oa1)"/>
+        </svg>
+      </div>
+      <figcaption>Renkler Tüm resim'deki gibi: yeşil Adım 1, lacivert Adım 2 (attention), kehribar Adım 3. Mor kesikli: Öneri A. Tek değişen yer attention'ın çıktısı: bugün yalnız c (durumların karışımı) topla kutusuna gidiyor. Öneri A ile aynı ağırlıklarla c′ (kelimelerin kendisinin karışımı) da gidiyor; önce kapı g_t ile çarpılıyor (0: bu konumda kopya yok, 1: tam kopya), sonra W_copy ile ekleniyor. q, k, a_tj, FactUnits, tur sayısı ve çıkış aynen kalıyor.</figcaption>
+    </figure>
+
+    <div class="formula"><span class="c">hesap, baştan sona · Öneri A ile (yeni: satır 4b ve satır 5'in sonu)</span>
+1  <span class="pl">PL</span>_i  = norm(<span class="pf">PF</span>_i + <span class="pl">Δ</span>_i)
+2  <span class="an">h</span>_t   = <span class="pl">PL</span>_t
+   <span class="c">her turda (2 tur, aynı Block):</span>
+3  <span class="w">q_t</span>   = norm(<span class="w">W_query</span> · <span class="an">h</span>_t)   <span class="w">k_j</span> = norm(<span class="w">W_key</span> · <span class="an">h</span>_j)
+4  a_tj  = softmax_{j≤t}(10,83 · ⟨<span class="w">q_t</span>, <span class="w">k_j</span>⟩)
+<span class="prop">4b g_t   = sigmoid(w · h_t + b)</span>                  <span class="c">kapı: bu konumda kopyala mı</span>
+5  <span class="an">h</span>_t  ← norm(<span class="an">h</span>_t + <span class="w">W_context</span> · Σ_j a_tj · <span class="an">h</span>_j <span class="prop">+ g_t · W_copy · Σ_j a_tj · PL_j</span>)
+6  <span class="an">h</span>_t  ← norm(<span class="an">h</span>_t + <span class="w">W_fact_out</span> · ReLU(<span class="w">W_fact_in</span> · <span class="an">h</span>_t − eşik))
+7  p(sonraki = token) = softmax(10,06 · ⟨<span class="an">h</span>_t, <span class="pl">PL</span>_token⟩)
+8  kayıp = ortalama(−log p(doğru sonraki)) + <span class="an">1e-3</span> · Σ Δ²</div>
+
+    <div class="scroll"><table>
+      <thead><tr><th>parça</th><th>bugün</th><th>Öneri A ile</th></tr></thead>
+      <tbody>
+        <tr><td>token noktaları (PF, Δ, PL)</td><td>var</td><td>aynı</td></tr>
+        <tr><td>attention: nereye bakıyor (W_query, W_key, a_tj)</td><td>var</td><td>aynı</td></tr>
+        <tr><td>attention: ne getiriyor</td><td>durumlar: Σ a · h</td><td>durumlar + <span class="prop">kelimelerin kendisi: Σ a · PL</span></td></tr>
+        <tr><td>getirileni duruma yazan matris</td><td>W_context</td><td>W_context + <span class="prop">W_copy (64 × 64, 0'dan)</span></td></tr>
+        <tr><td>kopyanın nerede yazılacağı</td><td>—</td><td><span class="prop">kapı g_t: w (64) + b (1)</span></td></tr>
+        <tr><td>FactUnits, 2 tur, paylaşılan Block</td><td>var</td><td>aynı</td></tr>
+        <tr><td>çıkış: ⟨h_son, PL⟩</td><td>var</td><td>aynı</td></tr>
+        <tr><td>öğrenilen sayı</td><td class="num">60.544</td><td class="num">64.705 (+4.161)</td></tr>
+      </tbody>
+    </table></div>
+    <p>Neden tam burası: sorun attention'ın <b>nereye</b> baktığında değil (Owen'a 0,97 bakıyor), <b>ne getirdiğinde</b>. Getirdiği durum tur 1'de değişmiş oluyor; getirilen şeyin içine değişmemiş kelimeyi de koymak, hatanın doğduğu tek noktaya dokunuyor. Üç parçanın işi ayrı: attention <b>nereye</b> bakılacağını, W_copy <b>ne</b> yazılacağını, kapı <b>yazılıp yazılmayacağını</b> seçiyor.</p>
+  </div>
+
+  <div class="part">
+    <h3>Kapı neden gerekli: kapısız kopya düz bir toplama olurdu</h3>
+    <p>Kapı olmasaydı kopya yolu her konumda, attention'ın baktığı adı cevaba iterdi. Kopyanın istenmediği yerlerde de model ada bakıyor mu? Bugünkü modelde ölçüldü (eğitimsiz, tur 2'de attention'ın ada verdiği ağırlık):</p>
+    <div class="scroll"><table>
+      <thead><tr><th>konum</th><th>model orada ne yazmalı</th><th class="num">ada bakış</th><th>kopya</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">&lt;steps&gt; Who is Owen Evans's father's father ?</td><td>Owen</td><td class="num">0,97</td><td><b>istenir</b></td></tr>
+        <tr><td class="mono">Owen Evans's father is David Evans .</td><td>David (2. cümlenin öznesi)</td><td class="num">0,58–0,87</td><td><b>istenir</b></td></tr>
+        <tr><td class="mono">Who is Owen Evans's father ?</td><td>David</td><td class="num" style="color:var(--bad)">~0,5</td><td>istenmez</td></tr>
+        <tr><td class="mono">Owen Evans's father is</td><td>David</td><td class="num" style="color:var(--bad)">~0,5</td><td>istenmez</td></tr>
+        <tr><td class="mono">… David Evans's father is</td><td>Arthur</td><td class="num">0,24 (tur 1'de 0,5–0,7)</td><td>istenmez</td></tr>
+      </tbody>
+    </table></div>
+    <p class="muted" style="font-size:14px">Yakını yazan konumlarda model adın kendisine yarım ağırlıkla bakıyor: kapısız bir kopya yolu orada adı yarım güçle iterdi ("Who is Owen Evans's father?" → Owen). Bu bir tahmin değil, bugünkü bakış düzeni; eğitim bakışı değiştirebilir ama kendiliğinden değiştireceğinin garantisi yok.</p>
+  </div>
+
+  <div class="part">
+    <h3>Kapı neye göre açılıp kapanıyor</h3>
+    <p>Kapı yalnız bulunduğu konumun durumuna bakıyor: g_t = sigmoid(w · h_t + b). w, 64 sayılık bir yön; b tek bir sayı. "?" konumunun durumunda, <b>&lt;steps&gt;</b> ile sorulan soruda &lt;steps&gt;'ten gelen bilgi var (tur 1'de "?", &lt;steps&gt;'e 0,71 bakıyor); 1R sorusunda yok. w bu yöne dönerse:</p>
+    <div class="two">
+      <div class="formula"><span class="c">&lt;steps&gt; Who is Owen Evans's father's father ?</span>
+&lt;steps&gt; payı:  0,7
+s = 8 · 0,7 − 3 = 2,6
+g = sigmoid(2,6) = 0,93     kopya açık
+çıkış:  "Owen"</div>
+      <div class="formula"><span class="c">Who is Owen Evans's father ?</span>
+&lt;steps&gt; payı:  0
+s = 8 · 0 − 3 = −3
+g = sigmoid(−3) = 0,05      kopya kapalı
+çıkış:  "David" (FactUnits getirir)</div>
+    </div>
+    <p class="muted" style="font-size:14px">8 ve −3 örnek sayılar. "." (köprüyü yaz) ile "is" (yakını yaz) zaten farklı token'lar; kapı onları token'dan ayırabilir. Aynı fikir metin özetleyen modellerdeki pointer-generator'ın "kopyala ya da üret" anahtarı (See, Liu, Manning, 2017).</p>
+
+    <p><b>Kapıyı kim eğitiyor?</b> Kimse "burada kopyala" demiyor; sinyal sonraki token kaybı. Kopya işe yaradığında kayıp düşer, gradient o tür durumlarda g'yi büyütür; zarar verdiğinde küçültür. Eğitimde iki tür örnek de bol:</p>
+    <div class="scroll"><table>
+      <thead><tr><th>konum</th><th>kopya</th><th class="num">eğitimde</th></tr></thead>
+      <tbody>
+        <tr><td>adımlı soruda "?" (özneyi yaz)</td><td>işe yarar</td><td class="num">960</td></tr>
+        <tr><td>1. cümle sonu "." (köprüyü yaz)</td><td>işe yarar</td><td class="num">960</td></tr>
+        <tr><td>1R soruda "?" (yakını yaz)</td><td>zarar verir</td><td class="num">640</td></tr>
+        <tr><td>"is" konumları (yakını yaz)</td><td>zarar verir</td><td class="num">2.560</td></tr>
+      </tbody>
+    </table></div>
+
+    <p><b>Kapının girdisinde bu ayrım var mı?</b> Bugünkü modelde ölçüldü: "?" konumunun durumu, tek bir yönle, &lt;steps&gt; sorusunu 1R sorusundan ayırıyor mu? Yön öğretilen kişilerden çıkarıldı, hiç görülmemiş tutulan torunlarda sınandı.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>kapının girdisi</th><th class="num">öğretilen kişiler</th><th class="num">tutulan torunlar</th></tr></thead>
+      <tbody>
+        <tr><td>tur 1'e giren durum (yalnız "?" token'ı)</td><td class="num">ayrılamaz: iki soruda birebir aynı</td><td class="num">ayrılamaz</td></tr>
+        <tr><td>tur 2'ye giren durum</td><td class="num"><b>736/736</b></td><td class="num"><b>282/288</b></td></tr>
+      </tbody>
+    </table></div>
+    <p class="muted" style="font-size:14px">Sinyal tur 2'de var ve hiç görülmemiş adlara taşınıyor; pay daha dar (6 soru sınırın biraz yanlış tarafında). Cevap tur 2'den sonra yazıldığı ve Owen'a 0,97 bakış tur 2'de olduğu için yeterli. Aynı yön tur 1'deki "?" durumunu kapalı tarafa koyuyor (−0,04, sınıra yakın): tek bir kapı tur 1'de kapalı, tur 2'de &lt;steps&gt; sorusunda açık olabilir. Kapı ada değil konuma ve soru türüne bakıyor; w'nun 160 adı ayrı ayrı ezberleyecek yeri yok.</p>
+  </div>
+
+  <div class="part">
+    <h3>Yakından: attention artık iki şey getiriyor</h3>
+    <figure>
+      <div class="draw">
+        <svg viewBox="0 0 900 290" role="img" aria-label="Öneri A yakından. Attention ağırlıkları a_tj aynı kalır. Bugün önceki konumların durumları h_j bu ağırlıklarla karıştırılıp W_context ile duruma yazılır. Öneri A'da aynı ağırlıklarla o konumlardaki kelimelerin noktaları PL_j de karıştırılır, W_copy'den geçer, kapı g_t ile çarpılır ve aynı duruma eklenir.">
+          <defs>
+            <marker id="k1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrowhead"/></marker>
+            <marker id="k2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="arrowhead-prop"/></marker>
+          </defs>
+          <rect class="frameprop" x="425" y="184" width="400" height="96" rx="6"/>
+          <text class="framelbl fp" x="815" y="274" text-anchor="end">ÖNERİ A · yeni</text>
+
+          <rect class="box an" x="20" y="46" width="180" height="48" rx="3"/>
+          <text class="lbl" x="110" y="66" text-anchor="middle">h_j</text>
+          <text class="sub" x="110" y="82" text-anchor="middle">önceki konumların durumu</text>
+          <rect class="box pl" x="20" y="200" width="180" height="48" rx="3"/>
+          <text class="lbl" x="110" y="220" text-anchor="middle">PL_j</text>
+          <text class="sub" x="110" y="236" text-anchor="middle">o konumdaki kelimenin kendisi</text>
+
+          <rect class="box" x="240" y="118" width="160" height="58" rx="3"/>
+          <text class="lbl" x="320" y="142" text-anchor="middle">a_tj</text>
+          <text class="sub" x="320" y="160" text-anchor="middle">aynı attention (q, k)</text>
+
+          <rect class="box" x="440" y="46" width="160" height="48" rx="3"/>
+          <text class="lbl" x="520" y="66" text-anchor="middle">Σ a_tj · h_j</text>
+          <text class="sub" x="520" y="82" text-anchor="middle">bugün getirilen</text>
+          <rect class="box prop" x="440" y="200" width="150" height="48" rx="3"/>
+          <text class="lbl prop" x="515" y="220" text-anchor="middle">Σ a_tj · PL_j</text>
+          <text class="sub prop" x="515" y="236" text-anchor="middle">yeni getirilen</text>
+
+          <rect class="box w" x="630" y="46" width="110" height="48" rx="3"/>
+          <text class="lbl" x="685" y="66" text-anchor="middle">W_context</text>
+          <text class="sub" x="685" y="82" text-anchor="middle">var</text>
+          <rect class="box prop" x="610" y="200" width="100" height="48" rx="3"/>
+          <text class="lbl prop" x="660" y="220" text-anchor="middle">W_copy</text>
+          <text class="sub prop" x="660" y="236" text-anchor="middle">0'dan</text>
+          <circle class="plus" cx="750" cy="224" r="11"/>
+          <text class="lbl" x="750" y="229" text-anchor="middle">×</text>
+          <text class="sub prop" x="750" y="256" text-anchor="middle">kapı g_t</text>
+
+          <rect class="box an" x="775" y="118" width="115" height="58" rx="3"/>
+          <text class="lbl" x="832" y="142" text-anchor="middle">durum h_t</text>
+          <text class="sub" x="832" y="160" text-anchor="middle">norm(h + ikisi)</text>
+
+          <line class="flow" x1="200" y1="70" x2="438" y2="70" marker-end="url(#k1)"/>
+          <line class="flow prop" x1="200" y1="224" x2="438" y2="224" marker-end="url(#k2)"/>
+          <line class="dash" x1="60" y1="198" x2="60" y2="96" marker-end="url(#k1)"/>
+          <text class="sub" x="68" y="152">başta h = PL,</text>
+          <text class="sub" x="68" y="166">sonra değişir</text>
+          <line class="flow" x1="400" y1="130" x2="458" y2="96" marker-end="url(#k1)"/>
+          <line class="flow prop" x1="400" y1="164" x2="458" y2="198" marker-end="url(#k2)"/>
+          <line class="flow" x1="600" y1="70" x2="628" y2="70" marker-end="url(#k1)"/>
+          <line class="flow prop" x1="590" y1="224" x2="608" y2="224" marker-end="url(#k2)"/>
+          <line class="flow prop" x1="710" y1="224" x2="737" y2="224" marker-end="url(#k2)"/>
+          <polyline class="flow" points="740,70 832,70 832,116" marker-end="url(#k1)"/>
+          <polyline class="flow prop" points="761,224 832,224 832,178" marker-end="url(#k2)"/>
+        </svg>
+      </div>
+      <figcaption>Üst sıra bugünkü yol: getirilen durumların karışımı W_context'ten geçip duruma yazılır. Mor çerçeve Öneri A: aynı ağırlıklarla o konumların kelime noktaları getirilir, W_copy'den geçer, kapıyla çarpılır ve aynı toplamaya eklenir. Attention'ın nereye baktığı (q, k) değişmiyor.</figcaption>
+    </figure>
+    <p>Yeni: W_copy 4.096 + kapı 65 = 4.161 sayı (60.544 → 64.705). W_copy 0'dan başlar, yani başta model bugünküyle birebir aynı; kapı b = 0 ile başlarsa yarı açık (0,5) başlar ve W_copy öğrenmeye başladıkça o da öğrenir.</p>
+  </div>
+
+  <div class="part">
+    <h3>Sayısal örnek: "?" konumu, tur 2</h3>
+    <div class="two">
+      <div class="formula"><span class="c">bugün (ölçüldü)</span>
+bakar:     Owen'ın adı 0,97
+getirir:   0,97 · h(Owen)    tur 1'de "baba" olmuş
+yazar:     W_context · …  → en yakın David
+çıkış:     "David"   (Owen'ın olasılığı 0,004)</div>
+      <div class="formula"><span class="c">Öneri A (öğrenirse)</span>
+bakar:     Owen'ın adı 0,97   aynı
+getirir:   0,97 · PL(Owen)    kelimenin kendisi
+kapı:      g ≈ 1              &lt;steps&gt; sorusu
+yazar:     g · W_copy · PL(Owen) ≈ PL(Owen)
+çıkış:     "Owen"</div>
+    </div>
+    <p class="muted" style="font-size:14px">Sağdakinin bir kısmı ölçüldü: "?" konumuna Owen'ın noktası elle konunca model 192 sorunun 180'inde Owen yazıyor. Ölçülmeyen kısım, W_copy'nin ve kapının bunu öğrenip öğrenmeyeceği.</p>
+  </div>
+
+  <div class="part">
+    <h3>Beş boyut</h3>
+    <div class="dims">
+      <div><b>amaç</b><p>Sorudaki adı ve köprüyü cevaba geri yazmak: "&lt;steps&gt; Who is Owen Evans's …?" → "Owen Evans's …". Bugün bu iş 160 ad için ad ad ezberli; tutulan 32 adda 6/192. Olmadan model hiç görmediği bir adı geri yazamıyor.</p></div>
+      <div><b>kullanım</b><p>Her turda, her konumda: attention'ın baktığı konumların kelime noktaları aynı ağırlıklarla karışır, W_copy'den geçer, kapı g_t ile çarpılıp duruma eklenir. Kapı her konumda o konumun durumuna bakar. İş görmesi beklenen yer: adımlı "?" ve ilk cümlenin sonundaki ".".</p></div>
+      <div><b>öğrenilme</b><p>İkisi de sonraki token kaybıyla. W_copy: 192 ad 64 boyutlu uzayda; "PL(ad) → PL(ad)" işini 160 ad üzerinde yapan tek doğrusal harita 64 yönün hepsini kapsar, görmediği 32 ada da uygulanır. Kapı: kopyanın işe yaradığı 1.920, zarar verdiği 3.200 konumdan; ada değil konuma bakar. Ezberleyerek geçebilir: model eski yolu kullanmayı sürdürebilir; bunu koşu gösterir.</p></div>
+      <div><b>okunma</b><p>Kapı her konum türünde ne değer alıyor: adımlı "?" ve "." konumlarında ~1, 1R "?" ve "is" konumlarında ~0 bekleniyor; her yerde ~0,5 ise öğrenmemiş. W_copy · PL(ad) en çok kendisine mi yakın (192 adın kaçında). Kopya yolunu kapatınca SC ne oluyor.</p></div>
+      <div><b>yönetim</b><p>Aç/kapa ayarı; kapalıyken bugünkü model. Testler: kapalıyken hesap bugünküyle birebir, W_copy = 0 etkisiz, bağımsız formülle aynı. Kapılar: 1R_T ≥ 634/640, 2R_T_EX ≥ 187/192; ikinci adımda "B's r is B" tekrarı (bugün 10) artmamalı. Ana ölçü 2R_UT_AC, kopya ölçüsü 2R_UT_SC.</p></div>
+    </div>
+  </div>
+
+  <div class="part">
+    <h3>Kapı yetmezse</h3>
+    <p>Kapı, kopyanın <b>nerede</b> yazılacağına karar veriyor; ama kopya yolu hâlâ 1R getirmeyle aynı bakışı (a_tj) kullanıyor. Kapı açıkken attention yanlış yere bakıyorsa yanlış ad kopyalanır. O durumda sonraki seçenek, kopya için ayrı bir attention: kendi q ve k'siyle ikinci bir head (3 × 4.096 = 12.288 sayı daha).</p>
+    <p class="muted" style="font-size:14px">Transformer'da birebir karşılığı yok. En yakını, kelimenin embedding'ini okuyup V ve O ile aynen yazan "copy head". Transformer'da kelime vektörü akışta büyüklüğünü koruduğu için sonraki katmanlar onu okuyabiliyor. Bizde her turdan sonra küreye normalize edildiği için tur 1'de küçülüyor (Owen'ın konumunda PL(Owen) ile benzerlik 0,21).</p>
+  </div>
+
+  <div class="part">
+    <h3>Kod ve adlar</h3>
+    <div class="kv">
+      <span class="muted">kopya matrisi</span><span><code>W_copy</code> (64 × 64, 0'dan); CausalAttention içinde, W_context'in yanında · onaylı</span>
+      <span class="muted">kapı</span><span><code>W_copy_gate</code> (1 × 64, 0'dan) ve <code>copy_gate_bias</code> (1, 0'dan: kapı başta 0,5) · onaylı</span>
+      <span class="muted">ayar</span><span><code>COPY_PATH = False</code> (model_20.py tepesinde); BlockModel ve train_seq'te <code>copy_path</code>; Colab'da <code>C.start(..., copy_path=True)</code> · onaylı</span>
+      <span class="muted">testler</span><span><code>t_copy</code>: kapalıyken parametresi yok ve skor aynı; bağımsız float64 formülle aynı (shared, separate); kapı kapalıyken katkı yok; nedensellik; eğitimde W_copy ve kapı 0'dan ayrılır; weight decay W_copy ve W_copy_gate'e, copy_gate_bias hariç</span>
+      <span class="muted">koşu</span><span><code>shared_steps_copy_s0</code> · onaylı: aynı veri (7ae5615623aa), 4.000 adım, tohum 0, wd yok; kıyas kısa 2R'siz koşu (2R_UT AC 89, SC 6)</span>
+      <span class="muted">karar kuralı</span><span>OLCULENLER_20'de, koşudan önce yazıldı. Ana ölçü 2R_UT_EX (bugün 6): ≥ 20 yaradı, 3–19 fark yok, ≤ 2 zarar. Kopya 2R_UT_SC (6): ≥ 30 genelleşti. Risk: verilen 2'de "B's r is B" (bugün 14) ≥ 28 ise kopya yanlış yerde. Sağlık: 1R_T ≥ 634, 2R_T_EX ≥ 187.</span>
+    </div>
+  </div>
+</section>
 
 </div>
 
