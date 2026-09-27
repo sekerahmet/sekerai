@@ -7,8 +7,11 @@ Elle yazilan kisim notebook_master_20.html; Adim 0'daki dunya icerigi data_20'de
 import html
 import math
 import os
+import sys
 
-import data_20 as D
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "train_kinship"))   # veri: akrabalik egitimi
+
+import data_20 as D  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MASTER = os.path.join(HERE, "notebook_master_20.html")

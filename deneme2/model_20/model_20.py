@@ -57,8 +57,8 @@ STREAM_NORM = True   # True: durum her eklemeden sonra kureye (bugunku).  False:
                      # ve FactUnits'in okudugu kopya normalize edilir (transformer gibi); cikis <norm(h), PL> (27 Eylul)
 LAYER_NORM = False   # True: L2 norm yerine LayerNorm (norm_attention, norm_facts, norm_final; ogrenilen kazanc ve kayma);
                      # cikis <norm_final(h), PL>, sabit scale yok (kullanici, 27 Eylul: "Layernorm yapalım")
-ROPE = False         # True: attention'in q ve k'sina RoPE (konum bilgisi); False = bugunku model, konum bilgisi yok
-                     # (kullanici, 27 Eylul: "şimdi rope olan model yap")
+ROPE = True          # attention'in q ve k'sina RoPE (konum bilgisi).  Varsayilanlar = Model X (C' + RoPE; kullanici, 27 Eylul:
+                     # "Model X varsayilan model olsun" onayi); False = RoPE'suz C'
 
 
 def apply_rope(x):

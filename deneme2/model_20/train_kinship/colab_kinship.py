@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""colab_20 -- model_20 Colab kosulari.  Egitim arka planda bir iplikte; hucre hemen doner (CLAUDE.md kural 8).
+"""colab_kinship -- akrabalik egitiminin Colab kosulari.  Egitim arka planda bir iplikte; hucre hemen doner (CLAUDE.md kural 8).
 
-    import colab_20 as C
+    import colab_kinship as C
     C.start(NAME, DATA, OUT, steps=S, seed=0, every=100, device="cuda")     compile=True varsayilan (model_19 gibi)
     C.pulse()      her kosunun durumu ve son satirlari
     C.stop()       bayrak: iplik bir sonraki sinavda modeli kaydedip cikar
@@ -12,13 +12,17 @@ OUT/checkpoint_tNNNNN.pt her save_every adimda surdurme paketi (kesilirse start(
 """
 import json
 import os
+import sys
 import threading
 import time
 import traceback
 
 import torch
 
-import train_20 as TR
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # model_20: model ve genel egitim
+
+import exam_kinship as EK  # noqa: E402
+import train_20 as TR  # noqa: E402
 
 SHORT = ("1R_T",)                    # ilk token: tek adimli bilgi, egitimde yazili
 STEPS_CLS = ("2R_T", "2R_UT")         # "<steps>" ile uretim: egitimde gorulen / hic gorulmemis 2R
@@ -28,18 +32,19 @@ RUNS = {}
 def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True, setting="shared", save_every=None,
           resume=False, **train_kw):
     """Egitimi arka planda baslatir, hemen doner.  out doluysa once out_eski_<zaman>'a TASINIR, silinmez.
-    setting: "shared" (model_20) ya da "transformer" (kiyas modeli, model_20_transformer).
+    setting: "shared" (Model X, varsayilan ayarlarla) ya da "transformer" (kiyas modeli, model_20_transformer).
     save_every: her save_every adimda out/checkpoint_tNNNNN.pt {step, model, optimizer}.  resume=True: out'taki son
     paketten surdurur -- klasor tasinmaz, gunluk ve sinavlar uzar; ayarlar config.json ile ayni olmali."""
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
-    n = {c: len(TR.questions(data, c)) for c in SHORT + STEPS_CLS}
+    n = {c: len(EK.questions(data, c)) for c in SHORT + STEPS_CLS}
     # varsayilanlar da yazilir (lr, cosine tabani, clip, wd, kopya yolu, rope): config tek basina koşuyu tarif etsin
     config = dict(name=name, setting=setting, steps=steps, seed=seed, every=every, device=device, compile=compile,
                   fingerprint=data["fingerprint"], train=len(data["train"]), sizes=n, save_every=save_every,
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
                               copy_path=TR.COPY_PATH, stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
-                              rope=True if setting.startswith("transformer") else TR.ROPE), **train_kw))
+                              rope=True if setting.startswith("transformer") else TR.ROPE if setting in TR.STEP3 else False),
+                         **train_kw))
     checkpoint = None
     if resume:
         packs = sorted(f for f in os.listdir(out) if f.startswith("checkpoint_t")) if os.path.isdir(out) else []
@@ -70,14 +75,14 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
         e = dict(step=step, nll=nll, secs=round(time.time() - run["t0"], 1))
         for c in SHORT:
             if data.get("long_1r"):              # 1R cevabi tam cumle: yakinin adi cevapta dogru mu (AC)
-                counts, _ = TR.exam_steps(model, data, c)
+                counts, _ = EK.exam_steps(model, data, c)
                 e[c], e[c + "_EX"] = counts["AC"], counts["EX"]
                 continue
-            qs = TR.questions(data, c)
-            pred = TR.read_questions(model, qs, data["vocab"])[0].tolist()
+            qs = EK.questions(data, c)
+            pred = EK.read_questions(model, qs, data["vocab"])[0].tolist()
             e[c] = sum(int(p) in q[1] for p, q in zip(pred, qs))
         for c in STEPS_CLS:
-            counts, _ = TR.exam_steps(model, data, c)
+            counts, _ = EK.exam_steps(model, data, c)
             e.update({"%s_%s" % (c, k): v for k, v in counts.items()})
         run["exams"].append(e)
         json.dump(run["exams"], open(os.path.join(out, "exams.json"), "w"), indent=1)
@@ -96,7 +101,7 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
         try:
             if checkpoint is not None:
                 note("SURDURULDU adim %d'den (%s)" % (checkpoint["step"], "checkpoint_t%05d.pt" % checkpoint["step"]))
-            ids, mask = TR.sequences(data)
+            ids, mask = EK.sequences(data)
             model, _ = TR.train_seq(setting, ids, mask, len(data["vocab"]), steps=steps, seed=seed, device=device,
                                     every=every, callback=callback, log_at=(), compile=compile, save_every=save_every,
                                     save=save, checkpoint=checkpoint, **train_kw)
@@ -104,7 +109,7 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
             final = {}
             for c, givens in [(c, (0,)) for c in SHORT if data.get("long_1r")] + [(c, (0, 2, 8)) for c in STEPS_CLS]:
                 for given in givens:
-                    counts, rows = TR.exam_steps(model, data, c, given)
+                    counts, rows = EK.exam_steps(model, data, c, given)
                     final["%s_given%d" % (c, given)] = dict(counts=counts, rows=rows)
                     note("SON %-13s verilen %d: %s" % (c, given, "  ".join("%s %d" % kv for kv in counts.items())))
             json.dump(final, open(os.path.join(out, "final.json"), "w"), indent=1, ensure_ascii=False)
