@@ -510,8 +510,10 @@ def t_step3():
           and sig["cooldown"].default == TR.COOLDOWN == 0.2 and sig["compile"].default is True)
     c_on, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=2, log_at=(), compile=True)
     c_off, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=2, log_at=(), compile=False)
-    check("compile CPU'da kendiliginden kapali (if, train_seq): compile=True hata vermez, compile=False ile bit duzeyinde ayni",
-          all(torch.equal(a, b) for a, b in zip(c_on.state_dict().values(), c_off.state_dict().values())))
+    check("compile CPU'da kendiliginden kapali (if, train_seq): compile=True hata vermez, compile=False ile bit duzeyinde ayni; "
+          "COMPILE_LOCK (iplikler arasi derleme kilidi) egitimden sonra serbest",
+          all(torch.equal(a, b) for a, b in zip(c_on.state_dict().values(), c_off.state_dict().values()))
+          and not TR.COMPILE_LOCK.locked())
 
     mb = BlockModel(nv)
     with torch.no_grad():

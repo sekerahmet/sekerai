@@ -6,7 +6,9 @@
     Muon        optimizer: gizli matrisler Muon, gerisi Adam (tek sinif, tek state_dict)
     pad         id listeleri -> (ids, mask);  generate: acgozlu uretim
 """
+import contextlib
 import math
+import threading
 
 import torch
 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -32,6 +34,8 @@ OPTIMIZER = "muon"   # "muon": gizli matrisler (W_context, W_fact_in, W_fact_out
                      # W_mlp_out) Muon, gerisi Adam | "adam": hepsi Adam (27 Eylul'e kadarki butun kosular).
                      # Kullanici, 27 Eylul: "WSD ve muon uygun", varsayilan "Hemen Muon + WSD"
 SCHEDULE = "wsd"     # "wsd": lr sabit, son COOLDOWN kisminda 1 - sqrt ile LR x LR_FLOOR'a | "cosine": 27 Eylul'e kadarki
+COMPILE_LOCK = threading.Lock()   # torch.compile iplikler arasi guvenli degil: bir kosu derlerken digerinin derlenmis
+                                  # cagrisi "FX ile izleme" hatasi verdi (Colab, 27 Eylul); ileri hesap bu kilit altinda
 COOLDOWN = 0.2       # WSD'de inisin payi (son %20).  Hagele 2024: <= %20 yeter, 1 - sqrt dogrusaldan iyi
 
 
@@ -211,7 +215,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
             ids, mask = (t.to(device) for t in batches(step))
         # attention hep math yolunda: torch 2.14'ten itibaren SDPA kendiliginden flash / mem-efficient'e gidiyor, onlarin
         # geri yayilimi deterministik degil (surdurme bit duzeyinde ayni kalmaz; hiz ajani, 27 Eylul)
-        with sdpa_kernel([SDPBackend.MATH]):
+        with COMPILE_LOCK if compile else contextlib.nullcontext(), sdpa_kernel([SDPBackend.MATH]):
             total, nll = loss_fn(ids, mask)                # butun cumleler (ya da adimin parcasi), butun konumlar
         if step in log_at:
             curve.append(dict(step=step, nll=nll.item(), dev=deviation(model).clone() if hasattr(model, "tokens") else None,
