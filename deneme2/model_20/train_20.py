@@ -124,13 +124,13 @@ def sequences(data):
 
 def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, lr_floor=LR_FLOOR, grad_clip=GRAD_CLIP,
               weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None, compile=False, copy_path=COPY_PATH,
-              save_every=None, save=None, checkpoint=None, stream_norm=STREAM_NORM, layer_norm=LAYER_NORM):
+              save_every=None, save=None, checkpoint=None, stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=True):
     """Standart tarif: cosine decay (LR -> LR x lr_floor) + gradient clipping.  lr_floor=None, grad_clip=None: eski tarif
     (sabit lr); 27 Eylul oncesi kayitli Adim 2-3 sonuclari onunla uretildi.  weight_decay > 0: AdamW, yalniz W_ matrisleri.
     callback(step, model, nll): her `every` adimda, o adimin guncellemesinden ONCE (sinav, kayit, durdurma).
     compile: yalniz kayip hesabi torch.compile ile (model_19'daki gibi); full batch'te sekil sabit, bir kez derlenir.
     copy_path: Oneri A (kopya yolu ve kapisi), yalniz Adim 3 modelinde.  setting "transformer": kiyas modeli
-    (model_20_transformer), ayni tarif.
+    (model_20_transformer), ayni tarif; rope=False: transformer'da RoPE yok (konum bilgisi yok).
     save(step, model, opt): her save_every adimda, callback'ten sonra, guncellemeden ONCE -- adim s paketi s guncelleme
     gormus modeli ve optimizer'i tasir.  checkpoint {step, model, optimizer}: o adimdan surdurur (ayni steps ve tarifle
     kesintisiz kosuyla bit duzeyinde ayni); o adimin callback'i ve kaydi tekrarlanmaz."""
@@ -138,8 +138,9 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     assert setting in STEP3 or stream_norm, "stream_norm=False yalniz Adim 3 (BlockModel) icin"
     assert setting in STEP3 or not layer_norm, "layer_norm yalniz Adim 3 (BlockModel) icin"
     assert not setting.startswith("transformer") or not weight_decay, "transformer icin weight decay gruplari tanimli degil"
+    assert setting.startswith("transformer") or rope, "rope=False yalniz transformer icin (BlockModel'de konum bilgisi zaten yok)"
     if setting in ("transformer", "transformer_novalue"):   # novalue: V matrisi yok (tek head'de V.O tek matris)
-        model = TransformerModel(n, seed=seed, value_matrix=setting == "transformer")
+        model = TransformerModel(n, seed=seed, value_matrix=setting == "transformer", rope=rope)
     elif setting in STEP3:
         model = BlockModel(n, seed=seed, copy_path=copy_path, stream_norm=stream_norm, layer_norm=layer_norm, **STEP3[setting])
     else:

@@ -38,7 +38,7 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
     config = dict(name=name, setting=setting, steps=steps, seed=seed, every=every, device=device, compile=compile,
                   fingerprint=data["fingerprint"], train=len(data["train"]), sizes=n, save_every=save_every,
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
-                              copy_path=TR.COPY_PATH, stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM), **train_kw))
+                              copy_path=TR.COPY_PATH, stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM, rope=True), **train_kw))
     checkpoint = None
     if resume:
         packs = sorted(f for f in os.listdir(out) if f.startswith("checkpoint_t")) if os.path.isdir(out) else []

@@ -688,7 +688,9 @@ def reference_transformer(m, ids):
         theta = torch.arange(T, dtype=torch.float64)[:, None] * 10000.0 ** (-torch.arange(0, dh, 2, dtype=torch.float64) / dh)
         rot = lambda y: torch.view_as_real(torch.view_as_complex(y.reshape(B, H, T, dh // 2, 2).contiguous())
                                            * torch.polar(torch.ones_like(theta), theta)).flatten(-2)
-        s = (rot(q) @ rot(k).transpose(-1, -2) / math.sqrt(dh)).masked_fill(future, float("-inf"))
+        if layer.rope:
+            q, k = rot(q), rot(k)
+        s = (q @ k.transpose(-1, -2) / math.sqrt(dh)).masked_fill(future, float("-inf"))
         a = torch.softmax(s, -1) @ v
         h = h + lin(a.transpose(1, 2).reshape(B, T, -1), layer.W_out)
         u = lin(ln(h, layer.norm_mlp), layer.W_mlp_in)
@@ -710,14 +712,14 @@ def t_transformer():
           count(TransformerModel(238, value_matrix=False)) == 107008
           and all(layer.W_value is None for layer in TransformerModel(238, value_matrix=False).layers),
           str(count(TransformerModel(238, value_matrix=False))))
-    for heads, vm in ((1, True), (4, True), (1, False)):
-        m = TransformerModel(n, d=d, units=12, heads=heads, value_matrix=vm)
+    for heads, vm, rope in ((1, True, True), (4, True, True), (1, False, True), (1, False, False)):
+        m = TransformerModel(n, d=d, units=12, heads=heads, value_matrix=vm, rope=rope)
         with torch.no_grad():
             for p_ in m.parameters():
                 p_.copy_(0.5 * torch.randn(p_.shape, generator=g))
         err = float((m.logits(ids).detach().double() - reference_transformer(m, ids)).abs().max())
-        check("transformer: skor = tasarim formulu (bagimsiz float64; RoPE karmasik carpimla), %d head%s" % (
-              heads, "" if vm else ", V yok"), err < 1e-4, "fark %.1e" % err)
+        check("transformer: skor = tasarim formulu (bagimsiz float64; RoPE karmasik carpimla), %d head%s%s" % (
+              heads, "" if vm else ", V yok", "" if rope else ", rope=False"), err < 1e-4, "fark %.1e" % err)
     m = TransformerModel(n, d=d, units=12, heads=4)
     with torch.no_grad():
         for p_ in m.parameters():
@@ -758,6 +760,18 @@ def t_transformer():
           isinstance(m, TransformerModel) and curve[-1]["nll"] < curve[0]["nll"] and refused
           and all(layer.W_value is None for layer in mv.layers) and curve_v[-1]["nll"] < curve_v[0]["nll"],
           "%.3f -> %.3f; V'siz %.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"], curve_v[0]["nll"], curve_v[-1]["nll"]))
+
+    mr, curve_r = TR.train_seq("transformer_novalue", sids, smask, nv, steps=20, log_at=(0, 20), rope=False)
+    try:
+        TR.train_seq("shared", sids, smask, nv, steps=1, log_at=(), rope=False)
+        refused = False
+    except AssertionError:
+        refused = True
+    check("transformer, rope=False: train_seq ayari modele ulasir (her katmanda rope False), kayip iner; BlockModel'de "
+          "reddedilir; varsayilan True",
+          all(not layer.rope for layer in mr.layers) and all(layer.rope for layer in mv.layers)
+          and curve_r[-1]["nll"] < curve_r[0]["nll"] and refused,
+          "%.3f -> %.3f" % (curve_r[0]["nll"], curve_r[-1]["nll"]))
 
 
 def t_resume():
@@ -865,7 +879,8 @@ def t_colab():
     cfg = json.load(open(out_dir + "/t/config.json"))
     check("colab_20: setting='transformer' ile start; config ayarlarin tamamini yazar (varsayilanlar dahil)",
           run["done"] and not run["error"] and cfg["setting"] == "transformer" and cfg["copy_path"] is False
-          and cfg["lr"] == TR.LR and cfg["grad_clip"] == TR.GRAD_CLIP and "final.json" in os.listdir(out_dir + "/t"),
+          and cfg["lr"] == TR.LR and cfg["grad_clip"] == TR.GRAD_CLIP and cfg["rope"] is True
+          and "final.json" in os.listdir(out_dir + "/t"),
           str(run["error"] or cfg))
 
 
