@@ -41,4 +41,5 @@ deneme2/*/veri_ham/
 
 # kol basina olcum kayitlari (OLCULENLER_<N>.md): YEREL kalir, depo PUBLIC
 deneme2/*/OLCULENLER_*.md
-deneme2/*/*/OLCULENLER_*.md        # egitim klasorlerinin kendi kayitlari (train_<veri>/)
+# egitim klasorlerinin kendi kayitlari (train_<veri>/OLCULENLER_<veri>.md)
+deneme2/*/*/OLCULENLER_*.md
