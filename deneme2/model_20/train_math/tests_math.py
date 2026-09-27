@@ -319,11 +319,14 @@ def t_notebook():
             parsed.append(False)
     gpu = [s for s in cells if head.match(s) and head.match(s).group(1) == "GPU"]
     runs = [(re.search(r"^DATA_NAME, D = '(\w+)', (\d+)", s, re.M) or [None] * 3) for s in gpu]
-    check("defter: her kod hucresi kunyeyle baslar ve gecerli Python; her GPU hucresinde GPU kapisi C.start'tan once; dur ve "
-          "cok x D 64 ve 96; BATCH_SIZE 256, EPOCHS 100, STEPS epoktan; sinav ve yedek 5.000; veri koddan; kod train_math'ten",
-          all(head.match(s) for s in cells) and all(parsed) and len(gpu) == 4
+    check("defter: her kod hucresi kunyeyle baslar ve gecerli Python; her GPU hucresinde GPU kapisi C.start'tan once; YALNIZ "
+          "cok x D 64 ve 96 (HAZIRLIK yalniz cok uretir, kosu hucresi cok disini reddeder); BATCH_SIZE 256, EPOCHS 100, STEPS "
+          "epoktan; sinav ve yedek 5.000; veri koddan; kod train_math'ten",
+          all(head.match(s) for s in cells) and all(parsed) and len(gpu) == 2
+          and re.search(r"^DATASETS = \('cok',\)", cells[0], re.M) and "'dur'" not in "".join(cells)
+          and all("assert DATA_NAME == 'cok'" in s for s in gpu)
           and all(s.index("torch.cuda.is_available()") < s.index("C.start(") and "mem_get_info" in s for s in gpu)
-          and sorted((r[1], r[2]) for r in runs) == [("cok", "64"), ("cok", "96"), ("dur", "64"), ("dur", "96")]
+          and sorted((r[1], r[2]) for r in runs) == [("cok", "64"), ("cok", "96")]
           and all(re.search(p, s, re.M) for s in gpu for p in (r"^BATCH_SIZE = 256", r"^EPOCHS = 100", r"^STEPS = EPOCHS \*",
                                                                   r"^EVERY = 5000", r"^SAVE_EVERY = 5000", r"^MODEL_KW = dict\(d=D, units=4 \* D"))
           and re.search(r"^SOURCE = 'code'", cells[0], re.M) and "/train_math" in cells[0] and "kinship" not in "".join(cells),
