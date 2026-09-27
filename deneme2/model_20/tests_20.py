@@ -282,7 +282,7 @@ def t_step3():
     import model_20
     from model_20 import TURNS
     # 28 Eylul oncesi tasarimin testleri: paket (normalized_update, sphere_weights) kapali; paket t_normalized_update'te
-    BlockModel = functools.partial(model_20.BlockModel, normalized_update=False, sphere_weights=False)
+    BlockModel = functools.partial(model_20.BlockModel, normalized_update=False, sphere_weights=False, canon=False)
     n, d = 12, 6
     g = torch.Generator().manual_seed(9)
     ids = torch.randint(0, n, (3, 9), generator=g)
@@ -503,7 +503,7 @@ def t_step3():
     kept = sorted(names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.0 for p_ in g_["params"])
     check("weight decay: yalniz W_ matrislerine; shift ve fact_threshold haric",
           decayed == sorted(["W_query", "W_key", "W_context", "W_fact_in", "W_fact_out"])
-          and kept == ["alpha_attention", "alpha_facts", "fact_threshold", "shift"], "%s | %s" % (decayed, kept))
+          and kept == ["alpha_attention", "alpha_facts", "canon_weights", "fact_threshold", "shift"], "%s | %s" % (decayed, kept))
 
     # 27 Eylul tarifi: Muon (gizli matrisler) + Adam, WSD takvimi, compile varsayilan acik; masked_nll; RoPE en az fp32
     import inspect
@@ -562,7 +562,7 @@ def t_step3():
     check("Muon + WSD (varsayilan): Muon'da W_context, W_fact_in, W_fact_out; Adam'da noktalar, esik, W_query, W_key; "
           "lr 8. adima kadar sabit, sonra 1 - sqrt ile LR x LR_FLOOR'a; kayip iner",
           isinstance(opts[0], TR.Muon) and in_muon == ["W_context", "W_fact_in", "W_fact_out"]
-          and in_adam == ["W_key", "W_query", "alpha_attention", "alpha_facts", "fact_threshold", "shift"]
+          and in_adam == ["W_key", "W_query", "alpha_attention", "alpha_facts", "canon_weights", "fact_threshold", "shift"]
           and all(abs(lrs[t] - w) < 1e-12 for t, w in zip(range(1, 11), wsd)) and curve_m[-1]["nll"] < curve_m[0]["nll"],
           "%s | %s | lr %s" % (in_muon, in_adam, [round(lrs[t], 5) for t in range(1, 11)]))
 
@@ -613,7 +613,8 @@ def t_step3():
 def t_copy():
     import functools
     import model_20
-    BlockModel = functools.partial(model_20.BlockModel, normalized_update=False, sphere_weights=False)   # 28 Eylul oncesi
+    BlockModel = functools.partial(model_20.BlockModel, normalized_update=False, sphere_weights=False,
+                                   canon=False)   # 28 Eylul oncesi
     n, d = 12, 6
     g = torch.Generator().manual_seed(11)
     ids = torch.randint(0, n, (3, 9), generator=g)
@@ -693,7 +694,8 @@ def t_copy():
     kept = sorted(names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.0 for p_ in g_["params"])
     check("kopya yolu, weight decay: W_copy ve W_copy_gate'e uygulanir; copy_gate_bias haric",
           decayed == sorted(["W_query", "W_key", "W_context", "W_fact_in", "W_fact_out", "W_copy", "W_copy_gate"])
-          and kept == ["alpha_attention", "alpha_facts", "copy_gate_bias", "fact_threshold", "shift"], "%s | %s" % (decayed, kept))
+          and kept == ["alpha_attention", "alpha_facts", "canon_weights", "copy_gate_bias", "fact_threshold", "shift"],
+          "%s | %s" % (decayed, kept))
 
 
 def reference_transformer(m, ids):
@@ -838,7 +840,7 @@ def t_generate_cached():
     for kw in (dict(), dict(shared=False), dict(rope=False), dict(off), dict(off, stream_norm=False),
                dict(off, stream_norm=False, layer_norm=True), dict(copy_path=True),
                dict(off, shared=False, copy_path=True, stream_norm=False, layer_norm=True)):
-        m = BlockModel(n, d=16, units=24, t_max=64, **kw)
+        m = BlockModel(n, d=16, units=24, t_max=64, canon=False, **kw)   # onbellek Canon'suz yolda
         with torch.no_grad():
             for p_ in m.parameters():
                 if p_.requires_grad:
@@ -854,7 +856,7 @@ def t_generate_cached():
         runs += 1
     check("generate: onbellekli (AttentionCache) = tam yeniden hesap -- ayni token'lar, %d ayar x 12 istem (1-20 token) x 15; "
           "tek basina = batch icinde; her konumun skoru tolerans icinde" % runs, same and worst < 1e-4, "en buyuk fark %.1e" % worst)
-    edge = BlockModel(n, d=16, units=24, t_max=64)
+    edge = BlockModel(n, d=16, units=24, t_max=64, canon=False)
     check("generate: n = 0 bos, n = 1 istem hesabinin son konumu; transformer eski yoldan",
           TR.generate(edge, prompts[:3], 0) == [[], [], []]
           and TR.generate(edge, prompts[:3], 1) == TR.generate(edge, prompts[:3], 1, cached=False)
@@ -864,7 +866,7 @@ def t_generate_cached():
     data = D.build()
     sids, smask = EK.sequences(data)
     nv = len(data["vocab"])
-    trained, curve = TR.train_seq("shared", sids[:256], smask[:256], nv, steps=60, log_at=(0, 60))
+    trained, curve = TR.train_seq("shared", sids[:256], smask[:256], nv, steps=60, log_at=(0, 60), canon=False)
     ix = {w: i for i, w in enumerate(data["vocab"])}
     qs = [[ix[D.EOS]] + [ix[t] for t in e["prompt"]] for e in data["exam"]][:96]
     old, new = TR.generate(trained, qs, 24, cached=False), TR.generate(trained, qs, 24)
@@ -902,7 +904,7 @@ def t_normalized_update():
 
     # bagimsiz float64 referans (tasarim formulu): rastgele parametrelerle
     g = torch.Generator().manual_seed(41)
-    m = BlockModel(nv, d=32, units=48, normalized_update=True, sphere_weights=True).double()
+    m = BlockModel(nv, d=32, units=48, normalized_update=True, sphere_weights=True, canon=False).double()
     with torch.no_grad():
         for name, p_ in m.named_parameters():
             if name.startswith("alpha"):
@@ -998,7 +1000,7 @@ def t_canon():
     nv = len(data["vocab"])
     ids = sids[:6, :20]
 
-    plain, zero = BlockModel(nv), BlockModel(nv, canon=True)
+    plain, zero = BlockModel(nv, canon=False), BlockModel(nv, canon=True)
     with torch.no_grad():
         same = torch.equal(plain.logits(ids), zero.logits(ids))
     check("canon: w = 0 iken Canon'suz Model X1 ile bit duzeyinde ayni skor; canon_weights (4, d) = 0",

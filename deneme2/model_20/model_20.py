@@ -65,9 +65,9 @@ ALPHA_INIT = 0.1            # alpha'nin baslangici: nGPT 2026 tarifi (derinlikte
 SPHERE_WEIGHTS = True       # W_query, W_key, W_fact_in satirlari ve W_context, W_fact_out sutunlari baslangicta ve her
                             # optimizer adimindan sonra birim boya (nGPT); FactUnits girdisi sqrt(d) x kosinus.  Kusur 2:
                             # agirliklar ~20 kat buyuyor, adim sonuyordu.  Varsayilan (kullanici, 28 Eylul)
-CANON = False        # Canon-A (Allen-Zhu 2025): attention girdisi x_t + sum_k w_k * x_(t-k), k = 0..3, w 0'dan; tek turda
-                     # "A'dan sonra B gelmisti" (kopyalama) icin.  TinyStories'te kopyalama olculmedi (induction yok, 28 Eylul);
-                     # test sonucuna gore Model X2 (kullanici, 28 Eylul)
+CANON = True         # Canon-A (Allen-Zhu 2025): attention girdisi x_t + sum_k w_k * x_(t-k), k = 0..3, w 0'dan.  Varsayilan:
+                     # Model X2 = X1 + Canon (kullanici, 28 Eylul: "evet model X2 hayırlı olsun. Canon=True."; TinyStories
+                     # "X1+C çok daha iyi görünüyor açık ara", akrabalik 191,0 / X1 188,3 ve cokussuz)
 ROPE = True          # attention'in q ve k'sina RoPE (konum bilgisi).  Varsayilanlar = Model X (C' + RoPE; kullanici, 27 Eylul:
                      # "Model X varsayilan model olsun" onayi); False = RoPE'suz C'
 
