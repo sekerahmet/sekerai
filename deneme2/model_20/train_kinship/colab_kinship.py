@@ -39,6 +39,7 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
         raise RuntimeError("%s zaten kosuyor" % name)
     n = {c: len(EK.questions(data, c)) for c in SHORT + STEPS_CLS}
     # varsayilanlar da yazilir (lr, cosine tabani, clip, wd, kopya yolu, rope): config tek basina koşuyu tarif etsin
+    compile = compile and torch.device(device).type == "cuda"     # train_seq ile ayni kural: compile yalniz GPU'da
     config = dict(name=name, setting=setting, steps=steps, seed=seed, every=every, device=device, compile=compile,
                   fingerprint=data["fingerprint"], train=len(data["train"]), sizes=n, save_every=save_every,
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,

@@ -176,9 +176,9 @@ def t_batches():
                                                                    optimizer=copy.deepcopy(opt.state_dict())))
     n = len(d["vocab"])
     full, curve = TR.train_seq("shared", None, None, n, steps=8, log_at=(0, 8), batches=DT.batches(d, 4, 0),
-                               save_every=2, save=keep, model_kw=TINY, compile=False)
+                               save_every=2, save=keep, model_kw=TINY)
     resumed, _ = TR.train_seq("shared", None, None, n, steps=8, log_at=(), batches=DT.batches(d, 4, 0),
-                              checkpoint=packs[4], model_kw=TINY, compile=False)
+                              checkpoint=packs[4], model_kw=TINY)
     same = all(torch.equal(x, y) for x, y in zip(full.state_dict().values(), resumed.state_dict().values()))
     check("surdurme: batches ile 8 adim (%d epok), 4. adim paketinden surdurulen = kesintisiz, bit duzeyinde; kayip duser"
           % (8 // per_epoch), same and curve[-1]["nll"] < curve[0]["nll"] and full.blocks[0].attention.W_query.shape[0] == 16,
@@ -196,7 +196,7 @@ def t_exam():
 
     # kisa egitilmis model: accuracy 0'dan buyuk olsun, uretim tek token'a takilmasin
     m, _ = TR.train_seq("shared", None, None, len(d["vocab"]), steps=60, log_at=(), batches=DT.batches(d, 4, 0),
-                        model_kw=TINY, compile=False)
+                        model_kw=TINY)
     e1, e64 = ET.exam(m, d, rows, batch_size=1), ET.exam(m, d, rows)
     ids, mask = DT.sequences(d, "valid", rows)
     with torch.no_grad():
@@ -244,7 +244,7 @@ def t_colab():
     root, d = fixture()
     tmp = tempfile.mkdtemp()
     out = tmp + "/r"
-    run = C.start("TEST", d, out, steps=3, every=1, device="cpu", batch_size=4, model_kw=TINY, save_every=1, compile=False)
+    run = C.start("TEST", d, out, steps=3, every=1, device="cpu", batch_size=4, model_kw=TINY, save_every=1)
     run["thread"].join(600)
     files = sorted(os.listdir(out))
     cfg = json.load(open(out + "/config.json"))
@@ -264,13 +264,13 @@ def t_colab():
 
     first = torch.load(out + "/model.pt")
     os.remove(out + "/checkpoint_t000003.pt")                        # 2. adimdan sonra kesilmis gibi
-    run2 = C.start("TEST", d, out, steps=3, every=1, device="cpu", batch_size=4, model_kw=TINY, save_every=1, resume=True, compile=False)
+    run2 = C.start("TEST", d, out, steps=3, every=1, device="cpu", batch_size=4, model_kw=TINY, save_every=1, resume=True)
     run2["thread"].join(600)
     log = open(out + "/log.txt", encoding="utf-8").read()
     ex2 = json.load(open(out + "/exams.json", encoding="utf-8"))
     second = torch.load(out + "/model.pt")
     try:
-        C.start("TEST2", d, out, steps=5, every=1, device="cpu", batch_size=4, model_kw=TINY, save_every=1, resume=True, compile=False)
+        C.start("TEST2", d, out, steps=5, every=1, device="cpu", batch_size=4, model_kw=TINY, save_every=1, resume=True)
         refused = False
     except RuntimeError:
         refused = True
@@ -281,7 +281,7 @@ def t_colab():
           and all(torch.equal(first[k], second[k]) for k in first) and refused,
           str(run2["error"] or [e["step"] for e in ex2]))
 
-    run3 = C.start("TEST3", d, tmp + "/s", steps=500, every=1, device="cpu", batch_size=4, model_kw=TINY, compile=False)
+    run3 = C.start("TEST3", d, tmp + "/s", steps=500, every=1, device="cpu", batch_size=4, model_kw=TINY)
     C.stop()
     run3["thread"].join(600)
     check("colab_tinystories: stop -> bir sonraki sinavda model.pt yazilir, iplik cikar; pulse hatasiz",

@@ -131,8 +131,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     1 - sqrt ile LR x lr_floor'a), gradient clipping.  optimizer="adam", schedule="cosine": 27 Eylul'e kadarki tarif.
     lr_floor=None, grad_clip=None: en eski tarif (sabit lr).  weight_decay > 0: AdamW, yalniz W_ matrisleri (yalniz adam).
     callback(step, model, nll): her `every` adimda, o adimin guncellemesinden ONCE (sinav, kayit, durdurma).
-    compile: kayip hesabi (ileri + geri) torch.compile ile; VARSAYILAN ACIK (kullanici: "bu sabit ayar ve yes olsun").  CPU'da
-    C++ derleyicisi ister; bu makinede yok, testler compile=False verir.
+    compile: kayip hesabi (ileri + geri) torch.compile ile; VARSAYILAN ACIK (kullanici: "bu sabit ayar ve yes olsun").  Yalniz
+    GPU'da uygulanir: CPU'da kendiliginden kapanir (asagidaki if), elle compile=False yazmak gerekmez.
     copy_path: Oneri A (kopya yolu ve kapisi), yalniz Adim 3 modelinde.  setting "transformer": kiyas modeli
     (model_20_transformer), ayni tarif.  rope: attention'da RoPE; None = modelin kendi varsayilani (transformer True,
     BlockModel ROPE).
@@ -186,6 +186,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
         model.load_state_dict(checkpoint["model"])
         opt.load_state_dict(checkpoint["optimizer"])
         first = checkpoint["step"]
+    if torch.device(device).type != "cuda":               # CPU: compile C++ derleyicisi ister (bu makinede yok) -> kapali
+        compile = False
     loss_fn = torch.compile(model.loss) if compile else model.loss
     start = round((1 - cooldown) * steps)                  # WSD: inis bu adimda baslar
     curve = []

@@ -60,6 +60,7 @@ def start(name, data, out, steps, seed=0, every=EVERY, device="cuda", compile=Tr
     per = len(data["train"]) // batch_size
     assert per > 0, "batch_size (%d) > egitim sorusu (%d)" % (batch_size, len(data["train"]))
     # varsayilanlar da yazilir: config tek basina kosuyu tarif etsin
+    compile = compile and torch.device(device).type == "cuda"     # train_seq ile ayni kural: compile yalniz GPU'da
     config = dict(name=name, setting=setting, steps=steps, seed=seed, every=every, device=device, compile=compile,
                   data=data["name"], fingerprint=data["fingerprint"], width=data["width"], train=len(data["train"]),
                   heldout=len(data["heldout"]), batch_size=batch_size, steps_per_epoch=per, epochs=round(steps / per, 4),

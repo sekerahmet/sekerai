@@ -49,6 +49,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
     assert per_epoch > 0, "batch_size (%d) > train penceresi (%d)" % (batch_size, len(data["train_start"]))
     rows = ET.exam_rows(data)
     # varsayilanlar da yazilir: config tek basina kosuyu tarif etsin
+    compile = compile and torch.device(device).type == "cuda"     # train_seq ile ayni kural: compile yalniz GPU'da
     config = dict(name=name, setting=setting, steps=steps, seed=seed, every=every, device=device, compile=compile,
                   fingerprint=data["fingerprint"], seq_len=data["seq_len"], vocab=len(data["vocab"]),
                   train_windows=len(data["train_start"]), exam_stories=len(rows), batch_size=batch_size,

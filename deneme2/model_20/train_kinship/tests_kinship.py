@@ -202,25 +202,25 @@ def t_resume():
         def keep(step, model, opt):
             packs[step] = dict(step=step, model=copy.deepcopy(model.state_dict()), optimizer=copy.deepcopy(opt.state_dict()))
         full, _ = TR.train_seq("shared", ids, mask, nv, steps=6, log_at=(), save_every=2, save=keep, every=2,
-                               callback=lambda st, m, nll: seen_full.append(st), **kw, compile=False)
+                               callback=lambda st, m, nll: seen_full.append(st), **kw)
         resumed, _ = TR.train_seq("shared", ids, mask, nv, steps=6, log_at=(), checkpoint=packs[4], every=2,
-                                  callback=lambda st, m, nll: seen_resumed.append(st), **kw, compile=False)
+                                  callback=lambda st, m, nll: seen_resumed.append(st), **kw)
         same = all(torch.equal(a, b) for a, b in zip(full.state_dict().values(), resumed.state_dict().values()))
         check("surdurme: 4. adim paketinden surdurulen = kesintisiz 6 adim, bit duzeyinde; paketler 2, 4, 6; sinav tekrarlanmaz %s"
               % (kw or ""), same and sorted(packs) == [2, 4, 6] and seen_full == [0, 2, 4, 6] and seen_resumed == [6],
               "%s %s %s" % (sorted(packs), seen_full, seen_resumed))
 
     out = tempfile.mkdtemp() + "/r"
-    run = C.start("TEST_R", s, out, steps=3, every=100, device="cpu", compile=False, save_every=1)
+    run = C.start("TEST_R", s, out, steps=3, every=100, device="cpu", save_every=1)
     run["thread"].join(600)
     files = sorted(f for f in os.listdir(out) if f.startswith("checkpoint_t"))
     os.remove(os.path.join(out, "checkpoint_t00003.pt"))            # 2. adimdan sonra kesilmis gibi
     lines_before = open(os.path.join(out, "log.txt"), encoding="utf-8").read().count("\n")
-    run2 = C.start("TEST_R", s, out, steps=3, every=100, device="cpu", compile=False, save_every=1, resume=True)
+    run2 = C.start("TEST_R", s, out, steps=3, every=100, device="cpu", save_every=1, resume=True)
     run2["thread"].join(600)
     log = open(os.path.join(out, "log.txt"), encoding="utf-8").read()
     try:
-        C.start("TEST_R2", s, out, steps=5, every=100, device="cpu", compile=False, save_every=1, resume=True)
+        C.start("TEST_R2", s, out, steps=5, every=100, device="cpu", save_every=1, resume=True)
         refused = False
     except RuntimeError:
         refused = True
@@ -266,11 +266,11 @@ def t_colab():
     seen = []
     ids, mask = EK.sequences(s)
     TR.train_seq("shared", ids[:20], mask[:20], len(s["vocab"]), steps=4, log_at=(), every=2,
-                 callback=lambda step, model, nll: seen.append(step), compile=False)
+                 callback=lambda step, model, nll: seen.append(step))
     check("train_seq: callback her every adimda, guncellemeden once (0, 2, 4)", seen == [0, 2, 4], str(seen))
 
     out_dir = tempfile.mkdtemp()
-    run = C.start("TEST", s, out_dir + "/r", steps=2, every=100, device="cpu", compile=False)
+    run = C.start("TEST", s, out_dir + "/r", steps=2, every=100, device="cpu")
     run["thread"].join(600)
     files = sorted(os.listdir(out_dir + "/r"))
     check("colab_kinship: CPU'da start -> sinav, model, son olcum dosyalari; pulse/stop hatasiz; config'de rope True (Model X)",
@@ -281,7 +281,7 @@ def t_colab():
     C.stop()
 
     L = D.build(step_answers=True, long_1r=True)
-    run = C.start("TEST_L", L, out_dir + "/l", steps=1, every=100, device="cpu", compile=False)
+    run = C.start("TEST_L", L, out_dir + "/l", steps=1, every=100, device="cpu")
     run["thread"].join(600)
     fin = json.load(open(out_dir + "/l/final.json", encoding="utf-8")) if os.path.exists(out_dir + "/l/final.json") else {}
     ex = json.load(open(out_dir + "/l/exams.json")) if os.path.exists(out_dir + "/l/exams.json") else [{}]
@@ -289,7 +289,7 @@ def t_colab():
           run["done"] and not run["error"] and "1R_T_given0" in fin and "1R_T_EX" in ex[0]
           and len(fin["1R_T_given0"]["rows"]) == 640, str(run["error"] or sorted(fin)))
 
-    run = C.start("TEST_T", s, out_dir + "/t", steps=2, every=100, device="cpu", compile=False, setting="transformer")
+    run = C.start("TEST_T", s, out_dir + "/t", steps=2, every=100, device="cpu", setting="transformer")
     run["thread"].join(600)
     cfg = json.load(open(out_dir + "/t/config.json"))
     check("colab_kinship: setting='transformer' ile start; config ayarlarin tamamini yazar (varsayilanlar dahil)",

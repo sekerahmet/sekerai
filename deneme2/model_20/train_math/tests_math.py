@@ -204,9 +204,9 @@ def t_windows(tmp):
         def keep(step, model, opt):
             packs[step] = dict(step=step, model=copy.deepcopy(model.state_dict()), optimizer=copy.deepcopy(opt.state_dict()))
         whole, curve = TR.train_seq("shared", None, None, DM.N, steps=10, log_at=(0, 10), save_every=3, save=keep, model_kw=TINY,
-                                    batches=DM.batches(data, B, 1, answer_only), compile=False)
+                                    batches=DM.batches(data, B, 1, answer_only))
         resumed, _ = TR.train_seq("shared", None, None, DM.N, steps=10, log_at=(), checkpoint=packs[6], model_kw=TINY,
-                                  batches=DM.batches(data, B, 1, answer_only), compile=False)
+                                  batches=DM.batches(data, B, 1, answer_only))
         bit = all(torch.equal(a, b) for a, b in zip(whole.state_dict().values(), resumed.state_dict().values()))
         check("surdurme, batches: yedek araligi (3) epoku (4 adim) bolmuyor; 6. adim paketinden surdurulen = kesintisiz 10 adim, "
               "bit duzeyinde (answer_only %s)" % answer_only, bit and sorted(packs) == [3, 6, 9],
@@ -257,7 +257,7 @@ def t_colab(tmp):
     data = tiny_data()
     per = len(TRAIN) // 4
     out = os.path.join(tmp, "runs", "r")
-    kw = dict(every=3, device="cpu", compile=False, save_every=2, batch_size=4, exam_limit=50, model_kw=TINY)
+    kw = dict(every=3, device="cpu", save_every=2, batch_size=4, exam_limit=50, model_kw=TINY)
     run = C.start("TEST_R", data, out, steps=7, **kw)
     run["thread"].join(600)
     files = sorted(os.listdir(out))
