@@ -65,6 +65,9 @@ ALPHA_INIT = 0.1            # alpha'nin baslangici: nGPT 2026 tarifi (derinlikte
 SPHERE_WEIGHTS = True       # W_query, W_key, W_fact_in satirlari ve W_context, W_fact_out sutunlari baslangicta ve her
                             # optimizer adimindan sonra birim boya (nGPT); FactUnits girdisi sqrt(d) x kosinus.  Kusur 2:
                             # agirliklar ~20 kat buyuyor, adim sonuyordu.  Varsayilan (kullanici, 28 Eylul)
+CANON = False        # Canon-A (Allen-Zhu 2025): attention girdisi x_t + sum_k w_k * x_(t-k), k = 0..3, w 0'dan; tek turda
+                     # "A'dan sonra B gelmisti" (kopyalama) icin.  TinyStories'te kopyalama olculmedi (induction yok, 28 Eylul);
+                     # test sonucuna gore Model X2 (kullanici, 28 Eylul)
 ROPE = True          # attention'in q ve k'sina RoPE (konum bilgisi).  Varsayilanlar = Model X (C' + RoPE; kullanici, 27 Eylul:
                      # "Model X varsayilan model olsun" onayi); False = RoPE'suz C'
 
@@ -300,12 +303,14 @@ class Block(torch.nn.Module):
     """Adim 3 bir tur: attention durumlara bakar ve getirdigini duruma yazar; FactUnits durumu donusturur."""
 
     def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, units=FACT_UNITS, seed=POINTS_SEED + 2, copy_path=False,
-                 stream_norm=True, layer_norm=False, rope=False, normalized_update=False, sphere_weights=False):
+                 stream_norm=True, layer_norm=False, rope=False, normalized_update=False, sphere_weights=False, canon=False):
         super().__init__()
         self.attention = CausalAttention(d, t_max, confidence, seed, copy_path=copy_path, rope=rope)
         self.facts = FactUnits(d, units, seed + 1)
         self.stream_norm, self.layer_norm = stream_norm, layer_norm
-        self.normalized_update, self.sphere_weights = normalized_update, sphere_weights
+        self.normalized_update, self.sphere_weights, self.canon = normalized_update, sphere_weights, canon
+        if canon:                                         # w_k: k konum oncesinden, boyut basina; 0'dan (adim 0 = Canon'suz)
+            self.canon_weights = torch.nn.Parameter(torch.zeros(4, d))
         if layer_norm:                                    # L2 normun yerine: ortalama cikar, ogrenilen kazanc ve kayma
             self.norm_attention = torch.nn.LayerNorm(d)
             self.norm_facts = torch.nn.LayerNorm(d)
@@ -316,6 +321,10 @@ class Block(torch.nn.Module):
         unit = lambda v: F.normalize(v, dim=-1)
         norm_a, norm_f = (self.norm_attention, self.norm_facts) if self.layer_norm else (unit, unit)
         x = h if self.stream_norm else norm_a(h)             # attention'in okudugu; stream_norm'da h zaten normlu
+        if self.canon:                                       # Canon-A: x_t + sum_k w_k * x_(t-k), baslangictan once 0
+            assert cache is None, "Canon onbellekli uretimi desteklemiyor (onceki konumlar gerekir)"
+            T = x.shape[-2]
+            x = x + sum(self.canon_weights[k] * F.pad(x, (0, 0, k, 0))[..., :T, :] for k in range(4))
         if at.copy_path:
             assert points is not None, "kopya yolu acik: kelime noktalari (points) verilmeli"   # yoksa c, c' batch'ten bolunur
             c, c_copy = at(x, points, cache)
@@ -343,18 +352,19 @@ class BlockModel(torch.nn.Module):
     def __init__(self, n, d=D, turns=TURNS, shared=SHARED_BLOCK, learn_points=LEARN_POINTS, anchor=ANCHOR,
                  confidence=CONFIDENCE, t_max=T_MAX, units=FACT_UNITS, seed=POINTS_SEED, copy_path=COPY_PATH,
                  stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=ROPE, normalized_update=NORMALIZED_UPDATE,
-                 sphere_weights=SPHERE_WEIGHTS):
+                 sphere_weights=SPHERE_WEIGHTS, canon=CANON):
         super().__init__()
         assert not normalized_update or (stream_norm and not layer_norm), "normalized_update akis normuyla (L2) calisir"
         self.tokens = TokenPoints(n, d, learn_points, anchor, 100 * seed)          # 100 * seed: BigramModel'deki gibi
         count = 1 if shared else turns
         self.blocks = torch.nn.ModuleList(Block(d, t_max, confidence, units, 100 * seed + 10 + 2 * i, copy_path=copy_path,
                                                 stream_norm=stream_norm, layer_norm=layer_norm, rope=rope,
-                                                normalized_update=normalized_update, sphere_weights=sphere_weights)
+                                                normalized_update=normalized_update, sphere_weights=sphere_weights,
+                                                canon=canon)
                                           for i in range(count))
         self.turns, self.shared, self.copy_path, self.stream_norm = turns, shared, copy_path, stream_norm
         self.layer_norm, self.rope = layer_norm, rope
-        self.normalized_update, self.sphere_weights = normalized_update, sphere_weights
+        self.normalized_update, self.sphere_weights, self.canon = normalized_update, sphere_weights, canon
         if normalized_update or sphere_weights:           # sifir yon normalize edilemez: W_context, W_fact_out rastgele baslar
             g = torch.Generator().manual_seed(100 * seed + 9)
             with torch.no_grad():

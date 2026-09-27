@@ -986,9 +986,86 @@ def t_normalized_update():
           and TR.generate(trained, qs, 10) == TR.generate(trained, qs, 10, cached=False) and refused and refused_ln)
 
 
+def t_canon():
+    """Canon-A: w = 0 iken Canon'suz modelle bit duzeyinde ayni; attention girdisi resmi kodun hesabiyla (PhysicsLM4
+    canon_helper: x + conv1d(groups=d, cekirdek 4, soldan 3 dolgu), aktivasyon ve bias yok) ayni; nedensel; egitim ve
+    surdurme; onbellekli uretim tam hesaba doner."""
+    import copy
+    import torch.nn.functional as F
+    from model_20 import BlockModel
+    data = D.build()
+    sids, smask = EK.sequences(data)
+    nv = len(data["vocab"])
+    ids = sids[:6, :20]
+
+    plain, zero = BlockModel(nv), BlockModel(nv, canon=True)
+    with torch.no_grad():
+        same = torch.equal(plain.logits(ids), zero.logits(ids))
+    check("canon: w = 0 iken Canon'suz Model X1 ile bit duzeyinde ayni skor; canon_weights (4, d) = 0",
+          same and tuple(zero.blocks[0].canon_weights.shape) == (4, 64) and not zero.blocks[0].canon_weights.any())
+
+    # resmi kodun hesabi: out = x + conv1d(x, W, padding=3, groups=d)[..., :T], W[:, 0, 3 - k] = w_k
+    g = torch.Generator().manual_seed(51)
+    m = BlockModel(nv, canon=True)
+    with torch.no_grad():
+        m.blocks[0].canon_weights.copy_(torch.randn(4, 64, generator=g))
+    seen = []
+    hook = m.blocks[0].attention.register_forward_pre_hook(lambda mod, args, kwargs: seen.append(args[0].detach()),
+                                                            with_kwargs=True)
+    with torch.no_grad():
+        m.logits(ids)
+    hook.remove()
+    with torch.no_grad():
+        x = m.tokens.points()[ids]                                  # tur 1'in girdisi: PL
+        W = m.blocks[0].canon_weights.flip(0).T.unsqueeze(1)        # (d, 1, 4): W[:, 0, 3 - k] = w_k
+        ref = x + F.conv1d(x.transpose(1, 2), W, padding=3, groups=64)[..., :x.shape[1]].transpose(1, 2)
+    err = float((seen[0] - ref).abs().max())
+    check("canon: attention girdisi (tur 1) = resmi kodun hesabi x + conv1d(gruplu, cekirdek 4, soldan dolgu)", err < 1e-5,
+          "fark %.1e" % err)
+
+    # nedensellik: konum 5'teki token degisince 0-4'un skoru ayni, 5 ve sonrasi degisir
+    alt = ids.clone()
+    alt[:, 5] = (alt[:, 5] + 1) % nv
+    with torch.no_grad():
+        a_, b_ = m.logits(ids), m.logits(alt)
+    check("canon: nedensel -- konum 5 degisince 0-4 bit duzeyinde ayni, 5 ve sonrasi degisir",
+          torch.equal(a_[:, :5], b_[:, :5]) and not torch.equal(a_[:, 5:], b_[:, 5:]))
+
+    opts = []
+    grab = lambda step, model, opt: opts.append(opt)
+    trained, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), save_every=1, save=grab, canon=True)
+    names = {id(p_): k for k, p_ in trained.named_parameters()}
+    in_adam = [names[id(p_)] for g_ in opts[-1].param_groups if not g_["use_muon"] for p_ in g_["params"]]
+    packs = {}
+    keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
+                                                                   optimizer=copy.deepcopy(opt.state_dict())))
+    full, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), save_every=2, save=keep, canon=True)
+    res, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs[4], canon=True)
+    qs = [[1] + sids[i, 1:9].tolist() for i in range(8)]
+    try:
+        with torch.no_grad():
+            from model_20 import AttentionCache
+            trained.logits(torch.tensor(qs), [AttentionCache(torch.full((8,), 9), 20) for _ in range(trained.turns)])
+        refused_cache = False
+    except AssertionError:
+        refused_cache = True
+    try:
+        TR.train_seq("transformer", sids[:8], smask[:8], nv, steps=1, log_at=(), canon=True)
+        refused = False
+    except AssertionError:
+        refused = True
+    check("canon: egitimde kayip iner, canon_weights 0'dan ayrilir ve Adam'da; surdurme bit duzeyinde; onbellekli uretim "
+          "tam hesaba doner (onbellek dogrudan reddedilir); transformer'da reddedilir",
+          curve[-1]["nll"] < curve[0]["nll"] and bool(trained.blocks[0].canon_weights.abs().max() > 0)
+          and "blocks.0.canon_weights" in in_adam
+          and all(torch.equal(a, b) for a, b in zip(full.state_dict().values(), res.state_dict().values()))
+          and TR.generate(trained, qs, 6) == TR.generate(trained, qs, 6, cached=False) and refused_cache and refused,
+          "%.3f -> %.3f  |w| %.4f" % (curve[0]["nll"], curve[-1]["nll"], float(trained.blocks[0].canon_weights.abs().max())))
+
+
 if __name__ == "__main__":
     print("tests (model_20)")
-    for f in (t_model, t_step2, t_step3, t_copy, t_transformer, t_generate_cached, t_normalized_update):
+    for f in (t_model, t_step2, t_step3, t_copy, t_transformer, t_generate_cached, t_normalized_update, t_canon):
         f()
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)

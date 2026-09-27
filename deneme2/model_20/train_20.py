@@ -14,7 +14,7 @@ import torch
 import torch._inductor.config
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from model_20 import (COPY_PATH, LAYER_NORM, NORMALIZED_UPDATE, ROPE, SPHERE_WEIGHTS, STREAM_NORM, AttentionCache,
+from model_20 import (CANON, COPY_PATH, LAYER_NORM, NORMALIZED_UPDATE, ROPE, SPHERE_WEIGHTS, STREAM_NORM, AttentionCache,
                       BigramModel, BlockModel, SequenceModel, deviation)
 from model_20_transformer import TransformerModel
 
@@ -136,7 +136,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
               weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None, compile=True, copy_path=COPY_PATH,
               save_every=None, save=None, checkpoint=None, stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=None,
               batches=None, model_kw=None, optimizer=OPTIMIZER, schedule=SCHEDULE, cooldown=COOLDOWN,
-              normalized_update=None, sphere_weights=None):
+              normalized_update=None, sphere_weights=None, canon=None):
     """Standart tarif (27 Eylul'den): Muon (gizli matrisler) + Adam, WSD takvimi (lr sabit, son cooldown kisminda
     1 - sqrt ile LR x lr_floor'a), gradient clipping.  optimizer="adam", schedule="cosine": 27 Eylul'e kadarki tarif.
     lr_floor=None, grad_clip=None: en eski tarif (sabit lr).  weight_decay > 0: AdamW, yalniz W_ matrisleri (yalniz adam).
@@ -165,7 +165,10 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
         normalized_update = NORMALIZED_UPDATE if setting in STEP3 else False
     if sphere_weights is None:
         sphere_weights = SPHERE_WEIGHTS if setting in STEP3 else False
-    assert setting in STEP3 or not (normalized_update or sphere_weights), "normalized_update / sphere_weights yalniz Adim 3 icin"
+    if canon is None:
+        canon = CANON if setting in STEP3 else False
+    assert setting in STEP3 or not (normalized_update or sphere_weights or canon), \
+        "normalized_update / sphere_weights / canon yalniz Adim 3 icin"
     if rope is None:                                       # modelin kendi varsayilani; Adim 1-2 modellerinde RoPE yok
         rope = True if setting.startswith("transformer") else ROPE if setting in STEP3 else False
     assert setting in STEP3 or setting.startswith("transformer") or not rope, "rope yalniz Adim 3 ve transformer icin"
@@ -173,7 +176,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
         model = TransformerModel(n, seed=seed, value_matrix=setting == "transformer", rope=rope, **(model_kw or {}))
     elif setting in STEP3:
         model = BlockModel(n, seed=seed, copy_path=copy_path, stream_norm=stream_norm, layer_norm=layer_norm, rope=rope,
-                           normalized_update=normalized_update, sphere_weights=sphere_weights, **STEP3[setting],
+                           normalized_update=normalized_update, sphere_weights=sphere_weights, canon=canon, **STEP3[setting],
                            **(model_kw or {}))
     else:
         model = SequenceModel(n, seed=seed, **STEP2[setting], **(model_kw or {}))
@@ -259,7 +262,7 @@ def generate(model, prompts, n, cached=True):
     cached (BlockModel): istem bir kez, sonra her token yalniz kendi konumunu hesaplar (AttentionCache); butun istemler
     tek batch'te (farkli uzunluk: sagdan dolgu, satir basina konum).  Degilse: ayni uzunluktaki istemler birlikte ve her
     token'da butun dizi yeniden hesaplanir (transformer; ayni token'lar, skorlar float yuvarlamasina kadar)."""
-    if cached and isinstance(model, BlockModel):
+    if cached and isinstance(model, BlockModel) and not model.canon:   # Canon: onbellek yok, tam yeniden hesap
         return generate_cached(model, prompts, n)
     device = next(model.parameters()).device
     out = [None] * len(prompts)
