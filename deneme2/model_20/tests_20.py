@@ -502,8 +502,9 @@ def t_colab():
     bad = list(e["steps"])
     bad[-3] = "Tom"
     worse = TR.score_steps(bad, e)
-    check("adim 4: score_steps -- dogru cevapta hepsi evet; son ad yanlissa yalniz son cevap ve birebir hayir",
-          all(good.values()) and not worse["final"] and not worse["exact"] and worse["bridge"] and worse["form"])
+    check("adim 4: score_steps -- dogru cevapta SC BC AC EX FC hepsi evet; son ad yanlissa yalniz AC ve EX hayir",
+          all(good.values()) and sorted(good) == ["AC", "BC", "EX", "FC", "SC"]
+          and not worse["AC"] and not worse["EX"] and worse["BC"] and worse["SC"] and worse["FC"])
 
     m = BlockModel(len(s["vocab"]), d=16, units=8)
     prompts = [TR.questions(s, "2R_UT")[i][0] for i in (0, 1)] + [TR.questions(s, "1R_T")[0][0]]

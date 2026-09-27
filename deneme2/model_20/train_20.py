@@ -217,13 +217,15 @@ def generate(model, prompts, n):
 
 
 def score_steps(said, entry):
-    """Ara adimli cevap (token listesi, 8 x adim): birebir; bicim (her cumle 'A B 's r_i is C D .', r_i sorudaki);
-    ozne (ilk cumlenin oznesi); kopru (ilk cumlenin nesnesi); son cevap (son cumlenin nesnesi)."""
+    """Ara adimli cevap (token listesi, 8 x adim).  Adlar kullanici onayiyla (27 Eylul):
+    SC subject correct (cevap sorudaki kisiyle basliyor), BC bridge correct (ilk cumlenin nesnesi = kopru),
+    AC answer correct (son cumlenin nesnesi = cevap; ANA OLCU), EX exact (tamami birebir),
+    FC format correct (her cumle 'A B 's r_i is C D .', r_i sorudaki)."""
     want, path = entry["steps"], entry["path"]
     form = all(said[8 * i + 2] == "'s" and said[8 * i + 3] == r and said[8 * i + 4] == "is" and said[8 * i + 7] == "."
                for i, r in enumerate(path))
-    return dict(exact=said == want, form=form, subject=said[0:2] == want[0:2], bridge=said[5:7] == want[5:7],
-                final=said[-3:-1] == want[-3:-1])
+    return dict(SC=said[0:2] == want[0:2], BC=said[5:7] == want[5:7], AC=said[-3:-1] == want[-3:-1], EX=said == want,
+                FC=form)
 
 
 def exam_steps(model, data, cls, given=0):
@@ -231,7 +233,7 @@ def exam_steps(model, data, cls, given=0):
     -> (sayimlar, [(soru, modelin yazdigi, dogrusu)])."""
     vocab = data["vocab"]
     ix = {w: i for i, w in enumerate(vocab)}
-    counts = dict(exact=0, form=0, subject=0, bridge=0, final=0)
+    counts = dict(SC=0, BC=0, AC=0, EX=0, FC=0)
     rows = []
     by_hops = {}
     for q in questions(data, cls):

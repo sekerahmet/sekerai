@@ -55,9 +55,9 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
             e.update({"%s_%s" % (c, k): v for k, v in counts.items()})
         run["exams"].append(e)
         json.dump(run["exams"], open(os.path.join(out, "exams.json"), "w"), indent=1)
-        note("adim %5d  nll %.3f  1R_T %d/%d | 2R_T birebir %d/%d | 2R_UT son %d birebir %d kopru %d ozne %d /%d  (%.0f sn)" % (
-                 step, nll, e["1R_T"], n["1R_T"], e["2R_T_exact"], n["2R_T"], e["2R_UT_final"], e["2R_UT_exact"],
-                 e["2R_UT_bridge"], e["2R_UT_subject"], n["2R_UT"], e["secs"]))
+        note("adim %5d  nll %.3f  1R_T %d/%d | 2R_T EX %d/%d | 2R_UT AC %d EX %d BC %d SC %d FC %d /%d  (%.0f sn)" % (
+                 step, nll, e["1R_T"], n["1R_T"], e["2R_T_EX"], n["2R_T"], e["2R_UT_AC"], e["2R_UT_EX"], e["2R_UT_BC"],
+                 e["2R_UT_SC"], e["2R_UT_FC"], n["2R_UT"], e["secs"]))
         if run["stop"]:
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             raise Stopped()
