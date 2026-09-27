@@ -134,9 +134,9 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     gormus modeli ve optimizer'i tasir.  checkpoint {step, model, optimizer}: o adimdan surdurur (ayni steps ve tarifle
     kesintisiz kosuyla bit duzeyinde ayni); o adimin callback'i ve kaydi tekrarlanmaz."""
     assert setting in STEP3 or not copy_path, "copy_path yalniz Adim 3 (BlockModel) icin"
-    assert setting != "transformer" or not weight_decay, "transformer icin weight decay gruplari tanimli degil (W_ adlari Linear)"
-    if setting == "transformer":
-        model = TransformerModel(n, seed=seed)
+    assert not setting.startswith("transformer") or not weight_decay, "transformer icin weight decay gruplari tanimli degil"
+    if setting in ("transformer", "transformer_novalue"):   # novalue: V matrisi yok (tek head'de V.O tek matris)
+        model = TransformerModel(n, seed=seed, value_matrix=setting == "transformer")
     elif setting in STEP3:
         model = BlockModel(n, seed=seed, copy_path=copy_path, **STEP3[setting])
     else:

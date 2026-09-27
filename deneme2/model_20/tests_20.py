@@ -624,7 +624,8 @@ def reference_transformer(m, ids):
         dh = h.shape[-1] // H
         x = ln(h, layer.norm_attention)
         split = lambda y: y.view(B, T, H, dh).transpose(1, 2)
-        q, k, v = split(lin(x, layer.W_query)), split(lin(x, layer.W_key)), split(lin(x, layer.W_value))
+        q, k = split(lin(x, layer.W_query)), split(lin(x, layer.W_key))
+        v = split(lin(x, layer.W_value)) if layer.W_value is not None else split(x)
         theta = torch.arange(T, dtype=torch.float64)[:, None] * 10000.0 ** (-torch.arange(0, dh, 2, dtype=torch.float64) / dh)
         rot = lambda y: torch.view_as_real(torch.view_as_complex(y.reshape(B, H, T, dh // 2, 2).contiguous())
                                            * torch.polar(torch.ones_like(theta), theta)).flatten(-2)
@@ -646,14 +647,22 @@ def t_transformer():
     n, d = 12, 8
     g = torch.Generator().manual_seed(13)
     ids = torch.randint(0, n, (3, 9), generator=g)
-    for heads in (1, 4):
-        m = TransformerModel(n, d=d, units=12, heads=heads)
+    check("transformer, value_matrix=False: V yok -> 238 token'da 107.008 sayi (katman basina 4.160 eksik)",
+          count(TransformerModel(238, value_matrix=False)) == 107008
+          and all(layer.W_value is None for layer in TransformerModel(238, value_matrix=False).layers),
+          str(count(TransformerModel(238, value_matrix=False))))
+    for heads, vm in ((1, True), (4, True), (1, False)):
+        m = TransformerModel(n, d=d, units=12, heads=heads, value_matrix=vm)
         with torch.no_grad():
             for p_ in m.parameters():
                 p_.copy_(0.5 * torch.randn(p_.shape, generator=g))
         err = float((m.logits(ids).detach().double() - reference_transformer(m, ids)).abs().max())
-        check("transformer: skor = tasarim formulu (bagimsiz float64; RoPE karmasik carpimla), %d head" % heads,
-              err < 1e-4, "fark %.1e" % err)
+        check("transformer: skor = tasarim formulu (bagimsiz float64; RoPE karmasik carpimla), %d head%s" % (
+              heads, "" if vm else ", V yok"), err < 1e-4, "fark %.1e" % err)
+    m = TransformerModel(n, d=d, units=12, heads=4)
+    with torch.no_grad():
+        for p_ in m.parameters():
+            p_.copy_(0.5 * torch.randn(p_.shape, generator=g))
 
     q0, k0 = torch.randn(4, generator=g), torch.randn(4, generator=g)
     rq, rk = apply_rope(q0.expand(1, 1, 7, 4)), apply_rope(k0.expand(1, 1, 7, 4))
@@ -684,9 +693,12 @@ def t_transformer():
         refused = False
     except AssertionError:
         refused = True
-    check("transformer: train_seq ayni tarifle egitir, kayip iner; weight decay istenirse reddedilir (gruplar tanimsiz)",
-          isinstance(m, TransformerModel) and curve[-1]["nll"] < curve[0]["nll"] and refused,
-          "%.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"]))
+    mv, curve_v = TR.train_seq("transformer_novalue", sids, smask, nv, steps=20, log_at=(0, 20))
+    check("transformer: train_seq ayni tarifle egitir, kayip iner ('transformer' ve 'transformer_novalue'); weight decay "
+          "istenirse reddedilir (gruplar tanimsiz)",
+          isinstance(m, TransformerModel) and curve[-1]["nll"] < curve[0]["nll"] and refused
+          and all(layer.W_value is None for layer in mv.layers) and curve_v[-1]["nll"] < curve_v[0]["nll"],
+          "%.3f -> %.3f; V'siz %.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"], curve_v[0]["nll"], curve_v[-1]["nll"]))
 
 
 def t_resume():
