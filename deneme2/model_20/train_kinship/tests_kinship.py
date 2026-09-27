@@ -211,12 +211,12 @@ def t_resume():
               "%s %s %s" % (sorted(packs), seen_full, seen_resumed))
 
     out = tempfile.mkdtemp() + "/r"
-    run = C.start("TEST_R", s, out, steps=3, every=100, device="cpu", save_every=1)
+    run = C.start("TEST_R", s, out, steps=3, every=1, device="cpu", save_every=1)
     run["thread"].join(600)
     files = sorted(f for f in os.listdir(out) if f.startswith("checkpoint_t"))
     os.remove(os.path.join(out, "checkpoint_t00003.pt"))            # 2. adimdan sonra kesilmis gibi
     lines_before = open(os.path.join(out, "log.txt"), encoding="utf-8").read().count("\n")
-    run2 = C.start("TEST_R", s, out, steps=3, every=100, device="cpu", save_every=1, resume=True)
+    run2 = C.start("TEST_R", s, out, steps=3, every=1, device="cpu", save_every=1, resume=True)
     run2["thread"].join(600)
     log = open(os.path.join(out, "log.txt"), encoding="utf-8").read()
     try:
@@ -225,10 +225,11 @@ def t_resume():
     except RuntimeError:
         refused = True
     check("surdurme, colab_kinship: her adimda checkpoint_tNNNNN.pt; resume=True son paketten devam eder, gunluge yazar, "
-          "klasoru tasimaz; ayar farkliysa reddeder",
+          "klasoru tasimaz; exams.json'da adim tekrarlanmaz; ayar farkliysa reddeder",
           files == ["checkpoint_t00001.pt", "checkpoint_t00002.pt", "checkpoint_t00003.pt"] and run2["done"]
           and not run2["error"] and "SURDURULDU adim 2'den" in log and log.count("\n") > lines_before
-          and os.path.exists(os.path.join(out, "checkpoint_t00003.pt")) and refused, str(run2["error"] or files))
+          and os.path.exists(os.path.join(out, "checkpoint_t00003.pt")) and refused
+          and [e["step"] for e in json.load(open(os.path.join(out, "exams.json")))] == [0, 1, 2, 3], str(run2["error"] or files))
 
 
 def t_colab():
@@ -237,13 +238,16 @@ def t_colab():
     from model_20 import BlockModel
     s = D.build(step_answers=True)
     e = next(e for e in s["exam"] if e["cls"] == "2R_UT")
-    good = EK.score_steps(list(e["steps"]), e)
-    bad = list(e["steps"])
-    bad[-3] = "Tom"
+    good = EK.score_steps(list(e["steps"]) + [D.EOS], e)
+    bad = list(e["steps"]) + [D.EOS]
+    bad[-4] = "Tom"
     worse = EK.score_steps(bad, e)
-    check("adim 4: score_steps -- dogru cevapta SC BC AC EX FC hepsi evet; son ad yanlissa yalniz AC ve EX hayir",
+    going = EK.score_steps(list(e["steps"]) + ["Who"], e)          # dogru cevap, ama durmadan devam ediyor
+    check("adim 4: score_steps -- dogru cevap + <eos>'ta SC BC AC EX FC hepsi evet; son ad yanlissa yalniz AC ve EX hayir; "
+          "cevap dogru ama <eos> yoksa yalniz EX hayir",
           all(good.values()) and sorted(good) == ["AC", "BC", "EX", "FC", "SC"]
-          and not worse["AC"] and not worse["EX"] and worse["BC"] and worse["SC"] and worse["FC"])
+          and not worse["AC"] and not worse["EX"] and worse["BC"] and worse["SC"] and worse["FC"]
+          and not going["EX"] and going["AC"] and going["SC"] and going["BC"] and going["FC"])
 
     m = BlockModel(len(s["vocab"]), d=16, units=8)
     gr = torch.Generator().manual_seed(5)

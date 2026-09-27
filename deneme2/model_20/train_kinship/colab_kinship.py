@@ -59,13 +59,15 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)
         checkpoint = torch.load(os.path.join(out, packs[-1]), map_location=device)
+        path = os.path.join(out, "exams.json")
+        exams = [e for e in json.load(open(path)) if e["step"] <= checkpoint["step"]] if os.path.exists(path) else []
     else:
+        exams = []
         if os.path.isdir(out) and os.listdir(out):
             os.rename(out, out + "_eski_" + time.strftime("%Y%m%d_%H%M%S"))
         os.makedirs(out, exist_ok=True)
         json.dump(config, open(os.path.join(out, "config.json"), "w"), indent=1)
-    run = dict(name=name, out=out, lines=[], stop=False, error=None, done=False, t0=time.time(),
-               exams=json.load(open(os.path.join(out, "exams.json"))) if resume else [])
+    run = dict(name=name, out=out, lines=[], stop=False, error=None, done=False, t0=time.time(), exams=exams)
 
     class Stopped(Exception):
         pass

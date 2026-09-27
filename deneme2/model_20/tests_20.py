@@ -580,6 +580,29 @@ def t_step3():
           and t_muon == sorted("layers.%d.%s.weight" % (i, w) for i in range(2) for w in ("W_out", "W_mlp_in", "W_mlp_out"))
           and refused_wd, str(t_muon))
 
+    mc, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), copy_path=True, save_every=1, save=grab)
+    names_c = {id(p_): k.split(".")[-1] for k, p_ in mc.named_parameters()}
+    c_muon = sorted(names_c[id(p_)] for g_ in opts[-1].param_groups if g_["use_muon"] for p_ in g_["params"])
+    packs_s = {}
+    keep_s = lambda step, model, opt: packs_s.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
+                                                                     optimizer=copy.deepcopy(opt.state_dict())))
+
+    def stop_at_3(step, model, nll):
+        if step == 3:
+            raise RuntimeError("durdur")
+    try:
+        TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), every=1, callback=stop_at_3, save_every=2,
+                     save=keep_s)
+        stopped = False
+    except RuntimeError:
+        stopped = True
+    res_s, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs_s[3])
+    check("durdurma: callback hata atinca o adimin paketi de yazilir (adim 3, save_every 2); ondan surdurulen = kesintisiz, "
+          "bit duzeyinde; kopya yolunda W_copy Muon'da (W_context'in kardesi)",
+          stopped and sorted(packs_s) == [2, 3]
+          and all(torch.equal(a_, b_) for a_, b_ in zip(full_m.state_dict().values(), res_s.state_dict().values()))
+          and c_muon == ["W_context", "W_copy", "W_fact_in", "W_fact_out"], "%s %s" % (sorted(packs_s), c_muon))
+
 
 def t_copy():
     from model_20 import BlockModel

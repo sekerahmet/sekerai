@@ -137,8 +137,9 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     (model_20_transformer), ayni tarif.  rope: attention'da RoPE; None = modelin kendi varsayilani (transformer True,
     BlockModel ROPE).
     save(step, model, opt): her save_every adimda, callback'ten sonra, guncellemeden ONCE -- adim s paketi s guncelleme
-    gormus modeli ve optimizer'i tasir.  checkpoint {step, model, optimizer}: o adimdan surdurur (ayni steps ve tarifle
-    kesintisiz kosuyla bit duzeyinde ayni); o adimin callback'i ve kaydi tekrarlanmaz.
+    gormus modeli ve optimizer'i tasir.  callback hata atarsa (durdurma dahil) o adimin paketi de yazilir.  checkpoint {step, model, optimizer}: o adimdan surdurur (ayni steps ve tarifle
+    kesintisiz kosuyla bit duzeyinde ayni -- CPU'da; GPU'da compile token gradyanini atomik toplar, son bitler oynayabilir);
+    o adimin callback'i ve kaydi tekrarlanmaz.
     batches(step) -> (ids, mask): buyuk veri icin her adimda bir parca (mini-batch); verilirse ids, mask kullanilmaz (None
     olabilir).  Adimin fonksiyonu olmali (surdurmede ayni parca gelsin); compile icin parcalarin sekli sabit olmali.
     model_kw: modele gecen ayarlar (BlockModel: d, turns, units, t_max ...; transformer: d, layers, heads, units)."""
@@ -169,7 +170,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     if optimizer == "muon":
         # Muon yalniz gizli 2 boyutlu matrislerde ("VO + FFN" duzeni, Wang 2025); token noktalari, esikler, W_query, W_key,
         # bias ve norm katsayilari Adam'da
-        hidden = ("W_context", "W_fact_in", "W_fact_out", "W_value.weight", "W_out.weight", "W_mlp_in.weight",
+        hidden = ("W_context", "W_copy", "W_fact_in", "W_fact_out", "W_value.weight", "W_out.weight", "W_mlp_in.weight",
                   "W_mlp_out.weight")
         opt = Muon([dict(params=[p for k, p in named if k.endswith(hidden)], use_muon=True),
                     dict(params=[p for k, p in named if not k.endswith(hidden)], use_muon=False)], lr=lr)
@@ -214,7 +215,12 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
                                          model.attention.W_context.norm().item() if getattr(model, "attention", None) is not None
                                          else 0.0)))
         if callback is not None and every and step % every == 0 and not resumed_here:
-            callback(step, model, nll.item())
+            try:
+                callback(step, model, nll.item())
+            except Exception:                              # durdurma ya da hata: o adimdan surdurulebilsin
+                if save is not None and step > 0:
+                    save(step, model, opt)
+                raise
         if save is not None and save_every and step > 0 and step % save_every == 0 and not resumed_here:
             save(step, model, opt)
         if step == steps:

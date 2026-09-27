@@ -103,15 +103,15 @@ def answer(model, prompt, vocab, k=2):
 # ---- adim 4: ara adimli cevaplar ("<steps>"); cumle 8 token: X1 X2 's r is Y1 Y2 .
 
 def score_steps(said, entry):
-    """Ara adimli cevap (token listesi, 8 x adim).  Adlar kullanici onayiyla (27 Eylul):
+    """Ara adimli cevap (token listesi: 8 x adim + bir sonraki token).  Adlar kullanici onayiyla (27 Eylul):
     SC subject correct (cevap sorudaki kisiyle basliyor), BC bridge correct (ilk cumlenin nesnesi = kopru),
-    AC answer correct (son cumlenin nesnesi = cevap; ANA OLCU), EX exact (tamami birebir),
-    FC format correct (her cumle 'A B 's r_i is C D .', r_i sorudaki)."""
+    AC answer correct (son cumlenin nesnesi = cevap; ANA OLCU), EX exact (tamami birebir VE ardindan <eos>: model
+    durdu -- kullanici, 27 Eylul: "ex düzeltelim"), FC format correct (her cumle 'A B 's r_i is C D .', r_i sorudaki)."""
     want, path = entry["steps"], entry["path"]
     form = all(said[8 * i + 2] == "'s" and said[8 * i + 3] == r and said[8 * i + 4] == "is" and said[8 * i + 7] == "."
                for i, r in enumerate(path))
-    return dict(SC=said[0:2] == want[0:2], BC=said[5:7] == want[5:7], AC=said[-3:-1] == want[-3:-1], EX=said == want,
-                FC=form)
+    return dict(SC=said[0:2] == want[0:2], BC=said[5:7] == want[5:7], AC=said[len(want) - 3:len(want) - 1] == want[-3:-1],
+                EX=said == want + [data_20.EOS], FC=form)
 
 
 def exam_steps(model, data, cls, given=0):
@@ -125,7 +125,7 @@ def exam_steps(model, data, cls, given=0):
     for q in questions(data, cls):
         by_hops.setdefault(len(q[2]["path"]), []).append(q)
     for hops, group in by_hops.items():
-        gens = generate(model, [q[0] + [ix[t] for t in q[2]["steps"][:given]] for q in group], 8 * hops - given)
+        gens = generate(model, [q[0] + [ix[t] for t in q[2]["steps"][:given]] for q in group], 8 * hops - given + 1)
         for q, g in zip(group, gens):
             said = q[2]["steps"][:given] + [vocab[t] for t in g]
             for k, v in score_steps(said, q[2]).items():
