@@ -14,8 +14,8 @@ import time
 import torch
 
 import data_20
-from model_20 import (CONFIDENCE, COPY_PATH, STREAM_NORM, BigramModel, BlockModel, SequenceModel, deviation, neighbors,
-                      transitions)
+from model_20 import (CONFIDENCE, COPY_PATH, LAYER_NORM, STREAM_NORM, BigramModel, BlockModel, SequenceModel, deviation,
+                      neighbors, transitions)
 from model_20_transformer import TransformerModel
 
 SETTINGS = {                      # capa lr/wd gibi deneme sayisi; 1e-2 fazla sertti (kayip 1,284 > 1,270)
@@ -124,7 +124,7 @@ def sequences(data):
 
 def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, lr_floor=LR_FLOOR, grad_clip=GRAD_CLIP,
               weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None, compile=False, copy_path=COPY_PATH,
-              save_every=None, save=None, checkpoint=None, stream_norm=STREAM_NORM):
+              save_every=None, save=None, checkpoint=None, stream_norm=STREAM_NORM, layer_norm=LAYER_NORM):
     """Standart tarif: cosine decay (LR -> LR x lr_floor) + gradient clipping.  lr_floor=None, grad_clip=None: eski tarif
     (sabit lr); 27 Eylul oncesi kayitli Adim 2-3 sonuclari onunla uretildi.  weight_decay > 0: AdamW, yalniz W_ matrisleri.
     callback(step, model, nll): her `every` adimda, o adimin guncellemesinden ONCE (sinav, kayit, durdurma).
@@ -136,11 +136,12 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     kesintisiz kosuyla bit duzeyinde ayni); o adimin callback'i ve kaydi tekrarlanmaz."""
     assert setting in STEP3 or not copy_path, "copy_path yalniz Adim 3 (BlockModel) icin"
     assert setting in STEP3 or stream_norm, "stream_norm=False yalniz Adim 3 (BlockModel) icin"
+    assert setting in STEP3 or not layer_norm, "layer_norm yalniz Adim 3 (BlockModel) icin"
     assert not setting.startswith("transformer") or not weight_decay, "transformer icin weight decay gruplari tanimli degil"
     if setting in ("transformer", "transformer_novalue"):   # novalue: V matrisi yok (tek head'de V.O tek matris)
         model = TransformerModel(n, seed=seed, value_matrix=setting == "transformer")
     elif setting in STEP3:
-        model = BlockModel(n, seed=seed, copy_path=copy_path, stream_norm=stream_norm, **STEP3[setting])
+        model = BlockModel(n, seed=seed, copy_path=copy_path, stream_norm=stream_norm, layer_norm=layer_norm, **STEP3[setting])
     else:
         model = SequenceModel(n, seed=seed, **STEP2[setting])
     model = model.to(device)
@@ -338,7 +339,8 @@ def report_step3(results, data):
     firsts = torch.tensor(sorted({ix[p["first"]] for p in people.values()}))
     m0 = results["shared"][0]
     # kopru okumasi tur 1'in ara durumunu elle kuruyor; kopya yolu katkisini icermez
-    assert not any(getattr(m, "copy_path", False) or not getattr(m, "stream_norm", True) for m, _ in results.values()), \
+    assert not any(getattr(m, "copy_path", False) or not getattr(m, "stream_norm", True) or getattr(m, "layer_norm", False)
+                   for m, _ in results.values()), \
         "report_step3 kopya yolu kapali, akisi normalize edilen modeller icin"
     out = ["ADIM 3  veri iz %s  cumle %d  TURNS %d  FACT_UNITS %d  scale %.3f" % (
         data["fingerprint"], len(data["train"]), m0.turns, m0.blocks[0].facts.W_fact_in.shape[0], m0.scale), ""]
