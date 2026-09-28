@@ -43,3 +43,6 @@ deneme2/*/veri_ham/
 deneme2/*/OLCULENLER_*.md
 # egitim klasorlerinin kendi kayitlari (train_<veri>/OLCULENLER_<veri>.md)
 deneme2/*/*/OLCULENLER_*.md
+
+# Claude Code yerel klasoru (ajan worktree'leri, ayarlar): depo PUBLIC
+.claude/
