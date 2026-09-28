@@ -118,7 +118,7 @@ circle.unit{fill:none;stroke:var(--muted);stroke-width:1;stroke-dasharray:3 3}
 <div class="wrap">
 <header>
 <h1>Model X2 · 2 × 2</h1>
-<span class="meta">model_20 · 2 katman × 2 tur · TinyStories ayarı (d 384) · kod aad455c · 28 Eylül 2026</span>
+<span class="meta">model_20 · 2 katman × 2 tur · 4 head · TinyStories ayarı (d 384) · kod 8cdc245 · 28 Eylül 2026</span>
 </header>
 <figure class="fig">
 <svg viewBox="0 0 1240 1400" role="img" aria-label="Model X2, 2 katman x 2 tur: token noktaları PL; dört tur A B A B sırasıyla iki farklı Block (Canon, RoPE'lu nedensel attention ve FactUnits; her adım durumu alpha kadar yaklaştırıp küreye geri koyar); çıkışta aynı PL ile skor."><defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk"/></marker><marker id="ahs" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mks"/></marker><marker id="ahr" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mkr"/></marker><marker id="ahl" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mkl"/></marker><marker id="aht" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mkt"/></marker><marker id="ahc" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mkc"/></marker></defs><rect x="41" y="84" width="39" height="32" rx="3" class="cell"/>
@@ -240,15 +240,16 @@ circle.unit{fill:none;stroke:var(--muted);stroke-width:1;stroke-dasharray:3 3}
 <path d="M120,426 L406,426" class="st" marker-end="url(#ahs)"/>
 <rect x="170" y="462" width="614" height="384" rx="8" class="panel"/>
 <text x="186" y="484" class="pt" text-anchor="start">CausalAttention</text>
-<text x="312" y="484" class="bs" text-anchor="start">nedensel · HEADS = 1: değer = x (V yok)</text>
-<path d="M585,432 L585,496 L200,496 L200,744 L398,744" class="xs" marker-end="url(#ahc)"/>
+<text x="312" y="484" class="bs" text-anchor="start">nedensel · 4 head × 96 boyut · her head kendi q, k, a ve değer dilimi</text>
+<path d="M585,432 L585,496 L200,496 L200,744 L226,744" class="xs" marker-end="url(#ahc)"/>
 <text x="596" y="454" class="xl" text-anchor="start">x</text>
 <path d="M200,530 L226,530" class="xs" marker-end="url(#ahc)"/>
 <rect x="228" y="512" width="140" height="36" rx="6" class="learn"/>
 <text x="298" y="534.5" class="btm" text-anchor="middle">W_query · 384×384</text>
 <path d="M368,530 L382,530" class="ar" marker-end="url(#ah)"/>
 <rect x="384" y="512" width="62" height="36" rx="6" class="op"/>
-<text x="415" y="534.5" class="bt" text-anchor="middle">norm</text>
+<text x="415" y="527" class="bt" text-anchor="middle">norm</text>
+<text x="415" y="543" class="bs" text-anchor="middle">head başına</text>
 <path d="M446,530 L460,530" class="ar" marker-end="url(#ah)"/>
 <rect x="462" y="512" width="76" height="36" rx="6" class="rope"/>
 <text x="500" y="534.5" class="btr" text-anchor="middle">RoPE</text>
@@ -258,7 +259,8 @@ circle.unit{fill:none;stroke:var(--muted);stroke-width:1;stroke-dasharray:3 3}
 <text x="298" y="598.5" class="btm" text-anchor="middle">W_key · 384×384</text>
 <path d="M368,594 L382,594" class="ar" marker-end="url(#ah)"/>
 <rect x="384" y="576" width="62" height="36" rx="6" class="op"/>
-<text x="415" y="598.5" class="bt" text-anchor="middle">norm</text>
+<text x="415" y="591" class="bt" text-anchor="middle">norm</text>
+<text x="415" y="607" class="bs" text-anchor="middle">head başına</text>
 <path d="M446,594 L460,594" class="ar" marker-end="url(#ah)"/>
 <rect x="462" y="576" width="76" height="36" rx="6" class="rope"/>
 <text x="500" y="598.5" class="btr" text-anchor="middle">RoPE</text>
@@ -267,7 +269,7 @@ circle.unit{fill:none;stroke:var(--muted);stroke-width:1;stroke-dasharray:3 3}
 <text x="500" y="646" class="ropes" text-anchor="middle">boy 1 kalır · 0 sayı</text>
 <rect x="598" y="516" width="180" height="50" rx="6" class="op"/>
 <text x="688" y="538" class="btm" text-anchor="middle">s_tj = 10,83 · ⟨q_t, k_j⟩</text>
-<text x="688" y="554" class="bs" text-anchor="middle">cosine × sabit ölçek</text>
+<text x="688" y="554" class="bs" text-anchor="middle">head başına · cosine × sabit ölçek</text>
 <path d="M570,530 L596,534" class="ar" marker-end="url(#ah)"/>
 <path d="M570,594 L596,552" class="ar" marker-end="url(#ah)"/>
 <rect x="598" y="590" width="180" height="40" rx="6" class="op"/>
@@ -276,13 +278,16 @@ circle.unit{fill:none;stroke:var(--muted);stroke-width:1;stroke-dasharray:3 3}
 <path d="M688,566 L688,588" class="ar" marker-end="url(#ah)"/>
 <rect x="598" y="652" width="180" height="44" rx="6" class="op"/>
 <text x="688" y="671" class="btm" text-anchor="middle">a_tj = softmax_j</text>
-<text x="688" y="687" class="bs" text-anchor="middle">(T × T) · satır toplamı 1</text>
+<text x="688" y="687" class="bs" text-anchor="middle">4 head × (T × T) · satır toplamı 1</text>
 <path d="M688,630 L688,650" class="ar" marker-end="url(#ah)"/>
 <rect x="400" y="720" width="370" height="48" rx="6" class="op"/>
-<text x="585" y="741" class="btm" text-anchor="middle">c_t = Σ_j a_tj · x_j</text>
-<text x="585" y="757" class="bs" text-anchor="middle">getirilen: Canon'lu girdiler</text>
+<text x="585" y="741" class="btm" text-anchor="middle">c_t = [Σ_j a¹_tj v¹_j ; … ; Σ_j a⁴_tj v⁴_j]</text>
+<text x="585" y="757" class="bs" text-anchor="middle">4 head yan yana · vʰ = W_value x'in h. dilimi</text>
 <path d="M688,696 L688,718" class="ar" marker-end="url(#ah)"/>
-<text x="300" y="736" class="bs" text-anchor="middle">değer = x</text>
+<rect x="228" y="726" width="150" height="36" rx="6" class="learn"/>
+<text x="303" y="748.5" class="btm" text-anchor="middle">W_value · 384×384</text>
+<text x="303" y="776" class="bs" text-anchor="middle">satırlar birim, birim başlar</text>
+<path d="M378,744 L398,744" class="ar" marker-end="url(#ah)"/>
 <rect x="480" y="790" width="210" height="44" rx="6" class="learn"/>
 <text x="585" y="809" class="btm" text-anchor="middle">W_context · 384×384</text>
 <text x="585" y="825" class="bs" text-anchor="middle">sütunlar birim</text>
@@ -362,79 +367,83 @@ circle.unit{fill:none;stroke:var(--muted);stroke-width:1;stroke-dasharray:3 3}
 <text x="1210" y="270" class="num canonk" text-anchor="end">1.536</text>
 <text x="840" y="291" class="rk " text-anchor="start">W_query, W_key · 384 × 384</text>
 <text x="1210" y="291" class="num " text-anchor="end">2 × 147.456</text>
-<text x="840" y="312" class="rk " text-anchor="start">W_context · 384 × 384</text>
+<text x="840" y="312" class="rk " text-anchor="start">W_value · 384 × 384</text>
 <text x="1210" y="312" class="num " text-anchor="end">147.456</text>
-<text x="840" y="333" class="rk " text-anchor="start">W_fact_in · 1536 × 384</text>
-<text x="1210" y="333" class="num " text-anchor="end">589.824</text>
-<text x="840" y="354" class="rk " text-anchor="start">fact_threshold · 1536</text>
-<text x="1210" y="354" class="num " text-anchor="end">1.536</text>
-<text x="840" y="375" class="rk " text-anchor="start">W_fact_out · 384 × 1536</text>
-<text x="1210" y="375" class="num " text-anchor="end">589.824</text>
-<text x="840" y="396" class="rk " text-anchor="start">Block toplamı</text>
-<text x="1210" y="396" class="num " text-anchor="end">1.625.088</text>
-<path d="M840,404 L1210,404" class="rule"/>
-<text x="840" y="423" class="rk " text-anchor="start">α_A, α_F · 2 × 4 × 384</text>
-<text x="1210" y="423" class="num " text-anchor="end">3.072</text>
-<text x="840" y="444" class="rk bold" text-anchor="start">toplam</text>
-<text x="1210" y="444" class="num bold" text-anchor="end">6.326.784</text>
-<text x="840" y="465" class="rk " text-anchor="start">embedding dışı</text>
-<text x="1210" y="465" class="num " text-anchor="end">3.253.248</text>
-<text x="840" y="488" class="bs" text-anchor="start">HEADS = 4: + W_value (2 × 147.456) → 6.621.696</text>
-<text x="840" y="503" class="bs" text-anchor="start">akrabalıkta d 64 · 256 birim</text>
-<text x="840" y="540" class="sect" text-anchor="start">Ayarlar</text>
-<text x="840" y="566" class="rk " text-anchor="start">LAYERS · TURNS</text>
-<text x="1210" y="566" class="numm " text-anchor="end">2 · 4 (A B A B)</text>
-<text x="840" y="587" class="rk canonk" text-anchor="start">CANON</text>
-<text x="1210" y="587" class="numm canonk" text-anchor="end">True</text>
-<text x="840" y="608" class="rk " text-anchor="start">NORMALIZED_UPDATE</text>
-<text x="1210" y="608" class="numm " text-anchor="end">True · α 0,1'den</text>
-<text x="840" y="629" class="rk " text-anchor="start">SPHERE_WEIGHTS</text>
-<text x="1210" y="629" class="numm " text-anchor="end">True</text>
-<text x="840" y="650" class="rk ropek" text-anchor="start">ROPE</text>
-<text x="1210" y="650" class="numm ropek" text-anchor="end">True</text>
-<text x="840" y="671" class="rk " text-anchor="start">HEADS</text>
-<text x="1210" y="671" class="numm " text-anchor="end">1 (4 denemede)</text>
-<text x="840" y="692" class="rk " text-anchor="start">D · FACT_UNITS</text>
-<text x="1210" y="692" class="numm " text-anchor="end">384 · 1536</text>
-<text x="840" y="713" class="rk " text-anchor="start">STREAM_NORM · ANCHOR</text>
-<text x="1210" y="713" class="numm " text-anchor="end">True · 1e-3</text>
-<text x="840" y="740" class="sect" text-anchor="start">Yaklaş + norm nasıl</text>
-<rect x="840" y="752" width="370" height="200" rx="8" class="updbox"/>
-<circle cx="912" cy="858" r="52" class="unit"/>
-<path d="M962.228,844.541 L890.024,810.872" class="chord"/>
-<path d="M912,858 L962.228,844.541" class="vec" marker-end="url(#ah)"/>
-<path d="M912,858 L890.024,810.872" class="vec" marker-end="url(#ah)"/>
-<path d="M912,858 L948.559,821.021" class="vec new" marker-end="url(#ahs)"/>
-<circle cx="936.957" cy="832.757" r="3" class="pt"/>
-<text x="968.228" y="848.541" class="vl" text-anchor="start">h</text>
-<text x="886.024" y="804.872" class="vl" text-anchor="end">norm(u)</text>
-<text x="952.559" y="811.021" class="vl hl" text-anchor="start">yeni h</text>
-<text x="912" y="928" class="bs" text-anchor="middle">bir boyut düzlemi</text>
-<text x="998" y="780" class="rs" text-anchor="start">h, norm(u): kürede iki nokta</text>
-<text x="998" y="801" class="rs" text-anchor="start">h + α ⊙ (u − h): arada bir nokta</text>
-<text x="998" y="822" class="rs" text-anchor="start">norm: yeniden küreye</text>
-<text x="998" y="843" class="rs" text-anchor="start">α boyut ve tur başına</text>
-<text x="998" y="864" class="rs" text-anchor="start">u'nun boyu silinir, adımı α seçer</text>
-<text x="998" y="885" class="rs" text-anchor="start">eğitilmiş modelde adım 45–77°</text>
-<text x="998" y="906" class="rs" text-anchor="start">tek α'ya inince ppl 7 → 512</text>
-<text x="840" y="990" class="sect" text-anchor="start">Eğitim ve sonuç (1 epok)</text>
-<text x="840" y="1016" class="rk " text-anchor="start">optimizer</text>
-<text x="1210" y="1016" class="numm " text-anchor="end">Muon + Adam</text>
-<text x="840" y="1037" class="rk " text-anchor="start">lr (coherence)</text>
-<text x="1210" y="1037" class="numm " text-anchor="end">0,01 × ort(ρ) · son %20 iniş</text>
-<text x="840" y="1058" class="rk " text-anchor="start">batch · 1 epok</text>
-<text x="1210" y="1058" class="numm " text-anchor="end">64 × 512 · 41.602 adım</text>
-<text x="840" y="1079" class="rk " text-anchor="start">ağırlık ortalaması</text>
-<text x="1210" y="1079" class="numm " text-anchor="end">WEIGHT_EMA 0,999</text>
-<path d="M840,1087 L1210,1087" class="rule"/>
-<text x="840" y="1106" class="rk bold" text-anchor="start">TinyStories valid ppl</text>
-<text x="1210" y="1106" class="numm bold" text-anchor="end">6,45 · ortalama 6,34</text>
-<text x="840" y="1127" class="rk " text-anchor="start">accuracy</text>
-<text x="1210" y="1127" class="numm " text-anchor="end">0,618 · 0,621</text>
-<text x="840" y="1148" class="rk " text-anchor="start">bits/char</text>
-<text x="1210" y="1148" class="numm " text-anchor="end">0,6205 · TS-3M 0,610</text>
-<text x="840" y="1169" class="rk " text-anchor="start">akrabalık 2R_UT EX</text>
-<text x="1210" y="1169" class="numm " text-anchor="end">ort 191,0 / 192</text>
+<text x="840" y="333" class="rk " text-anchor="start">W_context · 384 × 384</text>
+<text x="1210" y="333" class="num " text-anchor="end">147.456</text>
+<text x="840" y="354" class="rk " text-anchor="start">W_fact_in · 1536 × 384</text>
+<text x="1210" y="354" class="num " text-anchor="end">589.824</text>
+<text x="840" y="375" class="rk " text-anchor="start">fact_threshold · 1536</text>
+<text x="1210" y="375" class="num " text-anchor="end">1.536</text>
+<text x="840" y="396" class="rk " text-anchor="start">W_fact_out · 384 × 1536</text>
+<text x="1210" y="396" class="num " text-anchor="end">589.824</text>
+<text x="840" y="417" class="rk " text-anchor="start">Block toplamı</text>
+<text x="1210" y="417" class="num " text-anchor="end">1.772.544</text>
+<path d="M840,425 L1210,425" class="rule"/>
+<text x="840" y="444" class="rk " text-anchor="start">α_A, α_F · 2 × 4 × 384</text>
+<text x="1210" y="444" class="num " text-anchor="end">3.072</text>
+<text x="840" y="465" class="rk bold" text-anchor="start">toplam</text>
+<text x="1210" y="465" class="num bold" text-anchor="end">6.621.696</text>
+<text x="840" y="486" class="rk " text-anchor="start">embedding dışı</text>
+<text x="1210" y="486" class="num " text-anchor="end">3.548.160</text>
+<text x="840" y="509" class="bs" text-anchor="start">HEADS = 1 (W_value yok): 6.326.784 · OUTPUT_SKIP: + 384</text>
+<text x="840" y="524" class="bs" text-anchor="start">akrabalıkta d 64 · 256 birim</text>
+<text x="840" y="566" class="sect" text-anchor="start">Ayarlar</text>
+<text x="840" y="592" class="rk " text-anchor="start">LAYERS · TURNS</text>
+<text x="1210" y="592" class="numm " text-anchor="end">2 · 4 (A B A B)</text>
+<text x="840" y="613" class="rk canonk" text-anchor="start">CANON</text>
+<text x="1210" y="613" class="numm canonk" text-anchor="end">True</text>
+<text x="840" y="634" class="rk " text-anchor="start">NORMALIZED_UPDATE</text>
+<text x="1210" y="634" class="numm " text-anchor="end">True · α 0,1'den</text>
+<text x="840" y="655" class="rk " text-anchor="start">SPHERE_WEIGHTS</text>
+<text x="1210" y="655" class="numm " text-anchor="end">True</text>
+<text x="840" y="676" class="rk ropek" text-anchor="start">ROPE</text>
+<text x="1210" y="676" class="numm ropek" text-anchor="end">True</text>
+<text x="840" y="697" class="rk " text-anchor="start">HEADS · OUTPUT_SKIP</text>
+<text x="1210" y="697" class="numm " text-anchor="end">4 · False (denemede)</text>
+<text x="840" y="718" class="rk " text-anchor="start">D · FACT_UNITS</text>
+<text x="1210" y="718" class="numm " text-anchor="end">384 · 1536</text>
+<text x="840" y="739" class="rk " text-anchor="start">STREAM_NORM · ANCHOR</text>
+<text x="1210" y="739" class="numm " text-anchor="end">True · 1e-3</text>
+<text x="840" y="766" class="sect" text-anchor="start">Yaklaş + norm nasıl</text>
+<rect x="840" y="778" width="370" height="200" rx="8" class="updbox"/>
+<circle cx="912" cy="884" r="52" class="unit"/>
+<path d="M962.228,870.541 L890.024,836.872" class="chord"/>
+<path d="M912,884 L962.228,870.541" class="vec" marker-end="url(#ah)"/>
+<path d="M912,884 L890.024,836.872" class="vec" marker-end="url(#ah)"/>
+<path d="M912,884 L948.559,847.021" class="vec new" marker-end="url(#ahs)"/>
+<circle cx="936.957" cy="858.757" r="3" class="pt"/>
+<text x="968.228" y="874.541" class="vl" text-anchor="start">h</text>
+<text x="886.024" y="830.872" class="vl" text-anchor="end">norm(u)</text>
+<text x="952.559" y="837.021" class="vl hl" text-anchor="start">yeni h</text>
+<text x="912" y="954" class="bs" text-anchor="middle">bir boyut düzlemi</text>
+<text x="998" y="806" class="rs" text-anchor="start">h, norm(u): kürede iki nokta</text>
+<text x="998" y="827" class="rs" text-anchor="start">h + α ⊙ (u − h): arada bir nokta</text>
+<text x="998" y="848" class="rs" text-anchor="start">norm: yeniden küreye</text>
+<text x="998" y="869" class="rs" text-anchor="start">α boyut ve tur başına</text>
+<text x="998" y="890" class="rs" text-anchor="start">u'nun boyu silinir, adımı α seçer</text>
+<text x="998" y="911" class="rs" text-anchor="start">eğitilmiş modelde adım 45–77°</text>
+<text x="998" y="932" class="rs" text-anchor="start">tek α'ya inince ppl 7 → 512</text>
+<text x="840" y="1016" class="sect" text-anchor="start">Eğitim ve sonuç (1 epok, tek head)</text>
+<text x="840" y="1042" class="rk " text-anchor="start">optimizer</text>
+<text x="1210" y="1042" class="numm " text-anchor="end">Muon + Adam</text>
+<text x="840" y="1063" class="rk " text-anchor="start">lr (coherence)</text>
+<text x="1210" y="1063" class="numm " text-anchor="end">0,01 × ort(ρ) · son %20 iniş</text>
+<text x="840" y="1084" class="rk " text-anchor="start">batch · 1 epok</text>
+<text x="1210" y="1084" class="numm " text-anchor="end">64 × 512 · 41.602 adım</text>
+<text x="840" y="1105" class="rk " text-anchor="start">ağırlık ortalaması</text>
+<text x="1210" y="1105" class="numm " text-anchor="end">WEIGHT_EMA 0,999</text>
+<path d="M840,1113 L1210,1113" class="rule"/>
+<text x="840" y="1132" class="rk bold" text-anchor="start">TinyStories valid ppl</text>
+<text x="1210" y="1132" class="numm bold" text-anchor="end">6,45 · ortalama 6,34</text>
+<text x="840" y="1153" class="rk " text-anchor="start">accuracy</text>
+<text x="1210" y="1153" class="numm " text-anchor="end">0,618 · 0,621</text>
+<text x="840" y="1174" class="rk " text-anchor="start">bits/char</text>
+<text x="1210" y="1174" class="numm " text-anchor="end">0,6205 · TS-3M 0,610</text>
+<text x="840" y="1195" class="rk bold" text-anchor="start">4 head, 10k ppl</text>
+<text x="1210" y="1195" class="numm bold" text-anchor="end">7,22 · tek head 7,63</text>
+<text x="840" y="1216" class="rk " text-anchor="start">akrabalık 2R_UT EX</text>
+<text x="1210" y="1216" class="numm " text-anchor="end">ort 191,0 / 192</text>
 <rect x="60" y="1362" width="22" height="14" rx="3" class="learn"/>
 <text x="90" y="1373" class="bs" text-anchor="start">öğrenilen parametre</text>
 <rect x="254.8" y="1362" width="22" height="14" rx="3" class="op"/>
@@ -452,7 +461,7 @@ circle.unit{fill:none;stroke:var(--muted);stroke-width:1;stroke-dasharray:3 3}
 <path d="M1002.8,1369 L1032.8,1369" class="tied"/>
 <text x="1040.8" y="1373" class="bs" text-anchor="start">aynı PL (tied)</text></svg>
 <figcaption>Bir konumun yolu: token noktası PL'den başlar ve dört turda iki farklı Block'tan A B A B sırasıyla geçer. Her
-turda Canon son 4 konumu boyut başına karıştırır, attention bu karışımlara bakıp uzaktakini getirir, FactUnits konumu
+turda Canon son 4 konumu boyut başına karıştırır, 4 head'li attention bu karışımlara bakıp uzaktakini getirir, FactUnits konumu
 kendi içinde dönüştürür; her adım durumu α kadar hedefe yaklaştırıp küreye geri koyar. Son durum aynı PL noktalarıyla
 karşılaştırılıp sonraki token seçilir.</figcaption>
 </figure>

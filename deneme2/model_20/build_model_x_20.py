@@ -117,30 +117,32 @@ line([(SX, 426), (406, 426)], "st", "ahs")
 AX, AT, AR, AB = 170, 462, 784, 846
 rect(AX, AT, AR - AX, AB - AT, "panel", rx=8)
 text(AX + 16, AT + 22, "CausalAttention", "pt", "start")
-text(AX + 142, AT + 22, "nedensel · HEADS = 1: değer = x (V yok)", "bs", "start")
-line([(585, 432), (585, 496), (200, 496), (200, 744), (398, 744)], "xs", "ahc")
+text(AX + 142, AT + 22, "nedensel · 4 head × 96 boyut · her head kendi q, k, a ve değer dilimi", "bs", "start")
+line([(585, 432), (585, 496), (200, 496), (200, 744), (226, 744)], "xs", "ahc")
 text(596, 454, "x", "xl", "start")
 QY, KY = 512, 576
 for y, wn, lab in ((QY, "W_query · 384×384", "q_t"), (KY, "W_key · 384×384", "k_j")):
     line([(200, y + 18), (226, y + 18)], "xs", "ahc")
     box(228, y, 140, 36, "learn", wn, tcls="btm")
     line([(368, y + 18), (382, y + 18)])
-    box(384, y, 62, 36, "op", "norm", tcls="bt")
+    box(384, y, 62, 36, "op", "norm", "head başına", tcls="bt")
     line([(446, y + 18), (460, y + 18)])
     box(462, y, 76, 36, "rope", "RoPE", tcls="btr")
     text(546, y + 23, lab, "hl", "start")
 text(500, KY + 56, "konuma göre döndür", "ropes")
 text(500, KY + 70, "boy 1 kalır · 0 sayı", "ropes")
-box(598, 516, 180, 50, "op", "s_tj = 10,83 · ⟨q_t, k_j⟩", "cosine × sabit ölçek", tcls="btm")
+box(598, 516, 180, 50, "op", "s_tj = 10,83 · ⟨q_t, k_j⟩", "head başına · cosine × sabit ölçek", tcls="btm")
 line([(570, QY + 18), (596, 534)])
 line([(570, KY + 18), (596, 552)])
 box(598, 590, 180, 40, "op", "j > t  →  −∞", "nedensel maske", tcls="btm")
 line([(688, 566), (688, 588)])
-box(598, 652, 180, 44, "op", "a_tj = softmax_j", "(T × T) · satır toplamı 1", tcls="btm")
+box(598, 652, 180, 44, "op", "a_tj = softmax_j", "4 head × (T × T) · satır toplamı 1", tcls="btm")
 line([(688, 630), (688, 650)])
-box(400, 720, 370, 48, "op", "c_t = Σ_j a_tj · x_j", "getirilen: Canon'lu girdiler", tcls="btm")
+box(400, 720, 370, 48, "op", "c_t = [Σ_j a¹_tj v¹_j ; … ; Σ_j a⁴_tj v⁴_j]", "4 head yan yana · vʰ = W_value x'in h. dilimi", tcls="btm")
 line([(688, 696), (688, 718)])
-text(300, 736, "değer = x", "bs")
+box(228, 726, 150, 36, "learn", "W_value · 384×384", tcls="btm")
+text(303, 776, "satırlar birim, birim başlar", "bs")
+line([(378, 744), (398, 744)])
 box(480, 790, 210, 44, "learn", "W_context · 384×384", "sütunlar birim", tcls="btm")
 line([(585, 768), (585, 788)])
 
@@ -227,24 +229,25 @@ y = panel_rows(196, "Öğrenilen sayılar · TinyStories", [
     ("Block başına (A ve B ayrı)", "", "bold"),
     ("canon_weights · 4 × 384", "1.536", "canonk"),
     ("W_query, W_key · 384 × 384", "2 × 147.456"),
+    ("W_value · 384 × 384", "147.456"),
     ("W_context · 384 × 384", "147.456"),
     ("W_fact_in · 1536 × 384", "589.824"),
     ("fact_threshold · 1536", "1.536"),
     ("W_fact_out · 384 × 1536", "589.824"),
-    ("Block toplamı", "1.625.088"), None,
+    ("Block toplamı", "1.772.544"), None,
     ("α_A, α_F · 2 × 4 × 384", "3.072"),
-    ("toplam", "6.326.784", "bold"),
-    ("embedding dışı", "3.253.248")])
-text(RX, y + 2, "HEADS = 4: + W_value (2 × 147.456) → 6.621.696", "bs", "start")
+    ("toplam", "6.621.696", "bold"),
+    ("embedding dışı", "3.548.160")])
+text(RX, y + 2, "HEADS = 1 (W_value yok): 6.326.784 · OUTPUT_SKIP: + 384", "bs", "start")
 text(RX, y + 17, "akrabalıkta d 64 · 256 birim", "bs", "start")
 
-panel_rows(540, "Ayarlar", [
+panel_rows(566, "Ayarlar", [
     ("LAYERS · TURNS", "2 · 4 (A B A B)"), ("CANON", "True", "canonk"), ("NORMALIZED_UPDATE", "True · α 0,1'den"),
-    ("SPHERE_WEIGHTS", "True"), ("ROPE", "True", "ropek"), ("HEADS", "1 (4 denemede)"),
+    ("SPHERE_WEIGHTS", "True"), ("ROPE", "True", "ropek"), ("HEADS · OUTPUT_SKIP", "4 · False (denemede)"),
     ("D · FACT_UNITS", "384 · 1536"), ("STREAM_NORM · ANCHOR", "True · 1e-3")], valcls="numm")
 
 # yaklas + norm kutusu
-UY = 740
+UY = 766
 text(RX, UY, "Yaklaş + norm nasıl", "sect", "start")
 rect(RX, UY + 12, RW, 200, "updbox", rx=8)
 ccx, ccy, r = RX + 72, UY + 118, 52
@@ -271,11 +274,12 @@ for i, s in enumerate(["h, norm(u): kürede iki nokta", "h + α ⊙ (u − h): a
     text(tx, UY + 40 + i * 21, s, "rs", "start")
 
 # egitim ve sonuc
-panel_rows(990, "Eğitim ve sonuç (1 epok)", [
+panel_rows(1016, "Eğitim ve sonuç (1 epok, tek head)", [
     ("optimizer", "Muon + Adam"), ("lr (coherence)", "0,01 × ort(ρ) · son %20 iniş"),
     ("batch · 1 epok", "64 × 512 · 41.602 adım"), ("ağırlık ortalaması", "WEIGHT_EMA 0,999"), None,
     ("TinyStories valid ppl", "6,45 · ortalama 6,34", "bold"), ("accuracy", "0,618 · 0,621"),
-    ("bits/char", "0,6205 · TS-3M 0,610"), ("akrabalık 2R_UT EX", "ort 191,0 / 192")], valcls="numm")
+    ("bits/char", "0,6205 · TS-3M 0,610"), ("4 head, 10k ppl", "7,22 · tek head 7,63", "bold"),
+    ("akrabalık 2R_UT EX", "ort 191,0 / 192")], valcls="numm")
 
 # lejant
 LG = 1362
@@ -415,12 +419,12 @@ html = """<title>Model X2</title>
 <div class="wrap">
 <header>
 <h1>Model X2 · 2 × 2</h1>
-<span class="meta">model_20 · 2 katman × 2 tur · TinyStories ayarı (d 384) · kod aad455c · 28 Eylül 2026</span>
+<span class="meta">model_20 · 2 katman × 2 tur · 4 head · TinyStories ayarı (d 384) · kod 8cdc245 · 28 Eylül 2026</span>
 </header>
 <figure class="fig">
 %s
 <figcaption>Bir konumun yolu: token noktası PL'den başlar ve dört turda iki farklı Block'tan A B A B sırasıyla geçer. Her
-turda Canon son 4 konumu boyut başına karıştırır, attention bu karışımlara bakıp uzaktakini getirir, FactUnits konumu
+turda Canon son 4 konumu boyut başına karıştırır, 4 head'li attention bu karışımlara bakıp uzaktakini getirir, FactUnits konumu
 kendi içinde dönüştürür; her adım durumu α kadar hedefe yaklaştırıp küreye geri koyar. Son durum aynı PL noktalarıyla
 karşılaştırılıp sonraki token seçilir.</figcaption>
 </figure>
