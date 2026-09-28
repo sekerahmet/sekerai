@@ -1148,10 +1148,66 @@ def t_layers():
           TR.generate(plain, qs, 6) == TR.generate(plain, qs, 6, cached=False))
 
 
+def t_coherence():
+    """SCHEDULE "coherence": mini-batch'te adim iki yarida, birlestirilen gradyan tam batch'inki (ilk adim wsd ile ayni);
+    tam batch'te rho = 1 (lr sabit, sonda final_cooldown inisi); mini-batch'te c, rho, ortalama gecerli ve lr = LR x
+    ortalama; surdurme bit duzeyinde (ortalama optimizer'in grup kaydinda); lr_floor yoksa reddedilir."""
+    import copy
+    data = D.build()
+    sids, smask = EK.sequences(data)
+    nv = len(data["vocab"])
+
+    def batches(step):                                     # adimin fonksiyonu: 16 cumle
+        rows = torch.randperm(len(sids), generator=torch.Generator().manual_seed(1000 + step))[:16]
+        return sids[rows], smask[rows]
+
+    a, _ = TR.train_seq("shared", None, None, nv, steps=1, log_at=(), batches=batches, schedule="coherence")
+    b, _ = TR.train_seq("shared", None, None, nv, steps=1, log_at=(), batches=batches, schedule="wsd")
+    err = max(float((x - y).abs().max()) for x, y in zip(a.state_dict().values(), b.state_dict().values()))
+    c0 = a.coherence
+    check("coherence: ilk adim (ortalama 1) wsd ile ayni guncelleme -- iki yarinin birlesik gradyani = tam batch; "
+          "c, rho gecerli", err < 1e-4 and -1 <= c0["c"] <= 1 and 0 <= c0["rho"] <= 1 and c0["lr"] == TR.LR,
+          "fark %.1e  c %.3f rho %.3f" % (err, c0["c"], c0["rho"]))
+
+    lrs = {}
+    grab = lambda step, model, opt: lrs.setdefault(step, opt.param_groups[0]["lr"])
+    full, _ = TR.train_seq("shared", sids, smask, nv, steps=40, log_at=(), save_every=1, save=grab, schedule="coherence")
+    floor = TR.LR_FLOOR
+    want = {37: TR.LR, 38: TR.LR, 39: TR.LR * (floor + (1 - floor) * (1 - math.sqrt(0.5))), 40: TR.LR * floor}
+    check("coherence, tam batch: rho olculmez (= 1), lr sabit; son %5'te 1 - sqrt ile x LR_FLOOR'a",
+          all(abs(lrs[t] - v) < 1e-12 for t, v in want.items()) and all(lrs[t] == TR.LR for t in range(1, 38))
+          and not getattr(full, "coherence", None), str({t: round(lrs[t], 6) for t in (1, 37, 38, 39, 40)}))
+
+    lrs_m, means = {}, {}
+    grab_m = lambda step, model, opt: (lrs_m.setdefault(step, opt.param_groups[0]["lr"]),
+                                       means.setdefault(step, opt.param_groups[0]["coherence_mean"]))
+    mm, curve = TR.train_seq("shared", None, None, nv, steps=30, log_at=(0, 30), batches=batches, save_every=1, save=grab_m,
+                             schedule="coherence", coherence_window=5)
+    follows = all(abs(lrs_m[t] - TR.LR * min(max(means[t], floor), 1.0)) < 1e-12 for t in range(1, 28))
+    check("coherence, mini-batch: ortalama 1'den ayrilir, lr = LR x ortalama (alt sinir LR_FLOOR); kayip iner",
+          follows and 0 < means[27] < 1 and curve[-1]["nll"] < curve[0]["nll"],
+          "ortalama %.3f  lr %.5f  %.3f -> %.3f" % (means[27], lrs_m[27], curve[0]["nll"], curve[-1]["nll"]))
+
+    packs = {}
+    keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
+                                                                   optimizer=copy.deepcopy(opt.state_dict())))
+    kw = dict(batches=batches, schedule="coherence", coherence_window=3)
+    whole, _ = TR.train_seq("shared", None, None, nv, steps=8, log_at=(), save_every=2, save=keep, **kw)
+    res, _ = TR.train_seq("shared", None, None, nv, steps=8, log_at=(), checkpoint=packs[4], **kw)
+    try:
+        TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), lr_floor=None, schedule="coherence")
+        refused = False
+    except AssertionError:
+        refused = True
+    check("coherence: 4. adim paketinden surdurulen = kesintisiz, bit duzeyinde (ortalama pakette); lr_floor yoksa reddedilir",
+          all(torch.equal(x, y) for x, y in zip(whole.state_dict().values(), res.state_dict().values()))
+          and packs[4]["optimizer"]["param_groups"][0]["coherence_mean"] != 1.0 and refused)
+
+
 if __name__ == "__main__":
     print("tests (model_20)")
     for f in (t_model, t_step2, t_step3, t_copy, t_transformer, t_generate_cached, t_normalized_update, t_canon,
-              t_layers):
+              t_layers, t_coherence):
         f()
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)

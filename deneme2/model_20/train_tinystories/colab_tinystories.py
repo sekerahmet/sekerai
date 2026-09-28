@@ -59,6 +59,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                   bucket=bucket,
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
                               optimizer=TR.OPTIMIZER, schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,
+                              coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,
                               copy_path=TR.COPY_PATH, stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
                               normalized_update=TR.NORMALIZED_UPDATE if setting in TR.STEP3 else False,
                               sphere_weights=TR.SPHERE_WEIGHTS if setting in TR.STEP3 else False,
@@ -74,7 +75,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         # 27 Eylul oncesi config'lerde optimizer / takvim / bucket yok: o kosular Adam + cosine, rastgele batch idi.
         # compile sonucu degistirir: karsilastirilir
         saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN,
-                          normalized_update=False, sphere_weights=False, canon=False, bucket=None), **saved)
+                          normalized_update=False, sphere_weights=False, canon=False, bucket=None,
+                          coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN), **saved)
         if setting in TR.STEP3 and saved.get("model_kw"):   # 28 Eylul oncesi model_kw'de layers yok: tek Block idi
             saved["model_kw"] = dict(dict(layers=1), **saved["model_kw"])
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
@@ -108,6 +110,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
             run["params"] = sum(p.numel() for p in model.parameters() if p.requires_grad)
             note("parametre %d  |  %s" % (run["params"], json.dumps(model_kw)))
         e = dict(step=step, epoch=round(step / per_epoch, 4), train_nll=nll, **ET.exam(model, data, rows))
+        if getattr(model, "coherence", None):         # schedule coherence: son adimin olcumu (c, rho, ortalama, lr)
+            e.update(coherence=dict(model.coherence))
         written = ET.texts(model, data, probes, PROBE_TOKENS)
         e.update(ET.loop_check([w["ids"] for w in written]), texts=[w["model"] for w in written],
                  secs=round(time.time() - run["t0"], 1))
@@ -116,7 +120,9 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         note("adim %6d  epok %.3f  nll %.3f | val nll %.3f ppl %.2f acc %.4f (%.3f/%.3f/%.3f) eos %.2f | dongu %d/%d "
              "farkli4 %.2f  (%.0f sn)" % (step, e["epoch"], nll, e["nll"], e["ppl"], e["accuracy"], e["acc_0_64"],
                                           e["acc_64_256"], e["acc_256_512"], e["eos_ok"], e["loop"], len(probes),
-                                          e["distinct4"], e["secs"]))
+                                          e["distinct4"], e["secs"])
+             + (" | c %.3f rho %.3f ort %.3f lr %.5f" % tuple(e["coherence"][k] for k in ("c", "rho", "mean", "lr"))
+                if "coherence" in e else ""))
         if run["stop"]:
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             raise Stopped()

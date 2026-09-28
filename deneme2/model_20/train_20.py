@@ -43,6 +43,12 @@ torch._inductor.config.triton.coalesce_tiling_analysis = False
 COMPILE_LOCK = threading.Lock()   # torch.compile iplikler arasi guvenli degil: bir kosu derlerken digerinin derlenmis
                                   # cagrisi "FX ile izleme" hatasi verdi (Colab, 27 Eylul); ileri hesap bu kilit altinda
 COOLDOWN = 0.2       # WSD'de inisin payi (son %20).  Hagele 2024: <= %20 yeter, 1 - sqrt dogrusaldan iyi
+# SCHEDULE "coherence" (kullanici, 28 Eylul: "modelden ölçtüğümiz bir bilgiye göre Lr bu olsun diyemiyor muyuz ?"): lr = LR x
+# rho, rho = adimin sinyal payi, batch'in iki yarisinin gradyanlarindan olculur (g1, g2; N >> B):
+#   rho = g1.g2 / (g1.g2 + |g1 - g2|^2 / 4)        (= 2c / (1 + c), c = cos(g1, g2), esit boylarda)
+# kurede adim = aci: theta = LR x 0,2 x sqrt(d) x rho.  Tam batch'te (ids verilmis) gurultu yok: rho = 1, olculmez.
+COHERENCE_WINDOW = 200   # rho'nun hareketli ortalamasi (adim); tek adimin olcumu gurultulu
+FINAL_COOLDOWN = 0.05    # coherence'ta sondaki inisin payi: 1 - sqrt ile o anki lr'den x LR_FLOOR'a (titresimi sondurur)
 
 
 class Muon(torch.optim.Optimizer):
@@ -138,7 +144,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
               weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None, compile=True, copy_path=COPY_PATH,
               save_every=None, save=None, checkpoint=None, stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=None,
               batches=None, model_kw=None, optimizer=OPTIMIZER, schedule=SCHEDULE, cooldown=COOLDOWN,
-              normalized_update=None, sphere_weights=None, canon=None):
+              normalized_update=None, sphere_weights=None, canon=None, coherence_window=COHERENCE_WINDOW,
+              final_cooldown=FINAL_COOLDOWN):
     """Standart tarif (27 Eylul'den): Muon (gizli matrisler) + Adam, WSD takvimi (lr sabit, son cooldown kisminda
     1 - sqrt ile LR x lr_floor'a), gradient clipping.  optimizer="adam", schedule="cosine": 27 Eylul'e kadarki tarif.
     lr_floor=None, grad_clip=None: en eski tarif (sabit lr).  weight_decay > 0: AdamW, yalniz W_ matrisleri (yalniz adam).
@@ -155,13 +162,17 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     batches(step) -> (ids, mask): buyuk veri icin her adimda bir parca (mini-batch); verilirse ids, mask kullanilmaz (None
     olabilir).  Adimin fonksiyonu olmali (surdurmede ayni parca gelsin).  Sekil adimdan adima degisebilir (bucket):
     compile ikinci sekilde dinamik sekilli tek grafige gecer.
-    model_kw: modele gecen ayarlar (BlockModel: d, turns, units, t_max ...; transformer: d, layers, heads, units)."""
+    model_kw: modele gecen ayarlar (BlockModel: d, turns, units, t_max ...; transformer: d, layers, heads, units).
+    schedule="coherence": lr = lr x ortalama(rho) (COHERENCE_WINDOW), alt sinir lr_floor; son final_cooldown kisminda
+    1 - sqrt ile x lr_floor'a.  Mini-batch'te adim iki yarida hesaplanir (satirlar tek / cift), birlestirilen gradyan tam
+    batch'inkiyle ayni; ortalama optimizer'in grup kaydinda (checkpoint'e girer).  model.coherence: son olcum (okuma)."""
     assert batches is not None or ids is not None, "ids/mask ya da batches verilmeli"
     assert setting in STEP3 or not copy_path, "copy_path yalniz Adim 3 (BlockModel) icin"
     assert setting in STEP3 or stream_norm, "stream_norm=False yalniz Adim 3 (BlockModel) icin"
     assert setting in STEP3 or not layer_norm, "layer_norm yalniz Adim 3 (BlockModel) icin"
     assert not setting.startswith("transformer") or not weight_decay, "transformer icin weight decay gruplari tanimli degil"
-    assert optimizer in ("muon", "adam") and schedule in ("wsd", "cosine") and 0 < cooldown <= 1
+    assert optimizer in ("muon", "adam") and schedule in ("wsd", "cosine", "coherence") and 0 < cooldown <= 1
+    assert schedule != "coherence" or (lr_floor is not None and 0 < final_cooldown <= 1 and coherence_window >= 1)
     assert optimizer == "adam" or not weight_decay, "weight_decay yalniz optimizer='adam' ile (AdamW)"
     if normalized_update is None:                          # Model X'in varsayilani; transformer ve Adim 1-2'de yok
         normalized_update = NORMALIZED_UPDATE if setting in STEP3 else False
@@ -213,12 +224,27 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
         compile = False
     loss_fn = torch.compile(model.loss) if compile else model.loss
     start = round((1 - cooldown) * steps)                  # WSD: inis bu adimda baslar
+    final = round((1 - final_cooldown) * steps)            # coherence: son inis bu adimda baslar
+    split = schedule == "coherence" and batches is not None  # tam batch'te gurultu yok: rho = 1, olculmez
+    for group in opt.param_groups:                         # coherence durumu: surdurmede optimizer'la birlikte gelir
+        group.setdefault("coherence_mean", 1.0)
+        group.setdefault("coherence_frozen", None)
     curve = []
     for step in range(first, steps + 1):
         resumed_here = checkpoint is not None and step == first
         if lr_floor is not None:
             if schedule == "cosine":                       # lr_t = lr · (floor + (1 - floor) · (1 + cos(π t / T)) / 2)
                 factor = lr_floor + (1 - lr_floor) * 0.5 * (1 + math.cos(math.pi * step / max(steps, 1)))
+            elif schedule == "coherence":                 # t < final: ortalama(rho);  sonra o deger · (floor + (1 - floor)(1 - sqrt(p)))
+                g0 = opt.param_groups[0]
+                if step < final:
+                    factor = min(max(g0["coherence_mean"], lr_floor), 1.0)
+                else:
+                    if g0["coherence_frozen"] is None:
+                        for group in opt.param_groups:
+                            group["coherence_frozen"] = min(max(g0["coherence_mean"], lr_floor), 1.0)
+                    factor = g0["coherence_frozen"] * (
+                        lr_floor + (1 - lr_floor) * (1 - math.sqrt((step - final) / max(steps - final, 1))))
             else:                                          # WSD: t < start: lr;  sonra lr · (floor + (1 - floor)(1 - sqrt(p)))
                 factor = 1.0 if step < start else (
                     lr_floor + (1 - lr_floor) * (1 - math.sqrt((step - start) / max(steps - start, 1))))
@@ -229,7 +255,12 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
         # attention hep math yolunda: torch 2.14'ten itibaren SDPA kendiliginden flash / mem-efficient'e gidiyor, onlarin
         # geri yayilimi deterministik degil (surdurme bit duzeyinde ayni kalmaz; hiz ajani, 27 Eylul)
         with COMPILE_LOCK if compile else contextlib.nullcontext(), sdpa_kernel([SDPBackend.MATH]):
-            total, nll = loss_fn(ids, mask)                # butun cumleler (ya da adimin parcasi), butun konumlar
+            if split:                                      # iki yari: satirlar tek / cift (uzunluk dagilimi benzer)
+                halves = [loss_fn(ids[h::2].contiguous(), mask[h::2].contiguous()) for h in (0, 1)]
+                weights = [mask[h::2, 1:].sum() for h in (0, 1)]     # kayip hedef token ortalamasi: token sayisiyla
+                nll = sum(w * hn for w, (_, hn) in zip(weights, halves)) / sum(weights)
+            else:
+                total, nll = loss_fn(ids, mask)            # butun cumleler (ya da adimin parcasi), butun konumlar
         if step in log_at:
             curve.append(dict(step=step, nll=nll.item(), dev=deviation(model).clone() if hasattr(model, "tokens") else None,
                               W_context=(sum(b.attention.W_context.norm().item() for b in model.blocks)
@@ -248,8 +279,37 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
         if step == steps:
             break
         opt.zero_grad()                                    # onceki adimin gradyanlarini sil
-        with sdpa_kernel([SDPBackend.MATH]):
-            total.backward()                               # her ogrenilen sayi x icin ∂kayip/∂x (zincir kurali, otomatik)
+        if split:                                          # iki yarinin gradyani -> rho; toplam = tam batch'in gradyani
+            grads = []
+            for (half_total, _) in halves:
+                with sdpa_kernel([SDPBackend.MATH]):
+                    half_total.backward()
+                grads.append([None if p.grad is None else p.grad.detach().clone() for p in params])
+                opt.zero_grad()
+            dot, na, nb = 0.0, 0.0, 0.0
+            for (k, p), a, b in zip(named, *grads):
+                if a is None:
+                    continue
+                kind = k.split(".")[-1]
+                if sphere_weights and kind in ("W_query", "W_key", "W_fact_in"):     # kurede: yalniz teget kisim
+                    a, b = (v - (v * p.detach()).sum(1, keepdim=True) * p.detach() for v in (a, b))
+                elif sphere_weights and kind in ("W_context", "W_fact_out", "W_copy"):
+                    a, b = (v - (v * p.detach()).sum(0, keepdim=True) * p.detach() for v in (a, b))
+                dot += float((a * b).sum())
+                na += float((a * a).sum())
+                nb += float((b * b).sum())
+            diff = na + nb - 2 * dot                        # |g1 - g2|^2
+            rho = max(dot, 0.0) / (max(dot, 0.0) + diff / 4 + 1e-30)
+            w0, w1 = (float(w) for w in weights)
+            for p, a, b in zip(params, *grads):
+                p.grad = None if a is None else (w0 * a + w1 * b) / (w0 + w1)
+            for group in opt.param_groups:
+                group["coherence_mean"] += (rho - group["coherence_mean"]) / coherence_window
+            model.coherence = dict(c=dot / (na * nb + 1e-30) ** 0.5, rho=rho, mean=opt.param_groups[0]["coherence_mean"],
+                                   lr=opt.param_groups[0]["lr"])
+        else:
+            with sdpa_kernel([SDPBackend.MATH]):
+                total.backward()                           # her ogrenilen sayi x icin ∂kayip/∂x (zincir kurali, otomatik)
         if grad_clip is not None:                          # butun gradyanlarin toplam boyu > grad_clip ise olcekle indir
             torch.nn.utils.clip_grad_norm_(params, grad_clip)
         opt.step()                                         # Adam: x <- x - lr · m / (√v + eps); Muon: ortogonal adim
