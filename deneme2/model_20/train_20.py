@@ -7,6 +7,7 @@
     pad         id listeleri -> (ids, mask);  generate: acgozlu uretim
 """
 import contextlib
+import copy
 import math
 import threading
 
@@ -49,6 +50,8 @@ COOLDOWN = 0.2       # WSD'de inisin payi (son %20).  Hagele 2024: <= %20 yeter,
 # kurede adim = aci: theta = LR x 0,2 x sqrt(d) x rho.  Tam batch'te (ids verilmis) gurultu yok: rho = 1, olculmez.
 COHERENCE_WINDOW = 200   # rho'nun hareketli ortalamasi (adim); tek adimin olcumu gurultulu
 FINAL_COOLDOWN = 0.05    # coherence'ta sondaki inisin payi: 1 - sqrt ile o anki lr'den x LR_FLOOR'a (titresimi sondurur)
+WEIGHT_EMA = None        # agirliklarin hareketli ortalamasi (ornek 0,999; kullanici onayli ad, 28 Eylul): titresimi
+                         # siler; L(w) - L(ortalama) = o anki titresimin bedeli.  None = kapali
 
 
 class Muon(torch.optim.Optimizer):
@@ -145,7 +148,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
               save_every=None, save=None, checkpoint=None, stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=None,
               batches=None, model_kw=None, optimizer=OPTIMIZER, schedule=SCHEDULE, cooldown=COOLDOWN,
               normalized_update=None, sphere_weights=None, canon=None, coherence_window=COHERENCE_WINDOW,
-              final_cooldown=FINAL_COOLDOWN):
+              final_cooldown=FINAL_COOLDOWN, weight_ema=WEIGHT_EMA):
     """Standart tarif (27 Eylul'den): Muon (gizli matrisler) + Adam, WSD takvimi (lr sabit, son cooldown kisminda
     1 - sqrt ile LR x lr_floor'a), gradient clipping.  optimizer="adam", schedule="cosine": 27 Eylul'e kadarki tarif.
     lr_floor=None, grad_clip=None: en eski tarif (sabit lr).  weight_decay > 0: AdamW, yalniz W_ matrisleri (yalniz adam).
@@ -165,7 +168,9 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     model_kw: modele gecen ayarlar (BlockModel: d, turns, units, t_max ...; transformer: d, layers, heads, units).
     schedule="coherence": lr = lr x ortalama(rho) (COHERENCE_WINDOW), alt sinir lr_floor; son final_cooldown kisminda
     1 - sqrt ile x lr_floor'a.  Mini-batch'te adim iki yarida hesaplanir (satirlar tek / cift), birlestirilen gradyan tam
-    batch'inkiyle ayni; ortalama optimizer'in grup kaydinda (checkpoint'e girer).  model.coherence: son olcum (okuma)."""
+    batch'inkiyle ayni; ortalama optimizer'in grup kaydinda (checkpoint'e girer).  model.coherence: son olcum (okuma).
+    weight_ema=d: her adimdan sonra ortalama <- d x ortalama + (1 - d) x agirlik (kurede satirlar yeniden birim);
+    model.weight_ema = dict(model=<ortalama model>, decay=d).  Ortalama optimizer durumunda (checkpoint'e girer)."""
     assert batches is not None or ids is not None, "ids/mask ya da batches verilmeli"
     assert setting in STEP3 or not copy_path, "copy_path yalniz Adim 3 (BlockModel) icin"
     assert setting in STEP3 or stream_norm, "stream_norm=False yalniz Adim 3 (BlockModel) icin"
@@ -173,6 +178,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     assert not setting.startswith("transformer") or not weight_decay, "transformer icin weight decay gruplari tanimli degil"
     assert optimizer in ("muon", "adam") and schedule in ("wsd", "cosine", "coherence") and 0 < cooldown <= 1
     assert schedule != "coherence" or (lr_floor is not None and 0 < final_cooldown <= 1 and coherence_window >= 1)
+    assert weight_ema is None or 0 < weight_ema < 1, "weight_ema: 0 ile 1 arasi (ornek 0,999) ya da None"
     assert optimizer == "adam" or not weight_decay, "weight_decay yalniz optimizer='adam' ile (AdamW)"
     if normalized_update is None:                          # Model X'in varsayilani; transformer ve Adim 1-2'de yok
         normalized_update = NORMALIZED_UPDATE if setting in STEP3 else False
@@ -226,6 +232,13 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     start = round((1 - cooldown) * steps)                  # WSD: inis bu adimda baslar
     final = round((1 - final_cooldown) * steps)            # coherence: son inis bu adimda baslar
     split = schedule == "coherence" and batches is not None  # tam batch'te gurultu yok: rho = 1, olculmez
+    ema = None
+    if weight_ema is not None:                             # ortalama model; surdurmede optimizer durumundan geri gelir
+        ema = copy.deepcopy(model).requires_grad_(False)
+        for pe, p in zip(ema.parameters(), model.parameters()):
+            if "weight_ema" in opt.state.get(p, {}):
+                pe.data = opt.state[p]["weight_ema"]
+        model.weight_ema = dict(model=ema, decay=weight_ema)
     for group in opt.param_groups:                         # coherence durumu: surdurmede optimizer'la birlikte gelir
         group.setdefault("coherence_mean", 1.0)
         group.setdefault("coherence_frozen", None)
@@ -315,6 +328,15 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
         opt.step()                                         # Adam: x <- x - lr · m / (√v + eps); Muon: ortogonal adim
         if sphere_weights:                                 # kusur 2: agirlik kureye geri; adim boyunu yalniz lr belirler
             model.normalize_weights()
+        if ema is not None:                                # ortalama <- d x ortalama + (1 - d) x agirlik
+            with torch.no_grad():
+                for pe, p in zip(ema.parameters(), model.parameters()):
+                    pe.mul_(weight_ema).add_(p.detach(), alpha=1 - weight_ema)
+                    state = opt.state.get(p)
+                    if state and "weight_ema" not in state:   # optimizer durumuna bagla: checkpoint'e girer
+                        state["weight_ema"] = pe.data
+                if sphere_weights:
+                    ema.normalize_weights()
     return model, curve
 
 

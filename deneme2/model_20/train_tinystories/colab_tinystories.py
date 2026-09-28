@@ -60,6 +60,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
                               optimizer=TR.OPTIMIZER, schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,
                               coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,
+                              weight_ema=TR.WEIGHT_EMA,
                               copy_path=TR.COPY_PATH, stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
                               normalized_update=TR.NORMALIZED_UPDATE if setting in TR.STEP3 else False,
                               sphere_weights=TR.SPHERE_WEIGHTS if setting in TR.STEP3 else False,
@@ -76,7 +77,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         # compile sonucu degistirir: karsilastirilir
         saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN,
                           normalized_update=False, sphere_weights=False, canon=False, bucket=None,
-                          coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN), **saved)
+                          coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,
+                          weight_ema=TR.WEIGHT_EMA), **saved)
         if setting in TR.STEP3 and saved.get("model_kw"):   # 28 Eylul oncesi model_kw'de layers yok: tek Block idi
             saved["model_kw"] = dict(dict(layers=1), **saved["model_kw"])
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
@@ -112,6 +114,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         e = dict(step=step, epoch=round(step / per_epoch, 4), train_nll=nll, **ET.exam(model, data, rows))
         if getattr(model, "coherence", None):         # schedule coherence: son adimin olcumu (c, rho, ortalama, lr)
             e.update(coherence=dict(model.coherence))
+        if getattr(model, "weight_ema", None):        # ortalama model: ayni sinav; fark = titresimin bedeli
+            e.update(weight_ema=ET.exam(model.weight_ema["model"], data, rows))
         written = ET.texts(model, data, probes, PROBE_TOKENS)
         e.update(ET.loop_check([w["ids"] for w in written]), texts=[w["model"] for w in written],
                  secs=round(time.time() - run["t0"], 1))
@@ -122,7 +126,9 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                                           e["acc_64_256"], e["acc_256_512"], e["eos_ok"], e["loop"], len(probes),
                                           e["distinct4"], e["secs"])
              + (" | c %.3f rho %.3f ort %.3f lr %.5f" % tuple(e["coherence"][k] for k in ("c", "rho", "mean", "lr"))
-                if "coherence" in e else ""))
+                if "coherence" in e else "")
+             + (" | ema ppl %.2f (fark %.3f nat)" % (e["weight_ema"]["ppl"], e["nll"] - e["weight_ema"]["nll"])
+                if "weight_ema" in e else ""))
         if run["stop"]:
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             raise Stopped()
@@ -149,6 +155,14 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
             halves, reals = ET.story_prompts(data, rows[:FINAL_STORIES])
             final["stories"] = ET.texts(model, data, halves, FINAL_TOKENS, reals=reals)
             final["loops"] = ET.loop_check([w["ids"] for w in final["prompts"]])
+            if getattr(model, "weight_ema", None):    # ortalama model de ayni son sinavdan gecer
+                em = model.weight_ema["model"]
+                torch.save(em.state_dict(), os.path.join(out, "model_weight_ema.pt"))
+                final["weight_ema"] = dict(valid=ET.exam(em, data, ET.exam_rows(data, None)), subset=ET.exam(em, data, rows),
+                                           prompts=ET.texts(em, data, [[eos] + DT.encode(p, vocab) for p in ET.PROMPTS],
+                                                            FINAL_TOKENS),
+                                           stories=ET.texts(em, data, halves, FINAL_TOKENS, reals=reals))
+                final["weight_ema"]["loops"] = ET.loop_check([w["ids"] for w in final["weight_ema"]["prompts"]])
             json.dump(final, open(os.path.join(out, "final.json"), "w", encoding="utf-8"), indent=1, ensure_ascii=False)
             for k in ("valid", "subset"):
                 v = final[k]
@@ -157,6 +171,10 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                     v["eos_ok"], v["acc_ar"]))
             note("SON istemler: dongu %d/%d  farkli4 %.2f" % (final["loops"]["loop"], len(ET.PROMPTS),
                                                             final["loops"]["distinct4"]))
+            if "weight_ema" in final:
+                w_ = final["weight_ema"]
+                note("SON ortalama model: valid ppl %.2f acc %.4f | subset ppl %.2f | dongu %d/%d" % (
+                    w_["valid"]["ppl"], w_["valid"]["accuracy"], w_["subset"]["ppl"], w_["loops"]["loop"], len(ET.PROMPTS)))
             run["done"] = True
             note("BITTI  %.0f sn" % (time.time() - run["t0"]))
         except Stopped:

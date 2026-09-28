@@ -1204,10 +1204,55 @@ def t_coherence():
           and packs[4]["optimizer"]["param_groups"][0]["coherence_mean"] != 1.0 and refused)
 
 
+def t_weight_ema():
+    """WEIGHT_EMA: ortalama <- d x ortalama + (1 - d) x agirlik, kurede satir / sutunlar yeniden birim; surdurme (ortalama
+    optimizer durumunda) bit duzeyinde; gecersiz d reddedilir."""
+    import copy
+    import torch.nn.functional as F
+    data = D.build()
+    sids, smask = EK.sequences(data)
+    nv = len(data["vocab"])
+
+    start, _ = TR.train_seq("shared", sids, smask, nv, steps=0, log_at=())
+    one, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=(), weight_ema=0.5)
+    em = one.weight_ema["model"]
+    b0, b1, be = start.blocks[0], one.blocks[0], em.blocks[0]
+    with torch.no_grad():
+        q = F.normalize(0.5 * b0.attention.W_query + 0.5 * b1.attention.W_query, dim=1)
+        ctx = F.normalize(0.5 * b0.attention.W_context + 0.5 * b1.attention.W_context, dim=0)
+        sh = 0.5 * start.tokens.shift + 0.5 * one.tokens.shift
+    err = max(float((q - be.attention.W_query).abs().max()), float((ctx - be.attention.W_context).abs().max()),
+              float((sh - em.tokens.shift).abs().max()))
+    check("weight_ema: bir adim sonra ortalama = norm(d x baslangic + (1 - d) x agirlik) (satirlar W_query, sutunlar "
+          "W_context; shift normalizesiz); ortalama model agirliktan farkli", err < 1e-6
+          and not torch.equal(be.attention.W_query, b1.attention.W_query), "fark %.1e" % err)
+
+    def batches(step):
+        rows = torch.randperm(len(sids), generator=torch.Generator().manual_seed(2000 + step))[:16]
+        return sids[rows], smask[rows]
+    packs = {}
+    keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
+                                                                   optimizer=copy.deepcopy(opt.state_dict())))
+    kw = dict(batches=batches, schedule="coherence", weight_ema=0.9)
+    whole, _ = TR.train_seq("shared", None, None, nv, steps=8, log_at=(), save_every=2, save=keep, **kw)
+    res, _ = TR.train_seq("shared", None, None, nv, steps=8, log_at=(), checkpoint=packs[4], **kw)
+    same = lambda a, b: all(torch.equal(x, y) for x, y in zip(a.state_dict().values(), b.state_dict().values()))
+    unit = all(torch.allclose(b.attention.W_query.norm(dim=1), torch.ones(64), atol=1e-5)
+               for b in whole.weight_ema["model"].blocks)
+    try:
+        TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), weight_ema=1.5)
+        refused = False
+    except AssertionError:
+        refused = True
+    check("weight_ema: 4. adim paketinden surdurulen = kesintisiz, bit duzeyinde (model VE ortalama); ortalamanin satirlari "
+          "birim; d = 1,5 reddedilir",
+          same(whole, res) and same(whole.weight_ema["model"], res.weight_ema["model"]) and unit and refused)
+
+
 if __name__ == "__main__":
     print("tests (model_20)")
     for f in (t_model, t_step2, t_step3, t_copy, t_transformer, t_generate_cached, t_normalized_update, t_canon,
-              t_layers, t_coherence):
+              t_layers, t_coherence, t_weight_ema):
         f()
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)
