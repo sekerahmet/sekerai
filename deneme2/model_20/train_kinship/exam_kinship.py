@@ -200,8 +200,9 @@ def report_step3(results, data):
     m0 = results["shared"][0]
     # kopru okumasi tur 1'in ara durumunu elle kuruyor; kopya yolu katkisini icermez
     assert not any(getattr(m, "copy_path", False) or not getattr(m, "stream_norm", True) or getattr(m, "layer_norm", False)
+                   or getattr(m, "canon", False) or getattr(m, "normalized_update", False) or getattr(m, "heads", 1) > 1
                    for m, _ in results.values()), \
-        "report_step3 kopya yolu kapali, akisi normalize edilen modeller icin"
+        "report_step3 kopru okumasi 28 Eylul oncesi tasarim icin (kopya yolu, Canon, alpha, cok head yok)"
     out = ["ADIM 3  veri iz %s  cumle %d  TURNS %d  FACT_UNITS %d  scale %.3f" % (
         data["fingerprint"], len(data["train"]), m0.turns, m0.blocks[0].facts.W_fact_in.shape[0], m0.scale), ""]
     out.append("ayar           " + "  ".join("%10s" % ("adim %d" % c["step"]) for c in results["step2"][1]))

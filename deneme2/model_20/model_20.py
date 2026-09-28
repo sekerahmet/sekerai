@@ -14,14 +14,16 @@ Adim 2: CausalAttention.  Her konum kendisi ve onceki konumlarin PL noktalarina 
 
 Adim 3: BlockModel.  Her konumun bir durumu var (hidden, h); TURNS tur boyunca Block uygulanir.
     h = PL                                              durum konumun noktasiyla baslar
-    her turda (Block):
-      c_t = sum_j a_tj h_j                              attention DURUMLARA bakar, durumlarin kendisini getirir
-      h_t = norm(h_t + W_context c_t)                   okunan duruma yazilir (W_context 0'dan)
-      h_t = norm(h_t + W_fact_out ReLU(W_fact_in h_t - fact_threshold))   FactUnits: iki bilgi birlikteyse yanar
-                                                        (W_fact_out 0'dan)
+    her turda (Block), varsayilan (Model X2, 2 x 2):
+      x_t = h_t + sum_{k=0..3} w_k h_(t-k)              Canon-A: attention'in girdisi (w 0'dan)
+      c_t = sum_j a_tj x_j                              attention DURUMLARA bakar (HEADS > 1: head basina W_value dilimi)
+      h_t = norm(h_t + a_A (norm(W_context c_t) - h_t))                 normalized_update: alpha kadar don
+      h_t = norm(h_t + a_F (norm(W_fact_out ReLU(W_fact_in sqrt(d) h_t - esik)) - h_t))   FactUnits
+      anahtarlar kapaliyken (28 Eylul oncesi): h_t = norm(h_t + W_context c_t), h_t = norm(h_t + FactUnits(h_t));
+      W_context ve W_fact_out 0'dan (paket acikken rastgele, birim sutun)
     cikis: skor = scale <h, PL>                         son durum dogrudan noktalarla karsilastirilir (W_next yok)
-    SHARED_BLOCK: ayni Block her turda (True) ya da her tura ayri Block (False)
-    LAYERS: paylasilan blokta farkli Block sayisi; tur i Block i mod LAYERS'i kullanir (2 katman x 2 tur: A B A B)
+    SHARED_BLOCK / LAYERS: turlar LAYERS farkli Block'u sirayla kullanir (2 katman x 2 tur: A B A B); SHARED_BLOCK=False:
+    her tura ayri Block
 
 Oneri A, COPY_PATH: attention ayni agirliklarla o konumlardaki kelimelerin kendisini de getirir, bir kapi yazilip
 yazilmayacagina karar verir.
@@ -51,10 +53,10 @@ ANCHOR = 1e-3        # PF'den uzaklasmanin bedeli (0 = serbest); 8 aileli data_2
 ATTENTION = True     # Adim 2: attention; False = Adim 1 (yalniz son token)
 T_MAX = 512          # baglam siniri (hedef); attention olcegi bundan: 512 konum arasindan 0,99 guvenle secebilsin
 TURNS = 4            # Adim 3: blok tur sayisi (kullanici karari: 2; 28 Eylul: 2 x 2 varsayilan -> 4)
-SHARED_BLOCK = True  # True: ayni Block her turda; False: her tura ayri Block (ayri katmanlar)
+SHARED_BLOCK = True  # True: turlar LAYERS Block'u sirayla paylasir; False: her tura ayri Block (ayri katmanlar)
 LAYERS = 2           # SHARED_BLOCK'ta farkli Block (katman) sayisi, turlar sirayla doner: tur i -> Block i mod LAYERS
                      # (kullanici, 28 Eylul: "2 tane paylaşımlı katman", sira ABAB, ad LAYERS).  Varsayilan 2 x 2 (kullanici,
-                     # 28 Eylul: "2X2 şu an varsayılan olsun"; TinyStories 1 epok ppl 7,95 / X2 9,73).  1 = tek Block (X2)
+                     # 28 Eylul: "2X2 şu an varsayılan olsun"; TinyStories 1 epok ppl 7,95 / X2 9,73).  1 = tek Block x TURNS tur
 FACT_UNITS = 256     # FactUnits birim sayisi; 4 x D (transformer aliskanligi), olculmedi
 COPY_PATH = False    # Oneri A: kopya yolu ve kapisi; False = bugunku model birebir (kullanici onayi, 27 Eylul)
 STREAM_NORM = True   # True: durum her eklemeden sonra kureye (bugunku).  False: akis normalize edilmez, yalniz attention'in
@@ -66,13 +68,14 @@ NORMALIZED_UPDATE = True    # h <- norm(h + alpha (norm(u) - h)), u blok ciktisi
                             # (|u| ~ 10-178, |h| = 1).  Varsayilan (kullanici, 28 Eylul: "evet ikisi de varsayılan olsun";
                             # akrabalik paket 188,3 / taban 178,5)
 ALPHA_INIT = 0.1            # alpha'nin baslangici: nGPT 2026 tarifi (derinlikten bagimsiz 0,1)
-SPHERE_WEIGHTS = True       # W_query, W_key, W_fact_in satirlari ve W_context, W_fact_out sutunlari baslangicta ve her
+SPHERE_WEIGHTS = True       # W_query, W_key, W_fact_in, W_value satirlari ve W_context, W_fact_out sutunlari basta ve her
                             # optimizer adimindan sonra birim boya (nGPT); FactUnits girdisi sqrt(d) x kosinus.  Kusur 2:
                             # agirliklar ~20 kat buyuyor, adim sonuyordu.  Varsayilan (kullanici, 28 Eylul)
 CANON = True         # Canon-A (Allen-Zhu 2025): attention girdisi x_t + sum_k w_k * x_(t-k), k = 0..3, w 0'dan.  Varsayilan:
                      # Model X2 = X1 + Canon (kullanici, 28 Eylul: "evet model X2 hayırlı olsun. Canon=True."; TinyStories
                      # "X1+C çok daha iyi görünüyor açık ara", akrabalik 191,0 / X1 188,3 ve cokussuz)
-HEADS = 1            # attention head sayisi (kullanici, 28 Eylul: "heads = 4 onaylıyorum"; olcum: uzak bakan tek head
+HEADS = 1            # attention head sayisi; varsayilan 1, 4 deneme degeri (kullanici, 28 Eylul: "heads = 4 onaylıyorum";
+                     # olcum: uzak bakan tek head
                      # sorgularin %76'sinda agirligini 2+ ayri bolgeye boluyor, ad hedeflerinin %31'inde iki adi birlikte
                      # getiriyor).  1 = tek head, V yok (bugunku model); H > 1: d H'ye bolunur, W_value (d x d, birim
                      # baslar) her head'in tasiyacagini secer
@@ -158,7 +161,7 @@ class BigramModel(torch.nn.Module):
 
     def logits(self, ids):
         P = self.tokens.points()
-        # skor_j = scale · <q, PL_j> = scale · Σ_a q_a · PL_ja      her token j icin (74 tane)
+        # skor_j = scale · <q, PL_j> = scale · Σ_a q_a · PL_ja      her token j icin (n tane)
         return self.scale * self.next(P[ids]) @ P.T
 
     def loss(self, inputs, targets):
@@ -169,12 +172,14 @@ class BigramModel(torch.nn.Module):
 
 
 class CausalAttention(torch.nn.Module):
-    """Nedensel tam attention; getirdigi sey girdinin kendisi (Adim 2: PL noktalari, Adim 3: durumlar).  W_context 0'dan."""
+    """Nedensel tam attention.  Tek head'de getirdigi sey girdinin kendisi (Adim 2: PL noktalari, Adim 3: durumlar);
+    HEADS > 1: head basina W_value x'in dilimi.  W_context 0'dan (paket acikken BlockModel rastgele baslatir)."""
 
     def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, seed=POINTS_SEED + 2, copy_path=False, rope=False,
                  heads=1):
         super().__init__()
         assert d % heads == 0 and (heads == 1 or not copy_path), "d head sayisina bolunmeli; kopya yolu yalniz tek head'de"
+        assert not rope or (d // heads) % 2 == 0, "RoPE icin head boyu cift olmali"
         g = torch.Generator().manual_seed(seed)
         self.rope, self.heads = rope, heads
         # W_query, W_key: d x d, rastgele / √d baslar, egitimle degisir.  PL'yi baska bir yone ceviren dogrusal donusum
@@ -198,6 +203,7 @@ class CausalAttention(torch.nn.Module):
         q, k = x @ self.W_query.T, x @ self.W_key.T
         if self.heads > 1:                                # (.., T, d) -> (.., H, T, d/H): her head kendi dilimini normlar
             q, k = (z.unflatten(-1, (self.heads, -1)).transpose(-3, -2) for z in (q, k))
+            positions = None if positions is None else positions[:, None]   # (B, 1, T): head ekseniyle hizali
         q, k = F.normalize(q, dim=-1), F.normalize(k, dim=-1)
         if self.rope:                                     # konuma gore dondur; boy 1 kalir
             q, k = apply_rope(q, positions), apply_rope(k, positions)
@@ -226,7 +232,8 @@ class CausalAttention(torch.nn.Module):
         return both[..., :x.shape[-1]], both[..., x.shape[-1]:]
 
     def weights(self, x):
-        """Okuma icin acik hesap: a (B, T, T) -- cok head'de (B, H, T, T) --, satir t yalniz j <= t."""
+        """Okuma icin acik hesap: a (B, T, T) -- cok head'de (B, H, T, T) --, satir t yalniz j <= t.  x attention'in
+        GERCEK girdisi olmali: Block'ta Canon karisimi (Block.forward'daki x), h degil."""
         q, k = self.queries_keys(x)
         s = self.scale * q @ k.transpose(-1, -2)                  # s_tj = scale · <q_t, k_j>
         T = x.shape[-2]
@@ -286,12 +293,12 @@ class SequenceModel(torch.nn.Module):
 
     def logits(self, ids):
         """ids (B, T) -> (B, T, n): konum t'de t+1'inci token."""
-        P = self.tokens.points()                          # PL, 74 x d
+        P = self.tokens.points()                          # PL, n x d
         x = P[ids]                                        # her konumun token'inin noktasi
         raw = x @ self.next.W_next.T                      # raw_t = W_next · PL_t
         if self.attention is not None:
             raw = raw + self.attention(x) @ self.attention.W_context.T   # raw_t = W_next · PL_t + W_context · c_t
-        # q_t = raw_t / |raw_t|;   skor_tj = scale · <q_t, PL_j>   (74 token)
+        # q_t = raw_t / |raw_t|;   skor_tj = scale · <q_t, PL_j>   (n token)
         return self.scale * F.normalize(raw, dim=-1) @ P.T
 
     def loss(self, ids, mask):
@@ -305,7 +312,8 @@ class SequenceModel(torch.nn.Module):
 
 class FactUnits(torch.nn.Module):
     """Adim 3 donusturme: her konumda ayri.  u = ReLU(W_fact_in · h - fact_threshold): birim, girdileri birlikte yeterince
-    guclu ise yanar (VE gibi); cikti W_fact_out · u duruma eklenir.  W_fact_out 0'dan: baslangicta etkisiz."""
+    guclu ise yanar (VE gibi); cikti W_fact_out · u duruma eklenir.  W_fact_out 0'dan: baslangicta etkisiz (paket acikken
+    BlockModel rastgele baslatir)."""
 
     def __init__(self, d=D, units=FACT_UNITS, seed=POINTS_SEED + 3):
         super().__init__()
@@ -376,6 +384,7 @@ class BlockModel(torch.nn.Module):
                  normalized_update=NORMALIZED_UPDATE, sphere_weights=SPHERE_WEIGHTS, canon=CANON, heads=HEADS):
         super().__init__()
         assert not normalized_update or (stream_norm and not layer_norm), "normalized_update akis normuyla (L2) calisir"
+        assert not (sphere_weights and layer_norm), "sphere_weights LayerNorm'la denenmedi: FactUnits girdisi sqrt(d) kat buyuk"
         self.tokens = TokenPoints(n, d, learn_points, anchor, 100 * seed)          # 100 * seed: BigramModel'deki gibi
         assert not shared or turns % layers == 0, "turns (%d) layers'in (%d) kati olmali: her Block esit sayida tur" % (
             turns, layers)                                # ayri blokta (shared=False) layers yok sayilir: her tura bir Block
@@ -386,7 +395,8 @@ class BlockModel(torch.nn.Module):
                                                 canon=canon, heads=heads)
                                           for i in range(count))
         self.turns, self.shared, self.copy_path, self.stream_norm = turns, shared, copy_path, stream_norm
-        self.layers, self.layer_norm, self.rope, self.heads = layers, layer_norm, rope, heads
+        self.layers = layers if shared else len(self.blocks)   # farkli Block sayisi (ayri blokta her tura bir)
+        self.layer_norm, self.rope, self.heads = layer_norm, rope, heads
         self.normalized_update, self.sphere_weights, self.canon = normalized_update, sphere_weights, canon
         if normalized_update or sphere_weights:           # sifir yon normalize edilemez: W_context, W_fact_out rastgele baslar
             g = torch.Generator().manual_seed(100 * seed + 9)
@@ -421,13 +431,14 @@ class BlockModel(torch.nn.Module):
 
     @torch.no_grad()
     def normalize_weights(self):
-        """sphere_weights: girdisi durum olan matrislerin satirlari (W_query, W_key, W_fact_in), duruma yazanlarin sutunlari
-        (W_context, W_copy, W_fact_out) birim boya; baslangicta ve her optimizer adimindan sonra (train_seq)."""
+        """sphere_weights: girdisi durum olan matrislerin satirlari (W_query, W_key, W_fact_in, W_value), duruma yazanlarin
+        sutunlari (W_context, W_fact_out) birim boya; baslangicta ve her optimizer adimindan sonra (train_seq)."""
         for b in self.blocks:
             at, f = b.attention, b.facts
             for w in (at.W_query, at.W_key, f.W_fact_in) + ((at.W_value,) if at.heads > 1 else ()):
                 w.copy_(F.normalize(w, dim=1))
-            for w in (at.W_context, f.W_fact_out) + ((at.W_copy,) if at.copy_path else ()):
+            for w in (at.W_context, f.W_fact_out):         # W_copy haric: 0'dan baslar, kapiyla eklenir (birim yapmak
+                                                           # ilk adimda tam guce cikariyordu; inceleme, 28 Eylul)
                 w.copy_(F.normalize(w, dim=0))
 
     def logits(self, ids, caches=None):

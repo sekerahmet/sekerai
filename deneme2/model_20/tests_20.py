@@ -1109,8 +1109,8 @@ def t_layers():
             refused.append(False)
         except AssertionError:
             refused.append(True)
-    check("layers: turns layers'in kati degilse reddedilir; ayri blokta layers yok sayilir (her tura bir Block)",
-          all(refused) and len(sep4.blocks) == sep4.turns)
+    check("layers: turns layers'in kati degilse reddedilir; ayri blokta layers yok sayilir (her tura bir Block, "
+          "model.layers = Block sayisi)", all(refused) and len(sep4.blocks) == sep4.turns == sep4.layers)
 
     opts = []
     grab = lambda step, model, opt: opts.append(opt)
@@ -1291,13 +1291,16 @@ def t_heads():
     with torch.no_grad():
         a_, b_ = m4.logits(ids), m4.logits(alt)
     refused = []
-    for kw in (dict(d=64, heads=5), dict(d=64, heads=4, copy_path=True)):
+    for make in (lambda: CausalAttention(64, heads=5), lambda: CausalAttention(64, heads=4, copy_path=True),
+                 lambda: CausalAttention(12, heads=4, rope=True),
+                 lambda: BlockModel(nv, layer_norm=True, stream_norm=False, normalized_update=False)):
         try:
-            CausalAttention(**kw)
+            make()
             refused.append(False)
         except AssertionError:
             refused.append(True)
-    check("heads: nedensel; W_value birim baslar (d x d); d head'e bolunmezse ve kopya yolunda reddedilir",
+    check("heads: nedensel; W_value birim baslar (d x d); reddedilir: d head'e bolunmezse, kopya yolunda, RoPE'de tek "
+          "sayili head boyu, sphere_weights + LayerNorm",
           torch.equal(a_[:, :5], b_[:, :5]) and not torch.equal(a_[:, 5:], b_[:, 5:])
           and all(torch.equal(b.attention.W_value, torch.eye(64)) for b in m4.blocks) and all(refused))
 
@@ -1313,12 +1316,18 @@ def t_heads():
                                                                    optimizer=copy.deepcopy(opt.state_dict())))
     full, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), save_every=2, save=keep, **kw)
     res, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs[4], **kw)
-    plain = BlockModel(nv, heads=4, canon=False)
     qs = [[1] + sids[i, 1:9].tolist() for i in range(6)]
+
+    def greedy(model, prompt, k):                           # elle acgozlu uretim: her adimda logits'in en buyugu
+        x = list(prompt)
+        with torch.no_grad():
+            for _ in range(k):
+                x.append(int(model.logits(torch.tensor([x]))[0, -1].argmax()))
+        return x[len(prompt):]
     check("heads: egitimde kayip iner, W_value Muon'da ve satirlari birim; surdurme bit duzeyinde; uretim (onbelleksiz) "
-          "calisir", curve[-1]["nll"] < curve[0]["nll"] and "W_value" in in_muon and unit
+          "elle acgozlu uretimle ayni", curve[-1]["nll"] < curve[0]["nll"] and "W_value" in in_muon and unit
           and all(torch.equal(a, b) for a, b in zip(full.state_dict().values(), res.state_dict().values()))
-          and TR.generate(plain, qs, 5) == TR.generate(plain, qs, 5, cached=False),
+          and TR.generate(trained, qs, 5) == [greedy(trained, q, 5) for q in qs],
           "%.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"]))
 
 
