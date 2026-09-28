@@ -8,7 +8,8 @@ kendi <eos>'unu yazinca durur.
   serbest                    istemsiz, bos sayfadan bir hikaye
   n=200                      en fazla kac token (varsayilan 200; istem + n <= 512)
   s=0.8                      sicaklik.  0 = hep en olasi token (sinavdaki acgozlu uretim)
-  p=0.9                      top-p: en olasi token'lardan toplami 0,9 olan kumeden sec (1 = kapali; s > 0 ister)
+  p=0.9                      top-p: en olasi token'lardan toplami 0,9 olan kumeden sec (varsayilan 0,9; 1 = kapali;
+                             yalniz s > 0'da isler -- kapaliyken uzun kuyruktan nadir kelimeler gelir)
   r=1.3                      tekrar cezasi: son 20 token'da gecenlerin puani 1,3'e bolunur (1 = kapali)
   yasak                      <bilinmeyen>/<dolgu> uretimi kapat (varsayilan) / ac
   model                      kosulari listele (en yeni once), hangisi yuklu
@@ -166,7 +167,8 @@ def main():
     loader = threading.Thread(target=_load, daemon=True)
     loader.start()
     ready = False
-    n, temp, top_p, penalty, banned = 200, 0.0, 1.0, 1.0, True
+    # top-p 0,9: s = 0,8'de kapaliyken kelime salatasi ("a green toot"), aciksa tutarli (kullanici denemesi, 28 Eylul)
+    n, temp, top_p, penalty, banned = 200, 0.0, 0.9, 1.0, True
     while True:
         try:
             g = input("> ").strip()
