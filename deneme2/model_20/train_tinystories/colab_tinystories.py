@@ -45,7 +45,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
     if setting in TR.STEP3:
-        model_kw = dict(dict(d=M.D, turns=M.TURNS, units=M.FACT_UNITS, t_max=M.T_MAX, anchor=M.ANCHOR), **(model_kw or {}))
+        model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, units=M.FACT_UNITS, t_max=M.T_MAX, anchor=M.ANCHOR),
+                        **(model_kw or {}))
     per_epoch = len(data["train_start"]) // batch_size
     assert per_epoch > 0, "batch_size (%d) > train penceresi (%d)" % (batch_size, len(data["train_start"]))
     rows = ET.exam_rows(data)
@@ -74,6 +75,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         # compile sonucu degistirir: karsilastirilir
         saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN,
                           normalized_update=False, sphere_weights=False, canon=False, bucket=None), **saved)
+        if setting in TR.STEP3 and saved.get("model_kw"):   # 28 Eylul oncesi model_kw'de layers yok: tek Block idi
+            saved["model_kw"] = dict(dict(layers=1), **saved["model_kw"])
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)

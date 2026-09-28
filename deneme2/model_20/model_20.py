@@ -50,10 +50,11 @@ ANCHOR = 1e-3        # PF'den uzaklasmanin bedeli (0 = serbest); 8 aileli data_2
                      # kayip <= tavan + 0,01.  32 ailede (27 Eylul) yeniden olculmedi
 ATTENTION = True     # Adim 2: attention; False = Adim 1 (yalniz son token)
 T_MAX = 512          # baglam siniri (hedef); attention olcegi bundan: 512 konum arasindan 0,99 guvenle secebilsin
-TURNS = 2            # Adim 3: blok tur sayisi (kullanici karari: 2)
+TURNS = 4            # Adim 3: blok tur sayisi (kullanici karari: 2; 28 Eylul: 2 x 2 varsayilan -> 4)
 SHARED_BLOCK = True  # True: ayni Block her turda; False: her tura ayri Block (ayri katmanlar)
-LAYERS = 1           # SHARED_BLOCK'ta farkli Block (katman) sayisi, turlar sirayla doner: tur i -> Block i mod LAYERS
-                     # (kullanici, 28 Eylul: "2 tane paylaşımlı katman", sira ABAB, ad LAYERS).  1 = tek Block (Model X2)
+LAYERS = 2           # SHARED_BLOCK'ta farkli Block (katman) sayisi, turlar sirayla doner: tur i -> Block i mod LAYERS
+                     # (kullanici, 28 Eylul: "2 tane paylaşımlı katman", sira ABAB, ad LAYERS).  Varsayilan 2 x 2 (kullanici,
+                     # 28 Eylul: "2X2 şu an varsayılan olsun"; TinyStories 1 epok ppl 7,95 / X2 9,73).  1 = tek Block (X2)
 FACT_UNITS = 256     # FactUnits birim sayisi; 4 x D (transformer aliskanligi), olculmedi
 COPY_PATH = False    # Oneri A: kopya yolu ve kapisi; False = bugunku model birebir (kullanici onayi, 27 Eylul)
 STREAM_NORM = True   # True: durum her eklemeden sonra kureye (bugunku).  False: akis normalize edilmez, yalniz attention'in
@@ -359,8 +360,8 @@ class BlockModel(torch.nn.Module):
         super().__init__()
         assert not normalized_update or (stream_norm and not layer_norm), "normalized_update akis normuyla (L2) calisir"
         self.tokens = TokenPoints(n, d, learn_points, anchor, 100 * seed)          # 100 * seed: BigramModel'deki gibi
-        assert shared or layers == 1, "layers yalniz paylasilan blokta (ayri blokta her tur zaten kendi Block'u)"
-        assert turns % layers == 0, "turns (%d) layers'in (%d) kati olmali: her Block esit sayida tur" % (turns, layers)
+        assert not shared or turns % layers == 0, "turns (%d) layers'in (%d) kati olmali: her Block esit sayida tur" % (
+            turns, layers)                                # ayri blokta (shared=False) layers yok sayilir: her tura bir Block
         count = layers if shared else turns
         self.blocks = torch.nn.ModuleList(Block(d, t_max, confidence, units, 100 * seed + 10 + 2 * i, copy_path=copy_path,
                                                 stream_norm=stream_norm, layer_norm=layer_norm, rope=rope,

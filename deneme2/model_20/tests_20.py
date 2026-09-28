@@ -280,9 +280,11 @@ def reference_blocks(m, ids):
 def t_step3():
     import functools
     import model_20
-    from model_20 import TURNS
-    # 28 Eylul oncesi tasarimin testleri: paket (normalized_update, sphere_weights) kapali; paket t_normalized_update'te
-    BlockModel = functools.partial(model_20.BlockModel, normalized_update=False, sphere_weights=False, canon=False)
+    TURNS = 2
+    # 28 Eylul oncesi tasarimin testleri: paket (normalized_update, sphere_weights) kapali, tek Block x 2 tur; paket
+    # t_normalized_update'te, 2 x 2 t_layers'ta
+    BlockModel = functools.partial(model_20.BlockModel, normalized_update=False, sphere_weights=False, canon=False, turns=2,
+                                   layers=1)
     n, d = 12, 6
     g = torch.Generator().manual_seed(9)
     ids = torch.randint(0, n, (3, 9), generator=g)
@@ -436,7 +438,7 @@ def t_step3():
           "surdurulen = kesintisiz; ids ve batches yoksa reddeder",
           same(whole, via) and same(full, resumed) and refused and curve_b[-1]["nll"] < curve_b[0]["nll"],
           "%.3f -> %.3f" % (curve_b[0]["nll"], curve_b[-1]["nll"]))
-    mk, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), model_kw=dict(d=32, turns=3, units=64))
+    mk, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), model_kw=dict(d=32, turns=3, layers=1, units=64))
     mt, _ = TR.train_seq("transformer", sids[:8], smask[:8], nv, steps=1, log_at=(), model_kw=dict(d=32, layers=1))
     check("train_seq, model_kw: ayarlar modele ulasir (BlockModel d 32, 3 tur, 64 birim; transformer d 32, 1 katman)",
           tuple(mk.blocks[0].attention.W_query.shape) == (32, 32) and mk.turns == 3 and len(mk.hidden(sids[:2])) == 4
@@ -499,8 +501,8 @@ def t_step3():
     finally:
         torch.optim.AdamW = real_adamw
     names = {id(p_): k.split(".")[-1] for k, p_ in mw.named_parameters()}
-    decayed = sorted(names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.1 for p_ in g_["params"])
-    kept = sorted(names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.0 for p_ in g_["params"])
+    decayed = sorted({names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.1 for p_ in g_["params"]})
+    kept = sorted({names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.0 for p_ in g_["params"]})
     check("weight decay: yalniz W_ matrislerine; shift ve fact_threshold haric",
           decayed == sorted(["W_query", "W_key", "W_context", "W_fact_in", "W_fact_out"])
           and kept == ["alpha_attention", "alpha_facts", "canon_weights", "fact_threshold", "shift"], "%s | %s" % (decayed, kept))
@@ -556,8 +558,8 @@ def t_step3():
         lrs[step] = opt.param_groups[0]["lr"]
     mm, curve_m = TR.train_seq("shared", sids, smask, nv, steps=10, log_at=(0, 10), save_every=1, save=grab)
     names_m = {id(p_): k.split(".")[-1] for k, p_ in mm.named_parameters()}
-    in_muon = sorted(names_m[id(p_)] for g_ in opts[0].param_groups if g_["use_muon"] for p_ in g_["params"])
-    in_adam = sorted(names_m[id(p_)] for g_ in opts[0].param_groups if not g_["use_muon"] for p_ in g_["params"])
+    in_muon = sorted({names_m[id(p_)] for g_ in opts[0].param_groups if g_["use_muon"] for p_ in g_["params"]})
+    in_adam = sorted({names_m[id(p_)] for g_ in opts[0].param_groups if not g_["use_muon"] for p_ in g_["params"]})
     wsd = [0.01 * (1.0 if t < 8 else TR.LR_FLOOR + (1 - TR.LR_FLOOR) * (1 - math.sqrt((t - 8) / 2))) for t in range(1, 11)]
     check("Muon + WSD (varsayilan): Muon'da W_context, W_fact_in, W_fact_out; Adam'da noktalar, esik, W_query, W_key; "
           "lr 8. adima kadar sabit, sonra 1 - sqrt ile LR x LR_FLOOR'a; kayip iner",
@@ -574,7 +576,7 @@ def t_step3():
     res_m, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs_m[4])
     ta, _ = TR.train_seq("transformer_novalue", sids[:8], smask[:8], nv, steps=1, log_at=(), save_every=1, save=grab)
     names_t = {id(p_): k for k, p_ in ta.named_parameters()}
-    t_muon = sorted(names_t[id(p_)] for g_ in opts[-1].param_groups if g_["use_muon"] for p_ in g_["params"])
+    t_muon = sorted({names_t[id(p_)] for g_ in opts[-1].param_groups if g_["use_muon"] for p_ in g_["params"]})
     try:
         TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), weight_decay=0.1)
         refused_wd = False
@@ -588,7 +590,7 @@ def t_step3():
 
     mc, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), copy_path=True, save_every=1, save=grab)
     names_c = {id(p_): k.split(".")[-1] for k, p_ in mc.named_parameters()}
-    c_muon = sorted(names_c[id(p_)] for g_ in opts[-1].param_groups if g_["use_muon"] for p_ in g_["params"])
+    c_muon = sorted({names_c[id(p_)] for g_ in opts[-1].param_groups if g_["use_muon"] for p_ in g_["params"]})
     packs_s = {}
     keep_s = lambda step, model, opt: packs_s.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
                                                                      optimizer=copy.deepcopy(opt.state_dict())))
@@ -614,7 +616,7 @@ def t_copy():
     import functools
     import model_20
     BlockModel = functools.partial(model_20.BlockModel, normalized_update=False, sphere_weights=False,
-                                   canon=False)   # 28 Eylul oncesi
+                                   canon=False, turns=2, layers=1)   # 28 Eylul oncesi
     n, d = 12, 6
     g = torch.Generator().manual_seed(11)
     ids = torch.randint(0, n, (3, 9), generator=g)
@@ -690,8 +692,8 @@ def t_copy():
     finally:
         torch.optim.AdamW = real_adamw
     names = {id(p_): k.split(".")[-1] for k, p_ in mw.named_parameters()}
-    decayed = sorted(names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.1 for p_ in g_["params"])
-    kept = sorted(names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.0 for p_ in g_["params"])
+    decayed = sorted({names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.1 for p_ in g_["params"]})
+    kept = sorted({names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.0 for p_ in g_["params"]})
     check("kopya yolu, weight decay: W_copy ve W_copy_gate'e uygulanir; copy_gate_bias haric",
           decayed == sorted(["W_query", "W_key", "W_context", "W_fact_in", "W_fact_out", "W_copy", "W_copy_gate"])
           and kept == ["alpha_attention", "alpha_facts", "canon_weights", "copy_gate_bias", "fact_threshold", "shift"],
@@ -916,10 +918,10 @@ def t_normalized_update():
     with torch.no_grad():
         P = F.normalize(m.tokens.fixed_points + m.tokens.shift, dim=-1)
         h = P[ids]
-        blk = m.blocks[0]
-        at, fu = blk.attention, blk.facts
         T = ids.shape[1]
         for i in range(m.turns):
+            blk = m.blocks[i % len(m.blocks)]                       # A B A B
+            at, fu = blk.attention, blk.facts
             q = apply_rope(F.normalize(h @ at.W_query.T, dim=-1))
             k = apply_rope(F.normalize(h @ at.W_key.T, dim=-1))
             s_ = at.scale * q @ k.transpose(-1, -2)
@@ -957,7 +959,7 @@ def t_normalized_update():
     trained, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), save_every=1, save=grab, **kw)
     tb = trained.blocks[0]
     names = {id(p_): k for k, p_ in trained.named_parameters()}
-    in_adam = sorted(names[id(p_)] for g_ in opts[-1].param_groups if not g_["use_muon"] for p_ in g_["params"])
+    in_adam = sorted({names[id(p_)] for g_ in opts[-1].param_groups if not g_["use_muon"] for p_ in g_["params"]})
     check("egitim (normalized_update + sphere_weights, Muon + WSD): kayip iner; 20 adimdan sonra satir / sutunlar birim; "
           "alpha Adam'da ve baslangictan ayrildi",
           curve[-1]["nll"] < curve[0]["nll"] and "alpha_attention" in in_adam and "alpha_facts" in in_adam
@@ -1075,15 +1077,15 @@ def t_layers():
     nv = len(data["vocab"])
     ids = sids[:6, :20]
 
-    base, one = BlockModel(nv), BlockModel(nv, layers=1)
+    base, explicit = BlockModel(nv), BlockModel(nv, layers=2, turns=4)
     with torch.no_grad():
-        same = torch.equal(base.logits(ids), one.logits(ids))
-    check("layers: layers=1 bugunku modelle bit duzeyinde ayni (ayni parametre adlari)",
-          same and list(base.state_dict()) == list(one.state_dict()))
+        same = torch.equal(base.logits(ids), explicit.logits(ids))
+    check("layers: varsayilan = 2 x 2 (layers=2, turns=4; kullanici, 28 Eylul), bit duzeyinde ayni",
+          same and list(base.state_dict()) == list(explicit.state_dict()) and len(base.blocks) == 2 and base.turns == 4)
 
     m = BlockModel(nv, layers=2, turns=4)
     tb = m.turn_blocks()
-    four = BlockModel(nv, turns=4)
+    four = BlockModel(nv, turns=4, layers=1)
     count = lambda mm: sum(p_.numel() for p_ in mm.parameters())
     per_block = sum(p_.numel() for p_ in m.blocks[0].parameters())
     check("layers: layers=2, turns=4 -> iki Block, sira A B A B; parametre = tek Block'lu 4 tur + bir Block; alpha (4, d)",
@@ -1100,13 +1102,15 @@ def t_layers():
           torch.equal(ha[1], hb[1]) and not torch.equal(ha[2], hb[2]))
 
     refused = []
-    for kw in (dict(layers=2, shared=False), dict(layers=2, turns=3)):
+    sep4 = BlockModel(nv, shared=False)                    # ayri blokta layers yok sayilir: her tura bir Block
+    for kw in (dict(layers=2, turns=3), dict(layers=3, turns=4)):
         try:
             BlockModel(nv, **kw)
             refused.append(False)
         except AssertionError:
             refused.append(True)
-    check("layers: ayri blokta layers > 1 ve turns layers'in kati degilse reddedilir", all(refused))
+    check("layers: turns layers'in kati degilse reddedilir; ayri blokta layers yok sayilir (her tura bir Block)",
+          all(refused) and len(sep4.blocks) == sep4.turns)
 
     opts = []
     grab = lambda step, model, opt: opts.append(opt)

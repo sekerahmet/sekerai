@@ -22,6 +22,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # model_20: model ve genel egitim
 
 import exam_kinship as EK  # noqa: E402
+import model_20 as M  # noqa: E402
 import train_20 as TR  # noqa: E402
 
 SHORT = ("1R_T",)                    # ilk token: tek adimli bilgi, egitimde yazili
@@ -48,6 +49,8 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
                               normalized_update=TR.NORMALIZED_UPDATE if setting in TR.STEP3 else False,
                               sphere_weights=TR.SPHERE_WEIGHTS if setting in TR.STEP3 else False,
                               canon=TR.CANON if setting in TR.STEP3 else False,
+                              turns=M.TURNS if setting in TR.STEP3 else None,
+                              layers=M.LAYERS if setting in TR.STEP3 else None,
                               rope=True if setting.startswith("transformer") else TR.ROPE if setting in TR.STEP3 else False),
                          **train_kw))
     checkpoint = None
@@ -57,8 +60,11 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
             raise RuntimeError("%s: surdurme paketi yok; bastan kosmak ayri karar (resume=False)" % out)
         saved = json.load(open(os.path.join(out, "config.json")))
         # 27 Eylul oncesi config'lerde optimizer / takvim yok: o kosular Adam + cosine idi.  compile sonucu degistirir: karsilastirilir
+        # 28 Eylul oncesi config'lerde turns / layers yok: Adim 3 modeli tek Block x 2 tur idi
         saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN,
-                          normalized_update=False, sphere_weights=False, canon=False), **saved)
+                          normalized_update=False, sphere_weights=False, canon=False,
+                          turns=2 if saved.get("setting") in TR.STEP3 else None,
+                          layers=1 if saved.get("setting") in TR.STEP3 else None), **saved)
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)
