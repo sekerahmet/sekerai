@@ -51,6 +51,7 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
                               canon=TR.CANON if setting in TR.STEP3 else False,
                               turns=M.TURNS if setting in TR.STEP3 else None,
                               layers=M.LAYERS if setting in TR.STEP3 else None,
+                              heads=M.HEADS if setting in TR.STEP3 else None,
                               rope=True if setting.startswith("transformer") else TR.ROPE if setting in TR.STEP3 else False),
                          **train_kw))
     checkpoint = None
@@ -64,7 +65,8 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
         saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN,
                           normalized_update=False, sphere_weights=False, canon=False,
                           turns=2 if saved.get("setting") in TR.STEP3 else None,
-                          layers=1 if saved.get("setting") in TR.STEP3 else None), **saved)
+                          layers=1 if saved.get("setting") in TR.STEP3 else None,
+                          heads=1 if saved.get("setting") in TR.STEP3 else None), **saved)
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)

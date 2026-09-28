@@ -1249,10 +1249,83 @@ def t_weight_ema():
           same(whole, res) and same(whole.weight_ema["model"], res.weight_ema["model"]) and unit and refused)
 
 
+def t_heads():
+    """HEADS: 1 = bugunku model (W_value yok); H > 1: head basina q, k birim + RoPE, V'nin dilimi, head'ler yan yana ->
+    bagimsiz hesapla ayni; nedensel; W_value birim baslar, kurede satirlari birim, Muon'da; egitim, surdurme; uretim."""
+    import copy
+    import torch.nn.functional as F
+    from model_20 import BlockModel, CausalAttention, apply_rope
+    data = D.build()
+    sids, smask = EK.sequences(data)
+    nv = len(data["vocab"])
+    ids = sids[:6, :20]
+
+    one, default = BlockModel(nv, heads=1), BlockModel(nv)
+    with torch.no_grad():
+        same = torch.equal(one.logits(ids), default.logits(ids))
+    check("heads: heads=1 varsayilanla bit duzeyinde ayni; W_value yok",
+          same and list(one.state_dict()) == list(default.state_dict())
+          and not any("W_value" in k for k in default.state_dict()))
+
+    g = torch.Generator().manual_seed(61)
+    at = CausalAttention(64, rope=True, heads=4).double()
+    with torch.no_grad():
+        for p_ in at.parameters():
+            p_.copy_(torch.randn(p_.shape, generator=g, dtype=torch.float64))
+        x = torch.randn(3, 20, 64, generator=g, dtype=torch.float64)
+        out, T, dh = at(x), 20, 16
+        parts = []
+        for h in range(4):                                  # head h: W_query / W_key / W_value'nun h. satir dilimi
+            sl = slice(h * dh, (h + 1) * dh)
+            q = apply_rope(F.normalize(x @ at.W_query[sl].T, dim=-1))
+            k = apply_rope(F.normalize(x @ at.W_key[sl].T, dim=-1))
+            s = (at.scale * q @ k.transpose(-1, -2)).masked_fill(torch.ones(T, T, dtype=torch.bool).triu(1), float("-inf"))
+            parts.append(torch.softmax(s, -1) @ (x @ at.W_value[sl].T))
+        err = float((out - torch.cat(parts, -1)).abs().max())
+    check("heads: 4 head'li attention = bagimsiz hesap (head basina q, k birim + RoPE, V dilimi, yan yana)", err < 1e-10,
+          "fark %.1e" % err)
+
+    m4 = BlockModel(nv, heads=4)
+    alt = ids.clone()
+    alt[:, 5] = (alt[:, 5] + 1) % nv
+    with torch.no_grad():
+        a_, b_ = m4.logits(ids), m4.logits(alt)
+    refused = []
+    for kw in (dict(d=64, heads=5), dict(d=64, heads=4, copy_path=True)):
+        try:
+            CausalAttention(**kw)
+            refused.append(False)
+        except AssertionError:
+            refused.append(True)
+    check("heads: nedensel; W_value birim baslar (d x d); d head'e bolunmezse ve kopya yolunda reddedilir",
+          torch.equal(a_[:, :5], b_[:, :5]) and not torch.equal(a_[:, 5:], b_[:, 5:])
+          and all(torch.equal(b.attention.W_value, torch.eye(64)) for b in m4.blocks) and all(refused))
+
+    opts = []
+    grab = lambda step, model, opt: opts.append(opt)
+    kw = dict(model_kw=dict(heads=4))
+    trained, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), save_every=1, save=grab, **kw)
+    names = {id(p_): k for k, p_ in trained.named_parameters()}
+    in_muon = {names[id(p_)].split(".")[-1] for g_ in opts[-1].param_groups if g_["use_muon"] for p_ in g_["params"]}
+    unit = all(torch.allclose(b.attention.W_value.norm(dim=1), torch.ones(64), atol=1e-5) for b in trained.blocks)
+    packs = {}
+    keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
+                                                                   optimizer=copy.deepcopy(opt.state_dict())))
+    full, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), save_every=2, save=keep, **kw)
+    res, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs[4], **kw)
+    plain = BlockModel(nv, heads=4, canon=False)
+    qs = [[1] + sids[i, 1:9].tolist() for i in range(6)]
+    check("heads: egitimde kayip iner, W_value Muon'da ve satirlari birim; surdurme bit duzeyinde; uretim (onbelleksiz) "
+          "calisir", curve[-1]["nll"] < curve[0]["nll"] and "W_value" in in_muon and unit
+          and all(torch.equal(a, b) for a, b in zip(full.state_dict().values(), res.state_dict().values()))
+          and TR.generate(plain, qs, 5) == TR.generate(plain, qs, 5, cached=False),
+          "%.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"]))
+
+
 if __name__ == "__main__":
     print("tests (model_20)")
     for f in (t_model, t_step2, t_step3, t_copy, t_transformer, t_generate_cached, t_normalized_update, t_canon,
-              t_layers, t_coherence, t_weight_ema):
+              t_layers, t_coherence, t_weight_ema, t_heads):
         f()
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)

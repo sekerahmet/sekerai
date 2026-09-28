@@ -54,7 +54,8 @@ def start(name, data, out, steps, seed=0, every=EVERY, device="cuda", compile=Tr
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
     if setting in TR.STEP3:
-        model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, units=M.FACT_UNITS, t_max=M.T_MAX), **(model_kw or {}))
+        model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, heads=M.HEADS, units=M.FACT_UNITS, t_max=M.T_MAX),
+                        **(model_kw or {}))
     elif setting.startswith("transformer"):
         model_kw = dict(dict(d=MT.D, layers=MT.LAYERS, heads=MT.HEADS, units=MT.FACT_UNITS), **(model_kw or {}))
     per = len(data["train"]) // batch_size
@@ -84,7 +85,7 @@ def start(name, data, out, steps, seed=0, every=EVERY, device="cuda", compile=Tr
         saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN,
                           normalized_update=False, sphere_weights=False, canon=False), **saved)
         if setting in TR.STEP3 and saved.get("model_kw"):   # 28 Eylul oncesi model_kw'de layers yok: tek Block idi
-            saved["model_kw"] = dict(dict(layers=1), **saved["model_kw"])
+            saved["model_kw"] = dict(dict(layers=1, heads=1), **saved["model_kw"])   # 28 Eylul oncesi: tek head
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)

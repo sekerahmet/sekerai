@@ -209,7 +209,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     if optimizer == "muon":
         # Muon yalniz gizli 2 boyutlu matrislerde ("VO + FFN" duzeni, Wang 2025); token noktalari, esikler, W_query, W_key,
         # bias ve norm katsayilari Adam'da
-        hidden = ("W_context", "W_copy", "W_fact_in", "W_fact_out", "W_value.weight", "W_out.weight", "W_mlp_in.weight",
+        hidden = ("W_context", "W_copy", "W_value", "W_fact_in", "W_fact_out", "W_value.weight", "W_out.weight",
+                  "W_mlp_in.weight",
                   "W_mlp_out.weight")
         opt = Muon([dict(params=[p for k, p in named if k.endswith(hidden)], use_muon=True),
                     dict(params=[p for k, p in named if not k.endswith(hidden)], use_muon=False)], lr=lr)
@@ -304,7 +305,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
                 if a is None:
                     continue
                 kind = k.split(".")[-1]
-                if sphere_weights and kind in ("W_query", "W_key", "W_fact_in"):     # kurede: yalniz teget kisim
+                if sphere_weights and kind in ("W_query", "W_key", "W_fact_in", "W_value"):   # kurede: yalniz teget
                     a, b = (v - (v * p.detach()).sum(1, keepdim=True) * p.detach() for v in (a, b))
                 elif sphere_weights and kind in ("W_context", "W_fact_out", "W_copy"):
                     a, b = (v - (v * p.detach()).sum(0, keepdim=True) * p.detach() for v in (a, b))
@@ -346,7 +347,7 @@ def generate(model, prompts, n, cached=True):
     cached (BlockModel): istem bir kez, sonra her token yalniz kendi konumunu hesaplar (AttentionCache); butun istemler
     tek batch'te (farkli uzunluk: sagdan dolgu, satir basina konum).  Degilse: ayni uzunluktaki istemler birlikte ve her
     token'da butun dizi yeniden hesaplanir (transformer; ayni token'lar, skorlar float yuvarlamasina kadar)."""
-    if cached and isinstance(model, BlockModel) and not model.canon:   # Canon: onbellek yok, tam yeniden hesap
+    if cached and isinstance(model, BlockModel) and not model.canon and model.heads == 1:   # Canon, cok head: tam hesap
         return generate_cached(model, prompts, n)
     device = next(model.parameters()).device
     out = [None] * len(prompts)

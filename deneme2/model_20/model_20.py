@@ -72,6 +72,10 @@ SPHERE_WEIGHTS = True       # W_query, W_key, W_fact_in satirlari ve W_context, 
 CANON = True         # Canon-A (Allen-Zhu 2025): attention girdisi x_t + sum_k w_k * x_(t-k), k = 0..3, w 0'dan.  Varsayilan:
                      # Model X2 = X1 + Canon (kullanici, 28 Eylul: "evet model X2 hayırlı olsun. Canon=True."; TinyStories
                      # "X1+C çok daha iyi görünüyor açık ara", akrabalik 191,0 / X1 188,3 ve cokussuz)
+HEADS = 1            # attention head sayisi (kullanici, 28 Eylul: "heads = 4 onaylıyorum"; olcum: uzak bakan tek head
+                     # sorgularin %76'sinda agirligini 2+ ayri bolgeye boluyor, ad hedeflerinin %31'inde iki adi birlikte
+                     # getiriyor).  1 = tek head, V yok (bugunku model); H > 1: d H'ye bolunur, W_value (d x d, birim
+                     # baslar) her head'in tasiyacagini secer
 ROPE = True          # attention'in q ve k'sina RoPE (konum bilgisi).  Varsayilanlar = Model X (C' + RoPE; kullanici, 27 Eylul:
                      # "Model X varsayilan model olsun" onayi); False = RoPE'suz C'
 
@@ -167,18 +171,22 @@ class BigramModel(torch.nn.Module):
 class CausalAttention(torch.nn.Module):
     """Nedensel tam attention; getirdigi sey girdinin kendisi (Adim 2: PL noktalari, Adim 3: durumlar).  W_context 0'dan."""
 
-    def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, seed=POINTS_SEED + 2, copy_path=False, rope=False):
+    def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, seed=POINTS_SEED + 2, copy_path=False, rope=False,
+                 heads=1):
         super().__init__()
+        assert d % heads == 0 and (heads == 1 or not copy_path), "d head sayisina bolunmeli; kopya yolu yalniz tek head'de"
         g = torch.Generator().manual_seed(seed)
-        self.rope = rope
+        self.rope, self.heads = rope, heads
         # W_query, W_key: d x d, rastgele / √d baslar, egitimle degisir.  PL'yi baska bir yone ceviren dogrusal donusum
         # (dondurur, gerer, sikistirir); ardindan norm geldigi icin yalniz yon kalir.
         self.W_query = torch.nn.Parameter(torch.randn(d, d, generator=g) / d ** 0.5)   # "ne ariyorum"
         self.W_key = torch.nn.Parameter(torch.randn(d, d, generator=g) / d ** 0.5)   # "bende ne var"
         self.W_context = torch.nn.Parameter(torch.zeros(d, d))                      # getirileni tahmine katar, 0'dan
         self.scale = scale_for(t_max, confidence)                                  # ln(0,99 · 511 / 0,01) = 10,83
-        # V (value) matrisi yok: W_context'ten once ikinci bir matris, arada dogrusal olmayan adim olmadigi icin
-        # W_context ile carpimi tek bir d x d matrise esit olurdu
+        # V (value) matrisi tek head'de yok: W_context'ten once ikinci bir matris, arada dogrusal olmayan adim olmadigi
+        # icin W_context ile carpimi tek bir d x d matrise esit olurdu.  Cok head'de her head'in tasiyacagini V secer
+        if heads > 1:                                     # birim baslar: ilk adimda head h durumun h. dilimini tasir
+            self.W_value = torch.nn.Parameter(torch.eye(d))
         self.copy_path = copy_path
         if copy_path:                                     # Oneri A; sifirlar uretecten sayi cekmez, diger baslangiclar ayni
             self.W_copy = torch.nn.Parameter(torch.zeros(d, d))                  # getirilen kelimeleri duruma yazar, 0'dan
@@ -187,7 +195,10 @@ class CausalAttention(torch.nn.Module):
 
     def queries_keys(self, x, positions=None):
         # q_t = W_query·PL_t / |W_query·PL_t|      k_j = W_key·PL_j / |W_key·PL_j|      (ara sonuc, saklanmaz)
-        q, k = F.normalize(x @ self.W_query.T, dim=-1), F.normalize(x @ self.W_key.T, dim=-1)
+        q, k = x @ self.W_query.T, x @ self.W_key.T
+        if self.heads > 1:                                # (.., T, d) -> (.., H, T, d/H): her head kendi dilimini normlar
+            q, k = (z.unflatten(-1, (self.heads, -1)).transpose(-3, -2) for z in (q, k))
+        q, k = F.normalize(q, dim=-1), F.normalize(k, dim=-1)
         if self.rope:                                     # konuma gore dondur; boy 1 kalir
             q, k = apply_rope(q, positions), apply_rope(k, positions)
         return q, k
@@ -196,8 +207,13 @@ class CausalAttention(torch.nn.Module):
         """x (B, T, d) PL ya da durum dizisi -> c (B, T, d).  points verilirse (Oneri A) ayni agirliklarla (c, c').
         cache (AttentionCache): onbellekli uretim; x yalniz yeni konumlar."""
         if cache is not None:
+            assert self.heads == 1, "onbellekli uretim yalniz tek head'de"
             return cache.attend(self, x, points)
         q, k = self.queries_keys(x)
+        if self.heads > 1:                                # c = [a_1 (V_1 x) ; ... ; a_H (V_H x)], head'ler yan yana
+            v = (x @ self.W_value.T).unflatten(-1, (self.heads, -1)).transpose(-3, -2)
+            c = F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=self.scale)
+            return c.transpose(-3, -2).flatten(-2)
         # scaled_dot_product_attention (SDPA) su hesabi yapar, weights() ile ayni:
         #   s_tj = scale · <q_t, k_j>                 her konum t, her konum j icin
         #   j > t ise s_tj = -∞                       is_causal: sonrakilere bakilmaz
@@ -210,7 +226,7 @@ class CausalAttention(torch.nn.Module):
         return both[..., :x.shape[-1]], both[..., x.shape[-1]:]
 
     def weights(self, x):
-        """Okuma icin acik hesap: a (B, T, T), satir t yalniz j <= t."""
+        """Okuma icin acik hesap: a (B, T, T) -- cok head'de (B, H, T, T) --, satir t yalniz j <= t."""
         q, k = self.queries_keys(x)
         s = self.scale * q @ k.transpose(-1, -2)                  # s_tj = scale · <q_t, k_j>
         T = x.shape[-2]
@@ -307,9 +323,10 @@ class Block(torch.nn.Module):
     """Adim 3 bir tur: attention durumlara bakar ve getirdigini duruma yazar; FactUnits durumu donusturur."""
 
     def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, units=FACT_UNITS, seed=POINTS_SEED + 2, copy_path=False,
-                 stream_norm=True, layer_norm=False, rope=False, normalized_update=False, sphere_weights=False, canon=False):
+                 stream_norm=True, layer_norm=False, rope=False, normalized_update=False, sphere_weights=False, canon=False,
+                 heads=1):
         super().__init__()
-        self.attention = CausalAttention(d, t_max, confidence, seed, copy_path=copy_path, rope=rope)
+        self.attention = CausalAttention(d, t_max, confidence, seed, copy_path=copy_path, rope=rope, heads=heads)
         self.facts = FactUnits(d, units, seed + 1)
         self.stream_norm, self.layer_norm = stream_norm, layer_norm
         self.normalized_update, self.sphere_weights, self.canon = normalized_update, sphere_weights, canon
@@ -356,7 +373,7 @@ class BlockModel(torch.nn.Module):
     def __init__(self, n, d=D, turns=TURNS, shared=SHARED_BLOCK, layers=LAYERS, learn_points=LEARN_POINTS,
                  anchor=ANCHOR, confidence=CONFIDENCE, t_max=T_MAX, units=FACT_UNITS, seed=POINTS_SEED,
                  copy_path=COPY_PATH, stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=ROPE,
-                 normalized_update=NORMALIZED_UPDATE, sphere_weights=SPHERE_WEIGHTS, canon=CANON):
+                 normalized_update=NORMALIZED_UPDATE, sphere_weights=SPHERE_WEIGHTS, canon=CANON, heads=HEADS):
         super().__init__()
         assert not normalized_update or (stream_norm and not layer_norm), "normalized_update akis normuyla (L2) calisir"
         self.tokens = TokenPoints(n, d, learn_points, anchor, 100 * seed)          # 100 * seed: BigramModel'deki gibi
@@ -366,10 +383,10 @@ class BlockModel(torch.nn.Module):
         self.blocks = torch.nn.ModuleList(Block(d, t_max, confidence, units, 100 * seed + 10 + 2 * i, copy_path=copy_path,
                                                 stream_norm=stream_norm, layer_norm=layer_norm, rope=rope,
                                                 normalized_update=normalized_update, sphere_weights=sphere_weights,
-                                                canon=canon)
+                                                canon=canon, heads=heads)
                                           for i in range(count))
         self.turns, self.shared, self.copy_path, self.stream_norm = turns, shared, copy_path, stream_norm
-        self.layers, self.layer_norm, self.rope = layers, layer_norm, rope
+        self.layers, self.layer_norm, self.rope, self.heads = layers, layer_norm, rope, heads
         self.normalized_update, self.sphere_weights, self.canon = normalized_update, sphere_weights, canon
         if normalized_update or sphere_weights:           # sifir yon normalize edilemez: W_context, W_fact_out rastgele baslar
             g = torch.Generator().manual_seed(100 * seed + 9)
@@ -408,7 +425,7 @@ class BlockModel(torch.nn.Module):
         (W_context, W_copy, W_fact_out) birim boya; baslangicta ve her optimizer adimindan sonra (train_seq)."""
         for b in self.blocks:
             at, f = b.attention, b.facts
-            for w in (at.W_query, at.W_key, f.W_fact_in):
+            for w in (at.W_query, at.W_key, f.W_fact_in) + ((at.W_value,) if at.heads > 1 else ()):
                 w.copy_(F.normalize(w, dim=1))
             for w in (at.W_context, f.W_fact_out) + ((at.W_copy,) if at.copy_path else ()):
                 w.copy_(F.normalize(w, dim=0))
