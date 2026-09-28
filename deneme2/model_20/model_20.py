@@ -21,6 +21,7 @@ Adim 3: BlockModel.  Her konumun bir durumu var (hidden, h); TURNS tur boyunca B
                                                         (W_fact_out 0'dan)
     cikis: skor = scale <h, PL>                         son durum dogrudan noktalarla karsilastirilir (W_next yok)
     SHARED_BLOCK: ayni Block her turda (True) ya da her tura ayri Block (False)
+    LAYERS: paylasilan blokta farkli Block sayisi; tur i Block i mod LAYERS'i kullanir (2 katman x 2 tur: A B A B)
 
 Oneri A, COPY_PATH: attention ayni agirliklarla o konumlardaki kelimelerin kendisini de getirir, bir kapi yazilip
 yazilmayacagina karar verir.
@@ -51,6 +52,8 @@ ATTENTION = True     # Adim 2: attention; False = Adim 1 (yalniz son token)
 T_MAX = 512          # baglam siniri (hedef); attention olcegi bundan: 512 konum arasindan 0,99 guvenle secebilsin
 TURNS = 2            # Adim 3: blok tur sayisi (kullanici karari: 2)
 SHARED_BLOCK = True  # True: ayni Block her turda; False: her tura ayri Block (ayri katmanlar)
+LAYERS = 1           # SHARED_BLOCK'ta farkli Block (katman) sayisi, turlar sirayla doner: tur i -> Block i mod LAYERS
+                     # (kullanici, 28 Eylul: "2 tane paylaşımlı katman", sira ABAB, ad LAYERS).  1 = tek Block (Model X2)
 FACT_UNITS = 256     # FactUnits birim sayisi; 4 x D (transformer aliskanligi), olculmedi
 COPY_PATH = False    # Oneri A: kopya yolu ve kapisi; False = bugunku model birebir (kullanici onayi, 27 Eylul)
 STREAM_NORM = True   # True: durum her eklemeden sonra kureye (bugunku).  False: akis normalize edilmez, yalniz attention'in
@@ -349,21 +352,23 @@ class BlockModel(torch.nn.Module):
     normalized_update ve sphere_weights kapaliyken (28 Eylul'e kadarki model) W_context = W_fact_out = 0 baslar, durum PL'de
     kalir: skor = scale <PL_t, PL>."""
 
-    def __init__(self, n, d=D, turns=TURNS, shared=SHARED_BLOCK, learn_points=LEARN_POINTS, anchor=ANCHOR,
-                 confidence=CONFIDENCE, t_max=T_MAX, units=FACT_UNITS, seed=POINTS_SEED, copy_path=COPY_PATH,
-                 stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=ROPE, normalized_update=NORMALIZED_UPDATE,
-                 sphere_weights=SPHERE_WEIGHTS, canon=CANON):
+    def __init__(self, n, d=D, turns=TURNS, shared=SHARED_BLOCK, layers=LAYERS, learn_points=LEARN_POINTS,
+                 anchor=ANCHOR, confidence=CONFIDENCE, t_max=T_MAX, units=FACT_UNITS, seed=POINTS_SEED,
+                 copy_path=COPY_PATH, stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=ROPE,
+                 normalized_update=NORMALIZED_UPDATE, sphere_weights=SPHERE_WEIGHTS, canon=CANON):
         super().__init__()
         assert not normalized_update or (stream_norm and not layer_norm), "normalized_update akis normuyla (L2) calisir"
         self.tokens = TokenPoints(n, d, learn_points, anchor, 100 * seed)          # 100 * seed: BigramModel'deki gibi
-        count = 1 if shared else turns
+        assert shared or layers == 1, "layers yalniz paylasilan blokta (ayri blokta her tur zaten kendi Block'u)"
+        assert turns % layers == 0, "turns (%d) layers'in (%d) kati olmali: her Block esit sayida tur" % (turns, layers)
+        count = layers if shared else turns
         self.blocks = torch.nn.ModuleList(Block(d, t_max, confidence, units, 100 * seed + 10 + 2 * i, copy_path=copy_path,
                                                 stream_norm=stream_norm, layer_norm=layer_norm, rope=rope,
                                                 normalized_update=normalized_update, sphere_weights=sphere_weights,
                                                 canon=canon)
                                           for i in range(count))
         self.turns, self.shared, self.copy_path, self.stream_norm = turns, shared, copy_path, stream_norm
-        self.layer_norm, self.rope = layer_norm, rope
+        self.layers, self.layer_norm, self.rope = layers, layer_norm, rope
         self.normalized_update, self.sphere_weights, self.canon = normalized_update, sphere_weights, canon
         if normalized_update or sphere_weights:           # sifir yon normalize edilemez: W_context, W_fact_out rastgele baslar
             g = torch.Generator().manual_seed(100 * seed + 9)
@@ -381,7 +386,7 @@ class BlockModel(torch.nn.Module):
         self.scale = scale_for(n, confidence)
 
     def turn_blocks(self):
-        return [self.blocks[0]] * self.turns if self.shared else list(self.blocks)
+        return [self.blocks[i % len(self.blocks)] for i in range(self.turns)]     # paylasilan: A B A B; ayri: her tura biri
 
     def hidden(self, ids, caches=None):
         """Her turdan sonraki durumlar: [h0 = PL, h1, ..., h_TURNS], her biri (B, T, d).  caches: tur basina bir

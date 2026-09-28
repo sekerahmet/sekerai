@@ -1065,9 +1065,89 @@ def t_canon():
           "%.3f -> %.3f  |w| %.4f" % (curve[0]["nll"], curve[-1]["nll"], float(trained.blocks[0].canon_weights.abs().max())))
 
 
+def t_layers():
+    """LAYERS: paylasilan blokta farkli Block sayisi, turlar sirayla (A B A B).  layers=1 bugunku model; layers=2, turns=4
+    iki Block'u donusumlu kullanir; ayri blok (separate) Model X2 anahtarlariyla egitilir."""
+    import copy
+    from model_20 import BlockModel
+    data = D.build()
+    sids, smask = EK.sequences(data)
+    nv = len(data["vocab"])
+    ids = sids[:6, :20]
+
+    base, one = BlockModel(nv), BlockModel(nv, layers=1)
+    with torch.no_grad():
+        same = torch.equal(base.logits(ids), one.logits(ids))
+    check("layers: layers=1 bugunku modelle bit duzeyinde ayni (ayni parametre adlari)",
+          same and list(base.state_dict()) == list(one.state_dict()))
+
+    m = BlockModel(nv, layers=2, turns=4)
+    tb = m.turn_blocks()
+    four = BlockModel(nv, turns=4)
+    count = lambda mm: sum(p_.numel() for p_ in mm.parameters())
+    per_block = sum(p_.numel() for p_ in m.blocks[0].parameters())
+    check("layers: layers=2, turns=4 -> iki Block, sira A B A B; parametre = tek Block'lu 4 tur + bir Block; alpha (4, d)",
+          len(m.blocks) == 2 and [tb.index(b) for b in tb] == [0, 1, 0, 1] and tb[0] is tb[2] and tb[1] is tb[3]
+          and tb[0] is not tb[1] and count(m) - count(four) == per_block
+          and tuple(m.alpha_facts.shape) == (4, 64) and len(m.hidden(ids)) == 5)
+
+    # B'yi bozunca tur 1 (A) ayni, tur 2 (B) ve sonrasi degisir
+    alt = copy.deepcopy(m)
+    with torch.no_grad():
+        alt.blocks[1].attention.W_query.add_(0.5)
+        ha, hb = m.hidden(ids), alt.hidden(ids)
+    check("layers: tur 1 yalniz A'yi kullanir (B degisince h1 bit duzeyinde ayni), tur 2 B'yi kullanir (h2 degisir)",
+          torch.equal(ha[1], hb[1]) and not torch.equal(ha[2], hb[2]))
+
+    refused = []
+    for kw in (dict(layers=2, shared=False), dict(layers=2, turns=3)):
+        try:
+            BlockModel(nv, **kw)
+            refused.append(False)
+        except AssertionError:
+            refused.append(True)
+    check("layers: ayri blokta layers > 1 ve turns layers'in kati degilse reddedilir", all(refused))
+
+    opts = []
+    grab = lambda step, model, opt: opts.append(opt)
+    kw = dict(layers=2, turns=4)
+    trained, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), save_every=1, save=grab, model_kw=kw)
+    names = {id(p_): k for k, p_ in trained.named_parameters()}
+    groups = {names[id(p_)]: g_["use_muon"] for g_ in opts[-1].param_groups for p_ in g_["params"]}
+    unit = all(torch.allclose(b.attention.W_query.norm(dim=1), torch.ones(64), atol=1e-5)
+               and torch.allclose(b.facts.W_fact_out.norm(dim=0), torch.ones(b.facts.W_fact_out.shape[1]), atol=1e-5)
+               for b in trained.blocks)
+    packs = {}
+    keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
+                                                                   optimizer=copy.deepcopy(opt.state_dict())))
+    full, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), save_every=2, save=keep, model_kw=kw)
+    res, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs[4], model_kw=kw)
+    check("layers: layers=2 egitimde kayip iner; iki Block'un matrisleri ayni optimizer grubunda ve kurede; canon her "
+          "Block'ta ayri ogrenir; surdurme bit duzeyinde",
+          curve[-1]["nll"] < curve[0]["nll"] and unit
+          and all(groups["blocks.0." + k] == groups["blocks.1." + k]
+                  for k in ("attention.W_query", "attention.W_context", "facts.W_fact_in", "canon_weights"))
+          and not torch.equal(trained.blocks[0].canon_weights, trained.blocks[1].canon_weights)
+          and all(torch.equal(a, b) for a, b in zip(full.state_dict().values(), res.state_dict().values())),
+          "%.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"]))
+
+    sep, curve_s = TR.train_seq("separate", sids, smask, nv, steps=20, log_at=(0, 20))
+    check("layers: ayri blok (separate) Model X2 anahtarlariyla (normalized_update, sphere_weights, canon) egitilir",
+          curve_s[-1]["nll"] < curve_s[0]["nll"] and len(sep.blocks) == sep.turns and sep.canon
+          and sep.normalized_update and sep.sphere_weights
+          and all(torch.allclose(b.attention.W_key.norm(dim=1), torch.ones(64), atol=1e-5) for b in sep.blocks),
+          "%.3f -> %.3f" % (curve_s[0]["nll"], curve_s[-1]["nll"]))
+
+    plain = BlockModel(nv, layers=2, turns=4, canon=False)
+    qs = [[1] + sids[i, 1:9].tolist() for i in range(8)]
+    check("layers: layers=2 onbellekli uretim tam hesapla ayni (tur basina onbellek)",
+          TR.generate(plain, qs, 6) == TR.generate(plain, qs, 6, cached=False))
+
+
 if __name__ == "__main__":
     print("tests (model_20)")
-    for f in (t_model, t_step2, t_step3, t_copy, t_transformer, t_generate_cached, t_normalized_update, t_canon):
+    for f in (t_model, t_step2, t_step3, t_copy, t_transformer, t_generate_cached, t_normalized_update, t_canon,
+              t_layers):
         f()
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)
