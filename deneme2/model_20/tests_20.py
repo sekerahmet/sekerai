@@ -1235,72 +1235,66 @@ def t_heads():
           "%.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"]))
 
 
-def t_output_skip():
-    """OUTPUT_SKIP: cikis son turun attention sonrasi durumunu da okur, skor = scale <norm(h_son + output_skip * h_att), PL>;
-    output_skip 0'dan (baslangicta kapaliyla ayni), Adam'da, weight decay yok; surdurme ve onbellekli uretim."""
+def t_fact_activation():
+    """FACT_ACTIVATION: varsayilan "relu" (bugunku model birebir); "swiglu" u = SiLU(W_fact_in x) * (W_fact_up x), esik yok;
+    ayni parametre icin units 2/3; W_fact_up Muon'da ve satirlari birim; surdurme bit duzeyinde; onbellekli uretim."""
     import copy
     import torch.nn.functional as F
-    from model_20 import BlockModel
+    from model_20 import FACT_ACTIVATION, BlockModel, FactUnits
     data = D.build()
     sids, smask = EK.sequences(data)
     nv = len(data["vocab"])
     ids = sids[:6, :20]
 
-    off, on = BlockModel(nv), BlockModel(nv, output_skip=True)
+    base, relu = BlockModel(nv), BlockModel(nv, fact_activation="relu")
     with torch.no_grad():
-        err0 = float((off.logits(ids) - on.logits(ids)).abs().max())
-    check("output_skip: varsayilan kapali (parametre yok); acikken yalniz output_skip (d,) = 0 eklenir, skor kapaliyla ayni",
-          off.output_skip is None and tuple(on.output_skip.shape) == (64,) and not on.output_skip.any()
-          and sorted(set(dict(on.named_parameters())) - set(dict(off.named_parameters()))) == ["output_skip"] and err0 < 1e-5,
-          "fark %.1e" % err0)
+        same = torch.equal(base.logits(ids), relu.logits(ids))
+    sw = BlockModel(nv, fact_activation="swiglu")
+    names = {k.split(".")[-1] for k in dict(sw.named_parameters())}
+    fu = lambda m: sum(p_.numel() for k, p_ in m.named_parameters() if ".facts." in k)
+    a384, b384 = BlockModel(nv, d=384, units=1536), BlockModel(nv, d=384, units=1024, fact_activation="swiglu")
+    check("fact_activation: varsayilan relu, bit duzeyinde ayni; swiglu'da W_fact_up var, fact_threshold yok; d 384'te "
+          "ReLU 1536 ile SwiGLU 1024 matris sayisi esit (fark yalniz esikler)",
+          FACT_ACTIVATION == "relu" and same and "W_fact_up" in names and "fact_threshold" not in names
+          and fu(a384) - fu(b384) == 2 * 1536, "%d / %d" % (fu(a384), fu(b384)))
 
-    # bagimsiz hesap: son turun attention sonrasi durumu blok parcalariyla elle
-    g = torch.Generator().manual_seed(61)
+    g = torch.Generator().manual_seed(71)
+    f = FactUnits(16, 12, activation="swiglu").double()
     with torch.no_grad():
-        on.output_skip.copy_(torch.randn(64, generator=g))
-        on.blocks[1].canon_weights.copy_(0.3 * torch.randn(4, 64, generator=g))
-        hs = on.hidden(ids)
-        blk, i = on.turn_blocks()[-1], on.turns - 1
-        h_in = hs[-2]
-        T_ = h_in.shape[1]
-        x = h_in + sum(blk.canon_weights[k] * F.pad(h_in, (0, 0, k, 0))[..., :T_, :] for k in range(4))
-        added = blk.attention(x) @ blk.attention.W_context.T
-        h_att = F.normalize(h_in + on.alpha_attention[i] * (F.normalize(added, dim=-1) - h_in), dim=-1)
-        P = on.tokens.points()
-        ref = on.scale * F.normalize(hs[-1] + on.output_skip * h_att, dim=-1) @ P.T
-        err = float((on.logits(ids) - ref).abs().max())
-    check("output_skip: skor = scale <norm(h_son + output_skip * h_att), PL> (h_att son turun attention sonrasi durumu, elle)",
-          err < 1e-4, "fark %.1e" % err)
+        for p_ in f.parameters():
+            p_.copy_(torch.randn(p_.shape, generator=g, dtype=torch.float64))
+        x = torch.randn(5, 16, generator=g, dtype=torch.float64)
+        gate, up = x @ f.W_fact_in.T, x @ f.W_fact_up.T
+        ref = (gate / (1 + torch.exp(-gate)) * up) @ f.W_fact_out.T
+        err = float((f(x) - ref).abs().max())
+    check("fact_activation swiglu: cikti = W_fact_out (SiLU(W_fact_in x) * (W_fact_up x)) (bagimsiz float64)", err < 1e-12,
+          "fark %.1e" % err)
 
     opts = []
     grab = lambda step, model, opt: opts.append(opt)
-    kw = dict(model_kw=dict(output_skip=True))
+    kw = dict(model_kw=dict(fact_activation="swiglu", units=170))
     trained, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), save_every=1, save=grab, **kw)
-    names = {id(p_): k for k, p_ in trained.named_parameters()}
-    in_adam = {names[id(p_)] for g_ in opts[-1].param_groups if not g_["use_muon"] for p_ in g_["params"]}
+    nm = {id(p_): k.split(".")[-1] for k, p_ in trained.named_parameters()}
+    in_muon = {nm[id(p_)] for g_ in opts[-1].param_groups if g_["use_muon"] for p_ in g_["params"]}
+    unit = all(torch.allclose(b.facts.W_fact_up.norm(dim=1), torch.ones(170), atol=1e-5) for b in trained.blocks)
     packs = {}
     keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
                                                                    optimizer=copy.deepcopy(opt.state_dict())))
     full, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), save_every=2, save=keep, **kw)
     res, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs[4], **kw)
     qs = [[1] + sids[i, 1:1 + k].tolist() for i, k in enumerate((1, 3, 5, 8, 12, 16))]
-    try:
-        BlockModel(nv, output_skip=True, normalized_update=False, sphere_weights=False)
-        refused = False
-    except AssertionError:
-        refused = True
-    check("output_skip: egitimde kayip iner, output_skip Adam'da ve 0'dan ayrilir; surdurme bit duzeyinde; onbellekli uretim "
-          "tam hesapla ayni; normalized_update'siz reddedilir",
-          curve[-1]["nll"] < curve[0]["nll"] and "output_skip" in in_adam and bool(trained.output_skip.abs().max() > 0)
+    check("fact_activation swiglu: egitimde kayip iner; W_fact_up Muon'da ve satirlari birim; surdurme bit duzeyinde; "
+          "onbellekli uretim tam hesapla ayni",
+          curve[-1]["nll"] < curve[0]["nll"] and "W_fact_up" in in_muon and unit
           and all(torch.equal(a, b) for a, b in zip(full.state_dict().values(), res.state_dict().values()))
-          and TR.generate(trained, qs, 6) == TR.generate(trained, qs, 6, cached=False) and refused,
-          "%.3f -> %.3f  |skip| %.4f" % (curve[0]["nll"], curve[-1]["nll"], float(trained.output_skip.abs().max())))
+          and TR.generate(trained, qs, 6) == TR.generate(trained, qs, 6, cached=False),
+          "%.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"]))
 
 
 if __name__ == "__main__":
     print("tests (model_20)")
     for f in (t_model, t_step2, t_step3, t_transformer, t_generate_cached, t_normalized_update, t_canon,
-              t_layers, t_coherence, t_weight_ema, t_heads, t_output_skip):
+              t_layers, t_coherence, t_weight_ema, t_heads, t_fact_activation):
         f()
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)

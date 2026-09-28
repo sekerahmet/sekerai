@@ -45,7 +45,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
     if setting in TR.STEP3:
-        model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, heads=M.HEADS, output_skip=M.OUTPUT_SKIP,
+        model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, heads=M.HEADS, fact_activation=M.FACT_ACTIVATION,
                              units=M.FACT_UNITS, t_max=M.T_MAX,
                              anchor=M.ANCHOR),
                         **(model_kw or {}))
@@ -83,7 +83,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                           coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,
                           weight_ema=TR.WEIGHT_EMA), **saved)
         if setting in TR.STEP3 and saved.get("model_kw"):   # 28 Eylul oncesi model_kw'de layers yok: tek Block idi
-            saved["model_kw"] = dict(dict(layers=1, heads=1, output_skip=False), **saved["model_kw"])   # eski: yoklar
+            saved["model_kw"] = dict(dict(layers=1, heads=1, fact_activation="relu"), **saved["model_kw"])   # eskiler
+            assert not saved["model_kw"].pop("output_skip", False), "output_skip (28 Eylul) kaldirildi: bu kosu surdurulemez"
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)

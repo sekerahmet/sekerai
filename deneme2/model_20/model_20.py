@@ -52,6 +52,9 @@ LAYERS = 2           # SHARED_BLOCK'ta farkli Block (katman) sayisi, turlar sira
                      # (kullanici, 28 Eylul: "2 tane paylaşımlı katman", sira ABAB, ad LAYERS).  Varsayilan 2 x 2 (kullanici,
                      # 28 Eylul: "2X2 şu an varsayılan olsun"; TinyStories 1 epok ppl 7,95 / X2 9,73).  1 = tek Block x TURNS tur
 FACT_UNITS = 256     # FactUnits birim sayisi; 4 x D (transformer aliskanligi), olculmedi
+FACT_ACTIVATION = "relu"   # FactUnits: "relu" u = ReLU(W_fact_in x - fact_threshold) | "swiglu" u = SiLU(W_fact_in x) *
+                           # (W_fact_up x), esik yok (kapili; nGPT gibi x = sqrt(d) h).  Ayni parametre icin swiglu'da units
+                           # 2/3.  Kullanici, 28 Eylul: "önce sadece S bakalım" (ReLU literaturde kapili yapilarin gerisinde)
 STREAM_NORM = True   # True: durum her eklemeden sonra kureye (bugunku).  False: akis normalize edilmez, yalniz attention'in
                      # ve FactUnits'in okudugu kopya normalize edilir (transformer gibi); cikis <norm(h), PL> (27 Eylul)
 LAYER_NORM = False   # True: L2 norm yerine LayerNorm (norm_attention, norm_facts, norm_final; ogrenilen kazanc ve kayma);
@@ -70,9 +73,6 @@ CANON = True         # Canon-A (Allen-Zhu 2025): attention girdisi x_t + sum_k w
 HEADS = 4            # attention head sayisi (kullanici, 28 Eylul: "Evet, varsayılan 4"; TinyStories 10k ppl 7,22 / tek head
                      # 7,63).  H > 1: d H'ye bolunur, W_value (d x d, birim baslar) her head'in tasiyacagini secer;
                      # 1 = tek head, V yok (28 Eylul'e kadarki model)
-OUTPUT_SKIP = False  # cikis son turun attention sonrasi (FactUnits oncesi) durumunu da okur: skor = scale <norm(h_son +
-                     # output_skip ⊙ h_att), PL>, output_skip (d,) 0'dan (kullanici, 28 Eylul: "bana da b çok mantıklı
-                     # geldi").  Olcum: son tur FactUnits getirilenin yarisini siliyor (1,00 -> 0,56; alpha_F ~0,7-0,97)
 ROPE = True          # attention'in q ve k'sina RoPE (konum bilgisi).  Varsayilanlar = Model X (C' + RoPE; kullanici, 27 Eylul:
                      # "Model X varsayilan model olsun" onayi); False = RoPE'suz C'
 
@@ -314,18 +314,26 @@ class SequenceModel(torch.nn.Module):
 
 
 class FactUnits(torch.nn.Module):
-    """Adim 3 donusturme: her konumda ayri.  u = ReLU(W_fact_in · h - fact_threshold): birim, girdileri birlikte yeterince
-    guclu ise yanar (VE gibi); cikti W_fact_out · u duruma eklenir.  W_fact_out 0'dan: baslangicta etkisiz (paket acikken
-    BlockModel rastgele baslatir)."""
+    """Adim 3 donusturme: her konumda ayri.  relu: u = ReLU(W_fact_in · h - fact_threshold), birim girdileri birlikte
+    yeterince guclu ise yanar.  swiglu: u = SiLU(W_fact_in · h) ⊙ (W_fact_up · h), kapi (W_fact_in) icerigi (W_fact_up)
+    acar; esik yok.  Cikti W_fact_out · u.  W_fact_out 0'dan: baslangicta etkisiz (paket acikken BlockModel rastgele
+    baslatir)."""
 
-    def __init__(self, d=D, units=FACT_UNITS, seed=POINTS_SEED + 3):
+    def __init__(self, d=D, units=FACT_UNITS, seed=POINTS_SEED + 3, activation="relu"):
         super().__init__()
+        assert activation in ("relu", "swiglu"), activation
         g = torch.Generator().manual_seed(seed)
-        self.W_fact_in = torch.nn.Parameter(torch.randn(units, d, generator=g) / d ** 0.5)   # durumdan birimlere
-        self.fact_threshold = torch.nn.Parameter(torch.zeros(units))                          # ornekteki "- 1"
+        self.activation = activation
+        self.W_fact_in = torch.nn.Parameter(torch.randn(units, d, generator=g) / d ** 0.5)   # durumdan birimlere (kapi)
+        if activation == "relu":
+            self.fact_threshold = torch.nn.Parameter(torch.zeros(units))                      # ornekteki "- 1"
+        else:
+            self.W_fact_up = torch.nn.Parameter(torch.randn(units, d, generator=g) / d ** 0.5)   # tasinan icerik
         self.W_fact_out = torch.nn.Parameter(torch.zeros(d, units))                          # birimlerden duruma, 0'dan
 
     def forward(self, h):
+        if self.activation == "swiglu":                  # u_i = SiLU(W_fact_in[i] · h) · (W_fact_up[i] · h)
+            return (F.silu(h @ self.W_fact_in.T) * (h @ self.W_fact_up.T)) @ self.W_fact_out.T
         # u_i = max(0, Σ_b W_fact_in[i,b] · h_b - fact_threshold_i);   cikti_a = Σ_i W_fact_out[a,i] · u_i
         return torch.relu(h @ self.W_fact_in.T - self.fact_threshold) @ self.W_fact_out.T
 
@@ -335,10 +343,10 @@ class Block(torch.nn.Module):
 
     def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, units=FACT_UNITS, seed=POINTS_SEED + 2,
                  stream_norm=True, layer_norm=False, rope=False, normalized_update=False, sphere_weights=False, canon=False,
-                 heads=1):
+                 heads=1, fact_activation="relu"):
         super().__init__()
         self.attention = CausalAttention(d, t_max, confidence, seed, rope=rope, heads=heads)
-        self.facts = FactUnits(d, units, seed + 1)
+        self.facts = FactUnits(d, units, seed + 1, activation=fact_activation)
         self.stream_norm, self.layer_norm = stream_norm, layer_norm
         self.normalized_update, self.sphere_weights, self.canon = normalized_update, sphere_weights, canon
         if canon:                                         # w_k: k konum oncesinden, boyut basina; 0'dan (adim 0 = Canon'suz)
@@ -347,9 +355,8 @@ class Block(torch.nn.Module):
             self.norm_attention = torch.nn.LayerNorm(d)
             self.norm_facts = torch.nn.LayerNorm(d)
 
-    def forward(self, h, cache=None, alpha_attention=None, alpha_facts=None, keep_attention=False):
-        """alpha_attention, alpha_facts (d,): normalized_update'te bu turun alpha'lari.  keep_attention: attention
-        sonrasi (FactUnits oncesi) durumu da dondur -> (h, h_att)."""
+    def forward(self, h, cache=None, alpha_attention=None, alpha_facts=None):
+        """alpha_attention, alpha_facts (d,): normalized_update'te bu turun alpha'lari."""
         at = self.attention
         unit = lambda v: F.normalize(v, dim=-1)
         norm_a, norm_f = (self.norm_attention, self.norm_facts) if self.layer_norm else (unit, unit)
@@ -363,9 +370,7 @@ class Block(torch.nn.Module):
         facts = (lambda v: self.facts(v * v.shape[-1] ** 0.5)) if self.sphere_weights else self.facts
         if self.normalized_update:                                                 # u'nun boyu silinir, adimi alpha belirler
             h = unit(h + alpha_attention * (unit(added) - h))                     # h = norm(h + α_A ⊙ (norm(W_context c) - h))
-            out = unit(h + alpha_facts * (unit(facts(h)) - h))                    # h = norm(h + α_F ⊙ (norm(olgu(h)) - h))
-            return (out, h) if keep_attention else out
-        assert not keep_attention, "keep_attention yalniz normalized_update ile"
+            return unit(h + alpha_facts * (unit(facts(h)) - h))                   # h = norm(h + α_F ⊙ (norm(olgu(h)) - h))
         if self.stream_norm:
             h = norm_a(h + added)                                                  # h_t = norm(h_t + W_context · c_t)
             return norm_f(h + facts(h))                                            # h_t = norm(h_t + olgu(h_t))
@@ -382,9 +387,8 @@ class BlockModel(torch.nn.Module):
                  anchor=ANCHOR, confidence=CONFIDENCE, t_max=T_MAX, units=FACT_UNITS, seed=POINTS_SEED,
                  stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=ROPE,
                  normalized_update=NORMALIZED_UPDATE, sphere_weights=SPHERE_WEIGHTS, canon=CANON, heads=HEADS,
-                 output_skip=OUTPUT_SKIP):
+                 fact_activation=FACT_ACTIVATION):
         super().__init__()
-        assert not output_skip or normalized_update, "output_skip normalized_update ile"
         assert not normalized_update or (stream_norm and not layer_norm), "normalized_update akis normuyla (L2) calisir"
         assert not (sphere_weights and layer_norm), "sphere_weights LayerNorm'la denenmedi: FactUnits girdisi sqrt(d) kat buyuk"
         self.tokens = TokenPoints(n, d, learn_points, anchor, 100 * seed)          # 100 * seed: BigramModel'deki gibi
@@ -394,11 +398,11 @@ class BlockModel(torch.nn.Module):
         self.blocks = torch.nn.ModuleList(Block(d, t_max, confidence, units, 100 * seed + 10 + 2 * i,
                                                 stream_norm=stream_norm, layer_norm=layer_norm, rope=rope,
                                                 normalized_update=normalized_update, sphere_weights=sphere_weights,
-                                                canon=canon, heads=heads)
+                                                canon=canon, heads=heads, fact_activation=fact_activation)
                                           for i in range(count))
         self.turns, self.shared, self.stream_norm = turns, shared, stream_norm
         self.layers = layers if shared else len(self.blocks)   # farkli Block sayisi (ayri blokta her tura bir)
-        self.layer_norm, self.rope, self.heads = layer_norm, rope, heads
+        self.layer_norm, self.rope, self.heads, self.fact_activation = layer_norm, rope, heads, fact_activation
         self.normalized_update, self.sphere_weights, self.canon = normalized_update, sphere_weights, canon
         if normalized_update or sphere_weights:           # sifir yon normalize edilemez: W_context, W_fact_out rastgele baslar
             g = torch.Generator().manual_seed(100 * seed + 9)
@@ -413,28 +417,22 @@ class BlockModel(torch.nn.Module):
             self.normalize_weights()
         if layer_norm:                                    # cikista: keskinligi kazanc ogrenir, sabit scale kullanilmaz
             self.norm_final = torch.nn.LayerNorm(d)
-        # boyut basina: son attention durumundan cikisa ne kadar; 0'dan (baslangicta kapaliyla ayni)
-        self.output_skip = torch.nn.Parameter(torch.zeros(d)) if output_skip else None
         self.scale = scale_for(n, confidence)
 
     def turn_blocks(self):
         return [self.blocks[i % len(self.blocks)] for i in range(self.turns)]     # paylasilan: A B A B; ayri: her tura biri
 
-    def hidden(self, ids, caches=None, keep_attention=False):
+    def hidden(self, ids, caches=None):
         """Her turdan sonraki durumlar: [h0 = PL, h1, ..., h_TURNS], her biri (B, T, d).  caches: tur basina bir
-        AttentionCache (onbellekli uretim; ids yalniz yeni token'lar).  keep_attention: -> (durumlar, son turun
-        attention sonrasi durumu)."""
+        AttentionCache (onbellekli uretim; ids yalniz yeni token'lar)."""
         h = self.tokens.points()[ids]
-        out, h_att = [h], None
+        out = [h]
         for i, block in enumerate(self.turn_blocks()):
             alphas = (dict(alpha_attention=self.alpha_attention[i], alpha_facts=self.alpha_facts[i])
                       if self.normalized_update else {})
-            last = keep_attention and i == self.turns - 1
-            h = block(h, None if caches is None else caches[i], keep_attention=last, **alphas)
-            if last:
-                h, h_att = h
+            h = block(h, None if caches is None else caches[i], **alphas)
             out.append(h)
-        return (out, h_att) if keep_attention else out
+        return out
 
     @torch.no_grad()
     def normalize_weights(self):
@@ -442,18 +440,15 @@ class BlockModel(torch.nn.Module):
         sutunlari (W_context, W_fact_out) birim boya; baslangicta ve her optimizer adimindan sonra (train_seq)."""
         for b in self.blocks:
             at, f = b.attention, b.facts
-            for w in (at.W_query, at.W_key, f.W_fact_in) + ((at.W_value,) if at.heads > 1 else ()):
+            for w in ((at.W_query, at.W_key, f.W_fact_in) + ((at.W_value,) if at.heads > 1 else ())
+                      + ((f.W_fact_up,) if f.activation == "swiglu" else ())):
                 w.copy_(F.normalize(w, dim=1))
             for w in (at.W_context, f.W_fact_out):
                 w.copy_(F.normalize(w, dim=0))
 
     def logits(self, ids, caches=None):
         P = self.tokens.points()
-        if self.output_skip is not None:                       # h = norm(h_son + output_skip ⊙ h_att)
-            hs, h_att = self.hidden(ids, caches, keep_attention=True)
-            h = F.normalize(hs[-1] + self.output_skip * h_att, dim=-1)
-        else:
-            h = self.hidden(ids, caches)[-1]                   # son durum; stream_norm'da zaten kurede
+        h = self.hidden(ids, caches)[-1]                       # son durum; stream_norm'da zaten kurede
         if self.layer_norm:
             return self.norm_final(h) @ P.T                    # skor_tj = <LN(h_t), PL_j>
         if not self.stream_norm:

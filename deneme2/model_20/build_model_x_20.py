@@ -238,12 +238,12 @@ y = panel_rows(196, "Öğrenilen sayılar · TinyStories", [
     ("α_A, α_F · 2 × 4 × 384", "3.072"),
     ("toplam", "6.621.696", "bold"),
     ("embedding dışı", "3.548.160")])
-text(RX, y + 2, "HEADS = 1 (W_value yok): 6.326.784 · OUTPUT_SKIP: + 384", "bs", "start")
+text(RX, y + 2, "HEADS = 1 (W_value yok): 6.326.784", "bs", "start")
 text(RX, y + 17, "akrabalıkta d 64 · 256 birim", "bs", "start")
 
 panel_rows(566, "Ayarlar", [
     ("LAYERS · TURNS", "2 · 4 (A B A B)"), ("CANON", "True", "canonk"), ("NORMALIZED_UPDATE", "True · α 0,1'den"),
-    ("SPHERE_WEIGHTS", "True"), ("ROPE", "True", "ropek"), ("HEADS · OUTPUT_SKIP", "4 · False (denemede)"),
+    ("SPHERE_WEIGHTS", "True"), ("ROPE", "True", "ropek"), ("HEADS", "4"),
     ("D · FACT_UNITS", "384 · 1536"), ("STREAM_NORM · ANCHOR", "True · 1e-3")], valcls="numm")
 
 # yaklas + norm kutusu

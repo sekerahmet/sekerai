@@ -53,7 +53,7 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
                               turns=M.TURNS if setting in TR.STEP3 else None,
                               layers=M.LAYERS if setting in TR.STEP3 else None,
                               heads=M.HEADS if setting in TR.STEP3 else None,
-                              output_skip=M.OUTPUT_SKIP if setting in TR.STEP3 else None,
+                              fact_activation=M.FACT_ACTIVATION if setting in TR.STEP3 else None,
                               rope=True if setting.startswith("transformer") else TR.ROPE if setting in TR.STEP3 else False),
                          **(model_kw or {}), **train_kw))
     checkpoint = None
@@ -63,6 +63,7 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
             raise RuntimeError("%s: surdurme paketi yok; bastan kosmak ayri karar (resume=False)" % out)
         saved = json.load(open(os.path.join(out, "config.json")))
         assert not saved.pop("copy_path", False), "kopya yolu (Oneri A) 28 Eylul'de kaldirildi: bu kosu surdurulemez"
+        assert not saved.pop("output_skip", False), "output_skip (28 Eylul) kaldirildi: bu kosu surdurulemez"
         # 27 Eylul oncesi config'lerde optimizer / takvim yok: o kosular Adam + cosine idi.  compile sonucu degistirir: karsilastirilir
         # 28 Eylul oncesi config'lerde turns / layers yok: Adim 3 modeli tek Block x 2 tur idi
         saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN,
@@ -70,7 +71,7 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
                           turns=2 if saved.get("setting") in TR.STEP3 else None,
                           layers=1 if saved.get("setting") in TR.STEP3 else None,
                           heads=1 if saved.get("setting") in TR.STEP3 else None,
-                          output_skip=False if saved.get("setting") in TR.STEP3 else None), **saved)
+                          fact_activation="relu" if saved.get("setting") in TR.STEP3 else None), **saved)
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)

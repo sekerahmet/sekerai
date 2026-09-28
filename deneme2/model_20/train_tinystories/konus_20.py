@@ -86,7 +86,8 @@ def load_model(run_dir, n_vocab, averaged=False):
     _heavy()
     cfg = json.load(open(os.path.join(run_dir, "config.json")))
     kw = dict(cfg["model_kw"])
-    kw = dict(dict(layers=1, heads=1, output_skip=False), **kw)   # eski kosular: tek Block, tek head, skip yok
+    kw = dict(dict(layers=1, heads=1, fact_activation="relu"), **kw)   # eski kosular: tek Block, tek head, ReLU
+    assert not kw.pop("output_skip", False), "output_skip (28 Eylul) kaldirildi"
     assert not cfg.get("copy_path"), "kopya yolu (Oneri A) 28 Eylul'de kaldirildi"
     m = BlockModel(n_vocab, seed=0, stream_norm=cfg.get("stream_norm", True),
                    layer_norm=cfg.get("layer_norm", False), rope=cfg.get("rope", True), shared=cfg["setting"] == "shared",

@@ -207,7 +207,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     if optimizer == "muon":
         # Muon yalniz gizli 2 boyutlu matrislerde ("VO + FFN" duzeni, Wang 2025); token noktalari, esikler, W_query, W_key,
         # bias ve norm katsayilari Adam'da
-        hidden = ("W_context", "W_value", "W_fact_in", "W_fact_out", "W_value.weight", "W_out.weight",
+        hidden = ("W_context", "W_value", "W_fact_in", "W_fact_up", "W_fact_out", "W_value.weight", "W_out.weight",
                   "W_mlp_in.weight",
                   "W_mlp_out.weight")
         opt = Muon([dict(params=[p for k, p in named if k.endswith(hidden)], use_muon=True),
@@ -303,7 +303,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
                 if a is None:
                     continue
                 kind = k.split(".")[-1]
-                if sphere_weights and kind in ("W_query", "W_key", "W_fact_in", "W_value"):   # kurede: yalniz teget
+                if sphere_weights and kind in ("W_query", "W_key", "W_fact_in", "W_fact_up", "W_value"):   # kurede: teget
                     a, b = (v - (v * p.detach()).sum(1, keepdim=True) * p.detach() for v in (a, b))
                 elif sphere_weights and kind in ("W_context", "W_fact_out"):
                     a, b = (v - (v * p.detach()).sum(0, keepdim=True) * p.detach() for v in (a, b))
