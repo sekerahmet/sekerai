@@ -345,7 +345,7 @@ def generate(model, prompts, n, cached=True):
     cached (BlockModel): istem bir kez, sonra her token yalniz kendi konumunu hesaplar (AttentionCache); butun istemler
     tek batch'te (farkli uzunluk: sagdan dolgu, satir basina konum).  Degilse: ayni uzunluktaki istemler birlikte ve her
     token'da butun dizi yeniden hesaplanir (transformer; ayni token'lar, skorlar float yuvarlamasina kadar)."""
-    if cached and isinstance(model, BlockModel) and not model.canon and model.heads == 1:   # Canon, cok head: tam hesap
+    if cached and isinstance(model, BlockModel) and model.heads == 1:   # cok head: tam hesap
         return generate_cached(model, prompts, n)
     device = next(model.parameters()).device
     out = [None] * len(prompts)

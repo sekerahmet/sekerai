@@ -28,21 +28,22 @@ import threading
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [HERE, os.path.dirname(HERE)]
 # Agir moduller ilk kullanimda: pencere hemen acilir (import torch birkac saniye)
-torch = np = DT = ET = BlockModel = None
+torch = np = DT = ET = BlockModel = AttentionCache = None
 
 RUN_ROOTS = [r"G:\Drive'ım\model_20", r"G:\Drivem\model_20"]
 TS_DIRS = [r"G:\Drive'ım\tinystories\onbellek", r"G:\Drivem\tinystories\onbellek"]
 
 
 def _heavy():
-    global torch, np, DT, ET, BlockModel
+    global torch, np, DT, ET, BlockModel, AttentionCache
     if DT is None:
         import numpy as _np
         import torch as _torch
         import data_tinystories as _dt
         import exam_tinystories as _et
+        from model_20 import AttentionCache as _attention_cache
         from model_20 import BlockModel as _block_model
-        torch, np, DT, ET, BlockModel = _torch, _np, _dt, _et, _block_model
+        torch, np, DT, ET, BlockModel, AttentionCache = _torch, _np, _dt, _et, _block_model, _attention_cache
 
 
 def _first_existing(candidates):
@@ -115,14 +116,20 @@ def summary(run_dir, cfg, averaged):
 
 
 def generate(model, ids, n, vocab, temp=0.0, top_p=1.0, penalty=1.0, banned=()):
-    """Tek istem, token token tam yeniden hesap (Canon: onbellek yok).  <eos>'ta durur."""
+    """Tek istem, token token.  Tek head'de onbellekli (istem bir kez, sonra yalniz yeni konum; istem + n <= 512),
+    cok head'de her token'da tam yeniden hesap.  <eos>'ta durur."""
     eos = vocab.index(DT.EOS_TOKEN)
     ban = [vocab.index(t) for t in banned]
     out = []
     x = list(ids)
+    cached = getattr(model, "heads", 1) == 1 and len(x) + n <= 512
+    caches = [AttentionCache(torch.tensor([len(x)]), len(x) + n) for _ in range(model.turns)] if cached else None
     with torch.no_grad():
-        for _ in range(n):
-            logits = model.logits(torch.tensor([x[-512:]]))[0, -1].float()
+        for i in range(n):
+            if cached:                                      # ilk adim istemin tamami, sonra yalniz son token
+                logits = model.logits(torch.tensor([x if i == 0 else x[-1:]]), caches)[0, -1].float()
+            else:
+                logits = model.logits(torch.tensor([x[-512:]]))[0, -1].float()
             if ban:
                 logits[ban] = -float("inf")
             if penalty != 1.0:                              # son 20 token: pozitif puan boluner, negatif carpilir

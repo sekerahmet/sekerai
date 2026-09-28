@@ -229,12 +229,28 @@ class AttentionCache:
     Attention nedensel: onceki konumlarin durumu yeni token'la degismez, yeni konum yalniz kendi q, k, v'sini hesaplar.
     Ilk cagri istem (B, L) -- normal ileri hesabin aynisi; sonraki her cagri satir basina TEK yeni token.
     lengths (B,): istem uzunluklari (sagdan dolgulu; satir r'nin ilk yeni token'i konum lengths[r]'ye yazilir, dolgunun
-    key'leri o konuma gelinceye kadar maskeli kalir).  capacity: istem + uretilecek token."""
+    key'leri o konuma gelinceye kadar maskeli kalir).  capacity: istem + uretilecek token.
+    Canon: turun Canon oncesi girdileri de saklanir (canon_cache); yeni konum onceki 3 konumu buradan okur."""
 
     def __init__(self, lengths, capacity):
         self.next_position, self.capacity = lengths.clone(), capacity   # satir basina siradaki konum
-        self.keys = self.values = None
+        self.keys = self.values = self.canon_inputs = None
         self.span = 0                                            # yazilmis en uzun satirin boyu (Python sayisi: senkron yok)
+
+    def canon_cache(self, x):
+        """x (B, t, d): yeni konumlarin Canon oncesi girdisi -> (B, 3 + t, d), basta ayni turun onceki 3 konumu
+        (istemden once 0).  x'i saklar; attend'den ONCE cagrilir (next_position henuz ilerlemedi)."""
+        B, t, d = x.shape
+        if self.canon_inputs is None:                           # istem: oncesi yok, tam hesaptaki dolgu
+            self.canon_inputs = x.new_zeros(B, self.capacity, d)
+            self.canon_inputs[:, :t] = x
+            return F.pad(x, (0, 0, 3, 0))
+        assert t == 1, "istemden sonra satir basina tek token"
+        pos = self.next_position[:, None]                       # (B, 1)
+        back = pos - torch.arange(3, 0, -1, device=x.device)    # (B, 3): t-3, t-2, t-1; < 0 ise istemden once
+        before = self.canon_inputs.gather(1, back.clamp(min=0)[..., None].expand(-1, -1, d)) * (back >= 0)[..., None]
+        self.canon_inputs.scatter_(1, pos[..., None].expand(-1, -1, d), x)
+        return torch.cat([before, x], 1)
 
     def attend(self, at, x):
         v = x                                                    # tek head: value girdinin kendisi
@@ -332,9 +348,9 @@ class Block(torch.nn.Module):
         norm_a, norm_f = (self.norm_attention, self.norm_facts) if self.layer_norm else (unit, unit)
         x = h if self.stream_norm else norm_a(h)             # attention'in okudugu; stream_norm'da h zaten normlu
         if self.canon:                                       # Canon-A: x_t + sum_k w_k * x_(t-k), baslangictan once 0
-            assert cache is None, "Canon onbellekli uretimi desteklemiyor (onceki konumlar gerekir)"
             T = x.shape[-2]
-            x = x + sum(self.canon_weights[k] * F.pad(x, (0, 0, k, 0))[..., :T, :] for k in range(4))
+            full = F.pad(x, (0, 0, 3, 0)) if cache is None else cache.canon_cache(x)   # onceki 3 konum + x
+            x = x + sum(self.canon_weights[k] * full[..., 3 - k:3 - k + T, :] for k in range(4))
         added = at(x, cache=cache) @ at.W_context.T                                # W_context · c_t
         # sphere_weights: W_fact_in satirlari birim, h birim -> girdi kosinus (tipik ±1/√d); √d ile esik O(1) olcekte
         facts = (lambda v: self.facts(v * v.shape[-1] ** 0.5)) if self.sphere_weights else self.facts

@@ -765,9 +765,9 @@ def t_generate_cached():
     prompts = [torch.randint(0, n, (int(k),), generator=g).tolist() for k in torch.randint(1, 21, (12,), generator=g)]
     worst, same, runs = 0.0, True, 0
     off = dict(normalized_update=False, sphere_weights=False)          # 28 Eylul oncesi guncelleme (LayerNorm / normsuz akis icin sart)
-    for kw in (dict(), dict(shared=False), dict(rope=False), dict(off), dict(off, stream_norm=False),
+    for kw in (dict(), dict(canon=False), dict(shared=False), dict(rope=False), dict(off), dict(off, stream_norm=False),
                dict(off, stream_norm=False, layer_norm=True), dict(off, shared=False, stream_norm=False, layer_norm=True)):
-        m = BlockModel(n, d=16, units=24, t_max=64, canon=False, **kw)   # onbellek Canon'suz yolda
+        m = BlockModel(n, d=16, units=24, t_max=64, **kw)
         with torch.no_grad():
             for p_ in m.parameters():
                 if p_.requires_grad:
@@ -918,7 +918,7 @@ def t_normalized_update():
 def t_canon():
     """Canon-A: w = 0 iken Canon'suz modelle bit duzeyinde ayni; attention girdisi resmi kodun hesabiyla (PhysicsLM4
     canon_helper: x + conv1d(groups=d, cekirdek 4, soldan 3 dolgu), aktivasyon ve bias yok) ayni; nedensel; egitim ve
-    surdurme; onbellekli uretim tam hesaba doner."""
+    surdurme; onbellekli uretim (canon_cache) tam hesapla ayni."""
     import copy
     import torch.nn.functional as F
     from model_20 import BlockModel
@@ -970,26 +970,24 @@ def t_canon():
                                                                    optimizer=copy.deepcopy(opt.state_dict())))
     full, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), save_every=2, save=keep, canon=True)
     res, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs[4], canon=True)
-    qs = [[1] + sids[i, 1:9].tolist() for i in range(8)]
-    try:
-        with torch.no_grad():
-            from model_20 import AttentionCache
-            trained.logits(torch.tensor(qs), [AttentionCache(torch.full((8,), 9), 20) for _ in range(trained.turns)])
-        refused_cache = False
-    except AssertionError:
-        refused_cache = True
+    qs = [[1] + sids[i, 1:1 + k].tolist() for i, k in enumerate((1, 2, 3, 5, 8, 8, 12, 16))]   # 2-17 token: Canon
+    cached_new = TR.generate(trained, qs, 6)                                                 # istem basini da gorur
+    scores, _ = cached_scores(trained, qs, cached_new)
+    err_c = max(float((scores[i] - trained.logits(torch.tensor([q + cached_new[i]])).detach()[0, len(q) - 1:]).abs().max())
+                for i, q in enumerate(qs))
     try:
         TR.train_seq("transformer", sids[:8], smask[:8], nv, steps=1, log_at=(), canon=True)
         refused = False
     except AssertionError:
         refused = True
     check("canon: egitimde kayip iner, canon_weights 0'dan ayrilir ve Adam'da; surdurme bit duzeyinde; onbellekli uretim "
-          "tam hesaba doner (onbellek dogrudan reddedilir); transformer'da reddedilir",
+          "(canon_cache) tam hesapla ayni token'lar ve skorlar (istem 2-17 token); transformer'da reddedilir",
           curve[-1]["nll"] < curve[0]["nll"] and bool(trained.blocks[0].canon_weights.abs().max() > 0)
           and "blocks.0.canon_weights" in in_adam
           and all(torch.equal(a, b) for a, b in zip(full.state_dict().values(), res.state_dict().values()))
-          and TR.generate(trained, qs, 6) == TR.generate(trained, qs, 6, cached=False) and refused_cache and refused,
-          "%.3f -> %.3f  |w| %.4f" % (curve[0]["nll"], curve[-1]["nll"], float(trained.blocks[0].canon_weights.abs().max())))
+          and cached_new == TR.generate(trained, qs, 6, cached=False) and err_c < 1e-4 and refused,
+          "%.3f -> %.3f  |w| %.4f  skor farki %.1e" % (curve[0]["nll"], curve[-1]["nll"],
+                                                     float(trained.blocks[0].canon_weights.abs().max()), err_c))
 
 
 def t_layers():
