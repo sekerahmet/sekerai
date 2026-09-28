@@ -694,9 +694,183 @@ def F_ce(logits, targets):
     return float(torch.nn.functional.cross_entropy(logits, targets))
 
 
+def rope_reference(x):
+    """apply_rope'un tablosuz hali (27 Eylul koduyla ayni satirlar): tablonun bit duzeyinde ayni oldugunu sinar."""
+    T, dh = x.shape[-2], x.shape[-1]
+    freq = 10000.0 ** (-torch.arange(0, dh, 2, device=x.device, dtype=x.dtype) / dh)
+    angle = torch.arange(T, device=x.device, dtype=x.dtype)[:, None] * freq[None, :]
+    cos, sin = angle.cos(), angle.sin()
+    x1, x2 = x[..., 0::2], x[..., 1::2]
+    return torch.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], -1).flatten(-2)
+
+
+@torch.no_grad()
+def cached_scores(m, prompts, tails):
+    """AttentionCache ile, token'lar SIRAYLA verilerek (acgozlu degil): satir basina istemin son konumunun ve tails'in
+    her token'indan sonraki skorlar, (B, k + 1, n); ve istem hesabinin butun skorlari."""
+    from model_20 import AttentionCache
+    L = [len(p) for p in prompts]
+    ids = torch.zeros(len(prompts), max(L), dtype=torch.long)
+    for i, p in enumerate(prompts):
+        ids[i, :len(p)] = torch.tensor(p)
+    caches = [AttentionCache(torch.tensor(L), max(L) + len(tails[0]) + 1) for _ in range(m.turns)]
+    first = m.logits(ids, caches)
+    rows = [first[torch.arange(len(prompts)), torch.tensor(L) - 1]]
+    for j in range(len(tails[0])):
+        rows.append(m.logits(torch.tensor([t[j] for t in tails])[:, None], caches)[:, 0])
+    return torch.stack(rows, 1), first
+
+
+def t_generate_cached():
+    from model_20 import ROPE_TABLES, BlockModel, apply_rope
+    g = torch.Generator().manual_seed(21)
+
+    # RoPE tablosu: (d, cihaz, tur) basina en uzun T; kisa T ilk satirlari okur.  Tablosuz hesapla BIT DUZEYINDE ayni:
+    # once kisa (tablo kurulur), sonra uzun (buyur), sonra yine kisa (buyuk tablonun dilimi)
+    ROPE_TABLES.clear()
+    exact = True
+    for dh in (6, 12, 64, 384):
+        for T in (9, 40, 511, 1, 17, 300, 511):
+            x = torch.randn(3, T, dh, generator=g)
+            exact &= torch.equal(apply_rope(x), rope_reference(x))
+    sizes = sorted(t[0].shape[0] for t in ROPE_TABLES.values())
+    with torch.inference_mode():
+        apply_rope(torch.randn(1, 999, 6, generator=g))
+    skipped = ROPE_TABLES[(6, torch.device("cpu"), torch.float32)][0].shape[0] == 511
+    pos = torch.tensor([[0], [5], [16]])
+    x = torch.randn(3, 17, 12, generator=g)
+    at_pos = apply_rope(x[torch.arange(3), pos[:, 0]][:, None], pos)
+    err_p = float((at_pos[:, 0] - rope_reference(x)[torch.arange(3), pos[:, 0]]).abs().max())
+    check("apply_rope: tablolu = tablosuz hesap BIT DUZEYINDE (4 d x 7 T; tablo kurulurken, buyurken, dilimden); d basina "
+          "tek tablo; inference_mode'da tabloya yazilmaz; positions verilince ayni konumda ayni",
+          exact and sizes == [511] * 4 and skipped and err_p < 1e-6, "positions farki %.1e" % err_p)
+
+    m = BlockModel(40, d=16, units=24, t_max=64)
+    with torch.no_grad():
+        for p_ in m.parameters():
+            if p_.requires_grad:
+                p_.copy_(0.5 * torch.randn(p_.shape, generator=g))
+    ids = torch.randint(0, 40, (4, 23), generator=g)
+    grads = []
+    for keep in (False, True):
+        if not keep:
+            ROPE_TABLES.clear()
+        m.zero_grad()
+        m.logits(ids).logsumexp(-1).sum().backward()
+        grads.append([p_.grad.clone() for p_ in m.parameters() if p_.grad is not None])
+    check("apply_rope tablosu: skor gradyanlari tablo yeni hesaplanirken ve tablodan okunurken bit duzeyinde ayni",
+          all(torch.equal(a, b) for a, b in zip(*grads)))
+
+    # gradyansiz points(): agirlik degismedikce ayni tablo; Adam adimi ve load_state_dict'ten sonra yeniden
+    tp = BlockModel(40, d=16, units=24).tokens
+    fresh = lambda: torch.nn.functional.normalize(tp.fixed_points + tp.shift, dim=-1).detach()
+    with torch.no_grad():
+        a, b = tp.points(), tp.points()
+    first = torch.equal(a, fresh())
+    opt = torch.optim.Adam([tp.shift], lr=0.1)
+    (tp.points() ** 3).sum().backward()
+    opt.step()
+    with torch.no_grad():
+        c = tp.points()
+    stepped = torch.equal(c, fresh()) and not torch.equal(c, a)
+    sd = {k: v.clone() for k, v in tp.state_dict().items()}
+    sd["shift"] += 1
+    tp.load_state_dict(sd)
+    with torch.no_grad():
+        e = tp.points()
+    check("points(): gradyansizken ayni agirlikta tek tablo (bit duzeyinde ayni); Adam adimindan ve load_state_dict'ten sonra "
+          "yeni tablo; gradyanliyken her seferinde yeni (grad_fn'li)",
+          a is b and first and stepped and torch.equal(e, fresh()) and tp.points().grad_fn is not None)
+
+    # artimli uretim = tam yeniden hesap: rastgele agirlik, butun Block ayarlari, farkli uzunlukta istemler
+    n = 40
+    prompts = [torch.randint(0, n, (int(k),), generator=g).tolist() for k in torch.randint(1, 21, (12,), generator=g)]
+    worst, same, runs = 0.0, True, 0
+    for kw in (dict(), dict(shared=False), dict(rope=False), dict(stream_norm=False), dict(stream_norm=False, layer_norm=True),
+               dict(copy_path=True), dict(shared=False, copy_path=True, stream_norm=False, layer_norm=True)):
+        m = BlockModel(n, d=16, units=24, t_max=64, **kw)
+        with torch.no_grad():
+            for p_ in m.parameters():
+                if p_.requires_grad:
+                    p_.copy_(0.5 * torch.randn(p_.shape, generator=g))
+        old, new = TR.generate(m, prompts, 15, cached=False), TR.generate(m, prompts, 15)
+        alone = [TR.generate(m, [p], 15)[0] for p in prompts[:4]]
+        same &= old == new and alone == new[:4]
+        scores, first = cached_scores(m, prompts, new)
+        for i, p in enumerate(prompts):
+            full = m.logits(torch.tensor([p + new[i]])).detach()[0]
+            worst = max(worst, float((scores[i] - full[len(p) - 1:]).abs().max()),
+                        float((first[i, :len(p)] - full[:len(p)]).abs().max()))
+        runs += 1
+    check("generate: artimli (AttentionCache) = tam yeniden hesap -- ayni token'lar, %d ayar x 12 istem (1-20 token) x 15; "
+          "tek basina = batch icinde; her konumun skoru tolerans icinde" % runs, same and worst < 1e-4, "en buyuk fark %.1e" % worst)
+    edge = BlockModel(n, d=16, units=24, t_max=64)
+    check("generate: n = 0 bos, n = 1 istem hesabinin son konumu; transformer eski yoldan",
+          TR.generate(edge, prompts[:3], 0) == [[], [], []]
+          and TR.generate(edge, prompts[:3], 1) == TR.generate(edge, prompts[:3], 1, cached=False)
+          and len(TR.generate(TR.TransformerModel(n, d=16, layers=1), prompts[:3], 4)[2]) == 4)
+
+    # egitilmis agirlik: akrabalik verisinde 60 adim; sinav sorulari (<steps> dahil) ve uzun devam
+    data = D.build()
+    sids, smask = EK.sequences(data)
+    nv = len(data["vocab"])
+    trained, curve = TR.train_seq("shared", sids[:256], smask[:256], nv, steps=60, log_at=(0, 60))
+    ix = {w: i for i, w in enumerate(data["vocab"])}
+    qs = [[ix[D.EOS]] + [ix[t] for t in e["prompt"]] for e in data["exam"]][:96]
+    old, new = TR.generate(trained, qs, 24, cached=False), TR.generate(trained, qs, 24)
+    scores, _ = cached_scores(trained, qs[:24], new[:24])
+    err = max(float((scores[i] - trained.logits(torch.tensor([q + new[i]])).detach()[0, len(q) - 1:]).abs().max())
+              for i, q in enumerate(qs[:24]))
+    check("generate, egitilmis Model X (akrabalik, 256 cumle, 60 adim): 96 sinav sorusu x 24 token artimli = tam yeniden hesap; "
+          "skorlar tolerans icinde", old == new and err < 1e-4 and curve[-1]["nll"] < curve[0]["nll"],
+          "fark %.1e  kayip %.3f -> %.3f" % (err, curve[0]["nll"], curve[-1]["nll"]))
+
+
+def t_speed_proposals():
+    """bench_speed_20'nin onerileri (adlar ONERI): kayip ve gradyan eski hesapla float toleransinda ayni; prefetch ayni parca."""
+    import bench_speed_20 as BS
+    from model_20 import BlockModel
+    g = torch.Generator().manual_seed(33)
+    n = 30
+    ids = torch.randint(0, n, (6, 40), generator=g)
+    lengths = torch.tensor([40, 7, 25, 12, 3, 31])
+    mask = torch.arange(40)[None, :] < lengths[:, None]
+    ids[~mask] = 0
+    worst = {}
+    for kw in (dict(), dict(stream_norm=False), dict(stream_norm=False, layer_norm=True)):
+        m = BlockModel(n, d=16, units=24, t_max=64, **kw)
+        with torch.no_grad():
+            for p_ in m.parameters():
+                if p_.requires_grad:
+                    p_.copy_(0.5 * torch.randn(p_.shape, generator=g))
+        runs = {}
+        for name, fn in (("old", lambda: m.loss(ids, mask)), ("valid_rows", lambda: BS.loss_valid_rows(m, ids, mask)),
+                         ("crop", lambda: m.loss(*BS.crop(ids[1:], mask[1:])))):
+            m.zero_grad()
+            total, nll = fn()
+            total.backward()
+            runs[name] = (float(nll.detach()), [p_.grad.clone() for p_ in m.parameters() if p_.grad is not None])
+        m.zero_grad()
+        total, nll = m.loss(ids[1:], mask[1:])
+        total.backward()
+        runs["old_rest"] = (float(nll.detach()), [p_.grad.clone() for p_ in m.parameters() if p_.grad is not None])
+        for a, b in (("old", "valid_rows"), ("old_rest", "crop")):
+            d_nll = abs(runs[a][0] - runs[b][0])
+            d_grad = max(float((x - y).abs().max() / (x.abs().max() + 1e-12)) for x, y in zip(runs[a][1], runs[b][1]))
+            worst[b] = max(worst.get(b, 0.0), d_nll, d_grad)
+    cropped = BS.crop(ids[1:], mask[1:])[0].shape[1]
+    check("oneri valid_rows (skor yalniz sayilan konumda) ve crop (en uzun diziye kirpma): kayip ve gradyan eski hesapla "
+          "float toleransinda ayni (3 ayar)", worst["valid_rows"] < 1e-5 and worst["crop"] < 1e-5 and cropped == 31,
+          "valid_rows %.1e  crop %.1e (40 -> %d)" % (worst["valid_rows"], worst["crop"], cropped))
+    source = lambda step: (ids[step % 6:step % 6 + 2], mask[step % 6:step % 6 + 2])
+    pre = BS.Prefetch(source, "cpu")
+    check("oneri prefetch: adim adim ayni parca (bit duzeyinde)",
+          all(all(torch.equal(a, b) for a, b in zip(pre.get(s), source(s))) for s in range(8)))
+
+
 if __name__ == "__main__":
     print("tests (model_20)")
-    for f in (t_model, t_step2, t_step3, t_copy, t_transformer):
+    for f in (t_model, t_step2, t_step3, t_copy, t_transformer, t_generate_cached, t_speed_proposals):
         f()
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)

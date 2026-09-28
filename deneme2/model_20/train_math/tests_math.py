@@ -248,6 +248,14 @@ def t_exam(dur):
     check("breakdown: terim (2/3) ve hane kirilimlarinin n agirlikli toplami = butun kume", sorted(parts) == [2, 3]
           and all(abs(total[k] - whole[k]) < 1e-12 for k in ("accuracy", "length_ok", "first_digit"))
           and abs(by_digits["accuracy"] - mine["accuracy"]) < 1e-12 and total["n"] == len(qs))
+    saved = TR.generate.__defaults__
+    TR.generate.__defaults__ = (False,)                     # eski yol: her token'da butun dizi yeniden
+    try:
+        old_ask, old_rows = EM.ask(m, qs, "cpu", limit=10**9), EM.show(m, qs[:40])
+    finally:
+        TR.generate.__defaults__ = saved
+    check("ask, show: artimli uretim (AttentionCache) = eski tam yeniden hesap (rastgele Model X, 2 ve 3 terim)",
+          old_ask == whole and old_rows == EM.show(m, qs[:40]), str(whole))
     rows = EM.show(Scripted(lambda t: scripts[t]), [(2, 3), (15, 17), (123, 456)])
     check("show (kural 12): (soru, dogrusu, modelin yazdigi, dogru mu); hic durmayan isaretli",
           rows == [("2 + 3", "5", "5", True), ("15 + 17", "32", "23", False), ("123 + 456", "579", "5799 (durmadi)", False)], str(rows))

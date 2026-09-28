@@ -61,13 +61,33 @@ ROPE = True          # attention'in q ve k'sina RoPE (konum bilgisi).  Varsayila
                      # "Model X varsayilan model olsun" onayi); False = RoPE'suz C'
 
 
-def apply_rope(x):
+ROPE_TABLES = {}         # (d, device, dtype) -> (cos, sin) goruldugu en uzun T icin; kisa T ilk satirlari okur.  Her
+                         # cagri ayni 8 islemi tekrarlamasin; silme yok (iplikler arasi yaris olmasin), boy <= T_MAX
+
+
+def rope_angles(positions, dh):
+    """Konumlar (..., T) -> (cos, sin), (..., T, d/2): konum t'de i. cift t · 10000^(-2i/d) acisi."""
+    freq = 10000.0 ** (-torch.arange(0, dh, 2, device=positions.device, dtype=positions.dtype) / dh)   # (d/2,)
+    angle = positions[..., None] * freq                                                          # (..., T, d/2)
+    return angle.cos(), angle.sin()
+
+
+def apply_rope(x, positions=None):
     """RoPE, x (..., T, d): konum t'de her boyut cifti t · 10000^(-2i/d) acisiyla dondurulur; iki konumun
-    <q, k> skoru yalniz aradaki mesafeye bagli kalir.  Parametresi yok."""
+    <q, k> skoru yalniz aradaki mesafeye bagli kalir.  Parametresi yok.  positions (B, T): satir basina konum
+    (artimli uretim); None = 0..T-1, tablo ROPE_TABLES'tan (ayni hesap, bir kez)."""
     T, dh = x.shape[-2], x.shape[-1]
-    freq = 10000.0 ** (-torch.arange(0, dh, 2, device=x.device, dtype=x.dtype) / dh)          # (d/2,)
-    angle = torch.arange(T, device=x.device, dtype=x.dtype)[:, None] * freq[None, :]          # (T, d/2)
-    cos, sin = angle.cos(), angle.sin()
+    if positions is not None:
+        cos, sin = rope_angles(positions.to(x.dtype), dh)
+    elif torch.compiler.is_compiling() or torch.is_inference_mode_enabled():   # derlemede sabit; inference tensor saklanmaz
+        cos, sin = rope_angles(torch.arange(T, device=x.device, dtype=x.dtype), dh)
+    else:
+        key = (dh, x.device, x.dtype)
+        table = ROPE_TABLES.get(key)
+        if table is None or table[0].shape[0] < T:
+            table = rope_angles(torch.arange(T, device=x.device, dtype=x.dtype), dh)
+            ROPE_TABLES[key] = table
+        cos, sin = table[0][:T], table[1][:T]
     x1, x2 = x[..., 0::2], x[..., 1::2]
     return torch.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], -1).flatten(-2)
 
@@ -91,7 +111,17 @@ class TokenPoints(torch.nn.Module):
 
     def points(self):
         # PL_i = (PF_i + Δ_i) / |PF_i + Δ_i|      her token icin
-        return F.normalize(self.fixed_points + self.shift, dim=-1)
+        if torch.is_grad_enabled():
+            return F.normalize(self.fixed_points + self.shift, dim=-1)
+        # gradyansiz (sinav, uretim): agirlik degismedikce ayni tablo; her ileri hesapta iki kez kurulmasin.  Ayni bellek
+        # ve ayni surum = ayni deger: yerinde her guncelleme (Adam, load_state_dict) surumu arttirir; tutulan takma adlar
+        # eski bellegi canli tutar, adres baska tensore gecemez
+        s, f = self.shift, self.fixed_points
+        memo = getattr(self, "points_memo", None)
+        if memo is None or not (memo[0].data_ptr() == s.data_ptr() and memo[1] == s._version
+                                and memo[2].data_ptr() == f.data_ptr() and memo[3] == f._version):
+            self.points_memo = memo = (s.detach(), s._version, f.detach(), f._version, F.normalize(f + s, dim=-1))
+        return memo[4]
 
     def anchor_loss(self):
         """PF'den uzaklasmanin bedeli."""
@@ -158,15 +188,18 @@ class CausalAttention(torch.nn.Module):
             self.W_copy_gate = torch.nn.Parameter(torch.zeros(1, d))             # kapi: bu konumda kopyala mi
             self.copy_gate_bias = torch.nn.Parameter(torch.zeros(1))             # baslangicta kapi yari acik (0,5)
 
-    def queries_keys(self, x):
+    def queries_keys(self, x, positions=None):
         # q_t = W_query·PL_t / |W_query·PL_t|      k_j = W_key·PL_j / |W_key·PL_j|      (ara sonuc, saklanmaz)
         q, k = F.normalize(x @ self.W_query.T, dim=-1), F.normalize(x @ self.W_key.T, dim=-1)
         if self.rope:                                     # konuma gore dondur; boy 1 kalir
-            q, k = apply_rope(q), apply_rope(k)
+            q, k = apply_rope(q, positions), apply_rope(k, positions)
         return q, k
 
-    def forward(self, x, points=None):
-        """x (B, T, d) PL ya da durum dizisi -> c (B, T, d).  points verilirse (Oneri A) ayni agirliklarla (c, c')."""
+    def forward(self, x, points=None, cache=None):
+        """x (B, T, d) PL ya da durum dizisi -> c (B, T, d).  points verilirse (Oneri A) ayni agirliklarla (c, c').
+        cache (AttentionCache): artimli uretim, x yalniz yeni konumlar."""
+        if cache is not None:
+            return cache.attend(self, x, points)
         q, k = self.queries_keys(x)
         # scaled_dot_product_attention (SDPA) su hesabi yapar, weights() ile ayni:
         #   s_tj = scale · <q_t, k_j>                 her konum t, her konum j icin
@@ -186,6 +219,45 @@ class CausalAttention(torch.nn.Module):
         T = x.shape[-2]
         s = s.masked_fill(torch.ones(T, T, dtype=torch.bool, device=x.device).triu(1), float("-inf"))   # j > t: -∞
         return torch.softmax(s, -1)                               # a_tj = e^s_tj / Σ_i e^s_ti
+
+
+class AttentionCache:
+    """Artimli (cached) uretim icin BIR turun attention bellegi: yazilmis konumlarin key'leri (RoPE'li) ve value'lari.
+    Attention nedensel: onceki konumlarin durumu yeni token'la degismez, yeni konum yalniz kendi q, k, v'sini hesaplar.
+    Ilk cagri istem (B, L) -- normal ileri hesabin aynisi; sonraki her cagri satir basina TEK yeni token.
+    lengths (B,): istem uzunluklari (sagdan dolgulu; satir r'nin ilk yeni token'i konum lengths[r]'ye yazilir,
+    dolgunun durumlari o sirada ustune yazilir ve o ana kadar maskelidir).  capacity: istem + uretilecek token."""
+
+    def __init__(self, lengths, capacity):
+        self.next, self.capacity = lengths.clone(), capacity     # satir basina siradaki konum
+        self.keys = self.values = None
+        self.span = 0                                            # yazilmis en uzun satirin boyu (Python sayisi: senkron yok)
+
+    def attend(self, at, x, points=None):
+        v = x if points is None else torch.cat([x, points], -1)
+        B, t, d = x.shape
+        if self.keys is None:                                    # istem: CausalAttention.forward ile ayni islemler
+            q, k = at.queries_keys(x)
+            out = F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=at.scale)
+            self.keys = k.new_zeros(B, self.capacity, k.shape[-1])
+            self.values = v.new_zeros(B, self.capacity, v.shape[-1])
+            self.keys[:, :t], self.values[:, :t] = k, v
+            self.span = t
+        else:
+            assert t == 1, "istemden sonra satir basina tek token"
+            pos = self.next[:, None]                             # (B, 1)
+            q, k = at.queries_keys(x, pos)
+            self.keys.scatter_(1, pos[..., None].expand(-1, -1, k.shape[-1]), k)
+            self.values.scatter_(1, pos[..., None].expand(-1, -1, v.shape[-1]), v)
+            self.next = self.next + 1                            # yeni tensor: pos (gorunum) degismesin
+            self.span += 1                                       # butun satirlar birer ilerler
+            S = self.span
+            allowed = torch.arange(S, device=x.device)[None, None, :] <= pos[..., None]   # j <= konum; ilerisi dolgu
+            out = F.scaled_dot_product_attention(q, self.keys[:, :S], self.values[:, :S], attn_mask=allowed,
+                                                 scale=at.scale)
+        if points is None:
+            return out
+        return out[..., :d], out[..., d:]
 
 
 class SequenceModel(torch.nn.Module):
@@ -247,18 +319,18 @@ class Block(torch.nn.Module):
             self.norm_attention = torch.nn.LayerNorm(d)
             self.norm_facts = torch.nn.LayerNorm(d)
 
-    def forward(self, h, points=None):
+    def forward(self, h, points=None, cache=None):
         at = self.attention
         unit = lambda v: F.normalize(v, dim=-1)
         norm_a, norm_f = (self.norm_attention, self.norm_facts) if self.layer_norm else (unit, unit)
         x = h if self.stream_norm else norm_a(h)             # attention'in okudugu; stream_norm'da h zaten normlu
         if at.copy_path:
             assert points is not None, "kopya yolu acik: kelime noktalari (points) verilmeli"   # yoksa c, c' batch'ten bolunur
-            c, c_copy = at(x, points)
+            c, c_copy = at(x, points, cache)
             gate = torch.sigmoid(x @ at.W_copy_gate.T + at.copy_gate_bias)          # g_t, (B, T, 1): konumun kendi durumundan
             added = c @ at.W_context.T + gate * (c_copy @ at.W_copy.T)             # W_context · c_t + g_t · W_copy · c'_t
         else:
-            added = at(x) @ at.W_context.T                                         # W_context · c_t
+            added = at(x, cache=cache) @ at.W_context.T                            # W_context · c_t
         if self.stream_norm:
             h = norm_a(h + added)                                                  # h_t = norm(h_t + W_context · c_t)
             return norm_f(h + self.facts(h))                                       # h_t = norm(h_t + olgu(h_t))
@@ -288,19 +360,20 @@ class BlockModel(torch.nn.Module):
     def turn_blocks(self):
         return [self.blocks[0]] * self.turns if self.shared else list(self.blocks)
 
-    def hidden(self, ids):
-        """Her turdan sonraki durumlar: [h0 = PL, h1, ..., h_TURNS], her biri (B, T, d)."""
+    def hidden(self, ids, caches=None):
+        """Her turdan sonraki durumlar: [h0 = PL, h1, ..., h_TURNS], her biri (B, T, d).  caches: tur basina bir
+        AttentionCache (artimli uretim; ids yalniz yeni token'lar)."""
         h = self.tokens.points()[ids]
         points = h if self.copy_path else None                # Oneri A: kelimelerin kendi noktalari, turlarda degismez
         out = [h]
-        for block in self.turn_blocks():
-            h = block(h, points)
+        for i, block in enumerate(self.turn_blocks()):
+            h = block(h, points, None if caches is None else caches[i])
             out.append(h)
         return out
 
-    def logits(self, ids):
+    def logits(self, ids, caches=None):
         P = self.tokens.points()
-        h = self.hidden(ids)[-1]                               # son durum; stream_norm'da zaten kurede
+        h = self.hidden(ids, caches)[-1]                       # son durum; stream_norm'da zaten kurede
         if self.layer_norm:
             return self.norm_final(h) @ P.T                    # skor_tj = <LN(h_t), PL_j>
         if not self.stream_norm:
