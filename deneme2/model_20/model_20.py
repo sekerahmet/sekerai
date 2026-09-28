@@ -53,8 +53,9 @@ LAYERS = 2           # SHARED_BLOCK'ta farkli Block (katman) sayisi, turlar sira
                      # 28 Eylul: "2X2 şu an varsayılan olsun"; TinyStories 1 epok ppl 7,95 / X2 9,73).  1 = tek Block x TURNS tur
 FACT_UNITS = 256     # FactUnits birim sayisi; 4 x D (transformer aliskanligi), olculmedi
 FACT_ACTIVATION = "relu"   # FactUnits: "relu" u = ReLU(W_fact_in x - fact_threshold) | "swiglu" u = SiLU(W_fact_in x) *
-                           # (W_fact_up x), esik yok (kapili; nGPT gibi x = sqrt(d) h).  Ayni parametre icin swiglu'da units
-                           # 2/3.  Kullanici, 28 Eylul: "önce sadece S bakalım" (ReLU literaturde kapili yapilarin gerisinde)
+                           # (W_fact_up x), esik yok (kapili; nGPT gibi x = sqrt(d) h) | "reglu" u = ReLU(W_fact_in x -
+                           # fact_threshold) * (W_fact_up x) (kapi tam sifir, okunur).  Ayni parametre icin kapililarda units
+                           # 2/3.  Kullanici, 28 Eylul: "önce sadece S bakalım", sonra "1 ve 2 ok" (G kolu)
 STREAM_NORM = True   # True: durum her eklemeden sonra kureye (bugunku).  False: akis normalize edilmez, yalniz attention'in
                      # ve FactUnits'in okudugu kopya normalize edilir (transformer gibi); cikis <norm(h), PL> (27 Eylul)
 LAYER_NORM = False   # True: L2 norm yerine LayerNorm (norm_attention, norm_facts, norm_final; ogrenilen kazanc ve kayma);
@@ -321,13 +322,13 @@ class FactUnits(torch.nn.Module):
 
     def __init__(self, d=D, units=FACT_UNITS, seed=POINTS_SEED + 3, activation="relu"):
         super().__init__()
-        assert activation in ("relu", "swiglu"), activation
+        assert activation in ("relu", "swiglu", "reglu"), activation
         g = torch.Generator().manual_seed(seed)
         self.activation = activation
         self.W_fact_in = torch.nn.Parameter(torch.randn(units, d, generator=g) / d ** 0.5)   # durumdan birimlere (kapi)
-        if activation == "relu":
+        if activation != "swiglu":
             self.fact_threshold = torch.nn.Parameter(torch.zeros(units))                      # ornekteki "- 1"
-        else:
+        if activation != "relu":
             self.W_fact_up = torch.nn.Parameter(torch.randn(units, d, generator=g) / d ** 0.5)   # tasinan icerik
         self.W_fact_out = torch.nn.Parameter(torch.zeros(d, units))                          # birimlerden duruma, 0'dan
 
@@ -335,7 +336,10 @@ class FactUnits(torch.nn.Module):
         if self.activation == "swiglu":                  # u_i = SiLU(W_fact_in[i] · h) · (W_fact_up[i] · h)
             return (F.silu(h @ self.W_fact_in.T) * (h @ self.W_fact_up.T)) @ self.W_fact_out.T
         # u_i = max(0, Σ_b W_fact_in[i,b] · h_b - fact_threshold_i);   cikti_a = Σ_i W_fact_out[a,i] · u_i
-        return torch.relu(h @ self.W_fact_in.T - self.fact_threshold) @ self.W_fact_out.T
+        u = torch.relu(h @ self.W_fact_in.T - self.fact_threshold)
+        if self.activation == "reglu":                   # kapi tam sifir, icerik W_fact_up · h
+            u = u * (h @ self.W_fact_up.T)
+        return u @ self.W_fact_out.T
 
 
 class Block(torch.nn.Module):
@@ -441,7 +445,7 @@ class BlockModel(torch.nn.Module):
         for b in self.blocks:
             at, f = b.attention, b.facts
             for w in ((at.W_query, at.W_key, f.W_fact_in) + ((at.W_value,) if at.heads > 1 else ())
-                      + ((f.W_fact_up,) if f.activation == "swiglu" else ())):
+                      + ((f.W_fact_up,) if f.activation != "relu" else ())):
                 w.copy_(F.normalize(w, dim=1))
             for w in (at.W_context, f.W_fact_out):
                 w.copy_(F.normalize(w, dim=0))

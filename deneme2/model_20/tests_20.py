@@ -1269,6 +1269,22 @@ def t_fact_activation():
         err = float((f(x) - ref).abs().max())
     check("fact_activation swiglu: cikti = W_fact_out (SiLU(W_fact_in x) * (W_fact_up x)) (bagimsiz float64)", err < 1e-12,
           "fark %.1e" % err)
+    fr = FactUnits(16, 12, activation="reglu").double()
+    with torch.no_grad():
+        for p_ in fr.parameters():
+            p_.copy_(torch.randn(p_.shape, generator=g, dtype=torch.float64))
+        gate = torch.clamp(x @ fr.W_fact_in.T - fr.fact_threshold, min=0)
+        ref_r = (gate * (x @ fr.W_fact_up.T)) @ fr.W_fact_out.T
+        err_r = float((fr(x) - ref_r).abs().max())
+    names_r = {k for k, _ in fr.named_parameters()}
+    check("fact_activation reglu: cikti = W_fact_out (ReLU(W_fact_in x - esik) * (W_fact_up x)) (bagimsiz float64); "
+          "esik ve W_fact_up birlikte", err_r < 1e-12 and {"fact_threshold", "W_fact_up"} <= names_r, "fark %.1e" % err_r)
+    rg, curve_r = TR.train_seq("shared", sids, smask, nv, steps=10, log_at=(0, 10),
+                               model_kw=dict(fact_activation="reglu", units=170))
+    check("fact_activation reglu: egitimde kayip iner; W_fact_up satirlari birim",
+          curve_r[-1]["nll"] < curve_r[0]["nll"]
+          and all(torch.allclose(b.facts.W_fact_up.norm(dim=1), torch.ones(170), atol=1e-5) for b in rg.blocks),
+          "%.3f -> %.3f" % (curve_r[0]["nll"], curve_r[-1]["nll"]))
 
     opts = []
     grab = lambda step, model, opt: opts.append(opt)
