@@ -22,6 +22,7 @@ TAG = "tam_n8000_v4"
 PAD_TOKEN, EOS_TOKEN, UNK_TOKEN, NL_TOKEN = "<dolgu>", "<eos>", "<bilinmeyen>", "<nl>"
 SPECIAL = (PAD_TOKEN, EOS_TOKEN, UNK_TOKEN, NL_TOKEN)     # v4 sozlugunun basi, bu sirayla (id 0-3)
 SEQ_LEN = 512      # pencere = Model X'in T_MAX'i; v4'te hikayelerin %98,4'u sigar (256'da %89,6)
+TRIM_MULTIPLE = 8  # kirpilan batch genisligi bunun katina yuvarlanir: sekil cesidi azalir (512 / 8 = 64 genislik)
 
 # --- tokenizer (model_18 data_stories v4'ten kopya): kelime duzeyi, kisaltma tek token, noktalama ayri
 TOKEN_RE = re.compile(r"[A-Za-z]+'[A-Za-z]+|[A-Za-z]+|[0-9]+|[^\sA-Za-z0-9]")
@@ -156,12 +157,14 @@ def audit(data):
     return dict(data["counts"], valid_in_train=len(data["valid_in_train"]))
 
 
-def sequences(data, split, rows):
-    """Hikaye pencereleri -> (ids, mask), (len(rows), seq_len): <eos> hikaye <eos>, sagdan <dolgu>; mask gercek token."""
-    vocab, T = data["vocab"], data["seq_len"]
+def sequences(data, split, rows, width=None):
+    """Hikaye pencereleri -> (ids, mask), (len(rows), width): <eos> hikaye <eos>, sagdan <dolgu>; mask gercek token.
+    width: varsayilan seq_len; daha dar verilirse en uzun pencere sigmali."""
+    vocab, T = data["vocab"], data["seq_len"] if width is None else width
     eos = vocab.index(EOS_TOKEN)
     rows = np.asarray(rows, dtype=np.int64)
     starts, lengths = data[split + "_start"][rows], data[split + "_length"][rows]
+    assert len(rows) == 0 or int(lengths.max()) + 2 <= T, "pencere genislige sigmiyor"
     ids = np.full((len(rows), T), vocab.index(PAD_TOKEN), dtype=np.int64)
     ids[:, 0] = eos
     a = data[split]
@@ -172,9 +175,31 @@ def sequences(data, split, rows):
     return torch.from_numpy(ids), torch.from_numpy(mask)
 
 
-def batches(data, batch_size, seed=0):
-    """Adimin fonksiyonu step -> (ids, mask), sekil hep (batch_size, seq_len).  Epok e: train pencerelerinin (seed, e)
-    tohumlu permutasyonu sirayla bolunur; artan son parca o epokta kullanilmaz.  Ayni step her zaman ayni parca (surdurme)."""
+def bucket_plan(data, batch_size, perm, bucket, seed, epoch):
+    """Epok permutasyonunun ilk per_epoch x batch_size'i -> per_epoch batch (satir listeleri).  bucket x batch_size'lik
+    parcalar boya gore siralanir, her parca hedef sayisi (L + 1) esit bucket batch'e kesilir; batch sirasi (seed, epoch, 1)
+    tohumuyla karistirilir.  Ayni hikayeler, ayni adim sayisi; batch'in satir sayisi degisir."""
+    per_epoch = len(perm) // batch_size
+    lengths = data["train_length"]
+    out = []
+    for s in range(0, per_epoch * batch_size, bucket * batch_size):
+        chunk = perm[s:min(s + bucket * batch_size, per_epoch * batch_size)]
+        k = len(chunk) // batch_size
+        chunk = chunk[np.argsort(lengths[chunk], kind="stable")]
+        cum = np.cumsum(lengths[chunk] + 1)                            # hedef: pencere - 1 = L + 1
+        middle = cum - (lengths[chunk] + 1) / 2                        # hikaye, orta noktasinin dustugu batch'e
+        out += np.split(chunk, np.searchsorted(middle, cum[-1] * np.arange(1, k) / k))
+    assert len(out) == per_epoch and all(len(b) for b in out), "bos batch"
+    order = np.random.default_rng([seed, epoch, 1]).permutation(per_epoch)
+    return [out[j] for j in order]
+
+
+def batches(data, batch_size, seed=0, trim=False, bucket=None):
+    """Adimin fonksiyonu step -> (ids, mask).  Epok e: train pencerelerinin (seed, e) tohumlu permutasyonu sirayla
+    bolunur; artan son parca o epokta kullanilmaz.  Ayni step her zaman ayni parca (surdurme).
+    trim=False: sekil hep (batch_size, seq_len).  trim=True: genislik batch'in en uzun penceresi (TRIM_MULTIPLE'in katina
+    yuvarlanir); dolgu sagda ve attention nedensel, kayip ve gradyan ayni (float duzeyinde), batch'ler ayni.
+    bucket=K (trim acik): bucket_plan -- ayni hikayeler ve adim sayisi, ama batch'i birlikte olusturan hikayeler DEGISIR."""
     n = len(data["train_start"])
     per_epoch = n // batch_size
     assert per_epoch > 0, "batch_size (%d) > train penceresi (%d)" % (batch_size, n)
@@ -184,7 +209,12 @@ def batches(data, batch_size, seed=0):
         epoch, i = divmod(step, per_epoch)
         if epoch not in memo:                              # epok basina bir permutasyon; yalniz hiz icin saklanir
             memo.clear()
-            memo[epoch] = np.random.default_rng([seed, epoch]).permutation(n)
-        return sequences(data, "train", memo[epoch][i * batch_size:(i + 1) * batch_size])
+            perm = np.random.default_rng([seed, epoch]).permutation(n)
+            memo[epoch] = perm if bucket is None else bucket_plan(data, batch_size, perm, bucket, seed, epoch)
+        rows = memo[epoch][i * batch_size:(i + 1) * batch_size] if bucket is None else memo[epoch][i]
+        if not (trim or bucket):
+            return sequences(data, "train", rows)
+        width = int(data["train_length"][rows].max()) + 2
+        return sequences(data, "train", rows, min(-(-width // TRIM_MULTIPLE) * TRIM_MULTIPLE, data["seq_len"]))
 
     return batch

@@ -199,22 +199,23 @@ class SequenceModel(torch.nn.Module):
         self.attention = CausalAttention(d, t_max, confidence, 100 * seed + 2) if attention else None
         self.scale = scale_for(n, confidence)
 
-    def logits(self, ids):
-        """ids (B, T) -> (B, T, n): konum t'de t+1'inci token."""
+    def logits(self, ids, positions=None):
+        """ids (B, T) -> (B, T, n): konum t'de t+1'inci token.  positions (B, T) bool: yalniz o konumlar -> (N, n)."""
         P = self.tokens.points()                          # PL, 74 x d
         x = P[ids]                                        # her konumun token'inin noktasi
         raw = x @ self.next.W_next.T                      # raw_t = W_next · PL_t
         if self.attention is not None:
             raw = raw + self.attention(x) @ self.attention.W_context.T   # raw_t = W_next · PL_t + W_context · c_t
+        if positions is not None:
+            raw = raw[positions]
         # q_t = raw_t / |raw_t|;   skor_tj = scale · <q_t, PL_j>   (74 token)
         return self.scale * F.normalize(raw, dim=-1) @ P.T
 
     def loss(self, ids, mask):
         """mask (B, T) gercek token; hedef t+1 gercekse konum t sayilir.  (toplam, nll)."""
-        logits = self.logits(ids[:, :-1])                 # konum t'nin skorlari ...
-        valid = mask[:, 1:]                               # ... hedefi t+1'deki token; <pad> hedefler sayilmaz
+        valid = mask[:, 1:]                               # hedefi t+1'deki token; <pad> hedefler sayilmaz, skoru da hesaplanmaz
         # cross_entropy: p = softmax(skor);  nll = ortalama( -log p(hedef) )  butun gercek konumlarda
-        nll = F.cross_entropy(logits[valid], ids[:, 1:][valid])
+        nll = F.cross_entropy(self.logits(ids[:, :-1], valid), ids[:, 1:][valid])
         return nll + self.tokens.anchor_loss(), nll       # + λ · Σ Δ²
 
 
@@ -298,9 +299,13 @@ class BlockModel(torch.nn.Module):
             out.append(h)
         return out
 
-    def logits(self, ids):
+    def logits(self, ids, positions=None):
+        """ids (B, T) -> (B, T, n).  positions (B, T) bool: yalniz o konumlar cikis katmanindan gecer -> (N, n), satir
+        sirasi logits(ids)[positions] ile ayni; attention yine butun diziyi gorur."""
         P = self.tokens.points()
         h = self.hidden(ids)[-1]                               # son durum; stream_norm'da zaten kurede
+        if positions is not None:
+            h = h[positions]                                   # cikis konum basina: secilmeyenin skoru hic hesaplanmaz
         if self.layer_norm:
             return self.norm_final(h) @ P.T                    # skor_tj = <LN(h_t), PL_j>
         if not self.stream_norm:
@@ -308,9 +313,8 @@ class BlockModel(torch.nn.Module):
         return self.scale * h @ P.T                            # skor_tj = scale · <h_t, PL_j>
 
     def loss(self, ids, mask):
-        logits = self.logits(ids[:, :-1])
-        valid = mask[:, 1:]
-        nll = F.cross_entropy(logits[valid], ids[:, 1:][valid])
+        valid = mask[:, 1:]                                    # hedefi dolgu olan konum sayilmaz: cikisi da hesaplanmaz
+        nll = F.cross_entropy(self.logits(ids[:, :-1], valid), ids[:, 1:][valid])
         return nll + self.tokens.anchor_loss(), nll
 
 

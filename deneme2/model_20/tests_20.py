@@ -694,9 +694,68 @@ def F_ce(logits, targets):
     return float(torch.nn.functional.cross_entropy(logits, targets))
 
 
+def reference_full_loss(m, ids, mask):
+    """Onceki loss (032e664): cikis katmani BUTUN konumlarda hesaplanir, sonra sayilan konumlar secilir."""
+    logits = m.logits(ids[:, :-1])
+    valid = mask[:, 1:]
+    nll = torch.nn.functional.cross_entropy(logits[valid], ids[:, 1:][valid])
+    return nll + (m.tokens.anchor_loss() if hasattr(m, "tokens") else 0), nll
+
+
+def loss_and_grads(m, fn, ids, mask):
+    m.zero_grad()
+    total, nll = fn(ids, mask)
+    total.backward()
+    return total.detach(), [p_.grad.clone() for p_ in m.parameters() if p_.requires_grad]
+
+
+def t_output_positions():
+    """loss: cikis katmani yalniz hedefli konumlarda; kirpilmis batch (sagdaki dolgu sutunlari atilir).  Ikisi de onceki
+    loss ile AYNI kayip ve gradyan vermeli (matematik ayni; float64'te ~1e-15, float32'de toplama sirasi kadar)."""
+    from model_20 import BlockModel, SequenceModel
+    from model_20_transformer import TransformerModel
+    n, width = 40, 48
+    g = torch.Generator().manual_seed(21)
+    lengths = [7, 30, 12, 45, 3, 19]                                   # sagdan dolgu; en uzunu 45 < 48
+    ids = torch.zeros(len(lengths), width, dtype=torch.long)
+    mask = torch.zeros(len(lengths), width, dtype=torch.bool)
+    for i, L in enumerate(lengths):
+        ids[i, :L] = torch.randint(1, n, (L,), generator=g)
+        mask[i, :L] = True
+    models = {"Model X": lambda: BlockModel(n, d=16, units=24), "stream_norm=False": lambda: BlockModel(
+        n, d=16, units=24, stream_norm=False), "layer_norm": lambda: BlockModel(n, d=16, units=24, layer_norm=True),
+        "copy_path, separate": lambda: BlockModel(n, d=16, units=24, copy_path=True, shared=False),
+        "SequenceModel (adim 2)": lambda: SequenceModel(n, d=16), "transformer": lambda: TransformerModel(n, d=16, units=24)}
+    top = max(lengths)
+    for name, make in models.items():
+        notes, ok = [], True
+        for dtype, tol in ((torch.float64, 1e-12), (torch.float32, 1e-5)):
+            torch.manual_seed(0)
+            m = make().to(dtype)
+            with torch.no_grad():
+                for p_ in m.parameters():
+                    if p_.requires_grad:
+                        p_.copy_(0.5 * torch.randn(p_.shape, generator=g, dtype=dtype))
+            old, g_old = loss_and_grads(m, lambda a, b: reference_full_loss(m, a, b), ids, mask)
+            for label, (a, b) in (("gather", (ids, mask)), ("gather+kirp", (ids[:, :top], mask[:, :top]))):
+                new, g_new = loss_and_grads(m, m.loss, a, b)
+                scale_g = max(float(x.abs().max()) for x in g_old)
+                d_loss = abs(float(new - old)) / abs(float(old))
+                d_grad = max(float((x - y).abs().max()) for x, y in zip(g_new, g_old)) / scale_g
+                exact = torch.equal(new, old) and all(torch.equal(x, y) for x, y in zip(g_new, g_old))
+                ok &= d_loss < tol and d_grad < tol
+                notes.append("%s %s kayip %.0e grad %.0e%s" % (str(dtype)[6:], label, d_loss, d_grad,
+                                                              " BIREBIR" if exact else ""))
+            with torch.no_grad():
+                full, part = m.logits(ids), m.logits(ids, mask)
+            ok &= torch.allclose(part, full[mask], rtol=tol, atol=tol) and part.shape == (int(mask.sum()), n)
+        check("cikis yalniz hedefte: kayip ve gradyan = onceki loss (float64 < 1e-12, float32 < 1e-5), %s" % name, ok,
+              " | ".join(notes))
+
+
 if __name__ == "__main__":
     print("tests (model_20)")
-    for f in (t_model, t_step2, t_step3, t_copy, t_transformer):
+    for f in (t_model, t_step2, t_step3, t_copy, t_transformer, t_output_positions):
         f()
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)

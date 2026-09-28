@@ -31,16 +31,18 @@ BATCH_SIZE = 64          # model_18 v4 ile ayni: 1 epok 41.602 adim; logits fp32
 PROBE_TOKENS = 80        # her sinavda istem basina uretilen token
 FINAL_TOKENS = 200       # sonda istem basina (ortalama hikaye 194 token)
 FINAL_STORIES = 8        # sonda ilk yarisi verilen valid hikayesi (sabit alt kumenin ilk 8'i)
+LAYOUT_DEFAULTS = dict(trim=False, bucket=None)   # config.json'da yoksa (eski kosu) bunlarla kosmustur
 RUNS = {}
 
 
 def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=False, setting="shared", save_every=None,
-          resume=False, batch_size=BATCH_SIZE, model_kw=None, **train_kw):
+          resume=False, batch_size=BATCH_SIZE, model_kw=None, trim=False, bucket=None, **train_kw):
     """Egitimi arka planda baslatir, hemen doner.  out doluysa once out_eski_<zaman>'a TASINIR, silinmez.
     setting "shared": Model X; model_kw bos kalan ayarlar model_20 varsayilanlari (config'e acik yazilir).
     compile=False: kinship'te Inductor ilk adimda AssertionError verdi (27 Eylul); yalniz hiz etkilenir.
     save_every: her save_every adimda out/checkpoint_tNNNNNN.pt {step, model, optimizer}.  resume=True: out'taki son
-    paketten surdurur -- klasor tasinmaz, gunluk uzar, paketten sonraki sinavlar atilir; ayarlar config.json ile ayni olmali."""
+    paketten surdurur -- klasor tasinmaz, gunluk uzar, paketten sonraki sinavlar atilir; ayarlar config.json ile ayni olmali.
+    trim, bucket: data_tinystories.batches'e gider (trim kaybi degistirmez; bucket batch'leri degistirir)."""
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
     if setting in TR.STEP3:
@@ -53,6 +55,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=Fals
                   fingerprint=data["fingerprint"], seq_len=data["seq_len"], vocab=len(data["vocab"]),
                   train_windows=len(data["train_start"]), exam_stories=len(rows), batch_size=batch_size,
                   steps_per_epoch=per_epoch, epochs=round(steps / per_epoch, 4), save_every=save_every, model_kw=model_kw,
+                  trim=trim, bucket=bucket,
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
                               copy_path=TR.COPY_PATH, stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
                               rope=True if setting.startswith("transformer") else TR.ROPE if setting in TR.STEP3 else False),
@@ -63,6 +66,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=Fals
         if not packs:
             raise RuntimeError("%s: surdurme paketi yok; bastan kosmak ayri karar (resume=False)" % out)
         saved = json.load(open(os.path.join(out, "config.json")))
+        saved = dict(LAYOUT_DEFAULTS, **saved)             # trim/bucket'tan onceki config: varsayilanla kosmustu
         differ = sorted(k for k in set(saved) | set(config) if k not in ("device", "compile") and saved.get(k) != config.get(k))
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)
@@ -121,7 +125,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=Fals
                     len(rows)))
             model, _ = TR.train_seq(setting, None, None, len(vocab), steps=steps, seed=seed, device=device, every=every,
                                     callback=callback, log_at=(), compile=compile, save_every=save_every, save=save,
-                                    checkpoint=checkpoint, batches=DT.batches(data, batch_size, seed), model_kw=model_kw,
+                                    checkpoint=checkpoint, batches=DT.batches(data, batch_size, seed, trim, bucket),
+                                    model_kw=model_kw,
                                     **train_kw)
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             final = dict(step=steps, valid=ET.exam(model, data, ET.exam_rows(data, None)), subset=ET.exam(model, data, rows))

@@ -69,14 +69,16 @@ class TransformerModel(torch.nn.Module):
                     std = 0.02 / math.sqrt(2 * layers) if name.split(".")[-2] in ("W_out", "W_mlp_out") else 0.02
                     p.copy_(torch.randn(p.shape, generator=g) * std)
 
-    def logits(self, ids):
+    def logits(self, ids, positions=None):
+        """positions (B, T) bool: yalniz o konumlar cikis katmanindan gecer -> (N, n)."""
         h = self.embedding(ids)
         for layer in self.layers:
             h = layer(h)
+        if positions is not None:
+            h = h[positions]
         return self.norm_final(h) @ self.embedding.weight.T
 
     def loss(self, ids, mask):
-        logits = self.logits(ids[:, :-1])
         valid = mask[:, 1:]
-        nll = F.cross_entropy(logits[valid], ids[:, 1:][valid])
+        nll = F.cross_entropy(self.logits(ids[:, :-1], valid), ids[:, 1:][valid])
         return nll, nll                                          # capa yok: toplam = nll
