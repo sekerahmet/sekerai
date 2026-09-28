@@ -62,7 +62,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                               optimizer=TR.OPTIMIZER, schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,
                               coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,
                               weight_ema=TR.WEIGHT_EMA,
-                              copy_path=TR.COPY_PATH, stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
+                              stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
                               normalized_update=TR.NORMALIZED_UPDATE if setting in TR.STEP3 else False,
                               sphere_weights=TR.SPHERE_WEIGHTS if setting in TR.STEP3 else False,
                               canon=TR.CANON if setting in TR.STEP3 else False,
@@ -74,6 +74,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         if not packs:
             raise RuntimeError("%s: surdurme paketi yok; bastan kosmak ayri karar (resume=False)" % out)
         saved = json.load(open(os.path.join(out, "config.json")))
+        assert not saved.pop("copy_path", False), "kopya yolu (Oneri A) 28 Eylul'de kaldirildi: bu kosu surdurulemez"
         # 27 Eylul oncesi config'lerde optimizer / takvim / bucket yok: o kosular Adam + cosine, rastgele batch idi.
         # compile sonucu degistirir: karsilastirilir
         saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN,

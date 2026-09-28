@@ -217,7 +217,7 @@ text(RX, y + 17, "(transformer 115.328 · V'siz 107.008)", "bs", "start")
 
 y = panel_rows(500, "Ayarlar", [
     ("ROPE", "True · yeni", "ropek"), ("SHARED_BLOCK · TURNS", "True · 2"), ("STREAM_NORM", "True"),
-    ("LAYER_NORM", "False"), ("COPY_PATH", "False"), ("D · FACT_UNITS", "64 · 256"), ("ANCHOR", "1e-3")],
+    ("LAYER_NORM", "False"), ("D · FACT_UNITS", "64 · 256"), ("ANCHOR", "1e-3")],
     valcls="numm")
 
 # RoPE kutusu

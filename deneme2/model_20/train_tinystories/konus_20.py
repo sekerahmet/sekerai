@@ -86,7 +86,8 @@ def load_model(run_dir, n_vocab, averaged=False):
     cfg = json.load(open(os.path.join(run_dir, "config.json")))
     kw = dict(cfg["model_kw"])
     kw.setdefault("layers", 1)                              # 28 Eylul oncesi kosular: tek Block
-    m = BlockModel(n_vocab, seed=0, copy_path=cfg.get("copy_path", False), stream_norm=cfg.get("stream_norm", True),
+    assert not cfg.get("copy_path"), "kopya yolu (Oneri A) 28 Eylul'de kaldirildi"
+    m = BlockModel(n_vocab, seed=0, stream_norm=cfg.get("stream_norm", True),
                    layer_norm=cfg.get("layer_norm", False), rope=cfg.get("rope", True), shared=cfg["setting"] == "shared",
                    normalized_update=cfg.get("normalized_update", False), sphere_weights=cfg.get("sphere_weights", False),
                    canon=cfg.get("canon", False), **kw)

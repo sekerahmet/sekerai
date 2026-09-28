@@ -15,7 +15,7 @@ import torch
 import torch._inductor.config
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from model_20 import (CANON, COPY_PATH, LAYER_NORM, NORMALIZED_UPDATE, ROPE, SPHERE_WEIGHTS, STREAM_NORM, AttentionCache,
+from model_20 import (CANON, LAYER_NORM, NORMALIZED_UPDATE, ROPE, SPHERE_WEIGHTS, STREAM_NORM, AttentionCache,
                       BigramModel, BlockModel, SequenceModel, deviation)
 from model_20_transformer import TransformerModel
 
@@ -144,7 +144,7 @@ def pad(rows, vocab):
 
 
 def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, lr_floor=LR_FLOOR, grad_clip=GRAD_CLIP,
-              weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None, compile=True, copy_path=COPY_PATH,
+              weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None, compile=True,
               save_every=None, save=None, checkpoint=None, stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=None,
               batches=None, model_kw=None, optimizer=OPTIMIZER, schedule=SCHEDULE, cooldown=COOLDOWN,
               normalized_update=None, sphere_weights=None, canon=None, coherence_window=COHERENCE_WINDOW,
@@ -155,9 +155,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     callback(step, model, nll): her `every` adimda, o adimin guncellemesinden ONCE (sinav, kayit, durdurma).
     compile: kayip hesabi (ileri + geri) torch.compile ile; VARSAYILAN ACIK (kullanici: "bu sabit ayar ve yes olsun").  Yalniz
     GPU'da uygulanir: CPU'da kendiliginden kapanir (asagidaki if), elle compile=False yazmak gerekmez.
-    copy_path: Oneri A (kopya yolu ve kapisi), yalniz Adim 3 modelinde.  setting "transformer": kiyas modeli
-    (model_20_transformer), ayni tarif.  rope: attention'da RoPE; None = modelin kendi varsayilani (transformer True,
-    BlockModel ROPE).
+    setting "transformer": kiyas modeli (model_20_transformer), ayni tarif.  rope: attention'da RoPE; None = modelin kendi
+    varsayilani (transformer True, BlockModel ROPE).
     save(step, model, opt): her save_every adimda, callback'ten sonra, guncellemeden ONCE -- adim s paketi s guncelleme
     gormus modeli ve optimizer'i tasir.  callback hata atarsa (durdurma dahil) o adimin paketi de yazilir.  checkpoint {step, model, optimizer}: o adimdan surdurur (ayni steps ve tarifle
     kesintisiz kosuyla bit duzeyinde ayni -- CPU'da; GPU'da compile token gradyanini atomik toplar, son bitler oynayabilir);
@@ -172,7 +171,6 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     weight_ema=d: her adimdan sonra ortalama <- d x ortalama + (1 - d) x agirlik (kurede satirlar yeniden birim);
     model.weight_ema = dict(model=<ortalama model>, decay=d).  Ortalama optimizer durumunda (checkpoint'e girer)."""
     assert batches is not None or ids is not None, "ids/mask ya da batches verilmeli"
-    assert setting in STEP3 or not copy_path, "copy_path yalniz Adim 3 (BlockModel) icin"
     assert setting in STEP3 or stream_norm, "stream_norm=False yalniz Adim 3 (BlockModel) icin"
     assert setting in STEP3 or not layer_norm, "layer_norm yalniz Adim 3 (BlockModel) icin"
     assert not setting.startswith("transformer") or not weight_decay, "transformer icin weight decay gruplari tanimli degil"
@@ -194,7 +192,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     if setting in ("transformer", "transformer_novalue"):   # novalue: V matrisi yok (tek head'de V.O tek matris)
         model = TransformerModel(n, seed=seed, value_matrix=setting == "transformer", rope=rope, **(model_kw or {}))
     elif setting in STEP3:
-        model = BlockModel(n, seed=seed, copy_path=copy_path, stream_norm=stream_norm, layer_norm=layer_norm, rope=rope,
+        model = BlockModel(n, seed=seed, stream_norm=stream_norm, layer_norm=layer_norm, rope=rope,
                            normalized_update=normalized_update, sphere_weights=sphere_weights, canon=canon, **STEP3[setting],
                            **(model_kw or {}))
     else:
@@ -209,7 +207,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     if optimizer == "muon":
         # Muon yalniz gizli 2 boyutlu matrislerde ("VO + FFN" duzeni, Wang 2025); token noktalari, esikler, W_query, W_key,
         # bias ve norm katsayilari Adam'da
-        hidden = ("W_context", "W_copy", "W_value", "W_fact_in", "W_fact_out", "W_value.weight", "W_out.weight",
+        hidden = ("W_context", "W_value", "W_fact_in", "W_fact_out", "W_value.weight", "W_out.weight",
                   "W_mlp_in.weight",
                   "W_mlp_out.weight")
         opt = Muon([dict(params=[p for k, p in named if k.endswith(hidden)], use_muon=True),
@@ -307,7 +305,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
                 kind = k.split(".")[-1]
                 if sphere_weights and kind in ("W_query", "W_key", "W_fact_in", "W_value"):   # kurede: yalniz teget
                     a, b = (v - (v * p.detach()).sum(1, keepdim=True) * p.detach() for v in (a, b))
-                elif sphere_weights and kind in ("W_context", "W_fact_out", "W_copy"):
+                elif sphere_weights and kind in ("W_context", "W_fact_out"):
                     a, b = (v - (v * p.detach()).sum(0, keepdim=True) * p.detach() for v in (a, b))
                 dot += float((a * b).sum())
                 na += float((a * a).sum())

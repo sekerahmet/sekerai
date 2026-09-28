@@ -39,13 +39,13 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
     n = {c: len(EK.questions(data, c)) for c in SHORT + STEPS_CLS}
-    # varsayilanlar da yazilir (lr, cosine tabani, clip, wd, kopya yolu, rope): config tek basina koşuyu tarif etsin
+    # varsayilanlar da yazilir (lr, cosine tabani, clip, wd, rope): config tek basina koşuyu tarif etsin
     compile = compile and torch.device(device).type == "cuda"     # train_seq ile ayni kural: compile yalniz GPU'da
     config = dict(name=name, setting=setting, steps=steps, seed=seed, every=every, device=device, compile=compile,
                   fingerprint=data["fingerprint"], train=len(data["train"]), sizes=n, save_every=save_every,
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
                               optimizer=TR.OPTIMIZER, schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,
-                              copy_path=TR.COPY_PATH, stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
+                              stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
                               normalized_update=TR.NORMALIZED_UPDATE if setting in TR.STEP3 else False,
                               sphere_weights=TR.SPHERE_WEIGHTS if setting in TR.STEP3 else False,
                               canon=TR.CANON if setting in TR.STEP3 else False,
@@ -60,6 +60,7 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
         if not packs:
             raise RuntimeError("%s: surdurme paketi yok; bastan kosmak ayri karar (resume=False)" % out)
         saved = json.load(open(os.path.join(out, "config.json")))
+        assert not saved.pop("copy_path", False), "kopya yolu (Oneri A) 28 Eylul'de kaldirildi: bu kosu surdurulemez"
         # 27 Eylul oncesi config'lerde optimizer / takvim yok: o kosular Adam + cosine idi.  compile sonucu degistirir: karsilastirilir
         # 28 Eylul oncesi config'lerde turns / layers yok: Adim 3 modeli tek Block x 2 tur idi
         saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN,

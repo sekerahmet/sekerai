@@ -196,7 +196,7 @@ def t_resume():
     ids, mask = EK.sequences(s)
     ids, mask = ids[:40], mask[:40]
     nv = len(s["vocab"])
-    for kw in (dict(), dict(copy_path=True), dict(weight_decay=0.1, optimizer="adam")):
+    for kw in (dict(), dict(weight_decay=0.1, optimizer="adam")):
         packs, seen_full, seen_resumed = {}, [], []
 
         def keep(step, model, opt):
@@ -297,7 +297,7 @@ def t_colab():
     run["thread"].join(600)
     cfg = json.load(open(out_dir + "/t/config.json"))
     check("colab_kinship: setting='transformer' ile start; config ayarlarin tamamini yazar (varsayilanlar dahil)",
-          run["done"] and not run["error"] and cfg["setting"] == "transformer" and cfg["copy_path"] is False
+          run["done"] and not run["error"] and cfg["setting"] == "transformer"
           and cfg["lr"] == TR.LR and cfg["grad_clip"] == TR.GRAD_CLIP and cfg["rope"] is True
           and "final.json" in os.listdir(out_dir + "/t"),
           str(run["error"] or cfg))

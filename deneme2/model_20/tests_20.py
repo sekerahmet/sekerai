@@ -234,7 +234,7 @@ def t_step2():
 
 def reference_blocks(m, ids):
     """Adim 3 formulu, float64, modelden bagimsiz: h = PL; her turda attention (durumlari getirir), W_context, FactUnits;
-    cikis h (W_next yok).  Oneri A acikken: + g · W_copy · Σ a PL, g = sigmoid(W_copy_gate h + copy_gate_bias).
+    cikis h (W_next yok).
     rope: q ve k karmasik sayi carpimiyla dondurulur (apply_rope'tan bagimsiz)."""
     unit = lambda v: v / v.norm(dim=-1, keepdim=True)
     dd = lambda t: t.detach().double()
@@ -261,9 +261,6 @@ def reference_blocks(m, ids):
             q, k = rot(q), rot(k)
         a = torch.softmax((at.scale * q @ k.transpose(-1, -2)).masked_fill(future, float("-inf")), -1)
         added = (a @ x) @ dd(at.W_context).T
-        if m.copy_path:
-            gate = 1 / (1 + torch.exp(-(x @ dd(at.W_copy_gate).T + dd(at.copy_gate_bias))))
-            added = added + gate * ((a @ PL[ids]) @ dd(at.W_copy).T)
         if m.stream_norm:
             h = na(h + added)
             u = torch.relu(h @ dd(b.facts.W_fact_in).T - dd(b.facts.fact_threshold))
@@ -345,7 +342,7 @@ def t_step3():
     # STREAM_NORM=False: akis normalize edilmez
     base, free = BlockModel(n, d=d, units=10), BlockModel(n, d=d, units=10, stream_norm=False)
     err0 = float((base.logits(ids) - free.logits(ids)).detach().abs().max())
-    for kw in (dict(shared=True), dict(shared=False), dict(shared=True, copy_path=True)):
+    for kw in (dict(shared=True), dict(shared=False)):
         mf = BlockModel(n, d=d, units=10, stream_norm=False, **kw)
         with torch.no_grad():
             for p_ in mf.parameters():
@@ -588,9 +585,6 @@ def t_step3():
           and t_muon == sorted("layers.%d.%s.weight" % (i, w) for i in range(2) for w in ("W_out", "W_mlp_in", "W_mlp_out"))
           and refused_wd, str(t_muon))
 
-    mc, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), copy_path=True, save_every=1, save=grab)
-    names_c = {id(p_): k.split(".")[-1] for k, p_ in mc.named_parameters()}
-    c_muon = sorted({names_c[id(p_)] for g_ in opts[-1].param_groups if g_["use_muon"] for p_ in g_["params"]})
     packs_s = {}
     keep_s = lambda step, model, opt: packs_s.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
                                                                      optimizer=copy.deepcopy(opt.state_dict())))
@@ -606,78 +600,10 @@ def t_step3():
         stopped = True
     res_s, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs_s[3])
     check("durdurma: callback hata atinca o adimin paketi de yazilir (adim 3, save_every 2); ondan surdurulen = kesintisiz, "
-          "bit duzeyinde; kopya yolunda W_copy Muon'da (W_context'in kardesi)",
+          "bit duzeyinde",
           stopped and sorted(packs_s) == [2, 3]
-          and all(torch.equal(a_, b_) for a_, b_ in zip(full_m.state_dict().values(), res_s.state_dict().values()))
-          and c_muon == ["W_context", "W_copy", "W_fact_in", "W_fact_out"], "%s %s" % (sorted(packs_s), c_muon))
-
-
-def t_copy():
-    import functools
-    import model_20
-    BlockModel = functools.partial(model_20.BlockModel, normalized_update=False, sphere_weights=False,
-                                   canon=False, turns=2, layers=1)   # 28 Eylul oncesi
-    n, d = 12, 6
-    g = torch.Generator().manual_seed(11)
-    ids = torch.randint(0, n, (3, 9), generator=g)
-
-    off, on = BlockModel(n, d=d, units=10), BlockModel(n, d=d, units=10, copy_path=True)
-    so, sn = off.state_dict(), on.state_dict()
-    added = sorted(k.split(".")[-1] for k in set(sn) - set(so))
-    same_start = all(torch.equal(so[k], sn[k]) for k in so)
-    with torch.no_grad():                        # baslangicta W_context = W_fact_out = 0: iki model zaten ayni olurdu
-        for k, p_ in off.named_parameters():
-            if p_.requires_grad:
-                v = 0.5 * torch.randn(p_.shape, generator=g)
-                p_.copy_(v)
-                dict(on.named_parameters())[k].copy_(v)
-        on.blocks[0].attention.W_copy_gate.copy_(torch.randn(1, d, generator=g))
-    err = float((on.logits(ids) - off.logits(ids)).detach().abs().max())
-    check("kopya yolu: varsayilan kapali ve parametresi yok; acikken yalniz W_copy, W_copy_gate, copy_gate_bias eklenir, "
-          "digerleri ayni baslar; rastgele parametrelerle W_copy = 0 iken skor kapaliyla ayni",
-          not any("copy" in k for k in so) and added == ["W_copy", "W_copy_gate", "copy_gate_bias"]
-          and same_start and err < 1e-5, "%s, fark %.1e" % (added, err))
-
-    for kw in (dict(shared=True), dict(shared=False)):
-        m = BlockModel(n, d=d, units=10, copy_path=True, **kw)
-        with torch.no_grad():
-            for p_ in m.parameters():
-                if p_.requires_grad:
-                    p_.copy_(0.5 * torch.randn(p_.shape, generator=g))
-        err = float((m.logits(ids).detach().double() - reference_blocks(m, ids)).abs().max())
-        check("kopya yolu: skor = tasarim formulu (bagimsiz float64; c' = sum a PL, g = sigmoid(W_copy_gate h + b)), %s" % kw,
-              err < 1e-4, "fark %.1e" % err)
-
-    with torch.no_grad():
-        for b in m.blocks:
-            b.attention.copy_gate_bias.fill_(-50.0)                   # kapi kapali: g ~ 2e-22
-        closed = m.logits(ids).detach()
-        for b in m.blocks:
-            b.attention.W_copy.zero_()
-        err = float((closed - m.logits(ids).detach()).abs().max())
-    check("kopya yolu: kapi kapaliyken (g ~ 0) kopya katkisi yok, W_copy = 0 ile ayni skor", err < 1e-5, "fark %.1e" % err)
-
-    m = BlockModel(n, d=d, units=10, copy_path=True)
-    with torch.no_grad():
-        for p_ in m.parameters():
-            if p_.requires_grad:
-                p_.copy_(0.5 * torch.randn(p_.shape, generator=g))
-    base_logits = m.logits(ids).detach()
-    changed = ids.clone()
-    changed[:, 5] = (changed[:, 5] + 1) % n
-    after = m.logits(changed).detach()
-    check("kopya yolu: nedensellik -- konum 5 degisince 0-4 aynen kalir",
-          float((after[:, :5] - base_logits[:, :5]).abs().max()) < 1e-5 and float((after[:, 5:] - base_logits[:, 5:]).abs().max()) > 1e-3)
-
-    data = D.build()
-    sids, smask = EK.sequences(data)
-    nv = len(data["vocab"])
-    before = BlockModel(nv).tokens.fixed_points.clone()
-    m, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), copy_path=True)
-    at = m.blocks[0].attention
-    check("kopya yolu: egitimde PF bit duzeyinde degismez, W_copy 0'dan ayrilir, kapi degisir, kayip iner",
-          torch.equal(m.tokens.fixed_points, before) and at.W_copy.norm().item() > 0 and at.W_copy_gate.norm().item() > 0
-          and curve[-1]["nll"] < curve[0]["nll"])
+          and all(torch.equal(a_, b_) for a_, b_ in zip(full_m.state_dict().values(), res_s.state_dict().values())),
+          str(sorted(packs_s)))
 
     groups = []
     real_adamw = torch.optim.AdamW
@@ -688,15 +614,15 @@ def t_copy():
             groups.extend(self.param_groups)
     torch.optim.AdamW = SpyW
     try:
-        mw, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=(), weight_decay=0.1, copy_path=True, optimizer="adam")
+        mw, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=(), weight_decay=0.1, optimizer="adam")
     finally:
         torch.optim.AdamW = real_adamw
     names = {id(p_): k.split(".")[-1] for k, p_ in mw.named_parameters()}
     decayed = sorted({names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.1 for p_ in g_["params"]})
     kept = sorted({names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.0 for p_ in g_["params"]})
-    check("kopya yolu, weight decay: W_copy ve W_copy_gate'e uygulanir; copy_gate_bias haric",
-          decayed == sorted(["W_query", "W_key", "W_context", "W_fact_in", "W_fact_out", "W_copy", "W_copy_gate"])
-          and kept == ["alpha_attention", "alpha_facts", "canon_weights", "copy_gate_bias", "fact_threshold", "shift"],
+    check("weight decay (adam): matrislere uygulanir; noktalar, esik, alpha ve Canon agirliklari haric",
+          decayed == sorted(["W_query", "W_key", "W_context", "W_fact_in", "W_fact_out"])
+          and kept == ["alpha_attention", "alpha_facts", "canon_weights", "fact_threshold", "shift"],
           "%s | %s" % (decayed, kept))
 
 
@@ -840,8 +766,7 @@ def t_generate_cached():
     worst, same, runs = 0.0, True, 0
     off = dict(normalized_update=False, sphere_weights=False)          # 28 Eylul oncesi guncelleme (LayerNorm / normsuz akis icin sart)
     for kw in (dict(), dict(shared=False), dict(rope=False), dict(off), dict(off, stream_norm=False),
-               dict(off, stream_norm=False, layer_norm=True), dict(copy_path=True),
-               dict(off, shared=False, copy_path=True, stream_norm=False, layer_norm=True)):
+               dict(off, stream_norm=False, layer_norm=True), dict(off, shared=False, stream_norm=False, layer_norm=True)):
         m = BlockModel(n, d=16, units=24, t_max=64, canon=False, **kw)   # onbellek Canon'suz yolda
         with torch.no_grad():
             for p_ in m.parameters():
@@ -1291,15 +1216,14 @@ def t_heads():
     with torch.no_grad():
         a_, b_ = m4.logits(ids), m4.logits(alt)
     refused = []
-    for make in (lambda: CausalAttention(64, heads=5), lambda: CausalAttention(64, heads=4, copy_path=True),
-                 lambda: CausalAttention(12, heads=4, rope=True),
+    for make in (lambda: CausalAttention(64, heads=5), lambda: CausalAttention(12, heads=4, rope=True),
                  lambda: BlockModel(nv, layer_norm=True, stream_norm=False, normalized_update=False)):
         try:
             make()
             refused.append(False)
         except AssertionError:
             refused.append(True)
-    check("heads: nedensel; W_value birim baslar (d x d); reddedilir: d head'e bolunmezse, kopya yolunda, RoPE'de tek "
+    check("heads: nedensel; W_value birim baslar (d x d); reddedilir: d head'e bolunmezse, RoPE'de tek "
           "sayili head boyu, sphere_weights + LayerNorm",
           torch.equal(a_[:, :5], b_[:, :5]) and not torch.equal(a_[:, 5:], b_[:, 5:])
           and all(torch.equal(b.attention.W_value, torch.eye(64)) for b in m4.blocks) and all(refused))
@@ -1333,7 +1257,7 @@ def t_heads():
 
 if __name__ == "__main__":
     print("tests (model_20)")
-    for f in (t_model, t_step2, t_step3, t_copy, t_transformer, t_generate_cached, t_normalized_update, t_canon,
+    for f in (t_model, t_step2, t_step3, t_transformer, t_generate_cached, t_normalized_update, t_canon,
               t_layers, t_coherence, t_weight_ema, t_heads):
         f()
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
