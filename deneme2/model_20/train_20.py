@@ -5,9 +5,11 @@
     train_seq   dizi egitimi: Model X (varsayilan), deneme ayarlari ve kiyas transformer'i; yedek ve surdurme
     pad         id listeleri -> (ids, mask);  generate: acgozlu uretim
 """
+import contextlib
 import math
 
 import torch
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from model_20 import (COPY_PATH, LAYER_NORM, ROPE, STREAM_NORM, BigramModel, BlockModel, SequenceModel, deviation)
 from model_20_transformer import TransformerModel
@@ -25,6 +27,32 @@ LOG_AT = (0, 10, 50, 200, 500, 1000)
 LR_FLOOR = 0.1       # cosine decay: lr sonda LR x LR_FLOOR (taban lr/10); train_seq standardi
 GRAD_CLIP = 1.0      # gradient clipping: adimdaki gradient'in boyu bunu gecerse buna indirilir; train_seq standardi
 WEIGHT_DECAY = 0.0   # weight decay (AdamW), yalniz W_ matrislerine; 0 = kapali (standart).  Deger olculuyor
+PRECISION = "fp32"   # egitim adiminin sayisalligi: "fp32" bugunku | "tf32" CUDA'da fp32 matmul TF32 tensor core'da |
+                     # "bf16" autocast bf16 (agirliklar, Adam, normlar, softmax, kayip fp32).  Sinavlar hep fp32
+ATTENTION_KERNEL = "math"   # "math": SDPA hep math yolu (bugunku; deterministik) | "fused": flash / mem-efficient uygunsa
+                            # (hizli; geri yayilimi deterministik DEGIL -> surdurme bit duzeyinde ayni olmaz)
+FUSED_ADAM = False   # True: Adam tek CUDA cekirdegi (fused); False: torch varsayilani (CUDA'da foreach)
+
+
+@contextlib.contextmanager
+def numerics(precision=PRECISION, attention_kernel=ATTENTION_KERNEL, device="cpu", autocast=False):
+    """Egitim adiminin ileri (autocast=True) ve geri hesabinin sayisalligi; cikista onceki ayarlar geri gelir."""
+    assert precision in ("fp32", "tf32", "bf16") and attention_kernel in ("math", "fused")
+    matmul = torch.backends.cuda.matmul
+    saved = torch.get_float32_matmul_precision(), matmul.allow_bf16_reduced_precision_reduction
+    backends = [SDPBackend.MATH] if attention_kernel == "math" else [
+        SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]
+    try:
+        torch.set_float32_matmul_precision("high" if precision == "tf32" else "highest")
+        if precision == "bf16":                        # split-K ara toplamlari da fp32 kalsin
+            matmul.allow_bf16_reduced_precision_reduction = False
+        cast = (torch.autocast(torch.device(device).type, dtype=torch.bfloat16) if autocast and precision == "bf16"
+                else contextlib.nullcontext())
+        with sdpa_kernel(backends), cast:
+            yield
+    finally:
+        torch.set_float32_matmul_precision(saved[0])
+        matmul.allow_bf16_reduced_precision_reduction = saved[1]
 
 
 def bigram_floor(inputs, targets, n):
@@ -72,11 +100,13 @@ def pad(rows, vocab):
 def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, lr_floor=LR_FLOOR, grad_clip=GRAD_CLIP,
               weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None, compile=False, copy_path=COPY_PATH,
               save_every=None, save=None, checkpoint=None, stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=None,
-              batches=None, model_kw=None):
+              batches=None, model_kw=None, precision=PRECISION, attention_kernel=ATTENTION_KERNEL, fused_adam=FUSED_ADAM):
     """Standart tarif: cosine decay (LR -> LR x lr_floor) + gradient clipping.  lr_floor=None, grad_clip=None: eski tarif
     (sabit lr); 27 Eylul oncesi kayitli Adim 2-3 sonuclari onunla uretildi.  weight_decay > 0: AdamW, yalniz W_ matrisleri.
     callback(step, model, nll): her `every` adimda, o adimin guncellemesinden ONCE (sinav, kayit, durdurma).
-    compile: yalniz kayip hesabi torch.compile ile (model_19'daki gibi); full batch'te sekil sabit, bir kez derlenir.
+    compile: yalniz kayip hesabi (ileri + geri) torch.compile ile, tek grafik (fullgraph) ve sabit sekil; True ya da mod adi
+    ("reduce-overhead": CUDA graph, kucuk modelde cekirdek baslatma yukunu siler).  Inductor sonucu eager'la bit duzeyinde
+    ayni degil.  precision, attention_kernel: numerics(); fused_adam: FUSED_ADAM.
     copy_path: Oneri A (kopya yolu ve kapisi), yalniz Adim 3 modelinde.  setting "transformer": kiyas modeli
     (model_20_transformer), ayni tarif.  rope: attention'da RoPE; None = modelin kendi varsayilani (transformer True,
     BlockModel ROPE).
@@ -113,15 +143,16 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
         named = [(k, p) for k, p in model.named_parameters() if p.requires_grad]
         opt = torch.optim.AdamW([dict(params=[p for k, p in named if k.split(".")[-1].startswith("W_")], weight_decay=weight_decay),
                                  dict(params=[p for k, p in named if not k.split(".")[-1].startswith("W_")], weight_decay=0.0)],
-                                lr=lr)
-    else:
-        opt = torch.optim.Adam(params, lr=lr)
+                                lr=lr, **(dict(fused=True) if fused_adam else {}))
+    else:   # fused=False'u acik vermek foreach'i de kapatir (tek tek dongu): yalniz True iken verilir
+        opt = torch.optim.Adam(params, lr=lr, **(dict(fused=True) if fused_adam else {}))
     first = 0
     if checkpoint is not None:                             # surdurme: agirlik + Adam momentleri + adim
         model.load_state_dict(checkpoint["model"])
         opt.load_state_dict(checkpoint["optimizer"])
         first = checkpoint["step"]
-    loss_fn = torch.compile(model.loss) if compile else model.loss
+    loss_fn = (torch.compile(model.loss, fullgraph=True, dynamic=False, mode=compile if isinstance(compile, str) else None)
+               if compile else model.loss)
     curve = []
     for step in range(first, steps + 1):
         resumed_here = checkpoint is not None and step == first
@@ -130,7 +161,10 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
                 group["lr"] = lr * (lr_floor + (1 - lr_floor) * 0.5 * (1 + math.cos(math.pi * step / max(steps, 1))))
         if batches is not None:                            # mini-batch: bu adimin parcasi
             ids, mask = (t.to(device) for t in batches(step))
-        total, nll = loss_fn(ids, mask)                    # butun cumleler (ya da adimin parcasi), butun konumlar
+        with numerics(precision, attention_kernel, device, autocast=True):
+            if compile == "reduce-overhead":               # CUDA graph: onceki adimin ciktilari artik kullanilmiyor
+                torch.compiler.cudagraph_mark_step_begin()
+            total, nll = loss_fn(ids, mask)                # butun cumleler (ya da adimin parcasi), butun konumlar
         if step in log_at:
             curve.append(dict(step=step, nll=nll.item(), dev=deviation(model).clone() if hasattr(model, "tokens") else None,
                               W_context=(sum(b.attention.W_context.norm().item() for b in model.blocks)
@@ -144,7 +178,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
         if step == steps:
             break
         opt.zero_grad()                                    # onceki adimin gradyanlarini sil
-        total.backward()                                   # her ogrenilen sayi x icin ∂kayip/∂x (zincir kurali, otomatik)
+        with numerics(precision, attention_kernel, device):   # geri hesap da ayni matmul ayariyla (TF32 / bf16 toplama)
+            total.backward()                               # her ogrenilen sayi x icin ∂kayip/∂x (zincir kurali, otomatik)
         if grad_clip is not None:                          # butun gradyanlarin toplam boyu > grad_clip ise olcekle indir
             torch.nn.utils.clip_grad_norm_(params, grad_clip)
         opt.step()                                         # Adam: x <- x - lr · m / (√v + eps); m, v gradyanin

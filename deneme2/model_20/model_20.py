@@ -65,16 +65,27 @@ def apply_rope(x):
     """RoPE, x (..., T, d): konum t'de her boyut cifti t · 10000^(-2i/d) acisiyla dondurulur; iki konumun
     <q, k> skoru yalniz aradaki mesafeye bagli kalir.  Parametresi yok."""
     T, dh = x.shape[-2], x.shape[-1]
-    freq = 10000.0 ** (-torch.arange(0, dh, 2, device=x.device, dtype=x.dtype) / dh)          # (d/2,)
-    angle = torch.arange(T, device=x.device, dtype=x.dtype)[:, None] * freq[None, :]          # (T, d/2)
+    # hesap en az fp32: bf16'da konum 256'dan sonra tam sayi degil, aci t · freq ~0,5 radyan kayar.  fp32/fp64'te aynen
+    work = torch.promote_types(x.dtype, torch.float32)
+    freq = 10000.0 ** (-torch.arange(0, dh, 2, device=x.device, dtype=work) / dh)          # (d/2,)
+    angle = torch.arange(T, device=x.device, dtype=work)[:, None] * freq[None, :]          # (T, d/2)
     cos, sin = angle.cos(), angle.sin()
-    x1, x2 = x[..., 0::2], x[..., 1::2]
-    return torch.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], -1).flatten(-2)
+    x1, x2 = x[..., 0::2].to(work), x[..., 1::2].to(work)
+    return torch.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], -1).flatten(-2).to(x.dtype)
 
 
 def scale_for(n, confidence=CONFIDENCE):
     """Hedefin skoru rakiplerden scale kadar yuksekken p(hedef) = confidence."""
     return math.log(confidence * (n - 1) / (1 - confidence))
+
+
+def masked_nll(logits, targets, valid):
+    """ortalama -log p(hedef), yalniz valid konumlarda.  logits[valid] ile ayni hesap ama sekil sabit (boolean indeks yok):
+    torch.compile tek grafik kurar, adimda GPU->CPU senkronu yok.  Gradyan bit duzeyinde ayni; deger son bitte farkli
+    olabilir (toplama sirasi)."""
+    per_token = F.cross_entropy(logits.flatten(0, -2), targets.flatten(), reduction="none")
+    weight = valid.flatten().to(per_token.dtype)
+    return (per_token * weight).sum() / weight.sum()
 
 
 class TokenPoints(torch.nn.Module):
@@ -173,10 +184,14 @@ class CausalAttention(torch.nn.Module):
         #   j > t ise s_tj = -∞                       is_causal: sonrakilere bakilmaz
         #   a_tj = e^s_tj / Σ_{i<=t} e^s_ti            softmax, satir toplami 1
         #   c_t  = Σ_{j<=t} a_tj · x_j                getirilen: agirlikli karisim (Adim 2: x = PL, Adim 3: x = h)
+        # (B, 1, T, d): tek head.  torch < 2.14'te 3 boyutlu girdi yalniz math yolunu kullanabiliyordu; hangi yolun
+        # kullanilacagi train_20.numerics'te secilir (math yolunda 3 ve 4 boyut ayni sonuc)
+        q, k = q.unsqueeze(-3), k.unsqueeze(-3)
         if points is None:
-            return F.scaled_dot_product_attention(q, k, x, is_causal=True, scale=self.scale)
+            return F.scaled_dot_product_attention(q, k, x.unsqueeze(-3), is_causal=True, scale=self.scale).squeeze(-3)
         # c'_t = Σ a_tj · PL_j: iki deger yan yana tek SDPA'dan, ayni a_tj ile
-        both = F.scaled_dot_product_attention(q, k, torch.cat([x, points], -1), is_causal=True, scale=self.scale)
+        both = F.scaled_dot_product_attention(q, k, torch.cat([x, points], -1).unsqueeze(-3), is_causal=True,
+                                              scale=self.scale).squeeze(-3)
         return both[..., :x.shape[-1]], both[..., x.shape[-1]:]
 
     def weights(self, x):
@@ -214,7 +229,7 @@ class SequenceModel(torch.nn.Module):
         logits = self.logits(ids[:, :-1])                 # konum t'nin skorlari ...
         valid = mask[:, 1:]                               # ... hedefi t+1'deki token; <pad> hedefler sayilmaz
         # cross_entropy: p = softmax(skor);  nll = ortalama( -log p(hedef) )  butun gercek konumlarda
-        nll = F.cross_entropy(logits[valid], ids[:, 1:][valid])
+        nll = masked_nll(logits, ids[:, 1:], valid)
         return nll + self.tokens.anchor_loss(), nll       # + λ · Σ Δ²
 
 
@@ -309,8 +324,7 @@ class BlockModel(torch.nn.Module):
 
     def loss(self, ids, mask):
         logits = self.logits(ids[:, :-1])
-        valid = mask[:, 1:]
-        nll = F.cross_entropy(logits[valid], ids[:, 1:][valid])
+        nll = masked_nll(logits, ids[:, 1:], mask[:, 1:])
         return nll + self.tokens.anchor_loss(), nll
 
 
