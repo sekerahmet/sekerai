@@ -18,7 +18,7 @@ Adim 3: BlockModel.  Her konumun bir durumu var (hidden, h); TURNS tur boyunca B
       x_t = h_t + sum_{k=0..3} w_k h_(t-k)              Canon-A: attention'in girdisi (w 0'dan)
       c_t = sum_j a_tj x_j                              attention DURUMLARA bakar (HEADS > 1: head basina W_value dilimi)
       h_t = norm(h_t + a_A (norm(W_context c_t) - h_t))                 normalized_update: alpha kadar don
-      h_t = norm(h_t + a_F (norm(W_fact_out ReLU(W_fact_in sqrt(d) h_t - esik)) - h_t))   FactUnits
+      h_t = norm(h_t + a_F (norm(W_fact_out (SiLU(W_fact_in x) * (W_fact_up x))) - h_t)),  x = sqrt(d) h_t   FactUnits
       anahtarlar kapaliyken (28 Eylul oncesi): h_t = norm(h_t + W_context c_t), h_t = norm(h_t + FactUnits(h_t));
       W_context ve W_fact_out 0'dan (paket acikken rastgele, birim sutun)
     cikis: skor = scale <h, PL>                         son durum dogrudan noktalarla karsilastirilir (W_next yok)
@@ -51,11 +51,12 @@ SHARED_BLOCK = True  # True: turlar LAYERS Block'u sirayla paylasir; False: her 
 LAYERS = 2           # SHARED_BLOCK'ta farkli Block (katman) sayisi, turlar sirayla doner: tur i -> Block i mod LAYERS
                      # (kullanici, 28 Eylul: "2 tane paylaşımlı katman", sira ABAB, ad LAYERS).  Varsayilan 2 x 2 (kullanici,
                      # 28 Eylul: "2X2 şu an varsayılan olsun"; TinyStories 1 epok ppl 7,95 / X2 9,73).  1 = tek Block x TURNS tur
-FACT_UNITS = 256     # FactUnits birim sayisi; 4 x D (transformer aliskanligi), olculmedi
-FACT_ACTIVATION = "relu"   # FactUnits: "relu" u = ReLU(W_fact_in x - fact_threshold) | "swiglu" u = SiLU(W_fact_in x) *
+FACT_UNITS = 170     # FactUnits birim sayisi; SwiGLU'nun yerlesik genisligi 8/3 x D (Shazeer 2020 "2/3", LLaMA "2/3 4d",
+                     # MobileLLM 576 -> 1536); TinyStories'te 384 -> 1024 olculdu (ppl 6,94).  relu'da 4 x D = 256 aliskanligi
+FACT_ACTIVATION = "swiglu"   # FactUnits: "relu" u = ReLU(W_fact_in x - fact_threshold) | "swiglu" u = SiLU(W_fact_in x) *
                            # (W_fact_up x), esik yok (kapili; nGPT gibi x = sqrt(d) h) | "reglu" u = ReLU(W_fact_in x -
-                           # fact_threshold) * (W_fact_up x) (kapi tam sifir, okunur).  Ayni parametre icin kapililarda units
-                           # 2/3.  Kullanici, 28 Eylul: "önce sadece S bakalım", sonra "1 ve 2 ok" (G kolu)
+                           # fact_threshold) * (W_fact_up x) (kapi tam sifir, okunur).  Kullanici, 28 Eylul: "önce sadece S
+                           # bakalım", sonra "1 ve 2 ok": varsayilan swiglu (TinyStories 10k ppl 6,94 / relu 7,22) ve G kolu
 STREAM_NORM = True   # True: durum her eklemeden sonra kureye (bugunku).  False: akis normalize edilmez, yalniz attention'in
                      # ve FactUnits'in okudugu kopya normalize edilir (transformer gibi); cikis <norm(h), PL> (27 Eylul)
 LAYER_NORM = False   # True: L2 norm yerine LayerNorm (norm_attention, norm_facts, norm_final; ogrenilen kazanc ve kayma);

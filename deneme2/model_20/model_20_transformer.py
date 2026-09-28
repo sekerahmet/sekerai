@@ -7,16 +7,17 @@
                                                                 (rope=False: konum bilgisi yok, model_20 gibi)
         h <- h + W_mlp_out . GELU(W_mlp_in . norm_mlp(h))
     logits = norm_final(h) . E^T
-Dropout yok (model_20'de de yok, full batch).  Genislik D ve MLP birimi FACT_UNITS model_20'den; adlar kullanici onayiyla.
+Dropout yok (model_20'de de yok, full batch).  Genislik D model_20'den, MLP birimi 4 x D; adlar kullanici onayiyla.
 """
 import math
 
 import torch
 import torch.nn.functional as F
 
-from model_20 import D, FACT_UNITS, POINTS_SEED, apply_rope, masked_nll   # RoPE ve kayip model_20 ile ayni hesap
+from model_20 import D, POINTS_SEED, apply_rope, masked_nll   # RoPE ve kayip model_20 ile ayni hesap
 
 LAYERS = 2           # model_20'nin 2 turu gibi; ama her katmanin kendi agirligi (transformer standardi)
+FACT_UNITS = 4 * D   # MLP birimi: GELU MLP'nin yerlesik genisligi (model_20'nin SwiGLU'su 8/3 x D)
 HEADS = 1            # model_20 gibi tek head (kullanici: "bizim modele benzeyen"); parametre sayisi head sayisindan bagimsiz
 
 

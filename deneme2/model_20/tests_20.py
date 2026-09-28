@@ -281,7 +281,7 @@ def t_step3():
     # 28 Eylul oncesi tasarimin testleri: paket (normalized_update, sphere_weights) kapali, tek Block x 2 tur; paket
     # t_normalized_update'te, 2 x 2 t_layers'ta
     BlockModel = functools.partial(model_20.BlockModel, normalized_update=False, sphere_weights=False, canon=False, turns=2,
-                                   layers=1, heads=1)
+                                   layers=1, heads=1, fact_activation="relu")
     n, d = 12, 6
     g = torch.Generator().manual_seed(9)
     ids = torch.randint(0, n, (3, 9), generator=g)
@@ -500,9 +500,9 @@ def t_step3():
     names = {id(p_): k.split(".")[-1] for k, p_ in mw.named_parameters()}
     decayed = sorted({names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.1 for p_ in g_["params"]})
     kept = sorted({names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.0 for p_ in g_["params"]})
-    check("weight decay: yalniz W_ matrislerine; shift, fact_threshold, alpha ve Canon agirliklari haric",
-          decayed == sorted(["W_query", "W_key", "W_context", "W_fact_in", "W_fact_out", "W_value"])
-          and kept == ["alpha_attention", "alpha_facts", "canon_weights", "fact_threshold", "shift"], "%s | %s" % (decayed, kept))
+    check("weight decay: yalniz W_ matrislerine; shift, alpha ve Canon agirliklari haric",
+          decayed == sorted(["W_query", "W_key", "W_context", "W_fact_in", "W_fact_up", "W_fact_out", "W_value"])
+          and kept == ["alpha_attention", "alpha_facts", "canon_weights", "shift"], "%s | %s" % (decayed, kept))
 
     # 27 Eylul tarifi: Muon (gizli matrisler) + Adam, WSD takvimi, compile varsayilan acik; masked_nll; RoPE en az fp32
     import inspect
@@ -558,11 +558,11 @@ def t_step3():
     in_muon = sorted({names_m[id(p_)] for g_ in opts[0].param_groups if g_["use_muon"] for p_ in g_["params"]})
     in_adam = sorted({names_m[id(p_)] for g_ in opts[0].param_groups if not g_["use_muon"] for p_ in g_["params"]})
     wsd = [0.01 * (1.0 if t < 8 else TR.LR_FLOOR + (1 - TR.LR_FLOOR) * (1 - math.sqrt((t - 8) / 2))) for t in range(1, 11)]
-    check("Muon + WSD (varsayilan): Muon'da W_context, W_fact_in, W_fact_out, W_value; Adam'da noktalar, esik, W_query, "
+    check("Muon + WSD (varsayilan): Muon'da W_context, W_fact_in, W_fact_up, W_fact_out, W_value; Adam'da noktalar, W_query, "
           "W_key; "
           "lr 8. adima kadar sabit, sonra 1 - sqrt ile LR x LR_FLOOR'a; kayip iner",
-          isinstance(opts[0], TR.Muon) and in_muon == ["W_context", "W_fact_in", "W_fact_out", "W_value"]
-          and in_adam == ["W_key", "W_query", "alpha_attention", "alpha_facts", "canon_weights", "fact_threshold", "shift"]
+          isinstance(opts[0], TR.Muon) and in_muon == ["W_context", "W_fact_in", "W_fact_out", "W_fact_up", "W_value"]
+          and in_adam == ["W_key", "W_query", "alpha_attention", "alpha_facts", "canon_weights", "shift"]
           and all(abs(lrs[t] - w) < 1e-12 for t, w in zip(range(1, 11), wsd)) and curve_m[-1]["nll"] < curve_m[0]["nll"],
           "%s | %s | lr %s" % (in_muon, in_adam, [round(lrs[t], 5) for t in range(1, 11)]))
 
@@ -749,7 +749,7 @@ def t_generate_cached():
     for kw in (dict(), dict(heads=1), dict(canon=False), dict(shared=False), dict(rope=False), dict(off),
                dict(off, stream_norm=False),
                dict(off, stream_norm=False, layer_norm=True), dict(off, shared=False, stream_norm=False, layer_norm=True)):
-        m = BlockModel(n, d=16, units=24, t_max=64, **kw)
+        m = BlockModel(n, d=16, units=24, t_max=64, **kw).double()      # float64: fp32 yuvarlamasi SwiGLU'da 1e-4'u asiyor
         with torch.no_grad():
             for p_ in m.parameters():
                 if p_.requires_grad:
@@ -764,7 +764,8 @@ def t_generate_cached():
                         float((first[i, :len(p)] - full[:len(p)]).abs().max()))
         runs += 1
     check("generate: onbellekli (AttentionCache) = tam yeniden hesap -- ayni token'lar, %d ayar x 12 istem (1-20 token) x 15; "
-          "tek basina = batch icinde; her konumun skoru tolerans icinde" % runs, same and worst < 1e-4, "en buyuk fark %.1e" % worst)
+          "tek basina = batch icinde; her konumun skoru float64'te 1e-10 icinde" % runs, same and worst < 1e-10,
+          "en buyuk fark %.1e" % worst)
     edge = BlockModel(n, d=16, units=24, t_max=64, canon=False)
     check("generate: n = 0 bos, n = 1 istem hesabinin son konumu; transformer eski yoldan",
           TR.generate(edge, prompts[:3], 0) == [[], [], []]
@@ -836,7 +837,7 @@ def t_normalized_update():
             c = torch.softmax(s_, -1) @ h
             u = c @ at.W_context.T
             h = F.normalize(h + m.alpha_attention[i] * (F.normalize(u, dim=-1) - h), dim=-1)
-            f = torch.relu(32 ** 0.5 * h @ fu.W_fact_in.T - fu.fact_threshold) @ fu.W_fact_out.T
+            f = (F.silu(32 ** 0.5 * h @ fu.W_fact_in.T) * (32 ** 0.5 * h @ fu.W_fact_up.T)) @ fu.W_fact_out.T
             h = F.normalize(h + m.alpha_facts[i] * (F.normalize(f, dim=-1) - h), dim=-1)
         ref = m.scale * h @ P.T
         err = float((m.logits(ids) - ref).abs().max())
@@ -853,7 +854,7 @@ def t_normalized_update():
     with torch.no_grad():
         for mm in (fixed, now):
             mm.blocks[0].attention.W_context.copy_(torch.randn(64, 64, generator=g) / 8)
-            mm.blocks[0].facts.W_fact_out.copy_(1000 * torch.randn(64, 256, generator=g) / 16)
+            mm.blocks[0].facts.W_fact_out.copy_(1000 * torch.randn(mm.blocks[0].facts.W_fact_out.shape, generator=g) / 16)
     c_fixed, c_now = turn_cos(fixed), turn_cos(now)
     check("kusur 1: FactUnits ciktisi 1000 kat buyukken normalized_update'te tur basina cos(h_once, h_sonra) >= 0,95 (alpha "
           "0,1); bugunku guncellemede durum siliniyor", c_fixed >= 0.95 and c_now < 0.5, "en kucuk cos %.3f / bugun %.3f"
@@ -1236,26 +1237,27 @@ def t_heads():
 
 
 def t_fact_activation():
-    """FACT_ACTIVATION: varsayilan "relu" (bugunku model birebir); "swiglu" u = SiLU(W_fact_in x) * (W_fact_up x), esik yok;
+    """FACT_ACTIVATION: varsayilan "swiglu" u = SiLU(W_fact_in x) * (W_fact_up x), esik yok; "relu" 28 Eylul oncesi;
     ayni parametre icin units 2/3; W_fact_up Muon'da ve satirlari birim; surdurme bit duzeyinde; onbellekli uretim."""
     import copy
     import torch.nn.functional as F
-    from model_20 import FACT_ACTIVATION, BlockModel, FactUnits
+    from model_20 import FACT_ACTIVATION, FACT_UNITS, BlockModel, FactUnits
     data = D.build()
     sids, smask = EK.sequences(data)
     nv = len(data["vocab"])
     ids = sids[:6, :20]
 
-    base, relu = BlockModel(nv), BlockModel(nv, fact_activation="relu")
+    base, sw = BlockModel(nv), BlockModel(nv, fact_activation="swiglu", units=170)
     with torch.no_grad():
-        same = torch.equal(base.logits(ids), relu.logits(ids))
-    sw = BlockModel(nv, fact_activation="swiglu")
+        same = torch.equal(base.logits(ids), sw.logits(ids))
     names = {k.split(".")[-1] for k in dict(sw.named_parameters())}
+    names_relu = {k.split(".")[-1] for k in dict(BlockModel(nv, fact_activation="relu").named_parameters())}
     fu = lambda m: sum(p_.numel() for k, p_ in m.named_parameters() if ".facts." in k)
-    a384, b384 = BlockModel(nv, d=384, units=1536), BlockModel(nv, d=384, units=1024, fact_activation="swiglu")
-    check("fact_activation: varsayilan relu, bit duzeyinde ayni; swiglu'da W_fact_up var, fact_threshold yok; d 384'te "
-          "ReLU 1536 ile SwiGLU 1024 matris sayisi esit (fark yalniz esikler)",
-          FACT_ACTIVATION == "relu" and same and "W_fact_up" in names and "fact_threshold" not in names
+    a384, b384 = BlockModel(nv, d=384, units=1536, fact_activation="relu"), BlockModel(nv, d=384, units=1024)
+    check("fact_activation: varsayilan swiglu x 170 (8/3 x D), bit duzeyinde ayni; swiglu'da W_fact_up var, fact_threshold yok, relu'da "
+          "tersi; d 384'te ReLU 1536 ile SwiGLU 1024 matris sayisi esit (fark yalniz esikler)",
+          FACT_ACTIVATION == "swiglu" and FACT_UNITS == 170 and same and "W_fact_up" in names
+          and "fact_threshold" not in names and "fact_threshold" in names_relu and "W_fact_up" not in names_relu
           and fu(a384) - fu(b384) == 2 * 1536, "%d / %d" % (fu(a384), fu(b384)))
 
     g = torch.Generator().manual_seed(71)
