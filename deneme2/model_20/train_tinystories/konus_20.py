@@ -86,7 +86,7 @@ def load_model(run_dir, n_vocab, averaged=False):
     _heavy()
     cfg = json.load(open(os.path.join(run_dir, "config.json")))
     kw = dict(cfg["model_kw"])
-    kw.setdefault("layers", 1)                              # 28 Eylul oncesi kosular: tek Block
+    kw = dict(dict(layers=1, heads=1, output_skip=False), **kw)   # eski kosular: tek Block, tek head, skip yok
     assert not cfg.get("copy_path"), "kopya yolu (Oneri A) 28 Eylul'de kaldirildi"
     m = BlockModel(n_vocab, seed=0, stream_norm=cfg.get("stream_norm", True),
                    layer_norm=cfg.get("layer_norm", False), rope=cfg.get("rope", True), shared=cfg["setting"] == "shared",
@@ -116,13 +116,12 @@ def summary(run_dir, cfg, averaged):
 
 
 def generate(model, ids, n, vocab, temp=0.0, top_p=1.0, penalty=1.0, banned=()):
-    """Tek istem, token token.  Tek head'de onbellekli (istem bir kez, sonra yalniz yeni konum; istem + n <= 512),
-    cok head'de her token'da tam yeniden hesap.  <eos>'ta durur."""
+    """Tek istem, token token, onbellekli (istem bir kez, sonra yalniz yeni konum; istem + n <= 512).  <eos>'ta durur."""
     eos = vocab.index(DT.EOS_TOKEN)
     ban = [vocab.index(t) for t in banned]
     out = []
     x = list(ids)
-    cached = getattr(model, "heads", 1) == 1 and len(x) + n <= 512
+    cached = len(x) + n <= 512
     caches = [AttentionCache(torch.tensor([len(x)]), len(x) + n) for _ in range(model.turns)] if cached else None
     with torch.no_grad():
         for i in range(n):

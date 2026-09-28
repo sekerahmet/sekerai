@@ -277,7 +277,7 @@ def t_colab(tmp):
           run["done"] and not run["error"] and files == ["checkpoint_t000002.pt", "checkpoint_t000004.pt", "checkpoint_t000006.pt",
                                                          "config.json", "exams.json", "final.json", "log.txt", "model.pt"]
           and cfg["data"] == "fixture" and cfg["steps_per_epoch"] == per and cfg["answer_only"] is True and cfg["batch_size"] == 4
-          and cfg["model_kw"] == dict(d=16, turns=4, layers=2, heads=1, units=16, t_max=512) and cfg["setting"] == "shared" and cfg["rope"] is True
+          and cfg["model_kw"] == dict(d=16, turns=4, layers=2, heads=4, output_skip=False, units=16, t_max=512) and cfg["setting"] == "shared" and cfg["rope"] is True
           and set(fin) == {"health", "breakdown", "train", "heldout", "panel", "rows"} and fin["heldout"]["n"] == len(HELDOUT)
           and set(fin["breakdown"]["heldout"]["terms"]) == {"2", "3"} and len(fin["panel"]) == len(EM.PANEL)
           and len(fin["rows"]) == len(HELDOUT) and [e["step"] for e in ex] == [0, 3, 6] and "heldout_terms" in ex[0],

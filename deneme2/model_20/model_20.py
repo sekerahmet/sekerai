@@ -67,11 +67,12 @@ SPHERE_WEIGHTS = True       # W_query, W_key, W_fact_in, W_value satirlari ve W_
 CANON = True         # Canon-A (Allen-Zhu 2025): attention girdisi x_t + sum_k w_k * x_(t-k), k = 0..3, w 0'dan.  Varsayilan:
                      # Model X2 = X1 + Canon (kullanici, 28 Eylul: "evet model X2 hayırlı olsun. Canon=True."; TinyStories
                      # "X1+C çok daha iyi görünüyor açık ara", akrabalik 191,0 / X1 188,3 ve cokussuz)
-HEADS = 1            # attention head sayisi; varsayilan 1, 4 deneme degeri (kullanici, 28 Eylul: "heads = 4 onaylıyorum";
-                     # olcum: uzak bakan tek head
-                     # sorgularin %76'sinda agirligini 2+ ayri bolgeye boluyor, ad hedeflerinin %31'inde iki adi birlikte
-                     # getiriyor).  1 = tek head, V yok (bugunku model); H > 1: d H'ye bolunur, W_value (d x d, birim
-                     # baslar) her head'in tasiyacagini secer
+HEADS = 4            # attention head sayisi (kullanici, 28 Eylul: "Evet, varsayılan 4"; TinyStories 10k ppl 7,22 / tek head
+                     # 7,63).  H > 1: d H'ye bolunur, W_value (d x d, birim baslar) her head'in tasiyacagini secer;
+                     # 1 = tek head, V yok (28 Eylul'e kadarki model)
+OUTPUT_SKIP = False  # cikis son turun attention sonrasi (FactUnits oncesi) durumunu da okur: skor = scale <norm(h_son +
+                     # output_skip ⊙ h_att), PL>, output_skip (d,) 0'dan (kullanici, 28 Eylul: "bana da b çok mantıklı
+                     # geldi").  Olcum: son tur FactUnits getirilenin yarisini siliyor (1,00 -> 0,56; alpha_F ~0,7-0,97)
 ROPE = True          # attention'in q ve k'sina RoPE (konum bilgisi).  Varsayilanlar = Model X (C' + RoPE; kullanici, 27 Eylul:
                      # "Model X varsayilan model olsun" onayi); False = RoPE'suz C'
 
@@ -200,7 +201,6 @@ class CausalAttention(torch.nn.Module):
         """x (B, T, d) PL ya da durum dizisi -> c (B, T, d).  cache (AttentionCache): onbellekli uretim; x yalniz yeni
         konumlar."""
         if cache is not None:
-            assert self.heads == 1, "onbellekli uretim yalniz tek head'de"
             return cache.attend(self, x)
         q, k = self.queries_keys(x)
         if self.heads > 1:                                # c = [a_1 (V_1 x) ; ... ; a_H (V_H x)], head'ler yan yana
@@ -230,7 +230,8 @@ class AttentionCache:
     Ilk cagri istem (B, L) -- normal ileri hesabin aynisi; sonraki her cagri satir basina TEK yeni token.
     lengths (B,): istem uzunluklari (sagdan dolgulu; satir r'nin ilk yeni token'i konum lengths[r]'ye yazilir, dolgunun
     key'leri o konuma gelinceye kadar maskeli kalir).  capacity: istem + uretilecek token.
-    Canon: turun Canon oncesi girdileri de saklanir (canon_cache); yeni konum onceki 3 konumu buradan okur."""
+    Canon: turun Canon oncesi girdileri de saklanir (canon_cache); yeni konum onceki 3 konumu buradan okur.  Cok head'de
+    key ve value head basina."""
 
     def __init__(self, lengths, capacity):
         self.next_position, self.capacity = lengths.clone(), capacity   # satir basina siradaki konum
@@ -253,28 +254,33 @@ class AttentionCache:
         return torch.cat([before, x], 1)
 
     def attend(self, at, x):
-        v = x                                                    # tek head: value girdinin kendisi
+        """Tek head: key (B, S, d), value x.  Cok head: key ve value (B, H, S, d/H); value W_value x'in head dilimi."""
         B, t = x.shape[:2]
+        H = at.heads
+        v = x if H == 1 else (x @ at.W_value.T).unflatten(-1, (H, -1)).transpose(1, 2)
         if self.keys is None:                                    # istem: CausalAttention.forward ile ayni hesap
             q, k = at.queries_keys(x)
             out = F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=at.scale)
-            self.keys = k.new_zeros(B, self.capacity, k.shape[-1])
-            self.values = v.new_zeros(B, self.capacity, v.shape[-1])
-            self.keys[:, :t], self.values[:, :t] = k, v
+            self.keys = k.new_zeros(*k.shape[:-2], self.capacity, k.shape[-1])
+            self.values = v.new_zeros(*v.shape[:-2], self.capacity, v.shape[-1])
+            self.keys[..., :t, :], self.values[..., :t, :] = k, v
             self.span = t
         else:
             assert t == 1, "istemden sonra satir basina tek token"
             pos = self.next_position[:, None]                    # (B, 1)
             q, k = at.queries_keys(x, pos)
-            self.keys.scatter_(1, pos[..., None].expand(-1, -1, k.shape[-1]), k)
-            self.values.scatter_(1, pos[..., None].expand(-1, -1, v.shape[-1]), v)
+            at_pos = pos[..., None] if H == 1 else pos[:, None, :, None]   # yazilacak konum: (B, 1, 1) / (B, 1, 1, 1)
+            self.keys.scatter_(-2, at_pos.expand(*k.shape), k)
+            self.values.scatter_(-2, at_pos.expand(*v.shape), v)
             self.next_position = self.next_position + 1          # yeni tensor: pos (gorunum) degismesin
             self.span += 1                                       # butun satirlar birer ilerler
             S = self.span
-            allowed = torch.arange(S, device=x.device)[None, None, :] <= pos[..., None]   # j <= konum; ilerisi dolgu
-            out = F.scaled_dot_product_attention(q, self.keys[:, :S], self.values[:, :S], attn_mask=allowed,
+            allowed = torch.arange(S, device=x.device)[None, None, :] <= pos[..., None]   # (B, 1, S): j <= konum
+            if H > 1:
+                allowed = allowed[:, None]                       # (B, 1, 1, S): butun head'ler
+            out = F.scaled_dot_product_attention(q, self.keys[..., :S, :], self.values[..., :S, :], attn_mask=allowed,
                                                  scale=at.scale)
-        return out
+        return out if H == 1 else out.transpose(1, 2).flatten(-2)   # head'ler yan yana
 
 
 class SequenceModel(torch.nn.Module):
@@ -341,8 +347,9 @@ class Block(torch.nn.Module):
             self.norm_attention = torch.nn.LayerNorm(d)
             self.norm_facts = torch.nn.LayerNorm(d)
 
-    def forward(self, h, cache=None, alpha_attention=None, alpha_facts=None):
-        """alpha_attention, alpha_facts (d,): normalized_update'te bu turun alpha'lari."""
+    def forward(self, h, cache=None, alpha_attention=None, alpha_facts=None, keep_attention=False):
+        """alpha_attention, alpha_facts (d,): normalized_update'te bu turun alpha'lari.  keep_attention: attention
+        sonrasi (FactUnits oncesi) durumu da dondur -> (h, h_att)."""
         at = self.attention
         unit = lambda v: F.normalize(v, dim=-1)
         norm_a, norm_f = (self.norm_attention, self.norm_facts) if self.layer_norm else (unit, unit)
@@ -356,7 +363,9 @@ class Block(torch.nn.Module):
         facts = (lambda v: self.facts(v * v.shape[-1] ** 0.5)) if self.sphere_weights else self.facts
         if self.normalized_update:                                                 # u'nun boyu silinir, adimi alpha belirler
             h = unit(h + alpha_attention * (unit(added) - h))                     # h = norm(h + α_A ⊙ (norm(W_context c) - h))
-            return unit(h + alpha_facts * (unit(facts(h)) - h))                   # h = norm(h + α_F ⊙ (norm(olgu(h)) - h))
+            out = unit(h + alpha_facts * (unit(facts(h)) - h))                    # h = norm(h + α_F ⊙ (norm(olgu(h)) - h))
+            return (out, h) if keep_attention else out
+        assert not keep_attention, "keep_attention yalniz normalized_update ile"
         if self.stream_norm:
             h = norm_a(h + added)                                                  # h_t = norm(h_t + W_context · c_t)
             return norm_f(h + facts(h))                                            # h_t = norm(h_t + olgu(h_t))
@@ -372,8 +381,10 @@ class BlockModel(torch.nn.Module):
     def __init__(self, n, d=D, turns=TURNS, shared=SHARED_BLOCK, layers=LAYERS, learn_points=LEARN_POINTS,
                  anchor=ANCHOR, confidence=CONFIDENCE, t_max=T_MAX, units=FACT_UNITS, seed=POINTS_SEED,
                  stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=ROPE,
-                 normalized_update=NORMALIZED_UPDATE, sphere_weights=SPHERE_WEIGHTS, canon=CANON, heads=HEADS):
+                 normalized_update=NORMALIZED_UPDATE, sphere_weights=SPHERE_WEIGHTS, canon=CANON, heads=HEADS,
+                 output_skip=OUTPUT_SKIP):
         super().__init__()
+        assert not output_skip or normalized_update, "output_skip normalized_update ile"
         assert not normalized_update or (stream_norm and not layer_norm), "normalized_update akis normuyla (L2) calisir"
         assert not (sphere_weights and layer_norm), "sphere_weights LayerNorm'la denenmedi: FactUnits girdisi sqrt(d) kat buyuk"
         self.tokens = TokenPoints(n, d, learn_points, anchor, 100 * seed)          # 100 * seed: BigramModel'deki gibi
@@ -402,22 +413,28 @@ class BlockModel(torch.nn.Module):
             self.normalize_weights()
         if layer_norm:                                    # cikista: keskinligi kazanc ogrenir, sabit scale kullanilmaz
             self.norm_final = torch.nn.LayerNorm(d)
+        # boyut basina: son attention durumundan cikisa ne kadar; 0'dan (baslangicta kapaliyla ayni)
+        self.output_skip = torch.nn.Parameter(torch.zeros(d)) if output_skip else None
         self.scale = scale_for(n, confidence)
 
     def turn_blocks(self):
         return [self.blocks[i % len(self.blocks)] for i in range(self.turns)]     # paylasilan: A B A B; ayri: her tura biri
 
-    def hidden(self, ids, caches=None):
+    def hidden(self, ids, caches=None, keep_attention=False):
         """Her turdan sonraki durumlar: [h0 = PL, h1, ..., h_TURNS], her biri (B, T, d).  caches: tur basina bir
-        AttentionCache (onbellekli uretim; ids yalniz yeni token'lar)."""
+        AttentionCache (onbellekli uretim; ids yalniz yeni token'lar).  keep_attention: -> (durumlar, son turun
+        attention sonrasi durumu)."""
         h = self.tokens.points()[ids]
-        out = [h]
+        out, h_att = [h], None
         for i, block in enumerate(self.turn_blocks()):
             alphas = (dict(alpha_attention=self.alpha_attention[i], alpha_facts=self.alpha_facts[i])
                       if self.normalized_update else {})
-            h = block(h, None if caches is None else caches[i], **alphas)
+            last = keep_attention and i == self.turns - 1
+            h = block(h, None if caches is None else caches[i], keep_attention=last, **alphas)
+            if last:
+                h, h_att = h
             out.append(h)
-        return out
+        return (out, h_att) if keep_attention else out
 
     @torch.no_grad()
     def normalize_weights(self):
@@ -432,7 +449,11 @@ class BlockModel(torch.nn.Module):
 
     def logits(self, ids, caches=None):
         P = self.tokens.points()
-        h = self.hidden(ids, caches)[-1]                       # son durum; stream_norm'da zaten kurede
+        if self.output_skip is not None:                       # h = norm(h_son + output_skip ⊙ h_att)
+            hs, h_att = self.hidden(ids, caches, keep_attention=True)
+            h = F.normalize(hs[-1] + self.output_skip * h_att, dim=-1)
+        else:
+            h = self.hidden(ids, caches)[-1]                   # son durum; stream_norm'da zaten kurede
         if self.layer_norm:
             return self.norm_final(h) @ P.T                    # skor_tj = <LN(h_t), PL_j>
         if not self.stream_norm:
