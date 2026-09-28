@@ -31,11 +31,12 @@ RUNS = {}
 
 
 def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True, setting="shared", save_every=None,
-          resume=False, **train_kw):
+          resume=False, model_kw=None, **train_kw):
     """Egitimi arka planda baslatir, hemen doner.  out doluysa once out_eski_<zaman>'a TASINIR, silinmez.
     setting: "shared" (Model X, varsayilan ayarlarla) ya da "transformer" (kiyas modeli, model_20_transformer).
     save_every: her save_every adimda out/checkpoint_tNNNNN.pt {step, model, optimizer}.  resume=True: out'taki son
-    paketten surdurur -- klasor tasinmaz, gunluk ve sinavlar uzar; ayarlar config.json ile ayni olmali."""
+    paketten surdurur -- klasor tasinmaz, gunluk ve sinavlar uzar; ayarlar config.json ile ayni olmali.
+    model_kw: BlockModel ayarlari (ornek heads=4); config'te duz yazilir, varsayilanin yerine gecer."""
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
     n = {c: len(EK.questions(data, c)) for c in SHORT + STEPS_CLS}
@@ -53,7 +54,7 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
                               layers=M.LAYERS if setting in TR.STEP3 else None,
                               heads=M.HEADS if setting in TR.STEP3 else None,
                               rope=True if setting.startswith("transformer") else TR.ROPE if setting in TR.STEP3 else False),
-                         **train_kw))
+                         **(model_kw or {}), **train_kw))
     checkpoint = None
     if resume:
         packs = sorted(f for f in os.listdir(out) if f.startswith("checkpoint_t")) if os.path.isdir(out) else []
@@ -123,7 +124,7 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
             ids, mask = EK.sequences(data)
             model, _ = TR.train_seq(setting, ids, mask, len(data["vocab"]), steps=steps, seed=seed, device=device,
                                     every=every, callback=callback, log_at=(), compile=compile, save_every=save_every,
-                                    save=save, checkpoint=checkpoint, **train_kw)
+                                    save=save, checkpoint=checkpoint, model_kw=model_kw, **train_kw)
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             final = {}
             for c, givens in [(c, (0,)) for c in SHORT if data.get("long_1r")] + [(c, (0, 2, 8)) for c in STEPS_CLS]:

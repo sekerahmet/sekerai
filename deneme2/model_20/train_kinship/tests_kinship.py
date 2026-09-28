@@ -302,6 +302,14 @@ def t_colab():
           and "final.json" in os.listdir(out_dir + "/t"),
           str(run["error"] or cfg))
 
+    run = C.start("TEST_H", s, out_dir + "/h", steps=2, every=100, device="cpu", model_kw=dict(heads=4))
+    run["thread"].join(600)
+    cfg = json.load(open(out_dir + "/h/config.json"))
+    sd = torch.load(out_dir + "/h/model.pt", map_location="cpu")
+    check("colab_kinship: model_kw=dict(heads=4) modele gider (W_value var), config'te heads 4",
+          run["done"] and not run["error"] and cfg["heads"] == 4 and any(k.endswith("W_value") for k in sd),
+          str(run["error"] or cfg.get("heads")))
+
 
 if __name__ == "__main__":
     print("tests (train_kinship)")
