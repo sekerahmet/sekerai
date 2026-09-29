@@ -82,15 +82,17 @@ SPHERE_WEIGHTS = True       # W_query, W_key, W_fact_in, W_value satirlari ve W_
 CANON = True         # Canon-A (Allen-Zhu 2025): attention girdisi x_t + sum_k w_k * x_(t-k), k = 0..3, w 0'dan.  Varsayilan:
                      # Model X2 = X1 + Canon (kullanici, 28 Eylul: "evet model X2 hayırlı olsun. Canon=True."; TinyStories
                      # "X1+C çok daha iyi görünüyor açık ara", akrabalik 191,0 / X1 188,3 ve cokussuz)
-INPUT_EMBEDDING = False  # True: girdi ayri, ogrenilen tablo (V x d, PF'den baslar, capa yok; nGPT'deki E_input) -- cikis
+INPUT_EMBEDDING = True   # True: girdi ayri, ogrenilen tablo (V x d, PF'den baslar, capa yok; nGPT'deki E_input) -- cikis
                          # PL'de kalir.  False: girdi = cikis = PL (29 Eylul'e kadarki model).  Kullanici, 29 Eylul: "Bunu
-                         # yapalım bence ihtiyaç net zaten ngpt yapmış ama c mantıklı gibi"; adlar "Önerilerin kabul"
+                         # yapalım bence ihtiyaç net zaten ngpt yapmış ama c mantıklı gibi"; adlar "Önerilerin kabul".
+                         # Varsayilan FIRST_TURN_FACTS=False ile (kullanici, 30 Eylul: "bu arada bu standart olsun hız
+                         # kazancından dolayı"; SimpleStories 5.000'de acc facts6 duzeyinde, adim %14 kisa)
 INPUT_BIGRAMS = 0        # > 0: girdiye (onceki token, token) ikilisinin satiri eklenir (Over-Tokenized); satir sayisi = en
                          # sik K ikili (liste veriden, bigram_keys), listede olmayan ikilide yalniz token.  0 = yok
 INPUT_EMBEDDING_SPHERE = True  # INPUT_EMBEDDING'de girdi tablosunun satirlari basta ve her optimizer adimindan sonra
                                # birim boya (nGPT).  False (63338af): gradyan satira dik, boy buyuyor, etkin lr 1/|E| ile
                                # dusuyordu (t4500'de |E| medyan 4,9).  Kullanici, 29 Eylul: adlar "Onaylıyorum"
-FIRST_TURN_FACTS = True  # False: tur 1'in FactUnits alt adimi yok (C ajani: tur 1 FactUnits fiilen token tablosu)
+FIRST_TURN_FACTS = False  # False: tur 1'in FactUnits alt adimi yok (C ajani: tur 1 FactUnits fiilen token tablosu)
 HEADS = 4            # attention head sayisi (kullanici, 28 Eylul: "Evet, varsayılan 4"; TinyStories 10k ppl 7,22 / tek head
                      # 7,63).  H > 1: d H'ye bolunur, W_value (d x d, birim baslar) her head'in tasiyacagini secer;
                      # 1 = tek head, V yok (28 Eylul'e kadarki model)
@@ -472,8 +474,7 @@ class BlockModel(torch.nn.Module):
             self.blocks[0].facts = None                   # tur 1'in takimini baska tur kullanmiyor: parametresi de yok
         if input_embedding:                               # PF'den: ilk adimda girdi PL ile ayni
             self.input_embedding = torch.nn.Parameter(self.tokens.fixed_points.detach().clone())
-        self.input_embedding_sphere = bool(input_embedding and input_embedding_sphere)
-        assert not self.input_embedding_sphere or sphere_weights, "input_embedding_sphere normalize_weights'le (sphere_weights)"
+        self.input_embedding_sphere = bool(input_embedding and input_embedding_sphere and sphere_weights)   # kure agirliklarla
         if input_bigrams:                                 # 0'dan: ilk adimda ikili katkisi yok
             self.input_bigrams = torch.nn.Parameter(torch.zeros(input_bigrams, d))
             keys = (torch.zeros(input_bigrams, dtype=torch.long) if bigram_keys is None or isinstance(bigram_keys, str)

@@ -208,7 +208,7 @@ def _run(model, h, plan, taps=None, start=0):
                 h = norm_f(h + out)
             else:
                 h = h + out
-        elif blk.stream_norm and not blk.normalized_update:
+        elif f is not None and blk.stream_norm and not blk.normalized_update:   # mudahale: katki 0; model atlamasi normsuz
             h = norm_f(h)
         if "facts_out" in taps:
             taps["facts_out"](t, h)
@@ -793,7 +793,8 @@ def _checkpoints(run_dir):
 def _model_kw(config):
     """config'teki model_kw; output_link / shared_facts yazilmamis eski config'lerde yoktu (colab_simplestories'in
     surdurmesi gibi)."""
-    return dict(dict(output_link=False, shared_facts=True, input_embedding_sphere=False), **config.get("model_kw", {}))
+    return dict(dict(output_link=False, shared_facts=True, input_embedding=False, input_bigrams=0, first_turn_facts=True,
+                     input_embedding_sphere=False), **config.get("model_kw", {}))
 
 
 def _build(config):

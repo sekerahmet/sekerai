@@ -283,7 +283,7 @@ def t_step3():
     # t_normalized_update'te, 2 x 2 t_layers'ta
     BlockModel = functools.partial(model_y.BlockModel, normalized_update=False, sphere_weights=False, canon=False, turns=2,
                                    layers=1, heads=1, fact_activation="relu", learn_output_scale=False, loss_chunk=0,
-                                   output_link=False, shared_facts=True)
+                                   output_link=False, shared_facts=True, input_embedding=False, first_turn_facts=True)
     n, d = 12, 6
     g = torch.Generator().manual_seed(9)
     ids = torch.randint(0, n, (3, 9), generator=g)
@@ -437,7 +437,8 @@ def t_step3():
           "surdurulen = kesintisiz; ids ve batches yoksa reddeder",
           same(whole, via) and same(full, resumed) and refused and curve_b[-1]["nll"] < curve_b[0]["nll"],
           "%.3f -> %.3f" % (curve_b[0]["nll"], curve_b[-1]["nll"]))
-    mk, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), model_kw=dict(d=32, turns=3, layers=1, units=64))
+    mk, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), model_kw=dict(d=32, turns=3, layers=1, units=64,
+                                                                                          first_turn_facts=True))
     mt, _ = TR.train_seq("transformer", sids[:8], smask[:8], nv, steps=1, log_at=(), model_kw=dict(d=32, layers=1))
     check("train_seq, model_kw: ayarlar modele ulasir (BlockModel d 32, 3 tur, 64 birim; transformer d 32, 1 katman)",
           tuple(mk.blocks[0].attention.W_query.shape) == (32, 32) and mk.turns == 3 and len(mk.hidden(sids[:2])) == 4
@@ -504,7 +505,8 @@ def t_step3():
     kept = sorted({names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.0 for p_ in g_["params"]})
     check("weight decay: yalniz W_ matrislerine; shift, alpha, Canon agirliklari, cikis olcegi ve cikis bagi (phi) haric",
           decayed == sorted(["W_query", "W_key", "W_context", "W_fact_in", "W_fact_up", "W_fact_out", "W_value"])
-          and kept == ["alpha_attention", "alpha_facts", "canon_weights", "link_q", "link_u", "log_output_scale", "shift"],
+          and kept == ["alpha_attention", "alpha_facts", "canon_weights", "input_embedding", "link_q", "link_u",
+                       "log_output_scale", "shift"],
           "%s | %s" % (decayed, kept))
 
     # 27 Eylul tarifi: Muon (gizli matrisler) + Adam, WSD takvimi, compile varsayilan acik; masked_nll; RoPE en az fp32
@@ -595,8 +597,8 @@ def t_step3():
           "W_key, cikis olcegi; "
           "lr 8. adima kadar sabit, sonra 1 - sqrt ile LR x LR_FLOOR'a; kayip iner",
           isinstance(opts[0], TR.Muon) and in_muon == ["W_context", "W_fact_in", "W_fact_out", "W_fact_up", "W_value"]
-          and in_adam == ["W_key", "W_query", "alpha_attention", "alpha_facts", "canon_weights", "link_q", "link_u",
-                          "log_output_scale", "shift"]
+          and in_adam == ["W_key", "W_query", "alpha_attention", "alpha_facts", "canon_weights", "input_embedding",
+                          "link_q", "link_u", "log_output_scale", "shift"]
           and all(abs(lrs[t] - w) < 1e-12 for t, w in zip(range(1, 11), wsd)) and curve_m[-1]["nll"] < curve_m[0]["nll"],
           "%s | %s | lr %s" % (in_muon, in_adam, [round(lrs[t], 5) for t in range(1, 11)]))
 
@@ -841,7 +843,9 @@ def t_normalized_update():
     blok ciktisi ne kadar buyurse buyusun durum alpha kadar doner; agirliklar her adimdan sonra birim; surdurme ayni."""
     import copy
     import torch.nn.functional as F
+    import functools
     from model_y import ALPHA_INIT, LAST_FACTS_ALPHA_INIT, BlockModel, apply_rope
+    BlockModel = functools.partial(BlockModel, input_embedding=False, first_turn_facts=True)   # 30 Eylul oncesi tasarim (tur 1 FactUnits'li)
     data = D.build()
     sids, smask = EK.sequences(data)
     nv = len(data["vocab"])
@@ -916,7 +920,7 @@ def t_normalized_update():
     grab = lambda step, model, opt: opts.append(opt)
     kw = dict(normalized_update=True, sphere_weights=True)
     trained, curve = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20), save_every=1, save=grab, **kw)
-    tb = trained.blocks[0]
+    tb = trained.blocks[1]                                 # varsayilanda blocks[0]'in FactUnits'i yok
     names = {id(p_): k for k, p_ in trained.named_parameters()}
     in_adam = sorted({names[id(p_)] for g_ in opts[-1].param_groups if not g_["use_muon"] for p_ in g_["params"]})
     check("egitim (normalized_update + sphere_weights, Muon + WSD): kayip iner; 20 adimdan sonra satir / sutunlar birim; "
@@ -1101,7 +1105,7 @@ def t_layers():
 
     opts = []
     grab = lambda step, model, opt: opts.append(opt)
-    kw = dict(layers=2, turns=4)
+    kw = dict(layers=2, turns=4, first_turn_facts=True)
     trained, curve = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20), save_every=1, save=grab, model_kw=kw)
     names = {id(p_): k for k, p_ in trained.named_parameters()}
     groups = {names[id(p_)]: g_["use_muon"] for g_ in opts[-1].param_groups for p_ in g_["params"]}
@@ -1174,6 +1178,17 @@ def t_coherence():
     check("coherence, final_cooldown_shape linear: son %50'de dogrusal x 0'a (D2Z); varsayilan linear",
           TR.FINAL_COOLDOWN_SHAPE == "linear" and all(abs(lin[t] - v) < 1e-12 for t, v in want_l.items())
           and all(lin[t] == TR.LR for t in range(1, 20)), str({t: round(lin[t], 6) for t in (19, 20, 30, 39, 40)}))
+
+    lg = {}
+    TR.train_seq("shared", sids[:64], smask[:64], nv, steps=40, log_at=(), save_every=1,
+                 save=lambda step, model, opt: lg.setdefault(step, opt.param_groups[0]["lr"]), schedule="coherence",
+                 final_cooldown=0.5, lr_floor=0.0, final_cooldown_shape="log")
+    k_ = TR.LOG_COOLDOWN_KAPPA
+    want_g = {t: TR.LR * (1 - math.log(1 + (t - 20) / 20 / k_) / math.log(1 + 1 / k_)) for t in range(20, 41)}
+    check("coherence, final_cooldown_shape log (nGPT 2026): son %50'de 1 - log(1 + p/k) / log(1 + 1/k) ile 0'a, k 0,05; "
+          "inisin %10'unda tepenin %64'u, yarisinda %21'i",
+          k_ == 0.05 and all(abs(lg[t] - v) < 1e-12 for t, v in want_g.items()) and all(lg[t] == TR.LR for t in range(1, 20))
+          and abs(lg[22] / TR.LR - 0.639) < 1e-3 and abs(lg[30] / TR.LR - 0.212) < 1e-3, str({t: round(lg[t], 6) for t in (19, 20, 22, 30, 40)}))
 
     fz = {}
     TR.train_seq("shared", sids[:64], smask[:64], nv, steps=40, log_at=(), save_every=1,
@@ -1439,7 +1454,9 @@ def t_fact_activation():
     ayni parametre icin units 2/3; W_fact_up Muon'da ve satirlari birim; surdurme bit duzeyinde; onbellekli uretim."""
     import copy
     import torch.nn.functional as F
+    import functools
     from model_y import FACT_ACTIVATION, FACT_UNITS, BlockModel, FactUnits
+    BlockModel = functools.partial(BlockModel, input_embedding=False, first_turn_facts=True)   # butun turlarda FactUnits
     data = D.build()
     sids, smask = EK.sequences(data)
     nv = len(data["vocab"])
@@ -1480,7 +1497,7 @@ def t_fact_activation():
     check("fact_activation reglu: cikti = W_fact_out (ReLU(W_fact_in x - esik) * (W_fact_up x)) (bagimsiz float64); "
           "esik ve W_fact_up birlikte", err_r < 1e-12 and {"fact_threshold", "W_fact_up"} <= names_r, "fark %.1e" % err_r)
     rg, curve_r = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=10, log_at=(0, 10),
-                               model_kw=dict(fact_activation="reglu", units=170))
+                               model_kw=dict(fact_activation="reglu", units=170, first_turn_facts=True))
     check("fact_activation reglu: egitimde kayip iner; W_fact_up satirlari birim",
           curve_r[-1]["nll"] < curve_r[0]["nll"]
           and all(torch.allclose(b.facts.W_fact_up.norm(dim=1), torch.ones(170), atol=1e-5) for b in rg.blocks),
@@ -1488,7 +1505,7 @@ def t_fact_activation():
 
     opts = []
     grab = lambda step, model, opt: opts.append(opt)
-    kw = dict(model_kw=dict(fact_activation="swiglu", units=170))
+    kw = dict(model_kw=dict(fact_activation="swiglu", units=170, first_turn_facts=True))
     trained, curve = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20), save_every=1, save=grab, **kw)
     nm = {id(p_): k.split(".")[-1] for k, p_ in trained.named_parameters()}
     in_muon = {nm[id(p_)] for g_ in opts[-1].param_groups if g_["use_muon"] for p_ in g_["params"]}
@@ -1596,12 +1613,14 @@ def t_learn_output_scale():
     sys.path.insert(0, os.path.join(HERE, "train_tinystories"))
     import konus_y as K
     tmp = tempfile.mkdtemp()
-    legacy = BlockModel(nv, learn_output_scale=False, output_link=False, shared_facts=True)   # 29 Eylul oncesi kosu
+    legacy = BlockModel(nv, learn_output_scale=False, output_link=False, shared_facts=True, input_embedding=False, first_turn_facts=True)   # 29 Eylul oncesi kosu
     for sub, model_ in (("old", off), ("new", trained), ("legacy", legacy)):
         os.makedirs(os.path.join(tmp, sub))
         kw_ = dict(d=64, turns=4, layers=2, heads=4, fact_activation="swiglu", units=170, t_max=512)
         if sub != "legacy":                                  # kosucular (29 Eylul'den) iki anahtari hep yazar
-            kw_.update(output_link=model_.output_link, shared_facts=model_.shared_facts)
+            kw_.update(output_link=model_.output_link, shared_facts=model_.shared_facts,
+                       input_embedding=hasattr(model_, "input_embedding"), first_turn_facts=model_.first_turn_facts,
+                       input_embedding_sphere=model_.input_embedding_sphere)
         if sub == "new":
             kw_["learn_output_scale"] = True
         json.dump(dict(setting="shared", model_kw=kw_, rope=True, normalized_update=True, sphere_weights=True, canon=True,
@@ -1988,7 +2007,7 @@ def t_shared_facts():
     data = D.build()
     sids, smask = EK.sequences(data)
     nv = len(data["vocab"])
-    kw = dict(d=16, units=16, layers=2, turns=4, heads=2)
+    kw = dict(d=16, units=16, layers=2, turns=4, heads=2, input_embedding=False, first_turn_facts=True)
     base, split = BlockModel(nv, shared_facts=True, **kw), BlockModel(nv, **kw)
     cnt = lambda m: sum(p_.numel() for p_ in m.parameters() if p_.requires_grad)
     fu = sum(p_.numel() for p_ in split.extra_facts[0].parameters())
@@ -2072,7 +2091,7 @@ def t_input_embedding():
     keys = _bigram_keys(sids, smask, nv, K)
     full_kw = dict(input_embedding=True, input_bigrams=K, first_turn_facts=False, bigram_keys=keys)
 
-    base, emb = BlockModel(nv), BlockModel(nv, input_embedding=True)
+    base, emb = BlockModel(nv, input_embedding=False), BlockModel(nv, input_embedding=True)
     big = BlockModel(nv, input_embedding=True, input_bigrams=K, bigram_keys=keys)
     with torch.no_grad():
         z0 = base.logits(ids)
@@ -2106,11 +2125,11 @@ def t_input_embedding():
           "fark %.1e  devam %.1e  ikili %d / %d" % (err, err_c, hits, ids.numel()))
 
     torch.manual_seed(0)
-    plain, skip = BlockModel(nv), BlockModel(nv, first_turn_facts=False)
+    plain, skip = BlockModel(nv, first_turn_facts=True), BlockModel(nv, first_turn_facts=False)
     kept = BlockModel(nv, first_turn_facts=False, shared_facts=True)
     with torch.no_grad():
         err_s = float((skip.logits(ids) - I._logits(plain, ids, dict(skip_facts=[0]))).abs().max())
-        err_k = float((kept.logits(ids) - I._logits(BlockModel(nv, shared_facts=True), ids, dict(skip_facts=[0]))).abs().max())
+        err_k = float((kept.logits(ids) - I._logits(BlockModel(nv, shared_facts=True, first_turn_facts=True), ids, dict(skip_facts=[0]))).abs().max())
     n_plain = sum(p.numel() for p in plain.parameters())
     n_skip = sum(p.numel() for p in skip.parameters())
     check("first_turn_facts=False: tur 1 FactUnits'siz model = internals'in F1 atlamasi (ayni tohum); ayri takimda tur 1'in "
@@ -2214,7 +2233,8 @@ def t_internals():
     nv = len(data["vocab"])
     stories = [sids[i, :int(smask[i].sum())].tolist() for i in range(6)]
     others = [sids[i, :int(smask[i].sum())].tolist() for i in range(6, 12)]
-    base_kw = dict(d=16, units=24, layers=2, turns=4, heads=2, shared_facts=True)   # paylasimli tasarim; ayrik hali acikca
+    base_kw = dict(d=16, units=24, layers=2, turns=4, heads=2, shared_facts=True, input_embedding=False, first_turn_facts=True)   # paylasimli, PL girdili;
+                                                                                  # ayrik ve tablolu hali acikca
 
     def perturbed(seed=5, **kw):
         m = BlockModel(nv, **dict(base_kw, **kw)).double()

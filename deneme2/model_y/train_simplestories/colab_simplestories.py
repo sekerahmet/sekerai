@@ -166,7 +166,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                               weight_ema=TR.WEIGHT_EMA, matmul_precision=TR.MATMUL_PRECISION,
                               coherence_power=TR.COHERENCE_POWER, muon_tangent=TR.MUON_TANGENT,
                               final_cooldown_shape=TR.FINAL_COOLDOWN_SHAPE, attention_kernel=TR.ATTENTION_KERNEL,
-                              newton_schulz_precision=TR.NEWTON_SCHULZ_PRECISION,
+                              newton_schulz_precision=TR.NEWTON_SCHULZ_PRECISION, log_cooldown_kappa=TR.LOG_COOLDOWN_KAPPA,
                               stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
                               normalized_update=TR.NORMALIZED_UPDATE if setting in TR.STEP3 else False,
                               sphere_weights=TR.SPHERE_WEIGHTS if setting in TR.STEP3 else False,
@@ -180,6 +180,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
             raise RuntimeError("%s: surdurme paketi yok; bastan kosmak ayri karar (resume=False)" % out)
         saved = json.load(open(os.path.join(out, "config.json")))
         saved.setdefault("final_cooldown_shape", "sqrt")          # 29 Eylul oncesi kosularda yazilmadi: sqrt idi
+        saved.setdefault("log_cooldown_kappa", TR.LOG_COOLDOWN_KAPPA)   # 30 Eylul oncesi: "log" yoktu, k etkisiz
         saved.setdefault("attention_kernel", "math")              # 29 Eylul oncesi: hep math, fp32 Newton-Schulz
         saved.setdefault("newton_schulz_precision", "fp32")
         if setting in TR.STEP3 and saved.get("model_kw"):   # 29 Eylul oncesi kosularda bu ayarlar yazilmadi: yoktu

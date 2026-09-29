@@ -56,7 +56,10 @@ FINAL_COOLDOWN = 0.95    # coherence'ta inisin payi: ilk %5'te lr olculur, sonra
 FROZEN_LR = None         # coherence'ta inisin basladigi lr'yi elle vermek (None: o anki olculen deger).  Kullanici, 29 Eylul:
                          # "Tepe lr'yi φ'li koşununkine sabitle" (phi acik / kapali kiyasinda tek fark phi kalsin)
 FINAL_COOLDOWN_SHAPE = "linear"   # son inisin bicimi: "linear" 1 - p | "sqrt" 1 - sqrt(p) (29 Eylul'e kadar; kisa
-                                  # inislerde).  Kullanici, 29 Eylul: "final cooldown olsun", "1 evet varsayılan olsun"
+                                  # inislerde) | "log" 1 - log(1 + p/k) / log(1 + 1/k) (nGPT 2026, onden yuklu).
+                                  # Kullanici, 29 Eylul: "final cooldown olsun", "1 evet varsayılan olsun"
+LOG_COOLDOWN_KAPPA = 0.05          # "log" inisin k'si: kucuk k basta hizli dusus, uzun kuyruk (training_ngpt2026 s.563).
+                                  # Kullanici, 30 Eylul: adlar "Onaylıyorum"
 COHERENCE_POWER = 1.0    # coherence'ta lr carpani = ortalama(rho) ^ bu us; alt / ust sinir ve son inis aynen.  0,5 = sqrt(rho)
                          # (kullanici, 28 Eylul: "Sonra tek farkı lr = LR·√ρ olan bir 10k koşusu, 6,94'e karşı."); 1,0 = bugunku
 WEIGHT_EMA = None       # agirliklarin hareketli ortalamasi (ornek 0,999; kullanici onayli ad, 28 Eylul): titresimi
@@ -222,7 +225,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     assert not setting.startswith("transformer") or not weight_decay, "transformer icin weight decay gruplari tanimli degil"
     assert optimizer in ("muon", "adam") and schedule in ("wsd", "cosine", "coherence") and 0 < cooldown <= 1
     assert schedule != "coherence" or (lr_floor is not None and 0 < final_cooldown <= 1 and coherence_window >= 1)
-    assert final_cooldown_shape in ("sqrt", "linear"), "final_cooldown_shape: sqrt | linear"
+    assert final_cooldown_shape in ("sqrt", "linear", "log"), "final_cooldown_shape: sqrt | linear | log"
     assert frozen_lr is None or (schedule == "coherence" and frozen_lr > 0), "frozen_lr: yalniz coherence'ta, pozitif"
     assert weight_ema is None or 0 < weight_ema < 1, "weight_ema: 0 ile 1 arasi (ornek 0,999) ya da None"
     assert optimizer == "adam" or not weight_decay, "weight_decay yalniz optimizer='adam' ile (AdamW)"
@@ -327,8 +330,9 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
                                 group["coherence_frozen"] = (frozen_lr / lr if frozen_lr is not None else
                                                               min(max(g0["coherence_mean"] ** coherence_power, lr_floor), 1.0))
                         p = (step - final) / max(steps - final, 1)
-                        factor = g0["coherence_frozen"] * (
-                            lr_floor + (1 - lr_floor) * (1 - (p if final_cooldown_shape == "linear" else math.sqrt(p))))
+                        done = (p if final_cooldown_shape == "linear" else math.sqrt(p) if final_cooldown_shape == "sqrt"
+                                else math.log1p(p / LOG_COOLDOWN_KAPPA) / math.log1p(1 / LOG_COOLDOWN_KAPPA))
+                        factor = g0["coherence_frozen"] * (lr_floor + (1 - lr_floor) * (1 - done))
                 else:                                          # WSD: t < start: lr;  sonra lr · (floor + (1 - floor)(1 - sqrt(p)))
                     factor = 1.0 if step < start else (
                         lr_floor + (1 - lr_floor) * (1 - math.sqrt((step - start) / max(steps - start, 1))))

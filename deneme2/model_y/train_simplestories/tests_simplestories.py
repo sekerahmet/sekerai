@@ -462,11 +462,13 @@ def t_exam(root):
 
         al = ES.alpha_summary(m)
         A, F_ = (x.detach().numpy() for x in (m.alpha_attention, m.alpha_facts))
+        f0 = 0 if m.first_turn_facts else 1                 # FIRST_TURN_FACTS=False: tur 1'in alpha_F'si None
         check("%s alpha_summary: tur basina medyan ve |alpha|'nin en buyugu (numpy); normalized_update yoksa None" % t,
               np.allclose(al["attention"]["median"], np.median(A, -1), atol=1e-4)
-              and np.allclose(al["facts"]["median"], np.median(F_, -1), atol=1e-4)
+              and np.allclose(al["facts"]["median"][f0:], np.median(F_, -1)[f0:], atol=1e-4)
               and np.allclose(al["attention"]["max_abs"], np.abs(A).max(-1), atol=1e-4)
-              and np.allclose(al["facts"]["max_abs"], np.abs(F_).max(-1), atol=1e-4) and len(al["facts"]["median"]) == 2
+              and np.allclose(al["facts"]["max_abs"][f0:], np.abs(F_).max(-1)[f0:], atol=1e-4)
+              and al["facts"]["median"][:f0] == [None] * f0 and len(al["facts"]["median"]) == 2
               and ES.alpha_summary(TransformerModel(V, d=16, layers=1, units=32)) is None, json.dumps(al))
 
     ds, v = d["ss4096"], d["ss4096"]["vocab"]
@@ -714,10 +716,10 @@ def t_speed(root):
           work == dict(targets=targets, keys=keys) and targets > 0, str(work))
 
     V, D_, units, turns = 4096, 384, 1024, 6
-    bm = M.BlockModel(V, d=D_, turns=turns, layers=3, units=units, heads=4, fact_activation="swiglu")
+    bm = M.BlockModel(V, d=D_, turns=turns, layers=3, units=units, heads=4, fact_activation="swiglu", first_turn_facts=True)
     N, Ld = C._model_flops(bm)
-    bm2 = M.BlockModel(V, d=D_, turns=turns, layers=3, units=units, heads=4, fact_activation="swiglu", shared_facts=False)
-    bm1 = M.BlockModel(64, d=16, turns=2, layers=1, units=8, heads=1, fact_activation="relu")
+    bm2 = M.BlockModel(V, d=D_, turns=turns, layers=3, units=units, heads=4, fact_activation="swiglu", shared_facts=False, first_turn_facts=True)
+    bm1 = M.BlockModel(64, d=16, turns=2, layers=1, units=8, heads=1, fact_activation="relu", first_turn_facts=True)
     tm = TransformerModel(64, d=16, layers=2, units=32)
     check("_model_flops: 3x2 (d 384, FactUnits 1024, 6 tur, 4 head) N = 6 (4 d^2 + 3 d units) + V d; ileri FLOP/token "
           "2 N + 4 L d x 169,9 anahtar = 25,95 M (D ajani); ayri FactUnits ayni; tek head W_value'suz, relu iki matris; "
