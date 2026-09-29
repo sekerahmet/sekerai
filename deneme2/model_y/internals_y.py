@@ -18,6 +18,8 @@ ve mudahale.
 
 Hikayeler: id listeleri.  Girdi ids[:-1], hedef ids[1:]; exclude_last: son hedef (SimpleStories'te hikayeyi kapatan <eos>)
 sayilmaz.  Turlar kodda 0'dan, metinde 1'den (tur 3 = indeks 2); head'ler 0'dan.
+Veri (CLI): SimpleStories (config'teki tag) ya da FineWeb-Edu (kosu dataset'i fineweb-edu ya da --data FineWeb klasoru):
+valid belgeleri TEK TEK, en cok 2.048 token.  Paketli batch (document_positions) desteklenmez.
 
     python internals_y.py <kosu adi | klasoru> <olcum> [secenekler]        (python internals_y.py -h)
 Cikti <kosu klasoru>/internals/<olcum>_<agirlik>[_tNNNNNN]_<zaman>.txt + .json.  Yerel CPU, 4 is parcacigi.
@@ -45,6 +47,8 @@ from model_y import BlockModel, deviation  # noqa: E402
 
 _RUNS_ROOT = "G:/Drive'ım/model_y"                  # kosu klasorleri (Drive, bu bilgisayarda)
 _SIMPLESTORIES_ROOT = "G:/Drive'ım/simplestories"    # <tag>/tokenizer.json, <tag>/valid.npy, exam_stories.npy
+_FINEWEB_ROOT = "G:/Drive'ım/fineweb"                # gpt2/tokenizer.json, gpt2/shard_NNN.* (data_fineweb)
+_FINEWEB_TOKENS = 2048                               # FineWeb belgesi en cok bu kadar girdiyle (tek belge, paketsiz)
 # train_y.train_seq'teki Muon listesi: yedekteki optimizer parametre sirasi buna bagli (once bunlar)
 _MUON_HIDDEN = ("W_context", "W_value", "W_fact_in", "W_fact_up", "W_fact_out", "W_value.weight", "W_out.weight",
                 "W_mlp_in.weight", "W_mlp_out.weight")
@@ -1238,6 +1242,32 @@ def _simplestories(config, root):
 _DATA = {"ss4096": (_simplestories, _SIMPLESTORIES_ROOT), "gpt2": (_simplestories, _SIMPLESTORIES_ROOT)}
 
 
+def _fineweb(config, root):
+    """FineWeb-Edu valid belgeleri (data_fineweb.load_valid; egitim akisi okunmaz): stories(count, offset) -> (valid
+    siralari, [[eot] + metin + [eot]] en cok _FINEWEB_TOKENS + 1 token).  Sira: sinav alt kumesi once, sonra valid'in geri
+    kalani (tohum 0 permutasyonu); [offset, offset + count) dilimi, valid sirasiyla sirali.  Tek belge: paketleme yok."""
+    sys.path.insert(0, os.path.join(HERE, "train_fineweb"))
+    import data_fineweb as DF
+    v = DF.load_valid(root, log=lambda s: None)
+    assert len(v["vocab"]) == config["vocab"], "sozluk %d, kosu %d" % (len(v["vocab"]), config["vocab"])
+    perm = np.random.default_rng(0).permutation(len(v["valid_starts"]))
+    order = np.concatenate([v["exam"], perm[~np.isin(perm, v["exam"])]])
+
+    def stories(count, offset=0):
+        rows = np.sort(order[offset:offset + count])
+        return rows, [(DF.valid_doc(v, int(r)) + [v["eot"]])[:_FINEWEB_TOKENS + 1] for r in rows]
+
+    shards = config.get("shards") or [i for i in v["complete"] if i != DF.VALID_SHARD]
+    return dict(tag="fineweb_" + DF.TAG, vocab=v["vocab"], eos=v["eot"], stories=stories,
+                encode=lambda s: DF.DS.encode(s, v["vocab"]),
+                train=[os.path.join(root, DF.TAG, "shard_%03d.bin" % i) for i in shards])
+
+
+def _is_fineweb(root):
+    return bool(root) and os.path.exists(os.path.join(root, "gpt2", "tokenizer.json")) and any(
+        f.startswith("shard_") and f.endswith(".json") for f in os.listdir(os.path.join(root, "gpt2")))
+
+
 def _token_counts(data, config, run_dir, path=None, log=print):
     """Train akisinin token sayimi: path verilirse oradan; yoksa <kosu>/internals/token_counts_<tag>_<iz>.npy (bir kez
     sayilir, sonra okunur -- train.npy buyuk)."""
@@ -1247,10 +1277,12 @@ def _token_counts(data, config, run_dir, path=None, log=print):
     if os.path.exists(cache):
         return np.load(cache)
     log("train sayimi: %s (bir kez; sonra %s)" % (data["train"], cache))
-    a = np.load(data["train"], mmap_mode="r")
+    paths = data["train"] if isinstance(data["train"], (list, tuple)) else [data["train"]]   # FineWeb: parca .bin'leri
     counts = np.zeros(len(data["vocab"]), np.int64)
-    for i in range(0, len(a), 50_000_000):
-        counts += np.bincount(np.asarray(a[i:i + 50_000_000]), minlength=len(counts))[:len(counts)]
+    for path in paths:
+        a = np.memmap(path, dtype=np.uint16, mode="r") if path.endswith(".bin") else np.load(path, mmap_mode="r")
+        for i in range(0, len(a), 50_000_000):
+            counts += np.bincount(np.asarray(a[i:i + 50_000_000]), minlength=len(counts))[:len(counts)]
     os.makedirs(os.path.dirname(cache), exist_ok=True)
     np.save(cache, counts)
     return counts
@@ -1601,7 +1633,9 @@ def _main(argv=None):
     ap.add_argument("--counts", help="point_drift: token sayimi .npy (varsayilan: train akisi, bir kez sayilir)")
     ap.add_argument("--batch", type=int, help="batch (varsayilan 16; attention_stats, tuned_lens 8; profile_step config'in "
                                               "batch_size'i)")
-    ap.add_argument("--data", help="veri koku (varsayilan: tag'e gore %s)" % _SIMPLESTORIES_ROOT)
+    ap.add_argument("--data", help="veri koku (varsayilan: tag'e gore %s; FineWeb kosusunda %s); FineWeb klasoru "
+                                   "verilirse valid belgeleri (tek belge, en cok %d token)" % (
+                                       _SIMPLESTORIES_ROOT, _FINEWEB_ROOT, _FINEWEB_TOKENS))
     ap.add_argument("--fit-stories", type=int, default=256, help="tuned_lens: cevirici hikaye sayisi")
     ap.add_argument("--fit-offset", type=int, default=10000, help="tuned_lens: cevirici hikayeleri sinav permutasyonunda "
                                                                   "buradan (degerlendirmeyle ortusmez)")
@@ -1622,10 +1656,9 @@ def _main(argv=None):
     run_dir = args.run if os.path.isdir(args.run) else os.path.join(_RUNS_ROOT, args.run)
     assert os.path.isdir(run_dir), "kosu klasoru yok: %s" % run_dir
     config = _config(run_dir)
-    if config.get("packing"):                          # FineWeb: tag gpt2 SimpleStories'in verisine gitmesin
-        raise SystemExit("paketli kosu (%s, packing %s): veri yukleyicisi yok; olcum fonksiyonlari tek belgeli id "
-                         "listeleriyle dogrudan cagrilabilir" % (config.get("dataset"), config["packing"]))
-    loader = _DATA.get(config.get("tag"))
+    # FineWeb kosusu ya da --data bir FineWeb klasoru: valid belgeleri tek tek (tag gpt2 SimpleStories'e gitmesin)
+    fineweb = config.get("dataset") == "fineweb-edu" or _is_fineweb(args.data)
+    loader = (_fineweb, _FINEWEB_ROOT) if fineweb else _DATA.get(config.get("tag"))
     if loader is None:
         raise SystemExit("veri yukleyicisi yok: tag %r (yalniz SimpleStories: ss4096, gpt2); olcum fonksiyonlari id "
                          "listeleriyle dogrudan cagrilabilir" % config.get("tag"))

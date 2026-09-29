@@ -2578,8 +2578,6 @@ def t_packing():
     RoPE goreli (8.192 konumda da); compile'da graph break yok; train_seq paketli batch'le (coherence yarilari) ve surdurme;
     onbellek, INPUT_BIGRAMS ve internals paketli girdiyi reddeder.  Kendi kucuk verisi (rastgele token)."""
     import copy
-    import json
-    import tempfile
     import internals_y as I
     from model_y import BlockModel, build_document_mask, same_document_causal
     V = 40
@@ -2724,16 +2722,8 @@ def t_packing():
             refused.append(False)
         except AssertionError:
             refused.append(True)
-    run_dir = tempfile.mkdtemp()
-    with open(os.path.join(run_dir, "config.json"), "w") as f:
-        json.dump(dict(tag="gpt2", dataset="fineweb-edu", packing="masked", vocab=V), f)
-    try:
-        I._main([run_dir, "trace"])
-        refused.append(False)
-    except SystemExit as e:
-        refused.append("paketli" in str(e))
-    check("paketleme: onbellekli uretim, INPUT_BIGRAMS, internals profile_step (paketli batch) ve internals CLI (paketli "
-          "kosu: tag gpt2 SimpleStories verisine gitmez) reddeder", all(refused), str(refused))
+    check("paketleme: onbellekli uretim, INPUT_BIGRAMS ve internals profile_step (paketli batch) reddeder (internals CLI "
+          "FineWeb'i tek belgeyle okur: tests_fineweb)", all(refused), str(refused))
 
 
 def t_attention_log_scale():
@@ -2797,10 +2787,18 @@ def t_attention_log_scale():
     ids = torch.tensor([qs[3] + new[3]])
     with torch.no_grad():
         err_i = float((I._logits(md, ids) - md.logits(ids)).abs().max())
+    big = BlockModel(V, d=32, layers=6, turns=12, heads=16, units=24, t_max=16384, attention_log_scale=True).double()
+    with torch.no_grad():
+        for p_ in big.parameters():
+            p_.add_(0.3 * torch.randn(p_.shape, generator=torch.Generator().manual_seed(p_.numel()), dtype=torch.float64))
+        seen = []
+        err_t = float((I._logits(big, ids, taps=dict(attention=lambda t, a: seen.append(t))) - big.logits(ids)).abs().max())
+        err_s = float((I._logits(big, ids) - big.logits(ids)).abs().max())
     check("attention_log_scale: onbellekli uretim = tam hesap (sagdan dolgulu istemler, n = konum + 1); internals'in elle "
-          "ileri hesabi = model.logits (float64)",
-          new == TR.generate(m, qs, 6, cached=False) and err_g < 1e-4 and err_i < 1e-10,
-          "skor farki %.1e  internals %.1e" % (err_g, err_i))
+          "ileri hesabi = model.logits (float64; SDPA ve acik softmax yolu, 6 blok x 2 = 12 tur dahil)",
+          new == TR.generate(m, qs, 6, cached=False) and err_g < 1e-4 and err_i < 1e-10 and err_t < 1e-10
+          and err_s < 1e-10 and seen == list(range(12)),
+          "skor farki %.1e  internals %.1e / 6x2 %.1e %.1e" % (err_g, err_i, err_s, err_t))
 
     torch._dynamo.reset()
     fl = BlockModel(V, d=16, units=24, t_max=64, loss_chunk=7, attention_log_scale=True)

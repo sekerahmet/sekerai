@@ -394,7 +394,7 @@ def t_real_gpt2():
           and all(tok.decode(x) == t for x, t in zip(ids, texts)))
 
 
-def t_colab(data):
+def t_colab(data, root):
     tmp = tempfile.mkdtemp()
     out = tmp + "/r"
     work = dict(targets=0, keys=0)
@@ -464,6 +464,26 @@ def t_colab(data):
           run2["done"] and not run2["error"] and all(torch.equal(first[k], second[k]) for k in first) and refused,
           str(run2["error"]))
 
+    import internals_y as I
+    done, errors = [], []
+    for measure, extra in (("trace", ["--stories", "2"]), ("attention_stats", ["--stories", "3"]),
+                           ("unit_usage", ["--stories", "3"]), ("ablate", ["--stories", "3", "--cases", "none", "A2", "F2", "C"]),
+                           ("point_drift", [])):             # valid: fixture'da varsayilan adimla (50) tek belge
+        try:
+            I._main([out, measure, "--data", root] + extra)
+            done.append(measure)
+        except BaseException as e:                         # SystemExit dahil
+            errors.append("%s: %r" % (measure, e))
+    torch.set_num_threads(1)
+    written = sorted(f.split("_")[0] for f in os.listdir(out + "/internals") if f.endswith(".json"))
+    stories = I._fineweb(cfg, root)["stories"](3)[1]
+    check("internals_y FineWeb: --data FineWeb klasoru -> valid belgeleri tek tek ([eot] + metin + [eot], en cok 2.048), "
+          "sinav alt kumesi once; trace / attention_stats / unit_usage / ablate / point_drift (sayim parca .bin'lerinden) "
+          "kosar (tuned_lens ayri belge ister: fixture'da tek valid belge)",
+          not errors and len(done) == 5 and {"trace", "attention", "unit", "ablate", "point"} <= set(written)
+          and all(x[0] == data["eot"] and x[-1] == data["eot"] for x in stories),
+          "; ".join(errors)[:300] or str(written))
+
     run3 = C.start("TEST3", data, tmp + "/s", **dict(kw, token_budget=None, steps=500))
     C.stop()
     run3["thread"].join(900)
@@ -501,7 +521,7 @@ if __name__ == "__main__":
         t_windows(data)
         t_exam(data, tok)
         t_real_gpt2()
-        t_colab(data)
+        t_colab(data, root)
     finally:
         shutil.rmtree(root)
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
