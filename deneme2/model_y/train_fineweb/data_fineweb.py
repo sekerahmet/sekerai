@@ -170,7 +170,7 @@ def _docs_stream(stream, offsets, keep):
     return stream[np.repeat(keep, lengths)], np.concatenate([[0], np.cumsum(lengths[keep])[:-1]]).astype(np.int64)
 
 
-def load_valid(root, valid_stride=VALID_STRIDE, exam_docs=EXAM_DOCS, log=print):
+def load_valid(root, valid_stride=VALID_STRIDE, exam_docs=EXAM_DOCS, log=print, valid_shard=VALID_SHARD):
     """Drive -> yalniz valid (egitim akisi okunmaz; internals_y ve load'un ilk adimi).  -> vocab, eot, tag, valid (akis),
     valid_starts, valid_bytes, exam, parts (iz parcalari), counts, complete (tamamlanmis parcalar), tokenizer."""
     d = os.path.join(root, TAG)
@@ -179,11 +179,11 @@ def load_valid(root, valid_stride=VALID_STRIDE, exam_docs=EXAM_DOCS, log=print):
     tok, vocab = DS._load(tpath, EOT)
     eot = vocab.index(EOS_TOKEN)
     complete = sorted(int(f[6:9]) for f in os.listdir(d) if f.startswith("shard_") and f.endswith(".json"))
-    assert VALID_SHARD in complete, "valid parcasi shard_%03d henuz yok (tokenize bitmedi)" % VALID_SHARD
-    parts = dict(tokenizer=_sha256(tpath)[:12], rule=hashlib.sha256((VALID_RULE % (VALID_SHARD, valid_stride, exam_docs))
+    assert valid_shard in complete, "valid parcasi shard_%03d henuz yok (tokenize bitmedi)" % valid_shard
+    parts = dict(tokenizer=_sha256(tpath)[:12], rule=hashlib.sha256((VALID_RULE % (valid_shard, valid_stride, exam_docs))
                                                                      .encode()).hexdigest()[:12])
-    stream, offsets, nbytes, meta = _read_shard(d, VALID_SHARD, tok, eot)
-    parts["shard_%03d" % VALID_SHARD] = "%s.%s.%s" % (meta["sha256"][:12], _short(offsets), _short(nbytes))
+    stream, offsets, nbytes, meta = _read_shard(d, valid_shard, tok, eot)
+    parts["shard_%03d" % valid_shard] = "%s.%s.%s" % (meta["sha256"][:12], _short(offsets), _short(nbytes))
     is_valid = np.arange(len(offsets)) % valid_stride == 0
     valid, valid_starts = _docs_stream(stream, offsets, is_valid)
     exam = np.sort(np.random.default_rng(0).permutation(len(valid_starts))[:exam_docs])
@@ -195,27 +195,28 @@ def load_valid(root, valid_stride=VALID_STRIDE, exam_docs=EXAM_DOCS, log=print):
                 valid_shard=(stream, offsets, is_valid))
 
 
-def load(root, train_tokens=None, seq_len=SEQ_LEN, valid_stride=VALID_STRIDE, exam_docs=EXAM_DOCS, log=print):
+def load(root, train_tokens=None, seq_len=SEQ_LEN, valid_stride=VALID_STRIDE, exam_docs=EXAM_DOCS, log=print,
+         valid_shard=VALID_SHARD):
     """Drive -> veri; uretmez (tokenizer.json ya da tamamlanmis parca yoksa DURUR).  train_tokens: egitim akisina bu kadar
-    token yetene kadar parca 000'dan sirayla (None: butun tamamlanmis parcalar; 013 en sonda, valid'siz).  valid parcasi
-    (shard_013) sart.  -> load_valid'inkiler + seq_len, train (uint16 akis: belgeler [eot] + metin, art arda), train_starts,
+    token yetene kadar parca 000'dan sirayla (None: butun tamamlanmis parcalar; valid parcasi en sonda, valid'siz).  valid
+    parcasi sart: valid_shard (varsayilan 013; ON KOSU tokenize bitmeden erken bir parcayla).  -> load_valid'inkiler + seq_len, train (uint16 akis: belgeler [eot] + metin, art arda), train_starts,
     items (best-fit paketlemenin parcalari, _items), shards, counts, fingerprint, fingerprints."""
-    data = load_valid(root, valid_stride, exam_docs, log)
+    data = load_valid(root, valid_stride, exam_docs, log, valid_shard)
     d, eot, tok, parts, counts = os.path.join(root, TAG), data["eot"], data["tokenizer"], data["parts"], data["counts"]
     vs, vo, is_valid = data.pop("valid_shard")
     used, total = [], 0                                    # parcalar ve boylar json'dan: akis bir kez, yerinde yazilir
-    for i in [i for i in data["complete"] if i != VALID_SHARD] + [VALID_SHARD]:
+    for i in [i for i in data["complete"] if i != valid_shard] + [valid_shard]:
         if train_tokens is not None and total >= train_tokens:
             break
         used.append(i)
-        total += (len(vs) - len(data["valid"]) if i == VALID_SHARD else
+        total += (len(vs) - len(data["valid"]) if i == valid_shard else
                   json.load(open(_shard_paths(d, i)["json"], encoding="utf-8"))["tokens"])
     assert train_tokens is None or total >= train_tokens, "egitim akisi %d token < train_tokens %d (tamamlanmis parca: %s)" % (
         total, train_tokens, data["complete"])
     train = np.empty(total, dtype=np.uint16)
     starts, at = [], 0
     for i in used:
-        if i == VALID_SHARD:
+        if i == valid_shard:
             s, o = _docs_stream(vs, vo, ~is_valid)
         else:
             s, o, nb, meta = _read_shard(d, i, tok, eot)

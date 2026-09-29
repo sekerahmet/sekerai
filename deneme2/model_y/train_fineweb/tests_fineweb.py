@@ -178,6 +178,15 @@ def t_load(root, tok, texts):
           and load(root, seq_len=32)["fingerprint"] != data["fingerprint"]
           and DF.load(root, seq_len=SEQ, valid_stride=5, exam_docs=EXAM, log=lambda s: None)["fingerprint"]
           != data["fingerprint"], "iz %s" % data["fingerprint"])
+
+    early = load(root, train_tokens=10, valid_shard=1)
+    vt = texts[1][::STRIDE]
+    check("load: valid_shard (ON KOSU, tokenize bitmeden): valid o parcanin her %d. belgesi; egitim shard 000'dan, valid "
+          "parcasi en sonda ve valid'siz; iz farkli" % STRIDE,
+          early["shards"] == [0] and [tok.decode(DF.valid_doc(early, k)[1:], skip_special_tokens=False)
+                                      for k in range(len(early["valid_starts"]))] == vt
+          and early["fingerprint"] != part["fingerprint"]
+          and load(root, valid_shard=1)["shards"][-1] == 1)
     return data
 
 

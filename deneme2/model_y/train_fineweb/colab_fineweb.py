@@ -57,8 +57,9 @@ TOKENS_PER_STEP = 64 * 8192   # adim basina token hedefi: 64 x 8.192 ~ 0,5M
 SAVE_EVERY = 500
 # ON KOSU (L4; kullanici, 30 Eylul: "kod gelince L4'te küçük modelle ... ~1 saatlik, ~200M token'lık bir ön koşu. ve detaylı
 # analiz", baglam 4.096): uctan uca hata yakalamak -- veri, maske, sinav, surdurme, metin.  lr peak_lr(384) = 0,01
+# valid_shard 1: tokenize bitmeden (shard_013 yokken) baslayabilsin; egitim yalniz shard_000'dan (200M < 0,7G)
 PILOT = dict(name="fineweb_modely_3x2_d384_gpt2_pilot_s0", seq_len=4096, token_budget=200e6, tokens_per_step=16 * 4096,
-             batch_size=8, model_kw=dict(d=384, layers=3, turns=6, heads=4, units=1024))
+             batch_size=8, valid_shard=1, model_kw=dict(d=384, layers=3, turns=6, heads=4, units=1024))
 PROBE_TOKENS = 64        # her sinavda istem basina uretilen token
 FINAL_TOKENS = 256       # sonda sabit istem basina (belge devami: belgenin kalani kadar)
 FINAL_DOCS = 8           # sonda ilk yarisi verilen sinav belgesi (gercek devamla)
