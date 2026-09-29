@@ -271,7 +271,8 @@ def reference_blocks(m, ids):
             h = h + u @ dd(b.facts.W_fact_out).T
     if m.layer_norm:
         return ln(h, m.norm_final) @ PL.T
-    return m.scale * (h if m.stream_norm else unit(h)) @ PL.T
+    scale = torch.exp(dd(m.log_output_scale)) if getattr(m, "learn_output_scale", False) else m.scale   # e^tau ya da sabit
+    return scale * (h if m.stream_norm else unit(h)) @ PL.T
 
 
 def t_step3():
@@ -281,7 +282,7 @@ def t_step3():
     # 28 Eylul oncesi tasarimin testleri: paket (normalized_update, sphere_weights) kapali, tek Block x 2 tur; paket
     # t_normalized_update'te, 2 x 2 t_layers'ta
     BlockModel = functools.partial(model_20.BlockModel, normalized_update=False, sphere_weights=False, canon=False, turns=2,
-                                   layers=1, heads=1, fact_activation="relu")
+                                   layers=1, heads=1, fact_activation="relu", learn_output_scale=False)
     n, d = 12, 6
     g = torch.Generator().manual_seed(9)
     ids = torch.randint(0, n, (3, 9), generator=g)
@@ -500,9 +501,10 @@ def t_step3():
     names = {id(p_): k.split(".")[-1] for k, p_ in mw.named_parameters()}
     decayed = sorted({names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.1 for p_ in g_["params"]})
     kept = sorted({names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.0 for p_ in g_["params"]})
-    check("weight decay: yalniz W_ matrislerine; shift, alpha ve Canon agirliklari haric",
+    check("weight decay: yalniz W_ matrislerine; shift, alpha, Canon agirliklari ve cikis olcegi haric",
           decayed == sorted(["W_query", "W_key", "W_context", "W_fact_in", "W_fact_up", "W_fact_out", "W_value"])
-          and kept == ["alpha_attention", "alpha_facts", "canon_weights", "shift"], "%s | %s" % (decayed, kept))
+          and kept == ["alpha_attention", "alpha_facts", "canon_weights", "log_output_scale", "shift"],
+          "%s | %s" % (decayed, kept))
 
     # 27 Eylul tarifi: Muon (gizli matrisler) + Adam, WSD takvimi, compile varsayilan acik; masked_nll; RoPE en az fp32
     import inspect
@@ -559,10 +561,10 @@ def t_step3():
     in_adam = sorted({names_m[id(p_)] for g_ in opts[0].param_groups if not g_["use_muon"] for p_ in g_["params"]})
     wsd = [0.01 * (1.0 if t < 8 else TR.LR_FLOOR + (1 - TR.LR_FLOOR) * (1 - math.sqrt((t - 8) / 2))) for t in range(1, 11)]
     check("Muon + WSD (varsayilan): Muon'da W_context, W_fact_in, W_fact_up, W_fact_out, W_value; Adam'da noktalar, W_query, "
-          "W_key; "
+          "W_key, cikis olcegi; "
           "lr 8. adima kadar sabit, sonra 1 - sqrt ile LR x LR_FLOOR'a; kayip iner",
           isinstance(opts[0], TR.Muon) and in_muon == ["W_context", "W_fact_in", "W_fact_out", "W_fact_up", "W_value"]
-          and in_adam == ["W_key", "W_query", "alpha_attention", "alpha_facts", "canon_weights", "shift"]
+          and in_adam == ["W_key", "W_query", "alpha_attention", "alpha_facts", "canon_weights", "log_output_scale", "shift"]
           and all(abs(lrs[t] - w) < 1e-12 for t, w in zip(range(1, 11), wsd)) and curve_m[-1]["nll"] < curve_m[0]["nll"],
           "%s | %s | lr %s" % (in_muon, in_adam, [round(lrs[t], 5) for t in range(1, 11)]))
 
@@ -839,7 +841,7 @@ def t_normalized_update():
             h = F.normalize(h + m.alpha_attention[i] * (F.normalize(u, dim=-1) - h), dim=-1)
             f = (F.silu(32 ** 0.5 * h @ fu.W_fact_in.T) * (32 ** 0.5 * h @ fu.W_fact_up.T)) @ fu.W_fact_out.T
             h = F.normalize(h + m.alpha_facts[i] * (F.normalize(f, dim=-1) - h), dim=-1)
-        ref = m.scale * h @ P.T
+        ref = torch.exp(m.log_output_scale) * h @ P.T                   # ogrenilen cikis olcegi e^tau
         err = float((m.logits(ids) - ref).abs().max())
     check("normalized_update + sphere_weights: skor = tasarim formulu (bagimsiz float64; h <- norm(h + a (norm(u) - h)), "
           "FactUnits girdisi sqrt(d) x kosinus)", err < 1e-10, "fark %.1e" % err)
@@ -1109,6 +1111,36 @@ def t_coherence():
           all(torch.equal(x, y) for x, y in zip(whole.state_dict().values(), res.state_dict().values()))
           and packs[4]["optimizer"]["param_groups"][0]["coherence_mean"] != 1.0 and refused)
 
+    # COHERENCE_POWER: lr carpani ortalama(rho) ^ us; 1,0 bugunku (varsayilan), 0,5 = sqrt; son inisteki dondurulan deger de
+    same_1, _ = TR.train_seq("shared", None, None, nv, steps=8, log_at=(), coherence_power=1.0, **kw)
+    lrs_p, means_p = {}, {}
+    grab_p = lambda step, model, opt: (lrs_p.setdefault(step, opt.param_groups[0]["lr"]),
+                                       means_p.setdefault(step, opt.param_groups[0]["coherence_mean"]))
+    TR.train_seq("shared", None, None, nv, steps=30, log_at=(), batches=batches, save_every=1, save=grab_p,
+                 schedule="coherence", coherence_window=5, coherence_power=0.5)
+    clamp = lambda x: min(max(x, floor), 1.0)
+    frozen = clamp(means_p[28] ** 0.5)                     # final = round(0,95 x 30) = 28
+    sqrt_ok = (all(abs(lrs_p[t] - TR.LR * clamp(means_p[t] ** 0.5)) < 1e-12 for t in range(1, 28))
+               and all(abs(lrs_p[t] - TR.LR * frozen * (floor + (1 - floor) * (1 - math.sqrt((t - 28) / 2)))) < 1e-12
+                       for t in (28, 29, 30)))
+    packs_p = {}
+    keep_p = lambda step, model, opt: packs_p.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
+                                                                     optimizer=copy.deepcopy(opt.state_dict())))
+    kw_p = dict(kw, coherence_power=0.5)
+    whole_p, _ = TR.train_seq("shared", None, None, nv, steps=8, log_at=(), save_every=2, save=keep_p, **kw_p)
+    res_p, _ = TR.train_seq("shared", None, None, nv, steps=8, log_at=(), checkpoint=packs_p[4], **kw_p)
+    try:
+        TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), coherence_power=0.0)
+        refused_p = False
+    except AssertionError:
+        refused_p = True
+    check("coherence_power: varsayilan 1,0 ve 1,0 verilince bit duzeyinde ayni; 0,5'te lr = LR x sqrt(ortalama) (alt sinir "
+          "LR_FLOOR), son inis dondurulan sqrt degerinden; 0,5 ile surdurme bit duzeyinde; 0 reddedilir",
+          TR.COHERENCE_POWER == 1.0 and all(torch.equal(x, y) for x, y in zip(whole.state_dict().values(), same_1.state_dict().values()))
+          and sqrt_ok and means_p[27] < 1
+          and all(torch.equal(x, y) for x, y in zip(whole_p.state_dict().values(), res_p.state_dict().values())) and refused_p,
+          "ortalama %.3f  lr %.5f (sqrt) / %.5f (dogrusal olsaydi)" % (means_p[27], lrs_p[27], TR.LR * clamp(means_p[27])))
+
 
 def t_weight_ema():
     """WEIGHT_EMA: ortalama <- d x ortalama + (1 - d) x agirlik, kurede satir / sutunlar yeniden birim; surdurme (ortalama
@@ -1309,10 +1341,146 @@ def t_fact_activation():
           "%.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"]))
 
 
+def t_learn_output_scale():
+    """LEARN_OUTPUT_SCALE: skor = e^tau <h, PL>, tau = log_output_scale ln(scale)'dan; baslangicta sabit olcekle bit duzeyinde
+    ayni; Adam'da (Muon'da degil), weight decay yok, weight EMA ortalar; egitim, surdurme, onbellekli uretim; sinav gunlugu;
+    config'inde anahtar olmayan eski kosu False ile yuklenir ve surdurulur; LayerNorm'da parametre yok."""
+    import copy
+    import inspect
+    import json
+    import tempfile
+    import colab_kinship as C
+    from model_20 import LEARN_OUTPUT_SCALE, BlockModel
+    data = D.build()
+    sids, smask = EK.sequences(data)
+    nv = len(data["vocab"])
+    ids = sids[:6, :20]
+    val = lambda t: float(t.detach())
+
+    on, off = BlockModel(nv), BlockModel(nv, learn_output_scale=False)
+    with torch.no_grad():
+        same = torch.equal(on.logits(ids), off.logits(ids))
+    rest = {k: v for k, v in on.state_dict().items() if k != "log_output_scale"}
+    ln_model = BlockModel(nv, layer_norm=True, stream_norm=False, normalized_update=False, sphere_weights=False)
+    check("learn_output_scale: varsayilan True; tau = ln(scale) baslar, skor sabit olcekli modelle bit duzeyinde ayni, fark "
+          "yalniz log_output_scale; LayerNorm'da parametre yok",
+          LEARN_OUTPUT_SCALE is True and inspect.signature(BlockModel).parameters["learn_output_scale"].default is True
+          and on.learn_output_scale and not off.learn_output_scale and same
+          and val(on.log_output_scale) == float(torch.tensor(math.log(on.scale)))
+          and list(rest) == list(off.state_dict()) and all(torch.equal(rest[k], v) for k, v in off.state_dict().items())
+          and not ln_model.learn_output_scale and "log_output_scale" not in ln_model.state_dict())
+
+    # skor = e^tau <h, PL>: tau = ln 15 iken sabit olcekli modelin skoru x 15 / scale (float64)
+    a, b = BlockModel(nv, d=32, units=48).double(), BlockModel(nv, d=32, units=48, learn_output_scale=False).double()
+    b.load_state_dict({k: v for k, v in a.state_dict().items() if k != "log_output_scale"})
+    with torch.no_grad():
+        a.log_output_scale.fill_(math.log(15.0))
+        err = float((a.logits(ids) - 15.0 / a.scale * b.logits(ids)).abs().max())
+    check("learn_output_scale: skor = e^tau <h, PL> (tau = ln 15: sabit olcekli skor x 15 / scale, float64)", err < 1e-10,
+          "fark %.1e" % err)
+
+    opts = []
+    grab = lambda step, model, opt: opts.append(opt)
+    trained, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), save_every=1, save=grab)
+    names = {id(p_): k for k, p_ in trained.named_parameters()}
+    in_adam = {names[id(p_)] for g_ in opts[-1].param_groups if not g_["use_muon"] for p_ in g_["params"]}
+    in_muon = {names[id(p_)] for g_ in opts[-1].param_groups if g_["use_muon"] for p_ in g_["params"]}
+    groups = []
+    real_adamw = torch.optim.AdamW
+
+    class SpyW(real_adamw):
+        def __init__(self, param_groups, **k):
+            super().__init__(param_groups, **k)
+            groups.extend(self.param_groups)
+    torch.optim.AdamW = SpyW
+    try:
+        mw, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), weight_decay=0.1, optimizer="adam")
+    finally:
+        torch.optim.AdamW = real_adamw
+    no_decay = {k for g_ in groups if g_["weight_decay"] == 0.0 for k, p_ in mw.named_parameters()
+                if any(p_ is q_ for q_ in g_["params"])}
+    start, _ = TR.train_seq("shared", sids, smask, nv, steps=0, log_at=())
+    one, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=(), weight_ema=0.5)
+    ema_err = abs(val(one.weight_ema["model"].log_output_scale) - 0.5 * (val(start.log_output_scale) + val(one.log_output_scale)))
+    moved = val(trained.log_output_scale) - val(on.log_output_scale)
+    check("learn_output_scale: Adam'da (Muon'da degil), weight decay yok; weight EMA ortalar; 20 adimda deger degisir, "
+          "kayip iner",
+          "log_output_scale" in in_adam and "log_output_scale" not in in_muon and "log_output_scale" in no_decay
+          and ema_err < 1e-6 and abs(moved) > 1e-3 and curve[-1]["nll"] < curve[0]["nll"],
+          "olcek %.3f -> %.3f  kayip %.3f -> %.3f" % (math.exp(val(on.log_output_scale)), math.exp(val(trained.log_output_scale)),
+                                                     curve[0]["nll"], curve[-1]["nll"]))
+
+    packs = {}
+    keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
+                                                                   optimizer=copy.deepcopy(opt.state_dict())))
+    full, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), save_every=2, save=keep)
+    res, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs[4])
+    qs = [[1] + sids[i, 1:1 + k].tolist() for i, k in enumerate((1, 3, 5, 8, 12, 16))]
+    new = TR.generate(trained, qs, 6)
+    scores, _ = cached_scores(trained, qs, new)
+    err_c = max(float((scores[i] - trained.logits(torch.tensor([q + new[i]])).detach()[0, len(q) - 1:]).abs().max())
+                for i, q in enumerate(qs))
+    check("learn_output_scale: 4. adim paketinden surdurulen = kesintisiz, bit duzeyinde (tau pakette); onbellekli uretim "
+          "= tam hesap (token'lar ve skorlar)",
+          "log_output_scale" in packs[4]["model"]
+          and all(torch.equal(x, y) for x, y in zip(full.state_dict().values(), res.state_dict().values()))
+          and new == TR.generate(trained, qs, 6, cached=False) and err_c < 1e-4, "skor farki %.1e" % err_c)
+
+    # eski kosu: config'inde anahtar yok -> False; konus strict yukler, colab_kinship surdurur
+    sys.path.insert(0, os.path.join(HERE, "train_tinystories"))
+    import konus_20 as K
+    tmp = tempfile.mkdtemp()
+    for sub, model_ in (("old", off), ("new", trained)):
+        os.makedirs(os.path.join(tmp, sub))
+        kw_ = dict(d=64, turns=4, layers=2, heads=4, fact_activation="swiglu", units=170, t_max=512)
+        if sub == "new":
+            kw_["learn_output_scale"] = True
+        json.dump(dict(setting="shared", model_kw=kw_, rope=True, normalized_update=True, sphere_weights=True, canon=True,
+                       steps=20), open(os.path.join(tmp, sub, "config.json"), "w"))
+        torch.save(model_.state_dict(), os.path.join(tmp, sub, "model.pt"))
+    lo, _ = K.load_model(os.path.join(tmp, "old"), nv)
+    lnew, _ = K.load_model(os.path.join(tmp, "new"), nv)
+    with torch.no_grad():
+        loaded = (not lo.learn_output_scale and torch.equal(lo.logits(ids), off.logits(ids)) and lnew.learn_output_scale
+                  and torch.equal(lnew.logits(ids), trained.logits(ids)))
+
+    s = D.build(step_answers=True)
+    kw = dict(steps=2, every=100, device="cpu", save_every=1, model_kw=dict(d=16, units=16))
+    out_on = os.path.join(tmp, "on")
+    run = C.start("TEST_SCALE", s, out_on, **dict(kw, steps=1))
+    run["thread"].join(600)
+    log_on = open(os.path.join(out_on, "log.txt"), encoding="utf-8").read()
+    ex_on = json.load(open(os.path.join(out_on, "exams.json")))
+    out = os.path.join(tmp, "off")
+    kw_off = dict(kw, model_kw=dict(d=16, units=16, learn_output_scale=False))
+    run = C.start("TEST_SCALE", s, out, **kw_off)
+    run["thread"].join(600)
+    first = torch.load(os.path.join(out, "model.pt"))
+    cfg = json.load(open(os.path.join(out, "config.json")))
+    del cfg["learn_output_scale"]                                  # 28 Eylul oncesi config gibi
+    power_written = cfg.pop("coherence_power") == 1.0              # COHERENCE_POWER da: yazilir, anahtarsiz eski config 1,0
+    json.dump(cfg, open(os.path.join(out, "config.json"), "w"), indent=1)
+    os.remove(os.path.join(out, "checkpoint_t00002.pt"))
+    try:
+        C.start("TEST_SCALE2", s, out, resume=True, **kw)          # varsayilan (True) ile: ayar farkli
+        refused = False
+    except RuntimeError:
+        refused = True
+    run2 = C.start("TEST_SCALE", s, out, resume=True, **kw_off)
+    run2["thread"].join(600)
+    second = torch.load(os.path.join(out, "model.pt"))
+    check("learn_output_scale: sinav gunlugunde 'olcek', exams.json'da output_scale; config'inde anahtar olmayan eski kosu "
+          "False ile strict yuklenir (konus) ve surdurulur (colab_kinship, bit duzeyinde), True ile reddedilir; yeni kosu "
+          "True ile yuklenir; coherence_power config'te, anahtarsizi 1,0",
+          loaded and " | olcek " in log_on and abs(ex_on[0]["output_scale"] - scale_for(len(s["vocab"]))) < 1e-4
+          and power_written and refused and run2["done"] and not run2["error"] and all(torch.equal(first[k], second[k]) for k in first),
+          str(run2["error"] or ex_on[0].get("output_scale")))
+
+
 if __name__ == "__main__":
     print("tests (model_20)")
     for f in (t_model, t_step2, t_step3, t_transformer, t_generate_cached, t_normalized_update, t_canon,
-              t_layers, t_coherence, t_weight_ema, t_heads, t_fact_activation):
+              t_layers, t_coherence, t_weight_ema, t_heads, t_fact_activation, t_learn_output_scale):
         f()
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)

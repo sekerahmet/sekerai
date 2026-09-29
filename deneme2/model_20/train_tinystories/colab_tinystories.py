@@ -46,7 +46,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         raise RuntimeError("%s zaten kosuyor" % name)
     if setting in TR.STEP3:
         model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, heads=M.HEADS, fact_activation=M.FACT_ACTIVATION,
-                             units=M.FACT_UNITS, t_max=M.T_MAX,
+                             learn_output_scale=M.LEARN_OUTPUT_SCALE, units=M.FACT_UNITS, t_max=M.T_MAX,
                              anchor=M.ANCHOR),
                         **(model_kw or {}))
     per_epoch = len(data["train_start"]) // batch_size
@@ -62,7 +62,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
                               optimizer=TR.OPTIMIZER, schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,
                               coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,
-                              weight_ema=TR.WEIGHT_EMA,
+                              weight_ema=TR.WEIGHT_EMA, coherence_power=TR.COHERENCE_POWER,
                               stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
                               normalized_update=TR.NORMALIZED_UPDATE if setting in TR.STEP3 else False,
                               sphere_weights=TR.SPHERE_WEIGHTS if setting in TR.STEP3 else False,
@@ -77,13 +77,14 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         saved = json.load(open(os.path.join(out, "config.json")))
         assert not saved.pop("copy_path", False), "kopya yolu (Oneri A) 28 Eylul'de kaldirildi: bu kosu surdurulemez"
         # 27 Eylul oncesi config'lerde optimizer / takvim / bucket yok: o kosular Adam + cosine, rastgele batch idi.
-        # compile sonucu degistirir: karsilastirilir
+        # compile sonucu degistirir: karsilastirilir.  coherence_power'siz config'ler 1,0 idi
         saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN,
                           normalized_update=False, sphere_weights=False, canon=False, bucket=None,
                           coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,
-                          weight_ema=TR.WEIGHT_EMA), **saved)
+                          weight_ema=TR.WEIGHT_EMA, coherence_power=1.0), **saved)
         if setting in TR.STEP3 and saved.get("model_kw"):   # 28 Eylul oncesi model_kw'de layers yok: tek Block idi
-            saved["model_kw"] = dict(dict(layers=1, heads=1, fact_activation="relu"), **saved["model_kw"])   # eskiler
+            saved["model_kw"] = dict(dict(layers=1, heads=1, fact_activation="relu", learn_output_scale=False),
+                                     **saved["model_kw"])     # eskiler: tek Block, tek head, ReLU, sabit cikis olcegi
             assert not saved["model_kw"].pop("output_skip", False), "output_skip (28 Eylul) kaldirildi: bu kosu surdurulemez"
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
@@ -120,6 +121,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
             e.update(coherence=dict(model.coherence))
         if getattr(model, "weight_ema", None):        # ortalama model: ayni sinav; fark = titresimin bedeli
             e.update(weight_ema=ET.exam(model.weight_ema["model"], data, rows))
+        if getattr(model, "learn_output_scale", False):   # ogrenilen cikis olcegi e^tau
+            e.update(output_scale=float(model.log_output_scale.detach().exp()))
         written = ET.texts(model, data, probes, PROBE_TOKENS)
         e.update(ET.loop_check([w["ids"] for w in written]), texts=[w["model"] for w in written],
                  secs=round(time.time() - run["t0"], 1))
@@ -132,7 +135,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
              + (" | c %.3f rho %.3f ort %.3f lr %.5f" % tuple(e["coherence"][k] for k in ("c", "rho", "mean", "lr"))
                 if "coherence" in e else "")
              + (" | ema ppl %.2f (fark %.3f nat)" % (e["weight_ema"]["ppl"], e["nll"] - e["weight_ema"]["nll"])
-                if "weight_ema" in e else ""))
+                if "weight_ema" in e else "")
+             + (" | olcek %.2f" % e["output_scale"] if "output_scale" in e else ""))
         if run["stop"]:
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             raise Stopped()
@@ -152,13 +156,15 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
             model, _ = TR.train_seq(setting, None, None, len(vocab), steps=steps, seed=seed, device=device, every=every,
                                     callback=callback, log_at=(), compile=compile, save_every=save_every, save=save,
                                     checkpoint=checkpoint, batches=DT.batches(data, batch_size, seed, bucket), model_kw=model_kw,
-                                    **train_kw)
+                                    **dict(train_kw, coherence_power=config["coherence_power"]))
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             final = dict(step=steps, valid=ET.exam(model, data, ET.exam_rows(data, None)), subset=ET.exam(model, data, rows))
             final["prompts"] = ET.texts(model, data, [[eos] + DT.encode(p, vocab) for p in ET.PROMPTS], FINAL_TOKENS)
             halves, reals = ET.story_prompts(data, rows[:FINAL_STORIES])
             final["stories"] = ET.texts(model, data, halves, FINAL_TOKENS, reals=reals)
             final["loops"] = ET.loop_check([w["ids"] for w in final["prompts"]])
+            if getattr(model, "learn_output_scale", False):
+                final["output_scale"] = float(model.log_output_scale.detach().exp())
             if getattr(model, "weight_ema", None):    # ortalama model de ayni son sinavdan gecer
                 em = model.weight_ema["model"]
                 torch.save(em.state_dict(), os.path.join(out, "model_weight_ema.pt"))

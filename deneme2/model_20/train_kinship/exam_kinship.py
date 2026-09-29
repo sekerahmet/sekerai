@@ -201,8 +201,8 @@ def report_step3(results, data):
     # kopru okumasi tur 1'in ara durumunu elle kuruyor: yalniz 28 Eylul oncesi tasarimda gecerli
     assert not any(not getattr(m, "stream_norm", True) or getattr(m, "layer_norm", False)
                    or getattr(m, "canon", False) or getattr(m, "normalized_update", False) or getattr(m, "heads", 1) > 1
-                   for m, _ in results.values()), \
-        "report_step3 kopru okumasi 28 Eylul oncesi tasarim icin (Canon, alpha, cok head yok)"
+                   or getattr(m, "learn_output_scale", False) for m, _ in results.values()), \
+        "report_step3 kopru okumasi 28 Eylul oncesi tasarim icin (Canon, alpha, cok head, ogrenilen olcek yok)"
     out = ["ADIM 3  veri iz %s  cumle %d  TURNS %d  FACT_UNITS %d  scale %.3f" % (
         data["fingerprint"], len(data["train"]), m0.turns, m0.blocks[0].facts.W_fact_in.shape[0], m0.scale), ""]
     out.append("ayar           " + "  ".join("%10s" % ("adim %d" % c["step"]) for c in results["step2"][1]))

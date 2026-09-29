@@ -55,7 +55,7 @@ def start(name, data, out, steps, seed=0, every=EVERY, device="cuda", compile=Tr
         raise RuntimeError("%s zaten kosuyor" % name)
     if setting in TR.STEP3:
         model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, heads=M.HEADS, fact_activation=M.FACT_ACTIVATION,
-                             units=M.FACT_UNITS, t_max=M.T_MAX),
+                             learn_output_scale=M.LEARN_OUTPUT_SCALE, units=M.FACT_UNITS, t_max=M.T_MAX),
                         **(model_kw or {}))
     elif setting.startswith("transformer"):
         model_kw = dict(dict(d=MT.D, layers=MT.LAYERS, heads=MT.HEADS, units=MT.FACT_UNITS), **(model_kw or {}))
@@ -69,6 +69,7 @@ def start(name, data, out, steps, seed=0, every=EVERY, device="cuda", compile=Tr
                   answer_only=answer_only, exam_limit=exam_limit, save_every=save_every, model_kw=model_kw,
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
                               optimizer=TR.OPTIMIZER, schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,
+                              coherence_power=TR.COHERENCE_POWER,
                               stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
                               normalized_update=TR.NORMALIZED_UPDATE if setting in TR.STEP3 else False,
                               sphere_weights=TR.SPHERE_WEIGHTS if setting in TR.STEP3 else False,
@@ -85,9 +86,10 @@ def start(name, data, out, steps, seed=0, every=EVERY, device="cuda", compile=Tr
         assert not saved.pop("copy_path", False), "kopya yolu (Oneri A) 28 Eylul'de kaldirildi: bu kosu surdurulemez"
         # 27 Eylul oncesi config'lerde optimizer / takvim yok: o kosular Adam + cosine idi.  compile sonucu degistirir: karsilastirilir
         saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN,
-                          normalized_update=False, sphere_weights=False, canon=False), **saved)
+                          normalized_update=False, sphere_weights=False, canon=False, coherence_power=1.0), **saved)
         if setting in TR.STEP3 and saved.get("model_kw"):   # 28 Eylul oncesi model_kw'de layers yok: tek Block idi
-            saved["model_kw"] = dict(dict(layers=1, heads=1, fact_activation="relu"), **saved["model_kw"])   # eskiler
+            saved["model_kw"] = dict(dict(layers=1, heads=1, fact_activation="relu", learn_output_scale=False),
+                                     **saved["model_kw"])     # eskiler: tek Block, tek head, ReLU, sabit cikis olcegi
             assert not saved["model_kw"].pop("output_skip", False), "output_skip (28 Eylul) kaldirildi: bu kosu surdurulemez"
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
@@ -120,12 +122,15 @@ def start(name, data, out, steps, seed=0, every=EVERY, device="cuda", compile=Tr
                  train=EM.ask(model, data["train"], device, exam_limit), heldout=EM.ask(model, data["heldout"], device, exam_limit),
                  heldout_terms={str(k): v for k, v in EM.breakdown(model, heldout_sample, device, "terms").items()},
                  heldout_ce=EM.answer_ce(model, heldout_windows, device), panel=EM.show(model, EM.PANEL, device))
+        if getattr(model, "learn_output_scale", False):   # ogrenilen cikis olcegi e^tau
+            e.update(output_scale=float(model.log_output_scale.detach().exp()))
         run["exams"].append(e)
         json.dump(run["exams"], open(os.path.join(out, "exams.json"), "w"), indent=1)
         note("adim %6d  epok %6.2f  nll %.4f  egitim %.4f  tutulan %.4f (%s)  uzunluk %.4f  ilk rakam %.4f  ce %.4f  (%.0f sn)" % (
             step, e["epoch"], nll, e["train"]["accuracy"], e["heldout"]["accuracy"],
             " ".join("%s terim %.4f" % (k, v["accuracy"]) for k, v in e["heldout_terms"].items()),
-            e["heldout"]["length_ok"], e["heldout"]["first_digit"], e["heldout_ce"], e["secs"]))
+            e["heldout"]["length_ok"], e["heldout"]["first_digit"], e["heldout_ce"], e["secs"])
+             + (" | olcek %.2f" % e["output_scale"] if "output_scale" in e else ""))
         if run["stop"]:
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             raise Stopped()
@@ -141,7 +146,8 @@ def start(name, data, out, steps, seed=0, every=EVERY, device="cuda", compile=Tr
             model, _ = TR.train_seq(setting, None, None, DM.N, steps=steps, seed=seed, device=device, every=every,
                                     callback=callback, log_at=(), compile=compile, save_every=save_every, save=save,
                                     checkpoint=checkpoint, model_kw=model_kw,
-                                    batches=DM.batches(data, batch_size, seed, answer_only), **train_kw)
+                                    batches=DM.batches(data, batch_size, seed, answer_only),
+                                    **dict(train_kw, coherence_power=config["coherence_power"]))
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             final = dict(health=EM.ask(model, data["train"], device, exam_limit), breakdown={})
             for side in ("train", "heldout"):              # butun kume, kayit.txt'deki gibi terim ve hane kirilimi
@@ -150,6 +156,8 @@ def start(name, data, out, steps, seed=0, every=EVERY, device="cuda", compile=Tr
                 final[side] = _total(final["breakdown"][side]["terms"])
             final["panel"] = EM.show(model, EM.PANEL, device)
             final["rows"] = EM.show(model, heldout_sample[:ROWS], device)
+            if getattr(model, "learn_output_scale", False):
+                final["output_scale"] = float(model.log_output_scale.detach().exp())
             json.dump(final, open(os.path.join(out, "final.json"), "w", encoding="utf-8"), indent=1, ensure_ascii=False)
             note("SAGLIK  egitim ornegi (%d) %.4f  %s (esik %.2f)" % (
                 final["health"]["n"], final["health"]["accuracy"],

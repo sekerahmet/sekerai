@@ -46,6 +46,7 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
                   fingerprint=data["fingerprint"], train=len(data["train"]), sizes=n, save_every=save_every,
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
                               optimizer=TR.OPTIMIZER, schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,
+                              coherence_power=TR.COHERENCE_POWER,
                               stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
                               normalized_update=TR.NORMALIZED_UPDATE if setting in TR.STEP3 else False,
                               sphere_weights=TR.SPHERE_WEIGHTS if setting in TR.STEP3 else False,
@@ -54,6 +55,7 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
                               layers=M.LAYERS if setting in TR.STEP3 else None,
                               heads=M.HEADS if setting in TR.STEP3 else None,
                               fact_activation=M.FACT_ACTIVATION if setting in TR.STEP3 else None,
+                              learn_output_scale=M.LEARN_OUTPUT_SCALE if setting in TR.STEP3 else None,
                               rope=True if setting.startswith("transformer") else TR.ROPE if setting in TR.STEP3 else False),
                          **(model_kw or {}), **train_kw))
     checkpoint = None
@@ -65,13 +67,15 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
         assert not saved.pop("copy_path", False), "kopya yolu (Oneri A) 28 Eylul'de kaldirildi: bu kosu surdurulemez"
         assert not saved.pop("output_skip", False), "output_skip (28 Eylul) kaldirildi: bu kosu surdurulemez"
         # 27 Eylul oncesi config'lerde optimizer / takvim yok: o kosular Adam + cosine idi.  compile sonucu degistirir: karsilastirilir
-        # 28 Eylul oncesi config'lerde turns / layers yok: Adim 3 modeli tek Block x 2 tur idi
-        saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN,
+        # 28 Eylul oncesi config'lerde turns / layers yok: Adim 3 modeli tek Block x 2 tur idi; cikis olcegi sabitti;
+        # coherence_power'siz config'ler 1,0 idi
+        saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN, coherence_power=1.0,
                           normalized_update=False, sphere_weights=False, canon=False,
                           turns=2 if saved.get("setting") in TR.STEP3 else None,
                           layers=1 if saved.get("setting") in TR.STEP3 else None,
                           heads=1 if saved.get("setting") in TR.STEP3 else None,
-                          fact_activation="relu" if saved.get("setting") in TR.STEP3 else None), **saved)
+                          fact_activation="relu" if saved.get("setting") in TR.STEP3 else None,
+                          learn_output_scale=False if saved.get("setting") in TR.STEP3 else None), **saved)
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)
@@ -107,11 +111,14 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
         for c in STEPS_CLS:
             counts, _ = EK.exam_steps(model, data, c)
             e.update({"%s_%s" % (c, k): v for k, v in counts.items()})
+        if getattr(model, "learn_output_scale", False):   # ogrenilen cikis olcegi e^tau
+            e.update(output_scale=float(model.log_output_scale.detach().exp()))
         run["exams"].append(e)
         json.dump(run["exams"], open(os.path.join(out, "exams.json"), "w"), indent=1)
         note("adim %5d  nll %.3f  1R_T %d/%d | 2R_T EX %d/%d | 2R_UT AC %d EX %d BC %d SC %d FC %d /%d  (%.0f sn)" % (
                  step, nll, e["1R_T"], n["1R_T"], e["2R_T_EX"], n["2R_T"], e["2R_UT_AC"], e["2R_UT_EX"], e["2R_UT_BC"],
-                 e["2R_UT_SC"], e["2R_UT_FC"], n["2R_UT"], e["secs"]))
+                 e["2R_UT_SC"], e["2R_UT_FC"], n["2R_UT"], e["secs"])
+             + (" | olcek %.2f" % e["output_scale"] if "output_scale" in e else ""))
         if run["stop"]:
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             raise Stopped()
@@ -127,7 +134,8 @@ def start(name, data, out, steps, seed=0, every=100, device="cuda", compile=True
             ids, mask = EK.sequences(data)
             model, _ = TR.train_seq(setting, ids, mask, len(data["vocab"]), steps=steps, seed=seed, device=device,
                                     every=every, callback=callback, log_at=(), compile=compile, save_every=save_every,
-                                    save=save, checkpoint=checkpoint, model_kw=model_kw, **train_kw)
+                                    save=save, checkpoint=checkpoint, model_kw=model_kw,
+                                    **dict(train_kw, coherence_power=config["coherence_power"]))
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             final = {}
             for c, givens in [(c, (0,)) for c in SHORT if data.get("long_1r")] + [(c, (0, 2, 8)) for c in STEPS_CLS]:

@@ -50,7 +50,9 @@ COOLDOWN = 0.2       # WSD'de inisin payi (son %20).  Hagele 2024: <= %20 yeter,
 # kurede adim = aci: theta = LR x 0,2 x sqrt(d) x rho.  Tam batch'te (ids verilmis) gurultu yok: rho = 1, olculmez.
 COHERENCE_WINDOW = 200   # rho'nun hareketli ortalamasi (adim); tek adimin olcumu gurultulu
 FINAL_COOLDOWN = 0.05    # coherence'ta sondaki inisin payi: 1 - sqrt ile o anki lr'den x LR_FLOOR'a (titresimi sondurur)
-WEIGHT_EMA = None        # agirliklarin hareketli ortalamasi (ornek 0,999; kullanici onayli ad, 28 Eylul): titresimi
+COHERENCE_POWER = 1.0    # coherence'ta lr carpani = ortalama(rho) ^ bu us; alt / ust sinir ve son inis aynen.  0,5 = sqrt(rho)
+                         # (kullanici, 28 Eylul: "Sonra tek farkı lr = LR·√ρ olan bir 10k koşusu, 6,94'e karşı."); 1,0 = bugunku
+WEIGHT_EMA = None       # agirliklarin hareketli ortalamasi (ornek 0,999; kullanici onayli ad, 28 Eylul): titresimi
                          # siler; L(w) - L(ortalama) = o anki titresimin bedeli.  None = kapali
 
 
@@ -148,7 +150,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
               save_every=None, save=None, checkpoint=None, stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=None,
               batches=None, model_kw=None, optimizer=OPTIMIZER, schedule=SCHEDULE, cooldown=COOLDOWN,
               normalized_update=None, sphere_weights=None, canon=None, coherence_window=COHERENCE_WINDOW,
-              final_cooldown=FINAL_COOLDOWN, weight_ema=WEIGHT_EMA):
+              final_cooldown=FINAL_COOLDOWN, weight_ema=WEIGHT_EMA, coherence_power=COHERENCE_POWER):
     """Standart tarif (27 Eylul'den): Muon (gizli matrisler) + Adam, WSD takvimi (lr sabit, son cooldown kisminda
     1 - sqrt ile LR x lr_floor'a), gradient clipping.  optimizer="adam", schedule="cosine": 27 Eylul'e kadarki tarif.
     lr_floor=None, grad_clip=None: en eski tarif (sabit lr).  weight_decay > 0: AdamW, yalniz W_ matrisleri (yalniz adam).
@@ -168,6 +170,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     schedule="coherence": lr = lr x ortalama(rho) (COHERENCE_WINDOW), alt sinir lr_floor; son final_cooldown kisminda
     1 - sqrt ile x lr_floor'a.  Mini-batch'te adim iki yarida hesaplanir (satirlar tek / cift), birlestirilen gradyan tam
     batch'inkiyle ayni; ortalama optimizer'in grup kaydinda (checkpoint'e girer).  model.coherence: son olcum (okuma).
+    coherence_power: lr carpani ortalama(rho) ^ coherence_power (sinirlar ve son inisteki dondurulan deger de bu).
     weight_ema=d: her adimdan sonra ortalama <- d x ortalama + (1 - d) x agirlik (kurede satirlar yeniden birim);
     model.weight_ema = dict(model=<ortalama model>, decay=d).  Ortalama optimizer durumunda (checkpoint'e girer)."""
     assert batches is not None or ids is not None, "ids/mask ya da batches verilmeli"
@@ -178,6 +181,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     assert schedule != "coherence" or (lr_floor is not None and 0 < final_cooldown <= 1 and coherence_window >= 1)
     assert weight_ema is None or 0 < weight_ema < 1, "weight_ema: 0 ile 1 arasi (ornek 0,999) ya da None"
     assert optimizer == "adam" or not weight_decay, "weight_decay yalniz optimizer='adam' ile (AdamW)"
+    assert coherence_power > 0, "coherence_power: pozitif us (1,0 = rho, 0,5 = sqrt(rho))"
     if normalized_update is None:                          # Model X'in varsayilani; transformer ve Adim 1-2'de yok
         normalized_update = NORMALIZED_UPDATE if setting in STEP3 else False
     if sphere_weights is None:
@@ -206,7 +210,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     named = [(k, p) for k, p in model.named_parameters() if p.requires_grad]
     if optimizer == "muon":
         # Muon yalniz gizli 2 boyutlu matrislerde ("VO + FFN" duzeni, Wang 2025); token noktalari, esikler, W_query, W_key,
-        # bias ve norm katsayilari Adam'da
+        # bias, norm katsayilari ve cikis olcegi (log_output_scale) Adam'da
         hidden = ("W_context", "W_value", "W_fact_in", "W_fact_up", "W_fact_out", "W_value.weight", "W_out.weight",
                   "W_mlp_in.weight",
                   "W_mlp_out.weight")
@@ -250,11 +254,11 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
             elif schedule == "coherence":                 # t < final: ortalama(rho);  sonra o deger · (floor + (1 - floor)(1 - sqrt(p)))
                 g0 = opt.param_groups[0]
                 if step < final:
-                    factor = min(max(g0["coherence_mean"], lr_floor), 1.0)
+                    factor = min(max(g0["coherence_mean"] ** coherence_power, lr_floor), 1.0)
                 else:
                     if g0["coherence_frozen"] is None:
                         for group in opt.param_groups:
-                            group["coherence_frozen"] = min(max(g0["coherence_mean"], lr_floor), 1.0)
+                            group["coherence_frozen"] = min(max(g0["coherence_mean"] ** coherence_power, lr_floor), 1.0)
                     factor = g0["coherence_frozen"] * (
                         lr_floor + (1 - lr_floor) * (1 - math.sqrt((step - final) / max(steps - final, 1))))
             else:                                          # WSD: t < start: lr;  sonra lr · (floor + (1 - floor)(1 - sqrt(p)))

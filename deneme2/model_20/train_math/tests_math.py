@@ -273,12 +273,14 @@ def t_colab(tmp):
     fin = json.load(open(os.path.join(out, "final.json"), encoding="utf-8")) if "final.json" in files else {}
     ex = json.load(open(os.path.join(out, "exams.json"))) if "exams.json" in files else []
     check("colab_math: CPU'da start -> config, log, exams, final, model, checkpoint_t000002/4/6; config: veri, iz, batch, "
-          "epok, answer_only, model boyu; final: saglik, butun kume, terim/hane kirilimi, tani sorulari, satirlar",
+          "epok, answer_only, model boyu; final: saglik, butun kume, terim/hane kirilimi, tani sorulari, satirlar, cikis olcegi",
           run["done"] and not run["error"] and files == ["checkpoint_t000002.pt", "checkpoint_t000004.pt", "checkpoint_t000006.pt",
                                                          "config.json", "exams.json", "final.json", "log.txt", "model.pt"]
           and cfg["data"] == "fixture" and cfg["steps_per_epoch"] == per and cfg["answer_only"] is True and cfg["batch_size"] == 4
-          and cfg["model_kw"] == dict(d=16, turns=4, layers=2, heads=4, fact_activation="swiglu", units=16, t_max=512) and cfg["setting"] == "shared" and cfg["rope"] is True
-          and set(fin) == {"health", "breakdown", "train", "heldout", "panel", "rows"} and fin["heldout"]["n"] == len(HELDOUT)
+          and cfg["model_kw"] == dict(d=16, turns=4, layers=2, heads=4, fact_activation="swiglu", learn_output_scale=True, units=16,
+                                      t_max=512) and cfg["setting"] == "shared" and cfg["rope"] is True
+          and set(fin) == {"health", "breakdown", "train", "heldout", "panel", "rows", "output_scale"}
+          and fin["heldout"]["n"] == len(HELDOUT)
           and set(fin["breakdown"]["heldout"]["terms"]) == {"2", "3"} and len(fin["panel"]) == len(EM.PANEL)
           and len(fin["rows"]) == len(HELDOUT) and [e["step"] for e in ex] == [0, 3, 6] and "heldout_terms" in ex[0],
           str(run["error"] or files))

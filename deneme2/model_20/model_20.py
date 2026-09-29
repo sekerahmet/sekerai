@@ -22,6 +22,7 @@ Adim 3: BlockModel.  Her konumun bir durumu var (hidden, h); TURNS tur boyunca B
       anahtarlar kapaliyken (28 Eylul oncesi): h_t = norm(h_t + W_context c_t), h_t = norm(h_t + FactUnits(h_t));
       W_context ve W_fact_out 0'dan (paket acikken rastgele, birim sutun)
     cikis: skor = scale <h, PL>                         son durum dogrudan noktalarla karsilastirilir (W_next yok)
+    LEARN_OUTPUT_SCALE: skor = e^tau <h, PL>, tau = log_output_scale ogrenilir, ln(scale)'dan baslar
     SHARED_BLOCK / LAYERS: turlar LAYERS farkli Block'u sirayla kullanir (2 katman x 2 tur: A B A B); SHARED_BLOCK=False:
     her tura ayri Block
 
@@ -77,6 +78,9 @@ HEADS = 4            # attention head sayisi (kullanici, 28 Eylul: "Evet, varsay
                      # 1 = tek head, V yok (28 Eylul'e kadarki model)
 ROPE = True          # attention'in q ve k'sina RoPE (konum bilgisi).  Varsayilanlar = Model X (C' + RoPE; kullanici, 27 Eylul:
                      # "Model X varsayilan model olsun" onayi); False = RoPE'suz C'
+LEARN_OUTPUT_SCALE = True   # cikis olcegi ogrenilir: e^tau, tau = log_output_scale (kullanici, 28 Eylul: "evet öğrenilen çıkış
+                            # ölçeği olsun!").  3 ajan: donuk modelde olcek ~15'e cekilince -0,053..-0,067 nat; nGPT de
+                            # logit olcegini ogreniyor.  False: sabit scale (28 Eylul'e kadarki model)
 
 
 def apply_rope(x, positions=None):
@@ -392,7 +396,7 @@ class BlockModel(torch.nn.Module):
                  anchor=ANCHOR, confidence=CONFIDENCE, t_max=T_MAX, units=FACT_UNITS, seed=POINTS_SEED,
                  stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=ROPE,
                  normalized_update=NORMALIZED_UPDATE, sphere_weights=SPHERE_WEIGHTS, canon=CANON, heads=HEADS,
-                 fact_activation=FACT_ACTIVATION):
+                 fact_activation=FACT_ACTIVATION, learn_output_scale=LEARN_OUTPUT_SCALE):
         super().__init__()
         assert not normalized_update or (stream_norm and not layer_norm), "normalized_update akis normuyla (L2) calisir"
         assert not (sphere_weights and layer_norm), "sphere_weights LayerNorm'la denenmedi: FactUnits girdisi sqrt(d) kat buyuk"
@@ -423,6 +427,9 @@ class BlockModel(torch.nn.Module):
         if layer_norm:                                    # cikista: keskinligi kazanc ogrenir, sabit scale kullanilmaz
             self.norm_final = torch.nn.LayerNorm(d)
         self.scale = scale_for(n, confidence)
+        self.learn_output_scale = learn_output_scale and not layer_norm   # LayerNorm'da cikis olcegi yok
+        if self.learn_output_scale:                       # tau = ln(scale): baslangicta sabit scale ile bit duzeyinde ayni
+            self.log_output_scale = torch.nn.Parameter(torch.tensor(math.log(self.scale)))
 
     def turn_blocks(self):
         return [self.blocks[i % len(self.blocks)] for i in range(self.turns)]     # paylasilan: A B A B; ayri: her tura biri
@@ -458,7 +465,9 @@ class BlockModel(torch.nn.Module):
             return self.norm_final(h) @ P.T                    # skor_tj = <LN(h_t), PL_j>
         if not self.stream_norm:
             h = F.normalize(h, dim=-1)                         # akis normalize edilmediyse cikista bir kez
-        return self.scale * h @ P.T                            # skor_tj = scale · <h_t, PL_j>
+        # e^tau = scale · e^(tau - ln scale): baslangicta us tam 0
+        scale = self.scale * torch.exp(self.log_output_scale - math.log(self.scale)) if self.learn_output_scale else self.scale
+        return scale * h @ P.T                                 # skor_tj = scale · <h_t, PL_j>
 
     def loss(self, ids, mask):
         nll = masked_nll(self.logits(ids[:, :-1]), ids[:, 1:], mask[:, 1:])
