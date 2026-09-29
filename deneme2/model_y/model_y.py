@@ -82,6 +82,12 @@ SPHERE_WEIGHTS = True       # W_query, W_key, W_fact_in, W_value satirlari ve W_
 CANON = True         # Canon-A (Allen-Zhu 2025): attention girdisi x_t + sum_k w_k * x_(t-k), k = 0..3, w 0'dan.  Varsayilan:
                      # Model X2 = X1 + Canon (kullanici, 28 Eylul: "evet model X2 hayırlı olsun. Canon=True."; TinyStories
                      # "X1+C çok daha iyi görünüyor açık ara", akrabalik 191,0 / X1 188,3 ve cokussuz)
+INPUT_EMBEDDING = False  # True: girdi ayri, ogrenilen tablo (V x d, PF'den baslar, capa yok; nGPT'deki E_input) -- cikis
+                         # PL'de kalir.  False: girdi = cikis = PL (29 Eylul'e kadarki model).  Kullanici, 29 Eylul: "Bunu
+                         # yapalım bence ihtiyaç net zaten ngpt yapmış ama c mantıklı gibi"; adlar "Önerilerin kabul"
+INPUT_BIGRAMS = 0        # > 0: girdiye (onceki token, token) ikilisinin satiri eklenir (Over-Tokenized); satir sayisi = en
+                         # sik K ikili (liste veriden, bigram_keys), listede olmayan ikilide yalniz token.  0 = yok
+FIRST_TURN_FACTS = True  # False: tur 1'in FactUnits alt adimi yok (C ajani: tur 1 FactUnits fiilen token tablosu)
 HEADS = 4            # attention head sayisi (kullanici, 28 Eylul: "Evet, varsayılan 4"; TinyStories 10k ppl 7,22 / tek head
                      # 7,63).  H > 1: d H'ye bolunur, W_value (d x d, birim baslar) her head'in tasiyacagini secer;
                      # 1 = tek head, V yok (28 Eylul'e kadarki model)
@@ -259,6 +265,7 @@ class AttentionCache:
     def __init__(self, lengths, capacity):
         self.next_position, self.capacity = lengths.clone(), capacity   # satir basina siradaki konum
         self.keys = self.values = self.canon_inputs = None
+        self.last_token = None                                   # INPUT_BIGRAMS: satir basina onceki token (istemden sonra)
         self.span = 0                                            # yazilmis en uzun satirin boyu (Python sayisi: senkron yok)
 
     def canon_cache(self, x):
@@ -383,9 +390,10 @@ class Block(torch.nn.Module):
             self.norm_attention = torch.nn.LayerNorm(d)
             self.norm_facts = torch.nn.LayerNorm(d)
 
-    def forward(self, h, cache=None, alpha_attention=None, alpha_facts=None, turn_facts=None):
+    def forward(self, h, cache=None, alpha_attention=None, alpha_facts=None, turn_facts=None, skip_facts=False):
         """alpha_attention, alpha_facts (d,): normalized_update'te bu turun alpha'lari.  turn_facts: bu turun FactUnits'i
-        (SHARED_FACTS=False'ta ikinci gelis); None: Block'un kendi FactUnits'i."""
+        (SHARED_FACTS=False'ta ikinci gelis); None: Block'un kendi FactUnits'i.  skip_facts: FactUnits alt adimi yok
+        (FIRST_TURN_FACTS=False'ta tur 1)."""
         at = self.attention
         unit = lambda v: F.normalize(v, dim=-1)
         norm_a, norm_f = (self.norm_attention, self.norm_facts) if self.layer_norm else (unit, unit)
@@ -400,12 +408,12 @@ class Block(torch.nn.Module):
         facts = (lambda v: units(v * v.shape[-1] ** 0.5)) if self.sphere_weights else units
         if self.normalized_update:                                                 # u'nun boyu silinir, adimi alpha belirler
             h = unit(h + alpha_attention * (unit(added) - h))                     # h = norm(h + α_A ⊙ (norm(W_context c) - h))
-            return unit(h + alpha_facts * (unit(facts(h)) - h))                   # h = norm(h + α_F ⊙ (norm(olgu(h)) - h))
+            return h if skip_facts else unit(h + alpha_facts * (unit(facts(h)) - h))   # h = norm(h + α_F ⊙ (norm(olgu(h)) - h))
         if self.stream_norm:
             h = norm_a(h + added)                                                  # h_t = norm(h_t + W_context · c_t)
-            return norm_f(h + facts(h))                                            # h_t = norm(h_t + olgu(h_t))
+            return h if skip_facts else norm_f(h + facts(h))                       # h_t = norm(h_t + olgu(h_t))
         h = h + added                                                              # akis normalize edilmez:
-        return h + facts(norm_f(h))                                                # h_t = h_t + olgu(norm(h_t))
+        return h if skip_facts else h + facts(norm_f(h))                           # h_t = h_t + olgu(norm(h_t))
 
 
 class BlockModel(torch.nn.Module):
@@ -418,7 +426,11 @@ class BlockModel(torch.nn.Module):
                  stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=ROPE,
                  normalized_update=NORMALIZED_UPDATE, sphere_weights=SPHERE_WEIGHTS, canon=CANON, heads=HEADS,
                  fact_activation=FACT_ACTIVATION, learn_output_scale=LEARN_OUTPUT_SCALE, loss_chunk=LOSS_CHUNK,
-                 last_facts_alpha_init=LAST_FACTS_ALPHA_INIT, output_link=OUTPUT_LINK, shared_facts=SHARED_FACTS):
+                 last_facts_alpha_init=LAST_FACTS_ALPHA_INIT, output_link=OUTPUT_LINK, shared_facts=SHARED_FACTS,
+                 input_embedding=INPUT_EMBEDDING, input_bigrams=INPUT_BIGRAMS, first_turn_facts=FIRST_TURN_FACTS,
+                 bigram_keys=None):
+        """bigram_keys (INPUT_BIGRAMS > 0): en sik ikililerin anahtarlari (onceki * n + token), artan sirali, uzunluk
+        input_bigrams; None ya da str (config'teki iz): tampon 0'larla kurulur, state_dict'ten dolar."""
         super().__init__()
         assert not normalized_update or (stream_norm and not layer_norm), "normalized_update akis normuyla (L2) calisir"
         assert not (sphere_weights and layer_norm), "sphere_weights LayerNorm'la denenmedi: FactUnits girdisi sqrt(d) kat buyuk"
@@ -452,6 +464,17 @@ class BlockModel(torch.nn.Module):
             self.alpha_facts = torch.nn.Parameter(torch.full((turns, d), ALPHA_INIT))
             with torch.no_grad():                         # son tur: model girdisini tekrar etmesin (LAST_FACTS_ALPHA_INIT)
                 self.alpha_facts[-1] = last_facts_alpha_init
+        self.first_turn_facts = first_turn_facts
+        if not first_turn_facts and not (shared and self.shared_facts and turns > self.layers):
+            self.blocks[0].facts = None                   # tur 1'in takimini baska tur kullanmiyor: parametresi de yok
+        if input_embedding:                               # PF'den: ilk adimda girdi PL ile ayni
+            self.input_embedding = torch.nn.Parameter(self.tokens.fixed_points.detach().clone())
+        if input_bigrams:                                 # 0'dan: ilk adimda ikili katkisi yok
+            self.input_bigrams = torch.nn.Parameter(torch.zeros(input_bigrams, d))
+            keys = (torch.zeros(input_bigrams, dtype=torch.long) if bigram_keys is None or isinstance(bigram_keys, str)
+                    else torch.as_tensor(bigram_keys, dtype=torch.long).clone())
+            assert keys.shape == (input_bigrams,) and bool((keys[1:] >= keys[:-1]).all()), "bigram_keys: artan, input_bigrams uzun"
+            self.register_buffer("bigram_keys", keys)
         if sphere_weights:
             self.normalize_weights()
         if layer_norm:                                    # cikista: keskinligi kazanc ogrenir, sabit scale kullanilmaz
@@ -470,16 +493,44 @@ class BlockModel(torch.nn.Module):
     def turn_blocks(self):
         return [self.blocks[i % len(self.blocks)] for i in range(self.turns)]     # paylasilan: A B A B; ayri: her tura biri
 
+    def input_states(self, ids, last=None):
+        """h0 (B, T, d): PL[ids]; INPUT_EMBEDDING'de norm(E[ids] + ikili satiri).  Ikili (onceki, token): onceki konum 0'da
+        last (B,) ya da yok (-1); bigram_keys'te yoksa katki 0."""
+        E = getattr(self, "input_embedding", None)
+        B2 = getattr(self, "input_bigrams", None)
+        if E is None and B2 is None:
+            return self.tokens.points()[ids]
+        x = E[ids] if E is not None else self.tokens.points()[ids]
+        if B2 is not None:
+            first = (last if last is not None else torch.full_like(ids[:, 0], -1))[:, None]
+            prev = torch.cat([first, ids[:, :-1]], 1)
+            key = prev * self.tokens.fixed_points.shape[0] + ids              # onceki yoksa negatif: listede yok
+            pos = torch.searchsorted(self.bigram_keys, key).clamp(max=self.bigram_keys.shape[0] - 1)
+            hit = (self.bigram_keys[pos] == key) & (prev >= 0)
+            x = x + B2[pos] * hit[..., None].to(B2.dtype)
+        return F.normalize(x, dim=-1)
+
     def hidden(self, ids, caches=None):
-        """Her turdan sonraki durumlar: [h0 = PL, h1, ..., h_TURNS], her biri (B, T, d).  caches: tur basina bir
-        AttentionCache (onbellekli uretim; ids yalniz yeni token'lar)."""
-        h = self.tokens.points()[ids]
+        """Her turdan sonraki durumlar: [h0, h1, ..., h_TURNS], her biri (B, T, d); h0 = input_states.  caches: tur basina
+        bir AttentionCache (onbellekli uretim; ids yalniz yeni token'lar)."""
+        last = None
+        if caches is not None and getattr(self, "input_bigrams", None) is not None:
+            c0 = caches[0]
+            last = c0.last_token                              # istemde None: istemin icindeki onceki token'lar
+            if last is None:                                  # istem sagdan dolgulu: satirin son gercek token'i
+                n = c0.next_position
+                c0.last_token = torch.where(n > 0, ids.gather(1, (n - 1).clamp(min=0)[:, None])[:, 0], -1)
+            else:
+                c0.last_token = ids[:, -1]
+        h = self.input_states(ids, last)
         out = [h]
         for i, block in enumerate(self.turn_blocks()):
             alphas = (dict(alpha_attention=self.alpha_attention[i], alpha_facts=self.alpha_facts[i])
                       if self.normalized_update else {})
             if not self.shared_facts and i >= self.layers:
                 alphas["turn_facts"] = self.extra_facts[i - self.layers]
+            if i == 0 and not self.first_turn_facts:
+                alphas["skip_facts"] = True
             h = block(h, None if caches is None else caches[i], **alphas)
             out.append(h)
         return out
@@ -489,11 +540,11 @@ class BlockModel(torch.nn.Module):
         """sphere_weights: girdisi durum olan matrislerin satirlari (W_query, W_key, W_fact_in, W_value), duruma yazanlarin
         sutunlari (W_context, W_fact_out) birim boya; baslangicta ve her optimizer adimindan sonra (train_seq)."""
         for b in self.blocks:
-            at, f = b.attention, b.facts
-            for w in ((at.W_query, at.W_key, f.W_fact_in) + ((at.W_value,) if at.heads > 1 else ())
-                      + ((f.W_fact_up,) if f.activation != "relu" else ())):
+            at, f = b.attention, b.facts                  # f None: FIRST_TURN_FACTS=False'ta tur 1'in takimi yok
+            for w in ((at.W_query, at.W_key) + ((f.W_fact_in,) if f is not None else ()) + ((at.W_value,) if at.heads > 1 else ())
+                      + ((f.W_fact_up,) if f is not None and f.activation != "relu" else ())):
                 w.copy_(F.normalize(w, dim=1))
-            for w in (at.W_context, f.W_fact_out):
+            for w in (at.W_context,) + ((f.W_fact_out,) if f is not None else ()):
                 w.copy_(F.normalize(w, dim=0))
         for f in getattr(self, "extra_facts", ()):
             for w in (f.W_fact_in,) + ((f.W_fact_up,) if f.activation != "relu" else ()):

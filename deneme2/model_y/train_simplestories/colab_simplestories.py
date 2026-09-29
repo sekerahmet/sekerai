@@ -23,6 +23,7 @@ mfu (egitim FLOP'u / sure / GPU tepesi; CPU'da ve tabloda olmayan GPU'da None), 
 nll_by_frequency (exam'in icinde) ve her TEXT_ERRORS_EVERY sinavda bir text_errors (count_text_errors); final.json'da
 hepsi, metin hatalari gercek devamla birlikte.
 """
+import hashlib
 import json
 import math
 import os
@@ -75,8 +76,10 @@ def _model_flops(model):
         for i, b in enumerate(model.turn_blocks()):
             at = b.attention
             facts = model.extra_facts[i - model.layers] if not model.shared_facts and i >= model.layers else b.facts
+            if i == 0 and not getattr(model, "first_turn_facts", True):
+                facts = None                                  # FIRST_TURN_FACTS=False: tur 1'de FactUnits yok
             n += sum(w.numel() for w in (at.W_query, at.W_key, at.W_context) + ((at.W_value,) if at.heads > 1 else ()))
-            n += sum(p.numel() for k, p in facts.named_parameters() if k.startswith("W_"))
+            n += sum(p.numel() for k, p in facts.named_parameters() if k.startswith("W_")) if facts is not None else 0
         V, d = model.tokens.fixed_points.shape
         return n + V * d, model.turns * d
     if isinstance(model, TransformerModel):
@@ -134,8 +137,17 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
     if setting in TR.STEP3:
         model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, shared_facts=M.SHARED_FACTS, heads=M.HEADS, fact_activation=M.FACT_ACTIVATION,
                              learn_output_scale=M.LEARN_OUTPUT_SCALE, output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=M.T_MAX,
-                             anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK, last_facts_alpha_init=M.LAST_FACTS_ALPHA_INIT),
+                             anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK, last_facts_alpha_init=M.LAST_FACTS_ALPHA_INIT,
+                             input_embedding=M.INPUT_EMBEDDING, input_bigrams=M.INPUT_BIGRAMS,
+                             first_turn_facts=M.FIRST_TURN_FACTS),
                         **(model_kw or {}))
+    keys = None                                       # INPUT_BIGRAMS: ikili listesi modele tensor, config'e izi
+    if model_kw and model_kw.get("bigram_keys") is not None and not isinstance(model_kw["bigram_keys"], str):
+        keys = torch.as_tensor(model_kw["bigram_keys"], dtype=torch.long)
+        model_kw = dict(model_kw, bigram_keys="%d anahtar, sha256 %s" % (
+            len(keys), hashlib.sha256(keys.cpu().numpy().tobytes()).hexdigest()[:12]))
+    if model_kw and model_kw.get("input_bigrams") and not resume:
+        assert keys is not None and len(keys) == model_kw["input_bigrams"], "INPUT_BIGRAMS: model_kw'de bigram_keys (liste)"
     per_epoch = len(data["train_start"]) // batch_size
     assert per_epoch > 0, "batch_size (%d) > train penceresi (%d)" % (batch_size, len(data["train_start"]))
     rows = ES.exam_rows(data)
@@ -169,8 +181,9 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         saved.setdefault("final_cooldown_shape", "sqrt")          # 29 Eylul oncesi kosularda yazilmadi: sqrt idi
         saved.setdefault("attention_kernel", "math")              # 29 Eylul oncesi: hep math, fp32 Newton-Schulz
         saved.setdefault("newton_schulz_precision", "fp32")
-        if setting in TR.STEP3 and saved.get("model_kw"):   # 29 Eylul oncesi kosularda output_link yazilmadi: yoktu
-            saved["model_kw"] = dict(dict(output_link=False, shared_facts=True), **saved["model_kw"])
+        if setting in TR.STEP3 and saved.get("model_kw"):   # 29 Eylul oncesi kosularda bu ayarlar yazilmadi: yoktu
+            saved["model_kw"] = dict(dict(output_link=False, shared_facts=True, input_embedding=False, input_bigrams=0,
+                                          first_turn_facts=True), **saved["model_kw"])
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)
@@ -290,7 +303,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
             model, _ = TR.train_seq(setting, None, None, len(vocab), steps=steps, seed=seed, device=device, every=every,
                                     callback=callback, log_at=(), compile=compile, save_every=save_every, save=save,
                                     checkpoint=checkpoint, batches=_counting(DS.batches(data, batch_size, seed, bucket), work),
-                                    model_kw=model_kw,
+                                    model_kw=model_kw if keys is None else dict(model_kw, bigram_keys=keys),
                                     **dict(train_kw, matmul_precision=config["matmul_precision"],
                                            coherence_power=config["coherence_power"], muon_tangent=config["muon_tangent"],
                                            attention_kernel=config["attention_kernel"],

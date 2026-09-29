@@ -70,7 +70,10 @@ def _work(t):
 # ---- elle ileri hesap
 
 def _turn_facts(model, t):
-    """Tur t'nin FactUnits'i: SHARED_FACTS=False'ta tur >= layers kendi takimini (extra_facts) kullanir."""
+    """Tur t'nin FactUnits'i: SHARED_FACTS=False'ta tur >= layers kendi takimini (extra_facts) kullanir; FIRST_TURN_FACTS=False'ta
+    tur 0'da None (alt adim yok)."""
+    if t == 0 and not getattr(model, "first_turn_facts", True):
+        return None
     if not model.shared_facts and t >= model.layers:
         return model.extra_facts[t - model.layers]
     return model.turn_blocks()[t].facts
@@ -187,8 +190,8 @@ def _run(model, h, plan, taps=None, start=0):
             h = h + added
         if "attention_out" in taps:
             taps["attention_out"](t, h)
-        if t not in plan["skip_facts"]:
-            f = _turn_facts(model, t)
+        f = _turn_facts(model, t)
+        if t not in plan["skip_facts"] and f is not None:
             v = h if blk.stream_norm else norm_f(h)
             if blk.sphere_weights:
                 v = v * v.shape[-1] ** 0.5
@@ -230,7 +233,7 @@ def _scores(model, h, P=None):
 def _logits(model, ids, case=None, taps=None):
     """Elle ileri hesabin skoru (mudahaleli olabilir); mudahalesiz = model.logits (test)."""
     P = model.tokens.points()
-    return _scores(model, _run(model, P[ids], _plan(model, case), taps), P)
+    return _scores(model, _run(model, model.input_states(ids), _plan(model, case), taps), P)
 
 
 # ---- hikayeler ve puanlama
@@ -297,7 +300,7 @@ def _state_names(model):
 
 def _states(model, inp, plan, P):
     """_state_names sirasiyla durumlar, her biri (B, T, d)."""
-    states = [P[inp]]
+    states = [model.input_states(inp)]
     keep = lambda t, h: states.append(h)
     _run(model, states[0], plan, dict(attention_out=keep, facts_out=keep))
     return states
@@ -482,7 +485,7 @@ def attention_stats(model, ids, exclude_last=True, batch=8):
             mix, xin = mix_x
             canon[t] += ((mix.norm(dim=-1) / xin.norm(dim=-1).clamp_min(1e-12)).double() * wq[:, 0]).sum()
 
-        _run(model, P[inp], plan, dict(attention=on_attention, heads=on_heads, canon=on_canon))
+        _run(model, model.input_states(inp), plan, dict(attention=on_attention, heads=on_heads, canon=on_canon))
         for t1, t2 in pairs:
             reuse[(t1, t2)] += (torch.minimum(kept[t1], kept[t2]).sum(-1).double() * wq).sum((0, 2))
         n += int(valid.sum())
@@ -509,8 +512,10 @@ def unit_usage(model, ids, exclude_last=True, batch=16, sample=4096, seed=0):
     stories = _as_stories(ids)
     TN = model.turns
     facts = [_turn_facts(model, t) for t in range(TN)]
-    U = facts[0].W_fact_out.shape[1]
-    dv = facts[0].W_fact_out.device                          # sayaclar modelin cihazinda
+    with_facts = [t for t in range(TN) if facts[t] is not None]   # FIRST_TURN_FACTS=False'ta tur 0 yok
+    f0 = facts[with_facts[0]]
+    U = f0.W_fact_out.shape[1]
+    dv = f0.W_fact_out.device                                # sayaclar modelin cihazinda
     e2 = torch.zeros(TN, U, dtype=torch.float64, device=dv)
     active = torch.zeros(TN, U, dtype=torch.float64, device=dv)
     zeros = torch.zeros(TN, dtype=torch.float64, device=dv)
@@ -534,11 +539,11 @@ def unit_usage(model, ids, exclude_last=True, batch=16, sample=4096, seed=0):
             out2[t] += ((uu @ facts[t].W_fact_out.T.double()) ** 2).sum()
             samples[t].append(uu[here].float())
 
-        _run(model, P[x[:, :-1]], plan, dict(units=on_units))
+        _run(model, model.input_states(x[:, :-1]), plan, dict(units=on_units))
         offset += M
         n += M
-    turns = []
-    for t in range(TN):
+    turns, by_turn = [], {}
+    for t in with_facts:
         share = e2[t] / e2[t].sum()
         cum = torch.cumsum(torch.sort(share, descending=True).values, 0)
         S = torch.cat(samples[t]).double()
@@ -548,8 +553,9 @@ def unit_usage(model, ids, exclude_last=True, batch=16, sample=4096, seed=0):
                           cover=[int((cum < q).sum()) + 1 for q in (0.5, 0.9, 0.99)], dead=int((share < 1e-5).sum()),
                           rare=int((active[t] / n < 0.01).sum()), zero=float(zeros[t] / n),
                           corr_pairs=[int((C > 0.9).sum()), int((C > 0.7).sum())], sample=len(S), share=share.cpu().numpy()))
+        by_turn[t] = turns[-1]
     teams = []
-    for f in dict.fromkeys(facts):                                # sirali, tekrarsiz
+    for f in dict.fromkeys(f for f in facts if f is not None):    # sirali, tekrarsiz
         used = [t for t in range(TN) if facts[t] is f]
         sim = {}
         for name, W in (("in", f.W_fact_in), ("up", getattr(f, "W_fact_up", None)), ("out", f.W_fact_out.T)):
@@ -560,12 +566,12 @@ def unit_usage(model, ids, exclude_last=True, batch=16, sample=4096, seed=0):
         between = []
         for i, t1 in enumerate(used):
             for t2 in used[i + 1:]:
-                a, b = turns[t1]["share"], turns[t2]["share"]
+                a, b = by_turn[t1]["share"], by_turn[t2]["share"]
                 r = np.log10((a + 1e-9) / (b + 1e-9))
                 between.append(dict(turns=(t1, t2), corr=float(np.corrcoef(a, b)[0, 1]), more_first=int((r > 1).sum()),
                                     more_second=int((r < -1).sum()), dead_both=int(((a < 1e-5) & (b < 1e-5)).sum())))
         teams.append(dict(turns=used, similar=sim, between=between))
-    return dict(units=U, n=n, activation=facts[0].activation, turns=turns, teams=teams)
+    return dict(units=U, n=n, activation=f0.activation, turns=turns, teams=teams)
 
 
 def _head_means(model, stories, exclude_last, batch):
@@ -578,7 +584,7 @@ def _head_means(model, stories, exclude_last, batch):
         def on_heads(t, c):
             s = c.permute(0, 2, 1, 3)[valid].double().sum(0)     # (H, dh)
             sums[t] = s if t not in sums else sums[t] + s
-        _run(model, P[x[:, :-1]], _plan(model), dict(heads=on_heads))
+        _run(model, model.input_states(x[:, :-1]), _plan(model), dict(heads=on_heads))
         n += int(valid.sum())
     dtype = P.dtype
     return {(t, h): (s[h] / n).to(dtype) for t, s in sums.items() for h in range(s.shape[0])}
@@ -594,7 +600,7 @@ def _canon_means(model, stories, exclude_last, batch):
         def on_canon(t, mx):
             s = mx[0][valid].double().sum(0)                     # (d,)
             sums[t] = s if t not in sums else sums[t] + s
-        _run(model, P[x[:, :-1]], _plan(model), dict(canon=on_canon))
+        _run(model, model.input_states(x[:, :-1]), _plan(model), dict(canon=on_canon))
         n += int(valid.sum())
     return {t: (s / n).to(P.dtype) for t, s in sums.items()}
 
@@ -617,7 +623,7 @@ def ablate(model, ids_or_stories, cases, reference=None, exclude_last=True, batc
     for x, valid, idx in _batches(stories, batch, exclude_last):
         x, valid = x.to(P.device), valid.to(P.device)
         hs = []
-        h = _run(model, P[x[:, :-1]], clean, dict(input=lambda t, v: hs.append(v)))
+        h = _run(model, model.input_states(x[:, :-1]), clean, dict(input=lambda t, v: hs.append(v)))
         cache.append((x, valid, idx, hs + [h]))
     check = float((model.logits(cache[0][0][:, :-1]) - _scores(model, cache[0][3][-1], P)).abs().max())
 
@@ -1060,7 +1066,7 @@ def _breakdown_parts(ctx, ids, mask, clock):
     at = lambda name: (lambda t, _: clock.mark(name % (t + 1)))
     with _forward_context(dict(ctx, compile=False)):
         clock.mark("basla")
-        h0 = model.tokens.points()[ids[:, :-1]]
+        h0 = model.input_states(ids[:, :-1])
         clock.mark("gomme")
         h = _run(model, h0, _plan(model), dict(canon=at("tur %d Canon"), attention_out=at("tur %d attention"),
                                                facts_out=at("tur %d FactUnits")))
@@ -1098,7 +1104,8 @@ def _step_flops(model, ids):
     per = 2 * d * V
     for t, blk in enumerate(model.turn_blocks()):
         f = _turn_facts(model, t)
-        per += 2 * d * (d * (3 + (blk.attention.heads > 1)) + f.W_fact_out.shape[1] * (2 if f.activation == "relu" else 3))
+        per += 2 * d * (d * (3 + (blk.attention.heads > 1))
+                        + (f.W_fact_out.shape[1] * (2 if f.activation == "relu" else 3) if f is not None else 0))
         per += 4 * d * T
     return 3 * B * T * per
 
