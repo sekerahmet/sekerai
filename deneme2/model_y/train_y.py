@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
-"""train_y -- model_y GENEL egitim: veriden bagimsiz.  Veriye ozgu sinav ve raporlar egitim klasorlerinde
-(akrabalik: train_kinship/exam_kinship.py).
+"""train_y -- model_y GENEL egitim: veriden bagimsiz.  Veriye ozgu sinav ve raporlar egitim klasorlerinde (train_<veri>/).
     train       Adim 1: ardisik token ciftleri (BigramModel)
     train_seq   dizi egitimi: Model X (varsayilan), deneme ayarlari ve kiyas transformer'i; yedek ve surdurme
     Muon        optimizer: gizli matrisler Muon, gerisi Adam (tek sinif, tek state_dict)

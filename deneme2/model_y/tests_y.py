@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """tests_y -- model_y'nin kapilari: model (Adim 1-3, Model X, deneme ayarlari, transformer) ve genel egitim.  CPU, saniyeler.
-Egitim verisi olarak akrabalik verisi kullanilir (train_kinship/); verinin ve sinavin kendi testleri orada (tests_kinship.py).
+Egitim verisi testin icinde uretilir (synthetic_data): ag, Drive ve egitim klasoru gerekmez.
 
     python tests_y.py
 """
@@ -12,11 +12,8 @@ import torch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(HERE, "train_kinship"))
 torch.set_num_threads(1)
 
-import data_y as D  # noqa: E402
-import exam_kinship as EK  # noqa: E402
 import train_y as TR  # noqa: E402
 from model_y import BigramModel, deviation, scale_for  # noqa: E402
 
@@ -26,6 +23,39 @@ RESULTS = []
 def check(name, ok, note=""):
     RESULTS.append(bool(ok))
     print("  %-78s %s  %s" % (name, "GECTI" if ok else "KALDI", note))
+
+
+def synthetic_data(n_words=232, n_rules=8, rows=1024, seed=0):
+    """Deterministik test verisi: '<eos> r x f_r(x) f_r(f_r(x)) ... <eos>', 6-12 adim (dizi 10-16 token, dolgu var).
+    f_r kural token'ina ozgu, sabit noktasiz bir permutasyon: sonraki token onceki token ve dizinin basindaki kuraldan
+    belirli -- ogrenilebilir yapi (bigram tabani ln n_rules, kurala bakan model 0'a iner), gurultu degil.  Sozluk 242."""
+    g = torch.Generator().manual_seed(seed)
+    words, rules = ["w%03d" % i for i in range(n_words)], ["r%d" % i for i in range(n_rules)]
+    order = torch.randperm(n_words, generator=g)
+    rank = torch.empty_like(order)
+    rank[order] = torch.arange(n_words)
+    shifts = 1 + torch.randperm(n_words - 1, generator=g)[:n_rules]          # 1 .. n-1: f_r(x) != x
+    train = []
+    for _ in range(rows):
+        r, x, k = (int(torch.randint(lo, hi, (1,), generator=g)) for lo, hi in ((0, n_rules), (0, n_words), (6, 13)))
+        seq = [rules[r], words[x]]
+        for _ in range(k):
+            x = int(order[(rank[x] + shifts[r]) % n_words])
+            seq.append(words[x])
+        train.append(seq)
+    return dict(vocab=["<pad>", "<eos>"] + rules + words, train=train)
+
+
+def sequences(data):
+    """Her dizi <eos> ... <eos> -> (ids, mask), sagdan <pad>."""
+    ix = {w: i for i, w in enumerate(data["vocab"])}
+    return TR.pad([[ix["<eos>"]] + [ix[t] for t in s] + [ix["<eos>"]] for s in data["train"]], data["vocab"])
+
+
+def token_pairs(data):
+    """Ardisik (girdi, hedef) ciftleri (Adim 1)."""
+    ids, mask = sequences(data)
+    return ids[:, :-1][mask[:, 1:]], ids[:, 1:][mask[:, 1:]]
 
 
 def reference_logits(PF, shift, W, scale, ids):
@@ -130,8 +160,8 @@ def t_model():
     err = float((m.tokens.shift.grad - 2 * 0.05 * m.tokens.shift.detach()).abs().max())
     check("model: capa gradyani = 2 . anchor . shift", err < 1e-6, "fark %.1e" % err)
 
-    d = D.build()
-    inputs, targets = EK.token_pairs(d)
+    d = synthetic_data()
+    inputs, targets = token_pairs(d)
     nv = len(d["vocab"])
     ok = []
     for name in ("fixed", "free"):
@@ -223,8 +253,8 @@ def t_step2():
     check("adim 2: sagdaki dolgu sonucu degistirmez; kayip yalniz gercek hedeflerin ortalamasi",
           err < 1e-6 and abs(nll - want) < 1e-6, "fark %.1e  kayip %.6f / %.6f" % (err, nll, want))
 
-    data = D.build()
-    sids, smask = EK.sequences(data)
+    data = synthetic_data()
+    sids, smask = sequences(data)
     nv = len(data["vocab"])
     before = SequenceModel(nv).tokens.fixed_points.clone()
     m, curve = TR.train_seq("step2", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20))   # egitim tesisati: 64 dizi yeter (tam veri 2.560)
@@ -406,8 +436,8 @@ def t_step3():
           and float((ra[:, :5] - rb[:, :5]).abs().max()) < 1e-5 and float((ra[:, 5:] - rb[:, 5:]).abs().max()) > 1e-3,
           "weights farki %.1e" % err_w)
 
-    data = D.build()
-    sids, smask = EK.sequences(data)
+    data = synthetic_data()
+    sids, smask = sequences(data)
     nv = len(data["vocab"])
     mr, curve_r = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20), rope=True)
     md, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=1, log_at=())
@@ -724,8 +754,8 @@ def t_transformer():
           float((after[:, :5] - base_logits[:, :5]).abs().max()) < 1e-5 and float((after[:, 5:] - base_logits[:, 5:]).abs().max()) > 1e-3
           and err < 1e-5, "dolgu farki %.1e" % err)
 
-    data = D.build()
-    sids, smask = EK.sequences(data)
+    data = synthetic_data()
+    sids, smask = sequences(data)
     nv = len(data["vocab"])
     m, curve = TR.train_seq("transformer", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20))
     try:
@@ -822,19 +852,18 @@ def t_generate_cached():
           "sayisindan bagimsiz (esitlik yukarida, 1-20 token'lik istemlerle)",
           all(tuple(c.canon_inputs.shape) == (len(prompts), 3, 16) for c in caches), str(tuple(caches[0].canon_inputs.shape)))
 
-    # egitilmis agirlik: akrabalik verisinde 60 adim; sinav sorulari (<steps> dahil) ve uzun devam
-    data = D.build()
-    sids, smask = EK.sequences(data)
+    # egitilmis agirlik: test verisinde 60 adim; farkli boyda dizi baslari ve uzun devam
+    data = synthetic_data()
+    sids, smask = sequences(data)
     nv = len(data["vocab"])
     trained, curve = TR.train_seq("shared", sids[:256], smask[:256], nv, steps=60, log_at=(0, 60), canon=False)
-    ix = {w: i for i, w in enumerate(data["vocab"])}
-    qs = [[ix[D.EOS]] + [ix[t] for t in e["prompt"]] for e in data["exam"]][:96]
+    qs = [sids[i, :2 + i % 8].tolist() for i in range(96)]
     old, new = TR.generate(trained, qs, 24, cached=False), TR.generate(trained, qs, 24)
     scores, _ = cached_scores(trained, qs[:24], new[:24])
     err = max(float((scores[i] - trained.logits(torch.tensor([q + new[i]])).detach()[0, len(q) - 1:]).abs().max())
               for i, q in enumerate(qs[:24]))
-    check("generate, egitilmis Model X (akrabalik, 256 cumle, 60 adim): 96 sinav sorusu x 24 token onbellekli = tam yeniden "
-          "hesap; skorlar tolerans icinde", old == new and err < 1e-4 and curve[-1]["nll"] < curve[0]["nll"],
+    check("generate, egitilmis Model X (test verisi, 256 dizi, 60 adim): 96 istem (dizi basi, 2-9 token) x 24 token "
+          "onbellekli = tam yeniden hesap; skorlar tolerans icinde", old == new and err < 1e-4 and curve[-1]["nll"] < curve[0]["nll"],
           "fark %.1e  kayip %.3f -> %.3f" % (err, curve[0]["nll"], curve[-1]["nll"]))
 
 
@@ -846,8 +875,8 @@ def t_normalized_update():
     import functools
     from model_y import ALPHA_INIT, LAST_FACTS_ALPHA_INIT, BlockModel, apply_rope
     BlockModel = functools.partial(BlockModel, input_embedding=False, first_turn_facts=True)   # 30 Eylul oncesi tasarim (tur 1 FactUnits'li)
-    data = D.build()
-    sids, smask = EK.sequences(data)
+    data = synthetic_data()
+    sids, smask = sequences(data)
     nv = len(data["vocab"])
 
     # tasarim formulu dogrusal skorla: phi (OUTPUT_LINK, 29 Eylul varsayilan) t_output_link'te
@@ -975,7 +1004,7 @@ def t_normalized_update():
         rows.append((n_, d_, want, out_, abs(out_[LAST_FACTS_ALPHA_INIT][0] - want) < tol and out_[ALPHA_INIT][0] > want + 2
                      and out_[ALPHA_INIT][1] > 0.9 and out_[LAST_FACTS_ALPHA_INIT][1] < 0.05))
     check("last_facts_alpha_init: ALPHA_INIT ile eski baslatma bit duzeyinde; 1,0'da adim-0 kaybi ln n + s^2/(2d)'ye yakin "
-          "(akrabalik n 242 d 64 gercek cumleler, 0,35; n 8004 d 384 rastgele token, 0,1), 0,1'de 2 nat ustunde; girdiyi "
+          "(test verisi n 242 d 64, 0,35; n 8004 d 384 rastgele token, 0,1), 0,1'de 2 nat ustunde; girdiyi "
           "tekrar (argmax = girdi token'i) 0,1'de > %90, 1,0'da < %5",
           LAST_FACTS_ALPHA_INIT == 1.0 and same_old and all(r[-1] for r in rows),
           "  ".join("n %d d %d: formul %.3f / 1,0 kayip %.3f tekrar %.3f / 0,1 kayip %.3f tekrar %.3f" % (
@@ -990,8 +1019,8 @@ def t_canon():
     import copy
     import torch.nn.functional as F
     from model_y import BlockModel
-    data = D.build()
-    sids, smask = EK.sequences(data)
+    data = synthetic_data()
+    sids, smask = sequences(data)
     nv = len(data["vocab"])
     ids = sids[:6, :20]
 
@@ -1063,8 +1092,8 @@ def t_layers():
     iki Block'u donusumlu kullanir; ayri blok (separate) Model X2 anahtarlariyla egitilir."""
     import copy
     from model_y import BlockModel
-    data = D.build()
-    sids, smask = EK.sequences(data)
+    data = synthetic_data()
+    sids, smask = sequences(data)
     nv = len(data["vocab"])
     ids = sids[:6, :20]
 
@@ -1144,8 +1173,8 @@ def t_coherence():
     tam batch'te rho = 1 (lr sabit, sonda final_cooldown inisi); mini-batch'te c, rho, ortalama gecerli ve lr = LR x
     ortalama; surdurme bit duzeyinde (ortalama optimizer'in grup kaydinda); lr_floor yoksa reddedilir."""
     import copy
-    data = D.build()
-    sids, smask = EK.sequences(data)
+    data = synthetic_data()
+    sids, smask = sequences(data)
     nv = len(data["vocab"])
 
     def batches(step):                                     # adimin fonksiyonu: 16 cumle
@@ -1328,8 +1357,8 @@ def t_weight_ema():
     optimizer durumunda) bit duzeyinde; gecersiz d reddedilir."""
     import copy
     import torch.nn.functional as F
-    data = D.build()
-    sids, smask = EK.sequences(data)
+    data = synthetic_data()
+    sids, smask = sequences(data)
     nv = len(data["vocab"])
 
     start, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=0, log_at=())
@@ -1374,8 +1403,8 @@ def t_heads():
     import copy
     import torch.nn.functional as F
     from model_y import BlockModel, CausalAttention, apply_rope
-    data = D.build()
-    sids, smask = EK.sequences(data)
+    data = synthetic_data()
+    sids, smask = sequences(data)
     nv = len(data["vocab"])
     ids = sids[:6, :20]
 
@@ -1457,8 +1486,8 @@ def t_fact_activation():
     import functools
     from model_y import FACT_ACTIVATION, FACT_UNITS, BlockModel, FactUnits
     BlockModel = functools.partial(BlockModel, input_embedding=False, first_turn_facts=True)   # butun turlarda FactUnits
-    data = D.build()
-    sids, smask = EK.sequences(data)
+    data = synthetic_data()
+    sids, smask = sequences(data)
     nv = len(data["vocab"])
     ids = sids[:6, :20]
 
@@ -1526,16 +1555,16 @@ def t_fact_activation():
 
 def t_learn_output_scale():
     """LEARN_OUTPUT_SCALE: skor = e^tau <h, PL>, tau = log_output_scale ln(scale)'dan; baslangicta sabit olcekle bit duzeyinde
-    ayni; Adam'da (Muon'da degil), weight decay yok, weight EMA ortalar; egitim, surdurme, onbellekli uretim; sinav gunlugu;
-    config'inde anahtar olmayan eski kosu False ile yuklenir ve surdurulur; LayerNorm'da parametre yok."""
+    ayni; Adam'da (Muon'da degil), weight decay yok, weight EMA ortalar; egitim, surdurme, onbellekli uretim; config'inde
+    anahtar olmayan eski kosu False ile yuklenir; LayerNorm'da parametre yok.  Kosucunun sinav gunlugu (olcek):
+    tests_simplestories."""
     import copy
     import inspect
     import json
     import tempfile
-    import colab_kinship as C
     from model_y import LEARN_OUTPUT_SCALE, BlockModel
-    data = D.build()
-    sids, smask = EK.sequences(data)
+    data = synthetic_data()
+    sids, smask = sequences(data)
     nv = len(data["vocab"])
     ids = sids[:6, :20]
     val = lambda t: float(t.detach())
@@ -1609,7 +1638,7 @@ def t_learn_output_scale():
           and all(torch.equal(x, y) for x, y in zip(full.state_dict().values(), res.state_dict().values()))
           and new == TR.generate(trained, qs, 6, cached=False) and err_c < 1e-4, "skor farki %.1e" % err_c)
 
-    # eski kosu: config'inde anahtar yok -> False; konus strict yukler, colab_kinship surdurur
+    # eski kosu: config'inde anahtar yok -> False; konus strict yukler
     sys.path.insert(0, os.path.join(HERE, "train_tinystories"))
     import konus_y as K
     tmp = tempfile.mkdtemp()
@@ -1634,49 +1663,17 @@ def t_learn_output_scale():
                   and torch.equal(lnew.logits(ids), trained.logits(ids)) and not lleg.output_link and lleg.shared_facts
                   and torch.equal(lleg.logits(ids), legacy.logits(ids)))
 
-    s = D.build(step_answers=True)
-    kw = dict(steps=2, every=100, device="cpu", save_every=1, model_kw=dict(d=16, units=16))
-    out_on = os.path.join(tmp, "on")
-    run = C.start("TEST_SCALE", s, out_on, **dict(kw, steps=1))
-    run["thread"].join(600)
-    log_on = open(os.path.join(out_on, "log.txt"), encoding="utf-8").read()
-    ex_on = json.load(open(os.path.join(out_on, "exams.json")))
-    out = os.path.join(tmp, "off")
-    kw_off = dict(kw, model_kw=dict(d=16, units=16, learn_output_scale=False))
-    run = C.start("TEST_SCALE", s, out, **kw_off)
-    run["thread"].join(600)
-    first = torch.load(os.path.join(out, "model.pt"))
-    cfg = json.load(open(os.path.join(out, "config.json")))
-    del cfg["learn_output_scale"]                                  # 28 Eylul oncesi config gibi
-    power_written = cfg.pop("coherence_power") == 1.0              # COHERENCE_POWER da: yazilir, anahtarsiz eski config 1,0
-    json.dump(cfg, open(os.path.join(out, "config.json"), "w"), indent=1)
-    os.remove(os.path.join(out, "checkpoint_t00002.pt"))
-    try:
-        C.start("TEST_SCALE2", s, out, resume=True, **kw)          # varsayilan (True) ile: ayar farkli
-        refused = False
-    except RuntimeError:
-        refused = True
-    run2 = C.start("TEST_SCALE", s, out, resume=True, **kw_off)
-    run2["thread"].join(600)
-    second = torch.load(os.path.join(out, "model.pt"))
-    check("learn_output_scale: sinav gunlugunde 'olcek', exams.json'da output_scale; config'inde anahtar olmayan eski kosu "
-          "False ile strict yuklenir (konus) ve surdurulur (colab_kinship, bit duzeyinde), True ile reddedilir; yeni kosu "
-          "True ile yuklenir; coherence_power config'te, anahtarsizi 1,0",
-          loaded and " | olcek " in log_on and abs(ex_on[0]["output_scale"] - scale_for(len(s["vocab"]))) < 1e-4
-          and power_written and refused and run2["done"] and not run2["error"] and all(torch.equal(first[k], second[k]) for k in first),
-          str(run2["error"] or ex_on[0].get("output_scale")))
+    check("learn_output_scale: config'inde anahtar olmayan eski kosu False ile strict yuklenir (konus); yeni kosu True ile "
+          "yuklenir; anahtarsiz (29 Eylul oncesi) config phi kapali, paylasimli FactUnits", loaded)
 
 
 def t_matmul_precision():
     """MATMUL_PRECISION: varsayilan "bf16"; CPU'da etkisiz (fp32 / tf32 / bf16 bit duzeyinde ayni egitim, float32 matmul
-    ayari degismez); gecersiz deger reddedilir; colab config'e yazar ve train_seq'e iletir; config'inde anahtar olmayan eski
-    kosu "fp32" ile surdurulur.  GPU yolu (autocast bf16, TF32) yerelde sinanamaz."""
+    ayari degismez); gecersiz deger reddedilir.  Kosucunun config'e yazmasi ve train_seq'e iletmesi: tests_simplestories.
+    GPU yolu (autocast bf16, TF32) yerelde sinanamaz."""
     import inspect
-    import json
-    import tempfile
-    import colab_kinship as C
-    data = D.build()
-    sids, smask = EK.sequences(data)
+    data = synthetic_data()
+    sids, smask = sequences(data)
     nv = len(data["vocab"])
     before = torch.get_float32_matmul_precision()
     runs = {p: TR.train_seq("shared", sids[:40], smask[:40], nv, steps=4, log_at=(), matmul_precision=p)[0]
@@ -1693,56 +1690,15 @@ def t_matmul_precision():
           TR.MATMUL_PRECISION == "bf16" and inspect.signature(TR.train_seq).parameters["matmul_precision"].default == "bf16"
           and same and torch.get_float32_matmul_precision() == before and refused)
 
-    s = D.build(step_answers=True)
-    seen, real = [], TR.train_seq
-    TR.train_seq = lambda *a, **k: (seen.append((k.get("matmul_precision"), k.get("muon_tangent"))), real(*a, **k))[1]
-    tmp = tempfile.mkdtemp()
-    kw = dict(steps=2, every=100, device="cpu", save_every=1, model_kw=dict(d=16, units=16))
-    old = dict(kw, matmul_precision="fp32", muon_tangent=False)    # 28 Eylul oncesi tarif
-    try:
-        run = C.start("TEST_MP", s, tmp + "/b", **kw)
-        run["thread"].join(600)
-        run = C.start("TEST_MP", s, tmp + "/f", **old)
-        run["thread"].join(600)
-        cfg_b, cfg = (json.load(open(tmp + "/%s/config.json" % k)) for k in ("b", "f"))
-        first = torch.load(tmp + "/f/model.pt")
-        for k in ("matmul_precision", "muon_tangent", "coherence_power"):   # 28 Eylul oncesi config gibi
-            del cfg[k]
-        json.dump(cfg, open(tmp + "/f/config.json", "w"), indent=1)
-        os.remove(tmp + "/f/checkpoint_t00002.pt")
-        refused = []
-        for bad in (kw, dict(old, matmul_precision="bf16"), dict(old, muon_tangent=True)):   # biri farkliysa ret
-            try:
-                C.start("TEST_MP2", s, tmp + "/f", resume=True, **bad)
-                refused.append(False)
-            except RuntimeError:
-                refused.append(True)
-        run2 = C.start("TEST_MP", s, tmp + "/f", resume=True, **old)
-        run2["thread"].join(600)
-        second = torch.load(tmp + "/f/model.pt")
-        log = open(tmp + "/f/log.txt", encoding="utf-8").read()
-    finally:
-        TR.train_seq = real
-    check("matmul_precision (ve muon_tangent, coherence_power), colab_kinship: config'e yazilir (varsayilan bf16 / True / 1,0) "
-          "ve train_seq'e iletilir; anahtarsiz eski config fp32 / False / 1,0 ile surdurulur (bit duzeyinde), biri farkliysa "
-          "reddedilir",
-          cfg_b["matmul_precision"] == "bf16" and cfg_b["muon_tangent"] is True and cfg_b["coherence_power"] == 1.0
-          and seen == [("bf16", True), ("fp32", False), ("fp32", False)] and all(refused) and run2["done"]
-          and not run2["error"] and "SURDURULDU adim 1'den" in log and all(torch.equal(first[k], second[k]) for k in first),
-          "%s %s %s" % (seen, refused, run2["error"] or ""))
-
 
 def t_loss_chunk():
     """LOSS_CHUNK: egitim kaybi sozluk parcalariyla, gradyan ileri hesapta.  float64'te parca 4096 / 7 / 1 ile kayip ve butun
     gradyanlar tek parca (0) yoluyla ayni; fp32 egitim egrisi yakin; surdurme bit duzeyinde; tam logits tablosu olusmaz
-    (tepe tensor ve geri yayilima saklanan tensor); colab config'e yazar, anahtarsiz eski kosu 0 ile surdurulur."""
+    (tepe tensor ve geri yayilima saklanan tensor); transformer'da yok.  Kosucunun config'e yazmasi: tests_simplestories."""
     import copy
-    import json
-    import tempfile
-    import colab_kinship as C
     from model_y import LOSS_CHUNK, BlockModel
-    data = D.build()
-    sids, smask = EK.sequences(data)
+    data = synthetic_data()
+    sids, smask = sequences(data)
     nv = len(data["vocab"])
     ids, mask = sids[:8, :24], smask[:8, :24]
 
@@ -1809,33 +1765,7 @@ def t_loss_chunk():
           peak[0] >= table and saved[0] >= table and peak[256] < table / 3 and saved[256] < table / 3,
           "tablo %d  tepe %d / %d  saklanan %d / %d" % (table, peak[0], peak[256], saved[0], saved[256]))
 
-    s = D.build(step_answers=True)
-    tmp = tempfile.mkdtemp()
-    kw = dict(steps=2, every=100, device="cpu", save_every=1, model_kw=dict(d=16, units=16))
-    run = C.start("TEST_LC", s, tmp + "/n", **dict(kw, steps=1))
-    run["thread"].join(600)
-    cfg_new = json.load(open(tmp + "/n/config.json"))
-    kw_old = dict(kw, model_kw=dict(d=16, units=16, loss_chunk=0, output_link=False))
-    run = C.start("TEST_LC", s, tmp + "/o", **kw_old)
-    run["thread"].join(600)
-    first = torch.load(tmp + "/o/model.pt")
-    cfg = json.load(open(tmp + "/o/config.json"))
-    del cfg["loss_chunk"]                                          # 28 Eylul oncesi config gibi
-    json.dump(cfg, open(tmp + "/o/config.json", "w"), indent=1)
-    os.remove(tmp + "/o/checkpoint_t00002.pt")
-    try:
-        C.start("TEST_LC2", s, tmp + "/o", resume=True, **kw)      # varsayilan 4096: ayar farkli
-        refused = False
-    except RuntimeError:
-        refused = True
-    run2 = C.start("TEST_LC", s, tmp + "/o", resume=True, **kw_old)
-    run2["thread"].join(600)
-    second = torch.load(tmp + "/o/model.pt")
-    check("loss_chunk, colab_kinship: config'e yazilir (varsayilan 4096); anahtarsiz eski config 0 ile surdurulur (bit "
-          "duzeyinde), 4096 ile reddedilir; transformer'da yok",
-          cfg_new["loss_chunk"] == 4096 and refused and run2["done"] and not run2["error"]
-          and all(torch.equal(first[k], second[k]) for k in first) and not hasattr(TR.TransformerModel(nv), "loss_chunk"),
-          str(run2["error"] or ""))
+    check("loss_chunk: transformer'da yok", not hasattr(TR.TransformerModel(nv), "loss_chunk"))
 
 
 def t_muon_tangent():
@@ -1844,8 +1774,8 @@ def t_muon_tangent():
     girdi agirlikla dik; egitim, surdurme."""
     import copy
     import torch.nn.functional as F
-    data = D.build()
-    sids, smask = EK.sequences(data)
+    data = synthetic_data()
+    sids, smask = sequences(data)
     nv = len(data["vocab"])
     ids, mask = sids[:40], smask[:40]
     rows, cols = ("W_value", "W_fact_in", "W_fact_up"), ("W_context", "W_fact_out")
@@ -1911,8 +1841,8 @@ def t_output_link():
     import copy
     import inspect
     from model_y import OUTPUT_LINK, BlockModel, masked_nll
-    data = D.build()
-    sids, smask = EK.sequences(data)
+    data = synthetic_data()
+    sids, smask = sequences(data)
     nv = len(data["vocab"])
     ids = sids[:6, :20]
 
@@ -2004,8 +1934,8 @@ def t_shared_facts():
     import copy
     import inspect
     from model_y import SHARED_FACTS, BlockModel
-    data = D.build()
-    sids, smask = EK.sequences(data)
+    data = synthetic_data()
+    sids, smask = sequences(data)
     nv = len(data["vocab"])
     kw = dict(d=16, units=16, layers=2, turns=4, heads=2, input_embedding=False, first_turn_facts=True)
     base, split = BlockModel(nv, shared_facts=True, **kw), BlockModel(nv, **kw)
@@ -2083,8 +2013,8 @@ def t_input_embedding():
     import torch.nn.functional as F
     import internals_y as I
     from model_y import AttentionCache, BlockModel
-    data = D.build()
-    sids, smask = EK.sequences(data)
+    data = synthetic_data()
+    sids, smask = sequences(data)
     nv = len(data["vocab"])
     ids = sids[:6, :20]
     K = 40
@@ -2228,8 +2158,8 @@ def t_internals():
     import torch.nn.functional as F
     import internals_y as I
     from model_y import BlockModel
-    data = D.build()
-    sids, smask = EK.sequences(data)
+    data = synthetic_data()
+    sids, smask = sequences(data)
     nv = len(data["vocab"])
     stories = [sids[i, :int(smask[i].sum())].tolist() for i in range(6)]
     others = [sids[i, :int(smask[i].sum())].tolist() for i in range(6, 12)]
