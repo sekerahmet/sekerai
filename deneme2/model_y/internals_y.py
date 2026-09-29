@@ -258,9 +258,9 @@ def _score_rows(z, y, valid):
     z = _work(z)
     nll = -torch.log_softmax(z, -1).gather(-1, y[..., None])[..., 0]
     hit = z.argmax(-1) == y
-    zero = torch.zeros((), dtype=z.dtype)
-    return (torch.where(valid, nll, zero).sum(-1).double().numpy(), (hit & valid).sum(-1).double().numpy(),
-            valid.sum(-1).double().numpy())
+    zero = torch.zeros((), dtype=z.dtype, device=z.device)
+    return (torch.where(valid, nll, zero).sum(-1).double().cpu().numpy(), (hit & valid).sum(-1).double().cpu().numpy(),
+            valid.sum(-1).double().cpu().numpy())
 
 
 def _paired(base, other):
@@ -310,6 +310,7 @@ def trace(model, ids, exclude_last=True, batch=16, keep_logits=False):
     count, check = 0, 0.0
     plan = _plan(model)
     for x, valid, idx in _batches(stories, batch, exclude_last):
+        x, valid = x.to(P.device), valid.to(P.device)             # modelin cihazinda (GPU'da da)
         inp, y = x[:, :-1], x[:, 1:]
         states = _states(model, inp, plan, P)
         check = max(check, float((model.logits(inp) - _scores(model, states[-1], P)).abs().max()))
@@ -333,11 +334,11 @@ def trace(model, ids, exclude_last=True, batch=16, keep_logits=False):
                 L = len(stories[i]) - 1
                 row = rows[i]
                 row["rank"][name] = rank[r, :L].tolist()
-                row["p"][name] = [round(float(v), 6) for v in lp[r, :L].exp()]
+                row["p"][name] = [round(v, 6) for v in lp[r, :L].exp().tolist()]   # tek senkron (GPU)
                 row["top"][name] = top[r, :L].tolist()
-                row["angle"][name] = [round(float(v), 3) for v in angle[r, :L]]
+                row["angle"][name] = [round(v, 3) for v in angle[r, :L].tolist()]
                 if keep_logits and j == len(names) - 1:
-                    logits[i] = z[r, :L].clone()
+                    logits[i] = z[r, :L].cpu().clone()
     summary = {}
     for n in names:
         a = sums[n]
@@ -376,10 +377,10 @@ def point_drift(model, counts=None, vocab=None, bands=None, examples=(5, 50, 500
     varsayilan _band_edges), hic gorulmeyen token'lar, corr(log(1 + sayim), aci).  vocab: ornek token'larin (siklik
     sirasi examples; eksi = sondan) en yakin 3 komsusu."""
     tok = model.tokens
-    P, PF = tok.points(), tok.fixed_points
+    P, PF = tok.points().cpu(), tok.fixed_points.cpu()          # model GPU'da olsa da: numpy ciktilari
     V = P.shape[0]
-    dev = deviation(model).double()
-    shift = tok.shift.norm(dim=-1).double()
+    dev = deviation(model).double().cpu()
+    shift = tok.shift.norm(dim=-1).double().cpu()
     nn_pl, nn_idx = _nearest(P)
     nn_pf, _ = _nearest(PF)
     med = lambda v: float(np.median(v.double().numpy()))              # cift sayida ortadaki ikisinin ortalamasi
@@ -429,20 +430,22 @@ def attention_stats(model, ids, exclude_last=True, batch=8):
     stories = _as_stories(ids)
     TN, H = model.turns, model.blocks[0].attention.heads
     keys = ("entropy", "entropy_norm", "last4", "self", "first", "distance", "max", "head_norm")
-    acc = {k: torch.zeros(TN, H, dtype=torch.float64) for k in keys}
-    overlap = torch.zeros(TN, H, H, dtype=torch.float64)
-    canon = torch.zeros(TN, dtype=torch.float64)
+    dv = model.tokens.fixed_points.device                     # sayaclar modelin cihazinda
+    acc = {k: torch.zeros(TN, H, dtype=torch.float64, device=dv) for k in keys}
+    overlap = torch.zeros(TN, H, H, dtype=torch.float64, device=dv)
+    canon = torch.zeros(TN, dtype=torch.float64, device=dv)
     nb = len(model.blocks)
     pairs = [(t, t2) for t in range(TN) for t2 in range(t + 1, TN) if t % nb == t2 % nb]
-    reuse = {p: torch.zeros(H, dtype=torch.float64) for p in pairs}
+    reuse = {p: torch.zeros(H, dtype=torch.float64, device=dv) for p in pairs}
     reused = {t for p in pairs for t in p}
     plan = _plan(model)
     P = model.tokens.points()
     n = n_norm = 0
     for x, valid, idx in _batches(stories, batch, exclude_last):
+        x, valid = x.to(dv), valid.to(dv)
         inp = x[:, :-1]
         T = inp.shape[1]
-        pos = torch.arange(T, dtype=torch.float64)
+        pos = torch.arange(T, dtype=torch.float64, device=dv)
         wq = valid.double()[:, None, :]                          # (B, 1, T): sorgu konumu sayiliyor mu
         wn = wq * (pos >= 1)
         back = (pos[:, None] - pos[None, :]).clamp(min=0)        # t - j
@@ -474,12 +477,12 @@ def attention_stats(model, ids, exclude_last=True, batch=8):
             reuse[(t1, t2)] += (torch.minimum(kept[t1], kept[t2]).sum(-1).double() * wq).sum((0, 2))
         n += int(valid.sum())
         n_norm += int(wn.sum())
-    res = {k: (v / (n_norm if k == "entropy_norm" else n)).numpy() for k, v in acc.items()}
-    overlap = overlap / n
+    res = {k: (v / (n_norm if k == "entropy_norm" else n)).cpu().numpy() for k, v in acc.items()}
+    overlap = overlap.cpu() / n
     overlap = overlap + overlap.transpose(1, 2) + torch.eye(H, dtype=torch.float64)
     return dict(turns=[_turn_label(model, t) for t in range(TN)], heads=H, n=n, **res,
-                canon=(canon / n).numpy() if model.canon else None, overlap=overlap.numpy(),
-                reuse=[dict(turns=(t1, t2), overlap=(reuse[(t1, t2)] / n).numpy()) for t1, t2 in pairs])
+                canon=(canon / n).cpu().numpy() if model.canon else None, overlap=overlap.numpy(),
+                reuse=[dict(turns=(t1, t2), overlap=(reuse[(t1, t2)] / n).cpu().numpy()) for t1, t2 in pairs])
 
 
 @torch.no_grad()
@@ -497,10 +500,11 @@ def unit_usage(model, ids, exclude_last=True, batch=16, sample=4096, seed=0):
     TN = model.turns
     facts = [_turn_facts(model, t) for t in range(TN)]
     U = facts[0].W_fact_out.shape[1]
-    e2 = torch.zeros(TN, U, dtype=torch.float64)
-    active = torch.zeros(TN, U, dtype=torch.float64)
-    zeros = torch.zeros(TN, dtype=torch.float64)
-    out2 = torch.zeros(TN, dtype=torch.float64)
+    dv = facts[0].W_fact_out.device                          # sayaclar modelin cihazinda
+    e2 = torch.zeros(TN, U, dtype=torch.float64, device=dv)
+    active = torch.zeros(TN, U, dtype=torch.float64, device=dv)
+    zeros = torch.zeros(TN, dtype=torch.float64, device=dv)
+    out2 = torch.zeros(TN, dtype=torch.float64, device=dv)
     total = sum(len(s) - 1 - int(exclude_last) for s in stories)
     pick = torch.sort(torch.randperm(total, generator=torch.Generator().manual_seed(seed))[:sample]).values
     samples = [[] for _ in range(TN)]
@@ -508,8 +512,9 @@ def unit_usage(model, ids, exclude_last=True, batch=16, sample=4096, seed=0):
     P = model.tokens.points()
     offset = n = 0
     for x, valid, idx in _batches(stories, batch, exclude_last):
+        x, valid = x.to(dv), valid.to(dv)
         M = int(valid.sum())
-        here = pick[(pick >= offset) & (pick < offset + M)] - offset
+        here = (pick[(pick >= offset) & (pick < offset + M)] - offset).to(dv)
 
         def on_units(t, u):
             uu = u[valid].double()                               # (M, U)
@@ -532,7 +537,7 @@ def unit_usage(model, ids, exclude_last=True, batch=16, sample=4096, seed=0):
         turns.append(dict(turn=_turn_label(model, t), energy=float(e2[t].sum() / n), out_rms=float((out2[t] / n) ** 0.5),
                           cover=[int((cum < q).sum()) + 1 for q in (0.5, 0.9, 0.99)], dead=int((share < 1e-5).sum()),
                           rare=int((active[t] / n < 0.01).sum()), zero=float(zeros[t] / n),
-                          corr_pairs=[int((C > 0.9).sum()), int((C > 0.7).sum())], sample=len(S), share=share.numpy()))
+                          corr_pairs=[int((C > 0.9).sum()), int((C > 0.7).sum())], sample=len(S), share=share.cpu().numpy()))
     teams = []
     for f in dict.fromkeys(facts):                                # sirali, tekrarsiz
         used = [t for t in range(TN) if facts[t] is f]
@@ -558,6 +563,8 @@ def _head_means(model, stories, exclude_last, batch):
     P = model.tokens.points()
     sums, n = {}, 0
     for x, valid, idx in _batches(stories, batch, exclude_last):
+        x, valid = x.to(P.device), valid.to(P.device)
+
         def on_heads(t, c):
             s = c.permute(0, 2, 1, 3)[valid].double().sum(0)     # (H, dh)
             sums[t] = s if t not in sums else sums[t] + s
@@ -582,6 +589,7 @@ def ablate(model, ids_or_stories, cases, reference=None, exclude_last=True, batc
     clean = _plan(model)
     cache = []
     for x, valid, idx in _batches(stories, batch, exclude_last):
+        x, valid = x.to(P.device), valid.to(P.device)
         hs = []
         h = _run(model, P[x[:, :-1]], clean, dict(input=lambda t, v: hs.append(v)))
         cache.append((x, valid, idx, hs + [h]))
@@ -1552,7 +1560,7 @@ def _main(argv=None):
     ap.add_argument("--lens-lr", type=float, default=1e-3, help="tuned_lens: Adam lr (dogrusal iner)")
     ap.add_argument("--profile-steps", type=int, default=5, help="profile_step: olculen adim (once bir tur isinma)")
     ap.add_argument("--width", type=int, help="profile_step: hikayeler bu token'da kesilir (kucuk ayar)")
-    ap.add_argument("--device", default="cpu", help="profile_step, tuned_lens: cpu | cuda")
+    ap.add_argument("--device", default="cpu", help="cpu | cuda: model bu cihazda (butun olcumler; point_drift CPU'da)")
     ap.add_argument("--no-real", action="store_true", help="profile_step: train_seq'in kendisini kosma")
     ap.add_argument("--ops", type=int, default=0, help="profile_step: torch.profiler tablosunda islem sayisi (0: yok)")
     ap.add_argument("--set", nargs="+", help="profile_step: ayar degistir, anahtar=deger (ornek shared_facts=false)")
@@ -1650,7 +1658,7 @@ def _main(argv=None):
         spec = args.checkpoints
         steps = (list(packs) if spec == "all" else [s for s in packs if s % int(spec[6:]) == 0] if spec.startswith("every:")
                  else [int(s) for s in spec.split(",")])
-        results = over_checkpoints(run_dir, measure, steps, args.weights, log=say)
+        results = over_checkpoints(run_dir, lambda m: measure(m.to(args.device)), steps, args.weights, log=say)
         source, tag = "yedekler %s" % ",".join(str(s) for s in steps), "checkpoints"
         table = [summarize(r["result"]) for r in results]
         lines += ["## %d yedek boyunca ozet (%s)" % (len(results), args.weights),
@@ -1662,8 +1670,7 @@ def _main(argv=None):
     else:
         step = None if args.checkpoint is None else (max(packs) if args.checkpoint == "last" else int(args.checkpoint))
         model = _load_model(run_dir, args.weights, step, config)
-        if args.measure == "tuned_lens":                   # cihazdan bagimsiz yazildi; CPU'da ~1 saat
-            model = model.to(args.device)
+        model = model.to(args.device)                         # GPU'da tuned_lens ~25 sn (CPU'da ~1 saat)
         source = ("checkpoint_t%06d.pt" % step) if step is not None else (
             "model_weight_ema.pt" if args.weights == "ema" else "model.pt")
         tag = "" if step is None else "t%06d" % step
