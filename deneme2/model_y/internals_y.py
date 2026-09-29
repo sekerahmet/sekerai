@@ -1552,7 +1552,7 @@ def _main(argv=None):
     ap.add_argument("--lens-lr", type=float, default=1e-3, help="tuned_lens: Adam lr (dogrusal iner)")
     ap.add_argument("--profile-steps", type=int, default=5, help="profile_step: olculen adim (once bir tur isinma)")
     ap.add_argument("--width", type=int, help="profile_step: hikayeler bu token'da kesilir (kucuk ayar)")
-    ap.add_argument("--device", default="cpu", help="profile_step: cpu | cuda")
+    ap.add_argument("--device", default="cpu", help="profile_step, tuned_lens: cpu | cuda")
     ap.add_argument("--no-real", action="store_true", help="profile_step: train_seq'in kendisini kosma")
     ap.add_argument("--ops", type=int, default=0, help="profile_step: torch.profiler tablosunda islem sayisi (0: yok)")
     ap.add_argument("--set", nargs="+", help="profile_step: ayar degistir, anahtar=deger (ornek shared_facts=false)")
@@ -1662,6 +1662,8 @@ def _main(argv=None):
     else:
         step = None if args.checkpoint is None else (max(packs) if args.checkpoint == "last" else int(args.checkpoint))
         model = _load_model(run_dir, args.weights, step, config)
+        if args.measure == "tuned_lens":                   # cihazdan bagimsiz yazildi; CPU'da ~1 saat
+            model = model.to(args.device)
         source = ("checkpoint_t%06d.pt" % step) if step is not None else (
             "model_weight_ema.pt" if args.weights == "ema" else "model.pt")
         tag = "" if step is None else "t%06d" % step
