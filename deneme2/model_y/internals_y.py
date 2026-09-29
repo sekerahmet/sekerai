@@ -12,6 +12,8 @@ ve mudahale.
                       olcer; "o parca olmadan egitilseydi" DEGIL
     tuned_lens        her durumda ogrenilen afin cevirici + modelin cikis basligi (Belrose 2023): tahmin nerede olusuyor;
                       logit lens ile yan yana (nll, acc, son dagilima KL, sira).  Cevirici ayri hikayelerde ogrenilir
+    zero_param_probe  eksik parametre sondasi: ATTENTION_BIAS 0'dan eklenir (model ayni hesaplar), model donuk; gradyanin
+                      tutarliligi ve yalniz o vektor ogrenilince ayri hikayelerde Δnll
     profile_step      egitim adiminin parca parca suresi ve bellegi (ileri, kayip, geri, Muon / Adam, EMA, coherence ...);
                       model train_seq'in kurulumundan, egitilmis agirlik kullanilmaz.  Gercek olcum GPU'da
     over_checkpoints  ayni olcum kosunun checkpoint_tNNNNNN.pt yedekleri boyunca (EMA optimizer durumundan kurulur)
@@ -24,6 +26,7 @@ Cikti <kosu klasoru>/internals/<olcum>_<agirlik>[_tNNNNNN]_<zaman>.txt + .json. 
 """
 import argparse
 import contextlib
+import copy
 import inspect
 import json
 import math
@@ -154,6 +157,8 @@ def _run(model, h, plan, taps=None, start=0):
             x = x + mix
         else:
             assert t not in plan["canon_mean"], "tur %d: Canon yok" % (t + 1)
+        if getattr(model, "attention_bias", None) is not None:   # ATTENTION_BIAS: bu turun kaymasi, Canon'dan sonra
+            x = x + model.attention_bias[t]
         added = None
         if t not in plan["skip_attention"]:
             H = at.heads
@@ -765,6 +770,97 @@ def tuned_lens(model, ids, fit_ids, steps=200, lr=1e-3, batch=8, exclude_last=Tr
                 translators=dict(W=W.detach(), b=b.detach()))
 
 
+def zero_param_probe(model, ids, fit_ids, probe_batches=16, steps=200, lr=1e-2, batch=8, exclude_last=True, seed=0,
+                     fit_source=None, log=None):
+    """Eksik parametre sondasi: modelin kopyasina ATTENTION_BIAS (tur basina d sayi) 0'dan eklenir -- kopya ilk hesapta
+    modelle ayni.  Modelin agirliklari donuk, yalniz eklenen vektor.
+      gradyan  fit_ids'in probe_batches batch'inde dL/db (b = 0): ortalamanin boyu (tur basina), SNR = |ortalama| /
+               ortalamanin standart hatasi (saf gurultude ~1), iki yarinin ortalama gradyanlari arasi kosinus.
+      uydurma  yalniz b ogrenilir fit_ids'de (Adam, lr dogrusal olarak 0'a, adim basina batch hikaye); ids'de (ayri
+               hikayeler) b = 0'a karsi Δnll, Δacc hikaye duzeyinde eslesmis.  Birlikte egitimle gelen kazanci GOREMEZ.
+      yon      ogrenilen b_t ile Canon ekinin ortalamasi (fit_ids'de, b = 0) arasi kosinus ve boy orani.
+    -> dict(turns, d, check, grad {norm, per_turn, snr, half_cos, batches, targets}, fit {source, stories, steps, batch,
+    lr, loss_first, loss_last}, eval {stories, n, base, fitted, d_nll, se_nll, d_acc, se_acc}, fitted {norm, cos_canon,
+    ratio_canon}, b (turns, d))."""
+    assert getattr(model, "attention_bias", None) is None, "model zaten ATTENTION_BIAS'li: sonda eksik parametre icin"
+    stories, fit = _as_stories(ids), _as_stories(fit_ids)
+    m = copy.deepcopy(model).requires_grad_(False)
+    with torch.no_grad():
+        P0 = m.tokens.points()
+    dev, d = P0.device, P0.shape[1]
+    m.attention_bias = torch.nn.Parameter(torch.zeros(m.turns, d, dtype=P0.dtype, device=dev))
+    b = m.attention_bias
+    fit_batches = [(x.to(dev), v.to(dev)) for x, v, _ in _batches(fit, batch, exclude_last)]
+    assert len(fit_batches) >= probe_batches >= 2, "fit_ids en az probe_batches (%d) batch olmali" % probe_batches
+
+    def loss_of(x, valid):
+        z = _work(m.logits(x[:, :-1]))
+        return F.cross_entropy(z[valid], x[:, 1:][valid])
+
+    with torch.no_grad():                                 # b = 0: kopya modelle ayni
+        x0 = fit_batches[0][0][:, :-1]
+        check = float((m.logits(x0) - model.logits(x0)).abs().max())
+    rng = np.random.default_rng(seed)
+    grads, targets = [], 0
+    for i in rng.permutation(len(fit_batches))[:probe_batches]:
+        x, valid = fit_batches[i]
+        grads.append(torch.autograd.grad(loss_of(x, valid), b)[0].double().flatten().cpu())
+        targets += int(valid.sum())
+    G = torch.stack(grads)
+    K, mean = G.shape[0], G.mean(0)
+    se = float(((G - mean) ** 2).sum() / (K * (K - 1))) ** 0.5
+    half = F.cosine_similarity(G[:K // 2].mean(0), G[K // 2:].mean(0), dim=0)
+    grad = dict(norm=float(mean.norm()), per_turn=mean.view(m.turns, d).norm(dim=-1).tolist(), snr=float(mean.norm()) / se,
+                half_cos=float(half), batches=K, targets=targets)
+
+    opt = torch.optim.Adam([b], lr=lr)
+    order, curve = [], []
+    for step in range(steps):
+        if not order:
+            order = list(rng.permutation(len(fit_batches)))
+        loss = loss_of(*fit_batches[order.pop()])
+        opt.zero_grad()
+        loss.backward()
+        for g in opt.param_groups:
+            g["lr"] = lr * (1 - step / steps)
+        opt.step()
+        curve.append(float(loss.detach()))
+        if log and (step + 1) % max(steps // 5, 1) == 0:
+            log("zero_param_probe adim %d/%d: egitim kaybi %.4f" % (step + 1, steps, curve[-1]))
+    epoch = min(len(fit_batches), max(steps, 1))
+
+    def collect():
+        S = len(stories)
+        out = dict(nll_sum=np.zeros(S), hit_sum=np.zeros(S), count=np.zeros(S))
+        with torch.no_grad():
+            for x, valid, idx in _batches(stories, batch, exclude_last):
+                x, valid = x.to(dev), valid.to(dev)
+                out["nll_sum"][idx], out["hit_sum"][idx], out["count"][idx] = _score_rows(m.logits(x[:, :-1]), x[:, 1:],
+                                                                                         valid)
+        N = out["count"].sum()
+        return dict(out, nll=float(out["nll_sum"].sum() / N), acc=float(out["hit_sum"].sum() / N))
+
+    fitted = collect()
+    learned = b.detach().clone()
+    with torch.no_grad():
+        b.zero_()
+    base = collect()
+    fitted_info = dict(norm=learned.norm(dim=-1).tolist())
+    if m.canon:
+        with torch.no_grad():
+            cm = _canon_means(m, fit, exclude_last, batch)
+        E = torch.stack([cm[t] for t in range(m.turns)]).to(learned)
+        fitted_info.update(cos_canon=F.cosine_similarity(learned, E, dim=-1).tolist(),
+                           ratio_canon=(learned.norm(dim=-1) / E.norm(dim=-1)).tolist())
+    return dict(turns=m.turns, d=d, check=check, grad=grad,
+                fit=dict(source=fit_source, stories=len(fit), steps=steps, batch=batch, lr=lr,
+                         loss_first=float(np.mean(curve[:epoch])) if curve else None,
+                         loss_last=float(np.mean(curve[-epoch:])) if curve else None),
+                eval=dict(stories=len(stories), n=int(base["count"].sum()), base=dict(nll=base["nll"], acc=base["acc"]),
+                          fitted=dict(nll=fitted["nll"], acc=fitted["acc"]), **_paired(base, fitted)),
+                fitted=fitted_info, b=learned.cpu())
+
+
 # ---- kosu klasoru: ayarlar, agirliklar, yedekler
 
 def _config(run_dir):
@@ -783,9 +879,9 @@ def _checkpoints(run_dir):
 
 
 def _model_kw(config):
-    """config'teki model_kw; output_link / shared_facts yazilmamis eski config'lerde yoktu (colab_simplestories'in
-    surdurmesi gibi)."""
-    return dict(dict(output_link=False, shared_facts=True), **config.get("model_kw", {}))
+    """config'teki model_kw; output_link / shared_facts / attention_bias yazilmamis eski config'lerde yoktu
+    (colab_simplestories'in surdurmesi gibi)."""
+    return dict(dict(output_link=False, shared_facts=True, attention_bias=False), **config.get("model_kw", {}))
 
 
 def _build(config):
@@ -1492,6 +1588,27 @@ def _write(out_dir, name, lines, payload):
     return path
 
 
+def _text_zero_param_probe(res):
+    g, f, e, fi = res["grad"], res["fit"], res["eval"], res["fitted"]
+    per = lambda v, n="%.3g": " / ".join(n % x for x in v)
+    L = ["## zero_param_probe: ATTENTION_BIAS (tur basina %d sayi) 0'dan eklendi, model donuk (b = 0'da kopya - model en buyuk "
+         "fark %.1e).  Birlikte egitimle gelen kazanci GOREMEZ; o, egitim kosusuyla olculur." % (res["d"], res["check"]),
+         "gradyan (b = 0): %d batch, %d hedef; |ortalama| %.3e, SNR %.1f (saf gurultude ~1), iki yari kosinusu %.3f" % (
+             g["batches"], g["targets"], g["norm"], g["snr"], g["half_cos"]),
+         "  tur basina |ortalama gradyan|: " + per(g["per_turn"]),
+         "donuk uydurma: %s, %d hikaye; %d adim x %d hikaye, Adam lr %g dogrusal inis; egitim kaybi ilk / son epok %.4f / %.4f" % (
+             f["source"], f["stories"], f["steps"], f["batch"], f["lr"], f["loss_first"] or float("nan"),
+             f["loss_last"] or float("nan")),
+         "degerlendirme (ayri %d hikaye, %d hedef): b = 0 nll %.4f acc %.4f | ogrenilen b nll %.4f acc %.4f | Δnll %+.4f ± %.4f, "
+         "Δacc %+.2f ± %.2f puan" % (e["stories"], e["n"], e["base"]["nll"], e["base"]["acc"], e["fitted"]["nll"],
+                                  e["fitted"]["acc"], e["d_nll"], e["se_nll"], 100 * e["d_acc"], 100 * e["se_acc"]),
+         "ogrenilen b, tur basina: |b| " + per(fi["norm"])]
+    if "cos_canon" in fi:
+        L.append("  cos(b, Canon ekinin ortalamasi) " + per(fi["cos_canon"], "%+.2f") + "  |  |b| / |Canon ekinin ortalamasi| "
+                 + per(fi["ratio_canon"], "%.2f"))
+    return L
+
+
 def _text_ablate(res):
     b = res["base"]
     L = ["## ablate.  " + res["note"],
@@ -1523,6 +1640,8 @@ def _summary(measure, res):
         return out
     if measure == "tuned_lens":
         return {"%s %s nll" % (n, k): res["summary"][n][k]["nll"] for n in res["states"] for k in ("logit", "tuned")}
+    if measure == "zero_param_probe":
+        return {"gradyan SNR": res["grad"]["snr"], "yari kosinusu": res["grad"]["half_cos"], "uydurma dnll": res["eval"]["d_nll"]}
     return {r["case"].split()[0]: r["d_nll"] for r in res["rows"]}
 
 
@@ -1565,8 +1684,10 @@ def _jsonable(v):
     return v
 
 
-_MEASURES = ("trace", "point_drift", "attention_stats", "unit_usage", "ablate", "tuned_lens", "profile_step")
-_DEFAULT_STORIES = dict(trace=4, point_drift=0, attention_stats=128, unit_usage=128, ablate=128, tuned_lens=64)
+_MEASURES = ("trace", "point_drift", "attention_stats", "unit_usage", "ablate", "tuned_lens", "zero_param_probe",
+             "profile_step")
+_DEFAULT_STORIES = dict(trace=4, point_drift=0, attention_stats=128, unit_usage=128, ablate=128, tuned_lens=64,
+                        zero_param_probe=128)
 
 
 def _main(argv=None):
@@ -1589,9 +1710,9 @@ def _main(argv=None):
     ap.add_argument("--batch", type=int, help="batch (varsayilan 16; attention_stats, tuned_lens 8; profile_step config'in "
                                               "batch_size'i)")
     ap.add_argument("--data", help="veri koku (varsayilan: tag'e gore %s)" % _SIMPLESTORIES_ROOT)
-    ap.add_argument("--fit-stories", type=int, default=256, help="tuned_lens: cevirici hikaye sayisi")
-    ap.add_argument("--fit-offset", type=int, default=10000, help="tuned_lens: cevirici hikayeleri sinav permutasyonunda "
-                                                                  "buradan (degerlendirmeyle ortusmez)")
+    ap.add_argument("--fit-stories", type=int, default=256, help="tuned_lens, zero_param_probe: ogrenme hikaye sayisi")
+    ap.add_argument("--fit-offset", type=int, default=10000, help="tuned_lens, zero_param_probe: ogrenme hikayeleri sinav "
+                                                                  "permutasyonunda buradan (degerlendirmeyle ortusmez)")
     ap.add_argument("--lens-steps", type=int, default=200, help="tuned_lens: cevirici adimi (0: birim = logit lens)")
     ap.add_argument("--lens-lr", type=float, default=1e-3, help="tuned_lens: Adam lr (dogrusal iner)")
     ap.add_argument("--profile-steps", type=int, default=5, help="profile_step: olculen adim (once bir tur isinma)")
@@ -1622,7 +1743,7 @@ def _main(argv=None):
     else:
         assert not args.set, "--set yalniz profile_step"
         count = _DEFAULT_STORIES[args.measure] if args.stories is None else args.stories
-        batch = args.batch or (8 if args.measure in ("attention_stats", "tuned_lens") else 16)
+        batch = args.batch or (8 if args.measure in ("attention_stats", "tuned_lens", "zero_param_probe") else 16)
     if args.measure == "trace" and args.text and args.stories is None:
         count = 0
     rows, stories = data["stories"](count, args.offset) if count else (np.array([], dtype=np.int64), [])
@@ -1668,6 +1789,14 @@ def _main(argv=None):
                                                          fit_source=where, log=say).items() if k != "translators"}
         text = lambda res: _text_tuned_lens(res, vocab, args.positions)
         summarize = lambda res: _summary("tuned_lens", res)
+    elif args.measure == "zero_param_probe":
+        fit_end = args.fit_offset + args.fit_stories
+        assert fit_end <= args.offset or args.fit_offset >= args.offset + count, "ogrenme ve degerlendirme hikayeleri ortusuyor"
+        fit = data["stories"](args.fit_stories, args.fit_offset)[1]
+        where = "sinav permutasyonu %d..%d (valid; degerlendirmeden ayri)" % (args.fit_offset, fit_end - 1)
+        measure = lambda m: {k: v for k, v in zero_param_probe(m, stories, fit, batch=batch, fit_source=where,
+                                                               log=say).items() if k != "b"}
+        text, summarize = _text_zero_param_probe, lambda res: _summary("zero_param_probe", res)
     elif args.measure == "profile_step":
         assert not args.checkpoints and args.checkpoint is None, "profile_step agirlik kullanmaz (--checkpoint(s) yok)"
         cut = sorted((s[:args.width] if args.width else s for s in stories), key=len)   # benzer boylar bir batch'te

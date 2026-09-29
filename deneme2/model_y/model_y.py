@@ -82,6 +82,9 @@ SPHERE_WEIGHTS = True       # W_query, W_key, W_fact_in, W_value satirlari ve W_
 CANON = True         # Canon-A (Allen-Zhu 2025): attention girdisi x_t + sum_k w_k * x_(t-k), k = 0..3, w 0'dan.  Varsayilan:
                      # Model X2 = X1 + Canon (kullanici, 28 Eylul: "evet model X2 hayırlı olsun. Canon=True."; TinyStories
                      # "X1+C çok daha iyi görünüyor açık ara", akrabalik 191,0 / X1 188,3 ve cokussuz)
+ATTENTION_BIAS = False   # True: her turda attention girdisine (Canon'dan sonra) ogrenilen vektor attention_bias[tur], 0'dan
+                         # (kullanici, 29 Eylul: "çok mantıklı geliyor ... maliyeti de çok az"; adlar onayli).  Model bias'siz;
+                         # Canon'un sabit kismi bu kaymayi dolayli uretiyordu.  False: 29 Eylul'e kadarki model
 HEADS = 4            # attention head sayisi (kullanici, 28 Eylul: "Evet, varsayılan 4"; TinyStories 10k ppl 7,22 / tek head
                      # 7,63).  H > 1: d H'ye bolunur, W_value (d x d, birim baslar) her head'in tasiyacagini secer;
                      # 1 = tek head, V yok (28 Eylul'e kadarki model)
@@ -383,9 +386,10 @@ class Block(torch.nn.Module):
             self.norm_attention = torch.nn.LayerNorm(d)
             self.norm_facts = torch.nn.LayerNorm(d)
 
-    def forward(self, h, cache=None, alpha_attention=None, alpha_facts=None, turn_facts=None):
+    def forward(self, h, cache=None, alpha_attention=None, alpha_facts=None, turn_facts=None, attention_bias=None):
         """alpha_attention, alpha_facts (d,): normalized_update'te bu turun alpha'lari.  turn_facts: bu turun FactUnits'i
-        (SHARED_FACTS=False'ta ikinci gelis); None: Block'un kendi FactUnits'i."""
+        (SHARED_FACTS=False'ta ikinci gelis); None: Block'un kendi FactUnits'i.  attention_bias (d,): bu turun ATTENTION_BIAS
+        vektoru, attention girdisine Canon'dan sonra eklenir; None: yok."""
         at = self.attention
         unit = lambda v: F.normalize(v, dim=-1)
         norm_a, norm_f = (self.norm_attention, self.norm_facts) if self.layer_norm else (unit, unit)
@@ -394,6 +398,8 @@ class Block(torch.nn.Module):
             T = x.shape[-2]
             full = F.pad(x, (0, 0, 3, 0)) if cache is None else cache.canon_cache(x)   # onceki 3 konum + x
             x = x + sum(self.canon_weights[k] * full[..., 3 - k:3 - k + T, :] for k in range(4))
+        if attention_bias is not None:                       # ATTENTION_BIAS: her konuma ayni ogrenilen kayma
+            x = x + attention_bias
         added = at(x, cache=cache) @ at.W_context.T                                # W_context · c_t
         # sphere_weights: W_fact_in satirlari birim, h birim -> girdi kosinus (tipik ±1/√d); √d ile esik O(1) olcekte
         units = self.facts if turn_facts is None else turn_facts
@@ -418,7 +424,8 @@ class BlockModel(torch.nn.Module):
                  stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=ROPE,
                  normalized_update=NORMALIZED_UPDATE, sphere_weights=SPHERE_WEIGHTS, canon=CANON, heads=HEADS,
                  fact_activation=FACT_ACTIVATION, learn_output_scale=LEARN_OUTPUT_SCALE, loss_chunk=LOSS_CHUNK,
-                 last_facts_alpha_init=LAST_FACTS_ALPHA_INIT, output_link=OUTPUT_LINK, shared_facts=SHARED_FACTS):
+                 last_facts_alpha_init=LAST_FACTS_ALPHA_INIT, output_link=OUTPUT_LINK, shared_facts=SHARED_FACTS,
+                 attention_bias=ATTENTION_BIAS):
         super().__init__()
         assert not normalized_update or (stream_norm and not layer_norm), "normalized_update akis normuyla (L2) calisir"
         assert not (sphere_weights and layer_norm), "sphere_weights LayerNorm'la denenmedi: FactUnits girdisi sqrt(d) kat buyuk"
@@ -452,6 +459,8 @@ class BlockModel(torch.nn.Module):
             self.alpha_facts = torch.nn.Parameter(torch.full((turns, d), ALPHA_INIT))
             with torch.no_grad():                         # son tur: model girdisini tekrar etmesin (LAST_FACTS_ALPHA_INIT)
                 self.alpha_facts[-1] = last_facts_alpha_init
+        if attention_bias:                                # tur basina (tur, d), 0'dan: baslangicta bias'siz modelle ayni
+            self.attention_bias = torch.nn.Parameter(torch.zeros(turns, d))
         if sphere_weights:
             self.normalize_weights()
         if layer_norm:                                    # cikista: keskinligi kazanc ogrenir, sabit scale kullanilmaz
@@ -480,6 +489,8 @@ class BlockModel(torch.nn.Module):
                       if self.normalized_update else {})
             if not self.shared_facts and i >= self.layers:
                 alphas["turn_facts"] = self.extra_facts[i - self.layers]
+            if getattr(self, "attention_bias", None) is not None:
+                alphas["attention_bias"] = self.attention_bias[i]
             h = block(h, None if caches is None else caches[i], **alphas)
             out.append(h)
         return out

@@ -2043,9 +2043,84 @@ def t_shared_facts():
           "kayip %.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"]))
 
 
+def t_attention_bias():
+    """ATTENTION_BIAS: b = 0 iken bias'siz modelle bit duzeyinde ayni; attention girdisi = h + Canon + b_tur (ayni Block'un
+    iki turunda ayri b); egitimde kayip iner, attention_bias 0'dan ayrilir ve Adam'da; surdurme bit duzeyinde; onbellekli
+    uretim tam hesapla ayni; compile'da graph break yok; anahtarsiz (29 Eylul oncesi) config bias'siz acilir."""
+    import copy
+    import torch.nn.functional as F
+    import internals_y as I
+    from model_y import BlockModel
+    data = D.build()
+    sids, smask = EK.sequences(data)
+    nv = len(data["vocab"])
+    ids = sids[:6, :20]
+
+    plain, zero = BlockModel(nv), BlockModel(nv, attention_bias=True)
+    with torch.no_grad():
+        same = torch.equal(plain.logits(ids), zero.logits(ids))
+    check("attention_bias: b = 0 iken bias'siz modelle bit duzeyinde ayni skor; attention_bias (turns, d) = 0",
+          same and tuple(zero.attention_bias.shape) == (zero.turns, 64) and not zero.attention_bias.any())
+
+    g = torch.Generator().manual_seed(61)
+    m = BlockModel(nv, attention_bias=True)
+    with torch.no_grad():
+        for b_ in m.blocks:
+            b_.canon_weights.copy_(0.3 * torch.randn(4, 64, generator=g))
+        m.attention_bias.copy_(0.2 * torch.randn(m.turns, 64, generator=g))
+    seen = []
+    hook = m.blocks[0].attention.register_forward_pre_hook(lambda mod, args, kwargs: seen.append(args[0].detach()),
+                                                            with_kwargs=True)
+    with torch.no_grad():
+        hid = m.hidden(ids)
+    hook.remove()
+
+    def canon_in(blk, x):
+        T = x.shape[1]
+        full = F.pad(x, (0, 0, 3, 0))
+        return x + sum(blk.canon_weights[k] * full[:, 3 - k:3 - k + T] for k in range(4))
+    with torch.no_grad():
+        err = max(float((seen[0] - (canon_in(m.blocks[0], hid[0]) + m.attention_bias[0])).abs().max()),
+                  float((seen[1] - (canon_in(m.blocks[0], hid[2]) + m.attention_bias[2])).abs().max()))
+    check("attention_bias: attention girdisi = h + Canon + b_tur (tur 1 ve 3 ayni Block, ayri b)",
+          len(seen) == 2 and err < 1e-6, "fark %.1e" % err)
+
+    kw = dict(attention_bias=True)
+    opts = []
+    grab = lambda step, model, opt: opts.append(opt)
+    trained, curve = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20), save_every=1, save=grab,
+                                  model_kw=kw)
+    names = {id(p_): k for k, p_ in trained.named_parameters()}
+    in_adam = [names[id(p_)] for g_ in opts[-1].param_groups if not g_["use_muon"] for p_ in g_["params"]]
+    packs = {}
+    keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
+                                                                   optimizer=copy.deepcopy(opt.state_dict())))
+    full, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), save_every=2, save=keep, model_kw=kw)
+    res, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs[4], model_kw=kw)
+    qs = [[1] + sids[i, 1:1 + k].tolist() for i, k in enumerate((1, 2, 5, 8, 12))]
+    cached_new = TR.generate(trained, qs, 6)
+    scores, _ = cached_scores(trained, qs, cached_new)
+    err_c = max(float((scores[i] - trained.logits(torch.tensor([q + cached_new[i]])).detach()[0, len(q) - 1:]).abs().max())
+                for i, q in enumerate(qs))
+    check("attention_bias: egitimde kayip iner, attention_bias 0'dan ayrilir ve Adam'da; surdurme bit duzeyinde; onbellekli "
+          "uretim tam hesapla ayni token'lar ve skorlar",
+          curve[-1]["nll"] < curve[0]["nll"] and bool(trained.attention_bias.abs().max() > 0) and "attention_bias" in in_adam
+          and all(torch.equal(a, b) for a, b in zip(full.state_dict().values(), res.state_dict().values()))
+          and cached_new == TR.generate(trained, qs, 6, cached=False) and err_c < 1e-4,
+          "%.3f -> %.3f  |b| %.4f  skor farki %.1e" % (curve[0]["nll"], curve[-1]["nll"],
+                                                     float(trained.attention_bias.abs().max()), err_c))
+
+    torch._dynamo.reset()
+    ex = torch._dynamo.explain(BlockModel(nv, d=32, units=48, loss_chunk=7, attention_bias=True).loss)(sids[:4], smask[:4])
+    torch._dynamo.reset()
+    old = I._model_kw(dict(model_kw=dict(d=16, turns=2)))
+    check("attention_bias: kayip compile'da tek grafik (graph break yok); anahtarsiz config (29 Eylul oncesi) bias'siz",
+          ex.graph_break_count == 0 and old["attention_bias"] is False, "graph break %d" % ex.graph_break_count)
+
+
 def t_internals():
-    """internals_y (kalici analiz araci): elle ileri hesap = model.logits (float64; 8 model: varsayilan, shared_facts=False,
-    output_link=False, tek head + relu, ayri blok + reglu, normalized_update kapali, akis normsuz, LayerNorm; SDPA ve acik
+    """internals_y (kalici analiz araci): elle ileri hesap = model.logits (float64; 9 model: varsayilan, shared_facts=False,
+    output_link=False, attention_bias, tek head + relu, ayri blok + reglu, normalized_update kapali, akis normsuz, LayerNorm; SDPA ve acik
     softmax yolu, sagdan dolgulu batch); trace'in durumlari, acilari ve lens'i modelin kendi hidden'i ve Block'uyla;
     point_drift, attention_stats, unit_usage bagimsiz hesapla; ablate: hicbir sey = taban (Δ 0), alpha'yi ayni degerle
     vermek = taban, kapatmalar agirligi degistirilmis modelin logits'iyle ayni (Δnll, Δacc, se), head ortalamasi elle;
@@ -2076,7 +2151,8 @@ def t_internals():
         return m.eval()
 
     variants = [("varsayilan", {}), ("shared_facts=False", dict(shared_facts=False)),
-                ("output_link=False", dict(output_link=False)), ("tek head + relu", dict(heads=1, fact_activation="relu")),
+                ("output_link=False", dict(output_link=False)), ("attention_bias", dict(attention_bias=True)),
+                ("tek head + relu", dict(heads=1, fact_activation="relu")),
                 ("ayri blok + reglu", dict(shared=False, fact_activation="reglu")),
                 ("normalized_update kapali", dict(normalized_update=False, sphere_weights=False)),
                 ("akis normsuz", dict(stream_norm=False, normalized_update=False, sphere_weights=False)),
@@ -2091,7 +2167,7 @@ def t_internals():
             errs[name] = max([float((a - b).abs().max()) for a, b in zip(tr["logits"] + explicit, ref + ref)]
                              + [tr["check_logits"]])
     worst = max(errs, key=errs.get)
-    check("internals: elle ileri hesap = model.logits (float64; 8 model ayari, dolgulu batch, SDPA ve acik softmax)",
+    check("internals: elle ileri hesap = model.logits (float64; 9 model ayari, dolgulu batch, SDPA ve acik softmax)",
           max(errs.values()) < 1e-10, "en buyuk %.1e (%s)" % (errs[worst], worst))
 
     m = perturbed()
@@ -2334,6 +2410,29 @@ def t_internals():
               np.mean([tl["summary"][n]["logit"]["kl"] for n in inner]), np.mean([tl["summary"][n]["tuned"]["kl"] for n in inner]),
               last, worse))
 
+    before = {k: v.clone() for k, v in m.state_dict().items()}
+    pr = I.zero_param_probe(m, stories, fit[:16], probe_batches=2, steps=60, lr=1e-2, batch=8)
+    mb = BlockModel(nv, **dict(base_kw, attention_bias=True)).double().eval()
+    missing, unexpected = mb.load_state_dict(m.state_dict(), strict=False)
+    gs = []
+    for x, valid, _ in I._batches(fit[:16], 8, True):
+        mb.zero_grad()
+        F.cross_entropy(mb.logits(x[:, :-1])[valid], x[:, 1:][valid]).backward()
+        gs.append(mb.attention_bias.grad.clone())
+    gm = (gs[0] + gs[1]) / 2
+    g_err = max(abs(pr["grad"]["norm"] - float(gm.norm())),
+                max(abs(a - float(b)) for a, b in zip(pr["grad"]["per_turn"], gm.norm(dim=-1))),
+                abs(pr["grad"]["half_cos"] - float(F.cosine_similarity(gs[0].flatten(), gs[1].flatten(), dim=0))))
+    base_err = abs(pr["eval"]["base"]["nll"] - tr["summary"][tr["states"][-1]]["nll"])
+    untouched = (all(torch.equal(before[k], v) for k, v in m.state_dict().items()) and getattr(m, "attention_bias", None) is None
+                 and [p_.requires_grad for p_ in m.parameters()] == flags and all(p_.grad is None for p_ in m.parameters()))
+    check("internals zero_param_probe: b = 0'da kopya = model; gradyan (ortalama, tur basina, iki yari kosinusu) "
+          "attention_bias'li modelin autograd'iyla; taban nll trace'inki; uydurmada kayip iner; model degismez",
+          missing == ["attention_bias"] and not unexpected and pr["check"] < 1e-12 and g_err < 1e-10 and base_err < 1e-10
+          and pr["fit"]["loss_last"] < pr["fit"]["loss_first"] and untouched and len(pr["fitted"]["cos_canon"]) == m.turns,
+          "gradyan %.1e  taban %.1e  kayip %.4f -> %.4f  SNR %.1f  dnll %+.4f" % (
+              g_err, base_err, pr["fit"]["loss_first"], pr["fit"]["loss_last"], pr["grad"]["snr"], pr["eval"]["d_nll"]))
+
     class Enough(Exception):
         pass
 
@@ -2408,7 +2507,7 @@ if __name__ == "__main__":
     args = ap.parse_args()
     names = [f.__name__ for f in (t_model, t_step2, t_step3, t_transformer, t_generate_cached, t_normalized_update, t_canon,
               t_layers, t_coherence, t_weight_ema, t_heads, t_fact_activation, t_learn_output_scale, t_matmul_precision,
-              t_loss_chunk, t_muon_tangent, t_output_link, t_shared_facts, t_internals)]
+              t_loss_chunk, t_muon_tangent, t_output_link, t_shared_facts, t_attention_bias, t_internals)]
     if args.only:
         want = [n.strip() for n in args.only.split(",") if n.strip()]
         assert set(want) <= set(names), "bilinmeyen test: %s" % sorted(set(want) - set(names))

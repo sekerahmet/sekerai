@@ -105,7 +105,7 @@ def load_model(run_dir, n_vocab, averaged=False):
     kw = dict(cfg["model_kw"])
     # eski kosular: tek Block, tek head, ReLU, sabit cikis olcegi, tek parca kayip (yalniz egitimde fark eder)
     kw = dict(dict(layers=1, heads=1, fact_activation="relu", learn_output_scale=False, loss_chunk=0,
-                   output_link=False, shared_facts=True), **kw)   # 29 Eylul oncesi config'lerde yazilmadi
+                   output_link=False, shared_facts=True, attention_bias=False), **kw)   # 29 Eylul oncesi config'lerde yazilmadi
     assert not kw.pop("output_skip", False), "output_skip (28 Eylul) kaldirildi"
     assert not cfg.get("copy_path"), "kopya yolu (Oneri A) 28 Eylul'de kaldirildi"
     m = BlockModel(n_vocab, seed=0, stream_norm=cfg.get("stream_norm", True),

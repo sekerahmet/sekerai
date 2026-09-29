@@ -134,7 +134,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
     if setting in TR.STEP3:
         model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, shared_facts=M.SHARED_FACTS, heads=M.HEADS, fact_activation=M.FACT_ACTIVATION,
                              learn_output_scale=M.LEARN_OUTPUT_SCALE, output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=M.T_MAX,
-                             anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK, last_facts_alpha_init=M.LAST_FACTS_ALPHA_INIT),
+                             anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK, last_facts_alpha_init=M.LAST_FACTS_ALPHA_INIT,
+                             attention_bias=M.ATTENTION_BIAS),
                         **(model_kw or {}))
     per_epoch = len(data["train_start"]) // batch_size
     assert per_epoch > 0, "batch_size (%d) > train penceresi (%d)" % (batch_size, len(data["train_start"]))
@@ -169,8 +170,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         saved.setdefault("final_cooldown_shape", "sqrt")          # 29 Eylul oncesi kosularda yazilmadi: sqrt idi
         saved.setdefault("attention_kernel", "math")              # 29 Eylul oncesi: hep math, fp32 Newton-Schulz
         saved.setdefault("newton_schulz_precision", "fp32")
-        if setting in TR.STEP3 and saved.get("model_kw"):   # 29 Eylul oncesi kosularda output_link yazilmadi: yoktu
-            saved["model_kw"] = dict(dict(output_link=False, shared_facts=True), **saved["model_kw"])
+        if setting in TR.STEP3 and saved.get("model_kw"):   # 29 Eylul oncesi kosularda bu uc ayar yazilmadi: yoktu
+            saved["model_kw"] = dict(dict(output_link=False, shared_facts=True, attention_bias=False), **saved["model_kw"])
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)
@@ -229,6 +230,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
             e.update(output_scale=float(model.log_output_scale.detach().exp()))
         if getattr(model, "output_link", False):          # cikis bagi phi: q, u
             e.update(link_q=float(model.link_q.detach()), link_u=float(model.link_u.detach()))
+        if getattr(model, "attention_bias", None) is not None:   # ATTENTION_BIAS: tur basina |b|
+            e.update(attention_bias_norm=model.attention_bias.detach().norm(dim=-1).tolist())
         if (step // every) % TEXT_ERRORS_EVERY == 0:
             e.update(text_errors=ES.count_text_errors(model, data, FINAL_TOKENS))
         written = ES.texts(model, data, probes, PROBE_TOKENS)
@@ -255,7 +258,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
              + (" | ema ppl %.2f (fark %.3f nat)" % (e["weight_ema"]["ppl"], e["nll"] - e["weight_ema"]["nll"])
                 if "weight_ema" in e else "")
              + (" | olcek %.2f" % e["output_scale"] if "output_scale" in e else "")
-             + (" | bag q %.3f u %.3f" % (e["link_q"], e["link_u"]) if "link_q" in e else ""))
+             + (" | bag q %.3f u %.3f" % (e["link_q"], e["link_u"]) if "link_q" in e else "")
+             + (" | bias %s" % "/".join("%.3f" % v for v in e["attention_bias_norm"]) if "attention_bias_norm" in e else ""))
         if "text_errors" in e:
             note(_text_errors_line(e["text_errors"], "       metin"))
         if run["stop"]:
@@ -316,6 +320,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                 final["output_scale"] = float(model.log_output_scale.detach().exp())
             if getattr(model, "output_link", False):
                 final.update(link_q=float(model.link_q.detach()), link_u=float(model.link_u.detach()))
+            if getattr(model, "attention_bias", None) is not None:
+                final.update(attention_bias_norm=model.attention_bias.detach().norm(dim=-1).tolist())
             if getattr(model, "weight_ema", None):    # ortalama model de ayni son sinavdan gecer
                 em = model.weight_ema["model"]
                 torch.save(em.state_dict(), os.path.join(out, "model_weight_ema.pt"))
