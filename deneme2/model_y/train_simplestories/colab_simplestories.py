@@ -54,7 +54,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
     if setting in TR.STEP3:
-        model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, heads=M.HEADS, fact_activation=M.FACT_ACTIVATION,
+        model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, shared_facts=M.SHARED_FACTS, heads=M.HEADS, fact_activation=M.FACT_ACTIVATION,
                              learn_output_scale=M.LEARN_OUTPUT_SCALE, output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=M.T_MAX,
                              anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK, last_facts_alpha_init=M.LAST_FACTS_ALPHA_INIT),
                         **(model_kw or {}))
@@ -89,7 +89,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         saved = json.load(open(os.path.join(out, "config.json")))
         saved.setdefault("final_cooldown_shape", "sqrt")          # 29 Eylul oncesi kosularda yazilmadi: sqrt idi
         if setting in TR.STEP3 and saved.get("model_kw"):   # 29 Eylul oncesi kosularda output_link yazilmadi: yoktu
-            saved["model_kw"] = dict(dict(output_link=False), **saved["model_kw"])
+            saved["model_kw"] = dict(dict(output_link=False, shared_facts=True), **saved["model_kw"])
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)

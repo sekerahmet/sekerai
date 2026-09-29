@@ -1848,7 +1848,7 @@ def t_output_link():
     with torch.no_grad():
         err0 = float((base.logits(ids) - link.logits(ids)).abs().max())
     rest = {k: v for k, v in link.state_dict().items() if k not in ("link_q", "link_u")}
-    check("output_link: varsayilan False; link_q, link_u 0'dan, geri kalan agirliklar ayni; q = u = 0'da skor dogrusal "
+    check("output_link: varsayilan True (29 Eylul); link_q, link_u 0'dan, geri kalan agirliklar ayni; q = u = 0'da skor dogrusal "
           "skorla ayni (yuvarlama icinde)",
           OUTPUT_LINK is True and inspect.signature(BlockModel).parameters["output_link"].default is True
           and not base.output_link and link.output_link and "link_q" not in base.state_dict()
@@ -1902,11 +1902,325 @@ def t_output_link():
                                                                float(clamped.link_u), curve[0]["nll"], curve[-1]["nll"]))
 
 
+def t_shared_facts():
+    """SHARED_FACTS: varsayilan True (bugunku, ek FactUnits yok); False'ta her turun kendi FactUnits'i, attention paylasimli
+    kalir: attention'i ikiser bagli ayri bloklu modelle ayni skor (float64); parametre + (turns - layers) FactUnits;
+    ek FactUnits kurede ve Muon'da; egitim, surdurme, onbellekli uretim."""
+    import copy
+    import inspect
+    from model_y import SHARED_FACTS, BlockModel
+    data = D.build()
+    sids, smask = EK.sequences(data)
+    nv = len(data["vocab"])
+    kw = dict(d=16, units=16, layers=2, turns=4, heads=2)
+    base, split = BlockModel(nv, **kw), BlockModel(nv, shared_facts=False, **kw)
+    cnt = lambda m: sum(p_.numel() for p_ in m.parameters() if p_.requires_grad)
+    fu = sum(p_.numel() for p_ in split.extra_facts[0].parameters())
+    check("shared_facts: varsayilan True (ek FactUnits yok); False'ta turns - layers ek FactUnits, parametre tam o kadar "
+          "artar; ek FactUnits'in satirlari birim, W_fact_out sifir degil",
+          SHARED_FACTS is True and inspect.signature(BlockModel).parameters["shared_facts"].default is True
+          and not hasattr(base, "extra_facts") and len(split.extra_facts) == 2 and cnt(split) - cnt(base) == 2 * fu
+          and float((split.extra_facts[1].W_fact_in.norm(dim=1) - 1).abs().max()) < 1e-6
+          and float(split.extra_facts[1].W_fact_out.abs().max()) > 0, "ek %d parametre" % (cnt(split) - cnt(base)))
+
+    g = torch.Generator().manual_seed(3)
+    split = split.double()
+    with torch.no_grad():                                  # sifirdan farkli alpha, Canon, bag: kontrol bos gecmesin
+        for p_ in split.parameters():
+            p_.add_(0.1 * torch.randn(p_.shape, generator=g, dtype=p_.dtype))
+    sep = BlockModel(nv, shared=False, **kw).double()      # her tura ayri Block: attention'i split'ten ikiser kopya
+    with torch.no_grad():
+        for k in ("alpha_attention", "alpha_facts", "log_output_scale", "link_q", "link_u"):
+            getattr(sep, k).copy_(getattr(split, k))
+        sep.tokens.load_state_dict(split.tokens.state_dict())
+        for i, b in enumerate(sep.blocks):
+            src = split.blocks[i % 2]
+            b.attention.load_state_dict(src.attention.state_dict())
+            b.canon_weights.copy_(src.canon_weights)
+            b.facts.load_state_dict((src.facts if i < 2 else split.extra_facts[i - 2]).state_dict())
+    ids = sids[:4, :16]
+    with torch.no_grad():
+        err = float((split.logits(ids) - sep.logits(ids)).abs().max())
+        base_err = float((split.logits(ids) - BlockModel(nv, **kw).double().logits(ids)).abs().max())
+    check("shared_facts=False: skor = attention'i ikiser bagli (tur i ve i + layers), FactUnits'i tur basina ayri modelinki "
+          "(float64); paylasimli modelden farkli", err < 1e-10 and base_err > 1e-3, "fark %.1e" % err)
+
+    opts = []
+    grab = lambda step, model, opt: opts.append(opt)
+    mkw = dict(model_kw=dict(kw, shared_facts=False))
+    trained, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), save_every=1, save=grab, **mkw)
+    nm = {id(p_): k for k, p_ in trained.named_parameters()}
+    in_muon = {nm[id(p_)] for g_ in opts[-1].param_groups if g_["use_muon"] for p_ in g_["params"]}
+    packs = {}
+    keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
+                                                                   optimizer=copy.deepcopy(opt.state_dict())))
+    full, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), save_every=2, save=keep, **mkw)
+    res, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs[4], **mkw)
+    qs = [[1] + sids[i, 1:1 + k].tolist() for i, k in enumerate((1, 3, 5, 8))]
+    check("shared_facts=False: ek FactUnits Muon'da ve her adimdan sonra kurede; kayip iner; surdurme bit duzeyinde; "
+          "onbellekli uretim = tam hesap",
+          {"extra_facts.%d.%s" % (j, w) for j in (0, 1) for w in ("W_fact_in", "W_fact_up", "W_fact_out")} <= in_muon
+          and float((trained.extra_facts[0].W_fact_in.norm(dim=1) - 1).abs().max()) < 1e-5
+          and curve[-1]["nll"] < curve[0]["nll"]
+          and all(torch.equal(x, y) for x, y in zip(full.state_dict().values(), res.state_dict().values()))
+          and TR.generate(trained, qs, 6) == TR.generate(trained, qs, 6, cached=False),
+          "kayip %.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"]))
+
+
+def t_internals():
+    """internals_y (kalici analiz araci): elle ileri hesap = model.logits (float64; 8 model: varsayilan, shared_facts=False,
+    output_link=False, tek head + relu, ayri blok + reglu, normalized_update kapali, akis normsuz, LayerNorm; SDPA ve acik
+    softmax yolu, sagdan dolgulu batch); trace'in durumlari, acilari ve lens'i modelin kendi hidden'i ve Block'uyla;
+    point_drift, attention_stats, unit_usage bagimsiz hesapla; ablate: hicbir sey = taban (Δ 0), alpha'yi ayni degerle
+    vermek = taban, kapatmalar agirligi degistirilmis modelin logits'iyle ayni (Δnll, Δacc, se), head ortalamasi elle;
+    over_checkpoints'in yedekten kurdugu EMA = train_seq'in model.weight_ema'si (muon, adam, adamw)."""
+    import copy
+    import json
+    import shutil
+    import tempfile
+    import numpy as np
+    import torch.nn.functional as F
+    import internals_y as I
+    from model_y import BlockModel
+    data = D.build()
+    sids, smask = EK.sequences(data)
+    nv = len(data["vocab"])
+    stories = [sids[i, :int(smask[i].sum())].tolist() for i in range(6)]
+    others = [sids[i, :int(smask[i].sum())].tolist() for i in range(6, 12)]
+    base_kw = dict(d=16, units=24, layers=2, turns=4, heads=2)
+
+    def perturbed(seed=5, **kw):
+        m = BlockModel(nv, **dict(base_kw, **kw)).double()
+        g = torch.Generator().manual_seed(seed)
+        with torch.no_grad():                              # sifirdan farkli alpha, Canon, bag, esik: kontrol bos gecmesin
+            for p_ in m.parameters():
+                p_.add_(0.1 * torch.randn(p_.shape, generator=g, dtype=p_.dtype))
+        return m.eval()
+
+    variants = [("varsayilan", {}), ("shared_facts=False", dict(shared_facts=False)),
+                ("output_link=False", dict(output_link=False)), ("tek head + relu", dict(heads=1, fact_activation="relu")),
+                ("ayri blok + reglu", dict(shared=False, fact_activation="reglu")),
+                ("normalized_update kapali", dict(normalized_update=False, sphere_weights=False)),
+                ("akis normsuz", dict(stream_norm=False, normalized_update=False, sphere_weights=False)),
+                ("LayerNorm", dict(layer_norm=True, normalized_update=False, sphere_weights=False))]
+    errs = {}
+    with torch.no_grad():
+        for name, kw in variants:
+            m = perturbed(**kw)
+            ref = [m.logits(torch.tensor([s[:-1]]))[0] for s in stories]
+            tr = I.trace(m, stories, keep_logits=True)
+            explicit = [I._logits(m, torch.tensor([s[:-1]]), taps=dict(attention=lambda t, a: None))[0] for s in stories]
+            errs[name] = max([float((a - b).abs().max()) for a, b in zip(tr["logits"] + explicit, ref + ref)]
+                             + [tr["check_logits"]])
+    worst = max(errs, key=errs.get)
+    check("internals: elle ileri hesap = model.logits (float64; 8 model ayari, dolgulu batch, SDPA ve acik softmax)",
+          max(errs.values()) < 1e-10, "en buyuk %.1e (%s)" % (errs[worst], worst))
+
+    m = perturbed()
+    s0 = stories[0]
+    ids = torch.tensor([s0[:-1]])
+    y = torch.tensor(s0[1:])
+    tr = I.trace(m, [s0], exclude_last=False)
+    with torch.no_grad():
+        hid = m.hidden(ids)
+        states = [hid[0]]
+        for t, blk in enumerate(m.turn_blocks()):          # alpha_F = 0: Block yalniz attention alt adimini yapar
+            states += [blk(hid[t], alpha_attention=m.alpha_attention[t], alpha_facts=torch.zeros_like(m.alpha_facts[t])),
+                       hid[t + 1]]
+        P = m.tokens.points()
+        c_ = lambda h: h @ P.T
+        head = lambda h: torch.exp(m.log_output_scale) * (c_(h) + m.link_q * c_(h) ** 2
+                                                          + (m.link_q ** 2 / 3 + m.link_u) * c_(h) ** 3)
+        rank_ok, p_err, ang_err = True, 0.0, 0.0
+        row = tr["stories"][0]
+        for j, (name, h) in enumerate(zip(tr["states"], states)):
+            z = head(h[0])
+            zt = z[torch.arange(len(y)), y]
+            rank_ok &= (1 + (z > zt[:, None]).sum(-1)).tolist() == row["rank"][name]
+            p_err = max(p_err, float((torch.softmax(z, -1)[torch.arange(len(y)), y] - torch.tensor(row["p"][name])).abs().max()))
+            if j:
+                ang = torch.rad2deg(torch.acos((h[0] * states[j - 1][0]).sum(-1).clamp(-1, 1)))
+                ang_err = max(ang_err, float((ang - torch.tensor(row["angle"][name], dtype=ang.dtype)).abs().max()))
+        z = m.logits(ids)[0]
+        last = tr["summary"][tr["states"][-1]]
+        sum_err = max(abs(last["nll"] - float(F.cross_entropy(z, y))), abs(last["acc"] - float((z.argmax(-1) == y).double().mean())))
+    check("internals trace: durumlar = model.hidden ve alpha_F = 0'li Block; lens sirasi ve p(hedef) modelin cikis formuluyle; "
+          "aci = acos(<h, h'>); son durumun nll / acc'si model.logits'ten",
+          rank_ok and p_err < 1e-6 and ang_err < 1e-3 and sum_err < 1e-10 and tr["states"][:3] == ["h0", "A1", "F1"],
+          "p %.1e  aci %.1e derece  nll/acc %.1e" % (p_err, ang_err, sum_err))
+
+    counts = np.random.default_rng(0).integers(1, 50, nv)
+    counts[:5] = 0
+    pd = I.point_drift(m, counts, data["vocab"], bands=(0, 16, 64, nv))
+    with torch.no_grad():
+        PL, PF = m.tokens.points(), m.tokens.fixed_points
+        ang = torch.rad2deg(torch.acos((PL * PF).sum(-1).clamp(-1, 1))).numpy()
+        nn_ = lambda X: (X @ X.T).fill_diagonal_(-2).max(-1).values.numpy()
+    order = np.argsort(-counts, kind="stable")
+    band_err = max(abs(b["angle_median"] - float(np.median(ang[order[b["lo"]:b["hi"]]]))) for b in pd["bands"])
+    # PF float32'de birimlenip float64'e cevrildi: boyu 1'den ~1e-7 sapar -> acos ile kiris formulu ~1e-5 derece ayrisir
+    check("internals point_drift: aci = acos(<PF, PL>) (float64); komsu kosinusu tam tablodan (PL ve PF); siklik bantlari; "
+          "gorulmeyen token'lar", abs(pd["overall"]["angle_median"] - float(np.median(ang))) < 1e-4 and band_err < 1e-4
+          and abs(pd["overall"]["nn_cos_pl_median"] - float(np.median(nn_(PL)))) < 1e-12
+          and abs(pd["overall"]["nn_cos_pf_median"] - float(np.median(nn_(PF)))) < 1e-12
+          and [(b["lo"], b["hi"]) for b in pd["bands"]] == [(0, 16), (16, 64), (64, nv)] and pd["unseen"]["n"] == 5
+          and len(pd["examples"]) > 0, "bant %.1e" % band_err)
+
+    st = I.attention_stats(m, [s0], exclude_last=False)
+    with torch.no_grad():
+        err, T = 0.0, ids.shape[1]
+        back = (torch.arange(T)[:, None] - torch.arange(T)[None, :]).clamp(min=0).double()
+        weights = []
+        for t, blk in enumerate(m.turn_blocks()):
+            h = hid[t]
+            full = F.pad(h, (0, 0, 3, 0))
+            x = h + sum(blk.canon_weights[k] * full[:, 3 - k:3 - k + T] for k in range(4))
+            a = blk.attention.weights(x)[0]                                        # (H, T, T)
+            weights.append(a)
+            want = dict(entropy=-(a * a.clamp_min(1e-300).log()).sum(-1).mean(-1),
+                        last4=torch.stack([a[:, i, max(0, i - 3):i + 1].sum(-1) for i in range(T)], -1).mean(-1),
+                        distance=(a * back).sum(-1).mean(-1), first=a[..., 0].mean(-1))
+            for k, v in want.items():
+                err = max(err, float((v - torch.tensor(st[k][t], dtype=v.dtype)).abs().max()))
+            err = max(err, abs(float(((x - h).norm(dim=-1) / h.norm(dim=-1)).mean()) - float(st["canon"][t])))
+        reuse = torch.minimum(weights[0], weights[2]).sum(-1).mean(-1)
+        err = max(err, float((reuse - torch.tensor(st["reuse"][0]["overlap"], dtype=reuse.dtype)).abs().max()))
+    check("internals attention_stats: entropi, son 4, uzaklik, konum 0, Canon payi ve ayni Block'un iki turunun ortusmesi "
+          "CausalAttention.weights'ten", err < 1e-10 and [r["turns"] for r in st["reuse"]] == [(0, 2), (1, 3)],
+          "fark %.1e" % err)
+
+    m2 = perturbed(shared_facts=False)
+    uu = I.unit_usage(m2, [s0], exclude_last=False)
+    ush = I.unit_usage(m, [s0], exclude_last=False)
+    with torch.no_grad():
+        hid2 = m2.hidden(ids)
+        err = 0.0
+        for t, blk in enumerate(m2.turn_blocks()):
+            mid = blk(hid2[t], alpha_attention=m2.alpha_attention[t], alpha_facts=torch.zeros_like(m2.alpha_facts[t]))[0]
+            f = blk.facts if t < 2 else m2.extra_facts[t - 2]
+            xs = mid * 16 ** 0.5
+            u = F.silu(xs @ f.W_fact_in.T) * (xs @ f.W_fact_up.T)
+            share = (u ** 2).sum(0) / (u ** 2).sum()
+            err = max(err, float((share - torch.tensor(uu["turns"][t]["share"], dtype=share.dtype)).abs().max()),
+                      abs(float((u ** 2).sum(-1).mean()) - uu["turns"][t]["energy"]),
+                      abs(float((u @ f.W_fact_out.T).pow(2).sum(-1).mean().sqrt()) - uu["turns"][t]["out_rms"]))
+    check("internals unit_usage: enerji payi, E|u|^2, |W_out u| FactUnits formuluyle (shared_facts=False: tur >= layers "
+          "kendi takimi); takimlar paylasimda [1+3, 2+4], ayrikta turn basina",
+          err < 1e-10 and [tm["turns"] for tm in uu["teams"]] == [[0], [1], [2], [3]]
+          and [tm["turns"] for tm in ush["teams"]] == [[0, 2], [1, 3]] and len(ush["teams"][0]["between"]) == 1,
+          "fark %.1e" % err)
+
+    dh = 16 // 2
+    with torch.no_grad():                                  # tur 3 (blok 0) head ciktilarinin ortalamasi, referans hikayelerde
+        tot, cnt = torch.zeros(2, dh, dtype=torch.float64), 0
+        blk = m.blocks[0]
+        for s in others:
+            h = m.hidden(torch.tensor([s[:-1]]))[2]
+            T = h.shape[1]
+            full = F.pad(h, (0, 0, 3, 0))
+            x = h + sum(blk.canon_weights[k] * full[:, 3 - k:3 - k + T] for k in range(4))
+            v = (x @ blk.attention.W_value.T).unflatten(-1, (2, -1)).transpose(1, 2)[0]   # (H, T, dh)
+            c = blk.attention.weights(x)[0] @ v
+            tot += c[:, :T - 1].sum(1)                                                    # son hedef haric
+            cnt += T - 1
+        mean = tot / cnt
+    cases = [("none", {}),
+             ("alpha ayni", dict(alpha_attention={t: m.alpha_attention[t].clone() for t in range(4)},
+                                 alpha_facts={t: m.alpha_facts[t].clone() for t in range(4)})),
+             ("A2", dict(skip_attention=[1])), ("F1", dict(skip_facts=[0])),
+             ("C blok 0", dict(canon={0: torch.zeros(4), 2: torch.zeros(4)})),
+             ("head 1 sifir, blok 1", dict(heads={(1, 1): torch.zeros(dh), (3, 1): torch.zeros(dh)})),
+             ("H3 ortalama", dict(heads={(2, 0): None, (2, 1): None})),
+             ("H3 ortalama elle", dict(heads={(2, 0): mean[0], (2, 1): mean[1]}))]
+    ab = I.ablate(m, stories, cases, reference=others)
+
+    def per_story(model):                                  # model.logits'ten hikaye basina (nll, dogru, hedef); son hedef haric
+        out = []
+        for s in stories:
+            z = model.logits(torch.tensor([s[:-1]]))[0][:-1]
+            t_ = torch.tensor(s[1:-1])
+            out.append((float(F.cross_entropy(z, t_, reduction="sum")), float((z.argmax(-1) == t_).sum()), len(t_)))
+        return np.array(out)
+
+    def edited(fn):
+        c = copy.deepcopy(m)
+        with torch.no_grad():
+            fn(c)
+        return c
+
+    with torch.no_grad():
+        B0 = per_story(m)
+        refs = {"A2": edited(lambda c: c.alpha_attention[1].zero_()), "F1": edited(lambda c: c.alpha_facts[0].zero_()),
+                "C blok 0": edited(lambda c: c.blocks[0].canon_weights.zero_()),
+                "head 1 sifir, blok 1": edited(lambda c: c.blocks[1].attention.W_value[dh:].zero_())}
+    rows = {r["case"]: r for r in ab["rows"]}
+    N = B0[:, 2].sum()
+    err = abs(ab["base"]["nll"] - B0[:, 0].sum() / N) + abs(ab["base"]["acc"] - B0[:, 1].sum() / N)
+    for name, model in refs.items():
+        with torch.no_grad():
+            Bc = per_story(model)
+        for j, key in ((0, "nll"), (1, "acc")):
+            d = Bc[:, j] - B0[:, j]
+            mean_d = d.sum() / N
+            err = max(err, abs(rows[name]["d_" + key] - mean_d),
+                      abs(rows[name]["se_" + key] - float(np.sqrt(((d - mean_d * B0[:, 2]) ** 2).sum()) / N)))
+    zero = max(abs(rows[k][f]) for k in ("none", "alpha ayni") for f in ("d_nll", "d_acc", "se_nll", "se_acc"))
+    mean_err = abs(rows["H3 ortalama"]["d_nll"] - rows["H3 ortalama elle"]["d_nll"])
+    moved = min(abs(rows[k]["d_nll"]) for k in refs)
+    check("internals ablate: hicbir sey = taban ve alpha'yi ayni degerle vermek = taban (fark 0); A / F atlama, Canon kapatma, "
+          "head sifirlama = agirligi degistirilmis modelin logits'i (dnll, dacc, se); head ortalamasi referans hikayelerinden",
+          zero < 1e-12 and err < 1e-10 and mean_err < 1e-10 and moved > 1e-4 and "BAGIMLILIK" in ab["note"]
+          and ab["check_logits"] < 1e-10, "sifir %.1e  fark %.1e  ortalama %.1e  en kucuk |d| %.1e" % (zero, err, mean_err, moved))
+
+    name, words, build = I._parse_case((4, 2, 2), "A2+H3.1+C+aF4*0.5")
+    case = build(m)
+    check("internals CLI mudahale yazimi (turlar 1'den): 'A2+H3.1+C+aF4*0.5' -> skip_attention [1], heads (2, 1), butun Canon, "
+          "alpha_facts[3] x 0,5",
+          case["skip_attention"] == [1] and list(case["heads"]) == [(2, 1)] and sorted(case["canon"]) == [0, 1, 2, 3]
+          and torch.equal(case["alpha_facts"][3], m.alpha_facts[3] * 0.5), words)
+
+    tmp = tempfile.mkdtemp(prefix="internals_")
+    same = lambda a, b: list(a) == list(b) and all(torch.equal(a[k], b[k]) for k in a)
+    notes, ok = [], True
+    try:
+        for label, extra in (("muon", {}), ("adam", dict(optimizer="adam")), ("adamw", dict(optimizer="adam", weight_decay=0.1))):
+            run = os.path.join(tmp, label)
+            os.makedirs(run)
+            mk = dict(base_kw, shared_facts=False, output_link=True)     # colab config'i model_kw'yi tam yazar
+            emas, lasts = {}, {}
+
+            def save(step, model, opt, run=run, emas=emas, lasts=lasts):
+                torch.save(dict(step=step, model=model.state_dict(), optimizer=opt.state_dict()),
+                           os.path.join(run, "checkpoint_t%06d.pt" % step))
+                emas[step] = copy.deepcopy(model.weight_ema["model"].state_dict())
+                lasts[step] = copy.deepcopy(model.state_dict())
+            trained, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), save_every=2, save=save,
+                                      weight_ema=0.9, model_kw=mk, **extra)
+            config = dict(name=label, setting="shared", seed=0, vocab=nv, model_kw=mk, stream_norm=True, layer_norm=False,
+                          rope=True, normalized_update=True, sphere_weights=True, canon=True,
+                          optimizer=extra.get("optimizer", "muon"), weight_decay=extra.get("weight_decay", 0.0))
+            with open(os.path.join(run, "config.json"), "w") as fh:
+                json.dump(config, fh)
+            grab = lambda m_: {k: v.clone() for k, v in m_.state_dict().items()}
+            got = I.over_checkpoints(run, grab)
+            got_last = I.over_checkpoints(run, grab, steps=[4], weights="last")
+            torch.save(trained.weight_ema["model"].state_dict(), os.path.join(run, "model_weight_ema.pt"))
+            this = ([r["step"] for r in got] == [2, 4, 6] and all(same(r["result"], emas[r["step"]]) for r in got)
+                    and same(got_last[0]["result"], lasts[4]) and not same(emas[6], lasts[6])
+                    and same(I._load_model(run, "ema").state_dict(), trained.weight_ema["model"].state_dict()))
+            notes.append("%s %s" % (label, "tamam" if this else "TUTMADI"))
+            ok &= this
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    check("internals over_checkpoints: yedekten kurulan EMA = train_seq'in model.weight_ema'si, bit duzeyinde (adim 2/4/6; "
+          "muon, adam, adamw); 'last' = o adimin agirligi; model_weight_ema.pt", ok, ", ".join(notes))
+
+
 if __name__ == "__main__":
     print("tests (model_y)")
     for f in (t_model, t_step2, t_step3, t_transformer, t_generate_cached, t_normalized_update, t_canon,
               t_layers, t_coherence, t_weight_ema, t_heads, t_fact_activation, t_learn_output_scale, t_matmul_precision,
-              t_loss_chunk, t_muon_tangent, t_output_link):
+              t_loss_chunk, t_muon_tangent, t_output_link, t_shared_facts, t_internals):
         f()
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
     sys.exit(0 if all(RESULTS) else 1)

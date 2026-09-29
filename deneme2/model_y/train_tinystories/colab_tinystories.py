@@ -45,7 +45,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
     if setting in TR.STEP3:
-        model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, heads=M.HEADS, fact_activation=M.FACT_ACTIVATION,
+        model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, shared_facts=M.SHARED_FACTS, heads=M.HEADS, fact_activation=M.FACT_ACTIVATION,
                              learn_output_scale=M.LEARN_OUTPUT_SCALE, output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=M.T_MAX,
                              anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK, last_facts_alpha_init=M.LAST_FACTS_ALPHA_INIT),
                         **(model_kw or {}))
@@ -88,7 +88,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                           final_cooldown_shape="sqrt"),
                      **saved)
         if setting in TR.STEP3 and saved.get("model_kw"):   # 28 Eylul oncesi model_kw'de layers yok: tek Block idi
-            saved["model_kw"] = dict(dict(layers=1, heads=1, fact_activation="relu", learn_output_scale=False, output_link=False, loss_chunk=0,
+            saved["model_kw"] = dict(dict(layers=1, heads=1, fact_activation="relu", learn_output_scale=False, output_link=False,
+                                          shared_facts=True, loss_chunk=0,
                                           last_facts_alpha_init=M.ALPHA_INIT),
                                      **saved["model_kw"])     # eskiler: tek Block, tek head, ReLU, sabit cikis olcegi, tek parca
                                                               # kayip, butun alpha'lar ALPHA_INIT'ten

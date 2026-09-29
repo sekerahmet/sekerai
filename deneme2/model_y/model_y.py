@@ -53,6 +53,9 @@ SHARED_BLOCK = True  # True: turlar LAYERS Block'u sirayla paylasir; False: her 
 LAYERS = 2           # SHARED_BLOCK'ta farkli Block (katman) sayisi, turlar sirayla doner: tur i -> Block i mod LAYERS
                      # (kullanici, 28 Eylul: "2 tane paylaşımlı katman", sira ABAB, ad LAYERS).  Varsayilan 2 x 2 (kullanici,
                      # 28 Eylul: "2X2 şu an varsayılan olsun"; TinyStories 1 epok ppl 7,95 / X2 9,73).  1 = tek Block x TURNS tur
+SHARED_FACTS = True  # SHARED_BLOCK'ta FactUnits de turlar arasinda paylasilir.  False: her turun kendi FactUnits'i, attention
+                     # paylasimli kalir (kullanici, 29 Eylul: "bu öneri mantıklı geldi bana"): paylasilan FactUnits'in
+                     # ikinci kullanimi kapanmisti (alpha_F ~0, C ajani); parametre artar, hesap ayni
 FACT_UNITS = 170     # FactUnits birim sayisi; SwiGLU'nun yerlesik genisligi 8/3 x D (Shazeer 2020 "2/3", LLaMA "2/3 4d",
                      # MobileLLM 576 -> 1536); TinyStories'te 384 -> 1024 olculdu (ppl 6,94).  relu'da 4 x D = 256 aliskanligi
 FACT_ACTIVATION = "swiglu"   # FactUnits: "relu" u = ReLU(W_fact_in x - fact_threshold) | "swiglu" u = SiLU(W_fact_in x) *
@@ -379,8 +382,9 @@ class Block(torch.nn.Module):
             self.norm_attention = torch.nn.LayerNorm(d)
             self.norm_facts = torch.nn.LayerNorm(d)
 
-    def forward(self, h, cache=None, alpha_attention=None, alpha_facts=None):
-        """alpha_attention, alpha_facts (d,): normalized_update'te bu turun alpha'lari."""
+    def forward(self, h, cache=None, alpha_attention=None, alpha_facts=None, turn_facts=None):
+        """alpha_attention, alpha_facts (d,): normalized_update'te bu turun alpha'lari.  turn_facts: bu turun FactUnits'i
+        (SHARED_FACTS=False'ta ikinci gelis); None: Block'un kendi FactUnits'i."""
         at = self.attention
         unit = lambda v: F.normalize(v, dim=-1)
         norm_a, norm_f = (self.norm_attention, self.norm_facts) if self.layer_norm else (unit, unit)
@@ -391,7 +395,8 @@ class Block(torch.nn.Module):
             x = x + sum(self.canon_weights[k] * full[..., 3 - k:3 - k + T, :] for k in range(4))
         added = at(x, cache=cache) @ at.W_context.T                                # W_context · c_t
         # sphere_weights: W_fact_in satirlari birim, h birim -> girdi kosinus (tipik ±1/√d); √d ile esik O(1) olcekte
-        facts = (lambda v: self.facts(v * v.shape[-1] ** 0.5)) if self.sphere_weights else self.facts
+        units = self.facts if turn_facts is None else turn_facts
+        facts = (lambda v: units(v * v.shape[-1] ** 0.5)) if self.sphere_weights else units
         if self.normalized_update:                                                 # u'nun boyu silinir, adimi alpha belirler
             h = unit(h + alpha_attention * (unit(added) - h))                     # h = norm(h + α_A ⊙ (norm(W_context c) - h))
             return unit(h + alpha_facts * (unit(facts(h)) - h))                   # h = norm(h + α_F ⊙ (norm(olgu(h)) - h))
@@ -412,7 +417,7 @@ class BlockModel(torch.nn.Module):
                  stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=ROPE,
                  normalized_update=NORMALIZED_UPDATE, sphere_weights=SPHERE_WEIGHTS, canon=CANON, heads=HEADS,
                  fact_activation=FACT_ACTIVATION, learn_output_scale=LEARN_OUTPUT_SCALE, loss_chunk=LOSS_CHUNK,
-                 last_facts_alpha_init=LAST_FACTS_ALPHA_INIT, output_link=OUTPUT_LINK):
+                 last_facts_alpha_init=LAST_FACTS_ALPHA_INIT, output_link=OUTPUT_LINK, shared_facts=SHARED_FACTS):
         super().__init__()
         assert not normalized_update or (stream_norm and not layer_norm), "normalized_update akis normuyla (L2) calisir"
         assert not (sphere_weights and layer_norm), "sphere_weights LayerNorm'la denenmedi: FactUnits girdisi sqrt(d) kat buyuk"
@@ -427,6 +432,10 @@ class BlockModel(torch.nn.Module):
                                           for i in range(count))
         self.turns, self.shared, self.stream_norm = turns, shared, stream_norm
         self.layers = layers if shared else len(self.blocks)   # farkli Block sayisi (ayri blokta her tura bir)
+        self.shared_facts = shared_facts or not shared or turns == layers   # ayri blokta zaten tur basina
+        if not self.shared_facts:                         # ikinci ve sonraki gelisler: tur i >= layers -> extra_facts[i - layers]
+            self.extra_facts = torch.nn.ModuleList(       # tohum: ayri blokta tur i'nin FactUnits'ininki
+                FactUnits(d, units, 100 * seed + 10 + 2 * i + 1, activation=fact_activation) for i in range(layers, turns))
         self.layer_norm, self.rope, self.heads, self.fact_activation = layer_norm, rope, heads, fact_activation
         self.normalized_update, self.sphere_weights, self.canon = normalized_update, sphere_weights, canon
         if normalized_update or sphere_weights:           # sifir yon normalize edilemez: W_context, W_fact_out rastgele baslar
@@ -435,6 +444,8 @@ class BlockModel(torch.nn.Module):
                 for b in self.blocks:
                     b.attention.W_context.copy_(torch.randn(d, d, generator=g) / d ** 0.5)
                     b.facts.W_fact_out.copy_(torch.randn(d, units, generator=g) / units ** 0.5)
+                for f in getattr(self, "extra_facts", ()):
+                    f.W_fact_out.copy_(torch.randn(d, units, generator=g) / units ** 0.5)
         if normalized_update:                             # tur basina (paylasilan blokta da): (tur, d)
             self.alpha_attention = torch.nn.Parameter(torch.full((turns, d), ALPHA_INIT))
             self.alpha_facts = torch.nn.Parameter(torch.full((turns, d), ALPHA_INIT))
@@ -466,6 +477,8 @@ class BlockModel(torch.nn.Module):
         for i, block in enumerate(self.turn_blocks()):
             alphas = (dict(alpha_attention=self.alpha_attention[i], alpha_facts=self.alpha_facts[i])
                       if self.normalized_update else {})
+            if not self.shared_facts and i >= self.layers:
+                alphas["turn_facts"] = self.extra_facts[i - self.layers]
             h = block(h, None if caches is None else caches[i], **alphas)
             out.append(h)
         return out
@@ -481,6 +494,10 @@ class BlockModel(torch.nn.Module):
                 w.copy_(F.normalize(w, dim=1))
             for w in (at.W_context, f.W_fact_out):
                 w.copy_(F.normalize(w, dim=0))
+        for f in getattr(self, "extra_facts", ()):
+            for w in (f.W_fact_in,) + ((f.W_fact_up,) if f.activation != "relu" else ()):
+                w.copy_(F.normalize(w, dim=1))
+            f.W_fact_out.copy_(F.normalize(f.W_fact_out, dim=0))
 
     def logits(self, ids, caches=None):
         P = self.tokens.points()
