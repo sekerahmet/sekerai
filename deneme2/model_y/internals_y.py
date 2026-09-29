@@ -110,7 +110,7 @@ def _plan(model, case=None):
             assert model.normalized_update, "alpha yalniz normalized_update'te var"
             a = getattr(model, name).detach().clone()
             for t, v in given.items():
-                a[t] = torch.as_tensor(v, dtype=a.dtype)
+                a[t] = torch.as_tensor(v, dtype=a.dtype, device=a.device)
             plan[name] = a
             touched += list(given)
     H = model.blocks[0].attention.heads
@@ -137,7 +137,7 @@ def _run(model, h, plan, taps=None, start=0):
         if blk.canon:                                  # x_t + sum_k w_k x_(t-k), baslangictan once 0
             w = blk.canon_weights
             if t in plan["canon"]:
-                w = w * torch.as_tensor(plan["canon"][t], dtype=w.dtype)[:, None]
+                w = w * torch.as_tensor(plan["canon"][t], dtype=w.dtype, device=w.device)[:, None]
             T = x.shape[-2]
             full = F.pad(x, (0, 0, 3, 0))
             mix = sum(w[k] * full[..., 3 - k:3 - k + T, :] for k in range(4))
@@ -163,7 +163,7 @@ def _run(model, h, plan, taps=None, start=0):
             for (tt, hh), vec in plan["heads"].items():
                 if tt == t:
                     assert vec is not None, "head ortalamasi doldurulmadi (ablate doldurur)"
-                    c[:, hh] = torch.as_tensor(vec, dtype=c.dtype)
+                    c[:, hh] = torch.as_tensor(vec, dtype=c.dtype, device=c.device)
             if "heads" in taps:
                 taps["heads"](t, c)
             added = c.transpose(-3, -2).flatten(-2) @ at.W_context.T
@@ -411,7 +411,7 @@ def point_drift(model, counts=None, vocab=None, bands=None, examples=(5, 50, 500
         for r in examples:
             if -V <= r < V:
                 i = int(order[r])
-                c, j = (P[i] @ P.T).index_fill_(0, torch.tensor([i]), -2).topk(3)
+                c, j = (P[i] @ P.T).index_fill_(0, torch.tensor([i], device=P.device), -2).topk(3)
                 rows.append(dict(token=vocab[i], rank=int(r % V), count=None if counts is None else float(counts[i]),
                                  angle=float(dev[i]), neighbors=[(vocab[int(a)], float(b)) for a, b in zip(j, c)]))
         out["examples"] = rows
