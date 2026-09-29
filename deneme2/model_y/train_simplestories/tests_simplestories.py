@@ -823,6 +823,34 @@ def t_colab(root):
           and "link_q" in fin4 and fin4["link_u"] >= 0 and run5["done"] and not run5["error"],
           str(run4["error"] or run5["error"] or run4["lines"][-2:]))
 
+    # tarif ayarlari config'e ve train_seq'e; ogrenilen olcek sinava ve gunluge
+    seen, real = [], TR.train_seq
+    TR.train_seq = lambda *a, **k: (seen.append((k.get("matmul_precision"), k.get("muon_tangent"),
+                                                 k.get("coherence_power"))), real(*a, **k))[1]
+    try:
+        run6 = C.start("TEST6", d, tmp + "/m", steps=1, every=1, device="cpu", batch_size=4, model_kw=TINY, save_every=1,
+                       matmul_precision="fp32", muon_tangent=False)
+        run6["thread"].join(600)
+        cfg6 = json.load(open(tmp + "/m/config.json"))
+        try:
+            C.start("TEST6", d, tmp + "/m", steps=1, every=1, device="cpu", batch_size=4, model_kw=TINY, save_every=1,
+                    resume=True)                                  # varsayilan bf16 / True: ayar farkli
+            refused6 = False
+        except RuntimeError:
+            refused6 = True
+    finally:
+        TR.train_seq = real
+    log = open(out + "/log.txt", encoding="utf-8").read()
+    check("colab_simplestories, tarif: matmul_precision / muon_tangent / coherence_power config'e yazilir (varsayilan bf16 / "
+          "True / 1,0; verilen fp32 / False) ve train_seq'e iletilir, farkliysa surdurme reddedilir; loss_chunk model_kw'de "
+          "(varsayilan 4096) ve ilk satirda; ogrenilen olcek sinavda (output_scale, adim 0'da scale_for(V)), gunlukte, sonda",
+          cfg["matmul_precision"] == "bf16" and cfg["muon_tangent"] is True and cfg["coherence_power"] == 1.0
+          and cfg6["matmul_precision"] == "fp32" and cfg6["muon_tangent"] is False and cfg6["coherence_power"] == 1.0
+          and seen == [("fp32", False, 1.0)] and run6["done"] and not run6["error"] and refused6
+          and cfg["model_kw"]["loss_chunk"] == M.LOSS_CHUNK == 4096 and "loss_chunk 4096" in log
+          and abs(ex[0]["output_scale"] - M.scale_for(len(d["vocab"]))) < 1e-4 and " | olcek " in log and "output_scale" in fin,
+          "%s %s" % (seen, run6["error"] or ""))
+
     run3 = C.start("TEST3", d, tmp + "/s", steps=500, every=1, device="cpu", batch_size=4, model_kw=TINY)
     C.stop()
     run3["thread"].join(600)
