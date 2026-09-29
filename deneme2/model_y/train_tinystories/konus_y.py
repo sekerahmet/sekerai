@@ -1,4 +1,5 @@
-"""Modelle KONUS (model_y, TinyStories) -- bir hikaye baslangici yaz, model devamini yazsin.
+"""Modelle KONUS (model_y: TinyStories ve SimpleStories kosulari) -- bir hikaye baslangici yaz, model devamini yazsin.
+Sozluk, kodlayici ve istemler yuklenen kosunun verisinden (config.json tag).
 
 Agirlik Colab'da uretilip Drive'a yaziliyor; burasi yalniz OKUYOR.  Model CPU'da calisir.  Model <eos>'tan baslar ve
 kendi <eos>'unu yazinca durur.
@@ -10,7 +11,8 @@ kendi <eos>'unu yazinca durur.
   s=0.8                      sicaklik.  0 = hep en olasi token (sinavdaki acgozlu uretim)
   p=0.9                      top-p: en olasi token'lardan toplami 0,9 olan kumeden sec (varsayilan 0,9; 1 = kapali;
                              yalniz s > 0'da isler -- kapaliyken uzun kuyruktan nadir kelimeler gelir)
-  r=1.3                      tekrar cezasi: son 20 token'da gecenlerin puani 1,3'e bolunur (1 = kapali)
+  r=1.2                      tekrar cezasi: son 20 token'da gecenlerin puani 1,2'ye bolunur (1 = kapali).  Yalniz
+                             metin uretimi; modeli ve olculerini (acc, bpb) degistirmez
   yasak                      <bilinmeyen>/<dolgu> uretimi kapat (varsayilan) / ac
   model                      kosulari listele (model_y ve model_20, en yeni once), hangisi yuklu
   model <ad>                 baska bir kosu yukle (ad ya da basindan bir parca; iki kolda ayni ad: model_20/<ad>)
@@ -28,20 +30,25 @@ import threading
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [HERE, os.path.dirname(HERE)]
 # Agir moduller ilk kullanimda: pencere hemen acilir (import torch birkac saniye)
-torch = np = DT = ET = BlockModel = AttentionCache = None
+torch = np = DT = ET = DS = ES = BlockModel = AttentionCache = None
 
 # model_20 kosulari da: model_y'nin kodu 28 Eylul'de model_20'den kopyalandi; kod ayrisinca yuklenemeyebilir
 RUN_ROOTS = [r"G:\Drive'ım\model_y", r"G:\Drivem\model_y", r"G:\Drive'ım\model_20", r"G:\Drivem\model_20"]
 TS_DIRS = [r"G:\Drive'ım\tinystories\onbellek", r"G:\Drivem\tinystories\onbellek"]
+SS_DIRS = [r"G:\Drive'ım\simplestories", r"G:\Drivem\simplestories"]
 
 
 def _heavy():
-    global torch, np, DT, ET, BlockModel, AttentionCache
+    global torch, np, DT, ET, DS, ES, BlockModel, AttentionCache
     if DT is None:
         import numpy as _np
-        import torch as _torch
+        import torch as _torch                         # torch pyarrow'dan once (Windows c10.dll)
         import data_tinystories as _dt
         import exam_tinystories as _et
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "train_simplestories"))
+        import data_simplestories as _ds
+        import exam_simplestories as _es
+        DS, ES = _ds, _es
         from model_y import AttentionCache as _attention_cache
         from model_y import BlockModel as _block_model
         torch, np, DT, ET, BlockModel, AttentionCache = _torch, _np, _dt, _et, _block_model, _attention_cache
@@ -52,9 +59,9 @@ def _first_existing(candidates):
 
 
 def runs():
-    """TinyStories kosulari (model.pt olan), butun RUN_ROOTS'tan, en son degisen once."""
+    """TinyStories ve SimpleStories kosulari (model.pt olan), butun RUN_ROOTS'tan, en son degisen once."""
     d = [os.path.join(root, x) for root in RUN_ROOTS if os.path.isdir(root) for x in os.listdir(root)
-         if x.startswith("tinystories") and "_eski_" not in x]
+         if x.startswith(("tinystories", "simplestories")) and "_eski_" not in x]
     d = [x for x in d if os.path.exists(os.path.join(x, "model.pt"))]
     return sorted(d, key=lambda x: os.path.getmtime(os.path.join(x, "model.pt")), reverse=True)
 
@@ -62,7 +69,7 @@ def runs():
 def find_run(pattern=None):
     all_runs = runs()
     if not all_runs:
-        print("KOSU YOK.  Aranan: %s\\tinystories*\\model.pt" % " ya da ".join(RUN_ROOTS))
+        print("KOSU YOK.  Aranan: %s\\{tinystories,simplestories}*\\model.pt" % " ya da ".join(RUN_ROOTS))
         return None
     if not pattern:
         return all_runs[0]
@@ -77,10 +84,18 @@ def find_run(pattern=None):
     return hit[0]
 
 
-def load_vocab():
+def load_vocab(run_dir):
+    """Kosunun verisine gore -> (sozluk, veri modulu, sinav modulu).  SimpleStories (config tag ss4096 / gpt2):
+    tokenizer.json (train akisi yuklenmez); TinyStories: onbellekteki sozluk.  Iki veri modulunde encode, decode,
+    EOS_TOKEN ayni adla."""
     _heavy()
+    tag = json.load(open(os.path.join(run_dir, "config.json"))).get("tag")
+    if tag in DS.TAGS:
+        d = os.path.join(_first_existing(SS_DIRS), tag)
+        eos = json.load(open(os.path.join(d, "fingerprint.json"), encoding="utf-8"))["eos"]
+        return DS._load(os.path.join(d, "tokenizer.json"), eos)[1], DS, ES
     d = _first_existing(TS_DIRS)
-    return [str(a) for a in np.load(os.path.join(d, "sozluk_%s.npy" % DT.TAG), allow_pickle=True)]
+    return [str(a) for a in np.load(os.path.join(d, "sozluk_%s.npy" % DT.TAG), allow_pickle=True)], DT, ET
 
 
 def load_model(run_dir, n_vocab, averaged=False):
@@ -89,7 +104,8 @@ def load_model(run_dir, n_vocab, averaged=False):
     cfg = json.load(open(os.path.join(run_dir, "config.json")))
     kw = dict(cfg["model_kw"])
     # eski kosular: tek Block, tek head, ReLU, sabit cikis olcegi, tek parca kayip (yalniz egitimde fark eder)
-    kw = dict(dict(layers=1, heads=1, fact_activation="relu", learn_output_scale=False, loss_chunk=0), **kw)
+    kw = dict(dict(layers=1, heads=1, fact_activation="relu", learn_output_scale=False, loss_chunk=0,
+                   output_link=False, shared_facts=True), **kw)   # 29 Eylul oncesi config'lerde yazilmadi
     assert not kw.pop("output_skip", False), "output_skip (28 Eylul) kaldirildi"
     assert not cfg.get("copy_path"), "kopya yolu (Oneri A) 28 Eylul'de kaldirildi"
     m = BlockModel(n_vocab, seed=0, stream_norm=cfg.get("stream_norm", True),
@@ -110,9 +126,10 @@ def summary(run_dir, cfg, averaged):
     print("=" * 74)
     print("kosu    %s/%s%s" % (os.path.basename(os.path.dirname(run_dir)), os.path.basename(run_dir),
                                "   (ORTALAMA agirliklar)" if averaged else ""))
-    print("model   D %s  katman %s  tur %s  FactUnits %s   adim %s (%.2f epok)   takvim %s" % (
-        kw.get("d"), kw.get("layers", 1), kw.get("turns"), kw.get("units"), "{:,}".format(cfg["steps"]),
-        cfg.get("epochs", 0), cfg.get("schedule", "?")))
+    print("model   D %s  katman %s  tur %s  FactUnits %s%s%s   adim %s (%.2f epok)   takvim %s   veri %s" % (
+        kw.get("d"), kw.get("layers", 1), kw.get("turns"), kw.get("units"),
+        " tur basina" if kw.get("shared_facts") is False else "", "  phi" if kw.get("output_link") else "",
+        "{:,}".format(cfg["steps"]), cfg.get("epochs", 0), cfg.get("schedule", "?"), cfg.get("tag", "tinystories")))
     f = os.path.join(run_dir, "final.json")
     if os.path.exists(f):
         v = json.load(open(f, encoding="utf-8"))["valid"]
@@ -120,9 +137,10 @@ def summary(run_dir, cfg, averaged):
     print("=" * 74)
 
 
-def generate(model, ids, n, vocab, temp=0.0, top_p=1.0, penalty=1.0, banned=()):
-    """Tek istem, token token, onbellekli (istem bir kez, sonra yalniz yeni konum; istem + n <= 512).  <eos>'ta durur."""
-    eos = vocab.index(DT.EOS_TOKEN)
+def generate(model, ids, n, vocab, temp=0.0, top_p=1.0, penalty=1.0, banned=(), data=None):
+    """Tek istem, token token, onbellekli (istem bir kez, sonra yalniz yeni konum; istem + n <= 512).  <eos>'ta durur.
+    data: veri modulu (EOS_TOKEN; varsayilan TinyStories)."""
+    eos = vocab.index((data or DT).EOS_TOKEN)
     ban = [vocab.index(t) for t in banned]
     out = []
     x = list(ids)
@@ -171,7 +189,7 @@ def main():
         try:
             state["run"] = find_run(sys.argv[1] if len(sys.argv) > 1 else None)
             if state["run"]:
-                state["vocab"] = load_vocab()
+                state["vocab"], state["data"], state["exam"] = load_vocab(state["run"])
                 state["model"], state["cfg"] = load_model(state["run"], len(state["vocab"]))
         except BaseException as e:
             state["error"] = e
@@ -228,29 +246,31 @@ def main():
             run = state["run"] if g == "ema" else find_run(g[6:].strip())
             averaged = (not state["averaged"]) if g == "ema" else False
             if run:
-                m, cfg = load_model(run, len(state["vocab"]), averaged)
+                vocab_, data_, exam_ = load_vocab(run)            # baska veriyle egitilmis kosu: kendi sozlugu
+                m, cfg = load_model(run, len(vocab_), averaged)
                 if m is not None:
-                    state.update(run=run, model=m, cfg=cfg, averaged=averaged)
+                    state.update(run=run, model=m, cfg=cfg, averaged=averaged, vocab=vocab_, data=data_, exam=exam_)
                     summary(run, cfg, averaged)
             continue
-        vocab = state["vocab"]
-        eos = vocab.index(DT.EOS_TOKEN)
+        vocab, D, E = state["vocab"], state["data"], state["exam"]
+        eos = vocab.index(D.EOS_TOKEN)
         if g == "serbest":
             g = ""
         elif not g:
-            g = random.choice(ET.PROMPTS)
-        ids = [eos] + DT.encode(g, vocab)
-        n_unknown = sum(1 for t in ids if vocab[t] == DT.UNK_TOKEN)
+            g = random.choice(E.PROMPTS)
+        ids = [eos] + D.encode(g, vocab)
+        n_unknown = sum(1 for t in ids if vocab[t] == D.UNK_TOKEN)
+        # SimpleStories'te dolgu = eos: yasaklanirsa model hic durmaz; sozlukte olmayan (gpt2'de [UNK]) atlanir
+        ban = tuple(t for t in (D.PAD_TOKEN, D.UNK_TOKEN) if t != D.EOS_TOKEN and t in vocab) if banned else ()
         steps = min(n, 512 - len(ids))
-        out = generate(state["model"], ids, steps, vocab, temp, top_p, penalty,
-                       (DT.PAD_TOKEN, DT.UNK_TOKEN) if banned else ())
+        out = generate(state["model"], ids, steps, vocab, temp, top_p, penalty, ban, D)
         in_quote = sum(vocab[t] == '"' for t in ids[1:]) % 2 == 1
         print()
         print_wrapped("ISTEM%s" % ("   (%d kelime sozlukte YOK)" % n_unknown if n_unknown else ""),
-                      DT.decode(ids[1:], vocab) or "(bos)")
+                      D.decode(ids[1:], vocab) or "(bos)")
         print_wrapped("MODEL  (sicaklik %.2f, top-p %.2f, tekrar cezasi %.2f)%s" % (
             temp, top_p, penalty, "" if len(out) < steps else "  -- sinira geldi, kesildi"),
-            DT.decode(out, vocab, in_quote=in_quote))
+            D.decode(out, vocab, in_quote=in_quote))
         print()
 
 

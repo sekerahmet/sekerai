@@ -1596,9 +1596,12 @@ def t_learn_output_scale():
     sys.path.insert(0, os.path.join(HERE, "train_tinystories"))
     import konus_y as K
     tmp = tempfile.mkdtemp()
-    for sub, model_ in (("old", off), ("new", trained)):
+    legacy = BlockModel(nv, learn_output_scale=False, output_link=False, shared_facts=True)   # 29 Eylul oncesi kosu
+    for sub, model_ in (("old", off), ("new", trained), ("legacy", legacy)):
         os.makedirs(os.path.join(tmp, sub))
         kw_ = dict(d=64, turns=4, layers=2, heads=4, fact_activation="swiglu", units=170, t_max=512)
+        if sub != "legacy":                                  # kosucular (29 Eylul'den) iki anahtari hep yazar
+            kw_.update(output_link=model_.output_link, shared_facts=model_.shared_facts)
         if sub == "new":
             kw_["learn_output_scale"] = True
         json.dump(dict(setting="shared", model_kw=kw_, rope=True, normalized_update=True, sphere_weights=True, canon=True,
@@ -1606,9 +1609,11 @@ def t_learn_output_scale():
         torch.save(model_.state_dict(), os.path.join(tmp, sub, "model.pt"))
     lo, _ = K.load_model(os.path.join(tmp, "old"), nv)
     lnew, _ = K.load_model(os.path.join(tmp, "new"), nv)
+    lleg, _ = K.load_model(os.path.join(tmp, "legacy"), nv)      # anahtarsiz config: phi kapali, FactUnits paylasimli
     with torch.no_grad():
         loaded = (not lo.learn_output_scale and torch.equal(lo.logits(ids), off.logits(ids)) and lnew.learn_output_scale
-                  and torch.equal(lnew.logits(ids), trained.logits(ids)))
+                  and torch.equal(lnew.logits(ids), trained.logits(ids)) and not lleg.output_link and lleg.shared_facts
+                  and torch.equal(lleg.logits(ids), legacy.logits(ids)))
 
     s = D.build(step_answers=True)
     kw = dict(steps=2, every=100, device="cpu", save_every=1, model_kw=dict(d=16, units=16))
