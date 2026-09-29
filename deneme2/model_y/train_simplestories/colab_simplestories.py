@@ -1,17 +1,25 @@
 # -*- coding: utf-8 -*-
-"""colab_tinystories -- TinyStories egitiminin Colab kosulari.  Egitim arka planda bir iplikte; hucre hemen doner (kural 8).
+"""colab_simplestories -- SimpleStories egitiminin Colab kosulari (colab_tinystories duzeni).  Egitim arka planda bir
+iplikte; hucre hemen doner (kural 8).
 
-    import colab_tinystories as C
+    import data_simplestories as DS, colab_simplestories as C
+    DATA = DS.build(SS_DIR, TAG)                   TAG: "ss4096" | "gpt2"; sozluk buyuklugu veriden
     C.start(NAME, DATA, OUT, steps=S, seed=0, every=500, device="cuda", batch_size=64, save_every=500)
     C.pulse()      her kosunun durumu ve son satirlari
     C.stop()       bayrak: iplik bir sonraki sinavda modeli kaydedip cikar
 
-Mini-batch: data_tinystories.batches (adimin fonksiyonu; surdurmede ayni parca).  OUT/config.json kosu ayarlari,
-OUT/log.txt her sinavin satiri, OUT/exams.json butun sinavlar (sayilar + ilk PROBE_PROMPTS istemin metni),
-OUT/model.pt son agirlik, OUT/final.json sonda butun valid (sizintisiz) + sabit alt kume + butun istemler + valid
-hikayelerinin devami (gercegiyle), OUT/checkpoint_tNNNNNN.pt her save_every adimda surdurme paketi (resume=True).
+Mini-batch: data_simplestories.batches (adimin fonksiyonu; surdurmede ayni parca; uzun hikaye bolunmus pencereler).
+OUT/config.json kosu ayarlari (tag, iz), OUT/log.txt her sinavin satiri, OUT/exams.json butun sinavlar (sayilar, ilk
+PROBE_PROMPTS istemin metni, calisma: step_ms ve gpu_peak_gb), OUT/model.pt son agirlik, OUT/final.json sonda butun sinav
+kumesi + sabit alt kume + butun istemler + valid hikayelerinin devami (gercegiyle), OUT/checkpoint_tNNNNNN.pt her
+save_every adimda surdurme paketi (resume=True).
+Calisma olcumu (gpt2'de 50k sozluk; kullanici, 28 Eylul: "calisma performansina bakacagiz"): step_ms = son sinavdan bu
+yana adim basina sure (sinav suresi haric; ilk aralik compile'i da icerir), gpu_peak_gb = o aralikta GPU tepe bellegi
+(torch.cuda.max_memory_allocated; sinavdan sonra sifirlanir).  Kayip parcali (model_kw loss_chunk) ve matmul_precision
+config'te ve ilk satirda.
 """
 import json
+import math
 import os
 import sys
 import threading
@@ -22,14 +30,14 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # model_y: model ve genel egitim
 
-import data_tinystories as DT  # noqa: E402
-import exam_tinystories as ET  # noqa: E402
+import data_simplestories as DS  # noqa: E402
+import exam_simplestories as ES  # noqa: E402
 import model_y as M  # noqa: E402
 import train_y as TR  # noqa: E402
 
-BATCH_SIZE = 64          # model_18 v4 ile ayni: 1 epok 41.602 adim; logits fp32 64 x 511 x 8.004 = 1,05 GB
+BATCH_SIZE = 64          # colab_tinystories ile ayni; 1 epok = 35.382 adim (ss4096) / 35.251 (gpt2), bolunmus pencerelerle
 PROBE_TOKENS = 80        # her sinavda istem basina uretilen token
-FINAL_TOKENS = 200       # sonda istem basina (ortalama hikaye 194 token)
+FINAL_TOKENS = 300       # sonda istem basina (ortalama hikaye ~287 token)
 FINAL_STORIES = 8        # sonda ilk yarisi verilen valid hikayesi (sabit alt kumenin ilk 8'i)
 RUNS = {}
 
@@ -37,11 +45,12 @@ RUNS = {}
 def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True, setting="shared", save_every=None,
           resume=False, batch_size=BATCH_SIZE, model_kw=None, bucket=None, **train_kw):
     """Egitimi arka planda baslatir, hemen doner.  out doluysa once out_eski_<zaman>'a TASINIR, silinmez.
+    data: data_simplestories.build(root, tag) -- tag ve iz config'e yazilir, sozluk buyuklugu len(data["vocab"]).
     setting "shared": Model X; model_kw bos kalan ayarlar model_y varsayilanlari (config'e acik yazilir).
     compile=True (varsayilan; kullanici: "bu sabit ayar ve yes olsun").
     save_every: her save_every adimda out/checkpoint_tNNNNNN.pt {step, model, optimizer}.  resume=True: out'taki son
     paketten surdurur -- klasor tasinmaz, gunluk uzar, paketten sonraki sinavlar atilir; ayarlar config.json ile ayni olmali.
-    bucket: data_tinystories.batches'e gider (None: rastgele batch; K: uzunluga gore gruplama, tarif degisikligi)."""
+    bucket: data_simplestories.batches'e gider (None: rastgele batch; K: uzunluga gore gruplama)."""
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
     if setting in TR.STEP3:
@@ -51,11 +60,12 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                         **(model_kw or {}))
     per_epoch = len(data["train_start"]) // batch_size
     assert per_epoch > 0, "batch_size (%d) > train penceresi (%d)" % (batch_size, len(data["train_start"]))
-    rows = ET.exam_rows(data)
-    # varsayilanlar da yazilir: config tek basina kosuyu tarif etsin
+    rows = ES.exam_rows(data)
     compile = compile and torch.device(device).type == "cuda"     # train_seq ile ayni kural: compile yalniz GPU'da
+    cuda = torch.device(device).type == "cuda"
+    # varsayilanlar da yazilir: config tek basina kosuyu tarif etsin
     config = dict(name=name, setting=setting, steps=steps, seed=seed, every=every, device=device, compile=compile,
-                  fingerprint=data["fingerprint"], seq_len=data["seq_len"], vocab=len(data["vocab"]),
+                  tag=data["tag"], fingerprint=data["fingerprint"], seq_len=data["seq_len"], vocab=len(data["vocab"]),
                   train_windows=len(data["train_start"]), exam_stories=len(rows), batch_size=batch_size,
                   steps_per_epoch=per_epoch, epochs=round(steps / per_epoch, 4), save_every=save_every, model_kw=model_kw,
                   bucket=bucket,
@@ -77,22 +87,9 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         if not packs:
             raise RuntimeError("%s: surdurme paketi yok; bastan kosmak ayri karar (resume=False)" % out)
         saved = json.load(open(os.path.join(out, "config.json")))
-        assert not saved.pop("copy_path", False), "kopya yolu (Oneri A) 28 Eylul'de kaldirildi: bu kosu surdurulemez"
-        # 27 Eylul oncesi config'lerde optimizer / takvim / bucket yok: o kosular Adam + cosine, rastgele batch idi.
-        # compile sonucu degistirir: karsilastirilir.  Anahtarsiz eski config'ler: fp32, rho ussu 1, Muon'da izdusum yok
-        # (yorunge degismesin)
-        saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN,
-                          normalized_update=False, sphere_weights=False, canon=False, bucket=None,
-                          coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,
-                          weight_ema=TR.WEIGHT_EMA, matmul_precision="fp32", coherence_power=1.0, muon_tangent=False,
-                          final_cooldown_shape="sqrt"),
-                     **saved)
-        if setting in TR.STEP3 and saved.get("model_kw"):   # 28 Eylul oncesi model_kw'de layers yok: tek Block idi
-            saved["model_kw"] = dict(dict(layers=1, heads=1, fact_activation="relu", learn_output_scale=False, output_link=False, loss_chunk=0,
-                                          last_facts_alpha_init=M.ALPHA_INIT),
-                                     **saved["model_kw"])     # eskiler: tek Block, tek head, ReLU, sabit cikis olcegi, tek parca
-                                                              # kayip, butun alpha'lar ALPHA_INIT'ten
-            assert not saved["model_kw"].pop("output_skip", False), "output_skip (28 Eylul) kaldirildi: bu kosu surdurulemez"
+        saved.setdefault("final_cooldown_shape", "sqrt")          # 29 Eylul oncesi kosularda yazilmadi: sqrt idi
+        if setting in TR.STEP3 and saved.get("model_kw"):   # 29 Eylul oncesi kosularda output_link yazilmadi: yoktu
+            saved["model_kw"] = dict(dict(output_link=False), **saved["model_kw"])
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)
@@ -106,10 +103,10 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
     if resume:                                         # paketten sonraki sinavlar yeniden kosulacak: cift satir olmasin
         exams = [e for e in json.load(open(os.path.join(out, "exams.json"), encoding="utf-8"))
                  if e["step"] <= checkpoint["step"]]
-    run = dict(name=name, out=out, lines=[], stop=False, error=None, done=False, t0=time.time(), exams=exams)
+    run = dict(name=name, out=out, lines=[], stop=False, error=None, done=False, t0=time.time(), exams=exams, mark=None)
     vocab = data["vocab"]
-    eos = vocab.index(DT.EOS_TOKEN)
-    probes = [[eos] + DT.encode(p, vocab) for p in ET.PROMPTS[:ET.PROBE_PROMPTS]]
+    eos = vocab.index(DS.EOS_TOKEN)
+    probes = [[eos] + DS.encode(p, vocab) for p in ES.PROMPTS[:ES.PROBE_PROMPTS]]
 
     class Stopped(Exception):
         pass
@@ -120,27 +117,35 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
             f.write(line + "\n")
 
     def callback(step, model, nll):
+        perf = {}
+        if run["mark"] is not None and step > run["mark"][0]:   # sinav disi: son sinavin bitisinden bu yana
+            perf["step_ms"] = round(1000 * (time.time() - run["mark"][1]) / (step - run["mark"][0]), 1)
+        if cuda:
+            perf["gpu_peak_gb"] = round(torch.cuda.max_memory_allocated() / 1e9, 3)
         if "params" not in run:
             run["params"] = sum(p.numel() for p in model.parameters() if p.requires_grad)
             note("parametre %d  |  %s" % (run["params"], json.dumps(model_kw)))
-        e = dict(step=step, epoch=round(step / per_epoch, 4), train_nll=nll, **ET.exam(model, data, rows))
+        e = dict(step=step, epoch=round(step / per_epoch, 4), train_nll=nll, **ES.exam(model, data, rows), **perf)
         if getattr(model, "coherence", None):         # schedule coherence: son adimin olcumu (c, rho, ortalama, lr)
             e.update(coherence=dict(model.coherence))
         if getattr(model, "weight_ema", None):        # ortalama model: ayni sinav; fark = titresimin bedeli
-            e.update(weight_ema=ET.exam(model.weight_ema["model"], data, rows))
+            e.update(weight_ema=ES.exam(model.weight_ema["model"], data, rows))
         if getattr(model, "learn_output_scale", False):   # ogrenilen cikis olcegi e^tau
             e.update(output_scale=float(model.log_output_scale.detach().exp()))
         if getattr(model, "output_link", False):          # cikis bagi phi: q, u
             e.update(link_q=float(model.link_q.detach()), link_u=float(model.link_u.detach()))
-        written = ET.texts(model, data, probes, PROBE_TOKENS)
-        e.update(ET.loop_check([w["ids"] for w in written]), texts=[w["model"] for w in written],
+        written = ES.texts(model, data, probes, PROBE_TOKENS)
+        e.update(ES.loop_check([w["ids"] for w in written]), texts=[w["model"] for w in written],
                  secs=round(time.time() - run["t0"], 1))
         run["exams"].append(e)
         json.dump(run["exams"], open(os.path.join(out, "exams.json"), "w", encoding="utf-8"), indent=1, ensure_ascii=False)
-        note("adim %6d  epok %.3f  nll %.3f | val nll %.3f ppl %.2f acc %.4f (%.3f/%.3f/%.3f) eos %.2f | dongu %d/%d "
-             "farkli4 %.2f  (%.0f sn)" % (step, e["epoch"], nll, e["nll"], e["ppl"], e["accuracy"], e["acc_0_64"],
-                                          e["acc_64_256"], e["acc_256_512"], e["eos_ok"], e["loop"], len(probes),
-                                          e["distinct4"], e["secs"])
+        note("adim %6d  epok %.3f  nll %.3f%s | val nll %.3f ppl %.2f acc %.4f (%.3f/%.3f/%.3f) eos %.2f bpb %.4f "
+             "(eos %.4f) | dongu %d/%d farkli4 %.2f  (%.0f sn)"
+             % (step, e["epoch"], nll, "" if math.isfinite(nll) else " SONLU DEGIL", e["nll"], e["ppl"], e["accuracy"],
+                e["acc_0_64"], e["acc_64_256"], e["acc_256_512"], e["eos_ok"], e["bits_per_byte"], e["bits_per_byte_eos"],
+                e["loop"], len(probes), e["distinct4"], e["secs"])
+             + (" | %.0f ms/adim" % e["step_ms"] if "step_ms" in e else "")
+             + (" gpu %.2f GB" % e["gpu_peak_gb"] if "gpu_peak_gb" in e else "")
              + (" | c %.3f rho %.3f ort %.3f lr %.5f" % tuple(e["coherence"][k] for k in ("c", "rho", "mean", "lr"))
                 if "coherence" in e else "")
              + (" | ema ppl %.2f (fark %.3f nat)" % (e["weight_ema"]["ppl"], e["nll"] - e["weight_ema"]["nll"])
@@ -150,6 +155,9 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         if run["stop"]:
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             raise Stopped()
+        if cuda:
+            torch.cuda.reset_peak_memory_stats()
+        run["mark"] = (step, time.time())
 
     def save(step, model, opt):
         torch.save(dict(step=step, model=model.state_dict(), optimizer=opt.state_dict()),
@@ -160,20 +168,26 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
             if checkpoint is not None:
                 note("SURDURULDU adim %d'den (checkpoint_t%06d.pt)" % (checkpoint["step"], checkpoint["step"]))
             else:
-                note("veri iz %s  train %d pencere  epok = %d adim (batch %d)  %d adim = %.3f epok  sinav %d hikaye" % (
-                    data["fingerprint"], len(data["train_start"]), per_epoch, batch_size, steps, steps / per_epoch,
-                    len(rows)))
+                note("veri %s iz %s  sozluk %d  train %d pencere  epok = %d adim (batch %d)  %d adim = %.3f epok  sinav %d "
+                     "hikaye  |  loss_chunk %s  matmul %s  compile %s" % (
+                         data["tag"], data["fingerprint"], len(vocab), len(data["train_start"]), per_epoch, batch_size,
+                         steps, steps / per_epoch, len(rows), (model_kw or {}).get("loss_chunk"),
+                         config["matmul_precision"], compile))
             model, _ = TR.train_seq(setting, None, None, len(vocab), steps=steps, seed=seed, device=device, every=every,
                                     callback=callback, log_at=(), compile=compile, save_every=save_every, save=save,
-                                    checkpoint=checkpoint, batches=DT.batches(data, batch_size, seed, bucket), model_kw=model_kw,
+                                    checkpoint=checkpoint, batches=DS.batches(data, batch_size, seed, bucket),
+                                    model_kw=model_kw,
                                     **dict(train_kw, matmul_precision=config["matmul_precision"],
                                            coherence_power=config["coherence_power"], muon_tangent=config["muon_tangent"]))
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
-            final = dict(step=steps, valid=ET.exam(model, data, ET.exam_rows(data, None)), subset=ET.exam(model, data, rows))
-            final["prompts"] = ET.texts(model, data, [[eos] + DT.encode(p, vocab) for p in ET.PROMPTS], FINAL_TOKENS)
-            halves, reals = ET.story_prompts(data, rows[:FINAL_STORIES])
-            final["stories"] = ET.texts(model, data, halves, FINAL_TOKENS, reals=reals)
-            final["loops"] = ET.loop_check([w["ids"] for w in final["prompts"]])
+            final = dict(step=steps, valid=ES.exam(model, data, ES.exam_rows(data, None)), subset=ES.exam(model, data, rows))
+            final["prompts"] = ES.texts(model, data, [[eos] + DS.encode(p, vocab) for p in ES.PROMPTS], FINAL_TOKENS)
+            halves, reals = ES.story_prompts(data, rows[:FINAL_STORIES])
+            final["stories"] = ES.texts(model, data, halves, FINAL_TOKENS, reals=reals)
+            final["loops"] = ES.loop_check([w["ids"] for w in final["prompts"]])
+            peaks = [e["gpu_peak_gb"] for e in run["exams"] if "gpu_peak_gb" in e]
+            times = [e["step_ms"] for e in run["exams"] if "step_ms" in e]
+            final["perf"] = dict(step_ms=times[-1] if times else None, gpu_peak_gb=max(peaks) if peaks else None)
             if getattr(model, "learn_output_scale", False):
                 final["output_scale"] = float(model.log_output_scale.detach().exp())
             if getattr(model, "output_link", False):
@@ -181,23 +195,24 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
             if getattr(model, "weight_ema", None):    # ortalama model de ayni son sinavdan gecer
                 em = model.weight_ema["model"]
                 torch.save(em.state_dict(), os.path.join(out, "model_weight_ema.pt"))
-                final["weight_ema"] = dict(valid=ET.exam(em, data, ET.exam_rows(data, None)), subset=ET.exam(em, data, rows),
-                                           prompts=ET.texts(em, data, [[eos] + DT.encode(p, vocab) for p in ET.PROMPTS],
+                final["weight_ema"] = dict(valid=ES.exam(em, data, ES.exam_rows(data, None)), subset=ES.exam(em, data, rows),
+                                           prompts=ES.texts(em, data, [[eos] + DS.encode(p, vocab) for p in ES.PROMPTS],
                                                             FINAL_TOKENS),
-                                           stories=ET.texts(em, data, halves, FINAL_TOKENS, reals=reals))
-                final["weight_ema"]["loops"] = ET.loop_check([w["ids"] for w in final["weight_ema"]["prompts"]])
+                                           stories=ES.texts(em, data, halves, FINAL_TOKENS, reals=reals))
+                final["weight_ema"]["loops"] = ES.loop_check([w["ids"] for w in final["weight_ema"]["prompts"]])
             json.dump(final, open(os.path.join(out, "final.json"), "w", encoding="utf-8"), indent=1, ensure_ascii=False)
             for k in ("valid", "subset"):
                 v = final[k]
-                note("SON %-6s n %d  nll %.4f ppl %.2f acc %.4f (%.3f/%.3f/%.3f) eos %.3f ar %.3f" % (
+                note("SON %-6s n %d  nll %.4f ppl %.2f acc %.4f (%.3f/%.3f/%.3f) eos %.3f ar %.3f  bpb %.4f (eos %.4f)" % (
                     k, v["n"], v["nll"], v["ppl"], v["accuracy"], v["acc_0_64"], v["acc_64_256"], v["acc_256_512"],
-                    v["eos_ok"], v["acc_ar"]))
-            note("SON istemler: dongu %d/%d  farkli4 %.2f" % (final["loops"]["loop"], len(ET.PROMPTS),
-                                                            final["loops"]["distinct4"]))
+                    v["eos_ok"], v["acc_ar"], v["bits_per_byte"], v["bits_per_byte_eos"]))
+            note("SON istemler: dongu %d/%d  farkli4 %.2f  |  calisma %s" % (
+                final["loops"]["loop"], len(ES.PROMPTS), final["loops"]["distinct4"], json.dumps(final["perf"])))
             if "weight_ema" in final:
                 w_ = final["weight_ema"]
-                note("SON ortalama model: valid ppl %.2f acc %.4f | subset ppl %.2f | dongu %d/%d" % (
-                    w_["valid"]["ppl"], w_["valid"]["accuracy"], w_["subset"]["ppl"], w_["loops"]["loop"], len(ET.PROMPTS)))
+                note("SON ortalama model: valid ppl %.2f bpb %.4f acc %.4f | subset ppl %.2f | dongu %d/%d" % (
+                    w_["valid"]["ppl"], w_["valid"]["bits_per_byte"], w_["valid"]["accuracy"], w_["subset"]["ppl"],
+                    w_["loops"]["loop"], len(ES.PROMPTS)))
             run["done"] = True
             note("BITTI  %.0f sn" % (time.time() - run["t0"]))
         except Stopped:
@@ -213,13 +228,15 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
 
 
 def pulse(k=3):
-    """Her kosu: durum, sure ve son k satir."""
+    """Her kosu: durum, sure ve son k satir; GPU'da o anki ve tepe bellek."""
     if not RUNS:
         print("kosu yok")
     for name, run in RUNS.items():
         state = ("KOSUYOR" if run["thread"].is_alive() else "BITTI" if run["done"] else "HATA" if run["error"]
                  else "DURDU")
-        print("%s  %s  %.0f sn  %s" % (name, state, time.time() - run["t0"], run["out"]))
+        mem = (" | gpu %.2f GB (tepe %.2f)" % (torch.cuda.memory_allocated() / 1e9, torch.cuda.max_memory_allocated() / 1e9)
+               if torch.cuda.is_available() else "")
+        print("%s  %s  %.0f sn  %s%s" % (name, state, time.time() - run["t0"], run["out"], mem))
         for line in run["lines"][-k:]:
             print("   " + line)
 

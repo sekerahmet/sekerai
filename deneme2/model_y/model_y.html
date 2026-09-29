@@ -1,0 +1,494 @@
+<title>Model Y</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+:root{
+  --paper:#F5F6F2; --ink:#1B232C; --muted:#5B6773; --line:#3A4552;
+  --cell:#FFFFFF; --cellb:#C9D0D6;
+  --learn-f:#F4E4C4; --learn-s:#A5641A;
+  --op-f:#FFFFFF; --op-s:#3A4552;
+  --fixed-f:#E6E9EC; --fixed-s:#7A8793;
+  --rope:#0A7A83; --rope-f:#D3EEF0;
+  --canon:#8E3B8A; --canon-f:#F4E3F2;
+  --stream:#2E5596; --loop:#7B5AA6; --tied:#8A6D3B;
+  --block-f:#EBEFF4; --block-s:#9AA8B8; --panel-f:#F8FAFC; --panel-s:#C3CDD8;
+  --out-f:#E3EFE0; --out-s:#3F7A45; --new:#1E8A4C;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --paper:#101418; --ink:#DCE3EA; --muted:#94A1AE; --line:#B7C2CD;
+    --cell:#171C22; --cellb:#39424C;
+    --learn-f:#3A2B12; --learn-s:#E2A24C;
+    --op-f:#161B21; --op-s:#AEB9C4;
+    --fixed-f:#20262D; --fixed-s:#7F8C98;
+    --rope:#4CC8D1; --rope-f:#0E3134;
+    --canon:#D98AD3; --canon-f:#34182F;
+    --stream:#86A8E6; --loop:#B79BE0; --tied:#CDAE74;
+    --block-f:#151A21; --block-s:#3B4652; --panel-f:#12161B; --panel-s:#323C47;
+    --out-f:#15261A; --out-s:#76C07E; --new:#5FD08C;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --paper:#101418; --ink:#DCE3EA; --muted:#94A1AE; --line:#B7C2CD;
+    --cell:#171C22; --cellb:#39424C;
+    --learn-f:#3A2B12; --learn-s:#E2A24C;
+    --op-f:#161B21; --op-s:#AEB9C4;
+    --fixed-f:#20262D; --fixed-s:#7F8C98;
+    --rope:#4CC8D1; --rope-f:#0E3134;
+    --canon:#D98AD3; --canon-f:#34182F;
+    --stream:#86A8E6; --loop:#B79BE0; --tied:#CDAE74;
+    --block-f:#151A21; --block-s:#3B4652; --panel-f:#12161B; --panel-s:#323C47;
+    --out-f:#15261A; --out-s:#76C07E; --new:#5FD08C;
+}
+body{background:var(--paper);color:var(--ink);font-family:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:1280px;margin:0 auto;padding-inline:16px;padding-block:20px 28px}
+header{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 18px;margin-bottom:10px}
+h1{font-family:"IBM Plex Sans Condensed","IBM Plex Sans",system-ui,sans-serif;font-weight:600;font-size:28px;letter-spacing:.01em;margin:0;text-wrap:balance}
+.meta{font-family:"IBM Plex Mono",ui-monospace,Consolas,monospace;font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.fig{margin:0;overflow-x:auto}
+.fig svg{display:block;width:100%;min-width:1040px;height:auto;color:var(--ink)}
+figcaption{font-size:13px;color:var(--muted);max-width:75ch;margin-top:8px;line-height:1.5}
+svg text{fill:var(--ink);font-family:"IBM Plex Sans",system-ui,sans-serif}
+.eyebrow{font-size:11px;letter-spacing:.14em;font-weight:600;fill:var(--muted)}
+.sect{font-family:"IBM Plex Sans Condensed","IBM Plex Sans",sans-serif;font-size:16px;font-weight:600}
+.pt{font-family:"IBM Plex Sans Condensed","IBM Plex Sans",sans-serif;font-size:15px;font-weight:600}
+.bt{font-size:13px;font-weight:500}
+.btm{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:12px;font-weight:500}
+.btr{font-size:13px;font-weight:600;fill:var(--rope)!important}
+.bs{font-size:11px;fill:var(--muted)!important}
+.form{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11.5px;fill:var(--muted)!important}
+.hl{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:12px;font-weight:600;fill:var(--stream)!important}
+.xl{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:12px;font-weight:600;fill:var(--canon)!important}
+.tok{font-size:10px}
+.tokb{font-weight:700}
+.idx{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:9px;fill:var(--muted)!important}
+.tgl{font-size:10px;font-weight:600;fill:var(--out-s)!important}
+.arcl{font-size:10px;font-weight:600;fill:var(--rope)!important}
+.ropel{font-size:12.5px;font-weight:600;fill:var(--rope)!important}
+.ropes{font-size:10.5px;fill:var(--rope)!important}
+.canonl{font-size:12.5px;font-weight:600;fill:var(--canon)!important}
+.canons{font-size:10.5px;font-weight:600;fill:var(--canon)!important}
+.canonk{fill:var(--canon)!important;font-weight:600}
+.newk{fill:var(--new)!important;font-weight:600}
+.rk{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:12px}
+.rs{font-size:12px}
+.num{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:12px;font-variant-numeric:tabular-nums}
+.numm{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11.5px}
+.bold{font-weight:700}
+.vl{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11px}
+.loopl{font-size:11px;fill:var(--loop)!important;font-weight:500}
+.tiedl{font-size:11px;fill:var(--tied)!important;font-weight:500}
+.mulx{font-size:15px;font-weight:600}
+rect.cell{fill:var(--cell);stroke:var(--cellb);stroke-width:1}
+rect.canonhl{fill:var(--canon-f);stroke:var(--canon)}
+rect.query{stroke:var(--rope);stroke-width:2.2}
+rect.keyhl{fill:var(--rope-f);stroke:var(--rope)}
+rect.target{fill:var(--out-f);stroke:var(--out-s)}
+rect.learn{fill:var(--learn-f);stroke:var(--learn-s);stroke-width:1.4}
+rect.op{fill:var(--op-f);stroke:var(--op-s);stroke-width:1.2}
+rect.fixed{fill:var(--fixed-f);stroke:var(--fixed-s);stroke-width:1.2;stroke-dasharray:4 3}
+rect.rope{fill:var(--rope-f);stroke:var(--rope);stroke-width:2}
+rect.canon{fill:var(--canon-f);stroke:var(--canon);stroke-width:1.8}
+rect.out{fill:var(--out-f);stroke:var(--out-s);stroke-width:1.4}
+rect.block{fill:var(--block-f);stroke:var(--block-s);stroke-width:1.4;stroke-dasharray:7 4}
+rect.panel{fill:var(--panel-f);stroke:var(--panel-s);stroke-width:1}
+rect.canonpanel{fill:var(--panel-f);stroke:var(--canon);stroke-width:1.2}
+rect.updbox{fill:var(--panel-f);stroke:var(--stream);stroke-width:1.2}
+rect.newring{fill:none;stroke:var(--new);stroke-width:2;stroke-dasharray:5 3}
+path.ar{fill:none;stroke:var(--line);stroke-width:1.4}
+path.st{fill:none;stroke:var(--stream);stroke-width:2.6}
+path.xs{fill:none;stroke:var(--canon);stroke-width:2.2}
+path.loop{fill:none;stroke:var(--loop);stroke-width:1.8;stroke-dasharray:6 4}
+path.tied{fill:none;stroke:var(--tied);stroke-width:1.6;stroke-dasharray:3 4}
+path.arc{fill:none;stroke:var(--rope);stroke-width:2}
+path.arc.weak{stroke-width:1.2;stroke-dasharray:4 3;opacity:.8}
+path.brkc{fill:none;stroke:var(--canon);stroke-width:1.2}
+path.rule{stroke:var(--panel-s);stroke-width:1}
+path.vec{stroke:var(--ink);stroke-width:1.8}
+path.vec.new{stroke:var(--stream);stroke-width:2.4}
+path.chord{fill:none;stroke:var(--muted);stroke-width:1.2;stroke-dasharray:4 3}
+path.plusx{stroke:var(--ink);stroke-width:1.6}
+circle.plus{fill:var(--op-f);stroke:var(--ink);stroke-width:1.4}
+circle.mul{fill:var(--op-f);stroke:var(--new);stroke-width:1.8}
+circle.dot{fill:var(--stream)}
+circle.pt{fill:var(--ink)}
+circle.unit{fill:none;stroke:var(--muted);stroke-width:1;stroke-dasharray:3 3}
+.mk{fill:var(--line)} .mks{fill:var(--stream)} .mkr{fill:var(--rope)} .mkl{fill:var(--loop)} .mkt{fill:var(--tied)}
+.mkc{fill:var(--canon)}
+</style>
+<div class="wrap">
+<header>
+<h1>Model Y · 3 × 2</h1>
+<span class="meta">model_y · 3 blok × 2 tur · 4 head · SwiGLU · SimpleStories ayarı A (d 384) · tokenizer ss4096 / gpt2 · 28 Eylül 2026</span>
+</header>
+<figure class="fig">
+<svg viewBox="0 0 1240 1480" role="img" aria-label="Model Y, 3 blok x 2 tur: token noktaları PL; altı tur A B C A B C sırasıyla üç farklı Block (Canon, RoPE'lu nedensel attention ve SwiGLU FactUnits; her adım durumu alpha kadar yaklaştırıp küreye geri koyar); çıkışta aynı PL ile, öğrenilen ölçekle skor."><defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk"/></marker><marker id="ahs" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mks"/></marker><marker id="ahr" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mkr"/></marker><marker id="ahl" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mkl"/></marker><marker id="aht" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mkt"/></marker><marker id="ahc" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mkc"/></marker></defs><rect x="41" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="60.5" y="104" class="tok" text-anchor="middle">&lt;eos&gt;</text>
+<text x="60.5" y="130" class="idx" text-anchor="middle">0</text>
+<rect x="82" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="101.5" y="104" class="tok" text-anchor="middle">Lily</text>
+<text x="101.5" y="130" class="idx" text-anchor="middle">1</text>
+<rect x="123" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="142.5" y="104" class="tok" text-anchor="middle">and</text>
+<text x="142.5" y="130" class="idx" text-anchor="middle">2</text>
+<rect x="164" y="84" width="39" height="32" rx="3" class="cell keyhl"/>
+<text x="183.5" y="104" class="tok tokb" text-anchor="middle">Tom</text>
+<text x="183.5" y="130" class="idx" text-anchor="middle">3</text>
+<rect x="205" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="224.5" y="104" class="tok" text-anchor="middle">went</text>
+<text x="224.5" y="130" class="idx" text-anchor="middle">4</text>
+<rect x="246" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="265.5" y="104" class="tok" text-anchor="middle">to</text>
+<text x="265.5" y="130" class="idx" text-anchor="middle">5</text>
+<rect x="287" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="306.5" y="104" class="tok" text-anchor="middle">the</text>
+<text x="306.5" y="130" class="idx" text-anchor="middle">6</text>
+<rect x="328" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="347.5" y="104" class="tok" text-anchor="middle">park</text>
+<text x="347.5" y="130" class="idx" text-anchor="middle">7</text>
+<rect x="369" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="388.5" y="104" class="tok" text-anchor="middle">.</text>
+<text x="388.5" y="130" class="idx" text-anchor="middle">8</text>
+<rect x="410" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="429.5" y="104" class="tok tokb" text-anchor="middle">Lily</text>
+<text x="429.5" y="130" class="idx" text-anchor="middle">9</text>
+<rect x="451" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="470.5" y="104" class="tok" text-anchor="middle">had</text>
+<text x="470.5" y="130" class="idx" text-anchor="middle">10</text>
+<rect x="492" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="511.5" y="104" class="tok" text-anchor="middle">a</text>
+<text x="511.5" y="130" class="idx" text-anchor="middle">11</text>
+<rect x="533" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="552.5" y="104" class="tok" text-anchor="middle">red</text>
+<text x="552.5" y="130" class="idx" text-anchor="middle">12</text>
+<rect x="574" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="593.5" y="104" class="tok" text-anchor="middle">ball</text>
+<text x="593.5" y="130" class="idx" text-anchor="middle">13</text>
+<rect x="615" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="634.5" y="104" class="tok" text-anchor="middle">.</text>
+<text x="634.5" y="130" class="idx" text-anchor="middle">14</text>
+<rect x="656" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="675.5" y="104" class="tok" text-anchor="middle">She</text>
+<text x="675.5" y="130" class="idx" text-anchor="middle">15</text>
+<rect x="697" y="84" width="39" height="32" rx="3" class="cell canonhl"/>
+<text x="716.5" y="104" class="tok" text-anchor="middle">gave</text>
+<text x="716.5" y="130" class="idx" text-anchor="middle">16</text>
+<rect x="738" y="84" width="39" height="32" rx="3" class="cell canonhl"/>
+<text x="757.5" y="104" class="tok" text-anchor="middle">the</text>
+<text x="757.5" y="130" class="idx" text-anchor="middle">17</text>
+<rect x="779" y="84" width="39" height="32" rx="3" class="cell canonhl"/>
+<text x="798.5" y="104" class="tok" text-anchor="middle">ball</text>
+<text x="798.5" y="130" class="idx" text-anchor="middle">18</text>
+<rect x="820" y="84" width="39" height="32" rx="3" class="cell canonhl query"/>
+<text x="839.5" y="104" class="tok tokb" text-anchor="middle">to</text>
+<text x="839.5" y="130" class="idx" text-anchor="middle">19</text>
+<rect x="861" y="84" width="39" height="32" rx="3" class="cell target"/>
+<text x="880.5" y="104" class="tok tokb" text-anchor="middle">Tom</text>
+<text x="880.5" y="130" class="idx" text-anchor="middle">20</text>
+<rect x="902" y="84" width="39" height="32" rx="3" class="cell"/>
+<text x="921.5" y="104" class="tok" text-anchor="middle">.</text>
+<text x="921.5" y="130" class="idx" text-anchor="middle">21</text>
+<path d="M839.5,82 C839.5,36 183.5,36 183.5,81" class="arc" marker-end="url(#ahr)"/>
+<text x="511.5" y="38" class="arcl" text-anchor="middle">16 önce: Tom</text>
+<path d="M839.5,82 C839.5,58 429.5,58 429.5,81" class="arc weak" marker-end="url(#ahr)"/>
+<text x="634.5" y="76" class="arcl" text-anchor="middle">10 önce: Lily</text>
+<text x="880.5" y="76" class="tgl" text-anchor="middle">hedef</text>
+<path d="M699,135 L699,140 L857,140 L857,135" class="brkc"/>
+<text x="778" y="155" class="canons" text-anchor="middle">Canon: son 4 konum (t−3 … t)</text>
+<text x="980" y="26" class="eyebrow" text-anchor="start">GİRDİ</text>
+<text x="980" y="44" class="bs" text-anchor="start">örnek dizi, 22 konum</text>
+<text x="980" y="58" class="bs" text-anchor="start">gösterim kelimeyle; gerçekte alt-kelime</text>
+<text x="980" y="72" class="bs" text-anchor="start">token'ları (ss4096 ya da gpt2)</text>
+<text x="980" y="96" class="ropel" text-anchor="start">attention uzaktaki adı seçer</text>
+<text x="980" y="112" class="bs" text-anchor="start">'to' (19): 'Tom' mu, 'Lily' mi?</text>
+<text x="980" y="136" class="canonl" text-anchor="start">Canon: yakın ifadeyi karıştırır</text>
+<text x="980" y="152" class="bs" text-anchor="start">'gave the ball to' tek girdide</text>
+<text x="40" y="186" class="sect" text-anchor="start">TokenPoints</text>
+<rect x="40" y="196" width="170" height="50" rx="6" class="fixed"/>
+<text x="125" y="218" class="bt" text-anchor="middle">PF · V × 384</text>
+<text x="125" y="234" class="bs" text-anchor="middle">sabit noktalar, öğrenilmez</text>
+<circle cx="236" cy="221" r="11" class="plus"/>
+<path d="M230,221 L242,221 M236,215 L236,227" class="plusx"/>
+<rect x="262" y="196" width="170" height="50" rx="6" class="learn"/>
+<text x="347" y="218" class="bt" text-anchor="middle">shift · V × 384</text>
+<text x="347" y="234" class="bs" text-anchor="middle">öğrenilir, 0'dan</text>
+<path d="M210,221 L224,221" class="ar" marker-end="url(#ah)"/>
+<path d="M262,221 L248,221" class="ar" marker-end="url(#ah)"/>
+<rect x="150" y="270" width="172" height="44" rx="6" class="op"/>
+<text x="236" y="289" class="bt" text-anchor="middle">PL = norm(PF + shift)</text>
+<text x="236" y="305" class="bs" text-anchor="middle">V nokta, kürede</text>
+<path d="M236,232 L236,270" class="ar" marker-end="url(#ah)"/>
+<rect x="470" y="270" width="230" height="44" rx="6" class="op"/>
+<text x="585" y="289" class="bt" text-anchor="middle">h₀ = PL[ids]</text>
+<text x="585" y="305" class="bs" text-anchor="middle">(B, T, 384) · konum başına nokta</text>
+<path d="M322,292 L470,292" class="ar" marker-end="url(#ah)"/>
+<path d="M585,170 L585,268" class="ar" marker-end="url(#ah)"/>
+<text x="596" y="250" class="bs" text-anchor="start">ids</text>
+<text x="600" y="214" class="bs" text-anchor="start">V = 4.096 (ss4096) · 50.257 (gpt2)</text>
+<rect x="36" y="322" width="764" height="890" rx="10" class="block"/>
+<text x="140" y="344" class="sect" text-anchor="start">Block</text>
+<text x="192" y="344" class="bs" text-anchor="start">3 farklı Block (A, B, C) · 6 tur: A B C A B C · her Block kendi ağırlıkları · α tur başına</text>
+<path d="M585,314 L585,318 L120,318 L120,864" class="st" marker-end="url(#ahs)"/>
+<text x="128" y="474" class="hl" text-anchor="start">h</text>
+<rect x="170" y="352" width="614" height="92" rx="8" class="canonpanel"/>
+<text x="186" y="374" class="pt canonk" text-anchor="start">Canon</text>
+<text x="236" y="374" class="bs" text-anchor="start">attention'ın girdisi · son 4 konum, boyut başına ağırlık</text>
+<rect x="228" y="386" width="166" height="32" rx="6" class="learn"/>
+<text x="311" y="406.5" class="btm" text-anchor="middle">canon_weights · 4 × 384</text>
+<rect x="408" y="388" width="362" height="44" rx="6" class="canon"/>
+<text x="589" y="407" class="btm" text-anchor="middle">x_t = h_t + Σₖ wₖ ⊙ h_(t−k)</text>
+<text x="589" y="423" class="bs" text-anchor="middle">k = 0..3 · ⊙ boyut başına çarpım · w 0'dan</text>
+<path d="M394,402 L406,402" class="ar" marker-end="url(#ah)"/>
+<circle cx="120" cy="426" r="3.5" class="dot"/>
+<path d="M120,426 L406,426" class="st" marker-end="url(#ahs)"/>
+<rect x="170" y="462" width="614" height="384" rx="8" class="panel"/>
+<text x="186" y="484" class="pt" text-anchor="start">CausalAttention</text>
+<text x="312" y="484" class="bs" text-anchor="start">nedensel · 4 head × 96 boyut · her head kendi q, k, a ve değer dilimi</text>
+<path d="M585,432 L585,496 L200,496 L200,744 L226,744" class="xs" marker-end="url(#ahc)"/>
+<text x="596" y="454" class="xl" text-anchor="start">x</text>
+<path d="M200,530 L226,530" class="xs" marker-end="url(#ahc)"/>
+<rect x="228" y="512" width="140" height="36" rx="6" class="learn"/>
+<text x="298" y="534.5" class="btm" text-anchor="middle">W_query · 384×384</text>
+<path d="M368,530 L382,530" class="ar" marker-end="url(#ah)"/>
+<rect x="384" y="512" width="62" height="36" rx="6" class="op"/>
+<text x="415" y="527" class="bt" text-anchor="middle">norm</text>
+<text x="415" y="543" class="bs" text-anchor="middle">head başına</text>
+<path d="M446,530 L460,530" class="ar" marker-end="url(#ah)"/>
+<rect x="462" y="512" width="76" height="36" rx="6" class="rope"/>
+<text x="500" y="534.5" class="btr" text-anchor="middle">RoPE</text>
+<text x="546" y="535" class="hl" text-anchor="start">q_t</text>
+<path d="M200,594 L226,594" class="xs" marker-end="url(#ahc)"/>
+<rect x="228" y="576" width="140" height="36" rx="6" class="learn"/>
+<text x="298" y="598.5" class="btm" text-anchor="middle">W_key · 384×384</text>
+<path d="M368,594 L382,594" class="ar" marker-end="url(#ah)"/>
+<rect x="384" y="576" width="62" height="36" rx="6" class="op"/>
+<text x="415" y="591" class="bt" text-anchor="middle">norm</text>
+<text x="415" y="607" class="bs" text-anchor="middle">head başına</text>
+<path d="M446,594 L460,594" class="ar" marker-end="url(#ah)"/>
+<rect x="462" y="576" width="76" height="36" rx="6" class="rope"/>
+<text x="500" y="598.5" class="btr" text-anchor="middle">RoPE</text>
+<text x="546" y="599" class="hl" text-anchor="start">k_j</text>
+<text x="500" y="632" class="ropes" text-anchor="middle">konuma göre döndür</text>
+<text x="500" y="646" class="ropes" text-anchor="middle">boy 1 kalır · 0 sayı</text>
+<rect x="598" y="516" width="180" height="50" rx="6" class="op"/>
+<text x="688" y="538" class="btm" text-anchor="middle">s_tj = 10,83 · ⟨q_t, k_j⟩</text>
+<text x="688" y="554" class="bs" text-anchor="middle">head başına · cosine × sabit ölçek</text>
+<path d="M570,530 L596,534" class="ar" marker-end="url(#ah)"/>
+<path d="M570,594 L596,552" class="ar" marker-end="url(#ah)"/>
+<rect x="598" y="590" width="180" height="40" rx="6" class="op"/>
+<text x="688" y="607" class="btm" text-anchor="middle">j &gt; t  →  −∞</text>
+<text x="688" y="623" class="bs" text-anchor="middle">nedensel maske</text>
+<path d="M688,566 L688,588" class="ar" marker-end="url(#ah)"/>
+<rect x="598" y="652" width="180" height="44" rx="6" class="op"/>
+<text x="688" y="671" class="btm" text-anchor="middle">a_tj = softmax_j</text>
+<text x="688" y="687" class="bs" text-anchor="middle">4 head × (T × T) · satır toplamı 1</text>
+<path d="M688,630 L688,650" class="ar" marker-end="url(#ah)"/>
+<rect x="400" y="720" width="370" height="48" rx="6" class="op"/>
+<text x="585" y="741" class="btm" text-anchor="middle">c_t = [Σ_j a¹_tj v¹_j ; … ; Σ_j a⁴_tj v⁴_j]</text>
+<text x="585" y="757" class="bs" text-anchor="middle">4 head yan yana · vʰ = W_value x'in h. dilimi</text>
+<path d="M688,696 L688,718" class="ar" marker-end="url(#ah)"/>
+<rect x="228" y="726" width="150" height="36" rx="6" class="learn"/>
+<text x="303" y="748.5" class="btm" text-anchor="middle">W_value · 384×384</text>
+<text x="303" y="776" class="bs" text-anchor="middle">satırlar birim</text>
+<path d="M378,744 L398,744" class="ar" marker-end="url(#ah)"/>
+<rect x="480" y="790" width="210" height="44" rx="6" class="learn"/>
+<text x="585" y="809" class="btm" text-anchor="middle">W_context · 384×384</text>
+<text x="585" y="825" class="bs" text-anchor="middle">sütunlar birim</text>
+<path d="M585,768 L585,788" class="ar" marker-end="url(#ah)"/>
+<path d="M480,812 L150,812 L150,864" class="ar" marker-end="url(#ah)"/>
+<text x="300" y="806" class="bs" text-anchor="middle">norm(W_context · c)</text>
+<rect x="64" y="866" width="112" height="44" rx="6" class="op"/>
+<text x="120" y="885" class="bt" text-anchor="middle">yaklaş + norm</text>
+<text x="120" y="901" class="bs" text-anchor="middle">α_A</text>
+<rect x="600" y="868" width="180" height="40" rx="6" class="learn"/>
+<text x="690" y="885" class="btm" text-anchor="middle">α_A · 6 × 384</text>
+<text x="690" y="901" class="bs" text-anchor="middle">tur başına, 0,1'den</text>
+<path d="M600,888 L178,888" class="ar" marker-end="url(#ah)"/>
+<text x="190" y="930" class="form" text-anchor="start">h = norm(h + α_A ⊙ (norm(W_context c) − h))</text>
+<rect x="170" y="946" width="614" height="154" rx="8" class="panel"/>
+<text x="186" y="968" class="pt" text-anchor="start">FactUnits</text>
+<text x="266" y="968" class="bs" text-anchor="start">her konumda ayrı · SwiGLU · 1024 birim (8/3·d) · girdi x = √d · h</text>
+<path d="M120,910 L120,1110" class="st" marker-end="url(#ahs)"/>
+<circle cx="120" cy="1000" r="3.5" class="dot"/>
+<path d="M120,1000 L226,1000" class="st" marker-end="url(#ahs)"/>
+<circle cx="120" cy="1056" r="3.5" class="dot"/>
+<path d="M120,1056 L226,1056" class="st" marker-end="url(#ahs)"/>
+<rect x="228" y="980" width="150" height="40" rx="6" class="learn"/>
+<text x="303" y="997" class="btm" text-anchor="middle">W_fact_in · 1024×384</text>
+<text x="303" y="1013" class="bs" text-anchor="middle">satırlar birim · kapı</text>
+<path d="M378,1000 L392,1000" class="ar" marker-end="url(#ah)"/>
+<rect x="394" y="980" width="70" height="40" rx="6" class="op"/>
+<rect x="391" y="977" width="76" height="46" rx="8" class="newring"/>
+<text x="429" y="997" class="bt" text-anchor="middle">SiLU</text>
+<text x="429" y="1013" class="bs" text-anchor="middle">kapı</text>
+<rect x="228" y="1036" width="150" height="40" rx="6" class="learn"/>
+<rect x="225" y="1033" width="156" height="46" rx="8" class="newring"/>
+<text x="303" y="1053" class="btm" text-anchor="middle">W_fact_up · 1024×384</text>
+<text x="303" y="1069" class="bs" text-anchor="middle">satırlar birim · içerik</text>
+<path d="M464,1000 L506,1000 L506,1013" class="ar" marker-end="url(#ah)"/>
+<path d="M378,1056 L506,1056 L506,1041" class="ar" marker-end="url(#ah)"/>
+<circle cx="506" cy="1027" r="13" class="mul"/>
+<text x="506" y="1032" class="mulx" text-anchor="middle">⊙</text>
+<text x="530" y="1022" class="hl" text-anchor="start">u</text>
+<path d="M519,1027 L600,1027" class="ar" marker-end="url(#ah)"/>
+<rect x="602" y="1007" width="170" height="40" rx="6" class="learn"/>
+<text x="687" y="1024" class="btm" text-anchor="middle">W_fact_out · 384×1024</text>
+<text x="687" y="1040" class="bs" text-anchor="middle">sütunlar birim</text>
+<path d="M687,1047 L687,1088 L150,1088 L150,1110" class="ar" marker-end="url(#ah)"/>
+<text x="560" y="1082" class="bs" text-anchor="middle">norm(W_fact_out · u)</text>
+<rect x="64" y="1112" width="112" height="44" rx="6" class="op"/>
+<text x="120" y="1131" class="bt" text-anchor="middle">yaklaş + norm</text>
+<text x="120" y="1147" class="bs" text-anchor="middle">α_F</text>
+<rect x="600" y="1114" width="180" height="40" rx="6" class="learn"/>
+<rect x="597" y="1111" width="186" height="46" rx="8" class="newring"/>
+<text x="690" y="1131" class="btm" text-anchor="middle">α_F · 6 × 384</text>
+<text x="690" y="1147" class="bs" text-anchor="middle">0,1'den · son tur 1'den</text>
+<path d="M600,1134 L178,1134" class="ar" marker-end="url(#ah)"/>
+<text x="190" y="1176" class="form" text-anchor="start">h = norm(h + α_F ⊙ (norm(W_fact_out u) − h))</text>
+<path d="M120,1156 L120,1196" class="st"/>
+<circle cx="120" cy="1196" r="3.5" class="dot"/>
+<path d="M120,1196 L58,1196 L58,360 L114,360" class="loop" marker-end="url(#ahl)"/>
+<text x="50" y="780" class="loopl" text-anchor="middle" transform="rotate(-90 50 780)">tur 2–6: sıradaki Block (A B C A B C), aynı akış</text>
+<path d="M120,1196 L120,1246" class="st" marker-end="url(#ahs)"/>
+<text x="128" y="1230" class="hl" text-anchor="start">h₆</text>
+<text x="40" y="1238" class="sect" text-anchor="start">Çıkış</text>
+<rect x="60" y="1248" width="360" height="50" rx="6" class="op"/>
+<rect x="57" y="1245" width="366" height="56" rx="8" class="newring"/>
+<text x="240" y="1270" class="btm" text-anchor="middle">skor_j = e^τ · ⟨h₆, PL_j⟩</text>
+<text x="240" y="1286" class="bs" text-anchor="middle">τ = log_output_scale öğrenilir · başta ln 12,91 / ln 15,42</text>
+<path d="M420,1273 L446,1273" class="ar" marker-end="url(#ah)"/>
+<rect x="448" y="1248" width="100" height="50" rx="6" class="op"/>
+<text x="498" y="1270" class="bt" text-anchor="middle">softmax</text>
+<text x="498" y="1286" class="bs" text-anchor="middle">olasılık</text>
+<path d="M548,1273 L574,1273" class="ar" marker-end="url(#ah)"/>
+<rect x="576" y="1248" width="224" height="50" rx="6" class="out"/>
+<text x="688" y="1270" class="bt" text-anchor="middle">sonraki token</text>
+<text x="688" y="1286" class="bs" text-anchor="middle">konum 19 → 'Tom'</text>
+<path d="M150,292 L22,292 L22,1273 L58,1273" class="tied" marker-end="url(#aht)"/>
+<text x="15" y="780" class="tiedl" text-anchor="middle" transform="rotate(-90 15 780)">aynı PL: giriş ve çıkış aynı noktalar</text>
+<path d="M690,1298 L690,1334" class="ar" marker-end="url(#ah)"/>
+<rect x="60" y="1334" width="740" height="46" rx="6" class="op"/>
+<rect x="57" y="1331" width="746" height="52" rx="8" class="newring"/>
+<text x="430" y="1354" class="btm" text-anchor="middle">kayıp = cross-entropy(skor, hedef) + 1e-3 · Σ‖shift‖²</text>
+<text x="430" y="1370" class="bs" text-anchor="middle">LOSS_CHUNK 4096: sözlük parça parça, skor tablosu hiç oluşmaz · yalnız gerçek token'lar</text>
+<text x="840" y="196" class="sect" text-anchor="start">Öğrenilen sayılar · ayar A</text>
+<text x="840" y="222" class="rk " text-anchor="start">shift · V × 384</text>
+<text x="1210" y="222" class="num " text-anchor="end">1.572.864 / 19.298.688</text>
+<text x="840" y="243" class="rk " text-anchor="start"></text>
+<text x="1210" y="243" class="num " text-anchor="end">ss4096 / gpt2</text>
+<path d="M840,251 L1210,251" class="rule"/>
+<text x="840" y="270" class="rk bold" text-anchor="start">Block başına (A, B, C ayrı)</text>
+<text x="1210" y="270" class="num bold" text-anchor="end"></text>
+<text x="840" y="291" class="rk canonk" text-anchor="start">canon_weights · 4 × 384</text>
+<text x="1210" y="291" class="num canonk" text-anchor="end">1.536</text>
+<text x="840" y="312" class="rk " text-anchor="start">W_query, W_key · 384 × 384</text>
+<text x="1210" y="312" class="num " text-anchor="end">2 × 147.456</text>
+<text x="840" y="333" class="rk " text-anchor="start">W_value, W_context · 384 × 384</text>
+<text x="1210" y="333" class="num " text-anchor="end">2 × 147.456</text>
+<text x="840" y="354" class="rk " text-anchor="start">W_fact_in, W_fact_up · 1024 × 384</text>
+<text x="1210" y="354" class="num " text-anchor="end">2 × 393.216</text>
+<text x="840" y="375" class="rk " text-anchor="start">W_fact_out · 384 × 1024</text>
+<text x="1210" y="375" class="num " text-anchor="end">393.216</text>
+<text x="840" y="396" class="rk " text-anchor="start">Block toplamı</text>
+<text x="1210" y="396" class="num " text-anchor="end">1.771.008</text>
+<path d="M840,404 L1210,404" class="rule"/>
+<text x="840" y="423" class="rk " text-anchor="start">3 Block</text>
+<text x="1210" y="423" class="num " text-anchor="end">5.313.024</text>
+<text x="840" y="444" class="rk " text-anchor="start">α_A, α_F · 2 × 6 × 384</text>
+<text x="1210" y="444" class="num " text-anchor="end">4.608</text>
+<text x="840" y="465" class="rk newk" text-anchor="start">log_output_scale</text>
+<text x="1210" y="465" class="num newk" text-anchor="end">1</text>
+<text x="840" y="486" class="rk bold" text-anchor="start">toplam · ss4096</text>
+<text x="1210" y="486" class="num bold" text-anchor="end">6.890.497</text>
+<text x="840" y="507" class="rk bold" text-anchor="start">toplam · gpt2</text>
+<text x="1210" y="507" class="num bold" text-anchor="end">24.616.321</text>
+<text x="840" y="528" class="rk " text-anchor="start">embedding dışı</text>
+<text x="1210" y="528" class="num " text-anchor="end">5.317.633</text>
+<text x="840" y="551" class="bs" text-anchor="start">SimpleStories-11M: 6 katman, d 384, 11M · eşit hesap</text>
+<text x="840" y="566" class="bs" text-anchor="start">(6 tur = 6 katman), %37 daha az parametre</text>
+<text x="840" y="620" class="sect" text-anchor="start">Ayarlar</text>
+<text x="840" y="646" class="rk " text-anchor="start">LAYERS · TURNS</text>
+<text x="1210" y="646" class="numm " text-anchor="end">3 · 6 (A B C A B C)</text>
+<text x="840" y="667" class="rk " text-anchor="start">HEADS · D</text>
+<text x="1210" y="667" class="numm " text-anchor="end">4 × 96 · 384</text>
+<text x="840" y="688" class="rk " text-anchor="start">FACT_ACTIVATION · FACT_UNITS</text>
+<text x="1210" y="688" class="numm " text-anchor="end">swiglu · 1024</text>
+<text x="840" y="709" class="rk canonk" text-anchor="start">CANON · ROPE</text>
+<text x="1210" y="709" class="numm canonk" text-anchor="end">True · True</text>
+<text x="840" y="730" class="rk " text-anchor="start">NORMALIZED_UPDATE</text>
+<text x="1210" y="730" class="numm " text-anchor="end">True · α 0,1'den</text>
+<text x="840" y="751" class="rk newk" text-anchor="start">LAST_FACTS_ALPHA_INIT</text>
+<text x="1210" y="751" class="numm newk" text-anchor="end">1,0 (son tur α_F)</text>
+<text x="840" y="772" class="rk newk" text-anchor="start">LEARN_OUTPUT_SCALE</text>
+<text x="1210" y="772" class="numm newk" text-anchor="end">True</text>
+<text x="840" y="793" class="rk " text-anchor="start">SPHERE_WEIGHTS · ANCHOR</text>
+<text x="1210" y="793" class="numm " text-anchor="end">True · 1e-3</text>
+<text x="840" y="814" class="rk newk" text-anchor="start">T_MAX · üretim önbelleği</text>
+<text x="1210" y="814" class="numm newk" text-anchor="end">512 · Canon 3 satır</text>
+<text x="840" y="862" class="sect" text-anchor="start">Yaklaş + norm nasıl</text>
+<rect x="840" y="874" width="370" height="196" rx="8" class="updbox"/>
+<circle cx="912" cy="978" r="52" class="unit"/>
+<path d="M962.228,964.541 L890.024,930.872" class="chord"/>
+<path d="M912,978 L962.228,964.541" class="vec" marker-end="url(#ah)"/>
+<path d="M912,978 L890.024,930.872" class="vec" marker-end="url(#ah)"/>
+<path d="M912,978 L948.559,941.021" class="vec new" marker-end="url(#ahs)"/>
+<circle cx="936.957" cy="952.757" r="3" class="pt"/>
+<text x="968.228" y="968.541" class="vl" text-anchor="start">h</text>
+<text x="886.024" y="924.872" class="vl" text-anchor="end">norm(u)</text>
+<text x="952.559" y="931.021" class="vl hl" text-anchor="start">yeni h</text>
+<text x="912" y="1048" class="bs" text-anchor="middle">bir boyut düzlemi</text>
+<text x="998" y="902" class="rs" text-anchor="start">h, norm(u): kürede iki nokta</text>
+<text x="998" y="923" class="rs" text-anchor="start">h + α ⊙ (u − h): arada bir nokta</text>
+<text x="998" y="944" class="rs" text-anchor="start">norm: yeniden küreye</text>
+<text x="998" y="965" class="rs" text-anchor="start">α boyut ve tur başına</text>
+<text x="998" y="986" class="rs newk" text-anchor="start">son tur α_F = 1'den: başta</text>
+<text x="998" y="1007" class="rs newk" text-anchor="start">durum = norm(f), girdiyi</text>
+<text x="998" y="1028" class="rs newk" text-anchor="start">tekrar etmez (kayıp 12,4 → 9,2)</text>
+<text x="840" y="1100" class="sect" text-anchor="start">Eğitim</text>
+<text x="840" y="1126" class="rk " text-anchor="start">optimizer</text>
+<text x="1210" y="1126" class="numm " text-anchor="end">Muon + Adam</text>
+<text x="840" y="1147" class="rk newk" text-anchor="start">MUON_TANGENT</text>
+<text x="1210" y="1147" class="numm newk" text-anchor="end">önce teğete izdüş, sonra NS</text>
+<text x="840" y="1168" class="rk " text-anchor="start">lr (coherence)</text>
+<text x="1210" y="1168" class="numm " text-anchor="end">0,01 × ort(ρ)^COHERENCE_POWER (1)</text>
+<text x="840" y="1189" class="rk newk" text-anchor="start">ort(ρ)</text>
+<text x="1210" y="1189" class="numm newk" text-anchor="end">pay / payda ayrı ortalanır</text>
+<text x="840" y="1210" class="rk newk" text-anchor="start">MATMUL_PRECISION</text>
+<text x="1210" y="1210" class="numm newk" text-anchor="end">bf16 · ağırlık ve EMA fp32</text>
+<text x="840" y="1231" class="rk newk" text-anchor="start">LOSS_CHUNK</text>
+<text x="1210" y="1231" class="numm newk" text-anchor="end">4096</text>
+<text x="840" y="1252" class="rk " text-anchor="start">koşu: son iniş · EMA</text>
+<text x="1210" y="1252" class="numm " text-anchor="end">%20 · 0,999</text>
+<text x="840" y="1273" class="rk " text-anchor="start">batch</text>
+<text x="1210" y="1273" class="numm " text-anchor="end">64 × 512</text>
+<text x="840" y="1310" class="sect" text-anchor="start">Sonuç</text>
+<text x="840" y="1336" class="rk bold" text-anchor="start">ilk koşu (SimpleStories)</text>
+<text x="1210" y="1336" class="numm bold" text-anchor="end">bekleniyor</text>
+<text x="840" y="1357" class="rk " text-anchor="start">kıyas</text>
+<text x="1210" y="1357" class="numm " text-anchor="end">SS-11M · aynı test · bits_per_byte</text>
+<text x="840" y="1378" class="rk " text-anchor="start">Model X · TinyStories 1 epok</text>
+<text x="1210" y="1378" class="numm " text-anchor="end">ppl 5,99 · 0,594 bits/char</text>
+<rect x="60" y="1432" width="22" height="14" rx="3" class="learn"/>
+<text x="90" y="1443" class="bs" text-anchor="start">öğrenilen parametre</text>
+<rect x="254.8" y="1432" width="22" height="14" rx="3" class="op"/>
+<text x="284.8" y="1443" class="bs" text-anchor="start">parametresiz hesap</text>
+<rect x="442.4" y="1432" width="22" height="14" rx="3" class="fixed"/>
+<text x="472.4" y="1443" class="bs" text-anchor="start">sabit (PF)</text>
+<rect x="572.4" y="1432" width="22" height="14" rx="3" class="canon"/>
+<text x="602.4" y="1443" class="bs" text-anchor="start">Canon</text>
+<rect x="666.4" y="1432" width="22" height="14" rx="3" class="rope"/>
+<text x="696.4" y="1443" class="bs" text-anchor="start">RoPE</text>
+<rect x="753.2" y="1430" width="26" height="18" rx="4" class="newring"/>
+<text x="787.2" y="1443" class="bs newk" text-anchor="start">Model Y'de yeni</text>
+<path d="M931.2,1439 L961.2,1439" class="st"/>
+<text x="969.2" y="1443" class="bs" text-anchor="start">akış h</text>
+<path d="M1034.4,1439 L1064.4,1439" class="tied"/>
+<text x="1072.4" y="1443" class="bs" text-anchor="start">aynı PL (tied)</text></svg>
+<figcaption>Bir konumun yolu: token noktası PL'den başlar ve altı turda üç farklı Block'tan A B C A B C sırasıyla geçer. Her
+turda Canon son 4 konumu boyut başına karıştırır, 4 head'li attention bu karışımlara bakıp uzaktakini getirir, SwiGLU
+FactUnits konumu kendi içinde dönüştürür; her adım durumu α kadar hedefe yaklaştırıp küreye geri koyar. Son durum aynı PL
+noktalarıyla karşılaştırılır; ölçek artık öğrenilir. Yeşil çerçeve: Model X'e göre yeni.</figcaption>
+</figure>
+</div>

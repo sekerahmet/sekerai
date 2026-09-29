@@ -22,6 +22,8 @@ Adim 3: BlockModel.  Her konumun bir durumu var (hidden, h); TURNS tur boyunca B
       anahtarlar kapaliyken (28 Eylul oncesi): h_t = norm(h_t + W_context c_t), h_t = norm(h_t + FactUnits(h_t));
       W_context ve W_fact_out 0'dan (paket acikken rastgele, birim sutun)
     cikis: skor = scale <h, PL>                         son durum dogrudan noktalarla karsilastirilir (W_next yok)
+    LEARN_OUTPUT_SCALE: skor = e^tau <h, PL>, tau = log_output_scale ogrenilir, ln(scale)'dan baslar
+    LOSS_CHUNK: egitim kaybi sozluk parcalariyla (tam logits tablosu yok, gradyan ileri hesapta); sinav logits'le
     SHARED_BLOCK / LAYERS: turlar LAYERS farkli Block'u sirayla kullanir (2 katman x 2 tur: A B A B); SHARED_BLOCK=False:
     her tura ayri Block
 
@@ -66,6 +68,10 @@ NORMALIZED_UPDATE = True    # h <- norm(h + alpha (norm(u) - h)), u blok ciktisi
                             # (|u| ~ 10-178, |h| = 1).  Varsayilan (kullanici, 28 Eylul: "evet ikisi de varsayılan olsun";
                             # akrabalik paket 188,3 / taban 178,5)
 ALPHA_INIT = 0.1            # alpha'nin baslangici: nGPT 2026 tarifi (derinlikten bagimsiz 0,1)
+LAST_FACTS_ALPHA_INIT = 1.0  # yalniz son turun FactUnits alpha'si (alpha_facts[turns - 1]) bundan baslar, gerisi ALPHA_INIT
+                             # (kullanici, 28 Eylul: "Başlangıç hatası: model ilk adımda kendi girdisini tahmin ediyor önerin
+                             # kabul").  0,1'de son durum girdi noktasinda kaliyor (cos 0,914): adim-0 kaybi 12,41 > ln n;
+                             # 1,0'da ln n + ln E e^{s<h,p>} ~ 9,23.  Egitilmis modelde son alpha_F medyan 0,956
 SPHERE_WEIGHTS = True       # W_query, W_key, W_fact_in, W_value satirlari ve W_context, W_fact_out sutunlari basta ve her
                             # optimizer adimindan sonra birim boya (nGPT); FactUnits girdisi sqrt(d) x kosinus.  Kusur 2:
                             # agirliklar ~20 kat buyuyor, adim sonuyordu.  Varsayilan (kullanici, 28 Eylul)
@@ -77,6 +83,16 @@ HEADS = 4            # attention head sayisi (kullanici, 28 Eylul: "Evet, varsay
                      # 1 = tek head, V yok (28 Eylul'e kadarki model)
 ROPE = True          # attention'in q ve k'sina RoPE (konum bilgisi).  Varsayilanlar = Model X (C' + RoPE; kullanici, 27 Eylul:
                      # "Model X varsayilan model olsun" onayi); False = RoPE'suz C'
+LEARN_OUTPUT_SCALE = True   # cikis olcegi ogrenilir: e^tau, tau = log_output_scale (kullanici, 28 Eylul: "evet öğrenilen çıkış
+                            # ölçeği olsun!").  3 ajan: donuk modelde olcek ~15'e cekilince -0,053..-0,067 nat; nGPT de
+                            # logit olcegini ogreniyor.  False: sabit scale (28 Eylul'e kadarki model)
+LOSS_CHUNK = 4096    # egitim kaybi sozluk parcalariyla: tam logits tablosu (B x T x V) olusmaz, gradyan ileri hesapta biriktirilir
+                     # (kullanici, 28 Eylul: sozluk ileride 50k; "4096 ilk önerdiğin olsun").  0 = tek parca (28 Eylul'e kadarki
+                     # yol).  Sinav ve uretim logits'le, degismez
+OUTPUT_LINK = False  # cikis bagi phi (kullanici, 28 Eylul: "o zaman bu koşuyu da başlat"; adlar onayli): skor = s phi(c),
+                     # phi(c) = c (1 + c (q + c (q^2/3 + u))), c = <h, PL>, q = link_q, u = link_u >= 0 (her adimdan sonra
+                     # kirpilir) -> phi' = (1 + q c)^2 + 3 u c^2 >= 0: phi hep artan, en olasi token degismez; q = u = 0:
+                     # dogrusal.  Donuk modelde ogrenilen olcegin ustune -0,044..-0,052 nat (BULGULAR_20 3.13)
 
 
 def apply_rope(x, positions=None):
@@ -232,8 +248,8 @@ class AttentionCache:
     Ilk cagri istem (B, L) -- normal ileri hesabin aynisi; sonraki her cagri satir basina TEK yeni token.
     lengths (B,): istem uzunluklari (sagdan dolgulu; satir r'nin ilk yeni token'i konum lengths[r]'ye yazilir, dolgunun
     key'leri o konuma gelinceye kadar maskeli kalir).  capacity: istem + uretilecek token.
-    Canon: turun Canon oncesi girdileri de saklanir (canon_cache); yeni konum onceki 3 konumu buradan okur.  Cok head'de
-    key ve value head basina."""
+    Canon: turun Canon oncesi girdilerinden yalniz son 3 konum saklanir (canon_cache; 3 yuvali halka, yuva = konum mod 3);
+    yeni konum onceki 3 konumu buradan okur.  Cok head'de key ve value head basina."""
 
     def __init__(self, lengths, capacity):
         self.next_position, self.capacity = lengths.clone(), capacity   # satir basina siradaki konum
@@ -244,15 +260,17 @@ class AttentionCache:
         """x (B, t, d): yeni konumlarin Canon oncesi girdisi -> (B, 3 + t, d), basta ayni turun onceki 3 konumu
         (istemden once 0).  x'i saklar; attend'den ONCE cagrilir (next_position henuz ilerlemedi)."""
         B, t, d = x.shape
-        if self.canon_inputs is None:                           # istem: oncesi yok, tam hesaptaki dolgu
-            self.canon_inputs = x.new_zeros(B, self.capacity, d)
-            self.canon_inputs[:, :t] = x
+        pos = self.next_position[:, None]                       # (B, 1): istemde istemin boyu, sonra yeni konum
+        back = pos - torch.arange(3, 0, -1, device=x.device)    # (B, 3): t-3, t-2, t-1; < 0 ise istemden once (0)
+        ring = (back % 3)[..., None].expand(-1, -1, d)          # halka yuvasi = konum mod 3
+        if self.canon_inputs is None:                           # istem: oncesi yok, tam hesaptaki dolgu; son 3 konum halkaya
+            self.canon_inputs = x.new_zeros(B, 3, d)
+            self.canon_inputs.scatter_(1, ring, x.gather(1, back.clamp(min=0)[..., None].expand(-1, -1, d))
+                                       * (back >= 0)[..., None])
             return F.pad(x, (0, 0, 3, 0))
         assert t == 1, "istemden sonra satir basina tek token"
-        pos = self.next_position[:, None]                       # (B, 1)
-        back = pos - torch.arange(3, 0, -1, device=x.device)    # (B, 3): t-3, t-2, t-1; < 0 ise istemden once
-        before = self.canon_inputs.gather(1, back.clamp(min=0)[..., None].expand(-1, -1, d)) * (back >= 0)[..., None]
-        self.canon_inputs.scatter_(1, pos[..., None].expand(-1, -1, d), x)
+        before = self.canon_inputs.gather(1, ring) * (back >= 0)[..., None]
+        self.canon_inputs.scatter_(1, (pos % 3)[..., None].expand(-1, -1, d), x)   # t'nin yuvasi t-3'unku: once okundu
         return torch.cat([before, x], 1)
 
     def attend(self, at, x):
@@ -392,7 +410,8 @@ class BlockModel(torch.nn.Module):
                  anchor=ANCHOR, confidence=CONFIDENCE, t_max=T_MAX, units=FACT_UNITS, seed=POINTS_SEED,
                  stream_norm=STREAM_NORM, layer_norm=LAYER_NORM, rope=ROPE,
                  normalized_update=NORMALIZED_UPDATE, sphere_weights=SPHERE_WEIGHTS, canon=CANON, heads=HEADS,
-                 fact_activation=FACT_ACTIVATION):
+                 fact_activation=FACT_ACTIVATION, learn_output_scale=LEARN_OUTPUT_SCALE, loss_chunk=LOSS_CHUNK,
+                 last_facts_alpha_init=LAST_FACTS_ALPHA_INIT, output_link=OUTPUT_LINK):
         super().__init__()
         assert not normalized_update or (stream_norm and not layer_norm), "normalized_update akis normuyla (L2) calisir"
         assert not (sphere_weights and layer_norm), "sphere_weights LayerNorm'la denenmedi: FactUnits girdisi sqrt(d) kat buyuk"
@@ -418,11 +437,22 @@ class BlockModel(torch.nn.Module):
         if normalized_update:                             # tur basina (paylasilan blokta da): (tur, d)
             self.alpha_attention = torch.nn.Parameter(torch.full((turns, d), ALPHA_INIT))
             self.alpha_facts = torch.nn.Parameter(torch.full((turns, d), ALPHA_INIT))
+            with torch.no_grad():                         # son tur: model girdisini tekrar etmesin (LAST_FACTS_ALPHA_INIT)
+                self.alpha_facts[-1] = last_facts_alpha_init
         if sphere_weights:
             self.normalize_weights()
         if layer_norm:                                    # cikista: keskinligi kazanc ogrenir, sabit scale kullanilmaz
             self.norm_final = torch.nn.LayerNorm(d)
         self.scale = scale_for(n, confidence)
+        self.learn_output_scale = learn_output_scale and not layer_norm   # LayerNorm'da cikis olcegi yok
+        if self.learn_output_scale:                       # tau = ln(scale): baslangicta sabit scale ile bit duzeyinde ayni
+            self.log_output_scale = torch.nn.Parameter(torch.tensor(math.log(self.scale)))
+        self.output_link = output_link and not layer_norm       # LayerNorm'da cikis olcegi ve bag yok
+        if self.output_link:                              # q = u = 0: dogrusal skor
+            self.link_q = torch.nn.Parameter(torch.zeros(()))
+            self.link_u = torch.nn.Parameter(torch.zeros(()))
+        assert loss_chunk >= 0, "loss_chunk: 0 (tek parca) ya da parca boyu"
+        self.loss_chunk = loss_chunk
 
     def turn_blocks(self):
         return [self.blocks[i % len(self.blocks)] for i in range(self.turns)]     # paylasilan: A B A B; ayri: her tura biri
@@ -458,9 +488,65 @@ class BlockModel(torch.nn.Module):
             return self.norm_final(h) @ P.T                    # skor_tj = <LN(h_t), PL_j>
         if not self.stream_norm:
             h = F.normalize(h, dim=-1)                         # akis normalize edilmediyse cikista bir kez
-        return self.scale * h @ P.T                            # skor_tj = scale · <h_t, PL_j>
+        # e^tau = scale · e^(tau - ln scale): baslangicta us tam 0
+        scale = self.scale * torch.exp(self.log_output_scale - math.log(self.scale)) if self.learn_output_scale else self.scale
+        if self.output_link:                                   # skor_tj = scale · phi(<h_t, PL_j>)
+            c = h @ P.T
+            q, u = self.link_q, self.link_u
+            return scale * (c * (1 + c * (q + c * (q * q / 3 + u))))
+        return scale * h @ P.T                                 # skor_tj = scale · <h_t, PL_j>
 
     def loss(self, ids, mask):
+        if self.loss_chunk and not self.output_link:           # parcali: (N x V) tablosu yok, gradyan ileri hesapta;
+                                                               # phi'de parcali yol yok: tam tablo
+            P = self.tokens.points()
+            h = self.hidden(ids[:, :-1])[-1].flatten(0, -2)    # (N, d), N = B (T - 1); cikis logits'teki gibi
+            if self.layer_norm:
+                h, scale = self.norm_final(h), 1.0
+            else:
+                if not self.stream_norm:
+                    h = F.normalize(h, dim=-1)
+                scale = (self.scale * torch.exp(self.log_output_scale - math.log(self.scale)) if self.learn_output_scale
+                         else self.scale)
+            # z_ij = s <h_i, P_j>; once butun parcalardan lse_i, sonra p_ij = e^(z_ij - lse_i) ile gradyanlar:
+            #   dL/dh_i = s w_i (sum_j p_ij P_j - P_y)   dL/dP_j = s sum_i w_i (p_ij - [y_i = j]) h_i
+            #   dL/ds = sum_i w_i (sum_j p_ij <h_i, P_j> - <h_i, P_y>)        w_i = maske / gecerli hedef sayisi
+            with torch.no_grad():
+                work = torch.promote_types(h.dtype, torch.float32)   # lse ve birikimler en az fp32 (autocast'te carpim bf16)
+                hd, Pd = h.detach(), P.detach()
+                s = scale.detach() if torch.is_tensor(scale) else scale
+                y = ids[:, 1:].flatten()
+                w = mask[:, 1:].flatten().to(work)
+                w = w / w.sum()                                # masked_nll gibi: dolgu dahil sabit sekil, agirlik 0
+                chunks = range(0, Pd.shape[0], self.loss_chunk)
+                lse = None
+                for c in chunks:
+                    z = (hd @ Pd[c:c + self.loss_chunk].T).to(work).mul_(s)
+                    part = torch.logsumexp(z, -1)
+                    lse = part if lse is None else torch.logaddexp(lse, part)
+                    del z
+                hw = hd.to(work) * w[:, None]
+                grad_h = torch.zeros_like(hd, dtype=work)      # sum_j p_ij P_j
+                grad_P = torch.zeros_like(Pd, dtype=work)      # sum_i w_i p_ij h_i
+                mean_dot = torch.zeros_like(lse)               # sum_j p_ij <h_i, P_j>
+                for c in chunks:
+                    Pc = Pd[c:c + self.loss_chunk].to(work)
+                    dot = (hd @ Pc.T).to(work)
+                    p = (dot * s).sub_(lse[:, None]).exp_()
+                    grad_h += p @ Pc
+                    grad_P[c:c + self.loss_chunk] = p.T @ hw
+                    mean_dot += p.mul_(dot).sum(-1)
+                    del dot, p
+                dot_y = (hd * Pd[y]).sum(-1).to(work)
+                value = (w * (lse - s * dot_y)).sum()
+                grad_h = (s * w)[:, None] * (grad_h - Pd[y].to(work))
+                grad_P = s * grad_P.index_add_(0, y, -hw)
+                grad_s = (w * (mean_dot - dot_y)).sum()
+            # deger = value; eklenen terimlerin degeri 0, gradyanlari grad_* (geri yayilimda yeniden hesap yok)
+            nll = value + (grad_h * (h - h.detach())).sum() + (grad_P * (P - P.detach())).sum()
+            if torch.is_tensor(scale) and scale.requires_grad:
+                nll = nll + grad_s * (scale - scale.detach())
+            return nll + self.tokens.anchor_loss(), nll
         nll = masked_nll(self.logits(ids[:, :-1]), ids[:, 1:], mask[:, 1:])
         return nll + self.tokens.anchor_loss(), nll
 
