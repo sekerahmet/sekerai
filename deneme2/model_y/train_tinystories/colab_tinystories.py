@@ -49,7 +49,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                              learn_output_scale=M.LEARN_OUTPUT_SCALE, output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=M.T_MAX,
                              anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK, last_facts_alpha_init=M.LAST_FACTS_ALPHA_INIT,
                              input_embedding=M.INPUT_EMBEDDING, input_bigrams=M.INPUT_BIGRAMS,
-                             first_turn_facts=M.FIRST_TURN_FACTS),
+                             first_turn_facts=M.FIRST_TURN_FACTS, input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE),
                         **(model_kw or {}))
     per_epoch = len(data["train_start"]) // batch_size
     assert per_epoch > 0, "batch_size (%d) > train penceresi (%d)" % (batch_size, len(data["train_start"]))
@@ -92,6 +92,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         if setting in TR.STEP3 and saved.get("model_kw"):   # 28 Eylul oncesi model_kw'de layers yok: tek Block idi
             saved["model_kw"] = dict(dict(layers=1, heads=1, fact_activation="relu", learn_output_scale=False, output_link=False,
                                           shared_facts=True, input_embedding=False, input_bigrams=0, first_turn_facts=True,
+                                          input_embedding_sphere=False,
                                           loss_chunk=0,
                                           last_facts_alpha_init=M.ALPHA_INIT),
                                      **saved["model_kw"])     # eskiler: tek Block, tek head, ReLU, sabit cikis olcegi, tek parca

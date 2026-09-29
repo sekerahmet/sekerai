@@ -87,6 +87,9 @@ INPUT_EMBEDDING = False  # True: girdi ayri, ogrenilen tablo (V x d, PF'den basl
                          # yapalım bence ihtiyaç net zaten ngpt yapmış ama c mantıklı gibi"; adlar "Önerilerin kabul"
 INPUT_BIGRAMS = 0        # > 0: girdiye (onceki token, token) ikilisinin satiri eklenir (Over-Tokenized); satir sayisi = en
                          # sik K ikili (liste veriden, bigram_keys), listede olmayan ikilide yalniz token.  0 = yok
+INPUT_EMBEDDING_SPHERE = True  # INPUT_EMBEDDING'de girdi tablosunun satirlari basta ve her optimizer adimindan sonra
+                               # birim boya (nGPT).  False (63338af): gradyan satira dik, boy buyuyor, etkin lr 1/|E| ile
+                               # dusuyordu (t4500'de |E| medyan 4,9).  Kullanici, 29 Eylul: adlar "Onaylıyorum"
 FIRST_TURN_FACTS = True  # False: tur 1'in FactUnits alt adimi yok (C ajani: tur 1 FactUnits fiilen token tablosu)
 HEADS = 4            # attention head sayisi (kullanici, 28 Eylul: "Evet, varsayılan 4"; TinyStories 10k ppl 7,22 / tek head
                      # 7,63).  H > 1: d H'ye bolunur, W_value (d x d, birim baslar) her head'in tasiyacagini secer;
@@ -428,7 +431,7 @@ class BlockModel(torch.nn.Module):
                  fact_activation=FACT_ACTIVATION, learn_output_scale=LEARN_OUTPUT_SCALE, loss_chunk=LOSS_CHUNK,
                  last_facts_alpha_init=LAST_FACTS_ALPHA_INIT, output_link=OUTPUT_LINK, shared_facts=SHARED_FACTS,
                  input_embedding=INPUT_EMBEDDING, input_bigrams=INPUT_BIGRAMS, first_turn_facts=FIRST_TURN_FACTS,
-                 bigram_keys=None):
+                 bigram_keys=None, input_embedding_sphere=INPUT_EMBEDDING_SPHERE):
         """bigram_keys (INPUT_BIGRAMS > 0): en sik ikililerin anahtarlari (onceki * n + token), artan sirali, uzunluk
         input_bigrams; None ya da str (config'teki iz): tampon 0'larla kurulur, state_dict'ten dolar."""
         super().__init__()
@@ -469,6 +472,8 @@ class BlockModel(torch.nn.Module):
             self.blocks[0].facts = None                   # tur 1'in takimini baska tur kullanmiyor: parametresi de yok
         if input_embedding:                               # PF'den: ilk adimda girdi PL ile ayni
             self.input_embedding = torch.nn.Parameter(self.tokens.fixed_points.detach().clone())
+        self.input_embedding_sphere = bool(input_embedding and input_embedding_sphere)
+        assert not self.input_embedding_sphere or sphere_weights, "input_embedding_sphere normalize_weights'le (sphere_weights)"
         if input_bigrams:                                 # 0'dan: ilk adimda ikili katkisi yok
             self.input_bigrams = torch.nn.Parameter(torch.zeros(input_bigrams, d))
             keys = (torch.zeros(input_bigrams, dtype=torch.long) if bigram_keys is None or isinstance(bigram_keys, str)
@@ -538,7 +543,10 @@ class BlockModel(torch.nn.Module):
     @torch.no_grad()
     def normalize_weights(self):
         """sphere_weights: girdisi durum olan matrislerin satirlari (W_query, W_key, W_fact_in, W_value), duruma yazanlarin
-        sutunlari (W_context, W_fact_out) birim boya; baslangicta ve her optimizer adimindan sonra (train_seq)."""
+        sutunlari (W_context, W_fact_out) ve input_embedding_sphere'de girdi tablosunun satirlari birim boya; baslangicta ve
+        her optimizer adimindan sonra (train_seq)."""
+        if getattr(self, "input_embedding_sphere", False):
+            self.input_embedding.copy_(F.normalize(self.input_embedding, dim=1))
         for b in self.blocks:
             at, f = b.attention, b.facts                  # f None: FIRST_TURN_FACTS=False'ta tur 1'in takimi yok
             for w in ((at.W_query, at.W_key) + ((f.W_fact_in,) if f is not None else ()) + ((at.W_value,) if at.heads > 1 else ())

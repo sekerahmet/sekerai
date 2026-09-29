@@ -734,6 +734,12 @@ def t_speed(root):
           and C._peak_for("NVIDIA H100 PCIe", "bf16") == 756e12 and C._peak_for("NVIDIA H100 80GB HBM3", "bf16") == 989e12
           and C._peak_for("Tesla T4", "bf16") is None and C._peak_for("Tesla T4", "fp32") == 8.1e12)
 
+    al = ES.alpha_summary(M.BlockModel(64, d=16, turns=4, layers=2, units=8, first_turn_facts=False))
+    line = C._alpha_text(al)
+    check("alpha_summary: FIRST_TURN_FACTS=False'ta tur 1'in alpha_F'si None (kullanilmiyor), satirda '-'; en buyuk onu saymaz",
+          al["facts"]["median"][0] is None and al["facts"]["max_abs"][0] is None and al["attention"]["median"][0] is not None
+          and "aF -/" in line and "(1.00)" in line, line)
+
 
 def t_colab(root):
     import colab_simplestories as C

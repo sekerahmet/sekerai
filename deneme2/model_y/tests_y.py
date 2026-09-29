@@ -2076,8 +2076,10 @@ def t_input_embedding():
     big = BlockModel(nv, input_embedding=True, input_bigrams=K, bigram_keys=keys)
     with torch.no_grad():
         z0 = base.logits(ids)
-        same = torch.equal(z0, emb.logits(ids)) and torch.equal(z0, big.logits(ids))
-    check("input_embedding: tablolar baslangicta (girdi PF'den, ikili 0) PL'li modelle bit duzeyinde ayni skor; "
+        free0 = BlockModel(nv, input_embedding=True, input_embedding_sphere=False)
+        same = torch.equal(z0, free0.logits(ids)) and float((z0 - emb.logits(ids)).abs().max()) < 1e-5             and float((z0 - big.logits(ids)).abs().max()) < 1e-5
+    check("input_embedding: tablolar baslangicta (girdi PF'den, ikili 0) PL'li modelle ayni skor (kuresizde bit duzeyinde, "
+          "kurede yuvarlama farki); "
           "bigram_keys tampon, parametre degil",
           same and "bigram_keys" in dict(big.named_buffers()) and "bigram_keys" not in dict(big.named_parameters())
           and tuple(big.input_bigrams.shape) == (K, 64) and not hasattr(base, "input_embedding"))
@@ -2129,6 +2131,15 @@ def t_input_embedding():
     full, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), save_every=2, save=keep, model_kw=full_kw)
     res, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs[4],
                           model_kw=dict(full_kw, bigram_keys="iz"))
+    free, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(),
+                           model_kw=dict(full_kw, input_embedding_sphere=False))
+    rows_s, rows_f = trained.input_embedding.detach().norm(dim=1), free.input_embedding.detach().norm(dim=1)
+    check("input_embedding_sphere: girdi tablosunun satirlari egitimde birim boy (varsayilan); False'ta serbest, boy buyur "
+          "(gradyan satira dik)",
+          float((rows_s - 1).abs().max()) < 1e-5 and trained.input_embedding_sphere and not free.input_embedding_sphere
+          and float(rows_f.max()) > 1.01 and float((BlockModel(nv).tokens.fixed_points.norm(dim=1) - 1).abs().max()) < 1e-5,
+          "birim %.1e  serbest en buyuk %.3f" % (float((rows_s - 1).abs().max()), float(rows_f.max())))
+
     check("input_embedding: egitimde kayip iner; input_embedding ve input_bigrams Adam'da, 0'dan ayrilir; bigram_keys degismez; "
           "tur 1'in takimi state_dict'te yok; surdurme (liste pakette, config'te iz) bit duzeyinde",
           curve[-1]["nll"] < curve[0]["nll"] and {"input_embedding", "input_bigrams"} <= set(in_adam)
@@ -2162,12 +2173,21 @@ def t_input_embedding():
     torch._dynamo.reset()
     ex = torch._dynamo.explain(BlockModel(nv, d=32, units=48, loss_chunk=7, **dict(full_kw)).loss)(sids[:4], smask[:4])
     torch._dynamo.reset()
-    old = BlockModel(nv, **I._model_kw(dict(model_kw=dict(d=16, turns=2))))
+    old = BlockModel(nv, **I._model_kw(dict(model_kw=dict(d=16, turns=2, input_embedding=True))))
     uu = I.unit_usage(BlockModel(nv, first_turn_facts=False).double().eval(), [sids[0, :int(smask[0].sum())].tolist()],
                       exclude_last=False)
-    check("input_embedding: kayip compile'da tek grafik; ayarsiz config eski model (tablo yok, tur 1 FactUnits'li); unit_usage "
-          "tur 1'i saymaz",
-          ex.graph_break_count == 0 and not hasattr(old, "input_embedding") and old.first_turn_facts
+    try:
+        I._plan(BlockModel(nv, first_turn_facts=False), dict(skip_facts=[0]))
+        refused = False
+    except AssertionError:
+        refused = True
+    std_skip = I._standard_cases(6, 4, False)
+    check("internals: FIRST_TURN_FACTS=False'ta tur 1'e FactUnits mudahalesi reddedilir; varsayilan ablate listesinde F1 yok",
+          refused and "F1" not in std_skip and "F2" in std_skip and "F1" in I._standard_cases(6, 4))
+
+    check("input_embedding: kayip compile'da tek grafik; ayarsiz config eski model (tablo kureye cekilmez, tur 1 FactUnits'li); "
+          "unit_usage tur 1'i saymaz",
+          ex.graph_break_count == 0 and not old.input_embedding_sphere and old.first_turn_facts
           and [r["turn"] for r in uu["turns"]][0] != I._turn_label(BlockModel(nv), 0) and len(uu["turns"]) == 3,
           "graph break %d" % ex.graph_break_count)
 

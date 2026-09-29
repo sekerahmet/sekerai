@@ -110,9 +110,10 @@ def _counting(draw, work):
 
 
 def _alpha_text(a):
-    f = lambda xs: "/".join("%.2f" % x for x in xs)
-    return " | aA %s (en buyuk %.2f) aF %s (%.2f)" % (f(a["attention"]["median"]), max(a["attention"]["max_abs"]),
-                                                     f(a["facts"]["median"]), max(a["facts"]["max_abs"]))
+    f = lambda xs: "/".join("-" if x is None else "%.2f" % x for x in xs)      # None: o turda alt blok yok
+    top = lambda xs: max(x for x in xs if x is not None)
+    return " | aA %s (en buyuk %.2f) aF %s (%.2f)" % (f(a["attention"]["median"]), top(a["attention"]["max_abs"]),
+                                                     f(a["facts"]["median"]), top(a["facts"]["max_abs"]))
 
 
 def _text_errors_line(t, head):
@@ -139,7 +140,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                              learn_output_scale=M.LEARN_OUTPUT_SCALE, output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=M.T_MAX,
                              anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK, last_facts_alpha_init=M.LAST_FACTS_ALPHA_INIT,
                              input_embedding=M.INPUT_EMBEDDING, input_bigrams=M.INPUT_BIGRAMS,
-                             first_turn_facts=M.FIRST_TURN_FACTS),
+                             first_turn_facts=M.FIRST_TURN_FACTS, input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE),
                         **(model_kw or {}))
     keys = None                                       # INPUT_BIGRAMS: ikili listesi modele tensor, config'e izi
     if model_kw and model_kw.get("bigram_keys") is not None and not isinstance(model_kw["bigram_keys"], str):
@@ -174,7 +175,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                          **train_kw))
     checkpoint = None
     if resume:
-        packs = sorted(f for f in os.listdir(out) if f.startswith("checkpoint_t")) if os.path.isdir(out) else []
+        packs = sorted(f for f in os.listdir(out) if f.startswith("checkpoint_t") and f.endswith(".pt")) if os.path.isdir(out) else []
         if not packs:
             raise RuntimeError("%s: surdurme paketi yok; bastan kosmak ayri karar (resume=False)" % out)
         saved = json.load(open(os.path.join(out, "config.json")))
@@ -183,7 +184,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         saved.setdefault("newton_schulz_precision", "fp32")
         if setting in TR.STEP3 and saved.get("model_kw"):   # 29 Eylul oncesi kosularda bu ayarlar yazilmadi: yoktu
             saved["model_kw"] = dict(dict(output_link=False, shared_facts=True, input_embedding=False, input_bigrams=0,
-                                          first_turn_facts=True), **saved["model_kw"])
+                                          first_turn_facts=True, input_embedding_sphere=False), **saved["model_kw"])
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)
@@ -248,7 +249,10 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         e.update(ES.loop_check([w["ids"] for w in written]), texts=[w["model"] for w in written],
                  secs=round(time.time() - run["t0"], 1))
         run["exams"].append(e)
-        json.dump(run["exams"], open(os.path.join(out, "exams.json"), "w", encoding="utf-8"), indent=1, ensure_ascii=False)
+        part = os.path.join(out, "exams.json.part")   # once .part, sonra yerine: yazarken olen cekirdek dosyayi bozmaz
+        with open(part, "w", encoding="utf-8") as f:
+            json.dump(run["exams"], f, indent=1, ensure_ascii=False)
+        os.replace(part, os.path.join(out, "exams.json"))
         rare = [b for b in e["nll_by_frequency"] if b["targets"]][-1]
         note("adim %6d  epok %.3f  nll %.3f%s | val nll %.3f ppl %.2f acc %.4f (%.3f/%.3f/%.3f) eos %.2f bpb %.4f "
              "(eos %.4f) | dongu %d/%d farkli4 %.2f  (%.0f sn)"
@@ -281,8 +285,9 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
 
     def save(step, model, opt):
         t = time.time()
-        torch.save(dict(step=step, model=model.state_dict(), optimizer=opt.state_dict()),
-                   os.path.join(out, "checkpoint_t%06d.pt" % step))
+        path = os.path.join(out, "checkpoint_t%06d.pt" % step)
+        torch.save(dict(step=step, model=model.state_dict(), optimizer=opt.state_dict()), path + ".part")
+        os.replace(path + ".part", path)             # surdurme yarim pakete dusmesin
         work["save_secs"] += time.time() - t
 
     def job():

@@ -122,6 +122,8 @@ def _plan(model, case=None):
             touched += list(given)
     H = model.blocks[0].attention.heads
     assert all(0 <= t < model.turns for t in touched), "tur 0..%d disinda" % (model.turns - 1)
+    assert getattr(model, "first_turn_facts", True) or (0 not in plan["skip_facts"] and 0 not in (case.get("alpha_facts") or {})), \
+        "tur 1'de FactUnits yok (FIRST_TURN_FACTS=False): mudahale sessizce 0 verirdi"
     assert all(0 <= h < H for _, h in plan["heads"]), "head 0..%d disinda" % (H - 1)
     plan["start"] = min(touched, default=model.turns)
     return plan
@@ -791,7 +793,7 @@ def _checkpoints(run_dir):
 def _model_kw(config):
     """config'teki model_kw; output_link / shared_facts yazilmamis eski config'lerde yoktu (colab_simplestories'in
     surdurmesi gibi)."""
-    return dict(dict(output_link=False, shared_facts=True), **config.get("model_kw", {}))
+    return dict(dict(output_link=False, shared_facts=True, input_embedding_sphere=False), **config.get("model_kw", {}))
 
 
 def _build(config):
@@ -1314,9 +1316,11 @@ def _parse_case(shape, text):
     return text, ", ".join(words), build
 
 
-def _standard_cases(turns, heads):
-    """Varsayilan ablate listesi: none, her tur A / F / H, her head, her tur C ve CM, butun Canon (C, CM)."""
-    cases = ["none"] + ["A%d" % t for t in range(1, turns + 1)] + ["F%d" % t for t in range(1, turns + 1)]
+def _standard_cases(turns, heads, first_turn_facts=True):
+    """Varsayilan ablate listesi: none, her tur A / F / H, her head, her tur C ve CM, butun Canon (C, CM); F1 yalniz tur 1'de
+    FactUnits varsa."""
+    cases = ["none"] + ["A%d" % t for t in range(1, turns + 1)]
+    cases += ["F%d" % t for t in range(1 if first_turn_facts else 2, turns + 1)]
     cases += ["H%d" % t for t in range(1, turns + 1)]
     if heads > 1:
         cases += ["H%d.%d" % (t, h) for t in range(1, turns + 1) for h in range(heads)]
@@ -1680,7 +1684,8 @@ def _main(argv=None):
         cut = sorted((s[:args.width] if args.width else s for s in stories), key=len)   # benzer boylar bir batch'te
         cached = [_padded(cut[i:i + batch], data["eos"]) for i in range(0, len(cut), batch)]
     else:
-        cases = [_parse_case(shape, c) for c in (args.cases or _standard_cases(shape[0], shape[1]))]
+        cases = [_parse_case(shape, c) for c in (args.cases or _standard_cases(shape[0], shape[1],
+                                                                              skeleton.first_turn_facts))]
         needs_ref = any("H" in c[0] or "CM" in c[0] for c in cases)
         ref = data["stories"](args.reference, args.offset + count)[1] if needs_ref and args.reference else None
         measure = lambda m: ablate(m, stories, [("%-8s %s" % (name, words), build(m)) for name, words, build in cases],
