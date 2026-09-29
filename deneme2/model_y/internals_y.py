@@ -901,11 +901,11 @@ def _train_kwargs(config):
 
 
 def _forward_context(ctx):
-    """train_seq'in ileri hesap baglami: compile kilidi, SDPA math yolu, bf16 autocast (GPU)."""
+    """train_seq'in ileri hesap baglami: compile kilidi, SDPA cekirdegi (attention_kernel), bf16 autocast (GPU)."""
     stack = contextlib.ExitStack()
     if ctx["compile"]:
         stack.enter_context(ctx["TR"].COMPILE_LOCK)
-    stack.enter_context(sdpa_kernel([SDPBackend.MATH]))
+    stack.enter_context(sdpa_kernel(ctx["kernels"]))
     if ctx["bf16"]:
         stack.enter_context(torch.autocast("cuda", dtype=torch.bfloat16))
     return stack
@@ -932,7 +932,9 @@ def _profile_setup(config, cached, device):
                 unit_axis={k: int(k.split(".")[-1] in rows) for k, _ in named if sphere and k.split(".")[-1] in rows + cols},
                 split=get("schedule") == "coherence", grad_clip=get("grad_clip"), ema=getattr(model, "weight_ema", None),
                 compile=compile, loss_fn=torch.compile(model.loss) if compile else model.loss,
-                bf16=cuda and get("matmul_precision") == "bf16", tf32=cuda and get("matmul_precision") == "tf32")
+                bf16=cuda and get("matmul_precision") == "bf16", tf32=cuda and get("matmul_precision") == "tf32",
+                kernels=([SDPBackend.MATH] if not cuda or get("attention_kernel") == "math" else     # train_seq gibi
+                         [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]))
 
 
 def _step_parts(ctx, ids, mask, clock):
@@ -953,7 +955,7 @@ def _step_parts(ctx, ids, mask, clock):
     if ctx["split"]:                                     # coherence: iki yarinin gradyani, g1 kopyasi, birlestirme
         grads = None
         for half_total, _ in halves:
-            with clock.part("geri yayilim"), sdpa_kernel([SDPBackend.MATH]):
+            with clock.part("geri yayilim"), sdpa_kernel(ctx["kernels"]):
                 half_total.backward()
             if grads is None:
                 with clock.part("coherence: g1 kopyasi"):
@@ -973,15 +975,15 @@ def _step_parts(ctx, ids, mask, clock):
                 na += float((a * a).sum())
                 nb += float((b * b).sum())
     else:
-        with clock.part("geri yayilim"), sdpa_kernel([SDPBackend.MATH]):
+        with clock.part("geri yayilim"), sdpa_kernel(ctx["kernels"]):
             total.backward()
     if ctx["grad_clip"] is not None:
         with clock.part("clip"):
             torch.nn.utils.clip_grad_norm_(ctx["params"], ctx["grad_clip"])
     if isinstance(opt, TR.Muon):
-        def orthogonalize(G, steps=5):
+        def orthogonalize(G, steps=5, precision="fp32"):
             with clock.part("  Newton-Schulz"):
-                return TR.Muon.orthogonalize(G, steps)
+                return TR.Muon.orthogonalize(G, steps, precision)
 
         groups = opt.param_groups
         opt.orthogonalize = orthogonalize                # ornek ozelligi sinifin staticmethod'unu golgeler
@@ -1032,7 +1034,7 @@ def _breakdown_parts(ctx, ids, mask, clock):
             del model.hidden
         clock.mark("kayip basligi ileri")
     h.register_hook(lambda g: clock.mark("kayip basligi geri"))
-    with sdpa_kernel([SDPBackend.MATH]):
+    with sdpa_kernel(ctx["kernels"]):
         total.backward()
     clock.mark("govde geri (turlar, gomme)")
     model.zero_grad(set_to_none=True)

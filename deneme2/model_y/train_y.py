@@ -64,6 +64,10 @@ WEIGHT_EMA = None       # agirliklarin hareketli ortalamasi (ornek 0,999; kullan
 MATMUL_PRECISION = "bf16"   # egitim hesabi: "fp32" (28 Eylul'e kadarki) | "tf32" (egitim boyunca TF32 matmul; KL 2e-7) | "bf16"
                             # (ileri hesap autocast, kayip ~3e-4 nat; parametre, gradyan, optimizer ve Muon Newton-Schulz, weight
                             # EMA fp32).  Sinav hep fp32.  Yalniz GPU'da (kullanici, 28 Eylul: "bunu da yapalım model y de")
+ATTENTION_KERNEL = "math"   # egitimde SDPA cekirdegi: "math" (bit duzeyinde surdurme, CPU testleri) | "flash" (GPU'da flash,
+                            # olmazsa mem-efficient; geri yayilim deterministik degil).  CPU'da hep math.  Kullanici, 29 Eylul:
+                            # "önerin kabul" (math, gövde ileri hesabinin ~%70'i; GPU'da surdurme zaten bit duzeyinde degil)
+NEWTON_SCHULZ_PRECISION = "fp32"   # Muon'un ortogonallestirmesi: "fp32" | "bf16" (Muon'un yaygin kullanimi; adimin %14'u)
 MUON_TANGENT = True      # sphere_weights'te Muon'a giren Nesterov birlesimi (g + mu buf) once agirligin kure tegetine izdusulur,
                          # sonra ortogonallestirilir (kullanici, 28 Eylul: "tamam alalım"): kurede birinci mertebe dususu en buyuk
                          # yapan adim polar(T(G)); Training nGPT 1B'de "slightly improves".  Momentum tamponu ve Adam degismez
@@ -77,19 +81,23 @@ class Muon(torch.optim.Optimizer):
     def __init__(self, groups, lr, momentum=0.95, betas=(0.9, 0.999), eps=1e-8):
         super().__init__(groups, dict(lr=lr, momentum=momentum, betas=betas, eps=eps, use_muon=False))
         self.tangent_axis = {}      # MUON_TANGENT: parametre -> kurede birim eksen (1 satir, 0 sutun); bos = izdusum yok
+        self.newton_schulz_precision = "fp32"   # NEWTON_SCHULZ_PRECISION (train_seq kurar)
 
     @staticmethod
-    def orthogonalize(G, steps=5):
-        """G'ye en yakin yari-ortogonal matris (tekil degerler ~1), besinci derece Newton-Schulz."""
+    def orthogonalize(G, steps=5, precision="fp32"):
+        """G'ye en yakin yari-ortogonal matris (tekil degerler ~1), besinci derece Newton-Schulz; precision "bf16": dongu
+        bf16'da, sonuc G'nin tipinde."""
         a, b, c = 3.4445, -4.7750, 2.0315
         X = G / (G.norm() + 1e-7)
+        if precision == "bf16":
+            X = X.bfloat16()
         tall = X.shape[0] > X.shape[1]
         if tall:
             X = X.T
         for _ in range(steps):
             A = X @ X.T
             X = a * X + (b * A + c * A @ A) @ X
-        return X.T if tall else X
+        return (X.T if tall else X).to(G.dtype)
 
     @torch.no_grad()
     def step(self):
@@ -107,7 +115,7 @@ class Muon(torch.optim.Optimizer):
                     axis = self.tangent_axis.get(p)
                     if axis is not None:                    # kure tegeti: satir / sutun basina v - <v, w> w
                         nesterov = nesterov - (nesterov * p).sum(axis, keepdim=True) * p
-                    update = self.orthogonalize(nesterov)
+                    update = self.orthogonalize(nesterov, precision=self.newton_schulz_precision)
                     p.add_(update, alpha=-g["lr"] * 0.2 * max(p.shape) ** 0.5)
                     continue
                 if not state:
@@ -170,7 +178,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
               normalized_update=None, sphere_weights=None, canon=None, coherence_window=COHERENCE_WINDOW,
               final_cooldown=FINAL_COOLDOWN, weight_ema=WEIGHT_EMA, matmul_precision=MATMUL_PRECISION,
               coherence_power=COHERENCE_POWER, muon_tangent=MUON_TANGENT, final_cooldown_shape=FINAL_COOLDOWN_SHAPE,
-              frozen_lr=FROZEN_LR):
+              frozen_lr=FROZEN_LR, attention_kernel=ATTENTION_KERNEL, newton_schulz_precision=NEWTON_SCHULZ_PRECISION):
     """Standart tarif (27 Eylul'den): Muon (gizli matrisler) + Adam, WSD takvimi (lr sabit, son cooldown kisminda
     1 - sqrt ile LR x lr_floor'a), gradient clipping.  optimizer="adam", schedule="cosine": 27 Eylul'e kadarki tarif.
     lr_floor=None, grad_clip=None: en eski tarif (sabit lr).  weight_decay > 0: AdamW, yalniz W_ matrisleri (yalniz adam).
@@ -198,7 +206,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     model.weight_ema = dict(model=<ortalama model>, decay=d).  Ortalama optimizer durumunda (checkpoint'e girer).
     matmul_precision: "bf16" ileri hesap ve kayip autocast (bf16) icinde, geri yayilim disinda; "tf32" egitim boyunca TF32
     matmul (surec geneli ayar: ayni surecteki eszamanli kosular da etkilenir), sinav fp32, bitince onceki ayar; "fp32"
-    hicbir seye dokunmaz.  CPU'da (compile gibi) etkisiz."""
+    hicbir seye dokunmaz.  CPU'da (compile gibi) etkisiz.
+    attention_kernel: ATTENTION_KERNEL (CPU'da hep math).  newton_schulz_precision: NEWTON_SCHULZ_PRECISION (yalniz Muon)."""
     assert batches is not None or ids is not None, "ids/mask ya da batches verilmeli"
     assert setting in STEP3 or stream_norm, "stream_norm=False yalniz Adim 3 (BlockModel) icin"
     assert setting in STEP3 or not layer_norm, "layer_norm yalniz Adim 3 (BlockModel) icin"
@@ -211,6 +220,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     assert optimizer == "adam" or not weight_decay, "weight_decay yalniz optimizer='adam' ile (AdamW)"
     assert matmul_precision in ("fp32", "tf32", "bf16"), "matmul_precision: fp32 | tf32 | bf16"
     assert coherence_power > 0, "coherence_power: pozitif us (1,0 = rho, 0,5 = sqrt(rho))"
+    assert attention_kernel in ("math", "flash"), "attention_kernel: math | flash"
+    assert newton_schulz_precision in ("fp32", "bf16"), "newton_schulz_precision: fp32 | bf16"
     if normalized_update is None:                          # Model X'in varsayilani; transformer ve Adim 1-2'de yok
         normalized_update = NORMALIZED_UPDATE if setting in STEP3 else False
     if sphere_weights is None:
@@ -254,6 +265,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
                     dict(params=[p for k, p in named if not k.endswith(hidden)], use_muon=False)], lr=lr)
         if muon_tangent:                                   # yalniz Muon grubunda uygulanir (Adam degismez)
             opt.tangent_axis = {p: unit_axis[k] for k, p in named if k in unit_axis}
+        opt.newton_schulz_precision = newton_schulz_precision
     elif weight_decay:
         # her adimda once W <- W - lr · weight_decay · W (kaybin desteklemedigi agirlik soner), sonra Adam adimi.
         # shift'in capasi var, fact_threshold bir esik: ikisine uygulanmaz
@@ -270,6 +282,9 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     if torch.device(device).type != "cuda":               # CPU: compile C++ derleyicisi ister (bu makinede yok) -> kapali
         compile = False
         matmul_precision = "fp32"                          # CPU'da etkisiz: autocast ve TF32 yalniz GPU'da
+        attention_kernel = "math"                          # flash / mem-efficient yalniz GPU'da
+    kernels = ([SDPBackend.MATH] if attention_kernel == "math" else
+               [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION])
     loss_fn = torch.compile(model.loss) if compile else model.loss
     start = round((1 - cooldown) * steps)                  # WSD: inis bu adimda baslar
     final = round((1 - final_cooldown) * steps)            # coherence: son inis bu adimda baslar
@@ -313,10 +328,10 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
                     group["lr"] = lr * factor
             if batches is not None:                            # mini-batch: bu adimin parcasi
                 ids, mask = (t.to(device) for t in batches(step))
-            # attention hep math yolunda: torch 2.14'ten itibaren SDPA kendiliginden flash / mem-efficient'e gidiyor, onlarin
+            # attention_kernel "math": torch 2.14'ten itibaren SDPA kendiliginden flash / mem-efficient'e gidiyor, onlarin
             # geri yayilimi deterministik degil (surdurme bit duzeyinde ayni kalmaz; hiz ajani, 27 Eylul)
             # bf16: ileri hesap ve kayip autocast'te; geri yayilim disarida (autocast'in kaydettigi tiplerle)
-            with COMPILE_LOCK if compile else contextlib.nullcontext(), sdpa_kernel([SDPBackend.MATH]), (
+            with COMPILE_LOCK if compile else contextlib.nullcontext(), sdpa_kernel(kernels), (
                     torch.autocast("cuda", dtype=torch.bfloat16) if matmul_precision == "bf16" else contextlib.nullcontext()):
                 if split:                                      # iki yari: satirlar tek / cift (uzunluk dagilimi benzer)
                     halves = [loss_fn(ids[h::2].contiguous(), mask[h::2].contiguous()) for h in (0, 1)]
@@ -349,7 +364,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
             if split:                                          # iki yarinin gradyani -> rho; toplam = tam batch'in gradyani
                 grads = None                                   # tek kopya: g1; ikinci yari p.grad'a birikir (g1 + g2)
                 for (half_total, _) in halves:
-                    with sdpa_kernel([SDPBackend.MATH]):
+                    with sdpa_kernel(kernels):
                         half_total.backward()
                     if grads is None:
                         grads = [None if p.grad is None else p.grad.detach().clone() for p in params]
@@ -378,7 +393,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
                 model.coherence = dict(c=dot / (na * nb + 1e-30) ** 0.5, rho=rho, mean=opt.param_groups[0]["coherence_mean"],
                                        lr=opt.param_groups[0]["lr"])
             else:
-                with sdpa_kernel([SDPBackend.MATH]):
+                with sdpa_kernel(kernels):
                     total.backward()                           # her ogrenilen sayi x icin ∂kayip/∂x (zincir kurali, otomatik)
             if grad_clip is not None:                          # butun gradyanlarin toplam boyu > grad_clip ise olcekle indir
                 torch.nn.utils.clip_grad_norm_(params, grad_clip)

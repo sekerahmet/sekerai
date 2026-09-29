@@ -152,7 +152,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                               coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,
                               weight_ema=TR.WEIGHT_EMA, matmul_precision=TR.MATMUL_PRECISION,
                               coherence_power=TR.COHERENCE_POWER, muon_tangent=TR.MUON_TANGENT,
-                              final_cooldown_shape=TR.FINAL_COOLDOWN_SHAPE,
+                              final_cooldown_shape=TR.FINAL_COOLDOWN_SHAPE, attention_kernel=TR.ATTENTION_KERNEL,
+                              newton_schulz_precision=TR.NEWTON_SCHULZ_PRECISION,
                               stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
                               normalized_update=TR.NORMALIZED_UPDATE if setting in TR.STEP3 else False,
                               sphere_weights=TR.SPHERE_WEIGHTS if setting in TR.STEP3 else False,
@@ -166,6 +167,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
             raise RuntimeError("%s: surdurme paketi yok; bastan kosmak ayri karar (resume=False)" % out)
         saved = json.load(open(os.path.join(out, "config.json")))
         saved.setdefault("final_cooldown_shape", "sqrt")          # 29 Eylul oncesi kosularda yazilmadi: sqrt idi
+        saved.setdefault("attention_kernel", "math")              # 29 Eylul oncesi: hep math, fp32 Newton-Schulz
+        saved.setdefault("newton_schulz_precision", "fp32")
         if setting in TR.STEP3 and saved.get("model_kw"):   # 29 Eylul oncesi kosularda output_link yazilmadi: yoktu
             saved["model_kw"] = dict(dict(output_link=False, shared_facts=True), **saved["model_kw"])
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
@@ -289,7 +292,9 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                                     checkpoint=checkpoint, batches=_counting(DS.batches(data, batch_size, seed, bucket), work),
                                     model_kw=model_kw,
                                     **dict(train_kw, matmul_precision=config["matmul_precision"],
-                                           coherence_power=config["coherence_power"], muon_tangent=config["muon_tangent"]))
+                                           coherence_power=config["coherence_power"], muon_tangent=config["muon_tangent"],
+                                           attention_kernel=config["attention_kernel"],
+                                           newton_schulz_precision=config["newton_schulz_precision"]))
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             final = dict(step=steps, valid=ES.exam(model, data, ES.exam_rows(data, None)), subset=ES.exam(model, data, rows),
                          exam_train=ES.exam_train(model, data))

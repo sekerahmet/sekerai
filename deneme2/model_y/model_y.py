@@ -53,9 +53,10 @@ SHARED_BLOCK = True  # True: turlar LAYERS Block'u sirayla paylasir; False: her 
 LAYERS = 2           # SHARED_BLOCK'ta farkli Block (katman) sayisi, turlar sirayla doner: tur i -> Block i mod LAYERS
                      # (kullanici, 28 Eylul: "2 tane paylaşımlı katman", sira ABAB, ad LAYERS).  Varsayilan 2 x 2 (kullanici,
                      # 28 Eylul: "2X2 şu an varsayılan olsun"; TinyStories 1 epok ppl 7,95 / X2 9,73).  1 = tek Block x TURNS tur
-SHARED_FACTS = True  # SHARED_BLOCK'ta FactUnits de turlar arasinda paylasilir.  False: her turun kendi FactUnits'i, attention
-                     # paylasimli kalir (kullanici, 29 Eylul: "bu öneri mantıklı geldi bana"): paylasilan FactUnits'in
-                     # ikinci kullanimi kapanmisti (alpha_F ~0, C ajani); parametre artar, hesap ayni
+SHARED_FACTS = False # True: SHARED_BLOCK'ta FactUnits de turlar arasinda paylasilir (29 Eylul'e kadar).  False: her turun
+                     # kendi FactUnits'i, attention paylasimli kalir (kullanici, 29 Eylul: "bu öneri mantıklı geldi bana";
+                     # varsayilan: "Facts fazla iken iyi sonuç aldık değil mi ? Tabiki olsun"): SimpleStories 1 epok EMA acc
+                     # 0,5547 -> 0,5659, bpb 0,5932 -> 0,5694; parametre 6,9M -> 10,4M, hesap ayni
 FACT_UNITS = 170     # FactUnits birim sayisi; SwiGLU'nun yerlesik genisligi 8/3 x D (Shazeer 2020 "2/3", LLaMA "2/3 4d",
                      # MobileLLM 576 -> 1536); TinyStories'te 384 -> 1024 olculdu (ppl 6,94).  relu'da 4 x D = 256 aliskanligi
 FACT_ACTIVATION = "swiglu"   # FactUnits: "relu" u = ReLU(W_fact_in x - fact_threshold) | "swiglu" u = SiLU(W_fact_in x) *
@@ -516,8 +517,8 @@ class BlockModel(torch.nn.Module):
 
     def _link_parts(self, c):
         """phi(c) = c + q c^2 + (q^2/3 + u) c^3 ve turevleri: phi'(c) = (1 + q c)^2 + 3 u c^2, dphi/dq = c^2 + 2q/3 c^3,
-        dphi/du = c^3 (parcali kayip icin; q, u sabit sayi olarak)."""
-        q, u = float(self.link_q.detach()), float(self.link_u.detach())
+        dphi/du = c^3 (parcali kayip icin; q, u sabit).  q, u tensor kalir: float() compile'da grafigi kirar (274 ms/adim)."""
+        q, u = self.link_q.detach().to(c.dtype), self.link_u.detach().to(c.dtype)
         c2 = c * c
         c3 = c2 * c
         return c + q * c2 + (q * q / 3 + u) * c3, (1 + q * c) ** 2 + 3 * u * c2, c2 + (2 * q / 3) * c3, c3

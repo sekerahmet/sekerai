@@ -283,7 +283,7 @@ def t_step3():
     # t_normalized_update'te, 2 x 2 t_layers'ta
     BlockModel = functools.partial(model_y.BlockModel, normalized_update=False, sphere_weights=False, canon=False, turns=2,
                                    layers=1, heads=1, fact_activation="relu", learn_output_scale=False, loss_chunk=0,
-                                   output_link=False)
+                                   output_link=False, shared_facts=True)
     n, d = 12, 6
     g = torch.Generator().manual_seed(9)
     ids = torch.randint(0, n, (3, 9), generator=g)
@@ -550,6 +550,32 @@ def t_step3():
     sv = torch.linalg.svdvals(TR.Muon.orthogonalize(Gm))
     check("Muon: Newton-Schulz ciktisinin tekil degerleri ~1 (yari-ortogonal)", float((sv - 1).abs().max()) < 0.35,
           "tekil deger %.3f..%.3f" % (float(sv.min()), float(sv.max())))
+    ob = TR.Muon.orthogonalize(Gm, precision="bf16")
+    of = TR.Muon.orthogonalize(Gm)
+    svb = torch.linalg.svdvals(ob)
+    rel = float((ob - of).norm() / of.norm())
+    ns_opts = []
+    nb, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=2, log_at=(), save_every=1,
+                         save=lambda step, model, opt: ns_opts.append(opt), newton_schulz_precision="bf16")
+    ns_set = ns_opts[-1].newton_schulz_precision
+    TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), save_every=1,
+                 save=lambda step, model, opt: ns_opts.append(opt))
+    k_math, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=2, log_at=())
+    k_flash, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=2, log_at=(), attention_kernel="flash")
+    refused_k = 0
+    for bad in (dict(attention_kernel="efficient"), dict(newton_schulz_precision="fp16")):
+        try:
+            TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), **bad)
+        except AssertionError:
+            refused_k += 1
+    check("ATTENTION_KERNEL / NEWTON_SCHULZ_PRECISION (29 Eylul): varsayilan math / fp32; bf16 Newton-Schulz tekil degerleri ~1, "
+          "fp32'ye yakin, tipi G'ninki, train_seq optimizer'a iletir; CPU'da flash = math (bit duzeyinde); gecersiz deger reddedilir",
+          TR.ATTENTION_KERNEL == "math" and TR.NEWTON_SCHULZ_PRECISION == "fp32" and float((svb - 1).abs().max()) < 0.35
+          and rel < 0.05 and ob.dtype == Gm.dtype and ns_set == "bf16" and ns_opts[-1].newton_schulz_precision == "fp32"
+          and not any(torch.isnan(p_).any() for p_ in nb.parameters())
+          and all(torch.equal(a_, b_) for a_, b_ in zip(k_math.state_dict().values(), k_flash.state_dict().values()))
+          and refused_k == 2,
+          "bf16 tekil %.3f..%.3f, fp32'den fark %.3f" % (float(svb.min()), float(svb.max()), rel))
 
     opts, lrs = [], {}
 
@@ -835,7 +861,7 @@ def t_normalized_update():
     # bagimsiz float64 referans (tasarim formulu): rastgele parametrelerle
     g = torch.Generator().manual_seed(41)
     m = BlockModel(nv, d=32, units=48, normalized_update=True, sphere_weights=True, canon=False, heads=1,
-                   output_link=False).double()
+                   output_link=False, shared_facts=True).double()
     with torch.no_grad():
         for name, p_ in m.named_parameters():
             if name.startswith("alpha"):
@@ -920,7 +946,8 @@ def t_normalized_update():
 
     # LAST_FACTS_ALPHA_INIT: ALPHA_INIT verilince eski baslatma birebir; 1,0'da son durum girdi noktasindan ayrilir, adim-0
     # kaybi ln n + s^2 / (2d) (h rastgele yon: <h, p> ~ N(0, 1/d)), girdiyi tekrar etme kaybolur
-    old_init, new_init = BlockModel(nv, last_facts_alpha_init=ALPHA_INIT), BlockModel(nv)
+    old_init, new_init = (BlockModel(nv, last_facts_alpha_init=ALPHA_INIT, shared_facts=True),   # esikler paylasimli
+                          BlockModel(nv, shared_facts=True))                                  # FactUnits ile olculdu
     before = {k: v.clone() for k, v in new_init.state_dict().items()}
     before["alpha_facts"].fill_(ALPHA_INIT)                               # 28 Eylul oncesi kod: torch.full(ALPHA_INIT)
     same_old = list(before) == list(old_init.state_dict()) and all(torch.equal(before[k], v)
@@ -931,7 +958,7 @@ def t_normalized_update():
                                              (8004, 384, 1024, big, torch.ones_like(big, dtype=torch.bool), 0.1)):
         out_ = {}
         for init in (LAST_FACTS_ALPHA_INIT, ALPHA_INIT):
-            m_ = BlockModel(n_, d=d_, units=units_, last_facts_alpha_init=init)
+            m_ = BlockModel(n_, d=d_, units=units_, last_facts_alpha_init=init, shared_facts=True)
             with torch.no_grad():
                 keep_ = mask_[:, 1:]
                 repeat = float((m_.logits(ids_[:, :-1]).argmax(-1) == ids_[:, :-1])[keep_].float().mean())
@@ -1039,9 +1066,9 @@ def t_layers():
     check("layers: varsayilan = 2 x 2 (layers=2, turns=4; kullanici, 28 Eylul), bit duzeyinde ayni",
           same and list(base.state_dict()) == list(explicit.state_dict()) and len(base.blocks) == 2 and base.turns == 4)
 
-    m = BlockModel(nv, layers=2, turns=4)
+    m = BlockModel(nv, layers=2, turns=4, shared_facts=True)
     tb = m.turn_blocks()
-    four = BlockModel(nv, turns=4, layers=1)
+    four = BlockModel(nv, turns=4, layers=1, shared_facts=True)
     count = lambda mm: sum(p_.numel() for p_ in mm.parameters())
     per_block = sum(p_.numel() for p_ in m.blocks[0].parameters())
     check("layers: layers=2, turns=4 -> iki Block, sira A B A B; parametre = tek Block'lu 4 tur + bir Block; alpha (4, d)",
@@ -1803,7 +1830,8 @@ def t_muon_tangent():
     torch.nn.utils.clip_grad_norm_([p_ for p_ in ref.parameters() if p_.requires_grad], TR.GRAD_CLIP)
     seen, saved = [], TR.Muon.__dict__["orthogonalize"]              # staticmethod nesnesi: aynen geri konur
     real = saved.__func__
-    TR.Muon.orthogonalize = staticmethod(lambda G, steps=5: (seen.append(G.clone()), real(G, steps))[1])
+    TR.Muon.orthogonalize = staticmethod(lambda G, steps=5, precision="fp32": (seen.append(G.clone()),
+                                                                            real(G, steps, precision))[1])
     worst, dots = {}, []
     try:
         for tangent in (False, True):
@@ -1904,6 +1932,14 @@ def t_output_link():
     check("output_link: parcali kayip (29 Eylul) = tam tablo, deger ve butun gradyanlar (link_q, link_u, olcek, noktalar "
           "dahil) float64'te <= 1e-10", float((lc - lf).abs()) < 1e-10 and gerr < 1e-10 and mc.link_q.grad is not None,
           "deger %.1e  gradyan %.1e" % (float((lc - lf).abs()), gerr))
+    breaks = {}
+    for link_ in (True, False):
+        torch._dynamo.reset()
+        ex = torch._dynamo.explain(BlockModel(nv, d=32, units=48, loss_chunk=7, output_link=link_).loss)(sids[:4], smask[:4])
+        breaks[link_] = ex.graph_break_count
+    torch._dynamo.reset()
+    check("output_link: parcali kayip compile'da tek grafik (graph break yok; phi'de float(q) kiriyordu: GPU'da 166 -> 274 "
+          "ms/adim, 29 Eylul)", breaks == {True: 0, False: 0}, str(breaks))
     check("output_link: LOSS_CHUNK > 0 iken kayip (parcali yol) = masked_nll(logits)",
           m.loss_chunk > 0 and float((nll - ref).abs()) < 1e-6, "fark %.1e" % float((nll - ref).abs()))
 
@@ -1933,7 +1969,7 @@ def t_output_link():
 
 
 def t_shared_facts():
-    """SHARED_FACTS: varsayilan True (bugunku, ek FactUnits yok); False'ta her turun kendi FactUnits'i, attention paylasimli
+    """SHARED_FACTS: varsayilan False (29 Eylul'den; True: ek FactUnits yok); False'ta her turun kendi FactUnits'i, attention paylasimli
     kalir: attention'i ikiser bagli ayri bloklu modelle ayni skor (float64); parametre + (turns - layers) FactUnits;
     ek FactUnits kurede ve Muon'da; egitim, surdurme, onbellekli uretim."""
     import copy
@@ -1943,12 +1979,12 @@ def t_shared_facts():
     sids, smask = EK.sequences(data)
     nv = len(data["vocab"])
     kw = dict(d=16, units=16, layers=2, turns=4, heads=2)
-    base, split = BlockModel(nv, **kw), BlockModel(nv, shared_facts=False, **kw)
+    base, split = BlockModel(nv, shared_facts=True, **kw), BlockModel(nv, **kw)
     cnt = lambda m: sum(p_.numel() for p_ in m.parameters() if p_.requires_grad)
     fu = sum(p_.numel() for p_ in split.extra_facts[0].parameters())
-    check("shared_facts: varsayilan True (ek FactUnits yok); False'ta turns - layers ek FactUnits, parametre tam o kadar "
+    check("shared_facts: varsayilan False (29 Eylul; True'da ek FactUnits yok); False'ta turns - layers ek FactUnits, parametre tam o kadar "
           "artar; ek FactUnits'in satirlari birim, W_fact_out sifir degil",
-          SHARED_FACTS is True and inspect.signature(BlockModel).parameters["shared_facts"].default is True
+          SHARED_FACTS is False and inspect.signature(BlockModel).parameters["shared_facts"].default is False
           and not hasattr(base, "extra_facts") and len(split.extra_facts) == 2 and cnt(split) - cnt(base) == 2 * fu
           and float((split.extra_facts[1].W_fact_in.norm(dim=1) - 1).abs().max()) < 1e-6
           and float(split.extra_facts[1].W_fact_out.abs().max()) > 0, "ek %d parametre" % (cnt(split) - cnt(base)))
@@ -2019,7 +2055,7 @@ def t_internals():
     nv = len(data["vocab"])
     stories = [sids[i, :int(smask[i].sum())].tolist() for i in range(6)]
     others = [sids[i, :int(smask[i].sum())].tolist() for i in range(6, 12)]
-    base_kw = dict(d=16, units=24, layers=2, turns=4, heads=2)
+    base_kw = dict(d=16, units=24, layers=2, turns=4, heads=2, shared_facts=True)   # paylasimli tasarim; ayrik hali acikca
 
     def perturbed(seed=5, **kw):
         m = BlockModel(nv, **dict(base_kw, **kw)).double()
@@ -2280,23 +2316,25 @@ def t_internals():
 
     cached = [(sids[i:i + 8].clone(), smask[i:i + 8].clone()) for i in (0, 8, 16)]
     kept = [(a_.clone(), b_.clone()) for a_, b_ in cached]
-    mk = dict(base_kw, output_link=True)
-    ctx = I._profile_setup(dict(setting="shared", vocab=nv, model_kw=mk, weight_ema=0.9), cached, "cpu")
-    for j in (1, 2, 3):                                    # kurulum batch 0 ile bir adim; tekrar 1, 2, 0
-        I._step_parts(ctx, *cached[j % 3], I._Clock("cpu"))
-    ref = {}
+    replica = []
+    for sf in (True, False):                               # paylasimli ve tur basina FactUnits
+        mk = dict(base_kw, output_link=True, shared_facts=sf)
+        ctx = I._profile_setup(dict(setting="shared", vocab=nv, model_kw=mk, weight_ema=0.9), cached, "cpu")
+        for j in (1, 2, 3):                                # kurulum batch 0 ile bir adim; tekrar 1, 2, 0
+            I._step_parts(ctx, *cached[j % 3], I._Clock("cpu"))
+        ref = {}
 
-    def stop(step, model, opt):
-        ref.update(model=copy.deepcopy(model.state_dict()), ema=copy.deepcopy(model.weight_ema["model"].state_dict()))
-        raise Enough()
-    try:                                                   # wsd: 80 adimdan once lr sabit
-        TR.train_seq("shared", None, None, nv, steps=100, batches=lambda s: cached[s % 3], log_at=(), save_every=4, save=stop,
-                     weight_ema=0.9, model_kw=mk)
-    except Enough:
-        pass
-    replica = same(ctx["model"].state_dict(), ref["model"]) and same(ctx["ema"]["model"].state_dict(), ref["ema"])
+        def stop(step, model, opt):
+            ref.update(model=copy.deepcopy(model.state_dict()), ema=copy.deepcopy(model.weight_ema["model"].state_dict()))
+            raise Enough()
+        try:                                               # wsd: 80 adimdan once lr sabit
+            TR.train_seq("shared", None, None, nv, steps=100, batches=lambda s: cached[s % 3], log_at=(), save_every=4,
+                         save=stop, weight_ema=0.9, model_kw=mk)
+        except Enough:
+            pass
+        replica.append(same(ctx["model"].state_dict(), ref["model"]) and same(ctx["ema"]["model"].state_dict(), ref["ema"]))
     check("internals profile_step: parca parca tekrarlanan adim = train_seq'in adimi, bit duzeyinde (wsd, Muon + Adam, clip, "
-          "kure, phi kirpma, EMA; 1 + 3 adim)", replica)
+          "kure, phi kirpma, EMA; 1 + 3 adim; paylasimli / tur basina FactUnits)", all(replica), str(replica))
 
     precision, rng = torch.get_float32_matmul_precision(), torch.get_rng_state()
     cfg = dict(setting="shared", vocab=nv, model_kw=dict(base_kw, shared_facts=False, output_link=False),
@@ -2329,7 +2367,12 @@ def _run_one(name):
     del RESULTS[:]
     t0 = time.time()
     with contextlib.redirect_stdout(buf):
-        globals()[name]()
+        try:
+            globals()[name]()
+        except Exception:                                  # istisna o testin kaldisi; havuz dusmez
+            import traceback
+            print(traceback.format_exc())
+            RESULTS.append(False)
     return name, list(RESULTS), buf.getvalue(), time.time() - t0
 
 
