@@ -53,6 +53,8 @@ COHERENCE_WINDOW = 200   # rho'nun hareketli ortalamasi (adim); tek adimin olcum
 FINAL_COOLDOWN = 0.95    # coherence'ta inisin payi: ilk %5'te lr olculur, sonra o degerden x LR_FLOOR'a.  0,95 (kullanici,
                          # 29 Eylul: "1 evet varsayılan olsun"; oncesi 0,05 / 0,2): SimpleStories 1 epok, phi ile EMA bpb
                          # 0,6090 -> 0,5932, acc +0,7 puan (plato evresi kazandirmiyordu)
+FROZEN_LR = None         # coherence'ta inisin basladigi lr'yi elle vermek (None: o anki olculen deger).  Kullanici, 29 Eylul:
+                         # "Tepe lr'yi φ'li koşununkine sabitle" (phi acik / kapali kiyasinda tek fark phi kalsin)
 FINAL_COOLDOWN_SHAPE = "linear"   # son inisin bicimi: "linear" 1 - p | "sqrt" 1 - sqrt(p) (29 Eylul'e kadar; kisa
                                   # inislerde).  Kullanici, 29 Eylul: "final cooldown olsun", "1 evet varsayılan olsun"
 COHERENCE_POWER = 1.0    # coherence'ta lr carpani = ortalama(rho) ^ bu us; alt / ust sinir ve son inis aynen.  0,5 = sqrt(rho)
@@ -167,7 +169,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
               batches=None, model_kw=None, optimizer=OPTIMIZER, schedule=SCHEDULE, cooldown=COOLDOWN,
               normalized_update=None, sphere_weights=None, canon=None, coherence_window=COHERENCE_WINDOW,
               final_cooldown=FINAL_COOLDOWN, weight_ema=WEIGHT_EMA, matmul_precision=MATMUL_PRECISION,
-              coherence_power=COHERENCE_POWER, muon_tangent=MUON_TANGENT, final_cooldown_shape=FINAL_COOLDOWN_SHAPE):
+              coherence_power=COHERENCE_POWER, muon_tangent=MUON_TANGENT, final_cooldown_shape=FINAL_COOLDOWN_SHAPE,
+              frozen_lr=FROZEN_LR):
     """Standart tarif (27 Eylul'den): Muon (gizli matrisler) + Adam, WSD takvimi (lr sabit, son cooldown kisminda
     1 - sqrt ile LR x lr_floor'a), gradient clipping.  optimizer="adam", schedule="cosine": 27 Eylul'e kadarki tarif.
     lr_floor=None, grad_clip=None: en eski tarif (sabit lr).  weight_decay > 0: AdamW, yalniz W_ matrisleri (yalniz adam).
@@ -203,6 +206,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     assert optimizer in ("muon", "adam") and schedule in ("wsd", "cosine", "coherence") and 0 < cooldown <= 1
     assert schedule != "coherence" or (lr_floor is not None and 0 < final_cooldown <= 1 and coherence_window >= 1)
     assert final_cooldown_shape in ("sqrt", "linear"), "final_cooldown_shape: sqrt | linear"
+    assert frozen_lr is None or (schedule == "coherence" and frozen_lr > 0), "frozen_lr: yalniz coherence'ta, pozitif"
     assert weight_ema is None or 0 < weight_ema < 1, "weight_ema: 0 ile 1 arasi (ornek 0,999) ya da None"
     assert optimizer == "adam" or not weight_decay, "weight_decay yalniz optimizer='adam' ile (AdamW)"
     assert matmul_precision in ("fp32", "tf32", "bf16"), "matmul_precision: fp32 | tf32 | bf16"
@@ -297,7 +301,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
                     else:
                         if g0["coherence_frozen"] is None:
                             for group in opt.param_groups:
-                                group["coherence_frozen"] = min(max(g0["coherence_mean"] ** coherence_power, lr_floor), 1.0)
+                                group["coherence_frozen"] = (frozen_lr / lr if frozen_lr is not None else
+                                                              min(max(g0["coherence_mean"] ** coherence_power, lr_floor), 1.0))
                         p = (step - final) / max(steps - final, 1)
                         factor = g0["coherence_frozen"] * (
                             lr_floor + (1 - lr_floor) * (1 - (p if final_cooldown_shape == "linear" else math.sqrt(p))))

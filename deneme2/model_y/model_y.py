@@ -514,9 +514,16 @@ class BlockModel(torch.nn.Module):
             return scale * (c * (1 + c * (q + c * (q * q / 3 + u))))
         return scale * h @ P.T                                 # skor_tj = scale · <h_t, PL_j>
 
+    def _link_parts(self, c):
+        """phi(c) = c + q c^2 + (q^2/3 + u) c^3 ve turevleri: phi'(c) = (1 + q c)^2 + 3 u c^2, dphi/dq = c^2 + 2q/3 c^3,
+        dphi/du = c^3 (parcali kayip icin; q, u sabit sayi olarak)."""
+        q, u = float(self.link_q.detach()), float(self.link_u.detach())
+        c2 = c * c
+        c3 = c2 * c
+        return c + q * c2 + (q * q / 3 + u) * c3, (1 + q * c) ** 2 + 3 * u * c2, c2 + (2 * q / 3) * c3, c3
+
     def loss(self, ids, mask):
-        if self.loss_chunk and not self.output_link:           # parcali: (N x V) tablosu yok, gradyan ileri hesapta;
-                                                               # phi'de parcali yol yok: tam tablo
+        if self.loss_chunk:                                    # parcali: (N x V) tablosu yok, gradyan ileri hesapta
             P = self.tokens.points()
             h = self.hidden(ids[:, :-1])[-1].flatten(0, -2)    # (N, d), N = B (T - 1); cikis logits'teki gibi
             if self.layer_norm:
@@ -539,31 +546,56 @@ class BlockModel(torch.nn.Module):
                 chunks = range(0, Pd.shape[0], self.loss_chunk)
                 lse = None
                 for c in chunks:
-                    z = (hd @ Pd[c:c + self.loss_chunk].T).to(work).mul_(s)
+                    z = (hd @ Pd[c:c + self.loss_chunk].T).to(work)
+                    z = (self._link_parts(z)[0] if self.output_link else z).mul_(s)
                     part = torch.logsumexp(z, -1)
                     lse = part if lse is None else torch.logaddexp(lse, part)
                     del z
                 hw = hd.to(work) * w[:, None]
                 grad_h = torch.zeros_like(hd, dtype=work)      # sum_j p_ij P_j
                 grad_P = torch.zeros_like(Pd, dtype=work)      # sum_i w_i p_ij h_i
-                mean_dot = torch.zeros_like(lse)               # sum_j p_ij <h_i, P_j>
+                mean_dot = torch.zeros_like(lse)               # sum_j p_ij <h_i, P_j>  (phi'de sum_j p_ij phi_ij)
+                if self.output_link:                           # phi: z = s phi(c); dz/dc = s phi'(c), dphi/dq, dphi/du
+                    mean_q, mean_u = torch.zeros_like(lse), torch.zeros_like(lse)
                 for c in chunks:
                     Pc = Pd[c:c + self.loss_chunk].to(work)
                     dot = (hd @ Pc.T).to(work)
+                    if self.output_link:
+                        ph, dph, dq, du = self._link_parts(dot)
+                        p = (ph * s).sub_(lse[:, None]).exp_()
+                        g = p * dph
+                        grad_h += g @ Pc
+                        grad_P[c:c + self.loss_chunk] = g.T @ hw
+                        mean_dot += (p * ph).sum(-1)
+                        mean_q += (p * dq).sum(-1)
+                        mean_u += (p * du).sum(-1)
+                        del dot, p, g, ph, dph, dq, du
+                        continue
                     p = (dot * s).sub_(lse[:, None]).exp_()
                     grad_h += p @ Pc
                     grad_P[c:c + self.loss_chunk] = p.T @ hw
                     mean_dot += p.mul_(dot).sum(-1)
                     del dot, p
                 dot_y = (hd * Pd[y]).sum(-1).to(work)
-                value = (w * (lse - s * dot_y)).sum()
-                grad_h = (s * w)[:, None] * (grad_h - Pd[y].to(work))
-                grad_P = s * grad_P.index_add_(0, y, -hw)
-                grad_s = (w * (mean_dot - dot_y)).sum()
+                if self.output_link:                           # hedefte: phi, phi', dphi/dq, dphi/du
+                    ph_y, dph_y, dq_y, du_y = self._link_parts(dot_y)
+                    value = (w * (lse - s * ph_y)).sum()
+                    grad_h = (s * w)[:, None] * (grad_h - dph_y[:, None] * Pd[y].to(work))
+                    grad_P = s * grad_P.index_add_(0, y, -hw * dph_y[:, None])
+                    grad_s = (w * (mean_dot - ph_y)).sum()
+                    grad_q = s * (w * (mean_q - dq_y)).sum()
+                    grad_u = s * (w * (mean_u - du_y)).sum()
+                else:
+                    value = (w * (lse - s * dot_y)).sum()
+                    grad_h = (s * w)[:, None] * (grad_h - Pd[y].to(work))
+                    grad_P = s * grad_P.index_add_(0, y, -hw)
+                    grad_s = (w * (mean_dot - dot_y)).sum()
             # deger = value; eklenen terimlerin degeri 0, gradyanlari grad_* (geri yayilimda yeniden hesap yok)
             nll = value + (grad_h * (h - h.detach())).sum() + (grad_P * (P - P.detach())).sum()
             if torch.is_tensor(scale) and scale.requires_grad:
                 nll = nll + grad_s * (scale - scale.detach())
+            if self.output_link:
+                nll = nll + grad_q * (self.link_q - self.link_q.detach()) + grad_u * (self.link_u - self.link_u.detach())
             return nll + self.tokens.anchor_loss(), nll
         nll = masked_nll(self.logits(ids[:, :-1]), ids[:, 1:], mask[:, 1:])
         return nll + self.tokens.anchor_loss(), nll

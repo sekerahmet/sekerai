@@ -18,10 +18,13 @@ Drive <root>/ (Colab: /content/drive/MyDrive/simplestories):
     <tag>/train.npy, valid.npy             uint16, her hikayeden sonra eos
     <tag>/train_bytes.npy, valid_bytes.npy int32, hikaye basina UTF-8 bayt
     <tag>/fingerprint.json                 kaynak izi ve parca izleri, kaynaklar, sayimlar
+    <tag>/text_reference.json              train'in kelime kumesi ve 'X and X' sayilari (count_text_errors), kaynak izi,
+                                           icerik sha256'si ve kurali (build_text_reference; kullanici, 29 Eylul: "Evet")
     exam_stories.npy, exam_stories.json    sinav kumesi (valid hikaye sirasi), sha256 ve kurali
-    log.txt                                build_cache gunlugu
+    log.txt                                build_cache / build_text_reference gunlugu
 Iz (fingerprint): kaynak parcalari (sozluk, tokenizer, akislar, baytlar) fingerprint.json ile karsilastirilir; birlesik iz
 bunlara pencere tablosunu (windows) ve sinav kumesini (exam) de katar -- bolme kurali ya da SEQ_LEN degisirse iz degisir.
+text_reference.json birlesik ize girmez (eski kosularin izi degismesin); build kaynak izini, icerik izini ve kurali dogrular.
 
 ss4096: SimpleStories'in kendi WordPiece'i (4.096; kucuk harf, bosluk ve satir sonu kaybolur; [UNK] 0, [EOS] 1).
 gpt2: GPT-2 byte-level BPE (50.257, kayipsiz; <|endoftext|> 50256).  Sozlukte eos'un yazimi EOS_TOKEN: egitim ve sinav
@@ -29,12 +32,15 @@ kodu eos'u data_tinystories'teki adla bulur.
 Finke ve digerleri, arXiv 2504.09184; lisans MIT.
 
     python data_simplestories.py build_cache <root> [tag ...]      tek seferlik; ag + CPU, arka planda
+    python data_simplestories.py build_text_reference <root> [tag ...]   tek seferlik; CPU, tag basina ~2 dk
 """
+import collections
 import hashlib
 import itertools
 import json
 import math
 import os
+import re
 import shutil
 import sys
 import time
@@ -73,6 +79,17 @@ TOKENIZERS = dict(  # ss4096 = simple_stories_train tokenizer/simplestories-4096
               file="tokenizer.json", eos="<|endoftext|>",
               sha256="8414cab924d8b9b33013f0d221c5862f365ee9be39c5c2bfae8a5a9e970478a6"))
 _LOADED = {}  # id(vocab) -> (vocab, Tokenizer, eos id); encode / decode tokenizer'i sozlukten bulur
+_UNIT = re.compile(r"\d|[^\W\d_]+|[^\w\s]")   # birim: kelime, tek rakam, tek noktalama (ss4096 on-bolucusu gibi)
+_XWORD = re.compile(r"[a-z']+")
+_XAX_WORDS = 7           # 'X and X'te X en cok bu kadar birim: A ajaninin ifadesi (?:[a-z']+ ){0,6}[a-z']+
+_P = np.uint64(0x9E3779B97F4A7C15)            # metin ozeti carpani (64 bit, tasma sarar)
+_CHUNK = 1 << 24         # train taramasi parca boyu (token)
+_TABLES = {}             # id(vocab) -> (vocab, birim tablosu)
+_TEXT_REFERENCE = "text_reference.json"
+_TEXT_REFERENCE_RULE = (
+    "birim: kucuk harf kelime ('##' / bosluksuz harf parcalari birlesik), tek rakam, tek noktalama; words: train'de gecen "
+    "alfabetik birimler; xax: her 'and' / 'or' birimi icin hemen once ve hemen sonra ayni en uzun X (1-%d birim, [a-z']+), "
+    "ortusmeli sayim" % _XAX_WORDS)
 
 
 def _load(path, eos):
@@ -194,15 +211,24 @@ def _windows(starts, lengths, seq_len):
 
 def build(root, tag, seq_len=SEQ_LEN, log=print):
     """Drive -> veri.  root: simplestories klasoru, tag: TAGS'tan biri.  Uretmez: dosya yoksa, kaynak izi fingerprint.json
-    ile ya da sinav kumesi exam_stories.json ile tutmazsa DURUR.  -> vocab, train / valid (akis, uint16),
-    train_start / _length / _head (pencereler, uzun hikaye bolunmus), valid_start / _length / _bytes (sigan hikayeler),
-    valid_in_train, exam (sinav kumesinin valid pencereleri), counts, seq_len, tag, fingerprint, fingerprints."""
+    ile, sinav kumesi exam_stories.json ile ya da text_reference.json (icerik izi, kaynak izi, kural) tutmazsa DURUR.
+    -> vocab, train / valid (akis, uint16), train_start / _length / _head (pencereler, uzun hikaye bolunmus), train_bytes
+    (hikaye basina, bos dahil; exam_train), valid_start / _length / _bytes (sigan hikayeler), valid_in_train, exam (sinav
+    kumesinin valid pencereleri), text_reference (words, xax, sha256), counts, seq_len, tag, fingerprint, fingerprints."""
+    return _build(root, tag, seq_len, log, reference=True)
+
+
+def _build(root, tag, seq_len, log, reference):
+    """build; reference=False: text_reference.json aranmaz (build_text_reference onu uretirken)."""
     d = os.path.join(root, tag)
     names = [os.path.join(tag, n) for n in ("tokenizer.json", "train.npy", "valid.npy", "train_bytes.npy",
                                             "valid_bytes.npy", "fingerprint.json")] + ["exam_stories.npy",
                                                                                        "exam_stories.json"]
     missing = [n for n in names if not os.path.exists(os.path.join(root, n))]
     assert not missing, "%s: Drive'da YOK %s -- build_cache bir kez uretir, Colab uretmez (kural 9)" % (root, missing)
+    assert not reference or os.path.exists(os.path.join(d, _TEXT_REFERENCE)), \
+        "%s: Drive'da YOK %s -- build_text_reference(root, %r) bir kez uretir, Colab uretmez (kural 9)" % (
+            d, _TEXT_REFERENCE, tag)
     saved = json.load(open(os.path.join(d, "fingerprint.json"), encoding="utf-8"))
     _, vocab = _load(os.path.join(d, "tokenizer.json"), saved["eos"])
     eos = vocab.index(EOS_TOKEN)
@@ -220,6 +246,7 @@ def build(root, tag, seq_len=SEQ_LEN, log=print):
     starts, lengths = stories["train"]
     keep = lengths > 0
     data["train_start"], data["train_length"], data["train_head"] = _windows(starts[keep], lengths[keep], seq_len)
+    data["train_bytes"] = whole["train_bytes"]
     starts, lengths = stories["valid"]
     keep = (lengths > 0) & (lengths + 2 <= seq_len)                   # + bastaki ve sondaki eos
     data["valid_start"], data["valid_length"], data["valid_bytes"] = starts[keep], lengths[keep], whole["valid_bytes"][keep]
@@ -259,6 +286,10 @@ def build(root, tag, seq_len=SEQ_LEN, log=print):
         data["fingerprint"], source, " ".join("%s %s" % kv for kv in sorted(data["fingerprints"].items())), seq_len,
         100 * (1 - (data["train_length"] + 2).sum() / (seq_len * max(c["train_kept"], 1))),
         c["train_bytes"] / max(c["train_tokens"] - c["train_stories"], 1)))
+    if reference:
+        ref = data["text_reference"] = _read_text_reference(os.path.join(d, _TEXT_REFERENCE), source)
+        log("metin referansi %s (%s): train kelime %d, 'X and X' cifti %d" % (
+            ref["sha256"], _TEXT_REFERENCE, len(ref["words"]), len(ref["xax"])))
     return data
 
 
@@ -362,6 +393,206 @@ def batches(data, batch_size, seed=0, bucket=None):
     return batch
 
 
+# --- metin referansi (exam_simplestories.count_text_errors): birimler ve train'in kelime / 'X and X' sayimi
+
+def _string_hash(s):
+    """Metnin 64 bit polinom ozeti ve _P^uzunluk: H(a + b) = H(a) x _P^len(b) + H(b) (tasma sarar)."""
+    h, p = 0, 1
+    for c in s:
+        h, p = (h * int(_P) + ord(c)) % (1 << 64), p * int(_P) % (1 << 64)
+    return h, p
+
+
+def _token_table(vocab):
+    """Token -> birim tablosu: pieces (kucuk harf birimler), joins (ilk birimi onceki token'in son birimine yapisir), ends
+    (harfle biter), empty (birimsiz: bosluk; eos haric), xword (tek birim, [a-z']+), hash / power (birimlerin bitisik
+    metninin _string_hash'i: ayni metin, farkli token'lama ayni anahtar), conj ('and' 1, 'or' 2).  WordPiece (ss4096):
+    '##' parca yapisir.  Byte BPE (gpt2): bosluksuz harfle baslayan token, harfle biten token'a yapisir."""
+    hit = _TABLES.get(id(vocab))
+    if hit is not None and hit[0] is vocab:
+        return hit[1]
+    from tokenizers.models import WordPiece
+    V, eos = len(vocab), vocab.index(EOS_TOKEN)
+    tok = _tokenizer(vocab)[0]
+    if isinstance(tok.model, WordPiece):
+        pieces = [[t[2:]] if t.startswith("##") and len(t) > 2 else [t] for t in vocab]
+        joins = np.array([t.startswith("##") and len(t) > 2 for t in vocab])
+        ends = np.ones(V, dtype=bool)
+    else:
+        text = [tok.decode([i]) for i in range(V)]
+        pieces = [_UNIT.findall(s.lower()) for s in text]
+        joins = np.array([s[:1].isalpha() for s in text])
+        ends = np.array([s[-1:].isalpha() for s in text])
+    pieces[eos], joins[eos], ends[eos] = [], False, False
+    hashes = [_string_hash("".join(p)) for p in pieces]
+    tab = dict(pieces=pieces, joins=joins, ends=ends, joins_list=joins.tolist(), ends_list=ends.tolist(),
+               empty=np.array([not p for p in pieces]) & (np.arange(V) != eos),
+               xword=np.array([len(p) == 1 and bool(_XWORD.fullmatch(p[0])) for p in pieces]),
+               hash=np.array([h for h, _ in hashes], dtype=np.uint64), power=np.array([p for _, p in hashes], dtype=np.uint64),
+               conj={_string_hash("and")[0]: 1, _string_hash("or")[0]: 2})
+    _TABLES[id(vocab)] = (vocab, tab)
+    return tab
+
+
+def _units(ids, tab):
+    """id listesi -> birimler (kelime '##' / bosluksuz parcalarla birlesik, tek rakam, tek noktalama); eos ve bosluk sinir."""
+    pieces, joins, ends = tab["pieces"], tab["joins_list"], tab["ends_list"]
+    out, letter = [], False
+    for t in ids:
+        p = pieces[t]
+        if p and joins[t] and letter and out:
+            out[-1] += p[0]
+            out.extend(p[1:])
+        else:
+            out.extend(p)
+        letter = ends[t] and bool(p)
+    return out
+
+
+def _segments(x, tab):
+    """Token dizisi (numpy) -> birim segmentleri (baslangic, token sayisi); bosluk token'lari atilir, eos kalir (sinir)."""
+    join = tab["joins"][x[1:]] & tab["ends"][x[:-1]]
+    starts = np.concatenate([[0], np.flatnonzero(~join) + 1]).astype(np.int64)
+    lengths = np.diff(np.append(starts, len(x)))
+    keep = ~tab["empty"][x[starts]]
+    return starts[keep], lengths[keep]
+
+
+def _segment_keys(x, starts, lengths, tab):
+    """Segment basina anahtar: birimlerinin bitisik metninin _string_hash'i, token'lar uzerinden katlanarak."""
+    keys = tab["hash"][x[starts]]
+    multi = np.flatnonzero(lengths > 1)
+    if len(multi):
+        s, L = starts[multi], lengths[multi]
+        h = keys[multi]
+        for j in range(1, int(L.max())):
+            m = np.flatnonzero(L > j)
+            t = x[s[m] + j]
+            h[m] = h[m] * tab["power"][t] + tab["hash"][t]
+        keys[multi] = h
+    return keys
+
+
+def _xax_counts(x, starts, lengths, keys, tab):
+    """Token parcasinda her 'and' / 'or' icin en uzun X (en cok _XAX_WORDS [a-z']+ birim, bagdan hemen once ve hemen
+    sonra ayni) -> Counter {(X, bag): sayi}.  Ortusme sayilir: zincir 'dug and dug and dug' iki kez."""
+    bad = np.concatenate([[0], np.cumsum(~tab["xword"][x])])
+    ok = bad[starts + lengths] == bad[starts]
+    conj = np.zeros(len(keys), dtype=np.int64)
+    for h, c in tab["conj"].items():
+        conj[keys == np.uint64(h)] = c
+    ci = np.flatnonzero(ok & (conj > 0))
+    best = np.zeros(len(ci), dtype=np.int64)
+    for m in range(1, _XAX_WORDS + 1):
+        live = np.flatnonzero((ci >= m) & (ci + m < len(starts)))
+        for q in range(m):
+            i = ci[live]
+            live = live[ok[i - m + q] & (keys[i - m + q] == keys[i + 1 + q])]
+        best[live] = m
+    hit = np.flatnonzero(best)
+    out = collections.Counter()
+    if not len(hit):
+        return out
+    i, m = ci[hit], best[hit]
+    kind = conj[i]
+    h = (m * 3 + kind).astype(np.uint64)
+    for q in range(_XAX_WORDS):
+        sel = np.flatnonzero(m > q)
+        h[sel] = h[sel] * _P + keys[i[sel] - m[sel] + q]
+    _, first, count = np.unique(h, return_index=True, return_counts=True)
+    for f, c in zip(first.tolist(), count.tolist()):
+        X = _units(x[starts[i[f] - m[f]]:starts[i[f]]].tolist(), tab)
+        out[(" ".join(X), "and" if kind[f] == 1 else "or")] += c
+    return out
+
+
+def _text_reference(vocab, a, log=lambda s: None):
+    """Token akisi (eos ile biten hikayeler) -> (alfabetik kelime kumesi, 'X and X' sayilari {(X, bag): sayi}).  Parca
+    parca (_CHUNK token, eos sinirinda)."""
+    tab, eos = _token_table(vocab), vocab.index(EOS_TOKEN)
+    single = np.zeros(len(vocab), dtype=bool)
+    multi, xax, c0, t0 = [], collections.Counter(), 0, time.time()
+    while c0 < len(a):
+        c1, w = c0 + _CHUNK, 4096                     # parca sonu: c0 + _CHUNK'tan sonraki ilk eos (dahil)
+        while c1 < len(a):
+            after = np.flatnonzero(a[c1:c1 + w] == eos)
+            if len(after):
+                c1 += int(after[0]) + 1
+                break
+            c1, w = c1 + w, 2 * w
+        x = a[c0:min(c1, len(a))]
+        c1 = c0 + len(x)
+        starts, lengths = _segments(x, tab)
+        keys = _segment_keys(x, starts, lengths, tab)
+        one = lengths == 1
+        single[x[starts[one]]] = True
+        _, first = np.unique(keys[~one], return_index=True)
+        multi.append((keys[~one][first], c0 + starts[~one][first], lengths[~one][first]))
+        xax.update(_xax_counts(x, starts, lengths, keys, tab))
+        c0 = c1
+        if c0 == len(a) or len(multi) % 8 == 0:
+            log("metin referansi %d / %d token  (%.0f sn)" % (c0, len(a), time.time() - t0))
+    words = {w for t in np.flatnonzero(single).tolist() for w in tab["pieces"][t] if w.isalpha()}
+    k, s, L = (np.concatenate(z) for z in zip(*multi))
+    for j in np.unique(k, return_index=True)[1].tolist():
+        words.update(w for w in _units(a[s[j]:s[j] + L[j]].tolist(), tab) if w.isalpha())
+    return words, xax
+
+
+def _reference_body(words, xax):
+    """-> (dosya govdesi, sha256): kelimeler sirali, 'X|bag' anahtarlari; iz govdenin sirali JSON'undan."""
+    body = dict(words=sorted(words), xax={"%s|%s" % k: int(c) for k, c in sorted(xax.items())})
+    return body, hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _read_text_reference(path, source):
+    """text_reference.json -> dict(words, xax, sha256).  Icerik izi, kaynak izi (fingerprint.json) ya da kural tutmazsa
+    DURUR; yeniden hesaplamaz (tazeleme karar: dosya elle tasinir, build_text_reference)."""
+    ref = json.load(open(path, encoding="utf-8"))
+    body, sha = _reference_body(ref["words"], {tuple(k.rsplit("|", 1)): c for k, c in ref["xax"].items()})
+    assert sha == ref["sha256"], "%s: icerik izi tutmuyor (%s, dosyada %s) -- DURDU (kural 9)" % (path, sha[:12],
+                                                                                              ref["sha256"][:12])
+    assert ref["source"] == source, "%s: baska bir veriden uretilmis (kaynak izi %s, fingerprint.json %s) -- DURDU (kural 9)" \
+        % (path, ref["source"], source)
+    assert ref["rule"] == _TEXT_REFERENCE_RULE, "%s: kural degismis -- dosyayi tasi, build_text_reference yeniden uretir" % path
+    return dict(words=set(body["words"]), sha256=sha[:12],
+                xax=collections.Counter({tuple(k.rsplit("|", 1)): c for k, c in body["xax"].items()}))
+
+
+def _root_log(root):
+    def log(line):
+        line = time.strftime("%H:%M:%S ") + line
+        print(line, flush=True)
+        with open(os.path.join(root, "log.txt"), "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    return log
+
+
+def build_text_reference(root, tag, log=None):
+    """Tek seferlik (kural 9; kullanici, 29 Eylul: "Evet"): <root>/<tag>/text_reference.json -- train'deki alfabetik
+    kelimeler (uydurma kelime) ve 'X and X' sayilari (legit), kural, kaynak izi (fingerprint.json; train once build ile
+    dogrulanir) ve icerigin sha256'si.  Dosya varsa dokunmaz (tazelemek icin elle tasinir).  -> ust bilgi (varsa None)."""
+    log = log or _root_log(root)
+    path = os.path.join(root, tag, _TEXT_REFERENCE)
+    if os.path.exists(path):
+        log("%s: %s var, ATLANDI (tazelemek icin dosyayi elle tasi)" % (tag, _TEXT_REFERENCE))
+        return None
+    t0 = time.time()
+    data = _build(root, tag, SEQ_LEN, lambda s: None, reference=False)     # train fingerprint.json ile dogrulanir
+    source = json.load(open(os.path.join(root, tag, "fingerprint.json"), encoding="utf-8"))["fingerprint"]
+    words, xax = _text_reference(data["vocab"], data["train"], log)
+    body, sha = _reference_body(words, xax)
+    meta = dict(tag=tag, source=source, sha256=sha, rule=_TEXT_REFERENCE_RULE,
+                counts=dict(words=len(body["words"]), xax_pairs=len(body["xax"]), xax_events=sum(body["xax"].values()),
+                            train_tokens=len(data["train"])),
+                created=time.strftime("%Y-%m-%d %H:%M:%S"), seconds=round(time.time() - t0))
+    with open(path + ".part", "w", encoding="utf-8") as f:
+        json.dump(dict(meta, **body), f, ensure_ascii=False)
+    os.replace(path + ".part", path)
+    log("%s: %s YAZILDI iz %s  %s" % (tag, _TEXT_REFERENCE, sha[:12], json.dumps(meta)))
+    return meta
+
+
 # --- tek seferlik uretim
 
 def _sha256(path):
@@ -426,17 +657,20 @@ def build_cache(root, tags=TAGS, dataset=DATASET, tokenizers=TOKENIZERS, log=Non
     <tag>/'a; butun hikayeler (metin oldugu gibi) her tokenizer'la token'lanir.  Var olan <tag>/ ATLANIR (tazeleme ayri
     karar: klasor elle tasinir); is <tag>_partial/'da yapilir, bitince <tag>/ olur.  fingerprint.json'a: iz, kaynaklar,
     sayimlar (UNK, valid'de gidis-donus, metin duzeyinde sizinti ve tekrar).  dataset / tokenizers: testte yerel
-    kaynak (repo yok, tokenizer "path").  Sonda sinav kumesi yoksa yazilir (_write_exam, seq_len).
-    -> {tag: fingerprint.json icerigi}"""
+    kaynak (repo yok, tokenizer "path").  Sonda sinav kumesi ve tag'lerin text_reference.json'u yoksa yazilir
+    (_write_exam, seq_len; build_text_reference).  -> {tag: fingerprint.json icerigi}"""
     import pyarrow.parquet as pq
     from tokenizers.models import WordPiece
     os.makedirs(root, exist_ok=True)
-    if log is None:
-        def log(line):
-            line = time.strftime("%H:%M:%S ") + line
-            print(line, flush=True)
-            with open(os.path.join(root, "log.txt"), "a", encoding="utf-8") as f:
-                f.write(line + "\n")
+    log = log or _root_log(root)
+
+    def finish(out):                                   # sinav kumesi, sonra (sinav kumesi varsa) metin referanslari
+        _write_exam(root, tags, seq_len, log)
+        if os.path.exists(os.path.join(root, "exam_stories.npy")):
+            for tag in tags:
+                if os.path.isdir(os.path.join(root, tag)) and not os.path.exists(os.path.join(root, tag, _TEXT_REFERENCE)):
+                    build_text_reference(root, tag, log)
+        return out
     t0 = time.time()
     hf = "https://huggingface.co/%s/resolve/%s/%s"
     splits = ("valid", "train")                                      # valid once: kusur erken gorunsun
@@ -466,8 +700,7 @@ def build_cache(root, tags=TAGS, dataset=DATASET, tokenizers=TOKENIZERS, log=Non
         work[tag] = dict(tok=tok, vocab=vocab, eos=vocab.index(EOS_TOKEN), part=part, sha256=sha, src=src,
                          valid=[], train=[])
     if not work:
-        _write_exam(root, tags, seq_len, log)
-        return {}
+        return finish({})
     nbytes, text_hash = {s: [] for s in splits}, {s: [] for s in splits}
     for split in splits:
         done, total = 0, sum(pq.ParquetFile(r["path"]).metadata.num_rows for r in raw[split])
@@ -530,12 +763,14 @@ def build_cache(root, tags=TAGS, dataset=DATASET, tokenizers=TOKENIZERS, log=Non
         os.rename(w["part"], os.path.join(root, tag))
         log("%s: YAZILDI iz %s  %s" % (tag, fp, json.dumps(counts)))
         out[tag] = meta
-    _write_exam(root, tags, seq_len, log)
-    return out
+    return finish(out)
 
 
 if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "build_cache":
         build_cache(sys.argv[2], tuple(sys.argv[3:]) or TAGS)
+    elif len(sys.argv) >= 3 and sys.argv[1] == "build_text_reference":
+        for _tag in sys.argv[3:] or TAGS:
+            build_text_reference(sys.argv[2], _tag)
     else:
         print(__doc__)

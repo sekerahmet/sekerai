@@ -48,3 +48,6 @@ deneme2/*/BULGULAR_*.md
 
 # Claude Code yerel klasoru (ajan worktree'leri, ayarlar): depo PUBLIC
 .claude/
+# model notlari yerel: kullanici kararlari ve alintilar (not.md, FIKIRLER_*.md)
+deneme2/*/not.md
+deneme2/*/FIKIRLER_*.md

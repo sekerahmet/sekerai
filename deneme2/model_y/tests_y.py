@@ -227,7 +227,7 @@ def t_step2():
     sids, smask = EK.sequences(data)
     nv = len(data["vocab"])
     before = SequenceModel(nv).tokens.fixed_points.clone()
-    m, curve = TR.train_seq("step2", sids, smask, nv, steps=20, log_at=(0, 20))
+    m, curve = TR.train_seq("step2", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20))   # egitim tesisati: 64 dizi yeter (tam veri 2.560)
     check("adim 2: egitimde PF bit duzeyinde degismez, W_context 0'dan ayrilir, kayip iner",
           torch.equal(m.tokens.fixed_points, before) and curve[-1]["W_context"] > 0 and curve[-1]["nll"] < curve[0]["nll"])
 
@@ -409,9 +409,9 @@ def t_step3():
     data = D.build()
     sids, smask = EK.sequences(data)
     nv = len(data["vocab"])
-    mr, curve_r = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), rope=True)
-    md, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=())
-    mo, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=(), rope=False)
+    mr, curve_r = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20), rope=True)
+    md, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=1, log_at=())
+    mo, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=1, log_at=(), rope=False)
     check("adim 3, rope=True: train_seq ayari modele ulasir, kayip iner; train_seq varsayilani (None) BlockModel'de ROPE (True); "
           "rope=False kapatir",
           all(b.attention.rope for b in mr.blocks) and curve_r[-1]["nll"] < curve_r[0]["nll"]
@@ -419,8 +419,8 @@ def t_step3():
           "%.3f -> %.3f" % (curve_r[0]["nll"], curve_r[-1]["nll"]))
     # batches: mini-batch; model_kw: model ayarlari
     import copy
-    whole, _ = TR.train_seq("shared", sids, smask, nv, steps=5, log_at=())
-    via, _ = TR.train_seq("shared", None, None, nv, steps=5, log_at=(), batches=lambda step: (sids, smask))
+    whole, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=5, log_at=())
+    via, _ = TR.train_seq("shared", None, None, nv, steps=5, log_at=(), batches=lambda step: (sids[:64], smask[:64]))
     pick = lambda step: (sids[(step * 16) % 480:(step * 16) % 480 + 32], smask[(step * 16) % 480:(step * 16) % 480 + 32])
     packs = {}
     keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
@@ -444,14 +444,14 @@ def t_step3():
           and tuple(mk.blocks[0].facts.W_fact_in.shape) == (64, 32)
           and len(mt.layers) == 1 and mt.embedding.weight.shape[1] == 32)
 
-    ml, curve_l = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), stream_norm=False, normalized_update=False, sphere_weights=False, layer_norm=True)
+    ml, curve_l = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20), stream_norm=False, normalized_update=False, sphere_weights=False, layer_norm=True)
     check("adim 3, layer_norm=True: train_seq ile egitilir, kayip iner", ml.layer_norm and curve_l[-1]["nll"] < curve_l[0]["nll"],
           "%.3f -> %.3f" % (curve_l[0]["nll"], curve_l[-1]["nll"]))
-    mf, curve_f = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), stream_norm=False, normalized_update=False, sphere_weights=False)
+    mf, curve_f = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20), stream_norm=False, normalized_update=False, sphere_weights=False)
     check("adim 3, stream_norm=False: train_seq ile egitilir, kayip iner", not mf.stream_norm and curve_f[-1]["nll"] < curve_f[0]["nll"],
           "%.3f -> %.3f" % (curve_f[0]["nll"], curve_f[-1]["nll"]))
     before = BlockModel(nv).tokens.fixed_points.clone()
-    m, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20))
+    m, curve = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20))
     check("adim 3: egitimde PF bit duzeyinde degismez, W_context 0'dan ayrilir, kayip iner",
           torch.equal(m.tokens.fixed_points, before) and curve[-1]["W_context"] > 0 and curve[-1]["nll"] < curve[0]["nll"])
 
@@ -465,24 +465,24 @@ def t_step3():
             return super().step(*a, **k)
     torch.optim.Adam = Spy
     try:
-        TR.train_seq("shared", sids, smask, nv, steps=4, log_at=(), lr=0.01, lr_floor=0.1, grad_clip=0.5, optimizer="adam", schedule="cosine")
+        TR.train_seq("shared", sids[:64], smask[:64], nv, steps=4, log_at=(), lr=0.01, lr_floor=0.1, grad_clip=0.5, optimizer="adam", schedule="cosine")
         cosine = [0.01 * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * t / 4))) for t in range(4)]
         ok_sched = all(abs(lr_ - c) < 1e-12 for (lr_, _), c in zip(seen, cosine))
         ok_clip = all(g <= 0.5 + 1e-5 for _, g in seen)
         seen.clear()
-        TR.train_seq("shared", sids, smask, nv, steps=4, log_at=(), lr=0.01, optimizer="adam", schedule="cosine")
+        TR.train_seq("shared", sids[:64], smask[:64], nv, steps=4, log_at=(), lr=0.01, optimizer="adam", schedule="cosine")
         standard = [0.01 * (TR.LR_FLOOR + (1 - TR.LR_FLOOR) * 0.5 * (1 + math.cos(math.pi * t / 4))) for t in range(4)]
         ok_default = (all(abs(lr_ - c) < 1e-12 for (lr_, _), c in zip(seen, standard))
                       and all(g <= TR.GRAD_CLIP + 1e-5 for _, g in seen))
         seen.clear()
-        TR.train_seq("shared", sids, smask, nv, steps=3, log_at=(), lr=0.01, lr_floor=None, grad_clip=None, optimizer="adam", schedule="cosine")
+        TR.train_seq("shared", sids[:64], smask[:64], nv, steps=3, log_at=(), lr=0.01, lr_floor=None, grad_clip=None, optimizer="adam", schedule="cosine")
         ok_old = all(lr_ == 0.01 for lr_, _ in seen) and any(g > 0.5 for _, g in seen)
     finally:
         torch.optim.Adam = real_adam
     check("egitim tarifi (optimizer='adam', schedule='cosine', 27 Eylul oncesi): cosine decay ile lr LR'den LR x lr_floor'a iner, gradient boyu grad_clip'i gecmez; standart LR_FLOOR ve "
           "GRAD_CLIP; None verilirse sabit lr", ok_sched and ok_clip and ok_default and ok_old)
-    a1, _ = TR.train_seq("shared", sids, smask, nv, steps=3, log_at=(), seed=0)
-    a2, _ = TR.train_seq("shared", sids, smask, nv, steps=3, log_at=(), seed=1)
+    a1, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=3, log_at=(), seed=0)
+    a2, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=3, log_at=(), seed=1)
     check("egitim tarifi: seed modeli degistirir (PF dahil), seed=0 varsayilanla ayni",
           not torch.equal(a1.tokens.fixed_points, a2.tokens.fixed_points)
           and torch.equal(a1.tokens.fixed_points, before))
@@ -496,7 +496,7 @@ def t_step3():
             groups.extend(self.param_groups)
     torch.optim.AdamW = SpyW
     try:
-        mw, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=(), weight_decay=0.1, optimizer="adam")
+        mw, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=1, log_at=(), weight_decay=0.1, optimizer="adam")
     finally:
         torch.optim.AdamW = real_adamw
     names = {id(p_): k.split(".")[-1] for k, p_ in mw.named_parameters()}
@@ -556,7 +556,7 @@ def t_step3():
     def grab(step, model, opt):
         opts.append(opt)
         lrs[step] = opt.param_groups[0]["lr"]
-    mm, curve_m = TR.train_seq("shared", sids, smask, nv, steps=10, log_at=(0, 10), save_every=1, save=grab)
+    mm, curve_m = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=10, log_at=(0, 10), save_every=1, save=grab)
     names_m = {id(p_): k.split(".")[-1] for k, p_ in mm.named_parameters()}
     in_muon = sorted({names_m[id(p_)] for g_ in opts[0].param_groups if g_["use_muon"] for p_ in g_["params"]})
     in_adam = sorted({names_m[id(p_)] for g_ in opts[0].param_groups if not g_["use_muon"] for p_ in g_["params"]})
@@ -695,20 +695,20 @@ def t_transformer():
     data = D.build()
     sids, smask = EK.sequences(data)
     nv = len(data["vocab"])
-    m, curve = TR.train_seq("transformer", sids, smask, nv, steps=20, log_at=(0, 20))
+    m, curve = TR.train_seq("transformer", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20))
     try:
-        TR.train_seq("transformer", sids, smask, nv, steps=1, log_at=(), weight_decay=0.1)
+        TR.train_seq("transformer", sids[:64], smask[:64], nv, steps=1, log_at=(), weight_decay=0.1)
         refused = False
     except AssertionError:
         refused = True
-    mv, curve_v = TR.train_seq("transformer_novalue", sids, smask, nv, steps=20, log_at=(0, 20))
+    mv, curve_v = TR.train_seq("transformer_novalue", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20))
     check("transformer: train_seq ayni tarifle egitir, kayip iner ('transformer' ve 'transformer_novalue'); weight decay "
           "istenirse reddedilir (gruplar tanimsiz)",
           isinstance(m, TransformerModel) and curve[-1]["nll"] < curve[0]["nll"] and refused
           and all(layer.W_value is None for layer in mv.layers) and curve_v[-1]["nll"] < curve_v[0]["nll"],
           "%.3f -> %.3f; V'siz %.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"], curve_v[0]["nll"], curve_v[-1]["nll"]))
 
-    mr, curve_r = TR.train_seq("transformer_novalue", sids, smask, nv, steps=20, log_at=(0, 20), rope=False)
+    mr, curve_r = TR.train_seq("transformer_novalue", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20), rope=False)
     check("transformer, rope=False: train_seq ayari modele ulasir (her katmanda rope False), kayip iner; varsayilan True",
           all(not layer.rope for layer in mr.layers) and all(layer.rope for layer in mv.layers)
           and curve_r[-1]["nll"] < curve_r[0]["nll"],
@@ -885,7 +885,7 @@ def t_normalized_update():
     opts = []
     grab = lambda step, model, opt: opts.append(opt)
     kw = dict(normalized_update=True, sphere_weights=True)
-    trained, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), save_every=1, save=grab, **kw)
+    trained, curve = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20), save_every=1, save=grab, **kw)
     tb = trained.blocks[0]
     names = {id(p_): k for k, p_ in trained.named_parameters()}
     in_adam = sorted({names[id(p_)] for g_ in opts[-1].param_groups if not g_["use_muon"] for p_ in g_["params"]})
@@ -995,7 +995,7 @@ def t_canon():
 
     opts = []
     grab = lambda step, model, opt: opts.append(opt)
-    trained, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), save_every=1, save=grab, canon=True)
+    trained, curve = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20), save_every=1, save=grab, canon=True)
     names = {id(p_): k for k, p_ in trained.named_parameters()}
     in_adam = [names[id(p_)] for g_ in opts[-1].param_groups if not g_["use_muon"] for p_ in g_["params"]]
     packs = {}
@@ -1071,7 +1071,7 @@ def t_layers():
     opts = []
     grab = lambda step, model, opt: opts.append(opt)
     kw = dict(layers=2, turns=4)
-    trained, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), save_every=1, save=grab, model_kw=kw)
+    trained, curve = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20), save_every=1, save=grab, model_kw=kw)
     names = {id(p_): k for k, p_ in trained.named_parameters()}
     groups = {names[id(p_)]: g_["use_muon"] for g_ in opts[-1].param_groups for p_ in g_["params"]}
     unit = all(torch.allclose(b.attention.W_query.norm(dim=1), torch.ones(64), atol=1e-5)
@@ -1091,7 +1091,7 @@ def t_layers():
           and all(torch.equal(a, b) for a, b in zip(full.state_dict().values(), res.state_dict().values())),
           "%.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"]))
 
-    sep, curve_s = TR.train_seq("separate", sids, smask, nv, steps=20, log_at=(0, 20))
+    sep, curve_s = TR.train_seq("separate", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20))
     check("layers: ayri blok (separate) Model X2 anahtarlariyla (normalized_update, sphere_weights, canon) egitilir",
           curve_s[-1]["nll"] < curve_s[0]["nll"] and len(sep.blocks) == sep.turns and sep.canon
           and sep.normalized_update and sep.sphere_weights
@@ -1127,7 +1127,7 @@ def t_coherence():
 
     lrs = {}
     grab = lambda step, model, opt: lrs.setdefault(step, opt.param_groups[0]["lr"])
-    full, _ = TR.train_seq("shared", sids, smask, nv, steps=40, log_at=(), save_every=1, save=grab, schedule="coherence",
+    full, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=40, log_at=(), save_every=1, save=grab, schedule="coherence",
                            final_cooldown=0.05, final_cooldown_shape="sqrt")      # 29 Eylul oncesi varsayilan: son %5, 1 - sqrt
     floor = TR.LR_FLOOR
     want = {37: TR.LR, 38: TR.LR, 39: TR.LR * (floor + (1 - floor) * (1 - math.sqrt(0.5))), 40: TR.LR * floor}
@@ -1137,12 +1137,27 @@ def t_coherence():
 
     lin = {}
     grab_l = lambda step, model, opt: lin.setdefault(step, opt.param_groups[0]["lr"])
-    TR.train_seq("shared", sids, smask, nv, steps=40, log_at=(), save_every=1, save=grab_l, schedule="coherence",
+    TR.train_seq("shared", sids[:64], smask[:64], nv, steps=40, log_at=(), save_every=1, save=grab_l, schedule="coherence",
                  final_cooldown=0.5, lr_floor=0.0, final_cooldown_shape="linear")
     want_l = {t: TR.LR * (1 - (t - 20) / 20) for t in range(20, 41)}
     check("coherence, final_cooldown_shape linear: son %50'de dogrusal x 0'a (D2Z); varsayilan linear",
           TR.FINAL_COOLDOWN_SHAPE == "linear" and all(abs(lin[t] - v) < 1e-12 for t, v in want_l.items())
           and all(lin[t] == TR.LR for t in range(1, 20)), str({t: round(lin[t], 6) for t in (19, 20, 30, 39, 40)}))
+
+    fz = {}
+    TR.train_seq("shared", sids[:64], smask[:64], nv, steps=40, log_at=(), save_every=1,
+                 save=lambda step, model, opt: fz.setdefault(step, opt.param_groups[0]["lr"]), schedule="coherence",
+                 final_cooldown=0.5, lr_floor=0.0, final_cooldown_shape="linear", frozen_lr=0.004)
+    try:
+        TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), frozen_lr=0.004, schedule="wsd")
+        refused_fz = False
+    except AssertionError:
+        refused_fz = True
+    check("coherence, frozen_lr: inis olculen degerden degil verilen lr'den (0,004) dogrusal 0'a; oncesi ayni; varsayilan "
+          "None; wsd'de reddedilir",
+          TR.FROZEN_LR is None and all(fz[t] == TR.LR for t in range(1, 20)) and refused_fz
+          and all(abs(fz[t] - 0.004 * (1 - (t - 20) / 20)) < 1e-12 for t in range(20, 41)),
+          str({t: round(fz[t], 6) for t in (19, 20, 30, 40)}))
 
     lrs_m, means = {}, {}
     grab_m = lambda step, model, opt: (lrs_m.setdefault(step, opt.param_groups[0]["lr"]),
@@ -1271,8 +1286,8 @@ def t_weight_ema():
     sids, smask = EK.sequences(data)
     nv = len(data["vocab"])
 
-    start, _ = TR.train_seq("shared", sids, smask, nv, steps=0, log_at=())
-    one, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=(), weight_ema=0.5)
+    start, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=0, log_at=())
+    one, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=1, log_at=(), weight_ema=0.5)
     em = one.weight_ema["model"]
     b0, b1, be = start.blocks[0], one.blocks[0], em.blocks[0]
     with torch.no_grad():
@@ -1364,7 +1379,7 @@ def t_heads():
     opts = []
     grab = lambda step, model, opt: opts.append(opt)
     kw = dict(model_kw=dict(heads=4))
-    trained, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), save_every=1, save=grab, **kw)
+    trained, curve = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20), save_every=1, save=grab, **kw)
     names = {id(p_): k for k, p_ in trained.named_parameters()}
     in_muon = {names[id(p_)].split(".")[-1] for g_ in opts[-1].param_groups if g_["use_muon"] for p_ in g_["params"]}
     unit = all(torch.allclose(b.attention.W_value.norm(dim=1), torch.ones(64), atol=1e-5) for b in trained.blocks)
@@ -1433,7 +1448,7 @@ def t_fact_activation():
     names_r = {k for k, _ in fr.named_parameters()}
     check("fact_activation reglu: cikti = W_fact_out (ReLU(W_fact_in x - esik) * (W_fact_up x)) (bagimsiz float64); "
           "esik ve W_fact_up birlikte", err_r < 1e-12 and {"fact_threshold", "W_fact_up"} <= names_r, "fark %.1e" % err_r)
-    rg, curve_r = TR.train_seq("shared", sids, smask, nv, steps=10, log_at=(0, 10),
+    rg, curve_r = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=10, log_at=(0, 10),
                                model_kw=dict(fact_activation="reglu", units=170))
     check("fact_activation reglu: egitimde kayip iner; W_fact_up satirlari birim",
           curve_r[-1]["nll"] < curve_r[0]["nll"]
@@ -1443,7 +1458,7 @@ def t_fact_activation():
     opts = []
     grab = lambda step, model, opt: opts.append(opt)
     kw = dict(model_kw=dict(fact_activation="swiglu", units=170))
-    trained, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), save_every=1, save=grab, **kw)
+    trained, curve = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20), save_every=1, save=grab, **kw)
     nm = {id(p_): k.split(".")[-1] for k, p_ in trained.named_parameters()}
     in_muon = {nm[id(p_)] for g_ in opts[-1].param_groups if g_["use_muon"] for p_ in g_["params"]}
     unit = all(torch.allclose(b.facts.W_fact_up.norm(dim=1), torch.ones(170), atol=1e-5) for b in trained.blocks)
@@ -1501,7 +1516,7 @@ def t_learn_output_scale():
 
     opts = []
     grab = lambda step, model, opt: opts.append(opt)
-    trained, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), save_every=1, save=grab)
+    trained, curve = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20), save_every=1, save=grab)
     names = {id(p_): k for k, p_ in trained.named_parameters()}
     in_adam = {names[id(p_)] for g_ in opts[-1].param_groups if not g_["use_muon"] for p_ in g_["params"]}
     in_muon = {names[id(p_)] for g_ in opts[-1].param_groups if g_["use_muon"] for p_ in g_["params"]}
@@ -1519,8 +1534,8 @@ def t_learn_output_scale():
         torch.optim.AdamW = real_adamw
     no_decay = {k for g_ in groups if g_["weight_decay"] == 0.0 for k, p_ in mw.named_parameters()
                 if any(p_ is q_ for q_ in g_["params"])}
-    start, _ = TR.train_seq("shared", sids, smask, nv, steps=0, log_at=())
-    one, _ = TR.train_seq("shared", sids, smask, nv, steps=1, log_at=(), weight_ema=0.5)
+    start, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=0, log_at=())
+    one, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=1, log_at=(), weight_ema=0.5)
     ema_err = abs(val(one.weight_ema["model"].log_output_scale) - 0.5 * (val(start.log_output_scale) + val(one.log_output_scale)))
     moved = val(trained.log_output_scale) - val(on.log_output_scale)
     check("learn_output_scale: Adam'da (Muon'da degil), weight decay yok; weight EMA ortalar; 20 adimda deger degisir, "
@@ -1700,10 +1715,10 @@ def t_loss_chunk():
           "parca yoluyla <= 1e-10 ayni -- dolgulu batch; ogrenilen / sabit olcek, normsuz akis, LayerNorm",
           LOSS_CHUNK == 4096 and not missing and worst < 1e-10 and bool((~mask).any()), "en buyuk fark %.1e" % worst)
 
-    c0 = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=tuple(range(21)),
+    c0 = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=tuple(range(21)),
                       model_kw=dict(loss_chunk=0, output_link=False))[1]
-    c1 = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=tuple(range(21)), model_kw=dict(output_link=False))[1]
-    c7 = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=tuple(range(21)),
+    c1 = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=tuple(range(21)), model_kw=dict(output_link=False))[1]
+    c7 = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=tuple(range(21)),
                       model_kw=dict(loss_chunk=7, output_link=False))[1]
     gap = max(abs(a["nll"] - b["nll"]) for c in (c1, c7) for a, b in zip(c0, c)) / c0[-1]["nll"]
     packs = {}
@@ -1817,7 +1832,7 @@ def t_muon_tangent():
 
     opts = []
     grab = lambda step, model, opt: opts.append(opt)
-    trained, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), save_every=1, save=grab)
+    trained, curve = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20), save_every=1, save=grab)
     names = {id(p_): k.split(".")[-1] for k, p_ in trained.named_parameters()}
     axes = {names[id(p_)]: a for p_, a in opts[-1].tangent_axis.items()}
     packs = {}
@@ -1874,13 +1889,28 @@ def t_output_link():
         m.link_u.fill_(0.2)
     _, nll = m.loss(sids[:8], smask[:8])
     ref = masked_nll(m.logits(sids[:8, :-1]), sids[:8, 1:], smask[:8, 1:])
-    check("output_link: LOSS_CHUNK > 0 iken de kayip tam tablo yolundan = masked_nll(logits)",
+    mc = BlockModel(nv, d=32, units=48, loss_chunk=7, output_link=True).double()
+    with torch.no_grad():
+        mc.link_q.fill_(-1.3)
+        mc.link_u.fill_(0.2)
+    mf = copy.deepcopy(mc)
+    mf.loss_chunk = 0
+    _, lc = mc.loss(sids[:6].clone(), smask[:6])
+    _, lf = mf.loss(sids[:6].clone(), smask[:6])
+    lc.backward()
+    lf.backward()
+    gerr = max(float((p_.grad - r_.grad).abs().max()) for p_, r_ in zip(mc.parameters(), mf.parameters())
+               if p_.grad is not None)
+    check("output_link: parcali kayip (29 Eylul) = tam tablo, deger ve butun gradyanlar (link_q, link_u, olcek, noktalar "
+          "dahil) float64'te <= 1e-10", float((lc - lf).abs()) < 1e-10 and gerr < 1e-10 and mc.link_q.grad is not None,
+          "deger %.1e  gradyan %.1e" % (float((lc - lf).abs()), gerr))
+    check("output_link: LOSS_CHUNK > 0 iken kayip (parcali yol) = masked_nll(logits)",
           m.loss_chunk > 0 and float((nll - ref).abs()) < 1e-6, "fark %.1e" % float((nll - ref).abs()))
 
     opts = []
     grab = lambda step, model, opt: opts.append(opt)
     kw = dict(model_kw=dict(output_link=True))
-    trained, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), save_every=1, save=grab, **kw)
+    trained, curve = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20), save_every=1, save=grab, **kw)
     nm = {id(p_): k for k, p_ in trained.named_parameters()}
     in_adam = {nm[id(p_)] for g_ in opts[-1].param_groups if not g_["use_muon"] for p_ in g_["params"]}
     packs = {}
@@ -1948,7 +1978,7 @@ def t_shared_facts():
     opts = []
     grab = lambda step, model, opt: opts.append(opt)
     mkw = dict(model_kw=dict(kw, shared_facts=False))
-    trained, curve = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=(0, 20), save_every=1, save=grab, **mkw)
+    trained, curve = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20), save_every=1, save=grab, **mkw)
     nm = {id(p_): k for k, p_ in trained.named_parameters()}
     in_muon = {nm[id(p_)] for g_ in opts[-1].param_groups if g_["use_muon"] for p_ in g_["params"]}
     packs = {}
@@ -1973,7 +2003,9 @@ def t_internals():
     softmax yolu, sagdan dolgulu batch); trace'in durumlari, acilari ve lens'i modelin kendi hidden'i ve Block'uyla;
     point_drift, attention_stats, unit_usage bagimsiz hesapla; ablate: hicbir sey = taban (Δ 0), alpha'yi ayni degerle
     vermek = taban, kapatmalar agirligi degistirilmis modelin logits'iyle ayni (Δnll, Δacc, se), head ortalamasi elle;
-    over_checkpoints'in yedekten kurdugu EMA = train_seq'in model.weight_ema'si (muon, adam, adamw)."""
+    over_checkpoints'in yedekten kurdugu EMA = train_seq'in model.weight_ema'si (muon, adam, adamw); tuned_lens: birim
+    cevirici = logit lens, ogrenilen cevirici ayri hikayelerde iyi, son durumda KL 0, model degismez; profile_step: parca
+    parca adim = train_seq'in adimi (bit duzeyinde), parcalar adimin icinde, kendi kopyasinda."""
     import copy
     import json
     import shutil
@@ -2215,12 +2247,123 @@ def t_internals():
     check("internals over_checkpoints: yedekten kurulan EMA = train_seq'in model.weight_ema'si, bit duzeyinde (adim 2/4/6; "
           "muon, adam, adamw); 'last' = o adimin agirligi; model_weight_ema.pt", ok, ", ".join(notes))
 
+    fit = [sids[i, :int(smask[i].sum())].tolist() for i in range(12, 76)]
+    before = {k: v.clone() for k, v in m.state_dict().items()}
+    flags = [p_.requires_grad for p_ in m.parameters()]
+    tl0 = I.tuned_lens(m, stories, None, steps=0)
+    tr = I.trace(m, stories)
+    same_id = all(tl0["summary"][n]["tuned"] == tl0["summary"][n]["logit"] for n in tl0["states"])
+    lens_err = max(max(abs(tl0["summary"][n]["logit"][k] - tr["summary"][n][k]) for k in ("nll", "acc", "median_rank"))
+                   for n in tr["states"])
+    check("internals tuned_lens: birim cevirici (0 adim) = logit lens, butun sayilar birebir; logit lens trace'inkiyle ayni "
+          "(nll, acc, medyan sira; float64)", same_id and lens_err < 1e-10 and tl0["states"] == tr["states"],
+          "fark %.1e" % lens_err)
+
+    tl = I.tuned_lens(m, stories, fit, steps=120, lr=1e-2, batch=8)
+    inner = tl["states"][:-1]
+    worse = [n for n in inner if tl["summary"][n]["tuned"]["kl"] >= tl["summary"][n]["logit"]["kl"]]
+    last = tl["summary"][tl["states"][-1]]["tuned"]["kl"]
+    fell = all(b_ < a_ for a_, b_ in zip(tl["fit"]["kl_first"][:-1], tl["fit"]["kl_last"][:-1]))
+    untouched = (all(torch.equal(before[k], v) for k, v in m.state_dict().items())
+                 and [p_.requires_grad for p_ in m.parameters()] == flags and all(p_.grad is None for p_ in m.parameters()))
+    # son durumda birim tam en iyi (gradyan ~1e-17) ama Adam olcekten bagimsiz: en iyinin cevresinde ~lr kadar titrer
+    check("internals tuned_lens (d 16): ayri hikayelerde ogrenilen cevirici her ara durumda logit lens'ten iyi (KL); son "
+          "durumda KL < 1e-4; egitim KL iner; model degismez (agirlik, requires_grad, grad)",
+          not worse and abs(last) < 1e-4 and fell and untouched and tl["fit"]["stories"] == 64
+          and len(tl["example"]["top"]["h0"]) == len(stories[0]) - 1,
+          "KL ara durum ortalamasi logit %.3f -> tuned %.3f; son %.1e; kotu %s" % (
+              np.mean([tl["summary"][n]["logit"]["kl"] for n in inner]), np.mean([tl["summary"][n]["tuned"]["kl"] for n in inner]),
+              last, worse))
+
+    class Enough(Exception):
+        pass
+
+    cached = [(sids[i:i + 8].clone(), smask[i:i + 8].clone()) for i in (0, 8, 16)]
+    kept = [(a_.clone(), b_.clone()) for a_, b_ in cached]
+    mk = dict(base_kw, output_link=True)
+    ctx = I._profile_setup(dict(setting="shared", vocab=nv, model_kw=mk, weight_ema=0.9), cached, "cpu")
+    for j in (1, 2, 3):                                    # kurulum batch 0 ile bir adim; tekrar 1, 2, 0
+        I._step_parts(ctx, *cached[j % 3], I._Clock("cpu"))
+    ref = {}
+
+    def stop(step, model, opt):
+        ref.update(model=copy.deepcopy(model.state_dict()), ema=copy.deepcopy(model.weight_ema["model"].state_dict()))
+        raise Enough()
+    try:                                                   # wsd: 80 adimdan once lr sabit
+        TR.train_seq("shared", None, None, nv, steps=100, batches=lambda s: cached[s % 3], log_at=(), save_every=4, save=stop,
+                     weight_ema=0.9, model_kw=mk)
+    except Enough:
+        pass
+    replica = same(ctx["model"].state_dict(), ref["model"]) and same(ctx["ema"]["model"].state_dict(), ref["ema"])
+    check("internals profile_step: parca parca tekrarlanan adim = train_seq'in adimi, bit duzeyinde (wsd, Muon + Adam, clip, "
+          "kure, phi kirpma, EMA; 1 + 3 adim)", replica)
+
+    precision, rng = torch.get_float32_matmul_precision(), torch.get_rng_state()
+    cfg = dict(setting="shared", vocab=nv, model_kw=dict(base_kw, shared_facts=False, output_link=False),
+               schedule="coherence", weight_ema=0.9)
+    pr = I.profile_step(cfg, cached, steps=3)
+    names = [p_["part"] for p_ in pr["parts"]]
+    want = ["batch -> cihaz", "ileri + kayip", "zero_grad", "geri yayilim", "coherence: g1 kopyasi",
+            "coherence: birlestirme, teget, carpimlar", "clip", "Muon (Newton-Schulz dahil)", "  Newton-Schulz", "Adam",
+            "normalize_weights", "EMA"]
+    gap = max((s_["total_ms"] - s_["parts_ms"]) / s_["total_ms"] for s_ in pr["per_step"])
+    low = min(s_["total_ms"] - s_["parts_ms"] for s_ in pr["per_step"])
+    turns = [b_["part"] for b_ in pr["breakdown"]]
+    check("internals profile_step (CPU): parcalar train_seq'in sirasiyla (coherence yarilari, Muon / Newton-Schulz / Adam, "
+          "EMA); her adimda parcalarin toplami <= adim, fark < %10; dokum tur basina 3 parca; train_seq'in kendi adimi olculdu",
+          names == want and 0 <= low and gap < 0.1 and len(turns) == 4 * 3 + 4 and turns[1] == "tur 1 Canon"
+          and pr["real_step_ms"] > 0 and pr["flops"]["per_step"] > 0,
+          "adim %.1f ms, olculmeyen en cok %%%.1f; train_seq %.1f ms" % (pr["total"]["device_ms"], 100 * gap, pr["real_step_ms"]))
+    check("internals profile_step: kendi kopyasinda calisir (train_seq'in kurulumu); batch'ler, grad modu, matmul hassasiyeti "
+          "ve RNG degismez", all(torch.equal(a_, c_) and torch.equal(b_, d_) for (a_, b_), (c_, d_) in zip(cached, kept))
+          and torch.is_grad_enabled() and torch.get_float32_matmul_precision() == precision
+          and torch.equal(torch.get_rng_state(), rng))
+
+
+def _run_one(name):
+    """Tek testi calistirir; ciktisi, sonuclari ve suresi (paralel kosucu icin)."""
+    import contextlib
+    import io
+    import time
+    buf = io.StringIO()
+    del RESULTS[:]
+    t0 = time.time()
+    with contextlib.redirect_stdout(buf):
+        globals()[name]()
+    return name, list(RESULTS), buf.getvalue(), time.time() - t0
+
 
 if __name__ == "__main__":
-    print("tests (model_y)")
-    for f in (t_model, t_step2, t_step3, t_transformer, t_generate_cached, t_normalized_update, t_canon,
+    import argparse
+    import time
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--jobs", type=int, default=1, help="paralel surec sayisi (her surec tek is parcacigi)")
+    ap.add_argument("--only", default="", help="yalniz bu testler, virgulle: t_coherence,t_output_link")
+    args = ap.parse_args()
+    names = [f.__name__ for f in (t_model, t_step2, t_step3, t_transformer, t_generate_cached, t_normalized_update, t_canon,
               t_layers, t_coherence, t_weight_ema, t_heads, t_fact_activation, t_learn_output_scale, t_matmul_precision,
-              t_loss_chunk, t_muon_tangent, t_output_link, t_shared_facts, t_internals):
-        f()
-    print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
-    sys.exit(0 if all(RESULTS) else 1)
+              t_loss_chunk, t_muon_tangent, t_output_link, t_shared_facts, t_internals)]
+    if args.only:
+        want = [n.strip() for n in args.only.split(",") if n.strip()]
+        assert set(want) <= set(names), "bilinmeyen test: %s" % sorted(set(want) - set(names))
+        names = [n for n in names if n in want]
+    print("tests (model_y)  %d test, %d surec" % (len(names), args.jobs))
+    t0 = time.time()
+    if args.jobs > 1:                                  # spawn: her surec tests_y'yi yeniden yukler (tek is parcacigi)
+        import multiprocessing as mp
+        pool = mp.get_context("spawn").Pool(args.jobs)
+        outs = pool.imap(_run_one, names, chunksize=1)
+    else:
+        outs = (_run_one(n) for n in names)
+    total, times = [], []
+    for name, res, text, secs in outs:
+        print(text, end="", flush=True)
+        print("  -- %s: %d/%d GECTI, %.0f sn" % (name, sum(res), len(res), secs), flush=True)
+        total += res
+        times.append((secs, name))
+    if args.jobs > 1:
+        pool.close()
+    print("\nen uzun: " + ", ".join("%s %.0f sn" % (n, t) for t, n in sorted(times, reverse=True)[:5]))
+    print("toplam %.0f sn (duvar saati)" % (time.time() - t0))
+    print("\n%d GECTI   %d KALDI" % (sum(total), len(total) - sum(total)))
+    sys.exit(0 if all(total) else 1)

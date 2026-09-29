@@ -1,15 +1,19 @@
 # -*- coding: utf-8 -*-
 """tests_simplestories -- SimpleStories egitiminin kapilari: encode / decode gidis-donus, tek seferlik uretim (build_cache)
 ve okuma (build), iz dogrulamasi (bozulunca durur), bolme sizintisi, uzun hikayenin pencerelere bolunmesi, sinav kumesi,
-bits_per_byte, batch sekilleri (data_simplestories); sinav (exam_simplestories) ve Colab calistirici (colab_simplestories).
+bits_per_byte, batch sekilleri, text_reference.json (data_simplestories); sinav (exam_simplestories: exam, nll_by_frequency, exam_train,
+alpha_summary, count_text_errors) ve Colab calistirici (colab_simplestories: tokens_per_sec, mfu).
 CPU; Drive ve ag YOK: parquet'ler asagidaki kucuk metinden yazilir, iki tokenizer ayni ayarlarla burada egitilir
-(ss4096 = SimpleStories WordPiece ayarlari, gpt2 = byte-level BPE).  GPU yolu (compile, bf16, gpu_peak_gb) sinanamaz.
+(ss4096 = SimpleStories WordPiece ayarlari, gpt2 = byte-level BPE).  GPU yolu (compile, bf16, gpu_peak_gb, mfu) sinanamaz.
 
     python tests_simplestories.py
 """
+import collections
+import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -27,7 +31,9 @@ torch.set_num_threads(1)
 
 import data_simplestories as DS  # noqa: E402
 import exam_simplestories as ES  # noqa: E402
+import model_y as M  # noqa: E402
 import train_y as TR  # noqa: E402
+from model_y_transformer import TransformerModel  # noqa: E402
 
 RESULTS = []
 SEQ = 128                                         # fixture penceresi
@@ -236,6 +242,57 @@ def t_fingerprint(root):
           "sinav kumesini yakalar", all(bad) and len(bad) == 5, str(bad))
 
 
+def t_text_reference(root):
+    ok = {}
+    for t in DS.TAGS:
+        d = load(root, t)
+        ref = json.load(open(os.path.join(root, t, "text_reference.json"), encoding="utf-8"))
+        words, xax = DS._text_reference(d["vocab"], d["train"])
+        body = dict(words=sorted(words), xax={"%s|%s" % k: c for k, c in xax.items()})
+        sha = hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+        source = json.load(open(os.path.join(root, t, "fingerprint.json"), encoding="utf-8"))["fingerprint"]
+        ok[t] = (d["text_reference"]["words"] == words and d["text_reference"]["xax"] == xax and len(xax) > 0
+                 and ref["source"] == source and ref["sha256"] == sha and d["text_reference"]["sha256"] == sha[:12]
+                 and ref["counts"]["words"] == len(words) and ref["counts"]["train_tokens"] == len(d["train"]))
+    check("text_reference.json: build_cache iki tag'de uretir; build okur; kelime kumesi ve 'X and X' sayilari train'den "
+          "yeniden hesapla ayni; kaynak izi = fingerprint.json, icerik izi = govdenin sha256'si", all(ok.values()), str(ok))
+
+    caught, regen = {}, False
+    for what in ("missing", "content", "source", "rule"):
+        other = tempfile.mkdtemp()
+        shutil.copytree(os.path.join(root, "gpt2"), os.path.join(other, "gpt2"))
+        for n in ("exam_stories.npy", "exam_stories.json"):
+            shutil.copyfile(os.path.join(root, n), os.path.join(other, n))
+        f = os.path.join(other, "gpt2", "text_reference.json")
+        ref = json.load(open(f, encoding="utf-8"))
+        if what == "missing":
+            os.remove(f)
+        else:
+            if what == "content":
+                ref["xax"][next(iter(ref["xax"]))] += 1                   # tek sayim
+            elif what == "source":
+                ref["source"] = "0" * 12
+            else:
+                ref["rule"] += " (eski)"
+            json.dump(ref, open(f, "w", encoding="utf-8"), ensure_ascii=False)
+        try:
+            load(other, "gpt2")
+            caught[what] = ""
+        except AssertionError as e:
+            caught[what] = str(e)
+        if what == "missing":
+            meta = DS.build_text_reference(other, "gpt2", log=lambda s: None)
+            again = DS.build_text_reference(other, "gpt2", log=lambda s: None)
+            regen = (meta is not None and again is None and meta["sha256"] == ref["sha256"]
+                     and load(other, "gpt2")["text_reference"]["sha256"] == ref["sha256"][:12])
+        shutil.rmtree(other)
+    check("text_reference.json yoksa build DURUR (build_text_reference'i soyler, bellekte uretmez); icerik izi, kaynak izi "
+          "ya da kural tutmazsa DURUR; build_text_reference ayni dosyayi yeniden uretir, varsa dokunmaz",
+          "build_text_reference" in caught["missing"] and "icerik izi" in caught["content"]
+          and "baska bir veriden" in caught["source"] and "kural degismis" in caught["rule"] and regen,
+          " | ".join("%s: %s" % (k, v[-50:]) for k, v in caught.items()))
+
+
 def t_bits_per_byte(root):
     d = load(root, "gpt2")
     rows = np.arange(len(d["valid_start"]))
@@ -344,9 +401,73 @@ def t_exam(root):
               abs(e64["nll"] - float(nll)) < 1e-5 and abs(e64["accuracy"] - acc) < 1e-9 and e64["n"] == int(valid.sum())
               and abs(e64["bits_per_byte"] - bpb) < 1e-5 and abs(e64["bits_per_byte_eos"] - bpb_eos) < 1e-5
               and e64["bytes"] == b and e64["stories"] == len(rows)
-              and all(np.isclose(x[k], e64[k], rtol=1e-5, atol=1e-6, equal_nan=True) for x in (e1, auto) for k in e64),
+              and all(np.isclose(x[k], e64[k], rtol=1e-5, atol=1e-6, equal_nan=True) for x in (e1, auto) for k in e64
+                      if k != "nll_by_frequency"),
               "nll %.4f acc %.4f bpb %.4f / %.4f" % (e64["nll"], e64["accuracy"], e64["bits_per_byte"],
                                                     e64["bits_per_byte_eos"]))
+
+        # nll_by_frequency: fixture sozlugu kucuk (120 / 400) -> sinirlar (8, 32, 64), dort bant dolu
+        V, fp = len(d[t]["vocab"]), d[t]["fingerprint"]
+        saved, ES.FREQUENCY_BANDS = ES.FREQUENCY_BANDS, (8, 32, 64)
+        ES._CACHE.pop(("band", fp), None)
+        try:
+            f64, f1 = (ES.exam(m, d[t], rows, batch_size=b_)["nll_by_frequency"] for b_ in (64, 1))
+        finally:
+            ES.FREQUENCY_BANDS = saved
+            ES._CACHE.pop(("band", fp), None)
+        counts = np.bincount(d[t]["train"].astype(np.int64), minlength=V)
+        rank = np.empty(V, dtype=np.int64)
+        rank[np.argsort(-counts, kind="stable")] = np.arange(V)
+        band = torch.as_tensor((rank >= 8).astype(int) + (rank >= 32) + (rank >= 64))
+        probs = logits.softmax(-1)[valid]
+        want = []
+        for k in range(4):
+            sel = valid & (band[target] == k)
+            nk = int(sel.sum())
+            want.append((nk, float(ce[sel].sum()) / nk if nk else None,
+                         float(probs[:, band == k].sum()) / nk if nk else None))
+        got = [(x["targets"], x["nll"], x["mass_ratio"]) for x in f64]
+        close = lambda a, b_: (a is None and b_ is None) or (a is not None and b_ is not None and abs(a - b_) < 1e-5)
+        check("%s nll_by_frequency: bant = train'in bincount siklik sirasi; bantta hedef sayisi, nll, softmax kutlesi / "
+              "hedef sayisi elle; batch 1 = 64" % t,
+              all(g[0] == w[0] and close(g[1], w[1]) and close(g[2], w[2]) for g, w in zip(got, want))
+              and all(a["targets"] == c["targets"] and close(a["nll"], c["nll"]) and close(a["mass_ratio"], c["mass_ratio"])
+                      for a, c in zip(f1, f64))
+              and [x["ranks"] for x in f64] == [[0, 8], [8, 32], [32, 64], [64, V]] and sum(w[0] for w in want) == len(ce[valid])
+              and all(w[0] for w in want), str([(g[0], round(g[2], 3)) for g in got if g[0]]))
+
+        # exam_train: B ajaninin b6_gap secimi, hikaye hikaye elle
+        tr = ES.exam_train(m, d[t])
+        a = d[t]["train"]
+        ends = np.flatnonzero(a == eos)
+        st, ln = np.concatenate([[0], ends[:-1] + 1]), ends - np.concatenate([[0], ends[:-1] + 1])
+        fits = np.flatnonzero((ln > 0) & (ln + 2 <= SEQ))
+        order = fits[np.argsort(ln[fits], kind="stable")]
+        rng, picks = np.random.default_rng(7), []
+        for L in d[t]["valid_length"][ES.exam_rows(d[t], 128)]:
+            picks.append(order[int(np.clip(np.searchsorted(ln[order], L) + rng.integers(-200, 200), 0, len(order) - 1))])
+        nll_s = acc_s = n_s = 0
+        with torch.no_grad():
+            for r in picks:
+                s = [eos] + a[st[r]:st[r] + ln[r]].tolist() + [eos]
+                z, y = m.logits(torch.tensor([s[:-1]])).double()[0], torch.tensor(s[1:])
+                nll_s += float((z.logsumexp(-1) - z.gather(-1, y[:, None])[:, 0]).sum())
+                acc_s += int((z.argmax(-1) == y).sum())
+                n_s += len(y)
+        check("%s exam_train: b6_gap secimi (tohum 7, boy sirasinda +-200, pencereye sigan) ve hikaye hikaye elle nll, acc, "
+              "bayt (train_bytes)" % t,
+              tr["n"] == n_s and abs(tr["nll"] - nll_s / n_s) < 1e-5 and abs(tr["accuracy"] - acc_s / n_s) < 1e-9
+              and tr["stories"] == len(picks) == 3 and tr["bytes"] == int(d[t]["train_bytes"][picks].sum()),
+              "nll %.4f (valid %.4f)" % (tr["nll"], e64["nll"]))
+
+        al = ES.alpha_summary(m)
+        A, F_ = (x.detach().numpy() for x in (m.alpha_attention, m.alpha_facts))
+        check("%s alpha_summary: tur basina medyan ve |alpha|'nin en buyugu (numpy); normalized_update yoksa None" % t,
+              np.allclose(al["attention"]["median"], np.median(A, -1), atol=1e-4)
+              and np.allclose(al["facts"]["median"], np.median(F_, -1), atol=1e-4)
+              and np.allclose(al["attention"]["max_abs"], np.abs(A).max(-1), atol=1e-4)
+              and np.allclose(al["facts"]["max_abs"], np.abs(F_).max(-1), atol=1e-4) and len(al["facts"]["median"]) == 2
+              and ES.alpha_summary(TransformerModel(V, d=16, layers=1, units=32)) is None, json.dumps(al))
 
     ds, v = d["ss4096"], d["ss4096"]["vocab"]
     eos = v.index(DS.EOS_TOKEN)
@@ -377,11 +498,241 @@ _MODELS = {}
 
 
 def m_ss(d):
-    """ss4096 fixture'inda kisa egitilmis kucuk model (bir kez)."""
-    if "ss" not in _MODELS:
-        _MODELS["ss"], _ = TR.train_seq("shared", None, None, len(d["vocab"]), steps=60, log_at=(),
-                                        batches=DS.batches(d, 4, 0), model_kw=TINY)
-    return _MODELS["ss"]
+    """fixture'da (tag basina) kisa egitilmis kucuk model (bir kez)."""
+    if d["tag"] not in _MODELS:
+        _MODELS[d["tag"]], _ = TR.train_seq("shared", None, None, len(d["vocab"]), steps=60, log_at=(),
+                                            batches=DS.batches(d, 4, 0), model_kw=TINY)
+    return _MODELS[d["tag"]]
+
+
+UNIT = re.compile(r"\d|[^\W\d_]+|[^\w\s]")                          # birim: kelime, tek rakam, tek noktalama
+XWORD = re.compile(r"[a-z']+")
+XAX_A = re.compile(r"\b((?:[a-z']+ ){0,6}[a-z']+),? (and|or) \1\b")   # A ajaninin ifadesi (run_review/A_errors/common.py)
+XAX_STORIES = ["the big dog and the big dog ran and ran and ran. we went higher and higher.",
+               "a cat or a cat sat by the sun and the sunflower. red, and red.",
+               "one two three four five six seven eight and two three four five six seven eight.",
+               "we went higher and higher and the big dog and the big dog sat."]
+
+
+def units_ref(ids, vocab, tag):
+    """Bagimsiz birimler: ss4096 A'nin words'u ('##' onceki kelimeye yapisir), gpt2 cozulmus metin kucuk harf + UNIT."""
+    if tag == "gpt2":
+        return UNIT.findall(DS.decode(ids, vocab).lower())
+    w = []
+    for t in ids:
+        s = vocab[t]
+        if s.startswith("##") and w:
+            w[-1] += s[2:]
+        else:
+            w.append(s)
+    return w
+
+
+def sentences_ref(ws):
+    """A'nin sentences'i: tirnak atilir, . ! ? ile biter."""
+    out, cur = [], []
+    for w in ws:
+        if w == '"':
+            continue
+        cur.append(w)
+        if w in {".", "!", "?"}:
+            out.append(tuple(cur))
+            cur = []
+    if cur:
+        out.append(tuple(cur))
+    return out
+
+
+def xax_per_conj(units):
+    """Her 'and' / 'or' icin en uzun X (<= 7 birim, [a-z']+, hemen once ve hemen sonra ayni), ortusmeli."""
+    out = collections.Counter()
+    for i, u in enumerate(units):
+        for m in (range(7, 0, -1) if u in ("and", "or") else ()):
+            x = units[i - m:i] if i >= m else None
+            if x and x == units[i + 1:i + 1 + m] and all(XWORD.fullmatch(w) for w in x):
+                out[(" ".join(x), u)] += 1
+                break
+    return out
+
+
+def sample_by_hand(model, prompts, n, flags, seed, eos):
+    """Tek tek tam yeniden hesap; her adimda butun satirlar tek multinomial cagrisi (ayni uretec tuketimi)."""
+    gen = torch.Generator().manual_seed(seed)
+    seqs, outs = [list(p) for p in prompts], [[] for _ in prompts]
+    with torch.no_grad():
+        for _ in range(n):
+            z = torch.stack([model.logits(torch.tensor([s]))[0, -1] for s in seqs]).float()
+            tok = torch.where(torch.tensor(flags), torch.multinomial(z.softmax(-1), 1, generator=gen)[:, 0], z.argmax(-1))
+            for s, o, x in zip(seqs, outs, tok.tolist()):
+                s.append(x)
+                o.append(x)
+    return [o[:o.index(eos)] if eos in o else o for o in outs]
+
+
+def t_text_errors(root):
+    d = {t: load(root, t) for t in DS.TAGS}
+    same, cross = {}, True
+    for t in DS.TAGS:
+        v = d[t]["vocab"]
+        tab = DS._token_table(v)
+        same[t] = sum(DS._units(DS.encode(s, v), tab) == units_ref(DS.encode(s, v), v, t) for s in TRAIN + VALID)
+    ss, g = (d[t]["vocab"] for t in DS.TAGS)
+    cross = [DS._units(DS.encode(s, ss), DS._token_table(ss)) == DS._units(DS.encode(s, g), DS._token_table(g))
+             for s in TRAIN]
+    check("birimler: ss4096 = A'nin words'u ('##' birlesir), gpt2 = cozulmus metin kucuk harf + tek rakam / noktalama; "
+          "TRAIN'de iki tokenizer ayni birimleri verir",
+          all(k == len(TRAIN + VALID) for k in same.values()) and all(cross), "%s, ortak %d/%d" % (same, sum(cross), len(cross)))
+
+    for t in DS.TAGS:
+        v = d[t]["vocab"]
+        eos = v.index(DS.EOS_TOKEN)
+        ids = [DS.encode(s, v) for s in XAX_STORIES]
+        stream = np.array([x for s in ids for x in s + [eos]], dtype=np.uint16)
+        want_words = {w for s in ids for w in units_ref(s, v, t) if w.isalpha()}
+        want_xax = sum((xax_per_conj(units_ref(s, v, t)) for s in ids), collections.Counter())
+        got = []
+        for chunk in (DS._CHUNK, 5):
+            saved, DS._CHUNK = DS._CHUNK, chunk
+            try:
+                got.append(DS._text_reference(v, stream))
+            finally:
+                DS._CHUNK = saved
+        check("%s train referansi: alfabetik kelime kumesi ve her 'and' / 'or' icin en uzun 'X and X' (<= 7 birim, "
+              "ortusmeli) elle; parca boyu (5 token, eos sinirinda) sonucu degistirmez" % t,
+              all(w == want_words and dict(x) == dict(want_xax) for w, x in got)
+              and dict(want_xax) == {("the big dog", "and"): 2, ("ran", "and"): 2, ("higher", "and"): 2, ("a cat", "or"): 1,
+                                     ("two three four five six seven eight", "and"): 1}, str(dict(got[0][1])))
+
+    cases = [u.split() for u in ("dug and dug and dug", "the big dog and the big dog ran", "a b c d e f g h and b c d e f g h",
+                                 "the sun and the sunflower", "red , and red", "x and y", "i can do this and i can do this !",
+                                 "cats and dogs and cats and dogs .", "and and and", "or or")]
+    cases += [units_ref(DS.encode(s, g), g, "gpt2") for s in XAX_STORIES]
+    check("_xax (uretilen metin) = A'nin ifadesinin finditer'i ' '.join(birimler) uzerinde: soldan, ortusmeden, en uzun X",
+          all(ES._xax(u) == [(x.group(1), x.group(2)) for x in XAX_A.finditer(" ".join(u))] for u in cases),
+          str([ES._xax(u) for u in cases[:3]]))
+
+    ok = []
+    for t in DS.TAGS:
+        v, dt = d[t]["vocab"], d[t]
+        eos = v.index(DS.EOS_TOKEN)
+        a = dt["valid"]
+        ends = np.flatnonzero(a == eos)
+        skip = set(dt["valid_start"][ES.exam_rows(dt)[:ES.STORY_CONTINUATIONS]].tolist())
+        want = {" ".join(s) for b, e in zip(np.concatenate([[0], ends[:-1] + 1]).tolist(), ends.tolist()) if b not in skip
+                for s in sentences_ref(units_ref(a[b:e].tolist(), v, t)) if len(s) >= 5}
+        ok.append(ES._stock_reference(dt, ES.STORY_CONTINUATIONS) == want and len(want) > 0)
+    check("kalip cumle referansi: valid'in (devami uretilen sinav hikayeleri haric) >= 5 birimlik cumleleri elle",
+          all(ok), str(ok))
+
+    v = g
+    tab, eos = DS._token_table(v), v.index(DS.EOS_TOKEN)
+    p1 = [eos] + DS.encode('Tom saw a big dog. "Can we play now?" said Tom.', v)
+    g1 = DS.encode(' The dog ran to the park. Tom saw a big dog. "Can we play now?" asked Sue. The zorblax and zorblax ran '
+                   'and ran. The dog ran to the park.', v)
+    p2, g2 = [eos] + DS.encode("Sue had a hat.", v), DS.encode(" Sue smiled.", v)
+    alpha = [w for w in units_ref(g1, v, "gpt2") + units_ref(g2, v, "gpt2") if w.isalpha()]
+    r = ES._count([p1, p2], [g1, g2], [True, False], tab, set(alpha) - {"zorblax"}, {("ran", "and"): ES.XAX_LEGIT_MIN},
+                  {"the dog ran to the park ."})
+    T = len(g1) + len(g2)
+    g8 = [tuple(g1[i:i + 8]) for i in range(len(g1) - 7)]
+    want = dict(stories=2, tokens=T, ended=0.5, loop=(len(set(g8)) < len(g8)) / 2, sentence_repeat=0.5,
+                sentence_repeat_per1k=round(3000 / T, 4), quote_repeat=0.5, quote_repeat_per1k=round(1000 / T, 4), xax=0.5,
+                xax_per1k=round(1000 / T, 4), xax_legit_per1k=round(1000 / T, 4), stock=0.4, sentences=5, nonword=0.5,
+                nonword_per1k=round(2000 / len(alpha), 4), words=len(alpha),
+                examples=dict(xax=["zorblax and zorblax"], nonword=["zorblax", "zorblax"]))
+    check("_count elle: cumle tekrari (istemden 2, devamdan 1), soz tekrari, legit olmayan 'zorblax and zorblax' (legit "
+          "'ran and ran' ayri), kalip cumle 2/5, uydurma kelime, 8'li dongu, hikaye paylari ve 1000 token basina",
+          r == want, str({k: (r[k], want[k]) for k in want if r.get(k) != want[k]}))
+
+    ok = []
+    for t in DS.TAGS:                                                  # istem kelime ortasinda kesilir (story_prompts L // 2)
+        v = d[t]["vocab"]
+        tab, eos = DS._token_table(v), v.index(DS.EOS_TOKEN)
+        ids = DS.encode("the cat sat on the mountain. it was", v)
+        piece = lambda i: v[ids[i]].startswith("##") if t == "ss4096" else (
+            DS.decode(ids[i:i + 1], v)[:1].isalpha() and DS.decode(ids[i - 1:i], v)[-1:].isalpha())
+        k = max(i for i in range(1, len(DS.encode("the cat sat on the mountain", v))) if piece(i))   # 'mountain' icinde
+        r3 = ES._count([[eos] + ids[:k]], [ids[k:]], [True], tab, {"mountain", "it", "was"}, {}, set())
+        ok.append(r3["nonword"] == 0 and r3["words"] == 3)
+    check("_count: istem kelime ortasinda biterse o kelime devamin (parca 'tain' uydurma sayilmaz), iki tokenizer'da",
+          all(ok), str(ok))
+
+    ds = d["ss4096"]
+    v = ds["vocab"]
+    eos = v.index(DS.EOS_TOKEN)
+    prompts = [[eos] + DS.encode(TRAIN[i][:30], v) for i in (0, 1, 7)]
+    flags = [False] * 3 + [True] * 3
+    model, n, V = m_ss(ds), 12, len(v)
+    prompts.append([eos])                                             # tek token'li istem (onbellekte istem gecisi yok)
+    flags = [False] * 4 + [True] * 4
+    got, ended = ES._continue(model, prompts + prompts, n, flags, 3, eos, V)
+    again, _ = ES._continue(model, prompts + prompts, n, flags, 3, eos, V)
+    alone, _ = ES._continue(model, [[eos]], n, [False], 3, eos, V)
+    tm = TransformerModel(V, d=16, layers=1, units=32)
+    got_t, _ = ES._continue(tm, prompts + prompts, n, flags, 3, eos, V)
+    split_t, _ = ES._continue(tm, prompts + prompts, n, flags, 3, eos, ES.LOGITS_BUDGET)    # satir basina bir parca
+    greedy_t = [x[:x.index(eos)] if eos in x else x for x in TR.generate(tm, prompts, n)]
+    check("_continue: acgozlu satirlar = texts (onbellekli; tek token'li istem dahil) / train_y.generate (transformer, tam "
+          "hesap, satir parcalari dahil); ornekleme satirlari = tek tek tam hesapla ayni uretec; ayni tohum ayni devam",
+          got[:4] == [r_["ids"] for r_ in ES.texts(model, ds, prompts, n)] and got == again and alone[0] == got[3]
+          and got == sample_by_hand(model, prompts + prompts, n, flags, 3, eos) and got[4:] != got[:4]
+          and ended == [len(x) < n for x in got] and got_t[:4] == greedy_t == split_t[:4]
+          and got_t == sample_by_hand(tm, prompts + prompts, n, flags, 3, eos), str(got[4][:6]))
+
+    ok = []
+    for t in DS.TAGS:
+        dt = d[t]
+        model = m_ss(dt)
+        eos = dt["vocab"].index(DS.EOS_TOKEN)
+        r = ES.count_text_errors(model, dt, 300, real=True)
+        prompts, reals = ES.story_prompts(dt, ES.exam_rows(dt)[:ES.STORY_CONTINUATIONS])
+        k, n = len(prompts), min(300, SEQ - max(len(p) for p in prompts))
+        gens, ended = ES._continue(model, prompts + prompts, n, [False] * k + [True] * k, 0, eos, len(dt["vocab"]))
+        ref = (DS._token_table(dt["vocab"]), dt["text_reference"]["words"], dt["text_reference"]["xax"],
+               ES._stock_reference(dt, ES.STORY_CONTINUATIONS))
+        ok.append(r == dict(greedy=ES._count(prompts, gens[:k], ended[:k], *ref),
+                            sampled=ES._count(prompts, gens[k:], ended[k:], *ref),
+                            real=ES._count(prompts, reals, [True] * k, *ref))
+                  and r["greedy"]["stories"] == 3 and r["real"]["loop"] == 0 and r["real"]["sentence_repeat"] == 0
+                  and max(len(x) for x in gens) <= n and ES.count_text_errors(None, dt, 300, real=True) == dict(real=r["real"]))
+    check("count_text_errors: sabit alt kumenin ilk STORY_CONTINUATIONS hikayesi, istem + devam pencereye sigar; greedy / "
+          "sampled (tohum 0) / real = _count(_continue); model None yalniz real", all(ok), str(ok))
+
+
+def t_speed(root):
+    import colab_simplestories as C
+    d = load(root, "ss4096")
+    work = dict(targets=0, keys=0)
+    f = C._counting(DS.batches(d, 4, 0, bucket=2), work)
+    targets = keys = 0
+    for s in (0, 3, 5):
+        for row in f(s)[1].tolist():
+            n = sum(row) - 1                                   # hedef: pencere - 1
+            targets += n
+            keys += sum(range(1, n + 1))                       # hedef t (1..n) nedensel attention'da t konum gorur
+    check("_counting: cekilen batch'lerin hedef token'i ve attention anahtari elle (bucket'li genislik dolgu sayilmaz)",
+          work == dict(targets=targets, keys=keys) and targets > 0, str(work))
+
+    V, D_, units, turns = 4096, 384, 1024, 6
+    bm = M.BlockModel(V, d=D_, turns=turns, layers=3, units=units, heads=4, fact_activation="swiglu")
+    N, Ld = C._model_flops(bm)
+    bm2 = M.BlockModel(V, d=D_, turns=turns, layers=3, units=units, heads=4, fact_activation="swiglu", shared_facts=False)
+    bm1 = M.BlockModel(64, d=16, turns=2, layers=1, units=8, heads=1, fact_activation="relu")
+    tm = TransformerModel(64, d=16, layers=2, units=32)
+    check("_model_flops: 3x2 (d 384, FactUnits 1024, 6 tur, 4 head) N = 6 (4 d^2 + 3 d units) + V d; ileri FLOP/token "
+          "2 N + 4 L d x 169,9 anahtar = 25,95 M (D ajani); ayri FactUnits ayni; tek head W_value'suz, relu iki matris; "
+          "transformer katman basina 4 d^2 + 2 d units",
+          (N, Ld) == (turns * (4 * D_ * D_ + 3 * D_ * units) + V * D_, turns * D_) and round((2 * N + 4 * Ld * 169.9) / 1e6, 2)
+          == 25.95 and 2 * N == 24379392 and C._model_flops(bm2) == (N, Ld)
+          and C._model_flops(bm1) == (2 * (3 * 16 * 16 + 2 * 16 * 8) + 64 * 16, 2 * 16)
+          and C._model_flops(tm) == (2 * (4 * 16 * 16 + 2 * 16 * 32) + 64 * 16, 2 * 16), "N %d L d %d" % (N, Ld))
+
+    check("mfu: (6 N hedef + 12 L d anahtar) / sure / tepe; tepe tablosu cihaz adindan (L40S, T4'te bf16 yok -> None)",
+          C._mfu((10, 3), dict(targets=100, keys=50), 2.0, 1e3) == 3.9 and C._mfu(None, work, 1.0, 1e3) is None
+          and C._mfu((10, 3), work, 1.0, None) is None and C._peak_for("NVIDIA L4", "bf16") == 121e12
+          and C._peak_for("NVIDIA L40S", "bf16") is None and C._peak_for("NVIDIA A100-SXM4-40GB", "tf32") == 156e12
+          and C._peak_for("NVIDIA H100 PCIe", "bf16") == 756e12 and C._peak_for("NVIDIA H100 80GB HBM3", "bf16") == 989e12
+          and C._peak_for("Tesla T4", "bf16") is None and C._peak_for("Tesla T4", "fp32") == 8.1e12)
 
 
 def t_colab(root):
@@ -408,6 +759,25 @@ def t_colab(root):
           and len(fin.get("stories", [])) == 3 and fin["perf"]["step_ms"] is not None and fin["perf"]["gpu_peak_gb"] is None,
           str(run["error"] or files))
 
+    draw = DS.batches(d, 4, 0)
+    implied = [int(draw(e["step"])[1][:, 1:].sum()) / e["tokens_per_sec"] for e in ex[1:]]    # every 1: aralikta tek batch
+    log = open(out + "/log.txt", encoding="utf-8").read()
+    check("colab_simplestories, yeni olculer: tokens_per_sec (step_ms olan her sinavda; aralikta cekilen batch'in hedefi / "
+          "egitim suresi), save_secs (aralikta yedek yazimi; adim 0'da yedek yok) ve egitim + yedek = aralik; CPU'da mfu None; "
+          "her sinavda exam_train, alpha_summary (2 tur), nll_by_frequency; text_errors her 4. sinavda (adim 0) ve sonda "
+          "gercekle; gunlukte referans, token/sn, yedek ve metin",
+          "tokens_per_sec" not in ex[0] and "save_secs" not in ex[0] and all(e["mfu"] is None for e in ex[1:])
+          and all(x > 0 and abs(x + e["save_secs"] - e["step_ms"] / 1000) < 2e-3 for x, e in zip(implied, ex[1:]))
+          and ex[1]["save_secs"] == 0 and all(e["save_secs"] > 0 for e in ex[2:]) and " yedek " in log
+          and all("exam_train" in e and len(e["alpha_summary"]["facts"]["median"]) == 2 and len(e["nll_by_frequency"]) == 4
+                  for e in ex)
+          and [e["step"] for e in ex if "text_errors" in e] == [0] and set(ex[0]["text_errors"]) == {"greedy", "sampled"}
+          and set(fin["text_errors"]) == {"greedy", "sampled", "real"} and fin["exam_train"]["stories"] == 3
+          and len(fin["alpha_summary"]["attention"]["max_abs"]) == 2 and fin["perf"]["tokens_per_sec"] > 0
+          and fin["perf"]["mfu"] is None and "referans" in log and "token/sn" in log and "       metin (3 hikaye)" in log
+          and "SON metin (3 hikaye)" in log and "SON train" in log,
+          "%s | %s" % ([round(x, 4) for x in implied], [e.get("step_ms") for e in ex]))
+
     first = torch.load(out + "/model.pt")
     os.remove(out + "/checkpoint_t000003.pt")                        # 2. adimdan sonra kesilmis gibi
     run2 = C.start("TEST", d, out, steps=3, every=1, device="cpu", batch_size=4, model_kw=TINY, save_every=1, resume=True)
@@ -430,12 +800,16 @@ def t_colab(root):
     fin4 = json.load(open(tmp + "/p/final.json", encoding="utf-8")) if os.path.exists(tmp + "/p/final.json") else {}
     old = dict(cfg, model_kw={k: v for k, v in cfg["model_kw"].items() if k != "output_link"})
     json.dump(old, open(out + "/config.json", "w"), indent=1)   # 29 Eylul oncesi config: output_link yazilmamis
+    new_fields = ("tokens_per_sec", "mfu", "save_secs", "exam_train", "alpha_summary", "nll_by_frequency", "text_errors")
+    json.dump([{k: v for k, v in e.items() if k not in new_fields}
+               for e in json.load(open(out + "/exams.json", encoding="utf-8"))],
+              open(out + "/exams.json", "w", encoding="utf-8"), indent=1)   # 29 Eylul oncesi exams.json: yeni olculer yok
     if os.path.exists(out + "/checkpoint_t000003.pt"):
         os.remove(out + "/checkpoint_t000003.pt")
     run5 = C.start("TEST", d, out, steps=3, every=1, device="cpu", batch_size=4, model_kw=TINY, save_every=1, resume=True)
     run5["thread"].join(600)
     check("colab_simplestories, output_link: config'te acik (TINY'de False); True'da q, u sinavda, gunlukte ve "
-          "final.json'da; output_link'siz eski config surdurulur",
+          "final.json'da; output_link'siz eski config ve yeni olcusuz eski exams.json surdurulur",
           cfg["model_kw"]["output_link"] is False and run4["done"] and not run4["error"]
           and all("link_q" in e and "link_u" in e for e in ex4) and any("bag q" in l for l in run4["lines"])
           and "link_q" in fin4 and fin4["link_u"] >= 0 and run5["done"] and not run5["error"],
@@ -459,10 +833,13 @@ if __name__ == "__main__":
         t_tokens(root)
         t_data(root, dataset, tokenizers, meta)
         t_fingerprint(root)
+        t_text_reference(root)
         t_bits_per_byte(root)
         t_batches(root)
         t_split(root)
         t_exam(root)
+        t_text_errors(root)
+        t_speed(root)
         t_colab(root)
     finally:
         shutil.rmtree(root)
