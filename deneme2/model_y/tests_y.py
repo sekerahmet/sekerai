@@ -2189,19 +2189,22 @@ def t_internals():
           "fark %.1e" % err)
 
     dh = 16 // 2
-    with torch.no_grad():                                  # tur 3 (blok 0) head ciktilarinin ortalamasi, referans hikayelerde
+    with torch.no_grad():                                  # tur 3 (blok 0) head ciktilarinin ve Canon ekinin ortalamasi, referansta
         tot, cnt = torch.zeros(2, dh, dtype=torch.float64), 0
+        ctot = torch.zeros(16, dtype=torch.float64)
         blk = m.blocks[0]
         for s in others:
             h = m.hidden(torch.tensor([s[:-1]]))[2]
             T = h.shape[1]
             full = F.pad(h, (0, 0, 3, 0))
-            x = h + sum(blk.canon_weights[k] * full[:, 3 - k:3 - k + T] for k in range(4))
+            mix = sum(blk.canon_weights[k] * full[:, 3 - k:3 - k + T] for k in range(4))
+            x = h + mix
             v = (x @ blk.attention.W_value.T).unflatten(-1, (2, -1)).transpose(1, 2)[0]   # (H, T, dh)
             c = blk.attention.weights(x)[0] @ v
             tot += c[:, :T - 1].sum(1)                                                    # son hedef haric
+            ctot += mix[0, :T - 1].sum(0)
             cnt += T - 1
-        mean = tot / cnt
+        mean, cmean = tot / cnt, ctot / cnt
     cases = [("none", {}),
              ("alpha ayni", dict(alpha_attention={t: m.alpha_attention[t].clone() for t in range(4)},
                                  alpha_facts={t: m.alpha_facts[t].clone() for t in range(4)})),
@@ -2209,7 +2212,8 @@ def t_internals():
              ("C blok 0", dict(canon={0: torch.zeros(4), 2: torch.zeros(4)})),
              ("head 1 sifir, blok 1", dict(heads={(1, 1): torch.zeros(dh), (3, 1): torch.zeros(dh)})),
              ("H3 ortalama", dict(heads={(2, 0): None, (2, 1): None})),
-             ("H3 ortalama elle", dict(heads={(2, 0): mean[0], (2, 1): mean[1]}))]
+             ("H3 ortalama elle", dict(heads={(2, 0): mean[0], (2, 1): mean[1]})),
+             ("CM3 ortalama", dict(canon_mean={2: None})), ("CM3 ortalama elle", dict(canon_mean={2: cmean}))]
     ab = I.ablate(m, stories, cases, reference=others)
 
     def per_story(model):                                  # model.logits'ten hikaye basina (nll, dogru, hedef); son hedef haric
@@ -2243,19 +2247,28 @@ def t_internals():
             err = max(err, abs(rows[name]["d_" + key] - mean_d),
                       abs(rows[name]["se_" + key] - float(np.sqrt(((d - mean_d * B0[:, 2]) ** 2).sum()) / N)))
     zero = max(abs(rows[k][f]) for k in ("none", "alpha ayni") for f in ("d_nll", "d_acc", "se_nll", "se_acc"))
-    mean_err = abs(rows["H3 ortalama"]["d_nll"] - rows["H3 ortalama elle"]["d_nll"])
-    moved = min(abs(rows[k]["d_nll"]) for k in refs)
+    mean_err = max(abs(rows["H3 ortalama"][k] - rows["H3 ortalama elle"][k]) for k in ("d_nll", "d_acc"))
+    mean_err = max(mean_err, *(abs(rows["CM3 ortalama"][k] - rows["CM3 ortalama elle"][k]) for k in ("d_nll", "d_acc")))
+    moved = min(abs(rows[k]["d_nll"]) for k in list(refs) + ["CM3 ortalama"])
     check("internals ablate: hicbir sey = taban ve alpha'yi ayni degerle vermek = taban (fark 0); A / F atlama, Canon kapatma, "
-          "head sifirlama = agirligi degistirilmis modelin logits'i (dnll, dacc, se); head ortalamasi referans hikayelerinden",
+          "head sifirlama = agirligi degistirilmis modelin logits'i (dnll, dacc, se); head ve Canon eki ortalamasi referans "
+          "hikayelerinden (elle hesapla ayni)",
           zero < 1e-12 and err < 1e-10 and mean_err < 1e-10 and moved > 1e-4 and "BAGIMLILIK" in ab["note"]
           and ab["check_logits"] < 1e-10, "sifir %.1e  fark %.1e  ortalama %.1e  en kucuk |d| %.1e" % (zero, err, mean_err, moved))
 
     name, words, build = I._parse_case((4, 2, 2), "A2+H3.1+C+aF4*0.5")
     case = build(m)
+    _, words_cm, build_cm = I._parse_case((4, 2, 2), "CM3+C1")
+    case_cm, case_all = build_cm(m), I._parse_case((4, 2, 2), "CM")[2](m)
+    std = I._standard_cases(4, 2)
     check("internals CLI mudahale yazimi (turlar 1'den): 'A2+H3.1+C+aF4*0.5' -> skip_attention [1], heads (2, 1), butun Canon, "
-          "alpha_facts[3] x 0,5",
+          "alpha_facts[3] x 0,5; 'CM3+C1' -> canon_mean {2: None} + canon {0: 0}; 'CM' butun turlar; varsayilan listede C ve CM",
           case["skip_attention"] == [1] and list(case["heads"]) == [(2, 1)] and sorted(case["canon"]) == [0, 1, 2, 3]
-          and torch.equal(case["alpha_facts"][3], m.alpha_facts[3] * 0.5), words)
+          and torch.equal(case["alpha_facts"][3], m.alpha_facts[3] * 0.5)
+          and case_cm["canon_mean"] == {2: None} and list(case_cm["canon"]) == [0] and not case_cm["canon"][0].any()
+          and sorted(case_all["canon_mean"]) == [0, 1, 2, 3] and std[-10:] == ["C1", "C2", "C3", "C4", "C", "CM1", "CM2", "CM3",
+                                                                             "CM4", "CM"],
+          "%s | %s" % (words, words_cm))
 
     tmp = tempfile.mkdtemp(prefix="internals_")
     same = lambda a, b: list(a) == list(b) and all(torch.equal(a[k], b[k]) for k in a)

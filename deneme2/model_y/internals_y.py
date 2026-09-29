@@ -48,7 +48,7 @@ _SIMPLESTORIES_ROOT = "G:/Drive'ım/simplestories"    # <tag>/tokenizer.json, <t
 # train_y.train_seq'teki Muon listesi: yedekteki optimizer parametre sirasi buna bagli (once bunlar)
 _MUON_HIDDEN = ("W_context", "W_value", "W_fact_in", "W_fact_up", "W_fact_out", "W_value.weight", "W_out.weight",
                 "W_mlp_in.weight", "W_mlp_out.weight")
-_PLAN_KEYS = ("skip_attention", "skip_facts", "heads", "canon", "alpha_attention", "alpha_facts")
+_PLAN_KEYS = ("skip_attention", "skip_facts", "heads", "canon", "canon_mean", "alpha_attention", "alpha_facts")
 _DEPENDENCE_NOTE = ("Kapatma BAGIMLILIK olcer: egitilmis model o parcaya ne kadar dayaniyor.  'O parca olmadan "
                     "egitilseydi' sorusunu CEVAPLAMAZ; o, parcasiz egitim kosusuyla olculur.")
 _LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -95,14 +95,18 @@ def _plan(model, case=None):
         skip_attention, skip_facts   tur listesi: alt blogun katkisi sifir (normalized_update'te alpha 0 ile ayni)
         heads      {(tur, head): (dh,) vektor | None}: head'in ciktisi c_h bu vektorle degisir; None = ortalama (ablate doldurur)
         canon      {tur: (4,) carpan}: Canon agirliklari w_k bu carpanla (0 = kapali)
+        canon_mean {tur: (d,) vektor | None}: Canon eki (sum_k w_k x_(t-k)) bu vektorle degisir; None = ortalama
+                   (ablate doldurur)
         alpha_attention, alpha_facts   {tur: sayi | (d,) vektor}: o turun alpha'si ELLE (yalniz normalized_update)
     plan["start"]: mudahalenin ilk turu (onceki turlar temiz hesapla ayni)."""
     case = dict(case or {})
     bad = set(case) - set(_PLAN_KEYS)
     assert not bad, "bilinmeyen mudahale %s (gecerli: %s)" % (sorted(bad), _PLAN_KEYS)
     plan = dict(skip_attention=set(case.get("skip_attention", ())), skip_facts=set(case.get("skip_facts", ())),
-                heads=dict(case.get("heads") or {}), canon=dict(case.get("canon") or {}))
+                heads=dict(case.get("heads") or {}), canon=dict(case.get("canon") or {}),
+                canon_mean=dict(case.get("canon_mean") or {}))
     touched = list(plan["skip_attention"] | plan["skip_facts"]) + [t for t, _ in plan["heads"]] + list(plan["canon"])
+    touched += list(plan["canon_mean"])
     for name in ("alpha_attention", "alpha_facts"):
         given = case.get(name) or {}
         plan[name] = None
@@ -141,9 +145,15 @@ def _run(model, h, plan, taps=None, start=0):
             T = x.shape[-2]
             full = F.pad(x, (0, 0, 3, 0))
             mix = sum(w[k] * full[..., 3 - k:3 - k + T, :] for k in range(4))
+            if t in plan["canon_mean"]:
+                vec = plan["canon_mean"][t]
+                assert vec is not None, "Canon eki ortalamasi doldurulmadi (ablate doldurur)"
+                mix = torch.as_tensor(vec, dtype=x.dtype, device=x.device).expand_as(x)
             if "canon" in taps:
                 taps["canon"](t, (mix, x))
             x = x + mix
+        else:
+            assert t not in plan["canon_mean"], "tur %d: Canon yok" % (t + 1)
         added = None
         if t not in plan["skip_attention"]:
             H = at.heads
@@ -574,11 +584,27 @@ def _head_means(model, stories, exclude_last, batch):
     return {(t, h): (s[h] / n).to(dtype) for t, s in sums.items() for h in range(s.shape[0])}
 
 
+def _canon_means(model, stories, exclude_last, batch):
+    """Canon ekinin (sum_k w_k x_(t-k), attention girdisine eklenen) gecerli konumlarda ortalamasi: {tur: (d,)}."""
+    P = model.tokens.points()
+    sums, n = {}, 0
+    for x, valid, idx in _batches(stories, batch, exclude_last):
+        x, valid = x.to(P.device), valid.to(P.device)
+
+        def on_canon(t, mx):
+            s = mx[0][valid].double().sum(0)                     # (d,)
+            sums[t] = s if t not in sums else sums[t] + s
+        _run(model, P[x[:, :-1]], _plan(model), dict(canon=on_canon))
+        n += int(valid.sum())
+    return {t: (s / n).to(P.dtype) for t, s in sums.items()}
+
+
 @torch.no_grad()
 def ablate(model, ids_or_stories, cases, reference=None, exclude_last=True, batch=16, log=None):
     """Parca kapatma / alpha degistirme.  cases: [(ad, mudahale)] ya da {ad: mudahale}; mudahale _plan anahtarlariyla
-    (skip_attention, skip_facts, heads, canon, alpha_attention, alpha_facts; tur 0'dan).  heads'te None: head'in ciktisi
-    reference hikayelerindeki ortalamasiyla (verilmezse olculen hikayelerdeki) degisir: ortalama ablasyonu.
+    (skip_attention, skip_facts, heads, canon, canon_mean, alpha_attention, alpha_facts; tur 0'dan).  heads / canon_mean'de
+    None: head'in ciktisi / Canon eki reference hikayelerindeki ortalamasiyla (verilmezse olculen hikayelerdeki) degisir:
+    ortalama ablasyonu.
     Temiz ileri hesap bir kez, her turun girdisi saklanir: mudahale tur t'den basliyorsa hesap t'den surer (sonuc ayni).
     -> dict(base {nll, acc, n}, rows [{case, nll, acc, d_nll, se_nll, d_acc, se_acc, start (None: yalniz cikis)}], note,
     check_logits).
@@ -607,20 +633,24 @@ def ablate(model, ids_or_stories, cases, reference=None, exclude_last=True, batc
 
     base = collect(clean)
     ref = stories if reference is None else _as_stories(reference)
-    means, rows = None, []
+    means, cmeans, rows = None, None, []
     for name, case in cases:
         plan = _plan(model, case)
         if any(v is None for v in plan["heads"].values()):
             if means is None:
                 means = _head_means(model, ref, exclude_last, batch)
             plan["heads"] = {k: means[k] if v is None else v for k, v in plan["heads"].items()}
+        if any(v is None for v in plan["canon_mean"].values()):
+            if cmeans is None:
+                cmeans = _canon_means(model, ref, exclude_last, batch)
+            plan["canon_mean"] = {k: cmeans[k] if v is None else v for k, v in plan["canon_mean"].items()}
         r = collect(plan)
         rows.append(dict(case=name, nll=r["nll"], acc=r["acc"], start=plan["start"] if plan["start"] < model.turns else None,
                          **_paired(base, r)))
         if log:
             log(_ablate_row(rows[-1]))
     return dict(base=dict(nll=base["nll"], acc=base["acc"], n=int(base["count"].sum()), stories=len(stories)),
-                rows=rows, reference=None if means is None else (
+                rows=rows, reference=None if means is None and cmeans is None else (
                     "olculen hikayelerden" if reference is None else "ayri %d hikayeden" % len(ref)),
                 note=_DEPENDENCE_NOTE, check_logits=check)
 
@@ -1223,14 +1253,16 @@ def _parse_case(shape, text):
         A3 / F3              tur 3'un attention / FactUnits alt adimi yok
         H3 / H3.1            tur 3'un butun head'leri / head 1'i, referans ortalamasiyla (ortalama ablasyonu)
         C3 / C               tur 3'te / butun turlarda Canon kapali
+        CM3 / CM             tur 3'te / butun turlarda Canon eki (sum_k w_k x_(t-k)) referans ortalamasiyla
         aA3=0.5 / aF6*0.5    tur 3'un alpha_attention'i 0,5 (butun boyutlar) / tur 6'nin alpha_facts'i x 0,5
     shape: (tur sayisi, head sayisi, Block sayisi)."""
     turns, heads, nb = shape
     parts, words = [], []
     for part in text.split("+"):
-        m = re.fullmatch(r"none|([AF])(\d+)|H(\d+)(?:\.(\d+))?|C(\d+)?|a([AF])(\d+)([=*])(-?[\d.]+(?:e-?\d+)?)", part)
+        m = re.fullmatch(r"none|([AF])(\d+)|H(\d+)(?:\.(\d+))?|C(\d+)?|a([AF])(\d+)([=*])(-?[\d.]+(?:e-?\d+)?)|CM(\d+)?",
+                         part)
         assert m, "mudahale okunamadi: %r (python internals_y.py -h)" % part
-        turn = next((int(g) - 1 for g in (m.group(2), m.group(3), m.group(5), m.group(7)) if g), None)
+        turn = next((int(g) - 1 for g in (m.group(2), m.group(3), m.group(5), m.group(7), m.group(10)) if g), None)
         assert turn is None or 0 <= turn < turns, "%s: tur 1..%d" % (part, turns)
         where = "" if turn is None else "tur %d%s " % (turn + 1, _LETTERS[turn % nb])
         if part == "none":
@@ -1244,6 +1276,10 @@ def _parse_case(shape, text):
             assert all(0 <= h < heads for h in hs), "%s: head 0..%d" % (part, heads - 1)
             parts += [("heads", (turn, h), None) for h in hs]
             words.append(where + ("head %d" % hs[0] if m.group(4) else "butun head'ler") + " ortalamayla")
+        elif part.startswith("CM"):
+            ts = [turn] if turn is not None else list(range(turns))
+            parts += [("canon_mean", t, None) for t in ts]
+            words.append(where + "Canon eki ortalamayla" if turn is not None else "butun turlarda Canon eki ortalamayla")
         elif part.startswith("C"):
             ts = [turn] if turn is not None else list(range(turns))
             parts += [("canon", t, None) for t in ts]
@@ -1258,7 +1294,7 @@ def _parse_case(shape, text):
         for key, where, arg in parts:
             if key in ("skip_attention", "skip_facts"):
                 case.setdefault(key, []).append(where)
-            elif key == "heads":
+            elif key in ("heads", "canon_mean"):
                 case.setdefault(key, {})[where] = None
             elif key == "canon":
                 case.setdefault(key, {})[where] = torch.zeros(4)
@@ -1272,12 +1308,12 @@ def _parse_case(shape, text):
 
 
 def _standard_cases(turns, heads):
-    """Varsayilan ablate listesi: none, her tur A / F / H, her head, her tur C, butun Canon."""
+    """Varsayilan ablate listesi: none, her tur A / F / H, her head, her tur C ve CM, butun Canon (C, CM)."""
     cases = ["none"] + ["A%d" % t for t in range(1, turns + 1)] + ["F%d" % t for t in range(1, turns + 1)]
     cases += ["H%d" % t for t in range(1, turns + 1)]
     if heads > 1:
         cases += ["H%d.%d" % (t, h) for t in range(1, turns + 1) for h in range(heads)]
-    return cases + ["C%d" % t for t in range(1, turns + 1)] + ["C"]
+    return cases + ["C%d" % t for t in range(1, turns + 1)] + ["C"] + ["CM%d" % t for t in range(1, turns + 1)] + ["CM"]
 
 
 # ---- CLI: metin
@@ -1461,7 +1497,7 @@ def _text_ablate(res):
     L = ["## ablate.  " + res["note"],
          "taban: nll %.4f  acc %.4f  (%d hedef, %d hikaye; elle ileri hesap - model.logits en buyuk fark %.1e)%s" % (
              b["nll"], b["acc"], b["n"], b["stories"], res["check_logits"],
-             "" if res["reference"] is None else "; head ortalamalari %s" % res["reference"]),
+             "" if res["reference"] is None else "; ortalamalar (head, Canon eki) %s" % res["reference"]),
          "Δ hikaye duzeyinde eslesmis, ± standart hata"]
     return L + [_ablate_row(r) for r in res["rows"]]
 
@@ -1547,8 +1583,8 @@ def _main(argv=None):
     ap.add_argument("--offset", type=int, default=0, help="sinav permutasyonunda baslangic (farkli hikayeler)")
     ap.add_argument("--text", action="append", help="trace: istem metni (<eos> ile baslatilir; butun hedefler sayilir)")
     ap.add_argument("--positions", type=int, default=60, help="trace: hikaye basina tablodaki hedef sayisi")
-    ap.add_argument("--cases", nargs="+", help="ablate mudahaleleri (varsayilan: none, her tur A/F/H/C, her head, C)")
-    ap.add_argument("--reference", type=int, default=48, help="ablate: head ortalamasi icin ayri hikaye sayisi")
+    ap.add_argument("--cases", nargs="+", help="ablate mudahaleleri (varsayilan: none, her tur A/F/H/C/CM, her head, C, CM)")
+    ap.add_argument("--reference", type=int, default=48, help="ablate: head / Canon eki ortalamasi icin ayri hikaye sayisi")
     ap.add_argument("--counts", help="point_drift: token sayimi .npy (varsayilan: train akisi, bir kez sayilir)")
     ap.add_argument("--batch", type=int, help="batch (varsayilan 16; attention_stats, tuned_lens 8; profile_step config'in "
                                               "batch_size'i)")
@@ -1638,13 +1674,13 @@ def _main(argv=None):
         cached = [_padded(cut[i:i + batch], data["eos"]) for i in range(0, len(cut), batch)]
     else:
         cases = [_parse_case(shape, c) for c in (args.cases or _standard_cases(shape[0], shape[1]))]
-        needs_ref = any("H" in c[0] for c in cases)
+        needs_ref = any("H" in c[0] or "CM" in c[0] for c in cases)
         ref = data["stories"](args.reference, args.offset + count)[1] if needs_ref and args.reference else None
         measure = lambda m: ablate(m, stories, [("%-8s %s" % (name, words), build(m)) for name, words, build in cases],
                                    reference=ref, batch=batch, log=say)
         text, summarize = _text_ablate, lambda res: _summary("ablate", res)
         if ref is not None:
-            lines.append("head ortalamalari icin ayri %d hikaye: sinav permutasyonu %d..%d" % (
+            lines.append("head / Canon eki ortalamalari icin ayri %d hikaye: sinav permutasyonu %d..%d" % (
                 len(ref), args.offset + count, args.offset + count + len(ref) - 1))
 
     packs = _checkpoints(run_dir)
