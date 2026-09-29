@@ -34,11 +34,16 @@ STREAM_NORM=False: akis normalize edilmez, okunan kopya normalize edilir (transf
 
 ROPE=True: attention'da q ve k konuma gore dondurulur (RoPE, transformer'daki apply_rope); iki konumun skoru aradaki mesafeye
 de bagli olur.  Ogrenilen sayi yok; donme boyu degistirmez, cosine ve sabit att_scale aynen.
+
+Paketli pencere (FineWeb, maskeli paketleme; Llama 3 yolu): document_positions (B, T) = token'in kendi belgesindeki konumu,
+belge basinda 0.  Attention (PACKED_ATTENTION) ve Canon belge sinirini gecmez, RoPE konumu belge basinda 0'dan.  Verilmezse
+bugunku hesap (SDPA is_causal).
 """
 import math
 
 import torch
 import torch.nn.functional as F
+from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
 D = 64               # nokta boyutu; olculmedi (sozluk 74 > 64)
 CONFIDENCE = 0.99    # hedef tam q yonundeyken, rakipler dikken verilebilecek olasilik -> scale
@@ -109,6 +114,12 @@ OUTPUT_LINK = True   # cikis bagi phi (kullanici, 28 Eylul: "o zaman bu koşuyu 
                      # kirpilir) -> phi' = (1 + q c)^2 + 3 u c^2 >= 0: phi hep artan, en olasi token degismez; q = u = 0:
                      # dogrusal.  Varsayilan (kullanici, 29 Eylul: "1 evet varsayılan olsun"): SimpleStories 1 epok EMA bpb
                      # 0,6413 -> 0,6090, acc +1,1 puan (lr'yi de ~yariya indirdi, ayristirilamadi).  False: dogrusal skor
+PACKED_ATTENTION = "flex"   # paketli pencerede (document_positions verilince) attention: "flex" GPU'da flex_attention, blok-seyrek
+                            # belge maskesi (maliyet belge boylarina bagli; yogun T x T maske 8.192'de sigmaz), CPU'da yogun maske
+                            # (flex'in CPU'da geri yayilimi yok) | "dense" hep yogun bool maske (SDPA).  Paketsiz girdi bunu kullanmaz
+ATTENTION_LOG_SCALE = False  # True: attention olcegi sabit scale_for(T_MAX) yerine sorgu basina scale_for(n), n = gordugu anahtar
+                             # sayisi (belge ici konum + 1); T_MAX = 512'de n = 512 konumu bugunku olcek (SSMax'in s log n'i).
+                             # Kullanici, 30 Eylul: "Tasarım + log-n (Önerilen)"; FineWeb 8.192 bagliminda (not.md §9)
 
 
 def apply_rope(x, positions=None):
@@ -124,6 +135,25 @@ def apply_rope(x, positions=None):
     cos, sin = angle.cos(), angle.sin()
     x1, x2 = x[..., 0::2].to(work), x[..., 1::2].to(work)
     return torch.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], -1).flatten(-2).to(x.dtype)
+
+
+def same_document_causal(first):
+    """mask_mod (flex_attention imzasi): sorgu q, anahtar kv'ye bakar <=> kv <= q ve kv ayni belgede (kv >= first[b, q]);
+    first (B, T) = t - konum_t, t'nin belgesinin penceredeki ilk konumu."""
+    def mask_mod(b, h, q, kv):
+        return (kv <= q) & (kv >= first[b, q])
+    return mask_mod
+
+
+def build_document_mask(document_positions, flex=False):
+    """Paketli pencere: document_positions (B, T) her token'in kendi belgesindeki konumu (belge basinda 0) -> belge ici
+    nedensel maske.  flex: flex_attention'in blok-seyrek BlockMask'i; degilse AYNI mask_mod'dan yogun (B, T, T) bool."""
+    B, T = document_positions.shape
+    t = torch.arange(T, device=document_positions.device)
+    mask_mod = same_document_causal(t - document_positions)
+    if flex:
+        return create_block_mask(mask_mod, B, None, T, T, device=document_positions.device)
+    return mask_mod(torch.arange(B, device=t.device)[:, None, None], None, t[None, :, None], t[None, None, :])
 
 
 def masked_nll(logits, targets, valid):
@@ -203,12 +233,14 @@ class CausalAttention(torch.nn.Module):
     """Nedensel tam attention.  Tek head'de getirdigi sey girdinin kendisi (Adim 2: PL noktalari, Adim 3: durumlar);
     HEADS > 1: head basina W_value x'in dilimi.  W_context 0'dan (paket acikken BlockModel rastgele baslatir)."""
 
-    def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, seed=POINTS_SEED + 2, rope=False, heads=1):
+    def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, seed=POINTS_SEED + 2, rope=False, heads=1,
+                 attention_log_scale=False):
         super().__init__()
         assert d % heads == 0, "d head sayisina bolunmeli"
         assert not rope or (d // heads) % 2 == 0, "RoPE icin head boyu cift olmali"
         g = torch.Generator().manual_seed(seed)
         self.rope, self.heads = rope, heads
+        self.attention_log_scale, self.confidence = attention_log_scale, confidence
         # W_query, W_key: d x d, rastgele / √d baslar, egitimle degisir.  PL'yi baska bir yone ceviren dogrusal donusum
         # (dondurur, gerer, sikistirir); ardindan norm geldigi icin yalniz yon kalir.
         self.W_query = torch.nn.Parameter(torch.randn(d, d, generator=g) / d ** 0.5)   # "ne ariyorum"
@@ -229,13 +261,36 @@ class CausalAttention(torch.nn.Module):
         q, k = F.normalize(q, dim=-1), F.normalize(k, dim=-1)
         if self.rope:                                     # konuma gore dondur; boy 1 kalir
             q, k = apply_rope(q, positions), apply_rope(k, positions)
+        if self.attention_log_scale:                      # q x scale_for(n) / scale: cagiranin scale'iyle skor scale_for(n) <q, k>
+            q = q * self.query_scale(q.shape[-2], positions, q.device).to(q.dtype)
         return q, k
 
-    def forward(self, x, cache=None):
+    def query_scale(self, T, positions=None, device=None):
+        """ATTENTION_LOG_SCALE: sorgu basina scale_for(n) / scale, n = sorgunun gordugu anahtar sayisi = belge ici konum + 1
+        (positions None: t + 1).  n >= 2: n = 1'de softmax tek anahtarda 1, olcek sonucu degistirmez (scale_for(1) = -inf).
+        -> (..., T, 1), float64."""
+        n = (torch.arange(T, device=device) if positions is None else positions).to(torch.float64) + 1
+        s = torch.log(self.confidence * (n.clamp(min=2) - 1) / (1 - self.confidence))
+        return (s / self.scale)[..., None]
+
+    def forward(self, x, cache=None, document_positions=None, document_mask=None):
         """x (B, T, d) PL ya da durum dizisi -> c (B, T, d).  cache (AttentionCache): onbellekli uretim; x yalniz yeni
-        konumlar."""
+        konumlar.  document_positions (B, T): paketli pencere -- RoPE konumu belge basinda 0, attention belge icinde;
+        document_mask: build_document_mask'in ciktisi (BlockMask: flex_attention, bool tensor: SDPA), None ise yogun."""
         if cache is not None:
+            assert document_positions is None, "onbellekli uretim tek belgeli"
             return cache.attend(self, x)
+        if document_positions is not None:
+            mask = build_document_mask(document_positions) if document_mask is None else document_mask
+            q, k = self.queries_keys(x, document_positions)
+            v = x if self.heads == 1 else (x @ self.W_value.T).unflatten(-1, (self.heads, -1)).transpose(-3, -2)
+            if self.heads == 1:                           # (B, 1, T, d): tek head
+                q, k, v = q[:, None], k[:, None], v[:, None]
+            if torch.is_tensor(mask):
+                c = F.scaled_dot_product_attention(q, k, v, attn_mask=mask[:, None], scale=self.scale)
+            else:                                         # autocast flex'i kapsamaz: tipler q'nunki
+                c = flex_attention(q, k.to(q.dtype), v.to(q.dtype), block_mask=mask, scale=self.scale)
+            return c[:, 0] if self.heads == 1 else c.transpose(-3, -2).flatten(-2)
         q, k = self.queries_keys(x)
         if self.heads > 1:                                # c = [a_1 (V_1 x) ; ... ; a_H (V_H x)], head'ler yan yana
             v = (x @ self.W_value.T).unflatten(-1, (self.heads, -1)).transpose(-3, -2)
@@ -383,9 +438,10 @@ class Block(torch.nn.Module):
 
     def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, units=FACT_UNITS, seed=POINTS_SEED + 2,
                  stream_norm=True, layer_norm=False, rope=False, normalized_update=False, sphere_weights=False, canon=False,
-                 heads=1, fact_activation="relu"):
+                 heads=1, fact_activation="relu", attention_log_scale=False):
         super().__init__()
-        self.attention = CausalAttention(d, t_max, confidence, seed, rope=rope, heads=heads)
+        self.attention = CausalAttention(d, t_max, confidence, seed, rope=rope, heads=heads,
+                                         attention_log_scale=attention_log_scale)
         self.facts = FactUnits(d, units, seed + 1, activation=fact_activation)
         self.stream_norm, self.layer_norm = stream_norm, layer_norm
         self.normalized_update, self.sphere_weights, self.canon = normalized_update, sphere_weights, canon
@@ -395,10 +451,12 @@ class Block(torch.nn.Module):
             self.norm_attention = torch.nn.LayerNorm(d)
             self.norm_facts = torch.nn.LayerNorm(d)
 
-    def forward(self, h, cache=None, alpha_attention=None, alpha_facts=None, turn_facts=None, skip_facts=False):
+    def forward(self, h, cache=None, alpha_attention=None, alpha_facts=None, turn_facts=None, skip_facts=False,
+                document_positions=None, document_mask=None):
         """alpha_attention, alpha_facts (d,): normalized_update'te bu turun alpha'lari.  turn_facts: bu turun FactUnits'i
         (SHARED_FACTS=False'ta ikinci gelis); None: Block'un kendi FactUnits'i.  skip_facts: FactUnits alt adimi yok
-        (FIRST_TURN_FACTS=False'ta tur 1)."""
+        (FIRST_TURN_FACTS=False'ta tur 1).  document_positions (B, T), document_mask: paketli pencere (Canon ve attention
+        belge icinde; CausalAttention.forward)."""
         at = self.attention
         unit = lambda v: F.normalize(v, dim=-1)
         norm_a, norm_f = (self.norm_attention, self.norm_facts) if self.layer_norm else (unit, unit)
@@ -406,8 +464,12 @@ class Block(torch.nn.Module):
         if self.canon:                                       # Canon-A: x_t + sum_k w_k * x_(t-k), baslangictan once 0
             T = x.shape[-2]
             full = F.pad(x, (0, 0, 3, 0)) if cache is None else cache.canon_cache(x)   # onceki 3 konum + x
-            x = x + sum(self.canon_weights[k] * full[..., 3 - k:3 - k + T, :] for k in range(4))
-        added = at(x, cache=cache) @ at.W_context.T                                # W_context · c_t
+            if document_positions is None:
+                x = x + sum(self.canon_weights[k] * full[..., 3 - k:3 - k + T, :] for k in range(4))
+            else:                                            # x_(t-k) yalniz ayni belgede (k <= konum_t), degilse 0
+                x = x + sum(self.canon_weights[k] * full[..., 3 - k:3 - k + T, :]
+                            * (document_positions >= k)[..., None].to(x.dtype) for k in range(4))
+        added = at(x, cache=cache, document_positions=document_positions, document_mask=document_mask) @ at.W_context.T
         # sphere_weights: W_fact_in satirlari birim, h birim -> girdi kosinus (tipik ±1/√d); √d ile esik O(1) olcekte
         units = self.facts if turn_facts is None else turn_facts
         facts = (lambda v: units(v * v.shape[-1] ** 0.5)) if self.sphere_weights else units
@@ -433,7 +495,8 @@ class BlockModel(torch.nn.Module):
                  fact_activation=FACT_ACTIVATION, learn_output_scale=LEARN_OUTPUT_SCALE, loss_chunk=LOSS_CHUNK,
                  last_facts_alpha_init=LAST_FACTS_ALPHA_INIT, output_link=OUTPUT_LINK, shared_facts=SHARED_FACTS,
                  input_embedding=INPUT_EMBEDDING, input_bigrams=INPUT_BIGRAMS, first_turn_facts=FIRST_TURN_FACTS,
-                 bigram_keys=None, input_embedding_sphere=INPUT_EMBEDDING_SPHERE):
+                 bigram_keys=None, input_embedding_sphere=INPUT_EMBEDDING_SPHERE, packed_attention=PACKED_ATTENTION,
+                 attention_log_scale=ATTENTION_LOG_SCALE):
         """bigram_keys (INPUT_BIGRAMS > 0): en sik ikililerin anahtarlari (onceki * n + token), artan sirali, uzunluk
         input_bigrams; None ya da str (config'teki iz): tampon 0'larla kurulur, state_dict'ten dolar."""
         super().__init__()
@@ -446,7 +509,8 @@ class BlockModel(torch.nn.Module):
         self.blocks = torch.nn.ModuleList(Block(d, t_max, confidence, units, 100 * seed + 10 + 2 * i,
                                                 stream_norm=stream_norm, layer_norm=layer_norm, rope=rope,
                                                 normalized_update=normalized_update, sphere_weights=sphere_weights,
-                                                canon=canon, heads=heads, fact_activation=fact_activation)
+                                                canon=canon, heads=heads, fact_activation=fact_activation,
+                                                attention_log_scale=attention_log_scale)
                                           for i in range(count))
         self.turns, self.shared, self.stream_norm = turns, shared, stream_norm
         self.layers = layers if shared else len(self.blocks)   # farkli Block sayisi (ayri blokta her tura bir)
@@ -495,6 +559,8 @@ class BlockModel(torch.nn.Module):
             self.link_u = torch.nn.Parameter(torch.zeros(()))
         assert loss_chunk >= 0, "loss_chunk: 0 (tek parca) ya da parca boyu"
         self.loss_chunk = loss_chunk
+        assert packed_attention in ("flex", "dense"), "packed_attention: flex | dense"
+        self.packed_attention = packed_attention
 
     def turn_blocks(self):
         return [self.blocks[i % len(self.blocks)] for i in range(self.turns)]     # paylasilan: A B A B; ayri: her tura biri
@@ -516,9 +582,12 @@ class BlockModel(torch.nn.Module):
             x = x + B2[pos] * hit[..., None].to(B2.dtype)
         return F.normalize(x, dim=-1)
 
-    def hidden(self, ids, caches=None):
+    def hidden(self, ids, caches=None, document_positions=None):
         """Her turdan sonraki durumlar: [h0, h1, ..., h_TURNS], her biri (B, T, d); h0 = input_states.  caches: tur basina
-        bir AttentionCache (onbellekli uretim; ids yalniz yeni token'lar)."""
+        bir AttentionCache (onbellekli uretim; ids yalniz yeni token'lar).  document_positions (B, T): paketli pencere,
+        token'in kendi belgesindeki konumu (belge basinda 0); None = tek belge (bugunku hesap)."""
+        assert document_positions is None or (caches is None and getattr(self, "input_bigrams", None) is None), \
+            "paketli pencere: onbellekli uretim ve INPUT_BIGRAMS (onceki token belge sinirini gecer) desteklenmiyor"
         last = None
         if caches is not None and getattr(self, "input_bigrams", None) is not None:
             c0 = caches[0]
@@ -530,6 +599,8 @@ class BlockModel(torch.nn.Module):
                 c0.last_token = ids[:, -1]
         h = self.input_states(ids, last)
         out = [h]
+        if document_positions is not None:                # maske bir kez, butun turlar icin
+            mask = self.document_mask(document_positions)
         for i, block in enumerate(self.turn_blocks()):
             alphas = (dict(alpha_attention=self.alpha_attention[i], alpha_facts=self.alpha_facts[i])
                       if self.normalized_update else {})
@@ -537,9 +608,16 @@ class BlockModel(torch.nn.Module):
                 alphas["turn_facts"] = self.extra_facts[i - self.layers]
             if i == 0 and not self.first_turn_facts:
                 alphas["skip_facts"] = True
+            if document_positions is not None:
+                alphas.update(document_positions=document_positions, document_mask=mask)
             h = block(h, None if caches is None else caches[i], **alphas)
             out.append(h)
         return out
+
+    def document_mask(self, document_positions):
+        """packed_attention "flex": GPU'da flex_attention'in BlockMask'i; CPU'da (flex'in geri yayilimi yok) ve "dense"te
+        ayni mask_mod'dan yogun bool maske."""
+        return build_document_mask(document_positions, flex=self.packed_attention == "flex" and document_positions.is_cuda)
 
     @torch.no_grad()
     def normalize_weights(self):
@@ -560,9 +638,9 @@ class BlockModel(torch.nn.Module):
                 w.copy_(F.normalize(w, dim=1))
             f.W_fact_out.copy_(F.normalize(f.W_fact_out, dim=0))
 
-    def logits(self, ids, caches=None):
+    def logits(self, ids, caches=None, document_positions=None):
         P = self.tokens.points()
-        h = self.hidden(ids, caches)[-1]                       # son durum; stream_norm'da zaten kurede
+        h = self.hidden(ids, caches, document_positions)[-1]   # son durum; stream_norm'da zaten kurede
         if self.layer_norm:
             return self.norm_final(h) @ P.T                    # skor_tj = <LN(h_t), PL_j>
         if not self.stream_norm:
@@ -583,10 +661,13 @@ class BlockModel(torch.nn.Module):
         c3 = c2 * c
         return c + q * c2 + (q * q / 3 + u) * c3, (1 + q * c) ** 2 + 3 * u * c2, c2 + (2 * q / 3) * c3, c3
 
-    def loss(self, ids, mask):
+    def loss(self, ids, mask, document_positions=None):
+        """document_positions (B, T), ids ile hizali: paketli pencere (hidden); hedef t+1, konum t'nin belgesinden
+        tahmin edilir."""
+        inner = None if document_positions is None else document_positions[:, :-1]
         if self.loss_chunk:                                    # parcali: (N x V) tablosu yok, gradyan ileri hesapta
             P = self.tokens.points()
-            h = self.hidden(ids[:, :-1])[-1].flatten(0, -2)    # (N, d), N = B (T - 1); cikis logits'teki gibi
+            h = self.hidden(ids[:, :-1], None, inner)[-1].flatten(0, -2)   # (N, d), N = B (T - 1); cikis logits'teki gibi
             if self.layer_norm:
                 h, scale = self.norm_final(h), 1.0
             else:
@@ -658,7 +739,7 @@ class BlockModel(torch.nn.Module):
             if self.output_link:
                 nll = nll + grad_q * (self.link_q - self.link_q.detach()) + grad_u * (self.link_u - self.link_u.detach())
             return nll + self.tokens.anchor_loss(), nll
-        nll = masked_nll(self.logits(ids[:, :-1]), ids[:, 1:], mask[:, 1:])
+        nll = masked_nll(self.logits(ids[:, :-1], None, inner), ids[:, 1:], mask[:, 1:])
         return nll + self.tokens.anchor_loss(), nll
 
 

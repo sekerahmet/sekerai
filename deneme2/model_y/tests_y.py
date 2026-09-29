@@ -2482,6 +2482,320 @@ def t_internals():
           and torch.equal(torch.get_rng_state(), rng))
 
 
+def _packed_rows(segments_by_row, pad=0):
+    """Satir basina parcalar (id listeleri) -> (ids, mask, document_positions, parcalarin (satir, baslangic, boy)).
+    Parca kendi konumuyla 0'dan; dolgu sagda, mask disi, konumu artarak devam eder."""
+    T = max(sum(len(s) for s in segs) for segs in segments_by_row)
+    ids = torch.full((len(segments_by_row), T), pad, dtype=torch.long)
+    mask = torch.zeros(len(segments_by_row), T, dtype=torch.bool)
+    pos = torch.zeros(len(segments_by_row), T, dtype=torch.long)
+    where = []
+    for r, segs in enumerate(segments_by_row):
+        at = 0
+        for s in segs:
+            ids[r, at:at + len(s)] = torch.tensor(s)
+            pos[r, at:at + len(s)] = torch.arange(len(s))
+            where.append((r, at, len(s)))
+            at += len(s)
+        mask[r, :at] = True
+        pos[r, at:] = torch.arange(1, T - at + 1) + (pos[r, at - 1] if at else -1)
+    return ids, mask, pos, where
+
+
+def t_packing():
+    """Maskeli paketleme (FineWeb): paketli pencerede her belgenin skoru, kaybi ve gradyani o belgenin tek basina hesabiyla
+    ayni (float64, yogun maske); flex yolu (CPU'da yalniz ileri) yogun maskeyle ayni; tek belgeli paket = paketsiz hesap;
+    RoPE goreli (8.192 konumda da); compile'da graph break yok; train_seq paketli batch'le (coherence yarilari) ve surdurme;
+    onbellek, INPUT_BIGRAMS ve internals paketli girdiyi reddeder.  Kendi kucuk verisi (rastgele token)."""
+    import copy
+    import json
+    import tempfile
+    import internals_y as I
+    from model_y import BlockModel, build_document_mask, same_document_causal
+    V = 40
+    g = torch.Generator().manual_seed(11)
+    docs = [[0] + torch.randint(1, V, (L,), generator=g).tolist() for L in (4, 9, 6, 12, 3)]   # [eos] + metin
+    # satir 0: uc tam belge; satir 1: d3'un devam parcasi (pencere basinda, konum 0'dan) + d4, sagda dolgu
+    rows = [[docs[0], docs[1], docs[2]], [docs[3][5:], docs[4]]]
+    ids, mask, pos, where = _packed_rows(rows)
+    segs = [s for r in rows for s in r]
+
+    def perturbed_model(**kw):
+        torch.manual_seed(3)
+        m = BlockModel(V, **dict(dict(d=16, units=24, t_max=64), **kw)).double()
+        with torch.no_grad():                              # Canon, alpha, phi 0'dan baslar: katkilari gorunsun
+            for p_ in m.parameters():
+                p_.add_(0.3 * torch.randn(p_.shape, generator=torch.Generator().manual_seed(p_.numel()), dtype=torch.float64))
+        return m
+
+    def per_document(m, chunk):
+        """Parca parca tek basina: skorlar ve kayip toplami; parcanin son konumu paketteki sonraki token'i tahmin eder."""
+        zs, total = [], 0.0
+        for k, (r, at, L) in enumerate(where):
+            z = m.logits(torch.tensor([segs[k]]))[0]
+            zs.append(z)
+            nxt = int(ids[r, at + L]) if at + L < ids.shape[1] and mask[r, at + L] else None
+            y = torch.tensor(segs[k][1:] + ([nxt] if nxt is not None else []))
+            total = total + torch.nn.functional.cross_entropy(z[:len(y)], y, reduction="sum")
+        return zs, total
+
+    configs = (dict(), dict(heads=1), dict(input_embedding=False, first_turn_facts=True, shared_facts=True),
+               dict(rope=False, output_link=False, loss_chunk=0),
+               dict(d=32, layers=6, turns=12, heads=16, t_max=16384, attention_log_scale=True))   # FineWeb 6x2 bicimi
+    errs, gerrs, ierrs = [], [], []
+    for kw in configs:
+        m = perturbed_model(**kw)
+        with torch.no_grad():
+            z = m.logits(ids, document_positions=pos)
+            zs, _ = per_document(m, kw)
+            errs.append(max(float((z[r, at:at + L] - zs[k]).abs().max()) for k, (r, at, L) in enumerate(where)))
+            ierrs.append(float((I._logits(m, torch.tensor([segs[1]])) - zs[1][None]).abs().max()))
+        n_targets = int(mask[:, 1:].sum())
+        _, nll = m.loss(ids, mask, document_positions=pos)       # capasiz kayip: belge toplamlariyla karsilastirilir
+        grads = torch.autograd.grad(nll * n_targets, [p_ for p_ in m.parameters() if p_.requires_grad], allow_unused=True)
+        _, ref = per_document(m, kw)
+        rgrads = torch.autograd.grad(ref, [p_ for p_ in m.parameters() if p_.requires_grad], allow_unused=True)
+        gerrs.append(max(float((a - b).abs().max()) for a, b in zip(grads, rgrads) if a is not None)
+                     + abs(float(nll.detach()) * n_targets - float(ref.detach())))
+    check("paketleme: paketli pencerede her belgenin skoru, kaybi ve BUTUN gradyanlari = belge tek basina (float64, yogun "
+          "maske; 5 ayar: varsayilan, tek head, eski tasarim, RoPE'suz parcasiz kayip, 6 blok x 2 (12 tur, 16 head, t_max "
+          "16.384, log-n); devam parcasi ve dolgu dahil); internals'in elle ileri hesabi = model (tek belge)",
+          max(errs) < 1e-10 and max(gerrs) < 1e-10 and max(ierrs) < 1e-10,
+          "skor %.1e  kayip+gradyan %.1e  internals %.1e" % (max(errs), max(gerrs), max(ierrs)))
+
+    m = perturbed_model()
+    T = ids.shape[1]
+    dense = build_document_mask(pos)
+    t = torch.arange(T)
+    by_hand = torch.zeros(2, T, T, dtype=torch.bool)
+    for r in range(2):
+        for i in range(T):
+            for j in range(T):
+                by_hand[r, i, j] = j <= i and j >= i - int(pos[r, i])
+    flex_mask = build_document_mask(pos, flex=True)
+    m_flex = copy.deepcopy(m)
+    m_flex.document_mask = lambda p: build_document_mask(p, flex=True)
+    with torch.no_grad():
+        err_flex = float((m_flex.logits(ids, document_positions=pos) - m.logits(ids, document_positions=pos)).abs().max())
+    check("paketleme: yogun maske = elle (j <= t, ayni belge) ve flex'in mask_mod'undan; flex_attention yolu (CPU'da yalniz "
+          "ileri, GPU'da compile + flex Colab'da dogrulanacak) yogun maskeyle ayni skor (float64)",
+          torch.equal(dense, by_hand) and type(flex_mask).__name__ == "BlockMask" and err_flex < 1e-10
+          and torch.equal(same_document_causal(t - pos)(torch.arange(2)[:, None, None], None, t[None, :, None],
+                                                        t[None, None, :]), dense),
+          "flex fark %.1e" % err_flex)
+
+    single = torch.tensor([docs[1] + docs[2]])
+    arange = torch.arange(single.shape[1])[None]
+    fm = BlockModel(V, d=16, units=24, t_max=64)
+    with torch.no_grad():
+        for p_ in fm.parameters():
+            p_.add_(0.3 * torch.randn(p_.shape, generator=torch.Generator().manual_seed(p_.numel())))
+        z_none, z_one = fm.logits(single), fm.logits(single, document_positions=arange)
+    one_mask = torch.ones_like(single, dtype=torch.bool)
+    l_none = fm.loss(single, one_mask)[0]
+    g_none = torch.autograd.grad(l_none, list(fm.parameters()), allow_unused=True)
+    l_one = fm.loss(single, one_mask, document_positions=arange)[0]
+    g_one = torch.autograd.grad(l_one, list(fm.parameters()), allow_unused=True)
+    diff = max(float((a - b).abs().max()) for a, b in zip(g_none, g_one) if a is not None)
+    check("paketleme: tek belgeli pencere (konum 0..T-1) = paketsiz hesap, bit duzeyinde (float32; skor, kayip, gradyan)",
+          torch.equal(z_none, z_one) and float(l_none) == float(l_one) and diff == 0,
+          "skor %.1e  gradyan %.1e  bit duzeyinde %s" % (float((z_none - z_one).abs().max()), diff,
+                                                         torch.equal(z_none, z_one) and float(l_none) == float(l_one)))
+
+    big = BlockModel(V, d=48, heads=12, units=24, t_max=8192).double()
+    x = torch.tensor([docs[3] + docs[1]])
+    near, far = torch.arange(x.shape[1])[None], torch.arange(x.shape[1])[None] + 8150
+    with torch.no_grad():
+        for p_ in big.parameters():
+            p_.add_(0.3 * torch.randn(p_.shape, generator=torch.Generator().manual_seed(p_.numel()), dtype=torch.float64))
+        h_near = big.blocks[0].attention(big.input_states(x), document_positions=near)
+        h_far = big.blocks[0].attention(big.input_states(x), document_positions=far)
+    check("paketleme: t_max 8.192, 12 head (head boyu 4): RoPE goreli -- konumlar 8.150 kaydirilinca attention ayni (float64)",
+          float((h_near - h_far).abs().max()) < 1e-9 and abs(big.blocks[0].attention.scale - math.log(0.99 * 8191 / 0.01)) < 1e-12,
+          "fark %.1e" % float((h_near - h_far).abs().max()))
+
+    torch._dynamo.reset()
+    fl = BlockModel(V, d=16, units=24, t_max=64, loss_chunk=7)
+    ex = torch._dynamo.explain(fl.loss)(ids, mask, pos)
+    torch._dynamo.reset()
+    fl.document_mask = lambda p: build_document_mask(p, flex=True)
+    with torch.no_grad():                                  # flex'in CPU'da geri yayilimi yok: iz yalniz ileri hesapla
+        ex_flex = torch._dynamo.explain(fl.loss)(ids, mask, pos)
+    torch._dynamo.reset()
+    check("paketleme: paketli kayip compile'da tek grafik (yogun maske; flex yolu ileri hesapta) -- GPU'da compile + flex "
+          "Colab'da dogrulanacak", ex.graph_break_count == 0 and ex_flex.graph_break_count == 0,
+          "graph break %d / flex %d" % (ex.graph_break_count, ex_flex.graph_break_count))
+
+    windows = [_packed_rows([[docs[0], docs[1]], [docs[2], docs[4], docs[0]]]),
+               _packed_rows([[docs[3], docs[4]], [docs[1][2:], docs[2]]])]
+    batches = lambda s: windows[s % 2][:3]
+    kw = dict(d=16, units=24, t_max=64, loss_chunk=7)
+    runs = {}
+    for sched in ("wsd", "coherence"):
+        packs = {}
+        keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
+                                                                       optimizer=copy.deepcopy(opt.state_dict())))
+        full, curve = TR.train_seq("shared", None, None, V, steps=6, log_at=(0, 6), batches=batches, schedule=sched,
+                                   save_every=2, save=keep, model_kw=kw)
+        res, _ = TR.train_seq("shared", None, None, V, steps=6, log_at=(), batches=batches, schedule=sched,
+                              checkpoint=packs[4], model_kw=kw)
+        runs[sched] = (all(torch.equal(a, b) for a, b in zip(full.state_dict().values(), res.state_dict().values()))
+                       and all(math.isfinite(c["nll"]) for c in curve))
+    check("paketleme: train_seq batch (ids, mask, document_positions) ile (wsd; coherence iki yarisi konumlarla); surdurme "
+          "bit duzeyinde", all(runs.values()), str(runs))
+
+    refused = []
+    for attempt in (lambda: m.hidden(ids, [None] * m.turns, document_positions=pos),
+                    lambda: BlockModel(V, d=16, units=24, input_bigrams=4, bigram_keys=torch.arange(4)).logits(
+                        ids, document_positions=pos),
+                    lambda: I.profile_step(dict(setting="shared", vocab=V, model_kw=kw), [windows[0][:3]], steps=1)):
+        try:
+            attempt()
+            refused.append(False)
+        except AssertionError:
+            refused.append(True)
+    run_dir = tempfile.mkdtemp()
+    with open(os.path.join(run_dir, "config.json"), "w") as f:
+        json.dump(dict(tag="gpt2", dataset="fineweb-edu", packing="masked", vocab=V), f)
+    try:
+        I._main([run_dir, "trace"])
+        refused.append(False)
+    except SystemExit as e:
+        refused.append("paketli" in str(e))
+    check("paketleme: onbellekli uretim, INPUT_BIGRAMS, internals profile_step (paketli batch) ve internals CLI (paketli "
+          "kosu: tag gpt2 SimpleStories verisine gitmez) reddeder", all(refused), str(refused))
+
+
+def t_attention_log_scale():
+    """ATTENTION_LOG_SCALE: sorgu basina scale_for(n), n = gordugu anahtar sayisi (belge ici konum + 1, en az 2).  Varsayilan
+    kapali; t_max 512'de konum 511 sabit olcekli modelle ayni; elle hesap (float64; paketsiz / paketli, 4 head / tek head);
+    onbellekli uretim = tam hesap; internals'in elle ileri hesabi = model; compile'da graph break yok."""
+    import internals_y as I
+    from model_y import ATTENTION_LOG_SCALE, BlockModel, CausalAttention, build_document_mask, scale_for
+    V = 40
+    g = torch.Generator().manual_seed(21)
+    fixed = CausalAttention(16, t_max=512, seed=5, rope=True, heads=4)
+    logn = CausalAttention(16, t_max=512, seed=5, rope=True, heads=4, attention_log_scale=True)
+    x = torch.nn.functional.normalize(torch.randn(1, 512, 16, generator=g), dim=-1)
+    with torch.no_grad():
+        a, b = fixed(x), logn(x)
+    check("attention_log_scale: varsayilan kapali; t_max 512'de n = 512 (konum 511) sabit olcekle ayni, erken konumda farkli",
+          ATTENTION_LOG_SCALE is False and not BlockModel(V).blocks[0].attention.attention_log_scale
+          and float((a[0, 511] - b[0, 511]).abs().max()) < 1e-6 and float((a[0, 100] - b[0, 100]).abs().max()) > 1e-4,
+          "511: %.1e  100: %.1e" % (float((a[0, 511] - b[0, 511]).abs().max()), float((a[0, 100] - b[0, 100]).abs().max())))
+
+    errs = []
+    for heads in (4, 1):
+        at = CausalAttention(16, t_max=64, seed=6, rope=True, heads=heads, attention_log_scale=True).double()
+        ref_at = CausalAttention(16, t_max=64, seed=6, rope=True, heads=heads).double()
+        with torch.no_grad():
+            if heads > 1:
+                for m_ in (at, ref_at):
+                    m_.W_value.copy_(torch.randn(16, 16, generator=torch.Generator().manual_seed(3), dtype=torch.float64))
+        h = torch.randn(2, 13, 16, generator=g, dtype=torch.float64)
+        pos = torch.tensor([[0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 0, 1, 2], [4, 5, 6, 7, 8, 0, 1, 2, 3, 4, 5, 6, 7]])
+        for p in (None, pos):
+            with torch.no_grad():
+                got = at(h) if p is None else at(h, document_positions=p)
+                q, k = ref_at.queries_keys(h, p)                        # birim q, k (RoPE'lu), sabit olceksiz
+                v = h if heads == 1 else (h @ ref_at.W_value.T).unflatten(-1, (heads, -1)).transpose(-3, -2)
+                t = torch.arange(13)
+                n = (t + 1 if p is None else p + 1).double()
+                s = torch.tensor([[scale_for(max(int(c), 2)) for c in row] for row in n.reshape(-1, 13)],
+                                 dtype=torch.float64).reshape(n.shape)
+                s = s if heads == 1 or p is None else s[:, None]
+                allowed = (torch.ones(13, 13, dtype=torch.bool).tril() if p is None
+                           else build_document_mask(p) if heads == 1 else build_document_mask(p)[:, None])
+                z = (s[..., None] * (q @ k.transpose(-1, -2))).masked_fill(~allowed, float("-inf"))
+                want = torch.softmax(z, -1) @ v
+                want = want if heads == 1 else want.transpose(-3, -2).flatten(-2)
+            errs.append(float((got - want).abs().max()))
+    check("attention_log_scale: skor = scale_for(max(n, 2)) <q, k>, n = konum + 1 (elle, float64; paketsiz ve paketli, 4 head "
+          "ve tek head)", max(errs) < 1e-12, "fark %.1e" % max(errs))
+
+    torch.manual_seed(4)
+    m = BlockModel(V, d=16, units=24, t_max=64, attention_log_scale=True)
+    with torch.no_grad():
+        for p_ in m.parameters():
+            p_.add_(0.3 * torch.randn(p_.shape, generator=torch.Generator().manual_seed(p_.numel())))
+    qs = [[0] + torch.randint(1, V, (k,), generator=g).tolist() for k in (1, 3, 6, 9)]
+    new = TR.generate(m, qs, 6)
+    scores, _ = cached_scores(m, qs, new)
+    err_g = max(float((scores[i] - m.logits(torch.tensor([q + new[i]])).detach()[0, len(q) - 1:]).abs().max())
+                for i, q in enumerate(qs))
+    md = m.double()
+    ids = torch.tensor([qs[3] + new[3]])
+    with torch.no_grad():
+        err_i = float((I._logits(md, ids) - md.logits(ids)).abs().max())
+    check("attention_log_scale: onbellekli uretim = tam hesap (sagdan dolgulu istemler, n = konum + 1); internals'in elle "
+          "ileri hesabi = model.logits (float64)",
+          new == TR.generate(m, qs, 6, cached=False) and err_g < 1e-4 and err_i < 1e-10,
+          "skor farki %.1e  internals %.1e" % (err_g, err_i))
+
+    torch._dynamo.reset()
+    fl = BlockModel(V, d=16, units=24, t_max=64, loss_chunk=7, attention_log_scale=True)
+    ids = torch.randint(0, V, (3, 12), generator=g)
+    mask = torch.ones_like(ids, dtype=torch.bool)
+    pos = torch.tensor([[0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 5, 6]] * 3)
+    ex = torch._dynamo.explain(fl.loss)(ids, mask)
+    torch._dynamo.reset()
+    ex_p = torch._dynamo.explain(fl.loss)(ids, mask, pos)
+    torch._dynamo.reset()
+    check("attention_log_scale: kayip compile'da tek grafik (paketsiz ve paketli)",
+          ex.graph_break_count == 0 and ex_p.graph_break_count == 0,
+          "graph break %d / %d" % (ex.graph_break_count, ex_p.graph_break_count))
+
+
+def t_micro_batches():
+    """MICRO_BATCHES (gradyan birikimi): coherence'ta 2 parca = bugunku iki yari (bit duzeyinde); 4 parca ve coherence'siz 2 /
+    4 parca tek batch'in egitimiyle ayni (float32 yuvarlamasi); paketli batch'le; surdurme bit duzeyinde; coherence'ta tek
+    sayi reddedilir."""
+    import copy
+    V = 30
+    g = torch.Generator().manual_seed(31)
+    steps_data = []
+    for _ in range(3):
+        ids = torch.randint(0, V, (8, 14), generator=g)
+        mask = torch.ones_like(ids, dtype=torch.bool)
+        mask[1, 9:] = mask[6, 4:] = False                    # farkli hedef sayilari: agirliklar esit degil
+        steps_data.append((ids, mask))
+    batches = lambda s: steps_data[s % 3]
+    kw = dict(d=16, units=24, t_max=64, loss_chunk=7)
+
+    def train(sched, k, draw=batches, steps=6, **extra):
+        m, _ = TR.train_seq("shared", None, None, V, steps=steps, log_at=(), batches=draw, schedule=sched, micro_batches=k,
+                            model_kw=kw, **extra)
+        return m.state_dict()
+
+    def gap(a, b):
+        return max(float((a[k_] - b[k_]).abs().max()) for k_ in a)
+
+    base_c, base_w = train("coherence", 1), train("wsd", 1)
+    two_c = train("coherence", 2)
+    diffs = dict(coherence4=gap(base_c, train("coherence", 4)), wsd2=gap(base_w, train("wsd", 2)),
+                 wsd4=gap(base_w, train("wsd", 4)))
+    check("micro_batches: coherence'ta 2 parca = iki yari (bit duzeyinde, 6 adim); 4 parca ve coherence'siz 2 / 4 parca tek "
+          "batch'le ayni egitim (float32, Muon dahil)",
+          all(torch.equal(base_c[k_], two_c[k_]) for k_ in base_c) and max(diffs.values()) < 1e-4,
+          " ".join("%s %.1e" % kv for kv in diffs.items()))
+
+    packs = {}
+    keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
+                                                               optimizer=copy.deepcopy(opt.state_dict())))
+    pos = torch.tensor([list(range(6)) + list(range(8))] * 8)
+    packed = lambda s: steps_data[s % 3] + (pos,)
+    full = train("coherence", 4, draw=packed, save_every=2, save=keep)
+    res, _ = TR.train_seq("shared", None, None, V, steps=6, log_at=(), batches=packed, schedule="coherence", micro_batches=4,
+                          checkpoint=packs[4], model_kw=kw)
+    try:
+        train("coherence", 3, steps=1)
+        refused = False
+    except AssertionError:
+        refused = True
+    check("micro_batches: paketli batch'le (4 parca, coherence); surdurme bit duzeyinde; coherence'ta tek sayi reddedilir",
+          all(torch.equal(full[k_], v) for k_, v in res.state_dict().items()) and refused)
+
+
 def _run_one(name):
     """Tek testi calistirir; ciktisi, sonuclari ve suresi (paralel kosucu icin)."""
     import contextlib
@@ -2509,7 +2823,8 @@ if __name__ == "__main__":
     args = ap.parse_args()
     names = [f.__name__ for f in (t_model, t_step2, t_step3, t_transformer, t_generate_cached, t_normalized_update, t_canon,
               t_layers, t_coherence, t_weight_ema, t_heads, t_fact_activation, t_learn_output_scale, t_matmul_precision,
-              t_loss_chunk, t_muon_tangent, t_output_link, t_shared_facts, t_input_embedding, t_internals)]
+              t_loss_chunk, t_muon_tangent, t_output_link, t_shared_facts, t_input_embedding, t_internals, t_packing, t_attention_log_scale,
+              t_micro_batches)]
     if args.only:
         want = [n.strip() for n in args.only.split(",") if n.strip()]
         assert set(want) <= set(names), "bilinmeyen test: %s" % sorted(set(want) - set(names))

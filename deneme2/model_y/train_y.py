@@ -70,6 +70,9 @@ ATTENTION_KERNEL = "math"   # egitimde SDPA cekirdegi: "math" (bit duzeyinde sur
                             # olmazsa mem-efficient; geri yayilim deterministik degil).  CPU'da hep math.  Kullanici, 29 Eylul:
                             # "önerin kabul" (math, gövde ileri hesabinin ~%70'i; GPU'da surdurme zaten bit duzeyinde degil)
 NEWTON_SCHULZ_PRECISION = "fp32"   # Muon'un ortogonallestirmesi: "fp32" | "bf16" (Muon'un yaygin kullanimi; adimin %14'u)
+MICRO_BATCHES = 1        # adimin batch'i bu kadar parcada (satirlar s::k) ileri + geri, gradyan birikir: bellek bir parcalik,
+                         # adim tam batch'in gradyanini alir (parca kaybi hedef payiyla agirlikli).  coherence'ta cift sayi
+                         # (yari basina k / 2 parca).  FineWeb: adim basina token hedefi GPU bellegini asar
 MUON_TANGENT = True      # sphere_weights'te Muon'a giren Nesterov birlesimi (g + mu buf) once agirligin kure tegetine izdusulur,
                          # sonra ortogonallestirilir (kullanici, 28 Eylul: "tamam alalım"): kurede birinci mertebe dususu en buyuk
                          # yapan adim polar(T(G)); Training nGPT 1B'de "slightly improves".  Momentum tamponu ve Adam degismez
@@ -139,6 +142,19 @@ class Muon(torch.optim.Optimizer):
                 p.addcdiv_(m, denom, value=-g["lr"] / (1 - b1 ** state["step"]))
 
 
+class _Gradients:
+    """Birikmis gradyanlar, backward arayuzuyle: backward() p.grad'a ekler (yoksa yazar) -- train_seq'in split / tek
+    batch yolu autograd'in birikimiyle ayni toplamayi gorur."""
+
+    def __init__(self, params, grads):
+        self.params, self.grads = params, grads
+
+    def backward(self):
+        for p, g in zip(self.params, self.grads):
+            if g is not None:
+                p.grad = g.clone() if p.grad is None else p.grad.add_(g)
+
+
 def bigram_floor(inputs, targets, n):
     """Yalniz son token'a bakan bir modelin ulasabilecegi en dusuk kayip (sayimlardan)."""
     C = torch.zeros(n, n, dtype=torch.float64)
@@ -188,7 +204,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
               normalized_update=None, sphere_weights=None, canon=None, coherence_window=COHERENCE_WINDOW,
               final_cooldown=FINAL_COOLDOWN, weight_ema=WEIGHT_EMA, matmul_precision=MATMUL_PRECISION,
               coherence_power=COHERENCE_POWER, muon_tangent=MUON_TANGENT, final_cooldown_shape=FINAL_COOLDOWN_SHAPE,
-              frozen_lr=FROZEN_LR, attention_kernel=ATTENTION_KERNEL, newton_schulz_precision=NEWTON_SCHULZ_PRECISION):
+              frozen_lr=FROZEN_LR, attention_kernel=ATTENTION_KERNEL, newton_schulz_precision=NEWTON_SCHULZ_PRECISION,
+              micro_batches=MICRO_BATCHES):
     """Standart tarif (27 Eylul'den): Muon (gizli matrisler) + Adam, WSD takvimi (lr sabit, son cooldown kisminda
     1 - sqrt ile LR x lr_floor'a), gradient clipping.  optimizer="adam", schedule="cosine": 27 Eylul'e kadarki tarif.
     lr_floor=None, grad_clip=None: en eski tarif (sabit lr).  weight_decay > 0: AdamW, yalniz W_ matrisleri (yalniz adam).
@@ -203,7 +220,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     o adimin callback'i ve kaydi tekrarlanmaz.
     batches(step) -> (ids, mask): buyuk veri icin her adimda bir parca (mini-batch); verilirse ids, mask kullanilmaz (None
     olabilir).  Adimin fonksiyonu olmali (surdurmede ayni parca gelsin).  Sekil adimdan adima degisebilir (bucket):
-    compile ikinci sekilde dinamik sekilli tek grafige gecer.
+    compile ikinci sekilde dinamik sekilli tek grafige gecer.  (ids, mask, document_positions): paketli pencere
+    (BlockModel.loss; yalniz BlockModel).
     model_kw: modele gecen ayarlar (BlockModel: d, turns, units, t_max ...; transformer: d, layers, heads, units).
     schedule="coherence": lr = lr x ortalama(rho) (COHERENCE_WINDOW), alt sinir lr_floor; son final_cooldown kisminda
     1 - sqrt ile x lr_floor'a.  Mini-batch'te adim iki yarida hesaplanir (satirlar tek / cift), birlestirilen gradyan tam
@@ -217,7 +235,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     matmul_precision: "bf16" ileri hesap ve kayip autocast (bf16) icinde, geri yayilim disinda; "tf32" egitim boyunca TF32
     matmul (surec geneli ayar: ayni surecteki eszamanli kosular da etkilenir), sinav fp32, bitince onceki ayar; "fp32"
     hicbir seye dokunmaz.  CPU'da (compile gibi) etkisiz.
-    attention_kernel: ATTENTION_KERNEL (CPU'da hep math).  newton_schulz_precision: NEWTON_SCHULZ_PRECISION (yalniz Muon)."""
+    attention_kernel: ATTENTION_KERNEL (CPU'da hep math).  newton_schulz_precision: NEWTON_SCHULZ_PRECISION (yalniz Muon).
+    micro_batches: MICRO_BATCHES (gradyan birikimi; batch'in satir sayisi bunun kati olmali)."""
     assert batches is not None or ids is not None, "ids/mask ya da batches verilmeli"
     assert setting in STEP3 or stream_norm, "stream_norm=False yalniz Adim 3 (BlockModel) icin"
     assert setting in STEP3 or not layer_norm, "layer_norm yalniz Adim 3 (BlockModel) icin"
@@ -232,6 +251,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     assert coherence_power > 0, "coherence_power: pozitif us (1,0 = rho, 0,5 = sqrt(rho))"
     assert attention_kernel in ("math", "flash"), "attention_kernel: math | flash"
     assert newton_schulz_precision in ("fp32", "bf16"), "newton_schulz_precision: fp32 | bf16"
+    assert micro_batches >= 1 and (schedule != "coherence" or micro_batches % 2 == 0 or micro_batches == 1), \
+        "micro_batches: >= 1; coherence'ta 1 ya da cift"
     if normalized_update is None:                          # Model X'in varsayilani; transformer ve Adim 1-2'de yok
         normalized_update = NORMALIZED_UPDATE if setting in STEP3 else False
     if sphere_weights is None:
@@ -299,6 +320,41 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     start = round((1 - cooldown) * steps)                  # WSD: inis bu adimda baslar
     final = round((1 - final_cooldown) * steps)            # coherence: son inis bu adimda baslar
     split = schedule == "coherence" and batches is not None  # tam batch'te gurultu yok: rho = 1, olculmez
+
+    def forward_context():
+        """Asagidaki ileri hesap with'inin aynisi: compile kilidi, SDPA cekirdegi, bf16 autocast."""
+        stack = contextlib.ExitStack()
+        if compile:
+            stack.enter_context(COMPILE_LOCK)
+        stack.enter_context(sdpa_kernel(kernels))
+        if matmul_precision == "bf16":
+            stack.enter_context(torch.autocast("cuda", dtype=torch.bfloat16))
+        return stack
+
+    def accumulate(ids, mask, packed):
+        """micro_batches > 1: parca s = satirlar s::k (k = micro_batches) ayri ileri + geri; parca kaybi grubun hedef
+        payiyla agirlikli.  Grup: coherence'ta iki yari (h + 2r, satirlar h::2'nin parcalari), degilse hepsi.  -> grup
+        basina (_Gradients, nll), hedef sayilari, nll: split yolunun (halves, weights) ve tek batch'in (total) yerine."""
+        k = micro_batches
+        groups = [[h + 2 * r for r in range(k // 2)] for h in (0, 1)] if split else [list(range(k))]
+        out, counts = [], []
+        for group in groups:
+            count = sum(mask[s::k, 1:].sum() for s in group)
+            opt.zero_grad()
+            nll_group = 0.0
+            for s in group:
+                with forward_context():
+                    part_total, part_nll = loss_fn(ids[s::k].contiguous(), mask[s::k].contiguous(),
+                                                   *(p[s::k].contiguous() for p in packed))
+                w = mask[s::k, 1:].sum() / count
+                with sdpa_kernel(kernels):
+                    (part_total * w).backward()
+                nll_group = nll_group + w * part_nll.detach()
+            out.append((_Gradients(params, [None if p.grad is None else p.grad.detach().clone() for p in params]),
+                        nll_group))
+            counts.append(count)
+        opt.zero_grad()
+        return out, counts, sum(c * n for c, (_, n) in zip(counts, out)) / sum(counts)
     ema = None
     if weight_ema is not None:                             # ortalama model; surdurmede optimizer durumundan geri gelir
         ema = copy.deepcopy(model).requires_grad_(False)
@@ -309,7 +365,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     for group in opt.param_groups:                         # coherence durumu: surdurmede optimizer'la birlikte gelir
         group.setdefault("coherence_mean", 1.0)
         group.setdefault("coherence_frozen", None)
-    curve = []
+    curve, packed = [], []
     precision = torch.get_float32_matmul_precision()      # tf32: surec geneli ayar; egitim bitince (hata olsa da) geri
     if matmul_precision == "tf32":
         torch.set_float32_matmul_precision("high")
@@ -337,19 +393,26 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
                         lr_floor + (1 - lr_floor) * (1 - math.sqrt((step - start) / max(steps - start, 1))))
                 for group in opt.param_groups:
                     group["lr"] = lr * factor
-            if batches is not None:                            # mini-batch: bu adimin parcasi
-                ids, mask = (t.to(device) for t in batches(step))
+            if batches is not None:                            # mini-batch: bu adimin parcasi; paketli: + document_positions
+                ids, mask, *packed = (t.to(device) for t in batches(step))
+                assert not packed or isinstance(model, BlockModel), "paketli pencere yalniz BlockModel"
             # attention_kernel "math": torch 2.14'ten itibaren SDPA kendiliginden flash / mem-efficient'e gidiyor, onlarin
             # geri yayilimi deterministik degil (surdurme bit duzeyinde ayni kalmaz; hiz ajani, 27 Eylul)
             # bf16: ileri hesap ve kayip autocast'te; geri yayilim disarida (autocast'in kaydettigi tiplerle)
+            if micro_batches > 1:                              # parca parca ileri + geri; asagidaki backward'lar birikimi yazar
+                halves, weights, nll = accumulate(ids, mask, packed)
+                total = halves[0][0]
             with COMPILE_LOCK if compile else contextlib.nullcontext(), sdpa_kernel(kernels), (
                     torch.autocast("cuda", dtype=torch.bfloat16) if matmul_precision == "bf16" else contextlib.nullcontext()):
-                if split:                                      # iki yari: satirlar tek / cift (uzunluk dagilimi benzer)
-                    halves = [loss_fn(ids[h::2].contiguous(), mask[h::2].contiguous()) for h in (0, 1)]
+                if micro_batches > 1:
+                    pass
+                elif split:                                    # iki yari: satirlar tek / cift (uzunluk dagilimi benzer)
+                    halves = [loss_fn(ids[h::2].contiguous(), mask[h::2].contiguous(),
+                                      *(p[h::2].contiguous() for p in packed)) for h in (0, 1)]
                     weights = [mask[h::2, 1:].sum() for h in (0, 1)]     # kayip hedef token ortalamasi: token sayisiyla
                     nll = sum(w * hn for w, (_, hn) in zip(weights, halves)) / sum(weights)
                 else:
-                    total, nll = loss_fn(ids, mask)            # butun cumleler (ya da adimin parcasi), butun konumlar
+                    total, nll = loss_fn(ids, mask, *packed)   # butun cumleler (ya da adimin parcasi), butun konumlar
             if step in log_at:
                 curve.append(dict(step=step, nll=nll.item(), dev=deviation(model).clone() if hasattr(model, "tokens") else None,
                                   W_context=(sum(b.attention.W_context.norm().item() for b in model.blocks)

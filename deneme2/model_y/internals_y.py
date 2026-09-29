@@ -1073,7 +1073,7 @@ def _breakdown_parts(ctx, ids, mask, clock):
         clock.mark("gomme")
         h = _run(model, h0, _plan(model), dict(canon=at("tur %d Canon"), attention_out=at("tur %d attention"),
                                                facts_out=at("tur %d FactUnits")))
-        model.hidden = lambda ids_, caches=None: [h]     # kayip basligi: modelin loss'u, govde _run'dan
+        model.hidden = lambda ids_, caches=None, document_positions=None: [h]   # kayip basligi: modelin loss'u, govde _run'dan
         try:
             total, _ = model.loss(ids, mask)
         finally:
@@ -1131,6 +1131,7 @@ def profile_step(config, batches, steps=5, device="cpu", real=True, ops=0, log=N
     say = log or (lambda s: None)
     t_start = time.time()
     cached = [batches(i) if callable(batches) else batches[i] for i in range(steps)]
+    assert all(len(b) == 2 for b in cached), "paketli batch (document_positions) desteklenmiyor: adim parcalari (ids, mask) ile"
     precision, grad = torch.get_float32_matmul_precision(), torch.is_grad_enabled()
     rows, whole, breakdown, op_lines, real_ms = [], [], [], None, None
     torch.set_grad_enabled(True)
@@ -1621,6 +1622,9 @@ def _main(argv=None):
     run_dir = args.run if os.path.isdir(args.run) else os.path.join(_RUNS_ROOT, args.run)
     assert os.path.isdir(run_dir), "kosu klasoru yok: %s" % run_dir
     config = _config(run_dir)
+    if config.get("packing"):                          # FineWeb: tag gpt2 SimpleStories'in verisine gitmesin
+        raise SystemExit("paketli kosu (%s, packing %s): veri yukleyicisi yok; olcum fonksiyonlari tek belgeli id "
+                         "listeleriyle dogrudan cagrilabilir" % (config.get("dataset"), config["packing"]))
     loader = _DATA.get(config.get("tag"))
     if loader is None:
         raise SystemExit("veri yukleyicisi yok: tag %r (yalniz SimpleStories: ss4096, gpt2); olcum fonksiyonlari id "
