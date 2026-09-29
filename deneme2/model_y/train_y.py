@@ -31,7 +31,8 @@ STEPS, LR = 4000, 0.01  # full batch: 1 adim = 1 epoch.  32 aile icin ilk deger 
                          # lr dayanagi (kure agirliklari + Muon): adim basina donme ~ LR x 0,2 x sqrt(d) (D=384'te ~2,2
                          # derece); nGPT 2026 tepe lr 0,24 / sqrt(d).  Veri / batch / D degisince yeniden hesaplanir.
 LOG_AT = (0, 10, 50, 200, 500, 1000)
-LR_FLOOR = 0.1       # cosine decay: lr sonda LR x LR_FLOOR (taban lr/10); train_seq standardi
+LR_FLOOR = 0.0       # inisin tabani: lr sonda LR x LR_FLOOR (wsd, cosine, coherence).  0 (kullanici, 29 Eylul: "1 evet
+                     # varsayılan olsun"; 28 Eylul'e kadar 0,1): taban asil kaldirac (BULGULAR_y 1.3 B)
 GRAD_CLIP = 1.0      # gradient clipping: adimdaki gradient'in boyu bunu gecerse buna indirilir; train_seq standardi
 WEIGHT_DECAY = 0.0   # weight decay (AdamW), yalniz W_ matrislerine; 0 = kapali (standart).  Deger olculuyor
 OPTIMIZER = "muon"   # "muon": gizli matrisler (W_context, W_fact_in, W_fact_out; transformer'da W_value, W_out, W_mlp_in,
@@ -49,9 +50,11 @@ COOLDOWN = 0.2       # WSD'de inisin payi (son %20).  Hagele 2024: <= %20 yeter,
 #   rho = g1.g2 / (g1.g2 + |g1 - g2|^2 / 4)        (= 2c / (1 + c), c = cos(g1, g2), esit boylarda)
 # kurede adim = aci: theta = LR x 0,2 x sqrt(d) x rho.  Tam batch'te (ids verilmis) gurultu yok: rho = 1, olculmez.
 COHERENCE_WINDOW = 200   # rho'nun hareketli ortalamasi (adim); tek adimin olcumu gurultulu
-FINAL_COOLDOWN = 0.05    # coherence'ta sondaki inisin payi: 1 - sqrt ile o anki lr'den x LR_FLOOR'a (titresimi sondurur)
-FINAL_COOLDOWN_SHAPE = "sqrt"   # son inisin bicimi: "sqrt" 1 - sqrt(p) | "linear" 1 - p (kullanici, 29 Eylul: "final
-                                # cooldown olsun"; FINAL_COOLDOWN 0,95 + LR_FLOOR 0 ile tepesi olculen D2Z)
+FINAL_COOLDOWN = 0.95    # coherence'ta inisin payi: ilk %5'te lr olculur, sonra o degerden x LR_FLOOR'a.  0,95 (kullanici,
+                         # 29 Eylul: "1 evet varsayılan olsun"; oncesi 0,05 / 0,2): SimpleStories 1 epok, phi ile EMA bpb
+                         # 0,6090 -> 0,5932, acc +0,7 puan (plato evresi kazandirmiyordu)
+FINAL_COOLDOWN_SHAPE = "linear"   # son inisin bicimi: "linear" 1 - p | "sqrt" 1 - sqrt(p) (29 Eylul'e kadar; kisa
+                                  # inislerde).  Kullanici, 29 Eylul: "final cooldown olsun", "1 evet varsayılan olsun"
 COHERENCE_POWER = 1.0    # coherence'ta lr carpani = ortalama(rho) ^ bu us; alt / ust sinir ve son inis aynen.  0,5 = sqrt(rho)
                          # (kullanici, 28 Eylul: "Sonra tek farkı lr = LR·√ρ olan bir 10k koşusu, 6,94'e karşı."); 1,0 = bugunku
 WEIGHT_EMA = None       # agirliklarin hareketli ortalamasi (ornek 0,999; kullanici onayli ad, 28 Eylul): titresimi

@@ -31,7 +31,7 @@ import train_y as TR  # noqa: E402
 
 RESULTS = []
 SEQ = 128                                         # fixture penceresi
-TINY = dict(d=16, turns=2, units=16, t_max=SEQ)   # kucuk Model X
+TINY = dict(d=16, turns=2, units=16, t_max=SEQ, output_link=False)   # kucuk Model X (phi'siz; phi TEST4'te)
 TRAIN = [
     'Once upon a time, there was a girl named Lily. She had a red ball.\n\nOne day, Lily went to the park with her ball.',
     'Tom saw a big dog. The dog was happy. Tom said, "Can we play?" The dog wagged its tail.',
@@ -434,7 +434,7 @@ def t_colab(root):
         os.remove(out + "/checkpoint_t000003.pt")
     run5 = C.start("TEST", d, out, steps=3, every=1, device="cpu", batch_size=4, model_kw=TINY, save_every=1, resume=True)
     run5["thread"].join(600)
-    check("colab_simplestories, output_link: config'te acik (varsayilan False); True'da q, u sinavda, gunlukte ve "
+    check("colab_simplestories, output_link: config'te acik (TINY'de False); True'da q, u sinavda, gunlukte ve "
           "final.json'da; output_link'siz eski config surdurulur",
           cfg["model_kw"]["output_link"] is False and run4["done"] and not run4["error"]
           and all("link_q" in e and "link_u" in e for e in ex4) and any("bag q" in l for l in run4["lines"])

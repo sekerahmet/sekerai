@@ -89,10 +89,11 @@ LEARN_OUTPUT_SCALE = True   # cikis olcegi ogrenilir: e^tau, tau = log_output_sc
 LOSS_CHUNK = 4096    # egitim kaybi sozluk parcalariyla: tam logits tablosu (B x T x V) olusmaz, gradyan ileri hesapta biriktirilir
                      # (kullanici, 28 Eylul: sozluk ileride 50k; "4096 ilk önerdiğin olsun").  0 = tek parca (28 Eylul'e kadarki
                      # yol).  Sinav ve uretim logits'le, degismez
-OUTPUT_LINK = False  # cikis bagi phi (kullanici, 28 Eylul: "o zaman bu koşuyu da başlat"; adlar onayli): skor = s phi(c),
+OUTPUT_LINK = True   # cikis bagi phi (kullanici, 28 Eylul: "o zaman bu koşuyu da başlat"; adlar onayli): skor = s phi(c),
                      # phi(c) = c (1 + c (q + c (q^2/3 + u))), c = <h, PL>, q = link_q, u = link_u >= 0 (her adimdan sonra
                      # kirpilir) -> phi' = (1 + q c)^2 + 3 u c^2 >= 0: phi hep artan, en olasi token degismez; q = u = 0:
-                     # dogrusal.  Donuk modelde ogrenilen olcegin ustune -0,044..-0,052 nat (BULGULAR_20 3.13)
+                     # dogrusal.  Varsayilan (kullanici, 29 Eylul: "1 evet varsayılan olsun"): SimpleStories 1 epok EMA bpb
+                     # 0,6413 -> 0,6090, acc +1,1 puan (lr'yi de ~yariya indirdi, ayristirilamadi).  False: dogrusal skor
 
 
 def apply_rope(x, positions=None):

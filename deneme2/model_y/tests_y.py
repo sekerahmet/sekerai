@@ -282,7 +282,8 @@ def t_step3():
     # 28 Eylul oncesi tasarimin testleri: paket (normalized_update, sphere_weights) kapali, tek Block x 2 tur; paket
     # t_normalized_update'te, 2 x 2 t_layers'ta
     BlockModel = functools.partial(model_y.BlockModel, normalized_update=False, sphere_weights=False, canon=False, turns=2,
-                                   layers=1, heads=1, fact_activation="relu", learn_output_scale=False, loss_chunk=0)
+                                   layers=1, heads=1, fact_activation="relu", learn_output_scale=False, loss_chunk=0,
+                                   output_link=False)
     n, d = 12, 6
     g = torch.Generator().manual_seed(9)
     ids = torch.randint(0, n, (3, 9), generator=g)
@@ -501,9 +502,9 @@ def t_step3():
     names = {id(p_): k.split(".")[-1] for k, p_ in mw.named_parameters()}
     decayed = sorted({names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.1 for p_ in g_["params"]})
     kept = sorted({names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.0 for p_ in g_["params"]})
-    check("weight decay: yalniz W_ matrislerine; shift, alpha, Canon agirliklari ve cikis olcegi haric",
+    check("weight decay: yalniz W_ matrislerine; shift, alpha, Canon agirliklari, cikis olcegi ve cikis bagi (phi) haric",
           decayed == sorted(["W_query", "W_key", "W_context", "W_fact_in", "W_fact_up", "W_fact_out", "W_value"])
-          and kept == ["alpha_attention", "alpha_facts", "canon_weights", "log_output_scale", "shift"],
+          and kept == ["alpha_attention", "alpha_facts", "canon_weights", "link_q", "link_u", "log_output_scale", "shift"],
           "%s | %s" % (decayed, kept))
 
     # 27 Eylul tarifi: Muon (gizli matrisler) + Adam, WSD takvimi, compile varsayilan acik; masked_nll; RoPE en az fp32
@@ -564,7 +565,8 @@ def t_step3():
           "W_key, cikis olcegi; "
           "lr 8. adima kadar sabit, sonra 1 - sqrt ile LR x LR_FLOOR'a; kayip iner",
           isinstance(opts[0], TR.Muon) and in_muon == ["W_context", "W_fact_in", "W_fact_out", "W_fact_up", "W_value"]
-          and in_adam == ["W_key", "W_query", "alpha_attention", "alpha_facts", "canon_weights", "log_output_scale", "shift"]
+          and in_adam == ["W_key", "W_query", "alpha_attention", "alpha_facts", "canon_weights", "link_q", "link_u",
+                          "log_output_scale", "shift"]
           and all(abs(lrs[t] - w) < 1e-12 for t, w in zip(range(1, 11), wsd)) and curve_m[-1]["nll"] < curve_m[0]["nll"],
           "%s | %s | lr %s" % (in_muon, in_adam, [round(lrs[t], 5) for t in range(1, 11)]))
 
@@ -814,9 +816,10 @@ def t_normalized_update():
     sids, smask = EK.sequences(data)
     nv = len(data["vocab"])
 
-    today, off = BlockModel(nv, normalized_update=False, sphere_weights=False), BlockModel(nv, normalized_update=False,
-                                                                                             sphere_weights=False)
-    both = BlockModel(nv, normalized_update=True, sphere_weights=True)
+    # tasarim formulu dogrusal skorla: phi (OUTPUT_LINK, 29 Eylul varsayilan) t_output_link'te
+    today, off = (BlockModel(nv, normalized_update=False, sphere_weights=False, output_link=False),
+                  BlockModel(nv, normalized_update=False, sphere_weights=False, output_link=False))
+    both = BlockModel(nv, normalized_update=True, sphere_weights=True, output_link=False)
     b0 = both.blocks[0]
     unit_rows = lambda w: float((w.norm(dim=1) - 1).abs().max())
     unit_cols = lambda w: float((w.norm(dim=0) - 1).abs().max())
@@ -831,7 +834,8 @@ def t_normalized_update():
 
     # bagimsiz float64 referans (tasarim formulu): rastgele parametrelerle
     g = torch.Generator().manual_seed(41)
-    m = BlockModel(nv, d=32, units=48, normalized_update=True, sphere_weights=True, canon=False, heads=1).double()
+    m = BlockModel(nv, d=32, units=48, normalized_update=True, sphere_weights=True, canon=False, heads=1,
+                   output_link=False).double()
     with torch.no_grad():
         for name, p_ in m.named_parameters():
             if name.startswith("alpha"):
@@ -1123,7 +1127,8 @@ def t_coherence():
 
     lrs = {}
     grab = lambda step, model, opt: lrs.setdefault(step, opt.param_groups[0]["lr"])
-    full, _ = TR.train_seq("shared", sids, smask, nv, steps=40, log_at=(), save_every=1, save=grab, schedule="coherence")
+    full, _ = TR.train_seq("shared", sids, smask, nv, steps=40, log_at=(), save_every=1, save=grab, schedule="coherence",
+                           final_cooldown=0.05, final_cooldown_shape="sqrt")      # 29 Eylul oncesi varsayilan: son %5, 1 - sqrt
     floor = TR.LR_FLOOR
     want = {37: TR.LR, 38: TR.LR, 39: TR.LR * (floor + (1 - floor) * (1 - math.sqrt(0.5))), 40: TR.LR * floor}
     check("coherence, tam batch: rho olculmez (= 1), lr sabit; son %5'te 1 - sqrt ile x LR_FLOOR'a",
@@ -1135,15 +1140,15 @@ def t_coherence():
     TR.train_seq("shared", sids, smask, nv, steps=40, log_at=(), save_every=1, save=grab_l, schedule="coherence",
                  final_cooldown=0.5, lr_floor=0.0, final_cooldown_shape="linear")
     want_l = {t: TR.LR * (1 - (t - 20) / 20) for t in range(20, 41)}
-    check("coherence, final_cooldown_shape linear: son %50'de dogrusal x 0'a (D2Z); varsayilan sqrt",
-          TR.FINAL_COOLDOWN_SHAPE == "sqrt" and all(abs(lin[t] - v) < 1e-12 for t, v in want_l.items())
+    check("coherence, final_cooldown_shape linear: son %50'de dogrusal x 0'a (D2Z); varsayilan linear",
+          TR.FINAL_COOLDOWN_SHAPE == "linear" and all(abs(lin[t] - v) < 1e-12 for t, v in want_l.items())
           and all(lin[t] == TR.LR for t in range(1, 20)), str({t: round(lin[t], 6) for t in (19, 20, 30, 39, 40)}))
 
     lrs_m, means = {}, {}
     grab_m = lambda step, model, opt: (lrs_m.setdefault(step, opt.param_groups[0]["lr"]),
                                        means.setdefault(step, opt.param_groups[0]["coherence_mean"]))
     mm, curve = TR.train_seq("shared", None, None, nv, steps=30, log_at=(0, 30), batches=batches, save_every=1, save=grab_m,
-                             schedule="coherence", coherence_window=5)
+                             schedule="coherence", coherence_window=5, final_cooldown=0.05, final_cooldown_shape="sqrt")
     follows = all(abs(lrs_m[t] - TR.LR * min(max(means[t], floor), 1.0)) < 1e-12 for t in range(1, 28))
     check("coherence, mini-batch: ortalama 1'den ayrilir, lr = LR x ortalama (alt sinir LR_FLOOR); kayip iner",
           follows and 0 < means[27] < 1 and curve[-1]["nll"] < curve[0]["nll"],
@@ -1152,7 +1157,7 @@ def t_coherence():
     packs = {}
     keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
                                                                    optimizer=copy.deepcopy(opt.state_dict())))
-    kw = dict(batches=batches, schedule="coherence", coherence_window=3)
+    kw = dict(batches=batches, schedule="coherence", coherence_window=3, final_cooldown=0.05, final_cooldown_shape="sqrt")
     whole, _ = TR.train_seq("shared", None, None, nv, steps=8, log_at=(), save_every=2, save=keep, **kw)
     res, _ = TR.train_seq("shared", None, None, nv, steps=8, log_at=(), checkpoint=packs[4], **kw)
     try:
@@ -1171,7 +1176,7 @@ def t_coherence():
     grab_r = lambda step, model, opt: rec.setdefault(step, dict(
         model=copy.deepcopy(model.state_dict()), coherence=dict(model.coherence),
         grad=[p_.grad.clone() for p_ in model.parameters() if p_.requires_grad]))
-    kw = dict(batches=batches, schedule="coherence", coherence_window=3)
+    kw = dict(batches=batches, schedule="coherence", coherence_window=3, final_cooldown=0.05, final_cooldown_shape="sqrt")
     run_r, curve_r = TR.train_seq("shared", None, None, nv, steps=6, log_at=tuple(range(7)), save_every=1, save=grab_r, **kw)
     start_r, _ = TR.train_seq("shared", None, None, nv, steps=0, log_at=(), **kw)
     ref_m = copy.deepcopy(run_r)
@@ -1232,7 +1237,7 @@ def t_coherence():
     grab_p = lambda step, model, opt: (lrs_p.setdefault(step, opt.param_groups[0]["lr"]),
                                        means_p.setdefault(step, opt.param_groups[0]["coherence_mean"]))
     TR.train_seq("shared", None, None, nv, steps=30, log_at=(), batches=batches, save_every=1, save=grab_p,
-                 schedule="coherence", coherence_window=5, coherence_power=0.5)
+                 schedule="coherence", coherence_window=5, coherence_power=0.5, final_cooldown=0.05, final_cooldown_shape="sqrt")
     clamp = lambda x: min(max(x, floor), 1.0)
     frozen = clamp(means_p[28] ** 0.5)                     # final = round(0,95 x 30) = 28
     sqrt_ok = (all(abs(lrs_p[t] - TR.LR * clamp(means_p[t] ** 0.5)) < 1e-12 for t in range(1, 28))
@@ -1286,7 +1291,7 @@ def t_weight_ema():
     packs = {}
     keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
                                                                    optimizer=copy.deepcopy(opt.state_dict())))
-    kw = dict(batches=batches, schedule="coherence", weight_ema=0.9)
+    kw = dict(batches=batches, schedule="coherence", weight_ema=0.9, final_cooldown=0.05, final_cooldown_shape="sqrt")
     whole, _ = TR.train_seq("shared", None, None, nv, steps=8, log_at=(), save_every=2, save=keep, **kw)
     res, _ = TR.train_seq("shared", None, None, nv, steps=8, log_at=(), checkpoint=packs[4], **kw)
     same = lambda a, b: all(torch.equal(x, y) for x, y in zip(a.state_dict().values(), b.state_dict().values()))
@@ -1675,7 +1680,7 @@ def t_loss_chunk():
     g = torch.Generator().manual_seed(91)
     for kw in (dict(), dict(learn_output_scale=False), dict(stream_norm=False, normalized_update=False, sphere_weights=False),
                dict(layer_norm=True, stream_norm=False, normalized_update=False, sphere_weights=False)):
-        base = BlockModel(nv, d=32, units=48, loss_chunk=0, **kw).double()
+        base = BlockModel(nv, d=32, units=48, loss_chunk=0, output_link=False, **kw).double()   # parcali yol phi'siz
         with torch.no_grad():
             for p_ in base.parameters():
                 p_.add_(0.1 * torch.randn(p_.shape, generator=g, dtype=torch.float64))
@@ -1695,14 +1700,16 @@ def t_loss_chunk():
           "parca yoluyla <= 1e-10 ayni -- dolgulu batch; ogrenilen / sabit olcek, normsuz akis, LayerNorm",
           LOSS_CHUNK == 4096 and not missing and worst < 1e-10 and bool((~mask).any()), "en buyuk fark %.1e" % worst)
 
-    c0 = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=tuple(range(21)), model_kw=dict(loss_chunk=0))[1]
-    c1 = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=tuple(range(21)))[1]
-    c7 = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=tuple(range(21)), model_kw=dict(loss_chunk=7))[1]
+    c0 = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=tuple(range(21)),
+                      model_kw=dict(loss_chunk=0, output_link=False))[1]
+    c1 = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=tuple(range(21)), model_kw=dict(output_link=False))[1]
+    c7 = TR.train_seq("shared", sids, smask, nv, steps=20, log_at=tuple(range(21)),
+                      model_kw=dict(loss_chunk=7, output_link=False))[1]
     gap = max(abs(a["nll"] - b["nll"]) for c in (c1, c7) for a, b in zip(c0, c)) / c0[-1]["nll"]
     packs = {}
     keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
                                                                    optimizer=copy.deepcopy(opt.state_dict())))
-    kw = dict(model_kw=dict(loss_chunk=7))
+    kw = dict(model_kw=dict(loss_chunk=7, output_link=False))
     full, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), save_every=2, save=keep, **kw)
     res, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs[4], **kw)
     check("loss_chunk: fp32 CPU'da 20 adim egri tek parca yoluna yakin (4096 ve 7); parcali (7) egitimde 4. adim paketinden "
@@ -1719,7 +1726,7 @@ def t_loss_chunk():
     table = ids_v.shape[0] * (ids_v.shape[1] - 1) * V
     peak, saved = {}, {}
     for chunk in (0, 256):
-        mv = BlockModel(V, loss_chunk=chunk)
+        mv = BlockModel(V, loss_chunk=chunk, output_link=False)
         with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU], profile_memory=True) as prof:
             mv.loss(ids_v, mask_v)[0].backward()
         peak[chunk] = max(e.self_cpu_memory_usage for e in prof.events()) / 4          # fp32 eleman
@@ -1738,7 +1745,7 @@ def t_loss_chunk():
     run = C.start("TEST_LC", s, tmp + "/n", **dict(kw, steps=1))
     run["thread"].join(600)
     cfg_new = json.load(open(tmp + "/n/config.json"))
-    kw_old = dict(kw, model_kw=dict(d=16, units=16, loss_chunk=0))
+    kw_old = dict(kw, model_kw=dict(d=16, units=16, loss_chunk=0, output_link=False))
     run = C.start("TEST_LC", s, tmp + "/o", **kw_old)
     run["thread"].join(600)
     first = torch.load(tmp + "/o/model.pt")
@@ -1837,13 +1844,13 @@ def t_output_link():
     nv = len(data["vocab"])
     ids = sids[:6, :20]
 
-    base, link = BlockModel(nv), BlockModel(nv, output_link=True)
+    base, link = BlockModel(nv, output_link=False), BlockModel(nv, output_link=True)
     with torch.no_grad():
         err0 = float((base.logits(ids) - link.logits(ids)).abs().max())
     rest = {k: v for k, v in link.state_dict().items() if k not in ("link_q", "link_u")}
     check("output_link: varsayilan False; link_q, link_u 0'dan, geri kalan agirliklar ayni; q = u = 0'da skor dogrusal "
           "skorla ayni (yuvarlama icinde)",
-          OUTPUT_LINK is False and inspect.signature(BlockModel).parameters["output_link"].default is False
+          OUTPUT_LINK is True and inspect.signature(BlockModel).parameters["output_link"].default is True
           and not base.output_link and link.output_link and "link_q" not in base.state_dict()
           and list(rest) == list(base.state_dict()) and all(torch.equal(rest[k], v) for k, v in base.state_dict().items())
           and float(link.link_q) == 0.0 and float(link.link_u) == 0.0 and err0 < 1e-5, "fark %.1e" % err0)
