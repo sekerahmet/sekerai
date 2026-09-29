@@ -550,6 +550,10 @@ def t_step3():
     sv = torch.linalg.svdvals(TR.Muon.orthogonalize(Gm))
     check("Muon: Newton-Schulz ciktisinin tekil degerleri ~1 (yari-ortogonal)", float((sv - 1).abs().max()) < 0.35,
           "tekil deger %.3f..%.3f" % (float(sv.min()), float(sv.max())))
+    stack = [torch.randn(64, 256, generator=g) for _ in range(3)]
+    batch_same = all(torch.equal(x, TR.Muon.orthogonalize(y)) for x, y in zip(TR.Muon.orthogonalize(torch.stack(stack)), stack))
+    check("Muon: Newton-Schulz ayni boydaki matrislerin yigininda her matrise ayri (tek is parcacigi: bit duzeyinde ayni)",
+          batch_same)
     ob = TR.Muon.orthogonalize(Gm, precision="bf16")
     of = TR.Muon.orthogonalize(Gm)
     svb = torch.linalg.svdvals(ob)
@@ -1838,7 +1842,7 @@ def t_muon_tangent():
             seen.clear()
             m, _ = TR.train_seq("shared", ids, mask, nv, steps=1, log_at=(), muon_tangent=tangent)
             worst[tangent] = 0.0
-            inputs = iter(seen)
+            flat = [x for G in seen for x in (G.unbind(0) if G.dim() == 3 else [G])]   # Muon ayni boyu yigin halinde verir
             for (k, p0), p1 in zip(ref.named_parameters(), m.parameters()):
                 kind = k.split(".")[-1]
                 if kind not in rows + cols:
@@ -1847,8 +1851,9 @@ def t_muon_tangent():
                 v = p0.grad.add(p0.grad, alpha=0.95)            # ilk adim: tampon = g, Nesterov g + 0,95 g
                 if tangent:
                     v = v - (v * p0.detach()).sum(axis, keepdim=True) * p0.detach()
-                    G = next(inputs)
-                    dots.append(float((G * p0.detach()).sum(axis).abs().max() / G.norm(dim=axis).max()))
+                    G = next((x for x in flat if x.shape == v.shape and torch.allclose(x, v, rtol=1e-5, atol=1e-7)), None)
+                    dots.append(float("inf") if G is None else
+                                float((G * p0.detach()).sum(axis).abs().max() / G.norm(dim=axis).max()))
                 new = p0.detach().clone().add_(real(v), alpha=-TR.LR * 0.2 * max(p0.shape) ** 0.5)
                 worst[tangent] = max(worst[tangent], float((F.normalize(new, dim=axis) - p1.detach()).abs().max()))
     finally:

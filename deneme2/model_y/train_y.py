@@ -85,28 +85,29 @@ class Muon(torch.optim.Optimizer):
 
     @staticmethod
     def orthogonalize(G, steps=5, precision="fp32"):
-        """G'ye en yakin yari-ortogonal matris (tekil degerler ~1), besinci derece Newton-Schulz; precision "bf16": dongu
-        bf16'da, sonuc G'nin tipinde."""
+        """G'ye en yakin yari-ortogonal matris (tekil degerler ~1), besinci derece Newton-Schulz; G ayni boyda matrislerin
+        yigini da olabilir (... x m x n, her matris ayri).  precision "bf16": dongu bf16'da, sonuc G'nin tipinde."""
         a, b, c = 3.4445, -4.7750, 2.0315
-        X = G / (G.norm() + 1e-7)
+        X = G / (G.norm(dim=(-2, -1), keepdim=True) + 1e-7)
         if precision == "bf16":
             X = X.bfloat16()
-        tall = X.shape[0] > X.shape[1]
+        tall = X.shape[-2] > X.shape[-1]
         if tall:
-            X = X.T
+            X = X.mT
         for _ in range(steps):
-            A = X @ X.T
+            A = X @ X.mT
             X = a * X + (b * A + c * A @ A) @ X
-        return (X.T if tall else X).to(G.dtype)
+        return (X.mT if tall else X).to(G.dtype)
 
     @torch.no_grad()
     def step(self):
         for g in self.param_groups:
-            for p in g["params"]:
-                if p.grad is None:
-                    continue
-                state = self.state[p]
-                if g["use_muon"]:
+            if g["use_muon"]:
+                by_shape = {}                               # ayni boydaki matrisler tek Newton-Schulz cagrisinda: sure
+                for p in g["params"]:                       # hesapta degil cagri sayisinda (profil, 29 Eylul: 26 ms)
+                    if p.grad is None:
+                        continue
+                    state = self.state[p]
                     if "momentum_buffer" not in state:
                         state["momentum_buffer"] = torch.zeros_like(p)
                     buf = state["momentum_buffer"]
@@ -115,9 +116,16 @@ class Muon(torch.optim.Optimizer):
                     axis = self.tangent_axis.get(p)
                     if axis is not None:                    # kure tegeti: satir / sutun basina v - <v, w> w
                         nesterov = nesterov - (nesterov * p).sum(axis, keepdim=True) * p
-                    update = self.orthogonalize(nesterov, precision=self.newton_schulz_precision)
-                    p.add_(update, alpha=-g["lr"] * 0.2 * max(p.shape) ** 0.5)
+                    by_shape.setdefault(tuple(p.shape), []).append((p, nesterov))
+                for items in by_shape.values():
+                    updates = self.orthogonalize(torch.stack([v for _, v in items]), precision=self.newton_schulz_precision)
+                    for (p, _), update in zip(items, updates):
+                        p.add_(update, alpha=-g["lr"] * 0.2 * max(p.shape) ** 0.5)
+                continue
+            for p in g["params"]:
+                if p.grad is None:
                     continue
+                state = self.state[p]
                 if not state:
                     state["step"] = 0
                     state["exp_avg"], state["exp_avg_sq"] = torch.zeros_like(p), torch.zeros_like(p)
@@ -368,7 +376,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
                         half_total.backward()
                     if grads is None:
                         grads = [None if p.grad is None else p.grad.detach().clone() for p in params]
-                dot, na, nb = 0.0, 0.0, 0.0
+                sums = []                                       # parametre basina (a.b, a.a, b.b): sonda tek senkron
                 w0, w1 = (float(w) for w in weights)
                 for (k, p), a in zip(named, grads):
                     if a is None:
@@ -378,9 +386,10 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
                     p.grad = (w0 * a + w1 * b) / (w0 + w1)      # birlesik gradyan = tam batch'inki
                     if k in unit_axis:                          # kurede: teget (satir ya da sutun basina)
                         a, b = (v - (v * p.detach()).sum(unit_axis[k], keepdim=True) * p.detach() for v in (a, b))
-                    dot += float((a * b).sum())
-                    na += float((a * a).sum())
-                    nb += float((b * b).sum())
+                    sums.append(torch.stack([(a * b).sum(), (a * a).sum(), (b * b).sum()]))
+                dot, na, nb = 0.0, 0.0, 0.0
+                for x, y, z in torch.stack(sums).tolist():      # eski sirayla toplanir (bit duzeyinde ayni)
+                    dot, na, nb = dot + x, na + y, nb + z
                 diff = na + nb - 2 * dot                        # |g1 - g2|^2
                 rho = max(dot, 0.0) / (max(dot, 0.0) + diff / 4 + 1e-30)
                 for group in opt.param_groups:                  # yansiz: pay ve payda ayri ortalama, sonra oran

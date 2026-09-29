@@ -961,7 +961,7 @@ def _step_parts(ctx, ids, mask, clock):
                 with clock.part("coherence: g1 kopyasi"):
                     grads = [None if p.grad is None else p.grad.detach().clone() for p in ctx["params"]]
         with clock.part("coherence: birlestirme, teget, carpimlar"):
-            dot = na = nb = 0.0
+            sums = []                                    # train_seq gibi: parametre basina carpimlar, sonda tek senkron
             w0, w1 = (float(w) for w in weights)
             for (k, p), a in zip(ctx["named"], grads):
                 if a is None:
@@ -971,9 +971,8 @@ def _step_parts(ctx, ids, mask, clock):
                 p.grad = (w0 * a + w1 * b) / (w0 + w1)
                 if k in ctx["unit_axis"]:
                     a, b = (v - (v * p.detach()).sum(ctx["unit_axis"][k], keepdim=True) * p.detach() for v in (a, b))
-                dot += float((a * b).sum())
-                na += float((a * a).sum())
-                nb += float((b * b).sum())
+                sums.append(torch.stack([(a * b).sum(), (a * a).sum(), (b * b).sum()]))
+            torch.stack(sums).tolist()
     else:
         with clock.part("geri yayilim"), sdpa_kernel(ctx["kernels"]):
             total.backward()
