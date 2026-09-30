@@ -52,9 +52,10 @@ RECIPE = dict(schedule="coherence", final_cooldown=0.95, final_cooldown_shape="l
               weight_ema=0.999, matmul_precision="bf16")      # lr: peak_lr(d)
 # A100 TEST adaylari (profile_sizes): model ayarlari disinda her sey ayni; units ~ 8/3 d, 64'un kati; head boyu 128
 # (kullanici, 30 Eylul: "10X128 ok"; RoPE tabani 8.192'de 64'luk head'de tirtikli, 128'likte duzgun -- not.md §9)
+# batch_size: parca basina satir (model_kw'ye girmez); 8 satirda d1024_8x2 egitim adiminda 80 GB'i asti (A100 TEST, 30 Eylul)
 CANDIDATES = (("d1024_6x2", dict(d=1024, layers=6, turns=12, heads=8, units=2752)),
-              ("d1024_8x2", dict(d=1024, layers=8, turns=16, heads=8, units=2752)),
-              ("d1280_6x2", dict(d=1280, layers=6, turns=12, heads=10, units=3456)))
+              ("d1024_8x2", dict(d=1024, layers=8, turns=16, heads=8, units=2752, batch_size=4)),
+              ("d1280_6x2", dict(d=1280, layers=6, turns=12, heads=10, units=3456, batch_size=4)))
 BATCH_SIZE = 8           # parca basina satir (SEQ_LEN token); A100 TEST'le bellege gore secilir
 TOKENS_PER_STEP = 64 * 8192   # adim basina token hedefi: 64 x 8.192 ~ 0,5M
 SAVE_EVERY = 500
@@ -416,10 +417,12 @@ def profile_sizes(data, out_root, candidates=CANDIDATES, stop_at=100, every=50, 
             for label, kw in candidates:
                 if run["stop"]:
                     break
+                kw = dict(kw)
+                rows = kw.pop("batch_size", batch_size)
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 r = start("A100_TEST_" + label, data, os.path.join(out_root, label), model_kw=kw, stop_at=stop_at, every=every,
-                          save_every=None, batch_size=batch_size, device=device, **start_kw)
+                          save_every=None, batch_size=rows, device=device, **start_kw)
                 r["thread"].join()
                 timed = [e for e in r["exams"] if "tokens_per_sec" in e]
                 if r["error"] or not timed:
@@ -427,7 +430,7 @@ def profile_sizes(data, out_root, candidates=CANDIDATES, stop_at=100, every=50, 
                     continue
                 e = timed[-1]
                 hours = token_budget / e["tokens_per_sec"] / 3600
-                res = dict(label=label, model_kw=kw, tokens_per_sec=e["tokens_per_sec"], step_ms=e["step_ms"],
+                res = dict(label=label, model_kw=kw, batch_size=rows, tokens_per_sec=e["tokens_per_sec"], step_ms=e["step_ms"],
                            gpu_peak_gb=e.get("gpu_peak_gb"), mfu=e.get("mfu"), params=r["params"],
                            body_params=r["body_params"], ratio=token_budget / r["body_params"], hours=hours,
                            cu=hours * cu_per_hour)
