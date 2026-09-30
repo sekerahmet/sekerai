@@ -51,3 +51,6 @@ deneme2/*/BULGULAR_*.md
 # model notlari yerel: kullanici kararlari ve alintilar (not.md, FIKIRLER_*.md)
 deneme2/*/not.md
 deneme2/*/FIKIRLER_*.md
+
+# konus_fineweb yerel agirlik onbellegi (checkpoint model agirligi, ~1 GB)
+deneme2/model_y/konus_cache/

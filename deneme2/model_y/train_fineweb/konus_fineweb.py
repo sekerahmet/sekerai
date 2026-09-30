@@ -36,7 +36,7 @@ torch = DS = EF = I = AttentionCache = None
 RUN_ROOTS = [r"G:\Drive'ım\model_y", r"G:\Drivem\model_y"]
 FW_ROOTS = [r"G:\Drive'ım\fineweb", r"G:\Drivem\fineweb"]
 EOT = "<|endoftext|>"
-CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "model_y_konus")   # kosu basina alt klasor
+CACHE_DIR = os.path.join(os.path.dirname(HERE), "konus_cache")   # model_y/konus_cache/<kosu>; git disi (.gitignore)
 
 
 def _heavy():
