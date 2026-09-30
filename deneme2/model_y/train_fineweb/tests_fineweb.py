@@ -491,6 +491,23 @@ def t_colab(data, root):
           and "SON valid" in log and "SON uzun" in log and "tekrar" in log,
           str(run["error"] or files) + " docs %d repeats %s" % (len(fin.get("docs", [])), sorted(fin.get("repeats", {}))))
 
+    import konus_fineweb as K
+    import train_y as TR
+    K.FW_ROOTS = [root]
+    vocab = K.load_vocab()
+    eot = vocab.index(K.DS.EOS_TOKEN)
+    last, _, l1 = K.load_model(out, "last")
+    ck, _, l2 = K.load_model(out, "ck")
+    ema, _, l3 = K.load_model(out, "ema")
+    prompt = [eot] + K.DS.encode("water cycle", vocab)
+    mine = K.generate(last, prompt, 6, eot)
+    ref = TR.generate(last, [prompt], 6)[0]
+    ref = ref[:ref.index(eot)] if eot in ref else ref
+    check("konus_fineweb: model.pt / son checkpoint / EMA yuklenir (internals_y._build); acgozlu devam = train_y.generate "
+          "(onbellekli, eot'ta durur)", mine == ref and l2 == "checkpoint adim 3" and l3 == "ORTALAMA agirliklar"
+          and all(torch.equal(a, b) for a, b in zip(last.state_dict().values(), ck.state_dict().values())),
+          "%s | %s" % (mine, ref))
+
     first = torch.load(out + "/model.pt")
     os.remove(out + "/checkpoint_t000003.pt")
     run2 = C.start("TEST", data, out, resume=True, **kw)
