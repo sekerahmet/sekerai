@@ -377,6 +377,44 @@ def t_exam(data, tok):
           "%d / %d belge sigar" % (len(fit), len(docs)))
 
 
+def t_distant_copy(data):
+    V = len(data["vocab"])
+    k = min(EF.COPY_TOKENS, SEQ // 4)
+
+    class Copier(torch.nn.Module):
+        """Kopyayi bilen sahte model: konum t >= d - 1'de ids[t + 1 - d] (d = uzaklik), oncesinde ids[t] (tekrar)."""
+        def __init__(self):
+            super().__init__()
+            self.w = torch.nn.Parameter(torch.zeros((), dtype=torch.float64))
+
+        def logits(self, ids, document_positions=None):
+            d = ids.shape[1] - k
+            src = ids.clone()
+            src[:, d - 1:] = ids[:, :ids.shape[1] - d + 1]
+            return 10.0 * torch.nn.functional.one_hot(src, V).double()
+
+    s = data["valid_starts"]
+    lengths = np.append(s[1:], len(data["valid"])) - s
+    P = [DF.valid_doc(data, int(i))[1:k + 1] for i in data["exam"] if lengths[i] > k][:EF.COPY_PASSAGES]
+    echo = sum(p[j] == p[j - 1] for p in P for j in range(1, k)) / (len(P) * (k - 1))
+    c = EF.distant_copy(Copier(), data, first=16)
+    far = EF.distant_copy(Copier(), data, first=16, context=2 * SEQ)
+    check("distant_copy: [eot] + P + dolgu + P; kopyayi bilen modelde kopya accuracy 1, ilk gecis tekrar payi (hizalama); "
+          "uzakliklar 16, 32, ... SEQ - k; context 2 x SEQ egitilmemis uzaklik; hedef = parca x (k - 1)",
+          [r["distance"] for r in c["rows"]] == EF.copy_distances(SEQ - k, 16) == [16, 32, SEQ - k]
+          and [r["distance"] for r in far["rows"]][-1] == 2 * SEQ - k and c["passages"] == len(P) > 0 and c["tokens"] == k
+          and all(r["accuracy"] == 1.0 and abs(r["first_accuracy"] - echo) < 1e-12 and r["targets"] == len(P) * (k - 1)
+                  for r in c["rows"] + far["rows"]),
+          "%d parca, k %d, tekrar payi %.3f" % (len(P), k, echo))
+
+    torch.manual_seed(0)
+    model = M.BlockModel(V, **dict(TINY, t_max=SEQ)).double()
+    r = EF.distant_copy(model, data, first=16)["rows"]
+    check("distant_copy: gercek model (float64, paketli yol) calisir; accuracy [0, 1], nll sonlu",
+          len(r) == 3 and all(0 <= x["accuracy"] <= 1 and 0 <= x["first_accuracy"] <= 1 and math.isfinite(x["nll"]) for x in r),
+          " ".join("%d %.2f/%.2f" % (x["distance"], x["accuracy"], x["first_accuracy"]) for x in r))
+
+
 def t_real_gpt2():
     """Istege bagli: gercek gpt2 sozlugunde bayt tablosu ve ornek belgelerde bicim."""
     if not (os.path.exists(REAL_TOKENIZER) and os.path.exists(REAL_SAMPLE)):
@@ -444,6 +482,7 @@ def t_colab(data, root):
           and cfg["model_kw"]["rope_base"] == M.rope_base_for(16 // 2, SEQ)       # "auto" config'e sayi olarak
           and [e["step"] for e in ex] == [0, 1, 2, 3] and len(ex[0]["bands"]) == len(EF.BANDS)
           and len(ex[0]["texts"]) == EF.PROBE_PROMPTS and "repeats" in ex[0] and "weight_ema" in ex[1]
+          and ex[0]["distant_copy"]["rows"] and fin["distant_copy"]["rows"][-1]["distance"] > SEQ
           and all("tokens_per_sec" in e for e in ex[1:]) and fin.get("valid", {}).get("docs") == len(data["valid_starts"])
           and fin["subset"]["docs"] == EXAM and len(fin["prompts"]) == len(EF.PROMPTS)
           and len(fin["docs"]) == len(EF.fitting_docs(data, data["exam"])[:C.FINAL_DOCS]) > 0
@@ -521,6 +560,7 @@ if __name__ == "__main__":
         t_fingerprint(root, tok)
         t_windows(data)
         t_exam(data, tok)
+        t_distant_copy(data)
         t_real_gpt2()
         t_colab(data, root)
     finally:

@@ -118,6 +118,13 @@ def _repeats_line(r, head):
     return "%s (%d belge): %s" % (head, next(iter(r.values()))["docs"], " | ".join(parts)) if r else head + ": belge yok"
 
 
+def _copy_line(c, head):
+    """distant_copy: uzaklik basina kopya accuracy'si (ilk gecisteki taban parantezde)."""
+    rows = " ".join("%d %.3f (%.3f)" % (r["distance"], r["accuracy"], r["first_accuracy"]) for r in c["rows"])
+    return "%s (%d parca x %d token, uzaklik kopya (taban)): %s%s" % (head, c["passages"], c["tokens"], rows,
+                                                                       "  " + c["error"] if "error" in c else "")
+
+
 def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS_PER_STEP, batch_size=BATCH_SIZE, seed=0,
           every=500, device="cuda", compile=True, setting="shared", save_every=SAVE_EVERY, resume=False, model_kw=None,
           stop_at=None, **train_kw):
@@ -225,7 +232,7 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
         if getattr(model, "output_link", False):
             e.update(link_q=float(model.link_q.detach()), link_u=float(model.link_u.detach()))
         if (step // every) % REPEAT_EVERY == 0:
-            e.update(repeats=EF.continuation_repeats(model, data))
+            e.update(repeats=EF.continuation_repeats(model, data), distant_copy=EF.distant_copy(model, data))
         written = EF.texts(model, data, probes, PROBE_TOKENS)
         e.update(ES.loop_check([w["ids"] for w in written]), texts=[w["model"] for w in written],
                  secs=round(time.time() - run["t0"], 1))
@@ -255,6 +262,8 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
              + (" | bag q %.3f u %.3f" % (e["link_q"], e["link_u"]) if "link_q" in e else ""))
         if "repeats" in e:
             note(_repeats_line(e["repeats"], "       tekrar"))
+        if "distant_copy" in e:
+            note(_copy_line(e["distant_copy"], "       uzak kopya"))
         if run["stop"] or (stop_at is not None and step >= stop_at):
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             raise Stopped()
@@ -279,6 +288,7 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
         f["docs"] = EF.texts(model, data, halves, reals=reals)
         f["loops"] = ES.loop_check([w["ids"] for w in f["prompts"]])
         f["repeats"] = EF.continuation_repeats(model, data, real=True)
+        f["distant_copy"] = EF.distant_copy(model, data, context=2 * data["seq_len"])   # egitilmemis uzakliga kadar
         alpha = ES.alpha_summary(model)
         if alpha:
             f["alpha_summary"] = alpha
@@ -295,6 +305,7 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
             g["docs"], data["seq_len"], g["max_tokens"], _band_text(g), _bpb_text(g))))
         note("%s istemler: dongu %d/%d  farkli4 %.2f" % (head, f["loops"]["loop"], len(EF.PROMPTS), f["loops"]["distinct4"]))
         note(_repeats_line(f["repeats"], "%s tekrar" % head))
+        note(_copy_line(f["distant_copy"], "%s uzak kopya" % head))
 
     def job():
         try:

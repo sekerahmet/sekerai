@@ -9,6 +9,9 @@ genel olculeri (loop_check, alpha_summary, onbellekli devam) exam_simplestories'
     texts                 sabit istemlerden ([eot] + istem) acgozlu devam, ilk eot'ta kesilir -- GOZLE okunur (kural 12)
     continuation_repeats  sinav belgelerinin ilk yarisindan acgozlu ve ornekleme devam: dongu, tekrar eden 8'li payi,
                           farkli 4'lu; gercek devam referans
+    distant_copy          uzun baglam: bir parca uzaklik kadar sonra tekrar edilir; ikinci kopyada accuracy / nll, ilk
+                          geciste (kopya yok) taban.  Kullanici, 30 Eylul: "Uzun bağlamı ölçen bir sınav yok. En kritiği bu.
+                          bunu hallet." (ppl ve bant accuracy'si uzaktan getirememeyi gostermez, Men 2024)
 SimpleStories'ten TASINMAYANLAR: 'X and X', kalip cumle, uydurma kelime (web metninde ad, adres, kod, sayi mesru; train
 kelime listesi anlam tasimaz), soz tekrari (diyalog olcusu), exam_train (egitim 1 epoktan az: ezber okunmaz).
 """
@@ -47,6 +50,9 @@ PROMPTS = (
 PROBE_PROMPTS = 4
 REPEAT_DOCS = 64         # continuation_repeats: baglama sigan sinav belgelerinin ilk bu kadari (en az MIN_DOC token)
 MIN_DOC = 16             # istem + devam icin en kisa belge (token)
+COPY_PASSAGES = 32       # distant_copy: sinav belgelerinin (COPY_TOKENS'ten uzun) ilk bu kadarinin basi
+COPY_TOKENS = 64         # distant_copy: parca boyu (token)
+COPY_FIRST = 256         # distant_copy: en kisa uzaklik; 2 katlarla en uzaga kadar
 _CACHE = {}
 
 
@@ -264,4 +270,65 @@ def continuation_repeats(model, data, count=REPEAT_DOCS, seed=0, real=False):
         out["sampled"] = _repeats(prompts, gens[k:], ended[k:])
     if real:
         out["real"] = _repeats(prompts, reals, [False] * len(reals))
+    return out
+
+
+def copy_distances(max_distance, first=COPY_FIRST):
+    """first, 2 first, 4 first, ... < max_distance, sonra max_distance."""
+    out = []
+    while first < max_distance:
+        out.append(first)
+        first *= 2
+    return out + [max_distance]
+
+
+@torch.no_grad()
+def distant_copy(model, data, passages=COPY_PASSAGES, k=COPY_TOKENS, context=None, first=COPY_FIRST):
+    """Satir = [eot] + P + dolgu + P, tek belge (konum 0'dan): P sinav belgesinin ilk k token'i (en cok baglamin 1/4'u),
+    dolgu baska valid belgelerin metni; uzaklik = iki P'nin baslari arasi, copy_distances(context - k): satir context'e
+    sigar (None: SEQ_LEN; 2 x SEQ_LEN egitilmemis uzaklik).  Uzaklik basina P'nin 2..k. token'lari: ikinci kopyada (bilgi uzakta) ve ilk geciste (taban, kopya yok)
+    accuracy ve nll.  Kopya tabani gecmiyorsa model o uzakliga bakamiyor.  Bellek yetmezse kalan uzakliklar yazilmaz,
+    error."""
+    device = next(model.parameters()).device
+    V, eot = len(data["vocab"]), data["eot"]
+    k = min(k, data["seq_len"] // 4)
+    max_distance = (context or data["seq_len"]) - k
+    s = data["valid_starts"]
+    lengths = np.append(s[1:], len(data["valid"])) - s
+    chosen = [int(i) for i in data["exam"] if lengths[i] > k][:passages]
+    P = torch.tensor([DF.valid_doc(data, i)[1:k + 1] for i in chosen], dtype=torch.long)
+    pool, taken = [], set(chosen)                      # dolgu: parcalarin belgeleri disindaki valid metni, sirayla
+    for i in range(len(s)):
+        if len(pool) >= max_distance + 1024:
+            break
+        if i not in taken:
+            pool += DF.valid_doc(data, i)[1:]
+    pool = torch.tensor(pool, dtype=torch.long)
+    pool = pool.repeat(-(-(max_distance + 1024) // len(pool)))    # kucuk veride (testler) dolgu kendini tekrar eder
+    out = dict(passages=len(chosen), tokens=k, rows=[])
+    j = torch.arange(1, k)                              # P'nin hedefleri 1..k-1: ilk geciste konum j, kopyada d + j
+    for d in copy_distances(max_distance, first):
+        g = d - k
+        fill = torch.stack([pool[o:o + g] for o in ((r * 997) % (len(pool) - g + 1) for r in range(len(P)))])
+        ids = torch.cat([torch.full((len(P), 1), eot), P, fill, P], 1).to(device)      # (n, d + k + 1)
+        L = ids.shape[1] - 1
+        pos = torch.arange(L, device=device).expand(len(P), L)
+        at = torch.cat([j, d + j]).to(device)
+        sums = torch.zeros(4, dtype=torch.float64)      # ilk nll, ilk isabet, kopya nll, kopya isabet
+        step = max(1, LOGITS_BUDGET // (V * L))
+        try:
+            for b in range(0, len(P), step):
+                z = model.logits(ids[b:b + step, :-1], document_positions=pos[b:b + step])[:, at]
+                z = z.to(torch.promote_types(z.dtype, torch.float32))
+                y = ids[b:b + step, 1:][:, at]
+                ce = z.logsumexp(-1) - z.gather(-1, y[..., None])[..., 0]
+                hit = (z.argmax(-1) == y).double()
+                sums += torch.stack([ce[:, :k - 1].sum(), hit[:, :k - 1].sum(), ce[:, k - 1:].sum(),
+                                     hit[:, k - 1:].sum()]).double().cpu()
+        except torch.cuda.OutOfMemoryError as e:
+            out["error"] = "uzaklik %d: bellek yetmedi: %s" % (d, str(e)[:200])
+            break
+        n = len(P) * (k - 1)
+        out["rows"].append(dict(distance=d, targets=n, accuracy=float(sums[3]) / n, nll=float(sums[2]) / n,
+                                first_accuracy=float(sums[1]) / n, first_nll=float(sums[0]) / n))
     return out
