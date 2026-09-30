@@ -45,7 +45,9 @@ import train_y as TR  # noqa: E402
 RUN_NAME = "fineweb_modely_6x2_d1280_gpt2_s0"
 MODEL_KW = dict(d=1280, layers=6, turns=12, heads=10, fact_activation="swiglu", units=3456, shared_facts=False,
                 first_turn_facts=False, input_embedding=True, input_embedding_sphere=True, input_bigrams=0, output_link=True,
-                learn_output_scale=True, attention_log_scale=True, loss_chunk=4096)
+                learn_output_scale=True, attention_log_scale=True, loss_chunk=4096,
+                last_facts_alpha_init=0.1)   # butun alpha'lar esit 0,1'den (kullanici, 30 Eylul: "o zaman alfa karar verip
+#   yapsak ?"); FactUnits denemesi ..._pilot_lastalpha01_s0: 3.000'de val nll -0,038, acc +0,14 puan (1,0'a karsi, tek tohum)
 RECIPE = dict(schedule="coherence", final_cooldown=0.95, final_cooldown_shape="log", lr_floor=0.0, optimizer="muon",
               weight_ema=0.999, matmul_precision="bf16")      # lr: peak_lr(d)
 # A100 TEST adaylari (profile_sizes): model ayarlari disinda her sey ayni; units ~ 8/3 d, 64'un kati; head boyu 128
