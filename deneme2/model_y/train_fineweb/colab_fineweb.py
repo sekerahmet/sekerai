@@ -394,12 +394,14 @@ def stop():
 
 def profile_sizes(data, out_root, candidates=CANDIDATES, stop_at=100, every=50, batch_size=BATCH_SIZE, token_budget=10e9,
                   cu_per_hour=5.4, max_hours=48.0, min_ratio=50.0, device="cuda", **start_kw):
-    """A100 TEST, arka planda: adaylar SIRAYLA, her biri gercek kosunun ayarlariyla (MODEL_KW + aday, RECIPE, lr peak_lr(d),
+    """GPU TEST (ad GPU'dan: A100 TEST, G4 TEST ...), arka planda: adaylar SIRAYLA, her biri gercek kosunun ayarlariyla (MODEL_KW + aday, RECIPE, lr peak_lr(d),
     1 epokluk takvim) stop_at adima kadar, <out_root>/<ad>.  Aday basina satir: token/sn ve ms/adim (son sinav araligi,
     compile sonrasi), tepe bellek, mfu, govde parametresi (token tablolari haric), token_budget / govde, token_budget icin saat
     ve CU; kural: token / govde >= min_ratio ve saat <= max_hours.  Sonda SECIM: kurali gecen en buyuk (govde) aday.
     Ilerleme pulse(), durdurma stop()."""
-    name = "A100 TEST"
+    gpu = torch.cuda.get_device_name(0) if torch.device(device).type == "cuda" else "CPU"
+    tag = next((t for k, t in (("H100", "H100"), ("A100", "A100"), ("RTX PRO 6000", "G4"), ("L4", "L4")) if k in gpu), "GPU")
+    name = "%s TEST" % tag
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
     run = dict(name=name, out=out_root, lines=[], stop=False, error=None, done=False, t0=time.time(), results=[])
@@ -421,7 +423,7 @@ def profile_sizes(data, out_root, candidates=CANDIDATES, stop_at=100, every=50, 
                 rows = kw.pop("batch_size", batch_size)
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                r = start("A100_TEST_" + label, data, os.path.join(out_root, label), model_kw=kw, stop_at=stop_at, every=every,
+                r = start("%s_TEST_%s" % (tag, label), data, os.path.join(out_root, label), model_kw=kw, stop_at=stop_at, every=every,
                           save_every=None, batch_size=rows, device=device, **start_kw)
                 r["thread"].join()
                 timed = [e for e in r["exams"] if "tokens_per_sec" in e]
