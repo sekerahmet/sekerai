@@ -45,6 +45,10 @@ import torch
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
+# GPU'da derlenmis flex: derlenmemisi yavas ve T x T gecici bellek acar (FineWeb on kosusunun son sinavi 20+ dk).  CPU'da (testler,
+# float64) derlenmemisi: derlenmis flex CPU'da float64 kabul etmiyor.  dynamic=False: sinav pencereleri sabit boyda
+_flex_compiled = torch.compile(flex_attention, dynamic=False)
+
 D = 64               # nokta boyutu; olculmedi (sozluk 74 > 64)
 CONFIDENCE = 0.99    # hedef tam q yonundeyken, rakipler dikken verilebilecek olasilik -> scale
 POINTS_SEED = 0
@@ -289,7 +293,8 @@ class CausalAttention(torch.nn.Module):
             if torch.is_tensor(mask):
                 c = F.scaled_dot_product_attention(q, k, v, attn_mask=mask[:, None], scale=self.scale)
             else:                                         # autocast flex'i kapsamaz: tipler q'nunki
-                c = flex_attention(q, k.to(q.dtype), v.to(q.dtype), block_mask=mask, scale=self.scale)
+                c = (_flex_compiled if q.is_cuda else flex_attention)(q, k.to(q.dtype), v.to(q.dtype), block_mask=mask,
+                                                                      scale=self.scale)
             return c[:, 0] if self.heads == 1 else c.transpose(-3, -2).flatten(-2)
         q, k = self.queries_keys(x)
         if self.heads > 1:                                # c = [a_1 (V_1 x) ; ... ; a_H (V_H x)], head'ler yan yana
