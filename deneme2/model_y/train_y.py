@@ -317,6 +317,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     kernels = ([SDPBackend.MATH] if attention_kernel == "math" else
                [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION])
     loss_fn = torch.compile(model.loss) if compile else model.loss
+    static_loss = [False]                                  # paketli (sabit boy) batch gelince bir kez: dynamic=False
     start = round((1 - cooldown) * steps)                  # WSD: inis bu adimda baslar
     final = round((1 - final_cooldown) * steps)            # coherence: son inis bu adimda baslar
     split = schedule == "coherence" and batches is not None  # tam batch'te gurultu yok: rho = 1, olculmez
@@ -396,6 +397,10 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
             if batches is not None:                            # mini-batch: bu adimin parcasi; paketli: + document_positions
                 ids, mask, *packed = (t.to(device) for t in batches(step))
                 assert not packed or isinstance(model, BlockModel), "paketli pencere yalniz BlockModel"
+                if compile and packed and not static_loss[0]:  # paketli pencere hep ayni boy: ayni surecte onceki kosunun
+                    # boyu (FactUnits denemesi 4.096 -> A100 TEST 8.192) derleyiciye boyu dinamik saydiriyordu, dinamik
+                    # kod uretilemedi (CantSplit, 30 Eylul)
+                    loss_fn, static_loss[0] = torch.compile(model.loss, dynamic=False), True
             # attention_kernel "math": torch 2.14'ten itibaren SDPA kendiliginden flash / mem-efficient'e gidiyor, onlarin
             # geri yayilimi deterministik degil (surdurme bit duzeyinde ayni kalmaz; hiz ajani, 27 Eylul)
             # bf16: ileri hesap ve kayip autocast'te; geri yayilim disarida (autocast'in kaydettigi tiplerle)
