@@ -140,8 +140,11 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                              learn_output_scale=M.LEARN_OUTPUT_SCALE, output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=M.T_MAX,
                              anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK, last_facts_alpha_init=M.LAST_FACTS_ALPHA_INIT,
                              input_embedding=M.INPUT_EMBEDDING, input_bigrams=M.INPUT_BIGRAMS,
-                             first_turn_facts=M.FIRST_TURN_FACTS, input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE),
+                             first_turn_facts=M.FIRST_TURN_FACTS, input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE,
+                             rope_base=M.ROPE_BASE),
                         **(model_kw or {}))
+        if model_kw.get("rope_base") == "auto":  # config'e SAYI yazilir: formul sonra degisse de kosu ayni tabanla kurulur
+            model_kw["rope_base"] = M.rope_base_for(model_kw["d"] // model_kw["heads"], model_kw["t_max"])
     keys = None                                       # INPUT_BIGRAMS: ikili listesi modele tensor, config'e izi
     if model_kw and model_kw.get("bigram_keys") is not None and not isinstance(model_kw["bigram_keys"], str):
         keys = torch.as_tensor(model_kw["bigram_keys"], dtype=torch.long)
@@ -185,7 +188,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         saved.setdefault("newton_schulz_precision", "fp32")
         if setting in TR.STEP3 and saved.get("model_kw"):   # 29 Eylul oncesi kosularda bu ayarlar yazilmadi: yoktu
             saved["model_kw"] = dict(dict(output_link=False, shared_facts=True, input_embedding=False, input_bigrams=0,
-                                          first_turn_facts=True, input_embedding_sphere=False), **saved["model_kw"])
+                                          first_turn_facts=True, input_embedding_sphere=False, rope_base=10000.0),
+                                     **saved["model_kw"])     # 30 Eylul oncesi: RoPE tabani sabit 10.000
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)

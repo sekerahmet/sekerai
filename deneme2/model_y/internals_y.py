@@ -798,7 +798,7 @@ def _model_kw(config):
     """config'teki model_kw; output_link / shared_facts yazilmamis eski config'lerde yoktu (colab_simplestories'in
     surdurmesi gibi)."""
     return dict(dict(output_link=False, shared_facts=True, input_embedding=False, input_bigrams=0, first_turn_facts=True,
-                     input_embedding_sphere=False), **config.get("model_kw", {}))
+                     input_embedding_sphere=False, rope_base=10000.0), **config.get("model_kw", {}))
 
 
 def _build(config):

@@ -43,15 +43,16 @@ import train_y as TR  # noqa: E402
 # Varsayilan kosu (kullanici, 30 Eylul: "onaylıyorum", "CU satın alırım sorun değli"; not.md §9): model_y varsayilanlarinin
 # uzerine, aday (3) d 1280
 RUN_NAME = "fineweb_modely_6x2_d1280_gpt2_s0"
-MODEL_KW = dict(d=1280, layers=6, turns=12, heads=20, fact_activation="swiglu", units=3456, shared_facts=False,
+MODEL_KW = dict(d=1280, layers=6, turns=12, heads=10, fact_activation="swiglu", units=3456, shared_facts=False,
                 first_turn_facts=False, input_embedding=True, input_embedding_sphere=True, input_bigrams=0, output_link=True,
                 learn_output_scale=True, attention_log_scale=True, loss_chunk=4096)
 RECIPE = dict(schedule="coherence", final_cooldown=0.95, final_cooldown_shape="log", lr_floor=0.0, optimizer="muon",
               weight_ema=0.999, matmul_precision="bf16")      # lr: peak_lr(d)
-# A100 TEST adaylari (profile_sizes): model ayarlari disinda her sey ayni; units ~ 8/3 d, 64'un kati
-CANDIDATES = (("d1024_6x2", dict(d=1024, layers=6, turns=12, heads=16, units=2752)),
-              ("d1024_8x2", dict(d=1024, layers=8, turns=16, heads=16, units=2752)),
-              ("d1280_6x2", dict(d=1280, layers=6, turns=12, heads=20, units=3456)))
+# A100 TEST adaylari (profile_sizes): model ayarlari disinda her sey ayni; units ~ 8/3 d, 64'un kati; head boyu 128
+# (kullanici, 30 Eylul: "10X128 ok"; RoPE tabani 8.192'de 64'luk head'de tirtikli, 128'likte duzgun -- not.md §9)
+CANDIDATES = (("d1024_6x2", dict(d=1024, layers=6, turns=12, heads=8, units=2752)),
+              ("d1024_8x2", dict(d=1024, layers=8, turns=16, heads=8, units=2752)),
+              ("d1280_6x2", dict(d=1280, layers=6, turns=12, heads=10, units=3456)))
 BATCH_SIZE = 8           # parca basina satir (SEQ_LEN token); A100 TEST'le bellege gore secilir
 TOKENS_PER_STEP = 64 * 8192   # adim basina token hedefi: 64 x 8.192 ~ 0,5M
 SAVE_EVERY = 500
@@ -135,7 +136,10 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
                          last_facts_alpha_init=M.LAST_FACTS_ALPHA_INIT, input_embedding=M.INPUT_EMBEDDING,
                          input_bigrams=0, first_turn_facts=M.FIRST_TURN_FACTS,
                          input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE, packed_attention=M.PACKED_ATTENTION,
-                         attention_log_scale=M.ATTENTION_LOG_SCALE), **dict(MODEL_KW, **(model_kw or {})))
+                         attention_log_scale=M.ATTENTION_LOG_SCALE, rope_base=M.ROPE_BASE),
+                    **dict(MODEL_KW, **(model_kw or {})))
+    if model_kw.get("rope_base") == "auto":      # config'e SAYI yazilir: formul sonra degisse de kosu ayni tabanla kurulur
+        model_kw["rope_base"] = M.rope_base_for(model_kw["d"] // model_kw["heads"], model_kw["t_max"])
     train_kw = dict(RECIPE, lr=peak_lr(model_kw["d"]), **train_kw)
     assert not model_kw["input_bigrams"], "paketli pencerede INPUT_BIGRAMS yok"
     steps_plan = plan(data, token_budget, steps, tokens_per_step, batch_size, train_kw.get("schedule"), seed)

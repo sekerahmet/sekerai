@@ -39,6 +39,7 @@ Paketli pencere (FineWeb, maskeli paketleme; Llama 3 yolu): document_positions (
 belge basinda 0.  Attention (PACKED_ATTENTION) ve Canon belge sinirini gecmez, RoPE konumu belge basinda 0'dan.  Verilmezse
 bugunku hesap (SDPA is_causal).
 """
+import functools
 import math
 
 import torch
@@ -124,16 +125,35 @@ PACKED_ATTENTION = "flex"   # paketli pencerede (document_positions verilince) a
 ATTENTION_LOG_SCALE = False  # True: attention olcegi sabit scale_for(T_MAX) yerine sorgu basina scale_for(n), n = gordugu anahtar
                              # sayisi (belge ici konum + 1); T_MAX = 512'de n = 512 konumu bugunku olcek (SSMax'in s log n'i).
                              # Kullanici, 30 Eylul: "Tasarım + log-n (Önerilen)"; FineWeb 8.192 bagliminda (not.md §9)
+ROPE_BASE = "auto"   # RoPE tabani: sayi ya da "auto" = rope_base_for(head boyu, t_max).  Kullanici, 30 Eylul: "rope base ok ve
+                     # bence hesaplı bir formül olsun ... yoksa hep unuturuz".  30 Eylul'e kadar sabit 10.000 (eski config'ler)
 
 
-def apply_rope(x, positions=None):
-    """RoPE, x (..., T, d): konum t'de her boyut cifti t · 10000^(-2i/d) acisiyla dondurulur; iki konumun
+@functools.lru_cache(maxsize=None)
+def rope_base_for(head_dim, context):
+    """RoPE tabani, Men 2024 (arXiv 2405.14591, Eq. 15-17): B(m) = sum_{i < d/2} cos(m taban^(-2i/d)) >= 0 her m <= 2 x
+    context icin (benzer token rastgeleden fazla dikkat alabilsin; 2 kat pay: sinir tirtikli, uretim baglami asabilir).
+    Adaylar 1, 2, 5 x 10^k, en az 10.000; hicbiri tutmazsa (kucuk head, test modelleri) en uzun mesafeyi tasiyan."""
+    m = torch.arange(2 * context + 1, dtype=torch.float64)
+    best = None
+    for base in (c * 10.0 ** k for k in range(4, 13) for c in (1, 2, 5)):
+        theta = base ** (-torch.arange(0, head_dim, 2, dtype=torch.float64) / head_dim)
+        negative = (torch.cos(m[:, None] * theta).sum(1) < 0).nonzero()
+        reach = int(negative[0]) - 1 if len(negative) else 2 * context        # B(m) >= 0 kalan en uzun mesafe
+        if reach >= 2 * context:
+            return base
+        best = max(best or (reach, base), (reach, base), key=lambda r: r[0])
+    return best[1]
+
+
+def apply_rope(x, positions=None, base=10000.0):
+    """RoPE, x (..., T, d): konum t'de her boyut cifti t · base^(-2i/d) acisiyla dondurulur; iki konumun
     <q, k> skoru yalniz aradaki mesafeye bagli kalir.  Parametresi yok.  positions (B, T): satir basina konum
     (onbellekli uretim); None = 0..T-1."""
     T, dh = x.shape[-2], x.shape[-1]
     # hesap en az fp32: bf16'da konum 256'dan sonra tam sayi degil, aci kayar.  fp32 / fp64'te sonuc aynen
     work = torch.promote_types(x.dtype, torch.float32)
-    freq = 10000.0 ** (-torch.arange(0, dh, 2, device=x.device, dtype=work) / dh)          # (d/2,)
+    freq = float(base) ** (-torch.arange(0, dh, 2, device=x.device, dtype=work) / dh)      # (d/2,)
     positions = torch.arange(T, device=x.device, dtype=work) if positions is None else positions.to(work)
     angle = positions[..., None] * freq                                                     # (..., T, d/2)
     cos, sin = angle.cos(), angle.sin()
@@ -238,12 +258,13 @@ class CausalAttention(torch.nn.Module):
     HEADS > 1: head basina W_value x'in dilimi.  W_context 0'dan (paket acikken BlockModel rastgele baslatir)."""
 
     def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, seed=POINTS_SEED + 2, rope=False, heads=1,
-                 attention_log_scale=False):
+                 attention_log_scale=False, rope_base=ROPE_BASE):
         super().__init__()
         assert d % heads == 0, "d head sayisina bolunmeli"
         assert not rope or (d // heads) % 2 == 0, "RoPE icin head boyu cift olmali"
         g = torch.Generator().manual_seed(seed)
         self.rope, self.heads = rope, heads
+        self.rope_base = rope_base_for(d // heads, t_max) if rope_base == "auto" else float(rope_base)
         self.attention_log_scale, self.confidence = attention_log_scale, confidence
         # W_query, W_key: d x d, rastgele / √d baslar, egitimle degisir.  PL'yi baska bir yone ceviren dogrusal donusum
         # (dondurur, gerer, sikistirir); ardindan norm geldigi icin yalniz yon kalir.
@@ -264,7 +285,7 @@ class CausalAttention(torch.nn.Module):
             positions = None if positions is None else positions[:, None]   # (B, 1, T): head ekseniyle hizali
         q, k = F.normalize(q, dim=-1), F.normalize(k, dim=-1)
         if self.rope:                                     # konuma gore dondur; boy 1 kalir
-            q, k = apply_rope(q, positions), apply_rope(k, positions)
+            q, k = apply_rope(q, positions, self.rope_base), apply_rope(k, positions, self.rope_base)
         if self.attention_log_scale:                      # q x scale_for(n) / scale: cagiranin scale'iyle skor scale_for(n) <q, k>
             q = q * self.query_scale(q.shape[-2], positions, q.device).to(q.dtype)
         return q, k
@@ -443,10 +464,10 @@ class Block(torch.nn.Module):
 
     def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, units=FACT_UNITS, seed=POINTS_SEED + 2,
                  stream_norm=True, layer_norm=False, rope=False, normalized_update=False, sphere_weights=False, canon=False,
-                 heads=1, fact_activation="relu", attention_log_scale=False):
+                 heads=1, fact_activation="relu", attention_log_scale=False, rope_base=ROPE_BASE):
         super().__init__()
         self.attention = CausalAttention(d, t_max, confidence, seed, rope=rope, heads=heads,
-                                         attention_log_scale=attention_log_scale)
+                                         attention_log_scale=attention_log_scale, rope_base=rope_base)
         self.facts = FactUnits(d, units, seed + 1, activation=fact_activation)
         self.stream_norm, self.layer_norm = stream_norm, layer_norm
         self.normalized_update, self.sphere_weights, self.canon = normalized_update, sphere_weights, canon
@@ -501,7 +522,7 @@ class BlockModel(torch.nn.Module):
                  last_facts_alpha_init=LAST_FACTS_ALPHA_INIT, output_link=OUTPUT_LINK, shared_facts=SHARED_FACTS,
                  input_embedding=INPUT_EMBEDDING, input_bigrams=INPUT_BIGRAMS, first_turn_facts=FIRST_TURN_FACTS,
                  bigram_keys=None, input_embedding_sphere=INPUT_EMBEDDING_SPHERE, packed_attention=PACKED_ATTENTION,
-                 attention_log_scale=ATTENTION_LOG_SCALE):
+                 attention_log_scale=ATTENTION_LOG_SCALE, rope_base=ROPE_BASE):
         """bigram_keys (INPUT_BIGRAMS > 0): en sik ikililerin anahtarlari (onceki * n + token), artan sirali, uzunluk
         input_bigrams; None ya da str (config'teki iz): tampon 0'larla kurulur, state_dict'ten dolar."""
         super().__init__()
@@ -515,7 +536,7 @@ class BlockModel(torch.nn.Module):
                                                 stream_norm=stream_norm, layer_norm=layer_norm, rope=rope,
                                                 normalized_update=normalized_update, sphere_weights=sphere_weights,
                                                 canon=canon, heads=heads, fact_activation=fact_activation,
-                                                attention_log_scale=attention_log_scale)
+                                                attention_log_scale=attention_log_scale, rope_base=rope_base)
                                           for i in range(count))
         self.turns, self.shared, self.stream_norm = turns, shared, stream_norm
         self.layers = layers if shared else len(self.blocks)   # farkli Block sayisi (ayri blokta her tura bir)

@@ -285,7 +285,7 @@ def reference_blocks(m, ids):
         q, k = unit(x @ dd(at.W_query).T), unit(x @ dd(at.W_key).T)
         if getattr(m, "rope", False):
             dh = q.shape[-1]
-            theta = torch.arange(T, dtype=torch.float64)[:, None] * 10000.0 ** (-torch.arange(0, dh, 2, dtype=torch.float64) / dh)
+            theta = torch.arange(T, dtype=torch.float64)[:, None] * at.rope_base ** (-torch.arange(0, dh, 2, dtype=torch.float64) / dh)
             rot = lambda y: torch.view_as_real(torch.view_as_complex(y.reshape(*y.shape[:-1], dh // 2, 2).contiguous())
                                                * torch.polar(torch.ones_like(theta), theta)).flatten(-2)
             q, k = rot(q), rot(k)
@@ -914,8 +914,8 @@ def t_normalized_update():
         for i in range(m.turns):
             blk = m.blocks[i % len(m.blocks)]                       # A B A B
             at, fu = blk.attention, blk.facts
-            q = apply_rope(F.normalize(h @ at.W_query.T, dim=-1))
-            k = apply_rope(F.normalize(h @ at.W_key.T, dim=-1))
+            q = apply_rope(F.normalize(h @ at.W_query.T, dim=-1), None, at.rope_base)
+            k = apply_rope(F.normalize(h @ at.W_key.T, dim=-1), None, at.rope_base)
             s_ = at.scale * q @ k.transpose(-1, -2)
             s_ = s_.masked_fill(torch.ones(T, T, dtype=torch.bool).triu(1), float("-inf"))
             c = torch.softmax(s_, -1) @ h
@@ -1425,8 +1425,8 @@ def t_heads():
         parts = []
         for h in range(4):                                  # head h: W_query / W_key / W_value'nun h. satir dilimi
             sl = slice(h * dh, (h + 1) * dh)
-            q = apply_rope(F.normalize(x @ at.W_query[sl].T, dim=-1))
-            k = apply_rope(F.normalize(x @ at.W_key[sl].T, dim=-1))
+            q = apply_rope(F.normalize(x @ at.W_query[sl].T, dim=-1), None, at.rope_base)
+            k = apply_rope(F.normalize(x @ at.W_key[sl].T, dim=-1), None, at.rope_base)
             s = (at.scale * q @ k.transpose(-1, -2)).masked_fill(torch.ones(T, T, dtype=torch.bool).triu(1), float("-inf"))
             parts.append(torch.softmax(s, -1) @ (x @ at.W_value[sl].T))
         err = float((out - torch.cat(parts, -1)).abs().max())
@@ -1642,14 +1642,16 @@ def t_learn_output_scale():
     sys.path.insert(0, os.path.join(HERE, "train_tinystories"))
     import konus_y as K
     tmp = tempfile.mkdtemp()
-    legacy = BlockModel(nv, learn_output_scale=False, output_link=False, shared_facts=True, input_embedding=False, first_turn_facts=True)   # 29 Eylul oncesi kosu
+    legacy = BlockModel(nv, learn_output_scale=False, output_link=False, shared_facts=True, input_embedding=False, first_turn_facts=True,
+                        rope_base=10000)   # 29 Eylul oncesi kosu (RoPE tabani sabit 10.000)
     for sub, model_ in (("old", off), ("new", trained), ("legacy", legacy)):
         os.makedirs(os.path.join(tmp, sub))
         kw_ = dict(d=64, turns=4, layers=2, heads=4, fact_activation="swiglu", units=170, t_max=512)
         if sub != "legacy":                                  # kosucular (29 Eylul'den) iki anahtari hep yazar
             kw_.update(output_link=model_.output_link, shared_facts=model_.shared_facts,
                        input_embedding=hasattr(model_, "input_embedding"), first_turn_facts=model_.first_turn_facts,
-                       input_embedding_sphere=model_.input_embedding_sphere)
+                       input_embedding_sphere=model_.input_embedding_sphere,
+                       rope_base=model_.blocks[0].attention.rope_base)    # kosucular (30 Eylul'den) tabani sayi yazar
         if sub == "new":
             kw_["learn_output_scale"] = True
         json.dump(dict(setting="shared", model_kw=kw_, rope=True, normalized_update=True, sphere_weights=True, canon=True,
@@ -2442,7 +2444,7 @@ def t_internals():
     kept = [(a_.clone(), b_.clone()) for a_, b_ in cached]
     replica = []
     for sf in (True, False):                               # paylasimli ve tur basina FactUnits
-        mk = dict(base_kw, output_link=True, shared_facts=sf)
+        mk = dict(base_kw, output_link=True, shared_facts=sf, rope_base=10000.0)   # kosucular config'e sayi yazar
         ctx = I._profile_setup(dict(setting="shared", vocab=nv, model_kw=mk, weight_ema=0.9), cached, "cpu")
         for j in (1, 2, 3):                                # kurulum batch 0 ile bir adim; tekrar 1, 2, 0
             I._step_parts(ctx, *cached[j % 3], I._Clock("cpu"))
@@ -2744,6 +2746,50 @@ def t_attention_log_scale():
           "graph break %d / %d" % (ex.graph_break_count, ex_p.graph_break_count))
 
 
+def t_rope_base():
+    """ROPE_BASE "auto": rope_base_for(head boyu, t_max) Men 2024 olcutu -- secilen tabanda B(m) >= 0 her m <= 2 x baglam, bir
+    kucuk aday tutmuyor (bagimsiz hesap, math.cos); SimpleStories (96, 512) 10.000'de kalir; model tabani attention'a ulasir
+    (elle RoPE ayni); eski config (rope_base yok) 10.000 ile kurulur."""
+    import internals_y as I
+    from model_y import ROPE_BASE, BlockModel, CausalAttention, apply_rope, rope_base_for
+
+    def reach(base, dh, L):                              # B(m) >= 0 kalan en uzun m (<= L); bagimsiz: saf Python
+        th = [base ** (-2 * i / dh) for i in range(dh // 2)]
+        for m in range(L + 1):
+            if sum(math.cos(m * t) for t in th) < 0:
+                return m - 1
+        return L
+
+    grid = [c * 10.0 ** k for k in range(4, 13) for c in (1, 2, 5)]
+    rows = []
+    for dh, L, want in ((96, 512, 1e4), (128, 8192, 5e5), (64, 8192, 2e6)):
+        b = rope_base_for(dh, L)
+        prev = grid[grid.index(b) - 1] if grid.index(b) else None
+        rows.append((dh, L, b, want, reach(b, dh, 2 * L) == 2 * L, prev is None or reach(prev, dh, 2 * L) < 2 * L))
+    check("rope_base_for: B(m) >= 0 her m <= 2 x baglam, bir kucuk aday tutmuyor; (96, 512) 10.000, (128, 8.192) 5e5, "
+          "(64, 8.192) 2e6", all(r[2] == r[3] and r[4] and r[5] for r in rows),
+          " ".join("%d/%d->%.0e" % r[:3] for r in rows))
+
+    V = 30
+    g = torch.Generator().manual_seed(41)
+    x = torch.nn.functional.normalize(torch.randn(1, 20, 32, generator=g), dim=-1).double()
+    at = CausalAttention(32, t_max=64, seed=3, rope=True, heads=4).double()
+    fixed = CausalAttention(32, t_max=64, seed=3, rope=True, heads=4, rope_base=10000).double()
+    with torch.no_grad():
+        q, k = at.queries_keys(x)
+        qh = torch.nn.functional.normalize((x @ at.W_query.T).unflatten(-1, (4, -1)).transpose(-3, -2), dim=-1)
+        err = float((q - apply_rope(qh, None, rope_base_for(8, 64))).abs().max())
+    m_auto, m_old = BlockModel(V, d=32, heads=4, units=8, t_max=64), I._build(dict(vocab=V, stream_norm=True, layer_norm=False,
+        rope=True, normalized_update=True, sphere_weights=True, canon=True, model_kw=dict(d=32, heads=4, units=8, t_max=64)))
+    check("ROPE_BASE: varsayilan auto, model rope_base_for(head boyu, t_max) kullanir (elle RoPE ayni); sayi verilince o; "
+          "eski config (rope_base yok) 10.000; apply_rope varsayilani 10.000",
+          ROPE_BASE == "auto" and at.rope_base == rope_base_for(8, 64) != 10000 and fixed.rope_base == 10000.0 and err < 1e-12
+          and all(b.attention.rope_base == rope_base_for(8, 64) for b in m_auto.blocks)
+          and all(b.attention.rope_base == 10000.0 for b in m_old.blocks)
+          and torch.equal(apply_rope(x), apply_rope(x, None, 10000.0)),
+          "auto %.0e  fark %.1e" % (at.rope_base, err))
+
+
 def t_micro_batches():
     """MICRO_BATCHES (gradyan birikimi): coherence'ta 2 parca = bugunku iki yari (bit duzeyinde); 4 parca ve coherence'siz 2 /
     4 parca tek batch'in egitimiyle ayni (float32 yuvarlamasi); paketli batch'le; surdurme bit duzeyinde; coherence'ta tek
@@ -2822,7 +2868,7 @@ if __name__ == "__main__":
     names = [f.__name__ for f in (t_model, t_step2, t_step3, t_transformer, t_generate_cached, t_normalized_update, t_canon,
               t_layers, t_coherence, t_weight_ema, t_heads, t_fact_activation, t_learn_output_scale, t_matmul_precision,
               t_loss_chunk, t_muon_tangent, t_output_link, t_shared_facts, t_input_embedding, t_internals, t_packing, t_attention_log_scale,
-              t_micro_batches)]
+              t_micro_batches, t_rope_base)]
     if args.only:
         want = [n.strip() for n in args.only.split(",") if n.strip()]
         assert set(want) <= set(names), "bilinmeyen test: %s" % sorted(set(want) - set(names))

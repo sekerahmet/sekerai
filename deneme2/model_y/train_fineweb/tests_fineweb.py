@@ -441,6 +441,7 @@ def t_colab(data, root):
           and cfg["lr"] == C.peak_lr(16) and cfg["schedule"] == "coherence" and cfg["model_kw"]["units"] == 16
           and cfg["model_kw"]["t_max"] == SEQ and cfg["model_kw"]["attention_log_scale"] is True
           and cfg["model_kw"]["packed_attention"] == M.PACKED_ATTENTION
+          and cfg["model_kw"]["rope_base"] == M.rope_base_for(16 // 2, SEQ)       # "auto" config'e sayi olarak
           and [e["step"] for e in ex] == [0, 1, 2, 3] and len(ex[0]["bands"]) == len(EF.BANDS)
           and len(ex[0]["texts"]) == EF.PROBE_PROMPTS and "repeats" in ex[0] and "weight_ema" in ex[1]
           and all("tokens_per_sec" in e for e in ex[1:]) and fin.get("valid", {}).get("docs") == len(data["valid_starts"])
