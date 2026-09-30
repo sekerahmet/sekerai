@@ -30,6 +30,7 @@ from train_y import generate  # noqa: E402
 EXAM_STORIES = 1000      # ~287 bin hedef token (ortalama hikaye ~287 token)
 BANDS = ((0, 64), (64, 256), (256, 512))     # hedefin penceredeki konumu (exam_tinystories ile ayni)
 LOGITS_BUDGET = 1 << 28  # sinav batch'i: batch x seq_len x sozluk <= bu (fp32 1 GB); ss4096'da 64, gpt2'de 10
+CACHE_BUDGET = 8 << 30   # onbellekli uretimde satir parcasi: K/V onbellegi + istem attention tablosu (fp32) <= bu bayt
 # SimpleStories valid'inden (sinav kumesi): tohum 0 ile karisik sirada temasi farkli ilk 12 hikaye, istem = ilk paragrafin
 # ilk 30 kelimesi (paragraf >= 36 kelime).  TinyStories istemleri SimpleStories'in dagilimina uymayabilir.  Yorum: valid
 # sirasi | theme | topic | style.  Ilk PROBE_PROMPTS her sinavda, hepsi sonda.
@@ -324,7 +325,13 @@ def _continue(model, prompts, n, sampled, seed, eos, vocab_size):
     obur modeller her adimda diziyi bastan hesaplar, satir parcalari LOGITS_BUDGET'a sigar."""
     gen = torch.Generator(device=next(model.parameters()).device).manual_seed(seed)
     cached = isinstance(model, BlockModel)
-    step = len(prompts) if cached else max(1, LOGITS_BUDGET // (vocab_size * (max(map(len, prompts)) + n)))
+    width = max(map(len, prompts))
+    if cached:                                          # FineWeb'de istem 4.000 token'a kadar: 128 satir tek batch'te 80 GB'i asti
+        d = model.blocks[0].attention.W_query.shape[0]
+        per_row = 4 * (2 * model.turns * d * (width + n) + model.heads * width * width)
+        step = max(1, min(len(prompts), CACHE_BUDGET // per_row))
+    else:
+        step = max(1, LOGITS_BUDGET // (vocab_size * (width + n)))
     gens = [g for c in range(0, len(prompts), step)
             for g in _continue_batch(model, prompts[c:c + step], n, sampled[c:c + step], gen, eos, cached)]
     return [g[:g.index(eos)] if eos in g else g for g in gens], [eos in g for g in gens]

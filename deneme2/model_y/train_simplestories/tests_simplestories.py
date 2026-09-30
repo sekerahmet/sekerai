@@ -681,6 +681,14 @@ def t_text_errors(root):
           and ended == [len(x) < n for x in got] and got_t[:4] == greedy_t == split_t[:4]
           and got_t == sample_by_hand(tm, prompts + prompts, n, flags, 3, eos), str(got[4][:6]))
 
+    budget, ES.CACHE_BUDGET = ES.CACHE_BUDGET, 1                      # onbellekli parca satir basina bir
+    try:
+        split, _ = ES._continue(model, prompts, n, [False] * 4, 3, eos, V)
+    finally:
+        ES.CACHE_BUDGET = budget
+    check("_continue: onbellekli uretim CACHE_BUDGET'a gore satir parcalarina bolunur; acgozlu devam tek batch'le ayni",
+          split == got[:4], str(split[0][:6]))
+
     ok = []
     for t in DS.TAGS:
         dt = d[t]

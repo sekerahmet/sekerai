@@ -49,6 +49,8 @@ PROMPTS = (
 )
 PROBE_PROMPTS = 4
 REPEAT_DOCS = 64         # continuation_repeats: baglama sigan sinav belgelerinin ilk bu kadari (en az MIN_DOC token)
+REPEAT_TOKENS = 256      # continuation_repeats: devam (ve karsilastirilan gercek devam) en cok bu kadar token; dongu olcusu
+                         # icin yeter, 4.000'lik devam her sinavda cok yavas (A100 TEST, 30 Eylul)
 MIN_DOC = 16             # istem + devam icin en kisa belge (token)
 COPY_PASSAGES = 32       # distant_copy: sinav belgelerinin (COPY_TOKENS'ten uzun) ilk bu kadarinin basi
 COPY_TOKENS = 64         # distant_copy: parca boyu (token)
@@ -256,8 +258,9 @@ def _repeats(prompts, gens, ended):
 @torch.no_grad()
 def continuation_repeats(model, data, count=REPEAT_DOCS, seed=0, real=False):
     """Baglama sigan sinav belgelerinin ilk count'u (fitting_docs): ilk yaridan (doc_prompts) acgozlu ve ornekleme
-    (sicaklik 1, tohum seed) devam, belgenin kalani + 1 token ya da eot.  -> greedy / sampled [/ real]: _repeats."""
+    (sicaklik 1, tohum seed) devam, belgenin kalani (en cok REPEAT_TOKENS) + 1 token ya da eot.  -> greedy / sampled [/ real]: _repeats."""
     prompts, reals = doc_prompts(data, fitting_docs(data, data["exam"])[:count])
+    reals = [r[:REPEAT_TOKENS] for r in reals]
     out = {}
     if model is not None and prompts:
         limits = [len(r) + 1 for r in reals] * 2
