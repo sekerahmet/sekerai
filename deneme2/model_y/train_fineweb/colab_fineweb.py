@@ -281,10 +281,13 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
         os.replace(path + ".part", path)             # surdurme yarim pakete dusmesin
         work["save_secs"] += time.time() - t
 
-    def final_exam(model):
-        """Sonda bir kez: butun valid, alt kume, uzun belgeler, istemler, belge devamlari, tekrar."""
-        f = dict(valid=EF.exam(model, data, range(len(data["valid_starts"]))), subset=EF.exam(model, data),
-                 long=EF.exam_long(model, data))
+    def final_exam(model, full=True):
+        """Sonda bir kez: butun valid (full), alt kume, uzun belgeler, istemler, belge devamlari, tekrar, uzak kopya.  Ortalama
+        modelde full=False (kullanici, 30 Eylul: "sınav kısaltması ok"): alt kume +-0,005 nat yetiyor, butun valid sureyi ikiye
+        katliyordu (on kosu: son sinav 16 dk)."""
+        f = dict(subset=EF.exam(model, data), long=EF.exam_long(model, data))
+        if full:
+            f["valid"] = EF.exam(model, data, range(len(data["valid_starts"])))
         f["prompts"] = EF.texts(model, data, EF.prompt_ids(data), FINAL_TOKENS)
         halves, reals = EF.doc_prompts(data, EF.fitting_docs(data, data["exam"])[:FINAL_DOCS])
         f["docs"] = EF.texts(model, data, halves, reals=reals)
@@ -297,7 +300,7 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
         return f
 
     def final_lines(f, head):
-        for k in ("valid", "subset"):
+        for k in [k for k in ("valid", "subset") if k in f]:
             v = f[k]
             note("%s %-6s n %d  nll %.4f ppl %.2f acc %.4f (%s)  bpb %.4f (%s, eos dahil %.4f)  eos %.3f ar %.3f" % (
                 head, k, v["n"], v["nll"], v["ppl"], v["accuracy"], _band_text(v), v["bits_per_byte"], _bpb_text(v),
@@ -346,7 +349,7 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
             if getattr(model, "weight_ema", None):    # ortalama model de ayni son sinavdan gecer
                 em = model.weight_ema["model"]
                 torch.save(em.state_dict(), os.path.join(out, "model_weight_ema.pt"))
-                final["weight_ema"] = final_exam(em)
+                final["weight_ema"] = final_exam(em, full=False)
             json.dump(final, open(os.path.join(out, "final.json"), "w", encoding="utf-8"), indent=1, ensure_ascii=False)
             final_lines(final, "SON")
             if "weight_ema" in final:

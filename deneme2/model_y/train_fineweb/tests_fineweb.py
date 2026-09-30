@@ -484,6 +484,7 @@ def t_colab(data, root):
           and len(ex[0]["texts"]) == EF.PROBE_PROMPTS and "repeats" in ex[0] and "weight_ema" in ex[1]
           and ex[0]["distant_copy"]["rows"] and fin["distant_copy"]["rows"][-1]["distance"] > SEQ
           and all("tokens_per_sec" in e for e in ex[1:]) and fin.get("valid", {}).get("docs") == len(data["valid_starts"])
+          and "valid" not in fin["weight_ema"] and fin["weight_ema"]["subset"]["docs"] == len(data["exam"])
           and fin["subset"]["docs"] == EXAM and len(fin["prompts"]) == len(EF.PROMPTS)
           and len(fin["docs"]) == len(EF.fitting_docs(data, data["exam"])[:C.FINAL_DOCS]) > 0
           and set(fin["repeats"]) == {"greedy", "sampled", "real"} and "long" in fin and "weight_ema" in fin
