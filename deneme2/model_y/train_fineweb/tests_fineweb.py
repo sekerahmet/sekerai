@@ -493,7 +493,7 @@ def t_colab(data, root):
 
     import konus_fineweb as K
     import train_y as TR
-    K.FW_ROOTS = [root]
+    K.FW_ROOTS, K.CACHE_DIR = [root], tmp + "/konus_cache"
     vocab = K.load_vocab()
     eot = vocab.index(K.DS.EOS_TOKEN)
     last, _, l1 = K.load_model(out, "last")
@@ -503,8 +503,13 @@ def t_colab(data, root):
     mine = K.generate(last, prompt, 6, eot)
     ref = TR.generate(last, [prompt], 6)[0]
     ref = ref[:ref.index(eot)] if eot in ref else ref
-    check("konus_fineweb: model.pt / son checkpoint / EMA yuklenir (internals_y._build); acgozlu devam = train_y.generate "
-          "(onbellekli, eot'ta durur)", mine == ref and l2 == "checkpoint adim 3" and l3 == "ORTALAMA agirliklar"
+    again, _, _ = K.load_model(out, "ck")                         # ikinci kez: yerel onbellekten
+    cached = sorted(os.listdir(tmp + "/konus_cache/r"))
+    check("konus_fineweb: model.pt / son checkpoint / EMA yuklenir (internals_y._build), yerel onbellege (checkpoint'ten "
+          "yalniz model); acgozlu devam = train_y.generate (onbellekli, eot'ta durur)",
+          mine == ref and l2 == "checkpoint adim 3" and l3 == "ORTALAMA agirliklar"
+          and cached == ["checkpoint_t000003.model.pt", "model.pt", "model_weight_ema.pt"]
+          and all(torch.equal(a, b) for a, b in zip(again.state_dict().values(), ck.state_dict().values()))
           and all(torch.equal(a, b) for a, b in zip(last.state_dict().values(), ck.state_dict().values())),
           "%s | %s" % (mine, ref))
 

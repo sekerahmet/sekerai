@@ -1,8 +1,9 @@
 """Modelle KONUS (model_y, FineWeb-Edu kosulari) -- bir metin baslangici yaz, model devamini yazsin.
 Kullanici, 30 Eylul: "Sen bir konuş py yazar mısın"; ad "konus_fineweb.py (Önerilen)".
 
-Agirlik Colab'da uretilip Drive'a yaziliyor; burasi yalniz OKUYOR.  Model CPU'da calisir, gpt2 tokenizer Drive'dan
-(fineweb/gpt2/tokenizer.json).  Model <|endoftext|>'ten (belge basi) baslar ve kendi <|endoftext|>'ini yazinca durur.
+Agirlik Colab'da uretilip Drive'a yaziliyor; burasi yalniz OKUYOR ve yerel onbellege alir (CACHE_DIR): model.pt / EMA
+bir kez kopyalanir, checkpoint'in yalniz model agirligi (~1 GB, optimizer'siz) yazilir -- ayni dosya bir daha inmez.
+Model CPU'da calisir, gpt2 tokenizer Drive'dan (fineweb/gpt2/tokenizer.json).  Model <|endoftext|>'ten (belge basi) baslar ve kendi <|endoftext|>'ini yazinca durur.
 Kosu surerken model.pt yoksa son checkpoint yuklenir: egitilirken konusulur.
 
   The water cycle is         yaz, devamini gorursun
@@ -22,6 +23,7 @@ Kosu surerken model.pt yoksa son checkpoint yuklenir: egitilirken konusulur.
 import json
 import os
 import random
+import shutil
 import sys
 import textwrap
 import threading
@@ -34,6 +36,7 @@ torch = DS = EF = I = AttentionCache = None
 RUN_ROOTS = [r"G:\Drive'ım\model_y", r"G:\Drivem\model_y"]
 FW_ROOTS = [r"G:\Drive'ım\fineweb", r"G:\Drivem\fineweb"]
 EOT = "<|endoftext|>"
+CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "model_y_konus")   # kosu basina alt klasor
 
 
 def _heavy():
@@ -93,20 +96,32 @@ def load_model(run_dir, weights="auto"):
     cfg = json.load(open(os.path.join(run_dir, "config.json")))
     if weights == "auto":
         weights = "last" if os.path.exists(os.path.join(run_dir, "model.pt")) else "ck"
+    cache = os.path.join(CACHE_DIR, os.path.basename(run_dir))
+    os.makedirs(cache, exist_ok=True)
     if weights == "ck":
         cks = _checkpoints(run_dir)
         if not cks:
             print("   checkpoint yok (%s)" % os.path.basename(run_dir))
             return None, cfg, None
-        pack = torch.load(os.path.join(run_dir, cks[-1]), map_location="cpu", weights_only=True)
-        state, label = pack["model"], "checkpoint adim %d" % pack["step"]
+        local = os.path.join(cache, cks[-1][:-3] + ".model.pt")
+        if not os.path.exists(local):                   # paketten yalniz model agirligi, yerele bir kez
+            print("   %s Drive'dan okunuyor (optimizer dahil ~3 GB), yalniz model yerele yaziliyor..." % cks[-1])
+            pack = torch.load(os.path.join(run_dir, cks[-1]), map_location="cpu", weights_only=True)
+            torch.save(pack["model"], local + ".part")
+            os.replace(local + ".part", local)
+        state, label = torch.load(local, map_location="cpu", weights_only=True), "checkpoint adim %d" % int(cks[-1][12:18])
     else:
         name = "model_weight_ema.pt" if weights == "ema" else "model.pt"
         path = os.path.join(run_dir, name)
         if not os.path.exists(path):
             print("   %s yok (%s)" % (name, os.path.basename(run_dir)))
             return None, cfg, None
-        state, label = torch.load(path, map_location="cpu", weights_only=True), (
+        local = os.path.join(cache, name)
+        if not os.path.exists(local) or os.path.getmtime(local) < os.path.getmtime(path):   # Drive'daki daha yeni
+            print("   %s yerel onbellege kopyalaniyor (%.1f GB)..." % (name, os.path.getsize(path) / 1e9))
+            shutil.copyfile(path, local + ".part")
+            os.replace(local + ".part", local)
+        state, label = torch.load(local, map_location="cpu", weights_only=True), (
             "ORTALAMA agirliklar" if weights == "ema" else "son agirliklar")
     m = I._build(cfg)
     m.load_state_dict(state)
