@@ -105,10 +105,17 @@ def load_model(run_dir, weights="auto"):
             return None, cfg, None
         local = os.path.join(cache, cks[-1][:-3] + ".model.pt")
         if not os.path.exists(local):                   # paketten yalniz model agirligi, yerele bir kez
-            print("   %s Drive'dan okunuyor (optimizer dahil ~3 GB), yalniz model yerele yaziliyor..." % cks[-1])
-            pack = torch.load(os.path.join(run_dir, cks[-1]), map_location="cpu", weights_only=True)
-            torch.save(pack["model"], local + ".part")
-            os.replace(local + ".part", local)
+            # once parca parca yerele kopya: torch.load 3,8 GB'lik paketi G:'den dogrudan okurken [Errno 22] verdi (30 Eylul)
+            print("   %s Drive'dan yerele kopyalaniyor (optimizer dahil %.1f GB), yalniz model saklanacak..." % (
+                cks[-1], os.path.getsize(os.path.join(run_dir, cks[-1])) / 1e9))
+            full = os.path.join(cache, "_paket.pt")
+            shutil.copyfile(os.path.join(run_dir, cks[-1]), full)
+            try:
+                pack = torch.load(full, map_location="cpu", weights_only=True)
+                torch.save(pack["model"], local + ".part")
+                os.replace(local + ".part", local)
+            finally:
+                os.remove(full)
         state, label = torch.load(local, map_location="cpu", weights_only=True), "checkpoint adim %d" % int(cks[-1][12:18])
     else:
         name = "model_weight_ema.pt" if weights == "ema" else "model.pt"
