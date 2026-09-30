@@ -313,9 +313,13 @@ class CausalAttention(torch.nn.Module):
                 q, k, v = q[:, None], k[:, None], v[:, None]
             if torch.is_tensor(mask):
                 c = F.scaled_dot_product_attention(q, k, v, attn_mask=mask[:, None], scale=self.scale)
-            else:                                         # autocast flex'i kapsamaz: tipler q'nunki
-                c = (_flex_compiled if q.is_cuda else flex_attention)(q, k.to(q.dtype), v.to(q.dtype), block_mask=mask,
-                                                                      scale=self.scale)
+            elif q.is_cuda:                               # autocast flex'i kapsamaz: tipler q'nunki.  fp32 (sinav): kucuk blok,
+                # varsayilan blok A100'un paylasimli bellegini asiyor (head 96: 180 KB > 167 KB; 30 Eylul, on kosu uzak kopya)
+                c = _flex_compiled(q, k.to(q.dtype), v.to(q.dtype), block_mask=mask, scale=self.scale,
+                                   kernel_options=dict(BLOCK_M=32, BLOCK_N=32, num_stages=1)
+                                   if q.dtype == torch.float32 else None)
+            else:
+                c = flex_attention(q, k.to(q.dtype), v.to(q.dtype), block_mask=mask, scale=self.scale)
             return c[:, 0] if self.heads == 1 else c.transpose(-3, -2).flatten(-2)
         q, k = self.queries_keys(x)
         if self.heads > 1:                                # c = [a_1 (V_1 x) ; ... ; a_H (V_H x)], head'ler yan yana
