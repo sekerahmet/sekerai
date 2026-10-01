@@ -48,6 +48,20 @@ PROMPTS = (
     "Climate change affects",
 )
 PROBE_PROMPTS = 4
+# Dogru cevap sinavi: (istem, dogru cevabin ozu).  Puanlama OTOMATIK DEGIL, gozle (kullanici, 1 Ekim: "bence 10 tane yap ama
+# otomatik kontrol değil sen bak"); son model ve EMA, acgozlu + 3 ornekleme, cevaplar kosu klasorunde questions.json
+QUESTIONS = (
+    ("The capital of France is", "Paris"),
+    ("The largest planet in our solar system is", "Jupiter"),
+    ("Water boils at a temperature of", "100 C / 212 F"),
+    ("Plants need sunlight, water and", "carbon dioxide"),
+    ("The chemical symbol for gold is", "Au"),
+    ("Isaac Newton is famous for", "laws of motion / gravity"),
+    ("World War II ended in the year", "1945"),
+    ("The Amazon rainforest is located in", "South America / Brazil"),
+    ("If a rectangle is 3 meters long and 4 meters wide, its area is", "12 square meters"),
+    ("The seasons on Earth are caused by", "the tilt of Earth's axis"),
+)
 REPEAT_DOCS = 64         # continuation_repeats: baglama sigan sinav belgelerinin ilk bu kadari (en az MIN_DOC token)
 REPEAT_TOKENS = 256      # continuation_repeats: devam (ve karsilastirilan gercek devam) en cok bu kadar token; dongu olcusu
                          # icin yeter, 4.000'lik devam her sinavda cok yavas (A100 TEST, 30 Eylul)
