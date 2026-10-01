@@ -376,6 +376,18 @@ def t_exam(data, tok):
           and all(len(w["ids"]) <= len(r) + 1 and w["real"] for w, r in zip(written, reals)),
           "%d / %d belge sigar" % (len(fit), len(docs)))
 
+    s = data["valid_starts"]
+    lw = EF.long_write(model, data, segment=8)
+    lw2 = EF.long_write(model, data, segment=8)
+    n_prompt = len(EF.prompt_ids(data)[0])
+    check("typical_doc_tokens = valid belgelerinin medyan boyu; long_write: baglam dolana kadar (seq_len - istem), eot "
+          "yasak, tohumlu; dilim basina farkli4 / tekrar8, loop_first ilk tekrar eden 8'li",
+          EF.typical_doc_tokens(data) == int(np.median(np.append(s[1:], len(data["valid"])) - s))
+          and lw["tokens"] == SEQ - n_prompt and lw == lw2 and len(lw["segments"]) == -(-lw["tokens"] // 8)
+          and all(0 <= x["distinct4"] <= 1 and 0 <= x["repeat8"] <= 1 for x in lw["segments"])
+          and (lw["loop_first"] is None or 0 <= lw["loop_first"] < lw["tokens"]),
+          "%d token, eot_first %s, loop_first %s" % (lw["tokens"], lw["eot_first"], lw["loop_first"]))
+
 
 def t_distant_copy(data):
     V = len(data["vocab"])
@@ -488,7 +500,9 @@ def t_colab(data, root):
           and fin["subset"]["docs"] == EXAM and len(fin["prompts"]) == len(EF.PROMPTS)
           and len(fin["docs"]) == len(EF.fitting_docs(data, data["exam"])[:C.FINAL_DOCS]) > 0
           and set(fin["repeats"]) == {"greedy", "sampled", "real"} and "long" in fin and "weight_ema" in fin
-          and "SON valid" in log and "SON uzun" in log and "tekrar" in log,
+          and "SON valid" in log and "SON uzun" in log and "tekrar" in log
+          and fin["long_write"]["tokens"] == fin["weight_ema"]["long_write"]["tokens"] > 0 and "SON uzun yazim" in log
+          and "uretim: sinav istemi %d token" % EF.typical_doc_tokens(data) in log,
           str(run["error"] or files) + " docs %d repeats %s" % (len(fin.get("docs", [])), sorted(fin.get("repeats", {}))))
 
     import konus_fineweb as K

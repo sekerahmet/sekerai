@@ -12,6 +12,8 @@ genel olculeri (loop_check, alpha_summary, onbellekli devam) exam_simplestories'
     distant_copy          uzun baglam: bir parca uzaklik kadar sonra tekrar edilir; ikinci kopyada accuracy / nll, ilk
                           geciste (kopya yok) taban.  Kullanici, 30 Eylul: "Uzun bağlamı ölçen bir sınav yok. En kritiği bu.
                           bunu hallet." (ppl ve bant accuracy'si uzaktan getirememeyi gostermez, Men 2024)
+    long_write            tek istemden baglam dolana kadar ornekleme (eot yasak): nerede donguye giriyor, dilim dilim
+                          farkli4 / tekrar8; sonda bir kez
 SimpleStories'ten TASINMAYANLAR: 'X and X', kalip cumle, uydurma kelime (web metninde ad, adres, kod, sayi mesru; train
 kelime listesi anlam tasimaz), soz tekrari (diyalog olcusu), exam_train (egitim 1 epoktan az: ezber okunmaz).
 """
@@ -29,6 +31,7 @@ sys.path.insert(0, os.path.dirname(HERE))                           # model_y: m
 import data_fineweb as DF  # noqa: E402
 import data_simplestories as DS  # noqa: E402
 import exam_simplestories as ES  # noqa: E402
+from model_y import AttentionCache  # noqa: E402
 from train_y import generate  # noqa: E402
 
 BANDS = ((0, 2048), (2048, 4096), (4096, 8192))    # tahminin yapildigi belge ici konum (gorulen anahtar - 1)
@@ -69,6 +72,9 @@ MIN_DOC = 16             # istem + devam icin en kisa belge (token)
 COPY_PASSAGES = 32       # distant_copy: sinav belgelerinin (COPY_TOKENS'ten uzun) ilk bu kadarinin basi
 COPY_TOKENS = 64         # distant_copy: parca boyu (token)
 COPY_FIRST = 256         # distant_copy: en kisa uzaklik; 2 katlarla en uzaga kadar
+LONG_WRITE_TEMPERATURE = 0.8   # long_write: konus'taki ornekleme (s 0,8, p 0,9); tekrar cezasi YOK -- dogal dongu gorulsun
+LONG_WRITE_TOP_P = 0.9
+LONG_WRITE_SEGMENT = 512       # long_write: dilim boyu (dilim basina farkli4, tekrar8)
 _CACHE = {}
 
 
@@ -224,6 +230,53 @@ def texts(model, data, prompts, n=None, reals=None):
             row["real"] = DS.decode(reals[i], vocab)
         out.append(row)
     return out
+
+
+def typical_doc_tokens(data):
+    """Valid belgelerinin medyan boyu (token, [eot] dahil): "auto" uretim boyu -- model tipik bir belge kadar yazar (kullanici,
+    1 Ekim: "bir ölçeğe uydur"; FineWeb-Edu shard 13'te 641)."""
+    s = data["valid_starts"]
+    return int(np.median(np.append(s[1:], len(data["valid"])) - s))
+
+
+@torch.no_grad()
+def long_write(model, data, prompt=PROMPTS[0], seed=0, temperature=LONG_WRITE_TEMPERATURE, top_p=LONG_WRITE_TOP_P,
+               segment=LONG_WRITE_SEGMENT, n=None):
+    """Tek istemden baglam (seq_len) dolana kadar ornekleme, eot YASAK (kullanici, 1 Ekim: "Yasakla, bağlam dolana kadar
+    yazsın"); eot'un en olasi oldugu ilk konum eot_first.  loop_first: daha once gecmis (istem dahil) 8'linin bittigi ilk
+    konum.  -> dict(prompt, text, tokens, eot_first, loop_first, segments [dict(start, distinct4, repeat8)])."""
+    device = next(model.parameters()).device
+    eot, vocab = data["eot"], data["vocab"]
+    ids = [eot] + DS.encode(prompt, vocab)
+    n = n or data["seq_len"] - len(ids)
+    caches = [AttentionCache(torch.tensor([len(ids)], device=device), len(ids) + n) for _ in range(model.turns)]
+    g = torch.Generator(device=device).manual_seed(seed)
+    out, eot_first, x = [], None, torch.tensor([ids], device=device)
+    for i in range(n):
+        z = model.logits(x, caches)[0, -1].float()
+        if eot_first is None and int(z.argmax()) == eot:
+            eot_first = i
+        z[eot] = -float("inf")
+        ps, order = torch.softmax(z / temperature, -1).sort(descending=True)
+        keep = ps.cumsum(0) - ps < top_p
+        t = int(order[keep][torch.multinomial(ps[keep] / ps[keep].sum(), 1, generator=g)])
+        out.append(t)
+        x = torch.tensor([[t]], device=device)
+    full, seen, repeated = ids + out, set(), []
+    for j in range(len(full)):                          # repeated[j - len(ids)]: out[...]'ta biten 8'li daha once gecti mi
+        gram = tuple(full[j - 7:j + 1]) if j >= 7 else None
+        if j >= len(ids):
+            repeated.append(gram in seen)
+        if gram:
+            seen.add(gram)
+    segments = []
+    for s in range(0, len(out), segment):
+        part = out[s:s + segment]
+        g4 = [tuple(part[i:i + 4]) for i in range(len(part) - 3)]
+        segments.append(dict(start=s, distinct4=round(len(set(g4)) / len(g4), 4) if g4 else 1.0,
+                             repeat8=round(sum(repeated[s:s + segment]) / len(part), 4)))
+    return dict(prompt=prompt, text=DS.decode(out, vocab), tokens=len(out), eot_first=eot_first,
+                loop_first=repeated.index(True) if True in repeated else None, segments=segments)
 
 
 def prompt_ids(data, prompts=PROMPTS):

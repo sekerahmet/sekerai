@@ -64,8 +64,9 @@ SAVE_EVERY = 500
 # valid_shard 1: tokenize bitmeden (shard_013 yokken) baslayabilsin; egitim yalniz shard_000'dan (200M < 0,7G)
 PILOT = dict(name="fineweb_modely_3x2_d384_gpt2_pilot_s0", seq_len=4096, token_budget=200e6, tokens_per_step=16 * 4096,
              batch_size=8, valid_shard=1, model_kw=dict(d=384, layers=3, turns=6, heads=4, units=1024))
-PROBE_TOKENS = 64        # her sinavda istem basina uretilen token
-FINAL_TOKENS = 256       # sonda sabit istem basina (belge devami: belgenin kalani kadar)
+PROBE_TOKENS = "auto"    # her sinavda istem basina uretilen token; "auto" = EF.typical_doc_tokens (valid medyan belge, 641;
+                         # kullanici, 1 Ekim: "bir ölçeğe uydur").  1 Ekim'e kadar 64 (olculmemis).  Config'e girmez: log'da
+FINAL_TOKENS = "auto"    # sonda sabit istem basina, ayni kural (1 Ekim'e kadar 256); belge devami: belgenin kalani kadar
 FINAL_DOCS = 8           # sonda ilk yarisi verilen sinav belgesi (gercek devamla)
 REPEAT_EVERY = 4         # continuation_repeats her 4. sinavda (adim / every % 4 == 0) ve sonda
 RUNS = {}
@@ -192,6 +193,7 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
                  if e["step"] <= checkpoint["step"]]
     run = dict(name=name, out=out, lines=[], stop=False, error=None, done=False, t0=time.time(), exams=exams, mark=None)
     probes = EF.prompt_ids(data)[:EF.PROBE_PROMPTS]
+    probe_tokens, final_tokens = (EF.typical_doc_tokens(data) if x == "auto" else x for x in (PROBE_TOKENS, FINAL_TOKENS))
     peak = CS._peak_for(torch.cuda.get_device_name(device), config["matmul_precision"]) if cuda else None
     work = dict(targets=0, keys=0, save_secs=0.0)      # son sinavdan bu yana: hedef token, attention anahtari, yedek suresi
 
@@ -236,7 +238,7 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
             e.update(link_q=float(model.link_q.detach()), link_u=float(model.link_u.detach()))
         if (step // every) % REPEAT_EVERY == 0:
             e.update(repeats=EF.continuation_repeats(model, data), distant_copy=EF.distant_copy(model, data))
-        written = EF.texts(model, data, probes, PROBE_TOKENS)
+        written = EF.texts(model, data, probes, probe_tokens)
         e.update(ES.loop_check([w["ids"] for w in written]), texts=[w["model"] for w in written],
                  secs=round(time.time() - run["t0"], 1))
         run["exams"].append(e)
@@ -289,12 +291,13 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
         f = dict(subset=EF.exam(model, data), long=EF.exam_long(model, data))
         if full:
             f["valid"] = EF.exam(model, data, range(len(data["valid_starts"])))
-        f["prompts"] = EF.texts(model, data, EF.prompt_ids(data), FINAL_TOKENS)
+        f["prompts"] = EF.texts(model, data, EF.prompt_ids(data), final_tokens)
         halves, reals = EF.doc_prompts(data, EF.fitting_docs(data, data["exam"])[:FINAL_DOCS])
         f["docs"] = EF.texts(model, data, halves, reals=reals)
         f["loops"] = ES.loop_check([w["ids"] for w in f["prompts"]])
         f["repeats"] = EF.continuation_repeats(model, data, real=True)
         f["distant_copy"] = EF.distant_copy(model, data, context=2 * data["seq_len"])   # egitilmemis uzakliga kadar
+        f["long_write"] = EF.long_write(model, data)
         alpha = ES.alpha_summary(model)
         if alpha:
             f["alpha_summary"] = alpha
@@ -312,9 +315,15 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
         note("%s istemler: dongu %d/%d  farkli4 %.2f" % (head, f["loops"]["loop"], len(EF.PROMPTS), f["loops"]["distinct4"]))
         note(_repeats_line(f["repeats"], "%s tekrar" % head))
         note(_copy_line(f["distant_copy"], "%s uzak kopya" % head))
+        w = f["long_write"]
+        note("%s uzun yazim (%d token, eot yasak): eot en olasi ilk %s, ilk tekrar eden 8'li %s | dilim farkli4 %s | tekrar8 %s"
+             % (head, w["tokens"], w["eot_first"], w["loop_first"], "/".join("%.2f" % s["distinct4"] for s in w["segments"]),
+                "/".join("%.2f" % s["repeat8"] for s in w["segments"])))
 
     def job():
         try:
+            note("uretim: sinav istemi %d token, son istem %d token (PROBE_TOKENS %s, FINAL_TOKENS %s; auto = valid medyan belge)"
+                 % (probe_tokens, final_tokens, PROBE_TOKENS, FINAL_TOKENS))
             if checkpoint is not None:
                 note("SURDURULDU adim %d'den (checkpoint_t%06d.pt)" % (checkpoint["step"], checkpoint["step"]))
             else:
