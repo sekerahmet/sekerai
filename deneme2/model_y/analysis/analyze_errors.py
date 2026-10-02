@@ -62,6 +62,7 @@ for p in (os.path.join(SRC, "train_simplestories"), os.path.join(SRC, "train_fin
 
 import data_simplestories as DS  # noqa: E402
 import internals_y as I  # noqa: E402
+from exam_fineweb import ENTRY_MIN_SENT, _dec, _sentence_end_table, _sentences_of  # noqa: E402
 from model_y import AttentionCache  # noqa: E402
 
 EOT = "<|endoftext|>"
@@ -96,6 +97,9 @@ QUESTIONS = (
     ("The seasons on Earth are caused by", (" the tilt of the Earth", " the tilt of Earth's axis", " the Earth's tilt",
                                             " the rotation of the Earth", " the distance from the Sun",
                                             " the Earth's distance from the sun"), 3, ("tilt",)),
+    ("The largest city in the world is", (" Tokyo", " Shanghai", " New York", " Mexico City", " Mumbai", " Kolkata"), 1,
+     ("Tokyo",)),
+    ("The biggest hamburger in the world", (" weighed", " was", " is"), 1, ("pound", "kilogram", "kg", "weigh")),   # gozle
 )
 # Ayni olgu baska yoldan: (grup, istem, adaylar, dogru aday sayisi).  Grup: reverse = ters yon / baska soru kalibi,
 # context = cevabi baglamda vererek, fewshot = ayni kalipta iki dogru ornek, binding = gozle bulunan yanlis birlesimlerin olgusu
@@ -526,8 +530,8 @@ def _median(v):
 
 
 def text_decoding(res):
-    L = ["# URETIM AYARLARI (%d token, eot yasak; 8 istem + 10 soru + %d belge devami (ilk 256 token); ornekleme 3 tohum)" % (
-        res["tokens"], res.get("docs", 0)),
+    L = ["# URETIM AYARLARI (%d token, eot yasak; %d istem + %d soru + %d belge devami (ilk 256 token); ornekleme 3 tohum)" % (
+        res["tokens"], len(PROMPTS), len(QUESTIONS), res.get("docs", 0)),
          "ayar | tur: dongu orani / ilk dongu medyan / tekrar8 / farkli4 | anahtar ilk 48 token'da (soru, OTOMATIK YARDIMCI)"]
     for s in res["settings"]:
         m = s["summary"]
@@ -545,7 +549,7 @@ def text_decoding(res):
         for r in s["rows"]:
             if (r["seed"] > 0 and r["kind"] == "prompt") or r["kind"] == "doc":
                 continue
-            cut = 260 if r["kind"] == "question" else 600
+            cut = None if r["kind"] == "question" else 600     # sorular tam (oncesi / sonrasi gozle, kural 12)
             L.append("[%s t%d dongu@%s tekrar8 %.2f] %s ||%s" % (r["kind"][0], r["seed"], r["loop_first"], r["repeat8"],
                                                                r["prompt"], r["text"][:cut].replace("\n", " / ")))
     return L
@@ -1779,26 +1783,10 @@ def text_copy_ceiling(res, n_min=400):
 
 # ---- repeat_entry: tekrara giris
 
-ENTRY_MIN_SENT = 5          # tam cumle en az bu kadar token
 ENTRY_MAX_L = 32            # l en cok bu kadar izlenir
 ENTRY_REGION = 256          # devam bolgesi (token)
 ENTRY_CUTS = (64, 128, 256, 512, 1024, 2048)
 _MOD = (1 << 61) - 1
-
-
-def _dec(vocab, ids):
-    """vocab: bizim sozluk listesi ya da cagrilabilir cozucu (hazir modelin tokenizer'i, len() ile)."""
-    return vocab(list(ids)) if callable(vocab) else decode(ids, vocab)
-
-
-def _sentence_end_table(vocab):
-    """token -> cumle sonu mu: metni '.', '!', '?' ile biten (sondaki bosluk / tirnak / parantez atilarak) ya da satir sonu
-    iceren token."""
-    out = np.zeros(len(vocab), bool)
-    for i in range(len(vocab)):
-        t = _dec(vocab, [i])
-        out[i] = "\n" in t or t.rstrip(" \"')]").endswith((".", "!", "?"))
-    return out
 
 
 def _match_trace(x):
@@ -1832,18 +1820,6 @@ def _match_trace(x):
                 last[L][h] = t
                 count[L][h] = count[L].get(h, 0) + 1
     return ell, mm, cp
-
-
-def _sentences_of(x, is_end, vocab):
-    """-> [(bas, son, anahtar)]: cumle sonu token'iyla biten parcalar (ilk parca metin basindan); anahtar = cozulmus metin,
-    bosluklari atilmis (satir basi / bosluklu yazim farki silinir).  ENTRY_MIN_SENT'ten kisa ya da bos olanlar None."""
-    out, st = [], 0
-    for i, t in enumerate(x):
-        if is_end[t]:
-            key = _dec(vocab, x[st:i + 1]).strip() if i + 1 - st >= ENTRY_MIN_SENT else None
-            out.append((st, i, key or None))
-            st = i + 1
-    return out
 
 
 def _entry_stats(x, region_start, is_end, vocab, trace=None):

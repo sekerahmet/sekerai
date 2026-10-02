@@ -64,6 +64,9 @@ QUESTIONS = (
     ("The Amazon rainforest is located in", "South America / Brazil"),
     ("If a rectangle is 3 meters long and 4 meters wide, its area is", "12 square meters"),
     ("The seasons on Earth are caused by", "the tilt of Earth's axis"),
+    ("The largest city in the world is", "Tokyo"),   # kullanici, 2 Ekim: "ekle bakalım" (papagan dongusu ornegi)
+    ("The biggest hamburger in the world", "the record-size hamburger (weight / place), not a definition loop"),
+    # kullanici, 2 Ekim: "ekle göreliml düzeliyormu düzelirken anlamlı oluyor mu" (tanim cumlesinden sonra dongu)
 )
 REPEAT_DOCS = 64         # continuation_repeats: baglama sigan sinav belgelerinin ilk bu kadari (en az MIN_DOC token)
 REPEAT_TOKENS = 256      # continuation_repeats: devam (ve karsilastirilan gercek devam) en cok bu kadar token; dongu olcusu
@@ -75,7 +78,35 @@ COPY_FIRST = 256         # distant_copy: en kisa uzaklik; 2 katlarla en uzaga ka
 LONG_WRITE_TEMPERATURE = 0.8   # long_write: konus'taki ornekleme (s 0,8, p 0,9); tekrar cezasi YOK -- dogal dongu gorulsun
 LONG_WRITE_TOP_P = 0.9
 LONG_WRITE_SEGMENT = 512       # long_write: dilim boyu (dilim basina farkli4, tekrar8)
+ENTRY_MIN_SENT = 5       # tam cumle en az bu kadar token (tekrara giris D_032, O14 ve DITTO-X cumle siniri)
 _CACHE = {}
+
+
+def _dec(vocab, ids):
+    """vocab: bizim sozluk listesi ya da cagrilabilir cozucu (hazir modelin tokenizer'i, len() ile)."""
+    return vocab(list(ids)) if callable(vocab) else DS.decode(list(ids), vocab)
+
+
+def _sentence_end_table(vocab):
+    """token -> cumle sonu mu: metni '.', '!', '?' ile biten (sondaki bosluk / tirnak / parantez atilarak) ya da satir sonu
+    iceren token."""
+    out = np.zeros(len(vocab), bool)
+    for i in range(len(vocab)):
+        t = _dec(vocab, [i])
+        out[i] = "\n" in t or t.rstrip(" \"')]").endswith((".", "!", "?"))
+    return out
+
+
+def _sentences_of(x, is_end, vocab):
+    """-> [(bas, son, anahtar)]: cumle sonu token'iyla biten parcalar (ilk parca metin basindan); anahtar = cozulmus metin,
+    bosluklari atilmis (satir basi / bosluklu yazim farki silinir).  ENTRY_MIN_SENT'ten kisa ya da bos olanlar None."""
+    out, st = [], 0
+    for i, t in enumerate(x):
+        if is_end[t]:
+            key = _dec(vocab, x[st:i + 1]).strip() if i + 1 - st >= ENTRY_MIN_SENT else None
+            out.append((st, i, key or None))
+            st = i + 1
+    return out
 
 
 def _frequency_band(data):
@@ -325,10 +356,11 @@ def _repeats(prompts, gens, ended):
 @torch.no_grad()
 def continuation_repeats(model, data, count=REPEAT_DOCS, seed=0, real=False):
     """Baglama sigan sinav belgelerinin ilk count'u (fitting_docs): ilk yaridan (doc_prompts) acgozlu ve ornekleme
-    (sicaklik 1, tohum seed) devam, belgenin kalani (en cok REPEAT_TOKENS) + 1 token ya da eot.  -> greedy / sampled [/ real]: _repeats."""
+    (sicaklik 1, tohum seed) devam, belgenin kalani (en cok REPEAT_TOKENS) + 1 token ya da eot.  -> greedy / sampled [/ real]: _repeats
+    + token_bands (uretilen token'larin train siklik bantlarina payi, FREQUENCY_BANDS; nadir token'a kacis)."""
     prompts, reals = doc_prompts(data, fitting_docs(data, data["exam"])[:count])
     reals = [r[:REPEAT_TOKENS] for r in reals]
-    out = {}
+    out, written = {}, {}
     if model is not None and prompts:
         limits = [len(r) + 1 for r in reals] * 2
         gens, ended = ES._continue(model, prompts + prompts, max(limits), [False] * len(prompts) + [True] * len(prompts),
@@ -338,8 +370,15 @@ def continuation_repeats(model, data, count=REPEAT_DOCS, seed=0, real=False):
         k = len(prompts)
         out["greedy"] = _repeats(prompts, gens[:k], ended[:k])
         out["sampled"] = _repeats(prompts, gens[k:], ended[k:])
+        written.update(greedy=gens[:k], sampled=gens[k:])
     if real:
         out["real"] = _repeats(prompts, reals, [False] * len(reals))
+        written["real"] = reals
+    band = _frequency_band(data) if written else None
+    for key, gens_ in written.items():
+        ids = np.array([t for g in gens_ for t in g], dtype=np.int64)
+        share = np.bincount(band[ids], minlength=len(FREQUENCY_BANDS) + 1) / max(len(ids), 1)
+        out[key]["token_bands"] = [round(float(x), 5) for x in share]
     return out
 
 
