@@ -1578,8 +1578,7 @@ def t_internals():
     point_drift, attention_stats, unit_usage bagimsiz hesapla; ablate: hicbir sey = taban (Δ 0), alpha'yi ayni degerle
     vermek = taban, kapatmalar agirligi degistirilmis modelin logits'iyle ayni (Δnll, Δacc, se), head ortalamasi elle;
     over_checkpoints'in yedekten kurdugu EMA = train_seq'in model.weight_ema'si (muon, adam, adamw); tuned_lens: birim
-    cevirici = logit lens, ogrenilen cevirici ayri hikayelerde iyi, son durumda KL 0, model degismez; profile_step: parca
-    parca adim = train_seq'in adimi (bit duzeyinde), parcalar adimin icinde, kendi kopyasinda."""
+    cevirici = logit lens, ogrenilen cevirici ayri hikayelerde iyi, son durumda KL 0, model degismez."""
     import copy
     import json
     import shutil
@@ -1861,53 +1860,6 @@ def t_internals():
               np.mean([tl["summary"][n]["logit"]["kl"] for n in inner]), np.mean([tl["summary"][n]["tuned"]["kl"] for n in inner]),
               last, worse))
 
-    class Enough(Exception):
-        pass
-
-    cached = [(sids[i:i + 8].clone(), smask[i:i + 8].clone()) for i in (0, 8, 16)]
-    kept = [(a_.clone(), b_.clone()) for a_, b_ in cached]
-    replica = []
-    for sf in (True, False):                               # paylasimli ve tur basina FactUnits
-        mk = dict(base_kw, output_link=True, shared_facts=sf, rope_base=10000.0,   # kosucular config'e sayi yazar
-                  attention_log_scale=True)
-        ctx = I._profile_setup(dict(setting="shared", vocab=nv, model_kw=mk, weight_ema=0.9, schedule="wsd"), cached, "cpu")
-        for j in (1, 2, 3):                                # kurulum batch 0 ile bir adim; tekrar 1, 2, 0
-            I._step_parts(ctx, *cached[j % 3], I._Clock("cpu"))
-        ref = {}
-
-        def stop(step, model, opt):
-            ref.update(model=copy.deepcopy(model.state_dict()), ema=copy.deepcopy(model.weight_ema["model"].state_dict()))
-            raise Enough()
-        try:                                               # wsd: 80 adimdan once lr sabit
-            TR.train_seq("shared", None, None, nv, steps=100, batches=lambda s: cached[s % 3], log_at=(), save_every=4,
-                         save=stop, weight_ema=0.9, model_kw=mk, schedule="wsd")
-        except Enough:
-            pass
-        replica.append(same(ctx["model"].state_dict(), ref["model"]) and same(ctx["ema"]["model"].state_dict(), ref["ema"]))
-    check("internals profile_step: parca parca tekrarlanan adim = train_seq'in adimi, bit duzeyinde (wsd, Muon + Adam, clip, "
-          "kure, phi kirpma, EMA; 1 + 3 adim; paylasimli / tur basina FactUnits)", all(replica), str(replica))
-
-    precision, rng = torch.get_float32_matmul_precision(), torch.get_rng_state()
-    cfg = dict(setting="shared", vocab=nv, model_kw=dict(base_kw, shared_facts=False, output_link=False),
-               schedule="coherence", weight_ema=0.9)
-    pr = I.profile_step(cfg, cached, steps=3)
-    names = [p_["part"] for p_ in pr["parts"]]
-    want = ["batch -> cihaz", "ileri + kayip", "zero_grad", "geri yayilim", "coherence: g1 kopyasi",
-            "coherence: birlestirme, teget, carpimlar", "clip", "Muon (Newton-Schulz dahil)", "  Newton-Schulz", "Adam",
-            "normalize_weights", "EMA"]
-    gap = max((s_["total_ms"] - s_["parts_ms"]) / s_["total_ms"] for s_ in pr["per_step"])
-    low = min(s_["total_ms"] - s_["parts_ms"] for s_ in pr["per_step"])
-    turns = [b_["part"] for b_ in pr["breakdown"]]
-    check("internals profile_step (CPU): parcalar train_seq'in sirasiyla (coherence yarilari, Muon / Newton-Schulz / Adam, "
-          "EMA); her adimda parcalarin toplami <= adim, fark < %10; dokum tur basina 3 parca; train_seq'in kendi adimi olculdu",
-          names == want and 0 <= low and gap < 0.1 and len(turns) == 4 * 3 + 4 and turns[1] == "tur 1 Canon"
-          and pr["real_step_ms"] > 0 and pr["flops"]["per_step"] > 0,
-          "adim %.1f ms, olculmeyen en cok %%%.1f; train_seq %.1f ms" % (pr["total"]["device_ms"], 100 * gap, pr["real_step_ms"]))
-    check("internals profile_step: kendi kopyasinda calisir (train_seq'in kurulumu); batch'ler, grad modu, matmul hassasiyeti "
-          "ve RNG degismez", all(torch.equal(a_, c_) and torch.equal(b_, d_) for (a_, b_), (c_, d_) in zip(cached, kept))
-          and torch.is_grad_enabled() and torch.get_float32_matmul_precision() == precision
-          and torch.equal(torch.get_rng_state(), rng))
-
 
 def _packed_rows(segments_by_row, pad=0):
     """Satir basina parcalar (id listeleri) -> (ids, mask, document_positions, parcalarin (satir, baslangic, boy)).
@@ -1933,7 +1885,7 @@ def t_packing():
     """Maskeli paketleme (FineWeb): paketli pencerede her belgenin skoru, kaybi ve gradyani o belgenin tek basina hesabiyla
     ayni (float64, yogun maske); flex yolu (CPU'da yalniz ileri) yogun maskeyle ayni; tek belgeli paket = paketsiz hesap;
     RoPE goreli (8.192 konumda da); compile'da graph break yok; train_seq paketli batch'le (coherence yarilari) ve surdurme;
-    onbellek ve internals paketli girdiyi reddeder.  Kendi kucuk verisi (rastgele token)."""
+    onbellek paketli girdiyi reddeder.  Kendi kucuk verisi (rastgele token)."""
     import copy
     import internals_y as I
     from model_y import BlockModel, build_document_mask, same_document_causal
@@ -2070,15 +2022,14 @@ def t_packing():
           "bit duzeyinde", all(runs.values()), str(runs))
 
     refused = []
-    for attempt in (lambda: m.hidden(ids, [None] * m.turns, document_positions=pos),
-                    lambda: I.profile_step(dict(setting="shared", vocab=V, model_kw=kw), [windows[0][:3]], steps=1)):
+    for attempt in (lambda: m.hidden(ids, [None] * m.turns, document_positions=pos),):
         try:
             attempt()
             refused.append(False)
         except AssertionError:
             refused.append(True)
-    check("paketleme: onbellekli uretim ve internals profile_step (paketli batch) reddeder (internals CLI "
-          "FineWeb'i tek belgeyle okur: tests_fineweb)", all(refused), str(refused))
+    check("paketleme: onbellekli uretim paketli pencereyi reddeder (internals CLI FineWeb'i tek belgeyle okur: "
+          "tests_fineweb)", all(refused), str(refused))
 
 
 def t_attention_log_scale():

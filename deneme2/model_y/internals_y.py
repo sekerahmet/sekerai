@@ -12,8 +12,6 @@ ve mudahale.
                       olcer; "o parca olmadan egitilseydi" DEGIL
     tuned_lens        her durumda ogrenilen afin cevirici + modelin cikis basligi (Belrose 2023): tahmin nerede olusuyor;
                       logit lens ile yan yana (nll, acc, son dagilima KL, sira).  Cevirici ayri hikayelerde ogrenilir
-    profile_step      egitim adiminin parca parca suresi ve bellegi (ileri, kayip, geri, Muon / Adam, EMA, coherence ...);
-                      model train_seq'in kurulumundan, egitilmis agirlik kullanilmaz.  Gercek olcum GPU'da
     over_checkpoints  ayni olcum kosunun checkpoint_tNNNNNN.pt yedekleri boyunca (EMA optimizer durumundan kurulur)
 
 Hikayeler: id listeleri.  Girdi ids[:-1], hedef ids[1:]; exclude_last: son hedef (SimpleStories'te hikayeyi kapatan <eos>)
@@ -37,7 +35,7 @@ import time
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.nn.attention import SDPBackend, sdpa_kernel
+from torch.nn.attention import SDPBackend
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -847,66 +845,7 @@ def over_checkpoints(run_dir, measure, steps=None, weights="ema", log=None):
     return out
 
 
-# ---- hiz: egitim adiminin parcalari
-
-class _Clock:
-    """Parca sureleri: host saati ve GPU'da CUDA event'leri (akis sirasiyla: GPU CPU'yu beklese de sayilir); GPU'da ust
-    duzey parcanin tepe bellegi (giristeki ayrilmis bellegin ustu, MB).  Ic ice parca (Newton-Schulz) yalniz sure.
-    mark(ad): nokta; onceki noktadan buraya kadarki parca ad."""
-
-    def __init__(self, device):
-        self.cuda = torch.device(device).type == "cuda"
-        self.rows, self.marks, self.depth = [], [], 0
-
-    def now(self):
-        e = None
-        if self.cuda:
-            e = torch.cuda.Event(enable_timing=True)
-            e.record()
-        return time.perf_counter(), e
-
-    def ms(self, a, b):
-        """(host ms, cihaz ms) iki an arasi; cihaz CPU'da host ile ayni.  GPU'da once read (senkron)."""
-        host = 1e3 * (b[0] - a[0])
-        return host, (a[1].elapsed_time(b[1]) if self.cuda else host)
-
-    @contextlib.contextmanager
-    def part(self, name):
-        top, i = self.depth == 0, len(self.rows)
-        self.rows.append(None)                           # yer: ic ice parca ustunden sonra listelenmesin
-        if self.cuda and top:
-            base = torch.cuda.memory_allocated()
-            torch.cuda.reset_peak_memory_stats()
-        a = self.now()
-        self.depth += 1
-        try:
-            with torch.profiler.record_function(name):
-                yield
-        finally:
-            self.depth -= 1
-        b = self.now()
-        peak = (torch.cuda.max_memory_allocated() - base) / 2 ** 20 if self.cuda and top else None
-        self.rows[i] = (name, a, b, peak, top)
-
-    def mark(self, name):
-        self.marks.append((name, self.now()))
-
-    def read(self):
-        """-> ({ad: [host ms, cihaz ms, tepe MB, ust duzey]}, ayni ad toplanir; [(ad, host ms, cihaz ms)] noktalar arasi);
-        temizler."""
-        if self.cuda:
-            torch.cuda.synchronize()
-        parts = {}
-        for name, a, b, peak, top in self.rows:
-            r = parts.setdefault(name, [0.0, 0.0, None, top])
-            host, dev = self.ms(a, b)
-            r[0], r[1] = r[0] + host, r[1] + dev
-            if peak is not None:
-                r[2] = max(r[2] or 0.0, peak)
-        segments = [(name, *self.ms(a, b)) for (_, a), (name, b) in zip(self.marks, self.marks[1:])]
-        self.rows, self.marks = [], []
-        return parts, segments
-
+# ---- egitim adiminin kurulumu (analysis/analyze_speed)
 
 def _train_kwargs(config):
     """config -> train_seq ayarlari: yalniz train_seq'in parametreleri (adim, kayit, cihaz, compile ve veri haric)."""
@@ -918,20 +857,9 @@ def _train_kwargs(config):
     return kw
 
 
-def _forward_context(ctx):
-    """train_seq'in ileri hesap baglami: compile kilidi, SDPA cekirdegi, bf16 autocast (GPU)."""
-    stack = contextlib.ExitStack()
-    if ctx["compile"]:
-        stack.enter_context(ctx["TR"].COMPILE_LOCK)
-    stack.enter_context(sdpa_kernel(ctx["kernels"]))
-    if ctx["bf16"]:
-        stack.enter_context(torch.autocast("cuda", dtype=torch.bfloat16))
-    return stack
-
-
 def _profile_setup(config, cached, device):
     """train_seq'in kendi kurulumu, 1 adim: model, optimizer (Muon / Adam gruplari, kure eksenleri), EMA onun kodundan.
-    -> adimin parcalarinin ihtiyaci (ctx)."""
+    -> adimi parca parca tekrarlayanin ihtiyaci (ctx; analysis/analyze_speed)."""
     import train_y as TR
     kw = _train_kwargs(config)
     default = inspect.signature(TR.train_seq).parameters
@@ -943,237 +871,13 @@ def _profile_setup(config, cached, device):
     model = got["model"]
     named = [(k, p) for k, p in model.named_parameters() if p.requires_grad]
     rows, cols = ("W_query", "W_key", "W_fact_in", "W_fact_up", "W_value"), ("W_context", "W_fact_out")
-    sphere = getattr(model, "sphere_weights", False)
     cuda = torch.device(device).type == "cuda"
     compile = cuda and config.get("compile", True)       # train_seq gibi: compile yalniz GPU'da
-    return dict(TR=TR, model=model, opt=got["opt"], named=named, params=[p for _, p in named], device=device, cuda=cuda,
-                unit_axis={k: int(k.split(".")[-1] in rows) for k, _ in named if sphere and k.split(".")[-1] in rows + cols},
+    return dict(model=model, opt=got["opt"], named=named, params=[p for _, p in named], device=device, cuda=cuda,
+                unit_axis={k: int(k.split(".")[-1] in rows) for k, _ in named if k.split(".")[-1] in rows + cols},
                 split=get("schedule") == "coherence", grad_clip=get("grad_clip"), ema=getattr(model, "weight_ema", None),
                 compile=compile, loss_fn=torch.compile(model.loss) if compile else model.loss,
                 bf16=cuda and get("matmul_precision") == "bf16", kernels=[SDPBackend.MATH])      # train_seq gibi
-
-
-def _step_parts(ctx, ids, mask, clock):
-    """train_seq'in bir adimi, ayni sirayla parca parca (lr takvimi ve coherence'in skaler ortalamasi haric: ikisi de
-    birkac sayi).  Muon ve Adam gruplari ayri step'lerle (ayni hesap); Newton-Schulz Muon'un icinde ayrica."""
-    TR, model, opt = ctx["TR"], ctx["model"], ctx["opt"]
-    with clock.part("batch -> cihaz"):
-        ids, mask = ids.to(ctx["device"]), mask.to(ctx["device"])
-    with clock.part("ileri + kayip"), _forward_context(ctx):
-        if ctx["split"]:
-            halves = [ctx["loss_fn"](ids[h::2].contiguous(), mask[h::2].contiguous()) for h in (0, 1)]
-            weights = [mask[h::2, 1:].sum() for h in (0, 1)]
-            sum(w * hn for w, (_, hn) in zip(weights, halves)) / sum(weights)     # train_seq'in nll'i (kullanilmaz)
-        else:
-            total, _ = ctx["loss_fn"](ids, mask)
-    with clock.part("zero_grad"):
-        opt.zero_grad()
-    if ctx["split"]:                                     # coherence: iki yarinin gradyani, g1 kopyasi, birlestirme
-        grads = None
-        for half_total, _ in halves:
-            with clock.part("geri yayilim"), sdpa_kernel(ctx["kernels"]):
-                half_total.backward()
-            if grads is None:
-                with clock.part("coherence: g1 kopyasi"):
-                    grads = [None if p.grad is None else p.grad.detach().clone() for p in ctx["params"]]
-        with clock.part("coherence: birlestirme, teget, carpimlar"):
-            sums = []                                    # train_seq gibi: parametre basina carpimlar, sonda tek senkron
-            w0, w1 = (float(w) for w in weights)
-            for (k, p), a in zip(ctx["named"], grads):
-                if a is None:
-                    p.grad = None
-                    continue
-                b = p.grad - a
-                p.grad = (w0 * a + w1 * b) / (w0 + w1)
-                if k in ctx["unit_axis"]:
-                    a, b = (v - (v * p.detach()).sum(ctx["unit_axis"][k], keepdim=True) * p.detach() for v in (a, b))
-                sums.append(torch.stack([(a * b).sum(), (a * a).sum(), (b * b).sum()]))
-            torch.stack(sums).tolist()
-    else:
-        with clock.part("geri yayilim"), sdpa_kernel(ctx["kernels"]):
-            total.backward()
-    if ctx["grad_clip"] is not None:
-        with clock.part("clip"):
-            torch.nn.utils.clip_grad_norm_(ctx["params"], ctx["grad_clip"])
-    if isinstance(opt, TR.Muon):
-        def orthogonalize(G, steps=5, precision="fp32"):
-            with clock.part("  Newton-Schulz"):
-                return TR.Muon.orthogonalize(G, steps, precision)
-
-        groups = opt.param_groups
-        opt.orthogonalize = orthogonalize                # ornek ozelligi sinifin staticmethod'unu golgeler
-        try:
-            for name, muon in (("Muon (Newton-Schulz dahil)", True), ("Adam", False)):
-                opt.param_groups = [g for g in groups if g["use_muon"] == muon]
-                with clock.part(name):
-                    opt.step()
-        finally:
-            opt.param_groups = groups
-            del opt.orthogonalize
-    else:
-        with clock.part("Adam"):
-            opt.step()
-    sphere = getattr(model, "sphere_weights", False)
-    if sphere:
-        with clock.part("normalize_weights"):
-            model.normalize_weights()
-    if getattr(model, "output_link", False):
-        with clock.part("link_u kirpma"), torch.no_grad():
-            model.link_u.clamp_(min=0)
-    if ctx["ema"] is not None:
-        with clock.part("EMA"), torch.no_grad():
-            ema, decay = ctx["ema"]["model"], ctx["ema"]["decay"]
-            for pe, p in zip(ema.parameters(), model.parameters()):
-                pe.mul_(decay).add_(p.detach(), alpha=1 - decay)
-            if sphere:
-                ema.normalize_weights()
-
-
-def _breakdown_parts(ctx, ids, mask, clock):
-    """Ileri hesap dokumu, eager: gomme; tur basina Canon, attention (W_context ve guncelleme dahil), FactUnits (guncelleme
-    dahil) _run'in noktalarindan; kayip basligi modelin kendi loss'u (hidden yerine _run'in son durumu); geri yayilim iki
-    parca: kayip basligi (son durumun gradyanina kadar) ve govde."""
-    model = ctx["model"]
-    ids, mask = ids.to(ctx["device"]), mask.to(ctx["device"])
-    at = lambda name: (lambda t, _: clock.mark(name % (t + 1)))
-    with _forward_context(dict(ctx, compile=False)):
-        clock.mark("basla")
-        h0 = model.input_states(ids[:, :-1])
-        clock.mark("gomme")
-        h = _run(model, h0, _plan(model), dict(canon=at("tur %d Canon"), attention_out=at("tur %d attention"),
-                                               facts_out=at("tur %d FactUnits")))
-        model.hidden = lambda ids_, caches=None, document_positions=None: [h]   # kayip basligi: modelin loss'u, govde _run'dan
-        try:
-            total, _ = model.loss(ids, mask)
-        finally:
-            del model.hidden
-        clock.mark("kayip basligi ileri")
-    h.register_hook(lambda g: clock.mark("kayip basligi geri"))
-    with sdpa_kernel(ctx["kernels"]):
-        total.backward()
-    clock.mark("govde geri (turlar, gomme)")
-    model.zero_grad(set_to_none=True)
-
-
-def _real_step_ms(config, cached, device, compile):
-    """train_seq'in kendisi, ayni batch'lerle 2 K adim (ilk K isinma); ikinci K adimin adim basina suresi.  Olcum
-    noktalari geri cagrida (train_seq nll.item() ile esitler)."""
-    import train_y as TR
-    K, marks = len(cached), []
-    TR.train_seq(config.get("setting", "shared"), None, None, config["vocab"], steps=2 * K, device=device, compile=compile,
-                 log_at=(), every=K, callback=lambda s, m, nll: marks.append(time.perf_counter()),
-                 batches=lambda s: cached[s % K], **_train_kwargs(config))
-    return 1e3 * (marks[2] - marks[1]) / K
-
-
-def _step_flops(model, ids):
-    """Adim basina model FLOP'u (tahmin): 3 x ileri.  Ileri, konum basina: tur basina 2 d (d x attention matrisi sayisi +
-    birim x FactUnits matrisi sayisi) + SDPA math'in tam tablosu 4 d T; cikis 2 d V.  Dolgu konumlari da hesaplanir."""
-    if not isinstance(model, BlockModel):
-        return None
-    V, d = model.tokens.fixed_points.shape
-    B, T = ids.shape[0], ids.shape[1] - 1
-    per = 2 * d * V
-    for t, blk in enumerate(model.turn_blocks()):
-        f = _turn_facts(model, t)
-        per += 2 * d * (4 * d + (3 * f.W_fact_out.shape[1] if f is not None else 0))
-        per += 4 * d * T
-    return 3 * B * T * per
-
-
-def profile_step(config, batches, steps=5, device="cpu", real=True, ops=0, log=None, out_dir=None):
-    """Bir egitim adiminin parca parca suresi (ms) ve bellegi.
-    config: kosunun config.json'u (_config) ya da ayni anahtarlarla sozluk (setting, vocab, model_kw, schedule,
-    weight_ema, matmul_precision, compile ...; olmayan anahtar train_seq varsayilani).  batches: adimin fonksiyonu
-    step -> (ids, mask) (data_simplestories.batches) ya da (ids, mask) listesi; ilk `steps` batch bir tur isinma (compile,
-    her sekil bir kez), bir tur olcum.
-    Yol (b), parcalar ayri zamanlanir: train_seq'in adimi tek parca bir dongu, ara parcalari (EMA, coherence, clip)
-    train_y degismeden disaridan zamanlanamaz.  Model, optimizer ve EMA train_seq'in kendi 1 adimlik kurulumundan (yeni
-    nesneler; kullanicinin modeline dokunulmaz), adim train_seq'in sirasiyla parca parca tekrarlanir (_step_parts).
-    Tekrarin sadakati: real=True ise train_seq'in kendisi ayni batch'lerle kosar, adim suresi yan yana yazilir.
-    Ayrica eager ileri hesap dokumu (_breakdown_parts: tur basina Canon / attention / FactUnits, kayip basligi, geri
-    yayilim iki parca) ve ops > 0 ise bir adimin torch.profiler tablosu (en pahali ops islem).
-    GPU'da ayni anda baska bir kosu varsa sureler bozulur.  CPU sureleri GPU'yu temsil etmez.
-    -> dict(setup, parts [{part, host_ms, device_ms, peak_mb, nested}], total, unmeasured_ms, per_step, breakdown,
-    breakdown_total, real_step_ms, flops, ops).  out_dir: <out_dir>/profile_step_<cihaz>_<zaman>.txt + .json."""
-    say = log or (lambda s: None)
-    t_start = time.time()
-    cached = [batches(i) if callable(batches) else batches[i] for i in range(steps)]
-    assert all(len(b) == 2 for b in cached), "paketli batch (document_positions) desteklenmiyor: adim parcalari (ids, mask) ile"
-    precision, grad = torch.get_float32_matmul_precision(), torch.is_grad_enabled()
-    rows, whole, breakdown, op_lines, real_ms = [], [], [], None, None
-    torch.set_grad_enabled(True)
-    try:
-        ctx = _profile_setup(config, cached, device)
-        model, clock = ctx["model"], _Clock(device)
-        for i in range(2 * steps):                       # ilk tur isinma
-            a = clock.now()
-            _step_parts(ctx, *cached[i % steps], clock)
-            b = clock.now()
-            parts, _ = clock.read()
-            if i >= steps:
-                rows.append(parts)
-                whole.append(clock.ms(a, b))
-        say("profile_step: %d adim olculdu (%.0f sn)" % (steps, time.time() - t_start))
-        if ops:                                          # dokumden once: model.hidden yamasi compile'a dokunmasin
-            acts = [torch.profiler.ProfilerActivity.CPU] + ([torch.profiler.ProfilerActivity.CUDA] if ctx["cuda"] else [])
-            with torch.profiler.profile(activities=acts) as prof:
-                _step_parts(ctx, *cached[0], _Clock(device))
-                if ctx["cuda"]:
-                    torch.cuda.synchronize()
-            key = "self_device_time_total" if ctx["cuda"] else "self_cpu_time_total"
-            op_lines = prof.key_averages().table(sort_by=key, row_limit=ops).splitlines()
-        if isinstance(model, BlockModel):
-            for i in range(steps + 1):                   # ilki isinma
-                _breakdown_parts(ctx, *cached[i % steps], clock)
-                if i:
-                    breakdown.append(clock.read()[1])
-                else:
-                    clock.read()
-        flops = [_step_flops(model, ids) for ids, _ in cached]
-        kw = _train_kwargs(config)
-        setup = dict(run=config.get("name"), device=str(device), gpu=torch.cuda.get_device_name(0) if ctx["cuda"] else None,
-                     compile=ctx["compile"], precision="bf16" if ctx["bf16"] else "fp32",
-                     split=ctx["split"], optimizer=type(ctx["opt"]).__name__,
-                     weight_ema=None if ctx["ema"] is None else ctx["ema"]["decay"],
-                     params=sum(p.numel() for p in ctx["params"]), batches=[list(ids.shape) for ids, _ in cached],
-                     targets=[int(m[:, 1:].sum()) for _, m in cached], model_kw=kw.get("model_kw"),
-                     schedule=kw.get("schedule"), grad_clip=ctx["grad_clip"])
-        compile, cuda = ctx["compile"], ctx["cuda"]
-        del ctx, model                                   # gercek kosudan once bellek bosalsin
-        if cuda:
-            torch.cuda.empty_cache()
-        if real:
-            say("profile_step: train_seq'in kendisi, %d adim" % (2 * steps))
-            real_ms = _real_step_ms(config, cached, device, compile)
-    finally:
-        torch.set_float32_matmul_precision(precision)
-        torch.set_grad_enabled(grad)
-    med = lambda v: float(np.median(v))
-    names = list(rows[0])
-    top = [n for n in names if rows[0][n][3]]
-    parts = [dict(part=n, host_ms=med([r[n][0] for r in rows]), device_ms=med([r[n][1] for r in rows]),
-                  peak_mb=max(r[n][2] for r in rows) if cuda and rows[0][n][3] else None, nested=not rows[0][n][3])
-             for n in names]
-    per_step = [dict(total_ms=w[1], parts_ms=sum(r[n][1] for n in top)) for r, w in zip(rows, whole)]
-    total = dict(host_ms=med([w[0] for w in whole]), device_ms=med([w[1] for w in whole]))
-    res = dict(setup=setup, parts=parts, total=total, per_step=per_step,
-               unmeasured_ms=med([s["total_ms"] - s["parts_ms"] for s in per_step]),
-               breakdown=[dict(part=n, host_ms=med([b[j][1] for b in breakdown]), device_ms=med([b[j][2] for b in breakdown]))
-                          for j, (n, _, _) in enumerate(breakdown[0])] if breakdown else None,
-               real_step_ms=real_ms, ops=op_lines,
-               flops=None if flops[0] is None else dict(per_step=float(np.mean(flops)), tflops=float(np.mean(flops)) / (
-                   total["device_ms"] * 1e9), tflops_real=None if real_ms is None else float(np.mean(flops)) / (real_ms * 1e9)))
-    if res["breakdown"]:
-        res["breakdown_total"] = dict(host_ms=sum(b["host_ms"] for b in res["breakdown"]),
-                                      device_ms=sum(b["device_ms"] for b in res["breakdown"]))
-    if out_dir:
-        lines = ["internals_y profile_step | %s | %s | sure %.0f sn" % (
-            config.get("name", "-"), time.strftime("%Y-%m-%d %H:%M"), time.time() - t_start), ""] + _text_profile(res)
-        path = _write(out_dir, "profile_step_%s_%s" % (torch.device(device).type, time.strftime("%Y%m%d_%H%M%S")), lines,
-                      dict(measure="profile_step", run=config.get("name"), result=res))
-        say("\n".join(lines) + "\nyazildi: %s.txt / .json" % path)
-    return res
 
 
 # ---- veri (CLI): config'teki tag
@@ -1447,47 +1151,6 @@ def _text_tuned_lens(res, vocab, positions):
     return L
 
 
-def _text_profile(res):
-    c, t = res["setup"], res["total"]
-    L = ["## egitim adimi parca parca: %s%s | %s, compile %s, %s | %d batch %s, %d adimin medyani (once bir tur isinma)" % (
-             c["device"], " (%s)" % c["gpu"] if c["gpu"] else "", c["optimizer"], c["compile"], c["precision"],
-             len(c["batches"]), " ".join("%dx%d" % tuple(b) for b in c["batches"]), len(res["per_step"])),
-         "yol (b): model, optimizer ve EMA train_seq'in 1 adimlik kurulumundan (yeni nesneler); adim train_seq'in sirasiyla "
-         "parca parca (lr takvimi ve coherence'in skaler ortalamasi haric)",
-         "ayarlar: schedule %s (iki yari: %s), weight_ema %s, grad_clip %s, %d parametre, model_kw %s" % (
-             c["schedule"], c["split"], c["weight_ema"], c["grad_clip"], c["params"], json.dumps(c["model_kw"])),
-         "cihaz ms: %s" % ("CUDA event'leri (akis sirasiyla; GPU CPU'yu beklerken de sayar); host ms: CPU'nun parcada kaldigi "
-                          "sure; tepe MB: parcanin girisindeki bellegin ustu" if c["gpu"] else
-                          "CPU'da host ile ayni.  CPU sureleri GPU'yu TEMSIL ETMEZ"),
-         "%-42s | %9s | %9s | %8s | %5s" % ("parca", "host ms", "cihaz ms", "tepe MB", "pay")]
-    for p in res["parts"]:
-        L.append("%-42s | %9.2f | %9.2f | %8s | %4.1f%%" % (p["part"], p["host_ms"], p["device_ms"], _fmt(p["peak_mb"], "%.0f"),
-                                                          100 * p["device_ms"] / t["device_ms"]))
-    top = sum(p["device_ms"] for p in res["parts"] if not p["nested"])
-    L += ["%-42s | %9s | %9.2f |" % ("parcalarin toplami (ust duzey medyanlari)", "", top),
-          "%-42s | %9.2f | %9.2f |" % ("olculen adim (butun)", t["host_ms"], t["device_ms"]),
-          "%-42s | %9s | %9.2f |" % ("olculmeyen (adim - parcalar, medyan)", "", res["unmeasured_ms"])]
-    if res["real_step_ms"] is not None:
-        L.append("train_seq'in kendisi, ayni batch'lerle (compile %s): %.2f ms/adim  (tekrar / gercek %.3f)" % (
-            c["compile"], res["real_step_ms"], t["device_ms"] / res["real_step_ms"]))
-    fl = res["flops"]
-    if fl:
-        L.append("model FLOP'u (tahmin, 3 x ileri, dolgu dahil) %.3g / adim -> %.3g TFLOP/s (tekrar)%s.  MFU = bu / cihazin "
-                 "tepe FLOP'u" % (fl["per_step"], fl["tflops"], "" if fl["tflops_real"] is None else
-                                  ", %.3g TFLOP/s (train_seq)" % fl["tflops_real"]))
-    if res["breakdown"]:
-        bt = res["breakdown_total"]
-        L += ["", "## ileri hesap dokumu, eager (compile yok): tur basina Canon | attention (W_context ve guncelleme dahil) | "
-                  "FactUnits (guncelleme dahil); kayip basligi modelin kendi loss'u; geri yayilim iki parca",
-              "%-42s | %9s | %9s | %5s" % ("parca", "host ms", "cihaz ms", "pay")]
-        L += ["%-42s | %9.2f | %9.2f | %4.1f%%" % (b["part"], b["host_ms"], b["device_ms"], 100 * b["device_ms"] / bt["device_ms"])
-              for b in res["breakdown"]]
-        L.append("%-42s | %9.2f | %9.2f |" % ("toplam", bt["host_ms"], bt["device_ms"]))
-    if res["ops"]:
-        L += ["", "## torch.profiler: bir adim, en pahali islemler (parca adlari record_function)"] + res["ops"]
-    return L
-
-
 def _write(out_dir, name, lines, payload):
     """<out_dir>/<name>.txt (satirlar) + .json (payload) -> yol (uzantisiz)."""
     os.makedirs(out_dir, exist_ok=True)
@@ -1533,18 +1196,8 @@ def _summary(measure, res):
     return {r["case"].split()[0]: r["d_nll"] for r in res["rows"]}
 
 
-def _padded(rows, pad, multiple=8):
-    """Id listeleri -> (ids, mask): sagdan pad ile dolgu, genislik multiple'in katina (bucket batch'leri gibi)."""
-    T = -(-max(len(r) for r in rows) // multiple) * multiple
-    ids = torch.full((len(rows), T), pad, dtype=torch.long)
-    mask = torch.zeros(len(rows), T, dtype=torch.bool)
-    for i, r in enumerate(rows):
-        ids[i, :len(r)], mask[i, :len(r)] = torch.tensor(r), True
-    return ids, mask
-
-
 def _override(config, pairs):
-    """--set anahtar=deger (deger JSON, olmazsa metin): BlockModel parametresi model_kw'ye, gerisi config'e."""
+    """anahtar=deger listesi (deger JSON, olmazsa metin): BlockModel parametresi model_kw'ye, gerisi config'e (analysis)."""
     config = dict(config, model_kw=_model_kw(config))
     model_keys = set(inspect.signature(BlockModel).parameters)
     for pair in pairs or ():
@@ -1572,7 +1225,7 @@ def _jsonable(v):
     return v
 
 
-_MEASURES = ("trace", "point_drift", "attention_stats", "unit_usage", "ablate", "tuned_lens", "profile_step")
+_MEASURES = ("trace", "point_drift", "attention_stats", "unit_usage", "ablate", "tuned_lens")
 _DEFAULT_STORIES = dict(trace=4, point_drift=0, attention_stats=128, unit_usage=128, ablate=128, tuned_lens=64)
 
 
@@ -1593,8 +1246,7 @@ def _main(argv=None):
     ap.add_argument("--cases", nargs="+", help="ablate mudahaleleri (varsayilan: none, her tur A/F/H/C/CM, her head, C, CM)")
     ap.add_argument("--reference", type=int, default=48, help="ablate: head / Canon eki ortalamasi icin ayri hikaye sayisi")
     ap.add_argument("--counts", help="point_drift: token sayimi .npy (varsayilan: train akisi, bir kez sayilir)")
-    ap.add_argument("--batch", type=int, help="batch (varsayilan 16; attention_stats, tuned_lens 8; profile_step config'in "
-                                              "batch_size'i)")
+    ap.add_argument("--batch", type=int, help="batch (varsayilan 16; attention_stats, tuned_lens 8)")
     ap.add_argument("--data", help="veri koku (varsayilan: tag'e gore %s; FineWeb kosusunda %s); FineWeb klasoru "
                                    "verilirse valid belgeleri (tek belge, en cok %d token)" % (
                                        _SIMPLESTORIES_ROOT, _FINEWEB_ROOT, _FINEWEB_TOKENS))
@@ -1603,12 +1255,7 @@ def _main(argv=None):
                                                                   "buradan (degerlendirmeyle ortusmez)")
     ap.add_argument("--lens-steps", type=int, default=200, help="tuned_lens: cevirici adimi (0: birim = logit lens)")
     ap.add_argument("--lens-lr", type=float, default=1e-3, help="tuned_lens: Adam lr (dogrusal iner)")
-    ap.add_argument("--profile-steps", type=int, default=5, help="profile_step: olculen adim (once bir tur isinma)")
-    ap.add_argument("--width", type=int, help="profile_step: hikayeler bu token'da kesilir (kucuk ayar)")
     ap.add_argument("--device", default="cpu", help="cpu | cuda: model bu cihazda (butun olcumler; point_drift CPU'da)")
-    ap.add_argument("--no-real", action="store_true", help="profile_step: train_seq'in kendisini kosma")
-    ap.add_argument("--ops", type=int, default=0, help="profile_step: torch.profiler tablosunda islem sayisi (0: yok)")
-    ap.add_argument("--set", nargs="+", help="profile_step: ayar degistir, anahtar=deger (ornek shared_facts=false)")
     args = ap.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):              # Windows konsolu (cp1254) Δ yazamiyor; dosyalar utf-8
         sys.stdout.reconfigure(errors="replace")
@@ -1626,14 +1273,8 @@ def _main(argv=None):
                          "listeleriyle dogrudan cagrilabilir" % config.get("tag"))
     data = loader[0](config, args.data or loader[1])
     vocab = data["vocab"]
-    if args.measure == "profile_step":
-        config = _override(config, args.set)
-        batch = args.batch or config.get("batch_size", 64)
-        count = args.profile_steps * batch
-    else:
-        assert not args.set, "--set yalniz profile_step"
-        count = _DEFAULT_STORIES[args.measure] if args.stories is None else args.stories
-        batch = args.batch or (8 if args.measure in ("attention_stats", "tuned_lens") else 16)
+    count = _DEFAULT_STORIES[args.measure] if args.stories is None else args.stories
+    batch = args.batch or (8 if args.measure in ("attention_stats", "tuned_lens") else 16)
     if args.measure == "trace" and args.text and args.stories is None:
         count = 0
     rows, stories = data["stories"](count, args.offset) if count else (np.array([], dtype=np.int64), [])
@@ -1679,10 +1320,6 @@ def _main(argv=None):
                                                          fit_source=where, log=say).items() if k != "translators"}
         text = lambda res: _text_tuned_lens(res, vocab, args.positions)
         summarize = lambda res: _summary("tuned_lens", res)
-    elif args.measure == "profile_step":
-        assert not args.checkpoints and args.checkpoint is None, "profile_step agirlik kullanmaz (--checkpoint(s) yok)"
-        cut = sorted((s[:args.width] if args.width else s for s in stories), key=len)   # benzer boylar bir batch'te
-        cached = [_padded(cut[i:i + batch], data["eos"]) for i in range(0, len(cut), batch)]
     else:
         cases = [_parse_case(shape, c) for c in (args.cases or _standard_cases(shape[0], shape[1],
                                                                               skeleton.first_turn_facts))]
@@ -1696,13 +1333,7 @@ def _main(argv=None):
                 len(ref), args.offset + count, args.offset + count + len(ref) - 1))
 
     packs = _checkpoints(run_dir)
-    if args.measure == "profile_step":
-        result = profile_step(config, cached, steps=len(cached), device=args.device, real=not args.no_real, ops=args.ops,
-                              log=say)
-        lines += _text_profile(result)
-        source, tag = "agirlik kullanilmaz; batch'ler sinav hikayelerinden%s" % (
-            ", %d token'da kesilmis" % args.width if args.width else ""), torch.device(args.device).type
-    elif args.checkpoints:
+    if args.checkpoints:
         spec = args.checkpoints
         steps = (list(packs) if spec == "all" else [s for s in packs if s % int(spec[6:]) == 0] if spec.startswith("every:")
                  else [int(s) for s in spec.split(",")])
@@ -1725,13 +1356,12 @@ def _main(argv=None):
         result = measure(model)
         lines += text(result)
     header = ["internals_y %s | kosu %s | %s | %s | sure %.0f sn" % (
-        args.measure, config.get("name", os.path.basename(run_dir)),
-        source if args.measure == "profile_step" else "agirlik %s (%s)" % (args.weights, source),
+        args.measure, config.get("name", os.path.basename(run_dir)), "agirlik %s (%s)" % (args.weights, source),
         time.strftime("%Y-%m-%d %H:%M"), time.time() - t0)]
     if count:
         header.append("sinav hikayeleri: %d (tohum 0 permutasyonu %d..%d; valid sirasi %d..%d)" % (
             count, args.offset, args.offset + count - 1, int(rows.min()), int(rows.max())))
-    weights = None if args.measure == "profile_step" else args.weights
+    weights = args.weights
     name = "_".join(p for p in (args.measure, weights, tag, time.strftime("%Y%m%d_%H%M%S")) if p)
     path = _write(os.path.join(run_dir, "internals"), name, header + [""] + lines,
                   dict(measure=args.measure, run=config.get("name"), weights=weights, source=source,
