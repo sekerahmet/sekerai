@@ -32,6 +32,7 @@ import colab_fineweb as C  # noqa: E402
 import data_fineweb as DF  # noqa: E402
 import exam_fineweb as EF  # noqa: E402
 import model_y as M  # noqa: E402
+import train_y as TR  # noqa: E402
 
 RESULTS = []
 SEQ = 64                                          # fixture baglami
@@ -506,7 +507,6 @@ def t_colab(data, root):
           str(run["error"] or files) + " docs %d repeats %s" % (len(fin.get("docs", [])), sorted(fin.get("repeats", {}))))
 
     import konus_fineweb as K
-    import train_y as TR
     K.FW_ROOTS, K.CACHE_DIR = [root], tmp + "/konus_cache"
     vocab = K.load_vocab()
     eot = vocab.index(K.DS.EOS_TOKEN)
@@ -588,6 +588,68 @@ def t_colab(data, root):
     shutil.rmtree(tmp)
 
 
+def t_continuation(data, root):
+    """init_from (pilot devam egitimi): model ayarlari kaynak config'inden (rope_base yoksa 10.000), adim 0 = kaynagin agirligi
+    (0. adim sinavi, EMA bastan), coherence bastan (lr takvimi bu kosununki, log inis lr_floor'a), veri kaynagin gormedigi
+    pencerelerden; DITTO-X: ayarlar config'te acik, sinavda ditto_x_self, gunlukte cumle duzeyi satiri; stop_at'te EMA
+    yazilir; surdurme bit duzeyinde; token_bands."""
+    import internals_y as I
+    tmp = tempfile.mkdtemp()
+    src = tmp + "/src"
+    kw = dict(tokens_per_step=4 * SEQ, batch_size=2, every=1, device="cpu", weight_ema=0.9)
+    run = C.start("SRC", data, src, steps=3, save_every=1, model_kw=dict(TINY, rope_base=10000.0), schedule="coherence",
+                  **kw)
+    run["thread"].join(900)
+    cfg_src = json.load(open(src + "/config.json"))
+    old = dict(cfg_src, model_kw={k: v for k, v in cfg_src["model_kw"].items() if k != "rope_base"})
+    json.dump(old, open(src + "/config.json", "w"), indent=1)    # rope_base'siz eski config (pilot gibi)
+    lr = 2e-3
+    cont = dict(kw, steps=3, save_every=1, stop_at=3, init_from=src + "/checkpoint_t000002.pt", lr=lr, schedule="coherence",
+                final_cooldown=1.0, final_cooldown_shape="log", lr_floor=0.1, ditto_x_weight=0.3, ditto_x_share=4,
+                ditto_x_self_prefix=8, ditto_x_self_tokens=8, ditto_x_self_every=1)
+    out = tmp + "/c"
+    run2 = C.start("CONT", data, out, **cont)
+    run2["thread"].join(900)
+    cfg = json.load(open(out + "/config.json"))
+    ex = json.load(open(out + "/exams.json", encoding="utf-8"))
+    ex_src = json.load(open(src + "/exams.json", encoding="utf-8"))
+    log = open(out + "/log.txt", encoding="utf-8").read()
+    start = I._load_model(src, "last", step=2)
+    ids, mask, pos = DF.batches(data, 4, 0)(cfg_src["steps"] + 1)
+    first_nll = float(start.loss(ids, mask, pos)[1])
+    done = lambda p: math.log1p(p / TR.LOG_COOLDOWN_KAPPA) / math.log1p(1 / TR.LOG_COOLDOWN_KAPPA)
+    want_lr = [lr * (0.1 + 0.9 * (1 - done(s / 3))) for s in (0, 1, 2)]
+    got_lr = [e["coherence"]["lr"] for e in ex[1:]]
+    d = ex[1].get("ditto_x_self", {})
+    check("init_from: model ayarlari kaynaktan (rope_base yoksa 10.000), adim 0 = kaynagin 2. adim agirligi (0. adim sinavi "
+          "kaynagin 2. adim sinaviyla ayni, EMA = agirlik), ilk batch kaynagin gormedigi pencere, lr log inisle x0,1'e",
+          not run2["error"] and [e["step"] for e in ex] == [0, 1, 2, 3] and cfg["init_from"] == cont["init_from"]
+          and cfg["model_kw"]["rope_base"] == 10000.0 and cfg["model_kw"]["d"] == TINY["d"]
+          and abs(ex[0]["nll"] - ex_src[2]["nll"]) < 1e-6 and abs(ex[0]["weight_ema"]["nll"] - ex[0]["nll"]) < 1e-9
+          and abs(ex[0]["train_nll"] - first_nll) < 1e-5 and all(abs(a - b) < 1e-12 for a, b in zip(got_lr, want_lr))
+          and "BASLANGIC" in log and "kaynagin %d. adimindan" % (cfg_src["steps"] + 1) in log,
+          "%s | nll %.6f / %.6f, ilk batch %.6f / %.6f | lr %s / %s" % (
+              run2["error"], ex[0]["nll"], ex_src[2]["nll"], ex[0]["train_nll"], first_nll, got_lr, want_lr))
+    check("init_from + DITTO-X: butun ayarlar config'te acik (copy_ceiling, ditto_x_params liste), sinavda ditto_x_self (cumle "
+          "girisi kendi / gercek, sinir bolmesi, l kovalari, gercek metinde by_l, token_bands), gunlukte ditto-x satiri; stop_at'te "
+          "model_weight_ema.pt; tekrar olcusunde token_bands",
+          cfg["ditto_x_weight"] == 0.3 and cfg["copy_ceiling"] == TR.COPY_CEILING and cfg["ditto_x_params"] == list(TR.DITTO_X_PARAMS)
+          and cfg["ditto_x_self_every"] == 1 and cfg["ditto_x_margin"] == TR.DITTO_X_MARGIN
+          and all("ditto_x_self" in e for e in ex[1:]) and d.get("steps") == 1
+          and set(d.get("own", {})) == {"bins", "by_l", "entry", "token_bands"} and "sentence" in d["own"]["bins"]
+          and abs(sum(d["own"]["token_bands"]) - 1) < 1e-9 and "16-32" in d["real"]["by_l"]
+          and "ditto-x" in log and "cumle tekrarina giris" in log and os.path.exists(out + "/model_weight_ema.pt")
+          and abs(sum(ex[0]["repeats"]["greedy"]["token_bands"]) - 1) < 1e-9,
+          str(d)[:300])
+    first = torch.load(out + "/model.pt")
+    os.remove(out + "/checkpoint_t000003.pt")
+    run3 = C.start("CONT", data, out, resume=True, **cont)
+    run3["thread"].join(900)
+    second = torch.load(out + "/model.pt")
+    check("init_from + DITTO-X surdurme: son paketten (adim 2) devam = kesintisiz, bit duzeyinde (beta ve veri penceresi ayni)",
+          not run3["error"] and all(torch.equal(first[k], second[k]) for k in first), str(run3["error"])[-300:])
+    shutil.rmtree(tmp)
+
 if __name__ == "__main__":
     print("tests (train_fineweb)")
     root, tok, texts = fixture()
@@ -600,6 +662,7 @@ if __name__ == "__main__":
         t_distant_copy(data)
         t_real_gpt2()
         t_colab(data, root)
+        t_continuation(data, root)
     finally:
         shutil.rmtree(root)
     print("\n%d GECTI   %d KALDI" % (sum(RESULTS), len(RESULTS) - sum(RESULTS)))
