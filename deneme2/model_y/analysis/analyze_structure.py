@@ -1616,10 +1616,15 @@ def _sentence_return(seqs, lays, cos):
         oth = [i for i in range(q) if i != t]
         oth2 = [i for i in range(k) if i != j]
         tc, oc, tc2, oc2 = C[:, q, t], C[:, q, oth], C[:, k, j], C[:, k, oth2]
+        same = [i for i in oth if s[lay["ends"][i]] == s[lay["ends"][q]]]      # ayni son token'li otekiler (h0 kontrolu)
+        ocs = C[:, q, same] if same else None
         rows.append(dict(cos=tc.numpy(), other=oc.mean(1).numpy(), pct=_pct(tc, oc).numpy(),
                          top=(oc.max(1).values < tc).float().numpy(), chance=1.0 / q,
                          pct_after=_pct(tc2, oc2).numpy(),
-                         ell=int(AE._match_trace(np.asarray(s))[0][lay["ends"][q]]), adjacent=j == k - 1))
+                         ell=int(AE._match_trace(np.asarray(s))[0][lay["ends"][q]]), adjacent=j == k - 1,
+                         same_token=s[lay["ends"][t]] == s[lay["ends"][q]], n_same=len(same),
+                         pct_same=_pct(tc, ocs).numpy() if same else None,
+                         top_same=(ocs.max(1).values < tc).float().numpy() if same else None))
     out = dict(n=len(rows), chance_top=_ms([r["chance"] for r in rows]),
                ell_median=float(np.median([r["ell"] for r in rows])) if rows else None, by={})
     for part, sel in (("all", rows), ("ell<=2", [r for r in rows if r["ell"] <= 2]), ("ell>=3", [r for r in rows if r["ell"] >= 3]),
@@ -1628,6 +1633,12 @@ def _sentence_return(seqs, lays, cos):
             out["by"][part] = {k: [_ms([r[k][si] for r in sel]) for si in range(len(sel[0]["cos"]))]
                                for k in ("cos", "other", "pct", "top", "pct_after")}
             out["by"][part]["chance_top"] = _ms([r["chance"] for r in sel])
+            ss = [r for r in sel if r["same_token"] and r["n_same"]]
+            if ss:
+                out["by"][part]["pct_same"] = [_ms([r["pct_same"][si] for r in ss]) for si in range(len(ss[0]["cos"]))]
+                out["by"][part]["top_same"] = [_ms([r["top_same"][si] for r in ss]) for si in range(len(ss[0]["cos"]))]
+                out["by"][part]["chance_same"] = _ms([1.0 / (r["n_same"] + 1) for r in ss])
+    out["same_token_share"] = _ms([r["same_token"] for r in rows])
     return out
 
 
@@ -1868,6 +1879,15 @@ def _text_sentences(res):
             nm, f3(b["all"]["cos"][si]), b["all"]["other"][si][0], f3(b["all"]["pct"][si]), f3(b["all"]["top"][si]),
             f3(b["all"]["pct_after"][si]), part("ell<=2", si), part("ell>=3", si), part("j=k-1", si),
             f3(rb[si]) if rb else "-", part("j<k-1", si)) for si, nm in enumerate(res["states"])]
+        L += ["", "#### 1a-K: ayni son token kontrolu -- e_(j-1) ile e_(k-1) ayni token'la bitiyor (pay %s); yuzdelik yalniz ayni "
+              "token'la biten onceki sonlar arasinda (h0'da esitlik -> 0,5)" % f3(r["same_token_share"]),
+              "durum | pct ayni-token (n)  | en yakin ayni-token | sans  | j<k-1: pct (n)      | j<k-1 en yakin"]
+        cell = lambda p, key, si: ("%s (%d)" % (f3(b[p][key][si]), b[p][key][si][2])) if p in b and key in b[p] else "-"
+        L += ["%-5s | %s | %s       | %s | %s | %s" % (
+            nm, cell("all", "pct_same", si), f3(b["all"]["top_same"][si]) if "top_same" in b["all"] else "-",
+            "%.3f" % b["all"]["chance_same"][0] if "chance_same" in b["all"] else "-", cell("j<k-1", "pct_same", si),
+            f3(b["j<k-1"]["top_same"][si]) if "j<k-1" in b and "top_same" in b["j<k-1"] else "-")
+              for si, nm in enumerate(res["states"])]
         L.append("en yakin olma (j<k-1): %s; sans %s" % (
             " ".join("%s %.2f" % (nm, b["j<k-1"]["top"][si][0]) for si, nm in enumerate(res["states"])) if "j<k-1" in b else "-",
             f3(b["j<k-1"]["chance_top"]) if "j<k-1" in b else "-"))
