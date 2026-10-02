@@ -43,7 +43,7 @@ import train_y as TR  # noqa: E402
 # Varsayilan kosu: ana kosu (d1024_8x2); geri kalan model ayarlari model_y varsayilanlari
 RUN_NAME = "fineweb_modely_8x2_d1024_gpt2_s0"
 MODEL_KW = dict(d=1024, layers=8, turns=16, heads=8, units=2752)
-RECIPE = dict(schedule="coherence", final_cooldown=0.95, final_cooldown_shape="log", lr_floor=0.0, optimizer="muon",
+RECIPE = dict(schedule="coherence", final_cooldown=0.95, final_cooldown_shape="log", lr_floor=0.0,
               weight_ema=0.999, matmul_precision="bf16")      # lr: peak_lr(d)
 # A100 TEST adaylari (profile_sizes): model ayarlari disinda her sey ayni; units ~ 8/3 d, 64'un kati; head boyu 128 (RoPE
 # tabani 8.192'de 64'luk head'de tirtikli, 128'likte duzgun)
@@ -152,8 +152,8 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
                   model_kw=dict(model_kw, packed_attention="flex", fact_activation="swiglu",   # kaldirilan secenekler
                                 learn_output_scale=True, input_bigrams=0),   # config'te sabit degerle: surdurme
                   **steps_plan,
-                  **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
-                              optimizer=TR.OPTIMIZER, schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,
+                  **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=0.0,
+                              optimizer="muon", schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,
                               coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,
                               weight_ema=TR.WEIGHT_EMA, matmul_precision=TR.MATMUL_PRECISION,
                               coherence_power=1.0, muon_tangent=True,

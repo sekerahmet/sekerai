@@ -780,16 +780,12 @@ def _build(config):
 
 def _load_weight_ema(model, optimizer_state, config):
     """Yedekteki agirlik ortalamasi (train_seq: optimizer durumunda state[i]["weight_ema"]) -> model.  Parametre sirasi
-    train_seq'in gruplariyla: muon -> once _MUON_HIDDEN matrisleri; adam + weight_decay -> once W_ matrisleri; adam ->
-    named_parameters sirasi.  Ortalamasi olmayan parametre (hic gradyan almamis) agirlikta kalir: train_seq'in
-    surdurmesi de oyle kurar."""
+    train_seq'in Muon gruplariyla: once _MUON_HIDDEN matrisleri, sonra gerisi.  Ortalamasi olmayan parametre (hic gradyan
+    almamis) agirlikta kalir: train_seq'in surdurmesi de oyle kurar."""
+    assert config.get("optimizer", "muon") == "muon" and not config.get("weight_decay"), \
+        "adam / weight_decay kaldirildi: bu kosunun yedegi okunamaz"
     named = [(k, p) for k, p in model.named_parameters() if p.requires_grad]
-    if config.get("optimizer", "muon") == "muon":
-        first = [k for k, _ in named if k.endswith(_MUON_HIDDEN)]
-    elif config.get("weight_decay"):
-        first = [k for k, _ in named if k.split(".")[-1].startswith("W_")]
-    else:
-        first = [k for k, _ in named]
+    first = [k for k, _ in named if k.endswith(_MUON_HIDDEN)]
     order = first + [k for k, _ in named if k not in first]
     groups = optimizer_state["param_groups"]
     ids = [i for g in groups for i in g["params"]]

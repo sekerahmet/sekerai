@@ -242,34 +242,12 @@ def t_step3():
           not torch.equal(a1.tokens.fixed_points, a2.tokens.fixed_points)
           and torch.equal(a1.tokens.fixed_points, before))
 
-    groups = []
-    real_adamw = torch.optim.AdamW
-
-    class SpyW(real_adamw):
-        def __init__(self, param_groups, **k):
-            super().__init__(param_groups, **k)
-            groups.extend(self.param_groups)
-    torch.optim.AdamW = SpyW
-    try:
-        mw, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=1, log_at=(), weight_decay=0.1, optimizer="adam")
-    finally:
-        torch.optim.AdamW = real_adamw
-    names = {id(p_): k.split(".")[-1] for k, p_ in mw.named_parameters()}
-    decayed = sorted({names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.1 for p_ in g_["params"]})
-    kept = sorted({names[id(p_)] for g_ in groups if g_["weight_decay"] == 0.0 for p_ in g_["params"]})
-    check("weight decay: yalniz W_ matrislerine; shift, alpha, Canon agirliklari, cikis olcegi ve cikis bagi (phi) haric",
-          decayed == sorted(["W_query", "W_key", "W_context", "W_fact_in", "W_fact_up", "W_fact_out", "W_value"])
-          and kept == ["alpha_attention", "alpha_facts", "canon_weights", "input_embedding", "link_q", "link_u",
-                       "log_output_scale", "shift"],
-          "%s | %s" % (decayed, kept))
-
-    # 27 Eylul tarifi: Muon (gizli matrisler) + Adam, WSD takvimi, compile varsayilan acik; masked_nll; RoPE en az fp32
+    # tarif: Muon (gizli matrisler) + Adam, takvim, compile varsayilan acik; masked_nll; RoPE en az fp32
     import inspect
     from model_y import apply_rope, masked_nll
     sig = inspect.signature(TR.train_seq).parameters
-    check("tarif varsayilanlari (ana kosu): optimizer 'muon', schedule 'coherence', son inis 'log', weight_ema 0,999, "
-          "cooldown 0,2, compile True",
-          sig["optimizer"].default == TR.OPTIMIZER == "muon" and sig["schedule"].default == TR.SCHEDULE == "coherence"
+    check("tarif varsayilanlari (ana kosu): schedule 'coherence', son inis 'log', weight_ema 0,999, cooldown 0,2, compile True",
+          sig["schedule"].default == TR.SCHEDULE == "coherence"
           and sig["final_cooldown_shape"].default == TR.FINAL_COOLDOWN_SHAPE == "log"
           and sig["weight_ema"].default == TR.WEIGHT_EMA == 0.999
           and sig["cooldown"].default == TR.COOLDOWN == 0.2 and sig["compile"].default is True)
@@ -361,14 +339,8 @@ def t_step3():
                                                                      optimizer=copy.deepcopy(opt.state_dict())))
     full_m, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), save_every=2, save=keep_m)
     res_m, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs_m[4])
-    try:
-        TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), weight_decay=0.1)
-        refused_wd = False
-    except AssertionError:
-        refused_wd = True
-    check("Muon + WSD: 4. adim paketinden surdurulen = kesintisiz, bit duzeyinde; weight_decay yalniz adam ile",
-          all(torch.equal(a_, b_) for a_, b_ in zip(full_m.state_dict().values(), res_m.state_dict().values()))
-          and refused_wd)
+    check("Muon + WSD: 4. adim paketinden surdurulen = kesintisiz, bit duzeyinde",
+          all(torch.equal(a_, b_) for a_, b_ in zip(full_m.state_dict().values(), res_m.state_dict().values())))
 
     packs_s = {}
     keep_s = lambda step, model, opt: packs_s.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
@@ -1068,27 +1040,12 @@ def t_learn_output_scale():
     names = {id(p_): k for k, p_ in trained.named_parameters()}
     in_adam = {names[id(p_)] for g_ in opts[-1].param_groups if not g_["use_muon"] for p_ in g_["params"]}
     in_muon = {names[id(p_)] for g_ in opts[-1].param_groups if g_["use_muon"] for p_ in g_["params"]}
-    groups = []
-    real_adamw = torch.optim.AdamW
-
-    class SpyW(real_adamw):
-        def __init__(self, param_groups, **k):
-            super().__init__(param_groups, **k)
-            groups.extend(self.param_groups)
-    torch.optim.AdamW = SpyW
-    try:
-        mw, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), weight_decay=0.1, optimizer="adam")
-    finally:
-        torch.optim.AdamW = real_adamw
-    no_decay = {k for g_ in groups if g_["weight_decay"] == 0.0 for k, p_ in mw.named_parameters()
-                if any(p_ is q_ for q_ in g_["params"])}
     start, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=0, log_at=())
     one, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=1, log_at=(), weight_ema=0.5)
     ema_err = abs(val(one.weight_ema["model"].log_output_scale) - 0.5 * (val(start.log_output_scale) + val(one.log_output_scale)))
     moved = val(trained.log_output_scale) - val(on.log_output_scale)
-    check("cikis olcegi: Adam'da (Muon'da degil), weight decay yok; weight EMA ortalar; 20 adimda deger degisir, "
-          "kayip iner",
-          "log_output_scale" in in_adam and "log_output_scale" not in in_muon and "log_output_scale" in no_decay
+    check("cikis olcegi: Adam'da (Muon'da degil); weight EMA ortalar; 20 adimda deger degisir, kayip iner",
+          "log_output_scale" in in_adam and "log_output_scale" not in in_muon
           and ema_err < 1e-6 and abs(moved) > 1e-3 and curve[-1]["nll"] < curve[0]["nll"],
           "olcek %.3f -> %.3f  kayip %.3f -> %.3f" % (math.exp(val(on.log_output_scale)), math.exp(val(trained.log_output_scale)),
                                                      curve[0]["nll"], curve[-1]["nll"]))
@@ -1800,7 +1757,7 @@ def t_internals():
     same = lambda a, b: list(a) == list(b) and all(torch.equal(a[k], b[k]) for k in a)
     notes, ok = [], True
     try:
-        for label, extra in (("muon", {}), ("adam", dict(optimizer="adam")), ("adamw", dict(optimizer="adam", weight_decay=0.1))):
+        for label, extra in (("muon", {}),):
             run = os.path.join(tmp, label)
             os.makedirs(run)
             mk = dict(base_kw, shared_facts=False, output_link=True)     # colab config'i model_kw'yi tam yazar
@@ -1814,8 +1771,8 @@ def t_internals():
             trained, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), save_every=2, save=save,
                                       weight_ema=0.9, model_kw=mk, **extra)
             config = dict(name=label, setting="shared", seed=0, vocab=nv, model_kw=mk, stream_norm=True, layer_norm=False,
-                          rope=True, normalized_update=True, sphere_weights=True, canon=True,
-                          optimizer=extra.get("optimizer", "muon"), weight_decay=extra.get("weight_decay", 0.0))
+                          rope=True, normalized_update=True, sphere_weights=True, canon=True, optimizer="muon",
+                          weight_decay=0.0)
             with open(os.path.join(run, "config.json"), "w") as fh:
                 json.dump(config, fh)
             grab = lambda m_: {k: v.clone() for k, v in m_.state_dict().items()}
@@ -1830,7 +1787,7 @@ def t_internals():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     check("internals over_checkpoints: yedekten kurulan EMA = train_seq'in model.weight_ema'si, bit duzeyinde (adim 2/4/6; "
-          "muon, adam, adamw); 'last' = o adimin agirligi; model_weight_ema.pt", ok, ", ".join(notes))
+          "Muon gruplari); 'last' = o adimin agirligi; model_weight_ema.pt", ok, ", ".join(notes))
 
     fit = [sids[i, :int(smask[i].sum())].tolist() for i in range(12, 76)]
     before = {k: v.clone() for k, v in m.state_dict().items()}

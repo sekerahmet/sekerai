@@ -20,9 +20,6 @@ STEPS, LR = 4000, 0.01  # lr dayanagi (kure agirliklari + Muon): adim basina don
 LOG_AT = (0, 10, 50, 200, 500, 1000)
 LR_FLOOR = 0.0       # inisin tabani: lr sonda LR x LR_FLOOR (wsd, coherence)
 GRAD_CLIP = 1.0      # gradient clipping: adimdaki gradient'in boyu bunu gecerse buna indirilir
-WEIGHT_DECAY = 0.0   # weight decay (AdamW), yalniz W_ matrislerine; 0 = kapali
-OPTIMIZER = "muon"   # "muon": gizli matrisler (W_context, W_value, W_fact_in, W_fact_up, W_fact_out) Muon, gerisi Adam |
-                     # "adam": hepsi Adam
 SCHEDULE = "coherence"   # "coherence": asagida | "wsd": lr sabit, son COOLDOWN kisminda 1 - sqrt ile LR x LR_FLOOR'a
 # Inductor'un bellek yerlesimi analizi dinamik sekilde (bucket) ic kontrolde patladi; yalniz tiling sezgisi, kapatmak sonucu
 # degistirmez
@@ -139,15 +136,15 @@ def pad(rows, vocab):
 
 
 def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, lr_floor=LR_FLOOR, grad_clip=GRAD_CLIP,
-              weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None, compile=True,
+              device="cpu", every=None, callback=None, compile=True,
               save_every=None, save=None, checkpoint=None, rope=ROPE,
-              batches=None, model_kw=None, optimizer=OPTIMIZER, schedule=SCHEDULE, cooldown=COOLDOWN,
+              batches=None, model_kw=None, schedule=SCHEDULE, cooldown=COOLDOWN,
               coherence_window=COHERENCE_WINDOW,
               final_cooldown=FINAL_COOLDOWN, weight_ema=WEIGHT_EMA, matmul_precision=MATMUL_PRECISION,
               final_cooldown_shape=FINAL_COOLDOWN_SHAPE, newton_schulz_precision=NEWTON_SCHULZ_PRECISION,
               micro_batches=MICRO_BATCHES):
-    """Tarif: Muon (gizli matrisler) + Adam, takvim (wsd ya da coherence), gradient clipping.  weight_decay > 0: AdamW,
-    yalniz W_ matrisleri (yalniz adam).
+    """Tarif: Muon (gizli matrisler: W_context, W_value, W_fact_in, W_fact_up, W_fact_out) + Adam (gerisi), takvim (wsd ya
+    da coherence), gradient clipping.
     callback(step, model, nll): her `every` adimda, o adimin guncellemesinden ONCE (sinav, kayit, durdurma).
     compile: kayip hesabi (ileri + geri) torch.compile ile; varsayilan acik, yalniz GPU'da uygulanir (CPU'da kendiliginden
     kapanir).
@@ -176,11 +173,10 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     micro_batches: gradyan birikimi (batch'in satir sayisi bunun kati olmali)."""
     assert batches is not None or ids is not None, "ids/mask ya da batches verilmeli"
     assert setting == "shared", "setting: yalniz shared (BlockModel), bu: %s" % setting
-    assert optimizer in ("muon", "adam") and schedule in ("wsd", "coherence") and 0 < cooldown <= 1
+    assert schedule in ("wsd", "coherence") and 0 < cooldown <= 1
     assert schedule != "coherence" or (0 < final_cooldown <= 1 and coherence_window >= 1)
     assert final_cooldown_shape in ("sqrt", "linear", "log"), "final_cooldown_shape: sqrt | linear | log"
     assert weight_ema is None or 0 < weight_ema < 1, "weight_ema: 0 ile 1 arasi (ornek 0,999) ya da None"
-    assert optimizer == "adam" or not weight_decay, "weight_decay yalniz optimizer='adam' ile (AdamW)"
     assert matmul_precision in ("fp32", "bf16"), "matmul_precision: fp32 | bf16"
     assert newton_schulz_precision in ("fp32", "bf16"), "newton_schulz_precision: fp32 | bf16"
     assert micro_batches >= 1 and (schedule != "coherence" or micro_batches % 2 == 0 or micro_batches == 1), \
@@ -197,22 +193,13 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
             unit_axis[k] = 1
         elif kind in ("W_context", "W_fact_out"):                               # duruma yazan: sutun
             unit_axis[k] = 0
-    if optimizer == "muon":
-        # Muon yalniz gizli 2 boyutlu matrislerde ("VO + FFN" duzeni, Wang 2025); token noktalari, esikler, W_query, W_key,
-        # alpha'lar, Canon, cikis olcegi ve bag Adam'da
-        hidden = ("W_context", "W_value", "W_fact_in", "W_fact_up", "W_fact_out")
-        opt = Muon([dict(params=[p for k, p in named if k.endswith(hidden)], use_muon=True),
-                    dict(params=[p for k, p in named if not k.endswith(hidden)], use_muon=False)], lr=lr)
-        opt.tangent_axis = {p: unit_axis[k] for k, p in named if k in unit_axis}   # yalniz Muon grubunda uygulanir
-        opt.newton_schulz_precision = newton_schulz_precision
-    elif weight_decay:
-        # her adimda once W <- W - lr · weight_decay · W (kaybin desteklemedigi agirlik soner), sonra Adam adimi.
-        # shift'in capasi var, fact_threshold bir esik: ikisine uygulanmaz
-        opt = torch.optim.AdamW([dict(params=[p for k, p in named if k.split(".")[-1].startswith("W_")], weight_decay=weight_decay),
-                                 dict(params=[p for k, p in named if not k.split(".")[-1].startswith("W_")], weight_decay=0.0)],
-                                lr=lr)
-    else:
-        opt = torch.optim.Adam(params, lr=lr)
+    # Muon yalniz gizli 2 boyutlu matrislerde ("VO + FFN" duzeni, Wang 2025); token noktalari, W_query, W_key, alpha'lar,
+    # Canon, cikis olcegi ve bag Adam'da
+    hidden = ("W_context", "W_value", "W_fact_in", "W_fact_up", "W_fact_out")
+    opt = Muon([dict(params=[p for k, p in named if k.endswith(hidden)], use_muon=True),
+                dict(params=[p for k, p in named if not k.endswith(hidden)], use_muon=False)], lr=lr)
+    opt.tangent_axis = {p: unit_axis[k] for k, p in named if k in unit_axis}   # yalniz Muon grubunda uygulanir
+    opt.newton_schulz_precision = newton_schulz_precision
     first = 0
     if checkpoint is not None:                             # surdurme: agirlik + Adam momentleri + adim
         model.load_state_dict(checkpoint["model"])

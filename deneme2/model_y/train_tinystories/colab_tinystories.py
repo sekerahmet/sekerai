@@ -65,8 +65,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                   model_kw=dict(model_kw, fact_activation="swiglu", learn_output_scale=True,   # kaldirilan secenekler
                                 input_bigrams=0),                                              # sabit degerle
                   bucket=bucket,
-                  **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
-                              optimizer=TR.OPTIMIZER, schedule="wsd", cooldown=TR.COOLDOWN,   # wsd, EMA yok, linear:
+                  **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=0.0,
+                              optimizer="muon", schedule="wsd", cooldown=TR.COOLDOWN,   # wsd, EMA yok, linear:
                               coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,   # bu kosucunun
                               weight_ema=None, matmul_precision=TR.MATMUL_PRECISION,            # varsayilani
                               coherence_power=1.0, muon_tangent=True,
