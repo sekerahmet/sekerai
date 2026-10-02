@@ -101,22 +101,42 @@ def _collect(model, stories, batch, keep, lens_on=True):
     return [torch.cat(f) for f in feats], {k: torch.cat(v) for k, v in targ.items()}, lens
 
 
-def _softmax_probe(Xf, yf, Xt, yt, V, epochs, lr, bs, seed=0):
-    """Dogrusal softmax probe z = W x + b (W 0'dan, b fit'teki log siklik); Adam, lr dogrusal 0'a.  -> test acc, top5,
-    nll, egitim acc (fit'in ilk 50k ornegi), sayilar."""
+def _probe_score(W, b, X, y):
+    """-> (acc, top5, nll) dogrusal softmax probe icin."""
+    nll = hit = hit5 = 0.0
+    with torch.no_grad():
+        for c in range(0, len(y), 8192):
+            z = X[c:c + 8192].float() @ W.T + b
+            yc = y[c:c + 8192]
+            nll -= float(torch.log_softmax(z, -1).gather(-1, yc[:, None]).sum())
+            top = z.topk(5, -1).indices
+            hit += float((top[:, 0] == yc).sum())
+            hit5 += float((top == yc[:, None]).any(-1).sum())
+    return hit / len(y), hit5 / len(y), nll / len(y)
+
+
+def _softmax_probe(Xf, yf, Xt, yt, V, epochs, lr, bs, seed=0, wd=0.0, early_stop=False):
+    """Dogrusal softmax probe z = W x + b (W 0'dan, b fit'teki log siklik); AdamW (wd yalniz W'de), lr dogrusal 0'a.
+    early_stop: fit'in son %10'u ayrilir, her epok sonunda olculur, en iyi epokun W'si kullanilir (asiri uyumu sinirlar).
+    -> test acc, top5, nll, egitim acc (fit'in ilk 50k ornegi), secilen epok, sayilar."""
     mf, mt = yf >= 0, yt >= 0
     Xf, yf, Xt, yt = Xf[mf], yf[mf], Xt[mt], yt[mt]
+    Xh = yh = None
+    if early_stop:
+        cut = int(len(yf) * 0.9)
+        Xf, yf, Xh, yh = Xf[:cut], yf[:cut], Xf[cut:], yf[cut:]
     dev, d = Xf.device, Xf.shape[1]
     cuda = dev.type == "cuda"
     W = torch.zeros(V, d, device=dev, requires_grad=True)
     prior = torch.bincount(yf, minlength=V).float() + 0.1
     b = (prior / prior.sum()).log().clone().requires_grad_(True)
-    opt = torch.optim.Adam([W, b], lr=lr)
+    opt = torch.optim.AdamW([dict(params=[W], weight_decay=wd), dict(params=[b], weight_decay=0.0)], lr=lr)
     g = torch.Generator(device=dev).manual_seed(seed)
     n = len(yf)
     steps, step = epochs * math.ceil(n / bs), 0
+    best = None
     with torch.enable_grad():
-        for _ in range(epochs):
+        for epoch in range(epochs):
             perm = torch.randperm(n, device=dev, generator=g)
             for i in range(0, n, bs):
                 j = perm[i:i + bs]
@@ -129,23 +149,18 @@ def _softmax_probe(Xf, yf, Xt, yt, V, epochs, lr, bs, seed=0):
                 loss.backward()
                 opt.step()
                 step += 1
-
-    @torch.no_grad()
-    def score(X, y):
-        nll = hit = hit5 = 0.0
-        for c in range(0, len(y), 8192):
-            z = X[c:c + 8192].float() @ W.T + b
-            yc = y[c:c + 8192]
-            nll -= float(torch.log_softmax(z, -1).gather(-1, yc[:, None]).sum())
-            top = z.topk(5, -1).indices
-            hit += float((top[:, 0] == yc).sum())
-            hit5 += float((top == yc[:, None]).any(-1).sum())
-        return hit / len(y), hit5 / len(y), nll / len(y)
-
-    acc, top5, nll = score(Xt, yt)
-    train_acc = score(Xf[:50000], yf[:50000])[0]
-    return dict(acc=acc, top5=top5, nll=nll, train_acc=train_acc, n_fit=n, n_test=len(yt),
-                majority=float((yt == prior.argmax()).double().mean()))
+            if early_stop:
+                ha = _probe_score(W, b, Xh, yh)[0]
+                if best is None or ha > best[0]:
+                    best = (ha, W.detach().clone(), b.detach().clone(), epoch + 1)
+    if best is not None:
+        with torch.no_grad():
+            W.copy_(best[1])
+            b.copy_(best[2])
+    acc, top5, nll = _probe_score(W, b, Xt, yt)
+    return dict(acc=acc, top5=top5, nll=nll, train_acc=_probe_score(W, b, Xf[:50000], yf[:50000])[0], n_fit=n,
+                n_test=len(yt), wd=wd, best_epoch=None if best is None else best[3],
+                held_acc=None if best is None else best[0], majority=float((yt == prior.argmax()).double().mean()))
 
 
 def _ridge(Xf, yf, Xt, yt, lam=1e-3):
@@ -169,7 +184,8 @@ def _ridge(Xf, yf, Xt, yt, lam=1e-3):
     return _r2(float(((yt - pred) ** 2).sum()), float(((yt - yt.mean()) ** 2).sum())), pred
 
 
-def probes(model, test, fit, batch=8, epochs=4, lr=5e-3, bs=2048, states=None, targets=TARGETS, log=print):
+def probes(model, test, fit, batch=8, epochs=4, lr=5e-3, bs=2048, states=None, targets=TARGETS, wd=0.0, early_stop=False,
+           log=print):
     """Her durumda dogrusal okuma (fit belgelerinde ogrenilir, test belgelerinde olculur).  states: durum adlari (None =
     hepsi); targets: TARGETS'in alt kumesi."""
     names, blocks = I._state_names(model)
@@ -185,7 +201,7 @@ def probes(model, test, fit, batch=8, epochs=4, lr=5e-3, bs=2048, states=None, t
     for j, s in enumerate(keep):
         row = dict(state=names[s], block=blocks[s], lens_acc=lens[j][1] / n, lens_nll=lens[j][0] / n)
         for k in targets:
-            row[k] = _softmax_probe(Xf[j], tf[k], Xt[j], tt[k], V, epochs, lr, bs)
+            row[k] = _softmax_probe(Xf[j], tf[k], Xt[j], tt[k], V, epochs, lr, bs, wd=wd, early_stop=early_stop)
         r2, pred = _ridge(Xf[j], torch.log1p(tf["pos"].double()), Xt[j], torch.log1p(tt["pos"].double()))
         err = (torch.expm1(pred) - tt["pos"].double()).abs()
         row["pos"] = dict(r2_log=r2, median_abs_err=float(err.median()))
@@ -193,14 +209,16 @@ def probes(model, test, fit, batch=8, epochs=4, lr=5e-3, bs=2048, states=None, t
         log("%-4s %s (lens %.3f) pos R2 %.3f  (%.0f sn)" % (names[s], " ".join(
             "%s %.3f/%.3f" % (k, row[k]["acc"], row[k]["train_acc"]) for k in targets), row["lens_acc"], r2, time.time() - t0))
         Xf[j] = Xt[j] = None                                     # bellek
-    return dict(rows=rows, n_test=n, n_fit=len(tf["cur"]), epochs=epochs, lr=lr, batch=bs, targets=list(targets),
+    return dict(rows=rows, n_test=n, n_fit=len(tf["cur"]), epochs=epochs, lr=lr, batch=bs, targets=list(targets), wd=wd,
+                early_stop=early_stop,
                 pos_test_median=float(tt["pos"].double().median()))
 
 
 def _text_probes(res):
     tg = res.get("targets", TARGETS)
-    L = ["## dogrusal probe (test acc / egitim acc; probe %d fit konumunda, %d epok, Adam lr %.0e, batch %d; test %d konum)"
-         % (res["n_fit"], res["epochs"], res["lr"], res["batch"], res["n_test"]),
+    L = ["## dogrusal probe (test acc / egitim acc; probe %d fit konumunda, %d epok, AdamW lr %.0e wd %g%s, batch %d; test %d "
+         "konum)" % (res["n_fit"], res["epochs"], res["lr"], res.get("wd", 0.0),
+                     ", erken durdurma (fit'in %10'u)" if res.get("early_stop") else "", res["batch"], res["n_test"]),
          "durum blok | " + " | ".join("%-11s" % k for k in tg) + " | lens next1 | next1-top5 | pos R2(log) med|err|"]
     for r in res["rows"]:
         L.append("%-5s %s   | %s | %.3f      | %s      | %.3f  %6.0f" % (
@@ -1639,6 +1657,8 @@ def _main(argv=None):
     ap.add_argument("--probe-epochs", type=int, default=4)
     ap.add_argument("--probe-lr", type=float, default=5e-3)
     ap.add_argument("--probe-batch", type=int, default=2048)
+    ap.add_argument("--probe-wd", type=float, default=0.0, help="probes: W'de AdamW weight decay")
+    ap.add_argument("--probe-early-stop", action="store_true", help="probes: fit'in %%10'unda en iyi epok")
     ap.add_argument("--focus", type=int, default=2, help="units: odak tur (1'den)")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args(argv)
@@ -1664,7 +1684,8 @@ def _main(argv=None):
     if args.measure == "probes":
         res = probes(model, test, fit, args.batch, args.probe_epochs, args.probe_lr, args.probe_batch,
                      states=args.states.split(",") if args.states else None,
-                     targets=tuple(args.targets.split(",")) if args.targets else TARGETS, log=say)
+                     targets=tuple(args.targets.split(",")) if args.targets else TARGETS, wd=args.probe_wd,
+                     early_stop=args.probe_early_stop, log=say)
         lines = _text_probes(res)
     elif args.measure == "attention_passes":
         res = attention_passes(model, test, batch=max(1, args.batch // 2))
@@ -1758,8 +1779,9 @@ def _selftest():
     print(chr(10).join(_text_points(pt)))
     assert abs(rows["A4 atla"]["d_nll"]) < 10 and "A1 optimal" in rows and "A1 atla+donuk2" in rows
     assert all(v["held_best"] <= v["held_mean"] + 1e-9 for v in rp["fits"].values())
-    r2 = probes(model, test, fit, batch=4, epochs=2, lr=2e-2, bs=64, states=["h0", "F2"], targets=("next1",),
-                log=lambda s: None)
+    r2 = probes(model, test, fit, batch=4, epochs=3, lr=2e-2, bs=64, states=["h0", "F2"], targets=("next1",),
+                wd=0.1, early_stop=True, log=lambda s: None)
+    assert r2["rows"][0]["next1"]["best_epoch"] in (1, 2, 3)
     print("\n".join(_text_probes(r2)[:4]))
     assert [r["state"] for r in r2["rows"]] == ["h0", "F2"]
     lg = loop_geometry(model, test, ([[0] + [5, 6, 7, 8, 9] * 4], 5), ([[0] + [11, 3, 17, 2, 30] * 4], 5),
