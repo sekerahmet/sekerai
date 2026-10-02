@@ -26,6 +26,9 @@
                  ([eot] + cumle x 10) ve dongu oncesi (400 token yeni metin + cumle x 10)
     copy_calibration  matematikci O12: gercek valid metninde induction tahmini olan konumlarda p(induction token) kalibrasyonu,
                  baglam boyu 2 ve 4, m = 1 / 2 / 3+ ayri
+    copy_ceiling DITTO-X Adim 0: g(l, m) = gercek metinde verbatim kopyanin bir sonraki token'da devam etme orani; l = en uzun
+                 eslesen sonek (kova 2/4/8/16/32/64+), m = o sonekin belgede onceki gecis sayisi (kova 1..5+); --corpus-tokens > 0:
+                 egitim parcalarindan (CPU), --model-docs > 0: valid belgelerinde ayni hucrelerde veri orani ve modelin p'si
     symbol_filler  86 element (analyze_capacity.ELEMENTS) x 5 kalip: dogru sembol ve " Cu" olasiligi / sirasi, top1
                  dagilimi (Cu kalibin genel doldurucusu mu); 133 baskentte top1 dagilimi
 
@@ -1601,6 +1604,172 @@ def text_copy_calibration(res):
     return L
 
 
+# ---- copy_ceiling: DITTO-X tavani g(l, m)
+
+CEIL_LENGTHS = (2, 4, 8, 16, 32, 64)        # kova alt siniri; 64 = 64+
+CEIL_M = 5                                  # m kovasi 1..4, 5 = 5+
+CEIL_CHUNK = 50_000_000                     # parca (belge sinirinda) token
+_HASH_P = np.uint64(0x9E3779B97F4A7C15)
+
+
+def _copy_cells(a, starts):
+    """a: belgeler arka arkaya (uint16 akis), starts: belge baslari (artan; belge [eot] + metin).  Konum t (hedef a[t + 1],
+    ayni belgede): l = belgede daha once (bitisi < t) gecmis en uzun sonek, CEIL_LENGTHS kovasi (eot haric pencere); m = o
+    kova boyundaki sonekin onceki gecis sayisi; tahmin = onceki gecislerin hepsi ayni token'la surduyse o token (O12 gibi),
+    surmediyse tutarsiz.  -> dict(lb, m, consistent, hit, t, pred) (yalniz l >= 2 olan konumlar)."""
+    n = len(a)
+    doc = np.zeros(n, np.int64)
+    doc[starts[1:]] = 1
+    doc = np.cumsum(doc)
+    pos = np.arange(n, dtype=np.int64) - starts[doc]           # belge ici konum (eot = 0)
+    ends = np.append(starts[1:], n)
+    has_next = np.arange(n) + 1 < ends[doc]
+    nxt = np.zeros(n, np.int64)
+    nxt[:-1] = a[1:]
+    h = a.astype(np.uint64) + np.uint64(1)
+    L = 1
+    best = dict(lb=np.full(n, -1, np.int8), m=np.zeros(n, np.int64), cons=np.zeros(n, bool), pred=np.zeros(n, np.int64))
+    docmix = (doc.astype(np.uint64) + np.uint64(1)) * np.uint64(0xD6E8FEB86659FD93)
+    with np.errstate(over="ignore"):
+        for k, target in enumerate(CEIL_LENGTHS):
+            while L < target:                                   # h_{2L}[t] = h_L[t - L] * P^L + h_L[t]
+                shifted = np.zeros(n, np.uint64)
+                shifted[L:] = h[:-L]
+                h = shifted * (_HASH_P ** np.uint64(L)) + h
+                L *= 2
+            valid = (pos - L + 1 >= 1) & has_next               # pencere eot'u icermez; hedef ayni belgede
+            idx = np.flatnonzero(valid)
+            key = h[idx] ^ docmix[idx]
+            order = np.argsort(key, kind="stable")              # anahtar, sonra konum
+            ks, ii = key[order], idx[order]
+            first = np.ones(len(ks), bool)
+            first[1:] = ks[1:] != ks[:-1]
+            gstart = np.maximum.accumulate(np.where(first, np.arange(len(ks)), 0))
+            occ = np.arange(len(ks)) - gstart                   # onceki gecis sayisi
+            fnext = nxt[ii[gstart]]
+            diff = (nxt[ii] != fnext).astype(np.int64)
+            cs = np.cumsum(diff)
+            before = cs - diff - (cs[gstart] - diff[gstart])    # grup icinde onceki uyusmazlik sayisi
+            has = occ >= 1
+            t = ii[has]
+            best["lb"][t] = k                                   # buyuk L sonra yazilir: en uzun kova kalir
+            best["m"][t] = occ[has]
+            best["cons"][t] = before[has] == 0
+            best["pred"][t] = fnext[has]
+    t = np.flatnonzero(best["lb"] >= 0)
+    return dict(t=t, lb=best["lb"][t].astype(np.int64), m=np.minimum(best["m"][t], CEIL_M), consistent=best["cons"][t],
+                pred=best["pred"][t], hit=(nxt[t] == best["pred"][t]))
+
+
+def _cell_table(cells, p=None):
+    """-> hucre listesi: l kovasi, m kovasi, n (tutarli), isabet orani ± SE, tutarsiz payi, (p: modelin ortalama p'si)."""
+    rows = []
+    for k, L in enumerate(CEIL_LENGTHS):
+        for m in range(1, CEIL_M + 1):
+            sel = (cells["lb"] == k) & (cells["m"] == m)
+            ok = sel & cells["consistent"]
+            n, n_all = int(ok.sum()), int(sel.sum())
+            g = float(cells["hit"][ok].mean()) if n else None
+            row = dict(l=L, m=m, n=n, n_all=n_all, inconsistent=round(1 - n / n_all, 4) if n_all else None,
+                       g=None if g is None else round(g, 4), se=None if g is None else round(math.sqrt(g * (1 - g) / n), 4))
+            if p is not None and n:
+                row["p_model"] = round(float(p[ok].mean()), 4)
+            rows.append(row)
+    return rows
+
+
+def _merge_counts(acc, cells):
+    for k in range(len(CEIL_LENGTHS)):
+        for m in range(1, CEIL_M + 1):
+            sel = (cells["lb"] == k) & (cells["m"] == m)
+            ok = sel & cells["consistent"]
+            c = acc.setdefault((k, m), [0, 0, 0])
+            c[0] += int(ok.sum())
+            c[1] += int(cells["hit"][ok].sum())
+            c[2] += int(sel.sum())
+
+
+def measure_copy_ceiling(args):
+    import data_fineweb as DF
+    out = dict(lengths=CEIL_LENGTHS, m_max=CEIL_M)
+    if args.corpus_tokens:
+        d = os.path.join(args.data, DF.TAG)
+        shards = sorted(int(f[6:9]) for f in os.listdir(d) if f.startswith("shard_") and f.endswith(".bin")
+                        and int(f[6:9]) != DF.VALID_SHARD)
+        per_shard = int(args.corpus_tokens / len(shards))       # her parcanin basindan esit pay (belge sinirinda)
+        acc, total = {}, 0
+        for i in shards:
+            t0 = time.time()
+            a = np.memmap(os.path.join(d, "shard_%03d.bin" % i), dtype=np.uint16, mode="r")
+            offs = np.load(os.path.join(d, "shard_%03d_offsets.npy" % i))
+            lo = 0
+            while lo < min(per_shard, len(a)):                  # parcalar belge baslarinda kesilir
+                k_lo = int(np.searchsorted(offs, lo))
+                j = max(int(np.searchsorted(offs, lo + CEIL_CHUNK, side="right")) - 1, k_lo + 1)
+                hi = int(offs[j]) if j < len(offs) else len(a)
+                chunk = np.asarray(a[lo:hi])
+                st = offs[k_lo:j] - lo
+                _merge_counts(acc, _copy_cells(chunk, st.astype(np.int64)))
+                total += len(chunk)
+                lo = hi
+            done = lo
+            _say("parca %03d: %.0f M token, toplam %.0f M, %.0f sn" % (i, done / 1e6, total / 1e6, time.time() - t0))
+        rows = []
+        for (k, m), (n, hit, n_all) in sorted(acc.items()):
+            g = hit / n if n else None
+            rows.append(dict(l=CEIL_LENGTHS[k], m=m, n=n, n_all=n_all, inconsistent=round(1 - n / n_all, 4) if n_all else None,
+                             g=None if g is None else round(g, 4), se=None if g is None else round(math.sqrt(g * (1 - g) / n), 5)))
+        out["corpus"] = dict(tokens=total, shards=shards, rows=rows)
+    if args.model_docs:
+        v = DF.load_valid(args.data, log=lambda s: None)
+        order = np.random.default_rng(0).permutation(len(v["valid_starts"]))[:args.model_docs]
+        docs = [DF.valid_doc(v, int(k))[:args.model_tokens + 1] for k in sorted(order)]
+        stream = np.concatenate([np.asarray(x, np.int64) for x in docs])
+        starts = np.cumsum([0] + [len(x) for x in docs[:-1]]).astype(np.int64)
+        cells = _copy_cells(stream.astype(np.uint16), starts)
+        out["valid"] = dict(docs=len(docs), tokens=int(len(stream)), weights={})
+        for w in (["last", "ema"] if args.weights == "both" else [args.weights]):
+            model = load_model(args.run, w, args.device)
+            p = np.zeros(len(stream))
+            dev = next(model.parameters()).device
+            with torch.no_grad():
+                for s0, x in zip(starts, docs):
+                    lp = torch.softmax(model.logits(torch.tensor([x[:-1]], device=dev))[0].float(), -1)
+                    sel = (cells["t"] >= s0) & (cells["t"] < s0 + len(x) - 1)
+                    tt = cells["t"][sel] - s0
+                    if len(tt):
+                        p[cells["t"][sel]] = lp[torch.tensor(tt, device=dev), torch.tensor(cells["pred"][sel], device=dev)].cpu().numpy()
+            out["valid"]["weights"][w] = _cell_table(cells, p[cells["t"]])
+            del model
+    return out
+
+
+def text_copy_ceiling(res, n_min=400):
+    L = ["# COPY_CEILING g(l, m): verbatim kopyanin sonraki token'da devam etme orani",
+         "l = konum t'de biten ve belgede daha once gecmis EN UZUN sonekin boyu, kova alt siniri (2: 2-3, 4: 4-7, ..., 64: 64+);",
+         "m = o kova boyundaki sonekin belgede onceki gecis sayisi (5 = 5+); tahmin = onceki gecislerin devami (hepsi ayniysa, "
+         "O12 gibi; degilse 'tutarsiz', g'ye girmez); g = gercek sonraki token = tahmin orani"]
+    if "corpus" in res:
+        c = res["corpus"]
+        L += ["", "## egitim parcalari: %.2f milyar token (parca basina esit pay, belge sinirinda)" % (c["tokens"] / 1e9),
+              "l \\ m | " + " | ".join("m=%d%s" % (m, "+" if m == res["m_max"] else "") for m in range(1, res["m_max"] + 1))]
+        for Lb in res["lengths"]:
+            cells = {r["m"]: r for r in c["rows"] if r["l"] == Lb}
+            L.append("%3d%s | " % (Lb, "+" if Lb == res["lengths"][-1] else " ") + " | ".join(
+                ("%.3f ± %.3f (n %d%s)" % (r["g"], r["se"], r["n"], "" if r["n"] >= n_min else ", <n_min") if r and r["n"]
+                 else "-") for r in (cells.get(m) for m in range(1, res["m_max"] + 1))))
+    if "valid" in res:
+        v = res["valid"]
+        for w, rows in v["weights"].items():
+            L += ["", "## valid (%d belge, %d token), agirlik %s: veri g ± SE / model p ort. (n)" % (v["docs"], v["tokens"], w)]
+            for Lb in res["lengths"]:
+                cells = {r["m"]: r for r in rows if r["l"] == Lb}
+                L.append("%3d | " % Lb + " | ".join(
+                    ("%.3f±%.3f / %.3f (%d)" % (r["g"], r["se"], r["p_model"], r["n"]) if r and r["n"] else "-")
+                    for r in (cells.get(m) for m in range(1, res["m_max"] + 1))))
+    return L
+
+
 # ---- CLI
 
 def _out_dir(run_dir):
@@ -1614,13 +1783,16 @@ def main(argv=None):
     ap.add_argument("run", help="kosu klasoru")
     ap.add_argument("measure", choices=("answers", "decoding", "repetition", "loop_heads", "corpus",
                                                "answer_split", "symbol_filler", "cooccur", "training_curve",
-                                               "ss_profile", "copy_odds", "copy_calibration"))
+                                               "ss_profile", "copy_odds", "copy_calibration", "copy_ceiling"))
     ap.add_argument("--data", required=True, help="FineWeb koku (gpt2/tokenizer.json, gpt2/shard_*.bin)")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--weights", default="last", choices=("last", "ema", "both"))
     ap.add_argument("--checkpoint", type=int, help="answers: checkpoint_t<adim>.pt (EMA yedekteki ortalama)")
     ap.add_argument("--tokens", type=int, default=641, help="decoding: uretim boyu (final.json gibi 641)")
     ap.add_argument("--heads", help="copy_odds: tur.head listesi, tur 1'den (varsayilan 5.7,7.5,8.7,10.2)")
+    ap.add_argument("--corpus-tokens", type=float, default=0, help="copy_ceiling: egitim parcalarindan token (0 = yok)")
+    ap.add_argument("--model-docs", type=int, default=0, help="copy_ceiling: valid belgesi (0 = model olcumu yok)")
+    ap.add_argument("--model-tokens", type=int, default=4096, help="copy_ceiling: valid belgesi en cok bu kadar token")
     ap.add_argument("--steps", default="final", help="training_curve: virgulle adimlar ve/veya final")
     ap.add_argument("--beam", type=int, default=8, help="answer_split: isin genisligi")
     ap.add_argument("--beam-steps", type=int, default=6, help="answer_split: isin boyu (token)")
@@ -1636,7 +1808,7 @@ def main(argv=None):
     vocab, eot = (None, None) if args.measure == "ss_profile" else load_vocab(args.data)
     out_dir = _out_dir(args.run)
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    weights_list = ["none"] if args.measure in ("corpus", "cooccur", "training_curve", "ss_profile") else (["last", "ema"] if args.weights == "both" else [args.weights])
+    weights_list = ["none"] if args.measure in ("corpus", "cooccur", "training_curve", "ss_profile", "copy_ceiling") else (["last", "ema"] if args.weights == "both" else [args.weights])
     for w in weights_list:
         t1 = time.time()
         if args.measure in ("corpus", "cooccur"):
@@ -1647,6 +1819,10 @@ def main(argv=None):
             res = measure_training_curve(vocab, eot, args)
             lines = text_training_curve(res)
             source = "checkpoint'ler %s" % args.steps
+        elif args.measure == "copy_ceiling":
+            res = measure_copy_ceiling(args)
+            lines = text_copy_ceiling(res)
+            source = "egitim parcalari / valid"
         elif args.measure == "ss_profile":
             res = measure_ss_profile(args)
             lines = text_ss_profile(res)
