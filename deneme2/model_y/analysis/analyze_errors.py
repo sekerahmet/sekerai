@@ -14,6 +14,8 @@
                  verinin kendisi hangi cevabi destekliyor; "symbol for <ad> is" kalibinin cevap yuvasi
     answer_split 10 soru: cevap konumunda son turlar (F16, F15+F16, F16 alpha x 0,5) degisince dogru ve secilen ilk token;
                  acgozlu ilk token'dan sonraki dagilim; isin aramasi (beam 8 x 6 token).  Mudahale BAGIMLILIK olcer
+    cooccur      metal adlari (Cu'nun doldurucu oldugu / olmadigi) cevresinde (+-COOC_WINDOW token, ayni belge) " copper",
+                 " Cu", " iron", " Fe" gecme payi -- Cu doldurucusunun birlikte gecme adayi
     symbol_filler  86 element (analyze_capacity.ELEMENTS) x 5 kalip: dogru sembol ve " Cu" olasiligi / sirasi, top1
                  dagilimi (Cu kalibin genel doldurucusu mu); 133 baskentte top1 dagilimi
 
@@ -1140,6 +1142,63 @@ def text_symbol_filler(res):
     return L
 
 
+# ---- cooccur: metal adi cevresinde aday token'lar
+
+COOC_ANCHORS = (" gold", " silver", " tin", " platinum", " iron", " aluminum", " zinc", " nickel", " lead", " mercury")
+COOC_TARGETS = (" copper", " Cu", " iron", " Fe", " silver", " Ag")
+COOC_WINDOW = 32
+
+
+def measure_cooccur(vocab, eot, args):
+    """Capa (metal adi, tek token) gecislerinin kacinda +-COOC_WINDOW token icinde, ayni belgede hedef token var."""
+    import data_fineweb as DF
+    d = os.path.join(args.data, DF.TAG)
+    shards = sorted(int(f[6:9]) for f in os.listdir(d) if f.startswith("shard_") and f.endswith(".bin"))
+    ids = {w: encode(w, vocab) for w in COOC_ANCHORS + COOC_TARGETS}
+    assert all(len(v) == 1 for v in ids.values()), {w: v for w, v in ids.items() if len(v) != 1}
+    tab = {a: dict(n=0, hits={t: 0 for t in COOC_TARGETS}) for a in COOC_ANCHORS}
+    tot = {t: 0 for t in COOC_TARGETS}
+    total = 0
+    for i in shards[:args.shards] if args.shards else shards:
+        t0 = time.time()
+        a = np.fromfile(os.path.join(d, "shard_%03d.bin" % i), dtype=np.uint16)
+        offsets = np.load(os.path.join(d, "shard_%03d_offsets.npy" % i))
+        total += len(a)
+        tpos = {t: np.flatnonzero(a == ids[t][0]) for t in COOC_TARGETS}
+        for t in COOC_TARGETS:
+            tot[t] += len(tpos[t])
+        for an in COOC_ANCHORS:
+            ap = np.flatnonzero(a == ids[an][0])
+            tab[an]["n"] += len(ap)
+            if not len(ap):
+                continue
+            adoc = np.searchsorted(offsets, ap, side="right") - 1
+            for t in COOC_TARGETS:
+                tp = tpos[t]
+                if not len(tp):
+                    continue
+                lo = np.searchsorted(tp, ap - COOC_WINDOW)          # pencerenin ilk adayi
+                j = np.minimum(lo, len(tp) - 1)
+                ok = (lo < len(tp)) & (tp[j] <= ap + COOC_WINDOW) & (tp[j] != ap)
+                ok &= np.searchsorted(offsets, tp[j], side="right") - 1 == adoc
+                tab[an]["hits"][t] += int(ok.sum())
+        _say("parca %03d: %.0f M token, %.0f sn" % (i, len(a) / 1e6, time.time() - t0))
+        del a
+    return dict(tokens=total, window=COOC_WINDOW, totals=tot,
+                rows=[dict(anchor=an, n=e["n"], hits=e["hits"],
+                           rate={t: round(e["hits"][t] / max(e["n"], 1), 5) for t in COOC_TARGETS}) for an, e in tab.items()])
+
+
+def text_cooccur(res):
+    L = ["# METAL ADI CEVRESINDE ADAYLAR (+-%d token, ayni belge; %.2f milyar token)" % (res["window"], res["tokens"] / 1e9),
+         "hedeflerin toplam gecisi: " + "  ".join("%r %d" % kv for kv in res["totals"].items()),
+         "capa | n | " + " | ".join("%r pay (sayi)" % t for t in COOC_TARGETS)]
+    for r in res["rows"]:
+        L.append("%-10r %9d | " % (r["anchor"], r["n"]) + " | ".join(
+            "%.4f (%d)" % (r["rate"][t], r["hits"][t]) for t in COOC_TARGETS))
+    return L
+
+
 # ---- CLI
 
 def _out_dir(run_dir):
@@ -1152,7 +1211,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("run", help="kosu klasoru")
     ap.add_argument("measure", choices=("answers", "decoding", "repetition", "loop_heads", "corpus",
-                                               "answer_split", "symbol_filler"))
+                                               "answer_split", "symbol_filler", "cooccur"))
     ap.add_argument("--data", required=True, help="FineWeb koku (gpt2/tokenizer.json, gpt2/shard_*.bin)")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--weights", default="last", choices=("last", "ema", "both"))
@@ -1172,12 +1231,12 @@ def main(argv=None):
     vocab, eot = load_vocab(args.data)
     out_dir = _out_dir(args.run)
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    weights_list = ["none"] if args.measure == "corpus" else (["last", "ema"] if args.weights == "both" else [args.weights])
+    weights_list = ["none"] if args.measure in ("corpus", "cooccur") else (["last", "ema"] if args.weights == "both" else [args.weights])
     for w in weights_list:
         t1 = time.time()
-        if args.measure == "corpus":
-            res, lines = measure_corpus(vocab, eot, args), None
-            lines = text_corpus(res)
+        if args.measure in ("corpus", "cooccur"):
+            res = measure_corpus(vocab, eot, args) if args.measure == "corpus" else measure_cooccur(vocab, eot, args)
+            lines = text_corpus(res) if args.measure == "corpus" else text_cooccur(res)
             source = "egitim parcalari"
         else:
             model = load_model(args.run, w, args.device, args.checkpoint)
