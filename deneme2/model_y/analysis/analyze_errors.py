@@ -99,6 +99,13 @@ PROBES = (
     ("fewshot", "The smallest planet in our solar system is Mercury. The planet closest to the Sun is Mercury. "
                 "The largest planet in our solar system is", (" Jupiter", " Earth", " Mercury", " Saturn"), 1),
     ("fewshot", "2 x 3 = 6. 5 x 2 = 10. 3 x 4 =", (" 12", " 7", " 15", " 34"), 1),
+    ("arith", "7 + 5 =", (" 12", " 75", " 13", " 2"), 1),
+    ("arith", "3 + 4 =", (" 7", " 34", " 12", " 1"), 1),
+    ("arith", "Seven plus five equals", (" twelve", " 12", " seven", " five"), 2),
+    ("arith", "2 + 2 = 4. 3 + 5 = 8. 7 + 5 =", (" 12", " 13", " 75", " 8"), 1),
+    ("arith", "2 + 2 = 4\n3 + 5 = 8\n7 + 5 =", (" 12", " 13", " 75", " 8"), 1),
+    ("arith", "Two plus two equals four. Three plus five equals eight. Seven plus five equals",
+     (" twelve", " thirteen", " eight", " seven"), 1),
     ("binding", "George Washington was born in", (" Virginia", " Westmoreland", " New York", " a log cabin", " Kentucky"), 2),
     ("binding", "Abraham Lincoln was born in", (" a log cabin", " Kentucky", " Virginia", " New York"), 2),
     ("binding", "The first president of the United States was", (" George Washington", " Thomas Jefferson",
@@ -119,17 +126,22 @@ PROBES = (
     ("binding", "The radius of a circle is the distance from the center to the", (" edge", " circumference",
                                                                                   " center", " diameter"), 2),
 )
-# decoding: ayar adi -> (sicaklik, top-p, tekrar cezasi, ceza penceresi, yasakli tekrar n'lisi, tohum sayisi)
+# decoding: ayar adi -> (sicaklik, top-p, tekrar cezasi, ceza penceresi, yasakli tekrar n'lisi, tohum sayisi, DRY)
 SETTINGS = (
-    ("greedy", 0.0, 1.0, 1.0, 0, 0, 1),
-    ("greedy_pen64", 0.0, 1.0, 1.2, 64, 0, 1),
-    ("greedy_pen512", 0.0, 1.0, 1.2, 512, 0, 1),
-    ("greedy_no4gram", 0.0, 1.0, 1.0, 0, 4, 1),
-    ("t1.0", 1.0, 1.0, 1.0, 0, 0, 3),
-    ("t0.8_p0.9", 0.8, 0.9, 1.0, 0, 0, 3),
-    ("t0.8_p0.9_pen512", 0.8, 0.9, 1.2, 512, 0, 3),
-    ("t0.8_p0.9_no4gram", 0.8, 0.9, 1.0, 0, 4, 3),
+    ("greedy", 0.0, 1.0, 1.0, 0, 0, 1, False),
+    ("greedy_pen64", 0.0, 1.0, 1.2, 64, 0, 1, False),
+    ("greedy_pen512", 0.0, 1.0, 1.2, 512, 0, 1, False),
+    ("greedy_no4gram", 0.0, 1.0, 1.0, 0, 4, 1, False),
+    ("greedy_dry", 0.0, 1.0, 1.0, 0, 0, 1, True),
+    ("t1.0", 1.0, 1.0, 1.0, 0, 0, 3, False),
+    ("t0.8_p0.9", 0.8, 0.9, 1.0, 0, 0, 3, False),
+    ("t0.8_p0.9_pen512", 0.8, 0.9, 1.2, 512, 0, 3, False),
+    ("t0.8_p0.9_no4gram", 0.8, 0.9, 1.0, 0, 4, 3, False),
+    ("t0.8_p0.9_dry", 0.8, 0.9, 1.0, 0, 0, 3, True),
 )
+# DRY (dontrepeat2026_verbatimloops.txt, Ek A ve Tablo 8): z(v) -= lam * base^(n - allowed), n = v'yi uretmenin uzatacagi
+# baglam sonekiyle eslesen onceki parcanin boyu (n >= allowed); ayiricilar (satir sonu, iki nokta, tirnak, yildiz) eslesmeyi keser
+DRY = dict(lam=0.8, base=1.75, allowed=2, range=1024, cap=64)
 # corpus: istem ifadesi (bosluklu, cumle icindeki yazimiyla) -> sonraki token'lar; ve (capa, adaylar): capadan sonraki
 # NEAR_WINDOW token icinde aday sayisi
 PHRASES = (
@@ -139,6 +151,8 @@ PHRASES = (
     " World War II ended in", " Amazon rainforest is located in", " Newton is famous for", " its area is",
     " 3 x 4 =", " George Washington was born in", " steam engine was invented by", " Constitution was written by",
     " heart has four chambers", " Thomas Newcomen", " Newcomen engine",
+    " 7 + 5 =", " 3 + 4 =", " 2 + 2 =", " plus five equals", " times four equals",
+    " first president of the United States was", " capital of Australia is",
 )
 NEAR = (
     (" largest planet", (" Jupiter", " Earth", " Saturn", " Venus", " Pluto", " Mercury")),
@@ -147,6 +161,9 @@ NEAR = (
     (" sunlight, water", (" carbon dioxide", " nutrients", " air", " soil", " oxygen")),
     (" Washington was born", (" Virginia", " New York", " Westmoreland", " log cabin")),
     (" steam engine", (" Newcomen", " Watt", " 1712", " 1769", " 1793")),
+    (" capital of Australia", (" Canberra", " Sydney", " Melbourne")),
+    (" first president", (" Washington", " Lincoln", " Jefferson", " Adams")),
+    (" symbol Au", (" gold", " copper", " silver")),
 )
 NEAR_WINDOW = 32
 REPEATS = 10           # repetition: kendini besleme egrisi icin cumle tekrar sayisi
@@ -290,8 +307,29 @@ def _loop_stats(prompt_ids, gen):
 
 
 @torch.no_grad()
+def _dry_lengths(h, pos, breakers, cfg):
+    """DRY n_t(v): h baglam (liste), pos {token: konumlar}; son token'in onceki her gecisi i icin geriye eslesme boyu m,
+    aday v = h[i + 1].  -> {v: en uzun m}."""
+    t = len(h) - 1
+    last = h[t]
+    if last in breakers:
+        return {}
+    lo = max(0, len(h) - cfg["range"])
+    out = {}
+    for i in pos.get(last, ()):
+        if i >= t or i < lo:
+            continue
+        m = 1
+        while m < cfg["cap"] and i - m >= lo and h[t - m] == h[i - m] and h[t - m] not in breakers:
+            m += 1
+        v = h[i + 1]
+        if m > out.get(v, 0):
+            out[v] = m
+    return out
+
+
 def generate_batch(model, prompts, n, eot, temp=0.0, top_p=1.0, penalty=1.0, window=64, no_repeat=0, seed=0,
-                   forbid_eot=True):
+                   forbid_eot=True, dry=None, breakers=frozenset()):
     """Satir basina istem (id listeleri, [eot] ile), n token; onbellekli (AttentionCache, sagdan dolgu).  eot yasak
     (long_write gibi) -- eot_first: eot'un en olasi oldugu ilk adim.  penalty: konus_fineweb.generate'in cezasi (son window
     token, pozitif skor bolunur, negatif carpilir).  no_repeat k: metinde (istem dahil) gecmis k'liyi tamamlayan token yasak.
@@ -311,6 +349,11 @@ def generate_batch(model, prompts, n, eot, temp=0.0, top_p=1.0, penalty=1.0, win
         for r, h in enumerate(hist):
             for j in range(len(h) - no_repeat + 1):
                 grams[r].setdefault(tuple(h[j:j + no_repeat - 1]), set()).add(h[j + no_repeat - 1])
+    pos = [{} for _ in range(B)]
+    if dry:
+        for r, h in enumerate(hist):
+            for j, tok in enumerate(h):
+                pos[r].setdefault(tok, []).append(j)
     out, eot_first, probs = [[] for _ in range(B)], [None] * B, [[] for _ in range(B)]
     z = model.logits(x, caches).float()
     z = z[torch.arange(B, device=dev), lengths - 1]
@@ -337,6 +380,13 @@ def generate_batch(model, prompts, n, eot, temp=0.0, top_p=1.0, penalty=1.0, win
                 ban = grams[r].get(tuple(hist[r][-(no_repeat - 1):]))
                 if ban:
                     z[r, list(ban)] = -float("inf")
+        if dry:
+            for r in range(B):
+                ns = _dry_lengths(hist[r], pos[r], breakers, dry)
+                vs = [v for v, m in ns.items() if m >= dry["allowed"] and v not in breakers]
+                if vs:
+                    pen = torch.tensor([dry["lam"] * dry["base"] ** (ns[v] - dry["allowed"]) for v in vs], device=dev)
+                    z[r, vs] = z[r, vs] - pen
         if temp <= 0:
             t = z.argmax(-1)
         else:
@@ -350,6 +400,8 @@ def generate_batch(model, prompts, n, eot, temp=0.0, top_p=1.0, penalty=1.0, win
         for r in range(B):
             out[r].append(tl[r])
             hist[r].append(tl[r])
+            if dry:
+                pos[r].setdefault(tl[r], []).append(len(hist[r]) - 1)
             if no_repeat:
                 grams[r].setdefault(tuple(hist[r][-no_repeat:-1]), set()).add(tl[r])
         if i + 1 < n:
@@ -357,37 +409,84 @@ def generate_batch(model, prompts, n, eot, temp=0.0, top_p=1.0, penalty=1.0, win
     return out, eot_first, probs
 
 
+def _breakers(vocab):
+    """DRY ayiricilari: metninde satir sonu, iki nokta, tirnak ya da yildiz olan token'lar."""
+    return frozenset(i for i in range(len(vocab)) if any(c in decode([i], vocab) for c in '\n:"*'))
+
+
+def _doc_prompts(fw_root, count, max_prompt=512):
+    """Sinav belgelerinin (exam) ilk yarisi istem (en cok max_prompt token): continuation_repeats gibi."""
+    import data_fineweb as DF
+    v = DF.load_valid(fw_root, log=lambda s: None)
+    out = []
+    for k in v["exam"]:
+        d = DF.valid_doc(v, int(k))
+        if 32 <= len(d) // 2 <= max_prompt:
+            out.append(d[:len(d) // 2])
+        if len(out) >= count:
+            break
+    return out
+
+
 def measure_decoding(model, vocab, eot, args):
     texts = list(PROMPTS) + [q for q, _, _, _ in QUESTIONS]
     prompts = [[eot] + encode(s, vocab) for s in texts]
+    docs = _doc_prompts(args.data, args.docs) if args.docs else []
     n = args.tokens
-    res = []
-    for name, temp, top_p, pen, win, nrep, seeds in SETTINGS:
+    chosen = [x for x in SETTINGS if not args.settings or x[0] in args.settings.split(",")]
+    breakers = _breakers(vocab) if any(x[7] for x in chosen) else frozenset()
+    res, longs = [], []
+    for name, temp, top_p, pen, win, nrep, seeds, dry in chosen:
         t0 = time.time()
         rows = []
         for seed in range(seeds):
-            gens, eot_first, _ = generate_batch(model, prompts, n, eot, temp, top_p, pen, win, nrep, seed)
-            for k, (s, p, g) in enumerate(zip(texts, prompts, gens)):
+            gens, eot_first, _ = generate_batch(model, prompts + docs, n, eot, temp, top_p, pen, win, nrep, seed,
+                                                dry=DRY if dry else None, breakers=breakers)
+            for k, (p, g) in enumerate(zip(prompts + docs, gens)):
+                if k >= len(prompts):                       # belge devami: dongu olculeri ilk 256 token'da
+                    g = g[:256]
+                    rows.append(dict(prompt=decode(p[-30:], vocab), seed=seed, kind="doc", eot_first=eot_first[k],
+                                     key_in_first48=None, text=decode(g, vocab)[:300], **_loop_stats(p, g)))
+                    continue
                 st = _loop_stats(p, g)
                 head = decode(g[:48], vocab)
                 hit = None
                 if k >= len(PROMPTS):
                     keys = QUESTIONS[k - len(PROMPTS)][3]
                     hit = any(key in head for key in keys)
-                rows.append(dict(prompt=s, seed=seed, kind="question" if k >= len(PROMPTS) else "prompt",
+                rows.append(dict(prompt=texts[k], seed=seed, kind="question" if k >= len(PROMPTS) else "prompt",
                                  eot_first=eot_first[k], key_in_first48=hit, text=decode(g, vocab), **st))
+        summary = dict(setting=name, temp=temp, top_p=top_p, penalty=pen, window=win, no_repeat=nrep, seeds=seeds, dry=dry,
+                       secs=round(time.time() - t0, 1))
+        for kind in ("prompt", "question", "doc"):
+            rs = [r for r in rows if r["kind"] == kind]
+            if rs:
+                summary[kind] = dict(n=len(rs), loop_rate=round(sum(r["loop_first"] is not None for r in rs) / len(rs), 4),
+                                     loop_first_median=_median([r["loop_first"] for r in rs]),
+                                     repeat8=round(float(np.mean([r["repeat8"] for r in rs])), 4),
+                                     distinct4=round(float(np.mean([r["distinct4"] for r in rs])), 4))
         q = [r for r in rows if r["kind"] == "question"]
-        summary = dict(setting=name, temp=temp, top_p=top_p, penalty=pen, window=win, no_repeat=nrep, seeds=seeds,
-                       loop_rate=round(sum(r["loop_first"] is not None for r in rows) / len(rows), 4),
-                       loop_first_median=_median([r["loop_first"] for r in rows]),
-                       repeat8=round(float(np.mean([r["repeat8"] for r in rows])), 4),
-                       distinct4=round(float(np.mean([r["distinct4"] for r in rows])), 4),
-                       key_hits=round(sum(bool(r["key_in_first48"]) for r in q) / len(q), 4), secs=round(time.time() - t0, 1))
-        _say("decoding %-20s dongu %.2f  ilk dongu medyan %s  tekrar8 %.3f  farkli4 %.3f  anahtar %.2f  (%.0f sn)" % (
-            name, summary["loop_rate"], summary["loop_first_median"], summary["repeat8"], summary["distinct4"],
-            summary["key_hits"], summary["secs"]))
+        summary["key_hits"] = round(sum(bool(r["key_in_first48"]) for r in q) / len(q), 4)
+        a = summary["prompt"]
+        _say("decoding %-20s istem dongu %.2f (ilk %s)  belge dongu %s  anahtar %.2f  (%.0f sn)" % (
+            name, a["loop_rate"], a["loop_first_median"], summary.get("doc", {}).get("loop_rate"), summary["key_hits"],
+            summary["secs"]))
         res.append(dict(summary=summary, rows=rows))
-    return dict(tokens=n, settings=res)
+        if args.long and (temp > 0 or dry):                 # long_write gibi: tek istem, baglam dolana kadar
+            t0 = time.time()
+            g, _, _ = generate_batch(model, [prompts[0]], args.long, eot, temp, top_p, pen, win, nrep, 0,
+                                     dry=DRY if dry else None, breakers=breakers)
+            g = g[0]
+            st = _loop_stats(prompts[0], g)
+            segs = []
+            for s0 in range(0, len(g), 512):
+                part = g[s0:s0 + 512]
+                g4 = [tuple(part[i:i + 4]) for i in range(len(part) - 3)]
+                segs.append(dict(start=s0, distinct4=round(len(set(g4)) / max(len(g4), 1), 4),
+                                 repeat8=_loop_stats(prompts[0] + g[:s0], part)["repeat8"]))
+            longs.append(dict(setting=name, tokens=len(g), segments=segs, text=decode(g, vocab)[:4000], **st))
+            _say("long %-20s ilk dongu %s  tekrar8 %.3f  (%.0f sn)" % (name, st["loop_first"], st["repeat8"], time.time() - t0))
+    return dict(tokens=n, docs=len(docs), settings=res, long=longs)
 
 
 def _median(v):
@@ -397,16 +496,24 @@ def _median(v):
 
 
 def text_decoding(res):
-    L = ["# URETIM AYARLARI (%d token, eot yasak; 8 istem + 10 soru; ornekleme 3 tohum)" % res["tokens"],
-         "ayar | dongu orani | ilk dongu konumu medyan | tekrar8 | farkli4 | anahtar ilk 48 token'da (soru, OTOMATIK YARDIMCI)"]
+    L = ["# URETIM AYARLARI (%d token, eot yasak; 8 istem + 10 soru + %d belge devami (ilk 256 token); ornekleme 3 tohum)" % (
+        res["tokens"], res.get("docs", 0)),
+         "ayar | tur: dongu orani / ilk dongu medyan / tekrar8 / farkli4 | anahtar ilk 48 token'da (soru, OTOMATIK YARDIMCI)"]
     for s in res["settings"]:
         m = s["summary"]
-        L.append("%-20s %.2f  %8s  %.3f  %.3f  %.2f" % (m["setting"], m["loop_rate"], m["loop_first_median"], m["repeat8"],
-                                                       m["distinct4"], m["key_hits"]))
+        parts = ["%s %.2f/%s/%.3f/%.3f" % (k, m[k]["loop_rate"], m[k]["loop_first_median"], m[k]["repeat8"], m[k]["distinct4"])
+                 for k in ("prompt", "question", "doc") if k in m]
+        L.append("%-20s %s | %.2f" % (m["setting"], "  ".join(parts), m["key_hits"]))
+    for r in res.get("long") or []:
+        L += ["", "## uzun yazim %s: %d token, ilk dongu %s, tekrar8 %.3f" % (r["setting"], r["tokens"], r["loop_first"],
+                                                                         r["repeat8"]),
+              "dilim farkli4/tekrar8: " + "  ".join("%d:%.2f/%.2f" % (g["start"], g["distinct4"], g["repeat8"])
+                                                    for g in r["segments"]),
+              r["text"][:1500].replace("\n", " / ")]
     for s in res["settings"]:
         L += ["", "## %s" % s["summary"]["setting"]]
         for r in s["rows"]:
-            if r["seed"] > 0 and r["kind"] == "prompt":
+            if (r["seed"] > 0 and r["kind"] == "prompt") or r["kind"] == "doc":
                 continue
             cut = 260 if r["kind"] == "question" else 600
             L.append("[%s t%d dongu@%s tekrar8 %.2f] %s ||%s" % (r["kind"][0], r["seed"], r["loop_first"], r["repeat8"],
@@ -435,7 +542,9 @@ def _sentences(fw_root, vocab, count, offset=0, lo=12, hi=40):
 
 @torch.no_grad()
 def self_reinforcement(model, sents, eot, repeats):
-    """[eot] + s x repeats; k. tekrarda (k = 0..repeats-1) token olasiligi (ilk token haric), argmax isabeti."""
+    """[eot] + s x repeats; k. tekrarda (k = 0..repeats-1) token olasiligi (ilk token haric), argmax isabeti (Xu 2022 WR),
+    olasiligi ilk gecistekinden yuksek token payi (Xu 2022 IP); cumleler ilk gecis olasiligina gore ucte bire bolunur
+    (Xu 2022: baslangic olasiligi yuksek cumlede etki daha guclu)."""
     dev = next(model.parameters()).device
     rows = []
     for s in sents:
@@ -445,15 +554,24 @@ def self_reinforcement(model, sents, eot, repeats):
         pt = p.gather(-1, y[:, None])[:, 0]
         hit = p.argmax(-1) == y
         P = len(s)
+        first = pt[1:P]
         row = []
         for k in range(repeats):
             sl = slice(k * P + 1, (k + 1) * P)              # tekrarin ilk token'i haric (cumle siniri)
-            row.append((float(pt[sl].mean()), float(hit[sl].float().mean())))
+            row.append((float(pt[sl].mean()), float(hit[sl].float().mean()), float((pt[sl] > first).float().mean())))
         rows.append(row)
-    a = np.array(rows)                                      # (cumle, k, 2)
-    return dict(p_mean=[round(float(v), 4) for v in a[:, :, 0].mean(0)],
-                p_median=[round(float(v), 4) for v in np.median(a[:, :, 0], 0)],
-                acc=[round(float(v), 4) for v in a[:, :, 1].mean(0)], sentences=len(rows))
+    a = np.array(rows)                                      # (cumle, k, 3)
+
+    def curves(b):
+        return dict(p_mean=[round(float(v), 4) for v in b[:, :, 0].mean(0)],
+                    p_median=[round(float(v), 4) for v in np.median(b[:, :, 0], 0)],
+                    acc=[round(float(v), 4) for v in b[:, :, 1].mean(0)],
+                    ip=[round(float(v), 4) for v in b[:, :, 2].mean(0)], sentences=len(b))
+    out = curves(a)
+    order = np.argsort(a[:, 0, 0])
+    out["by_initial"] = [dict(initial=round(float(a[t, 0, 0].mean()), 4), **curves(a[t]))
+                         for t in np.array_split(order, 3) if len(t)]
+    return out
 
 
 def _copy_targets(seq, start, n=8):
@@ -514,6 +632,8 @@ def loop_confidence(model, seqs, starts):
             key = "yeni" if k == 0 else ("gecis%d" % (k + 1) if k < 4 else "gecis5+")
             b = buckets.setdefault(key, [])
             b.append((top[t, 0], top[t, 0] - top[t, 1]))
+            bin_key = "konum%03d" % (64 * ((t + 1 - start) // 64))   # uretimdeki konum (64'luk): p(top1), tekrar payi
+            buckets.setdefault(bin_key, []).append((top[t, 0], float(k > 0)))
     return {k: dict(n=len(v), p_top1=round(float(np.mean([a for a, _ in v])), 4),
                     margin=round(float(np.mean([b for _, b in v])), 4)) for k, v in sorted(buckets.items())}
 
@@ -591,10 +711,16 @@ def text_repetition(res):
         L.append("%-8s p ort.  " % key + " ".join("%6.3f" % v for v in r["p_mean"]))
         L.append("%-8s p med.  " % key + " ".join("%6.3f" % v for v in r["p_median"]))
         L.append("%-8s isabet  " % key + " ".join("%6.3f" % v for v in r["acc"]))
+        if "ip" in r:
+            L.append("%-8s IP      " % key + " ".join("%6.3f" % v for v in r["ip"]))
+        for b in r.get("by_initial", []):
+            L.append("  ilk gecis p %.3f (%d cumle) p ort. " % (b["initial"], b["sentences"]) + " ".join(
+                "%6.3f" % v for v in b["p_mean"]))
     L.append("")
     L.append("# ACGOZLU URETIMDE (final.json) GUVEN: konum basina p(top1) ve top1-top2 farki, 8'linin kacinci gecisi")
     for k, v in res["confidence_greedy"].items():
-        L.append("%-8s n %5d  p(top1) %.3f  fark %.3f" % (k, v["n"], v["p_top1"], v["margin"]))
+        L.append("%-9s n %5d  p(top1) %.3f  %s %.3f" % (k, v["n"], v["p_top1"], "tekrar payi" if k.startswith("konum")
+                                                        else "fark", v["margin"]))
     L += ["", "# ACGOZLU URETIMDE LOGIT LENS: uretilen token'in her durumdaki medyan sirasi / sira 1 payi (yeni = 8'li ilk kez)"]
     lens = res["lens_greedy"]
     for k, d in lens.items():
@@ -843,6 +969,9 @@ def main(argv=None):
     ap.add_argument("--weights", default="last", choices=("last", "ema", "both"))
     ap.add_argument("--checkpoint", type=int, help="answers: checkpoint_t<adim>.pt (EMA yedekteki ortalama)")
     ap.add_argument("--tokens", type=int, default=641, help="decoding: uretim boyu (final.json gibi 641)")
+    ap.add_argument("--settings", help="decoding: virgulle ayar adlari (varsayilan hepsi)")
+    ap.add_argument("--docs", type=int, default=0, help="decoding: sinav belgesi devami sayisi (ilk yari istem)")
+    ap.add_argument("--long", type=int, default=0, help="decoding: ornekleme / DRY ayarlarinda tek istemden bu kadar token")
     ap.add_argument("--ablate-tokens", type=int, default=200, help="loop_heads: mudahaleli acgozlu uretim boyu")
     ap.add_argument("--shards", type=int, default=0, help="corpus: ilk K parca (0 = hepsi)")
     args = ap.parse_args(argv)
