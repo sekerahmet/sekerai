@@ -2169,6 +2169,170 @@ def t_micro_batches():
           all(torch.equal(full[k_], v) for k_, v in res.state_dict().items()) and refused)
 
 
+def t_ditto_x_self():
+    """DITTO-X kendi ciktisinda (bulgular 18, 21): copy_trace = analyze_errors._match_trace; self_continuations eot uretmez;
+    ditto_x_self_loss'un sayilari D_032 / O14 kodlariyla ayni (by_l = _decision_stats, giris = _entry_stats, cumle siniri =
+    _chain_stats seq); tavan / secim / kayip bagimsiz elle hesapla; train_seq'te ayrilan parametreler P0 ile bit duzeyinde,
+    MLE yolu P0 ile ayni, beta sabit, surdurme bit duzeyinde."""
+    import copy
+    import functools
+    sys.path.insert(0, os.path.join(HERE, "analysis"))
+    sys.path.insert(0, os.path.join(HERE, "train_fineweb"))
+    import analyze_errors as AE
+    import exam_fineweb as EF
+    from model_y import BlockModel
+    g = torch.Generator().manual_seed(0)
+    ok = True
+    for V, N in ((2, 80), (3, 120), (5, 200), (50, 100)):
+        x = torch.randint(0, V, (5, N), generator=g)
+        mine = TR.copy_trace(x)
+        for r in range(5):
+            ref = AE._match_trace(x[r].tolist())
+            ok &= all((a[r].numpy() == b).all() for a, b in zip(mine, ref))
+    loop = torch.tensor([[7, 1, 2, 3, 4, 5] * 15])
+    ok &= all((a[0].numpy() == b).all() for a, b in zip(TR.copy_trace(loop), AE._match_trace(loop[0].tolist())))
+    check("copy_trace = analyze_errors._match_trace birebir (l, m, kopya token'i; sozluk 2-50, dongu)", ok)
+
+    data = synthetic_data()
+    vocab, nv = data["vocab"], len(data["vocab"])
+    eot = vocab.index("<eos>")
+    m = BlockModel(nv, d=32, turns=2, layers=1, heads=2, units=64, t_max=64, seed=0).double()
+    prompts = torch.randint(10, nv, (6, 9), generator=g)
+    out = TR.self_continuations(m, prompts, 12, eot)
+    seq = prompts.clone()
+    for _ in range(12):
+        z = m.logits(seq)[:, -1]
+        z[:, eot] = -float("inf")
+        seq = torch.cat([seq, z.argmax(-1, keepdim=True)], 1)
+    top = int(out[0, 0])                                    # yasak gercekten calisiyor mu: acgozlunun sectigi token yasak
+    banned = TR.self_continuations(m, prompts, 12, top)
+    check("self_continuations: acgozlu, eot yasak = tam yeniden hesap referansi; acgozlunun sectigi token yasaklaninca "
+          "hic uretilmez", torch.equal(out, seq[:, 9:]) and not (banned == top).any() and not (out == eot).any())
+
+    ends = torch.zeros(nv, dtype=torch.bool)
+    ends[torch.arange(10, nv, 9)] = True                    # oyuncak cumle sonu token'lari
+    is_end = ends.numpy()
+    say = lambda ids: " ".join(vocab[i] for i in ids)      # oyuncak cozucu: anahtar = token dizisi
+    sentence_ends = functools.partial(EF._sentences_of, is_end=is_end, vocab=say)
+    end_ids, word_ids = torch.arange(10, nv, 9), torch.tensor([i for i in range(10, nv) if not ends[i]])
+    pool = [torch.cat([word_ids[torch.randint(0, len(word_ids), (int(torch.randint(4, 8, (1,), generator=g)),),
+                                              generator=g)], end_ids[k:k + 1]]) for k in range(6)]
+    rows = []
+    for _ in range(8):                                      # tekrarli cumle dizileri: giris, cumle siniri, kopya
+        parts = [pool[int(i)] for i in torch.randint(0, 6, (14,), generator=g)]
+        rows.append(torch.cat(parts)[:60])
+    rows = torch.stack(rows)
+    P = 14
+    ceiling = {"1": 0.191, "2": 0.277, "3": 0.388, "4-7": 0.477, "8-15": 0.697, "sentence": 0.19}
+    with torch.no_grad():
+        _, st = TR.ditto_x_self_loss(m, rows, P, sentence_ends, eot, ceiling)
+    texts = [r.tolist() for r in rows]
+    traces = [AE._match_trace(t) for t in texts]
+    dec = AE._decision_stats(m, texts, [P] * len(texts), traces, [dict(l8=None)] * len(texts))["by_l"]
+    by_l_ok = all(st["by_l"][k][0] == v["n"] and abs(st["by_l"][k][1] / v["n"] - v["p_copy"]) < 1e-4
+                  and abs(st["by_l"][k][2] / v["n"] - v["top1"]) < 1e-4 and abs(st["by_l"][k][3] / v["n"] - v["copy_rate"]) < 1e-4
+                  for k, v in dec.items()) and sum(v[0] for v in st["by_l"].values()) == sum(v["n"] for v in dec.values())
+    entries = [AE._entry_stats(t, P, is_end, say, tr) for t, tr in zip(texts, traces)]
+    rest = [e["sent_rest"] for e in entries if e["sent_rest"] is not None]
+    entry_ok = (st["entry"][0] == sum(e["sent"] is not None for e in entries) and st["entry"][3] == len(rest)
+                and abs(st["entry"][2] - sum(rest)) < 1e-9)
+    chains = [c for t, tr in zip(texts, traces) for c in AE._chain_stats(t, P, is_end, say, tr) if c["copy"] >= 0]
+    chain_ok = st["bins"]["sentence"][:2] == [len(chains), sum(c["seq"] for c in chains)] and len(chains) > 5
+    check("ditto_x_self_loss sayilari = D_032 / O14 kodu: by_l = _decision_stats (n, p_copy, top1, kopya), cumle girisi ve "
+          "kalan pay = _entry_stats, cumle siniri n / secim = _chain_stats (kopya token'li olaylar, seq)",
+          by_l_ok and entry_ok and chain_ok, "sinir %s, giris %s" % (st["bins"]["sentence"], st["entry"]))
+
+    def by_hand(ceil, margin):
+        """Bagimsiz: bolmeler _match_trace + _chain_stats'ten, p_c ve rakip model.logits'ten (tam sozluk), secim en dusuk p_c."""
+        z = m.logits(rows[:, :-1])
+        cand = []                                           # (bolme, satir, t, kopya, secildi)
+        for r, (t_, (ell, mm, cp)) in enumerate(zip(texts, traces)):
+            sb = {c["boundary"]: c["seq"] for c in AE._chain_stats(t_, P, is_end, say, (ell, mm, cp)) if c["copy"] >= 0}
+            for t in range(P - 1, len(t_) - 1):
+                if t in sb:
+                    cand.append(("sentence", r, t, int(cp[t]), sb[t]))
+                elif mm[t] == 1 and 1 <= ell[t] <= 15:
+                    key = next(k for k in ceil if k != "sentence" and int(k.split("-")[0]) <= ell[t] <= int(k.split("-")[-1]))
+                    cand.append((key, r, t, int(cp[t]), t_[t + 1] == cp[t]))
+        total, picked = len(cand), []
+        for key in ceil:
+            ks = [c for c in cand if c[0] == key]
+            hit = [c for c in ks if c[4]]
+            k = max(0, len(hit) - math.floor(ceil[key] * len(ks) + 1e-9))
+            pc = lambda c: float(torch.softmax(z[c[1], c[2]], -1)[c[3]])
+            picked += sorted(hit, key=lambda c: (pc(c), c[1], c[2]))[:k]
+        loss = z.new_zeros(())
+        for _, r, t, c, _ in picked:
+            rival = z[r, t].detach().clone()
+            rival[[c, eot]] = -float("inf")
+            loss = loss + 0.5 * (z[r, t, c] - rival.max() + margin).clamp(min=0) ** 2
+        return loss / max(total, 1), len(picked)
+
+    params = [p for p in m.parameters()]
+    zero_loss, zst = TR.ditto_x_self_loss(m, rows, P, sentence_ends, eot, {k: 1.0 for k in ceiling})
+    _, all_st = TR.ditto_x_self_loss(m, rows, P, sentence_ends, eot, {k: 0.0 for k in ceiling})
+    half = {k: 0.4 for k in ceiling}
+    mine, hst = TR.ditto_x_self_loss(m, rows, P, sentence_ends, eot, half, 40.0)
+    ref, n_ref = by_hand(half, 40.0)
+    gm = torch.autograd.grad(mine, params, allow_unused=True)
+    gr = torch.autograd.grad(ref, params, allow_unused=True)
+    gerr = max(float((a - b).abs().max()) for a, b in zip(gm, gr) if a is not None and b is not None)
+    same_none = all((a is None) == (b is None) for a, b in zip(gm, gr))
+    check("kayip: tavan 1,0 -> secim ve kayip 0 (gradyansiz); tavan 0 -> secilen = A; tavan 0,4, margin 40 -> deger ve "
+          "gradyan bagimsiz elle hesapla (en dusuk p_c, z*_r eot ve kopya disi, gradyansiz)",
+          not zero_loss.requires_grad and float(zero_loss) == 0 and all(v[2] == 0 for v in zst["bins"].values())
+          and all(v[2] == v[1] for v in all_st["bins"].values()) and abs(float(mine) - float(ref)) < 1e-10 and float(mine) > 0
+          and sum(v[2] for v in hst["bins"].values()) == n_ref and gerr < 1e-9 and same_none,
+          "kayip %.4g / %.4g, gradyan farki %.1e, cezalanan %d" % (float(mine), float(ref), gerr, n_ref))
+
+    sids, smask = sequences(data)
+    lens = smask.sum(1)
+    real = torch.cat([sids[lens >= 14][:16, :14], sids[lens >= 14][16:32, :14]], 1)    # 28 token'lik gercek satirlar
+    small = dict(d=32, turns=2, layers=1, heads=2, units=64, t_max=32)
+    base = dict(steps=3, log_at=(), model_kw=small, schedule="wsd")
+    ditto = dict(ditto_x_weight=0.5, ditto_x_share=16, ditto_x_self_prefix=8, ditto_x_self_tokens=20, ditto_x_self_every=1,
+                 copy_ceiling={k: 0.0 for k in ceiling}, self_prompts=lambda step: real, sentence_ends=sentence_ends, eot=eot)
+    train = lambda **kw: TR.train_seq("shared", sids[:64], smask[:64], nv, **dict(base, **kw))[0]
+    p0, one = train(), train(steps=1)                       # ayrilma tek adimda okunur (sonra butun ag farkli)
+    p1, p2, p3 = (train(**dict(ditto, steps=1, ditto_x_params=v)) for v in (TR.DITTO_X_PARAMS, TR.DITTO_X_PARAMS[:4], None))
+    rec = train(**ditto).ditto_x_self
+    detached = ("input_embedding", "tokens.shift", "log_output_scale", "link_q", "link_u", "alpha_attention", "alpha_facts",
+                "canon_weights")
+    same = lambda a, b, keys: all(torch.equal(dict(a.named_parameters())[k], dict(b.named_parameters())[k])
+                                  for k, _ in a.named_parameters() if k.endswith(keys))
+    facts = ("W_fact_in", "W_fact_up", "W_fact_out")
+    check("train_seq DITTO-X, bir adim: kayip > 0 iken ayrilanlar (E, Delta, tau, q, u, alpha, Canon) P0 ile bit duzeyinde ayni "
+          "(MLE gradyani once kirpilir), attention ve FactUnits farkli; P2'de FactUnits de ayni; P3'te (None) alpha ve E farkli "
+          "(tau: Adam'in ilk adimi isaret, ayni kalabilir); "
+          "3 adimda beta ilk adimda r* |c g_MLE| / |g_self|, sonra sabit; oran <= 1",
+          all(r["loss"] > 0 for r in rec) and same(p1, one, detached) and not same(p1, one, ("W_query",))
+          and not same(p1, one, facts) and same(p2, one, detached + facts) and not same(p2, one, ("W_context",))
+          and not same(p3, one, ("alpha_attention",)) and not same(p3, one, ("input_embedding",))
+          and len({r["beta"] for r in rec}) == 1 and abs(rec[0]["ratio"] - 0.5) < 1e-9 and all(r["ratio"] <= 1 + 1e-9 for r in rec),
+          "kayip %s oran %s" % (["%.3g" % r["loss"] for r in rec], ["%.3f" % r["ratio"] for r in rec]))
+
+    calm = train(**dict(ditto, copy_ceiling={k: 1.0 for k in ceiling}))
+    called = []
+    off = train(ditto_x_weight=0.0, self_prompts=lambda step: called.append(step))
+    check("train_seq DITTO-X: tavan 1,0 (kayip 0) -> P0 ile bit duzeyinde ayni (uretim, gercek devam ve kendi satirlari MLE'ye ve "
+          "duruma dokunmaz; varsayilan grad_clip); ditto_x_weight 0 -> uretim hic cagrilmaz",
+          all(torch.equal(a, b) for a, b in zip(calm.state_dict().values(), p0.state_dict().values())) and not called
+          and len(calm.ditto_x_self) == 3 and torch.equal(off.state_dict()["log_output_scale"], p0.state_dict()["log_output_scale"]))
+
+    packs = {}
+    keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
+                                                                optimizer=copy.deepcopy(opt.state_dict())))
+    whole = train(**dict(ditto, steps=4, save_every=2, save=keep))
+    resumed = train(**dict(ditto, steps=4, checkpoint=packs[2]))
+    seen = []
+    TR.train_seq("shared", sids[:64], smask[:64], nv, **dict(base, steps=2, checkpoint=dict(packs[2], step=0), every=1,
+                                                             callback=lambda step, model, nll: seen.append(step)))
+    check("train_seq DITTO-X: 2. adim paketinden surdurulen = kesintisiz, bit duzeyinde (beta grup kaydinda); checkpoint adim 0 "
+          "= baslangic agirligi, 0. adimin callback'i kosar",
+          all(torch.equal(a, b) for a, b in zip(whole.state_dict().values(), resumed.state_dict().values()))
+          and packs[2]["optimizer"]["param_groups"][0]["ditto_x_self"]["beta"] > 0 and seen == [0, 1, 2])
+
+
 def _run_one(name):
     """Tek testi calistirir; ciktisi, sonuclari ve suresi (paralel kosucu icin)."""
     import contextlib
@@ -2197,7 +2361,7 @@ if __name__ == "__main__":
     names = [f.__name__ for f in (t_step3, t_generate_cached, t_normalized_update, t_canon,
               t_layers, t_coherence, t_weight_ema, t_heads, t_fact_activation, t_learn_output_scale, t_matmul_precision,
               t_loss_chunk, t_muon_tangent, t_output_link, t_shared_facts, t_input_embedding, t_internals, t_packing, t_attention_log_scale,
-              t_micro_batches, t_rope_base)]
+              t_micro_batches, t_rope_base, t_ditto_x_self)]
     if args.only:
         want = [n.strip() for n in args.only.split(",") if n.strip()]
         assert set(want) <= set(names), "bilinmeyen test: %s" % sorted(set(want) - set(names))
