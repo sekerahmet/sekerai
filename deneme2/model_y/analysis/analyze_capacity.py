@@ -658,12 +658,16 @@ def direction_summary(result):
     return out
 
 
-def _write(args, name, payload):
-    out_dir = os.environ.get("KUYRUK_SONUC") or os.path.join(args.run, "analysis")
-    os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, "%s%s_%s.json" % (name, "_" + args.label if args.label else "", time.strftime("%Y%m%d_%H%M%S")))
-    with open(path, "w", encoding="utf-8") as f:
+def _write(args, name, payload, path=None):
+    """JSON yaz; path verilirse ayni dosyanin uzerine (kosu kesilirse o ana kadarki yedekler kalir)."""
+    if path is None:
+        out_dir = os.environ.get("KUYRUK_SONUC") or os.path.join(args.run, "analysis")
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, "%s%s_%s.json" % (name, "_" + args.label if args.label else "",
+                                                       time.strftime("%Y%m%d_%H%M%S")))
+    with open(path + ".part", "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=1)
+    os.replace(path + ".part", path)
     return path
 
 
@@ -735,6 +739,13 @@ def main(argv=None):
                  [s for s in packs if s % int(spec[6:]) == 0] if spec.startswith("every:") else [int(s) for s in spec.split(",")])
         sets = weight_sets(args.run, steps, [x for x in args.finals.split(",") if x], config)
     results = []
+    name = dict(facts="capacity_facts", freq_facts="capacity_freq_facts", direction="capacity_direction")[args.measure]
+    payload = lambda: dict(measure=args.measure, run=config.get("name"), selftest=args.selftest,
+                           secs=round(time.time() - t0, 1),
+                           facts=[dict(f, wrong=list(f["wrong"]), also=list(f.get("also", ()))) for f in facts],
+                           token_ids=[dict(fact=s["fact"], candidate=s["candidate"], role=s["role"], ids=s["ids"])
+                                      for s in seqs], results=results)
+    path = None
     for label, step, kind, model in sets:
         model = model.to(args.device)
         scores = score(model, seqs, tok, args.device, eot)
@@ -744,6 +755,7 @@ def main(argv=None):
             results[-1]["direction"] = direction_summary(results[-1])
         print("   %s: dogru en iyi %d / %d" % (label, sum(x["correct_best_any"] for x in results[-1]["facts"]), len(facts)),
               flush=True)
+        path = _write(args, name, payload(), path)              # her yedekten sonra: kesilirse kismi sonuc kalir
         del model
         if args.device.startswith("cuda"):
             torch.cuda.empty_cache()
@@ -754,12 +766,7 @@ def main(argv=None):
                 k, v["acc"], v["acc_calibrated"], v["margin"], v["margin_calibrated"]) for k, v in r["direction"].items())))
     else:
         print("\n".join(summary_lines(results) if args.measure == "facts" else freq_lines(results, facts)))
-    path = _write(args, dict(facts="capacity_facts", freq_facts="capacity_freq_facts",
-                             direction="capacity_direction")[args.measure],
-                  dict(measure=args.measure, run=config.get("name"), selftest=args.selftest, secs=round(time.time() - t0, 1),
-                       facts=[dict(f, wrong=list(f["wrong"]), also=list(f.get("also", ()))) for f in facts],
-                       token_ids=[dict(fact=s["fact"], candidate=s["candidate"], role=s["role"], ids=s["ids"]) for s in seqs],
-                       results=results))
+    path = _write(args, name, payload(), path)
     print("yazildi: %s  (%.0f sn)" % (path, time.time() - t0))
 
 
