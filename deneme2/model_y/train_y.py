@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """train_y -- model_y GENEL egitim: veriden bagimsiz.  Veriye ozgu sinav ve raporlar egitim klasorlerinde (train_<veri>/).
-    train       Adim 1: ardisik token ciftleri (BigramModel)
-    train_seq   dizi egitimi: Model X (varsayilan), deneme ayarlari ve kiyas transformer'i; yedek ve surdurme
+    train_seq   dizi egitimi: Model Y (BlockModel) ve kiyas transformer'i; yedek ve surdurme
     Muon        optimizer: gizli matrisler Muon, gerisi Adam (tek sinif, tek state_dict)
     pad         id listeleri -> (ids, mask);  generate: acgozlu uretim
 """
@@ -14,16 +13,8 @@ import torch
 import torch._inductor.config
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from model_y import (CANON, NORMALIZED_UPDATE, ROPE, SPHERE_WEIGHTS, AttentionCache, BigramModel, BlockModel,
-                     SequenceModel, deviation)
+from model_y import CANON, NORMALIZED_UPDATE, ROPE, SPHERE_WEIGHTS, AttentionCache, BlockModel, deviation
 from model_y_transformer import TransformerModel
-
-SETTINGS = {
-    "fixed": dict(learn_points=False),
-    "free": dict(learn_points=True, anchor=0.0),
-    "anchored": dict(learn_points=True, anchor=1e-3),
-}
-
 
 STEPS, LR = 4000, 0.01  # lr dayanagi (kure agirliklari + Muon): adim basina donme ~ LR x 0,2 x sqrt(d); nGPT 2026 tepe lr
                          # 0,24 / sqrt(d).  Veri / batch / D degisince yeniden hesaplanir
@@ -135,34 +126,8 @@ class _Gradients:
                 p.grad = g.clone() if p.grad is None else p.grad.add_(g)
 
 
-def bigram_floor(inputs, targets, n):
-    """Yalniz son token'a bakan bir modelin ulasabilecegi en dusuk kayip (sayimlardan)."""
-    C = torch.zeros(n, n, dtype=torch.float64)
-    C.index_put_((inputs, targets), torch.ones(len(inputs), dtype=torch.float64), accumulate=True)
-    p = C / C.sum(1, keepdim=True).clamp_min(1)
-    nz = C > 0
-    return float(-(C[nz] * p[nz].log()).sum() / C.sum())
-
-
-def train(setting, inputs, targets, n, steps=STEPS, lr=LR, log_at=LOG_AT):
-    model = BigramModel(n, **SETTINGS[setting])
-    opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=lr)
-    curve = []
-    for step in range(steps + 1):
-        total, nll = model.loss(inputs, targets)
-        if step in log_at:
-            curve.append(dict(step=step, nll=nll.item(), W_next=model.next.W_next.norm().item(), dev=deviation(model).clone()))
-        if step == steps:
-            break
-        opt.zero_grad()
-        total.backward()
-        opt.step()
-    return model, curve
-
-
 # ---- dizi egitimi
 
-STEP2 = {"step1": dict(attention=False), "step2": dict(attention=True)}
 STEP3 = ("shared",)
 
 
@@ -224,24 +189,22 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     assert newton_schulz_precision in ("fp32", "bf16"), "newton_schulz_precision: fp32 | bf16"
     assert micro_batches >= 1 and (schedule != "coherence" or micro_batches % 2 == 0 or micro_batches == 1), \
         "micro_batches: >= 1; coherence'ta 1 ya da cift"
-    if normalized_update is None:                          # Model X'in varsayilani; transformer ve Adim 1-2'de yok
+    if normalized_update is None:                          # Model Y'nin varsayilani; transformer'da yok
         normalized_update = NORMALIZED_UPDATE if setting in STEP3 else False
     if sphere_weights is None:
         sphere_weights = SPHERE_WEIGHTS if setting in STEP3 else False
     if canon is None:
         canon = CANON if setting in STEP3 else False
     assert setting in STEP3 or not (normalized_update or sphere_weights or canon), \
-        "normalized_update / sphere_weights / canon yalniz Adim 3 icin"
-    if rope is None:                                       # modelin kendi varsayilani; Adim 1-2 modellerinde RoPE yok
-        rope = True if setting.startswith("transformer") else ROPE if setting in STEP3 else False
-    assert setting in STEP3 or setting.startswith("transformer") or not rope, "rope yalniz Adim 3 ve transformer icin"
+        "normalized_update / sphere_weights / canon yalniz BlockModel icin"
+    if rope is None:                                       # modelin kendi varsayilani
+        rope = True if setting.startswith("transformer") else ROPE
     if setting in ("transformer", "transformer_novalue"):   # novalue: V matrisi yok (tek head'de V.O tek matris)
         model = TransformerModel(n, seed=seed, value_matrix=setting == "transformer", rope=rope, **(model_kw or {}))
-    elif setting in STEP3:
+    else:
+        assert setting in STEP3, "setting: shared | transformer | transformer_novalue (bu: %s)" % setting
         model = BlockModel(n, seed=seed, rope=rope, normalized_update=normalized_update, sphere_weights=sphere_weights,
                            canon=canon, **(model_kw or {}))
-    else:
-        model = SequenceModel(n, seed=seed, **STEP2[setting], **(model_kw or {}))
     model = model.to(device)
     if ids is not None:
         ids, mask = ids.to(device), mask.to(device)
@@ -373,9 +336,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
         if step in log_at:
             curve.append(dict(step=step, nll=nll.item(), dev=deviation(model).clone() if hasattr(model, "tokens") else None,
                               W_context=(sum(b.attention.W_context.norm().item() for b in model.blocks)
-                                         if isinstance(model, BlockModel) else
-                                         model.attention.W_context.norm().item() if getattr(model, "attention", None) is not None
-                                         else 0.0)))
+                                         if isinstance(model, BlockModel) else 0.0)))
         if callback is not None and every and step % every == 0 and not resumed_here:
             try:
                 callback(step, model, nll.item())

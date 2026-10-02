@@ -394,7 +394,7 @@ def point_drift(model, counts=None, vocab=None, bands=None, examples=(5, 50, 500
     nn_pl, nn_idx = _nearest(P)
     nn_pf, _ = _nearest(PF)
     med = lambda v: float(np.median(v.double().numpy()))              # cift sayida ortadaki ikisinin ortalamasi
-    out = dict(tokens=V, d=P.shape[1], learn=bool(tok.learn), anchor=float(tok.anchor or 0.0),
+    out = dict(tokens=V, d=P.shape[1], anchor=float(tok.anchor or 0.0),
                anchor_loss=float(tok.anchor_loss()),
                overall=dict(angle_median=med(dev), angle_mean=float(dev.mean()), angle_max=float(dev.max()),
                             shift_median=med(shift), nn_cos_pl_median=med(nn_pl), nn_cos_pf_median=med(nn_pf)),
@@ -1387,8 +1387,8 @@ def _text_trace(res, vocab, positions):
 
 def _text_point_drift(res, vocab):
     o = res["overall"]
-    L = ["## token noktalari: %d token, d %d, ogrenilen %s, capa %.1e (amacta %.4f)" % (
-        res["tokens"], res["d"], res["learn"], res["anchor"], res["anchor_loss"]),
+    L = ["## token noktalari: %d token, d %d, capa %.1e (amacta %.4f)" % (
+        res["tokens"], res["d"], res["anchor"], res["anchor_loss"]),
          "PF -> PL acisi: medyan %.2f, ortalama %.2f, en buyuk %.2f derece; |shift| medyan %.4f" % (
              o["angle_median"], o["angle_mean"], o["angle_max"], o["shift_median"]),
          "en yakin komsu kosinusu medyan: PL %.3f | PF (rastgele duzey) %.3f" % (o["nn_cos_pl_median"], o["nn_cos_pf_median"])]

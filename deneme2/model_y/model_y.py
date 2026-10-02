@@ -1,18 +1,12 @@
 # -*- coding: utf-8 -*-
-"""model_y -- adim adim kurulan model (CLAUDE.md kural 13).
+"""model_y -- Model Y (CLAUDE.md kural 13: adim adim kuruldu).
 
-Adim 1: TokenPoints + NextRelation.  Bir token girer, sonraki token'in olasiligi cikar; geriye bakmaz.
-    PL = norm(PF + shift)          PF sabit (tohumdan), shift 0'dan ogrenilir; model YALNIZ PL'yi kullanir
-    q  = norm(W_next . PL_i)       NextRelation: YALNIZ yon -- sonraki token'in beklenen noktasi (kurede)
-    skor_j = scale . <q, PL_j>     olasilik softmax, kayip -log p(hedef) + anchor . sum|shift|^2
+TokenPoints: her token'in kuredeki noktasi.
+    PL = norm(PF + shift)          PF sabit (tohumdan), shift 0'dan ogrenilir; kayba anchor . sum|shift|^2 eklenir
     scale  = ln(CONFIDENCE (n-1) / (1-CONFIDENCE))   guven; elle girilmez, nokta sayisindan
+CausalAttention: nedensel tam attention, skor att_scale . <norm(W_query x_t), norm(W_key x_j)>, att_scale = scale_for(T_MAX).
 
-Adim 2: CausalAttention.  Her konum kendisi ve onceki konumlarin PL noktalarina bakar (nedensel, tam attention, SDPA).
-    a_tj = softmax_{j<=t}( att_scale . <norm(W_query PL_t), norm(W_key PL_j)> )     att_scale = scale_for(T_MAX)
-    c_t  = sum_j a_tj PL_j            getirilen sey noktalarin KENDISI: "getirilen Alice mi" dogrudan okunur
-    q_t  = norm(W_next PL_t + W_context c_t)       W_context 0'dan: baslangicta model Adim 1'in aynisi
-
-Adim 3: BlockModel.  Her konumun bir durumu var (hidden, h); TURNS tur boyunca Block uygulanir.
+BlockModel.  Her konumun bir durumu var (hidden, h); TURNS tur boyunca Block uygulanir.
     h = PL                                              durum konumun noktasiyla baslar
     her turda (Block), varsayilan (Model X2, 2 x 2):
       x_t = h_t + sum_{k=0..3} w_k h_(t-k)              Canon-A: attention'in girdisi (w 0'dan)
@@ -21,7 +15,7 @@ Adim 3: BlockModel.  Her konumun bir durumu var (hidden, h); TURNS tur boyunca B
       h_t = norm(h_t + a_F (norm(W_fact_out (SiLU(W_fact_in x) * (W_fact_up x))) - h_t)),  x = sqrt(d) h_t   FactUnits
       anahtarlar kapaliyken (28 Eylul oncesi): h_t = norm(h_t + W_context c_t), h_t = norm(h_t + FactUnits(h_t));
       W_context ve W_fact_out 0'dan (paket acikken rastgele, birim sutun)
-    cikis: skor = scale <h, PL>                         son durum dogrudan noktalarla karsilastirilir (W_next yok)
+    cikis: skor = scale <h, PL>                         son durum dogrudan noktalarla karsilastirilir
     LEARN_OUTPUT_SCALE: skor = e^tau <h, PL>, tau = log_output_scale ogrenilir, ln(scale)'dan baslar
     LOSS_CHUNK: egitim kaybi sozluk parcalariyla (tam logits tablosu yok, gradyan ileri hesapta); sinav logits'le
     LAYERS: turlar LAYERS farkli Block'u sirayla kullanir (2 katman x 2 tur: A B A B)
@@ -47,11 +41,9 @@ _flex_compiled = torch.compile(flex_attention, dynamic=False)
 D = 64               # nokta boyutu
 CONFIDENCE = 0.99    # hedef tam q yonundeyken, rakipler dikken verilebilecek olasilik -> scale
 POINTS_SEED = 0
-LEARN_POINTS = True  # False: PL = PF (sabit noktalar)
 ANCHOR = 1e-3        # PF'den uzaklasmanin bedeli (0 = serbest)
-ATTENTION = True     # Adim 2: attention; False = Adim 1 (yalniz son token)
 T_MAX = 512          # baglam siniri (hedef); attention olcegi bundan: 512 konum arasindan 0,99 guvenle secebilsin
-TURNS = 4            # Adim 3: blok tur sayisi
+TURNS = 4            # blok tur sayisi
 LAYERS = 2           # farkli Block (katman) sayisi, turlar sirayla doner: tur i -> Block i mod LAYERS (A B A B)
 SHARED_FACTS = False # True: FactUnits de turlar arasinda paylasilir.  False: her turun kendi FactUnits'i, attention paylasimli
 FACT_UNITS = 170     # FactUnits birim sayisi: SwiGLU'nun yerlesik genisligi 8/3 x D
@@ -151,16 +143,16 @@ def scale_for(n, confidence=CONFIDENCE):
 
 
 class TokenPoints(torch.nn.Module):
-    """Her token'in kuredeki noktasi.  learn=False: PL = PF (sabit noktalar)."""
+    """Her token'in kuredeki noktasi."""
 
-    def __init__(self, n, d=D, learn=LEARN_POINTS, anchor=ANCHOR, seed=POINTS_SEED):
+    def __init__(self, n, d=D, anchor=ANCHOR, seed=POINTS_SEED):
         super().__init__()
         g = torch.Generator().manual_seed(seed)
         # PF: n x d, rastgele, her satir norm(v) = v / |v| ile boyu 1'e indirilir; buffer = ogrenilmez, hic degismez
         self.register_buffer("fixed_points", F.normalize(torch.randn(n, d, generator=g), dim=-1))
-        # shift (Δ): n x d, 0'dan; Parameter = egitimle degisir (learn=False ise dondurulur)
-        self.shift = torch.nn.Parameter(torch.zeros(n, d), requires_grad=learn)
-        self.learn, self.anchor = learn, anchor
+        # shift (Δ): n x d, 0'dan; Parameter = egitimle degisir
+        self.shift = torch.nn.Parameter(torch.zeros(n, d))
+        self.anchor = anchor
 
     def points(self):
         # PL_i = (PF_i + Δ_i) / |PF_i + Δ_i|      her token icin
@@ -168,51 +160,15 @@ class TokenPoints(torch.nn.Module):
 
     def anchor_loss(self):
         """PF'den uzaklasmanin bedeli."""
-        if not (self.learn and self.anchor):
+        if not self.anchor:
             return self.shift.new_zeros(())
         # λ · Σ_i Σ_k Δ_ik²
         return self.anchor * (self.shift ** 2).sum()
 
 
-class NextRelation(torch.nn.Module):
-    """W_next (d x d), kucuk rastgele: cikti kureye indirildigi icin W_next'in boyu bir sey degistirmez, yalniz yonu.
-    (0'dan baslayamaz: norm(0)'in yonu yok, gradyani 1/eps.)"""
-
-    def __init__(self, d=D, seed=POINTS_SEED + 1):
-        super().__init__()
-        g = torch.Generator().manual_seed(seed)
-        # W_next: d x d, degerler rastgele / √d (baslangic), sonra egitimle degisir
-        self.W_next = torch.nn.Parameter(torch.randn(d, d, generator=g) / d ** 0.5)
-
-    def forward(self, p):
-        # p @ W_next.T: her satir p icin W_next · p (matris carpi vektor): (W_next·p)_a = Σ_b W_next_ab · p_b
-        # q = W_next·p / |W_next·p|
-        return F.normalize(p @ self.W_next.T, dim=-1)
-
-
-class BigramModel(torch.nn.Module):
-    def __init__(self, n, d=D, learn_points=LEARN_POINTS, anchor=ANCHOR, confidence=CONFIDENCE, seed=POINTS_SEED):
-        super().__init__()
-        # 100 * seed: her tohum kendi 100'luk araliginda -- tohumlar rastgele sayi paylasmaz
-        self.tokens = TokenPoints(n, d, learn_points, anchor, 100 * seed)
-        self.next = NextRelation(d, 100 * seed + 1)
-        self.scale = scale_for(n, confidence)
-
-    def logits(self, ids):
-        P = self.tokens.points()
-        # skor_j = scale · <q, PL_j> = scale · Σ_a q_a · PL_ja      her token j icin (n tane)
-        return self.scale * self.next(P[ids]) @ P.T
-
-    def loss(self, inputs, targets):
-        """(toplam, nll): toplam = nll + capa."""
-        # cross_entropy: p_j = e^skor_j / Σ_i e^skor_i (softmax);  nll = ortalama( -log p_hedef )
-        nll = F.cross_entropy(self.logits(inputs), targets)
-        return nll + self.tokens.anchor_loss(), nll
-
-
 class CausalAttention(torch.nn.Module):
-    """Nedensel tam attention.  Tek head'de getirdigi sey girdinin kendisi (Adim 2: PL noktalari, Adim 3: durumlar);
-    HEADS > 1: head basina W_value x'in dilimi.  W_context 0'dan (paket acikken BlockModel rastgele baslatir)."""
+    """Nedensel tam attention.  Tek head'de getirdigi sey girdinin kendisi (durumlar); HEADS > 1: head basina W_value
+    x'in dilimi.  W_context 0'dan (paket acikken BlockModel rastgele baslatir)."""
 
     def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, seed=POINTS_SEED + 2, rope=False, heads=1,
                  attention_log_scale=False, rope_base=ROPE_BASE):
@@ -223,7 +179,7 @@ class CausalAttention(torch.nn.Module):
         self.rope, self.heads = rope, heads
         self.rope_base = rope_base_for(d // heads, t_max) if rope_base == "auto" else float(rope_base)
         self.attention_log_scale, self.confidence = attention_log_scale, confidence
-        # W_query, W_key: d x d, rastgele / √d baslar, egitimle degisir.  PL'yi baska bir yone ceviren dogrusal donusum
+        # W_query, W_key: d x d, rastgele / √d baslar, egitimle degisir.  Girdiyi baska bir yone ceviren dogrusal donusum
         # (dondurur, gerer, sikistirir); ardindan norm geldigi icin yalniz yon kalir.
         self.W_query = torch.nn.Parameter(torch.randn(d, d, generator=g) / d ** 0.5)   # "ne ariyorum"
         self.W_key = torch.nn.Parameter(torch.randn(d, d, generator=g) / d ** 0.5)   # "bende ne var"
@@ -235,7 +191,7 @@ class CausalAttention(torch.nn.Module):
             self.W_value = torch.nn.Parameter(torch.eye(d))
 
     def queries_keys(self, x, positions=None):
-        # q_t = W_query·PL_t / |W_query·PL_t|      k_j = W_key·PL_j / |W_key·PL_j|      (ara sonuc, saklanmaz)
+        # q_t = W_query·x_t / |W_query·x_t|      k_j = W_key·x_j / |W_key·x_j|      (ara sonuc, saklanmaz)
         q, k = x @ self.W_query.T, x @ self.W_key.T
         if self.heads > 1:                                # (.., T, d) -> (.., H, T, d/H): her head kendi dilimini normlar
             q, k = (z.unflatten(-1, (self.heads, -1)).transpose(-3, -2) for z in (q, k))
@@ -256,7 +212,7 @@ class CausalAttention(torch.nn.Module):
         return (s / self.scale)[..., None]
 
     def forward(self, x, cache=None, document_positions=None, document_mask=None):
-        """x (B, T, d) PL ya da durum dizisi -> c (B, T, d).  cache (AttentionCache): onbellekli uretim; x yalniz yeni
+        """x (B, T, d) durum dizisi -> c (B, T, d).  cache (AttentionCache): onbellekli uretim; x yalniz yeni
         konumlar.  document_positions (B, T): paketli pencere -- RoPE konumu belge basinda 0, attention belge icinde;
         document_mask: build_document_mask'in ciktisi (BlockMask: flex_attention, bool tensor: SDPA), None ise yogun."""
         if cache is not None:
@@ -292,7 +248,7 @@ class CausalAttention(torch.nn.Module):
         #   s_tj = scale · <q_t, k_j>                 her konum t, her konum j icin
         #   j > t ise s_tj = -∞                       is_causal: sonrakilere bakilmaz
         #   a_tj = e^s_tj / Σ_{i<=t} e^s_ti            softmax, satir toplami 1
-        #   c_t  = Σ_{j<=t} a_tj · x_j                getirilen: agirlikli karisim (Adim 2: x = PL, Adim 3: x = h)
+        #   c_t  = Σ_{j<=t} a_tj · x_j                getirilen: agirlikli karisim
         return F.scaled_dot_product_attention(q, k, x, is_causal=True, scale=self.scale)
 
     def weights(self, x):
@@ -367,38 +323,8 @@ class AttentionCache:
         return out if H == 1 else out.transpose(1, 2).flatten(-2)   # head'ler yan yana
 
 
-class SequenceModel(torch.nn.Module):
-    """Dizi uzerinde model: attention=False iken her konumda Adim 1 (BigramModel) ile ayni."""
-
-    def __init__(self, n, d=D, attention=ATTENTION, learn_points=LEARN_POINTS, anchor=ANCHOR, confidence=CONFIDENCE,
-                 t_max=T_MAX, seed=POINTS_SEED):
-        super().__init__()
-        self.tokens = TokenPoints(n, d, learn_points, anchor, 100 * seed)          # 100 * seed: BigramModel'deki gibi
-        self.next = NextRelation(d, 100 * seed + 1)
-        self.attention = CausalAttention(d, t_max, confidence, 100 * seed + 2) if attention else None
-        self.scale = scale_for(n, confidence)
-
-    def logits(self, ids):
-        """ids (B, T) -> (B, T, n): konum t'de t+1'inci token."""
-        P = self.tokens.points()                          # PL, n x d
-        x = P[ids]                                        # her konumun token'inin noktasi
-        raw = x @ self.next.W_next.T                      # raw_t = W_next · PL_t
-        if self.attention is not None:
-            raw = raw + self.attention(x) @ self.attention.W_context.T   # raw_t = W_next · PL_t + W_context · c_t
-        # q_t = raw_t / |raw_t|;   skor_tj = scale · <q_t, PL_j>   (n token)
-        return self.scale * F.normalize(raw, dim=-1) @ P.T
-
-    def loss(self, ids, mask):
-        """mask (B, T) gercek token; hedef t+1 gercekse konum t sayilir.  (toplam, nll)."""
-        logits = self.logits(ids[:, :-1])                 # konum t'nin skorlari ...
-        valid = mask[:, 1:]                               # ... hedefi t+1'deki token; <pad> hedefler sayilmaz
-        # cross_entropy: p = softmax(skor);  nll = ortalama( -log p(hedef) )  butun gercek konumlarda
-        nll = masked_nll(logits, ids[:, 1:], valid)
-        return nll + self.tokens.anchor_loss(), nll       # + λ · Σ Δ²
-
-
 class FactUnits(torch.nn.Module):
-    """Adim 3 donusturme: her konumda ayri.  relu: u = ReLU(W_fact_in · h - fact_threshold), birim girdileri birlikte
+    """Durum donusturme: her konumda ayri.  relu: u = ReLU(W_fact_in · h - fact_threshold), birim girdileri birlikte
     yeterince guclu ise yanar.  swiglu: u = SiLU(W_fact_in · h) ⊙ (W_fact_up · h), kapi (W_fact_in) icerigi (W_fact_up)
     acar; esik yok.  Cikti W_fact_out · u.  W_fact_out 0'dan: baslangicta etkisiz (paket acikken BlockModel rastgele
     baslatir)."""
@@ -426,7 +352,7 @@ class FactUnits(torch.nn.Module):
 
 
 class Block(torch.nn.Module):
-    """Adim 3 bir tur: attention durumlara bakar ve getirdigini duruma yazar; FactUnits durumu donusturur."""
+    """Bir tur: attention durumlara bakar ve getirdigini duruma yazar; FactUnits durumu donusturur."""
 
     def __init__(self, d=D, t_max=T_MAX, confidence=CONFIDENCE, units=FACT_UNITS, seed=POINTS_SEED + 2,
                  rope=False, normalized_update=False, sphere_weights=False, canon=False,
@@ -468,12 +394,11 @@ class Block(torch.nn.Module):
 
 
 class BlockModel(torch.nn.Module):
-    """Adim 3: durum (hidden) PL ile baslar, TURNS tur Block; cikis son durumun kendisi (W_next yok).
+    """Durum (hidden) PL ile baslar, TURNS tur Block; cikis son durumun kendisi (ayri cikis matrisi yok).
     normalized_update ve sphere_weights kapaliyken (28 Eylul'e kadarki model) W_context = W_fact_out = 0 baslar, durum PL'de
     kalir: skor = scale <PL_t, PL>."""
 
-    def __init__(self, n, d=D, turns=TURNS, layers=LAYERS, learn_points=LEARN_POINTS,
-                 anchor=ANCHOR, confidence=CONFIDENCE, t_max=T_MAX, units=FACT_UNITS, seed=POINTS_SEED,
+    def __init__(self, n, d=D, turns=TURNS, layers=LAYERS, anchor=ANCHOR, confidence=CONFIDENCE, t_max=T_MAX, units=FACT_UNITS, seed=POINTS_SEED,
                  stream_norm=True, rope=ROPE,
                  normalized_update=NORMALIZED_UPDATE, sphere_weights=SPHERE_WEIGHTS, canon=CANON, heads=HEADS,
                  fact_activation=FACT_ACTIVATION, learn_output_scale=LEARN_OUTPUT_SCALE, loss_chunk=LOSS_CHUNK,
@@ -486,7 +411,7 @@ class BlockModel(torch.nn.Module):
         True (eski cagrilar icin kabul edilir)."""
         super().__init__()
         assert stream_norm, "stream_norm=False (normsuz akis) kaldirildi"
-        self.tokens = TokenPoints(n, d, learn_points, anchor, 100 * seed)          # 100 * seed: BigramModel'deki gibi
+        self.tokens = TokenPoints(n, d, anchor, 100 * seed)   # 100 * seed: tohumlar rastgele sayi paylasmaz
         assert turns % layers == 0, "turns (%d) layers'in (%d) kati olmali: her Block esit sayida tur" % (turns, layers)
         self.blocks = torch.nn.ModuleList(Block(d, t_max, confidence, units, 100 * seed + 10 + 2 * i, rope=rope,
                                                 normalized_update=normalized_update, sphere_weights=sphere_weights,
