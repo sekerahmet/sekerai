@@ -115,14 +115,14 @@ def load_tokenizer(fw_root):
     return tok, eot
 
 
-def build_sequences(tok, eot):
+def build_sequences(tok, eot, facts=FACTS):
     """Her olgu x aday (0 = dogru, sonra ALSO'daki dogrular, sonra yanlislar; role right / also / wrong) ->
     dict(ids, answer_start, answer_end, tail_end).  Dizi: eot + istem +
     cevap + devam (belge basindan, konus'taki gibi).  Ayri kodlama birlesik kodlamayla tutmali (bosluk sinirinda)."""
     enc = lambda s: tok.encode(s, add_special_tokens=False).ids
     seqs = []
-    for i, f in enumerate(FACTS):
-        also = ALSO.get(f["prompt"], ())
+    for i, f in enumerate(facts):
+        also = tuple(f.get("also", ())) or ALSO.get(f["prompt"], ())
         roles = ["right"] + ["also"] * len(also) + ["wrong"] * len(f["wrong"])
         for j, ans in enumerate((f["answer"],) + tuple(also) + tuple(f["wrong"])):
             p, a, t = enc(f["prompt"]), enc(ans), enc(f["tail"])
@@ -134,8 +134,10 @@ def build_sequences(tok, eot):
 
 
 @torch.no_grad()
-def score(model, seqs, tok, device, eot):
-    """Tek ileri hesap (sagdan dolgu; nedensel, dolgu onceki konumlari etkilemez).  -> aday basina sayilar."""
+def score(model, seqs, tok, device, eot, batch=256):
+    """Batch'ler halinde ileri hesap (sagdan dolgu; nedensel, dolgu onceki konumlari etkilemez).  -> aday basina sayilar."""
+    if len(seqs) > batch:
+        return [x for i in range(0, len(seqs), batch) for x in score(model, seqs[i:i + batch], tok, device, eot, batch)]
     T = max(len(s["ids"]) for s in seqs)
     ids = torch.full((len(seqs), T), eot, dtype=torch.long)
     for k, s in enumerate(seqs):
@@ -175,13 +177,16 @@ def _diverging(right, other):
                 logp_gap=other["answer_token_nll"][d] - right["answer_token_nll"][d])
 
 
-def per_fact(seqs, scores):
+def per_fact(seqs, scores, facts=FACTS):
     """Aday sonuclari olgu basina.  margin: en iyi yanlis - dogru (cevap kismi toplam nll); margin_any: dogru ya da ALSO'dan
     en iyisiyle; margin_per_token: token basina ortalamayla (uzunluk / bolunme duyarliligi icin); diverging: yanlis basina
     ilk ayrisan token'da dogrunun sirasi ve log p farki."""
     rows = []
-    for i, f in enumerate(FACTS):
-        cand = [(s, r) for s, r in zip(seqs, scores) if s["fact"] == i]
+    by_fact = {}
+    for s, r in zip(seqs, scores):
+        by_fact.setdefault(s["fact"], []).append((s, r))
+    for i, f in enumerate(facts):
+        cand = by_fact[i]
         right = cand[0][1]
         alts = [dict(text=s["text"], answer_nll=r["answer_nll"], answer_tokens=r["answer_tokens"], first_rank=r["first_rank"],
                      answer_token_nll=r["answer_token_nll"]) for s, r in cand if s["role"] == "also"]
@@ -190,13 +195,14 @@ def per_fact(seqs, scores):
                       answer_token_nll=r["answer_token_nll"], diverging=_diverging(right, r)) for s, r in wrong_raw]
         best_wrong = min(w["answer_nll"] for w in wrong)
         best_right = min([right["answer_nll"]] + [a["answer_nll"] for a in alts])
-        rows.append(dict(fact=i, kind=f["kind"], prompt=f["prompt"], answer=f["answer"],
+        rows.append(dict(fact=i, kind=f["kind"], prompt=f["prompt"], answer=f["answer"], first_diverging_rank=max(
+                             [w["diverging"]["right_rank"] for w in wrong if w["diverging"]] or [right["first_rank"]]),
                          answer_nll=right["answer_nll"], answer_tokens=right["answer_tokens"],
                          answer_token_nll=right["answer_token_nll"], first_rank=right["first_rank"],
                          first_p=right["first_p"], tail_nll_mean=right["tail_nll_mean"], top5=right["top5"],
                          also=alts, wrong=wrong, margin=best_wrong - right["answer_nll"],
                          correct_best=all(right["answer_nll"] < w["answer_nll"] for w in wrong),
-                         margin_any=best_wrong - best_right,
+                         margin_any=best_wrong - best_right, correct_best_any=best_right < best_wrong,
                          margin_per_token=min(w["answer_nll"] / w["answer_tokens"] for w in wrong)
                          - right["answer_nll"] / right["answer_tokens"]))
     return rows
@@ -254,23 +260,420 @@ def summary_lines(results):
     return L
 
 
+# ---- siklik esigi (kullanici, 2 Ekim: oneri 1 "Olur eklet."): olgu derlemde kac kez geciyor, model onu biliyor mu;
+# esik yedekler boyunca asagi kayiyorsa egitim sinirli, duruyorsa kapasite sinirli.
+
+# (ulke istemdeki yazimiyla, sayim icin ozne, baskent, kabul edilen baska yazimlar)
+CAPITALS = (
+    ("Afghanistan", "Afghanistan", "Kabul", ()), ("Albania", "Albania", "Tirana", ()),
+    ("Algeria", "Algeria", "Algiers", ()), ("Argentina", "Argentina", "Buenos Aires", ()),
+    ("Armenia", "Armenia", "Yerevan", ()), ("Australia", "Australia", "Canberra", ()),
+    ("Austria", "Austria", "Vienna", ()), ("Azerbaijan", "Azerbaijan", "Baku", ()),
+    ("Bangladesh", "Bangladesh", "Dhaka", ()), ("Belarus", "Belarus", "Minsk", ()),
+    ("Belgium", "Belgium", "Brussels", ()), ("Brazil", "Brazil", "Brasília", ("Brasilia",)),
+    ("Bulgaria", "Bulgaria", "Sofia", ()), ("Cambodia", "Cambodia", "Phnom Penh", ()),
+    ("Canada", "Canada", "Ottawa", ()), ("Chile", "Chile", "Santiago", ()),
+    ("China", "China", "Beijing", ()), ("Colombia", "Colombia", "Bogotá", ("Bogota",)),
+    ("Croatia", "Croatia", "Zagreb", ()), ("Cuba", "Cuba", "Havana", ()),
+    ("the Czech Republic", "Czech Republic", "Prague", ()), ("Denmark", "Denmark", "Copenhagen", ()),
+    ("Ecuador", "Ecuador", "Quito", ()), ("Egypt", "Egypt", "Cairo", ()),
+    ("Estonia", "Estonia", "Tallinn", ()), ("Ethiopia", "Ethiopia", "Addis Ababa", ()),
+    ("Finland", "Finland", "Helsinki", ()), ("France", "France", "Paris", ()),
+    ("Germany", "Germany", "Berlin", ()), ("Ghana", "Ghana", "Accra", ()),
+    ("Greece", "Greece", "Athens", ()), ("Hungary", "Hungary", "Budapest", ()),
+    ("Iceland", "Iceland", "Reykjavik", ()), ("India", "India", "New Delhi", ()),
+    ("Indonesia", "Indonesia", "Jakarta", ()), ("Iran", "Iran", "Tehran", ()),
+    ("Iraq", "Iraq", "Baghdad", ()), ("Ireland", "Ireland", "Dublin", ()),
+    ("Italy", "Italy", "Rome", ()), ("Jamaica", "Jamaica", "Kingston", ()),
+    ("Japan", "Japan", "Tokyo", ()), ("Jordan", "Jordan", "Amman", ()),
+    ("Kenya", "Kenya", "Nairobi", ()), ("Laos", "Laos", "Vientiane", ()),
+    ("Latvia", "Latvia", "Riga", ()), ("Lebanon", "Lebanon", "Beirut", ()),
+    ("Libya", "Libya", "Tripoli", ()), ("Lithuania", "Lithuania", "Vilnius", ()),
+    ("Madagascar", "Madagascar", "Antananarivo", ()), ("Malaysia", "Malaysia", "Kuala Lumpur", ()),
+    ("Mali", "Mali", "Bamako", ()), ("Mexico", "Mexico", "Mexico City", ()),
+    ("Mongolia", "Mongolia", "Ulaanbaatar", ("Ulan Bator",)), ("Morocco", "Morocco", "Rabat", ()),
+    ("Mozambique", "Mozambique", "Maputo", ()), ("Nepal", "Nepal", "Kathmandu", ()),
+    ("the Netherlands", "Netherlands", "Amsterdam", ()), ("New Zealand", "New Zealand", "Wellington", ()),
+    ("Nicaragua", "Nicaragua", "Managua", ()), ("Niger", "Niger", "Niamey", ()),
+    ("Nigeria", "Nigeria", "Abuja", ()), ("North Korea", "North Korea", "Pyongyang", ()),
+    ("Norway", "Norway", "Oslo", ()), ("Pakistan", "Pakistan", "Islamabad", ()),
+    ("Paraguay", "Paraguay", "Asunción", ("Asuncion",)), ("Peru", "Peru", "Lima", ()),
+    ("the Philippines", "Philippines", "Manila", ()), ("Poland", "Poland", "Warsaw", ()),
+    ("Portugal", "Portugal", "Lisbon", ()), ("Qatar", "Qatar", "Doha", ()),
+    ("Romania", "Romania", "Bucharest", ()), ("Russia", "Russia", "Moscow", ()),
+    ("Rwanda", "Rwanda", "Kigali", ()), ("Saudi Arabia", "Saudi Arabia", "Riyadh", ()),
+    ("Senegal", "Senegal", "Dakar", ()), ("Serbia", "Serbia", "Belgrade", ()),
+    ("Slovakia", "Slovakia", "Bratislava", ()), ("Slovenia", "Slovenia", "Ljubljana", ()),
+    ("Somalia", "Somalia", "Mogadishu", ()), ("South Korea", "South Korea", "Seoul", ()),
+    ("Spain", "Spain", "Madrid", ()), ("Sudan", "Sudan", "Khartoum", ()),
+    ("Sweden", "Sweden", "Stockholm", ()), ("Switzerland", "Switzerland", "Bern", ("Berne",)),
+    ("Syria", "Syria", "Damascus", ()), ("Taiwan", "Taiwan", "Taipei", ()),
+    ("Tanzania", "Tanzania", "Dodoma", ()), ("Thailand", "Thailand", "Bangkok", ()),
+    ("Tunisia", "Tunisia", "Tunis", ()), ("Turkey", "Turkey", "Ankara", ()),
+    ("Uganda", "Uganda", "Kampala", ()), ("Ukraine", "Ukraine", "Kyiv", ("Kiev",)),
+    ("the United Kingdom", "United Kingdom", "London", ()), ("the United States", "United States", "Washington", ()),
+    ("Uruguay", "Uruguay", "Montevideo", ()), ("Uzbekistan", "Uzbekistan", "Tashkent", ()),
+    ("Venezuela", "Venezuela", "Caracas", ()), ("Vietnam", "Vietnam", "Hanoi", ()),
+    ("Zambia", "Zambia", "Lusaka", ()), ("Zimbabwe", "Zimbabwe", "Harare", ()),
+    ("Angola", "Angola", "Luanda", ()), ("Botswana", "Botswana", "Gaborone", ()),
+    ("Namibia", "Namibia", "Windhoek", ()), ("Bhutan", "Bhutan", "Thimphu", ()),
+    ("Kyrgyzstan", "Kyrgyzstan", "Bishkek", ()), ("Tajikistan", "Tajikistan", "Dushanbe", ()),
+    ("Turkmenistan", "Turkmenistan", "Ashgabat", ()), ("North Macedonia", "Macedonia", "Skopje", ()),
+    ("Montenegro", "Montenegro", "Podgorica", ()), ("Bosnia and Herzegovina", "Bosnia", "Sarajevo", ()),
+    ("Malta", "Malta", "Valletta", ()), ("Cyprus", "Cyprus", "Nicosia", ()),
+    ("Haiti", "Haiti", "Port-au-Prince", ()), ("the Dominican Republic", "Dominican Republic", "Santo Domingo", ()),
+    ("Honduras", "Honduras", "Tegucigalpa", ()), ("Guatemala", "Guatemala", "Guatemala City", ()),
+    ("El Salvador", "El Salvador", "San Salvador", ()), ("Costa Rica", "Costa Rica", "San José", ("San Jose",)),
+    ("the Bahamas", "Bahamas", "Nassau", ()), ("Fiji", "Fiji", "Suva", ()),
+    ("Papua New Guinea", "Papua New Guinea", "Port Moresby", ()), ("Liberia", "Liberia", "Monrovia", ()),
+    ("Sierra Leone", "Sierra Leone", "Freetown", ()), ("Burkina Faso", "Burkina Faso", "Ouagadougou", ()),
+    ("Eritrea", "Eritrea", "Asmara", ()), ("Malawi", "Malawi", "Lilongwe", ()),
+    ("Gabon", "Gabon", "Libreville", ()), ("Togo", "Togo", "Lomé", ("Lome",)),
+    ("Mauritania", "Mauritania", "Nouakchott", ()), ("Oman", "Oman", "Muscat", ()),
+    ("Kuwait", "Kuwait", "Kuwait City", ()), ("Bahrain", "Bahrain", "Manama", ()),
+    ("the United Arab Emirates", "United Arab Emirates", "Abu Dhabi", ()),
+)
+# (element adi, sembol)
+ELEMENTS = (
+    ("hydrogen", "H"), ("helium", "He"), ("lithium", "Li"), ("beryllium", "Be"), ("boron", "B"), ("carbon", "C"),
+    ("nitrogen", "N"), ("oxygen", "O"), ("fluorine", "F"), ("neon", "Ne"), ("sodium", "Na"), ("magnesium", "Mg"),
+    ("aluminum", "Al"), ("silicon", "Si"), ("phosphorus", "P"), ("sulfur", "S"), ("chlorine", "Cl"), ("argon", "Ar"),
+    ("potassium", "K"), ("calcium", "Ca"), ("scandium", "Sc"), ("titanium", "Ti"), ("vanadium", "V"),
+    ("chromium", "Cr"), ("manganese", "Mn"), ("iron", "Fe"), ("cobalt", "Co"), ("nickel", "Ni"), ("copper", "Cu"),
+    ("zinc", "Zn"), ("gallium", "Ga"), ("germanium", "Ge"), ("arsenic", "As"), ("selenium", "Se"), ("bromine", "Br"),
+    ("krypton", "Kr"), ("rubidium", "Rb"), ("strontium", "Sr"), ("yttrium", "Y"), ("zirconium", "Zr"),
+    ("niobium", "Nb"), ("molybdenum", "Mo"), ("technetium", "Tc"), ("ruthenium", "Ru"), ("rhodium", "Rh"),
+    ("palladium", "Pd"), ("silver", "Ag"), ("cadmium", "Cd"), ("indium", "In"), ("tin", "Sn"), ("antimony", "Sb"),
+    ("tellurium", "Te"), ("iodine", "I"), ("xenon", "Xe"), ("cesium", "Cs"), ("barium", "Ba"), ("lanthanum", "La"),
+    ("cerium", "Ce"), ("neodymium", "Nd"), ("europium", "Eu"), ("gadolinium", "Gd"), ("hafnium", "Hf"),
+    ("tantalum", "Ta"), ("tungsten", "W"), ("rhenium", "Re"), ("osmium", "Os"), ("iridium", "Ir"),
+    ("platinum", "Pt"), ("gold", "Au"), ("mercury", "Hg"), ("thallium", "Tl"), ("lead", "Pb"), ("bismuth", "Bi"),
+    ("polonium", "Po"), ("astatine", "At"), ("radon", "Rn"), ("francium", "Fr"), ("radium", "Ra"),
+    ("actinium", "Ac"), ("thorium", "Th"), ("uranium", "U"), ("plutonium", "Pu"), ("americium", "Am"),
+    ("curium", "Cm"), ("einsteinium", "Es"), ("nobelium", "No"),
+)
+# (istem, sayim icin ozne, yil)
+DATES = (
+    ("The French Revolution began in", "French Revolution", "1789"),
+    ("The American Declaration of Independence was signed in", "Declaration of Independence", "1776"),
+    ("World War I began in", "World War I", "1914"), ("World War I ended in", "World War I", "1918"),
+    ("World War II began in", "World War II", "1939"), ("World War II ended in", "World War II", "1945"),
+    ("The Berlin Wall fell in", "Berlin Wall", "1989"), ("The Berlin Wall was built in", "Berlin Wall", "1961"),
+    ("The Apollo 11 mission landed on the Moon in", "Apollo 11", "1969"),
+    ("Christopher Columbus first reached the Americas in", "Columbus", "1492"),
+    ("The Titanic sank in", "Titanic", "1912"), ("The Magna Carta was signed in", "Magna Carta", "1215"),
+    ("The Battle of Hastings took place in", "Battle of Hastings", "1066"),
+    ("The Russian Revolution took place in", "Russian Revolution", "1917"),
+    ("The American Civil War began in", "American Civil War", "1861"),
+    ("The American Civil War ended in", "American Civil War", "1865"),
+    ("Abraham Lincoln was assassinated in", "Lincoln", "1865"),
+    ("The stock market crash that started the Great Depression happened in", "Great Depression", "1929"),
+    ("The Soviet Union collapsed in", "Soviet Union", "1991"),
+    ("The attack on Pearl Harbor took place in", "Pearl Harbor", "1941"),
+    ("The atomic bomb was dropped on Hiroshima in", "Hiroshima", "1945"),
+    ("The September 11 attacks happened in", "September 11", "2001"),
+    ("The Wright brothers made their first powered flight in", "Wright brothers", "1903"),
+    ("Martin Luther posted his Ninety-five Theses in", "Martin Luther", "1517"),
+    ("The Battle of Waterloo was fought in", "Waterloo", "1815"),
+    ("The United Nations was founded in", "United Nations", "1945"),
+    ("Nelson Mandela was released from prison in", "Mandela", "1990"),
+    ("The Chernobyl disaster happened in", "Chernobyl", "1986"),
+    ("Charles Darwin published On the Origin of Species in", "Origin of Species", "1859"),
+    ("The Boston Tea Party took place in", "Boston Tea Party", "1773"),
+    ("The Great Fire of London happened in", "Great Fire of London", "1666"),
+    ("The Spanish Armada was defeated in", "Spanish Armada", "1588"),
+    ("The Treaty of Versailles was signed in", "Treaty of Versailles", "1919"),
+    ("The Emancipation Proclamation was issued in", "Emancipation Proclamation", "1863"),
+    ("The Louisiana Purchase took place in", "Louisiana Purchase", "1803"),
+    ("The Cuban Missile Crisis took place in", "Cuban Missile Crisis", "1962"),
+    ("Sputnik was launched in", "Sputnik", "1957"),
+    ("Yuri Gagarin became the first human in space in", "Gagarin", "1961"),
+    ("The Korean War began in", "Korean War", "1950"), ("The Vietnam War ended in", "Vietnam War", "1975"),
+    ("Martin Luther King Jr. gave his I Have a Dream speech in", "I Have a Dream", "1963"),
+    ("John F. Kennedy was assassinated in", "Kennedy", "1963"),
+    ("The Nineteenth Amendment was ratified in", "Nineteenth Amendment", "1920"),
+    ("The Ottoman Turks captured Constantinople in", "Constantinople", "1453"),
+    ("The Battle of Gettysburg was fought in", "Gettysburg", "1863"),
+    ("The Panama Canal opened in", "Panama Canal", "1914"), ("The Suez Canal opened in", "Suez Canal", "1869"),
+    ("The Eiffel Tower was completed in", "Eiffel Tower", "1889"),
+    ("The Statue of Liberty was dedicated in", "Statue of Liberty", "1886"),
+    ("Alexander Fleming discovered penicillin in", "penicillin", "1928"),
+    ("Albert Einstein published the theory of special relativity in", "special relativity", "1905"),
+    ("The first iPhone was released in", "iPhone", "2007"),
+    ("The People's Republic of China was founded in", "People's Republic of China", "1949"),
+    ("The State of Israel was founded in", "Israel", "1948"),
+    ("The Mayflower arrived in America in", "Mayflower", "1620"), ("Jamestown was founded in", "Jamestown", "1607"),
+    ("The Battle of Trafalgar took place in", "Trafalgar", "1805"),
+    ("The Hundred Years' War began in", "Hundred Years", "1337"),
+    ("Queen Victoria became queen in", "Queen Victoria", "1837"),
+    ("The Glorious Revolution took place in", "Glorious Revolution", "1688"),
+    ("The Peace of Westphalia was signed in", "Westphalia", "1648"),
+    ("Galileo was tried by the Inquisition in", "Galileo", "1633"),
+    ("Isaac Newton published the Principia in", "Principia", "1687"),
+    ("The Meiji Restoration began in", "Meiji Restoration", "1868"),
+    ("The Mexican-American War began in", "Mexican-American War", "1846"),
+    ("The Great Chicago Fire happened in", "Chicago Fire", "1871"),
+    ("The great San Francisco earthquake happened in", "San Francisco earthquake", "1906"),
+    ("Hurricane Katrina struck New Orleans in", "Katrina", "2005"),
+    ("The Hubble Space Telescope was launched in", "Hubble", "1990"),
+    ("The Space Shuttle Challenger disaster happened in", "Challenger", "1986"),
+    ("The Human Genome Project was completed in", "Human Genome Project", "2003"),
+    ("Dolly the sheep was cloned in", "Dolly", "1996"),
+    ("Watson and Crick described the structure of DNA in", "Watson and Crick", "1953"),
+    ("Marie Curie won her first Nobel Prize in", "Marie Curie", "1903"),
+    ("The Rwandan genocide took place in", "Rwandan genocide", "1994"),
+    ("Barack Obama was first elected president in", "Obama", "2008"),
+    ("Germany was reunified in", "reunification", "1990"),
+    ("The Indian Ocean tsunami happened in", "Indian Ocean tsunami", "2004"),
+    ("The Battle of Stalingrad ended in", "Stalingrad", "1943"), ("D-Day took place in", "D-Day", "1944"),
+    ("Thomas Edison invented the phonograph in", "phonograph", "1877"),
+    ("Alexander Graham Bell patented the telephone in", "Graham Bell", "1876"),
+    ("Gutenberg's printing press was developed around", "Gutenberg", "1440"),
+    ("The Battle of Bunker Hill was fought in", "Bunker Hill", "1775"),
+    ("The US Constitution was signed in", "Constitution", "1787"),
+    ("India gained independence from Britain in", "India", "1947"),
+    ("The Prohibition era in the United States began in", "Prohibition", "1920"),
+    ("The Bolsheviks seized power in Russia in", "Bolsheviks", "1917"),
+    ("Napoleon Bonaparte crowned himself emperor in", "Napoleon", "1804"),
+    ("The Battle of Midway was fought in", "Midway", "1942"),
+    ("The Treaty of Paris ended the American Revolutionary War in", "Treaty of Paris", "1783"),
+    ("The Wall Street Journal was first published in", "Wall Street Journal", "1889"),
+    ("The first Olympic Games of the modern era were held in", "Olympic Games", "1896"),
+)
+YEAR_OFFSETS = (-10, -3, 3, 10)      # tarih celdiricileri: dogru yilin komsulari (kesin yil bilgisi olculur)
+FREQ_DISTRACTORS = 4                 # baskent ve sembolde: listeden rastgele baska cevaplar (tohum 0)
+# sayimi gurultulu semboller: Ingilizce kelime ya da tek harf (bas harf, zamir) -- esik iki kez: hepsiyle ve bunlarsiz
+NOISY_SYMBOLS = {"H", "B", "C", "N", "O", "F", "P", "S", "K", "V", "Y", "W", "U", "I", "He", "Be", "In", "As", "At",
+                 "No", "Am", "Co", "Es"}
+FREQ_WINDOW = 16                     # sayim: ozne ile cevap arasinda en cok bu kadar token (iki yon), ayni belge
+
+
+def freq_facts():
+    """Uc tur olgu -> FACTS bicimi (+ subject: sayim icin ozne, answers: dogru yazimlarin hepsi).  Celdiriciler tohum 0."""
+    import random
+    rng = random.Random(0)
+    out = []
+    caps = [c[2] for c in CAPITALS]
+    for country, subject, capital, also in CAPITALS:
+        wrong = rng.sample([c for c in caps if c != capital], FREQ_DISTRACTORS)
+        out.append(dict(kind="capital", prompt="The capital of %s is" % country, answer=" " + capital,
+                        also=tuple(" " + a for a in also), wrong=tuple(" " + w for w in wrong), tail=".",
+                        subject=" " + subject))
+    syms = [e[1] for e in ELEMENTS]
+    for name, sym in ELEMENTS:
+        wrong = rng.sample([x for x in syms if x != sym], FREQ_DISTRACTORS)
+        out.append(dict(kind="element", prompt="The chemical symbol for %s is" % name, answer=" " + sym, also=(),
+                        wrong=tuple(" " + w for w in wrong), tail=".", subject=" " + name, noisy=sym in NOISY_SYMBOLS))
+    for prompt, subject, year in DATES:
+        wrong = tuple(" %d" % (int(year) + k) for k in YEAR_OFFSETS)
+        out.append(dict(kind="date", prompt=prompt, answer=" " + year, also=(), wrong=wrong, tail=".",
+                        subject=" " + subject))
+    return out
+
+
+def _token_positions(a, firsts):
+    """a icinde firsts token'larinin konumlari, token'a gore gruplu: {token: artan konumlar}.  Tek gecis (arama tablosu)."""
+    import numpy as np
+    lut = np.zeros(1 << 16, dtype=bool)
+    lut[list(firsts)] = True
+    idx = np.flatnonzero(lut[a])
+    order = np.argsort(a[idx], kind="stable")
+    idx, vals = idx[order], a[idx][order]
+    cut = np.flatnonzero(np.diff(vals)) + 1
+    return {int(g[0]): p for g, p in zip(np.split(vals, cut), np.split(idx, cut)) if len(g)}
+
+
+def _phrase_positions(a, ids, by_first):
+    import numpy as np
+    cand = by_first.get(ids[0], np.array([], dtype=np.int64))
+    cand = cand[cand + len(ids) <= len(a)]
+    for k, t in enumerate(ids[1:], 1):
+        if not len(cand):
+            break
+        cand = cand[a[cand + k] == t]
+    return cand
+
+
+def freq_count(fw_root, tok, facts, window=FREQ_WINDOW, shards=None, log=print):
+    """Olgu basina derlem sayimi (butun parcalar; shard 13'un valid belgeleri dahil, ~%0,04):
+    n_subject  ozne (bosluklu yazim) gecisi
+    near     cevabin (dogru yazimlarindan biri) ozneden en cok `window` token once ya da sonra, AYNI belgede basladigi ozne
+             gecisi.  Ana sikilik olcusu
+    docs     ozne ve cevabin ikisini birden iceren belge sayisi
+    n_answer   cevabin gecisi (ozneden bagimsiz)"""
+    import numpy as np
+    d = os.path.join(fw_root, "gpt2")
+    enc = lambda s: tok.encode(s, add_special_tokens=False).ids
+    subj = [enc(f["subject"]) for f in facts]
+    ans = [[enc(x) for x in (f["answer"],) + tuple(f.get("also", ()))] for f in facts]
+    firsts = {x[0] for x in subj} | {y[0] for xs in ans for y in xs}
+    tot = [dict(n_subject=0, near=0, docs=0, n_answer=0) for _ in facts]
+    found = sorted(int(f[6:9]) for f in os.listdir(d) if f.startswith("shard_") and f.endswith(".bin"))
+    tokens = 0
+    for i in found if shards is None else [s for s in found if s in shards]:
+        t0 = time.time()
+        a = np.fromfile(os.path.join(d, "shard_%03d.bin" % i), dtype=np.uint16)
+        offsets = np.load(os.path.join(d, "shard_%03d_offsets.npy" % i))
+        tokens += len(a)
+        by_first = _token_positions(a, firsts)
+        doc = lambda p: np.searchsorted(offsets, p, side="right") - 1
+        for k, f in enumerate(facts):
+            sp = _phrase_positions(a, subj[k], by_first)
+            ap = np.unique(np.concatenate([_phrase_positions(a, x, by_first) for x in ans[k]] + [np.array([], np.int64)]))
+            t = tot[k]
+            t["n_subject"] += len(sp)
+            t["n_answer"] += len(ap)
+            if len(sp) and len(ap):
+                lo = np.searchsorted(ap, sp - window)                  # ozneden once en cok window token ...
+                j = np.minimum(lo, len(ap) - 1)
+                hit = (lo < len(ap)) & (ap[j] <= sp + len(subj[k]) + window) & (doc(ap[j]) == doc(sp))
+                t["near"] += int(hit.sum())
+                t["docs"] += len(np.intersect1d(np.unique(doc(sp)), np.unique(doc(ap))))
+        log("parca %03d: %.0f M token, %.0f sn" % (i, len(a) / 1e6, time.time() - t0))
+        del a, by_first
+    return dict(tokens=tokens, window=window, counts=[dict(t, prompt=f["prompt"], answer=f["answer"], kind=f["kind"],
+                                                           subject=f["subject"], noisy=f.get("noisy", False))
+                                                      for t, f in zip(tot, facts)])
+
+
+def _logistic_floor(x, y, floor):
+    """p = floor + (1 - floor) sigmoid(a + b x), en buyuk olabilirlik: standartlastirilmis x'te (a, b) izgarasi (b >= 0).
+    -> (a, b) x'in kendi biriminde."""
+    import numpy as np
+    xm, xs = x.mean(), x.std() + 1e-9
+    z = (x - xm) / xs
+    A, B = np.meshgrid(np.linspace(-6, 6, 61), np.linspace(0, 8, 41), indexing="ij")
+    s = 1 / (1 + np.exp(-(A.reshape(-1, 1) + B.reshape(-1, 1) * z)))
+    p = np.clip(floor + (1 - floor) * s, 1e-6, 1 - 1e-6)
+    ll = (y * np.log(p) + (1 - y) * np.log(1 - p)).sum(1)
+    k = int(ll.argmax())
+    a, b = A.reshape(-1)[k], B.reshape(-1)[k]
+    return a - b * xm / xs, b / xs
+
+
+def freq_threshold(count_res, fact_res, key="near", criterion="correct_best_any", weights="ema", min_step=4000,
+                   boot=100, kinds_only=None, drop_noisy=False):
+    """Bilinme orani ~ log10(1 + sayim), yedek basina: kutu tablosu (Wilson araligi) ve sans tabanli lojistik esik
+    (p = taban + (1 - taban)/2'de sayim), olgulara gore bootstrap %90 araligi.  EMA'da min_step oncesi baslangic agirligiyla
+    kirli (E2 R1).  -> (satirlar, ozet)."""
+    import numpy as np
+    keep = np.array([(kinds_only is None or c["kind"] in kinds_only) and not (drop_noisy and c["noisy"])
+                     for c in count_res["counts"]])
+    counts = np.array([c[key] for c in count_res["counts"]], dtype=float)[keep]
+    kinds = np.array([c["kind"] for c in count_res["counts"]])[keep]
+    x = np.log10(1 + counts)
+    floor = 1.0 / (1 + FREQ_DISTRACTORS)
+    edges = [0, 1, 10, 100, 1000, 10000, 1e9]
+    L = ["## bilinme orani (%s) ~ sayim (%s, pencere %d) | agirlik %s, adim >= %d; sans %.2f | olgu %d (%s%s)" % (
+        criterion, key, count_res["window"], weights, min_step, floor, keep.sum(), ",".join(kinds_only or ["hepsi"]),
+        ", gurultulu semboller haric" if drop_noisy else ""),
+         "%-12s %s | esik (sayim, %%90 araligi)" % ("adim", " ".join("%13s" % ("[%g,%g)" % (lo, hi))
+                                                              for lo, hi in zip(edges[:-1], edges[1:])))]
+    L.append("%-12s %s" % ("olgu sayisi", " ".join("%13d" % ((counts >= lo) & (counts < hi)).sum()
+                                                   for lo, hi in zip(edges[:-1], edges[1:]))))
+    rng = np.random.default_rng(0)
+    summary = []
+    for r in fact_res:
+        if r["weights"] != weights or (r["step"] is not None and r["step"] < min_step):
+            continue
+        y = np.array([float(f[criterion]) for f in r["facts"]])[keep]
+        cells = []
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            m = (counts >= lo) & (counts < hi)
+            n, k = m.sum(), y[m].sum()
+            if not n:
+                cells.append("%13s" % "-")
+                continue
+            p, z = k / n, 1.645
+            c = (p + z * z / (2 * n)) / (1 + z * z / n)
+            h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
+            cells.append("%13s" % ("%.2f[%.2f,%.2f]" % (p, max(0, c - h), min(1, c + h))))
+
+        def thr(xx, yy):
+            a, b = _logistic_floor(xx, yy, floor)
+            return 10 ** min(-a / b, 12.0) - 1 if b > 0 else 1e12
+        t = thr(x, y)
+        bs = []
+        for _ in range(boot):
+            i = rng.integers(0, len(x), len(x))
+            bs.append(thr(x[i], y[i]))
+        lo, hi = np.percentile(bs, [5, 95])
+        per_kind = {k: float(y[kinds == k].mean()) for k in sorted(set(kinds))}
+        summary.append(dict(label=r["label"], step=r["step"], threshold=t, ci90=[float(lo), float(hi)],
+                            known=float(y.mean()), per_kind=per_kind))
+        L.append("%-12s %s | %.0f [%.0f, %.0f]  bilinen %.2f  %s" % (
+            r["label"][-12:], " ".join(cells), t, lo, hi, y.mean(), " ".join("%s %.2f" % kv for kv in per_kind.items())))
+    return L, summary
+
+
+def _write(args, name, payload):
+    out_dir = os.environ.get("KUYRUK_SONUC") or os.path.join(args.run, "analysis")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "%s%s_%s.json" % (name, "_" + args.label if args.label else "", time.strftime("%Y%m%d_%H%M%S")))
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=1)
+    return path
+
+
+def freq_lines(results, facts):
+    kinds = sorted({f["kind"] for f in facts})
+    L = ["## siklik olgulari: tur basina dogru en iyi (ALSO dahil) / ilk ayrisan token sira 0 orani; n = %s" % (
+        ", ".join("%s %d" % (k, sum(f["kind"] == k for f in facts)) for k in kinds))]
+    for r in results:
+        cells = []
+        for k in kinds:
+            xs = [x for x in r["facts"] if x["kind"] == k]
+            cells.append("%s %.2f / %.2f" % (k, sum(x["correct_best_any"] for x in xs) / len(xs),
+                                             sum(x["first_diverging_rank"] == 0 for x in xs) / len(xs)))
+        L.append("%-12s %s" % (r["label"][-12:], "   ".join(cells)))
+    return L
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="analyze_capacity.py", description=__doc__.split("\n\n")[0])
     ap.add_argument("run", help="kosu klasoru")
-    ap.add_argument("measure", choices=("facts",))
-    ap.add_argument("--data", required=True, help="FineWeb koku (gpt2/tokenizer.json)")
+    ap.add_argument("measure", choices=("facts", "freq_facts", "freq_count", "freq_threshold"))
+    ap.add_argument("--data", required=True, help="FineWeb koku (gpt2/tokenizer.json, gpt2/shard_*)")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--steps", default="", help="checkpoint adimlari: '2000,4000' ya da 'every:K' ya da 'all'")
     ap.add_argument("--finals", default="", help="'last,ema': model.pt / model_weight_ema.pt")
     ap.add_argument("--label", default="", help="cikti adina ek")
     ap.add_argument("--selftest", action="store_true", help="kucuk rastgele model, CPU")
+    ap.add_argument("--shards", default="", help="freq_count: yalniz bu parcalar ('0,1'; bos = hepsi)")
+    ap.add_argument("--counts", help="freq_threshold: freq_count ciktisi (.json)")
+    ap.add_argument("--inputs", nargs="+", help="freq_threshold: freq_facts ciktilari (.json)")
     args = ap.parse_args(argv)
     t0 = time.time()
-    config = I._config(args.run)
     tok, eot = load_tokenizer(args.data)
-    seqs = build_sequences(tok, eot)
+    if args.measure == "freq_count":
+        facts = freq_facts()
+        shards = [int(x) for x in args.shards.split(",")] if args.shards else None
+        res = freq_count(args.data, tok, facts, shards=shards, log=lambda m: print(m, flush=True))
+        for c in sorted(res["counts"], key=lambda c: -c["near"])[:: max(1, len(facts) // 40)]:
+            print("%8d near %8d docs %9d ozne  %-40s %s" % (c["near"], c["docs"], c["n_subject"], c["prompt"][:40], c["answer"]))
+        path = _write(args, "capacity_freq_count", dict(measure="freq_count", secs=round(time.time() - t0, 1), **res))
+        print("yazildi: %s  (%.0f sn)" % (path, time.time() - t0))
+        return
+    if args.measure == "freq_threshold":
+        counts = json.load(open(args.counts, encoding="utf-8"))
+        results = [r for p in args.inputs for r in json.load(open(p, encoding="utf-8"))["results"]]
+        results.sort(key=lambda r: (r["step"] is None, r["step"] or 0))
+        out = {}
+        for weights in ("ema", "last"):
+            for kinds, noisy in ((None, True), (["capital"], False), (["element"], True), (["date"], False)):
+                L, summ = freq_threshold(counts, results, weights=weights, kinds_only=kinds, drop_noisy=noisy,
+                                         min_step=4000 if weights == "ema" else 0)
+                print("\n".join(L) + "\n", flush=True)
+                out["%s|%s|%s" % (weights, ",".join(kinds or ["all"]), "clean" if noisy else "raw")] = summ
+        path = _write(args, "capacity_freq_threshold", dict(measure="freq_threshold", counts=args.counts, inputs=args.inputs,
+                                                            summary=out))
+        print("yazildi: %s" % path)
+        return
+    config = I._config(args.run)
+    facts = FACTS if args.measure == "facts" else freq_facts()
+    seqs = build_sequences(tok, eot, facts)
     bad = [s["text"] for s in seqs if not s["joint_ok"]]
-    print("olgu %d, aday %d; ayri/birlesik kodlama farkli: %s" % (len(FACTS), len(seqs), bad or "yok"), flush=True)
+    print("olgu %d, aday %d; ayri/birlesik kodlama farkli: %s" % (len(facts), len(seqs), bad or "yok"), flush=True)
     if args.selftest:
         sets = selftest_sets(config)
     else:
@@ -283,23 +686,19 @@ def main(argv=None):
     for label, step, kind, model in sets:
         model = model.to(args.device)
         scores = score(model, seqs, tok, args.device, eot)
-        results.append(dict(label=label, step=step, weights=kind, facts=per_fact(seqs, scores),
+        results.append(dict(label=label, step=step, weights=kind, facts=per_fact(seqs, scores, facts),
                             ema_init_share=EMA_DECAY ** step if kind == "ema" and step else None))
-        print("   %s: dogru en iyi %d / %d" % (label, sum(x["correct_best"] for x in results[-1]["facts"]), len(FACTS)), flush=True)
+        print("   %s: dogru en iyi %d / %d" % (label, sum(x["correct_best_any"] for x in results[-1]["facts"]), len(facts)),
+              flush=True)
         del model
         if args.device.startswith("cuda"):
             torch.cuda.empty_cache()
-    lines = summary_lines(results)
-    print("\n".join(lines))
-    out_dir = os.environ.get("KUYRUK_SONUC") or os.path.join(args.run, "analysis")
-    os.makedirs(out_dir, exist_ok=True)
-    name = "capacity_facts%s_%s" % ("_" + args.label if args.label else "", time.strftime("%Y%m%d_%H%M%S"))
-    path = os.path.join(out_dir, name + ".json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(dict(measure="facts", run=config.get("name"), selftest=args.selftest, secs=round(time.time() - t0, 1),
-                       facts=[dict(f, wrong=list(f["wrong"])) for f in FACTS],
-                       token_ids=[dict(fact=s["fact"], candidate=s["candidate"], ids=s["ids"]) for s in seqs],
-                       results=results), f, ensure_ascii=False, indent=1)
+    print("\n".join(summary_lines(results) if args.measure == "facts" else freq_lines(results, facts)))
+    path = _write(args, "capacity_facts" if args.measure == "facts" else "capacity_freq_facts",
+                  dict(measure=args.measure, run=config.get("name"), selftest=args.selftest, secs=round(time.time() - t0, 1),
+                       facts=[dict(f, wrong=list(f["wrong"]), also=list(f.get("also", ()))) for f in facts],
+                       token_ids=[dict(fact=s["fact"], candidate=s["candidate"], role=s["role"], ids=s["ids"]) for s in seqs],
+                       results=results))
     print("yazildi: %s  (%.0f sn)" % (path, time.time() - t0))
 
 
