@@ -17,6 +17,9 @@ Olcumler (python analysis/analyze_structure.py <kosu> <olcum> --data <FineWeb ko
     loop              hedef kosinusu c_y siniflara gore ve dL/du payi; tekrarda durum yakinsamasi; kopyanin c_y'si gecis basina
     answers           son turun attention'i sonrasi / FactUnits sonrasi ilk 5 adayin c'si; element sembolleri ve metal yonu
     selfgen           m = 1 ve ayni l kovasinda acgozlu kendi uretimi / gercek devam ayrimi (tur <= 12, konum esitlenmis)
+    sentence_states   cumle sonu durumlari: tekrara giristen once ilk gecisin oncesine donus, giris cevresinde benzerlik,
+                      "soyledim" sondasi, tekrar cumlesinin alt blok bagimliligi; SimpleStories kosusunda da (--data)
+                      --region, --prompt-max, --ablate-docs
 
     python analysis/analyze_structure.py --selftest        (kucuk sahte model, CPU)
 Cikti: $KUYRUK_SONUC (yoksa <kosu>/analysis/) structure_<olcum>_<agirlik>[_tNNNNNN]_<zaman>.txt + .json; metin stdout'a da.
@@ -40,7 +43,8 @@ import torch.nn.functional as F  # noqa: E402
 import internals_y as I  # noqa: E402
 
 TARGETS = ("cur", "prev1", "prev2", "next1", "next2")
-MEASURES = ("probes", "attention_passes", "units", "pass_swap", "extras", "repair", "points", "loop", "answers", "selfgen")
+MEASURES = ("probes", "attention_passes", "units", "pass_swap", "extras", "repair", "points", "loop", "answers", "selfgen",
+            "sentence_states")
 _unit = I._unit
 
 
@@ -1541,6 +1545,368 @@ def _text_selfgen(res):
     return L
 
 
+# ---- 10. sentence_states (O17): cumle sonu durumlari -- onceki duruma donus ve "soyledim" bilgisi
+
+SENT_BUCKET = 32        # bolge ici konum kovasi (token): kontrol eslemesi ve probe katmanlari
+SENT_RELS = (-3, -2, -1, 0, 1, 2)
+
+
+def _sentence_layout(s, P0, is_end, vocab):
+    """Metin s (bolge s[P0:]) -> cumle bas / son'lari, tekrar bayragi (anahtar daha once tam gecmis; _entry_stats ile ayni),
+    bolgede biten cumleler, giris k (bolgede biten ilk tekrar cumlesi) ve onun ilk gecisi j."""
+    import analyze_errors as AE
+    sents = AE._sentences_of(s, is_end, vocab)
+    seen, first, rep = set(), {}, []
+    for i, (a, b, key) in enumerate(sents):
+        rep.append(key is not None and key in seen)
+        if key is not None:
+            seen.add(key)
+            first.setdefault(key, i)
+    region = [i for i, (a, b, key) in enumerate(sents) if b >= P0]
+    k = next((i for i in region if rep[i]), None)
+    return dict(starts=[a for a, _, _ in sents], ends=[b for _, b, _ in sents], rep=rep, region=region, k=k,
+                j=None if k is None else first[sents[k][2]])
+
+
+@torch.no_grad()
+def _sentence_end_states(model, seqs, lays, keep, eot, batch=8):
+    """Metin basina: cumle sonlarinda butun durumlar arasi kosinus (S, E, E) ve bolgedeki cumle sonlarinda keep durumlari
+    (K, nR, d; fp16, sqrt(d) olcekli)."""
+    P_ = model.tokens.points()
+    d = P_.shape[1]
+    cos, feats = [], []
+    for c0 in range(0, len(seqs), batch):
+        part = seqs[c0:c0 + batch]
+        x = torch.full((len(part), max(map(len, part))), eot, dtype=torch.long, device=P_.device)
+        for r, s in enumerate(part):
+            x[r, :len(s)] = torch.tensor(s, device=P_.device)
+        states = _states(model, x)
+        for r, lay in enumerate(lays[c0:c0 + batch]):
+            idx = torch.tensor(lay["ends"], dtype=torch.long, device=P_.device)
+            g = F.normalize(torch.stack([st[r, idx] for st in states]).float(), dim=-1)
+            cos.append((g @ g.transpose(1, 2)).cpu())
+            reg = idx[torch.tensor(lay["region"], dtype=torch.long, device=P_.device)]
+            feats.append(torch.stack([states[j][r, reg] for j in keep]).mul(d ** 0.5).half().cpu())
+    return cos, feats
+
+
+def _ms(v):
+    """-> (ortalama, SE, n)."""
+    v = np.asarray(v, float)
+    return (float(v.mean()), float(v.std() / math.sqrt(len(v))) if len(v) > 1 else float("nan"), len(v)) if len(v) else (
+        float("nan"), float("nan"), 0)
+
+
+def _pct(tc, oc):
+    """tc (S,) hedef kosinusu, oc (S, n) otekiler -> otekiler arasinda yuzdelik (esitlik yarim; h0'da ayni token)."""
+    return ((oc < tc[:, None]).float() + 0.5 * (oc - tc[:, None]).abs().lt(1e-6).float()).mean(1)
+
+
+def _sentence_return(seqs, lays, cos):
+    """Giristen once: e_(k-1) (tekrar cumlesinin hemen oncesindeki cumle sonu) ile ilk gecisin oncesi e_(j-1); e_(k-1)'in
+    kendisi tekrar degil, k >= 3.  Durum basina kosinus, e_(k-1)'den onceki sonlar arasinda yuzdelik (1 = en yakin) ve en
+    yakin olma; ayni sey giristen sonra (e_k ile e_j).  ell: e_(k-1)'de biten ve daha once gecmis en uzun sonek."""
+    import analyze_errors as AE
+    rows = []
+    for s, lay, C in zip(seqs, lays, cos):
+        k, j = lay["k"], lay["j"]
+        if k is None or j < 1 or k < 3 or lay["rep"][k - 1]:
+            continue
+        q, t = k - 1, j - 1
+        oth = [i for i in range(q) if i != t]
+        oth2 = [i for i in range(k) if i != j]
+        tc, oc, tc2, oc2 = C[:, q, t], C[:, q, oth], C[:, k, j], C[:, k, oth2]
+        rows.append(dict(cos=tc.numpy(), other=oc.mean(1).numpy(), pct=_pct(tc, oc).numpy(),
+                         top=(oc.max(1).values < tc).float().numpy(), chance=1.0 / q,
+                         pct_after=_pct(tc2, oc2).numpy(),
+                         ell=int(AE._match_trace(np.asarray(s))[0][lay["ends"][q]]), adjacent=j == k - 1))
+    out = dict(n=len(rows), chance_top=_ms([r["chance"] for r in rows]),
+               ell_median=float(np.median([r["ell"] for r in rows])) if rows else None, by={})
+    for part, sel in (("all", rows), ("ell<=2", [r for r in rows if r["ell"] <= 2]), ("ell>=3", [r for r in rows if r["ell"] >= 3]),
+                      ("j=k-1", [r for r in rows if r["adjacent"]]), ("j<k-1", [r for r in rows if not r["adjacent"]])):
+        if sel:
+            out["by"][part] = {k: [_ms([r[k][si] for r in sel]) for si in range(len(sel[0]["cos"]))]
+                               for k in ("cos", "other", "pct", "top", "pct_after")}
+            out["by"][part]["chance_top"] = _ms([r["chance"] for r in sel])
+    return out
+
+
+def _recency_base(real):
+    """Yakinlik tabani (gercek devam): bolge sonu e_i (i >= 3) icin e_(i-1)'in e_0..e_(i-2) arasinda yuzdeligi -- j = k - 1
+    durumunda hedef e_(k-2) en yakin gecmis son oldugu icin."""
+    v = [_pct(C[:, i, i - 1], C[:, i, :i - 1]).numpy() for C, lay in zip(real["cos"], real["lays"]) for i in lay["region"] if i >= 3]
+    return [_ms([x[si] for x in v]) for si in range(len(v[0]))] if v else None
+
+
+def _end_values(C, lay, P0):
+    """Bolgedeki cumle sonlari (i >= 1): (i, konum kovasi, en yakin onceki son kosinusu nn (S,), bir onceki son prev (S,))."""
+    return [(i, (lay["ends"][i] - P0) // SENT_BUCKET, C[:, i, :i].max(1).values.numpy(), C[:, i, i - 1].numpy())
+            for i in lay["region"] if i >= 1]
+
+
+def _sentence_trend(real, greedy, keep):
+    """Giris cevresinde (rel = i - k) nn ve prev; her deger gercek devamdaki ayni konum kovasinin ortalamasindan farkla
+    (konum ve onceki son sayisi kontrolu).  'girissiz': kendi uretimi, bolgede tekrar yok."""
+    ctl = {}
+    for C, lay, P0 in zip(real["cos"], real["lays"], real["P0s"]):
+        for i, b, nn, pv in _end_values(C, lay, P0):
+            ctl.setdefault(b, []).append((nn[keep], pv[keep]))
+    ctl = {b: (np.mean([v[0] for v in vs], 0), np.mean([v[1] for v in vs], 0)) for b, vs in ctl.items()}
+    groups = {}
+    for C, lay, P0 in zip(greedy["cos"], greedy["lays"], greedy["P0s"]):
+        for i, b, nn, pv in _end_values(C, lay, P0):
+            if b not in ctl:
+                continue
+            g = "girissiz" if lay["k"] is None else (i - lay["k"]) if (i - lay["k"]) in SENT_RELS else None
+            if g is not None:
+                groups.setdefault(g, []).append((nn[keep] - ctl[b][0], pv[keep] - ctl[b][1], nn[keep], pv[keep]))
+    out = {}
+    for g, vs in groups.items():
+        a = np.array(vs)                                              # (n, 4, K)
+        out[g] = {m: [_ms(a[:, mi, si]) for si in range(a.shape[2])] for mi, m in enumerate(("nn_diff", "prev_diff", "nn", "prev"))}
+    real_raw = [(nn[keep], pv[keep]) for C, lay, P0 in zip(real["cos"], real["lays"], real["P0s"])
+                for _, _, nn, pv in _end_values(C, lay, P0)]
+    a = np.array(real_raw)
+    out["gercek"] = {m: [_ms(a[:, mi, si]) for si in range(a.shape[2])] for mi, m in enumerate(("nn", "prev"))}
+    return out
+
+
+def _sentence_probes(greedy, keep_names, train_share=0.7, gen_seed=0):
+    """Kendi uretiminde bolge cumle sonlarindan dogrusal (lojistik) sonda; belge duzeyinde egitim / test, siniflar konum
+    kovasinda esit.  Negatif havuz: tekrar olmayan cumle sonlari, girisin en az 2 oncesi ya da girissiz belge.
+    next_first: e_(k-1) (sonraki cumle ilk tekrar); cur_first: e_k (bu cumle ilk tekrar); cur_any: herhangi tekrar cumle."""
+    X, lab, doc, pos = [], [], [], []
+    for d_, (f, lay, P0) in enumerate(zip(greedy["feats"], greedy["lays"], greedy["P0s"])):
+        k = lay["k"]
+        for r, i in enumerate(lay["region"]):
+            rel = None if k is None else i - k
+            neg = not lay["rep"][i] and (k is None or rel <= -2)
+            lab.append((neg, rel == -1, rel == 0, lay["rep"][i]))
+            X.append(f[:, r])
+            doc.append(d_)
+            pos.append((lay["ends"][i] - P0) // SENT_BUCKET)
+    X = torch.stack(X, 1)                                              # (K, N, d)
+    lab, doc, pos = torch.tensor(lab), torch.tensor(doc), torch.tensor(pos)
+    cut = int(len(greedy["lays"]) * train_share)
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    gen = torch.Generator().manual_seed(gen_seed)
+    rows = []
+    for li, name in ((1, "next_first"), (2, "cur_first"), (3, "cur_any")):
+        sel = torch.nonzero(lab[:, 0] | lab[:, li])[:, 0]
+        y = torch.zeros(len(lab), dtype=torch.long)
+        y[lab[:, li]] = 1
+        tr = _balanced(sel[doc[sel] < cut], y, gen, pos)
+        te = _balanced(sel[doc[sel] >= cut], y, gen, pos)
+        row = dict(target=name, n_pos=int(lab[:, li].sum()), n_neg=int(lab[:, 0].sum()), n_train=len(tr), n_test=len(te),
+                   acc={}, train_acc={})
+        if len(tr) >= 20 and len(te) >= 20:
+            for si, nm in enumerate(keep_names):
+                Xs = X[si].to(dev)
+                row["acc"][nm], row["train_acc"][nm] = _logistic(Xs[tr.to(dev)], y[tr].to(dev), Xs[te.to(dev)], y[te].to(dev))
+            pf = pos.float()[:, None] / 8
+            pf = torch.cat([pf, pf ** 2], 1)
+            row["acc_position"] = _logistic(pf[tr], y[tr], pf[te], y[te])[0]
+        rows.append(row)
+    return rows
+
+
+@torch.no_grad()
+def _sentence_ablation(model, greedy, ref, eot, docs=96, batch=8):
+    """Giris belgelerinde, tek alt blok ciktisi ortalamayla (A: norm oncesi attention ciktisi, F: FactUnits ciktisi):
+    tekrar cumlesinin ilk token'i (karar e_(k-1)'de) ve kalan token'lari, ayni belgede giristen onceki tekrar olmayan
+    cumlelerin ilk / kalan token'lariyla; Δ log p belge ortalamasi, fark belge duzeyinde eslesmis."""
+    P = model.tokens.points()
+    items = []
+    for s, lay in zip(greedy["seqs"], greedy["lays"]):
+        k = lay["k"]
+        if k is None or k < 1:
+            continue
+        ctl = [i for i in lay["region"] if i < k and i >= 1 and not lay["rep"][i]]
+        if not ctl:
+            continue
+        st, en = lay["starts"], lay["ends"]
+        g = dict(rep_first=[st[k] - 1], rep_rest=list(range(st[k], en[k])),
+                 ctl_first=[st[i] - 1 for i in ctl], ctl_rest=[t for i in ctl for t in range(st[i], en[i])])
+        items.append((s, g))
+        if len(items) >= docs:
+            break
+    cases = [("A%d" % (t + 1), t, dict(A_const=ref["out_A"][t])) for t in range(model.turns)]
+    cases += [("F%d" % (t + 1), t, dict(facts="mean")) for t in range(model.turns) if I._turn_facts(model, t) is not None]
+    G = ("rep_first", "rep_rest", "ctl_first", "ctl_rest")
+    clean = {g: [] for g in G}
+    delta = {c[0]: {g: [] for g in G} for c in cases}
+    for c0 in range(0, len(items), batch):
+        part = items[c0:c0 + batch]
+        x = torch.full((len(part), max(len(s) for s, _ in part)), eot, dtype=torch.long, device=P.device)
+        for r, (s, _) in enumerate(part):
+            x[r, :len(s)] = torch.tensor(s, device=P.device)
+        rows = torch.tensor([r for r, (_, g) in enumerate(part) for gg in G for _ in g[gg]], device=P.device)
+        tpos = torch.tensor([t for _, g in part for gg in G for t in g[gg]], device=P.device)
+        tags = [(r, gg) for r, (_, g) in enumerate(part) for gg in G for _ in g[gg]]
+        lp = lambda h: torch.log_softmax(I._work(I._scores(model, h[rows, tpos], P)), -1).gather(
+            -1, x[rows, tpos + 1][:, None])[:, 0].cpu().numpy()
+
+        def per_doc(v):
+            acc = {}
+            for (r, gg), a in zip(tags, v):
+                acc.setdefault((r, gg), []).append(a)
+            return {key: float(np.mean(a)) for key, a in acc.items()}
+        hs = _forward(model, x)
+        base = lp(hs[-1])
+        b = per_doc(base)
+        for (r, gg), a in b.items():
+            clean[gg].append(a)
+        for name, t, m in cases:
+            h = hs[t]
+            for u in range(t, model.turns):
+                h = _turn_mod(model, u, h, m if u == t else None, ref)
+            dd = per_doc(lp(h) - base)
+            for r in range(len(part)):
+                delta[name]["rep_first"].append(dd[(r, "rep_first")])
+                delta[name]["ctl_first"].append(dd[(r, "ctl_first")])
+                delta[name]["rep_rest"].append(dd.get((r, "rep_rest"), float("nan")))
+                delta[name]["ctl_rest"].append(dd.get((r, "ctl_rest"), float("nan")))
+    rows_out = []
+    for name, _, _ in cases:
+        d = {g: np.array(v) for g, v in delta[name].items()}
+        ok = ~np.isnan(d["rep_rest"]) & ~np.isnan(d["ctl_rest"])
+        rows_out.append(dict(case=name, **{g: _ms(d[g][~np.isnan(d[g])]) for g in G},
+                             diff_first=_ms(d["rep_first"] - d["ctl_first"]), diff_rest=_ms(d["rep_rest"][ok] - d["ctl_rest"][ok])))
+    return dict(docs=len(items), clean={g: _ms(v) for g, v in clean.items()}, rows=rows_out, note=I._DEPENDENCE_NOTE)
+
+
+def sentence_states(model, stories, eot, vocab, decode, reference=None, region=256, max_prompt=1024, gen_batch=32,
+                    ablate_docs=96, batch=8, log=print):
+    """O17: acgozlu devamda ve gercek devamda (ayni istemler, _selfgen_docs) cumle sonu durumlari.  (1) donus: tekrara
+    giristen once durum ilk gecisin oncesine donuyor mu, giris yaklasirken benzerlik artiyor mu; (2) 'soyledim' bilgisi
+    dogrusal sondayla; (3) tekrar cumlesinin alt bloklara bagimliligi (ortalamayla degistirme)."""
+    import analyze_errors as AE
+    t0 = time.time()
+    is_end = AE._sentence_end_table(vocab)
+    names = _names(model)
+    keep = [0] + [names.index("F%d" % (t + 1)) for t in range(model.turns)]
+    docs = _selfgen_docs(stories, eot, region, max_prompt)
+    gens, eot_first = [], []
+    for c0 in range(0, len(docs), gen_batch):
+        g, ef, _ = AE.generate_batch(model, [[eot] + p for _, p, _ in docs[c0:c0 + gen_batch]], region, eot)
+        gens += g
+        eot_first += ef
+    log("O17: %d belge, acgozlu %d token (%.0f sn)" % (len(docs), region, time.time() - t0))
+    conds = {}
+    for cond, conts in (("real", [r for _, _, r in docs]), ("greedy", gens)):
+        seqs = [[eot] + p + list(c) for (_, p, _), c in zip(docs, conts)]
+        P0s = [1 + len(p) for _, p, _ in docs]
+        lays = [_sentence_layout(s, P0, is_end, vocab) for s, P0 in zip(seqs, P0s)]
+        cos, feats = _sentence_end_states(model, seqs, lays, keep, eot, batch)
+        conds[cond] = dict(seqs=seqs, P0s=P0s, lays=lays, cos=cos, feats=feats)
+        log("O17 %s: durumlar (%.0f sn)" % (cond, time.time() - t0))
+    entry = {}
+    for cond, c in conds.items():
+        ks = [lay for lay in c["lays"] if lay["k"] is not None]
+        off = [max(lay["starts"][lay["k"]], P0) - P0 for lay, P0 in zip(c["lays"], c["P0s"]) if lay["k"] is not None]
+        entry[cond] = dict(rate=_ms([lay["k"] is not None for lay in c["lays"]]), median_offset=float(np.median(off)) if off else None,
+                           region_sentences=_ms([len(lay["region"]) for lay in c["lays"]]),
+                           rep_share=_ms([np.mean([lay["rep"][i] for i in lay["region"]]) for lay in c["lays"] if lay["region"]]),
+                           n_entry=len(ks))
+    gl = conds["greedy"]["lays"]
+    after_eot = [ef is not None and ef <= max(lay["starts"][lay["k"]], P0) - P0
+                 for lay, P0, ef in zip(gl, conds["greedy"]["P0s"], eot_first) if lay["k"] is not None]
+    entry["greedy"]["eot_before_entry"] = _ms(after_eot)
+    entry["greedy"]["eot_any"] = _ms([ef is not None for ef in eot_first])
+    ret = _sentence_return(conds["greedy"]["seqs"], gl, conds["greedy"]["cos"])
+    ret["recency_base"] = _recency_base(conds["real"])
+    trend = _sentence_trend(conds["real"], conds["greedy"], keep)
+    log("O17: donus ve egilim (%.0f sn)" % (time.time() - t0))
+    probes_ = _sentence_probes(conds["greedy"], [names[j] for j in keep])
+    log("O17: sondalar (%.0f sn)" % (time.time() - t0))
+    abl = None
+    if reference and ablate_docs:
+        abl = _sentence_ablation(model, conds["greedy"], _reference(model, reference, batch), eot, ablate_docs, batch)
+        log("O17: mudahale %d belge (%.0f sn)" % (abl["docs"], time.time() - t0))
+    ex = []
+    for s, lay, C in zip(conds["greedy"]["seqs"], gl, conds["greedy"]["cos"]):
+        k, j = lay["k"], lay["j"]
+        if k is None or j < 1 or k < 3 or lay["rep"][k - 1]:
+            continue
+        txt = lambda i: decode(s[lay["starts"][i]:lay["ends"][i] + 1]).replace("\n", "⏎")[-110:]
+        oth = [i for i in range(k - 1) if i != j - 1]
+        ex.append(dict(prev_first=txt(j - 1), first=txt(j), prev_entry=txt(k - 1), entry=txt(k),
+                       cos_last=float(C[-1, k - 1, j - 1]), pct_last=float(_pct(C[-1:, k - 1, j - 1], C[-1:, k - 1, oth])[0]),
+                       cos_h0=float(C[0, k - 1, j - 1])))
+        if len(ex) >= 6:
+            break
+    return dict(docs=len(docs), region=region, max_prompt=max_prompt, states=names, keep=[names[j] for j in keep],
+                entry=entry, ret=ret, trend=trend, probes=probes_, ablation=abl, examples=ex)
+
+
+def _text_sentences(res):
+    f3 = lambda m: "%.3f ± %.3f" % m[:2]
+    E = res["entry"]
+    L = ["## O17: cumle sonu durumlari (%d belge; bolge %d token, istem <= %d; cumle = exam_fineweb._sentences_of, tekrar = "
+         "anahtari daha once tam gecmis cumle; giris k = bolgede biten ilk tekrar cumlesi, j = onun ilk gecisi)" % (
+             res["docs"], res["region"], res["max_prompt"])]
+    for cond in ("real", "greedy"):
+        e = E[cond]
+        L.append("%-6s: giris orani %s (n %d), giren %d, medyan giris konumu %s; bolgede cumle %s; bolgede tekrar cumle payi %s" % (
+            cond, f3(e["rate"]), e["rate"][2], e["n_entry"], e["median_offset"], f3(e["region_sentences"]), f3(e["rep_share"])))
+    L.append("acgozlu: eot en olasi oldu (herhangi) %s; eot giristen once / giriste en olasi %s (giren belgelerde)" % (
+        f3(E["greedy"]["eot_any"]), f3(E["greedy"]["eot_before_entry"])))
+    r = res["ret"]
+    L += ["", "### 1a. Donus: e_(k-1) ile e_(j-1) (tekrar edilen cumleyi ilk ureten durum); n %d belge, e_(k-1) tekrar degil, "
+          "k >= 3; en yakin olma sansi %s; e_(k-1)'de onceden gecmis en uzun sonek ell medyani %s" % (
+              r["n"], f3(r["chance_top"]) if r["n"] else "-", r["ell_median"]),
+          "pct = e_(k-1)'den onceki sonlar arasinda e_(j-1)'in kosinus yuzdeligi (1 en yakin, sans 0,5, esitlik yarim); en yakin = e_(j-1) "
+          "hepsinden yakin; sonra = ayni yuzdelik e_k ile e_j icin",
+          "yakinlik tabani = gercek devamda e_(i-1)'in e_0..e_(i-2) arasinda yuzdeligi (j = k-1 satiriyla kiyaslanir)",
+          "durum | cos(e_k-1, e_j-1) | ote sonlar ort | pct             | en yakin        | sonra pct       | pct ell<=2 (n) "
+          "     | pct ell>=3 (n)      | pct j=k-1 (n)       | yakinlik tabani | pct j<k-1 (n)"]
+    if r["n"]:
+        b = r["by"]
+        part = lambda p, si: ("%s (%d)" % (f3(b[p]["pct"][si]), b[p]["pct"][si][2])) if p in b else "-"
+        rb = r.get("recency_base")
+        L += ["%-5s | %s     | %.3f          | %s | %s | %s | %s | %s | %s | %s | %s" % (
+            nm, f3(b["all"]["cos"][si]), b["all"]["other"][si][0], f3(b["all"]["pct"][si]), f3(b["all"]["top"][si]),
+            f3(b["all"]["pct_after"][si]), part("ell<=2", si), part("ell>=3", si), part("j=k-1", si),
+            f3(rb[si]) if rb else "-", part("j<k-1", si)) for si, nm in enumerate(res["states"])]
+        L.append("en yakin olma (j<k-1): %s; sans %s" % (
+            " ".join("%s %.2f" % (nm, b["j<k-1"]["top"][si][0]) for si, nm in enumerate(res["states"])) if "j<k-1" in b else "-",
+            f3(b["j<k-1"]["chance_top"]) if "j<k-1" in b else "-"))
+    T = res["trend"]
+    gs = [g for g in SENT_RELS if g in T] + (["girissiz"] if "girissiz" in T else [])
+    for m, words in (("nn_diff", "en yakin onceki son kosinusu"), ("prev_diff", "bir onceki son kosinusu")):
+        L += ["", "### 1b. Giris cevresi (rel = i - k; -1 = e_(k-1)): %s, gercek devamdaki ayni %d'lik konum kovasinin "
+              "ortalamasindan fark (± SE); n: %s" % (words, SENT_BUCKET, " ".join("%s:%d" % (g, T[g][m][0][2]) for g in gs)),
+              "durum | " + " | ".join("%-15s" % ("rel %+d" % g if g != "girissiz" else g) for g in gs) + " | gercek ham ort"]
+        raw = "nn" if m == "nn_diff" else "prev"
+        L += ["%-5s | %s | %.3f" % (nm, " | ".join("%+.3f ± %.3f" % T[g][m][si][:2] for g in gs), T["gercek"][raw][si][0])
+              for si, nm in enumerate(res["keep"])]
+    L += ["", "### 2. 'Soyledim' sondasi (kendi uretimi; belge duzeyinde %70 / %30; konum kovasinda esit, sans 0,5)",
+          "hedef      | poz / neg     | egitim / test | yalniz konum | " + " ".join("%-6s" % nm for nm in res["keep"])]
+    for p in res["probes"]:
+        L.append("%-10s | %5d / %5d | %5d / %5d   | %s        | %s" % (
+            p["target"], p["n_pos"], p["n_neg"], p["n_train"], p["n_test"],
+            "%.3f" % p["acc_position"] if "acc_position" in p else "  -  ",
+            " ".join("%.3f " % p["acc"][nm] if nm in p["acc"] else "  -   " for nm in res["keep"])))
+        if p["acc"]:
+            L.append("%-10s   egitim acc: %s; test SE ~ %.3f" % ("", " ".join("%.2f" % p["train_acc"][nm] for nm in res["keep"]),
+                                                             0.5 / math.sqrt(max(p["n_test"], 1))))
+    a = res["ablation"]
+    if a:
+        L += ["", "### 3. Bagimlilik (%d giris belgesi; tek alt blok ciktisi ortalamayla; Δ log p, belge ortalamasi; %s)" % (
+            a["docs"], a["note"]),
+              "temiz log p: tekrar ilk %s, tekrar kalan %s, kontrol ilk %s, kontrol kalan %s" % tuple(
+                  f3(a["clean"][g]) for g in ("rep_first", "rep_rest", "ctl_first", "ctl_rest")),
+              "alt blok | tekrar ilk      | kontrol ilk     | fark ilk        | tekrar kalan    | kontrol kalan   | fark kalan"]
+        L += ["%-8s | %s | %s | %s | %s | %s | %s" % (
+            r["case"], *("%+.3f ± %.3f" % r[g][:2] for g in ("rep_first", "ctl_first", "diff_first", "rep_rest", "ctl_rest",
+                                                            "diff_rest"))) for r in a["rows"]]
+    L += ["", "### ornekler (acgozlu; son durumda cos ve yuzdelik, h0'da cos)"]
+    for e in res["examples"]:
+        L += ["- e_(j-1): %r" % e["prev_first"], "  j     : %r" % e["first"], "  e_(k-1): %r" % e["prev_entry"],
+              "  k     : %r   | son durum cos %.3f pct %.2f, h0 cos %.3f" % (e["entry"], e["cos_last"], e["pct_last"], e["cos_h0"])]
+    return L
+
+
 # ---- CLI
 
 def _decoder(vocab):
@@ -1573,6 +1939,9 @@ def _main(argv=None):
     ap.add_argument("--focus", type=int, default=2, help="units / extras: odak tur (1'den)")
     ap.add_argument("--fit-steps", type=int, default=150, help="repair: optimal sabitin adim sayisi")
     ap.add_argument("--fit-lr", type=float, default=0.003, help="repair: optimal sabitin lr'si (x |ortalama|)")
+    ap.add_argument("--region", type=int, default=256, help="sentence_states: devam bolgesi (token)")
+    ap.add_argument("--prompt-max", type=int, default=1024, help="sentence_states: istem en cok (model t_max'ina sigsin)")
+    ap.add_argument("--ablate-docs", type=int, default=96, help="sentence_states: mudahale belgesi (0 = yok)")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):              # Windows konsolu (cp1254) Δ yazamiyor
@@ -1584,14 +1953,18 @@ def _main(argv=None):
     t0 = time.time()
     run_dir = args.run if os.path.isdir(args.run) else os.path.join(I._RUNS_ROOT, args.run)
     config = I._config(run_dir)
-    data = I._fineweb(config, args.data or I._FINEWEB_ROOT)
+    if config.get("dataset") == "fineweb-edu" or I._is_fineweb(args.data):
+        data = I._fineweb(config, args.data or I._FINEWEB_ROOT)
+    else:                                               # SimpleStories (yalniz sentence_states icin sinandi)
+        data = I._simplestories(config, args.data or I._SIMPLESTORIES_ROOT)
     decode = _decoder(data["vocab"])
     rows, test = data["stories"](args.stories, args.offset)
     fit_rows, fit = [], []
     if args.measure in ("probes", "units", "repair"):
         assert args.fit_offset >= args.offset + args.stories or args.fit_offset + args.fit_stories <= args.offset, "ortusme"
         fit_rows, fit = data["stories"](args.fit_stories, args.fit_offset)
-    ref = data["stories"](args.reference, args.offset + args.stories)[1] if args.measure in ("extras", "repair") else None
+    ref = (data["stories"](args.reference, args.offset + args.stories)[1]
+           if args.measure in ("extras", "repair", "sentence_states") else None)
     model = I._load_model(run_dir, args.weights, args.checkpoint).to(args.device)
     ck = "" if args.checkpoint is None else "t%06d" % args.checkpoint
     say("model %s %s yuklendi (%.0f sn); test %d belge, fit %d belge" % (args.weights, ck, time.time() - t0, len(test), len(fit)))
@@ -1627,9 +2000,13 @@ def _main(argv=None):
     elif args.measure == "answers":
         res = answer_geometry(model, *_answer_inputs(data["vocab"], data["eos"]), log=say)
         lines = _text_answers(res, decode)
-    else:
+    elif args.measure == "selfgen":
         res = selfgen_probe(model, test, data["eos"], log=say)
         lines = _text_selfgen(res)
+    else:
+        res = sentence_states(model, test, data["eos"], data["vocab"], decode, ref, args.region, args.prompt_max,
+                              ablate_docs=args.ablate_docs, batch=args.batch, log=say)
+        lines = _text_sentences(res)
     header = ["analyze_structure %s | kosu %s | agirlik %s %s | %s | sure %.0f sn" % (
         args.measure, config.get("name"), args.weights, ck or "(kosu sonu)", time.strftime("%Y-%m-%d %H:%M"), time.time() - t0),
         "test: %d belge (sinav permutasyonu %d..%d); fit: %d belge (%d..)" % (
@@ -1705,6 +2082,36 @@ def _selftest():
     sg = selfgen_probe(model, mk(60) + [[0] + rng.integers(1, V, 50).tolist() for _ in range(20)], 0, turns=(0, 1, 2),
                        region=8, gen_batch=16, log=lambda s: None)
     show(_text_selfgen(sg))
+
+    class _Vocab:                                                  # 5 = cumle sonu
+        __len__ = lambda self: V
+        __call__ = lambda self, ids: "".join("." if i == 5 else " w%d" % i for i in ids)
+    import analyze_errors as AE
+    voc = _Vocab()
+    is_end = AE._sentence_end_table(voc)
+    sa, sb, sc = [1, 2, 3, 4, 6, 5], [7, 8, 9, 10, 11, 5], [12, 13, 14, 15, 16, 5]
+    lay = _sentence_layout([0] + sb + sa + sc + sa, 13, is_end, voc)
+    assert lay["k"] == 3 and lay["j"] == 1 and lay["ends"] == [6, 12, 18, 24] and lay["region"] == [2, 3], lay
+
+    def fake_generate(model_, prompts, n, eot, *a, **kw):           # iki yeni cumle, sonra istemdeki bir cumlenin tekrari
+        gens = []
+        for p in prompts:
+            new = lambda: rng.integers(6, V, 5).tolist() + [5]
+            s1, s2 = new(), new()
+            old = [p[a_:b_ + 1] for i, (a_, b_, key) in enumerate(AE._sentences_of(p, is_end, voc)) if i >= 1 and key]
+            gens.append(((s1 + s2 + (old[-1] if old else s1)) * 3)[:n])
+        return gens, [None] * len(prompts), None
+    body = lambda n: [5 if rng.random() < 0.2 else int(rng.integers(6, V)) for _ in range(n)]
+    real_generate, AE.generate_batch = AE.generate_batch, fake_generate
+    try:
+        ss = sentence_states(model, [[0] + body(int(rng.integers(48, 60))) + [0] for _ in range(80)], 0, voc, decode,
+                             reference=fit[:4], region=24, max_prompt=30, gen_batch=16, ablate_docs=8, batch=4,
+                             log=lambda s: None)
+    finally:
+        AE.generate_batch = real_generate
+    show(_text_sentences(ss), 60)
+    assert ss["entry"]["greedy"]["n_entry"] > 40 and ss["ret"]["n"] > 20 and ss["ablation"]["docs"] == 8
+    assert all(p["acc"] for p in ss["probes"][:2]), [p["n_train"] for p in ss["probes"]]
     print("selftest TAMAM")
 
 
