@@ -1443,17 +1443,97 @@ def generate_measure(args, config, device):
     write(args.run, "generate", res)
 
 
+# ---- egitim sirasinda kendi devami uretimi (mathematician O15): t_dec(B), ek yuk
+
+def decode_measure(args, config, device):
+    """Onbellekli acgozlu uretim, istem P token, devam G token, B = 32 / 64 / 128: bugunku ortak yol (train_y.generate_cached,
+    eager) fp32 ve autocast bf16; KIYAS: sabit onbellek + CUDA graph (GraphDecoder, fp32).  Kosu basina egitim adimi da
+    olculur (train_seq'in kendisi, shard 13 paketi) -> "her k adimda bir uretim" ek yuku."""
+    import data_fineweb as DF
+    gpu = torch.cuda.get_device_name(0)
+    say("analyze_speed decode | %s | torch %s | %s" % (time.strftime("%Y-%m-%d %H:%M"), torch.__version__, gpu))
+    P, G = args.prefix, args.tokens
+    v = DF.load_valid(args.data, log=lambda s: None)
+    starts = list(v["valid_starts"]) + [len(v["valid"])]
+    docs = [torch.from_numpy(v["valid"][a:b].astype("int64")) for a, b in zip(starts, starts[1:]) if b - a > P]
+    res = dict(gpu=gpu, torch=torch.__version__, prefix=P, generated=G, runs={})
+
+    def timed(fn):
+        sync()
+        t = time.perf_counter()
+        out = fn()
+        sync()
+        return out, 1e3 * (time.perf_counter() - t)
+    for run in [args.run] + [r for r in (args.extra or "").split(",") if r]:
+        cfg = I._config(run)
+        name = cfg.get("name", os.path.basename(run))
+        r = res["runs"][name] = dict(rows=[])
+        with guarded("adim " + name, r):                # egitim adimi: train_seq'in kendisi, bugunku ortak kod
+            batch = packed_batches(args.data, cfg["batch_size"] * cfg["micro_batches"], 1, cfg["seq_len"])[0][0]
+            info = real_step_ms(cfg, batch, device, K=2)
+            r.update(step_ms=info["step_ms"], step_tokens=cfg["step_tokens"])
+            say("%s: egitim adimi %.0f ms (%d token; shard 13 paketi, sabit batch)" % (name, info["step_ms"], cfg["step_tokens"]))
+            torch._dynamo.reset()
+            torch.cuda.empty_cache()
+        model = I._load_model(run, "last").to(device)
+        for B in (32, 64, 128):
+            prompts = [d[:P].tolist() for d in docs[:B]]
+            ids = torch.tensor(prompts, device=device)
+            row = dict(B=B)
+            for label, ac in (("eager fp32 (generate_cached)", False), ("eager bf16 autocast", True)):
+                ctx = (lambda: torch.autocast("cuda", dtype=torch.bfloat16)) if ac else contextlib.nullcontext
+                with ctx(), torch.no_grad():               # D4: bu baglamda logits tipi
+                    dtype = str(model.logits(ids[:1, :8]).dtype)
+                    TR.generate_cached(model, prompts, 4)
+                    toks, pre = timed(lambda: TR.generate_cached(model, prompts, 1))
+                    toks, tot = timed(lambda: TR.generate_cached(model, prompts, G))
+                row[label] = dict(logits_dtype=dtype, prefill_ms=pre, t_dec_ms=(tot - pre) / (G - 1), total_ms=tot)
+                if not ac:
+                    ref_tokens = torch.tensor(toks)
+            try:
+                dec, build = timed(lambda: GraphDecoder(model, ids, G))
+                (out, _), ms = timed(lambda: dec.run(G))
+                row["KIYAS graph fp32"] = dict(logits_dtype=str(dec.logits.dtype), build_ms=build, t_dec_ms=ms / (G - 1),
+                                               total_ms=build + ms,
+                                               same_tokens=float((out.cpu() == ref_tokens).float().mean()))
+                del dec
+            except Exception as e:
+                row["KIYAS graph fp32"] = dict(error=repr(e)[:200])
+            torch.cuda.empty_cache()
+            r["rows"].append(row)
+            for label in ("eager fp32 (generate_cached)", "eager bf16 autocast", "KIYAS graph fp32"):
+                x = row[label]
+                if "error" in x:
+                    say("   B %3d %-30s HATA %s" % (B, label, x["error"]))
+                    continue
+                train_ms = B * (P + G) * r["step_ms"] / r["step_tokens"] if "step_ms" in r else float("nan")
+                cost = x["total_ms"] + train_ms
+                x.update(train_on_generated_ms=train_ms, cost_ms=cost,
+                         overhead_every4=cost / (4 * r["step_ms"]) if "step_ms" in r else None,
+                         overhead_every8=cost / (8 * r["step_ms"]) if "step_ms" in r else None)
+                say("   B %3d %-30s logits %s | t_dec %.2f ms/adim | uretim %.0f ms (istem %.0f) + uretilende egitim %.0f ms = "
+                    "%.0f ms | ek yuk her 4 adimda %.1f%%, her 8 adimda %.1f%%%s" % (
+                        B, label, x["logits_dtype"], x["t_dec_ms"], x["total_ms"], x.get("prefill_ms", x.get("build_ms", 0)),
+                        train_ms, cost, 100 * (x["overhead_every4"] or 0), 100 * (x["overhead_every8"] or 0),
+                        " | token'lar eager fp32 ile ayni %.3f" % x["same_tokens"] if "same_tokens" in x else ""))
+        del model
+        torch.cuda.empty_cache()
+    write(args.run, "decode", res)
+
+
 # ---- CLI
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("run", help="kosu klasoru (config.json)")
-    ap.add_argument("measure", nargs="?", choices=("train", "sizes", "generate", "tune", "flexdtype", "steptrace"))
+    ap.add_argument("measure", nargs="?", choices=("train", "sizes", "generate", "tune", "flexdtype", "steptrace", "decode"))
     ap.add_argument("--data", help="FineWeb koku (gpt2/shard_013 ...); yoksa rastgele token")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--steps", type=int, default=3, help="train: parca parca olculen adim")
     ap.add_argument("--real", type=int, default=2, help="train_seq'in kendisi: K isinma + K olcum adimi (0: yok)")
     ap.add_argument("--only", help="sizes: aday adlari, virgulle (d1280_8x2,...)")
+    ap.add_argument("--prefix", type=int, default=256, help="decode: istem boyu P")
+    ap.add_argument("--extra", help="decode: ek kosu klasorleri, virgulle")
     ap.add_argument("--at", default="1000,9000,17000", help="steptrace: pencerelerin ilk adimi (kosunun veri sirasi)")
     ap.add_argument("--window", type=int, default=30, help="steptrace: pencere basina adim")
     ap.add_argument("--sample", type=int, default=300, help="steptrace: epok dagilimi icin rastgele adim (yalniz CPU)")
@@ -1476,7 +1556,8 @@ def main():
         return
     config = I._config(args.run)
     {"train": train_measure, "sizes": sizes_measure, "generate": generate_measure, "tune": tune_measure,
-     "flexdtype": flexdtype_measure, "steptrace": steptrace_measure}[args.measure](
+     "flexdtype": flexdtype_measure, "steptrace": steptrace_measure,
+     "decode": decode_measure}[args.measure](
         args, config, args.device)
 
 
