@@ -201,12 +201,18 @@ def alpha_summary(model):
 
 
 def story_prompts(data, rows):
-    """Valid hikayelerinin ilk yarisi istem, ikinci yarisi gercek devam: ([<eos> + ilk yari], [ikinci yari])."""
+    """Valid hikayelerinin ilk yarisi istem, ikinci yarisi gercek devam: ([<eos> + ilk yari], [ikinci yari]).  Yari metin
+    token'larinda sayilir: etiketli veride (sentence_ids) istem ayni metinde biter, etiketler araya girer."""
     a, eos = data["valid"], data["vocab"].index(DS.EOS_TOKEN)
+    base = DS._sentence_id_base(data["vocab"])
     prompts, reals = [], []
     for s, L in zip(data["valid_start"][rows].tolist(), data["valid_length"][rows].tolist()):
-        prompts.append([eos] + a[s:s + L // 2].tolist())
-        reals.append(a[s + L // 2:s + L].tolist())
+        cut = L // 2
+        if base is not None:                           # ikinci yarinin ilk metin token'i
+            text = np.flatnonzero(a[s:s + L] < base)
+            cut = int(text[len(text) // 2]) if len(text) else 0
+        prompts.append([eos] + a[s:s + cut].tolist())
+        reals.append(a[s + cut:s + L].tolist())
     return prompts, reals
 
 
@@ -221,7 +227,7 @@ def texts(model, data, prompts, n, reals=None):
     out = []
     for i, (p, g) in enumerate(zip(prompts, generate(model, prompts, n))):
         ended = eos in g
-        g = g[:g.index(eos)] if ended else g
+        g = DS.strip_sentence_ids(g[:g.index(eos)] if ended else g, vocab)   # tekrar olculeri etiketsiz metinde
         in_quote = sum(vocab[t] == '"' for t in p[1:]) % 2 == 1          # istem tirnagi acik biraktiysa (WordPiece)
         row = dict(prompt=DS.decode(p[1:], vocab), model=DS.decode(g, vocab, in_quote=in_quote), ended=ended, ids=g)
         if reals is not None:
@@ -432,6 +438,10 @@ def count_text_errors(model, data, n, count=STORY_CONTINUATIONS, seed=0, real=Fa
         gens, ended = _continue(model, prompts + prompts, n, [False] * len(prompts) + [True] * len(prompts), seed,
                                 data["vocab"].index(DS.EOS_TOKEN), len(data["vocab"]))
         k = len(prompts)
+        gens = [DS.strip_sentence_ids(g, data["vocab"]) for g in gens]      # olculer etiketsiz metinde
+    reals = [DS.strip_sentence_ids(r, data["vocab"]) for r in reals]
+    prompts = [DS.strip_sentence_ids(p, data["vocab"]) for p in prompts]
+    if model is not None:
         out["greedy"] = _count(prompts, gens[:k], ended[:k], tab, words, xax_ref, stock)
         out["sampled"] = _count(prompts, gens[k:], ended[k:], tab, words, xax_ref, stock)
     if real:

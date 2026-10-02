@@ -108,15 +108,22 @@ def _tokenizer(vocab):
     """vocab -> (Tokenizer, eos id); ayni icerikli kopya da bulunur."""
     hit = _LOADED.get(id(vocab))
     if hit is None or hit[0] is not vocab:
-        hit = next((h for h in _LOADED.values() if h[0] == vocab), None)
+        base = _sentence_id_base(vocab)                 # etiketli sozluk: taban sozlugun tokenizer'i
+        plain = vocab if base is None else vocab[:base]
+        hit = next((h for h in _LOADED.values() if h[0] == plain), None)
         assert hit is not None, "bu sozlugun tokenizer'i yuklu degil: once build(root, tag)"
         _LOADED[id(vocab)] = (vocab,) + hit[1:]
     return hit[1], hit[2]
 
 
 def encode(text, vocab):
-    """Metin -> id listesi (ozel token eklemez).  ss4096 kucuk harfe cevirir, bosluk ve satir sonunu atar; gpt2 kayipsiz."""
-    return _tokenizer(vocab)[0].encode(text, add_special_tokens=False).ids
+    """Metin -> id listesi (ozel token eklemez).  ss4096 kucuk harfe cevirir, bosluk ve satir sonunu atar; gpt2 kayipsiz.
+    Etiketli sozlukte (sentence_ids) metin hikaye basi sayilir: cumle numarasi etiketleri eklenir."""
+    ids = _tokenizer(vocab)[0].encode(text, add_special_tokens=False).ids
+    base = _sentence_id_base(vocab)
+    if base is not None:
+        ids = _insert_sentence_ids(np.array(ids, dtype=np.int64), vocab, base).tolist()
+    return ids
 
 
 def decode(ids, vocab, in_quote=False):
@@ -126,7 +133,7 @@ def decode(ids, vocab, in_quote=False):
     basliyor (istemin devami)."""
     from tokenizers.models import WordPiece
     tok, eos = _tokenizer(vocab)
-    ids = [int(x) for x in ids]
+    ids = [int(x) for x in strip_sentence_ids(ids, vocab)]
     if not isinstance(tok.model, WordPiece):
         pieces = [[]]
         for x in ids:
@@ -207,6 +214,117 @@ def _windows(starts, lengths, seq_len):
     off = j * (seq_len - 1)
     n = np.minimum(seq_len, total[story] - off)
     return starts[story] + off - (j > 0), n - 2, j == 0
+
+
+# --- cumle numarasi etiketi (C kolu; kullanici, 3 Ekim: "etiket koymak belki s1 s2 s3 s4 s5 bile konur", "Ss olur bence
+# ilk c ye bakalım"; adlar onayli).  Etiket metnin token'larinin ARASINA girer, metin token'lari degismez (bulgular 33)
+
+SENTENCE_IDS = 64        # <s1> .. <s64>, sonrasi <s+> (doygunluk: basa sarma kopya anahtari olurdu, bulgular 33 §2)
+PARAGRAPH_IDS = 16       # <p1> .. <p16>, sonrasi <p+>; cumle numarasi paragrafta sifirlanmaz (kullanici, 3 Ekim: "evet
+                         # paragraf devam etsin. p1  p2 gibi")
+SENTENCE_ID_TOKENS = (tuple("<s%d>" % i for i in range(1, SENTENCE_IDS + 1)) + ("<s+>",)
+                      + tuple("<p%d>" % i for i in range(1, PARAGRAPH_IDS + 1)) + ("<p+>",))
+_ENDS = {}               # id(taban sozluk) -> (sozluk, cumle sonu, nokta, rakamla baslar, satir sonu sayisi)
+
+
+def _sentence_id_base(vocab):
+    """Etiketli sozlukte ilk etiketin id'si (taban sozluk boyu), degilse None."""
+    n = len(SENTENCE_ID_TOKENS)
+    return len(vocab) - n if len(vocab) > n and tuple(vocab[-n:]) == SENTENCE_ID_TOKENS else None
+
+
+def strip_sentence_ids(ids, vocab):
+    """Etiketleri atar (etiketsiz sozlukte aynen doner): metin olculeri etiketsiz metinde."""
+    base = _sentence_id_base(vocab)
+    return list(ids) if base is None else [x for x in ids if int(x) < base]
+
+
+def _sentence_ends(vocab, base):
+    """Taban token'lari icin (cumle sonu, '.', rakamla baslar, satir sonu sayisi): metni, sondaki tirnak / parantez
+    atilinca . ! ? ile biten ya da satir sonu iceren token cumle sonudur."""
+    hit = _ENDS.get(id(vocab))
+    if hit is None or hit[0] is not vocab:
+        tok = _tokenizer(vocab)[0]
+        text = [tok.decode([i]) for i in range(base)]
+        end = np.array([("\n" in s) or s.rstrip().rstrip("\"')]}”’").endswith((".", "!", "?")) for s in text])
+        hit = _ENDS[id(vocab)] = (vocab, end, np.array([s.strip() == "." for s in text]),
+                                  np.array([s[:1].isdigit() for s in text]), np.array([s.count("\n") for s in text]))
+    return hit[1:]
+
+
+def _insert_sentence_ids(a, vocab, base):
+    """Akis ya da tek hikaye (a, eos sinirli; basi hikaye basi) -> etiketli kopya.  Cumle etiketi hikaye basinda (akisin
+    basi ve her eos'tan sonra, akisin sonu haric) ve cumle sonundan sonra: ardindan cumle sonu ya da eos gelmiyorsa
+    (ardisik cumle sonlarinin sonuncusundan sonra; hikayenin son cumlesinden sonra etiket yok, karar eos ile).  '.'
+    ardindan rakamla baslayan token: ondalik, cumle sonu degil.  Paragraf etiketi hikaye basinda ve ardisik cumle
+    sonlarinda en az iki satir sonu varsa, cumle etiketinin onunde: <p_k><s_n>.  Numaralar hikaye icinde 1'den (cumle
+    numarasi paragrafta sifirlanmaz); SENTENCE_IDS / PARAGRAPH_IDS'ten sonrasi <s+> / <p+>."""
+    a = np.asarray(a)
+    if not len(a):
+        return np.array([base + SENTENCE_IDS + 1, base], dtype=a.dtype)
+    eos = _tokenizer(vocab)[1]
+    end, dot, digit, lines = _sentence_ends(vocab, base)
+    nxt = np.append(a[1:], eos)
+    end_a = end[a] & ~(dot[a] & digit[nxt])
+    after = (end_a & ~end[nxt] & (nxt != eos)) | (a == eos)
+    after[-1] = False
+    pos = np.concatenate([[0], np.flatnonzero(after) + 1])
+    story = np.concatenate([[0], np.cumsum(a == eos)])[pos]          # etiketin hikayesi: oncesindeki eos sayisi
+    head = np.r_[True, story[1:] != story[:-1]]
+    k = np.arange(len(pos))
+    rank = k - np.maximum.accumulate(np.where(head, k, 0))
+    i = np.arange(len(a))                                            # ardisik cumle sonlarindaki satir sonu sayisi
+    run = np.maximum.accumulate(np.where(end_a & ~np.r_[False, end_a[:-1]], i, 0))
+    total = np.concatenate([[0], np.cumsum(lines[a])])
+    prev = np.maximum(pos - 1, 0)
+    para = head | (total[pos] - total[run[prev]] >= 2)
+    count = np.cumsum(para)
+    prank = count - np.maximum.accumulate(np.where(head, count, 0))
+    values = np.concatenate([base + SENTENCE_IDS + 1 + np.minimum(prank[para], PARAGRAPH_IDS),
+                             base + np.minimum(rank, SENTENCE_IDS)]).astype(a.dtype)
+    return np.insert(a, np.concatenate([pos[para], pos]), values)    # ayni yerde once paragraf (kararli sira)
+
+
+def sentence_ids(data, log=print):
+    """build'in verisi -> cumle numarasi etiketli kopya (tag <tag>_sentence_ids): sozluk sonuna SENTENCE_ID_TOKENS,
+    akislara etiketler (_insert_sentence_ids), pencereler, valid ve sinav satirlari yeniden.  Hikaye ve bayt sayilari
+    ayni (etiket bayt eklemez: bits_per_byte etiket nat'larini da metin baytina boler).  Sinav hikayeleri etiketle
+    seq_len'e sigmali.  Drive'a yazilmaz: her yuklemede bellekte uretilir, kural ize girer."""
+    assert _sentence_id_base(data["vocab"]) is None, "veri zaten etiketli"
+    base, seq_len = len(data["vocab"]), data["seq_len"]
+    vocab = list(data["vocab"]) + list(SENTENCE_ID_TOKENS)
+    eos = _tokenizer(vocab)[1]
+    out = dict(data, vocab=vocab, tag=data["tag"] + "_sentence_ids", counts=dict(data["counts"]))
+    for split in ("train", "valid"):
+        out[split] = _insert_sentence_ids(data[split], vocab, base)
+    starts, lengths = _stories(out["train"], eos)
+    keep = lengths > 0
+    out["train_start"], out["train_length"], out["train_head"] = _windows(starts[keep], lengths[keep], seq_len)
+    starts, lengths = _stories(out["valid"], eos)
+    old_lengths = _stories(data["valid"], eos)[1]
+    old_rows = np.flatnonzero((old_lengths > 0) & (old_lengths + 2 <= seq_len))     # build'in valid satirlari
+    rows = np.flatnonzero((lengths > 0) & (lengths + 2 <= seq_len))                  # etiketle sigan hikayeler
+    exam = old_rows[data["exam"]]
+    assert np.isin(exam, rows).all(), "%d sinav hikayesi etiketle seq_len %d'ye sigmiyor" % (
+        int((~np.isin(exam, rows)).sum()), seq_len)
+    out["valid_start"], out["valid_length"] = starts[rows], lengths[rows]
+    out["valid_bytes"] = data["valid_bytes"][np.searchsorted(old_rows, rows)]
+    out["exam"] = np.searchsorted(rows, exam)
+    leak = old_rows[data["valid_in_train"]]
+    out["valid_in_train"] = np.searchsorted(rows, leak[np.isin(leak, rows)])
+    c = out["counts"]
+    c.update(train_tokens=len(out["train"]), valid_tokens=len(out["valid"]), train_kept=len(out["train_start"]),
+             valid_kept=len(rows), train_split=int((_stories(out["train"], eos)[1] + 2 > seq_len).sum()),
+             train_targets=int((out["train_length"] + 1).sum()),
+             sentence_ids=int((out["train"] >= base).sum() + (out["valid"] >= base).sum()))
+    table = b"".join(np.ascontiguousarray(out["train_" + k]).tobytes() for k in ("start", "length", "head"))
+    parts = {k: v for k, v in data["fingerprints"].items() if k not in ("vocab", "train", "valid", "windows")}
+    out["fingerprint"], out["fingerprints"] = fingerprint(vocab, out["train"], out["valid"], **dict(
+        parts, windows=table, sentence_ids="v2_%d_%d" % (SENTENCE_IDS, PARAGRAPH_IDS)))
+    log("%s: etiket %d (train payi %%%.1f) | train %d pencere | valid %d hikaye | sinav %d | iz %s" % (
+        out["tag"], c["sentence_ids"], 100 * (out["train"] >= base).mean(), c["train_kept"], len(rows), len(out["exam"]),
+        out["fingerprint"]))
+    return out
 
 
 def build(root, tag, seq_len=SEQ_LEN, log=print):
@@ -418,8 +536,9 @@ def _token_table(vocab):
         pieces = [[t[2:]] if t.startswith("##") and len(t) > 2 else [t] for t in vocab]
         joins = np.array([t.startswith("##") and len(t) > 2 for t in vocab])
         ends = np.ones(V, dtype=bool)
-    else:
-        text = [tok.decode([i]) for i in range(V)]
+    else:                                               # cumle numarasi etiketi birimsiz: sinir (bosluk gibi)
+        base = _sentence_id_base(vocab) or V
+        text = [tok.decode([i]) if i < base else "" for i in range(V)]
         pieces = [_UNIT.findall(s.lower()) for s in text]
         joins = np.array([s[:1].isalpha() for s in text])
         ends = np.array([s[-1:].isalpha() for s in text])

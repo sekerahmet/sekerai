@@ -857,6 +857,64 @@ def t_colab(root):
     shutil.rmtree(tmp)
 
 
+def t_sentence_ids(root):
+    """sentence_ids (C kolu): etiket metin token'larinin arasina; silinince akis birebir; hikaye basi <s1>, cumle
+    sonundan sonra sirali numara, sinirdan sonra <s+>, ondalik nokta cumle sonu degil; encode etiketler, decode siler;
+    birimler, gercek metin olculeri, bayt ve sinav hikayeleri etiketsizle ayni; audit gecer; model etiketli sozlukle
+    egitilir ve sinav / metin hatalari kosar."""
+    d = load(root, "gpt2")
+    e = DS.sentence_ids(d, log=lambda s: None)
+    v, base = e["vocab"], len(d["vocab"])
+    eos = v.index(DS.EOS_TOKEN)
+    check("sentence_ids: akislar etiketsiz haliyle birebir, sozluk + %d etiket, audit gecer, iz farkli" % len(
+              DS.SENTENCE_ID_TOKENS),
+          all(np.array_equal(np.array(DS.strip_sentence_ids(e[s], v), dtype=d[s].dtype), d[s]) for s in ("train", "valid"))
+          and v[:base] == d["vocab"] and DS.audit(e) and e["fingerprint"] != d["fingerprint"]
+          and e["tag"] == "gpt2_sentence_ids" and "sentence_ids" in e["fingerprints"])
+    pbase = base + DS.SENTENCE_IDS + 1                  # ilk paragraf etiketi
+    sent = lambda x: [t - base for t in x if base <= t < pbase]
+    pars = lambda x: [t - pbase for t in x if t >= pbase]
+    ok, first = True, []
+    for s, L in zip(*(x.tolist() for x in DS._stories(e["valid"], eos))):
+        x = e["valid"][s:s + L].tolist()
+        first.append(x[:2] == [pbase, base])
+        ok &= sent(x) == list(range(len(sent(x)))) or sent(x)[:DS.SENTENCE_IDS] == list(range(DS.SENTENCE_IDS))
+        ok &= pars(x) == list(range(len(pars(x))))
+        ok &= all(x[j + 1] >= base and x[j + 1] < pbase for j, t in enumerate(x) if t >= pbase)   # <p_k> ardindan <s_n>
+        ok &= not x or x[-1] < base                     # son cumleden sonra etiket yok: karar eos ile
+    long = DS.encode("Sue ran. " * 70, v)
+    tail = sent(long)
+    dec = DS.encode("He had 1.5 cakes. He ate them.", v)
+    para = DS.encode("Tom ran. He fell.\n\nSue came. She helped.\n\nThey went home.", v)
+    names = [v[t] for t in para if t >= base]
+    check("sentence_ids: hikaye basi <p1><s1>, cumle numarasi sirali ve paragrafta sifirlanmaz, paragraf numarasi "
+          "\\n\\n'de, son cumleden sonra etiket yok, 64'ten sonra <s+>, ondalik nokta cumle sonu degil",
+          ok and all(first) and tail[:DS.SENTENCE_IDS] == list(range(DS.SENTENCE_IDS))
+          and set(tail[DS.SENTENCE_IDS:]) == {DS.SENTENCE_IDS} and len(sent(dec)) == 2
+          and names == ["<p1>", "<s1>", "<s2>", "<p2>", "<s3>", "<s4>", "<p3>", "<s5>"],
+          "%s / %s / %s" % (tail[60:68], sent(dec), names))
+    text = 'Tom saw a big dog. The dog was happy!\n\n"Can we play?" The dog wagged.'
+    plain = DS.encode(text, d["vocab"])
+    tab_d, tab_e = DS._token_table(d["vocab"]), DS._token_table(v)
+    rows = ES.exam_rows(e)
+    same_text = [DS.decode(e["valid"][s:s + L], v) for s, L in zip(e["valid_start"][rows], e["valid_length"][rows])] == \
+        [DS.decode(d["valid"][s:s + L], d["vocab"]) for s, L in zip(d["valid_start"][ES.exam_rows(d)],
+                                                                  d["valid_length"][ES.exam_rows(d)])]
+    check("sentence_ids: encode etiketler (= akis kurali), decode siler, birimler ve sinav hikayeleri / baytlari ayni, "
+          "gercek metin hata sayaclari ayni",
+          DS.strip_sentence_ids(DS.encode(text, v), v) == plain and DS.decode(DS.encode(text, v), v) == text
+          and DS._units(DS.encode(text, v), tab_e) == DS._units(plain, tab_d) and same_text
+          and np.array_equal(e["valid_bytes"][rows], d["valid_bytes"][ES.exam_rows(d)])
+          and ES.count_text_errors(None, e, 32, count=4, real=True) == ES.count_text_errors(None, d, 32, count=4, real=True))
+    model, _ = TR.train_seq("shared", None, None, len(v), steps=5, log_at=(), batches=DS.batches(e, 4, 0), model_kw=TINY)
+    probes = [[eos] + DS.encode(p, v) for p in ES.PROMPTS[:2]]
+    written = ES.texts(model, e, probes, 16)
+    errs = ES.count_text_errors(model, e, 16, count=2)
+    check("sentence_ids: etiketli sozlukle egitim, sinav, metin ve metin hatalari kosar (uretilen metinde etiket yok)",
+          ES.exam(model, e, rows[:4])["ppl"] > 0 and all(max(w["ids"] or [0]) < base for w in written)
+          and "<s" not in "".join(w["model"] for w in written) and errs["greedy"]["stories"] == 2)
+
+
 if __name__ == "__main__":
     print("tests (train_simplestories)")
     root, src, dataset, tokenizers, meta = fixture()
@@ -870,6 +928,7 @@ if __name__ == "__main__":
         t_split(root)
         t_exam(root)
         t_text_errors(root)
+        t_sentence_ids(root)
         t_speed(root)
         t_colab(root)
     finally:
