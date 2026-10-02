@@ -1458,23 +1458,11 @@ def t_shared_facts():
           "kayip %.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"]))
 
 
-def _bigram_keys(sids, smask, nv, k):
-    """Test verisinin en sik k (onceki, token) ikilisi: anahtar onceki * nv + token, artan sirali (bigrams_<K>.npy gibi)."""
-    import numpy as np
-    counts = {}
-    for i in range(sids.shape[0]):
-        x = sids[i, :int(smask[i].sum())].tolist()
-        for a, b in zip(x[:-1], x[1:]):
-            counts[a * nv + b] = counts.get(a * nv + b, 0) + 1
-    top = sorted(counts, key=lambda key: (-counts[key], key))[:k]
-    return torch.tensor(np.sort(np.array(top, dtype=np.int64)))
-
-
 def t_input_embedding():
-    """INPUT_EMBEDDING / INPUT_BIGRAMS / FIRST_TURN_FACTS (bulgular tablosu #7c): tablolar baslangicta (girdi PF'den, ikili 0)
-    PL'li modelle bit duzeyinde ayni; input_states elle hesapla (ikili bulunan / bulunmayan / konum 0, last ile devam); tur 1
-    FactUnits'siz model = internals'in F1 atlamasi (ayni tohum); egitim, Adam, surdurme; onbellekli uretim (sagdan dolgulu
-    istemler; istem sonra tek token) tam hesapla ayni; compile'da graph break yok; ayarsiz config eski model."""
+    """INPUT_EMBEDDING / FIRST_TURN_FACTS: girdi tablosu baslangicta (PF'den) PL'li modelle ayni; input_states elle hesapla
+    ayni; tur 1 FactUnits'siz model = internals'in F1 atlamasi (ayni tohum); egitim, Adam, surdurme; onbellekli uretim
+    (sagdan dolgulu istemler; istem sonra tek token) tam hesapla ayni; compile'da graph break yok; ayarsiz config eski
+    model."""
     import copy
     import torch.nn.functional as F
     import internals_y as I
@@ -1483,42 +1471,21 @@ def t_input_embedding():
     sids, smask = sequences(data)
     nv = len(data["vocab"])
     ids = sids[:6, :20]
-    K = 40
-    keys = _bigram_keys(sids, smask, nv, K)
-    full_kw = dict(input_embedding=True, input_bigrams=K, first_turn_facts=False, bigram_keys=keys)
+    full_kw = dict(input_embedding=True, first_turn_facts=False)
 
     base, emb = BlockModel(nv, input_embedding=False), BlockModel(nv, input_embedding=True)
-    big = BlockModel(nv, input_embedding=True, input_bigrams=K, bigram_keys=keys)
     with torch.no_grad():
         z0 = base.logits(ids)
         free0 = BlockModel(nv, input_embedding=True, input_embedding_sphere=False)
-        same = torch.equal(z0, free0.logits(ids)) and float((z0 - emb.logits(ids)).abs().max()) < 1e-5             and float((z0 - big.logits(ids)).abs().max()) < 1e-5
-    check("input_embedding: tablolar baslangicta (girdi PF'den, ikili 0) PL'li modelle ayni skor (kuresizde bit duzeyinde, "
-          "kurede yuvarlama farki); "
-          "bigram_keys tampon, parametre degil",
-          same and "bigram_keys" in dict(big.named_buffers()) and "bigram_keys" not in dict(big.named_parameters())
-          and tuple(big.input_bigrams.shape) == (K, 64) and not hasattr(base, "input_embedding"))
+        same = torch.equal(z0, free0.logits(ids)) and float((z0 - emb.logits(ids)).abs().max()) < 1e-5
+    check("input_embedding: tablo baslangicta (girdi PF'den) PL'li modelle ayni skor (kuresizde bit duzeyinde, kurede "
+          "yuvarlama farki)", same and not hasattr(base, "input_embedding"))
 
     g = torch.Generator().manual_seed(71)
     with torch.no_grad():
-        big.input_embedding.copy_(torch.randn(big.input_embedding.shape, generator=g))
-        big.input_bigrams.copy_(torch.randn(big.input_bigrams.shape, generator=g))
-        got = big.input_states(ids)
-        cont = big.input_states(ids[:, 5:], last=ids[:, 4])
-        index = {int(k_): r for r, k_ in enumerate(keys.tolist())}
-        want, hits = torch.zeros_like(got), 0
-        for b in range(ids.shape[0]):
-            for t in range(ids.shape[1]):
-                v = big.input_embedding[ids[b, t]].clone()
-                r = index.get(int(ids[b, t - 1]) * nv + int(ids[b, t])) if t > 0 else None
-                if r is not None:
-                    v, hits = v + big.input_bigrams[r], hits + 1
-                want[b, t] = F.normalize(v, dim=-1)
-    err = float((got - want).abs().max())
-    err_c = float((cont - got[:, 5:]).abs().max())
-    check("input_embedding: input_states = norm(E[token] + ikili satiri) elle (ikili listede yoksa ve konum 0'da yalniz token); "
-          "last ile devam = tam hesabin devami", err < 1e-6 and err_c < 1e-6 and 0 < hits < ids.numel() - ids.shape[0],
-          "fark %.1e  devam %.1e  ikili %d / %d" % (err, err_c, hits, ids.numel()))
+        emb.input_embedding.copy_(torch.randn(emb.input_embedding.shape, generator=g))
+        err = float((emb.input_states(ids) - F.normalize(emb.input_embedding[ids], dim=-1)).abs().max())
+    check("input_embedding: input_states = norm(E[token]) (elle)", err < 1e-6, "fark %.1e" % err)
 
     torch.manual_seed(0)
     plain, skip = BlockModel(nv, first_turn_facts=True), BlockModel(nv, first_turn_facts=False)
@@ -1544,8 +1511,7 @@ def t_input_embedding():
     keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
                                                                    optimizer=copy.deepcopy(opt.state_dict())))
     full, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), save_every=2, save=keep, model_kw=full_kw)
-    res, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs[4],
-                          model_kw=dict(full_kw, bigram_keys="iz"))
+    res, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs[4], model_kw=full_kw)
     free, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(),
                            model_kw=dict(full_kw, input_embedding_sphere=False))
     rows_s, rows_f = trained.input_embedding.detach().norm(dim=1), free.input_embedding.detach().norm(dim=1)
@@ -1555,10 +1521,9 @@ def t_input_embedding():
           and float(rows_f.max()) > 1.01 and float((BlockModel(nv).tokens.fixed_points.norm(dim=1) - 1).abs().max()) < 1e-5,
           "birim %.1e  serbest en buyuk %.3f" % (float((rows_s - 1).abs().max()), float(rows_f.max())))
 
-    check("input_embedding: egitimde kayip iner; input_embedding ve input_bigrams Adam'da, 0'dan ayrilir; bigram_keys degismez; "
-          "tur 1'in takimi state_dict'te yok; surdurme (liste pakette, config'te iz) bit duzeyinde",
-          curve[-1]["nll"] < curve[0]["nll"] and {"input_embedding", "input_bigrams"} <= set(in_adam)
-          and bool(trained.input_bigrams.abs().max() > 0) and torch.equal(trained.bigram_keys, keys)
+    check("input_embedding: egitimde kayip iner; input_embedding Adam'da; tur 1'in takimi state_dict'te yok; surdurme bit "
+          "duzeyinde",
+          curve[-1]["nll"] < curve[0]["nll"] and "input_embedding" in in_adam
           and not any(k_.startswith("blocks.0.facts.") for k_ in trained.state_dict())
           and all(torch.equal(a, b) for a, b in zip(full.state_dict().values(), res.state_dict().values())),
           "%.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"]))
@@ -1580,8 +1545,7 @@ def t_input_embedding():
         z_c = trained.logits(x[rows, L - 1][:, None], caches)[:, 0]
         z_f = trained.logits(x)[rows, L - 1]
     err_h = float((z_c - z_f).abs().max())
-    check("input_embedding: onbellekli uretim = tam hesap (sagdan dolgulu istemler; ikili icin onceki token last_token'dan); "
-          "istem - 1 sonra tek token yolu ayni",
+    check("input_embedding: onbellekli uretim = tam hesap (sagdan dolgulu istemler); istem - 1 sonra tek token yolu ayni",
           cached_new == TR.generate(trained, qs, 6, cached=False) and err_g < 1e-4 and err_h < 1e-4,
           "skor farki %.1e  istem yolu %.1e" % (err_g, err_h))
 
@@ -1609,7 +1573,7 @@ def t_input_embedding():
 
 def t_internals():
     """internals_y (kalici analiz araci): elle ileri hesap = model.logits (float64; 5 model: varsayilan, shared_facts=False,
-    girdi tablosu + ikili + tur 1 FactUnits'siz, output_link=False, dort Block; SDPA ve acik softmax yolu, sagdan dolgulu
+    girdi tablosu + tur 1 FactUnits'siz, output_link=False, dort Block; SDPA ve acik softmax yolu, sagdan dolgulu
     batch); trace'in durumlari, acilari ve lens'i modelin kendi hidden'i ve Block'uyla;
     point_drift, attention_stats, unit_usage bagimsiz hesapla; ablate: hicbir sey = taban (Δ 0), alpha'yi ayni degerle
     vermek = taban, kapatmalar agirligi degistirilmis modelin logits'iyle ayni (Δnll, Δacc, se), head ortalamasi elle;
@@ -1642,8 +1606,7 @@ def t_internals():
 
     variants = [("varsayilan", {}), ("shared_facts=False", dict(shared_facts=False)),
                 ("output_link=False", dict(output_link=False)),
-                ("girdi tablosu + ikili + tur 1 FactUnits'siz", dict(input_embedding=True, input_bigrams=20, first_turn_facts=False,
-                                                                     bigram_keys=_bigram_keys(sids, smask, nv, 20))),
+                ("girdi tablosu + tur 1 FactUnits'siz", dict(input_embedding=True, first_turn_facts=False)),
                 ("dort Block", dict(layers=4))]
     errs = {}
     with torch.no_grad():
@@ -1970,7 +1933,7 @@ def t_packing():
     """Maskeli paketleme (FineWeb): paketli pencerede her belgenin skoru, kaybi ve gradyani o belgenin tek basina hesabiyla
     ayni (float64, yogun maske); flex yolu (CPU'da yalniz ileri) yogun maskeyle ayni; tek belgeli paket = paketsiz hesap;
     RoPE goreli (8.192 konumda da); compile'da graph break yok; train_seq paketli batch'le (coherence yarilari) ve surdurme;
-    onbellek, INPUT_BIGRAMS ve internals paketli girdiyi reddeder.  Kendi kucuk verisi (rastgele token)."""
+    onbellek ve internals paketli girdiyi reddeder.  Kendi kucuk verisi (rastgele token)."""
     import copy
     import internals_y as I
     from model_y import BlockModel, build_document_mask, same_document_causal
@@ -2108,15 +2071,13 @@ def t_packing():
 
     refused = []
     for attempt in (lambda: m.hidden(ids, [None] * m.turns, document_positions=pos),
-                    lambda: BlockModel(V, d=16, units=24, input_bigrams=4, bigram_keys=torch.arange(4)).logits(
-                        ids, document_positions=pos),
                     lambda: I.profile_step(dict(setting="shared", vocab=V, model_kw=kw), [windows[0][:3]], steps=1)):
         try:
             attempt()
             refused.append(False)
         except AssertionError:
             refused.append(True)
-    check("paketleme: onbellekli uretim, INPUT_BIGRAMS ve internals profile_step (paketli batch) reddeder (internals CLI "
+    check("paketleme: onbellekli uretim ve internals profile_step (paketli batch) reddeder (internals CLI "
           "FineWeb'i tek belgeyle okur: tests_fineweb)", all(refused), str(refused))
 
 

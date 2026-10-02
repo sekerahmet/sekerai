@@ -48,8 +48,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
     model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, shared_facts=M.SHARED_FACTS, heads=M.HEADS,
                          output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=M.T_MAX,
                          anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK, last_facts_alpha_init=1.0,
-                         input_embedding=M.INPUT_EMBEDDING, input_bigrams=M.INPUT_BIGRAMS,
-                         first_turn_facts=M.FIRST_TURN_FACTS, input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE,
+                         input_embedding=M.INPUT_EMBEDDING, first_turn_facts=M.FIRST_TURN_FACTS, input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE,
                          rope_base=M.ROPE_BASE, attention_log_scale=False),   # 1,0 / False: bu kosucunun varsayilani
                     **(model_kw or {}))
     if model_kw.get("rope_base") == "auto":  # config'e SAYI yazilir: formul sonra degisse de kosu ayni tabanla kurulur
@@ -63,8 +62,9 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                   fingerprint=data["fingerprint"], seq_len=data["seq_len"], vocab=len(data["vocab"]),
                   train_windows=len(data["train_start"]), exam_stories=len(rows), batch_size=batch_size,
                   steps_per_epoch=per_epoch, epochs=round(steps / per_epoch, 4), save_every=save_every,
-                  model_kw=dict(model_kw, fact_activation="swiglu", learn_output_scale=True),   # kaldirilan secenekler
-                  bucket=bucket,                                                                 # sabit degerle
+                  model_kw=dict(model_kw, fact_activation="swiglu", learn_output_scale=True,   # kaldirilan secenekler
+                                input_bigrams=0),                                              # sabit degerle
+                  bucket=bucket,
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
                               optimizer=TR.OPTIMIZER, schedule="wsd", cooldown=TR.COOLDOWN,   # wsd, EMA yok, linear:
                               coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,   # bu kosucunun

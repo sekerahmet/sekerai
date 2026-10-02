@@ -50,8 +50,6 @@ ALPHA_INIT = 0.1            # normalized update h <- norm(h + alpha (norm(u) - h
 LAST_FACTS_ALPHA_INIT = 0.1  # yalniz son turun FactUnits alpha'si (alpha_facts[turns - 1]) bundan baslar, gerisi ALPHA_INIT
 INPUT_EMBEDDING = True   # True: girdi ayri, ogrenilen tablo (V x d, PF'den baslar, capa yok; nGPT'deki E_input) -- cikis
                          # PL'de kalir.  False: girdi = cikis = PL
-INPUT_BIGRAMS = 0        # > 0: girdiye (onceki token, token) ikilisinin satiri eklenir (Over-Tokenized); satir sayisi = en
-                         # sik K ikili (liste veriden, bigram_keys), listede olmayan ikilide yalniz token.  0 = yok
 INPUT_EMBEDDING_SPHERE = True  # INPUT_EMBEDDING'de girdi tablosunun satirlari basta ve her optimizer adimindan sonra
                                # birim boya (nGPT); serbest tabloda gradyan satira dik, boy buyur, etkin lr duser
 FIRST_TURN_FACTS = False  # False: tur 1'in FactUnits alt adimi yok
@@ -250,7 +248,6 @@ class AttentionCache:
     def __init__(self, lengths, capacity):
         self.next_position, self.capacity = lengths.clone(), capacity   # satir basina siradaki konum
         self.keys = self.values = self.canon_inputs = None
-        self.last_token = None                                   # INPUT_BIGRAMS: satir basina onceki token (istemden sonra)
         self.span = 0                                            # yazilmis en uzun satirin boyu (Python sayisi: senkron yok)
 
     def canon_cache(self, x):
@@ -358,13 +355,11 @@ class BlockModel(torch.nn.Module):
     def __init__(self, n, d=D, turns=TURNS, layers=LAYERS, anchor=ANCHOR, confidence=CONFIDENCE, t_max=T_MAX, units=FACT_UNITS,
                  seed=POINTS_SEED, rope=ROPE, heads=HEADS, loss_chunk=LOSS_CHUNK,
                  last_facts_alpha_init=LAST_FACTS_ALPHA_INIT, output_link=OUTPUT_LINK, shared_facts=SHARED_FACTS,
-                 input_embedding=INPUT_EMBEDDING, input_bigrams=INPUT_BIGRAMS, first_turn_facts=FIRST_TURN_FACTS,
-                 bigram_keys=None, input_embedding_sphere=INPUT_EMBEDDING_SPHERE,
+                 input_embedding=INPUT_EMBEDDING, first_turn_facts=FIRST_TURN_FACTS, input_embedding_sphere=INPUT_EMBEDDING_SPHERE,
                  attention_log_scale=ATTENTION_LOG_SCALE, rope_base=ROPE_BASE,
                  stream_norm=True, normalized_update=True, sphere_weights=True, canon=True, fact_activation="swiglu"):
-        """bigram_keys (INPUT_BIGRAMS > 0): en sik ikililerin anahtarlari (onceki * n + token), artan sirali, uzunluk
-        input_bigrams; None ya da str (config'teki iz): tampon 0'larla kurulur, state_dict'ten dolar.  stream_norm,
-        normalized_update, sphere_weights, canon, fact_activation: kaldirilan seceneklerin tek degeri (analysis cagrilari)."""
+        """stream_norm, normalized_update, sphere_weights, canon, fact_activation: kaldirilan seceneklerin tek degeri
+        (analysis cagrilari)."""
         super().__init__()
         assert stream_norm and normalized_update and sphere_weights and canon and fact_activation == "swiglu", \
             "kaldirilan secenek (normsuz akis, normalized_update / sphere_weights / canon kapali, relu / reglu)"
@@ -400,12 +395,6 @@ class BlockModel(torch.nn.Module):
         if input_embedding:                               # PF'den: ilk adimda girdi PL ile ayni
             self.input_embedding = torch.nn.Parameter(self.tokens.fixed_points.detach().clone())
         self.input_embedding_sphere = bool(input_embedding and input_embedding_sphere)
-        if input_bigrams:                                 # 0'dan: ilk adimda ikili katkisi yok
-            self.input_bigrams = torch.nn.Parameter(torch.zeros(input_bigrams, d))
-            keys = (torch.zeros(input_bigrams, dtype=torch.long) if bigram_keys is None or isinstance(bigram_keys, str)
-                    else torch.as_tensor(bigram_keys, dtype=torch.long).clone())
-            assert keys.shape == (input_bigrams,) and bool((keys[1:] >= keys[:-1]).all()), "bigram_keys: artan, input_bigrams uzun"
-            self.register_buffer("bigram_keys", keys)
         self.normalize_weights()
         self.scale = scale_for(n, confidence)
         # cikis olcegi e^tau, tau = ln(scale)'dan ogrenilir: baslangicta sabit scale ile bit duzeyinde ayni
@@ -420,39 +409,17 @@ class BlockModel(torch.nn.Module):
     def turn_blocks(self):
         return [self.blocks[i % len(self.blocks)] for i in range(self.turns)]     # A B A B
 
-    def input_states(self, ids, last=None):
-        """h0 (B, T, d): PL[ids]; INPUT_EMBEDDING'de norm(E[ids] + ikili satiri).  Ikili (onceki, token): onceki konum 0'da
-        last (B,) ya da yok (-1); bigram_keys'te yoksa katki 0."""
+    def input_states(self, ids):
+        """h0 (B, T, d): PL[ids]; INPUT_EMBEDDING'de norm(E[ids])."""
         E = getattr(self, "input_embedding", None)
-        B2 = getattr(self, "input_bigrams", None)
-        if E is None and B2 is None:
-            return self.tokens.points()[ids]
-        x = E[ids] if E is not None else self.tokens.points()[ids]
-        if B2 is not None:
-            first = (last if last is not None else torch.full_like(ids[:, 0], -1))[:, None]
-            prev = torch.cat([first, ids[:, :-1]], 1)
-            key = prev * self.tokens.fixed_points.shape[0] + ids              # onceki yoksa negatif: listede yok
-            pos = torch.searchsorted(self.bigram_keys, key).clamp(max=self.bigram_keys.shape[0] - 1)
-            hit = (self.bigram_keys[pos] == key) & (prev >= 0)
-            x = x + B2[pos] * hit[..., None].to(B2.dtype)
-        return F.normalize(x, dim=-1)
+        return self.tokens.points()[ids] if E is None else F.normalize(E[ids], dim=-1)
 
     def hidden(self, ids, caches=None, document_positions=None):
         """Her turdan sonraki durumlar: [h0, h1, ..., h_TURNS], her biri (B, T, d); h0 = input_states.  caches: tur basina
         bir AttentionCache (onbellekli uretim; ids yalniz yeni token'lar).  document_positions (B, T): paketli pencere,
         token'in kendi belgesindeki konumu (belge basinda 0); None = tek belge (bugunku hesap)."""
-        assert document_positions is None or (caches is None and getattr(self, "input_bigrams", None) is None), \
-            "paketli pencere: onbellekli uretim ve INPUT_BIGRAMS (onceki token belge sinirini gecer) desteklenmiyor"
-        last = None
-        if caches is not None and getattr(self, "input_bigrams", None) is not None:
-            c0 = caches[0]
-            last = c0.last_token                              # istemde None: istemin icindeki onceki token'lar
-            if last is None:                                  # istem sagdan dolgulu: satirin son gercek token'i
-                n = c0.next_position
-                c0.last_token = torch.where(n > 0, ids.gather(1, (n - 1).clamp(min=0)[:, None])[:, 0], -1)
-            else:
-                c0.last_token = ids[:, -1]
-        h = self.input_states(ids, last)
+        assert document_positions is None or caches is None, "paketli pencere: onbellekli uretim desteklenmiyor"
+        h = self.input_states(ids)
         out = [h]
         if document_positions is not None:                # maske bir kez, butun turlar icin
             mask = self.document_mask(document_positions)

@@ -23,7 +23,6 @@ mfu (egitim FLOP'u / sure / GPU tepesi; CPU'da ve tabloda olmayan GPU'da None), 
 nll_by_frequency (exam'in icinde) ve her TEXT_ERRORS_EVERY sinavda bir text_errors (count_text_errors); final.json'da
 hepsi, metin hatalari gercek devamla birlikte.
 """
-import hashlib
 import json
 import math
 import os
@@ -132,19 +131,11 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
     model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, shared_facts=M.SHARED_FACTS, heads=M.HEADS,
                          output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=M.T_MAX,
                          anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK, last_facts_alpha_init=1.0,
-                         input_embedding=M.INPUT_EMBEDDING, input_bigrams=M.INPUT_BIGRAMS,
-                         first_turn_facts=M.FIRST_TURN_FACTS, input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE,
+                         input_embedding=M.INPUT_EMBEDDING, first_turn_facts=M.FIRST_TURN_FACTS, input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE,
                          rope_base=M.ROPE_BASE, attention_log_scale=False),   # 1,0 / False: bu kosucunun varsayilani
                     **(model_kw or {}))
     if model_kw.get("rope_base") == "auto":  # config'e SAYI yazilir: formul sonra degisse de kosu ayni tabanla kurulur
         model_kw["rope_base"] = M.rope_base_for(model_kw["d"] // model_kw["heads"], model_kw["t_max"])
-    keys = None                                       # INPUT_BIGRAMS: ikili listesi modele tensor, config'e izi
-    if model_kw and model_kw.get("bigram_keys") is not None and not isinstance(model_kw["bigram_keys"], str):
-        keys = torch.as_tensor(model_kw["bigram_keys"], dtype=torch.long)
-        model_kw = dict(model_kw, bigram_keys="%d anahtar, sha256 %s" % (
-            len(keys), hashlib.sha256(keys.cpu().numpy().tobytes()).hexdigest()[:12]))
-    if model_kw and model_kw.get("input_bigrams") and not resume:
-        assert keys is not None and len(keys) == model_kw["input_bigrams"], "INPUT_BIGRAMS: model_kw'de bigram_keys (liste)"
     per_epoch = len(data["train_start"]) // batch_size
     assert per_epoch > 0, "batch_size (%d) > train penceresi (%d)" % (batch_size, len(data["train_start"]))
     rows = ES.exam_rows(data)
@@ -155,8 +146,9 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                   tag=data["tag"], fingerprint=data["fingerprint"], seq_len=data["seq_len"], vocab=len(data["vocab"]),
                   train_windows=len(data["train_start"]), exam_stories=len(rows), batch_size=batch_size,
                   steps_per_epoch=per_epoch, epochs=round(steps / per_epoch, 4), save_every=save_every,
-                  model_kw=dict(model_kw, fact_activation="swiglu", learn_output_scale=True),   # kaldirilan secenekler
-                  bucket=bucket,                                                                 # sabit degerle
+                  model_kw=dict(model_kw, fact_activation="swiglu", learn_output_scale=True,   # kaldirilan secenekler
+                                input_bigrams=0),                                              # sabit degerle
+                  bucket=bucket,
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
                               optimizer=TR.OPTIMIZER, schedule="wsd", cooldown=TR.COOLDOWN,   # wsd, EMA yok, linear:
                               coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,   # bu kosucunun
@@ -305,7 +297,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
             model, _ = TR.train_seq(setting, None, None, len(vocab), steps=steps, seed=seed, device=device, every=every,
                                     callback=callback, log_at=(), compile=compile, save_every=save_every, save=save,
                                     checkpoint=checkpoint, batches=_counting(DS.batches(data, batch_size, seed, bucket), work),
-                                    model_kw=model_kw if keys is None else dict(model_kw, bigram_keys=keys),
+                                    model_kw=model_kw,
                                     **dict(train_kw, matmul_precision=config["matmul_precision"],
                                            newton_schulz_precision=config["newton_schulz_precision"],
                                            schedule=config["schedule"], weight_ema=config["weight_ema"],

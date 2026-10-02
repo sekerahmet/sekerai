@@ -134,14 +134,13 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
     model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, shared_facts=M.SHARED_FACTS, heads=M.HEADS,
                          output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=data["seq_len"], anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK,
                          last_facts_alpha_init=M.LAST_FACTS_ALPHA_INIT, input_embedding=M.INPUT_EMBEDDING,
-                         input_bigrams=0, first_turn_facts=M.FIRST_TURN_FACTS,
+                         first_turn_facts=M.FIRST_TURN_FACTS,
                          input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE,
                          attention_log_scale=M.ATTENTION_LOG_SCALE, rope_base=M.ROPE_BASE),
                     **dict(MODEL_KW, **(model_kw or {})))
     if model_kw.get("rope_base") == "auto":      # config'e SAYI yazilir: formul sonra degisse de kosu ayni tabanla kurulur
         model_kw["rope_base"] = M.rope_base_for(model_kw["d"] // model_kw["heads"], model_kw["t_max"])
     train_kw = dict(RECIPE, lr=peak_lr(model_kw["d"]), **train_kw)
-    assert not model_kw["input_bigrams"], "paketli pencerede INPUT_BIGRAMS yok"
     steps_plan = plan(data, token_budget, steps, tokens_per_step, batch_size, train_kw.get("schedule"), seed)
     cuda = torch.device(device).type == "cuda"
     compile = compile and cuda                                 # train_seq ile ayni kural: compile yalniz GPU'da
@@ -151,7 +150,7 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
                   exam_docs=len(data["exam"]), valid_docs=len(data["valid_starts"]), token_budget=token_budget,
                   tokens_per_step=tokens_per_step, batch_size=batch_size, save_every=save_every,
                   model_kw=dict(model_kw, packed_attention="flex", fact_activation="swiglu",   # kaldirilan secenekler
-                                learn_output_scale=True),          # config'te sabit degerle: surdurme karsilastirmasi
+                                learn_output_scale=True, input_bigrams=0),   # config'te sabit degerle: surdurme
                   **steps_plan,
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
                               optimizer=TR.OPTIMIZER, schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,

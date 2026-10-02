@@ -761,9 +761,10 @@ def _checkpoints(run_dir):
 def _model_kw(config):
     """config'teki model_kw: eski config'lerde yazilmamis anahtarlar o gunun degeriyle; kaldirilan secenegin anahtari
     tek kalan davranisin degerini tasiyorsa atilir, baska degerdeyse kosu kurulamaz (sessizce farkli model kurulmasin)."""
-    kw = dict(dict(output_link=False, shared_facts=True, input_embedding=False, input_bigrams=0, first_turn_facts=True,
+    kw = dict(dict(output_link=False, shared_facts=True, input_embedding=False, first_turn_facts=True,
                    input_embedding_sphere=False, rope_base=10000.0, attention_log_scale=False), **config.get("model_kw", {}))
-    for key, only in (("packed_attention", "flex"), ("fact_activation", "swiglu"), ("learn_output_scale", True)):
+    for key, only in (("packed_attention", "flex"), ("fact_activation", "swiglu"), ("learn_output_scale", True),
+                      ("input_bigrams", 0)):
         value = kw.pop(key, only)
         assert value == only, "%s=%r kaldirildi (yalniz %r): bu kosu bugunku kodla kurulamaz" % (key, value, only)
     return kw
