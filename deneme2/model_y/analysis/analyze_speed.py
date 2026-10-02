@@ -351,6 +351,8 @@ def kernel_categories(fn, cuda, top=30):
     for e in prof.key_averages():
         t = getattr(e, "self_device_time_total", 0) or getattr(e, "self_cuda_time_total", 0)
         name = e.key.lower()
+        if "CUDA" not in str(getattr(e, "device_type", "CUDA")):   # triton kernel'in CPU tarafi olayi da ayni adla (cift sayim)
+            continue
         if not t or name.startswith(("aten::", "torch", "autograd", "compiled", "##", "inductor", "triton_kernel_wrapper")):
             continue                                        # CPU tarafi olay: kernel'leri ayrica sayiliyor
         if any(s in name for s in ("gemm", "nvjet", "cutlass", "xmma", "cublas", "sm90_", "sm100_", "sm120_", "ampere_")):
@@ -716,6 +718,86 @@ def train_measure(args, config, device):
     write(args.run, "train", res)
 
 
+# ---- birlesik hizlandirma: train_seq'in kendisi, oneriler tek tek ve birlikte
+
+FLEX_BWD_OPTIONS = dict(BLOCK_M1=32, BLOCK_N1=64, BLOCK_M2=64, BLOCK_N2=32)   # train olcumunde en hizli geri yayilim
+
+
+@contextlib.contextmanager
+def flex_options(options):
+    """ONERI: model_y'nin derlenmis flex'i bf16'da (kernel_options None) bu seceneklerle; fp32 yolu degismez."""
+    from torch.nn.attention.flex_attention import flex_attention
+    original = M._flex_compiled
+    M._flex_compiled = torch.compile(
+        lambda q, k, v, block_mask=None, scale=None, kernel_options=None: flex_attention(
+            q, k, v, block_mask=block_mask, scale=scale, kernel_options=kernel_options or options), dynamic=False)
+    torch._dynamo.reset()
+    try:
+        yield
+    finally:
+        M._flex_compiled = original
+        torch._dynamo.reset()
+
+
+def data_cost(root, rows, steps=5):
+    """Kosudaki veri yolu: adim basina pencere kurma (data_fineweb.windows, CPU) ve cihaza kopya."""
+    import data_fineweb as DF
+    v = DF.load_valid(root, log=lambda s: None)
+    stream, offsets, _ = v["valid_shard"]
+    data = dict(seq_len=8192, train=stream, train_starts=offsets, eot=v["eot"], fingerprint="speed_shard13")
+    data["items"] = DF._items(data)
+    draw = DF.batches(data, rows)
+    draw(0)
+    t = time.perf_counter()
+    got = [draw(s) for s in range(1, steps + 1)]
+    cpu_ms = 1e3 * (time.perf_counter() - t) / steps
+    sync()
+    t = time.perf_counter()
+    for b in got:
+        [x.to("cuda") for x in b]
+    sync()
+    return cpu_ms, 1e3 * (time.perf_counter() - t) / steps
+
+
+def tune_measure(args, config, device):
+    gpu = torch.cuda.get_device_name(0)
+    peak = peak_for(gpu)
+    say("analyze_speed tune | %s | torch %s | %s" % (time.strftime("%Y-%m-%d %H:%M"), torch.__version__, gpu))
+    total_rows = config["batch_size"] * config["micro_batches"]
+    batch = packed_batches(args.data, total_rows, 1, config["seq_len"])[0][0]
+    keys, targets = keys_per_target(batch)
+    cpu_ms, copy_ms = data_cost(args.data, total_rows)
+    say("VERI YOLU (kosuda her adimda, egitim dongusunde sirayla): pencere kurma %.1f ms (CPU), cihaza kopya %.1f ms" % (
+        cpu_ms, copy_ms))
+    res = dict(gpu=gpu, torch=torch.__version__, data_windows_ms=cpu_ms, data_copy_ms=copy_ms, variants=[])
+    K = args.real or 3
+    variants = (("bugunku", None, None, "fp32"),
+                ("flex geri yayilim bloklari", FLEX_BWD_OPTIONS, None, "fp32"),
+                ("+ 8 parca x 8 satir", FLEX_BWD_OPTIONS, 8, "fp32"),
+                ("+ Newton-Schulz bf16 (DAVRANIS DEGISIR)", FLEX_BWD_OPTIONS, 8, "bf16"))
+    base = None
+    for label, options, micro, ns in variants:
+        cfg = dict(config, newton_schulz_precision=ns)
+        try:
+            with (flex_options(options) if options else contextlib.nullcontext()):
+                info = real_step_ms(cfg, batch, device, K=K, micro=micro, rows=None if micro is None else total_rows // micro)
+        except Exception:
+            say("HATA %s: %s" % (label, traceback.format_exc()[-800:]))
+            continue
+        finally:
+            torch._dynamo.reset()
+            torch.cuda.empty_cache()
+        info["nlls"] = info.pop("nll")
+        mfu = train_flops(info["flops"], targets, keys) / (info["step_ms"] / 1e3) / peak
+        base = base or info["step_ms"]
+        res["variants"].append(dict(label=label, step_ms=info["step_ms"], peak_gb=info["peak_gb"], mfu=mfu,
+                                    nll_after=info["nlls"], tokens_per_sec=targets / (info["step_ms"] / 1e3)))
+        say("%-42s %6.0f ms/adim (%+.1f%%)  %6.0f token/sn  MFU %.1f%%  tepe %.1f GB  nll(adim %d) %.6f" % (
+            label, info["step_ms"], 100 * (info["step_ms"] / base - 1), targets / (info["step_ms"] / 1e3), 100 * mfu,
+            info["peak_gb"], 2 * K, info["nlls"]))
+    write(args.run, "tune", res)
+
+
 # ---- buyuk model adaylari
 
 CANDIDATES = (("d1024_8x2 (bugunku)", dict(d=1024, layers=8, turns=16, heads=8, units=2752), 4),
@@ -1065,7 +1147,7 @@ def generate_measure(args, config, device):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("run", help="kosu klasoru (config.json)")
-    ap.add_argument("measure", nargs="?", choices=("train", "sizes", "generate"))
+    ap.add_argument("measure", nargs="?", choices=("train", "sizes", "generate", "tune"))
     ap.add_argument("--data", help="FineWeb koku (gpt2/shard_013 ...); yoksa rastgele token")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--steps", type=int, default=3, help="train: parca parca olculen adim")
@@ -1089,7 +1171,8 @@ def main():
             {"train": train_measure, "sizes": sizes_measure, "generate": generate_measure}[m](args, config, "cpu")
         return
     config = I._config(args.run)
-    {"train": train_measure, "sizes": sizes_measure, "generate": generate_measure}[args.measure](args, config, args.device)
+    {"train": train_measure, "sizes": sizes_measure, "generate": generate_measure, "tune": tune_measure}[args.measure](
+        args, config, args.device)
 
 
 if __name__ == "__main__":
