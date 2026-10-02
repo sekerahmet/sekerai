@@ -12,7 +12,9 @@ Kosu surerken model.pt yoksa son checkpoint yuklenir: egitilirken konusulur.
   n=200                      en fazla kac token (varsayilan 200)
   s=0.8                      sicaklik.  0 = hep en olasi token (sinavdaki acgozlu uretim)
   p=0.9                      top-p: en olasi token'lardan toplami 0,9 olan kumeden sec (1 = kapali; yalniz s > 0'da)
-  r=1.2                      tekrar cezasi: son 64 token'da gecenlerin puani 1,2'ye bolunur (1 = kapali); yalniz uretim
+  r=1.2                      tekrar cezasi: son 512 token'da gecenlerin puani 1,2'ye bolunur (1 = kapali); yalniz uretim
+                             acilista s 0,8 p 0,9 r 1,2 (pencere 512): dongu %2-4, dogruluk ayni (D_006; kullanici 2 Ekim:
+                             "zaten mimari bağımsız onu da uygula"); s=0 r=1 sinavdaki acgozlu uretim
   model                      kosulari listele (en yeni once), hangisi yuklu
   model <ad>                 baska bir kosu yukle (ad ya da basindan bir parca)
   ema                        ayni kosunun ortalama agirliklari (model_weight_ema.pt) / son agirliklar
@@ -154,7 +156,7 @@ def summary(run_dir, cfg, label):
     print("=" * 74)
 
 
-def generate(model, ids, n, eot, temp=0.0, top_p=1.0, penalty=1.0, window=64):
+def generate(model, ids, n, eot, temp=0.0, top_p=1.0, penalty=1.0, window=512):
     """Tek istem, token token, onbellekli (istem bir kez, sonra yalniz yeni konum).  <|endoftext|>'te durur.  Modelin
     cihazinda (CPU ya da GPU)."""
     _heavy()
@@ -207,7 +209,7 @@ def main():
     loader = threading.Thread(target=_load, daemon=True)
     loader.start()
     ready = False
-    n, temp, top_p, penalty = 200, 0.0, 0.9, 1.0
+    n, temp, top_p, penalty = 200, 0.8, 0.9, 1.2
     while True:
         try:
             g = input("> ").strip()
