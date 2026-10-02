@@ -1701,16 +1701,20 @@ def _logistic(Xtr, ytr, Xte, yte, steps=300, lr=0.01, wd=1e-3):
         return float((((B @ w + b) > 0).long() == yte).float().mean()), float((((A @ w + b) > 0).long() == ytr).float().mean())
 
 
-def _balanced(idx, y, gen):
-    """Siniflari esitle: buyuk siniftan rastgele (tohumlu) alt ornek."""
-    a, b = idx[y[idx] == 0], idx[y[idx] == 1]
-    n = min(len(a), len(b))
-    pa = a[torch.randperm(len(a), generator=gen)[:n]]
-    pb = b[torch.randperm(len(b), generator=gen)[:n]]
-    return torch.cat([pa, pb])
+def _balanced(idx, y, gen, strata=None):
+    """Siniflari esitle: buyuk siniftan rastgele (tohumlu) alt ornek; strata verilirse her katmanda ayri (ornek: bolge ici
+    konum kovasi -- iki sinifin konum dagilimi ayni olur)."""
+    groups = [idx] if strata is None else [idx[strata[idx] == g] for g in torch.unique(strata[idx])]
+    out = []
+    for gi in groups:
+        a, b = gi[y[gi] == 0], gi[y[gi] == 1]
+        n = min(len(a), len(b))
+        out += [a[torch.randperm(len(a), generator=gen)[:n]], b[torch.randperm(len(b), generator=gen)[:n]]]
+    return torch.cat(out)
 
 
-def selfgen_probe(model, stories, eot, turns=tuple(range(0, 13)), region=256, gen_batch=32, train_share=0.7, log=print):
+def selfgen_probe(model, stories, eot, turns=tuple(range(0, 13)), region=256, gen_batch=32, train_share=0.7,
+                  match_position=True, log=print):
     """O16: ayni l kovasinda (m = 1) acgozlu kendi uretimi ile gercek metin konumlarini tur <= 12 durumlarindan ayirma.
     Belgeler egitim / test diye bolunur (belge duzeyinde, %70 / %30); siniflar her bolumde esitlenir.  h0 (girdi embedding)
     satiri kontrol: token kimligi tek basina ne kadar ayiriyor."""
@@ -1734,8 +1738,9 @@ def selfgen_probe(model, stories, eot, turns=tuple(range(0, 13)), region=256, ge
             continue
         y = torch.tensor(f["y"])
         doc = torch.tensor(f["doc"])
-        tr = _balanced(torch.nonzero(doc < cut)[:, 0], y, gen)
-        te = _balanced(torch.nonzero(doc >= cut)[:, 0], y, gen)
+        strata = torch.tensor(f["pos"]) // 16 if match_position else None   # 16'lik konum kovalari
+        tr = _balanced(torch.nonzero(doc < cut)[:, 0], y, gen, strata)
+        te = _balanced(torch.nonzero(doc >= cut)[:, 0], y, gen, strata)
         row = dict(bin="%d-%d" % b if b[0] != b[1] else "%d" % b[0], n_real=int((y == 0).sum()), n_self=int((y == 1).sum()),
                    n_train=len(tr), n_test=len(te), acc={}, train_acc={})
         if len(tr) >= 20 and len(te) >= 20:
@@ -1750,14 +1755,16 @@ def selfgen_probe(model, stories, eot, turns=tuple(range(0, 13)), region=256, ge
         rows.append(row)
         log("O16 l %s: gercek %d / kendi %d konum; test acc %s" % (row["bin"], row["n_real"], row["n_self"], " ".join(
             "%d:%.3f" % (t, a) for t, a in row["acc"].items())))
-    return dict(rows=rows, docs=len(docs), region=region, turns=list(turns), train_docs=cut, test_docs=len(docs) - cut)
+    return dict(rows=rows, docs=len(docs), region=region, turns=list(turns), train_docs=cut, test_docs=len(docs) - cut,
+                match_position=match_position)
 
 
 def _text_selfgen(res):
     T = res["turns"]
     L = ["## O16: kendi acgozlu uretimi (1) mi gercek devam (0) mi -- m = 1, ayni l kovasi; tur <= 12 durumlarindan "
-         "dogrusal (lojistik) probe; belgeler %d egitim / %d test (belge duzeyinde), siniflar esit (sans 0,5)" % (
-             res["train_docs"], res["test_docs"]),
+         "dogrusal (lojistik) probe; belgeler %d egitim / %d test (belge duzeyinde), siniflar esit (sans 0,5)%s" % (
+             res["train_docs"], res["test_docs"], "; siniflar 16'lik bolge konumu kovalarinda esitlendi (konum dagilimi ayni)"
+             if res.get("match_position") else ""),
          "durum 0 = h0 (girdi embedding, token kimligi kontrolu); t = tur t ciktisi (1: A1)",
          "l      | gercek / kendi konum | egitim / test | yalniz konum | " + " ".join("t%-4d" % t for t in T)]
     for r in res["rows"]:
