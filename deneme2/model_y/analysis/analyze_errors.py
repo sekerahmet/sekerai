@@ -16,6 +16,11 @@
                  acgozlu ilk token'dan sonraki dagilim; isin aramasi (beam 8 x 6 token).  Mudahale BAGIMLILIK olcer
     cooccur      metal adlari (Cu'nun doldurucu oldugu / olmadigi) cevresinde (+-COOC_WINDOW token, ayni belge) " copper",
                  " Cu", " iron", " Fe" gecme payi -- Cu doldurucusunun birlikte gecme adayi
+    training_curve  checkpoint'ler boyunca (son + EMA): kendini besleme (dogal / rastgele, k = 0..5), acgozlu dongu (18 istem +
+                 32 belge, 256 token), 10 soru cevap konumu, 312 olguda (analyze_capacity.freq_facts) acgozlu ilk token dogru mu ve
+                 64 token'lik devamda dongu -- dongu egilimi ile bilgi birlikte mi degisiyor
+    ss_profile   SimpleStories kosusu (son + varsa EMA): kendini besleme, acgozlu / ornekleme dongu (12 istem + 64 hikaye yarisi),
+                 metinler; --data SimpleStories koku
     symbol_filler  86 element (analyze_capacity.ELEMENTS) x 5 kalip: dogru sembol ve " Cu" olasiligi / sirasi, top1
                  dagilimi (Cu kalibin genel doldurucusu mu); 133 baskentte top1 dagilimi
 
@@ -25,6 +30,7 @@ Calisma klasoru deneme2/model_y (importlar oradan).
 """
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -1199,6 +1205,214 @@ def text_cooccur(res):
     return L
 
 
+# ---- training_curve / ss_profile: dongu ve bilgi birlikte
+
+CURVE_REPEATS = 6       # kendini besleme: tekrar sayisi (k = 0..5)
+CURVE_TOKENS = 256      # acgozlu dongu olcusunun uretim boyu
+CURVE_DOCS = 32         # sinav belgesi devami
+FACT_TOKENS = 64        # olgu isteminden sonra acgozlu devam
+
+
+def _doc_prompts_from(v, count, max_prompt=512):
+    import data_fineweb as DF
+    out = []
+    for k in v["exam"]:
+        d = DF.valid_doc(v, int(k))
+        if 32 <= len(d) // 2 <= max_prompt:
+            out.append(d[:len(d) // 2])
+        if len(out) >= count:
+            break
+    return out
+
+
+def _loop_summary(rows):
+    """rows: _loop_stats sozlukleri -> dongu orani (± SE), ilk dongu medyani, tekrar8, farkli4."""
+    n = len(rows)
+    rate = sum(r["loop_first"] is not None for r in rows) / max(n, 1)
+    return dict(n=n, loop_rate=round(rate, 4), loop_se=round(math.sqrt(rate * (1 - rate) / max(n, 1)), 4),
+                loop_first_median=_median([r["loop_first"] for r in rows]),
+                repeat8=round(float(np.mean([r["repeat8"] for r in rows])), 4),
+                distinct4=round(float(np.mean([r["distinct4"] for r in rows])), 4))
+
+
+def _facts_check(model, vocab, eot, facts):
+    """Olgu istemi -> acgozlu ilk token dogru mu (dogru ya da kabul edilen yazimin ilk token'i) ve FACT_TOKENS'lik
+    devamda dongu.  -> satirlar ve ozet (dogru / yanlis olgularda dongu orani)."""
+    prompts = [[eot] + encode(f["prompt"], vocab) for f in facts]
+    gens, _, _ = generate_batch(model, prompts, FACT_TOKENS, eot)
+    rows = []
+    for f, p, g in zip(facts, prompts, gens):
+        rights = {encode(a, vocab)[0] for a in (f["answer"],) + tuple(f.get("also", ()))}
+        rows.append(dict(kind=f["kind"], prompt=f["prompt"], correct=g[0] in rights, text=decode(g[:16], vocab),
+                         **_loop_stats(p, g)))
+    out = {}
+    for kind in sorted({r["kind"] for r in rows}) + ["all"]:
+        rs = [r for r in rows if kind in ("all", r["kind"])]
+        ok, bad = [r for r in rs if r["correct"]], [r for r in rs if not r["correct"]]
+        out[kind] = dict(n=len(rs), acc=round(len(ok) / len(rs), 4), loop_correct=_loop_summary(ok) if ok else None,
+                         loop_wrong=_loop_summary(bad) if bad else None)
+    return rows, out
+
+
+def _curve_point(model, vocab, eot, sents, rand, prompts, texts, facts):
+    sr = dict(natural=self_reinforcement(model, sents, eot, CURVE_REPEATS),
+              random=self_reinforcement(model, rand, eot, CURVE_REPEATS))
+    for k in ("natural", "random"):
+        sr[k].pop("by_initial", None)
+    gens, _, _ = generate_batch(model, prompts, CURVE_TOKENS, eot)
+    rows = [dict(kind="question" if len(PROMPTS) <= i < len(PROMPTS) + len(QUESTIONS) else
+                 ("prompt" if i < len(PROMPTS) else "doc"), **_loop_stats(p, g)) for i, (p, g) in enumerate(zip(prompts, gens))]
+    loops = {k: _loop_summary([r for r in rows if k in ("all", r["kind"])]) for k in ("prompt", "question", "doc", "all")}
+    answers = [probe(model, vocab, eot, q, c, n) for q, c, n, _ in QUESTIONS]
+    q_texts = [decode(g[:24], vocab) for g in gens[len(PROMPTS):len(PROMPTS) + len(QUESTIONS)]]
+    frows, fsum = _facts_check(model, vocab, eot, facts)
+    return dict(self_reinforcement=sr, loops=loops,
+                answers=[dict(prompt=a["prompt"], right_first_rank=a["right_first_rank"], best_is_right=a["best_is_right"],
+                              margin=a["margin_logp"], greedy=t) for a, t in zip(answers, q_texts)],
+                facts=fsum, fact_rows=[dict(prompt=r["prompt"], correct=r["correct"], loop_first=r["loop_first"])
+                                       for r in frows],
+                prompt_texts=[decode(g[:80], vocab) for g in gens[:len(PROMPTS)]])
+
+
+def measure_training_curve(vocab, eot, args):
+    import analyze_capacity as AC
+    config = I._config(args.run)
+    sents, v = _sentences(args.data, vocab, SENTENCES)
+    rng = np.random.default_rng(0)
+    rand = [rng.integers(1000, 50000, len(x)).tolist() for x in sents[:32]]
+    prompts = [[eot] + encode(x, vocab) for x in list(PROMPTS) + [q for q, _, _, _ in QUESTIONS]]
+    prompts += _doc_prompts_from(v, CURVE_DOCS)
+    facts = AC.freq_facts()
+    packs = I._checkpoints(args.run)
+    points = []
+    for step in args.steps.split(","):
+        t0 = time.time()
+        model = I._build(config)
+        if step == "final":
+            pairs = [("last", "model.pt"), ("ema", "model_weight_ema.pt")]
+            for w, f in pairs:
+                model.load_state_dict(torch.load(os.path.join(args.run, f), map_location="cpu", weights_only=True))
+                m = model.eval().requires_grad_(False).to(args.device)
+                points.append(dict(step="final", weights=w, **_curve_point(m, vocab, eot, sents, rand, prompts, None, facts)))
+                _say(_curve_line(points[-1]))
+                model = m.cpu()
+        else:
+            pack = torch.load(packs[int(step)], map_location="cpu", weights_only=True)
+            model.load_state_dict(pack["model"])
+            m = model.eval().requires_grad_(False).to(args.device)
+            points.append(dict(step=int(step), weights="last", **_curve_point(m, vocab, eot, sents, rand, prompts, None, facts)))
+            _say(_curve_line(points[-1]))
+            m = m.cpu().requires_grad_(True)                    # _load_weight_ema gradyanli parametreleri sayar
+            I._load_weight_ema(m, pack["optimizer"], config)
+            m = m.eval().requires_grad_(False).to(args.device)
+            points.append(dict(step=int(step), weights="ema", **_curve_point(m, vocab, eot, sents, rand, prompts, None, facts)))
+            _say(_curve_line(points[-1]))
+            del pack
+        del model
+        if args.device.startswith("cuda"):
+            torch.cuda.empty_cache()
+        _say("adim %s: %.0f sn" % (step, time.time() - t0))
+    return dict(points=points, repeats=CURVE_REPEATS, tokens=CURVE_TOKENS, sentences=len(sents), facts=len(facts))
+
+
+def _curve_line(pt):
+    sr, lp, f = pt["self_reinforcement"], pt["loops"], pt["facts"]["all"]
+    return ("%-6s %-4s | SR dogal p k0..2 %.3f %.3f %.3f  rastgele k1 %.3f | dongu istem %.2f soru %.2f belge %.2f "
+            "(ilk %s) | 10 soru dogru-en-iyi %d | olgu acc %.3f, dongu dogru %s / yanlis %s") % (
+        pt["step"], pt["weights"], sr["natural"]["p_mean"][0], sr["natural"]["p_mean"][1], sr["natural"]["p_mean"][2],
+        sr["random"]["p_mean"][1], lp["prompt"]["loop_rate"], lp["question"]["loop_rate"], lp["doc"]["loop_rate"],
+        lp["all"]["loop_first_median"], sum(a["best_is_right"] for a in pt["answers"]), f["acc"],
+        f["loop_correct"] and f["loop_correct"]["loop_rate"], f["loop_wrong"] and f["loop_wrong"]["loop_rate"])
+
+
+def text_training_curve(res):
+    L = ["# CHECKPOINT'LER BOYUNCA DONGU VE BILGI (son + EMA; EMA < 4000 baslangic agirligiyla kirli, B7)",
+         "SR = kendini besleme, k. tekrarda token olasiligi (ilk token haric); dongu = 8'li tekrar, %d token acgozlu; "
+         "olgu = %d olguda acgozlu ilk token dogru" % (res["tokens"], res["facts"])]
+    L += [_curve_line(pt) for pt in res["points"]]
+    L += ["", "## olgu turune gore (acc / dongu dogru / dongu yanlis)"]
+    for pt in res["points"]:
+        L.append("%-6s %-4s " % (pt["step"], pt["weights"]) + "  ".join(
+            "%s %.3f/%s/%s" % (k, v["acc"], v["loop_correct"] and v["loop_correct"]["loop_rate"],
+                               v["loop_wrong"] and v["loop_wrong"]["loop_rate"]) for k, v in pt["facts"].items()))
+    L += ["", "## 10 soru: dogru ilk token sirasi (son agirlik)"]
+    for pt in res["points"]:
+        if pt["weights"] == "last":
+            L.append("%-6s " % pt["step"] + " ".join("%5d" % a["right_first_rank"] for a in pt["answers"]))
+    L += ["", "## istem metinleri (son agirlik, ilk 80 token)"]
+    for pt in res["points"]:
+        if pt["weights"] == "last":
+            L.append("### adim %s" % pt["step"])
+            L += ["  %s" % t[:300].replace("\n", " / ") for t in pt["prompt_texts"][:4]]
+    return L
+
+
+def _ss_sentences(stories, vocab, count, lo=8, hi=30):
+    """SimpleStories hikayelerinden '.' token'iyla biten lo..hi token'lik cumleler (ilk cumle haric)."""
+    dots = {i for i, t in enumerate(vocab) if t.strip(" \u0120") == "."}
+    out = []
+    for st in stories:
+        ends = [j for j, t in enumerate(st) if t in dots]
+        for a, b in zip(ends, ends[1:]):
+            if lo <= b - a <= hi:
+                out.append(st[a + 1:b + 1])
+                break
+        if len(out) >= count:
+            break
+    return out
+
+
+def measure_ss_profile(args):
+    import exam_simplestories as ES
+    config = I._config(args.run)
+    data = I._simplestories(config, args.data)
+    vocab, eos = data["vocab"], data["eos"]
+    _, stories = data["stories"](SENTENCES * 2 + 64, 0)
+    sents = _ss_sentences(stories[:SENTENCES * 2], vocab, SENTENCES)
+    rng = np.random.default_rng(0)
+    rand = [rng.integers(10, len(vocab) - 1, len(x)).tolist() for x in sents[:32]]
+    story_prompts = [st[:min(len(st) // 2, 200)] for st in stories[SENTENCES * 2:]][:64]
+    prompts = [[eos] + data["encode"](x) for x in ES.PROMPTS] + story_prompts
+    res = dict(config=dict(tag=config.get("tag"), steps=config.get("steps"), **{k: config.get("model_kw", {}).get(k) for k in (
+        "d", "turns", "layers", "heads", "units", "output_link", "input_embedding", "input_embedding_sphere",
+        "shared_facts", "first_turn_facts", "attention_bias")}), points=[])
+    for w in ("last", "ema"):
+        if not os.path.exists(os.path.join(args.run, "model_weight_ema.pt" if w == "ema" else "model.pt")):
+            continue
+        model = I._load_model(args.run, w).to(args.device)
+        sr = dict(natural=self_reinforcement(model, sents, eos, CURVE_REPEATS),
+                  random=self_reinforcement(model, rand, eos, CURVE_REPEATS))
+        pt = dict(weights=w, self_reinforcement=sr, sentences=len(sents))
+        for name, temp in (("greedy", 0.0), ("t1.0", 1.0)):
+            gens, _, _ = generate_batch(model, prompts, CURVE_TOKENS, eos, temp=temp, top_p=1.0, seed=0)
+            rows = [dict(kind="prompt" if i < len(ES.PROMPTS) else "story", **_loop_stats(p, g))
+                    for i, (p, g) in enumerate(zip(prompts, gens))]
+            pt[name] = {k: _loop_summary([r for r in rows if k in ("all", r["kind"])]) for k in ("prompt", "story", "all")}
+            pt[name + "_texts"] = [DS.decode(g[:120], vocab) for g in gens[:4]]
+        res["points"].append(pt)
+        _say("%s %s | SR dogal k1 %.3f rastgele k1 %.3f | acgozlu dongu %.2f (ilk %s) | s1 dongu %.2f" % (
+            os.path.basename(os.path.normpath(args.run)), w, sr["natural"]["p_mean"][1], sr["random"]["p_mean"][1],
+            pt["greedy"]["all"]["loop_rate"], pt["greedy"]["all"]["loop_first_median"], pt["t1.0"]["all"]["loop_rate"]))
+        del model
+    return res
+
+
+def text_ss_profile(res):
+    L = ["# SIMPLESTORIES PROFILI  ayarlar: " + ", ".join("%s=%s" % kv for kv in res["config"].items())]
+    for pt in res["points"]:
+        sr = pt["self_reinforcement"]
+        L += ["", "## %s (cumle %d)" % (pt["weights"], pt["sentences"]),
+              "SR dogal p k0.. " + " ".join("%.3f" % v for v in sr["natural"]["p_mean"]) + "  IP " +
+              " ".join("%.3f" % v for v in sr["natural"]["ip"]),
+              "SR rastgele p   " + " ".join("%.3f" % v for v in sr["random"]["p_mean"])]
+        for name in ("greedy", "t1.0"):
+            L.append("%-6s " % name + "  ".join("%s n %d dongu %.3f ± %.3f ilk %s tekrar8 %.3f farkli4 %.3f" % (
+                k, v["n"], v["loop_rate"], v["loop_se"], v["loop_first_median"], v["repeat8"], v["distinct4"])
+                for k, v in pt[name].items()))
+            L += ["    %s" % t[:400].replace("\n", " / ") for t in pt[name + "_texts"][:2]]
+    return L
+
+
 # ---- CLI
 
 def _out_dir(run_dir):
@@ -1211,12 +1425,14 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("run", help="kosu klasoru")
     ap.add_argument("measure", choices=("answers", "decoding", "repetition", "loop_heads", "corpus",
-                                               "answer_split", "symbol_filler", "cooccur"))
+                                               "answer_split", "symbol_filler", "cooccur", "training_curve",
+                                               "ss_profile"))
     ap.add_argument("--data", required=True, help="FineWeb koku (gpt2/tokenizer.json, gpt2/shard_*.bin)")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--weights", default="last", choices=("last", "ema", "both"))
     ap.add_argument("--checkpoint", type=int, help="answers: checkpoint_t<adim>.pt (EMA yedekteki ortalama)")
     ap.add_argument("--tokens", type=int, default=641, help="decoding: uretim boyu (final.json gibi 641)")
+    ap.add_argument("--steps", default="final", help="training_curve: virgulle adimlar ve/veya final")
     ap.add_argument("--beam", type=int, default=8, help="answer_split: isin genisligi")
     ap.add_argument("--beam-steps", type=int, default=6, help="answer_split: isin boyu (token)")
     ap.add_argument("--settings", help="decoding: virgulle ayar adlari (varsayilan hepsi)")
@@ -1228,16 +1444,24 @@ def main(argv=None):
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
     t0 = time.time()
-    vocab, eot = load_vocab(args.data)
+    vocab, eot = (None, None) if args.measure == "ss_profile" else load_vocab(args.data)
     out_dir = _out_dir(args.run)
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    weights_list = ["none"] if args.measure in ("corpus", "cooccur") else (["last", "ema"] if args.weights == "both" else [args.weights])
+    weights_list = ["none"] if args.measure in ("corpus", "cooccur", "training_curve", "ss_profile") else (["last", "ema"] if args.weights == "both" else [args.weights])
     for w in weights_list:
         t1 = time.time()
         if args.measure in ("corpus", "cooccur"):
             res = measure_corpus(vocab, eot, args) if args.measure == "corpus" else measure_cooccur(vocab, eot, args)
             lines = text_corpus(res) if args.measure == "corpus" else text_cooccur(res)
             source = "egitim parcalari"
+        elif args.measure == "training_curve":
+            res = measure_training_curve(vocab, eot, args)
+            lines = text_training_curve(res)
+            source = "checkpoint'ler %s" % args.steps
+        elif args.measure == "ss_profile":
+            res = measure_ss_profile(args)
+            lines = text_ss_profile(res)
+            source = "model.pt / model_weight_ema.pt"
         else:
             model = load_model(args.run, w, args.device, args.checkpoint)
             source = ("checkpoint_t%06d.pt" % args.checkpoint) if args.checkpoint else (
