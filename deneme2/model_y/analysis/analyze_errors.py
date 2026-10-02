@@ -518,6 +518,34 @@ def loop_confidence(model, seqs, starts):
                     margin=round(float(np.mean([b for _, b in v])), 4)) for k, v in sorted(buckets.items())}
 
 
+@torch.no_grad()
+def loop_lens(model, seqs, starts):
+    """Acgozlu uretimde uretilen token'in her durumdaki (h0, A1, F1, ...) logit lens sirasi; konumlar: yeni (8'li ilk kez)
+    ve tekrar (8'li daha once gecmis).  -> {kova: {durum: medyan sira, sira 1 payi}}."""
+    dev = next(model.parameters()).device
+    P = model.tokens.points()
+    names, _ = I._state_names(model)
+    ranks = {}
+    for seq, start in zip(seqs, starts):
+        x = torch.tensor([seq], device=dev)
+        states = I._states(model, x[:, :-1], I._plan(model), P)
+        y = x[0, 1:]
+        seen, kind = set(), []
+        for t in range(len(seq) - 1):
+            gram = tuple(seq[max(0, t - 7):t + 1])
+            kind.append("tekrar" if gram in seen else "yeni")
+            seen.add(gram)
+        pos = [t for t in range(start - 1, len(seq) - 1)]
+        for name, s in zip(names, states):
+            z = I._scores(model, s[0], P).float()                  # (L - 1, V)
+            r = (z > z.gather(-1, y[:, None])).sum(-1) + 1
+            r = r.cpu().numpy()
+            for t in pos:
+                ranks.setdefault(kind[t], {}).setdefault(name, []).append(int(r[t]))
+    return {k: {n: dict(median=float(np.median(v)), top1=round(float(np.mean(np.array(v) == 1)), 4), n=len(v))
+                for n, v in d.items()} for k, d in ranks.items()}
+
+
 def _final_generations(run_dir, eot, vocab, weights):
     """final.json'daki acgozlu uretimler (istem + ids): 8 istem ve 8 belge devami.  EMA icin weight_ema altindaki."""
     f = json.load(open(os.path.join(run_dir, "final.json"), encoding="utf-8"))
@@ -543,6 +571,7 @@ def measure_repetition(model, vocab, eot, args, weights):
     gseqs, gstarts, names = _final_generations(args.run, eot, vocab, weights)
     out["attention_greedy_loops"] = copy_attention(model, gseqs, gstarts)
     out["confidence_greedy"] = loop_confidence(model, gseqs, gstarts)
+    out["lens_greedy"] = loop_lens(model, gseqs, gstarts)
     out["greedy_texts"] = names
     return out
 
@@ -566,6 +595,11 @@ def text_repetition(res):
     L.append("# ACGOZLU URETIMDE (final.json) GUVEN: konum basina p(top1) ve top1-top2 farki, 8'linin kacinci gecisi")
     for k, v in res["confidence_greedy"].items():
         L.append("%-8s n %5d  p(top1) %.3f  fark %.3f" % (k, v["n"], v["p_top1"], v["margin"]))
+    L += ["", "# ACGOZLU URETIMDE LOGIT LENS: uretilen token'in her durumdaki medyan sirasi / sira 1 payi (yeni = 8'li ilk kez)"]
+    lens = res["lens_greedy"]
+    for k, d in lens.items():
+        L.append("%-7s n %d: " % (k, next(iter(d.values()))["n"]) + "  ".join(
+            "%s %g/%.2f" % (n, v["median"], v["top1"]) for n, v in d.items() if n == "h0" or n[1:] .isdigit()))
     for key, title in (("attention_repeated", "TEKRARLI CUMLELER"), ("attention_greedy_loops", "ACGOZLU DONGULER (final.json)")):
         a = res[key]
         H = len(a["target"][0])
@@ -625,8 +659,10 @@ def measure_loop_heads(model, vocab, eot, args):
                 res[key][1] += float(w.sum())
         return {k: v[0] / v[1] for k, v in res.items()}
 
-    def plan_for(heads=(), turns=()):
+    def plan_for(heads=(), turns=(), facts=()):
         case = {}
+        if facts:
+            case["skip_facts"] = list(facts)
         if heads:
             case["heads"] = {k: means[k] for k in heads}
         if turns:
@@ -645,6 +681,10 @@ def measure_loop_heads(model, vocab, eot, args):
         r = score(plan_for(turns=[t]))
         rows.append(dict(case="A%d" % (t + 1), turn=t, head=None, d_copy=round(base["copy"] - r["copy"], 4),
                          d_first=round(base["first"] - r["first"], 4), d_normal=round(base["normal"] - r["normal"], 4)))
+        if t > 0 or model.first_turn_facts:                # FactUnits alt adimi yok (tur 1'de takim yok)
+            r = score(plan_for(facts=[t]))
+            rows.append(dict(case="F%d" % (t + 1), turn=t, head=None, d_copy=round(base["copy"] - r["copy"], 4),
+                             d_first=round(base["first"] - r["first"], 4), d_normal=round(base["normal"] - r["normal"], 4)))
         _say("tur %d bitti" % (t + 1))
     heads = [r for r in rows if r["head"] is not None]
     for r in heads:                                     # secicilik: kopya kaybi - normal metin kaybi
@@ -659,8 +699,15 @@ def measure_loop_heads(model, vocab, eot, args):
     # kendini besleme egrisi ve acgozlu uretim, secici head'ler kapali
     gens = {}
     prompts = [[eot] + encode(s, vocab) for s in PROMPTS]
-    for name in ("none", "top3", "top8"):
-        plan = I._plan(model) if name == "none" else plan_for(heads=[(x["turn"], x["head"]) for x in picks[name]])
+    T1 = model.turns - 1
+    fact_cases = {"F%d" % (T1 + 1): [T1], "F%d+F%d" % (T1, T1 + 1): [T1 - 1, T1]}
+    for name, fs in fact_cases.items():
+        r = score(plan_for(facts=fs))
+        combos[name] = dict(heads=[name], d_copy=round(base["copy"] - r["copy"], 4),
+                            d_first=round(base["first"] - r["first"], 4), d_normal=round(base["normal"] - r["normal"], 4))
+    for name in ("none", "top3", "top8") + tuple(fact_cases):
+        plan = (I._plan(model) if name == "none" else plan_for(facts=fact_cases[name]) if name in fact_cases
+                else plan_for(heads=[(x["turn"], x["head"]) for x in picks[name]]))
         g = _greedy_with_plan(model, prompts, args.ablate_tokens, eot, plan)
         gens[name] = [dict(prompt=s, text=decode(x, vocab), **_loop_stats(p, x)) for s, p, x in zip(PROMPTS, prompts, g)]
         _say("uretim %s: dongu %d/%d" % (name, sum(r["loop_first"] is not None for r in gens[name]), len(gens[name])))
@@ -698,7 +745,7 @@ def text_loop_heads(res):
     heads = sorted([r for r in res["rows"] if r["head"] is not None], key=lambda r: -r["selective"])
     for r in heads[:20]:
         L.append("%-8s %7.4f %7.4f %8.4f %8.4f" % (r["case"], r["d_copy"], r["d_first"], r["d_normal"], r["selective"]))
-    L += ["", "## tur attention'i kapali (A<t>)", "case      Δkopya  Δilk    Δnormal"]
+    L += ["", "## tur attention'i (A<t>) / FactUnits'i (F<t>) kapali", "case      Δkopya  Δilk    Δnormal"]
     for r in [r for r in res["rows"] if r["head"] is None]:
         L.append("%-8s %7.4f %7.4f %8.4f" % (r["case"], r["d_copy"], r["d_first"], r["d_normal"]))
     L += ["", "## birlikte kapali"]
