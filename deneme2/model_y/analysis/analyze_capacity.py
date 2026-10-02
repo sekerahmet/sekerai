@@ -558,10 +558,13 @@ def freq_threshold(count_res, fact_res, key="near", criterion="correct_best_any"
     kirli (E2 R1).  -> (satirlar, ozet)."""
     import numpy as np
     # cevap ozneyle basliyorsa (Mexico City / Mexico) ozne cevabin icinde sayilir: sayim anlamsiz, disarida
-    keep = np.array([(kinds_only is None or c["kind"] in kinds_only) and not (drop_noisy and c["noisy"])
-                     and not c["answer"].startswith(c["subject"]) for c in count_res["counts"]])
-    counts = np.array([c[key] for c in count_res["counts"]], dtype=float)[keep]
-    kinds = np.array([c["kind"] for c in count_res["counts"]])[keep]
+    by_prompt = {c["prompt"]: c for c in count_res["counts"]}
+    order = [by_prompt.get(f.get("forward_prompt", f["prompt"])) for f in fact_res[0]["facts"]]
+    keep = np.array([c is not None and f["kind"] not in ("prior",) and (kinds_only is None or c["kind"] in kinds_only)
+                     and not (drop_noisy and c["noisy"]) and not c["answer"].startswith(c["subject"])
+                     for c, f in zip(order, fact_res[0]["facts"])])
+    counts = np.array([c[key] if c else 0 for c in order], dtype=float)[keep]
+    kinds = np.array([c["kind"] if c else "" for c in order])[keep]
     x = np.log10(1 + counts)
     # top1: dogru, ilk ayrisan token'da butun sozlukte en olasi (sans tabani 0); oteki olcutler 5'li kapali aday
     floor = 0.0 if criterion == "top1" else 1.0 / (1 + FREQ_DISTRACTORS)
@@ -607,6 +610,126 @@ def freq_threshold(count_res, fact_res, key="near", criterion="correct_best_any"
         L.append("%-12s %s | %.0f [%.0f, %.0f]  bilinen %.2f  %s" % (
             r["label"][-12:], " ".join(cells), t, lo, hi, y.mean(), " ".join("%s %.2f" % kv for kv in per_kind.items())))
     return L, summary
+
+
+# ---- sert celdiriciler (oneri 2): baskentte en buyuk sehir + ayni bolgenin baskentleri, sembolde ayni bas harf, yilda +-1/+-2
+REGIONS = (
+    "Afghanistan Bangladesh Bhutan India Iran Nepal Pakistan Kyrgyzstan Tajikistan Turkmenistan Uzbekistan",
+    "Cambodia China Indonesia Japan Laos Malaysia Mongolia North_Korea Philippines South_Korea Taiwan Thailand Vietnam",
+    "Iraq Jordan Kuwait Lebanon Oman Qatar Saudi_Arabia Syria Turkey United_Arab_Emirates Bahrain Cyprus Israel",
+    "Austria Belgium Denmark Finland France Germany Iceland Ireland Netherlands Norway Portugal Spain Sweden "
+    "Switzerland United_Kingdom Italy Greece Malta",
+    "Albania Belarus Bulgaria Croatia Czech_Republic Estonia Hungary Latvia Lithuania Poland Romania Russia Serbia "
+    "Slovakia Slovenia Ukraine Macedonia Montenegro Bosnia Armenia Azerbaijan",
+    "Algeria Egypt Libya Morocco Tunisia Sudan Mauritania Mali Niger",
+    "Ethiopia Kenya Rwanda Somalia Tanzania Uganda Eritrea Madagascar Malawi Mozambique Zambia Zimbabwe Angola Botswana "
+    "Namibia",
+    "Ghana Nigeria Senegal Liberia Sierra_Leone Burkina_Faso Gabon Togo",
+    "Canada United_States Mexico Cuba Jamaica Haiti Dominican_Republic Honduras Guatemala El_Salvador Costa_Rica "
+    "Nicaragua Bahamas",
+    "Argentina Brazil Chile Colombia Ecuador Paraguay Peru Uruguay Venezuela",
+    "Australia New_Zealand Fiji Papua_New_Guinea",
+)
+# baskenti olmayan en buyuk (ya da en bilinen) sehir: klasik tuzak
+LARGEST_CITY = {
+    "Australia": "Sydney", "Canada": "Toronto", "Brazil": "Rio de Janeiro", "Turkey": "Istanbul",
+    "United States": "New York", "Switzerland": "Zurich", "India": "Mumbai", "Pakistan": "Karachi", "Nigeria": "Lagos",
+    "Morocco": "Casablanca", "Vietnam": "Ho Chi Minh City", "Syria": "Aleppo", "New Zealand": "Auckland",
+    "Tanzania": "Dar es Salaam", "Ecuador": "Guayaquil", "China": "Shanghai", "Bolivia": "La Paz",
+    "Kazakhstan": "Almaty", "Israel": "Tel Aviv", "Italy": "Milan", "Germany": "Munich", "Spain": "Barcelona",
+    "Russia": "Saint Petersburg", "Japan": "Osaka", "Egypt": "Alexandria", "Saudi Arabia": "Jeddah",
+    "United Arab Emirates": "Dubai", "Malta": "Sliema", "Philippines": "Quezon City", "Netherlands": "Rotterdam",
+    "Scotland": "Glasgow", "Belize": "Belize City", "Cameroon": "Douala", "Libya": "Benghazi", "Kenya": "Mombasa",
+    "Ghana": "Kumasi", "Iraq": "Basra", "Iran": "Mashhad", "Peru": "Cusco", "Chile": "Valparaiso",
+    "Colombia": "Medellin", "Argentina": "Cordoba", "Mexico": "Guadalajara", "Ukraine": "Kharkiv", "Poland": "Krakow",
+    "Indonesia": "Surabaya", "Thailand": "Chiang Mai", "South Korea": "Busan", "Portugal": "Porto",
+    "Venezuela": "Maracaibo", "Uzbekistan": "Samarkand", "Gabon": "Port-Gentil", "Honduras": "San Pedro Sula",
+}
+HARD_YEAR_OFFSETS = (-2, -1, 1, 2)
+
+
+def freq_facts_hard():
+    """freq_facts'in ayni istemleri, sert celdiricilerle (tohum 0).  Baskent: en buyuk sehir (varsa) + ayni bolgenin
+    baskentleri; sembol: ayni bas harfle baslayan semboller (bas harf kurali ise yaramaz), eksik kalirsa rastgele; tarih
+    +-1/+-2.  Istemler ve ozneler freq_facts ile ayni: freq_count sayimi istemle eslesir."""
+    import random
+    rng = random.Random(0)
+    base = {f["prompt"]: f for f in freq_facts()}
+    region_of = {c.replace("_", " "): k for k, line in enumerate(REGIONS) for c in line.split()}
+    cap_of = {subject: capital for _, subject, capital, _ in CAPITALS}
+    out = []
+    for country, subject, capital, also in CAPITALS:
+        f = dict(base["The capital of %s is" % country])
+        same = [cap_of[c] for c, k in region_of.items() if k == region_of.get(subject) and c in cap_of and c != subject]
+        wrong = [LARGEST_CITY[subject]] if subject in LARGEST_CITY else []
+        pool = [c for c in same if c != capital and c not in wrong]
+        wrong += rng.sample(pool, min(FREQ_DISTRACTORS - len(wrong), len(pool)))
+        rest = [c[2] for c in CAPITALS if c[2] != capital and c[2] not in wrong]
+        wrong += rng.sample(rest, FREQ_DISTRACTORS - len(wrong))
+        f["wrong"] = tuple(" " + w for w in wrong)
+        f["trap"] = subject in LARGEST_CITY
+        out.append(f)
+    syms = [e[1] for e in ELEMENTS]
+    for name, sym in ELEMENTS:
+        f = dict(base["The chemical symbol for %s is" % name])
+        pool = [x for x in syms if x != sym and x[0] == name[0].upper()]
+        wrong = rng.sample(pool, min(FREQ_DISTRACTORS, len(pool)))
+        wrong += rng.sample([x for x in syms if x != sym and x not in wrong], FREQ_DISTRACTORS - len(wrong))
+        f["wrong"] = tuple(" " + w for w in wrong)
+        out.append(f)
+    for prompt, subject, year in DATES:
+        f = dict(base[prompt])
+        f["wrong"] = tuple(" %d" % (int(year) + k) for k in HARD_YEAR_OFFSETS)
+        out.append(f)
+    return out
+
+
+# ---- ters yon, butun tarihler (oneri 3): "In <yil>," -> olay; ayni yilin oteki olaylari kabul, celdirici baska yillardan
+REVERSE_DISTRACTORS = 5
+REVERSE_PRIOR = "In that year,"
+
+
+def _event_clause(prompt):
+    """'The French Revolution began in' -> ' the French Revolution began' (son 'in' / 'around' atilir)."""
+    words = prompt.split()
+    while words[-1] in ("in", "around"):
+        words.pop()
+    if words[0] == "The":
+        words[0] = "the"
+    return " " + " ".join(words)
+
+
+def reverse_dates_facts():
+    """kind reverse: istem 'In <yil>,', dogru o yilin olayi, also ayni yilin oteki olaylari, wrong baska yillardan 5 olay;
+    kind prior: ayni olay notr istemle (kalibrasyon: nll(olay | yil) - nll(olay | notr))."""
+    import random
+    rng = random.Random(0)
+    events = [(_event_clause(p), y, p) for p, _, y in DATES]
+    out = []
+    for event, year, prompt in events:
+        same = tuple(e for e, y, _ in events if y == year and e != event)
+        pool = [e for e, y, _ in events if y != year]
+        out.append(dict(kind="reverse", prompt="In %s," % year, answer=event, also=same,
+                        wrong=tuple(rng.sample(pool, REVERSE_DISTRACTORS)), tail=".", forward_prompt=prompt))
+    for event, year, prompt in events:
+        out.append(dict(kind="prior", prompt=REVERSE_PRIOR, answer=event, also=(), wrong=(events[0][0] if event !=
+                        events[0][0] else events[1][0],), tail=".", forward_prompt=prompt))
+    return out
+
+
+def reverse_summary(result):
+    """Ham ve kalibre: dogru (ya da ayni yilin olayi) 5 celdiricinin hepsinden iyi mi; marj (nat)."""
+    prior = {x["answer"]: x["answer_nll"] for x in result["facts"] if x["kind"] == "prior"}
+    rows = [x for x in result["facts"] if x["kind"] == "reverse"]
+    raw, cal = [], []
+    for x in rows:
+        right = [(x["answer"], x["answer_nll"])] + [(a["text"], a["answer_nll"]) for a in x["also"]]
+        wrong = [(w["text"], w["answer_nll"]) for w in x["wrong"]]
+        raw.append(min(v for _, v in wrong) - min(v for _, v in right))
+        cal.append(min(v - prior.get(t, 0.0) for t, v in wrong) - min(v - prior.get(t, 0.0) for t, v in right))
+    return dict(n=len(rows), acc=sum(m > 0 for m in raw) / len(rows), acc_calibrated=sum(m > 0 for m in cal) / len(rows),
+                margin=sum(raw) / len(rows), margin_calibrated=sum(cal) / len(rows),
+                margins=[round(m, 3) for m in raw], margins_calibrated=[round(m, 3) for m in cal])
 
 
 # ---- yon asimetrisi (ajan L, Sorun 3): ayni 6 olay-yil olgusu iki yonde, kapali 6'li aday kumesiyle
@@ -691,7 +814,8 @@ def freq_lines(results, facts):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="analyze_capacity.py", description=__doc__.split("\n\n")[0])
     ap.add_argument("run", help="kosu klasoru")
-    ap.add_argument("measure", choices=("facts", "freq_facts", "freq_count", "freq_threshold", "direction"))
+    ap.add_argument("measure", choices=("facts", "freq_facts", "freq_facts_hard", "freq_count", "freq_threshold",
+                                        "direction", "reverse_dates"))
     ap.add_argument("--data", required=True, help="FineWeb koku (gpt2/tokenizer.json, gpt2/shard_*)")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--steps", default="", help="checkpoint adimlari: '2000,4000' ya da 'every:K' ya da 'all'")
@@ -730,7 +854,8 @@ def main(argv=None):
         print("yazildi: %s" % path)
         return
     config = I._config(args.run)
-    facts = FACTS if args.measure == "facts" else freq_facts() if args.measure == "freq_facts" else direction_facts()
+    facts = dict(facts=lambda: FACTS, freq_facts=freq_facts, freq_facts_hard=freq_facts_hard, direction=direction_facts,
+                 reverse_dates=reverse_dates_facts)[args.measure]()
     seqs = build_sequences(tok, eot, facts)
     bad = [s["text"] for s in seqs if not s["joint_ok"]]
     print("olgu %d, aday %d; ayri/birlesik kodlama farkli: %s" % (len(facts), len(seqs), bad or "yok"), flush=True)
@@ -743,7 +868,7 @@ def main(argv=None):
                  [s for s in packs if s % int(spec[6:]) == 0] if spec.startswith("every:") else [int(s) for s in spec.split(",")])
         sets = weight_sets(args.run, steps, [x for x in args.finals.split(",") if x], config)
     results = []
-    name = dict(facts="capacity_facts", freq_facts="capacity_freq_facts", direction="capacity_direction")[args.measure]
+    name = "capacity_" + args.measure
     payload = lambda: dict(measure=args.measure, run=config.get("name"), selftest=args.selftest,
                            secs=round(time.time() - t0, 1),
                            facts=[dict(f, wrong=list(f["wrong"]), also=list(f.get("also", ()))) for f in facts],
@@ -757,13 +882,22 @@ def main(argv=None):
                             ema_init_share=EMA_DECAY ** step if kind == "ema" and step else None))
         if args.measure == "direction":
             results[-1]["direction"] = direction_summary(results[-1])
+        if args.measure == "reverse_dates":
+            results[-1]["reverse"] = reverse_summary(results[-1])
         print("   %s: dogru en iyi %d / %d" % (label, sum(x["correct_best_any"] for x in results[-1]["facts"]), len(facts)),
               flush=True)
         path = _write(args, name, payload(), path)              # her yedekten sonra: kesilirse kismi sonuc kalir
         del model
         if args.device.startswith("cuda"):
             torch.cuda.empty_cache()
-    if args.measure == "direction":
+    if args.measure == "reverse_dates":
+        print("## ters yon, %d tarih: 'In <yil>,' -> olay; dogru (ya da ayni yilin olayi) %d celdiriciden iyi mi -- "
+              "ham / kalibre dogruluk, ortalama marj (nat)" % (len(DATES), REVERSE_DISTRACTORS))
+        for r in results:
+            v = r["reverse"]
+            print("%-14s %.2f / %.2f  marj %.2f / %.2f" % (r["label"][-14:], v["acc"], v["acc_calibrated"], v["margin"],
+                                                           v["margin_calibrated"]))
+    elif args.measure == "direction":
         print("## yon: 6'li kapali aday, sans 0,17 -- ham / kalibre dogruluk, ortalama marj (nat)")
         for r in results:
             print("%-14s %s" % (r["label"][-14:], "   ".join("%s %.2f / %.2f  marj %.2f / %.2f" % (
