@@ -300,6 +300,7 @@ def real_step_ms(config, batch, device, K=2, micro=None, rows=None, model_kw=Non
             info.update(flops=model_flops(model), params=sum(p.numel() for p in model.parameters()),
                         body=sum(p.numel() for k, p in model.named_parameters() if not k.startswith(("tokens.", "input_"))))
         info["nll"] = nll
+        info.setdefault("nll_by_step", []).append((step, nll))
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
@@ -798,6 +799,135 @@ def tune_measure(args, config, device):
     write(args.run, "tune", res)
 
 
+# ---- flex'in eğitimdeki tipi (matematikci O1): q, k, v fp32 mi, hangi kernel_options
+
+@contextlib.contextmanager
+def flex_recorder(log):
+    """model_y'nin flex cagrisini kaydeder (tip, kernel_options; derlenmiste izleme aninda), hesap degismez.  queries_keys'in
+    cikti tipi de (q, k: k.to(q.dtype) oncesi)."""
+    flex, qk = M._flex_compiled, M.CausalAttention.queries_keys
+
+    def record_flex(q, k, v, block_mask=None, scale=None, kernel_options=None):
+        log.append(dict(call="flex", q=str(q.dtype), k=str(k.dtype), v=str(v.dtype), kernel_options=kernel_options))
+        return flex(q, k, v, block_mask=block_mask, scale=scale, kernel_options=kernel_options)
+
+    def record_qk(self, x, positions=None):
+        q, k = qk(self, x, positions)
+        log.append(dict(call="queries_keys", x=str(x.dtype), q=str(q.dtype), k=str(k.dtype),
+                        W_value_out=str((x[..., :1, :] @ self.W_value.T).dtype) if self.heads > 1 else None))
+        return q, k
+    M._flex_compiled, M.CausalAttention.queries_keys = record_flex, record_qk
+    torch._dynamo.reset()
+    try:
+        yield
+    finally:
+        M._flex_compiled, M.CausalAttention.queries_keys = flex, qk
+        torch._dynamo.reset()
+
+
+@contextlib.contextmanager
+def flex_cast(dtype=torch.bfloat16, options=None):
+    """ONERI (O1): flex'e fp32 gelen q, k, v autocast tipine (bf16) cevrilir, fp32 icin konan kucuk blok secenegi yerine
+    `options` (None: varsayilan); cikti bf16.  fp32 olmayan cagri ve CPU yolu degismez."""
+    from torch.nn.attention.flex_attention import flex_attention
+    original = M._flex_compiled
+
+    def cast(q, k, v, block_mask=None, scale=None, kernel_options=None):
+        if q.dtype == torch.float32:
+            q, k, v, kernel_options = q.to(dtype), k.to(dtype), v.to(dtype), options
+        return flex_attention(q, k, v, block_mask=block_mask, scale=scale, kernel_options=kernel_options)
+    M._flex_compiled = torch.compile(cast, dynamic=False)
+    torch._dynamo.reset()
+    try:
+        yield
+    finally:
+        M._flex_compiled = original
+        torch._dynamo.reset()
+
+
+def flexdtype_measure(args, config, device):
+    gpu = torch.cuda.get_device_name(0)
+    peak = peak_for(gpu)
+    say("analyze_speed flexdtype | %s | torch %s | %s" % (time.strftime("%Y-%m-%d %H:%M"), torch.__version__, gpu))
+    total_rows = config["batch_size"] * config["micro_batches"]
+    batch = packed_batches(args.data, total_rows, 1, config["seq_len"])[0][0]
+    keys, targets = keys_per_target(batch)
+    res = dict(gpu=gpu, torch=torch.__version__)
+    # 1) gercek egitim yolu: train_seq'in kurulumu, bir parca, autocast bf16; eager ve derlenmis (izleme ani)
+    with guarded("kayit", res):
+        ctx = setup(config, device, config["vocab"])
+        model = ctx["model"]
+        one = tuple(t[0::config["micro_batches"]][:config["batch_size"]].contiguous().to(device) for t in batch)
+        for mode in ("eager", "compiled"):
+            log = []
+            with flex_recorder(log):
+                fn = torch.compile(model.loss, dynamic=False) if mode == "compiled" else model.loss
+                with fwd_context(ctx):
+                    fn(*one)
+            res["record_" + mode] = log[:4]
+            say("KAYIT %s (autocast %s): %s" % (mode, ctx["bf16"], " | ".join(
+                ", ".join("%s=%s" % (k, v) for k, v in e.items()) for e in log[:2])))
+        del ctx, model
+        torch.cuda.empty_cache()
+    # 2) sadakat: egitilmis model, bir satir; fp32 (autocast yok) referans, bugunku autocast, bf16 flex
+    with guarded("sadakat", res):
+        model = I._load_model(args.run, "last").to(device).requires_grad_(True)
+        ids, mask, pos = (t[:1].contiguous().to(device) for t in batch)
+        outs = {}
+        for label, auto, cast in (("fp32 referans", False, False), ("bugunku (autocast)", True, False),
+                                  ("bf16 flex", True, True)):
+            with (flex_cast() if cast else contextlib.nullcontext()):
+                ac = torch.autocast("cuda", dtype=torch.bfloat16) if auto else contextlib.nullcontext()
+                with torch.no_grad(), ac:
+                    logits = model.logits(ids[:, :-1], None, pos[:, :-1]).float()
+                with ac:
+                    total, nll = model.loss(ids, mask, pos)
+                total.backward()
+                grad = torch.cat([p.grad.flatten() for p in model.parameters() if p.grad is not None]).float()
+                model.zero_grad(set_to_none=True)
+            outs[label] = dict(logits=logits, nll=float(nll.detach()), grad=grad)
+        ref, base, var = (outs[k] for k in ("fp32 referans", "bugunku (autocast)", "bf16 flex"))
+        valid = mask[0, 1:]
+
+        def compare(a, b):
+            d = (a["logits"] - b["logits"])[0][valid]
+            return dict(logits_maxdiff=float(d.abs().max()), logits_meandiff=float(d.abs().mean()),
+                        top1_agree=float((a["logits"][0][valid].argmax(-1) == b["logits"][0][valid].argmax(-1)).float().mean()),
+                        nll_diff=a["nll"] - b["nll"], grad_rel=float((a["grad"] - b["grad"]).norm() / b["grad"].norm()))
+        res["fidelity"] = {"bugunku - fp32": compare(base, ref), "bf16 flex - fp32": compare(var, ref),
+                           "bf16 flex - bugunku": compare(var, base)}
+        for k, r in res["fidelity"].items():
+            say("SADAKAT %-22s logits max %.3e ort %.3e | top1 ayni %.4f | nll farki %+.2e | gradyan goreli %.3e" % (
+                k, r["logits_maxdiff"], r["logits_meandiff"], r["top1_agree"], r["nll_diff"], r["grad_rel"]))
+        del model, outs, ref, base, var
+        torch.cuda.empty_cache()
+    # 3) train_seq'in kendisi (F1): ms/adim, bellek, nll yolu (ayni tohum, ayni batch)
+    K = args.real or 3
+    res["variants"] = []
+    base_ms = None
+    for label, cast, options, micro in (("bugunku", False, None, None), ("bf16 flex", True, None, None),
+                                        ("bf16 flex + geri bloklari 32/64/64/32", True, FLEX_BWD_OPTIONS, None),
+                                        ("bf16 flex + 8 parca x 8 satir", True, None, 8)):
+        try:
+            with (flex_cast(options=options) if cast else contextlib.nullcontext()):
+                info = real_step_ms(config, batch, device, K=K, micro=micro,
+                                    rows=None if micro is None else total_rows // micro)
+        except Exception:
+            say("HATA %s: %s" % (label, traceback.format_exc()[-800:]))
+            continue
+        finally:
+            torch._dynamo.reset()
+            torch.cuda.empty_cache()
+        base_ms = base_ms or info["step_ms"]
+        mfu = train_flops(info["flops"], targets, keys) / (info["step_ms"] / 1e3) / peak
+        res["variants"].append(dict(label=label, step_ms=info["step_ms"], peak_gb=info["peak_gb"], mfu=mfu,
+                                    tokens_per_sec=targets / (info["step_ms"] / 1e3), nll_by_step=info["nll_by_step"]))
+        say("%-40s %6.0f ms/adim (%+.1f%%)  %6.0f token/sn  MFU %.1f%%  tepe %.1f GB  nll %s" % (
+            label, info["step_ms"], 100 * (info["step_ms"] / base_ms - 1), targets / (info["step_ms"] / 1e3), 100 * mfu,
+            info["peak_gb"], " ".join("t%d %.6f" % s for s in info["nll_by_step"])))
+    write(args.run, "flexdtype", res)
+
+
 # ---- buyuk model adaylari
 
 CANDIDATES = (("d1024_8x2 (bugunku)", dict(d=1024, layers=8, turns=16, heads=8, units=2752), 4),
@@ -1147,7 +1277,7 @@ def generate_measure(args, config, device):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("run", help="kosu klasoru (config.json)")
-    ap.add_argument("measure", nargs="?", choices=("train", "sizes", "generate", "tune"))
+    ap.add_argument("measure", nargs="?", choices=("train", "sizes", "generate", "tune", "flexdtype"))
     ap.add_argument("--data", help="FineWeb koku (gpt2/shard_013 ...); yoksa rastgele token")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--steps", type=int, default=3, help="train: parca parca olculen adim")
@@ -1171,7 +1301,8 @@ def main():
             {"train": train_measure, "sizes": sizes_measure, "generate": generate_measure}[m](args, config, "cpu")
         return
     config = I._config(args.run)
-    {"train": train_measure, "sizes": sizes_measure, "generate": generate_measure, "tune": tune_measure}[args.measure](
+    {"train": train_measure, "sizes": sizes_measure, "generate": generate_measure, "tune": tune_measure,
+     "flexdtype": flexdtype_measure}[args.measure](
         args, config, args.device)
 
 
