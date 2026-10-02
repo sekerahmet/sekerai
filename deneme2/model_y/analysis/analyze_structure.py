@@ -1281,6 +1281,336 @@ def _text_points(res):
     return L
 
 
+# ---- 8. dongu Faz 0 (13_dongu_faz0_matematik §5): O5, O6, O8, O9 (loop) ve O10, O11 (answers)
+
+PLATEAU = (0.30, 0.45)
+DEAD_POINT_NOTE = "phi'nin olu noktasi c* = -1/q (u = 0)"
+
+
+def _output_parts(model):
+    """(s, q, u): z = s phi(c); phi(c) = c + q c^2 + (q^2/3 + u) c^3."""
+    s = float(model.scale * math.exp(float(model.log_output_scale) - math.log(model.scale))) if model.learn_output_scale \
+        else float(model.scale)
+    q = float(model.link_q) if model.output_link else 0.0
+    u = float(model.link_u) if model.output_link else 0.0
+    return s, q, u
+
+
+def _induction_pred(seq):
+    """Konum t icin: x_t'nin en son onceki gecisinin devami (yoksa -1)."""
+    last, out = {}, []
+    for t, x in enumerate(seq):
+        out.append(seq[last[x] + 1] if x in last else -1)
+        last[x] = t
+    return out
+
+
+@torch.no_grad()
+def _target_geometry(model, stories, batch):
+    """Gecerli konumlarda: c_y, c_top, dogru mu, induction sinifi (0 yok, 1 tahmin = hedef, 2 tahmin != hedef), ve
+    ∂L/∂u'nun konum payi s (E_p c^3 - c_y^3)."""
+    P = model.tokens.points()
+    s, q, u = _output_parts(model)
+    out = {k: [] for k in ("cy", "ctop", "hit", "ind", "gu", "py")}
+    for x, valid, idx in _stories_batches(stories, batch, P.device):
+        inp, y = x[:, :-1], x[:, 1:]
+        h = model.hidden(inp)[-1][valid]
+        yv = y[valid]
+        pred = torch.tensor([_induction_pred(stories[i][:inp.shape[1]]) + [-1] * (inp.shape[1] - len(stories[i][:inp.shape[1]]))
+                             for i in idx], device=P.device)[:, :inp.shape[1]][valid]
+        for c0 in range(0, len(h), 2048):
+            hh, yy, pp = h[c0:c0 + 2048], yv[c0:c0 + 2048], pred[c0:c0 + 2048]
+            c = (hh @ P.T).float()
+            z = I._work(I._scores(model, hh, P))
+            p = torch.softmax(z, -1)
+            cy = c.gather(-1, yy[:, None])[:, 0]
+            top = z.argmax(-1)
+            out["cy"].append(cy.cpu())
+            out["ctop"].append(c.gather(-1, top[:, None])[:, 0].cpu())
+            out["hit"].append((top == yy).cpu())
+            out["ind"].append(torch.where(pp < 0, 0, torch.where(pp == yy, 1, 2)).cpu())
+            out["gu"].append((s * ((p * c ** 3).sum(-1) - cy ** 3)).cpu())
+            out["py"].append(p.gather(-1, yy[:, None])[:, 0].cpu())
+    return {k: torch.cat(v).numpy() for k, v in out.items()}
+
+
+def _hist(v, lo=-0.2, hi=1.0, w=0.02):
+    edges = np.arange(lo, hi + 1e-9, w)
+    return np.histogram(np.clip(v, lo, hi - 1e-9), edges)[0].tolist()
+
+
+def _cos_classes(g):
+    """O5 / O6 siniflari: induction (yok / tahmin = hedef / tahmin != hedef) x top-1 (dogru / yanlis)."""
+    names = {0: "induction yok", 1: "induction = hedef", 2: "induction != hedef"}
+    rows = []
+    gu_total = float(g["gu"].sum())
+    for k in (0, 1, 2):
+        for hit in (True, False):
+            m = (g["ind"] == k) & (g["hit"] == hit)
+            if not m.any():
+                continue
+            cy, ct = g["cy"][m], g["ctop"][m]
+            rows.append(dict(cls=names[k], top1="dogru" if hit else "yanlis", n=int(m.sum()),
+                             cy_q=np.quantile(cy, [0.1, 0.25, 0.5, 0.75, 0.9]).tolist(),
+                             plateau=float(((cy >= PLATEAU[0]) & (cy <= PLATEAU[1])).mean()), above055=float((cy > 0.55).mean()),
+                             ctop_median=float(np.median(ct)), ctop_plateau=float(((ct >= PLATEAU[0]) & (ct <= PLATEAU[1])).mean()),
+                             gu_sum=float(g["gu"][m].sum()), gu_share=float(g["gu"][m].sum() / gu_total) if gu_total else 0.0,
+                             gu_mean=float(g["gu"][m].mean()), gu_se=float(g["gu"][m].std() / math.sqrt(m.sum())),
+                             hist=_hist(cy)))
+    return rows, gu_total
+
+
+@torch.no_grad()
+def _repeat_geometry(model, seqs, period):
+    """seqs: [eot] + parca x k (parca boyu period).  O8: tur basina (her durum) gecis k ile k+1 arasi ayni konumda kosinus;
+    O9: gecis basina hedefin c_y'si, log p_y, en guclu rakibin c'si, rakiplerin log toplami (z_y haric)."""
+    P = model.tokens.points()
+    s, q, u = _output_parts(model)
+    names = _state_names_for(model)
+    K = (len(seqs[0]) - 1) // period
+    cosk = np.zeros((len(names), K - 1))
+    o9 = {k: dict(cy=[], lp=[], crival=[], lse_rival=[], zy=[]) for k in range(K)}
+    for seq in seqs:
+        x = torch.tensor([seq], device=P.device)
+        states = I._states(model, x[:, :-1], I._plan(model), P)
+        for j, st in enumerate(states):
+            h = st[0]
+            for k in range(K - 1):
+                a = h[1 + k * period:1 + (k + 1) * period]
+                b = h[1 + (k + 1) * period:1 + (k + 2) * period]
+                m = min(len(a), len(b))                         # son gecis girdide bir token kisa
+                cosk[j, k] += float(F.cosine_similarity(a[:m], b[:m], dim=-1).mean())
+        h = states[-1][0]
+        y = x[0, 1:]
+        c = (h @ P.T).float()
+        z = I._work(I._scores(model, h, P))
+        lp = torch.log_softmax(z, -1).gather(-1, y[:, None])[:, 0]
+        cy = c.gather(-1, y[:, None])[:, 0]
+        zy = z.gather(-1, y[:, None])[:, 0]
+        zr, cr = z.clone(), c.clone()
+        zr.scatter_(-1, y[:, None], float("-inf"))
+        cr.scatter_(-1, y[:, None], float("-inf"))
+        lse_r = torch.logsumexp(zr, -1)
+        for k in range(K):
+            sl = slice(k * period + 1, (k + 1) * period)       # gecisin ilk hedefi (parca siniri) haric
+            for key, v in (("cy", cy), ("lp", lp), ("crival", cr.max(-1).values), ("lse_rival", lse_r), ("zy", zy)):
+                o9[k][key].append(v[sl].cpu().numpy())
+    cosk /= len(seqs)
+    o9r = []
+    for k in range(K):
+        d = {key: np.concatenate(v) for key, v in o9[k].items()}
+        p = np.exp(d["lp"])
+        o9r.append(dict(pass_=k + 1, n=len(p), p_mean=float(p.mean()), cy_median=float(np.median(d["cy"])),
+                        cy_mean=float(d["cy"].mean()), cy_se=float(d["cy"].std() / math.sqrt(len(p))),
+                        crival_median=float(np.median(d["crival"])), lse_rival_median=float(np.median(d["lse_rival"])),
+                        zy_median=float(np.median(d["zy"])), cy_pred_single_rival=_c_from_p(float(np.median(p)), s, q, u)))
+    ratio = (1 - cosk[:, 1:]) / np.clip(1 - cosk[:, :-1], 1e-9, None)
+    return dict(states=names, cos=cosk, ratio=ratio, o9=o9r, sequences=len(seqs), period=period, passes=K)
+
+
+def _state_names_for(model):
+    return I._state_names(model)[0]
+
+
+def _c_from_p(p, s, q, u, rival_z=25.7):
+    """'Tek etkin rakip, plato duzeyinde z = rival_z' varsayimiyla p'den c (13 §2d): s phi(c) = rival_z + logit(p)."""
+    target = rival_z + math.log(p / max(1 - p, 1e-12))
+    lo, hi = -1.0, 1.0
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        if s * (mid + q * mid ** 2 + (q * q / 3 + u) * mid ** 3) < target:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+def loop_geometry(model, test, sentences, randoms, batch=8, log=print):
+    t0 = time.time()
+    s, q, u = _output_parts(model)
+    g = _target_geometry(model, test, batch)
+    rows, gu_total = _cos_classes(g)
+    log("O5/O6 (%d konum, %.0f sn)" % (len(g["cy"]), time.time() - t0))
+    rep = {}
+    for name, seqs, period in (("cumle", sentences[0], sentences[1]), ("rastgele", randoms[0], randoms[1])):
+        if seqs:
+            rep[name] = _repeat_geometry(model, seqs, period)
+    log("O8/O9 (%.0f sn)" % (time.time() - t0))
+    return dict(s=s, q=q, u=u, dead_point=(-1 / q if q < 0 and u == 0 else None), n=len(g["cy"]), classes=rows,
+                gu_total=gu_total, gu_mean=float(g["gu"].mean()), gu_se=float(g["gu"].std() / math.sqrt(len(g["gu"]))),
+                hist_all=_hist(g["cy"]), repeat=rep)
+
+
+def _text_loop(res):
+    L = ["## O5 / O6: hedef kosinusu c_y = <h16, P_y> (%d test konumu); s %.1f q %.3f u %.4f; %s %.3f; plato %.2f-%.2f" % (
+        res["n"], res["s"], res["q"], res["u"], DEAD_POINT_NOTE, res["dead_point"] or float("nan"), *PLATEAU),
+         "sinif                 top1   |      n | c_y %10 %25 med %75 %90       | platoda | >0,55 | c_top med (platoda) | "
+         "∂L/∂u payi (ort ± se)"]
+    for r in res["classes"]:
+        L.append("%-21s %-6s | %6d | %s | %.3f   | %.3f | %.3f (%.3f)       | %+.3f (%+.3f ± %.3f)" % (
+            r["cls"], r["top1"], r["n"], " ".join("%.3f" % v for v in r["cy_q"]), r["plateau"], r["above055"],
+            r["ctop_median"], r["ctop_plateau"], r["gu_share"], r["gu_mean"], r["gu_se"]))
+    L.append("∂L/∂u toplam (konum ortalamasi) %+.4f ± %.4f; pozitif = tahmin kutlesi hedeften yuksek c^3'te (u'yu sifira "
+             "iter)" % (res["gu_mean"], res["gu_se"]))
+    L.append("c_y histogrami (butun konumlar, -0,2..1,0, 0,02'lik): " + " ".join(str(v) for v in res["hist_all"]))
+    for name, r in res["repeat"].items():
+        L += ["", "## O8: tekrar (%s, %d dizi, parca %d token, %d gecis): ayni konumda gecis k ile k+1 arasi kosinus; "
+              "buzulme orani (1-cos_{k+1})/(1-cos_k)" % (name, r["sequences"], r["period"], r["passes"]),
+              "durum | " + " ".join("cos k%d-%d" % (k + 1, k + 2) for k in range(r["passes"] - 1)) + " | "
+              + " ".join("oran%d" % (k + 1) for k in range(r["passes"] - 2))]
+        for j, nm in enumerate(r["states"]):
+            if nm in ("h0", "F1") or nm.startswith("A") and nm not in ("A1", "A16"):
+                continue
+            L.append("%-5s | %s | %s" % (nm, " ".join("%8.4f" % v for v in r["cos"][j]),
+                                         " ".join("%6.3f" % v for v in r["ratio"][j])))
+        L += ["", "## O9: gecis basina kopyalanan token (%s); tek rakip varsayimiyla p'den tahmin edilen c ile yan yana" % name,
+              "gecis |    n | p ort | c_y med (ort ± se) | tek-rakip c tahmini | en guclu rakip c med | z_y med | "
+              "log Σ rakip e^z med"]
+        for o in r["o9"]:
+            L.append("%5d | %4d | %.3f | %.3f (%.3f ± %.3f) | %.3f               | %.3f                | %6.2f  | %6.2f" % (
+                o["pass_"], o["n"], o["p_mean"], o["cy_median"], o["cy_mean"], o["cy_se"], o["cy_pred_single_rival"],
+                o["crival_median"], o["zy_median"], o["lse_rival_median"]))
+    return L
+
+
+@torch.no_grad()
+def _last_states(model, prefixes, wanted=("A16", "F16"), batch=32):
+    """Istemlerin son konumunda istenen durumlar -> {ad: (N, d)}."""
+    P = model.tokens.points()
+    names = _state_names_for(model)
+    out = {w: [] for w in wanted}
+    for i in range(0, len(prefixes), batch):
+        part = prefixes[i:i + batch]
+        L = max(len(x) for x in part)
+        x = torch.zeros(len(part), L, dtype=torch.long, device=P.device)
+        for r, pr in enumerate(part):
+            x[r, :len(pr)] = torch.tensor(pr, device=P.device)
+        states = I._states(model, x, I._plan(model), P)
+        last = torch.tensor([len(pr) - 1 for pr in part], device=P.device)
+        for w in wanted:
+            out[w].append(states[names.index(w)][torch.arange(len(part), device=P.device), last])
+    return {w: torch.cat(v) for w, v in out.items()}
+
+
+@torch.no_grad()
+def answer_geometry(model, items, symbol_items, symbol_tokens, metal_tokens, nonmetal_tokens, log=print):
+    """O10: istem sonunda A16 (F16 oncesi) ve F16'da ilk 5 adayin c'si, dogru cevabin c'si ve sirasi.  O11: element
+    istemlerinde c(Au, Cu, Ag, Fe), dogru sembolun c'si; cos(P_Cu, P_Au), metal ortalama yonuyle kosinus."""
+    P = model.tokens.points()
+    pair = tuple(_state_names_for(model)[-2:])                       # son turun attention'i sonrasi / FactUnits sonrasi
+    res = dict(groups={}, symbols={}, pair=pair)
+    for group, its in items.items():
+        st = _last_states(model, [it["prefix"] for it in its], wanted=pair)
+        rows = []
+        for i, it in enumerate(its):
+            r = dict(label=it["label"], right=it["right"])
+            for w in pair:
+                c = (st[w][i] @ P.T).float()
+                top = c.topk(5)
+                r[w] = dict(top_c=top.values.tolist(), top_id=top.indices.tolist(), right_c=float(c[it["right"]]),
+                            right_rank=int((c > c[it["right"]]).sum()) + 1)
+            rows.append(r)
+        agg = {}
+        for w in pair:
+            tc = np.array([r[w]["top_c"] for r in rows])
+            rc = np.array([r[w]["right_c"] for r in rows])
+            agg[w] = dict(top1_median=float(np.median(tc[:, 0])), top5_median=float(np.median(tc[:, 4])),
+                          spread_median=float(np.median(tc[:, 0] - tc[:, 4])),
+                          top_in_plateau=float(((tc >= PLATEAU[0]) & (tc <= PLATEAU[1])).mean()),
+                          right_c_median=float(np.median(rc)), right_top1=float(np.mean([r[w]["right_rank"] == 1 for r in rows])),
+                          right_rank_median=float(np.median([r[w]["right_rank"] for r in rows])))
+        res["groups"][group] = dict(n=len(rows), agg=agg, rows=rows)
+        log("O10 %s: %d istem" % (group, len(rows)))
+    sym = list(symbol_tokens.items())                                # [(' Au', id), ...]
+    st = _last_states(model, [it["prefix"] for it in symbol_items], wanted=pair[1:])[pair[1]]
+    c_all = (st @ P.T).float()
+    by = {}
+    for i, it in enumerate(symbol_items):
+        key = (it["template"], "altin" if it["name"] == "gold" else "metal" if it["metal"] else "ametal")
+        d = by.setdefault(key, dict(right=[], **{k: [] for k, _ in sym}))
+        d["right"].append(float(c_all[i, it["right"]]))
+        for k, tid in sym:
+            d[k].append(float(c_all[i, tid]))
+    res["symbols"]["by"] = [dict(template=t, group=g, n=len(d["right"]), right=float(np.median(d["right"])),
+                                 **{k: float(np.median(v)) for k, v in d.items() if k != "right"}) for (t, g), d in by.items()]
+    Pm = P.float()
+    mdir = F.normalize(Pm[metal_tokens].mean(0), dim=0)
+    ndir = F.normalize(Pm[nonmetal_tokens].mean(0), dim=0)
+    res["symbols"]["geometry"] = dict(
+        pair={"%s-%s" % (a, b): float(Pm[ia] @ Pm[ib]) for i, (a, ia) in enumerate(sym) for b, ib in sym[i + 1:]},
+        to_metal_mean={k: float(Pm[t] @ mdir) for k, t in sym}, to_nonmetal_mean={k: float(Pm[t] @ ndir) for k, t in sym},
+        metal_vs_nonmetal=float(mdir @ ndir), n_metal=len(metal_tokens), n_nonmetal=len(nonmetal_tokens))
+    return res
+
+
+def _text_answers(res, decode):
+    A, Fs = res["pair"]
+    L = ["## O10: istem sonunda ilk 5 adayin c'si, %s (son FactUnits oncesi) ve %s; plato %.2f-%.2f" % (A, Fs, *PLATEAU),
+         "grup        n | durum | top1 c med | top5 c med | top1-top5 med | ilk 5'te platoda | dogru c med | dogru top1 | "
+         "dogru sira med"]
+    for g, d in res["groups"].items():
+        for w in (A, Fs):
+            a = d["agg"][w]
+            L.append("%-10s %3d | %-5s | %.3f      | %.3f      | %.3f         | %.3f            | %.3f       | %.3f      | %.0f" % (
+                g, d["n"], w, a["top1_median"], a["top5_median"], a["spread_median"], a["top_in_plateau"],
+                a["right_c_median"], a["right_top1"], a["right_rank_median"]))
+    q = res["groups"].get("questions")
+    if q:
+        L += ["", "### sorular, istem istem (%s -> %s): ilk 3 aday (c) ve dogru cevap" % (A, Fs)]
+        for r in q["rows"]:
+            L.append("%-48s | %s %s | %s %s | dogru %r %.3f -> %.3f (sira %d -> %d)" % (
+                r["label"][:48], A, " ".join("%r %.3f" % (decode([t]), c) for t, c in zip(r[A]["top_id"][:3], r[A]["top_c"][:3])),
+                Fs, " ".join("%r %.3f" % (decode([t]), c) for t, c in zip(r[Fs]["top_id"][:3], r[Fs]["top_c"][:3])),
+                decode([r["right"]]), r[A]["right_c"], r[Fs]["right_c"], r[A]["right_rank"], r[Fs]["right_rank"]))
+    s = res["symbols"]
+    L += ["", "## O11: element istemleri, %s'da c medyani (sablon x grup)" % Fs]
+    keys = [k for k in s["by"][0] if k.startswith(" ")] if s["by"] else []
+    L.append("sablon                                              grup    |  n | dogru | " + " | ".join("%5s" % k for k in keys))
+    for r in s["by"]:
+        L.append("%-50s %-7s | %2d | %.3f | %s" % (r["template"][-50:], r["group"], r["n"], r["right"],
+                                                   " | ".join("%.3f" % r[k] for k in keys)))
+    g = s["geometry"]
+    L += ["cikis noktalari: " + "  ".join("cos(%s) %.3f" % (k, v) for k, v in g["pair"].items()),
+          "metal ortalama yonu (%d sembol) ile: %s; ametal (%d) ile: %s; metal-ametal yonleri %.3f" % (
+              g["n_metal"], " ".join("%s %.3f" % kv for kv in g["to_metal_mean"].items()), g["n_nonmetal"],
+              " ".join("%s %.3f" % kv for kv in g["to_nonmetal_mean"].items()), g["metal_vs_nonmetal"])]
+    return L
+
+
+NONMETALS = {"H", "He", "B", "C", "N", "O", "F", "Ne", "Si", "P", "S", "Cl", "Ar", "As", "Se", "Br", "Kr", "Te", "I", "Xe",
+             "Rn", "At", "Ge", "Sb"}
+
+
+def _answer_inputs(vocab, eot, log=print):
+    """O10 / O11 istemleri: analyze_errors.QUESTIONS + PROBES, analyze_capacity.freq_facts(), SYMBOL_TEMPLATES x ELEMENTS."""
+    import analyze_capacity as AC
+    import analyze_errors as AE
+    enc = lambda t: AE.encode(t, vocab)
+    items = dict(questions=[dict(label=q, prefix=[eot] + enc(q), right=enc(c[0])[0]) for q, c, n, k in AE.QUESTIONS])
+    items["probes"] = [dict(label=q, prefix=[eot] + enc(q), right=enc(c[0])[0]) for g, q, c, n in AE.PROBES]
+    items["facts"] = [dict(label=f["prompt"], prefix=[eot] + enc(f["prompt"]), right=enc(f["answer"])[0])
+                      for f in AC.freq_facts()]
+    sym_items = []
+    for tpl in AE.SYMBOL_TEMPLATES:
+        for name, sym in AC.ELEMENTS:
+            sym_items.append(dict(template=tpl, name=name, metal=sym not in NONMETALS, right=enc(" " + sym)[0],
+                                  prefix=[eot] + enc(tpl.format(name=name, Name=name[0].upper() + name[1:]))))
+    symbol_tokens = {k: enc(k)[0] for k in (" Au", " Cu", " Ag", " Fe")}
+    metal = sorted({enc(" " + s)[0] for _, s in AC.ELEMENTS if s not in NONMETALS})
+    nonmetal = sorted({enc(" " + s)[0] for _, s in AC.ELEMENTS if s in NONMETALS})
+    return items, sym_items, symbol_tokens, metal, nonmetal
+
+
+def _loop_inputs(fw_root, vocab, eot, count=64, repeats=6, rand_len=20, seed=0):
+    """Tekrar dizileri: valid cumleleri (12-40 token) bir boya kirpilmaz, parca boyu sabit olsun diye 20 token'a kirpilir;
+    rastgele token dizileri (256..50000) 20 token.  [eot] + parca x repeats."""
+    import analyze_errors as AE
+    sents = [s[:rand_len] for s in AE._sentences(fw_root, vocab, count * 2)[0] if len(s) >= rand_len][:count]
+    rng = np.random.default_rng(seed)
+    rand = [rng.integers(256, 50000, rand_len).tolist() for _ in range(count)]
+    return ([[eot] + s * repeats for s in sents], rand_len), ([[eot] + r * repeats for r in rand], rand_len)
+
+
 # ---- CLI
 
 def _decoder(vocab):
@@ -1291,7 +1621,7 @@ def _decoder(vocab):
 def _main(argv=None):
     ap = argparse.ArgumentParser(prog="analyze_structure.py", description=__doc__.split("\n\n")[0])
     ap.add_argument("run", nargs="?", help="kosu klasoru ya da adi")
-    ap.add_argument("measure", nargs="?", choices=("probes", "attention_passes", "units", "pass_swap", "extras", "repair", "points"))
+    ap.add_argument("measure", nargs="?", choices=("probes", "attention_passes", "units", "pass_swap", "extras", "repair", "points", "loop", "answers"))
     ap.add_argument("--fit-steps", type=int, default=150, help="repair: optimal sabitin adim sayisi")
     ap.add_argument("--fit-lr", type=float, default=0.003, help="repair: optimal sabitin lr'si (x |ortalama|)")
     ap.add_argument("--checkpoint", type=int, help="checkpoint_tNNNNNN.pt adimi (varsayilan: kosu sonu)")
@@ -1346,6 +1676,14 @@ def _main(argv=None):
         al = alpha_report(model, test, batch=args.batch, focus=focus, log=say)
         res = dict(units=res, alpha=al)
         lines = _text_units(res["units"], al)
+    elif args.measure == "loop":
+        sents, rands = _loop_inputs(args.data or I._FINEWEB_ROOT, data["vocab"], data["eos"])
+        res = loop_geometry(model, test, sents, rands, batch=args.batch, log=say)
+        lines = _text_loop(res)
+    elif args.measure == "answers":
+        items, sym_items, sym_tok, metal, nonmetal = _answer_inputs(data["vocab"], data["eos"], log=say)
+        res = answer_geometry(model, items, sym_items, sym_tok, metal, nonmetal, log=say)
+        lines = _text_answers(res, decode)
     elif args.measure == "points":
         counts = I._token_counts(data, config, run_dir, log=say)
         res = points(model, counts, test[:args.stories], batch=args.batch)
@@ -1424,6 +1762,15 @@ def _selftest():
                 log=lambda s: None)
     print("\n".join(_text_probes(r2)[:4]))
     assert [r["state"] for r in r2["rows"]] == ["h0", "F2"]
+    lg = loop_geometry(model, test, ([[0] + [5, 6, 7, 8, 9] * 4], 5), ([[0] + [11, 3, 17, 2, 30] * 4], 5),
+                       batch=4, log=lambda s: None)
+    print("\n".join(_text_loop(lg)[:12]))
+    assert lg["repeat"]["cumle"]["cos"].shape == (len(I._state_names(model)[0]), 3)
+    its = [dict(label="t%d" % i, prefix=[0] + rng.integers(1, V, 6).tolist(), right=int(rng.integers(1, V))) for i in range(5)]
+    sym = [dict(template="T {name}", name=n, metal=m, right=r, prefix=[0, 3, 4 + r]) for n, m, r in
+           (("gold", True, 7), ("iron", True, 8), ("neon", False, 9))]
+    ag = answer_geometry(model, dict(questions=its), sym, {" Au": 7, " Cu": 10}, [7, 8, 10], [9], log=lambda s: None)
+    print("\n".join(_text_answers(ag, decode)))
     print("selftest TAMAM")
 
 
