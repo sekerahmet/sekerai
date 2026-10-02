@@ -720,12 +720,10 @@ def t_speed(root):
     bm = M.BlockModel(V, d=D_, turns=turns, layers=3, units=units, heads=4, fact_activation="swiglu", first_turn_facts=True)
     N, Ld = C._model_flops(bm)
     bm2 = M.BlockModel(V, d=D_, turns=turns, layers=3, units=units, heads=4, fact_activation="swiglu", shared_facts=False, first_turn_facts=True)
-    bm1 = M.BlockModel(64, d=16, turns=2, layers=1, units=8, heads=1, fact_activation="relu", first_turn_facts=True)
     check("_model_flops: 3x2 (d 384, FactUnits 1024, 6 tur, 4 head) N = 6 (4 d^2 + 3 d units) + V d; ileri FLOP/token "
-          "2 N + 4 L d x 169,9 anahtar = 25,95 M; ayri FactUnits ayni; tek head W_value'suz, relu iki matris",
+          "2 N + 4 L d x 169,9 anahtar = 25,95 M; ayri FactUnits ayni",
           (N, Ld) == (turns * (4 * D_ * D_ + 3 * D_ * units) + V * D_, turns * D_) and round((2 * N + 4 * Ld * 169.9) / 1e6, 2)
-          == 25.95 and 2 * N == 24379392 and C._model_flops(bm2) == (N, Ld)
-          and C._model_flops(bm1) == (2 * (3 * 16 * 16 + 2 * 16 * 8) + 64 * 16, 2 * 16), "N %d L d %d" % (N, Ld))
+          == 25.95 and 2 * N == 24379392 and C._model_flops(bm2) == (N, Ld), "N %d L d %d" % (N, Ld))
 
     check("mfu: (6 N hedef + 12 L d anahtar) / sure / tepe; tepe tablosu cihaz adindan (L40S, T4'te bf16 yok -> None)",
           C._mfu((10, 3), dict(targets=100, keys=50), 2.0, 1e3) == 3.9 and C._mfu(None, work, 1.0, 1e3) is None

@@ -13,7 +13,7 @@ import torch
 import torch._inductor.config
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from model_y import CANON, NORMALIZED_UPDATE, ROPE, SPHERE_WEIGHTS, AttentionCache, BlockModel, deviation
+from model_y import ROPE, AttentionCache, BlockModel, deviation
 
 STEPS, LR = 4000, 0.01  # lr dayanagi (kure agirliklari + Muon): adim basina donme ~ LR x 0,2 x sqrt(d); nGPT 2026 tepe lr
                          # 0,24 / sqrt(d).  Veri / batch / D degisince yeniden hesaplanir
@@ -142,7 +142,6 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
               weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None, compile=True,
               save_every=None, save=None, checkpoint=None, rope=ROPE,
               batches=None, model_kw=None, optimizer=OPTIMIZER, schedule=SCHEDULE, cooldown=COOLDOWN,
-              normalized_update=NORMALIZED_UPDATE, sphere_weights=SPHERE_WEIGHTS, canon=CANON,
               coherence_window=COHERENCE_WINDOW,
               final_cooldown=FINAL_COOLDOWN, weight_ema=WEIGHT_EMA, matmul_precision=MATMUL_PRECISION,
               final_cooldown_shape=FINAL_COOLDOWN_SHAPE, newton_schulz_precision=NEWTON_SCHULZ_PRECISION,
@@ -167,7 +166,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     gradyan tam batch'inkiyle ayni; ortalama optimizer'in grup kaydinda (checkpoint'e girer).  model.coherence: son olcum.
     Ortalama yansiz: pay ve payda ayri hareketli ortalama, ortalama(rho) = EMA(dot+) / EMA(dot+ + |g1 - g2|^2 / 4) (oranlarin
     ortalamasi dusuk rankli gurultude yukari yanli).
-    Muon'da sphere_weights: Nesterov birlesimi once kure tegetine izdusulur (Muon.tangent_axis).
+    Kure agirliklari: her adimdan sonra model.normalize_weights; Muon'da Nesterov birlesimi once kure tegetine izdusulur
+    (Muon.tangent_axis).
     weight_ema=d: her adimdan sonra ortalama <- d x ortalama + (1 - d) x agirlik (kurede satirlar yeniden birim);
     model.weight_ema = dict(model=<ortalama model>, decay=d).  Ortalama optimizer durumunda (checkpoint'e girer).
     matmul_precision: "bf16" ileri hesap ve kayip autocast (bf16) icinde, geri yayilim disinda; "fp32" hicbir seye
@@ -185,8 +185,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     assert newton_schulz_precision in ("fp32", "bf16"), "newton_schulz_precision: fp32 | bf16"
     assert micro_batches >= 1 and (schedule != "coherence" or micro_batches % 2 == 0 or micro_batches == 1), \
         "micro_batches: >= 1; coherence'ta 1 ya da cift"
-    model = BlockModel(n, seed=seed, rope=rope, normalized_update=normalized_update, sphere_weights=sphere_weights,
-                       canon=canon, **(model_kw or {})).to(device)
+    model = BlockModel(n, seed=seed, rope=rope, **(model_kw or {})).to(device)
     if ids is not None:
         ids, mask = ids.to(device), mask.to(device)
     params = [p for p in model.parameters() if p.requires_grad]
@@ -194,9 +193,9 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     unit_axis = {}                                         # kure tegetinin tek tablosu (coherence ve Muon)
     for k, _ in named:
         kind = k.split(".")[-1]
-        if sphere_weights and kind in ("W_query", "W_key", "W_fact_in", "W_fact_up", "W_value"):   # girdisi durum: satir
+        if kind in ("W_query", "W_key", "W_fact_in", "W_fact_up", "W_value"):   # girdisi durum: satir
             unit_axis[k] = 1
-        elif sphere_weights and kind in ("W_context", "W_fact_out"):                               # duruma yazan: sutun
+        elif kind in ("W_context", "W_fact_out"):                               # duruma yazan: sutun
             unit_axis[k] = 0
     if optimizer == "muon":
         # Muon yalniz gizli 2 boyutlu matrislerde ("VO + FFN" duzeni, Wang 2025); token noktalari, esikler, W_query, W_key,
@@ -363,8 +362,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
                 total.backward()                           # her ogrenilen sayi x icin ∂kayip/∂x (zincir kurali, otomatik)
         torch.nn.utils.clip_grad_norm_(params, grad_clip)  # butun gradyanlarin toplam boyu > grad_clip ise olcekle indir
         opt.step()                                         # Adam: x <- x - lr · m / (√v + eps); Muon: ortogonal adim
-        if sphere_weights:                                 # agirlik kureye geri; adim boyunu yalniz lr belirler
-            model.normalize_weights()
+        model.normalize_weights()                          # agirlik kureye geri; adim boyunu yalniz lr belirler
         if getattr(model, "output_link", False):          # phi hep artan kalsin: u >= 0
             with torch.no_grad():
                 model.link_u.clamp_(min=0)
@@ -375,8 +373,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
                     state = opt.state.get(p)
                     if state and "weight_ema" not in state:   # optimizer durumuna bagla: checkpoint'e girer
                         state["weight_ema"] = pe.data
-                if sphere_weights:
-                    ema.normalize_weights()
+                ema.normalize_weights()
     return model, curve
 
 

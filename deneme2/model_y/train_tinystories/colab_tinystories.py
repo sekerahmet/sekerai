@@ -45,8 +45,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
     assert setting == "shared", "yalniz BlockModel (setting shared)"
-    model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, shared_facts=M.SHARED_FACTS, heads=M.HEADS, fact_activation=M.FACT_ACTIVATION,
-                         learn_output_scale=M.LEARN_OUTPUT_SCALE, output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=M.T_MAX,
+    model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, shared_facts=M.SHARED_FACTS, heads=M.HEADS,
+                         output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=M.T_MAX,
                          anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK, last_facts_alpha_init=1.0,
                          input_embedding=M.INPUT_EMBEDDING, input_bigrams=M.INPUT_BIGRAMS,
                          first_turn_facts=M.FIRST_TURN_FACTS, input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE,
@@ -62,8 +62,9 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
     config = dict(name=name, setting=setting, steps=steps, seed=seed, every=every, device=device, compile=compile,
                   fingerprint=data["fingerprint"], seq_len=data["seq_len"], vocab=len(data["vocab"]),
                   train_windows=len(data["train_start"]), exam_stories=len(rows), batch_size=batch_size,
-                  steps_per_epoch=per_epoch, epochs=round(steps / per_epoch, 4), save_every=save_every, model_kw=model_kw,
-                  bucket=bucket,
+                  steps_per_epoch=per_epoch, epochs=round(steps / per_epoch, 4), save_every=save_every,
+                  model_kw=dict(model_kw, fact_activation="swiglu", learn_output_scale=True),   # kaldirilan secenekler
+                  bucket=bucket,                                                                 # sabit degerle
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
                               optimizer=TR.OPTIMIZER, schedule="wsd", cooldown=TR.COOLDOWN,   # wsd, EMA yok, linear:
                               coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,   # bu kosucunun
@@ -71,8 +72,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                               coherence_power=1.0, muon_tangent=True,
                               final_cooldown_shape="linear",
                               stream_norm=True, layer_norm=False,
-                              normalized_update=TR.NORMALIZED_UPDATE, sphere_weights=TR.SPHERE_WEIGHTS, canon=TR.CANON,
-                              rope=TR.ROPE),
+                              normalized_update=True, sphere_weights=True, canon=True, rope=TR.ROPE),
                          **train_kw))
     checkpoint = None
     if resume:
@@ -80,25 +80,12 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         if not packs:
             raise RuntimeError("%s: surdurme paketi yok; bastan kosmak ayri karar (resume=False)" % out)
         saved = json.load(open(os.path.join(out, "config.json")))
-        assert not saved.pop("copy_path", False), "kopya yolu (Oneri A) 28 Eylul'de kaldirildi: bu kosu surdurulemez"
-        # 27 Eylul oncesi config'lerde optimizer / takvim / bucket yok: o kosular Adam + cosine, rastgele batch idi.
-        # compile sonucu degistirir: karsilastirilir.  Anahtarsiz eski config'ler: fp32, rho ussu 1, Muon'da izdusum yok
-        # (yorunge degismesin)
-        saved = dict(dict(optimizer="adam", schedule="cosine", cooldown=TR.COOLDOWN,
-                          normalized_update=False, sphere_weights=False, canon=False, bucket=None,
-                          coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,
-                          weight_ema=None, matmul_precision="fp32", coherence_power=1.0, muon_tangent=False,
-                          final_cooldown_shape="sqrt"),
-                     **saved)
-        if saved.get("model_kw"):                         # 28 Eylul oncesi model_kw'de layers yok: tek Block idi
-            saved["model_kw"] = dict(dict(layers=1, heads=1, fact_activation="relu", learn_output_scale=False, output_link=False,
-                                          shared_facts=True, input_embedding=False, input_bigrams=0, first_turn_facts=True,
-                                          input_embedding_sphere=False, rope_base=10000.0, attention_log_scale=False,
-                                          loss_chunk=0,
-                                          last_facts_alpha_init=M.ALPHA_INIT),
-                                     **saved["model_kw"])     # eskiler: tek Block, tek head, ReLU, sabit cikis olcegi, tek parca
-                                                              # kayip, butun alpha'lar ALPHA_INIT'ten
-            assert not saved["model_kw"].pop("output_skip", False), "output_skip (28 Eylul) kaldirildi: bu kosu surdurulemez"
+        # yazilmamis anahtarlar o gunun degeriyle: bucket yoksa rastgele batch, son inis sqrt
+        saved = dict(dict(bucket=None, final_cooldown_shape="sqrt"), **saved)
+        if saved.get("model_kw"):
+            saved["model_kw"] = dict(dict(output_link=False, shared_facts=True, input_embedding=False, input_bigrams=0,
+                                          first_turn_facts=True, input_embedding_sphere=False, rope_base=10000.0,
+                                          attention_log_scale=False), **saved["model_kw"])
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
             raise RuntimeError("surdurme: ayarlar config.json'dan farkli %s -- ayni ayarlarla surdurulur" % differ)

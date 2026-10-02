@@ -191,10 +191,7 @@ def exam_train(model, data):
 @torch.no_grad()
 def alpha_summary(model):
     """Tur basina alpha_attention ve alpha_facts: median ve max_abs (|alpha|'nin en buyugu; medyan tek basina yaniltir:
-    bir turda medyan 0,0055, en buyuk 2,67).  normalized_update yoksa None.  FIRST_TURN_FACTS=False'ta tur 1'in alpha_F'si
-    kullanilmiyor: None."""
-    if not getattr(model, "normalized_update", False):
-        return None
+    bir turda medyan 0,0055, en buyuk 2,67).  FIRST_TURN_FACTS=False'ta tur 1'in alpha_F'si kullanilmiyor: None."""
     out = {name: dict(median=[round(float(x), 4) for x in a.float().quantile(0.5, dim=-1)],
                       max_abs=[round(float(x), 4) for x in a.abs().max(-1).values])
            for name, a in (("attention", model.alpha_attention), ("facts", model.alpha_facts))}

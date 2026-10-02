@@ -89,21 +89,19 @@ def _turn_label(model, t):
 
 
 def _units(f, v):
-    """FactUnits birim etkinlikleri u (.., units); cikti u @ W_fact_out.T (FactUnits.forward ile ayni)."""
-    if f.activation == "swiglu":
-        return F.silu(v @ f.W_fact_in.T) * (v @ f.W_fact_up.T)
-    u = torch.relu(v @ f.W_fact_in.T - f.fact_threshold)
-    return u * (v @ f.W_fact_up.T) if f.activation == "reglu" else u
+    """FactUnits birim etkinlikleri u (.., units) = SiLU(W_fact_in v) * (W_fact_up v); cikti u @ W_fact_out.T
+    (FactUnits.forward ile ayni)."""
+    return F.silu(v @ f.W_fact_in.T) * (v @ f.W_fact_up.T)
 
 
 def _plan(model, case=None):
     """Mudahale sozlugu -> tam plan.  Anahtarlar (tur 0'dan):
-        skip_attention, skip_facts   tur listesi: alt blogun katkisi sifir (normalized_update'te alpha 0 ile ayni)
+        skip_attention, skip_facts   tur listesi: alt blogun katkisi sifir (alpha 0 ile ayni)
         heads      {(tur, head): (dh,) vektor | None}: head'in ciktisi c_h bu vektorle degisir; None = ortalama (ablate doldurur)
         canon      {tur: (4,) carpan}: Canon agirliklari w_k bu carpanla (0 = kapali)
         canon_mean {tur: (d,) vektor | None}: Canon eki (sum_k w_k x_(t-k)) bu vektorle degisir; None = ortalama
                    (ablate doldurur)
-        alpha_attention, alpha_facts   {tur: sayi | (d,) vektor}: o turun alpha'si ELLE (yalniz normalized_update)
+        alpha_attention, alpha_facts   {tur: sayi | (d,) vektor}: o turun alpha'si ELLE
     plan["start"]: mudahalenin ilk turu (onceki turlar temiz hesapla ayni)."""
     case = dict(case or {})
     bad = set(case) - set(_PLAN_KEYS)
@@ -117,7 +115,6 @@ def _plan(model, case=None):
         given = case.get(name) or {}
         plan[name] = None
         if given:
-            assert model.normalized_update, "alpha yalniz normalized_update'te var"
             a = getattr(model, name).detach().clone()
             for t, v in given.items():
                 a[t] = torch.as_tensor(v, dtype=a.dtype, device=a.device)
@@ -134,7 +131,7 @@ def _plan(model, case=None):
 
 def _run(model, h, plan, taps=None, start=0):
     """Turlar start..TURNS-1; h tur start'in girdisi (B, T, d) -> son durum.  Block.forward'in aynisi (LAYERS Block,
-    SHARED_FACTS, Canon, head'ler, normalized_update) + mudahale (plan) + kayit:
+    SHARED_FACTS, Canon, head'ler, normalized update) + mudahale (plan) + kayit:
     taps[ad](tur, deger), ad: input, canon (ek, girdi), attention (B, H, T, T), heads (B, H, T, dh), attention_out, units,
     facts_out.  attention kaydi istenirse softmax acik hesaplanir (CausalAttention.weights), degilse SDPA."""
     taps = taps or {}
@@ -144,70 +141,50 @@ def _run(model, h, plan, taps=None, start=0):
         at = blk.attention
         if "input" in taps:
             taps["input"](t, h)
-        x = h
-        if blk.canon:                                  # x_t + sum_k w_k x_(t-k), baslangictan once 0
-            w = blk.canon_weights
-            if t in plan["canon"]:
-                w = w * torch.as_tensor(plan["canon"][t], dtype=w.dtype, device=w.device)[:, None]
-            T = x.shape[-2]
-            full = F.pad(x, (0, 0, 3, 0))
-            mix = sum(w[k] * full[..., 3 - k:3 - k + T, :] for k in range(4))
-            if t in plan["canon_mean"]:
-                vec = plan["canon_mean"][t]
-                assert vec is not None, "Canon eki ortalamasi doldurulmadi (ablate doldurur)"
-                mix = torch.as_tensor(vec, dtype=x.dtype, device=x.device).expand_as(x)
-            if "canon" in taps:
-                taps["canon"](t, (mix, x))
-            x = x + mix
-        else:
-            assert t not in plan["canon_mean"], "tur %d: Canon yok" % (t + 1)
-        added = None
+        w = blk.canon_weights                          # x_t = h_t + sum_k w_k h_(t-k), baslangictan once 0
+        if t in plan["canon"]:
+            w = w * torch.as_tensor(plan["canon"][t], dtype=w.dtype, device=w.device)[:, None]
+        T = h.shape[-2]
+        full = F.pad(h, (0, 0, 3, 0))
+        mix = sum(w[k] * full[..., 3 - k:3 - k + T, :] for k in range(4))
+        if t in plan["canon_mean"]:
+            vec = plan["canon_mean"][t]
+            assert vec is not None, "Canon eki ortalamasi doldurulmadi (ablate doldurur)"
+            mix = torch.as_tensor(vec, dtype=h.dtype, device=h.device).expand_as(h)
+        if "canon" in taps:
+            taps["canon"](t, (mix, h))
+        x = h + mix
         if t not in plan["skip_attention"]:
             H = at.heads
             q, k = at.queries_keys(x)
-            v = x if H == 1 else (x @ at.W_value.T).unflatten(-1, (H, -1)).transpose(-3, -2)
+            v = (x @ at.W_value.T).unflatten(-1, (H, -1)).transpose(-3, -2)
             if "attention" in taps:
-                T = x.shape[-2]
                 s = at.scale * q @ k.transpose(-1, -2)
                 s = s.masked_fill(torch.ones(T, T, dtype=torch.bool, device=x.device).triu(1), float("-inf"))
                 a = torch.softmax(s, -1)
-                taps["attention"](t, a if H > 1 else a[:, None])
+                taps["attention"](t, a)
                 c = a @ v
             else:
                 c = F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=at.scale)
-            if H == 1:
-                c = c[:, None]                         # (B, 1, T, d): tek head
             for (tt, hh), vec in plan["heads"].items():
                 if tt == t:
                     assert vec is not None, "head ortalamasi doldurulmadi (ablate doldurur)"
                     c[:, hh] = torch.as_tensor(vec, dtype=c.dtype, device=c.device)
             if "heads" in taps:
                 taps["heads"](t, c)
-            added = c.transpose(-3, -2).flatten(-2) @ at.W_context.T
-        if blk.normalized_update:                      # h = norm(h + α_A ⊙ (norm(W_context c) - h))
-            if added is not None:
-                a_att = model.alpha_attention[t] if plan["alpha_attention"] is None else plan["alpha_attention"][t]
-                h = _unit(h + a_att * (_unit(added) - h))
-        else:
-            h = _unit(h if added is None else h + added)
+            added = c.transpose(-3, -2).flatten(-2) @ at.W_context.T   # h = norm(h + α_A ⊙ (norm(W_context c) - h))
+            a_att = model.alpha_attention[t] if plan["alpha_attention"] is None else plan["alpha_attention"][t]
+            h = _unit(h + a_att * (_unit(added) - h))
         if "attention_out" in taps:
             taps["attention_out"](t, h)
         f = _turn_facts(model, t)
         if t not in plan["skip_facts"] and f is not None:
-            v = h
-            if blk.sphere_weights:
-                v = v * v.shape[-1] ** 0.5
-            u = _units(f, v)
+            u = _units(f, h * h.shape[-1] ** 0.5)     # kure agirliklari: girdi sqrt(d) x kosinus
             if "units" in taps:
                 taps["units"](t, u)
-            out = u @ f.W_fact_out.T
-            if blk.normalized_update:                  # h = norm(h + α_F ⊙ (norm(olgu) - h))
-                a_f = model.alpha_facts[t] if plan["alpha_facts"] is None else plan["alpha_facts"][t]
-                h = _unit(h + a_f * (_unit(out) - h))
-            else:
-                h = _unit(h + out)
-        elif f is not None and not blk.normalized_update:   # mudahale: katki 0; model atlamasi normsuz
-            h = _unit(h)
+            out = u @ f.W_fact_out.T                   # h = norm(h + α_F ⊙ (norm(olgu) - h))
+            a_f = model.alpha_facts[t] if plan["alpha_facts"] is None else plan["alpha_facts"][t]
+            h = _unit(h + a_f * (_unit(out) - h))
         if "facts_out" in taps:
             taps["facts_out"](t, h)
     return h
@@ -216,8 +193,7 @@ def _run(model, h, plan, taps=None, start=0):
 def _scores(model, h, P=None):
     """Cikis basligi (BlockModel.logits ile ayni): e^tau phi(<h, PL>); ara durumlara uygulaninca logit lens."""
     P = model.tokens.points() if P is None else P
-    scale =(model.scale * torch.exp(model.log_output_scale - math.log(model.scale)) if model.learn_output_scale
-             else model.scale)
+    scale = model.scale * torch.exp(model.log_output_scale - math.log(model.scale))
     if model.output_link:
         c = h @ P.T
         q, u = model.link_q, model.link_u
@@ -500,7 +476,7 @@ def unit_usage(model, ids, exclude_last=True, batch=16, sample=4096, seed=0):
       energy        E|u|^2 token basina;  out_rms: |W_fact_out u|'nun karesel ortalamasi (norm oncesi yazim boyu)
       share         birim basina enerji payi E u_i^2 / sum_k E u_k^2;  cover: payin %50 / %90 / %99'unu tasiyan en az birim
       dead          payi < 1e-5 olan birim;  rare: |u_i| > 0,1 oldugu konum orani %1'in altinda kalan birim
-      zero          (relu / reglu) u_i = 0 oldugu konum orani, ortalama
+      zero          u_i = 0 oldugu konum orani, ortalama
       corr_pairs    ornek konumlarda (en fazla sample; tohum seed) aktivasyon korelasyonu |r| > 0,9 / > 0,7 birim cifti
     FactUnits takimi basina (paylasilan blokta bir takim birden cok turda): agirlik benzerligi |cos| > 0,8 olan cift
     (W_fact_in / W_fact_up satirlari, W_fact_out sutunlari), takimi kullanan turlar arasi enerji payi korelasyonu,
@@ -567,7 +543,7 @@ def unit_usage(model, ids, exclude_last=True, batch=16, sample=4096, seed=0):
                 between.append(dict(turns=(t1, t2), corr=float(np.corrcoef(a, b)[0, 1]), more_first=int((r > 1).sum()),
                                     more_second=int((r < -1).sum()), dead_both=int(((a < 1e-5) & (b < 1e-5)).sum())))
         teams.append(dict(turns=used, similar=sim, between=between))
-    return dict(units=U, n=n, activation=f0.activation, turns=turns, teams=teams)
+    return dict(units=U, n=n, turns=turns, teams=teams)
 
 
 def _head_means(model, stories, exclude_last, batch):
@@ -787,7 +763,7 @@ def _model_kw(config):
     tek kalan davranisin degerini tasiyorsa atilir, baska degerdeyse kosu kurulamaz (sessizce farkli model kurulmasin)."""
     kw = dict(dict(output_link=False, shared_facts=True, input_embedding=False, input_bigrams=0, first_turn_facts=True,
                    input_embedding_sphere=False, rope_base=10000.0, attention_log_scale=False), **config.get("model_kw", {}))
-    for key, only in (("packed_attention", "flex"),):
+    for key, only in (("packed_attention", "flex"), ("fact_activation", "swiglu"), ("learn_output_scale", True)):
         value = kw.pop(key, only)
         assert value == only, "%s=%r kaldirildi (yalniz %r): bu kosu bugunku kodla kurulamaz" % (key, value, only)
     return kw
@@ -797,10 +773,10 @@ def _build(config):
     """config.json -> bos BlockModel (agirliklar sonra yuklenir)."""
     setting = config.get("setting", "shared")
     assert setting == "shared", "yalniz BlockModel (setting shared), bu kosu: %s" % setting
-    assert config["stream_norm"] and not config["layer_norm"], "normsuz akis / LayerNorm kaldirildi: bu kosu kurulamaz"
-    return BlockModel(config["vocab"], seed=config.get("seed", 0), rope=config["rope"],
-                      normalized_update=config["normalized_update"], sphere_weights=config["sphere_weights"],
-                      canon=config["canon"], **_model_kw(config))
+    assert (config["stream_norm"] and not config["layer_norm"] and config["normalized_update"] and config["sphere_weights"]
+            and config["canon"]), "normsuz akis / LayerNorm / normalized_update, sphere_weights, canon kapali kaldirildi: bu kosu " \
+        "kurulamaz"
+    return BlockModel(config["vocab"], seed=config.get("seed", 0), rope=config["rope"], **_model_kw(config))
 
 
 def _load_weight_ema(model, optimizer_state, config):
@@ -1099,8 +1075,7 @@ def _step_flops(model, ids):
     per = 2 * d * V
     for t, blk in enumerate(model.turn_blocks()):
         f = _turn_facts(model, t)
-        per += 2 * d * (d * (3 + (blk.attention.heads > 1))
-                        + (f.W_fact_out.shape[1] * (2 if f.activation == "relu" else 3) if f is not None else 0))
+        per += 2 * d * (4 * d + (3 * f.W_fact_out.shape[1] if f is not None else 0))
         per += 4 * d * T
     return 3 * B * T * per
 
@@ -1425,7 +1400,7 @@ def _text_attention(res):
 
 
 def _text_units(res):
-    L = ["## FactUnits birimleri (%d birim, %s): %d gecerli konum" % (res["units"], res["activation"], res["n"]),
+    L = ["## FactUnits birimleri (%d birim): %d gecerli konum" % (res["units"], res["n"]),
          "tur | E|u|^2 | |W_out u| rms | enerji %50/%90/%99 birim | olu (<1e-5) | seyrek (<%1) | u=0 orani | |r|>0,9 / >0,7 cift"]
     for r in res["turns"]:
         L.append("%-5s | %8.3f | %7.3f | %4d / %4d / %4d | %4d | %4d | %.3f | %d / %d (%d ornek)" % (

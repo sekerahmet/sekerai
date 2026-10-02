@@ -14,8 +14,8 @@ kendi <eos>'unu yazinca durur.
   r=1.2                      tekrar cezasi: son 20 token'da gecenlerin puani 1,2'ye bolunur (1 = kapali).  Yalniz
                              metin uretimi; modeli ve olculerini (acc, bpb) degistirmez
   yasak                      <bilinmeyen>/<dolgu> uretimi kapat (varsayilan) / ac
-  model                      kosulari listele (model_y ve model_20, en yeni once), hangisi yuklu
-  model <ad>                 baska bir kosu yukle (ad ya da basindan bir parca; iki kolda ayni ad: model_20/<ad>)
+  model                      kosulari listele (en yeni once), hangisi yuklu
+  model <ad>                 baska bir kosu yukle (ad ya da basindan bir parca)
   ema                        ayni kosunun ortalama agirliklari (model_weight_ema.pt) / son agirliklar
   ?                          yardim
   q                          cik
@@ -30,16 +30,15 @@ import threading
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [HERE, os.path.dirname(HERE)]
 # Agir moduller ilk kullanimda: pencere hemen acilir (import torch birkac saniye)
-torch = np = DT = ET = DS = ES = BlockModel = AttentionCache = None
+torch = np = DT = ET = DS = ES = I = AttentionCache = None
 
-# model_20 kosulari da: model_y'nin kodu 28 Eylul'de model_20'den kopyalandi; kod ayrisinca yuklenemeyebilir
-RUN_ROOTS = [r"G:\Drive'ım\model_y", r"G:\Drivem\model_y", r"G:\Drive'ım\model_20", r"G:\Drivem\model_20"]
+RUN_ROOTS = [r"G:\Drive'ım\model_y", r"G:\Drivem\model_y"]
 TS_DIRS = [r"G:\Drive'ım\tinystories\onbellek", r"G:\Drivem\tinystories\onbellek"]
 SS_DIRS = [r"G:\Drive'ım\simplestories", r"G:\Drivem\simplestories"]
 
 
 def _heavy():
-    global torch, np, DT, ET, DS, ES, BlockModel, AttentionCache
+    global torch, np, DT, ET, DS, ES, I, AttentionCache
     if DT is None:
         import numpy as _np
         import torch as _torch                         # torch pyarrow'dan once (Windows c10.dll)
@@ -49,9 +48,9 @@ def _heavy():
         import data_simplestories as _ds
         import exam_simplestories as _es
         DS, ES = _ds, _es
+        import internals_y as _i
         from model_y import AttentionCache as _attention_cache
-        from model_y import BlockModel as _block_model
-        torch, np, DT, ET, BlockModel, AttentionCache = _torch, _np, _dt, _et, _block_model, _attention_cache
+        torch, np, DT, ET, I, AttentionCache = _torch, _np, _dt, _et, _i, _attention_cache
 
 
 def _first_existing(candidates):
@@ -73,11 +72,8 @@ def find_run(pattern=None):
         return None
     if not pattern:
         return all_runs[0]
-    pattern = pattern.replace("\\", "/")                # kol/ad da olur: model_20/<ad>
-    key = ((lambda r: os.path.basename(os.path.dirname(r)) + "/" + os.path.basename(r)) if "/" in pattern
-           else os.path.basename)
-    hit = [r for r in all_runs if key(r) == pattern] or \
-          [r for r in all_runs if key(r).startswith(pattern)]
+    hit = [r for r in all_runs if os.path.basename(r) == pattern] or \
+          [r for r in all_runs if os.path.basename(r).startswith(pattern)]
     if not hit:
         print("'%s' ile eslesen kosu yok.  'model' yazip listeye bak." % pattern)
         return None
@@ -99,20 +95,11 @@ def load_vocab(run_dir):
 
 
 def load_model(run_dir, n_vocab, averaged=False):
-    """config.json'dan modeli kurar, model.pt (ya da model_weight_ema.pt) yukler."""
+    """config.json'dan modeli kurar (internals_y._build: eski config'lerin varsayilanlari dahil), model.pt (ya da
+    model_weight_ema.pt) yukler."""
     _heavy()
     cfg = json.load(open(os.path.join(run_dir, "config.json")))
-    kw = dict(cfg["model_kw"])
-    # eski kosular: tek Block, tek head, ReLU, sabit cikis olcegi, tek parca kayip (yalniz egitimde fark eder)
-    kw = dict(dict(layers=1, heads=1, fact_activation="relu", learn_output_scale=False, loss_chunk=0,
-                   output_link=False, shared_facts=True, input_embedding=False, input_bigrams=0, first_turn_facts=True,
-                   input_embedding_sphere=False, rope_base=10000.0, attention_log_scale=False), **kw)
-    assert not kw.pop("output_skip", False), "output_skip (28 Eylul) kaldirildi"
-    assert not cfg.get("copy_path"), "kopya yolu (Oneri A) 28 Eylul'de kaldirildi"
-    assert cfg["setting"] == "shared" and not cfg.get("layer_norm"), "ayri blok / LayerNorm kaldirildi: bu kosu kurulamaz"
-    m = BlockModel(n_vocab, seed=0, stream_norm=cfg.get("stream_norm", True), rope=cfg.get("rope", True),
-                   normalized_update=cfg.get("normalized_update", False), sphere_weights=cfg.get("sphere_weights", False),
-                   canon=cfg.get("canon", False), **kw)
+    m = I._build(dict(cfg, vocab=n_vocab))
     name = "model_weight_ema.pt" if averaged else "model.pt"
     path = os.path.join(run_dir, name)
     if not os.path.exists(path):

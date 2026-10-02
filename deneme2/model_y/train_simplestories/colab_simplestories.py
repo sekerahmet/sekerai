@@ -77,7 +77,7 @@ def _model_flops(model):
             facts = model.extra_facts[i - model.layers] if not model.shared_facts and i >= model.layers else b.facts
             if i == 0 and not getattr(model, "first_turn_facts", True):
                 facts = None                                  # FIRST_TURN_FACTS=False: tur 1'de FactUnits yok
-            n += sum(w.numel() for w in (at.W_query, at.W_key, at.W_context) + ((at.W_value,) if at.heads > 1 else ()))
+            n += sum(w.numel() for w in (at.W_query, at.W_key, at.W_context, at.W_value))
             n += sum(p.numel() for k, p in facts.named_parameters() if k.startswith("W_")) if facts is not None else 0
         V, d = model.tokens.fixed_points.shape
         return n + V * d, model.turns * d
@@ -129,8 +129,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
     assert setting == "shared", "yalniz BlockModel (setting shared)"
-    model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, shared_facts=M.SHARED_FACTS, heads=M.HEADS, fact_activation=M.FACT_ACTIVATION,
-                         learn_output_scale=M.LEARN_OUTPUT_SCALE, output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=M.T_MAX,
+    model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, shared_facts=M.SHARED_FACTS, heads=M.HEADS,
+                         output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=M.T_MAX,
                          anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK, last_facts_alpha_init=1.0,
                          input_embedding=M.INPUT_EMBEDDING, input_bigrams=M.INPUT_BIGRAMS,
                          first_turn_facts=M.FIRST_TURN_FACTS, input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE,
@@ -154,8 +154,9 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
     config = dict(name=name, setting=setting, steps=steps, seed=seed, every=every, device=device, compile=compile,
                   tag=data["tag"], fingerprint=data["fingerprint"], seq_len=data["seq_len"], vocab=len(data["vocab"]),
                   train_windows=len(data["train_start"]), exam_stories=len(rows), batch_size=batch_size,
-                  steps_per_epoch=per_epoch, epochs=round(steps / per_epoch, 4), save_every=save_every, model_kw=model_kw,
-                  bucket=bucket,
+                  steps_per_epoch=per_epoch, epochs=round(steps / per_epoch, 4), save_every=save_every,
+                  model_kw=dict(model_kw, fact_activation="swiglu", learn_output_scale=True),   # kaldirilan secenekler
+                  bucket=bucket,                                                                 # sabit degerle
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
                               optimizer=TR.OPTIMIZER, schedule="wsd", cooldown=TR.COOLDOWN,   # wsd, EMA yok, linear:
                               coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,   # bu kosucunun
@@ -164,8 +165,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                               final_cooldown_shape="linear", attention_kernel="math",
                               newton_schulz_precision=TR.NEWTON_SCHULZ_PRECISION, log_cooldown_kappa=TR.LOG_COOLDOWN_KAPPA,
                               stream_norm=True, layer_norm=False,
-                              normalized_update=TR.NORMALIZED_UPDATE, sphere_weights=TR.SPHERE_WEIGHTS, canon=TR.CANON,
-                              rope=TR.ROPE),
+                              normalized_update=True, sphere_weights=True, canon=True, rope=TR.ROPE),
                          **train_kw))
     checkpoint = None
     if resume:

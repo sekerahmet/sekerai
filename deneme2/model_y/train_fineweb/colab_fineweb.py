@@ -132,8 +132,7 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
     assert setting == "shared", "paketli pencere yalniz BlockModel (setting shared)"
     assert "micro_batches" not in train_kw, "micro_batches plan'dan (tokens_per_step / batch_size)"
     model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, shared_facts=M.SHARED_FACTS, heads=M.HEADS,
-                         fact_activation=M.FACT_ACTIVATION, learn_output_scale=M.LEARN_OUTPUT_SCALE, output_link=M.OUTPUT_LINK,
-                         units=M.FACT_UNITS, t_max=data["seq_len"], anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK,
+                         output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=data["seq_len"], anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK,
                          last_facts_alpha_init=M.LAST_FACTS_ALPHA_INIT, input_embedding=M.INPUT_EMBEDDING,
                          input_bigrams=0, first_turn_facts=M.FIRST_TURN_FACTS,
                          input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE,
@@ -151,7 +150,8 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
                   seq_len=data["seq_len"], vocab=len(data["vocab"]),
                   exam_docs=len(data["exam"]), valid_docs=len(data["valid_starts"]), token_budget=token_budget,
                   tokens_per_step=tokens_per_step, batch_size=batch_size, save_every=save_every,
-                  model_kw=dict(model_kw, packed_attention="flex"),   # kaldirilan secenekler config'te sabit degerle: surdurme
+                  model_kw=dict(model_kw, packed_attention="flex", fact_activation="swiglu",   # kaldirilan secenekler
+                                learn_output_scale=True),          # config'te sabit degerle: surdurme karsilastirmasi
                   **steps_plan,
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
                               optimizer=TR.OPTIMIZER, schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,
@@ -160,8 +160,8 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
                               coherence_power=1.0, muon_tangent=True,
                               final_cooldown_shape=TR.FINAL_COOLDOWN_SHAPE, attention_kernel="math",
                               newton_schulz_precision=TR.NEWTON_SCHULZ_PRECISION, log_cooldown_kappa=TR.LOG_COOLDOWN_KAPPA,
-                              stream_norm=True, layer_norm=False, normalized_update=TR.NORMALIZED_UPDATE,
-                              sphere_weights=TR.SPHERE_WEIGHTS, canon=TR.CANON, rope=TR.ROPE), **train_kw))
+                              stream_norm=True, layer_norm=False, normalized_update=True, sphere_weights=True, canon=True,
+                              rope=TR.ROPE), **train_kw))
     steps, per_epoch, rows = config["steps"], config["steps_per_epoch"], config["rows_per_step"]
     checkpoint = None
     if resume:
