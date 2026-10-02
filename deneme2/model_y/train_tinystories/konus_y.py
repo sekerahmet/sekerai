@@ -106,7 +106,7 @@ def load_model(run_dir, n_vocab, averaged=False):
     # eski kosular: tek Block, tek head, ReLU, sabit cikis olcegi, tek parca kayip (yalniz egitimde fark eder)
     kw = dict(dict(layers=1, heads=1, fact_activation="relu", learn_output_scale=False, loss_chunk=0,
                    output_link=False, shared_facts=True, input_embedding=False, input_bigrams=0, first_turn_facts=True,
-                   input_embedding_sphere=False, rope_base=10000.0), **kw)   # 29-30 Eylul oncesi config'lerde yazilmadi
+                   input_embedding_sphere=False, rope_base=10000.0, attention_log_scale=False), **kw)
     assert not kw.pop("output_skip", False), "output_skip (28 Eylul) kaldirildi"
     assert not cfg.get("copy_path"), "kopya yolu (Oneri A) 28 Eylul'de kaldirildi"
     assert cfg["setting"] == "shared" and not cfg.get("layer_norm"), "ayri blok / LayerNorm kaldirildi: bu kosu kurulamaz"

@@ -300,6 +300,7 @@ def t_step3():
     # 28 Eylul oncesi tasarimin testleri: paket (normalized_update, sphere_weights) kapali, tek Block x 2 tur; paket
     # t_normalized_update'te, 2 x 2 t_layers'ta
     BlockModel = functools.partial(model_y.BlockModel, normalized_update=False, sphere_weights=False, canon=False, turns=2,
+                                   attention_log_scale=False,
                                    layers=1, heads=1, fact_activation="relu", learn_output_scale=False, loss_chunk=0,
                                    output_link=False, shared_facts=True, input_embedding=False, first_turn_facts=True)
     n, d = 12, 6
@@ -399,8 +400,9 @@ def t_step3():
           "%.3f -> %.3f" % (curve_r[0]["nll"], curve_r[-1]["nll"]))
     # batches: mini-batch; model_kw: model ayarlari
     import copy
-    whole, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=5, log_at=())
-    via, _ = TR.train_seq("shared", None, None, nv, steps=5, log_at=(), batches=lambda step: (sids[:64], smask[:64]))
+    whole, _ = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=5, log_at=(), schedule="wsd")
+    via, _ = TR.train_seq("shared", None, None, nv, steps=5, log_at=(), batches=lambda step: (sids[:64], smask[:64]),
+                          schedule="wsd")
     pick = lambda step: (sids[(step * 16) % 480:(step * 16) % 480 + 32], smask[(step * 16) % 480:(step * 16) % 480 + 32])
     packs = {}
     keep = lambda step, model, opt: packs.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
@@ -461,8 +463,11 @@ def t_step3():
     import inspect
     from model_y import apply_rope, masked_nll
     sig = inspect.signature(TR.train_seq).parameters
-    check("tarif varsayilanlari: optimizer 'muon', schedule 'wsd', cooldown 0,2, compile True (kullanici, 27 Eylul)",
-          sig["optimizer"].default == TR.OPTIMIZER == "muon" and sig["schedule"].default == TR.SCHEDULE == "wsd"
+    check("tarif varsayilanlari (ana kosu): optimizer 'muon', schedule 'coherence', son inis 'log', weight_ema 0,999, "
+          "cooldown 0,2, compile True",
+          sig["optimizer"].default == TR.OPTIMIZER == "muon" and sig["schedule"].default == TR.SCHEDULE == "coherence"
+          and sig["final_cooldown_shape"].default == TR.FINAL_COOLDOWN_SHAPE == "log"
+          and sig["weight_ema"].default == TR.WEIGHT_EMA == 0.999
           and sig["cooldown"].default == TR.COOLDOWN == 0.2 and sig["compile"].default is True)
     c_on, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=2, log_at=(), compile=True)
     c_off, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=2, log_at=(), compile=False)
@@ -531,12 +536,13 @@ def t_step3():
     def grab(step, model, opt):
         opts.append(opt)
         lrs[step] = opt.param_groups[0]["lr"]
-    mm, curve_m = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=10, log_at=(0, 10), save_every=1, save=grab)
+    mm, curve_m = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=10, log_at=(0, 10), save_every=1, save=grab,
+                               schedule="wsd")
     names_m = {id(p_): k.split(".")[-1] for k, p_ in mm.named_parameters()}
     in_muon = sorted({names_m[id(p_)] for g_ in opts[0].param_groups if g_["use_muon"] for p_ in g_["params"]})
     in_adam = sorted({names_m[id(p_)] for g_ in opts[0].param_groups if not g_["use_muon"] for p_ in g_["params"]})
     wsd = [0.01 * (1.0 if t < 8 else TR.LR_FLOOR + (1 - TR.LR_FLOOR) * (1 - math.sqrt((t - 8) / 2))) for t in range(1, 11)]
-    check("Muon + WSD (varsayilan): Muon'da W_context, W_fact_in, W_fact_up, W_fact_out, W_value; Adam'da noktalar, W_query, "
+    check("Muon + WSD: Muon'da W_context, W_fact_in, W_fact_up, W_fact_out, W_value; Adam'da noktalar, W_query, "
           "W_key, cikis olcegi; "
           "lr 8. adima kadar sabit, sonra 1 - sqrt ile LR x LR_FLOOR'a; kayip iner",
           isinstance(opts[0], TR.Muon) and in_muon == ["W_context", "W_fact_in", "W_fact_out", "W_fact_up", "W_value"]
@@ -785,7 +791,8 @@ def t_normalized_update():
     import torch.nn.functional as F
     import functools
     from model_y import ALPHA_INIT, LAST_FACTS_ALPHA_INIT, BlockModel, apply_rope
-    BlockModel = functools.partial(BlockModel, input_embedding=False, first_turn_facts=True)   # 30 Eylul oncesi tasarim (tur 1 FactUnits'li)
+    BlockModel = functools.partial(BlockModel, input_embedding=False, first_turn_facts=True,   # tur 1 FactUnits'li,
+                                   attention_log_scale=False)                                     # sabit attention olcegi
     data = synthetic_data()
     sids, smask = sequences(data)
     nv = len(data["vocab"])
@@ -890,7 +897,7 @@ def t_normalized_update():
     # LAST_FACTS_ALPHA_INIT: ALPHA_INIT verilince eski baslatma birebir; 1,0'da son durum girdi noktasindan ayrilir, adim-0
     # kaybi ln n + s^2 / (2d) (h rastgele yon: <h, p> ~ N(0, 1/d)), girdiyi tekrar etme kaybolur
     old_init, new_init = (BlockModel(nv, last_facts_alpha_init=ALPHA_INIT, shared_facts=True),   # esikler paylasimli
-                          BlockModel(nv, shared_facts=True))                                  # FactUnits ile olculdu
+                          BlockModel(nv, last_facts_alpha_init=1.0, shared_facts=True))       # FactUnits ile olculdu
     before = {k: v.clone() for k, v in new_init.state_dict().items()}
     before["alpha_facts"].fill_(ALPHA_INIT)                               # 28 Eylul oncesi kod: torch.full(ALPHA_INIT)
     same_old = list(before) == list(old_init.state_dict()) and all(torch.equal(before[k], v)
@@ -900,21 +907,22 @@ def t_normalized_update():
     for n_, d_, units_, ids_, mask_, tol in ((nv, 64, 170, sids[:32], smask[:32], 0.35),
                                              (8004, 384, 1024, big, torch.ones_like(big, dtype=torch.bool), 0.1)):
         out_ = {}
-        for init in (LAST_FACTS_ALPHA_INIT, ALPHA_INIT):
+        for init in (1.0, ALPHA_INIT):
             m_ = BlockModel(n_, d=d_, units=units_, last_facts_alpha_init=init, shared_facts=True)
             with torch.no_grad():
                 keep_ = mask_[:, 1:]
                 repeat = float((m_.logits(ids_[:, :-1]).argmax(-1) == ids_[:, :-1])[keep_].float().mean())
                 out_[init] = (float(m_.loss(ids_, mask_)[1]), repeat)
         want = math.log(n_) + m_.scale ** 2 / (2 * d_)
-        rows.append((n_, d_, want, out_, abs(out_[LAST_FACTS_ALPHA_INIT][0] - want) < tol and out_[ALPHA_INIT][0] > want + 2
-                     and out_[ALPHA_INIT][1] > 0.9 and out_[LAST_FACTS_ALPHA_INIT][1] < 0.05))
-    check("last_facts_alpha_init: ALPHA_INIT ile eski baslatma bit duzeyinde; 1,0'da adim-0 kaybi ln n + s^2/(2d)'ye yakin "
+        rows.append((n_, d_, want, out_, abs(out_[1.0][0] - want) < tol and out_[ALPHA_INIT][0] > want + 2
+                     and out_[ALPHA_INIT][1] > 0.9 and out_[1.0][1] < 0.05))
+    check("last_facts_alpha_init: varsayilan 0,1 (ana kosu); ALPHA_INIT ile eski baslatma bit duzeyinde; 1,0'da adim-0 "
+          "kaybi ln n + s^2/(2d)'ye yakin "
           "(test verisi n 242 d 64, 0,35; n 8004 d 384 rastgele token, 0,1), 0,1'de 2 nat ustunde; girdiyi "
           "tekrar (argmax = girdi token'i) 0,1'de > %90, 1,0'da < %5",
-          LAST_FACTS_ALPHA_INIT == 1.0 and same_old and all(r[-1] for r in rows),
+          LAST_FACTS_ALPHA_INIT == 0.1 and same_old and all(r[-1] for r in rows),
           "  ".join("n %d d %d: formul %.3f / 1,0 kayip %.3f tekrar %.3f / 0,1 kayip %.3f tekrar %.3f" % (
-              n_, d_, want, o[LAST_FACTS_ALPHA_INIT][0], o[LAST_FACTS_ALPHA_INIT][1], o[ALPHA_INIT][0], o[ALPHA_INIT][1])
+              n_, d_, want, o[1.0][0], o[1.0][1], o[ALPHA_INIT][0], o[ALPHA_INIT][1])
               for n_, d_, want, o, _ in rows))
 
 
@@ -1109,8 +1117,8 @@ def t_coherence():
     TR.train_seq("shared", sids[:64], smask[:64], nv, steps=40, log_at=(), save_every=1, save=grab_l, schedule="coherence",
                  final_cooldown=0.5, lr_floor=0.0, final_cooldown_shape="linear")
     want_l = {t: TR.LR * (1 - (t - 20) / 20) for t in range(20, 41)}
-    check("coherence, final_cooldown_shape linear: son %50'de dogrusal x 0'a (D2Z); varsayilan linear",
-          TR.FINAL_COOLDOWN_SHAPE == "linear" and all(abs(lin[t] - v) < 1e-12 for t, v in want_l.items())
+    check("coherence, final_cooldown_shape linear: son %50'de dogrusal x 0'a (D2Z)",
+          all(abs(lin[t] - v) < 1e-12 for t, v in want_l.items())
           and all(lin[t] == TR.LR for t in range(1, 20)), str({t: round(lin[t], 6) for t in (19, 20, 30, 39, 40)}))
 
     lg = {}
@@ -1119,9 +1127,9 @@ def t_coherence():
                  final_cooldown=0.5, lr_floor=0.0, final_cooldown_shape="log")
     k_ = TR.LOG_COOLDOWN_KAPPA
     want_g = {t: TR.LR * (1 - math.log(1 + (t - 20) / 20 / k_) / math.log(1 + 1 / k_)) for t in range(20, 41)}
-    check("coherence, final_cooldown_shape log (nGPT 2026): son %50'de 1 - log(1 + p/k) / log(1 + 1/k) ile 0'a, k 0,05; "
-          "inisin %10'unda tepenin %64'u, yarisinda %21'i",
-          k_ == 0.05 and all(abs(lg[t] - v) < 1e-12 for t, v in want_g.items()) and all(lg[t] == TR.LR for t in range(1, 20))
+    check("coherence, final_cooldown_shape log (nGPT 2026, varsayilan): son %50'de 1 - log(1 + p/k) / log(1 + 1/k) ile 0'a, "
+          "k 0,05; inisin %10'unda tepenin %64'u, yarisinda %21'i",
+          TR.FINAL_COOLDOWN_SHAPE == "log" and k_ == 0.05 and all(abs(lg[t] - v) < 1e-12 for t, v in want_g.items()) and all(lg[t] == TR.LR for t in range(1, 20))
           and abs(lg[22] / TR.LR - 0.639) < 1e-3 and abs(lg[30] / TR.LR - 0.212) < 1e-3, str({t: round(lg[t], 6) for t in (19, 20, 22, 30, 40)}))
 
     lrs_m, means = {}, {}
@@ -1496,7 +1504,7 @@ def t_learn_output_scale():
     import konus_y as K
     tmp = tempfile.mkdtemp()
     legacy = BlockModel(nv, learn_output_scale=False, output_link=False, shared_facts=True, input_embedding=False, first_turn_facts=True,
-                        rope_base=10000)   # 29 Eylul oncesi kosu (RoPE tabani sabit 10.000)
+                        rope_base=10000, attention_log_scale=False)   # 29 Eylul oncesi kosu (RoPE tabani sabit 10.000)
     for sub, model_ in (("old", off), ("new", trained), ("legacy", legacy)):
         os.makedirs(os.path.join(tmp, sub))
         kw_ = dict(d=64, turns=4, layers=2, heads=4, fact_activation="swiglu", units=170, t_max=512)
@@ -1504,7 +1512,8 @@ def t_learn_output_scale():
             kw_.update(output_link=model_.output_link, shared_facts=model_.shared_facts,
                        input_embedding=hasattr(model_, "input_embedding"), first_turn_facts=model_.first_turn_facts,
                        input_embedding_sphere=model_.input_embedding_sphere,
-                       rope_base=model_.blocks[0].attention.rope_base)    # kosucular (30 Eylul'den) tabani sayi yazar
+                       rope_base=model_.blocks[0].attention.rope_base,    # kosucular (30 Eylul'den) tabani sayi yazar
+                       attention_log_scale=model_.blocks[0].attention.attention_log_scale)
         if sub == "new":
             kw_["learn_output_scale"] = True
         json.dump(dict(setting="shared", model_kw=kw_, rope=True, normalized_update=True, sphere_weights=True, canon=True,
@@ -2288,8 +2297,9 @@ def t_internals():
     kept = [(a_.clone(), b_.clone()) for a_, b_ in cached]
     replica = []
     for sf in (True, False):                               # paylasimli ve tur basina FactUnits
-        mk = dict(base_kw, output_link=True, shared_facts=sf, rope_base=10000.0)   # kosucular config'e sayi yazar
-        ctx = I._profile_setup(dict(setting="shared", vocab=nv, model_kw=mk, weight_ema=0.9), cached, "cpu")
+        mk = dict(base_kw, output_link=True, shared_facts=sf, rope_base=10000.0,   # kosucular config'e sayi yazar
+                  attention_log_scale=True)
+        ctx = I._profile_setup(dict(setting="shared", vocab=nv, model_kw=mk, weight_ema=0.9, schedule="wsd"), cached, "cpu")
         for j in (1, 2, 3):                                # kurulum batch 0 ile bir adim; tekrar 1, 2, 0
             I._step_parts(ctx, *cached[j % 3], I._Clock("cpu"))
         ref = {}
@@ -2299,7 +2309,7 @@ def t_internals():
             raise Enough()
         try:                                               # wsd: 80 adimdan once lr sabit
             TR.train_seq("shared", None, None, nv, steps=100, batches=lambda s: cached[s % 3], log_at=(), save_every=4,
-                         save=stop, weight_ema=0.9, model_kw=mk)
+                         save=stop, weight_ema=0.9, model_kw=mk, schedule="wsd")
         except Enough:
             pass
         replica.append(same(ctx["model"].state_dict(), ref["model"]) and same(ctx["ema"]["model"].state_dict(), ref["ema"]))
@@ -2446,7 +2456,7 @@ def t_packing():
           "skor %.1e  gradyan %.1e  bit duzeyinde %s" % (float((z_none - z_one).abs().max()), diff,
                                                          torch.equal(z_none, z_one) and float(l_none) == float(l_one)))
 
-    big = BlockModel(V, d=48, heads=12, units=24, t_max=8192).double()
+    big = BlockModel(V, d=48, heads=12, units=24, t_max=8192, attention_log_scale=False).double()
     x = torch.tensor([docs[3] + docs[1]])
     near, far = torch.arange(x.shape[1])[None], torch.arange(x.shape[1])[None] + 8150
     with torch.no_grad():
@@ -2515,8 +2525,9 @@ def t_attention_log_scale():
     x = torch.nn.functional.normalize(torch.randn(1, 512, 16, generator=g), dim=-1)
     with torch.no_grad():
         a, b = fixed(x), logn(x)
-    check("attention_log_scale: varsayilan kapali; t_max 512'de n = 512 (konum 511) sabit olcekle ayni, erken konumda farkli",
-          ATTENTION_LOG_SCALE is False and not BlockModel(V).blocks[0].attention.attention_log_scale
+    check("attention_log_scale: varsayilan acik (ana kosu); t_max 512'de n = 512 (konum 511) sabit olcekle ayni, erken konumda "
+          "farkli",
+          ATTENTION_LOG_SCALE is True and BlockModel(V).blocks[0].attention.attention_log_scale
           and float((a[0, 511] - b[0, 511]).abs().max()) < 1e-6 and float((a[0, 100] - b[0, 100]).abs().max()) > 1e-4,
           "511: %.1e  100: %.1e" % (float((a[0, 511] - b[0, 511]).abs().max()), float((a[0, 100] - b[0, 100]).abs().max())))
 

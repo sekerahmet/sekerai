@@ -138,10 +138,10 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
     if setting in TR.STEP3:
         model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, shared_facts=M.SHARED_FACTS, heads=M.HEADS, fact_activation=M.FACT_ACTIVATION,
                              learn_output_scale=M.LEARN_OUTPUT_SCALE, output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=M.T_MAX,
-                             anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK, last_facts_alpha_init=M.LAST_FACTS_ALPHA_INIT,
+                             anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK, last_facts_alpha_init=1.0,
                              input_embedding=M.INPUT_EMBEDDING, input_bigrams=M.INPUT_BIGRAMS,
                              first_turn_facts=M.FIRST_TURN_FACTS, input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE,
-                             rope_base=M.ROPE_BASE),
+                             rope_base=M.ROPE_BASE, attention_log_scale=False),   # 1,0 / False: bu kosucunun varsayilani
                         **(model_kw or {}))
         if model_kw.get("rope_base") == "auto":  # config'e SAYI yazilir: formul sonra degisse de kosu ayni tabanla kurulur
             model_kw["rope_base"] = M.rope_base_for(model_kw["d"] // model_kw["heads"], model_kw["t_max"])
@@ -164,11 +164,11 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                   steps_per_epoch=per_epoch, epochs=round(steps / per_epoch, 4), save_every=save_every, model_kw=model_kw,
                   bucket=bucket,
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
-                              optimizer=TR.OPTIMIZER, schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,
-                              coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,
-                              weight_ema=TR.WEIGHT_EMA, matmul_precision=TR.MATMUL_PRECISION,
+                              optimizer=TR.OPTIMIZER, schedule="wsd", cooldown=TR.COOLDOWN,   # wsd, EMA yok, linear:
+                              coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,   # bu kosucunun
+                              weight_ema=None, matmul_precision=TR.MATMUL_PRECISION,            # varsayilani
                               coherence_power=1.0, muon_tangent=True,
-                              final_cooldown_shape=TR.FINAL_COOLDOWN_SHAPE, attention_kernel="math",
+                              final_cooldown_shape="linear", attention_kernel="math",
                               newton_schulz_precision=TR.NEWTON_SCHULZ_PRECISION, log_cooldown_kappa=TR.LOG_COOLDOWN_KAPPA,
                               stream_norm=True, layer_norm=False,
                               normalized_update=TR.NORMALIZED_UPDATE if setting in TR.STEP3 else False,
@@ -188,7 +188,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         saved.setdefault("newton_schulz_precision", "fp32")
         if setting in TR.STEP3 and saved.get("model_kw"):   # 29 Eylul oncesi kosularda bu ayarlar yazilmadi: yoktu
             saved["model_kw"] = dict(dict(output_link=False, shared_facts=True, input_embedding=False, input_bigrams=0,
-                                          first_turn_facts=True, input_embedding_sphere=False, rope_base=10000.0),
+                                          first_turn_facts=True, input_embedding_sphere=False, rope_base=10000.0,
+                                          attention_log_scale=False),
                                      **saved["model_kw"])     # 30 Eylul oncesi: RoPE tabani sabit 10.000
         differ = sorted(k for k in set(saved) | set(config) if k != "device" and saved.get(k) != config.get(k))
         if differ:
@@ -315,7 +316,9 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                                     checkpoint=checkpoint, batches=_counting(DS.batches(data, batch_size, seed, bucket), work),
                                     model_kw=model_kw if keys is None else dict(model_kw, bigram_keys=keys),
                                     **dict(train_kw, matmul_precision=config["matmul_precision"],
-                                           newton_schulz_precision=config["newton_schulz_precision"]))
+                                           newton_schulz_precision=config["newton_schulz_precision"],
+                                           schedule=config["schedule"], weight_ema=config["weight_ema"],
+                                           final_cooldown_shape=config["final_cooldown_shape"]))
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             final = dict(step=steps, valid=ES.exam(model, data, ES.exam_rows(data, None)), subset=ES.exam(model, data, rows),
                          exam_train=ES.exam_train(model, data))

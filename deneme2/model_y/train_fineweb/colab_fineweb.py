@@ -40,28 +40,23 @@ import exam_simplestories as ES  # noqa: E402
 import model_y as M  # noqa: E402
 import train_y as TR  # noqa: E402
 
-# Varsayilan kosu (kullanici, 30 Eylul: "onaylıyorum", "CU satın alırım sorun değli"; not.md §9): model_y varsayilanlarinin
-# uzerine, aday (3) d 1280
-RUN_NAME = "fineweb_modely_6x2_d1280_gpt2_s0"
-MODEL_KW = dict(d=1280, layers=6, turns=12, heads=10, fact_activation="swiglu", units=3456, shared_facts=False,
-                first_turn_facts=False, input_embedding=True, input_embedding_sphere=True, input_bigrams=0, output_link=True,
-                learn_output_scale=True, attention_log_scale=True, loss_chunk=4096,
-                last_facts_alpha_init=0.1)   # butun alpha'lar esit 0,1'den (kullanici, 30 Eylul: "o zaman alfa karar verip
-#   yapsak ?"); FactUnits denemesi ..._pilot_lastalpha01_s0: 3.000'de val nll -0,038, acc +0,14 puan (1,0'a karsi, tek tohum)
+# Varsayilan kosu: ana kosu (d1024_8x2); geri kalan model ayarlari model_y varsayilanlari
+RUN_NAME = "fineweb_modely_8x2_d1024_gpt2_s0"
+MODEL_KW = dict(d=1024, layers=8, turns=16, heads=8, units=2752)
 RECIPE = dict(schedule="coherence", final_cooldown=0.95, final_cooldown_shape="log", lr_floor=0.0, optimizer="muon",
               weight_ema=0.999, matmul_precision="bf16")      # lr: peak_lr(d)
-# A100 TEST adaylari (profile_sizes): model ayarlari disinda her sey ayni; units ~ 8/3 d, 64'un kati; head boyu 128
-# (kullanici, 30 Eylul: "10X128 ok"; RoPE tabani 8.192'de 64'luk head'de tirtikli, 128'likte duzgun -- not.md §9)
-# batch_size: parca basina satir (model_kw'ye girmez); 8 satirda d1024_8x2 egitim adiminda 80 GB'i asti (A100 TEST, 30 Eylul)
+# A100 TEST adaylari (profile_sizes): model ayarlari disinda her sey ayni; units ~ 8/3 d, 64'un kati; head boyu 128 (RoPE
+# tabani 8.192'de 64'luk head'de tirtikli, 128'likte duzgun)
+# batch_size: parca basina satir (model_kw'ye girmez); 8 satirda d1024_8x2 egitim adimi 80 GB'i asar
 CANDIDATES = (("d1024_6x2", dict(d=1024, layers=6, turns=12, heads=8, units=2752)),
               ("d1024_8x2", dict(d=1024, layers=8, turns=16, heads=8, units=2752, batch_size=4)),
               ("d1280_6x2", dict(d=1280, layers=6, turns=12, heads=10, units=3456, batch_size=4)))
-BATCH_SIZE = 8           # parca basina satir (SEQ_LEN token); A100 TEST'le bellege gore secilir
+BATCH_SIZE = 4           # parca basina satir (SEQ_LEN token): ana kosununki; A100 TEST'le bellege gore secilir
 TOKENS_PER_STEP = 64 * 8192   # adim basina token hedefi: 64 x 8.192 ~ 0,5M
 SAVE_EVERY = 500
-PROBE_TOKENS = "auto"    # her sinavda istem basina uretilen token; "auto" = EF.typical_doc_tokens (valid medyan belge, 641;
-                         # kullanici, 1 Ekim: "bir ölçeğe uydur").  1 Ekim'e kadar 64 (olculmemis).  Config'e girmez: log'da
-FINAL_TOKENS = "auto"    # sonda sabit istem basina, ayni kural (1 Ekim'e kadar 256); belge devami: belgenin kalani kadar
+PROBE_TOKENS = "auto"    # her sinavda istem basina uretilen token; "auto" = EF.typical_doc_tokens (valid medyan belge).
+                         # Config'e girmez: log'da
+FINAL_TOKENS = "auto"    # sonda sabit istem basina, ayni kural; belge devami: belgenin kalani kadar
 FINAL_DOCS = 8           # sonda ilk yarisi verilen sinav belgesi (gercek devamla)
 REPEAT_EVERY = 4         # continuation_repeats her 4. sinavda (adim / every % 4 == 0) ve sonda
 RUNS = {}

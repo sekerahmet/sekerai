@@ -42,8 +42,7 @@ WORDS = ("water cycle energy cell river mountain history empire trade science nu
 EXTRA = ("\u00e9t\u00e9", "M\u00fcller", "\u4e2d\u6587", "na\u00efve", "\U0001f600")   # cok baytli karakterler
 REAL_TOKENIZER = os.path.expanduser("~/.cache/huggingface/hub/models--openai-community--gpt2/snapshots/"
                                     "607a30d783dfa663caf39e06633721c8d4cfcd7e/tokenizer.json")
-REAL_SAMPLE = ("C:/Users/Lenovo/AppData/Local/Temp/claude/c--AI-NEW-MODEL/c8909f31-4ce6-4f6c-9134-2c20db5b6a95/scratchpad/"
-               "fineweb/sample.parquet")
+REAL_SAMPLE = os.path.join(os.path.dirname(os.path.dirname(HERE)), "onbellek", "fineweb", "sample.parquet")   # git disi
 
 
 def check(name, ok, note=""):
@@ -465,10 +464,11 @@ def t_colab(data, root):
     V, d, units = 50257, 80, 32
     bm = M.BlockModel(V, **dict(C.MODEL_KW, d=d, units=units, t_max=SEQ))
     N, Ld = C.CS._model_flops(bm)
-    check("_model_flops, varsayilan kosu bicimi (6 blok x 2 = 12 tur, 20 head, tur 1 FactUnits'siz, tur basina FactUnits): "
-          "N = 12 x 4 d^2 + 11 x 3 d units + V d, L d = 12 d; RUN_NAME d1280; peak_lr = 0,01 sqrt(384 / d)",
-          (N, Ld) == (12 * 4 * d * d + 11 * 3 * d * units + V * d, 12 * d) and C.RUN_NAME == "fineweb_modely_6x2_d1280_gpt2_s0"
-          and C.MODEL_KW["d"] == 1280 and C.peak_lr(1280) == 0.0055 and C.peak_lr(1024) == 0.0061 and C.peak_lr(384) == 0.01
+    check("_model_flops, varsayilan kosu bicimi (8 blok x 2 = 16 tur, 8 head, tur 1 FactUnits'siz, tur basina FactUnits): "
+          "N = 16 x 4 d^2 + 15 x 3 d units + V d, L d = 16 d; RUN_NAME ana kosu (d1024_8x2, batch 4); peak_lr = 0,01 sqrt(384 / d)",
+          (N, Ld) == (16 * 4 * d * d + 15 * 3 * d * units + V * d, 16 * d) and C.RUN_NAME == "fineweb_modely_8x2_d1024_gpt2_s0"
+          and C.MODEL_KW["d"] == 1024 and C.BATCH_SIZE == 4
+          and C.peak_lr(1280) == 0.0055 and C.peak_lr(1024) == 0.0061 and C.peak_lr(384) == 0.01
           and "lr" not in C.RECIPE and C.TOKENS_PER_STEP == 64 * 8192, "N %d" % N)
 
     kw = dict(token_budget=3 * 4 * SEQ, tokens_per_step=4 * SEQ, batch_size=2, every=1, device="cpu", save_every=1,

@@ -33,7 +33,7 @@ GRAD_CLIP = 1.0      # gradient clipping: adimdaki gradient'in boyu bunu gecerse
 WEIGHT_DECAY = 0.0   # weight decay (AdamW), yalniz W_ matrislerine; 0 = kapali
 OPTIMIZER = "muon"   # "muon": gizli matrisler (W_context, W_value, W_fact_in, W_fact_up, W_fact_out) Muon, gerisi Adam |
                      # "adam": hepsi Adam
-SCHEDULE = "wsd"     # "wsd": lr sabit, son COOLDOWN kisminda 1 - sqrt ile LR x LR_FLOOR'a | "coherence": asagida
+SCHEDULE = "coherence"   # "coherence": asagida | "wsd": lr sabit, son COOLDOWN kisminda 1 - sqrt ile LR x LR_FLOOR'a
 # Inductor'un bellek yerlesimi analizi dinamik sekilde (bucket) ic kontrolde patladi; yalniz tiling sezgisi, kapatmak sonucu
 # degistirmez
 torch._inductor.config.triton.coalesce_tiling_analysis = False
@@ -45,10 +45,10 @@ COOLDOWN = 0.2       # WSD'de inisin payi (son %20).  Hagele 2024: <= %20 yeter,
 # kurede adim = aci: theta = LR x 0,2 x sqrt(d) x rho.  Tam batch'te (ids verilmis) gurultu yok: rho = 1, olculmez.
 COHERENCE_WINDOW = 200   # rho'nun hareketli ortalamasi (adim); tek adimin olcumu gurultulu
 FINAL_COOLDOWN = 0.95    # coherence'ta inisin payi: ilk %5'te lr olculur, sonra o degerden x LR_FLOOR'a
-FINAL_COOLDOWN_SHAPE = "linear"   # son inisin bicimi: "linear" 1 - p | "sqrt" 1 - sqrt(p) | "log" 1 - log(1 + p/k) /
+FINAL_COOLDOWN_SHAPE = "log"      # son inisin bicimi: "linear" 1 - p | "sqrt" 1 - sqrt(p) | "log" 1 - log(1 + p/k) /
                                   # log(1 + 1/k) (nGPT 2026, onden yuklu)
 LOG_COOLDOWN_KAPPA = 0.05          # "log" inisin k'si: kucuk k basta hizli dusus, uzun kuyruk
-WEIGHT_EMA = None       # agirliklarin hareketli ortalamasi (ornek 0,999): titresimi siler.  None = kapali
+WEIGHT_EMA = 0.999      # agirliklarin hareketli ortalamasi: titresimi siler.  None = kapali
 MATMUL_PRECISION = "bf16"   # egitim hesabi: "fp32" | "bf16" (ileri hesap autocast; parametre, gradyan, optimizer, Newton-Schulz
                             # ve weight EMA fp32).  Sinav hep fp32.  Yalniz GPU'da
 NEWTON_SCHULZ_PRECISION = "fp32"   # Muon'un ortogonallestirmesi: "fp32" | "bf16"

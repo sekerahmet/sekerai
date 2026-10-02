@@ -61,7 +61,7 @@ FACT_ACTIVATION = "swiglu"   # FactUnits: "relu" u = ReLU(W_fact_in x - fact_thr
 NORMALIZED_UPDATE = True    # h <- norm(h + alpha (norm(u) - h)), u blok ciktisi; alpha ogrenilen, tur ve alt blok basina
                             # d sayi (nGPT).  False: h <- norm(h + u)
 ALPHA_INIT = 0.1            # alpha'nin baslangici: nGPT 2026 tarifi (derinlikten bagimsiz 0,1)
-LAST_FACTS_ALPHA_INIT = 1.0  # yalniz son turun FactUnits alpha'si (alpha_facts[turns - 1]) bundan baslar, gerisi ALPHA_INIT
+LAST_FACTS_ALPHA_INIT = 0.1  # yalniz son turun FactUnits alpha'si (alpha_facts[turns - 1]) bundan baslar, gerisi ALPHA_INIT
 SPHERE_WEIGHTS = True       # W_query, W_key, W_fact_in, W_value satirlari ve W_context, W_fact_out sutunlari basta ve her
                             # optimizer adimindan sonra birim boya (nGPT); FactUnits girdisi sqrt(d) x kosinus
 CANON = True         # Canon-A (Allen-Zhu 2025): attention girdisi x_t + sum_k w_k * x_(t-k), k = 0..3, w 0'dan
@@ -81,7 +81,7 @@ LOSS_CHUNK = 4096    # egitim kaybi sozluk parcalariyla: tam logits tablosu (B x
 OUTPUT_LINK = True   # cikis bagi phi: skor = s phi(c), phi(c) = c (1 + c (q + c (q^2/3 + u))), c = <h, PL>, q = link_q,
                      # u = link_u >= 0 (her adimdan sonra kirpilir) -> phi' = (1 + q c)^2 + 3 u c^2 >= 0: phi hep artan, en
                      # olasi token degismez; q = u = 0: dogrusal.  False: dogrusal skor
-ATTENTION_LOG_SCALE = False  # True: attention olcegi sabit scale_for(T_MAX) yerine sorgu basina scale_for(n), n = gordugu anahtar
+ATTENTION_LOG_SCALE = True   # True: attention olcegi sabit scale_for(T_MAX) yerine sorgu basina scale_for(n), n = gordugu anahtar
                              # sayisi (belge ici konum + 1); T_MAX = 512'de n = 512 konumu sabit olcek (SSMax'in s log n'i)
 ROPE_BASE = "auto"   # RoPE tabani: sayi ya da "auto" = rope_base_for(head boyu, t_max); eski config'ler sabit 10.000
 

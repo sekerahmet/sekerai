@@ -787,7 +787,7 @@ def _model_kw(config):
     """config'teki model_kw: eski config'lerde yazilmamis anahtarlar o gunun degeriyle; kaldirilan secenegin anahtari
     tek kalan davranisin degerini tasiyorsa atilir, baska degerdeyse kosu kurulamaz (sessizce farkli model kurulmasin)."""
     kw = dict(dict(output_link=False, shared_facts=True, input_embedding=False, input_bigrams=0, first_turn_facts=True,
-                   input_embedding_sphere=False, rope_base=10000.0), **config.get("model_kw", {}))
+                   input_embedding_sphere=False, rope_base=10000.0, attention_log_scale=False), **config.get("model_kw", {}))
     for key, only in (("packed_attention", "flex"),):
         value = kw.pop(key, only)
         assert value == only, "%s=%r kaldirildi (yalniz %r): bu kosu bugunku kodla kurulamaz" % (key, value, only)
