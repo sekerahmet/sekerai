@@ -1169,6 +1169,86 @@ def _text_repair(res):
     return L
 
 
+# ---- 7. points: matematik raporunun O2 / O3 okumalari (cikis noktalari, girdi tablosu, cikis olcegi, arka plan tabani)
+
+FREQ_BANDS = (0.0, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1.0)
+
+
+@torch.no_grad()
+def points(model, counts, test, batch=8):
+    """O2: aci(P_j, PF_j), |PF_j + Δ_j|, siklik f_j bantlari; s = e^tau, q, u, s·φ(1); seyrek kume R (f < 1e-6, gorulen ve
+    gorulmeyen) icin log Σ_{j∈R} e^{z_j} ile ln|R|.  O3: girdi tablosu E'de κ_j = mean_k |E_jk| √d ve cos(E_j, PF_j)."""
+    tok = model.tokens
+    PF, D = tok.fixed_points.double(), tok.shift.double()
+    raw = PF + D
+    P = F.normalize(raw, dim=-1)
+    ang = torch.rad2deg(2 * torch.asin(((P - PF).norm(dim=-1) / 2).clamp(max=1))).cpu().numpy()
+    rawn = raw.norm(dim=-1).cpu().numpy()
+    E = model.input_embedding.detach().double()
+    d = E.shape[1]
+    kappa = (E.abs().mean(-1) * d ** 0.5 / E.norm(dim=-1)).cpu().numpy()   # birim satirda: isaret vektoru 1, Gauss ~0,80
+    ecos = F.cosine_similarity(E, PF, dim=-1).cpu().numpy()
+    f = counts / counts.sum()
+    rows = []
+    for lo, hi in zip(FREQ_BANDS[:-1], FREQ_BANDS[1:]):
+        sel = (f == 0) if lo == 0 else (f >= lo) & (f < hi)
+        if lo == 0:
+            label = "gorulmemis (f = 0)"
+        else:
+            label = "%.0e <= f < %.0e" % (lo, hi)
+        if sel.sum():
+            rows.append(dict(band=label, n=int(sel.sum()), angle=np.quantile(ang[sel], [0.5, 0.9, 1]).tolist(),
+                             raw_norm=np.quantile(rawn[sel], [0.1, 0.5, 0.9]).tolist(),
+                             kappa=np.quantile(kappa[sel], [0.1, 0.5, 0.9]).tolist(),
+                             ecos=np.quantile(ecos[sel], [0.1, 0.5, 0.9]).tolist()))
+    sel = f > 0
+    corr = dict(angle_logf=float(np.corrcoef(ang[sel], np.log(f[sel]))[0, 1]),
+                rawnorm_logf=float(np.corrcoef(rawn[sel], np.log(f[sel]))[0, 1]))
+    s = float(model.scale * math.exp(float(model.log_output_scale) - math.log(model.scale))) if model.learn_output_scale \
+        else model.scale
+    q = float(model.link_q) if model.output_link else 0.0
+    u = float(model.link_u) if model.output_link else 0.0
+    phi1 = 1 + q + q * q / 3 + u
+    R = torch.as_tensor(f < 1e-6, device=tok.shift.device)
+    R_seen = torch.as_tensor((f < 1e-6) & (f > 0), device=tok.shift.device)
+    Pm = tok.points()
+    acc = dict(lse_R=0.0, lse_Rseen=0.0, lse_all=0.0, z_target=0.0, p_R=0.0, n=0)
+    for x, valid, idx in _stories_batches(test, batch, Pm.device):
+        z = I._work(model.logits(x[:, :-1]))[valid]
+        y = x[:, 1:][valid]
+        lse = torch.logsumexp(z, -1)
+        lR = torch.logsumexp(z[:, R], -1)
+        acc["lse_R"] += float(lR.sum())
+        acc["lse_Rseen"] += float(torch.logsumexp(z[:, R_seen], -1).sum())
+        acc["lse_all"] += float(lse.sum())
+        acc["z_target"] += float(z.gather(-1, y[:, None]).sum())
+        acc["p_R"] += float((lR - lse).exp().sum())
+        acc["n"] += len(y)
+    n = acc.pop("n")
+    rival = {k: v / n for k, v in acc.items()}
+    rival.update(ln_R=math.log(int(R.sum())), ln_Rseen=math.log(max(int(R_seen.sum()), 1)), R=int(R.sum()),
+                 R_seen=int(R_seen.sum()), n=n)
+    return dict(bands=rows, corr=corr, s=s, q=q, u=u, s_phi1=s * phi1, s_init=model.scale, rival=rival,
+                tokens_counted=int(counts.sum()))
+
+
+def _text_points(res):
+    L = ["## O2 / O3: token bantlari (siklik %d egitim token'indan)" % res["tokens_counted"],
+         "bant                 |     n | aci(P,PF) med/%90/max | |PF+Δ| %10/med/%90 | E: κ %10/med/%90 | E: cos(E,PF) %10/med/%90"]
+    for r in res["bands"]:
+        L.append("%-20s | %5d | %5.2f %5.2f %6.2f     | %.3f %.3f %.3f     | %.3f %.3f %.3f  | %+.3f %+.3f %+.3f" % (
+            r["band"], r["n"], *r["angle"], *r["raw_norm"], *r["kappa"], *r["ecos"]))
+    c = res["corr"]
+    L += ["korelasyon (gorulen token'lar): aci ~ log f %.3f, |PF+Δ| ~ log f %.3f" % (c["angle_logf"], c["rawnorm_logf"]),
+          "", "## cikis olcegi: s = e^tau %.3f (baslangic %.3f), q %.4f, u %.4f, s·φ(1) %.3f" % (
+              res["s"], res["s_init"], res["q"], res["u"], res["s_phi1"])]
+    r = res["rival"]
+    L += ["## arka plan tabani (%d test konumu): R = f < 1e-6 (%d token; %d'i gorulmus)" % (r["n"], r["R"], r["R_seen"]),
+          "ortalama log Σ_R e^z %.3f (ln|R| %.3f) | gorulmus R'de %.3f (ln %.3f) | log Σ_hepsi e^z %.3f | hedef z %.3f | "
+          "p(R) ortalama %.4f" % (r["lse_R"], r["ln_R"], r["lse_Rseen"], r["ln_Rseen"], r["lse_all"], r["z_target"], r["p_R"])]
+    return L
+
+
 # ---- CLI
 
 def _decoder(vocab):
@@ -1179,7 +1259,7 @@ def _decoder(vocab):
 def _main(argv=None):
     ap = argparse.ArgumentParser(prog="analyze_structure.py", description=__doc__.split("\n\n")[0])
     ap.add_argument("run", nargs="?", help="kosu klasoru ya da adi")
-    ap.add_argument("measure", nargs="?", choices=("probes", "attention_passes", "units", "pass_swap", "extras", "repair"))
+    ap.add_argument("measure", nargs="?", choices=("probes", "attention_passes", "units", "pass_swap", "extras", "repair", "points"))
     ap.add_argument("--fit-steps", type=int, default=150, help="repair: optimal sabitin adim sayisi")
     ap.add_argument("--reference", type=int, default=48, help="extras: ortalamalar icin ayri belge (testten hemen sonra)")
     ap.add_argument("--data", help="FineWeb koku (gpt2/ altinda)")
@@ -1229,6 +1309,10 @@ def _main(argv=None):
         al = alpha_report(model, test, batch=args.batch, focus=focus, log=say)
         res = dict(units=res, alpha=al)
         lines = _text_units(res["units"], al)
+    elif args.measure == "points":
+        counts = I._token_counts(data, config, run_dir, log=say)
+        res = points(model, counts, test[:args.stories], batch=args.batch)
+        lines = _text_points(res)
     elif args.measure == "repair":
         ref = data["stories"](args.reference, args.offset + args.stories)[1]
         res = repair(model, test, fit, ref, decode, batch=args.batch, steps=args.fit_steps, log=say)
@@ -1291,6 +1375,10 @@ def _selftest():
                 sink_heads=((3, 1),), log=lambda s: None)
     print("\n".join(_text_repair(rp)))
     rows = {r["case"]: r for r in rp["ablate"]["rows"]}
+    cnt = np.zeros(V)
+    cnt[:30] = rng.integers(1, 1000, 30)
+    pt = points(model, cnt, test, batch=4)
+    print(chr(10).join(_text_points(pt)))
     assert abs(rows["A4 atla"]["d_nll"]) < 10 and "A1 optimal" in rows
     print("selftest TAMAM")
 
