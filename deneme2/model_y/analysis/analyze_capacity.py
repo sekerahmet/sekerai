@@ -1,24 +1,31 @@
 # -*- coding: utf-8 -*-
-"""analyze_capacity -- Model Y kapasite analizi (ajan A, 2 Ekim 2026).
+"""analyze_capacity -- Model Y kapasite analizi (capacity-analyst).
 
 Kullanici: "bu bozulmanin nedeni model kapasitesinin eksik olmasi olabilir mi? birsey ogrenirken onu saklayacak yerin
-olmamasi mesela".  Soru: bir olgu checkpoint'ler boyunca ogreniliyor mu, sonra unutuluyor mu, hic mi ogrenilmiyor.
+olmamasi mesela".  Olgu yoklamasi checkpoint'ler boyunca (her yedekte son agirlik + optimizer'daki EMA; --finals ile
+model.pt / model_weight_ema.pt): dogru cevabin ve yanlis adaylarin ogretmen zorlamali nll'i, ilk ayrisan token'da sira.
 
-    facts   FACTS listesindeki her istem icin dogru cevabin (ve 2 yanlis ama makul cevabin) ogretmen zorlamali nll'i,
-            cevabin ilk token'inin sirasi (0 = en olasi), o konumda modelin ilk 5 tahmini; checkpoint'ler boyunca
-            (her yedekte son agirlik + optimizer'daki EMA), sonda model.pt ve model_weight_ema.pt.
+    facts            27 elle secilmis olgu (2 yanlis aday, ALSO kabul edilen yazimlar)
+    freq_facts       312 olgu (baskent, element sembolu, tarih), 4 rastgele celdirici
+    freq_facts_hard  ayni 312 istem, sert celdiriciler (en buyuk sehir / ayni bolge, ayni bas harf, yil +-1/+-2)
+    freq_count       (CPU) 312 olgunun egitim derlemindeki sayimi
+    freq_threshold   (CPU) bilinme orani ~ log sayim, yedek basina esik
+    direction        6 olay-yil olgusu iki yonde, kalibre
+    reverse_dates    93 tarih "In <yil>," -> olay, kalibre
 
-    python analysis/analyze_capacity.py <kosu klasoru> facts --data <FineWeb koku> --device cuda --steps 2000,4000
-    python analysis/analyze_capacity.py <kosu klasoru> facts --data <FineWeb koku> --selftest      (CPU, kucuk rastgele model)
-Cikti: $KUYRUK_SONUC (yoksa <kosu>/analysis) altina capacity_facts_<etiket>.json; ozet tablo stdout'a.
+    python analysis/analyze_capacity.py <kosu klasoru> <olcum> --data <FineWeb koku> --device cuda --steps 4000,8000 --finals last,ema
+    python analysis/analyze_capacity.py <kosu klasoru> <olcum> --data <FineWeb koku> --selftest      (CPU, kucuk rastgele model)
+Cikti: $KUYRUK_SONUC (yoksa <kosu>/analysis) altina capacity_<olcum>[_<etiket>]_<zaman>.json; ozet tablo stdout'a.
 """
 import argparse
 import json
 import math
 import os
+import random
 import sys
 import time
 
+import numpy as np
 import torch  # pyarrow / tokenizers'tan once (Windows c10.dll)
 import torch.nn.functional as F
 
@@ -260,8 +267,8 @@ def summary_lines(results):
     return L
 
 
-# ---- siklik esigi (kullanici, 2 Ekim: oneri 1 "Olur eklet."): olgu derlemde kac kez geciyor, model onu biliyor mu;
-# esik yedekler boyunca asagi kayiyorsa egitim sinirli, duruyorsa kapasite sinirli.
+# ---- siklik esigi (kullanici, 2 Ekim: "Olur eklet."): olgu derlemde kac kez geciyor, model onu biliyor mu.
+# Okuma (ana oturumun onerisi): esik yedekler boyunca asagi kayiyorsa egitim sinirli, duruyorsa kapasite sinirli.
 
 # (ulke istemdeki yazimiyla, sayim icin ozne, baskent, kabul edilen baska yazimlar)
 CAPITALS = (
@@ -449,8 +456,7 @@ FREQ_WINDOW = 16                     # sayim: ozne ile cevap arasinda en cok bu 
 
 
 def freq_facts():
-    """Uc tur olgu -> FACTS bicimi (+ subject: sayim icin ozne, answers: dogru yazimlarin hepsi).  Celdiriciler tohum 0."""
-    import random
+    """Uc tur olgu -> FACTS bicimi (+ subject: sayim icin ozne, also: kabul edilen yazimlar).  Celdiriciler tohum 0."""
     rng = random.Random(0)
     out = []
     caps = [c[2] for c in CAPITALS]
@@ -473,7 +479,6 @@ def freq_facts():
 
 def _token_positions(a, firsts):
     """a icinde firsts token'larinin konumlari, token'a gore gruplu: {token: artan konumlar}.  Tek gecis (arama tablosu)."""
-    import numpy as np
     lut = np.zeros(1 << 16, dtype=bool)
     lut[list(firsts)] = True
     idx = np.flatnonzero(lut[a])
@@ -484,7 +489,7 @@ def _token_positions(a, firsts):
 
 
 def _phrase_positions(a, ids, by_first):
-    import numpy as np
+    """a icinde ids dizisinin basladigi konumlar (by_first: _token_positions)."""
     cand = by_first.get(ids[0], np.array([], dtype=np.int64))
     cand = cand[cand + len(ids) <= len(a)]
     for k, t in enumerate(ids[1:], 1):
@@ -501,7 +506,6 @@ def freq_count(fw_root, tok, facts, window=FREQ_WINDOW, shards=None, log=print):
              gecisi.  Ana sikilik olcusu
     docs     ozne ve cevabin ikisini birden iceren belge sayisi
     n_answer   cevabin gecisi (ozneden bagimsiz)"""
-    import numpy as np
     d = os.path.join(fw_root, "gpt2")
     enc = lambda s: tok.encode(s, add_special_tokens=False).ids
     subj = [enc(f["subject"]) for f in facts]
@@ -539,7 +543,6 @@ def freq_count(fw_root, tok, facts, window=FREQ_WINDOW, shards=None, log=print):
 def _logistic_floor(x, y, floor):
     """p = floor + (1 - floor) sigmoid(a + b x), en buyuk olabilirlik: standartlastirilmis x'te (a, b) izgarasi (b >= 0).
     -> (a, b) x'in kendi biriminde."""
-    import numpy as np
     xm, xs = x.mean(), x.std() + 1e-9
     z = (x - xm) / xs
     A, B = np.meshgrid(np.linspace(-6, 6, 61), np.linspace(0, 8, 41), indexing="ij")
@@ -555,12 +558,11 @@ def freq_threshold(count_res, fact_res, key="near", criterion="correct_best_any"
                    boot=100, kinds_only=None, drop_noisy=False):
     """Bilinme orani ~ log10(1 + sayim), yedek basina: kutu tablosu (Wilson araligi) ve sans tabanli lojistik esik
     (p = taban + (1 - taban)/2'de sayim), olgulara gore bootstrap %90 araligi.  EMA'da min_step oncesi baslangic agirligiyla
-    kirli (E2 R1).  -> (satirlar, ozet)."""
-    import numpy as np
-    # cevap ozneyle basliyorsa (Mexico City / Mexico) ozne cevabin icinde sayilir: sayim anlamsiz, disarida
+    kirli (E2 R1).  Sayim istemle eslesir (reverse_dates: forward_prompt).  -> (satirlar, ozet)."""
     by_prompt = {c["prompt"]: c for c in count_res["counts"]}
     order = [by_prompt.get(f.get("forward_prompt", f["prompt"])) for f in fact_res[0]["facts"]]
-    keep = np.array([c is not None and f["kind"] not in ("prior",) and (kinds_only is None or c["kind"] in kinds_only)
+    # cevap ozneyle basliyorsa (Mexico City / Mexico) ozne cevabin icinde sayilir: sayim anlamsiz, disarida
+    keep = np.array([c is not None and f["kind"] != "prior" and (kinds_only is None or c["kind"] in kinds_only)
                      and not (drop_noisy and c["noisy"]) and not c["answer"].startswith(c["subject"])
                      for c, f in zip(order, fact_res[0]["facts"])])
     counts = np.array([c[key] if c else 0 for c in order], dtype=float)[keep]
@@ -652,7 +654,6 @@ def freq_facts_hard():
     """freq_facts'in ayni istemleri, sert celdiricilerle (tohum 0).  Baskent: en buyuk sehir (varsa) + ayni bolgenin
     baskentleri; sembol: ayni bas harfle baslayan semboller (bas harf kurali ise yaramaz), eksik kalirsa rastgele; tarih
     +-1/+-2.  Istemler ve ozneler freq_facts ile ayni: freq_count sayimi istemle eslesir."""
-    import random
     rng = random.Random(0)
     base = {f["prompt"]: f for f in freq_facts()}
     region_of = {c.replace("_", " "): k for k, line in enumerate(REGIONS) for c in line.split()}
@@ -702,7 +703,6 @@ def _event_clause(prompt):
 def reverse_dates_facts():
     """kind reverse: istem 'In <yil>,', dogru o yilin olayi, also ayni yilin oteki olaylari, wrong baska yillardan 5 olay;
     kind prior: ayni olay notr istemle (kalibrasyon: nll(olay | yil) - nll(olay | notr))."""
-    import random
     rng = random.Random(0)
     events = [(_event_clause(p), y, p) for p, _, y in DATES]
     out = []
@@ -717,19 +717,29 @@ def reverse_dates_facts():
     return out
 
 
-def reverse_summary(result):
-    """Ham ve kalibre: dogru (ya da ayni yilin olayi) 5 celdiricinin hepsinden iyi mi; marj (nat)."""
-    prior = {x["answer"]: x["answer_nll"] for x in result["facts"] if x["kind"] == "prior"}
-    rows = [x for x in result["facts"] if x["kind"] == "reverse"]
+def _calibrated(rows, prior):
+    """rows: [(dogrular {metin: nll}, yanlislar {metin: nll})], prior {metin: notr istemde nll} -> ham ve kalibre
+    (nll - notr nll) dogruluk (dogrunun en iyisi yanlislarin hepsinden iyi mi) ve marj (nat)."""
     raw, cal = [], []
-    for x in rows:
-        right = [(x["answer"], x["answer_nll"])] + [(a["text"], a["answer_nll"]) for a in x["also"]]
-        wrong = [(w["text"], w["answer_nll"]) for w in x["wrong"]]
-        raw.append(min(v for _, v in wrong) - min(v for _, v in right))
-        cal.append(min(v - prior.get(t, 0.0) for t, v in wrong) - min(v - prior.get(t, 0.0) for t, v in right))
-    return dict(n=len(rows), acc=sum(m > 0 for m in raw) / len(rows), acc_calibrated=sum(m > 0 for m in cal) / len(rows),
-                margin=sum(raw) / len(rows), margin_calibrated=sum(cal) / len(rows),
+    for right, wrong in rows:
+        raw.append(min(wrong.values()) - min(right.values()))
+        cal.append(min(v - prior.get(t, 0.0) for t, v in wrong.items()) - min(v - prior.get(t, 0.0) for t, v in right.items()))
+    n = len(rows)
+    return dict(n=n, acc=sum(m > 0 for m in raw) / n, acc_calibrated=sum(m > 0 for m in cal) / n,
+                margin=sum(raw) / n, margin_calibrated=sum(cal) / n,
                 margins=[round(m, 3) for m in raw], margins_calibrated=[round(m, 3) for m in cal])
+
+
+def _candidates(x):
+    """per_fact satiri -> (dogrular, yanlislar) {metin: cevap nll}."""
+    right = {x["answer"]: x["answer_nll"], **{a["text"]: a["answer_nll"] for a in x["also"]}}
+    return right, {w["text"]: w["answer_nll"] for w in x["wrong"]}
+
+
+def reverse_summary(result):
+    """Ters yon: dogru (ya da ayni yilin olayi) 5 celdiricinin hepsinden iyi mi; ham ve kalibre."""
+    prior = {x["answer"]: x["answer_nll"] for x in result["facts"] if x["kind"] == "prior"}
+    return _calibrated([_candidates(x) for x in result["facts"] if x["kind"] == "reverse"], prior)
 
 
 # ---- yon asimetrisi (ajan L, Sorun 3): ayni 6 olay-yil olgusu iki yonde, kapali 6'li aday kumesiyle
@@ -761,27 +771,14 @@ def direction_facts():
 
 
 def direction_summary(result):
-    """Ham ve kalibre dogruluk (6'li, sans 1/6) ve marj, yon basina."""
-    facts = result["facts"]
+    """Yon basina (forward / reverse) ham ve kalibre dogruluk (6'li, sans 1/6) ve marj."""
     prior = {}
-    for x in facts:
+    for x in result["facts"]:
         if x["kind"].startswith("prior_"):
-            prior[x["kind"][6:]] = {x["answer"]: x["answer_nll"], **{w["text"]: w["answer_nll"] for w in x["wrong"]}}
-    out = {}
-    for kind in ("forward", "reverse"):
-        acc = cal = 0
-        margins, cal_margins = [], []
-        rows = [x for x in facts if x["kind"] == kind]
-        for x in rows:
-            raw = {x["answer"]: x["answer_nll"], **{w["text"]: w["answer_nll"] for w in x["wrong"]}}
-            adj = {k: v - prior[kind][k] for k, v in raw.items()}
-            for d, store in ((raw, margins), (adj, cal_margins)):
-                store.append(min(v for k, v in d.items() if k != x["answer"]) - d[x["answer"]])
-        out[kind] = dict(n=len(rows), acc=sum(m > 0 for m in margins) / len(rows),
-                         acc_calibrated=sum(m > 0 for m in cal_margins) / len(rows),
-                         margin=sum(margins) / len(rows), margin_calibrated=sum(cal_margins) / len(rows),
-                         margins=[round(m, 3) for m in margins], margins_calibrated=[round(m, 3) for m in cal_margins])
-    return out
+            right, wrong = _candidates(x)
+            prior[x["kind"][6:]] = {**right, **wrong}
+    return {kind: _calibrated([_candidates(x) for x in result["facts"] if x["kind"] == kind], prior[kind])
+            for kind in ("forward", "reverse")}
 
 
 def _write(args, name, payload, path=None):
