@@ -91,6 +91,22 @@ FACTS = (
 )
 
 
+# Kabul edilen baska dogrular (exam_fineweb'in "100 C / 212 F" gibi); FACTS degismez, eski sonuclarla kiyas surer.
+ALSO = {
+    "Water boils at a temperature of": (" 212 degrees Fahrenheit",),
+    "Isaac Newton is famous for": (" his law of gravity", " his laws of gravity"),
+    "The Amazon rainforest is located in": (" Brazil",),
+    "If a rectangle is 3 meters long and 4 meters wide, its area is": (" 12 square metres",),
+    "The seasons on Earth are caused by": (" the tilt of the Earth's axis",),
+    "The powerhouse of the cell is the": (" mitochondrion",),
+    "The American Declaration of Independence was signed in": (" Philadelphia",),
+    "The capital of Mongolia is": (" Ulan Bator",),
+    "The speed of light in a vacuum is about": (" 186,000 miles per second",),
+    "Seven plus five equals": (" 12",),
+}
+EMA_DECAY = 0.999        # config weight_ema; EMA baslangic agirligiyla baslar (duzeltmesiz): payi EMA_DECAY^adim
+
+
 def load_tokenizer(fw_root):
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(os.path.join(fw_root, "gpt2", "tokenizer.json"))
@@ -100,16 +116,19 @@ def load_tokenizer(fw_root):
 
 
 def build_sequences(tok, eot):
-    """Her olgu x aday (0 = dogru, 1.. yanlis) -> dict(ids, answer_start, answer_end, tail_end).  Dizi: eot + istem +
+    """Her olgu x aday (0 = dogru, sonra ALSO'daki dogrular, sonra yanlislar; role right / also / wrong) ->
+    dict(ids, answer_start, answer_end, tail_end).  Dizi: eot + istem +
     cevap + devam (belge basindan, konus'taki gibi).  Ayri kodlama birlesik kodlamayla tutmali (bosluk sinirinda)."""
     enc = lambda s: tok.encode(s, add_special_tokens=False).ids
     seqs = []
     for i, f in enumerate(FACTS):
-        for j, ans in enumerate((f["answer"],) + tuple(f["wrong"])):
+        also = ALSO.get(f["prompt"], ())
+        roles = ["right"] + ["also"] * len(also) + ["wrong"] * len(f["wrong"])
+        for j, ans in enumerate((f["answer"],) + tuple(also) + tuple(f["wrong"])):
             p, a, t = enc(f["prompt"]), enc(ans), enc(f["tail"])
             joined = enc(f["prompt"] + ans + f["tail"])
             ids = [eot] + p + a + t
-            seqs.append(dict(fact=i, candidate=j, text=ans, ids=ids, answer_start=1 + len(p),
+            seqs.append(dict(fact=i, candidate=j, role=roles[j], text=ans, ids=ids, answer_start=1 + len(p),
                              answer_end=1 + len(p) + len(a), tail_end=len(ids), joint_ok=joined == p + a + t))
     return seqs
 
@@ -133,8 +152,12 @@ def score(model, seqs, tok, device, eot):
         top = first.topk(5)
         ans_nll = nll[a0 - 1:a1 - 1]
         tail_nll = nll[a1 - 1:t1 - 1]
+        pos = logp[k, a0 - 1:a1 - 1]                                    # cevap token'larinin konumlari
+        own = pos.gather(-1, ids[k, a0:a1, None])
+        token_rank = (pos > own).sum(-1)
         out.append(dict(
             answer_nll=float(ans_nll.sum()), answer_tokens=int(a1 - a0), answer_token_nll=[round(float(x), 4) for x in ans_nll],
+            answer_token_rank=[int(x) for x in token_rank], answer_ids=[int(x) for x in ids[k, a0:a1]],
             first_rank=rank, first_p=float(first[ids[k, a0]].exp()),
             tail_nll_mean=float(tail_nll.mean()) if len(tail_nll) else None,
             top5=[(tok.decode([int(t)]), round(float(p.exp()), 4)) for p, t in zip(top.values, top.indices)]
@@ -142,19 +165,40 @@ def score(model, seqs, tok, device, eot):
     return out
 
 
+def _diverging(right, other):
+    """Ilk AYRISAN token (ortak onek ayni baglamda ayni nll'i alir): (indeks, dogrunun orada sirasi, dogru - oteki log p)."""
+    a, b = right["answer_ids"], other["answer_ids"]
+    d = next((n for n in range(min(len(a), len(b))) if a[n] != b[n]), None)
+    if d is None:
+        return None
+    return dict(index=d, right_rank=right["answer_token_rank"][d],
+                logp_gap=other["answer_token_nll"][d] - right["answer_token_nll"][d])
+
+
 def per_fact(seqs, scores):
-    """Aday sonuclari olgu basina: dogru, yanlislar, dogru en dusuk nll'li mi (cevap kismi toplam nll)."""
+    """Aday sonuclari olgu basina.  margin: en iyi yanlis - dogru (cevap kismi toplam nll); margin_any: dogru ya da ALSO'dan
+    en iyisiyle; margin_per_token: token basina ortalamayla (uzunluk / bolunme duyarliligi icin); diverging: yanlis basina
+    ilk ayrisan token'da dogrunun sirasi ve log p farki."""
     rows = []
     for i, f in enumerate(FACTS):
         cand = [(s, r) for s, r in zip(seqs, scores) if s["fact"] == i]
         right = cand[0][1]
-        wrong = [dict(text=s["text"], answer_nll=r["answer_nll"], first_rank=r["first_rank"]) for s, r in cand[1:]]
+        alts = [dict(text=s["text"], answer_nll=r["answer_nll"], answer_tokens=r["answer_tokens"], first_rank=r["first_rank"],
+                     answer_token_nll=r["answer_token_nll"]) for s, r in cand if s["role"] == "also"]
+        wrong_raw = [(s, r) for s, r in cand if s["role"] == "wrong"]
+        wrong = [dict(text=s["text"], answer_nll=r["answer_nll"], answer_tokens=r["answer_tokens"], first_rank=r["first_rank"],
+                      answer_token_nll=r["answer_token_nll"], diverging=_diverging(right, r)) for s, r in wrong_raw]
+        best_wrong = min(w["answer_nll"] for w in wrong)
+        best_right = min([right["answer_nll"]] + [a["answer_nll"] for a in alts])
         rows.append(dict(fact=i, kind=f["kind"], prompt=f["prompt"], answer=f["answer"],
                          answer_nll=right["answer_nll"], answer_tokens=right["answer_tokens"],
                          answer_token_nll=right["answer_token_nll"], first_rank=right["first_rank"],
                          first_p=right["first_p"], tail_nll_mean=right["tail_nll_mean"], top5=right["top5"],
-                         wrong=wrong, margin=min(w["answer_nll"] for w in wrong) - right["answer_nll"],
-                         correct_best=all(right["answer_nll"] < w["answer_nll"] for w in wrong)))
+                         also=alts, wrong=wrong, margin=best_wrong - right["answer_nll"],
+                         correct_best=all(right["answer_nll"] < w["answer_nll"] for w in wrong),
+                         margin_any=best_wrong - best_right,
+                         margin_per_token=min(w["answer_nll"] / w["answer_tokens"] for w in wrong)
+                         - right["answer_nll"] / right["answer_tokens"]))
     return rows
 
 
@@ -201,6 +245,10 @@ def summary_lines(results):
                                                            for r in results)))
     L.append("%-44s %s" % ("ilk token sira 0 (sayi)", " ".join("%16d" % sum(x["first_rank"] == 0 for x in r["facts"])
                                                                for r in results)))
+    L.append("%-44s %s" % ("marj ortalama (nat)", " ".join("%16.3f" % (sum(x["margin"] for x in r["facts"]) / len(FACTS))
+                                                           for r in results)))
+    L.append("%-44s %s" % ("marj ALSO dahil ortalama", " ".join("%16.3f" % (sum(x["margin_any"] for x in r["facts"]) / len(FACTS))
+                                                                for r in results)))
     L.append("%-44s %s" % ("cevap nll ortalama", " ".join("%16.3f" % (sum(x["answer_nll"] for x in r["facts"]) / len(FACTS))
                                                           for r in results)))
     return L
@@ -235,7 +283,8 @@ def main(argv=None):
     for label, step, kind, model in sets:
         model = model.to(args.device)
         scores = score(model, seqs, tok, args.device, eot)
-        results.append(dict(label=label, step=step, weights=kind, facts=per_fact(seqs, scores)))
+        results.append(dict(label=label, step=step, weights=kind, facts=per_fact(seqs, scores),
+                            ema_init_share=EMA_DECAY ** step if kind == "ema" and step else None))
         print("   %s: dogru en iyi %d / %d" % (label, sum(x["correct_best"] for x in results[-1]["facts"]), len(FACTS)), flush=True)
         del model
         if args.device.startswith("cuda"):
