@@ -882,17 +882,20 @@ def t_sentence_ids(root):
         ok &= pars(x) == list(range(len(pars(x))))
         ok &= all(x[j + 1] >= base and x[j + 1] < pbase for j, t in enumerate(x) if t >= pbase)   # <p_k> ardindan <s_n>
         ok &= not x or x[-1] < base                     # son cumleden sonra etiket yok: karar eos ile
-    long = DS.encode("Sue ran. " * 70, v)
+    long = DS.encode("Sue ran. " * (DS.SENTENCE_IDS + 6), v)
     tail = sent(long)
     dec = DS.encode("He had 1.5 cakes. He ate them.", v)
     para = DS.encode("Tom ran. He fell.\n\nSue came. She helped.\n\nThey went home.", v)
     names = [v[t] for t in para if t >= base]
+    talk = DS.encode('"Can we play?" asked Tom. "Yes!" she said. I love... cake. The end.', v)
+    talk_names = [v[t] for t in talk if t >= base]
     check("sentence_ids: hikaye basi <p1><s1>, cumle numarasi sirali ve paragrafta sifirlanmaz, paragraf numarasi "
-          "\\n\\n'de, son cumleden sonra etiket yok, 64'ten sonra <s+>, ondalik nokta cumle sonu degil",
+          "\\n\\n'de, son cumleden sonra etiket yok, sinirdan sonra <s+>, ondalik nokta cumle sonu degil",
           ok and all(first) and tail[:DS.SENTENCE_IDS] == list(range(DS.SENTENCE_IDS))
           and set(tail[DS.SENTENCE_IDS:]) == {DS.SENTENCE_IDS} and len(sent(dec)) == 2
-          and names == ["<p1>", "<s1>", "<s2>", "<p2>", "<s3>", "<s4>", "<p3>", "<s5>"],
-          "%s / %s / %s" % (tail[60:68], sent(dec), names))
+          and names == ["<p1>", "<s1>", "<s2>", "<p2>", "<s3>", "<s4>", "<p3>", "<s5>"]
+          and talk_names == ["<p1>", "<s1>", "<s2>", "<s3>", "<s4>"],
+          "%s / %s / %s / %s" % (tail[-8:], sent(dec), names, talk_names))
     text = 'Tom saw a big dog. The dog was happy!\n\n"Can we play?" The dog wagged.'
     plain = DS.encode(text, d["vocab"])
     tab_d, tab_e = DS._token_table(d["vocab"]), DS._token_table(v)
@@ -912,7 +915,9 @@ def t_sentence_ids(root):
     errs = ES.count_text_errors(model, e, 16, count=2)
     check("sentence_ids: etiketli sozlukle egitim, sinav, metin ve metin hatalari kosar (uretilen metinde etiket yok)",
           ES.exam(model, e, rows[:4])["ppl"] > 0 and all(max(w["ids"] or [0]) < base for w in written)
-          and "<s" not in "".join(w["model"] for w in written) and errs["greedy"]["stories"] == 2)
+          and "<s" not in "".join(w["model"] for w in written) and errs["greedy"]["stories"] == 2
+          and all(len(w["ids"]) == 16 or (w["ended"] and len(w["ids"]) < 16) for w in written),
+          "metin boylari %s" % [(len(w["ids"]), w["ended"]) for w in written])
 
 
 if __name__ == "__main__":

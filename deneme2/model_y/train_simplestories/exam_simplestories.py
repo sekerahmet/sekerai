@@ -28,6 +28,7 @@ from model_y import AttentionCache, BlockModel  # noqa: E402
 from train_y import generate  # noqa: E402
 
 EXAM_STORIES = 1000      # ~287 bin hedef token (ortalama hikaye ~287 token)
+LABEL_SLACK = 1.25       # etiketli veride (sentence_ids) n metin token'i icin en cok n x bu kadar uretilir (etiket ~%10)
 BANDS = ((0, 64), (64, 256), (256, 512))     # hedefin penceredeki konumu (exam_tinystories ile ayni)
 LOGITS_BUDGET = 1 << 28  # sinav batch'i: batch x seq_len x sozluk <= bu (fp32 1 GB); ss4096'da 64, gpt2'de 10
 CACHE_BUDGET = 8 << 30   # onbellekli uretimde satir parcasi: K/V onbellegi + istem attention tablosu (fp32) <= bu bayt
@@ -216,18 +217,34 @@ def story_prompts(data, rows):
     return prompts, reals
 
 
+def _text_budget(data, prompts, n):
+    """(uretilecek token, metin token'i siniri): etiketli sozlukte etiketler butceyi yemesin -- n x LABEL_SLACK uretilir,
+    etiketler atildiktan sonra n metin token'inda kesilir (etiketsizle ayni metin boyu; tekrar olculeri boya duyarli)."""
+    room = data["seq_len"] - max(len(p) for p in prompts)
+    assert room > 0, "istem pencereyi dolduruyor"
+    if DS._sentence_id_base(data["vocab"]) is None:
+        return min(n, room), None
+    return min(math.ceil(n * LABEL_SLACK), room), n
+
+
+def _text_only(g, ended, vocab, limit):
+    """Uretim (eos'ta kesilmis) -> (etiketsiz metin token'lari, bitti): limit asilirsa kesilir, bitmemis sayilir."""
+    g = DS.strip_sentence_ids(g, vocab)
+    return (g[:limit], False) if limit is not None and len(g) > limit else (g, ended)
+
+
 @torch.no_grad()
 def texts(model, data, prompts, n, reals=None):
     """Acgozlu devam (train_y.generate), ilk <eos>'ta kesilir.  prompts: <eos> ile baslayan id listeleri; istem + n
-    pencereye (seq_len) sigacak kadar uretilir.  -> [dict(prompt, model, ended[, real], ids)] metinler okunur halde."""
+    pencereye (seq_len) sigacak kadar uretilir (etiketli veride n metin token'i).  -> [dict(prompt, model, ended[, real],
+    ids)] metinler okunur halde."""
     vocab = data["vocab"]
     eos = vocab.index(DS.EOS_TOKEN)
-    n = min(n, data["seq_len"] - max(len(p) for p in prompts))
-    assert n > 0, "istem pencereyi dolduruyor"
+    n, limit = _text_budget(data, prompts, n)
     out = []
     for i, (p, g) in enumerate(zip(prompts, generate(model, prompts, n))):
         ended = eos in g
-        g = DS.strip_sentence_ids(g[:g.index(eos)] if ended else g, vocab)   # tekrar olculeri etiketsiz metinde
+        g, ended = _text_only(g[:g.index(eos)] if ended else g, ended, vocab, limit)   # olculer etiketsiz metinde
         in_quote = sum(vocab[t] == '"' for t in p[1:]) % 2 == 1          # istem tirnagi acik biraktiysa (WordPiece)
         row = dict(prompt=DS.decode(p[1:], vocab), model=DS.decode(g, vocab, in_quote=in_quote), ended=ended, ids=g)
         if reals is not None:
@@ -433,12 +450,11 @@ def count_text_errors(model, data, n, count=STORY_CONTINUATIONS, seed=0, real=Fa
     stock = _stock_reference(data, max(count, STORY_CONTINUATIONS))
     out = {}
     if model is not None:
-        n = min(n, data["seq_len"] - max(len(p) for p in prompts))
-        assert n > 0, "istem pencereyi dolduruyor"
+        n, limit = _text_budget(data, prompts, n)
         gens, ended = _continue(model, prompts + prompts, n, [False] * len(prompts) + [True] * len(prompts), seed,
                                 data["vocab"].index(DS.EOS_TOKEN), len(data["vocab"]))
         k = len(prompts)
-        gens = [DS.strip_sentence_ids(g, data["vocab"]) for g in gens]      # olculer etiketsiz metinde
+        gens, ended = map(list, zip(*(_text_only(g, e, data["vocab"], limit) for g, e in zip(gens, ended))))
     reals = [DS.strip_sentence_ids(r, data["vocab"]) for r in reals]
     prompts = [DS.strip_sentence_ids(p, data["vocab"]) for p in prompts]
     if model is not None:

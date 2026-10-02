@@ -219,7 +219,8 @@ def _windows(starts, lengths, seq_len):
 # --- cumle numarasi etiketi (C kolu; kullanici, 3 Ekim: "etiket koymak belki s1 s2 s3 s4 s5 bile konur", "Ss olur bence
 # ilk c ye bakalım"; adlar onayli).  Etiket metnin token'larinin ARASINA girer, metin token'lari degismez (bulgular 33)
 
-SENTENCE_IDS = 64        # <s1> .. <s64>, sonrasi <s+> (doygunluk: basa sarma kopya anahtari olurdu, bulgular 33 §2)
+SENTENCE_IDS = 128       # <s1> .. <s128>, sonrasi <s+> (SS: hikaye en cok 99 cumle; kullanici, 3 Ekim: "bari sn token da
+                         # düzelt") (doygunluk: basa sarma kopya anahtari olurdu, bulgular 33 §2)
 PARAGRAPH_IDS = 16       # <p1> .. <p16>, sonrasi <p+>; cumle numarasi paragrafta sifirlanmaz (kullanici, 3 Ekim: "evet
                          # paragraf devam etsin. p1  p2 gibi")
 SENTENCE_ID_TOKENS = (tuple("<s%d>" % i for i in range(1, SENTENCE_IDS + 1)) + ("<s+>",)
@@ -248,25 +249,30 @@ def _sentence_ends(vocab, base):
         text = [tok.decode([i]) for i in range(base)]
         end = np.array([("\n" in s) or s.rstrip().rstrip("\"')]}”’").endswith((".", "!", "?")) for s in text])
         hit = _ENDS[id(vocab)] = (vocab, end, np.array([s.strip() == "." for s in text]),
-                                  np.array([s[:1].isdigit() for s in text]), np.array([s.count("\n") for s in text]))
-    return hit[1:]
+                                  np.array([s[:1].isdigit() for s in text]), np.array([s.count("\n") for s in text]),
+                                  np.array([s.lstrip()[:1].islower() for s in text]),
+                                  np.array([bool(s) and s == s.lstrip() and not s.strip("\"')]}”’") for s in text]))
+    return hit[1:]                                     # son: bosluksuz kapanis (tirnak / parantez) token'i
 
 
 def _insert_sentence_ids(a, vocab, base):
     """Akis ya da tek hikaye (a, eos sinirli; basi hikaye basi) -> etiketli kopya.  Cumle etiketi hikaye basinda (akisin
     basi ve her eos'tan sonra, akisin sonu haric) ve cumle sonundan sonra: ardindan cumle sonu ya da eos gelmiyorsa
     (ardisik cumle sonlarinin sonuncusundan sonra; hikayenin son cumlesinden sonra etiket yok, karar eos ile).  '.'
-    ardindan rakamla baslayan token: ondalik, cumle sonu degil.  Paragraf etiketi hikaye basinda ve ardisik cumle
+    ardindan rakamla baslayan token: ondalik; ardindan kucuk harfle baslayan token: cumle surer (tirnakli soru / unlem,
+    uc nokta) -- ikisi de cumle sonu degil.  Paragraf etiketi hikaye basinda ve ardisik cumle
     sonlarinda en az iki satir sonu varsa, cumle etiketinin onunde: <p_k><s_n>.  Numaralar hikaye icinde 1'den (cumle
     numarasi paragrafta sifirlanmaz); SENTENCE_IDS / PARAGRAPH_IDS'ten sonrasi <s+> / <p+>."""
     a = np.asarray(a)
     if not len(a):
         return np.array([base + SENTENCE_IDS + 1, base], dtype=a.dtype)
     eos = _tokenizer(vocab)[1]
-    end, dot, digit, lines = _sentence_ends(vocab, base)
+    end, dot, digit, lines, lower, closer = _sentence_ends(vocab, base)
     nxt = np.append(a[1:], eos)
     end_a = end[a] & ~(dot[a] & digit[nxt])
-    after = (end_a & ~end[nxt] & (nxt != eos)) | (a == eos)
+    end_a |= closer[a] & np.r_[False, end_a[:-1]]                 # cumle sonundan hemen sonraki kapanis tirnagi da sonun parcasi
+    after = (end_a & ~end[nxt] & ~closer[nxt] & ~lower[nxt] & (nxt != eos)) | (a == eos)   # ardindan kucuk harf: cumle
+                                                                  # surer ('"Why?" she asked.', 'love... betrayal')
     after[-1] = False
     pos = np.concatenate([[0], np.flatnonzero(after) + 1])
     story = np.concatenate([[0], np.cumsum(a == eos)])[pos]          # etiketin hikayesi: oncesindeki eos sayisi
@@ -320,7 +326,7 @@ def sentence_ids(data, log=print):
     table = b"".join(np.ascontiguousarray(out["train_" + k]).tobytes() for k in ("start", "length", "head"))
     parts = {k: v for k, v in data["fingerprints"].items() if k not in ("vocab", "train", "valid", "windows")}
     out["fingerprint"], out["fingerprints"] = fingerprint(vocab, out["train"], out["valid"], **dict(
-        parts, windows=table, sentence_ids="v2_%d_%d" % (SENTENCE_IDS, PARAGRAPH_IDS)))
+        parts, windows=table, sentence_ids="v3_%d_%d" % (SENTENCE_IDS, PARAGRAPH_IDS)))
     log("%s: etiket %d (train payi %%%.1f) | train %d pencere | valid %d hikaye | sinav %d | iz %s" % (
         out["tag"], c["sentence_ids"], 100 * (out["train"] >= base).mean(), c["train_kept"], len(rows), len(out["exam"]),
         out["fingerprint"]))
