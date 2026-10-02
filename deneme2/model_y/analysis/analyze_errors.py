@@ -21,6 +21,11 @@
                  64 token'lik devamda dongu -- dongu egilimi ile bilgi birlikte mi degisiyor
     ss_profile   SimpleStories kosusu (son + varsa EMA): kendini besleme, acgozlu / ornekleme dongu (12 istem + 64 hikaye yarisi),
                  metinler; --data SimpleStories koku
+    copy_odds    matematikci O7: kopya head'lerinde (tur.head, 1'den) kopya hedeflerine dusen kutlenin ln odds'u; m (onceki kopya
+                 sayisi), s(n) = ln(0,99 (n - 1) / 0,01), Delta c (eslesen kosinus - otekilerin ortalamasi), sigma_o^2; saf dongu
+                 ([eot] + cumle x 10) ve dongu oncesi (400 token yeni metin + cumle x 10)
+    copy_calibration  matematikci O12: gercek valid metninde induction tahmini olan konumlarda p(induction token) kalibrasyonu,
+                 baglam boyu 2 ve 4, m = 1 / 2 / 3+ ayri
     symbol_filler  86 element (analyze_capacity.ELEMENTS) x 5 kalip: dogru sembol ve " Cu" olasiligi / sirasi, top1
                  dagilimi (Cu kalibin genel doldurucusu mu); 133 baskentte top1 dagilimi
 
@@ -1413,6 +1418,189 @@ def text_ss_profile(res):
     return L
 
 
+# ---- O7: kopya head odds'u
+
+COPY_HEADS = ((5, 7), (7, 5), (8, 7), (10, 2))   # (tur, head), tur 1'den (D_003 kopya hedefi tablosu)
+ODDS_REPEATS = 10
+ODDS_PREFIX = 400
+
+
+def _s_of_n(n):
+    return math.log(0.99 * (max(n, 2) - 1) / 0.01)
+
+
+@torch.no_grad()
+def _copy_head_rows(model, seq, starts_period, heads):
+    """seq: id listesi; starts_period: (tekrar bloğunun basi b, periyot P, tekrar sayisi R).  Konum t (tekrar k >= 1, ilk
+    token haric): kopya hedefleri {t - r P + 1, r = 1..k}.  Head basina: kutle M, ln odds, cos ort. (kopya / oteki), oteki
+    varyansi."""
+    dev = next(model.parameters()).device
+    x = torch.tensor([seq], device=dev)
+    want = {t - 1 for t, _ in heads}
+    inputs, atts = {}, {}
+    taps = dict(canon=lambda t, v: inputs.__setitem__(t, v[1] + v[0]) if t in want else None,
+                attention=lambda t, a: atts.__setitem__(t, a[0]) if t in want else None)
+    I._run(model, model.input_states(x), I._plan(model), taps)
+    blocks = model.turn_blocks()
+    b, P, R = starts_period
+    rows = []
+    for (tt, hh) in heads:
+        t0 = tt - 1
+        at = blocks[t0].attention
+        q, k = at.queries_keys(inputs[t0])                        # (1, H, T, dh); q log-n olcekli
+        T = q.shape[-2]
+        qs = at.query_scale(T, None, q.device).to(q.dtype) if at.attention_log_scale else torch.ones(T, 1, device=q.device)
+        cos = (q[0, hh] @ k[0, hh].T) / qs                        # (T, T) ham kosinus
+        a = atts[t0][hh]                                          # (T, T)
+        for kk in range(1, R):
+            for off in range(1, P):                               # tekrar k, tekrarin ilk token'i haric
+                t = b + kk * P + off - 1                          # sorgu konumu (hedefi t + 1)
+                tg = [t - r * P + 1 for r in range(1, kk + 1)]
+                M = float(a[t, tg].sum())
+                mask = torch.ones(t + 1, dtype=torch.bool, device=a.device)
+                mask[tg] = False
+                co = cos[t, :t + 1][mask]
+                rows.append(dict(head="%d.%d" % (tt, hh), k=kk, m=kk, n=t + 1, s=_s_of_n(t + 1),
+                                 ln_odds=math.log(max(M, 1e-9) / max(1 - M, 1e-9)), mass=M,
+                                 dc=float(cos[t, tg].mean() - co.mean()), var_o=float(co.var())))
+    return rows
+
+
+def _fit(xs, ys):
+    """En kucuk kareler egimi ve standart hatasi."""
+    x, y = np.asarray(xs, float), np.asarray(ys, float)
+    if len(x) < 3 or x.std() == 0:
+        return None, None
+    A = np.vstack([x, np.ones_like(x)]).T
+    coef, res, *_ = np.linalg.lstsq(A, y, rcond=None)
+    resid = y - A @ coef
+    se = math.sqrt((resid @ resid) / (len(x) - 2) / ((x - x.mean()) ** 2).sum())
+    return float(coef[0]), se
+
+
+def measure_copy_odds(model, vocab, eot, args):
+    heads = tuple(tuple(int(z) for z in h.split(".")) for h in args.heads.split(",")) if args.heads else COPY_HEADS
+    sents, v = _sentences(args.data, vocab, 32)
+    import data_fineweb as DF
+    rng = np.random.default_rng(0)
+    rand = [rng.integers(1000, 50000, len(x)).tolist() for x in sents[:16]]
+    order = np.random.default_rng(1).permutation(len(v["valid_starts"]))
+    prefixes = [DF.valid_doc(v, int(i))[:ODDS_PREFIX + 1] for i in order if len(DF.valid_doc(v, int(i))) > ODDS_PREFIX][:32]
+    sets = dict(pure_natural=[([eot] + st * ODDS_REPEATS, (1, len(st), ODDS_REPEATS)) for st in sents],
+                pure_random=[([eot] + st * ODDS_REPEATS, (1, len(st), ODDS_REPEATS)) for st in rand],
+                preloop_natural=[(pf + st * ODDS_REPEATS, (len(pf), len(st), ODDS_REPEATS)) for pf, st in zip(prefixes, sents)])
+    out = {}
+    for name, items in sets.items():
+        rows = []
+        for seq, sp in items:
+            rows += _copy_head_rows(model, seq, sp, heads)
+        per = {}
+        for tt, hh in heads:
+            h = "%d.%d" % (tt, hh)
+            rs = [r for r in rows if r["head"] == h]
+            byk = []
+            for kk in range(1, ODDS_REPEATS):
+                rk = [r for r in rs if r["k"] == kk]
+                byk.append(dict(k=kk, n=len(rk), ln_odds=round(float(np.mean([r["ln_odds"] for r in rk])), 3),
+                                ln_odds_se=round(float(np.std([r["ln_odds"] for r in rk]) / math.sqrt(len(rk))), 3),
+                                mass=round(float(np.mean([r["mass"] for r in rk])), 4),
+                                s=round(float(np.mean([r["s"] for r in rk])), 3),
+                                dc=round(float(np.mean([r["dc"] for r in rk])), 4),
+                                var_o=round(float(np.mean([r["var_o"] for r in rk])), 5)))
+            early = [r for r in rs if r["k"] <= 3]
+            late = [r for r in rs if r["k"] >= 3]
+            sl_m, se_m = _fit([math.log(r["m"]) for r in early], [r["ln_odds"] for r in early])
+            sl_s, se_s = _fit([r["s"] for r in late], [r["ln_odds"] for r in late])
+            pred = float(np.mean([r["dc"] - r["s"] * r["var_o"] for r in late])) if late else None
+            per[h] = dict(by_k=byk, slope_ln_m_k1to3=sl_m, slope_ln_m_se=se_m, slope_s_k3plus=sl_s, slope_s_se=se_s,
+                          predicted_slope_s=pred)
+            _say("%s %s: d lnodds/d ln m (k<=3) %s  d lnodds/d s (k>=3) %s  tahmin Delta c - s sigma^2 %s" % (
+                name, h, _rnd(sl_m, 3), _rnd(sl_s, 3), _rnd(pred, 3)))
+        out[name] = per
+    return dict(sets=out, heads=["%d.%d" % h for h in heads], repeats=ODDS_REPEATS, prefix=ODDS_PREFIX)
+
+
+def text_copy_odds(res):
+    L = ["# O7: KOPYA HEAD ODDS'U (tur.head 1'den; m = onceki kopya sayisi = k; s(n) = ln(0,99 (n-1)/0,01))",
+         "pure_* = [eot] + cumle x %d (saf dongu); preloop_natural = %d token yeni metin + cumle x %d" % (
+             res["repeats"], res["prefix"], res["repeats"])]
+    for name, per in res["sets"].items():
+        L += ["", "## %s" % name]
+        for h, d in per.items():
+            L.append("%s  egim ln m (k 1-3) %s ± %s | egim s(n) (k >= 3) %s ± %s | tahmin ort(Delta c - s sigma_o^2) %s" % (
+                h, _rnd(d["slope_ln_m_k1to3"], 3), _rnd(d["slope_ln_m_se"], 3), _rnd(d["slope_s_k3plus"], 3),
+                _rnd(d["slope_s_se"], 3), _rnd(d["predicted_slope_s"], 3)))
+            L.append("    k: " + "  ".join("%d:%.2f±%.2f m%.3f s%.2f dc%.3f v%.4f" % (
+                b["k"], b["ln_odds"], b["ln_odds_se"], b["mass"], b["s"], b["dc"], b["var_o"]) for b in d["by_k"]))
+    return L
+
+
+# ---- O12: m = 1 / 2 kopya kalibrasyonu
+
+CAL_DOCS = 256
+CAL_BINS = (0.0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0001)
+
+
+@torch.no_grad()
+def measure_copy_calibration(model, vocab, eot, args):
+    import data_fineweb as DF
+    v = DF.load_valid(args.data, log=lambda s: None)
+    docs = [DF.valid_doc(v, int(k))[:2049] for k in v["exam"][:CAL_DOCS]]
+    dev = next(model.parameters()).device
+    rows = {ctx: [] for ctx in (2, 4)}                     # (m, p_model(ind), hit, p_model(actual))
+    for d in docs:
+        x = torch.tensor([d[:-1]], device=dev)
+        lp = torch.log_softmax(model.logits(x)[0].float(), -1)
+        for ctx in (2, 4):
+            seen, found = {}, []
+            for t in range(ctx - 1, len(d) - 1):           # konum t, hedef d[t + 1]
+                key = tuple(d[t - ctx + 1:t + 1])
+                nxt = seen.get(key)
+                if nxt and len(set(nxt)) == 1:             # onceki butun gecisler ayni devamda: induction tahmini
+                    found.append((t, nxt[0], len(nxt), int(d[t + 1] == nxt[0])))
+                seen.setdefault(key, []).append(d[t + 1])
+            if found:
+                ts = torch.tensor([f[0] for f in found], device=dev)
+                ys = torch.tensor([f[1] for f in found], device=dev)
+                pv = lp[ts, ys].exp().tolist()
+                rows[ctx] += [(f[2], q, f[3]) for f, q in zip(found, pv)]
+    out = {}
+    for ctx, rs in rows.items():
+        out[ctx] = {}
+        for mname, sel in (("m1", lambda m: m == 1), ("m2", lambda m: m == 2), ("m3+", lambda m: m >= 3)):
+            r = [x for x in rs if sel(x[0])]
+            if not r:
+                continue
+            ps, hs = np.array([x[1] for x in r]), np.array([x[2] for x in r])
+            bins = []
+            ece = 0.0
+            for lo, hi in zip(CAL_BINS, CAL_BINS[1:]):
+                sel_b = (ps >= lo) & (ps < hi)
+                if sel_b.sum():
+                    bins.append(dict(lo=lo, hi=round(min(hi, 1.0), 2), n=int(sel_b.sum()), p=round(float(ps[sel_b].mean()), 4),
+                                     hit=round(float(hs[sel_b].mean()), 4),
+                                     se=round(float(math.sqrt(hs[sel_b].mean() * (1 - hs[sel_b].mean()) / sel_b.sum())), 4)))
+                    ece += sel_b.sum() / len(ps) * abs(ps[sel_b].mean() - hs[sel_b].mean())
+            out[ctx][mname] = dict(n=len(r), p_mean=round(float(ps.mean()), 4), hit=round(float(hs.mean()), 4),
+                                   hit_se=round(float(math.sqrt(hs.mean() * (1 - hs.mean()) / len(r))), 4),
+                                   ece=round(float(ece), 4), bins=bins)
+            _say("baglam %d %s: n %d  p ort %.3f  isabet %.3f  ECE %.3f" % (ctx, mname, len(r), ps.mean(), hs.mean(), ece))
+    return dict(docs=len(docs), by_context=out)
+
+
+def text_copy_calibration(res):
+    L = ["# O12: INDUCTION KALIBRASYONU (%d valid sinav belgesi, en cok 2048 token)" % res["docs"],
+         "konum t: son <baglam> token daha once gectiyse ve onceki gecislerin hepsi ayni token'la surduyse induction tahmini; "
+         "m = onceki gecis sayisi.  p = modelin o token'a verdigi olasilik, isabet = gercek sonraki token o mu"]
+    for ctx, d in res["by_context"].items():
+        for mname, r in d.items():
+            L += ["", "## baglam %s, %s: n %d  p ort %.3f  isabet %.3f ± %.3f  ECE %.3f" % (
+                ctx, mname, r["n"], r["p_mean"], r["hit"], r["hit_se"], r["ece"])]
+            L += ["    p [%.2f, %.2f)  n %6d  p ort %.3f  isabet %.3f ± %.3f" % (b["lo"], b["hi"], b["n"], b["p"], b["hit"], b["se"])
+                  for b in r["bins"]]
+    return L
+
+
 # ---- CLI
 
 def _out_dir(run_dir):
@@ -1426,12 +1614,13 @@ def main(argv=None):
     ap.add_argument("run", help="kosu klasoru")
     ap.add_argument("measure", choices=("answers", "decoding", "repetition", "loop_heads", "corpus",
                                                "answer_split", "symbol_filler", "cooccur", "training_curve",
-                                               "ss_profile"))
+                                               "ss_profile", "copy_odds", "copy_calibration"))
     ap.add_argument("--data", required=True, help="FineWeb koku (gpt2/tokenizer.json, gpt2/shard_*.bin)")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--weights", default="last", choices=("last", "ema", "both"))
     ap.add_argument("--checkpoint", type=int, help="answers: checkpoint_t<adim>.pt (EMA yedekteki ortalama)")
     ap.add_argument("--tokens", type=int, default=641, help="decoding: uretim boyu (final.json gibi 641)")
+    ap.add_argument("--heads", help="copy_odds: tur.head listesi, tur 1'den (varsayilan 5.7,7.5,8.7,10.2)")
     ap.add_argument("--steps", default="final", help="training_curve: virgulle adimlar ve/veya final")
     ap.add_argument("--beam", type=int, default=8, help="answer_split: isin genisligi")
     ap.add_argument("--beam-steps", type=int, default=6, help="answer_split: isin boyu (token)")
@@ -1478,6 +1667,12 @@ def main(argv=None):
             elif args.measure == "answer_split":
                 res = measure_answer_split(model, vocab, eot, args)
                 lines = text_answer_split(res)
+            elif args.measure == "copy_odds":
+                res = measure_copy_odds(model, vocab, eot, args)
+                lines = text_copy_odds(res)
+            elif args.measure == "copy_calibration":
+                res = measure_copy_calibration(model, vocab, eot, args)
+                lines = text_copy_calibration(res)
             elif args.measure == "symbol_filler":
                 res = measure_symbol_filler(model, vocab, eot, args)
                 lines = text_symbol_filler(res)
