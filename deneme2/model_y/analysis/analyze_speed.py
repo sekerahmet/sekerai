@@ -19,6 +19,7 @@ import argparse
 import contextlib
 import copy
 import json
+import math
 import os
 import tempfile
 import sys
@@ -928,6 +929,155 @@ def flexdtype_measure(args, config, device):
     write(args.run, "flexdtype", res)
 
 
+# ---- adim suresi gercek veri sirasiyla (kosu ile olcum arasindaki fark)
+
+def batch_stats(batch, block=128):
+    """Adimin attention isi: hedef, anahtar/hedef, flex'in BlockMask'indaki etkin (q, kv) blok sayisi (belge ici nedensel),
+    belge parcasi sayisi, en uzun belge."""
+    _, mask, pos = batch
+    p = pos[:, :-1]
+    B, T = p.shape
+    first = torch.arange(T)[None] - p                     # konumun belgesinin penceredeki ilk konumu
+    lo = first.view(B, T // block, block).min(-1).values // block
+    blocks = int((torch.arange(T // block)[None] - lo + 1).sum())
+    valid = mask[:, 1:]
+    starts = (p == 0).sum().item()
+    return dict(targets=int(valid.sum()), keys=float(((p + 1) * valid).sum()) / float(valid.sum()), blocks=blocks,
+                docs=starts, longest=int(p.max()) + 1)
+
+
+@contextlib.contextmanager
+def run_flex_path(log):
+    """Kosunun yolu (7b3c1fa oncesi): egitimde flex fp32, kucuk blok (BLOCK 32x32, num_stages 1).  Bugunku kod q, k'yi bf16'ya
+    cevirip geri yayilim bloklarini veriyor; bu sarmalayici o cagriyi fp32'ye geri cevirir (degerler bf16 yuvarlamali,
+    sure ayni yol).  log: cagri tipi ve secenekleri (D4)."""
+    from torch.nn.attention.flex_attention import flex_attention
+    original = M._flex_compiled
+    inner = torch.compile(lambda q, k, v, block_mask=None, scale=None, kernel_options=None: flex_attention(
+        q, k, v, block_mask=block_mask, scale=scale, kernel_options=kernel_options), dynamic=False)
+
+    def old(q, k, v, block_mask=None, scale=None, kernel_options=None):
+        if kernel_options and "BLOCK_M1" in kernel_options:
+            q, k, v, kernel_options = q.float(), k.float(), v.float(), dict(BLOCK_M=32, BLOCK_N=32, num_stages=1)
+        log.append(dict(q=str(q.dtype), k=str(k.dtype), v=str(v.dtype), kernel_options=kernel_options))
+        return inner(q, k, v, block_mask=block_mask, scale=scale, kernel_options=kernel_options)
+    M._flex_compiled = old
+    torch._dynamo.reset()
+    try:
+        yield
+    finally:
+        M._flex_compiled = original
+        torch._dynamo.reset()
+
+
+def gpu_sampler(samples, stop, every=5.0):
+    """Arka planda nvidia-smi: SM saati, sicaklik, guc, kisma nedeni (uzun kosuda isil kisma var mi)."""
+    import subprocess
+    q = "clocks.sm,clocks.mem,temperature.gpu,power.draw,clocks_throttle_reasons.active"
+    while not stop.is_set():
+        try:
+            out = subprocess.run(["nvidia-smi", "--query-gpu=" + q, "--format=csv,noheader,nounits"], capture_output=True,
+                                 text=True, timeout=10).stdout.strip()
+            samples.append([time.time()] + [x.strip() for x in out.split(",")])
+        except Exception as e:
+            samples.append([time.time(), repr(e)[:80]])
+        stop.wait(every)
+
+
+def fit_line(x, y):
+    n = len(x)
+    mx, my = sum(x) / n, sum(y) / n
+    sxx = sum((a - mx) ** 2 for a in x)
+    sxy = sum((a - mx) * (b - my) for a, b in zip(x, y))
+    syy = sum((b - my) ** 2 for b in y)
+    slope = sxy / sxx if sxx else 0.0
+    r = sxy / math.sqrt(sxx * syy) if sxx and syy else 0.0
+    return my - slope * mx, slope, r
+
+
+def steptrace_measure(args, config, device):
+    import threading
+    import data_fineweb as DF
+    gpu = torch.cuda.get_device_name(0)
+    say("analyze_speed steptrace | %s | torch %s | %s" % (time.strftime("%Y-%m-%d %H:%M"), torch.__version__, gpu))
+    data = DF.load(args.data, log=say)
+    assert data["fingerprint"] == config["fingerprint"], "veri izi kosununkiyle ayni degil"
+    rows = config["batch_size"] * config["micro_batches"]
+    draw = DF.batches(data, rows, config.get("seed", 0))
+    starts = [int(s) for s in args.at.split(",")]
+    N = args.window
+    seq = [s for a in starts for s in range(a, a + N + 1)]
+    cached = [draw(s) for s in seq]
+    stats = [batch_stats(b) for b in cached]
+    g = torch.Generator().manual_seed(0)
+    sample = [batch_stats(draw(int(s))) for s in torch.randint(0, config["steps"], (args.sample,), generator=g)]
+    mean = lambda xs: sum(xs) / len(xs)
+    res = dict(gpu=gpu, torch=torch.__version__, at=starts, steps_per_window=N, stats=stats,
+               epoch_sample=dict(n=len(sample), **{k: mean([s[k] for s in sample]) for k in ("keys", "blocks", "docs")},
+                                 blocks_sd=float(torch.tensor([float(s["blocks"]) for s in sample]).std())),
+               modes={})
+    say("EPOK ORNEGI (%d rastgele adim): anahtar/hedef %.0f, flex blok %.0f (sd %.0f), belge parcasi %.0f | olculen adimlar: "
+        "anahtar/hedef %.0f, blok %.0f" % (len(sample), res["epoch_sample"]["keys"], res["epoch_sample"]["blocks"],
+                                          res["epoch_sample"]["blocks_sd"], res["epoch_sample"]["docs"],
+                                          mean([s["keys"] for s in stats]), mean([s["blocks"] for s in stats])))
+    kw = I._train_kwargs(config)
+    for label in ("kosudaki yol (fp32 flex)", "bugunku kod (bf16 flex, 7b3c1fa)"):
+        log, marks, samples = [], [], []
+        stop = threading.Event()
+        sampler = threading.Thread(target=gpu_sampler, args=(samples, stop), daemon=True)
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        sampler.start()
+        try:
+            with (run_flex_path(log) if label.startswith("kosu") else flex_recorder(log)):
+                TR.train_seq(config.get("setting", "shared"), None, None, config["vocab"], steps=len(seq) - 1, device=device,
+                             compile=config.get("compile", True), log_at=(), every=1,
+                             callback=lambda s, m, nll: marks.append(time.perf_counter()),
+                             batches=lambda s: cached[s], **kw)
+        except Exception:
+            say("HATA %s: %s" % (label, traceback.format_exc()[-800:]))
+            continue
+        finally:
+            stop.set()
+            sampler.join(timeout=15)
+            torch._dynamo.reset()
+        # aralik k: adim k'nin geri yayilimi + optimizer + adim k+1'in ileri hesabi; pencere sinirindaki ve ilk 2 aralik disari
+        ms, x_blocks, x_keys, window = [], [], [], []
+        for k in range(2, len(marks) - 1):
+            if k % (N + 1) == N:                          # pencere siniri: sonraki adim baska yerden
+                continue
+            ms.append(1e3 * (marks[k + 1] - marks[k]))
+            x_blocks.append((stats[k]["blocks"] + stats[k + 1]["blocks"]) / 2)
+            x_keys.append((stats[k]["keys"] + stats[k + 1]["keys"]) / 2)
+            window.append(k // (N + 1))
+        a, b, r = fit_line(x_blocks, ms)
+        ak, bk, rk = fit_line(x_keys, ms)
+        srt = sorted(ms)
+        sms = [float(s[1]) for s in samples if len(s) > 2 and s[1].replace(".", "").isdigit()]
+        temps = [float(s[3]) for s in samples if len(s) > 3 and s[3].replace(".", "").isdigit()]
+        flags = sorted({s[5] for s in samples if len(s) > 5})
+        pred = a + b * res["epoch_sample"]["blocks"]
+        m = res["modes"][label] = dict(record=log[:2], intervals=len(ms), ms_mean=mean(ms), ms_median=srt[len(srt) // 2],
+                                       ms_min=srt[0], ms_max=srt[-1], ms_sd=float(torch.tensor(ms).std()),
+                                       fit_blocks=dict(intercept=a, slope=b, r=r), fit_keys=dict(intercept=ak, slope=bk, r=rk),
+                                       predicted_epoch_ms=pred, peak_gb=torch.cuda.max_memory_allocated() / 1e9,
+                                       sm_clock=[min(sms), max(sms)] if sms else None,
+                                       temperature=[min(temps), max(temps)] if temps else None, throttle_flags=flags,
+                                       samples=samples, ms=ms)
+        say("%s | kayit %s" % (label, log[:1]))
+        say("   %d aralik: ortalama %.0f ms, medyan %.0f, en az %.0f, en cok %.0f, sd %.0f | tepe %.1f GB" % (
+            len(ms), m["ms_mean"], m["ms_median"], m["ms_min"], m["ms_max"], m["ms_sd"], m["peak_gb"]))
+        say("   ms ~ flex blok: %.0f + %.4f x blok (r %.2f) -> epok ortalamasinda %.0f ms | ms ~ anahtar/hedef: egim %.3f (r %.2f)" % (
+            a, b, r, pred, bk, rk))
+        say("   GPU: SM saati %s MHz, sicaklik %s C, kisma bayraklari %s (%d ornek)" % (
+            m["sm_clock"], m["temperature"], flags, len(samples)))
+        for i, start in enumerate(starts):
+            part = [v for v, w in zip(ms, window) if w == i]
+            if part:
+                say("   pencere adim %d: ortalama %.0f ms" % (start, mean(part)))
+    write(args.run, "steptrace", res)
+
+
 # ---- buyuk model adaylari
 
 CANDIDATES = (("d1024_8x2 (bugunku)", dict(d=1024, layers=8, turns=16, heads=8, units=2752), 4),
@@ -1277,12 +1427,15 @@ def generate_measure(args, config, device):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("run", help="kosu klasoru (config.json)")
-    ap.add_argument("measure", nargs="?", choices=("train", "sizes", "generate", "tune", "flexdtype"))
+    ap.add_argument("measure", nargs="?", choices=("train", "sizes", "generate", "tune", "flexdtype", "steptrace"))
     ap.add_argument("--data", help="FineWeb koku (gpt2/shard_013 ...); yoksa rastgele token")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--steps", type=int, default=3, help="train: parca parca olculen adim")
     ap.add_argument("--real", type=int, default=2, help="train_seq'in kendisi: K isinma + K olcum adimi (0: yok)")
     ap.add_argument("--only", help="sizes: aday adlari, virgulle (d1280_8x2,...)")
+    ap.add_argument("--at", default="1000,9000,17000", help="steptrace: pencerelerin ilk adimi (kosunun veri sirasi)")
+    ap.add_argument("--window", type=int, default=30, help="steptrace: pencere basina adim")
+    ap.add_argument("--sample", type=int, default=300, help="steptrace: epok dagilimi icin rastgele adim (yalniz CPU)")
     ap.add_argument("--weights", default="last", choices=("last", "ema"))
     ap.add_argument("--tokens", type=int, default=256, help="generate: istem basina uretilen token")
     ap.add_argument("--selftest", action="store_true", help="CPU, kucuk model: kod yollari")
@@ -1302,7 +1455,7 @@ def main():
         return
     config = I._config(args.run)
     {"train": train_measure, "sizes": sizes_measure, "generate": generate_measure, "tune": tune_measure,
-     "flexdtype": flexdtype_measure}[args.measure](
+     "flexdtype": flexdtype_measure, "steptrace": steptrace_measure}[args.measure](
         args, config, args.device)
 
 
