@@ -563,7 +563,8 @@ def freq_threshold(count_res, fact_res, key="near", criterion="correct_best_any"
     counts = np.array([c[key] for c in count_res["counts"]], dtype=float)[keep]
     kinds = np.array([c["kind"] for c in count_res["counts"]])[keep]
     x = np.log10(1 + counts)
-    floor = 1.0 / (1 + FREQ_DISTRACTORS)
+    # top1: dogru, ilk ayrisan token'da butun sozlukte en olasi (sans tabani 0); oteki olcutler 5'li kapali aday
+    floor = 0.0 if criterion == "top1" else 1.0 / (1 + FREQ_DISTRACTORS)
     edges = [0, 1, 10, 100, 1000, 10000, 1e9]
     L = ["## bilinme orani (%s) ~ sayim (%s, pencere %d) | agirlik %s, adim >= %d; sans %.2f | olgu %d (%s%s)" % (
         criterion, key, count_res["window"], weights, min_step, floor, keep.sum(), ",".join(kinds_only or ["hepsi"]),
@@ -577,7 +578,8 @@ def freq_threshold(count_res, fact_res, key="near", criterion="correct_best_any"
     for r in fact_res:
         if r["weights"] != weights or (r["step"] is not None and r["step"] < min_step):
             continue
-        y = np.array([float(f[criterion]) for f in r["facts"]])[keep]
+        y = np.array([float(f["first_diverging_rank"] == 0 if criterion == "top1" else f[criterion])
+                      for f in r["facts"]])[keep]
         cells = []
         for lo, hi in zip(edges[:-1], edges[1:]):
             m = (counts >= lo) & (counts < hi)
@@ -717,11 +719,12 @@ def main(argv=None):
         results.sort(key=lambda r: (r["step"] is None, r["step"] or 0))
         out = {}
         for weights in ("ema", "last"):
-            for kinds, noisy in ((None, True), (["capital"], False), (["element"], True), (["date"], False)):
-                L, summ = freq_threshold(counts, results, weights=weights, kinds_only=kinds, drop_noisy=noisy,
-                                         min_step=4000 if weights == "ema" else 0)
-                print("\n".join(L) + "\n", flush=True)
-                out["%s|%s|%s" % (weights, ",".join(kinds or ["all"]), "clean" if noisy else "raw")] = summ
+            for criterion in ("correct_best_any", "top1"):
+                for kinds, noisy in ((None, True), (["capital"], False), (["element"], True), (["date"], False)):
+                    L, summ = freq_threshold(counts, results, criterion=criterion, weights=weights, kinds_only=kinds,
+                                             drop_noisy=noisy, min_step=4000 if weights == "ema" else 0)
+                    print("\n".join(L) + "\n", flush=True)
+                    out["%s|%s|%s|%s" % (weights, criterion, ",".join(kinds or ["all"]), "clean" if noisy else "raw")] = summ
         path = _write(args, "capacity_freq_threshold", dict(measure="freq_threshold", counts=args.counts, inputs=args.inputs,
                                                             summary=out))
         print("yazildi: %s" % path)
