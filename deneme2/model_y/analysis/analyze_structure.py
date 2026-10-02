@@ -169,10 +169,12 @@ def _ridge(Xf, yf, Xt, yt, lam=1e-3):
     return _r2(float(((yt - pred) ** 2).sum()), float(((yt - yt.mean()) ** 2).sum())), pred
 
 
-def probes(model, test, fit, batch=8, epochs=4, lr=5e-3, bs=2048, log=print):
-    """Her durumda dogrusal okuma (fit belgelerinde ogrenilir, test belgelerinde olculur)."""
+def probes(model, test, fit, batch=8, epochs=4, lr=5e-3, bs=2048, states=None, targets=TARGETS, log=print):
+    """Her durumda dogrusal okuma (fit belgelerinde ogrenilir, test belgelerinde olculur).  states: durum adlari (None =
+    hepsi); targets: TARGETS'in alt kumesi."""
     names, blocks = I._state_names(model)
-    keep = [i for i, n in enumerate(names) if not (n == "F1" and not getattr(model, "first_turn_facts", True))]
+    keep = [i for i, n in enumerate(names) if not (n == "F1" and not getattr(model, "first_turn_facts", True))
+            and (states is None or n in states)]
     V = model.tokens.fixed_points.shape[0]
     t0 = time.time()
     Xf, tf, _ = _collect(model, fit, batch, keep, lens_on=False)
@@ -182,31 +184,31 @@ def probes(model, test, fit, batch=8, epochs=4, lr=5e-3, bs=2048, log=print):
     rows = []
     for j, s in enumerate(keep):
         row = dict(state=names[s], block=blocks[s], lens_acc=lens[j][1] / n, lens_nll=lens[j][0] / n)
-        for k in TARGETS:
+        for k in targets:
             row[k] = _softmax_probe(Xf[j], tf[k], Xt[j], tt[k], V, epochs, lr, bs)
         r2, pred = _ridge(Xf[j], torch.log1p(tf["pos"].double()), Xt[j], torch.log1p(tt["pos"].double()))
         err = (torch.expm1(pred) - tt["pos"].double()).abs()
         row["pos"] = dict(r2_log=r2, median_abs_err=float(err.median()))
         rows.append(row)
-        log("%-4s cur %.3f prev1 %.3f prev2 %.3f next1 %.3f (lens %.3f) next2 %.3f pos R2 %.3f  (%.0f sn)" % (
-            names[s], row["cur"]["acc"], row["prev1"]["acc"], row["prev2"]["acc"], row["next1"]["acc"], row["lens_acc"],
-            row["next2"]["acc"], r2, time.time() - t0))
+        log("%-4s %s (lens %.3f) pos R2 %.3f  (%.0f sn)" % (names[s], " ".join(
+            "%s %.3f/%.3f" % (k, row[k]["acc"], row[k]["train_acc"]) for k in targets), row["lens_acc"], r2, time.time() - t0))
         Xf[j] = Xt[j] = None                                     # bellek
-    return dict(rows=rows, n_test=n, n_fit=len(tf["cur"]), epochs=epochs, lr=lr, batch=bs,
+    return dict(rows=rows, n_test=n, n_fit=len(tf["cur"]), epochs=epochs, lr=lr, batch=bs, targets=list(targets),
                 pos_test_median=float(tt["pos"].double().median()))
 
 
 def _text_probes(res):
-    L = ["## dogrusal probe (test acc; probe %d fit konumunda, %d epok, Adam lr %.0e, batch %d; test %d konum)" % (
-        res["n_fit"], res["epochs"], res["lr"], res["batch"], res["n_test"]),
-         "durum blok | cur   prev1 prev2 | next1 (lens) next1-top5 | next2 | pos R2(log) med|err| | cur egitim acc"]
+    tg = res.get("targets", TARGETS)
+    L = ["## dogrusal probe (test acc / egitim acc; probe %d fit konumunda, %d epok, Adam lr %.0e, batch %d; test %d konum)"
+         % (res["n_fit"], res["epochs"], res["lr"], res["batch"], res["n_test"]),
+         "durum blok | " + " | ".join("%-11s" % k for k in tg) + " | lens next1 | next1-top5 | pos R2(log) med|err|"]
     for r in res["rows"]:
-        L.append("%-5s %s   | %.3f %.3f %.3f | %.3f (%.3f) %.3f      | %.3f | %.3f  %6.0f     | %.3f" % (
-            r["state"], r["block"], r["cur"]["acc"], r["prev1"]["acc"], r["prev2"]["acc"], r["next1"]["acc"], r["lens_acc"],
-            r["next1"]["top5"], r["next2"]["acc"], r["pos"]["r2_log"], r["pos"]["median_abs_err"], r["cur"]["train_acc"]))
+        L.append("%-5s %s   | %s | %.3f      | %s      | %.3f  %6.0f" % (
+            r["state"], r["block"], " | ".join("%.3f/%.3f" % (r[k]["acc"], r[k]["train_acc"]) for k in tg), r["lens_acc"],
+            "%.3f" % r["next1"]["top5"] if "next1" in r else "  -  ", r["pos"]["r2_log"], r["pos"]["median_abs_err"]))
     r = res["rows"][0]
-    L.append("en sik token tahmini (cogunluk) test acc: " + "  ".join("%s %.3f" % (k, r[k]["majority"]) for k in TARGETS))
-    L.append("probe nll (nat): " + " | ".join("%s %s" % (r["state"], " ".join("%.2f" % r[k]["nll"] for k in TARGETS))
+    L.append("en sik token tahmini (cogunluk) test acc: " + "  ".join("%s %.3f" % (k, r[k]["majority"]) for k in tg))
+    L.append("probe nll (nat): " + " | ".join("%s %s" % (r["state"], " ".join("%.2f" % r[k]["nll"] for k in tg))
                                              for r in res["rows"]))
     L.append("test konum medyani %.0f; pos: ridge log(1+t) -> R^2 ve |exp(tahmin)-1 - t| medyani" % res["pos_test_median"])
     return L
@@ -1035,15 +1037,35 @@ def _const_key(kind):
 
 
 def _fit_constant(model, stories, part, init, steps=150, batch=4, lr=0.02, seed=0, log=print):
-    """Optimal ablation: alt blok ciktisi yerine kaybi en aza indiren sabit yon (model donuk).  init: ortalama."""
+    """Optimal ablation: alt blok ciktisi yerine kaybi en aza indiren sabit yon (model donuk).  init: ortalama.  Belgelerin
+    1/8'i dogrulama: her steps/10 adimda ve basta (= ortalama) olculur, en dusuk dogrulama kayipli sabit doner."""
     kind, t = part
     P = model.tokens.points().detach()
-    data = list(_stories_batches(stories, batch, P.device))
+    held = max(1, len(stories) // 8)
+    data = list(_stories_batches(stories[held:], batch, P.device))
+    check = list(_stories_batches(stories[:held], batch, P.device))
+
+    @torch.no_grad()
+    def held_loss(zc):
+        tot = cnt = 0.0
+        for x, valid, _ in check:
+            h = model.input_states(x[:, :-1])
+            for tt in range(model.turns):
+                h = _turn_mod(model, tt, h, {_const_key(kind): zc} if tt == t else None)
+            tot += float(F.cross_entropy(I._scores(model, h, P)[valid].float(), x[:, 1:][valid], reduction="sum"))
+            cnt += int(valid.sum())
+        return tot / cnt
     z = init.detach().clone().float().requires_grad_(True)
     opt = torch.optim.Adam([z], lr=lr * float(init.norm()))
     rng = np.random.default_rng(seed)
     curve = []
+    best = (held_loss(init.float()), init.detach().clone().float(), 0)
+    start_loss = best[0]
     for step in range(steps):
+        if step and step % max(1, steps // 10) == 0:
+            hl = held_loss(z.detach())
+            if hl < best[0]:
+                best = (hl, z.detach().clone(), step)
         x, valid, _ = data[rng.integers(len(data))]
         inp, y = x[:, :-1], x[:, 1:]
         with torch.no_grad():
@@ -1061,14 +1083,20 @@ def _fit_constant(model, stories, part, init, steps=150, batch=4, lr=0.02, seed=
         loss.backward()
         opt.step()
         curve.append(float(loss))
-    log("optimal sabit %s%d: kayip ilk 10 adim %.3f, son 10 adim %.3f" % (kind, t + 1, np.mean(curve[:10]), np.mean(curve[-10:])))
-    return z.detach(), dict(first=float(np.mean(curve[:10])), last=float(np.mean(curve[-10:])))
+    hl = held_loss(z.detach())
+    if hl < best[0]:
+        best = (hl, z.detach().clone(), steps)
+    log("optimal sabit %s%d: dogrulama kaybi ortalamada %.4f, secilen (adim %d) %.4f" % (
+        kind, t + 1, start_loss, best[2], best[0]))
+    return best[1], dict(first=float(np.mean(curve[:10])), last=float(np.mean(curve[-10:])), held_mean=start_loss,
+                         held_best=best[0], best_step=best[2])
 
 
 @torch.no_grad()
 def _repair_eval(model, test, cases, batch):
-    """cases: [(ad, aciklama, tur, mod, donmus mu)] -> paired Δ.  Donmus: mudahale turundan sonraki butun norm carpanlari
-    temiz kosudaki degerinde (dogrudan etki; normalizasyon uzerinden telafi yok)."""
+    """cases: [(ad, aciklama, tur, mod, donma)] -> paired Δ.  donma (tur ici sonraki anahtarlar, k) ya da None: mudahaleden
+    sonra ayni turdaki verilen norm anahtarlari ve sonraki k turun butun norm carpanlari temiz kosudaki degerinde
+    (normalizasyon uzerinden telafi o pencerede yok; sonra normal)."""
     P = model.tokens.points()
     S = len(test)
     names = ["base"] + [c[0] for c in cases]
@@ -1088,7 +1116,8 @@ def _repair_eval(model, test, cases, batch):
         for name, _, t, mod, frozen in cases:
             h = hs[t]
             for tt in range(t, model.turns):
-                fz = {k: v for k, v in clean_norms.items() if k[0] > t} if frozen else None
+                fz = None if frozen is None else {k: v for k, v in clean_norms.items() if (k[0] == t and k[1] in frozen[0])
+                                                  or t < k[0] <= t + frozen[1]}
                 h = _turn_mod(model, tt, h, mod if tt == t else None, norms=fz)
             put(name, h)
     base = sums["base"]
@@ -1114,7 +1143,7 @@ def _sink_by_document(model, stories, heads=((14, 3), (15, 2)), batch=4):
 
 
 def repair(model, test, fit, reference, decode, batch=8, steps=150, parts=REPAIR_PARTS, sink_heads=((14, 3), (15, 2)),
-           log=print):
+           lr=0.003, frozen_turns=(1, 2), log=print):
     """Ayni alt bloklarda dort kapatma: atla, atla + donmus normalizasyon, ortalama, optimal sabit; sink head'lerin belge
     basina konum 0 kutlesi.  BAGIMLILIK olcer."""
     t0 = time.time()
@@ -1127,12 +1156,14 @@ def repair(model, test, fit, reference, decode, batch=8, steps=150, parts=REPAIR
     for kind, t in parts:
         lab = "%s%d" % (kind, t + 1)
         skip = dict(skip_A=True) if kind == "A" else dict(facts="skip")
-        z, curve = _fit_constant(model, fit, (kind, t), means[(t, kind)], steps=steps, log=log)
+        z, curve = _fit_constant(model, fit, (kind, t), means[(t, kind)], steps=steps, lr=lr, log=log)
         fits[lab] = dict(curve, cos_mean=float(F.cosine_similarity(z, means[(t, kind)].float(), dim=0)))
-        cases += [(lab + " atla", "alt blok yok", t, skip, False),
-                  (lab + " atla+donuk", "alt blok yok, sonraki norm carpanlari temiz", t, skip, True),
-                  (lab + " ortalama", "cikti ortalama vektor (norm oncesi)", t, {_const_key(kind): means[(t, kind)]}, False),
-                  (lab + " optimal", "cikti ogrenilen sabit (Li & Janson 2024)", t, {_const_key(kind): z}, False)]
+        same = ("uF", "hF") if kind == "A" else ()
+        cases += [(lab + " atla", "alt blok yok", t, skip, None)]
+        cases += [(lab + " atla+donuk%d" % k, "alt blok yok, norm carpanlari %d tur temiz" % k, t, skip, (same, k))
+                  for k in frozen_turns]
+        cases += [(lab + " ortalama", "cikti ortalama vektor (norm oncesi)", t, {_const_key(kind): means[(t, kind)]}, None),
+                  (lab + " optimal", "cikti ogrenilen sabit (Li & Janson 2024)", t, {_const_key(kind): z}, None)]
     log("sabitler (%.0f sn)" % (time.time() - t0))
     res = _repair_eval(model, test, cases, batch)
     sink = _sink_by_document(model, test, sink_heads)
@@ -1158,8 +1189,9 @@ def _text_repair(res):
     for r in a["rows"]:
         L.append("%-16s | %-48s | %+.4f ± %.4f | %+.2f ± %.2f" % (r["case"], r["words"][:48], r["d_nll"], r["se_nll"],
                                                                 100 * r["d_acc"], 100 * r["se_acc"]))
-    L += ["", "optimal sabitin egitimi (kayip ilk / son 10 adim) ve ortalamayla kosinusu: " + "  ".join(
-        "%s %.3f/%.3f cos %.2f" % (k, v["first"], v["last"], v["cos_mean"]) for k, v in res["fits"].items())]
+    L += ["", "optimal sabit: dogrulama kaybi ortalamada -> secilen (adim), ortalamayla kosinus: " + "  ".join(
+        "%s %.4f->%.4f (%d) cos %.2f" % (k, v["held_mean"], v["held_best"], v["best_step"], v["cos_mean"])
+        for k, v in res["fits"].items())]
     L += ["", "## sink head'ler: belge basina konum 0 kutlesi (Guo 2024 active-dormant sorusu)"]
     for r in res["sink"]:
         L.append("head %s: min/%%10/%%25/medyan/%%75/%%90/max %s; log(boy) ile korelasyon %.2f" % (
@@ -1261,6 +1293,10 @@ def _main(argv=None):
     ap.add_argument("run", nargs="?", help="kosu klasoru ya da adi")
     ap.add_argument("measure", nargs="?", choices=("probes", "attention_passes", "units", "pass_swap", "extras", "repair", "points"))
     ap.add_argument("--fit-steps", type=int, default=150, help="repair: optimal sabitin adim sayisi")
+    ap.add_argument("--fit-lr", type=float, default=0.003, help="repair: optimal sabitin lr'si (x |ortalama|)")
+    ap.add_argument("--checkpoint", type=int, help="checkpoint_tNNNNNN.pt adimi (varsayilan: kosu sonu)")
+    ap.add_argument("--states", help="probes: virgullu durum adlari (ornek h0,F2,F8,F16; varsayilan hepsi)")
+    ap.add_argument("--targets", help="probes: virgullu hedefler (%s)" % ",".join(TARGETS))
     ap.add_argument("--reference", type=int, default=48, help="extras: ortalamalar icin ayri belge (testten hemen sonra)")
     ap.add_argument("--data", help="FineWeb koku (gpt2/ altinda)")
     ap.add_argument("--device", default="cpu")
@@ -1289,15 +1325,16 @@ def _main(argv=None):
     decode = _decoder(data["vocab"])
     rows, test = data["stories"](args.stories, args.offset)
     fit_rows, fit = [], []
-    if args.measure == "repair":
-        args.fit_stories = min(args.fit_stories, 64)
     if args.measure in ("probes", "units", "repair"):
         assert args.fit_offset >= args.offset + args.stories or args.fit_offset + args.fit_stories <= args.offset, "ortusme"
         fit_rows, fit = data["stories"](args.fit_stories, args.fit_offset)
-    model = I._load_model(run_dir, args.weights).to(args.device)
-    say("model %s yuklendi (%.0f sn); test %d belge, fit %d belge" % (args.weights, time.time() - t0, len(test), len(fit)))
+    model = I._load_model(run_dir, args.weights, args.checkpoint).to(args.device)
+    say("model %s%s yuklendi (%.0f sn); test %d belge, fit %d belge" % (args.weights, "" if args.checkpoint is None else
+                                                                        " t%d" % args.checkpoint, time.time() - t0, len(test), len(fit)))
     if args.measure == "probes":
-        res = probes(model, test, fit, args.batch, args.probe_epochs, args.probe_lr, args.probe_batch, log=say)
+        res = probes(model, test, fit, args.batch, args.probe_epochs, args.probe_lr, args.probe_batch,
+                     states=args.states.split(",") if args.states else None,
+                     targets=tuple(args.targets.split(",")) if args.targets else TARGETS, log=say)
         lines = _text_probes(res)
     elif args.measure == "attention_passes":
         res = attention_passes(model, test, batch=max(1, args.batch // 2))
@@ -1315,7 +1352,7 @@ def _main(argv=None):
         lines = _text_points(res)
     elif args.measure == "repair":
         ref = data["stories"](args.reference, args.offset + args.stories)[1]
-        res = repair(model, test, fit, ref, decode, batch=args.batch, steps=args.fit_steps, log=say)
+        res = repair(model, test, fit, ref, decode, batch=args.batch, steps=args.fit_steps, lr=args.fit_lr, log=say)
         lines = _text_repair(res)
     elif args.measure == "extras":
         ref = data["stories"](args.reference, args.offset + args.stories)[1]   # internals ablate'in referansiyla ayni
@@ -1324,14 +1361,16 @@ def _main(argv=None):
     else:
         res = pass_swap(model, test, batch=args.batch, log=say)
         lines = _text_pass_swap(res)
-    header = ["analyze_structure %s | kosu %s | agirlik %s | %s | sure %.0f sn" % (
-        args.measure, config.get("name"), args.weights, time.strftime("%Y-%m-%d %H:%M"), time.time() - t0),
+    ck = "" if args.checkpoint is None else "t%06d" % args.checkpoint
+    header = ["analyze_structure %s | kosu %s | agirlik %s %s | %s | sure %.0f sn" % (
+        args.measure, config.get("name"), args.weights, ck or "(kosu sonu)", time.strftime("%Y-%m-%d %H:%M"), time.time() - t0),
         "test: %d belge (sinav permutasyonu %d..%d); fit: %d belge (%d..)" % (
             len(test), args.offset, args.offset + len(test) - 1, len(fit), args.fit_offset)]
     out_dir = os.environ.get("KUYRUK_SONUC") or os.path.join(run_dir, "analysis")
-    name = "structure_%s_%s_%s" % (args.measure, args.weights, time.strftime("%Y%m%d_%H%M%S"))
+    name = "_".join(p for p in ("structure", args.measure, args.weights, ck, time.strftime("%Y%m%d_%H%M%S")) if p)
     path = I._write(out_dir, name, header + [""] + lines, dict(measure=args.measure, run=config.get("name"),
-                                                               weights=args.weights, test=np.asarray(rows).tolist(),
+                                                               weights=args.weights, checkpoint=args.checkpoint,
+                                                               test=np.asarray(rows).tolist(),
                                                                fit=np.asarray(fit_rows).tolist(), result=res))
     print("\n".join(header + [""] + lines))
     say("yazildi: %s.txt / .json" % path)
@@ -1379,7 +1418,12 @@ def _selftest():
     cnt[:30] = rng.integers(1, 1000, 30)
     pt = points(model, cnt, test, batch=4)
     print(chr(10).join(_text_points(pt)))
-    assert abs(rows["A4 atla"]["d_nll"]) < 10 and "A1 optimal" in rows
+    assert abs(rows["A4 atla"]["d_nll"]) < 10 and "A1 optimal" in rows and "A1 atla+donuk2" in rows
+    assert all(v["held_best"] <= v["held_mean"] + 1e-9 for v in rp["fits"].values())
+    r2 = probes(model, test, fit, batch=4, epochs=2, lr=2e-2, bs=64, states=["h0", "F2"], targets=("next1",),
+                log=lambda s: None)
+    print("\n".join(_text_probes(r2)[:4]))
+    assert [r["state"] for r in r2["rows"]] == ["h0", "F2"]
     print("selftest TAMAM")
 
 
