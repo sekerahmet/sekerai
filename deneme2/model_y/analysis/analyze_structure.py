@@ -1629,6 +1629,147 @@ def _loop_inputs(fw_root, vocab, eot, count=64, repeats=6, rand_len=20, seed=0):
     return ([[eot] + s * repeats for s in sents], rand_len), ([[eot] + r * repeats for r in rand], rand_len)
 
 
+# ---- 9. O16 (18_ditto_x_self_matematik §7): kendi uretimi mi gercek metin mi, tur <= 12 durumlarindan dogrusal ayrim
+
+ELL_BINS = ((1, 1), (2, 2), (3, 3), (4, 7), (8, 15))
+
+
+def _selfgen_docs(stories, eot, region=256, max_prompt=1024):
+    """(istem, gercek devam) ciftleri: istem = belgenin ilk yarisi (<= max_prompt), devam = sonraki region token; belge
+    istem + region'dan kisaysa atlanir.  Bastaki / sondaki eot atilir."""
+    out = []
+    for i, s in enumerate(stories):
+        body = [x for x in s if x != eot]
+        P = min(len(body) // 2, max_prompt)
+        if P >= 16 and len(body) >= P + region:
+            out.append((i, body[:P], body[P:P + region]))
+    return out
+
+
+@torch.no_grad()
+def _selfgen_features(model, docs, gens, eot, turns, region, batch=8):
+    """Her (istem + devam) dizisinde bolge konumlari (karar konumu t: x_t'den sonraki token), m_t = 1 ve l_t bir
+    ELL_BINS kovasinda: istenen durumlar (fp16, sqrt(d) olcekli).  -> {kova: dict(X {tur: [..]}, y [..], doc [..])}."""
+    import analyze_errors as AE
+    P_ = model.tokens.points()
+    names = _state_names_for(model)
+    pick = {t: names.index("A1" if t == 1 else "h0" if t == 0 else "F%d" % t) for t in turns}
+    d = P_.shape[1]
+    out = {b: dict(X={t: [] for t in turns}, y=[], doc=[], pos=[]) for b in ELL_BINS}
+    seqs = []
+    for k, ((i, prompt, real), gen) in enumerate(zip(docs, gens)):
+        seqs.append((k, 0, [eot] + prompt + real))
+        seqs.append((k, 1, [eot] + prompt + list(gen)))
+    for c0 in range(0, len(seqs), batch):
+        part = seqs[c0:c0 + batch]
+        L = max(len(s) for _, _, s in part)
+        x = torch.full((len(part), L), eot, dtype=torch.long, device=P_.device)
+        for r, (_, _, s) in enumerate(part):
+            x[r, :len(s)] = torch.tensor(s, device=P_.device)
+        states = I._states(model, x, I._plan(model), P_)
+        for r, (k, lab, s) in enumerate(part):
+            ell, mm, _ = AE._match_trace(np.asarray(s))
+            P = len(s) - region                                  # ilk devam token'inin indeksi
+            for b in ELL_BINS:
+                ts = [t for t in range(P - 1, len(s) - 1) if mm[t] == 1 and b[0] <= ell[t] <= b[1]]
+                if not ts:
+                    continue
+                idx = torch.tensor(ts, device=P_.device)
+                for t, j in pick.items():
+                    out[b]["X"][t].append((states[j][r, idx] * d ** 0.5).half())
+                out[b]["y"] += [lab] * len(ts)
+                out[b]["doc"] += [k] * len(ts)
+                out[b]["pos"] += [t - P for t in ts]                # bolge icindeki konum (kontrol)
+    return out
+
+
+def _logistic(Xtr, ytr, Xte, yte, steps=300, lr=0.01, wd=1e-3):
+    """Ikili lojistik probe (standartlastirilmis girdi, Adam, tam batch) -> test acc, egitim acc."""
+    mu, sd = Xtr.float().mean(0), Xtr.float().std(0).clamp_min(1e-6)
+    A, B = (Xtr.float() - mu) / sd, (Xte.float() - mu) / sd
+    w = torch.zeros(A.shape[1], device=A.device, requires_grad=True)
+    b = torch.zeros((), device=A.device, requires_grad=True)
+    opt = torch.optim.AdamW([w, b], lr=lr, weight_decay=wd)
+    yt = ytr.float()
+    with torch.enable_grad():
+        for _ in range(steps):
+            loss = F.binary_cross_entropy_with_logits(A @ w + b, yt)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+    with torch.no_grad():
+        return float((((B @ w + b) > 0).long() == yte).float().mean()), float((((A @ w + b) > 0).long() == ytr).float().mean())
+
+
+def _balanced(idx, y, gen):
+    """Siniflari esitle: buyuk siniftan rastgele (tohumlu) alt ornek."""
+    a, b = idx[y[idx] == 0], idx[y[idx] == 1]
+    n = min(len(a), len(b))
+    pa = a[torch.randperm(len(a), generator=gen)[:n]]
+    pb = b[torch.randperm(len(b), generator=gen)[:n]]
+    return torch.cat([pa, pb])
+
+
+def selfgen_probe(model, stories, eot, turns=tuple(range(0, 13)), region=256, gen_batch=32, train_share=0.7, log=print):
+    """O16: ayni l kovasinda (m = 1) acgozlu kendi uretimi ile gercek metin konumlarini tur <= 12 durumlarindan ayirma.
+    Belgeler egitim / test diye bolunur (belge duzeyinde, %70 / %30); siniflar her bolumde esitlenir.  h0 (girdi embedding)
+    satiri kontrol: token kimligi tek basina ne kadar ayiriyor."""
+    import analyze_errors as AE
+    t0 = time.time()
+    docs = _selfgen_docs(stories, eot, region)
+    gens = []
+    for c0 in range(0, len(docs), gen_batch):
+        part = docs[c0:c0 + gen_batch]
+        g, _, _ = AE.generate_batch(model, [[eot] + p for _, p, _ in part], region, eot)
+        gens += g
+    log("O16: %d belge, acgozlu %d token (%.0f sn)" % (len(docs), region, time.time() - t0))
+    feats = _selfgen_features(model, docs, gens, eot, turns, region)
+    log("O16: durumlar (%.0f sn)" % (time.time() - t0))
+    gen = torch.Generator().manual_seed(0)
+    cut = int(len(docs) * train_share)
+    rows = []
+    for b in ELL_BINS:
+        f = feats[b]
+        if not f["y"]:
+            continue
+        y = torch.tensor(f["y"])
+        doc = torch.tensor(f["doc"])
+        tr = _balanced(torch.nonzero(doc < cut)[:, 0], y, gen)
+        te = _balanced(torch.nonzero(doc >= cut)[:, 0], y, gen)
+        row = dict(bin="%d-%d" % b if b[0] != b[1] else "%d" % b[0], n_real=int((y == 0).sum()), n_self=int((y == 1).sum()),
+                   n_train=len(tr), n_test=len(te), acc={}, train_acc={})
+        if len(tr) >= 20 and len(te) >= 20:
+            for t in turns:
+                X = torch.cat(f["X"][t])
+                dv = X.device
+                a, at = _logistic(X[tr.to(dv)], y[tr].to(dv), X[te.to(dv)], y[te].to(dv))
+                row["acc"][t], row["train_acc"][t] = a, at
+            pos = torch.tensor(f["pos"], dtype=torch.float32)[:, None]
+            pos = torch.cat([pos / 256, (pos / 256) ** 2], 1)        # yalniz bolge ici konum: kontrol
+            row["acc_position"] = _logistic(pos[tr], y[tr], pos[te], y[te])[0]
+        rows.append(row)
+        log("O16 l %s: gercek %d / kendi %d konum; test acc %s" % (row["bin"], row["n_real"], row["n_self"], " ".join(
+            "%d:%.3f" % (t, a) for t, a in row["acc"].items())))
+    return dict(rows=rows, docs=len(docs), region=region, turns=list(turns), train_docs=cut, test_docs=len(docs) - cut)
+
+
+def _text_selfgen(res):
+    T = res["turns"]
+    L = ["## O16: kendi acgozlu uretimi (1) mi gercek devam (0) mi -- m = 1, ayni l kovasi; tur <= 12 durumlarindan "
+         "dogrusal (lojistik) probe; belgeler %d egitim / %d test (belge duzeyinde), siniflar esit (sans 0,5)" % (
+             res["train_docs"], res["test_docs"]),
+         "durum 0 = h0 (girdi embedding, token kimligi kontrolu); t = tur t ciktisi (1: A1)",
+         "l      | gercek / kendi konum | egitim / test | yalniz konum | " + " ".join("t%-4d" % t for t in T)]
+    for r in res["rows"]:
+        L.append("%-6s | %6d / %6d        | %5d / %5d  | %s        | %s" % (
+            r["bin"], r["n_real"], r["n_self"], r["n_train"], r["n_test"],
+            "%.3f" % r["acc_position"] if "acc_position" in r else "  -  ",
+            " ".join("%.3f" % r["acc"][t] if t in r["acc"] else "  -  " for t in T)))
+    L.append("egitim acc (asiri uyum kontrolu): " + " | ".join("l %s: %s" % (r["bin"], " ".join(
+        "%.2f" % r["train_acc"][t] for t in T if t in r["train_acc"])) for r in res["rows"]))
+    return L
+
+
 # ---- CLI
 
 def _decoder(vocab):
@@ -1639,7 +1780,7 @@ def _decoder(vocab):
 def _main(argv=None):
     ap = argparse.ArgumentParser(prog="analyze_structure.py", description=__doc__.split("\n\n")[0])
     ap.add_argument("run", nargs="?", help="kosu klasoru ya da adi")
-    ap.add_argument("measure", nargs="?", choices=("probes", "attention_passes", "units", "pass_swap", "extras", "repair", "points", "loop", "answers"))
+    ap.add_argument("measure", nargs="?", choices=("probes", "attention_passes", "units", "pass_swap", "extras", "repair", "points", "loop", "answers", "selfgen"))
     ap.add_argument("--fit-steps", type=int, default=150, help="repair: optimal sabitin adim sayisi")
     ap.add_argument("--fit-lr", type=float, default=0.003, help="repair: optimal sabitin lr'si (x |ortalama|)")
     ap.add_argument("--checkpoint", type=int, help="checkpoint_tNNNNNN.pt adimi (varsayilan: kosu sonu)")
@@ -1697,6 +1838,9 @@ def _main(argv=None):
         al = alpha_report(model, test, batch=args.batch, focus=focus, log=say)
         res = dict(units=res, alpha=al)
         lines = _text_units(res["units"], al)
+    elif args.measure == "selfgen":
+        res = selfgen_probe(model, test, data["eos"], log=say)
+        lines = _text_selfgen(res)
     elif args.measure == "loop":
         sents, rands = _loop_inputs(args.data or I._FINEWEB_ROOT, data["vocab"], data["eos"])
         res = loop_geometry(model, test, sents, rands, batch=args.batch, log=say)
@@ -1793,6 +1937,9 @@ def _selftest():
            (("gold", True, 7), ("iron", True, 8), ("neon", False, 9))]
     ag = answer_geometry(model, dict(questions=its), sym, {" Au": 7, " Cu": 10}, [7, 8, 10], [9], log=lambda s: None)
     print("\n".join(_text_answers(ag, decode)))
+    sg = selfgen_probe(model, mk(60) + [[0] + rng.integers(1, V, 50).tolist() for _ in range(20)], 0, turns=(0, 1, 2),
+                       region=8, gen_batch=16, log=lambda s: None)
+    print("\n".join(_text_selfgen(sg)))
     print("selftest TAMAM")
 
 
