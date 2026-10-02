@@ -946,28 +946,48 @@ def batch_stats(batch, block=128):
                 docs=starts, longest=int(p.max()) + 1)
 
 
+_FLEX_NOTE = dict(on=False, log=[])     # tip kaydi yalniz derleme disindaki tek prob cagrisinda (on=True); egitimde yazilmaz
+
+
 @contextlib.contextmanager
-def run_flex_path(log):
-    """Kosunun yolu (7b3c1fa oncesi): egitimde flex fp32, kucuk blok (BLOCK 32x32, num_stages 1).  Bugunku kod q, k'yi bf16'ya
-    cevirip geri yayilim bloklarini veriyor; bu sarmalayici o cagriyi fp32'ye geri cevirir (degerler bf16 yuvarlamali,
-    sure ayni yol).  log: cagri tipi ve secenekleri (D4)."""
+def training_flex_path(run_path):
+    """run_path True: kosunun yolu (7b3c1fa oncesi) -- egitimde flex fp32, kucuk blok (BLOCK 32x32, num_stages 1); bugunku kod
+    q, k'yi bf16'ya cevirip geri yayilim bloklarini veriyor, bu sarmalayici o cagriyi fp32'ye geri cevirir (degerler bf16
+    yuvarlamali, sure ayni yol).  False: bugunku cagri aynen.  Kayit (D4) _FLEX_NOTE["on"] iken; derlenmis bolgede buyuyen
+    liste her adimda yeniden derletiyordu (C_007: 64 derlemeden sonra eager, ~21 sn/adim)."""
     from torch.nn.attention.flex_attention import flex_attention
     original = M._flex_compiled
     inner = torch.compile(lambda q, k, v, block_mask=None, scale=None, kernel_options=None: flex_attention(
         q, k, v, block_mask=block_mask, scale=scale, kernel_options=kernel_options), dynamic=False)
 
-    def old(q, k, v, block_mask=None, scale=None, kernel_options=None):
-        if kernel_options and "BLOCK_M1" in kernel_options:
+    def call(q, k, v, block_mask=None, scale=None, kernel_options=None):
+        if run_path and kernel_options and "BLOCK_M1" in kernel_options:
             q, k, v, kernel_options = q.float(), k.float(), v.float(), dict(BLOCK_M=32, BLOCK_N=32, num_stages=1)
-        log.append(dict(q=str(q.dtype), k=str(k.dtype), v=str(v.dtype), kernel_options=kernel_options))
+        if _FLEX_NOTE["on"]:
+            _FLEX_NOTE["log"].append(dict(q=str(q.dtype), k=str(k.dtype), v=str(v.dtype), kernel_options=kernel_options))
         return inner(q, k, v, block_mask=block_mask, scale=scale, kernel_options=kernel_options)
-    M._flex_compiled = old
+    M._flex_compiled = call
     torch._dynamo.reset()
     try:
         yield
     finally:
         M._flex_compiled = original
         torch._dynamo.reset()
+
+
+def probe_flex_call(config, batch, device):
+    """Derlemesiz tek ileri hesap (1 satir, autocast bf16): flex'e giden tip ve secenekler."""
+    _FLEX_NOTE.update(on=True, log=[])
+    try:
+        model = I._build(config).to(device)
+        ids, mask, pos = (t[:1].contiguous().to(device) for t in batch)
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+            model.loss(ids, mask, pos)
+        del model
+        torch.cuda.empty_cache()
+        return _FLEX_NOTE["log"][:1]
+    finally:
+        _FLEX_NOTE.update(on=False, log=[])
 
 
 def gpu_sampler(samples, stop, every=5.0):
@@ -1029,7 +1049,8 @@ def steptrace_measure(args, config, device):
         torch.cuda.reset_peak_memory_stats()
         sampler.start()
         try:
-            with (run_flex_path(log) if label.startswith("kosu") else flex_recorder(log)):
+            with training_flex_path(label.startswith("kosu")):
+                log = probe_flex_call(config, cached[0], device)
                 TR.train_seq(config.get("setting", "shared"), None, None, config["vocab"], steps=len(seq) - 1, device=device,
                              compile=config.get("compile", True), log_at=(), every=1,
                              callback=lambda s, m, nll: marks.append(time.perf_counter()),
