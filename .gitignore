@@ -45,6 +45,8 @@ deneme2/*/OLCULENLER_*.md
 deneme2/*/*/OLCULENLER_*.md
 # ajan raporlari ve birlesik bulgular (BULGULAR_<N>.md): YEREL kalir
 deneme2/*/BULGULAR_*.md
+# kosu basina analiz raporlari klasoru (deneme2/<kol>/bulgular/<kosu>/): YEREL kalir
+deneme2/*/bulgular/
 
 # Claude Code yerel klasoru (ajan worktree'leri, ayarlar): depo PUBLIC
 .claude/
