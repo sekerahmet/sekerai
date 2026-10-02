@@ -155,14 +155,17 @@ def summary(run_dir, cfg, label):
 
 
 def generate(model, ids, n, eot, temp=0.0, top_p=1.0, penalty=1.0, window=64):
-    """Tek istem, token token, onbellekli (istem bir kez, sonra yalniz yeni konum).  <|endoftext|>'te durur."""
+    """Tek istem, token token, onbellekli (istem bir kez, sonra yalniz yeni konum).  <|endoftext|>'te durur.  Modelin
+    cihazinda (CPU ya da GPU)."""
+    _heavy()
+    dev = next(model.parameters()).device
     out, x = [], list(ids)
-    caches = [AttentionCache(torch.tensor([len(x)]), len(x) + n) for _ in range(model.turns)]
+    caches = [AttentionCache(torch.tensor([len(x)], device=dev), len(x) + n) for _ in range(model.turns)]
     with torch.no_grad():
         for i in range(n):
-            logits = model.logits(torch.tensor([x if i == 0 else x[-1:]]), caches)[0, -1].float()
+            logits = model.logits(torch.tensor([x if i == 0 else x[-1:]], device=dev), caches)[0, -1].float()
             if penalty != 1.0:                              # son window token: pozitif puan bolunur, negatif carpilir
-                recent = torch.tensor(sorted(set(x[-window:])))
+                recent = torch.tensor(sorted(set(x[-window:])), device=dev)
                 logits[recent] = torch.where(logits[recent] > 0, logits[recent] / penalty, logits[recent] * penalty)
             if temp <= 0:
                 t = int(logits.argmax())
