@@ -557,8 +557,9 @@ def freq_threshold(count_res, fact_res, key="near", criterion="correct_best_any"
     (p = taban + (1 - taban)/2'de sayim), olgulara gore bootstrap %90 araligi.  EMA'da min_step oncesi baslangic agirligiyla
     kirli (E2 R1).  -> (satirlar, ozet)."""
     import numpy as np
+    # cevap ozneyle basliyorsa (Mexico City / Mexico) ozne cevabin icinde sayilir: sayim anlamsiz, disarida
     keep = np.array([(kinds_only is None or c["kind"] in kinds_only) and not (drop_noisy and c["noisy"])
-                     for c in count_res["counts"]])
+                     and not c["answer"].startswith(c["subject"]) for c in count_res["counts"]])
     counts = np.array([c[key] for c in count_res["counts"]], dtype=float)[keep]
     kinds = np.array([c["kind"] for c in count_res["counts"]])[keep]
     x = np.log10(1 + counts)
