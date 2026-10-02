@@ -36,6 +36,11 @@
                  mu; isin dogru / acgozlu yanlis payi (kendi ciktisinda damitmanin bilgi kolu ust siniri)
     repeat_chain matematikci O14: tekrar cumlesinden hemen sonraki cumle de tekrar mi (g_S: herhangi bir tekrar / kopyalanan
                  parcanin devami); cumle sinirinda kopya token'i secilmis mi ve modelin p'si; veri (valid + egitim) ve acgozlu
+    repeat_mass  matematikci T4: acgozlu tekrar cumlesi 1..4'un, girisin bir oncekinin ve gercek devamin cumle sinirlarinda
+                 modelin kendi olasiligiyla onceki bir cumleyi bastan sona uretmesi (Σ_j p, en buyuk), gelen cumlenin log p'si,
+                 p(eot); giriste modelden ornek cumle turleri (tekrar / yeni / eot)
+    eot_free     ayni belgelerde ve soru istemlerinde acgozlu eot serbest: kendiliginden biten / donguye giren, eot'un en
+                 olasi oldugu yer giristen once mi sonra mi; sorularda dongu cevap cumlesinden hemen sonra mi
     symbol_filler  86 element (analyze_capacity.ELEMENTS) x 5 kalip: dogru sembol ve " Cu" olasiligi / sirasi, top1
                  dagilimi (Cu kalibin genel doldurucusu mu); 133 baskentte top1 dagilimi
 
@@ -2314,6 +2319,449 @@ def text_repeat_chain(res):
     return L
 
 
+# ---- T4 (matematikci, bulgular 30 §7): sinirda modelin kendi olasiligiyla "onceki bir cumleyi tekrar et"; eot serbest acgozlu
+
+MASS_PRUNE = 1e-4        # adayin ilk token p'si bundan kucukse tam skorlanmaz; atlanan kutlenin ust siniri (ilk token p'leri) yazilir
+MASS_ROWS = 8            # aday skorlamada tek ileri hesaptaki satir (logits bellegi)
+MASS_SAMPLE_TOKENS = 64  # sinirdan ornek cumle en cok bu kadar token
+EOT_QA = (               # 07 "soru biciminde kendiliginden durma" istemleri
+    "What is the capital city of Turkey?",
+    "What is the capital city of Turkey?\n",
+    "Question: What is the capital city of Turkey?\nAnswer:",
+    "Q: What is the capital of France?\nA:",
+    "What is the largest planet in our solar system?",
+    "Question: Who wrote Romeo and Juliet?\nAnswer:",
+    "Question: What is the chemical symbol for gold?\nAnswer:",
+    "Ankara is the capital city of Turkey.",
+)
+
+
+def _entry_docs(args):
+    """repeat_entry (D_032) ile ayni belgeler ve sira: valid permutasyonu (tohum 0), >= 2 x bolge + 1 token, ilk
+    args.entry_docs; istem = ilk yari (<= args.prompt_max), gercek devam = sonraki ENTRY_REGION token."""
+    import data_fineweb as DF
+    v = DF.load_valid(args.data, log=lambda s: None)
+    docs = []
+    for i in np.random.default_rng(0).permutation(len(v["valid_starts"])):
+        d = DF.valid_doc(v, int(i))[:2049]
+        if len(d) >= 2 * ENTRY_REGION + 1:
+            docs.append(d)
+            if len(docs) >= args.entry_docs:
+                break
+    prompts = [d[:min(len(d) // 2, args.prompt_max)] for d in docs]
+    return prompts, [d[len(p):len(p) + ENTRY_REGION] for d, p in zip(docs, prompts)]
+
+
+def _greedy(model, prompts, eot, forbid_eot=True, n=ENTRY_REGION):
+    gens, firsts = [], []
+    for i in range(0, len(prompts), 64):
+        g, f, _ = generate_batch(model, prompts[i:i + 64], n, eot, forbid_eot=forbid_eot)
+        gens, firsts = gens + g, firsts + f
+    return gens, firsts
+
+
+def _repeat_walk(sents, r0):
+    """Bolgede biten tekrar cumleleri sirayla (tanim repeat_entry): (cumle sirasi i, bas, son, anahtar, onceki gecis sayisi m,
+    kaynak = anahtarin en son onceki gecisinin cumle sirasi)."""
+    last, count, out = {}, {}, []
+    for i, (a, b, key) in enumerate(sents):
+        if key is None:
+            continue
+        if key in last and b >= r0:
+            out.append((i, a, b, key, count[key], last[key]))
+        last[key], count[key] = i, count.get(key, 0) + 1
+    return out
+
+
+@torch.no_grad()
+def _score_sequences(model, context, cands, rows=MASS_ROWS):
+    """log p(c | context) her aday token listesi c icin (teacher forcing, tam ileri hesap; sagdan dolgu nedensel, etkisiz)."""
+    dev = next(model.parameters()).device
+    out, n0 = [], len(context)
+    for i in range(0, len(cands), rows):
+        part = cands[i:i + rows]
+        x = torch.full((len(part), n0 + max(len(c) for c in part) - 1), int(context[-1]), dtype=torch.long, device=dev)
+        x[:, :n0] = torch.tensor(context, device=dev)
+        for r, c in enumerate(part):
+            if len(c) > 1:
+                x[r, n0:n0 + len(c) - 1] = torch.tensor(c[:-1], device=dev)
+        lp = torch.log_softmax(model.logits(x)[:, n0 - 1:].float(), -1)
+        for r, c in enumerate(part):
+            out.append(float(lp[r, torch.arange(len(c), device=dev), torch.tensor(c, device=dev)].sum()))
+    return out
+
+
+@torch.no_grad()
+def _doc_rows(model, x, positions):
+    """Tek ileri hesap: own[t] = log p(x[t + 1] | x[:t + 1]), p_eot[t] = p(eot | x[:t + 1]), istenen konumlarin log p satirlari."""
+    dev = next(model.parameters()).device
+    lp = torch.log_softmax(model.logits(torch.tensor([x[:-1]], device=dev))[0].float(), -1)
+    own = lp.gather(-1, torch.tensor(x[1:], device=dev)[:, None])[:, 0].cpu().numpy()
+    return own, {p: lp[p].clone() for p in positions}, lp
+
+
+def _repeat_candidates(x, sents, s, vocab, eot):
+    """Sinir s'den (baglam x[:s]) once biten anahtarli cumleler -> {anahtar: [token demetleri]}: metindeki yazimlari (bastaki
+    eot atilmis) + bosluklu / bosluksuz yeniden kodlanisi.  Baska bir adayi onek olarak iceren aday duser: olaylar ayrik,
+    toplam bir olasilik."""
+    by_key = {}
+    for a, b, key in sents:
+        if b >= s:
+            break
+        if key is None:
+            continue
+        seq = tuple(x[a + 1 if x[a] == eot else a:b + 1])
+        if seq:
+            text = decode(seq, vocab).strip()
+            by_key.setdefault(key, set()).update((seq, tuple(encode(" " + text, vocab)), tuple(encode(text, vocab))))
+    alls = {c for cs in by_key.values() for c in cs if c}
+    return {k: sorted(c for c in cs if c and not any(c[:j] in alls for j in range(1, len(c)))) for k, cs in by_key.items()}
+
+
+def _boundary_mass(model, x, sents, s, row, vocab, eot, prune=MASS_PRUNE):
+    """Sinir s'de (baglam x[:s]; row = oradaki log p satiri) modelin kendi olasiligiyla onceki bir cumleyi bastan sona
+    uretmek: toplam (anahtar ve yazim uzerinden), en buyuk anahtarin p'si, budanan ust sinir, p(eot), eot sirasi."""
+    cands = _repeat_candidates(x, sents, s, vocab, eot)
+    flat = [(k, c) for k, cs in cands.items() for c in cs]
+    pf = row[torch.tensor([c[0] for _, c in flat], device=row.device)].exp().cpu().numpy() if flat else np.zeros(0)
+    keep = [i for i in range(len(flat)) if pf[i] >= prune]
+    per = {}
+    for i, sc in zip(keep, _score_sequences(model, x[:s], [flat[i][1] for i in keep])):
+        per[flat[i][0]] = per.get(flat[i][0], 0.0) + math.exp(sc)
+    best = max(per, key=per.get) if per else None
+    return dict(total=sum(per.values()), best=per[best] if best else 0.0, best_key=best, keys=len(cands), cands=len(flat),
+                scored=len(keep), pruned=float(pf.sum() - pf[keep].sum()) if flat else 0.0,
+                p_eot=float(row[eot].exp()), eot_rank=int((row > row[eot]).sum()) + 1)
+
+
+def _sample_types(model, x, s, prior, eot, is_end, vocab, k, seed):
+    """Sinir s'den modelden k ornek cumle (s 1, eot serbest) -> turler (repeat / new / short (< ENTRY_MIN_SENT) / eot / open =
+    MASS_SAMPLE_TOKENS'ta bitmedi), log p'leri (teacher forcing) ve boylari."""
+    gens = generate_batch(model, [x[:s]] * k, MASS_SAMPLE_TOKENS, eot, 1.0, 1.0, seed=seed, forbid_eot=False)[0]
+    seqs, kinds = [], []
+    for g in gens:
+        cut = next((i for i, t in enumerate(g) if t == eot or is_end[t]), None)
+        seq = g if cut is None else g[:cut + 1]
+        if cut is None:
+            kind = "open"
+        elif g[cut] == eot:
+            kind = "eot"
+        elif len(seq) < ENTRY_MIN_SENT:
+            kind = "short"
+        else:
+            kind = "repeat" if _dec(vocab, seq).strip() in prior else "new"
+        seqs.append(seq)
+        kinds.append(kind)
+    return dict(sample_kinds=kinds, sample_logp=[round(v, 3) for v in _score_sequences(model, x[:s], seqs)],
+                sample_len=[len(q) for q in seqs])
+
+
+def _boundary_row(model, x, sents, i, r0, row, own, vocab, eot, kind, **extra):
+    """Cumle i'nin basindaki sinir icin T4 satiri: toplam / en buyuk / en buyugun kac cumle geride oldugu, sinirda gercekte
+    gelen cumlenin log p'si ve boyu."""
+    a, b, key = sents[i]
+    res = _boundary_mass(model, x, sents, a, row, vocab, eot)
+    back = None
+    if res["best_key"] is not None:
+        back = i - max(j for j in range(i) if sents[j][2] == res["best_key"])
+    res.update(kind=kind, offset=a - r0, gen_logp=float(own[a - 1:b].sum()), gen_len=b - a + 1, best_back=back,
+               gen_is_best=res["best_key"] is not None and res["best_key"] == key, **extra)
+    res["best_key"] = (res["best_key"] or "")[:100]
+    return res
+
+
+def _dist(v):
+    v = np.asarray(v, float)
+    if not len(v):
+        return dict(n=0)
+    q = np.percentile(v, [10, 25, 50, 75, 90])
+    boot = np.median(np.random.default_rng(0).choice(v, (200, len(v))), 1)
+    return dict(n=len(v), mean=float(v.mean()), mean_se=float(v.std() / math.sqrt(len(v))), median_se=float(boot.std()),
+                **{"p%d" % k: float(x) for k, x in zip((10, 25, 50, 75, 90), q)})
+
+
+def _share(flags):
+    f = np.asarray(flags, float)
+    if not len(f):
+        return None
+    k = float(f.mean())
+    return (round(k, 4), round(math.sqrt(k * (1 - k) / len(f)), 4), len(f))
+
+
+def _mass_summary(rows):
+    out = {}
+    for kind in sorted({r["kind"] for r in rows}):
+        rs = [r for r in rows if r["kind"] == kind]
+        tot = [r["total"] for r in rs]
+        d = dict(n=len(rs), total=_dist(tot), best=_dist([r["best"] for r in rs]),
+                 lt001=_share([t < 0.01 for t in tot]), lt005=_share([t < 0.05 for t in tot]),
+                 lt05=_share([t < 0.5 for t in tot]), gen_logp=_dist([r["gen_logp"] for r in rs]),
+                 gen_logp_tok=_dist([r["gen_logp"] / r["gen_len"] for r in rs]), gen_len=_dist([r["gen_len"] for r in rs]),
+                 p_eot=_dist([r["p_eot"] for r in rs]), eot_rank=_dist([r["eot_rank"] for r in rs]),
+                 pruned_max=max(r["pruned"] for r in rs), pruned_mean=float(np.mean([r["pruned"] for r in rs])),
+                 keys=float(np.mean([r["keys"] for r in rs])), scored=float(np.mean([r["scored"] for r in rs])),
+                 cands=float(np.mean([r["cands"] for r in rs])), gen_is_best=_share([r["gen_is_best"] for r in rs]),
+                 best_back=_dist([r["best_back"] for r in rs if r["best_back"] is not None]))
+        if "src_back" in rs[0]:
+            d["src_back"] = _dist([r["src_back"] for r in rs])
+        smp = [r for r in rs if "sample_kinds" in r]
+        if smp:
+            ks = [k for r in smp for k in r["sample_kinds"]]
+            d["samples"] = {k: _share([x == k for x in ks]) for k in ("repeat", "new", "short", "eot", "open")}
+            news = [max((lp for k, lp in zip(r["sample_kinds"], r["sample_logp"]) if k == "new"), default=None) for r in smp]
+            pairs = [(r["gen_logp"], m) for r, m in zip(smp, news) if m is not None]
+            d["gen_above_new_max"] = _share([g > m for g, m in pairs])
+            d["new_sample_logp"] = _dist([lp for r in smp for k, lp in zip(r["sample_kinds"], r["sample_logp"]) if k == "new"])
+            d["new_sample_logp_tok"] = _dist([lp / n for r in smp for k, lp, n in zip(r["sample_kinds"], r["sample_logp"],
+                                                                                      r["sample_len"]) if k == "new"])
+        if kind.startswith("greedy_r"):
+            d["by_m"] = {m: _dist([r["total"] for r in rs if min(r["m"], 4) == m]) for m in (1, 2, 3, 4)}
+        out[kind] = d
+    return out
+
+
+def _marked(x, r0, marks, vocab, tail=None):
+    """Bolge metni, konum isaretleriyle: marks = [(mutlak konum, etiket)]."""
+    end = len(x) if tail is None else min(len(x), tail)
+    pts = sorted(p for p in marks if r0 <= p[0] <= end)
+    out, at = [], r0
+    for p, lab in pts:
+        out.append(decode(x[at:p], vocab))
+        out.append(" [[%s]] " % lab)
+        at = p
+    out.append(decode(x[at:end], vocab))
+    return "".join(out)
+
+
+def measure_repeat_mass(model, vocab, eot, args):
+    """T4: D_032 belgelerinde acgozlu (eot yasak, 256 token) tekrar cumlesi 1..4'un sinirinda, girisin bir onceki
+    sinirinda ve gercek devamin sinirlarinda (girise en yakin + bir rastgele) Σ_j p(cumle_j | baglam); girista ve
+    gercekteki eslenik sinirda modelden ornek cumle turleri."""
+    is_end = _sentence_end_table(vocab)
+    prompts, reals = _entry_docs(args)
+    gens, _ = _greedy(model, prompts, eot)
+    _say("acgozlu: %d belge" % len(gens))
+    rng, rows, examples, skipped, t0 = np.random.default_rng(0), [], [], 0, time.time()
+    for d, (p, g, rl) in enumerate(zip(prompts, gens, reals)):
+        r0 = len(p)
+        xg, xr = p + g, p + rl
+        sg, sr = _sentences_of(xg, is_end, vocab), _sentences_of(xr, is_end, vocab)
+        reps = _repeat_walk(sg, r0)
+        gb = []
+        for r, (i, a, b, key, m, src) in enumerate(reps[:4]):
+            if a >= r0:
+                gb.append((i, "greedy_r%d" % (r + 1), dict(m=m, src_back=i - src)))
+            elif r == 0:
+                skipped += 1
+        if reps:
+            pre = [i for i, (a, b, key) in enumerate(sg) if key is not None and a >= r0 and i < reps[0][0]]
+            if pre:
+                gb.append((pre[-1], "greedy_pre", {}))
+        cand = [i for i, (a, b, key) in enumerate(sr) if key is not None and a >= r0]
+        rb = []
+        if cand:
+            target = reps[0][1] if reps else None
+            first = min(cand, key=lambda i: abs(sr[i][0] - target)) if target is not None else int(rng.choice(cand))
+            rb.append((first, "real_matched" if target is not None else "real_random", {}))
+            rest = [i for i in cand if i != first]
+            if rest:
+                rb.append((int(rng.choice(rest)), "real_random", {}))
+        for x, sents, bl in ((xg, sg, gb), (xr, sr, rb)):
+            if not bl:
+                continue
+            own, rws, _ = _doc_rows(model, x, [sents[i][0] - 1 for i, _, _ in bl])
+            for i, kind, extra in bl:
+                a = sents[i][0]
+                res = _boundary_row(model, x, sents, i, r0, rws[a - 1], own, vocab, eot, kind, doc=d, **extra)
+                if args.samples and kind in ("greedy_r1", "real_matched"):
+                    prior = {k for _, b_, k in sents if k is not None and b_ < a}
+                    res.update(_sample_types(model, x, a, prior, eot, is_end, vocab, args.samples, seed=d))
+                rows.append(res)
+        if reps and reps[0][1] >= r0 and len(examples) < args.examples:
+            marks = [(reps[0][1], "GIRIS")] + [(a, "T%d" % (r + 2)) for r, (_, a, _, _, _, _) in enumerate(reps[1:4])]
+            examples.append(dict(doc=d, prompt_tail=decode(p[-60:], vocab), text=_marked(xg, r0, marks, vocab),
+                                 rows=[r for r in rows if r["doc"] == d]))
+        if d % 20 == 19:
+            _say("  %d belge, %d sinir, %.0f sn" % (d + 1, len(rows), time.time() - t0))
+    return dict(docs=len(prompts), prompt_max=args.prompt_max, region=ENTRY_REGION, prune=MASS_PRUNE, samples=args.samples,
+                entry_in_prompt=skipped, summary=_mass_summary(rows), rows=rows, examples=examples)
+
+
+def _fmt_dist(d, f="%.3g"):
+    if not d or not d.get("n"):
+        return "-"
+    return ("med " + f + " ± " + f + " | p10 " + f + " p25 " + f + " p75 " + f + " p90 " + f + " | ort " + f + " ± " + f) % (
+        d["p50"], d["median_se"], d["p10"], d["p25"], d["p75"], d["p90"], d["mean"], d["mean_se"])
+
+
+def _fmt_share(s):
+    return "-" if s is None else "%.3f ± %.3f (n %d)" % s
+
+
+def text_repeat_mass(res):
+    L = ["# T4: SINIRDA MODELIN KENDI OLASILIGIYLA 'ONCEKI BIR CUMLEYI BASTAN SONA TEKRAR ET'",
+         "belgeler = repeat_entry (D_032) ile ayni sira, ilk %d; istem ilk yari <= %d token; acgozlu eot yasak, %d token" % (
+             res["docs"], res["prompt_max"], res["region"]),
+         "sinir = cumle basi (baglam = ondan onceki her sey); toplam = Σ_j p(cumle_j'nin token'lari | baglam), j = sinirdan "
+         "once biten anahtarli (>= %d token) her farkli cumle; yazimlari: metindeki + bosluklu / bosluksuz yeniden kodlama "
+         "(ALT SINIR: baska yazim / tokenizasyon sayilmaz); ilk token p < %.0e olan aday skorlanmaz (budanan ust sinir "
+         "asagida)" % (ENTRY_MIN_SENT, res["prune"]),
+         "turler: greedy_r1 = GIRIS (bolgede ilk tekrar cumlesi), greedy_r2..r4 = sonraki tekrar cumleleri, greedy_pre = "
+         "girisin bir onceki (yeni) cumlesinin siniri; real_matched = gercek devamda girise en yakin cumle basi, real_random "
+         "= gercek devamda rastgele cumle basi",
+         "giris cumlesi istemde baslayan (sinir istemde) belge: %d" % res["entry_in_prompt"], ""]
+    for kind, d in res["summary"].items():
+        L += ["## %s (n %d sinir)" % (kind, d["n"]),
+              "  toplam Σ_j p   : " + _fmt_dist(d["total"]),
+              "  < 0,01 / < 0,05 / < 0,5: %s | %s | %s" % (_fmt_share(d["lt001"]), _fmt_share(d["lt005"]), _fmt_share(d["lt05"])),
+              "  en buyuk tek  : " + _fmt_dist(d["best"]),
+              "  en buyuk kac cumle geride: " + _fmt_dist(d["best_back"]) +
+              ("  | gercek kaynak geride: " + _fmt_dist(d["src_back"]) if "src_back" in d else ""),
+              "  gelen cumle log p: " + _fmt_dist(d["gen_logp"]) + " | token basina: " + _fmt_dist(d["gen_logp_tok"]) +
+              " | boy: " + _fmt_dist(d["gen_len"]),
+              "  gelen cumle = en buyuk aday: " + _fmt_share(d["gen_is_best"]),
+              "  p(eot): " + _fmt_dist(d["p_eot"]) + " | eot sirasi: " + _fmt_dist(d["eot_rank"], "%.0f"),
+              "  aday: anahtar %.1f, demet %.1f, skorlanan %.1f; budanan ust sinir ort %.2e, en cok %.2e" % (
+                  d["keys"], d["cands"], d["scored"], d["pruned_mean"], d["pruned_max"])]
+        if "by_m" in d:
+            L.append("  onceki gecis m'ye gore toplam: " + " | ".join(
+                "m %s: %s" % ("4+" if m == 4 else m, ("med %.3g (n %d)" % (v["p50"], v["n"])) if v.get("n") else "-")
+                for m, v in d["by_m"].items()))
+        if "samples" in d:
+            L.append("  ornek cumleler (s 1, eot serbest; tur payi ± SE, n ornek): " + " | ".join(
+                "%s %s" % (k, _fmt_share(v)) for k, v in d["samples"].items()))
+            L.append("  gelen cumle log p > ornek yeni cumlelerin en buyugu: " + _fmt_share(d["gen_above_new_max"]))
+            L.append("  ornek yeni cumle log p: " + _fmt_dist(d["new_sample_logp"]) + " | token basina: " +
+                     _fmt_dist(d["new_sample_logp_tok"]))
+    L += ["", "## ornekler (gozle; [[GIRIS]] = ilk tekrar cumlesinin basi, [[Tk]] = k. tekrar cumlesi)"]
+    for e in res["examples"]:
+        L.append("--- belge %d | istem sonu: ...%s" % (e["doc"], e["prompt_tail"].replace("\n", " / ")))
+        L.append("    " + e["text"][:1400].replace("\n", " / "))
+        for r in e["rows"]:
+            L.append("    %-12s ofset %3d | toplam %.3g | en buyuk %.3g (%d geride) | gelen log p %.2f (%d token) | p(eot) %.4f "
+                     "sira %d%s" % (r["kind"], r["offset"], r["total"], r["best"], r["best_back"] or 0, r["gen_logp"],
+                                    r["gen_len"], r["p_eot"], r["eot_rank"],
+                                    (" | ornek " + ",".join(r["sample_kinds"])) if "sample_kinds" in r else ""))
+    return L
+
+
+def measure_eot_free(model, vocab, eot, args):
+    """D_032 belgelerinde ve soru istemlerinde acgozlu eot SERBEST (256 token): kendiliginden biten / donguye giren,
+    eot'un en olasi oldugu yer tekrar girisinden once mi sonra mi; sorularda dongu cevap cumlesinden hemen sonra mi."""
+    is_end = _sentence_end_table(vocab)
+    prompts, reals = _entry_docs(args)
+    g_forbid, first = _greedy(model, prompts, eot, True)
+    g_free, _ = _greedy(model, prompts, eot, False)
+    docs, real_eot = [], []
+    for p, gf, gz, ef, rl in zip(prompts, g_forbid, g_free, first, reals):
+        r0 = len(p)
+        cut = gz.index(eot) if eot in gz else None
+        x = p + gf
+        sents = _sentences_of(x, is_end, vocab)
+        reps = _repeat_walk(sents, r0)
+        entry = max(reps[0][1], r0) - r0 if reps else None
+        _, _, lp = _doc_rows(model, x, [])
+        q = lp[r0 - 1:, eot].exp().cpu().numpy()                 # q[k] = p(eot) uretim adimi k'da
+        bpos = [b - r0 + 1 for a, b, key in sents if b >= r0 and b - r0 + 1 < len(q)]   # cumle sonundan sonraki adim
+        pre = [k for k in bpos if entry is None or k <= entry]
+        post = [k for k in bpos if entry is not None and k > entry]
+        docs.append(dict(R=len(gf), entry=entry, eot_first=ef, cut=cut, same=gz[:cut] == gf[:cut] if cut is not None else gz == gf,
+                         argmax_eot=int(q.argmax()), max_eot=float(q.max()),
+                         b_pre=float(np.mean(q[pre])) if pre else None, b_post=float(np.mean(q[post])) if post else None))
+        xr = p + rl
+        _, _, lpr = _doc_rows(model, xr, [])
+        qr = lpr[r0 - 1:, eot].exp().cpu().numpy()
+        real_eot += [float(qr[b - r0 + 1]) for a, b, key in _sentences_of(xr, is_end, vocab) if r0 <= b and b - r0 + 1 < len(qr)]
+        del lp, lpr
+    n = len(docs)
+    cls = lambda r: ("ended_no_loop" if r["cut"] is not None and (r["entry"] is None or r["cut"] <= r["entry"]) else
+                     "loop_then_ended" if r["cut"] is not None else "loop_no_end" if r["entry"] is not None else "neither")
+    entered = [r for r in docs if r["entry"] is not None]
+    summ = dict(n=n, classes={c: _share([cls(r) == c for r in docs]) for c in ("ended_no_loop", "loop_then_ended",
+                                                                               "loop_no_end", "neither")},
+                same_text=_share([r["same"] for r in docs]),
+                eot_first_before_entry=_share([r["eot_first"] is not None and r["eot_first"] <= r["entry"] for r in entered]),
+                eot_first_after_entry=_share([r["eot_first"] is not None and r["eot_first"] > r["entry"] for r in entered]),
+                argmax_eot_after_entry=_share([r["argmax_eot"] > r["entry"] for r in entered]),
+                max_eot=_dist([r["max_eot"] for r in docs]),
+                boundary_pre=_dist([r["b_pre"] for r in entered if r["b_pre"] is not None]),
+                boundary_post=_dist([r["b_post"] for r in entered if r["b_post"] is not None]),
+                boundary_real=_dist(real_eot),
+                post_gt_pre=_share([r["b_post"] > r["b_pre"] for r in entered if r["b_pre"] is not None and r["b_post"] is not None]))
+    # soru istemleri
+    texts = [q for q, _, _, _ in QUESTIONS] + list(EOT_QA)
+    qp = [[eot] + encode(t, vocab) for t in texts]
+    gz, _ = _greedy(model, qp, eot, False)
+    qs = []
+    for t, p, g in zip(texts, qp, gz):
+        r0 = len(p)
+        cut = g.index(eot) if eot in g else None
+        x = p + (g if cut is None else g[:cut + 1])
+        xs = x[:-1] if cut is not None else x
+        sents = _sentences_of(xs, is_end, vocab)
+        reps = _repeat_walk(sents, r0)
+        ans = next((i for i, (a, b, key) in enumerate(sents) if b >= r0), None)
+        own, rws, lp = _doc_rows(model, x, [])
+        q = lp[r0 - 1:, eot].exp().cpu().numpy()
+        r = dict(prompt=t, ended=cut is not None, cut=cut, answer_end=None if ans is None else sents[ans][1] - r0 + 1,
+                 max_eot=float(q.max()), argmax_eot=int(q.argmax()), entry=None)
+        if ans is not None and sents[ans][1] < len(x) - 1:
+            row = lp[sents[ans][1]]
+            r.update(answer_p_eot=float(row[eot].exp()), answer_eot_rank=int((row > row[eot]).sum()) + 1)
+        if reps:
+            i, a, b, key, m, src = reps[0]
+            nxt = next((j for j in range(ans + 1, len(sents)) if sents[j][2] is not None), None) if ans is not None else None
+            r.update(entry=max(a, r0) - r0, entry_after_answer=i == nxt, src_is_answer=src == ans, src_back=i - src)
+            if a >= r0:
+                res = _boundary_row(model, xs, sents, i, r0, lp[a - 1], own, vocab, eot, "question_entry")
+                if args.samples:
+                    prior = {k for _, b_, k in sents if k is not None and b_ < a}
+                    res.update(_sample_types(model, xs, a, prior, eot, is_end, vocab, args.samples, seed=0))
+                r["mass"] = res
+        marks = [(r0 + r["entry"], "GIRIS")] if r["entry"] is not None else []
+        if r["answer_end"] is not None:
+            marks.append((r0 + r["answer_end"], "CEVAP CUMLESI SONU"))
+        r["text"] = _marked(xs, r0, marks, vocab) + (" [[EOT]]" if cut is not None else "")
+        qs.append(r)
+        del lp
+    return dict(docs=summ, questions=qs, region=ENTRY_REGION, prompt_max=args.prompt_max)
+
+
+def text_eot_free(res):
+    d = res["docs"]
+    L = ["# EOT SERBEST ACGOZLU (%d token): belgeler (D_032 sirasi, ilk %d) ve soru istemleri" % (res["region"], d["n"]),
+         "eot serbest acgozlu, eot yasak acgozluyle eot'un ilk en olasi oldugu adima kadar AYNI metindir (yasak yalniz o adimda "
+         "devreye girer); ayni metin payi: " + _fmt_share(d["same_text"]),
+         "giris = repeat_entry tanimi (bolgede ilk tekrar cumlesi, eot yasak metinde); bitis = eot serbest metinde ilk eot", "",
+         "## belgeler",
+         "  sinif: " + " | ".join("%s %s" % (k, _fmt_share(v)) for k, v in d["classes"].items()),
+         "  girenlerde eot ilk en olasi: giristen once / giriste %s | giristen sonra %s" % (
+             _fmt_share(d["eot_first_before_entry"]), _fmt_share(d["eot_first_after_entry"])),
+         "  girenlerde p(eot)'nin en buyuk oldugu adim giristen sonra: " + _fmt_share(d["argmax_eot_after_entry"]),
+         "  bolgede en buyuk p(eot): " + _fmt_dist(d["max_eot"]),
+         "  cumle sonlarinda p(eot), belge ortalamasi: giristen once " + _fmt_dist(d["boundary_pre"]),
+         "                                            giristen sonra " + _fmt_dist(d["boundary_post"]),
+         "  gercek devamin cumle sonlarinda p(eot): " + _fmt_dist(d["boundary_real"]),
+         "  ayni belgede sonra > once: " + _fmt_share(d["post_gt_pre"]), "",
+         "## soru istemleri (acgozlu, eot serbest; [[GIRIS]] = ilk tekrar cumlesi, [[CEVAP CUMLESI SONU]] = istemi tamamlayan "
+         "ilk cumlenin sonu)"]
+    for r in res["questions"]:
+        L.append("--- %r" % r["prompt"])
+        L.append("    bitti %s%s | cevap cumlesi sonu adim %s, orada p(eot) %s sira %s | en buyuk p(eot) %.4f (adim %d) | giris %s%s" % (
+            "EVET" if r["ended"] else "hayir", (" (adim %d)" % r["cut"]) if r["ended"] else "", r["answer_end"],
+            "%.4f" % r["answer_p_eot"] if "answer_p_eot" in r else "-", r.get("answer_eot_rank", "-"), r["max_eot"],
+            r["argmax_eot"], r["entry"],
+            (" | giris cevaptan hemen sonraki cumle %s, kaynak cevap cumlesi %s, kaynak %d cumle geride" % (
+                r["entry_after_answer"], r["src_is_answer"], r["src_back"])) if r["entry"] is not None else ""))
+        if "mass" in r:
+            m = r["mass"]
+            L.append("    girista: toplam %.3g | en buyuk %.3g | gelen tekrar log p %.2f (%d token) | p(eot) %.4f sira %d%s" % (
+                m["total"], m["best"], m["gen_logp"], m["gen_len"], m["p_eot"], m["eot_rank"],
+                (" | ornek " + ",".join(m["sample_kinds"])) if "sample_kinds" in m else ""))
+        L.append("    " + r["text"][:1600].replace("\n", " / "))
+    return L
+
+
 # ---- CLI
 
 def _out_dir(run_dir):
@@ -2328,7 +2776,8 @@ def main(argv=None):
     ap.add_argument("measure", choices=("answers", "decoding", "repetition", "loop_heads", "corpus",
                                                "answer_split", "symbol_filler", "cooccur", "training_curve",
                                                "ss_profile", "copy_odds", "copy_calibration", "copy_ceiling",
-                                               "repeat_entry", "beam_facts", "repeat_chain", "repeat_entry_hf"))
+                                               "repeat_entry", "beam_facts", "repeat_chain", "repeat_entry_hf",
+                                               "repeat_mass", "eot_free"))
     ap.add_argument("--data", required=True, help="FineWeb koku (gpt2/tokenizer.json, gpt2/shard_*.bin)")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--weights", default="last", choices=("last", "ema", "both"))
@@ -2337,6 +2786,8 @@ def main(argv=None):
     ap.add_argument("--heads", help="copy_odds: tur.head listesi, tur 1'den (varsayilan 5.7,7.5,8.7,10.2)")
     ap.add_argument("--corpus-docs", type=int, default=0, help="repeat_entry: egitim parcalarindan belge (0 = yok)")
     ap.add_argument("--prompt-max", type=int, default=1024, help="repeat_entry(_hf): istem en cok bu kadar gpt2 token")
+    ap.add_argument("--samples", type=int, default=16, help="repeat_mass / eot_free: giris sinirinda ornek cumle (0 = yok)")
+    ap.add_argument("--examples", type=int, default=8, help="repeat_mass: gozle okunacak belge sayisi")
     ap.add_argument("--hf-model", default="gpt2", help="repeat_entry_hf: HuggingFace model adi")
     ap.add_argument("--entry-docs", type=int, default=1200, help="repeat_entry: devam olcumu icin belge (>= 513 token)")
     ap.add_argument("--corpus-tokens", type=float, default=0, help="copy_ceiling: egitim parcalarindan token (0 = yok)")
@@ -2413,6 +2864,12 @@ def main(argv=None):
             elif args.measure == "repeat_chain":
                 res = measure_repeat_chain(model, vocab, eot, args)
                 lines = text_repeat_chain(res)
+            elif args.measure == "repeat_mass":
+                res = measure_repeat_mass(model, vocab, eot, args)
+                lines = text_repeat_mass(res)
+            elif args.measure == "eot_free":
+                res = measure_eot_free(model, vocab, eot, args)
+                lines = text_eot_free(res)
             elif args.measure == "symbol_filler":
                 res = measure_symbol_filler(model, vocab, eot, args)
                 lines = text_symbol_filler(res)
