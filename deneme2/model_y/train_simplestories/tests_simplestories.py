@@ -33,7 +33,6 @@ import data_simplestories as DS  # noqa: E402
 import exam_simplestories as ES  # noqa: E402
 import model_y as M  # noqa: E402
 import train_y as TR  # noqa: E402
-from model_y_transformer import TransformerModel  # noqa: E402
 
 RESULTS = []
 SEQ = 128                                         # fixture penceresi
@@ -463,13 +462,12 @@ def t_exam(root):
         al = ES.alpha_summary(m)
         A, F_ = (x.detach().numpy() for x in (m.alpha_attention, m.alpha_facts))
         f0 = 0 if m.first_turn_facts else 1                 # FIRST_TURN_FACTS=False: tur 1'in alpha_F'si None
-        check("%s alpha_summary: tur basina medyan ve |alpha|'nin en buyugu (numpy); normalized_update yoksa None" % t,
+        check("%s alpha_summary: tur basina medyan ve |alpha|'nin en buyugu (numpy)" % t,
               np.allclose(al["attention"]["median"], np.median(A, -1), atol=1e-4)
               and np.allclose(al["facts"]["median"][f0:], np.median(F_, -1)[f0:], atol=1e-4)
               and np.allclose(al["attention"]["max_abs"], np.abs(A).max(-1), atol=1e-4)
               and np.allclose(al["facts"]["max_abs"][f0:], np.abs(F_).max(-1)[f0:], atol=1e-4)
-              and al["facts"]["median"][:f0] == [None] * f0 and len(al["facts"]["median"]) == 2
-              and ES.alpha_summary(TransformerModel(V, d=16, layers=1, units=32)) is None, json.dumps(al))
+              and al["facts"]["median"][:f0] == [None] * f0 and len(al["facts"]["median"]) == 2, json.dumps(al))
 
     ds, v = d["ss4096"], d["ss4096"]["vocab"]
     eos = v.index(DS.EOS_TOKEN)
@@ -670,16 +668,11 @@ def t_text_errors(root):
     got, ended = ES._continue(model, prompts + prompts, n, flags, 3, eos, V)
     again, _ = ES._continue(model, prompts + prompts, n, flags, 3, eos, V)
     alone, _ = ES._continue(model, [[eos]], n, [False], 3, eos, V)
-    tm = TransformerModel(V, d=16, layers=1, units=32)
-    got_t, _ = ES._continue(tm, prompts + prompts, n, flags, 3, eos, V)
-    split_t, _ = ES._continue(tm, prompts + prompts, n, flags, 3, eos, ES.LOGITS_BUDGET)    # satir basina bir parca
-    greedy_t = [x[:x.index(eos)] if eos in x else x for x in TR.generate(tm, prompts, n)]
-    check("_continue: acgozlu satirlar = texts (onbellekli; tek token'li istem dahil) / train_y.generate (transformer, tam "
-          "hesap, satir parcalari dahil); ornekleme satirlari = tek tek tam hesapla ayni uretec; ayni tohum ayni devam",
+    check("_continue: acgozlu satirlar = texts (onbellekli; tek token'li istem dahil); ornekleme satirlari = tek tek tam "
+          "hesapla ayni uretec; ayni tohum ayni devam",
           got[:4] == [r_["ids"] for r_ in ES.texts(model, ds, prompts, n)] and got == again and alone[0] == got[3]
           and got == sample_by_hand(model, prompts + prompts, n, flags, 3, eos) and got[4:] != got[:4]
-          and ended == [len(x) < n for x in got] and got_t[:4] == greedy_t == split_t[:4]
-          and got_t == sample_by_hand(tm, prompts + prompts, n, flags, 3, eos), str(got[4][:6]))
+          and ended == [len(x) < n for x in got], str(got[4][:6]))
 
     budget, ES.CACHE_BUDGET = ES.CACHE_BUDGET, 1                      # onbellekli parca satir basina bir
     try:
@@ -728,14 +721,11 @@ def t_speed(root):
     N, Ld = C._model_flops(bm)
     bm2 = M.BlockModel(V, d=D_, turns=turns, layers=3, units=units, heads=4, fact_activation="swiglu", shared_facts=False, first_turn_facts=True)
     bm1 = M.BlockModel(64, d=16, turns=2, layers=1, units=8, heads=1, fact_activation="relu", first_turn_facts=True)
-    tm = TransformerModel(64, d=16, layers=2, units=32)
     check("_model_flops: 3x2 (d 384, FactUnits 1024, 6 tur, 4 head) N = 6 (4 d^2 + 3 d units) + V d; ileri FLOP/token "
-          "2 N + 4 L d x 169,9 anahtar = 25,95 M (D ajani); ayri FactUnits ayni; tek head W_value'suz, relu iki matris; "
-          "transformer katman basina 4 d^2 + 2 d units",
+          "2 N + 4 L d x 169,9 anahtar = 25,95 M; ayri FactUnits ayni; tek head W_value'suz, relu iki matris",
           (N, Ld) == (turns * (4 * D_ * D_ + 3 * D_ * units) + V * D_, turns * D_) and round((2 * N + 4 * Ld * 169.9) / 1e6, 2)
           == 25.95 and 2 * N == 24379392 and C._model_flops(bm2) == (N, Ld)
-          and C._model_flops(bm1) == (2 * (3 * 16 * 16 + 2 * 16 * 8) + 64 * 16, 2 * 16)
-          and C._model_flops(tm) == (2 * (4 * 16 * 16 + 2 * 16 * 32) + 64 * 16, 2 * 16), "N %d L d %d" % (N, Ld))
+          and C._model_flops(bm1) == (2 * (3 * 16 * 16 + 2 * 16 * 8) + 64 * 16, 2 * 16), "N %d L d %d" % (N, Ld))
 
     check("mfu: (6 N hedef + 12 L d anahtar) / sure / tepe; tepe tablosu cihaz adindan (L40S, T4'te bf16 yok -> None)",
           C._mfu((10, 3), dict(targets=100, keys=50), 2.0, 1e3) == 3.9 and C._mfu(None, work, 1.0, 1e3) is None

@@ -50,8 +50,7 @@ _SIMPLESTORIES_ROOT = "G:/Drive'ım/simplestories"    # <tag>/tokenizer.json, <t
 _FINEWEB_ROOT = "G:/Drive'ım/fineweb"                # gpt2/tokenizer.json, gpt2/shard_NNN.* (data_fineweb)
 _FINEWEB_TOKENS = 2048                               # FineWeb belgesi en cok bu kadar girdiyle (tek belge, paketsiz)
 # train_y.train_seq'teki Muon listesi: yedekteki optimizer parametre sirasi buna bagli (once bunlar)
-_MUON_HIDDEN = ("W_context", "W_value", "W_fact_in", "W_fact_up", "W_fact_out", "W_value.weight", "W_out.weight",
-                "W_mlp_in.weight", "W_mlp_out.weight")
+_MUON_HIDDEN = ("W_context", "W_value", "W_fact_in", "W_fact_up", "W_fact_out")
 _PLAN_KEYS = ("skip_attention", "skip_facts", "heads", "canon", "canon_mean", "alpha_attention", "alpha_facts")
 _DEPENDENCE_NOTE = ("Kapatma BAGIMLILIK olcer: egitilmis model o parcaya ne kadar dayaniyor.  'O parca olmadan "
                     "egitilseydi' sorusunu CEVAPLAMAZ; o, parcasiz egitim kosusuyla olculur.")
@@ -938,8 +937,7 @@ def _train_kwargs(config):
     skip = {"setting", "ids", "mask", "n", "steps", "log_at", "every", "callback", "save_every", "save", "checkpoint",
             "batches", "device", "compile"}
     kw = {k: config[k] for k in set(inspect.signature(TR.train_seq).parameters) - skip if k in config}
-    if config.get("setting", "shared") in TR.STEP3:
-        kw["model_kw"] = _model_kw(config)
+    kw["model_kw"] = _model_kw(config)
     return kw
 
 

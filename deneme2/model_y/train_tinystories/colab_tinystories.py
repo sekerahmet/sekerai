@@ -44,16 +44,16 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
     bucket: data_tinystories.batches'e gider (None: rastgele batch; K: uzunluga gore gruplama, tarif degisikligi)."""
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
-    if setting in TR.STEP3:
-        model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, shared_facts=M.SHARED_FACTS, heads=M.HEADS, fact_activation=M.FACT_ACTIVATION,
-                             learn_output_scale=M.LEARN_OUTPUT_SCALE, output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=M.T_MAX,
-                             anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK, last_facts_alpha_init=1.0,
-                             input_embedding=M.INPUT_EMBEDDING, input_bigrams=M.INPUT_BIGRAMS,
-                             first_turn_facts=M.FIRST_TURN_FACTS, input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE,
-                             rope_base=M.ROPE_BASE, attention_log_scale=False),   # 1,0 / False: bu kosucunun varsayilani
-                        **(model_kw or {}))
-        if model_kw.get("rope_base") == "auto":  # config'e SAYI yazilir: formul sonra degisse de kosu ayni tabanla kurulur
-            model_kw["rope_base"] = M.rope_base_for(model_kw["d"] // model_kw["heads"], model_kw["t_max"])
+    assert setting == "shared", "yalniz BlockModel (setting shared)"
+    model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, shared_facts=M.SHARED_FACTS, heads=M.HEADS, fact_activation=M.FACT_ACTIVATION,
+                         learn_output_scale=M.LEARN_OUTPUT_SCALE, output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=M.T_MAX,
+                         anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK, last_facts_alpha_init=1.0,
+                         input_embedding=M.INPUT_EMBEDDING, input_bigrams=M.INPUT_BIGRAMS,
+                         first_turn_facts=M.FIRST_TURN_FACTS, input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE,
+                         rope_base=M.ROPE_BASE, attention_log_scale=False),   # 1,0 / False: bu kosucunun varsayilani
+                    **(model_kw or {}))
+    if model_kw.get("rope_base") == "auto":  # config'e SAYI yazilir: formul sonra degisse de kosu ayni tabanla kurulur
+        model_kw["rope_base"] = M.rope_base_for(model_kw["d"] // model_kw["heads"], model_kw["t_max"])
     per_epoch = len(data["train_start"]) // batch_size
     assert per_epoch > 0, "batch_size (%d) > train penceresi (%d)" % (batch_size, len(data["train_start"]))
     rows = ET.exam_rows(data)
@@ -71,10 +71,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                               coherence_power=1.0, muon_tangent=True,
                               final_cooldown_shape="linear",
                               stream_norm=True, layer_norm=False,
-                              normalized_update=TR.NORMALIZED_UPDATE if setting in TR.STEP3 else False,
-                              sphere_weights=TR.SPHERE_WEIGHTS if setting in TR.STEP3 else False,
-                              canon=TR.CANON if setting in TR.STEP3 else False,
-                              rope=True if setting.startswith("transformer") else TR.ROPE if setting in TR.STEP3 else False),
+                              normalized_update=TR.NORMALIZED_UPDATE, sphere_weights=TR.SPHERE_WEIGHTS, canon=TR.CANON,
+                              rope=TR.ROPE),
                          **train_kw))
     checkpoint = None
     if resume:
@@ -92,7 +90,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                           weight_ema=None, matmul_precision="fp32", coherence_power=1.0, muon_tangent=False,
                           final_cooldown_shape="sqrt"),
                      **saved)
-        if setting in TR.STEP3 and saved.get("model_kw"):   # 28 Eylul oncesi model_kw'de layers yok: tek Block idi
+        if saved.get("model_kw"):                         # 28 Eylul oncesi model_kw'de layers yok: tek Block idi
             saved["model_kw"] = dict(dict(layers=1, heads=1, fact_activation="relu", learn_output_scale=False, output_link=False,
                                           shared_facts=True, input_embedding=False, input_bigrams=0, first_turn_facts=True,
                                           input_embedding_sphere=False, rope_base=10000.0, attention_log_scale=False,

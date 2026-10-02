@@ -41,7 +41,6 @@ import data_simplestories as DS  # noqa: E402
 import exam_simplestories as ES  # noqa: E402
 import model_y as M  # noqa: E402
 import train_y as TR  # noqa: E402
-from model_y_transformer import TransformerModel  # noqa: E402
 
 BATCH_SIZE = 64          # colab_tinystories ile ayni; 1 epok = 35.382 adim (ss4096) / 35.251 (gpt2), bolunmus pencerelerle
 PROBE_TOKENS = 80        # her sinavda istem basina uretilen token
@@ -82,12 +81,6 @@ def _model_flops(model):
             n += sum(p.numel() for k, p in facts.named_parameters() if k.startswith("W_")) if facts is not None else 0
         V, d = model.tokens.fixed_points.shape
         return n + V * d, model.turns * d
-    if isinstance(model, TransformerModel):
-        V, d = model.embedding.weight.shape
-        n = sum(m.weight.numel() for layer in model.layers
-                for m in (layer.W_query, layer.W_key, layer.W_value, layer.W_out, layer.W_mlp_in, layer.W_mlp_out)
-                if m is not None)
-        return n + V * d, len(model.layers) * d
     return None
 
 
@@ -135,16 +128,16 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
     bucket: data_simplestories.batches'e gider (None: rastgele batch; K: uzunluga gore gruplama)."""
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
-    if setting in TR.STEP3:
-        model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, shared_facts=M.SHARED_FACTS, heads=M.HEADS, fact_activation=M.FACT_ACTIVATION,
-                             learn_output_scale=M.LEARN_OUTPUT_SCALE, output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=M.T_MAX,
-                             anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK, last_facts_alpha_init=1.0,
-                             input_embedding=M.INPUT_EMBEDDING, input_bigrams=M.INPUT_BIGRAMS,
-                             first_turn_facts=M.FIRST_TURN_FACTS, input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE,
-                             rope_base=M.ROPE_BASE, attention_log_scale=False),   # 1,0 / False: bu kosucunun varsayilani
-                        **(model_kw or {}))
-        if model_kw.get("rope_base") == "auto":  # config'e SAYI yazilir: formul sonra degisse de kosu ayni tabanla kurulur
-            model_kw["rope_base"] = M.rope_base_for(model_kw["d"] // model_kw["heads"], model_kw["t_max"])
+    assert setting == "shared", "yalniz BlockModel (setting shared)"
+    model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, shared_facts=M.SHARED_FACTS, heads=M.HEADS, fact_activation=M.FACT_ACTIVATION,
+                         learn_output_scale=M.LEARN_OUTPUT_SCALE, output_link=M.OUTPUT_LINK, units=M.FACT_UNITS, t_max=M.T_MAX,
+                         anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK, last_facts_alpha_init=1.0,
+                         input_embedding=M.INPUT_EMBEDDING, input_bigrams=M.INPUT_BIGRAMS,
+                         first_turn_facts=M.FIRST_TURN_FACTS, input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE,
+                         rope_base=M.ROPE_BASE, attention_log_scale=False),   # 1,0 / False: bu kosucunun varsayilani
+                    **(model_kw or {}))
+    if model_kw.get("rope_base") == "auto":  # config'e SAYI yazilir: formul sonra degisse de kosu ayni tabanla kurulur
+        model_kw["rope_base"] = M.rope_base_for(model_kw["d"] // model_kw["heads"], model_kw["t_max"])
     keys = None                                       # INPUT_BIGRAMS: ikili listesi modele tensor, config'e izi
     if model_kw and model_kw.get("bigram_keys") is not None and not isinstance(model_kw["bigram_keys"], str):
         keys = torch.as_tensor(model_kw["bigram_keys"], dtype=torch.long)
@@ -171,10 +164,8 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                               final_cooldown_shape="linear", attention_kernel="math",
                               newton_schulz_precision=TR.NEWTON_SCHULZ_PRECISION, log_cooldown_kappa=TR.LOG_COOLDOWN_KAPPA,
                               stream_norm=True, layer_norm=False,
-                              normalized_update=TR.NORMALIZED_UPDATE if setting in TR.STEP3 else False,
-                              sphere_weights=TR.SPHERE_WEIGHTS if setting in TR.STEP3 else False,
-                              canon=TR.CANON if setting in TR.STEP3 else False,
-                              rope=True if setting.startswith("transformer") else TR.ROPE if setting in TR.STEP3 else False),
+                              normalized_update=TR.NORMALIZED_UPDATE, sphere_weights=TR.SPHERE_WEIGHTS, canon=TR.CANON,
+                              rope=TR.ROPE),
                          **train_kw))
     checkpoint = None
     if resume:
@@ -186,7 +177,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
         saved.setdefault("log_cooldown_kappa", TR.LOG_COOLDOWN_KAPPA)   # 30 Eylul oncesi: "log" yoktu, k etkisiz
         saved.setdefault("attention_kernel", "math")              # 29 Eylul oncesi: hep math, fp32 Newton-Schulz
         saved.setdefault("newton_schulz_precision", "fp32")
-        if setting in TR.STEP3 and saved.get("model_kw"):   # 29 Eylul oncesi kosularda bu ayarlar yazilmadi: yoktu
+        if saved.get("model_kw"):                         # 29 Eylul oncesi kosularda bu ayarlar yazilmadi: yoktu
             saved["model_kw"] = dict(dict(output_link=False, shared_facts=True, input_embedding=False, input_bigrams=0,
                                           first_turn_facts=True, input_embedding_sphere=False, rope_base=10000.0,
                                           attention_log_scale=False),

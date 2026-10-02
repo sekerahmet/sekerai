@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""tests_y -- model_y'nin kapilari: model (BlockModel, ayarlari, transformer) ve genel egitim.  CPU, saniyeler.
+"""tests_y -- model_y'nin kapilari: model (BlockModel ve ayarlari) ve genel egitim.  CPU, saniyeler.
 Egitim verisi testin icinde uretilir (synthetic_data): ag, Drive ve egitim klasoru gerekmez.
 
     python tests_y.py
@@ -222,11 +222,9 @@ def t_step3():
           "%.3f -> %.3f" % (curve_b[0]["nll"], curve_b[-1]["nll"]))
     mk, _ = TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), model_kw=dict(d=32, turns=3, layers=1, units=64,
                                                                                           first_turn_facts=True))
-    mt, _ = TR.train_seq("transformer", sids[:8], smask[:8], nv, steps=1, log_at=(), model_kw=dict(d=32, layers=1))
-    check("train_seq, model_kw: ayarlar modele ulasir (BlockModel d 32, 3 tur, 64 birim; transformer d 32, 1 katman)",
+    check("train_seq, model_kw: ayarlar modele ulasir (d 32, 3 tur, 64 birim)",
           tuple(mk.blocks[0].attention.W_query.shape) == (32, 32) and mk.turns == 3 and len(mk.hidden(sids[:2])) == 4
-          and tuple(mk.blocks[0].facts.W_fact_in.shape) == (64, 32)
-          and len(mt.layers) == 1 and mt.embedding.weight.shape[1] == 32)
+          and tuple(mk.blocks[0].facts.W_fact_in.shape) == (64, 32))
 
     before = BlockModel(nv).tokens.fixed_points.clone()
     m, curve = TR.train_seq("shared", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20))
@@ -358,19 +356,14 @@ def t_step3():
                                                                      optimizer=copy.deepcopy(opt.state_dict())))
     full_m, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), save_every=2, save=keep_m)
     res_m, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs_m[4])
-    ta, _ = TR.train_seq("transformer_novalue", sids[:8], smask[:8], nv, steps=1, log_at=(), save_every=1, save=grab)
-    names_t = {id(p_): k for k, p_ in ta.named_parameters()}
-    t_muon = sorted({names_t[id(p_)] for g_ in opts[-1].param_groups if g_["use_muon"] for p_ in g_["params"]})
     try:
         TR.train_seq("shared", sids[:8], smask[:8], nv, steps=1, log_at=(), weight_decay=0.1)
         refused_wd = False
     except AssertionError:
         refused_wd = True
-    check("Muon + WSD: 4. adim paketinden surdurulen = kesintisiz, bit duzeyinde; transformer'da Muon W_out ve MLP'de; "
-          "weight_decay yalniz adam ile",
+    check("Muon + WSD: 4. adim paketinden surdurulen = kesintisiz, bit duzeyinde; weight_decay yalniz adam ile",
           all(torch.equal(a_, b_) for a_, b_ in zip(full_m.state_dict().values(), res_m.state_dict().values()))
-          and t_muon == sorted("layers.%d.%s.weight" % (i, w) for i in range(2) for w in ("W_out", "W_mlp_in", "W_mlp_out"))
-          and refused_wd, str(t_muon))
+          and refused_wd)
 
     packs_s = {}
     keep_s = lambda step, model, opt: packs_s.setdefault(step, dict(step=step, model=copy.deepcopy(model.state_dict()),
@@ -391,110 +384,6 @@ def t_step3():
           stopped and sorted(packs_s) == [2, 3]
           and all(torch.equal(a_, b_) for a_, b_ in zip(full_m.state_dict().values(), res_s.state_dict().values())),
           str(sorted(packs_s)))
-
-
-def reference_transformer(m, ids):
-    """model_y_transformer formulu, float64, modelden bagimsiz: LayerNorm, RoPE (karmasik sayi carpimiyla), nedensel
-    softmax attention, GELU (erf), tied cikis."""
-    dd = lambda t: t.detach().double()
-
-    def ln(x, mod):
-        mu, var = x.mean(-1, keepdim=True), x.var(-1, unbiased=False, keepdim=True)
-        return (x - mu) / torch.sqrt(var + mod.eps) * dd(mod.weight) + dd(mod.bias)
-
-    lin = lambda x, mod: x @ dd(mod.weight).T + dd(mod.bias)
-    E = dd(m.embedding.weight)
-    h = E[ids]
-    B, T = ids.shape
-    future = torch.ones(T, T, dtype=torch.bool).triu(1)
-    for layer in m.layers:
-        H = layer.heads
-        dh = h.shape[-1] // H
-        x = ln(h, layer.norm_attention)
-        split = lambda y: y.view(B, T, H, dh).transpose(1, 2)
-        q, k = split(lin(x, layer.W_query)), split(lin(x, layer.W_key))
-        v = split(lin(x, layer.W_value)) if layer.W_value is not None else split(x)
-        theta = torch.arange(T, dtype=torch.float64)[:, None] * 10000.0 ** (-torch.arange(0, dh, 2, dtype=torch.float64) / dh)
-        rot = lambda y: torch.view_as_real(torch.view_as_complex(y.reshape(B, H, T, dh // 2, 2).contiguous())
-                                           * torch.polar(torch.ones_like(theta), theta)).flatten(-2)
-        if layer.rope:
-            q, k = rot(q), rot(k)
-        s = (q @ k.transpose(-1, -2) / math.sqrt(dh)).masked_fill(future, float("-inf"))
-        a = torch.softmax(s, -1) @ v
-        h = h + lin(a.transpose(1, 2).reshape(B, T, -1), layer.W_out)
-        u = lin(ln(h, layer.norm_mlp), layer.W_mlp_in)
-        h = h + lin(0.5 * u * (1 + torch.erf(u / math.sqrt(2))), layer.W_mlp_out)
-    return ln(h, m.norm_final) @ E.T
-
-
-def t_transformer():
-    from model_y_transformer import HEADS, LAYERS, TransformerModel, apply_rope
-    count = lambda mm: sum(p_.numel() for p_ in mm.parameters() if p_.requires_grad)
-    check("transformer: 238 token, D 64, MLP 256, 2 katman -> 115.328 ogrenilen sayi; head sayisi degistirmez; LAYERS 2, HEADS 1",
-          count(TransformerModel(238)) == 115328 and count(TransformerModel(238, heads=4)) == 115328
-          and LAYERS == 2 and HEADS == 1, str(count(TransformerModel(238))))
-
-    n, d = 12, 8
-    g = torch.Generator().manual_seed(13)
-    ids = torch.randint(0, n, (3, 9), generator=g)
-    check("transformer, value_matrix=False: V yok -> 238 token'da 107.008 sayi (katman basina 4.160 eksik)",
-          count(TransformerModel(238, value_matrix=False)) == 107008
-          and all(layer.W_value is None for layer in TransformerModel(238, value_matrix=False).layers),
-          str(count(TransformerModel(238, value_matrix=False))))
-    for heads, vm, rope in ((1, True, True), (4, True, True), (1, False, True), (1, False, False)):
-        m = TransformerModel(n, d=d, units=12, heads=heads, value_matrix=vm, rope=rope)
-        with torch.no_grad():
-            for p_ in m.parameters():
-                p_.copy_(0.5 * torch.randn(p_.shape, generator=g))
-        err = float((m.logits(ids).detach().double() - reference_transformer(m, ids)).abs().max())
-        check("transformer: skor = tasarim formulu (bagimsiz float64; RoPE karmasik carpimla), %d head%s%s" % (
-              heads, "" if vm else ", V yok", "" if rope else ", rope=False"), err < 1e-4, "fark %.1e" % err)
-    m = TransformerModel(n, d=d, units=12, heads=4)
-    with torch.no_grad():
-        for p_ in m.parameters():
-            p_.copy_(0.5 * torch.randn(p_.shape, generator=g))
-
-    q0, k0 = torch.randn(4, generator=g), torch.randn(4, generator=g)
-    rq, rk = apply_rope(q0.expand(1, 1, 7, 4)), apply_rope(k0.expand(1, 1, 7, 4))
-    S = (rq @ rk.transpose(-1, -2))[0, 0]
-    err = float((S[1:, 1:] - S[:-1, :-1]).abs().max())
-    check("transformer: RoPE -- ayni q, k vektorlerinin skoru yalniz konum farkina bagli", err < 1e-5 and float(S.std()) > 1e-3,
-          "fark %.1e" % err)
-
-    base_logits = m.logits(ids).detach()
-    changed = ids.clone()
-    changed[:, 5] = (changed[:, 5] + 1) % n
-    after = m.logits(changed).detach()
-    vocab = ["<pad>", "<eos>"] + [str(i) for i in range(n - 2)]
-    rows = [[1, 3, 4, 5, 1], [1, 6, 7, 1], [1, 8, 9, 10, 11, 3, 1]]
-    padded, _ = TR.pad(rows, vocab)
-    lp = m.logits(padded).detach()
-    err = max(float((lp[i, :len(r)] - m.logits(torch.tensor([r])).detach()[0]).abs().max()) for i, r in enumerate(rows))
-    check("transformer: nedensellik (konum 5 degisince 0-4 aynen kalir) ve sagdaki dolgu sonucu degistirmez",
-          float((after[:, :5] - base_logits[:, :5]).abs().max()) < 1e-5 and float((after[:, 5:] - base_logits[:, 5:]).abs().max()) > 1e-3
-          and err < 1e-5, "dolgu farki %.1e" % err)
-
-    data = synthetic_data()
-    sids, smask = sequences(data)
-    nv = len(data["vocab"])
-    m, curve = TR.train_seq("transformer", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20))
-    try:
-        TR.train_seq("transformer", sids[:64], smask[:64], nv, steps=1, log_at=(), weight_decay=0.1)
-        refused = False
-    except AssertionError:
-        refused = True
-    mv, curve_v = TR.train_seq("transformer_novalue", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20))
-    check("transformer: train_seq ayni tarifle egitir, kayip iner ('transformer' ve 'transformer_novalue'); weight decay "
-          "istenirse reddedilir (gruplar tanimsiz)",
-          isinstance(m, TransformerModel) and curve[-1]["nll"] < curve[0]["nll"] and refused
-          and all(layer.W_value is None for layer in mv.layers) and curve_v[-1]["nll"] < curve_v[0]["nll"],
-          "%.3f -> %.3f; V'siz %.3f -> %.3f" % (curve[0]["nll"], curve[-1]["nll"], curve_v[0]["nll"], curve_v[-1]["nll"]))
-
-    mr, curve_r = TR.train_seq("transformer_novalue", sids[:64], smask[:64], nv, steps=20, log_at=(0, 20), rope=False)
-    check("transformer, rope=False: train_seq ayari modele ulasir (her katmanda rope False), kayip iner; varsayilan True",
-          all(not layer.rope for layer in mr.layers) and all(layer.rope for layer in mv.layers)
-          and curve_r[-1]["nll"] < curve_r[0]["nll"],
-          "%.3f -> %.3f" % (curve_r[0]["nll"], curve_r[-1]["nll"]))
 
 
 @torch.no_grad()
@@ -547,10 +436,9 @@ def t_generate_cached():
           "tek basina = batch icinde; her konumun skoru float64'te 1e-10 icinde" % runs, same and worst < 1e-10,
           "en buyuk fark %.1e" % worst)
     edge = BlockModel(n, d=16, units=24, t_max=64, canon=False)
-    check("generate: n = 0 bos, n = 1 istem hesabinin son konumu; transformer eski yoldan",
+    check("generate: n = 0 bos, n = 1 istem hesabinin son konumu",
           TR.generate(edge, prompts[:3], 0) == [[], [], []]
-          and TR.generate(edge, prompts[:3], 1) == TR.generate(edge, prompts[:3], 1, cached=False)
-          and len(TR.generate(TR.TransformerModel(n, d=16, layers=1), prompts[:3], 4)[2]) == 4)
+          and TR.generate(edge, prompts[:3], 1) == TR.generate(edge, prompts[:3], 1, cached=False))
     from model_y import AttentionCache
     ring_m = BlockModel(n, d=16, units=24, t_max=64)
     L = torch.tensor([len(p) for p in prompts])
@@ -681,15 +569,10 @@ def t_normalized_update():
     full, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), save_every=2, save=keep, **kw)
     res, _ = TR.train_seq("shared", sids[:40], smask[:40], nv, steps=6, log_at=(), checkpoint=packs[4], **kw)
     qs = [[1] + sids[i, 1:9].tolist() for i in range(12)]
-    try:
-        TR.train_seq("transformer", sids[:8], smask[:8], nv, steps=1, log_at=(), normalized_update=True)
-        refused = False
-    except AssertionError:
-        refused = True
     check("normalized_update + sphere_weights: 4. adim paketinden surdurulen = kesintisiz, bit duzeyinde; onbellekli uretim = "
-          "tam yeniden hesap; transformer'da reddedilir",
+          "tam yeniden hesap",
           all(torch.equal(a, b) for a, b in zip(full.state_dict().values(), res.state_dict().values()))
-          and TR.generate(trained, qs, 10) == TR.generate(trained, qs, 10, cached=False) and refused)
+          and TR.generate(trained, qs, 10) == TR.generate(trained, qs, 10, cached=False))
 
     # LAST_FACTS_ALPHA_INIT: ALPHA_INIT verilince eski baslatma birebir; 1,0'da son durum girdi noktasindan ayrilir, adim-0
     # kaybi ln n + s^2 / (2d) (h rastgele yon: <h, p> ~ N(0, 1/d)), girdiyi tekrar etme kaybolur
@@ -783,17 +666,12 @@ def t_canon():
     scores, _ = cached_scores(trained, qs, cached_new)
     err_c = max(float((scores[i] - trained.logits(torch.tensor([q + cached_new[i]])).detach()[0, len(q) - 1:]).abs().max())
                 for i, q in enumerate(qs))
-    try:
-        TR.train_seq("transformer", sids[:8], smask[:8], nv, steps=1, log_at=(), canon=True)
-        refused = False
-    except AssertionError:
-        refused = True
     check("canon: egitimde kayip iner, canon_weights 0'dan ayrilir ve Adam'da; surdurme bit duzeyinde; onbellekli uretim "
-          "(canon_cache) tam hesapla ayni token'lar ve skorlar (istem 2-17 token); transformer'da reddedilir",
+          "(canon_cache) tam hesapla ayni token'lar ve skorlar (istem 2-17 token)",
           curve[-1]["nll"] < curve[0]["nll"] and bool(trained.blocks[0].canon_weights.abs().max() > 0)
           and "blocks.0.canon_weights" in in_adam
           and all(torch.equal(a, b) for a, b in zip(full.state_dict().values(), res.state_dict().values()))
-          and cached_new == TR.generate(trained, qs, 6, cached=False) and err_c < 1e-4 and refused,
+          and cached_new == TR.generate(trained, qs, 6, cached=False) and err_c < 1e-4,
           "%.3f -> %.3f  |w| %.4f  skor farki %.1e" % (curve[0]["nll"], curve[-1]["nll"],
                                                      float(trained.blocks[0].canon_weights.abs().max()), err_c))
 
@@ -1355,7 +1233,7 @@ def t_matmul_precision():
 def t_loss_chunk():
     """LOSS_CHUNK: egitim kaybi sozluk parcalariyla, gradyan ileri hesapta.  float64'te parca 4096 / 7 / 1 ile kayip ve butun
     gradyanlar tek parca (0) yoluyla ayni; fp32 egitim egrisi yakin; surdurme bit duzeyinde; tam logits tablosu olusmaz
-    (tepe tensor ve geri yayilima saklanan tensor); transformer'da yok.  Kosucunun config'e yazmasi: tests_simplestories."""
+    (tepe tensor ve geri yayilima saklanan tensor).  Kosucunun config'e yazmasi: tests_simplestories."""
     import copy
     from model_y import LOSS_CHUNK, BlockModel
     data = synthetic_data()
@@ -1424,8 +1302,6 @@ def t_loss_chunk():
           "parcali (256) yolda ikisi de < N x V / 3 (en buyugu P ve gradyani, V x d)",
           peak[0] >= table and saved[0] >= table and peak[256] < table / 3 and saved[256] < table / 3,
           "tablo %d  tepe %d / %d  saklanan %d / %d" % (table, peak[0], peak[256], saved[0], saved[256]))
-
-    check("loss_chunk: transformer'da yok", not hasattr(TR.TransformerModel(nv), "loss_chunk"))
 
 
 def t_muon_tangent():
@@ -2517,7 +2393,7 @@ if __name__ == "__main__":
     ap.add_argument("--jobs", type=int, default=1, help="paralel surec sayisi (her surec tek is parcacigi)")
     ap.add_argument("--only", default="", help="yalniz bu testler, virgulle: t_coherence,t_output_link")
     args = ap.parse_args()
-    names = [f.__name__ for f in (t_step3, t_transformer, t_generate_cached, t_normalized_update, t_canon,
+    names = [f.__name__ for f in (t_step3, t_generate_cached, t_normalized_update, t_canon,
               t_layers, t_coherence, t_weight_ema, t_heads, t_fact_activation, t_learn_output_scale, t_matmul_precision,
               t_loss_chunk, t_muon_tangent, t_output_link, t_shared_facts, t_input_embedding, t_internals, t_packing, t_attention_log_scale,
               t_micro_batches, t_rope_base)]

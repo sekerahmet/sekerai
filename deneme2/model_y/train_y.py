@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """train_y -- model_y GENEL egitim: veriden bagimsiz.  Veriye ozgu sinav ve raporlar egitim klasorlerinde (train_<veri>/).
-    train_seq   dizi egitimi: Model Y (BlockModel) ve kiyas transformer'i; yedek ve surdurme
+    train_seq   dizi egitimi: Model Y (BlockModel); yedek ve surdurme
     Muon        optimizer: gizli matrisler Muon, gerisi Adam (tek sinif, tek state_dict)
     pad         id listeleri -> (ids, mask);  generate: acgozlu uretim
 """
@@ -14,7 +14,6 @@ import torch._inductor.config
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from model_y import CANON, NORMALIZED_UPDATE, ROPE, SPHERE_WEIGHTS, AttentionCache, BlockModel, deviation
-from model_y_transformer import TransformerModel
 
 STEPS, LR = 4000, 0.01  # lr dayanagi (kure agirliklari + Muon): adim basina donme ~ LR x 0,2 x sqrt(d); nGPT 2026 tepe lr
                          # 0,24 / sqrt(d).  Veri / batch / D degisince yeniden hesaplanir
@@ -128,9 +127,6 @@ class _Gradients:
 
 # ---- dizi egitimi
 
-STEP3 = ("shared",)
-
-
 def pad(rows, vocab):
     """Id listeleri -> (ids, mask), sagdan <pad>; nedensel attention'da sagdaki dolgu oncekileri etkilemez."""
     T = max(len(r) for r in rows)
@@ -144,9 +140,10 @@ def pad(rows, vocab):
 
 def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, lr_floor=LR_FLOOR, grad_clip=GRAD_CLIP,
               weight_decay=WEIGHT_DECAY, device="cpu", every=None, callback=None, compile=True,
-              save_every=None, save=None, checkpoint=None, rope=None,
+              save_every=None, save=None, checkpoint=None, rope=ROPE,
               batches=None, model_kw=None, optimizer=OPTIMIZER, schedule=SCHEDULE, cooldown=COOLDOWN,
-              normalized_update=None, sphere_weights=None, canon=None, coherence_window=COHERENCE_WINDOW,
+              normalized_update=NORMALIZED_UPDATE, sphere_weights=SPHERE_WEIGHTS, canon=CANON,
+              coherence_window=COHERENCE_WINDOW,
               final_cooldown=FINAL_COOLDOWN, weight_ema=WEIGHT_EMA, matmul_precision=MATMUL_PRECISION,
               final_cooldown_shape=FINAL_COOLDOWN_SHAPE, newton_schulz_precision=NEWTON_SCHULZ_PRECISION,
               micro_batches=MICRO_BATCHES):
@@ -155,8 +152,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     callback(step, model, nll): her `every` adimda, o adimin guncellemesinden ONCE (sinav, kayit, durdurma).
     compile: kayip hesabi (ileri + geri) torch.compile ile; varsayilan acik, yalniz GPU'da uygulanir (CPU'da kendiliginden
     kapanir).
-    setting "transformer": kiyas modeli (model_y_transformer), ayni tarif.  rope: attention'da RoPE; None = modelin kendi
-    varsayilani (transformer True, BlockModel ROPE).
+    setting: "shared" (BlockModel).  rope: attention'da RoPE.
     save(step, model, opt): her save_every adimda, callback'ten sonra, guncellemeden ONCE -- adim s paketi s guncelleme
     gormus modeli ve optimizer'i tasir.  callback hata atarsa (durdurma dahil) o adimin paketi de yazilir.
     checkpoint {step, model, optimizer}: o adimdan surdurur (ayni steps ve tarifle kesintisiz kosuyla bit duzeyinde ayni --
@@ -164,8 +160,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     batches(step) -> (ids, mask): buyuk veri icin her adimda bir parca (mini-batch); verilirse ids, mask kullanilmaz (None
     olabilir).  Adimin fonksiyonu olmali (surdurmede ayni parca gelsin).  Sekil adimdan adima degisebilir (bucket):
     compile ikinci sekilde dinamik sekilli tek grafige gecer.  (ids, mask, document_positions): paketli pencere
-    (BlockModel.loss; yalniz BlockModel).
-    model_kw: modele gecen ayarlar (BlockModel: d, turns, units, t_max ...; transformer: d, layers, heads, units).
+    (BlockModel.loss).
+    model_kw: modele gecen ayarlar (d, turns, layers, units, t_max ...).
     schedule="coherence": lr = lr x ortalama(rho) (COHERENCE_WINDOW), alt sinir lr_floor; son final_cooldown kisminda
     final_cooldown_shape ile x lr_floor'a.  Mini-batch'te adim iki yarida hesaplanir (satirlar tek / cift), birlestirilen
     gradyan tam batch'inkiyle ayni; ortalama optimizer'in grup kaydinda (checkpoint'e girer).  model.coherence: son olcum.
@@ -179,7 +175,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     deterministik degil (surdurme bit duzeyinde kalmaz).
     micro_batches: gradyan birikimi (batch'in satir sayisi bunun kati olmali)."""
     assert batches is not None or ids is not None, "ids/mask ya da batches verilmeli"
-    assert not setting.startswith("transformer") or not weight_decay, "transformer icin weight decay gruplari tanimli degil"
+    assert setting == "shared", "setting: yalniz shared (BlockModel), bu: %s" % setting
     assert optimizer in ("muon", "adam") and schedule in ("wsd", "coherence") and 0 < cooldown <= 1
     assert schedule != "coherence" or (0 < final_cooldown <= 1 and coherence_window >= 1)
     assert final_cooldown_shape in ("sqrt", "linear", "log"), "final_cooldown_shape: sqrt | linear | log"
@@ -189,23 +185,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     assert newton_schulz_precision in ("fp32", "bf16"), "newton_schulz_precision: fp32 | bf16"
     assert micro_batches >= 1 and (schedule != "coherence" or micro_batches % 2 == 0 or micro_batches == 1), \
         "micro_batches: >= 1; coherence'ta 1 ya da cift"
-    if normalized_update is None:                          # Model Y'nin varsayilani; transformer'da yok
-        normalized_update = NORMALIZED_UPDATE if setting in STEP3 else False
-    if sphere_weights is None:
-        sphere_weights = SPHERE_WEIGHTS if setting in STEP3 else False
-    if canon is None:
-        canon = CANON if setting in STEP3 else False
-    assert setting in STEP3 or not (normalized_update or sphere_weights or canon), \
-        "normalized_update / sphere_weights / canon yalniz BlockModel icin"
-    if rope is None:                                       # modelin kendi varsayilani
-        rope = True if setting.startswith("transformer") else ROPE
-    if setting in ("transformer", "transformer_novalue"):   # novalue: V matrisi yok (tek head'de V.O tek matris)
-        model = TransformerModel(n, seed=seed, value_matrix=setting == "transformer", rope=rope, **(model_kw or {}))
-    else:
-        assert setting in STEP3, "setting: shared | transformer | transformer_novalue (bu: %s)" % setting
-        model = BlockModel(n, seed=seed, rope=rope, normalized_update=normalized_update, sphere_weights=sphere_weights,
-                           canon=canon, **(model_kw or {}))
-    model = model.to(device)
+    model = BlockModel(n, seed=seed, rope=rope, normalized_update=normalized_update, sphere_weights=sphere_weights,
+                       canon=canon, **(model_kw or {})).to(device)
     if ids is not None:
         ids, mask = ids.to(device), mask.to(device)
     params = [p for p in model.parameters() if p.requires_grad]
@@ -219,10 +200,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
             unit_axis[k] = 0
     if optimizer == "muon":
         # Muon yalniz gizli 2 boyutlu matrislerde ("VO + FFN" duzeni, Wang 2025); token noktalari, esikler, W_query, W_key,
-        # bias, norm katsayilari ve cikis olcegi (log_output_scale) Adam'da
-        hidden = ("W_context", "W_value", "W_fact_in", "W_fact_up", "W_fact_out", "W_value.weight", "W_out.weight",
-                  "W_mlp_in.weight",
-                  "W_mlp_out.weight")
+        # alpha'lar, Canon, cikis olcegi ve bag Adam'da
+        hidden = ("W_context", "W_value", "W_fact_in", "W_fact_up", "W_fact_out")
         opt = Muon([dict(params=[p for k, p in named if k.endswith(hidden)], use_muon=True),
                     dict(params=[p for k, p in named if not k.endswith(hidden)], use_muon=False)], lr=lr)
         opt.tangent_axis = {p: unit_axis[k] for k, p in named if k in unit_axis}   # yalniz Muon grubunda uygulanir
@@ -316,7 +295,6 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
             group["lr"] = lr * factor
         if batches is not None:                            # mini-batch: bu adimin parcasi; paketli: + document_positions
             ids, mask, *packed = (t.to(device) for t in batches(step))
-            assert not packed or isinstance(model, BlockModel), "paketli pencere yalniz BlockModel"
             if compile and packed and not static_loss[0]:  # paketli pencere hep ayni boy: ayni surecteki onceki kosunun
                 # boyu derleyiciye boyu dinamik saydiriyordu, dinamik kod uretilemedi (CantSplit)
                 loss_fn, static_loss[0] = torch.compile(model.loss, dynamic=False), True
@@ -334,9 +312,8 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
                 else:
                     total, nll = loss_fn(ids, mask, *packed)   # butun cumleler (ya da adimin parcasi), butun konumlar
         if step in log_at:
-            curve.append(dict(step=step, nll=nll.item(), dev=deviation(model).clone() if hasattr(model, "tokens") else None,
-                              W_context=(sum(b.attention.W_context.norm().item() for b in model.blocks)
-                                         if isinstance(model, BlockModel) else 0.0)))
+            curve.append(dict(step=step, nll=nll.item(), dev=deviation(model).clone(),
+                              W_context=sum(b.attention.W_context.norm().item() for b in model.blocks)))
         if callback is not None and every and step % every == 0 and not resumed_here:
             try:
                 callback(step, model, nll.item())
@@ -406,10 +383,10 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
 @torch.no_grad()
 def generate(model, prompts, n, cached=True):
     """Acgozlu uretim, her isteme n token.  -> id listeleri (yalniz uretilen).
-    cached (BlockModel): istem bir kez, sonra her token yalniz kendi konumunu hesaplar (AttentionCache); butun istemler
-    tek batch'te (farkli uzunluk: sagdan dolgu, satir basina konum).  Degilse: ayni uzunluktaki istemler birlikte ve her
-    token'da butun dizi yeniden hesaplanir (transformer; ayni token'lar, skorlar float yuvarlamasina kadar)."""
-    if cached and isinstance(model, BlockModel):
+    cached: istem bir kez, sonra her token yalniz kendi konumunu hesaplar (AttentionCache); butun istemler tek batch'te
+    (farkli uzunluk: sagdan dolgu, satir basina konum).  Degilse (test referansi): ayni uzunluktaki istemler birlikte ve
+    her token'da butun dizi yeniden hesaplanir (ayni token'lar, skorlar float yuvarlamasina kadar)."""
+    if cached:
         return generate_cached(model, prompts, n)
     device = next(model.parameters()).device
     out = [None] * len(prompts)
@@ -427,7 +404,7 @@ def generate(model, prompts, n, cached=True):
 
 @torch.no_grad()
 def generate_cached(model, prompts, n):
-    """generate'in onbellekli hali (BlockModel): istem ileri hesabi bir kez (tur basina AttentionCache doldurulur), sonra
+    """generate'in onbellekli hali: istem ileri hesabi bir kez (tur basina AttentionCache doldurulur), sonra
     her adimda satir basina tek yeni konum turlardan gecer.  Is: istem + n - 1 konum (tam yeniden hesapta sum(L + i))."""
     if n <= 0:
         return [[] for _ in prompts]

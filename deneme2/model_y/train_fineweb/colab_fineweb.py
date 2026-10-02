@@ -129,7 +129,7 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
     ayni olmali.  stop_at: o adimin sinavindan sonra model.pt yazilir ve durur (config'e girmez)."""
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
-    assert setting in TR.STEP3, "paketli pencere yalniz BlockModel (setting shared)"
+    assert setting == "shared", "paketli pencere yalniz BlockModel (setting shared)"
     assert "micro_batches" not in train_kw, "micro_batches plan'dan (tokens_per_step / batch_size)"
     model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, shared_facts=M.SHARED_FACTS, heads=M.HEADS,
                          fact_activation=M.FACT_ACTIVATION, learn_output_scale=M.LEARN_OUTPUT_SCALE, output_link=M.OUTPUT_LINK,
