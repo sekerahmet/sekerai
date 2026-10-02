@@ -29,6 +29,9 @@
     copy_ceiling DITTO-X Adim 0: g(l, m) = gercek metinde verbatim kopyanin bir sonraki token'da devam etme orani; l = en uzun
                  eslesen sonek (kova 2/4/8/16/32/64+), m = o sonekin belgede onceki gecis sayisi (kova 1..5+); --corpus-tokens > 0:
                  egitim parcalarindan (CPU), --model-docs > 0: valid belgelerinde ayni hucrelerde veri orani ve modelin p'si
+    repeat_entry tekrara GIRIS: valid belgelerinde (ve --corpus-docs ile egitim parcalarinda) taze metin ilk kez tam cumle
+                 tekrarina / l >= 8, 16 verbatim kopyaya hangi konumda giriyor, girince kalan metnin tekrar payi; ayni belgelerin
+                 yarisindan gercek devam / acgozlu / s 1 / s 0,8 p 0,9 (256 token) ayni olcuyle; giris aninda modelin dagilimi
     symbol_filler  86 element (analyze_capacity.ELEMENTS) x 5 kalip: dogru sembol ve " Cu" olasiligi / sirasi, top1
                  dagilimi (Cu kalibin genel doldurucusu mu); 133 baskentte top1 dagilimi
 
@@ -1770,6 +1773,282 @@ def text_copy_ceiling(res, n_min=400):
     return L
 
 
+# ---- repeat_entry: tekrara giris
+
+ENTRY_MIN_SENT = 5          # tam cumle en az bu kadar token
+ENTRY_MAX_L = 32            # l en cok bu kadar izlenir
+ENTRY_REGION = 256          # devam bolgesi (token)
+ENTRY_CUTS = (64, 128, 256, 512, 1024, 2048)
+_MOD = (1 << 61) - 1
+
+
+def _sentence_end_table(vocab):
+    """token -> cumle sonu mu: metni '.', '!', '?' ile biten (sondaki bosluk / tirnak / parantez atilarak) ya da satir sonu
+    iceren token."""
+    out = np.zeros(len(vocab), bool)
+    for i in range(len(vocab)):
+        t = decode([i], vocab)
+        out[i] = "\n" in t or t.rstrip(" \"')]").endswith((".", "!", "?"))
+    return out
+
+
+def _match_trace(x):
+    """Konum t icin l_t = t'de biten ve daha once (bitisi < t) gecmis en uzun sonek (<= ENTRY_MAX_L), m_t = o sonekin onceki
+    gecis sayisi, copy_t = en son onceki gecisin devami (kopya token'i; l_t = 0 ise -1).  Polinom hash, O(n ENTRY_MAX_L)."""
+    n = len(x)
+    pre = [0] * (n + 1)
+    pw = [1] * (ENTRY_MAX_L + 1)
+    B = 1_000_003
+    for i in range(n):
+        pre[i + 1] = (pre[i] * B + int(x[i]) + 1) % _MOD
+    for i in range(1, ENTRY_MAX_L + 1):
+        pw[i] = pw[i - 1] * B % _MOD
+    last = [dict() for _ in range(ENTRY_MAX_L + 1)]
+    count = [dict() for _ in range(ENTRY_MAX_L + 1)]
+    ell, mm, cp = np.zeros(n, np.int64), np.zeros(n, np.int64), np.full(n, -1, np.int64)
+    prev_l = 0
+    for t in range(n):
+        top = min(prev_l + 1, ENTRY_MAX_L, t + 1)
+        found = 0
+        for L in range(top, 0, -1):
+            h = (pre[t + 1] - pre[t + 1 - L] * pw[L]) % _MOD
+            j = last[L].get(h)
+            if j is not None:
+                found, ell[t], mm[t], cp[t] = L, L, count[L][h], int(x[j + 1])
+                break
+        prev_l = found
+        for L in range(1, min(ENTRY_MAX_L, t + 1) + 1):  # t'de biten sonekler (t + 1 varsa)
+            if t + 1 < n:
+                h = (pre[t + 1] - pre[t + 1 - L] * pw[L]) % _MOD
+                last[L][h] = t
+                count[L][h] = count[L].get(h, 0) + 1
+    return ell, mm, cp
+
+
+def _sentences_of(x, is_end, vocab):
+    """-> [(bas, son, anahtar)]: cumle sonu token'iyla biten parcalar (ilk parca metin basindan); anahtar = cozulmus metin,
+    bosluklari atilmis (satir basi / bosluklu yazim farki silinir).  ENTRY_MIN_SENT'ten kisa ya da bos olanlar None."""
+    out, st = [], 0
+    for i, t in enumerate(x):
+        if is_end[t]:
+            key = decode(x[st:i + 1], vocab).strip() if i + 1 - st >= ENTRY_MIN_SENT else None
+            out.append((st, i, key or None))
+            st = i + 1
+    return out
+
+
+def _entry_stats(x, region_start, is_end, vocab, trace=None):
+    """x: tam metin (baglam + bolge); bolge = x[region_start:].  -> giris konumlari (bolge basindan) ve kalan tekrar payi:
+    sent (bolgede biten ilk cumle, daha once tam olarak gecmis), l8 / l16 (l_t >= L olan ilk konum, giris = t - L + 1)."""
+    ell, mm, cp = trace if trace is not None else _match_trace(x)
+    n, R = len(x), len(x) - region_start
+    rep_tok = np.zeros(n, bool)
+    seen, sent_entry = set(), None
+    for a, b, key in _sentences_of(x, is_end, vocab):
+        if key is not None:
+            if key in seen and b >= region_start:
+                rep_tok[a:b + 1] = True
+                if sent_entry is None:
+                    sent_entry = max(a, region_start) - region_start
+            seen.add(key)
+    out = dict(R=R, sent=sent_entry,
+               sent_rest=float(rep_tok[region_start + sent_entry:].mean()) if sent_entry is not None and sent_entry < R else None)
+    for L in (8, 16):
+        hit = np.flatnonzero(ell[region_start:] >= L)
+        if len(hit):
+            e = max(int(hit[0]) - L + 1, 0)
+            out["l%d" % L] = e
+            out["l%d_rest" % L] = float((ell[region_start + e:] >= L).mean()) if e < R else None
+        else:
+            out["l%d" % L] = None
+            out["l%d_rest" % L] = None
+    return out
+
+
+def _entry_summary(rows, cuts):
+    """Giris konumu dagilimi: kesimler icinde giris orani (± SE; bolgesi kesimden kisa metinler o kesimde sayilmaz),
+    medyan giris, girince kalan tekrar payi (ort.)."""
+    out = {}
+    for kind in ("sent", "l8", "l16"):
+        d = dict(n=len(rows))
+        for c in cuts:
+            elig = [r for r in rows if r["R"] >= c]
+            if elig:
+                k = sum(r[kind] is not None and r[kind] < c for r in elig) / len(elig)
+                d["by_%d" % c] = (round(k, 4), round(math.sqrt(k * (1 - k) / len(elig)), 4), len(elig))
+        ent = [r[kind] for r in rows if r[kind] is not None]
+        rest = [r[kind + "_rest"] for r in rows if r.get(kind + "_rest") is not None]
+        d["median_entry"] = float(np.median(ent)) if ent else None
+        d["rest_share"] = round(float(np.mean(rest)), 4) if rest else None
+        d["rest_n"] = len(rest)
+        out[kind] = d
+    return out
+
+
+@torch.no_grad()
+def _decision_stats(model, texts, region_starts, traces, entry_rows):
+    """Bolgedeki konumlarda (l_t >= 1, m_t = 1; l kovasi 1, 2, 3, 4-7, 8-15, 16+): gercek / uretilmis sonraki token kopya mi,
+    modelin p(kopya), kopya top1 mi, kopya disi kutle, kopya disi dagilimin entropisi, en buyuk rakibin p'si.  Ayrica l8
+    girisinin acilis yolunda (giris + 0..7) ayni sayilar, l adimina gore."""
+    dev = next(model.parameters()).device
+    buckets = ((1, 1), (2, 2), (3, 3), (4, 7), (8, 15), (16, ENTRY_MAX_L))
+    acc = {b: [] for b in buckets}
+    path = {k: [] for k in range(8)}
+    for x, r0, (ell, mm, cp), er in zip(texts, region_starts, traces, entry_rows):
+        pos = np.arange(r0 - 1, len(x) - 1)                    # konum t, sonraki token x[t + 1] bolgede
+        sel = pos[(cp[pos] >= 0)]
+        if not len(sel):
+            continue
+        z = model.logits(torch.tensor([x[:-1]], device=dev))[0].float()
+        P = torch.softmax(z[torch.tensor(sel, device=dev)], -1)
+        c = torch.tensor(cp[sel], device=dev)
+        pc = P.gather(-1, c[:, None])[:, 0]
+        top1 = P.argmax(-1) == c
+        Q = P.scatter(-1, c[:, None], 0.0)
+        mass = Q.sum(-1)
+        Qn = Q / mass[:, None].clamp(min=1e-12)
+        H = -(Qn * Qn.clamp(min=1e-12).log()).sum(-1)
+        rival = Q.max(-1).values
+        vals = torch.stack([pc, top1.float(), mass, H, rival], -1).cpu().numpy()
+        real = (np.asarray(x)[sel + 1] == cp[sel]).astype(float)
+        for i, t in enumerate(sel):
+            if mm[t] == 1:
+                for b in buckets:
+                    if b[0] <= ell[t] <= b[1]:
+                        acc[b].append(np.append(vals[i], real[i]))
+        if er.get("l8") is not None:
+            e = r0 + er["l8"]                                   # kopyanin ilk token'i; karar konumu e - 1 + k
+            for k in range(8):
+                t = e - 1 + k
+                idx = np.flatnonzero(sel == t)
+                if len(idx):
+                    path[k].append(np.append(vals[idx[0]], [real[idx[0]], ell[t]]))
+    names = ("p_copy", "top1", "noncopy_mass", "noncopy_entropy", "rival_p", "copy_rate")
+    out = dict(by_l={}, entry_path={})
+    for b, v in acc.items():
+        if v:
+            a = np.array(v)
+            out["by_l"]["%d-%d" % b] = dict(n=len(a), **{k: round(float(a[:, j].mean()), 4) for j, k in enumerate(names)},
+                                            copy_rate_se=round(float(a[:, 5].std() / math.sqrt(len(a))), 4))
+    for k, v in path.items():
+        if v:
+            a = np.array(v)
+            out["entry_path"][k] = dict(n=len(a), l_mean=round(float(a[:, 6].mean()), 2),
+                                        **{n_: round(float(a[:, j].mean()), 4) for j, n_ in enumerate(names)})
+    return out
+
+
+def _entry_examples(texts, rows, vocab, k=6, width=60):
+    """Veride cumle tekrarina giren belgelerden k pencere: tekrar eden cumlenin cevresi (gozle)."""
+    out = []
+    for x, r in zip(texts, rows):
+        if r["sent"] is not None:
+            e = r["sent"]
+            out.append(dict(entry=e, before=decode(x[max(0, e - width):e], vocab), at=decode(x[e:e + width], vocab)))
+            if len(out) >= k:
+                break
+    return out
+
+
+def measure_repeat_entry(model_needed, vocab, eot, args):
+    import data_fineweb as DF
+    is_end = _sentence_end_table(vocab)
+    out = dict(cuts=ENTRY_CUTS, region=ENTRY_REGION, min_sentence=ENTRY_MIN_SENT)
+    v = DF.load_valid(args.data, log=lambda s: None)
+    order = np.random.default_rng(0).permutation(len(v["valid_starts"]))
+    # (1) veri, belge basindan: butun valid belgeleri, en cok 2048 token
+    full = [DF.valid_doc(v, int(i))[:2049] for i in order]
+    rows = [_entry_stats(d, 1, is_end, vocab) for d in full]           # bolge = eot sonrasi metnin tamami
+    out["data_from_start"] = dict(docs=len(rows), summary=_entry_summary(rows, ENTRY_CUTS),
+                                  examples=_entry_examples([d[1:] for d in full], rows, vocab))
+    _say("veri (belge basindan): %d belge" % len(rows))
+    if args.corpus_docs:
+        d0 = os.path.join(args.data, DF.TAG)
+        crow, per = [], max(1, args.corpus_docs // 4)
+        for sh in (0, 3, 6, 9):
+            if not os.path.exists(os.path.join(d0, "shard_%03d.bin" % sh)):
+                continue
+            a = np.memmap(os.path.join(d0, "shard_%03d.bin" % sh), dtype=np.uint16, mode="r")
+            offs = np.load(os.path.join(d0, "shard_%03d_offsets.npy" % sh))
+            pick = np.random.default_rng(sh).choice(len(offs) - 1, per, replace=False)
+            for i in pick:
+                doc = np.asarray(a[offs[i]:offs[i + 1]][:2049]).tolist()
+                crow.append(_entry_stats(doc, 1, is_end, vocab))
+        out["corpus_from_start"] = dict(docs=len(crow), summary=_entry_summary(crow, ENTRY_CUTS))
+        _say("corpus (belge basindan): %d belge" % len(crow))
+    if not model_needed:
+        return out
+    # (2) ayni belgelerin yarisindan devam
+    docs = [d for d in full if len(d) >= 2 * ENTRY_REGION + 1][:args.entry_docs]
+    prompts = [d[:min(len(d) // 2, 1024)] for d in docs]
+    reals = [d[len(p):len(p) + ENTRY_REGION] for d, p in zip(docs, prompts)]
+    conds = dict(real=reals)
+    for name, temp, top_p in (("greedy", 0.0, 1.0), ("t1.0", 1.0, 1.0), ("t0.8_p0.9", 0.8, 0.9)):
+        gens = []
+        for i in range(0, len(prompts), 64):
+            g, _, _ = generate_batch(args._model, prompts[i:i + 64], ENTRY_REGION, eot, temp, top_p, seed=0)
+            gens += g
+        conds[name] = gens
+        _say("uretim %s: %d" % (name, len(gens)))
+    out["continuation"] = dict(docs=len(docs), conditions={})
+    for name, gens in conds.items():
+        texts = [p + g for p, g in zip(prompts, gens)]
+        traces = [_match_trace(t) for t in texts]
+        rows = [_entry_stats(t, len(p), is_end, vocab, tr) for t, p, tr in zip(texts, prompts, traces)]
+        res = dict(summary=_entry_summary(rows, (64, 128, 256)))
+        if name in ("real", "greedy"):
+            res["decisions"] = _decision_stats(args._model, texts, [len(p) for p in prompts], traces, rows)
+        if name != "real":
+            res["examples"] = [decode(g[:120], vocab) for g in gens[:3]]
+        out["continuation"]["conditions"][name] = res
+        _say("devam %s: cumle girisi <=256 %s" % (name, res["summary"]["sent"].get("by_256")))
+    return out
+
+
+def text_repeat_entry(res):
+    L = ["# TEKRARA GIRIS",
+         "cumle = cumle sonu token'iyla (metni . ! ? ile biten ya da satir sonu iceren) biten parca, >= %d token; tekrar = "
+         "metni (bosluk atilmis) daha once tam olarak gecmis cumle; l_t = t'de biten ve daha once gecmis en uzun sonek, m_t = "
+         "onceki gecis sayisi; giris = bolgede ilk tekrar (cumle) / l >= 8, 16'nin basladigi konum" % res["min_sentence"]]
+
+    def block(title, summ, cuts):
+        out = ["", "## " + title, "olcu | " + " | ".join("<= %d: oran ± SE (n)" % c for c in cuts) +
+               " | medyan giris | girince kalan tekrar payi (n)"]
+        for kind, d in summ.items():
+            out.append("%-5s | " % kind + " | ".join(
+                ("%.3f ± %.3f (%d)" % d["by_%d" % c]) if "by_%d" % c in d else "-" for c in cuts) +
+                " | %s | %s (%d)" % (d["median_entry"], d["rest_share"], d["rest_n"]))
+        return out
+    L += block("veri, valid belge basindan (%d belge, <= 2048 token)" % res["data_from_start"]["docs"],
+               res["data_from_start"]["summary"], res["cuts"])
+    if "corpus_from_start" in res:
+        L += block("veri, egitim parcalari belge basindan (%d belge)" % res["corpus_from_start"]["docs"],
+                   res["corpus_from_start"]["summary"], res["cuts"])
+    L += ["", "### veride cumle tekrarina giris ornekleri (gozle)"]
+    for e in res["data_from_start"]["examples"]:
+        L.append("[%d] ...%s || %s" % (e["entry"], e["before"][-200:].replace("\n", " / "), e["at"][:240].replace("\n", " / ")))
+    if "continuation" in res:
+        c = res["continuation"]
+        for name, r in c["conditions"].items():
+            L += block("devam %s (%d belge, istem = ilk yari <= 1024 token, bolge %d token)" % (name, c["docs"], res["region"]),
+                       r["summary"], (64, 128, 256))
+            if "decisions" in r:
+                L += ["karar konumlari (m = 1): l kovasi | n | gercek kopya orani ± SE | model p(kopya) | kopya top1 | kopya disi "
+                      "kutle | kopya disi entropi | en buyuk rakip p"]
+                for b, d in r["decisions"]["by_l"].items():
+                    L.append("  l %-5s | %6d | %.3f ± %.3f | %.3f | %.3f | %.3f | %.2f | %.3f" % (
+                        b, d["n"], d["copy_rate"], d["copy_rate_se"], d["p_copy"], d["top1"], d["noncopy_mass"],
+                        d["noncopy_entropy"], d["rival_p"]))
+                L.append("l8 girisinin acilis yolu (k = kopyanin k. token'i; karar konumu): k | n | l ort | p(kopya) | top1 | "
+                         "rakip p | gercekte kopya")
+                for k, d in r["decisions"]["entry_path"].items():
+                    L.append("  k %d | %5d | %.1f | %.3f | %.3f | %.3f | %.3f" % (
+                        k, d["n"], d["l_mean"], d["p_copy"], d["top1"], d["rival_p"], d["copy_rate"]))
+            for t in r.get("examples", []):
+                L.append("    %s" % t[:300].replace("\n", " / "))
+    return L
+
+
 # ---- CLI
 
 def _out_dir(run_dir):
@@ -1783,13 +2062,16 @@ def main(argv=None):
     ap.add_argument("run", help="kosu klasoru")
     ap.add_argument("measure", choices=("answers", "decoding", "repetition", "loop_heads", "corpus",
                                                "answer_split", "symbol_filler", "cooccur", "training_curve",
-                                               "ss_profile", "copy_odds", "copy_calibration", "copy_ceiling"))
+                                               "ss_profile", "copy_odds", "copy_calibration", "copy_ceiling",
+                                               "repeat_entry"))
     ap.add_argument("--data", required=True, help="FineWeb koku (gpt2/tokenizer.json, gpt2/shard_*.bin)")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--weights", default="last", choices=("last", "ema", "both"))
     ap.add_argument("--checkpoint", type=int, help="answers: checkpoint_t<adim>.pt (EMA yedekteki ortalama)")
     ap.add_argument("--tokens", type=int, default=641, help="decoding: uretim boyu (final.json gibi 641)")
     ap.add_argument("--heads", help="copy_odds: tur.head listesi, tur 1'den (varsayilan 5.7,7.5,8.7,10.2)")
+    ap.add_argument("--corpus-docs", type=int, default=0, help="repeat_entry: egitim parcalarindan belge (0 = yok)")
+    ap.add_argument("--entry-docs", type=int, default=1200, help="repeat_entry: devam olcumu icin belge (>= 513 token)")
     ap.add_argument("--corpus-tokens", type=float, default=0, help="copy_ceiling: egitim parcalarindan token (0 = yok)")
     ap.add_argument("--model-docs", type=int, default=0, help="copy_ceiling: valid belgesi (0 = model olcumu yok)")
     ap.add_argument("--model-tokens", type=int, default=4096, help="copy_ceiling: valid belgesi en cok bu kadar token")
@@ -1849,6 +2131,10 @@ def main(argv=None):
             elif args.measure == "copy_calibration":
                 res = measure_copy_calibration(model, vocab, eot, args)
                 lines = text_copy_calibration(res)
+            elif args.measure == "repeat_entry":
+                args._model = model
+                res = measure_repeat_entry(True, vocab, eot, args)
+                lines = text_repeat_entry(res)
             elif args.measure == "symbol_filler":
                 res = measure_symbol_filler(model, vocab, eot, args)
                 lines = text_symbol_filler(res)
