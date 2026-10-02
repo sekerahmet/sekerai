@@ -156,32 +156,38 @@ def summary(run_dir, cfg, label):
     print("=" * 74)
 
 
-def generate(model, ids, n, eot, temp=0.0, top_p=1.0, penalty=1.0, window=512):
+def generate(model, ids, n, eot, temp=0.0, top_p=1.0, penalty=1.0, window=512, on_token=None):
     """Tek istem, token token, onbellekli (istem bir kez, sonra yalniz yeni konum).  <|endoftext|>'te durur.  Modelin
-    cihazinda (CPU ya da GPU)."""
+    cihazinda (CPU ya da GPU).  on_token(out): her yeni token'dan sonra o ana kadarki cikti (akan yazim).  Ctrl+C
+    uretimi keser, o ana kadarki cikti doner."""
     _heavy()
     dev = next(model.parameters()).device
     out, x = [], list(ids)
     caches = [AttentionCache(torch.tensor([len(x)], device=dev), len(x) + n) for _ in range(model.turns)]
-    with torch.no_grad():
-        for i in range(n):
-            logits = model.logits(torch.tensor([x if i == 0 else x[-1:]], device=dev), caches)[0, -1].float()
-            if penalty != 1.0:                              # son window token: pozitif puan bolunur, negatif carpilir
-                recent = torch.tensor(sorted(set(x[-window:])), device=dev)
-                logits[recent] = torch.where(logits[recent] > 0, logits[recent] / penalty, logits[recent] * penalty)
-            if temp <= 0:
-                t = int(logits.argmax())
-            else:
-                p = torch.softmax(logits / temp, -1)
-                if top_p < 1.0:
-                    ps, order = p.sort(descending=True)
-                    keep = ps.cumsum(0) - ps < top_p
-                    p = torch.zeros_like(p).scatter(0, order[keep], ps[keep])
-                t = int(torch.multinomial(p / p.sum(), 1))
-            if t == eot:
-                break
-            out.append(t)
-            x.append(t)
+    try:
+        with torch.no_grad():
+            for i in range(n):
+                logits = model.logits(torch.tensor([x if i == 0 else x[-1:]], device=dev), caches)[0, -1].float()
+                if penalty != 1.0:                          # son window token: pozitif puan bolunur, negatif carpilir
+                    recent = torch.tensor(sorted(set(x[-window:])), device=dev)
+                    logits[recent] = torch.where(logits[recent] > 0, logits[recent] / penalty, logits[recent] * penalty)
+                if temp <= 0:
+                    t = int(logits.argmax())
+                else:
+                    p = torch.softmax(logits / temp, -1)
+                    if top_p < 1.0:
+                        ps, order = p.sort(descending=True)
+                        keep = ps.cumsum(0) - ps < top_p
+                        p = torch.zeros_like(p).scatter(0, order[keep], ps[keep])
+                    t = int(torch.multinomial(p / p.sum(), 1))
+                if t == eot:
+                    break
+                out.append(t)
+                x.append(t)
+                if on_token is not None:
+                    on_token(out)
+    except KeyboardInterrupt:                               # Ctrl+C: o ana kadarki cikti kalir
+        pass
     return out
 
 
@@ -264,11 +270,28 @@ def main():
         elif not g:
             g = random.choice(EF.PROMPTS)
         ids = [eot] + DS.encode(g, vocab)
-        out = generate(state["model"], ids, n, eot, temp, top_p, penalty)
         print()
         print_wrapped("ISTEM", DS.decode(ids[1:], vocab) or "(bos)")
-        print_wrapped("MODEL  (sicaklik %.2f, top-p %.2f, tekrar cezasi %.2f)%s" % (
-            temp, top_p, penalty, "" if len(out) < n else "  -- sinira geldi, kesildi"), DS.decode(out, vocab))
+        print("MODEL  (sicaklik %.2f, top-p %.2f, tekrar cezasi %.2f)  -- akiyor, Ctrl+C keser" % (temp, top_p, penalty))
+        sys.stdout.write("   ")
+        shown = {"text": "", "col": 0}
+
+        def stream(out):                                    # yazilan metni token token bas, 78 sutunda kir
+            text = DS.decode(out, vocab)
+            if text.endswith("�"):                     # yarim UTF-8 bayti: sonraki token'i bekle
+                return
+            new, shown["text"] = text[len(shown["text"]):], text
+            for ch in new:
+                if ch == "\n" or (ch == " " and shown["col"] >= 75):
+                    sys.stdout.write("\n   ")
+                    shown["col"] = 0
+                else:
+                    sys.stdout.write(ch)
+                    shown["col"] += 1
+            sys.stdout.flush()
+
+        out = generate(state["model"], ids, n, eot, temp, top_p, penalty, on_token=stream)
+        print("\n   -- %d token%s" % (len(out), ", sinira geldi, kesildi" if len(out) >= n else ""))
         print()
 
 
