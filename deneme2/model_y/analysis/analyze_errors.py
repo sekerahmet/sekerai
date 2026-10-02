@@ -1786,12 +1786,17 @@ ENTRY_CUTS = (64, 128, 256, 512, 1024, 2048)
 _MOD = (1 << 61) - 1
 
 
+def _dec(vocab, ids):
+    """vocab: bizim sozluk listesi ya da cagrilabilir cozucu (hazir modelin tokenizer'i, len() ile)."""
+    return vocab(list(ids)) if callable(vocab) else decode(ids, vocab)
+
+
 def _sentence_end_table(vocab):
     """token -> cumle sonu mu: metni '.', '!', '?' ile biten (sondaki bosluk / tirnak / parantez atilarak) ya da satir sonu
     iceren token."""
     out = np.zeros(len(vocab), bool)
     for i in range(len(vocab)):
-        t = decode([i], vocab)
+        t = _dec(vocab, [i])
         out[i] = "\n" in t or t.rstrip(" \"')]").endswith((".", "!", "?"))
     return out
 
@@ -1835,7 +1840,7 @@ def _sentences_of(x, is_end, vocab):
     out, st = [], 0
     for i, t in enumerate(x):
         if is_end[t]:
-            key = decode(x[st:i + 1], vocab).strip() if i + 1 - st >= ENTRY_MIN_SENT else None
+            key = _dec(vocab, x[st:i + 1]).strip() if i + 1 - st >= ENTRY_MIN_SENT else None
             out.append((st, i, key or None))
             st = i + 1
     return out
@@ -1890,11 +1895,13 @@ def _entry_summary(rows, cuts):
 
 
 @torch.no_grad()
-def _decision_stats(model, texts, region_starts, traces, entry_rows):
+def _decision_stats(model, texts, region_starts, traces, entry_rows, logits_fn=None):
     """Bolgedeki konumlarda (l_t >= 1, m_t = 1; l kovasi 1, 2, 3, 4-7, 8-15, 16+): gercek / uretilmis sonraki token kopya mi,
     modelin p(kopya), kopya top1 mi, kopya disi kutle, kopya disi dagilimin entropisi, en buyuk rakibin p'si.  Ayrica l8
-    girisinin acilis yolunda (giris + 0..7) ayni sayilar, l adimina gore."""
+    girisinin acilis yolunda (giris + 0..7) ayni sayilar, l adimina gore.  logits_fn(x) -> (len(x) - 1, V); None = Model Y."""
     dev = next(model.parameters()).device
+    if logits_fn is None:
+        logits_fn = lambda x: model.logits(torch.tensor([x[:-1]], device=dev))[0]
     buckets = ((1, 1), (2, 2), (3, 3), (4, 7), (8, 15), (16, ENTRY_MAX_L))
     acc = {b: [] for b in buckets}
     path = {k: [] for k in range(8)}
@@ -1903,7 +1910,7 @@ def _decision_stats(model, texts, region_starts, traces, entry_rows):
         sel = pos[(cp[pos] >= 0)]
         if not len(sel):
             continue
-        z = model.logits(torch.tensor([x[:-1]], device=dev))[0].float()
+        z = logits_fn(x).float()
         P = torch.softmax(z[torch.tensor(sel, device=dev)], -1)
         c = torch.tensor(cp[sel], device=dev)
         pc = P.gather(-1, c[:, None])[:, 0]
@@ -1984,9 +1991,10 @@ def measure_repeat_entry(model_needed, vocab, eot, args):
         return out
     # (2) ayni belgelerin yarisindan devam
     docs = [d for d in full if len(d) >= 2 * ENTRY_REGION + 1][:args.entry_docs]
-    prompts = [d[:min(len(d) // 2, 1024)] for d in docs]
+    prompts = [d[:min(len(d) // 2, args.prompt_max)] for d in docs]
     reals = [d[len(p):len(p) + ENTRY_REGION] for d, p in zip(docs, prompts)]
     conds = dict(real=reals)
+    out["prompt_max"] = args.prompt_max
     for name, temp, top_p in (("greedy", 0.0, 1.0), ("t1.0", 1.0, 1.0), ("t0.8_p0.9", 0.8, 0.9)):
         gens = []
         for i in range(0, len(prompts), 64):
@@ -2023,18 +2031,21 @@ def text_repeat_entry(res):
                 ("%.3f ± %.3f (%d)" % d["by_%d" % c]) if "by_%d" % c in d else "-" for c in cuts) +
                 " | %s | %s (%d)" % (d["median_entry"], d["rest_share"], d["rest_n"]))
         return out
-    L += block("veri, valid belge basindan (%d belge, <= 2048 token)" % res["data_from_start"]["docs"],
-               res["data_from_start"]["summary"], res["cuts"])
-    if "corpus_from_start" in res:
+    if res.get("data_from_start"):
+        L += block("veri, valid belge basindan (%d belge, <= 2048 token)" % res["data_from_start"]["docs"],
+                   res["data_from_start"]["summary"], res["cuts"])
+    if res.get("corpus_from_start"):
         L += block("veri, egitim parcalari belge basindan (%d belge)" % res["corpus_from_start"]["docs"],
                    res["corpus_from_start"]["summary"], res["cuts"])
-    L += ["", "### veride cumle tekrarina giris ornekleri (gozle)"]
-    for e in res["data_from_start"]["examples"]:
+    if res.get("data_from_start"):
+        L += ["", "### veride cumle tekrarina giris ornekleri (gozle)"]
+    for e in (res.get("data_from_start") or {}).get("examples", []):
         L.append("[%d] ...%s || %s" % (e["entry"], e["before"][-200:].replace("\n", " / "), e["at"][:240].replace("\n", " / ")))
     if "continuation" in res:
         c = res["continuation"]
         for name, r in c["conditions"].items():
-            L += block("devam %s (%d belge, istem = ilk yari <= 1024 token, bolge %d token)" % (name, c["docs"], res["region"]),
+            L += block("devam %s (%d belge, istem = ilk yari <= %d token, bolge %d token%s)" % (
+                name, c["docs"], res.get("prompt_max", 1024), res["region"], res.get("token_note", "")),
                        r["summary"], (64, 128, 256))
             if "decisions" in r:
                 L += ["karar konumlari (m = 1): l kovasi | n | gercek kopya orani ± SE | model p(kopya) | kopya top1 | kopya disi "
@@ -2051,6 +2062,113 @@ def text_repeat_entry(res):
             for t in r.get("examples", []):
                 L.append("    %s" % t[:300].replace("\n", " / "))
     return L
+
+
+# ---- repeat_entry_hf: ayni olcu hazir modellerde (transformers)
+
+class _HFDecoder:
+    def __init__(self, tok):
+        self.tok, self.n = tok, len(tok)
+
+    def __call__(self, ids):
+        return self.tok.decode(ids, skip_special_tokens=False)
+
+    def __len__(self):
+        return self.n
+
+
+def _hf_card(name):
+    """Model kartindan egitim verisi / token satirlari (kural 10: birebir alinti icin)."""
+    try:
+        from huggingface_hub import hf_hub_download
+        text = open(hf_hub_download(name, "README.md"), encoding="utf-8").read()
+    except Exception as e:                                  # kart yoksa olcum surer
+        return ["(kart okunamadi: %s)" % e]
+    keys = ("token", "dataset", "trained", "training data", "corpus", "fineweb", "webtext", "cosmopedia")
+    return [ln.strip() for ln in text.splitlines() if any(k in ln.lower() for k in keys)][:25]
+
+
+@torch.no_grad()
+def measure_repeat_entry_hf(vocab, eot, args):
+    """repeat_entry'nin (D_032) ayni 1.200 valid belgesi ve tanimlariyla hazir bir modelde: istem = belgenin ilk yarisi (<=
+    --prompt-max gpt2 token), bolge 256 token.  gpt2 ailesi: id'ler birebir; baska tokenizer: metin kendi tokenizer'iyla
+    yeniden kodlanir (bolge 256 KENDI token'i; l-tabanli satirlar o tokenizer'a ait)."""
+    import data_fineweb as DF
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(args.hf_model)
+    hf = AutoModelForCausalLM.from_pretrained(args.hf_model, torch_dtype=torch.float32).to(args.device).eval()
+    same = tok.get_vocab().get("<|endoftext|>") == eot and len(tok) == len(vocab)
+    hv = _HFDecoder(tok)
+    is_end = _sentence_end_table(hv)
+    bos = tok.bos_token_id if tok.bos_token_id is not None else tok.eos_token_id
+    eos = tok.eos_token_id
+    v = DF.load_valid(args.data, log=lambda s: None)
+    order = np.random.default_rng(0).permutation(len(v["valid_starts"]))
+    full = [DF.valid_doc(v, int(i))[:2049] for i in order]
+    docs = [d for d in full if len(d) >= 2 * ENTRY_REGION + 1][:args.entry_docs]
+    prompts_g = [d[:min(len(d) // 2, args.prompt_max)] for d in docs]
+    reals_g = [d[len(p):len(p) + ENTRY_REGION] for d, p in zip(docs, prompts_g)]
+    if same:
+        prompts, reals = prompts_g, reals_g
+    else:                                                   # metin -> kendi token'lari
+        prompts = [[bos] + tok.encode(decode(p[1:], vocab), add_special_tokens=False) for p in prompts_g]
+        reals = [tok.encode(decode(r, vocab), add_special_tokens=False)[:ENTRY_REGION] for r in reals_g]
+    dev = args.device
+    ctx = getattr(hf.config, "n_positions", None) or getattr(hf.config, "max_position_embeddings", 2048)
+    keep = [i for i, p in enumerate(prompts) if len(p) + ENTRY_REGION <= ctx]
+    prompts, reals = [prompts[i] for i in keep], [reals[i] for i in keep]
+
+    def gen(temp, top_p):
+        out = []
+        torch.manual_seed(0)
+        for i in range(0, len(prompts), 32):
+            part = prompts[i:i + 32]
+            L = max(len(q) for q in part)
+            pad = eos if tok.pad_token_id is None else tok.pad_token_id
+            x = torch.full((len(part), L), pad, dtype=torch.long)
+            m = torch.zeros((len(part), L), dtype=torch.long)
+            for r, q in enumerate(part):                     # soldan dolgu
+                x[r, L - len(q):] = torch.tensor(q)
+                m[r, L - len(q):] = 1
+            kw = dict(do_sample=temp > 0, max_new_tokens=ENTRY_REGION, min_new_tokens=ENTRY_REGION,
+                      suppress_tokens=[eos], pad_token_id=pad)
+            if temp > 0:
+                kw.update(temperature=temp, top_p=top_p, top_k=0)
+            y = hf.generate(input_ids=x.to(dev), attention_mask=m.to(dev), **kw)
+            out += [row[L:].tolist() for row in y.cpu()]
+        return out
+
+    conds = dict(real=reals)
+    for name, temp, top_p in (("greedy", 0.0, 1.0), ("t1.0", 1.0, 1.0), ("t0.8_p0.9", 0.8, 0.9)):
+        conds[name] = gen(temp, top_p)
+        _say("%s %s: %d" % (args.hf_model, name, len(conds[name])))
+    logits_fn = lambda x: hf(torch.tensor([x[:-1]], device=dev)).logits[0]
+    out = dict(cuts=ENTRY_CUTS, region=ENTRY_REGION, min_sentence=ENTRY_MIN_SENT, prompt_max=args.prompt_max,
+               hf_model=args.hf_model, same_tokenizer=same, context=ctx, card=_hf_card(args.hf_model),
+               params=sum(p_.numel() for p_ in hf.parameters()),
+               token_note="" if same else "; TOKENIZER FARKLI: l satirlari o tokenizer'in token'lariyla",
+               continuation=dict(docs=len(prompts), conditions={}))
+    for name, gens in conds.items():
+        texts = [q + g for q, g in zip(prompts, gens)]
+        traces = [_match_trace(t) for t in texts]
+        rows = [_entry_stats(t, len(q), is_end, hv, tr) for t, q, tr in zip(texts, prompts, traces)]
+        res = dict(summary=_entry_summary(rows, (64, 128, 256)))
+        if name in ("real", "greedy"):
+            res["decisions"] = _decision_stats(hf, texts, [len(q) for q in prompts], traces, rows, logits_fn)
+        if name != "real":
+            res["examples"] = [hv(g[:120]) for g in gens[:3]]
+        out["continuation"]["conditions"][name] = res
+        _say("devam %s: cumle girisi <=256 %s" % (name, res["summary"]["sent"].get("by_256")))
+    return out
+
+
+def text_repeat_entry_hf(res):
+    L = ["# HAZIR MODEL: %s (%.0fM parametre, baglam %d, tokenizer %s)" % (
+        res["hf_model"], res["params"] / 1e6, res["context"], "gpt2 ile ayni" if res["same_tokenizer"] else "FARKLI"),
+         "model kartindan (README.md, egitim verisi / token satirlari, birebir):"]
+    L += ["    " + ln for ln in res["card"]]
+    body = text_repeat_entry(dict(res, data_from_start=None))
+    return L + body
 
 
 # ---- O13: isin dogru / acgozlu yanlis
@@ -2234,7 +2352,7 @@ def main(argv=None):
     ap.add_argument("measure", choices=("answers", "decoding", "repetition", "loop_heads", "corpus",
                                                "answer_split", "symbol_filler", "cooccur", "training_curve",
                                                "ss_profile", "copy_odds", "copy_calibration", "copy_ceiling",
-                                               "repeat_entry", "beam_facts", "repeat_chain"))
+                                               "repeat_entry", "beam_facts", "repeat_chain", "repeat_entry_hf"))
     ap.add_argument("--data", required=True, help="FineWeb koku (gpt2/tokenizer.json, gpt2/shard_*.bin)")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--weights", default="last", choices=("last", "ema", "both"))
@@ -2242,6 +2360,8 @@ def main(argv=None):
     ap.add_argument("--tokens", type=int, default=641, help="decoding: uretim boyu (final.json gibi 641)")
     ap.add_argument("--heads", help="copy_odds: tur.head listesi, tur 1'den (varsayilan 5.7,7.5,8.7,10.2)")
     ap.add_argument("--corpus-docs", type=int, default=0, help="repeat_entry: egitim parcalarindan belge (0 = yok)")
+    ap.add_argument("--prompt-max", type=int, default=1024, help="repeat_entry(_hf): istem en cok bu kadar gpt2 token")
+    ap.add_argument("--hf-model", default="gpt2", help="repeat_entry_hf: HuggingFace model adi")
     ap.add_argument("--entry-docs", type=int, default=1200, help="repeat_entry: devam olcumu icin belge (>= 513 token)")
     ap.add_argument("--corpus-tokens", type=float, default=0, help="copy_ceiling: egitim parcalarindan token (0 = yok)")
     ap.add_argument("--model-docs", type=int, default=0, help="copy_ceiling: valid belgesi (0 = model olcumu yok)")
@@ -2261,7 +2381,8 @@ def main(argv=None):
     vocab, eot = (None, None) if args.measure == "ss_profile" else load_vocab(args.data)
     out_dir = _out_dir(args.run)
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    weights_list = ["none"] if args.measure in ("corpus", "cooccur", "training_curve", "ss_profile", "copy_ceiling") else (["last", "ema"] if args.weights == "both" else [args.weights])
+    weights_list = ["none"] if args.measure in ("corpus", "cooccur", "training_curve", "ss_profile", "copy_ceiling",
+                                                "repeat_entry_hf") else (["last", "ema"] if args.weights == "both" else [args.weights])
     for w in weights_list:
         t1 = time.time()
         if args.measure in ("corpus", "cooccur"):
@@ -2276,6 +2397,10 @@ def main(argv=None):
             res = measure_copy_ceiling(args)
             lines = text_copy_ceiling(res)
             source = "egitim parcalari / valid"
+        elif args.measure == "repeat_entry_hf":
+            res = measure_repeat_entry_hf(vocab, eot, args)
+            lines = text_repeat_entry_hf(res)
+            source = "hazir model %s" % args.hf_model
         elif args.measure == "ss_profile":
             res = measure_ss_profile(args)
             lines = text_ss_profile(res)
