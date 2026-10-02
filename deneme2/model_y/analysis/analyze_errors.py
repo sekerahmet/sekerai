@@ -510,9 +510,9 @@ def measure_decoding(model, vocab, eot, args):
 
 
 def _median(v):
-    v = [x if x is not None else 10 ** 9 for x in v]   # dongusuz = sonsuz
+    v = [x if x is not None else 10 ** 9 for x in v]   # dongusuz = sonsuz; medyan dongusuz yarida ise None
     m = float(np.median(v))
-    return None if m >= 10 ** 9 else m
+    return None if m >= 10 ** 8 else m
 
 
 def text_decoding(res):
