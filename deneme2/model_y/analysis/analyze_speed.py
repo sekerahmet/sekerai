@@ -102,7 +102,8 @@ def packed_batches(root, rows, count, seq_len=8192):
     import data_fineweb as DF
     v = DF.load_valid(root, log=lambda s: None)
     stream, offsets, _ = v["valid_shard"]
-    data = dict(seq_len=seq_len, train=stream, train_starts=offsets, eot=v["eot"], fingerprint="speed_shard13")
+    data = dict(seq_len=seq_len, train=stream, train_starts=offsets, eot=v["eot"],
+                fingerprint="speed_shard13_%d" % seq_len)          # pack() plani izle onbellekte: baglam boyu izde olmali
     data["items"] = DF._items(data)
     plan = DF.pack(data, 0, 0)
     out = [DF.windows(data, plan, plan["order"][i * rows:(i + 1) * rows]) for i in range(count)]
@@ -600,7 +601,7 @@ def data_cost(root, rows, steps=5):
     import data_fineweb as DF
     v = DF.load_valid(root, log=lambda s: None)
     stream, offsets, _ = v["valid_shard"]
-    data = dict(seq_len=8192, train=stream, train_starts=offsets, eot=v["eot"], fingerprint="speed_shard13")
+    data = dict(seq_len=8192, train=stream, train_starts=offsets, eot=v["eot"], fingerprint="speed_shard13_8192")
     data["items"] = DF._items(data)
     draw = DF.batches(data, rows)
     draw(0)
@@ -965,10 +966,15 @@ class GraphDecoder:
         return logits
 
     def _snapshot(self):
-        return [(c.next_position.clone(), None if c.canon_inputs is None else c.canon_inputs.clone()) for c in self.caches]
+        """Isinma adimlari konumu, Canon halkasini ve token tamponunu ilerletir; uchu de geri yuklenir (token tamponu
+        unutulunca serbest uretim istemin argmax'i yerine 3 adim sonrasinin token'iyla basliyordu: C_008)."""
+        return self.token.clone(), [(c.next_position.clone(), None if c.canon_inputs is None else c.canon_inputs.clone())
+                                    for c in self.caches]
 
     def _restore(self, state):
-        for c, (p, ci) in zip(self.caches, state):
+        token, caches = state
+        self.token.copy_(token)
+        for c, (p, ci) in zip(self.caches, caches):
             c.next_position.copy_(p)
             if ci is not None:
                 c.canon_inputs.copy_(ci)
