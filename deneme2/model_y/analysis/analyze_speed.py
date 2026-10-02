@@ -3,13 +3,15 @@
 
 Kullanici: "Performans da bir kriter olsun ama ayrica performans icin de ajan tayin et olur mu ?"
 
-    train     egitim adimi (kosunun config.json'u, gercek paketli FineWeb pencereleri): train_seq'in adimi parca parca
-              (ileri / geri / grup kopyasi / coherence / clip / Muon + Newton-Schulz / Adam / normalize_weights / EMA),
-              train_seq'in kendisiyle yan yana; parca bilesenleri (govde, kayip basligi, attention, flex, FactUnits);
-              kernel kategorileri (torch.profiler); MFU; hizlandirma denemeleri (esdegerlik kontroluyle).
-    sizes     buyuk model adaylari: train_seq'in kendisi, birkac adim -> ms/adim, token/sn, bellek, MFU.
-    generate  uretim: onbellekli (AttentionCache) batch 1 / buyuk batch, baglam boyu, prefill; sabit onbellek + CUDA graph
-              (esdegerlik kontroluyle); bf16; son turlarin attention'i sabit (DAVRANIS DEGISIR).
+    train      egitim adimi parca parca (ileri / geri / grup kopyasi / coherence / clip / Muon + Newton-Schulz / Adam /
+               normalize_weights / EMA), train_seq'in kendisiyle yan yana; bilesenler (govde, kayip basligi, attention,
+               FactUnits), kernel kategorileri, MFU; kure normlari kapali (DAVRANIS DEGISIR, yalniz sure); LOSS_CHUNK.
+    tune       hizlandirma denemeleri train_seq'in kendisiyle (parca bolusu, Newton-Schulz bf16); veri yolu suresi.
+    steptrace  kosunun gercek veri sirasiyla adim adim sure, flex blok sayisiyla iliski, GPU saati / kisma.
+    sizes      buyuk model adaylari: ms/adim, token/sn, bellek, MFU.
+    generate   uretim: onbellekli batch 1 / buyuk batch, baglam boyu, prefill; sabit onbellek + CUDA graph (esdegerlik
+               kontroluyle); bf16; son iki turun attention'i sabit (DAVRANIS DEGISIR).
+    decode     egitim sirasinda kendi devami uretiminin maliyeti: t_dec(B), her k adimda ek yuk.
 
     python analysis/analyze_speed.py <kosu klasoru> train --data <FineWeb koku>
     python analysis/analyze_speed.py <kosu klasoru> --selftest          (CPU, kucuk model: kod yollari)
@@ -17,7 +19,6 @@ Cikti: $KUYRUK_SONUC (yoksa <kosu>/analysis) altina speed_<olcum>.json; satirlar
 """
 import argparse
 import contextlib
-import copy
 import json
 import math
 import os
@@ -236,14 +237,7 @@ def ema_loop(ema, model, decay):
         pe.mul_(decay).add_(p.detach(), alpha=1 - decay)
 
 
-def ema_foreach(ema, model, decay):
-    """ONERI: ayni iki islem, parametre listesi tek cagrida (torch._foreach_*)."""
-    pe, p = list(ema.parameters()), [q.detach() for q in model.parameters()]
-    torch._foreach_mul_(pe, decay)
-    torch._foreach_add_(pe, p, alpha=1 - decay)
-
-
-def optimizer_tail(ctx, clock, ema_fn=ema_loop):
+def optimizer_tail(ctx, clock):
     """train_seq'in adim sonu: clip, Muon (Newton-Schulz ayrica) / Adam, normalize_weights, link_u, EMA."""
     opt, model = ctx["opt"], ctx["model"]
     with torch.no_grad():
@@ -271,16 +265,16 @@ def optimizer_tail(ctx, clock, ema_fn=ema_loop):
             model.link_u.clamp_(min=0)
         if ctx["ema"] is not None:
             with clock.part("EMA (+ normalize_weights)"):
-                ema_fn(ctx["ema"]["model"], model, ctx["ema"]["decay"])
+                ema_loop(ctx["ema"]["model"], model, ctx["ema"]["decay"])
                 if getattr(model, "sphere_weights", False):
                     ctx["ema"]["model"].normalize_weights()
 
 
-def replica_step(ctx, batch, micro, ema_fn=ema_loop):
+def replica_step(ctx, batch, micro):
     clock = Clock(ctx["cuda"])
     with clock.part("ADIM"):
         accumulate(ctx, batch, micro, clock)
-        optimizer_tail(ctx, clock, ema_fn)
+        optimizer_tail(ctx, clock)
     return clock.read()
 
 
@@ -443,55 +437,6 @@ def components(ctx, batch, flops, peak):
     return res, mask_obj, inner
 
 
-def flex_variants(model, inner, mask_obj, device, cuda):
-    """flex_attention tek basina (bf16, tur basina bir cagri) ve kernel_options / autotune denemeleri; cikti farki
-    varsayilana gore (ayni maske, ayni q k v)."""
-    if not cuda:
-        return None
-    from torch.nn.attention.flex_attention import flex_attention
-    at = model.blocks[0].attention
-    B, T = inner.shape
-    H, dh = at.heads, model.tokens.fixed_points.shape[1] // at.heads
-    g = torch.Generator(device=device).manual_seed(0)
-    q, k, v = (torch.randn(B, H, T, dh, device=device, generator=g, dtype=torch.bfloat16) for _ in range(3))
-    q, k = F.normalize(q.float(), dim=-1).bfloat16(), F.normalize(k.float(), dim=-1).bfloat16()
-    q, k, v = (t.requires_grad_() for t in (q, k, v))
-    go = torch.randn(B, H, T, dh, device=device, dtype=torch.bfloat16)
-    out, ref = {}, None
-    variants = [("varsayilan (egitimdeki)", M._flex_compiled, None),
-                ("fwd BLOCK 64x64", M._flex_compiled, dict(BLOCK_M=64, BLOCK_N=64)),
-                ("fwd BLOCK 128x64", M._flex_compiled, dict(BLOCK_M=128, BLOCK_N=64)),
-                ("fwd BLOCK 64x128", M._flex_compiled, dict(BLOCK_M=64, BLOCK_N=128)),
-                ("fwd BLOCK 128x128", M._flex_compiled, dict(BLOCK_M=128, BLOCK_N=128)),
-                ("bwd 64/128/128/64", M._flex_compiled, dict(BLOCK_M1=64, BLOCK_N1=128, BLOCK_M2=128, BLOCK_N2=64)),
-                ("bwd 32/64/64/32", M._flex_compiled, dict(BLOCK_M1=32, BLOCK_N1=64, BLOCK_M2=64, BLOCK_N2=32)),
-                ("max-autotune", None, None)]
-    for name, fn, opts in variants:
-        try:
-            if fn is None:
-                fn = torch.compile(flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
-
-            def fwd():
-                return fn(q, k, v, block_mask=mask_obj, scale=at.scale, kernel_options=opts)
-
-            def fb():
-                fwd().backward(go)
-                for t in (q, k, v):
-                    t.grad = None
-            o = fwd().detach().float()
-            fwd().backward(go)
-            gq = q.grad.detach().float().clone()
-            for t in (q, k, v):
-                t.grad = None
-            if ref is None:
-                ref = (o, gq)
-            out[name] = dict(fwd_ms=bench(fwd), fwd_bwd_ms=bench(fb), out_maxdiff=float((o - ref[0]).abs().max()),
-                             grad_q_maxdiff=float((gq - ref[1]).abs().max()))
-        except Exception as e:                           # paylasimli bellek / desteklenmeyen blok
-            out[name] = dict(error=repr(e)[:200])
-    return out
-
-
 @contextlib.contextmanager
 def guarded(name, res):
     """Bolum hata verirse kaydedilir, sonraki bolumler kosar."""
@@ -581,16 +526,7 @@ def train_measure(args, config, device):
             say("   en pahali kernel'ler (ms, cagri, ad):")
             for t, n, name in kc["top"][:20]:
                 say("      %8.2f %5d  %s" % (t, n, name))
-    # 3) flex varyantlari
-    with guarded('flex varyantlari', res):
-        fv = flex_variants(model, inner, mask_obj, device, cuda)
-        res["flex"] = fv
-        if fv:
-            say("FLEX tek basina (B %d, H %d, T %d, bf16; tur basina), ms ve varsayilana gore fark:" % (rows, model.blocks[0].attention.heads, T))
-            for n, r in fv.items():
-                say("   %-28s %s" % (n, r.get("error") or "ileri %.2f  ileri+geri %.2f  cikti farki %.1e  grad_q farki %.1e" % (
-                    r["fwd_ms"], r["fwd_bwd_ms"], r["out_maxdiff"], r["grad_q_maxdiff"])))
-    # 4) kure normlari kapali (DAVRANIS DEGISIR, yalniz sure)
+    # 3) kure normlari kapali (DAVRANIS DEGISIR, yalniz sure)
     with guarded('kure normlari kapali (DAVRANIS DEGISIR', res):
         ids, mask, pos = (t.to(device) for t in one)
         with norms_off():
@@ -606,7 +542,7 @@ def train_measure(args, config, device):
         say("KURE NORMLARI KAPALI (DAVRANIS DEGISIR, yalniz sure): bir parca ileri+geri %.1f ms (normlu %.1f; fark %.1f%%)" % (
             res["norms_off_fwd_bwd_ms"], comp["loss_fwd_bwd_ms"],
             100 * (comp["loss_fwd_bwd_ms"] - res["norms_off_fwd_bwd_ms"]) / comp["loss_fwd_bwd_ms"]))
-    # 5) LOSS_CHUNK
+    # 4) LOSS_CHUNK
     with guarded('LOSS_CHUNK', res):
         res["loss_chunk"] = {}
         ref = None
@@ -642,70 +578,7 @@ def train_measure(args, config, device):
             "%s %s" % (c, r.get("error") or "%.1f %.1e %s %.1f" % (r["fwd_bwd_ms"], r["nll_diff"],
                                                                  "-" if r["grad_shift_maxdiff"] is None else "%.1e" % r["grad_shift_maxdiff"],
                                                                  r["peak_gb"] or 0)) for c, r in res["loss_chunk"].items()))
-    # 6) optimizer tarafi: EMA foreach (bit duzeyinde ayni mi), Newton-Schulz bf16 (DAVRANIS DEGISIR)
-    with guarded('optimizer tarafi: EMA foreach (bit duz', res):
-        if ctx["ema"] is not None:
-            ema = ctx["ema"]["model"]
-            e1, e2 = copy.deepcopy(ema), copy.deepcopy(ema)
-            with torch.no_grad():
-                ema_loop(e1, model, 0.999)
-                ema_foreach(e2, model, 0.999)
-            same = all(torch.equal(a, b) for a, b in zip(e1.parameters(), e2.parameters()))
-            with torch.no_grad():
-                t_loop = bench(lambda: ema_loop(e1, model, 0.999))
-                t_each = bench(lambda: ema_foreach(e2, model, 0.999))
-                t_norm = bench(lambda: e1.normalize_weights())
-            res["ema"] = dict(loop_ms=t_loop, foreach_ms=t_each, bit_identical=same, normalize_weights_ms=t_norm)
-            del e1, e2
-            say("EMA: dongu %.2f ms, foreach %.2f ms (bit duzeyinde ayni: %s) | normalize_weights %.2f ms" % (
-                t_loop, t_each, same, t_norm))
-        params_muon = [p for g in ctx["opt"].param_groups if g["use_muon"] for p in g["params"]]
-        shapes = {}
-        for p in params_muon:
-            shapes.setdefault(tuple(p.shape), []).append(p)
-        ns = {}
-        for prec in ("fp32", "bf16"):
-            ns[prec] = sum(bench(lambda G=torch.randn(len(ps), *s, device=device): TR.Muon.orthogonalize(G, precision=prec))
-                           for s, ps in shapes.items())
-        G = torch.randn(len(next(iter(shapes.values()))), *next(iter(shapes)), device=device)
-        diff = (TR.Muon.orthogonalize(G, precision="bf16").float() - TR.Muon.orthogonalize(G, precision="fp32")).norm() / \
-            TR.Muon.orthogonalize(G, precision="fp32").norm()
-        res["newton_schulz"] = dict(fp32_ms=ns["fp32"], bf16_ms=ns["bf16"], rel_diff=float(diff),
-                                    shapes={str(s): len(ps) for s, ps in shapes.items()})
-        say("NEWTON-SCHULZ (adim basina, sekil gruplari %s): fp32 %.1f ms, bf16 %.1f ms (DAVRANIS DEGISIR: goreli fark %.1e)" % (
-            res["newton_schulz"]["shapes"], ns["fp32"], ns["bf16"], diff))
-    # 7) adimin satir / parca bolusu (ayni 64 satir, ayni gradyan): bellek ve sure
-    with guarded('adimin satir / parca bolusu (ayni 64 s', res):
-        res["micro_split"] = {}
-        full = steps_data[0]
-        clock = Clock(cuda)
-        accumulate(ctx, full, micro, clock)
-        clock.read()
-        ref_grad = [None if p.grad is None else p.grad.detach().clone() for p in ctx["params"]]
-        ctx["opt"].zero_grad()
-        for m in sorted({micro, micro // 2, micro // 4} - {0}):
-            if (rows * micro) % m or m % 2:
-                continue
-            try:
-                if cuda:
-                    torch.cuda.empty_cache()
-                    torch.cuda.reset_peak_memory_stats()
-                accumulate(ctx, full, m, Clock(cuda))            # isinma (yeni sekil: compile)
-                gdiff = max(float((p.grad - r).abs().max() / (r.abs().max() + 1e-30)) for p, r in zip(ctx["params"], ref_grad)
-                            if r is not None)
-                ctx["opt"].zero_grad()
-                ms = bench(lambda: (accumulate(ctx, full, m, Clock(cuda)), ctx["opt"].zero_grad()), reps=2, warmup=0)
-                res["micro_split"][m] = dict(rows=rows * micro // m, accumulate_ms=ms, grad_rel_maxdiff=gdiff,
-                                             peak_gb=torch.cuda.max_memory_allocated() / 1e9 if cuda else None)
-            except torch.cuda.OutOfMemoryError as e:
-                res["micro_split"][m] = dict(rows=rows * micro // m, error="OOM " + repr(e)[:120])
-                ctx["opt"].zero_grad()
-                if cuda:
-                    torch.cuda.empty_cache()
-        say("ADIMIN BOLUSU (64 satirin ileri+geri birikimi; gradyan farki %d parcaya gore): " % micro + " | ".join(
-            "%d parca x %d satir %s" % (m, r["rows"], r.get("error") or "%.0f ms, tepe %.1f GB, grad farki %.1e" % (
-                r["accumulate_ms"], r["peak_gb"] or 0, r["grad_rel_maxdiff"])) for m, r in res["micro_split"].items()))
-    # 8) train_seq'in kendisi (sadakat): ayni batch
+    # 5) train_seq'in kendisi (sadakat): ayni batch
     with guarded("train_seq'in kendisi (sadakat): ayni b", res):
         del ctx, model
         torch._dynamo.reset()
@@ -720,26 +593,7 @@ def train_measure(args, config, device):
     write(args.run, "train", res)
 
 
-# ---- birlesik hizlandirma: train_seq'in kendisi, oneriler tek tek ve birlikte
-
-FLEX_BWD_OPTIONS = dict(BLOCK_M1=32, BLOCK_N1=64, BLOCK_M2=64, BLOCK_N2=32)   # train olcumunde en hizli geri yayilim
-
-
-@contextlib.contextmanager
-def flex_options(options):
-    """ONERI: model_y'nin derlenmis flex'i bf16'da (kernel_options None) bu seceneklerle; fp32 yolu degismez."""
-    from torch.nn.attention.flex_attention import flex_attention
-    original = M._flex_compiled
-    M._flex_compiled = torch.compile(
-        lambda q, k, v, block_mask=None, scale=None, kernel_options=None: flex_attention(
-            q, k, v, block_mask=block_mask, scale=scale, kernel_options=kernel_options or options), dynamic=False)
-    torch._dynamo.reset()
-    try:
-        yield
-    finally:
-        M._flex_compiled = original
-        torch._dynamo.reset()
-
+# ---- hizlandirma denemeleri: train_seq'in kendisi (F1)
 
 def data_cost(root, rows, steps=5):
     """Kosudaki veri yolu: adim basina pencere kurma (data_fineweb.windows, CPU) ve cihaza kopya."""
@@ -773,16 +627,14 @@ def tune_measure(args, config, device):
         cpu_ms, copy_ms))
     res = dict(gpu=gpu, torch=torch.__version__, data_windows_ms=cpu_ms, data_copy_ms=copy_ms, variants=[])
     K = args.real or 3
-    variants = (("bugunku", None, None, "fp32"),
-                ("flex geri yayilim bloklari", FLEX_BWD_OPTIONS, None, "fp32"),
-                ("+ 8 parca x 8 satir", FLEX_BWD_OPTIONS, 8, "fp32"),
-                ("+ Newton-Schulz bf16 (DAVRANIS DEGISIR)", FLEX_BWD_OPTIONS, 8, "bf16"))
+    variants = (("bugunku", None, "fp32"),
+                ("8 parca x 8 satir", 8, "fp32"),
+                ("+ Newton-Schulz bf16 (DAVRANIS DEGISIR)", 8, "bf16"))
     base = None
-    for label, options, micro, ns in variants:
+    for label, micro, ns in variants:
         cfg = dict(config, newton_schulz_precision=ns)
         try:
-            with (flex_options(options) if options else contextlib.nullcontext()):
-                info = real_step_ms(cfg, batch, device, K=K, micro=micro, rows=None if micro is None else total_rows // micro)
+            info = real_step_ms(cfg, batch, device, K=K, micro=micro, rows=None if micro is None else total_rows // micro)
         except Exception:
             say("HATA %s: %s" % (label, traceback.format_exc()[-800:]))
             continue
@@ -798,135 +650,6 @@ def tune_measure(args, config, device):
             label, info["step_ms"], 100 * (info["step_ms"] / base - 1), targets / (info["step_ms"] / 1e3), 100 * mfu,
             info["peak_gb"], 2 * K, info["nlls"]))
     write(args.run, "tune", res)
-
-
-# ---- flex'in eğitimdeki tipi (matematikci O1): q, k, v fp32 mi, hangi kernel_options
-
-@contextlib.contextmanager
-def flex_recorder(log):
-    """model_y'nin flex cagrisini kaydeder (tip, kernel_options; derlenmiste izleme aninda), hesap degismez.  queries_keys'in
-    cikti tipi de (q, k: k.to(q.dtype) oncesi)."""
-    flex, qk = M._flex_compiled, M.CausalAttention.queries_keys
-
-    def record_flex(q, k, v, block_mask=None, scale=None, kernel_options=None):
-        log.append(dict(call="flex", q=str(q.dtype), k=str(k.dtype), v=str(v.dtype), kernel_options=kernel_options))
-        return flex(q, k, v, block_mask=block_mask, scale=scale, kernel_options=kernel_options)
-
-    def record_qk(self, x, positions=None):
-        q, k = qk(self, x, positions)
-        log.append(dict(call="queries_keys", x=str(x.dtype), q=str(q.dtype), k=str(k.dtype),
-                        W_value_out=str((x[..., :1, :] @ self.W_value.T).dtype) if self.heads > 1 else None))
-        return q, k
-    M._flex_compiled, M.CausalAttention.queries_keys = record_flex, record_qk
-    torch._dynamo.reset()
-    try:
-        yield
-    finally:
-        M._flex_compiled, M.CausalAttention.queries_keys = flex, qk
-        torch._dynamo.reset()
-
-
-@contextlib.contextmanager
-def flex_cast(dtype=torch.bfloat16, options=None):
-    """ONERI (O1): flex'e fp32 gelen q, k, v autocast tipine (bf16) cevrilir, fp32 icin konan kucuk blok secenegi yerine
-    `options` (None: varsayilan); cikti bf16.  fp32 olmayan cagri ve CPU yolu degismez."""
-    from torch.nn.attention.flex_attention import flex_attention
-    original = M._flex_compiled
-
-    def cast(q, k, v, block_mask=None, scale=None, kernel_options=None):
-        if q.dtype == torch.float32:
-            q, k, v, kernel_options = q.to(dtype), k.to(dtype), v.to(dtype), options
-        return flex_attention(q, k, v, block_mask=block_mask, scale=scale, kernel_options=kernel_options)
-    M._flex_compiled = torch.compile(cast, dynamic=False)
-    torch._dynamo.reset()
-    try:
-        yield
-    finally:
-        M._flex_compiled = original
-        torch._dynamo.reset()
-
-
-def flexdtype_measure(args, config, device):
-    gpu = torch.cuda.get_device_name(0)
-    peak = peak_for(gpu)
-    say("analyze_speed flexdtype | %s | torch %s | %s" % (time.strftime("%Y-%m-%d %H:%M"), torch.__version__, gpu))
-    total_rows = config["batch_size"] * config["micro_batches"]
-    batch = packed_batches(args.data, total_rows, 1, config["seq_len"])[0][0]
-    keys, targets = keys_per_target(batch)
-    res = dict(gpu=gpu, torch=torch.__version__)
-    # 1) gercek egitim yolu: train_seq'in kurulumu, bir parca, autocast bf16; eager ve derlenmis (izleme ani)
-    with guarded("kayit", res):
-        ctx = setup(config, device, config["vocab"])
-        model = ctx["model"]
-        one = tuple(t[0::config["micro_batches"]][:config["batch_size"]].contiguous().to(device) for t in batch)
-        for mode in ("eager", "compiled"):
-            log = []
-            with flex_recorder(log):
-                fn = torch.compile(model.loss, dynamic=False) if mode == "compiled" else model.loss
-                with fwd_context(ctx):
-                    fn(*one)
-            res["record_" + mode] = log[:4]
-            say("KAYIT %s (autocast %s): %s" % (mode, ctx["bf16"], " | ".join(
-                ", ".join("%s=%s" % (k, v) for k, v in e.items()) for e in log[:2])))
-        del ctx, model
-        torch.cuda.empty_cache()
-    # 2) sadakat: egitilmis model, bir satir; fp32 (autocast yok) referans, bugunku autocast, bf16 flex
-    with guarded("sadakat", res):
-        model = I._load_model(args.run, "last").to(device).requires_grad_(True)
-        ids, mask, pos = (t[:1].contiguous().to(device) for t in batch)
-        outs = {}
-        for label, auto, cast in (("fp32 referans", False, False), ("bugunku (autocast)", True, False),
-                                  ("bf16 flex", True, True)):
-            with (flex_cast() if cast else contextlib.nullcontext()):
-                ac = torch.autocast("cuda", dtype=torch.bfloat16) if auto else contextlib.nullcontext()
-                with torch.no_grad(), ac:
-                    logits = model.logits(ids[:, :-1], None, pos[:, :-1]).float()
-                with ac:
-                    total, nll = model.loss(ids, mask, pos)
-                total.backward()
-                grad = torch.cat([p.grad.flatten() for p in model.parameters() if p.grad is not None]).float()
-                model.zero_grad(set_to_none=True)
-            outs[label] = dict(logits=logits, nll=float(nll.detach()), grad=grad)
-        ref, base, var = (outs[k] for k in ("fp32 referans", "bugunku (autocast)", "bf16 flex"))
-        valid = mask[0, 1:]
-
-        def compare(a, b):
-            d = (a["logits"] - b["logits"])[0][valid]
-            return dict(logits_maxdiff=float(d.abs().max()), logits_meandiff=float(d.abs().mean()),
-                        top1_agree=float((a["logits"][0][valid].argmax(-1) == b["logits"][0][valid].argmax(-1)).float().mean()),
-                        nll_diff=a["nll"] - b["nll"], grad_rel=float((a["grad"] - b["grad"]).norm() / b["grad"].norm()))
-        res["fidelity"] = {"bugunku - fp32": compare(base, ref), "bf16 flex - fp32": compare(var, ref),
-                           "bf16 flex - bugunku": compare(var, base)}
-        for k, r in res["fidelity"].items():
-            say("SADAKAT %-22s logits max %.3e ort %.3e | top1 ayni %.4f | nll farki %+.2e | gradyan goreli %.3e" % (
-                k, r["logits_maxdiff"], r["logits_meandiff"], r["top1_agree"], r["nll_diff"], r["grad_rel"]))
-        del model, outs, ref, base, var
-        torch.cuda.empty_cache()
-    # 3) train_seq'in kendisi (F1): ms/adim, bellek, nll yolu (ayni tohum, ayni batch)
-    K = args.real or 3
-    res["variants"] = []
-    base_ms = None
-    for label, cast, options, micro in (("bugunku", False, None, None), ("bf16 flex", True, None, None),
-                                        ("bf16 flex + geri bloklari 32/64/64/32", True, FLEX_BWD_OPTIONS, None),
-                                        ("bf16 flex + 8 parca x 8 satir", True, None, 8)):
-        try:
-            with (flex_cast(options=options) if cast else contextlib.nullcontext()):
-                info = real_step_ms(config, batch, device, K=K, micro=micro,
-                                    rows=None if micro is None else total_rows // micro)
-        except Exception:
-            say("HATA %s: %s" % (label, traceback.format_exc()[-800:]))
-            continue
-        finally:
-            torch._dynamo.reset()
-            torch.cuda.empty_cache()
-        base_ms = base_ms or info["step_ms"]
-        mfu = train_flops(info["flops"], targets, keys) / (info["step_ms"] / 1e3) / peak
-        res["variants"].append(dict(label=label, step_ms=info["step_ms"], peak_gb=info["peak_gb"], mfu=mfu,
-                                    tokens_per_sec=targets / (info["step_ms"] / 1e3), nll_by_step=info["nll_by_step"]))
-        say("%-40s %6.0f ms/adim (%+.1f%%)  %6.0f token/sn  MFU %.1f%%  tepe %.1f GB  nll %s" % (
-            label, info["step_ms"], 100 * (info["step_ms"] / base_ms - 1), targets / (info["step_ms"] / 1e3), 100 * mfu,
-            info["peak_gb"], " ".join("t%d %.6f" % s for s in info["nll_by_step"])))
-    write(args.run, "flexdtype", res)
 
 
 # ---- adim suresi gercek veri sirasiyla (kosu ile olcum arasindaki fark)
@@ -1390,7 +1113,6 @@ def generate_measure(args, config, device):
                     torch.cuda.reset_peak_memory_stats()
                     dec = GraphDecoder(model, pp, n, compile=compile_, autocast=ac)
                     _, ms = timed(lambda: dec.run(n))
-                    eager_ms = None
                     rows.append(dict(B=B, L=L, ms_per_step=ms / (n - 1), tokens_per_sec=B * (n - 1) / (ms / 1e3),
                                      peak_gb=torch.cuda.max_memory_allocated() / 1e9))
                     del dec
@@ -1526,7 +1248,7 @@ def decode_measure(args, config, device):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("run", help="kosu klasoru (config.json)")
-    ap.add_argument("measure", nargs="?", choices=("train", "sizes", "generate", "tune", "flexdtype", "steptrace", "decode"))
+    ap.add_argument("measure", nargs="?", choices=("train", "sizes", "generate", "tune", "steptrace", "decode"))
     ap.add_argument("--data", help="FineWeb koku (gpt2/shard_013 ...); yoksa rastgele token")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--steps", type=int, default=3, help="train: parca parca olculen adim")
@@ -1556,7 +1278,7 @@ def main():
         return
     config = I._config(args.run)
     {"train": train_measure, "sizes": sizes_measure, "generate": generate_measure, "tune": tune_measure,
-     "flexdtype": flexdtype_measure, "steptrace": steptrace_measure,
+     "steptrace": steptrace_measure,
      "decode": decode_measure}[args.measure](
         args, config, args.device)
 
