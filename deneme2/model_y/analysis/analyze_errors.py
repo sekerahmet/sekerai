@@ -1286,7 +1286,7 @@ def measure_training_curve(vocab, eot, args):
     rng = np.random.default_rng(0)
     rand = [rng.integers(1000, 50000, len(x)).tolist() for x in sents[:32]]
     prompts = [[eot] + encode(x, vocab) for x in list(PROMPTS) + [q for q, _, _, _ in QUESTIONS]]
-    prompts += _doc_prompts_from(v, CURVE_DOCS)
+    prompts += _doc_prompts_from(v, args.docs or CURVE_DOCS)
     facts = AC.freq_facts()
     packs = I._checkpoints(args.run)
     points = []
@@ -1625,7 +1625,7 @@ def main(argv=None):
     ap.add_argument("--beam", type=int, default=8, help="answer_split: isin genisligi")
     ap.add_argument("--beam-steps", type=int, default=6, help="answer_split: isin boyu (token)")
     ap.add_argument("--settings", help="decoding: virgulle ayar adlari (varsayilan hepsi)")
-    ap.add_argument("--docs", type=int, default=0, help="decoding: sinav belgesi devami sayisi (ilk yari istem)")
+    ap.add_argument("--docs", type=int, default=0, help="decoding / training_curve: sinav belgesi devami sayisi (ilk yari istem; training_curve 0 = 32)")
     ap.add_argument("--long", type=int, default=0, help="decoding: ornekleme / DRY ayarlarinda tek istemden bu kadar token")
     ap.add_argument("--ablate-tokens", type=int, default=200, help="loop_heads: mudahaleli acgozlu uretim boyu")
     ap.add_argument("--shards", type=int, default=0, help="corpus: ilk K parca (0 = hepsi)")
