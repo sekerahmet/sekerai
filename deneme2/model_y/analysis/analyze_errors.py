@@ -32,6 +32,10 @@
     repeat_entry tekrara GIRIS: valid belgelerinde (ve --corpus-docs ile egitim parcalarinda) taze metin ilk kez tam cumle
                  tekrarina / l >= 8, 16 verbatim kopyaya hangi konumda giriyor, girince kalan metnin tekrar payi; ayni belgelerin
                  yarisindan gercek devam / acgozlu / s 1 / s 0,8 p 0,9 (256 token) ayni olcuyle; giris aninda modelin dagilimi
+    beam_facts   matematikci O13: 312 olguda (analyze_capacity.freq_facts) isin (8 x 6) ve acgozlu ilk token / ilk ayrisan dogru
+                 mu; isin dogru / acgozlu yanlis payi (kendi ciktisinda damitmanin bilgi kolu ust siniri)
+    repeat_chain matematikci O14: tekrar cumlesinden hemen sonraki cumle de tekrar mi (g_S: herhangi bir tekrar / kopyalanan
+                 parcanin devami); cumle sinirinda kopya token'i secilmis mi ve modelin p'si; veri (valid + egitim) ve acgozlu
     symbol_filler  86 element (analyze_capacity.ELEMENTS) x 5 kalip: dogru sembol ve " Cu" olasiligi / sirasi, top1
                  dagilimi (Cu kalibin genel doldurucusu mu); 133 baskentte top1 dagilimi
 
@@ -2049,6 +2053,173 @@ def text_repeat_entry(res):
     return L
 
 
+# ---- O13: isin dogru / acgozlu yanlis
+
+@torch.no_grad()
+def measure_beam_facts(model, vocab, eot, args):
+    import analyze_capacity as AC
+    facts = AC.freq_facts()
+    rows = []
+    dev = next(model.parameters()).device
+    for f in facts:
+        prefix = [eot] + encode(f["prompt"], vocab)
+        answers = [encode(a, vocab) for a in (f["answer"],) + tuple(f.get("also", ()))]
+        z = model.logits(torch.tensor([prefix], device=dev))[0, -1]
+        g = int(z.argmax())
+        beams = _beam(model, prefix, args.beam, args.beam_steps)
+        top = beams[0][0]
+        starts = lambda seq: bool(seq) and any(seq[:len(a)] == a[:len(seq)] for a in answers)   # isin cevapla basliyor
+        texts = [decode(b, vocab) for b, _ in beams]
+        rows.append(dict(kind=f["kind"], prompt=f["prompt"], answer=f["answer"], greedy_first=any(g == a[0] for a in answers),
+                         beam_start=starts(top), beam_any=any(a.strip() in texts[0] for a in (f["answer"],) +
+                                                              tuple(f.get("also", ()))),
+                         beam_in_top8=any(starts(b) for b, _ in beams), beam_text=texts[0], greedy_token=decode([g], vocab)))
+    out = {}
+    for kind in sorted({r["kind"] for r in rows}) + ["all"]:
+        rs = [r for r in rows if kind in ("all", r["kind"])]
+        n = len(rs)
+        cell = lambda a, b: sum((r["greedy_first"] == a) and (r["beam_start"] == b) for r in rs)
+        k = cell(False, True)
+        out[kind] = dict(n=n, greedy_right=round(sum(r["greedy_first"] for r in rs) / n, 4),
+                         beam_right=round(sum(r["beam_start"] for r in rs) / n, 4),
+                         beam_right_greedy_wrong=k, beam_wrong_greedy_right=cell(True, False),
+                         share=round(k / n, 4), share_se=round(math.sqrt(k / n * (1 - k / n) / n), 4),
+                         beam_any=round(sum(r["beam_any"] for r in rs) / n, 4),
+                         beam_in_top8=round(sum(r["beam_in_top8"] for r in rs) / n, 4))
+    return dict(summary=out, beam=args.beam, beam_steps=args.beam_steps,
+                examples=[r for r in rows if r["beam_start"] and not r["greedy_first"]][:12],
+                losses=[r for r in rows if r["greedy_first"] and not r["beam_start"]][:6])
+
+
+def text_beam_facts(res):
+    L = ["# O13: ISIN %d x %d ILE ACGOZLU, 312 OLGU (analyze_capacity.freq_facts)" % (res["beam"], res["beam_steps"]),
+         "dogru = devam dogru cevabin (ya da kabul edilen yazimin) token'lariyla basliyor; acgozlu = ilk token",
+         "tur | n | acgozlu dogru | isin dogru | isin dogru & acgozlu yanlis (pay ± SE) | acgozlu dogru & isin yanlis | "
+         "cevap isin metninde herhangi yerde | ilk 8 isindan biri dogru"]
+    for k, d in res["summary"].items():
+        L.append("%-8s | %d | %.3f | %.3f | %d (%.3f ± %.3f) | %d | %.3f | %.3f" % (
+            k, d["n"], d["greedy_right"], d["beam_right"], d["beam_right_greedy_wrong"], d["share"], d["share_se"],
+            d["beam_wrong_greedy_right"], d["beam_any"], d["beam_in_top8"]))
+    L += ["", "## isin dogru, acgozlu yanlis ornekleri"]
+    L += ["%r -> acgozlu %r | isin %r" % (r["prompt"], r["greedy_token"], r["beam_text"]) for r in res["examples"]]
+    L += ["", "## acgozlu dogru, isin yanlis"]
+    L += ["%r -> acgozlu %r | isin %r" % (r["prompt"], r["greedy_token"], r["beam_text"]) for r in res["losses"]]
+    return L
+
+
+# ---- O14: tekrar cumlesinden sonra yine tekrar
+
+def _chain_stats(x, region_start, is_end, vocab, trace=None):
+    """Bolgede biten tekrar cumlesi i (>= ENTRY_MIN_SENT token, daha once tam gecmis) ve hemen ardindan tam cumle i + 1 icin:
+    any = i + 1 de tekrar; seq = i + 1, i'nin en son onceki gecisinden sonraki cumleyle ayni (kopyalanan parcanin devami);
+    sinir: i'nin son token'inda kopya token'i (en uzun sonek eslesmesinin devami) gercekte / uretimde secilmis mi.
+    -> [dict(any, seq, boundary_pos, copy_token, chose)]"""
+    ell, mm, cp = trace if trace is not None else _match_trace(x)
+    sents = _sentences_of(x, is_end, vocab)
+    last_at, out = {}, []
+    for i, (a, b, key) in enumerate(sents):
+        if key is not None and key in last_at and b >= region_start and i + 1 < len(sents) and sents[i + 1][2] is not None:
+            j = last_at[key]
+            nxt_key = sents[i + 1][2]
+            follow = sents[j + 1][2] if j + 1 < len(sents) else None
+            seen_before = {s_[2] for s_ in sents[:i + 1] if s_[2] is not None}
+            out.append(dict(any=nxt_key in seen_before, seq=follow is not None and nxt_key == follow, boundary=b,
+                            copy=int(cp[b]), chose=bool(cp[b] >= 0 and b + 1 < len(x) and x[b + 1] == cp[b])))
+        if key is not None:
+            last_at[key] = i
+    return out
+
+
+def _chain_summary(rows):
+    n = len(rows)
+    if not n:
+        return dict(n=0)
+    f = lambda k: (round(sum(r[k] for r in rows) / n, 4), round(math.sqrt(sum(r[k] for r in rows) / n *
+                                                                         (1 - sum(r[k] for r in rows) / n) / n), 4))
+    return dict(n=n, g_any=f("any"), g_seq=f("seq"), boundary_copy=f("chose"),
+                has_copy=round(sum(r["copy"] >= 0 for r in rows) / n, 4))
+
+
+@torch.no_grad()
+def _boundary_probs(model, texts, chains):
+    """Cumle sinirinda (tekrar cumlesinin son token'i) modelin p(kopya), kopya top1 mi, en buyuk rakip."""
+    dev = next(model.parameters()).device
+    vals = []
+    for x, rows in zip(texts, chains):
+        rows = [r for r in rows if r["copy"] >= 0]
+        if not rows:
+            continue
+        z = model.logits(torch.tensor([x[:-1]], device=dev))[0].float()
+        pos = torch.tensor([r["boundary"] for r in rows], device=dev)
+        c = torch.tensor([r["copy"] for r in rows], device=dev)
+        P = torch.softmax(z[pos], -1)
+        pc = P.gather(-1, c[:, None])[:, 0]
+        top1 = P.argmax(-1) == c
+        rival = P.scatter(-1, c[:, None], 0.0).max(-1).values
+        vals += torch.stack([pc, top1.float(), rival], -1).cpu().tolist()
+    if not vals:
+        return None
+    a = np.array(vals)
+    return dict(n=len(a), p_copy=round(float(a[:, 0].mean()), 4), top1=round(float(a[:, 1].mean()), 4),
+                rival_p=round(float(a[:, 2].mean()), 4))
+
+
+def measure_repeat_chain(model, vocab, eot, args):
+    import data_fineweb as DF
+    is_end = _sentence_end_table(vocab)
+    v = DF.load_valid(args.data, log=lambda s: None)
+    order = np.random.default_rng(0).permutation(len(v["valid_starts"]))
+    full = [DF.valid_doc(v, int(i))[:2049] for i in order]
+    rows = [r for d in full for r in _chain_stats(d, 1, is_end, vocab)]
+    out = dict(valid=dict(docs=len(full), summary=_chain_summary(rows)))
+    _say("valid: %s" % out["valid"]["summary"])
+    if args.corpus_docs:
+        d0 = os.path.join(args.data, DF.TAG)
+        crow, per = [], max(1, args.corpus_docs // 4)
+        for sh in (0, 3, 6, 9):
+            if not os.path.exists(os.path.join(d0, "shard_%03d.bin" % sh)):
+                continue
+            a = np.memmap(os.path.join(d0, "shard_%03d.bin" % sh), dtype=np.uint16, mode="r")
+            offs = np.load(os.path.join(d0, "shard_%03d_offsets.npy" % sh))
+            for i in np.random.default_rng(sh).choice(len(offs) - 1, per, replace=False):
+                crow += _chain_stats(np.asarray(a[offs[i]:offs[i + 1]][:2049]).tolist(), 1, is_end, vocab)
+        out["corpus"] = dict(docs=per * 4, summary=_chain_summary(crow))
+        _say("corpus: %s" % out["corpus"]["summary"])
+    docs = [d for d in full if len(d) >= 2 * ENTRY_REGION + 1][:args.entry_docs]
+    prompts = [d[:min(len(d) // 2, 1024)] for d in docs]
+    gens = []
+    for i in range(0, len(prompts), 64):
+        gens += generate_batch(model, prompts[i:i + 64], ENTRY_REGION, eot)[0]
+    for name, conts in (("real", [d[len(p):len(p) + ENTRY_REGION] for d, p in zip(docs, prompts)]), ("greedy", gens)):
+        texts = [p + c for p, c in zip(prompts, conts)]
+        chains = [_chain_stats(t, len(p), is_end, vocab) for t, p in zip(texts, prompts)]
+        out[name] = dict(docs=len(texts), summary=_chain_summary([r for c in chains for r in c]),
+                         boundary_model=_boundary_probs(model, texts, chains))
+        _say("%s: %s %s" % (name, out[name]["summary"], out[name]["boundary_model"]))
+    return out
+
+
+def text_repeat_chain(res):
+    L = ["# O14: TEKRAR CUMLESINDEN HEMEN SONRA YINE TEKRAR (g_S)",
+         "cumle / tekrar tanimi repeat_entry (D_032) ile ayni.  Olay: bolgede biten tekrar cumlesi i, ardindan tam cumle i + 1.",
+         "g_any = i + 1 de daha once gecmis bir cumle; g_seq = i + 1, i'nin en son onceki gecisinden sonra gelen cumleyle ayni "
+         "(kopyalanan parca suruyor); sinir kopya = i'nin son token'inda en uzun sonek eslesmesinin devami secilmis",
+         "kaynak | n (olay) | g_any ± SE | g_seq ± SE | sinirda kopya secildi ± SE | sinirda kopya adayi var | model p(kopya) / "
+         "top1 / rakip (n)"]
+    for name in ("valid", "corpus", "real", "greedy"):
+        if name not in res:
+            continue
+        d, bm = res[name]["summary"], res[name].get("boundary_model")
+        if not d.get("n"):
+            L.append("%-7s | 0" % name)
+            continue
+        L.append("%-7s | %d | %.3f ± %.3f | %.3f ± %.3f | %.3f ± %.3f | %.3f | %s" % (
+            name, d["n"], d["g_any"][0], d["g_any"][1], d["g_seq"][0], d["g_seq"][1], d["boundary_copy"][0],
+            d["boundary_copy"][1], d["has_copy"],
+            "%.3f / %.3f / %.3f (%d)" % (bm["p_copy"], bm["top1"], bm["rival_p"], bm["n"]) if bm else "-"))
+    return L
+
+
 # ---- CLI
 
 def _out_dir(run_dir):
@@ -2063,7 +2234,7 @@ def main(argv=None):
     ap.add_argument("measure", choices=("answers", "decoding", "repetition", "loop_heads", "corpus",
                                                "answer_split", "symbol_filler", "cooccur", "training_curve",
                                                "ss_profile", "copy_odds", "copy_calibration", "copy_ceiling",
-                                               "repeat_entry"))
+                                               "repeat_entry", "beam_facts", "repeat_chain"))
     ap.add_argument("--data", required=True, help="FineWeb koku (gpt2/tokenizer.json, gpt2/shard_*.bin)")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--weights", default="last", choices=("last", "ema", "both"))
@@ -2135,6 +2306,12 @@ def main(argv=None):
                 args._model = model
                 res = measure_repeat_entry(True, vocab, eot, args)
                 lines = text_repeat_entry(res)
+            elif args.measure == "beam_facts":
+                res = measure_beam_facts(model, vocab, eot, args)
+                lines = text_beam_facts(res)
+            elif args.measure == "repeat_chain":
+                res = measure_repeat_chain(model, vocab, eot, args)
+                lines = text_repeat_chain(res)
             elif args.measure == "symbol_filler":
                 res = measure_symbol_filler(model, vocab, eot, args)
                 lines = text_symbol_filler(res)
