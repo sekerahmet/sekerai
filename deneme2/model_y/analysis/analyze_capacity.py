@@ -606,6 +606,58 @@ def freq_threshold(count_res, fact_res, key="near", criterion="correct_best_any"
     return L, summary
 
 
+# ---- yon asimetrisi (ajan L, Sorun 3): ayni 6 olay-yil olgusu iki yonde, kapali 6'li aday kumesiyle
+DIRECTION_EVENTS = (
+    ("The French Revolution began in", "1789", " the French Revolution began"),
+    ("The Declaration of Independence was signed in", "1776", " the Declaration of Independence was signed"),
+    ("The Russian Revolution began in", "1917", " the Russian Revolution began"),
+    ("The Berlin Wall fell in", "1989", " the Berlin Wall fell"),
+    ("World War II ended in", "1945", " World War II ended"),
+    ("Christopher Columbus reached the Americas in", "1492", " Christopher Columbus reached the Americas"),
+)
+DIRECTION_PRIORS = ("It happened in", "In that year,")      # aday onselleri: kalibrasyon icin notr istemler
+
+
+def direction_facts():
+    """forward: olay -> yil (6 aday yil); reverse: "In <yil>," -> olay (6 aday olay); prior_*: ayni adaylar notr istemle
+    (kalibre skor = nll(aday | istem) - nll(aday | notr))."""
+    years = [" " + y for _, y, _ in DIRECTION_EVENTS]
+    events = [e for _, _, e in DIRECTION_EVENTS]
+    out = []
+    for k, (prompt, year, event) in enumerate(DIRECTION_EVENTS):
+        out.append(dict(kind="forward", prompt=prompt, answer=years[k], wrong=tuple(y for y in years if y != years[k]),
+                        tail="."))
+        out.append(dict(kind="reverse", prompt="In %s," % year, answer=event, wrong=tuple(e for e in events if e != event),
+                        tail="."))
+    out.append(dict(kind="prior_forward", prompt=DIRECTION_PRIORS[0], answer=years[0], wrong=tuple(years[1:]), tail="."))
+    out.append(dict(kind="prior_reverse", prompt=DIRECTION_PRIORS[1], answer=events[0], wrong=tuple(events[1:]), tail="."))
+    return out
+
+
+def direction_summary(result):
+    """Ham ve kalibre dogruluk (6'li, sans 1/6) ve marj, yon basina."""
+    facts = result["facts"]
+    prior = {}
+    for x in facts:
+        if x["kind"].startswith("prior_"):
+            prior[x["kind"][6:]] = {x["answer"]: x["answer_nll"], **{w["text"]: w["answer_nll"] for w in x["wrong"]}}
+    out = {}
+    for kind in ("forward", "reverse"):
+        acc = cal = 0
+        margins, cal_margins = [], []
+        rows = [x for x in facts if x["kind"] == kind]
+        for x in rows:
+            raw = {x["answer"]: x["answer_nll"], **{w["text"]: w["answer_nll"] for w in x["wrong"]}}
+            adj = {k: v - prior[kind][k] for k, v in raw.items()}
+            for d, store in ((raw, margins), (adj, cal_margins)):
+                store.append(min(v for k, v in d.items() if k != x["answer"]) - d[x["answer"]])
+        out[kind] = dict(n=len(rows), acc=sum(m > 0 for m in margins) / len(rows),
+                         acc_calibrated=sum(m > 0 for m in cal_margins) / len(rows),
+                         margin=sum(margins) / len(rows), margin_calibrated=sum(cal_margins) / len(rows),
+                         margins=[round(m, 3) for m in margins], margins_calibrated=[round(m, 3) for m in cal_margins])
+    return out
+
+
 def _write(args, name, payload):
     out_dir = os.environ.get("KUYRUK_SONUC") or os.path.join(args.run, "analysis")
     os.makedirs(out_dir, exist_ok=True)
@@ -632,7 +684,7 @@ def freq_lines(results, facts):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="analyze_capacity.py", description=__doc__.split("\n\n")[0])
     ap.add_argument("run", help="kosu klasoru")
-    ap.add_argument("measure", choices=("facts", "freq_facts", "freq_count", "freq_threshold"))
+    ap.add_argument("measure", choices=("facts", "freq_facts", "freq_count", "freq_threshold", "direction"))
     ap.add_argument("--data", required=True, help="FineWeb koku (gpt2/tokenizer.json, gpt2/shard_*)")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--steps", default="", help="checkpoint adimlari: '2000,4000' ya da 'every:K' ya da 'all'")
@@ -670,7 +722,7 @@ def main(argv=None):
         print("yazildi: %s" % path)
         return
     config = I._config(args.run)
-    facts = FACTS if args.measure == "facts" else freq_facts()
+    facts = FACTS if args.measure == "facts" else freq_facts() if args.measure == "freq_facts" else direction_facts()
     seqs = build_sequences(tok, eot, facts)
     bad = [s["text"] for s in seqs if not s["joint_ok"]]
     print("olgu %d, aday %d; ayri/birlesik kodlama farkli: %s" % (len(facts), len(seqs), bad or "yok"), flush=True)
@@ -688,13 +740,22 @@ def main(argv=None):
         scores = score(model, seqs, tok, args.device, eot)
         results.append(dict(label=label, step=step, weights=kind, facts=per_fact(seqs, scores, facts),
                             ema_init_share=EMA_DECAY ** step if kind == "ema" and step else None))
+        if args.measure == "direction":
+            results[-1]["direction"] = direction_summary(results[-1])
         print("   %s: dogru en iyi %d / %d" % (label, sum(x["correct_best_any"] for x in results[-1]["facts"]), len(facts)),
               flush=True)
         del model
         if args.device.startswith("cuda"):
             torch.cuda.empty_cache()
-    print("\n".join(summary_lines(results) if args.measure == "facts" else freq_lines(results, facts)))
-    path = _write(args, "capacity_facts" if args.measure == "facts" else "capacity_freq_facts",
+    if args.measure == "direction":
+        print("## yon: 6'li kapali aday, sans 0,17 -- ham / kalibre dogruluk, ortalama marj (nat)")
+        for r in results:
+            print("%-14s %s" % (r["label"][-14:], "   ".join("%s %.2f / %.2f  marj %.2f / %.2f" % (
+                k, v["acc"], v["acc_calibrated"], v["margin"], v["margin_calibrated"]) for k, v in r["direction"].items())))
+    else:
+        print("\n".join(summary_lines(results) if args.measure == "facts" else freq_lines(results, facts)))
+    path = _write(args, dict(facts="capacity_facts", freq_facts="capacity_freq_facts",
+                             direction="capacity_direction")[args.measure],
                   dict(measure=args.measure, run=config.get("name"), selftest=args.selftest, secs=round(time.time() - t0, 1),
                        facts=[dict(f, wrong=list(f["wrong"]), also=list(f.get("also", ()))) for f in facts],
                        token_ids=[dict(fact=s["fact"], candidate=s["candidate"], role=s["role"], ids=s["ids"]) for s in seqs],
