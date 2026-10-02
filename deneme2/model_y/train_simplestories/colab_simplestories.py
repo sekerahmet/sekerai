@@ -167,10 +167,10 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                               optimizer=TR.OPTIMIZER, schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,
                               coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,
                               weight_ema=TR.WEIGHT_EMA, matmul_precision=TR.MATMUL_PRECISION,
-                              coherence_power=TR.COHERENCE_POWER, muon_tangent=TR.MUON_TANGENT,
-                              final_cooldown_shape=TR.FINAL_COOLDOWN_SHAPE, attention_kernel=TR.ATTENTION_KERNEL,
+                              coherence_power=1.0, muon_tangent=True,
+                              final_cooldown_shape=TR.FINAL_COOLDOWN_SHAPE, attention_kernel="math",
                               newton_schulz_precision=TR.NEWTON_SCHULZ_PRECISION, log_cooldown_kappa=TR.LOG_COOLDOWN_KAPPA,
-                              stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
+                              stream_norm=True, layer_norm=False,
                               normalized_update=TR.NORMALIZED_UPDATE if setting in TR.STEP3 else False,
                               sphere_weights=TR.SPHERE_WEIGHTS if setting in TR.STEP3 else False,
                               canon=TR.CANON if setting in TR.STEP3 else False,
@@ -315,8 +315,6 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                                     checkpoint=checkpoint, batches=_counting(DS.batches(data, batch_size, seed, bucket), work),
                                     model_kw=model_kw if keys is None else dict(model_kw, bigram_keys=keys),
                                     **dict(train_kw, matmul_precision=config["matmul_precision"],
-                                           coherence_power=config["coherence_power"], muon_tangent=config["muon_tangent"],
-                                           attention_kernel=config["attention_kernel"],
                                            newton_schulz_precision=config["newton_schulz_precision"]))
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             final = dict(step=steps, valid=ES.exam(model, data, ES.exam_rows(data, None)), subset=ES.exam(model, data, rows),

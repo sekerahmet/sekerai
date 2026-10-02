@@ -8,7 +8,7 @@
                        nll_by_frequency (hedefin train siklik bandina gore)
     exam_train         ayni sinav, boyu sinav hikayelerine eslenmis train hikayelerinde (ezber; epok > 1 karari)
     alpha_summary      tur basina alpha_A ve alpha_F: medyan ve |alpha|'nin en buyugu
-    count_text_errors  sinav hikayelerinin ilk yarisindan acgozlu ve ornekleme devam; metin hatalari (A ajani)
+    count_text_errors  sinav hikayelerinin ilk yarisindan acgozlu ve ornekleme devam; metin hatalari
     texts              sabit istemlerden acgozlu devam, ilk <eos>'ta kesilir -- GOZLE okunur (kural 12)
     loop_check         uretilen metinde tekrar (farkli 4'lu orani, tekrar eden 8'li)
 Son dort olcu ve adlari: kullanici, 29 Eylul: "Önerilerinin hepsi kabul".
@@ -61,9 +61,9 @@ PROMPTS = (
     "tried to play. Alice knelt down and",                                       # 4323 | Helping Others | miniature worlds | humorous
 )
 PROBE_PROMPTS = 4        # her sinavda ilk 4 istem; sonda hepsi
-XAX_LEGIT_MIN = 5        # 'X and X' train'de en az bu kadar geciyorsa legit ("higher and higher" 12.241 kez); A ajani
+XAX_LEGIT_MIN = 5        # 'X and X' train'de en az bu kadar geciyorsa legit ("higher and higher")
 STORY_CONTINUATIONS = 100   # count_text_errors: sabit alt kumenin ilk bu kadar hikayesinin ilk yarisindan devam
-EXAM_TRAIN_STORIES = 128    # exam_train: B ajaninin b6_gap'i (run_review/B_recipe)
+EXAM_TRAIN_STORIES = 128    # exam_train: ezber olcusu icin train hikayesi
 FREQUENCY_BANDS = (64, 512, 2048)    # nll_by_frequency: train siklik sirasi sinirlari (0 = en sik token)
 _LONG_SENTENCE, _LONG_QUOTE = 5, 3   # tekrari sayilan cumle / soz en az bu kadar birim (A)
 _CACHE = {}              # iz basina bir kez: siklik bandi (bincount), exam_train secimi, valid kalip cumleleri
@@ -171,7 +171,7 @@ def exam(model, data, rows, batch_size=None):
 
 def exam_train(model, data):
     """exam'in aynisi, egitimde gorulmus EXAM_TRAIN_STORIES train hikayesinde (ezber olcusu: train - sinav farki).  Secim
-    bir kez, b6_gap ile ayni: exam_rows(data, 128)'in her hikayesine, pencereye sigan train hikayelerinin boya gore sirali
+    bir kez: exam_rows(data, 128)'in her hikayesine, pencereye sigan train hikayelerinin boya gore sirali
     listesinde kendi boyunun yerinden +-200 icinde rastgele biri (tohum 7)."""
     key = ("train_view", data["fingerprint"])
     if key not in _CACHE:
@@ -372,7 +372,7 @@ def _continue_batch(model, prompts, n, sampled, gen, eos, cached):
 
 
 def _count(prompts, continuations, ended, tab, words, xax_ref, stock):
-    """A ajaninin sayaclari (run_review/A_errors/common.errors), devam basina; istem yalniz tekrarin kaynagi."""
+    """Metin hatasi sayaclari, devam basina; istem yalniz tekrarin kaynagi."""
     c, ex = collections.Counter(), dict(xax=[], nonword=[])
     for p, g in zip(prompts, continuations):
         pu, both = DS._units(p, tab), DS._units(p + g, tab)
@@ -415,7 +415,7 @@ def _count(prompts, continuations, ended, tab, words, xax_ref, stock):
 def count_text_errors(model, data, n, count=STORY_CONTINUATIONS, seed=0, real=False):
     """Sabit alt kumenin ilk count hikayesinin ilk yarisindan (story_prompts) devam, en cok n token (pencereye sigacak
     kadar) ya da <eos>: greedy (acgozlu) ve sampled (sicaklik 1, tohum seed); real=True: gercek ikinci yari da; model
-    None: yalniz real.  Her biri (A ajani, BULGULAR_y 1.3 A; hikaye payi, _per1k 1000 token basina olay):
+    None: yalniz real.  Her biri (hikaye payi, _per1k 1000 token basina olay):
       loop             tekrar eden token 8'lisi olan hikaye
       sentence_repeat  istemde ya da devamda once gecmis uzun cumlenin (>= 5 birim, tirnaksiz) birebir tekrari
       quote_repeat     tekrar eden soz (tirnak ici, >= 3 birim)

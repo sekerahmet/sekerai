@@ -81,7 +81,7 @@ TOKENIZERS = dict(  # ss4096 = simple_stories_train tokenizer/simplestories-4096
 _LOADED = {}  # id(vocab) -> (vocab, Tokenizer, eos id); encode / decode tokenizer'i sozlukten bulur
 _UNIT = re.compile(r"\d|[^\W\d_]+|[^\w\s]")   # birim: kelime, tek rakam, tek noktalama (ss4096 on-bolucusu gibi)
 _XWORD = re.compile(r"[a-z']+")
-_XAX_WORDS = 7           # 'X and X'te X en cok bu kadar birim: A ajaninin ifadesi (?:[a-z']+ ){0,6}[a-z']+
+_XAX_WORDS = 7           # 'X and X'te X en cok bu kadar birim: (?:[a-z']+ ){0,6}[a-z']+
 _P = np.uint64(0x9E3779B97F4A7C15)            # metin ozeti carpani (64 bit, tasma sarar)
 _CHUNK = 1 << 24         # train taramasi parca boyu (token)
 _TABLES = {}             # id(vocab) -> (vocab, birim tablosu)

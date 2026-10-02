@@ -11,7 +11,7 @@ hucre hemen doner (kural 8).
 Adim: batch_size satirlik micro_batches parca (gradyan birikimi, train_y.MICRO_BATCHES); micro_batches = adim basina token
 hedefi / (batch_size x SEQ_LEN), coherence'ta cifte yuvarlanir.  Adim sayisi: steps, yoksa token_budget / adimin gercek
 token'i, o da yoksa 1 epok (pencere / adimin satiri).  stop_at: o adimin sinavindan sonra durur (A100 TEST; ayarlar gercek
-kosununki).  Paketli pencere (maskeli paketleme; model_y PACKED_ATTENTION, GPU'da flex_attention).
+kosununki).  Paketli pencere (maskeli paketleme; GPU'da flex_attention).
 OUT/config.json kosu ayarlari (veri, iz, baglam, adim ve token hesabi), OUT/log.txt her sinavin satiri, OUT/exams.json
 butun sinavlar (sinav alt kumesinde nll / acc / bpb ve konum bantlari, ilk PROBE_PROMPTS istemin metni, calisma), OUT/model.pt
 son agirlik, OUT/final.json sonda butun valid + alt kume + uzun belgeler (exam_long, 16k) + butun istemler + valid
@@ -59,11 +59,6 @@ CANDIDATES = (("d1024_6x2", dict(d=1024, layers=6, turns=12, heads=8, units=2752
 BATCH_SIZE = 8           # parca basina satir (SEQ_LEN token); A100 TEST'le bellege gore secilir
 TOKENS_PER_STEP = 64 * 8192   # adim basina token hedefi: 64 x 8.192 ~ 0,5M
 SAVE_EVERY = 500
-# ON KOSU (L4; kullanici, 30 Eylul: "kod gelince L4'te küçük modelle ... ~1 saatlik, ~200M token'lık bir ön koşu. ve detaylı
-# analiz", baglam 4.096): uctan uca hata yakalamak -- veri, maske, sinav, surdurme, metin.  lr peak_lr(384) = 0,01
-# valid_shard 1: tokenize bitmeden (shard_013 yokken) baslayabilsin; egitim yalniz shard_000'dan (200M < 0,7G)
-PILOT = dict(name="fineweb_modely_3x2_d384_gpt2_pilot_s0", seq_len=4096, token_budget=200e6, tokens_per_step=16 * 4096,
-             batch_size=8, valid_shard=1, model_kw=dict(d=384, layers=3, turns=6, heads=4, units=1024))
 PROBE_TOKENS = "auto"    # her sinavda istem basina uretilen token; "auto" = EF.typical_doc_tokens (valid medyan belge, 641;
                          # kullanici, 1 Ekim: "bir ölçeğe uydur").  1 Ekim'e kadar 64 (olculmemis).  Config'e girmez: log'da
 FINAL_TOKENS = "auto"    # sonda sabit istem basina, ayni kural (1 Ekim'e kadar 256); belge devami: belgenin kalani kadar
@@ -139,14 +134,14 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
     ayni olmali.  stop_at: o adimin sinavindan sonra model.pt yazilir ve durur (config'e girmez)."""
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
-    assert setting in TR.STEP3, "paketli pencere yalniz BlockModel (setting shared / separate)"
+    assert setting in TR.STEP3, "paketli pencere yalniz BlockModel (setting shared)"
     assert "micro_batches" not in train_kw, "micro_batches plan'dan (tokens_per_step / batch_size)"
     model_kw = dict(dict(d=M.D, turns=M.TURNS, layers=M.LAYERS, shared_facts=M.SHARED_FACTS, heads=M.HEADS,
                          fact_activation=M.FACT_ACTIVATION, learn_output_scale=M.LEARN_OUTPUT_SCALE, output_link=M.OUTPUT_LINK,
                          units=M.FACT_UNITS, t_max=data["seq_len"], anchor=M.ANCHOR, loss_chunk=M.LOSS_CHUNK,
                          last_facts_alpha_init=M.LAST_FACTS_ALPHA_INIT, input_embedding=M.INPUT_EMBEDDING,
                          input_bigrams=0, first_turn_facts=M.FIRST_TURN_FACTS,
-                         input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE, packed_attention=M.PACKED_ATTENTION,
+                         input_embedding_sphere=M.INPUT_EMBEDDING_SPHERE,
                          attention_log_scale=M.ATTENTION_LOG_SCALE, rope_base=M.ROPE_BASE),
                     **dict(MODEL_KW, **(model_kw or {})))
     if model_kw.get("rope_base") == "auto":      # config'e SAYI yazilir: formul sonra degisse de kosu ayni tabanla kurulur
@@ -160,16 +155,17 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
                   packing=DF.PACKING, tag=data["tag"], fingerprint=data["fingerprint"], shards=data["shards"],
                   seq_len=data["seq_len"], vocab=len(data["vocab"]),
                   exam_docs=len(data["exam"]), valid_docs=len(data["valid_starts"]), token_budget=token_budget,
-                  tokens_per_step=tokens_per_step, batch_size=batch_size, save_every=save_every, model_kw=model_kw,
+                  tokens_per_step=tokens_per_step, batch_size=batch_size, save_every=save_every,
+                  model_kw=dict(model_kw, packed_attention="flex"),   # kaldirilan secenekler config'te sabit degerle: surdurme
                   **steps_plan,
                   **dict(dict(lr=TR.LR, lr_floor=TR.LR_FLOOR, grad_clip=TR.GRAD_CLIP, weight_decay=TR.WEIGHT_DECAY,
                               optimizer=TR.OPTIMIZER, schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,
                               coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,
                               weight_ema=TR.WEIGHT_EMA, matmul_precision=TR.MATMUL_PRECISION,
-                              coherence_power=TR.COHERENCE_POWER, muon_tangent=TR.MUON_TANGENT,
-                              final_cooldown_shape=TR.FINAL_COOLDOWN_SHAPE, attention_kernel=TR.ATTENTION_KERNEL,
+                              coherence_power=1.0, muon_tangent=True,
+                              final_cooldown_shape=TR.FINAL_COOLDOWN_SHAPE, attention_kernel="math",
                               newton_schulz_precision=TR.NEWTON_SCHULZ_PRECISION, log_cooldown_kappa=TR.LOG_COOLDOWN_KAPPA,
-                              stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM, normalized_update=TR.NORMALIZED_UPDATE,
+                              stream_norm=True, layer_norm=False, normalized_update=TR.NORMALIZED_UPDATE,
                               sphere_weights=TR.SPHERE_WEIGHTS, canon=TR.CANON, rope=TR.ROPE), **train_kw))
     steps, per_epoch, rows = config["steps"], config["steps_per_epoch"], config["rows_per_step"]
     checkpoint = None
@@ -328,12 +324,12 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
                 note("SURDURULDU adim %d'den (checkpoint_t%06d.pt)" % (checkpoint["step"], checkpoint["step"]))
             else:
                 note("veri fineweb-edu %s iz %s  parca %s  sozluk %d  baglam %d  pencere %d (best-fit, dolgu %%%.2f) | adim %d "
-                     "x %d satir (%d parca x %d) = %d token, %d adim = %.2fG token = %.3f epok | sinav %d belge | %s  "
+                     "x %d satir (%d parca x %d) = %d token, %d adim = %.2fG token = %.3f epok | sinav %d belge | flex  "
                      "loss_chunk %s  matmul %s  compile %s" % (
                          data["tag"], data["fingerprint"], data["shards"], len(data["vocab"]), data["seq_len"],
                          config["windows"], 100 * config["padding"], steps, rows, config["micro_batches"], batch_size,
                                      config["step_tokens"], steps, steps * config["step_tokens"] / 1e9, config["epochs"],
-                                     len(data["exam"]), model_kw["packed_attention"], model_kw["loss_chunk"],
+                                     len(data["exam"]), model_kw["loss_chunk"],
                                      config["matmul_precision"], compile))
             model, _ = TR.train_seq(setting, None, None, len(data["vocab"]), steps=steps, seed=seed, device=device,
                                     every=every, callback=callback, log_at=(), compile=compile, save_every=save_every,
@@ -341,8 +337,6 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
                                     batches=_counting(DF.batches(data, rows, seed), work), model_kw=model_kw,
                                     **dict(train_kw, micro_batches=config["micro_batches"],
                                            matmul_precision=config["matmul_precision"],
-                                           coherence_power=config["coherence_power"], muon_tangent=config["muon_tangent"],
-                                           attention_kernel=config["attention_kernel"],
                                            newton_schulz_precision=config["newton_schulz_precision"]))
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             final = dict(step=steps, **final_exam(model))

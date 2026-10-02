@@ -134,8 +134,8 @@ def _plan(model, case=None):
 
 
 def _run(model, h, plan, taps=None, start=0):
-    """Turlar start..TURNS-1; h tur start'in girdisi (B, T, d) -> son durum.  Block.forward'in aynisi (paylasilan / ayri
-    blok, SHARED_FACTS, Canon, head'ler, normalized_update, stream_norm, LayerNorm) + mudahale (plan) + kayit:
+    """Turlar start..TURNS-1; h tur start'in girdisi (B, T, d) -> son durum.  Block.forward'in aynisi (LAYERS Block,
+    SHARED_FACTS, Canon, head'ler, normalized_update) + mudahale (plan) + kayit:
     taps[ad](tur, deger), ad: input, canon (ek, girdi), attention (B, H, T, T), heads (B, H, T, dh), attention_out, units,
     facts_out.  attention kaydi istenirse softmax acik hesaplanir (CausalAttention.weights), degilse SDPA."""
     taps = taps or {}
@@ -143,10 +143,9 @@ def _run(model, h, plan, taps=None, start=0):
     for t in range(start, model.turns):
         blk = blocks[t]
         at = blk.attention
-        norm_a, norm_f = (blk.norm_attention, blk.norm_facts) if blk.layer_norm else (_unit, _unit)
         if "input" in taps:
             taps["input"](t, h)
-        x = h if blk.stream_norm else norm_a(h)
+        x = h
         if blk.canon:                                  # x_t + sum_k w_k x_(t-k), baslangictan once 0
             w = blk.canon_weights
             if t in plan["canon"]:
@@ -190,15 +189,13 @@ def _run(model, h, plan, taps=None, start=0):
             if added is not None:
                 a_att = model.alpha_attention[t] if plan["alpha_attention"] is None else plan["alpha_attention"][t]
                 h = _unit(h + a_att * (_unit(added) - h))
-        elif blk.stream_norm:
-            h = norm_a(h if added is None else h + added)
-        elif added is not None:
-            h = h + added
+        else:
+            h = _unit(h if added is None else h + added)
         if "attention_out" in taps:
             taps["attention_out"](t, h)
         f = _turn_facts(model, t)
         if t not in plan["skip_facts"] and f is not None:
-            v = h if blk.stream_norm else norm_f(h)
+            v = h
             if blk.sphere_weights:
                 v = v * v.shape[-1] ** 0.5
             u = _units(f, v)
@@ -208,12 +205,10 @@ def _run(model, h, plan, taps=None, start=0):
             if blk.normalized_update:                  # h = norm(h + α_F ⊙ (norm(olgu) - h))
                 a_f = model.alpha_facts[t] if plan["alpha_facts"] is None else plan["alpha_facts"][t]
                 h = _unit(h + a_f * (_unit(out) - h))
-            elif blk.stream_norm:
-                h = norm_f(h + out)
             else:
-                h = h + out
-        elif f is not None and blk.stream_norm and not blk.normalized_update:   # mudahale: katki 0; model atlamasi normsuz
-            h = norm_f(h)
+                h = _unit(h + out)
+        elif f is not None and not blk.normalized_update:   # mudahale: katki 0; model atlamasi normsuz
+            h = _unit(h)
         if "facts_out" in taps:
             taps["facts_out"](t, h)
     return h
@@ -222,11 +217,7 @@ def _run(model, h, plan, taps=None, start=0):
 def _scores(model, h, P=None):
     """Cikis basligi (BlockModel.logits ile ayni): e^tau phi(<h, PL>); ara durumlara uygulaninca logit lens."""
     P = model.tokens.points() if P is None else P
-    if model.layer_norm:
-        return model.norm_final(h) @ P.T
-    if not model.stream_norm:
-        h = _unit(h)
-    scale = (model.scale * torch.exp(model.log_output_scale - math.log(model.scale)) if model.learn_output_scale
+    scale =(model.scale * torch.exp(model.log_output_scale - math.log(model.scale)) if model.learn_output_scale
              else model.scale)
     if model.output_link:
         c = h @ P.T
@@ -668,13 +659,11 @@ def ablate(model, ids_or_stories, cases, reference=None, exclude_last=True, batc
 
 
 def _lens(model, h, P, W=None, b=None):
-    """Lens skoru: cevirici h + W h + b (W, b yoksa birim), sonra modelin cikis basligi.  Akis normunda girdi kureye
-    indirilir (son durum da kurede; tuned lens'teki son LayerNorm'un karsiligi)."""
+    """Lens skoru: cevirici h + W h + b (W, b yoksa birim), sonra modelin cikis basligi.  Girdi kureye indirilir (son
+    durum da kurede; tuned lens'teki son LayerNorm'un karsiligi)."""
     if W is not None:
         h = h + h @ W.T + b
-    if model.stream_norm and not model.layer_norm:
-        h = _unit(h)
-    return _scores(model, h, P)
+    return _scores(model, _unit(h), P)
 
 
 @contextlib.contextmanager
@@ -795,21 +784,24 @@ def _checkpoints(run_dir):
 
 
 def _model_kw(config):
-    """config'teki model_kw; output_link / shared_facts yazilmamis eski config'lerde yoktu (colab_simplestories'in
-    surdurmesi gibi)."""
-    return dict(dict(output_link=False, shared_facts=True, input_embedding=False, input_bigrams=0, first_turn_facts=True,
-                     input_embedding_sphere=False, rope_base=10000.0), **config.get("model_kw", {}))
+    """config'teki model_kw: eski config'lerde yazilmamis anahtarlar o gunun degeriyle; kaldirilan secenegin anahtari
+    tek kalan davranisin degerini tasiyorsa atilir, baska degerdeyse kosu kurulamaz (sessizce farkli model kurulmasin)."""
+    kw = dict(dict(output_link=False, shared_facts=True, input_embedding=False, input_bigrams=0, first_turn_facts=True,
+                   input_embedding_sphere=False, rope_base=10000.0), **config.get("model_kw", {}))
+    for key, only in (("packed_attention", "flex"),):
+        value = kw.pop(key, only)
+        assert value == only, "%s=%r kaldirildi (yalniz %r): bu kosu bugunku kodla kurulamaz" % (key, value, only)
+    return kw
 
 
 def _build(config):
     """config.json -> bos BlockModel (agirliklar sonra yuklenir)."""
     setting = config.get("setting", "shared")
-    assert setting in ("shared", "separate"), "yalniz BlockModel (setting shared / separate), bu kosu: %s" % setting
-    kw = _model_kw(config)
-    return BlockModel(config["vocab"], seed=config.get("seed", 0), stream_norm=config["stream_norm"],
-                      layer_norm=config["layer_norm"], rope=config["rope"], shared=setting == "shared",
+    assert setting == "shared", "yalniz BlockModel (setting shared), bu kosu: %s" % setting
+    assert config["stream_norm"] and not config["layer_norm"], "normsuz akis / LayerNorm kaldirildi: bu kosu kurulamaz"
+    return BlockModel(config["vocab"], seed=config.get("seed", 0), rope=config["rope"],
                       normalized_update=config["normalized_update"], sphere_weights=config["sphere_weights"],
-                      canon=config["canon"], **kw)
+                      canon=config["canon"], **_model_kw(config))
 
 
 def _load_weight_ema(model, optimizer_state, config):
@@ -952,7 +944,7 @@ def _train_kwargs(config):
 
 
 def _forward_context(ctx):
-    """train_seq'in ileri hesap baglami: compile kilidi, SDPA cekirdegi (attention_kernel), bf16 autocast (GPU)."""
+    """train_seq'in ileri hesap baglami: compile kilidi, SDPA cekirdegi, bf16 autocast (GPU)."""
     stack = contextlib.ExitStack()
     if ctx["compile"]:
         stack.enter_context(ctx["TR"].COMPILE_LOCK)
@@ -983,9 +975,7 @@ def _profile_setup(config, cached, device):
                 unit_axis={k: int(k.split(".")[-1] in rows) for k, _ in named if sphere and k.split(".")[-1] in rows + cols},
                 split=get("schedule") == "coherence", grad_clip=get("grad_clip"), ema=getattr(model, "weight_ema", None),
                 compile=compile, loss_fn=torch.compile(model.loss) if compile else model.loss,
-                bf16=cuda and get("matmul_precision") == "bf16", tf32=cuda and get("matmul_precision") == "tf32",
-                kernels=([SDPBackend.MATH] if not cuda or get("attention_kernel") == "math" else     # train_seq gibi
-                         [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]))
+                bf16=cuda and get("matmul_precision") == "bf16", kernels=[SDPBackend.MATH])      # train_seq gibi
 
 
 def _step_parts(ctx, ids, mask, clock):
@@ -1142,8 +1132,6 @@ def profile_step(config, batches, steps=5, device="cpu", real=True, ops=0, log=N
     try:
         ctx = _profile_setup(config, cached, device)
         model, clock = ctx["model"], _Clock(device)
-        if ctx["tf32"]:
-            torch.set_float32_matmul_precision("high")
         for i in range(2 * steps):                       # ilk tur isinma
             a = clock.now()
             _step_parts(ctx, *cached[i % steps], clock)
@@ -1171,7 +1159,7 @@ def profile_step(config, batches, steps=5, device="cpu", real=True, ops=0, log=N
         flops = [_step_flops(model, ids) for ids, _ in cached]
         kw = _train_kwargs(config)
         setup = dict(run=config.get("name"), device=str(device), gpu=torch.cuda.get_device_name(0) if ctx["cuda"] else None,
-                     compile=ctx["compile"], precision="bf16" if ctx["bf16"] else "tf32" if ctx["tf32"] else "fp32",
+                     compile=ctx["compile"], precision="bf16" if ctx["bf16"] else "fp32",
                      split=ctx["split"], optimizer=type(ctx["opt"]).__name__,
                      weight_ema=None if ctx["ema"] is None else ctx["ema"]["decay"],
                      params=sum(p.numel() for p in ctx["params"]), batches=[list(ids.shape) for ids, _ in cached],

@@ -68,9 +68,9 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                               optimizer=TR.OPTIMIZER, schedule=TR.SCHEDULE, cooldown=TR.COOLDOWN,
                               coherence_window=TR.COHERENCE_WINDOW, final_cooldown=TR.FINAL_COOLDOWN,
                               weight_ema=TR.WEIGHT_EMA, matmul_precision=TR.MATMUL_PRECISION,
-                              coherence_power=TR.COHERENCE_POWER, muon_tangent=TR.MUON_TANGENT,
+                              coherence_power=1.0, muon_tangent=True,
                               final_cooldown_shape=TR.FINAL_COOLDOWN_SHAPE,
-                              stream_norm=TR.STREAM_NORM, layer_norm=TR.LAYER_NORM,
+                              stream_norm=True, layer_norm=False,
                               normalized_update=TR.NORMALIZED_UPDATE if setting in TR.STEP3 else False,
                               sphere_weights=TR.SPHERE_WEIGHTS if setting in TR.STEP3 else False,
                               canon=TR.CANON if setting in TR.STEP3 else False,
@@ -174,8 +174,7 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
             model, _ = TR.train_seq(setting, None, None, len(vocab), steps=steps, seed=seed, device=device, every=every,
                                     callback=callback, log_at=(), compile=compile, save_every=save_every, save=save,
                                     checkpoint=checkpoint, batches=DT.batches(data, batch_size, seed, bucket), model_kw=model_kw,
-                                    **dict(train_kw, matmul_precision=config["matmul_precision"],
-                                           coherence_power=config["coherence_power"], muon_tangent=config["muon_tangent"]))
+                                    **dict(train_kw, matmul_precision=config["matmul_precision"]))
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             final = dict(step=steps, valid=ET.exam(model, data, ET.exam_rows(data, None)), subset=ET.exam(model, data, rows))
             final["prompts"] = ET.texts(model, data, [[eos] + DT.encode(p, vocab) for p in ET.PROMPTS], FINAL_TOKENS)

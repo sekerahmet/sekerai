@@ -490,7 +490,7 @@ def t_colab(data, root):
           and cfg["seq_len"] == SEQ and cfg["micro_batches"] == 2 and cfg["steps"] == 3 and cfg["step_tokens"] == 4 * SEQ
           and cfg["lr"] == C.peak_lr(16) and cfg["schedule"] == "coherence" and cfg["model_kw"]["units"] == 16
           and cfg["model_kw"]["t_max"] == SEQ and cfg["model_kw"]["attention_log_scale"] is True
-          and cfg["model_kw"]["packed_attention"] == M.PACKED_ATTENTION
+          and cfg["model_kw"]["packed_attention"] == "flex"
           and cfg["model_kw"]["rope_base"] == M.rope_base_for(16 // 2, SEQ)       # "auto" config'e sayi olarak
           and [e["step"] for e in ex] == [0, 1, 2, 3] and len(ex[0]["bands"]) == len(EF.BANDS)
           and len(ex[0]["texts"]) == EF.PROBE_PROMPTS and "repeats" in ex[0] and "weight_ema" in ex[1]

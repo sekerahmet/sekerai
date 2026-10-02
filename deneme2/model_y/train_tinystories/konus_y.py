@@ -109,8 +109,8 @@ def load_model(run_dir, n_vocab, averaged=False):
                    input_embedding_sphere=False, rope_base=10000.0), **kw)   # 29-30 Eylul oncesi config'lerde yazilmadi
     assert not kw.pop("output_skip", False), "output_skip (28 Eylul) kaldirildi"
     assert not cfg.get("copy_path"), "kopya yolu (Oneri A) 28 Eylul'de kaldirildi"
-    m = BlockModel(n_vocab, seed=0, stream_norm=cfg.get("stream_norm", True),
-                   layer_norm=cfg.get("layer_norm", False), rope=cfg.get("rope", True), shared=cfg["setting"] == "shared",
+    assert cfg["setting"] == "shared" and not cfg.get("layer_norm"), "ayri blok / LayerNorm kaldirildi: bu kosu kurulamaz"
+    m = BlockModel(n_vocab, seed=0, stream_norm=cfg.get("stream_norm", True), rope=cfg.get("rope", True),
                    normalized_update=cfg.get("normalized_update", False), sphere_weights=cfg.get("sphere_weights", False),
                    canon=cfg.get("canon", False), **kw)
     name = "model_weight_ema.pt" if averaged else "model.pt"
