@@ -701,11 +701,21 @@ def _text_pass_swap(res):
 
 # ---- 5. extras: mudahaleli elle ileri hesap (ortalama / yeniden ornekleme), sabit yonler, q.k yayilimi
 
-def _turn_mod(model, t, h, mod=None, ref=None, donor_ok=None, rec=None):
+def _turn_mod(model, t, h, mod=None, ref=None, donor_ok=None, rec=None, norms=None):
     """_turn + mudahale ve kayit.  mod anahtarlari: skip_A, heads {h: 'mean'|'resample'}, canon_prev / canon_self
     'mean'|'zero' (Canon'un k>=1 / k=0 terimi), canon_all 'mean', facts 'skip'|'mean'|'resample'.  'resample': ayni
-    batch'te bir sonraki belgenin (roll 1) ayni konumdaki degeri; o konum o belgede yoksa ortalama.  rec: kayit."""
+    batch'te bir sonraki belgenin (roll 1) ayni konumdaki degeri; o konum o belgede yoksa ortalama.  A_const / F_const (d,):
+    alt blok ciktisi (norm oncesi) bu sabit vektor.  rec: kayit (rec['norm'](anahtar, boy): butun norm carpanlari).
+    norms {anahtar: boy}: verilen anahtarlarda norm carpani bu sabit (donmus normalizasyon, Rushing 2024)."""
     mod, rec = mod or {}, rec or {}
+
+    def nrm(v, key):
+        if norms is not None and key in norms:
+            return v / norms[key]
+        n = v.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        if "norm" in rec:
+            rec["norm"](key, n)
+        return v / n
     blk = model.turn_blocks()[t]
     at = blk.attention
     assert blk.canon, "extras: Canon'lu kosu"
@@ -740,10 +750,15 @@ def _turn_mod(model, t, h, mod=None, ref=None, donor_ok=None, rec=None):
                 c[:, hh] = m
             else:
                 c[:, hh] = torch.where(donor_ok[..., None], c[:, hh].roll(1, 0), m)
-        added = _unit(c.transpose(-3, -2).flatten(-2) @ at.W_context.T)
+        added = c.transpose(-3, -2).flatten(-2) @ at.W_context.T
+        if "A_const" in mod:
+            added = mod["A_const"].expand_as(added)
+        if "out_A" in rec:
+            rec["out_A"](t, added)
+        added = nrm(added, (t, "uA"))
         if "upd_A" in rec:
             rec["upd_A"](t, added, h)
-        h = _unit(h + model.alpha_attention[t] * (added - h))
+        h = nrm(h + model.alpha_attention[t] * (added - h), (t, "hA"))
     f = I._turn_facts(model, t)
     if f is not None and mod.get("facts") != "skip":
         u = I._units(f, h * h.shape[-1] ** 0.5)
@@ -755,9 +770,11 @@ def _turn_mod(model, t, h, mod=None, ref=None, donor_ok=None, rec=None):
             out = ref["out"][t].expand_as(out)
         elif how == "resample":
             out = torch.where(donor_ok[..., None], out.roll(1, 0), ref["out"][t])
+        if "F_const" in mod:
+            out = mod["F_const"].expand_as(out)
         if "out" in rec:
             rec["out"](t, out)
-        h = _unit(h + model.alpha_facts[t] * (_unit(out) - h))
+        h = nrm(h + model.alpha_facts[t] * (nrm(out, (t, "uF")) - h), (t, "hF"))
     return h
 
 
@@ -993,6 +1010,165 @@ def _text_extras(res, decode):
     return L
 
 
+# ---- 6. repair: donmus normalizasyon (Rushing 2024), optimal sabit (Li & Janson 2024), sink head'lerin belge dagilimi
+
+REPAIR_PARTS = (("A", 0), ("A", 4), ("A", 7), ("F", 1), ("F", 15), ("A", 14), ("A", 15))
+
+
+def _pre_norm_means(model, stories, batch):
+    """Alt blok ciktilarinin (norm oncesi: W_context c, W_fact_out u) gecerli konum ortalamasi {(tur, 'A'|'F'): (d,)}."""
+    P = model.tokens.points()
+    sums, n = {}, 0
+    for x, valid, idx in _stories_batches(stories, batch, P.device):
+        rec = {"out_A": lambda t, o: sums.__setitem__((t, "A"), sums.get((t, "A"), 0) + o[valid].double().sum(0)),
+               "out": lambda t, o: sums.__setitem__((t, "F"), sums.get((t, "F"), 0) + o[valid].double().sum(0))}
+        h = model.input_states(x[:, :-1])
+        with torch.no_grad():
+            for t in range(model.turns):
+                h = _turn_mod(model, t, h, rec=rec)
+        n += int(valid.sum())
+    return {k: (v / n).to(P.dtype) for k, v in sums.items()}
+
+
+def _const_key(kind):
+    return "A_const" if kind == "A" else "F_const"
+
+
+def _fit_constant(model, stories, part, init, steps=150, batch=4, lr=0.02, seed=0, log=print):
+    """Optimal ablation: alt blok ciktisi yerine kaybi en aza indiren sabit yon (model donuk).  init: ortalama."""
+    kind, t = part
+    P = model.tokens.points().detach()
+    data = list(_stories_batches(stories, batch, P.device))
+    z = init.detach().clone().float().requires_grad_(True)
+    opt = torch.optim.Adam([z], lr=lr * float(init.norm()))
+    rng = np.random.default_rng(seed)
+    curve = []
+    for step in range(steps):
+        x, valid, _ = data[rng.integers(len(data))]
+        inp, y = x[:, :-1], x[:, 1:]
+        with torch.no_grad():
+            h = model.input_states(inp)
+            for tt in range(t):
+                h = _turn_mod(model, tt, h)
+        with torch.enable_grad():
+            for tt in range(t, model.turns):
+                h = _turn_mod(model, tt, h, {_const_key(kind): z} if tt == t else None)
+            z_ = I._scores(model, h, P)
+            loss = F.cross_entropy(z_[valid].float(), y[valid])
+        for g in opt.param_groups:
+            g["lr"] = lr * float(init.norm()) * (1 - step / steps)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+        curve.append(float(loss))
+    log("optimal sabit %s%d: kayip ilk 10 adim %.3f, son 10 adim %.3f" % (kind, t + 1, np.mean(curve[:10]), np.mean(curve[-10:])))
+    return z.detach(), dict(first=float(np.mean(curve[:10])), last=float(np.mean(curve[-10:])))
+
+
+@torch.no_grad()
+def _repair_eval(model, test, cases, batch):
+    """cases: [(ad, aciklama, tur, mod, donmus mu)] -> paired Δ.  Donmus: mudahale turundan sonraki butun norm carpanlari
+    temiz kosudaki degerinde (dogrudan etki; normalizasyon uzerinden telafi yok)."""
+    P = model.tokens.points()
+    S = len(test)
+    names = ["base"] + [c[0] for c in cases]
+    sums = {k: dict(nll_sum=np.zeros(S), hit_sum=np.zeros(S), count=np.zeros(S)) for k in names}
+    for x, valid, idx in _stories_batches(test, batch, P.device):
+        inp, y = x[:, :-1], x[:, 1:]
+        clean_norms = {}
+        rec = {"norm": lambda k, n: clean_norms.__setitem__(k, n)}
+        hs = [model.input_states(inp)]
+        for t in range(model.turns):
+            hs.append(_turn_mod(model, t, hs[-1], rec=rec))
+
+        def put(name, h):
+            a, b, c = I._score_rows(I._scores(model, h, P), y, valid)
+            sums[name]["nll_sum"][idx], sums[name]["hit_sum"][idx], sums[name]["count"][idx] = a, b, c
+        put("base", hs[-1])
+        for name, _, t, mod, frozen in cases:
+            h = hs[t]
+            for tt in range(t, model.turns):
+                fz = {k: v for k, v in clean_norms.items() if k[0] > t} if frozen else None
+                h = _turn_mod(model, tt, h, mod if tt == t else None, norms=fz)
+            put(name, h)
+    base = sums["base"]
+    N = base["count"].sum()
+    return dict(base=dict(nll=float(base["nll_sum"].sum() / N), acc=float(base["hit_sum"].sum() / N), n=int(N)),
+                rows=[dict(case=n, words=w, nll=float(sums[n]["nll_sum"].sum() / N), **I._paired(base, sums[n]))
+                      for n, w, _, _, _ in cases])
+
+
+@torch.no_grad()
+def _sink_by_document(model, stories, heads=((14, 3), (15, 2)), batch=4):
+    """Head basina belge basina konum 0 kutlesi (gecerli sorgularda ortalama)."""
+    P = model.tokens.points()
+    out = {h: np.zeros(len(stories)) for h in heads}
+    for x, valid, idx in _stories_batches(stories, batch, P.device):
+        def on_attention(t, a):
+            for (tt, hh) in heads:
+                if tt == t:
+                    m = (a[:, hh, :, 0].double() * valid).sum(-1) / valid.sum(-1).clamp(min=1)
+                    out[(tt, hh)][idx] = m.cpu().numpy()
+        I._run(model, model.input_states(x[:, :-1]), I._plan(model), dict(attention=on_attention))
+    return out
+
+
+def repair(model, test, fit, reference, decode, batch=8, steps=150, parts=REPAIR_PARTS, sink_heads=((14, 3), (15, 2)),
+           log=print):
+    """Ayni alt bloklarda dort kapatma: atla, atla + donmus normalizasyon, ortalama, optimal sabit; sink head'lerin belge
+    basina konum 0 kutlesi.  BAGIMLILIK olcer."""
+    t0 = time.time()
+    H = model.blocks[0].attention.heads
+    parts = [(k, t) for k, t in parts if t < model.turns and (k == "A" or I._turn_facts(model, t) is not None)]
+    sink_heads = tuple((t, h) for t, h in sink_heads if t < model.turns and h < H)
+    means = _pre_norm_means(model, reference, batch)
+    log("ortalamalar (%.0f sn)" % (time.time() - t0))
+    cases, fits = [], {}
+    for kind, t in parts:
+        lab = "%s%d" % (kind, t + 1)
+        skip = dict(skip_A=True) if kind == "A" else dict(facts="skip")
+        z, curve = _fit_constant(model, fit, (kind, t), means[(t, kind)], steps=steps, log=log)
+        fits[lab] = dict(curve, cos_mean=float(F.cosine_similarity(z, means[(t, kind)].float(), dim=0)))
+        cases += [(lab + " atla", "alt blok yok", t, skip, False),
+                  (lab + " atla+donuk", "alt blok yok, sonraki norm carpanlari temiz", t, skip, True),
+                  (lab + " ortalama", "cikti ortalama vektor (norm oncesi)", t, {_const_key(kind): means[(t, kind)]}, False),
+                  (lab + " optimal", "cikti ogrenilen sabit (Li & Janson 2024)", t, {_const_key(kind): z}, False)]
+    log("sabitler (%.0f sn)" % (time.time() - t0))
+    res = _repair_eval(model, test, cases, batch)
+    sink = _sink_by_document(model, test, sink_heads)
+    lens = np.array([len(s) - 2 for s in test])
+    sink_rows = []
+    for (t, h), v in sink.items():
+        order = np.argsort(v)
+        sink_rows.append(dict(head="%d.%d" % (t + 1, h), quantiles=np.quantile(v, [0, 0.1, 0.25, 0.5, 0.75, 0.9, 1]).tolist(),
+                              corr_length=float(np.corrcoef(v, np.log(lens))[0, 1]),
+                              low=[(float(v[i]), decode(test[i][1:25])) for i in order[:3]],
+                              high=[(float(v[i]), decode(test[i][1:25])) for i in order[-3:]]))
+    log("bitti (%.0f sn)" % (time.time() - t0))
+    return dict(ablate=res, fits=fits, sink=sink_rows, steps=steps, fit_docs=len(fit), reference=len(reference),
+                note=I._DEPENDENCE_NOTE)
+
+
+def _text_repair(res):
+    a = res["ablate"]
+    L = ["## kapatma turleri yan yana (%s)" % res["note"],
+         "taban nll %.4f acc %.4f (%d hedef); optimal sabit %d belgede %d adim; ortalama %d ayri belgeden" % (
+             a["base"]["nll"], a["base"]["acc"], a["base"]["n"], res["fit_docs"], res["steps"], res["reference"]),
+         "%-16s | %-48s | Δnll ± se          | Δacc (puan)" % ("ad", "aciklama")]
+    for r in a["rows"]:
+        L.append("%-16s | %-48s | %+.4f ± %.4f | %+.2f ± %.2f" % (r["case"], r["words"][:48], r["d_nll"], r["se_nll"],
+                                                                100 * r["d_acc"], 100 * r["se_acc"]))
+    L += ["", "optimal sabitin egitimi (kayip ilk / son 10 adim) ve ortalamayla kosinusu: " + "  ".join(
+        "%s %.3f/%.3f cos %.2f" % (k, v["first"], v["last"], v["cos_mean"]) for k, v in res["fits"].items())]
+    L += ["", "## sink head'ler: belge basina konum 0 kutlesi (Guo 2024 active-dormant sorusu)"]
+    for r in res["sink"]:
+        L.append("head %s: min/%%10/%%25/medyan/%%75/%%90/max %s; log(boy) ile korelasyon %.2f" % (
+            r["head"], " ".join("%.3f" % q for q in r["quantiles"]), r["corr_length"]))
+        L += ["   en dusuk %.3f: %r" % (v, s.replace("\n", " ")[:90]) for v, s in r["low"]]
+        L += ["   en yuksek %.3f: %r" % (v, s.replace("\n", " ")[:90]) for v, s in r["high"]]
+    return L
+
+
 # ---- CLI
 
 def _decoder(vocab):
@@ -1003,7 +1179,8 @@ def _decoder(vocab):
 def _main(argv=None):
     ap = argparse.ArgumentParser(prog="analyze_structure.py", description=__doc__.split("\n\n")[0])
     ap.add_argument("run", nargs="?", help="kosu klasoru ya da adi")
-    ap.add_argument("measure", nargs="?", choices=("probes", "attention_passes", "units", "pass_swap", "extras"))
+    ap.add_argument("measure", nargs="?", choices=("probes", "attention_passes", "units", "pass_swap", "extras", "repair"))
+    ap.add_argument("--fit-steps", type=int, default=150, help="repair: optimal sabitin adim sayisi")
     ap.add_argument("--reference", type=int, default=48, help="extras: ortalamalar icin ayri belge (testten hemen sonra)")
     ap.add_argument("--data", help="FineWeb koku (gpt2/ altinda)")
     ap.add_argument("--device", default="cpu")
@@ -1032,7 +1209,9 @@ def _main(argv=None):
     decode = _decoder(data["vocab"])
     rows, test = data["stories"](args.stories, args.offset)
     fit_rows, fit = [], []
-    if args.measure in ("probes", "units"):
+    if args.measure == "repair":
+        args.fit_stories = min(args.fit_stories, 64)
+    if args.measure in ("probes", "units", "repair"):
         assert args.fit_offset >= args.offset + args.stories or args.fit_offset + args.fit_stories <= args.offset, "ortusme"
         fit_rows, fit = data["stories"](args.fit_stories, args.fit_offset)
     model = I._load_model(run_dir, args.weights).to(args.device)
@@ -1050,6 +1229,10 @@ def _main(argv=None):
         al = alpha_report(model, test, batch=args.batch, focus=focus, log=say)
         res = dict(units=res, alpha=al)
         lines = _text_units(res["units"], al)
+    elif args.measure == "repair":
+        ref = data["stories"](args.reference, args.offset + args.stories)[1]
+        res = repair(model, test, fit, ref, decode, batch=args.batch, steps=args.fit_steps, log=say)
+        lines = _text_repair(res)
     elif args.measure == "extras":
         ref = data["stories"](args.reference, args.offset + args.stories)[1]   # internals ablate'in referansiyla ayni
         res = extras(model, test, ref, batch=args.batch, focus=args.focus - 1, top_heads={5: [7, 5], 7: [5, 7]}, log=say)
@@ -1104,6 +1287,11 @@ def _selftest():
     e = extras(model, test, fit[:4], batch=4, focus=1, dims=(3, 5), top_heads={2: [0, 1]}, log=lambda s: None)
     print("\n".join(_text_extras(e, decode)[:8] + _text_extras(e, decode)[-6:]))
     assert e["ablate"]["check_logits"] < 1e-4
+    rp = repair(model, test, fit, fit[:4], decode, batch=4, steps=5, parts=(("A", 0), ("F", 1), ("A", 3)),
+                sink_heads=((3, 1),), log=lambda s: None)
+    print("\n".join(_text_repair(rp)))
+    rows = {r["case"]: r for r in rp["ablate"]["rows"]}
+    assert abs(rows["A4 atla"]["d_nll"]) < 10 and "A1 optimal" in rows
     print("selftest TAMAM")
 
 
