@@ -699,6 +699,300 @@ def _text_pass_swap(res):
     return L
 
 
+# ---- 5. extras: mudahaleli elle ileri hesap (ortalama / yeniden ornekleme), sabit yonler, q.k yayilimi
+
+def _turn_mod(model, t, h, mod=None, ref=None, donor_ok=None, rec=None):
+    """_turn + mudahale ve kayit.  mod anahtarlari: skip_A, heads {h: 'mean'|'resample'}, canon_prev / canon_self
+    'mean'|'zero' (Canon'un k>=1 / k=0 terimi), canon_all 'mean', facts 'skip'|'mean'|'resample'.  'resample': ayni
+    batch'te bir sonraki belgenin (roll 1) ayni konumdaki degeri; o konum o belgede yoksa ortalama.  rec: kayit."""
+    mod, rec = mod or {}, rec or {}
+    blk = model.turn_blocks()[t]
+    at = blk.attention
+    assert blk.canon, "extras: Canon'lu kosu"
+    T = h.shape[-2]
+    full = F.pad(h, (0, 0, 3, 0))
+    w = blk.canon_weights
+    self_term = w[0] * h
+    prev_term = sum(w[k] * full[..., 3 - k:3 - k + T, :] for k in range(1, 4))
+    if "canon" in rec:
+        rec["canon"](t, self_term, prev_term)
+    if mod.get("canon_all") == "mean":
+        mod = dict(mod, canon_self="mean", canon_prev="mean")
+    terms = dict(self=self_term, prev=prev_term)
+    for name in terms:
+        how = mod.get("canon_" + name)
+        if how == "zero":
+            terms[name] = torch.zeros_like(h)
+        elif how == "mean":
+            terms[name] = ref["canon_" + name][t].expand_as(h)
+    x = h + terms["self"] + terms["prev"]
+    if "att_in" in rec:
+        rec["att_in"](t, x)
+    if not mod.get("skip_A"):
+        q, k = at.queries_keys(x)
+        v = (x @ at.W_value.T).unflatten(-1, (at.heads, -1)).transpose(-3, -2)
+        c = F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=at.scale)
+        if "c" in rec:
+            rec["c"](t, c)
+        for hh, how in (mod.get("heads") or {}).items():
+            m = ref["c"][t][hh]
+            if how == "mean" or c.shape[0] == 1:
+                c[:, hh] = m
+            else:
+                c[:, hh] = torch.where(donor_ok[..., None], c[:, hh].roll(1, 0), m)
+        added = _unit(c.transpose(-3, -2).flatten(-2) @ at.W_context.T)
+        if "upd_A" in rec:
+            rec["upd_A"](t, added, h)
+        h = _unit(h + model.alpha_attention[t] * (added - h))
+    f = I._turn_facts(model, t)
+    if f is not None and mod.get("facts") != "skip":
+        u = I._units(f, h * h.shape[-1] ** 0.5)
+        if "units" in rec:
+            rec["units"](t, u)
+        out = u @ f.W_fact_out.T
+        how = mod.get("facts")
+        if how == "mean" or (how == "resample" and out.shape[0] == 1):
+            out = ref["out"][t].expand_as(out)
+        elif how == "resample":
+            out = torch.where(donor_ok[..., None], out.roll(1, 0), ref["out"][t])
+        if "out" in rec:
+            rec["out"](t, out)
+        h = _unit(h + model.alpha_facts[t] * (_unit(out) - h))
+    return h
+
+
+@torch.no_grad()
+def _reference(model, stories, batch):
+    """Ortalamalar (gecerli konumlarda): Canon k=0 / k>=1 terimi, head ciktisi c_h, FactUnits ciktisi (norm oncesi)."""
+    P = model.tokens.points()
+    sums, n = {}, 0
+
+    def add(key, t, v):
+        sums.setdefault(key, {})
+        sums[key][t] = sums[key].get(t, 0) + v
+
+    for x, valid, idx in _stories_batches(stories, batch, P.device):
+        rec = dict(canon=lambda t, s, p: (add("canon_self", t, s[valid].double().sum(0)),
+                                          add("canon_prev", t, p[valid].double().sum(0))),
+                   c=lambda t, c: add("c", t, c.permute(0, 2, 1, 3)[valid].double().sum(0)),
+                   out=lambda t, o: add("out", t, o[valid].double().sum(0)))
+        h = model.input_states(x[:, :-1])
+        for t in range(model.turns):
+            h = _turn_mod(model, t, h, rec=rec)
+        n += int(valid.sum())
+    return {k: {t: (v / n).to(P.dtype) for t, v in d.items()} for k, d in sums.items()}
+
+
+@torch.no_grad()
+def _ablate_mod(model, test, cases, ref, batch, log=print):
+    """cases: [(ad, aciklama, {tur: mod})] -> paired Δnll / Δacc (I._paired), taban."""
+    P = model.tokens.points()
+    S = len(test)
+    names = ["base"] + [c[0] for c in cases]
+    sums = {k: dict(nll_sum=np.zeros(S), hit_sum=np.zeros(S), count=np.zeros(S)) for k in names}
+    check = 0.0
+    for x, valid, idx in _stories_batches(test, batch, P.device):
+        inp, y = x[:, :-1], x[:, 1:]
+        T = inp.shape[1]
+        lens = torch.as_tensor([len(test[i]) - 1 for i in idx], device=P.device)
+        donor_ok = (torch.arange(T, device=P.device)[None] < lens[:, None]).roll(1, 0)
+        hs = [model.input_states(inp)]
+        for t in range(model.turns):
+            hs.append(_turn_mod(model, t, hs[-1]))
+        check = max(check, float((model.logits(inp) - I._scores(model, hs[-1], P)).abs().max()))
+
+        def put(name, h):
+            a, b, c = I._score_rows(I._scores(model, h, P), y, valid)
+            sums[name]["nll_sum"][idx], sums[name]["hit_sum"][idx], sums[name]["count"][idx] = a, b, c
+        put("base", hs[-1])
+        for name, _, mods in cases:
+            start = min(mods)
+            h = hs[start]
+            for t in range(start, model.turns):
+                h = _turn_mod(model, t, h, mods.get(t), ref, donor_ok)
+            put(name, h)
+    base = sums["base"]
+    N = base["count"].sum()
+    rows = [dict(case=name, words=words, nll=float(sums[name]["nll_sum"].sum() / N),
+                 acc=float(sums[name]["hit_sum"].sum() / N), **I._paired(base, sums[name])) for name, words, _ in cases]
+    return dict(base=dict(nll=float(base["nll_sum"].sum() / N), acc=float(base["hit_sum"].sum() / N), n=int(N)), rows=rows,
+                check_logits=check)
+
+
+def _extra_cases(model, top_heads):
+    """Tur numaralari metinde 1'den.  top_heads {tur: [h1, h2]}: ikili head mudahalesi."""
+    TN, H = model.turns, model.blocks[0].attention.heads
+    allh = lambda how: {h: how for h in range(H)}
+    cases = []
+    for t in (1, 5, 7, 8, 9, 12, 15, 16):
+        cases.append(("Hm%d" % t, "tur %d butun head'ler ortalamayla" % t, {t - 1: dict(heads=allh("mean"))}))
+        cases.append(("Hr%d" % t, "tur %d butun head'ler baska belgeden (resample)" % t, {t - 1: dict(heads=allh("resample"))}))
+    for t in (2, 3, 8, 13, 15, 16):
+        cases.append(("Fm%d" % t, "tur %d FactUnits ciktisi ortalamayla" % t, {t - 1: dict(facts="mean")}))
+        cases.append(("Fr%d" % t, "tur %d FactUnits ciktisi baska belgeden" % t, {t - 1: dict(facts="resample")}))
+    for t in range(1, TN + 1):
+        cases.append(("CPm%d" % t, "tur %d Canon k>=1 (onceki token'lar) ortalamayla" % t, {t - 1: dict(canon_prev="mean")}))
+        cases.append(("CSm%d" % t, "tur %d Canon k=0 (oz-terim) ortalamayla" % t, {t - 1: dict(canon_self="mean")}))
+    every = lambda m: {t: dict(m) for t in range(TN)}
+    cases += [("CPm", "butun turlarda Canon k>=1 ortalamayla", every(dict(canon_prev="mean"))),
+              ("CSm", "butun turlarda Canon k=0 ortalamayla", every(dict(canon_self="mean"))),
+              ("CAm", "butun turlarda Canon eki ortalamayla (internals CM)", every(dict(canon_all="mean"))),
+              ("CPz", "butun turlarda Canon k>=1 sifir", every(dict(canon_prev="zero"))),
+              ("CSz", "butun turlarda Canon k=0 sifir", every(dict(canon_self="zero")))]
+    pairs = [("A5+A13", {4: dict(skip_A=True), 12: dict(skip_A=True)}),
+             ("Hm5+Hm13", {4: dict(heads=allh("mean")), 12: dict(heads=allh("mean"))}),
+             ("Hm5+Hm7", {4: dict(heads=allh("mean")), 6: dict(heads=allh("mean"))}),
+             ("CAm5+CAm10", {4: dict(canon_all="mean"), 9: dict(canon_all="mean")}),
+             ("A15+A16", {14: dict(skip_A=True), 15: dict(skip_A=True)}),
+             ("Hm15+Hm16", {14: dict(heads=allh("mean")), 15: dict(heads=allh("mean"))}),
+             ("F15+F16", {14: dict(facts="skip"), 15: dict(facts="skip")}),
+             ("Fm15+Fm16", {14: dict(facts="mean"), 15: dict(facts="mean")})]
+    for t, hs in top_heads.items():
+        pairs.append(("H%d.%d+H%d.%d" % (t, hs[0], t, hs[1]), {t - 1: dict(heads={hs[0]: "mean", hs[1]: "mean"})}))
+        for h in hs:
+            pairs.append(("H%d.%d" % (t, h), {t - 1: dict(heads={h: "mean"})}))
+    cases += [(n, "ikili / tekil (yedeklilik)", m) for n, m in pairs]
+    return [c for c in cases if max(c[2]) < TN]                  # kucuk modelde (selftest) olmayan turlar duser
+
+
+@torch.no_grad()
+def extras(model, test, reference, batch=8, focus=1, dims=(382, 616, 10, 758, 132), top_heads=None, log=print):
+    """E ajaninin sorulari: head ciktisinin konuma gore degisimi (E6), attention guncellemesinin sabit yonu m_t (lens
+    token'lari, turlar arasi kosinus, ortalama durumla kosinus), q.k skor yayilimi iki gecis, odak turun birimlerinin sabit
+    payi, Block E'nin ozel boyutlarini okuyan head'ler (agirlik), ve ortalama / yeniden ornekleme / ikili mudahaleler."""
+    P = model.tokens.points()
+    dv, TN, H = P.device, model.turns, model.blocks[0].attention.heads
+    t0 = time.time()
+    ref = _reference(model, reference, batch)
+    log("referans ortalamalari (%d belge, %.0f sn)" % (len(reference), time.time() - t0))
+    csum = torch.zeros(TN, H, dtype=torch.float64, device=dv)
+    c2 = torch.zeros(TN, H, dtype=torch.float64, device=dv)
+    cvec = {}
+    msum, hsum = {}, {}
+    spread = {k: torch.zeros(TN, H, dtype=torch.float64, device=dv) for k in ("std", "gap", "max")}
+    U = I._turn_facts(model, focus).W_fact_out.shape[1]
+    u1 = torch.zeros(U, dtype=torch.float64, device=dv)
+    u2 = torch.zeros(U, dtype=torch.float64, device=dv)
+    n = 0
+    for x, valid, idx in _stories_batches(test, max(1, batch // 2), dv):
+        inp = x[:, :-1]
+        T = inp.shape[1]
+        wq = valid.double()[:, None]
+        causal = torch.ones(T, T, dtype=torch.bool, device=dv).tril()
+        cnt = causal.sum(-1).double()
+
+        def on_c(t, c):
+            c2[t] += ((c.double() ** 2).sum(-1) * wq).sum((0, 2))
+            cvec[t] = cvec.get(t, 0) + c.permute(0, 2, 1, 3)[valid].double().sum(0)
+
+        def on_upd(t, a, h):
+            msum[t] = msum.get(t, 0) + a[valid].double().sum(0)
+            hsum[t] = hsum.get(t, 0) + h[valid].double().sum(0)
+
+        def on_att_in(t, xin):
+            at = model.turn_blocks()[t].attention
+            q, k = at.queries_keys(xin)
+            s = (at.scale * q @ k.transpose(-1, -2)).float()
+            sm = s.masked_fill(~causal, 0)
+            mean = sm.sum(-1) / cnt
+            var = ((s - mean[..., None]) ** 2).masked_fill(~causal, 0).sum(-1) / cnt
+            mx = s.masked_fill(~causal, float("-inf")).max(-1).values
+            spread["std"][t] += (var.sqrt().double() * wq).sum((0, 2))
+            spread["gap"][t] += ((mx - mean).double() * wq).sum((0, 2))
+            spread["max"][t] += (mx.double() * wq).sum((0, 2))
+
+        def on_units(t, u):
+            if t == focus:
+                u1.add_(u[valid].double().sum(0))
+                u2.add_((u[valid].double() ** 2).sum(0))
+
+        rec = dict(c=on_c, upd_A=on_upd, att_in=on_att_in, units=on_units)
+        h = model.input_states(inp)
+        for t in range(TN):
+            h = _turn_mod(model, t, h, rec=rec)
+        n += int(valid.sum())
+    log("istatistik gecisi (%.0f sn)" % (time.time() - t0))
+    mu = {t: v / n for t, v in cvec.items()}
+    E6 = torch.zeros(TN, H, dtype=torch.float64)
+    for t in range(TN):
+        e2 = (c2[t] / n).cpu()
+        E6[t] = (1 - (mu[t] ** 2).sum(-1).cpu() / e2.clamp_min(1e-30)).clamp(min=0).sqrt()
+    m = torch.stack([msum[t] / n for t in range(TN)])            # (TN, d) ortalama guncelleme yonu
+    hm = torch.stack([hsum[t] / n for t in range(TN)])           # (TN, d) attention'a giren ortalama durum
+    mn = _unit(m)
+    m_cos = (mn @ mn.T).cpu().numpy()
+    m_tokens = []
+    for t in range(TN):
+        z = I._scores(model, mn[t].to(P.dtype)[None], P)[0]
+        m_tokens.append(dict(len=float(m[t].norm()), cos_mean_state=float((mn[t] * _unit(hm[t])).sum()),
+                             top=z.topk(8).indices.tolist(), bottom=(-z).topk(5).indices.tolist()))
+    eu = u2 / n
+    mean2 = (u1 / n) ** 2
+    order = torch.argsort(eu, descending=True)
+    cover = int((torch.cumsum(eu[order] / eu.sum(), 0) < 0.5).sum()) + 1
+    top = order[:cover]
+    unit_const = dict(cover50=cover, const_share_top=float(mean2[top].sum() / eu[top].sum()),
+                      const_share_all=float(mean2.sum() / eu.sum()),
+                      const_share_unit_median_top=float((mean2[top] / eu[top]).median()))
+    # Block E (indeks 4) ozel boyutlari: head basina W_query / W_key / W_value sutun boyu, o head'in butun sutunlarina gore
+    # yuzdelik
+    blkE = model.blocks[4 % len(model.blocks)].attention
+    dim_rows = []
+    for name, W in (("query", blkE.W_query), ("key", blkE.W_key), ("value", blkE.W_value)):
+        Wh = W.detach().double().unflatten(0, (H, -1))           # (H, dh, d)
+        norms = Wh.norm(dim=1)                                   # (H, d)
+        for dd in dims:
+            if dd < norms.shape[1]:
+                pct = (norms <= norms[:, dd:dd + 1]).double().mean(1)
+                dim_rows.append(dict(W=name, dim=dd, norm=norms[:, dd].cpu().numpy(), pct=pct.cpu().numpy()))
+    cases = _extra_cases(model, top_heads or {})
+    log("%d mudahale" % len(cases))
+    abl = _ablate_mod(model, test, cases, ref, batch, log)
+    log("mudahaleler (%.0f sn)" % (time.time() - t0))
+    return dict(turns=[I._turn_label(model, t) for t in range(TN)], heads=H, n=n, E6=E6.numpy(), m_cos=m_cos,
+                m=m_tokens, spread={k: (v / n).cpu().numpy() for k, v in spread.items()}, unit_const=unit_const,
+                focus_label=I._turn_label(model, focus), dims=dim_rows, ablate=abl, reference=len(reference),
+                note=I._DEPENDENCE_NOTE)
+
+
+def _text_extras(res, decode):
+    TN, H = len(res["turns"]), res["heads"]
+    lab = lambda t: res["turns"][t].split(",")[0]
+    L = ["## E6: head ciktisinin konuma / belgeye gore degisimi sqrt(E|c_h - ort|^2 / E|c_h|^2) (0 = sabit; %d konum)" % res["n"],
+         "tur  | " + " ".join("h%d   " % h for h in range(H))]
+    L += ["%-4s | %s" % (lab(t), " ".join("%.3f" % v for v in res["E6"][t])) for t in range(TN)]
+    L += ["", "## attention guncellemesinin ortalama yonu m_t = E[norm(W_context c)]: |m| (1 = tamamen sabit), ortalama "
+          "girdi durumuyla kosinus, lens'te en yuksek / en dusuk token'lar"]
+    for t, r in enumerate(res["m"]):
+        L.append("%-4s |m| %.3f  cos(m, E h) %+.3f  ust: %s  alt: %s" % (
+            lab(t), r["len"], r["cos_mean_state"], " ".join(repr(decode([i])) for i in r["top"]),
+            " ".join(repr(decode([i])) for i in r["bottom"])))
+    L += ["", "m_t'ler arasi kosinus (satir/sutun tur 1..%d)" % TN]
+    L += ["%-4s %s" % (lab(t), " ".join("%+.2f" % v for v in res["m_cos"][t])) for t in range(TN)]
+    L += ["", "## q.k skor yayilimi (scale dahil, sorgu basina izinli anahtarlar uzerinde): std | max - ortalama",
+          "tur  | " + " ".join("h%d std/gap   " % h for h in range(H))]
+    for t in range(TN):
+        L.append("%-4s | %s" % (lab(t), " ".join("%5.2f/%5.2f  " % (res["spread"]["std"][t][h], res["spread"]["gap"][t][h])
+                                                 for h in range(H))))
+    u = res["unit_const"]
+    L += ["", "## %s FactUnits: enerjinin %%50'sini tasiyan %d birimde sabit pay sum(E u)^2 / sum E u^2 = %.3f (birim "
+          "medyani %.3f); butun birimlerde %.3f" % (res["focus_label"], u["cover50"], u["const_share_top"],
+                                                   u["const_share_unit_median_top"], u["const_share_all"]),
+          "", "## Block E ozel boyutlari: head basina W sutun boyu (o head'in 1024 sutunu icinde yuzdelik)"]
+    for r in res["dims"]:
+        L.append("W_%-5s boyut %4d | %s" % (r["W"], r["dim"], " ".join("h%d %.2f(%.2f)" % (h, r["norm"][h], r["pct"][h])
+                                                                       for h in range(H))))
+    a = res["ablate"]
+    L += ["", "## mudahaleler (ortalamalar ayri %d belgeden; %s)" % (res["reference"], res["note"]),
+          "taban nll %.4f acc %.4f (%d hedef); elle ileri hesap - model.logits en buyuk fark %.1e" % (
+              a["base"]["nll"], a["base"]["acc"], a["base"]["n"], a["check_logits"]),
+          "%-12s | %-52s | Δnll ± se          | Δacc (puan)" % ("ad", "aciklama")]
+    for r in a["rows"]:
+        L.append("%-12s | %-52s | %+.4f ± %.4f | %+.2f ± %.2f" % (r["case"], r["words"][:52], r["d_nll"], r["se_nll"],
+                                                                100 * r["d_acc"], 100 * r["se_acc"]))
+    return L
+
+
 # ---- CLI
 
 def _decoder(vocab):
@@ -709,7 +1003,8 @@ def _decoder(vocab):
 def _main(argv=None):
     ap = argparse.ArgumentParser(prog="analyze_structure.py", description=__doc__.split("\n\n")[0])
     ap.add_argument("run", nargs="?", help="kosu klasoru ya da adi")
-    ap.add_argument("measure", nargs="?", choices=("probes", "attention_passes", "units", "pass_swap"))
+    ap.add_argument("measure", nargs="?", choices=("probes", "attention_passes", "units", "pass_swap", "extras"))
+    ap.add_argument("--reference", type=int, default=48, help="extras: ortalamalar icin ayri belge (testten hemen sonra)")
     ap.add_argument("--data", help="FineWeb koku (gpt2/ altinda)")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--weights", choices=("ema", "last"), default="last")
@@ -755,6 +1050,10 @@ def _main(argv=None):
         al = alpha_report(model, test, batch=args.batch, focus=focus, log=say)
         res = dict(units=res, alpha=al)
         lines = _text_units(res["units"], al)
+    elif args.measure == "extras":
+        ref = data["stories"](args.reference, args.offset + args.stories)[1]   # internals ablate'in referansiyla ayni
+        res = extras(model, test, ref, batch=args.batch, focus=args.focus - 1, top_heads={5: [7, 5], 7: [5, 7]}, log=say)
+        lines = _text_extras(res, decode)
     else:
         res = pass_swap(model, test, batch=args.batch, log=say)
         lines = _text_pass_swap(res)
@@ -802,7 +1101,9 @@ def _selftest():
     p = pass_swap(model, test, batch=4, log=lambda s: None)
     print("\n".join(_text_pass_swap(p)[:8]))
     assert p["check_logits"] < 1e-4, p["check_logits"]
-    lag = {r["case"]: r for r in p["rows"]}
+    e = extras(model, test, fit[:4], batch=4, focus=1, dims=(3, 5), top_heads={2: [0, 1]}, log=lambda s: None)
+    print("\n".join(_text_extras(e, decode)[:8] + _text_extras(e, decode)[-6:]))
+    assert e["ablate"]["check_logits"] < 1e-4
     print("selftest TAMAM")
 
 
