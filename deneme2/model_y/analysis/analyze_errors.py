@@ -11,7 +11,11 @@
     loop_heads   head basina ortalama ablasyonu: tekrarli cumlede kopya log p'si ve normal metinde nll ne kadar degisiyor
                  (BAGIMLILIK olcer, "o parca olmadan egitilseydi" degil); en secici head'ler kapaliyken acgozlu uretim
     corpus       egitim parcalarinda istem ifadelerinden sonra gelen token'lar ve yakin pencerede aday cevap sayilari:
-                 verinin kendisi hangi cevabi destekliyor
+                 verinin kendisi hangi cevabi destekliyor; "symbol for <ad> is" kalibinin cevap yuvasi
+    answer_split 10 soru: cevap konumunda son turlar (F16, F15+F16, F16 alpha x 0,5) degisince dogru ve secilen ilk token;
+                 acgozlu ilk token'dan sonraki dagilim; isin aramasi (beam 8 x 6 token).  Mudahale BAGIMLILIK olcer
+    symbol_filler  86 element (analyze_capacity.ELEMENTS) x 5 kalip: dogru sembol ve " Cu" olasiligi / sirasi, top1
+                 dagilimi (Cu kalibin genel doldurucusu mu); 133 baskentte top1 dagilimi
 
     python analysis/analyze_errors.py <kosu klasoru> <olcum> --data <FineWeb koku> [--device cuda] [--weights last|ema|both]
 Cikti: KUYRUK_SONUC ortam degiskenindeki klasor (yoksa <kosu>/internals/errors/), errors_<olcum>_<agirlik>_<zaman>.txt + .json.
@@ -166,6 +170,9 @@ NEAR = (
     (" symbol Au", (" gold", " copper", " silver")),
 )
 NEAR_WINDOW = 32
+# corpus: (capa, baglac) -> capadan sonra en cok SLOT_GAP token icinde baglac, ardindan gelen token sayilir (cevap yuvasi)
+SLOTS = ((" chemical symbol for", " is"), (" symbol for", " is"), (" capital of", " is"))
+SLOT_GAP = 6
 REPEATS = 10           # repetition: kendini besleme egrisi icin cumle tekrar sayisi
 COPY_REPEATS = 4       # loop_heads ve attention: tekrar sayisi
 SENTENCES = 64         # tekrarlanan dogal cumle sayisi (valid belgelerinden, 12-40 token)
@@ -897,11 +904,24 @@ def measure_corpus(vocab, eot, args):
     counts = {s: 0 for s in PHRASES}
     near = {a: dict(anchor=encode(a, vocab), cands={c: encode(c, vocab) for c in cs}, n=0, hits={c: 0 for c in cs})
             for a, cs in NEAR}
+    slots = {an: dict(anchor=encode(an, vocab), conn=encode(cn, vocab), n=0, filled={}) for an, cn in SLOTS}
     total = 0
     for i in shards[:args.shards] if args.shards else shards:
         t0 = time.time()
         a = np.fromfile(os.path.join(d, "shard_%03d.bin" % i), dtype=np.uint16)
         total += len(a)
+        for an, e in slots.items():                         # "<capa> <1..SLOT_GAP token> <baglac> <cevap>"
+            pos = _find(a, e["anchor"]) + len(e["anchor"])
+            e["n"] += len(pos)
+            conn = e["conn"][0]
+            done = np.zeros(len(pos), bool)
+            for g in range(1, SLOT_GAP + 1):
+                q = pos + g
+                ok = ~done & (q + 1 < len(a))
+                ok[ok] = a[q[ok]] == conn
+                for t in a[q[ok] + 1].tolist():
+                    e["filled"][t] = e["filled"].get(t, 0) + 1
+                done |= ok
         for s, ids in phrases.items():
             pos = _find(a, ids)
             counts[s] += len(pos)
@@ -919,7 +939,11 @@ def measure_corpus(vocab, eot, args):
                     e["hits"][c] += int(ok.sum())
         _say("parca %03d: %.0f M token, %.0f sn" % (i, len(a) / 1e6, time.time() - t0))
         del a
-    out = dict(tokens=total, phrases=[], near=[])
+    out = dict(tokens=total, phrases=[], near=[], slots=[])
+    for an, e in slots.items():
+        top = sorted(e["filled"].items(), key=lambda kv: -kv[1])[:25]
+        out["slots"].append(dict(anchor=an, n=e["n"], filled=sum(e["filled"].values()),
+                                 top=[(decode([k], vocab), c) for k, c in top]))
     for s in PHRASES:
         top = sorted(nexts[s].items(), key=lambda kv: -kv[1])[:15]
         out["phrases"].append(dict(phrase=s, count=counts[s], next=[(decode(k, vocab), c) for k, c in top]))
@@ -949,6 +973,170 @@ def text_corpus(res):
     L += ["", "## capadan sonra %d token icinde aday" % NEAR_WINDOW]
     for r in res["near"]:
         L.append("%r n=%d: " % (r["anchor"], r["n"]) + "  ".join("%r %d" % kv for kv in r["hits"].items()))
+    L += ["", "## cevap yuvasi: <capa> ... is <token> (capadan sonra en cok %d token icinde ' is')" % SLOT_GAP]
+    for r in res.get("slots", []):
+        L.append("%r n=%d, yuva dolu %d: " % (r["anchor"], r["n"], r["filled"]) + "  ".join("%r %d" % kv for kv in r["top"]))
+    return L
+
+
+# ---- answer_split: son turlar ve ilk token bolunmesi
+
+def _variants(model):
+    """Cevap konumunda karsilastirilan mudahaleler (tur 0'dan): son tur FactUnits yok / alpha yarim, son iki tur yok."""
+    T1 = model.turns - 1
+    return (("none", {}), ("F%d yok" % (T1 + 1), dict(skip_facts=[T1])),
+            ("F%d+F%d yok" % (T1, T1 + 1), dict(skip_facts=[T1 - 1, T1])),
+            ("aF%d x0,5" % (T1 + 1), dict(alpha_facts={T1: model.alpha_facts[T1].detach() * 0.5})))
+
+
+@torch.no_grad()
+def _beam(model, prefix, width, steps):
+    """Isin aramasi: toplam log p'ye gore en iyi width devam, steps token.  -> [(token'lar, toplam log p)]."""
+    dev = next(model.parameters()).device
+    beams = [([], 0.0)]
+    for _ in range(steps):
+        x = torch.tensor([prefix + b for b, _ in beams], device=dev)
+        lp = torch.log_softmax(model.logits(x)[:, -1].float(), -1)
+        cand = []
+        for (b, s0), row in zip(beams, lp):
+            v, i = row.topk(width)
+            cand += [(b + [int(t)], s0 + float(q)) for q, t in zip(v, i)]
+        beams = sorted(cand, key=lambda c: -c[1])[:width]
+    return beams
+
+
+def measure_answer_split(model, vocab, eot, args):
+    rows = []
+    items = [(q, c[:n], k) for q, c, n, k in QUESTIONS] + [(q, c[:n], ("Jupiter",)) for g, q, c, n in PROBES
+                                                           if "planet" in q and g in ("context", "fewshot")]
+    dev = next(model.parameters()).device
+    for prompt, rights, keys in items:
+        prefix = [eot] + encode(prompt, vocab)
+        right = encode(rights[0], vocab)[0]
+        x = torch.tensor([prefix], device=dev)
+        out = dict(prompt=prompt, right=decode([right], vocab), variants=[])
+        greedy = None
+        for name, case in _variants(model):
+            z = (I._logits(model, x, case) if case else model.logits(x))[0, -1].float()
+            p = torch.softmax(z, -1)
+            g = int(p.argmax())
+            greedy = g if greedy is None else greedy
+            v, i = p.topk(5)
+            out["variants"].append(dict(case=name, top5=[(decode([int(t)], vocab), round(float(q), 4)) for q, t in zip(v, i)],
+                                        right_rank=int((p > p[right]).sum()) + 1, right_p=round(float(p[right]), 4),
+                                        greedy_token=decode([greedy], vocab), greedy_p=round(float(p[greedy]), 4)))
+        z2 = model.logits(torch.tensor([prefix + [greedy]], device=dev))[0, -1].float()
+        p2 = torch.softmax(z2, -1)
+        v, i = p2.topk(10)
+        out["after_greedy"] = [(decode([int(t)], vocab), round(float(q), 4)) for q, t in zip(v, i)]
+        beams = _beam(model, prefix, args.beam, args.beam_steps)
+        out["beams"] = [(decode(b, vocab), round(s0, 3), any(k in decode(b, vocab) for k in keys)) for b, s0 in beams]
+        rows.append(out)
+        _say("%s: dogru %r sira %s" % (prompt[:40], out["right"], [r["right_rank"] for r in out["variants"]]))
+    return dict(rows=rows, note=I._DEPENDENCE_NOTE, beam=args.beam, beam_steps=args.beam_steps)
+
+
+def text_answer_split(res):
+    L = ["# CEVAP KONUMU, SON TURLAR DEGISINCE (%s)" % res["note"],
+         "istem | mudahale: dogru ilk token sirasi / p | acgozlu ilk token / p | ilk 3"]
+    for r in res["rows"]:
+        L.append("%r  (dogru ilk token %r)" % (r["prompt"][-70:], r["right"]))
+        for v in r["variants"]:
+            L.append("    %-12s dogru %4d / %.4f | secilen %r %.3f | %s" % (
+                v["case"], v["right_rank"], v["right_p"], v["greedy_token"], v["greedy_p"],
+                "  ".join("%r %.3f" % t for t in v["top5"][:3])))
+        L.append("    acgozlu ilk token'dan sonra: " + "  ".join("%r %.3f" % t for t in r["after_greedy"]))
+        L.append("    isin %d x %d: " % (res["beam"], res["beam_steps"]) + "  ".join(
+            "%s%r %.2f" % ("*" if hit else "", b, s0) for b, s0, hit in r["beams"][:5]))
+    return L
+
+
+# ---- symbol_filler: "chemical symbol" kalibinin doldurucusu
+
+SYMBOL_TEMPLATES = (
+    "The chemical symbol for {name} is",
+    "The symbol for {name} is",
+    "{Name}'s chemical symbol is",
+    "The element {name} has the chemical symbol",
+    "The chemical symbol for silver is Ag. The chemical symbol for iron is Fe. The chemical symbol for {name} is",
+)
+
+
+@torch.no_grad()
+def _answer_dists(model, prefixes, batch=64):
+    """Istemlerin son konumundaki olasilik dagilimi (sagdan dolgu, nedensel) -> (N, V) CPU float."""
+    dev = next(model.parameters()).device
+    out = []
+    for i in range(0, len(prefixes), batch):
+        part = prefixes[i:i + batch]
+        L = max(len(x) for x in part)
+        x = torch.zeros(len(part), L, dtype=torch.long, device=dev)
+        for r, q in enumerate(part):
+            x[r, :len(q)] = torch.tensor(q, device=dev)
+        z = model.logits(x).float()
+        last = torch.tensor([len(q) - 1 for q in part], device=dev)
+        out.append(torch.softmax(z[torch.arange(len(part), device=dev), last], -1).cpu())
+    return torch.cat(out)
+
+
+def measure_symbol_filler(model, vocab, eot, args):
+    import analyze_capacity as AC
+    cu = encode(" Cu", vocab)[0]
+    res = dict(templates=[], capitals=None)
+    for tpl in SYMBOL_TEMPLATES:
+        rows = []
+        prefixes = [[eot] + encode(tpl.format(name=n, Name=n[0].upper() + n[1:]), vocab) for n, _ in AC.ELEMENTS]
+        P = _answer_dists(model, prefixes)
+        for (name, sym), p in zip(AC.ELEMENTS, P):
+            right = encode(" " + sym, vocab)[0]
+            top = p.topk(3)
+            rows.append(dict(name=name, symbol=sym, top3=[(decode([int(t)], vocab), round(float(q), 4))
+                                                          for q, t in zip(top.values, top.indices)],
+                             right_p=round(float(p[right]), 5), right_rank=int((p > p[right]).sum()) + 1,
+                             cu_p=round(float(p[cu]), 5), cu_rank=int((p > p[cu]).sum()) + 1))
+        other = [r for r in rows if r["symbol"] != "Cu"]
+        tops = {}
+        for r in rows:
+            tops[r["top3"][0][0]] = tops.get(r["top3"][0][0], 0) + 1
+        res["templates"].append(dict(
+            template=tpl, n=len(rows), acc=round(sum(r["right_rank"] == 1 for r in rows) / len(rows), 4),
+            top1_cu=sum(r["top3"][0][0] == " Cu" for r in other), n_other=len(other),
+            cu_p_mean=round(float(np.mean([r["cu_p"] for r in other])), 4),
+            cu_p_median=round(float(np.median([r["cu_p"] for r in other])), 4),
+            cu_rank_median=float(np.median([r["cu_rank"] for r in other])),
+            cu_beats_right=sum(r["cu_p"] > r["right_p"] for r in other),
+            top1_counts=sorted(tops.items(), key=lambda kv: -kv[1])[:12], rows=rows))
+        m = res["templates"][-1]
+        _say("%-60s acc %.2f  top1=Cu %d/%d  Cu>dogru %d  p(Cu) ort %.3f" % (
+            tpl[-60:], m["acc"], m["top1_cu"], m["n_other"], m["cu_beats_right"], m["cu_p_mean"]))
+    P = _answer_dists(model, [[eot] + encode("The capital of %s is" % c[0], vocab) for c in AC.CAPITALS])
+    tops, acc = {}, 0
+    for c, p in zip(AC.CAPITALS, P):
+        t = decode([int(p.argmax())], vocab)
+        tops[t] = tops.get(t, 0) + 1
+        acc += int(p.argmax()) == encode(" " + c[2], vocab)[0]
+    res["capitals"] = dict(n=len(AC.CAPITALS), acc_first_token=round(acc / len(AC.CAPITALS), 4),
+                           top1_counts=sorted(tops.items(), key=lambda kv: -kv[1])[:15])
+    return res
+
+
+def text_symbol_filler(res):
+    L = ["# 'CHEMICAL SYMBOL' KALIBI: dogru sembolun ilk token'i ve ' Cu' (86 element, analyze_capacity.ELEMENTS)",
+         "kalip | top1 dogru | top1 = Cu (bakir disi) | Cu > dogru | p(Cu) ort / medyan | Cu sirasi medyan"]
+    for m in res["templates"]:
+        L.append("%r" % m["template"])
+        L.append("    %.3f | %d/%d | %d/%d | %.4f / %.4f | %g" % (
+            m["acc"], m["top1_cu"], m["n_other"], m["cu_beats_right"], m["n_other"], m["cu_p_mean"], m["cu_p_median"],
+            m["cu_rank_median"]))
+        L.append("    top1 dagilimi: " + "  ".join("%r %d" % kv for kv in m["top1_counts"]))
+    L += ["", "## element basina (ilk kalip): ad sembol | dogru sira / p | Cu sira / p | top3"]
+    for r in res["templates"][0]["rows"]:
+        L.append("%-12s %-3s | %5d / %.4f | %5d / %.4f | %s" % (
+            r["name"], r["symbol"], r["right_rank"], r["right_p"], r["cu_rank"], r["cu_p"],
+            "  ".join("%r %.3f" % t for t in r["top3"])))
+    c = res["capitals"]
+    L += ["", "## baskentler ('The capital of X is', %d): ilk token dogru %.3f; top1 dagilimi: " % (c["n"], c["acc_first_token"])
+          + "  ".join("%r %d" % kv for kv in c["top1_counts"])]
     return L
 
 
@@ -963,12 +1151,15 @@ def _out_dir(run_dir):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("run", help="kosu klasoru")
-    ap.add_argument("measure", choices=("answers", "decoding", "repetition", "loop_heads", "corpus"))
+    ap.add_argument("measure", choices=("answers", "decoding", "repetition", "loop_heads", "corpus",
+                                               "answer_split", "symbol_filler"))
     ap.add_argument("--data", required=True, help="FineWeb koku (gpt2/tokenizer.json, gpt2/shard_*.bin)")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--weights", default="last", choices=("last", "ema", "both"))
     ap.add_argument("--checkpoint", type=int, help="answers: checkpoint_t<adim>.pt (EMA yedekteki ortalama)")
     ap.add_argument("--tokens", type=int, default=641, help="decoding: uretim boyu (final.json gibi 641)")
+    ap.add_argument("--beam", type=int, default=8, help="answer_split: isin genisligi")
+    ap.add_argument("--beam-steps", type=int, default=6, help="answer_split: isin boyu (token)")
     ap.add_argument("--settings", help="decoding: virgulle ayar adlari (varsayilan hepsi)")
     ap.add_argument("--docs", type=int, default=0, help="decoding: sinav belgesi devami sayisi (ilk yari istem)")
     ap.add_argument("--long", type=int, default=0, help="decoding: ornekleme / DRY ayarlarinda tek istemden bu kadar token")
@@ -1001,6 +1192,12 @@ def main(argv=None):
             elif args.measure == "repetition":
                 res = measure_repetition(model, vocab, eot, args, w)
                 lines = text_repetition(res)
+            elif args.measure == "answer_split":
+                res = measure_answer_split(model, vocab, eot, args)
+                lines = text_answer_split(res)
+            elif args.measure == "symbol_filler":
+                res = measure_symbol_filler(model, vocab, eot, args)
+                lines = text_symbol_filler(res)
             else:
                 res = measure_loop_heads(model, vocab, eot, args)
                 lines = text_loop_heads(res)
