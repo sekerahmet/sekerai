@@ -78,7 +78,7 @@ COPY_FIRST = 256         # distant_copy: en kisa uzaklik; 2 katlarla en uzaga ka
 LONG_WRITE_TEMPERATURE = 0.8   # long_write: konus'taki ornekleme (s 0,8, p 0,9); tekrar cezasi YOK -- dogal dongu gorulsun
 LONG_WRITE_TOP_P = 0.9
 LONG_WRITE_SEGMENT = 512       # long_write: dilim boyu (dilim basina farkli4, tekrar8)
-ENTRY_MIN_SENT = 5       # tam cumle en az bu kadar token (tekrara giris D_032, O14 ve DITTO-X cumle siniri)
+ENTRY_MIN_SENT = 5       # tam cumle en az bu kadar token (tekrara giris D_032, O14)
 _CACHE = {}
 
 

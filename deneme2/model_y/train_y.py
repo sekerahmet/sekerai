@@ -8,7 +8,6 @@ import contextlib
 import copy
 import math
 import threading
-import time
 
 import torch
 import torch._inductor.config
@@ -43,19 +42,6 @@ NEWTON_SCHULZ_PRECISION = "fp32"   # Muon'un ortogonallestirmesi: "fp32" | "bf16
 MICRO_BATCHES = 1        # adimin batch'i bu kadar parcada (satirlar s::k) ileri + geri, gradyan birikir: bellek bir parcalik,
                          # adim tam batch'in gradyanini alir (parca kaybi hedef payiyla agirlikli).  coherence'ta cift sayi
                          # (yari basina k / 2 parca)
-# DITTO-X kendi ciktisinda (bulgular 18, 21): her DITTO_X_SELF_EVERY adimda gercek onekten acgozlu devam; secim orani veri
-# oranini asan bolmelerde en dusuk p'li kopyalarin logit'i indirilir.  Kullanici, 2 Ekim: "doğru bilgiye zarar vermez ama
-# faydasız döngüyü de azaltır."
-DITTO_X_WEIGHT = 0.0      # r*: kendi teriminin MLE'ye orani; ilk kendi adiminda beta'ya cevrilir, sonra sabit.  0 = kapali
-DITTO_X_SHARE = 64        # kendi devami satir sayisi (B)
-DITTO_X_SELF_PREFIX = 256  # gercek belge oneki (P)
-DITTO_X_SELF_TOKENS = 128  # acgozlu devam (G)
-DITTO_X_SELF_EVERY = 8    # uretim ve ceza her bu kadar adimda (yalniz o adimda)
-DITTO_X_MARGIN = 0.0      # mu (nat)
-DITTO_X_PARAMS = ("W_query", "W_key", "W_value", "W_context", "W_fact_in", "W_fact_up", "W_fact_out")   # kendi teriminin
-                          # gradyani yalniz bu ad sonekli parametrelere (tau, q, u, alpha, Canon, E, Delta ayrik); None = hepsi
-COPY_CEILING = {"1": 0.191, "2": 0.277, "3": 0.388, "4-7": 0.477, "8-15": 0.697, "sentence": 0.19}   # secim tavani: l kovasi
-                          # (m = 1) gercek metinde kopya orani (D_032 Tablo 3); sentence = tekrar cumlesinden sonra yine o parca (O14)
 
 
 class Muon(torch.optim.Optimizer):
@@ -156,10 +142,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
               coherence_window=COHERENCE_WINDOW,
               final_cooldown=FINAL_COOLDOWN, weight_ema=WEIGHT_EMA, matmul_precision=MATMUL_PRECISION,
               final_cooldown_shape=FINAL_COOLDOWN_SHAPE, newton_schulz_precision=NEWTON_SCHULZ_PRECISION,
-              micro_batches=MICRO_BATCHES, ditto_x_weight=DITTO_X_WEIGHT, ditto_x_share=DITTO_X_SHARE,
-              ditto_x_self_prefix=DITTO_X_SELF_PREFIX, ditto_x_self_tokens=DITTO_X_SELF_TOKENS,
-              ditto_x_self_every=DITTO_X_SELF_EVERY, ditto_x_margin=DITTO_X_MARGIN, ditto_x_params=DITTO_X_PARAMS,
-              copy_ceiling=COPY_CEILING, self_prompts=None, sentence_ends=None, eot=None):
+              micro_batches=MICRO_BATCHES):
     """Tarif: Muon (gizli matrisler: W_context, W_value, W_fact_in, W_fact_up, W_fact_out) + Adam (gerisi), takvim (wsd ya
     da coherence), gradient clipping.
     callback(step, model, nll): her `every` adimda, o adimin guncellemesinden ONCE (sinav, kayit, durdurma).
@@ -188,14 +171,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     dokunmaz.  CPU'da (compile gibi) etkisiz.  SDPA hep math cekirdegiyle: flash / mem-efficient'in geri yayilimi
     deterministik degil (surdurme bit duzeyinde kalmaz).
     micro_batches: gradyan birikimi (batch'in satir sayisi bunun kati olmali).
-    checkpoint step 0: baslangic agirligi (baska kosudan, init_from) -- 0. adimin callback'i kosar.
-    ditto_x_weight > 0 (DITTO-X kendi ciktisinda): her ditto_x_self_every adimda self_prompts(step) (>= P + G token'lik gercek
-    satirlar, ilk ditto_x_share'i) -> onek P'den acgozlu devam (self_continuations, eot yasak) -> ditto_x_self_loss; MLE
-    gradyani bugunku gibi kirpildiktan SONRA beta g_self eklenir, yalniz ditto_x_params parametrelerine (MLE yolu P0 ile ayni).
-    beta = r* |c g_MLE| / |g_self| ilk kendi adiminda (normlar izinli parametrelerde), sonra sabit (grup kaydinda
-    "ditto_x_self"); kendi terimi en cok 1 x |c g_MLE|.  Ayni oneklerin gercek devami gradyansiz gecer (sizma izleyicisi).
-    Kayitlar model.ditto_x_self listesinde (kosucu sinavda okur ve bosaltir).  sentence_ends(ids) -> [(bas, son, anahtar)]
-    (exam_fineweb._sentences_of); eot: uretimde yasak token."""
+    checkpoint step 0: baslangic agirligi (baska kosudan, init_from) -- 0. adimin callback'i kosar."""
     assert batches is not None or ids is not None, "ids/mask ya da batches verilmeli"
     assert setting == "shared", "setting: yalniz shared (BlockModel), bu: %s" % setting
     assert schedule in ("wsd", "coherence") and 0 < cooldown <= 1
@@ -284,12 +260,6 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     for group in opt.param_groups:                         # coherence durumu: surdurmede optimizer'la birlikte gelir
         group.setdefault("coherence_mean", 1.0)
         group.setdefault("coherence_frozen", None)
-    self_term = ditto_x_weight > 0
-    if self_term:
-        assert self_prompts is not None and sentence_ends is not None and eot is not None, \
-            "DITTO-X: self_prompts, sentence_ends ve eot gerekli"
-        allowed = [p for k, p in named if ditto_x_params is None or k.endswith(tuple(ditto_x_params))]
-        model.ditto_x_self = []                            # kendi adimi kayitlari; kosucu sinavda okur ve bosaltir
     curve, packed = [], []
     for step in range(first, steps + 1):
         resumed_here = checkpoint is not None and step == first and first > 0
@@ -378,40 +348,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
         else:
             with sdpa_kernel(kernels):
                 total.backward()                           # her ogrenilen sayi x icin ∂kayip/∂x (zincir kurali, otomatik)
-        grad_norm = torch.nn.utils.clip_grad_norm_(params, grad_clip)  # toplam boy > grad_clip ise olcekle indir
-        if self_term and step % ditto_x_self_every == 0:  # DITTO-X: MLE kirpildiktan sonra eklenir (MLE yolu P0 ile ayni)
-            t0 = time.time()
-            P, G = ditto_x_self_prefix, ditto_x_self_tokens
-            real = self_prompts(step)[:ditto_x_share].to(device)
-            own = torch.cat([real[:, :P], self_continuations(model, real[:, :P], G, eot)], 1)
-            gen_secs = time.time() - t0
-            with forward_context():
-                loss_self, own_stats = ditto_x_self_loss(model, own, P, sentence_ends, eot, copy_ceiling, ditto_x_margin)
-                with torch.no_grad():                      # sizma izleyicisi: ayni oneklerin gercek devami
-                    real_stats = ditto_x_self_loss(model, real[:, :P + G], P, sentence_ends, eot, copy_ceiling,
-                                                   ditto_x_margin)[1]
-            grads = [None] * len(allowed)
-            if loss_self.requires_grad:
-                with sdpa_kernel(kernels):
-                    grads = torch.autograd.grad(loss_self, allowed, allow_unused=True)
-            norm = lambda gs: math.sqrt(sum(float(g.double().pow(2).sum()) for g in gs if g is not None))
-            n_mle, n_self = norm([p.grad for p in allowed]), norm(grads)
-            if (opt.param_groups[0].get("ditto_x_self") or {}).get("beta") is None and n_self > 0:
-                for group in opt.param_groups:             # beta ilk gradyanli kendi adiminda, sonra sabit (21 §8-1)
-                    group["ditto_x_self"] = dict(beta=ditto_x_weight * n_mle / n_self)
-            beta = (opt.param_groups[0].get("ditto_x_self") or {}).get("beta") or 0.0
-            weight = min(beta, n_mle / n_self) if n_self > 0 else 0.0   # kendi terimi <= 1 x |c g_MLE|
-            if weight:
-                for p, g in zip(allowed, grads):
-                    if g is not None:
-                        p.grad = g * weight if p.grad is None else p.grad.add_(g, alpha=weight)
-            model.ditto_x_self.append(dict(
-                step=step, beta=beta, ratio=weight * n_self / max(n_mle, 1e-30), capped=bool(n_self and weight < beta),
-                clip=min(1.0, grad_clip / (float(grad_norm) + 1e-6)), loss=own_stats["loss"], gen_secs=gen_secs,
-                bins=own_stats["bins"], agreement=own_stats["agreement"],
-                own=dict(by_l=own_stats["by_l"], entry=own_stats["entry"], ids=own[:, P:].cpu().numpy()),
-                real=dict(by_l=real_stats["by_l"], entry=real_stats["entry"], bins=real_stats["bins"],
-                          ids=real[:, P:P + G].cpu().numpy())))
+        torch.nn.utils.clip_grad_norm_(params, grad_clip)  # butun gradyanlarin toplam boyu > grad_clip ise olcekle indir
         opt.step()                                         # Adam: x <- x - lr · m / (√v + eps); Muon: ortogonal adim
         model.normalize_weights()                          # agirlik kureye geri; adim boyunu yalniz lr belirler
         if getattr(model, "output_link", False):          # phi hep artan kalsin: u >= 0
@@ -469,145 +406,3 @@ def generate_cached(model, prompts, n):
         token = model.logits(token[:, None], caches)[:, 0].argmax(-1)
         out.append(token)
     return torch.stack(out, 1).tolist()
-
-
-# ---- DITTO-X kendi ciktisinda (bulgular 18, 21)
-
-def copy_trace(x):
-    """x (B, N) token -> (l, m, copy), her biri (B, N) int64: l_t = t'de biten ve daha once (bitisi < t) gecmis en uzun sonek
-    (<= 32), m_t = o sonekin onceki gecis sayisi, copy_t = en son onceki gecisin devami (l_t = 0: -1).
-    analyze_errors._match_trace ile ayni tanim (D_032), vektorel."""
-    B, N = x.shape
-    pos = torch.arange(N, device=x.device)
-    alive = (pos[None, :] < pos[:, None]).expand(B, N, N)          # [b, t, j]: j < t ve ortak sonek suruyor
-    run = torch.zeros(B, N, N, dtype=torch.long, device=x.device)
-    for k in range(32):
-        back = x[:, (pos - k).clamp(min=0)]                         # x_(t - k)
-        alive = alive & (back[:, :, None] == back[:, None, :]) & (pos >= k)
-        run += alive
-    ell = run.max(-1).values
-    found = ell > 0
-    last = torch.where(run == ell[..., None], pos, -1).max(-1).values
-    copy = torch.where(found, x.gather(1, (last + 1).clamp(max=N - 1)), -1)
-    count = torch.where(found, (run >= ell[..., None]).sum(-1), 0)
-    return ell, count, copy
-
-
-@torch.no_grad()
-def self_continuations(model, prompts, n, eot):
-    """Kendi devami: prompts (B, P > 1) ayni boyda, her satir kendi belgesi -> (B, n) acgozlu devam, eot yasak.  Onbellekli;
-    istemin son token'i disi hidden'dan gecer (logits yalniz son konumda)."""
-    B, P = prompts.shape
-    assert P > 1, "onek en az 2 token"
-    caches = [AttentionCache(torch.full((B,), P - 1, device=prompts.device), P + n) for _ in range(model.turns)]
-    model.hidden(prompts[:, :-1], caches)
-    z = model.logits(prompts[:, -1:], caches)[:, 0].float()
-    out = []
-    for i in range(n):
-        z[:, eot] = -float("inf")
-        out.append(z.argmax(-1))
-        if i + 1 < n:
-            z = model.logits(out[-1][:, None], caches)[:, 0].float()
-    return torch.stack(out, 1)
-
-
-def ditto_x_self_loss(model, rows, prefix, sentence_ends, eot, copy_ceiling=COPY_CEILING, margin=DITTO_X_MARGIN):
-    """rows (B, N) = onek (prefix token) + devam; karar konumu t, prefix - 1 <= t <= N - 2 (sonraki token devamda).
-    Bolmeler: l kovasi (copy_ceiling anahtari, m = 1) ve "sentence" = cumle siniri (O14 / _chain_stats: devamda biten tekrar
-    cumlesinin son token'i, ardindan tam cumle, kopya token'i var); cumle siniri l kovasindan cikarilir.  Bolmede secim a_t:
-    l kovasinda x_(t+1) = kopya token'i, cumle sinirinda sonraki cumle onceki gecisin ardindan gelen cumle.
-    k = max(0, |A| - floor(g |S|)); A'nin p_c'si en dusuk k konumu:
-        L = (1 / |S|) sum 1/2 (z_c - z*_r + margin)_+^2,   z*_r = max_{j != c, eot} z_j (gradyansiz), |S| butun bolmeler
-    sentence_ends(ids) -> [(bas, son, anahtar)].  -> (L, istatistik): bins {bolme: [n, secilen, cezalanan]}, agreement
-    [uyusan, n] (l kovasinda a_t ile z_c > z*_r), by_l {"lo-hi": [n, p_copy, top1, kopya]} (m = 1; _decision_stats'in
-    toplamlari), entry [giren, satir, kalan pay toplami, kalan n] (_entry_stats'in cumle girisi), loss."""
-    B, N = rows.shape
-    dev = rows.device
-    ell, mm, cp = copy_trace(rows)
-    pos = torch.arange(N, device=dev)
-    decide = (pos >= prefix - 1) & (pos <= N - 2)
-    nxt = torch.cat([rows[:, 1:], rows.new_full((B, 1), -2)], 1)
-    chosen = nxt == cp
-    sentence = torch.zeros(B, N, dtype=torch.bool)
-    seq = torch.zeros(B, N, dtype=torch.bool)
-    entry = [0, B, 0.0, 0]
-    cp_host = cp.cpu()
-    for r, x in enumerate(rows.tolist()):
-        sents, last_at, rep, first = sentence_ends(x), {}, [False] * N, None
-        for i, (a, b, key) in enumerate(sents):
-            if key is not None and key in last_at and b >= prefix:
-                rep[a:b + 1] = [True] * (b + 1 - a)
-                first = max(a, prefix) if first is None else first
-                if i + 1 < len(sents) and sents[i + 1][2] is not None and cp_host[r, b] >= 0:
-                    j = last_at[key]
-                    sentence[r, b] = True
-                    seq[r, b] = j + 1 < len(sents) and sents[i + 1][2] == sents[j + 1][2]
-            if key is not None:
-                last_at[key] = i
-        if first is not None:
-            entry[0] += 1
-            if first < N:
-                entry[2] += sum(rep[first:]) / (N - first)
-                entry[3] += 1
-    sentence, seq = sentence.to(dev) & decide, seq.to(dev)
-    bins = {}
-    for key in copy_ceiling:
-        if key == "sentence":
-            bins[key] = (sentence, seq)
-        else:
-            lo, hi = int(key.split("-")[0]), int(key.split("-")[-1])
-            bins[key] = (decide & (mm == 1) & (ell >= lo) & (ell <= hi) & ~sentence, chosen)
-    buckets = ((1, 1), (2, 2), (3, 3), (4, 7), (8, 15), (16, 32))
-    watch = decide & (mm == 1) & (cp >= 0)
-    use = (watch | sentence)[:, :-1]
-    where = torch.full((B, N), -1, dtype=torch.long, device=dev)
-    rt = use.nonzero()
-    where[rt[:, 0], rt[:, 1]] = torch.arange(len(rt), device=dev)
-    h = model.hidden(rows[:, :-1])[-1][rt[:, 0], rt[:, 1]]                      # karar konumlarinin son durumu
-    c = cp[rt[:, 0], rt[:, 1]]
-    P = model.tokens.points()
-    scale = model.scale * torch.exp(model.log_output_scale - math.log(model.scale))
-    link = (lambda v, q, u: v * (1 + v * (q + v * (q * q / 3 + u)))) if model.output_link else (lambda v, q, u: v)
-    q, u = (model.link_q, model.link_u) if model.output_link else (None, None)
-    work = torch.promote_types(h.dtype, torch.float32)                           # en az fp32 (float64 model float64)
-    with torch.no_grad(), torch.autocast(dev.type, enabled=False):              # p_c, top1, z*_r: butun sozluk, parca parca
-        Pd, sd = P.detach().to(work), scale.detach().to(work)
-        qd, ud = (q.detach().to(work), u.detach().to(work)) if model.output_link else (None, None)
-        z_copy, p_copy, top1, rival = [], [], [], []
-        for s in range(0, len(rt), 1024):
-            z = sd * link(h[s:s + 1024].detach().to(work) @ Pd.T, qd, ud)
-            cc = c[s:s + 1024, None]
-            z_copy.append(z.gather(1, cc)[:, 0])
-            p_copy.append((z_copy[-1] - z.logsumexp(-1)).exp())
-            top1.append(z.argmax(-1) == cc[:, 0])
-            z.scatter_(1, cc, -float("inf"))
-            z[:, eot] = -float("inf")
-            rival.append(z.max(-1).values)
-        z_copy, p_copy, top1, rival = (torch.cat(v) if v else torch.zeros(0, device=dev)
-                                       for v in (z_copy, p_copy, top1, rival))
-    stats = dict(bins={}, by_l={})
-    total, picked, agree = 0, [], [0, 0]
-    for key, (mask, sel) in bins.items():
-        idx = where[mask]
-        hit = idx[sel[mask]]
-        n = len(idx)
-        k = max(0, len(hit) - math.floor(copy_ceiling[key] * n + 1e-9))
-        picked.append(hit[torch.argsort(p_copy[hit], stable=True)[:k]])
-        stats["bins"][key] = [n, len(hit), k]
-        total += n
-        if key != "sentence":
-            agree[0] += int((sel[mask] == (z_copy[idx] > rival[idx])).sum())
-            agree[1] += n
-    for lo, hi in buckets:
-        idx = where[watch & (ell >= lo) & (ell <= hi)]
-        stats["by_l"]["%d-%d" % (lo, hi)] = [len(idx), float(p_copy[idx].sum()), float(top1[idx].float().sum()),
-                                             float(chosen[watch & (ell >= lo) & (ell <= hi)].float().sum())]
-    stats.update(agreement=agree, entry=entry)
-    picked = torch.cat(picked)
-    if not len(picked) or not torch.is_grad_enabled():
-        stats["loss"] = 0.0
-        return torch.zeros((), device=dev), stats
-    zc = scale * link((h[picked].to(work) * P[c[picked]].to(work)).sum(-1), q, u)   # canli: izinli parametreler ayrilmaz
-    loss = 0.5 * (zc - rival[picked] + margin).clamp(min=0).pow(2).sum() / max(total, 1)
-    stats["loss"] = float(loss.detach())
-    return loss, stats

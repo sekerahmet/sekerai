@@ -26,7 +26,7 @@
                  ([eot] + cumle x 10) ve dongu oncesi (400 token yeni metin + cumle x 10)
     copy_calibration  matematikci O12: gercek valid metninde induction tahmini olan konumlarda p(induction token) kalibrasyonu,
                  baglam boyu 2 ve 4, m = 1 / 2 / 3+ ayri
-    copy_ceiling DITTO-X Adim 0: g(l, m) = gercek metinde verbatim kopyanin bir sonraki token'da devam etme orani; l = en uzun
+    copy_ceiling: g(l, m) = gercek metinde verbatim kopyanin bir sonraki token'da devam etme orani; l = en uzun
                  eslesen sonek (kova 2/4/8/16/32/64+), m = o sonekin belgede onceki gecis sayisi (kova 1..5+); --corpus-tokens > 0:
                  egitim parcalarindan (CPU), --model-docs > 0: valid belgelerinde ayni hucrelerde veri orani ve modelin p'si
     repeat_entry tekrara GIRIS: valid belgelerinde (ve --corpus-docs ile egitim parcalarinda) taze metin ilk kez tam cumle
@@ -1615,7 +1615,7 @@ def text_copy_calibration(res):
     return L
 
 
-# ---- copy_ceiling: DITTO-X tavani g(l, m)
+# ---- copy_ceiling: gercek metinde kopya devam orani g(l, m)
 
 CEIL_LENGTHS = (2, 4, 8, 16, 32, 64)        # kova alt siniri; 64 = 64+
 CEIL_M = 5                                  # m kovasi 1..4, 5 = 5+

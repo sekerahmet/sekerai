@@ -591,8 +591,7 @@ def t_colab(data, root):
 def t_continuation(data, root):
     """init_from (pilot devam egitimi): model ayarlari kaynak config'inden (rope_base yoksa 10.000), adim 0 = kaynagin agirligi
     (0. adim sinavi, EMA bastan), coherence bastan (lr takvimi bu kosununki, log inis lr_floor'a), veri kaynagin gormedigi
-    pencerelerden; DITTO-X: ayarlar config'te acik, sinavda ditto_x_self, gunlukte cumle duzeyi satiri; stop_at'te EMA
-    yazilir; surdurme bit duzeyinde; token_bands."""
+    pencerelerden; stop_at'te EMA yazilir; surdurme bit duzeyinde; token_bands."""
     import internals_y as I
     tmp = tempfile.mkdtemp()
     src = tmp + "/src"
@@ -605,8 +604,7 @@ def t_continuation(data, root):
     json.dump(old, open(src + "/config.json", "w"), indent=1)    # rope_base'siz eski config (pilot gibi)
     lr = 2e-3
     cont = dict(kw, steps=3, save_every=1, stop_at=3, init_from=src + "/checkpoint_t000002.pt", lr=lr, schedule="coherence",
-                final_cooldown=1.0, final_cooldown_shape="log", lr_floor=0.1, ditto_x_weight=0.3, ditto_x_share=4,
-                ditto_x_self_prefix=8, ditto_x_self_tokens=8, ditto_x_self_every=1)
+                final_cooldown=1.0, final_cooldown_shape="log", lr_floor=0.1)
     out = tmp + "/c"
     run2 = C.start("CONT", data, out, **cont)
     run2["thread"].join(900)
@@ -620,7 +618,6 @@ def t_continuation(data, root):
     done = lambda p: math.log1p(p / TR.LOG_COOLDOWN_KAPPA) / math.log1p(1 / TR.LOG_COOLDOWN_KAPPA)
     want_lr = [lr * (0.1 + 0.9 * (1 - done(s / 3))) for s in (0, 1, 2)]
     got_lr = [e["coherence"]["lr"] for e in ex[1:]]
-    d = ex[1].get("ditto_x_self", {})
     check("init_from: model ayarlari kaynaktan (rope_base yoksa 10.000), adim 0 = kaynagin 2. adim agirligi (0. adim sinavi "
           "kaynagin 2. adim sinaviyla ayni, EMA = agirlik), ilk batch kaynagin gormedigi pencere, lr log inisle x0,1'e",
           not run2["error"] and [e["step"] for e in ex] == [0, 1, 2, 3] and cfg["init_from"] == cont["init_from"]
@@ -630,23 +627,14 @@ def t_continuation(data, root):
           and "BASLANGIC" in log and "kaynagin %d. adimindan" % (cfg_src["steps"] + 1) in log,
           "%s | nll %.6f / %.6f, ilk batch %.6f / %.6f | lr %s / %s" % (
               run2["error"], ex[0]["nll"], ex_src[2]["nll"], ex[0]["train_nll"], first_nll, got_lr, want_lr))
-    check("init_from + DITTO-X: butun ayarlar config'te acik (copy_ceiling, ditto_x_params liste), sinavda ditto_x_self (cumle "
-          "girisi kendi / gercek, sinir bolmesi, l kovalari, gercek metinde by_l, token_bands), gunlukte ditto-x satiri; stop_at'te "
-          "model_weight_ema.pt; tekrar olcusunde token_bands",
-          cfg["ditto_x_weight"] == 0.3 and cfg["copy_ceiling"] == TR.COPY_CEILING and cfg["ditto_x_params"] == list(TR.DITTO_X_PARAMS)
-          and cfg["ditto_x_self_every"] == 1 and cfg["ditto_x_margin"] == TR.DITTO_X_MARGIN
-          and all("ditto_x_self" in e for e in ex[1:]) and d.get("steps") == 1
-          and set(d.get("own", {})) == {"bins", "by_l", "entry", "token_bands"} and "sentence" in d["own"]["bins"]
-          and abs(sum(d["own"]["token_bands"]) - 1) < 1e-9 and "16-32" in d["real"]["by_l"]
-          and "ditto-x" in log and "cumle tekrarina giris" in log and os.path.exists(out + "/model_weight_ema.pt")
-          and abs(sum(ex[0]["repeats"]["greedy"]["token_bands"]) - 1) < 1e-9,
-          str(d)[:300])
+    check("init_from: stop_at'te model_weight_ema.pt; tekrar olcusunde token_bands",
+          os.path.exists(out + "/model_weight_ema.pt") and abs(sum(ex[0]["repeats"]["greedy"]["token_bands"]) - 1) < 1e-9)
     first = torch.load(out + "/model.pt")
     os.remove(out + "/checkpoint_t000003.pt")
     run3 = C.start("CONT", data, out, resume=True, **cont)
     run3["thread"].join(900)
     second = torch.load(out + "/model.pt")
-    check("init_from + DITTO-X surdurme: son paketten (adim 2) devam = kesintisiz, bit duzeyinde (beta ve veri penceresi ayni)",
+    check("init_from surdurme: son paketten (adim 2) devam = kesintisiz, bit duzeyinde (veri penceresi ayni)",
           not run3["error"] and all(torch.equal(first[k], second[k]) for k in first), str(run3["error"])[-300:])
     shutil.rmtree(tmp)
 

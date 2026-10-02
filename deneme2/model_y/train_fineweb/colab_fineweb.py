@@ -19,7 +19,6 @@ belgelerinin devami (gercegiyle) + tekrar olculeri, OUT/checkpoint_tNNNNNN.pt he
 (resume=True).  Calisma olculeri (step_ms, tokens_per_sec, mfu, save_secs, gpu_peak_gb) colab_simplestories'teki gibi; MFU'da
 attention anahtari belge icinde sayilir (hedef t'nin gordugu konum + 1).
 """
-import functools
 import json
 import math
 import os
@@ -29,7 +28,6 @@ import time
 import traceback
 
 import torch
-import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "train_simplestories"))
@@ -132,10 +130,7 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
     ayni olmali.  stop_at: o adimin sinavindan sonra model.pt (ve model_weight_ema.pt) yazilir ve durur (config'e girmez).
     init_from: baska kosunun checkpoint_tNNNNNN.pt'si -- model ayarlari onun config'inden (eski config'te yazilmamis anahtar o
     gunun degeriyle, internals_y._model_kw: rope_base 10.000), agirlik ve optimizer oradan; EMA ve coherence bastan, adim 0
-    (0. adim sinavi kosar).  Veri izi kaynaginkiyle ayniysa pencereler kaynagin son adimindan sonra (gormedigi veri).
-    train_kw ditto_x_weight > 0: DITTO-X kendi ciktisinda (train_y); butun DITTO-X ayarlari config'e acik yazilir,
-    self_prompts = adimin (yetmezse sonrakilerin) pencerelerinden belge basindan P + G token'lik satirlar, sentence_ends =
-    exam_fineweb._sentences_of (D_032 / O14 cumle tanimi); sinavda ditto_x_self ozeti."""
+    (0. adim sinavi kosar).  Veri izi kaynaginkiyle ayniysa pencereler kaynagin son adimindan sonra (gormedigi veri)."""
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
     assert setting == "shared", "paketli pencere yalniz BlockModel (setting shared)"
@@ -157,11 +152,6 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
     if model_kw.get("rope_base") == "auto":      # config'e SAYI yazilir: formul sonra degisse de kosu ayni tabanla kurulur
         model_kw["rope_base"] = M.rope_base_for(model_kw["d"] // model_kw["heads"], model_kw["t_max"])
     train_kw = dict(dict(RECIPE, lr=peak_lr(model_kw["d"])), **train_kw)   # lr verilirse onunki (devam egitimi)
-    ditto_x = train_kw.get("ditto_x_weight", TR.DITTO_X_WEIGHT) > 0
-    if ditto_x:                                        # butun DITTO-X ayarlari acik (varsayilan sonra degisse de kosu ayni)
-        for k in ("ditto_x_weight", "ditto_x_share", "ditto_x_self_prefix", "ditto_x_self_tokens", "ditto_x_self_every",
-                  "ditto_x_margin", "ditto_x_params", "copy_ceiling"):
-            train_kw.setdefault(k, getattr(TR, k.upper()))
     steps_plan = plan(data, token_budget, steps, tokens_per_step, batch_size, train_kw.get("schedule"), seed)
     cuda = torch.device(device).type == "cuda"
     compile = compile and cuda                                 # train_seq ile ayni kural: compile yalniz GPU'da
@@ -207,7 +197,7 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
                 state.pop("weight_ema", None)
             for group in pack["optimizer"]["param_groups"]:
                 group.update(coherence_mean=1.0, coherence_frozen=None)
-                for k in ("coherence_signal", "coherence_total", "ditto_x_self"):
+                for k in ("coherence_signal", "coherence_total"):
                     group.pop(k, None)
             checkpoint = dict(step=0, model=pack["model"], optimizer=pack["optimizer"])
             del pack
@@ -217,26 +207,6 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
             "init_from ayni veride: adim basina satir ve tohum kaynaginkiyle ayni olmali"
         offset = source["steps"] + 1                   # kaynak son adimin penceresini yalniz ileri hesapta gordu
     draw = DF.batches(data, rows, seed)
-    extra = {}
-    if ditto_x:
-        P, G, B, eot = (train_kw["ditto_x_self_prefix"], train_kw["ditto_x_self_tokens"], train_kw["ditto_x_share"],
-                        data["eot"])
-
-        def self_prompts(step):
-            """Adimin (yetmezse sonraki adimlarin) pencerelerinden belge basindan ([eot] ile) P + G token'lik B satir."""
-            found, s = [], step
-            while len(found) < B:
-                ids, mask, pos = draw(offset + s)
-                for r, a in (pos == 0).nonzero().tolist():
-                    if (ids[r, a] == eot and a + P + G <= ids.shape[1] and pos[r, a + P + G - 1] == P + G - 1
-                            and bool(mask[r, a + 1:a + P + G].all())):
-                        found.append(ids[r, a:a + P + G])
-                s += 1
-                assert s - step < 64, "self_prompts: 64 adimda %d belge yok" % B
-            return torch.stack(found[:B])
-        extra = dict(self_prompts=self_prompts, eot=eot,
-                     sentence_ends=functools.partial(EF._sentences_of, is_end=EF._sentence_end_table(data["vocab"]),
-                                                     vocab=data["vocab"]))
     exams = []
     if resume:                                         # paketten sonraki sinavlar yeniden kosulacak: cift satir olmasin
         exams = [e for e in json.load(open(os.path.join(out, "exams.json"), encoding="utf-8"))
@@ -280,29 +250,6 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
             e.update(alpha_summary=alpha)
         if getattr(model, "coherence", None):
             e.update(coherence=dict(model.coherence))
-        records = getattr(model, "ditto_x_self", None)
-        if records:                                    # DITTO-X kendi adimlari, son sinavdan bu yana
-            band = EF._frequency_band(data)
-            mean = lambda k: sum(r[k] for r in records) / len(records)
-            agree = [sum(r["agreement"][i] for r in records) for i in (0, 1)]
-            agg = dict(steps=len(records), beta=records[-1]["beta"], ratio=mean("ratio"), clip=mean("clip"), loss=mean("loss"),
-                       gen_secs=mean("gen_secs"), capped=sum(r["capped"] for r in records),
-                       agreement=agree[0] / max(agree[1], 1))
-            for side, bins_of in (("own", lambda r: r["bins"]), ("real", lambda r: r["real"]["bins"])):
-                sums = {k: [sum(bins_of(r)[k][i] for r in records) for i in range(3)] for k in bins_of(records[0])}
-                agg[side] = dict(bins={k: dict(n=n, rate=c / n if n else None, selected=k_)
-                                       for k, (n, c, k_) in sums.items()})
-            for side in ("own", "real"):
-                by_l = {k: [sum(r[side]["by_l"][k][i] for r in records) for i in range(4)] for k in records[0][side]["by_l"]}
-                entry = [sum(r[side]["entry"][i] for r in records) for i in range(4)]
-                ids = np.concatenate([r[side]["ids"].ravel() for r in records])
-                agg[side].update(by_l={k: dict(n=n, p_copy=p / n if n else None, top1=t / n if n else None,
-                                               copy_rate=c / n if n else None) for k, (n, p, t, c) in by_l.items()},
-                                 entry=dict(rate=entry[0] / max(entry[1], 1), rest=entry[2] / entry[3] if entry[3] else None),
-                                 token_bands=(np.bincount(band[ids], minlength=len(EF.FREQUENCY_BANDS) + 1)
-                                              / max(len(ids), 1)).tolist())
-            e["ditto_x_self"] = agg
-            records.clear()
         if getattr(model, "weight_ema", None):        # ortalama model: ayni sinav
             e.update(weight_ema=EF.exam(model.weight_ema["model"], data))
         if getattr(model, "learn_output_scale", False):
@@ -342,21 +289,6 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
             note(_repeats_line(e["repeats"], "       tekrar"))
         if "distant_copy" in e:
             note(_copy_line(e["distant_copy"], "       uzak kopya"))
-        if "ditto_x_self" in e:                        # cumle duzeyi once (kullanici, 2 Ekim: "papağan gibi tekrarlaması")
-            d = e["ditto_x_self"]
-            fmt = lambda v, f="%.2f": "-" if v is None else f % v
-            note("       ditto-x (%d kendi adimi, beta %.4g, oran %.2f, kesilen %d, kirpma %.2f, uyum %.3f, uretim %.1f sn): "
-                 "cumle tekrarina giris kendi %s / gercek %s, kalan pay %s / %s | sinir secimi %s (n %d, ceza %d; gercek %s) | "
-                 "l kovasi secimi %s | gercekte p(kopya)/top1 %s | nadir (16384+) kendi %.1f%% gercek %.1f%%" % (
-                     d["steps"], d["beta"], d["ratio"], d["capped"], d["clip"], d["agreement"], d["gen_secs"],
-                     fmt(d["own"]["entry"]["rate"]), fmt(d["real"]["entry"]["rate"]), fmt(d["own"]["entry"]["rest"]),
-                     fmt(d["real"]["entry"]["rest"]), fmt(d["own"]["bins"]["sentence"]["rate"], "%.3f"),
-                     d["own"]["bins"]["sentence"]["n"], d["own"]["bins"]["sentence"]["selected"],
-                     fmt(d["real"]["bins"]["sentence"]["rate"], "%.3f"),
-                     " ".join("%s %s" % (k, fmt(b["rate"], "%.3f")) for k, b in d["own"]["bins"].items() if k != "sentence"),
-                     " ".join("%s %s/%s" % (k, fmt(b["p_copy"], "%.3f"), fmt(b["top1"], "%.3f"))
-                              for k, b in d["real"]["by_l"].items()),
-                     100 * d["own"]["token_bands"][-1], 100 * d["real"]["token_bands"][-1]))
         if run["stop"] or (stop_at is not None and step >= stop_at):
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
             if getattr(model, "weight_ema", None):
@@ -432,7 +364,7 @@ def start(name, data, out, token_budget=None, steps=None, tokens_per_step=TOKENS
                                     every=every, callback=callback, log_at=(), compile=compile, save_every=save_every,
                                     save=save, checkpoint=checkpoint,
                                     batches=_counting(lambda step: draw(offset + step), work), model_kw=model_kw,
-                                    **extra, **dict(train_kw, micro_batches=config["micro_batches"],
+                                    **dict(train_kw, micro_batches=config["micro_batches"],
                                            matmul_precision=config["matmul_precision"],
                                            newton_schulz_precision=config["newton_schulz_precision"]))
             torch.save(model.state_dict(), os.path.join(out, "model.pt"))
