@@ -19,6 +19,7 @@ dogru komsu, deneme sayisi (Gumbel gurultulu G ile dogru bulunana kadar, en cok 
 """
 import argparse
 import json
+import math
 import os
 import time
 from collections import Counter, defaultdict
@@ -230,6 +231,8 @@ def main(argv=None):
     ap.add_argument("--d", type=int, default=D, help="kelime temsili boyu")
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--lr", type=float, default=3e-3)
+    ap.add_argument("--schedule", default="constant", choices=("constant", "cosine"), help="cosine: lr adim adim "
+                    "--epochs sonunda 0'a iner")
     ap.add_argument("--device", default="cpu", help="cpu | cuda")
     ap.add_argument("--compile", type=int, default=1, help="1: torch.compile (yalniz cuda; CPU'da kendiliginden kapali)")
     ap.add_argument("--precision", default="bf16", choices=("bf16", "fp32"), help="egitim ileri hesabi (yalniz cuda); "
@@ -258,9 +261,9 @@ def main(argv=None):
     enc = {k: v.to(args.device) for k, v in _encode(agent, train).items() if k != "words"}   # egitim verisi bir kez cihazda
     gen = torch.Generator().manual_seed(args.seed)                     # epok sirasi (CPU)
     gen_unk = torch.Generator(device=args.device).manual_seed(args.seed)   # <unk> secimi (cihazda)
-    print("veri %s: egitim %d cumle, sozluk %d, sinav %s, en uzun %d kelime | d %d, %d parametre | cihaz %s compile %s %s"
-          % (args.data, len(train), len(vocab), {s: len(e["words"]) for s, e in splits.items()}, enc["ids"].shape[1],
-             args.d, sum(p.numel() for p in agent.parameters()), args.device, forward is not agent,
+    print("veri %s: egitim %d cumle, sozluk %d, sinav %s, en uzun %d kelime | d %d, lr %g %s, %d parametre | cihaz %s "
+          "compile %s %s" % (args.data, len(train), len(vocab), {s: len(e["words"]) for s, e in splits.items()},
+                             enc["ids"].shape[1], args.d, args.lr, args.schedule, sum(p.numel() for p in agent.parameters()), args.device, forward is not agent,
              "bf16" if bf16 else "fp32"), flush=True)
     t0 = time.time()
     res, history, first = None, [], 1
@@ -282,6 +285,10 @@ def main(argv=None):
         if cuda:
             torch.cuda.reset_peak_memory_stats()
         for b in range(0, len(train), args.batch):
+            if args.schedule == "cosine":                     # adim epok ve batch'ten: surdurmede ayni lr
+                done = ((epoch - 1) * len(train) + b) / (args.epochs * len(train))
+                for group in opt.param_groups:
+                    group["lr"] = args.lr * 0.5 * (1 + math.cos(math.pi * done))
             rows = perm[b:b + args.batch]
             loss = loss_of(agent, enc, rows, gen_unk, UNK_RATE, forward, bf16)
             opt.zero_grad()
