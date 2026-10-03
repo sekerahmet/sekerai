@@ -18,7 +18,7 @@ import random
 from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DATA = os.path.join(HERE, "data")
+DATA = os.path.join(HERE, "data", "countries")   # hazir veri: bir kez uretilir, sonra hep okunur
 HELD_OUT = 3            # ulke basina sinava ayrilan olgu
 SEEN_EXAM = 100         # sinavin 'seen' bolmesi: egitim cumlelerinden bu kadar
 SEED = 0
