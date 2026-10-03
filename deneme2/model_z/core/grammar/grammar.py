@@ -13,6 +13,9 @@ Girdi: cumlenin kelimeleri, karisik (torba).  Cikti: butun cumle bir anda.
     order_by_relation  cumle = G uzerinde boundary'den gecen tek cevrim: her dugume bir ardil (Macar atamasi, tek seferde);
                     atama birden fazla cevrim verirse patch_cycles birlestirir (Karp yamasi).  Maliyet n^3
 """
+import heapq
+
+import numpy as np
 import torch
 from scipy.optimize import linear_sum_assignment
 
@@ -74,6 +77,45 @@ def order_by_relation(G):
         seq.append(x)
         x = succ[x]
     return seq
+
+
+def order_alternatives(G, k, labels=None):
+    """G -> puana gore en iyi k farkli cumle (torba indeksleri).  Murty: en iyi atamadan baslayip bir bagi yasaklayarak /
+    oncekileri sabitleyerek sonraki en iyi atamalar; her atama patch_cycles ile tek cevrime.  labels (kelimeler): ayni
+    kelimenin kopyalarini degistiren sira ayni cumle sayilir.  Deterministik."""
+    big = 1e12                                          # yasak bag (sonsuz yerine: scipy sonsuzda hata verir)
+    cost = np.where(G <= NEG / 2, big, -G)
+    n = G.shape[0] - 1
+
+    def solve(c):
+        r, s = linear_sum_assignment(c)
+        return (c[r, s].sum(), s) if c[r, s].max() < big / 2 else None
+
+    first = solve(cost)
+    heap, tick, out, seen = [(first[0], 0, cost, first[1], 0)], 1, [], set()
+    while heap and len(out) < k and tick < 50 * k:
+        score, _, c, s, fixed = heapq.heappop(heap)
+        succ = patch_cycles(G, dict(enumerate(s.tolist())))
+        seq, x = [], succ[n]
+        while x != n:
+            seq.append(x)
+            x = succ[x]
+        key = tuple(labels[i] for i in seq) if labels is not None else tuple(seq)
+        if key not in seen:
+            seen.add(key)
+            out.append(seq)
+        child = c.copy()
+        for i in range(fixed, n + 1):                   # i. bag yasak, 0..i-1 sabit
+            ban = child.copy()
+            ban[i, s[i]] = big
+            got = solve(ban)
+            if got is not None:
+                heapq.heappush(heap, (got[0], tick, ban, got[1], i))
+                tick += 1
+            keep = child[i, s[i]]
+            child[i, :], child[:, s[i]] = big, big
+            child[i, s[i]] = keep
+    return out
 
 
 def patch_cycles(G, succ):

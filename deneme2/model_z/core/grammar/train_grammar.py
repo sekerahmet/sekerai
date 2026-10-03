@@ -17,13 +17,15 @@ from collections import Counter, defaultdict
 import numpy as np
 import torch
 
-from grammar import D, NEG, UNK, GrammarAgent, order_by_relation
+from grammar import D, NEG, UNK, GrammarAgent, order_alternatives, order_by_relation
 
 MODEL_Z = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FILES = {"countries": "country_", "simplestories": "ss_"}   # data/<ad>/<onek>{train,exam,sentences}.jsonl
+BATCH = 64              # tam SS gibi buyuk veride Colab hucresi 1024 verir
 LR = 3e-3               # Adam; d=256'da bu degerle 6. epoktan sonra dagildi
 SCHEDULE = "constant"   # constant | cosine (adim adim --epochs sonunda 0)
 UNK_RATE = 0.1          # egitimde kelimenin <unk> yapilma olasiligi: bilinmeyen kelimeye yer bulmayi da ogrensin
+ALTERNATIVES = 5        # top_k: dogru cumle ilk bu kadar aday icinde mi (order_alternatives)
 TRIES = 100             # deneme sayisi olcusunun ust siniri
 LENGTH_BANDS = ((1, 10), (11, 20), (21, 1000))   # olculer cumle boyuna gore de
 
@@ -55,15 +57,16 @@ def _batch(enc, rows, gen):
 def loss_of(agent, enc, rows, gen, unk_rate, forward=None, bf16=False, L=None):
     """Egitim torbasi cumlenin kendisi: okuyucu konumsuz, G kelimelerin veriliş sirasiyla birlikte permute olur, kayip
     sirasizdir; karistirmak bir sey degistirmez.  Hedefler sabit: ardil i+1, oncel i-1, boundary (indeks L) ilk / son
-    kelimeye.  enc, rows ve gen ajanin cihazinda; dolgu batch'in en uzun cumlesine (8'e yuvarli) kirpilir.
-    forward: agent'in derlenmis hali (torch.compile) ya da agent; bf16: okuyucu autocast (GPU; G hep fp32).
-    L: dolgu boyu, CPU'dan (verilmezse cihazdan okunur: GPU'yu bekletir)."""
+    kelimeye.  enc (flat: cumleler uc uca, start, length), rows ve gen ajanin cihazinda; dolgu batch'in en uzun cumlesine
+    (8'e yuvarli) kirpilir.  forward: agent'in derlenmis hali (torch.compile) ya da agent; bf16: okuyucu autocast (GPU; G
+    hep fp32).  L: dolgu boyu, CPU'dan (verilmezse cihazdan okunur: GPU'yu bekletir)."""
     dev = next(agent.parameters()).device
     length = enc["length"][rows]
-    L = min(L or -(-int(length.max()) // 8) * 8, enc["ids"].shape[1])   # 8'in kati: compile her boyda yeniden derlemesin
-    orig = enc["ids"][rows, :L]
+    L = L or -(-int(length.max()) // 8) * 8            # 8'in kati: compile her boyda yeniden derlemesin
     pos = torch.arange(L, device=dev)[None]
     mask = pos < length[:, None]
+    flat = enc["flat"]
+    orig = flat[(enc["start"][rows][:, None] + pos).clamp(max=len(flat) - 1)].long().masked_fill(~mask, 0)
     ids = orig.masked_fill((torch.rand(orig.shape, generator=gen, device=dev) < unk_rate) & mask, agent.index[UNK])
     succ = torch.cat([torch.where(pos + 1 < length[:, None], pos + 1, L), torch.zeros_like(length)[:, None]], 1)
     pred = torch.cat([torch.where(pos > 0, pos - 1, L).expand(len(rows), -1), (length - 1)[:, None]], 1)
@@ -81,9 +84,9 @@ def loss_of(agent, enc, rows, gen, unk_rate, forward=None, bf16=False, L=None):
     return -((ls + lp) * node).sum() / node.sum()
 
 
-def evaluate(agent, enc, valid, seed=0):
-    """-> butun ve cumle boyu bantlari: tam dogru, dogru yuva, dogru komsu, deneme (en cok TRIES; bulunamayan TRIES + 1),
-    dizme ms.  Butun sinav parca parca tek ileri hesapla."""
+def evaluate(agent, enc, valid, seed=0, k_best=ALTERNATIVES):
+    """-> butun ve cumle boyu bantlari: tam dogru, ilk k_best aday icinde (top_k), dogru yuva, dogru komsu, deneme (en cok
+    TRIES; bulunamayan TRIES + 1), dizme ms.  k_best 0: top_k yok.  Butun sinav parca parca tek ileri hesapla."""
     gen = torch.Generator().manual_seed(seed)
     np_rng = np.random.default_rng(seed)
     dev = next(agent.parameters()).device
@@ -107,6 +110,8 @@ def evaluate(agent, enc, valid, seed=0):
             t_order += time.perf_counter() - t
             options = valid.get(tuple(sorted(words)), {tuple(words)})
             best = max(options, key=lambda o: sum(a == x for a, x in zip(built, o)))
+            top = built in options or (k_best > 0 and any(tuple(bag[i] for i in seq) in options
+                                                          for seq in order_alternatives(g, k_best, bag)[1:]))
             k, found = 1, built in options
             noise = np_rng.gumbel(size=(TRIES,) + g.shape) if not found else None
             while not found and k < TRIES:
@@ -117,6 +122,7 @@ def evaluate(agent, enc, valid, seed=0):
                 s = stats[key]
                 s["n"] += 1
                 s["exact"] += built in options
+                s["top_k"] += top
                 s["slot"] += sum(a == x for a, x in zip(built, best))
                 s["slots"] += n
                 s["pairs"] += sum((Counter(zip(built, built[1:])) & Counter(zip(best, best[1:]))).values())
@@ -124,7 +130,8 @@ def evaluate(agent, enc, valid, seed=0):
                 s["tries"] += k if found else TRIES + 1
     out = {}
     for key, s in stats.items():
-        out[key] = dict(n=s["n"], exact=round(s["exact"] / s["n"], 4), slot=round(s["slot"] / s["slots"], 4),
+        out[key] = dict(n=s["n"], exact=round(s["exact"] / s["n"], 4),
+                        top_k=round(s["top_k"] / s["n"], 4) if k_best else None, slot=round(s["slot"] / s["slots"], 4),
                         neighbor=round(s["pairs"] / max(s["n_pairs"], 1), 4), tries=round(s["tries"] / s["n"], 2))
     out["all"]["ms"] = round(1000 * t_order / max(len(rows), 1), 3)
     return out
@@ -137,13 +144,14 @@ def main(argv=None):
     ap.add_argument("--epochs", type=int, default=30)          # ulke verisinde 60 ile ayni sonuc (olculdu)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--d", type=int, default=D, help="kelime temsili boyu")
-    ap.add_argument("--batch", type=int, default=64)
+    ap.add_argument("--batch", type=int, default=BATCH)
     ap.add_argument("--lr", type=float, default=LR)
     ap.add_argument("--schedule", default=SCHEDULE, choices=("constant", "cosine"))
     ap.add_argument("--device", default="cpu", help="cpu | cuda")
     ap.add_argument("--compile", type=int, default=1, help="1: torch.compile (yalniz cuda; CPU'da kendiliginden kapali)")
     ap.add_argument("--precision", default="bf16", choices=("bf16", "fp32"), help="egitim ileri hesabi (yalniz cuda); "
                     "sinav hep fp32")
+    ap.add_argument("--alternatives", type=int, default=ALTERNATIVES, help="top_k olcusu: ilk kac aday")
     ap.add_argument("--every", type=int, default=10, help="kac epokta bir olcum")
     ap.add_argument("--out", default=None, help="kosu klasoru: her epok checkpoint.pt (ajan, optimizer, epok, rastgelelik), "
                     "sonda agent.pt; olcumler results.json")
@@ -153,25 +161,39 @@ def main(argv=None):
     if args.device == "cpu":
         torch.set_num_threads(4)                        # kucuk model: 16 is parcacigi 4'ten yavas (olculdu)
     folder, prefix = args.root or os.path.join(MODEL_Z, "data", args.data), FILES[args.data]
-    train = _load(os.path.join(folder, prefix + "train.jsonl"))
     exam = _load(os.path.join(folder, prefix + "exam.jsonl"))
     valid = defaultdict(set)                            # ayni torbadan kurulabilen gecerli cumleler
-    for r in _load(os.path.join(folder, prefix + "sentences.jsonl"), required=False) or train + exam:
-        valid[tuple(sorted(r["words"]))].add(tuple(r["words"]))
-    vocab = [UNK] + sorted({w for r in train for w in r["words"]})
+    if os.path.exists(os.path.join(folder, prefix + "train_ids.npy")):
+        # buyuk veri (make_ss_sentences): sozluk, cumleler uc uca kimlik dizisi; gecerli siralar sinav satirinda
+        vocab = json.load(open(os.path.join(folder, prefix + "vocab.json"), encoding="utf-8"))
+        assert vocab[0] == UNK
+        offsets = torch.from_numpy(np.load(os.path.join(folder, prefix + "train_offsets.npy")))
+        flat = torch.from_numpy(np.load(os.path.join(folder, prefix + "train_ids.npy")))
+        for r in exam:
+            valid[tuple(sorted(r["words"]))] |= {tuple(o) for o in r["valid"]}
+    else:
+        train = _load(os.path.join(folder, prefix + "train.jsonl"))
+        for r in _load(os.path.join(folder, prefix + "sentences.jsonl"), required=False) or train + exam:
+            valid[tuple(sorted(r["words"]))].add(tuple(r["words"]))
+        vocab = [UNK] + sorted({w for r in train for w in r["words"]})
+        index = {w: i for i, w in enumerate(vocab)}
+        flat = torch.tensor([index[w] for r in train for w in r["words"]], dtype=torch.int32)
+        offsets = torch.tensor([0] + [len(r["words"]) for r in train]).cumsum(0)
+    n_train = len(offsets) - 1
     agent = GrammarAgent(vocab, d=args.d).to(args.device)
     cuda = torch.device(args.device).type == "cuda"
     forward = torch.compile(agent, dynamic=True) if (cuda and args.compile) else agent
     bf16 = cuda and args.precision == "bf16"
     opt = torch.optim.Adam(agent.parameters(), lr=args.lr)
     splits = {s: _encode(agent, [r for r in exam if r["split"] == s]) for s in sorted({r["split"] for r in exam})}
-    enc = {k: v.to(args.device) for k, v in _encode(agent, train).items() if k != "words"}   # egitim verisi bir kez cihazda
+    length_host = (offsets[1:] - offsets[:-1]).long()   # dolgu boyu CPU'dan: her adimda GPU beklenmez
+    enc = dict(flat=flat.to(args.device), start=offsets[:-1].long().to(args.device),
+               length=length_host.to(args.device))      # egitim verisi bir kez cihazda
     gen = torch.Generator().manual_seed(args.seed)                     # epok sirasi (CPU)
     gen_unk = torch.Generator(device=args.device).manual_seed(args.seed)   # <unk> secimi (cihazda)
-    length_host = enc["length"].cpu()                    # dolgu boyu CPU'dan: her adimda GPU beklenmez
     print("veri %s: egitim %d cumle, sozluk %d, sinav %s, en uzun %d kelime | d %d, lr %g %s, batch %d, %d parametre | "
           "cihaz %s compile %s %s" % (
-              args.data, len(train), len(vocab), {s: len(e["words"]) for s, e in splits.items()}, enc["ids"].shape[1],
+              args.data, n_train, len(vocab), {s: len(e["words"]) for s, e in splits.items()}, int(length_host.max()),
               args.d, args.lr, args.schedule, args.batch, sum(p.numel() for p in agent.parameters()), args.device,
               forward is not agent, "bf16" if bf16 else "fp32"), flush=True)
     t0 = time.time()
@@ -194,14 +216,14 @@ def main(argv=None):
         first, history = pack["epoch"] + 1, pack["history"]
         print("SURDURULDU: epok %d'den (%s)" % (pack["epoch"], ckpt), flush=True)
     for epoch in range(first, args.epochs + 1):
-        perm_host = torch.randperm(len(train), generator=gen)
+        perm_host = torch.randperm(n_train, generator=gen)
         perm = perm_host.to(args.device)
         total, t_epoch = torch.zeros((), device=args.device), time.time()
         if cuda:
             torch.cuda.reset_peak_memory_stats()
-        for b in range(0, len(train), args.batch):
+        for b in range(0, n_train, args.batch):
             if args.schedule == "cosine":                     # adim epok ve batch'ten: surdurmede ayni lr
-                done = ((epoch - 1) * len(train) + b) / (args.epochs * len(train))
+                done = ((epoch - 1) * n_train + b) / (args.epochs * n_train)
                 for group in opt.param_groups:
                     group["lr"] = args.lr * 0.5 * (1 + math.cos(math.pi * done))
             rows = perm[b:b + args.batch]
@@ -214,23 +236,24 @@ def main(argv=None):
         total = total.item()
         if cuda:
             torch.cuda.synchronize()
-        perf = dict(train_secs=round(time.time() - t_epoch, 2), sentences_per_sec=round(len(train) / (time.time() - t_epoch)),
+        perf = dict(train_secs=round(time.time() - t_epoch, 2), sentences_per_sec=round(n_train / (time.time() - t_epoch)),
                     gpu_peak_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2) if cuda else None)
         if epoch % args.every == 0 or epoch == args.epochs:
             agent.eval()
             t_eval = time.time()
-            res = {s: evaluate(agent, e, valid) for s, e in splits.items()}
+            k_best = args.alternatives if epoch == args.epochs else 0     # top_k yavas (~50 ms / yanlis cumle): yalniz sonda
+            res = {s: evaluate(agent, e, valid, k_best=k_best) for s, e in splits.items()}
             perf["eval_secs"] = round(time.time() - t_eval, 1)
             agent.train()
             print("epok %3d  kayip %.3f  (%.0f sn) | egitim %.1f sn/epok, %d cumle/sn%s | sinav %.1f sn" % (
-                epoch, total / len(train), time.time() - t0, perf["train_secs"], perf["sentences_per_sec"],
+                epoch, total / n_train, time.time() - t0, perf["train_secs"], perf["sentences_per_sec"],
                 (", gpu tepe %.2f GB" % perf["gpu_peak_gb"]) if cuda else "", perf["eval_secs"]), flush=True)
             for s, v in res.items():
                 print("   %-8s %s" % (s, "  ".join(
-                    "%s: n %d tam %.3f yuva %.3f komsu %.3f deneme %.1f%s" % (
-                        k, x["n"], x["exact"], x["slot"], x["neighbor"], x["tries"],
+                    "%s: n %d tam %.3f ilk%d %s yuva %.3f komsu %.3f deneme %.1f%s" % (
+                        k, x["n"], x["exact"], args.alternatives, "-" if x["top_k"] is None else "%.3f" % x["top_k"], x["slot"], x["neighbor"], x["tries"],
                         (" %.2f ms" % x["ms"]) if "ms" in x else "") for k, x in v.items())), flush=True)
-            history.append(dict(epoch=epoch, loss=total / len(train), result=res, perf=perf))
+            history.append(dict(epoch=epoch, loss=total / n_train, result=res, perf=perf))
         if ckpt:                                         # her epok: once .part, sonra yerine (yarim dosya kalmaz)
             torch.save(dict(vocab=vocab, state=agent.state_dict(), opt=opt.state_dict(), gen=gen.get_state(),
                             gen_unk=gen_unk.get_state(), epoch=epoch, history=history, args=vars(args)), ckpt + ".part")
