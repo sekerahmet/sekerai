@@ -702,6 +702,37 @@ def t_text_errors(root):
           "sampled (tohum 0) / real = _count(_continue); model None yalniz real", all(ok), str(ok))
 
 
+def t_correction_break(root):
+    """Duzeltme molasi: _repeats birebir ve 8'li tekrari yakalar, dogal cumleye dokunmaz; correction_break satirlari istem
+    + metin + hedef, mask yalniz hedefte; train_seq molayla kosar, kaydi tutar ve mola satirlari guncellemeyi degistirir."""
+    d = load(root, "gpt2")
+    v = d["vocab"]
+    tab = DS._token_table(v)
+    enc = lambda s: DS.encode(s, v)
+    ctx = enc("Tom saw a big red dog in the park. The dog ran away.")
+    check("correction_break: _repeats birebir cumle ve 8'li ortak oneki yakalar, yeni cumleye dokunmaz",
+          ES._repeats(ctx, enc(" Tom saw a big red dog in the park."), tab)
+          and ES._repeats(ctx, enc(" Tom saw a big red dog in the yard."), tab)
+          and not ES._repeats(ctx, enc(" Sue came home and ate a cake."), tab))
+    model, _ = TR.train_seq("shared", None, None, len(v), steps=5, log_at=(), batches=DS.batches(d, 4, 0), model_kw=TINY)
+    ids, mask, rec = ES.correction_break(d, prompts=8)(2, model)
+    eos = v.index(DS.EOS_TOKEN)
+    ok = all(m.any() and ids[i, 0] == eos and not m[:2].any() for i, m in enumerate(mask))
+    check("correction_break: satir <eos> + istem + metin + hedef, mask yalniz hedef cumlede; kayit tutarli",
+          ok and rec["stories"] == 8 and rec["corrected"] == len(ids) <= rec["entered"] <= 8
+          and rec["corrected"] + rec["forced"] == rec["entered"], str(rec))
+    fixed = (torch.tensor([[eos] + enc("Tom ran. Sue came home.")]), None)
+    fixed = (fixed[0], torch.zeros_like(fixed[0], dtype=torch.bool))
+    fixed[1][0, -4:] = True
+    calls = []
+    stub = lambda step, m: (calls.append(step) or (fixed[0], fixed[1], dict(step=step)))
+    runs = [TR.train_seq("shared", None, None, len(v), steps=6, log_at=(), batches=DS.batches(d, 4, 0), model_kw=TINY,
+                         **kw)[0] for kw in ({}, dict(correction_break=stub, break_every=2, break_weight=1.0))]
+    differ = any(not torch.equal(a, b) for a, b in zip(runs[0].state_dict().values(), runs[1].state_dict().values()))
+    check("correction_break: train_seq her break_every adimda cagirir (adim > 0), kaydi tutar, guncelleme degisir",
+          calls == [2, 4] and [r["step"] for r in runs[1].correction_break] == [2, 4] and differ, "cagri %s" % calls)
+
+
 def t_speed(root):
     import colab_simplestories as C
     d = load(root, "ss4096")
@@ -870,6 +901,7 @@ if __name__ == "__main__":
         t_split(root)
         t_exam(root)
         t_text_errors(root)
+        t_correction_break(root)
         t_speed(root)
         t_colab(root)
     finally:

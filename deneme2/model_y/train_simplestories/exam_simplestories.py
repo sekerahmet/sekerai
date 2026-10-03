@@ -437,3 +437,118 @@ def count_text_errors(model, data, n, count=STORY_CONTINUATIONS, seed=0, real=Fa
     if real:
         out["real"] = _count(prompts, reals, [True] * len(reals), tab, words, xax_ref, stock)
     return out
+
+
+# ---- duzeltme molasi (train_y.train_seq correction_break; kullanici, 3 Ekim: "Hepsi onaylı yani ss böyle yapalım")
+
+BREAK_PROMPT_TOKENS = 6  # mola istemi: train hikayesinin ilk bu kadar token'i (kisa istemde dongu daha sik, D_067)
+BREAK_TOKENS = 256       # mola basina hikaye basina acgozlu devam
+SENTENCE_MAX = 40        # aday cumle en cok bu kadar token
+CANDIDATES = 4           # tekrar sinirinda denenen en olasi ilk token (+ eos)
+
+
+def _sentence_end_table(vocab):
+    """Token -> cumle sonu mu: metni (sondaki tirnak / parantez atilinca) . ! ? ile biter ya da satir sonu icerir."""
+    tok = DS._tokenizer(vocab)[0]
+    return [("\n" in s) or s.rstrip().rstrip("\"')]}”’").endswith((".", "!", "?"))
+            for s in (tok.decode([i]) for i in range(len(vocab)))]
+
+
+def _repeats(context, sentence, tab):
+    """sentence, context'te birebir gecmis cumle mi (>= 5 birim, count_text_errors tanimi) ya da sentence'a degen bir
+    token 8'lisi context'te zaten var mi (yakin tekrar; 8'li dongu olcusunun karsiligi)."""
+    s = _sentences(DS._units(context + sentence, tab))
+    if len(s) > 1 and len(s[-1]) >= _LONG_SENTENCE and s[-1] in set(s[:-1]):
+        return True
+    full, k = context + sentence, len(context)
+    old = {tuple(full[j:j + 8]) for j in range(k - 7)}
+    return any(tuple(full[j:j + 8]) in old for j in range(max(k - 7, 0), len(full) - 7))
+
+
+@torch.no_grad()
+def _next_logprobs(model, prefixes, eos):
+    """Onekler (degisken boy) -> son konumdaki log olasiliklar (cpu).  Onbellekli: onek son token'i haric hidden'dan."""
+    dev = next(model.parameters()).device
+    out = []
+    for c in range(0, len(prefixes), 64):
+        part = prefixes[c:c + 64]
+        lengths = torch.tensor([len(p) for p in part], device=dev)
+        width = int(lengths.max())
+        ids = torch.full((len(part), width), eos, dtype=torch.long)
+        for i, p in enumerate(part):
+            ids[i, :len(p)] = torch.tensor(p)
+        ids, rows = ids.to(dev), torch.arange(len(part), device=dev)
+        caches = [AttentionCache(lengths - 1, width) for _ in range(model.turns)]
+        model.hidden(ids[:, :width - 1], caches)
+        out.append(model.logits(ids[rows, lengths - 1][:, None], caches)[:, 0].float().log_softmax(-1).cpu())
+    return torch.cat(out)
+
+
+def correction_break(data, prompts=None, seed=0):
+    """Duzeltme molasi (bulgular 34, 36, 37) -> f(step, model) -> (ids, mask, kayit).  Train hikayelerinden (seed, step)
+    tohumlu prompts tanesinin ilk BREAK_PROMPT_TOKENS token'i istem; model BREAK_TOKENS token acgozlu yazar.  Her hikayede
+    ILK tekrar cumlesinin (_repeats) sinirinda D1: en olasi CANDIDATES ilk token + eos, her aday cumle sonuna kadar
+    acgozlu; tekrar olmayanlarin en olasisi hedef (eos: hikaye biter).  Satir = istem + model metni (sinira kadar) +
+    hedef cumle; mask yalniz hedef.  Kayit: hikaye, giren (tekrara giren hikaye), duzeltilen, zorlanan (hicbir aday
+    tekrarsiz degil), saniye."""
+    import time
+    from train_y import BREAK_PROMPTS
+    prompts = prompts or BREAK_PROMPTS
+    vocab, a = data["vocab"], data["train"]
+    eos = vocab.index(DS.EOS_TOKEN)
+    end, tab = _sentence_end_table(vocab), DS._token_table(vocab)
+    heads = data["train_start"][data["train_head"] & (data["train_length"] >= BREAK_PROMPT_TOKENS)]
+
+    def run(step, model):
+        t0 = time.time()
+        rows = np.random.default_rng([seed, step]).choice(len(heads), prompts, replace=False)
+        firsts = [[eos] + a[s:s + BREAK_PROMPT_TOKENS].tolist() for s in heads[rows].tolist()]
+        entries = []                                   # (istem + metin sinira kadar, tekrar cumlesi)
+        for p, g in zip(firsts, generate(model, firsts, BREAK_TOKENS)):
+            g = g[:g.index(eos)] if eos in g else g
+            text, s = p[1:] + g, len(p) - 1
+            for i in range(len(p) - 1, len(text)):
+                if end[text[i]] or i == len(text) - 1:
+                    if i + 1 > s and _repeats(text[:s], text[s:i + 1], tab):
+                        entries.append(([eos] + text[:s], text[s:i + 1]))
+                        break
+                    s = i + 1
+        ids, targets, forced = [], [], 0
+        if entries:
+            lp = _next_logprobs(model, [pre for pre, _ in entries], eos)
+            top = lp.topk(CANDIDATES, -1).indices.tolist()
+            jobs = [(r, t) for r, c in enumerate(top) for t in c if t != eos]
+            rolls = generate(model, [entries[r][0] + [t] for r, t in jobs], SENTENCE_MAX - 1)
+            roll = {job: x for job, x in zip(jobs, rolls)}
+            for r, (pre, _) in enumerate(entries):
+                cands = sorted([(float(lp[r, t]), t) for t in top[r]] + [(float(lp[r, eos]), eos)], reverse=True)
+                pick = None
+                for _, t in cands:
+                    if t == eos:
+                        pick = [eos]
+                        break
+                    sent = [t]
+                    for x in ([] if end[t] else roll[(r, t)]):
+                        if x == eos:
+                            break
+                        sent.append(x)
+                        if end[x]:
+                            break
+                    if not _repeats(pre[1:], sent, tab):
+                        pick = sent
+                        break
+                if pick is None:
+                    forced += 1
+                    continue
+                ids.append(pre + pick)
+                targets.append(len(pick))
+        width = max((len(x) for x in ids), default=1)
+        out = torch.full((len(ids), width), eos, dtype=torch.long)
+        mask = torch.zeros((len(ids), width), dtype=torch.bool)
+        for i, (x, n) in enumerate(zip(ids, targets)):
+            out[i, :len(x)] = torch.tensor(x)
+            mask[i, len(x) - n:len(x)] = True
+        return out, mask, dict(step=step, stories=prompts, entered=len(entries), corrected=len(ids), forced=forced,
+                               target_tokens=int(sum(targets)), secs=round(time.time() - t0, 1))
+
+    return run

@@ -42,6 +42,12 @@ NEWTON_SCHULZ_PRECISION = "fp32"   # Muon'un ortogonallestirmesi: "fp32" | "bf16
 MICRO_BATCHES = 1        # adimin batch'i bu kadar parcada (satirlar s::k) ileri + geri, gradyan birikir: bellek bir parcalik,
                          # adim tam batch'in gradyanini alir (parca kaybi hedef payiyla agirlikli).  coherence'ta cift sayi
                          # (yari basina k / 2 parca)
+# Duzeltme molasi (kullanici, 3 Ekim: "Hepsi onaylı yani ss böyle yapalım"; adlar correction_break, BREAK_EVERY,
+# BREAK_PROMPTS onayli; bulgular 34, 36, 37): her BREAK_EVERY adimda model kendi metnini yazar, tekrara girdigi cumle
+# sinirinda ileri bakisin sectigi cumle hedef olur; sonraki adimlarda bu satirlarin kaybi MLE'ye eklenir
+BREAK_EVERY = 2000
+BREAK_PROMPTS = 256      # mola basina modelin yazdigi hikaye
+BREAK_WEIGHT = 0.1       # duzeltme kaybinin MLE kaybina gore agirligi (adim basina 16 satir)
 
 
 class Muon(torch.optim.Optimizer):
@@ -142,7 +148,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
               coherence_window=COHERENCE_WINDOW,
               final_cooldown=FINAL_COOLDOWN, weight_ema=WEIGHT_EMA, matmul_precision=MATMUL_PRECISION,
               final_cooldown_shape=FINAL_COOLDOWN_SHAPE, newton_schulz_precision=NEWTON_SCHULZ_PRECISION,
-              micro_batches=MICRO_BATCHES):
+              micro_batches=MICRO_BATCHES, correction_break=None, break_every=BREAK_EVERY, break_weight=BREAK_WEIGHT):
     """Tarif: Muon (gizli matrisler: W_context, W_value, W_fact_in, W_fact_up, W_fact_out) + Adam (gerisi), takvim (wsd ya
     da coherence), gradient clipping.
     callback(step, model, nll): her `every` adimda, o adimin guncellemesinden ONCE (sinav, kayit, durdurma).
@@ -171,7 +177,11 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     dokunmaz.  CPU'da (compile gibi) etkisiz.  SDPA hep math cekirdegiyle: flash / mem-efficient'in geri yayilimi
     deterministik degil (surdurme bit duzeyinde kalmaz).
     micro_batches: gradyan birikimi (batch'in satir sayisi bunun kati olmali).
-    checkpoint step 0: baslangic agirligi (baska kosudan, init_from) -- 0. adimin callback'i kosar."""
+    checkpoint step 0: baslangic agirligi (baska kosudan, init_from) -- 0. adimin callback'i kosar.
+    correction_break(step, model) -> (ids, mask, kayit): duzeltme molasi, her break_every adimda (adim > 0), guncellemeden
+    once; mask yalniz hedef token'lar.  Sonraki her adimda 16 satirin kaybi x break_weight MLE gradyanina eklenir (kirpmadan
+    once; coherence yalniz MLE'den).  Kayitlar model.correction_break listesinde (kosucu sinavda okur ve bosaltir).
+    Surdurmede satirlar bir sonraki molaya kadar yok (paketlenmez)."""
     assert batches is not None or ids is not None, "ids/mask ya da batches verilmeli"
     assert setting == "shared", "setting: yalniz shared (BlockModel), bu: %s" % setting
     assert schedule in ("wsd", "coherence") and 0 < cooldown <= 1
@@ -260,7 +270,9 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
     for group in opt.param_groups:                         # coherence durumu: surdurmede optimizer'la birlikte gelir
         group.setdefault("coherence_mean", 1.0)
         group.setdefault("coherence_frozen", None)
-    curve, packed = [], []
+    curve, packed, fixes = [], [], None
+    if correction_break is not None:
+        model.correction_break = []
     for step in range(first, steps + 1):
         resumed_here = checkpoint is not None and step == first and first > 0
         if schedule == "coherence":                        # t < final: ortalama(rho);  sonra o deger · (floor + (1 - floor)(1 - done))
@@ -312,6 +324,9 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
             save(step, model, opt)
         if step == steps:
             break
+        if correction_break is not None and step > 0 and step % break_every == 0:
+            *fixes, record = correction_break(step, model)  # modelin kendi metni, guncellemeden once
+            model.correction_break.append(record)
         opt.zero_grad()                                    # onceki adimin gradyanlarini sil
         if split:                                          # iki yarinin gradyani -> rho; toplam = tam batch'in gradyani
             grads = None                                   # tek kopya: g1; ikinci yari p.grad'a birikir (g1 + g2)
@@ -348,6 +363,12 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
         else:
             with sdpa_kernel(kernels):
                 total.backward()                           # her ogrenilen sayi x icin ∂kayip/∂x (zincir kurali, otomatik)
+        if fixes is not None and len(fixes[0]):           # duzeltme molasi: 16 satir, gradyan MLE'ninkine eklenir
+            pick = torch.randperm(len(fixes[0]), generator=torch.Generator().manual_seed(step))[:16]
+            with forward_context():
+                fix_total, _ = model.loss(fixes[0][pick].to(device), fixes[1][pick].to(device))
+            with sdpa_kernel(kernels):
+                (break_weight * fix_total).backward()
         torch.nn.utils.clip_grad_norm_(params, grad_clip)  # butun gradyanlarin toplam boyu > grad_clip ise olcekle indir
         opt.step()                                         # Adam: x <- x - lr · m / (√v + eps); Muon: ortogonal adim
         model.normalize_weights()                          # agirlik kureye geri; adim boyunu yalniz lr belirler

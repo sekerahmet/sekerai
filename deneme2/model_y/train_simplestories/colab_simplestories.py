@@ -117,14 +117,16 @@ def _text_errors_line(t, head):
 
 
 def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True, setting="shared", save_every=None,
-          resume=False, batch_size=BATCH_SIZE, model_kw=None, bucket=None, **train_kw):
+          resume=False, batch_size=BATCH_SIZE, model_kw=None, bucket=None, correction_break=False, **train_kw):
     """Egitimi arka planda baslatir, hemen doner.  out doluysa once out_eski_<zaman>'a TASINIR, silinmez.
     data: data_simplestories.build(root, tag) -- tag ve iz config'e yazilir, sozluk buyuklugu len(data["vocab"]).
     setting "shared": Model X; model_kw bos kalan ayarlar model_y varsayilanlari (config'e acik yazilir).
     compile=True (varsayilan; kullanici: "bu sabit ayar ve yes olsun").
     save_every: her save_every adimda out/checkpoint_tNNNNNN.pt {step, model, optimizer}.  resume=True: out'taki son
     paketten surdurur -- klasor tasinmaz, gunluk uzar, paketten sonraki sinavlar atilir; ayarlar config.json ile ayni olmali.
-    bucket: data_simplestories.batches'e gider (None: rastgele batch; K: uzunluga gore gruplama)."""
+    bucket: data_simplestories.batches'e gider (None: rastgele batch; K: uzunluga gore gruplama).
+    correction_break=True: duzeltme molasi (exam_simplestories.correction_break; break_every, break_prompts, break_weight
+    train_kw'den ya da train_y varsayilani, config'e yazilir)."""
     if name in RUNS and RUNS[name]["thread"].is_alive():
         raise RuntimeError("%s zaten kosuyor" % name)
     assert setting == "shared", "yalniz BlockModel (setting shared)"
@@ -159,6 +161,11 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                               stream_norm=True, layer_norm=False,
                               normalized_update=True, sphere_weights=True, canon=True, rope=TR.ROPE),
                          **train_kw))
+    if correction_break:                               # duzeltme molasi: ayarlar config'e (A ile farki gorunsun)
+        config.update(correction_break=True, break_every=config.get("break_every", TR.BREAK_EVERY),
+                      break_prompts=config.get("break_prompts", TR.BREAK_PROMPTS),
+                      break_weight=config.get("break_weight", TR.BREAK_WEIGHT))
+        train_kw = {k: v for k, v in train_kw.items() if k not in ("break_every", "break_prompts", "break_weight")}
     checkpoint = None
     if resume:
         packs = sorted(f for f in os.listdir(out) if f.startswith("checkpoint_t") and f.endswith(".pt")) if os.path.isdir(out) else []
@@ -262,6 +269,12 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
                 if "weight_ema" in e else "")
              + (" | olcek %.2f" % e["output_scale"] if "output_scale" in e else "")
              + (" | bag q %.3f u %.3f" % (e["link_q"], e["link_u"]) if "link_q" in e else ""))
+        if getattr(model, "correction_break", None):   # son sinavdan bu yana molalar
+            e.update(correction_break=list(model.correction_break))
+            for b in model.correction_break:
+                note("       mola adim %d: %d hikaye, tekrara giren %d, duzeltilen %d, zorlanan %d, hedef %d token (%.0f sn)" % (
+                    b["step"], b["stories"], b["entered"], b["corrected"], b["forced"], b["target_tokens"], b["secs"]))
+            model.correction_break.clear()
         if "text_errors" in e:
             note(_text_errors_line(e["text_errors"], "       metin"))
         if run["stop"]:
@@ -297,6 +310,9 @@ def start(name, data, out, steps, seed=0, every=500, device="cuda", compile=True
             model, _ = TR.train_seq(setting, None, None, len(vocab), steps=steps, seed=seed, device=device, every=every,
                                     callback=callback, log_at=(), compile=compile, save_every=save_every, save=save,
                                     checkpoint=checkpoint, batches=_counting(DS.batches(data, batch_size, seed, bucket), work),
+                                    **(dict(correction_break=ES.correction_break(data, config["break_prompts"], seed),
+                                            break_every=config["break_every"], break_weight=config["break_weight"])
+                                       if correction_break else {}),
                                     model_kw=model_kw,
                                     **dict(train_kw, matmul_precision=config["matmul_precision"],
                                            newton_schulz_precision=config["newton_schulz_precision"],
