@@ -230,6 +230,7 @@ def main(argv=None):
     ap.add_argument("--root", default=None, help="veri klasoru (varsayilan data/<data>; SS: Drive'daki hazir dosyalar)")
     ap.add_argument("--epochs", type=int, default=30)          # ulke verisinde 60 ile ayni sonuc (olculdu)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--d", type=int, default=D, help="kelime temsili boyu")
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--lr", type=float, default=3e-3)
     ap.add_argument("--device", default="cpu", help="cpu | cuda")
@@ -251,7 +252,7 @@ def main(argv=None):
     for r in _load(os.path.join(folder, prefix + "sentences.jsonl")) or train + exam:
         valid[tuple(sorted(r["words"]))].add(tuple(r["words"]))
     vocab = [UNK] + sorted({w for r in train for w in r["words"]})
-    agent = GrammarAgent(vocab).to(args.device)
+    agent = GrammarAgent(vocab, d=args.d).to(args.device)
     cuda = torch.device(args.device).type == "cuda"
     forward = torch.compile(agent, dynamic=True) if (cuda and args.compile) else agent
     bf16 = cuda and args.precision == "bf16"
@@ -259,9 +260,10 @@ def main(argv=None):
     splits = {s: _encode(agent, [r for r in exam if r["split"] == s]) for s in sorted({r["split"] for r in exam})}
     enc = _encode(agent, train)
     gen = torch.Generator().manual_seed(args.seed)
-    print("veri %s: egitim %d cumle, sozluk %d, sinav %s, en uzun %d kelime | cihaz %s compile %s %s" % (
-        args.data, len(train), len(vocab), {s: len(e["words"]) for s, e in splits.items()}, enc["ids"].shape[1],
-        args.device, forward is not agent, "bf16" if bf16 else "fp32"), flush=True)
+    print("veri %s: egitim %d cumle, sozluk %d, sinav %s, en uzun %d kelime | d %d, %d parametre | cihaz %s compile %s %s"
+          % (args.data, len(train), len(vocab), {s: len(e["words"]) for s, e in splits.items()}, enc["ids"].shape[1],
+             args.d, sum(p.numel() for p in agent.parameters()), args.device, forward is not agent,
+             "bf16" if bf16 else "fp32"), flush=True)
     t0 = time.time()
     res, history, first = None, [], 1
     ckpt = os.path.join(args.out, "checkpoint.pt") if args.out else None
