@@ -237,6 +237,7 @@ def main(argv=None):
     ap.add_argument("--precision", default="bf16", choices=("bf16", "fp32"), help="egitim ileri hesabi (yalniz cuda); "
                     "sinav hep fp32")
     ap.add_argument("--every", type=int, default=10, help="kac epokta bir olcum")
+    ap.add_argument("--save", default=None, help="sonda ajan (sozluk + agirlik) ve son olcum bu dosyaya (.pt)")
     args = ap.parse_args(argv)
     torch.manual_seed(args.seed)
     if args.device == "cpu":
@@ -281,6 +282,9 @@ def main(argv=None):
                     "%s: n %d tam %.3f yuva %.3f komsu %.3f deneme %.1f%s" % (
                         k, x["n"], x["exact"], x["slot"], x["neighbor"], x["tries"],
                         (" %.2f ms" % x["ms"]) if "ms" in x else "") for k, x in v.items())), flush=True)
+    if args.save:
+        torch.save(dict(vocab=vocab, state=agent.state_dict(), result=res, args=vars(args)), args.save)
+        print("kaydedildi:", args.save, flush=True)
     return agent, res
 
 
