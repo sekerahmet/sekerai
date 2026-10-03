@@ -150,11 +150,11 @@ def _batch(enc, rows, gen):
 def loss_of(agent, enc, rows, gen, unk_rate, forward=None, bf16=False):
     """Egitim torbasi cumlenin kendisi: okuyucu konumsuz, G kelimelerin veriliş sirasiyla birlikte permute olur, kayip
     sirasizdir; karistirmak bir sey degistirmez.  Hedefler sabit: ardil i+1, oncel i-1, boundary (indeks L) ilk / son
-    kelimeye.  enc, rows ve gen ajanin cihazinda; dolgu batch'in en uzun cumlesine kirpilir.
+    kelimeye.  enc, rows ve gen ajanin cihazinda; dolgu batch'in en uzun cumlesine (8'e yuvarli) kirpilir.
     forward: agent'in derlenmis hali (torch.compile) ya da agent; bf16: ileri hesap autocast (GPU)."""
     dev = next(agent.parameters()).device
     length = enc["length"][rows]
-    L = int(length.max())
+    L = min(-(-int(length.max()) // 8) * 8, enc["ids"].shape[1])   # 8'in kati: torch.compile her boyda yeniden derlemesin
     orig = enc["ids"][rows, :L]
     pos = torch.arange(L, device=dev)[None]
     mask = pos < length[:, None]
