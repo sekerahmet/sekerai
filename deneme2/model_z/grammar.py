@@ -237,7 +237,9 @@ def main(argv=None):
     ap.add_argument("--precision", default="bf16", choices=("bf16", "fp32"), help="egitim ileri hesabi (yalniz cuda); "
                     "sinav hep fp32")
     ap.add_argument("--every", type=int, default=10, help="kac epokta bir olcum")
-    ap.add_argument("--save", default=None, help="sonda ajan (sozluk + agirlik) ve son olcum bu dosyaya (.pt)")
+    ap.add_argument("--out", default=None, help="kosu klasoru: her epok checkpoint.pt (ajan, optimizer, epok, rastgelelik), "
+                    "sonda agent.pt; olcumler results.json")
+    ap.add_argument("--resume", type=int, default=0, help="1: --out'taki checkpoint.pt'den kaldigi epoktan surdur")
     args = ap.parse_args(argv)
     torch.manual_seed(args.seed)
     if args.device == "cpu":
@@ -261,10 +263,23 @@ def main(argv=None):
         args.data, len(train), len(vocab), {s: len(e["words"]) for s, e in splits.items()}, enc["ids"].shape[1],
         args.device, forward is not agent, "bf16" if bf16 else "fp32"), flush=True)
     t0 = time.time()
-    res = None
-    for epoch in range(1, args.epochs + 1):
+    res, history, first = None, [], 1
+    ckpt = os.path.join(args.out, "checkpoint.pt") if args.out else None
+    if args.out:
+        os.makedirs(args.out, exist_ok=True)
+    if args.resume:
+        pack = torch.load(ckpt, map_location=args.device, weights_only=False)
+        assert pack["vocab"] == vocab, "sozluk checkpoint'tekinden farkli: ayni veriyle surdurulur"
+        agent.load_state_dict(pack["state"])
+        opt.load_state_dict(pack["opt"])
+        gen.set_state(pack["gen"])
+        first, history = pack["epoch"] + 1, pack["history"]
+        print("SURDURULDU: epok %d'den (%s)" % (pack["epoch"], ckpt), flush=True)
+    for epoch in range(first, args.epochs + 1):
         perm = torch.randperm(len(train), generator=gen)
-        total = 0.0
+        total, t_epoch = 0.0, time.time()
+        if cuda:
+            torch.cuda.reset_peak_memory_stats()
         for b in range(0, len(train), args.batch):
             rows = perm[b:b + args.batch]
             loss = loss_of(agent, enc, rows, gen, UNK_RATE, forward, bf16)
@@ -272,19 +287,33 @@ def main(argv=None):
             loss.backward()
             opt.step()
             total += loss.item() * len(rows)
+        if cuda:
+            torch.cuda.synchronize()
+        perf = dict(train_secs=round(time.time() - t_epoch, 2), sentences_per_sec=round(len(train) / (time.time() - t_epoch)),
+                    gpu_peak_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2) if cuda else None)
         if epoch % args.every == 0 or epoch == args.epochs:
             agent.eval()
+            t_eval = time.time()
             res = {s: evaluate(agent, e, valid) for s, e in splits.items()}
+            perf["eval_secs"] = round(time.time() - t_eval, 1)
             agent.train()
-            print("epok %3d  kayip %.3f  (%.0f sn)" % (epoch, total / len(train), time.time() - t0), flush=True)
+            print("epok %3d  kayip %.3f  (%.0f sn) | egitim %.1f sn/epok, %d cumle/sn%s | sinav %.1f sn" % (
+                epoch, total / len(train), time.time() - t0, perf["train_secs"], perf["sentences_per_sec"],
+                (", gpu tepe %.2f GB" % perf["gpu_peak_gb"]) if cuda else "", perf["eval_secs"]), flush=True)
             for s, v in res.items():
                 print("   %-8s %s" % (s, "  ".join(
                     "%s: n %d tam %.3f yuva %.3f komsu %.3f deneme %.1f%s" % (
                         k, x["n"], x["exact"], x["slot"], x["neighbor"], x["tries"],
                         (" %.2f ms" % x["ms"]) if "ms" in x else "") for k, x in v.items())), flush=True)
-    if args.save:
-        torch.save(dict(vocab=vocab, state=agent.state_dict(), result=res, args=vars(args)), args.save)
-        print("kaydedildi:", args.save, flush=True)
+            history.append(dict(epoch=epoch, loss=total / len(train), result=res, perf=perf))
+        if ckpt:                                         # her epok: once .part, sonra yerine (yarim dosya kalmaz)
+            torch.save(dict(vocab=vocab, state=agent.state_dict(), opt=opt.state_dict(), gen=gen.get_state(),
+                            epoch=epoch, history=history, args=vars(args)), ckpt + ".part")
+            os.replace(ckpt + ".part", ckpt)
+    if args.out:
+        torch.save(dict(vocab=vocab, state=agent.state_dict(), args=vars(args)), os.path.join(args.out, "agent.pt"))
+        json.dump(history, open(os.path.join(args.out, "results.json"), "w"), indent=1)
+        print("kaydedildi:", args.out, flush=True)
     return agent, res
 
 
