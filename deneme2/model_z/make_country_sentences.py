@@ -1,6 +1,6 @@
 """make_country_sentences -- Model Z ilk verisi: ulke olgularindan duz cumleler (kullanici, 3 Ekim: "Önce tüm veriyi
 çıkartan sonra eğitim ve sınav").  Ayni olgu farkli kaliplarla: ulke bazen ozne, bazen nesne, tamlayan ya da yer.
-Gorev etiketi YOK: gorevi makine kendisi bulur (kullanici, 3 Ekim: "Görev etiketi olmasın dedim ya artık tasarımdan kalktı").
+Gorev kavrami yok (kullanici, 3 Ekim: "Görevi makine bulmayacak görev diye birşey yok"): veri yalniz kelimeler.
 
 1. Butun veri: her ulke x her dolu olgu x o olgunun her kalibi -> country_sentences.jsonl
 2. Egitim / sinav (tohum sabit):
