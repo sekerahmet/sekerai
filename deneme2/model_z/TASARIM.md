@@ -15,5 +15,14 @@ Kullanıcı, 3 Ekim 2026: *"Gramer ajanının temel görevi verilen tüm kelimel
 - Başarı: tek seferde doğru cümle. Ölçüler: tam doğru, doğru yuva, doğru komşu, deneme sayısı.
 - Veri: `data/countries/` (hazır dosyalar). Sınav: eğitimde görülmüş ve görülmemiş olgu.
 
-Durum: veri hazır, gramer ajanının kodu yok. Kol Model Y'den kopyalanmadı; temel çalışması (dilin, gramerin, anlamın matematiksel
-ifadesi; bilginin nasıl saklandığı; yön / açı / uzunluk / kütle) bitince adım adım kurulur (CLAUDE.md kural 13).
+Durum (4 Ekim): kod `core/grammar/` (grammar.py ajan, train_grammar.py eğitim); dizme ilişki matrisi üzerinde tek çevrim,
+ilk k aday `order_alternatives`. Veri: ülke, SS 200k, SS tamamı (`make_ss_sentences.py`, Drive).
+
+## Açık noktalar
+
+- **Gramer kötü torba görmedi.** Kullanıcı, 4 Ekim 2026: *"bunu açık bir nokta olarak kaydet. grammer kötü torba görmedi!
+  evet seçilen torbaya puan vermek grammer işi olur katılıyorum."* Gramer, kendisine gelen torbayı dizer ve bir **kalite
+  endeksi** döndürür (kullanıcı: *"judge değil quality index mi oluyor grammerin fonksiyonu ?"*); torbayı gönderen ajan
+  sıralama yapmaz (*"grammere gönderen ajanın grammer gibi bir görevi olmayacak"*). Gramer yalnız doğru cümlelerle eğitildi;
+  kötü torbaya verdiği puanın anlamı ölçülmedi. Sınama: gerçek torba ile içine başka cümleden kelime karışmış torba,
+  endeks ayrışıyor mu.
