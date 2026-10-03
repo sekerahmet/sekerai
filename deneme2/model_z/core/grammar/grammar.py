@@ -7,9 +7,9 @@ Girdi: cumlenin kelimeleri, karisik (torba).  Cikti: butun cumle bir anda.
     E               kelime temsili (sozluk x d); egitimde gecmeyen kelime <unk>
     boundary        sinir dugumu: cumlenin basi ve sonu, torbaya eklenir
     torba okuyucu   konumsuz attention (TransformerEncoder): h_i, kelimenin torbadaki baglami; girdi sirasindan bagimsiz
-    relation_matrix G[i, j] = h_i^T W h_j + e_i^T U e_j: "j, i'nin hemen ardindan gelir"; ilk terim baglamli (kalip),
-                    ikincisi sozcuksel (kelimenin kendisi: ad ici sira).  boundary'nin satiri cumlenin ilk kelimesi, sutunu
-                    son kelimesi
+    relation_matrix G[i, j] = (h_i^T W h_j + e_i^T U e_j) / sqrt(d), torba ortalamasi cikarilmis, fp32: "j, i'nin
+                    hemen ardindan gelir"; ilk terim baglamli (kalip), ikincisi sozcuksel (kelimenin kendisi: ad ici sira).
+                    boundary'nin satiri cumlenin ilk kelimesi, sutunu son kelimesi
     order_by_relation  cumle = G uzerinde boundary'den gecen tek cevrim: her dugume bir ardil (Macar atamasi, tek seferde);
                     atama birden fazla cevrim verirse patch_cycles birlestirir (Karp yamasi).  Maliyet n^3
 """
@@ -45,13 +45,17 @@ class GrammarAgent(torch.nn.Module):
         e = torch.cat([self.E(ids), self.boundary.expand(B, 1, -1)], 1)
         m = torch.cat([mask, torch.ones(B, 1, dtype=torch.bool, device=ids.device)], 1)
         h = self.reader(e, src_key_padding_mask=~m)
-        G = (torch.einsum("bid,de,bje->bij", h, self.W, h) + torch.einsum("bid,de,bje->bij", e, self.U, e)) / e.shape[-1] ** 0.5
         ok = m[:, :, None] & m[:, None, :] & ~torch.eye(L + 1, dtype=torch.bool, device=ids.device)[None]
+        with torch.autocast(ids.device.type, enabled=False):          # G fp32: bf16'da buyuk G'nin farklari silinir
+            h, e = h.float(), e.float()
+            G = (torch.einsum("bid,de,bje->bij", h, self.W, h) + torch.einsum("bid,de,bje->bij", e, self.U, e)) / e.shape[-1] ** 0.5
+            # kayip ve dizme G'ye eklenen sabite duyarsiz: ortalama cikarilir ki G serbestce kaymasin
+            G = G - (G * ok).sum((1, 2), keepdim=True) / ok.sum((1, 2), keepdim=True)
         return G.masked_fill(~ok, NEG)
 
 
 def relation_matrix(agent, words):
-    """Tek torba -> G ((n+1) x (n+1), son satir / sutun boundary) (okuma icin)."""
+    """Tek torba -> G (torch, (n+1) x (n+1), son satir / sutun boundary) (okuma icin)."""
     dev = next(agent.parameters()).device
     with torch.no_grad():
         return agent(torch.tensor([agent.ids(words)], device=dev), torch.ones(1, len(words), dtype=torch.bool,

@@ -28,8 +28,11 @@ TRIES = 100             # deneme sayisi olcusunun ust siniri
 LENGTH_BANDS = ((1, 10), (11, 20), (21, 1000))   # olculer cumle boyuna gore de
 
 
-def _load(path):
-    return [json.loads(line) for line in open(path, encoding="utf-8")] if os.path.exists(path) else []
+def _load(path, required=True):
+    if not os.path.exists(path):
+        assert not required, "veri dosyasi yok: %s (--root dogru mu?)" % path
+        return []
+    return [json.loads(line) for line in open(path, encoding="utf-8")]
 
 
 def _encode(agent, rows):
@@ -49,14 +52,15 @@ def _batch(enc, rows, gen):
     return enc["ids"][rows].gather(1, order), mask, order
 
 
-def loss_of(agent, enc, rows, gen, unk_rate, forward=None, bf16=False):
+def loss_of(agent, enc, rows, gen, unk_rate, forward=None, bf16=False, L=None):
     """Egitim torbasi cumlenin kendisi: okuyucu konumsuz, G kelimelerin veriliş sirasiyla birlikte permute olur, kayip
     sirasizdir; karistirmak bir sey degistirmez.  Hedefler sabit: ardil i+1, oncel i-1, boundary (indeks L) ilk / son
     kelimeye.  enc, rows ve gen ajanin cihazinda; dolgu batch'in en uzun cumlesine (8'e yuvarli) kirpilir.
-    forward: agent'in derlenmis hali (torch.compile) ya da agent; bf16: ileri hesap autocast (GPU)."""
+    forward: agent'in derlenmis hali (torch.compile) ya da agent; bf16: okuyucu autocast (GPU; G hep fp32).
+    L: dolgu boyu, CPU'dan (verilmezse cihazdan okunur: GPU'yu bekletir)."""
     dev = next(agent.parameters()).device
     length = enc["length"][rows]
-    L = min(-(-int(length.max()) // 8) * 8, enc["ids"].shape[1])   # 8'in kati: torch.compile her boyda yeniden derlemesin
+    L = min(L or -(-int(length.max()) // 8) * 8, enc["ids"].shape[1])   # 8'in kati: compile her boyda yeniden derlemesin
     orig = enc["ids"][rows, :L]
     pos = torch.arange(L, device=dev)[None]
     mask = pos < length[:, None]
@@ -152,7 +156,7 @@ def main(argv=None):
     train = _load(os.path.join(folder, prefix + "train.jsonl"))
     exam = _load(os.path.join(folder, prefix + "exam.jsonl"))
     valid = defaultdict(set)                            # ayni torbadan kurulabilen gecerli cumleler
-    for r in _load(os.path.join(folder, prefix + "sentences.jsonl")) or train + exam:
+    for r in _load(os.path.join(folder, prefix + "sentences.jsonl"), required=False) or train + exam:
         valid[tuple(sorted(r["words"]))].add(tuple(r["words"]))
     vocab = [UNK] + sorted({w for r in train for w in r["words"]})
     agent = GrammarAgent(vocab, d=args.d).to(args.device)
@@ -164,10 +168,12 @@ def main(argv=None):
     enc = {k: v.to(args.device) for k, v in _encode(agent, train).items() if k != "words"}   # egitim verisi bir kez cihazda
     gen = torch.Generator().manual_seed(args.seed)                     # epok sirasi (CPU)
     gen_unk = torch.Generator(device=args.device).manual_seed(args.seed)   # <unk> secimi (cihazda)
-    print("veri %s: egitim %d cumle, sozluk %d, sinav %s, en uzun %d kelime | d %d, lr %g %s, %d parametre | cihaz %s "
-          "compile %s %s" % (args.data, len(train), len(vocab), {s: len(e["words"]) for s, e in splits.items()},
-                             enc["ids"].shape[1], args.d, args.lr, args.schedule, sum(p.numel() for p in agent.parameters()), args.device, forward is not agent,
-             "bf16" if bf16 else "fp32"), flush=True)
+    length_host = enc["length"].cpu()                    # dolgu boyu CPU'dan: her adimda GPU beklenmez
+    print("veri %s: egitim %d cumle, sozluk %d, sinav %s, en uzun %d kelime | d %d, lr %g %s, batch %d, %d parametre | "
+          "cihaz %s compile %s %s" % (
+              args.data, len(train), len(vocab), {s: len(e["words"]) for s, e in splits.items()}, enc["ids"].shape[1],
+              args.d, args.lr, args.schedule, args.batch, sum(p.numel() for p in agent.parameters()), args.device,
+              forward is not agent, "bf16" if bf16 else "fp32"), flush=True)
     t0 = time.time()
     res, history, first = None, [], 1
     ckpt = os.path.join(args.out, "checkpoint.pt") if args.out else None
@@ -176,14 +182,20 @@ def main(argv=None):
     if args.resume:
         pack = torch.load(ckpt, map_location=args.device, weights_only=False)
         assert pack["vocab"] == vocab, "sozluk checkpoint'tekinden farkli: ayni veriyle surdurulur"
+        # surdurme ayni tarifle: farkli ayar sessizce yok sayilmasin (lr optimizer durumundan gelir)
+        keys = ("data", "seed", "d", "batch", "lr", "schedule", "precision") + (
+            ("epochs",) if args.schedule == "cosine" else ())    # cosine'in bitisi --epochs: uzatma zamanlamayi degistirir
+        diff = {k: (pack["args"].get(k), vars(args)[k]) for k in keys if pack["args"].get(k) != vars(args)[k]}
+        assert not diff, "surdurme ayari checkpoint'ten farkli (checkpoint, simdi): %s" % diff
         agent.load_state_dict(pack["state"])
         opt.load_state_dict(pack["opt"])
-        gen.set_state(pack["gen"])
+        gen.set_state(pack["gen"].cpu())                 # map_location RNG durumunu da cihaza tasir; set_state CPU ister
         gen_unk.set_state(pack["gen_unk"].cpu())
         first, history = pack["epoch"] + 1, pack["history"]
         print("SURDURULDU: epok %d'den (%s)" % (pack["epoch"], ckpt), flush=True)
     for epoch in range(first, args.epochs + 1):
-        perm = torch.randperm(len(train), generator=gen).to(args.device)
+        perm_host = torch.randperm(len(train), generator=gen)
+        perm = perm_host.to(args.device)
         total, t_epoch = torch.zeros((), device=args.device), time.time()
         if cuda:
             torch.cuda.reset_peak_memory_stats()
@@ -193,7 +205,8 @@ def main(argv=None):
                 for group in opt.param_groups:
                     group["lr"] = args.lr * 0.5 * (1 + math.cos(math.pi * done))
             rows = perm[b:b + args.batch]
-            loss = loss_of(agent, enc, rows, gen_unk, UNK_RATE, forward, bf16)
+            L = -(-int(length_host[perm_host[b:b + args.batch]].max()) // 8) * 8
+            loss = loss_of(agent, enc, rows, gen_unk, UNK_RATE, forward, bf16, L)
             opt.zero_grad()
             loss.backward()
             opt.step()
