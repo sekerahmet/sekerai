@@ -118,10 +118,14 @@ def _tokenizer(vocab):
 
 def encode(text, vocab):
     """Metin -> id listesi (ozel token eklemez).  ss4096 kucuk harfe cevirir, bosluk ve satir sonunu atar; gpt2 kayipsiz.
-    Etiketli sozlukte (sentence_ids) metin hikaye basi sayilir: cumle numarasi etiketleri eklenir."""
-    ids = _tokenizer(vocab)[0].encode(text, add_special_tokens=False).ids
+    Etiketli sozlukte metin hikaye basi sayilir: cumle numarasi (sentence_ids) ya da cumle turu (sentence_type_tag,
+    kopyasiz) etiketleri eklenir."""
+    tok, eos = _tokenizer(vocab)
+    ids = tok.encode(text, add_special_tokens=False).ids
     base = _sentence_id_base(vocab)
-    if base is not None:
+    if base is not None and tuple(vocab[base:]) == TYPE_TAG_TOKENS:
+        ids = _insert_type_tags(np.array(ids + [eos], dtype=np.int64), vocab, base)[0][:-1].tolist()
+    elif base is not None:
         ids = _insert_sentence_ids(np.array(ids, dtype=np.int64), vocab, base).tolist()
     return ids
 
@@ -229,9 +233,11 @@ _ENDS = {}               # id(taban sozluk) -> (sozluk, cumle sonu, nokta, rakam
 
 
 def _sentence_id_base(vocab):
-    """Etiketli sozlukte ilk etiketin id'si (taban sozluk boyu), degilse None."""
-    n = len(SENTENCE_ID_TOKENS)
-    return len(vocab) - n if len(vocab) > n and tuple(vocab[-n:]) == SENTENCE_ID_TOKENS else None
+    """Etiketli sozlukte (cumle numarasi ya da cumle turu) ilk etiketin id'si (taban sozluk boyu), degilse None."""
+    for tags in (SENTENCE_ID_TOKENS, TYPE_TAG_TOKENS):
+        if len(vocab) > len(tags) and tuple(vocab[-len(tags):]) == tags:
+            return len(vocab) - len(tags)
+    return None
 
 
 def strip_sentence_ids(ids, vocab):
@@ -297,12 +303,18 @@ def sentence_ids(data, log=print):
     ayni (etiket bayt eklemez: bits_per_byte etiket nat'larini da metin baytina boler).  Sinav hikayeleri etiketle
     seq_len'e sigmali.  Drive'a yazilmaz: her yuklemede bellekte uretilir, kural ize girer."""
     assert _sentence_id_base(data["vocab"]) is None, "veri zaten etiketli"
-    base, seq_len = len(data["vocab"]), data["seq_len"]
+    base = len(data["vocab"])
     vocab = list(data["vocab"]) + list(SENTENCE_ID_TOKENS)
+    train, valid = (_insert_sentence_ids(data[s], vocab, base) for s in ("train", "valid"))
+    return _relabeled(data, vocab, train, valid, "sentence_ids", "v3_%d_%d" % (SENTENCE_IDS, PARAGRAPH_IDS), {}, log)
+
+
+def _relabeled(data, vocab, train, valid, name, rule, extra_counts, log):
+    """Etiketli akislar -> build'in verisinin etiketli kopyasi (tag <tag>_<name>): pencereler, valid ve sinav satirlari
+    yeniden; kural (rule) ize girer.  Valid hikayeleri yalniz etiket alir (sinav hikayeleri etiketle seq_len'e sigmali)."""
+    base, seq_len = len(data["vocab"]), data["seq_len"]
     eos = _tokenizer(vocab)[1]
-    out = dict(data, vocab=vocab, tag=data["tag"] + "_sentence_ids", counts=dict(data["counts"]))
-    for split in ("train", "valid"):
-        out[split] = _insert_sentence_ids(data[split], vocab, base)
+    out = dict(data, vocab=vocab, tag=data["tag"] + "_" + name, counts=dict(data["counts"]), train=train, valid=valid)
     starts, lengths = _stories(out["train"], eos)
     keep = lengths > 0
     out["train_start"], out["train_length"], out["train_head"] = _windows(starts[keep], lengths[keep], seq_len)
@@ -322,15 +334,192 @@ def sentence_ids(data, log=print):
     c.update(train_tokens=len(out["train"]), valid_tokens=len(out["valid"]), train_kept=len(out["train_start"]),
              valid_kept=len(rows), train_split=int((_stories(out["train"], eos)[1] + 2 > seq_len).sum()),
              train_targets=int((out["train_length"] + 1).sum()),
-             sentence_ids=int((out["train"] >= base).sum() + (out["valid"] >= base).sum()))
+             **{name: int((out["train"] >= base).sum() + (out["valid"] >= base).sum())}, **extra_counts)
     table = b"".join(np.ascontiguousarray(out["train_" + k]).tobytes() for k in ("start", "length", "head"))
     parts = {k: v for k, v in data["fingerprints"].items() if k not in ("vocab", "train", "valid", "windows")}
     out["fingerprint"], out["fingerprints"] = fingerprint(vocab, out["train"], out["valid"], **dict(
-        parts, windows=table, sentence_ids="v3_%d_%d" % (SENTENCE_IDS, PARAGRAPH_IDS)))
-    log("%s: etiket %d (train payi %%%.1f) | train %d pencere | valid %d hikaye | sinav %d | iz %s" % (
-        out["tag"], c["sentence_ids"], 100 * (out["train"] >= base).mean(), c["train_kept"], len(rows), len(out["exam"]),
-        out["fingerprint"]))
+        parts, windows=table, **{name: rule}))
+    log("%s: etiket %d (train payi %%%.1f) %s| train %d pencere | valid %d hikaye | sinav %d | iz %s" % (
+        out["tag"], c[name], 100 * (out["train"] >= base).mean(), "".join("%s %s " % kv for kv in extra_counts.items()),
+        c["train_kept"], len(rows), len(out["exam"]), out["fingerprint"]))
     return out
+
+
+# --- cumle turu etiketi (kullanici, 3 Ekim: "Böyle kalsın isimler onaylı"; adlar sentence_type_tag, injected_repeat,
+# REPEAT_RATE; bulgular 35).  Her cumlenin ONUNDE <new> / <repeat>: model once turu secer, sonra cumleyi kurar.  <repeat>
+# = hikayenin onceki bir cumlesiyle birebir ayni (en az 4 kelime; kucuk harf, noktalama haric).  Egitim verisine
+# REPEAT_RATE ile bilincli kopya (injected_repeat); valid ve sinav kopyasiz.  Sinir kurali on izlemede (5.000 hikaye) sinandi
+
+TYPE_TAG_TOKENS = ("<new>", "<repeat>")
+REPEAT_RATE = 0.02       # cumle siniri basina kopya olasiligi (zincirsiz): egitim cumlelerinin ~%1,3'u
+_SPEECH = frozenset("""said asked whispered shouted replied cried exclaimed called yelled answered added thought wondered
+muttered murmured screamed declared announced explained insisted begged pleaded shouts says asks replies cries calls
+whispers continued agreed admitted suggested""".split())   # eylem fiilleri (laughed, nodded ...) yeni cumle
+_TITLES = frozenset(("Mr", "Mrs", "Ms", "Dr", "St", "Prof", "Sr", "Jr"))
+# '"Why?" Alice asked' / '"Why?" the old man said' tek cumle; fiilden hemen sonra ', "' gelirse yeni alintiyi acar: sinir
+_ATTRIBUTION = re.compile(r"^\s*(?:The\s+(?:\w+\s+)?\w+|[A-Z][\w']*(?:\s+[A-Z][\w']*)?)\s+(\w+)\b(?!\s*,\s*[\"“])")
+_TYPE_TABLES = {}        # id(sozluk) -> (sozluk, tablolar)
+_FLAG = dict(end=1, dot=2, digit=4, title=8, space=16, closer=32, lines=64, lower=128, quote=256, speech=512)
+
+
+def _type_tables(vocab, base):
+    """Taban token'lari icin: _sentence_ends + bosluk, tirnak, unvan, konusma fiili, kelime kimligi (kucuk harf; harfsiz 0)."""
+    hit = _TYPE_TABLES.get(id(vocab))
+    if hit is None or hit[0] is not vocab:
+        tok = _tokenizer(vocab)[0]
+        text = [tok.decode([i]) for i in range(base)]
+        low = [s.strip().lower() for s in text]
+        speech = np.zeros(base, dtype=bool)                  # konusma fiilinin (bosluklu) ilk token'i: on eleme
+        speech[[tok.encode(p + w, add_special_tokens=False).ids[0] for w in _SPEECH for p in (" ", "")]] = True
+        ids = {}
+        tab = dict(zip(("end", "dot", "digit", "lines", "lower", "closer"), _sentence_ends(vocab, base)))
+        tab["end"] = tab["end"] & ~np.array([s.strip().endswith(".") and s.strip()[:-1] in _TITLES for s in text])  # 'Mr.'
+        tab.update(space=np.array([not s.strip() for s in text]),
+                   quote=np.array([any(q in s for q in '"“”') for s in text]),
+                   title=np.array([s.strip() in _TITLES for s in text]), speech=speech, lines=tab["lines"] > 0)
+        tab["flags"] = sum(tab[k].astype(np.uint16) * v for k, v in _FLAG.items()).astype(np.uint16)
+        tab["word"] = np.array([ids.setdefault(w, len(ids) + 1) if re.search("[a-z]", w) else 0 for w in low])
+        hit = _TYPE_TABLES[id(vocab)] = (vocab, tab)
+    return hit[1]
+
+
+def _sentence_starts(x, vocab, base):
+    """Hikayeler (eos ile biten akis) -> (cumle baslangiclari: bos olmayan hikayenin basi ve cumle sinirlari, sirali;
+    konusma yuzunden birlesen sinir sayisi).  Cumle sonu _sentence_ends; '.' ardindan rakam (ondalik) ya da unvandan sonra
+    ('Mr. Luis') degil.  Sonu izleyen bosluk / satir sonu ve satir basinda olmayan kapanis tirnagi sonun parcasi (bos cumle
+    yok; paragraf basindaki acilis tirnagi cumlesinde kalir).  Ardindan kucuk harf: cumle surer.  Satir sonu icermeyen
+    tirnakli sonun ardinda konusan ('"Why?" Alice asked'): cumle surer."""
+    t, (tok, eos) = _type_tables(vocab, base), _tokenizer(vocab)
+    f = t["flags"][x]                                    # tek gather: bit bayraklari (_FLAG)
+    on = lambda a, name: (a & _FLAG[name]) != 0
+    fn, fp = np.append(f[1:], t["flags"][eos]), np.insert(f[:-1], 0, t["flags"][eos])
+    not_eos = x != eos
+    e = on(f, "end") & ~(on(f, "dot") & (on(fn, "digit") | on(fp, "title")))
+    grow = (on(f, "space") | (on(f, "closer") & ~on(fp, "space") & ~on(fp, "lines"))) & not_eos
+    while True:
+        more = grow[1:] & e[:-1] & ~e[1:]
+        if not more.any():
+            break
+        e[1:] |= more
+    cut = np.flatnonzero(e & ~np.append(e[1:], False) & ~on(fn, "lower") & np.append(not_eos[1:], False) & not_eos)
+    first = np.flatnonzero(e & ~np.r_[False, e[:-1]])
+    run0 = first[np.searchsorted(first, cut, "right") - 1]                       # sonun ilk token'i
+    quoted, broken = np.zeros(len(cut), dtype=bool), np.zeros(len(cut), dtype=bool)
+    for d in range(int((cut - run0).max()) + 1 if len(cut) else 0):            # sonlar kisa: konum konum
+        inside = run0 + d <= cut
+        g = f[np.minimum(run0 + d, cut)]
+        quoted |= inside & on(g, "quote")
+        broken |= inside & on(g, "lines")
+    talk = cut[quoted & ~broken]
+    pad = np.append(f, [t["flags"][eos]] * 9)
+    talk = talk[np.any([on(pad[talk + k], "speech") for k in range(1, 9)], axis=0)] if len(talk) else talk
+    merged = []
+    for i in talk.tolist():                            # pencere fiilden sonraki ', "'yu da gormeli ('The Velociraptor replied, "But')
+        w = x[i + 1:i + 13].tolist()
+        w = w[:w.index(eos)] if eos in w else w
+        m = _ATTRIBUTION.match(tok.decode(w))
+        if m and m.group(1).lower() in _SPEECH:
+            merged.append(i)
+    heads = np.flatnonzero(np.r_[True, ~not_eos[:-1]] & not_eos)
+    return np.union1d(heads, np.setdiff1d(cut, merged) + 1), len(merged)
+
+
+def _insert_type_tags(a, vocab, base, repeat_rate=0.0, seed=0):
+    """Akis (eos ile biter) -> (etiketli kopya, sayimlar).  Her cumlenin onunde <new>; hikayenin onceki bir cumlesiyle
+    birebir ayniysa <repeat>.  repeat_rate > 0: injected_repeat.  Hikaye sinirinda bolunmus parcalarla (bellek); parca
+    c'nin rastgeleligi (seed, c)."""
+    from concurrent.futures import ThreadPoolExecutor
+    eos = _tokenizer(vocab)[1]
+    _type_tables(vocab, base)
+    ends = np.flatnonzero(np.asarray(a) == eos)
+    assert len(ends) and ends[-1] == len(a) - 1 and int(np.max(a)) < base, "akis eos ile bitmeli, etiketsiz olmali"
+    cuts = [0]
+    while cuts[-1] < len(a):
+        cuts.append(int(ends[min(np.searchsorted(ends, cuts[-1] + (1 << 22)), len(ends) - 1)]) + 1)
+    job = lambda c: _type_tag_chunk(np.asarray(a[cuts[c]:cuts[c + 1]]), vocab, base, repeat_rate,
+                                    np.random.default_rng([seed, c]))
+    with ThreadPoolExecutor(min(8, os.cpu_count() or 1)) as pool:      # numpy ve tokenizers GIL'i birakir
+        done = list(pool.map(job, range(len(cuts) - 1)))
+    counts = collections.Counter()
+    for _, cnt in done:
+        counts.update(cnt)
+    return np.concatenate([p for p, _ in done]).astype(np.asarray(a).dtype), dict(counts)
+
+
+def _type_tag_chunk(x, vocab, base, repeat_rate, rng):
+    t, (tok, eos) = _type_tables(vocab, base), _tokenizer(vocab)
+    S, merged = _sentence_starts(x, vocab, base)
+    story_of = np.cumsum(np.r_[0, x[:-1] == eos])
+    story = story_of[S]
+    first = np.r_[True, story[1:] != story[:-1]]
+    last = np.r_[story[1:] != story[:-1], True]
+    k = np.arange(len(S)) - np.maximum.accumulate(np.where(first, np.arange(len(S)), 0))   # hikayedeki sirasi
+    E = np.where(last, np.flatnonzero(x == eos)[story], np.r_[S[1:], 0])                   # bitis (haric)
+    # birebir tekrar: cumlenin kelime dizisinin ozeti (kelime kimligi x konum, 64 bit tasma sarar); hikaye icinde ayni ozet
+    word = t["word"][x]
+    kept = word > 0
+    cum = np.concatenate([[0], np.cumsum(kept)])         # cum[i]: i'den onceki kelime sayisi
+    stop = np.r_[S[1:], len(x)]
+    words = cum[stop] - cum[S]
+    mark = np.zeros(len(x), dtype=np.int32)
+    mark[S] = 1
+    sent = np.cumsum(mark) - 1                          # token'in cumlesi (-1: ilk cumleden once, bos hikaye)
+    pos = np.minimum(cum[1:] - 1 - cum[S][np.maximum(sent, 0)], 255)
+    r1 = np.random.default_rng(7).integers(1, 2 ** 63, size=int(t["word"].max()) + 1, dtype=np.uint64)
+    r2 = np.random.default_rng(8).integers(1, 2 ** 63, size=256, dtype=np.uint64)
+    with np.errstate(over="ignore"):
+        H = np.concatenate([[np.uint64(0)], np.cumsum(np.where(kept & (sent >= 0), r1[word] * r2[pos], np.uint64(0)),
+                                                       dtype=np.uint64)])
+        h = (H[stop] - H[S]) ^ (story.astype(np.uint64) * np.uint64(0x9E3779B97F4A7C15))   # hikayeye ozgu anahtar
+    order = np.argsort(h, kind="stable")                 # ayni anahtar: once gelen cumle (sira korunur)
+    dup = np.zeros(len(S), dtype=bool)
+    dup[order[1:]] = (h[order[1:]] == h[order[:-1]]) & (story[order[1:]] == story[order[:-1]]) & (words[order[1:]] >= 4)
+    pos_list, values, rank = [S], [base + dup.astype(np.int64)], [np.ones(len(S), dtype=np.int64)]
+    injected = []
+    if repeat_rate > 0:
+        newline = np.concatenate([[0], np.cumsum(t["lines"][x])])
+        lines = newline[stop] > newline[S]
+        tail = t["quote"][x[E - 1]] | (t["quote"][x[np.maximum(E - 2, S)]] & (E - 2 >= S))
+        u, v = rng.random(len(S)), rng.random(len(S))
+        drawn = np.flatnonzero((k >= 1) & ~last & ~lines & ~tail & (u < repeat_rate))
+        src = drawn - k[drawn] + (v[drawn] * (k[drawn] + 1)).astype(np.int64)   # hikayenin 0..k cumlelerinden biri
+        texts = [s.strip() for s in tok.decode_batch([x[S[j]:E[j]].tolist() for j in src.tolist()])]
+        done, chosen = set(), []
+        for i, s in zip(drawn.tolist(), texts):
+            if i - 1 in done or sum(s.count(q) for q in '"“”') % 2 or len(_XWORD.findall(s.lower())) < 3:
+                continue                               # zincir yok; alinti ortasi (tirnak tek) ya da cok kisa: kopya yok
+            done.add(i)
+            chosen.append((i, s))
+        copies = injected_repeat([s for _, s in chosen], vocab)
+        injected = [len(c) for c in copies]
+        pos_list.append(np.repeat(E[[i for i, _ in chosen]], np.array(injected, dtype=np.int64) + 1))
+        values.append(np.array([y for c in copies for y in [base + 1] + c], dtype=np.int64))
+        rank.append(np.zeros(len(values[-1]), dtype=np.int64))
+    p, val, rk = (np.concatenate(z) for z in (pos_list, values, rank))
+    o = np.lexsort((np.arange(len(p)), rk, p))         # ayni yerde once kopya (<repeat> + cumle), sonra sonraki cumlenin etiketi
+    return np.insert(x, p[o], val[o]), dict(sentences=len(S), natural_repeat=int(dup.sum()), injected_repeat=len(injected),
+                                            injected_tokens=sum(injected), merged_speech=merged)
+
+
+def injected_repeat(sentences, vocab):
+    """Bilincli tekrar: hikayenin onceki cumlelerinin metinleri -> cumle sonuna eklenecek token listeleri (bosluklu
+    yeniden kodlama; yalniz egitim verisinde, <repeat> ile)."""
+    return [e.ids for e in _tokenizer(vocab)[0].encode_batch([" " + s for s in sentences], add_special_tokens=False)]
+
+
+def sentence_type_tag(data, repeat_rate=REPEAT_RATE, seed=0, log=print):
+    """build'in verisi -> cumle turu etiketli kopya (tag <tag>_sentence_type_tag): sozluk sonuna TYPE_TAG_TOKENS, train'e
+    etiket + injected_repeat (repeat_rate), valid'e yalniz etiket.  train_bytes kopya baytlarini saymaz.  Drive'a
+    yazilmaz: her yuklemede bellekte uretilir, kural ize girer."""
+    assert _sentence_id_base(data["vocab"]) is None, "veri zaten etiketli"
+    base = len(data["vocab"])
+    vocab = list(data["vocab"]) + list(TYPE_TAG_TOKENS)
+    train, ct = _insert_type_tags(data["train"], vocab, base, repeat_rate, seed)
+    valid, cv = _insert_type_tags(data["valid"], vocab, base)
+    extra = dict(natural_repeat=ct.get("natural_repeat", 0) + cv.get("natural_repeat", 0),
+                 injected_repeat=ct.get("injected_repeat", 0), injected_tokens=ct.get("injected_tokens", 0),
+                 merged_speech=ct.get("merged_speech", 0) + cv.get("merged_speech", 0))
+    return _relabeled(data, vocab, train, valid, "sentence_type_tag", "v1_%g_%d" % (repeat_rate, seed), extra, log)
 
 
 def build(root, tag, seq_len=SEQ_LEN, log=print):
