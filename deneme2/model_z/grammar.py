@@ -1,19 +1,21 @@
 """grammar -- Model Z gramer ajani (kullanici, 3 Ekim: "Gramer ajanının temel görevi verilen tüm kelimelerden anlamlı bir
-cümle kurabilmesi"; "Next token mantığında değil tek seferde ... Yuvalar doğru olacak"; adlar onayli).
+cümle kurabilmesi"; "Next token mantığında değil tek seferde"; "ilişki matrisi gramerin öğrenerek hem değiştirdiği hem de
+kullandığı birşey"; "Emin olduklarımızı yazalım"; adlar onayli).  Matematik: belge/model_z_temel/03_gramer_matematik.md.
 
-Girdi: cumlenin kelimeleri, karisik (torba).  Cikti: her kelimeye bir yuva (konum), butun cumle bir anda.
-    E            kelime temsili (sozluk x d); egitimde gecmeyen kelime <unk>
+Girdi: cumlenin kelimeleri, karisik (torba).  Cikti: butun cumle bir anda.
+    E               kelime temsili (sozluk x d); egitimde gecmeyen kelime <unk>
+    boundary        sinir dugumu: cumlenin basi ve sonu, torbaya eklenir
     torba okuyucu   konumsuz attention (TransformerEncoder): h_i, kelimenin torbadaki baglami; girdi sirasindan bagimsiz
-    yuva matrisi    P[i, k] = <h_i, q_k>, q_k = bastan k. yuva + sondan (n - 1 - k). yuva (cumle boyu degisir)
-    relation_matrix G[i, j] = h_i^T W h_j: "j, i'nin hemen ardindan gelir"
-    assign_slots    satir ve sutun log olasiliklarinin toplami uzerinde Macar algoritmasi: her kelime bir yuvaya, her
-                    yuvaya bir kelime, tek seferde
-Kayip: yuva (satir: kelimenin yuvasi, sutun: yuvanin kelimesi; ayni kelime birden fazlaysa yuvalari esdeger) + komsu
-(G'de gercek ardil).  Gorev etiketi yok.
-Olculer (sinav bolmeleri ayri): tam dogru (ayni torbadan kurulabilen herhangi bir gecerli cumle), dogru yuva, dogru komsu,
-deneme sayisi (Gumbel gurultulu atamalarla dogru bulunana kadar, en cok TRIES).
+    relation_matrix G[i, j] = h_i^T W h_j + e_i^T U e_j: "j, i'nin hemen ardindan gelir"; ilk terim baglamli (kalip),
+                    ikincisi sozcuksel (kelimenin kendisi: ad ici sira).  boundary'nin satiri cumlenin ilk kelimesi, sutunu
+                    son kelimesi
+    order_by_relation  cumle = G uzerinde boundary'den gecen tek cevrim: her dugume bir ardil (Macar atamasi, tek seferde);
+                    atama birden fazla cevrim verirse patch_cycles birlestirir (Karp yamasi).  Maliyet n^3
+Kayip: ardil (satir) + oncel (sutun) CE; ayni kelimenin kopyalari esdeger hedef.  Gorev ve yuva etiketi yok.
+Olculer (sinav bolmeleri ve cumle boyu ayri): tam dogru (ayni torbadan kurulabilen herhangi gecerli cumle), dogru yuva,
+dogru komsu, deneme sayisi (Gumbel gurultulu G ile dogru bulunana kadar, en cok TRIES), cumle basina dizme suresi.
 
-    python grammar.py [--epochs 30] [--seed 0]
+    python grammar.py [--data countries|simplestories] [--epochs 30] [--device cpu|cuda] [--seed 0]
 """
 import argparse
 import json
@@ -23,23 +25,22 @@ from collections import Counter, defaultdict
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DATA = os.path.join(HERE, "data", "countries")
+FILES = {"countries": "country_", "simplestories": "ss_"}   # data/<ad>/<onek>{train,exam,sentences}.jsonl
 UNK = "<unk>"
 D = 64                  # kelime temsili boyu
 HEADS = 4
 LAYERS = 3
-MAX_SLOTS = 16          # en uzun cumle 12 kelime
 UNK_RATE = 0.1          # egitimde kelimenin <unk> yapilma olasiligi: bilinmeyen kelimeye yer bulmayi da ogrensin
 TRIES = 100             # deneme sayisi olcusunun ust siniri
-BOND = 0.5              # karsilikli bag olasiligi bundan buyukse iki kelime ayni obek (assign_slots, G ile)
+NEG = -1e9
+LENGTH_BANDS = ((1, 10), (11, 20), (21, 1000))   # olculer cumle boyuna gore de
 
 
-def _load(name):
-    return [json.loads(line) for line in open(os.path.join(DATA, name), encoding="utf-8")]
+def _load(path):
+    return [json.loads(line) for line in open(path, encoding="utf-8")] if os.path.exists(path) else []
 
 
 class GrammarAgent(torch.nn.Module):
@@ -48,252 +49,208 @@ class GrammarAgent(torch.nn.Module):
         self.vocab = vocab
         self.index = {w: i for i, w in enumerate(vocab)}
         self.E = torch.nn.Embedding(len(vocab), d)
+        self.boundary = torch.nn.Parameter(torch.randn(d) / d ** 0.5)
         layer = torch.nn.TransformerEncoderLayer(d, heads, 4 * d, dropout=0.0, batch_first=True)
-        self.reader = torch.nn.TransformerEncoder(layer, layers)
-        self.slot_from_start = torch.nn.Parameter(torch.randn(MAX_SLOTS, d) / d ** 0.5)
-        self.slot_from_end = torch.nn.Parameter(torch.randn(MAX_SLOTS, d) / d ** 0.5)
-        self.W = torch.nn.Parameter(torch.randn(d, d) / d ** 0.5)
+        self.reader = torch.nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
+        self.W = torch.nn.Parameter(torch.randn(d, d) / d ** 0.5)      # baglamli bag (kalip)
+        self.U = torch.nn.Parameter(torch.randn(d, d) / d ** 0.5)      # sozcuksel bag (ad ici sira: Phnom -> Penh)
 
     def ids(self, words):
         return [self.index.get(w, self.index[UNK]) for w in words]
 
     def forward(self, ids, mask):
-        """ids (B, n) karisik torba, mask (B, n) gercek kelime -> yuva log puanlari (B, n kelime, n yuva) ve
-        relation_matrix (B, n, n)."""
-        h = self.reader(self.E(ids), src_key_padding_mask=~mask)
-        n = mask.sum(1)
-        k = torch.arange(ids.shape[1])
-        from_end = (n[:, None] - 1 - k[None]).clamp(min=0, max=MAX_SLOTS - 1)
-        q = self.slot_from_start[k][None] + self.slot_from_end[from_end]                    # (B, n yuva, d)
-        P = torch.einsum("bid,bkd->bik", h, q) / h.shape[-1] ** 0.5
-        G = torch.einsum("bid,de,bje->bij", h, self.W, h) / h.shape[-1] ** 0.5
-        both = mask[:, :, None] & mask[:, None, :]
-        return P.masked_fill(~both, -1e9), G.masked_fill(~both, -1e9)
+        """ids (B, L) karisik torba, mask (B, L) gercek kelime -> G (B, L+1, L+1); son dugum boundary.  Kendine bag ve
+        dolgu NEG."""
+        B, L = ids.shape
+        e = torch.cat([self.E(ids), self.boundary.expand(B, 1, -1)], 1)
+        m = torch.cat([mask, torch.ones(B, 1, dtype=torch.bool, device=ids.device)], 1)
+        h = self.reader(e, src_key_padding_mask=~m)
+        G = (torch.einsum("bid,de,bje->bij", h, self.W, h) + torch.einsum("bid,de,bje->bij", e, self.U, e)) / e.shape[-1] ** 0.5
+        ok = m[:, :, None] & m[:, None, :] & ~torch.eye(L + 1, dtype=torch.bool, device=ids.device)[None]
+        return G.masked_fill(~ok, NEG)
 
 
 def relation_matrix(agent, words):
-    """Tek torba -> G (n x n): G[i, j] "j, i'nin hemen ardindan gelir" puani (okuma icin)."""
+    """Tek torba -> G ((n+1) x (n+1), son satir / sutun boundary) (okuma icin)."""
+    dev = next(agent.parameters()).device
     with torch.no_grad():
-        _, G = agent(torch.tensor([agent.ids(words)]), torch.ones(1, len(words), dtype=torch.bool))
-    return G[0]
+        return agent(torch.tensor([agent.ids(words)], device=dev), torch.ones(1, len(words), dtype=torch.bool,
+                                                                                device=dev))[0].cpu()
 
 
-def assign_slots(P, noise=None, G=None):
-    """P (n kelime, n yuva) -> her kelimenin yuvasi.  Satir (kelime -> yuva) ve sutun (yuva -> kelime) log olasiliklari
-    toplanir.  G None: Macar algoritmasi toplam puani en buyuk tek atamayi verir.  G (n, n) relation_matrix verilirse
-    once guclu baglar obek olur (_chunks), sonra obekler yuvalara (_order_chunks): ilisi matrisi de kullanilir
-    (kullanici, 3 Ekim: "ilişki matrisi gramerin öğrenerek hem değiştirdiği hem de kullandığı birşey").  noise: Gumbel
-    gurultusu (deneme sayisi); P numpy ise hazir puan sayilir."""
-    score = P if isinstance(P, np.ndarray) else (P.log_softmax(1) + P.log_softmax(0)).detach().numpy()
-    if noise is not None:
-        score = score + noise
-    if G is not None:
-        return _order_chunks(score, _chunks(G), G)
-    rows, cols = linear_sum_assignment(-score)
-    slot = [0] * len(rows)
-    for r, c in zip(rows, cols):
-        slot[r] = int(c)
-    return slot
+def order_by_relation(G):
+    """G ((n+1) x (n+1), son dugum boundary; numpy) -> kelime sirasi (torba indeksleri).  Her dugume bir ardil: Macar
+    atamasi toplam bag puani en buyuk eslemeyi tek seferde verir; birden fazla cevrim cikarsa patch_cycles."""
+    n = G.shape[0] - 1
+    rows, cols = linear_sum_assignment(-G)
+    succ = dict(zip(rows.tolist(), cols.tolist()))
+    succ = patch_cycles(G, succ)
+    seq, x = [], succ[n]
+    while x != n:
+        seq.append(x)
+        x = succ[x]
+    return seq
 
 
-def _chunks(G):
-    """G (n, n) -> obekler (kelime listeleri, ic sirasiyla).  Karsilikli bag b(i, j) = p(j, i'nin ardili) x
-    p(i, j'nin oncelisi); BOND'dan guclu baglar en gucluden baslayarak zincirlenir (her kelimenin en cok bir ardili ve bir
-    oncelisi, dongu yok).  Maliyet n^2 log n."""
-    G = G if isinstance(G, np.ndarray) else G.detach().numpy()
-    n = G.shape[0]
-    g = G.copy()
-    np.fill_diagonal(g, -1e9)
-    nxt = np.exp(g - g.max(1, keepdims=True))
-    nxt /= nxt.sum(1, keepdims=True)
-    prv = np.exp(g - g.max(0, keepdims=True))
-    prv /= prv.sum(0, keepdims=True)
-    b = nxt * prv
-    succ, pred, root = {}, {}, list(range(n))
-
-    def find(x):
-        while root[x] != x:
-            root[x] = root[root[x]]
-            x = root[x]
-        return x
-
-    for flat in np.argsort(-b, axis=None):
-        i, j = divmod(int(flat), n)
-        if b[i, j] < BOND:
-            break
-        if i in succ or j in pred or find(i) == find(j):
+def patch_cycles(G, succ):
+    """Atamanin cevrimleri tek cevrime (Karp yamasi): her adimda iki cevrimden birer bag (a -> b, c -> d) a -> d, c -> b
+    olur; toplam puandaki kaybi en kucuk degisim secilir."""
+    seen, cycles = set(), []
+    for s in range(G.shape[0]):
+        if s in seen:
             continue
-        succ[i], pred[j] = j, i
-        root[find(j)] = find(i)
-    chunks = []
-    for head in (i for i in range(n) if i not in pred):
-        c = [head]
-        while c[-1] in succ:
-            c.append(succ[c[-1]])
-        chunks.append(c)
-    return chunks
-
-
-def _order_chunks(score, chunks, G):
-    """Obekleri cumleye diz: her obek en iyi baslangic yuvasina gore siralanir, sonra yan yana iki obegin yeri
-    degisince toplam (yuva puani + obek sinirlarindaki ardil log olasiligi) artiyorsa degistirilir (iyilesme bitene kadar).
-    -> her kelimenin yuvasi."""
-    G = G if isinstance(G, np.ndarray) else G.detach().numpy()
-    g = G.copy()
-    np.fill_diagonal(g, -1e9)
-    nxt = g - np.logaddexp.reduce(g, axis=1, keepdims=True)
-    n = score.shape[0]
-
-    def fit(c, s):                                     # obek c, s yuvasindan baslarsa yuva puani
-        return sum(score[w, s + t] for t, w in enumerate(c))
-
-    def start(c):
-        return max(range(n - len(c) + 1), key=lambda s: fit(c, s))
-
-    order = sorted(chunks, key=start)
-
-    def total(order):
-        s, val = 0, 0.0
-        for k, c in enumerate(order):
-            val += fit(c, s)
-            if k:
-                val += nxt[order[k - 1][-1], c[0]]
-            s += len(c)
-        return val
-
-    best = total(order)
-    better = True
-    while better:
-        better = False
-        for k in range(len(order) - 1):
-            trial = order[:k] + [order[k + 1], order[k]] + order[k + 2:]
-            v = total(trial)
-            if v > best + 1e-9:
-                order, best, better = trial, v, True
-    slot, s = [0] * n, 0
-    for c in order:
-        for w in c:
-            slot[w] = s
-            s += 1
-    return slot
+        cyc, x = [], s
+        while x not in seen:
+            seen.add(x)
+            cyc.append(x)
+            x = succ[x]
+        cycles.append(cyc)
+    while len(cycles) > 1:
+        best = None
+        for ai in range(len(cycles)):
+            for bi in range(ai + 1, len(cycles)):
+                for a in cycles[ai]:
+                    for c in cycles[bi]:
+                        b, d = succ[a], succ[c]
+                        delta = G[a, d] + G[c, b] - G[a, b] - G[c, d]
+                        if best is None or delta > best[0]:
+                            best = (delta, a, c, ai, bi)
+        _, a, c, ai, bi = best
+        succ[a], succ[c] = succ[c], succ[a]
+        merged, x = [], a
+        while True:
+            merged.append(x)
+            x = succ[x]
+            if x == a:
+                break
+        cycles = [cy for i, cy in enumerate(cycles) if i not in (ai, bi)] + [merged]
+    return succ
 
 
 def _encode(agent, rows):
-    """Cumleler -> bir kez: ids (N, L) dolgulu, boy (N,), ayni (N, L, L): ayni kelimenin yuvalari esdeger
-    (ayni[p, q] = 1/m, p ve q konumlarinda ayni kelime, m o kelimenin sayisi)."""
+    """Cumleler -> bir kez: ids (N, L) dolgulu, boy (N,), kelimeler."""
     L = max(len(r["words"]) for r in rows)
     ids = torch.zeros(len(rows), L, dtype=torch.long)
-    same = torch.zeros(len(rows), L, L)
     for b, r in enumerate(rows):
-        w = r["words"]
-        ids[b, :len(w)] = torch.tensor(agent.ids(w))
-        for p, a in enumerate(w):
-            hits = [q for q, c in enumerate(w) if c == a]
-            same[b, p, hits] = 1.0 / len(hits)
-    return dict(ids=ids, length=torch.tensor([len(r["words"]) for r in rows]), same=same,
-                words=[r["words"] for r in rows])
-
-
-def _shuffle(enc, rows, gen):
-    """Satir basina rastgele siralama (dolgu sonda): order[b, i] = torbadaki i. kelimenin cumledeki konumu."""
-    L = enc["ids"].shape[1]
-    valid = torch.arange(L)[None] < enc["length"][rows, None]
-    keys = torch.rand(len(rows), L, generator=gen).masked_fill(~valid, 2.0)
-    return keys.argsort(1), valid
+        ids[b, :len(r["words"])] = torch.tensor(agent.ids(r["words"]))
+    return dict(ids=ids, length=torch.tensor([len(r["words"]) for r in rows]), words=[r["words"] for r in rows])
 
 
 def _batch(enc, rows, gen, unk_rate=0.0, unk_id=0):
-    """Satirlar -> karisik torbalar (ids, mask), yuva hedefi (B, L, L), ardil hedefi (B, L; yok: -1).  Dongusuz."""
-    order, mask = _shuffle(enc, rows, gen)
-    L = order.shape[1]
-    ids = enc["ids"][rows].gather(1, order)
-    ids = ids.masked_fill((torch.rand(ids.shape, generator=gen) < unk_rate) & mask, unk_id)
-    slot_t = enc["same"][rows].gather(1, order[..., None].expand(-1, -1, L)) * mask[..., None]
+    """Satirlar -> karisik torbalar ve hedefler (dongusuz).  order[b, i] = torbadaki i. kelimenin cumledeki konumu.
+    succ / pred: her dugumun (boundary dahil, indeks L) gercek ardili / oncelisi; same[b, i, j]: i ve j ayni kelime."""
+    L = enc["ids"].shape[1]
+    length = enc["length"][rows]
+    mask = torch.arange(L)[None] < length[:, None]
+    order = torch.rand(len(rows), L, generator=gen).masked_fill(~mask, 2.0).argsort(1)
+    orig = enc["ids"][rows].gather(1, order)
+    ids = orig.masked_fill((torch.rand(orig.shape, generator=gen) < unk_rate) & mask, unk_id)
     inv = order.argsort(1)                              # cumledeki konum -> torbadaki yer
-    succ = order + 1
-    has = (succ < enc["length"][rows, None]) & mask
-    next_t = torch.where(has, inv.gather(1, succ.clamp(max=L - 1)), torch.full_like(succ, -1))
-    return ids, mask, slot_t, next_t, order
+    nxt = order + 1
+    succ = torch.where((nxt < length[:, None]) & mask, inv.gather(1, nxt.clamp(max=L - 1)), torch.full_like(nxt, L))
+    prv = order - 1
+    pred = torch.where((order > 0) & mask, inv.gather(1, prv.clamp(min=0)), torch.full_like(prv, L))
+    first, last = inv[:, 0], inv.gather(1, (length - 1)[:, None])[:, 0]
+    succ = torch.cat([succ, first[:, None]], 1)          # boundary'nin ardili ilk kelime
+    pred = torch.cat([pred, last[:, None]], 1)           # boundary'nin oncelisi son kelime
+    key = torch.cat([orig.masked_fill(~mask, -5), torch.full((len(rows), 1), -7)], 1)
+    same = key[:, :, None] == key[:, None, :]
+    return ids, mask, succ, pred, same, order
 
 
 def loss_of(agent, enc, rows, gen, unk_rate):
-    ids, mask, slot_t, next_t, _ = _batch(enc, rows, gen, unk_rate, agent.index[UNK])
-    P, G = agent(ids, mask)
-    rowm = mask.float()
-    slot_loss = -((slot_t * P.log_softmax(2)).sum(2) * rowm).sum() / rowm.sum()                 # kelime -> yuva
-    col_t = slot_t / slot_t.sum(1, keepdim=True).clamp(min=1e-9)
-    slot_loss = slot_loss - ((col_t * P.log_softmax(1)).sum(1) * rowm).sum() / rowm.sum()       # yuva -> kelime
-    has = next_t >= 0
-    next_loss = F.cross_entropy(G[has], next_t[has])
-    return slot_loss + next_loss
+    ids, mask, succ, pred, same, _ = _batch(enc, rows, gen, unk_rate, agent.index[UNK])
+    dev = next(agent.parameters()).device
+    ids, mask, succ, pred, same = (t.to(dev) for t in (ids, mask, succ, pred, same))
+    G = agent(ids, mask)
+    L1 = G.shape[1]
+    node = torch.cat([mask, torch.ones(len(ids), 1, dtype=torch.bool, device=dev)], 1).float()
+    hit_s = same.gather(1, succ[:, :, None].expand(-1, -1, L1))     # j, gercek ardille ayni kelime
+    hit_p = same.gather(1, pred[:, :, None].expand(-1, -1, L1))
+    ls = G.log_softmax(2).masked_fill(~hit_s, NEG).logsumexp(2)                    # ardil (satir)
+    lp = G.log_softmax(1).transpose(1, 2).masked_fill(~hit_p, NEG).logsumexp(2)   # oncel (sutun)
+    return -((ls + lp) * node).sum() / node.sum()
 
 
-def evaluate(agent, enc, valid, seed=0, relation=True):
-    """-> tam dogru, dogru yuva, dogru komsu, ortalama deneme (en cok TRIES; bulunamayan TRIES + 1 sayilir).  Butun
-    sinav tek ileri hesapta; deneme yalniz ilk atamasi yanlis cumlelerde."""
+def evaluate(agent, enc, valid, seed=0):
+    """-> butun ve cumle boyu bantlari: tam dogru, dogru yuva, dogru komsu, deneme (en cok TRIES; bulunamayan TRIES + 1),
+    dizme ms.  Butun sinav parca parca tek ileri hesapla."""
     gen = torch.Generator().manual_seed(seed)
     np_rng = np.random.default_rng(seed)
+    dev = next(agent.parameters()).device
     rows = torch.arange(len(enc["words"]))
-    ids, mask, _, _, order = _batch(enc, rows, gen)
-    with torch.no_grad():
-        P, G = agent(ids, mask)
-    t0 = time.time()
-    exact = slots = pairs = tries = n_slots = n_pairs = 0
-    for b, words in enumerate(enc["words"]):
-        n = len(words)
-        bag = [words[o] for o in order[b, :n].tolist()]
-        Pb = P[b, :n, :n]
-        options = valid[tuple(sorted(words))]
-
-        def sentence(slot):
-            out = [None] * n
-            for i, s in enumerate(slot):
-                out[s] = bag[i]
-            return tuple(out)
-
-        Gb = G[b, :n, :n] if relation else None
-        built = sentence(assign_slots(Pb, G=Gb))
-        best = max(options, key=lambda o: sum(a == c for a, c in zip(built, o)))
-        exact += built in options
-        slots += sum(a == c for a, c in zip(built, best))
-        n_slots += n
-        gold = set(zip(best, best[1:]))
-        pairs += sum(p in gold for p in zip(built, built[1:]))
-        n_pairs += n - 1
-        k, found = 1, built in options
-        if not found:
-            score = (Pb.log_softmax(1) + Pb.log_softmax(0)).numpy()
-            noise = np_rng.gumbel(size=(TRIES,) + score.shape)
-        while not found and k < TRIES:
-            found = sentence(assign_slots(score, noise[k], Gb)) in options
-            k += 1
-        tries += k if found else TRIES + 1
-    m = max(len(enc["words"]), 1)
-    return dict(n=len(enc["words"]), exact=round(exact / m, 4), slot=round(slots / max(n_slots, 1), 4),
-                neighbor=round(pairs / max(n_pairs, 1), 4), tries=round(tries / m, 2),
-                ms=round(1000 * (time.time() - t0) / m, 2))     # cumle basina dizme + deneme suresi
+    stats = defaultdict(Counter)
+    t_order = 0.0
+    for c in range(0, len(rows), 512):
+        part = rows[c:c + 512]
+        ids, mask, _, _, _, order = _batch(enc, part, gen)
+        with torch.no_grad():
+            G = agent(ids.to(dev), mask.to(dev)).cpu().double().numpy()
+        L = ids.shape[1]
+        for b, r in enumerate(part.tolist()):
+            words = enc["words"][r]
+            n = len(words)
+            bag = [words[o] for o in order[b, :n].tolist()]
+            idx = list(range(n)) + [L]
+            g = G[b][np.ix_(idx, idx)]
+            t = time.perf_counter()
+            built = tuple(bag[i] for i in order_by_relation(g))
+            t_order += time.perf_counter() - t
+            options = valid.get(tuple(sorted(words)), {tuple(words)})
+            best = max(options, key=lambda o: sum(a == x for a, x in zip(built, o)))
+            k, found = 1, built in options
+            noise = np_rng.gumbel(size=(TRIES,) + g.shape) if not found else None
+            while not found and k < TRIES:
+                found = tuple(bag[i] for i in order_by_relation(g + noise[k])) in options
+                k += 1
+            band = next(f"{lo}-{hi}" if hi < 1000 else f"{lo}+" for lo, hi in LENGTH_BANDS if lo <= n <= hi)
+            for key in ("all", band):
+                s = stats[key]
+                s["n"] += 1
+                s["exact"] += built in options
+                s["slot"] += sum(a == x for a, x in zip(built, best))
+                s["slots"] += n
+                s["pairs"] += sum((Counter(zip(built, built[1:])) & Counter(zip(best, best[1:]))).values())
+                s["n_pairs"] += n - 1
+                s["tries"] += k if found else TRIES + 1
+    out = {}
+    for key, s in stats.items():
+        out[key] = dict(n=s["n"], exact=round(s["exact"] / s["n"], 4), slot=round(s["slot"] / s["slots"], 4),
+                        neighbor=round(s["pairs"] / max(s["n_pairs"], 1), 4), tries=round(s["tries"] / s["n"], 2))
+    out["all"]["ms"] = round(1000 * t_order / max(len(rows), 1), 3)
+    return out
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--epochs", type=int, default=30)          # 60 ile ayni sonuc (olculdu)
+    ap.add_argument("--data", default="countries", choices=sorted(FILES))
+    ap.add_argument("--epochs", type=int, default=30)          # ulke verisinde 60 ile ayni sonuc (olculdu)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--lr", type=float, default=3e-3)
+    ap.add_argument("--device", default="cpu")
+    ap.add_argument("--every", type=int, default=10, help="kac epokta bir olcum")
     args = ap.parse_args(argv)
     torch.manual_seed(args.seed)
-    torch.set_num_threads(4)                            # kucuk model: 16 iplik 4'ten yavas (olculdu)
-    train, exam = _load("country_train.jsonl"), _load("country_exam.jsonl")
-    valid = defaultdict(set)                            # ayni torbadan kurulabilen gecerli cumleler (butun veri)
-    for r in _load("country_sentences.jsonl"):
+    if args.device == "cpu":
+        torch.set_num_threads(4)                        # kucuk model: 16 is parcacigi 4'ten yavas (olculdu)
+    folder, prefix = os.path.join(HERE, "data", args.data), FILES[args.data]
+    train = _load(os.path.join(folder, prefix + "train.jsonl"))
+    exam = _load(os.path.join(folder, prefix + "exam.jsonl"))
+    valid = defaultdict(set)                            # ayni torbadan kurulabilen gecerli cumleler
+    for r in _load(os.path.join(folder, prefix + "sentences.jsonl")) or train + exam:
         valid[tuple(sorted(r["words"]))].add(tuple(r["words"]))
     vocab = [UNK] + sorted({w for r in train for w in r["words"]})
-    agent = GrammarAgent(vocab)
+    agent = GrammarAgent(vocab).to(args.device)
     opt = torch.optim.Adam(agent.parameters(), lr=args.lr)
-    splits = {s: _encode(agent, [r for r in exam if r["split"] == s]) for s in ("seen", "unseen")}
-    enc = _encode(agent, train)                         # bir kez: kelime -> sayi, esdeger yuvalar
+    splits = {s: _encode(agent, [r for r in exam if r["split"] == s]) for s in sorted({r["split"] for r in exam})}
+    enc = _encode(agent, train)
     gen = torch.Generator().manual_seed(args.seed)
+    print("veri %s: egitim %d cumle, sozluk %d, sinav %s, en uzun %d kelime | cihaz %s" % (
+        args.data, len(train), len(vocab), {s: len(e["words"]) for s, e in splits.items()}, enc["ids"].shape[1],
+        args.device), flush=True)
     t0 = time.time()
+    res = None
     for epoch in range(1, args.epochs + 1):
         perm = torch.randperm(len(train), generator=gen)
         total = 0.0
@@ -304,15 +261,16 @@ def main(argv=None):
             loss.backward()
             opt.step()
             total += loss.item() * len(rows)
-        if epoch % 10 == 0 or epoch == args.epochs:
+        if epoch % args.every == 0 or epoch == args.epochs:
             agent.eval()
-            res = {s + ("+G" if rel else ""): evaluate(agent, e, valid, relation=rel) for s, e in splits.items()
-                   for rel in (False, True)}
+            res = {s: evaluate(agent, e, valid) for s, e in splits.items()}
             agent.train()
-            print("epok %3d  kayip %.3f  |  %s  (%.0f sn)" % (epoch, total / len(train), "  ".join(
-                "%s: tam %.3f yuva %.3f komsu %.3f deneme %.1f %.1f ms" % (s, v["exact"], v["slot"], v["neighbor"], v["tries"],
-                                                                     v["ms"])
-                for s, v in res.items()), time.time() - t0), flush=True)
+            print("epok %3d  kayip %.3f  (%.0f sn)" % (epoch, total / len(train), time.time() - t0), flush=True)
+            for s, v in res.items():
+                print("   %-8s %s" % (s, "  ".join(
+                    "%s: n %d tam %.3f yuva %.3f komsu %.3f deneme %.1f%s" % (
+                        k, x["n"], x["exact"], x["slot"], x["neighbor"], x["tries"],
+                        (" %.2f ms" % x["ms"]) if "ms" in x else "") for k, x in v.items())), flush=True)
     return agent, res
 
 
