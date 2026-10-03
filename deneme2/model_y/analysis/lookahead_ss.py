@@ -35,6 +35,13 @@ BUDGET = 256        # devam en cok bu kadar token
 CHUNK = 64          # son konum logit'i icin satir parcasi
 
 
+def _ends(vocab):
+    """Token -> cumle sonu mu: metni (sondaki tirnak / parantez atilinca) . ! ? ile biter ya da satir sonu icerir."""
+    tok = DS._tokenizer(vocab)[0]
+    text = [tok.decode([i]) for i in range(len(vocab))]
+    return [("\n" in s) or s.rstrip().rstrip("\"')]}”’").endswith((".", "!", "?")) for s in text]
+
+
 @torch.no_grad()
 def _last_logprobs(model, prefixes, eos):
     """Onekler (degisken boy) -> son konumdaki log olasiliklar (cpu).  Onbellekli: onek son token'i haric hidden'dan."""
@@ -90,7 +97,7 @@ def continue_by_sentence(model, prompts, vocab, lookahead, budget=BUDGET, ngram=
     """prompts ([eos] + istem) -> (devamlar, bitti, istatistik).  Cumle cumle; lookahead False: her sinirda en olasi
     token (acgozlu ile ayni metin)."""
     eos = vocab.index(DS.EOS_TOKEN)
-    end = DS._sentence_ends(vocab, len(vocab))[0]
+    end = _ends(vocab)
     tab = DS._token_table(vocab)
     gens, ended = [[] for _ in prompts], [False] * len(prompts)
     stats = dict(boundaries=0, changed=0, forced=0, stopped=0)
@@ -143,7 +150,7 @@ def prompt_sets(data, n):
     """Sinav hikayelerinden uc istem kumesi: ilk 6 token / ilk cumle / ilk yari ([eos] ile)."""
     vocab, a = data["vocab"], data["valid"]
     eos = vocab.index(DS.EOS_TOKEN)
-    end = DS._sentence_ends(vocab, len(vocab))[0]
+    end = _ends(vocab)
     rows = ES.exam_rows(data)[:n]
     half = ES.story_prompts(data, rows)[0]
     first6, sent1 = [], []
@@ -185,8 +192,7 @@ def main(argv=None):
                 t0 = time.time()
                 gens, ended, st = continue_by_sentence(model, prompts, vocab, mode == "lookahead", args.budget,
                                                          args.ngram)
-                gens = [DS.strip_sentence_ids(g, vocab) for g in gens]
-                c = ES._count([DS.strip_sentence_ids(p, vocab) for p in prompts], gens, ended, tab, words, xax, stock)
+                c = ES._count(prompts, gens, ended, tab, words, xax, stock)
                 c.update(st, secs=round(time.time() - t0, 1))
                 c["texts"] = [dict(prompt=DS.decode(p[1:], vocab), model=DS.decode(g, vocab))
                               for p, g in zip(prompts[:args.examples], gens[:args.examples])]
