@@ -35,6 +35,7 @@ LAYERS = 3
 MAX_SLOTS = 16          # en uzun cumle 12 kelime
 UNK_RATE = 0.1          # egitimde kelimenin <unk> yapilma olasiligi: bilinmeyen kelimeye yer bulmayi da ogrensin
 TRIES = 100             # deneme sayisi olcusunun ust siniri
+BOND = 0.5              # karsilikli bag olasiligi bundan buyukse iki kelime ayni obek (assign_slots, G ile)
 
 
 def _load(name):
@@ -77,17 +78,103 @@ def relation_matrix(agent, words):
     return G[0]
 
 
-def assign_slots(P, noise=None):
+def assign_slots(P, noise=None, G=None):
     """P (n kelime, n yuva) -> her kelimenin yuvasi.  Satir (kelime -> yuva) ve sutun (yuva -> kelime) log olasiliklari
-    toplanir, Macar algoritmasi toplam puani en buyuk tek atamayi verir.  noise: Gumbel gurultusu (deneme sayisi);
-    P numpy ise hazir puan sayilir (denemelerde log_softmax bir kez)."""
+    toplanir.  G None: Macar algoritmasi toplam puani en buyuk tek atamayi verir.  G (n, n) relation_matrix verilirse
+    once guclu baglar obek olur (_chunks), sonra obekler yuvalara (_order_chunks): ilisi matrisi de kullanilir
+    (kullanici, 3 Ekim: "ilişki matrisi gramerin öğrenerek hem değiştirdiği hem de kullandığı birşey").  noise: Gumbel
+    gurultusu (deneme sayisi); P numpy ise hazir puan sayilir."""
     score = P if isinstance(P, np.ndarray) else (P.log_softmax(1) + P.log_softmax(0)).detach().numpy()
     if noise is not None:
         score = score + noise
+    if G is not None:
+        return _order_chunks(score, _chunks(G), G)
     rows, cols = linear_sum_assignment(-score)
     slot = [0] * len(rows)
     for r, c in zip(rows, cols):
         slot[r] = int(c)
+    return slot
+
+
+def _chunks(G):
+    """G (n, n) -> obekler (kelime listeleri, ic sirasiyla).  Karsilikli bag b(i, j) = p(j, i'nin ardili) x
+    p(i, j'nin oncelisi); BOND'dan guclu baglar en gucluden baslayarak zincirlenir (her kelimenin en cok bir ardili ve bir
+    oncelisi, dongu yok).  Maliyet n^2 log n."""
+    G = G if isinstance(G, np.ndarray) else G.detach().numpy()
+    n = G.shape[0]
+    g = G.copy()
+    np.fill_diagonal(g, -1e9)
+    nxt = np.exp(g - g.max(1, keepdims=True))
+    nxt /= nxt.sum(1, keepdims=True)
+    prv = np.exp(g - g.max(0, keepdims=True))
+    prv /= prv.sum(0, keepdims=True)
+    b = nxt * prv
+    succ, pred, root = {}, {}, list(range(n))
+
+    def find(x):
+        while root[x] != x:
+            root[x] = root[root[x]]
+            x = root[x]
+        return x
+
+    for flat in np.argsort(-b, axis=None):
+        i, j = divmod(int(flat), n)
+        if b[i, j] < BOND:
+            break
+        if i in succ or j in pred or find(i) == find(j):
+            continue
+        succ[i], pred[j] = j, i
+        root[find(j)] = find(i)
+    chunks = []
+    for head in (i for i in range(n) if i not in pred):
+        c = [head]
+        while c[-1] in succ:
+            c.append(succ[c[-1]])
+        chunks.append(c)
+    return chunks
+
+
+def _order_chunks(score, chunks, G):
+    """Obekleri cumleye diz: her obek en iyi baslangic yuvasina gore siralanir, sonra yan yana iki obegin yeri
+    degisince toplam (yuva puani + obek sinirlarindaki ardil log olasiligi) artiyorsa degistirilir (iyilesme bitene kadar).
+    -> her kelimenin yuvasi."""
+    G = G if isinstance(G, np.ndarray) else G.detach().numpy()
+    g = G.copy()
+    np.fill_diagonal(g, -1e9)
+    nxt = g - np.logaddexp.reduce(g, axis=1, keepdims=True)
+    n = score.shape[0]
+
+    def fit(c, s):                                     # obek c, s yuvasindan baslarsa yuva puani
+        return sum(score[w, s + t] for t, w in enumerate(c))
+
+    def start(c):
+        return max(range(n - len(c) + 1), key=lambda s: fit(c, s))
+
+    order = sorted(chunks, key=start)
+
+    def total(order):
+        s, val = 0, 0.0
+        for k, c in enumerate(order):
+            val += fit(c, s)
+            if k:
+                val += nxt[order[k - 1][-1], c[0]]
+            s += len(c)
+        return val
+
+    best = total(order)
+    better = True
+    while better:
+        better = False
+        for k in range(len(order) - 1):
+            trial = order[:k] + [order[k + 1], order[k]] + order[k + 2:]
+            v = total(trial)
+            if v > best + 1e-9:
+                order, best, better = trial, v, True
+    slot, s = [0] * n, 0
+    for c in order:
+        for w in c:
+            slot[w] = s
+            s += 1
     return slot
 
 
@@ -141,7 +228,7 @@ def loss_of(agent, enc, rows, gen, unk_rate):
     return slot_loss + next_loss
 
 
-def evaluate(agent, enc, valid, seed=0):
+def evaluate(agent, enc, valid, seed=0, relation=True):
     """-> tam dogru, dogru yuva, dogru komsu, ortalama deneme (en cok TRIES; bulunamayan TRIES + 1 sayilir).  Butun
     sinav tek ileri hesapta; deneme yalniz ilk atamasi yanlis cumlelerde."""
     gen = torch.Generator().manual_seed(seed)
@@ -149,7 +236,8 @@ def evaluate(agent, enc, valid, seed=0):
     rows = torch.arange(len(enc["words"]))
     ids, mask, _, _, order = _batch(enc, rows, gen)
     with torch.no_grad():
-        P, _ = agent(ids, mask)
+        P, G = agent(ids, mask)
+    t0 = time.time()
     exact = slots = pairs = tries = n_slots = n_pairs = 0
     for b, words in enumerate(enc["words"]):
         n = len(words)
@@ -163,7 +251,8 @@ def evaluate(agent, enc, valid, seed=0):
                 out[s] = bag[i]
             return tuple(out)
 
-        built = sentence(assign_slots(Pb))
+        Gb = G[b, :n, :n] if relation else None
+        built = sentence(assign_slots(Pb, G=Gb))
         best = max(options, key=lambda o: sum(a == c for a, c in zip(built, o)))
         exact += built in options
         slots += sum(a == c for a, c in zip(built, best))
@@ -176,12 +265,13 @@ def evaluate(agent, enc, valid, seed=0):
             score = (Pb.log_softmax(1) + Pb.log_softmax(0)).numpy()
             noise = np_rng.gumbel(size=(TRIES,) + score.shape)
         while not found and k < TRIES:
-            found = sentence(assign_slots(score, noise[k])) in options
+            found = sentence(assign_slots(score, noise[k], Gb)) in options
             k += 1
         tries += k if found else TRIES + 1
     m = max(len(enc["words"]), 1)
     return dict(n=len(enc["words"]), exact=round(exact / m, 4), slot=round(slots / max(n_slots, 1), 4),
-                neighbor=round(pairs / max(n_pairs, 1), 4), tries=round(tries / m, 2))
+                neighbor=round(pairs / max(n_pairs, 1), 4), tries=round(tries / m, 2),
+                ms=round(1000 * (time.time() - t0) / m, 2))     # cumle basina dizme + deneme suresi
 
 
 def main(argv=None):
@@ -216,10 +306,12 @@ def main(argv=None):
             total += loss.item() * len(rows)
         if epoch % 10 == 0 or epoch == args.epochs:
             agent.eval()
-            res = {s: evaluate(agent, e, valid) for s, e in splits.items()}
+            res = {s + ("+G" if rel else ""): evaluate(agent, e, valid, relation=rel) for s, e in splits.items()
+                   for rel in (False, True)}
             agent.train()
             print("epok %3d  kayip %.3f  |  %s  (%.0f sn)" % (epoch, total / len(train), "  ".join(
-                "%s: tam %.3f yuva %.3f komsu %.3f deneme %.1f" % (s, v["exact"], v["slot"], v["neighbor"], v["tries"])
+                "%s: tam %.3f yuva %.3f komsu %.3f deneme %.1f %.1f ms" % (s, v["exact"], v["slot"], v["neighbor"], v["tries"],
+                                                                     v["ms"])
                 for s, v in res.items()), time.time() - t0), flush=True)
     return agent, res
 
