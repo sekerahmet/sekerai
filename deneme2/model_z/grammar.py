@@ -34,6 +34,8 @@ UNK = "<unk>"
 D = 64                  # kelime temsili boyu
 HEADS = 4
 LAYERS = 3
+LR = 3e-3               # Adam; d=256'da bu degerle 6. epoktan sonra dagildi
+SCHEDULE = "constant"   # constant | cosine (adim adim --epochs sonunda 0)
 UNK_RATE = 0.1          # egitimde kelimenin <unk> yapilma olasiligi: bilinmeyen kelimeye yer bulmayi da ogrensin
 TRIES = 100             # deneme sayisi olcusunun ust siniri
 NEG = -1e9
@@ -230,9 +232,8 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--d", type=int, default=D, help="kelime temsili boyu")
     ap.add_argument("--batch", type=int, default=64)
-    ap.add_argument("--lr", type=float, default=3e-3)
-    ap.add_argument("--schedule", default="constant", choices=("constant", "cosine"), help="cosine: lr adim adim "
-                    "--epochs sonunda 0'a iner")
+    ap.add_argument("--lr", type=float, default=LR)
+    ap.add_argument("--schedule", default=SCHEDULE, choices=("constant", "cosine"))
     ap.add_argument("--device", default="cpu", help="cpu | cuda")
     ap.add_argument("--compile", type=int, default=1, help="1: torch.compile (yalniz cuda; CPU'da kendiliginden kapali)")
     ap.add_argument("--precision", default="bf16", choices=("bf16", "fp32"), help="egitim ileri hesabi (yalniz cuda); "
