@@ -366,7 +366,7 @@ def train_seq(setting, ids, mask, n, steps=STEPS, lr=LR, log_at=LOG_AT, seed=0, 
         if fixes is not None and len(fixes[0]):           # duzeltme molasi: 16 satir, gradyan MLE'ninkine eklenir
             pick = torch.randperm(len(fixes[0]), generator=torch.Generator().manual_seed(step))[:16]
             with forward_context():
-                fix_total, _ = model.loss(fixes[0][pick].to(device), fixes[1][pick].to(device))
+                fix_total, _ = loss_fn(fixes[0][pick].to(device), fixes[1][pick].to(device))   # derlenmis: model.loss 2,6x yavas
             with sdpa_kernel(kernels):
                 (break_weight * fix_total).backward()
         torch.nn.utils.clip_grad_norm_(params, grad_clip)  # butun gradyanlarin toplam boyu > grad_clip ise olcekle indir
