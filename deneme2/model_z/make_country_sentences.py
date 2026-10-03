@@ -4,10 +4,9 @@ Gorev kavrami yok (kullanici, 3 Ekim: "Görevi makine bulmayacak görev diye bir
 
 1. Butun veri: her ulke x her dolu olgu x o olgunun her kalibi -> country_sentences.jsonl
 2. Egitim / sinav (tohum sabit):
-     her ulkenin dolu olgularindan 3'u ayrilir (sinav, gorulmemis olgu); kalanlarin her biri egitimde TEK kalipla
-     (kalip ulkeden ulkeye doner)
-     sinav bolmeleri: seen (egitim cumlelerinden ornek), unseen_template (egitimdeki olgu, baska kalip),
-     unseen_fact (ayrilan olgu, butun kaliplari)
+     her ulkenin dolu olgularindan 3'u ayrilir (sinav, gorulmemis olgu); kalanlar butun kaliplariyla egitimde
+     (kullanici, 3 Ekim: "Uygun" -- yeni kalip bolmesi egitime katildi: kaliplar baska ulkelerde zaten goruluyor)
+     sinav bolmeleri: seen (egitim cumlelerinden ornek), unseen_fact (ayrilan olgu, butun kaliplari)
    -> country_train.jsonl, country_exam.jsonl
 Hazir veri (data/countries/): bir kez uretilir, sonra hep okunur; yeniden calistirmak ayni dosyalari verir.
 
@@ -57,7 +56,6 @@ def main():
         r["id"] = i
     rng = random.Random(SEED)
     train, exam = [], []
-    turn = Counter()                                   # olgu turu basina kalip sirasi: ulkeden ulkeye doner
     for row in table["countries"]:
         mine = [f for f in facts if row[f] is not None]
         held = set(rng.sample(mine, HELD_OUT))
@@ -66,10 +64,7 @@ def main():
             if fact in held:
                 exam += [dict(r, split="unseen_fact") for r in rows]
                 continue
-            k = turn[fact] % len(TEMPLATES[fact])
-            turn[fact] += 1
-            train += [dict(r, split="train") for r in rows if r["template"] == k]
-            exam += [dict(r, split="unseen_template") for r in rows if r["template"] != k]
+            train += [dict(r, split="train") for r in rows]
     exam += [dict(r, split="seen") for r in rng.sample(train, SEEN_EXAM)]
     for name, rows in (("country_sentences", everything), ("country_train", train), ("country_exam", exam)):
         with open(os.path.join(DATA, name + ".jsonl"), "w", encoding="utf-8", newline="\n") as f:
