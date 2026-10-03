@@ -100,7 +100,8 @@ def continue_by_sentence(model, prompts, vocab, lookahead, budget=BUDGET):
                 c.append((float(lp[r, eos]), eos))
             cands.append(sorted(c, reverse=True))
         jobs = [(r, t) for r, c in enumerate(cands) for _, t in c if t != eos]
-        rolls = generate_cached(model, [prefixes[r] + [t] for r, t in jobs], SENTENCE_MAX - 1) if jobs else []
+        seqs = [prefixes[r] + [t] for r, t in jobs]   # parca parca: istem gecisi butun konumlarda sozluk logit'i uretir
+        rolls = [x for c in range(0, len(seqs), CHUNK) for x in generate_cached(model, seqs[c:c + CHUNK], SENTENCE_MAX - 1)]
         roll = {job: x for job, x in zip(jobs, rolls)}
         nxt = []
         for r, i in enumerate(active):
