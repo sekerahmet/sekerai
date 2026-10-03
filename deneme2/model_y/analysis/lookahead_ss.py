@@ -72,14 +72,21 @@ def _sentence(first, rollout, end, eos):
     return out, False
 
 
-def _repeat(context, sent, tab):
-    """context + sent'in son cumlesi (>= 5 birim) daha once tam gecmis mi (exam_simplestories cumle tanimi)."""
+def _repeat(context, sent, tab, ngram=0):
+    """context + sent'in son cumlesi (>= 5 birim) daha once tam gecmis mi (exam_simplestories cumle tanimi); ngram > 0:
+    ya da sent'e degen bir token ngram'i context'te zaten var mi (benzer cumle tekrari, 8'li dongu olcusunun karsiligi)."""
     s = ES._sentences(DS._units(context + sent, tab))
-    return len(s) > 1 and len(s[-1]) >= ES._LONG_SENTENCE and s[-1] in set(s[:-1])
+    if len(s) > 1 and len(s[-1]) >= ES._LONG_SENTENCE and s[-1] in set(s[:-1]):
+        return True
+    if not ngram:
+        return False
+    full, k = context + sent, len(context)
+    old = {tuple(full[j:j + ngram]) for j in range(k - ngram + 1)}
+    return any(tuple(full[j:j + ngram]) in old for j in range(max(k - ngram + 1, 0), len(full) - ngram + 1))
 
 
 @torch.no_grad()
-def continue_by_sentence(model, prompts, vocab, lookahead, budget=BUDGET):
+def continue_by_sentence(model, prompts, vocab, lookahead, budget=BUDGET, ngram=0):
     """prompts ([eos] + istem) -> (devamlar, bitti, istatistik).  Cumle cumle; lookahead False: her sinirda en olasi
     token (acgozlu ile ayni metin)."""
     eos = vocab.index(DS.EOS_TOKEN)
@@ -112,7 +119,7 @@ def continue_by_sentence(model, prompts, vocab, lookahead, budget=BUDGET):
                     choice = ([], True)
                     break
                 sent, stop = _sentence(t, roll[(r, t)], end, eos)
-                if not lookahead or not _repeat(prompts[i][1:] + gens[i], sent, tab):
+                if not lookahead or not _repeat(prompts[i][1:] + gens[i], sent, tab, ngram):
                     choice = (sent, stop)
                     break
             if choice is None:                       # hepsi tekrar: en olasi (zorlandi)
@@ -157,6 +164,7 @@ def main(argv=None):
     ap.add_argument("--weights", default="both", choices=("last", "ema", "both"))
     ap.add_argument("--examples", type=int, default=4)
     ap.add_argument("--budget", type=int, default=BUDGET)
+    ap.add_argument("--ngram", type=int, default=0, help="0: yalniz birebir cumle tekrari; 8: tekrar eden 8'li de tekrar")
     args = ap.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
@@ -167,14 +175,16 @@ def main(argv=None):
     words, xax = data["text_reference"]["words"], data["text_reference"]["xax"]
     stock = ES._stock_reference(data, ES.STORY_CONTINUATIONS)
     sets = prompt_sets(data, args.n)
-    report = dict(run=os.path.basename(os.path.normpath(args.run)), n=args.n, top=TOP, budget=BUDGET, results={})
+    report = dict(run=os.path.basename(os.path.normpath(args.run)), n=args.n, top=TOP, budget=args.budget, ngram=args.ngram,
+                  results={})
     lines = []
     for w in (["last", "ema"] if args.weights == "both" else [args.weights]):
         model = I._load_model(args.run, w).to(args.device)
         for name, prompts in sets.items():
             for mode in ("greedy", "lookahead"):
                 t0 = time.time()
-                gens, ended, st = continue_by_sentence(model, prompts, vocab, mode == "lookahead", args.budget)
+                gens, ended, st = continue_by_sentence(model, prompts, vocab, mode == "lookahead", args.budget,
+                                                         args.ngram)
                 gens = [DS.strip_sentence_ids(g, vocab) for g in gens]
                 c = ES._count([DS.strip_sentence_ids(p, vocab) for p in prompts], gens, ended, tab, words, xax, stock)
                 c.update(st, secs=round(time.time() - t0, 1))
