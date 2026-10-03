@@ -15,7 +15,7 @@ Kayip: ardil (satir) + oncel (sutun) CE; ayni kelimenin kopyalari esdeger hedef.
 Olculer (sinav bolmeleri ve cumle boyu ayri): tam dogru (ayni torbadan kurulabilen herhangi gecerli cumle), dogru yuva,
 dogru komsu, deneme sayisi (Gumbel gurultulu G ile dogru bulunana kadar, en cok TRIES), cumle basina dizme suresi.
 
-    python grammar.py [--data countries|simplestories] [--epochs 30] [--device cpu|cuda] [--seed 0]
+    python grammar.py [--data countries|simplestories] [--epochs 30] [--device cpu|cuda] [--compile 1] [--precision bf16]
 """
 import argparse
 import json
@@ -158,11 +158,14 @@ def _batch(enc, rows, gen, unk_rate=0.0, unk_id=0):
     return ids, mask, succ, pred, same, order
 
 
-def loss_of(agent, enc, rows, gen, unk_rate):
+def loss_of(agent, enc, rows, gen, unk_rate, forward=None, bf16=False):
+    """forward: agent'in derlenmis hali (torch.compile) ya da agent; bf16: ileri hesap autocast (GPU)."""
     ids, mask, succ, pred, same, _ = _batch(enc, rows, gen, unk_rate, agent.index[UNK])
     dev = next(agent.parameters()).device
-    ids, mask, succ, pred, same = (t.to(dev) for t in (ids, mask, succ, pred, same))
-    G = agent(ids, mask)
+    ids, mask, succ, pred, same = (t.to(dev, non_blocking=True) for t in (ids, mask, succ, pred, same))
+    with torch.autocast(dev.type, dtype=torch.bfloat16, enabled=bf16):
+        G = (forward or agent)(ids, mask)
+    G = G.float()
     L1 = G.shape[1]
     node = torch.cat([mask, torch.ones(len(ids), 1, dtype=torch.bool, device=dev)], 1).float()
     hit_s = same.gather(1, succ[:, :, None].expand(-1, -1, L1))     # j, gercek ardille ayni kelime
@@ -224,17 +227,21 @@ def evaluate(agent, enc, valid, seed=0):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--data", default="countries", choices=sorted(FILES))
+    ap.add_argument("--root", default=None, help="veri klasoru (varsayilan data/<data>; SS: Drive'daki hazir dosyalar)")
     ap.add_argument("--epochs", type=int, default=30)          # ulke verisinde 60 ile ayni sonuc (olculdu)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--lr", type=float, default=3e-3)
-    ap.add_argument("--device", default="cpu")
+    ap.add_argument("--device", default="cpu", help="cpu | cuda")
+    ap.add_argument("--compile", type=int, default=1, help="1: torch.compile (yalniz cuda; CPU'da kendiliginden kapali)")
+    ap.add_argument("--precision", default="bf16", choices=("bf16", "fp32"), help="egitim ileri hesabi (yalniz cuda); "
+                    "sinav hep fp32")
     ap.add_argument("--every", type=int, default=10, help="kac epokta bir olcum")
     args = ap.parse_args(argv)
     torch.manual_seed(args.seed)
     if args.device == "cpu":
         torch.set_num_threads(4)                        # kucuk model: 16 is parcacigi 4'ten yavas (olculdu)
-    folder, prefix = os.path.join(HERE, "data", args.data), FILES[args.data]
+    folder, prefix = args.root or os.path.join(HERE, "data", args.data), FILES[args.data]
     train = _load(os.path.join(folder, prefix + "train.jsonl"))
     exam = _load(os.path.join(folder, prefix + "exam.jsonl"))
     valid = defaultdict(set)                            # ayni torbadan kurulabilen gecerli cumleler
@@ -242,13 +249,16 @@ def main(argv=None):
         valid[tuple(sorted(r["words"]))].add(tuple(r["words"]))
     vocab = [UNK] + sorted({w for r in train for w in r["words"]})
     agent = GrammarAgent(vocab).to(args.device)
+    cuda = torch.device(args.device).type == "cuda"
+    forward = torch.compile(agent, dynamic=True) if (cuda and args.compile) else agent
+    bf16 = cuda and args.precision == "bf16"
     opt = torch.optim.Adam(agent.parameters(), lr=args.lr)
     splits = {s: _encode(agent, [r for r in exam if r["split"] == s]) for s in sorted({r["split"] for r in exam})}
     enc = _encode(agent, train)
     gen = torch.Generator().manual_seed(args.seed)
-    print("veri %s: egitim %d cumle, sozluk %d, sinav %s, en uzun %d kelime | cihaz %s" % (
+    print("veri %s: egitim %d cumle, sozluk %d, sinav %s, en uzun %d kelime | cihaz %s compile %s %s" % (
         args.data, len(train), len(vocab), {s: len(e["words"]) for s, e in splits.items()}, enc["ids"].shape[1],
-        args.device), flush=True)
+        args.device, forward is not agent, "bf16" if bf16 else "fp32"), flush=True)
     t0 = time.time()
     res = None
     for epoch in range(1, args.epochs + 1):
@@ -256,7 +266,7 @@ def main(argv=None):
         total = 0.0
         for b in range(0, len(train), args.batch):
             rows = perm[b:b + args.batch]
-            loss = loss_of(agent, enc, rows, gen, UNK_RATE)
+            loss = loss_of(agent, enc, rows, gen, UNK_RATE, forward, bf16)
             opt.zero_grad()
             loss.backward()
             opt.step()
