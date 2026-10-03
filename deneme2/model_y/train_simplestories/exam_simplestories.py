@@ -518,7 +518,8 @@ def correction_break(data, prompts=None, seed=0):
             lp = _next_logprobs(model, [pre for pre, _ in entries], eos)
             top = lp.topk(CANDIDATES, -1).indices.tolist()
             jobs = [(r, t) for r, c in enumerate(top) for t in c if t != eos]
-            rolls = generate(model, [entries[r][0] + [t] for r, t in jobs], SENTENCE_MAX - 1)
+            seqs = [entries[r][0] + [t] for r, t in jobs]   # parca parca: istem gecisi butun konumlarda sozluk logit'i uretir
+            rolls = [x for c in range(0, len(seqs), 32) for x in generate(model, seqs[c:c + 32], SENTENCE_MAX - 1)]
             roll = {job: x for job, x in zip(jobs, rolls)}
             for r, (pre, _) in enumerate(entries):
                 cands = sorted([(float(lp[r, t]), t) for t in top[r]] + [(float(lp[r, eos]), eos)], reverse=True)
