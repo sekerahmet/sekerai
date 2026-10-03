@@ -136,33 +136,30 @@ def _encode(agent, rows):
     return dict(ids=ids, length=torch.tensor([len(r["words"]) for r in rows]), words=[r["words"] for r in rows])
 
 
-def _batch(enc, rows, gen, unk_rate=0.0, unk_id=0):
-    """Satirlar -> karisik torbalar ve hedefler (dongusuz).  order[b, i] = torbadaki i. kelimenin cumledeki konumu.
-    succ / pred: her dugumun (boundary dahil, indeks L) gercek ardili / oncelisi; same[b, i, j]: i ve j ayni kelime."""
+def _batch(enc, rows, gen):
+    """Satirlar -> karisik torbalar (sinav).  order[b, i] = torbadaki i. kelimenin cumledeki konumu."""
     L = enc["ids"].shape[1]
-    length = enc["length"][rows]
-    mask = torch.arange(L)[None] < length[:, None]
+    mask = torch.arange(L)[None] < enc["length"][rows][:, None]
     order = torch.rand(len(rows), L, generator=gen).masked_fill(~mask, 2.0).argsort(1)
-    orig = enc["ids"][rows].gather(1, order)
-    ids = orig.masked_fill((torch.rand(orig.shape, generator=gen) < unk_rate) & mask, unk_id)
-    inv = order.argsort(1)                              # cumledeki konum -> torbadaki yer
-    nxt = order + 1
-    succ = torch.where((nxt < length[:, None]) & mask, inv.gather(1, nxt.clamp(max=L - 1)), torch.full_like(nxt, L))
-    prv = order - 1
-    pred = torch.where((order > 0) & mask, inv.gather(1, prv.clamp(min=0)), torch.full_like(prv, L))
-    first, last = inv[:, 0], inv.gather(1, (length - 1)[:, None])[:, 0]
-    succ = torch.cat([succ, first[:, None]], 1)          # boundary'nin ardili ilk kelime
-    pred = torch.cat([pred, last[:, None]], 1)           # boundary'nin oncelisi son kelime
-    key = torch.cat([orig.masked_fill(~mask, -5), torch.full((len(rows), 1), -7)], 1)
-    same = key[:, :, None] == key[:, None, :]
-    return ids, mask, succ, pred, same, order
+    return enc["ids"][rows].gather(1, order), mask, order
 
 
 def loss_of(agent, enc, rows, gen, unk_rate, forward=None, bf16=False):
-    """forward: agent'in derlenmis hali (torch.compile) ya da agent; bf16: ileri hesap autocast (GPU)."""
-    ids, mask, succ, pred, same, _ = _batch(enc, rows, gen, unk_rate, agent.index[UNK])
+    """Egitim torbasi cumlenin kendisi: okuyucu konumsuz, G kelimelerin veriliş sirasiyla birlikte permute olur, kayip
+    sirasizdir; karistirmak bir sey degistirmez.  Hedefler sabit: ardil i+1, oncel i-1, boundary (indeks L) ilk / son
+    kelimeye.  enc, rows ve gen ajanin cihazinda; dolgu batch'in en uzun cumlesine kirpilir.
+    forward: agent'in derlenmis hali (torch.compile) ya da agent; bf16: ileri hesap autocast (GPU)."""
     dev = next(agent.parameters()).device
-    ids, mask, succ, pred, same = (t.to(dev, non_blocking=True) for t in (ids, mask, succ, pred, same))
+    length = enc["length"][rows]
+    L = int(length.max())
+    orig = enc["ids"][rows, :L]
+    pos = torch.arange(L, device=dev)[None]
+    mask = pos < length[:, None]
+    ids = orig.masked_fill((torch.rand(orig.shape, generator=gen, device=dev) < unk_rate) & mask, agent.index[UNK])
+    succ = torch.cat([torch.where(pos + 1 < length[:, None], pos + 1, L), torch.zeros_like(length)[:, None]], 1)
+    pred = torch.cat([torch.where(pos > 0, pos - 1, L).expand(len(rows), -1), (length - 1)[:, None]], 1)
+    key = torch.cat([orig.masked_fill(~mask, -5), torch.full_like(length, -7)[:, None]], 1)
+    same = key[:, :, None] == key[:, None, :]           # ayni kelimenin kopyalari esdeger hedef
     with torch.autocast(dev.type, dtype=torch.bfloat16, enabled=bf16):
         G = (agent if forward is None else forward)(ids, mask)
     G = G.float()
@@ -186,7 +183,7 @@ def evaluate(agent, enc, valid, seed=0):
     t_order = 0.0
     for c in range(0, len(rows), 512):
         part = rows[c:c + 512]
-        ids, mask, _, _, _, order = _batch(enc, part, gen)
+        ids, mask, order = _batch(enc, part, gen)
         with torch.no_grad():
             G = agent(ids.to(dev), mask.to(dev)).cpu().double().numpy()
         L = ids.shape[1]
@@ -258,8 +255,9 @@ def main(argv=None):
     bf16 = cuda and args.precision == "bf16"
     opt = torch.optim.Adam(agent.parameters(), lr=args.lr)
     splits = {s: _encode(agent, [r for r in exam if r["split"] == s]) for s in sorted({r["split"] for r in exam})}
-    enc = _encode(agent, train)
-    gen = torch.Generator().manual_seed(args.seed)
+    enc = {k: v.to(args.device) for k, v in _encode(agent, train).items() if k != "words"}   # egitim verisi bir kez cihazda
+    gen = torch.Generator().manual_seed(args.seed)                     # epok sirasi (CPU)
+    gen_unk = torch.Generator(device=args.device).manual_seed(args.seed)   # <unk> secimi (cihazda)
     print("veri %s: egitim %d cumle, sozluk %d, sinav %s, en uzun %d kelime | d %d, %d parametre | cihaz %s compile %s %s"
           % (args.data, len(train), len(vocab), {s: len(e["words"]) for s, e in splits.items()}, enc["ids"].shape[1],
              args.d, sum(p.numel() for p in agent.parameters()), args.device, forward is not agent,
@@ -275,20 +273,22 @@ def main(argv=None):
         agent.load_state_dict(pack["state"])
         opt.load_state_dict(pack["opt"])
         gen.set_state(pack["gen"])
+        gen_unk.set_state(pack["gen_unk"].cpu())
         first, history = pack["epoch"] + 1, pack["history"]
         print("SURDURULDU: epok %d'den (%s)" % (pack["epoch"], ckpt), flush=True)
     for epoch in range(first, args.epochs + 1):
-        perm = torch.randperm(len(train), generator=gen)
-        total, t_epoch = 0.0, time.time()
+        perm = torch.randperm(len(train), generator=gen).to(args.device)
+        total, t_epoch = torch.zeros((), device=args.device), time.time()
         if cuda:
             torch.cuda.reset_peak_memory_stats()
         for b in range(0, len(train), args.batch):
             rows = perm[b:b + args.batch]
-            loss = loss_of(agent, enc, rows, gen, UNK_RATE, forward, bf16)
+            loss = loss_of(agent, enc, rows, gen_unk, UNK_RATE, forward, bf16)
             opt.zero_grad()
             loss.backward()
             opt.step()
-            total += loss.item() * len(rows)
+            total += loss.detach() * len(rows)                # .item() yok: her adimda GPU beklenmez
+        total = total.item()
         if cuda:
             torch.cuda.synchronize()
         perf = dict(train_secs=round(time.time() - t_epoch, 2), sentences_per_sec=round(len(train) / (time.time() - t_epoch)),
@@ -310,7 +310,7 @@ def main(argv=None):
             history.append(dict(epoch=epoch, loss=total / len(train), result=res, perf=perf))
         if ckpt:                                         # her epok: once .part, sonra yerine (yarim dosya kalmaz)
             torch.save(dict(vocab=vocab, state=agent.state_dict(), opt=opt.state_dict(), gen=gen.get_state(),
-                            epoch=epoch, history=history, args=vars(args)), ckpt + ".part")
+                            gen_unk=gen_unk.get_state(), epoch=epoch, history=history, args=vars(args)), ckpt + ".part")
             os.replace(ckpt + ".part", ckpt)
     if args.out:
         torch.save(dict(vocab=vocab, state=agent.state_dict(), args=vars(args)), os.path.join(args.out, "agent.pt"))
