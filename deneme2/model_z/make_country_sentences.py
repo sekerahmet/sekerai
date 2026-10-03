@@ -9,6 +9,10 @@ Gorev kavrami yok (kullanici, 3 Ekim: "Görevi makine bulmayacak görev diye bir
      eğitim setimiz uyumsuz"); kalan olgular butun kaliplariyla egitimde.  Egitimde birebir gecen cumle sinavdan cikar
      (komsuluk iki ulkeden de yazilabiliyor).  sinav bolmeleri: seen (egitim cumlelerinden ornek), unseen
    -> country_train.jsonl, country_exam.jsonl
+3. Baglam ajani icin hikayeler (kullanici, 4 Ekim: "Önce bizim ülke verisinden denesek"): hikaye = bir ulkenin dolu
+   olgulari rastgele sirayla, her olgu rastgele bir kalipla; egitime STORIES, sinava EXAM_STORIES hikaye / ulke (ayri
+   tohum; 1-2'nin dosyalari degismez).  Sozluk: butun verinin kelimeleri, indeks 0 '<unk>'.
+   -> country_stories.jsonl (split train / exam), country_vocab.json
 Hazir veri (data/countries/): bir kez uretilir, sonra hep okunur; yeniden calistirmak ayni dosyalari verir.
 
     python make_country_sentences.py
@@ -23,6 +27,8 @@ DATA = os.path.join(HERE, "data", "countries")
 HELD_OUT = 3            # ulke basina sinava ayrilan olgu
 SEEN_EXAM = 100         # sinavin 'seen' bolmesi: egitim cumlelerinden bu kadar
 SEED = 0
+STORIES = 30           # egitim hikayesi / ulke
+EXAM_STORIES = 3       # sinav hikayesi / ulke
 THE = {"Netherlands", "United Kingdom", "United States", "Czech Republic", "Philippines", "United Arab Emirates"}
 
 # {C} ulke, {F} olgu
@@ -77,6 +83,22 @@ def main():
         with open(os.path.join(DATA, name + ".jsonl"), "w", encoding="utf-8", newline="\n") as f:
             for r in rows:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    story_rng = random.Random(SEED + 1)
+    stories = []
+    for row in table["countries"]:
+        mine = [f for f in facts if row[f] is not None]
+        for i in range(STORIES + EXAM_STORIES):
+            order = story_rng.sample(mine, len(mine))
+            sents = [story_rng.choice([r for r in everything if r["country"] == row["country"] and r["fact"] == f])
+                     for f in order]
+            stories.append(dict(country=row["country"], split="train" if i < STORIES else "exam",
+                                facts=order, sentences=[r["words"] for r in sents]))
+    with open(os.path.join(DATA, "country_stories.jsonl"), "w", encoding="utf-8", newline="\n") as f:
+        for r in stories:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    vocab = ["<unk>"] + sorted({w for r in everything for w in r["words"]})
+    json.dump(vocab, open(os.path.join(DATA, "country_vocab.json"), "w", encoding="utf-8"), ensure_ascii=False)
+    print("hikaye %s, sozluk %d" % (dict(Counter(r["split"] for r in stories)), len(vocab)))
     print("butun veri %d cumle | egitim %d | sinav %s" % (
         len(everything), len(train), dict(Counter(r["split"] for r in exam))))
     print("cumle boyu (kelime): en kisa %d, en uzun %d, sozluk %d kelime" % (
