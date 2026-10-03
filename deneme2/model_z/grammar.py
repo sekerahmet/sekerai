@@ -164,7 +164,7 @@ def loss_of(agent, enc, rows, gen, unk_rate, forward=None, bf16=False):
     dev = next(agent.parameters()).device
     ids, mask, succ, pred, same = (t.to(dev, non_blocking=True) for t in (ids, mask, succ, pred, same))
     with torch.autocast(dev.type, dtype=torch.bfloat16, enabled=bf16):
-        G = (forward or agent)(ids, mask)
+        G = (agent if forward is None else forward)(ids, mask)
     G = G.float()
     L1 = G.shape[1]
     node = torch.cat([mask, torch.ones(len(ids), 1, dtype=torch.bool, device=dev)], 1).float()
