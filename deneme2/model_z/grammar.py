@@ -13,7 +13,7 @@ Kayip: yuva (satir: kelimenin yuvasi, sutun: yuvanin kelimesi; ayni kelime birde
 Olculer (sinav bolmeleri ayri): tam dogru (ayni torbadan kurulabilen herhangi bir gecerli cumle), dogru yuva, dogru komsu,
 deneme sayisi (Gumbel gurultulu atamalarla dogru bulunana kadar, en cok TRIES).
 
-    python grammar.py [--epochs 60] [--seed 0]
+    python grammar.py [--epochs 30] [--seed 0]
 """
 import argparse
 import json
@@ -186,7 +186,7 @@ def evaluate(agent, enc, valid, seed=0):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--epochs", type=int, default=60)
+    ap.add_argument("--epochs", type=int, default=30)          # 60 ile ayni sonuc (olculdu)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--lr", type=float, default=3e-3)
@@ -200,7 +200,7 @@ def main(argv=None):
     vocab = [UNK] + sorted({w for r in train for w in r["words"]})
     agent = GrammarAgent(vocab)
     opt = torch.optim.Adam(agent.parameters(), lr=args.lr)
-    splits = {s: _encode(agent, [r for r in exam if r["split"] == s]) for s in ("seen", "unseen_fact")}
+    splits = {s: _encode(agent, [r for r in exam if r["split"] == s]) for s in ("seen", "unseen")}
     enc = _encode(agent, train)                         # bir kez: kelime -> sayi, esdeger yuvalar
     gen = torch.Generator().manual_seed(args.seed)
     t0 = time.time()

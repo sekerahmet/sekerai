@@ -4,9 +4,10 @@ Gorev kavrami yok (kullanici, 3 Ekim: "Görevi makine bulmayacak görev diye bir
 
 1. Butun veri: her ulke x her dolu olgu x o olgunun her kalibi -> country_sentences.jsonl
 2. Egitim / sinav (tohum sabit):
-     her ulkenin dolu olgularindan 3'u ayrilir (sinav, gorulmemis olgu); kalanlar butun kaliplariyla egitimde
-     (kullanici, 3 Ekim: "Uygun" -- yeni kalip bolmesi egitime katildi: kaliplar baska ulkelerde zaten goruluyor)
-     sinav bolmeleri: seen (egitim cumlelerinden ornek), unseen_fact (ayrilan olgu, butun kaliplari)
+     her ulkenin dolu olgularindan 3'u ayrilir; ayrilan olgunun BIR kalibi egitime, otekiler sinava (unseen): sinav
+     cumlesi egitimde gecmemis ama butun kelimeleri egitimde gecmis (kullanici, 3 Ekim: "Unk içinse demekki soru ve
+     eğitim setimiz uyumsuz"); kalan olgular butun kaliplariyla egitimde.  Egitimde birebir gecen cumle sinavdan cikar
+     (komsuluk iki ulkeden de yazilabiliyor).  sinav bolmeleri: seen (egitim cumlelerinden ornek), unseen
    -> country_train.jsonl, country_exam.jsonl
 Hazir veri (data/countries/): bir kez uretilir, sonra hep okunur; yeniden calistirmak ayni dosyalari verir.
 
@@ -31,7 +32,7 @@ TEMPLATES = {
     "language": ["People in {C} speak {F}", "{F} is spoken in {C}"],
     "currency": ["{C} uses the {F}", "The {F} is the currency of {C}", "People in {C} pay with the {F}"],
     "city": ["{F} is a large city in {C}", "{C} has a large city called {F}"],
-    "neighbor": ["{C} borders {F}", "{F} borders {C}", "{F} is a neighbor of {C}"],
+    "neighbor": ["{C} borders {F}", "{F} borders {C}", "{F} is a neighbor of {C}", "{C} is a neighbor of {F}"],   # iki yon
     "river": ["The {F} flows through {C}", "The {F} is a river in {C}"],
     "dish": ["People in {C} eat {F}", "{C} is famous for {F}"],
     "landmark": ["{F} is in {C}", "Tourists in {C} visit {F}", "{C} is home to {F}"],
@@ -61,10 +62,16 @@ def main():
         held = set(rng.sample(mine, HELD_OUT))
         for fact in mine:
             rows = [r for r in everything if r["country"] == row["country"] and r["fact"] == fact]
-            if fact in held:
-                exam += [dict(r, split="unseen_fact") for r in rows]
+            if fact in held:                           # bir kalip egitime: kelimeleri ogrenilsin
+                k = rng.randrange(len(rows))
+                train.append(dict(rows[k], split="train"))
+                exam += [dict(r, split="unseen") for i, r in enumerate(rows) if i != k]
                 continue
             train += [dict(r, split="train") for r in rows]
+    seen_text = {r["sentence"] for r in train}
+    known = {w for r in train for w in r["words"]}
+    exam = [r for r in exam if r["sentence"] not in seen_text]
+    assert all(w in known for r in exam for w in r["words"]), "sinavda egitimde gecmeyen kelime var"
     exam += [dict(r, split="seen") for r in rng.sample(train, SEEN_EXAM)]
     for name, rows in (("country_sentences", everything), ("country_train", train), ("country_exam", exam)):
         with open(os.path.join(DATA, name + ".jsonl"), "w", encoding="utf-8", newline="\n") as f:
