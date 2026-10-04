@@ -35,16 +35,20 @@ class MeaningAgent(torch.nn.Module):
     def ids(self, words):
         return [self.index.get(w, self.index[UNK]) for w in words]
 
-    def forward(self, ids, present, hidden):
-        """ids (B, L) torbadaki kelimeler (sirasiz), present (B, L) gorunen yuva, hidden (B,) gizli kelime -> log P(gizli
-        kelime | torba) (B,): gorunen kelimelerin tek tek tahminlerinin ortalamasi.  P(j | i) paydasi yalniz i'ye bagli,
-        adim basina sozluk icin bir kez hesaplanir."""
-        u = self.source(ids)
+    def forward(self, ids, present, chunk=8192):
+        """ids (B, L) penceredeki farkli kelimeler (sirasiz), present (B, L) gercek yuva -> (log P(yuvadaki kelime |
+        penceredeki obur kelimeler) (B, L), oy veren var mi (B, L)): her kelime sirayla gizli sayilir, toplu hesap.  P(j | i) paydasi yalniz i'ye bagli;
+        batch'teki farkli kelimeler icin bir kez (chunk satir parcalarla)."""
+        u, v = self.source(ids), self.target(ids)
         scale = u.shape[-1] ** 0.5
-        log_z = (self.source.weight @ self.target.weight.T / scale + self.bias).logsumexp(1)      # (V,)
-        each = (u * self.target(hidden)[:, None, :]).sum(-1) / scale + self.bias[hidden][:, None] - log_z[ids]
-        each = each.masked_fill(~present, -1e9)                                                    # (B, L)
-        return each.logsumexp(1) - present.sum(1).clamp(min=1).log()
+        uq, inv = ids.unique(return_inverse=True)
+        log_z = torch.cat([(self.source(uq[c:c + chunk]) @ self.target.weight.T / scale + self.bias).logsumexp(1)
+                           for c in range(0, len(uq), chunk)])
+        s = u @ v.transpose(1, 2) / scale + self.bias[ids][:, None, :] - log_z[inv][:, :, None]   # s[b, i, j] = log P(j | i)
+        L = ids.shape[1]
+        voters = present[:, :, None] & present[:, None, :] & ~torch.eye(L, dtype=torch.bool, device=ids.device)
+        n = voters.sum(1)                                                                        # (B, L) oy veren sayisi
+        return s.masked_fill(~voters, -1e9).logsumexp(1) - n.clamp(min=1).log(), n > 0
 
 
 @torch.no_grad()
