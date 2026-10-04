@@ -37,6 +37,28 @@ bir kapı yani sıralama değil geçersiz olmaz demek sadece"*; *"Tamam son kara
 - Aday sayısı mimariden ayrı (öneri, kodlanmadı): her yön bir dağılım; yönlerden sırayla torba çekilip kapıdan geçirilir,
   N iyi aday bulununca durulur.
 
+## Meaning agent (tasarım, 4 Ekim; kodlanmadı)
+
+Kullanıcı, 4 Ekim 2026: *"Aslında kelimeler arası anlam bağını oluştıran bir adıma ihtiyaç yok gramerden ayrı olarak
+Türkiye Ankara Asia lira gibi kelimeleri yakınlaştıran"*; *"Cümleler içinde attention ile"*; *"dizmenin bozulmaması için
+ayrı birşey öneriyorum"*; *"Meaning agent ok"*; *"Benim aklımdaki şuydu aslında context bir önceki cümledeki kelimelere
+bakıp ona yakın kelimeleri bulabilmesi 57.000 yerine belki çok daha az. Amaç missing değil önceki cümleye bakarak doğru
+torbayı oluşturması"*.
+
+- Amaç: kelimeler arası anlam yakınlığı (Turkey ↔ Ankara, Asia, lira). Context agent önceki cümlenin kelimelerine yakın
+  kelimelerden kısa bir aday listesi alır, torbayı 57.000 yerine bu listeden kurar.
+- Öğrenme (kod: `core/meaning/`, `MeaningAgent`): WINDOW cümlelik pencerede attention; skip-gram + negative sampling
+  (SGNS, word2vec): penceredeki öbür kelimeler olumlu, sıklığın 0,75 kuvvetiyle çekilen kelimeler olumsuz. Grammar
+  agent'tan ayrı (dizme etkilenmez). Önce pencere 1 cümle (kullanıcı: *"önce 1 bakarız hepsine aynı anda bakmayız
+  performansa göre bakarız"*).
+- Çıktı: `neighbors.pt` (`build_neighbor_table`): her kelimenin en güçlü 50 bağı; context agent `shortlist` ile son
+  cümlelerin kelimelerinin ilk N bağını alır, hikâyede geçmiş kelimeler ve biçim kelimeleri her zaman eklenir.
+- Ölçü `shortlist_recall`: sonraki cümlenin kelimeleri listede mi (içerik kelimeleri ayrı); taban bağlamsız en sık 200
+  içerik kelimesi. Göz: kelimenin tablo satırı.
+- Kaba ön ölçüm (birlikte geçme sayımı, 1 cümle, içerik kelimeleri listede): ülke N 10 → 86 kelime 0,927 (sıklık tabanı
+  247 kelime 0,694); SS (5M token) N 10 → 195 kelime 0,331, N 50 → 339 kelime 0,509 (sıklık tabanı 312 kelime 0,490):
+  SS'te ham sayım sık kelimeleri öne çıkarıyor (dragon → its, A, saw).
+
 ## Açık noktalar
 
 - **Kapı SS'te: görülmemiş bağ.** Kullanıcı, 4 Ekim 2026: *"şu an indeks hazır değil mi? notunu al ona bakarız"*. Kısmi
