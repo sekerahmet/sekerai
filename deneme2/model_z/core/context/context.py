@@ -42,6 +42,8 @@ class ContextAgent(torch.nn.Module):
         self.share = torch.nn.Linear(d, 1)                                            # pi = softmax(a . u_k + b)
         self.beta = torch.nn.Parameter(torch.full((len(vocab),), -5.0))              # kelimenin genel varlik egilimi
         self.seen_bias = torch.nn.Parameter(torch.zeros(len(vocab)))                 # hikayede gecmis kelimeye etki
+        self.norm_pool = torch.nn.LayerNorm(d)
+        self.pool_in = torch.nn.Linear(d, d)                                          # verilen torba -> h'ye katki
         g = torch.zeros(len(vocab), 3); g[:, 0] = 4.0                                  # hurdle: P(c=1|c>=1) ~0,96 baslangic
         self.gamma = torch.nn.Parameter(g)                                            # kelime basina sayi dagilimi (baglamsiz)
 
@@ -74,10 +76,12 @@ class ContextAgent(torch.nn.Module):
         new_seen = seen.scatter(1, ids, mask.float()).maximum(seen)
         return torch.where(empty[:, None, None], slots, new), torch.where(empty[:, None], seen, new_seen)
 
-    def _heads(self, state):
-        """-> log pi (B, K), z (B, K, V)."""
+    def _heads(self, state, pool=None):
+        """durum, verilen torba (B, V sayilar; yoksa bos) -> log pi (B, K), z (B, K, V): eksik kelimeler icin."""
         slots, seen = state
-        h = self.norm_out(slots).mean(1)
+        if pool is None:
+            pool = torch.zeros_like(seen)
+        h = self.norm_out(slots).mean(1) + self.pool_in(self.norm_pool(pool @ self.E.weight))
         u = self.W(h).view(len(h), self.directions, -1)
         log_pi = self.share(u).squeeze(-1).log_softmax(-1)
         z = u @ self.E.weight.T / u.shape[-1] ** 0.5 + self.beta + (self.seen_bias * seen)[:, None, :]
@@ -92,23 +96,17 @@ class ContextAgent(torch.nn.Module):
             lc = lc[:, None]                                                          # (B, 1, P, 3)
         return torch.cat([F.logsigmoid(-z)[..., None], F.logsigmoid(z)[..., None] + lc], -1)
 
-    def bag_log_prob(self, state, words, counts):
-        """Gercek torba -> (log pi (B, K), log P(B | k) (B, K)).  words (B, P) torbadaki farkli kelimeler (dolgu 0),
-        counts (B, P) sayilari (0 = dolgu; 3'ten buyuk 3 sayilir)."""
-        log_pi, z = self._heads(state)
+    def bag_log_prob(self, state, words, counts, pool=None):
+        """Eksik kisim -> (log pi (B, K), log P(eksik | k, verilen) (B, K)).  words (B, P) eksik kisimdaki farkli kelimeler
+        (dolgu 0), counts (B, P) sayilari (0 = dolgu; 3'ten buyuk 3 sayilir); pool (B, V) verilen kisim (yoksa bos: butun
+        torba eksik)."""
+        log_pi, z = self._heads(state, pool)
         absent = F.logsigmoid(-z).sum(-1)                                             # her kelime 0: (B, K)
         zp = z.gather(2, words[:, None, :].expand(-1, z.shape[1], -1))                # (B, K, P)
         lp = self._level_log_probs(zp, words)                                         # (B, K, P, 4)
         c = counts.clamp(max=LEVELS - 1)[:, None, :, None].expand(-1, z.shape[1], -1, 1)
         fix = (lp.gather(3, c).squeeze(3) - lp[..., 0]) * (counts > 0)[:, None, :]
         return log_pi, absent + fix.sum(-1)
-
-    def chosen_log_prob(self, state, words, chosen):
-        """Torbadan secilen kelimeler -> (log pi (B, K), sum_{secilen} log P(kelime var | k) (B, K)): kademeli hedefin kismi
-        olasiligi; secilmeyen ve torbada olmayan kelimeler sinanmaz."""
-        log_pi, z = self._heads(state)
-        zp = z.gather(2, words[:, None, :].expand(-1, z.shape[1], -1))                # (B, K, P)
-        return log_pi, (F.logsigmoid(zp) * chosen[:, None, :]).sum(-1)
 
     @torch.no_grad()
     def next_bags(self, state):

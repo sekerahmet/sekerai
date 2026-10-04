@@ -26,7 +26,7 @@ MODEL_Z = os.path.dirname(os.path.dirname(HERE))
 FILES = {"countries": "country_"}   # data/<ad>/<onek>{stories.jsonl, vocab.json}
 # veriye gore baslangic lr'si (kullanici, 4 Ekim: "hepsi cosine sadece başlangıç lr farklı veriye göre"); verilmeyende LR
 DATA_LR = {"countries": 3e-3}       # ulke: sabit 3e-3 600 adimda sinav ilk20 0,650 (olculdu)
-RAMP = 0.5              # kademeli hedef: egitimin bu kadarinda istenen kelime 1'den butun torbaya cikar (0: kapali)
+RAMP = 0.5              # kademeli tamamlama: egitimin bu payinda eksik kelime 1'den butun torbaya cikar (0: kapali)
 BATCH = 64              # hikaye
 LR = 1e-3              # genel baslangic lr'si (gramer d 256 ile ayni); veriye ozel deger DATA_LR
 SCHEDULE = "cosine"     # her veride cosine (kullanici, 4 Ekim: "hepsi cosine"); constant yalniz denemek icin
@@ -82,9 +82,9 @@ def _bag(ids, mask, vocab_size):
 
 def loss_of(agent, ids, mask, relax, progress=1.0, ramp=0.0):
     """Hikaye batch'i -> ortalama kayip (gecis basina, nat): (1 - relax) * -log sum_k pi_k P(B | k) + relax * yon ortalamasi.
-    Kademeli hedef (kullanici, 4 Ekim: "önce torbaya 1 kelime sonra 2 kelime sonra 3 kelime gibi"; "her seferinde rastgele
-    bir kelime"): asama a = progress / ramp; torbadan rastgele max(1, a * n) kelime istenir (yalniz var olmalari) ve tam torba
-    olasiligi a agirligiyla karisir; a >= 1 iken yalniz tam torba."""
+    Kademeli tamamlama (kullanici, 4 Ekim: "hedef cümle 10 kelime ise 9 nu verelim sadece 1 tanesini tahmin etsin. sonra 8 ni
+    verelim 2 sini tahmin etsin"; "aynen bunu istiyorum"): asama a = progress / ramp; sonraki cumlenin kelimelerinden rastgele
+    max(1, a * n) tanesi saklanir, gerisi verilir; ajan saklananlari bulur.  a >= 1: hepsi saklanir (uretimdeki gibi)."""
     a = min(progress / ramp, 1.0) if ramp > 0 else 1.0
     state = agent.initial_state(len(ids))
     LP, PI = [], []
@@ -93,14 +93,14 @@ def loss_of(agent, ids, mask, relax, progress=1.0, ramp=0.0):
         valid = mask[:, t + 1].any(1)
         if not valid.any():
             break
-        words, c = _bag(ids[:, t + 1], mask[:, t + 1], len(agent.vocab))
-        log_pi, lp = agent.bag_log_prob(state, words, c)
-        if a < 1.0:
-            real = c > 0
-            take = (real.sum(1, keepdim=True).float() * a).ceil().clamp(min=1)
-            rank = torch.rand(c.shape, device=c.device).masked_fill(~real, 2.0).argsort(1).argsort(1)
-            _, part = agent.chosen_log_prob(state, words, (rank < take) & real)
-            lp = a * lp + (1 - a) * part
+        nxt, nm = ids[:, t + 1], mask[:, t + 1]
+        real = nm & (nxt != 0)
+        hide = (real.sum(1, keepdim=True).float() * a).ceil().clamp(min=1)
+        rank = torch.rand(nxt.shape, device=nxt.device).masked_fill(~real, 2.0).argsort(1).argsort(1)
+        hidden = real & (rank < hide)
+        pool = _counts(nxt, real & ~hidden, len(agent.vocab))                       # verilen kisim
+        words, c = _bag(nxt, hidden, len(agent.vocab))                               # eksik kisim
+        log_pi, lp = agent.bag_log_prob(state, words, c, pool)
         LP.append(lp[valid])
         PI.append(log_pi[valid])
     lp, log_pi = torch.cat(LP), torch.cat(PI)
@@ -205,7 +205,7 @@ def main(argv=None):
     ap.add_argument("--batch", type=int, default=BATCH)
     ap.add_argument("--lr", type=float, default=None, help="baslangic lr'si; verilmezse veriye gore (DATA_LR) ya da LR")
     ap.add_argument("--schedule", default=SCHEDULE, choices=("constant", "cosine"))
-    ap.add_argument("--ramp", type=float, default=RAMP, help="kademeli hedef: egitimin bu payinda 1 kelimeden butun torbaya")
+    ap.add_argument("--ramp", type=float, default=RAMP, help="kademeli tamamlama: egitimin bu payinda eksik 1 kelimeden hepsine")
     ap.add_argument("--device", default="cpu", help="cpu | cuda")
     ap.add_argument("--every", type=int, default=10, help="kac epokta bir olcum")
     ap.add_argument("--out", default=None, help="kosu klasoru: her epok checkpoint.pt, sonda agent.pt ve results.json")
