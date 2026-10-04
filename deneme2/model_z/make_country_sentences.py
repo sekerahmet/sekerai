@@ -13,6 +13,11 @@ Gorev kavrami yok (kullanici, 3 Ekim: "Görevi makine bulmayacak görev diye bir
    olgulari rastgele sirayla, her olgu rastgele bir kalipla; egitime STORIES, sinava EXAM_STORIES hikaye / ulke (ayri
    tohum; 1-2'nin dosyalari degismez).  Sozluk: butun verinin kelimeleri, indeks 0 '<unk>'.
    -> country_stories.jsonl (split train / exam), country_vocab.json
+4. Sabit hikayeler (kullanici, 4 Ekim: "sabit bir hikaye"; "her ülkenin hikayesi sabit ama sırası farklı"): her ulke tek
+   hikaye, kalip 0; countries_fixed: butun ulkelerde ayni olgu sirasi, countries_orders: ulkeye ozel sabit sira (tohum 7);
+   sinav = egitim.  -> data/countries_fixed/, data/countries_orders/
+Her hikayede valid_next (kullanici, 4 Ekim: "modelin ürettiği çıktı olası bir çıktı olabilir yani bizim istediğimiz değil
+ama doğru"): her cumleden sonra gecerli devamlar = o ulkenin henuz soylenmemis olgularinin butun kaliplari (kelime listesi).
 Hazir veri (data/countries/): bir kez uretilir, sonra hep okunur; yeniden calistirmak ayni dosyalari verir.
 
     python make_country_sentences.py
@@ -54,6 +59,15 @@ def build(country, fact, value, k):
     return dict(sentence=" ".join(words) + ".", words=words + ["."], country=country, fact=fact, template=k)
 
 
+def _valid_next(story, everything):
+    """Her cumleden sonra gecerli devamlar: ulkenin henuz soylenmemis olgularinin butun kaliplari."""
+    out = []
+    for t in range(len(story["facts"]) - 1):
+        said = set(story["facts"][:t + 1])
+        out.append([r["words"] for r in everything if r["country"] == story["country"] and r["fact"] not in said])
+    return out
+
+
 def main():
     table = json.load(open(os.path.join(DATA, "country_facts.json"), encoding="utf-8"))
     facts = list(table["fields"])
@@ -93,11 +107,24 @@ def main():
                      for f in order]
             stories.append(dict(country=row["country"], split="train" if i < STORIES else "exam",
                                 facts=order, sentences=[r["words"] for r in sents]))
-    with open(os.path.join(DATA, "country_stories.jsonl"), "w", encoding="utf-8", newline="\n") as f:
-        for r in stories:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
     vocab = ["<unk>"] + sorted({w for r in everything for w in r["words"]})
-    json.dump(vocab, open(os.path.join(DATA, "country_vocab.json"), "w", encoding="utf-8"), ensure_ascii=False)
+    fixed_rng = random.Random(7)
+    fixed, orders = [], []
+    for row in table["countries"]:
+        mine = [f for f in facts if row[f] is not None]
+        own = list(mine)
+        fixed_rng.shuffle(own)
+        for out, order in ((fixed, mine), (orders, own)):
+            out.append(dict(country=row["country"], facts=order,
+                            sentences=[build(row["country"], f, row[f], 0)["words"] for f in order]))
+    sets = ((DATA, stories), (DATA + "_fixed", [dict(s, split=sp) for sp in ("train", "exam") for s in fixed]),
+            (DATA + "_orders", [dict(s, split=sp) for sp in ("train", "exam") for s in orders]))
+    for folder, rows in sets:
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "country_stories.jsonl"), "w", encoding="utf-8", newline="\n") as f:
+            for r in rows:
+                f.write(json.dumps(dict(r, valid_next=_valid_next(r, everything)), ensure_ascii=False) + "\n")
+        json.dump(vocab, open(os.path.join(folder, "country_vocab.json"), "w", encoding="utf-8"), ensure_ascii=False)
     print("hikaye %s, sozluk %d" % (dict(Counter(r["split"] for r in stories)), len(vocab)))
     print("butun veri %d cumle | egitim %d | sinav %s" % (
         len(everything), len(train), dict(Counter(r["split"] for r in exam))))

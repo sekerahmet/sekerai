@@ -119,12 +119,28 @@ def _counts(ids, mask, V):
     return c
 
 
-def evaluate(agent, ids, mask, real_hash, weights, names, show=SHOW):
+def valid_hashes(valid_next, agent, weights, T):
+    """Hikayelerin gecerli devamlari (hikaye -> gecis -> kelime listeleri) -> ozet tensoru (N, T - 1, M), bos -1."""
+    V = len(agent.vocab)
+    rows = [[[_bag_hash(torch.bincount(torch.tensor(agent.ids(b)), minlength=V).float(), weights.cpu()).item()
+              for b in step] for step in story] for story in valid_next]
+    M = max((len(step) for story in rows for step in story), default=1)
+    out = torch.full((len(rows), T - 1, M), -1, dtype=torch.long)
+    for n, story in enumerate(rows):
+        for t, step in enumerate(story):
+            out[n, t, :len(step)] = torch.tensor(step, dtype=torch.long)
+    return out
+
+
+def evaluate(agent, ids, mask, real_hash, weights, names, show=SHOW, valid_next=None):
     """-> bag_in_top_k (ilk 1 / 5 / K, taban: onceki cumle), tutarlilik, calibration, direction_health; goz satirlari.
+    gecerli_devam (valid verilirse; kullanici, 4 Ekim: "modelin ürettiği çıktı olası bir çıktı olabilir yani bizim istediğimiz
+    değil ama doğru"): ilk aday veride tanimli gecerli devamlardan biri mi, ilk 5 adayin kaci gecerli.
     Toplu: ayni torbayi veren yonler ozetle birlesir, olasiliklari toplanir.  Hikayede daha once gecmis torba aday sayilmaz
     (kullanici, 4 Ekim: "birebir aynı torba olmadığı sürece bence sıkıntı yok aynı şeyin farklı ifade edilmesinde")."""
     K, V = agent.directions, len(agent.vocab)
-    acc = torch.zeros(9, device=ids.device)          # n, ilk1, ilk5, ilkK, taban, tutarli ilk, tutarli hepsi, aday, expH
+    acc = torch.zeros(12, device=ids.device)         # n, ilk1, ilk5, ilkK, taban, tutarli ilk, tutarli hepsi, aday, expH,
+    #                                                  gecerli ilk1, gecerli ilk5 sayisi, ilk5 aday sayisi
     bins = torch.zeros(3, 5, device=ids.device)      # olasilik toplami, aday, dogru (5 dilim)
     pi_max = torch.zeros(K, device=ids.device)
     eye = []
@@ -155,14 +171,22 @@ def evaluate(agent, ids, mask, real_hash, weights, names, show=SHOW):
                 hit = (ranked_h == true[:, None]) & ranked_first                     # (B, K) sirali
                 real = torch.isin(hk, real_hash) & first
                 n_first = first.sum(1).float()
+                v = valid.float()
+                if valid_next is not None:
+                    vh = valid_next[b0:b0 + len(bi), t].to(ids.device)
+                    ok = (hk[:, :, None] == vh[:, None, :]).any(-1) & first
+                    ok_ranked = ok.gather(1, order)[:, :5]
+                    in5 = ranked_first[:, :5].sum(1).float()
+                    extra = torch.stack([(ok_ranked[:, 0] * v).sum(), (ok_ranked.sum(1) * v).sum(), (in5 * v).sum()])
+                else:
+                    extra = torch.zeros(3, device=ids.device)
                 q = torch.where(first, merged, torch.zeros_like(merged))
                 q = q / q.sum(1, keepdim=True).clamp_min(1e-30)
                 ent = (-(q * q.clamp_min(1e-30).log()).sum(1)).exp()
-                v = valid.float()
-                acc += torch.stack([v.sum(), (hit[:, :1].any(1) * v).sum(), (hit[:, :5].any(1) * v).sum(),
-                                    (hit.any(1) * v).sum(), ((prev == true) * v).sum(),
-                                    (real.gather(1, order[:, :1]).squeeze(1) * v).sum(), (real.sum(1) * v).sum(),
-                                    (n_first * v).sum(), (ent * v).sum()])
+                acc += torch.cat([torch.stack([v.sum(), (hit[:, :1].any(1) * v).sum(), (hit[:, :5].any(1) * v).sum(),
+                                               (hit.any(1) * v).sum(), ((prev == true) * v).sum(),
+                                               (real.gather(1, order[:, :1]).squeeze(1) * v).sum(),
+                                               (real.sum(1) * v).sum(), (n_first * v).sum(), (ent * v).sum()]), extra])
                 correct = (hk == true[:, None]) & first
                 dil = (merged * 5).long().clamp(0, 4)
                 w = (first & valid[:, None]).float()
@@ -178,6 +202,8 @@ def evaluate(agent, ids, mask, real_hash, weights, names, show=SHOW):
     out = dict(bag_in_top_k=dict(ilk1=round(acc[1] / n, 4), ilk5=round(acc[2] / n, 4), ilkK=round(acc[3] / n, 4),
                                  taban_onceki=round(acc[4] / n, 4)),
                tutarlilik=dict(ilk_aday=round(acc[5] / n, 4), butun_adaylar=round(acc[6] / max(acc[7], 1), 4)),
+               gecerli_devam=dict(ilk_aday=round(acc[9] / n, 4), ilk5_orani=round(acc[10] / max(acc[11], 1), 4))
+               if valid_next is not None else None,
                calibration=round(calib, 4),
                direction_health=dict(farkli_torba_orani=round(acc[7] / n / K, 4), exp_H_pi=round(acc[8] / n, 2),
                                      olu_yon=int((pi_max < 0.01).sum())))
@@ -226,7 +252,8 @@ def main(argv=None):
         stories = [json.loads(line) for line in open(stories_path, encoding="utf-8")]
         train, exam = [s for s in stories if s["split"] == "train"], [s for s in stories if s["split"] == "exam"]
         return dict(train=_encode(agent, train), exam=_encode(agent, exam),
-                    exam_names=[s.get("country", i) for i, s in enumerate(exam)])
+                    exam_names=[s.get("country", i) for i, s in enumerate(exam)],
+                    exam_valid=[s["valid_next"] for s in exam] if all("valid_next" in s for s in exam) else None)
     data = _cached(os.path.join(folder, prefix + "stories.pt"),
                    (vocab_path, stories_path, __file__, os.path.join(HERE, "context.py")), build)
     ids, mask = (t.to(args.device) for t in data["train"])
@@ -235,6 +262,8 @@ def main(argv=None):
     weights = torch.randint(1, 2 ** 62, (len(vocab),), generator=torch.Generator().manual_seed(0)).to(args.device)
     real_hash = torch.cat([_bag_hash(_counts(a[:, t], m[:, t], len(vocab)), weights)[m[:, t].any(1)]
                            for a, m in ((ids, mask), (exam_ids, exam_mask)) for t in range(a.shape[1])]).unique()
+    exam_valid = (valid_hashes(data["exam_valid"], agent, weights, exam_ids.shape[1])
+                  if data.get("exam_valid") else None)
     sent = mask.any(2)
     presence = torch.zeros(len(vocab), device=args.device)
     for t in range(ids.shape[1]):
@@ -283,7 +312,7 @@ def main(argv=None):
         if epoch % args.every == 0 or epoch == args.epochs:
             agent.eval()
             t_train = time.time() - t_epoch
-            res = evaluate(agent, exam_ids, exam_mask, real_hash, weights, data["exam_names"],
+            res = evaluate(agent, exam_ids, exam_mask, real_hash, weights, data["exam_names"], valid_next=exam_valid,
                            show=SHOW if epoch == args.epochs else 0)
             agent.train()
             k = res["bag_in_top_k"]
@@ -294,6 +323,9 @@ def main(argv=None):
                       args.directions, k["ilkK"], k["taban_onceki"], res["tutarlilik"]["ilk_aday"],
                       res["tutarlilik"]["butun_adaylar"], res["calibration"], res["direction_health"]["farkli_torba_orani"],
                       res["direction_health"]["exp_H_pi"], res["direction_health"]["olu_yon"]), flush=True)
+            if res["gecerli_devam"]:
+                print("          gecerli devam: ilk aday %.3f, ilk 5 adayin %.3f'i" % (
+                    res["gecerli_devam"]["ilk_aday"], res["gecerli_devam"]["ilk5_orani"]), flush=True)
             history.append(dict(epoch=epoch, loss=total / n_train, result=res))
         if ckpt:
             torch.save(dict(vocab=vocab, state=agent.state_dict(), opt=opt.state_dict(), gen=gen.get_state(),
