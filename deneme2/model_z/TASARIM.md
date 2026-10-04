@@ -49,6 +49,11 @@ diye birşey yok doğru tasarım ne"*; tasarıma *"Tamam beraber eğitelim o de�
   aday cümle değil: kapısız %3,6, −1,0 %3,0 (yanlış eleme 0), −0,5 %0,8 (yanlış eleme 544 cümle adayı; "X borders Y" −0,55
   aldığı için bu olgu türü kapıdan geçemez). Kapının orta bölgesi zayıf: dizilişi iki yönlü düzgün cümle, eksik torbadan
   düşük puan alıyor.
+  **`missing` düğümü ve `is_complete` (4 Ekim; kullanıcı: "missing ok"):** gramer bozuk torbalarla (drop 0,25, add 0,25)
+  yeniden eğitildi, eşik yok. Dizme görülmemişte 0,995 (eski 0,998). Context agent adaylarında ilk aday cümle değil %3,6
+  → %0,1, ilk 5'te %4,6 → %0,5; farklı torbada cümle olmayanın %95,3'ü elenir, cümlenin %98,9'u geçer. Yanlış elenenler
+  gramerin görmediği olgular (Parthenon, nasi lemak, Himeji Castle; sınavda complete_real unseen 0,919, seen 1,000):
+  kapı tanımadığı kelime bağını "eksik" sayıyor. Geçen eksikler: "The Netherlands .", "The Eiffel is in France .".
 
 - **Gramer kötü torba görmedi.** Kullanıcı, 4 Ekim 2026: *"bunu açık bir nokta olarak kaydet. grammer kötü torba görmedi!
   evet seçilen torbaya puan vermek grammer işi olur katılıyorum."* Gramer, kendisine gelen torbayı dizer ve bir **kalite
