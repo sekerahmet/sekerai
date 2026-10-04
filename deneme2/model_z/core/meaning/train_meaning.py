@@ -56,17 +56,26 @@ def loss_of(agent, ids, present, slot):
 
 
 @torch.no_grad()
-def eye(agent, stories, countries, top=5):
-    """Ulkenin farkli cumlelerinde her kelime sirayla gizli -> ilk top tahmin."""
+def eye(agent, stories, countries, W=1, top=5, windows=8):
+    """Ulkenin pencerelerinde her kelime sirayla gizli -> ilk top tahmin.  W 1: ulkenin butun farkli cumleleri; W > 1:
+    ulkenin ilk sinav hikayesinin ilk `windows` penceresi (W cumlenin kelimeleri ortak torba)."""
     dev = agent.E.weight.device
     for c in countries:
         sents = []
-        for s in stories:
-            if s["country"] == c:
-                for x in s["sentences"]:
-                    if x not in sents:
-                        sents.append(x)
-        print("\n   === %s (%d cumle)" % (c, len(sents)), flush=True)
+        if W == 1:
+            for s in stories:
+                if s["country"] == c:
+                    for x in s["sentences"]:
+                        if x not in sents:
+                            sents.append(x)
+        else:
+            st = next(s["sentences"] for s in stories if s["country"] == c and s["split"] == "exam")
+            for t in range(min(windows, len(st) - W + 1)):
+                bag = []
+                for x in st[t:t + W]:
+                    bag += [w for w in x if w not in bag]
+                sents.append(bag)
+        print("\n   === %s (%d pencere, %d cumle)" % (c, len(sents), W), flush=True)
         for x in sents:
             ids = torch.tensor([agent.ids(x)], device=dev)
             present = torch.ones_like(ids, dtype=torch.bool)
@@ -126,7 +135,7 @@ def main(argv=None):
             total += loss.item() * len(rows)
         print("epok %d  kayip %.4f  (%.0f sn)" % (epoch, total / n, time.time() - t0), flush=True)
     agent.eval()
-    eye(agent, stories, EYE)
+    eye(agent, stories, EYE, args.window)
     if args.out:
         os.makedirs(args.out, exist_ok=True)
         torch.save(dict(vocab=vocab, state=agent.state_dict(), args=vars(args)), os.path.join(args.out, "agent.pt"))
