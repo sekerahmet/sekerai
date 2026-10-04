@@ -91,9 +91,10 @@ def _judge(gate, h, counts):
     found = torch.zeros_like(flat, dtype=torch.bool)
     if len(known):
         found = known[torch.searchsorted(known, flat).clamp(max=len(known) - 1)] == flat
-    new = flat[~found].unique()
+    new, inv = flat[~found].unique(return_inverse=True)
     if len(new):
-        at = (flat[None, :] == new[:, None]).float().argmax(1)          # her yeni torbanin ilk gorulen yeri
+        at = torch.zeros(len(new), dtype=torch.long, device=flat.device).scatter_(
+            0, inv, (~found).nonzero().flatten())                      # her yeni torbanin bir gorulen yeri
         rows = counts.reshape(-1, V)[at].long().cpu()
         g, Gm = gate["grammar"], gate["module"]
         bags = [[gate["vocab"][w] for w in r.nonzero().flatten().tolist() for _ in range(int(r[w]))] for r in rows]
