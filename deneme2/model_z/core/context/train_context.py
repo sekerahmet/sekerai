@@ -80,12 +80,13 @@ def _bag(ids, mask, vocab_size):
     return words, c
 
 
-def loss_of(agent, ids, mask, relax, progress=1.0, ramp=0.0):
+def loss_of(agent, ids, mask, relax, progress=1.0, ramp=0.0, dynamic=False):
     """Hikaye batch'i -> ortalama kayip (gecis basina, nat): (1 - relax) * -log sum_k pi_k P(B | k) + relax * yon ortalamasi.
     Kademeli tamamlama (kullanici, 4 Ekim: "hedef cümle 10 kelime ise 9 nu verelim sadece 1 tanesini tahmin etsin. sonra 8 ni
     verelim 2 sini tahmin etsin"; "aynen bunu istiyorum"): asama a = progress / ramp; sonraki cumlenin kelimelerinden rastgele
     max(1, a * n) tanesi saklanir, gerisi verilir; ajan saklananlari bulur.  a >= 1: hepsi saklanir (uretimdeki gibi)."""
     a = min(progress / ramp, 1.0) if ramp > 0 else 1.0
+    k = max(1, math.ceil(a * agent.directions)) if dynamic else None   # dinamik yon: belirsizlik (saklanan pay) kadar yon
     state = agent.initial_state(len(ids))
     LP, PI = [], []
     for t in range(ids.shape[1] - 1):
@@ -100,7 +101,7 @@ def loss_of(agent, ids, mask, relax, progress=1.0, ramp=0.0):
         hidden = real & (rank < hide)
         pool = _counts(nxt, real & ~hidden, len(agent.vocab))                       # verilen kisim
         words, c = _bag(nxt, hidden, len(agent.vocab))                               # eksik kisim
-        log_pi, lp = agent.bag_log_prob(state, words, c, pool)
+        log_pi, lp = agent.bag_log_prob(state, words, c, pool, k)
         LP.append(lp[valid])
         PI.append(log_pi[valid])
     lp, log_pi = torch.cat(LP), torch.cat(PI)
@@ -231,6 +232,7 @@ def main(argv=None):
     ap.add_argument("--batch", type=int, default=BATCH)
     ap.add_argument("--lr", type=float, default=None, help="baslangic lr'si; verilmezse veriye gore (DATA_LR) ya da LR")
     ap.add_argument("--schedule", default=SCHEDULE, choices=("constant", "cosine"))
+    ap.add_argument("--dynamic", type=int, default=0, help="1: kademede yon sayisi saklanan payla artar (en cok --directions)")
     ap.add_argument("--ramp", type=float, default=RAMP, help="kademeli tamamlama: egitimin bu payinda eksik 1 kelimeden hepsine")
     ap.add_argument("--device", default="cpu", help="cpu | cuda")
     ap.add_argument("--every", type=int, default=10, help="kac epokta bir olcum")
@@ -285,7 +287,7 @@ def main(argv=None):
     if args.resume:
         pack = torch.load(ckpt, map_location=args.device, weights_only=False)
         assert pack["vocab"] == vocab, "sozluk checkpoint'tekinden farkli"
-        keys = ("data", "seed", "d", "slots", "directions", "relax", "batch", "lr", "schedule", "ramp", "epochs")
+        keys = ("data", "seed", "d", "slots", "directions", "relax", "batch", "lr", "schedule", "ramp", "dynamic", "epochs")
         diff = {k: (pack["args"].get(k), vars(args)[k]) for k in keys if pack["args"].get(k) != vars(args)[k]}
         assert not diff, "surdurme ayari checkpoint'ten farkli (checkpoint, simdi): %s" % diff
         agent.load_state_dict(pack["state"])
@@ -303,7 +305,7 @@ def main(argv=None):
                     group["lr"] = args.lr * 0.5 * (1 + math.cos(math.pi * done))
             rows = perm[b:b + args.batch].to(args.device)
             progress = ((epoch - 1) * n_train + b) / (args.epochs * n_train)
-            loss = loss_of(agent, ids[rows], mask[rows], args.relax, progress, args.ramp)
+            loss = loss_of(agent, ids[rows], mask[rows], args.relax, progress, args.ramp, bool(args.dynamic))
             opt.zero_grad()
             loss.backward()
             opt.step()

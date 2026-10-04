@@ -76,13 +76,16 @@ class ContextAgent(torch.nn.Module):
         new_seen = seen.scatter(1, ids, mask.float()).maximum(seen)
         return torch.where(empty[:, None, None], slots, new), torch.where(empty[:, None], seen, new_seen)
 
-    def _heads(self, state, pool=None):
-        """durum, verilen torba (B, V sayilar; yoksa bos) -> log pi (B, K), z (B, K, V): eksik kelimeler icin."""
+    def _heads(self, state, pool=None, k=None):
+        """durum, verilen torba (B, V sayilar; yoksa bos) -> log pi (B, k), z (B, k, V): eksik kelimeler icin.  k: yalniz ilk k
+        yon hesaplanir (dinamik yon; yoksa hepsi)."""
         slots, seen = state
         if pool is None:
             pool = torch.zeros_like(seen)
         h = self.norm_out(slots).mean(1) + self.pool_in(self.norm_pool(pool @ self.E.weight))
-        u = self.W(h).view(len(h), self.directions, -1)
+        k = k or self.directions
+        d = h.shape[-1]
+        u = F.linear(h, self.W.weight[:k * d], self.W.bias[:k * d]).view(len(h), k, d)
         log_pi = self.share(u).squeeze(-1).log_softmax(-1)
         z = u @ self.E.weight.T / u.shape[-1] ** 0.5 + self.beta + (self.seen_bias * seen)[:, None, :]
         z = z.clone()
@@ -96,11 +99,11 @@ class ContextAgent(torch.nn.Module):
             lc = lc[:, None]                                                          # (B, 1, P, 3)
         return torch.cat([F.logsigmoid(-z)[..., None], F.logsigmoid(z)[..., None] + lc], -1)
 
-    def bag_log_prob(self, state, words, counts, pool=None):
+    def bag_log_prob(self, state, words, counts, pool=None, k=None):
         """Eksik kisim -> (log pi (B, K), log P(eksik | k, verilen) (B, K)).  words (B, P) eksik kisimdaki farkli kelimeler
         (dolgu 0), counts (B, P) sayilari (0 = dolgu; 3'ten buyuk 3 sayilir); pool (B, V) verilen kisim (yoksa bos: butun
-        torba eksik)."""
-        log_pi, z = self._heads(state, pool)
+        torba eksik); k: kullanilan yon sayisi (dinamik yon)."""
+        log_pi, z = self._heads(state, pool, k)
         absent = F.logsigmoid(-z).sum(-1)                                             # her kelime 0: (B, K)
         zp = z.gather(2, words[:, None, :].expand(-1, z.shape[1], -1))                # (B, K, P)
         lp = self._level_log_probs(zp, words)                                         # (B, K, P, 4)
