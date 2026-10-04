@@ -2,18 +2,20 @@
 Asia lira gibi kelimeleri yakınlaştıran"; "Cümleler içinde attention ile"; "saatlerdir bu tabloyu öğrenen modelle kurmanı
 istedim"; adlar onayli).  Egitim: train_meaning.py.
 
-Bag tablosu modelin kendi parametresi; gizli kelime yalniz tablo uzerinden tahmin edilir:
+Bag tablosu modelin kendi parametresi; gizli kelime yalniz tablo uzerinden tahmin edilir (kullanici, 4 Ekim: "Tamam sen
+öneri mimari kur"):
     R[i, j] = source_i . target_j / sqrt(d)     bag tablosu (V x V, dusuk boyutlu)
-    puan(j) = bias_j + sum_i alpha_i R[i, j]    torbadaki her kelime i gizli kelimeye bagi kadar oy verir
-    alpha   = softmax_i(mask . key(source_i))   attention: gizli yer hangi kelimenin oyuna ne kadar kulak verir
+    puan(j) = bias_j + sum_i R[i, j]            torbadaki her kelime i gizli kelimeye bagi kadar oy verir (esit, toplamsal)
     bias    kelimenin genel sikligi: "the", "is" tabloyu doldurmasin
+(Attention'li surum denendi: sorgu gizli yeri bilmedigi icin oylari kalip kelimelerine verdi, Turkey'nin satiri
+egitilmedi.)
 Komsu tablosu (build_neighbor_table): R'nin her satirinin en buyuk m degeri.  Kisa liste (shortlist): okunan cumlenin
 kelimeleri icin tablodan NEIGHBORS komsu, DEPTH adim (komsularin komsulari).
 """
 import torch
 
 UNK = "<unk>"
-D = 64                  # kelime vektoru boyu (olculmedi)
+D = 128                 # kelime vektoru boyu: ulkede ~110 ulke kumesi ayrilabilsin (olculmedi)
 NEIGHBORS = 5           # kisa liste: kelime basina komsu (kullanici, 4 Ekim: "Komşu 5 derinlik 5 yap")
 DEPTH = 5               # kisa liste: komsularin komsulari kac adim (kullanici: "benim n dediğim derinlikti")
 
@@ -25,21 +27,19 @@ class MeaningAgent(torch.nn.Module):
         self.index = {w: i for i, w in enumerate(vocab)}
         self.source = torch.nn.Embedding(len(vocab), d)          # oy veren
         self.target = torch.nn.Embedding(len(vocab), d)          # oy alan
-        self.key = torch.nn.Linear(d, d, bias=False)
-        self.mask = torch.nn.Parameter(torch.randn(d) / d ** 0.5)
         self.bias = torch.nn.Parameter(torch.zeros(len(vocab)))
+        for e in (self.source, self.target):                     # kucuk baslangic: 30 oyun toplami da kucuk kalsin
+            torch.nn.init.normal_(e.weight, std=0.1)
 
     def ids(self, words):
         return [self.index.get(w, self.index[UNK]) for w in words]
 
     def forward(self, ids, present):
         """ids (B, L) torbadaki kelimeler (sirasiz), present (B, L) gercek ve gorunen yuva -> gizli kelime icin log
-        olasilik (B, V) ve attention (B, L)."""
-        u = self.source(ids)
-        d = u.shape[-1]
-        alpha = ((self.key(u) @ self.mask) / d ** 0.5).masked_fill(~present, -1e9).softmax(-1)
-        vote = (alpha[..., None] * u).sum(1)                    # sum_i alpha_i source_i
-        return (vote @ self.target.weight.T / d ** 0.5 + self.bias).log_softmax(-1), alpha
+        olasilik (B, V)."""
+        u = self.source(ids) * present[..., None]
+        vote = u.sum(1)                                          # sum_i source_i
+        return (vote @ self.target.weight.T / u.shape[-1] ** 0.5 + self.bias).log_softmax(-1)
 
     @torch.no_grad()
     def relation(self, rows):

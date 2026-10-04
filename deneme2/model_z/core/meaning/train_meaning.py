@@ -53,14 +53,14 @@ def loss_of(agent, ids, present, slot):
     rows = torch.arange(len(ids), device=ids.device)
     seen = present.clone()
     seen[rows, slot] = False
-    logp, _ = agent(ids, seen)
+    logp = agent(ids, seen)
     return -logp[rows, ids[rows, slot]].mean()
 
 
 @torch.no_grad()
 def eye(agent, stories, W, windows=6, top=5):
-    """Tablo satirlari; ulkelerin ilk sinav hikayesinde (ilk `windows` pencere) her kelime gizli -> ilk top tahmin ve en
-    cok oy veren 3 kelime."""
+    """Tablo satirlari; ulkelerin ilk sinav hikayesinde (ilk `windows` pencere) her kelime gizli -> ilk top tahmin ve ilk
+    tahmine en cok oy veren 3 kelime (R[i, tahmin])."""
     vocab = agent.vocab
     table = build_neighbor_table(agent, 15)
     print("\n   BAG TABLOSU (R satiri, ilk 15):", flush=True)
@@ -81,13 +81,14 @@ def eye(agent, stories, W, windows=6, top=5):
             for j, w in enumerate(bag):
                 present = torch.ones_like(ids, dtype=torch.bool)
                 present[0, j] = False
-                logp, alpha = agent(ids, present)
+                logp = agent(ids, present)
                 best = logp[0].exp().topk(top)
-                voters = alpha[0].topk(min(3, len(bag) - 1))
+                vote = agent.relation(ids[0])[:, best.indices[0]].masked_fill(~present[0], -1e9)
+                voters = vote.topk(min(3, len(bag) - 1))
                 print("      %-12s -> %-60s oy: %s" % (
                     w, " ".join("%s %.2f" % (vocab[k], v) for k, v in zip(
                         best.indices.tolist(), best.values.tolist())),
-                    " ".join("%s %.2f" % (bag[k], v) for k, v in zip(voters.indices.tolist(), voters.values.tolist()))),
+                    " ".join("%s %.1f" % (bag[k], v) for k, v in zip(voters.indices.tolist(), voters.values.tolist()))),
                     flush=True)
 
 
