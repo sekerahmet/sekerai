@@ -1,13 +1,12 @@
-"""train_meaning -- meaning agent'in egitimi ve olcumu (ajan: meaning.py).
+"""train_meaning -- meaning agent'in egitimi (ajan: meaning.py).
 
 Veri: hikayelerden ardisik WINDOW cumlelik pencereler; pencerenin butun cumlelerinin farkli kelimeleri tek ortak torba
-(sira ve cumle siniri yok).  Egitim: torbadaki icerik kelimelerinin her biri MASK_RATE olasilikla (en az biri) mask ile
-degistirilir; model gizli kelimeleri kalanlara bakarak tahmin eder; kayip gizli yuvalarda -log P(kelime).  Bicim
-kelimeleri (cumlelerin %2'sinden fazlasinda gecen) gizlenmez, kisa listeye her zaman girer.
-Olcu (sinav hikayeleri, her cumle gecisi): shortlist_recall -- sonraki cumlenin kelimeleri, son WINDOW cumlenin
-kelimelerinin shortlist'i (ilk N) + hikayede gecmis kelimeler + bicim kelimeleri listesinde mi; icerik kelimeleri ayri.
-Taban: baglamsiz en sik 200 icerik kelimesi.  Goz: birkac kelime tek basina verilince ilk 10 tahmin.
-Sonunda agent.pt ve neighbors.pt (her kelimenin ilk 50 tahmini).
+(sira ve cumle siniri yok).  Egitim (kullanici, 4 Ekim: "1 cümlenin tüm kelimeleri sırayla gizlenmezse model nasıl
+öğrenecek ? Ben rastgele demedim hiç"): torbanin her kelimesi sirayla birer kez mask ile gizlenir; model kalanlara bakip
+gizliyi tahmin eder; kayip -log P(gizli kelime).
+Olcu goz ile (kullanici: "Sınav görülmemiş mantıklı liste değil biz gözle bakıp Türkiye için ne yapmış ona bakmak"):
+EYE ulkelerinin cumlelerinde her kelime sirayla gizlenir, ilk 5 tahmin olasiligiyla yazilir.
+Sonunda agent.pt ve neighbors.pt (her kelime tek basina verilince ilk 50 tahmin).
 
     python train_meaning.py [--window 1] [--epochs 4] [--device cpu|cuda] [--out klasor]
 """
@@ -18,10 +17,9 @@ import os
 import sys
 import time
 
-import numpy as np
 import torch
 
-from meaning import D, MeaningAgent, build_neighbor_table, shortlist
+from meaning import D, MeaningAgent, build_neighbor_table
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_Z = os.path.dirname(os.path.dirname(HERE))
@@ -29,11 +27,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "grammar"))
 from train_grammar import _no_power_throttling  # noqa: E402
 
 WINDOW = 1              # pencere: kac cumle (kullanici, 4 Ekim: "önce 1 bakarız ... performansa göre bakarız")
-MASK_RATE = 0.25        # icerik kelimesinin gizlenme olasiligi, torbada en az bir (olculmedi)
-BATCH = 256             # pencere
+BATCH = 256             # ornek (pencere x gizlenen kelime)
 LR = 3e-3
-SHORTLIST_N = (10, 20, 50)
-EYE = ("Turkey", "Ankara", "baklava", "Peru")
+EYE = ("Turkey", "Peru")
 
 
 def windows_of(agent, stories, W):
@@ -51,42 +47,38 @@ def windows_of(agent, stories, W):
     return ids, present
 
 
-def loss_of(agent, ids, present, content, rate, gen):
-    """Icerik kelimelerinin her biri rate olasilikla (torbada en az biri) gizlenir -> gizli yuvalarda ort -log P."""
-    cand = present & content[ids]
-    r = torch.rand(ids.shape, generator=gen).to(ids.device)
-    hidden = cand & (r < rate)
-    first = r.masked_fill(~cand, 2.0).argmin(1)                  # en az bir gizli (icerik kelimesi varsa)
-    hidden[torch.arange(len(ids)), first] |= cand[torch.arange(len(ids)), first]
+def loss_of(agent, ids, present, slot):
+    """Ornek: pencere + gizlenen yuva (slot) -> ort -log P(gizli kelime)."""
+    hidden = torch.zeros_like(present)
+    hidden[torch.arange(len(ids)), slot] = True
     logp = agent(ids, present, hidden)
-    return -(logp.gather(2, ids[..., None])[..., 0] * hidden).sum() / hidden.sum().clamp(min=1)
+    return -logp[torch.arange(len(ids)), slot, ids[torch.arange(len(ids)), slot]].mean()
 
 
-def shortlist_recall(agent, exam, function, W, freq_top):
-    """-> {N: (liste ort, butun kelimeler listede, icerik kelimeleri listede)}; N = 'taban' siklik listesi."""
-    fn = set(np.flatnonzero(function).tolist())
-    out = {}
-    for N in SHORTLIST_N + ("taban",):
-        hit = tot = hit_c = tot_c = size = n = 0
-        for st in exam:
-            seen = set()
-            for t in range(len(st) - 1):
-                seen |= set(st[t]) - {0}
-                cand = seen | fn
-                if N == "taban":
-                    cand |= freq_top
-                else:
-                    cand |= shortlist(agent, sorted({x for s in st[max(0, t - W + 1):t + 1] for x in s} - {0}), N)
-                target = set(st[t + 1]) - {0}
-                content = [x for x in target if not function[x]]
-                hit += sum(x in cand for x in target)
-                tot += len(target)
-                hit_c += sum(x in cand for x in content)
-                tot_c += len(content)
-                size += len(cand)
-                n += 1
-        out[N] = (round(size / n, 1), round(hit / tot, 4), round(hit_c / max(tot_c, 1), 4))
-    return out
+@torch.no_grad()
+def eye(agent, stories, countries, top=5):
+    """Ulkenin farkli cumlelerinde her kelime sirayla gizli -> ilk top tahmin."""
+    dev = agent.E.weight.device
+    for c in countries:
+        sents = []
+        for s in stories:
+            if s["country"] == c:
+                for x in s["sentences"]:
+                    if x not in sents:
+                        sents.append(x)
+        print("\n   === %s (%d cumle)" % (c, len(sents)), flush=True)
+        for x in sents:
+            ids = torch.tensor([agent.ids(x)], device=dev)
+            present = torch.ones_like(ids, dtype=torch.bool)
+            print("   " + " ".join(x), flush=True)
+            for j, w in enumerate(x):
+                hidden = torch.zeros_like(present)
+                hidden[0, j] = True
+                p = agent(ids, present, hidden)[0, j].exp()
+                best = p.topk(top)
+                guess = " ".join("%s %.2f" % (agent.vocab[k], v) for k, v in zip(best.indices.tolist(), best.values.tolist()))
+                mark = "+" if agent.vocab[best.indices[0]] == w else " "
+                print("      %s %-12s -> %s" % (mark, w, guess), flush=True)
 
 
 def main(argv=None):
@@ -95,11 +87,10 @@ def main(argv=None):
     ap.add_argument("--epochs", type=int, default=4)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--d", type=int, default=D)
-    ap.add_argument("--mask_rate", type=float, default=MASK_RATE)
     ap.add_argument("--batch", type=int, default=BATCH)
     ap.add_argument("--lr", type=float, default=LR)
     ap.add_argument("--device", default="cpu", help="cpu | cuda")
-    ap.add_argument("--out", default=None, help="kosu klasoru: agent.pt, neighbors.pt, results.json")
+    ap.add_argument("--out", default=None, help="kosu klasoru: agent.pt, neighbors.pt")
     args = ap.parse_args(argv)
     torch.manual_seed(args.seed)
     if args.device == "cpu":
@@ -110,25 +101,14 @@ def main(argv=None):
     vocab = json.load(open(os.path.join(folder, "country_vocab.json"), encoding="utf-8"))
     stories = [json.loads(line) for line in open(os.path.join(folder, "country_stories.jsonl"), encoding="utf-8")]
     agent = MeaningAgent(vocab, d=args.d).to(args.device)
-    train = [s["sentences"] for s in stories if s["split"] == "train"]
-    exam = [[agent.ids(x) for x in s["sentences"]] for s in stories if s["split"] == "exam"]
-    ids, present = windows_of(agent, train, args.window)
-    df = np.zeros(len(vocab))
-    n_sent = 0
-    for st in train:
-        for s in st:
-            n_sent += 1
-            df[list(set(agent.ids(s)))] += 1
-    function = df / n_sent > 0.02                       # bicim kelimesi: gizlenmez, her listeye girer
-    content = torch.tensor(~function, device=args.device)
-    content[0] = False
-    freq_top = set([i for i in np.argsort(-df) if not function[i] and i != 0][:200])
+    ids, present = windows_of(agent, [s["sentences"] for s in stories if s["split"] == "train"], args.window)
+    win, slot = present.nonzero(as_tuple=True)          # her pencerenin her kelimesi bir ornek
+    n = len(win)
     opt = torch.optim.Adam(agent.parameters(), lr=args.lr)
     gen = torch.Generator().manual_seed(args.seed)
-    n = len(ids)
-    print("veri: %d pencere (%d cumle, ortak torba), sozluk %d, bicim kelimesi %d | d %d, mask_rate %g, lr %g cosine, "
-          "batch %d, %d parametre" % (n, args.window, len(vocab), function.sum(), args.d, args.mask_rate, args.lr,
-                                      args.batch, sum(p.numel() for p in agent.parameters())), flush=True)
+    print("veri: %d pencere (%d cumle, ortak torba), %d ornek (her kelime sirayla gizli), sozluk %d | d %d, lr %g cosine, "
+          "batch %d, %d parametre" % (len(ids), args.window, n, len(vocab), args.d, args.lr, args.batch,
+                                      sum(p.numel() for p in agent.parameters())), flush=True)
     t0 = time.time()
     for epoch in range(1, args.epochs + 1):
         perm = torch.randperm(n, generator=gen)
@@ -138,29 +118,19 @@ def main(argv=None):
             for group in opt.param_groups:
                 group["lr"] = args.lr * 0.5 * (1 + math.cos(math.pi * done))
             rows = perm[b:b + args.batch]
-            loss = loss_of(agent, ids[rows].to(args.device), present[rows].to(args.device), content, args.mask_rate, gen)
+            w = win[rows]
+            loss = loss_of(agent, ids[w].to(args.device), present[w].to(args.device), slot[rows].to(args.device))
             opt.zero_grad()
             loss.backward()
             opt.step()
             total += loss.item() * len(rows)
         print("epok %d  kayip %.4f  (%.0f sn)" % (epoch, total / n, time.time() - t0), flush=True)
     agent.eval()
-    res = shortlist_recall(agent, exam, function, args.window, freq_top)
-    for N, (size, all_, cont) in res.items():
-        print("   shortlist_recall %-5s liste ort %5.1f kelime | sonraki cumlenin kelimeleri listede %.3f (icerik %.3f)" % (
-            N, size, all_, cont), flush=True)
-    table = build_neighbor_table(agent, 50)
-    for w in EYE:
-        if w in agent.index:
-            i = agent.index[w]
-            print("   %-8s %s" % (w, " ".join("%s %.2f" % (vocab[j], p) for j, p in zip(
-                table["ids"][i, :10].tolist(), table["scores"][i, :10].tolist()))), flush=True)
+    eye(agent, stories, EYE)
     if args.out:
         os.makedirs(args.out, exist_ok=True)
         torch.save(dict(vocab=vocab, state=agent.state_dict(), args=vars(args)), os.path.join(args.out, "agent.pt"))
-        torch.save(table, os.path.join(args.out, "neighbors.pt"))
-        json.dump(dict(shortlist_recall={str(k): v for k, v in res.items()}), open(os.path.join(args.out, "results.json"), "w"),
-                  indent=1)
+        torch.save(build_neighbor_table(agent, 50), os.path.join(args.out, "neighbors.pt"))
         print("kaydedildi:", args.out, flush=True)
     return agent
 
