@@ -44,7 +44,10 @@ diye birşey yok doğru tasarım ne"*; tasarıma *"Tamam beraber eğitelim o de�
 
 ## Açık noktalar
 
-- **Kapı eşiği** (önceki λ'nın yerine). Kullanıcı, 4 Ekim 2026: *"o değer de not al sonra bir ölçüye bağlarız"*. Ön
+- **Kapı SS'te: görülmemiş bağ.** Kullanıcı, 4 Ekim 2026: *"şu an indeks hazır değil mi? notunu al ona bakarız"*. Kısmi
+  eğitimli ülke grameri görülmemiş gerçek cümlelerin %8'ini eledi (complete_real unseen 0,919): tanımadığı bağı "eksik"
+  sayıyor. Ülkede tam eğitimle kalktı; SS'te görülmemiş bağ hep olacak, orada yeniden bakılacak.
+- **Kapı eşiği** (önceki λ'nın yerine; `is_complete` ile eşik kalmadı). Kullanıcı, 4 Ekim 2026: *"o değer de not al sonra bir ölçüye bağlarız"*. Ön
   koşul sınamasında −1,0 altında gerçek cümle yoktu; ölçüye bağlanmadı. **Kapı sınaması (4 Ekim, 2.607 bağlam):** ilk
   aday cümle değil: kapısız %3,6, −1,0 %3,0 (yanlış eleme 0), −0,5 %0,8 (yanlış eleme 544 cümle adayı; "X borders Y" −0,55
   aldığı için bu olgu türü kapıdan geçemez). Kapının orta bölgesi zayıf: dizilişi iki yönlü düzgün cümle, eksik torbadan
