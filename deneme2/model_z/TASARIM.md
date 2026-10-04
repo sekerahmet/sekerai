@@ -57,7 +57,12 @@ tahmini değil"*; *"1 cümlenin tüm kelimeleri sırayla gizlenmezse model nası
 - Çıktı: `neighbors.pt` (`build_neighbor_table`): her kelime için kos(source_i, target_j) en büyük 50 kelime. IN-OUT
   kosinüsü birlikte gelen kelimeleri verir (Mitra ve ark. 2016, `belge/makaleler/2016/mitra2016_desm.txt`).
 - Kullanım `shortlist`: okunan cümlenin her kelimesi için tablodan NEIGHBORS komşu, DEPTH adım; komşu × derinlik eğitimde
-  maliyet kararı, üretimde sıcaklık gibi ayar. Context agent `shortlist` ile çalışabiliyor (`context.py`); bağlanmadı.
+  maliyet kararı, üretimde sıcaklık gibi ayar (`train_context --meaning neighbors.pt --shortlist N --depth D`). Liste =
+  okunan cümlenin kelimelerinin komşuları + hikâyede geçenler; biçim kelimeleri cümlenin kendi biçim kelimeleri ve
+  onların komşuları üzerinden girer. Ülke sınavı kapsam (sonraki cümlenin tamamı listede): 10 × 1 0,301, 10 × 5 0,958,
+  30 × 2 0,995 (138 kelime / 897); derinlik bu tabloda belirleyici.
+- Context agent + meaning 30 × 2 (CPU, epok ~7 sn), seçimde kapı yok: doğru torba ilk 1 / 5 / 30 0,133 / 0,490 / 0,826,
+  ilk aday geçerli 0,942 (kısıtsız B: 0,139 / 0,509 / 0,881, 0,964).
 - Ölçü gözle (kullanıcı: *"Sınav yok bunda göz ile kontrol var"*; *"Eğer doğru değilse biz yanlış birşey
   tasarlamışızdır"*). Ülke, son sürüm (`meaning_table_countries_w5_d128_mix_sub_e4`, CPU 39 sn): Japan → Tokyo, Shinano,
   Japanese, Osaka, sushi, yen, Himeji; Peru → Chile, sol, ceviche, Cusco, Lima, Spanish, America, Amazon, Pacific;
