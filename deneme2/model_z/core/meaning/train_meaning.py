@@ -89,7 +89,6 @@ def eye(agent, stories, W, windows=6, top=5):
                         best.indices.tolist(), best.values.tolist())),
                     " ".join("%s %.2f" % (bag[k], v) for k, v in zip(voters.indices.tolist(), voters.values.tolist()))),
                     flush=True)
-    print("\n   gizli kelime ilk tahminde dogru: %d / %d" % (hit, total), flush=True)
 
 
 def main(argv=None):
