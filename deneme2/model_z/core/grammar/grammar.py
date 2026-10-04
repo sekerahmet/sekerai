@@ -66,7 +66,7 @@ class GrammarAgent(torch.nn.Module):
 
 def relation_matrix(agent, words):
     """Tek torba -> G (torch, (n+1) x (n+1), satir / sutun n boundary; missing'li ajanda (n+2) x (n+2), n+1 missing).
-    Dizme fonksiyonlari G[:n+1, :n+1] alir; quality_index ve is_complete butun G'yi."""
+    Dizme fonksiyonlari G[:n+1, :n+1] alir; is_complete butun G'yi."""
     dev = next(agent.parameters()).device
     with torch.no_grad():
         return agent(torch.tensor([agent.ids(words)], device=dev), torch.ones(1, len(words), dtype=torch.bool,
@@ -85,18 +85,6 @@ def order_by_relation(G):
         seq.append(x)
         x = succ[x]
     return seq
-
-
-def quality_index(G, order):
-    """Kalite endeksi (kullanici, 4 Ekim: "judge değil quality index"; "Olur uygun"): dizilisteki her bagin ardil (satir) ve
-    oncel (sutun) log-olasiliklarinin ortalamasi, bag basina.  Egitimin olctugu olasiliklar; her torbada normalize, torbalar
-    arasi kiyaslanabilir.  G numpy (n+1) x (n+1), dugum n boundary; missing'li ajanda (n+2) x (n+2) ve missing de
-    normalizasyona girer.  order: torba indeksleri (order_by_relation)."""
-    n = len(order)
-    path = [n] + list(order) + [n]
-    row = G - np.logaddexp.reduce(G, axis=1, keepdims=True)        # ardil: satir log-softmax
-    col = G - np.logaddexp.reduce(G, axis=0, keepdims=True)        # oncel: sutun log-softmax
-    return float(np.mean([(row[a, b] + col[a, b]) / 2 for a, b in zip(path, path[1:])]))
 
 
 def is_complete(G, order):

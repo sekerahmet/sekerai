@@ -15,10 +15,10 @@ Hikaye cumle cumle okunur; durumdan sonraki cumle icin K aday kelime torbasi ve 
 import torch
 import torch.nn.functional as F
 
-D = 32                  # kelime temsili ve yuva boyu; 09 kosulari d 32 (ulke verisi)
+D = 64                  # kelime temsili ve yuva boyu; son surum B (kullanici, 4 Ekim: "Son sürüm b"): d 64, K 30
 SLOTS = 10              # durumun yuva sayisi (olculmedi)
-DIRECTIONS = 20         # aday torba (yon) sayisi; ulke verisinde dogru torbanin K adayda olma tavani K10 0,849, K20 0,998
-                        # (07 §2, sayim); SS'de gramer butcesi belirler
+DIRECTIONS = 30         # aday torba (yon) sayisi; ulke verisinde dogru torbanin K adayda olma tavani K10 0,849, K20 0,998
+                        # (07 §2, sayim)
 LEVELS = 4              # sayi: 0, 1, 2, 3+
 HEADS = 4
 
@@ -42,8 +42,6 @@ class ContextAgent(torch.nn.Module):
         self.share = torch.nn.Linear(d, 1)                                            # pi = softmax(a . u_k + b)
         self.beta = torch.nn.Parameter(torch.full((len(vocab),), -5.0))              # kelimenin genel varlik egilimi
         self.seen_bias = torch.nn.Parameter(torch.zeros(len(vocab)))                 # hikayede gecmis kelimeye etki
-        self.norm_pool = torch.nn.LayerNorm(d)
-        self.pool_in = torch.nn.Linear(d, d)                                          # verilen torba -> h'ye katki
         g = torch.zeros(len(vocab), 3); g[:, 0] = 4.0                                  # hurdle: P(c=1|c>=1) ~0,96 baslangic
         self.gamma = torch.nn.Parameter(g)                                            # kelime basina sayi dagilimi (baglamsiz)
 
@@ -76,16 +74,11 @@ class ContextAgent(torch.nn.Module):
         new_seen = seen.scatter(1, ids, mask.float()).maximum(seen)
         return torch.where(empty[:, None, None], slots, new), torch.where(empty[:, None], seen, new_seen)
 
-    def _heads(self, state, pool=None, k=None):
-        """durum, verilen torba (B, V sayilar; yoksa bos) -> log pi (B, k), z (B, k, V): eksik kelimeler icin.  k: yalniz ilk k
-        yon hesaplanir (dinamik yon; yoksa hepsi)."""
+    def _heads(self, state):
+        """durum -> log pi (B, K), z (B, K, V)."""
         slots, seen = state
-        if pool is None:
-            pool = torch.zeros_like(seen)
-        h = self.norm_out(slots).mean(1) + self.pool_in(self.norm_pool(pool @ self.E.weight))
-        k = k or self.directions
-        d = h.shape[-1]
-        u = F.linear(h, self.W.weight[:k * d], self.W.bias[:k * d]).view(len(h), k, d)
+        h = self.norm_out(slots).mean(1)
+        u = self.W(h).view(len(h), self.directions, -1)
         log_pi = self.share(u).squeeze(-1).log_softmax(-1)
         z = u @ self.E.weight.T / u.shape[-1] ** 0.5 + self.beta + (self.seen_bias * seen)[:, None, :]
         z = z.clone()
@@ -99,11 +92,10 @@ class ContextAgent(torch.nn.Module):
             lc = lc[:, None]                                                          # (B, 1, P, 3)
         return torch.cat([F.logsigmoid(-z)[..., None], F.logsigmoid(z)[..., None] + lc], -1)
 
-    def bag_log_prob(self, state, words, counts, pool=None, k=None):
-        """Eksik kisim -> (log pi (B, K), log P(eksik | k, verilen) (B, K)).  words (B, P) eksik kisimdaki farkli kelimeler
-        (dolgu 0), counts (B, P) sayilari (0 = dolgu; 3'ten buyuk 3 sayilir); pool (B, V) verilen kisim (yoksa bos: butun
-        torba eksik); k: kullanilan yon sayisi (dinamik yon)."""
-        log_pi, z = self._heads(state, pool, k)
+    def bag_log_prob(self, state, words, counts):
+        """Torba -> (log pi (B, K), log P(torba | k) (B, K)).  words (B, P) torbadaki farkli kelimeler (dolgu 0), counts
+        (B, P) sayilari (0 = dolgu; 3'ten buyuk 3 sayilir)."""
+        log_pi, z = self._heads(state)
         absent = F.logsigmoid(-z).sum(-1)                                             # her kelime 0: (B, K)
         zp = z.gather(2, words[:, None, :].expand(-1, z.shape[1], -1))                # (B, K, P)
         lp = self._level_log_probs(zp, words)                                         # (B, K, P, 4)
