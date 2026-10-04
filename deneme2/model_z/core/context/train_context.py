@@ -133,8 +133,11 @@ def _judge(gate, h, counts):
 
 def loss_of(agent, ids, mask, relax, lists=None):
     """Hikaye batch'i -> ortalama kayip (gecis basina, nat): (1 - relax) * -log sum_k pi_k P(B | k) + relax * yon ortalamasi;
-    B sonraki cumlenin butun torbasi.  lists (B, T - 1, L): gecis basina kisa liste (verilirse torba yalniz listeden)."""
+    B sonraki cumlenin butun torbasi.  lists (B, T - 1, L): gecis basina kisa liste (verilirse torba yalniz listeden); ya da
+    (hikayenin birlesik listesi (B, L), gecis basina listede mi (B, T - 1, L)): temsiller bir kez cekilir."""
     state = agent.initial_state(len(ids))
+    union = isinstance(lists, tuple)
+    cand = agent.prepare(lists[0]) if union else None
     LP, PI = [], []
     for t in range(ids.shape[1] - 1):
         state = agent.read(state, ids[:, t], mask[:, t])
@@ -142,7 +145,10 @@ def loss_of(agent, ids, mask, relax, lists=None):
         if not valid.any():
             break
         words, c = _bag(ids[:, t + 1], mask[:, t + 1], len(agent.vocab))
-        log_pi, lp = agent.bag_log_prob(state, words, c, None if lists is None else lists[:, t])
+        if union:
+            log_pi, lp = agent.bag_log_prob(state, words, c, cand, lists[1][:, t])
+        else:
+            log_pi, lp = agent.bag_log_prob(state, words, c, None if lists is None else lists[:, t])
         LP.append(lp[valid])
         PI.append(log_pi[valid])
     lp, log_pi = torch.cat(LP), torch.cat(PI)
@@ -207,10 +213,11 @@ class Stories:
         return ids, mask & (ids != 0)
 
 
-def _lists_gpu(nbr, ids, mask, n, depth, gold):
+def _lists_gpu(nbr, ids, mask, n, depth, gold, union=False):
     """Batch (ids (B, T, W), mask) -> gecis basina kisa liste (B, T - 1, L) cihazda, dolgu 0: okunan cumlenin
     kelimelerinin meaning komsulari (nbr (V, m) tablosu, n komsu, depth adim) + hikayede o ana kadar gecenler; gold:
-    egitimde gercek sonraki cumlenin kelimeleri de."""
+    egitimde gercek sonraki cumlenin kelimeleri de.  union: (hikayenin birlesik listesi (B, L), gecis basina listede mi
+    (B, T - 1, L)) -- gecis basina liste ort ~520 iken dolgulu L ~1.600, birlesik ~2.500 (SS, G4 profili)."""
     B, T, W = ids.shape
     V = nbr.shape[0]
     rows = torch.arange(B, device=ids.device)[:, None].expand(-1, W)
@@ -235,6 +242,11 @@ def _lists_gpu(nbr, ids, mask, n, depth, gold):
         lst[:, 0] = False
         out.append(lst)
     lst = torch.stack(out, 1)                                                   # (B, T - 1, V)
+    if union:
+        anyt = lst.any(1)
+        val, idx = anyt.float().topk(int(anyt.sum(-1).max().clamp(min=1)), dim=-1)
+        allowed = lst.gather(2, idx[:, None, :].expand(-1, T - 1, -1)) & (val > 0)[:, None, :]
+        return torch.where(val > 0, idx, torch.zeros_like(idx)), allowed
     L = int(lst.sum(-1).max().clamp(min=1))
     val, idx = lst.float().topk(L, dim=-1)
     return torch.where(val > 0, idx, torch.zeros_like(idx))
@@ -261,7 +273,7 @@ def main_stories(args, vocab):
         tot = cover = size = k = 0.0
         for c in range(0, len(exam_rows), 64):
             ids, mask = exam.batch(exam_rows[c:c + 64])
-            lists = _lists_gpu(nbr, ids, mask, args.shortlist, args.depth, gold=False) if nbr is not None else None
+            lists = _lists_gpu(nbr, ids, mask, args.shortlist, args.depth, gold=False, union=True) if nbr is not None else None
             tot += loss_of(agent, ids, mask, args.relax, lists).item()
             k += 1
             if lists is not None:
@@ -269,9 +281,9 @@ def main_stories(args, vocab):
                     nxt = mask[:, t + 1].any(1)
                     if not nxt.any():
                         continue
-                    inl = (ids[:, t + 1, :, None] == lists[:, t, None, :]).any(-1) & mask[:, t + 1]
+                    inl = ((ids[:, t + 1, :, None] == lists[0][:, None, :]) & lists[1][:, t, None, :]).any(-1) & mask[:, t + 1]
                     cover += (inl.sum(1).float() / mask[:, t + 1].sum(1).clamp(min=1))[nxt].sum().item()
-                    size += (lists[:, t] > 0).sum(1)[nxt].float().sum().item()
+                    size += lists[1][:, t].sum(1)[nxt].float().sum().item()
                     tot_n = nxt.sum().item()
                     exam_check.n += tot_n
         n = max(exam_check.n, 1)
@@ -280,6 +292,8 @@ def main_stories(args, vocab):
     opt = torch.optim.Adam(agent.parameters(), lr=args.lr)
     n = train.n
     cuda = args.device.startswith("cuda")
+    if cuda:
+        torch.set_float32_matmul_precision("high")         # TF32: einsum fp32 SIMT'te kaliyordu (G4 profili)
     first, start, ckpt = 1, 0, os.path.join(args.out, "checkpoint.pt") if args.out else None
     if args.out:
         os.makedirs(args.out, exist_ok=True)
@@ -330,8 +344,8 @@ def main_stories(args, vocab):
                 for group in opt.param_groups:
                     group["lr"] = args.lr * 0.5 * (1 + math.cos(math.pi * done))
             ids, mask = train.batch(perm[b:b + args.batch])
-            lists = _lists_gpu(nbr, ids, mask, args.shortlist, args.depth, gold=True) if nbr is not None else None
-            L_last = lists.shape[-1] if lists is not None else len(vocab)
+            lists = _lists_gpu(nbr, ids, mask, args.shortlist, args.depth, gold=True, union=True) if nbr is not None else None
+            L_last = lists[0].shape[-1] if lists is not None else len(vocab)
             loss = loss_of(agent, ids, mask, args.relax, lists)
             opt.zero_grad()
             loss.backward()

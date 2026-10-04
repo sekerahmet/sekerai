@@ -74,9 +74,16 @@ class ContextAgent(torch.nn.Module):
         new_seen = seen.scatter(1, ids, mask.float()).maximum(seen)
         return torch.where(empty[:, None, None], slots, new), torch.where(empty[:, None], seen, new_seen)
 
-    def _heads(self, state, shortlist=None):
-        """durum -> log pi (B, K), z (B, K, V).  shortlist (B, L) kelime kimlikleri (dolgu 0): z yalniz bu kelimeler icin
-        (B, K, L) (meaning: kisa liste; listede olmayan kelime torbaya giremez)."""
+    def prepare(self, shortlist):
+        """Kisa liste (B, L) -> (kimlikler, temsiller (B, L, d), [beta, seen_bias] (B, L, 2)): ayni liste birden cok cumle
+        gecisinde kullanilinca temsiller bir kez cekilir (geri yayilim da bir kez).  beta[shortlist] yerine embedding:
+        dizin geri yayilimi dolgu 0'larini sirayla topluyordu (G4'te adimin %77'si)."""
+        return shortlist, self.E(shortlist), F.embedding(shortlist, torch.stack([self.beta, self.seen_bias], 1))
+
+    def _heads(self, state, shortlist=None, allowed=None):
+        """durum -> log pi (B, K), z (B, K, V).  shortlist (B, L) kelime kimlikleri (dolgu 0) ya da prepare() ciktisi: z
+        yalniz bu kelimeler icin (B, K, L) (meaning: kisa liste; listede olmayan kelime torbaya giremez).  allowed (B, L):
+        bu geciste listede olanlar (hikayenin birlesik listesi verildiginde)."""
         slots, seen = state
         h = self.norm_out(slots).mean(1)
         u = self.W(h).view(len(h), self.directions, -1)
@@ -86,11 +93,11 @@ class ContextAgent(torch.nn.Module):
             z = z.clone()
             z[..., 0] = -1e4                                                          # <unk> uretilmez
             return log_pi, z
-        # beta[shortlist] yerine embedding: dizin geri yayilimi dolgu 0'larini sirayla toplar (G4'te adimin %77'si)
-        beta, seen_bias = F.embedding(shortlist, torch.stack([self.beta, self.seen_bias], 1)).unbind(-1)
-        z = (torch.einsum("bkd,bld->bkl", u, self.E(shortlist)) / u.shape[-1] ** 0.5
-             + (beta + seen_bias * seen.gather(1, shortlist))[:, None, :])
-        return log_pi, z.masked_fill((shortlist == 0)[:, None, :], -1e4)            # dolgu ve <unk>
+        ids, e, bias = shortlist if isinstance(shortlist, tuple) else self.prepare(shortlist)
+        z = (torch.einsum("bkd,bld->bkl", u, e) / u.shape[-1] ** 0.5
+             + (bias[..., 0] + bias[..., 1] * seen.gather(1, ids))[:, None, :])
+        off = ids == 0 if allowed is None else (ids == 0) | ~allowed
+        return log_pi, z.masked_fill(off[:, None, :], -1e4)                          # dolgu, <unk>, bu geciste listede yok
 
     def _level_log_probs(self, z, words=None):
         """z (..., n) -> log P(c = 0, 1, 2, 3+) (..., n, 4): var mi sigmoid(z), varsa kac kez softmax(gamma_w)."""
@@ -99,15 +106,18 @@ class ContextAgent(torch.nn.Module):
             lc = lc[:, None]                                                          # (B, 1, P, 3)
         return torch.cat([F.logsigmoid(-z)[..., None], F.logsigmoid(z)[..., None] + lc], -1)
 
-    def bag_log_prob(self, state, words, counts, shortlist=None):
+    def bag_log_prob(self, state, words, counts, shortlist=None, allowed=None):
         """Torba -> (log pi (B, K), log P(torba | k) (B, K)).  words (B, P) torbadaki farkli kelimeler (dolgu 0), counts
         (B, P) sayilari (0 = dolgu; 3'ten buyuk 3 sayilir).  shortlist verilirse hedef torba listeyle sinirlanir: listede
-        olmayan kelime sayilmaz (kapsam ayri olculur)."""
-        log_pi, z = self._heads(state, shortlist)
+        olmayan kelime sayilmaz (kapsam ayri olculur); shortlist / allowed: _heads."""
+        log_pi, z = self._heads(state, shortlist, allowed)
         absent = F.logsigmoid(-z).sum(-1)                                             # her kelime 0: (B, K)
         at = words
         if shortlist is not None:
-            hit = shortlist[:, None, :] == words[:, :, None]                          # (B, P, L)
+            ids = shortlist[0] if isinstance(shortlist, tuple) else shortlist
+            hit = ids[:, None, :] == words[:, :, None]                                # (B, P, L)
+            if allowed is not None:
+                hit = hit & allowed[:, None, :]
             at, counts = hit.float().argmax(-1), counts * hit.any(-1)                 # argmax tek basina 0. yuvayi verirdi
         zp = z.gather(2, at[:, None, :].expand(-1, z.shape[1], -1))                   # (B, K, P)
         lp = self._level_log_probs(zp, words)                                         # (B, K, P, 4)
