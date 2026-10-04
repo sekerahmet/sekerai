@@ -28,6 +28,7 @@ SCHEDULE = "constant"   # constant | cosine (adim adim --epochs sonunda 0)
 UNK_RATE = 0.1          # egitimde kelimenin <unk> yapilma olasiligi: bilinmeyen kelimeye yer bulmayi da ogrensin
 ALTERNATIVES = 5        # top_k: dogru cumle ilk bu kadar aday icinde mi (order_alternatives)
 TRIES = 100             # deneme sayisi olcusunun ust siniri
+PROGRESS_SECS = 60      # epok icinde ara satir araligi (kullanici, 4 Ekim: "ekle bunları")
 DROP_RATE = 0.25        # --missing 1: torbadan kelime cikarma olasiligi (olculmedi)
 ADD_RATE = 0.25         # --missing 1: torbaya baska cumleden kelime ekleme olasiligi (olculmedi)
 LENGTH_BANDS = ((1, 10), (11, 20), (21, 1000))   # olculer cumle boyuna gore de
@@ -308,7 +309,13 @@ def main(argv=None):
         total, t_epoch = torch.zeros((), device=args.device), time.time()
         if cuda:
             torch.cuda.reset_peak_memory_stats()
-        for b in range(0, n_train, args.batch):
+        t_shown, steps = time.time(), -(-n_train // args.batch)
+        for step, b in enumerate(range(0, n_train, args.batch), 1):
+            if time.time() - t_shown > PROGRESS_SECS:          # ara satir: kayip yalniz burada okunur
+                t_shown, el = time.time(), time.time() - t_epoch
+                print("  epok %d adim %d / %d (%%%.0f)  kayip %.3f  %.0f cumle/sn  kalan ~%.0f dk" % (
+                    epoch, step, steps, 100 * step / steps, total.item() / b, b / el, (steps - step) * el / step / 60),
+                    flush=True)
             if args.schedule == "cosine":                     # adim epok ve batch'ten: surdurmede ayni lr
                 done = ((epoch - 1) * n_train + b) / (args.epochs * n_train)
                 for group in opt.param_groups:

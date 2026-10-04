@@ -38,6 +38,7 @@ LR = 1e-3              # genel baslangic lr'si (gramer d 256 ile ayni); veriye o
 SCHEDULE = "cosine"     # her veride cosine (kullanici, 4 Ekim: "hepsi cosine"); constant yalniz denemek icin
 RELAX = 0.05            # olu yon gevsetmesi; Rupprecht ve ark. (MHP) degeri, bu modelde olculmedi
 SHOW = 2                # goz: kac sinav hikayesi yazilir
+PROGRESS_SECS = 60      # epok icinde ara satir araligi (kullanici, 4 Ekim: "ekle bunları")
 
 
 def _no_power_throttling():
@@ -388,7 +389,13 @@ def main(argv=None):
     for epoch in range(first, args.epochs + 1):
         perm = torch.randperm(n_train, generator=gen)
         total, t_epoch = torch.zeros((), device=args.device), time.time()
-        for b in range(0, n_train, args.batch):
+        t_shown, steps = time.time(), -(-n_train // args.batch)
+        for step, b in enumerate(range(0, n_train, args.batch), 1):
+            if time.time() - t_shown > PROGRESS_SECS:          # ara satir: kayip yalniz burada okunur
+                t_shown, el = time.time(), time.time() - t_epoch
+                print("  epok %d adim %d / %d (%%%.0f)  kayip %.3f  %.0f hikaye/sn  kalan ~%.0f dk" % (
+                    epoch, step, steps, 100 * step / steps, total.item() / b, b / el, (steps - step) * el / step / 60),
+                    flush=True)
             if args.schedule == "cosine":
                 done = ((epoch - 1) * n_train + b) / (args.epochs * n_train)
                 for group in opt.param_groups:

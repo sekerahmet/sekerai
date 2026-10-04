@@ -29,6 +29,7 @@ from train_grammar import _no_power_throttling  # noqa: E402
 WINDOW = 5              # pencere: en cok kac cumle (kullanici, 4 Ekim: "Meaning agent window 5")
 BATCH = 256             # ornek (pencere x gizlenen kelime)
 LR = 3e-3
+PROGRESS_SECS = 60      # epok icinde ara satir araligi (kullanici, 4 Ekim: "ekle bunları")
 SUBSAMPLE = 1e-3        # sik kelime seyreltmesi (word2vec): kelime p = min(1, sqrt(t / f) + t / f) olasilikla kalir,
                         # f kelimenin sikligi; hem gizlenen hem oy veren (kullanici, 4 Ekim: "Evet")
 EYE_WORDS = ("Turkey", "Ankara", "baklava", "Peru", "Lima", "Japan", "Spanish", "South", "the", "is", ".")
@@ -123,8 +124,14 @@ def main(argv=None):
     t0 = time.time()
     for epoch in range(1, args.epochs + 1):
         perm = torch.randperm(n, generator=gen)
-        total = 0.0
-        for b in range(0, n, args.batch):
+        total, t_epoch = torch.zeros((), device=args.device), time.time()
+        t_shown, steps = time.time(), -(-n // args.batch)
+        for step, b in enumerate(range(0, n, args.batch), 1):
+            if time.time() - t_shown > PROGRESS_SECS:          # ara satir: kayip yalniz burada okunur
+                t_shown, el = time.time(), time.time() - t_epoch
+                print("  epok %d adim %d / %d (%%%.0f)  kayip %.3f  %.0f ornek/sn  kalan ~%.0f dk" % (
+                    epoch, step, steps, 100 * step / steps, total.item() / b, b / el, (steps - step) * el / step / 60),
+                    flush=True)
             done = ((epoch - 1) * n + b) / (args.epochs * n)
             for group in opt.param_groups:
                 group["lr"] = args.lr * 0.5 * (1 + math.cos(math.pi * done))
@@ -136,8 +143,8 @@ def main(argv=None):
             opt.zero_grad()
             loss.backward()
             opt.step()
-            total += loss.item() * len(rows)
-        print("epok %d  kayip %.4f  (%.0f sn)" % (epoch, total / n, time.time() - t0), flush=True)
+            total += loss.detach() * len(rows)                # .item() yok: her adimda GPU beklenmez
+        print("epok %d  kayip %.4f  (%.0f sn)" % (epoch, total.item() / n, time.time() - t0), flush=True)
     agent.eval()
     eye(agent)
     if args.out:
