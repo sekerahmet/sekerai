@@ -26,6 +26,11 @@ bir kapı yani sıralama değil geçersiz olmaz demek sadece"*; *"Tamam son kara
 - Döngü: context agent cümleyi okur → K aday torba (olasılığıyla) → grammar agent her adayı dizer ve kapıdan geçirir
   (`is_complete`) → geçemeyen ve hikâyede birebir geçmiş torba elenir → kalanların en olasısı seçilir → dizilmiş cümle
   context agent'a döner.
+- Üretim döngüsü `core/generate.py` (kullanıcı, 4 Ekim: *"ilk hedef döngülü olarak ülke hikayesi yazdırmak olsun"*;
+  *"generate çok mantıklı. yani istediğimiz çıktı aslında generate olacak"*). Ülke, 3 ülke × 2 sürüm (kısıtsız B, meaning
+  30 × 2), 15 adım: ülke kayması yok; ilk 8–10 cümle hep yeni olgu (ülkenin bütün olguları); sonra aynı olgu başka
+  kalıpla tekrar; hikâye başına bir hatalı cümle ("People in Turkey eat Turkish .", "Peru is home to Machu ."). Eksik:
+  hikâye sonu (model "yeni bir şey kalmadı" diyemiyor), aynı olgunun başka söylenişi.
 - İş bölümü: context agent içerik ve eksiksizlik (torba olasılığı), grammar agent biçim (kapı). Kapı sıralamaz.
 - Context agent (son sürüm B): d 64, K 30, cosine, lr 3e-3, 30 epok; kayıp gerçek sonraki torbanın karışım olasılığı.
   Eğitim kapısız; kapı yalnız seçimde (`train_context --grammar`). Eğitimde kapı cezası denendi: seçimde kapıyla aynı
