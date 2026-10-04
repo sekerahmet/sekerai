@@ -103,6 +103,13 @@ class ContextAgent(torch.nn.Module):
         fix = (lp.gather(3, c).squeeze(3) - lp[..., 0]) * (counts > 0)[:, None, :]
         return log_pi, absent + fix.sum(-1)
 
+    def chosen_log_prob(self, state, words, chosen):
+        """Torbadan secilen kelimeler -> (log pi (B, K), sum_{secilen} log P(kelime var | k) (B, K)): kademeli hedefin kismi
+        olasiligi; secilmeyen ve torbada olmayan kelimeler sinanmaz."""
+        log_pi, z = self._heads(state)
+        zp = z.gather(2, words[:, None, :].expand(-1, z.shape[1], -1))                # (B, K, P)
+        return log_pi, (F.logsigmoid(zp) * chosen[:, None, :]).sum(-1)
+
     @torch.no_grad()
     def next_bags(self, state):
         """-> sayilar (B, K, V) (0..3, 3 = 3+), log olasilik (B, K) = log pi_k + log P(B_k | k)."""

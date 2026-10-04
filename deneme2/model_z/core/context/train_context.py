@@ -26,6 +26,7 @@ MODEL_Z = os.path.dirname(os.path.dirname(HERE))
 FILES = {"countries": "country_"}   # data/<ad>/<onek>{stories.jsonl, vocab.json}
 # veriye gore baslangic lr'si (kullanici, 4 Ekim: "hepsi cosine sadece başlangıç lr farklı veriye göre"); verilmeyende LR
 DATA_LR = {"countries": 3e-3}       # ulke: sabit 3e-3 600 adimda sinav ilk20 0,650 (olculdu)
+RAMP = 0.5              # kademeli hedef: egitimin bu kadarinda istenen kelime 1'den butun torbaya cikar (0: kapali)
 BATCH = 64              # hikaye
 LR = 1e-3              # genel baslangic lr'si (gramer d 256 ile ayni); veriye ozel deger DATA_LR
 SCHEDULE = "cosine"     # her veride cosine (kullanici, 4 Ekim: "hepsi cosine"); constant yalniz denemek icin
@@ -79,8 +80,12 @@ def _bag(ids, mask, vocab_size):
     return words, c
 
 
-def loss_of(agent, ids, mask, relax):
-    """Hikaye batch'i -> ortalama kayip (gecis basina, nat): (1 - relax) * -log sum_k pi_k P(B | k) + relax * yon ortalamasi."""
+def loss_of(agent, ids, mask, relax, progress=1.0, ramp=0.0):
+    """Hikaye batch'i -> ortalama kayip (gecis basina, nat): (1 - relax) * -log sum_k pi_k P(B | k) + relax * yon ortalamasi.
+    Kademeli hedef (kullanici, 4 Ekim: "önce torbaya 1 kelime sonra 2 kelime sonra 3 kelime gibi"; "her seferinde rastgele
+    bir kelime"): asama a = progress / ramp; torbadan rastgele max(1, a * n) kelime istenir (yalniz var olmalari) ve tam torba
+    olasiligi a agirligiyla karisir; a >= 1 iken yalniz tam torba."""
+    a = min(progress / ramp, 1.0) if ramp > 0 else 1.0
     state = agent.initial_state(len(ids))
     LP, PI = [], []
     for t in range(ids.shape[1] - 1):
@@ -90,6 +95,12 @@ def loss_of(agent, ids, mask, relax):
             break
         words, c = _bag(ids[:, t + 1], mask[:, t + 1], len(agent.vocab))
         log_pi, lp = agent.bag_log_prob(state, words, c)
+        if a < 1.0:
+            real = c > 0
+            take = (real.sum(1, keepdim=True).float() * a).ceil().clamp(min=1)
+            rank = torch.rand(c.shape, device=c.device).masked_fill(~real, 2.0).argsort(1).argsort(1)
+            _, part = agent.chosen_log_prob(state, words, (rank < take) & real)
+            lp = a * lp + (1 - a) * part
         LP.append(lp[valid])
         PI.append(log_pi[valid])
     lp, log_pi = torch.cat(LP), torch.cat(PI)
@@ -110,7 +121,8 @@ def _counts(ids, mask, V):
 
 def evaluate(agent, ids, mask, real_hash, weights, names, show=SHOW):
     """-> bag_in_top_k (ilk 1 / 5 / K, taban: onceki cumle), tutarlilik, calibration, direction_health; goz satirlari.
-    Toplu: ayni torbayi veren yonler ozetle birlesir, olasiliklari toplanir."""
+    Toplu: ayni torbayi veren yonler ozetle birlesir, olasiliklari toplanir.  Hikayede daha once gecmis torba aday sayilmaz
+    (kullanici, 4 Ekim: "birebir aynı torba olmadığı sürece bence sıkıntı yok aynı şeyin farklı ifade edilmesinde")."""
     K, V = agent.directions, len(agent.vocab)
     acc = torch.zeros(9, device=ids.device)          # n, ilk1, ilk5, ilkK, taban, tutarli ilk, tutarli hepsi, aday, expH
     bins = torch.zeros(3, 5, device=ids.device)      # olasilik toplami, aday, dogru (5 dilim)
@@ -121,18 +133,21 @@ def evaluate(agent, ids, mask, real_hash, weights, names, show=SHOW):
         for b0 in range(0, len(ids), 256):
             bi, bm = ids[b0:b0 + 256], mask[b0:b0 + 256]
             state = agent.initial_state(len(bi))
+            said = []                                                                 # hikayede gecmis torbalar
             for t in range(bi.shape[1] - 1):
                 state = agent.read(state, bi[:, t], bm[:, t])
+                said.append(_bag_hash(_counts(bi[:, t], bm[:, t], V), weights))
                 counts, logp = agent.next_bags(state)
+                hk = _bag_hash(counts, weights)
+                logp = logp.masked_fill((hk[:, :, None] == torch.stack(said, 1)[:, None, :]).any(-1), -1e9)
                 pi_max = torch.maximum(pi_max, agent._heads(state)[0].exp().max(0).values)
                 valid = bm[:, t + 1].any(1)
-                hk = _bag_hash(counts, weights)                                       # (B, K)
                 true = _bag_hash(_counts(bi[:, t + 1], bm[:, t + 1], V), weights)     # (B,)
                 prev = _bag_hash(_counts(bi[:, t], bm[:, t], V), weights)
                 same = hk[:, :, None] == hk[:, None, :]                              # (B, K, K)
                 p = logp.exp()
                 merged = (same * p[:, None, :]).sum(-1)                               # ayni torbanin toplam olasiligi
-                first = ~(same & earlier).any(-1)                                     # her torbanin ilk gorulen yonu
+                first = ~(same & earlier).any(-1) & (logp > -1e8)                     # ilk gorulen yon; tekrar torba yok
                 score = torch.where(first, merged, torch.full_like(merged, -1.0))
                 order = score.argsort(1, descending=True)
                 ranked_h = hk.gather(1, order)
@@ -190,6 +205,7 @@ def main(argv=None):
     ap.add_argument("--batch", type=int, default=BATCH)
     ap.add_argument("--lr", type=float, default=None, help="baslangic lr'si; verilmezse veriye gore (DATA_LR) ya da LR")
     ap.add_argument("--schedule", default=SCHEDULE, choices=("constant", "cosine"))
+    ap.add_argument("--ramp", type=float, default=RAMP, help="kademeli hedef: egitimin bu payinda 1 kelimeden butun torbaya")
     ap.add_argument("--device", default="cpu", help="cpu | cuda")
     ap.add_argument("--every", type=int, default=10, help="kac epokta bir olcum")
     ap.add_argument("--out", default=None, help="kosu klasoru: her epok checkpoint.pt, sonda agent.pt ve results.json")
@@ -240,8 +256,7 @@ def main(argv=None):
     if args.resume:
         pack = torch.load(ckpt, map_location=args.device, weights_only=False)
         assert pack["vocab"] == vocab, "sozluk checkpoint'tekinden farkli"
-        keys = ("data", "seed", "d", "slots", "directions", "relax", "batch", "lr", "schedule") + (
-            ("epochs",) if args.schedule == "cosine" else ())
+        keys = ("data", "seed", "d", "slots", "directions", "relax", "batch", "lr", "schedule", "ramp", "epochs")
         diff = {k: (pack["args"].get(k), vars(args)[k]) for k in keys if pack["args"].get(k) != vars(args)[k]}
         assert not diff, "surdurme ayari checkpoint'ten farkli (checkpoint, simdi): %s" % diff
         agent.load_state_dict(pack["state"])
@@ -258,7 +273,8 @@ def main(argv=None):
                 for group in opt.param_groups:
                     group["lr"] = args.lr * 0.5 * (1 + math.cos(math.pi * done))
             rows = perm[b:b + args.batch].to(args.device)
-            loss = loss_of(agent, ids[rows], mask[rows], args.relax)
+            progress = ((epoch - 1) * n_train + b) / (args.epochs * n_train)
+            loss = loss_of(agent, ids[rows], mask[rows], args.relax, progress, args.ramp)
             opt.zero_grad()
             loss.backward()
             opt.step()
