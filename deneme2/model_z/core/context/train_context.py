@@ -23,9 +23,9 @@ from context import D, DIRECTIONS, LEVELS, SLOTS, ContextAgent
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_Z = os.path.dirname(os.path.dirname(HERE))
-FILES = {"countries": "country_"}   # data/<ad>/<onek>{stories.jsonl, vocab.json}
+FILES = {"countries": "country_", "countries_fixed": "country_"}   # data/<ad>/<onek>{stories.jsonl, vocab.json}
 # veriye gore baslangic lr'si (kullanici, 4 Ekim: "hepsi cosine sadece başlangıç lr farklı veriye göre"); verilmeyende LR
-DATA_LR = {"countries": 3e-3}       # ulke: sabit 3e-3 600 adimda sinav ilk20 0,650 (olculdu)
+DATA_LR = {"countries": 3e-3, "countries_fixed": 3e-3}       # ulke: sabit 3e-3 600 adimda sinav ilk20 0,650 (olculdu)
 RAMP = 0.5              # kademeli tamamlama: egitimin bu payinda eksik kelime 1'den butun torbaya cikar (0: kapali)
 BATCH = 64              # hikaye
 LR = 1e-3              # genel baslangic lr'si (gramer d 256 ile ayni); veriye ozel deger DATA_LR
