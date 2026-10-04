@@ -24,8 +24,10 @@ from context import D, DIRECTIONS, LEVELS, SLOTS, ContextAgent
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_Z = os.path.dirname(os.path.dirname(HERE))
 FILES = {"countries": "country_"}   # data/<ad>/<onek>{stories.jsonl, vocab.json}
+# veriye gore baslangic ayari (kullanici, 4 Ekim: "küçük veride farklı büyük veride farklı"); verilmeyen veride LR / SCHEDULE
+DATA_SETTINGS = {"countries": dict(lr=3e-3, schedule="constant")}   # ulke: 470 adimda cosine 0,021, sabit 3e-3 600 adimda 0,650
 BATCH = 64              # hikaye
-LR = 3e-3              # olculdu (ulke, d 32): sabit 3e-3 ile 600 adimda sinav 20de 0,650; cosine 1e-3 2.820 adimda 0,59-0,70
+LR = 1e-3              # genel baslangic (gramer d 256 ile ayni); veriye ozel deger DATA_SETTINGS
 SCHEDULE = "cosine"     # cosine | constant (kullanici, 4 Ekim: "Varsayılan ... cosine olsun gerekirse constant deneriz");
                         # az adimli kosuda constant: ulke verisinde 470 adimda cosine 0,021, sabit 3e-3 600 adimda 0,650
 RELAX = 0.05            # olu yon gevsetmesi; Rupprecht ve ark. (MHP) degeri, bu modelde olculmedi
@@ -187,13 +189,16 @@ def main(argv=None):
     ap.add_argument("--directions", type=int, default=DIRECTIONS, help="aday torba (yon) sayisi")
     ap.add_argument("--relax", type=float, default=RELAX, help="olu yon gevsetmesi")
     ap.add_argument("--batch", type=int, default=BATCH)
-    ap.add_argument("--lr", type=float, default=LR)
-    ap.add_argument("--schedule", default=SCHEDULE, choices=("constant", "cosine"))
+    ap.add_argument("--lr", type=float, default=None, help="verilmezse veriye gore (DATA_SETTINGS) ya da LR")
+    ap.add_argument("--schedule", default=None, choices=("constant", "cosine"), help="verilmezse veriye gore ya da SCHEDULE")
     ap.add_argument("--device", default="cpu", help="cpu | cuda")
     ap.add_argument("--every", type=int, default=10, help="kac epokta bir olcum")
     ap.add_argument("--out", default=None, help="kosu klasoru: her epok checkpoint.pt, sonda agent.pt ve results.json")
     ap.add_argument("--resume", type=int, default=0, help="1: --out'taki checkpoint.pt'den kaldigi epoktan surdur")
     args = ap.parse_args(argv)
+    preset = DATA_SETTINGS.get(args.data, {})
+    args.lr = args.lr if args.lr is not None else preset.get("lr", LR)
+    args.schedule = args.schedule or preset.get("schedule", SCHEDULE)
     torch.manual_seed(args.seed)
     if args.device == "cpu":
         torch.set_num_threads(4)
