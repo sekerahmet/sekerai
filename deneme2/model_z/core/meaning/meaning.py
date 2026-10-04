@@ -19,8 +19,8 @@ import torch
 
 UNK = "<unk>"
 D = 128                 # kelime vektoru boyu: ulkede ~110 ulke kumesi ayrilabilsin (olculmedi)
-NEIGHBORS = 10          # kisa liste: kelime basina komsu (kullanici, 4 Ekim: "Durdur 10x3 yap"; SS log P: 10 x 3 liste 935,
-DEPTH = 3               # sonraki cumlenin tamami listede 0,269; 5 x 5: 820, 0,207); DEPTH: komsularin komsulari kac adim
+NEIGHBORS = 10          # kisa liste: kelime basina komsu; DEPTH: komsularin komsulari kac adim.  Ilk SS denemesi (kullanici,
+DEPTH = 3               # 4 Ekim: "Durdur 10x3 yap"; "10x3 kesin yargı değil . Ss bakmadık hiç"): deneme yanilma ayari
 
 
 class MeaningAgent(torch.nn.Module):

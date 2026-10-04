@@ -65,8 +65,9 @@ tahmini değil"*; *"1 cümlenin tüm kelimeleri sırayla gizlenmezse model nası
   cave, fierce, roared). Matematikçi ölçüsü (`belge/model_z_temel/12` Ek A), SS sınavı 5 × 5: liste 3.676 → 820 kelime,
   sonraki cümlenin tamamı listede 0,062 → 0,207. SS: boy → He, his, he, him; girl → She, her, she; Mia → She, her, she.
   Nadir adlar zayıf (Tom 71 kez geçiyor: little, big, Mia …; Tim 372: Rex 1,000).
-- SS kısa liste 10 × 3 (kullanıcı, 4 Ekim: *"Durdur 10x3 yap"*): log P 10 × 3 liste 935 kelime, sonraki cümlenin tamamı
-  listede 0,269 (5 × 5: 820, 0,207); eğitimde ve `generate`'te aynı (`meaning.NEIGHBORS`, `DEPTH`).
+- SS kısa liste ilk deneme 10 × 3 (kullanıcı, 4 Ekim: *"Durdur 10x3 yap"*; *"10x3 kesin yargı değil . Ss bakmadık
+  hiç"*). Dayanak yalnız matematikçinin ölçüsü (log P 10 × 3 liste 935, sonraki cümlenin tamamı listede 0,269; 5 × 5: 820,
+  0,207), SS'te gözle bakılmadı. Eğitimde ve `generate`'te aynı (`meaning.NEIGHBORS`, `DEPTH`).
 - Kullanım `shortlist`: okunan cümlenin her kelimesi için tablodan NEIGHBORS komşu, DEPTH adım; komşu × derinlik eğitimde
   maliyet kararı, üretimde sıcaklık gibi ayar (`train_context --meaning neighbors.pt --shortlist N --depth D`). Liste =
   okunan cümlenin kelimelerinin komşuları + hikâyede geçenler; biçim kelimeleri cümlenin kendi biçim kelimeleri ve
