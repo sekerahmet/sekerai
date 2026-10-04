@@ -17,7 +17,7 @@ Gorev kavrami yok (kullanici, 3 Ekim: "Görevi makine bulmayacak görev diye bir
    hikaye, kalip 0; countries_fixed: butun ulkelerde ayni olgu sirasi, countries_orders: ulkeye ozel sabit sira (tohum 7);
    sinav = egitim.  -> data/countries_fixed/, data/countries_orders/
 Her hikayede valid_next (kullanici, 4 Ekim: "modelin ürettiği çıktı olası bir çıktı olabilir yani bizim istediğimiz değil
-ama doğru"): her cumleden sonra gecerli devamlar = o ulkenin henuz soylenmemis olgularinin butun kaliplari (kelime listesi).
+ama doğru"; "İkisi de bir şekilde Türkiye'den bahsediyor"): gecerli devam = ulkenin butun cumleleri, hikayede birebir gecmis torba haric.
 Hazir veri (data/countries/): bir kez uretilir, sonra hep okunur; yeniden calistirmak ayni dosyalari verir.
 
     python make_country_sentences.py
@@ -60,11 +60,12 @@ def build(country, fact, value, k):
 
 
 def _valid_next(story, everything):
-    """Her cumleden sonra gecerli devamlar: ulkenin henuz soylenmemis olgularinin butun kaliplari."""
+    """Her cumleden sonra gecerli devamlar: ulkenin butun cumleleri (butun olgular, butun kaliplar), hikayede birebir gecmis
+    torbalar haric (kullanici, 4 Ekim: "İkisi de bir şekilde Türkiye'den bahsediyor ... Bu veri için bu doğru")."""
     out = []
-    for t in range(len(story["facts"]) - 1):
-        said = set(story["facts"][:t + 1])
-        out.append([r["words"] for r in everything if r["country"] == story["country"] and r["fact"] not in said])
+    for t in range(len(story["sentences"]) - 1):
+        said = {tuple(sorted(x)) for x in story["sentences"][:t + 1]}
+        out.append([r["words"] for r in everything if r["country"] == story["country"] and tuple(sorted(r["words"])) not in said])
     return out
 
 
