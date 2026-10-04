@@ -30,7 +30,7 @@ from meaning import DEPTH, NEIGHBORS, shortlist  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_Z = os.path.dirname(os.path.dirname(HERE))
-FILES = {"countries": "country_"}   # data/<ad>/<onek>{stories.jsonl, vocab.json}
+FILES = {"countries": "country_", "simplestories": "ss_"}   # data/<ad>/<onek>{stories.jsonl, vocab.json}
 # veriye gore baslangic lr'si (kullanici, 4 Ekim: "hepsi cosine sadece başlangıç lr farklı veriye göre"); verilmeyende LR
 DATA_LR = {"countries": 3e-3}       # ulke: sabit 3e-3 600 adimda sinav ilk20 0,650 (olculdu)
 BATCH = 64              # hikaye
@@ -38,6 +38,8 @@ LR = 1e-3              # genel baslangic lr'si (gramer d 256 ile ayni); veriye o
 SCHEDULE = "cosine"     # her veride cosine (kullanici, 4 Ekim: "hepsi cosine"); constant yalniz denemek icin
 RELAX = 0.05            # olu yon gevsetmesi; Rupprecht ve ark. (MHP) degeri, bu modelde olculmedi
 SHOW = 2                # goz: kac sinav hikayesi yazilir
+MAX_SENTENCES = 40      # SS: hikayenin ilk bu kadar cumlesi (hikaye basina ort 22,5)
+MAX_WORDS = 40          # SS: cumlenin ilk bu kadar kelimesi (cumlelerin %99'u 25 kelimeye kadar)
 PROGRESS_SECS = 60      # epok icinde ara satir araligi (kullanici, 4 Ekim: "ekle bunları")
 
 
@@ -181,6 +183,141 @@ def _lists(table, stories, T, gold, n, depth):
     return out
 
 
+class Stories:
+    """SS hikaye dosyalari (make_ss_sentences --stories) -> hikaye batch'leri (ids (B, T, W), mask) cihazda."""
+
+    def __init__(self, root, prefix, device):
+        self.flat = torch.as_tensor(np.load(os.path.join(root, prefix + "_ids.npy")), dtype=torch.long, device=device)
+        self.sent_off = torch.as_tensor(np.load(os.path.join(root, prefix + "_sentence_offsets.npy")), device=device)
+        self.story_off = torch.as_tensor(np.load(os.path.join(root, prefix + "_offsets.npy")), device=device)
+        self.n = len(self.story_off) - 1
+
+    def batch(self, rows):
+        first, last = self.story_off[rows], self.story_off[rows + 1]
+        T = int(min((last - first).max(), MAX_SENTENCES))
+        sent = first[:, None] + torch.arange(T, device=first.device)[None]
+        has = sent < last[:, None]
+        sent = sent.clamp(max=len(self.sent_off) - 2)
+        a, b = self.sent_off[sent], self.sent_off[sent + 1]
+        W = int(min(((b - a) * has).max(), MAX_WORDS))
+        pos = a[..., None] + torch.arange(W, device=a.device)
+        mask = (pos < b[..., None]) & has[..., None]
+        ids = torch.where(mask, self.flat[pos.clamp(max=len(self.flat) - 1)], torch.zeros_like(pos))
+        return ids, mask & (ids != 0)
+
+
+def _lists_gpu(nbr, ids, mask, n, depth, gold):
+    """Batch (ids (B, T, W), mask) -> gecis basina kisa liste (B, T - 1, L) cihazda, dolgu 0: okunan cumlenin
+    kelimelerinin meaning komsulari (nbr (V, m) tablosu, n komsu, depth adim) + hikayede o ana kadar gecenler; gold:
+    egitimde gercek sonraki cumlenin kelimeleri de."""
+    B, T, W = ids.shape
+    V = nbr.shape[0]
+    rows = torch.arange(B, device=ids.device)[:, None].expand(-1, W)
+    seen = torch.zeros(B, V, dtype=torch.bool, device=ids.device)
+    out = []
+    for t in range(T - 1):
+        here = torch.zeros(B, V, dtype=torch.bool, device=ids.device)
+        here[rows[mask[:, t]], ids[:, t][mask[:, t]]] = True
+        seen |= here
+        found, frontier = here.clone(), here
+        for _ in range(depth):
+            r, w = frontier.nonzero(as_tuple=True)
+            if not len(r):
+                break
+            new = torch.zeros_like(found)
+            new[r[:, None].expand(-1, n), nbr[w, :n]] = True
+            frontier = new & ~found
+            found |= new
+        lst = found | seen
+        if gold:
+            lst[rows[mask[:, t + 1]], ids[:, t + 1][mask[:, t + 1]]] = True
+        lst[:, 0] = False
+        out.append(lst)
+    lst = torch.stack(out, 1)                                                   # (B, T - 1, V)
+    L = int(lst.sum(-1).max().clamp(min=1))
+    val, idx = lst.float().topk(L, dim=-1)
+    return torch.where(val > 0, idx, torch.zeros_like(idx))
+
+
+def main_stories(args, vocab):
+    """SS: hikaye dosyalarindan batch, kisa liste GPU'da batch basina (--meaning).  Olcu: sinav hikayelerinde kayip ve
+    listenin kapsami; nitel olcu generate ile."""
+    root = args.root
+    agent = ContextAgent(vocab, d=args.d, slots=args.slots, directions=args.directions).to(args.device)
+    train, exam = Stories(root, "ss_story", args.device), Stories(root, "ss_exam_story", args.device)
+    count = torch.bincount(train.flat, minlength=len(vocab)).float()
+    agent.set_prior((count / (len(train.sent_off) - 1)).clamp(max=0.99))
+    nbr = None
+    if args.meaning:
+        table = torch.load(args.meaning, weights_only=False)
+        assert table["vocab"] == vocab, "meaning tablosunun sozlugu farkli"
+        nbr = table["ids"].to(args.device)
+    exam_rows = torch.arange(min(512, exam.n), device=args.device)
+
+    @torch.no_grad()
+    def exam_check():
+        tot = cover = size = k = 0.0
+        for c in range(0, len(exam_rows), 64):
+            ids, mask = exam.batch(exam_rows[c:c + 64])
+            lists = _lists_gpu(nbr, ids, mask, args.shortlist, args.depth, gold=False) if nbr is not None else None
+            tot += loss_of(agent, ids, mask, args.relax, lists).item()
+            k += 1
+            if lists is not None:
+                for t in range(ids.shape[1] - 1):
+                    nxt = mask[:, t + 1].any(1)
+                    if not nxt.any():
+                        continue
+                    inl = (ids[:, t + 1, :, None] == lists[:, t, None, :]).any(-1) & mask[:, t + 1]
+                    cover += (inl.sum(1).float() / mask[:, t + 1].sum(1).clamp(min=1))[nxt].sum().item()
+                    size += (lists[:, t] > 0).sum(1)[nxt].float().sum().item()
+                    tot_n = nxt.sum().item()
+                    exam_check.n += tot_n
+        n = max(exam_check.n, 1)
+        return tot / k, cover / n, size / n
+    exam_check.n = 0
+    opt = torch.optim.Adam(agent.parameters(), lr=args.lr)
+    n = train.n
+    print("veri SS: egitim %d hikaye, sinav %d (olcu ilk %d) | d %d, slots %d, directions %d, lr %g %s, batch %d hikaye, "
+          "%d parametre | kisa liste %s | cihaz %s" % (n, exam.n, len(exam_rows), args.d, args.slots, args.directions, args.lr,
+                                                      args.schedule, args.batch, sum(p.numel() for p in agent.parameters()),
+                                                      ("komsu %d derinlik %d" % (args.shortlist, args.depth)) if nbr is not None
+                                                      else "yok", args.device), flush=True)
+    t0 = time.time()
+    for epoch in range(1, args.epochs + 1):
+        perm = torch.randperm(n, generator=torch.Generator().manual_seed(args.seed + epoch)).to(args.device)
+        total, t_epoch = torch.zeros((), device=args.device), time.time()
+        t_shown, steps = time.time(), -(-n // args.batch)
+        for step, b in enumerate(range(0, n, args.batch), 1):
+            if time.time() - t_shown > PROGRESS_SECS:          # ara satir: kayip yalniz burada okunur
+                t_shown, el = time.time(), time.time() - t_epoch
+                print("  epok %d adim %d / %d (%%%.0f)  kayip %.3f  %.0f hikaye/sn  kalan ~%.0f dk (butun egitim)" % (
+                    epoch, step, steps, 100 * step / steps, total.item() / step, b / el,
+                    ((steps - step) + (args.epochs - epoch) * steps) * el / step / 60), flush=True)
+            if args.schedule == "cosine":
+                done = ((epoch - 1) * n + b) / (args.epochs * n)
+                for group in opt.param_groups:
+                    group["lr"] = args.lr * 0.5 * (1 + math.cos(math.pi * done))
+            ids, mask = train.batch(perm[b:b + args.batch])
+            lists = _lists_gpu(nbr, ids, mask, args.shortlist, args.depth, gold=True) if nbr is not None else None
+            loss = loss_of(agent, ids, mask, args.relax, lists)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            total += loss.detach()
+        agent.eval()
+        exam_check.n = 0
+        loss_exam, cover, size = exam_check()
+        agent.train()
+        print("epok %d  kayip %.3f (sinav %.3f)  (%.0f sn) | kisa liste ort %.0f kelime, sonraki cumlenin kelimeleri listede %.3f"
+              % (epoch, total.item() / steps, loss_exam, time.time() - t0, size, cover), flush=True)
+        if args.out:
+            os.makedirs(args.out, exist_ok=True)
+            torch.save(dict(vocab=vocab, state=agent.state_dict(), args=vars(args)), os.path.join(args.out, "agent.pt"))
+    if args.out:
+        print("kaydedildi:", args.out, flush=True)
+    return agent
+
+
 def valid_hashes(valid_next, agent, weights, T):
     """Hikayelerin gecerli devamlari (hikaye -> gecis -> kelime listeleri) -> ozet tensoru (N, T - 1, M), bos -1."""
     V = len(agent.vocab)
@@ -311,6 +448,8 @@ def main(argv=None):
         torch.set_num_threads(4)
         if os.name == "nt":
             print("guc kisitlamasi (EcoQoS) kapali:", _no_power_throttling(), flush=True)
+    if args.data == "simplestories":
+        return main_stories(args, json.load(open(os.path.join(args.root, "ss_vocab.json"), encoding="utf-8")))
     folder, prefix = args.root or os.path.join(MODEL_Z, "data", args.data), FILES[args.data]
     vocab_path, stories_path = os.path.join(folder, prefix + "vocab.json"), os.path.join(folder, prefix + "stories.jsonl")
     vocab = json.load(open(vocab_path, encoding="utf-8"))
