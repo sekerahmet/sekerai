@@ -129,8 +129,8 @@ def main(argv=None):
         for step, b in enumerate(range(0, n, args.batch), 1):
             if time.time() - t_shown > PROGRESS_SECS:          # ara satir: kayip yalniz burada okunur
                 t_shown, el = time.time(), time.time() - t_epoch
-                print("  epok %d adim %d / %d (%%%.0f)  kayip %.3f  %.0f ornek/sn  kalan ~%.0f dk" % (
-                    epoch, step, steps, 100 * step / steps, total.item() / b, b / el, (steps - step) * el / step / 60),
+                print("  epok %d adim %d / %d (%%%.0f)  kayip %.3f  %.0f ornek/sn  kalan ~%.0f dk (butun egitim)" % (
+                    epoch, step, steps, 100 * step / steps, total.item() / b, b / el, ((steps - step) + (args.epochs - epoch) * steps) * el / step / 60),
                     flush=True)
             done = ((epoch - 1) * n + b) / (args.epochs * n)
             for group in opt.param_groups:
