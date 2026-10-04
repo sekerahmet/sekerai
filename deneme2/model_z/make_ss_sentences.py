@@ -16,7 +16,14 @@ egitimde ya da sinavda gecen butun siralar.  Hazir veri: bir kez uretilir.
 Cikti: ss_vocab.json (indeks 0 '<unk>'), ss_train_ids.npy (int32, cumleler uc uca), ss_train_offsets.npy (int64, N+1),
 ss_exam.jsonl.
 
+Hikaye cikisi (--stories; kullanici, 4 Ekim: "eğitim hikaye hikaye olmak zorunda veri de bu şekilde"): ayni cumle
+bolucu ve ayni sozluk (once uretilmis ss_vocab.json); hikayenin BUTUN cumleleri sirasiyla (tekillestirme ve boy filtresi
+yok), sozluk disi kelime <unk>.  train akisi -> ss_story_ids.npy (int32, kelimeler uc uca), ss_story_sentence_offsets.npy
+(int64, cumle baslari, N+1), ss_story_offsets.npy (int64, hikaye baslari cumle sirasiyla, H+1); test akisi ->
+ss_exam_story_*.npy.
+
     python make_ss_sentences.py <simplestories koku> <cikti klasoru> [--tokens N  (yalniz ilk N token; sinama)]
+                                [--stories]
 """
 import hashlib
 import json
@@ -117,6 +124,27 @@ def stream_sentences(a, flags, quotes, tok, eos):
     return [t.strip() for t in texts if t.strip()]
 
 
+def stream_stories(a, flags, quotes, tok, eos):
+    """Akis -> hikayeler (her biri cumle metinleri listesi, sirasiyla).  Akis eos ile bitmeli."""
+    a = np.asarray(a).astype(np.int64)
+    S = sentence_starts(a, flags, quotes, tok, eos)
+    ends = np.flatnonzero(a == eos)
+    story = np.searchsorted(ends, S)                                         # cumlenin hikayesi: sonraki eos
+    stop = np.minimum(np.r_[S[1:], len(a)], ends[np.minimum(story, len(ends) - 1)])
+    texts = tok.decode_batch([a[s:t].tolist() for s, t in zip(S.tolist(), stop.tolist())])
+    out, cur, last = [], [], None
+    for sid, t in zip(story.tolist(), texts):
+        if sid != last and cur:
+            out.append(cur)
+            cur = []
+        last = sid
+        if t.strip():
+            cur.append(t.strip())
+    if cur:
+        out.append(cur)
+    return out
+
+
 def chunks(a, eos, size):
     """Akis -> hikaye sinirinda kesilmis parcalarin (bas, son) sinirlari."""
     start = 0
@@ -150,6 +178,66 @@ def _chunk(job):
             keys.append(_key(s))
     return (list(local), np.array(ids, dtype=np.int32), np.array(lengths, dtype=np.int64),
             np.array(keys, dtype=np.int64), n)
+
+
+def _story_chunk(job):
+    """Bir parca (ayri surecte) -> (kelime kimlikleri, cumle boylari, hikaye basina cumle sayisi)."""
+    root, out, stream, start, stop = job
+    if stream not in _WORKER:
+        from tokenizers import Tokenizer
+        tok = Tokenizer.from_file(os.path.join(root, "gpt2", "tokenizer.json"))
+        vocab = json.load(open(os.path.join(out, "ss_vocab.json"), encoding="utf-8"))
+        _WORKER[stream] = dict(tok=tok, eos=tok.token_to_id("<|endoftext|>"), tables=_tables(tok, tok.get_vocab_size()),
+                               index={w: i for i, w in enumerate(vocab)},
+                               stream=np.load(os.path.join(root, "gpt2", stream + ".npy"), mmap_mode="r"))
+    w_ = _WORKER[stream]
+    ids, lengths, counts = [], [], []
+    for story in stream_stories(w_["stream"][start:stop], *w_["tables"], w_["tok"], w_["eos"]):
+        n = 0
+        for s in story:
+            w = _WORD.findall(s)
+            if w:
+                ids.extend(w_["index"].get(x, 0) for x in w)
+                lengths.append(len(w))
+                n += 1
+        if n:
+            counts.append(n)
+    return np.array(ids, dtype=np.int32), np.array(lengths, dtype=np.int64), np.array(counts, dtype=np.int64)
+
+
+def main_stories(root, out, tokens=None):
+    """Hikaye cikisi (modul basindaki aciklama): train ve test akislari -> ss_story_*.npy, ss_exam_story_*.npy."""
+    from tokenizers import Tokenizer
+    t0 = time.time()
+    tok = Tokenizer.from_file(os.path.join(root, "gpt2", "tokenizer.json"))
+    eos = tok.token_to_id("<|endoftext|>")
+    vocab = json.load(open(os.path.join(out, "ss_vocab.json"), encoding="utf-8"))
+    for stream, prefix in (("train", "ss_story"), ("valid", "ss_exam_story")):
+        a = np.load(os.path.join(root, "gpt2", stream + ".npy"), mmap_mode="r")
+        if tokens:
+            a = a[:int(np.flatnonzero(np.asarray(a[:tokens]) == eos)[-1]) + 1]
+        jobs = [(root, out, stream, s, t) for s, t in chunks(a, eos, CHUNK)]
+        ids, lengths, counts = [], [], []
+        with Pool(min(WORKERS, len(jobs))) as pool:
+            for c, (i, l, n) in enumerate(pool.imap(_story_chunk, jobs)):   # imap: parca sirasi korunur
+                ids.append(i)
+                lengths.append(l)
+                counts.append(n)
+                print("%s parca %d/%d: %d hikaye, %.0f sn" % (stream, c + 1, len(jobs), sum(map(len, counts)),
+                                                             time.time() - t0), flush=True)
+        ids, lengths, counts = np.concatenate(ids), np.concatenate(lengths), np.concatenate(counts)
+        np.save(os.path.join(out, prefix + "_ids.npy"), ids)
+        np.save(os.path.join(out, prefix + "_sentence_offsets.npy"), np.r_[0, np.cumsum(lengths)].astype(np.int64))
+        np.save(os.path.join(out, prefix + "_offsets.npy"), np.r_[0, np.cumsum(counts)].astype(np.int64))
+        print("%s: %d hikaye, %d cumle (hikaye basina ort %.1f), %d kelime, <unk> payi %.4f | %.0f sn" % (
+            stream, len(counts), len(lengths), lengths.size / max(len(counts), 1), len(ids), (ids == 0).mean(),
+            time.time() - t0), flush=True)
+        so = np.r_[0, np.cumsum(lengths)]
+        for h in range(2):                                                   # goz: ilk iki hikaye
+            first = int(np.r_[0, np.cumsum(counts)][h])
+            print("  --- hikaye %d" % (h + 1))
+            for k in range(first, first + int(counts[h])):
+                print("   ", " ".join(vocab[j] for j in ids[so[k]:so[k + 1]].tolist()))
 
 
 def _key(s):
@@ -240,4 +328,4 @@ def main(root, out, tokens=None):
 if __name__ == "__main__":
     args = sys.argv[1:]
     n = int(args[args.index("--tokens") + 1]) if "--tokens" in args else None
-    main(args[0], args[1], n)
+    (main_stories if "--stories" in args else main)(args[0], args[1], n)
