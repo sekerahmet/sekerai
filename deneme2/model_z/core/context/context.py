@@ -74,16 +74,21 @@ class ContextAgent(torch.nn.Module):
         new_seen = seen.scatter(1, ids, mask.float()).maximum(seen)
         return torch.where(empty[:, None, None], slots, new), torch.where(empty[:, None], seen, new_seen)
 
-    def _heads(self, state):
-        """durum -> log pi (B, K), z (B, K, V)."""
+    def _heads(self, state, shortlist=None):
+        """durum -> log pi (B, K), z (B, K, V).  shortlist (B, L) kelime kimlikleri (dolgu 0): z yalniz bu kelimeler icin
+        (B, K, L) (meaning: kisa liste; listede olmayan kelime torbaya giremez)."""
         slots, seen = state
         h = self.norm_out(slots).mean(1)
         u = self.W(h).view(len(h), self.directions, -1)
         log_pi = self.share(u).squeeze(-1).log_softmax(-1)
-        z = u @ self.E.weight.T / u.shape[-1] ** 0.5 + self.beta + (self.seen_bias * seen)[:, None, :]
-        z = z.clone()
-        z[..., 0] = -1e4                                                              # <unk> uretilmez
-        return log_pi, z
+        if shortlist is None:
+            z = u @ self.E.weight.T / u.shape[-1] ** 0.5 + self.beta + (self.seen_bias * seen)[:, None, :]
+            z = z.clone()
+            z[..., 0] = -1e4                                                          # <unk> uretilmez
+            return log_pi, z
+        z = (torch.einsum("bkd,bld->bkl", u, self.E(shortlist)) / u.shape[-1] ** 0.5
+             + (self.beta[shortlist] + self.seen_bias[shortlist] * seen.gather(1, shortlist))[:, None, :])
+        return log_pi, z.masked_fill((shortlist == 0)[:, None, :], -1e4)            # dolgu ve <unk>
 
     def _level_log_probs(self, z, words=None):
         """z (..., n) -> log P(c = 0, 1, 2, 3+) (..., n, 4): var mi sigmoid(z), varsa kac kez softmax(gamma_w)."""
@@ -92,20 +97,24 @@ class ContextAgent(torch.nn.Module):
             lc = lc[:, None]                                                          # (B, 1, P, 3)
         return torch.cat([F.logsigmoid(-z)[..., None], F.logsigmoid(z)[..., None] + lc], -1)
 
-    def bag_log_prob(self, state, words, counts):
+    def bag_log_prob(self, state, words, counts, shortlist=None):
         """Torba -> (log pi (B, K), log P(torba | k) (B, K)).  words (B, P) torbadaki farkli kelimeler (dolgu 0), counts
-        (B, P) sayilari (0 = dolgu; 3'ten buyuk 3 sayilir)."""
-        log_pi, z = self._heads(state)
+        (B, P) sayilari (0 = dolgu; 3'ten buyuk 3 sayilir).  shortlist verilirse torbanin kelimeleri listede olmali."""
+        log_pi, z = self._heads(state, shortlist)
         absent = F.logsigmoid(-z).sum(-1)                                             # her kelime 0: (B, K)
-        zp = z.gather(2, words[:, None, :].expand(-1, z.shape[1], -1))                # (B, K, P)
+        at = words if shortlist is None else (shortlist[:, None, :] == words[:, :, None]).float().argmax(-1)
+        zp = z.gather(2, at[:, None, :].expand(-1, z.shape[1], -1))                   # (B, K, P)
         lp = self._level_log_probs(zp, words)                                         # (B, K, P, 4)
         c = counts.clamp(max=LEVELS - 1)[:, None, :, None].expand(-1, z.shape[1], -1, 1)
         fix = (lp.gather(3, c).squeeze(3) - lp[..., 0]) * (counts > 0)[:, None, :]
         return log_pi, absent + fix.sum(-1)
 
     @torch.no_grad()
-    def next_bags(self, state):
+    def next_bags(self, state, shortlist=None):
         """-> sayilar (B, K, V) (0..3, 3 = 3+), log olasilik (B, K) = log pi_k + log P(B_k | k)."""
-        log_pi, z = self._heads(state)
-        best, counts = self._level_log_probs(z).max(-1)
+        log_pi, z = self._heads(state, shortlist)
+        best, counts = self._level_log_probs(z, shortlist).max(-1)
+        if shortlist is not None:
+            counts = torch.zeros(*counts.shape[:2], len(self.vocab), dtype=counts.dtype, device=counts.device).scatter_add_(
+                2, shortlist[:, None, :].expand(-1, counts.shape[1], -1), counts)
         return counts, log_pi + best.sum(-1)

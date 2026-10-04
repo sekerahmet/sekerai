@@ -54,19 +54,50 @@ def predict(agent, words):
     return p
 
 
-def shortlist(agent, words, n):
-    """Kelime kimlikleri -> ayni parcada bulunma olasiligi en yuksek n kelime (kimlik kumesi; verilenler haric)."""
-    if not len(words):
-        return set()
-    return set(predict(agent, words).topk(n).indices.tolist())
+WINDOW = 2              # komsu tablosu: kac cumlelik pencerede birlikte gecme (kullanici, 4 Ekim: "önce 1 bakarız")
+NEIGHBORS = 10          # kelime basina komsu (kullanici: "n=10 olacak sekilde")
+STRONG_LIFT = 3.0       # guclu bag: P(j | i) / P(j) en az (elle; olculmedi)
+STRONG_SHARE = 0.05     # guclu bag: i'nin pencerelerinin en az bu payinda j de var (elle; olculmedi)
+FREQUENT_SHARE = 0.02   # cumlelerin bu payindan fazlasinda gecen kelime listeye hep girer (siklik tablosu; elle)
 
 
-@torch.no_grad()
-def build_neighbor_table(agent, m):
-    """-> {"ids": (V, m), "scores": (V, m)}: her kelime tek basina verilince ilk m tahmin (okuma ve inceleme icin)."""
-    ids, scores = [], []
-    for w in range(len(agent.vocab)):
-        top = predict(agent, [w]).topk(m)
-        ids.append(top.indices.cpu())
-        scores.append(top.values.cpu())
-    return dict(vocab=agent.vocab, ids=torch.stack(ids), scores=torch.stack(scores))
+def build_neighbor_table(stories, V, window=WINDOW, n=NEIGHBORS):
+    """Hikayeler (cumle -> kelime kimlikleri) -> komsu tablosu: {"ids": (V, n) (dolgu 0), "frequent": kimlikler}.
+    Komsu: ayni pencerede (window cumlenin kelimeleri) guclu bagli kelimeler (kat >= STRONG_LIFT, birlikte >= STRONG_SHARE),
+    birlikte gecme payina gore ilk n.  Bicim kelimelerinin guclu bagi olmaz: komsu getirmezler."""
+    import numpy as np
+    import scipy.sparse as sp
+    rows, cols, k = [], [], 0
+    df, n_sent = np.zeros(V), 0
+    for st in stories:
+        for s in st:
+            n_sent += 1
+            df[list(set(s))] += 1
+        for t in range(max(1, len(st) - window + 1)):
+            ws = {x for s in st[t:t + window] for x in s}
+            rows += [k] * len(ws)
+            cols += list(ws)
+            k += 1
+    X = sp.csr_matrix((np.ones(len(rows), dtype=np.float32), (rows, cols)), shape=(k, V))
+    C = (X.T @ X).tocsr()
+    win = C.diagonal()
+    ids = torch.zeros(V, n, dtype=torch.long)
+    for i in range(1, V):
+        a, b = C.indptr[i], C.indptr[i + 1]
+        j, c = C.indices[a:b], C.data[a:b]
+        share = c / max(win[i], 1)
+        keep = (j != i) & (j != 0) & (share >= STRONG_SHARE) & (share / np.maximum(win[j] / k, 1e-12) >= STRONG_LIFT)
+        top = j[keep][np.argsort(-share[keep])][:n]
+        ids[i, :len(top)] = torch.from_numpy(top.astype(np.int64))
+    frequent = torch.from_numpy(np.flatnonzero(df / max(n_sent, 1) > FREQUENT_SHARE))
+    return dict(ids=ids, frequent=frequent, window=window, n=n)
+
+
+def shortlist(table, words, n=None):
+    """Kelime kimlikleri -> her birinin ilk n komsusu + sik kelimeler + kendileri (kimlik kumesi, <unk> haric)."""
+    n = n or table["n"]
+    out = set(table["frequent"].tolist()) | set(words)
+    if len(words):
+        out |= set(table["ids"][list(words), :n].flatten().tolist())
+    out.discard(0)
+    return out

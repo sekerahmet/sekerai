@@ -6,7 +6,7 @@ Veri: hikayelerden ardisik WINDOW cumlelik pencereler; pencerenin butun cumleler
 gizliyi tahmin eder; kayip -log P(gizli kelime).
 Olcu goz ile (kullanici: "Sınav görülmemiş mantıklı liste değil biz gözle bakıp Türkiye için ne yapmış ona bakmak"):
 EYE ulkelerinin cumlelerinde her kelime sirayla gizlenir, ilk 5 tahmin olasiligiyla yazilir.
-Sonunda agent.pt ve neighbors.pt (her kelime tek basina verilince ilk 50 tahmin).
+Sonunda agent.pt.
 
     python train_meaning.py [--window 1] [--epochs 4] [--device cpu|cuda] [--out klasor]
 """
@@ -19,7 +19,7 @@ import time
 
 import torch
 
-from meaning import D, MeaningAgent, build_neighbor_table
+from meaning import D, MeaningAgent
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_Z = os.path.dirname(os.path.dirname(HERE))
@@ -99,7 +99,7 @@ def main(argv=None):
     ap.add_argument("--batch", type=int, default=BATCH)
     ap.add_argument("--lr", type=float, default=LR)
     ap.add_argument("--device", default="cpu", help="cpu | cuda")
-    ap.add_argument("--out", default=None, help="kosu klasoru: agent.pt, neighbors.pt")
+    ap.add_argument("--out", default=None, help="kosu klasoru: agent.pt")
     args = ap.parse_args(argv)
     torch.manual_seed(args.seed)
     if args.device == "cpu":
@@ -139,7 +139,6 @@ def main(argv=None):
     if args.out:
         os.makedirs(args.out, exist_ok=True)
         torch.save(dict(vocab=vocab, state=agent.state_dict(), args=vars(args)), os.path.join(args.out, "agent.pt"))
-        torch.save(build_neighbor_table(agent, 50), os.path.join(args.out, "neighbors.pt"))
         print("kaydedildi:", args.out, flush=True)
     return agent
 
