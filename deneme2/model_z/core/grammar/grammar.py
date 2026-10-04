@@ -12,6 +12,8 @@ Girdi: cumlenin kelimeleri, karisik (torba).  Cikti: butun cumle bir anda.
                     boundary'nin satiri cumlenin ilk kelimesi, sutunu son kelimesi
     order_by_relation  cumle = G uzerinde boundary'den gecen tek cevrim: her dugume bir ardil (Macar atamasi, tek seferde);
                     atama birden fazla cevrim verirse patch_cycles birlestirir (Karp yamasi).  Maliyet n^3
+    missing         (secimli) ardili / onceli torbada olmayan kelimenin baglandigi dugum; bozuk torbalarla egitilir
+                    (train_grammar --missing 1); is_complete kapisi buna bakar
 """
 import heapq
 
@@ -27,12 +29,14 @@ NEG = -1e9
 
 
 class GrammarAgent(torch.nn.Module):
-    def __init__(self, vocab, d=D, heads=HEADS, layers=LAYERS):
+    def __init__(self, vocab, d=D, heads=HEADS, layers=LAYERS, missing=False):
         super().__init__()
         self.vocab = vocab
         self.index = {w: i for i, w in enumerate(vocab)}
         self.E = torch.nn.Embedding(len(vocab), d)
         self.boundary = torch.nn.Parameter(torch.randn(d) / d ** 0.5)
+        # missing dugumu (kullanici, 4 Ekim: "missing ok"): ardili / onceli torbada olmayan kelime buna baglanir
+        self.missing = torch.nn.Parameter(torch.randn(d) / d ** 0.5) if missing else None
         layer = torch.nn.TransformerEncoderLayer(d, heads, 4 * d, dropout=0.0, batch_first=True)
         self.reader = torch.nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
         self.W = torch.nn.Parameter(torch.randn(d, d) / d ** 0.5)      # baglamli bag (kalip)
@@ -42,13 +46,16 @@ class GrammarAgent(torch.nn.Module):
         return [self.index.get(w, self.index[UNK]) for w in words]
 
     def forward(self, ids, mask):
-        """ids (B, L) karisik torba, mask (B, L) gercek kelime -> G (B, L+1, L+1); son dugum boundary.  Kendine bag ve
-        dolgu NEG."""
+        """ids (B, L) karisik torba, mask (B, L) gercek kelime -> G (B, L+1, L+1); dugum L boundary.  missing'li ajanda
+        G (B, L+2, L+2), dugum L+1 missing: G[i, L+1] "i'nin ardili torbada yok", G[L+1, j] "j'nin onceli torbada yok".
+        Kendine bag ve dolgu NEG."""
         B, L = ids.shape
-        e = torch.cat([self.E(ids), self.boundary.expand(B, 1, -1)], 1)
-        m = torch.cat([mask, torch.ones(B, 1, dtype=torch.bool, device=ids.device)], 1)
+        extra = [self.boundary] + ([self.missing] if self.missing is not None else [])
+        e = torch.cat([self.E(ids)] + [x.expand(B, 1, -1) for x in extra], 1)
+        m = torch.cat([mask, torch.ones(B, len(extra), dtype=torch.bool, device=ids.device)], 1)
         h = self.reader(e, src_key_padding_mask=~m)
-        ok = m[:, :, None] & m[:, None, :] & ~torch.eye(L + 1, dtype=torch.bool, device=ids.device)[None]
+        N = L + len(extra)
+        ok = m[:, :, None] & m[:, None, :] & ~torch.eye(N, dtype=torch.bool, device=ids.device)[None]
         with torch.autocast(ids.device.type, enabled=False):          # G fp32: bf16'da buyuk G'nin farklari silinir
             h, e = h.float(), e.float()
             G = (torch.einsum("bid,de,bje->bij", h, self.W, h) + torch.einsum("bid,de,bje->bij", e, self.U, e)) / e.shape[-1] ** 0.5
@@ -58,7 +65,8 @@ class GrammarAgent(torch.nn.Module):
 
 
 def relation_matrix(agent, words):
-    """Tek torba -> G (torch, (n+1) x (n+1), son satir / sutun boundary) (okuma icin)."""
+    """Tek torba -> G (torch, (n+1) x (n+1), satir / sutun n boundary; missing'li ajanda (n+2) x (n+2), n+1 missing).
+    Dizme fonksiyonlari G[:n+1, :n+1] alir; quality_index ve is_complete butun G'yi."""
     dev = next(agent.parameters()).device
     with torch.no_grad():
         return agent(torch.tensor([agent.ids(words)], device=dev), torch.ones(1, len(words), dtype=torch.bool,
@@ -82,12 +90,23 @@ def order_by_relation(G):
 def quality_index(G, order):
     """Kalite endeksi (kullanici, 4 Ekim: "judge değil quality index"; "Olur uygun"): dizilisteki her bagin ardil (satir) ve
     oncel (sutun) log-olasiliklarinin ortalamasi, bag basina.  Egitimin olctugu olasiliklar; her torbada normalize, torbalar
-    arasi kiyaslanabilir.  G numpy (n+1) x (n+1), son dugum boundary; order: torba indeksleri (order_by_relation)."""
-    n = G.shape[0] - 1
+    arasi kiyaslanabilir.  G numpy (n+1) x (n+1), dugum n boundary; missing'li ajanda (n+2) x (n+2) ve missing de
+    normalizasyona girer.  order: torba indeksleri (order_by_relation)."""
+    n = len(order)
     path = [n] + list(order) + [n]
     row = G - np.logaddexp.reduce(G, axis=1, keepdims=True)        # ardil: satir log-softmax
     col = G - np.logaddexp.reduce(G, axis=0, keepdims=True)        # oncel: sutun log-softmax
     return float(np.mean([(row[a, b] + col[a, b]) / 2 for a, b in zip(path, path[1:])]))
+
+
+def is_complete(G, order):
+    """Kapi (kullanici, 4 Ekim: "İndeks aslında bir kapı"; ad onayli): dizilisteki her bagda secilen ardil ve oncel
+    missing'den olasiliysa torba cumledir.  G missing'li ajanin (n+2) x (n+2) matrisi (numpy), dugum n+1 missing."""
+    n = len(order)
+    assert G.shape[0] == n + 2, "is_complete missing'li ajan ister"
+    M = n + 1
+    path = [n] + list(order) + [n]
+    return all(G[a, b] > G[a, M] and G[a, b] > G[M, b] for a, b in zip(path, path[1:]))
 
 
 def order_alternatives(G, k, labels=None):
