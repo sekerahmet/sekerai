@@ -84,10 +84,10 @@ def _encode(agent, stories):
 
 def _bag(ids, mask, vocab_size):
     """Bir cumle (B, W) -> torbadaki farkli kelimeler (B, W) ve sayilari (B, W; 0 = dolgu).  <unk> torbaya girmez."""
-    counts = torch.zeros(len(ids), vocab_size, dtype=torch.long, device=ids.device).scatter_add_(1, ids, mask.long())
-    counts[:, 0] = 0
-    c, words = counts.topk(ids.shape[1], dim=1)
-    return words, c
+    s = torch.where(mask, ids, torch.zeros_like(ids)).sort(1).values             # sozluk boyu topk yerine (G4: adimin %20'si)
+    first = (s != 0) & torch.cat([torch.ones_like(s[:, :1], dtype=torch.bool), s[:, 1:] != s[:, :-1]], 1)
+    c = (s[:, :, None] == s[:, None, :]).sum(-1) * first
+    return s * first, c
 
 
 def _judge(gate, h, counts):
@@ -131,24 +131,32 @@ def _judge(gate, h, counts):
     return ~ok[torch.searchsorted(known, flat)].view(h.shape)
 
 
-def loss_of(agent, ids, mask, relax, lists=None):
+def _transition(agent, state, read_ids, read_mask, words, counts, shortlist, allowed):
+    """Bir cumle gecisi: cumleyi oku, sonraki cumlenin torbasinin olasiligi.  --compile ile derlenen birim."""
+    state = agent.read(state, read_ids, read_mask)
+    log_pi, lp = agent.bag_log_prob(state, words, counts, shortlist, allowed)
+    return state, log_pi, lp
+
+
+def loss_of(agent, ids, mask, relax, lists=None, step=_transition):
     """Hikaye batch'i -> ortalama kayip (gecis basina, nat): (1 - relax) * -log sum_k pi_k P(B | k) + relax * yon ortalamasi;
     B sonraki cumlenin butun torbasi.  lists (B, T - 1, L): gecis basina kisa liste (verilirse torba yalniz listeden); ya da
-    (hikayenin birlesik listesi (B, L), gecis basina listede mi (B, T - 1, L)): temsiller bir kez cekilir."""
+    (hikayenin birlesik listesi (B, L), gecis basina listede mi (B, T - 1, L)): temsiller bir kez cekilir.  step:
+    _transition ya da derlenmis hali."""
     state = agent.initial_state(len(ids))
     union = isinstance(lists, tuple)
     cand = agent.prepare(lists[0]) if union else None
     LP, PI = [], []
     for t in range(ids.shape[1] - 1):
-        state = agent.read(state, ids[:, t], mask[:, t])
         valid = mask[:, t + 1].any(1)
         if not valid.any():
             break
         words, c = _bag(ids[:, t + 1], mask[:, t + 1], len(agent.vocab))
         if union:
-            log_pi, lp = agent.bag_log_prob(state, words, c, cand, lists[1][:, t])
+            shortlist, allowed = cand, lists[1][:, t]
         else:
-            log_pi, lp = agent.bag_log_prob(state, words, c, None if lists is None else lists[:, t])
+            shortlist, allowed = None if lists is None else lists[:, t], None
+        state, log_pi, lp = step(agent, state, ids[:, t], mask[:, t], words, c, shortlist, allowed)
         LP.append(lp[valid])
         PI.append(log_pi[valid])
     lp, log_pi = torch.cat(LP), torch.cat(PI)
@@ -292,8 +300,11 @@ def main_stories(args, vocab):
     opt = torch.optim.Adam(agent.parameters(), lr=args.lr)
     n = train.n
     cuda = args.device.startswith("cuda")
+    step_fn = _transition
     if cuda:
         torch.set_float32_matmul_precision("high")         # TF32: einsum fp32 SIMT'te kaliyordu (G4 profili)
+        if args.compile:
+            step_fn = torch.compile(_transition, dynamic=True)
     first, start, ckpt = 1, 0, os.path.join(args.out, "checkpoint.pt") if args.out else None
     if args.out:
         os.makedirs(args.out, exist_ok=True)
@@ -315,10 +326,10 @@ def main_stories(args, vocab):
                             args=vars(args)), ckpt + ".part")
             os.replace(ckpt + ".part", ckpt)
     print("veri SS: egitim %d hikaye, sinav %d (olcu ilk %d) | d %d, slots %d, directions %d, lr %g %s, batch %d hikaye, "
-          "%d parametre | kisa liste %s | cihaz %s" % (n, exam.n, len(exam_rows), args.d, args.slots, args.directions, args.lr,
+          "%d parametre | kisa liste %s | cihaz %s compile %s" % (n, exam.n, len(exam_rows), args.d, args.slots, args.directions, args.lr,
                                                       args.schedule, args.batch, sum(p.numel() for p in agent.parameters()),
                                                       ("komsu %d derinlik %d" % (args.shortlist, args.depth)) if nbr is not None
-                                                      else "yok", args.device), flush=True)
+                                                      else "yok", args.device, bool(cuda and args.compile)), flush=True)
     t0 = time.time()
     for epoch in range(first, args.epochs + 1):
         perm = torch.randperm(n, generator=torch.Generator().manual_seed(args.seed + epoch)).to(args.device)
@@ -346,7 +357,7 @@ def main_stories(args, vocab):
             ids, mask = train.batch(perm[b:b + args.batch])
             lists = _lists_gpu(nbr, ids, mask, args.shortlist, args.depth, gold=True, union=True) if nbr is not None else None
             L_last = lists[0].shape[-1] if lists is not None else len(vocab)
-            loss = loss_of(agent, ids, mask, args.relax, lists)
+            loss = loss_of(agent, ids, mask, args.relax, lists, step_fn)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -487,6 +498,7 @@ def main(argv=None):
     ap.add_argument("--meaning", default=None, help="kisa liste: meaning agent'in neighbors.pt'si (torba yalniz listeden)")
     ap.add_argument("--shortlist", type=int, default=NEIGHBORS, help="kisa liste: kelime basina komsu")
     ap.add_argument("--depth", type=int, default=DEPTH, help="kisa liste: komsularin komsulari kac adim")
+    ap.add_argument("--compile", type=int, default=1, help="1: cumle gecisi torch.compile ile (yalniz SS, cuda)")
     ap.add_argument("--grammar", default=None, help="secimde kapi: missing'li grammar agent'in agent.pt'si (sinavda)")
     args = ap.parse_args(argv)
     args.lr = args.lr if args.lr is not None else DATA_LR.get(args.data, LR)
