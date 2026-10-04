@@ -47,12 +47,13 @@ torbayı oluşturması"*.
 
 - Amaç: kelimeler arası anlam yakınlığı (Turkey ↔ Ankara, Asia, lira). Context agent önceki cümlenin kelimelerine yakın
   kelimelerden kısa bir aday listesi alır, torbayı 57.000 yerine bu listeden kurar.
-- Öğrenme (kod: `core/meaning/`, `MeaningAgent`): WINDOW cümlelik pencerede attention; skip-gram + negative sampling
-  (SGNS, word2vec): penceredeki öbür kelimeler olumlu, sıklığın 0,75 kuvvetiyle çekilen kelimeler olumsuz. Grammar
-  agent'tan ayrı (dizme etkilenmez). Önce pencere 1 cümle (kullanıcı: *"önce 1 bakarız hepsine aynı anda bakmayız
-  performansa göre bakarız"*).
-- Çıktı: `neighbors.pt` (`build_neighbor_table`): her kelimenin en güçlü 50 bağı; context agent `shortlist` ile son
-  cümlelerin kelimelerinin ilk N bağını alır, hikâyede geçmiş kelimeler ve biçim kelimeleri her zaman eklenir.
+- Öğrenme (kod: `core/meaning/`, `MeaningAgent`): WINDOW cümlenin bütün kelimeleri tek ortak torba (kullanıcı: *"benim 2
+  ve ya 3 cümle dediğim cümlenin tüm kelimeleri ortak. Yoksa cümle tahmini değil"*); içerik kelimelerinden bazıları `mask`
+  ile gizlenir, model kalanlara attention ile bakıp gizliyi tahmin eder (BERT türü). Grammar agent'tan ayrı. Önce pencere
+  1 cümle (kullanıcı: *"önce 1 bakarız hepsine aynı anda bakmayız performansa göre bakarız"*).
+- Kullanım `shortlist`: elimizdeki kelimeler + bir `mask` → aynı parçada bulunma olasılığı en yüksek N kelime; hikâyede
+  geçmiş kelimeler ve biçim kelimeleri her zaman eklenir. `neighbors.pt` (`build_neighbor_table`): her kelime tek başına
+  verilince ilk 50 tahmin (okuma için).
 - Ölçü `shortlist_recall`: sonraki cümlenin kelimeleri listede mi (içerik kelimeleri ayrı); taban bağlamsız en sık 200
   içerik kelimesi. Göz: kelimenin tablo satırı.
 - Kaba ön ölçüm (birlikte geçme sayımı, 1 cümle, içerik kelimeleri listede): ülke N 10 → 86 kelime 0,927 (sıklık tabanı

@@ -1,14 +1,14 @@
 """meaning -- Model Z meaning agent (kullanici, 4 Ekim: "kelimeler arası anlam bağını oluştıran bir adım ... Türkiye Ankara
-Asia lira gibi kelimeleri yakınlaştıran"; "Cümleler içinde attention ile"; "Meaning agent ok"; adlar onayli).  Egitim ve
-olcum: train_meaning.py.
+Asia lira gibi kelimeleri yakınlaştıran"; "Cümleler içinde attention ile"; "benim 2 ve ya 3 cümle dediğim cümlenin tüm
+kelimeleri ortak. Yoksa cümle tahmini değil"; adlar onayli).  Egitim ve olcum: train_meaning.py.
 
-Amac: context agent 57.000 kelime yerine onceki cumlelerin kelimelerine anlamca yakin kelimelerden kisa bir liste
-(vocabulary shortlist) uzerinde calissin.
-    E               kelime temsili (sozluk x d)
-    okuyucu         konumsuz attention (TransformerEncoder): h_i, kelimenin penceredeki (WINDOW cumle) anlami
-    bag(i, j)       h_i . e_j / sqrt(d); egitim skip-gram + negative sampling (SGNS): pencerede birlikte gecen kelime
-                    olumlu, sikligin 0,75 kuvvetiyle cekilen kelime olumsuz
-    neighbors       her kelimenin baglamsiz okunusu (tek basina h_w) ile butun sozluge bag; en guclu m kelime tabloya
+Amac: context agent 57.000 kelime yerine elindeki kelimelerle ayni metin parcasinda bulunan kelimelerden kisa bir liste
+(vocabulary shortlist) uzerinde calissin.  Sira ve cumle tahmini yok: WINDOW cumlenin kelimeleri tek ortak torba.
+    E               kelime temsili (sozluk x d); cikis da ayni temsil
+    mask            gizli yerin temsili: torbadaki bir kelime yerine konur
+    okuyucu         konumsuz attention (TransformerEncoder); mask Q ile hangi kelimeye bakacagini secer
+    tahmin          P(w | torba) = softmax(h_mask . e_w / sqrt(d) + bias_w)
+    shortlist       verilen kelimeler + mask -> olasiligi en yuksek n kelime (verilenler haric)
 """
 import torch
 
@@ -24,41 +24,49 @@ class MeaningAgent(torch.nn.Module):
         self.vocab = vocab
         self.index = {w: i for i, w in enumerate(vocab)}
         self.E = torch.nn.Embedding(len(vocab), d)
+        self.mask = torch.nn.Parameter(torch.randn(d) / d ** 0.5)
         layer = torch.nn.TransformerEncoderLayer(d, heads, 4 * d, dropout=0.0, batch_first=True)
         self.reader = torch.nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
+        self.bias = torch.nn.Parameter(torch.zeros(len(vocab)))
 
     def ids(self, words):
         return [self.index.get(w, self.index[UNK]) for w in words]
 
-    def forward(self, ids, mask):
-        """ids (B, L) pencerenin kelimeleri (sirasiz), mask (B, L) -> h (B, L, d)."""
-        return self.reader(self.E(ids), src_key_padding_mask=~mask)
-
-    def bond(self, h, ids):
-        """h (..., d), ids (..., k) -> bag puani (..., k)."""
-        return (h.unsqueeze(-2) * self.E(ids)).sum(-1) / h.shape[-1] ** 0.5
+    def forward(self, ids, present, hidden):
+        """ids (B, L) torba (sirasiz), present (B, L) gercek yuva, hidden (B, L) mask konan yuva -> gizli yuvalar icin
+        log olasilik (B, L, V) (gizli olmayan yuvalarda anlamsiz)."""
+        e = torch.where(hidden[..., None], self.mask.expand_as(self.E(ids)), self.E(ids))
+        h = self.reader(e, src_key_padding_mask=~present)
+        return (h @ self.E.weight.T / h.shape[-1] ** 0.5 + self.bias).log_softmax(-1)
 
 
 @torch.no_grad()
-def build_neighbor_table(agent, m, chunk=4096):
-    """-> {"ids": (V, m) en guclu bagli kelimeler, "scores": (V, m)}; kelimenin kendisi ve <unk> haric."""
+def predict(agent, words):
+    """Kelime kimlikleri (liste) -> ayni parcada bulunacak kelimelerin olasiligi (V,): torba + bir mask."""
     dev = agent.E.weight.device
-    V = len(agent.vocab)
-    ids_out, scores_out = [], []
-    for c in range(0, V, chunk):
-        w = torch.arange(c, min(c + chunk, V), device=dev)
-        h = agent(w[:, None], torch.ones(len(w), 1, dtype=torch.bool, device=dev))[:, 0]
-        s = h @ agent.E.weight.T / h.shape[-1] ** 0.5
-        s[torch.arange(len(w)), w] = -1e9
-        s[:, agent.index[UNK]] = -1e9
-        top = s.topk(m, dim=1)
-        ids_out.append(top.indices.cpu())
-        scores_out.append(top.values.cpu())
-    return dict(vocab=agent.vocab, ids=torch.cat(ids_out), scores=torch.cat(scores_out))
+    ids = torch.tensor([list(words) + [0]], device=dev)
+    present = torch.ones_like(ids, dtype=torch.bool)
+    hidden = torch.zeros_like(present)
+    hidden[0, -1] = True
+    p = agent(ids, present, hidden)[0, -1].exp()
+    p[list(words)] = 0
+    p[agent.index[UNK]] = 0
+    return p
 
 
-def shortlist(table, words, n):
-    """Kelime kimlikleri -> her birinin en guclu n bagli kelimesinin birlesimi (kimlik kumesi)."""
+def shortlist(agent, words, n):
+    """Kelime kimlikleri -> ayni parcada bulunma olasiligi en yuksek n kelime (kimlik kumesi; verilenler haric)."""
     if not len(words):
         return set()
-    return set(table["ids"][list(words), :n].flatten().tolist())
+    return set(predict(agent, words).topk(n).indices.tolist())
+
+
+@torch.no_grad()
+def build_neighbor_table(agent, m):
+    """-> {"ids": (V, m), "scores": (V, m)}: her kelime tek basina verilince ilk m tahmin (okuma ve inceleme icin)."""
+    ids, scores = [], []
+    for w in range(len(agent.vocab)):
+        top = predict(agent, [w]).topk(m)
+        ids.append(top.indices.cpu())
+        scores.append(top.values.cpu())
+    return dict(vocab=agent.vocab, ids=torch.stack(ids), scores=torch.stack(scores))
