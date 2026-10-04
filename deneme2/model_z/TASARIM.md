@@ -47,18 +47,22 @@ torbayı oluşturması"*.
 
 - Amaç: kelimeler arası anlam yakınlığı (Turkey ↔ Ankara, Asia, lira). Context agent önceki cümlenin kelimelerine yakın
   kelimelerden kısa bir aday listesi alır, torbayı 57.000 yerine bu listeden kurar.
-- Öğrenme (kod: `core/meaning/`, `MeaningAgent`): WINDOW cümlenin bütün kelimeleri tek ortak torba (kullanıcı: *"benim 2
-  ve ya 3 cümle dediğim cümlenin tüm kelimeleri ortak. Yoksa cümle tahmini değil"*); içerik kelimelerinden bazıları `mask`
-  ile gizlenir, model kalanlara attention ile bakıp gizliyi tahmin eder (BERT türü). Grammar agent'tan ayrı. Önce pencere
-  1 cümle (kullanıcı: *"önce 1 bakarız hepsine aynı anda bakmayız performansa göre bakarız"*).
-- Kullanım `shortlist`: elimizdeki kelimeler + bir `mask` → aynı parçada bulunma olasılığı en yüksek N kelime; hikâyede
-  geçmiş kelimeler ve biçim kelimeleri her zaman eklenir. `neighbors.pt` (`build_neighbor_table`): her kelime tek başına
-  verilince ilk 50 tahmin (okuma için).
-- Ölçü `shortlist_recall`: sonraki cümlenin kelimeleri listede mi (içerik kelimeleri ayrı); taban bağlamsız en sık 200
-  içerik kelimesi. Göz: kelimenin tablo satırı.
-- Kaba ön ölçüm (birlikte geçme sayımı, 1 cümle, içerik kelimeleri listede): ülke N 10 → 86 kelime 0,927 (sıklık tabanı
-  247 kelime 0,694); SS (5M token) N 10 → 195 kelime 0,331, N 50 → 339 kelime 0,509 (sıklık tabanı 312 kelime 0,490):
-  SS'te ham sayım sık kelimeleri öne çıkarıyor (dragon → its, A, saw).
+- Kısa liste (kod: `meaning.build_neighbor_table`, `shortlist`; kullanıcı: *"bir cümledeki tüm kelimeler için ... 5 yakın
+  kelime ... bir liste üretmek bir tahmin yok"*; *"the of is gibi kelimeleri elemek çok kolay ... sıklık tablosu ... elle
+  vermeye gerek yok"*; *"south in the a gibi değil"*): 2 cümlelik pencerede birlikte geçme sayımı; kelimenin komşusu
+  **güçlü bağ**: kat P(j|i)/P(j) ≥ 3 ve i'nin pencerelerinin ≥ %5'inde birlikte; birlikte geçme payına göre ilk N. Biçim
+  kelimelerinin güçlü bağı olmaz, komşu getirmez (elle liste yok). Geçiş listesi = okunan cümlenin bütün kelimelerinin
+  komşuları (derinlik 1) + sık kelimeler + hikâyede geçenler.
+- **Elle konan ölçüler** (kullanıcı: *"elle verdiğin ölçüleri not al"*; hiçbiri ölçülmedi): pencere 2 cümle (`WINDOW`),
+  kelime başına N = 10 (`NEIGHBORS`, kullanıcı: *"n=10"*), kat ≥ 3 (`STRONG_LIFT`), birlikte ≥ %5 (`STRONG_SHARE`), sık
+  kelime: cümlelerin > %2'si (`FREQUENT_SHARE`), sayımda en az 3 birlikte geçme (senaryo betiği).
+- Gözle (ülke, sayım): Turkey → Turkish, Ankara, Black, Iran…; Peru'da kat sıralaması America'yı 25. sıraya atıyordu
+  (seyrek kelimeler Sucre, Tiwanaku öne geçiyor); pay sıralaması + kat eşiği düzeltti. 7 komşuda 2. adım Sophia →
+  Ukraine kayması (ortak kelime köprüsü).
+- Gizli kelimeli (BERT türü) `MeaningAgent` denendi: bağlam içinde gizli kelimeyi doğru buluyor (pencere 2: 167/170) ama
+  kelime başına komşu tablosu vermiyor (E benzerliği: yerine geçen kelimeler; Q·K: gürültü). Kısa liste sayımla.
+- Ülke, context agent senaryosu (N 10, derinlik 1): liste ort 60 kelime / 897, sınavda sonraki cümlenin kelimeleri
+  listede 0,976.
 
 ## Açık noktalar
 
