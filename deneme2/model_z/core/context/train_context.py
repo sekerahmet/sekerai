@@ -15,8 +15,10 @@ import argparse
 import json
 import math
 import os
+import sys
 import time
 
+import numpy as np
 import torch
 
 from context import D, DIRECTIONS, LEVELS, SLOTS, ContextAgent
@@ -32,6 +34,8 @@ LR = 1e-3              # genel baslangic lr'si (gramer d 256 ile ayni); veriye o
 SCHEDULE = "cosine"     # her veride cosine (kullanici, 4 Ekim: "hepsi cosine"); constant yalniz denemek icin
 RELAX = 0.05            # olu yon gevsetmesi; Rupprecht ve ark. (MHP) degeri, bu modelde olculmedi
 SHOW = 2                # goz: kac sinav hikayesi yazilir
+GATE_WEIGHT = 1.0       # --grammar: kapidan gecemeyen yon torbasinin cezasi (olculmedi)
+GATE_SAMPLES = 256      # --grammar: adim basina yargilanan gecis sayisi (her geciste K yon torbasi)
 
 
 def _no_power_throttling():
@@ -80,15 +84,60 @@ def _bag(ids, mask, vocab_size):
     return words, c
 
 
-def loss_of(agent, ids, mask, relax, progress=1.0, ramp=0.0, dynamic=False):
+def _judge(gate, h, counts):
+    """Yon torbalari -> kapidan gecemeyen mi (h'nin bicimi, bool).  h torba ozetleri, counts (..., V) sayilari.  Her farkli
+    torba bir kez gramerden gecer (donuk grammar agent: dizme + is_complete); sonuc ozetle saklanir.  Bos torba gecemez."""
+    flat, V = h.flatten(), counts.shape[-1]
+    known, ok = gate["known"], gate["ok"]
+    found = torch.zeros_like(flat, dtype=torch.bool)
+    if len(known):
+        found = known[torch.searchsorted(known, flat).clamp(max=len(known) - 1)] == flat
+    new = flat[~found].unique()
+    if len(new):
+        at = (flat[None, :] == new[:, None]).float().argmax(1)          # her yeni torbanin ilk gorulen yeri
+        rows = counts.reshape(-1, V)[at].long().cpu()
+        g, Gm = gate["grammar"], gate["module"]
+        bags = [[gate["vocab"][w] for w in r.nonzero().flatten().tolist() for _ in range(int(r[w]))] for r in rows]
+        L = max(1, max(len(b) for b in bags))
+        dev = next(g.parameters()).device
+        gid = torch.zeros(len(bags), L, dtype=torch.long)
+        gm = torch.zeros(len(bags), L, dtype=torch.bool)
+        for i, b in enumerate(bags):
+            gid[i, :len(b)] = torch.tensor(g.ids(b), dtype=torch.long)
+            gm[i, :len(b)] = True
+        with torch.no_grad():
+            G = g(gid.to(dev), gm.to(dev)).double().cpu().numpy()
+        res = []
+        for i, b in enumerate(bags):
+            n = len(b)
+            if n == 0:
+                res.append(False)
+                continue
+            idx = list(range(n)) + [L, L + 1]
+            full = G[i][np.ix_(idx, idx)]
+            res.append(Gm.is_complete(full, Gm.order_by_relation(full[:n + 1, :n + 1])))
+        known = torch.cat([known, new])
+        ok = torch.cat([ok, torch.tensor(res, device=ok.device)])
+        order = known.argsort()
+        gate["known"], gate["ok"] = known[order], ok[order]
+        known, ok = gate["known"], gate["ok"]
+    return ~ok[torch.searchsorted(known, flat)].view(h.shape)
+
+
+def loss_of(agent, ids, mask, relax, progress=1.0, ramp=0.0, dynamic=False, gate=None):
     """Hikaye batch'i -> ortalama kayip (gecis basina, nat): (1 - relax) * -log sum_k pi_k P(B | k) + relax * yon ortalamasi.
     Kademeli tamamlama (kullanici, 4 Ekim: "hedef cümle 10 kelime ise 9 nu verelim sadece 1 tanesini tahmin etsin. sonra 8 ni
     verelim 2 sini tahmin etsin"; "aynen bunu istiyorum"): asama a = progress / ramp; sonraki cumlenin kelimelerinden rastgele
-    max(1, a * n) tanesi saklanir, gerisi verilir; ajan saklananlari bulur.  a >= 1: hepsi saklanir (uretimdeki gibi)."""
+    max(1, a * n) tanesi saklanir, gerisi verilir; ajan saklananlari bulur.  a >= 1: hepsi saklanir (uretimdeki gibi).
+    gate (donuk gramer; kullanici, 4 Ekim: "context eğitilmiş grammar ile eğitilmeli gramer değişmemeli sadece okunmalı"):
+    orneklenen gecislerde her yonun en olasi torbasi (next_bags'in adayi) is_complete'ten gecemezse ceza
+    -log(1 - P(torba | yon)), gecen torbaya bir sey yapilmaz; gecis basina yonler toplami, + weight * ortalama."""
     a = min(progress / ramp, 1.0) if ramp > 0 else 1.0
     k = max(1, math.ceil(a * agent.directions)) if dynamic else None   # dinamik yon: belirsizlik (saklanan pay) kadar yon
     state = agent.initial_state(len(ids))
-    LP, PI = [], []
+    LP, PI, PEN = [], [], []
+    if gate is not None:
+        rate = gate["samples"] / max(int(mask[:, 1:].any(2).sum()), 1)
     for t in range(ids.shape[1] - 1):
         state = agent.read(state, ids[:, t], mask[:, t])
         valid = mask[:, t + 1].any(1)
@@ -104,8 +153,21 @@ def loss_of(agent, ids, mask, relax, progress=1.0, ramp=0.0, dynamic=False):
         log_pi, lp = agent.bag_log_prob(state, words, c, pool, k)
         LP.append(lp[valid])
         PI.append(log_pi[valid])
+        if gate is not None:
+            sel = valid & (torch.rand(len(ids), device=ids.device) < rate)
+            if sel.any():
+                _, z = agent._heads((state[0][sel], state[1][sel]))
+                best, cnt = agent._level_log_probs(z).max(-1)                      # yon torbalari (S, K, V)
+                bad = _judge(gate, _bag_hash(cnt, gate["weights"]), cnt)
+                gate["seen"] += bad.numel()
+                gate["bad"] += bad.sum()
+                p = best.sum(-1).exp().clamp(max=1 - 1e-6)                         # P(torba | yon)
+                PEN.append((-torch.log1p(-p) * bad).sum(1))
     lp, log_pi = torch.cat(LP), torch.cat(PI)
-    return ((1 - relax) * -(log_pi + lp).logsumexp(1) + relax * -lp.mean(1)).mean()
+    loss = ((1 - relax) * -(log_pi + lp).logsumexp(1) + relax * -lp.mean(1)).mean()
+    if PEN:
+        loss = loss + gate["weight"] * torch.cat(PEN).mean()
+    return loss
 
 
 def _bag_hash(counts, weights):
@@ -133,15 +195,17 @@ def valid_hashes(valid_next, agent, weights, T):
     return out
 
 
-def evaluate(agent, ids, mask, real_hash, weights, names, show=SHOW, valid_next=None):
+def evaluate(agent, ids, mask, real_hash, weights, names, show=SHOW, valid_next=None, gate=None):
     """-> bag_in_top_k (ilk 1 / 5 / K, taban: onceki cumle), tutarlilik, calibration, direction_health; goz satirlari.
     gecerli_devam (valid verilirse; kullanici, 4 Ekim: "modelin ürettiği çıktı olası bir çıktı olabilir yani bizim istediğimiz
     değil ama doğru"): ilk aday veride tanimli gecerli devamlardan biri mi, ilk 5 adayin kaci gecerli.
     Toplu: ayni torbayi veren yonler ozetle birlesir, olasiliklari toplanir.  Hikayede daha once gecmis torba aday sayilmaz
-    (kullanici, 4 Ekim: "birebir aynı torba olmadığı sürece bence sıkıntı yok aynı şeyin farklı ifade edilmesinde")."""
+    (kullanici, 4 Ekim: "birebir aynı torba olmadığı sürece bence sıkıntı yok aynı şeyin farklı ifade edilmesinde").
+    kapi (gate verilirse): ilk aday ve ilk 5 aday icinde kapidan gecemeyen (is_complete) orani."""
     K, V = agent.directions, len(agent.vocab)
-    acc = torch.zeros(12, device=ids.device)         # n, ilk1, ilk5, ilkK, taban, tutarli ilk, tutarli hepsi, aday, expH,
-    #                                                  gecerli ilk1, gecerli ilk5 sayisi, ilk5 aday sayisi
+    acc = torch.zeros(14, device=ids.device)         # n, ilk1, ilk5, ilkK, taban, tutarli ilk, tutarli hepsi, aday, expH,
+    #                                                  gecerli ilk1, gecerli ilk5 sayisi, ilk5 aday sayisi,
+    #                                                  kapi: ilk aday gecemeyen, ilk 5'te gecemeyen
     bins = torch.zeros(3, 5, device=ids.device)      # olasilik toplami, aday, dogru (5 dilim)
     pi_max = torch.zeros(K, device=ids.device)
     eye = []
@@ -181,6 +245,11 @@ def evaluate(agent, ids, mask, real_hash, weights, names, show=SHOW, valid_next=
                     extra = torch.stack([(ok_ranked[:, 0] * v).sum(), (ok_ranked.sum(1) * v).sum(), (in5 * v).sum()])
                 else:
                     extra = torch.zeros(3, device=ids.device)
+                if gate is not None:
+                    shut = (_judge(gate, hk, counts) & first).gather(1, order)[:, :5]
+                    extra = torch.cat([extra, torch.stack([(shut[:, 0] * v).sum(), (shut.sum(1) * v).sum()])])
+                else:
+                    extra = torch.cat([extra, torch.zeros(2, device=ids.device)])
                 q = torch.where(first, merged, torch.zeros_like(merged))
                 q = q / q.sum(1, keepdim=True).clamp_min(1e-30)
                 ent = (-(q * q.clamp_min(1e-30).log()).sum(1)).exp()
@@ -205,6 +274,8 @@ def evaluate(agent, ids, mask, real_hash, weights, names, show=SHOW, valid_next=
                tutarlilik=dict(ilk_aday=round(acc[5] / n, 4), butun_adaylar=round(acc[6] / max(acc[7], 1), 4)),
                gecerli_devam=dict(ilk_aday=round(acc[9] / n, 4), ilk5_orani=round(acc[10] / max(acc[11], 1), 4))
                if valid_next is not None else None,
+               kapi=dict(ilk_aday_gecemeyen=round(acc[12] / n, 4), ilk5_gecemeyen=round(acc[13] / max(acc[11], 1), 4))
+               if gate is not None else None,
                calibration=round(calib, 4),
                direction_health=dict(farkli_torba_orani=round(acc[7] / n / K, 4), exp_H_pi=round(acc[8] / n, 2),
                                      olu_yon=int((pi_max < 0.01).sum())))
@@ -238,6 +309,9 @@ def main(argv=None):
     ap.add_argument("--every", type=int, default=10, help="kac epokta bir olcum")
     ap.add_argument("--out", default=None, help="kosu klasoru: her epok checkpoint.pt, sonda agent.pt ve results.json")
     ap.add_argument("--resume", type=int, default=0, help="1: --out'taki checkpoint.pt'den kaldigi epoktan surdur")
+    ap.add_argument("--grammar", default=None, help="kapi: missing'li grammar agent'in agent.pt'si (donuk); ceza ve olcu")
+    ap.add_argument("--gate_weight", type=float, default=GATE_WEIGHT, help="kapi cezasinin agirligi (0: yalniz olcu)")
+    ap.add_argument("--gate_samples", type=int, default=GATE_SAMPLES, help="adim basina yargilanan gecis sayisi")
     args = ap.parse_args(argv)
     args.lr = args.lr if args.lr is not None else DATA_LR.get(args.data, LR)
     torch.manual_seed(args.seed)
@@ -274,6 +348,19 @@ def main(argv=None):
     agent.set_prior(presence / sent.sum())
     opt = torch.optim.Adam(agent.parameters(), lr=args.lr)
     gen = torch.Generator().manual_seed(args.seed)
+    gate = None
+    if args.grammar:
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "grammar"))
+        import grammar as Gm
+        gp = torch.load(args.grammar, map_location=args.device, weights_only=False)
+        grm = Gm.GrammarAgent(gp["vocab"], d=gp["args"]["d"], missing=bool(gp["args"].get("missing", 0)))
+        grm.load_state_dict(gp["state"])
+        assert grm.missing is not None, "kapi missing'li gramer ister (train_grammar --missing 1)"
+        grm.to(args.device).eval().requires_grad_(False)
+        gate = dict(grammar=grm, module=Gm, vocab=vocab, weights=weights, samples=args.gate_samples, weight=args.gate_weight,
+                    known=torch.empty(0, dtype=torch.long, device=args.device),
+                    ok=torch.empty(0, dtype=torch.bool, device=args.device), seen=0, bad=torch.zeros((), device=args.device))
+        print("kapi: %s (agirlik %g, adim basina %d gecis)" % (args.grammar, args.gate_weight, args.gate_samples), flush=True)
     print("veri %s: egitim %d hikaye, sinav %d, sozluk %d, gercek torba %d | d %d, slots %d, directions %d, relax %g, "
           "lr %g %s, batch %d, %d parametre | cihaz %s" % (
               args.data, n_train, len(exam_ids), len(vocab), len(real_hash), args.d, args.slots, args.directions,
@@ -287,8 +374,10 @@ def main(argv=None):
     if args.resume:
         pack = torch.load(ckpt, map_location=args.device, weights_only=False)
         assert pack["vocab"] == vocab, "sozluk checkpoint'tekinden farkli"
-        keys = ("data", "seed", "d", "slots", "directions", "relax", "batch", "lr", "schedule", "ramp", "dynamic", "epochs")
-        diff = {k: (pack["args"].get(k), vars(args)[k]) for k in keys if pack["args"].get(k) != vars(args)[k]}
+        keys = ("data", "seed", "d", "slots", "directions", "relax", "batch", "lr", "schedule", "ramp", "dynamic", "epochs",
+                "grammar", "gate_weight", "gate_samples")
+        old = {k: pack["args"].get(k, ap.get_default(k)) for k in keys}       # eski checkpoint'te olmayan ayar: varsayilan
+        diff = {k: (old[k], vars(args)[k]) for k in keys if old[k] != vars(args)[k]}
         assert not diff, "surdurme ayari checkpoint'ten farkli (checkpoint, simdi): %s" % diff
         agent.load_state_dict(pack["state"])
         opt.load_state_dict(pack["opt"])
@@ -305,7 +394,8 @@ def main(argv=None):
                     group["lr"] = args.lr * 0.5 * (1 + math.cos(math.pi * done))
             rows = perm[b:b + args.batch].to(args.device)
             progress = ((epoch - 1) * n_train + b) / (args.epochs * n_train)
-            loss = loss_of(agent, ids[rows], mask[rows], args.relax, progress, args.ramp, bool(args.dynamic))
+            loss = loss_of(agent, ids[rows], mask[rows], args.relax, progress, args.ramp, bool(args.dynamic),
+                           gate if (gate and args.gate_weight > 0) else None)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -315,7 +405,7 @@ def main(argv=None):
             agent.eval()
             t_train = time.time() - t_epoch
             res = evaluate(agent, exam_ids, exam_mask, real_hash, weights, data["exam_names"], valid_next=exam_valid,
-                           show=SHOW if epoch == args.epochs else 0)
+                           show=SHOW if epoch == args.epochs else 0, gate=gate)
             agent.train()
             k = res["bag_in_top_k"]
             print("epok %3d  kayip %.3f  (%.0f sn; egitim %.1f sn/epok, olcum %.1f sn) | dogru torba ilk1 %.3f ilk5 %.3f ilk%d %.3f (taban onceki "
@@ -328,6 +418,12 @@ def main(argv=None):
             if res["gecerli_devam"]:
                 print("          gecerli devam: ilk aday %.3f, ilk 5 adayin %.3f'i" % (
                     res["gecerli_devam"]["ilk_aday"], res["gecerli_devam"]["ilk5_orani"]), flush=True)
+            if res["kapi"]:
+                print("          kapi: ilk aday gecemeyen %.3f, ilk 5'te %.3f | egitimde orneklenen yon torbasi gecemeyen %.3f "
+                      "(%d), yargilanan farkli torba %d" % (
+                          res["kapi"]["ilk_aday_gecemeyen"], res["kapi"]["ilk5_gecemeyen"],
+                          gate["bad"].item() / max(gate["seen"], 1), gate["seen"], len(gate["known"])), flush=True)
+                gate["seen"], gate["bad"] = 0, torch.zeros((), device=args.device)
             history.append(dict(epoch=epoch, loss=total / n_train, result=res))
         if ckpt:
             torch.save(dict(vocab=vocab, state=agent.state_dict(), opt=opt.state_dict(), gen=gen.get_state(),
