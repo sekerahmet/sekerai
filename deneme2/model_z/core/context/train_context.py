@@ -26,7 +26,7 @@ import torch
 from context import D, DIRECTIONS, LEVELS, SLOTS, ContextAgent
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "meaning"))
-from meaning import DEPTH, build_neighbor_table, shortlist  # noqa: E402
+from meaning import DEPTH, WINDOW, build_neighbor_table, shortlist  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_Z = os.path.dirname(os.path.dirname(HERE))
@@ -302,6 +302,7 @@ def main(argv=None):
     ap.add_argument("--shortlist", type=int, default=0, help="N: torba kisa listeden (meaning komsu tablosu, kelime basina N "
                     "komsu, --depth adim + sik kelimeler + hikayede gecenler); 0 kapali")
     ap.add_argument("--depth", type=int, default=DEPTH, help="kisa liste: komsularin komsulari kac adim")
+    ap.add_argument("--window", type=int, default=WINDOW, help="kisa liste: komsu tablosunun penceresi (cumle)")
     ap.add_argument("--grammar", default=None, help="secimde kapi: missing'li grammar agent'in agent.pt'si (sinavda)")
     args = ap.parse_args(argv)
     args.lr = args.lr if args.lr is not None else DATA_LR.get(args.data, LR)
@@ -332,13 +333,14 @@ def main(argv=None):
         t_list = time.time()
         as_lists = lambda a, m: [[a[n, t][m[n, t]].tolist() for t in range(a.shape[1]) if m[n, t].any()] for n in range(len(a))]
         train_s, exam_s = as_lists(ids.cpu(), mask.cpu()), as_lists(exam_ids.cpu(), exam_mask.cpu())
-        table = build_neighbor_table(train_s, len(vocab), n=args.shortlist)
+        table = build_neighbor_table(train_s, len(vocab), window=args.window, n=args.shortlist)
+        t_table = time.time() - t_list
         lists = _lists(table, train_s, ids.shape[1], gold=True, depth=args.depth).to(args.device)
         exam_lists = _lists(table, exam_s, exam_ids.shape[1], gold=False, depth=args.depth).to(args.device)
         cover = [len(set(st[t + 1]) & set(exam_lists[n, t].tolist())) / len(set(st[t + 1]))
                  for n, st in enumerate(exam_s) for t in range(len(st) - 1)]
-        print("kisa liste: kelime basina %d komsu, derinlik %d; liste ort %.0f kelime (sozluk %d); sinavda sonraki cumlenin kelimeleri "
-              "listede %.3f; %.0f sn" % (args.shortlist, args.depth, (exam_lists > 0).sum(-1).float()[exam_lists.sum(-1) > 0].mean(),
+        print("kisa liste: pencere %d cumle, tablo %.1f sn; kelime basina %d komsu, derinlik %d; liste ort %.0f kelime (sozluk %d); sinavda sonraki cumlenin kelimeleri "
+              "listede %.3f; %.0f sn" % (args.window, t_table, args.shortlist, args.depth, (exam_lists > 0).sum(-1).float()[exam_lists.sum(-1) > 0].mean(),
                                         len(vocab), np.mean(cover), time.time() - t_list), flush=True)
     real_hash = torch.cat([_bag_hash(_counts(a[:, t], m[:, t], len(vocab)), weights)[m[:, t].any(1)]
                            for a, m in ((ids, mask), (exam_ids, exam_mask)) for t in range(a.shape[1])]).unique()
@@ -377,7 +379,7 @@ def main(argv=None):
     if args.resume:
         pack = torch.load(ckpt, map_location=args.device, weights_only=False)
         assert pack["vocab"] == vocab, "sozluk checkpoint'tekinden farkli"
-        keys = ("data", "seed", "d", "slots", "directions", "relax", "batch", "lr", "schedule", "epochs", "shortlist", "depth")
+        keys = ("data", "seed", "d", "slots", "directions", "relax", "batch", "lr", "schedule", "epochs", "shortlist", "depth", "window")
         diff = {k: (pack["args"].get(k), vars(args)[k]) for k in keys if pack["args"].get(k) != vars(args)[k]}
         assert not diff, "surdurme ayari checkpoint'ten farkli (checkpoint, simdi): %s" % diff
         agent.load_state_dict(pack["state"])
