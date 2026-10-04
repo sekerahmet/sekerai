@@ -54,6 +54,12 @@ diye birşey yok doğru tasarım ne"*; tasarıma *"Tamam beraber eğitelim o de�
   → %0,1, ilk 5'te %4,6 → %0,5; farklı torbada cümle olmayanın %95,3'ü elenir, cümlenin %98,9'u geçer. Yanlış elenenler
   gramerin görmediği olgular (Parthenon, nasi lemak, Himeji Castle; sınavda complete_real unseen 0,919, seen 1,000):
   kapı tanımadığı kelime bağını "eksik" sayıyor. Geçen eksikler: "The Netherlands .", "The Eiffel is in France .".
+  **Tam eğitim** (kullanıcı, 4 Ekim: *"Gramer tam eğitimli olmalı o zaman"*; `--train_all 1`, 2.498 cümle): ilk aday cümle
+  değil %0,1, ilk 5'te %0,4; yanlış elenen cümle adayı 422 → 31 (4 farklı torba: "The capital of the Netherlands is
+  Amsterdam" türü, iki "the"li torbada dizme adları karıştırıyor, kapı o diziyi eliyor). Cümlenin %99,8'i geçer, cümle
+  olmayanın %94,7'si elenir; geçenlerin çoğu veride olmayan ama düzgün cümle ("Paris is in France ."), anlam hatası
+  ("People in the Czech Republic eat Brno .") ya da az sayıda eksik ("The Czech Republic ."). SS'te görülmemiş bağ
+  sorunu açık.
 
 - **Gramer kötü torba görmedi.** Kullanıcı, 4 Ekim 2026: *"bunu açık bir nokta olarak kaydet. grammer kötü torba görmedi!
   evet seçilen torbaya puan vermek grammer işi olur katılıyorum."* Gramer, kendisine gelen torbayı dizer ve bir **kalite

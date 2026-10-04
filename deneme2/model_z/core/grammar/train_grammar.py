@@ -228,6 +228,8 @@ def main(argv=None):
     ap.add_argument("--precision", default="bf16", choices=("bf16", "fp32"), help="egitim ileri hesabi (yalniz cuda); "
                     "sinav hep fp32")
     ap.add_argument("--alternatives", type=int, default=ALTERNATIVES, help="top_k olcusu: ilk kac aday")
+    ap.add_argument("--train_all", type=int, default=0, help="1: sinav cumleleri de egitime girer (gramer arac olarak; "
+                    "kullanici, 4 Ekim: \"Gramer tam eğitimli olmalı\"); sinav olculeri o zaman gorulmus")
     ap.add_argument("--missing", type=int, default=0, help="1: missing dugumu + bozuk torbalarla egitim (is_complete kapisi)")
     ap.add_argument("--drop", type=float, default=DROP_RATE, help="--missing 1: kelime cikarma olasiligi")
     ap.add_argument("--add", type=float, default=ADD_RATE, help="--missing 1: kelime ekleme olasiligi")
@@ -245,6 +247,7 @@ def main(argv=None):
     exam = _load(os.path.join(folder, prefix + "exam.jsonl"))
     valid = defaultdict(set)                            # ayni torbadan kurulabilen gecerli cumleler
     if os.path.exists(os.path.join(folder, prefix + "train_ids.npy")):
+        assert not args.train_all, "--train_all yalniz jsonl verisinde (ulke)"
         # buyuk veri (make_ss_sentences): sozluk, cumleler uc uca kimlik dizisi; gecerli siralar sinav satirinda
         vocab = json.load(open(os.path.join(folder, prefix + "vocab.json"), encoding="utf-8"))
         assert vocab[0] == UNK
@@ -253,7 +256,7 @@ def main(argv=None):
         for r in exam:
             valid[tuple(sorted(r["words"]))] |= {tuple(o) for o in r["valid"]}
     else:
-        train = _load(os.path.join(folder, prefix + "train.jsonl"))
+        train = _load(os.path.join(folder, prefix + "train.jsonl")) + (exam if args.train_all else [])
         for r in _load(os.path.join(folder, prefix + "sentences.jsonl"), required=False) or train + exam:
             valid[tuple(sorted(r["words"]))].add(tuple(r["words"]))
         vocab = [UNK] + sorted({w for r in train for w in r["words"]})
@@ -288,7 +291,7 @@ def main(argv=None):
         pack = torch.load(ckpt, map_location=args.device, weights_only=False)
         assert pack["vocab"] == vocab, "sozluk checkpoint'tekinden farkli: ayni veriyle surdurulur"
         # surdurme ayni tarifle: farkli ayar sessizce yok sayilmasin (lr optimizer durumundan gelir)
-        keys = ("data", "seed", "d", "batch", "lr", "schedule", "precision", "missing", "drop", "add") + (
+        keys = ("data", "seed", "d", "batch", "lr", "schedule", "precision", "missing", "drop", "add", "train_all") + (
             ("epochs",) if args.schedule == "cosine" else ())    # cosine'in bitisi --epochs: uzatma zamanlamayi degistirir
         old = {k: pack["args"].get(k, ap.get_default(k)) for k in keys}     # eski checkpoint'te olmayan ayar: varsayilan
         diff = {k: (old[k], vars(args)[k]) for k in keys if old[k] != vars(args)[k]}
