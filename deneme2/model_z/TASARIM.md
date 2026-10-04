@@ -36,6 +36,10 @@ diye birşey yok doğru tasarım ne"*; tasarıma *"Tamam beraber eğitelim o de�
   context agent'tan torbalar çekilir, gramer dizip puanlar, kapıdan geçemeyenin olasılığı aşağı itilir; geçen
   ödüllendirilmez (yalnız ceza: kısa, kesin torba ödül almaz) (torba kesikli: gradient gramerden akmaz, örnekleme sinyali). Gerçek torbanın olasılık kaybı aynen sürer.
   Gramer biçime bakar: geçerli ama gerçek olmayan devam cezalanmaz (SS'te geçerli devam kümesi gerekmez).
+  **Sonuç (4 Ekim, `context_countries_B_d64_k30_cosine_e30_gate1`, tam eğitimli missing'li gramer, ağırlık 1):** kapı
+  cezasız B ile aynı ölçüyle (adaylar is_complete'ten geçirilip context olasılığıyla sıralı): ilk aday geçerli 0,978 /
+  0,976, ilk 5'te gerçek 0,519 / 0,505, kalan aday 13,9 / 13,8. Eğitim sırasında kapı, çıkarımdaki kapıya bir şey
+  eklemedi; doğru torba ilk 30'da 0,881 → 0,829 düştü, adım süresi 3,5 → 5,9 sn.
   Ön koşul: donuk gramer cümle olmayan torbaları ayırıyor mu. **Sınandı (4 Ekim):** ülke grameri, context agent d64 K30
   adayları, 300 sınav hikâyesi, 57.308 aday: cümle > cümle değil %86 (aynı bağlamda da %86); eşik −0,5 cümle olmayanın
   %61'ini, cümlenin %1,5'ini eler. Kör nokta: kısa torba (2 kelimelik "Nepal ." tam puan) ve dilbilgisi düzgün ama eksik /
