@@ -16,7 +16,6 @@ import json
 import math
 import os
 import time
-from collections import defaultdict
 
 import torch
 
@@ -26,8 +25,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_Z = os.path.dirname(os.path.dirname(HERE))
 FILES = {"countries": "country_"}   # data/<ad>/<onek>{stories.jsonl, vocab.json}
 BATCH = 64              # hikaye
-LR = 1e-3
-SCHEDULE = "cosine"     # constant | cosine (adim adim --epochs sonunda 0)
+LR = 3e-3              # olculdu (ulke, d 32): sabit 3e-3 ile 600 adimda sinav 20de 0,650; cosine 1e-3 2.820 adimda 0,59-0,70
+SCHEDULE = "constant"   # constant | cosine; cosine kisa kosuda lr'yi ogrenme baslamadan sifira indiriyordu (470 adimda 0,021)
 RELAX = 0.05            # olu yon gevsetmesi; Rupprecht ve ark. (MHP) degeri, bu modelde olculmedi
 SHOW = 2                # goz: kac sinav hikayesi yazilir
 
@@ -95,20 +94,27 @@ def loss_of(agent, ids, mask, relax):
     return ((1 - relax) * -(log_pi + lp).logsumexp(1) + relax * -lp.mean(1)).mean()
 
 
-def _key(counts_row, V):
-    """Sayi vektoru (V,) -> torba anahtari: ((kelime, sayi), ...) sirali."""
-    nz = counts_row.nonzero().squeeze(1)
-    return tuple(zip(nz.tolist(), counts_row[nz].tolist()))
+def _bag_hash(counts, weights):
+    """Sayi vektorleri (..., V) -> torba ozeti (...,) int64: sum_w min(c_w, 3) * r_w (r_w rastgele; carpisma ~0)."""
+    return (counts.clamp(max=LEVELS - 1).long() * weights).sum(-1)
 
 
-def evaluate(agent, ids, mask, real_bags, names, show=SHOW):
-    """-> bag_in_top_k (ilk 1 / 5 / K, taban: onceki cumle), tutarlilik, calibration, direction_health; goz satirlari."""
+def _counts(ids, mask, V):
+    """Cumleler (B, W) -> sayi vektoru (B, V); <unk> sayilmaz."""
+    c = torch.zeros(len(ids), V, device=ids.device).scatter_add_(1, ids, mask.float())
+    c[:, 0] = 0
+    return c
+
+
+def evaluate(agent, ids, mask, real_hash, weights, names, show=SHOW):
+    """-> bag_in_top_k (ilk 1 / 5 / K, taban: onceki cumle), tutarlilik, calibration, direction_health; goz satirlari.
+    Toplu: ayni torbayi veren yonler ozetle birlesir, olasiliklari toplanir."""
     K, V = agent.directions, len(agent.vocab)
-    hit = defaultdict(int)
-    n, coherent_first, coherent_all, n_cand, distinct, ent = 0, 0, 0, 0, 0.0, 0.0
-    bins = [[0.0, 0, 0] for _ in range(5)]           # olasilik toplami, aday, dogru
-    pi_max = torch.zeros(K)
+    acc = torch.zeros(9, device=ids.device)          # n, ilk1, ilk5, ilkK, taban, tutarli ilk, tutarli hepsi, aday, expH
+    bins = torch.zeros(3, 5, device=ids.device)      # olasilik toplami, aday, dogru (5 dilim)
+    pi_max = torch.zeros(K, device=ids.device)
     eye = []
+    earlier = torch.ones(K, K, device=ids.device).tril(-1).bool()
     with torch.no_grad():
         for b0 in range(0, len(ids), 256):
             bi, bm = ids[b0:b0 + 256], mask[b0:b0 + 256]
@@ -116,51 +122,55 @@ def evaluate(agent, ids, mask, real_bags, names, show=SHOW):
             for t in range(bi.shape[1] - 1):
                 state = agent.read(state, bi[:, t], bm[:, t])
                 counts, logp = agent.next_bags(state)
-                log_pi = agent._heads(state)[0]
-                pi_max = torch.maximum(pi_max, log_pi.exp().max(0).values.cpu())
-                for r in range(len(bi)):
-                    if not bm[r, t + 1].any():
-                        continue
-                    words, c = _bag(bi[r:r + 1, t + 1], bm[r:r + 1, t + 1], V)
-                    true = tuple(sorted((w, min(x, LEVELS - 1)) for w, x in zip(words[0].tolist(), c[0].tolist()) if x))
-                    prev_w, prev_c = _bag(bi[r:r + 1, t], bm[r:r + 1, t], V)
-                    prev = tuple(sorted((w, min(x, LEVELS - 1)) for w, x in zip(prev_w[0].tolist(), prev_c[0].tolist()) if x))
-                    merged = defaultdict(float)
-                    for k in range(K):                                       # ayni torbayi veren yonler birlesir
-                        merged[_key(counts[r, k], V)] += math.exp(logp[r, k].item())
-                    ranked = sorted(merged.items(), key=lambda x: -x[1])
-                    keys = [key for key, _ in ranked]
-                    n += 1
-                    hit["ilk1"] += true in keys[:1]
-                    hit["ilk5"] += true in keys[:5]
-                    hit["ilkK"] += true in keys
-                    hit["taban_onceki"] += prev == true
-                    coherent_first += keys[0] in real_bags
-                    coherent_all += sum(key in real_bags for key in keys)
-                    n_cand += len(keys)
-                    distinct += len(keys) / K
-                    p = log_pi[r].exp()
-                    ent += math.exp(-(p * p.clamp_min(1e-12).log()).sum().item())
-                    for key, prob in ranked:
-                        s = bins[min(int(prob * 5), 4)]
-                        s[0] += prob
-                        s[1] += 1
-                        s[2] += key == true
-                    if b0 + r < show:
-                        eye.append((b0 + r, t, bi[r, t][bm[r, t]].tolist(), ranked[:3], bi[r, t + 1][bm[r, t + 1]].tolist()))
-    calib = sum(abs(s[0] / s[1] - s[2] / s[1]) * s[1] for s in bins if s[1]) / max(sum(s[1] for s in bins), 1)
-    out = dict(bag_in_top_k={k: round(v / n, 4) for k, v in hit.items()},
-               tutarlilik=dict(ilk_aday=round(coherent_first / n, 4), butun_adaylar=round(coherent_all / max(n_cand, 1), 4)),
+                pi_max = torch.maximum(pi_max, agent._heads(state)[0].exp().max(0).values)
+                valid = bm[:, t + 1].any(1)
+                hk = _bag_hash(counts, weights)                                       # (B, K)
+                true = _bag_hash(_counts(bi[:, t + 1], bm[:, t + 1], V), weights)     # (B,)
+                prev = _bag_hash(_counts(bi[:, t], bm[:, t], V), weights)
+                same = hk[:, :, None] == hk[:, None, :]                              # (B, K, K)
+                p = logp.exp()
+                merged = (same * p[:, None, :]).sum(-1)                               # ayni torbanin toplam olasiligi
+                first = ~(same & earlier).any(-1)                                     # her torbanin ilk gorulen yonu
+                score = torch.where(first, merged, torch.full_like(merged, -1.0))
+                order = score.argsort(1, descending=True)
+                ranked_h = hk.gather(1, order)
+                ranked_first = first.gather(1, order)
+                hit = (ranked_h == true[:, None]) & ranked_first                     # (B, K) sirali
+                real = torch.isin(hk, real_hash) & first
+                n_first = first.sum(1).float()
+                q = torch.where(first, merged, torch.zeros_like(merged))
+                q = q / q.sum(1, keepdim=True).clamp_min(1e-30)
+                ent = (-(q * q.clamp_min(1e-30).log()).sum(1)).exp()
+                v = valid.float()
+                acc += torch.stack([v.sum(), (hit[:, :1].any(1) * v).sum(), (hit[:, :5].any(1) * v).sum(),
+                                    (hit.any(1) * v).sum(), ((prev == true) * v).sum(),
+                                    (real.gather(1, order[:, :1]).squeeze(1) * v).sum(), (real.sum(1) * v).sum(),
+                                    (n_first * v).sum(), (ent * v).sum()])
+                correct = (hk == true[:, None]) & first
+                dil = (merged * 5).long().clamp(0, 4)
+                w = (first & valid[:, None]).float()
+                for j, val in enumerate((merged * w, w, correct.float() * w)):
+                    bins[j].scatter_add_(0, dil.flatten(), val.flatten())
+                for r in range(min(len(bi), max(show - b0, 0))):
+                    if valid[r]:
+                        top = [(counts[r, order[r, j]].clone(), merged[r, order[r, j]].item()) for j in range(K)
+                               if first[r, order[r, j]]][:3]
+                        eye.append((b0 + r, t, bi[r, t][bm[r, t]].tolist(), top, bi[r, t + 1][bm[r, t + 1]].tolist()))
+    n, acc = acc[0].item(), acc.tolist()
+    calib = ((bins[0] - bins[2]).abs().sum() / bins[1].sum().clamp_min(1)).item()
+    out = dict(bag_in_top_k=dict(ilk1=round(acc[1] / n, 4), ilk5=round(acc[2] / n, 4), ilkK=round(acc[3] / n, 4),
+                                 taban_onceki=round(acc[4] / n, 4)),
+               tutarlilik=dict(ilk_aday=round(acc[5] / n, 4), butun_adaylar=round(acc[6] / max(acc[7], 1), 4)),
                calibration=round(calib, 4),
-               direction_health=dict(farkli_torba_orani=round(distinct / n, 4), exp_H_pi=round(ent / n, 2),
+               direction_health=dict(farkli_torba_orani=round(acc[7] / n / K, 4), exp_H_pi=round(acc[8] / n, 2),
                                      olu_yon=int((pi_max < 0.01).sum())))
-    bag_text = lambda key: " ".join(agent.vocab[w] + ("x%d" % c if c > 1 else "") for w, c in key)
-    for s, t, read, top, real in eye:
+    bag_text = lambda c: " ".join(agent.vocab[w] + ("x%d" % c[w] if c[w] > 1 else "") for w in c.nonzero().flatten().tolist())
+    for s_, t, read, top, real in eye:
         if t == 0:
-            print("   --- %s" % names[s])
+            print("   --- %s" % names[s_])
         print("   okunan: %s" % " ".join(agent.vocab[i] for i in read))
-        for key, prob in top:
-            print("      %.3f  {%s}" % (prob, bag_text(key)))
+        for c, prob in top:
+            print("      %.3f  {%s}" % (prob, bag_text(c)))
         print("      gercek: %s" % " ".join(agent.vocab[i] for i in real))
     return out
 
@@ -203,14 +213,9 @@ def main(argv=None):
     ids, mask = (t.to(args.device) for t in data["train"])
     exam_ids, exam_mask = (t.to(args.device) for t in data["exam"])
     n_train = len(ids)
-    real_bags = set()                                       # veride gecen butun cumle torbalari (tutarlilik olcusu)
-    for a, m in (data["train"], data["exam"]):
-        for n in range(len(a)):
-            for t in range(a.shape[1]):
-                if m[n, t].any():
-                    real_bags.add(tuple(sorted((w, min(c, LEVELS - 1)) for w, c in
-                                               zip(*torch.unique(a[n, t][m[n, t]], return_counts=True)) if w)))
-    real_bags = {tuple((int(w), int(c)) for w, c in b) for b in real_bags}
+    weights = torch.randint(1, 2 ** 62, (len(vocab),), generator=torch.Generator().manual_seed(0)).to(args.device)
+    real_hash = torch.cat([_bag_hash(_counts(a[:, t], m[:, t], len(vocab)), weights)[m[:, t].any(1)]
+                           for a, m in ((ids, mask), (exam_ids, exam_mask)) for t in range(a.shape[1])]).unique()
     sent = mask.any(2)
     presence = torch.zeros(len(vocab), device=args.device)
     for t in range(ids.shape[1]):
@@ -221,7 +226,7 @@ def main(argv=None):
     gen = torch.Generator().manual_seed(args.seed)
     print("veri %s: egitim %d hikaye, sinav %d, sozluk %d, gercek torba %d | d %d, slots %d, directions %d, relax %g, "
           "lr %g %s, batch %d, %d parametre | cihaz %s" % (
-              args.data, n_train, len(exam_ids), len(vocab), len(real_bags), args.d, args.slots, args.directions,
+              args.data, n_train, len(exam_ids), len(vocab), len(real_hash), args.d, args.slots, args.directions,
               args.relax, args.lr, args.schedule, args.batch, sum(p.numel() for p in agent.parameters()), args.device),
           flush=True)
     t0, history, first = time.time(), [], 1
@@ -243,7 +248,7 @@ def main(argv=None):
         print("SURDURULDU: epok %d'den" % pack["epoch"], flush=True)
     for epoch in range(first, args.epochs + 1):
         perm = torch.randperm(n_train, generator=gen)
-        total, t_epoch = 0.0, time.time()
+        total, t_epoch = torch.zeros((), device=args.device), time.time()
         for b in range(0, n_train, args.batch):
             if args.schedule == "cosine":
                 done = ((epoch - 1) * n_train + b) / (args.epochs * n_train)
@@ -254,16 +259,19 @@ def main(argv=None):
             opt.zero_grad()
             loss.backward()
             opt.step()
-            total += loss.item() * len(rows)
+            total += loss.detach() * len(rows)
+        total = total.item()                             # adim basina .item() yok: GPU her adimda beklenmez
         if epoch % args.every == 0 or epoch == args.epochs:
             agent.eval()
-            res = evaluate(agent, exam_ids, exam_mask, real_bags, data["exam_names"],
+            t_train = time.time() - t_epoch
+            res = evaluate(agent, exam_ids, exam_mask, real_hash, weights, data["exam_names"],
                            show=SHOW if epoch == args.epochs else 0)
             agent.train()
             k = res["bag_in_top_k"]
-            print("epok %3d  kayip %.3f  (%.0f sn, epok %.1f sn) | dogru torba ilk1 %.3f ilk5 %.3f ilk%d %.3f (taban onceki "
+            print("epok %3d  kayip %.3f  (%.0f sn; egitim %.1f sn/epok, olcum %.1f sn) | dogru torba ilk1 %.3f ilk5 %.3f ilk%d %.3f (taban onceki "
                   "%.3f) | tutarlilik ilk %.3f butun %.3f | calibration %.3f | yon: farkli %.2f expH %.1f olu %d" % (
-                      epoch, total / n_train, time.time() - t0, time.time() - t_epoch, k["ilk1"], k["ilk5"],
+                      epoch, total / n_train, time.time() - t0, t_train, time.time() - t_epoch - t_train,
+                      k["ilk1"], k["ilk5"],
                       args.directions, k["ilkK"], k["taban_onceki"], res["tutarlilik"]["ilk_aday"],
                       res["tutarlilik"]["butun_adaylar"], res["calibration"], res["direction_health"]["farkli_torba_orani"],
                       res["direction_health"]["exp_H_pi"], res["direction_health"]["olu_yon"]), flush=True)
