@@ -99,10 +99,14 @@ class ContextAgent(torch.nn.Module):
 
     def bag_log_prob(self, state, words, counts, shortlist=None):
         """Torba -> (log pi (B, K), log P(torba | k) (B, K)).  words (B, P) torbadaki farkli kelimeler (dolgu 0), counts
-        (B, P) sayilari (0 = dolgu; 3'ten buyuk 3 sayilir).  shortlist verilirse torbanin kelimeleri listede olmali."""
+        (B, P) sayilari (0 = dolgu; 3'ten buyuk 3 sayilir).  shortlist verilirse hedef torba listeyle sinirlanir: listede
+        olmayan kelime sayilmaz (kapsam ayri olculur)."""
         log_pi, z = self._heads(state, shortlist)
         absent = F.logsigmoid(-z).sum(-1)                                             # her kelime 0: (B, K)
-        at = words if shortlist is None else (shortlist[:, None, :] == words[:, :, None]).float().argmax(-1)
+        at = words
+        if shortlist is not None:
+            hit = shortlist[:, None, :] == words[:, :, None]                          # (B, P, L)
+            at, counts = hit.float().argmax(-1), counts * hit.any(-1)                 # argmax tek basina 0. yuvayi verirdi
         zp = z.gather(2, at[:, None, :].expand(-1, z.shape[1], -1))                   # (B, K, P)
         lp = self._level_log_probs(zp, words)                                         # (B, K, P, 4)
         c = counts.clamp(max=LEVELS - 1)[:, None, :, None].expand(-1, z.shape[1], -1, 1)
