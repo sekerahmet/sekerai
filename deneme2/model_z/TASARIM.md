@@ -59,8 +59,12 @@ tahmini değil"*; *"1 cümlenin tüm kelimeleri sırayla gizlenmezse model nası
   cümle ve ikinci cümle sonra ilk üç cümle gibi"*), penceredeki bütün kelimeler tek torba; her kelime sırayla gizlenir.
   Sık kelime seyreltmesi (word2vec, t = 0,001; kullanıcı: *"Evet"*): kelime √(t/f) + t/f olasılıkla kalır (. 0,09, the
   0,19, Turkey 1).
-- Çıktı: `neighbors.pt` (`build_neighbor_table`): her kelime için kos(source_i, target_j) en büyük 50 kelime. IN-OUT
-  kosinüsü birlikte gelen kelimeleri verir (Mitra ve ark. 2016, `belge/makaleler/2016/mitra2016_desm.txt`).
+- Çıktı: `neighbors.pt` (`build_neighbor_table`): her kelime için modelin kendi log P(j | i) en büyük 50 kelime
+  (kullanıcı, 4 Ekim: *"log P bana daha doğru gibi geldi"*). Önce kosinüs vardı (Mitra ve ark. 2016); SS'te vektör boyu
+  sıklığı kodluyor, kosinüs onu atınca komşular nadir adlara kaydı (dragon → Flamewing, Firewing; log P: scales, knight,
+  cave, fierce, roared). Matematikçi ölçüsü (`belge/model_z_temel/12` Ek A), SS sınavı 5 × 5: liste 3.676 → 820 kelime,
+  sonraki cümlenin tamamı listede 0,062 → 0,207. SS: boy → He, his, he, him; girl → She, her, she; Mia → She, her, she.
+  Nadir adlar zayıf (Tom 71 kez geçiyor: little, big, Mia …; Tim 372: Rex 1,000).
 - Kullanım `shortlist`: okunan cümlenin her kelimesi için tablodan NEIGHBORS komşu, DEPTH adım; komşu × derinlik eğitimde
   maliyet kararı, üretimde sıcaklık gibi ayar (`train_context --meaning neighbors.pt --shortlist N --depth D`). Liste =
   okunan cümlenin kelimelerinin komşuları + hikâyede geçenler; biçim kelimeleri cümlenin kendi biçim kelimeleri ve

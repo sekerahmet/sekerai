@@ -8,10 +8,10 @@ Bag tablosu modelin kendi parametresi; gizli kelime yalniz tablo uzerinden tahmi
     P(j | i) = softmax_j(bias_j + R[i, j])      torbadaki her kelime tek basina tahmin eder
     P(j gizli | torba) = ortalama_i P(j | i)    (kullanici, 4 Ekim: "Kur"): bag kelime ciftine yazilir
     bias    kelimenin genel sikligi: "the", "is" tabloyu doldurmasin
-Komsu tablosu (build_neighbor_table): kos(source_i, target_j) -- IN-OUT kosinusu birlikte gelen kelimeleri verir, ham
-carpimda vektor boyu buyuk sik kelimeler one cikar (Mitra ve ark. 2016, belge/makaleler/2016/mitra2016_desm.txt: "the
-IN-OUT cosine similarities are high between words that often co-occur in the same query or document").  Kisa liste (shortlist): okunan cumlenin
-kelimeleri icin tablodan NEIGHBORS komsu, DEPTH adim (komsularin komsulari).
+Komsu tablosu (build_neighbor_table): modelin kendi tahmini log P(j | i) en buyuk kelimeler (kullanici, 4 Ekim: "log P
+bana daha doğru gibi geldi").  Kosinus vektor boyunu atiyordu; SS'te boy sikligi kodluyor ve komsular nadir adlara
+kayiyordu (dragon -> Flamewing, Firewing; log P: scales, knight, cave; belge/model_z_temel/12 Ek A).  Kisa liste
+(shortlist): okunan cumlenin kelimeleri icin tablodan NEIGHBORS komsu, DEPTH adim (komsularin komsulari).
 """
 import math
 
@@ -61,15 +61,15 @@ class MeaningAgent(torch.nn.Module):
 
 @torch.no_grad()
 def build_neighbor_table(agent, m):
-    """-> {"ids": (V, m), "scores": (V, m)}: her kelime icin kos(source_i, target_j) en buyuk m kelime (kendisi ve <unk>
-    haric)."""
+    """-> {"ids": (V, m), "scores": (V, m)}: her kelime i icin log P(j | i) en buyuk m kelime j (kendisi ve <unk> haric);
+    scores log P."""
     V = len(agent.vocab)
     ids, scores = [], []
-    src = torch.nn.functional.normalize(agent.source.weight, dim=1)
-    tgt = torch.nn.functional.normalize(agent.target.weight, dim=1)
+    src, tgt = agent.source.weight, agent.target.weight
     for c in range(0, V, 4096):
         rows = torch.arange(c, min(c + 4096, V), device=agent.bias.device)
-        r = src[rows] @ tgt.T
+        r = src[rows] @ tgt.T / src.shape[1] ** 0.5 + agent.bias
+        r = r - r.logsumexp(1, keepdim=True)
         r[torch.arange(len(rows)), rows] = -1e9
         r[:, agent.index[UNK]] = -1e9
         top = r.topk(m, dim=1)

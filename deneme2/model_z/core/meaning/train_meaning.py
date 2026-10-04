@@ -8,7 +8,7 @@ sirayla gizli sayilir ve obur kelimelerden tahmin edilir (toplu hesap); kayip -l
 kelime seyreltmesi (word2vec): kelime pencerede sqrt(t / f) + t / f olasilikla kalir.
 Olcu goz ile (kullanici: "biz gözle bakıp Türkiye için ne yapmış ona bakmak"; "Sınav yok bunda göz ile kontrol var"):
 EYE kelimelerinin tablo satiri.  Her epok checkpoint.pt (surdurme); sonunda agent.pt ve neighbors.pt (her kelimenin ilk
-50 komsusu, kosinus).
+50 komsusu, log P).
 
     python train_meaning.py [--data countries|simplestories] [--root klasor] [--window 5] [--epochs 4]
                             [--device cpu|cuda] [--out klasor] [--resume 1]
@@ -106,13 +106,13 @@ def loss_of(agent, ids, present, keep=None, gen=None, sample=None):
 
 @torch.no_grad()
 def eye(agent, words):
-    """Kelimelerin tablo satirlari (ilk 15, kosinus)."""
+    """Kelimelerin tablo satirlari (ilk 15, P(j | i))."""
     table = build_neighbor_table(agent, 15)
     print("\n   BAG TABLOSU (ilk 15):", flush=True)
     for w in words:
         if w in agent.index:
             i = agent.index[w]
-            print("   %-8s %s" % (w, ", ".join("%s %.1f" % (agent.vocab[j], v) for j, v in zip(
+            print("   %-8s %s" % (w, ", ".join("%s %.3f" % (agent.vocab[j], math.exp(v)) for j, v in zip(
                 table["ids"][i].tolist(), table["scores"][i].tolist()))), flush=True)
     return table
 
