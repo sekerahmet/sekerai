@@ -64,7 +64,7 @@ FREQUENT_SHARE = 0.02   # cumlelerin bu payindan fazlasinda gecen kelime listeye
 
 def build_neighbor_table(stories, V, window=WINDOW, n=NEIGHBORS):
     """Hikayeler (cumle -> kelime kimlikleri) -> komsu tablosu: {"ids": (V, n) (dolgu 0), "frequent": kimlikler}.
-    Komsu: ayni pencerede (window cumlenin kelimeleri) guclu bagli kelimeler (kat >= STRONG_LIFT, birlikte >= STRONG_SHARE),
+    Pencere: her cumlede biten, geriye en cok window cumle (hikaye basinda 1, 1-2, 1-3 ...).  Komsu: ayni pencerede guclu bagli kelimeler (kat >= STRONG_LIFT, birlikte >= STRONG_SHARE),
     birlikte gecme payina gore ilk n.  Bicim kelimelerinin guclu bagi olmaz: komsu getirmezler."""
     import numpy as np
     import scipy.sparse as sp
@@ -74,8 +74,8 @@ def build_neighbor_table(stories, V, window=WINDOW, n=NEIGHBORS):
         for s in st:
             n_sent += 1
             df[list(set(s))] += 1
-        for t in range(max(1, len(st) - window + 1)):
-            ws = {x for s in st[t:t + window] for x in s}
+        for t in range(len(st)):                       # pencere t. cumlede biter, geriye en cok window cumle: hikayenin
+            ws = {x for s in st[max(0, t - window + 1):t + 1] for x in s}      # basinda 1, 1-2, 1-3 ... (kullanici, 4 Ekim)
             rows += [k] * len(ws)
             cols += list(ws)
             k += 1
