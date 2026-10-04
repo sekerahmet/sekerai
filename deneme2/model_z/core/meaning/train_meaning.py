@@ -4,8 +4,8 @@ Veri: her cumlede biten buyuyen pencere (hikaye basinda 1, 1-2, 1-3 ... en cok W
 ilk cümle sonra ilk cümle ve ikinci cümle sonra ilk üç cümle gibi"); pencerenin farkli kelimeleri tek ortak torba.
 Egitim (kullanici: "1 cümlenin tüm kelimeleri sırayla gizlenmezse model nasıl öğrenecek ?"): torbanin her kelimesi sirayla
 birer kez gizlenir; gizli kelime kalanlarin bag tablosu oylariyla tahmin edilir; kayip -log P(gizli kelime).
-Olcu goz ile (kullanici: "biz gözle bakıp Türkiye için ne yapmış ona bakmak"): EYE kelimelerinin tablo satiri; EYE
-ulkelerinin ilk sinav hikayesinde gizli kelime tahminleri ve en cok oy veren kelimeler.
+Olcu goz ile (kullanici: "biz gözle bakıp Türkiye için ne yapmış ona bakmak"; "Sınav yok bunda göz ile kontrol var"):
+EYE kelimelerinin tablo satiri.
 Sonunda agent.pt ve neighbors.pt (bag tablosunun her satirinin ilk 50 kelimesi).
 
     python train_meaning.py [--window 5] [--epochs 4] [--device cpu|cuda] [--out klasor]
@@ -32,7 +32,6 @@ LR = 3e-3
 SUBSAMPLE = 1e-3        # sik kelime seyreltmesi (word2vec): kelime p = min(1, sqrt(t / f) + t / f) olasilikla kalir,
                         # f kelimenin sikligi; hem gizlenen hem oy veren (kullanici, 4 Ekim: "Evet")
 EYE_WORDS = ("Turkey", "Ankara", "baklava", "Peru", "Lima", "Japan", "Spanish", "South", "the", "is", ".")
-EYE_COUNTRIES = ("Turkey", "Peru")
 
 
 def windows_of(agent, stories, W):
@@ -71,38 +70,15 @@ def loss_of(agent, ids, present, slot, keep=None, gen=None):
 
 
 @torch.no_grad()
-def eye(agent, stories, W, windows=6, top=5):
-    """Tablo satirlari; ulkelerin ilk sinav hikayesinde (ilk `windows` pencere) her kelime gizli -> ilk top tahmin ve ilk
-    tahmine en cok oy veren 3 kelime (R[i, tahmin])."""
-    vocab = agent.vocab
+def eye(agent):
+    """EYE kelimelerinin tablo satirlari (ilk 15, kosinus)."""
     table = build_neighbor_table(agent, 15)
-    print("\n   BAG TABLOSU (R satiri, ilk 15):", flush=True)
+    print("\n   BAG TABLOSU (ilk 15):", flush=True)
     for w in EYE_WORDS:
         if w in agent.index:
             i = agent.index[w]
-            print("   %-8s %s" % (w, ", ".join("%s %.1f" % (vocab[j], v) for j, v in zip(
+            print("   %-8s %s" % (w, ", ".join("%s %.1f" % (agent.vocab[j], v) for j, v in zip(
                 table["ids"][i].tolist(), table["scores"][i].tolist()))), flush=True)
-    for c in EYE_COUNTRIES:
-        st = next(s["sentences"] for s in stories if s["country"] == c and s["split"] == "exam")
-        print("\n   === %s (ilk %d pencere, en cok %d cumle)" % (c, windows, W), flush=True)
-        for t in range(min(windows, len(st))):
-            bag = []
-            for x in st[max(0, t - W + 1):t + 1]:
-                bag += [w for w in x if w not in bag]
-            ids = torch.tensor([agent.ids(bag)], device=agent.bias.device)
-            print("   " + " ".join(bag), flush=True)
-            for j, w in enumerate(bag):
-                present = torch.ones_like(ids, dtype=torch.bool)
-                present[0, j] = False
-                logp = agent(ids, present)
-                best = logp[0].exp().topk(top)
-                vote = agent.relation(ids[0])[:, best.indices[0]].masked_fill(~present[0], -1e9)
-                voters = vote.topk(min(3, len(bag) - 1))
-                print("      %-12s -> %-60s oy: %s" % (
-                    w, " ".join("%s %.2f" % (vocab[k], v) for k, v in zip(
-                        best.indices.tolist(), best.values.tolist())),
-                    " ".join("%s %.1f" % (bag[k], v) for k, v in zip(voters.indices.tolist(), voters.values.tolist()))),
-                    flush=True)
 
 
 def main(argv=None):
@@ -163,7 +139,7 @@ def main(argv=None):
             total += loss.item() * len(rows)
         print("epok %d  kayip %.4f  (%.0f sn)" % (epoch, total / n, time.time() - t0), flush=True)
     agent.eval()
-    eye(agent, stories, args.window)
+    eye(agent)
     if args.out:
         os.makedirs(args.out, exist_ok=True)
         torch.save(dict(vocab=vocab, state=agent.state_dict(), args=vars(args)), os.path.join(args.out, "agent.pt"))

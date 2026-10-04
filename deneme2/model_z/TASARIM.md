@@ -47,21 +47,24 @@ tahmini değil"*; *"1 cümlenin tüm kelimeleri sırayla gizlenmezse model nası
 - Amaç: context agent 57.000 kelime yerine okuduğu cümlenin kelimelerine yakın kelimelerden kısa bir liste üzerinde
   çalışsın (kullanıcı: *"57.000 yerine belki çok daha az"*).
 - Mimari (kullanıcı: *"Ya da istediğimiz tabloyu kuran bir mimari tasarla"*; *"saatlerdir bu tabloyu öğrenen modelle
-  kurmanı istedim"*): bağ tablosu modelin kendi parametresi, R[i, j] = source_i · target_j / √d. Gizli kelime yalnız
-  tablodan tahmin edilir: puan(j) = bias_j + Σ_i α_i R[i, j]; α attention (gizli yer `mask` sorgusu, `key`), bias genel
-  sıklık. Kelime başına iki vektör (`source`, `target`).
+  kurmanı istedim"*; *"Kur"*): kelime başına iki vektör, `source` (oy veren, word2vec IN) ve `target` (oy alan, OUT); her
+  görünen kelime gizli kelimeyi tek başına tahmin eder, P(j | i) = softmax_j(bias_j + source_i · target_j / √d); gizli
+  kelimenin olasılığı bu tahminlerin ortalaması. bias genel sıklık. d 128.
 - Öğrenme: her cümlede biten büyüyen pencere (1, 1–2, 1–3 … en çok 5 cümle; kullanıcı: *"sıralı ilk cümle sonra ilk
   cümle ve ikinci cümle sonra ilk üç cümle gibi"*), penceredeki bütün kelimeler tek torba; her kelime sırayla gizlenir.
-  Pencere 1 cümle içi bağ, fazlası cümleler arası bağ.
-- Çıktı: `neighbors.pt` (`build_neighbor_table`): R'nin her satırının en büyük 50 değeri.
+  Sık kelime seyreltmesi (word2vec, t = 0,001; kullanıcı: *"Evet"*): kelime √(t/f) + t/f olasılıkla kalır (. 0,09, the
+  0,19, Turkey 1).
+- Çıktı: `neighbors.pt` (`build_neighbor_table`): her kelime için kos(source_i, target_j) en büyük 50 kelime. IN-OUT
+  kosinüsü birlikte gelen kelimeleri verir (Mitra ve ark. 2016, `belge/makaleler/2016/mitra2016_desm.txt`).
 - Kullanım `shortlist`: okunan cümlenin her kelimesi için tablodan NEIGHBORS komşu, DEPTH adım; komşu × derinlik eğitimde
-  maliyet kararı, üretimde sıcaklık gibi ayar. Context agent `shortlist` ile çalışabiliyor (`context.py`).
-- Doğruluk ölçüsü (eğitimden önce yazıldı; kullanıcı: *"Eğer doğru değilse biz yanlış birşey tasarlamışızdır demek"*):
-  (1) tablo gözle: Turkey → Ankara, Istanbul, Turkish, lira, baklava, Hagia Sophia; Peru → Lima, Cusco, sol, ceviche;
-  biçim kelimelerinin güçlü bağı yok; (2) gizli kelime tahminleri ve oy verenler gözle (kullanıcı: *"Sınav yok bunda
-  göz ile kontrol var"*); (3) bu tablonun kısa listesiyle context agent kısıtsız B'ye yakın.
-- Önceki deneme (attention katmanlı gizli kelime modeli): gizli kelimeyi bağlam içinde buluyordu (pencere 5: 269/273) ama
-  tablo çıkarılamadı (kelime temsili benzerliği, Q·K, boş mask, etki okuması); silindi.
+  maliyet kararı, üretimde sıcaklık gibi ayar. Context agent `shortlist` ile çalışabiliyor (`context.py`); bağlanmadı.
+- Ölçü gözle (kullanıcı: *"Sınav yok bunda göz ile kontrol var"*; *"Eğer doğru değilse biz yanlış birşey
+  tasarlamışızdır"*). Ülke, son sürüm (`meaning_table_countries_w5_d128_mix_sub_e4`, CPU 39 sn): Japan → Tokyo, Shinano,
+  Japanese, Osaka, sushi, yen, Himeji; Peru → Chile, sol, ceviche, Cusco, Lima, Spanish, America, Amazon, Pacific;
+  Ankara → Turkey, Greece, baklava, Turkish, Hagia, Euphrates, Istanbul, Black, lira; Turkey → Euphrates, borders,
+  Istanbul, Hagia, is, Turkish, Greece, Ankara, … (arada kalıp kelimeleri); biçim kelimeleri yalnız birbirine bağlı.
+- Denenip bırakılan: attention katmanlı gizli kelime modeli (tablo okunamadı), attention'lı oy (oylar kalıp kelimelerine
+  gitti), toplamsal oy (kanıt bütün Türkiye kelimelerine bölüştü).
 
 ## Açık noktalar
 

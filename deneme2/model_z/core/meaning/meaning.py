@@ -8,8 +8,6 @@ Bag tablosu modelin kendi parametresi; gizli kelime yalniz tablo uzerinden tahmi
     P(j | i) = softmax_j(bias_j + R[i, j])      torbadaki her kelime tek basina tahmin eder
     P(j gizli | torba) = ortalama_i P(j | i)    (kullanici, 4 Ekim: "Kur"): bag kelime ciftine yazilir
     bias    kelimenin genel sikligi: "the", "is" tabloyu doldurmasin
-(Denenen: attention'li oy -- sorgu gizli yeri bilmedigi icin oylar kalip kelimelerine gitti; toplamsal oy -- kanit
-butun Turkiye kelimelerine bolustu, satirlarda kalip fiilleri one cikti.)
 Komsu tablosu (build_neighbor_table): kos(source_i, target_j) -- IN-OUT kosinusu birlikte gelen kelimeleri verir, ham
 carpimda vektor boyu buyuk sik kelimeler one cikar (Mitra ve ark. 2016, belge/makaleler/2016/mitra2016_desm.txt: "the
 IN-OUT cosine similarities are high between words that often co-occur in the same query or document").  Kisa liste (shortlist): okunan cumlenin
@@ -37,25 +35,16 @@ class MeaningAgent(torch.nn.Module):
     def ids(self, words):
         return [self.index.get(w, self.index[UNK]) for w in words]
 
-    def forward(self, ids, present, hidden=None):
-        """ids (B, L) torbadaki kelimeler (sirasiz), present (B, L) gercek ve gorunen yuva -> gizli kelime icin log
-        olasilik (B, V): gorunen kelimelerin tek tek tahminlerinin ortalamasi.  hidden (B,) verilirse yalniz o kelimenin
-        log olasiligi (B,): P(j | i) paydasi yalniz i'ye bagli, adim basina sozluk icin bir kez hesaplanir."""
+    def forward(self, ids, present, hidden):
+        """ids (B, L) torbadaki kelimeler (sirasiz), present (B, L) gorunen yuva, hidden (B,) gizli kelime -> log P(gizli
+        kelime | torba) (B,): gorunen kelimelerin tek tek tahminlerinin ortalamasi.  P(j | i) paydasi yalniz i'ye bagli,
+        adim basina sozluk icin bir kez hesaplanir."""
         u = self.source(ids)
         scale = u.shape[-1] ** 0.5
-        if hidden is None:
-            each = (u @ self.target.weight.T / scale + self.bias).log_softmax(-1)                # (B, L, V)
-            each = each.masked_fill(~present[..., None], -1e9)
-            return each.logsumexp(1) - present.sum(1, keepdim=True).clamp(min=1).log()
         log_z = (self.source.weight @ self.target.weight.T / scale + self.bias).logsumexp(1)      # (V,)
         each = (u * self.target(hidden)[:, None, :]).sum(-1) / scale + self.bias[hidden][:, None] - log_z[ids]
         each = each.masked_fill(~present, -1e9)                                                    # (B, L)
         return each.logsumexp(1) - present.sum(1).clamp(min=1).log()
-
-    @torch.no_grad()
-    def relation(self, rows):
-        """Kelime kimlikleri (n,) -> R satirlari (n, V)."""
-        return self.source(rows) @ self.target.weight.T / self.source.weight.shape[1] ** 0.5
 
 
 @torch.no_grad()
