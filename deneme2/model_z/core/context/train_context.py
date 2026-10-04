@@ -1,17 +1,15 @@
-"""train_context -- baglam ajaninin egitimi ve olcumu (ajan: context.py).
+"""train_context -- baglam ajaninin egitimi ve olcumu (ajan: context.py; matematik: belge/model_z_temel/07, 09).
 
-Egitim: maskeli torba tamamlama.  Her cumle gecisinde sonraki cumlenin torbasindan rastgele sayida (1..n) kelime saklanir;
-ajan hikaye ve kalan havuzla saklananlari bulur.  Kayip -log P(eksik | hikaye, havuz), gecis basina.  Etiket yok.
-Olculer (sinav hikayeleri, her cumle gecisi):
-    bag_in_top_k     gercek torba (kelime + sayi, 3+ birlesik) ilk 1 / 5 / K aday icinde mi (havuz bos); taban: onceki
-                     cumlenin torbasi
-    tamamlama        1 kelime / yarisi saklaninca saklananlar birebir bulundu mu
+Kayip: sonraki cumlenin gercek torbasinin kesin karisim olasiligi, -log sum_k pi_k P(B | k); olu yon icin RELAX:
+(1 - relax) * karisim + relax * yonlerin ortalamasi (her yon biraz ogrenir; Rupprecht ve ark. MHP).  Etiket yok.
+Olculer (sinav hikayeleri, her cumle gecisi; 07 §7):
+    bag_in_top_k     gercek torba (kelime + sayi, 3+ birlesik) ilk 1 / 5 / K aday icinde mi; taban: onceki cumlenin torbasi
     tutarlilik       aday torbalarin kaci veride gecen gercek bir cumle torbasi (ilk aday / butun adaylar)
     calibration      adaylarin olasiligi ile gercekten dogru cikma sikligi (5 dilim, ortalama sapma)
-    direction_health farkli torba / K, adaylarin olasilik dagiliminin exp H'si
+    direction_health farkli torba / K, exp H(pi), olu yon (sinavda pi hic 0,01'i gecmeyen)
 Goz: birkac sinav hikayesinde her cumleden sonra ilk 3 aday torba ve gercek sonraki cumle.
 
-    python train_context.py [--data countries] [--epochs 60] [--device cpu|cuda] [--directions 20] [--out klasor]
+    python train_context.py [--data countries] [--epochs 30] [--device cpu|cuda] [--directions 20] [--out klasor]
 """
 import argparse
 import json
@@ -22,7 +20,7 @@ from collections import defaultdict
 
 import torch
 
-from context import COUNTS, D, DIRECTIONS, ContextAgent
+from context import D, DIRECTIONS, LEVELS, SLOTS, ContextAgent
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_Z = os.path.dirname(os.path.dirname(HERE))
@@ -30,7 +28,7 @@ FILES = {"countries": "country_"}   # data/<ad>/<onek>{stories.jsonl, vocab.json
 BATCH = 64              # hikaye
 LR = 1e-3
 SCHEDULE = "cosine"     # constant | cosine (adim adim --epochs sonunda 0)
-EPOCHS = 60             # 09: 30 epokta kayip hala iniyordu, 60 belirgin iyi (ulke, d 32)
+RELAX = 0.05            # olu yon gevsetmesi; Rupprecht ve ark. (MHP) degeri, bu modelde olculmedi
 SHOW = 2                # goz: kac sinav hikayesi yazilir
 
 
@@ -72,105 +70,90 @@ def _encode(agent, stories):
     return ids, mask
 
 
-def _counts(ids, mask, V):
-    """Bir cumle (B, W) -> sayi vektoru (B, V); <unk> sayilmaz."""
-    c = torch.zeros(len(ids), V, device=ids.device).scatter_add_(1, ids, mask.float())
-    c[:, 0] = 0
-    return c
+def _bag(ids, mask, vocab_size):
+    """Bir cumle (B, W) -> torbadaki farkli kelimeler (B, W) ve sayilari (B, W; 0 = dolgu).  <unk> torbaya girmez."""
+    counts = torch.zeros(len(ids), vocab_size, dtype=torch.long, device=ids.device).scatter_add_(1, ids, mask.long())
+    counts[:, 0] = 0
+    c, words = counts.topk(ids.shape[1], dim=1)
+    return words, c
 
 
-def _split(ids, mask, V, hide, gen):
-    """Cumle -> (havuz, eksik) sayi vektorleri: her satirda gercek kelimelerden 'hide' (B,) kadari saklanir (rastgele)."""
-    real = mask & (ids != 0)
-    rank = torch.rand(ids.shape, device=ids.device, generator=gen).masked_fill(~real, 2.0).argsort(1).argsort(1)
-    hidden = real & (rank < hide[:, None])
-    return _counts(ids, real & ~hidden, V), _counts(ids, hidden, V)
-
-
-def loss_of(agent, ids, mask, gen):
-    """Hikaye batch'i -> ortalama kayip (gecis basina, nat).  gen: saklanacak kelimelerin secimi (cihazda)."""
-    V = len(agent.vocab)
+def loss_of(agent, ids, mask, relax):
+    """Hikaye batch'i -> ortalama kayip (gecis basina, nat): (1 - relax) * -log sum_k pi_k P(B | k) + relax * yon ortalamasi."""
     state = agent.initial_state(len(ids))
-    total, n = 0.0, 0
+    LP, PI = [], []
     for t in range(ids.shape[1] - 1):
         state = agent.read(state, ids[:, t], mask[:, t])
-        nxt, nm = ids[:, t + 1], mask[:, t + 1]
-        n_real = (nm & (nxt != 0)).sum(1)
-        valid = n_real > 0
+        valid = mask[:, t + 1].any(1)
         if not valid.any():
             break
-        hide = (torch.rand(len(nxt), device=nxt.device, generator=gen) * n_real).floor().long() + 1      # 1..n
-        pool, missing = _split(nxt, nm, V, hide, gen)
-        lp = agent.bag_log_prob(state, pool, missing)
-        total = total - (lp * valid).sum()
-        n += int(valid.sum())
-    return total / max(n, 1)
+        words, c = _bag(ids[:, t + 1], mask[:, t + 1], len(agent.vocab))
+        log_pi, lp = agent.bag_log_prob(state, words, c)
+        LP.append(lp[valid])
+        PI.append(log_pi[valid])
+    lp, log_pi = torch.cat(LP), torch.cat(PI)
+    return ((1 - relax) * -(log_pi + lp).logsumexp(1) + relax * -lp.mean(1)).mean()
 
 
-def _key(counts_row):
-    """Sayi vektoru (V,) -> torba anahtari ((kelime, sayi), ...) kelime sirasiyla; 3+ birlesik."""
+def _key(counts_row, V):
+    """Sayi vektoru (V,) -> torba anahtari: ((kelime, sayi), ...) sirali."""
     nz = counts_row.nonzero().squeeze(1)
-    return tuple(zip(nz.tolist(), counts_row[nz].clamp(max=COUNTS).long().tolist()))
+    return tuple(zip(nz.tolist(), counts_row[nz].tolist()))
 
 
-def evaluate(agent, ids, mask, real_bags, names, k_best, show=SHOW):
-    """-> bag_in_top_k, tamamlama, tutarlilik, calibration, direction_health; goz satirlari."""
-    V = len(agent.vocab)
-    hit, fill = defaultdict(int), defaultdict(int)
+def evaluate(agent, ids, mask, real_bags, names, show=SHOW):
+    """-> bag_in_top_k (ilk 1 / 5 / K, taban: onceki cumle), tutarlilik, calibration, direction_health; goz satirlari."""
+    K, V = agent.directions, len(agent.vocab)
+    hit = defaultdict(int)
     n, coherent_first, coherent_all, n_cand, distinct, ent = 0, 0, 0, 0, 0.0, 0.0
     bins = [[0.0, 0, 0] for _ in range(5)]           # olasilik toplami, aday, dogru
+    pi_max = torch.zeros(K)
     eye = []
-    gen = torch.Generator(device=ids.device).manual_seed(0)     # tamamlama olcusu her olcumde ayni saklama
     with torch.no_grad():
         for b0 in range(0, len(ids), 256):
             bi, bm = ids[b0:b0 + 256], mask[b0:b0 + 256]
             state = agent.initial_state(len(bi))
             for t in range(bi.shape[1] - 1):
                 state = agent.read(state, bi[:, t], bm[:, t])
-                nxt, nm = bi[:, t + 1], bm[:, t + 1]
-                n_real = (nm & (nxt != 0)).sum(1)
-                bags, logp = agent.next_bags(state, k_best)
-                full = _counts(nxt, nm, V)
-                prev = _counts(bi[:, t], bm[:, t], V)
-                for name, hide in (("1", torch.ones_like(n_real)), ("yari", (n_real + 1) // 2)):
-                    pool, missing = _split(nxt, nm, V, hide, gen)
-                    got, _ = agent._complete(state, pool)
-                    ok = (got.clamp(max=COUNTS) == missing.clamp(max=COUNTS)).all(1)
-                    fill[name] += int((ok & (n_real > 0)).sum())
+                counts, logp = agent.next_bags(state)
+                log_pi = agent._heads(state)[0]
+                pi_max = torch.maximum(pi_max, log_pi.exp().max(0).values.cpu())
                 for r in range(len(bi)):
-                    if n_real[r] == 0:
+                    if not bm[r, t + 1].any():
                         continue
-                    true, before = _key(full[r]), _key(prev[r])
+                    words, c = _bag(bi[r:r + 1, t + 1], bm[r:r + 1, t + 1], V)
+                    true = tuple(sorted((w, min(x, LEVELS - 1)) for w, x in zip(words[0].tolist(), c[0].tolist()) if x))
+                    prev_w, prev_c = _bag(bi[r:r + 1, t], bm[r:r + 1, t], V)
+                    prev = tuple(sorted((w, min(x, LEVELS - 1)) for w, x in zip(prev_w[0].tolist(), prev_c[0].tolist()) if x))
                     merged = defaultdict(float)
-                    for k in range(bags.shape[1]):                          # ayni torbayi veren adaylar birlesir
-                        merged[_key(bags[r, k])] += math.exp(logp[r, k].item())
+                    for k in range(K):                                       # ayni torbayi veren yonler birlesir
+                        merged[_key(counts[r, k], V)] += math.exp(logp[r, k].item())
                     ranked = sorted(merged.items(), key=lambda x: -x[1])
                     keys = [key for key, _ in ranked]
                     n += 1
                     hit["ilk1"] += true in keys[:1]
                     hit["ilk5"] += true in keys[:5]
                     hit["ilkK"] += true in keys
-                    hit["taban_onceki"] += before == true
+                    hit["taban_onceki"] += prev == true
                     coherent_first += keys[0] in real_bags
                     coherent_all += sum(key in real_bags for key in keys)
                     n_cand += len(keys)
-                    distinct += len(keys) / bags.shape[1]
-                    p = torch.tensor([x for _, x in ranked])
-                    p = p / p.sum().clamp_min(1e-30)
-                    ent += math.exp(-(p * p.clamp_min(1e-30).log()).sum().item())
+                    distinct += len(keys) / K
+                    p = log_pi[r].exp()
+                    ent += math.exp(-(p * p.clamp_min(1e-12).log()).sum().item())
                     for key, prob in ranked:
                         s = bins[min(int(prob * 5), 4)]
                         s[0] += prob
                         s[1] += 1
                         s[2] += key == true
                     if b0 + r < show:
-                        eye.append((b0 + r, t, bi[r, t][bm[r, t]].tolist(), ranked[:3], nxt[r][nm[r]].tolist()))
+                        eye.append((b0 + r, t, bi[r, t][bm[r, t]].tolist(), ranked[:3], bi[r, t + 1][bm[r, t + 1]].tolist()))
     calib = sum(abs(s[0] / s[1] - s[2] / s[1]) * s[1] for s in bins if s[1]) / max(sum(s[1] for s in bins), 1)
     out = dict(bag_in_top_k={k: round(v / n, 4) for k, v in hit.items()},
-               tamamlama={k: round(v / n, 4) for k, v in fill.items()},
                tutarlilik=dict(ilk_aday=round(coherent_first / n, 4), butun_adaylar=round(coherent_all / max(n_cand, 1), 4)),
                calibration=round(calib, 4),
-               direction_health=dict(farkli_torba_orani=round(distinct / n, 4), exp_H=round(ent / n, 2)))
+               direction_health=dict(farkli_torba_orani=round(distinct / n, 4), exp_H_pi=round(ent / n, 2),
+                                     olu_yon=int((pi_max < 0.01).sum())))
     bag_text = lambda key: " ".join(agent.vocab[w] + ("x%d" % c if c > 1 else "") for w, c in key)
     for s, t, read, top, real in eye:
         if t == 0:
@@ -186,10 +169,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--data", default="countries", choices=sorted(FILES))
     ap.add_argument("--root", default=None, help="veri klasoru (varsayilan data/<data>)")
-    ap.add_argument("--epochs", type=int, default=EPOCHS)
+    ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--d", type=int, default=D)
-    ap.add_argument("--directions", type=int, default=DIRECTIONS, help="aday torba (tohum) sayisi")
+    ap.add_argument("--slots", type=int, default=SLOTS, help="durumun yuva sayisi")
+    ap.add_argument("--directions", type=int, default=DIRECTIONS, help="aday torba (yon) sayisi")
+    ap.add_argument("--relax", type=float, default=RELAX, help="olu yon gevsetmesi")
     ap.add_argument("--batch", type=int, default=BATCH)
     ap.add_argument("--lr", type=float, default=LR)
     ap.add_argument("--schedule", default=SCHEDULE, choices=("constant", "cosine"))
@@ -206,8 +191,7 @@ def main(argv=None):
     folder, prefix = args.root or os.path.join(MODEL_Z, "data", args.data), FILES[args.data]
     vocab_path, stories_path = os.path.join(folder, prefix + "vocab.json"), os.path.join(folder, prefix + "stories.jsonl")
     vocab = json.load(open(vocab_path, encoding="utf-8"))
-    agent = ContextAgent(vocab, d=args.d).to(args.device)
-    V = len(vocab)
+    agent = ContextAgent(vocab, d=args.d, slots=args.slots, directions=args.directions).to(args.device)
 
     def build():
         stories = [json.loads(line) for line in open(stories_path, encoding="utf-8")]
@@ -221,23 +205,25 @@ def main(argv=None):
     n_train = len(ids)
     real_bags = set()                                       # veride gecen butun cumle torbalari (tutarlilik olcusu)
     for a, m in (data["train"], data["exam"]):
-        for t in range(a.shape[1]):
-            c = _counts(a[:, t], m[:, t], V)
-            for r in range(len(a)):
-                if m[r, t].any():
-                    real_bags.add(_key(c[r]))
+        for n in range(len(a)):
+            for t in range(a.shape[1]):
+                if m[n, t].any():
+                    real_bags.add(tuple(sorted((w, min(c, LEVELS - 1)) for w, c in
+                                               zip(*torch.unique(a[n, t][m[n, t]], return_counts=True)) if w)))
+    real_bags = {tuple((int(w), int(c)) for w, c in b) for b in real_bags}
     sent = mask.any(2)
-    presence = torch.zeros(V, device=args.device)
+    presence = torch.zeros(len(vocab), device=args.device)
     for t in range(ids.shape[1]):
-        presence += (_counts(ids[:, t], mask[:, t], V) > 0).float().sum(0)
+        present = torch.zeros(n_train, len(vocab), device=args.device).scatter_(1, ids[:, t], mask[:, t].float())
+        presence += (present * sent[:, t:t + 1]).sum(0)
     agent.set_prior(presence / sent.sum())
     opt = torch.optim.Adam(agent.parameters(), lr=args.lr)
-    gen = torch.Generator().manual_seed(args.seed)                     # epok sirasi (CPU)
-    gen_mask = torch.Generator(device=args.device).manual_seed(args.seed)   # saklanan kelimeler (cihazda)
-    print("veri %s: egitim %d hikaye, sinav %d, sozluk %d, gercek torba %d | d %d, directions %d, lr %g %s, batch %d, "
-          "epok %d, %d parametre | cihaz %s" % (
-              args.data, n_train, len(exam_ids), V, len(real_bags), args.d, args.directions, args.lr, args.schedule,
-              args.batch, args.epochs, sum(p.numel() for p in agent.parameters()), args.device), flush=True)
+    gen = torch.Generator().manual_seed(args.seed)
+    print("veri %s: egitim %d hikaye, sinav %d, sozluk %d, gercek torba %d | d %d, slots %d, directions %d, relax %g, "
+          "lr %g %s, batch %d, %d parametre | cihaz %s" % (
+              args.data, n_train, len(exam_ids), len(vocab), len(real_bags), args.d, args.slots, args.directions,
+              args.relax, args.lr, args.schedule, args.batch, sum(p.numel() for p in agent.parameters()), args.device),
+          flush=True)
     t0, history, first = time.time(), [], 1
     ckpt = os.path.join(args.out, "checkpoint.pt") if args.out else None
     if args.out:
@@ -246,14 +232,13 @@ def main(argv=None):
     if args.resume:
         pack = torch.load(ckpt, map_location=args.device, weights_only=False)
         assert pack["vocab"] == vocab, "sozluk checkpoint'tekinden farkli"
-        keys = ("data", "seed", "d", "directions", "batch", "lr", "schedule") + (
+        keys = ("data", "seed", "d", "slots", "directions", "relax", "batch", "lr", "schedule") + (
             ("epochs",) if args.schedule == "cosine" else ())
         diff = {k: (pack["args"].get(k), vars(args)[k]) for k in keys if pack["args"].get(k) != vars(args)[k]}
         assert not diff, "surdurme ayari checkpoint'ten farkli (checkpoint, simdi): %s" % diff
         agent.load_state_dict(pack["state"])
         opt.load_state_dict(pack["opt"])
         gen.set_state(pack["gen"].cpu())
-        gen_mask.set_state(pack["gen_mask"].cpu())
         first, history = pack["epoch"] + 1, pack["history"]
         print("SURDURULDU: epok %d'den" % pack["epoch"], flush=True)
     for epoch in range(first, args.epochs + 1):
@@ -265,28 +250,27 @@ def main(argv=None):
                 for group in opt.param_groups:
                     group["lr"] = args.lr * 0.5 * (1 + math.cos(math.pi * done))
             rows = perm[b:b + args.batch].to(args.device)
-            loss = loss_of(agent, ids[rows], mask[rows], gen_mask)
+            loss = loss_of(agent, ids[rows], mask[rows], args.relax)
             opt.zero_grad()
             loss.backward()
             opt.step()
             total += loss.item() * len(rows)
         if epoch % args.every == 0 or epoch == args.epochs:
             agent.eval()
-            res = evaluate(agent, exam_ids, exam_mask, real_bags, data["exam_names"], args.directions,
+            res = evaluate(agent, exam_ids, exam_mask, real_bags, data["exam_names"],
                            show=SHOW if epoch == args.epochs else 0)
             agent.train()
-            k, f = res["bag_in_top_k"], res["tamamlama"]
+            k = res["bag_in_top_k"]
             print("epok %3d  kayip %.3f  (%.0f sn, epok %.1f sn) | dogru torba ilk1 %.3f ilk5 %.3f ilk%d %.3f (taban onceki "
-                  "%.3f) | tamamlama 1 kelime %.3f yari %.3f | tutarlilik ilk %.3f butun %.3f | calibration %.3f | "
-                  "farkli %.2f expH %.1f" % (
+                  "%.3f) | tutarlilik ilk %.3f butun %.3f | calibration %.3f | yon: farkli %.2f expH %.1f olu %d" % (
                       epoch, total / n_train, time.time() - t0, time.time() - t_epoch, k["ilk1"], k["ilk5"],
-                      args.directions, k["ilkK"], k["taban_onceki"], f["1"], f["yari"], res["tutarlilik"]["ilk_aday"],
+                      args.directions, k["ilkK"], k["taban_onceki"], res["tutarlilik"]["ilk_aday"],
                       res["tutarlilik"]["butun_adaylar"], res["calibration"], res["direction_health"]["farkli_torba_orani"],
-                      res["direction_health"]["exp_H"]), flush=True)
+                      res["direction_health"]["exp_H_pi"], res["direction_health"]["olu_yon"]), flush=True)
             history.append(dict(epoch=epoch, loss=total / n_train, result=res))
         if ckpt:
             torch.save(dict(vocab=vocab, state=agent.state_dict(), opt=opt.state_dict(), gen=gen.get_state(),
-                            gen_mask=gen_mask.get_state(), epoch=epoch, history=history, args=vars(args)), ckpt + ".part")
+                            epoch=epoch, history=history, args=vars(args)), ckpt + ".part")
             os.replace(ckpt + ".part", ckpt)
     if args.out:
         torch.save(dict(vocab=vocab, state=agent.state_dict(), args=vars(args)), os.path.join(args.out, "agent.pt"))
