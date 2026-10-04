@@ -5,10 +5,11 @@ istedim"; adlar onayli).  Egitim: train_meaning.py.
 Bag tablosu modelin kendi parametresi; gizli kelime yalniz tablo uzerinden tahmin edilir (kullanici, 4 Ekim: "Tamam sen
 öneri mimari kur"):
     R[i, j] = source_i . target_j / sqrt(d)     bag tablosu (V x V, dusuk boyutlu)
-    puan(j) = bias_j + sum_i R[i, j]            torbadaki her kelime i gizli kelimeye bagi kadar oy verir (esit, toplamsal)
+    P(j | i) = softmax_j(bias_j + R[i, j])      torbadaki her kelime tek basina tahmin eder
+    P(j gizli | torba) = ortalama_i P(j | i)    (kullanici, 4 Ekim: "Kur"): bag kelime ciftine yazilir
     bias    kelimenin genel sikligi: "the", "is" tabloyu doldurmasin
-(Attention'li surum denendi: sorgu gizli yeri bilmedigi icin oylari kalip kelimelerine verdi, Turkey'nin satiri
-egitilmedi.)
+(Denenen: attention'li oy -- sorgu gizli yeri bilmedigi icin oylar kalip kelimelerine gitti; toplamsal oy -- kanit
+butun Turkiye kelimelerine bolustu, satirlarda kalip fiilleri one cikti.)
 Komsu tablosu (build_neighbor_table): R'nin her satirinin en buyuk m degeri.  Kisa liste (shortlist): okunan cumlenin
 kelimeleri icin tablodan NEIGHBORS komsu, DEPTH adim (komsularin komsulari).
 """
@@ -36,10 +37,11 @@ class MeaningAgent(torch.nn.Module):
 
     def forward(self, ids, present):
         """ids (B, L) torbadaki kelimeler (sirasiz), present (B, L) gercek ve gorunen yuva -> gizli kelime icin log
-        olasilik (B, V)."""
-        u = self.source(ids) * present[..., None]
-        vote = u.sum(1)                                          # sum_i source_i
-        return (vote @ self.target.weight.T / u.shape[-1] ** 0.5 + self.bias).log_softmax(-1)
+        olasilik (B, V): gorunen kelimelerin tek tek tahminlerinin ortalamasi."""
+        u = self.source(ids)
+        each = (u @ self.target.weight.T / u.shape[-1] ** 0.5 + self.bias).log_softmax(-1)      # (B, L, V)
+        each = each.masked_fill(~present[..., None], -1e9)
+        return each.logsumexp(1) - present.sum(1, keepdim=True).clamp(min=1).log()
 
     @torch.no_grad()
     def relation(self, rows):
