@@ -24,15 +24,17 @@ Kullanıcı, 4 Ekim 2026: *"k bağımsız bir yapı olmalı ve grammar endeks il
 diye birşey yok doğru tasarım ne"*; tasarıma *"Tamam beraber eğitelim o değer de not al sonra bir ölçüye bağlarız"*.
 
 - İş bölümü: context agent içeriği ve eksiksizliği (torba olasılığı), grammar agent biçimi (`quality_index`) ölçer.
-- Seçim tek puanla: `log P_context(torba) + λ · quality_index`; ayrı eleme eşiği yok, endeks hep aynı bağlamın adayları
-  arasında kullanılır.
+- Seçim: endeks **kapı**, sıralama değil. Kullanıcı, 4 Ekim 2026: *"İndeks aslında bir kapı yani sıralama değil geçersiz
+  olmaz demek sadece"*; *"Aynen ve test et"*. Eşiğin altındaki torba elenir; geçenler yalnız context agent olasılığıyla
+  sıralanır. (Önceki öneri `log P_context + λ · quality_index` düştü: yüksek endeks bilgi taşımıyor, "Nepal ." tam puan;
+  orta bölgede düzgün iki yönlü cümle −0,55, eksik torba −0,00.)
 - Aday sayısı mimariden ayrı: her yön bir dağılım; yönlerden sırayla en olası torbalar çekilir, gramerden geçer, N iyi
   aday bulununca durulur. N çalışma bütçesi; K (yön sayısı) kaç konu tutulabileceği.
 - Döngü: seçilen torba → grammar agent dizer → cümle → context agent okur → sonraki torba.
 - Birlikte eğitim: kullanıcı, 4 Ekim 2026: *"Gramer önce eğittik ve çalışıyor context ve gramer aynı veri. Bu yüzden
   context eğitilmiş grammar ile eğitilmeli gramer değişmemeli sadece okunmalı"*; *"Yaz ve test et"*. Grammar agent donuk;
-  context agent'tan torbalar çekilir, gramer dizip puanlar, düşük puanlının olasılığı aşağı, yüksek puanlının yukarı
-  itilir (torba kesikli: gradient gramerden akmaz, örnekleme sinyali). Gerçek torbanın olasılık kaybı aynen sürer.
+  context agent'tan torbalar çekilir, gramer dizip puanlar, kapıdan geçemeyenin olasılığı aşağı itilir; geçen
+  ödüllendirilmez (yalnız ceza: kısa, kesin torba ödül almaz) (torba kesikli: gradient gramerden akmaz, örnekleme sinyali). Gerçek torbanın olasılık kaybı aynen sürer.
   Gramer biçime bakar: geçerli ama gerçek olmayan devam cezalanmaz (SS'te geçerli devam kümesi gerekmez).
   Ön koşul: donuk gramer cümle olmayan torbaları ayırıyor mu. **Sınandı (4 Ekim):** ülke grameri, context agent d64 K30
   adayları, 300 sınav hikâyesi, 57.308 aday: cümle > cümle değil %86 (aynı bağlamda da %86); eşik −0,5 cümle olmayanın
@@ -42,7 +44,11 @@ diye birşey yok doğru tasarım ne"*; tasarıma *"Tamam beraber eğitelim o de�
 
 ## Açık noktalar
 
-- **λ değeri.** Kullanıcı, 4 Ekim 2026: *"o değer de not al sonra bir ölçüye bağlarız"*. Henüz ölçüye bağlanmadı.
+- **Kapı eşiği** (önceki λ'nın yerine). Kullanıcı, 4 Ekim 2026: *"o değer de not al sonra bir ölçüye bağlarız"*. Ön
+  koşul sınamasında −1,0 altında gerçek cümle yoktu; ölçüye bağlanmadı. **Kapı sınaması (4 Ekim, 2.607 bağlam):** ilk
+  aday cümle değil: kapısız %3,6, −1,0 %3,0 (yanlış eleme 0), −0,5 %0,8 (yanlış eleme 544 cümle adayı; "X borders Y" −0,55
+  aldığı için bu olgu türü kapıdan geçemez). Kapının orta bölgesi zayıf: dizilişi iki yönlü düzgün cümle, eksik torbadan
+  düşük puan alıyor.
 
 - **Gramer kötü torba görmedi.** Kullanıcı, 4 Ekim 2026: *"bunu açık bir nokta olarak kaydet. grammer kötü torba görmedi!
   evet seçilen torbaya puan vermek grammer işi olur katılıyorum."* Gramer, kendisine gelen torbayı dizer ve bir **kalite
