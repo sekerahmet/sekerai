@@ -53,8 +53,7 @@ def loss_of(agent, ids, present, slot):
     rows = torch.arange(len(ids), device=ids.device)
     seen = present.clone()
     seen[rows, slot] = False
-    logp = agent(ids, seen)
-    return -logp[rows, ids[rows, slot]].mean()
+    return -agent(ids, seen, ids[rows, slot]).mean()
 
 
 @torch.no_grad()

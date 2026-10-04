@@ -10,7 +10,9 @@ Bag tablosu modelin kendi parametresi; gizli kelime yalniz tablo uzerinden tahmi
     bias    kelimenin genel sikligi: "the", "is" tabloyu doldurmasin
 (Denenen: attention'li oy -- sorgu gizli yeri bilmedigi icin oylar kalip kelimelerine gitti; toplamsal oy -- kanit
 butun Turkiye kelimelerine bolustu, satirlarda kalip fiilleri one cikti.)
-Komsu tablosu (build_neighbor_table): R'nin her satirinin en buyuk m degeri.  Kisa liste (shortlist): okunan cumlenin
+Komsu tablosu (build_neighbor_table): kos(source_i, target_j) -- IN-OUT kosinusu birlikte gelen kelimeleri verir, ham
+carpimda vektor boyu buyuk sik kelimeler one cikar (Mitra ve ark. 2016, belge/makaleler/2016/mitra2016_desm.txt: "the
+IN-OUT cosine similarities are high between words that often co-occur in the same query or document").  Kisa liste (shortlist): okunan cumlenin
 kelimeleri icin tablodan NEIGHBORS komsu, DEPTH adim (komsularin komsulari).
 """
 import torch
@@ -35,13 +37,20 @@ class MeaningAgent(torch.nn.Module):
     def ids(self, words):
         return [self.index.get(w, self.index[UNK]) for w in words]
 
-    def forward(self, ids, present):
+    def forward(self, ids, present, hidden=None):
         """ids (B, L) torbadaki kelimeler (sirasiz), present (B, L) gercek ve gorunen yuva -> gizli kelime icin log
-        olasilik (B, V): gorunen kelimelerin tek tek tahminlerinin ortalamasi."""
+        olasilik (B, V): gorunen kelimelerin tek tek tahminlerinin ortalamasi.  hidden (B,) verilirse yalniz o kelimenin
+        log olasiligi (B,): P(j | i) paydasi yalniz i'ye bagli, adim basina sozluk icin bir kez hesaplanir."""
         u = self.source(ids)
-        each = (u @ self.target.weight.T / u.shape[-1] ** 0.5 + self.bias).log_softmax(-1)      # (B, L, V)
-        each = each.masked_fill(~present[..., None], -1e9)
-        return each.logsumexp(1) - present.sum(1, keepdim=True).clamp(min=1).log()
+        scale = u.shape[-1] ** 0.5
+        if hidden is None:
+            each = (u @ self.target.weight.T / scale + self.bias).log_softmax(-1)                # (B, L, V)
+            each = each.masked_fill(~present[..., None], -1e9)
+            return each.logsumexp(1) - present.sum(1, keepdim=True).clamp(min=1).log()
+        log_z = (self.source.weight @ self.target.weight.T / scale + self.bias).logsumexp(1)      # (V,)
+        each = (u * self.target(hidden)[:, None, :]).sum(-1) / scale + self.bias[hidden][:, None] - log_z[ids]
+        each = each.masked_fill(~present, -1e9)                                                    # (B, L)
+        return each.logsumexp(1) - present.sum(1).clamp(min=1).log()
 
     @torch.no_grad()
     def relation(self, rows):
@@ -51,12 +60,15 @@ class MeaningAgent(torch.nn.Module):
 
 @torch.no_grad()
 def build_neighbor_table(agent, m):
-    """-> {"ids": (V, m), "scores": (V, m)}: R'nin her satirinin en buyuk m degeri (kelimenin kendisi ve <unk> haric)."""
+    """-> {"ids": (V, m), "scores": (V, m)}: her kelime icin kos(source_i, target_j) en buyuk m kelime (kendisi ve <unk>
+    haric)."""
     V = len(agent.vocab)
     ids, scores = [], []
+    src = torch.nn.functional.normalize(agent.source.weight, dim=1)
+    tgt = torch.nn.functional.normalize(agent.target.weight, dim=1)
     for c in range(0, V, 4096):
         rows = torch.arange(c, min(c + 4096, V), device=agent.bias.device)
-        r = agent.relation(rows)
+        r = src[rows] @ tgt.T
         r[torch.arange(len(rows)), rows] = -1e9
         r[:, agent.index[UNK]] = -1e9
         top = r.topk(m, dim=1)
