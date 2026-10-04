@@ -30,6 +30,21 @@ TRIES = 100             # deneme sayisi olcusunun ust siniri
 LENGTH_BANDS = ((1, 10), (11, 20), (21, 1000))   # olculer cumle boyuna gore de
 
 
+def _no_power_throttling():
+    """Windows: bu surecin guc kisitlamasini (EcoQoS) kapat; arka plandaki surec ~10 kat yavasliyordu (train_context ile
+    ayni; belge/model_z_temel/06 H1)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class State(ctypes.Structure):
+        _fields_ = [("Version", wintypes.ULONG), ("ControlMask", wintypes.ULONG), ("StateMask", wintypes.ULONG)]
+    k = ctypes.windll.kernel32
+    k.GetCurrentProcess.restype = wintypes.HANDLE
+    k.SetProcessInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    s = State(1, 0x1, 0)                                 # ProcessPowerThrottling, EXECUTION_SPEED denetimi, kapali
+    return bool(k.SetProcessInformation(k.GetCurrentProcess(), 4, ctypes.byref(s), ctypes.sizeof(s)))
+
+
 def _load(path, required=True):
     if not os.path.exists(path):
         assert not required, "veri dosyasi yok: %s (--root dogru mu?)" % path
@@ -160,6 +175,8 @@ def main(argv=None):
     torch.manual_seed(args.seed)
     if args.device == "cpu":
         torch.set_num_threads(4)                        # kucuk model: 16 is parcacigi 4'ten yavas (olculdu)
+        if os.name == "nt":
+            print("guc kisitlamasi (EcoQoS) kapali:", _no_power_throttling(), flush=True)
     folder, prefix = args.root or os.path.join(MODEL_Z, "data", args.data), FILES[args.data]
     exam = _load(os.path.join(folder, prefix + "exam.jsonl"))
     valid = defaultdict(set)                            # ayni torbadan kurulabilen gecerli cumleler
