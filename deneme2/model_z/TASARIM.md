@@ -18,7 +18,31 @@ Kullanıcı, 3 Ekim 2026: *"Gramer ajanının temel görevi verilen tüm kelimel
 Durum (4 Ekim): kod `core/grammar/` (grammar.py ajan, train_grammar.py eğitim); dizme ilişki matrisi üzerinde tek çevrim,
 ilk k aday `order_alternatives`. Veri: ülke, SS 200k, SS tamamı (`make_ss_sentences.py`, Drive).
 
+## Akış: context agent + grammar agent
+
+Kullanıcı, 4 Ekim 2026: *"k bağımsız bir yapı olmalı ve grammar endeks ile baştan torbalar elenmeli"*; *"benim istediğim
+diye birşey yok doğru tasarım ne"*; tasarıma *"Tamam beraber eğitelim o değer de not al sonra bir ölçüye bağlarız"*.
+
+- İş bölümü: context agent içeriği ve eksiksizliği (torba olasılığı), grammar agent biçimi (`quality_index`) ölçer.
+- Seçim tek puanla: `log P_context(torba) + λ · quality_index`; ayrı eleme eşiği yok, endeks hep aynı bağlamın adayları
+  arasında kullanılır.
+- Aday sayısı mimariden ayrı: her yön bir dağılım; yönlerden sırayla en olası torbalar çekilir, gramerden geçer, N iyi
+  aday bulununca durulur. N çalışma bütçesi; K (yön sayısı) kaç konu tutulabileceği.
+- Döngü: seçilen torba → grammar agent dizer → cümle → context agent okur → sonraki torba.
+- Birlikte eğitim: kullanıcı, 4 Ekim 2026: *"Gramer önce eğittik ve çalışıyor context ve gramer aynı veri. Bu yüzden
+  context eğitilmiş grammar ile eğitilmeli gramer değişmemeli sadece okunmalı"*; *"Yaz ve test et"*. Grammar agent donuk;
+  context agent'tan torbalar çekilir, gramer dizip puanlar, düşük puanlının olasılığı aşağı, yüksek puanlının yukarı
+  itilir (torba kesikli: gradient gramerden akmaz, örnekleme sinyali). Gerçek torbanın olasılık kaybı aynen sürer.
+  Gramer biçime bakar: geçerli ama gerçek olmayan devam cezalanmaz (SS'te geçerli devam kümesi gerekmez).
+  Ön koşul: donuk gramer cümle olmayan torbaları ayırıyor mu. **Sınandı (4 Ekim):** ülke grameri, context agent d64 K30
+  adayları, 300 sınav hikâyesi, 57.308 aday: cümle > cümle değil %86 (aynı bağlamda da %86); eşik −0,5 cümle olmayanın
+  %61'ini, cümlenin %1,5'ini eler. Kör nokta: kısa torba (2 kelimelik "Nepal ." tam puan) ve dilbilgisi düzgün ama eksik /
+  yanlış torba ("Turkey has Ankara as its ."). Endeks dizilişin kesinliğini ölçüyor: "X borders Y" iki yönlü olduğu
+  için gerçek cümle −0,55 alıyor. Eğitimde ödül olarak kullanılırsa kısa, kesin torbaları ödüllendirme tehlikesi var.
+
 ## Açık noktalar
+
+- **λ değeri.** Kullanıcı, 4 Ekim 2026: *"o değer de not al sonra bir ölçüye bağlarız"*. Henüz ölçüye bağlanmadı.
 
 - **Gramer kötü torba görmedi.** Kullanıcı, 4 Ekim 2026: *"bunu açık bir nokta olarak kaydet. grammer kötü torba görmedi!
   evet seçilen torbaya puan vermek grammer işi olur katılıyorum."* Gramer, kendisine gelen torbayı dizer ve bir **kalite
