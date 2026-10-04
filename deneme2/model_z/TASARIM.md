@@ -26,3 +26,6 @@ ilk k aday `order_alternatives`. Veri: ülke, SS 200k, SS tamamı (`make_ss_sent
   sıralama yapmaz (*"grammere gönderen ajanın grammer gibi bir görevi olmayacak"*). Gramer yalnız doğru cümlelerle eğitildi;
   kötü torbaya verdiği puanın anlamı ölçülmedi. Sınama: gerçek torba ile içine başka cümleden kelime karışmış torba,
   endeks ayrışıyor mu.
+  **Durum (4 Ekim, kısmen kapandı):** `quality_index` (ardıl + öncel log-olasılığı, bağ başına). SS tam gramer, 400
+  unseen: aynı cümlede gerçek > eksik %87, > karışık %82, > rastgele kelimeli %93; rastgele çiftte %68 / %79 / %75.
+  Aynı bağlamın adaylarını sıralamada güçlü, mutlak eşik olarak zayıf; eksiksizliği değil dilbilgisini ölçüyor.
