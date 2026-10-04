@@ -34,6 +34,7 @@ BATCH = 256             # pencere; tam SS'te Colab hucresi buyuk verir
 LR = 3e-3
 MAX_WORDS = 256         # pencerede en cok kelime (uzun pencerede son kelimeler)
 PROGRESS_SECS = 60      # epok icinde ara satir araligi (kullanici, 4 Ekim: "ekle bunları")
+NEGATIVES = 0           # payda ornegi: 0 butun sozluk; K>0 her adimda sikligin 0,75 kuvvetiyle cekilen K ortak kelime
 SUBSAMPLE = 1e-3        # sik kelime seyreltmesi (word2vec): kelime p = min(1, sqrt(t / f) + t / f) olasilikla kalir,
                         # f kelimenin sikligi; hem gizlenen hem oy veren (kullanici, 4 Ekim: "Evet")
 EYE = {"countries": ("Turkey", "Ankara", "baklava", "Peru", "Lima", "Japan", "Spanish", "South", "the", "is", "."),
@@ -63,7 +64,9 @@ class Windows:
         ids = torch.where(ok, self.flat[pos.clamp(max=len(self.flat) - 1)], torch.zeros_like(pos))
         ids = ids.sort(1).values                                               # ayni kelimeler yan yana
         present = (ids != 0) & torch.cat([torch.ones_like(ids[:, :1], dtype=torch.bool), ids[:, 1:] != ids[:, :-1]], 1)
-        return ids, present
+        order = (~present).to(torch.int8).argsort(dim=1, stable=True)            # gercek kelimeler one, yuva sayisi kirpilir
+        k = int(present.sum(1).max().clamp(min=1))
+        return ids.gather(1, order)[:, :k], present.gather(1, order)[:, :k]
 
 
 def load(args, vocab_out):
@@ -88,12 +91,14 @@ def load(args, vocab_out):
     return vocab, Windows(flat, sent_off, story_off, args.window, args.device), torch.as_tensor(count, dtype=torch.float)
 
 
-def loss_of(agent, ids, present, keep=None, gen=None):
+def loss_of(agent, ids, present, keep=None, gen=None, sample=None):
     """Pencereler -> her kelime gizliyken -log P ortalamasi.  keep (V,): sik kelime seyreltmesi (atilan kelime ne gizlenir
-    ne oy verir)."""
+    ne oy verir); sample: payda ornegi (meaning.forward)."""
     if keep is not None:
         present = present & (torch.rand(ids.shape, generator=gen, device=ids.device) < keep[ids])
-    logp, ok = agent(ids, present)
+    with torch.autocast(ids.device.type, dtype=torch.bfloat16, enabled=ids.device.type == "cuda"):
+        logp, ok = agent(ids, present, sample)
+    logp = logp.float()
     use = present & ok
     return -(logp * use).sum() / use.sum().clamp(min=1)
 
@@ -121,6 +126,7 @@ def main(argv=None):
     ap.add_argument("--d", type=int, default=D)
     ap.add_argument("--batch", type=int, default=BATCH, help="pencere")
     ap.add_argument("--lr", type=float, default=LR)
+    ap.add_argument("--negatives", type=int, default=NEGATIVES, help="payda ornegi K (0: butun sozluk)")
     ap.add_argument("--subsample", type=float, default=SUBSAMPLE, help="sik kelime seyreltme esigi t (0: kapali)")
     ap.add_argument("--device", default="cpu", help="cpu | cuda")
     ap.add_argument("--out", default=None, help="kosu klasoru: agent.pt, neighbors.pt")
@@ -138,12 +144,17 @@ def main(argv=None):
         keep = ((args.subsample / f.clamp_min(1e-12)).sqrt() + args.subsample / f.clamp_min(1e-12)).clamp(max=1).to(args.device)
         print("sik kelime seyreltmesi t %g: kalma olasiligi %s" % (args.subsample, ", ".join(
             "%s %.2f" % (w, keep[agent.index[w]].item()) for w in EYE[args.data][-4:])), flush=True)
+    log_q = None
+    if args.negatives:
+        q = count.clamp(min=1) ** 0.75
+        q = (q / q.sum()).to(args.device)
+        log_q = q.log()
     opt = torch.optim.Adam(agent.parameters(), lr=args.lr)
     gen = torch.Generator(device=args.device).manual_seed(args.seed)
     n = data.n
     print("veri %s: %d pencere (en cok %d cumle, ortak torba), sozluk %d | d %d, lr %g cosine, batch %d pencere, %d parametre"
-          % (args.data, n, args.window, len(vocab), args.d, args.lr, args.batch, sum(p.numel() for p in agent.parameters())),
-          flush=True)
+          % (args.data, n, args.window, len(vocab), args.d, args.lr, args.batch, sum(p.numel() for p in agent.parameters()))
+          + (" | payda ornegi %d" % args.negatives if args.negatives else " | payda butun sozluk"), flush=True)
     t0 = time.time()
     for epoch in range(1, args.epochs + 1):
         perm = torch.randperm(n, generator=torch.Generator().manual_seed(args.seed + epoch)).to(args.device)
@@ -159,7 +170,11 @@ def main(argv=None):
             for group in opt.param_groups:
                 group["lr"] = args.lr * 0.5 * (1 + math.cos(math.pi * done))
             ids, present = data.batch(perm[b:b + args.batch])
-            loss = loss_of(agent, ids, present, keep, gen)
+            sample = None
+            if log_q is not None:
+                k = torch.multinomial(log_q.exp(), args.negatives, replacement=True, generator=gen)
+                sample = (k, log_q[k])
+            loss = loss_of(agent, ids, present, keep, gen, sample)
             opt.zero_grad()
             loss.backward()
             opt.step()

@@ -13,6 +13,8 @@ carpimda vektor boyu buyuk sik kelimeler one cikar (Mitra ve ark. 2016, belge/ma
 IN-OUT cosine similarities are high between words that often co-occur in the same query or document").  Kisa liste (shortlist): okunan cumlenin
 kelimeleri icin tablodan NEIGHBORS komsu, DEPTH adim (komsularin komsulari).
 """
+import math
+
 import torch
 
 UNK = "<unk>"
@@ -35,14 +37,20 @@ class MeaningAgent(torch.nn.Module):
     def ids(self, words):
         return [self.index.get(w, self.index[UNK]) for w in words]
 
-    def forward(self, ids, present, chunk=8192):
+    def forward(self, ids, present, sample=None, chunk=8192):
         """ids (B, L) penceredeki farkli kelimeler (sirasiz), present (B, L) gercek yuva -> (log P(yuvadaki kelime |
-        penceredeki obur kelimeler) (B, L), oy veren var mi (B, L)): her kelime sirayla gizli sayilir, toplu hesap.  P(j | i) paydasi yalniz i'ye bagli;
-        batch'teki farkli kelimeler icin bir kez (chunk satir parcalarla)."""
+        penceredeki obur kelimeler) (B, L), oy veren var mi (B, L)): her kelime sirayla gizli sayilir, toplu hesap.
+        P(j | i) paydasi yalniz i'ye bagli, batch'teki farkli kelimeler icin bir kez.  sample (kelimeler (K,), log q (K,))
+        verilirse payda butun sozluk yerine bu ortak orneklemle tahmin edilir (onem orneklemesi: Z_i ~ ort_k
+        exp(puan_ik) / q_k; sampled softmax, Jean ve ark. 2015)."""
         u, v = self.source(ids), self.target(ids)
         scale = u.shape[-1] ** 0.5
         uq, inv = ids.unique(return_inverse=True)
-        log_z = torch.cat([(self.source(uq[c:c + chunk]) @ self.target.weight.T / scale + self.bias).logsumexp(1)
+        if sample is None:
+            cand, corr = self.target.weight, self.bias
+        else:
+            cand, corr = self.target(sample[0]), self.bias[sample[0]] - sample[1] - math.log(len(sample[0]))
+        log_z = torch.cat([(self.source(uq[c:c + chunk]) @ cand.T / scale + corr).logsumexp(1)
                            for c in range(0, len(uq), chunk)])
         s = u @ v.transpose(1, 2) / scale + self.bias[ids][:, None, :] - log_z[inv][:, :, None]   # s[b, i, j] = log P(j | i)
         L = ids.shape[1]
