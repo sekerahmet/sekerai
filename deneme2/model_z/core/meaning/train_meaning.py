@@ -69,7 +69,6 @@ def eye(agent, stories, W, windows=6, top=5):
             i = agent.index[w]
             print("   %-8s %s" % (w, ", ".join("%s %.1f" % (vocab[j], v) for j, v in zip(
                 table["ids"][i].tolist(), table["scores"][i].tolist()))), flush=True)
-    hit = total = 0
     for c in EYE_COUNTRIES:
         st = next(s["sentences"] for s in stories if s["country"] == c and s["split"] == "exam")
         print("\n   === %s (ilk %d pencere, en cok %d cumle)" % (c, windows, W), flush=True)
@@ -85,11 +84,8 @@ def eye(agent, stories, W, windows=6, top=5):
                 logp, alpha = agent(ids, present)
                 best = logp[0].exp().topk(top)
                 voters = alpha[0].topk(min(3, len(bag) - 1))
-                ok = vocab[best.indices[0]] == w
-                hit += ok
-                total += 1
-                print("      %s %-12s -> %-60s oy: %s" % (
-                    "+" if ok else " ", w, " ".join("%s %.2f" % (vocab[k], v) for k, v in zip(
+                print("      %-12s -> %-60s oy: %s" % (
+                    w, " ".join("%s %.2f" % (vocab[k], v) for k, v in zip(
                         best.indices.tolist(), best.values.tolist())),
                     " ".join("%s %.2f" % (bag[k], v) for k, v in zip(voters.indices.tolist(), voters.values.tolist()))),
                     flush=True)

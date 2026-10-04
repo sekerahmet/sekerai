@@ -58,8 +58,8 @@ tahmini değil"*; *"1 cümlenin tüm kelimeleri sırayla gizlenmezse model nası
   maliyet kararı, üretimde sıcaklık gibi ayar. Context agent `shortlist` ile çalışabiliyor (`context.py`).
 - Doğruluk ölçüsü (eğitimden önce yazıldı; kullanıcı: *"Eğer doğru değilse biz yanlış birşey tasarlamışızdır demek"*):
   (1) tablo gözle: Turkey → Ankara, Istanbul, Turkish, lira, baklava, Hagia Sophia; Peru → Lima, Cusco, sol, ceviche;
-  biçim kelimelerinin güçlü bağı yok; (2) gizli kelime bulunuyor; (3) Ankara gizliyken en çok Turkey ve capital oy
-  veriyor; (4) bu tablonun kısa listesiyle context agent kısıtsız B'ye yakın.
+  biçim kelimelerinin güçlü bağı yok; (2) gizli kelime tahminleri ve oy verenler gözle (kullanıcı: *"Sınav yok bunda
+  göz ile kontrol var"*); (3) bu tablonun kısa listesiyle context agent kısıtsız B'ye yakın.
 - Önceki deneme (attention katmanlı gizli kelime modeli): gizli kelimeyi bağlam içinde buluyordu (pencere 5: 269/273) ama
   tablo çıkarılamadı (kelime temsili benzerliği, Q·K, boş mask, etki okuması); silindi.
 
