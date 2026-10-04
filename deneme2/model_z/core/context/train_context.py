@@ -26,7 +26,8 @@ MODEL_Z = os.path.dirname(os.path.dirname(HERE))
 FILES = {"countries": "country_"}   # data/<ad>/<onek>{stories.jsonl, vocab.json}
 BATCH = 64              # hikaye
 LR = 3e-3              # olculdu (ulke, d 32): sabit 3e-3 ile 600 adimda sinav 20de 0,650; cosine 1e-3 2.820 adimda 0,59-0,70
-SCHEDULE = "constant"   # constant | cosine; cosine kisa kosuda lr'yi ogrenme baslamadan sifira indiriyordu (470 adimda 0,021)
+SCHEDULE = "constant"   # constant | cosine; secim toplam adima bagli: ulke verisinde (470 adim) cosine lr'yi ogrenme
+                        # baslamadan sifira indirdi (0,021); gramerde tam SS (~157 bin adim) cosine en iyiydi
 RELAX = 0.05            # olu yon gevsetmesi; Rupprecht ve ark. (MHP) degeri, bu modelde olculmedi
 SHOW = 2                # goz: kac sinav hikayesi yazilir
 
