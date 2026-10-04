@@ -33,11 +33,12 @@ EYE = ("Turkey", "Peru")
 
 
 def windows_of(agent, stories, W):
-    """Hikayeler -> pencereler (N, L) kimlik, maske: her hikayede ardisik W cumlenin farkli kelimeleri."""
+    """Hikayeler -> pencereler (N, L) kimlik, maske: her cumlede biten, geriye en cok W cumlenin farkli kelimeleri (hikaye
+    basinda 1, 1-2, 1-3 ...; kullanici, 4 Ekim: "sıralı ilk cümle sonra ilk cümle ve ikinci cümle sonra ilk üç cümle")."""
     rows = []
     for st in stories:
-        for t in range(max(1, len(st) - W + 1)):
-            rows.append(sorted(set(agent.ids([w for s in st[t:t + W] for w in s])) - {0}))
+        for t in range(len(st)):
+            rows.append(sorted(set(agent.ids([w for s in st[max(0, t - W + 1):t + 1] for w in s])) - {0}))
     L = max(len(r) for r in rows)
     ids = torch.zeros(len(rows), L, dtype=torch.long)
     present = torch.zeros(len(rows), L, dtype=torch.bool)
@@ -70,9 +71,9 @@ def eye(agent, stories, countries, W=1, top=5, windows=8):
                             sents.append(x)
         else:
             st = next(s["sentences"] for s in stories if s["country"] == c and s["split"] == "exam")
-            for t in range(min(windows, len(st) - W + 1)):
+            for t in range(min(windows, len(st))):
                 bag = []
-                for x in st[t:t + W]:
+                for x in st[max(0, t - W + 1):t + 1]:
                     bag += [w for w in x if w not in bag]
                 sents.append(bag)
         print("\n   === %s (%d pencere, %d cumle)" % (c, len(sents), W), flush=True)
