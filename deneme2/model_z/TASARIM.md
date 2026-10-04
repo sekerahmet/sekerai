@@ -78,6 +78,12 @@ tahmini değil"*; *"1 cümlenin tüm kelimeleri sırayla gizlenmezse model nası
 
 ## Açık noktalar
 
+- **SS ilk eğitim kapısız.** Kullanıcı, 4 Ekim 2026: *"ilk eğitimi kapısız yapalım o zaman bence. sonradan kontrolsüz
+  eklenen ve bir sürü sıkıntıya sebep olacak birşey"*. SS'te `missing`'siz gramer (`grammar_ssfull_d256_cosine_lr0.001_
+  b1024_20261003_211559`, görülmemiş tam 0,744) ve kapısız `generate`; kapı, context agent'ın ürettiğinde bozuk torba
+  gözle görülürse yeniden ele alınır. Gerekçe (denetimler, `belge/model_z_temel/11`, `12`): (1) kelime çıkarılmış torbanın
+  ~%37'si hâlâ tam cümle ama "missing" etiketi alıyor; (2) kapı n+1 bağın hepsini istiyor, gerçek cümle geçişi 1–10 /
+  11–20 / 21–30 kelimede 0,970 / 0,901 / 0,793. `missing` dizmeyi belirgin bozmuyor (0,735, 3 epok).
 - **Kapı SS'te: görülmemiş bağ.** Kullanıcı, 4 Ekim 2026: *"şu an indeks hazır değil mi? notunu al ona bakarız"*. Kısmi
   eğitimli ülke grameri görülmemiş gerçek cümlelerin %8'ini eledi (unseen complete_real 0,919): tanımadığı kelime bağını
   "eksik" sayıyor. Ülkede tam eğitimle kalktı; SS'te görülmemiş bağ hep olacak, orada yeniden bakılacak.

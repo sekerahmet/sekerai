@@ -4,7 +4,8 @@
 Bir cumleden baslar, metni cumle cumle surdurur:
     1. context agent okudugu cumleye gore sonraki cumlenin aday torbalarini uretir (meaning tablosu verilirse yalniz kisa
        listeden: okunan cumlenin kelimelerinin komsulari + metinde gecenler)
-    2. grammar agent her adayi dizer; kapidan (is_complete) gecemeyen ve metinde birebir gecmis torba elenir
+    2. grammar agent her adayi dizer; metinde birebir gecmis torba elenir; gramer missing'li ise kapidan (is_complete)
+       gecemeyen de (kullanici, 4 Ekim: "ilk eğitimi kapısız yapalım")
     3. en olasi aday secilir, dizilmis cumle context agent'a geri verilir
 
     python generate.py --context agent.pt --grammar agent.pt [--meaning neighbors.pt --shortlist 30 --depth 2]
@@ -33,7 +34,6 @@ def load(context_path, grammar_path, meaning_path=None):
     pg = torch.load(grammar_path, map_location="cpu", weights_only=False)
     grm = Gm.GrammarAgent(pg["vocab"], d=pg["args"]["d"], missing=bool(pg["args"].get("missing", 0)))
     grm.load_state_dict(pg["state"])
-    assert grm.missing is not None, "kapi missing'li gramer ister"
     table = torch.load(meaning_path, weights_only=False) if meaning_path else None
     if table is not None:
         assert table["vocab"] == pc["vocab"], "meaning tablosunun sozlugu context agent'inkinden farkli"
@@ -42,7 +42,7 @@ def load(context_path, grammar_path, meaning_path=None):
 
 @torch.no_grad()
 def generate(ctx, grm, start, steps, table=None, n=NEIGHBORS, depth=DEPTH):
-    """Ilk cumle (kelime listesi) -> uretilen cumleler (kelime listeleri; ilki haric).  Kapidan gecen aday kalmazsa durur."""
+    """Ilk cumle (kelime listesi) -> uretilen cumleler (kelime listeleri; ilki haric).  Gecen aday kalmazsa durur."""
     state = ctx.initial_state(1)
     sentence, said, seen, out = list(start), set(), set(), []
     for _ in range(steps):
@@ -61,7 +61,7 @@ def generate(ctx, grm, start, steps, table=None, n=NEIGHBORS, depth=DEPTH):
                 continue
             g = Gm.relation_matrix(grm, words).double().numpy()
             order = Gm.order_by_relation(g[:len(words) + 1, :len(words) + 1])
-            if Gm.is_complete(g, order):
+            if grm.missing is None or Gm.is_complete(g, order):
                 chosen = [words[i] for i in order]
                 break
         if chosen is None:
@@ -74,7 +74,7 @@ def generate(ctx, grm, start, steps, table=None, n=NEIGHBORS, depth=DEPTH):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--context", required=True, help="context agent'in agent.pt'si")
-    ap.add_argument("--grammar", required=True, help="missing'li grammar agent'in agent.pt'si (kapi)")
+    ap.add_argument("--grammar", required=True, help="grammar agent'in agent.pt'si (missing'li ise kapi da)")
     ap.add_argument("--meaning", default=None, help="meaning agent'in neighbors.pt'si (verilirse kisa liste)")
     ap.add_argument("--shortlist", type=int, default=NEIGHBORS, help="kisa liste: kelime basina komsu")
     ap.add_argument("--depth", type=int, default=DEPTH, help="kisa liste: komsularin komsulari kac adim")
