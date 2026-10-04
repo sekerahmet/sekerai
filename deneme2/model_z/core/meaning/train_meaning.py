@@ -29,6 +29,8 @@ from train_grammar import _no_power_throttling  # noqa: E402
 WINDOW = 5              # pencere: en cok kac cumle (kullanici, 4 Ekim: "Meaning agent window 5")
 BATCH = 256             # ornek (pencere x gizlenen kelime)
 LR = 3e-3
+SUBSAMPLE = 1e-3        # sik kelime seyreltmesi (word2vec): kelime p = min(1, sqrt(t / f) + t / f) olasilikla kalir,
+                        # f kelimenin sikligi; hem gizlenen hem oy veren (kullanici, 4 Ekim: "Evet")
 EYE_WORDS = ("Turkey", "Ankara", "baklava", "Peru", "Lima", "Japan", "Spanish", "South", "the", "is", ".")
 EYE_COUNTRIES = ("Turkey", "Peru")
 
@@ -48,8 +50,20 @@ def windows_of(agent, stories, W):
     return ids, present
 
 
-def loss_of(agent, ids, present, slot):
-    """Ornek: pencere + gizlenen yuva (slot) -> ort -log P(gizli kelime)."""
+def loss_of(agent, ids, present, slot, keep=None, gen=None):
+    """Ornek: pencere + gizlenen yuva (slot) -> ort -log P(gizli kelime).  keep (V,): sik kelime seyreltmesi -- gizlenen
+    kelimesi atilan ornek ve atilan oy veren kelimeler disarida."""
+    if keep is not None:
+        r = torch.rand(ids.shape, generator=gen).to(ids.device)
+        held = r < keep[ids]
+        rows = torch.arange(len(ids), device=ids.device)
+        use = held[rows, slot]
+        present = present & held
+        present[rows, slot] = True
+        use &= (present.sum(1) > 1)
+        ids, present, slot = ids[use], present[use], slot[use]
+        if not len(ids):
+            return None
     rows = torch.arange(len(ids), device=ids.device)
     seen = present.clone()
     seen[rows, slot] = False
@@ -99,6 +113,7 @@ def main(argv=None):
     ap.add_argument("--d", type=int, default=D)
     ap.add_argument("--batch", type=int, default=BATCH)
     ap.add_argument("--lr", type=float, default=LR)
+    ap.add_argument("--subsample", type=float, default=SUBSAMPLE, help="sik kelime seyreltme esigi t (0: kapali)")
     ap.add_argument("--device", default="cpu", help="cpu | cuda")
     ap.add_argument("--out", default=None, help="kosu klasoru: agent.pt, neighbors.pt")
     args = ap.parse_args(argv)
@@ -113,6 +128,16 @@ def main(argv=None):
     agent = MeaningAgent(vocab, d=args.d).to(args.device)
     ids, present = windows_of(agent, [s["sentences"] for s in stories if s["split"] == "train"], args.window)
     win, slot = present.nonzero(as_tuple=True)          # her pencerenin her kelimesi bir ornek
+    keep = None
+    if args.subsample > 0:
+        count = torch.zeros(len(vocab))
+        for st in (s["sentences"] for s in stories if s["split"] == "train"):
+            for x in st:
+                count.index_add_(0, torch.tensor(agent.ids(x)), torch.ones(len(x)))
+        f = count / count.sum()
+        keep = ((args.subsample / f.clamp_min(1e-12)).sqrt() + args.subsample / f.clamp_min(1e-12)).clamp(max=1).to(args.device)
+        print("sik kelime seyreltmesi t %g: kalma olasiligi . %.2f, the %.2f, is %.2f, Turkey %.2f, Ankara %.2f" % tuple(
+            [args.subsample] + [keep[agent.index[w]].item() for w in (".", "the", "is", "Turkey", "Ankara")]), flush=True)
     n = len(win)
     opt = torch.optim.Adam(agent.parameters(), lr=args.lr)
     gen = torch.Generator().manual_seed(args.seed)
@@ -129,7 +154,9 @@ def main(argv=None):
                 group["lr"] = args.lr * 0.5 * (1 + math.cos(math.pi * done))
             rows = perm[b:b + args.batch]
             w = win[rows]
-            loss = loss_of(agent, ids[w].to(args.device), present[w].to(args.device), slot[rows].to(args.device))
+            loss = loss_of(agent, ids[w].to(args.device), present[w].to(args.device), slot[rows].to(args.device), keep, gen)
+            if loss is None:
+                continue
             opt.zero_grad()
             loss.backward()
             opt.step()
