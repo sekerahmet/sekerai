@@ -7,10 +7,11 @@ Egitim (kullanici: "1 cümlenin tüm kelimeleri sırayla gizlenmezse model nası
 sirayla gizli sayilir ve obur kelimelerden tahmin edilir (toplu hesap); kayip -log P(gizli kelime) ortalamasi.  Sik
 kelime seyreltmesi (word2vec): kelime pencerede sqrt(t / f) + t / f olasilikla kalir.
 Olcu goz ile (kullanici: "biz gözle bakıp Türkiye için ne yapmış ona bakmak"; "Sınav yok bunda göz ile kontrol var"):
-EYE kelimelerinin tablo satiri.  Sonunda agent.pt ve neighbors.pt (her kelimenin ilk 50 komsusu, kosinus).
+EYE kelimelerinin tablo satiri.  Her epok checkpoint.pt (surdurme); sonunda agent.pt ve neighbors.pt (her kelimenin ilk
+50 komsusu, kosinus).
 
     python train_meaning.py [--data countries|simplestories] [--root klasor] [--window 5] [--epochs 4]
-                            [--device cpu|cuda] [--out klasor]
+                            [--device cpu|cuda] [--out klasor] [--resume 1]
 """
 import argparse
 import json
@@ -129,7 +130,8 @@ def main(argv=None):
     ap.add_argument("--negatives", type=int, default=NEGATIVES, help="payda ornegi K (0: butun sozluk)")
     ap.add_argument("--subsample", type=float, default=SUBSAMPLE, help="sik kelime seyreltme esigi t (0: kapali)")
     ap.add_argument("--device", default="cpu", help="cpu | cuda")
-    ap.add_argument("--out", default=None, help="kosu klasoru: agent.pt, neighbors.pt")
+    ap.add_argument("--out", default=None, help="kosu klasoru: her epok checkpoint.pt, sonda agent.pt, neighbors.pt")
+    ap.add_argument("--resume", type=int, default=0, help="1: --out'taki checkpoint.pt'den kaldigi epoktan surdur")
     args = ap.parse_args(argv)
     torch.manual_seed(args.seed)
     if args.device == "cpu":
@@ -155,10 +157,28 @@ def main(argv=None):
     print("veri %s: %d pencere (en cok %d cumle, ortak torba), sozluk %d | d %d, lr %g cosine, batch %d pencere, %d parametre"
           % (args.data, n, args.window, len(vocab), args.d, args.lr, args.batch, sum(p.numel() for p in agent.parameters()))
           + (" | payda ornegi %d" % args.negatives if args.negatives else " | payda butun sozluk"), flush=True)
+    cuda = args.device.startswith("cuda")
+    first, ckpt = 1, os.path.join(args.out, "checkpoint.pt") if args.out else None
+    if args.out:
+        os.makedirs(args.out, exist_ok=True)
+    if args.resume:
+        pack = torch.load(ckpt, map_location=args.device, weights_only=False)
+        assert pack["vocab"] == vocab, "sozluk checkpoint'tekinden farkli: ayni veriyle surdurulur"
+        # surdurme ayni tarifle; --epochs da: cosine'in bitisi ona bagli
+        keys = ("data", "window", "seed", "d", "batch", "lr", "negatives", "subsample", "epochs")
+        diff = {k: (pack["args"][k], vars(args)[k]) for k in keys if pack["args"][k] != vars(args)[k]}
+        assert not diff, "surdurme ayari checkpoint'ten farkli (checkpoint, simdi): %s" % diff
+        agent.load_state_dict(pack["state"])
+        opt.load_state_dict(pack["opt"])
+        gen.set_state(pack["gen"].cpu())
+        first = pack["epoch"] + 1
+        print("SURDURULDU: epok %d'den (%s)" % (pack["epoch"], ckpt), flush=True)
     t0 = time.time()
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(first, args.epochs + 1):
         perm = torch.randperm(n, generator=torch.Generator().manual_seed(args.seed + epoch)).to(args.device)
         total, t_epoch = torch.zeros((), device=args.device), time.time()
+        if cuda:
+            torch.cuda.reset_peak_memory_stats()
         t_shown, steps = time.time(), -(-n // args.batch)
         for step, b in enumerate(range(0, n, args.batch), 1):
             if time.time() - t_shown > PROGRESS_SECS:          # ara satir: kayip yalniz burada okunur
@@ -179,11 +199,16 @@ def main(argv=None):
             loss.backward()
             opt.step()
             total += loss.detach()                             # .item() yok: her adimda GPU beklenmez
-        print("epok %d  kayip %.4f  (%.0f sn)" % (epoch, total.item() / steps, time.time() - t0), flush=True)
+        secs = time.time() - t_epoch
+        print("epok %d  kayip %.4f  (%.0f sn) | %.0f pencere/sn%s" % (
+            epoch, total.item() / steps, time.time() - t0, n / secs,
+            ", GPU tepe %.1f GB" % (torch.cuda.max_memory_allocated() / 1e9) if cuda else ""), flush=True)
+        if ckpt:
+            torch.save(dict(vocab=vocab, state=agent.state_dict(), opt=opt.state_dict(), gen=gen.get_state(), epoch=epoch,
+                            args=vars(args)), ckpt)
     agent.eval()
     table = eye(agent, EYE[args.data])
     if args.out:
-        os.makedirs(args.out, exist_ok=True)
         torch.save(dict(vocab=vocab, state=agent.state_dict(), args=vars(args)), os.path.join(args.out, "agent.pt"))
         torch.save(build_neighbor_table(agent, 50), os.path.join(args.out, "neighbors.pt"))
         print("kaydedildi:", args.out, flush=True)
