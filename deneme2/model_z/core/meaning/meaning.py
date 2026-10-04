@@ -55,7 +55,8 @@ def predict(agent, words):
 
 
 WINDOW = 2              # komsu tablosu: kac cumlelik pencerede birlikte gecme (kullanici, 4 Ekim: "önce 1 bakarız")
-NEIGHBORS = 10          # kelime basina komsu (kullanici: "n=10 olacak sekilde")
+NEIGHBORS = 5           # kelime basina komsu (kullanici: "Komşu 5 derinlik 5 yap")
+DEPTH = 5               # komsularin komsulari kac adim (kullanici: "benim n dediğim derinlikti")
 STRONG_LIFT = 3.0       # guclu bag: P(j | i) / P(j) en az (elle; olculmedi)
 STRONG_SHARE = 0.05     # guclu bag: i'nin pencerelerinin en az bu payinda j de var (elle; olculmedi)
 FREQUENT_SHARE = 0.02   # cumlelerin bu payindan fazlasinda gecen kelime listeye hep girer (siklik tablosu; elle)
@@ -93,11 +94,18 @@ def build_neighbor_table(stories, V, window=WINDOW, n=NEIGHBORS):
     return dict(ids=ids, frequent=frequent, window=window, n=n)
 
 
-def shortlist(table, words, n=None):
-    """Kelime kimlikleri -> her birinin ilk n komsusu + sik kelimeler + kendileri (kimlik kumesi, <unk> haric)."""
+def shortlist(table, words, n=None, depth=DEPTH):
+    """Kelime kimlikleri -> komsular depth adim (her adimda yeni gelen kelimelerin ilk n komsusu) + sik kelimeler +
+    kendileri (kimlik kumesi, <unk> haric)."""
     n = n or table["n"]
-    out = set(table["frequent"].tolist()) | set(words)
-    if len(words):
-        out |= set(table["ids"][list(words), :n].flatten().tolist())
-    out.discard(0)
-    return out
+    found = set(words)
+    frontier = set(words)
+    for _ in range(depth):
+        if not frontier:
+            break
+        nxt = set(table["ids"][sorted(frontier), :n].flatten().tolist()) - found - {0}
+        found |= nxt
+        frontier = nxt
+    found |= set(table["frequent"].tolist())
+    found.discard(0)
+    return found
