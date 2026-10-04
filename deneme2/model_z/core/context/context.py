@@ -86,13 +86,15 @@ class ContextAgent(torch.nn.Module):
             z = z.clone()
             z[..., 0] = -1e4                                                          # <unk> uretilmez
             return log_pi, z
+        # beta[shortlist] yerine embedding: dizin geri yayilimi dolgu 0'larini sirayla toplar (G4'te adimin %77'si)
+        beta, seen_bias = F.embedding(shortlist, torch.stack([self.beta, self.seen_bias], 1)).unbind(-1)
         z = (torch.einsum("bkd,bld->bkl", u, self.E(shortlist)) / u.shape[-1] ** 0.5
-             + (self.beta[shortlist] + self.seen_bias[shortlist] * seen.gather(1, shortlist))[:, None, :])
+             + (beta + seen_bias * seen.gather(1, shortlist))[:, None, :])
         return log_pi, z.masked_fill((shortlist == 0)[:, None, :], -1e4)            # dolgu ve <unk>
 
     def _level_log_probs(self, z, words=None):
         """z (..., n) -> log P(c = 0, 1, 2, 3+) (..., n, 4): var mi sigmoid(z), varsa kac kez softmax(gamma_w)."""
-        lc = (self.gamma if words is None else self.gamma[words]).log_softmax(-1)       # (n, 3) ya da (B, P, 3)
+        lc = (self.gamma if words is None else F.embedding(words, self.gamma)).log_softmax(-1)   # (n, 3) ya da (B, P, 3)
         if words is not None:
             lc = lc[:, None]                                                          # (B, 1, P, 3)
         return torch.cat([F.logsigmoid(-z)[..., None], F.logsigmoid(z)[..., None] + lc], -1)

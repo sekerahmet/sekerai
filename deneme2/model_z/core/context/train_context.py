@@ -40,6 +40,7 @@ RELAX = 0.05            # olu yon gevsetmesi; Rupprecht ve ark. (MHP) degeri, bu
 SHOW = 2                # goz: kac sinav hikayesi yazilir
 MAX_SENTENCES = 40      # SS: hikayenin ilk bu kadar cumlesi (hikaye basina ort 22,5)
 MAX_WORDS = 40          # SS: cumlenin ilk bu kadar kelimesi (cumlelerin %99'u 25 kelimeye kadar)
+CHECKPOINT_SECS = 600   # SS: epok icinde checkpoint araligi
 PROGRESS_SECS = 60      # epok icinde ara satir araligi (kullanici, 4 Ekim: "ekle bunları")
 
 
@@ -241,7 +242,8 @@ def _lists_gpu(nbr, ids, mask, n, depth, gold):
 
 def main_stories(args, vocab):
     """SS: hikaye dosyalarindan batch, kisa liste GPU'da batch basina (--meaning).  Olcu: sinav hikayelerinde kayip ve
-    listenin kapsami; nitel olcu generate ile."""
+    listenin kapsami; nitel olcu generate ile.  checkpoint.pt her CHECKPOINT_SECS'te ve epok sonunda (epok icinde kaldigi
+    batch'ten surer: sira epok tohumundan)."""
     root = args.root
     agent = ContextAgent(vocab, d=args.d, slots=args.slots, directions=args.directions).to(args.device)
     train, exam = Stories(root, "ss_story", args.device), Stories(root, "ss_exam_story", args.device)
@@ -277,28 +279,59 @@ def main_stories(args, vocab):
     exam_check.n = 0
     opt = torch.optim.Adam(agent.parameters(), lr=args.lr)
     n = train.n
+    cuda = args.device.startswith("cuda")
+    first, start, ckpt = 1, 0, os.path.join(args.out, "checkpoint.pt") if args.out else None
+    if args.out:
+        os.makedirs(args.out, exist_ok=True)
+    if args.resume:
+        pack = torch.load(ckpt, map_location=args.device, weights_only=False)
+        assert pack["vocab"] == vocab, "sozluk checkpoint'tekinden farkli: ayni veriyle surdurulur"
+        keys = ("seed", "d", "slots", "directions", "relax", "batch", "lr", "schedule", "epochs", "meaning", "shortlist",
+                "depth")
+        diff = {k: (pack["args"][k], vars(args)[k]) for k in keys if pack["args"][k] != vars(args)[k]}
+        assert not diff, "surdurme ayari checkpoint'ten farkli (checkpoint, simdi): %s" % diff
+        agent.load_state_dict(pack["state"])
+        opt.load_state_dict(pack["opt"])
+        first, start = pack["epoch"], pack["next"]
+        print("SURDURULDU: epok %d, hikaye %d'den (%s)" % (first, start, ckpt), flush=True)
+
+    def save(epoch, nxt):
+        if ckpt:
+            torch.save(dict(vocab=vocab, state=agent.state_dict(), opt=opt.state_dict(), epoch=epoch, next=nxt,
+                            args=vars(args)), ckpt + ".part")
+            os.replace(ckpt + ".part", ckpt)
     print("veri SS: egitim %d hikaye, sinav %d (olcu ilk %d) | d %d, slots %d, directions %d, lr %g %s, batch %d hikaye, "
           "%d parametre | kisa liste %s | cihaz %s" % (n, exam.n, len(exam_rows), args.d, args.slots, args.directions, args.lr,
                                                       args.schedule, args.batch, sum(p.numel() for p in agent.parameters()),
                                                       ("komsu %d derinlik %d" % (args.shortlist, args.depth)) if nbr is not None
                                                       else "yok", args.device), flush=True)
     t0 = time.time()
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(first, args.epochs + 1):
         perm = torch.randperm(n, generator=torch.Generator().manual_seed(args.seed + epoch)).to(args.device)
         total, t_epoch = torch.zeros((), device=args.device), time.time()
-        t_shown, steps = time.time(), -(-n // args.batch)
-        for step, b in enumerate(range(0, n, args.batch), 1):
+        if cuda:
+            torch.cuda.reset_peak_memory_stats()
+        t_shown, t_saved, steps = time.time(), time.time(), -(-n // args.batch)
+        b0 = start if epoch == first else 0
+        for step, b in enumerate(range(b0, n, args.batch), 1):
             if time.time() - t_shown > PROGRESS_SECS:          # ara satir: kayip yalniz burada okunur
                 t_shown, el = time.time(), time.time() - t_epoch
-                print("  epok %d adim %d / %d (%%%.0f)  kayip %.3f  %.0f hikaye/sn  kalan ~%.0f dk (butun egitim)" % (
-                    epoch, step, steps, 100 * step / steps, total.item() / step, b / el,
-                    ((steps - step) + (args.epochs - epoch) * steps) * el / step / 60), flush=True)
+                left = (n - b) // args.batch + (args.epochs - epoch) * steps
+                print("  epok %d adim %d / %d (%%%.0f)  kayip %.3f  %.0f hikaye/sn  kisa liste %d  kalan ~%.0f dk (butun "
+                      "egitim)%s" % (epoch, b // args.batch, steps, 100 * b / n, total.item() / step, (b - b0) / el,
+                                     L_last, left * el / step / 60,
+                                     ", GPU tepe %.1f GB" % (torch.cuda.max_memory_allocated() / 1e9) if cuda else ""),
+                      flush=True)
+            if time.time() - t_saved > CHECKPOINT_SECS:
+                t_saved = time.time()
+                save(epoch, b)
             if args.schedule == "cosine":
                 done = ((epoch - 1) * n + b) / (args.epochs * n)
                 for group in opt.param_groups:
                     group["lr"] = args.lr * 0.5 * (1 + math.cos(math.pi * done))
             ids, mask = train.batch(perm[b:b + args.batch])
             lists = _lists_gpu(nbr, ids, mask, args.shortlist, args.depth, gold=True) if nbr is not None else None
+            L_last = lists.shape[-1] if lists is not None else len(vocab)
             loss = loss_of(agent, ids, mask, args.relax, lists)
             opt.zero_grad()
             loss.backward()
@@ -309,9 +342,9 @@ def main_stories(args, vocab):
         loss_exam, cover, size = exam_check()
         agent.train()
         print("epok %d  kayip %.3f (sinav %.3f)  (%.0f sn) | kisa liste ort %.0f kelime, sonraki cumlenin kelimeleri listede %.3f"
-              % (epoch, total.item() / steps, loss_exam, time.time() - t0, size, cover), flush=True)
+              % (epoch, total.item() / step, loss_exam, time.time() - t0, size, cover), flush=True)
+        save(epoch + 1, 0)
         if args.out:
-            os.makedirs(args.out, exist_ok=True)
             torch.save(dict(vocab=vocab, state=agent.state_dict(), args=vars(args)), os.path.join(args.out, "agent.pt"))
     if args.out:
         print("kaydedildi:", args.out, flush=True)
