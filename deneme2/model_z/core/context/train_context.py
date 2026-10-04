@@ -25,9 +25,6 @@ import torch
 
 from context import D, DIRECTIONS, LEVELS, SLOTS, ContextAgent
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "meaning"))
-from meaning import DEPTH, WINDOW, build_neighbor_table, shortlist  # noqa: E402
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_Z = os.path.dirname(os.path.dirname(HERE))
 FILES = {"countries": "country_"}   # data/<ad>/<onek>{stories.jsonl, vocab.json}
@@ -127,9 +124,9 @@ def _judge(gate, h, counts):
     return ~ok[torch.searchsorted(known, flat)].view(h.shape)
 
 
-def loss_of(agent, ids, mask, relax, lists=None):
+def loss_of(agent, ids, mask, relax):
     """Hikaye batch'i -> ortalama kayip (gecis basina, nat): (1 - relax) * -log sum_k pi_k P(B | k) + relax * yon ortalamasi;
-    B sonraki cumlenin butun torbasi.  lists (B, T - 1, L): gecis basina kisa liste (verilirse torba yalniz listeden)."""
+    B sonraki cumlenin butun torbasi."""
     state = agent.initial_state(len(ids))
     LP, PI = [], []
     for t in range(ids.shape[1] - 1):
@@ -138,7 +135,7 @@ def loss_of(agent, ids, mask, relax, lists=None):
         if not valid.any():
             break
         words, c = _bag(ids[:, t + 1], mask[:, t + 1], len(agent.vocab))
-        log_pi, lp = agent.bag_log_prob(state, words, c, None if lists is None else lists[:, t])
+        log_pi, lp = agent.bag_log_prob(state, words, c)
         LP.append(lp[valid])
         PI.append(log_pi[valid])
     lp, log_pi = torch.cat(LP), torch.cat(PI)
@@ -157,29 +154,6 @@ def _counts(ids, mask, V):
     return c
 
 
-def _lists(table, stories, T, gold, depth=DEPTH):
-    """Hikayeler (cumle -> kimlik) -> gecis basina kisa liste (N, T - 1, L), dolgu 0: okunan cumlenin kelimelerinin
-    komsulari + sik kelimeler + hikayede o ana kadar gecenler; gold: egitimde gercek sonraki cumlenin kelimeleri de (torba
-    olasiligi ancak boyle tanimli)."""
-    rows = []
-    for st in stories:
-        seen, story = set(), []
-        for t in range(len(st) - 1):
-            seen |= set(st[t])
-            lst = shortlist(table, sorted(set(st[t])), depth=depth) | seen
-            if gold:
-                lst |= set(st[t + 1])
-            lst.discard(0)
-            story.append(sorted(lst))
-        rows.append(story)
-    L = max(len(x) for st in rows for x in st)
-    out = torch.zeros(len(rows), T - 1, L, dtype=torch.long)
-    for n, st in enumerate(rows):
-        for t, x in enumerate(st):
-            out[n, t, :len(x)] = torch.tensor(x)
-    return out
-
-
 def valid_hashes(valid_next, agent, weights, T):
     """Hikayelerin gecerli devamlari (hikaye -> gecis -> kelime listeleri) -> ozet tensoru (N, T - 1, M), bos -1."""
     V = len(agent.vocab)
@@ -193,7 +167,7 @@ def valid_hashes(valid_next, agent, weights, T):
     return out
 
 
-def evaluate(agent, ids, mask, real_hash, weights, names, show=SHOW, valid_next=None, gate=None, lists=None):
+def evaluate(agent, ids, mask, real_hash, weights, names, show=SHOW, valid_next=None, gate=None):
     """-> bag_in_top_k (ilk 1 / 5 / K, taban: onceki cumle), tutarlilik, calibration, direction_health; goz satirlari.
     gecerli_devam (valid verilirse; kullanici, 4 Ekim: "modelin ürettiği çıktı olası bir çıktı olabilir yani bizim istediğimiz
     değil ama doğru"): ilk aday veride tanimli gecerli devamlardan biri mi, ilk 5 adayin kaci gecerli.
@@ -215,7 +189,7 @@ def evaluate(agent, ids, mask, real_hash, weights, names, show=SHOW, valid_next=
             for t in range(bi.shape[1] - 1):
                 state = agent.read(state, bi[:, t], bm[:, t])
                 said.append(_bag_hash(_counts(bi[:, t], bm[:, t], V), weights))
-                counts, logp = agent.next_bags(state, None if lists is None else lists[b0:b0 + 256, t])
+                counts, logp = agent.next_bags(state)
                 hk = _bag_hash(counts, weights)
                 logp = logp.masked_fill((hk[:, :, None] == torch.stack(said, 1)[:, None, :]).any(-1), -1e9)
                 if gate is not None:
@@ -299,10 +273,6 @@ def main(argv=None):
     ap.add_argument("--every", type=int, default=10, help="kac epokta bir olcum")
     ap.add_argument("--out", default=None, help="kosu klasoru: her epok checkpoint.pt, sonda agent.pt ve results.json")
     ap.add_argument("--resume", type=int, default=0, help="1: --out'taki checkpoint.pt'den kaldigi epoktan surdur")
-    ap.add_argument("--shortlist", type=int, default=0, help="N: torba kisa listeden (meaning komsu tablosu, kelime basina N "
-                    "komsu, --depth adim + sik kelimeler + hikayede gecenler); 0 kapali")
-    ap.add_argument("--depth", type=int, default=DEPTH, help="kisa liste: komsularin komsulari kac adim")
-    ap.add_argument("--window", type=int, default=WINDOW, help="kisa liste: komsu tablosunun penceresi (cumle)")
     ap.add_argument("--grammar", default=None, help="secimde kapi: missing'li grammar agent'in agent.pt'si (sinavda)")
     args = ap.parse_args(argv)
     args.lr = args.lr if args.lr is not None else DATA_LR.get(args.data, LR)
@@ -328,20 +298,6 @@ def main(argv=None):
     exam_ids, exam_mask = (t.to(args.device) for t in data["exam"])
     n_train = len(ids)
     weights = torch.randint(1, 2 ** 62, (len(vocab),), generator=torch.Generator().manual_seed(0)).to(args.device)
-    lists = exam_lists = None
-    if args.shortlist:
-        t_list = time.time()
-        as_lists = lambda a, m: [[a[n, t][m[n, t]].tolist() for t in range(a.shape[1]) if m[n, t].any()] for n in range(len(a))]
-        train_s, exam_s = as_lists(ids.cpu(), mask.cpu()), as_lists(exam_ids.cpu(), exam_mask.cpu())
-        table = build_neighbor_table(train_s, len(vocab), window=args.window, n=args.shortlist)
-        t_table = time.time() - t_list
-        lists = _lists(table, train_s, ids.shape[1], gold=True, depth=args.depth).to(args.device)
-        exam_lists = _lists(table, exam_s, exam_ids.shape[1], gold=False, depth=args.depth).to(args.device)
-        cover = [len(set(st[t + 1]) & set(exam_lists[n, t].tolist())) / len(set(st[t + 1]))
-                 for n, st in enumerate(exam_s) for t in range(len(st) - 1)]
-        print("kisa liste: pencere %d cumle, tablo %.1f sn; kelime basina %d komsu, derinlik %d; liste ort %.0f kelime (sozluk %d); sinavda sonraki cumlenin kelimeleri "
-              "listede %.3f; %.0f sn" % (args.window, t_table, args.shortlist, args.depth, (exam_lists > 0).sum(-1).float()[exam_lists.sum(-1) > 0].mean(),
-                                        len(vocab), np.mean(cover), time.time() - t_list), flush=True)
     real_hash = torch.cat([_bag_hash(_counts(a[:, t], m[:, t], len(vocab)), weights)[m[:, t].any(1)]
                            for a, m in ((ids, mask), (exam_ids, exam_mask)) for t in range(a.shape[1])]).unique()
     exam_valid = (valid_hashes(data["exam_valid"], agent, weights, exam_ids.shape[1])
@@ -379,7 +335,7 @@ def main(argv=None):
     if args.resume:
         pack = torch.load(ckpt, map_location=args.device, weights_only=False)
         assert pack["vocab"] == vocab, "sozluk checkpoint'tekinden farkli"
-        keys = ("data", "seed", "d", "slots", "directions", "relax", "batch", "lr", "schedule", "epochs", "shortlist", "depth", "window")
+        keys = ("data", "seed", "d", "slots", "directions", "relax", "batch", "lr", "schedule", "epochs")
         diff = {k: (pack["args"].get(k), vars(args)[k]) for k in keys if pack["args"].get(k) != vars(args)[k]}
         assert not diff, "surdurme ayari checkpoint'ten farkli (checkpoint, simdi): %s" % diff
         agent.load_state_dict(pack["state"])
@@ -396,7 +352,7 @@ def main(argv=None):
                 for group in opt.param_groups:
                     group["lr"] = args.lr * 0.5 * (1 + math.cos(math.pi * done))
             rows = perm[b:b + args.batch].to(args.device)
-            loss = loss_of(agent, ids[rows], mask[rows], args.relax, None if lists is None else lists[rows])
+            loss = loss_of(agent, ids[rows], mask[rows], args.relax)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -405,7 +361,7 @@ def main(argv=None):
         if epoch % args.every == 0 or epoch == args.epochs:
             agent.eval()
             t_train = time.time() - t_epoch
-            res = evaluate(agent, exam_ids, exam_mask, real_hash, weights, data["exam_names"], valid_next=exam_valid, lists=exam_lists,
+            res = evaluate(agent, exam_ids, exam_mask, real_hash, weights, data["exam_names"], valid_next=exam_valid,
                            show=SHOW if epoch == args.epochs else 0, gate=gate)
             agent.train()
             k = res["bag_in_top_k"]

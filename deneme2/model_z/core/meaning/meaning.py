@@ -8,7 +8,8 @@ Amac: context agent 57.000 kelime yerine elindeki kelimelerle ayni metin parcasi
     mask            gizli yerin temsili: torbadaki bir kelime yerine konur
     okuyucu         konumsuz attention (TransformerEncoder); mask Q ile hangi kelimeye bakacagini secer
     tahmin          P(w | torba) = softmax(h_mask . e_w / sqrt(d) + bias_w)
-    shortlist       verilen kelimeler + mask -> olasiligi en yuksek n kelime (verilenler haric)
+    komsu tablosu   egitimden sonra meaning agent'in tahminlerinden (her kelime icin en yakin kelimeler; henuz yok)
+    shortlist       komsu tablosundan: kelime basina NEIGHBORS komsu, DEPTH adim
 """
 import torch
 
@@ -54,50 +55,14 @@ def predict(agent, words):
     return p
 
 
-WINDOW = 2              # komsu tablosu: kac cumlelik pencerede birlikte gecme (kullanici, 4 Ekim: "önce 1 bakarız")
-NEIGHBORS = 5           # kelime basina komsu (kullanici: "Komşu 5 derinlik 5 yap")
-DEPTH = 5               # komsularin komsulari kac adim (kullanici: "benim n dediğim derinlikti")
-STRONG_LIFT = 3.0       # guclu bag: P(j | i) / P(j) en az (elle; olculmedi)
-STRONG_SHARE = 0.05     # guclu bag: i'nin pencerelerinin en az bu payinda j de var (elle; olculmedi)
-FREQUENT_SHARE = 0.02   # cumlelerin bu payindan fazlasinda gecen kelime listeye hep girer (siklik tablosu; elle)
+NEIGHBORS = 5           # kisa liste: kelime basina komsu (kullanici, 4 Ekim: "Komşu 5 derinlik 5 yap")
+DEPTH = 5               # kisa liste: komsularin komsulari kac adim (kullanici: "benim n dediğim derinlikti")
 
 
-def build_neighbor_table(stories, V, window=WINDOW, n=NEIGHBORS):
-    """Hikayeler (cumle -> kelime kimlikleri) -> komsu tablosu: {"ids": (V, n) (dolgu 0), "frequent": kimlikler}.
-    Pencere: her cumlede biten, geriye en cok window cumle (hikaye basinda 1, 1-2, 1-3 ...).  Komsu: ayni pencerede guclu bagli kelimeler (kat >= STRONG_LIFT, birlikte >= STRONG_SHARE),
-    birlikte gecme payina gore ilk n.  Bicim kelimelerinin guclu bagi olmaz: komsu getirmezler."""
-    import numpy as np
-    import scipy.sparse as sp
-    rows, cols, k = [], [], 0
-    df, n_sent = np.zeros(V), 0
-    for st in stories:
-        for s in st:
-            n_sent += 1
-            df[list(set(s))] += 1
-        for t in range(len(st)):                       # pencere t. cumlede biter, geriye en cok window cumle: hikayenin
-            ws = {x for s in st[max(0, t - window + 1):t + 1] for x in s}      # basinda 1, 1-2, 1-3 ... (kullanici, 4 Ekim)
-            rows += [k] * len(ws)
-            cols += list(ws)
-            k += 1
-    X = sp.csr_matrix((np.ones(len(rows), dtype=np.float32), (rows, cols)), shape=(k, V))
-    C = (X.T @ X).tocsr()
-    win = C.diagonal()
-    ids = torch.zeros(V, n, dtype=torch.long)
-    for i in range(1, V):
-        a, b = C.indptr[i], C.indptr[i + 1]
-        j, c = C.indices[a:b], C.data[a:b]
-        share = c / max(win[i], 1)
-        keep = (j != i) & (j != 0) & (share >= STRONG_SHARE) & (share / np.maximum(win[j] / k, 1e-12) >= STRONG_LIFT)
-        top = j[keep][np.argsort(-share[keep])][:n]
-        ids[i, :len(top)] = torch.from_numpy(top.astype(np.int64))
-    frequent = torch.from_numpy(np.flatnonzero(df / max(n_sent, 1) > FREQUENT_SHARE))
-    return dict(ids=ids, frequent=frequent, window=window, n=n)
-
-
-def shortlist(table, words, n=None, depth=DEPTH):
-    """Kelime kimlikleri -> komsular depth adim (her adimda yeni gelen kelimelerin ilk n komsusu) + sik kelimeler +
-    kendileri (kimlik kumesi, <unk> haric)."""
-    n = n or table["n"]
+def shortlist(table, words, n=NEIGHBORS, depth=DEPTH):
+    """Kelime kimlikleri -> komsular depth adim (her adimda yeni gelen kelimelerin ilk n komsusu) + tablonun her zaman
+    giren kelimeleri ("frequent", varsa) + kendileri (kimlik kumesi, <unk> haric).  table["ids"] (V, m): meaning agent'in
+    komsu tablosu."""
     found = set(words)
     frontier = set(words)
     for _ in range(depth):
@@ -106,6 +71,7 @@ def shortlist(table, words, n=None, depth=DEPTH):
         nxt = set(table["ids"][sorted(frontier), :n].flatten().tolist()) - found - {0}
         found |= nxt
         frontier = nxt
-    found |= set(table["frequent"].tolist())
+    if "frequent" in table:
+        found |= set(table["frequent"].tolist())
     found.discard(0)
     return found

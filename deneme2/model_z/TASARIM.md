@@ -37,32 +37,29 @@ bir kapı yani sıralama değil geçersiz olmaz demek sadece"*; *"Tamam son kara
 - Aday sayısı mimariden ayrı (öneri, kodlanmadı): her yön bir dağılım; yönlerden sırayla torba çekilip kapıdan geçirilir,
   N iyi aday bulununca durulur.
 
-## Meaning agent (tasarım, 4 Ekim; kodlanmadı)
+## Meaning agent (4 Ekim)
 
 Kullanıcı, 4 Ekim 2026: *"Aslında kelimeler arası anlam bağını oluştıran bir adıma ihtiyaç yok gramerden ayrı olarak
 Türkiye Ankara Asia lira gibi kelimeleri yakınlaştıran"*; *"Cümleler içinde attention ile"*; *"dizmenin bozulmaması için
-ayrı birşey öneriyorum"*; *"Meaning agent ok"*; *"Benim aklımdaki şuydu aslında context bir önceki cümledeki kelimelere
-bakıp ona yakın kelimeleri bulabilmesi 57.000 yerine belki çok daha az. Amaç missing değil önceki cümleye bakarak doğru
-torbayı oluşturması"*.
+ayrı birşey öneriyorum"*; *"Meaning agent ok"*; *"benim 2 ve ya 3 cümle dediğim cümlenin tüm kelimeleri ortak. Yoksa cümle
+tahmini değil"*; *"1 cümlenin tüm kelimeleri sırayla gizlenmezse model nasıl öğrenecek ?"*.
 
-- Amaç: kelimeler arası anlam yakınlığı (Turkey ↔ Ankara, Asia, lira). Context agent önceki cümlenin kelimelerine yakın
-  kelimelerden kısa bir aday listesi alır, torbayı 57.000 yerine bu listeden kurar.
-- Kısa liste (kod: `meaning.build_neighbor_table`, `shortlist`; kullanıcı: *"bir cümledeki tüm kelimeler için ... 5 yakın
-  kelime ... bir liste üretmek bir tahmin yok"*; *"the of is gibi kelimeleri elemek çok kolay ... sıklık tablosu ... elle
-  vermeye gerek yok"*; *"south in the a gibi değil"*): 2 cümlelik pencerede birlikte geçme sayımı; kelimenin komşusu
-  **güçlü bağ**: kat P(j|i)/P(j) ≥ 3 ve i'nin pencerelerinin ≥ %5'inde birlikte; birlikte geçme payına göre ilk N. Biçim
-  kelimelerinin güçlü bağı olmaz, komşu getirmez (elle liste yok). Geçiş listesi = okunan cümlenin bütün kelimelerinin
-  komşuları (derinlik 1) + sık kelimeler + hikâyede geçenler.
-- **Elle konan ölçüler** (kullanıcı: *"elle verdiğin ölçüleri not al"*; hiçbiri ölçülmedi): pencere 2 cümle (`WINDOW`),
-  kelime başına N = 10 (`NEIGHBORS`, kullanıcı: *"n=10"*), kat ≥ 3 (`STRONG_LIFT`), birlikte ≥ %5 (`STRONG_SHARE`), sık
-  kelime: cümlelerin > %2'si (`FREQUENT_SHARE`), sayımda en az 3 birlikte geçme (senaryo betiği).
-- Gözle (ülke, sayım): Turkey → Turkish, Ankara, Black, Iran…; Peru'da kat sıralaması America'yı 25. sıraya atıyordu
-  (seyrek kelimeler Sucre, Tiwanaku öne geçiyor); pay sıralaması + kat eşiği düzeltti. 7 komşuda 2. adım Sophia →
-  Ukraine kayması (ortak kelime köprüsü).
-- Gizli kelimeli (BERT türü) `MeaningAgent` denendi: bağlam içinde gizli kelimeyi doğru buluyor (pencere 2: 167/170) ama
-  kelime başına komşu tablosu vermiyor (E benzerliği: yerine geçen kelimeler; Q·K: gürültü). Kısa liste sayımla.
-- Ülke, context agent senaryosu (N 10, derinlik 1): liste ort 60 kelime / 897, sınavda sonraki cümlenin kelimeleri
-  listede 0,976.
+- Amaç: context agent 57.000 kelime yerine okuduğu cümlenin kelimelerine yakın kelimelerden kısa bir liste üzerinde
+  çalışsın (kullanıcı: *"57.000 yerine belki çok daha az"*).
+- Öğrenme (kod: `core/meaning/`, `MeaningAgent`): her cümlede biten büyüyen pencere (1, 1–2, 1–3 … en çok WINDOW cümle;
+  kullanıcı: *"sıralı ilk cümle sonra ilk cümle ve ikinci cümle sonra ilk üç cümle gibi"*), penceredeki bütün kelimeler
+  tek torba; her kelime sırayla `mask` ile gizlenir, model kalanlara attention ile bakıp gizliyi bulur. Pencere 1 cümle
+  içi bağ, fazlası cümleler arası bağ (kullanıcı: *"window 1 zaten tüm cümleleri olası gösteriyor yani cümle içi bağlam
+  ayrı ayrı. Sonrası cümleler arası bağlantı"*).
+- Çıktı: eğitimden sonra bir kez üretilen komşu tablosu (her kelimenin en yakın kelimeleri, meaning agent'ın kendi
+  tahminlerinden). Henüz üretilmedi.
+- Kullanım `shortlist`: okunan cümlenin her kelimesi için tablodan NEIGHBORS komşu, DEPTH adım (komşuların komşuları);
+  komşu × derinlik eğitimde maliyet kararı, üretimde sıcaklık gibi ayar (kullanıcı: *"Hatta üretim ayarı olur sıcaklık
+  gibi"*, *"Eğitim için"*). Context agent `shortlist` ile çalışabiliyor (`context.py`).
+- Ölçü gözle (kullanıcı: *"biz gözle bakıp Türkiye için ne yapmış ona bakmak"*). Ülke: pencere 1'de gizli kelime
+  0,97–1,00 bulunuyor, belirsiz yerde doğru küme ("The Black Sea touches [ ]" → Bulgaria, Ukraine, Georgia, Turkey,
+  Russia); pencere 2'de 170 gizli kelimenin 167'si doğru, öbür cümleden ülke çıkarılıyor ("People in [ ] pay with the
+  Turkish lira" → Turkey 0,95). Kelime temsili benzerliği ve Q·K komşu tablosu vermiyor (yerine geçen kelimeler / gürültü).
 
 ## Açık noktalar
 
