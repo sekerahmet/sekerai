@@ -24,12 +24,11 @@ from context import D, DIRECTIONS, LEVELS, SLOTS, ContextAgent
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_Z = os.path.dirname(os.path.dirname(HERE))
 FILES = {"countries": "country_"}   # data/<ad>/<onek>{stories.jsonl, vocab.json}
-# veriye gore baslangic ayari (kullanici, 4 Ekim: "küçük veride farklı büyük veride farklı"); verilmeyen veride LR / SCHEDULE
-DATA_SETTINGS = {"countries": dict(lr=3e-3, schedule="constant")}   # ulke: 470 adimda cosine 0,021, sabit 3e-3 600 adimda 0,650
+# veriye gore baslangic lr'si (kullanici, 4 Ekim: "hepsi cosine sadece başlangıç lr farklı veriye göre"); verilmeyende LR
+DATA_LR = {"countries": 3e-3}       # ulke: sabit 3e-3 600 adimda sinav ilk20 0,650 (olculdu)
 BATCH = 64              # hikaye
-LR = 1e-3              # genel baslangic (gramer d 256 ile ayni); veriye ozel deger DATA_SETTINGS
-SCHEDULE = "cosine"     # cosine | constant (kullanici, 4 Ekim: "Varsayılan ... cosine olsun gerekirse constant deneriz");
-                        # az adimli kosuda constant: ulke verisinde 470 adimda cosine 0,021, sabit 3e-3 600 adimda 0,650
+LR = 1e-3              # genel baslangic lr'si (gramer d 256 ile ayni); veriye ozel deger DATA_LR
+SCHEDULE = "cosine"     # her veride cosine (kullanici, 4 Ekim: "hepsi cosine"); constant yalniz denemek icin
 RELAX = 0.05            # olu yon gevsetmesi; Rupprecht ve ark. (MHP) degeri, bu modelde olculmedi
 SHOW = 2                # goz: kac sinav hikayesi yazilir
 
@@ -189,16 +188,14 @@ def main(argv=None):
     ap.add_argument("--directions", type=int, default=DIRECTIONS, help="aday torba (yon) sayisi")
     ap.add_argument("--relax", type=float, default=RELAX, help="olu yon gevsetmesi")
     ap.add_argument("--batch", type=int, default=BATCH)
-    ap.add_argument("--lr", type=float, default=None, help="verilmezse veriye gore (DATA_SETTINGS) ya da LR")
-    ap.add_argument("--schedule", default=None, choices=("constant", "cosine"), help="verilmezse veriye gore ya da SCHEDULE")
+    ap.add_argument("--lr", type=float, default=None, help="baslangic lr'si; verilmezse veriye gore (DATA_LR) ya da LR")
+    ap.add_argument("--schedule", default=SCHEDULE, choices=("constant", "cosine"))
     ap.add_argument("--device", default="cpu", help="cpu | cuda")
     ap.add_argument("--every", type=int, default=10, help="kac epokta bir olcum")
     ap.add_argument("--out", default=None, help="kosu klasoru: her epok checkpoint.pt, sonda agent.pt ve results.json")
     ap.add_argument("--resume", type=int, default=0, help="1: --out'taki checkpoint.pt'den kaldigi epoktan surdur")
     args = ap.parse_args(argv)
-    preset = DATA_SETTINGS.get(args.data, {})
-    args.lr = args.lr if args.lr is not None else preset.get("lr", LR)
-    args.schedule = args.schedule or preset.get("schedule", SCHEDULE)
+    args.lr = args.lr if args.lr is not None else DATA_LR.get(args.data, LR)
     torch.manual_seed(args.seed)
     if args.device == "cpu":
         torch.set_num_threads(4)
