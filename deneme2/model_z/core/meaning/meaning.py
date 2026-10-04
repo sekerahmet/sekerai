@@ -1,68 +1,71 @@
 """meaning -- Model Z meaning agent (kullanici, 4 Ekim: "kelimeler arası anlam bağını oluştıran bir adım ... Türkiye Ankara
-Asia lira gibi kelimeleri yakınlaştıran"; "Cümleler içinde attention ile"; "benim 2 ve ya 3 cümle dediğim cümlenin tüm
-kelimeleri ortak. Yoksa cümle tahmini değil"; adlar onayli).  Egitim ve olcum: train_meaning.py.
+Asia lira gibi kelimeleri yakınlaştıran"; "Cümleler içinde attention ile"; "saatlerdir bu tabloyu öğrenen modelle kurmanı
+istedim"; adlar onayli).  Egitim: train_meaning.py.
 
-Amac: context agent 57.000 kelime yerine elindeki kelimelerle ayni metin parcasinda bulunan kelimelerden kisa bir liste
-(vocabulary shortlist) uzerinde calissin.  Sira ve cumle tahmini yok: WINDOW cumlenin kelimeleri tek ortak torba.
-    E               kelime temsili (sozluk x d); cikis da ayni temsil
-    mask            gizli yerin temsili: torbadaki bir kelime yerine konur
-    okuyucu         konumsuz attention (TransformerEncoder); mask Q ile hangi kelimeye bakacagini secer
-    tahmin          P(w | torba) = softmax(h_mask . e_w / sqrt(d) + bias_w)
-    komsu tablosu   egitimden sonra meaning agent'in tahminlerinden (her kelime icin en yakin kelimeler; henuz yok)
-    shortlist       komsu tablosundan: kelime basina NEIGHBORS komsu, DEPTH adim
+Bag tablosu modelin kendi parametresi; gizli kelime yalniz tablo uzerinden tahmin edilir:
+    R[i, j] = source_i . target_j / sqrt(d)     bag tablosu (V x V, dusuk boyutlu)
+    puan(j) = bias_j + sum_i alpha_i R[i, j]    torbadaki her kelime i gizli kelimeye bagi kadar oy verir
+    alpha   = softmax_i(mask . key(source_i))   attention: gizli yer hangi kelimenin oyuna ne kadar kulak verir
+    bias    kelimenin genel sikligi: "the", "is" tabloyu doldurmasin
+Komsu tablosu (build_neighbor_table): R'nin her satirinin en buyuk m degeri.  Kisa liste (shortlist): okunan cumlenin
+kelimeleri icin tablodan NEIGHBORS komsu, DEPTH adim (komsularin komsulari).
 """
 import torch
 
 UNK = "<unk>"
-D = 64                  # kelime temsili boyu (gramer ile ayni; olculmedi)
-HEADS = 4
-LAYERS = 2              # okuyucu katmani (olculmedi)
+D = 64                  # kelime vektoru boyu (olculmedi)
+NEIGHBORS = 5           # kisa liste: kelime basina komsu (kullanici, 4 Ekim: "Komşu 5 derinlik 5 yap")
+DEPTH = 5               # kisa liste: komsularin komsulari kac adim (kullanici: "benim n dediğim derinlikti")
 
 
 class MeaningAgent(torch.nn.Module):
-    def __init__(self, vocab, d=D, heads=HEADS, layers=LAYERS):
+    def __init__(self, vocab, d=D):
         super().__init__()
         self.vocab = vocab
         self.index = {w: i for i, w in enumerate(vocab)}
-        self.E = torch.nn.Embedding(len(vocab), d)
+        self.source = torch.nn.Embedding(len(vocab), d)          # oy veren
+        self.target = torch.nn.Embedding(len(vocab), d)          # oy alan
+        self.key = torch.nn.Linear(d, d, bias=False)
         self.mask = torch.nn.Parameter(torch.randn(d) / d ** 0.5)
-        layer = torch.nn.TransformerEncoderLayer(d, heads, 4 * d, dropout=0.0, batch_first=True)
-        self.reader = torch.nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
         self.bias = torch.nn.Parameter(torch.zeros(len(vocab)))
 
     def ids(self, words):
         return [self.index.get(w, self.index[UNK]) for w in words]
 
-    def forward(self, ids, present, hidden):
-        """ids (B, L) torba (sirasiz), present (B, L) gercek yuva, hidden (B, L) mask konan yuva -> gizli yuvalar icin
-        log olasilik (B, L, V) (gizli olmayan yuvalarda anlamsiz)."""
-        e = torch.where(hidden[..., None], self.mask.expand_as(self.E(ids)), self.E(ids))
-        h = self.reader(e, src_key_padding_mask=~present)
-        return (h @ self.E.weight.T / h.shape[-1] ** 0.5 + self.bias).log_softmax(-1)
+    def forward(self, ids, present):
+        """ids (B, L) torbadaki kelimeler (sirasiz), present (B, L) gercek ve gorunen yuva -> gizli kelime icin log
+        olasilik (B, V) ve attention (B, L)."""
+        u = self.source(ids)
+        d = u.shape[-1]
+        alpha = ((self.key(u) @ self.mask) / d ** 0.5).masked_fill(~present, -1e9).softmax(-1)
+        vote = (alpha[..., None] * u).sum(1)                    # sum_i alpha_i source_i
+        return (vote @ self.target.weight.T / d ** 0.5 + self.bias).log_softmax(-1), alpha
+
+    @torch.no_grad()
+    def relation(self, rows):
+        """Kelime kimlikleri (n,) -> R satirlari (n, V)."""
+        return self.source(rows) @ self.target.weight.T / self.source.weight.shape[1] ** 0.5
 
 
 @torch.no_grad()
-def predict(agent, words):
-    """Kelime kimlikleri (liste) -> ayni parcada bulunacak kelimelerin olasiligi (V,): torba + bir mask."""
-    dev = agent.E.weight.device
-    ids = torch.tensor([list(words) + [0]], device=dev)
-    present = torch.ones_like(ids, dtype=torch.bool)
-    hidden = torch.zeros_like(present)
-    hidden[0, -1] = True
-    p = agent(ids, present, hidden)[0, -1].exp()
-    p[list(words)] = 0
-    p[agent.index[UNK]] = 0
-    return p
-
-
-NEIGHBORS = 5           # kisa liste: kelime basina komsu (kullanici, 4 Ekim: "Komşu 5 derinlik 5 yap")
-DEPTH = 5               # kisa liste: komsularin komsulari kac adim (kullanici: "benim n dediğim derinlikti")
+def build_neighbor_table(agent, m):
+    """-> {"ids": (V, m), "scores": (V, m)}: R'nin her satirinin en buyuk m degeri (kelimenin kendisi ve <unk> haric)."""
+    V = len(agent.vocab)
+    ids, scores = [], []
+    for c in range(0, V, 4096):
+        rows = torch.arange(c, min(c + 4096, V), device=agent.bias.device)
+        r = agent.relation(rows)
+        r[torch.arange(len(rows)), rows] = -1e9
+        r[:, agent.index[UNK]] = -1e9
+        top = r.topk(m, dim=1)
+        ids.append(top.indices.cpu())
+        scores.append(top.values.cpu())
+    return dict(vocab=agent.vocab, ids=torch.cat(ids), scores=torch.cat(scores))
 
 
 def shortlist(table, words, n=NEIGHBORS, depth=DEPTH):
-    """Kelime kimlikleri -> komsular depth adim (her adimda yeni gelen kelimelerin ilk n komsusu) + tablonun her zaman
-    giren kelimeleri ("frequent", varsa) + kendileri (kimlik kumesi, <unk> haric).  table["ids"] (V, m): meaning agent'in
-    komsu tablosu."""
+    """Kelime kimlikleri -> komsular depth adim (her adimda yeni gelen kelimelerin ilk n komsusu) + kendileri (kimlik
+    kumesi, <unk> haric)."""
     found = set(words)
     frontier = set(words)
     for _ in range(depth):
@@ -71,7 +74,5 @@ def shortlist(table, words, n=NEIGHBORS, depth=DEPTH):
         nxt = set(table["ids"][sorted(frontier), :n].flatten().tolist()) - found - {0}
         found |= nxt
         frontier = nxt
-    if "frequent" in table:
-        found |= set(table["frequent"].tolist())
     found.discard(0)
     return found
