@@ -64,6 +64,16 @@ def load(args):
         for split in ("train", "exam"):
             sents = [[ix.get(w, 0) for w in x] for s in stories if s["split"] == split for x in s["sentences"]]
             parts[split] = (np.array([w for x in sents for w in x]), np.r_[0, np.cumsum([len(x) for x in sents])], sents)
+        if args.holdout > 0:
+            # ulkenin butun cumleleri egitimde de geciyor (2.374 farkli soyleyisin hepsi): genelleme icin farkli
+            # cumlelerin bir kismi butun gecisleriyle egitimden cikarilir, sinav onlar olur
+            distinct = sorted(set(tuple(x) for x in parts["train"][2]))
+            rng = np.random.default_rng(args.seed)
+            held = {distinct[i] for i in rng.permutation(len(distinct))[:int(len(distinct) * args.holdout)]}
+            keep = [x for x in parts["train"][2] if tuple(x) not in held]
+            parts["train"] = (np.array([w for x in keep for w in x]), np.r_[0, np.cumsum([len(x) for x in keep])], keep)
+            exam = [list(x) for x in sorted(held)]
+            parts["exam"] = (np.array([w for x in exam for w in x]), np.r_[0, np.cumsum([len(x) for x in exam])], exam)
         seen = set(tuple(x) for x in parts["train"][2])
         exam_seen = torch.tensor([tuple(x) in seen for x in parts["exam"][2][:EXAM_N]])
         tr, ex = parts["train"][:2], parts["exam"][:2]
@@ -123,6 +133,7 @@ def main(argv=None):
     ap.add_argument("--batch", type=int, default=BATCH, help="cumle")
     ap.add_argument("--lr", type=float, default=LR)
     ap.add_argument("--noise", type=float, default=0.0, help="encoder girdisinde kelime silme orani (TSDAE en iyisi 0,6)")
+    ap.add_argument("--holdout", type=float, default=0.0, help="ulke: farkli cumlelerin bu kadari egitimden cikar, sinav olur")
     ap.add_argument("--compile", type=int, default=1, help="1: torch.compile (yalniz cuda)")
     ap.add_argument("--device", default="cpu", help="cpu | cuda")
     ap.add_argument("--out", default=None, help="kosu klasoru: her epok checkpoint.pt, sonda agent.pt ve results.json")
@@ -148,7 +159,7 @@ def main(argv=None):
     if args.resume:
         pack = torch.load(ckpt, map_location=args.device, weights_only=False)
         assert pack["vocab"] == vocab, "sozluk checkpoint'tekinden farkli"
-        keys = ("data", "seed", "d", "z", "layers", "batch", "lr", "noise", "epochs")
+        keys = ("data", "seed", "d", "z", "layers", "batch", "lr", "noise", "holdout", "epochs")
         diff = {k: (pack["args"][k], vars(args)[k]) for k in keys if pack["args"][k] != vars(args)[k]}
         assert not diff, "surdurme ayari checkpoint'ten farkli (checkpoint, simdi): %s" % diff
         agent.load_state_dict(pack["state"])
