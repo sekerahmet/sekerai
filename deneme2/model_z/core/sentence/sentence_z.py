@@ -49,12 +49,19 @@ def build_keys(meaning_path, grammar_path, z=Z, longest=64, seed=1):
     return dict(vocab=mp["vocab"], END=V, F=F, signs=signs, shift=shift, unshift=unshift, P=P, grammar=gram, z=z)
 
 
+def keys_to(keys, device):
+    """Anahtarlar ve grammar okuyucusu cihaza (GPU'da z hesabi)."""
+    out = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in keys.items()}
+    out["grammar"] = keys["grammar"].to(device)
+    return out
+
+
 @torch.no_grad()
 def _roles(keys, ids, mask):
     gram = keys["grammar"]
     B = len(ids)
     e = torch.cat([gram.E(ids), gram.boundary.expand(B, 1, -1)], 1)
-    m = torch.cat([mask, torch.ones(B, 1, dtype=torch.bool)], 1)
+    m = torch.cat([mask, torch.ones(B, 1, dtype=torch.bool, device=ids.device)], 1)
     h = gram.reader(e, src_key_padding_mask=~m)[:, :ids.shape[1]]
     return torch.sign(h @ keys["P"].T)                                          # (B, L, z)
 
@@ -71,9 +78,10 @@ def encode_z(keys, ids, mask):
     B, L = ids.shape
     assert L < len(keys["signs"]), "cumle build_keys(longest)'ten uzun"
     n = mask.sum(1)
-    full = torch.cat([ids, torch.zeros(B, 1, dtype=ids.dtype)], 1).scatter(1, n[:, None], keys["END"])
-    keep = torch.arange(L + 1)[None] <= n[:, None]
-    t = torch.arange(L + 1).expand(B, -1)
+    dev = ids.device
+    full = torch.cat([ids, torch.zeros(B, 1, dtype=ids.dtype, device=dev)], 1).scatter(1, n[:, None], keys["END"])
+    keep = torch.arange(L + 1, device=dev)[None] <= n[:, None]
+    t = torch.arange(L + 1, device=dev).expand(B, -1)
     z = (_bind(keys, full, t) * keep[..., None]).sum(1)
     return z + (_roles(keys, ids, mask) * keys["F"][ids] * mask[..., None]).sum(1)
 
@@ -83,7 +91,8 @@ def decode_z(keys, z, sic=True):
     """z (B, z) -> kelime kimlik listeleri (END'e kadar)."""
     F, signs, unshift, END = keys["F"], keys["signs"], keys["unshift"], keys["END"]
     B, Lk = len(z), len(signs)
-    rows = torch.arange(B)
+    dev = z.device
+    rows = torch.arange(B, device=dev)
 
     def scores(r):                                                              # (B, Lk, V + 1)
         return (r[:, unshift] * signs[None]) @ F.T
@@ -92,14 +101,14 @@ def decode_z(keys, z, sic=True):
         words = scores(z).argmax(-1)
     else:
         r = z.clone()
-        words = torch.full((B, Lk), END, dtype=torch.long)
-        done = torch.zeros(B, Lk, dtype=torch.bool)
-        end = torch.full((B,), Lk - 1)
+        words = torch.full((B, Lk), END, dtype=torch.long, device=dev)
+        done = torch.zeros(B, Lk, dtype=torch.bool, device=dev)
+        end = torch.full((B,), Lk - 1, device=dev)
         for _ in range(Lk):
             s = scores(r)
             top = s.topk(2, dim=-1)
             margin = top.values[..., 0] - top.values[..., 1]
-            open_ = ~done & (torch.arange(Lk)[None] <= end[:, None])
+            open_ = ~done & (torch.arange(Lk, device=dev)[None] <= end[:, None])
             if not open_.any():
                 break
             margin = margin.masked_fill(~open_, -float("inf"))

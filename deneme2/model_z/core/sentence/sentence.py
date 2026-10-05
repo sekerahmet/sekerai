@@ -3,6 +3,7 @@ gibi"; "Safece 1 cümle sonrasına bakacak şekilde"; ad onayli).  Egitim ve olc
 
 Gecmis cumleler kelime olarak degil, cumle basina tek z (sentence_z.encode_z) olarak gorulur:
     model:  [BOS] [z_1] ... [z_{k-1}]  w_1 ... w_t  ->  w_{t+1}   (cumle END ile biter)
+    hikaye sonu: [BOS] [z_1] ... [z_n]  ->  EOS   (son cumleden sonra yeni cumle yerine; normal transformer'in <eos>'u)
 Egitimde her cumle kendi kisa dizisi (duz causal); konum (RoPE) modelin gordugu siradir (z_j konumu j, k. cumlenin i.
 kelimesi k + i).  Hikayenin tek dizi oldugu maskeli yol da var (group); iki yol ayni logit'i verir (sinandi, 3e-7).
 Tarif (Llama sinifi): pre-norm RMSNorm, RoPE, QK-norm, SwiGLU, bias yok, giris / cikis embedding ortak.
@@ -54,8 +55,9 @@ class SentenceTransformer(torch.nn.Module):
         super().__init__()
         self.vocab = vocab
         self.END = len(vocab)                                    # yalniz cikis: cumle sonu
+        self.EOS = len(vocab) + 1                                # yalniz cikis: hikaye sonu
         hidden = -(-int(8 * d / 3) // 8) * 8
-        self.E = torch.nn.Embedding(len(vocab) + 1, d)
+        self.E = torch.nn.Embedding(len(vocab) + 2, d)
         self.bos = torch.nn.Parameter(torch.zeros(d))
         self.z_norm = torch.nn.RMSNorm(z_dim)
         self.z_in = torch.nn.Linear(z_dim, d, bias=False)
@@ -96,7 +98,8 @@ class SentenceTransformer(torch.nn.Module):
 
     @torch.no_grad()
     def generate(self, zs, max_words):
-        """zs (B, k, z_dim): her ornegin onceki cumlelerinin z'leri (k ayni) -> sonraki cumle (acgozlu, END'e kadar)."""
+        """zs (B, k, z_dim): her ornegin onceki cumlelerinin z'leri (k ayni) -> sonraki cumle (acgozlu, END'e kadar);
+        ilk kelime EOS ise [EOS] (hikaye bitti)."""
         B, k, _ = zs.shape
         dev = zs.device
         words = torch.zeros(B, 0, dtype=torch.long, device=dev)
@@ -109,12 +112,16 @@ class SentenceTransformer(torch.nn.Module):
             pos = torch.arange(1 + k + t, device=dev).expand(B, -1)
             h = self.hidden(kind, tok, zvec, pos, None)
             w = (h[:, -1] @ self.E.weight.T).argmax(-1)
+            if t == 0:                                           # hikaye sonu yalniz cumle basinda
+                ended = w == self.EOS
+            else:
+                w = torch.where(w == self.EOS, torch.full_like(w, self.END), w)
             w = torch.where(done, torch.full_like(w, self.END), w)
-            done |= w == self.END
+            done |= (w == self.END) | (w == self.EOS)
             words = torch.cat([words, w[:, None]], 1)
             if done.all():
                 break
         out = []
-        for row in words.tolist():
-            out.append(row[:row.index(self.END)] if self.END in row else row)
+        for row, e in zip(words.tolist(), ended.tolist()):
+            out.append([self.EOS] if e else (row[:row.index(self.END)] if self.END in row else row))
         return out
