@@ -2,9 +2,9 @@
 -log P(decode ozgun cumleyi kelime kelime yazar); encoder ve decoder birlikte.  --noise > 0: encoder'a kelimeleri
 silinmis cumle gider, decoder ozgunu yazar (TSDAE).
 Veri: ulke (data/countries, egitim / sinav hikayelerinin cumleleri) ya da SS (ss_story_* egitim, ss_exam_story_* sinav).
-Olcu (sinav cumleleri; kullanici: "codec cümle cümle encode yazıp decode yapabiliyor mu"): birebir geri yazim (ulkede
-egitimde gecmis / gecmemis ayri), z'ye gurultu eklenince birebir geri yazim, goz icin ornekler.  Her epok checkpoint.pt
-(surdurme); sonda agent.pt ve results.json.
+Olcu (sinav cumleleri; kullanici: "codec cümle cümle encode yazıp decode yapabiliyor mu"): birebir geri yazim (egitimde
+gecmis / gecmemis ayri), z'ye gurultu eklenince birebir geri yazim, goz icin ornekler.  checkpoint.pt her
+CHECKPOINT_SECS'te ve epok sonunda (epok icinde kaldigi cumleden surdurur); sonda agent.pt ve results.json.
 
     python train_codec.py [--data countries|simplestories] [--root klasor] [--epochs 10] [--device cpu|cuda]
                           [--d 256] [--z 256] [--layers 3] [--batch 1024] [--lr 1e-3] [--noise 0] [--out klasor] [--resume 1]
@@ -29,6 +29,7 @@ from train_grammar import _no_power_throttling  # noqa: E402
 BATCH = 1024            # cumle
 LR = 1e-3
 PROGRESS_SECS = 60      # epok icinde ara satir araligi
+CHECKPOINT_SECS = 600   # epok icinde checkpoint araligi (SS epoku uzun; Colab kopabilir)
 EXAM_N = 2000           # olcude kullanilan sinav cumlesi
 NOISE_Z = (0.1, 0.3, 0.5)  # olcude z'ye eklenen gurultu (z boyutu basina birim olcekli)
 SHOW = 8                # goz icin ornek
@@ -51,6 +52,16 @@ class Sentences:
         mask = torch.arange(L, device=a.device)[None] < n[:, None]
         ids = torch.where(mask, self.flat[pos.clamp(max=len(self.flat) - 1)], torch.zeros_like(pos))
         return ids, mask
+
+    def hashes(self):
+        """-> (n,) int64 cumle ozeti (sirali kelimeler; 2^64'te tasan carpim): ayni cumle ayni ozet."""
+        n = self.off[1:] - self.off[:-1]
+        powers = torch.ones(self.longest, dtype=torch.long, device=self.flat.device)
+        for i in range(1, self.longest):
+            powers[i] = powers[i - 1] * 1000003
+        pos = torch.arange(len(self.flat), device=self.flat.device) - torch.repeat_interleave(self.off[:-1], n)
+        cs = torch.cat([torch.zeros(1, dtype=torch.long, device=self.flat.device), ((self.flat + 1) * powers[pos]).cumsum(0)])
+        return (cs[self.off[1:]] - cs[self.off[:-1]]) * 31 + n
 
 
 def load(args):
@@ -81,7 +92,9 @@ def load(args):
         vocab = json.load(open(os.path.join(args.root, "ss_vocab.json"), encoding="utf-8"))
         tr = [np.load(os.path.join(args.root, "ss_story" + s), mmap_mode="r") for s in ("_ids.npy", "_sentence_offsets.npy")]
         ex = [np.load(os.path.join(args.root, "ss_exam_story" + s), mmap_mode="r") for s in ("_ids.npy", "_sentence_offsets.npy")]
-        exam_seen = None
+        train, exam = Sentences(tr[0], tr[1], args.device), Sentences(ex[0], ex[1], args.device)
+        exam_seen = torch.isin(exam.hashes()[:EXAM_N], train.hashes()).cpu()     # gorulmemis = asil kritik olcu
+        return vocab, train, exam, exam_seen
     return vocab, Sentences(tr[0], tr[1], args.device), Sentences(ex[0], ex[1], args.device), exam_seen
 
 
@@ -151,9 +164,8 @@ def main(argv=None):
     agent = CodecAgent(vocab, d=args.d, z=args.z, layers=args.layers).to(args.device)
     forward = torch.compile(agent, dynamic=True) if (cuda and args.compile) else agent
     opt = torch.optim.Adam(agent.parameters(), lr=args.lr)
-    gen = torch.Generator().manual_seed(args.seed)
     noise_gen = torch.Generator(device=args.device).manual_seed(args.seed + 1)
-    first, ckpt = 1, os.path.join(args.out, "checkpoint.pt") if args.out else None
+    first, start, ckpt = 1, 0, os.path.join(args.out, "checkpoint.pt") if args.out else None
     if args.out:
         os.makedirs(args.out, exist_ok=True)
     if args.resume:
@@ -164,10 +176,15 @@ def main(argv=None):
         assert not diff, "surdurme ayari checkpoint'ten farkli (checkpoint, simdi): %s" % diff
         agent.load_state_dict(pack["state"])
         opt.load_state_dict(pack["opt"])
-        gen.set_state(pack["gen"])
         noise_gen.set_state(pack["noise_gen"].cpu() if not cuda else pack["noise_gen"])
-        first = pack["epoch"] + 1
-        print("SURDURULDU: epok %d'den" % pack["epoch"], flush=True)
+        first, start = pack["epoch"], pack["next"]
+        print("SURDURULDU: epok %d, cumle %d'den" % (first, start), flush=True)
+
+    def save(epoch, nxt):
+        if ckpt:
+            torch.save(dict(vocab=vocab, state=agent.state_dict(), opt=opt.state_dict(), noise_gen=noise_gen.get_state(),
+                            epoch=epoch, next=nxt, args=vars(args)), ckpt + ".part")
+            os.replace(ckpt + ".part", ckpt)
     n = train.n
     steps = -(-n // args.batch)
     print("veri %s: egitim %d cumle (en uzun %d kelime), sinav %d (olcu ilk %d) | d %d, z %d, katman %d, lr %g cosine, "
@@ -176,14 +193,21 @@ def main(argv=None):
               args.noise, sum(p.numel() for p in agent.parameters()), args.device, forward is not agent), flush=True)
     t0, results = time.time(), {}
     for epoch in range(first, args.epochs + 1):
-        perm = torch.randperm(n, generator=gen).to(args.device)
-        total, t_epoch, t_shown = torch.zeros((), device=args.device), time.time(), time.time()
-        for step, b in enumerate(range(0, n, args.batch), 1):
+        perm = torch.randperm(n, generator=torch.Generator().manual_seed(args.seed + epoch)).to(args.device)
+        total, t_epoch, t_shown, t_saved = torch.zeros((), device=args.device), time.time(), time.time(), time.time()
+        if cuda:
+            torch.cuda.reset_peak_memory_stats()
+        b0 = start if epoch == first else 0
+        for step, b in enumerate(range(b0, n, args.batch), 1):
             if time.time() - t_shown > PROGRESS_SECS:                 # ara satir: kayip yalniz burada okunur
                 t_shown, el = time.time(), time.time() - t_epoch
-                print("  epok %d adim %d / %d (%%%.0f)  kayip %.3f  %.0f cumle/sn  kalan ~%.0f dk (butun egitim)" % (
-                    epoch, step, steps, 100 * step / steps, total.item() / step, b / el,
-                    ((steps - step) + (args.epochs - epoch) * steps) * el / step / 60), flush=True)
+                left = (n - b) // args.batch + (args.epochs - epoch) * steps
+                print("  epok %d adim %d / %d (%%%.0f)  kayip %.3f  %.0f cumle/sn  kalan ~%.0f dk (butun egitim)%s" % (
+                    epoch, b // args.batch, steps, 100 * b / n, total.item() / step, (b - b0) / el, left * el / step / 60,
+                    ", GPU tepe %.1f GB" % (torch.cuda.max_memory_allocated() / 1e9) if cuda else ""), flush=True)
+            if time.time() - t_saved > CHECKPOINT_SECS:
+                t_saved = time.time()
+                save(epoch, b)
             done = ((epoch - 1) * n + b) / (args.epochs * n)
             for group in opt.param_groups:
                 group["lr"] = args.lr * 0.5 * (1 + math.cos(math.pi * done))
@@ -194,17 +218,14 @@ def main(argv=None):
             loss.backward()
             opt.step()
             total += loss.detach()
-        line = "epok %d  kayip %.4f  (%.0f sn)" % (epoch, total.item() / steps, time.time() - t0)
+        line = "epok %d  kayip %.4f  (%.0f sn)" % (epoch, total.item() / step, time.time() - t0)
         if epoch == args.epochs:
             agent.eval()
             results = evaluate(agent, exam, exam_seen, SHOW)
             agent.train()
             line += " | sinav: %s" % results
         print(line, flush=True)
-        if ckpt:
-            torch.save(dict(vocab=vocab, state=agent.state_dict(), opt=opt.state_dict(), gen=gen.get_state(),
-                            noise_gen=noise_gen.get_state(), epoch=epoch, args=vars(args)), ckpt + ".part")
-            os.replace(ckpt + ".part", ckpt)
+        save(epoch + 1, 0)
     if args.out:
         torch.save(dict(vocab=vocab, state=agent.state_dict(), args=vars(args)), os.path.join(args.out, "agent.pt"))
         json.dump(dict(args=vars(args), results=results), open(os.path.join(args.out, "results.json"), "w"), indent=1)

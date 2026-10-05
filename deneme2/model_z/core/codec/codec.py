@@ -81,18 +81,21 @@ class CodecAgent(torch.nn.Module):
         pooled, _ = self.pool(h[:, :1], h, h, key_padding_mask=~m, need_weights=False)   # sorgu: CLS ciktisi
         return self.z_norm(self.to_z(pooled[:, 0]))
 
-    def decode_logits(self, z, prev):
-        """z (B, Z), prev (B, T) girdi kelimeleri [BOS, w1 ..] -> sonraki kelime logit'leri (B, T, V + 3)."""
+    def decode_logits(self, z, prev, keep=None):
+        """z (B, Z), prev (B, T) girdi kelimeleri [BOS, w1 ..] -> sonraki kelime logit'leri (B, T, V + 3); keep (B, T)
+        verilirse yalniz o satirlar (N, V + 3) -- cikis katmani surenin cogu, dolguya harcanmaz."""
         T = prev.shape[1]
         x = self.E(prev) + sinusoid(T, self.d, prev.device)[None]
         causal = torch.triu(torch.ones(T, T, dtype=torch.bool, device=prev.device), 1)
         for layer in self.decoder:
             x = layer(x, z, causal)
+        if keep is not None:
+            x = x[keep]
         return self.out_norm(x) @ self.E.weight.T
 
     def forward(self, ids, mask, enc_ids=None, enc_mask=None):
-        """Egitim -> (logit'ler (B, L + 1, V + 3), hedefler (B, L + 1); dolgu -100).  enc_ids / enc_mask: encoder'a
-        giden (gurultulu) cumle; verilmezse ids / mask (gurultusuz)."""
+        """Egitim -> (logit'ler (N, V + 3), hedefler (N,)): yalniz gercek hedef satirlari (kelimeler + END).
+        enc_ids / enc_mask: encoder'a giden (gurultulu) cumle; verilmezse ids / mask (gurultusuz)."""
         B, L = ids.shape
         z = self.encode(ids if enc_ids is None else enc_ids, mask if enc_mask is None else enc_mask)
         n = mask.sum(1)
@@ -100,7 +103,8 @@ class CodecAgent(torch.nn.Module):
         tgt = torch.cat([ids, torch.zeros(B, 1, dtype=ids.dtype, device=ids.device)], 1)
         tgt = tgt.scatter(1, n[:, None], self.END)                               # son kelimeden sonra END
         tgt = tgt.masked_fill(torch.arange(L + 1, device=ids.device)[None] > n[:, None], -100)
-        return self.decode_logits(z, prev), tgt
+        keep = tgt != -100
+        return self.decode_logits(z, prev, keep), tgt[keep]
 
     @torch.no_grad()
     def decode(self, z, max_words):
@@ -109,7 +113,9 @@ class CodecAgent(torch.nn.Module):
         prev = torch.full((B, 1), self.BOS, device=z.device)
         done = torch.zeros(B, dtype=torch.bool, device=z.device)
         for _ in range(max_words + 1):
-            logits = self.decode_logits(z, prev)[:, -1]
+            last = torch.zeros(prev.shape, dtype=torch.bool, device=z.device)
+            last[:, -1] = True
+            logits = self.decode_logits(z, prev, last)                       # yalniz son konum
             logits[:, self.BOS] = logits[:, self.CLS] = -1e9
             w = torch.where(done, torch.full_like(done, self.END, dtype=torch.long), logits.argmax(-1))
             done |= w == self.END
@@ -137,4 +143,4 @@ def loss_of(forward, ids, mask, noise=0.0, gen=None):
     """-> ortalama -log P(dogru sonraki kelime) (kelime basina, END dahil); encoder'a gurultulu cumle (noise > 0)."""
     enc_ids, enc_mask = delete_words(ids, mask, noise, gen)
     logits, tgt = forward(ids, mask, enc_ids, enc_mask)
-    return F.cross_entropy(logits.float().reshape(-1, logits.shape[-1]), tgt.reshape(-1), ignore_index=-100)
+    return F.cross_entropy(logits.float(), tgt)
