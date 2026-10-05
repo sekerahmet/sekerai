@@ -26,7 +26,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from sentence import BOS, PAD, WORD, ZTOK, SentenceTransformer
+from sentence import BOS, PAD, WORD, ZTOK, SentenceTransformer, output_loss
 from sentence_z import build_keys, decode_z, encode_z, keys_to
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -320,6 +320,7 @@ def main(argv=None):
     if cuda and args.compile:
         for block in model.blocks:
             block.compile(dynamic=True)
+        model.loss_fn = torch.compile(output_loss, dynamic=True)          # cikis carpimi + kayip tek grafikte
     decay = [p for p in model.parameters() if p.dim() >= 2]
     no_decay = [p for p in model.parameters() if p.dim() < 2]
     opt = torch.optim.AdamW([dict(params=decay, weight_decay=WEIGHT_DECAY), dict(params=no_decay, weight_decay=0.0)],

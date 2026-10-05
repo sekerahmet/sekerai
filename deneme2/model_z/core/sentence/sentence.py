@@ -26,6 +26,13 @@ def rope(x, pos, base=10000.0):
     return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], -1)
 
 
+def output_loss(h, W, target):
+    """-log P ortalamasi: h (N, d) . W^T -> logit -> cross-entropy.  GPU'da derlenir (train_sentence): logit tablosunun fp32
+    kopyasi olusmaz, donusum softmax'in icinde (G4 profili: cikis katmani GPU zamaninin ~%63'u, cogu bu kopya ve softmax
+    gecisleri -- bellek trafigi)."""
+    return F.cross_entropy((h @ W.T).float(), target)
+
+
 class Block(torch.nn.Module):
     def __init__(self, d, heads, hidden):
         super().__init__()
@@ -63,6 +70,7 @@ class SentenceTransformer(torch.nn.Module):
         self.z_in = torch.nn.Linear(z_dim, d, bias=False)
         self.blocks = torch.nn.ModuleList(Block(d, heads, hidden) for _ in range(layers))
         self.norm = torch.nn.RMSNorm(d)
+        self.loss_fn = output_loss                               # GPU'da derlenmis hali train_sentence'te
         for name, p in self.named_parameters():
             if p.dim() == 2:
                 std = 0.02 / math.sqrt(2 * layers) if name.endswith(("proj.weight", "down.weight")) else 0.02
@@ -93,8 +101,7 @@ class SentenceTransformer(torch.nn.Module):
         """Egitim -> ortalama -log P(dogru sonraki kelime ya da END); logit yalniz hedefi olan satirlarda."""
         h = self.hidden(kind, tok, zvec, pos, group)
         keep = target >= 0
-        logits = h[keep] @ self.E.weight.T
-        return F.cross_entropy(logits.float(), target[keep])
+        return self.loss_fn(h[keep], self.E.weight, target[keep])
 
     @torch.no_grad()
     def generate(self, zs, max_words):
