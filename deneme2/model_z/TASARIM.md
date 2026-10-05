@@ -4,6 +4,45 @@ Kullanıcı, 3 Ekim 2026: *"belki model z deyip yeni birşey denesek öğrendikl
 *"Yeni bir model için yeni bakış açısı gerekiyor. Dil nedir. Dil matematiksel olarak nasıl ifade edilir."*;
 *"şimdi model Z klasörünü aç"*.
 
+## Son yapı (5 Ekim)
+
+Kullanıcı, 5 Ekim 2026: *"Artık meaning , gramer ve transformer var . Son yapımız var"*. Üç parça; cümle tek vektör z,
+model geçmişi cümle başına bir z olarak görüp sonraki kelimeyi tahmin eder.
+
+```
+            meaning agent                 grammar agent
+            kelime -> anlam vektörü        cümle -> her kelimenin yuvası (h_t)
+                    \                          /
+                     v                        v
+   cümle  ---->  z = Σ R_t f(w_t) + R_n f(END) + Σ işaret(P h_t) ⊙ f(w_t)      (sentence_z, formül, eğitim yok)
+                 f(w) = [meaning(w) ; kimlik(w)]      geri açma: R_tᵀ z, SIC   (kayıpsızlık denetimi)
+                     |
+                     v
+   SentenceTransformer:  [BOS] [z_1] … [z_{k-1}]  w_1 … w_t  ->  w_{t+1}   (END ile cümle biter)
+                     |
+                     v
+   cümle bitti  ->  z_k = formül(cümle)  ->  geçmişe eklenir
+```
+
+| parça | amaç | girdi / çıktı | öğrenilen | sabit mi |
+|---|---|---|---|---|
+| meaning (`core/meaning/`) | kelimelerin anlam yakınlığı (Turkey ↔ Ankara, lira) | kelime -> vektör (d 128) | bütün veriden (sınav dahil; sınavı yok) | z için sabit |
+| grammar (`core/grammar/`) | kelimenin cümledeki yuvası | cümle (sırasız) -> h_t (d 64) | ülke eğitim cümleleri | z için sabit |
+| z formülü (`core/sentence/sentence_z.py`) | cümle -> tek vektör, kayıpsız | cümle -> z (512); z -> cümle | hiçbir şey | evet |
+| SentenceTransformer (`core/sentence/`) | geçmiş z'ler + şimdiki kelimeler -> sonraki kelime | [BOS][z..] kelimeler -> kelime | her şeyi, eğitim hikâyelerinden | hayır |
+
+- **Neden böyle:** z formülü kayıpsızlığı yapı gereği sağlar (görülmüş / görülmemiş ayrımı yok); öğrenilen codec ezbere
+  kaydı (ülke görülmemiş 0,598). Model z'yi kendi kelime embedding'ine eşlemeyi (köprü) kendisi öğrenir; ortak uzay
+  gerekmedi.
+- **Grammar'ın bugünkü işi:** yalnız torba okuyucusu (h_t) z'nin rol anahtarına girer; dizme (`order_by_relation`) bu
+  akışta kullanılmıyor.
+- **Ölçü (ülke, görülmemiş 300 hikâye, yalnız sonraki 1 cümle):** sonraki cümle geçerli 0,984, doğru olgu 0,997, tekrar
+  0,013, döngü 0, z karıştırılınca sınav kaybı 0,385 -> 2,537. Sınav yeni hikâyeyi (olguların sırası ve birleşimi)
+  ölçüyor; olgular aynı 100 ülkeden.
+- **Açık:** SS'te denenmedi (z'nin boy kapasitesi: SS ortanca 12, %99,9 34, en uzun 226 kelime); kendi ürettiği cümleyle
+  devam (döngü) denenmedi; lr bu ölçekte ölçülmedi (1e-3, ajanlarla uyum için); cümle başında ülke adı 0,66 (başka
+  geçerli açılış seçiyor, doğrudan sınanmadı).
+
 ## Gramer ajanı (ilk parça)
 
 Kullanıcı, 3 Ekim 2026: *"Gramer ajanının temel görevi verilen tüm kelimelerden anlamlı bir cümle kurabilmesi"*;
