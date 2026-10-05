@@ -35,8 +35,8 @@ LENGTH_BANDS = ((1, 10), (11, 20), (21, 1000))   # olculer cumle boyuna gore de
 
 
 def _no_power_throttling():
-    """Windows: bu surecin guc kisitlamasini (EcoQoS) kapat; arka plandaki surec ~10 kat yavasliyordu (train_context ile
-    ayni; belge/model_z_temel/06 H1)."""
+    """Windows: bu surecin guc kisitlamasini (EcoQoS) kapat; arka plandaki surec ~10 kat yavasliyordu
+    (belge/model_z_temel/06 H1)."""
     import ctypes
     from ctypes import wintypes
 

@@ -18,30 +18,6 @@ Kullanıcı, 3 Ekim 2026: *"Gramer ajanının temel görevi verilen tüm kelimel
 Durum (4 Ekim): kod `core/grammar/` (grammar.py ajan, train_grammar.py eğitim); dizme ilişki matrisi üzerinde tek çevrim,
 ilk k aday `order_alternatives`. Veri: ülke, SS 200k, SS tamamı (`make_ss_sentences.py`, Drive).
 
-## Akış: context agent + grammar agent (son sürüm, 4 Ekim)
-
-Kullanıcı, 4 Ekim 2026: *"k bağımsız bir yapı olmalı ve grammar endeks ile baştan torbalar elenmeli"*; *"İndeks aslında
-bir kapı yani sıralama değil geçersiz olmaz demek sadece"*; *"Tamam son karar eğitimden sonra. Son sürüm b"*.
-
-- Döngü: context agent cümleyi okur → K aday torba (olasılığıyla) → grammar agent her adayı dizer ve kapıdan geçirir
-  (`is_complete`) → geçemeyen ve hikâyede birebir geçmiş torba elenir → kalanların en olasısı seçilir → dizilmiş cümle
-  context agent'a döner.
-- Üretim döngüsü `core/generate.py` (kullanıcı, 4 Ekim: *"ilk hedef döngülü olarak ülke hikayesi yazdırmak olsun"*;
-  *"generate çok mantıklı. yani istediğimiz çıktı aslında generate olacak"*). Ülke, 3 ülke × 2 sürüm (kısıtsız B, meaning
-  30 × 2), 15 adım: ülke kayması yok; ilk 8–10 cümle hep yeni olgu (ülkenin bütün olguları); sonra aynı olgu başka
-  kalıpla tekrar; hikâye başına bir hatalı cümle ("People in Turkey eat Turkish .", "Peru is home to Machu ."). Eksik:
-  hikâye sonu (model "yeni bir şey kalmadı" diyemiyor), aynı olgunun başka söylenişi.
-- İş bölümü: context agent içerik ve eksiksizlik (torba olasılığı), grammar agent biçim (kapı). Kapı sıralamaz.
-- Context agent (son sürüm B): d 64, K 30, cosine, lr 3e-3, 30 epok; kayıp gerçek sonraki torbanın karışım olasılığı.
-  Eğitim kapısız; kapı yalnız seçimde (`train_context --grammar`). Eğitimde kapı cezası denendi: seçimde kapıyla aynı
-  sonuç (ilk aday geçerli 0,978 / 0,976), doğru torba ilk 30'da 0,881 → 0,829, adım 1,7 kat yavaş.
-- Grammar agent (kapı): `missing` düğümüyle bozuk torbalarla (kelime çıkarma / ekleme) eğitilir (`train_grammar
-  --missing 1`); ülkede bütün cümlelerle (`--train_all 1`, kullanıcı: *"Gramer tam eğitimli olmalı o zaman"*).
-- Son sürüm, ülke sınavı (300 hikâye, seçimde kapı): ilk aday geçerli devam 0,9985, doğru torba ilk 1 / 5 / 30
-  0,143 / 0,519 / 0,880; kapı cümlenin %99,8'ini geçirir, cümle olmayanın %94,7'sini eler.
-- Aday sayısı mimariden ayrı (öneri, kodlanmadı): her yön bir dağılım; yönlerden sırayla torba çekilip kapıdan geçirilir,
-  N iyi aday bulununca durulur.
-
 ## Meaning agent (4 Ekim)
 
 Kullanıcı, 4 Ekim 2026: *"Aslında kelimeler arası anlam bağını oluştıran bir adıma ihtiyaç yok gramerden ayrı olarak
@@ -49,8 +25,8 @@ Türkiye Ankara Asia lira gibi kelimeleri yakınlaştıran"*; *"Cümleler içind
 ayrı birşey öneriyorum"*; *"Meaning agent ok"*; *"benim 2 ve ya 3 cümle dediğim cümlenin tüm kelimeleri ortak. Yoksa cümle
 tahmini değil"*; *"1 cümlenin tüm kelimeleri sırayla gizlenmezse model nasıl öğrenecek ?"*.
 
-- Amaç: context agent 57.000 kelime yerine okuduğu cümlenin kelimelerine yakın kelimelerden kısa bir liste üzerinde
-  çalışsın (kullanıcı: *"57.000 yerine belki çok daha az"*).
+- Amaç: kelimeleri anlamca yakınlaştıran tablo. İlk kullanım context agent'ın kısa listesiydi (arşivde);
+  şimdi meaning vektörü z'nin kelime vektörünün yarısı (`core/sentence/sentence_z.py`).
 - Mimari (kullanıcı: *"Ya da istediğimiz tabloyu kuran bir mimari tasarla"*; *"saatlerdir bu tabloyu öğrenen modelle
   kurmanı istedim"*; *"Kur"*): kelime başına iki vektör, `source` (oy veren, word2vec IN) ve `target` (oy alan, OUT); her
   görünen kelime gizli kelimeyi tek başına tahmin eder, P(j | i) = softmax_j(bias_j + source_i · target_j / √d); gizli
@@ -65,16 +41,6 @@ tahmini değil"*; *"1 cümlenin tüm kelimeleri sırayla gizlenmezse model nası
   cave, fierce, roared). Matematikçi ölçüsü (`belge/model_z_temel/12` Ek A), SS sınavı 5 × 5: liste 3.676 → 820 kelime,
   sonraki cümlenin tamamı listede 0,062 → 0,207. SS: boy → He, his, he, him; girl → She, her, she; Mia → She, her, she.
   Nadir adlar zayıf (Tom 71 kez geçiyor: little, big, Mia …; Tim 372: Rex 1,000).
-- SS kısa liste ilk deneme 10 × 3 (kullanıcı, 4 Ekim: *"Durdur 10x3 yap"*; *"10x3 kesin yargı değil . Ss bakmadık
-  hiç"*). Dayanak yalnız matematikçinin ölçüsü (log P 10 × 3 liste 935, sonraki cümlenin tamamı listede 0,269; 5 × 5: 820,
-  0,207), SS'te gözle bakılmadı. Eğitimde ve `generate`'te aynı (`meaning.NEIGHBORS`, `DEPTH`).
-- Kullanım `shortlist`: okunan cümlenin her kelimesi için tablodan NEIGHBORS komşu, DEPTH adım; komşu × derinlik eğitimde
-  maliyet kararı, üretimde sıcaklık gibi ayar (`train_context --meaning neighbors.pt --shortlist N --depth D`). Liste =
-  okunan cümlenin kelimelerinin komşuları + hikâyede geçenler; biçim kelimeleri cümlenin kendi biçim kelimeleri ve
-  onların komşuları üzerinden girer. Ülke sınavı kapsam (sonraki cümlenin tamamı listede): 10 × 1 0,301, 10 × 5 0,958,
-  30 × 2 0,995 (138 kelime / 897); derinlik bu tabloda belirleyici.
-- Context agent + meaning 30 × 2 (CPU, epok ~7 sn), seçimde kapı yok: doğru torba ilk 1 / 5 / 30 0,133 / 0,490 / 0,826,
-  ilk aday geçerli 0,942 (kısıtsız B: 0,139 / 0,509 / 0,881, 0,964).
 - Ölçü gözle (kullanıcı: *"Sınav yok bunda göz ile kontrol var"*; *"Eğer doğru değilse biz yanlış birşey
   tasarlamışızdır"*). Ülke, son sürüm (`meaning_table_countries_w5_d128_mix_sub_e4`, CPU 39 sn): Japan → Tokyo, Shinano,
   Japanese, Osaka, sushi, yen, Himeji; Peru → Chile, sol, ceviche, Cusco, Lima, Spanish, America, Amazon, Pacific;
@@ -83,31 +49,22 @@ tahmini değil"*; *"1 cümlenin tüm kelimeleri sırayla gizlenmezse model nası
 - Denenip bırakılan: attention katmanlı gizli kelime modeli (tablo okunamadı), attention'lı oy (oylar kalıp kelimelerine
   gitti), toplamsal oy (kanıt bütün Türkiye kelimelerine bölüştü).
 
-## Encoder + decoder (5 Ekim, tasarım aşamasında)
+## SentenceTransformer (5 Ekim)
 
-Kullanıcı, 5 Ekim 2026: *"Madem cümleyi bir vektör yapıyoruz bu durumda aslında encoder ve decoder gibi iki ajan olmalı.
-Birisi cümleyi vektöre çevirirken diğer vektörü cümleye çevirmeyi öğrenmeli bu sayede geçmişi korunur"*; *"Önceki encoder
-unut ve sil. Consistency de sil. Şimdiki hedef encoder ve decoder yapmak sanırım değil mi ? Sıralı cümle ile eğitilen"*.
+Kullanıcı, 5 Ekim 2026: *"Herşeyi unut model z baştan tasarlıyoruz gibi düşün . Mantık şu cümleyi vektöre çevir.
+Vektörler arası attention yapıp bir sonraki cümle değilde bir sonraki kelimeyi tahmin et. Cümle bitince onu vektör yap"*;
+*"matematikçinin formülü + meaning + grammer bilgileri = Z de"*; *"Sentence transformer çok dikkatli kur en iyi
+transformer modeli gibi . Safece 1 cümle sonrasına bakacak şekilde"*.
 
-- Neden: SS'te context agent'ın torbaları iskelet ("It was and ."). Okuma sağlam (gerçek sonraki torba 100 aday içinde
-  ilk 10'da 0,41, şans 0,10), kusur çıkışta: plan içinde kelimeler bağımsız var/yok, en olası torba = p > 0,5 olanlar
-  (belge/model_z_temel/13). Tutarlı cümle kelimelerin sırayla, öncekine bakarak seçilmesini istiyor.
-- encoder agent: cümle -> vektör z.  decoder agent: z -> aynı cümle, kelime kelime cümlenin kendi sırasıyla.  İkisi
-  birlikte, hikâyesiz, tek tek cümlelerle eğitilir (otomatik kodlayıcı).  İlk soru: z cümleyi taşıyor mu (birebir geri
-  yazım).  Sonraki adım (ayrı): önceki z'lerden sonraki z'yi seçen hikâye modeli (ortalama değil, bir mod).
-- Context agent atıl; kodu ve ağırlıkları duruyor.  Consistency fikri ve prototipi silindi.
-
-## Açık noktalar
-
-- **SS ilk eğitim kapısız.** Kullanıcı, 4 Ekim 2026: *"ilk eğitimi kapısız yapalım o zaman bence. sonradan kontrolsüz
-  eklenen ve bir sürü sıkıntıya sebep olacak birşey"*. SS'te `missing`'siz gramer (`grammar_ssfull_d256_cosine_lr0.001_
-  b1024_20261003_211559`, görülmemiş tam 0,744) ve kapısız `generate`; kapı, context agent'ın ürettiğinde bozuk torba
-  gözle görülürse yeniden ele alınır. Gerekçe (denetimler, `belge/model_z_temel/11`, `12`): (1) kelime çıkarılmış torbanın
-  ~%37'si hâlâ tam cümle ama "missing" etiketi alıyor; (2) kapı n+1 bağın hepsini istiyor, gerçek cümle geçişi 1–10 /
-  11–20 / 21–30 kelimede 0,970 / 0,901 / 0,793. `missing` dizmeyi belirgin bozmuyor (0,735, 3 epok).
-- **Kapı SS'te: görülmemiş bağ.** Kullanıcı, 4 Ekim 2026: *"şu an indeks hazır değil mi? notunu al ona bakarız"*. Kısmi
-  eğitimli ülke grameri görülmemiş gerçek cümlelerin %8'ini eledi (unseen complete_real 0,919): tanımadığı kelime bağını
-  "eksik" sayıyor. Ülkede tam eğitimle kalktı; SS'te görülmemiş bağ hep olacak, orada yeniden bakılacak.
-- **Kapıdan geçen eksikler** (az): "The Czech Republic .", "The Eiffel is in France .". Anlam hatası ("People in the Czech
-  Republic eat Brno .") kapının işi değil.
-- **Eğitimde kapı SS'te.** Ülkede katkısı olmadı; SS'te context agent çok daha fazla kötü aday üretirse yeniden sorulabilir.
+- z (`sentence_z.py`, eğitim yok): z = Σ_t R_t f(w_t) + R_n f(END) + Σ_t g_t ⊙ f(w_t).  f(w) = birim([meaning(w) ;
+  rastgele kimlik]); R_t konum anahtarı (kaydırma × işaret, tersi R_tᵀ); g_t = işaret(P h_t), h_t grammar torba
+  okuyucusu (kelimenin yuvası). Geri açma u_t = R_tᵀ z, en emin konum önce (SIC). Ülke, z 512: görülmemiş 356 cümlede
+  birebir 0,969. Aile: TPR (Smolensky 1990), HRR (Plate 1995); matematikçinin önerisi.
+- Model (`sentence.py`): [BOS][z_1..z_{k-1}] w_1..w_t → w_{t+1} (END ile biter); pre-norm RMSNorm, RoPE, QK-norm,
+  SwiGLU, bias yok, tied embedding; AdamW 0,1, warmup + cosine, clip 1,0. Örnek = tek cümle, kısa dizi, düz causal.
+- Adım adım (CLAUDE.md kural 13): (1) z'den ülke doğrusal okunuyor 0,989; (2) yalnız son z ile cümle içi ülke adı 0,988,
+  karışık z 0,03; (3) bütün z'ler, d 64, batch 160 cümle, 15 epok: görülmemiş 300 hikâyede sonraki cümle geçerli 0,984,
+  doğru olgu 0,997, tekrar 0,013, döngü 0. İlk 4 epok / 728 adım yetmedi (geçerli 0,386; adım değil örnek sayısı).
+- Windows: EcoQoS kapatılmazsa ~10 adımdan sonra adım 55 → ~550 ms (`train_grammar._no_power_throttling`).
+- Arşiv: context agent, öğrenilen codec ve `generate.py` `arsiv/model_z_20261005/` (5 Ekim, kullanıcı: *"context i ve
+  onunla ilgili şeyleri arşive al. Sadece meaning gramer transformer ve onunla ilgili şeyler kalsın"*); git geçmişinde.
