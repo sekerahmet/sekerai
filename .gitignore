@@ -14,8 +14,8 @@ belge/
 # Depo PUBLIC ve bunlar 17 MB'lik ikili dosyalar -- ASLA girmemeli.
 veri/
 
-# arsiv: 15 Eylul oncesi her sey. YERELDE durur, depoda DURMAZ.
-# (Gecmisi f31df5f commit'inde duruyor; diskten silinmedi.)
+# arsiv: model_z oncesi her sey (eski kollar, eski belgeler). YERELDE durur, depoda DURMAZ.
+# (Gecmisi git'te duruyor; diskten silinmedi.)
 arsiv/
 
 # kosu ciktilari: ikili, buyuk, yeniden uretilebilir. Depo PUBLIC.
@@ -24,20 +24,8 @@ arsiv/
 *.parquet
 onbellek/
 
-# model_13 uretilmis ciktilari: uretilebilir, depoda durmasin
-deneme2/model_13/*.npz
-deneme2/model_13/*.png
-deneme2/model_13/*.pdf
-deneme2/model_13/*.md
-
-# model_15 veri dosyasi -- Drive da durur, depoda degil
-deneme2/model_15/*.pt
-
 # kosu ciktilari: anlik goruntu (.pt) + gunluk.  Depo PUBLIC, ikili dosya girmez.
 deneme2/*/kosu/
-
-# CLUTRR ham CSV'leri: CC-BY-NC, ve veri_17.indir() bir komutla getiriyor.
-deneme2/*/veri_ham/
 
 # kol basina olcum kayitlari (OLCULENLER_<N>.md): YEREL kalir, depo PUBLIC
 deneme2/*/OLCULENLER_*.md
