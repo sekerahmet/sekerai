@@ -2,7 +2,8 @@
 
 Veri: her cumlede biten buyuyen pencere (hikaye basinda 1, 1-2, 1-3 ... en cok WINDOW cumle; kullanici, 4 Ekim: "sıralı
 ilk cümle sonra ilk cümle ve ikinci cümle sonra ilk üç cümle gibi"); pencerenin farkli kelimeleri tek ortak torba.  Ulke:
-data/countries hikayeleri; SS: make_ss_sentences --stories dosyalari (ss_story_*.npy; kullanici: "eğitim hikaye hikaye").
+data/countries hikayeleri; SS: make_ss_sentences --stories dosyalari (ss_story_*.npy ve ss_exam_story_*.npy; kullanici:
+"eğitim hikaye hikaye").  Sinav yok, butun veri (kullanici, 5 Ekim: "meaning herşeyi görmeli").
 Egitim (kullanici: "1 cümlenin tüm kelimeleri sırayla gizlenmezse model nasıl öğrenecek ?"): penceredeki her kelime
 sirayla gizli sayilir ve obur kelimelerden tahmin edilir (toplu hesap); kayip -log P(gizli kelime) ortalamasi.  Sik
 kelime seyreltmesi (word2vec): kelime pencerede sqrt(t / f) + t / f olasilikla kalir.
@@ -70,14 +71,15 @@ class Windows:
         return ids.gather(1, order)[:, :k], present.gather(1, order)[:, :k]
 
 
-def load(args, vocab_out):
-    """-> (sozluk, egitim Windows, kelime sayilari)."""
+def load(args):
+    """-> (sozluk, Windows, kelime sayilari).  Butun hikayeler, sinav dahil (kullanici, 5 Ekim: "meaning in sınavı olmaz.
+    meaning herşeyi görmeli")."""
     if args.data == "countries":
         folder = os.path.join(MODEL_Z, "data", "countries")
         vocab = json.load(open(os.path.join(folder, "country_vocab.json"), encoding="utf-8"))
         index = {w: i for i, w in enumerate(vocab)}
         stories = [json.loads(line)["sentences"] for line in open(os.path.join(folder, "country_stories.jsonl"),
-                                                                    encoding="utf-8") if '"split": "train"' in line]
+                                                                    encoding="utf-8")]
         sents = [[index.get(w, 0) for w in x] for st in stories for x in st]
         flat = np.array([w for x in sents for w in x])
         sent_off = np.r_[0, np.cumsum([len(x) for x in sents])]
@@ -85,9 +87,11 @@ def load(args, vocab_out):
     else:
         root = args.root
         vocab = json.load(open(os.path.join(root, "ss_vocab.json"), encoding="utf-8"))
-        flat = np.load(os.path.join(root, "ss_story_ids.npy"))
-        sent_off = np.load(os.path.join(root, "ss_story_sentence_offsets.npy"))
-        story_off = np.load(os.path.join(root, "ss_story_offsets.npy"))
+        parts = [[np.load(os.path.join(root, p + s)) for s in ("_ids.npy", "_sentence_offsets.npy", "_offsets.npy")]
+                 for p in ("ss_story", "ss_exam_story")]
+        flat = np.concatenate([parts[0][0], parts[1][0]])
+        sent_off = np.concatenate([parts[0][1], parts[1][1][1:] + parts[0][1][-1]])       # sinav kelimeleri egitimden sonra
+        story_off = np.concatenate([parts[0][2], parts[1][2][1:] + parts[0][2][-1]])      # sinav cumleleri egitimden sonra
     count = np.bincount(flat, minlength=len(vocab))
     return vocab, Windows(flat, sent_off, story_off, args.window, args.device), torch.as_tensor(count, dtype=torch.float)
 
@@ -138,7 +142,7 @@ def main(argv=None):
         torch.set_num_threads(4)
         if os.name == "nt":
             print("guc kisitlamasi (EcoQoS) kapali:", _no_power_throttling(), flush=True)
-    vocab, data, count = load(args, args.out)
+    vocab, data, count = load(args)
     agent = MeaningAgent(vocab, d=args.d).to(args.device)
     keep = None
     if args.subsample > 0:
