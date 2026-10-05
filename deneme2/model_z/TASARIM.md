@@ -83,6 +83,20 @@ tahmini değil"*; *"1 cümlenin tüm kelimeleri sırayla gizlenmezse model nası
 - Denenip bırakılan: attention katmanlı gizli kelime modeli (tablo okunamadı), attention'lı oy (oylar kalıp kelimelerine
   gitti), toplamsal oy (kanıt bütün Türkiye kelimelerine bölüştü).
 
+## Encoder + consistency (5 Ekim, tasarım aşamasında)
+
+Kullanıcı, 5 Ekim 2026: *"Bu durumda context I kullanmak değil. Şu an atıl durur . Encoder ve consistency iki ayrı ajan
+olur. Başarılı olursa context ihtiyaç kalmaz kaldırırız"*.
+
+- Neden: SS'te context agent'ın torbaları iskelet ("It was and ."). Okuma sağlam (gerçek sonraki torba 100 aday içinde
+  ilk 10'da 0,41, şans 0,10), kusur çıkışta: plan içinde kelimeler bağımsız var/yok, en olası torba = p > 0,5 olanlar
+  (belge/model_z_temel/13). Eşik yerine planın beklenen boyu kadar kelime (eğitimsiz benzetim) konuya uygun ama tutarsız
+  torba veriyor; tutarlılık kelimelerin sırayla, öncekine bakarak seçilmesini istiyor.
+- encoder agent: hikâyeyi okur (hikâye düzeyi). consistency agent: encoder durumu + meaning kısa listesinden torbayı
+  kelime kelime kurar. Gramer sıralar. Meaning'den iki okuma: komşular (log P, aday) ve gramerden yuva benzerliği
+  (cümle içi h ortalaması, "yerine geçer": was ~ is, were; Ankara ~ Athens, Tokyo) -- rakip bilgisi, girdi olabilir.
+- Context agent atıl; kodu ve ağırlıkları duruyor.
+
 ## Açık noktalar
 
 - **SS ilk eğitim kapısız.** Kullanıcı, 4 Ekim 2026: *"ilk eğitimi kapısız yapalım o zaman bence. sonradan kontrolsüz
