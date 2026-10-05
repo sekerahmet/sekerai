@@ -83,19 +83,19 @@ tahmini değil"*; *"1 cümlenin tüm kelimeleri sırayla gizlenmezse model nası
 - Denenip bırakılan: attention katmanlı gizli kelime modeli (tablo okunamadı), attention'lı oy (oylar kalıp kelimelerine
   gitti), toplamsal oy (kanıt bütün Türkiye kelimelerine bölüştü).
 
-## Encoder + consistency (5 Ekim, tasarım aşamasında)
+## Encoder + decoder (5 Ekim, tasarım aşamasında)
 
-Kullanıcı, 5 Ekim 2026: *"Bu durumda context I kullanmak değil. Şu an atıl durur . Encoder ve consistency iki ayrı ajan
-olur. Başarılı olursa context ihtiyaç kalmaz kaldırırız"*.
+Kullanıcı, 5 Ekim 2026: *"Madem cümleyi bir vektör yapıyoruz bu durumda aslında encoder ve decoder gibi iki ajan olmalı.
+Birisi cümleyi vektöre çevirirken diğer vektörü cümleye çevirmeyi öğrenmeli bu sayede geçmişi korunur"*; *"Önceki encoder
+unut ve sil. Consistency de sil. Şimdiki hedef encoder ve decoder yapmak sanırım değil mi ? Sıralı cümle ile eğitilen"*.
 
 - Neden: SS'te context agent'ın torbaları iskelet ("It was and ."). Okuma sağlam (gerçek sonraki torba 100 aday içinde
   ilk 10'da 0,41, şans 0,10), kusur çıkışta: plan içinde kelimeler bağımsız var/yok, en olası torba = p > 0,5 olanlar
-  (belge/model_z_temel/13). Eşik yerine planın beklenen boyu kadar kelime (eğitimsiz benzetim) konuya uygun ama tutarsız
-  torba veriyor; tutarlılık kelimelerin sırayla, öncekine bakarak seçilmesini istiyor.
-- encoder agent: hikâyeyi okur (hikâye düzeyi). consistency agent: encoder durumu + meaning kısa listesinden torbayı
-  kelime kelime kurar. Gramer sıralar. Meaning'den iki okuma: komşular (log P, aday) ve gramerden yuva benzerliği
-  (cümle içi h ortalaması, "yerine geçer": was ~ is, were; Ankara ~ Athens, Tokyo) -- rakip bilgisi, girdi olabilir.
-- Context agent atıl; kodu ve ağırlıkları duruyor.
+  (belge/model_z_temel/13). Tutarlı cümle kelimelerin sırayla, öncekine bakarak seçilmesini istiyor.
+- encoder agent: cümle -> vektör z.  decoder agent: z -> aynı cümle, kelime kelime cümlenin kendi sırasıyla.  İkisi
+  birlikte, hikâyesiz, tek tek cümlelerle eğitilir (otomatik kodlayıcı).  İlk soru: z cümleyi taşıyor mu (birebir geri
+  yazım).  Sonraki adım (ayrı): önceki z'lerden sonraki z'yi seçen hikâye modeli (ortalama değil, bir mod).
+- Context agent atıl; kodu ve ağırlıkları duruyor.  Consistency fikri ve prototipi silindi.
 
 ## Açık noktalar
 
