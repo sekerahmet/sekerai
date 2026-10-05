@@ -1,0 +1,6 @@
+{
+ "source": "model_z/simplestories_full/ss_exam_story_*.npy (sinav hikayesi indeksi = valid hikaye sirasi; Model Z ile ayni numara)",
+ "selection": "alt_kume = np.sort(E[default_rng(0).permutation(len(E))[:1000]]), E = simplestories/exam_stories.npy (sha256 ee0e13fa...); istemler np.sort(alt_kume[default_rng(1).choice(1000, 8, replace=False)])",
+ "stories": [740, 3011, 9616, 10582, 15877, 17492, 20389, 20431],
+ "sentences": [1, 3]
+}
