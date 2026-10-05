@@ -10,7 +10,7 @@ kullanici: "Safece 1 cümle sonrasına bakacak"; 2. cumleden itibaren):
 z'ler ayri bir surecte bir kez hesaplanip CACHE'e yazilir (--prepare); egitim sureci dosyayi okur.
 checkpoint.pt her CHECKPOINT_SECS'te ve epok sonunda (kaldigi yerden surdurur); sonda agent.pt ve results.json.
 
-    python train_sentence.py [--epochs 4] [--d 64] [--layers 4] [--heads 4] [--batch 160] [--lr 1e-3] [--z 512]
+    python train_sentence.py [--epochs 4] [--d 64] [--layers 4] [--heads 4] [--batch 160] [--lr LR_D64*64/d] [--z 512]
                              [--device cpu|cuda] [--out klasor] [--resume 1]
 """
 import argparse
@@ -34,6 +34,11 @@ RUNS = "G:/Drive'ım/model_z/runs/"
 MEANING = RUNS + "meaning_table_countries_w5_d128_mix_sub_e4_20261004_203221/agent.pt"
 GRAMMAR = RUNS + "grammar_countries_d64_cosine_lr0.003_b64_20261004_133746/agent.pt"
 CACHE = os.path.join(MODEL_Z, "cache") + "/"         # z bankasi (git disi): ayri surecte bir kez hesaplanir
+# lr olcutu: Adam'da gizli katman lr'si ~ 1 / genislik (muP mantigi; GPT-3 d 768 -> 6e-4).  Olculdu (ulke, d 64, batch 160
+# cumle, 4 epok, 5 Ekim): lr 1e-3 / 3e-3 / 7e-3 -> sinav kaybi 1,006 / 0,444 / 0,402, gecerli sonraki cumle 0,386 / 0,777 /
+# 0,872, z kullanimi 3. / 2. / 1. epokta basliyor; kararsizlik yok.  --lr verilmezse LR_D64 * 64 / d (d 256 -> ~1,75e-3,
+# orada yeniden olculur).
+LR_D64 = 7e-3
 WEIGHT_DECAY = 0.1
 BETAS = (0.9, 0.95)
 CLIP = 1.0
@@ -233,7 +238,7 @@ def main(argv=None):
     ap.add_argument("--layers", type=int, default=4)
     ap.add_argument("--heads", type=int, default=4)
     ap.add_argument("--batch", type=int, default=160, help="cumle (160 ~ 16 hikaye)")
-    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--lr", type=float, default=None, help="verilmezse LR_D64 * 64 / d (olcut yukarida)")
     ap.add_argument("--epochs", type=int, default=4)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--compile", type=int, default=1, help="1: torch.compile (yalniz cuda)")
@@ -242,6 +247,8 @@ def main(argv=None):
     ap.add_argument("--resume", type=int, default=0)
     ap.add_argument("--prepare", action="store_true", help="yalniz z bankasini hesapla ve CACHE'e yaz")
     args = ap.parse_args(argv)
+    if args.lr is None:
+        args.lr = LR_D64 * 64 / args.d
     torch.manual_seed(args.seed)
     cuda = args.device.startswith("cuda")
     if not cuda and os.name == "nt":
