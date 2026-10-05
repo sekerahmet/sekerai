@@ -162,7 +162,12 @@ def main(argv=None):
         torch.set_float32_matmul_precision("high")
     vocab, train, exam, exam_seen = load(args)
     agent = CodecAgent(vocab, d=args.d, z=args.z, layers=args.layers).to(args.device)
-    forward = torch.compile(agent, dynamic=True) if (cuda and args.compile) else agent
+    compiled = bool(cuda and args.compile)
+    if compiled:                                   # agir katmanlar derlenir; gercek satir secimi (boyu veriye bagli) disarida
+        agent.encoder.compile(dynamic=True)        # (butun forward'u derlemek G4'te InductorError verdi)
+        for layer in agent.decoder:
+            layer.compile(dynamic=True)
+    forward = agent
     opt = torch.optim.Adam(agent.parameters(), lr=args.lr)
     noise_gen = torch.Generator(device=args.device).manual_seed(args.seed + 1)
     first, start, ckpt = 1, 0, os.path.join(args.out, "checkpoint.pt") if args.out else None
@@ -190,7 +195,7 @@ def main(argv=None):
     print("veri %s: egitim %d cumle (en uzun %d kelime), sinav %d (olcu ilk %d) | d %d, z %d, katman %d, lr %g cosine, "
           "batch %d, gurultu %g, %d parametre | cihaz %s compile %s" % (
               args.data, n, train.longest, exam.n, min(EXAM_N, exam.n), args.d, args.z, args.layers, args.lr, args.batch,
-              args.noise, sum(p.numel() for p in agent.parameters()), args.device, forward is not agent), flush=True)
+              args.noise, sum(p.numel() for p in agent.parameters()), args.device, compiled), flush=True)
     t0, results = time.time(), {}
     for epoch in range(first, args.epochs + 1):
         perm = torch.randperm(n, generator=torch.Generator().manual_seed(args.seed + epoch)).to(args.device)
