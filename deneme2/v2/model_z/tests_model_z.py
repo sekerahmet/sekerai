@@ -2,7 +2,7 @@
 yalniz meaning_valid (SS valid; yoksa atlanir).
 
     python tests_model_z.py [--only layout,cache,flex,z,direct,meaning,meaning_resume,meaning_keys,meaning_valid,
-                            meaning_resume_mid,generate_longest]
+                            meaning_resume_mid,generate_longest,meaning_d1,meaning_wsd]
 """
 import os
 import sys
@@ -452,8 +452,11 @@ def t_meaning_keys():
     with torch.no_grad():
         h = model._batch_hidden(batch)
     sents = [s for st in STORIES for s in st]
-    check("meaning -> build_keys -> gercek build_batch ileri hesap sonlu; z geri acma birebir",
-          bool(torch.isfinite(h).all()) and SZ.decode_z(keys, model._z(sents, "cpu"), max_len=8) == sents)
+    z = model._z(sents, "cpu")
+    # geri acma birebirligi burada sinanmaz: sentetik d 16 meaning'de satirlar cok ilisik (ort |cos| ~0,5), SIC karisir;
+    # geri acma tesis (belge 22 s1), gercek ajanla olculur
+    check("meaning -> build_keys -> gercek build_batch ileri hesap sonlu; z (n, 1024) sonlu",
+          bool(torch.isfinite(h).all()) and z.shape == (len(sents), 1024) and bool(torch.isfinite(z).all()))
 
 
 def t_meaning_valid():
@@ -546,9 +549,86 @@ def t_generate_longest():
           ok and [len(s) for s in gen5] == [5, 5])
 
 
+def t_meaning_d1():
+    """Belge 27 D1: forward'daki F.embedding yolu = eski bias[ids] / lz[inv] yolu (kayip ve uc gradyan)."""
+    import train_meaning as TM
+    st, text = _syn_stories(60, 0), _syn_text()
+    win = TM.Windows(st.stream, st.sent, st.story, 5, torch.device("cpu"), TM.glue_tables(text))
+    ids, present, same = win.batch(torch.arange(64), same_word=True)
+    torch.manual_seed(0)
+    agent = TM.MeaningAgent(TM.V, 8)
+    with torch.no_grad():
+        agent.bias.normal_()
+
+    def old_forward():
+        u, v = agent.source(ids), agent.target(ids)
+        uq, inv = ids.unique(return_inverse=True)
+        lz = TM._log_z(agent.source(uq), agent.target.weight, agent.bias)
+        k = ids.shape[1]
+        voters = present[:, :, None] & present[:, None, :] & ~torch.eye(k, dtype=torch.bool) & ~same
+        return TM._mix(u, v, agent.bias[ids], lz[inv], voters)
+
+    out = []
+    for fn in (lambda: agent(ids, present, same), old_forward):
+        agent.zero_grad()
+        logp, ok = fn()
+        use = present & ok
+        loss = -(logp * use).sum() / use.sum()
+        loss.backward()
+        out.append([loss.detach()] + [p.grad.clone() for p in (agent.source.weight, agent.target.weight, agent.bias)])
+    rel = max(float((a - b).abs().max() / b.abs().max().clamp_min(1e-30)) for a, b in zip(*out))
+    exact = all(torch.equal(a, b) for a, b in zip(*out))
+    check("meaning D1: F.embedding yolu = bias[ids] / lz[inv] yolu (kayip, source / target / bias gradyani)", rel <= 1e-6,
+          "en buyuk goreli fark %.1e, birebir %s" % (rel, exact))
+
+
+def t_meaning_wsd():
+    """Belge 27 D3: lr dizisi = recipe.wsd_lr (genel adim, epok sinirinda kaymaz); uzatma (1 epok + --epochs 2 --resume 1,
+    decay_start'tan) = bastan 2 epok."""
+    import train_meaning as TM
+    import recipe as R
+    st, va, text = _syn_stories(60, 0), _syn_stories(20, 1), _syn_text()
+    lrs, Adam = [], torch.optim.Adam
+
+    class Recorder(Adam):
+        def step(self, *a, **k):
+            lrs.append(self.param_groups[0]["lr"])
+            return super().step(*a, **k)
+    torch.optim.Adam = Recorder
+    try:
+        a = _meaning_args()
+        TM._train(a, st, va, text)
+    finally:
+        torch.optim.Adam = Adam
+    steps = -(-len(st.sent) // a.batch)
+    want = [R.wsd_lr(g, 2 * steps, a.lr, decay=TM.DECAY) for g in range(2 * steps)]
+    check("meaning wsd: lr dizisi = recipe.wsd_lr (2 epok x %d adim)" % steps, lrs == want and a.schedule == "wsd",
+          "isinma %g, tepe %g, son %g" % (lrs[0], max(lrs), lrs[-1]))
+    full, ext = os.path.join(TMP, "wsd_full"), os.path.join(TMP, "wsd_ext")
+    TM._train(_meaning_args(full), st, va, text)
+    TM._train(_meaning_args(ext, epochs=1), st, va, text)
+    dpack = torch.load(os.path.join(ext, "decay_start", "checkpoint.pt"), weights_only=False)
+    g_down = dpack["epoch"] * steps + dpack["pos"] // a.batch
+    TM._train(_meaning_args(ext, epochs=2, resume=1), st, va, text)
+    A = torch.load(os.path.join(full, "agent.pt"), weights_only=False)
+    B = torch.load(os.path.join(ext, "agent.pt"), weights_only=False)
+    strip = lambda h: [{k: v for k, v in e.items() if k != "seconds"} for e in h]  # noqa: E731
+    same_w = all(torch.equal(A["state"][k], B["state"][k]) for k in A["state"])
+    check("meaning wsd: uzatma 1 -> 2 epok (decay_start'tan, adim %d) = bastan 2 epok (agirlik, olcu gecmisi birebir); "
+          "eski ciktilar epochs_1/" % g_down, g_down == steps - round(TM.DECAY * steps) and same_w
+          and strip(A["history"]) == strip(B["history"]) and os.path.exists(os.path.join(ext, "epochs_1", "agent.pt")))
+    try:
+        TM._train(_meaning_args(ext, epochs=1, resume=1), st, va, text)
+        ok = False
+    except AssertionError:
+        ok = True
+    check("meaning wsd: kisaltma (2 -> 1 epok) durur", ok)
+
+
 TESTS = dict(z=t_z, layout=t_layout, cache=t_cache, flex=t_flex, direct=t_direct, meaning=t_meaning,
              meaning_resume=t_meaning_resume, meaning_keys=t_meaning_keys, meaning_valid=t_meaning_valid,
-             meaning_resume_mid=t_meaning_resume_mid, generate_longest=t_generate_longest)
+             meaning_resume_mid=t_meaning_resume_mid, generate_longest=t_generate_longest, meaning_d1=t_meaning_d1,
+             meaning_wsd=t_meaning_wsd)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)

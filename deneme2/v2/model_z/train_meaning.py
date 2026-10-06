@@ -1,37 +1,41 @@
-"""train_meaning (V2) -- meaning agent'in GPT-2 token duzeyinde egitimi (ad onayli, kullanici 6 Ekim; belge 22 s2, 25).
+"""train_meaning (V2) -- meaning agent'in GPT-2 token duzeyinde egitimi (ad onayli, kullanici 6 Ekim; belge 22 s2, 25, 27).
 V1 core/meaning/meaning.py + train_meaning.py kopyasi + degisiklik (V2 kurali: V1'den import yok).  Tarif V1 ile ayni (d 256,
-buyuyen pencere 1..5 cumle, tam softmax, seyreltme t 3e-5, 3 epok, batch 2048, lr 3e-3 cosine); degisen birim: kelime ->
-GPT-2 token'i (V 50.257), veri yalniz train.
+buyuyen pencere 1..5 cumle, tam softmax, seyreltme t 3e-5, batch 2048, lr 3e-3, Adam); degisen: birim kelime -> GPT-2
+token'i (V 50.257), veri yalniz train, takvim wsd (recipe.wsd_lr; --schedule cosine V1'inki; kullanici karari).
 
     R[i, j]  = source_i . target_j / sqrt(d)
     P(j | i) = softmax_j(bias_j + R[i, j])                     bias: token'in genel sikligi
     P(j gizli | pencere) = ortalama_{i oy veren} P(j | i)       oy veren: penceredeki obur token'lar
 Pencere: cumle s'de biter, hikaye icinde en cok W cumle geriye, son MAX_TOKENS token; farkli token'lar tek torba (END ve
 EOS hedef degil: akista cumle disinda).  Seyreltme (word2vec): token pencerede min(1, sqrt(t/f) + t/f) olasilikla kalir
-(f train sikligi).  --mask_same_word 1: ayni kelimenin parcalari (" sw" + "am") birbirine oy vermez (ad onay bekliyor,
-belge 25 s1: valid'de gizli token'larin %9,5'inin ayni kelimeden oy vereni var).
+(f train sikligi).  --mask_same_word 1: ayni kelimenin parcalari (" sw" + "am") birbirine oy vermez (belge 25 s1).
 Kalite (belge 25 s3): valid'de held-out kayip (ayni pencere, sabit tohumlu seyreltme, ayni-kelime maskesi hep acik, train'de
 gecmeyen gizli token sayilmaz), ayni olcu train'in sabit alt kumesinde; taban = gizli token'larin unigram entropisi, kazanc =
-taban - kayip; siklik bantlari ve parca bandi.  Goz: EYE token'larinin log P komsulari.  Her epok checkpoint.pt
-(surdurme); sonda agent.pt (state["source.weight"] -> sentence_z.build_keys), neighbors.pt, metrics.json.  CUDA'da
-torch.compile, CPU'da eager.
+taban - kayip; siklik bantlari ve parca bandi.  Goz: EYE token'larinin log P komsulari.
+Kayit: her epok sonu ve epok icinde --checkpoint_minutes'te bir checkpoint.pt; wsd inisinin ilk adiminda
+decay_start/checkpoint.pt.  --resume 1: ayni --epochs kaldigi yerden; buyuk --epochs uzatma, inis basindan (eski ciktilar
+<out>/epochs_<eski>/; common/train.py duzeni).  Sonda agent.pt (state["source.weight"] -> sentence_z.build_keys),
+neighbors.pt, metrics.json.  CUDA'da torch.compile, fused Adam, bf16 indirgeme kapali; CPU'da eager.
 
     python train_meaning.py --root <simplestories (gpt2/)> --offsets <v2/simplestories_gpt2> --out <kosu klasoru>
-                            [--device cuda] [--epochs 3] [--mask_same_word 1] [--resume 1]
+                            [--device cuda] [--epochs 1] [--schedule wsd] [--mask_same_word 1] [--resume 1]
 """
 import argparse
 import json
 import math
 import os
+import shutil
 import sys
 import time
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "common"))
 from data import EOS_ID, TokenStories  # noqa: E402
+import recipe as R  # noqa: E402  (wsd_lr: train.py ile ayni takvim)
 
 V = EOS_ID + 1          # GPT-2 sozlugu; END burada yok (sentence_z kendi satirini ekler)
 PAD = EOS_ID            # dolgu: pencerede EOS yok (hikaye siniri); en buyuk kimlik, siralamada sona duser
@@ -44,6 +48,7 @@ SUBSAMPLE = 3e-5
 MAX_TOKENS = 256        # pencerede en cok token (uzun pencerede son token'lar)
 BANDS = {"sik": 1000, "orta": 10000, "seyrek": None}    # kalite bantlari: train siklik sirasi (belge 23 s D)
 PROGRESS_SECS = 60
+DECAY = 0.2                 # recipe.wsd_lr varsayilani: son %20 dogrusal inis; inis basinda decay_start/checkpoint.pt
 CHECKPOINT_MINUTES = 10     # epok ici kayit araligi, duvar saati (kullanici, 6 Ekim: "en fazla 10 dk kayıp yaşansın";
                             # buyuk koşuda 30); --checkpoint_minutes, surdurme kimligine girmez
 EYE = (" dragon", " forest", " rain", " cookie", " school", " ocean", " Lily", " happy", " said", " the", ".",
@@ -122,7 +127,9 @@ class MeaningAgent(torch.nn.Module):
         voters = present[:, :, None] & present[:, None, :] & ~torch.eye(k, dtype=torch.bool, device=dev)
         if same is not None:
             voters = voters & ~same
-        return _fn(_mix, dev)(u, v, self.bias[ids], lz[inv], voters)
+        # bias[ids], lz[inv]: embedding yolu (gelismis indeksin geri yayilimi PAD kopyalarini seri topluyordu; belge 27 D1)
+        b = F.embedding(ids, self.bias[:, None]).squeeze(-1)
+        return _fn(_mix, dev)(u, v, b, F.embedding(inv, lz[:, None]).squeeze(-1), voters)
 
 
 class Windows:
@@ -276,8 +283,11 @@ def parse(argv=None):
     ap.add_argument("--lr", type=float, default=LR)
     ap.add_argument("--subsample", type=float, default=SUBSAMPLE, help="seyreltme esigi t (0: kapali)")
     ap.add_argument("--mask_same_word", type=int, default=1, help="1: ayni kelimenin parcalari birbirine oy vermez")
+    ap.add_argument("--schedule", default="wsd", choices=("wsd", "cosine"),
+                    help="lr takvimi: wsd (recipe.wsd_lr, isinma %%1, son %%20 inis; kullanici karari) | cosine (V1)")
     ap.add_argument("--checkpoint_minutes", type=float, default=CHECKPOINT_MINUTES, help="epok ici kayit araligi (dk)")
-    ap.add_argument("--resume", type=int, default=0, help="1: --out'taki checkpoint.pt'den kaldigi epoktan surdur")
+    ap.add_argument("--resume", type=int, default=0, help="1: --out'taki checkpoint.pt'den surdur; --epochs buyukse "
+                    "uzatma (wsd: inis basindan, decay_start/)")
     return ap.parse_args(argv)
 
 
@@ -339,32 +349,54 @@ def _train(args, train, valid, text, encode=None, tokenizer_sha=None, eval_rows=
     vrows = torch.arange(n_eval, device=dev)
     trows = torch.randperm(data.n, generator=torch.Generator().manual_seed(args.seed + 1000))[:n_eval].sort().values.to(dev)
     agent = MeaningAgent(V, args.d).to(dev)
-    opt = torch.optim.Adam(agent.parameters(), lr=args.lr)
+    opt = torch.optim.Adam(agent.parameters(), lr=args.lr, **({"fused": True} if dev.type == "cuda" else {}))
     gen = torch.Generator(device=dev).manual_seed(args.seed)
     n = data.n
-    print("veri: train %d pencere (en cok %d cumle), valid %d, train'de gecen token %d / %d | d %d, lr %g cosine, batch %d, "
+    print("veri: train %d pencere (en cok %d cumle), valid %d, train'de gecen token %d / %d | d %d, lr %g %s, batch %d, "
           "%d parametre, ayni-kelime maskesi %d, parca token turu %d | yukleme %.0f sn" % (
-              n, args.window, vdata.n, int(seen.sum()), V, args.d, args.lr, args.batch,
+              n, args.window, vdata.n, int(seen.sum()), V, args.d, args.lr, args.schedule, args.batch,
               sum(p.numel() for p in agent.parameters()), args.mask_same_word, int(piece.sum()), time.time() - t0), flush=True)
     if keep is not None and encode is not None:
         print("seyreltme t %g: kalma olasiligi %s" % (args.subsample, ", ".join(
             "%r %.2f" % (w, keep[encode(w)[0]].item()) for w in (" happy", " said", " the", "."))), flush=True)
     cuda = dev.type == "cuda"
     first, start, carried, history = 1, 0, 0.0, []
+    steps = -(-n // args.batch)                                        # epok basina adim
+    total_steps = args.epochs * steps
+    down = total_steps - round(DECAY * total_steps)                    # wsd inisinin ilk adimi (recipe.wsd_lr)
     ckpt = os.path.join(args.out, "checkpoint.pt") if args.out else None
+    decay_ckpt = os.path.join(args.out, "decay_start", "checkpoint.pt") if args.out and args.schedule == "wsd" else None
 
-    def save_ckpt(epoch, pos, total):
+    def save_ckpt(epoch, pos, total, path=None):
         """epoch: biten son epok; pos: epok + 1'de siradaki pencere ofseti (0: epok basi); total: o epokun kayip toplami."""
+        os.makedirs(os.path.dirname(path or ckpt), exist_ok=True)
         _save(dict(state=agent.state_dict(), opt=opt.state_dict(), gen=gen.get_state(), epoch=epoch, pos=pos,
-                   total=total, args=vars(args), history=history, data=[n, vdata.n]), ckpt)
+                   total=total, args=vars(args), history=history, data=[n, vdata.n]), path or ckpt)
     if args.out:
         os.makedirs(args.out, exist_ok=True)
     if args.resume:
         pack = torch.load(ckpt, map_location=dev, weights_only=False)
-        keys = ("window", "seed", "d", "batch", "lr", "subsample", "mask_same_word", "epochs")
-        diff = {k: (pack["args"][k], vars(args)[k]) for k in keys if pack["args"][k] != vars(args)[k]}
+        keys = ("window", "seed", "d", "batch", "lr", "subsample", "mask_same_word", "schedule")   # epochs yok: uzatma
+        diff = {k: (pack["args"].get(k, "cosine" if k == "schedule" else None), vars(args)[k]) for k in keys
+                if pack["args"].get(k, "cosine" if k == "schedule" else None) != vars(args)[k]}
         assert not diff, "surdurme ayari checkpoint'ten farkli (checkpoint, simdi): %s" % diff
         assert pack["data"] == [n, vdata.n], "veri checkpoint'tekinden farkli"
+        old_epochs = pack["args"]["epochs"]
+        assert args.epochs >= old_epochs, "kisaltma yok: --epochs %d < checkpoint'teki %d" % (args.epochs, old_epochs)
+        if args.epochs > old_epochs:                                   # uzatma (kural 3): wsd'de inis basindan
+            assert args.schedule == "wsd", "uzatma yalniz wsd'de (cosine'in egrisi toplam adima bagli)"
+            old_total = old_epochs * steps
+            old_down = old_total - round(DECAY * old_total)
+            if pack["epoch"] * steps + pack["pos"] // args.batch > old_down:
+                pack = torch.load(decay_ckpt, map_location=dev, weights_only=False)
+                assert pack["epoch"] * steps + pack["pos"] // args.batch == old_down, "decay_start inis basinda degil"
+            arch = os.path.join(args.out, "epochs_%d" % old_epochs)
+            for name in ("agent.pt", "neighbors.pt", "metrics.json"):
+                if os.path.exists(os.path.join(args.out, name)):
+                    os.makedirs(arch, exist_ok=True)
+                    shutil.move(os.path.join(args.out, name), os.path.join(arch, name))
+            print("UZATMA: %d -> %d epok, genel adim %d'den (inis basi; eski ciktilar %s)" % (
+                old_epochs, args.epochs, pack["epoch"] * steps + pack["pos"] // args.batch, arch), flush=True)
         agent.load_state_dict(pack["state"])
         opt.load_state_dict(pack["opt"])
         gen.set_state(pack["gen"].cpu())
@@ -376,10 +408,13 @@ def _train(args, train, valid, text, encode=None, tokenizer_sha=None, eval_rows=
         total, t_epoch = torch.full((), carried, device=dev), time.time()
         if cuda:
             torch.cuda.reset_peak_memory_stats()
-        t_shown, steps, b0 = time.time(), -(-n // args.batch), start
+        t_shown, b0 = time.time(), start
         for step, b in enumerate(range(0, n, args.batch), 1):
             if b < start:                                      # epok ortasindan surdurme: islenmis pencereler
                 continue
+            g = (epoch - 1) * steps + step - 1                         # genel adim, 0'dan
+            if decay_ckpt and g == down:
+                save_ckpt(epoch - 1, b, total.item(), decay_ckpt)      # uzatma buradan (train.py ile ayni)
             if ckpt and time.time() - t_ckpt >= 60 * args.checkpoint_minutes:     # epok ici kayit
                 save_ckpt(epoch - 1, b, total.item())
                 t_ckpt = time.time()
@@ -388,9 +423,12 @@ def _train(args, train, valid, text, encode=None, tokenizer_sha=None, eval_rows=
                 print("  epok %d adim %d / %d (%%%.0f)  kayip %.3f  %.0f pencere/sn  kalan ~%.0f dk (butun egitim)" % (
                     epoch, step, steps, 100 * step / steps, total.item() / step, (b - b0) / el,
                     ((steps - step) + (args.epochs - epoch) * steps) * el / (step - b0 // args.batch) / 60), flush=True)
-            done = ((epoch - 1) * n + b) / (args.epochs * n)
+            if args.schedule == "wsd":
+                lr = R.wsd_lr(g, total_steps, args.lr, decay=DECAY)
+            else:
+                lr = args.lr * 0.5 * (1 + math.cos(math.pi * ((epoch - 1) * n + b) / (args.epochs * n)))
             for group in opt.param_groups:
-                group["lr"] = args.lr * 0.5 * (1 + math.cos(math.pi * done))
+                group["lr"] = lr
             ids, present, same = data.batch(perm[b:b + args.batch], same_word=bool(args.mask_same_word))
             loss = loss_of(agent, ids, present, same, keep, gen)
             opt.zero_grad()
@@ -432,6 +470,8 @@ def _train(args, train, valid, text, encode=None, tokenizer_sha=None, eval_rows=
 
 def main(argv=None):
     args = parse(argv)
+    if args.device.startswith("cuda"):              # uzun K (V) toplamlari fp32'de indirgensin (belge 27 D4; maliyet ~0)
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     if args.device == "cpu":
         torch.set_num_threads(4)
         if os.name == "nt":
