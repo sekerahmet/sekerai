@@ -5,6 +5,8 @@ bilgileri = Z de"; adlar onayli (encode_z, decode_z).  Baglama ailesi: TPR (Smol
     konum anahtari  R_t f = kaydir_t(isaret_t * f)              sirayi tutar; tersi R_t^T
     rol anahtari    g_t = isaret(P h_t)  (+-1)                  h_t: grammar torba okuyucusu (kelimenin yuvasi, sirasiz)
     z = sum_t R_t f(w_t) + R_n f(END) + sum_t g_t * f(w_t)     (son terim yalniz roles=True)
+    bag_channel=True:  z = [ konum kanali (yukaridaki) ; sum_t f(w_t) / sqrt(n) ]   (kullanici, 6 Ekim; ad onayli)
+    torba kanali konumsuz okunur (model z'yi torba gibi okuyor, belge/model_z_temel/15 s2); geri acma konum kanalindan.
 
 decode_z: u_t = R_t^T z, her konumda en yakin kelime; SIC: en emin konum once cozulur, katkisi z'den cikarilir.  Rol
 terimi geri acmada cikarilamaz (h_t butun cumleye bagli), gurultu gibi kalir; torbanin fonksiyonu oldugu icin (reader
@@ -27,9 +29,10 @@ def _unit(x):
     return x / x.norm(dim=-1, keepdim=True).clamp_min(1e-9)
 
 
-def build_keys(meaning_path, grammar_path, z=Z, longest=64, seed=1, roles=True):
+def build_keys(meaning_path, grammar_path, z=Z, longest=64, seed=1, roles=True, bag_channel=False):
     """meaning ve grammar agent.pt -> anahtarlar (sabit; ayni tohum ayni z).  longest: en uzun cumle (kelime).  roles:
-    rol terimi z'ye eklenir mi (anahtarlar ikisinde de ayni)."""
+    rol terimi z'ye eklenir mi; bag_channel: torba kanali (anahtarlar hepsinde ayni).  keys["z"] toplam z boyutu (model
+    z_dim'i buradan alir), keys["z_pos"] konum kanali (= z)."""
     mp = torch.load(meaning_path, map_location="cpu", weights_only=False)
     gp = torch.load(grammar_path, map_location="cpu", weights_only=False)
     assert mp["vocab"] == gp["vocab"], "meaning ve grammar sozlugu farkli"
@@ -50,8 +53,8 @@ def build_keys(meaning_path, grammar_path, z=Z, longest=64, seed=1, roles=True):
     shift = (j[None] - torch.arange(L)[:, None]) % z                           # kaydir_t: y[j] = x[j - t]
     unshift = (j[None] + torch.arange(L)[:, None]) % z
     P = torch.randn(z, gram.E.weight.shape[1], generator=g)
-    return dict(vocab=mp["vocab"], END=V, F=F, signs=signs, shift=shift, unshift=unshift, P=P, grammar=gram, z=z,
-                roles=roles)
+    return dict(vocab=mp["vocab"], END=V, F=F, signs=signs, shift=shift, unshift=unshift, P=P, grammar=gram,
+                z=z * (2 if bag_channel else 1), z_pos=z, roles=roles, bag_channel=bag_channel)
 
 
 def keys_to(keys, device):
@@ -89,15 +92,19 @@ def encode_z(keys, ids, mask):
         keep = torch.arange(L + 1, device=dev)[None] <= n[:, None]
         t = torch.arange(L + 1, device=dev).expand(B, -1)
         z = (_bind(keys, full, t) * keep[..., None]).sum(1)
-        if not keys["roles"]:
+        if keys["roles"]:
+            z = z + (_roles(keys, ids, mask) * keys["F"][ids] * mask[..., None]).sum(1)
+        if not keys.get("bag_channel"):
             return z
-        return z + (_roles(keys, ids, mask) * keys["F"][ids] * mask[..., None]).sum(1)
+        bag = (keys["F"][ids] * mask[..., None]).sum(1) / n.clamp_min(1)[:, None].float().sqrt()
+        return torch.cat([z, bag], 1)
 
 
 @torch.no_grad()
 def decode_z(keys, z, sic=True, max_len=None):
-    """z (B, z) -> kelime kimlik listeleri (END'e kadar).  max_len: en uzun cumle (kelime) biliniyorsa yalniz ilk max_len + 1
-    konum cozulur (bellek ve sure ~ konum sayisi); satirlar DECODE_BYTES'lik parcalarla."""
+    """z (B, z) -> kelime kimlik listeleri (END'e kadar); yalniz konum kanali cozulur (torba kanali atlanir).  max_len:
+    en uzun cumle (kelime) biliniyorsa yalniz ilk max_len + 1 konum cozulur (bellek ve sure ~ konum sayisi); satirlar
+    DECODE_BYTES'lik parcalarla."""
     Lk = len(keys["signs"]) if max_len is None else min(len(keys["signs"]), max_len + 1)
     step = max(1, DECODE_BYTES // (Lk * len(keys["F"]) * 4))
     if len(z) > step:
@@ -111,7 +118,7 @@ def decode_z(keys, z, sic=True, max_len=None):
         return (r[:, unshift] * signs[None]) @ F.T
 
     with torch.autocast(dev.type, enabled=False):
-        z = z.float()
+        z = z[:, :keys.get("z_pos", z.shape[1])].float()
         if not sic:
             words = scores(z).argmax(-1)
         else:

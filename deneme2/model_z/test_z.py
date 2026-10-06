@@ -10,6 +10,7 @@ import math  # noqa: E402
 import os  # noqa: E402
 import sys  # noqa: E402
 import tempfile  # noqa: E402
+import time  # noqa: E402
 
 import numpy as np  # noqa: E402
 
@@ -86,6 +87,46 @@ def t_roundtrip():
           and SZ.decode_z(on, SZ.encode_z(on, e2, e2.bool())) == [[]])
     k2 = SZ.build_keys(*agents(vocab, heads=2), z=512, longest=12)
     check("grammar heads agent.pt args'tan", k2["grammar"].reader.layers[0].self_attn.num_heads == 2)
+
+
+def t_bag_channel():
+    """bag_channel (kullanici, 6 Ekim; belge/model_z_temel/15): z = [konum kanali ; sum_t f(w_t) / sqrt(n)]."""
+    vocab = ["<unk>"] + ["w%d" % i for i in range(199)]
+    mp, gp = agents(vocab)
+    g = torch.Generator().manual_seed(1)
+    sents = [torch.randint(1, 200, (n,), generator=g).tolist() for n in range(1, 16) for _ in range(6)]
+    x, m = TS.pad_sentences(sents)
+    for roles in (True, False):
+        old = SZ.build_keys(mp, gp, z=512, longest=16, roles=roles)
+        z = SZ.encode_z(old, x, m)
+        ref = torch.zeros(len(sents), 512)
+        rl = SZ._roles(old, x, m) if roles else None
+        for i, s in enumerate(sents):                                    # formul, kelime kelime
+            for t, w in enumerate(s + [old["END"]]):
+                ref[i] += SZ._bind(old, torch.tensor(w), torch.tensor(t))
+                if roles and t < len(s):
+                    ref[i] += rl[i, t] * old["F"][w]
+        check("bag_channel kapali (varsayilan, rol %d): z = eski formul, boyut 512" % roles,
+              old["z"] == old["z_pos"] == 512 and not old["bag_channel"] and z.shape == (len(sents), 512)
+              and torch.allclose(z, ref, atol=1e-5),
+              "en buyuk fark %.1e" % (z - ref).abs().max())
+    off = SZ.build_keys(mp, gp, z=512, longest=16, roles=False)
+    on = SZ.build_keys(mp, gp, z=512, longest=16, roles=False, bag_channel=True)
+    z_off, z_on = SZ.encode_z(off, x, m), SZ.encode_z(on, x, m)
+    n = m.sum(1, keepdim=True).float()
+    bag = torch.stack([on["F"][s].sum(0) for s in sents]) / n.sqrt()
+    check("bag_channel acik: z 1024 = konum 512 + torba 512; konum kanali rolsuz z ile ayni, torba = sum f / sqrt n",
+          on["z"] == 1024 and on["z_pos"] == 512 and z_on.shape == (len(sents), 1024)
+          and torch.equal(z_on[:, :512], z_off) and torch.allclose(z_on[:, 512:], bag, atol=1e-6))
+    back_on, back_off = SZ.decode_z(on, z_on, max_len=15), SZ.decode_z(off, z_off, max_len=15)
+    hit = sum(b == s for b, s in zip(back_on, sents))
+    check("bag_channel acik: geri acma rolsuz z ile ayni (1-15 kelime)", back_on == back_off,
+          "birebir %d / %d" % (hit, len(sents)))
+    perm = [[s[j] for j in torch.randperm(len(s), generator=g).tolist()] for s in sents]
+    zp = SZ.encode_z(on, *TS.pad_sentences(perm))
+    moved = [i for i, (a, b) in enumerate(zip(sents, perm)) if a != b]
+    check("torba kanali kelime sirasindan bagimsiz, konum kanali degil", torch.allclose(zp[:, 512:], z_on[:, 512:],
+          atol=1e-6) and not torch.allclose(zp[moved, :512], z_on[moved, :512], atol=1e-3))
 
 
 def t_examples():
@@ -207,6 +248,46 @@ def t_resume():
     except AssertionError:
         refused = True
     check("surdurme kapisi: z_roles farkliysa durur", refused)
+    TS.main(base + ["--out", os.path.join(TMP, "D"), "--epochs", "1", "--bag_channel", "1"])
+    rd = json.load(open(os.path.join(TMP, "D", "results.json")))
+    sd = torch.load(os.path.join(TMP, "D", "agent.pt"), weights_only=False)["state"]
+    check("--bag_channel 1: kosu bitiyor, args'ta, modelin z girisi 1024 (konum 512 + torba 512)",
+          rd["args"]["bag_channel"] == 1 and len(rd["history"]) == 1 and sd["z_in.weight"].shape[1] == 1024)
+    try:
+        TS.main(base + ["--out", b_dir, "--resume", "1", "--bag_channel", "1"])
+        refused = False
+    except AssertionError:
+        refused = True
+    check("surdurme kapisi: bag_channel farkliysa durur", refused)
+
+
+def t_eval_only():
+    """--eval_only: kayitli ajani puanlamak = egitim sonundaki olcum; results.json'a dokunmaz; eski ajan (z_roles /
+    train_z / iz yok) da puanlanir."""
+    import glob
+    vocab, _ = TS.load_countries()
+    mp, gp = agents(vocab)
+    TS.CHECKPOINT_SECS, TS.SHOW = 600, 0
+    out = os.path.join(TMP, "E")
+    TS.main(["--data", "countries", "--meaning", mp, "--grammar", gp, "--d", "16", "--layers", "1", "--heads", "2",
+             "--batch", "256", "--epochs", "1", "--device", "cpu", "--out", out])
+    results = open(os.path.join(out, "results.json")).read()
+    want = json.loads(results)["history"][-1]
+    pack = torch.load(os.path.join(out, "agent.pt"), weights_only=False)
+    for k in ("z_roles", "train_z", "meaning_sha256", "grammar_sha256"):        # 5 Ekim ajani gibi eski ajan
+        pack["args"].pop(k)
+    torch.save(pack, os.path.join(TMP, "old_agent.pt"))
+    keys_ = ("exam", "exam_z", "exam_shuffled_z", "exam_zero_z", "generation")
+    for agent in (os.path.join(out, "agent.pt"), os.path.join(TMP, "old_agent.pt")):
+        before = set(glob.glob(os.path.join(out, "eval_*.json")))
+        TS.main(["--data", "countries", "--meaning", mp, "--grammar", gp, "--device", "cpu", "--eval_only", agent,
+                 "--out", out])                                          # d / layers / batch ajandan gelmeli
+        got = json.load(open((set(glob.glob(os.path.join(out, "eval_*.json"))) - before).pop()))
+        check("--eval_only (%s): sinav sayilari = egitim sonundaki, results.json degismedi" % os.path.basename(agent),
+              all(got[k] == want[k] for k in keys_) and open(os.path.join(out, "results.json")).read() == results,
+              "%s / %s" % (got["exam"]["loss"], want["exam"]["loss"]))
+        if len(before) == 0:
+            time.sleep(1.1)                                              # eval_<zaman>.json saniye cozunurluklu
 
 
 def t_drive():
@@ -238,7 +319,8 @@ def t_drive():
           and np.array_equal(np.r_[0, np.cumsum(counts)], np.load(zr + "/ss_exam_story_offsets.npy")))
 
 
-TESTS = dict(roundtrip=t_roundtrip, examples=t_examples, generate=t_generate, exam=t_exam, resume=t_resume,
+TESTS = dict(roundtrip=t_roundtrip, bag_channel=t_bag_channel, examples=t_examples, generate=t_generate, exam=t_exam, resume=t_resume,
+             eval_only=t_eval_only,
              drive=t_drive)
 
 if __name__ == "__main__":

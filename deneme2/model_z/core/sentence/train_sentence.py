@@ -17,7 +17,9 @@ results.json.  Bitmis kosu --resume ile cagrilirsa durur, dosyalara dokunmaz.
 
     python train_sentence.py [--data countries|simplestories] [--root SS klasoru] [--epochs 4] [--d 64] [--layers 4]
                              [--heads 4] [--batch 16 (hikaye)] [--lr LR_D64*64/d] [--z 512] [--z_roles 1|0]
-                             [--train_z true|zero] [--prompts istem.json] [--device cpu|cuda] [--out klasor] [--resume 1]
+                             [--bag_channel 0|1] [--train_z true|zero] [--prompts istem.json] [--device cpu|cuda] [--out klasor] [--resume 1]
+    python train_sentence.py --eval_only agent.pt [--data ...] [--root ...] [--out klasor]    (egitim yok: sinav + kapali
+                             dongu; model boyu, z_roles, train_z ajandan; sonuc --out/eval_<zaman>.json)
 """
 import argparse
 import hashlib
@@ -344,6 +346,7 @@ def main(argv=None):
     ap.add_argument("--grammar", default=None, help="verilmezse AGENTS[--data]")
     ap.add_argument("--z", type=int, default=512)
     ap.add_argument("--z_roles", type=int, default=1, help="1: z'de grammar rol terimi (bugunku varsayilan); 0: yalniz konum")
+    ap.add_argument("--bag_channel", type=int, default=0, help="1: z'ye torba kanali (z boyu 2 kat; sentence_z, belge 15)")
     ap.add_argument("--train_z", default="true", choices=("true", "zero"), help="zero: z'siz kontrol (z yerine sifir)")
     ap.add_argument("--decode", default="greedy,sample", help="kapali dongu: greedy (argmax), sample (modelin kendi "
                     "dagilimi, sicaklik 1, tohum --seed); virgulle ikisi")
@@ -360,6 +363,8 @@ def main(argv=None):
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--out", default=None)
     ap.add_argument("--resume", type=int, default=0)
+    ap.add_argument("--eval_only", default=None, help="agent.pt: egitim yok, yalniz sinav + kapali dongu (results.json'a "
+                    "dokunmaz; --out/eval_<zaman>.json)")
     args = ap.parse_args(argv)
     args.meaning = args.meaning or AGENTS[args.data][0]
     args.grammar = args.grammar or AGENTS[args.data][1]
@@ -367,6 +372,17 @@ def main(argv=None):
         args.lr = LR_D64 * 64 / args.d
     for name in ("meaning", "grammar"):                                  # z bu dosyalara bagli: iz (kural 9)
         args.__dict__[name + "_sha256"] = hashlib.sha256(open(vars(args)[name], "rb").read()).hexdigest()
+    agent = None
+    if args.eval_only:                                  # olculecek ajan: boyu ve z ayari ajandan (eski ajan: rol acik, z true)
+        agent = torch.load(args.eval_only, map_location="cpu", weights_only=False)
+        a = dict(dict(z_roles=1, train_z="true", bag_channel=0), **agent["args"])
+        assert a["data"] == args.data, "ajan %s verisiyle egitilmis" % a["data"]
+        for name in ("meaning", "grammar"):             # iz varsa iz, yoksa kosu klasoru adi (Colab / yerel yol farkli)
+            same = a.get(name + "_sha256") == vars(args)[name + "_sha256"] if name + "_sha256" in a else \
+                os.path.basename(os.path.dirname(a[name])) == os.path.basename(os.path.dirname(vars(args)[name]))
+            assert same, "%s ajani egitimdekinden farkli: %s" % (name, a[name])
+        for k in ("z", "d", "layers", "heads", "z_roles", "train_z", "bag_channel", "seed", "batch"):   # batch: karisik z esi
+            vars(args)[k] = a[k]
     default_prompts = os.path.join(os.path.dirname(MODEL_Z), "transformer_baseline", "ss_prompts.json")
     if args.prompts is None and args.data == "simplestories" and os.path.exists(default_prompts):
         args.prompts = default_prompts
@@ -386,10 +402,16 @@ def main(argv=None):
         exam_lists = [s for s in stories if s["split"] == "exam"]
         exam = Stories.from_lists([s["sents"] for s in exam_lists], args.device)
         exam_rows = torch.arange(exam.n, device=args.device)
+        longest = max(train.longest, exam.longest)
     else:
         vocab = json.load(open(os.path.join(args.root, "ss_vocab.json"), encoding="utf-8"))
-        train = Stories.from_files(args.root, "ss_story", args.device)
         exam = Stories.from_files(args.root, "ss_exam_story", args.device)
+        if agent is None:
+            train = Stories.from_files(args.root, "ss_story", args.device)
+            longest = max(train.longest, exam.longest)
+        else:                                           # egitim verisi yuklenmez; anahtarlar egitimdeki boyla (P ona bagli)
+            longest = max(int(np.diff(np.load(os.path.join(args.root, "ss_story_sentence_offsets.npy"))).max()),
+                          exam.longest)
         # sinav: model_y'nin kumesi (sizintisiz ve sigan valid hikayeleri; valid sirasi = Z sinav hikayesi sirasi) ve
         # exam_simplestories.exam_rows'un kurali -> ayni 1000 hikaye
         args.exam_set = os.path.join(os.path.dirname(os.path.dirname(os.path.normpath(args.root))), "simplestories",
@@ -404,11 +426,11 @@ def main(argv=None):
         story_bytes = np.load(os.path.join(args.root, "ss_exam_story_bytes.npy"))      # make_ss_sentences --stories
         assert len(story_bytes) == exam.n, "ss_exam_story_bytes.npy sinav hikayeleriyle hizali degil"
         nbytes = int(story_bytes[pick].sum())
-    keys = keys_to(build_keys(args.meaning, args.grammar, args.z, max(train.longest, exam.longest),
-                              roles=bool(args.z_roles)), args.device)
+    keys = keys_to(build_keys(args.meaning, args.grammar, args.z, longest, roles=bool(args.z_roles),
+                              bag_channel=bool(args.bag_channel)), args.device)
     assert keys["vocab"] == vocab, "meaning / grammar sozlugu veriyle ayni degil"
 
-    model = SentenceTransformer(vocab, args.z, args.d, args.layers, args.heads).to(args.device)
+    model = SentenceTransformer(vocab, keys["z"], args.d, args.layers, args.heads).to(args.device)   # z: konum (+ torba)
     if cuda and args.compile:
         for block in model.blocks:
             block.compile(dynamic=True)
@@ -417,7 +439,7 @@ def main(argv=None):
     no_decay = [p for p in model.parameters() if p.dim() < 2]
     opt = torch.optim.AdamW([dict(params=decay, weight_decay=WEIGHT_DECAY), dict(params=no_decay, weight_decay=0.0)],
                             lr=args.lr, betas=BETAS)
-    n = train.n
+    n = train.n if agent is None else 0
     steps_per = -(-n // args.batch)
     total_steps = steps_per * args.epochs
     first, start, ckpt = 1, 0, os.path.join(args.out, "checkpoint.pt") if args.out else None
@@ -427,8 +449,8 @@ def main(argv=None):
     if args.resume:
         pack = torch.load(ckpt, map_location=args.device, weights_only=False)
         keys_ = ("data", "z", "d", "layers", "heads", "batch", "lr", "epochs", "seed", "meaning", "grammar", "z_roles",
-                 "train_z", "meaning_sha256", "grammar_sha256", "exam_set_sha256")
-        old = dict(dict(z_roles=1, train_z="true"), **pack["args"])      # eski checkpoint: bugunku varsayilan; iz yoksa atlanir
+                 "train_z", "bag_channel", "meaning_sha256", "grammar_sha256", "exam_set_sha256")
+        old = dict(dict(z_roles=1, train_z="true", bag_channel=0), **pack["args"])     # eski checkpoint; iz yoksa atlanir
         diff = {k: (old[k], vars(args).get(k)) for k in keys_ if k in old and old[k] != vars(args).get(k)}
         assert not diff, "surdurme ayari checkpoint'ten farkli (checkpoint, simdi): %s" % diff
         if pack["epoch"] > args.epochs:
@@ -446,12 +468,59 @@ def main(argv=None):
                             history=history, args=vars(args)), ckpt + ".part")
             os.replace(ckpt + ".part", ckpt)
 
+    def measure(last):
+        """Sinav (egitimdeki z, karisik, sifir) + ulke uretimi + son epokta kapali dongu -> (e, s, z0, gen, story)."""
+        model.eval()
+        with torch.autocast(args.device.split(":")[0], dtype=torch.bfloat16, enabled=cuda):
+            e = exam_scores(model, exam, exam_rows, keys, args.batch * 4, args.train_z, nbytes)   # ana okuma: egitimdeki z
+            s = exam_scores(model, exam, exam_rows, keys, args.batch * 4, "shuffle")
+            z0 = exam_scores(model, exam, exam_rows, keys, args.batch * 4, "zero")
+            gen = country_generation(model, exam_lists, keys, args.device, SHOW if last else 0) if exam_lists else None
+            story = None
+            if last and args.prompts:                                     # kapali dongu: metin (kural 12) + olcu
+                spec = json.load(open(args.prompts, encoding="utf-8"))
+                p_ids, p_mask = exam.batch(torch.as_tensor(spec["stories"], device=args.device))
+                sents = [[r[m].tolist() for r, m in zip(p_ids[b], p_mask[b]) if m.any()] for b in range(len(p_ids))]
+                prompts = [st[:c] for st in sents for c in spec["sentences"]]
+                text = lambda s_: " ".join(vocab[w] for w in s_)  # noqa: E731
+                story, written = {}, {}
+                for mode in args.decode.split(","):
+                    gen_ = torch.Generator(args.device).manual_seed(args.seed) if mode == "sample" else None
+                    written[mode], story[mode] = story_generation(model, keys, prompts, generator=gen_, mode=args.train_z)
+                    story[mode]["texts"] = [[text(x) for x in w] for w in written[mode]]
+                story["prompts"] = [[text(x) for x in p] for p in prompts]
+                for j, p in enumerate(story["prompts"]):                  # decode'lar yan yana (goz)
+                    print("   istem  : " + "\n            ".join(p), flush=True)
+                    for mode in written:
+                        print("   %-7s: " % mode + "\n            ".join(story[mode]["texts"][j]), flush=True)
+        model.train()
+        if story:
+            for mode in args.decode.split(","):
+                print("kapali dongu %s: %s" % (mode, {k: v for k, v in story[mode].items() if k != "texts"}), flush=True)
+        return e, s, z0, gen, story
+
+    if agent is not None:                               # yalniz olcum: egitim, checkpoint, agent.pt, results.json YOK
+        model.load_state_dict(agent["state"])
+        print("YALNIZ OLCUM: %s | sinav %d hikaye (olcu %d%s) | z %d (meaning+konum%s), egitimde z %s | d %d, katman %d" % (
+            args.eval_only, exam.n, len(exam_rows), ", kume sha256 %s" % args.exam_set_sha256[:12] if "exam_set" in vars(args)
+            else "", keys["z"], ("+grammar rol" if args.z_roles else "") + ("+torba" if args.bag_channel else ""),
+            args.train_z, args.d, args.layers), flush=True)
+        e, s, z0, gen, story = measure(True)
+        print("sinav (z %s) %s | karisik z kayip %.3f, sifir z kayip %.3f%s" % (
+            args.train_z, e, s["loss"], z0["loss"], " | uretim %s" % gen if gen else ""), flush=True)
+        if args.out:
+            path = os.path.join(args.out, "eval_%s.json" % time.strftime("%Y%m%d_%H%M%S"))
+            json.dump(dict(args=vars(args), exam=e, exam_z=args.train_z, exam_shuffled_z=s, exam_zero_z=z0,
+                           generation=gen, story_generation=story), open(path, "w"), indent=1)
+            print("kaydedildi:", path, flush=True)
+        return model
     print("veri %s: egitim %d hikaye (%d cumle, en uzun %d kelime), sinav %d hikaye (olcu %d%s) | z %d (meaning+konum%s), "
           "egitimde z %s | d %d, katman %d, head %d, %d parametre | batch %d hikaye, lr %g, %d adim | cihaz %s compile %s "
           "(%.0f sn hazirlik)"
           % (args.data, n, len(train.sent_off) - 1, train.longest, exam.n, len(exam_rows),
              ", kume %s sha256 %s" % (args.exam_set, args.exam_set_sha256[:12]) if "exam_set" in vars(args) else "",
-             args.z, "+grammar rol" if args.z_roles else "", args.train_z, args.d, args.layers, args.heads,
+             keys["z"], ("+grammar rol" if args.z_roles else "") + ("+torba" if args.bag_channel else ""), args.train_z,
+             args.d, args.layers, args.heads,
              sum(p.numel() for p in model.parameters()), args.batch, args.lr, total_steps, args.device,
              bool(cuda and args.compile), time.time() - t0), flush=True)
     for epoch in range(first, args.epochs + 1):
@@ -489,37 +558,10 @@ def main(argv=None):
             total += loss.detach()
             count += 1
         t_train = time.time() - t_epoch
-        model.eval()
-        last = epoch == args.epochs
-        with torch.autocast(args.device.split(":")[0], dtype=torch.bfloat16, enabled=cuda):
-            e = exam_scores(model, exam, exam_rows, keys, args.batch * 4, args.train_z, nbytes)   # ana okuma: egitimdeki z
-            s = exam_scores(model, exam, exam_rows, keys, args.batch * 4, "shuffle")
-            z0 = exam_scores(model, exam, exam_rows, keys, args.batch * 4, "zero")
-            gen = country_generation(model, exam_lists, keys, args.device, SHOW if last else 0) if exam_lists else None
-            story = None
-            if last and args.prompts:                                     # kapali dongu: metin (kural 12) + olcu
-                spec = json.load(open(args.prompts, encoding="utf-8"))
-                p_ids, p_mask = exam.batch(torch.as_tensor(spec["stories"], device=args.device))
-                sents = [[r[m].tolist() for r, m in zip(p_ids[b], p_mask[b]) if m.any()] for b in range(len(p_ids))]
-                prompts = [st[:c] for st in sents for c in spec["sentences"]]
-                text = lambda s_: " ".join(vocab[w] for w in s_)  # noqa: E731
-                story, written = {}, {}
-                for mode in args.decode.split(","):
-                    gen_ = torch.Generator(args.device).manual_seed(args.seed) if mode == "sample" else None
-                    written[mode], story[mode] = story_generation(model, keys, prompts, generator=gen_, mode=args.train_z)
-                    story[mode]["texts"] = [[text(x) for x in w] for w in written[mode]]
-                story["prompts"] = [[text(x) for x in p] for p in prompts]
-                for j, p in enumerate(story["prompts"]):                  # decode'lar yan yana (goz)
-                    print("   istem  : " + "\n            ".join(p), flush=True)
-                    for mode in written:
-                        print("   %-7s: " % mode + "\n            ".join(story[mode]["texts"][j]), flush=True)
-        model.train()
+        e, s, z0, gen, story = measure(epoch == args.epochs)
         print("epok %d  kayip %.3f | sinav (z %s) %s | karisik z kayip %.3f, sifir z kayip %.3f%s  (egitim %.0f sn, olcum %.0f sn)" % (
             epoch, total.item() / count, args.train_z, e, s["loss"], z0["loss"], " | uretim %s" % gen if gen else "", t_train,
             time.time() - t_epoch - t_train), flush=True)
-        if story:
-            for mode in args.decode.split(","):
-                print("kapali dongu %s: %s" % (mode, {k: v for k, v in story[mode].items() if k != "texts"}), flush=True)
         history.append(dict(epoch=epoch, loss=total.item() / count, exam=e, exam_z=args.train_z, exam_shuffled_z=s,
                             exam_zero_z=z0, generation=gen, story_generation=story))
         save(epoch + 1, 0)
