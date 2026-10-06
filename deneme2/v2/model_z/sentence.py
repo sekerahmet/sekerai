@@ -15,10 +15,10 @@ import math
 import torch
 import torch.nn.functional as F
 
-from sentence_z import EOS_ID, END_ID, VOCAB, encode_z
+from sentence_z import encode_z
+from data import END_ID, EOS_ID, VOCAB, Kind  # noqa: E402  (sentence_z common/'u yola ekledi)
 
-BOS, TOKEN, END, ZTOK, PAD = 0, 1, 2, 3, 4                  # kind: common/data.py ile ayni (belge 21 s5)
-FIRST, MID, END_T, EOS_T = 0, 1, 2, 3                       # target_kind (belge 21 s5)
+BOS, TOKEN, END, ZTOK, PAD = Kind.BOS, Kind.TOKEN, Kind.END, Kind.ZTOK, Kind.PAD
 
 
 def rope(x, pos, base=10000.0):
@@ -154,8 +154,9 @@ class SentenceTransformer(torch.nn.Module):
         B, T = batch.tokens.shape
         dev = batch.tokens.device
         zvec = torch.zeros(B, T, self.keys["z"], device=dev)
-        if len(batch.z_sentences):
-            zvec[batch.z_slots] = self._z(batch.z_sentences, dev)
+        ids, mask = batch.z_sentences                                       # (n_z, Lmax), Z_k'nin cumlesi (belge 21)
+        if len(ids):
+            zvec[batch.z_slots] = encode_z(self.keys, ids.to(dev), mask.to(dev))
         if attn is None:
             attn = _dense(model_z_mask(batch.kind, batch.doc, batch.sent), B, T, dev)
         return self.hidden(batch.tokens, batch.kind, batch.pos, zvec, attn)

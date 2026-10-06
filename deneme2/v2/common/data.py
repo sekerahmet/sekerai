@@ -252,64 +252,68 @@ class PackedBatch:
 
 
 def build_batch(stories, row_stories_list, layout, device="cpu", row_len=ROW_LEN):
-    """stories (TokenStories ya da .sentences(i) veren nesne), satir basina hikaye kimlikleri -> PackedBatch."""
+    """stories (TokenStories: stream, sent (N, 2), story (H+1)), satir basina hikaye kimlikleri -> PackedBatch.  Vektorel
+    (numpy; olculdu: Python dongusunun ~10 kati hizli, tests_v2 'pack' dongulu basvuruyla esitligi sinar)."""
     assert layout in ("transformer", "model_z")
     B = len(row_stories_list)
+    per_row = np.array([len(r) for r in row_stories_list])
+    sid = np.full((B, per_row.max()), -1, np.int64)
+    for r, row in enumerate(row_stories_list):
+        sid[r, :len(row)] = row
+    h = sid[sid >= 0]                                                    # hikayeler, satir sirasiyla
+    hrow, hdoc = np.repeat(np.arange(B), per_row), np.concatenate([np.arange(k) for k in per_row])
+    n = stories.story[h + 1] - stories.story[h]                          # hikaye basina cumle
+    excl = lambda a: np.r_[0, np.cumsum(a)[:-1]]  # noqa: E731
+    first_sent = excl(n)
+    si = np.repeat(stories.story[h] - first_sent, n) + np.arange(n.sum())   # cumlenin genel indeksi
+    sh = np.repeat(np.arange(len(h)), n)                                 # cumlenin hikayesi (batch ici)
+    sk = np.arange(n.sum()) - first_sent[sh]                             # hikaye ici cumle no (0'dan)
+    st0, L = stories.sent[si, 0], stories.sent[si, 1] - stories.sent[si, 0]
+    slen = np.add.reduceat(L + 1, first_sent) + 1                        # hikaye boyu 1 + sum(L + 1)
+    cs = excl(slen)
+    start = cs - cs[np.r_[0, np.cumsum(per_row)[:-1]]][hrow]             # hikayenin satirdaki ilk sutunu
+    assert (start + slen <= row_len).all(), "satir tasti"
+    cl = excl(L + 1)
+    s0 = start[sh] + 1 + cl - cl[first_sent[sh]]                         # cumlenin ilk sutunu
+    ts = np.repeat(np.arange(len(L)), L)                                 # token'in cumlesi
+    j = np.arange(L.sum()) - excl(L)[ts]                                 # cumle ici sira (0'dan)
+    trow, tcol = hrow[sh[ts]], s0[ts] + j
+    erow, ecol = hrow[sh], s0 + L                                        # END / Z_k
     tokens = np.zeros((B, row_len), np.int64)
     kind = np.full((B, row_len), Kind.PAD, np.int8)
     pos = np.zeros((B, row_len), np.int64)
     doc = np.full((B, row_len), -1, np.int32)
     sent = np.full((B, row_len), -1, np.int32)
+    tokens[hrow, start], kind[hrow, start], doc[hrow, start] = EOS_ID, Kind.BOS, hdoc
+    tokens[trow, tcol] = np.asarray(stories.stream[st0[ts] + j], dtype=np.int64)
+    kind[trow, tcol], doc[trow, tcol], sent[trow, tcol] = Kind.TOKEN, hdoc[sh[ts]], sk[ts]
+    tokens[erow, ecol], kind[erow, ecol], doc[erow, ecol], sent[erow, ecol] = END_ID, Kind.END, hdoc[sh], sk
     target = np.full((B, row_len), -100, np.int64)
+    target[:, :-1] = tokens[:, 1:]                                       # sonraki token (hikaye icinde)
+    last = start + slen - 1
+    target[hrow, last] = EOS_ID                                          # son END'in hedefi EOS
+    target[kind == Kind.PAD] = -100
     tkind = np.full((B, row_len), -1, np.int8)
-    zr, zc, zs = [], [], []
-    S = max(len(r) for r in row_stories_list)
-    sid = np.full((B, S), -1, np.int64)
-    for r, row in enumerate(row_stories_list):
-        c = 0
-        for d, h in enumerate(row):
-            sid[r, d] = h
-            ss = stories.sentences(int(h))
-            n = len(ss)
-            seq = [EOS_ID] + [t for s in ss for t in list(s) + [END_ID]]
-            T = len(seq)
-            assert c + T <= row_len, "satir tasti"
-            kd = [Kind.BOS] + [k for s in ss for k in [Kind.TOKEN] * len(s) + [Kind.END]]
-            sn = [-1] + [k for k, s in enumerate(ss) for _ in range(len(s) + 1)]
-            nxt = seq[1:] + [EOS_ID]                       # sonraki token; son END'in hedefi EOS
-            tk = []
-            for k_, (x, kk) in enumerate(zip(nxt, kd)):
-                if k_ == T - 1:
-                    tk.append(TargetKind.EOS)
-                elif x == END_ID:
-                    tk.append(TargetKind.END)
-                elif kk in (Kind.BOS, Kind.END):
-                    tk.append(TargetKind.FIRST)
-                else:
-                    tk.append(TargetKind.MID)
-            if layout == "transformer":
-                ps = list(range(T))
-            else:                                           # mantiksal: BOS 0, s_k'nin i. token'i (k-1)+i, END_k k
-                ps = [0] + [p for k, s in enumerate(ss, 1) for p in list(range(k, k + len(s))) + [k]]
-                for k, s in enumerate(ss):
-                    zr.append(r)
-                    zc.append(c + 1 + sum(len(x) + 1 for x in ss[:k + 1]) - 1)
-                    zs.append(s)
-                seq = [0 if x == END_ID else x for x in seq]           # END'in yerinde Z_k: token yok
-                kd = [Kind.ZTOK if x == Kind.END else x for x in kd]
-            sl = slice(c, c + T)
-            tokens[r, sl], kind[r, sl], pos[r, sl], doc[r, sl], sent[r, sl] = seq, kd, ps, d, sn
-            target[r, sl], tkind[r, sl] = nxt, tk
-            c += T
+    real = kind != Kind.PAD
+    tkind[real & (target == END_ID)] = TargetKind.END
+    tkind[real & ((kind == Kind.BOS) | (kind == Kind.END))] = TargetKind.FIRST
+    tkind[real & (kind == Kind.TOKEN) & (target != END_ID)] = TargetKind.MID
+    tkind[hrow, last] = TargetKind.EOS
+    if layout == "transformer":                                          # hikaye ici sira
+        pos[trow, tcol] = tcol - start[sh[ts]]
+        pos[erow, ecol] = ecol - start[sh]
+    else:                                                                # mantiksal: BOS 0, (k-1)+i, Z_k k
+        pos[trow, tcol] = sk[ts] + j + 1
+        pos[erow, ecol] = sk + 1
+        tokens[erow, ecol], kind[erow, ecol] = 0, Kind.ZTOK
     t = lambda a: torch.as_tensor(a, device=device)  # noqa: E731
     z_slots = z_sentences = None
     if layout == "model_z":
-        Lm = max(len(s) for s in zs)
-        ids = np.zeros((len(zs), Lm), np.int64)
-        mask = np.zeros((len(zs), Lm), bool)
-        for i, s in enumerate(zs):
-            ids[i, :len(s)], mask[i, :len(s)] = s, True
-        z_slots, z_sentences = (t(np.array(zr)), t(np.array(zc))), (t(ids), t(mask))
+        Lm = int(L.max())
+        m = np.arange(Lm)[None] < L[:, None]
+        ids = np.where(m, np.asarray(stories.stream[np.minimum(st0[:, None] + np.arange(Lm), len(stories.stream) - 1)],
+                                     dtype=np.int64), 0)
+        z_slots, z_sentences = (t(erow), t(ecol)), (t(ids), t(m))
     return PackedBatch(t(tokens), t(kind), t(pos), t(doc), t(sent), t(target), t(tkind), z_slots, z_sentences, t(sid))
 
 

@@ -24,9 +24,14 @@ if os.name == "nt":                     # EcoQoS: yoksa ~10 kat yavas (kullanici
     print("guc kisitlamasi (EcoQoS) kapali:",
           bool(_k.SetProcessInformation(_k.GetCurrentProcess(), 4, ctypes.byref(_s), ctypes.sizeof(_s))), flush=True)
 torch.set_num_threads(4)
+import numpy as np  # noqa: E402
+
 import sentence_z as SZ  # noqa: E402
-from sentence import (BOS, END, EOS_T, END_T, FIRST, MID, PAD, TOKEN, ZTOK, SentenceTransformer, SummaryCache,  # noqa
-                      _dense, model_z_mask, z_slot_positions)
+from sentence import (BOS, PAD, TOKEN, ZTOK, SentenceTransformer, SummaryCache, _dense, model_z_mask,  # noqa: E402
+                      z_slot_positions)
+import data as D  # noqa: E402  (sentence_z common/'u yola ekledi)
+
+FIRST, MID, END_T, EOS_T = D.TargetKind.FIRST, D.TargetKind.MID, D.TargetKind.END, D.TargetKind.EOS
 
 TMP = tempfile.mkdtemp(prefix="tests_model_z_")
 RESULTS = []
@@ -42,14 +47,29 @@ def keys_and_model(d=16, layers=2, heads=2, longest=8):
     torch.manual_seed(0)
     path = os.path.join(TMP, "meaning.pt")
     if not os.path.exists(path):
-        torch.save(dict(state={"source.weight": torch.randn(SZ.END_ID, 256)}), path)
+        torch.save(dict(state={"source.weight": torch.randn(D.END_ID, 256)}), path)
     keys = SZ.build_keys(path, longest)
     return keys, SentenceTransformer(keys, d=d, layers=layers, heads=heads).eval()
 
 
-def pack(rows, T):
-    """Satirlar (her biri hikaye listesi) -> PackedBatch benzeri (belge 21 alanlari, rapor 22 duzeni).  pos bagimsiz
-    sayimla kurulur (z_slot_positions'a karsi sinanir)."""
+def token_stories(stories):
+    """Hikaye -> cumle -> token listeleri -> build_batch'in okudugu nesne (stream, sent (N, 2), story (H+1))."""
+    flat, sent, story = [], [], [0]
+    for st in stories:
+        for s in st:
+            sent.append((len(flat), len(flat) + len(s)))
+            flat += s
+        story.append(len(sent))
+    return SimpleNamespace(stream=np.array(flat, np.int64), sent=np.array(sent, np.int64), story=np.array(story))
+
+
+def real_batch(rows, T):
+    """Gercek common.data.build_batch(layout="model_z"); rows: STORIES indeksleri."""
+    return D.build_batch(token_stories(STORIES), rows, "model_z", row_len=T)
+
+
+def reference_pack(rows, T):
+    """Bagimsiz basvuru (dongulu): satirlar (hikaye listeleri) -> PackedBatch alanlari, rapor 22 duzeni."""
     B = len(rows)
     f = {k: torch.full((B, T), v, dtype=torch.long) for k, v in
          dict(tokens=0, kind=PAD, pos=0, doc=-1, sent=-1, target=-100, target_kind=-1).items()}
@@ -57,7 +77,7 @@ def pack(rows, T):
     for r, stories in enumerate(rows):
         c = 0
         for di, st in enumerate(stories):
-            seq = [(SZ.EOS_ID, BOS, 0, -1)]                                      # (token, kind, pos, sent)
+            seq = [(D.EOS_ID, BOS, 0, -1)]                                      # (token, kind, pos, sent)
             for k, s in enumerate(st):
                 seq += [(t, TOKEN, k + 1 + i, k) for i, t in enumerate(s)]
                 seq += [(0, ZTOK, k + 1, -1)]
@@ -65,10 +85,10 @@ def pack(rows, T):
             for j, (t, kd, p, sn) in enumerate(seq):
                 if kd == TOKEN:
                     nxt = seq[j + 1]
-                    tg.append((nxt[0], MID) if nxt[1] == TOKEN else (SZ.END_ID, END_T))
+                    tg.append((nxt[0], MID) if nxt[1] == TOKEN else (D.END_ID, END_T))
                 else:
                     k = 0 if kd == BOS else sum(1 for x in seq[:j + 1] if x[1] == ZTOK)
-                    tg.append((st[k][0], FIRST) if k < len(st) else (SZ.EOS_ID, EOS_T))
+                    tg.append((st[k][0], FIRST) if k < len(st) else (D.EOS_ID, EOS_T))
             for j, ((t, kd, p, sn), (tt, tk)) in enumerate(zip(seq, tg)):
                 for name, v in (("tokens", t), ("kind", kd), ("pos", p), ("doc", di), ("sent", sn), ("target", tt),
                                 ("target_kind", tk)):
@@ -79,7 +99,10 @@ def pack(rows, T):
                     zs.append(st[sum(1 for x in seq[:j + 1] if x[1] == ZTOK) - 1])
             c += len(seq)
         assert c <= T
-    return SimpleNamespace(**f, z_slots=(torch.tensor(slots_r), torch.tensor(slots_c)), z_sentences=zs)
+    Lm = max(len(z) for z in zs)
+    ids = torch.tensor([z + [0] * (Lm - len(z)) for z in zs])
+    mask = torch.tensor([[j < len(z) for j in range(Lm)] for z in zs])
+    return SimpleNamespace(**f, z_slots=(torch.tensor(slots_r), torch.tensor(slots_c)), z_sentences=(ids, mask))
 
 
 def full_logits(model, batch):
@@ -106,8 +129,16 @@ def t_z():
 def t_layout():
     """test_z_layout_equals_short: tek dizi + model_z_mask + z_slot_positions = her cumle ayri kisa dizi (V1 yolu)."""
     keys, model = keys_and_model()
-    batch = pack([STORIES[:2], STORIES[2:]], 40)
-    check("z_slot_positions = bagimsiz sayim (BOS 0, Z_k k, token k-1+i; iki hikaye ayni satirda, dolgu)",
+    batch = real_batch([[0, 1], [2]], 40)
+    ref = reference_pack([STORIES[:2], STORIES[2:]], 40)
+    same = all(torch.equal(getattr(batch, k).long(), getattr(ref, k)) for k in
+               ("tokens", "kind", "pos", "doc", "target", "target_kind"))
+    tok = batch.kind == TOKEN
+    same &= torch.equal(batch.sent[tok].long(), ref.sent[tok]) and all(torch.equal(a, b) for a, b in zip(
+        batch.z_slots, ref.z_slots)) and all(torch.equal(a, b) for a, b in zip(batch.z_sentences, ref.z_sentences))
+    check("build_batch(model_z) = bagimsiz basvuru (token, kind, pos, doc, hedef, hedef turu, z yerleri ve cumleleri)",
+          same)
+    check("z_slot_positions = build_batch pos (BOS 0, Z_k k, token k-1+i; iki hikaye ayni satirda, dolgu)",
           torch.equal(z_slot_positions(batch.kind, batch.doc), batch.pos))
     lens = [1 + sum(len(s) + 1 for s in st) for st in STORIES]
     used = (batch.kind != PAD).sum().item()
@@ -123,18 +154,18 @@ def t_layout():
             for k in range(len(st) + 1):                         # ornek k: k onceki z
                 w = st[k] if k < len(st) else []
                 T = 1 + k + len(w)
-                tokens = torch.tensor([[SZ.EOS_ID] + [0] * k + w])
+                tokens = torch.tensor([[D.EOS_ID] + [0] * k + w])
                 kind = torch.tensor([[BOS] + [ZTOK] * k + [TOKEN] * len(w)])
                 zvec = torch.zeros(1, T, keys["z"])
                 zvec[0, 1:1 + k] = zst[:k]
                 h = model.hidden(tokens, kind, torch.arange(T)[None], zvec, None)
                 rows = list(range(k, T))
                 lg_s.append(h[0, rows] @ model.E.weight.T)
-                tg_s += ([w[0]] if w else [SZ.EOS_ID]) + w[1:] + ([SZ.END_ID] if w else [])
+                tg_s += ([w[0]] if w else [D.EOS_ID]) + w[1:] + ([D.END_ID] if w else [])
     lg_s = torch.cat(lg_s)
     d = (lg_full - lg_s).abs().max().item()
-    check("test_z_layout_equals_short: logit ve hedefler kisa dizilerle ayni", torch.equal(tg_full, torch.tensor(tg_s))
-          and d < 1e-5, "en buyuk fark %.1e, %d hedef" % (d, len(tg_s)))
+    check("test_z_layout_equals_short (gercek build_batch): logit ve hedefler kisa dizilerle ayni",
+          torch.equal(tg_full, torch.tensor(tg_s)) and d < 1e-5, "en buyuk fark %.1e, %d hedef" % (d, len(tg_s)))
     model.train()
     nll, _, tk = model.loss_per_target(batch)
     nll.mean().backward()
@@ -148,7 +179,7 @@ def t_cache():
     """test_cached_logits_equal_full: SummaryCache, token token = tek dizi tam hesap (hikaye basi, tek token'lik cumle,
     ayni satirda iki hikaye, cumle onbellegi silindikten sonraki ilk token)."""
     keys, model = keys_and_model()
-    batch = pack([STORIES[:2], STORIES[2:]], 40)
+    batch = real_batch([[0, 1], [2]], 40)
     lg_full, _ = full_logits(model, batch)
     got = []
     with torch.no_grad():
@@ -178,7 +209,7 @@ def t_flex():
         print("ATLA flex: flex_attention yok", flush=True)
         return
     keys, model = keys_and_model()
-    batch = pack([STORIES[:2], STORIES[2:]], 128)
+    batch = real_batch([[0, 1], [2]], 128)
     mm = model_z_mask(batch.kind, batch.doc, batch.sent)
     try:
         bm = create_block_mask(mm, 2, None, 128, 128, device="cpu")

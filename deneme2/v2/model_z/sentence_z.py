@@ -11,9 +11,13 @@ Cumle = sinirdan sinira token'lar, END YOK (END konum kanalinda n'inci konum).  
 Ekim).  decode_z: u_t = R_t^T z, en emin konum once (SIC); yalniz konum kanali.  Konum anahtari sayisi veriden: en uzun
 cumle + 1 (build_keys(longest)).
 """
+import os
+import sys
+
 import torch
 
-EOS_ID, END_ID, VOCAB = 50256, 50257, 50258      # common/data.py ile ayni (belge 21 s1)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "common"))
+from data import END_ID, VOCAB  # noqa: E402
 Z = 512
 DECODE_BYTES = 2 ** 30      # decode_z: skor tablosu (B x konum x V) parca basina en cok bu kadar bayt
 
