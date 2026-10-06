@@ -1,0 +1,67 @@
+{
+ "source": "deneme2/transformer_baseline/ss_prompts.json (stories, sentences); is j = 2*hikaye_sirasi + (0: 1 cumle, 1: 3 cumle)",
+ "selection": "K7Q / R4T'de okunan 10 (is, decode), okuma sirasiyla (ana oturum, 6 Ekim)",
+ "story_index": "sinav hikayesi indeksi = valid hikaye sirasi (V1 ss_exam_story_* ile ayni numara)",
+ "prompts": [
+  {
+   "label": "okuma 1 (is 5)",
+   "story": 9616,
+   "sentences": 3,
+   "decode": "greedy"
+  },
+  {
+   "label": "okuma 2 (is 8)",
+   "story": 15877,
+   "sentences": 1,
+   "decode": "greedy"
+  },
+  {
+   "label": "okuma 3 (is 11)",
+   "story": 17492,
+   "sentences": 3,
+   "decode": "greedy"
+  },
+  {
+   "label": "okuma 4 (is 14)",
+   "story": 20431,
+   "sentences": 1,
+   "decode": "greedy"
+  },
+  {
+   "label": "okuma 5 (is 4)",
+   "story": 9616,
+   "sentences": 1,
+   "decode": "sample"
+  },
+  {
+   "label": "okuma 6 (is 1)",
+   "story": 740,
+   "sentences": 3,
+   "decode": "greedy"
+  },
+  {
+   "label": "okuma 7 (is 2)",
+   "story": 3011,
+   "sentences": 1,
+   "decode": "greedy"
+  },
+  {
+   "label": "okuma 8 (is 7)",
+   "story": 10582,
+   "sentences": 3,
+   "decode": "greedy"
+  },
+  {
+   "label": "okuma 9 (is 15)",
+   "story": 20431,
+   "sentences": 3,
+   "decode": "greedy"
+  },
+  {
+   "label": "okuma 10 (is 6)",
+   "story": 10582,
+   "sentences": 1,
+   "decode": "sample"
+  }
+ ]
+}
