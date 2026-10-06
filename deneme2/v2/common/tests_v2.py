@@ -2,10 +2,10 @@
 yoksa tokenizer'li sinamalar ATLANIR), pack (sentetik), recipe (maske, WSD, gruplar, surdurme, hiz), metrics (sentence_repeat,
 normalize_words, story_generation, exam_scores), integration (iki modelin loss_per_target'i ve recipe.output_loss'u
 gercek build_batch ile; model dosyalari yalniz testte import edilir), train (train.py uctan uca, iki model, kucuk veri;
-eski kimlik reddi dahil; ~1-2 dk), readings (generate_readings: kayitli kosudan okuma = train.py'ninki; ek istem secimi Drive'dan), drive (valid
-akisi: V1 ile birebir esleme, okuma istemleri).
+eski kimlik reddi dahil; ~1-2 dk), drive (valid akisi: V1 ile birebir esleme, okuma istemleri), tokens (data.token_counts).  Teshis araclari:
+diag/tests_diag.py.
 
-    python tests_v2.py [--only data,pack,recipe,metrics,integration,train,readings,drive]
+    python tests_v2.py [--only data,pack,recipe,metrics,integration,train,drive,tokens]
 """
 import torch
 
@@ -762,6 +762,7 @@ def t_train():
             check("train %s: sabit deger (temizlik oncesi --own_vocab 1 / transformer ile bit duzeyinde ayni olculen "
                   "kosu): ilk 6 kayip ve agirlik sha256" % model, [w["loss"] for w in g["log"]][:6] == GOLDEN[model][
                       "first6"] and whole == GOLDEN[model]["sha"], whole[:16])
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
         import generate_readings as GR
         legacy = lambda d, **kv: (d.update({k: kv.get(k, 0) for k in TR.LEGACY}), d)[1]  # noqa: E731
         st = D.TokenStories(root, data, "train")
@@ -806,80 +807,20 @@ def t_train():
         TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS = saved
 
 
-def t_readings():
-    """generate_readings: kayitli kosudan (agent.pt) ayni istemler -> train.py'nin samples.json'u ile birebir ayni metin ve
-    olcu (greedy + sample, iki model); kosu dosyalarina dokunmaz; istem dosyasi adi denetlenir.  Ek
-    istem dosyasi (Drive varsa) extra_prompts'tan yeniden hesaplanir: ayni, deterministik, sabit 10 / V1 havuzuyla kesisim yok."""
-    import traceback
-    import generate_readings as GR
-    import train as TR
-    tp = tokenizer_path()
-    if tp is None:
-        print("ATLA readings: GPT-2 tokenizer yok", flush=True)
-        return
-    root, data, prompts = _train_root(tp)
-    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS)
-    TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
-    TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=6, max_tokens=4)
-    base = ["--data", data, "--stream", root, "--device", "cpu"]
-    same_prompts = os.path.join(root, "reading_prompts_same.json")
-    shutil.copyfile(prompts, same_prompts)
-    sha = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()  # noqa: E731
-    try:
-        for model in ("transformer", "model_z"):
-            run = os.path.join(TMP, "runs_readings", model)
-            TR.main(base + ["--model", model, "--d", "16", "--layers", "1", "--heads", "2", "--lr", "1e-2", "--steps", "6",
-                            "--out", run, "--checkpoint_minutes", "0"])
-            before = {n: (sha(os.path.join(run, n)), os.path.getmtime(os.path.join(run, n))) for n in TR.OUTPUTS}
-            r = GR.main(base + ["--out", run, "--prompts", same_prompts])
-            sj = json.load(open(os.path.join(run, "samples.json"), encoding="utf-8"))
-            new = json.load(open(os.path.join(run, "samples_same.json"), encoding="utf-8"))
-            txt = open(os.path.join(run, "samples_same.txt"), encoding="utf-8").read()
-            after = {n: (sha(os.path.join(run, n)), os.path.getmtime(os.path.join(run, n))) for n in TR.OUTPUTS}
-            labels = [x["label"] for x in sj["rows"]]
-            check("readings %s: kayitli agent.pt'den ayni istemler = train.py samples.json (satirlar ve olculer birebir, "
-                  "greedy + sample); samples_same.txt = samples.txt; reproduced hepsi ayni" % model,
-                  new["rows"] == sj["rows"] and new["generation"] == sj["generation"] and r["rows"] == sj["rows"]
-                  and txt == open(os.path.join(run, "samples.txt"), encoding="utf-8").read()
-                  and new["reproduced"]["same"] == labels and new["reproduced"]["different"] == []
-                  and new["reproduced"]["generation"] == sj["generation"]
-                  and sum(len(x["story_text"].split()) for x in sj["rows"]) > 0,
-                  " | ".join(x["story_text"].replace("\n", " / ")[:40] for x in new["rows"]))
-            check("readings %s: kosu dosyalari (%s) degismedi" % (model, ", ".join(TR.OUTPUTS)), before == after)
-            gk = {"story_loop", "story_loop_prompts", "sentence_repeat_by_prompt", "sentence_repeat", "word_loop"}
-            check("readings %s: samples_<ek>.json olculeri (story_loop, sentence_repeat_by_prompt ...) ve kaynak" % model,
-                  all(gk <= set(g) for g in new["generation"].values()) and new["source"]["prompts_sha256"] == sha(
-                      same_prompts) and new["source"]["identity"]["model"] == model)
-            sj["rows"][1]["story_text"] += "\nX"                          # bozuk samples.json: fark yakalanir
-            json.dump(sj, open(os.path.join(run, "samples.json"), "w", encoding="utf-8"))
-            r2 = GR.main(base + ["--out", run, "--prompts", same_prompts])
-            check("readings %s: samples.json'dan farkli metin reproduced.different'ta" % model,
-                  r2["reproduced"]["different"] == [labels[1]] and r2["reproduced"]["same"] == [labels[0], labels[2]])
-            check("readings %s: reading_prompts.json (samples.* uzerine yazar) DURUR" % model,
-                  _raises(AssertionError, GR.main, base + ["--out", run, "--prompts", prompts]))
-    except Exception:  # noqa: BLE001
-        check("readings", False, traceback.format_exc(limit=3))
-    finally:
-        TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS = saved
-    if DRIVE is None:
-        print("ATLA readings (ek istem secimi): Drive yok", flush=True)
-        return
-    data = DRIVE + "/v2/simplestories_gpt2"
-    spec, again = GR.extra_prompts(data), GR.extra_prompts(data)
-    disk = json.load(open(GR.EXTRA_PROMPTS, encoding="utf-8"))
-    fixed = {p["story"] for p in json.load(open(TR.READING_PROMPTS, encoding="utf-8"))["prompts"]}
-    v1 = set(GR.V1_POOL)
-    exam = set(np.load(os.path.join(data, "exam_pack_plan.npz"))["row_stories"].tolist())
-    n_sent = np.diff(np.load(os.path.join(data, "valid_story_offsets.npy")))
-    p = disk["prompts"]
-    stories = [x["story"] for x in p]
-    check("reading_prompts_extra.json = extra_prompts(Drive) (deterministik); 5 yeni sinav hikayesi x {1, 3} cumle, "
-          "greedy, okuma 11-20; sabit 10 ve V1 havuzuyla kesisim yok; en az 8 cumle",
-          spec == again == disk and len(set(stories)) == 5 and not (set(stories) & (fixed | v1)) and v1 >= fixed
-          and set(stories) <= exam and all(n_sent[s] >= GR.MIN_SENTENCES for s in stories)
-          and [x["label"] for x in p] == ["okuma %d" % i for i in range(11, 21)]
-          and [x["sentences"] for x in p] == [1, 3] * 5 and stories[::2] == stories[1::2]
-          and all(x["decode"] == "greedy" for x in p), str(stories[::2]))
+def t_tokens():
+    """data.token_counts: parca parca sayim = np.bincount (butun akis); dosya yazilir; toplam = akis boyu."""
+    rng = np.random.default_rng(3)
+    root = tempfile.mkdtemp(dir=TMP)
+    os.makedirs(os.path.join(root, "gpt2"))
+    x = rng.integers(0, D.EOS_ID + 1, 100_003).astype(np.uint16)
+    np.save(os.path.join(root, "gpt2", "train.npy"), x)
+    out = os.path.join(root, "v2")
+    c = D.token_counts(root, out, chunk=7_919)
+    disk = np.load(os.path.join(out, "train_token_counts.npy"))
+    want = np.bincount(x.astype(np.int64), minlength=D.EOS_ID + 1)
+    check("token_counts: parcali sayim = np.bincount (100.003 token, parca 7.919); dosya = donus; uzunluk GPT-2 sozlugu "
+          "(EOS dahil); toplam = akis boyu", np.array_equal(c, want) and np.array_equal(disk, c)
+          and len(c) == D.EOS_ID + 1 and int(c.sum()) == len(x) and c.dtype == np.int64)
 
 
 def _exit_msg(fn, *a):
@@ -900,7 +841,7 @@ def _raises(exc, fn, *a):
 
 
 TESTS = dict(data=t_data, pack=t_pack, recipe=t_recipe, metrics=t_metrics, integration=t_integration,
-             train=t_train, readings=t_readings, drive=t_drive)
+             train=t_train, drive=t_drive, tokens=t_tokens)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)

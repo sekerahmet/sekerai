@@ -6,7 +6,8 @@ karsilastirilir (reproduced): yukleme ve kod egitimdekiyle ayni mi.  Sonra --pro
 Cikti: <out>/samples_<ek>.txt, samples_<ek>.json (istem dosyasi reading_prompts_<ek>.json); agent.pt, results.json,
 samples.txt / .json'a dokunmaz.
 
-Ek istemler (reading_prompts_extra.json) extra_prompts() ile yazildi; tests_v2 'readings' Drive'dan yeniden hesaplar.
+Ek istemler (common/reading_prompts_extra.json) extra_prompts() ile yazildi; tests_diag 'readings' Drive'dan yeniden
+hesaplar.  Teshis araclari kosuyu load_run ile yukler (tek yer).
 
     python generate_readings.py --out <kosu> [--prompts reading_prompts_extra.json] [--data <v2/simplestories_gpt2>]
                                 [--stream <simplestories>] [--device cuda]
@@ -23,11 +24,12 @@ from types import SimpleNamespace
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+COMMON = os.path.join(os.path.dirname(HERE), "common")
+sys.path.insert(0, COMMON)
 import data as D  # noqa: E402
 import train as T  # noqa: E402
 
-EXTRA_PROMPTS = os.path.join(HERE, "reading_prompts_extra.json")
+EXTRA_PROMPTS = os.path.join(COMMON, "reading_prompts_extra.json")
 V1_POOL = (740, 3011, 9616, 10582, 15877, 17492, 20389, 20431)   # V1 istem havuzu (arsiv transformer_baseline/ss_prompts.json)
 EXTRA_SEED, EXTRA_STORIES, MIN_SENTENCES = 2, 5, 8     # tohum 0 sinav alt kumesi, 1 V1 istemleri (ss_prompts.json)
 EXTRA_FIRST_LABEL = 11

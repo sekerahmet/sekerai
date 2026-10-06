@@ -11,7 +11,8 @@ Hikaye duzeni (iki model AYNI konum ve hedef; belge 22 §3): EOS(BOS) s_1 END s_
     transformer hikaye ici sira, model_z mantiksal (BOS 0, s_k'nin i. token'i (k-1)+i, Z_k k; k ve i 1'den) =
     model_z/sentence.z_slot_positions.
 Drive'a bir kez (kural 9), <out>/:  <split>_sentence_offsets.npy (int64 (N, 2): ham akista [bas, son)), <split>_story_
-offsets.npy (int64 H+1: hikayenin ilk cumlesi), <split>_boundaries.json, train_pack_plan_e1.npz, exam_pack_plan.npz.
+offsets.npy (int64 H+1: hikayenin ilk cumlesi), <split>_boundaries.json, train_pack_plan_e1.npz, exam_pack_plan.npz,
+train_token_counts.npy (token_counts).
 
     python data.py <simplestories koku (gpt2/, exam_stories.npy)> <cikti klasoru>
 """
@@ -321,6 +322,20 @@ def build_batch(stories, row_stories_list, layout, device="cpu", row_len=ROW_LEN
                        t(sid))
 
 
+def token_counts(stream_root, out_dir=None, split="train", chunk=CHUNK):
+    """<stream_root>/gpt2/<split>.npy -> token basina sayim (int64, uzunluk EOS_ID + 1), chunk'lik parcalarla (bellek: parca
+    basina 8 x chunk bayt).  out_dir verilirse <out_dir>/<split>_token_counts.npy (belge 33 s2: teshis araclarinin islev /
+    icerik ayrimi; bir kez uretilir)."""
+    a = np.load(os.path.join(stream_root, "gpt2", split + ".npy"), mmap_mode="r")
+    c = np.zeros(EOS_ID + 1, np.int64)
+    for s in range(0, len(a), chunk):
+        c += np.bincount(np.asarray(a[s:s + chunk]).astype(np.int64), minlength=EOS_ID + 1)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+        np.save(os.path.join(out_dir, split + "_token_counts.npy"), c)
+    return c
+
+
 def main(stream_root, out_dir):
     """Bir kez: train ve valid sinirlari, train paket plani (epok 1), sinav paket plani."""
     t0 = time.time()
@@ -348,6 +363,7 @@ def main(stream_root, out_dir):
     np.savez(os.path.join(out_dir, "exam_pack_plan.npz"), row_offsets=ro, row_stories=pick[rs].astype(np.int32), seed=-1,
              epoch=0, row_len=ROW_LEN, exam_set_sha256=sha)
     print("sinav paket plani: %d hikaye, %d satir | %.0f sn" % (len(pick), len(ro) - 1, time.time() - t0), flush=True)
+    token_counts(stream_root, out_dir)
 
 
 if __name__ == "__main__":

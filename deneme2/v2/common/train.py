@@ -12,7 +12,7 @@ ciktilar <out>/total_<eski toplam>/'a.  Bitmis kosu durur.
 Olcu: epok sonunda ve bitiste metrics.exam_scores (exam_pack_plan.npz; egitimle ayni maske yolu); hiz pencere pencere
 (recipe.SpeedWindow; ilk pencere derleme icerir, ozete girmez).  Sonda metrics.story_generation (reading_prompts.json).
 Cikti: config.json, checkpoint.pt, decay_start/, results.json, agent.pt, samples.txt, samples.json.  Ek okuma kayitli
-kosudan: generate_readings.py.
+kosudan: diag/generate_readings.py.
 
 Model Z (belge 33): z modelin ogrenilen E'sinden (eski --own_vocab yolu, tek yol).  Temizlik oncesi kosular
 surdurulmez / uzatilmaz (kullanici, 6 Ekim: "eski koşuları uzatma niyetim yok"); okumada (_archived) eski transformer ve
