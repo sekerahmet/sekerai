@@ -11,7 +11,8 @@ Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunl
 ciktilar <out>/total_<eski toplam>/'a.  Bitmis kosu durur.
 Olcu: epok sonunda ve bitiste metrics.exam_scores (exam_pack_plan.npz; egitimle ayni maske yolu); hiz pencere pencere
 (recipe.SpeedWindow; ilk pencere derleme icerir, ozete girmez).  Sonda metrics.story_generation (reading_prompts.json).
-Cikti: config.json, checkpoint.pt, decay_start/, results.json, agent.pt, samples.txt, samples.json.
+Cikti: config.json, checkpoint.pt, decay_start/, results.json, agent.pt, samples.txt, samples.json.  Ek okuma kayitli
+kosudan: generate_readings.py.
 
     python train.py --model transformer|model_z [--meaning agent.pt] --lr LR --out <kosu> [--data <v2/simplestories_gpt2>]
                     [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
@@ -173,9 +174,10 @@ def _exam(model, mask_fn, valid, plan, story_bytes, layout, dev, cuda):
     return dict(out, seconds=round(time.time() - t, 2))
 
 
-def _readings(model, valid, tok):
-    """reading_prompts.json'daki istemler -> (satirlar, decode basina olculer).  Uretim fp32, autocast yok."""
-    spec = json.load(open(READING_PROMPTS, encoding="utf-8"))["prompts"]
+def _readings(model, valid, tok, spec=None):
+    """Istemler (spec: [dict(label, story, sentences, decode)]; yoksa reading_prompts.json) -> (satirlar, decode basina
+    olculer).  Uretim fp32, autocast yok."""
+    spec = json.load(open(READING_PROMPTS, encoding="utf-8"))["prompts"] if spec is None else spec
     rows, gen = [None] * len(spec), {}
     for decode in ("greedy", "sample"):
         idx = [i for i, p in enumerate(spec) if p["decode"] == decode]

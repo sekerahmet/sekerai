@@ -1,0 +1,86 @@
+{
+ "source": "exam_pack_plan.npz (exam_set_sha256 ee0e13faebbf55b21bf9a5fc9d5159d7c33490b08b3c1ee89c3939072e4bf090): sinav alt kumesi, 1000 hikaye",
+ "selection": "generate_readings.extra_prompts: aday = sinav hikayeleri - V1 istem havuzu (transformer_baseline/ss_prompts.json) - sabit 10 (reading_prompts.json), en az 8 cumle (968 aday); secilen = np.sort(aday[default_rng(2).choice(len(aday), 5, replace=False)]); hikaye basina 1 ve 3 cumle istem (ayni hikaye yan yana), hepsi greedy",
+ "seed": 2,
+ "min_sentences": 8,
+ "exclude": [
+  740,
+  3011,
+  9616,
+  10582,
+  15877,
+  17492,
+  20389,
+  20431
+ ],
+ "story_sentences": {
+  "2391": 29,
+  "5413": 40,
+  "6035": 23,
+  "8351": 12,
+  "17603": 42
+ },
+ "story_index": "sinav hikayesi indeksi = valid hikaye sirasi (reading_prompts.json ile ayni numara)",
+ "prompts": [
+  {
+   "label": "okuma 11",
+   "story": 2391,
+   "sentences": 1,
+   "decode": "greedy"
+  },
+  {
+   "label": "okuma 12",
+   "story": 2391,
+   "sentences": 3,
+   "decode": "greedy"
+  },
+  {
+   "label": "okuma 13",
+   "story": 5413,
+   "sentences": 1,
+   "decode": "greedy"
+  },
+  {
+   "label": "okuma 14",
+   "story": 5413,
+   "sentences": 3,
+   "decode": "greedy"
+  },
+  {
+   "label": "okuma 15",
+   "story": 6035,
+   "sentences": 1,
+   "decode": "greedy"
+  },
+  {
+   "label": "okuma 16",
+   "story": 6035,
+   "sentences": 3,
+   "decode": "greedy"
+  },
+  {
+   "label": "okuma 17",
+   "story": 8351,
+   "sentences": 1,
+   "decode": "greedy"
+  },
+  {
+   "label": "okuma 18",
+   "story": 8351,
+   "sentences": 3,
+   "decode": "greedy"
+  },
+  {
+   "label": "okuma 19",
+   "story": 17603,
+   "sentences": 1,
+   "decode": "greedy"
+  },
+  {
+   "label": "okuma 20",
+   "story": 17603,
+   "sentences": 3,
+   "decode": "greedy"
+  }
+ ]
+}
