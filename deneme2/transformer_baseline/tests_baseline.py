@@ -1,7 +1,7 @@
 """tests_baseline -- transformer tabaninin kapilari (CPU, kucuk).  Adillik sozlesmesi (belge/model_z_temel/17):
     T1  hedefler Model Z'nin examples() hedefleriyle hikaye hikaye birebir ayni (sira + tur), uc baglamda
     T2  hikaye basina hedef W + S + 1
-    T3  causal ve dolgu: logit dolguya ve gelecege bagli degil; shuffled tek hikayede = full
+    T3  causal ve dolgu: logit dolguya ve gelecege bagli degil; 64'luk kova kaybi degistirmez; shuffled tek hikayede = full
     T4  Block Model Z'ninkiyle ayni cikti
     T5  parametre sayisi (d 256, L 4, H 4, SS sozlugu) 17.938.688
     T6  kesilip surdurulen = kesintisiz (agirlik farki 0)
@@ -128,6 +128,15 @@ def t3_causal():
         L = e1["tok"].shape[1]
         diff = max(diff, float((model.hidden(e1["tok"])[0] - h[r, :L]).abs().max()))
     check("T3 dolgu: tek basina = batch icinde (logit)", diff < 1e-5, "fark %.1e" % diff)
+    widths, same = [], True
+    for c in TB.CONTEXTS:
+        e = TB.story_sequences(ids, mask, model.END, model.EOS, c)
+        real = int((e["target"] >= 0).nonzero()[:, 1].max()) + 1
+        a = float(model(e["tok"], e["target"]))
+        b = float(model(e["tok"][:, :real], e["target"][:, :real]))
+        widths.append((e["tok"].shape[1], real))
+        same &= abs(a - b) < 1e-6 and e["tok"].shape[1] % 64 == 0 and e["tok"].shape[1] >= real
+    check("T3 64'luk kova dolgusu kaybi degistirmez (uc baglam)", same, "boy / gercek %s" % widths)
     tok = ex["tok"][3:4].clone()
     a = model.hidden(tok)
     tok[0, 6:] = 9

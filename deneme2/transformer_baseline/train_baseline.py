@@ -104,7 +104,8 @@ def story_sequences(ids, mask, END, EOS, context="full"):
       none      N = ornek (Model Z gibi her cumle + hikaye sonu): [BOS] w_1..w_L; hikaye sonu ornegi [BOS] -> EOS.
       shuffled  none gibi ama k. cumleden once baska hikayenin (b+1) ilk k cumlesi (yoksa son cumlesi) END'li; Model Z
                 story_z(mode="shuffle") ile ayni bagisci kurali.  Batch tek hikayeyse bagisci kendisi: full ile ayni tahmin.
-    Hedefler uc baglamda da ayni: hikaye basina W + S + 1."""
+    Hedefler uc baglamda da ayni: hikaye basina W + S + 1.  Dizi boyu 64'un katina dolgulanir (hedefsiz; causal
+    oldugu icin gercek konumlar degismez)."""
     dev = ids.device
     B, S, W = ids.shape
     L = mask.sum(-1)
@@ -117,7 +118,7 @@ def story_sequences(ids, mask, END, EOS, context="full"):
         keep = (torch.cat([mask, torch.zeros_like(mask[..., :1])], -1) | is_end).view(B, -1)
         is_end = is_end.view(B, -1)
         Tlen = 1 + keep.sum(1)                                   # girdi boyu = hedef sayisi
-        Tx = int(Tlen.max())
+        Tx = -(-int(Tlen.max()) // 64) * 64                    # 64'luk kova: az sayida dizi boyu (compile); dolgu hedefsiz
         at = torch.cumsum(keep, 1)                               # BOS'tan sonraki konum
         rb = torch.arange(B, device=dev)[:, None].expand_as(keep)
         tok = torch.zeros(B, Tx + 1, dtype=torch.long, device=dev)
@@ -147,7 +148,7 @@ def story_sequences(ids, mask, END, EOS, context="full"):
     seg_len = L[seg_b, seg_s] + 1
     ctx = torch.zeros(E, dtype=torch.long, device=dev).index_add_(0, seg_e, seg_len)
     own = torch.where(ex_k < n[ex_b], L[ex_b, ex_k.clamp(max=S - 1)], 0)
-    Tx = int((1 + ctx + own).max())
+    Tx = -(-int((1 + ctx + own).max()) // 64) * 64           # 64'luk kova (full ile ayni)
     tok = torch.zeros(E, Tx + 1, dtype=torch.long, device=dev)
     if len(seg_e):
         t_seg = torch.repeat_interleave(torch.arange(len(seg_e), device=dev), seg_len)
