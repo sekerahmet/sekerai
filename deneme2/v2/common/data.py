@@ -248,6 +248,8 @@ class PackedBatch:
     target_kind: torch.Tensor     # TargetKind (hedefsiz -1)
     z_slots: tuple                # (satir, sutun) ZTOK konumlari, z_sentences sirasiyla (yalniz model_z; yoksa None)
     z_sentences: tuple            # (ids (n_z, Lmax) int64, mask) Z_k'nin cumlesi (yalniz model_z; yoksa None)
+    z_flat: tuple                 # (cumle, sira) z_sentences mask'inin gercek token'lari = mask.nonzero sirasi; CPU'da
+                                  # numpy'dan (GPU senkronu yok; yalniz model_z, yoksa None)
     story_ids: torch.Tensor       # (B, S_max) satirdaki hikaye kimlikleri, -1 dolgu
 
 
@@ -307,14 +309,16 @@ def build_batch(stories, row_stories_list, layout, device="cpu", row_len=ROW_LEN
         pos[erow, ecol] = sk + 1
         tokens[erow, ecol], kind[erow, ecol] = 0, Kind.ZTOK
     t = lambda a: torch.as_tensor(a, device=device)  # noqa: E731
-    z_slots = z_sentences = None
+    z_slots = z_sentences = z_flat = None
     if layout == "model_z":
         Lm = int(L.max())
         m = np.arange(Lm)[None] < L[:, None]
         ids = np.where(m, np.asarray(stories.stream[np.minimum(st0[:, None] + np.arange(Lm), len(stories.stream) - 1)],
                                      dtype=np.int64), 0)
         z_slots, z_sentences = (t(erow), t(ecol)), (t(ids), t(m))
-    return PackedBatch(t(tokens), t(kind), t(pos), t(doc), t(sent), t(target), t(tkind), z_slots, z_sentences, t(sid))
+        z_flat = tuple(t(a.astype(np.int64)) for a in np.nonzero(m))
+    return PackedBatch(t(tokens), t(kind), t(pos), t(doc), t(sent), t(target), t(tkind), z_slots, z_sentences, z_flat,
+                       t(sid))
 
 
 def main(stream_root, out_dir):

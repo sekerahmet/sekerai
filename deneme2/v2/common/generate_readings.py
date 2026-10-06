@@ -1,15 +1,15 @@
 """generate_readings -- kayitli bir V2 kosusundan okuma uretimi, egitim yok (adlar onayli, kullanici 6 Ekim).
 
-Model train._build ile kurulur, agent.pt yuklenir (Model Z: meaning sha256 = identity); okuma train._readings ile (egitim
-sonundakiyle ayni uretim, ayni olculer).  Once kosunun kendi samples.json istemleri yeniden uretilir ve metinleri birebir
+Model train._build ile kurulur, agent.pt yuklenir (temizlik oncesi yolla egitilmis kosu durur: train._archived); okuma
+train._readings ile (egitim sonundakiyle ayni uretim, ayni olculer).  Once kosunun kendi samples.json istemleri yeniden uretilir ve metinleri birebir
 karsilastirilir (reproduced): yukleme ve kod egitimdekiyle ayni mi.  Sonra --prompts istemleri.
 Cikti: <out>/samples_<ek>.txt, samples_<ek>.json (istem dosyasi reading_prompts_<ek>.json); agent.pt, results.json,
 samples.txt / .json'a dokunmaz.
 
 Ek istemler (reading_prompts_extra.json) extra_prompts() ile yazildi; tests_v2 'readings' Drive'dan yeniden hesaplar.
 
-    python generate_readings.py --out <kosu> [--prompts reading_prompts_extra.json] [--meaning <agent.pt>]
-                                [--data <v2/simplestories_gpt2>] [--stream <simplestories>] [--device cuda]
+    python generate_readings.py --out <kosu> [--prompts reading_prompts_extra.json] [--data <v2/simplestories_gpt2>]
+                                [--stream <simplestories>] [--device cuda]
 """
 import torch  # noqa: I001  (Windows: torch once)
 
@@ -28,7 +28,7 @@ import data as D  # noqa: E402
 import train as T  # noqa: E402
 
 EXTRA_PROMPTS = os.path.join(HERE, "reading_prompts_extra.json")
-V1_PROMPTS = os.path.join(os.path.dirname(os.path.dirname(HERE)), "transformer_baseline", "ss_prompts.json")
+V1_POOL = (740, 3011, 9616, 10582, 15877, 17492, 20389, 20431)   # V1 istem havuzu (arsiv transformer_baseline/ss_prompts.json)
 EXTRA_SEED, EXTRA_STORIES, MIN_SENTENCES = 2, 5, 8     # tohum 0 sinav alt kumesi, 1 V1 istemleri (ss_prompts.json)
 EXTRA_FIRST_LABEL = 11
 
@@ -40,7 +40,7 @@ def extra_prompts(data_dir):
     ep = np.load(os.path.join(data_dir, "exam_pack_plan.npz"))
     n_sent = np.diff(np.load(os.path.join(data_dir, "valid_story_offsets.npy")))
     fixed = json.load(open(T.READING_PROMPTS, encoding="utf-8"))["prompts"]
-    exclude = sorted(set(json.load(open(V1_PROMPTS, encoding="utf-8"))["stories"]) | {p["story"] for p in fixed})
+    exclude = sorted(set(V1_POOL) | {p["story"] for p in fixed})
     exam = np.sort(ep["row_stories"].astype(np.int64))
     cand = exam[~np.isin(exam, exclude) & (n_sent[exam] >= MIN_SENTENCES)]
     pick = np.sort(cand[np.random.default_rng(EXTRA_SEED).choice(len(cand), EXTRA_STORIES, replace=False)])
@@ -59,33 +59,28 @@ def extra_prompts(data_dir):
                 prompts=prompts)
 
 
-def load_run(out, meaning, data_dir, dev):
-    """<out>/agent.pt (train.py bicimi) -> (model, identity, meaning yolu).  Model train._build ile; agirliklar strict."""
+def load_run(out, data_dir, dev):
+    """<out>/agent.pt (train.py bicimi) -> (model, identity).  Model train._build ile; agirliklar strict.  Temizlik
+    oncesi yolla egitilmis kosu (train._archived) DURUR: eski Model Z'nin sekilleri ayni, sessizce yanlis yuklenirdi."""
     pack = torch.load(os.path.join(out, "agent.pt"), map_location="cpu", weights_only=False)
     idt = pack["identity"]
+    if T._archived(idt):
+        sys.exit("DUR: %s: %s" % (out, T._archived(idt)))
     meta = json.load(open(os.path.join(data_dir, "train_boundaries.json"), encoding="utf-8"))
     longest = meta.get("max_sentence_tokens_all", meta["max_sentence_tokens"])      # = TokenStories.max_sentence_tokens
     assert longest == idt["longest"], "en uzun cumle %d, kosununki %d: baska veri" % (longest, idt["longest"])
-    flags = {k: idt.get(k, 0) for k in ("shared_vocab", "own_vocab", "open_z")}     # bayraktan onceki kosular: 0
-    meaning = None if flags["own_vocab"] else meaning or pack["args"].get("meaning")
-    if idt["model"] == "model_z" and not flags["own_vocab"]:
-        assert meaning and os.path.exists(meaning), "model_z: meaning agent.pt yok: %s" % meaning
-        got = T._sha256(meaning)
-        assert got == idt["meaning_sha256"], "meaning sha256 %s, kosununki %s" % (got, idt["meaning_sha256"])
-    spec = SimpleNamespace(model=idt["model"], seed=idt["seed"], d=idt["d"], layers=idt["layers"], heads=idt["heads"],
-                           meaning=meaning, **flags)
-    model, _, layout, _ = T._build(spec, longest, dev)
+    spec = SimpleNamespace(model=idt["model"], seed=idt["seed"], d=idt["d"], layers=idt["layers"], heads=idt["heads"])
+    model, _, layout = T._build(spec, longest, dev)
     assert layout != "model_z" or T.READING_LIMITS["max_tokens"] <= longest, \
         "okuma: max_tokens'ta kesilen cumle z konum anahtarindan uzun olur (encode_z durur)"
     model.load_state_dict(pack["state"])
-    return model, idt, meaning
+    return model, idt
 
 
 def _args(argv):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", required=True, help="kosu klasoru (agent.pt; cikti buraya)")
     ap.add_argument("--prompts", default=EXTRA_PROMPTS, help="reading_prompts_<ek>.json -> samples_<ek>.txt / .json")
-    ap.add_argument("--meaning", default=None, help="model_z: meaning agent.pt (yoksa agent.pt'deki yol); sha256 denetlenir")
     ap.add_argument("--data", default="/content/drive/MyDrive/v2/simplestories_gpt2", help="sinir dosyalari")
     ap.add_argument("--stream", default="/content/drive/MyDrive/simplestories", help="gpt2/valid.npy kok")
     ap.add_argument("--device", default="cuda")
@@ -106,13 +101,13 @@ def main(argv=None):
         "istem dosyasi reading_prompts_<ek>.json olmali (samples.txt / .json uzerine yazilmaz): %s" % base
     name = "samples_" + base[len("reading_prompts_"):-len(".json")]
     spec = json.load(open(args.prompts, encoding="utf-8"))["prompts"]
-    model, idt, meaning = load_run(args.out, args.meaning, args.data, dev)
+    model, idt = load_run(args.out, args.data, dev)
     valid = D.TokenStories(args.stream, args.data, "valid")
     got = T._sha256(os.path.join(args.stream, "gpt2", "valid.npy"))
     assert got == valid.meta["stream_sha256"], "valid akisi sinir dosyasindakiyle ayni degil"
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(os.path.join(args.stream, "gpt2", "tokenizer.json"))
-    log("%s | %s | meaning %s | istem %s (%d)" % (args.out, idt, meaning, args.prompts, len(spec)))
+    log("%s | %s | istem %s (%d)" % (args.out, idt, args.prompts, len(spec)))
     reproduced = None
     old_path = os.path.join(args.out, "samples.json")
     if os.path.exists(old_path):
@@ -129,7 +124,7 @@ def main(argv=None):
     log("okuma uretimi %.0f sn: %s" % (time.time() - t, gen))
     open(os.path.join(args.out, name + ".txt"), "w", encoding="utf-8").write(T._samples_text(rows))
     json.dump(dict(generation=gen, rows=rows, reproduced=reproduced, source=dict(
-        prompts=args.prompts, prompts_sha256=T._sha256(args.prompts), meaning=meaning, identity=idt,
+        prompts=args.prompts, prompts_sha256=T._sha256(args.prompts), identity=idt,
         limits=T.READING_LIMITS, git=T._git(), device=str(dev))),
         open(os.path.join(args.out, name + ".json"), "w", encoding="utf-8"), indent=1, ensure_ascii=False)
     log("BITTI: %s/%s.txt | sentence_repeat %s | story_loop %s" % (
