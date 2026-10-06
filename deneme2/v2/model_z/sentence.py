@@ -9,13 +9,15 @@ hedefler konum konum ayni:
 Maske (model_z_mask, tek mask_mod -> dense ya da FlexAttention BlockMask): ayni hikaye, kv <= q, ve kv BOS/ZTOK ya da
 (q, kv ayni cumlenin token'i).  Uretim: SummaryCache (ozet onbellegi BOS + Z'ler kalici, cumle onbellegi cumle bitince
 silinir).  Tarif (Llama sinifi, V1): pre-norm RMSNorm, RoPE, QK-norm (fp32), SwiGLU, bias yok, tied embedding.
+shared_vocab=True (ortak sozluk, belge 29; adlar onayli): E = MeaningEmbedding [m_gain * m_hat ; e], z ayni E'den
+(f = [m_hat ; e_hat] / sqrt(2), encode_z_rows, tam gradyan); keys build_keys(..., identity=False).
 """
 import math
 
 import torch
 import torch.nn.functional as F
 
-from sentence_z import encode_z
+from sentence_z import encode_z, encode_z_rows
 from data import END_ID, EOS_ID, VOCAB, Kind  # noqa: E402  (sentence_z common/'u yola ekledi)
 
 BOS, TOKEN, END, ZTOK, PAD = Kind.BOS, Kind.TOKEN, Kind.END, Kind.ZTOK, Kind.PAD
@@ -31,6 +33,30 @@ def _encode_z(keys, ids, mask):
     if _ENCODE_Z_CUDA is None:
         _ENCODE_Z_CUDA = torch.compile(encode_z, dynamic=True)
     return _ENCODE_Z_CUDA(keys, ids, mask)
+
+
+class MeaningEmbedding(torch.nn.Module):
+    """Ortak sozluk E(v) = [m_gain * m_hat(v) ; e(v)] (belge 29; ad onayli).  m_hat sabit (meaning, birim; buffer,
+    state_dict'te yok: kaynak meaning dosyasi), e ogrenilir (nn.Embedding: param_groups decay'siz tanir), m_gain tek
+    ogrenilen skaler (baslangic 1).  nn.Embedding arayuzu: forward(ids), weight (tied cikis).  Model bagimsiz
+    (transformer da kullanabilir).  f_table(): z icin [m_hat ; e_hat] / sqrt(2) (yarilar ayri birim)."""
+
+    def __init__(self, m_hat, e_dim):
+        super().__init__()
+        self.register_buffer("m_hat", m_hat.float().clone(), persistent=False)
+        self.e = torch.nn.Embedding(len(m_hat), e_dim)
+        self.m_gain = torch.nn.Parameter(torch.ones(()))
+
+    def forward(self, ids):
+        return torch.cat([self.m_gain * F.embedding(ids, self.m_hat), self.e(ids)], -1)
+
+    @property
+    def weight(self):
+        return torch.cat([self.m_gain * self.m_hat, self.e.weight], 1)
+
+    def f_table(self):
+        e = self.e.weight.float()
+        return torch.cat([self.m_hat, e / e.norm(dim=1, keepdim=True).clamp_min(1e-9)], 1) / 2 ** 0.5
 
 
 def rope(x, pos, base=10000.0):
@@ -120,12 +146,18 @@ class Block(torch.nn.Module):
 
 
 class SentenceTransformer(torch.nn.Module):
-    def __init__(self, keys, d=512, layers=8, heads=8):
+    def __init__(self, keys, d=512, layers=8, heads=8, shared_vocab=False):
         super().__init__()
         self.keys = keys                                         # z anahtarlari (parametre degil, state_dict'te yok)
         self.END, self.EOS = END_ID, EOS_ID
+        self.shared_vocab = shared_vocab
         hidden = -(-int(8 * d / 3) // 8) * 8
-        self.E = torch.nn.Embedding(VOCAB, d)
+        if shared_vocab:                                         # ortak sozluk (belge 29): z ve model ayni E
+            assert keys.get("identity") is False, "shared_vocab: build_keys(..., identity=False)"
+            assert keys["z_pos"] == d, "d (%d) = m yarisi + e yarisi (%d) olmali" % (d, keys["z_pos"])
+            self.E = MeaningEmbedding(keys["m_hat"], d - keys["m_dim"])
+        else:
+            self.E = torch.nn.Embedding(VOCAB, d)
         self.z_norm = torch.nn.RMSNorm(keys["z"])
         self.z_in = torch.nn.Linear(keys["z"], d, bias=False)
         self.blocks = torch.nn.ModuleList(Block(d, heads, hidden) for _ in range(layers))
@@ -134,6 +166,17 @@ class SentenceTransformer(torch.nn.Module):
             if p.dim() == 2:
                 std = 0.02 / math.sqrt(2 * layers) if name.endswith(("proj.weight", "down.weight")) else 0.02
                 torch.nn.init.normal_(p, std=std)
+
+    @property
+    def m_gain(self):
+        """Ortak sozlukte m yarisinin ogrenilen olcegi (skaler tensor; gunluk icin), yoksa None."""
+        return self.E.m_gain if self.shared_vocab else None
+
+    def _zrows(self, ids, mask):
+        """z (n, z_dim): ortak sozlukte guncel E'den (gradyanli), yoksa sabit F'den."""
+        if self.shared_vocab:
+            return encode_z_rows(self.keys, self.E.f_table(), ids, mask)      # eager: az cekirdek (belge 29 s3)
+        return _encode_z(self.keys, ids, mask)
 
     def _z(self, sents, device):
         """Token listeleri (END yok) -> z (N, z_dim) fp32, cihazda."""
@@ -145,6 +188,8 @@ class SentenceTransformer(torch.nn.Module):
         for i, s in enumerate(sents):
             ids[i, :len(s)] = torch.as_tensor(list(s), dtype=torch.long)
             mask[i, :len(s)] = True
+        if self.shared_vocab:
+            return encode_z_rows(self.keys, self.E.f_table(), ids.to(device), mask.to(device))
         return encode_z(self.keys, ids.to(device), mask.to(device))
 
     def _embed(self, tokens, kind, zvec):
@@ -170,7 +215,7 @@ class SentenceTransformer(torch.nn.Module):
         x = self.E(batch.tokens)
         ids, mask = batch.z_sentences                                       # (n_z, Lmax), Z_k'nin cumlesi (belge 21)
         if len(ids):                                                        # CPU tarafi uzunluk
-            z = _encode_z(self.keys, ids.to(dev), mask.to(dev))
+            z = self._zrows(ids.to(dev), mask.to(dev))
             x = x.index_put(batch.z_slots, self.z_in(self.z_norm(z)).to(x.dtype))
         if attn is None:
             attn = _dense(model_z_mask(batch.kind, batch.doc, batch.sent), B, T, dev)
@@ -185,8 +230,9 @@ class SentenceTransformer(torch.nn.Module):
         hk, tgt = h[keep], batch.target[keep]
         nll = torch.empty(len(tgt), device=h.device)
         pred = torch.empty(len(tgt), dtype=torch.long, device=h.device)
+        W = self.E.weight                                                   # ortak sozlukte bir kez kurulur
         for r in range(0, len(tgt), chunk):
-            lg = (hk[r:r + chunk] @ self.E.weight.T).float()
+            lg = (hk[r:r + chunk] @ W.T).float()
             nll[r:r + chunk] = F.cross_entropy(lg, tgt[r:r + chunk], reduction="none")
             pred[r:r + chunk] = lg.argmax(-1)
         return nll, pred, batch.target_kind[keep]

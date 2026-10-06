@@ -72,7 +72,7 @@ def load_run(out, meaning, data_dir, dev):
         got = T._sha256(meaning)
         assert got == idt["meaning_sha256"], "meaning sha256 %s, kosununki %s" % (got, idt["meaning_sha256"])
     spec = SimpleNamespace(model=idt["model"], seed=idt["seed"], d=idt["d"], layers=idt["layers"], heads=idt["heads"],
-                           meaning=meaning)
+                           meaning=meaning, shared_vocab=idt.get("shared_vocab", 0))          # bayraktan onceki kosular: 0
     model, _, layout, _ = T._build(spec, longest, dev)
     assert layout != "model_z" or T.READING_LIMITS["max_tokens"] <= longest, \
         "okuma: max_tokens'ta kesilen cumle z konum anahtarindan uzun olur (encode_z durur)"

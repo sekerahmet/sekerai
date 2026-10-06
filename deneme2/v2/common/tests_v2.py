@@ -2,7 +2,7 @@
 yoksa tokenizer'li sinamalar ATLANIR), pack (sentetik), recipe (maske, WSD, gruplar, surdurme, hiz), metrics (sentence_repeat,
 normalize_words, story_generation, exam_scores), integration (iki modelin loss_per_target'i ve recipe.output_loss'u
 gercek build_batch ile; model dosyalari yalniz testte import edilir), train (train.py uctan uca, iki model, kucuk veri;
-~1-2 dk), readings (generate_readings: kayitli kosudan okuma = train.py'ninki; ek istem secimi Drive'dan), drive (valid
+Model Z --shared_vocab 1 dahil; ~1-2 dk), readings (generate_readings: kayitli kosudan okuma = train.py'ninki; ek istem secimi Drive'dan), drive (valid
 akisi: V1 ile birebir esleme, okuma istemleri).
 
     python tests_v2.py [--only data,pack,recipe,metrics,integration,train,readings,drive]
@@ -657,10 +657,11 @@ def t_train():
         r = TR.main(cmd + ["--epochs", "2", "--out", A, "--resume", "1"])
         check("train: bitmis kosu --resume ile durur, dosyalara dokunmaz",
               r["finished"] and os.path.getmtime(os.path.join(A, "checkpoint.pt")) == mt)
-        check("train: checkpoint'li klasore --resume'suz yeni kosu, farkli lr ile surdurme, paketsiz surdurme, kisaltma "
-              "DURUR", exits(cmd + ["--epochs", "2", "--out", A]) and exits(
+        check("train: checkpoint'li klasore --resume'suz yeni kosu, farkli lr ile surdurme, paketsiz surdurme, kisaltma, "
+              "farkli d (agirlik yuklenmeden) DURUR", exits(cmd + ["--epochs", "2", "--out", A]) and exits(
                   [x if x != "1e-2" else "2e-2" for x in cmd] + ["--epochs", "2", "--out", A, "--resume", "1"])
               and exits(cmd + ["--out", out("empty"), "--resume", "1"])
+              and exits([x if x != "16" else "32" for x in cmd] + ["--epochs", "2", "--out", A, "--resume", "1"])
               and exits(cmd + ["--epochs", "1", "--out", A, "--resume", "1"]))
         s = TR.main(cmd + ["--steps", "3", "--out", out("steps")])
         check("train --steps 3: WSD toplam 3, inis basi 2, sonda tek sinav (epok ortasi)", s["plan"]["total"] == 3
@@ -699,10 +700,104 @@ def t_train():
         json.dump(meta, open(bj, "w"))
         check("train _local_copy: bayt bayt kopya; bozuk kopya yeniden kopyalanir; sinir dosyasinin sha'si tutmazsa durur",
               ok1 and ok2 and ok3)
+        old = out("pre_flag")                                            # bayraktan onceki kosu: identity'de alan yok
+        TR.main(cmd + ["--steps", "3", "--out", old])
+        for name, key in (("checkpoint.pt", "args"), ("agent.pt", "identity")):
+            pack = torch.load(os.path.join(old, name), weights_only=False)
+            del pack[key]["shared_vocab"]
+            torch.save(pack, os.path.join(old, name))
+        import generate_readings as GR
+        r = TR.main(cmd + ["--steps", "3", "--out", old, "--resume", "1"])
+        GR.load_run(old, None, data, torch.device("cpu"))
+        check("train: shared_vocab'siz eski checkpoint 0 sayilir (surdurme durmaz, load_run kurar); transformer + "
+              "--shared_vocab 1 veri yuklenmeden DURUR", r["finished"] and exits(cmd + ["--shared_vocab", "1", "--out",
+                                                                                         out("tf_shared")])
+              and not os.path.exists(out("tf_shared")))
+        _train_shared(base, meaning, prompts, data, out, state, same, exits, TR)
     except Exception:  # noqa: BLE001
         check("train", False, traceback.format_exc(limit=3))
     finally:
         TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS = saved
+
+
+def _train_shared(base, meaning, prompts, data, out, state, same, exits, TR):
+    """--shared_vocab 1 (belge 29) gercek SentenceTransformer / MeaningEmbedding ve gercek build_batch ile: kayip duser,
+    ilk adim = loss_per_target, m_gain gunlukte, param_groups, kesilip surdurulen = kesintisiz, identity farki durur,
+    generate_readings ayni okumayi uretir.  model_z/ kodu yoksa HATA (entegrasyon testi bekliyor)."""
+    import traceback
+    import generate_readings as GR
+    import recipe as R
+    try:
+        meaning = os.path.join(TMP, "meaning_shared.pt")                  # d 16 = m 8 + e 8 (belge 29: d = 2 x meaning)
+        torch.save(dict(state={"source.weight": torch.randn(D.END_ID, 8, generator=torch.Generator().manual_seed(2))}),
+                   meaning)
+        cmd = base + ["--model", "model_z", "--meaning", meaning, "--shared_vocab", "1"]
+        a = TR.main(cmd + ["--epochs", "2", "--out", out("mzs_A")])
+        L = [w["loss"] for w in a["log"]]
+        flag0 = json.load(open(os.path.join(out("model_z_A"), "results.json")))["log"]
+        check("train model_z --shared_vocab 1: 2 epok kosar, kayip duser; m_gain her gunluk kaydinda ve degisiyor "
+              "(bayrak 0'da yok); identity'de bayrak", np.mean(L[-3:]) < np.mean(L[:3]) - 0.5
+              and all("m_gain" in w for w in a["log"]) and len({w["m_gain"] for w in a["log"]}) > 1
+              and not any("m_gain" in w for w in flag0) and a["identity"]["shared_vocab"] == 1,
+              "kayip %.3f -> %.3f, m_gain %s -> %s" % (np.mean(L[:3]), np.mean(L[-3:]), a["log"][0]["m_gain"],
+                                                       a["log"][-1]["m_gain"]))
+        args = TR._args(cmd + ["--out", "x"])
+        st = D.TokenStories(base[base.index("--stream") + 1], data, "train")
+        m, mask_fn, layout, _ = TR._build(args, st.max_sentence_tokens, torch.device("cpu"))
+        f = np.load(os.path.join(data, "train_pack_plan_e1.npz"))
+        ro, rs = f["row_offsets"], f["row_stories"]
+        b = D.build_batch(st, [rs[ro[r]:ro[r + 1]].tolist() for r in range(4)], layout, "cpu", 64)
+        with torch.no_grad():
+            want = m.loss_per_target(b, R.dense_mask(b, mask_fn))[0].mean().item()
+        g = R.param_groups(m)
+        dec, nod = {id(p) for p in g[0]["params"]}, {id(p) for p in g[1]["params"]}
+        embs = [x.weight for x in m.modules() if isinstance(x, torch.nn.Embedding)]
+        names = dict(m.named_parameters())
+        check("train model_z --shared_vocab 1: ilk adim kaybi = loss_per_target (gercek build_batch); param_groups: "
+              "Embedding agirliklari ve m_gain decay'siz, z_in decay'li; m_hat parametre degil",
+              abs(a["log"][0]["loss"] - want) < 1e-4 and m.m_gain is not None and id(m.m_gain) in nod
+              and embs and all(id(w) in nod for w in embs) and id(m.z_in.weight) in dec
+              and not any(k.endswith("m_hat") for k in names) and dec | nod == {id(p) for p in m.parameters()},
+              "%.4f / %.4f; parametreler %s" % (a["log"][0]["loss"], want, sorted(k for k in names if "blocks" not in k)))
+        orig = R.Checkpoint.save
+
+        class Stop(Exception):
+            pass
+
+        def save_then_stop(dir_, *rest):
+            orig(dir_, *rest)
+            if rest[2] == 4 and os.path.basename(dir_) != "decay_start":
+                raise Stop()
+        R.Checkpoint.save = staticmethod(save_then_stop)
+        try:
+            TR.main(cmd + ["--epochs", "2", "--out", out("mzs_B")])
+            stopped = False
+        except Stop:
+            stopped = True
+        finally:
+            R.Checkpoint.save = staticmethod(orig)
+        bres = TR.main(cmd + ["--epochs", "2", "--out", out("mzs_B"), "--resume", "1"])
+        check("train model_z --shared_vocab 1: adim 4'te kesilip surdurulen = kesintisiz (agirlik bit duzeyinde, sinav ve "
+              "m_gain gunlugu ayni)", stopped and same(state(out("mzs_A")), state(out("mzs_B")))
+              and bres["exam"] == dict(a["exam"], seconds=bres["exam"]["seconds"])
+              and [w["m_gain"] for w in bres["log"]] == [w["m_gain"] for w in a["log"]])
+        flag0_cmd = base + ["--model", "model_z", "--meaning", meaning]
+        TR.main(flag0_cmd + ["--steps", "3", "--out", out("mz0_8")])
+        mt = os.path.getmtime(os.path.join(out("mzs_A"), "checkpoint.pt"))
+        check("train: yalniz --shared_vocab farkiyla surdurme checkpoint yuklenmeden DURUR (1 -> 0 ve 0 -> 1); "
+              "dosyaya dokunmaz", exits(flag0_cmd + ["--epochs", "2", "--out", out("mzs_A"), "--resume", "1"])
+              and exits(cmd + ["--steps", "3", "--out", out("mz0_8"), "--resume", "1"])
+              and os.path.getmtime(os.path.join(out("mzs_A"), "checkpoint.pt")) == mt)
+        same_prompts = os.path.join(os.path.dirname(prompts), "reading_prompts_same.json")
+        shutil.copyfile(prompts, same_prompts)
+        r = GR.main(base[:6] + ["--out", out("mzs_A"), "--prompts", same_prompts])        # --data, --stream, --device
+        sj = json.load(open(os.path.join(out("mzs_A"), "samples.json"), encoding="utf-8"))
+        check("generate_readings --shared_vocab 1 kosusu: bayrak identity'den; okuma = samples.json (birebir), reproduced "
+              "hepsi ayni", r["rows"] == sj["rows"] and r["generation"] == sj["generation"]
+              and r["reproduced"]["different"] == [])
+    except Exception:  # noqa: BLE001
+        check("train model_z --shared_vocab 1 (model_z/ kodu: SentenceTransformer(shared_vocab), build_keys(identity=False))",
+              False, traceback.format_exc(limit=3).splitlines()[-1])
 
 
 def t_readings():

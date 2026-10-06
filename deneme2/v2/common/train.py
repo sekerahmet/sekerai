@@ -16,7 +16,7 @@ kosudan: generate_readings.py.
 
     python train.py --model transformer|model_z [--meaning agent.pt] --lr LR --out <kosu> [--data <v2/simplestories_gpt2>]
                     [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
-                    [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1]
+                    [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1] [--shared_vocab 1 (model_z)]
 """
 import torch  # noqa: I001  (Windows: torch once)
 
@@ -46,7 +46,7 @@ READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
 READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "meaning_sha256", "longest", "row_len", "batch_rows",
-            "train_stream_sha256")
+            "train_stream_sha256", "shared_vocab")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -112,10 +112,14 @@ def _schedule(train, data_dir, seed, epochs, steps):
 
 
 def _build(args, longest, dev):
-    """-> (model, mask_fn, layout, meaning_sha256).  Model dosyalari yalniz burada import edilir."""
+    """-> (model, mask_fn, layout, meaning_sha256).  Model dosyalari yalniz burada import edilir.  shared_vocab (belge 29):
+    Model Z'de z ve model ayni E (args'ta yoksa 0)."""
     root = os.path.dirname(HERE)
+    shared = bool(getattr(args, "shared_vocab", 0))
     torch.manual_seed(args.seed)
     if args.model == "transformer":
+        if shared:
+            sys.exit("DUR: --shared_vocab 1 transformer'da henuz yok (ortak E'li kontrol kosusu taban ajaninin dosyasinda)")
         sys.path.insert(0, os.path.join(root, "transformer"))
         from baseline import BaselineTransformer
         return BaselineTransformer(args.d, args.layers, args.heads).to(dev), R.document_mask, "transformer", None
@@ -123,9 +127,10 @@ def _build(args, longest, dev):
     sys.path.insert(0, os.path.join(root, "model_z"))
     import sentence_z as SZ
     from sentence import SentenceTransformer, model_z_mask
-    keys = SZ.keys_to(SZ.build_keys(args.meaning, longest), dev)
+    keys = SZ.keys_to(SZ.build_keys(args.meaning, longest, identity=False) if shared else
+                      SZ.build_keys(args.meaning, longest), dev)
     torch.manual_seed(args.seed)
-    model = SentenceTransformer(keys, args.d, args.layers, args.heads).to(dev)
+    model = SentenceTransformer(keys, args.d, args.layers, args.heads, **({"shared_vocab": True} if shared else {})).to(dev)
     return model, model_z_mask, "model_z", _sha256(args.meaning)
 
 
@@ -230,6 +235,8 @@ def _args(argv):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--resume", type=int, default=0)
+    ap.add_argument("--shared_vocab", type=int, default=0, choices=(0, 1),
+                    help="model_z: z ve model ayni E = [m_gain * meaning ; e] (belge 29)")
     ap.add_argument("--checkpoint_minutes", type=float, default=10,
                     help="en cok bu kadar duvar saati kaybi (sinav dahil); surdurmede degistirilebilir")
     return ap.parse_args(argv)
@@ -239,6 +246,8 @@ def main(argv=None):
     args = _args(argv)
     t0 = time.time()
     log = lambda msg: print("[%7.1f sn] %s" % (time.time() - t0, msg), flush=True)  # noqa: E731
+    if args.shared_vocab and args.model == "transformer":               # veri yuklenmeden once (_build da durur)
+        sys.exit("DUR: --shared_vocab 1 transformer'da henuz yok")
     dev = torch.device(args.device)
     cuda = dev.type == "cuda"
     if cuda:                                                             # GPU kapisi (kural 5)
@@ -271,7 +280,7 @@ def main(argv=None):
                             **({"fused": True} if cuda else {}))
     ident = dict(model=args.model, d=args.d, layers=args.layers, heads=args.heads, lr=args.lr, seed=args.seed,
                  meaning_sha256=meaning_sha, longest=train.max_sentence_tokens, row_len=row_len, batch_rows=BATCH_ROWS,
-                 train_stream_sha256=train.meta["stream_sha256"])
+                 train_stream_sha256=train.meta["stream_sha256"], shared_vocab=args.shared_vocab)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -285,14 +294,17 @@ def main(argv=None):
     if args.resume:
         if not os.path.exists(ckpt):
             sys.exit("DUR: surdurme paketi yok: %s (bastan baslamaz)" % ckpt)
-        info = R.Checkpoint.load(args.out, model, opt, "cpu")
-        diff = {k: (info["args"].get(k), ident[k]) for k in IDENTITY if info["args"].get(k) != ident[k]}
-        old = info["plan"]
+        peek = torch.load(ckpt, map_location="cpu", weights_only=False, mmap=True)   # kimlik YUKLEMEDEN once (d /
+        was = {"shared_vocab": 0, **peek["args"]}                         # bayrak farki load_state_dict'te patlamasin);
+        old = peek["plan"]                                                # bayraktan onceki checkpoint'ler: 0
+        del peek
+        diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:
             diff["plan_sha256"] = "veri sirasi farkli"
         if diff:
             sys.exit("DUR: surdurme ayari checkpoint'ten farkli (checkpoint, simdi): %s" % diff)
+        info = R.Checkpoint.load(args.out, model, opt, "cpu")
         if total < old["total"]:
             sys.exit("DUR: toplam adim %d < checkpoint'teki %d (kisaltma yok)" % (total, old["total"]))
         if total == old["total"]:
@@ -372,9 +384,13 @@ def main(argv=None):
                    grad_norm=round(win["gn"].item() / k, 4), steps=k, tokens=s["tokens"], seconds=s["seconds"],
                    ms_per_step=round(1000 * s["seconds"] / k, 1), tokens_per_sec=s["tokens_per_sec"], first=first_window,
                    peak_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2) if cuda else None)
+        m_gain = getattr(model, "m_gain", None)                          # belge 29: m yarisinin olcegi (cokus izi)
+        if m_gain is not None:
+            rec["m_gain"] = round(float(m_gain), 4)
         history["log"].append(rec)
-        log("adim %d / %d (epok %d)  lr %.3g  kayip %.4f  grad %.3f | pencere %d adim %.1f sn  %.1f ms/adim  %.0f tok/sn%s%s"
-            % (done, total, epoch, lr, rec["loss"], rec["grad_norm"], k, s["seconds"], rec["ms_per_step"],
+        log("adim %d / %d (epok %d)  lr %.3g  kayip %.4f  grad %.3f%s | pencere %d adim %.1f sn  %.1f ms/adim  %.0f tok/sn%s%s"
+            % (done, total, epoch, lr, rec["loss"], rec["grad_norm"],
+               "  m_gain %.4f" % rec["m_gain"] if "m_gain" in rec else "", k, s["seconds"], rec["ms_per_step"],
                s["tokens_per_sec"], "  tepe %.1f GB" % rec["peak_gb"] if cuda else "",
                "  (ilk pencere: derleme dahil)" if first_window else ""))
         assert np.isfinite(rec["loss"]), "kayip sonlu degil; checkpoint yazilmadi"

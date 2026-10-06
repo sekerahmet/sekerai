@@ -10,6 +10,11 @@ belge/model_z_temel/22_V2_model_z_tarifi.md s1.
 Cumle = sinirdan sinira token'lar, END YOK (END konum kanalinda n'inci konum).  Grammar rol terimi yok (kullanici, 6
 Ekim).  decode_z: u_t = R_t^T z, en emin konum once (SIC); yalniz konum kanali.  Konum anahtari sayisi veriden: en uzun
 cumle + 1 (build_keys(longest)).
+
+Ortak sozluk (belge 29; adlar onayli, kullanici 6 Ekim): build_keys(..., identity=False) -> kimlik yok, F yok; m_hat
+(sabit meaning yarisi) ve yari ici R_t (m yarisi kendi Dm'sinde, e yarisi kendi De'sinde).  f = [m_hat ; e_hat] / sqrt(2)
+modelin E'sinden gelir (MeaningEmbedding.f_table); encode_z_rows gradyanli, duz token yolu.  decode_z_meaning: z'nin m
+yarisindan SIC, sabit m_hat tablosuyla (egitimden bagimsiz teshis).
 """
 import os
 import sys
@@ -26,15 +31,34 @@ def _unit(x):
     return x / x.norm(dim=-1, keepdim=True).clamp_min(1e-9)
 
 
-def build_keys(meaning_path, longest, z=Z, seed=1, bag_channel=True):
+def _halves_shift(sizes, L):
+    """Yari ici kaydirma: bloklar (boyutlar sizes) -> shift, unshift (L, sum(sizes)); y[j] = x[shift[t, j]]."""
+    j = torch.arange(sum(sizes))
+    start = torch.repeat_interleave(torch.tensor([0] + list(sizes[:-1])).cumsum(0), torch.tensor(sizes))
+    size = torch.repeat_interleave(torch.tensor(sizes), torch.tensor(sizes))
+    off, t = j - start, torch.arange(L)[:, None]
+    return start + (off[None] - t) % size, start + (off[None] + t) % size
+
+
+def build_keys(meaning_path, longest, z=Z, seed=1, bag_channel=True, identity=True, e_dim=None):
     """meaning agent.pt (source.weight, en az END_ID satir) -> anahtarlar (sabit; ayni tohum ayni z).  longest: en uzun
-    cumle (token, END haric; veriden).  keys["z"] toplam z boyutu (model z_dim'i buradan alir), keys["z_pos"] konum."""
+    cumle (token, END haric; veriden).  keys["z"] toplam z boyutu (model z_dim'i buradan alir), keys["z_pos"] konum.
+    identity=False (ortak sozluk, belge 29): F yok; m_hat (VOCAB, Dm) ve yari ici anahtarlar, z_pos = Dm + e_dim (e_dim
+    varsayilan Dm; modelin d'si buna esit olmali)."""
     mp = torch.load(meaning_path, map_location="cpu", weights_only=False)
     src = mp["state"]["source.weight"].float()
     assert len(src) >= END_ID, "meaning satiri %d < GPT-2 sozlugu %d" % (len(src), END_ID)
     g = torch.Generator().manual_seed(seed)
     m = _unit(src[:END_ID])
     m = torch.cat([m, _unit(torch.randn(1, m.shape[1], generator=g))])          # END: rastgele birim
+    if not identity:
+        Dm = m.shape[1]
+        D = Dm + (Dm if e_dim is None else e_dim)
+        L = longest + 1
+        shift, unshift = _halves_shift((Dm, D - Dm), L)
+        signs = torch.randint(0, 2, (L, D), generator=g).float() * 2 - 1
+        return dict(END=END_ID, m_hat=m, signs=signs, shift=shift, unshift=unshift, z=D * (2 if bag_channel else 1),
+                    z_pos=D, bag_channel=bag_channel, identity=False, m_dim=Dm)
     assert m.shape[1] < z, "z meaning boyundan buyuk olmali"
     ident = _unit(torch.randn(VOCAB, z - m.shape[1], generator=g))
     F = _unit(torch.cat([m, ident], 1))                                         # (VOCAB, z), satir END_ID = END
@@ -73,6 +97,38 @@ def encode_z(keys, ids, mask):
             return z
         bag = (keys["F"][ids] * mask[..., None]).sum(1) / n.clamp_min(1)[:, None].float().sqrt()
         return torch.cat([z, bag], 1)
+
+
+def encode_z_rows(keys, F, ids, mask):
+    """encode_z, f satirlari disaridan (F (VOCAB, z_pos), gradyanli; ortak sozlukte MeaningEmbedding.f_table) ve duz
+    token yolu (dolgulu (B, L, z_pos) tensor yok): ids, mask (B, L) -> z (B, keys["z"]) fp32.  Identity anahtarlari ve
+    keys["F"] verilince encode_z ile ayni (test)."""
+    B, L = ids.shape
+    assert L < len(keys["signs"]), "cumle build_keys(longest)'ten uzun"
+    dev = ids.device
+    n = mask.sum(1)
+    with torch.autocast(dev.type, enabled=False):
+        F = F.float()
+        b, t = mask.nonzero(as_tuple=True)
+        tok = torch.cat([ids[b, t], torch.full((B,), keys["END"], dtype=ids.dtype, device=dev)])
+        b, t = torch.cat([b, torch.arange(B, device=dev)]), torch.cat([t, n])           # + END konumu n
+        f = torch.nn.functional.embedding(tok, F)                                       # geri yayilim deterministik
+        z = torch.zeros(B, F.shape[1], device=dev).index_add(0, b, (f * keys["signs"][t]).gather(1, keys["shift"][t]))
+        if not keys["bag_channel"]:
+            return z
+        k = len(tok) - B                                                                # END haric token'lar
+        bag = torch.zeros(B, F.shape[1], device=dev).index_add(0, b[:k], f[:k]) / n.clamp_min(1)[:, None].float().sqrt()
+        return torch.cat([z, bag], 1)
+
+
+@torch.no_grad()
+def decode_z_meaning(keys, z, max_len=None):
+    """Ortak sozluk teshisi (belge 29 s1.4 a): z'nin konum kanalinin m yarisi (sqrt(2) olcekli) -> SIC, sabit m_hat
+    tablosuyla.  Egitimden bagimsiz; kisa / orta cumlede birebir (olculdu: <= 10 token ~1,000)."""
+    Dm = keys["m_dim"]
+    sub = dict(END=keys["END"], F=keys["m_hat"], signs=keys["signs"][:, :Dm], shift=keys["shift"][:, :Dm],
+               unshift=keys["unshift"][:, :Dm], z_pos=Dm)
+    return decode_z(sub, z[:, :Dm] * 2 ** 0.5, max_len=max_len)
 
 
 @torch.no_grad()

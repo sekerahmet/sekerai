@@ -2,7 +2,7 @@
 yalniz meaning_valid (SS valid; yoksa atlanir).
 
     python tests_model_z.py [--only layout,cache,flex,z,direct,meaning,meaning_resume,meaning_keys,meaning_valid,
-                            meaning_resume_mid,generate_longest,meaning_d1,meaning_wsd]
+                            meaning_resume_mid,generate_longest,meaning_d1,meaning_wsd,shared,shared_cache]
 """
 import os
 import sys
@@ -625,10 +625,124 @@ def t_meaning_wsd():
     check("meaning wsd: kisaltma (2 -> 1 epok) durur", ok)
 
 
+# --- ortak sozluk (shared_vocab, belge 29)
+def shared_model(d=264, layers=2, heads=2, longest=8):
+    """Ortak sozluklu kucuk model: m yarisi 256 (sentetik meaning), e yarisi d - 256."""
+    keys_and_model()                                                    # sentetik meaning dosyasi
+    torch.manual_seed(0)
+    keys = SZ.build_keys(os.path.join(TMP, "meaning.pt"), longest, identity=False, e_dim=d - 256)
+    return keys, SentenceTransformer(keys, d=d, layers=layers, heads=heads, shared_vocab=True).eval()
+
+
+def _ids_mask(sents):
+    L = max(len(x) for x in sents)
+    ids = torch.zeros(len(sents), L, dtype=torch.long)
+    mask = torch.zeros(len(sents), L, dtype=torch.bool)
+    for i, x in enumerate(sents):
+        ids[i, :len(x)] = torch.tensor(x)
+        mask[i, :len(x)] = True
+    return ids, mask
+
+
+def _z_reference(keys, Ft, sents):
+    """Bagimsiz basvuru: z_pos = sum_t R_t f(t) + R_n f(END), R_t yari ici (blok blok roll(isaret * f, t)); torba
+    sum f / sqrt(n)."""
+    Dm, D = keys["m_dim"], keys["z_pos"]
+    out = []
+    for x in sents:
+        zp = torch.zeros(D)
+        for t, v in enumerate(list(x) + [keys["END"]]):
+            y = Ft[v] * keys["signs"][t]
+            zp += torch.cat([torch.roll(y[:Dm], t), torch.roll(y[Dm:], t)])
+        out.append(torch.cat([zp, Ft[torch.tensor(x)].sum(0) / len(x) ** 0.5]))
+    return torch.stack(out)
+
+
+def t_shared():
+    """shared_vocab: False iken eski yol; True iken z = basvuru formulu, m yarisi sabit, e'ye bagli, gradyan e'ye z
+    yolundan da akar; E.weight = E(ids); param_groups; ileri / geri gercek build_batch ile sonlu."""
+    import recipe as R
+    sents = [x for st in STORIES for x in st]
+    ids, mask = _ids_mask(sents)
+    keys0, old = keys_and_model()
+    same_old = isinstance(old.E, torch.nn.Embedding) and old.m_gain is None and torch.equal(
+        old._zrows(ids, mask), SZ.encode_z(keys0, ids, mask))
+    flat = SZ.encode_z_rows(keys0, keys0["F"], ids, mask)
+    d_flat = (flat - SZ.encode_z(keys0, ids, mask)).abs().max().item()
+    check("shared_vocab=False: E nn.Embedding, m_gain None, z yolu eski encode_z ile birebir; encode_z_rows (duz token "
+          "yolu, F verilince) = encode_z", same_old and d_flat < 1e-5, "fark %.1e" % d_flat)
+    keys, model = shared_model()
+    Dm, D = keys["m_dim"], keys["z_pos"]
+    with torch.no_grad():
+        Ft = model.E.f_table()
+        z = model._z(sents, "cpu")
+        ref = _z_reference(keys, Ft, sents)
+    d_ref = (z - ref).abs().max().item()
+    check("shared: z = basvuru formulu (f = [m_hat ; e_hat]/sqrt2, R_t yari ici, END konumu, torba)", d_ref < 1e-5
+          and z.shape == (len(sents), 2 * D), "fark %.1e, z %s" % (d_ref, tuple(z.shape)))
+    with torch.no_grad():
+        model.E.e.weight[sents[0][0]] += 1.0
+        z2 = model._z(sents, "cpu")
+        model.E.e.weight[sents[0][0]] -= 1.0
+    m_idx = torch.cat([torch.arange(Dm), D + torch.arange(Dm)])
+    e_idx = torch.cat([torch.arange(Dm, D), D + torch.arange(Dm, D)])
+    check("shared: e degisince z'nin e yarilari degisir, m yarilari (konum ve torba) birebir ayni",
+          torch.equal(z2[:, m_idx], z[:, m_idx]) and (z2[:, e_idx] - z[:, e_idx]).abs().max() > 1e-3)
+    model.zero_grad()
+    SZ.encode_z_rows(keys, model.E.f_table(), ids, mask).square().sum().backward()
+    g_e = model.E.e.weight.grad
+    check("shared: gradyan z yolundan e'ye akar (kullanilan satirlar), m_hat buffer (gradyansiz)",
+          g_e is not None and g_e[torch.tensor(sents[0])].abs().sum() > 0 and not model.E.m_hat.requires_grad
+          and "E.m_hat" not in model.state_dict())
+    with torch.no_grad():
+        W = model.E.weight
+        rows = model.E(torch.arange(len(W)))
+    groups = R.param_groups(model)
+    nodec = {id(p) for p in groups[1]["params"]}
+    check("shared: E.weight (cikis) = E(ids) (girdi); e ve m_gain decay'siz; m_gain = model.m_gain (skaler, 1)",
+          torch.equal(W, rows) and id(model.E.e.weight) in nodec and id(model.E.m_gain) in nodec
+          and model.m_gain.shape == () and float(model.m_gain) == 1.0)
+    model.train()
+    model.zero_grad()
+    batch = real_batch([[0, 1], [2]], 40)
+    nll, _, _ = model.loss_per_target(batch)
+    nll.mean().backward()
+    grads = [p.grad for p in model.parameters()]
+    ok = torch.isfinite(nll).all() and all(g is not None and torch.isfinite(g).all() for g in grads)
+    check("shared: gercek build_batch ileri / geri sonlu; m_gain, e, z_in gradyani var", bool(ok)
+          and model.m_gain.grad.abs() > 0 and model.z_in.weight.grad.abs().sum() > 0)
+    model.eval()
+    back = SZ.decode_z_meaning(keys, z, max_len=8)
+    check("shared: decode_z_meaning (m yarisindan SIC, sabit m_hat) kisa cumlelerde birebir", back == sents,
+          "%d / %d" % (sum(b == x for b, x in zip(back, sents)), len(sents)))
+
+
+def t_shared_cache():
+    """shared_vocab: SummaryCache token token = tek dizi tam hesap; generate ayni tohum ayni metin."""
+    keys, model = shared_model()
+    batch = real_batch([[0, 1], [2]], 40)
+    with torch.no_grad():
+        lg_full, _ = full_logits(model, batch)
+        got = []
+        for st in [STORIES[0], STORIES[1], STORIES[2]]:
+            cache = SummaryCache(model)
+            got.append(cache.logits[None])
+            for x in st:
+                for t in x:
+                    got.append(cache.append_token(t)[None])
+                got.append(cache.close_sentence(model._z([x], "cpu")[0])[None])
+    d = (torch.cat(got) - lg_full).abs().max().item()
+    check("shared: test_cached_logits_equal_full (fp32)", d < 1e-4, "en buyuk fark %.1e" % d)
+    a = model.generate([STORIES[0][:1]], 3, 6, torch.Generator().manual_seed(0))
+    b = model.generate([STORIES[0][:1]], 3, 6, torch.Generator().manual_seed(0))
+    check("shared: generate calisir, sinirlar tutar, ayni tohum ayni metin", a == b and all(
+        len(gen) <= 3 and all(len(x) <= 6 for x in gen) for gen, _, _ in a))
+
+
 TESTS = dict(z=t_z, layout=t_layout, cache=t_cache, flex=t_flex, direct=t_direct, meaning=t_meaning,
              meaning_resume=t_meaning_resume, meaning_keys=t_meaning_keys, meaning_valid=t_meaning_valid,
              meaning_resume_mid=t_meaning_resume_mid, generate_longest=t_generate_longest, meaning_d1=t_meaning_d1,
-             meaning_wsd=t_meaning_wsd)
+             meaning_wsd=t_meaning_wsd, shared=t_shared, shared_cache=t_shared_cache)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)

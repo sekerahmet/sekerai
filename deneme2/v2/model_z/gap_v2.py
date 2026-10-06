@@ -69,7 +69,7 @@ def target_features(stories, rows):
 def _load(kind, path, meaning, longest, dev, synthetic):
     """agent.pt (train.py biçimi: state, identity, args) -> (model, mask_fn, layout)."""
     if synthetic:
-        a = SimpleNamespace(model=kind, seed=0, meaning=meaning, **SYN)
+        a = SimpleNamespace(model=kind, seed=0, meaning=meaning, shared_vocab=0, **SYN)
         model, mask_fn, layout, _ = T._build(a, longest, dev)
         return model.eval(), mask_fn, layout
     pack = torch.load(path, map_location="cpu", weights_only=False)
@@ -78,7 +78,8 @@ def _load(kind, path, meaning, longest, dev, synthetic):
     if kind == "model_z":
         sha = hashlib.sha256(open(meaning, "rb").read()).hexdigest()
         assert sha == idt["meaning_sha256"], "meaning agent.pt modelin egitildigi dosya degil"
-    a = SimpleNamespace(model=kind, seed=idt["seed"], d=idt["d"], layers=idt["layers"], heads=idt["heads"], meaning=meaning)
+    a = SimpleNamespace(model=kind, seed=idt["seed"], d=idt["d"], layers=idt["layers"], heads=idt["heads"], meaning=meaning,
+                        shared_vocab=idt.get("shared_vocab", 0))                  # ortak sozluk (belge 29)
     model, mask_fn, layout, _ = T._build(a, longest, dev)
     model.load_state_dict({k.replace("._orig_mod", ""): v for k, v in pack["state"].items()})
     return model.eval(), mask_fn, layout
