@@ -4,6 +4,31 @@ Kullanıcı, 3 Ekim 2026: *"belki model z deyip yeni birşey denesek öğrendikl
 *"Yeni bir model için yeni bakış açısı gerekiyor. Dil nedir. Dil matematiksel olarak nasıl ifade edilir."*;
 *"şimdi model Z klasörünü aç"*.
 
+## 6 Ekim: z'de grammar yerine torba kanalı; ilk milestone SS
+
+Kullanıcı, 6 Ekim 2026: *"ana ilk hedefimiz güzel sağlıklı çalışan bir model yapmak. ilk milestone SS olacak."* Karar
+(kullanıcı, aynı gün): grammar'ın rol terimi z'den çıkar, torba kanalı gelir (`--z_roles 0 --bag_channel 1`).
+
+```
+z = [ Σ_t R_t f(w_t) + R_n f(END)  ;  Σ_t f(w_t) / √n ]      konum kanalı (512) ; torba kanalı (512)
+```
+
+- Neden (ÖLÇÜLDÜ, `belge/model_z_temel/14`, `15`): rol terimi torbanın fonksiyonu, z'ye bilgi katmıyor ve SS'te 11+
+  kelimede geri açmayı bozuyor (11–15 kelime 0,117; rolsüz 1,000). Eğitilmiş model z'yi neredeyse torba olarak okuyor:
+  sıra karışınca +0,035 nat, rol terimi çıkınca +0,49. Doğrusal probe: bugünkü z 0,417 / 0,819 → torbalı 0,624 / 0,937.
+- Konum kanalı geri açmayı (encode doğru mu kontrolü) kayıpsız tutar; torba kanalı modelin kullandığı bilgiyi gürültüsüz
+  verir. Grammar ajanı kodda durur; z'de kullanılmıyor.
+- Taban: `deneme2/transformer_baseline/` (aynı veri, hedef, bütçe; tam bağlam).
+
+Çalışma hipotezleri (HİPOTEZ, sınanmadı; kullanıcı, 6 Ekim: *"Belki hedef kullanımda hızlı ve daha doğru bir mimari de
+elde ederiz"*):
+1. Hız: üretimde token/sn ve bellek, bağlam uzadıkça transformer'da düşer, Model Z'de cümle sayısıyla büyür.
+2. Doğruluk: eşit hesapta uzun belgede uzun mesafe tutarlılığı Model Z'de daha iyi.
+3. Sağlık: açgözlü üretimde cümle döngüsü yok (`sentence_repeat`).
+
+SS (milestone 1) sağlamlığı sınar: tabana yakın kayıp, tabandan kötü olmayan açgözlü `sentence_repeat`, okunur hikâye.
+Hipotez 1–2 uzun metinde (milestone 2) sınanır.
+
 ## Son yapı (5 Ekim)
 
 Kullanıcı, 5 Ekim 2026: *"Artık meaning , gramer ve transformer var . Son yapımız var"*. Üç parça; cümle tek vektör z,
