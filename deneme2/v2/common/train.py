@@ -1,0 +1,417 @@
+"""train -- V2 ortak egitim: iki model ayni veri, ayni hedef, ayni tarif, ayni sinav; farkli olan yalniz model
+(belge/model_z_temel/20 s4, 21, 22, 24 s9; ad onayli, kullanici 6 Ekim).
+
+Adim (belge 24 s9):  attn = recipe.block_mask(batch, mask_fn) (CPU'da dense_mask: FlexAttention CPU'da geri yayilim
+yapmiyor); h = model._batch_hidden(batch, attn); kayip = recipe.output_loss(h, E, hedef).  bf16 autocast ve bloklarda
+compile(dynamic=False) CUDA'da; clip 1,0; AdamW (0,9 / 0,95, wd 0,1; CUDA'da fused), recipe.param_groups, recipe.wsd_lr.
+Veri: BATCH_ROWS satir x row_len (plan dosyasindan); epok 1 <data>/train_pack_plan_e1.npz, sonrakiler pack_plan(seed,
+epok).  --local: ham akisin yerel kopyasi (yalniz onbellek; sha256 = <split>_boundaries.json'daki).
+Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunluk sinirinda, epok sonunda ve bitiste;
+<out>/decay_start/ inisin ilk adiminda.  --resume 1: ayni toplam -> kaldigi yerden; buyuk toplam (--epochs / --steps) -> uzatma, inis basindan; eski
+ciktilar <out>/total_<eski toplam>/'a.  Bitmis kosu durur.
+Olcu: epok sonunda ve bitiste metrics.exam_scores (exam_pack_plan.npz; egitimle ayni maske yolu); hiz pencere pencere
+(recipe.SpeedWindow; ilk pencere derleme icerir, ozete girmez).  Sonda metrics.story_generation (reading_prompts.json).
+Cikti: config.json, checkpoint.pt, decay_start/, results.json, agent.pt, samples.txt, samples.json.
+
+    python train.py --model transformer|model_z [--meaning agent.pt] --lr LR --out <kosu> [--data <v2/simplestories_gpt2>]
+                    [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
+                    [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1]
+"""
+import torch  # noqa: I001  (Windows: torch once)
+
+import argparse
+import dataclasses
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+import numpy as np
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import data as D  # noqa: E402
+import metrics as M  # noqa: E402
+import recipe as R  # noqa: E402
+
+BETAS, WEIGHT_DECAY, CLIP = (0.9, 0.95), 0.1, 1.0         # belge 20 s4
+DECAY = 0.2                                                # recipe.wsd_lr varsayilani; inis basi checkpoint'i
+BATCH_ROWS = D.BATCH_ROWS
+LOG_EVERY = 100             # adim; gunluk satiri = bir hiz penceresi
+READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
+READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
+SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
+IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "meaning_sha256", "longest", "row_len", "batch_rows",
+            "train_stream_sha256")
+OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
+
+
+def _no_power_throttling():
+    """Windows: surecin EcoQoS kisitini kapat (kural 2a)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class State(ctypes.Structure):
+        _fields_ = [("Version", wintypes.ULONG), ("ControlMask", wintypes.ULONG), ("StateMask", wintypes.ULONG)]
+    k = ctypes.windll.kernel32
+    k.GetCurrentProcess.restype = wintypes.HANDLE
+    k.SetProcessInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    s = State(1, 0x1, 0)
+    return bool(k.SetProcessInformation(k.GetCurrentProcess(), 4, ctypes.byref(s), ctypes.sizeof(s)))
+
+
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for c in iter(lambda: f.read(1 << 24), b""):
+            h.update(c)
+    return h.hexdigest()
+
+
+def _local_copy(stream_root, local, data_dir, splits=("train", "valid")):
+    """<stream_root>/gpt2/<split>.npy -> <local>/gpt2/<split>.npy; varsa ve sha256 tutuyorsa yeniden kopyalanmaz.  sha256,
+    sinirlarin hesaplandigi akisinki (<split>_boundaries.json) olmali: kopya = sinirlarin akisi, bayt bayt."""
+    for split in splits:
+        want = json.load(open(os.path.join(data_dir, split + "_boundaries.json"), encoding="utf-8"))["stream_sha256"]
+        src, dst = os.path.join(stream_root, "gpt2", split + ".npy"), os.path.join(local, "gpt2", split + ".npy")
+        if os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(src) and _sha256(dst) == want:
+            continue
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copyfile(src, dst + ".part")
+        got = _sha256(dst + ".part")
+        assert got == want, "%s kopyasinin sha256'si sinir dosyasindakiyle ayni degil: %s != %s" % (split, got, want)
+        os.replace(dst + ".part", dst)
+    return local
+
+
+def _decay_start(total):
+    """recipe.wsd_lr'deki inisin ilk adimi."""
+    return total - round(DECAY * total)
+
+
+def _schedule(train, data_dir, seed, epochs, steps):
+    """-> (epok planlari [(row_offsets, row_stories)], epok basina adim, row_len, toplam adim).  steps verilirse toplam o
+    (gerektigi kadar epok), yoksa epochs epok."""
+    f = np.load(os.path.join(data_dir, "train_pack_plan_e1.npz"))
+    row_len = int(f["row_len"])
+    lengths = train.lengths()
+    plans, per = [], []
+    while True:
+        e = len(plans) + 1
+        if e == 1 and int(f["seed"]) == seed and int(f["epoch"]) == 1:
+            plans.append((f["row_offsets"], f["row_stories"]))
+        else:
+            plans.append(D.pack_plan(lengths, row_len, seed, e))
+        per.append(-(-(len(plans[-1][0]) - 1) // BATCH_ROWS))
+        if (steps is None and e >= epochs) or (steps is not None and sum(per) >= steps):
+            return plans, per, row_len, steps if steps is not None else sum(per)
+
+
+def _build(args, longest, dev):
+    """-> (model, mask_fn, layout, meaning_sha256).  Model dosyalari yalniz burada import edilir."""
+    root = os.path.dirname(HERE)
+    torch.manual_seed(args.seed)
+    if args.model == "transformer":
+        sys.path.insert(0, os.path.join(root, "transformer"))
+        from baseline import BaselineTransformer
+        return BaselineTransformer(args.d, args.layers, args.heads).to(dev), R.document_mask, "transformer", None
+    assert args.meaning, "--model model_z icin --meaning <agent.pt> gerekli"
+    sys.path.insert(0, os.path.join(root, "model_z"))
+    import sentence_z as SZ
+    from sentence import SentenceTransformer, model_z_mask
+    keys = SZ.keys_to(SZ.build_keys(args.meaning, longest), dev)
+    torch.manual_seed(args.seed)
+    model = SentenceTransformer(keys, args.d, args.layers, args.heads).to(dev)
+    return model, model_z_mask, "model_z", _sha256(args.meaning)
+
+
+def _attn(batch, mask_fn, cuda):
+    return R.block_mask(batch, mask_fn) if cuda else R.dense_mask(batch, mask_fn)
+
+
+def _step(model, batch, mask_fn, opt, cuda):
+    """Tek egitim adimi -> (kayip, gradyan normu) cihazda (senkron yok)."""
+    with torch.autocast(batch.tokens.device.type, dtype=torch.bfloat16, enabled=cuda):
+        h = model._batch_hidden(batch, _attn(batch, mask_fn, cuda))
+        loss = R.output_loss(h.flatten(0, 1), model.E.weight, batch.target.flatten())
+    opt.zero_grad(set_to_none=True)
+    loss.backward()
+    gn = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
+    opt.step()
+    return loss.detach(), gn.detach()
+
+
+def _to_device(batch, dev):
+    """CPU PackedBatch -> cihaz; CUDA'da sabitlenmis bellekten non_blocking (sonraki batch GPU calisirken hazirlanir)."""
+    if dev.type != "cuda":
+        return batch
+    mv = lambda t: t.pin_memory().to(dev, non_blocking=True)  # noqa: E731
+    out = {}
+    for f in dataclasses.fields(batch):
+        v = getattr(batch, f.name)
+        out[f.name] = None if v is None else tuple(mv(x) for x in v) if isinstance(v, tuple) else mv(v)
+    return D.PackedBatch(**out)
+
+
+class _Exam:
+    """exam_scores icin model: loss_per_target egitimle ayni maske yolundan (CUDA'da block_mask; belge 24 s5 I)."""
+
+    def __init__(self, model, mask_fn, cuda):
+        self.model, self.mask_fn, self.cuda = model, mask_fn, cuda
+
+    def loss_per_target(self, batch):
+        return self.model.loss_per_target(batch, _attn(batch, self.mask_fn, self.cuda))
+
+
+def _exam(model, mask_fn, valid, plan, story_bytes, layout, dev, cuda):
+    t = time.time()
+    with torch.autocast(dev.type, dtype=torch.bfloat16, enabled=cuda):
+        out = M.exam_scores(_Exam(model, mask_fn, cuda), valid, plan, story_bytes, layout, dev, BATCH_ROWS)
+    return dict(out, seconds=round(time.time() - t, 2))
+
+
+def _readings(model, valid, tok):
+    """reading_prompts.json'daki istemler -> (satirlar, decode basina olculer).  Uretim fp32, autocast yok."""
+    spec = json.load(open(READING_PROMPTS, encoding="utf-8"))["prompts"]
+    rows, gen = [None] * len(spec), {}
+    for decode in ("greedy", "sample"):
+        idx = [i for i, p in enumerate(spec) if p["decode"] == decode]
+        if not idx:
+            continue
+        prompts = [[s.tolist() for s in valid.sentences(spec[i]["story"])[:spec[i]["sentences"]]] for i in idx]
+        texts, gen[decode] = M.story_generation(model, prompts, decode, SAMPLE_SEED, tokenizer=tok, **READING_LIMITS)
+        for i, t in zip(idx, texts):
+            real = valid.sentences(spec[i]["story"])[spec[i]["sentences"]:]
+            rows[i] = dict(spec[i], prompt=t["prompt"], story_text=t["story"], eos=t["eos"],
+                           real=M.reading_view([s.tolist() for s in real], tok))
+    return rows, gen
+
+
+def _samples_text(rows):
+    out = []
+    for r in rows:
+        out += ["=== %s | hikaye %d, istem %d cumle, %s | EOS %s" % (r["label"], r["story"], r["sentences"], r["decode"],
+                                                                       "var" if r["eos"] else "YOK"),
+                "--- istem", r["prompt"], "--- model", r["story_text"], "--- gercek devam", r["real"], ""]
+    return "\n".join(out)
+
+
+def _git():
+    try:
+        rev = subprocess.run(["git", "-C", HERE, "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+                             timeout=20).stdout.strip()
+        dirty = subprocess.run(["git", "-C", HERE, "status", "--porcelain", "--untracked-files=no"], capture_output=True,
+                               text=True, timeout=20).stdout.strip()
+        return dict(commit=rev or None, dirty=bool(dirty))
+    except Exception:  # noqa: BLE001
+        return dict(commit=None, dirty=None)
+
+
+def _args(argv):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--model", required=True, choices=("transformer", "model_z"))
+    ap.add_argument("--meaning", default=None, help="model_z: meaning agent.pt (state['source.weight'])")
+    ap.add_argument("--lr", type=float, required=True, help="tepe lr (WSD)")
+    ap.add_argument("--out", required=True, help="kosu klasoru")
+    ap.add_argument("--data", default="/content/drive/MyDrive/v2/simplestories_gpt2", help="sinir ve plan dosyalari")
+    ap.add_argument("--stream", default="/content/drive/MyDrive/simplestories", help="gpt2/{train,valid}.npy kok")
+    ap.add_argument("--local", default=None, help="ham akisin yerel kopyasi (yalniz onbellek)")
+    ap.add_argument("--epochs", type=int, default=1)
+    ap.add_argument("--steps", type=int, default=None, help="toplam adim (WSD tam takvim bu sayiyla); lr taramasi")
+    ap.add_argument("--d", type=int, default=512)
+    ap.add_argument("--layers", type=int, default=8)
+    ap.add_argument("--heads", type=int, default=8)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--resume", type=int, default=0)
+    ap.add_argument("--checkpoint_minutes", type=float, default=10,
+                    help="en cok bu kadar duvar saati kaybi (sinav dahil); surdurmede degistirilebilir")
+    return ap.parse_args(argv)
+
+
+def main(argv=None):
+    args = _args(argv)
+    t0 = time.time()
+    log = lambda msg: print("[%7.1f sn] %s" % (time.time() - t0, msg), flush=True)  # noqa: E731
+    dev = torch.device(args.device)
+    cuda = dev.type == "cuda"
+    if cuda:                                                             # GPU kapisi (kural 5)
+        assert torch.cuda.is_available(), "GPU YOK"
+        for k in ("cache_size_limit", "recompile_limit"):                # beklenen giris ~4-6 (egitim / sinav x tam /
+            if hasattr(torch._dynamo.config, k):                         # son batch); 8'i asarsa sessizce eager'a duser
+                setattr(torch._dynamo.config, k, 32)
+    elif os.name == "nt":
+        log("guc kisitlamasi (EcoQoS) kapali: %s" % _no_power_throttling())
+    stream = _local_copy(args.stream, args.local, args.data) if args.local else args.stream
+    log("ham akis: %s%s" % (stream, " (yerel kopya, sha256 sinir dosyasiyla ayni)" if args.local else ""))
+    train = D.TokenStories(stream, args.data, "train")
+    valid = D.TokenStories(stream, args.data, "valid")
+    plans, per_epoch, row_len, total = _schedule(train, args.data, args.seed, args.epochs, args.steps)
+    bounds = np.cumsum([0] + per_epoch)
+    down = _decay_start(total)
+    ep = np.load(os.path.join(args.data, "exam_pack_plan.npz"))
+    exam_plan = (ep["row_offsets"], ep["row_stories"])
+    story_bytes = np.load(os.path.join(args.stream, "gpt2", "valid_bytes.npy"))
+    assert len(story_bytes) == valid.n, "valid_bytes hikaye sayisi valid ile ayni degil"
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(os.path.join(args.stream, "gpt2", "tokenizer.json"))
+    model, mask_fn, layout, meaning_sha = _build(args, train.max_sentence_tokens, dev)
+    assert layout != "model_z" or READING_LIMITS["max_tokens"] <= train.max_sentence_tokens, \
+        "okuma: max_tokens'ta kesilen cumle z konum anahtarindan uzun olur (encode_z durur)"
+    if cuda:
+        for block in model.blocks:
+            block.compile(dynamic=False)
+    opt = torch.optim.AdamW(R.param_groups(model, WEIGHT_DECAY), lr=args.lr, betas=BETAS,
+                            **({"fused": True} if cuda else {}))
+    ident = dict(model=args.model, d=args.d, layers=args.layers, heads=args.heads, lr=args.lr, seed=args.seed,
+                 meaning_sha256=meaning_sha, longest=train.max_sentence_tokens, row_len=row_len, batch_rows=BATCH_ROWS,
+                 train_stream_sha256=train.meta["stream_sha256"])
+    plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
+                     plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
+    params = sum(p.numel() for p in model.parameters())
+    os.makedirs(args.out, exist_ok=True)
+    ckpt = os.path.join(args.out, "checkpoint.pt")
+    decay_dir = os.path.join(args.out, "decay_start")
+    res_path = os.path.join(args.out, "results.json")
+    start, history = 0, dict(log=[], exams=[], epochs=[])
+    if os.path.exists(ckpt) and not args.resume:
+        sys.exit("DUR: %s'de checkpoint var; surdurmek icin --resume 1, yeni kosu icin yeni klasor" % args.out)
+    if args.resume:
+        if not os.path.exists(ckpt):
+            sys.exit("DUR: surdurme paketi yok: %s (bastan baslamaz)" % ckpt)
+        info = R.Checkpoint.load(args.out, model, opt, "cpu")
+        diff = {k: (info["args"].get(k), ident[k]) for k in IDENTITY if info["args"].get(k) != ident[k]}
+        old = info["plan"]
+        n = len(old["plan_sha256"])
+        if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:
+            diff["plan_sha256"] = "veri sirasi farkli"
+        if diff:
+            sys.exit("DUR: surdurme ayari checkpoint'ten farkli (checkpoint, simdi): %s" % diff)
+        if total < old["total"]:
+            sys.exit("DUR: toplam adim %d < checkpoint'teki %d (kisaltma yok)" % (total, old["total"]))
+        if total == old["total"]:
+            if info["step"] == total and os.path.exists(res_path) and json.load(open(res_path)).get("finished"):
+                log("kosu bitmis (%d / %d adim, results.json var); uzatma icin --epochs / --steps buyutulur" % (
+                    total, total))
+                return json.load(open(res_path))
+            start, history = info["step"], info["history"]
+            log("SURDURULDU: adim %d / %d" % (start, total))
+        else:                                                            # uzatma (kural 3): inis basindan
+            if info["step"] > old["decay_start"]:
+                info = R.Checkpoint.load(decay_dir, model, opt, "cpu")
+                assert info["step"] == old["decay_start"], "decay_start checkpoint'i inis basinda degil"
+            arch = os.path.join(args.out, "total_%d" % old["total"])
+            for name in OUTPUTS:
+                if os.path.exists(os.path.join(args.out, name)):
+                    os.makedirs(arch, exist_ok=True)
+                    shutil.move(os.path.join(args.out, name), os.path.join(arch, name))
+            start, history = info["step"], info["history"]
+            log("UZATMA: toplam %d -> %d, adim %d'den (inis basi; eski ciktilar %s)" % (old["total"], total, start, arch))
+    config = dict(identity=ident, plan=plan_meta, args=vars(args), params=params, env=dict(
+        torch=torch.__version__, device=torch.cuda.get_device_name(0) if cuda else "cpu", git=_git()),
+        data=dict(train_stories=train.n, train_sentences=len(train.sent), exam_stories=int(len(exam_plan[1])),
+                  exam_set_sha256=str(ep["exam_set_sha256"]) if "exam_set_sha256" in ep.files else None,
+                  exam_bytes=int(story_bytes[exam_plan[1]].sum()), train_stream_sha256=train.meta["stream_sha256"],
+                  valid_stream_sha256=valid.meta["stream_sha256"]))
+    json.dump(config, open(os.path.join(args.out, "config.json"), "w"), indent=1)
+    log("%s | d %d, katman %d, head %d, %d parametre | egitim %d hikaye, satir %d x %d, %s adim/epok, toplam %d, inis "
+        "basi %d | lr %g | cihaz %s, compile %s | sinav %d hikaye" % (
+            args.model, args.d, args.layers, args.heads, params, train.n, BATCH_ROWS, row_len, per_epoch, total, down,
+            args.lr, config["env"]["device"], cuda, len(exam_plan[1])))
+
+    lengths = train.lengths()
+
+    def rows_of(step):
+        e = int(np.searchsorted(bounds, step, "right")) - 1
+        ro, rs = plans[e]
+        r0, r1 = (step - bounds[e]) * BATCH_ROWS, min((step - bounds[e] + 1) * BATCH_ROWS, len(ro) - 1)
+        return [rs[ro[r]:ro[r + 1]].tolist() for r in range(r0, r1)], int(lengths[rs[ro[r0]:ro[r1]]].sum())
+
+    def cpu_batch(step):
+        rows, real = rows_of(step)
+        return D.build_batch(train, rows, layout, "cpu", row_len), real
+
+    def save(dir_, step):
+        R.Checkpoint.save(dir_, model, opt, step, plan_meta, history, ident)
+
+    sw, win = R.SpeedWindow(), None
+    first_window, epoch_from, epoch_t0, saved_at = True, start, time.time(), time.time()
+    ckpt_seconds = 60 * args.checkpoint_minutes                      # kimlige girmez (kullanici: buyuk kosuda 30 dk)
+    nxt = cpu_batch(start) if start < total else None
+    for step in range(start, total):
+        if win is None:
+            sw.start(step)
+            win = dict(step0=step, loss=torch.zeros((), device=dev), gn=torch.zeros((), device=dev), tokens=0)
+            if cuda:
+                torch.cuda.reset_peak_memory_stats()
+        lr = R.wsd_lr(step, total, args.lr, decay=DECAY)
+        for g in opt.param_groups:
+            g["lr"] = lr
+        batch, real = nxt
+        loss, gn = _step(model, _to_device(batch, dev), mask_fn, opt, cuda)
+        nxt = cpu_batch(step + 1) if step + 1 < total else None          # GPU calisirken hazirlanir
+        win["loss"] += loss
+        win["gn"] += gn
+        win["tokens"] += real
+        done = step + 1
+        epoch = int(np.searchsorted(bounds, step, "right"))               # 1'den
+        epoch_end = done == bounds[epoch]
+        ckpt_due = epoch_end or done == total or (done % LOG_EVERY == 0
+                                                     and time.time() - saved_at >= ckpt_seconds)
+        if not (done % LOG_EVERY == 0 or ckpt_due or done == down):
+            continue
+        s = sw.stop(done, win["tokens"])                                 # pencere kapanir: kayit / sinav disarida
+        k = done - win["step0"]
+        rec = dict(step=done, epoch=epoch, lr=lr, loss=round(win["loss"].item() / k, 4),
+                   grad_norm=round(win["gn"].item() / k, 4), steps=k, tokens=s["tokens"], seconds=s["seconds"],
+                   ms_per_step=round(1000 * s["seconds"] / k, 1), tokens_per_sec=s["tokens_per_sec"], first=first_window,
+                   peak_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2) if cuda else None)
+        history["log"].append(rec)
+        log("adim %d / %d (epok %d)  lr %.3g  kayip %.4f  grad %.3f | pencere %d adim %.1f sn  %.1f ms/adim  %.0f tok/sn%s%s"
+            % (done, total, epoch, lr, rec["loss"], rec["grad_norm"], k, s["seconds"], rec["ms_per_step"],
+               s["tokens_per_sec"], "  tepe %.1f GB" % rec["peak_gb"] if cuda else "",
+               "  (ilk pencere: derleme dahil)" if first_window else ""))
+        assert np.isfinite(rec["loss"]), "kayip sonlu degil; checkpoint yazilmadi"
+        first_window, win = False, None
+        if done == down:
+            save(decay_dir, done)                                        # uzatma buradan (belge 20 s4)
+        if epoch_end or done == total:
+            history["epochs"].append(dict(epoch=epoch, step=done, wall_seconds=round(time.time() - epoch_t0, 1),
+                                          resumed=bool(epoch_from > bounds[epoch - 1])))
+            ex = _exam(model, mask_fn, valid, exam_plan, story_bytes, layout, dev, cuda)
+            history["exams"].append(dict(ex, step=done, epoch=epoch, full_epoch=bool(epoch_end)))
+            log("SINAV adim %d: kayip %.4f  acc %.4f  acc_token %.4f  bpb %.4f  end_ok %.4f  eos_ok %.4f (%.1f sn)" % (
+                done, ex["loss"], ex["acc"], ex["acc_token"], ex["bits_per_byte"], ex["end_ok"], ex["eos_ok"],
+                ex["seconds"]))
+            epoch_from, epoch_t0 = done, time.time()
+        if ckpt_due:
+            save(args.out, done)
+            saved_at = time.time()
+    if not history["exams"] or history["exams"][-1]["step"] != total:   # bitis checkpoint'i var, sinavi yok
+        ex = _exam(model, mask_fn, valid, exam_plan, story_bytes, layout, dev, cuda)
+        history["exams"].append(dict(ex, step=total, epoch=len(per_epoch), full_epoch=bool(total == bounds[-1])))
+    t = time.time()
+    rows, gen = _readings(model, valid, tok)
+    log("okuma uretimi %.0f sn: %s" % (time.time() - t, gen))
+    open(os.path.join(args.out, "samples.txt"), "w", encoding="utf-8").write(_samples_text(rows))
+    json.dump(dict(generation=gen, rows=rows), open(os.path.join(args.out, "samples.json"), "w", encoding="utf-8"),
+              indent=1, ensure_ascii=False)
+    speed = [w for w in history["log"] if not w["first"]]
+    med = lambda key: float(np.median([w[key] for w in speed])) if speed else None  # noqa: E731
+    results = dict(config, run=os.path.basename(os.path.normpath(args.out)), finished=True, exam=history["exams"][-1],
+                   exams=history["exams"], epochs=history["epochs"], generation=gen, log=history["log"],
+                   speed=dict(windows=len(speed), tokens_per_sec_median=med("tokens_per_sec"),
+                              ms_per_step_median=med("ms_per_step"), note="pencere ortancasi; ilk pencere (derleme) haric"))
+    torch.save(dict(state=model.state_dict(), identity=ident, args=vars(args)), os.path.join(args.out, "agent.pt"))
+    json.dump(results, open(res_path, "w"), indent=1)
+    log("BITTI: %s | sinav kayip %.4f bpb %.4f | sentence_repeat %s" % (
+        args.out, results["exam"]["loss"], results["exam"]["bits_per_byte"],
+        {d: g["sentence_repeat"] for d, g in gen.items()}))
+    return results
+
+
+if __name__ == "__main__":
+    main()

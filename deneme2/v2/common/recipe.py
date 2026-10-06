@@ -112,9 +112,9 @@ class Checkpoint:
         pack = torch.load(os.path.join(dir_, "checkpoint.pt"), map_location=device, weights_only=False)
         model.load_state_dict(pack["state"])
         opt.load_state_dict(pack["opt"])
-        torch.set_rng_state(pack["rng"]["cpu"])
-        if pack["rng"]["cuda"] is not None and torch.cuda.is_available():
-            torch.cuda.set_rng_state_all(pack["rng"]["cuda"])
+        torch.set_rng_state(pack["rng"]["cpu"].cpu())                    # RNG durumu CPU ByteTensor olmali
+        if pack["rng"]["cuda"] is not None and torch.cuda.is_available():  # (map_location="cuda" onu tasir)
+            torch.cuda.set_rng_state_all([s.cpu() for s in pack["rng"]["cuda"]])
         return dict(step=pack["step"], plan=pack["plan"], history=pack["history"], args=pack["args"])
 
 

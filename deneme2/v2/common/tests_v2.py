@@ -1,17 +1,21 @@
 """tests_v2 -- V2 common/ testleri (CPU).  Gruplar: data (hizli; GPT-2 tokenizer'i yerel HF onbelleginden ya da Drive'dan,
 yoksa tokenizer'li sinamalar ATLANIR), pack (sentetik), recipe (maske, WSD, gruplar, surdurme, hiz), metrics (sentence_repeat,
 normalize_words, story_generation, exam_scores), integration (iki modelin loss_per_target'i ve recipe.output_loss'u
-gercek build_batch ile; model dosyalari yalniz testte import edilir), drive (valid akisi: V1 ile birebir esleme, okuma istemleri).
+gercek build_batch ile; model dosyalari yalniz testte import edilir), train (train.py uctan uca, iki model, kucuk veri;
+~1-2 dk), drive (valid akisi: V1 ile birebir esleme, okuma istemleri).
 
-    python tests_v2.py [--only data,pack,recipe,metrics,integration,drive]
+    python tests_v2.py [--only data,pack,recipe,metrics,integration,train,drive]
 """
 import torch
 
+import atexit  # noqa: E402
+import atexit  # noqa: E402
 import glob  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
 import math  # noqa: E402
 import os  # noqa: E402
+import shutil  # noqa: E402
 import sys  # noqa: E402
 import tempfile  # noqa: E402
 
@@ -37,6 +41,7 @@ if os.name == "nt":                     # EcoQoS: yoksa ~10 kat yavas (kullanici
 GPT2_TOKENIZER_SHA = "8414cab924d8b9b33013f0d221c5862f365ee9be39c5c2bfae8a5a9e970478a6"   # Drive fingerprint.json
 DRIVE = next((d for d in ("G:/Drive'ım", "/content/drive/MyDrive") if os.path.isdir(d)), None)
 TMP = tempfile.mkdtemp(prefix="tests_v2_")
+atexit.register(shutil.rmtree, TMP, True)          # train grubu ~200 MB birakiyordu
 RESULTS = []
 
 
@@ -338,6 +343,28 @@ def t_recipe():
     check("Checkpoint: 4 + 6 adim = kesintisiz 10 adim (agirlik bit duzeyinde, RNG dahil); plan / gecmis / args yazili",
           all(torch.equal(a, c) for a, c in zip(full.state_dict().values(), resumed.state_dict().values()))
           and meta["plan"] == dict(seed=0, epoch=1) and meta["history"] == [dict(step=4)])
+
+    class OnDevice:                                                     # vekil: CPU'da olmayan RNG tensoru (CUDA yok)
+        def __init__(self, t):
+            self.t = t
+
+        def cpu(self):
+            return self.t
+    load = torch.load
+
+    def load_moved(*a, **k):
+        pack = load(*a, **k)
+        pack["rng"]["cpu"] = OnDevice(pack["rng"]["cpu"])
+        return pack
+    torch.load = load_moved
+    try:
+        moved = run(10, dir_=d_, load=True)
+    finally:
+        torch.load = load
+    check("Checkpoint.load: baska cihazdan gelmis RNG durumu .cpu() ile geri konur, surdurme yine kesintisiz (vekil; "
+          "CUDA RNG listesi CPU'da sinanamaz)", all(torch.equal(a, c) for a, c in zip(
+              full.state_dict().values(), moved.state_dict().values())) and _raises(TypeError, torch.set_rng_state,
+                                                                                     OnDevice(torch.get_rng_state())))
     import time as _t
     sw = R.SpeedWindow()
     sw.start(5)
@@ -459,8 +486,200 @@ def t_integration():
                   traceback.format_exc(limit=2).splitlines()[-1])
 
 
+def _train_root(tok_path):
+    """Kucuk SS benzeri veri, gercek boru hattiyla: gpt2/{train,valid}.npy + valid_bytes + tokenizer, build_boundaries,
+    train_pack_plan_e1.npz (satir 64), exam_pack_plan.npz, 3 istemlik okuma dosyasi.  -> (stream koku, data klasoru,
+    istem dosyasi)."""
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(tok_path)
+    names, things = ["Lily", "Tom", "Mia", "Sam"], ["ball", "kite", "cat", "box"]
+    story = lambda i: "%s had a %s. %s liked the %s. The end." % (  # noqa: E731
+        names[i % 4], things[i // 4 % 4], names[i % 4], things[i // 4 % 4])
+    root = tempfile.mkdtemp(dir=TMP)
+    data = os.path.join(root, "v2")
+    os.makedirs(os.path.join(root, "gpt2"))
+    for split, n in (("train", 64), ("valid", 8)):
+        texts = [story(i + (100 if split == "valid" else 0)) for i in range(n)]
+        np.save(os.path.join(root, "gpt2", split + ".npy"),
+                np.array([i for t in texts for i in tok.encode(t).ids + [D.EOS_ID]], dtype=np.uint16))
+        if split == "valid":
+            np.save(os.path.join(root, "gpt2", "valid_bytes.npy"), np.array([len(t.encode()) for t in texts]))
+    open(os.path.join(root, "gpt2", "tokenizer.json"), "wb").write(open(tok_path, "rb").read())
+    for split in ("train", "valid"):
+        D.build_boundaries(root, data, split)
+    tr, va = D.TokenStories(root, data, "train"), D.TokenStories(root, data, "valid")
+    ro, rs = D.pack_plan(tr.lengths(), 64, 0, 1)
+    np.savez(os.path.join(data, "train_pack_plan_e1.npz"), row_offsets=ro, row_stories=rs, seed=0, epoch=1, row_len=64)
+    ro, rs = D.pack_plan(va.lengths(), 64, None)
+    np.savez(os.path.join(data, "exam_pack_plan.npz"), row_offsets=ro, row_stories=rs.astype(np.int32), seed=-1, epoch=0,
+             row_len=64, exam_set_sha256="test")
+    prompts = os.path.join(root, "reading_prompts.json")
+    json.dump(dict(prompts=[dict(label="okuma 1", story=0, sentences=1, decode="greedy"),
+                            dict(label="okuma 2", story=1, sentences=2, decode="greedy"),
+                            dict(label="okuma 3", story=2, sentences=1, decode="sample")]), open(prompts, "w"))
+    return root, data, prompts
+
+
+def t_train():
+    """train.py uctan uca (CPU, d 16, 1 katman, gercek build_batch / modeller / exam_scores / story_generation): kayip
+    duser, ilk adim kaybi bagimsiz hesapla ayni, lr = wsd_lr, results / samples alanlari, kesilip surdurulen = kesintisiz
+    (bit duzeyinde), uzatma = bastan uzun kosu, bitmis kosu durur, ayar farki durur, --steps, yerel kopya sha'si."""
+    import traceback
+    import recipe as R
+    import train as TR
+    tp = tokenizer_path()
+    if tp is None:
+        print("ATLA train: GPT-2 tokenizer yok", flush=True)
+        return
+    root, data, prompts = _train_root(tp)
+    meaning = os.path.join(TMP, "meaning_train.pt")
+    torch.save(dict(state={"source.weight": torch.randn(D.END_ID, 256, generator=torch.Generator().manual_seed(0))}),
+               meaning)
+    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS)
+    TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
+    TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=3, max_tokens=4)
+    base = ["--data", data, "--stream", root, "--device", "cpu", "--d", "16", "--layers", "1", "--heads", "2",
+            "--lr", "1e-2", "--checkpoint_minutes", "0"]                # 0: her gunluk sinirinda kayit
+    out = lambda name: os.path.join(TMP, "runs", name)  # noqa: E731
+    state = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
+    same = lambda a, b: all(torch.equal(a[k], b[k]) for k in a) and a.keys() == b.keys()  # noqa: E731
+    exits = lambda argv: _raises(SystemExit, TR.main, argv)  # noqa: E731
+    try:
+        for model in ("transformer", "model_z"):
+            cmd = base + ["--model", model] + (["--meaning", meaning] if model == "model_z" else [])
+            a = TR.main(cmd + ["--epochs", "2", "--out", out(model + "_A")])
+            total, per = a["plan"]["total"], a["plan"]["per_epoch"]
+            L = [w["loss"] for w in a["log"]]
+            check("train %s: 2 epok kosar, kayip duser" % model, len(L) == total and np.mean(L[-3:]) < np.mean(L[:3]) - 0.5,
+                  "%d adim (%s / epok), kayip %.3f -> %.3f" % (total, per, np.mean(L[:3]), np.mean(L[-3:])))
+            args = TR._args(cmd + ["--out", "x"])
+            st = D.TokenStories(root, data, "train")
+            m, mask_fn, layout, _ = TR._build(args, st.max_sentence_tokens, torch.device("cpu"))
+            f = np.load(os.path.join(data, "train_pack_plan_e1.npz"))
+            ro, rs = f["row_offsets"], f["row_stories"]
+            b = D.build_batch(st, [rs[ro[r]:ro[r + 1]].tolist() for r in range(4)], layout, "cpu", 64)
+            with torch.no_grad():
+                want = m.loss_per_target(b, R.dense_mask(b, mask_fn))[0].mean().item()
+            lr_ok = all(w["lr"] == R.wsd_lr(w["step"] - 1, total, 1e-2) for w in a["log"])
+            check("train %s: ilk adim kaybi = loss_per_target (plan e1 satirlari 0-3, ayni tohum); lr = wsd_lr" % model,
+                  abs(a["log"][0]["loss"] - want) < 1e-4 and lr_ok, "%.4f / %.4f" % (a["log"][0]["loss"], want))
+            keys = {"identity", "plan", "args", "params", "env", "data", "run", "finished", "exam", "exams", "epochs",
+                    "generation", "log", "speed"}
+            ex_keys = {"loss", "ppl", "acc", "acc_token", "end_ok", "eos_ok", "bits_per_byte", "bits_per_byte_eos",
+                       "by_kind", "stories", "bytes", "seconds", "step", "epoch", "full_epoch"}
+            dk = torch.load(os.path.join(out(model + "_A"), "decay_start", "checkpoint.pt"), weights_only=False)["step"]
+            check("train %s: results.json alanlari; epok basina sinav; decay_start inis basinda" % model,
+                  keys <= set(json.load(open(os.path.join(out(model + "_A"), "results.json")))) and ex_keys <= set(a["exam"])
+                  and [(e["step"], e["full_epoch"]) for e in a["exams"]] == [(per[0], True), (total, True)]
+                  and dk == total - round(0.2 * total) == a["plan"]["decay_start"]
+                  and a["speed"]["windows"] == total - 1, "decay_start %d" % dk)
+            sj = json.load(open(os.path.join(out(model + "_A"), "samples.json"), encoding="utf-8"))
+            txt = open(os.path.join(out(model + "_A"), "samples.txt"), encoding="utf-8").read()
+            gk = {"decode", "prompts", "eos_rate", "sentences", "sentence_repeat", "counted", "loop", "no_end", "empty"}
+            check("train %s: okuma ciktisi (samples.txt / .json): 3 istem sirayla, istem / model / gercek devam, greedy + "
+                  "sample olculeri" % model,
+                  [r["label"] for r in sj["rows"]] == ["okuma 1", "okuma 2", "okuma 3"] and all(
+                      {"prompt", "story_text", "real", "eos", "story", "sentences", "decode"} <= set(r) for r in sj["rows"])
+                  and all("=== okuma %d " % i in txt for i in (1, 2, 3)) and txt.count("--- gercek devam") == 3
+                  and set(sj["generation"]) == {"greedy", "sample"} and all(gk <= set(g) for g in sj["generation"].values())
+                  and sj["rows"][1]["prompt"].count("\n") == 1, sj["rows"][0]["prompt"] + " | " + sj["rows"][0]["real"])
+            orig = R.Checkpoint.save
+
+            class Stop(Exception):
+                pass
+
+            def save_then_stop(dir_, *rest):
+                orig(dir_, *rest)
+                if rest[2] == 4 and os.path.basename(dir_) != "decay_start":
+                    raise Stop()
+            R.Checkpoint.save = staticmethod(save_then_stop)
+            try:
+                TR.main(cmd + ["--epochs", "2", "--out", out(model + "_B")])
+                stopped = False
+            except Stop:
+                stopped = True
+            finally:
+                R.Checkpoint.save = staticmethod(orig)
+            bres = TR.main(cmd + ["--epochs", "2", "--out", out(model + "_B"), "--resume", "1",
+                                  "--checkpoint_minutes", "30"])                   # kimlige girmez
+            check("train %s: adim 4'te kesilip surdurulen = kesintisiz (agirlik bit duzeyinde, sinav ayni)" % model,
+                  stopped and same(state(out(model + "_A")), state(out(model + "_B"))) and bres["exam"] == dict(
+                      a["exam"], seconds=bres["exam"]["seconds"]) and bres["log"][0]["step"] == 1)
+            TR.main(cmd + ["--epochs", "1", "--out", out(model + "_C")])
+            cres = TR.main(cmd + ["--epochs", "2", "--out", out(model + "_C"), "--resume", "1"])
+            arch = os.path.join(out(model + "_C"), "total_%d" % per[0])
+            check("train %s: uzatma (1 -> 2 epok, inis basindan) = bastan 2 epok (bit duzeyinde); eski ciktilar %s" % (
+                model, os.path.basename(arch)), same(state(out(model + "_A")), state(out(model + "_C")))
+                and all(os.path.exists(os.path.join(arch, n)) for n in TR.OUTPUTS) and cres["plan"]["total"] == total)
+        TR.READING_LIMITS = dict(max_sentences=3, max_tokens=500)
+        early = _raises(AssertionError, TR.main, base + ["--model", "model_z", "--meaning", meaning, "--out", out("long")])
+        TR.READING_LIMITS = dict(max_sentences=3, max_tokens=4)
+        check("train model_z: okuma max_tokens > z konum anahtari egitimden ONCE durur (checkpoint yok)", early
+              and not os.path.exists(os.path.join(out("long"), "checkpoint.pt")))
+        cmd = base + ["--model", "transformer"]
+        A = out("transformer_A")
+        mt = os.path.getmtime(os.path.join(A, "checkpoint.pt"))
+        r = TR.main(cmd + ["--epochs", "2", "--out", A, "--resume", "1"])
+        check("train: bitmis kosu --resume ile durur, dosyalara dokunmaz",
+              r["finished"] and os.path.getmtime(os.path.join(A, "checkpoint.pt")) == mt)
+        check("train: checkpoint'li klasore --resume'suz yeni kosu, farkli lr ile surdurme, paketsiz surdurme, kisaltma "
+              "DURUR", exits(cmd + ["--epochs", "2", "--out", A]) and exits(
+                  [x if x != "1e-2" else "2e-2" for x in cmd] + ["--epochs", "2", "--out", A, "--resume", "1"])
+              and exits(cmd + ["--out", out("empty"), "--resume", "1"])
+              and exits(cmd + ["--epochs", "1", "--out", A, "--resume", "1"]))
+        s = TR.main(cmd + ["--steps", "3", "--out", out("steps")])
+        check("train --steps 3: WSD toplam 3, inis basi 2, sonda tek sinav (epok ortasi)", s["plan"]["total"] == 3
+              and s["plan"]["decay_start"] == 2 and [w["lr"] for w in s["log"]] == [R.wsd_lr(i, 3, 1e-2) for i in range(3)]
+              and len(s["exams"]) == 1 and not s["exam"]["full_epoch"])
+        orig, saves = R.Checkpoint.save, []
+        R.Checkpoint.save = staticmethod(lambda dir_, *rest: (saves.append((os.path.basename(dir_), rest[2])),
+                                                              orig(dir_, *rest)))
+        try:
+            got = {}
+            for sec in (0, 10 ** 9):
+                saves[:] = []
+                TR.main(cmd + ["--steps", "5", "--out", out("sec%d" % sec), "--checkpoint_minutes", str(sec / 60)])
+                got[sec] = list(saves)
+        finally:
+            R.Checkpoint.save = staticmethod(orig)
+        check("train --checkpoint_minutes: esik asilinca her gunluk sinirinda kayit (0 sn: adim 1-5), asilmazsa yalniz "
+              "bitis + decay_start", got[0] == [("sec0", i) for i in (1, 2, 3)] + [("decay_start", 4), ("sec0", 4),
+                                                                                  ("sec0", 5)]
+              and got[10 ** 9] == [("decay_start", 4), ("sec1000000000", 5)] and json.load(open(os.path.join(
+                  out("sec0"), "config.json")))["args"]["checkpoint_minutes"] == 0, str(got))
+        local = os.path.join(TMP, "local")
+        TR._local_copy(root, local, data)
+        p = os.path.join(local, "gpt2", "train.npy")
+        ok1 = open(p, "rb").read() == open(os.path.join(root, "gpt2", "train.npy"), "rb").read()
+        with open(p, "r+b") as fh:                                          # bozuk kopya: ayni boy, farkli bayt
+            fh.seek(200)
+            fh.write(b"\x00\x01")
+        TR._local_copy(root, local, data)
+        ok2 = open(p, "rb").read() == open(os.path.join(root, "gpt2", "train.npy"), "rb").read()
+        bj = os.path.join(data, "train_boundaries.json")
+        meta = json.load(open(bj))
+        json.dump(dict(meta, stream_sha256="0" * 64), open(bj, "w"))
+        os.remove(p)
+        ok3 = _raises(AssertionError, TR._local_copy, root, local, data)
+        json.dump(meta, open(bj, "w"))
+        check("train _local_copy: bayt bayt kopya; bozuk kopya yeniden kopyalanir; sinir dosyasinin sha'si tutmazsa durur",
+              ok1 and ok2 and ok3)
+    except Exception:  # noqa: BLE001
+        check("train", False, traceback.format_exc(limit=3))
+    finally:
+        TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS = saved
+
+
+def _raises(exc, fn, *a):
+    try:
+        fn(*a)
+    except exc:
+        return True
+    return False
+
+
 TESTS = dict(data=t_data, pack=t_pack, recipe=t_recipe, metrics=t_metrics, integration=t_integration,
-             drive=t_drive)
+             train=t_train, drive=t_drive)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)

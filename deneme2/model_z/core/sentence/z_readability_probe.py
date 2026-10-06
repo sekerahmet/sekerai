@@ -8,11 +8,16 @@ d boyuta indirerek gorur (z_in).  Bu arac ayni kisiti tasir: ridge + rank d sini
     taban: siklik sirasi (z'siz).  --model verilirse egitilmis SentenceTransformer'in z_in'inden sonraki x de olculur.
 Olculdu (1.500 hikaye, rank 256, kelime icerik / ilk kelime): rol 0,417 / 0,818 (z_in sonrasi 0,371 / 0,769); rolsuz
 0,297 / 0,853; rolsuz + torba kanali 0,624 / 0,937 (belge/model_z_temel/15).
+--token_offsets <v2 sinir klasoru>: V2 token girisi (belge 22 s2, 25): cumleler GPT-2 token'i (valid akisi + V2 sinirlari),
+hikayeler exam_stories.npy'den, z = deneme2/v2/model_z/sentence_z (meaning = V2 agent.pt), --root simplestories klasoru;
+"kelime" ve "ilk kelime" token olur.  Kapi (belge 22): icerik >= 0,55, ilk token >= 0,90.
 
     python z_readability_probe.py [--roles 0|1] [--bag_channel 0|1] [--z 512] [--stories 1500] [--rank 256]
                                   [--model agent.pt] [--root SS klasoru] [--meaning ...] [--grammar ...]
+                                  [--token_offsets v2/simplestories_gpt2 --root simplestories --meaning v2 agent.pt]
 """
 import argparse
+import importlib.util
 import os
 import sys
 import time
@@ -29,6 +34,8 @@ RUNS = "G:/Drive'ım/model_z/runs/"
 MEANING = RUNS + "meaning_ss_full_w5_d256_b2048_k0_t3e-05_e3_20261005_160420/agent.pt"
 GRAMMAR = RUNS + "grammar_ssfull_d256_cosine_lr0.001_b1024_20261003_211559/agent.pt"
 ROOT = "G:/Drive'ım/model_z/simplestories_full"
+TOKEN_ROOT = "G:/Drive'ım/simplestories"
+V2_MODEL_Z = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(HERE))), "v2", "model_z")
 LONGEST = 226           # SS egitim en uzun cumlesi: egitimdeki build_keys ile ayni anahtarlar (P longest'e bagli)
 FUNCTION_WORDS = 50     # icerik = en sik 50 kelime disi
 LAMBDAS = (1e-2, 1e-1, 1.0)
@@ -48,8 +55,34 @@ def exam_sentences(root, stories, seed):
     return sents, np.array(story)
 
 
+def token_sentences(root, offsets, stories, seed):
+    """V2: SS valid sinav hikayelerinden (exam_stories.npy) rastgele `stories` hikaye -> cumleler (GPT-2 token'lari, V2
+    sinirlari), hikaye sirasi; ve en uzun cumle (train + valid, z konum anahtari)."""
+    import json
+    stream = np.load(os.path.join(root, "gpt2", "valid.npy"), mmap_mode="r")
+    so = np.load(os.path.join(offsets, "valid_sentence_offsets.npy"))
+    st = np.load(os.path.join(offsets, "valid_story_offsets.npy"))
+    meta = json.load(open(os.path.join(offsets, "valid_boundaries.json"), encoding="utf-8"))
+    exam = np.load(os.path.join(root, "exam_stories.npy"))
+    pick = exam[np.random.default_rng(seed).choice(len(exam), stories, replace=False)]
+    sents, story = [], []
+    for k, s in enumerate(pick):
+        for j in range(st[s], st[s + 1]):
+            sents.append(np.asarray(stream[so[j, 0]:so[j, 1]]).astype(np.int64))
+            story.append(k)
+    return sents, np.array(story), meta.get("max_sentence_tokens_all", meta["max_sentence_tokens"])
+
+
+def _v2_sentence_z():
+    """deneme2/v2/model_z/sentence_z (V1 sentence_z ile ayni ad: dosya yolundan yuklenir)."""
+    spec = importlib.util.spec_from_file_location("sentence_z_v2", os.path.join(V2_MODEL_Z, "sentence_z.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 @torch.no_grad()
-def encode_all(keys, sents, batch=512):
+def encode_all(keys, sents, batch=512, encode=encode_z):
     out = []
     for c in range(0, len(sents), batch):
         part = sents[c:c + batch]
@@ -59,7 +92,7 @@ def encode_all(keys, sents, batch=512):
         for i, s in enumerate(part):
             x[i, :len(s)] = torch.from_numpy(s)
             m[i, :len(s)] = True
-        out.append(encode_z(keys, x, m))
+        out.append(encode(keys, x, m))
     return torch.cat(out)
 
 
@@ -136,9 +169,10 @@ def probe(X, Y, first, story, rank, classes):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--meaning", default=MEANING)
+    ap.add_argument("--meaning", default=None, help="V1: varsayilan SS meaning; --token_offsets ile V2 agent.pt (zorunlu)")
     ap.add_argument("--grammar", default=GRAMMAR)
-    ap.add_argument("--root", default=ROOT)
+    ap.add_argument("--root", default=None, help="V1: SS kelime klasoru; --token_offsets ile simplestories klasoru")
+    ap.add_argument("--token_offsets", default=None, help="V2 sinir klasoru: token girisi (belge 25)")
     ap.add_argument("--z", type=int, default=512, help="konum kanali boyutu")
     ap.add_argument("--roles", type=int, default=0)
     ap.add_argument("--bag_channel", type=int, default=1)
@@ -154,13 +188,22 @@ def main(argv=None):
         print("guc kisitlamasi (EcoQoS) kapali:", _no_power_throttling(), flush=True)
     torch.set_num_threads(args.threads)
     t0 = time.time()
-    keys = build_keys(args.meaning, args.grammar, args.z, LONGEST, roles=bool(args.roles),
-                      bag_channel=bool(args.bag_channel))
-    sents, story = exam_sentences(args.root, args.stories, args.seed)
-    Z = encode_all(keys, sents)
-    Y, first = targets(sents, len(keys["vocab"]), args.top, args.classes)
-    name = "z %d (konum %d%s%s)" % (keys["z"], keys["z_pos"], " + rol" if args.roles else "",
-                                     " ; torba" if args.bag_channel else "")
+    if args.token_offsets:
+        assert args.meaning and not args.roles, "token girisi: --meaning V2 agent.pt verilir, rol terimi yok"
+        sz = _v2_sentence_z()
+        sents, story, longest = token_sentences(args.root or TOKEN_ROOT, args.token_offsets, args.stories, args.seed)
+        keys = sz.build_keys(args.meaning, longest, args.z, bag_channel=bool(args.bag_channel))
+        Z = encode_all(keys, sents, encode=sz.encode_z)
+        V = len(keys["F"])
+    else:
+        keys = build_keys(args.meaning or MEANING, args.grammar, args.z, LONGEST, roles=bool(args.roles),
+                          bag_channel=bool(args.bag_channel))
+        sents, story = exam_sentences(args.root or ROOT, args.stories, args.seed)
+        Z = encode_all(keys, sents)
+        V = len(keys["vocab"])
+    Y, first = targets(sents, V, args.top, args.classes)
+    name = "z %d (konum %d%s%s%s)" % (keys["z"], keys["z_pos"], " + rol" if args.roles else "",
+                                       " ; torba" if args.bag_channel else "", ", token" if args.token_offsets else "")
     print("%d hikaye, %d cumle, %s, rank %d (%.0f sn hazirlik)" % (args.stories, len(sents), name, args.rank,
                                                                      time.time() - t0), flush=True)
     feats = {name: Z}

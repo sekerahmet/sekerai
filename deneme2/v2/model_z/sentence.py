@@ -194,8 +194,11 @@ class SentenceTransformer(torch.nn.Module):
     @torch.no_grad()
     def generate(self, prompts, max_sentences, max_tokens, generator=None):
         """prompts: hikaye basina istem cumleleri (token listeleri, END yok) -> her istem icin (uretilen cumleler,
-        END ile bitti mi listesi, eos).  generator None: acgozlu, yoksa ornekleme.  SummaryCache ile, istem basina."""
+        END ile bitti mi listesi, eos).  generator None: acgozlu, yoksa ornekleme.  SummaryCache ile, istem basina.
+        Cumle en cok min(max_tokens, longest) token: z'nin konum anahtari longest'e kadar (egitimin en uzun cumlesi);
+        kesilen cumle max_tokens kesimi gibi ended False ile doner (belge 26 B2)."""
         dev = self.E.weight.device
+        max_tokens = min(max_tokens, len(self.keys["signs"]) - 1)
         out = []
         for sents in prompts:
             cache = SummaryCache(self)

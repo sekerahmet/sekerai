@@ -1,10 +1,13 @@
-"""tests_model_z -- V2-Model Z testleri (CPU; belge 21, 22).  Sentetik meaning gecici klasore yazilir; GPU / Drive yok.
+"""tests_model_z -- V2-Model Z testleri (CPU; belge 21, 22).  Sentetik meaning gecici klasore yazilir; GPU yok; Drive
+yalniz meaning_valid (SS valid; yoksa atlanir).
 
-    python tests_model_z.py [--only layout,cache,flex,z,direct]
+    python tests_model_z.py [--only layout,cache,flex,z,direct,meaning,meaning_resume,meaning_keys,meaning_valid,
+                            meaning_resume_mid,generate_longest]
 """
 import os
 import sys
 import dataclasses
+import math
 import tempfile
 from types import SimpleNamespace
 
@@ -287,7 +290,265 @@ def t_direct():
           d <= 1e-6 and new[1]["z_in.weight"] is None, "en buyuk fark %.1e" % d)
 
 
-TESTS = dict(z=t_z, layout=t_layout, cache=t_cache, flex=t_flex, direct=t_direct)
+# --- meaning (train_meaning.py; belge 25)
+DRIVE_ROOT, DRIVE_OFFSETS = "G:/Drive'ım/simplestories", "G:/Drive'ım/v2/simplestories_gpt2"
+_SYN_TEXT = {10: " sw", 11: "am", 12: " the", 13: " dog", 14: ".", 15: " gl", 16: "owed", 17: " Fl", 18: "ame",
+             19: "wing", 20: " sat", 21: "Let", 22: "'s", 23: " 1", 24: "2", 25: " go"}
+_SYN_WORDS = [[10, 11], [12], [13], [14], [15, 16], [17, 18, 19], [20], [21, 22], [23, 24], [25]]
+
+
+def _syn_text():
+    text = [" w%d" % i for i in range(D.EOS_ID + 1)]
+    for k, v in _SYN_TEXT.items():
+        text[k] = v
+    return text
+
+
+def _syn_stories(n_stories, seed):
+    """Konulu sentetik hikayeler: her hikaye bir konu grubundan (6 token) ve ortak kelimelerden (_SYN_WORDS) cumle kurar ->
+    (stream, sent (N, 2), story (H+1)); hikayeler EOS ile biter (gercek akis gibi)."""
+    rng = np.random.default_rng(seed)
+    topics = [list(range(100 + 6 * g, 106 + 6 * g)) for g in range(6)]
+    stream, sent, story = [], [], [0]
+    for _ in range(n_stories):
+        topic = topics[rng.integers(len(topics))]
+        for _ in range(rng.integers(2, 8)):
+            s0 = len(stream)
+            for _ in range(rng.integers(2, 9)):
+                stream += _SYN_WORDS[rng.integers(len(_SYN_WORDS))] if rng.random() < 0.4 else [int(rng.choice(topic))]
+            sent.append((s0, len(stream)))
+        story.append(len(sent))
+        stream.append(D.EOS_ID)
+    return SimpleNamespace(stream=np.array(stream, np.uint16), sent=np.array(sent, np.int64), story=np.array(story))
+
+
+def _meaning_args(out=None, **kw):
+    import train_meaning as TM
+    a = TM.parse(["--d", "16", "--batch", "16", "--epochs", "2", "--subsample", "0.05", "--lr", "0.05"]
+                 + (["--out", out] if out else []))
+    for k, v in kw.items():
+        setattr(a, k, v)
+    return a
+
+
+def _brute_windows(st, s, W, max_tokens, start, end):
+    """Bagimsiz basvuru: cumle s'nin penceresi -> (farkli token kumesi, ayni kelime token ciftleri)."""
+    h = int(np.searchsorted(st.story, s, "right")) - 1
+    lo = st.sent[max(st.story[h], s - W + 1), 0]
+    hi = st.sent[s, 1]
+    lo = max(lo, hi - max_tokens)
+    toks = [int(t) for t in st.stream[lo:hi]]
+    words, cur = [], [toks[0]]
+    for p, t in zip(toks, toks[1:]):
+        if int(start[t]) & int(end[p]):
+            cur.append(t)
+        else:
+            words.append(cur)
+            cur = [t]
+    words.append(cur)
+    pairs = {(x, y) for w in words for x in w for y in w if x != y}
+    return set(toks), pairs
+
+
+def t_meaning():
+    """Pencere ve ayni-kelime maskesi = bagimsiz basvuru; forward = acik formul; sentetik egitimde kazanc artar."""
+    import train_meaning as TM
+    st, text = _syn_stories(60, 0), _syn_text()
+    glue = TM.glue_tables(text)
+    ok_w = ok_s = True
+    n_same = 0
+    for mt in (TM.MAX_TOKENS, 7):                                       # 7: pencere kirpma yolu da
+        old, TM.MAX_TOKENS = TM.MAX_TOKENS, mt
+        try:
+            win = TM.Windows(st.stream, st.sent, st.story, 5, torch.device("cpu"), glue)
+            rows = torch.arange(win.n)
+            ids, present, same = win.batch(rows, same_word=True)
+        finally:
+            TM.MAX_TOKENS = old
+        for s in range(win.n):
+            toks, pairs = _brute_windows(st, s, 5, mt, *glue)
+            got = set(ids[s][present[s]].tolist())
+            ok_w &= got == toks and bool((ids[s][~present[s]] == TM.PAD).all())
+            gp = {(int(ids[s, x]), int(ids[s, y])) for x, y in same[s].nonzero().tolist()}
+            ok_s &= gp == pairs
+            n_same += len(pairs)
+    check("meaning: pencere token kumesi = basvuru (hikaye siniri, 5 cumle, MAX_TOKENS kirpma; dolgu PAD)", ok_w)
+    check("meaning: ayni-kelime ciftleri = basvuru (glue tablosu; ' sw'+'am', ' Fl'+'ame'+'wing', 'Let'+\"'s\", rakam)",
+          ok_s and n_same > 0, "%d cift" % n_same)
+    torch.manual_seed(0)
+    agent = TM.MeaningAgent(TM.V, 8)
+    with torch.no_grad():
+        agent.bias.normal_()
+    ids, present, same = win.batch(torch.tensor([3, 17, 40]), same_word=True)
+    present = present & (torch.rand(present.shape, generator=torch.Generator().manual_seed(1)) < 0.8)
+    logp, okv = agent(ids, present, same)
+    full = (agent.source.weight @ agent.target.weight.T / 8 ** 0.5 + agent.bias).log_softmax(1)     # log P(j | i)
+    err, cnt = 0.0, 0
+    for b in range(len(ids)):
+        for j in range(ids.shape[1]):
+            if not present[b, j]:
+                continue
+            vs = [i for i in range(ids.shape[1]) if present[b, i] and i != j and not same[b, i, j]]
+            if not vs:
+                ok_ = not okv[b, j]
+            else:
+                ref = torch.stack([full[ids[b, i], ids[b, j]] for i in vs]).logsumexp(0) - math.log(len(vs))
+                err = max(err, abs(float(ref - logp[b, j])))
+                ok_ = bool(okv[b, j])
+            cnt += ok_
+    check("meaning: forward = acik formul log ort_i P(j | i), oy veren ayni kelimeden degil", err < 1e-5,
+          "en buyuk fark %.1e, %d gizli" % (err, cnt))
+    a = _meaning_args(epochs=8)                                     # lr 0,05: 50.257'lik paydada az adim
+    _, hist = TM._train(a, _syn_stories(120, 0), _syn_stories(20, 1), text)
+    g = [h["valid"]["gain"] for h in hist]
+    check("meaning: sentetik egitim (konulu hikayeler) -- valid kazanci artar ve > 0 (konu bilgisi ogrenildi)",
+          g[-1] > g[0] and g[-1] > 0 and all(math.isfinite(h["train_loss"]) for h in hist), "kazanc %s" % g)
+
+
+def t_meaning_resume():
+    """Kesilip surdurulen (epok 1 + surdur) = kesintisiz (2 epok): agirlik, optimizer, olcu gecmisi birebir."""
+    import train_meaning as TM
+    st, va, text = _syn_stories(60, 0), _syn_stories(20, 1), _syn_text()
+    a_dir, b_dir = os.path.join(TMP, "m_full"), os.path.join(TMP, "m_cut")
+    TM._train(_meaning_args(a_dir), st, va, text)
+    TM._train(_meaning_args(b_dir), st, va, text, stop_after=1)
+    mid = torch.load(os.path.join(b_dir, "checkpoint.pt"), weights_only=False)["epoch"]
+    TM._train(_meaning_args(b_dir, resume=1), st, va, text)
+    A = torch.load(os.path.join(a_dir, "agent.pt"), weights_only=False)
+    B = torch.load(os.path.join(b_dir, "agent.pt"), weights_only=False)
+    ca = torch.load(os.path.join(a_dir, "checkpoint.pt"), weights_only=False)
+    cb = torch.load(os.path.join(b_dir, "checkpoint.pt"), weights_only=False)
+    same_w = all(torch.equal(A["state"][k], B["state"][k]) for k in A["state"])
+    same_o = all(torch.equal(x, y) for sa, sb in zip(ca["opt"]["state"].values(), cb["opt"]["state"].values())
+                 for x, y in zip(sa.values(), sb.values()))
+    hist = [{k: v for k, v in h.items() if k != "seconds"} for h in A["history"]]
+    hist_b = [{k: v for k, v in h.items() if k != "seconds"} for h in B["history"]]
+    check("meaning: kesilip surdurulen = kesintisiz (agirlik, Adam durumu, gen, olcu gecmisi; birebir)",
+          mid == 1 and same_w and same_o and torch.equal(ca["gen"], cb["gen"]) and hist == hist_b)
+    try:
+        TM._train(_meaning_args(b_dir, resume=1, lr=1e-2), st, va, text)
+        ok = False
+    except AssertionError:
+        ok = True
+    check("meaning: farkli ayarla surdurme durur", ok)
+
+
+def t_meaning_keys():
+    """Entegrasyon: train_meaning agent.pt -> sentence_z.build_keys (gercek arayuz) -> SentenceTransformer, gercek
+    build_batch."""
+    import train_meaning as TM
+    out = os.path.join(TMP, "m_keys")
+    TM._train(_meaning_args(out, epochs=1), _syn_stories(30, 0), _syn_stories(10, 1), _syn_text())
+    path = os.path.join(out, "agent.pt")
+    src = torch.load(path, weights_only=False)["state"]["source.weight"]
+    keys = SZ.build_keys(path, 8)
+    m = keys["F"][:D.END_ID, :src.shape[1]] * 2 ** 0.5                 # F = birim([birim(m) ; birim(kimlik)])
+    err = (m - src / src.norm(dim=1, keepdim=True)).abs().max().item()
+    check("meaning -> build_keys: source.weight (50.257 x d) okunur, F'nin meaning yarisi = birim(source)",
+          src.shape == (D.END_ID, 16) and keys["F"].shape == (D.VOCAB, 512) and err < 1e-5, "fark %.1e" % err)
+    torch.manual_seed(0)
+    model = SentenceTransformer(keys, d=16, layers=2, heads=2).eval()
+    batch = real_batch([[0, 1], [2]], 40)
+    with torch.no_grad():
+        h = model._batch_hidden(batch)
+    sents = [s for st in STORIES for s in st]
+    check("meaning -> build_keys -> gercek build_batch ileri hesap sonlu; z geri acma birebir",
+          bool(torch.isfinite(h).all()) and SZ.decode_z(keys, model._z(sents, "cpu"), max_len=8) == sents)
+
+
+def t_meaning_valid():
+    """Gercek SS valid'in kucuk kismi (Drive): ilk 300 hikaye egitim, sonraki 100 olcu; birkac adim, gercek tokenizer."""
+    import train_meaning as TM
+    if not os.path.exists(os.path.join(DRIVE_OFFSETS, "valid_sentence_offsets.npy")):
+        check("meaning: gercek valid (Drive yok, ATLANDI)", True)
+        return
+    vs = D.TokenStories(DRIVE_ROOT, DRIVE_OFFSETS, "valid")
+    part = lambda a, b: SimpleNamespace(stream=vs.stream, sent=vs.sent[vs.story[a]:vs.story[b]],  # noqa: E731
+                                        story=vs.story[a:b + 1] - vs.story[a])
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(os.path.join(DRIVE_ROOT, "gpt2", "tokenizer.json"))
+    text = [tok.decode([i]) for i in range(TM.V)]
+    enc = lambda s: tok.encode(s, add_special_tokens=False).ids  # noqa: E731
+    win = TM.Windows(vs.stream, vs.sent[:vs.story[300]], vs.story[:301], 5, torch.device("cpu"), TM.glue_tables(text))
+    ids, present, same = win.batch(torch.arange(win.n), same_word=True)
+    sw, am = enc(" swam")
+    rows = [b for b in range(win.n) if {sw, am} <= set(ids[b][present[b]].tolist())]
+    hit = [bool(same[b, (ids[b] == sw).nonzero()[0, 0], (ids[b] == am).nonzero()[0, 0]]) for b in rows]
+    check("meaning (gercek valid): ' sw'+'am' ayni pencerede -> oy veremez; maske dolu", len(rows) > 0 and all(hit)
+          and bool(same.any()), "%d pencere, ayni-kelime cifti olan pencere %%%.1f" % (
+              len(rows), 100 * same.flatten(1).any(1).float().mean()))
+    a = TM.parse(["--d", "32", "--batch", "64", "--epochs", "1", "--lr", "0.05"])     # lr: 100 adimda unigram ogrenilsin
+    _, hist = TM._train(a, part(0, 300), part(300, 400), text, enc)
+    h = hist[-1]
+    check("meaning (gercek valid): 1 epok (300 hikaye, ~106 adim) kayip sonlu, valid kaybi ln V'nin 1 nat alti; olcu ve "
+          "goz listesi calisir (kalite degil: yol)", math.isfinite(h["train_loss"]) and h["valid"]["nll"] < math.log(TM.V) - 1
+          and h["valid"]["targets"] > 0 and h["valid"]["bands"]["parca"]["targets"] > 0,
+          "kayip %.3f, valid %s" % (h["train_loss"], h["valid"]))
+
+
+class _Crash(Exception):
+    pass
+
+
+def t_meaning_resume_mid():
+    """Epok ICI kayit (--checkpoint_minutes, kullanici 6 Ekim: "en fazla 10 dk kayıp"): epok 1 ve epok 2 ortasinda kesilip
+    surdurulen = kesintisiz (veri sirasi, seyreltme maskesi / RNG, Adam, kayip toplami, olcu gecmisi birebir)."""
+    import train_meaning as TM
+    st, va, text = _syn_stories(60, 0), _syn_stories(20, 1), _syn_text()
+    old_save = TM._save
+    kw = dict(checkpoint_minutes=0)                                    # her adimdan once kayit
+    try:
+        ref_dir = os.path.join(TMP, "mid_ref")
+        TM._train(_meaning_args(ref_dir, **kw), st, va, text)
+        A = torch.load(os.path.join(ref_dir, "agent.pt"), weights_only=False)
+        ca = torch.load(os.path.join(ref_dir, "checkpoint.pt"), weights_only=False)
+        hist = [{k: v for k, v in h.items() if k != "seconds"} for h in A["history"]]
+        for cut in ((0, 3 * 16), (1, 5 * 16)):                         # (biten epok, siradaki pencere)
+            out = os.path.join(TMP, "mid_%d_%d" % cut)
+
+            def crash(obj, path, cut=cut):
+                old_save(obj, path)
+                if (obj.get("epoch"), obj.get("pos")) == cut:
+                    raise _Crash
+            TM._save = crash
+            try:
+                TM._train(_meaning_args(out, **kw), st, va, text)
+                crashed = False
+            except _Crash:
+                crashed = True
+            TM._save = old_save
+            pos = torch.load(os.path.join(out, "checkpoint.pt"), weights_only=False)["pos"]
+            TM._train(_meaning_args(out, resume=1, checkpoint_minutes=30), st, va, text)   # aralik kimlige girmez
+            B = torch.load(os.path.join(out, "agent.pt"), weights_only=False)
+            cb = torch.load(os.path.join(out, "checkpoint.pt"), weights_only=False)
+            same_w = all(torch.equal(A["state"][k], B["state"][k]) for k in A["state"])
+            same_o = all(torch.equal(x, y) for sa, sb in zip(ca["opt"]["state"].values(), cb["opt"]["state"].values())
+                         for x, y in zip(sa.values(), sb.values()))
+            hist_b = [{k: v for k, v in h.items() if k != "seconds"} for h in B["history"]]
+            check("meaning: epok %d ortasinda (pencere %d) kesilip surdurulen = kesintisiz (agirlik, Adam, gen, epok "
+                  "kaybi, olcu gecmisi)" % (cut[0] + 1, cut[1]), crashed and pos == cut[1] and same_w and same_o
+                  and torch.equal(ca["gen"], cb["gen"]) and hist == hist_b)
+    finally:
+        TM._save = old_save
+
+
+def t_generate_longest():
+    """B2 (belge 26): generate'te max_tokens > longest -> cumle longest'te kesilir (ended False), encode_z durmaz."""
+    keys, model = keys_and_model(longest=8)
+    model.END = model.EOS = -1                                         # cumle hic bitmesin: yalniz sinirlar keser
+    try:
+        gen, ended, _ = model.generate([STORIES[0][:1]], max_sentences=2, max_tokens=20)[0]
+        ok = [len(s) for s in gen] == [8, 8] and ended == [False, False]
+    except AssertionError:
+        ok = False
+    gen5, _, _ = model.generate([STORIES[0][:1]], max_sentences=2, max_tokens=5)[0]
+    check("generate: max_tokens 20 > longest 8 -> cumleler 8 token, ended False; max_tokens 5 < longest -> 5",
+          ok and [len(s) for s in gen5] == [5, 5])
+
+
+TESTS = dict(z=t_z, layout=t_layout, cache=t_cache, flex=t_flex, direct=t_direct, meaning=t_meaning,
+             meaning_resume=t_meaning_resume, meaning_keys=t_meaning_keys, meaning_valid=t_meaning_valid,
+             meaning_resume_mid=t_meaning_resume_mid, generate_longest=t_generate_longest)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)
