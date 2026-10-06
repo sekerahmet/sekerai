@@ -29,6 +29,11 @@ elde ederiz"*):
 SS (milestone 1) sağlamlığı sınar: tabana yakın kayıp, tabandan kötü olmayan açgözlü `sentence_repeat`, okunur hikâye.
 Hipotez 1–2 uzun metinde (milestone 2) sınanır.
 
+Hız, ilk işaret (6 Ekim; ÖLÇÜLDÜ ama temiz değil): SS eğitiminde Model Z ~27.800 cümle/sn, tam bağlamlı taban ~16.400
+cümle/sn (iki koşu aynı GPU'da paralel; Model Z tek başınayken ~30.000). Claude'un "SS'te eğitimde Model Z hızlı olamaz"
+hesabı (yalnız FLOP; dolgu ve uzun dizide attention'ın gerçek maliyeti sayılmadı) bu gözlemle çelişiyor. Temiz kıyas: tek
+başına koşu, aynı batch düzeni, üretimde KV cache.
+
 ## Son yapı (5 Ekim)
 
 Kullanıcı, 5 Ekim 2026: *"Artık meaning , gramer ve transformer var . Son yapımız var"*. Üç parça; cümle tek vektör z,
