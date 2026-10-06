@@ -14,8 +14,9 @@ Olcu: epok sonunda ve bitiste metrics.exam_scores (exam_pack_plan.npz; egitimle 
 Cikti: config.json, checkpoint.pt, decay_start/, results.json, agent.pt, samples.txt, samples.json.  Ek okuma kayitli
 kosudan: generate_readings.py.
 
-Model Z (belge 33): z modelin ogrenilen E'sinden (eski --own_vocab yolu, tek yol).  Meaning / ortak sozluk / open_z ile
-egitilmis kosular (identity) bu kodla yuklenmez ve surdurulmez: git etiketi v2-before-cleanup-20261006.
+Model Z (belge 33): z modelin ogrenilen E'sinden (eski --own_vocab yolu, tek yol).  Temizlik oncesi kosular
+surdurulmez / uzatilmaz (kullanici, 6 Ekim: "eski koşuları uzatma niyetim yok"); okumada (_archived) eski transformer ve
+eski own_vocab Model Z yuklenir, oteki eski Model Z'ler durur.  Eski kod: git etiketi v2-before-cleanup-20261006.
 
     python train.py --model transformer|model_z --lr LR --out <kosu> [--data <v2/simplestories_gpt2>]
                     [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
@@ -48,8 +49,9 @@ LOG_EVERY = 100             # adim; gunluk satiri = bir hiz penceresi
 READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
 READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
-IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "meaning_sha256", "longest", "row_len", "batch_rows",
-            "train_stream_sha256", "shared_vocab", "own_vocab", "open_z")    # adlar temizlik oncesiyle ayni (belge 33)
+IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256")
+LEGACY = ("meaning_sha256", "shared_vocab", "own_vocab", "open_z")   # temizlik oncesi kimlik alanlari (belge 33)
+TAG = "v2-before-cleanup-20261006"
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -114,21 +116,18 @@ def _schedule(train, data_dir, seed, epochs, steps):
             return plans, per, row_len, steps if steps is not None else sum(per)
 
 
-def _identity_flags(model):
-    """Kimligin z alanlari (adlar temizlik oncesiyle ayni; belge 33 s1.3): Model Z = eski own_vocab yolu."""
-    return dict(meaning_sha256=None, shared_vocab=0, own_vocab=int(model == "model_z"), open_z=0)
-
-
 def _archived(idt):
-    """Kimlik bu kodun kuramayacagi bir kosununsa ileti, yoksa None.  Eski Model Z (iota + meaning) agirlik sekilleri
-    bugunkuyle AYNI: strict yukleme hata vermez, z yanlis anahtarla kurulur (belge 33 s5) -- bu yuzden kimlikten durur."""
-    want = _identity_flags(idt.get("model"))
-    got = {k: idt.get(k, 0 if k != "meaning_sha256" else None) for k in want}
-    if got == want:
+    """Okuma (load_run): kimlik bu kodla kurulamiyorsa ileti, yoksa None.  Eski transformer ve eski own_vocab=1 Model Z
+    (agirliklari yeni varsayilanla bit duzeyinde ayni; belge 33 adim 4) yuklenir.  Oteki eski Model Z'ler (iota +
+    meaning, ortak sozluk, open_z) durur: iota'li olanin agirlik sekilleri AYNI, strict yukleme hata vermez, z yanlis
+    anahtarla kurulurdu (sessiz hata; olculdu)."""
+    if idt.get("model") != "model_z" or not any(k in idt for k in LEGACY):
         return None
-    return ("kosu temizlik oncesi bir yolla egitildi (%s); bu kodla yuklenmez / surdurulmez -- git etiketi "
-            "v2-before-cleanup-20261006 (git worktree add <klasor> v2-before-cleanup-20261006)" % {
-                k: v for k, v in got.items() if v != want[k]})
+    old = {k: idt.get(k) for k in LEGACY}
+    if old == dict(meaning_sha256=None, shared_vocab=0, own_vocab=1, open_z=0):
+        return None
+    return "kosu temizlik oncesi bir Model Z yoluyla egitildi (%s); bu kodla yuklenmez -- git etiketi %s (git worktree " \
+           "add <klasor> %s)" % (old, TAG, TAG)
 
 
 def _build(args, longest, dev):
@@ -290,7 +289,7 @@ def main(argv=None):
                             **({"fused": True} if cuda else {}))
     ident = dict(model=args.model, d=args.d, layers=args.layers, heads=args.heads, lr=args.lr, seed=args.seed,
                  longest=train.max_sentence_tokens, row_len=row_len, batch_rows=BATCH_ROWS,
-                 train_stream_sha256=train.meta["stream_sha256"], **_identity_flags(args.model))
+                 train_stream_sha256=train.meta["stream_sha256"])
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -305,11 +304,10 @@ def main(argv=None):
         if not os.path.exists(ckpt):
             sys.exit("DUR: surdurme paketi yok: %s (bastan baslamaz)" % ckpt)
         peek = torch.load(ckpt, map_location="cpu", weights_only=False, mmap=True)   # kimlik YUKLEMEDEN once: d farki
-        was, old = peek["args"], peek["plan"]                             # load_state_dict'te patlamasin, eski Model Z
-        del peek                                                          # sessizce yuklenmesin (_archived)
-        if _archived(was):
-            sys.exit("DUR: " + _archived(was))
-        was = {"shared_vocab": 0, "own_vocab": 0, "open_z": 0, **was}     # alansiz eski transformer checkpoint'i: 0
+        was, old = peek["args"], peek["plan"]                             # load_state_dict'te patlamasin
+        del peek
+        if any(k in was for k in LEGACY):                                 # kullanici, 6 Ekim: eski kosu uzatilmaz
+            sys.exit("DUR: temizlik oncesi kosu surdurulmez / uzatilmaz (kullanici, 6 Ekim); eski kod: git etiketi %s" % TAG)
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:

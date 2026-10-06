@@ -45,6 +45,32 @@ TMP = tempfile.mkdtemp(prefix="tests_v2_")
 atexit.register(shutil.rmtree, TMP, True)          # train grubu ~200 MB birakiyordu
 RESULTS = []
 
+GOLDEN_TORCH = "2.14.0+cpu"     # belge 33 adim 4: v2-before-cleanup-20261006 --own_vocab 1 ile bit duzeyinde ayni olculdu
+GOLDEN = {
+ "transformer": {
+  "first6": [
+   10.8394,
+   10.597,
+   10.3123,
+   10.0434,
+   9.7698,
+   9.4932
+  ],
+  "sha": "960799ace9cc5ec81208fa6002fd7ef35d087b2a3af6a93b582e63f8be0c96ea"
+ },
+ "model_z": {
+  "first6": [
+   10.8346,
+   10.6259,
+   10.3602,
+   10.0859,
+   9.8245,
+   9.5621
+  ],
+  "sha": "654ac2820cf7d28f7e0c0bff79e4181e2b447bedc0b6454867385c71bf21ad68"
+ }
+}
+
 
 def check(name, ok, info=""):
     RESULTS.append((name, bool(ok)))
@@ -725,42 +751,55 @@ def t_train():
         json.dump(meta, open(bj, "w"))
         check("train _local_copy: bayt bayt kopya; bozuk kopya yeniden kopyalanir; sinir dosyasinin sha'si tutmazsa durur",
               ok1 and ok2 and ok3)
+        for model in ("transformer", "model_z"):                       # sabit deger (belge 33 adim 4)
+            if torch.__version__ != GOLDEN_TORCH:
+                print("ATLANDI: sabit deger torch %s ile, burada %s" % (GOLDEN_TORCH, torch.__version__), flush=True)
+                break
+            g = TR.main(base + ["--model", model, "--steps", "6", "--out", out("golden_" + model)])
+            st_ = torch.load(os.path.join(out("golden_" + model), "agent.pt"), weights_only=False)["state"]
+            per = {k: hashlib.sha256(v.contiguous().numpy().tobytes()).hexdigest() for k, v in st_.items()}
+            whole = hashlib.sha256("".join(k + per[k] for k in sorted(per)).encode()).hexdigest()
+            check("train %s: sabit deger (temizlik oncesi --own_vocab 1 / transformer ile bit duzeyinde ayni olculen "
+                  "kosu): ilk 6 kayip ve agirlik sha256" % model, [w["loss"] for w in g["log"]][:6] == GOLDEN[model][
+                      "first6"] and whole == GOLDEN[model]["sha"], whole[:16])
         import generate_readings as GR
-        old = out("pre_flag")                                            # z alanlari eklenmeden onceki transformer kosusu
-        TR.main(cmd + ["--steps", "3", "--out", old])
-        for name, key in (("checkpoint.pt", "args"), ("agent.pt", "identity")):
-            pack = torch.load(os.path.join(old, name), weights_only=False)
-            for k in ("meaning_sha256", "shared_vocab", "own_vocab", "open_z"):
-                del pack[key][k]
-            torch.save(pack, os.path.join(old, name))
-        r = TR.main(cmd + ["--steps", "3", "--out", old, "--resume", "1"])
-        GR.load_run(old, data, torch.device("cpu"))
+        legacy = lambda d, **kv: (d.update({k: kv.get(k, 0) for k in TR.LEGACY}), d)[1]  # noqa: E731
+        st = D.TokenStories(root, data, "train")
+        dev = torch.device("cpu")
+        msgs, loads = {}, {}
+        for kind, src, kv in (("tf", out("transformer_A"), dict(meaning_sha256=None)),
+                              ("own", out("model_z_A"), dict(meaning_sha256=None, own_vocab=1)),
+                              ("iota", out("model_z_A"), dict(meaning_sha256="0" * 64))):
+            dst = out("legacy_" + kind)                                   # temizlik oncesi kimlikli kopya
+            shutil.copytree(src, dst)
+            for name, key in (("checkpoint.pt", "args"), ("agent.pt", "identity")):
+                pack = torch.load(os.path.join(dst, name), weights_only=False)
+                legacy(pack[key], **kv)
+                if kind == "iota":
+                    del pack[key]["own_vocab"], pack[key]["shared_vocab"], pack[key]["open_z"]   # e6e7847 kimligi
+                torch.save(pack, os.path.join(dst, name))
+            mt = os.path.getmtime(os.path.join(dst, "checkpoint.pt"))
+            msgs[kind] = (_exit_msg(TR.main, base + ["--model", "model_z" if kind != "tf" else "transformer",
+                                                     "--epochs", "3", "--out", dst, "--resume", "1"]) or "",
+                          os.path.getmtime(os.path.join(dst, "checkpoint.pt")) == mt)
+            loads[kind] = _exit_msg(GR.load_run, dst, data, dev)
+        m = GR.load_run(out("legacy_own"), data, dev)[0]
+        same_w = same(m.state_dict(), state(out("model_z_A")))
+        silent = not _raises(Exception, TR._build(TR._args(base + ["--model", "model_z", "--out", "x"]),
+                                                  st.max_sentence_tokens, dev)[0].load_state_dict,
+                             torch.load(os.path.join(out("legacy_iota"), "agent.pt"), weights_only=False)["state"])
+        fresh = json.load(open(os.path.join(out("model_z_A"), "config.json")))["identity"]
+        check("train: eski kimlikli checkpoint SURDURULMEZ (transformer, own, iota; iletide etiket, dosyaya dokunulmaz); "
+              "yeni kimlikte eski alanlar yok", all(TR.TAG in msg and kept for msg, kept in msgs.values())
+              and not set(fresh) & set(TR.LEGACY), msgs["own"][0][:120])
+        check("load_run: eski transformer ve eski own_vocab=1 Model Z yuklenir (agirlik ayni); eski iota Model Z DURUR "
+              "(iletide etiket; agirlik sekilleri ayni, strict yukleme hatasiz = sessiz risk)",
+              loads["tf"] is None and loads["own"] is None and same_w and TR.TAG in (loads["iota"] or "") and silent,
+              (loads["iota"] or "")[:120])
         gone = [base + ["--model", "model_z", a, v, "--out", out("gone%d" % i)] for i, (a, v) in enumerate(
             (("--meaning", "x.pt"), ("--own_vocab", "1"), ("--shared_vocab", "1"), ("--open_z", "2")))]
-        check("train: z alanlari olmayan eski transformer checkpoint'i surdurulur ve load_run kurar; kaldirilan argumanlar "
-              "(--meaning, --own_vocab, --shared_vocab, --open_z) veri yuklenmeden DURUR", r["finished"]
-              and all(exits(c) and not os.path.exists(c[-1]) for c in gone))
-        arch = out("mz_archived")                                       # temizlik oncesi Model Z (iota + meaning) kimligi
-        shutil.copytree(out("model_z_A"), arch)
-        for name, key in (("checkpoint.pt", "args"), ("agent.pt", "identity")):
-            pack = torch.load(os.path.join(arch, name), weights_only=False)
-            for k in ("shared_vocab", "own_vocab", "open_z"):
-                del pack[key][k]
-            pack[key]["meaning_sha256"] = "0" * 64
-            torch.save(pack, os.path.join(arch, name))
-        st = D.TokenStories(root, data, "train")
-        m = TR._build(TR._args(base + ["--model", "model_z", "--out", "x"]), st.max_sentence_tokens,
-                      torch.device("cpu"))[0]
-        silent = _raises(Exception, m.load_state_dict, torch.load(os.path.join(arch, "agent.pt"),
-                                                                    weights_only=False)["state"]) is False
-        mt = os.path.getmtime(os.path.join(arch, "checkpoint.pt"))
-        msg_load = _exit_msg(GR.load_run, arch, data, torch.device("cpu")) or ""
-        msg_resume = _exit_msg(TR.main, base + ["--model", "model_z", "--epochs", "3", "--out", arch, "--resume", "1"]) or ""
-        tag = "v2-before-cleanup-20261006"
-        check("train: temizlik oncesi Model Z kimligi (iota + meaning; agirlik sekilleri AYNI, strict yukleme hatasiz = "
-              "sessiz risk) load_run ve surdurmede DURUR, iletide git etiketi; checkpoint'e dokunulmaz",
-              silent and tag in msg_load and tag in msg_resume
-              and os.path.getmtime(os.path.join(arch, "checkpoint.pt")) == mt, msg_resume[:160])
+        check("train: kaldirilan argumanlar (--meaning, --own_vocab, --shared_vocab, --open_z) veri yuklenmeden DURUR",
+              all(exits(c) and not os.path.exists(c[-1]) for c in gone))
     except Exception:  # noqa: BLE001
         check("train", False, traceback.format_exc(limit=3))
     finally:
