@@ -47,11 +47,17 @@ def t_readings():
     same_prompts = os.path.join(root, "reading_prompts_same.json")
     shutil.copyfile(prompts, same_prompts)
     sha = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()  # noqa: E731
+    variants = [("transformer", []), ("model_z", [])]
+    if T2._learned_z_ready():
+        variants.append(("model_z_learned", ["--learned_z", "1"]))       # belge 35 (b); load_run kimlikten okur
+    else:
+        print("BEKLIYOR readings: learned_z modeli yok", flush=True)
     try:
-        for model in ("transformer", "model_z"):
-            run = os.path.join(T2.TMP, "runs_readings", model)
+        for name, extra in variants:                                       # name: model ya da model_z_learned
+            model = name.split("_learned")[0]
+            run = os.path.join(T2.TMP, "runs_readings", name)
             TR.main(base + ["--model", model, "--d", "16", "--layers", "1", "--heads", "2", "--lr", "1e-2", "--steps", "6",
-                            "--out", run, "--checkpoint_minutes", "0"])
+                            "--out", run, "--checkpoint_minutes", "0"] + extra)
             before = {n: (sha(os.path.join(run, n)), os.path.getmtime(os.path.join(run, n))) for n in TR.OUTPUTS}
             r = GR.main(base + ["--out", run, "--prompts", same_prompts])
             sj = json.load(open(os.path.join(run, "samples.json"), encoding="utf-8"))
@@ -60,26 +66,26 @@ def t_readings():
             after = {n: (sha(os.path.join(run, n)), os.path.getmtime(os.path.join(run, n))) for n in TR.OUTPUTS}
             labels = [x["label"] for x in sj["rows"]]
             check("readings %s: kayitli agent.pt'den ayni istemler = train.py samples.json (satirlar ve olculer birebir, "
-                  "greedy + sample); samples_same.txt = samples.txt; reproduced hepsi ayni" % model,
+                  "greedy + sample); samples_same.txt = samples.txt; reproduced hepsi ayni" % name,
                   new["rows"] == sj["rows"] and new["generation"] == sj["generation"] and r["rows"] == sj["rows"]
                   and txt == open(os.path.join(run, "samples.txt"), encoding="utf-8").read()
                   and new["reproduced"]["same"] == labels and new["reproduced"]["different"] == []
                   and new["reproduced"]["generation"] == sj["generation"]
                   and sum(len(x["story_text"].split()) for x in sj["rows"]) > 0,
                   " | ".join(x["story_text"].replace("\n", " / ")[:40] for x in new["rows"]))
-            check("readings %s: kosu dosyalari (%s) degismedi" % (model, ", ".join(TR.OUTPUTS)), before == after)
+            check("readings %s: kosu dosyalari (%s) degismedi" % (name, ", ".join(TR.OUTPUTS)), before == after)
             gk = {"story_loop", "story_loop_prompts", "sentence_repeat_by_prompt", "sentence_repeat", "word_loop"}
-            check("readings %s: samples_<ek>.json olculeri (story_loop, sentence_repeat_by_prompt ...) ve kaynak" % model,
+            check("readings %s: samples_<ek>.json olculeri (story_loop, sentence_repeat_by_prompt ...) ve kaynak" % name,
                   all(gk <= set(g) for g in new["generation"].values()) and new["source"]["prompts_sha256"] == sha(
                       same_prompts) and new["source"]["identity"]["model"] == model)
             sj["rows"][1]["story_text"] += "\nX"                          # bozuk samples.json: fark yakalanir
             json.dump(sj, open(os.path.join(run, "samples.json"), "w", encoding="utf-8"))
             r2 = GR.main(base + ["--out", run, "--prompts", same_prompts])
-            check("readings %s: samples.json'dan farkli metin reproduced.different'ta" % model,
+            check("readings %s: samples.json'dan farkli metin reproduced.different'ta" % name,
                   r2["reproduced"]["different"] == [labels[1]] and r2["reproduced"]["same"] == [labels[0], labels[2]])
-            check("readings %s: reading_prompts.json (samples.* uzerine yazar) DURUR" % model,
+            check("readings %s: reading_prompts.json (samples.* uzerine yazar) DURUR" % name,
                   T2._raises(AssertionError, GR.main, base + ["--out", run, "--prompts", prompts]))
-            if model == "model_z":
+            if name == "model_z":
                 pack = torch.load(os.path.join(run, "agent.pt"), weights_only=False)
                 pack["identity"]["meaning_sha256"] = "0" * 64              # temizlik oncesi iota + meaning kimligi
                 torch.save(pack, os.path.join(run, "agent.pt"))

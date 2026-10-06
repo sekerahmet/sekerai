@@ -1,7 +1,7 @@
 """tests_model_z -- V2-Model Z testleri (CPU; belge 21, 22, 33).  GPU yok, Drive yok.  Meaning / ortak sozluk / open_z
 testleri arsivde (arsiv/v2_20261006/model_z/tests_model_z.py; git etiketi v2-before-cleanup-20261006).
 
-    python tests_model_z.py [--only z,z_flat,layout,cache,flex,direct,generate_longest,equiv]
+    python tests_model_z.py [--only z,z_flat,layout,cache,flex,direct,generate_longest,learned,equiv]
 """
 import os
 import sys
@@ -35,6 +35,10 @@ import numpy as np  # noqa: E402
 
 import sentence_z as SZ  # noqa: E402
 from sentence import BOS, PAD, TOKEN, ZTOK, SentenceTransformer, SummaryCache, _dense, model_z_mask  # noqa: E402
+try:
+    from sentence import model_z_read_mask
+except ImportError:                     # equiv: etiketteki eski kodda yok
+    model_z_read_mask = None
 import data as D  # noqa: E402  (sentence_z common/'u yola ekledi)
 
 FIRST, MID, END_T, EOS_T = D.TargetKind.FIRST, D.TargetKind.MID, D.TargetKind.END, D.TargetKind.EOS
@@ -431,6 +435,124 @@ def t_generate_longest():
           ok and [len(s) for s in gen5] == [5, 5])
 
 
+# --- learned_z (belge 35 Yol A (b); kullanici, 6 Ekim: "formüllü Z üzerine yatırım yapmıyoruz")
+def ref_read_mask(kind, doc):
+    """Bagimsiz basvuru (dongulu): cumle kimligi ZTOK sayimindan (sent alani kullanilmaz).  q kv'yi gorur: ayni hikaye,
+    kv <= q, ve kv BOS / ZTOK ya da (kv TOKEN, q TOKEN ya da ZTOK, ayni cumle); dolgu dolguyu."""
+    B, T = kind.shape
+    out = torch.zeros(B, T, T, dtype=torch.bool)
+    for b in range(B):
+        sid, nz, last = [], 0, None
+        for j in range(T):
+            if doc[b, j] != last:
+                nz, last = 0, doc[b, j]
+            sid.append(nz)                                                  # Z_k kendi cumlesini kapatir
+            nz += int(kind[b, j] == ZTOK)
+        for q in range(T):
+            for kv in range(q + 1):
+                kq, kk = int(kind[b, q]), int(kind[b, kv])
+                if doc[b, q] != doc[b, kv]:
+                    continue
+                if kq == PAD or kk == PAD:
+                    out[b, q, kv] = kq == PAD and kk == PAD
+                    continue
+                out[b, q, kv] = kk in (BOS, ZTOK) or (kk == TOKEN and kq in (TOKEN, ZTOK) and sid[q] == sid[kv])
+    return out
+
+
+def learned_model(d=32, layers=2, heads=2):
+    torch.manual_seed(0)
+    return SentenceTransformer(None, d=d, layers=layers, heads=heads, learned_z=True).eval()
+
+
+def t_learned():
+    """learned_z: model_z_read_mask = basvuru; z parcasi yok; nedensellik; gecmisin tek yolu okuma (gradyan); onbellek =
+    tam hesap; flex = dense; gercek build_batch."""
+    rng = np.random.default_rng(0)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 14))] for _ in range(rng.integers(1, 6))]
+               for _ in range(30)]
+    rows = [list(range(i, i + 5)) for i in range(0, 30, 5)]
+    batch = real_batch(rows, 300, stories)
+    B, T = batch.kind.shape
+    got = _dense(model_z_read_mask(batch.kind, batch.doc, batch.sent), B, T, "cpu")
+    old = _dense(model_z_mask(batch.kind, batch.doc, batch.sent), B, T, "cpu")
+    extra = got & ~old
+    ntok = int((batch.kind == TOKEN).sum())
+    check("learned: model_z_read_mask = dongulu basvuru (gercek build_batch, 30 hikaye); bos satir yok; = model_z_mask + "
+          "yalniz ZTOK satirlarinda kendi cumlesinin token'lari (ek = token sayisi)",
+          torch.equal(got, ref_read_mask(batch.kind, batch.doc)) and bool(got.any(-1).all()) and bool((old <= got).all())
+          and not extra[batch.kind != ZTOK].any() and int(extra.sum()) == ntok, "ek %d, token %d" % (int(extra.sum()), ntok))
+    m = learned_model()
+    names = set(dict(m.named_parameters()))
+    check("learned: anahtar / z_norm / z_in yok (keys None kabul), mask_fn = model_z_read_mask; formullu yol ayni",
+          m.keys is None and not any(n.startswith(("z_norm", "z_in")) for n in names)
+          and m.mask_fn is model_z_read_mask and keys_and_model()[1].mask_fn is model_z_mask)
+    with torch.no_grad():
+        h0 = m._batch_hidden(batch)
+    bad, read = 0, True
+    cols = (batch.kind[0] == TOKEN).nonzero()[:, 0].tolist()[::3]
+    for c in cols:
+        tk = batch.tokens.clone()
+        tk[0, c] = (tk[0, c] + 7) % D.END_ID
+        with torch.no_grad():
+            diff = (m._batch_hidden(dataclasses.replace(batch, tokens=tk)) - h0).abs().amax(-1)
+        bad += int((diff[0, :c] > 0).sum()) + int((diff[1:] > 0).sum())
+        zc = c + int((batch.kind[0, c:] == ZTOK).nonzero()[0, 0])          # ayni cumlenin Z'si
+        read &= bool(diff[0, zc] > 0)
+    check("learned: nedensellik (sutun c'deki token degisince c'den onceki konumlar ve diger satirlar birebir, %d deneme); "
+          "Z_k kendi cumlesindeki degisimi gorur" % len(cols), bad == 0 and read)
+    first = (batch.sent == 0) & (batch.kind == TOKEN)
+    keep = (batch.target >= 0) & (batch.sent >= 1) & (batch.kind == TOKEN)
+    only = [i for i in batch.tokens[first].unique().tolist()
+            if not (batch.tokens[~first] == i).any() and not (batch.target[keep] == i).any()]
+    g = {}
+    for name, fn in (("read", model_z_read_mask), ("model_z_mask", model_z_mask)):
+        m.zero_grad()
+        h = m._batch_hidden(batch, _dense(fn(batch.kind, batch.doc, batch.sent), B, T, "cpu"))
+        torch.nn.functional.cross_entropy(h[keep] @ m.E.weight.detach().T, batch.target[keep]).backward()   # cikis yolu kapali
+        g[name] = m.E.weight.grad[only].abs().sum().item()
+    check("learned: gecmisin tek yolu okuma -- 2. cumleden sonraki kayiptan yalniz 1. cumlede gecen %d token'in E "
+          "satirina gradyan: read_mask > 0, model_z_mask = 0" % len(only), len(only) > 10 and g["read"] > 0
+          and g["model_z_mask"] == 0, "%.2e / %.1e" % (g["read"], g["model_z_mask"]))
+    m.train()
+    m.zero_grad()
+    nll, _, _ = m.loss_per_target(batch)
+    nll.mean().backward()
+    check("learned: loss_per_target (gercek build_batch) sonlu; butun parametrelerin gradyani var (olu parametre yok)",
+          bool(torch.isfinite(nll).all()) and all(p.grad is not None and p.grad.abs().sum() > 0 for p in m.parameters()))
+    m.eval()
+    with torch.no_grad():
+        lg_full, _ = full_logits(m, batch)
+        got_l = []
+        for row in rows:
+            for si in row:
+                cache = SummaryCache(m)
+                got_l.append(cache.logits[None])
+                for s in stories[si]:
+                    for t in s:
+                        got_l.append(cache.append_token(t)[None])
+                    got_l.append(cache.close_sentence()[None])
+                    assert all(k is None for k in cache.sen_k)
+    d = (torch.cat(got_l) - lg_full).abs().max().item()
+    a = m.generate([stories[0][:1], stories[1][:2]], 3, 6, torch.Generator().manual_seed(0))
+    b = m.generate([stories[0][:1], stories[1][:2]], 3, 6, torch.Generator().manual_seed(0))
+    check("learned: SummaryCache (Z_k kendi cumlesine bakar, sonra cumle silinir) = tam hesap (fp32, %d hedef); generate "
+          "sinirlar, ayni tohum ayni metin" % len(lg_full), d < 1e-5 and a == b and all(
+              len(gen) <= 3 and all(len(x) <= 6 for x in gen) for gen, _, _ in a), "fark %.1e" % d)
+    try:
+        from torch.nn.attention.flex_attention import create_block_mask
+        b4 = real_batch(rows[:2], 384, stories)
+        bm = create_block_mask(model_z_read_mask(b4.kind, b4.doc, b4.sent), 2, None, 384, 384, device="cpu")
+        with torch.no_grad():
+            h1, h0 = m._batch_hidden(b4, bm), m._batch_hidden(b4)
+    except Exception as e:  # noqa: BLE001
+        print("ATLA learned flex: CPU'da kosmadi (%s)" % str(e).splitlines()[0][:120], flush=True)
+        return
+    keepf = b4.kind != PAD
+    d = (h1[keepf] - h0[keepf]).abs().max().item()
+    check("learned: model_z_read_mask BlockMask (flex, CPU ileri) = dense", d < 1e-4, "fark %.1e" % d)
+
+
 # --- eski kodla esdegerlik (belge 33 s5): etiketteki own_vocab yolu = bugunku varsayilan, bit duzeyinde
 def _equiv_side(old):
     """Ayni tohum, ayni veri: ilk agirlik, 3 AdamW adiminin kayip ve gradyanlari, son agirlik, z, generate."""
@@ -507,7 +629,7 @@ def t_equiv():
 
 
 TESTS = dict(z=t_z, z_flat=t_z_flat, layout=t_layout, cache=t_cache, flex=t_flex, direct=t_direct,
-             generate_longest=t_generate_longest, equiv=t_equiv)
+             generate_longest=t_generate_longest, learned=t_learned, equiv=t_equiv)
 
 if __name__ == "__main__":
     if SIDE is not None:

@@ -226,6 +226,9 @@ def t_pack():
     nz = [x.tolist() for x in m.nonzero(as_tuple=True)]
     check("z_flat = z_sentences mask.nonzero (ayni sira, int64, CPU numpy'dan); transformer'da None", zf == nz
           and all(x.dtype == torch.int64 for x in bz.z_flat) and bt.z_flat is None, str(zf))
+    check("ZTOK konumunun sent alani = kendi cumle numarasi (belge 35 Yol A okuma maskesi buna dayaniyor)",
+          bz.sent[bz.kind == K.ZTOK].tolist() == [0, 1, 2, 0, 0, 1] and torch.equal(bz.sent[zr, zc], torch.tensor(
+              [0, 1, 2, 0, 0, 1], dtype=bz.sent.dtype)), str(bz.sent[bz.kind == K.ZTOK].tolist()))
     check("z_slots ZTOK konumlarini, z_sentences o Z'nin cumlesini veriyor (cumle sirasiyla)",
           all(bz.kind[r, c] == K.ZTOK for r, c in zip(zr.tolist(), zc.tolist()))
           and zs == [[10, 11, 12], [13], [14, 15], [20, 21], [30], [31, 32, 33]] and bt.z_slots is None)
@@ -801,6 +804,10 @@ def t_train():
             (("--meaning", "x.pt"), ("--own_vocab", "1"), ("--shared_vocab", "1"), ("--open_z", "2")))]
         check("train: kaldirilan argumanlar (--meaning, --own_vocab, --shared_vocab, --open_z) veri yuklenmeden DURUR",
               all(exits(c) and not os.path.exists(c[-1]) for c in gone))
+        if _learned_z_ready():
+            _train_learned(base, root, data, out, state, same, exits, TR)
+        else:
+            print("BEKLIYOR: learned_z modeli yok (SentenceTransformer(learned_z) / model_z_read_mask)", flush=True)
     except Exception:  # noqa: BLE001
         check("train", False, traceback.format_exc(limit=3))
     finally:
@@ -821,6 +828,87 @@ def t_tokens():
     check("token_counts: parcali sayim = np.bincount (100.003 token, parca 7.919); dosya = donus; uzunluk GPT-2 sozlugu "
           "(EOS dahil); toplam = akis boyu", np.array_equal(c, want) and np.array_equal(disk, c)
           and len(c) == D.EOS_ID + 1 and int(c.sum()) == len(x) and c.dtype == np.int64)
+
+
+def _learned_z_ready():
+    """model_z/ learned_z'yi (belge 35 (b)) taniyor mu: SentenceTransformer(learned_z) ve model_z_read_mask."""
+    import inspect
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "model_z"))
+    import sentence as SM
+    return "learned_z" in inspect.signature(SM.SentenceTransformer).parameters and hasattr(SM, "model_z_read_mask")
+
+
+def _cut_and_resume(TR, cmd, out_dir):
+    """cmd'yi adim 4'teki checkpoint'ten hemen sonra kes, --resume 1 ile bitir -> (kesildi mi, sonuc)."""
+    import recipe as R
+    orig = R.Checkpoint.save
+
+    class Stop(Exception):
+        pass
+
+    def save_then_stop(dir_, *rest):
+        orig(dir_, *rest)
+        if rest[2] == 4 and os.path.basename(dir_) != "decay_start":
+            raise Stop()
+    R.Checkpoint.save = staticmethod(save_then_stop)
+    try:
+        TR.main(cmd + ["--out", out_dir])
+        stopped = False
+    except Stop:
+        stopped = True
+    finally:
+        R.Checkpoint.save = staticmethod(orig)
+    return stopped, TR.main(cmd + ["--out", out_dir, "--resume", "1"])
+
+
+def _train_learned(base, root, data, out, state, same, exits, TR):
+    """--learned_z 1 (belge 35 (b)) gercek SentenceTransformer ve gercek build_batch ile: kayip duser, kimlikte bayrak,
+    ilk adim (train._attn: model_z_read_mask) = modelin KENDI maskesiyle loss_per_target, okuma maskesi Z_k'ye kendi
+    cumlesini acar, kesilip surdurulen = kesintisiz, bayrak farkiyla surdurme ve transformer + bayrak DURUR."""
+    import traceback
+    import recipe as R
+    try:
+        cmd = base + ["--model", "model_z", "--learned_z", "1"]
+        A = out("mzl_A")
+        a = TR.main(cmd + ["--epochs", "2", "--out", A])
+        L = [w["loss"] for w in a["log"]]
+        st = D.TokenStories(root, data, "train")
+        m, mask_fn, layout = TR._build(TR._args(cmd + ["--out", "x"]), st.max_sentence_tokens, torch.device("cpu"))
+        f = np.load(os.path.join(data, "train_pack_plan_e1.npz"))
+        ro, rs = f["row_offsets"], f["row_stories"]
+        b = D.build_batch(st, [rs[ro[r]:ro[r + 1]].tolist() for r in range(4)], layout, "cpu", 64)
+        with torch.no_grad():
+            want = m.loss_per_target(b)[0].mean().item()                  # modelin kendi (recipe'siz) maskesi
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "model_z"))
+        from sentence import model_z_mask
+        read, base_m = R.dense_mask(b, mask_fn), R.dense_mask(b, model_z_mask)
+        z = b.kind == D.Kind.ZTOK
+        tok = b.kind == D.Kind.TOKEN
+        own = (b.sent[:, :, None] == b.sent[:, None, :]) & (b.doc[:, :, None] == b.doc[:, None, :]) & tok[:, None, :]
+        extra = read & ~base_m
+        check("train model_z --learned_z 1: 2 epok kosar, kayip duser; kimlikte learned_z 1; ilk adim (train._attn, "
+              "model_z_read_mask) = modelin kendi maskesiyle loss_per_target; okuma maskesi = model_z_mask + yalniz Z_k "
+              "satirinda kendi cumlesinin token'lari", np.mean(L[-3:]) < np.mean(L[:3]) - 0.5
+              and a["identity"]["learned_z"] == 1 and abs(a["log"][0]["loss"] - want) < 1e-4
+              and bool((base_m <= read).all()) and bool(extra.any()) and bool((extra <= (z[:, :, None] & own)).all())
+              and int(extra.sum()) == int((z[:, :, None] & own).sum()),
+              "kayip %.3f -> %.3f; ilk %.4f / %.4f; ek cift %d" % (np.mean(L[:3]), np.mean(L[-3:]), a["log"][0]["loss"],
+                                                                 want, int(extra.sum())))
+        stopped, bres = _cut_and_resume(TR, cmd + ["--epochs", "2"], out("mzl_B"))
+        check("train model_z --learned_z 1: adim 4'te kesilip surdurulen = kesintisiz (agirlik bit duzeyinde, sinav ayni)",
+              stopped and same(state(A), state(out("mzl_B"))) and bres["exam"] == dict(a["exam"],
+                                                                                         seconds=bres["exam"]["seconds"]))
+        mt = os.path.getmtime(os.path.join(A, "checkpoint.pt"))
+        plain = base + ["--model", "model_z"]
+        check("train: learned_z farkiyla surdurme checkpoint yuklenmeden DURUR (1 -> 0, 0 -> 1); transformer + "
+              "--learned_z 1 veri yuklenmeden DURUR",
+              exits(plain + ["--epochs", "2", "--out", A, "--resume", "1"])
+              and exits(cmd + ["--epochs", "2", "--out", out("model_z_A"), "--resume", "1"])
+              and os.path.getmtime(os.path.join(A, "checkpoint.pt")) == mt
+              and exits(base + ["--model", "transformer", "--learned_z", "1", "--out", out("tf_learned")])
+              and not os.path.exists(out("tf_learned")))
+    except Exception:  # noqa: BLE001
+        check("train model_z --learned_z 1", False, traceback.format_exc(limit=3).splitlines()[-1])
 
 
 def _exit_msg(fn, *a):

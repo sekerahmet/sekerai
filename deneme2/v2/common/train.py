@@ -20,7 +20,7 @@ eski own_vocab Model Z yuklenir, oteki eski Model Z'ler durur.  Eski kod: git et
 
     python train.py --model transformer|model_z --lr LR --out <kosu> [--data <v2/simplestories_gpt2>]
                     [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
-                    [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1]
+                    [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1] [--learned_z 1 (model_z)]
 """
 import torch  # noqa: I001  (Windows: torch once)
 
@@ -49,7 +49,8 @@ LOG_EVERY = 100             # adim; gunluk satiri = bir hiz penceresi
 READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
 READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
-IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256")
+IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
+            "learned_z")
 LEGACY = ("meaning_sha256", "shared_vocab", "own_vocab", "open_z")   # temizlik oncesi kimlik alanlari (belge 33)
 TAG = "v2-before-cleanup-20261006"
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
@@ -132,8 +133,12 @@ def _archived(idt):
 
 def _build(args, longest, dev):
     """-> (model, mask_fn, layout).  Model dosyalari yalniz burada import edilir.  Model Z: z modelin ogrenilen E'sinden
-    (belge 33; yarilar d / 2)."""
+    (belge 33; yarilar d / 2); learned_z (belge 35 (b); args'ta yoksa 0): Z_k girdisi E(END), Z_k kendi cumlesini okur
+    (model_z_read_mask).  Maske kurali yalniz burada secilir (egitim, sinav, teshis ayni yol)."""
     root = os.path.dirname(HERE)
+    learned = bool(getattr(args, "learned_z", 0))
+    if args.model == "transformer" and learned:
+        sys.exit("DUR: --learned_z yalniz model_z")
     torch.manual_seed(args.seed)
     if args.model == "transformer":
         sys.path.insert(0, os.path.join(root, "transformer"))
@@ -144,7 +149,11 @@ def _build(args, longest, dev):
     from sentence import SentenceTransformer, model_z_mask
     keys = SZ.build_keys(longest, args.d // 2)
     torch.manual_seed(args.seed)
-    return SentenceTransformer(SZ.keys_to(keys, dev), args.d, args.layers, args.heads).to(dev), model_z_mask, "model_z"
+    if not learned:                                                      # varsayilan: cagri temizlik sonrasiyla ayni
+        return SentenceTransformer(SZ.keys_to(keys, dev), args.d, args.layers, args.heads).to(dev), model_z_mask, "model_z"
+    from sentence import model_z_read_mask
+    model = SentenceTransformer(SZ.keys_to(keys, dev), args.d, args.layers, args.heads, learned_z=True).to(dev)
+    return model, model_z_read_mask, "model_z"
 
 
 def _attn(batch, mask_fn, cuda):
@@ -248,6 +257,8 @@ def _args(argv):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--resume", type=int, default=0)
+    ap.add_argument("--learned_z", type=int, default=0, choices=(0, 1),
+                    help="model_z: z ogrenilir (belge 35 (b)): Z_k girdisi E(END), Z_k kendi cumlesini okur")
     ap.add_argument("--checkpoint_minutes", type=float, default=10,
                     help="en cok bu kadar duvar saati kaybi (sinav dahil); surdurmede degistirilebilir")
     return ap.parse_args(argv)
@@ -257,6 +268,8 @@ def main(argv=None):
     args = _args(argv)
     t0 = time.time()
     log = lambda msg: print("[%7.1f sn] %s" % (time.time() - t0, msg), flush=True)  # noqa: E731
+    if args.learned_z and args.model == "transformer":                   # veri yuklenmeden (_build da durur)
+        sys.exit("DUR: --learned_z yalniz model_z")
     dev = torch.device(args.device)
     cuda = dev.type == "cuda"
     if cuda:                                                             # GPU kapisi (kural 5)
@@ -289,7 +302,7 @@ def main(argv=None):
                             **({"fused": True} if cuda else {}))
     ident = dict(model=args.model, d=args.d, layers=args.layers, heads=args.heads, lr=args.lr, seed=args.seed,
                  longest=train.max_sentence_tokens, row_len=row_len, batch_rows=BATCH_ROWS,
-                 train_stream_sha256=train.meta["stream_sha256"])
+                 train_stream_sha256=train.meta["stream_sha256"], learned_z=args.learned_z)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -308,6 +321,7 @@ def main(argv=None):
         del peek
         if any(k in was for k in LEGACY):                                 # kullanici, 6 Ekim: eski kosu uzatilmaz
             sys.exit("DUR: temizlik oncesi kosu surdurulmez / uzatilmaz (kullanici, 6 Ekim); eski kod: git etiketi %s" % TAG)
+        was = {"learned_z": 0, **was}                                     # learned_z'den onceki (temizlik sonrasi) kosu
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:
