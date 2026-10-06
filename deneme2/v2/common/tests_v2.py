@@ -1,6 +1,6 @@
 """tests_v2 -- V2 common/ testleri (CPU).  Gruplar: data (hizli; GPT-2 tokenizer'i yerel HF onbelleginden ya da Drive'dan,
 yoksa tokenizer'li sinamalar ATLANIR), pack (sentetik), recipe (maske, WSD, gruplar, surdurme, hiz), metrics (sentence_repeat,
-normalize_words, story_generation, exam_scores), integration (iki modelin loss_per_target'i
+normalize_words, story_generation, exam_scores), integration (iki modelin loss_per_target'i ve recipe.output_loss'u
 gercek build_batch ile; model dosyalari yalniz testte import edilir), drive (valid akisi: V1 ile birebir esleme, okuma istemleri).
 
     python tests_v2.py [--only data,pack,recipe,metrics,integration,drive]
@@ -443,6 +443,17 @@ def t_integration():
             e = M.exam_scores(model, st, (ro, rs), nb, layout, batch_rows=2)
             check("entegrasyon %s: exam_scores uctan uca" % layout, math.isfinite(e["loss"]) and e["stories"] == st.n,
                   "kayip %.3f bpb %.3f" % (e["loss"], e["bits_per_byte"]))
+            dense = R.dense_mask(b, mask_fn)
+            ws = (model.E.weight, model.blocks[0].qkv.weight)
+            la = R.output_loss(model._batch_hidden(b, dense).flatten(0, 1), model.E.weight, b.target.flatten())
+            ga = torch.autograd.grad(la, ws)
+            lb = model.loss_per_target(b, dense)[0].mean()
+            gb = torch.autograd.grad(lb, ws)
+            rel = max(((x - y).norm() / y.norm()).item() for x, y in zip(ga, gb))
+            rel_loss = abs(la.item() - lb.item()) / abs(lb.item())
+            check("entegrasyon %s: output_loss = loss_per_target ortalamasi (fp32 CPU; kayip ve E / qkv gradyani)"
+                  % layout, rel_loss < 1e-6 and rel < 1e-5,
+                  "kayip goreli farki %.1e, gradyan goreli %.1e" % (rel_loss, rel))
         except Exception:  # noqa: BLE001
             check("entegrasyon %s: loss_per_target(build_batch)" % layout, False,
                   traceback.format_exc(limit=2).splitlines()[-1])

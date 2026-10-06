@@ -8,12 +8,14 @@
     param_groups  AdamW: 2-B agirliklar decay'li (Model Z'nin z_in dahil); embedding, norm, bias, 1-B decay'siz.
     Checkpoint  model + optimizer + adim + plan + gecmis + args + RNG; .part'tan atomik; kesilip surdurulen = kesintisiz.
     SpeedWindow isinma sonrasi pencere: basta ve sonda synchronize; gercek (dolgusuz) token / sn ve duvar saati.
+    output_loss egitim kaybi: tam CE, CUDA'da derlenmis (belge 24 §5 A); sinav loss_per_target'la kalir.
 """
 import math
 import os
 import time
 
 import torch
+import torch.nn.functional as F
 
 from data import Kind
 
@@ -50,6 +52,23 @@ def block_mask(batch, mask_fn):
     mod = _with_padding(mask_fn(batch.kind, batch.doc, batch.sent), batch.kind, batch.doc)
     dev = batch.kind.device
     return create_block_mask(mod, B, None, T, T, device=dev, _compile=dev.type == "cuda")
+
+
+def _output_loss(h, weight, target):
+    return F.cross_entropy((h @ weight.T).float(), target, ignore_index=-100)
+
+
+_COMPILED = {}
+
+
+def output_loss(h, weight, target):
+    """h (N, d), weight (V, d), target (N,) (-100 hedefsiz) -> hedefli konumlarda ortalama CE (logit fp32).
+    CUDA'da derlenmis (bir kez sarilir), CPU'da eager (Windows'ta inductor icin MSVC yok)."""
+    if not h.is_cuda:
+        return _output_loss(h, weight, target)
+    if "output_loss" not in _COMPILED:
+        _COMPILED["output_loss"] = torch.compile(_output_loss, dynamic=False)
+    return _COMPILED["output_loss"](h, weight, target)
 
 
 def wsd_lr(step, total, peak, warmup=0.01, decay=0.2):

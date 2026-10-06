@@ -19,6 +19,18 @@ from sentence_z import encode_z
 from data import END_ID, EOS_ID, VOCAB, Kind  # noqa: E402  (sentence_z common/'u yola ekledi)
 
 BOS, TOKEN, END, ZTOK, PAD = Kind.BOS, Kind.TOKEN, Kind.END, Kind.ZTOK, Kind.PAD
+_ENCODE_Z_CUDA = None
+
+
+def _encode_z(keys, ids, mask):
+    """encode_z; CUDA'da torch.compile(dynamic=True), surec basina bir kez (belge 24 s5 C; olculdu 5,51 -> 0,47 ms, fark
+    1,2e-7).  CPU'da eager (Windows'ta inductor icin MSVC yok; testler bu yolda)."""
+    global _ENCODE_Z_CUDA
+    if not ids.is_cuda:
+        return encode_z(keys, ids, mask)
+    if _ENCODE_Z_CUDA is None:
+        _ENCODE_Z_CUDA = torch.compile(encode_z, dynamic=True)
+    return _ENCODE_Z_CUDA(keys, ids, mask)
 
 
 def rope(x, pos, base=10000.0):
@@ -150,16 +162,21 @@ class SentenceTransformer(torch.nn.Module):
         return self.norm(x)
 
     def _batch_hidden(self, batch, attn=None):
-        """PackedBatch (belge 21: tokens, kind, pos, doc, sent, z_slots, z_sentences) -> h; attn yoksa dense maske."""
+        """PackedBatch (belge 21: tokens, kind, pos, doc, sent, z_slots, z_sentences) -> h; attn yoksa dense maske.  z
+        dogrudan Z_k satirlarina yazilir (zvec / boolean indeks / .any() yok: GPU senkronu yok; belge 24 s5 B).  hidden()
+        ile ayni satirlar ayni sirayla (z_slots satir sirasiyla = kind == ZTOK sirasi)."""
         B, T = batch.tokens.shape
         dev = batch.tokens.device
-        zvec = torch.zeros(B, T, self.keys["z"], device=dev)
+        x = self.E(batch.tokens)
         ids, mask = batch.z_sentences                                       # (n_z, Lmax), Z_k'nin cumlesi (belge 21)
-        if len(ids):
-            zvec[batch.z_slots] = encode_z(self.keys, ids.to(dev), mask.to(dev))
+        if len(ids):                                                        # CPU tarafi uzunluk
+            z = _encode_z(self.keys, ids.to(dev), mask.to(dev))
+            x = x.index_put(batch.z_slots, self.z_in(self.z_norm(z)).to(x.dtype))
         if attn is None:
             attn = _dense(model_z_mask(batch.kind, batch.doc, batch.sent), B, T, dev)
-        return self.hidden(batch.tokens, batch.kind, batch.pos, zvec, attn)
+        for block in self.blocks:
+            x = block(x, batch.pos, attn)
+        return self.norm(x)
 
     def loss_per_target(self, batch, attn=None, chunk=4096):
         """-> nll (K,), pred (K,), target_kind (K,) (hedefli konumlar, satir sirasiyla; belge 21 s7 sozlesmesi)."""

@@ -1,9 +1,10 @@
 """tests_model_z -- V2-Model Z testleri (CPU; belge 21, 22).  Sentetik meaning gecici klasore yazilir; GPU / Drive yok.
 
-    python tests_model_z.py [--only layout,cache,flex,z]
+    python tests_model_z.py [--only layout,cache,flex,z,direct]
 """
 import os
 import sys
+import dataclasses
 import tempfile
 from types import SimpleNamespace
 
@@ -227,7 +228,66 @@ def t_flex():
           "en buyuk fark %.1e" % d)
 
 
-TESTS = dict(z=t_z, layout=t_layout, cache=t_cache, flex=t_flex)
+def old_batch_hidden(model, batch, kind=None):
+    """Eski yol (belge 24 s5 B oncesi): zvec (B, T, z) + hidden (_embed boolean indeks).  kind: _embed'e verilen (maske
+    her zaman batch.kind'dan)."""
+    B, T = batch.tokens.shape
+    zvec = torch.zeros(B, T, model.keys["z"])
+    ids, mask = batch.z_sentences
+    if len(ids):
+        zvec[batch.z_slots] = SZ.encode_z(model.keys, ids, mask)
+    attn = _dense(model_z_mask(batch.kind, batch.doc, batch.sent), B, T, "cpu")
+    return model.hidden(batch.tokens, batch.kind if kind is None else kind, batch.pos, zvec, attn)
+
+
+def _h_and_grads(model, fn, w):
+    model.zero_grad(set_to_none=True)
+    h = fn()
+    (h * w).sum().backward()
+    return h.detach(), {n: (None if p.grad is None else p.grad.clone()) for n, p in model.named_parameters()}
+
+
+def _diff(a, b):
+    """(h, grad) ciftleri -> en buyuk mutlak fark; grad'in biri None digeri degilse inf."""
+    d = (a[0] - b[0]).abs().max().item()
+    for n in a[1]:
+        ga, gb = a[1][n], b[1][n]
+        if (ga is None) != (gb is None):
+            return float("inf")
+        if ga is not None:
+            d = max(d, (ga - gb).abs().max().item())
+    return d
+
+
+def t_direct():
+    """_batch_hidden (z dogrudan Z_k satirlarina; belge 24 s5 B) = eski yol (hidden + zvec): cikti ve gradyan, fp32 CPU,
+    gercek build_batch."""
+    keys, model = keys_and_model()
+    model.train()
+    with torch.no_grad():                                               # z_norm birim olmasin: agirligi da sinansin
+        model.z_norm.weight.mul_(1 + 0.3 * torch.randn_like(model.z_norm.weight))
+    batch = real_batch([[0, 1], [2]], 40)
+    order = torch.nonzero(batch.kind == ZTOK, as_tuple=True)
+    check("z_slots satir sirasiyla = kind == ZTOK sirasi (gercek build_batch)",
+          all(torch.equal(a.long(), b) for a, b in zip(batch.z_slots, order)))
+    w = torch.randn(2, 40, 16, generator=torch.Generator().manual_seed(1))
+    new = _h_and_grads(model, lambda: model._batch_hidden(batch), w)
+    old = _h_and_grads(model, lambda: old_batch_hidden(model, batch), w)
+    d = _diff(new, old)
+    check("_batch_hidden = hidden + zvec: cikti ve butun gradyanlar (z_in, z_norm dahil) <= 1e-6", d <= 1e-6
+          and new[1]["z_in.weight"] is not None and new[1]["z_in.weight"].abs().sum() > 0, "en buyuk fark %.1e" % d)
+    ids, mask = batch.z_sentences
+    r, c = batch.z_slots
+    empty = dataclasses.replace(batch, z_sentences=(ids[:0], mask[:0]), z_slots=(r[:0], c[:0]))
+    kind_noz = torch.where(batch.kind == ZTOK, torch.full_like(batch.kind, TOKEN), batch.kind)
+    new = _h_and_grads(model, lambda: model._batch_hidden(empty), w)
+    old = _h_and_grads(model, lambda: old_batch_hidden(model, empty, kind_noz), w)
+    d = _diff(new, old)
+    check("Z'siz batch (ids bos; build_batch bos hikaye uretemez, gercek batch'ten kesildi): = eski yol, z_in gradyani yok",
+          d <= 1e-6 and new[1]["z_in.weight"] is None, "en buyuk fark %.1e" % d)
+
+
+TESTS = dict(z=t_z, layout=t_layout, cache=t_cache, flex=t_flex, direct=t_direct)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)
