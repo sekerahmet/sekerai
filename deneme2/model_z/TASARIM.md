@@ -29,10 +29,12 @@ elde ederiz"*):
 SS (milestone 1) sağlamlığı sınar: tabana yakın kayıp, tabandan kötü olmayan açgözlü `sentence_repeat`, okunur hikâye.
 Hipotez 1–2 uzun metinde (milestone 2) sınanır.
 
-Hız, ilk işaret (6 Ekim; ÖLÇÜLDÜ ama temiz değil): SS eğitiminde Model Z ~27.800 cümle/sn, tam bağlamlı taban ~16.400
-cümle/sn (iki koşu aynı GPU'da paralel; Model Z tek başınayken ~30.000). Claude'un "SS'te eğitimde Model Z hızlı olamaz"
-hesabı (yalnız FLOP; dolgu ve uzun dizide attention'ın gerçek maliyeti sayılmadı) bu gözlemle çelişiyor. Temiz kıyas: tek
-başına koşu, aynı batch düzeni, üretimde KV cache.
+Hız (6 Ekim, DÜZELTİLDİ): ilk yazılan "Model Z ~27.800, taban ~16.400 cümle/sn, Model Z hızlı" YANLIŞTI. Günlükteki
+cümle/sn kümülatif ortalamadır; tabanın 16.400'ü Model Z'yle paralel geçen ilk ~1.600 sn'den. HESAP (günlüklerden,
+belge 24 §4): V1'de tek başına Model Z ~29.000 cümle/sn (bag 1.663 sn, roles0 1.617 sn / epok), taban tek başına kaldığı son
+~516 sn'de ~41.000. V2'de aynı GPU, tek başına: Model Z eğitim adımı transformer'dan %9 yavaş (ÖLÇÜLDÜ, v2_profile; z'nin
+hesabı + CPU-GPU senkronu). Eğitimde iki model aynı token'ları işlediği için Model Z'nin eğitimde hızlı olması beklenmez;
+hız hipotezi üretim / uzun bağlam (KV cache boyu) için kalır, milestone 2'de ölçülür.
 
 ## Son yapı (5 Ekim)
 
