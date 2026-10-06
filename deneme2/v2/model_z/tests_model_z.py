@@ -2,7 +2,8 @@
 yalniz meaning_valid (SS valid; yoksa atlanir).
 
     python tests_model_z.py [--only layout,cache,flex,z,direct,meaning,meaning_resume,meaning_keys,meaning_valid,
-                            meaning_resume_mid,generate_longest,meaning_d1,meaning_wsd,shared,shared_cache]
+                            meaning_resume_mid,generate_longest,meaning_d1,meaning_wsd,shared,shared_cache,own,
+                            open,open_sync]
 """
 import os
 import sys
@@ -32,6 +33,7 @@ import numpy as np  # noqa: E402
 
 import sentence_z as SZ  # noqa: E402
 from sentence import (BOS, PAD, TOKEN, ZTOK, SentenceTransformer, SummaryCache, _dense, model_z_mask,  # noqa: E402
+                      model_z_open_mask,
                       z_slot_positions)
 import data as D  # noqa: E402  (sentence_z common/'u yola ekledi)
 
@@ -739,10 +741,195 @@ def t_shared_cache():
         len(gen) <= 3 and all(len(x) <= 6 for x in gen) for gen, _, _ in a))
 
 
+# --- own_vocab (kontrol: meaning yok, z modelin kendi E'sinden; kullanici 6 Ekim)
+def own_model(d=16, layers=2, heads=2, longest=8):
+    torch.manual_seed(0)
+    keys = SZ.build_keys(None, longest, identity=False, e_dim=d // 2)
+    return keys, SentenceTransformer(keys, d=d, layers=layers, heads=heads, own_vocab=True).eval()
+
+
+def t_own():
+    """own_vocab: meaning'siz anahtar; E nn.Embedding; z = basvuru formulu (f = [birim(E[:h]) ; birim(E[h:])]/sqrt2, yari
+    ici R_t); E degisince z degisir; gradyan z yolundan E'ye; ileri / geri sonlu; onbellek = tam; generate; dislayicilik."""
+    sents = [x for st in STORIES for x in st]
+    ids, mask = _ids_mask(sents)
+    keys, model = own_model()
+    with torch.no_grad():
+        Ft = model.f_table()
+        z = model._z(sents, "cpu")
+        ref = _z_reference(keys, Ft, sents)
+    d_ref = (z - ref).abs().max().item()
+    check("own_vocab: meaning'siz anahtar (F / m_hat yok), E nn.Embedding, m_gain None; z = basvuru formulu",
+          "m_hat" not in keys and "F" not in keys and isinstance(model.E, torch.nn.Embedding) and model.m_gain is None
+          and d_ref < 1e-5 and z.shape == (len(sents), 32), "fark %.1e" % d_ref)
+    with torch.no_grad():
+        model.E.weight[sents[0][0]] += 1.0
+        z2 = model._z(sents, "cpu")
+        model.E.weight[sents[0][0]] -= 1.0
+    model.zero_grad()
+    SZ.encode_z_rows(keys, model.f_table(), ids, mask).square().sum().backward()
+    g = model.E.weight.grad
+    check("own_vocab: E degisince z degisir; gradyan z yolundan E'ye akar", (z2 - z).abs().max() > 1e-3
+          and g is not None and g[torch.tensor(sents[0])].abs().sum() > 0)
+    model.train()
+    model.zero_grad()
+    batch = real_batch([[0, 1], [2]], 40)
+    nll, _, _ = model.loss_per_target(batch)
+    nll.mean().backward()
+    ok = torch.isfinite(nll).all() and all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters())
+    check("own_vocab: gercek build_batch ileri / geri sonlu, butun gradyanlar var", bool(ok))
+    model.eval()
+    with torch.no_grad():
+        lg_full, _ = full_logits(model, batch)
+        got = []
+        for st in [STORIES[0], STORIES[1], STORIES[2]]:
+            cache = SummaryCache(model)
+            got.append(cache.logits[None])
+            for x in st:
+                for t in x:
+                    got.append(cache.append_token(t)[None])
+                got.append(cache.close_sentence(model._z([x], "cpu")[0])[None])
+    d = (torch.cat(got) - lg_full).abs().max().item()
+    a = model.generate([STORIES[0][:1]], 3, 6, torch.Generator().manual_seed(0))
+    b = model.generate([STORIES[0][:1]], 3, 6, torch.Generator().manual_seed(0))
+    check("own_vocab: SummaryCache = tam hesap; generate ayni tohum ayni metin", d < 1e-5 and a == b, "fark %.1e" % d)
+    errs = 0
+    for fn in (lambda: SentenceTransformer(keys, d=16, layers=1, heads=2, shared_vocab=True, own_vocab=True),
+               lambda: SZ.build_keys(None, 8),
+               lambda: SentenceTransformer(keys_and_model()[0], d=16, layers=1, heads=2, own_vocab=True)):
+        try:
+            fn()
+        except AssertionError:
+            errs += 1
+    check("own_vocab: shared_vocab ile birlikte, meaning'siz identity anahtar ve identity anahtarla own_vocab durur",
+          errs == 3)
+
+
+# --- open_z (z'yi acan dikkat, belge 31)
+def open_models(W=2):
+    """Uc tabanda open_z modeli: (ad, keys, model) -- bugunku (kimlikli F), ortak sozluk, own_vocab."""
+    out = []
+    keys0, _ = keys_and_model()
+    torch.manual_seed(0)
+    out.append(("bugunku", keys0, SentenceTransformer(keys0, d=16, layers=2, heads=2, open_z=W).eval()))
+    ks, _ = shared_model()
+    torch.manual_seed(0)
+    out.append(("ortak sozluk", ks, SentenceTransformer(ks, d=264, layers=2, heads=2, shared_vocab=True, open_z=W).eval()))
+    ko, _ = own_model()
+    torch.manual_seed(0)
+    out.append(("own_vocab", ko, SentenceTransformer(ko, d=16, layers=2, heads=2, own_vocab=True, open_z=W).eval()))
+    return out
+
+
+def t_open():
+    """open_z: 0 iken eski yol birebir; maske = bagimsiz basvuru (W 1 ve 2); acma kisa cumlede token'i verir; onbellek =
+    tam hesap (uc taban); geri yayilim sonlu, ZUnbinder gradyani var; generate."""
+    keys0, _ = keys_and_model()
+    torch.manual_seed(0)
+    ref = SentenceTransformer(keys0, d=16, layers=2, heads=2).eval()
+    torch.manual_seed(0)
+    m0 = SentenceTransformer(keys0, d=16, layers=2, heads=2, open_z=0).eval()
+    batch = real_batch([[0, 1], [2]], 40)
+    with torch.no_grad():
+        same = torch.equal(m0._batch_hidden(batch), ref._batch_hidden(batch))
+    check("open_z=0: parametreler ve cikti eski yolla birebir (ZUnbinder yok)", same and not hasattr(m0, "unbinder")
+          and set(m0.state_dict()) == set(ref.state_dict()))
+    kind, doc, sent = batch.kind, batch.doc, batch.sent
+    B, T = kind.shape
+    ok = True
+    for W in (1, 2):
+        got = _dense(model_z_open_mask(W)(kind, doc, sent), B, T, "cpu", 2 * T)
+        real = _dense(model_z_mask(kind, doc, sent), B, T, "cpu")
+        exp = torch.zeros(B, T, 2 * T, dtype=torch.bool)
+        exp[:, :, :T] = real
+        for b in range(B):
+            for q in range(T):
+                for j in range(T):
+                    if kind[b, j] != TOKEN or doc[b, j] != doc[b, q] or doc[b, q] < 0:
+                        continue
+                    sq, sj = int(sent[b, q]), int(sent[b, j])
+                    if kind[b, q] == TOKEN and sq - W <= sj <= sq - 1:
+                        exp[b, q, T + j] = True
+                    if kind[b, q] == ZTOK and sq - W + 1 <= sj <= sq:
+                        exp[b, q, T + j] = True
+        ok &= torch.equal(got, exp) and bool(got.any(-1).all())
+    check("model_z_open_mask = bagimsiz basvuru (W 1 ve 2; kelime s-W..s-1, Z_s s-W+1..s, BOS / dolgu sanal gormez; bos "
+          "satir yok)", ok)
+    sents = [x for st in STORIES for x in st]
+    z = SZ.encode_z(keys0, *_ids_mask(sents))[:, :512]
+    hits = tot = 0
+    for i, x in enumerate(sents):
+        u = SZ.unbind_z(keys0, z[i:i + 1].expand(len(x), -1), torch.arange(len(x)))
+        hits += int(((u @ keys0["F"].T).argmax(1) == torch.tensor(x)).sum())
+        tot += len(x)
+    check("unbind_z: R_t^T z'nin en yakin sozluk satiri konum t'deki token (kisa cumleler)", hits == tot,
+          "%d / %d" % (hits, tot))
+    for name, keys, model in open_models():
+        with torch.no_grad():
+            lg_full, _ = full_logits(model, batch)
+            got = []
+            for st in [STORIES[0], STORIES[1], STORIES[2]]:
+                cache = SummaryCache(model)
+                got.append(cache.logits[None])
+                for x in st:
+                    for t in x:
+                        got.append(cache.append_token(t)[None])
+                    got.append(cache.close_sentence(model._z([x], "cpu")[0])[None])
+        d = (torch.cat(got) - lg_full).abs().max().item()
+        model.train()
+        model.zero_grad()
+        nll, _, _ = model.loss_per_target(batch)
+        nll.mean().backward()
+        fin = all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters())
+        ga = model.unbinder.A.weight.grad
+        model.eval()
+        a = model.generate([STORIES[0][:1]], 3, 6, torch.Generator().manual_seed(0))
+        b = model.generate([STORIES[0][:1]], 3, 6, torch.Generator().manual_seed(0))
+        check("open_z=2 (%s): onbellek = tam hesap; geri yayilim sonlu, A / b_v gradyani var; generate" % name,
+              d < 1e-4 and fin and ga is not None and ga.abs().sum() > 0 and model.unbinder.b_v.grad.abs().sum() > 0
+              and a == b, "fark %.1e" % d)
+
+
+
+def _virtual_reference(model, batch, z, dtype):
+    """Eski (senkronlu) _virtual: token konumlari nonzero ile, index_put (esdegerlik basvurusu)."""
+    B, T = batch.kind.shape
+    flat = batch.kind.reshape(-1)
+    zid = (flat == ZTOK).long().cumsum(0) - (flat == ZTOK).long()
+    t = (batch.pos - batch.sent - 1).reshape(-1)
+    idx = (flat == TOKEN).nonzero().squeeze(1)
+    u = SZ.unbind_z(model.keys, z[:, :model.keys["z_pos"]][zid[idx]], t[idx])
+    xv = torch.zeros(B * T, model.unbinder.A.out_features, dtype=dtype)
+    return xv.index_put((idx,), model.unbinder(u).to(dtype)).view(B, T, -1)
+
+
+def t_open_sync():
+    """Senkronsuz yol (sabit sekil, maske) = eski nonzero yolu; encode_z_rows flat verilince = nonzero yolu."""
+    batch = real_batch([[0, 1], [2]], 40)
+    worst, exact = 0.0, True
+    for name, keys, model in open_models():
+        with torch.no_grad():
+            ids, mask = batch.z_sentences
+            z = model._zrows(ids, mask)
+            a = model._virtual(batch, z, torch.float32)
+            b = _virtual_reference(model, batch, z, torch.float32)
+        worst = max(worst, (a - b).abs().max().item())
+        exact &= torch.equal(a, b)
+    check("_virtual senkronsuz (sabit sekil + maske) = eski nonzero yolu (uc taban)", worst <= 1e-6,
+          "en buyuk fark %.1e, birebir %s" % (worst, exact))
+    keys, model = shared_model()
+    ids, mask = batch.z_sentences
+    F = model.f_table()
+    za = SZ.encode_z_rows(keys, F, ids, mask)
+    zb = SZ.encode_z_rows(keys, F, ids, mask, mask.nonzero(as_tuple=True))
+    check("encode_z_rows: disaridan flat (b, t) = mask.nonzero yolu (birebir)", torch.equal(za, zb))
+
+
 TESTS = dict(z=t_z, layout=t_layout, cache=t_cache, flex=t_flex, direct=t_direct, meaning=t_meaning,
              meaning_resume=t_meaning_resume, meaning_keys=t_meaning_keys, meaning_valid=t_meaning_valid,
              meaning_resume_mid=t_meaning_resume_mid, generate_longest=t_generate_longest, meaning_d1=t_meaning_d1,
-             meaning_wsd=t_meaning_wsd, shared=t_shared, shared_cache=t_shared_cache)
+             meaning_wsd=t_meaning_wsd, shared=t_shared, shared_cache=t_shared_cache, own=t_own,
+             open=t_open, open_sync=t_open_sync)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)

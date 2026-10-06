@@ -3,7 +3,8 @@
     maske       mask_fn(kind, doc, sent) -> mask_mod(b, h, q, kv) (FlexAttention imzasi).  Model kendi fonksiyonunu verir
                 (Model Z: model_z_mask); transformer icin document_mask.  Ortak dolgu kurali: dolgu, ayni satirdaki
                 onceki dolguyu gorur (tamamen maskeli satir SDPA'da NaN).  block_mask (FlexAttention) ve dense_mask (SDPA,
-                CPU egitimi ve testler; FlexAttention CPU'da geri yayilim yapmiyor) ayni mask_mod'dan.
+                CPU egitimi ve testler; FlexAttention CPU'da geri yayilim yapmiyor) ayni mask_mod'dan.  kv_len 2T: open_z
+                sanal blogu (kv >= T, j = kv - T; belge 31).
     wsd_lr      warmup %1, sabit, son %20 dogrusal sifira; inisin ilk adimi = total - round(decay * total) (checkpoint).
     param_groups  AdamW: 2-B agirliklar decay'li (Model Z'nin z_in dahil); embedding, norm, bias, 1-B decay'siz.
     Checkpoint  model + optimizer + adim + plan + gecmis + args + RNG; .part'tan atomik; kesilip surdurulen = kesintisiz.
@@ -28,30 +29,35 @@ def document_mask(kind, doc, sent):
 
 
 def _with_padding(mask_mod, kind, doc):
-    """Ortak dolgu kurali: dolgu (doc -1) ayni satirdaki onceki dolguyu gorur; gercek konum dolguyu gormez."""
+    """Ortak dolgu kurali: dolgu (doc -1) ayni satirdaki onceki dolguyu gorur; gercek konum dolguyu gormez.  Sanal blok
+    (kv >= T; belge 31): kv'nin konumu j = kv - T (sanal j gercek j ile hizali); dolgu sanal blogu hic gormez, gercek konum
+    dolgu j'nin sanalini gormez.  mask_mod ham kv'yi alir (sanal kuralini kendisi kurar)."""
+    T = kind.shape[1]
+
     def mod(b, h, q, kv):
-        pad = (kind[b, q] == Kind.PAD) & (kind[b, kv] == Kind.PAD) & (kv <= q)
-        real = (kind[b, q] != Kind.PAD) & (kind[b, kv] != Kind.PAD)
+        j = kv - T * (kv >= T)
+        pad = (kind[b, q] == Kind.PAD) & (kind[b, j] == Kind.PAD) & (kv <= q)     # kv <= q < T: yalniz kare blok
+        real = (kind[b, q] != Kind.PAD) & (kind[b, j] != Kind.PAD)
         return (mask_mod(b, h, q, kv) & real) | pad
     return mod
 
 
-def dense_mask(batch, mask_fn):
-    """-> bool (B, T, T) (SDPA attn_mask: True = gorulur)."""
+def dense_mask(batch, mask_fn, kv_len=None):
+    """-> bool (B, T, kv_len) (SDPA attn_mask: True = gorulur).  kv_len None: kare (T); open_z: 2T (belge 31)."""
     B, T = batch.kind.shape
     mod = _with_padding(mask_fn(batch.kind, batch.doc, batch.sent), batch.kind, batch.doc)
     dev = batch.kind.device
     return mod(torch.arange(B, device=dev)[:, None, None], 0, torch.arange(T, device=dev)[None, :, None],
-               torch.arange(T, device=dev)[None, None, :])
+               torch.arange(kv_len or T, device=dev)[None, None, :])
 
 
-def block_mask(batch, mask_fn):
-    """-> FlexAttention BlockMask (GPU'da derlenerek kurulur)."""
+def block_mask(batch, mask_fn, kv_len=None):
+    """-> FlexAttention BlockMask (Q_LEN T, KV_LEN kv_len ya da T; GPU'da derlenerek kurulur)."""
     from torch.nn.attention.flex_attention import create_block_mask
     B, T = batch.kind.shape
     mod = _with_padding(mask_fn(batch.kind, batch.doc, batch.sent), batch.kind, batch.doc)
     dev = batch.kind.device
-    return create_block_mask(mod, B, None, T, T, device=dev, _compile=dev.type == "cuda")
+    return create_block_mask(mod, B, None, T, kv_len or T, device=dev, _compile=dev.type == "cuda")
 
 
 def _output_loss(h, weight, target):

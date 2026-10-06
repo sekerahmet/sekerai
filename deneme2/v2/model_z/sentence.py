@@ -11,13 +11,19 @@ Maske (model_z_mask, tek mask_mod -> dense ya da FlexAttention BlockMask): ayni 
 silinir).  Tarif (Llama sinifi, V1): pre-norm RMSNorm, RoPE, QK-norm (fp32), SwiGLU, bias yok, tied embedding.
 shared_vocab=True (ortak sozluk, belge 29; adlar onayli): E = MeaningEmbedding [m_gain * m_hat ; e], z ayni E'den
 (f = [m_hat ; e_hat] / sqrt(2), encode_z_rows, tam gradyan); keys build_keys(..., identity=False).
+own_vocab=True (kontrol; kullanici 6 Ekim, ad onayli): meaning yok, E tamamen ogrenilen nn.Embedding; z ayni E'den, ortak
+sozlukle ayni bicim: f = [birim(E[:h]) ; birim(E[h:])] / sqrt(2), yari ici R_t, tam gradyan; keys build_keys(None, ...).
+open_z=W (belge 31; adlar onayli): son W cumlenin z'si acilir.  Her token konumu j icin bir sanal kv: u = R_t^T z_pos
+(kendi cumlesinin z'si, t cumle ici sira), x = A u + b_v (ZUnbinder), her katmanda blogun k / v'si, RoPE = token'in
+konumu.  KV = [gercek T ; sanal T] (sanal j gercek j ile hizali, KV_LEN = 2T); kurali model_z_open_mask(W): kelime
+sorgusu cumle s-W..s-1'in, Z_s sorgusu s-W+1..s'nin sanal token'larini gorur.  Saklanan yalniz z.
 """
 import math
 
 import torch
 import torch.nn.functional as F
 
-from sentence_z import encode_z, encode_z_rows
+from sentence_z import encode_z, encode_z_rows, unbind_z
 from data import END_ID, EOS_ID, VOCAB, Kind  # noqa: E402  (sentence_z common/'u yola ekledi)
 
 BOS, TOKEN, END, ZTOK, PAD = Kind.BOS, Kind.TOKEN, Kind.END, Kind.ZTOK, Kind.PAD
@@ -100,12 +106,47 @@ def model_z_mask(kind, doc, sent):
     return mask_mod
 
 
-def _dense(mask_mod, B, T, device):
-    """mask_mod -> bool (B, T, T) (SDPA yolu; CPU egitimi ve testler)."""
+def model_z_open_mask(W):
+    """open_z (belge 31; ad onayli): -> mask_fn(kind, doc, sent) (model_z_mask imzasi); mask_mod KV = [gercek T ; sanal T]
+    uzerinde (kv >= T: sanal j = kv - T, gercek j ile hizali).  Sanal j gorunur: j token, ayni hikaye, ve q kelime
+    (cumle s) iken sent[j] in [s-W, s-1], q Z_s iken sent[j] in [s-W+1, s].  mask_fn.kv_factor = 2 (KV_LEN = 2T)."""
+    def mask_fn(kind, doc, sent):
+        T = kind.shape[1]
+        base = model_z_mask(kind, doc, sent)
+
+        def mask_mod(b, h, q, kv):
+            virt = kv >= T
+            j = torch.where(virt, kv - T, kv)
+            real = base(b, h, q, j) & ~virt
+            kq, sq, sj = kind[b, q], sent[b, q], sent[b, j]
+            word = (kq == TOKEN) & (sj >= sq - W) & (sj <= sq - 1)
+            zq = (kq == ZTOK) & (sj >= sq - W + 1) & (sj <= sq)
+            vis = virt & (kind[b, j] == TOKEN) & (doc[b, j] == doc[b, q]) & (doc[b, q] >= 0) & (word | zq)
+            return real | vis
+        return mask_mod
+    mask_fn.kv_factor = 2
+    return mask_fn
+
+
+def _dense(mask_mod, B, T, device, kv_len=None):
+    """mask_mod -> bool (B, T, kv_len) (SDPA yolu; CPU egitimi ve testler); kv_len varsayilan T."""
     b = torch.arange(B, device=device)[:, None, None]
     q = torch.arange(T, device=device)[None, :, None]
-    kv = torch.arange(T, device=device)[None, None, :]
+    kv = torch.arange(T if kv_len is None else kv_len, device=device)[None, None, :]
     return mask_mod(b, 0, q, kv)
+
+
+class ZUnbinder(torch.nn.Module):
+    """open_z (belge 31; ad onayli): acilmis z satirlari u (N, z_pos) -> sanal token girdisi x = A u + b_v (N, d).  A
+    ogrenilen dogrusal harita, b_v 'sanal' tur vektoru (ayni RoPE konumundaki gercek token'dan ayirir)."""
+
+    def __init__(self, z_pos, d):
+        super().__init__()
+        self.A = torch.nn.Linear(z_pos, d, bias=False)
+        self.b_v = torch.nn.Parameter(torch.zeros(d))
+
+    def forward(self, u):
+        return self.A(u) + self.b_v
 
 
 class Block(torch.nn.Module):
@@ -132,9 +173,21 @@ class Block(torch.nn.Module):
         g, u = self.gate_up(self.n2(x)).chunk(2, -1)
         return x + self.down(F.silu(g) * u)
 
-    def forward(self, x, pos, attn):
-        """attn: None (duz causal), bool (B, T, T) (dense) ya da FlexAttention BlockMask."""
+    def _kv(self, x, pos):
+        """Yalniz k, v (sanal token'lar; open_z): blogun kendi agirliklari, k_norm, RoPE."""
+        B, T, d = x.shape
+        k, v = F.linear(self.n1(x), self.qkv.weight[d:]).view(B, T, 2, self.heads, d // self.heads).permute(2, 0, 3, 1, 4)
+        with torch.autocast(x.device.type, enabled=False):
+            k = self.k_norm(k.float()).to(v.dtype)
+        return rope(k, pos), v
+
+    def forward(self, x, pos, attn, virt=None):
+        """attn: None (duz causal), bool (B, T, T | 2T) (dense) ya da FlexAttention BlockMask.  virt: (x_v, pos_v) sanal
+        token'lar (open_z; KV = [gercek ; sanal])."""
         q, k, v = self._qkv(x, pos)
+        if virt is not None:
+            kv_, vv_ = self._kv(*virt)
+            k, v = torch.cat([k, kv_], 2), torch.cat([v, vv_], 2)
         if attn is None:
             a = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         elif torch.is_tensor(attn):
@@ -146,36 +199,63 @@ class Block(torch.nn.Module):
 
 
 class SentenceTransformer(torch.nn.Module):
-    def __init__(self, keys, d=512, layers=8, heads=8, shared_vocab=False):
+    def __init__(self, keys, d=512, layers=8, heads=8, shared_vocab=False, own_vocab=False, open_z=0):
         super().__init__()
+        assert not (shared_vocab and own_vocab), "shared_vocab ve own_vocab birlikte olmaz"
         self.keys = keys                                         # z anahtarlari (parametre degil, state_dict'te yok)
         self.END, self.EOS = END_ID, EOS_ID
-        self.shared_vocab = shared_vocab
+        self.shared_vocab, self.own_vocab, self.open_z = shared_vocab, own_vocab, int(open_z)
         hidden = -(-int(8 * d / 3) // 8) * 8
         if shared_vocab:                                         # ortak sozluk (belge 29): z ve model ayni E
             assert keys.get("identity") is False, "shared_vocab: build_keys(..., identity=False)"
             assert keys["z_pos"] == d, "d (%d) = m yarisi + e yarisi (%d) olmali" % (d, keys["z_pos"])
             self.E = MeaningEmbedding(keys["m_hat"], d - keys["m_dim"])
+        elif own_vocab:                                          # kontrol: meaning yok, z modelin kendi E'sinden
+            assert keys.get("identity") is False and "m_hat" not in keys, "own_vocab: build_keys(None, ..., identity=False)"
+            assert keys["z_pos"] == d, "d (%d) = iki yari (%d) olmali" % (d, keys["z_pos"])
+            self.E = torch.nn.Embedding(VOCAB, d)
         else:
             self.E = torch.nn.Embedding(VOCAB, d)
         self.z_norm = torch.nn.RMSNorm(keys["z"])
         self.z_in = torch.nn.Linear(keys["z"], d, bias=False)
         self.blocks = torch.nn.ModuleList(Block(d, heads, hidden) for _ in range(layers))
         self.norm = torch.nn.RMSNorm(d)
+        if self.open_z:                                          # belge 31: z'yi acan dikkat
+            self.unbinder = ZUnbinder(keys["z_pos"], d)
         for name, p in self.named_parameters():
             if p.dim() == 2:
                 std = 0.02 / math.sqrt(2 * layers) if name.endswith(("proj.weight", "down.weight")) else 0.02
                 torch.nn.init.normal_(p, std=std)
+        if self.open_z:
+            torch.nn.init.normal_(self.unbinder.b_v, std=0.02)
+
+    @property
+    def mask_fn(self):
+        """Bu modelin maske kurali (recipe.block_mask / dense_mask'a verilir; kv_factor ile KV_LEN = kv_factor * T)."""
+        return model_z_open_mask(self.open_z) if self.open_z else model_z_mask
 
     @property
     def m_gain(self):
         """Ortak sozlukte m yarisinin ogrenilen olcegi (skaler tensor; gunluk icin), yoksa None."""
         return self.E.m_gain if self.shared_vocab else None
 
-    def _zrows(self, ids, mask):
-        """z (n, z_dim): ortak sozlukte guncel E'den (gradyanli), yoksa sabit F'den."""
+    def f_table(self):
+        """z'nin token vektorleri (VOCAB, z_pos), guncel E'den: ortak sozlukte [m_hat ; e_hat]/sqrt2, own_vocab'da
+        [birim(E[:h]) ; birim(E[h:])]/sqrt2; sabit F'li yolda None."""
         if self.shared_vocab:
-            return encode_z_rows(self.keys, self.E.f_table(), ids, mask)      # eager: az cekirdek (belge 29 s3)
+            return self.E.f_table()
+        if self.own_vocab:
+            h = self.keys["m_dim"]
+            E = self.E.weight.float()
+            n = lambda x: x / x.norm(dim=1, keepdim=True).clamp_min(1e-9)  # noqa: E731
+            return torch.cat([n(E[:, :h]), n(E[:, h:])], 1) / 2 ** 0.5
+        return None
+
+    def _zrows(self, ids, mask, flat=None):
+        """z (n, z_dim): ortak sozlukte / own_vocab'da guncel E'den (gradyanli), yoksa sabit F'den.  flat: (satir, sira)
+        gercek token indeksleri CPU'da hazirsa (batch.z_flat, oneri) encode_z_rows senkronsuz."""
+        if self.shared_vocab or self.own_vocab:
+            return encode_z_rows(self.keys, self.f_table(), ids, mask, flat)  # eager: az cekirdek (belge 29 s3)
         return _encode_z(self.keys, ids, mask)
 
     def _z(self, sents, device):
@@ -188,8 +268,8 @@ class SentenceTransformer(torch.nn.Module):
         for i, s in enumerate(sents):
             ids[i, :len(s)] = torch.as_tensor(list(s), dtype=torch.long)
             mask[i, :len(s)] = True
-        if self.shared_vocab:
-            return encode_z_rows(self.keys, self.E.f_table(), ids.to(device), mask.to(device))
+        if self.shared_vocab or self.own_vocab:
+            return encode_z_rows(self.keys, self.f_table(), ids.to(device), mask.to(device))
         return encode_z(self.keys, ids.to(device), mask.to(device))
 
     def _embed(self, tokens, kind, zvec):
@@ -201,6 +281,7 @@ class SentenceTransformer(torch.nn.Module):
 
     def hidden(self, tokens, kind, pos, zvec, attn):
         """tokens, kind, pos (B, T); zvec (B, T, z_dim) (yalniz ZTOK'ta okunur); attn: None / dense / BlockMask."""
+        assert not self.open_z, "hidden() open_z'yi desteklemez: _batch_hidden"
         x = self._embed(tokens, kind, zvec)
         for block in self.blocks:
             x = block(x, pos, attn)
@@ -214,14 +295,30 @@ class SentenceTransformer(torch.nn.Module):
         dev = batch.tokens.device
         x = self.E(batch.tokens)
         ids, mask = batch.z_sentences                                       # (n_z, Lmax), Z_k'nin cumlesi (belge 21)
+        virt = None
         if len(ids):                                                        # CPU tarafi uzunluk
-            z = self._zrows(ids.to(dev), mask.to(dev))
+            z = self._zrows(ids.to(dev), mask.to(dev), getattr(batch, "z_flat", None))
             x = x.index_put(batch.z_slots, self.z_in(self.z_norm(z)).to(x.dtype))
+            if self.open_z:
+                virt = (self._virtual(batch, z, x.dtype), batch.pos)
         if attn is None:
-            attn = _dense(model_z_mask(batch.kind, batch.doc, batch.sent), B, T, dev)
+            attn = _dense(self.mask_fn(batch.kind, batch.doc, batch.sent), B, T, dev, (2 if self.open_z else 1) * T)
         for block in self.blocks:
-            x = block(x, batch.pos, attn)
+            x = block(x, batch.pos, attn, virt) if virt is not None else block(x, batch.pos, attn)
         return self.norm(x)
+
+    def _virtual(self, batch, z, dtype):
+        """open_z: sanal token girdisi (B, T, d), gercek token j ile hizali (token olmayan konumlar 0; maske gizler).
+        Token'in z'si: duz satir sirasinda ondan onceki ZTOK sayisi (z_slots satir sirasiyla = kind == ZTOK sirasi);
+        cumle ici sira t = pos - sent - 1 (model_z duzeni)."""
+        B, T = batch.kind.shape
+        flat = batch.kind.reshape(-1)
+        isz = (flat == ZTOK).long()
+        zid = (isz.cumsum(0) - isz).clamp(max=len(z) - 1)                    # sabit sekil: GPU senkronu yok
+        t = (batch.pos - batch.sent - 1).reshape(-1).clamp(0, len(self.keys["signs"]) - 1)
+        u = unbind_z(self.keys, z[:, :self.keys["z_pos"]][zid], t)            # (B*T, z_pos), token olmayanlar atilir
+        xv = torch.where((flat == TOKEN)[:, None], self.unbinder(u), 0.0).to(dtype)
+        return xv.view(B, T, -1)
 
     def loss_per_target(self, batch, attn=None, chunk=4096):
         """-> nll (K,), pred (K,), target_kind (K,) (hedefli konumlar, satir sirasiyla; belge 21 s7 sozlesmesi)."""
@@ -288,6 +385,7 @@ class SummaryCache:
         L = len(model.blocks)
         self.sum_k, self.sum_v = [None] * L, [None] * L
         self.sen_k, self.sen_v = [None] * L, [None] * L
+        self.virt = []                                                      # open_z: son W cumlenin sanal kv'si
         self.n_z, self.i = 0, 0
         x = model.E(torch.tensor([[EOS_ID]], device=self.dev))              # BOS = EOS token'i (belge 21 s1)
         self.logits = self._step(x, 0, summary=True)
@@ -296,8 +394,10 @@ class SummaryCache:
         p = torch.tensor([[pos]], device=self.dev)
         for l, block in enumerate(self.m.blocks):
             q, k, v = block._qkv(x, p)
-            ks = [c for c in (self.sum_k[l], None if summary else self.sen_k[l]) if c is not None] + [k]
-            vs = [c for c in (self.sum_v[l], None if summary else self.sen_v[l]) if c is not None] + [v]
+            vk = [e[0][l] for e in self.virt if pos > 0]                     # BOS sanal gormez
+            vv = [e[1][l] for e in self.virt if pos > 0]
+            ks = [c for c in (self.sum_k[l], None if summary else self.sen_k[l]) if c is not None] + vk + [k]
+            vs = [c for c in (self.sum_v[l], None if summary else self.sen_v[l]) if c is not None] + vv + [v]
             a = F.scaled_dot_product_attention(q, torch.cat(ks, 2), torch.cat(vs, 2))
             if summary:
                 self.sum_k[l] = k if self.sum_k[l] is None else torch.cat([self.sum_k[l], k], 2)
@@ -320,6 +420,13 @@ class SummaryCache:
     def close_sentence(self, z):
         """Cumle bitti: z (z_dim,) -> Z_k ozet onbellegine, cumle onbellegi silinir -> sonraki cumlenin ilk token'i (ya
         da EOS) logit'i."""
+        if self.m.open_z and self.i:                                        # bu cumlenin sanal kv'si (Z_s de gorur)
+            n = self.i
+            u = unbind_z(self.m.keys, z.float()[None, :self.m.keys["z_pos"]].expand(n, -1), torch.arange(n, device=self.dev))
+            xv = self.m.unbinder(u).to(self.m.E.weight.dtype)[None]
+            pv = (self.n_z + 1 + torch.arange(n, device=self.dev))[None]   # token konumlari (k-1)+i, i = 1..n
+            kv = [block._kv(xv, pv) for block in self.m.blocks]
+            self.virt = (self.virt + [([a for a, _ in kv], [b for _, b in kv])])[-self.m.open_z:]
         self.n_z += 1
         self.i = 0
         self.sen_k = [None] * len(self.sen_k)

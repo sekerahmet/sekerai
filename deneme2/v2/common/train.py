@@ -16,7 +16,8 @@ kosudan: generate_readings.py.
 
     python train.py --model transformer|model_z [--meaning agent.pt] --lr LR --out <kosu> [--data <v2/simplestories_gpt2>]
                     [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
-                    [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1] [--shared_vocab 1 (model_z)]
+                    [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1]
+                    model_z: [--shared_vocab 1 | --own_vocab 1 (--meaning yok)] [--open_z W]
 """
 import torch  # noqa: I001  (Windows: torch once)
 
@@ -46,7 +47,7 @@ READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
 READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "meaning_sha256", "longest", "row_len", "batch_rows",
-            "train_stream_sha256", "shared_vocab")
+            "train_stream_sha256", "shared_vocab", "own_vocab", "open_z")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -111,31 +112,60 @@ def _schedule(train, data_dir, seed, epochs, steps):
             return plans, per, row_len, steps if steps is not None else sum(per)
 
 
+def _flags(args):
+    """Model Z bayraklari (args'ta yoksa 0) -> (shared_vocab, own_vocab, open_z, hata iletisi ya da None)."""
+    shared, own, open_z = (int(getattr(args, k, 0) or 0) for k in ("shared_vocab", "own_vocab", "open_z"))
+    err = None
+    if args.model == "transformer" and (shared or own or open_z):
+        err = "--shared_vocab / --own_vocab / --open_z transformer'da henuz yok"
+    elif shared and own:
+        err = "--shared_vocab ve --own_vocab birlikte olmaz (z ya meaning'li ortak E'den ya modelin kendi E'sinden)"
+    elif own and args.meaning:
+        err = "--own_vocab'da meaning kullanilmaz; --meaning verilmemeli (kimlikte yanlis meaning_sha256 kalmasin)"
+    elif args.model == "model_z" and not own and not args.meaning:
+        err = "--model model_z icin --meaning <agent.pt> gerekli (ya da --own_vocab 1)"
+    elif open_z < 0:
+        err = "--open_z >= 0 olmali"
+    return shared, own, open_z, err
+
+
 def _build(args, longest, dev):
-    """-> (model, mask_fn, layout, meaning_sha256).  Model dosyalari yalniz burada import edilir.  shared_vocab (belge 29):
-    Model Z'de z ve model ayni E (args'ta yoksa 0)."""
+    """-> (model, mask_fn, layout, meaning_sha256).  Model dosyalari yalniz burada import edilir.  Model Z bayraklari:
+    shared_vocab (belge 29: z ve model ayni E), own_vocab (z modelin ogrenilen E'sinden, meaning yok), open_z (belge 31:
+    son W cumlenin z'si acilir); args'ta yoksa 0."""
     root = os.path.dirname(HERE)
-    shared = bool(getattr(args, "shared_vocab", 0))
+    shared, own, open_z, err = _flags(args)
+    if err:
+        sys.exit("DUR: " + err)
     torch.manual_seed(args.seed)
     if args.model == "transformer":
-        if shared:
-            sys.exit("DUR: --shared_vocab 1 transformer'da henuz yok (ortak E'li kontrol kosusu taban ajaninin dosyasinda)")
         sys.path.insert(0, os.path.join(root, "transformer"))
         from baseline import BaselineTransformer
         return BaselineTransformer(args.d, args.layers, args.heads).to(dev), R.document_mask, "transformer", None
-    assert args.meaning, "--model model_z icin --meaning <agent.pt> gerekli"
     sys.path.insert(0, os.path.join(root, "model_z"))
     import sentence_z as SZ
     from sentence import SentenceTransformer, model_z_mask
-    keys = SZ.keys_to(SZ.build_keys(args.meaning, longest, identity=False) if shared else
-                      SZ.build_keys(args.meaning, longest), dev)
+    if own:
+        keys = SZ.build_keys(None, longest, identity=False, e_dim=args.d // 2)   # meaning'siz; yarilar d/2 (d 512: 256)
+    elif shared:
+        keys = SZ.build_keys(args.meaning, longest, identity=False)
+    else:
+        keys = SZ.build_keys(args.meaning, longest)
+    flags = {k: v for k, v in (("shared_vocab", bool(shared)), ("own_vocab", bool(own)), ("open_z", open_z)) if v}
     torch.manual_seed(args.seed)
-    model = SentenceTransformer(keys, args.d, args.layers, args.heads, **({"shared_vocab": True} if shared else {})).to(dev)
-    return model, model_z_mask, "model_z", _sha256(args.meaning)
+    model = SentenceTransformer(SZ.keys_to(keys, dev), args.d, args.layers, args.heads, **flags).to(dev)
+    mask_fn = model_z_mask
+    if open_z:                                                           # belge 31: sanal blok, kv_factor 2 (_attn)
+        from sentence import model_z_open_mask
+        mask_fn = model_z_open_mask(open_z)
+    return model, mask_fn, "model_z", None if own else _sha256(args.meaning)
 
 
 def _attn(batch, mask_fn, cuda):
-    return R.block_mask(batch, mask_fn) if cuda else R.dense_mask(batch, mask_fn)
+    """Egitim, sinav (_Exam) ve gap_v2'nin tek maske yolu; mask_fn.kv_factor 2 (open_z) ise KV = [gercek T ; sanal T]."""
+    f = getattr(mask_fn, "kv_factor", 1)
+    kv_len = f * batch.kind.shape[1] if f != 1 else None
+    return R.block_mask(batch, mask_fn, kv_len) if cuda else R.dense_mask(batch, mask_fn, kv_len)
 
 
 def _step(model, batch, mask_fn, opt, cuda):
@@ -237,6 +267,9 @@ def _args(argv):
     ap.add_argument("--resume", type=int, default=0)
     ap.add_argument("--shared_vocab", type=int, default=0, choices=(0, 1),
                     help="model_z: z ve model ayni E = [m_gain * meaning ; e] (belge 29)")
+    ap.add_argument("--own_vocab", type=int, default=0, choices=(0, 1),
+                    help="model_z: z modelin tamamen ogrenilen E'sinden; meaning yok (--meaning verilmez)")
+    ap.add_argument("--open_z", type=int, default=0, help="model_z: son W cumlenin z'si acilir (belge 31); 0 kapali")
     ap.add_argument("--checkpoint_minutes", type=float, default=10,
                     help="en cok bu kadar duvar saati kaybi (sinav dahil); surdurmede degistirilebilir")
     return ap.parse_args(argv)
@@ -246,8 +279,9 @@ def main(argv=None):
     args = _args(argv)
     t0 = time.time()
     log = lambda msg: print("[%7.1f sn] %s" % (time.time() - t0, msg), flush=True)  # noqa: E731
-    if args.shared_vocab and args.model == "transformer":               # veri yuklenmeden once (_build da durur)
-        sys.exit("DUR: --shared_vocab 1 transformer'da henuz yok")
+    err = _flags(args)[3]                                               # veri yuklenmeden once (_build da durur)
+    if err:
+        sys.exit("DUR: " + err)
     dev = torch.device(args.device)
     cuda = dev.type == "cuda"
     if cuda:                                                             # GPU kapisi (kural 5)
@@ -280,7 +314,8 @@ def main(argv=None):
                             **({"fused": True} if cuda else {}))
     ident = dict(model=args.model, d=args.d, layers=args.layers, heads=args.heads, lr=args.lr, seed=args.seed,
                  meaning_sha256=meaning_sha, longest=train.max_sentence_tokens, row_len=row_len, batch_rows=BATCH_ROWS,
-                 train_stream_sha256=train.meta["stream_sha256"], shared_vocab=args.shared_vocab)
+                 train_stream_sha256=train.meta["stream_sha256"], shared_vocab=args.shared_vocab,
+                 own_vocab=args.own_vocab, open_z=args.open_z)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -295,8 +330,8 @@ def main(argv=None):
         if not os.path.exists(ckpt):
             sys.exit("DUR: surdurme paketi yok: %s (bastan baslamaz)" % ckpt)
         peek = torch.load(ckpt, map_location="cpu", weights_only=False, mmap=True)   # kimlik YUKLEMEDEN once (d /
-        was = {"shared_vocab": 0, **peek["args"]}                         # bayrak farki load_state_dict'te patlamasin);
-        old = peek["plan"]                                                # bayraktan onceki checkpoint'ler: 0
+        was = {"shared_vocab": 0, "own_vocab": 0, "open_z": 0, **peek["args"]}   # bayrak farki load_state_dict'te
+        old = peek["plan"]                                                # patlamasin); bayraktan onceki checkpoint: 0
         del peek
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])

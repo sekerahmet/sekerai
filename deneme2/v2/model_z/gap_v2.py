@@ -75,12 +75,15 @@ def _load(kind, path, meaning, longest, dev, synthetic):
     pack = torch.load(path, map_location="cpu", weights_only=False)
     idt = pack["identity"]
     assert idt["model"] == kind and idt["longest"] == longest, (idt, kind, longest)
-    if kind == "model_z":
+    if kind == "model_z" and idt.get("meaning_sha256"):
         sha = hashlib.sha256(open(meaning, "rb").read()).hexdigest()
         assert sha == idt["meaning_sha256"], "meaning agent.pt modelin egitildigi dosya degil"
-    a = SimpleNamespace(model=kind, seed=idt["seed"], d=idt["d"], layers=idt["layers"], heads=idt["heads"], meaning=meaning,
-                        shared_vocab=idt.get("shared_vocab", 0))                  # ortak sozluk (belge 29)
+    own = idt.get("own_vocab", 0)
+    a = SimpleNamespace(model=kind, seed=idt["seed"], d=idt["d"], layers=idt["layers"], heads=idt["heads"],
+                        meaning=None if own else meaning, shared_vocab=idt.get("shared_vocab", 0), own_vocab=own,
+                        open_z=idt.get("open_z", 0))                                  # belge 29, own_vocab, belge 31
     model, mask_fn, layout, _ = T._build(a, longest, dev)
+    mask_fn = getattr(model, "mask_fn", mask_fn)                                     # open_z: KV = 2T kurali
     model.load_state_dict({k.replace("._orig_mod", ""): v for k, v in pack["state"].items()})
     return model.eval(), mask_fn, layout
 

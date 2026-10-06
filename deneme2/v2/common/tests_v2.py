@@ -295,6 +295,43 @@ def t_recipe():
     except Exception as e:  # noqa: BLE001
         flex_ok, ref = False, e
     check("block_mask (FlexAttention, CPU ileri, fp32) = SDPA dense_mask, iki maske fonksiyonu", flex_ok)
+
+    def virtual_mask(kind, doc, sent):                                   # open_z benzeri: sanal j = onceki cumlenin token'i
+        Tq = kind.shape[1]
+
+        def mod(b_, h, q, kv):
+            j = kv - Tq * (kv >= Tq)
+            v = (kv >= Tq) & (doc[b_, q] == doc[b_, j]) & (kind[b_, j] == K.TOKEN) & (sent[b_, j] == sent[b_, q] - 1)
+            return v | ((kv < Tq) & (doc[b_, q] == doc[b_, j]) & (kv <= q))
+        return mod
+    mv = R.dense_mask(b, virtual_mask, 2 * T)
+    ok = mv.shape == (B, T, 2 * T) and torch.equal(R.dense_mask(b, R.document_mask, T), m)
+    for r in range(B):
+        for qi in range(T):
+            for kv in range(2 * T):
+                j = kv % T
+                pq, pk = b.kind[r, qi] == K.PAD, b.kind[r, j] == K.PAD
+                same_doc = b.doc[r, qi] == b.doc[r, j]
+                if kv < T:
+                    want = (kv <= qi) and ((pq and pk) or (not pq and not pk and same_doc))
+                else:
+                    want = (not pq and not pk and same_doc and b.kind[r, j] == K.TOKEN
+                            and b.sent[r, j] == b.sent[r, qi] - 1)
+                ok &= bool(mv[r, qi, kv]) == bool(want)
+    check("dense_mask kv_len: kv_len T = kare (aynen); 2T'de sanal blok j = kv - T elle ayni; dolgu sanal blogu gormez, "
+          "gercek konum dolgu j'nin sanalini gormez; bos satir yok", ok and bool(mv.any(-1).all())
+          and bool(mv[:, :, T:].any()), "sanal gorulen %d" % int(mv[:, :, T:].sum()))
+    k2, v2 = (torch.randn(B, 2, 2 * T, 8) for _ in range(2))
+    try:
+        from torch.nn.attention.flex_attention import flex_attention
+        out = flex_attention(q, k2, v2, block_mask=R.block_mask(b, virtual_mask, 2 * T))
+        ref = F.scaled_dot_product_attention(q, k2, v2, attn_mask=mv[:, None])
+        diff = (out - ref).abs().max().item()
+    except Exception as e:  # noqa: BLE001
+        diff = float("inf")
+        print(" ", e, flush=True)
+    check("block_mask kv_len 2T (FlexAttention, Q_LEN T, KV_LEN 2T, CPU ileri) = SDPA dense_mask", diff < 1e-5,
+          "fark %.1e" % diff)
     total, peak = 1000, 1e-3
     lr = [R.wsd_lr(s, total, peak) for s in range(total)]
     down = total - round(0.2 * total)
@@ -713,7 +750,21 @@ def t_train():
               "--shared_vocab 1 veri yuklenmeden DURUR", r["finished"] and exits(cmd + ["--shared_vocab", "1", "--out",
                                                                                          out("tf_shared")])
               and not os.path.exists(out("tf_shared")))
+        mz = base + ["--model", "model_z"]
+        bad = [cmd + ["--own_vocab", "1"], cmd + ["--open_z", "2"], mz + ["--own_vocab", "1", "--shared_vocab", "1"],
+               mz + ["--own_vocab", "1", "--meaning", meaning], mz, mz + ["--meaning", meaning, "--open_z", "-1"]]
+        check("train: bayrak kurallari veri yuklenmeden DURUR (transformer + own / open_z; own + shared; own + --meaning; "
+              "model_z meaning'siz ve own'suz; open_z < 0)", all(exits(c + ["--out", out("bad%d" % i)]) and not
+                                                                os.path.exists(out("bad%d" % i)) for i, c in enumerate(bad)))
         _train_shared(base, meaning, prompts, data, out, state, same, exits, TR)
+        _train_variant("own", ["--own_vocab", "1"], None, base, prompts, data, out, state, same, exits, TR)
+        import inspect
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "model_z"))
+        from sentence import SentenceTransformer
+        if "open_z" in inspect.signature(SentenceTransformer).parameters:
+            _train_variant("open", ["--open_z", "2"], meaning, base, prompts, data, out, state, same, exits, TR)
+        else:
+            print("ATLANDI: open_z modeli yok (SentenceTransformer open_z almiyor)", flush=True)
     except Exception:  # noqa: BLE001
         check("train", False, traceback.format_exc(limit=3))
     finally:
@@ -759,24 +810,7 @@ def _train_shared(base, meaning, prompts, data, out, state, same, exits, TR):
               and embs and all(id(w) in nod for w in embs) and id(m.z_in.weight) in dec
               and not any(k.endswith("m_hat") for k in names) and dec | nod == {id(p) for p in m.parameters()},
               "%.4f / %.4f; parametreler %s" % (a["log"][0]["loss"], want, sorted(k for k in names if "blocks" not in k)))
-        orig = R.Checkpoint.save
-
-        class Stop(Exception):
-            pass
-
-        def save_then_stop(dir_, *rest):
-            orig(dir_, *rest)
-            if rest[2] == 4 and os.path.basename(dir_) != "decay_start":
-                raise Stop()
-        R.Checkpoint.save = staticmethod(save_then_stop)
-        try:
-            TR.main(cmd + ["--epochs", "2", "--out", out("mzs_B")])
-            stopped = False
-        except Stop:
-            stopped = True
-        finally:
-            R.Checkpoint.save = staticmethod(orig)
-        bres = TR.main(cmd + ["--epochs", "2", "--out", out("mzs_B"), "--resume", "1"])
+        stopped, bres = _cut_and_resume(TR, cmd + ["--epochs", "2"], out("mzs_B"))
         check("train model_z --shared_vocab 1: adim 4'te kesilip surdurulen = kesintisiz (agirlik bit duzeyinde, sinav ve "
               "m_gain gunlugu ayni)", stopped and same(state(out("mzs_A")), state(out("mzs_B")))
               and bres["exam"] == dict(a["exam"], seconds=bres["exam"]["seconds"])
@@ -798,6 +832,80 @@ def _train_shared(base, meaning, prompts, data, out, state, same, exits, TR):
     except Exception:  # noqa: BLE001
         check("train model_z --shared_vocab 1 (model_z/ kodu: SentenceTransformer(shared_vocab), build_keys(identity=False))",
               False, traceback.format_exc(limit=3).splitlines()[-1])
+
+
+def _cut_and_resume(TR, cmd, out_dir):
+    """cmd'yi adim 4'teki checkpoint'ten hemen sonra kes, --resume 1 ile bitir -> (kesildi mi, sonuc)."""
+    import recipe as R
+    orig = R.Checkpoint.save
+
+    class Stop(Exception):
+        pass
+
+    def save_then_stop(dir_, *rest):
+        orig(dir_, *rest)
+        if rest[2] == 4 and os.path.basename(dir_) != "decay_start":
+            raise Stop()
+    R.Checkpoint.save = staticmethod(save_then_stop)
+    try:
+        TR.main(cmd + ["--out", out_dir])
+        stopped = False
+    except Stop:
+        stopped = True
+    finally:
+        R.Checkpoint.save = staticmethod(orig)
+    return stopped, TR.main(cmd + ["--out", out_dir, "--resume", "1"])
+
+
+def _train_variant(tag, flag_args, meaning, base, prompts, data, out, state, same, exits, TR):
+    """Model Z bayragi (--own_vocab 1 / --open_z W) gercek SentenceTransformer ve gercek build_batch ile: 2 epok kayip
+    duser, identity'de bayrak, ilk adim = loss_per_target (recipe.dense_mask), kesilip surdurulen = kesintisiz, bayraksiz
+    surdurme yuklemeden durur, generate_readings ayni okumayi uretir.  model_z/ kodu yoksa HATA (entegrasyon bekliyor)."""
+    import traceback
+    import generate_readings as GR
+    import recipe as R
+    name = " ".join(flag_args)
+    try:
+        mz = base + ["--model", "model_z"] + (["--meaning", meaning] if meaning else [])
+        cmd = mz + flag_args
+        A = out("mz_%s_A" % tag)
+        a = TR.main(cmd + ["--epochs", "2", "--out", A])
+        L = [w["loss"] for w in a["log"]]
+        want_id = {k.lstrip("-"): int(v) for k, v in zip(flag_args[::2], flag_args[1::2])}
+        args = TR._args(cmd + ["--out", "x"])
+        st = D.TokenStories(base[base.index("--stream") + 1], data, "train")
+        m, mask_fn, layout, _ = TR._build(args, st.max_sentence_tokens, torch.device("cpu"))
+        f = np.load(os.path.join(data, "train_pack_plan_e1.npz"))
+        ro, rs = f["row_offsets"], f["row_stories"]
+        b = D.build_batch(st, [rs[ro[r]:ro[r + 1]].tolist() for r in range(4)], layout, "cpu", 64)
+        with torch.no_grad():
+            want = m.loss_per_target(b)[0].mean().item()                  # modelin KENDI maskesi (recipe'siz)
+            kv = TR._attn(b, mask_fn, False)
+        check("train model_z %s: 2 epok kosar, kayip duser; identity'de bayrak; ilk adim kaybi (train._attn: recipe "
+              "maskesi) = loss_per_target (modelin kendi dense maskesi); KV boyu" % name,
+              np.mean(L[-3:]) < np.mean(L[:3]) - 0.5 and all(a["identity"][k] == v for k, v in want_id.items())
+              and abs(a["log"][0]["loss"] - want) < 1e-4 and kv.shape[-1] == (2 if want_id.get("open_z") else 1) * 64,
+              "kayip %.3f -> %.3f; ilk %.4f / %.4f; KV %d" % (np.mean(L[:3]), np.mean(L[-3:]), a["log"][0]["loss"], want,
+                                                          kv.shape[-1]))
+        stopped, bres = _cut_and_resume(TR, cmd + ["--epochs", "2"], out("mz_%s_B" % tag))
+        check("train model_z %s: adim 4'te kesilip surdurulen = kesintisiz (agirlik bit duzeyinde, sinav ayni)" % name,
+              stopped and same(state(A), state(out("mz_%s_B" % tag)))
+              and bres["exam"] == dict(a["exam"], seconds=bres["exam"]["seconds"]))
+        other = mz if meaning else mz + ["--meaning", os.path.join(TMP, "meaning_shared.pt")]
+        mt = os.path.getmtime(os.path.join(A, "checkpoint.pt"))
+        check("train model_z %s: bayraksiz surdurme checkpoint yuklenmeden DURUR" % name,
+              exits(other + ["--epochs", "2", "--out", A, "--resume", "1"])
+              and os.path.getmtime(os.path.join(A, "checkpoint.pt")) == mt)
+        same_prompts = os.path.join(os.path.dirname(prompts), "reading_prompts_same.json")
+        shutil.copyfile(prompts, same_prompts)
+        r = GR.main(base[:6] + ["--out", A, "--prompts", same_prompts])
+        sj = json.load(open(os.path.join(A, "samples.json"), encoding="utf-8"))
+        check("generate_readings model_z %s kosusu: bayrak identity'den%s; okuma = samples.json (birebir)" % (
+            name, ", meaning'siz" if not meaning else ""), r["rows"] == sj["rows"] and r["generation"] == sj["generation"]
+            and r["reproduced"]["different"] == [])
+    except Exception:  # noqa: BLE001
+        check("train model_z %s (model_z/ kodu; entegrasyon testi bekliyor olabilir)" % name, False,
+              traceback.format_exc(limit=3).splitlines()[-1])
 
 
 def t_readings():

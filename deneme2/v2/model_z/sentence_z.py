@@ -44,7 +44,17 @@ def build_keys(meaning_path, longest, z=Z, seed=1, bag_channel=True, identity=Tr
     """meaning agent.pt (source.weight, en az END_ID satir) -> anahtarlar (sabit; ayni tohum ayni z).  longest: en uzun
     cumle (token, END haric; veriden).  keys["z"] toplam z boyutu (model z_dim'i buradan alir), keys["z_pos"] konum.
     identity=False (ortak sozluk, belge 29): F yok; m_hat (VOCAB, Dm) ve yari ici anahtarlar, z_pos = Dm + e_dim (e_dim
-    varsayilan Dm; modelin d'si buna esit olmali)."""
+    varsayilan Dm; modelin d'si buna esit olmali).  meaning_path None (own_vocab; kullanici 6 Ekim: "hiç meaning
+    kullanmasak doğrudan modelin kendi E sini C de kullansak"): m_hat yok, yarilar (h, h), h = e_dim ya da z // 2."""
+    if meaning_path is None:
+        assert not identity, "meaning'siz anahtar yalniz identity=False (own_vocab)"
+        g = torch.Generator().manual_seed(seed)
+        h = z // 2 if e_dim is None else e_dim
+        L = longest + 1
+        shift, unshift = _halves_shift((h, h), L)
+        signs = torch.randint(0, 2, (L, 2 * h), generator=g).float() * 2 - 1
+        return dict(END=END_ID, signs=signs, shift=shift, unshift=unshift, z=2 * h * (2 if bag_channel else 1),
+                    z_pos=2 * h, bag_channel=bag_channel, identity=False, m_dim=h)
     mp = torch.load(meaning_path, map_location="cpu", weights_only=False)
     src = mp["state"]["source.weight"].float()
     assert len(src) >= END_ID, "meaning satiri %d < GPT-2 sozlugu %d" % (len(src), END_ID)
@@ -99,17 +109,18 @@ def encode_z(keys, ids, mask):
         return torch.cat([z, bag], 1)
 
 
-def encode_z_rows(keys, F, ids, mask):
+def encode_z_rows(keys, F, ids, mask, flat=None):
     """encode_z, f satirlari disaridan (F (VOCAB, z_pos), gradyanli; ortak sozlukte MeaningEmbedding.f_table) ve duz
     token yolu (dolgulu (B, L, z_pos) tensor yok): ids, mask (B, L) -> z (B, keys["z"]) fp32.  Identity anahtarlari ve
-    keys["F"] verilince encode_z ile ayni (test)."""
+    keys["F"] verilince encode_z ile ayni (test).  flat: (b, t) gercek token indeksleri (mask.nonzero ile ayni sira)
+    disaridan verilirse GPU senkronu yok; yoksa mask.nonzero (senkron)."""
     B, L = ids.shape
     assert L < len(keys["signs"]), "cumle build_keys(longest)'ten uzun"
     dev = ids.device
     n = mask.sum(1)
     with torch.autocast(dev.type, enabled=False):
         F = F.float()
-        b, t = mask.nonzero(as_tuple=True)
+        b, t = mask.nonzero(as_tuple=True) if flat is None else flat
         tok = torch.cat([ids[b, t], torch.full((B,), keys["END"], dtype=ids.dtype, device=dev)])
         b, t = torch.cat([b, torch.arange(B, device=dev)]), torch.cat([t, n])           # + END konumu n
         f = torch.nn.functional.embedding(tok, F)                                       # geri yayilim deterministik
@@ -119,6 +130,12 @@ def encode_z_rows(keys, F, ids, mask):
         k = len(tok) - B                                                                # END haric token'lar
         bag = torch.zeros(B, F.shape[1], device=dev).index_add(0, b[:k], f[:k]) / n.clamp_min(1)[:, None].float().sqrt()
         return torch.cat([z, bag], 1)
+
+
+def unbind_z(keys, z_pos, t):
+    """z'yi acma (belge 31; ad onayli): z_pos (N, z_pos) ve konum t (N,) -> u = R_t^T z_pos (N, z_pos), satir basina;
+    yari ici ya da tam vektor anahtarlarla ayni.  u ~ f(t'inci token) + capraz gurultu (gradyanli)."""
+    return z_pos.gather(1, keys["unshift"][t]) * keys["signs"][t]
 
 
 @torch.no_grad()
