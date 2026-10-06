@@ -182,7 +182,8 @@ def _readings(model, valid, tok):
         if not idx:
             continue
         prompts = [[s.tolist() for s in valid.sentences(spec[i]["story"])[:spec[i]["sentences"]]] for i in idx]
-        texts, gen[decode] = M.story_generation(model, prompts, decode, SAMPLE_SEED, tokenizer=tok, **READING_LIMITS)
+        texts, gen[decode] = M.story_generation(model, prompts, decode, SAMPLE_SEED, tokenizer=tok,
+                                                labels=[spec[i]["label"] for i in idx], **READING_LIMITS)
         for i, t in zip(idx, texts):
             real = valid.sentences(spec[i]["story"])[spec[i]["sentences"]:]
             rows[i] = dict(spec[i], prompt=t["prompt"], story_text=t["story"], eos=t["eos"],
@@ -407,9 +408,10 @@ def main(argv=None):
                               ms_per_step_median=med("ms_per_step"), note="pencere ortancasi; ilk pencere (derleme) haric"))
     torch.save(dict(state=model.state_dict(), identity=ident, args=vars(args)), os.path.join(args.out, "agent.pt"))
     json.dump(results, open(res_path, "w"), indent=1)
-    log("BITTI: %s | sinav kayip %.4f bpb %.4f | sentence_repeat %s" % (
+    log("BITTI: %s | sinav kayip %.4f bpb %.4f | sentence_repeat %s | story_loop %s" % (
         args.out, results["exam"]["loss"], results["exam"]["bits_per_byte"],
-        {d: g["sentence_repeat"] for d, g in gen.items()}))
+        {d: g["sentence_repeat"] for d, g in gen.items()},
+        {d: (g["story_loop"], g["story_loop_prompts"]) for d, g in gen.items()}))
     return results
 
 

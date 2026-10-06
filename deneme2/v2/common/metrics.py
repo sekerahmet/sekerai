@@ -45,29 +45,57 @@ def reading_view(sentences, tokenizer):
     return "\n".join(" ".join(normalize_words(s, tokenizer)) for s in sentences)
 
 
+LOOP_TAIL = 5               # story_loop: hikayenin son bu kadar uretilen cumlesi
+
+
+def _story_loop(prompt_words, gen_words):
+    """Hikaye dongusu (0 / 1): son LOOP_TAIL uretilen cumlenin HEPSI bos degil ve kelime dizisi o hikayede (istem + daha
+    once uretilen) gecmis.  Kesik (END'siz, max_tokens) cumleler de kuyruga ve gecmise girer; bos cumle tekrar sayilmaz.
+    LOOP_TAIL'den az cumle 0.  EOS'la biten ya da max_sentences'ta kesilen hikayede kural ayni."""
+    if len(gen_words) < LOOP_TAIL:
+        return 0
+    seen = {tuple(w) for w in prompt_words}
+    rep = []
+    for w in gen_words:
+        rep.append(bool(w) and tuple(w) in seen)
+        seen.add(tuple(w))
+    return int(all(rep[-LOOP_TAIL:]))
+
+
 @torch.no_grad()
-def story_generation(model, prompts, decode, seed, max_sentences=80, max_tokens=128, tokenizer=None):
+def story_generation(model, prompts, decode, seed, max_sentences=80, max_tokens=128, tokenizer=None, labels=None):
     """Kapali dongu: model.generate -> (istem basina dict(prompt, story metni reading_view), olculer).  decode greedy |
-    sample (sicaklik 1, kesme yok, CPU Generator tohum seed).  Olculer: eos_rate, sentences (istem basina), sentence_repeat,
-    loop (cumle icinde ardisik 3'lu kelime tekrari), no_end, empty (uretilen cumlelere oran)."""
+    sample (sicaklik 1, kesme yok, CPU Generator tohum seed).  labels: istem etiketleri (yoksa sira no).  Olculer:
+      eos_rate, sentences (istem basina)
+      sentence_repeat     butun istemler birlikte (TEK tanim, yukarida); sentence_repeat_by_prompt etiket -> oran
+      story_loop          dongudeki hikaye / istem (_story_loop); story_loop_prompts dongudeki istemlerin etiketleri
+      word_loop           cumle ICI: ardisik 3'lu kelime dizisinin hemen tekrari olan cumle / uretilen cumle (V1 'loop').
+                          Cumleler arasi donguyu GORMEZ; hikaye dongusu story_loop'ta.
+      no_end, empty       uretilen cumlelere oran."""
     assert decode in ("greedy", "sample") and tokenizer is not None
+    labels = [str(i) for i in range(len(prompts))] if labels is None else list(labels)
     gen = torch.Generator().manual_seed(seed) if decode == "sample" else None
     outs = model.generate(prompts, max_sentences, max_tokens, gen)
-    hit = total = n = eos = loop = no_end = empty = 0
-    texts = []
-    for p, (sents, ended, e) in zip(prompts, outs):
+    hit = total = n = eos = word_loop = no_end = empty = 0
+    texts, by_prompt, looped = [], {}, []
+    for lab, p, (sents, ended, e) in zip(labels, prompts, outs):
         pw = [normalize_words(s, tokenizer) for s in p]
         gw = [normalize_words(s, tokenizer) for s in sents]
         h, t = _repeat_counts(pw, gw, ended)
         hit, total, n, eos = hit + h, total + t, n + len(sents), eos + bool(e)
-        loop += sum(any(w[i:i + 3] == w[i + 3:i + 6] for i in range(max(0, len(w) - 5))) for w in gw)
+        by_prompt[lab] = round(h / t, 4) if t else None
+        if _story_loop(pw, gw):
+            looped.append(lab)
+        word_loop += sum(any(w[i:i + 3] == w[i + 3:i + 6] for i in range(max(0, len(w) - 5))) for w in gw)
         no_end += sum(not x for x in ended)
         empty += sum(not w for w in gw)
         texts.append(dict(prompt=reading_view(p, tokenizer), story=reading_view(sents, tokenizer), eos=bool(e)))
     rate = lambda a: round(a / n, 4) if n else None  # noqa: E731
     return texts, dict(decode=decode, prompts=len(prompts), eos_rate=round(eos / len(prompts), 4),
                        sentences=round(n / len(prompts), 2), sentence_repeat=round(hit / total, 4) if total else None,
-                       counted=total, loop=rate(loop), no_end=rate(no_end), empty=rate(empty))
+                       counted=total, sentence_repeat_by_prompt=by_prompt,
+                       story_loop=round(len(looped) / len(prompts), 4), story_loop_prompts=looped,
+                       word_loop=rate(word_loop), no_end=rate(no_end), empty=rate(empty))
 
 
 @torch.no_grad()

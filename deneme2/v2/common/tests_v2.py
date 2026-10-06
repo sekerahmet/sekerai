@@ -401,6 +401,39 @@ def t_metrics():
           and res["counted"] == 4 and res["eos_rate"] == 0.5 and res["no_end"] == 0.2 and res["sentences"] == 2.5
           and texts[0]["story"] == "The cat sat .\nA dog ran .\nA dog ran ." and texts[0]["prompt"] == "The cat sat .",
           str(res))
+    enc = lambda lines: [tok.encode(" " + x).ids for x in lines]  # noqa: E731
+    # gercek: v2_tf_d512_l8_lr1e-3_20261006_103227_sweep okuma 3 (kisaltilmis; aslinda 54'ten sonra 14 kez ayni cumle)
+    loop_p = enc(["Mysterious woods are always calling to me .", "The trees stand tall , their leaves whispering secrets ."])
+    loop_g = enc(["I will feel proud .", "I will be proud of her .", "I will know she is brave and kind .",
+                  "I will tell her about the girl and the girl .", "I will tell her about the girl and the girl .",
+                  "I will know she is brave and kind .", "I will be proud of her .", "I will be proud of her .",
+                  "I will be proud of her ."])
+    # gercek: v2_mz_d512_l8_lr5e-4_20261006_112843_sweep okuma 4, cumle 47-56 (51 = 54 = 48, 55 = 52; son 5'in 3'u yeni)
+    spread_g = enc(["As they walked , the boy felt a change inside .", "He had faced his fears and helped a friend .",
+                    "The giant creature smiled and said , \" You are brave . You are brave . \"",
+                    "The boy smiled , feeling proud .", "He had faced his fears and helped a friend .",
+                    "The boy knew he would always remember this adventure .",
+                    "As they walked back , the boy felt different .", "He had faced his fears and helped a friend .",
+                    "The boy knew he would always remember this adventure .",
+                    "He would always remember the giant and the giant ."])
+    spread_p = enc(["Near a tall mountain , a small fox felt cold and hungry ."])
+
+    class Real:
+        def generate(self, prompts, max_sentences, max_tokens, generator):
+            return [(loop_g, [True] * len(loop_g), True), (spread_g, [True] * len(spread_g), True)]
+    _, res = M.story_generation(Real(), [loop_p, spread_p], "greedy", 0, tokenizer=tok, labels=["okuma 3", "okuma 4"])
+    check("story_loop (gercek metin): son 5 cumlesi tekrar olan hikaye 1, daginik tekrarli hikaye 0; word_loop ikisinde 0 "
+          "(cumle ici tanim donguyu gormez); istem basina sentence_repeat",
+          res["story_loop"] == 0.5 and res["story_loop_prompts"] == ["okuma 3"] and res["word_loop"] == 0
+          and res["sentence_repeat_by_prompt"] == {"okuma 3": round(5 / 9, 4), "okuma 4": round(3 / 10, 4)}, str(res))
+    w = lambda *xs: [x.split() for x in xs]  # noqa: E731
+    cut = w("the the the the", "the the the the", "the the the the", "the the the the", "the the the the")
+    check("story_loop kenar: kesik (END'siz) ayni cumleler kuyrukta sayilir; kuyrukta bos cumle -> 0; 5'ten az cumle -> 0; "
+          "istemdeki cumleyi tekrar sayar",
+          M._story_loop(w("a b ."), w("the the the the") + cut) == 1 and M._story_loop([], w("a .", "a .", "a .", "a .",
+                                                                                        "a .") + [[]]) == 0
+          and M._story_loop(w("a ."), w("a .", "a .", "a .", "a .")) == 0
+          and M._story_loop(w("a .", "b ."), w("a .", "b .", "a .", "b .", "a .")) == 1)
     st, _ = _batch_two_rows()
     nb = np.array([40, 10, 30])
 
@@ -575,7 +608,8 @@ def t_train():
                   and a["speed"]["windows"] == total - 1, "decay_start %d" % dk)
             sj = json.load(open(os.path.join(out(model + "_A"), "samples.json"), encoding="utf-8"))
             txt = open(os.path.join(out(model + "_A"), "samples.txt"), encoding="utf-8").read()
-            gk = {"decode", "prompts", "eos_rate", "sentences", "sentence_repeat", "counted", "loop", "no_end", "empty"}
+            gk = {"decode", "prompts", "eos_rate", "sentences", "sentence_repeat", "counted", "word_loop", "no_end", "empty",
+                  "story_loop", "story_loop_prompts", "sentence_repeat_by_prompt"}
             check("train %s: okuma ciktisi (samples.txt / .json): 3 istem sirayla, istem / model / gercek devam, greedy + "
                   "sample olculeri" % model,
                   [r["label"] for r in sj["rows"]] == ["okuma 1", "okuma 2", "okuma 3"] and all(
