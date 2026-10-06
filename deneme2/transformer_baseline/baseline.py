@@ -40,7 +40,8 @@ class Block(torch.nn.Module):
     def forward(self, x, pos, allowed):
         B, T, d = x.shape
         q, k, v = self.qkv(self.n1(x)).view(B, T, 3, self.heads, d // self.heads).permute(2, 0, 3, 1, 4)
-        q, k = rope(self.q_norm(q), pos), rope(self.k_norm(k), pos)
+        # q, k autocast'te bf16: norm fp32'de (Model Z Block ile ayni), sonra geri
+        q, k = rope(self.q_norm(q.float()).to(v.dtype), pos), rope(self.k_norm(k.float()).to(v.dtype), pos)
         if allowed is None:                                      # duz causal: hizli yol (GPU'da flash)
             a = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         else:

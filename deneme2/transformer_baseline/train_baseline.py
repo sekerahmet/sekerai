@@ -353,7 +353,7 @@ def main(argv=None):
             opt.step()
             total += loss.detach()
             count += 1
-        t_train = time.time() - t_epoch
+        t_train = max(time.time() - t_epoch, 1e-6)            # surdurulen kisa parca: Windows saatinde 0 olabilir
         model.eval()
         with torch.autocast(args.device.split(":")[0], dtype=torch.bfloat16, enabled=cuda):
             scores = {c: exam_scores(model, exam, exam_rows, args.batch * 4, c, nbytes if c == "full" else None)
