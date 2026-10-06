@@ -1,28 +1,28 @@
-"""gap_v2 -- V2 acik analizi: Model Z - transformer, sinav hedefi basina nll ve kirilimlar (belge 28; V1 karsiligi belge 23
-gap.py).  Ad onay bekliyor.
+"""gap_v2 -- V2 acik analizi: Model Z - transformer, sinav hedefi basina nll ve kirilimlar (belge 28; ad onayli, 6 Ekim).
+diag/'a tasindi (belge 33 adim 5): kosular generate_readings.load_run ile (learned_z kimlikten), islev / icerik ayrimi
+train token sayimindan (data.token_counts; meaning yok).
 
-Iki model ayni sinavda (exam_pack_plan.npz, 1.000 hikaye), egitimle ayni maske yolu (common/train.py: CUDA'da block_mask +
+Iki model ayni sinavda (exam_pack_plan.npz, 1.000 hikaye), egitimle ayni maske yolu (train._attn: CUDA'da block_mask +
 bloklar compile, bf16 autocast; CPU'da dense).  Hedefler satir sirasiyla iki duzende ayni (belge 22 s3); hedef ozellikleri
 hikayelerden bagimsiz bir donguyle kurulur ve iki modelin batch hedefleriyle birebir karsilastirilir.
 
     hedef ozellikleri: tur (first / mid / end / eos), icerik / islev (train sikliginda ilk 50 ya da harf-rakamsiz token
-    islev), onceki cumlelerde gecti mi / yalniz bu cumlede gecti mi / yeni, parca (kelime devami; train_meaning glue),
-    cumle ici konum, hikayedeki cumle sirasi k.
+    islev), onceki cumlelerde gecti mi / yalniz bu cumlede gecti mi / yeni, parca (kelime devami), cumle ici konum,
+    hikayedeki cumle sirasi k.
     acik = nll_mz - nll_tf; kirilimda pay = sum(acik) / toplam acik.
 
-    python gap_v2.py --tf <tf agent.pt> --mz <mz agent.pt> --meaning <meaning agent.pt> --data <v2/simplestories_gpt2>
-                     --stream <simplestories> --out <klasor> [--device cuda] [--stories N] [--synthetic 1]
-Cikti: <out>/gap_targets.npz (hedef basina), gap.json (kirilimlar), gap.md (tablolar).
+    python gap_v2.py --tf <tf kosu klasoru> --mz <mz kosu klasoru> --data <v2/simplestories_gpt2> --stream <simplestories>
+                     --out <klasor> [--counts <train_token_counts.npy>] [--device cuda] [--stories N]
+Sayim: --counts, yoksa <data>/train_token_counts.npy, o da yoksa train akisindan bellekte (kaydedilmez; uretim karari
+kullanicinin).  Cikti: <out>/gap_targets.npz (hedef basina), gap.json (kirilimlar), gap.md (tablolar).
 """
 import torch  # noqa: I001  (Windows: torch once)
 
 import argparse
-import hashlib
 import json
 import os
 import sys
 import time
-from types import SimpleNamespace
 
 import numpy as np
 
@@ -31,14 +31,68 @@ COMMON = os.path.join(os.path.dirname(HERE), "common")
 sys.path.insert(0, COMMON)
 sys.path.insert(0, HERE)
 import data as D  # noqa: E402
-import train as T  # noqa: E402  (_build, _attn: egitimle ayni model kurulumu ve maske yolu)
-from train_meaning import glue_tables  # noqa: E402
+import recipe as R  # noqa: E402
+import train as T  # noqa: E402  (_attn: egitimle ayni maske yolu)
+import generate_readings as GR  # noqa: E402  (load_run: tek yukleme yeri)
 
 FUNCTION_TOP = 50           # islev: train sikliginda ilk 50 token (V1 gap.py ile ayni sinir)
 KINDS = {D.TargetKind.FIRST: "first", D.TargetKind.MID: "mid", D.TargetKind.END: "end", D.TargetKind.EOS: "eos"}
 K_BINS = [(0, 0), (1, 1), (2, 2), (3, 4), (5, 9), (10, 19), (20, 10 ** 6)]
 POS_BINS = [(0, 0), (1, 1), (2, 2), (3, 5), (6, 10), (11, 20), (21, 10 ** 6)]
-SYN = dict(d=32, layers=2, heads=2)     # --synthetic: rastgele kucuk modeller (yol sinamasi)
+_ALPHA, _DIGIT, _APOS = 1, 2, 4
+
+
+def load(run, data_dir, dev):
+    """Kosu klasoru -> (model eval, mask_fn, layout, identity); load_run + egitimin maske kurali (model.mask_fn: Model Z,
+    learned_z dahil; transformer: recipe.document_mask)."""
+    model, idt = GR.load_run(run, data_dir, dev)
+    mask_fn = getattr(model, "mask_fn", None) or R.document_mask
+    return model.eval(), mask_fn, ("model_z" if idt["model"] == "model_z" else "transformer"), idt
+
+
+def exam_rows(data_dir, stories=None):
+    """exam_pack_plan.npz satirlari; stories: yalniz ilk satirlardan ~N hikaye (smoke)."""
+    ep = np.load(os.path.join(data_dir, "exam_pack_plan.npz"))
+    ro, rs = ep["row_offsets"], ep["row_stories"]
+    rows = [rs[ro[r]:ro[r + 1]].tolist() for r in range(len(ro) - 1)]
+    if stories:
+        keep, n = [], 0
+        for r in rows:
+            if n >= stories:
+                break
+            keep.append(r)
+            n += len(r)
+        rows = keep
+    return rows
+
+
+def token_counts(args, log=print):
+    """--counts, <data>/train_token_counts.npy ya da train akisindan bellekte (kaydedilmez)."""
+    for p in (args.counts, os.path.join(args.data, "train_token_counts.npy")):
+        if p and os.path.exists(p):
+            log("sayim: %s" % p)
+            return np.load(p)
+    log("sayim: train_token_counts.npy yok -> train akisindan bellekte (data.token_counts; kaydedilmedi)")
+    return D.token_counts(args.stream)
+
+
+def function_tokens(text, counts):
+    """-> bool (V + 1): islev = train sikliginda ilk FUNCTION_TOP ya da harf-rakamsiz token."""
+    counts = np.asarray(counts)[:len(text)]
+    f = np.zeros(len(text) + 1, bool)
+    f[np.argsort(-counts)[:FUNCTION_TOP]] = True
+    f[:len(text)] |= np.array([not any(c.isalnum() for c in s) for s in text])
+    return f
+
+
+def glue_tables(text):
+    """Token metinleri (V) -> (start, end) int8: kelime devami olabilir mi (harf / rakam / 'harf ile baslar), neyle biter
+    (arsivdeki train_meaning.glue_tables ile ayni)."""
+    start = np.array([(_ALPHA if s[:1].isalpha() else 0) | (_DIGIT if s[:1].isdigit() else 0)
+                      | (_APOS if len(s) > 1 and s[0] in "'’" and s[1].isalpha() else 0) for s in text], np.int8)
+    end = np.array([(_ALPHA | _APOS if s[-1:].isalpha() else 0) | (_DIGIT if s[-1:].isdigit() else 0) for s in text],
+                   np.int8)
+    return start, end
 
 
 def target_features(stories, rows):
@@ -64,28 +118,6 @@ def target_features(stories, rows):
                 seen |= here
             add(D.EOS_ID, D.TargetKind.EOS, n, 0, -1, False, False, sid, n)
     return {k: np.asarray(v) for k, v in out.items()}
-
-
-def _load(kind, path, meaning, longest, dev, synthetic):
-    """agent.pt (train.py biçimi: state, identity, args) -> (model, mask_fn, layout)."""
-    if synthetic:
-        a = SimpleNamespace(model=kind, seed=0, meaning=meaning, shared_vocab=0, **SYN)
-        model, mask_fn, layout, _ = T._build(a, longest, dev)
-        return model.eval(), mask_fn, layout
-    pack = torch.load(path, map_location="cpu", weights_only=False)
-    idt = pack["identity"]
-    assert idt["model"] == kind and idt["longest"] == longest, (idt, kind, longest)
-    if kind == "model_z" and idt.get("meaning_sha256"):
-        sha = hashlib.sha256(open(meaning, "rb").read()).hexdigest()
-        assert sha == idt["meaning_sha256"], "meaning agent.pt modelin egitildigi dosya degil"
-    own = idt.get("own_vocab", 0)
-    a = SimpleNamespace(model=kind, seed=idt["seed"], d=idt["d"], layers=idt["layers"], heads=idt["heads"],
-                        meaning=None if own else meaning, shared_vocab=idt.get("shared_vocab", 0), own_vocab=own,
-                        open_z=idt.get("open_z", 0))                                  # belge 29, own_vocab, belge 31
-    model, mask_fn, layout, _ = T._build(a, longest, dev)
-    mask_fn = getattr(model, "mask_fn", mask_fn)                                     # open_z: KV = 2T kurali
-    model.load_state_dict({k.replace("._orig_mod", ""): v for k, v in pack["state"].items()})
-    return model.eval(), mask_fn, layout
 
 
 @torch.no_grad()
@@ -179,23 +211,10 @@ def _md(res):
     return "\n".join(lines)
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--tf", default=None)
-    ap.add_argument("--mz", default=None)
-    ap.add_argument("--meaning", required=True, help="Model Z'nin meaning agent.pt'si (sha identity ile denetlenir)")
-    ap.add_argument("--data", required=True)
-    ap.add_argument("--stream", required=True)
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--device", default="cpu")
-    ap.add_argument("--stories", type=int, default=None, help="yalniz ilk N sinav satirinin hikayeleri (smoke)")
-    ap.add_argument("--synthetic", type=int, default=0, help="1: rastgele kucuk modeller (yol sinamasi)")
-    args = ap.parse_args(argv)
-    t0 = time.time()
-    log = lambda m: print("[%6.1f sn] %s" % (time.time() - t0, m), flush=True)  # noqa: E731
-    dev = torch.device(args.device)
-    cuda = dev.type == "cuda"
-    if cuda:
+def setup(device, log):
+    """Cihaz: CUDA'da GPU sorulur ve dynamo sinirlari; Windows CPU'da EcoQoS kapali, 8 is parcacigi."""
+    dev = torch.device(device)
+    if dev.type == "cuda":
         assert torch.cuda.is_available(), "GPU YOK"
         for k in ("cache_size_limit", "recompile_limit"):
             if hasattr(torch._dynamo.config, k):
@@ -203,55 +222,63 @@ def main(argv=None):
     elif os.name == "nt":
         log("guc kisitlamasi (EcoQoS) kapali: %s" % T._no_power_throttling())
         torch.set_num_threads(8)
+    return dev
+
+
+def vocab_text(stream):
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(os.path.join(stream, "gpt2", "tokenizer.json"))
+    return tok, [tok.decode([i]) for i in range(tok.get_vocab_size())]
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--tf", required=True, help="transformer kosu klasoru (agent.pt)")
+    ap.add_argument("--mz", required=True, help="Model Z kosu klasoru (agent.pt)")
+    ap.add_argument("--data", required=True)
+    ap.add_argument("--stream", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--counts", default=None, help="train_token_counts.npy (yoksa <data>/ ya da akistan)")
+    ap.add_argument("--device", default="cpu")
+    ap.add_argument("--stories", type=int, default=None, help="yalniz ilk N sinav satirinin hikayeleri (smoke)")
+    args = ap.parse_args(argv)
+    t0 = time.time()
+    log = lambda m: print("[%6.1f sn] %s" % (time.time() - t0, m), flush=True)  # noqa: E731
+    dev = setup(args.device, log)
     valid = D.TokenStories(args.stream, args.data, "valid")
-    train_meta = json.load(open(os.path.join(args.data, "train_boundaries.json"), encoding="utf-8"))
-    longest = train_meta.get("max_sentence_tokens_all", train_meta["max_sentence_tokens"])     # train.py ile ayni
-    ep = np.load(os.path.join(args.data, "exam_pack_plan.npz"))
-    ro, rs = ep["row_offsets"], ep["row_stories"]
-    rows = [rs[ro[r]:ro[r + 1]].tolist() for r in range(len(ro) - 1)]
-    if args.stories:                                                  # smoke: ilk satirlardan ~N hikaye
-        keep, n = [], 0
-        for r in rows:
-            if n >= args.stories:
-                break
-            keep.append(r)
-            n += len(r)
-        rows = keep
+    rows = exam_rows(args.data, args.stories)
     f = target_features(valid, rows)
     log("sinav: %d satir, %d hikaye, %d hedef" % (len(rows), sum(map(len, rows)), len(f["tgt"])))
-    res_nll = {}
-    for kind, path in (("transformer", args.tf), ("model_z", args.mz)):
-        model, mask_fn, layout = _load(kind, path, args.meaning, longest, dev, args.synthetic)
-        if cuda:
+    res_nll, idts = {}, {}
+    for kind, run in (("transformer", args.tf), ("model_z", args.mz)):
+        model, mask_fn, layout, idt = load(run, args.data, dev)
+        assert idt["model"] == kind, "%s: kosu %s modeli" % (run, idt["model"])
+        idts[kind] = {k: idt.get(k) for k in ("model", "d", "layers", "heads", "seed", "learned_z")}
+        if dev.type == "cuda":
             for block in model.blocks:
                 block.compile(dynamic=False)
         nll, tgt, tk = per_target(model, mask_fn, layout, valid, rows, dev)
         assert np.array_equal(tgt, f["tgt"]) and np.array_equal(tk, f["kind"]), \
             "%s: batch hedefleri bagimsiz donguyle ayni degil" % kind
         res_nll[kind] = nll
-        log("%s: ort nll %.4f (%d hedef; hedef ve tur bagimsiz donguyle birebir)" % (kind, nll.mean(), len(nll)))
-        rj = os.path.join(os.path.dirname(path), "results.json") if path else ""
-        if not args.synthetic and not args.stories and os.path.exists(rj):          # egitim sinaviyla ayni sayi mi
+        log("%s (%s): ort nll %.4f (%d hedef; hedef ve tur bagimsiz donguyle birebir)" % (kind, idts[kind], nll.mean(),
+                                                                                         len(nll)))
+        rj = os.path.join(run, "results.json")
+        if not args.stories and os.path.exists(rj):                          # egitim sinaviyla ayni sayi mi
             want = json.load(open(rj, encoding="utf-8"))["exam"]["loss"]
             log("%s: egitimin sinav kaybi %.4f, burada %.4f, fark %.1e" % (kind, want, nll.mean(), nll.mean() - want))
         del model
-        if cuda:
+        if dev.type == "cuda":
             torch.cuda.empty_cache()
-    from tokenizers import Tokenizer
-    tok = Tokenizer.from_file(os.path.join(args.stream, "gpt2", "tokenizer.json"))
-    text = [tok.decode([i]) for i in range(tok.get_vocab_size())]
-    count = torch.load(args.meaning, map_location="cpu", weights_only=False).get("count")
-    count = np.bincount(np.asarray(valid.stream), minlength=len(text))[:len(text)] if count is None else count.numpy()
-    is_function = np.zeros(len(text) + 1, bool)
-    is_function[np.argsort(-count)[:FUNCTION_TOP]] = True
-    is_function[:len(text)] |= np.array([not any(c.isalnum() for c in s) for s in text])
-    start, end = (g.numpy() for g in glue_tables(text))
+    _, text = vocab_text(args.stream)
+    is_function = function_tokens(text, token_counts(args, log))
+    start, end = glue_tables(text)
     piece = (f["kind"] == D.TargetKind.MID) & ((start[np.maximum(f["tgt"], 0) % len(text)]
                                                 & end[np.maximum(f["prev"], 0) % len(text)]) != 0)
     res = breakdown(res_nll["transformer"], res_nll["model_z"], f, is_function, piece)
     res["tokenler"] = token_table(res_nll["transformer"], res_nll["model_z"], f["tgt"], text)
-    res["girdi"] = dict(tf=args.tf, mz=args.mz, meaning=args.meaning, synthetic=args.synthetic, stories=args.stories,
-                        device=args.device, longest=longest, function_top=FUNCTION_TOP)
+    res["girdi"] = dict(tf=args.tf, mz=args.mz, identity=idts, stories=args.stories, device=args.device,
+                        function_top=FUNCTION_TOP)
     os.makedirs(args.out, exist_ok=True)
     np.savez_compressed(os.path.join(args.out, "gap_targets.npz"), nll_tf=res_nll["transformer"],
                         nll_mz=res_nll["model_z"], piece=piece, function=is_function[np.maximum(f["tgt"], 0)], **f)

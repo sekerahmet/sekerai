@@ -1,4 +1,5 @@
-"""order_probe -- sira sinamasi (belge 31; ad onayli): bir model sirayi okuyor mu.  Iki olcu, gap_v2 gibi kayitli kosular:
+"""order_probe -- sira sinamasi (belge 31; ad onayli): bir model sirayi okuyor mu.  diag/'a tasindi (belge 33 adim 5):
+kosular generate_readings.load_run ile (learned_z kimlikten), islev ayrimi train token sayimindan (gap_v2.token_counts).
 
 1. Kim kime: "One day, A <eylem> B." -> ikinci cumlenin ilk token'inda A mi B mi.  8 dogal kalip (5 etken, cevap B; 3
    edilgen, cevap A), 10 ad, sirali ciftler (720 ornek).  (A, B) ve (B, A) ayni kelime torbasi.
@@ -8,9 +9,9 @@
    gecmis: C0 asil, C1 butun onceki cumlelerin ici karisik, C1p yalniz bir onceki cumlenin ici karisik.  Hedef cumlenin
    yeni icerik kaybi ve artislari.
 
-    python order_probe.py --data <v2/simplestories_gpt2> --stream <simplestories> [--tf <agent.pt>] [--mz <agent.pt> ...]
-                          [--meaning <meaning agent.pt>] [--stories 40] [--out <json>]
-CPU, eager, dense maske (model._batch_hidden(batch, None); open_z dahil).
+    python order_probe.py --data <v2/simplestories_gpt2> --stream <simplestories> --runs <kosu klasoru> [...]
+                          [--counts <train_token_counts.npy>] [--stories 40] [--out <json>]
+CPU, eager, dense maske (model._batch_hidden(batch, None): modelin kendi maske kurali).
 """
 import torch  # noqa: I001  (Windows: torch once)
 
@@ -28,8 +29,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "common"))
 sys.path.insert(0, HERE)
 import data as D  # noqa: E402
-import train as T  # noqa: E402
-from gap_v2 import _load, target_features  # noqa: E402
+import gap_v2 as G  # noqa: E402  (load, target_features, token_counts, function_tokens)
+from gap_v2 import target_features  # noqa: E402
 
 NAMES = [" Mia", " Leo", " Lily", " Max", " Sam", " Tom", " Ben", " Anna", " Zoe", " Jack"]
 TEMPLATES = [("One day,{A} threw the ball to{B}.", "B"), ("One day,{A} asked{B} for help.", "B"),
@@ -66,7 +67,7 @@ def _rows(groups, row_len=D.ROW_LEN):
 
 @torch.no_grad()
 def _nll(model, layout, st, rows):
-    """-> (nll, tgt, kind) hedef basina, satir sirasiyla (dense maske; open_z dahil)."""
+    """-> (nll, tgt, kind) hedef basina, satir sirasiyla (dense maske: modelin kendi kurali, learned_z dahil)."""
     out = [], [], []
     W = model.E.weight
     for r in rows:
@@ -82,13 +83,19 @@ def _nll(model, layout, st, rows):
 
 @torch.no_grad()
 def who_did_what(model, layout, enc):
-    """-> dict(dogruluk, sira_etkisi, sira_duyarliligi, kalip_marj)."""
+    """-> dict(dogruluk, sira_etkisi, sira_duyarliligi, kalip_marj); formullu Model Z'de kalip cumlesi z'nin konum
+    anahtarindan (egitimin en uzun cumlesi) uzunsa dict(atlandi=neden)."""
     items, groups = [], []
     for (pat, who), (a, b) in itertools.product(TEMPLATES, itertools.permutations(NAMES, 2)):
         s1 = enc(pat.format(A=a, B=b))
         ans, oth = (enc(a)[0], enc(b)[0]) if who == "A" else (enc(b)[0], enc(a)[0])
         items.append((ans, oth))
         groups.append([s1, [ans] + enc(" smiled.")])
+    keys = getattr(model, "keys", None)
+    longest = max(len(x) for g in groups for x in g)
+    if keys is not None and longest >= len(keys["signs"]):
+        return dict(atlandi="kalip cumlesi %d token > egitimin en uzun cumlesi %d (z konum anahtari)" % (
+            longest, len(keys["signs"]) - 1))
     st, rows = _stories(groups), _rows(groups)
     W = model.E.weight
     m = []
@@ -145,10 +152,11 @@ def history_shuffle(model, layout, valid, story_ids, func, seed=0):
         m = ((f["kind"] == D.TargetKind.FIRST) | (f["kind"] == D.TargetKind.MID)) & (f["k"] == f["n_sent"] - 1)
         assert m.sum() == len(fl)
         x = nll[m]
-        out[c] = dict(hepsi=round(float(x.mean()), 4), yeni_icerik=round(float(x[fl].mean()), 4), n=int(m.sum()),
-                      n_yeni=int(fl.sum()))
+        out[c] = dict(hepsi=round(float(x.mean()), 4), yeni_icerik=round(float(x[fl].mean()), 4) if fl.any() else None,
+                      n=int(m.sum()), n_yeni=int(fl.sum()))
     for c in ("C1", "C1p"):
-        out[c]["artis_yeni"] = round(out[c]["yeni_icerik"] - out["C0"]["yeni_icerik"], 4)
+        new = (out[c]["yeni_icerik"], out["C0"]["yeni_icerik"])
+        out[c]["artis_yeni"] = round(new[0] - new[1], 4) if None not in new else None
         out[c]["artis_hepsi"] = round(out[c]["hepsi"] - out["C0"]["hepsi"], 4)
     return out
 
@@ -157,44 +165,34 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--data", required=True)
     ap.add_argument("--stream", required=True)
-    ap.add_argument("--tf", default=None, help="transformer agent.pt")
-    ap.add_argument("--mz", nargs="*", default=[], help="Model Z agent.pt (birden cok olabilir)")
-    ap.add_argument("--meaning", default=None, help="meaning agent.pt (ortak sozluk / bugunku Model Z icin)")
+    ap.add_argument("--runs", nargs="+", required=True, help="kosu klasorleri (agent.pt; model turu kimlikten)")
+    ap.add_argument("--counts", default=None, help="train_token_counts.npy (yoksa <data>/ ya da akistan)")
     ap.add_argument("--stories", type=int, default=40)
     ap.add_argument("--out", default=None)
     args = ap.parse_args(argv)
     t0 = time.time()
-    if os.name == "nt":
-        print("guc kisitlamasi (EcoQoS) kapali:", T._no_power_throttling(), flush=True)
-    torch.set_num_threads(8)
-    from tokenizers import Tokenizer
-    tok = Tokenizer.from_file(os.path.join(args.stream, "gpt2", "tokenizer.json"))
+    log = lambda m: print("[%6.1f sn] %s" % (time.time() - t0, m), flush=True)  # noqa: E731
+    dev = G.setup("cpu", log)
+    tok, text = G.vocab_text(args.stream)
     enc = lambda s: tok.encode(s, add_special_tokens=False).ids  # noqa: E731
-    text = [tok.decode([i]) for i in range(tok.get_vocab_size())]
     valid = D.TokenStories(args.stream, args.data, "valid")
-    meta = json.load(open(os.path.join(args.data, "train_boundaries.json"), encoding="utf-8"))
-    longest = meta.get("max_sentence_tokens_all", meta["max_sentence_tokens"])
-    count = torch.load(args.meaning, map_location="cpu", weights_only=False).get("count") if args.meaning else None
-    count = np.bincount(np.asarray(valid.stream), minlength=len(text))[:len(text)] if count is None else count.numpy()
-    func = np.zeros(len(text) + 1, bool)
-    func[np.argsort(-count)[:50]] = True
-    func[:len(text)] |= np.array([not any(c.isalnum() for c in s) for s in text])
+    func = G.function_tokens(text, G.token_counts(args, log))
     ep = np.load(os.path.join(args.data, "exam_pack_plan.npz"))
     ids = np.unique(ep["row_stories"])
     pick = np.random.default_rng(0).choice(ids, min(args.stories, len(ids)), replace=False)
-    runs = ([("transformer", args.tf)] if args.tf else []) + [("model_z", p) for p in args.mz]
     res = {}
-    for kind, path in runs:
-        model, _, layout = _load(kind, path, args.meaning, longest, torch.device("cpu"), 0)
-        name = os.path.basename(os.path.dirname(path)) or path
+    for run in args.runs:
+        model, _, layout, idt = G.load(run, args.data, dev)
+        name = os.path.basename(os.path.normpath(run))
         r = dict(kim_kime=who_did_what(model, layout, enc), gecmis_karistirma=history_shuffle(model, layout, valid, pick,
-                                                                                             func))
+                                                                                             func),
+                 identity={k: idt.get(k) for k in ("model", "d", "layers", "heads", "seed", "learned_z")})
         res[name] = r
         k, g = r["kim_kime"], r["gecmis_karistirma"]
-        print("%-46s kim kime: dogruluk %.3f, sira etkisi %.3f, duyarlilik %.3f | gecmis karistirma, yeni icerik: C0 %.3f, "
-              "C1 %+.3f, C1p %+.3f  (%.0f sn)" % (name, k["dogruluk"], k["sira_etkisi"], k["sira_duyarliligi"],
-                                                 g["C0"]["yeni_icerik"], g["C1"]["artis_yeni"], g["C1p"]["artis_yeni"],
-                                                 time.time() - t0), flush=True)
+        kk = k.get("atlandi") or "dogruluk %.3f, sira etkisi %.3f, duyarlilik %.3f" % (
+            k["dogruluk"], k["sira_etkisi"], k["sira_duyarliligi"])
+        log("%-46s kim kime: %s | gecmis karistirma, yeni icerik: C0 %s, C1 %s, C1p %s" % (
+            name, kk, g["C0"]["yeni_icerik"], g["C1"]["artis_yeni"], g["C1p"]["artis_yeni"]))
         del model
     if args.out:
         json.dump(res, open(args.out, "w", encoding="utf-8"), indent=1, ensure_ascii=False)
