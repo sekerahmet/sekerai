@@ -119,4 +119,9 @@ def main():
 
 
 if __name__ == "__main__":
+    if os.name == "nt":                         # EcoQoS kapali; yoksa ~10 kat yavas (kullanici, 6 Ekim)
+        import sys
+        sys.path.insert(0, os.path.join(HERE, "core", "grammar"))
+        from train_grammar import _no_power_throttling
+        print("guc kisitlamasi (EcoQoS) kapali:", _no_power_throttling(), flush=True)
     main()

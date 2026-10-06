@@ -355,7 +355,9 @@ def main(argv=None):
                             gen_unk=gen_unk.get_state(), epoch=epoch, history=history, args=vars(args)), ckpt + ".part")
             os.replace(ckpt + ".part", ckpt)
     if args.out:
-        torch.save(dict(vocab=vocab, state=agent.state_dict(), args=vars(args)), os.path.join(args.out, "agent.pt"))
+        shape = dict(heads=agent.reader.layers[0].self_attn.num_heads, layers=agent.reader.num_layers)  # build_keys okur
+        torch.save(dict(vocab=vocab, state=agent.state_dict(), args=dict(vars(args), **shape)),
+                   os.path.join(args.out, "agent.pt"))
         json.dump(history, open(os.path.join(args.out, "results.json"), "w"), indent=1)
         print("kaydedildi:", args.out, flush=True)
     return agent, res

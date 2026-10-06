@@ -20,7 +20,8 @@ Hikaye cikisi (--stories; kullanici, 4 Ekim: "eğitim hikaye hikaye olmak zorund
 bolucu ve ayni sozluk (once uretilmis ss_vocab.json); hikayenin BUTUN cumleleri sirasiyla (tekillestirme ve boy filtresi
 yok), sozluk disi kelime <unk>.  train akisi -> ss_story_ids.npy (int32, kelimeler uc uca), ss_story_sentence_offsets.npy
 (int64, cumle baslari, N+1), ss_story_offsets.npy (int64, hikaye baslari cumle sirasiyla, H+1); test akisi ->
-ss_exam_story_*.npy.
+ss_exam_story_*.npy ve ss_exam_story_bytes.npy (int64, hikaye metninin UTF-8 bayti: bits per byte paydasi, model_y
+valid_bytes ile ayni tanim; hikaye i = valid hikayesi i).
 
     python make_ss_sentences.py <simplestories koku> <cikti klasoru> [--tokens N  (yalniz ilk N token; sinama)]
                                 [--stories]
@@ -36,6 +37,10 @@ from collections import Counter
 from multiprocessing import Pool
 
 import numpy as np
+
+if os.name == "nt":     # her surecte (isciler dahil) EcoQoS kapatilir; yoksa ~10 kat yavas (kullanici, 6 Ekim)
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "core", "grammar"))
+    from train_grammar import _no_power_throttling  # noqa: E402
 
 EXAM = 5_000
 SEEN = 1_000
@@ -163,6 +168,8 @@ def _chunk(job):
     """Bir parca (ayri surecte) -> (parcanin sozlugu ilk gecis sirasiyla, yerel kimlikler, boylar, cumle imzalari, aday)."""
     root, start, stop = job
     if not _WORKER:
+        if os.name == "nt":
+            _no_power_throttling()
         from tokenizers import Tokenizer
         tok = Tokenizer.from_file(os.path.join(root, "gpt2", "tokenizer.json"))
         _WORKER.update(tok=tok, eos=tok.token_to_id("<|endoftext|>"), tables=_tables(tok, tok.get_vocab_size()),
@@ -181,9 +188,12 @@ def _chunk(job):
 
 
 def _story_chunk(job):
-    """Bir parca (ayri surecte) -> (kelime kimlikleri, cumle boylari, hikaye basina cumle sayisi)."""
+    """Bir parca (ayri surecte) -> (kelime kimlikleri, cumle boylari, hikaye basina cumle sayisi, hikaye baytlari (yalniz
+    valid akisi; obur akista bos))."""
     root, out, stream, start, stop = job
     if stream not in _WORKER:
+        if os.name == "nt":
+            _no_power_throttling()
         from tokenizers import Tokenizer
         tok = Tokenizer.from_file(os.path.join(root, "gpt2", "tokenizer.json"))
         vocab = json.load(open(os.path.join(out, "ss_vocab.json"), encoding="utf-8"))
@@ -202,7 +212,15 @@ def _story_chunk(job):
                 n += 1
         if n:
             counts.append(n)
-    return np.array(ids, dtype=np.int32), np.array(lengths, dtype=np.int64), np.array(counts, dtype=np.int64)
+    nbytes = []
+    if stream == "valid":                       # hikayenin butun metni (bosluk dahil); bos hikaye cumle de vermez, atlanir
+        a = np.asarray(w_["stream"][start:stop]).astype(np.int64)
+        ends = np.flatnonzero(a == w_["eos"])
+        texts = w_["tok"].decode_batch([a[s:e].tolist() for s, e in zip(np.r_[0, ends[:-1] + 1], ends)])
+        nbytes = [len(t.encode("utf-8")) for t in texts if t.strip()]
+        assert len(nbytes) == len(counts), "bayt dizisi hikayelerle hizali degil"
+    return (np.array(ids, dtype=np.int32), np.array(lengths, dtype=np.int64), np.array(counts, dtype=np.int64),
+            np.array(nbytes, dtype=np.int64))
 
 
 def main_stories(root, out, tokens=None):
@@ -217,18 +235,21 @@ def main_stories(root, out, tokens=None):
         if tokens:
             a = a[:int(np.flatnonzero(np.asarray(a[:tokens]) == eos)[-1]) + 1]
         jobs = [(root, out, stream, s, t) for s, t in chunks(a, eos, CHUNK)]
-        ids, lengths, counts = [], [], []
+        ids, lengths, counts, nbytes = [], [], [], []
         with Pool(min(WORKERS, len(jobs))) as pool:
-            for c, (i, l, n) in enumerate(pool.imap(_story_chunk, jobs)):   # imap: parca sirasi korunur
+            for c, (i, l, n, nb) in enumerate(pool.imap(_story_chunk, jobs)):   # imap: parca sirasi korunur
                 ids.append(i)
                 lengths.append(l)
                 counts.append(n)
+                nbytes.append(nb)
                 print("%s parca %d/%d: %d hikaye, %.0f sn" % (stream, c + 1, len(jobs), sum(map(len, counts)),
                                                              time.time() - t0), flush=True)
         ids, lengths, counts = np.concatenate(ids), np.concatenate(lengths), np.concatenate(counts)
         np.save(os.path.join(out, prefix + "_ids.npy"), ids)
         np.save(os.path.join(out, prefix + "_sentence_offsets.npy"), np.r_[0, np.cumsum(lengths)].astype(np.int64))
         np.save(os.path.join(out, prefix + "_offsets.npy"), np.r_[0, np.cumsum(counts)].astype(np.int64))
+        if stream == "valid":
+            np.save(os.path.join(out, prefix + "_bytes.npy"), np.concatenate(nbytes))
         print("%s: %d hikaye, %d cumle (hikaye basina ort %.1f), %d kelime, <unk> payi %.4f | %.0f sn" % (
             stream, len(counts), len(lengths), lengths.size / max(len(counts), 1), len(ids), (ids == 0).mean(),
             time.time() - t0), flush=True)
@@ -326,6 +347,8 @@ def main(root, out, tokens=None):
 
 
 if __name__ == "__main__":
+    if os.name == "nt":
+        print("guc kisitlamasi (EcoQoS) kapali:", _no_power_throttling(), flush=True)
     args = sys.argv[1:]
     n = int(args[args.index("--tokens") + 1]) if "--tokens" in args else None
     (main_stories if "--stories" in args else main)(args[0], args[1], n)

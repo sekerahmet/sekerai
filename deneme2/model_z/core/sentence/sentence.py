@@ -47,7 +47,8 @@ class Block(torch.nn.Module):
     def forward(self, x, pos, allowed):
         B, T, d = x.shape
         q, k, v = self.qkv(self.n1(x)).view(B, T, 3, self.heads, d // self.heads).permute(2, 0, 3, 1, 4)
-        q, k = rope(self.q_norm(q), pos), rope(self.k_norm(k), pos)
+        # q, k autocast'te bf16: norm fp32'de (agirlikla ayni dtype -> fused kernel), sonra geri
+        q, k = rope(self.q_norm(q.float()).to(v.dtype), pos), rope(self.k_norm(k.float()).to(v.dtype), pos)
         if allowed is None:                                      # duz causal: hizli yol (GPU'da flash)
             a = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         else:
@@ -104,9 +105,10 @@ class SentenceTransformer(torch.nn.Module):
         return self.loss_fn(h[keep], self.E.weight, target[keep])
 
     @torch.no_grad()
-    def generate(self, zs, max_words):
-        """zs (B, k, z_dim): her ornegin onceki cumlelerinin z'leri (k ayni) -> sonraki cumle (acgozlu, END'e kadar);
-        ilk kelime EOS ise [EOS] (hikaye bitti)."""
+    def generate(self, zs, max_words, generator=None):
+        """zs (B, k, z_dim): her ornegin onceki cumlelerinin z'leri (k ayni) -> sonraki cumle (END'e kadar); ilk kelime EOS
+        ise [EOS] (hikaye bitti).  generator None: acgozlu (argmax); verilirse modelin kendi dagilimindan ornek (sicaklik 1,
+        kesme yok).  Cumle icinde EOS -> END."""
         B, k, _ = zs.shape
         dev = zs.device
         words = torch.zeros(B, 0, dtype=torch.long, device=dev)
@@ -118,7 +120,11 @@ class SentenceTransformer(torch.nn.Module):
             zvec = torch.cat([zs.new_zeros(B, 1, zs.shape[2]), zs, zs.new_zeros(B, t, zs.shape[2])], 1)
             pos = torch.arange(1 + k + t, device=dev).expand(B, -1)
             h = self.hidden(kind, tok, zvec, pos, None)
-            w = (h[:, -1] @ self.E.weight.T).argmax(-1)
+            logits = (h[:, -1] @ self.E.weight.T).float()
+            if generator is None:
+                w = logits.argmax(-1)
+            else:
+                w = torch.multinomial(logits.softmax(-1), 1, generator=generator)[:, 0]
             if t == 0:                                           # hikaye sonu yalniz cumle basinda
                 ended = w == self.EOS
             else:
