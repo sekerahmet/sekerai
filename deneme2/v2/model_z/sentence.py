@@ -123,7 +123,9 @@ class Block(torch.nn.Module):
             a = F.scaled_dot_product_attention(q, k, v, attn_mask=attn[:, None])
         else:
             from torch.nn.attention.flex_attention import flex_attention
-            a = flex_attention(q, k, v, block_mask=attn)
+            bs = attn.BLOCK_SIZE[0]                     # 128 disinda varsayilan cekirdek hata veriyor (belge 37)
+            a = flex_attention(q, k, v, block_mask=attn, kernel_options=None if bs == 128 else dict.fromkeys(
+                ("BLOCK_M", "BLOCK_N", "BLOCK_M1", "BLOCK_N1", "BLOCK_M2", "BLOCK_N2"), bs))
         return self._finish(x, a)
 
 class SentenceTransformer(torch.nn.Module):

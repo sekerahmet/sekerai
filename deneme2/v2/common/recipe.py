@@ -27,6 +27,8 @@ from data import END_ID, EOS_ID, VOCAB, Kind
 
 BAG_GROUP = 512                   # grup basina torba (ardisik; grubun aday birlesimine tek matmul)
 BAG_CHUNK = 2048                  # tam sozluk satir dilimi
+ATTN_BLOCK = 128                  # FlexAttention blok boyu (64: SS d512 attention -%14, belge 37; bf16 esdeger)
+SELECT_COMPILED = True            # secicinin puan + maske + topk yolu derlenmis (CUDA)
 
 
 def document_mask(kind, doc, sent):
@@ -60,7 +62,7 @@ def block_mask(batch, mask_fn):
     B, T = batch.kind.shape
     mod = _with_padding(mask_fn(batch.kind, batch.doc, batch.sent), batch.kind, batch.doc)
     dev = batch.kind.device
-    return create_block_mask(mod, B, None, T, T, device=dev, _compile=dev.type == "cuda")
+    return create_block_mask(mod, B, None, T, T, device=dev, BLOCK_SIZE=ATTN_BLOCK, _compile=dev.type == "cuda")
 
 
 def _output_loss(h, weight, target):
@@ -130,6 +132,13 @@ def bag_copy(batch, ids, rows, cols, core):
     return torch.repeat_interleave(first, lens) + off, torch.repeat_interleave(word_key % VOCAB, lens)
 
 
+def _select_top(qh, es, b, pbit, sidx, kk):
+    """Secici puani (Bag.scores ile ayni: bf16 matmul, fp32 + b_v), P_k maskesi, ilk kk -> (score, values, indices)."""
+    score = ((qh @ es.T).float() + b).masked_fill(pbit[:, sidx], float("-inf"))
+    top = score.topk(kk, 1)
+    return score, top.values, top.indices
+
+
 class Bag(torch.nn.Module):
     """Ogrenen torba (belge 53-55; kullanici, 7 Ekim): B_k = C u P_k u L_k, |P_k u L_k| <= R = k - |C| (P_k fazlasi kelime
     sirasiyla kesilir).  Secici: puan(v) = q(h_k) . sg(e_v) + b_v, bf16 matmul (egitim, sinav, uretim ayni yol; belge 55
@@ -189,12 +198,13 @@ class Bag(torch.nn.Module):
         n_p = torch.bincount(bag[keep], minlength=n)
         allowed = self.seen & ~bag_mask(self.core) & ~pbit
         sidx, spos = self.selectable()
-        with torch.no_grad():                                                 # secim gradyansiz; kayip selector_loss'ta
-            score = self.scores(h, E, sidx).masked_fill(pbit[:, sidx], float("-inf"))   # (n, |sidx|)
         kk = min(R, len(sidx))                                                # secilebilir < R: kalan yerler bos (-1)
-        top = score.topk(kk, 1)
+        with torch.no_grad(), torch.autocast(dev.type, enabled=False):      # secim gradyansiz; kayip selector_loss'ta
+            fn = _compiled("select_top", _select_top, h, True) if SELECT_COMPILED else _select_top
+            score, top_v, top_i = fn(self.q(h.float()).bfloat16(), E.detach()[sidx].bfloat16(), self.b_v[sidx], pbit,
+                                     sidx, kk)                                # score (n, |sidx|)
         j = torch.arange(kk, device=dev)[None]
-        lw = torch.where(torch.isfinite(top.values) & (j < (R - n_p)[:, None]), sidx[top.indices], -1)
+        lw = torch.where(torch.isfinite(top_v) & (j < (R - n_p)[:, None]), sidx[top_i], -1)
         lw = torch.cat([lw, lw.new_full((n, R - kk), -1)], 1)
         j = torch.arange(R, device=dev)[None]
         cand_r = torch.where(j < n_p[:, None], plist, lw.gather(1, (j - n_p[:, None]).clamp_min(0)))

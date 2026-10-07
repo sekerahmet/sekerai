@@ -66,6 +66,7 @@ MUON = dict(momentum=0.95, nesterov=True, ns_steps=5, adjust_lr_fn="match_rms_ad
 DECAY = 0.2                                                # recipe.wsd_lr varsayilani; inis basi checkpoint'i
 BATCH_ROWS = D.BATCH_ROWS
 LOG_EVERY = 100             # adim; gunluk satiri = bir hiz penceresi
+COMPILE_MODE = None         # bloklarin torch.compile modu (None varsayilan; "max-autotune-no-cudagraphs" denenir)
 READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
 READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
@@ -405,7 +406,7 @@ def main(argv=None):
         model.bag.fill(core, counts)
     if cuda:
         for block in model.blocks:
-            block.compile(dynamic=False)
+            block.compile(dynamic=False, mode=COMPILE_MODE)
     opt, opt_info = _optimizer(model, args.optimizer, args.lr, cuda)
     ident = dict(model=args.model, d=args.d, layers=args.layers, heads=args.heads, lr=args.lr, seed=args.seed,
                  longest=train.max_sentence_tokens, row_len=row_len, batch_rows=BATCH_ROWS,
