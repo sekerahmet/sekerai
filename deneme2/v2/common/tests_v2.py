@@ -554,6 +554,18 @@ def _recipe_bag(R):
               "adim tohumuyla ayni",
               all(r["nll"] < 1e-5 and r["rel"] < 1e-5 and r["goal"] and r["extra"] < 1e-4 and r["src"] and r["miss"] > 0
                   and r["p_over"] > 0 and r["full"] for r in res) and torch.equal(full, full2), str(res))
+        R.BAG_GROUP = 256
+        long = [[[40 + i % 30 for i in range(230)], [41, 42]], [[43, 44]]]          # SS train en uzun cumle 227 (GPU coktu)
+        out_ = []
+        for layout in ("model_z", "transformer"):
+            b = D.build_batch(_Synthetic(long), [[0, 1]], layout, row_len=256)
+            hl = torch.randn(*b.kind.shape, 8, generator=g)
+            nll_l = R.bag_train_loss(m, b, hl, torch.zeros(b.kind.numel(), dtype=torch.bool), 0.0)[1]
+            pos = (b.target.flatten() >= 0).nonzero()[:, 0]
+            ref_l = -R.output_logprobs(m, b, hl, pos).gather(1, b.target.flatten()[pos][:, None])[:, 0].mean()
+            out_.append(abs(float(nll_l) - float(ref_l)))
+        check("torba: 128'den uzun torba (230 token'lik cumle, satir 256) iki duzende hizli yol = output_logprobs",
+              max(out_) < 1e-5, str(out_))
     finally:
         R.BAG_GROUP, R.BAG_CHUNK = saved
 

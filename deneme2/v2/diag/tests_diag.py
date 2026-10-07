@@ -1,6 +1,6 @@
 """tests_diag -- V2 teshis araclari testleri (CPU; belge 33 adim 5).  Gruplar: readings (generate_readings: kayitli
 kosudan okuma = train.py'ninki; arsiv kimligi durur; ek istem secimi Drive'dan), tools (gap_v2, order_probe,
-z_ablate; model-z-mathematician), bag (bag_report: aday havuzu A0, belge 53-55).  Formullu z cesitleri kaldirildi
+z_ablate; model-z-mathematician), bag (bag_report: A0 ve torbali kosu, belge 53-55).  Formullu z cesitleri kaldirildi
 (belge 44).  Yardimcilar common/tests_v2'den (_train_root, tokenizer_path, DRIVE).
 
     python tests_diag.py [--only readings,tools,bag]
@@ -208,14 +208,15 @@ def t_tools():
 
 
 def t_bag():
-    """bag_report (A0): gercek kucuk train.py kosusu (Model Z + G) uzerinde secici uydurma + rapor, onsel acik / kapali;
-    sayim dosyasi depodaki kodla uretilir; C'de END ve EOS; kaynak paylari toplami 1, kacan M ile artmaz; uydurma ana
-    modeli degistirmez; meaning onseli elle hesapla ayni; ikinci kosu ayni klasorde durur."""
-    import math
+    """bag_report: gercek kucuk train.py kosulari uzerinde A0 (torbasiz model donuk, secici uydurulur) ve torbali kosunun
+    kendi torbasi; sayim dosyasi yoksa DURUR; paylar C + P + L + kacan = 1 her M'de, kacan M ile artmaz; torbali kosuda
+    K = bag_k satiri = modelin kendi torbasinin kacani (Bag.select ile dogrudan); uydurma ana modeli degistirmez; ayni
+    klasorde ikinci kosu durur."""
     import traceback
     import bag_report as BR
     import data as DD
     import generate_readings as GR
+    import recipe as R
     import train as TR
     tp = T2.tokenizer_path()
     if tp is None:
@@ -226,121 +227,76 @@ def t_bag():
     TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=6, max_tokens=4)
     try:
+        base_tr = ["--data", data, "--stream", root, "--device", "cpu", "--model", "model_z", "--d", "16", "--layers", "2",
+                   "--heads", "2", "--lr", "1e-2", "--steps", "4", "--checkpoint_minutes", "0"]
         run = os.path.join(T2.TMP, "runs_bag", "mz")
-        TR.main(["--data", data, "--stream", root, "--device", "cpu", "--model", "model_z", "--d", "16", "--layers", "2",
-                 "--heads", "2", "--lr", "1e-2", "--steps", "4", "--out", run, "--checkpoint_minutes", "0"])
+        TR.main(base_tr + ["--out", run])
         DD.BATCH_ROWS = 4
-        g = torch.Generator().manual_seed(0)
-        mpath = os.path.join(T2.TMP, "runs_bag", "meaning")
-        os.makedirs(mpath, exist_ok=True)
-        V = DD.EOS_ID + 1
-        count = torch.zeros(V)
-        count[torch.as_tensor(DD.token_counts(root)[:V] > 0)] = 1.0
-        torch.save(dict(state={"source.weight": torch.randn(V, 8, generator=g), "target.weight": torch.randn(V, 8, generator=g),
-                               "bias": torch.randn(V, generator=g)}, count=count,
-                        tokenizer_sha256=BR._sha256(os.path.join(root, "gpt2", "tokenizer.json"))),
-                   os.path.join(mpath, "agent.pt"))
-        base = ["--run", run, "--data", data, "--stream", root, "--device", "cpu", "--bag_core", "5", "--steps", "3",
-                "--seen_batches", "1"]
+        base = ["--data", data, "--stream", root, "--device", "cpu", "--bag_core", "5", "--steps", "3", "--seen_batches", "1"]
         cpath = os.path.join(data, "train_token_counts.npy")
-        had = os.path.exists(cpath)
-        rep = {k: BR.main(base + ["--out", os.path.join(T2.TMP, "bag_" + k)] + x)
-               for k, x in (("off", []), ("on", ["--bag_prior", mpath, "--queries", "2"]), ("cl", ["--bag_clusters", "4"]))}
-        check("bag: sayim dosyasi yoktu, depodaki kodla uretildi (= data.token_counts)",
-              not had and np.array_equal(np.load(cpath), DD.token_counts(root)))
-        cfg = json.load(open(os.path.join(T2.TMP, "bag_on", "config.json"), encoding="utf-8"))
-        check("bag: C = en sik 5 + END + EOS; onsel sha kimlikte (bag_prior_sha256)",
-              {DD.END_ID, DD.EOS_ID} <= set(cfg["core_tokens"]) and cfg["core"] in (6, 7)
-              and cfg["bag_prior_sha256"] == BR._sha256(os.path.join(mpath, "agent.pt")))
-        ok, names = True, set()
-        for k, r in rep.items():
+        try:
+            BR.main(base + ["--run", run, "--out", os.path.join(T2.TMP, "bag_nocount")])
+            no_count = False
+        except SystemExit as e:
+            no_count = "yok" in str(e)
+        np.save(cpath, DD.token_counts(root))
+        brun = os.path.join(T2.TMP, "runs_bag", "mz_bag")
+        TR.main(base_tr + ["--bag_k", "12", "--bag_core", "5", "--out", brun])
+        rep = {k: BR.main(base + ["--run", r, "--out", os.path.join(T2.TMP, "bag_" + k)])
+               for k, r in (("a0", run), ("trained", brun))}
+        ok = True
+        for r in rep.values():
             for part in ("exam", "train_seen"):
                 e = r[part]
-                for sc in [x for x in e if isinstance(e[x], dict)]:
-                    names.add(sc)
+                for sc in ("selector", "freq"):
                     bm = e[sc]["by_m"]
                     ms = [bm[str(m)]["miss"] for m in BR.M_LIST]
                     ok &= all(abs(e["share_c"] + e["share_p"] + bm[str(m)]["share_l"] + bm[str(m)]["miss"] - 1) < 2e-4
                               for m in BR.M_LIST)
                     ok &= all(a >= b for a, b in zip(ms, ms[1:])) and abs(ms[0] - (1 - e["share_c"] - e["share_p"])) < 2e-4
-        check("bag: paylar C + P + L + kacan = 1 her M'de, kacan M ile artmaz, M 0 = C u P disi (%s)" % sorted(names),
-              ok and names == {"selector", "freq", "meaning", "cluster", "cluster_freq"})
-        ccfg = json.load(open(os.path.join(T2.TMP, "bag_cl", "config.json"), encoding="utf-8"))["clusters"]
-        z = np.load(os.path.join(T2.TMP, "bag_cl", "bag_clusters.npz"))
-        lm_ok = all(v["l_actual"] <= int(m) for v_ in (rep["cl"]["exam"]["cluster"]["by_m"],) for m, v in v_.items())
-        check("bag kume: dosya sha'si config'te; her uygun token tek kumede, boy <= sinir; |L| <= M; maliyet raporda",
-              ccfg["sha256"] == BR._sha256(os.path.join(T2.TMP, "bag_cl", "bag_clusters.npz"))
-              and len(z["token"]) == ccfg["tokens"] == len(set(z["token"].tolist()))
-              and np.bincount(z["cluster"]).max() <= ccfg["limit"] and lm_ok
-              and rep["cl"]["cost"]["selector_flop_per_bag"] == 2 * 16 * (16 + 4), str(ccfg))
-        check("bag: ornek dosyasi dolu", os.path.getsize(os.path.join(T2.TMP, "bag_on", "bag_examples.txt")) > 100)
+        modes = [json.load(open(os.path.join(T2.TMP, "bag_" + k, "config.json")))["mode"] for k in ("a0", "trained")]
+        check("bag_report: sayim dosyasi yoksa DURUR; A0 ve torbali kosu; paylar toplami 1, kacan M ile artmaz",
+              no_count and ok and modes == ["A0", "trained"]
+              and os.path.getsize(os.path.join(T2.TMP, "bag_a0", "bag_examples.txt")) > 100)
+        model, idt = GR.load_run(brun, data, torch.device("cpu"))
+        model.eval()
+        va = DD.TokenStories(root, data, "valid")
+        ep = np.load(os.path.join(data, "exam_pack_plan.npz"))
+        ro, rs = ep["row_offsets"], ep["row_stories"]
+        miss = n = 0
+        with torch.no_grad():
+            for a in range(0, len(ro) - 1, 4):
+                b = DD.build_batch(va, [rs[ro[i]:ro[i + 1]].tolist() for i in range(a, min(a + 4, len(ro) - 1))], "model_z",
+                                   "cpu", 64)
+                sel = model.bag.batch_select(b, model._batch_hidden(b), model.E.weight)
+                keep = b.target >= 0
+                miss += int((~sel["inbag"][sel["ids"][keep], b.target[keep]]).sum())
+                n += int(keep.sum())
+        got = rep["trained"]["exam"]["selector"]["by_k"]["12"]["miss"]
+        check("bag_report: torbali kosuda K = bag_k kacani = modelin kendi torbasinin kacani (%.4f / %.4f)" % (got, miss / n),
+              abs(got - miss / n) < 1e-4)
+        m0, _ = GR.load_run(run, data, torch.device("cpu"))
+        m0.eval().requires_grad_(False)
+        before = {k: v.clone() for k, v in m0.state_dict().items()}
+        core = R.core_ids(np.load(cpath), 5)
+        bag = R.Bag(16, len(core) + 64, len(core))
+        bag.fill(core, np.load(cpath))
+        opt = torch.optim.AdamW(bag.parameters(), lr=1e-2)
+        tr = DD.TokenStories(root, data, "train")
+        f = np.load(os.path.join(data, "train_pack_plan_e1.npz"))
+        batch = DD.build_batch(tr, [f["row_stories"][f["row_offsets"][i]:f["row_offsets"][i + 1]].tolist() for i in range(4)],
+                               "model_z", "cpu", int(f["row_len"]))
+        q0 = bag.q.weight.clone()
+        l1 = [BR.fit_step(bag, opt, BR.bag_batch(m0, m0.mask_fn, bag, batch, False))[0] for _ in range(3)]
+        check("bag_report A0: uydurma ana modeli degistirmez, seciciyi degistirir, ayni batch'te kayip duser",
+              all(torch.equal(before[k], v) for k, v in m0.state_dict().items()) and not torch.equal(q0, bag.q.weight)
+              and l1[-1] < l1[0], str([round(x, 4) for x in l1]))
         try:
-            BR.main(base + ["--out", os.path.join(T2.TMP, "bag_off")])
+            BR.main(base + ["--run", run, "--out", os.path.join(T2.TMP, "bag_a0")])
             stopped = False
         except SystemExit as e:
-            stopped = "bag_head.pt var" in str(e)
-        check("bag: ayni klasorde ikinci kosu durur (kisa deneme, surdurme yok)", stopped)
-        model, _ = GR.load_run(run, data, torch.device("cpu"))
-        model.eval().requires_grad_(False)
-        before = {k: v.clone() for k, v in model.state_dict().items()}
-        counts = np.load(cpath)
-        core, rank = BR.core_mask(counts, 5, torch.device("cpu"))
-        prior = BR.load_prior(mpath, BR._sha256(os.path.join(root, "gpt2", "tokenizer.json")), torch.device("cpu"))
-        tr = DD.TokenStories(root, data, "train")
-        plan = np.load(os.path.join(data, "train_pack_plan_e1.npz"))
-        rows = [plan["row_stories"][plan["row_offsets"][i]:plan["row_offsets"][i + 1]].tolist() for i in range(4)]
-        batch = DD.build_batch(tr, rows, "model_z", "cpu", int(plan["row_len"]))
-        head = BR.BagHead(16, 1).float()
-        h0 = {k: v.clone() for k, v in head.state_dict().items()}
-        opt = torch.optim.AdamW(head.parameters(), lr=1e-2)
-        b = BR.bag_batch(model, model.mask_fn, batch, core, False, prior, rank)
-        l1 = [BR.fit_step(head, opt, model.E.weight, b, core, True)[0] for _ in range(3)]
-        check("bag: uydurma ana modeli degistirmez, seciciyi degistirir, ayni batch'te kayip duser",
-              all(torch.equal(before[k], v) for k, v in model.state_dict().items())
-              and not torch.equal(h0["q.weight"], head.q.weight) and l1[-1] < l1[0], str([round(x, 4) for x in l1]))
-        skip, BR.PRIOR_SKIP = BR.PRIOR_SKIP, 0                              # kucuk sozluk: her token oy versin
-        b = BR.bag_batch(model, model.mask_fn, batch, core, False, prior, rank)
-        BR.PRIOR_SKIP = skip
-        ids, br_, bc_ = BR.bag_index(batch)
-        j = int(((batch.kind[br_, bc_] == DD.Kind.ZTOK) & (batch.sent[br_, bc_] >= 2)).nonzero()[0, 0])
-        r, c = int(br_[j]), int(bc_[j])
-        d_, k_ = int(batch.doc[r, c]), int(batch.sent[r, c])
-        sel = ((batch.doc[r] == d_) & (batch.kind[r] == DD.Kind.TOKEN) & (batch.sent[r] <= k_)
-               & (batch.sent[r] > k_ - BR.PRIOR_WINDOW))
-        voters = sorted({t for t in batch.tokens[r][sel].tolist() if count[t] > 0})
-        P = [torch.softmax(prior["bias"] + prior["src"][i] @ prior["tgt"].T / math.sqrt(8), -1) for i in voters]
-        want = (torch.stack(P).mean(0) if P else torch.softmax(prior["bias"], -1)).clamp_min(1e-30).log()
-        check("bag: meaning onseli (torba %d, %d oy) elle hesapla ayni" % (j, len(voters)),
-              len(voters) > 1 and torch.allclose(b["prior"][j, :V], want, atol=1e-5))
-        g2 = torch.Generator().manual_seed(3)
-        nC, V_ = 5, DD.VOCAB
-        of = torch.full((V_,), -1, dtype=torch.long)
-        toks = torch.arange(100, 120)
-        of[toks] = torch.arange(20) % nC
-        cl = dict(of=of, size=torch.bincount(of[toks], minlength=nC), n=nC)
-        P = torch.zeros(3, V_, dtype=torch.bool)
-        P[1, [100, 105, 101]] = True
-        y = torch.tensor([100, 102, 107, 113, 119, 101, 104, 200])
-        bb = dict(P=P, bag=torch.tensor([0, 0, 0, 1, 1, 1, 2, 2]), y=y, n=3, cl=of[y],
-                  src=torch.tensor([BR.SRC_REST] * 5 + [BR.SRC_P, BR.SRC_REST, BR.SRC_REST]))
-        sc = torch.randn(3, nC, generator=g2)
-        rk, lsz = BR.cluster_ranks(bb, dict(c=lambda b0, b1: sc[b0:b1]), cl)
-        want, wl = [], []
-        for t in range(len(y)):
-            k, c = int(bb["bag"][t]), int(of[y[t]])
-            new = [int(cl["size"][j]) - int(P[k][toks][of[toks] == j].sum()) for j in range(nC)]
-            order = sorted(range(nC), key=lambda j: -float(sc[k, j]))
-            cum = np.cumsum([new[j] for j in order])
-            want.append(-1 if int(bb["src"][t]) != BR.SRC_REST else 10 ** 9 if c < 0 else int(cum[order.index(c)]) - 1)
-            wl.append([max([0] + [x for x in cum if x <= m]) for m in BR.M_LIST])
-        check("bag kume: gereken butce (sirali kumelerin birikimli YENI kelimesi) ve gercek |L| (butceyi asan kume "
-              "alinmaz) kaba kuvvetle ayni; kumesiz hedef hic yakalanmaz",
-              rk["c"].tolist() == want and lsz["c"].tolist() == [[float(x) for x in r] for r in wl], str(rk["c"].tolist()))
-        vec = torch.nn.functional.normalize(torch.randn(40, 6, generator=g2), dim=1)
-        a1, c1 = BR.cluster_vocab(vec, 4, 0)
-        a2, _ = BR.cluster_vocab(vec, 4, 0)
-        check("bag kume: k-means deterministik (ayni tohum ayni atama), boy <= ceil(1,5 x 10) = 15, merkez birim",
-              torch.equal(a1, a2) and int(torch.bincount(a1).max()) <= 15 and torch.allclose(c1.norm(dim=1), torch.ones(4)))
+            stopped = "bag_report.json var" in str(e)
+        check("bag_report: ayni klasorde ikinci kosu durur (kisa deneme, surdurme yok)", stopped)
     except Exception:  # noqa: BLE001
         check("bag", False, traceback.format_exc(limit=4))
     finally:

@@ -25,7 +25,7 @@ import torch.nn.functional as F
 
 from data import END_ID, EOS_ID, VOCAB, Kind
 
-BAG_CLASSES = (16, 32, 64, 160)   # torba basina konum sinifi (sabit sekil; FineWeb cumlesi <= 128 token + Z)
+BAG_CLASSES = (16, 32, 64, 128)   # torba basina konum sinifi (sabit sekil); otesi 2'nin kuvvetleri, satir boyuna kadar
 BAG_GROUP = 256                   # dilim basina torba (bmm)
 BAG_CHUNK = 2048                  # tam sozluk satir dilimi
 
@@ -277,15 +277,17 @@ def bag_train_loss(model, batch, h, full, weight, timer=None):
     miss, full = valid & ~inb, full & valid
     n = len(sel["rows"])
     npos = torch.bincount(idf[valid], minlength=n)
-    cls = torch.bucketize(npos, torch.tensor(BAG_CLASSES, device=dev))
-    sizes = torch.cat([torch.bincount(cls, minlength=len(BAG_CLASSES) + 1), (miss | full).sum()[None]]).tolist()
-    assert sizes[len(BAG_CLASSES)] == 0, "torbada %d'den fazla konum" % BAG_CLASSES[-1]
+    classes = list(BAG_CLASSES)
+    while classes[-1] < T:                                               # torba en cok satir boyu (her uzunluk kapsanir)
+        classes.append(2 * classes[-1])
+    cls = torch.bucketize(npos, torch.tensor(classes, device=dev))
+    sizes = torch.bincount(cls, minlength=len(classes)).tolist()                 # tek GPU senkronu
     start = sel["rows"] * T + sel["cols"]
     core = bag.core
     cpos = torch.full((VOCAB,), -1, dtype=torch.long, device=dev)
     cpos[core] = torch.arange(len(core), device=dev)
     term = p_other = torch.zeros((), device=dev)
-    for c, Lc in enumerate(BAG_CLASSES):
+    for c, Lc in enumerate(classes):
         if not sizes[c]:
             continue
         idx = (cls == c).nonzero()[:, 0]
