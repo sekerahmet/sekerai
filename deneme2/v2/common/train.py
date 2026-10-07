@@ -396,6 +396,12 @@ def main(argv=None):
         for k in ("cache_size_limit", "recompile_limit"):                # beklenen giris ~4-6 (egitim / sinav x tam /
             if hasattr(torch._dynamo.config, k):                         # son batch); 8'i asarsa sessizce eager'a duser
                 setattr(torch._dynamo.config, k, 32)
+        if COMPILE_MODE and "max-autotune" in COMPILE_MODE:              # bozuk Triton adayi yalniz alt sureci dusurur
+            import torch._inductor.config as inductor_config              # (8 Ekim: sm_120'de aday illegal memory access)
+            if hasattr(inductor_config, "autotune_in_subproc"):
+                inductor_config.autotune_in_subproc = True
+            else:
+                log("UYARI: torch %s'te inductor autotune_in_subproc yok; adaylar ayni surecte denenir" % torch.__version__)
     elif os.name == "nt":
         log("guc kisitlamasi (EcoQoS) kapali: %s" % _no_power_throttling())
     stream = _local_copy(args.stream, args.local, args.data) if args.local else args.stream
@@ -502,8 +508,10 @@ def main(argv=None):
         log("torba: K %d, C %d (en sik %d + END + EOS), lambda %g, tam softmax payi %g, secici kaybi payi %g" % (
             args.bag_k, len(core), args.bag_core, args.bag_weight, args.bag_full_frac, args.bag_sel_frac))
     if cuda:
-        log("hiz: derleme modu %s, attention blok %d, secici derlenmis %s, Muon %s" % (
-            COMPILE_MODE, R.ATTN_BLOCK, R.SELECT_COMPILED, type(getattr(opt, "muon", opt)).__name__))
+        import torch._inductor.config as inductor_config
+        log("hiz: derleme modu %s (autotune alt surecte %s), attention blok %d, secici derlenmis %s, Muon %s" % (
+            COMPILE_MODE, getattr(inductor_config, "autotune_in_subproc", None), R.ATTN_BLOCK, R.SELECT_COMPILED,
+            type(getattr(opt, "muon", opt)).__name__))
     for k, g in opt_info["split"].items():
         if g["tensors"]:
             log("optimizer %s | %s: %d tensor, %d parametre | %s" % (args.optimizer, k, g["tensors"], g["params"],
