@@ -44,3 +44,6 @@ deneme2/*/FIKIRLER_*.md
 
 # konus_fineweb yerel agirlik onbellegi (checkpoint model agirligi, ~1 GB)
 deneme2/model_y/konus_cache/
+
+# konus (V2) yerel agirlik onbellegi
+deneme2/v2/konus_cache/
