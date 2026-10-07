@@ -41,7 +41,7 @@ EXAM_DOCS = 1000            # SS'teki 1.000 hikaye karsiligi
 PREFIX_TOKENS = 64          # yakin kopya: ilk 64 token
 LEAK_MIN_TOKENS = 8         # cumle sizintisi bu boydan
 READING_DOCS = 10           # reading_prompts.json: 8 greedy + 2 sample (SS duzeni)
-GPT2_TOKENIZER_SHA = "8414cab924d8b9b33013f0d221c5862f365ee9be39c5c2bfae8a5a9e970478a6"   # SS ile ayni tokenizer
+GPT2_TOKENIZER_CANON_SHA = "347233c4a8bf33f5ca7884e9db53207443731e17eb1238967e4e221f4e62fba1"   # SS tokenizer'inin icerik sha'si (_tokenizer_canon_sha)
 
 
 def _sha256(path):
@@ -50,6 +50,25 @@ def _sha256(path):
         for c in iter(lambda: f.read(1 << 24), b""):
             h.update(c)
     return h.hexdigest()
+
+
+def _tokenizer_canon_sha(path):
+    """Icerik sha'si: vocab, merges, added_tokens, normalizer / pre_tokenizer / post_processor / decoder; surume bagli
+    varsayilan alanlar (use_regex True, type BPE, byte_fallback / ignore_merges False) atilir. 7 Ekim: fineweb/gpt2 tokenizer.json'u
+    yeni surumle kaydedilmis, dosya sha'si SS'ten farkli; vocab + merges ayni, 2.000 belge birebir ayni token."""
+    t = json.load(open(path, encoding="utf-8"))
+    m = dict(t["model"])
+    m["merges"] = [" ".join(x) if isinstance(x, list) else x for x in m["merges"]]
+    for k, v in (("type", "BPE"), ("byte_fallback", False), ("ignore_merges", False)):
+        if m.get(k) == v:
+            m.pop(k)
+    parts = {k: dict(t[k]) if isinstance(t.get(k), dict) else t.get(k)
+             for k in ("normalizer", "pre_tokenizer", "post_processor", "decoder")}
+    for v in parts.values():
+        if isinstance(v, dict) and v.get("use_regex") is True:
+            v.pop("use_regex")
+    canon = dict(model=m, added_tokens=t.get("added_tokens"), **parts)
+    return hashlib.sha256(json.dumps(canon, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
 def _guard(src, out):
@@ -161,7 +180,7 @@ def prepare(args):
     sha_bin = _sha256(files["bin"])
     assert sha_bin == meta["sha256"], "DUR: shard akisinin sha256'si shard json'dakiyle ayni degil"
     tok_sha = _sha256(files["tokenizer"])
-    assert tok_sha == GPT2_TOKENIZER_SHA, "DUR: tokenizer SS'tekiyle ayni degil"
+    assert _tokenizer_canon_sha(files["tokenizer"]) == GPT2_TOKENIZER_CANON_SHA, "DUR: tokenizer SS'tekiyle ayni degil"
     log("kaynak: %s | %d belge, %d token, sha tutuyor" % (files["bin"], meta["docs"], meta["tokens"]))
     out = args.out
     os.makedirs(os.path.join(out, "gpt2"), exist_ok=True)
