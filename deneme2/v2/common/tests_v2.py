@@ -2,10 +2,11 @@
 yoksa tokenizer'li sinamalar ATLANIR), pack (sentetik), recipe (maske, WSD, gruplar, Muon, surdurme, hiz), metrics (sentence_repeat,
 normalize_words, story_generation, exam_scores), integration (iki modelin loss_per_target'i ve recipe.output_loss'u
 gercek build_batch ile; model dosyalari yalniz testte import edilir), train (train.py uctan uca, iki model, kucuk veri;
-eski kimlik reddi, etiketteki kodla esdegerlik dahil; ~3 dk), drive (valid akisi: V1 ile birebir esleme, okuma istemleri), tokens (data.token_counts).  Teshis araclari:
+eski kimlik reddi, etiketteki kodla esdegerlik dahil; ~3 dk), drive (valid akisi: V1 ile birebir esleme, okuma istemleri), tokens (data.token_counts), fineweb (belge 48:
+web profili, parca / continues, make_fineweb, FineWeb ile train, knowledge_exam, generate open_last, d 768).  Teshis araclari:
 diag/tests_diag.py.
 
-    python tests_v2.py [--only data,pack,recipe,metrics,integration,train,drive,tokens]
+    python tests_v2.py [--only data,pack,recipe,metrics,integration,train,drive,tokens,fineweb]
 """
 import torch
 
@@ -1138,7 +1139,8 @@ def _train_equiv(base, root, data, prompts, out, state, same, TR):
         zipfile.ZipFile(z).extractall(tmp)
         runner = os.path.join(tmp, "runner.py")
         open(runner, "w", encoding="utf-8").write(EQUIV_RUNNER)
-        drop = lambda r: [dict(w, seconds=0, ms_per_step=0, tokens_per_sec=0) for w in r["log"]]  # noqa: E731
+        drop = lambda r: [{k: v for k, v in dict(w, seconds=0, ms_per_step=0, tokens_per_sec=0).items()  # noqa: E731
+                           if k != "peak_reserved_gb"} for w in r["log"]]            # belge 48'de eklenen alan
         exams = lambda r: [dict(e, seconds=0) for e in r["exams"]]  # noqa: E731
         bad, info = [], []
         for name, extra in (("model_z", ["--model", "model_z", "--layers", "2"]),
@@ -1188,8 +1190,296 @@ def _raises(exc, fn, *a):
     return False
 
 
+def _fake_fineweb(tok_path, n_docs=150, long_every=40):
+    """Kucuk FineWeb benzeri kaynak (belge 48): gpt2/shard_000.{bin,json}, _offsets, _bytes, tokenizer.json ve
+    raw/000_00000.parquet (row group 25).  Belgeler: kisaltma, kapanis tirnagi, liste; her long_every'de bir > 2.048 token."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(tok_path)
+    rng = np.random.default_rng(4)
+    names, topics = ["Paris", "Berlin", "Rome", "Madrid"], ["France", "Germany", "Italy", "Spain"]
+    texts = []
+    for i in range(n_docs):
+        k = i % 4
+        base = ("The capital of %s is %s. It is a large city in the U.S. sense of the word, said Dr. Smith.\n"
+                "“It is old.” The people there like music.\n- one item\n- two items\n"
+                "World War II began in 1939. Water boils at 100 degrees." % (topics[k], names[k]))
+        extra = " ".join("Sentence number %d is here." % j for j in range(int(rng.integers(2, 12))))
+        text = "Document %d. " % i + base + " " + extra
+        if i % long_every == 7:
+            text += " " + " ".join("Long part %d continues the long document." % j for j in range(330))
+        texts.append(text)
+    root = tempfile.mkdtemp(dir=TMP)
+    os.makedirs(os.path.join(root, "gpt2"))
+    os.makedirs(os.path.join(root, "raw"))
+    ids = [[D.EOS_ID] + tok.encode(t).ids for t in texts]
+    flat = np.array([t for d in ids for t in d], np.uint16)
+    flat.tofile(os.path.join(root, "gpt2", "shard_000.bin"))
+    np.save(os.path.join(root, "gpt2", "shard_000_offsets.npy"), np.r_[0, np.cumsum([len(d) for d in ids])[:-1]].astype(np.int64))
+    np.save(os.path.join(root, "gpt2", "shard_000_bytes.npy"), np.array([len(t.encode()) for t in texts], np.int32))
+    sha = hashlib.sha256(open(os.path.join(root, "gpt2", "shard_000.bin"), "rb").read()).hexdigest()
+    json.dump(dict(shard="shard_000", source="sample/10BT/000_00000.parquet", source_sha256="test", docs=n_docs,
+                   tokens=int(len(flat)), eot=D.EOS_ID, doc_format="[eot] + text", sha256=sha),
+              open(os.path.join(root, "gpt2", "shard_000.json"), "w"))
+    shutil.copyfile(tok_path, os.path.join(root, "gpt2", "tokenizer.json"))
+    pq.write_table(pa.table(dict(text=texts, dump=["CC-MAIN-test"] * n_docs)), os.path.join(root, "raw", "000_00000.parquet"),
+                   row_group_size=25)
+    return root, texts
+
+
+def t_fineweb():
+    """FineWeb-Edu hazirligi (belge 47 / 48): web profili (ss profili bit duzeyinde ayni), parca + continues (devam eden
+    parcada EOS hedefi yok), make_fineweb prepare uctan uca (kaynak dokunulmaz, ayirma, sinav, sizinti, planlar), train.py
+    FineWeb klasoruyle (Model Z + G), knowledge_exam count / run, generate open_last (iki model), d 768 / 10 / 12 sekli."""
+    import traceback
+    import recipe as R
+    import train as TR
+    import make_fineweb as MF
+    tp = tokenizer_path()
+    if tp is None:
+        print("ATLA fineweb: GPT-2 tokenizer yok", flush=True)
+        return
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(tp)
+    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS, MF.VALID_STRIDE, D.MAX_SENTENCE_TOKENS)
+    try:
+        fl_ss, q_ss = D.stream_tables(tok)
+        fl_ss2, q_ss2 = D.stream_tables(tok, "ss")
+        fl_web, q_web = D.stream_tables(tok, "web")
+        txt = ['“Have you got good religion?” and others respond. He lives in the U.S. now. Visit edX. It works.',
+               'food, then.” That is a good step.\n”\nNext line here. Keywords: ' + "; ".join("w%d" % i for i in range(90))]
+        x = np.array([t for s in txt for t in tok.encode(s).ids + [D.EOS_ID]], np.int64)
+        b_web, _, _, forced = D._boundaries(x, fl_web, q_web, tok, "web")
+        web_txt = [tok.decode(x[s:t].tolist()) for s, t in b_web]
+        check("web profili: ss tablolari ve ss sinirlari varsayilanla bit duzeyinde ayni; web'de U.S. kesilmez, edX. kesilir, "
+              "cok baytli kapanis tirnagi cumlede kalir, yalniz kapanis satiri katilir, 128'den uzun liste bolunur, token'lar "
+              "kayipsiz", np.array_equal(fl_ss, fl_ss2) and np.array_equal(q_ss, q_ss2) and any("U.S. now." in t for t in web_txt)
+              and any(t.endswith("edX.") for t in web_txt)
+              and web_txt[0].endswith("respond.") and any(t.endswith("then.”") for t in web_txt) and any(t.endswith("\n\u201d\n") for t in web_txt)
+              and forced >= 1 and max(t - s for s, t in b_web) <= D.MAX_SENTENCE_TOKENS
+              and int((b_web[:, 1] - b_web[:, 0]).sum()) == len(x) - len(txt),
+              " | ".join(t[:30] for t in web_txt))
+        cases = [   # (metin, beklenen cumleler) -- 1. ve 2. insan kontrolu (okuma/bolme/bolme_kontrol*.md)
+            ('Body.\nSources and Further Reading\nCeobanu, A. and X. Escandell. 2010. Comparative Analyses. Available '
+             'Online.\n', ['Body.\n', 'Sources and Further Reading\n', 'Ceobanu, A. and X. Escandell. 2010.',
+                           ' Comparative Analyses. Available Online.\n']),
+            ('- FB — Fullback. Optional.\n- QB — Quarterback. Mandatory.\n',
+             ['- FB — Fullback. Optional.\n', '- QB — Quarterback. Mandatory.\n']),
+            # v4: kaydirma belge duzeyinde (_wrapped_docs: >= 4 noktalamasiz satir, ortanca >= 45 karakter); kisa parcada
+            # yalniz islev kelimesi kurali (from / as: 2. insan kontrolu onerisi; "by" DEGIL -- 3. kontrol "by\nVideo" bolunmeli)
+            ('In 1892 the young painter was hired by the publishing house of\nHarper Brothers in New York, where he drew '
+             'covers for their weekly\nmagazines and illustrated several popular novels of the period for\nreaders across '
+             'the country. The San Francisco Art Association later\ninvited him to teach a course on drawing from life to '
+             'its students.\nNew Heading\nThe text.\n1. First item\n2. Second item',
+             ['In 1892 the young painter was hired by the publishing house of\nHarper Brothers in New York, where he drew '
+              'covers for their weekly\nmagazines and illustrated several popular novels of the period for\nreaders across '
+              'the country.', ' The San Francisco Art Association later\ninvited him to teach a course on drawing from life '
+              'to its students.\n', 'New Heading\n', 'The text.\n', '1. First item\n', '2. Second item']),
+            ('It was sent from\nNew York as\nPart of a series. Done.',
+             ['It was sent from\nNew York as\nPart of a series.', ' Done.']),
+            ('characteristics1\n, promote early identification2\n, and inform.',
+             ['characteristics1\n, promote early identification2\n, and inform.']),
+            ('See QC981.8.C5 B738 and Ra.One and GOV.UK now. Next one.', ['See QC981.8.C5 B738 and Ra.One and GOV.UK now.',
+                                                                           ' Next one.']),
+            ('Miranda v. Arizona held. Over Rs. 300 crore. Kasper et al. 2005 said. No. Shrek goes. See No. 5 (pp. 292-321).',
+             ['Miranda v. Arizona held.', ' Over Rs. 300 crore.', ' Kasper et al. 2005 said.', ' No.', ' Shrek goes.',
+              ' See No. 5 (pp. 292-321).']),
+            ('love yourself.` (Mk: 12. 31) Adam, the first man.', ['love yourself.`', ' (Mk: 12. 31) Adam, the first man.']),
+            ('the self-image.2 The premise. they have."1 This is it. used plastics.[4,5,22] It is used. Ages 3.5 here.',
+             ['the self-image.2', ' The premise. they have."1', ' This is it. used plastics.[4,5,22]', ' It is used.',
+              ' Ages 3.5 here.']),
+            ('usually negative.”\nPublic versus private interests\nAt issue is it. He said “No.” Then left.',
+             ['usually negative.”\n', 'Public versus private interests\n', 'At issue is it.', ' He said “No.”',
+              ' Then left.']),
+            # 3. insan kontrolu (bolme_kontrol_v3.md): ondalik + birim, 999. 999, baslik / madde, kisaltma kuyrugu, atif etiketi
+            ('Triggered on March 29.156 UT and it was big. A torque of 1.0 N m was used. Call 999. 999 calls are free.',
+             ['Triggered on March 29.156 UT and it was big.', ' A torque of 1.0 N m was used.', ' Call 999.',
+              ' 999 calls are free.']),
+            ('See his article.\nAlpha Omega Academy\nFor an example.\nLast Updated on May 2, 2022 by\nVideo games are fun.\n'
+             '- Note that we use it instead of the\nTI-83 listed here.\n- Next item.',
+             ['See his article.\n', 'Alpha Omega Academy\n', 'For an example.\n', 'Last Updated on May 2, 2022 by\n',
+              'Video games are fun.\n', '- Note that we use it instead of the\nTI-83 listed here.\n', '- Next item.']),
+            ('Settled (art. I). S. Mohd. Ali works at Upstate Med. Univ. 2000 now. He died (d. 1890) in Rome. Authors N. R. '
+             'Crockett, M.-L. Dubernet wrote. The work (v. 1. Our climate) is long.',
+             ['Settled (art. I).', ' S. Mohd. Ali works at Upstate Med. Univ. 2000 now.', ' He died (d. 1890) in Rome.',
+              ' Authors N. R. Crockett, M.-L. Dubernet wrote.', ' The work (v. 1. Our climate) is long.']),
+            ('Health is a state of mind.\n (Koppelman, 2004)\nNext paragraph here.',
+             ['Health is a state of mind.\n (Koppelman, 2004)\n', 'Next paragraph here.'])]
+        got = []
+        for t, want in cases:
+            xx = np.array(tok.encode(t).ids + [D.EOS_ID], np.int64)
+            got.append([tok.decode(xx[s:e].tolist()) for s, e in D._boundaries(xx, fl_web, q_web, tok, "web")[0]] == want)
+        check("web profili insan kontrolu kurallari (kaynakca / madde birlestirme, satir kaydirmasi, baslik, liste numarasi, "
+              "bosluksuz nokta, kisaltma, No. yalniz rakamdan once, ters tirnak, dipnot / atif, kapanis tirnagi + satir sonu): "
+              "%d / %d ornek" % (sum(got), len(got)), all(got), str(got))
+        st = _Synthetic([[[10, 11, 12], [13]], [[20, 21]], [[30], [31, 32]]])
+        st.continues = np.array([True, False, False])
+        b1 = D.build_batch(st, [[0, 1], [2]], "model_z", row_len=16)
+        st.continues = None
+        b0 = D.build_batch(st, [[0, 1], [2]], "model_z", row_len=16)
+        diff = (b1.target != b0.target)
+        check("continues: devam eden parcanin yalniz son konumunda hedef -100 ve tur -1 (EOS yok); oteki her alan ayni",
+              int(diff.sum()) == 1 and int(b1.target[diff][0]) == -100 and int(b0.target[diff][0]) == D.EOS_ID
+              and int(b1.target_kind[diff][0]) == -1 and torch.equal(b1.tokens, b0.tokens) and torch.equal(b1.pos, b0.pos))
+        src, texts = _fake_fineweb(tp)
+        before = {f: (os.path.getmtime(os.path.join(src, f)), os.path.getsize(os.path.join(src, f)))
+                  for f in ("gpt2/shard_000.bin", "gpt2/shard_000.json", "raw/000_00000.parquet")}
+        out = os.path.join(TMP, "fw_out")
+        MF.VALID_STRIDE = 5
+        guard = _raises(AssertionError, MF._guard, src, os.path.join(src, "x"))
+        MF.main(["prepare", "--src", src, "--out", out, "--local", os.path.join(TMP, "fw_local"), "--workers", "2"])
+        after = {f: (os.path.getmtime(os.path.join(src, f)), os.path.getsize(os.path.join(src, f))) for f in before}
+        sj = json.load(open(os.path.join(out, "source.json"), encoding="utf-8"))
+        tr, va = D.TokenStories(out, out, "train"), D.TokenStories(out, out, "valid")
+        tid, vid = np.load(os.path.join(out, "gpt2", "train_doc_ids.npy")), np.load(os.path.join(out, "gpt2", "valid_doc_ids.npy"))
+        cont = tr.continues
+        firsts = np.flatnonzero(~np.r_[False, cont[:-1]])                   # belge ilk parcasi
+        rebuilt = []
+        for k, a in enumerate(firsts.tolist()):
+            b = firsts[k + 1] if k + 1 < len(firsts) else tr.n
+            rebuilt.append(tok.decode(np.concatenate([np.concatenate(tr.sentences(i)) for i in range(a, b)]).tolist()))
+        exam = np.load(os.path.join(out, "exam_stories.npy"))
+        check("make_fineweb prepare: kaynak dosyalara dokunulmaz; cikti kaynak icinde DURUR; ayirma (valid indeks %% 5, train "
+              "kalan, ayrik); train parcalari birlestirilince belge metinleri birebir; uzun belge parcalandi (devam eden "
+              "parca var, hepsi satira sigar); sinav tam belge ve satira sigar; source.json", before == after and guard
+              and set(vid.tolist()) == set(range(0, len(texts), 5)) and not set(tid) & set(vid)
+              and len(tid) + len(vid) == len(texts) and rebuilt == [texts[i] for i in tid] and cont.any()
+              and tr.lengths().max() <= D.ROW_LEN and len(exam) and (va.lengths()[exam] <= D.ROW_LEN).all()
+              and sj["split"]["train_docs"] == len(tid) and sj["pieces"]["continuing"] == int(cont.sum())
+              and va.n == len(np.load(os.path.join(out, "gpt2", "valid_bytes.npy"))), "parca %d / devam %d" % (
+                  tr.n, int(cont.sum())))
+        TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS = 4, 1, dict(max_sentences=3, max_tokens=4)
+        base = ["--data", out, "--stream", out, "--device", "cpu", "--d", "16", "--layers", "2", "--heads", "2", "--lr",
+                "1e-2", "--checkpoint_minutes", "0"]
+        run = os.path.join(TMP, "fw_runs", "mzg")
+        a = TR.main(base + ["--model", "model_z", "--epochs", "2", "--out", run])
+        L = [w["loss"] for w in a["log"]]
+        f = np.load(os.path.join(out, "train_pack_plan_e1.npz"))
+        rows = [f["row_stories"][f["row_offsets"][r]:f["row_offsets"][r + 1]].tolist() for r in range(len(f["row_offsets"]) - 1)]
+        bb = [D.build_batch(tr, rows[r:r + 4], "model_z", "cpu", D.ROW_LEN) for r in range(0, len(rows), 4)]
+        n_eos = sum(int((b.target_kind == D.TargetKind.EOS).sum()) for b in bb)
+        check("train.py FineWeb klasoruyle (Model Z + G varsayilan, Muon): 2 epok kosar, kayip duser; kimlikte G 1 ve muon; "
+              "okuma istemleri veri klasorundeki reading_prompts.json'dan; plandaki EOS hedefi sayisi = belge sayisi "
+              "(devam eden parcada yok)", np.mean(L[-3:]) < np.mean(L[:3]) - 0.5 and a["identity"]["global_layers"] == 1
+              and a["identity"]["optimizer"] == "muon" and n_eos == len(tid) and json.load(open(os.path.join(
+                  run, "samples.json"), encoding="utf-8"))["rows"][0]["story"] == json.load(open(os.path.join(
+                      out, "reading_prompts.json")))["prompts"][0]["story"],
+              "kayip %.3f -> %.3f, EOS hedefi %d / belge %d" % (np.mean(L[:3]), np.mean(L[-3:]), n_eos, len(tid)))
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
+        import run_summary as RS
+        rs = RS.summarize(run, out)
+        kg, kl = RS.attention_keys(out)
+        T_ = tr.lengths().astype(np.float64)
+        check("run_summary: sinav / ms / token / bellek / Recompiling alanlari; MFU = token/sn x (6N + 12 d (G k_g + (L-G) "
+              "k_l)) / tepe; k_global = sum T(T+1)/2 / sum T (elle)", rs["exam_loss"] == a["exam"]["loss"]
+              and rs["recompiling"] == 0 and abs(kg - (T_ * (T_ + 1) / 2).sum() / T_.sum()) < 1e-6 and 0 < kl < kg
+              and abs(rs["mfu"] - rs["tokens_per_sec"] * (6 * a["params"] + 12 * 16 * (kg + kl)) / RS.PEAK) < 1e-4
+              and "peak_reserved_gb" in a["log"][0], str({k: rs[k] for k in ("mfu", "k_global", "k_local")}))
+        _fineweb_knowledge(src, out, run, tok)
+        _open_last(tok)
+        _d768(base, out, TR)
+    except Exception:  # noqa: BLE001
+        check("fineweb", False, traceback.format_exc(limit=4))
+    finally:
+        TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS, MF.VALID_STRIDE, D.MAX_SENTENCE_TOKENS = saved
+
+
+def _fineweb_knowledge(src, out, run, tok):
+    """knowledge_exam: sayim (ayni belge / pencere, bant, istem birebir, arama tablosu) ve kosu (uretim + puan)."""
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
+    import knowledge_exam as KE
+    facts = dict(facts=[
+        dict(id="cap_france", category="baskent", topic=["France"], key=["Paris"], distractors=["Lyon"],
+             prompt="The capital of France is"),
+        dict(id="ww2", category="tarih", topic=["World War II"], key=["1939"], distractors=["1914"],
+             prompt="World War II began in"),
+        dict(id="none", category="bilim", topic=["photosynthesis"], key=["sunlight"], distractors=[],
+             prompt="Photosynthesis is the process by which plants")])
+    fp = os.path.join(TMP, "fw_facts.json")
+    json.dump(facts, open(fp, "w"))
+    kd = os.path.join(TMP, "fw_knowledge")
+    tid = np.load(os.path.join(out, "gpt2", "train_doc_ids.npy"))
+    KE.main(["count", "--src", src, "--data", out, "--out", kd, "--facts", fp, "--workers", "2"])
+    c = {x["id"]: x for x in json.load(open(os.path.join(kd, "counts.json")))["facts"]}
+    lk = {x["id"]: x for x in json.load(open(os.path.join(kd, "lookup.json")))["facts"]}
+    n_fr = int(sum(1 for i in tid if i % 4 == 0))                              # France belgeleri (sentetik: i % 4 == 0)
+    check("knowledge_exam count: ayni belge / pencere sayisi = elle (France + Paris, WWII + 1939, yok = 0), bantlar, istem "
+          "birebir belge sayisi, arama tablosu cevabi ve puani",
+          c["cap_france"]["docs_same"] == n_fr == c["cap_france"]["docs_window"] and c["ww2"]["docs_same"] == len(tid)
+          and c["none"]["docs_same"] == 0 and c["none"]["band"] == "0" and c["ww2"]["band"] == KE.band(len(tid))
+          and c["cap_france"]["prompt_exact_docs"] == n_fr and lk["ww2"]["score"] == "DOGRU"
+          and lk["cap_france"]["answer"].startswith("Paris"), str({k: (v["docs_same"], v["band"]) for k, v in c.items()}))
+    check("knowledge_exam score: anahtar once -> DOGRU, celdirici once -> YANLIS, ikisi yok -> BOS, kelime siniri (19390 "
+          "1939 sayilmaz)", KE.score("began in 1939, not 1914", facts["facts"][1])[0] == "DOGRU"
+          and KE.score("began in 1914 and 1939", facts["facts"][1])[0] == "YANLIS"
+          and KE.score("began long ago", facts["facts"][1])[0] == "BOS"
+          and KE.score("code 19390", facts["facts"][1])[0] == "BOS")
+    r = KE.main(["run", "--run", run, "--data", out, "--knowledge", kd, "--device", "cpu"])
+    check("knowledge_exam run: kayitli kosudan acgozlu uretim (open_last) ve puan; ozet bantlari; dosyalar yazildi",
+          len(r["rows"]) == 3 and all(x["score"] in ("DOGRU", "YANLIS", "BOS") for x in r["rows"]) and "hepsi" in r["summary"]
+          and os.path.exists(os.path.join(run, "knowledge_exam.txt")), str(r["summary"]["hepsi"]))
+
+
+def _open_last(tok):
+    """generate(open_last=True): son istem cumlesi acik; ilk uretilen cumle = onbellekli / tam ileri gecisli basvuru
+    acgozlu devami (iki model); open_last False varsayilan = bugunku cagri."""
+    import importlib
+    root = os.path.dirname(HERE)
+    sys.path.insert(0, os.path.join(root, "model_z"))
+    sys.path.insert(0, os.path.join(root, "transformer"))
+    SM, BL = importlib.import_module("sentence"), importlib.import_module("baseline")
+    s1, s2 = tok.encode("The cat sat on the mat.").ids, tok.encode(" The dog").ids
+    ok = True
+    for name, m in (("model_z", None), ("transformer", None)):
+        torch.manual_seed(0)
+        m = SM.SentenceTransformer(32, 2, 2, global_layers=1).eval() if name == "model_z" else BL.BaselineTransformer(32, 2, 2).eval()
+        m.END = -1                                                          # cumle bitmesin: tam max_tokens devam
+        g = m.generate([[s1, s2]], 1, 6, open_last=True)[0][0][0]
+        with torch.no_grad():
+            if name == "model_z":
+                c = SM.SummaryCache(m)
+                lg = c.prefill([s1])
+                for t in s2:
+                    lg = c.append_token(t)
+                ref = []
+                for _ in range(6):
+                    w = int(lg.argmax())
+                    ref.append(w)
+                    lg = c.append_token(w)
+            else:
+                seq, ref = [D.EOS_ID] + s1 + [D.END_ID] + s2, []
+                for _ in range(6):
+                    T = len(seq)
+                    h = m.hidden(torch.tensor([seq]), torch.arange(T)[None], None)
+                    w = int((h[0, -1] @ m.E.weight.T).argmax())
+                    ref.append(w)
+                    seq.append(w)
+        dflt = m.generate([[s1, s2]], 2, 5) == m.generate([[s1, s2]], 2, 5, open_last=False)
+        ok &= g == ref and dflt
+    check("generate open_last (Model Z + G ve transformer): acik son cumlenin acgozlu devami = basvuru (onbellek / tam ileri "
+          "gecis); open_last=False = varsayilan", ok)
+
+
+def _d768(base, out, TR):
+    """d 768 / 12 head: 10 katman parametre sayisi (meta cihazda) ve 2 katmanli gercek kosu (sekil / derleme yolu, CPU)."""
+    import importlib
+    root = os.path.dirname(HERE)
+    SM, BL = importlib.import_module("sentence"), importlib.import_module("baseline")
+    with torch.device("meta"):
+        nz = sum(p.numel() for p in SM.SentenceTransformer(768, 10, 12, global_layers=1).parameters())
+        nt = sum(p.numel() for p in BL.BaselineTransformer(768, 10, 12).parameters())
+    args = [x for x in base]
+    for k, v in (("--d", "768"), ("--heads", "12"), ("--layers", "2")):
+        args[args.index(k) + 1] = v
+    r = TR.main(args + ["--model", "model_z", "--steps", "2", "--out", os.path.join(TMP, "fw_runs", "d768")])
+    check("d 768 / 10 katman / 12 head: Model Z + G ve transformer ayni parametre sayisi (~109M); 2 katmanli d 768 Model Z "
+          "+ G kosusu (Muon) sonlu kayipla biter", nz == nt and 105e6 < nz < 112e6 and r["finished"]
+          and all(np.isfinite(w["loss"]) for w in r["log"]), "%.1fM" % (nz / 1e6))
+
+
 TESTS = dict(data=t_data, pack=t_pack, recipe=t_recipe, metrics=t_metrics, integration=t_integration,
-             train=t_train, drive=t_drive, tokens=t_tokens)
+             train=t_train, drive=t_drive, tokens=t_tokens, fineweb=t_fineweb)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)

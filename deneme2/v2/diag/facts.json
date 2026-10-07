@@ -1,0 +1,3320 @@
+{
+ "status": "TASLAK (senior-developer onerisi, 7 Ekim; kullanici ve koordinator okuyacak)",
+ "rule": "konu (sayimda topic yazimlarindan biri) + anahtar (key yazimlarindan biri); celdirici = yanlis cevap; istem web metni bicimi, yarim cumle; bant sayimdan (knowledge_exam count)",
+ "categories": {
+  "baskent": 45,
+  "tarih": 40,
+  "bilim": 40,
+  "kisi_eser": 30,
+  "cografya": 30,
+  "birim_sayi": 21
+ },
+ "facts": [
+  {
+   "id": "cap_france",
+   "category": "baskent",
+   "topic": [
+    "France"
+   ],
+   "key": [
+    "Paris"
+   ],
+   "distractors": [
+    "Lyon",
+    "Marseille"
+   ],
+   "prompt": "The capital of France is"
+  },
+  {
+   "id": "cap_germany",
+   "category": "baskent",
+   "topic": [
+    "Germany"
+   ],
+   "key": [
+    "Berlin"
+   ],
+   "distractors": [
+    "Munich",
+    "Bonn"
+   ],
+   "prompt": "The capital of Germany is"
+  },
+  {
+   "id": "cap_italy",
+   "category": "baskent",
+   "topic": [
+    "Italy"
+   ],
+   "key": [
+    "Rome"
+   ],
+   "distractors": [
+    "Milan",
+    "Naples"
+   ],
+   "prompt": "The capital of Italy is"
+  },
+  {
+   "id": "cap_spain",
+   "category": "baskent",
+   "topic": [
+    "Spain"
+   ],
+   "key": [
+    "Madrid"
+   ],
+   "distractors": [
+    "Barcelona",
+    "Seville"
+   ],
+   "prompt": "The capital of Spain is"
+  },
+  {
+   "id": "cap_japan",
+   "category": "baskent",
+   "topic": [
+    "Japan"
+   ],
+   "key": [
+    "Tokyo"
+   ],
+   "distractors": [
+    "Kyoto",
+    "Osaka"
+   ],
+   "prompt": "The capital of Japan is"
+  },
+  {
+   "id": "cap_china",
+   "category": "baskent",
+   "topic": [
+    "China"
+   ],
+   "key": [
+    "Beijing"
+   ],
+   "distractors": [
+    "Shanghai",
+    "Hong Kong"
+   ],
+   "prompt": "The capital of China is"
+  },
+  {
+   "id": "cap_russia",
+   "category": "baskent",
+   "topic": [
+    "Russia"
+   ],
+   "key": [
+    "Moscow"
+   ],
+   "distractors": [
+    "St. Petersburg",
+    "Saint Petersburg"
+   ],
+   "prompt": "The capital of Russia is"
+  },
+  {
+   "id": "cap_egypt",
+   "category": "baskent",
+   "topic": [
+    "Egypt"
+   ],
+   "key": [
+    "Cairo"
+   ],
+   "distractors": [
+    "Alexandria"
+   ],
+   "prompt": "The capital of Egypt is"
+  },
+  {
+   "id": "cap_canada",
+   "category": "baskent",
+   "topic": [
+    "Canada"
+   ],
+   "key": [
+    "Ottawa"
+   ],
+   "distractors": [
+    "Toronto",
+    "Montreal",
+    "Vancouver"
+   ],
+   "prompt": "The capital of Canada is"
+  },
+  {
+   "id": "cap_australia",
+   "category": "baskent",
+   "topic": [
+    "Australia"
+   ],
+   "key": [
+    "Canberra"
+   ],
+   "distractors": [
+    "Sydney",
+    "Melbourne"
+   ],
+   "prompt": "The capital of Australia is"
+  },
+  {
+   "id": "cap_brazil",
+   "category": "baskent",
+   "topic": [
+    "Brazil"
+   ],
+   "key": [
+    "Brasilia",
+    "Brasília"
+   ],
+   "distractors": [
+    "Rio de Janeiro",
+    "Sao Paulo",
+    "São Paulo"
+   ],
+   "prompt": "The capital of Brazil is"
+  },
+  {
+   "id": "cap_india",
+   "category": "baskent",
+   "topic": [
+    "India"
+   ],
+   "key": [
+    "New Delhi",
+    "Delhi"
+   ],
+   "distractors": [
+    "Mumbai",
+    "Bombay",
+    "Kolkata"
+   ],
+   "prompt": "The capital of India is"
+  },
+  {
+   "id": "cap_turkey",
+   "category": "baskent",
+   "topic": [
+    "Turkey"
+   ],
+   "key": [
+    "Ankara"
+   ],
+   "distractors": [
+    "Istanbul"
+   ],
+   "prompt": "The capital of Turkey is"
+  },
+  {
+   "id": "cap_united_kingdom",
+   "category": "baskent",
+   "topic": [
+    "United Kingdom"
+   ],
+   "key": [
+    "London"
+   ],
+   "distractors": [
+    "Manchester",
+    "Edinburgh"
+   ],
+   "prompt": "The capital of the United Kingdom is"
+  },
+  {
+   "id": "cap_mexico",
+   "category": "baskent",
+   "topic": [
+    "Mexico"
+   ],
+   "key": [
+    "Mexico City"
+   ],
+   "distractors": [
+    "Guadalajara"
+   ],
+   "prompt": "The capital of Mexico is"
+  },
+  {
+   "id": "cap_argentina",
+   "category": "baskent",
+   "topic": [
+    "Argentina"
+   ],
+   "key": [
+    "Buenos Aires"
+   ],
+   "distractors": [
+    "Cordoba"
+   ],
+   "prompt": "The capital of Argentina is"
+  },
+  {
+   "id": "cap_kenya",
+   "category": "baskent",
+   "topic": [
+    "Kenya"
+   ],
+   "key": [
+    "Nairobi"
+   ],
+   "distractors": [
+    "Mombasa"
+   ],
+   "prompt": "The capital of Kenya is"
+  },
+  {
+   "id": "cap_nigeria",
+   "category": "baskent",
+   "topic": [
+    "Nigeria"
+   ],
+   "key": [
+    "Abuja"
+   ],
+   "distractors": [
+    "Lagos"
+   ],
+   "prompt": "The capital of Nigeria is"
+  },
+  {
+   "id": "cap_greece",
+   "category": "baskent",
+   "topic": [
+    "Greece"
+   ],
+   "key": [
+    "Athens"
+   ],
+   "distractors": [
+    "Thessaloniki",
+    "Sparta"
+   ],
+   "prompt": "The capital of Greece is"
+  },
+  {
+   "id": "cap_portugal",
+   "category": "baskent",
+   "topic": [
+    "Portugal"
+   ],
+   "key": [
+    "Lisbon"
+   ],
+   "distractors": [
+    "Porto"
+   ],
+   "prompt": "The capital of Portugal is"
+  },
+  {
+   "id": "cap_netherlands",
+   "category": "baskent",
+   "topic": [
+    "Netherlands"
+   ],
+   "key": [
+    "Amsterdam"
+   ],
+   "distractors": [
+    "Rotterdam",
+    "The Hague"
+   ],
+   "prompt": "The capital of the Netherlands is"
+  },
+  {
+   "id": "cap_sweden",
+   "category": "baskent",
+   "topic": [
+    "Sweden"
+   ],
+   "key": [
+    "Stockholm"
+   ],
+   "distractors": [
+    "Gothenburg"
+   ],
+   "prompt": "The capital of Sweden is"
+  },
+  {
+   "id": "cap_norway",
+   "category": "baskent",
+   "topic": [
+    "Norway"
+   ],
+   "key": [
+    "Oslo"
+   ],
+   "distractors": [
+    "Bergen"
+   ],
+   "prompt": "The capital of Norway is"
+  },
+  {
+   "id": "cap_poland",
+   "category": "baskent",
+   "topic": [
+    "Poland"
+   ],
+   "key": [
+    "Warsaw"
+   ],
+   "distractors": [
+    "Krakow",
+    "Kraków"
+   ],
+   "prompt": "The capital of Poland is"
+  },
+  {
+   "id": "cap_ireland",
+   "category": "baskent",
+   "topic": [
+    "Ireland"
+   ],
+   "key": [
+    "Dublin"
+   ],
+   "distractors": [
+    "Cork",
+    "Belfast"
+   ],
+   "prompt": "The capital of Ireland is"
+  },
+  {
+   "id": "cap_austria",
+   "category": "baskent",
+   "topic": [
+    "Austria"
+   ],
+   "key": [
+    "Vienna"
+   ],
+   "distractors": [
+    "Salzburg"
+   ],
+   "prompt": "The capital of Austria is"
+  },
+  {
+   "id": "cap_hungary",
+   "category": "baskent",
+   "topic": [
+    "Hungary"
+   ],
+   "key": [
+    "Budapest"
+   ],
+   "distractors": [
+    "Debrecen"
+   ],
+   "prompt": "The capital of Hungary is"
+  },
+  {
+   "id": "cap_czech_republic",
+   "category": "baskent",
+   "topic": [
+    "Czech Republic"
+   ],
+   "key": [
+    "Prague"
+   ],
+   "distractors": [
+    "Brno"
+   ],
+   "prompt": "The capital of the Czech Republic is"
+  },
+  {
+   "id": "cap_switzerland",
+   "category": "baskent",
+   "topic": [
+    "Switzerland"
+   ],
+   "key": [
+    "Bern",
+    "Berne"
+   ],
+   "distractors": [
+    "Zurich",
+    "Geneva"
+   ],
+   "prompt": "The capital of Switzerland is"
+  },
+  {
+   "id": "cap_thailand",
+   "category": "baskent",
+   "topic": [
+    "Thailand"
+   ],
+   "key": [
+    "Bangkok"
+   ],
+   "distractors": [
+    "Chiang Mai"
+   ],
+   "prompt": "The capital of Thailand is"
+  },
+  {
+   "id": "cap_vietnam",
+   "category": "baskent",
+   "topic": [
+    "Vietnam"
+   ],
+   "key": [
+    "Hanoi"
+   ],
+   "distractors": [
+    "Ho Chi Minh City",
+    "Saigon"
+   ],
+   "prompt": "The capital of Vietnam is"
+  },
+  {
+   "id": "cap_south_korea",
+   "category": "baskent",
+   "topic": [
+    "South Korea"
+   ],
+   "key": [
+    "Seoul"
+   ],
+   "distractors": [
+    "Busan"
+   ],
+   "prompt": "The capital of South Korea is"
+  },
+  {
+   "id": "cap_indonesia",
+   "category": "baskent",
+   "topic": [
+    "Indonesia"
+   ],
+   "key": [
+    "Jakarta"
+   ],
+   "distractors": [
+    "Bali",
+    "Surabaya"
+   ],
+   "prompt": "The capital of Indonesia is"
+  },
+  {
+   "id": "cap_iran",
+   "category": "baskent",
+   "topic": [
+    "Iran"
+   ],
+   "key": [
+    "Tehran"
+   ],
+   "distractors": [
+    "Isfahan"
+   ],
+   "prompt": "The capital of Iran is"
+  },
+  {
+   "id": "cap_iraq",
+   "category": "baskent",
+   "topic": [
+    "Iraq"
+   ],
+   "key": [
+    "Baghdad"
+   ],
+   "distractors": [
+    "Basra"
+   ],
+   "prompt": "The capital of Iraq is"
+  },
+  {
+   "id": "cap_saudi_arabia",
+   "category": "baskent",
+   "topic": [
+    "Saudi Arabia"
+   ],
+   "key": [
+    "Riyadh"
+   ],
+   "distractors": [
+    "Jeddah",
+    "Mecca"
+   ],
+   "prompt": "The capital of Saudi Arabia is"
+  },
+  {
+   "id": "cap_peru",
+   "category": "baskent",
+   "topic": [
+    "Peru"
+   ],
+   "key": [
+    "Lima"
+   ],
+   "distractors": [
+    "Cusco",
+    "Cuzco"
+   ],
+   "prompt": "The capital of Peru is"
+  },
+  {
+   "id": "cap_chile",
+   "category": "baskent",
+   "topic": [
+    "Chile"
+   ],
+   "key": [
+    "Santiago"
+   ],
+   "distractors": [
+    "Valparaiso"
+   ],
+   "prompt": "The capital of Chile is"
+  },
+  {
+   "id": "cap_colombia",
+   "category": "baskent",
+   "topic": [
+    "Colombia"
+   ],
+   "key": [
+    "Bogota",
+    "Bogotá"
+   ],
+   "distractors": [
+    "Medellin",
+    "Medellín"
+   ],
+   "prompt": "The capital of Colombia is"
+  },
+  {
+   "id": "cap_cuba",
+   "category": "baskent",
+   "topic": [
+    "Cuba"
+   ],
+   "key": [
+    "Havana"
+   ],
+   "distractors": [
+    "Santiago de Cuba"
+   ],
+   "prompt": "The capital of Cuba is"
+  },
+  {
+   "id": "cap_pakistan",
+   "category": "baskent",
+   "topic": [
+    "Pakistan"
+   ],
+   "key": [
+    "Islamabad"
+   ],
+   "distractors": [
+    "Karachi",
+    "Lahore"
+   ],
+   "prompt": "The capital of Pakistan is"
+  },
+  {
+   "id": "cap_afghanistan",
+   "category": "baskent",
+   "topic": [
+    "Afghanistan"
+   ],
+   "key": [
+    "Kabul"
+   ],
+   "distractors": [
+    "Kandahar"
+   ],
+   "prompt": "The capital of Afghanistan is"
+  },
+  {
+   "id": "cap_new_zealand",
+   "category": "baskent",
+   "topic": [
+    "New Zealand"
+   ],
+   "key": [
+    "Wellington"
+   ],
+   "distractors": [
+    "Auckland"
+   ],
+   "prompt": "The capital of New Zealand is"
+  },
+  {
+   "id": "cap_denmark",
+   "category": "baskent",
+   "topic": [
+    "Denmark"
+   ],
+   "key": [
+    "Copenhagen"
+   ],
+   "distractors": [
+    "Aarhus"
+   ],
+   "prompt": "The capital of Denmark is"
+  },
+  {
+   "id": "cap_finland",
+   "category": "baskent",
+   "topic": [
+    "Finland"
+   ],
+   "key": [
+    "Helsinki"
+   ],
+   "distractors": [
+    "Turku"
+   ],
+   "prompt": "The capital of Finland is"
+  },
+  {
+   "id": "ww2_start",
+   "category": "tarih",
+   "topic": [
+    "World War II",
+    "Second World War"
+   ],
+   "key": [
+    "1939"
+   ],
+   "distractors": [
+    "1914",
+    "1941",
+    "1945"
+   ],
+   "prompt": "World War II began in"
+  },
+  {
+   "id": "ww1_start",
+   "category": "tarih",
+   "topic": [
+    "World War I",
+    "First World War"
+   ],
+   "key": [
+    "1914"
+   ],
+   "distractors": [
+    "1918",
+    "1939"
+   ],
+   "prompt": "World War I began in"
+  },
+  {
+   "id": "ww2_end",
+   "category": "tarih",
+   "topic": [
+    "World War II",
+    "Second World War"
+   ],
+   "key": [
+    "1945"
+   ],
+   "distractors": [
+    "1944",
+    "1918",
+    "1939"
+   ],
+   "prompt": "World War II ended in"
+  },
+  {
+   "id": "independence",
+   "category": "tarih",
+   "topic": [
+    "Declaration of Independence"
+   ],
+   "key": [
+    "1776"
+   ],
+   "distractors": [
+    "1789",
+    "1812",
+    "1787"
+   ],
+   "prompt": "The Declaration of Independence was signed in"
+  },
+  {
+   "id": "french_rev",
+   "category": "tarih",
+   "topic": [
+    "French Revolution"
+   ],
+   "key": [
+    "1789"
+   ],
+   "distractors": [
+    "1776",
+    "1799",
+    "1848"
+   ],
+   "prompt": "The French Revolution began in"
+  },
+  {
+   "id": "columbus",
+   "category": "tarih",
+   "topic": [
+    "Columbus"
+   ],
+   "key": [
+    "1492"
+   ],
+   "distractors": [
+    "1498",
+    "1500",
+    "1607"
+   ],
+   "prompt": "Christopher Columbus reached the Americas in"
+  },
+  {
+   "id": "moon_landing",
+   "category": "tarih",
+   "topic": [
+    "Apollo 11",
+    "Moon landing"
+   ],
+   "key": [
+    "1969"
+   ],
+   "distractors": [
+    "1968",
+    "1972",
+    "1961"
+   ],
+   "prompt": "The first Moon landing took place in"
+  },
+  {
+   "id": "berlin_wall",
+   "category": "tarih",
+   "topic": [
+    "Berlin Wall"
+   ],
+   "key": [
+    "1989"
+   ],
+   "distractors": [
+    "1991",
+    "1961",
+    "1990"
+   ],
+   "prompt": "The Berlin Wall fell in"
+  },
+  {
+   "id": "constantinople",
+   "category": "tarih",
+   "topic": [
+    "Constantinople"
+   ],
+   "key": [
+    "1453"
+   ],
+   "distractors": [
+    "1492",
+    "1204",
+    "1071"
+   ],
+   "prompt": "Constantinople fell to the Ottomans in"
+  },
+  {
+   "id": "magna_carta",
+   "category": "tarih",
+   "topic": [
+    "Magna Carta"
+   ],
+   "key": [
+    "1215"
+   ],
+   "distractors": [
+    "1066",
+    "1225",
+    "1297"
+   ],
+   "prompt": "The Magna Carta was signed in"
+  },
+  {
+   "id": "hastings",
+   "category": "tarih",
+   "topic": [
+    "Battle of Hastings"
+   ],
+   "key": [
+    "1066"
+   ],
+   "distractors": [
+    "1086",
+    "1215"
+   ],
+   "prompt": "The Battle of Hastings was fought in"
+  },
+  {
+   "id": "civil_war_start",
+   "category": "tarih",
+   "topic": [
+    "Civil War"
+   ],
+   "key": [
+    "1861"
+   ],
+   "distractors": [
+    "1865",
+    "1776"
+   ],
+   "prompt": "The American Civil War began in"
+  },
+  {
+   "id": "civil_war_end",
+   "category": "tarih",
+   "topic": [
+    "Civil War"
+   ],
+   "key": [
+    "1865"
+   ],
+   "distractors": [
+    "1861",
+    "1863",
+    "1876"
+   ],
+   "prompt": "The American Civil War ended in"
+  },
+  {
+   "id": "russian_rev",
+   "category": "tarih",
+   "topic": [
+    "Russian Revolution"
+   ],
+   "key": [
+    "1917"
+   ],
+   "distractors": [
+    "1905",
+    "1922",
+    "1918"
+   ],
+   "prompt": "The Russian Revolution took place in"
+  },
+  {
+   "id": "pearl_harbor",
+   "category": "tarih",
+   "topic": [
+    "Pearl Harbor"
+   ],
+   "key": [
+    "1941"
+   ],
+   "distractors": [
+    "1939",
+    "1945",
+    "1942"
+   ],
+   "prompt": "The attack on Pearl Harbor took place in"
+  },
+  {
+   "id": "titanic",
+   "category": "tarih",
+   "topic": [
+    "Titanic"
+   ],
+   "key": [
+    "1912"
+   ],
+   "distractors": [
+    "1911",
+    "1915",
+    "1914"
+   ],
+   "prompt": "The Titanic sank in"
+  },
+  {
+   "id": "wright",
+   "category": "tarih",
+   "topic": [
+    "Wright brothers"
+   ],
+   "key": [
+    "1903"
+   ],
+   "distractors": [
+    "1905",
+    "1899",
+    "1908"
+   ],
+   "prompt": "The Wright brothers made their first flight in"
+  },
+  {
+   "id": "lincoln_death",
+   "category": "tarih",
+   "topic": [
+    "Lincoln"
+   ],
+   "key": [
+    "1865"
+   ],
+   "distractors": [
+    "1863",
+    "1861",
+    "1881"
+   ],
+   "prompt": "Abraham Lincoln was assassinated in"
+  },
+  {
+   "id": "depression",
+   "category": "tarih",
+   "topic": [
+    "Great Depression"
+   ],
+   "key": [
+    "1929"
+   ],
+   "distractors": [
+    "1933",
+    "1919",
+    "1939"
+   ],
+   "prompt": "The Great Depression began in"
+  },
+  {
+   "id": "theses",
+   "category": "tarih",
+   "topic": [
+    "Ninety-five Theses",
+    "95 Theses"
+   ],
+   "key": [
+    "1517"
+   ],
+   "distractors": [
+    "1521",
+    "1492",
+    "1534"
+   ],
+   "prompt": "Martin Luther posted his Ninety-five Theses in"
+  },
+  {
+   "id": "un_founded",
+   "category": "tarih",
+   "topic": [
+    "United Nations"
+   ],
+   "key": [
+    "1945"
+   ],
+   "distractors": [
+    "1919",
+    "1948",
+    "1946"
+   ],
+   "prompt": "The United Nations was founded in"
+  },
+  {
+   "id": "ussr_end",
+   "category": "tarih",
+   "topic": [
+    "Soviet Union"
+   ],
+   "key": [
+    "1991"
+   ],
+   "distractors": [
+    "1989",
+    "1985",
+    "1990"
+   ],
+   "prompt": "The Soviet Union collapsed in"
+  },
+  {
+   "id": "sept11",
+   "category": "tarih",
+   "topic": [
+    "September 11"
+   ],
+   "key": [
+    "2001"
+   ],
+   "distractors": [
+    "2000",
+    "2003",
+    "1999"
+   ],
+   "prompt": "The September 11 attacks happened in"
+  },
+  {
+   "id": "gutenberg",
+   "category": "tarih",
+   "topic": [
+    "Gutenberg"
+   ],
+   "key": [
+    "1440",
+    "1450",
+    "1439"
+   ],
+   "distractors": [
+    "1500",
+    "1350",
+    "1600"
+   ],
+   "prompt": "Johannes Gutenberg invented the printing press around"
+  },
+  {
+   "id": "waterloo",
+   "category": "tarih",
+   "topic": [
+    "Waterloo"
+   ],
+   "key": [
+    "1815"
+   ],
+   "distractors": [
+    "1812",
+    "1805",
+    "1814"
+   ],
+   "prompt": "The Battle of Waterloo was fought in"
+  },
+  {
+   "id": "emancipation",
+   "category": "tarih",
+   "topic": [
+    "Emancipation Proclamation"
+   ],
+   "key": [
+    "1863"
+   ],
+   "distractors": [
+    "1865",
+    "1861",
+    "1862"
+   ],
+   "prompt": "The Emancipation Proclamation was issued in"
+  },
+  {
+   "id": "hiroshima",
+   "category": "tarih",
+   "topic": [
+    "Hiroshima"
+   ],
+   "key": [
+    "1945"
+   ],
+   "distractors": [
+    "1944",
+    "1941",
+    "1946"
+   ],
+   "prompt": "The atomic bomb was dropped on Hiroshima in"
+  },
+  {
+   "id": "shakespeare_birth",
+   "category": "tarih",
+   "topic": [
+    "Shakespeare"
+   ],
+   "key": [
+    "1564",
+    "Stratford"
+   ],
+   "distractors": [
+    "1616",
+    "1594",
+    "London"
+   ],
+   "prompt": "William Shakespeare was born in"
+  },
+  {
+   "id": "origin_species",
+   "category": "tarih",
+   "topic": [
+    "Origin of Species"
+   ],
+   "key": [
+    "1859"
+   ],
+   "distractors": [
+    "1871",
+    "1831",
+    "1809"
+   ],
+   "prompt": "Charles Darwin published On the Origin of Species in"
+  },
+  {
+   "id": "special_rel",
+   "category": "tarih",
+   "topic": [
+    "special relativity",
+    "special theory of relativity"
+   ],
+   "key": [
+    "1905"
+   ],
+   "distractors": [
+    "1915",
+    "1921",
+    "1916"
+   ],
+   "prompt": "Albert Einstein published the special theory of relativity in"
+  },
+  {
+   "id": "versailles",
+   "category": "tarih",
+   "topic": [
+    "Treaty of Versailles"
+   ],
+   "key": [
+    "1919"
+   ],
+   "distractors": [
+    "1918",
+    "1945",
+    "1920"
+   ],
+   "prompt": "The Treaty of Versailles was signed in"
+  },
+  {
+   "id": "chernobyl",
+   "category": "tarih",
+   "topic": [
+    "Chernobyl"
+   ],
+   "key": [
+    "1986"
+   ],
+   "distractors": [
+    "1979",
+    "1991",
+    "1984"
+   ],
+   "prompt": "The Chernobyl disaster occurred in"
+  },
+  {
+   "id": "19th_amend",
+   "category": "tarih",
+   "topic": [
+    "Nineteenth Amendment",
+    "19th Amendment"
+   ],
+   "key": [
+    "1920"
+   ],
+   "distractors": [
+    "1919",
+    "1918",
+    "1865"
+   ],
+   "prompt": "The Nineteenth Amendment was ratified in"
+  },
+  {
+   "id": "brown_board",
+   "category": "tarih",
+   "topic": [
+    "Brown v. Board"
+   ],
+   "key": [
+    "1954"
+   ],
+   "distractors": [
+    "1964",
+    "1896",
+    "1955"
+   ],
+   "prompt": "Brown v. Board of Education was decided in"
+  },
+  {
+   "id": "civil_rights_act",
+   "category": "tarih",
+   "topic": [
+    "Civil Rights Act"
+   ],
+   "key": [
+    "1964"
+   ],
+   "distractors": [
+    "1965",
+    "1968",
+    "1957"
+   ],
+   "prompt": "The Civil Rights Act was signed in"
+  },
+  {
+   "id": "industrial_rev",
+   "category": "tarih",
+   "topic": [
+    "Industrial Revolution"
+   ],
+   "key": [
+    "Britain",
+    "England",
+    "Great Britain"
+   ],
+   "distractors": [
+    "France",
+    "Germany",
+    "America"
+   ],
+   "prompt": "The Industrial Revolution began in"
+  },
+  {
+   "id": "rome_fall",
+   "category": "tarih",
+   "topic": [
+    "Western Roman Empire"
+   ],
+   "key": [
+    "476"
+   ],
+   "distractors": [
+    "410",
+    "1453",
+    "455"
+   ],
+   "prompt": "The Western Roman Empire fell in"
+  },
+  {
+   "id": "mayflower",
+   "category": "tarih",
+   "topic": [
+    "Mayflower"
+   ],
+   "key": [
+    "1620",
+    "Plymouth"
+   ],
+   "distractors": [
+    "1607",
+    "1492",
+    "Jamestown"
+   ],
+   "prompt": "The Mayflower arrived in"
+  },
+  {
+   "id": "jamestown",
+   "category": "tarih",
+   "topic": [
+    "Jamestown"
+   ],
+   "key": [
+    "1607"
+   ],
+   "distractors": [
+    "1620",
+    "1585",
+    "1619"
+   ],
+   "prompt": "Jamestown was founded in"
+  },
+  {
+   "id": "korean_war",
+   "category": "tarih",
+   "topic": [
+    "Korean War"
+   ],
+   "key": [
+    "1950"
+   ],
+   "distractors": [
+    "1953",
+    "1945",
+    "1949"
+   ],
+   "prompt": "The Korean War began in"
+  },
+  {
+   "id": "photosynthesis",
+   "category": "bilim",
+   "topic": [
+    "photosynthesis"
+   ],
+   "key": [
+    "sunlight",
+    "light energy",
+    "carbon dioxide",
+    "energy from the sun",
+    "light"
+   ],
+   "distractors": [],
+   "prompt": "Photosynthesis is the process by which plants"
+  },
+  {
+   "id": "mitochondria",
+   "category": "bilim",
+   "topic": [
+    "mitochondria",
+    "mitochondrion"
+   ],
+   "key": [
+    "mitochondria",
+    "mitochondrion"
+   ],
+   "distractors": [
+    "nucleus",
+    "ribosome",
+    "chloroplast"
+   ],
+   "prompt": "The powerhouse of the cell is the"
+  },
+  {
+   "id": "water_elements",
+   "category": "bilim",
+   "topic": [
+    "water"
+   ],
+   "key": [
+    "hydrogen"
+   ],
+   "distractors": [
+    "carbon",
+    "nitrogen",
+    "helium"
+   ],
+   "prompt": "Water is made of"
+  },
+  {
+   "id": "gold_symbol",
+   "category": "bilim",
+   "topic": [
+    "gold"
+   ],
+   "key": [
+    "Au"
+   ],
+   "distractors": [
+    "Ag",
+    "Gd",
+    "Go"
+   ],
+   "prompt": "The chemical symbol for gold is"
+  },
+  {
+   "id": "sodium_symbol",
+   "category": "bilim",
+   "topic": [
+    "sodium"
+   ],
+   "key": [
+    "Na"
+   ],
+   "distractors": [
+    "So",
+    "Sd"
+   ],
+   "prompt": "The chemical symbol for sodium is"
+  },
+  {
+   "id": "water_formula",
+   "category": "bilim",
+   "topic": [
+    "water"
+   ],
+   "key": [
+    "H2O",
+    "H₂O"
+   ],
+   "distractors": [
+    "CO2",
+    "H2O2"
+   ],
+   "prompt": "The chemical formula for water is"
+  },
+  {
+   "id": "largest_planet",
+   "category": "bilim",
+   "topic": [
+    "planet"
+   ],
+   "key": [
+    "Jupiter"
+   ],
+   "distractors": [
+    "Saturn",
+    "Neptune",
+    "Earth"
+   ],
+   "prompt": "The largest planet in our solar system is"
+  },
+  {
+   "id": "closest_planet",
+   "category": "bilim",
+   "topic": [
+    "planet"
+   ],
+   "key": [
+    "Mercury"
+   ],
+   "distractors": [
+    "Venus",
+    "Mars"
+   ],
+   "prompt": "The closest planet to the Sun is"
+  },
+  {
+   "id": "dna_name",
+   "category": "bilim",
+   "topic": [
+    "DNA"
+   ],
+   "key": [
+    "deoxyribonucleic"
+   ],
+   "distractors": [
+    "ribonucleic acid (RNA)",
+    "dinitro"
+   ],
+   "prompt": "DNA stands for"
+  },
+  {
+   "id": "dna_helix",
+   "category": "bilim",
+   "topic": [
+    "DNA"
+   ],
+   "key": [
+    "double helix"
+   ],
+   "distractors": [
+    "single strand",
+    "triple helix"
+   ],
+   "prompt": "The structure of DNA is a"
+  },
+  {
+   "id": "newton_first",
+   "category": "bilim",
+   "topic": [
+    "Newton's first law",
+    "first law of motion"
+   ],
+   "key": [
+    "at rest",
+    "inertia",
+    "remains in motion",
+    "stays in motion"
+   ],
+   "distractors": [],
+   "prompt": "Newton's first law states that"
+  },
+  {
+   "id": "speed_light",
+   "category": "bilim",
+   "topic": [
+    "speed of light"
+   ],
+   "key": [
+    "300,000",
+    "299,792",
+    "186,000",
+    "186,282",
+    "3 x 10",
+    "3×10",
+    "300 000"
+   ],
+   "distractors": [
+    "340",
+    "150,000",
+    "1,000,000"
+   ],
+   "prompt": "The speed of light is about"
+  },
+  {
+   "id": "water_boils",
+   "category": "bilim",
+   "topic": [
+    "boils",
+    "boiling point"
+   ],
+   "key": [
+    "100 degrees",
+    "100°",
+    "212",
+    "100 °C"
+   ],
+   "distractors": [
+    "90 degrees",
+    "50 degrees",
+    "0 degrees"
+   ],
+   "prompt": "Water boils at"
+  },
+  {
+   "id": "water_freezes",
+   "category": "bilim",
+   "topic": [
+    "freezes",
+    "freezing point"
+   ],
+   "key": [
+    "0 degrees",
+    "0°",
+    "32",
+    "zero degrees"
+   ],
+   "distractors": [
+    "100 degrees",
+    "10 degrees"
+   ],
+   "prompt": "Water freezes at"
+  },
+  {
+   "id": "heart_chambers",
+   "category": "bilim",
+   "topic": [
+    "heart"
+   ],
+   "key": [
+    "four",
+    "4"
+   ],
+   "distractors": [
+    "three",
+    "two",
+    "five"
+   ],
+   "prompt": "The human heart has"
+  },
+  {
+   "id": "bones",
+   "category": "bilim",
+   "topic": [
+    "bones"
+   ],
+   "key": [
+    "206"
+   ],
+   "distractors": [
+    "208",
+    "212",
+    "196"
+   ],
+   "prompt": "An adult human skeleton has"
+  },
+  {
+   "id": "plants_oxygen",
+   "category": "bilim",
+   "topic": [
+    "carbon dioxide"
+   ],
+   "key": [
+    "oxygen"
+   ],
+   "distractors": [
+    "nitrogen",
+    "hydrogen"
+   ],
+   "prompt": "Plants absorb carbon dioxide and release"
+  },
+  {
+   "id": "evaporation",
+   "category": "bilim",
+   "topic": [
+    "evaporation"
+   ],
+   "key": [
+    "evaporation"
+   ],
+   "distractors": [
+    "condensation",
+    "precipitation",
+    "sublimation"
+   ],
+   "prompt": "The process by which water changes from a liquid to a gas is called"
+  },
+  {
+   "id": "gravity",
+   "category": "bilim",
+   "topic": [
+    "gravity"
+   ],
+   "key": [
+    "gravity",
+    "gravitational"
+   ],
+   "distractors": [
+    "magnetism",
+    "friction"
+   ],
+   "prompt": "The force that pulls objects toward the Earth is called"
+  },
+  {
+   "id": "carbon_number",
+   "category": "bilim",
+   "topic": [
+    "carbon"
+   ],
+   "key": [
+    "6",
+    "six"
+   ],
+   "distractors": [
+    "12",
+    "8",
+    "14"
+   ],
+   "prompt": "The atomic number of carbon is"
+  },
+  {
+   "id": "atmosphere_gas",
+   "category": "bilim",
+   "topic": [
+    "atmosphere"
+   ],
+   "key": [
+    "nitrogen"
+   ],
+   "distractors": [
+    "oxygen",
+    "carbon dioxide",
+    "argon"
+   ],
+   "prompt": "The most abundant gas in Earth's atmosphere is"
+  },
+  {
+   "id": "atom_center",
+   "category": "bilim",
+   "topic": [
+    "atom"
+   ],
+   "key": [
+    "nucleus"
+   ],
+   "distractors": [
+    "electron",
+    "proton cloud"
+   ],
+   "prompt": "The center of an atom is called the"
+  },
+  {
+   "id": "red_cells",
+   "category": "bilim",
+   "topic": [
+    "red blood cells"
+   ],
+   "key": [
+    "oxygen",
+    "hemoglobin",
+    "haemoglobin"
+   ],
+   "distractors": [
+    "insulin"
+   ],
+   "prompt": "Red blood cells carry"
+  },
+  {
+   "id": "insulin",
+   "category": "bilim",
+   "topic": [
+    "insulin"
+   ],
+   "key": [
+    "pancreas"
+   ],
+   "distractors": [
+    "liver",
+    "kidney",
+    "stomach"
+   ],
+   "prompt": "Insulin is produced by the"
+  },
+  {
+   "id": "largest_organ",
+   "category": "bilim",
+   "topic": [
+    "organ"
+   ],
+   "key": [
+    "skin"
+   ],
+   "distractors": [
+    "liver",
+    "brain",
+    "heart"
+   ],
+   "prompt": "The largest organ of the human body is the"
+  },
+  {
+   "id": "sound_fastest",
+   "category": "bilim",
+   "topic": [
+    "sound"
+   ],
+   "key": [
+    "solid",
+    "solids"
+   ],
+   "distractors": [
+    "gas",
+    "gases",
+    "air",
+    "vacuum"
+   ],
+   "prompt": "Sound travels fastest through"
+  },
+  {
+   "id": "ph_water",
+   "category": "bilim",
+   "topic": [
+    "pH"
+   ],
+   "key": [
+    "7",
+    "seven",
+    "neutral"
+   ],
+   "distractors": [
+    "0",
+    "14",
+    "1"
+   ],
+   "prompt": "The pH of pure water is"
+  },
+  {
+   "id": "mitosis",
+   "category": "bilim",
+   "topic": [
+    "mitosis"
+   ],
+   "key": [
+    "cell division",
+    "divides",
+    "division"
+   ],
+   "distractors": [
+    "photosynthesis",
+    "respiration"
+   ],
+   "prompt": "Mitosis is a process of"
+  },
+  {
+   "id": "chlorophyll",
+   "category": "bilim",
+   "topic": [
+    "chlorophyll"
+   ],
+   "key": [
+    "green"
+   ],
+   "distractors": [
+    "red",
+    "yellow"
+   ],
+   "prompt": "Chlorophyll gives plants their"
+  },
+  {
+   "id": "evolution",
+   "category": "bilim",
+   "topic": [
+    "natural selection"
+   ],
+   "key": [
+    "Darwin"
+   ],
+   "distractors": [
+    "Lamarck",
+    "Mendel",
+    "Newton"
+   ],
+   "prompt": "The theory of evolution by natural selection was proposed by"
+  },
+  {
+   "id": "mendel",
+   "category": "bilim",
+   "topic": [
+    "genetics"
+   ],
+   "key": [
+    "Mendel"
+   ],
+   "distractors": [
+    "Darwin",
+    "Watson",
+    "Crick"
+   ],
+   "prompt": "The father of genetics is"
+  },
+  {
+   "id": "penicillin",
+   "category": "bilim",
+   "topic": [
+    "penicillin"
+   ],
+   "key": [
+    "Fleming"
+   ],
+   "distractors": [
+    "Pasteur",
+    "Jenner",
+    "Koch"
+   ],
+   "prompt": "Penicillin was discovered by"
+  },
+  {
+   "id": "relativity",
+   "category": "bilim",
+   "topic": [
+    "relativity"
+   ],
+   "key": [
+    "Einstein"
+   ],
+   "distractors": [
+    "Newton",
+    "Bohr",
+    "Hawking"
+   ],
+   "prompt": "The theory of relativity was developed by"
+  },
+  {
+   "id": "satellite",
+   "category": "bilim",
+   "topic": [
+    "satellite"
+   ],
+   "key": [
+    "Moon"
+   ],
+   "distractors": [
+    "Sun",
+    "Mars"
+   ],
+   "prompt": "Earth's only natural satellite is the"
+  },
+  {
+   "id": "light_year",
+   "category": "bilim",
+   "topic": [
+    "light-year",
+    "light year"
+   ],
+   "key": [
+    "distance"
+   ],
+   "distractors": [
+    "time",
+    "speed"
+   ],
+   "prompt": "A light-year is a unit of"
+  },
+  {
+   "id": "unit_life",
+   "category": "bilim",
+   "topic": [
+    "unit of life"
+   ],
+   "key": [
+    "cell"
+   ],
+   "distractors": [
+    "atom",
+    "molecule",
+    "organ"
+   ],
+   "prompt": "The smallest unit of life is the"
+  },
+  {
+   "id": "current_unit",
+   "category": "bilim",
+   "topic": [
+    "current"
+   ],
+   "key": [
+    "ampere",
+    "amperes",
+    "amps",
+    "amp"
+   ],
+   "distractors": [
+    "volts",
+    "ohms",
+    "watts"
+   ],
+   "prompt": "Electric current is measured in"
+  },
+  {
+   "id": "leaves_food",
+   "category": "bilim",
+   "topic": [
+    "photosynthesis"
+   ],
+   "key": [
+    "photosynthesis"
+   ],
+   "distractors": [
+    "respiration",
+    "transpiration"
+   ],
+   "prompt": "Plants make their own food through a process called"
+  },
+  {
+   "id": "vaccines",
+   "category": "bilim",
+   "topic": [
+    "vaccine",
+    "vaccines"
+   ],
+   "key": [
+    "immune",
+    "antibodies"
+   ],
+   "distractors": [],
+   "prompt": "Vaccines work by"
+  },
+  {
+   "id": "electron_charge",
+   "category": "bilim",
+   "topic": [
+    "electron"
+   ],
+   "key": [
+    "negative"
+   ],
+   "distractors": [
+    "positive",
+    "neutral"
+   ],
+   "prompt": "An electron has a"
+  },
+  {
+   "id": "shakespeare",
+   "category": "kisi_eser",
+   "topic": [
+    "Shakespeare"
+   ],
+   "key": [
+    "Hamlet",
+    "Macbeth",
+    "Romeo and Juliet",
+    "Othello",
+    "King Lear"
+   ],
+   "distractors": [
+    "Pride and Prejudice",
+    "Oliver Twist"
+   ],
+   "prompt": "William Shakespeare wrote plays such as"
+  },
+  {
+   "id": "pride_prejudice",
+   "category": "kisi_eser",
+   "topic": [
+    "Pride and Prejudice"
+   ],
+   "key": [
+    "Austen"
+   ],
+   "distractors": [
+    "Bronte",
+    "Brontë",
+    "Dickens",
+    "Eliot"
+   ],
+   "prompt": "Pride and Prejudice was written by"
+  },
+  {
+   "id": "oliver_twist",
+   "category": "kisi_eser",
+   "topic": [
+    "Oliver Twist"
+   ],
+   "key": [
+    "Dickens"
+   ],
+   "distractors": [
+    "Austen",
+    "Thackeray"
+   ],
+   "prompt": "Oliver Twist was written by"
+  },
+  {
+   "id": "mona_lisa",
+   "category": "kisi_eser",
+   "topic": [
+    "Mona Lisa"
+   ],
+   "key": [
+    "Leonardo",
+    "da Vinci"
+   ],
+   "distractors": [
+    "Michelangelo",
+    "Raphael",
+    "Rembrandt"
+   ],
+   "prompt": "The Mona Lisa was painted by"
+  },
+  {
+   "id": "sistine",
+   "category": "kisi_eser",
+   "topic": [
+    "Sistine Chapel"
+   ],
+   "key": [
+    "Michelangelo"
+   ],
+   "distractors": [
+    "Leonardo",
+    "Raphael",
+    "Botticelli"
+   ],
+   "prompt": "The ceiling of the Sistine Chapel was painted by"
+  },
+  {
+   "id": "starry_night",
+   "category": "kisi_eser",
+   "topic": [
+    "Starry Night"
+   ],
+   "key": [
+    "Van Gogh",
+    "van Gogh"
+   ],
+   "distractors": [
+    "Monet",
+    "Picasso",
+    "Gauguin"
+   ],
+   "prompt": "The Starry Night was painted by"
+  },
+  {
+   "id": "guernica",
+   "category": "kisi_eser",
+   "topic": [
+    "Guernica"
+   ],
+   "key": [
+    "Picasso"
+   ],
+   "distractors": [
+    "Dali",
+    "Dalí",
+    "Goya"
+   ],
+   "prompt": "Guernica was painted by"
+  },
+  {
+   "id": "1984",
+   "category": "kisi_eser",
+   "topic": [
+    "Nineteen Eighty-Four",
+    "1984"
+   ],
+   "key": [
+    "Orwell"
+   ],
+   "distractors": [
+    "Huxley",
+    "Bradbury"
+   ],
+   "prompt": "The novel 1984 was written by"
+  },
+  {
+   "id": "brave_new_world",
+   "category": "kisi_eser",
+   "topic": [
+    "Brave New World"
+   ],
+   "key": [
+    "Huxley"
+   ],
+   "distractors": [
+    "Orwell",
+    "Wells"
+   ],
+   "prompt": "Brave New World was written by"
+  },
+  {
+   "id": "odyssey",
+   "category": "kisi_eser",
+   "topic": [
+    "Odyssey"
+   ],
+   "key": [
+    "Homer"
+   ],
+   "distractors": [
+    "Virgil",
+    "Sophocles"
+   ],
+   "prompt": "The Odyssey is attributed to"
+  },
+  {
+   "id": "divine_comedy",
+   "category": "kisi_eser",
+   "topic": [
+    "Divine Comedy"
+   ],
+   "key": [
+    "Dante"
+   ],
+   "distractors": [
+    "Petrarch",
+    "Boccaccio"
+   ],
+   "prompt": "The Divine Comedy was written by"
+  },
+  {
+   "id": "don_quixote",
+   "category": "kisi_eser",
+   "topic": [
+    "Don Quixote"
+   ],
+   "key": [
+    "Cervantes"
+   ],
+   "distractors": [
+    "Lope de Vega"
+   ],
+   "prompt": "Don Quixote was written by"
+  },
+  {
+   "id": "war_peace",
+   "category": "kisi_eser",
+   "topic": [
+    "War and Peace"
+   ],
+   "key": [
+    "Tolstoy"
+   ],
+   "distractors": [
+    "Dostoevsky",
+    "Chekhov"
+   ],
+   "prompt": "War and Peace was written by"
+  },
+  {
+   "id": "crime_punishment",
+   "category": "kisi_eser",
+   "topic": [
+    "Crime and Punishment"
+   ],
+   "key": [
+    "Dostoevsky",
+    "Dostoyevsky"
+   ],
+   "distractors": [
+    "Tolstoy",
+    "Gogol"
+   ],
+   "prompt": "Crime and Punishment was written by"
+  },
+  {
+   "id": "manifesto",
+   "category": "kisi_eser",
+   "topic": [
+    "Communist Manifesto"
+   ],
+   "key": [
+    "Marx",
+    "Engels"
+   ],
+   "distractors": [
+    "Lenin",
+    "Stalin"
+   ],
+   "prompt": "The Communist Manifesto was written by"
+  },
+  {
+   "id": "republic",
+   "category": "kisi_eser",
+   "topic": [
+    "The Republic"
+   ],
+   "key": [
+    "Plato"
+   ],
+   "distractors": [
+    "Aristotle",
+    "Socrates"
+   ],
+   "prompt": "The Republic was written by"
+  },
+  {
+   "id": "wealth_nations",
+   "category": "kisi_eser",
+   "topic": [
+    "Wealth of Nations"
+   ],
+   "key": [
+    "Adam Smith"
+   ],
+   "distractors": [
+    "Keynes",
+    "Marx",
+    "Ricardo"
+   ],
+   "prompt": "The Wealth of Nations was written by"
+  },
+  {
+   "id": "telephone",
+   "category": "kisi_eser",
+   "topic": [
+    "telephone"
+   ],
+   "key": [
+    "Bell"
+   ],
+   "distractors": [
+    "Edison",
+    "Tesla",
+    "Marconi"
+   ],
+   "prompt": "The telephone was invented by"
+  },
+  {
+   "id": "light_bulb",
+   "category": "kisi_eser",
+   "topic": [
+    "light bulb"
+   ],
+   "key": [
+    "Edison"
+   ],
+   "distractors": [
+    "Tesla",
+    "Bell",
+    "Franklin"
+   ],
+   "prompt": "The light bulb is usually credited to"
+  },
+  {
+   "id": "gravity_law",
+   "category": "kisi_eser",
+   "topic": [
+    "law of universal gravitation",
+    "universal gravitation"
+   ],
+   "key": [
+    "Newton"
+   ],
+   "distractors": [
+    "Einstein",
+    "Galileo",
+    "Kepler"
+   ],
+   "prompt": "The law of universal gravitation was formulated by"
+  },
+  {
+   "id": "first_moon",
+   "category": "kisi_eser",
+   "topic": [
+    "walk on the Moon",
+    "walked on the Moon"
+   ],
+   "key": [
+    "Armstrong"
+   ],
+   "distractors": [
+    "Aldrin",
+    "Gagarin",
+    "Collins"
+   ],
+   "prompt": "The first person to walk on the Moon was"
+  },
+  {
+   "id": "first_space",
+   "category": "kisi_eser",
+   "topic": [
+    "first person in space",
+    "first human in space"
+   ],
+   "key": [
+    "Gagarin"
+   ],
+   "distractors": [
+    "Armstrong",
+    "Shepard",
+    "Glenn"
+   ],
+   "prompt": "The first person in space was"
+  },
+  {
+   "id": "moonlight_sonata",
+   "category": "kisi_eser",
+   "topic": [
+    "Moonlight Sonata"
+   ],
+   "key": [
+    "Beethoven"
+   ],
+   "distractors": [
+    "Mozart",
+    "Chopin"
+   ],
+   "prompt": "The Moonlight Sonata was composed by"
+  },
+  {
+   "id": "magic_flute",
+   "category": "kisi_eser",
+   "topic": [
+    "Magic Flute"
+   ],
+   "key": [
+    "Mozart"
+   ],
+   "distractors": [
+    "Beethoven",
+    "Haydn"
+   ],
+   "prompt": "The Magic Flute was composed by"
+  },
+  {
+   "id": "four_seasons",
+   "category": "kisi_eser",
+   "topic": [
+    "Four Seasons"
+   ],
+   "key": [
+    "Vivaldi"
+   ],
+   "distractors": [
+    "Bach",
+    "Handel"
+   ],
+   "prompt": "The Four Seasons was composed by"
+  },
+  {
+   "id": "declaration_author",
+   "category": "kisi_eser",
+   "topic": [
+    "Declaration of Independence"
+   ],
+   "key": [
+    "Jefferson"
+   ],
+   "distractors": [
+    "Franklin",
+    "Adams",
+    "Washington"
+   ],
+   "prompt": "The Declaration of Independence was written mainly by"
+  },
+  {
+   "id": "first_president",
+   "category": "kisi_eser",
+   "topic": [
+    "first President"
+   ],
+   "key": [
+    "Washington"
+   ],
+   "distractors": [
+    "Lincoln",
+    "Adams",
+    "Jefferson"
+   ],
+   "prompt": "The first President of the United States was"
+  },
+  {
+   "id": "gettysburg",
+   "category": "kisi_eser",
+   "topic": [
+    "Gettysburg Address"
+   ],
+   "key": [
+    "Lincoln"
+   ],
+   "distractors": [
+    "Washington",
+    "Douglass"
+   ],
+   "prompt": "The Gettysburg Address was delivered by"
+  },
+  {
+   "id": "dream_speech",
+   "category": "kisi_eser",
+   "topic": [
+    "I Have a Dream"
+   ],
+   "key": [
+    "Martin Luther King",
+    "King Jr",
+    "MLK"
+   ],
+   "distractors": [
+    "Malcolm X",
+    "Kennedy"
+   ],
+   "prompt": "The \"I Have a Dream\" speech was given by"
+  },
+  {
+   "id": "radium",
+   "category": "kisi_eser",
+   "topic": [
+    "radium"
+   ],
+   "key": [
+    "Curie"
+   ],
+   "distractors": [
+    "Rutherford",
+    "Becquerel",
+    "Pasteur"
+   ],
+   "prompt": "Radium was discovered by"
+  },
+  {
+   "id": "largest_ocean",
+   "category": "cografya",
+   "topic": [
+    "ocean"
+   ],
+   "key": [
+    "Pacific"
+   ],
+   "distractors": [
+    "Atlantic",
+    "Indian",
+    "Arctic"
+   ],
+   "prompt": "The largest ocean on Earth is the"
+  },
+  {
+   "id": "longest_river",
+   "category": "cografya",
+   "topic": [
+    "river"
+   ],
+   "key": [
+    "Nile",
+    "Amazon"
+   ],
+   "distractors": [
+    "Mississippi",
+    "Yangtze",
+    "Congo"
+   ],
+   "prompt": "The longest river in the world is the"
+  },
+  {
+   "id": "tallest_mountain",
+   "category": "cografya",
+   "topic": [
+    "mountain"
+   ],
+   "key": [
+    "Everest"
+   ],
+   "distractors": [
+    "K2",
+    "Kilimanjaro",
+    "Denali"
+   ],
+   "prompt": "The tallest mountain in the world is"
+  },
+  {
+   "id": "largest_desert",
+   "category": "cografya",
+   "topic": [
+    "desert"
+   ],
+   "key": [
+    "Sahara",
+    "Antarctic",
+    "Antarctica"
+   ],
+   "distractors": [
+    "Gobi",
+    "Kalahari",
+    "Mojave"
+   ],
+   "prompt": "The largest desert in the world is the"
+  },
+  {
+   "id": "largest_country",
+   "category": "cografya",
+   "topic": [
+    "country"
+   ],
+   "key": [
+    "Russia"
+   ],
+   "distractors": [
+    "Canada",
+    "China",
+    "United States"
+   ],
+   "prompt": "The largest country in the world by area is"
+  },
+  {
+   "id": "smallest_country",
+   "category": "cografya",
+   "topic": [
+    "smallest country"
+   ],
+   "key": [
+    "Vatican"
+   ],
+   "distractors": [
+    "Monaco",
+    "San Marino",
+    "Liechtenstein"
+   ],
+   "prompt": "The smallest country in the world is"
+  },
+  {
+   "id": "largest_continent",
+   "category": "cografya",
+   "topic": [
+    "continent"
+   ],
+   "key": [
+    "Asia"
+   ],
+   "distractors": [
+    "Africa",
+    "Europe",
+    "North America"
+   ],
+   "prompt": "The largest continent is"
+  },
+  {
+   "id": "amazon_country",
+   "category": "cografya",
+   "topic": [
+    "Amazon rainforest"
+   ],
+   "key": [
+    "Brazil"
+   ],
+   "distractors": [
+    "Africa",
+    "Mexico",
+    "India"
+   ],
+   "prompt": "Most of the Amazon rainforest is located in"
+  },
+  {
+   "id": "reef",
+   "category": "cografya",
+   "topic": [
+    "Great Barrier Reef"
+   ],
+   "key": [
+    "Australia",
+    "Queensland"
+   ],
+   "distractors": [
+    "Hawaii",
+    "Indonesia",
+    "Florida"
+   ],
+   "prompt": "The Great Barrier Reef is located off the coast of"
+  },
+  {
+   "id": "eiffel",
+   "category": "cografya",
+   "topic": [
+    "Eiffel Tower"
+   ],
+   "key": [
+    "Paris"
+   ],
+   "distractors": [
+    "London",
+    "Rome",
+    "Lyon"
+   ],
+   "prompt": "The Eiffel Tower is located in"
+  },
+  {
+   "id": "liberty",
+   "category": "cografya",
+   "topic": [
+    "Statue of Liberty"
+   ],
+   "key": [
+    "New York"
+   ],
+   "distractors": [
+    "Washington",
+    "Boston",
+    "Philadelphia"
+   ],
+   "prompt": "The Statue of Liberty is located in"
+  },
+  {
+   "id": "kilimanjaro",
+   "category": "cografya",
+   "topic": [
+    "Kilimanjaro"
+   ],
+   "key": [
+    "Tanzania"
+   ],
+   "distractors": [
+    "Kenya",
+    "Uganda"
+   ],
+   "prompt": "Mount Kilimanjaro is located in"
+  },
+  {
+   "id": "grand_canyon",
+   "category": "cografya",
+   "topic": [
+    "Grand Canyon"
+   ],
+   "key": [
+    "Arizona"
+   ],
+   "distractors": [
+    "Nevada",
+    "Utah",
+    "Texas"
+   ],
+   "prompt": "The Grand Canyon is located in"
+  },
+  {
+   "id": "taj_mahal",
+   "category": "cografya",
+   "topic": [
+    "Taj Mahal"
+   ],
+   "key": [
+    "Agra",
+    "India"
+   ],
+   "distractors": [
+    "Delhi",
+    "Pakistan"
+   ],
+   "prompt": "The Taj Mahal is located in"
+  },
+  {
+   "id": "colosseum",
+   "category": "cografya",
+   "topic": [
+    "Colosseum"
+   ],
+   "key": [
+    "Rome"
+   ],
+   "distractors": [
+    "Athens",
+    "Naples",
+    "Milan"
+   ],
+   "prompt": "The Colosseum is located in"
+  },
+  {
+   "id": "deepest_point",
+   "category": "cografya",
+   "topic": [
+    "deepest"
+   ],
+   "key": [
+    "Mariana",
+    "Challenger Deep"
+   ],
+   "distractors": [
+    "Puerto Rico Trench",
+    "Java Trench"
+   ],
+   "prompt": "The deepest point in the ocean is the"
+  },
+  {
+   "id": "lake_victoria",
+   "category": "cografya",
+   "topic": [
+    "lake in Africa",
+    "African lake"
+   ],
+   "key": [
+    "Victoria"
+   ],
+   "distractors": [
+    "Tanganyika",
+    "Malawi",
+    "Chad"
+   ],
+   "prompt": "The largest lake in Africa is Lake"
+  },
+  {
+   "id": "largest_island",
+   "category": "cografya",
+   "topic": [
+    "island"
+   ],
+   "key": [
+    "Greenland"
+   ],
+   "distractors": [
+    "Australia",
+    "Borneo",
+    "Madagascar"
+   ],
+   "prompt": "The largest island in the world is"
+  },
+  {
+   "id": "andes",
+   "category": "cografya",
+   "topic": [
+    "Andes"
+   ],
+   "key": [
+    "South America"
+   ],
+   "distractors": [
+    "Africa",
+    "Asia",
+    "Europe"
+   ],
+   "prompt": "The Andes mountains are located in"
+  },
+  {
+   "id": "sahara_where",
+   "category": "cografya",
+   "topic": [
+    "Sahara"
+   ],
+   "key": [
+    "Africa"
+   ],
+   "distractors": [
+    "Asia",
+    "Australia",
+    "Arabia"
+   ],
+   "prompt": "The Sahara Desert is located in"
+  },
+  {
+   "id": "panama",
+   "category": "cografya",
+   "topic": [
+    "Panama Canal"
+   ],
+   "key": [
+    "Pacific",
+    "Atlantic"
+   ],
+   "distractors": [
+    "Indian Ocean",
+    "Mediterranean"
+   ],
+   "prompt": "The Panama Canal connects the"
+  },
+  {
+   "id": "suez",
+   "category": "cografya",
+   "topic": [
+    "Suez Canal"
+   ],
+   "key": [
+    "Mediterranean",
+    "Red Sea"
+   ],
+   "distractors": [
+    "Pacific",
+    "Black Sea",
+    "Caspian"
+   ],
+   "prompt": "The Suez Canal connects the"
+  },
+  {
+   "id": "mississippi",
+   "category": "cografya",
+   "topic": [
+    "Mississippi River"
+   ],
+   "key": [
+    "Gulf of Mexico"
+   ],
+   "distractors": [
+    "Atlantic",
+    "Pacific",
+    "Great Lakes"
+   ],
+   "prompt": "The Mississippi River flows into the"
+  },
+  {
+   "id": "thames",
+   "category": "cografya",
+   "topic": [
+    "Thames"
+   ],
+   "key": [
+    "London"
+   ],
+   "distractors": [
+    "Paris",
+    "Dublin",
+    "Edinburgh"
+   ],
+   "prompt": "The River Thames flows through"
+  },
+  {
+   "id": "antarctica",
+   "category": "cografya",
+   "topic": [
+    "Antarctica"
+   ],
+   "key": [
+    "coldest",
+    "southernmost",
+    "ice"
+   ],
+   "distractors": [
+    "warmest",
+    "tropical"
+   ],
+   "prompt": "Antarctica is the"
+  },
+  {
+   "id": "everest_where",
+   "category": "cografya",
+   "topic": [
+    "Mount Everest"
+   ],
+   "key": [
+    "Nepal",
+    "Himalaya",
+    "Tibet"
+   ],
+   "distractors": [
+    "Andes",
+    "Alps",
+    "Switzerland"
+   ],
+   "prompt": "Mount Everest is located in"
+  },
+  {
+   "id": "everest_height",
+   "category": "cografya",
+   "topic": [
+    "Mount Everest"
+   ],
+   "key": [
+    "8,848",
+    "8848",
+    "29,029",
+    "29,032",
+    "8,849",
+    "29,035"
+   ],
+   "distractors": [
+    "8,611",
+    "6,190",
+    "4,808"
+   ],
+   "prompt": "The height of Mount Everest is"
+  },
+  {
+   "id": "alps",
+   "category": "cografya",
+   "topic": [
+    "Alps"
+   ],
+   "key": [
+    "Europe",
+    "Switzerland",
+    "Austria",
+    "France",
+    "Italy"
+   ],
+   "distractors": [
+    "Asia",
+    "South America",
+    "Africa"
+   ],
+   "prompt": "The Alps are a mountain range in"
+  },
+  {
+   "id": "nile_flows",
+   "category": "cografya",
+   "topic": [
+    "Nile"
+   ],
+   "key": [
+    "Mediterranean"
+   ],
+   "distractors": [
+    "Red Sea",
+    "Atlantic",
+    "Indian Ocean"
+   ],
+   "prompt": "The Nile River flows into the"
+  },
+  {
+   "id": "mount_fuji",
+   "category": "cografya",
+   "topic": [
+    "Mount Fuji"
+   ],
+   "key": [
+    "Japan",
+    "Honshu"
+   ],
+   "distractors": [
+    "China",
+    "Korea"
+   ],
+   "prompt": "Mount Fuji is located in"
+  },
+  {
+   "id": "week_days",
+   "category": "birim_sayi",
+   "topic": [
+    "week"
+   ],
+   "key": [
+    "seven",
+    "7"
+   ],
+   "distractors": [
+    "six",
+    "eight",
+    "five"
+   ],
+   "prompt": "A week has"
+  },
+  {
+   "id": "year_days",
+   "category": "birim_sayi",
+   "topic": [
+    "year"
+   ],
+   "key": [
+    "365"
+   ],
+   "distractors": [
+    "364",
+    "360",
+    "366"
+   ],
+   "prompt": "A year has"
+  },
+  {
+   "id": "century",
+   "category": "birim_sayi",
+   "topic": [
+    "century"
+   ],
+   "key": [
+    "100",
+    "hundred"
+   ],
+   "distractors": [
+    "1,000",
+    "1000",
+    "ten",
+    "10"
+   ],
+   "prompt": "A century is"
+  },
+  {
+   "id": "km_m",
+   "category": "birim_sayi",
+   "topic": [
+    "kilometer",
+    "kilometre"
+   ],
+   "key": [
+    "1,000",
+    "1000",
+    "thousand"
+   ],
+   "distractors": [
+    "100",
+    "10,000"
+   ],
+   "prompt": "A kilometer is equal to"
+  },
+  {
+   "id": "mile_km",
+   "category": "birim_sayi",
+   "topic": [
+    "mile"
+   ],
+   "key": [
+    "1.6",
+    "1.61",
+    "1.609",
+    "1,609",
+    "5,280"
+   ],
+   "distractors": [
+    "1.2",
+    "2.5",
+    "1,000"
+   ],
+   "prompt": "One mile is about"
+  },
+  {
+   "id": "dozen",
+   "category": "birim_sayi",
+   "topic": [
+    "dozen"
+   ],
+   "key": [
+    "twelve",
+    "12"
+   ],
+   "distractors": [
+    "ten",
+    "13",
+    "six"
+   ],
+   "prompt": "A dozen is"
+  },
+  {
+   "id": "boil_f",
+   "category": "birim_sayi",
+   "topic": [
+    "Fahrenheit"
+   ],
+   "key": [
+    "212"
+   ],
+   "distractors": [
+    "100",
+    "180",
+    "32"
+   ],
+   "prompt": "In Fahrenheit, water boils at"
+  },
+  {
+   "id": "absolute_zero",
+   "category": "birim_sayi",
+   "topic": [
+    "absolute zero"
+   ],
+   "key": [
+    "-273",
+    "−273",
+    "0 K",
+    "zero kelvin",
+    "0 kelvin",
+    "-459"
+   ],
+   "distractors": [
+    "-100",
+    "0 degrees Celsius"
+   ],
+   "prompt": "Absolute zero is"
+  },
+  {
+   "id": "pi",
+   "category": "birim_sayi",
+   "topic": [
+    "pi"
+   ],
+   "key": [
+    "3.14"
+   ],
+   "distractors": [
+    "3.41",
+    "2.71"
+   ],
+   "prompt": "The value of pi is approximately"
+  },
+  {
+   "id": "speed_sound",
+   "category": "birim_sayi",
+   "topic": [
+    "speed of sound"
+   ],
+   "key": [
+    "343",
+    "340",
+    "767",
+    "761",
+    "1,235",
+    "1,125",
+    "1235"
+   ],
+   "distractors": [
+    "300,000",
+    "186,000"
+   ],
+   "prompt": "The speed of sound in air is about"
+  },
+  {
+   "id": "earth_age",
+   "category": "birim_sayi",
+   "topic": [
+    "Earth"
+   ],
+   "key": [
+    "4.5 billion",
+    "4.54 billion",
+    "4.6 billion"
+   ],
+   "distractors": [
+    "6,000",
+    "10,000",
+    "13.8 billion"
+   ],
+   "prompt": "The age of the Earth is about"
+  },
+  {
+   "id": "earth_sun",
+   "category": "birim_sayi",
+   "topic": [
+    "Sun"
+   ],
+   "key": [
+    "93 million",
+    "150 million",
+    "149.6 million"
+   ],
+   "distractors": [
+    "1 million",
+    "500 million"
+   ],
+   "prompt": "The distance from the Earth to the Sun is about"
+  },
+  {
+   "id": "moon_orbit",
+   "category": "birim_sayi",
+   "topic": [
+    "Moon"
+   ],
+   "key": [
+    "27",
+    "28",
+    "29",
+    "a month"
+   ],
+   "distractors": [
+    "365",
+    "24 hours",
+    "7 days"
+   ],
+   "prompt": "The Moon orbits the Earth about every"
+  },
+  {
+   "id": "circumference",
+   "category": "birim_sayi",
+   "topic": [
+    "circumference"
+   ],
+   "key": [
+    "40,000",
+    "40,075",
+    "24,901",
+    "25,000"
+   ],
+   "distractors": [
+    "10,000",
+    "100,000"
+   ],
+   "prompt": "The circumference of the Earth is about"
+  },
+  {
+   "id": "leap_year",
+   "category": "birim_sayi",
+   "topic": [
+    "leap year"
+   ],
+   "key": [
+    "366"
+   ],
+   "distractors": [
+    "365",
+    "364"
+   ],
+   "prompt": "A leap year has"
+  },
+  {
+   "id": "body_temp",
+   "category": "birim_sayi",
+   "topic": [
+    "body temperature"
+   ],
+   "key": [
+    "98.6",
+    "37"
+   ],
+   "distractors": [
+    "100",
+    "95",
+    "40"
+   ],
+   "prompt": "Normal human body temperature is about"
+  },
+  {
+   "id": "hour_minutes",
+   "category": "birim_sayi",
+   "topic": [
+    "hour"
+   ],
+   "key": [
+    "60",
+    "sixty"
+   ],
+   "distractors": [
+    "100",
+    "30"
+   ],
+   "prompt": "An hour has"
+  },
+  {
+   "id": "sunlight_time",
+   "category": "birim_sayi",
+   "topic": [
+    "sunlight",
+    "light from the Sun"
+   ],
+   "key": [
+    "8 minutes",
+    "eight minutes",
+    "8.3 minutes",
+    "500 seconds"
+   ],
+   "distractors": [
+    "8 hours",
+    "1 second",
+    "1 day"
+   ],
+   "prompt": "Light from the Sun takes about"
+  },
+  {
+   "id": "marathon",
+   "category": "birim_sayi",
+   "topic": [
+    "marathon"
+   ],
+   "key": [
+    "26.2",
+    "42.195",
+    "42 kilometers",
+    "26 miles"
+   ],
+   "distractors": [
+    "10 miles",
+    "20 miles",
+    "50"
+   ],
+   "prompt": "A marathon is"
+  },
+  {
+   "id": "right_angle",
+   "category": "birim_sayi",
+   "topic": [
+    "right angle"
+   ],
+   "key": [
+    "90"
+   ],
+   "distractors": [
+    "180",
+    "45",
+    "360"
+   ],
+   "prompt": "A right angle measures"
+  },
+  {
+   "id": "triangle",
+   "category": "birim_sayi",
+   "topic": [
+    "triangle"
+   ],
+   "key": [
+    "180"
+   ],
+   "distractors": [
+    "360",
+    "90"
+   ],
+   "prompt": "The angles of a triangle add up to"
+  }
+ ]
+}

@@ -4,6 +4,11 @@ Belgeler: belge/model_z_temel/20 (tasarim), 21 (arayuz; adlar onayli, kullanici 
 Cumle siniri V1 make_ss_sentences'in KOPYASI (f4d2a63 kurali + acik tirnakta kesme yok; import yok): sinir token
 indeksinde, token ortasina dusmez.  tests_v2 'drive' grubu V1 kelime cumleleriyle birebir esitligi sinar.  Yalniz bosluk
 token'larindan olusan cumle V1'de dusuyordu; burada komsusuna katilir (kelimeler ayni, token kaybolmaz).
+profile="web" (FineWeb-Edu, belge 47 s2 / 48): acik tirnak bastirmasi yok; genis kisaltma listesi ve tek buyuk harf + "."
+(U.S.) kesilmez; yalniz kapanis / bosluk olan cumle oncekine katilir; MAX_SENTENCE_TOKENS'tan uzun cumle ; : , ya da satir
+sonundan (yoksa bosluklu token'dan, yoksa sinirda) bolunur.  profile="ss" (varsayilan) bugunku kural, bit duzeyinde.
+Parca (belge 47 s3 A): uzun belge cumle sinirinda satira sigan parcalara bolunur; <split>_story_continues.npy (bool) devam
+eden parcayi isaretler, build_batch onun son konumuna EOS hedefi koymaz (-100).
 
 Hikaye duzeni (iki model AYNI konum ve hedef; belge 22 §3): EOS(BOS) s_1 END s_2 END ... s_n END
     hedef: BOS -> s_1'in ilk token'i; s_k'nin token'i -> sonraki ya da END; END_k -> s_(k+1)'in ilk token'i ya da EOS.
@@ -29,6 +34,7 @@ import torch
 EOS_ID, END_ID, VOCAB = 50256, 50257, 50258
 ROW_LEN, BATCH_ROWS = 2048, 32
 CHUNK = 20_000_000          # sinir hesabi bu kadar token'lik parcalarla (hikaye sinirinda)
+MAX_SENTENCE_TOKENS = 128   # web profili: daha uzun cumle bolunur (belge 47 s2)
 EXAM_STORIES = 1000         # sinav alt kumesi (model_y exam_simplestories.exam_rows ile ayni kural)
 
 
@@ -47,45 +53,188 @@ _SPEECH = frozenset("""said asked whispered shouted replied cried exclaimed call
 muttered murmured screamed declared announced explained insisted begged pleaded shouts says asks replies cries calls
 whispers continued agreed admitted suggested""".split())
 _TITLES = frozenset(("Mr", "Mrs", "Ms", "Dr", "St", "Prof", "Sr", "Jr"))
+_TITLES_WEB = _TITLES | frozenset("""Jan Feb Mar Apr Jun Jul Aug Sep Sept Oct Nov Dec Inc Ltd Co Corp Mt Gen Gov Sen Rep Rev
+Capt Col Lt Sgt Dept Univ Ave Blvd Ph Jr vs v approx ca c cf ed eds Ed Eds etc www Rs Sts al et ibid Ibid op cit
+art Art Med Mohd Refs Th
+Pa Va Mass Calif Conn Ill Wis Minn Fla Ga Tenn Ky Md Mich Penn Ariz Colo Okla Ore Wash Ala Ark Del Neb Nev""".split())
+_NUMABBR_WEB = frozenset("No NO Nos no Fig Figs Vol Vols vol vols Eq Eqs Ch Sec p pp Iss d".split())   # yalniz rakamdan once
+_SEQ_WEB = ("e.g.", "i.e.", " e.g.", " i.e.", "(e.g.", "(i.e.", " eds.", " Eds.", " op. cit.", " et al.", " Mohd.")
+                                                                   # cok token'li kisaltma: son noktasinda kesme yok
+_REF_WORDS = frozenset("""sources source and further reading references reference bibliography works cited notes citations
+literature list selected additional suggested resources footnotes endnotes for more information""".split())
+_CITE_LINE = re.compile(r"^\s*\([^()\n]{1,80}(?:1[5-9]|20)\d\d[a-z]?\)\s*$")   # (Koppelman, 2004) satiri
+_REF_KEYS = frozenset("sources references bibliography cited reading notes citations footnotes endnotes resources".split())
+_FUNC_WEB = frozenset("""the a an to of and or in on for with from as &""".split())   # okuyucu listesi; kaydirilmamis belgede
+_CHARS = {}                                                          # tokenizer -> token basina karakter sayisi
+
+
+def _char_len(tok):
+    if id(tok) not in _CHARS:
+        _CHARS[id(tok)] = np.array([len(tok.decode([i])) for i in range(tok.get_vocab_size())], np.int64)
+    return _CHARS[id(tok)]
+
+
+def _dot_dash(tok):
+    """'.-' tek token'inin kimligi (M.-L. bas harfleri); yoksa -1."""
+    ids = tok.encode(".-").ids
+    return ids[0] if len(ids) == 1 else -1
+
+
+def _func_ids(tok):
+    """_FUNC_WEB kelimelerinin token kimlikleri (bosluklu ve bosluksuz)."""
+    key = ("func", id(tok))
+    if key not in _CHARS:
+        _CHARS[key] = np.array(sorted({t for w in _FUNC_WEB for p in (" ", "") for t in tok.encode(p + w).ids[:1]
+                                       if len(tok.encode(p + w).ids) == 1}), np.int64)
+    return _CHARS[key]
+
+
+def _wrapped_docs(x, f, nl_end, eos, tok):
+    """Belge (eos ile ayrilan) basina kaydirilmis metin mi: noktalamasiz biten satirlarin (nl_end: o satirin '\n' token'i)
+    karakter boyu -- >= 4 satir, ortanca >= 45, %60'i ortancanin +-%25'inde.  -> token basina bool (belgesi kaydirilmis)."""
+    doc = np.cumsum(x == eos) - (x == eos)
+    out = np.zeros(len(x), bool)
+    pos = np.flatnonzero(nl_end)
+    if len(pos) < 4:
+        return out
+    cl = np.r_[0, np.cumsum(_char_len(tok)[np.minimum(x, len(_char_len(tok)) - 1)])]
+    nlv = np.maximum.accumulate(np.where(((f & _FLAG["lines"]) != 0) | (x == eos), np.arange(len(x)), -1))
+    start = np.r_[0, nlv[:-1] + 1][pos]
+    chars = cl[pos] - cl[start]
+    for d in np.unique(doc[pos]).tolist():
+        c = chars[doc[pos] == d]
+        c = c[c >= 20]
+        if len(c) >= 4:
+            m = float(np.median(c))
+            if m >= 45 and np.mean(np.abs(c - m) <= 0.25 * m) >= 0.6:
+                out[doc == d] = True
+    return out
 _ATTRIBUTION = re.compile(r"^\s*(?:The\s+(?:\w+\s+)?\w+|[A-Z][\w']*(?:\s+[A-Z][\w']*)?)\s+(\w+)\b(?!\s*,\s*[\"“])")
-_FLAG = dict(end=1, dot=2, digit=4, title=8, space=16, closer=32, lines=64, lower=128, quote=256, speech=512)
+_FLAG = dict(end=1, dot=2, digit=4, title=8, space=16, closer=32, lines=64, lower=128, quote=256, speech=512,
+             initial=1024, soft=2048, lead=4096, oparen=8192, listnum=16384, bullet=32768, numabbr=65536, upper=131072,
+             contp=262144, colon=524288, punctnl=1048576, note=2097152, numlead=4194304, notec=8388608)   # 1024+: yalniz web
 _WORD = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?|\d+|[^\sA-Za-z\d]")       # V1 kelimesi (normalize_words, V1 esleme)
 
 
-def stream_tables(tok):
-    """tokenizer -> (token basina bayraklar, token basina tirnak sayisi).  V1 _tables."""
+def stream_tables(tok, profile="ss"):
+    """tokenizer -> (token basina bayraklar, token basina tirnak sayisi).  V1 _tables.  web: genis kisaltma listesi,
+    initial (tek buyuk harf), soft (; : , satir sonu), lead (boslukla baslar) bayraklari; tirnak sayisi 0 (acik tirnak
+    bastirmasi yok)."""
+    assert profile in ("ss", "web"), profile
+    web = profile == "web"
+    titles = _TITLES_WEB if web else _TITLES
     n = tok.get_vocab_size()
+    word = lambda s: (not web or s[:1].isspace() or s.strip()[:1].isupper()   # noqa: E731  (web: 'ed' kelime eki degil)
+                      or s.strip() in ("pp", "p", "vol", "v", "al", "cit", "art"))
     text = [tok.decode([i]) for i in range(n)]
     speech = np.zeros(n, dtype=bool)
     speech[[tok.encode(p + w, add_special_tokens=False).ids[0] for w in _SPEECH for p in (" ", "")]] = True
-    closers = "\"')]}”’"
-    tab = dict(end=np.array([("\n" in s) or s.rstrip().rstrip(closers).endswith((".", "!", "?")) for s in text])
-               & ~np.array([s.strip().endswith(".") and s.strip()[:-1] in _TITLES for s in text]),
+    closers = "\"')]}”’" + ("`" if web else "")
+    nl_head = lambda s: s.split("\n")[0].rstrip().rstrip(closers).endswith((".", "!", "?", ":"))  # noqa: E731
+    tab = dict(end=np.array([("\n" in s) or s.rstrip().rstrip(closers).endswith((".", "!", "?"))
+                             or (web and s in (".[", "?[", "![")) for s in text])          # web: .[4] atif
+               & ~np.array([s.strip().endswith(".") and s.strip()[:-1] in titles and word(s) for s in text]),
                dot=np.array([s.strip() == "." for s in text]), digit=np.array([s[:1].isdigit() for s in text]),
                lines=np.array(["\n" in s for s in text]), lower=np.array([s.lstrip()[:1].islower() for s in text]),
                closer=np.array([bool(s) and s == s.lstrip() and not s.strip(closers) for s in text]),
                space=np.array([not s.strip() for s in text]),
                quote=np.array([any(q in s for q in '"“”') for s in text]),
-               title=np.array([s.strip() in _TITLES for s in text]), speech=speech)
-    flags = sum(tab[k].astype(np.uint16) * v for k, v in _FLAG.items()).astype(np.uint16)
+               title=np.array([s.strip() in titles and word(s) for s in text]), speech=speech,
+               initial=np.array([web and len(s.strip()) == 1 and s.strip().isupper() for s in text]),
+               soft=np.array([web and (any(c in s for c in ";:,") or "\n" in s) for s in text]),
+               lead=np.array([web and s[:1].isspace() for s in text]),
+               oparen=np.array([web and s.strip() == "(" for s in text]),
+               listnum=np.array([web and (bool(re.fullmatch(r"\d{1,3}", s.strip())) or bool(re.fullmatch("[a-z]", s.strip())))
+                                 for s in text]),
+               bullet=np.array([web and s.strip() in ("-", "*", "\u2022", "\u2013") for s in text]),
+               numabbr=np.array([web and s.strip() in _NUMABBR_WEB for s in text]),
+               upper=np.array([web and s.lstrip()[:1].isupper() for s in text]),
+               contp=np.array([web and s.lstrip()[:1] in tuple(",;:)]") for s in text]),
+               colon=np.array([web and s.rstrip().endswith(":") for s in text]),
+               punctnl=np.array([web and "\n" in s and nl_head(s) for s in text]),
+               note=np.array([web and bool(re.fullmatch("[\\d\\[\\],\u2013-]*[\\d\\[][\\d\\[\\],\u2013-]*", s))
+                             for s in text]),
+               notec=np.array([web and bool(re.fullmatch("[\\d\\[\\],\u2013-]+", s)) for s in text]),
+               numlead=np.array([web and s.strip()[:1].isdigit() for s in text]))
+    flags = sum(tab[k].astype(np.uint32) * v for k, v in _FLAG.items()).astype(np.uint32)
     quotes = np.array([sum(s.count(q) for q in '"“”') for s in text], dtype=np.int64)
-    return flags, quotes
+    return flags, quotes * (not web)
 
 
-def sentence_starts(x, flags, quotes, tok, eos):
-    """Hikayeler (eos ile biten akis, int64) -> cumle baslangiclari (token indeksi).  V1 sentence_starts, aynen."""
+def sentence_starts(x, flags, quotes, tok, eos, profile="ss"):
+    """Hikayeler (eos ile biten akis, int64) -> cumle baslangiclari (token indeksi).  V1 sentence_starts, aynen.  web:
+    tek harf kisaltmasi (bosluklu harf ya da noktadan sonraki harf) kesilmez; cok baytli kapanis tirnagi (” ’; GPT-2'de
+    iki bayt token'i) kapanis sayilir."""
     f = flags[x]
     on = lambda a, name: (a & _FLAG[name]) != 0  # noqa: E731
     fn, fp = np.append(f[1:], flags[eos]), np.insert(f[:-1], 0, flags[eos])
+    fpp = np.insert(fp[:-1], 0, flags[eos])
     not_eos = x != eos
-    e = on(f, "end") & ~(on(f, "dot") & (on(fn, "digit") | on(fp, "title")))
+    xpp0 = np.r_[eos, eos, x[:-2]]
+    ini = on(fp, "initial") & (on(fp, "lead") | on(fpp, "dot") | on(fpp, "lines") | (xpp0 == eos)   # ss'de initial bos
+                               | (on(fpp, "bullet") & np.insert(on(fpp, "dot")[:-1], 0, False))     # M.-L.
+                               | ((xpp0 == _dot_dash(tok)) & (profile == "web")))
+    keep = on(f, "dot") & (on(fn, "digit") | on(fp, "title") | ini)
+    web = profile == "web"
+    if web:
+        shift = lambda a, k, v: np.r_[np.full(k, v, a.dtype), a[:-k]]  # noqa: E731
+        fppp, xpp, xppp = shift(fpp, 1, flags[eos]), shift(x, 2, eos), shift(x, 3, eos)
+        line0 = lambda fl, xx: on(fl, "lines") | (xx == eos)  # noqa: E731
+        keep |= on(f, "dot") & on(fp, "listnum") & (line0(fpp, xpp) | (on(fpp, "bullet") & line0(fppp, xppp)))
+        fnn2 = np.append(f[2:], [flags[eos]] * 2)
+        keep |= on(f, "dot") & on(fp, "numabbr") & on(fn, "numlead")                  # No. 5, p. 94, d. 1890
+        keep |= (on(f, "dot") & on(fp, "numlead") & on(fn, "numlead")                 # 12. 31) -- 999. 999 calls degil
+                 & ~(on(fnn2, "lead") & on(fnn2, "lower")))
+        keep |= on(f, "dot") & on(fp, "numlead") & on(fpp, "dot") & (on(fppp, "title") | on(fppp, "numabbr"))   # (v. 1.
+        idx = np.arange(len(x))                                         # noktadan sonraki ilk not-disi token
+        nxt = np.minimum.accumulate(np.where(~on(f, "notec") | ~not_eos, idx, len(x) - 1)[::-1])[::-1]
+        after = f[np.minimum(np.r_[nxt[1:], len(x) - 1], len(x) - 1)]
+        note_end = (on(fn, "note") & ((on(after, "lead") & on(after, "upper")) | on(after, "lines"))
+                    & ~on(fp, "digit") & ~on(fp, "numlead"))                    # 29.156 UT ondalik, dipnot degil
+        qstart = np.zeros(len(x), bool)                                 # cok baytli kapanis tirnaginin ilk token'i
+        for a, b in (tok.encode(c).ids for c in "”’"):
+            qstart[:-1] |= (x[:-1] == a) & (x[1:] == b)
+        attached = (~on(fn, "lead") & ~on(fn, "lines") & ~on(fn, "space") & ~on(fn, "closer") & np.r_[not_eos[1:], False]
+                    & ~np.r_[qstart[1:], False])
+        keep |= on(f, "dot") & attached & ~note_end                     # QC981.8.C5, Ra.One, GOV.UK
+        keep &= ~(on(f, "dot") & note_end & ~on(fp, "title") & ~on(fp, "numabbr"))   # self-image.2 The: dipnot
+        for seq in {tuple(tok.encode(q).ids) for q in _SEQ_WEB}:
+            n = len(seq)
+            hit = np.ones(len(x) - n + 1, bool) if len(x) >= n else np.zeros(0, bool)
+            for k, t in enumerate(seq):
+                hit &= x[k:len(x) - n + 1 + k] == t
+            keep[np.flatnonzero(hit) + n - 1] = True
+    e = on(f, "end") & ~keep
     grow = (on(f, "space") | (on(f, "closer") & ~on(fp, "space") & ~on(fp, "lines"))) & not_eos
+    if web:
+        for a, b in (tok.encode(c).ids for c in "\u201d\u2019"):          # (ilk bayt, son bayt) token cifti
+            pair = (x[:-1] == a) & (x[1:] == b)
+            grow |= np.r_[pair, False] | np.r_[False, pair]
+        dot_pre = np.insert(on(fp, "digit") | on(fp, "numlead"), 0, False)[:-1]   # dipnotun noktasindan once rakam yok
+        notes = on(f, "notec") & ~on(f, "lead") & ~on(fp, "lines") & ~on(fp, "space") & not_eos
+        run0 = np.maximum.accumulate(np.where(~notes, np.arange(len(x)), -1))     # not dizisinin onceki token'i
+        grow |= notes & ~dot_pre[np.maximum(run0, 0)]
     while True:
         more = grow[1:] & e[:-1] & ~e[1:]
         if not more.any():
             break
         e[1:] |= more
-    cut = np.flatnonzero(e & ~np.append(e[1:], False) & ~on(fn, "lower") & np.append(not_eos[1:], False) & not_eos)
+    go = ~on(fn, "lower")
+    if web:
+        fnn = np.append(fn[1:], flags[eos])
+        punct = on(f, "lines") & ((np.r_[False, e[:-1]] & ~on(fp, "lines")) | on(f, "punctnl") | on(fp, "colon"))
+        bare = on(f, "lines") & ~punct                                       # noktalamasiz satir sonu
+        idx = np.arange(len(x))
+        nl = np.maximum.accumulate(np.where(on(f, "lines") | ~not_eos, idx, -1))
+        ls = np.r_[0, nl[:-1] + 1]                                          # satirin ilk token'i
+        first = f[np.minimum(ls, len(x) - 1)]
+        heading = (idx - ls < 8) & on(first, "upper") & on(fn, "upper")
+        listed = on(fn, "bullet") | (on(fn, "listnum") & on(fnn, "dot"))       # sonraki satir madde / numara
+        wrapped = _wrapped_docs(x, f, bare & e, eos, tok)
+        func = np.isin(x, _func_ids(tok)) & ~wrapped                        # kaydirilmamis belgede islev kelimesi + '\n'
+        hold = bare & ((wrapped & ~heading & ~listed) | (np.r_[False, func[:-1]] & ~listed))
+        go = ((go & ~(on(fn, "oparen") & on(fnn, "lower")) & ~hold) | punct) & ~on(fn, "contp")
+    cut = np.flatnonzero(e & ~np.append(e[1:], False) & go & np.append(not_eos[1:], False) & not_eos)
     count = np.cumsum(quotes[x])                       # acik tirnak: satir / hikaye basindan beri tek sayida tirnak
     last = np.maximum.accumulate(np.where(on(f, "lines") | ~not_eos, np.arange(len(x)), -1))
     base = np.where(last >= 0, count[np.maximum(last, 0)], 0)
@@ -123,16 +272,86 @@ def _chunks(a, eos, size):
         start = stop
 
 
-def _boundaries(x, flags, quotes, tok):
-    """Parca (eos ile biten, int64) -> (cumle [bas, son) (N, 2), hikaye basina cumle sayisi, bosluk-yalniz katilan sayisi).
-    Bos hikaye (cumlesiz) duser (V1 gibi)."""
-    S = sentence_starts(x, flags, quotes, tok, EOS_ID)
+def _split_long(x, flags, S, stop, limit):
+    """limit'ten uzun cumleleri bol (web): pencerede son soft token'dan sonra, yoksa son lead token'dan once, yoksa
+    sinirda; parca en az limit // 4.  -> (S, stop, bolunen cumle sayisi)."""
+    long = np.flatnonzero(stop - S > limit)
+    if not len(long):
+        return S, stop, 0
+    add_s, add_t = [], []
+    for i in long.tolist():
+        s, t = int(S[i]), int(stop[i])
+        while t - s > limit:
+            w = flags[x[s:s + limit]]
+            lo = limit // 4
+            soft = np.flatnonzero((w[lo - 1:limit - 1] & _FLAG["soft"]) != 0)
+            lead = np.flatnonzero((w[lo:limit] & _FLAG["lead"]) != 0)
+            cut = s + lo + int(soft[-1]) if len(soft) else s + lo + int(lead[-1]) if len(lead) else s + limit
+            add_s.append(s)
+            add_t.append(cut)
+            s = cut
+        S[i] = s                                                     # son parca yerinde
+    S2, t2 = np.r_[S, np.array(add_s, np.int64)], np.r_[stop, np.array(add_t, np.int64)]
+    o = np.argsort(S2, kind="stable")
+    return S2[o], t2[o], len(long)
+
+
+def _ref_heading(text):
+    """Kaynakca basligi mi: <= 6 kelime, hepsi _REF_WORDS'te, en az biri _REF_KEYS'te (Sources and Further Reading)."""
+    w = re.findall(r"[a-z]+", text.lower())
+    return 0 < len(w) <= 6 and set(w) <= _REF_WORDS and bool(set(w) & _REF_KEYS)
+
+
+def _merge_references(x, S, stop, story, tok, flags, small=4):
+    """web: <= small token'lik parca ayni satirdaki onceki cumleye (onceki cumle satir sonuyla bitmez), (a) kaynakca
+    basligindan sonra ya da (b) madde satirinda (- FB — Fullback. Optional.); (c) atif etiketi satiri '(Ad, Yil)' onceki
+    cumleye."""
+    n = stop - S
+    short = np.flatnonzero(n <= 8)
+    heads = [i for i in short.tolist() if _ref_heading(tok.decode(x[S[i]:stop[i]].tolist()))]
+    f = flags[x]
+    nl = np.maximum.accumulate(np.where(((f & _FLAG["lines"]) != 0) | (x == EOS_ID), np.arange(len(x)), -1))
+    drop = np.zeros(len(S), bool)
+    ref = np.zeros(len(S), bool)
+    for h in heads:
+        for i in range(h + 1, len(S)):
+            if story[i] != story[h]:
+                break
+            ref[i] = True
+    prev = -1
+    for i in range(len(S)):
+        if (prev >= 0 and story[i] == story[prev] and n[i] <= 20
+                and _CITE_LINE.match(tok.decode(x[S[i]:stop[i]].tolist()))):
+            stop[prev] = stop[i]
+            drop[i] = True
+            continue
+        if prev >= 0 and story[i] == story[prev] and n[i] <= small:
+            ls = nl[S[i] - 1] + 1 if S[i] > 0 else 0
+            joined = (f[stop[prev] - 1] & _FLAG["lines"]) == 0
+            item = (f[min(ls, len(x) - 1)] & (_FLAG["bullet"] | _FLAG["listnum"])) != 0
+            if joined and ((ref[i] and ref[prev]) or (item and ls <= S[prev])):
+                stop[prev] = stop[i]
+                drop[i] = True
+                continue
+        prev = i
+    return S[~drop], stop[~drop], story[~drop]
+
+
+def _boundaries(x, flags, quotes, tok, profile="ss"):
+    """Parca (eos ile biten, int64) -> (cumle [bas, son) (N, 2), hikaye basina cumle sayisi, bosluk-yalniz katilan sayisi,
+    zorla bolunen cumle sayisi).  Bos hikaye (cumlesiz) duser (V1 gibi).  web: yalniz kapanis / bosluk olan cumle de
+    "bos" sayilip komsusuna katilir; uzun cumle bolunur (MAX_SENTENCE_TOKENS)."""
+    S = sentence_starts(x, flags, quotes, tok, EOS_ID, profile)
     ends = np.flatnonzero(x == EOS_ID)
     story = np.searchsorted(ends, S)
     stop = np.minimum(np.r_[S[1:], len(x)], ends[np.minimum(story, len(ends) - 1)])
-    word = (flags[x] & _FLAG["space"]) == 0                       # bosluk olmayan token
+    blank = _FLAG["space"] | (_FLAG["closer"] if profile == "web" else 0)
+    word = (flags[x] & blank) == 0                                # bosluk (web: kapanis da) olmayan token
     cw = np.r_[0, np.cumsum(word)]
     empty = cw[stop] - cw[S] == 0
+    if profile == "web":                                          # kapanis cok baytli: token token degil, metinden
+        for i in np.flatnonzero(~empty & (stop - S <= 4)).tolist():
+            empty[i] = not tok.decode(x[S[i]:stop[i]].tolist()).strip().strip("\"')]}”’")
     # bosluk-yalniz cumle: hikayede onceki tutulan cumleye katilir; yoksa sonrakine (bas noktasi geri alinir)
     kept = -1
     for i in range(len(S)) if empty.any() else ():
@@ -146,28 +365,53 @@ def _boundaries(x, flags, quotes, tok):
             S[i + 1] = S[i]
     keep = ~empty
     S, stop, story = S[keep], stop[keep], story[keep]
+    forced = 0
+    if profile == "web":
+        S, stop, story = _merge_references(x, S, stop, story, tok, flags)
+        S, stop, forced = _split_long(x, flags, S, stop, MAX_SENTENCE_TOKENS)
+        story = np.searchsorted(ends, S)
     counts = np.bincount(story, minlength=len(ends))
-    return np.stack([S, stop], 1), counts[counts > 0], int(empty.sum())
+    return np.stack([S, stop], 1), counts[counts > 0], int(empty.sum()), forced
 
 
-def build_boundaries(stream_root, out_dir, split):
-    """<stream_root>/gpt2/<split>.npy -> <out_dir>/<split>_sentence_offsets.npy, _story_offsets.npy, _boundaries.json."""
+_JOB = {}
+
+
+def _job_init(tok_path, profile):
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(tok_path)
+    _JOB.update(tok=tok, profile=profile, tables=stream_tables(tok, profile))
+
+
+def _job(args):
+    """Cok surecli sinir: (akis yolu, bas, son) -> (cumleler (akis indeksi), sayimlar, katilan, bolunen)."""
+    path, s, t = args
+    x = np.asarray(np.load(path, mmap_mode="r")[s:t]).astype(np.int64)
+    b, c, m, f = _boundaries(x, *_JOB["tables"], _JOB["tok"], _JOB["profile"])
+    return b + s, c, m, f
+
+
+def build_boundaries(stream_root, out_dir, split, profile="ss", workers=1):
+    """<stream_root>/gpt2/<split>.npy -> <out_dir>/<split>_sentence_offsets.npy, _story_offsets.npy, _boundaries.json.
+    workers > 1: parcalar (CHUNK, hikaye sinirinda) surec havuzunda; sonuc tek surecle ayni (sira korunur)."""
     from tokenizers import Tokenizer
     t0 = time.time()
     tok_path = os.path.join(stream_root, "gpt2", "tokenizer.json")
     tok = Tokenizer.from_file(tok_path)
     assert tok.token_to_id("<|endoftext|>") == EOS_ID
-    flags, quotes = stream_tables(tok)
     path = os.path.join(stream_root, "gpt2", split + ".npy")
     a = np.load(path, mmap_mode="r")
-    sents, counts, merged = [], [], 0
-    for s, t in _chunks(a, EOS_ID, CHUNK):
-        b, c, m = _boundaries(np.asarray(a[s:t]).astype(np.int64), flags, quotes, tok)
-        sents.append(b + s)
-        counts.append(c)
-        merged += m
-        print("%s: %d / %d token, %.0f sn" % (split, t, len(a), time.time() - t0), flush=True)
-    sents, counts = np.concatenate(sents), np.concatenate(counts)
+    jobs = [(path, s, t) for s, t in _chunks(a, EOS_ID, CHUNK)]
+    if workers > 1:
+        import multiprocessing as mp
+        with mp.get_context("spawn").Pool(workers, _job_init, (tok_path, profile)) as pool:
+            out = pool.map(_job, jobs)
+    else:
+        _job_init(tok_path, profile)
+        out = [_job(j) for j in jobs]
+    sents, counts = np.concatenate([o[0] for o in out]), np.concatenate([o[1] for o in out])
+    merged, forced = sum(o[2] for o in out), sum(o[3] for o in out)
+    print("%s: %d token, %d parca, %d surec, %.0f sn" % (split, len(a), len(jobs), workers, time.time() - t0), flush=True)
     os.makedirs(out_dir, exist_ok=True)
     np.save(os.path.join(out_dir, split + "_sentence_offsets.npy"), sents)
     np.save(os.path.join(out_dir, split + "_story_offsets.npy"), np.r_[0, np.cumsum(counts)].astype(np.int64))
@@ -178,7 +422,9 @@ def build_boundaries(stream_root, out_dir, split):
     L = sents[:, 1] - sents[:, 0]
     meta = dict(split=split, stream=path, stream_sha256=sha.hexdigest(),
                 tokenizer_sha256=hashlib.sha256(open(tok_path, "rb").read()).hexdigest(),
-                rule="make_ss_sentences.sentence_starts (V1 f4d2a63 + acik tirnakta kesme yok); bosluk-yalniz cumle komsusuna",
+                rule="make_ss_sentences.sentence_starts (V1 f4d2a63 + acik tirnakta kesme yok); bosluk-yalniz cumle komsusuna"
+                     + ("; web profili (belge 47 s2), MAX_SENTENCE_TOKENS %d" % MAX_SENTENCE_TOKENS if profile == "web" else ""),
+                profile=profile, forced_splits=forced,
                 stories=len(counts), sentences=len(sents), tokens_in_sentences=int(L.sum()), merged_blank=merged,
                 max_sentence_tokens=int(L.max()), created=time.strftime("%Y-%m-%d %H:%M:%S"))
     json.dump(meta, open(os.path.join(out_dir, split + "_boundaries.json"), "w", encoding="utf-8"), indent=1)
@@ -198,6 +444,9 @@ class TokenStories:
         self.meta = json.load(open(os.path.join(data_dir, split + "_boundaries.json"), encoding="utf-8"))
         self.max_sentence_tokens = self.meta.get("max_sentence_tokens_all", self.meta["max_sentence_tokens"])
         self.n = len(self.story) - 1
+        cont = os.path.join(data_dir, split + "_story_continues.npy")
+        self.continues = np.load(cont) if os.path.exists(cont) else None   # parca devam ediyor (son konumda EOS yok)
+        assert self.continues is None or len(self.continues) == self.n, "continues hikaye sayisiyla ayni degil"
 
     def sentences(self, i):
         """Hikaye i -> cumle token dizileri (int64, END yok)."""
@@ -297,6 +546,11 @@ def build_batch(stories, row_stories_list, layout, device="cpu", row_len=ROW_LEN
     tkind[real & ((kind == Kind.BOS) | (kind == Kind.END))] = TargetKind.FIRST
     tkind[real & (kind == Kind.TOKEN) & (target != END_ID)] = TargetKind.MID
     tkind[hrow, last] = TargetKind.EOS
+    cont = getattr(stories, "continues", None)
+    if cont is not None:                                                # devam eden parca: belge bitmedi, EOS hedefi yok
+        c = np.asarray(cont, dtype=bool)[h]
+        target[hrow[c], last[c]] = -100
+        tkind[hrow[c], last[c]] = -1
     if layout == "transformer":                                          # hikaye ici sira
         pos[trow, tcol] = tcol - start[sh[ts]]
         pos[erow, ecol] = ecol - start[sh]

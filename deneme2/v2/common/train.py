@@ -245,10 +245,10 @@ def _exam(model, mask_fn, valid, plan, story_bytes, layout, dev, cuda):
     return dict(out, seconds=round(time.time() - t, 2))
 
 
-def _readings(model, valid, tok, spec=None):
+def _readings(model, valid, tok, spec=None, path=None):
     """Istemler (spec: [dict(label, story, sentences, decode)]; yoksa reading_prompts.json) -> (satirlar, decode basina
     olculer).  Uretim fp32, autocast yok."""
-    spec = json.load(open(READING_PROMPTS, encoding="utf-8"))["prompts"] if spec is None else spec
+    spec = json.load(open(path or READING_PROMPTS, encoding="utf-8"))["prompts"] if spec is None else spec
     rows, gen = [None] * len(spec), {}
     for decode in ("greedy", "sample"):
         idx = [i for i, p in enumerate(spec) if p["decode"] == decode]
@@ -467,11 +467,12 @@ def main(argv=None):
         rec = dict(step=done, epoch=epoch, lr=lr, loss=round(win["loss"].item() / k, 4),
                    grad_norm=round(win["gn"].item() / k, 4), steps=k, tokens=s["tokens"], seconds=s["seconds"],
                    ms_per_step=round(1000 * s["seconds"] / k, 1), tokens_per_sec=s["tokens_per_sec"], first=first_window,
-                   peak_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2) if cuda else None)
+                   peak_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2) if cuda else None,
+                   peak_reserved_gb=round(torch.cuda.max_memory_reserved() / 1e9, 2) if cuda else None)
         history["log"].append(rec)
         log("adim %d / %d (epok %d)  lr %.3g  kayip %.4f  grad %.3f | pencere %d adim %.1f sn  %.1f ms/adim  %.0f tok/sn%s%s"
             % (done, total, epoch, lr, rec["loss"], rec["grad_norm"], k, s["seconds"], rec["ms_per_step"],
-               s["tokens_per_sec"], "  tepe %.1f GB" % rec["peak_gb"] if cuda else "",
+               s["tokens_per_sec"], "  tepe %.1f GB (ayrilan %.1f)" % (rec["peak_gb"], rec["peak_reserved_gb"]) if cuda else "",
                "  (ilk pencere: derleme dahil)" if first_window else ""))
         assert np.isfinite(rec["loss"]), "kayip sonlu degil; checkpoint yazilmadi"
         first_window, win = False, None
@@ -493,7 +494,8 @@ def main(argv=None):
         ex = _exam(model, mask_fn, valid, exam_plan, story_bytes, layout, dev, cuda)
         history["exams"].append(dict(ex, step=total, epoch=len(per_epoch), full_epoch=bool(total == bounds[-1])))
     t = time.time()
-    rows, gen = _readings(model, valid, tok)
+    own = os.path.join(args.data, "reading_prompts.json")              # veri klasorunun istemleri (FineWeb, belge 48)
+    rows, gen = _readings(model, valid, tok, path=own if os.path.exists(own) else None)
     log("okuma uretimi %.0f sn: %s" % (time.time() - t, gen))
     open(os.path.join(args.out, "samples.txt"), "w", encoding="utf-8").write(_samples_text(rows))
     json.dump(dict(generation=gen, rows=rows), open(os.path.join(args.out, "samples.json"), "w", encoding="utf-8"),

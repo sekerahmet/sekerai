@@ -129,15 +129,17 @@ class BaselineTransformer(torch.nn.Module):
         return (self.norm(x[:, -1]) @ self.E.weight.T)[0]
 
     @torch.no_grad()
-    def generate(self, prompts, max_sentences, max_tokens, generator=None):
+    def generate(self, prompts, max_sentences, max_tokens, generator=None, open_last=False):
         """prompts: hikaye basina istem cumleleri (token listeleri, END yok) -> her istem icin (uretilen cumleler, END ile
         bitti mi listesi, eos).  generator None: acgozlu, yoksa ornekleme (sicaklik 1).  Model Z generate ile ayni kural:
         cumle basinda EOS hikayeyi bitirir, cumle icinde END ya da EOS cumleyi bitirir, max_tokens'ta kesilen cumle de
-        kapanir (girdiye END)."""
+        kapanir (girdiye END).  open_last (belge 48): son istem cumlesine END eklenmez, ilk uretilen cumle onun devami."""
         dev = self.E.weight.device
         out = []
         for sents in prompts:
+            opened = bool(open_last and sents)
             seq = [EOS_ID] + [t for s in sents for t in list(s) + [END_ID]]
+            seq = seq[:-1] if opened else seq
             cache = dict(k=[None] * len(self.blocks), v=[None] * len(self.blocks),
                          T=len(seq) + max_sentences * (max_tokens + 1))
             logits = self._step(torch.tensor([seq], device=dev), cache, 0)
@@ -149,7 +151,7 @@ class BaselineTransformer(torch.nn.Module):
                     p = logits.float()
                     w = int(p.argmax()) if generator is None else int(torch.multinomial(
                         torch.softmax(p, -1).cpu(), 1, generator=generator))
-                    if w == self.EOS and not cur:
+                    if w == self.EOS and not cur and not opened:
                         eos = True
                         break
                     if w in (self.END, self.EOS):
@@ -162,6 +164,7 @@ class BaselineTransformer(torch.nn.Module):
                     break
                 gen.append(cur)
                 ended.append(done)
+                opened = False
                 logits = self._step(torch.tensor([[END_ID]], device=dev), cache, n)
                 n += 1
             out.append((gen, ended, eos))

@@ -175,15 +175,19 @@ class SentenceTransformer(torch.nn.Module):
         return nll, pred, batch.target_kind[keep]
 
     @torch.no_grad()
-    def generate(self, prompts, max_sentences, max_tokens, generator=None):
+    def generate(self, prompts, max_sentences, max_tokens, generator=None, open_last=False):
         """prompts: hikaye basina istem cumleleri (token listeleri, END yok) -> her istem icin (uretilen cumleler,
         END ile bitti mi listesi, eos).  generator None: acgozlu, yoksa ornekleme.  SummaryCache ile, istem basina.
         Cumle en cok max_tokens token; kesilen cumle ended False ile doner (belge 26 B2).  Istem tek ileri geciste
-        (SummaryCache.prefill, belge 46), uretim token token."""
+        (SummaryCache.prefill, belge 46), uretim token token.  open_last (belge 48): son istem cumlesi kapanmaz, ilk
+        uretilen cumle onun devami (yalniz devam token'lari; max_tokens onlara)."""
         out = []
         for sents in prompts:
             cache = SummaryCache(self)
-            logits = cache.prefill(sents)
+            opened = bool(open_last and sents)
+            logits = cache.prefill(sents[:-1] if opened else sents)
+            for t in (sents[-1] if opened else ()):
+                logits = cache.append_token(t)
             gen, ended, eos = [], [], False
             while len(gen) < max_sentences:
                 cur, done = [], False
@@ -191,7 +195,7 @@ class SentenceTransformer(torch.nn.Module):
                     p = logits.float()
                     w = int(p.argmax()) if generator is None else int(torch.multinomial(
                         torch.softmax(p, -1).cpu(), 1, generator=generator))
-                    if w == self.EOS and not cur:
+                    if w == self.EOS and not cur and not opened:
                         eos = True
                         break
                     if w in (self.END, self.EOS):
@@ -203,6 +207,7 @@ class SentenceTransformer(torch.nn.Module):
                     break
                 gen.append(cur)
                 ended.append(done)
+                opened = False
                 logits = cache.close_sentence()
             out.append((gen, ended, eos))
         return out
