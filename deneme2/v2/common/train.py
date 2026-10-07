@@ -4,7 +4,7 @@
 Adim (belge 24 s9):  attn = recipe.block_mask(batch, mask_fn) (CPU'da dense_mask: FlexAttention CPU'da geri yayilim
 yapmiyor); h = model._batch_hidden(batch, attn); kayip = recipe.output_loss(h, E, hedef).  bf16 autocast ve bloklarda
 compile(dynamic=False) CUDA'da; clip 1,0; AdamW (0,9 / 0,95, wd 0,1; CUDA'da fused), recipe.param_groups, recipe.wsd_lr.
---optimizer muon (varsayilan; kullanici, 7 Ekim: "Muon da varsayılan olsun"): bloklarin 2-B matrisleri torch.optim.Muon'a
+--optimizer muon (varsayilan; kullanici, 7 Ekim: "Muon da varsayılan olsun"): bloklarin 2-B matrisleri recipe.BatchedMuon.a (torch.optim.Muon matematigi)
 (adjust_lr_fn match_rms_adamw: guncelleme RMS'i AdamW'ninki, ayni --lr ve wd; liu2025_muonscalable), geri kalan ayni
 AdamW'ye; wsd_lr ikisine.  Muon yoksa kosu baslamadan DURUR.  --lr zorunlu; Muon icin olculen 2e-3 (belge 39 kisa tarama
 5e-4 / 1e-3 / 2e-3 + 1 epok, OLCULENLER_z).  --optimizer adamw: eski tarif (olculen lr 5e-4).
@@ -213,7 +213,7 @@ def _optimizer(model, kind, lr, cuda):
     decay, no_decay = R.param_groups(model, WEIGHT_DECAY, skip=muon)
     adamw = torch.optim.AdamW([decay, no_decay] if not muon else [g for g in (decay, no_decay) if g["params"]],
                               lr=lr, betas=BETAS, **fused)                   # muon: transformer'da decay grubu bos
-    opt = R.MuonAdamW(torch.optim.Muon(muon, lr=lr, weight_decay=WEIGHT_DECAY, **MUON), adamw) if muon else adamw
+    opt = R.MuonAdamW(R.BatchedMuon(muon, lr=lr, weight_decay=WEIGHT_DECAY, **MUON), adamw) if muon else adamw
     names = {id(p): n for n, p in model.named_parameters()}
 
     def summary(params):

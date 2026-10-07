@@ -436,6 +436,50 @@ class MuonAdamW:
         self.muon.load_state_dict(state["muon"])
 
 
+def _ns_batched(G, coef, steps, eps):
+    """torch.optim._muon._zeropower_via_newtonschulz'un yigin hali: G (n, A, B) ayni bicimli n matris, bf16."""
+    a, b, c = coef
+    X = G.bfloat16()
+    tall = G.size(1) > G.size(2)
+    if tall:
+        X = X.transpose(1, 2)
+    X = X / X.flatten(1).norm(dim=1).clamp(min=eps)[:, None, None]
+    for _ in range(steps):
+        A = X @ X.transpose(1, 2)
+        X = torch.baddbmm(X, torch.baddbmm(A, A, A, beta=b, alpha=c), X, beta=a)
+    return X.transpose(1, 2) if tall else X
+
+
+class BatchedMuon(torch.optim.Muon if hasattr(torch.optim, "Muon") else torch.optim.Optimizer):
+    """torch.optim.Muon ile ayni matematik ve ayni durum (momentum_buffer); Newton-Schulz ayni bicimli matrislerde tek
+    bmm yiginiyla (parametre basina ayri matmul yerine).  bf16 toplama sirasi farkli: bit esit degil."""
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        from torch.optim._muon import _adjust_lr
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        for g in self.param_groups:
+            ps, grads, bufs = [], [], []
+            self._init_group(g, ps, grads, bufs)
+            if not ps:
+                continue
+            torch._foreach_lerp_(bufs, grads, 1 - g["momentum"])
+            ups = torch._foreach_lerp(grads, bufs, g["momentum"]) if g["nesterov"] else bufs
+            torch._foreach_mul_(ps, 1 - g["lr"] * g["weight_decay"])
+            shapes = {}
+            for i, p in enumerate(ps):
+                shapes.setdefault(tuple(p.shape), []).append(i)
+            for shape, idx in shapes.items():
+                O = _ns_batched(torch.stack([ups[i] for i in idx]), g["ns_coefficients"], g["ns_steps"], g["eps"])
+                alr = _adjust_lr(g["lr"], g["adjust_lr_fn"], torch.Size(shape))
+                for j, i in enumerate(idx):
+                    ps[i].add_(O[j], alpha=-alr)
+        return loss
+
+
 class Checkpoint:
     """Surdurme paketi: <dir>/checkpoint.pt (yarim dosya kalmaz)."""
 
