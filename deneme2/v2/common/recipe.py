@@ -25,8 +25,7 @@ import torch.nn.functional as F
 
 from data import END_ID, EOS_ID, VOCAB, Kind
 
-BAG_CLASSES = (16, 32, 64, 128)   # torba basina konum sinifi (sabit sekil); otesi 2'nin kuvvetleri, satir boyuna kadar
-BAG_GROUP = 256                   # dilim basina torba (bmm)
+BAG_GROUP = 256                   # grup basina torba (ardisik; grubun aday birlesimine tek matmul)
 BAG_CHUNK = 2048                  # tam sozluk satir dilimi
 
 
@@ -173,8 +172,8 @@ class Bag(torch.nn.Module):
         pbit[bag[keep], word[keep]] = True
         n_p = torch.bincount(bag[keep], minlength=n)
         allowed = self.seen & ~bag_mask(self.core) & ~pbit
-        score = self.scores(h, E)
-        top = score.detach().masked_fill(~allowed, float("-inf")).topk(R, 1)
+        score = self.scores(h, E).masked_fill(~allowed, float("-inf"))          # bir kez: topk ve secici kaybi ayni tensor
+        top = score.detach().topk(R, 1)
         j = torch.arange(R, device=dev)[None]
         lw = torch.where(torch.isfinite(top.values) & (j < (R - n_p)[:, None]), top.indices, -1)
         cand_r = torch.where(j < n_p[:, None], plist, lw.gather(1, (j - n_p[:, None]).clamp_min(0)))
@@ -202,7 +201,7 @@ class Bag(torch.nn.Module):
         (puan)[y] -> (toplam, sayi)."""
         m = sel["allowed"][bag, y]
         b, t = bag[m], y[m]
-        lse = sel["score"].masked_fill(~sel["allowed"], float("-inf")).logsumexp(1)
+        lse = sel["score"].logsumexp(1)                                       # score izinli disinda zaten -inf (select)
         return (lse[b] - sel["score"][b, t]).sum(), m.sum()
 
 
@@ -221,22 +220,15 @@ def bag_full_mask(target, frac, rng):
     return torch.as_tensor(full)
 
 
-def _bag_tokens(hf, tgt, start, npos, cand, ok, E, core, cpos, other, ar):
-    """Torba dilimi (G torba, Lc konum): -log p toplami (hedef C'de / torbanin adaylarinda kendi logit'i, kacan s_O) ve
-    p(DIGER) toplami.  Logit'ler yalniz C + torbanin R adayi (bmm)."""
-    pos = (start[:, None] + ar).clamp_max(len(hf) - 1)
-    pv = ar < npos[:, None]
-    Hb, y = hf[pos], tgt[pos]
-    valid = pv & (y >= 0)
-    y = y.clamp_min(0)
-    lgc = (Hb @ E[core].T).float()
-    lgr = torch.bmm(Hb, E[cand.clamp_min(0)].transpose(1, 2)).float().masked_fill(~ok[:, None, :], float("-inf"))
-    so = (Hb @ other).float()
-    lse = torch.logaddexp(torch.cat([lgc, lgr], -1).logsumexp(-1), so)
-    cp = cpos[y]
-    eq = (cand[:, None, :] == y[..., None]) & ok[:, None, :]
-    t = torch.where(cp >= 0, lgc.gather(-1, cp.clamp_min(0)[..., None])[..., 0],
-                    torch.where(eq.any(-1), lgr.gather(-1, eq.float().argmax(-1, keepdim=True))[..., 0], so))
+def _bag_group(hg, eu, mem, u, so, valid):
+    """Torba grubu (ardisik torbalar = duz konum dilimi): hg (P, d), eu (|U|, d) grubun aday birlesimi U, mem (P, |U|)
+    konumun kendi torbasinda mi, u (P,) hedefin U sirasi (-1: U disi), so (P,) DIGER logit'i -> (-log p toplami, p(DIGER)
+    toplami).  Tek matmul; kopya yok (7 Ekim profili: torba basina aday toplama + geri dagitim adimin ~%40'i)."""
+    lg = (hg @ eu.T).float()
+    lse = torch.logaddexp(lg.masked_fill(~mem, float("-inf")).logsumexp(-1), so)
+    uc = u.clamp_min(0)[:, None]
+    inside = (u >= 0) & mem.gather(1, uc)[:, 0]
+    t = torch.where(inside, lg.gather(1, uc)[:, 0], so)
     return torch.where(valid, lse - t, 0.0).sum(), torch.where(valid, (so - lse).exp(), 0.0).sum()
 
 
@@ -259,8 +251,8 @@ def _compiled(name, fn, h):
 
 def bag_train_loss(model, batch, h, full, weight, timer=None):
     """Egitimin hizli yolu (torbali model).  h (B, T, d), full (B * T,) tam softmax payi -> (amac, nll, ek).  nll = iki
-    asamali dagilimin ortalama NLL'i (output_logprobs ile ayni; sinav tanimi): torba basina C + R aday bmm (BAG_CLASSES
-    konum sinifi, BAG_GROUP torba dilimi), tam sozluk yalniz kacan + pay satirlarinda (BAG_CHUNK).  amac = nll + pay
+    asamali dagilimin ortalama NLL'i (output_logprobs ile ayni; sinav tanimi): BAG_GROUP ardisik torbanin aday birlesimi U'ya
+    tek matmul + konum maskesi (E'den U'lar tek toplamayla), tam sozluk yalniz kacan + pay satirlarinda (BAG_CHUNK).  amac = nll + pay
     satirlarinin tam CE toplami / gecerli hedef + weight x secici kaybi.  Tek GPU senkronu (dilim sayilari).  timer: secici
     suresi icin iki CUDA olayi."""
     bag, E, dev = model.bag, model.E.weight, h.device
@@ -276,30 +268,26 @@ def bag_train_loss(model, batch, h, full, weight, timer=None):
     inb = sel["inbag"][idf, y] & valid
     miss, full = valid & ~inb, full & valid
     n = len(sel["rows"])
-    npos = torch.bincount(idf[valid], minlength=n)
-    classes = list(BAG_CLASSES)
-    while classes[-1] < T:                                               # torba en cok satir boyu (her uzunluk kapsanir)
-        classes.append(2 * classes[-1])
-    cls = torch.bucketize(npos, torch.tensor(classes, device=dev))
-    sizes = torch.bincount(cls, minlength=len(classes)).tolist()                 # tek GPU senkronu
-    start = sel["rows"] * T + sel["cols"]
     core = bag.core
-    cpos = torch.full((VOCAB,), -1, dtype=torch.long, device=dev)
-    cpos[core] = torch.arange(len(core), device=dev)
+    inbag = sel["inbag"]
+    # Torbalar duz konum sirasinda ardisik: grup g = torbalar [b0, b1) = konumlar [start[b0], start[b1]).
+    start = torch.cat([sel["rows"] * T + sel["cols"], torch.tensor([len(hf)], device=dev)])
+    groups = list(range(0, n, BAG_GROUP)) + [n]
+    Us = [inbag[b0:b1].any(0).nonzero()[:, 0] for b0, b1 in zip(groups[:-1], groups[1:])]
+    sizes = torch.tensor([len(u) for u in Us])
+    bounds = start[groups].tolist()                                      # senkron (dilim sinirlari)
+    eu_all = E[torch.cat(Us)]                                            # TEK toplama: geride tek dagitim
+    off = [0] + sizes.cumsum(0).tolist()
+    so_all = (hf @ bag.other).float()
+    upos = torch.full((VOCAB,), -1, dtype=torch.long, device=dev)
     term = p_other = torch.zeros((), device=dev)
-    for c, Lc in enumerate(classes):
-        if not sizes[c]:
-            continue
-        idx = (cls == c).nonzero()[:, 0]
-        pad = -len(idx) % BAG_GROUP
-        real = torch.cat([torch.ones_like(idx, dtype=torch.bool), torch.zeros(pad, dtype=torch.bool, device=dev)])
-        idx = torch.cat([idx, idx.new_zeros(pad)])
-        ar = torch.arange(Lc, device=dev)
-        for g in range(0, len(idx), BAG_GROUP):
-            i, rl = idx[g:g + BAG_GROUP], real[g:g + BAG_GROUP]
-            a, b = _compiled("bag_tokens_%d" % Lc, _bag_tokens, h)(hf, tgt, start[i], npos[i] * rl, sel["cand_r"][i],
-                                                                     sel["ok_r"][i], E, core, cpos, bag.other, ar)
-            term, p_other = term + a, p_other + b
+    for g, (b0, b1) in enumerate(zip(groups[:-1], groups[1:])):
+        s0, s1, U = bounds[g], bounds[g + 1], Us[g]
+        upos.fill_(-1)
+        upos[U] = torch.arange(len(U), device=dev)
+        mem = inbag[b0:b1][:, U][idf[s0:s1] - b0]
+        a, b = _bag_group(hf[s0:s1], eu_all[off[g]:off[g + 1]], mem, upos[y[s0:s1]], so_all[s0:s1], valid[s0:s1])
+        term, p_other = term + a, p_other + b
     rows = (miss | full).nonzero()[:, 0]
     pad = -len(rows) % BAG_CHUNK
     ok = torch.cat([torch.ones_like(rows, dtype=torch.bool), torch.zeros(pad, dtype=torch.bool, device=dev)])
