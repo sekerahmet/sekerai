@@ -165,14 +165,14 @@ class Block(torch.nn.Module):
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, layer_plan=None):
         """layer_plan (ornek 'loc2,mid4,loc1,glob1'; belge 52): loc = yerel (model_z_read_mask), mid = yalniz ozet satirlari
-        (BOS + Z_k, aralarinda causal; token'lar atlar), glob = tam causal (yalniz sonda).  Verilirse layers ve
-        global_layers ondan; yoksa bugunku duzen (loc x (layers - global_layers), glob x global_layers)."""
+        (BOS + Z_k, aralarinda causal; token'lar atlar), glob = tam causal (her yerde; ornek glob1,loc8,glob1).  Verilirse
+        layers ondan, global_layers = glob sayisi; yoksa bugunku duzen (loc x (layers - global_layers), glob x
+        global_layers)."""
         super().__init__()
         self.plan = parse_layer_plan(layer_plan) if layer_plan else None
         if self.plan:
             layers = len(self.plan)
-            global_layers = layers - next((i + 1 for i in range(layers - 1, -1, -1) if self.plan[i] != "glob"), 0)
-            assert "glob" not in self.plan[:layers - global_layers], "layer_plan: glob yalniz sonda"
+            global_layers = self.plan.count("glob")
         self.global_layers = int(global_layers)
         assert 0 <= self.global_layers <= layers, "global_layers 0..layers"
         self.mask_fn = (model_z_read_mask, model_z_global_mask) if self.global_layers else model_z_read_mask
@@ -308,7 +308,7 @@ class SummaryCache:
         self.sum_k, self.sum_v = [None] * L, [None] * L
         self.sen_k, self.sen_v = [None] * L, [None] * L
         self.all_k, self.all_v = [None] * L, [None] * L
-        self.first_global = L - model.global_layers
+        self.glob = [k == "glob" for k in model.plan] if model.plan else [l >= L - model.global_layers for l in range(L)]
         self.n_z, self.i, self.t = 0, 0, 0
         self.past, self.cur, self.inbag = [], [], None
         x = model.E(torch.tensor([[EOS_ID]], device=self.dev))              # BOS = EOS token'i (belge 21 s1)
@@ -325,7 +325,7 @@ class SummaryCache:
         bloklar: gercek konum self.t, butun gecmis."""
         p = torch.tensor([[pos]], device=self.dev)
         for l, block in enumerate(self.m.blocks):
-            if l >= self.first_global:
+            if self.glob[l]:
                 q, k, v = block._qkv(x, torch.tensor([[self.t]], device=self.dev))
                 self.all_k[l] = k if self.all_k[l] is None else torch.cat([self.all_k[l], k], 2)
                 self.all_v[l] = v if self.all_v[l] is None else torch.cat([self.all_v[l], v], 2)
@@ -364,7 +364,7 @@ class SummaryCache:
         summ = ((kind == BOS) | (kind == ZTOK))[0]
         x, lpos, real = self.m.E(t(tok)), t(pos), torch.arange(T, device=self.dev)[None]
         for l, block in enumerate(self.m.blocks):
-            g = l >= self.first_global
+            g = self.glob[l]
             q, k, v = block._qkv(x, real if g else lpos)
             a = F.scaled_dot_product_attention(q, k, v, attn_mask=causal if g else local)
             if g:

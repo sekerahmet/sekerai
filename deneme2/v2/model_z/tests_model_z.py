@@ -714,6 +714,39 @@ def t_plan():
     check("plan glob'suz (loc1,mid1,loc1): tek maske, dense ve egitim yolu = basvuru",
           m2.global_layers == 0 and not isinstance(m2.mask_fn, tuple) and float((got2 - ref2).abs().max()) < 1e-5
           and torch.equal(got2, got3), "fark %.1e" % float((got2 - ref2).abs().max()))
+    m3 = make(layer_plan="glob1,loc1,glob1")                                     # glob her yerde (belge 60 B, 62)
+    real = story_positions(batch.kind)
+    with torch.no_grad():
+        x3 = m3.E(torch.where(batch.kind == ZTOK, torch.full_like(batch.tokens, D.END_ID), batch.tokens))
+        x3 = m3.blocks[0](x3, real, glob)
+        x3 = m3.blocks[1](x3, batch.pos, read)
+        ref3 = m3.norm(m3.blocks[2](x3, real, glob))
+        got4 = m3._batch_hidden(batch)
+        got5 = m3._batch_hidden(batch, (read, glob))
+        g6 = m3._batch_hidden(b2)
+    check("plan glob1,loc1,glob1: global_layers 2, ilk ve son katman tam causal + gercek konum = katman katman basvuru "
+          "(dense ve egitim yolu); son cumleyi degistirmek onceki konumlari degistirmez",
+          m3.global_layers == 2 and float((got4 - ref3).abs().max()) < 1e-5 and torch.equal(got4, got5)
+          and torch.equal(got4[0, :last], g6[0, :last]) and not torch.equal(got4[0, last:], g6[0, last:]),
+          "fark %.1e" % float((got4 - ref3).abs().max()))
+    with torch.no_grad():
+        keep = batch.target >= 0
+        lg_full = (got4[keep] @ m3.E.weight.T)
+        out = []
+        for row in rows:
+            for si in row:
+                cache = SummaryCache(m3)
+                out.append(cache.logits[None])
+                for s_ in stories[si]:
+                    out += [cache.append_token(t)[None] for t in s_] + [cache.close_sentence()[None]]
+        pre = SummaryCache(m3)
+        pre.prefill(stories[0][:2])
+        seq = [D.EOS_ID] + [t for s_ in stories[0][:2] for t in s_ + [D.END_ID]]
+        k_pre = len(seq) - 1                                                    # Z_2'nin hedef sirasi (hikaye 0)
+    d3 = float((torch.cat(out) - lg_full).abs().max())
+    check("plan glob1,loc1,glob1: SummaryCache (katman basina glob bayragi) adim adim logit ve prefill = tam ileri gecis",
+          d3 < 1e-5 and float((pre.logits - torch.cat(out)[k_pre]).abs().max()) < 1e-5
+          and cache.all_k[1] is None and cache.all_k[0].shape[2] == cache.t + 1, "fark %.1e" % d3)
 
 
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,

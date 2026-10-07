@@ -378,7 +378,7 @@ def _args(argv):
         from sentence import parse_layer_plan
         plan = parse_layer_plan(args.layer_plan)
         args.layers = len(plan)
-        args.global_layers = len(plan) - len(plan[:max([i + 1 for i, k in enumerate(plan) if k != "glob"] or [0])])
+        args.global_layers = plan.count("glob")
     return args
 
 

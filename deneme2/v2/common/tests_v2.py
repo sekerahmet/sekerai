@@ -1276,6 +1276,13 @@ def _train_global(base, root, data, out, exits, TR):
               rj["finished"] and rj["generation"] is None and "mid" in rj["readings_skipped"]
               and not os.path.exists(os.path.join(P, "samples.txt")) and lp.plan == ["loc", "mid", "glob"]
               and rp["identity"]["layer_plan"] == "loc1,mid1,glob1", str(rj.get("readings_skipped")))
+        G = out("plan_glob_ends")                                          # glob her yerde (belge 60 B, 62)
+        rg = TR.main(base + ["--model", "model_z", "--layer_plan", "glob1,loc1,glob1", "--steps", "3", "--out", G])
+        lg_ = GR.load_run(G, data, torch.device("cpu"))[0]
+        check("train --layer_plan glob1,loc1,glob1: kosar, kimlikte global_layers 2 (glob sayisi), okuma uretilir (onbellek "
+              "katman basina glob), load_run plani kurar",
+              rg["identity"]["global_layers"] == 2 and rg["generation"] and "readings_skipped" not in rg
+              and os.path.exists(os.path.join(G, "samples.txt")) and lg_.plan == ["glob", "loc", "glob"])
     except Exception:  # noqa: BLE001
         check("train --global_layers", False, traceback.format_exc(limit=3))
 
