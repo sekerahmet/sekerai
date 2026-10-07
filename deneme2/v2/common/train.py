@@ -66,7 +66,7 @@ MUON = dict(momentum=0.95, nesterov=True, ns_steps=5, adjust_lr_fn="match_rms_ad
 DECAY = 0.2                                                # recipe.wsd_lr varsayilani; inis basi checkpoint'i
 BATCH_ROWS = D.BATCH_ROWS
 LOG_EVERY = 100             # adim; gunluk satiri = bir hiz penceresi
-COMPILE_MODE = None         # bloklarin torch.compile modu (None varsayilan; "max-autotune-no-cudagraphs" denenir)
+COMPILE_MODE = "max-autotune-no-cudagraphs"   # bloklarin derleme modu (5w: torba K 1024 -2,9 ms/adim; kullanici, 7 Ekim)
 READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
 READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
@@ -487,6 +487,9 @@ def main(argv=None):
     if args.bag_k:
         log("torba: K %d, C %d (en sik %d + END + EOS), lambda %g, tam softmax payi %g, secici kaybi payi %g" % (
             args.bag_k, len(core), args.bag_core, args.bag_weight, args.bag_full_frac, args.bag_sel_frac))
+    if cuda:
+        log("hiz: derleme modu %s, attention blok %d, secici derlenmis %s, Muon %s" % (
+            COMPILE_MODE, R.ATTN_BLOCK, R.SELECT_COMPILED, type(getattr(opt, "muon", opt)).__name__))
     for k, g in opt_info["split"].items():
         if g["tensors"]:
             log("optimizer %s | %s: %d tensor, %d parametre | %s" % (args.optimizer, k, g["tensors"], g["params"],

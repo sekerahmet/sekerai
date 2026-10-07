@@ -27,7 +27,7 @@ from data import END_ID, EOS_ID, VOCAB, Kind
 
 BAG_GROUP = 512                   # grup basina torba (ardisik; grubun aday birlesimine tek matmul)
 BAG_CHUNK = 2048                  # tam sozluk satir dilimi
-ATTN_BLOCK = 128                  # FlexAttention blok boyu (64: SS d512 attention -%14, belge 37; bf16 esdeger)
+ATTN_BLOCK = 64                   # FlexAttention blok boyu (SS d512 attention -%14, belge 37; 5w -2,7 ms/adim; bf16 esdeger)
 SELECT_COMPILED = True            # secicinin puan + maske + topk yolu derlenmis (CUDA)
 
 
