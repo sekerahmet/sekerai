@@ -299,11 +299,12 @@ def bag_train_loss(model, batch, h, full, weight, timer=None):
     host = torch.cat([start[groups], torch.bincount(nz[:, 0], minlength=ng)]).tolist()  # tek senkron: sinirlar + |U_g|
     bounds, sizes = host[:ng + 1], host[ng + 1:]
     Us = torch.split(nz[:, 1], sizes)
-    eu_all = E[nz[:, 1]]                                                 # TEK toplama: geride tek dagitim
-    off = [0]
-    for s in sizes:
-        off.append(off[-1] + s)
-    so_all = (hf @ bag.other).float()
+    # Parcalar split ile (geri: tek birlestirme).  Dilim / indeks geri yayilimi her parca icin tam boy sifir gradyan acar
+    # (7 Ekim kisa profil: SliceBackward + add_ + fill_ ~24 ms/adim).
+    psz = [bounds[g + 1] - bounds[g] for g in range(ng)]
+    h_parts = torch.split(hf, psz)
+    e_parts = torch.split(E[nz[:, 1]], sizes)                            # TEK toplama: geride tek dagitim
+    so_parts = torch.split((hf @ bag.other).float(), psz)
     upos = torch.full((VOCAB,), -1, dtype=torch.long, device=dev)
     term = p_other = torch.zeros((), device=dev)
     for g, (b0, b1) in enumerate(zip(groups[:-1], groups[1:])):
@@ -311,16 +312,17 @@ def bag_train_loss(model, batch, h, full, weight, timer=None):
         upos.fill_(-1)
         upos[U] = torch.arange(len(U), device=dev)
         mem = inbag[b0:b1][:, U][idf[s0:s1] - b0]
-        a, b = _bag_group(hf[s0:s1], eu_all[off[g]:off[g + 1]], mem, upos[y[s0:s1]], so_all[s0:s1], valid[s0:s1])
+        a, b = _bag_group(h_parts[g], e_parts[g], mem, upos[y[s0:s1]], so_parts[g], valid[s0:s1])
         term, p_other = term + a, p_other + b
     rows = (miss | full).nonzero()[:, 0]
     pad = -len(rows) % BAG_CHUNK
     ok = torch.cat([torch.ones_like(rows, dtype=torch.bool), torch.zeros(pad, dtype=torch.bool, device=dev)])
     rows = torch.cat([rows, rows.new_zeros(pad)])
+    hr = torch.split(hf[rows], BAG_CHUNK)                                # tek indeks (geri tek dagitim)
     full_sum = torch.zeros((), device=dev)
-    for r in range(0, len(rows), BAG_CHUNK):
+    for c, r in enumerate(range(0, len(rows), BAG_CHUNK)):
         i, k = rows[r:r + BAG_CHUNK], ok[r:r + BAG_CHUNK]
-        o, f = _compiled("bag_full", _bag_full, h)(hf[i], E, y[i], sel["inbag"][idf[i]], miss[i] & k, full[i] & k)
+        o, f = _compiled("bag_full", _bag_full, h)(hr[c], E, y[i], sel["inbag"][idf[i]], miss[i] & k, full[i] & k)
         term, full_sum = term + o, full_sum + f
     ls, n_s = bag.selector_loss(sel, idf[valid], y[valid])
     n_valid = valid.sum().clamp_min(1)
