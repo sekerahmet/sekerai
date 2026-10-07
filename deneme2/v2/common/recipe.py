@@ -493,7 +493,8 @@ def _ns_batched(G, coef, steps, eps):
 
 class BatchedMuon(torch.optim.Muon if hasattr(torch.optim, "Muon") else torch.optim.Optimizer):
     """torch.optim.Muon ile ayni matematik ve ayni durum (momentum_buffer); Newton-Schulz ayni bicimli matrislerde tek
-    bmm yiginiyla (parametre basina ayri matmul yerine).  bf16 toplama sirasi farkli: bit esit degil."""
+    bmm yiginiyla (parametre basina ayri matmul yerine).  CPU'da torch Muon ile bit esit olculdu (d 512 sekilleri, tests_v2
+    recipe); GPU'da olculmedi, bmm toplama sirasi addmm'den farkli olabilir."""
 
     @torch.no_grad()
     def step(self, closure=None):

@@ -4,19 +4,21 @@
 Adim (belge 24 s9):  attn = recipe.block_mask(batch, mask_fn) (CPU'da dense_mask: FlexAttention CPU'da geri yayilim
 yapmiyor); h = model._batch_hidden(batch, attn); kayip = recipe.output_loss(h, E, hedef).  bf16 autocast ve bloklarda
 compile(dynamic=False) CUDA'da; clip 1,0; AdamW (0,9 / 0,95, wd 0,1; CUDA'da fused), recipe.param_groups, recipe.wsd_lr.
---optimizer muon (varsayilan; kullanici, 7 Ekim: "Muon da varsayılan olsun"): bloklarin 2-B matrisleri recipe.BatchedMuon.a (torch.optim.Muon matematigi)
-(adjust_lr_fn match_rms_adamw: guncelleme RMS'i AdamW'ninki, ayni --lr ve wd; liu2025_muonscalable), geri kalan ayni
-AdamW'ye; wsd_lr ikisine.  Muon yoksa kosu baslamadan DURUR.  --lr zorunlu; Muon icin olculen 2e-3 (belge 39 kisa tarama
-5e-4 / 1e-3 / 2e-3 + 1 epok, OLCULENLER_z).  --optimizer adamw: eski tarif (olculen lr 5e-4).
+--optimizer muon (varsayilan; kullanici, 7 Ekim: "Muon da varsayılan olsun"): bloklarin 2-B matrisleri
+recipe.BatchedMuon'a (torch.optim.Muon matematigi; adjust_lr_fn match_rms_adamw: guncelleme RMS'i AdamW'ninki, ayni --lr
+ve wd; liu2025_muonscalable), geri kalan ayni AdamW'ye; wsd_lr ikisine.  Muon yoksa kosu baslamadan DURUR.  --lr
+zorunlu; Muon icin olculen 2e-3 (belge 39 kisa tarama 5e-4 / 1e-3 / 2e-3 + 1 epok, OLCULENLER_z).  --optimizer adamw:
+eski tarif (olculen lr 5e-4).
 Veri: BATCH_ROWS satir x row_len (plan dosyasindan); epok 1 <data>/train_pack_plan_e1.npz, sonrakiler pack_plan(seed,
 epok).  --local: ham akisin yerel kopyasi (yalniz onbellek; sha256 = <split>_boundaries.json'daki).
 Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunluk sinirinda, epok sonunda ve bitiste;
 <out>/decay_start/ inisin ilk adiminda.  --resume 1: ayni toplam -> kaldigi yerden; buyuk toplam (--epochs / --steps) -> uzatma, inis basindan; eski
 ciktilar <out>/total_<eski toplam>/'a.  Bitmis kosu durur.
 Olcu: epok sonunda ve bitiste metrics.exam_scores (exam_pack_plan.npz; egitimle ayni maske yolu); hiz pencere pencere
-(recipe.SpeedWindow; ilk pencere derleme icerir, ozete girmez).  Sonda metrics.story_generation (reading_prompts.json).
-Cikti: config.json, checkpoint.pt, decay_start/, results.json, agent.pt, samples.txt, samples.json.  Ek okuma kayitli
-kosudan: diag/generate_readings.py.
+(recipe.SpeedWindow; ilk pencere derleme icerir, ozete girmez).  Sonda agent.pt ve results.json, SONRA
+metrics.story_generation (reading_prompts.json; okuma dusse de model kalir); layer_plan mid'de okuma yok (results.json
+readings_skipped).  Cikti: config.json, checkpoint.pt, decay_start/, results.json, agent.pt, samples.txt, samples.json.
+Ek okuma kayitli kosudan: diag/generate_readings.py.
 
 Model Z yalniz ogrenilen z (belge 35 (b)); formullu z ve --learned_z kaldirildi (kullanici, 7 Ekim: "bence temizlik
 başlasın"; belge 44; eski kod git etiketi v2-before-formula-cleanup-20261007).  Kimlikte learned_z (Model Z 1) eski
@@ -396,6 +398,12 @@ def main(argv=None):
         for k in ("cache_size_limit", "recompile_limit"):                # beklenen giris ~4-6 (egitim / sinav x tam /
             if hasattr(torch._dynamo.config, k):                         # son batch); 8'i asarsa sessizce eager'a duser
                 setattr(torch._dynamo.config, k, 32)
+        if COMPILE_MODE and "max-autotune" in COMPILE_MODE:              # bozuk Triton adayi yalniz alt sureci dusurur
+            import torch._inductor.config as inductor_config              # (8 Ekim sm_120: aday illegal memory access, kosu
+            if hasattr(inductor_config, "autotune_in_subproc"):          # adim 0'da oldu; 5b tek blok: alt surec 67,6 ms
+                inductor_config.autotune_in_subproc = True                # cokme yok, GEMM ATEN 70,1 ms)
+            else:
+                log("UYARI: torch %s'te inductor autotune_in_subproc yok; adaylar ayni surecte denenir" % torch.__version__)
     elif os.name == "nt":
         log("guc kisitlamasi (EcoQoS) kapali: %s" % _no_power_throttling())
     stream = _local_copy(args.stream, args.local, args.data) if args.local else args.stream
@@ -609,21 +617,28 @@ def main(argv=None):
     if not history["exams"] or history["exams"][-1]["step"] != total:   # bitis checkpoint'i var, sinavi yok
         ex = _exam(model, mask_fn, valid, exam_plan, story_bytes, layout, dev, cuda)
         history["exams"].append(dict(ex, step=total, epoch=len(per_epoch), full_epoch=bool(total == bounds[-1])))
-    t = time.time()
-    own = os.path.join(args.data, "reading_prompts.json")              # veri klasorunun istemleri (FineWeb, belge 48)
-    rows, gen = _readings(model, valid, tok, path=own if os.path.exists(own) else None)
-    log("okuma uretimi %.0f sn: %s" % (time.time() - t, gen))
-    open(os.path.join(args.out, "samples.txt"), "w", encoding="utf-8").write(_samples_text(rows))
-    json.dump(dict(generation=gen, rows=rows), open(os.path.join(args.out, "samples.json"), "w", encoding="utf-8"),
-              indent=1, ensure_ascii=False)
     speed = [w for w in history["log"] if not w["first"]]
     med = lambda key: float(np.median([w[key] for w in speed])) if speed else None  # noqa: E731
     results = dict(config, run=os.path.basename(os.path.normpath(args.out)), finished=True, exam=history["exams"][-1],
-                   exams=history["exams"], epochs=history["epochs"], generation=gen, log=history["log"],
+                   exams=history["exams"], epochs=history["epochs"], generation=None, log=history["log"],
                    speed=dict(windows=len(speed), tokens_per_sec_median=med("tokens_per_sec"),
                               ms_per_step_median=med("ms_per_step"), note="pencere ortancasi; ilk pencere (derleme) haric"))
     torch.save(dict(state=model.state_dict(), identity=ident, args=vars(args)), os.path.join(args.out, "agent.pt"))
+    json.dump(results, open(res_path, "w"), indent=1)                   # okumadan ONCE: okuma dusse de model kalir
+    if "mid" in (getattr(model, "plan", None) or ()):
+        results["readings_skipped"] = "OKUMA YOK: layer_plan mid (uretim onbellegi yok)"
+        log(results["readings_skipped"])
+    else:
+        t = time.time()
+        own = os.path.join(args.data, "reading_prompts.json")          # veri klasorunun istemleri (FineWeb, belge 48)
+        rows, gen = _readings(model, valid, tok, path=own if os.path.exists(own) else None)
+        log("okuma uretimi %.0f sn: %s" % (time.time() - t, gen))
+        open(os.path.join(args.out, "samples.txt"), "w", encoding="utf-8").write(_samples_text(rows))
+        json.dump(dict(generation=gen, rows=rows), open(os.path.join(args.out, "samples.json"), "w", encoding="utf-8"),
+                  indent=1, ensure_ascii=False)
+        results["generation"] = gen
     json.dump(results, open(res_path, "w"), indent=1)
+    gen = results["generation"] or {}
     log("BITTI: %s | sinav kayip %.4f bpb %.4f | sentence_repeat %s | story_loop %s" % (
         args.out, results["exam"]["loss"], results["exam"]["bits_per_byte"],
         {d: g["sentence_repeat"] for d, g in gen.items()},

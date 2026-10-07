@@ -471,6 +471,24 @@ def _recipe_muon(R):
               torch.equal(a, c) for a, c in zip(full.state_dict().values(), resumed.state_dict().values()))
           and set(pack) == {"adamw", "muon"} and "momentum_buffer" in pack["muon"]["state"][0]
           and "exp_avg" in pack["adamw"]["state"][0] and len(opt.param_groups) == 3)
+    shapes = [(8, 24), (24, 8), (8, 24), (16, 16)]                         # belge 57 D1
+    g = torch.Generator().manual_seed(0)
+    init = [torch.randn(*s_, generator=g) * 0.02 for s_ in shapes]
+    pa, pb = [torch.nn.Parameter(p.clone()) for p in init], [torch.nn.Parameter(p.clone()) for p in init]
+    oa = torch.optim.Muon(pa, lr=2e-3, weight_decay=0.1, **TR.MUON)
+    ob = R.BatchedMuon(pb, lr=2e-3, weight_decay=0.1, **TR.MUON)
+    for _ in range(3):
+        for x, y in zip(pa, pb):
+            x.grad = torch.randn(x.shape, generator=g)
+            y.grad = x.grad.clone()
+        oa.step()
+        ob.step()
+    oa2 = torch.optim.Muon([torch.nn.Parameter(p.clone()) for p in init], lr=2e-3, weight_decay=0.1, **TR.MUON)
+    oa2.load_state_dict(ob.state_dict())
+    check("BatchedMuon = torch.optim.Muon (CPU, 3 adim, nesterov, wd, match_rms_adamw; ayni bicimli matrisler yiginda): "
+          "agirlik ve momentum_buffer bit esit; state_dict torch Muon'a yuklenir",
+          all(torch.equal(x, y) for x, y in zip(pa, pb))
+          and all(torch.equal(oa.state[x]["momentum_buffer"], ob.state[y]["momentum_buffer"]) for x, y in zip(pa, pb)))
 
 
 def _recipe_bag(R):
@@ -523,7 +541,7 @@ def _recipe_bag(R):
             h0 = torch.randn(*b.kind.shape, 8, generator=g)
             full = R.bag_full_mask(b.target.numpy(), 0.3, np.random.default_rng(np.random.SeedSequence(0, spawn_key=(5,))))
             hs = h0.clone().requires_grad_(True)
-            goal, nll, ex = R.bag_train_loss(m, b, hs, torch.zeros_like(full), 0.0)
+            goal, nll, ex = R.bag_train_loss(m, b, hs, torch.zeros(full.shape, dtype=torch.bool), 0.0)   # pay yok, lambda 0
             goal.backward()
             gs = (hs.grad.clone(), m.E.weight.grad.clone(), m.bag.other.grad.clone())
             m.zero_grad()
@@ -566,6 +584,52 @@ def _recipe_bag(R):
             out_.append(abs(float(nll_l) - float(ref_l)))
         check("torba: 128'den uzun torba (230 token'lik cumle, satir 256) iki duzende hizli yol = output_logprobs",
               max(out_) < 1e-5, str(out_))
+        R.BAG_GROUP = 2
+        ok_plan, ok_sel = True, True
+        for layout in ("model_z", "transformer"):                         # belge 57 D2
+            b = D.build_batch(_Synthetic(stories), [[0, 1], [2]], layout, row_len=40)
+            torch.manual_seed(1)
+            m = torch.nn.Module()
+            m.E = torch.nn.Embedding(D.VOCAB, 8)
+            R.attach_bag(m, len(core) + 3, len(core))
+            m.bag.fill(core, counts)
+            torch.nn.init.normal_(m.bag.other, std=0.5)
+            torch.nn.init.normal_(m.bag.q.weight, std=0.5)
+            h0 = torch.randn(*b.kind.shape, 8, generator=g)
+            for sf in (1.0, 0.5):
+                flags = R.bag_full_mask(b.target.numpy(), 0.3, np.random.default_rng(np.random.SeedSequence(0, spawn_key=(5,))),
+                                        sf)
+                out = []
+                for plan in (R.bag_plan(b, flags, torch.as_tensor(core)), None):
+                    m.zero_grad()
+                    hp = h0.clone().requires_grad_(True)
+                    goal_, nll_, ex_ = R.bag_train_loss(m, b, hp, flags, 0.5, plan=plan)
+                    goal_.backward()
+                    out.append((float(goal_), float(nll_), {k: float(v) for k, v in ex_.items()}, hp.grad.clone(),
+                                m.bag.q.weight.grad.clone()))
+                ok_plan &= out[0][:3] == out[1][:3] and torch.equal(out[0][3], out[1][3]) and torch.equal(out[0][4],
+                                                                                                         out[1][4])
+                sel = m.bag.batch_select(b, h0, m.E.weight)
+                T = b.kind.shape[1]
+                keep = {j for j in range(len(sel["rows"]))
+                        if int(flags[int(sel["rows"][j]) * T + int(sel["cols"][j])]) & 2}
+                fsc, allw = R.Bag.full_score(sel), sel["allowed"]
+                tot = n = 0
+                for q in (b.target.flatten() >= 0).nonzero()[:, 0].tolist():
+                    j, w = int(sel["ids"].flatten()[q]), int(b.target.flatten()[q])
+                    if j in keep and bool(allw[j, w]):
+                        sc = fsc[j].masked_fill(~allw[j], float("-inf"))
+                        tot, n = tot + float(torch.logsumexp(sc, 0) - sc[w]), n + 1
+                got = out[0][2]["loss_selector"] / max(out[0][2]["n_selector"], 1)
+                ok_sel &= abs(got - tot / max(n, 1)) < 1e-4 and (sf == 1.0) == (len(keep) == len(sel["rows"]))
+        t_ = np.arange(50) - 5
+        a_ = R.bag_full_mask(t_, 0.3, np.random.default_rng(7))
+        old = np.zeros(50, bool)
+        old[np.random.default_rng(7).choice(np.flatnonzero(t_ >= 0), int(round(0.3 * 45)), replace=False)] = True
+        check("torba: bag_plan (CPU'da kurulmus) = plansiz yol (amac, nll, ekler, h ve q gradyani bit; iki duzen, sel_frac 1 "
+              "ve 0,5); sel_frac 0,5'te secici kaybi = yalniz bit 1'li torbalarin elle hesabi; sel_frac 1'de bit 0 eski rng "
+              "sirasi, bit 1 hepsi", ok_plan and ok_sel and np.array_equal(a_.numpy() & 1, old)
+              and bool(((a_.numpy() & 2) > 0).all()))
     finally:
         R.BAG_GROUP, R.BAG_CHUNK = saved
 
@@ -1201,6 +1265,17 @@ def _train_global(base, root, data, out, exits, TR):
               dflt == {"model_z": (1, "muon"), "transformer": (0, "muon"),
                   "model_z acik 0": (0, "muon"), "model_z adamw": (1, "adamw")}
               and (idt["global_layers"], idt["optimizer"], idt["learned_z"]) == (1, "muon", 1), str(dflt))
+        P = out("plan_mid")                                                # belge 57 K1
+        rp = TR.main(base + ["--model", "model_z", "--layer_plan", "loc1,mid1,glob1", "--steps", "3", "--out", P])
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
+        import generate_readings as GR
+        lp = GR.load_run(P, data, torch.device("cpu"))[0]
+        rj = json.load(open(os.path.join(P, "results.json")))
+        check("train --layer_plan mid: agent.pt ve results.json yazilir (okumadan once), okuma atlanir ve isaretlenir; "
+              "load_run plani kimlikten kurar",
+              rj["finished"] and rj["generation"] is None and "mid" in rj["readings_skipped"]
+              and not os.path.exists(os.path.join(P, "samples.txt")) and lp.plan == ["loc", "mid", "glob"]
+              and rp["identity"]["layer_plan"] == "loc1,mid1,glob1", str(rj.get("readings_skipped")))
     except Exception:  # noqa: BLE001
         check("train --global_layers", False, traceback.format_exc(limit=3))
 

@@ -175,7 +175,7 @@ class SentenceTransformer(torch.nn.Module):
             assert "glob" not in self.plan[:layers - global_layers], "layer_plan: glob yalniz sonda"
         self.global_layers = int(global_layers)
         assert 0 <= self.global_layers <= layers, "global_layers 0..layers"
-        self.mask_fn = (model_z_read_mask, model_z_global_mask) if self.global_layers or self.plan else model_z_read_mask
+        self.mask_fn = (model_z_read_mask, model_z_global_mask) if self.global_layers else model_z_read_mask
         self.END, self.EOS = END_ID, EOS_ID
         hidden = -(-int(8 * d / 3) // 8) * 8
         self.E = torch.nn.Embedding(VOCAB, d)                    # kurma sirasi E, blocks, norm (ilk agirlik bunu izler)
@@ -192,6 +192,23 @@ class SentenceTransformer(torch.nn.Module):
         B, T = batch.tokens.shape
         dev = batch.tokens.device
         x = self.E(torch.where(batch.kind == ZTOK, torch.full_like(batch.tokens, END_ID), batch.tokens))
+        if self.plan:                                                    # glob'suz planda tek maske
+            if attn is None:
+                fns = self.mask_fn if isinstance(self.mask_fn, tuple) else (self.mask_fn,)
+                attn = tuple(_dense(f(batch.kind, batch.doc, batch.sent), B, T, dev) for f in fns)
+            loc, glob = (tuple(attn) + (None,))[:2] if isinstance(attn, tuple) else (attn, None)
+            assert (glob is None) == (not self.global_layers), "layer_plan: maske sayisi glob katmanlariyla uyusmuyor"
+            real, summ = story_positions(batch.kind), summary_index(batch) if "mid" in self.plan else None
+            for kind, block in zip(self.plan, self.blocks):
+                if kind == "loc":
+                    x = block(x, batch.pos, loc)
+                elif kind == "glob":
+                    x = block(x, real, glob)
+                else:
+                    rows, cols, k, idx, spos, smask = summ
+                    xs = block(x.gather(1, idx[..., None].expand(-1, -1, x.shape[-1])), spos, smask)
+                    x = x.index_put((rows, cols), xs[rows, k])
+            return self.norm(x)
         if not self.global_layers:
             if attn is None:
                 attn = _dense(self.mask_fn(batch.kind, batch.doc, batch.sent), B, T, dev)
@@ -202,18 +219,6 @@ class SentenceTransformer(torch.nn.Module):
         if attn is None:
             attn = tuple(_dense(f(batch.kind, batch.doc, batch.sent), B, T, dev) for f in self.mask_fn)
         assert isinstance(attn, tuple) and len(attn) == 2, "global_layers: attn (yerel, global) ikilisi olmali"
-        if self.plan:
-            real, summ = story_positions(batch.kind), summary_index(batch) if "mid" in self.plan else None
-            for kind, block in zip(self.plan, self.blocks):
-                if kind == "loc":
-                    x = block(x, batch.pos, attn[0])
-                elif kind == "glob":
-                    x = block(x, real, attn[1])
-                else:
-                    rows, cols, k, idx, spos, smask = summ
-                    xs = block(x.gather(1, idx[..., None].expand(-1, -1, x.shape[-1])), spos, smask)
-                    x = x.index_put((rows, cols), xs[rows, k])
-            return self.norm(x)
         real, first = story_positions(batch.kind), len(self.blocks) - self.global_layers
         for l, block in enumerate(self.blocks):
             x = block(x, real, attn[1]) if l >= first else block(x, batch.pos, attn[0])

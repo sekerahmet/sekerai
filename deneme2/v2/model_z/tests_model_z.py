@@ -706,6 +706,14 @@ def t_plan():
     except AssertionError:
         stopped = True
     check("plan mid: uretim onbellegi (SummaryCache) DURUR", stopped)
+    m2 = make(layer_plan="loc1,mid1,loc1")                                       # glob'suz plan (belge 57 K2)
+    with torch.no_grad():
+        ref2 = m2.norm(m2.blocks[2](x, batch.pos, read))                         # x: mid'den sonraki basvuru (blok 0-1 ayni)
+        got2 = m2._batch_hidden(batch)
+        got3 = m2._batch_hidden(batch, read)                                     # egitim yolu: tek maske
+    check("plan glob'suz (loc1,mid1,loc1): tek maske, dense ve egitim yolu = basvuru",
+          m2.global_layers == 0 and not isinstance(m2.mask_fn, tuple) and float((got2 - ref2).abs().max()) < 1e-5
+          and torch.equal(got2, got3), "fark %.1e" % float((got2 - ref2).abs().max()))
 
 
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
