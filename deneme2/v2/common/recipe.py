@@ -261,12 +261,13 @@ def _bag_full(h, weight, target, inbag, miss, full):
     return torch.where(miss, out, 0.0).sum(), torch.where(full, lg.logsumexp(-1) - t, 0.0).sum()
 
 
-def _compiled(name, fn, h):
-    """CUDA'da derlenmis (bir kez sarilir, dynamic=False), CPU'da eager (output_loss ile ayni kural)."""
+def _compiled(name, fn, h, dynamic=False):
+    """CUDA'da derlenmis (bir kez sarilir), CPU'da eager (output_loss ile ayni kural).  dynamic: boyu adimdan adima degisen
+    girdiler (torba gruplari) icin tek grafik."""
     if not h.is_cuda:
         return fn
     if name not in _COMPILED:
-        _COMPILED[name] = torch.compile(fn, dynamic=False)
+        _COMPILED[name] = torch.compile(fn, dynamic=dynamic)
     return _COMPILED[name]
 
 
@@ -312,7 +313,8 @@ def bag_train_loss(model, batch, h, full, weight, timer=None):
         upos.fill_(-1)
         upos[U] = torch.arange(len(U), device=dev)
         mem = inbag[b0:b1][:, U][idf[s0:s1] - b0]
-        a, b = _bag_group(h_parts[g], e_parts[g], mem, upos[y[s0:s1]], so_parts[g], valid[s0:s1])
+        a, b = _compiled("bag_group", _bag_group, h, True)(h_parts[g], e_parts[g], mem, upos[y[s0:s1]], so_parts[g],
+                                                            valid[s0:s1])
         term, p_other = term + a, p_other + b
     rows = (miss | full).nonzero()[:, 0]
     pad = -len(rows) % BAG_CHUNK
