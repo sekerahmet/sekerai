@@ -164,12 +164,16 @@ class Bag(torch.nn.Module):
 
     def selectable(self):
         """-> (sidx, spos): secilebilir kelimeler (train'de gorulmus, C disi; artan V indeksi) ve V -> sira (disinda -1).
-        Secici yalniz bunlari puanlar (oteki kelimeler zaten secilemez; SS'te ~%56 V)."""
-        ok = self.seen & ~bag_mask(self.core)
-        sidx = ok.nonzero()[:, 0]
-        spos = torch.full((VOCAB,), -1, dtype=torch.long, device=ok.device)
-        spos[sidx] = torch.arange(len(sidx), device=ok.device)
-        return sidx, spos
+        Secici yalniz bunlari puanlar (oteki kelimeler zaten secilemez; SS'te ~%56 V).  seen / core degismedikce onbellekten
+        (adimda senkron yok)."""
+        key = (self.seen._version, self.core._version, self.seen.device)
+        if getattr(self, "_selectable", (None,))[0] != key:
+            ok = self.seen & ~bag_mask(self.core)
+            sidx = ok.nonzero()[:, 0]
+            spos = torch.full((VOCAB,), -1, dtype=torch.long, device=ok.device)
+            spos[sidx] = torch.arange(len(sidx), device=ok.device)
+            self._selectable = (key, sidx, spos)
+        return self._selectable[1:]
 
     def scores(self, h, E, sidx):
         """h (n, d) -> puan (n, |sidx|) fp32; matmul bf16, autocast'ten bagimsiz."""
@@ -191,11 +195,14 @@ class Bag(torch.nn.Module):
         bag, word = key // VOCAB, key % VOCAB
         rank = torch.arange(len(key), device=dev) - torch.searchsorted(bag, bag)
         keep = rank < R
-        plist = torch.full((n, R), -1, dtype=torch.long, device=dev)
-        plist[bag[keep], rank[keep]] = word[keep]
-        pbit = torch.zeros(n, VOCAB, dtype=torch.bool, device=dev)
-        pbit[bag[keep], word[keep]] = True
-        n_p = torch.bincount(bag[keep], minlength=n)
+        bk = torch.where(keep, bag, n)                                        # kesilenler artik satira (n): senkronsuz
+        plist = torch.full((n + 1, R), -1, dtype=torch.long, device=dev)
+        plist[bk, rank.clamp_max(R - 1)] = word
+        plist = plist[:n]
+        pfull = torch.zeros(n + 1, VOCAB, dtype=torch.bool, device=dev)
+        pfull[bk, word] = True
+        pbit = pfull[:n]
+        n_p = torch.zeros(n + 1, dtype=torch.long, device=dev).index_add_(0, bk, torch.ones_like(bk))[:n]
         allowed = self.seen & ~bag_mask(self.core) & ~pbit
         sidx, spos = self.selectable()
         kk = min(R, len(sidx))                                                # secilebilir < R: kalan yerler bos (-1)
@@ -209,17 +216,21 @@ class Bag(torch.nn.Module):
         j = torch.arange(R, device=dev)[None]
         cand_r = torch.where(j < n_p[:, None], plist, lw.gather(1, (j - n_p[:, None]).clamp_min(0)))
         ok_r = cand_r >= 0
-        inbag = pbit.clone()
-        inbag[:, self.core] = True
-        rows_, cols_ = ok_r.nonzero(as_tuple=True)
-        inbag[rows_, cand_r[rows_, cols_]] = True
+        inb = pfull.clone()
+        inb[:, self.core] = True
+        inb[torch.where(ok_r, torch.arange(n, device=dev)[:, None], n), cand_r.clamp_min(0)] = True
+        inbag = inb[:n]
         return dict(inbag=inbag, pbit=pbit, cand_r=cand_r, ok_r=ok_r, score=score, sidx=sidx, spos=spos, allowed=allowed,
                     p_over=(~keep).sum(), h=h, E=E)
 
-    def batch_select(self, batch, h, E):
-        """PackedBatch, h (B, T, d) -> select'in ciktisi + ids (B, T), rows, cols."""
-        ids, rows, cols = bag_index(batch)
-        sel = self.select(h[rows, cols], E, bag_copy(batch, ids, rows, cols, bag_mask(self.core)))
+    def batch_select(self, batch, h, E, plan=None):
+        """PackedBatch, h (B, T, d) -> select'in ciktisi + ids (B, T), rows, cols.  plan: bag_plan (yoksa burada kurulur)."""
+        if plan is None:
+            ids, rows, cols = bag_index(batch)
+            pairs = bag_copy(batch, ids, rows, cols, bag_mask(self.core))
+        else:
+            ids, rows, cols, pairs = plan["ids"], plan["rows"], plan["cols"], plan["pairs"]
+        sel = self.select(h[rows, cols], E, pairs)
         return dict(sel, ids=ids, rows=rows, cols=cols)
 
     def select_one(self, h, E, past):
@@ -230,20 +241,20 @@ class Bag(torch.nn.Module):
 
     def selector_loss(self, sel, bag, y, keep=None):
         """Secici kaybi (belge 54 s4.1, token basina havuz): izinli (C u P_k disi, gorulmus) hedeflerde -log softmax_izinli
-        (puan)[y] -> (toplam, sayi).  keep (n,) bool: kayip yalniz bu torbalarda (--bag_sel_frac; secim butun torbalarda).
-        Puan gradyanla yalniz kayba giren torbalar icin yeniden hesaplanir (secimin buyuk puan tensoru geri yayilmaz)."""
+        (puan)[y] -> (toplam, sayi).  keep (indeks): kayip yalniz bu torbalarda (--bag_sel_frac; secim butun torbalarda);
+        verilirse bag / y zaten suzulmus (izinli, keep torbalarinda; bag_train_loss senkronsuz suzer).  Puan gradyanla yalniz
+        kayba giren torbalar icin yeniden hesaplanir (secimin buyuk puan tensoru geri yayilmaz)."""
         n, dev = len(sel["h"]), bag.device
-        if keep is None:
-            rows, hs, pb = torch.arange(n, device=dev), sel["h"], sel["pbit"][:, sel["sidx"]]
-        else:
-            rows = keep.nonzero()[:, 0]
-            hs, pb = sel["h"][rows], sel["pbit"][rows][:, sel["sidx"]]
+        rows = torch.arange(n, device=dev) if keep is None else keep
+        hs, pb = sel["h"][rows], sel["pbit"][rows][:, sel["sidx"]]
         rmap = torch.full((n,), -1, dtype=torch.long, device=dev)
         rmap[rows] = torch.arange(len(rows), device=dev)
-        m = sel["allowed"][bag, y] & (rmap[bag] >= 0)
-        b, t = rmap[bag[m]], sel["spos"][y[m]]                                # izinli => secilebilir (spos >= 0)
+        if keep is None:
+            m = sel["allowed"][bag, y]
+            bag, y = bag[m], y[m]
+        b, t = rmap[bag], sel["spos"][y]                                      # izinli => secilebilir (spos >= 0)
         s = self.scores(hs, sel["E"], sel["sidx"]).masked_fill(pb, float("-inf"))
-        return (s.logsumexp(1)[b] - s[b, t]).sum(), m.sum()
+        return (s.logsumexp(1)[b] - s[b, t]).sum(), torch.tensor(len(b), device=dev)
 
 
 def attach_bag(model, k, n_core):
@@ -294,19 +305,32 @@ def _compiled(name, fn, h, dynamic=False):
     return _COMPILED[name]
 
 
-def bag_train_loss(model, batch, h, full, weight, timer=None):
+def bag_plan(batch, flags, core):
+    """Torbanin yalniz batch'e bagli kismi (modelden bagimsiz) -> dict: ids, rows, cols, pairs (bag_copy), start (host
+    liste: torba baslari + toplam konum), keep (secici kaybina giren torbalar, indeks).  Egitimde CPU'da batch'le kurulur
+    ve cihaza kopyalanir (adimda senkron yok); verilmezse bag_train_loss cihazda kurar.  flags: bag_full_mask (uint8)."""
+    ids, rows, cols = bag_index(batch)
+    T = batch.kind.shape[1]
+    start = torch.cat([rows * T + cols, rows.new_tensor([batch.kind.numel()])])
+    keep = ((flags.to(start.device) & 2) > 0)[start[:-1]].nonzero()[:, 0]
+    return dict(ids=ids, rows=rows, cols=cols, pairs=bag_copy(batch, ids, rows, cols, bag_mask(core.to(ids.device))),
+                start=start.tolist(), keep=keep)
+
+
+def bag_train_loss(model, batch, h, full, weight, timer=None, plan=None):
     """Egitimin hizli yolu (torbali model).  h (B, T, d), full (B * T,) tam softmax payi -> (amac, nll, ek).  nll = iki
     asamali dagilimin ortalama NLL'i (output_logprobs ile ayni; sinav tanimi): BAG_GROUP ardisik torbanin aday birlesimi U'ya
     tek matmul + konum maskesi (E'den U'lar tek toplamayla), tam sozluk yalniz kacan + pay satirlarinda (BAG_CHUNK).  amac = nll + pay
-    satirlarinin tam CE toplami / gecerli hedef + weight x secici kaybi.  Tek GPU senkronu (dilim sayilari).  timer: secici
-    suresi icin iki CUDA olayi."""
+    satirlarinin tam CE toplami / gecerli hedef + weight x secici kaybi.  plan: bag_plan (CPU'da kurulmus, cihazda); varsa
+    adimda tek GPU senkronu (|U_g|, satir sayilari; indeksler nonzero_static).  timer: secici suresi icin iki CUDA olayi."""
     bag, E, dev = model.bag, model.E.weight, h.device
     flags = full.to(torch.uint8) | 2 if full.dtype == torch.bool else full   # bool: yalniz tam pay (secici kaybi her torbada)
     full = (flags & 1).bool()
-    T = batch.kind.shape[1]
+    if plan is None:
+        plan = bag_plan(batch, flags, bag.core)
     if timer is not None:
         timer[0].record()
-    sel = bag.batch_select(batch, h, E)
+    sel = bag.batch_select(batch, h, E, plan)
     if timer is not None:
         timer[1].record()
     hf, tgt, idf = h.flatten(0, 1), batch.target.flatten(), sel["ids"].flatten()
@@ -314,16 +338,22 @@ def bag_train_loss(model, batch, h, full, weight, timer=None):
     y = tgt.clamp_min(0)
     inb = sel["inbag"][idf, y] & valid
     miss, full = valid & ~inb, full & valid
-    n = len(sel["rows"])
+    st, keep = plan["start"], plan["keep"]
+    n = len(st) - 1
     core = bag.core
     inbag = sel["inbag"]
-    # Torbalar duz konum sirasinda ardisik: grup g = torbalar [b0, b1) = konumlar [start[b0], start[b1]).
-    start = torch.cat([sel["rows"] * T + sel["cols"], torch.tensor([len(hf)], device=dev)])
+    # Torbalar duz konum sirasinda ardisik: grup g = torbalar [b0, b1) = konumlar [st[b0], st[b1]).
     groups = list(range(0, n, BAG_GROUP)) + [n]
     ng = len(groups) - 1
-    nz = torch.stack([inbag[b0:b1].any(0) for b0, b1 in zip(groups[:-1], groups[1:])]).nonzero()   # (grup, kelime)
-    host = torch.cat([start[groups], torch.bincount(nz[:, 0], minlength=ng)]).tolist()  # tek senkron: sinirlar + |U_g|
-    bounds, sizes = host[:ng + 1], host[ng + 1:]
+    bounds = [st[g] for g in groups]
+    any_u = torch.stack([inbag[b0:b1].any(0) for b0, b1 in zip(groups[:-1], groups[1:])])   # (grup, kelime)
+    rmap = torch.full((n,), -1, dtype=torch.long, device=dev)
+    rmap[keep] = torch.arange(len(keep), device=dev)
+    sel_m = valid & sel["allowed"][idf, y] & (rmap[idf] >= 0)                # secici kaybina giren hedefler
+    rowm = miss | full
+    host = torch.cat([any_u.sum(1), rowm.sum()[None], sel_m.sum()[None]]).tolist()   # TEK senkron
+    sizes, n_rows, n_sel = host[:ng], host[ng], host[ng + 1]
+    nz = torch.nonzero_static(any_u, size=sum(sizes))
     Us = torch.split(nz[:, 1], sizes)
     # Parcalar split ile (geri: tek birlestirme).  Dilim / indeks geri yayilimi her parca icin tam boy sifir gradyan acar
     # (7 Ekim kisa profil: SliceBackward + add_ + fill_ ~24 ms/adim).
@@ -341,7 +371,7 @@ def bag_train_loss(model, batch, h, full, weight, timer=None):
         a, b = _compiled("bag_group", _bag_group, h, True)(h_parts[g], e_parts[g], mem, upos[y[s0:s1]], so_parts[g],
                                                             valid[s0:s1])
         term, p_other = term + a, p_other + b
-    rows = (miss | full).nonzero()[:, 0]
+    rows = torch.nonzero_static(rowm, size=n_rows)[:, 0]
     pad = -len(rows) % BAG_CHUNK
     ok = torch.cat([torch.ones_like(rows, dtype=torch.bool), torch.zeros(pad, dtype=torch.bool, device=dev)])
     rows = torch.cat([rows, rows.new_zeros(pad)])
@@ -351,7 +381,8 @@ def bag_train_loss(model, batch, h, full, weight, timer=None):
         i, k = rows[r:r + BAG_CHUNK], ok[r:r + BAG_CHUNK]
         o, f = _compiled("bag_full", _bag_full, h)(hr[c], E, y[i], sel["inbag"][idf[i]], miss[i] & k, full[i] & k)
         term, full_sum = term + o, full_sum + f
-    ls, n_s = bag.selector_loss(sel, idf[valid], y[valid], ((flags & 2) > 0)[start[:-1]])
+    pos_s = torch.nonzero_static(sel_m, size=n_sel)[:, 0]
+    ls, n_s = bag.selector_loss(sel, idf[pos_s], y[pos_s], keep)
     n_valid = valid.sum().clamp_min(1)
     nll = term / n_valid
     goal = nll + full_sum / n_valid + weight * ls / n_s.clamp_min(1)

@@ -235,9 +235,9 @@ def _attn(batch, mask_fn, cuda):
     return R.block_mask(batch, mask_fn) if cuda else R.dense_mask(batch, mask_fn)
 
 
-def _step(model, batch, mask_fn, opt, cuda, full=None, weight=0.0, timer=None):
+def _step(model, batch, mask_fn, opt, cuda, full=None, weight=0.0, timer=None, plan=None):
     """Tek egitim adimi -> (kayip, gradyan normu, torba ekleri ya da None) cihazda.  full: torbali modelde tam softmax payi
-    -> recipe.bag_train_loss (kayip = iki asamali NLL; amac + secici kaybi; tek senkron).  timer: dort CUDA olayi, cikis
+    -> recipe.bag_train_loss (kayip = iki asamali NLL; amac + secici kaybi; plan: recipe.bag_plan, tek senkron).  timer: dort CUDA olayi, cikis
     kalemi ve icindeki secici (yalniz ileri)."""
     with torch.autocast(batch.tokens.device.type, dtype=torch.bfloat16, enabled=cuda):
         h = model._batch_hidden(batch, _attn(batch, mask_fn, cuda))
@@ -247,7 +247,7 @@ def _step(model, batch, mask_fn, opt, cuda, full=None, weight=0.0, timer=None):
             loss = goal = R.output_loss(h.flatten(0, 1), model.E.weight, batch.target.flatten())
             extra = None
         else:
-            goal, loss, extra = R.bag_train_loss(model, batch, h, full, weight, timer and timer[2:])
+            goal, loss, extra = R.bag_train_loss(model, batch, h, full, weight, timer and timer[2:], plan)
         if timer is not None:
             timer[1].record()
     opt.zero_grad(set_to_none=True)
@@ -263,6 +263,15 @@ def _to_device(batch, dev):
         return batch
     return D.PackedBatch(**{f.name: getattr(batch, f.name).pin_memory().to(dev, non_blocking=True)
                             for f in dataclasses.fields(batch)})
+
+
+def _to_device_bag(full, plan, dev):
+    """Torba payi ve recipe.bag_plan tensorleri -> cihaz (CUDA'da sabitlenmis bellekten non_blocking)."""
+    if full is None or dev.type != "cuda":
+        return full, plan
+    mv = lambda t: t.pin_memory().to(dev, non_blocking=True)
+    return mv(full), dict(plan, ids=mv(plan["ids"]), rows=mv(plan["rows"]), cols=mv(plan["cols"]), keep=mv(plan["keep"]),
+                          pairs=tuple(mv(p) for p in plan["pairs"]))
 
 
 class _Exam:
@@ -390,7 +399,7 @@ def main(argv=None):
     assert len(story_bytes) == valid.n, "valid_bytes hikaye sayisi valid ile ayni degil"
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(os.path.join(args.stream, "gpt2", "tokenizer.json"))
-    bag = dict(NO_BAG)
+    bag, core_cpu = dict(NO_BAG), None
     if args.bag_k:                                                       # C sayimdan (belge 55 O1)
         cpath = os.path.join(args.data, "train_token_counts.npy")
         if not os.path.exists(cpath):
@@ -398,6 +407,7 @@ def main(argv=None):
         counts = np.load(cpath)
         core = R.core_ids(counts, args.bag_core)
         args.bag_n_core = len(core)
+        core_cpu = torch.as_tensor(core)
         bag = dict(bag_k=args.bag_k, bag_core=args.bag_core, bag_weight=args.bag_weight, bag_full_frac=args.bag_full_frac,
                    bag_sel_frac=args.bag_sel_frac,
                    bag_core_sha256=hashlib.sha256(core.tobytes()).hexdigest())
@@ -494,9 +504,10 @@ def main(argv=None):
         rows, real = rows_of(step)
         b = D.build_batch(train, rows, layout, "cpu", row_len)
         if not args.bag_k:
-            return b, real, None
+            return b, real, None, None
         rng = np.random.default_rng(np.random.SeedSequence(args.seed, spawn_key=(step,)))   # adim tohumlu: surdurmede ayni
-        return b, real, R.bag_full_mask(b.target.numpy(), args.bag_full_frac, rng, args.bag_sel_frac)
+        full = R.bag_full_mask(b.target.numpy(), args.bag_full_frac, rng, args.bag_sel_frac)
+        return b, real, full, R.bag_plan(b, full, core_cpu)                # torba yapisi CPU'da (adimda senkron yok)
 
     def save(dir_, step):
         R.Checkpoint.save(dir_, model, opt, step, plan_meta, history, ident)
@@ -514,10 +525,10 @@ def main(argv=None):
         lr = R.wsd_lr(step, total, args.lr, decay=DECAY)
         for g in opt.param_groups:
             g["lr"] = lr
-        batch, real, full = nxt
+        batch, real, full, plan = nxt
         timer = tuple(torch.cuda.Event(enable_timing=True) for _ in range(4)) if cuda else None
-        full = None if full is None else full.pin_memory().to(dev, non_blocking=True) if cuda else full
-        loss, gn, extra = _step(model, _to_device(batch, dev), mask_fn, opt, cuda, full, args.bag_weight, timer)
+        full, plan = _to_device_bag(full, plan, dev)
+        loss, gn, extra = _step(model, _to_device(batch, dev), mask_fn, opt, cuda, full, args.bag_weight, timer, plan)
         nxt = cpu_batch(step + 1) if step + 1 < total else None          # GPU calisirken hazirlanir
         win["loss"] += loss
         win["gn"] += gn
