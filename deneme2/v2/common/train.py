@@ -4,8 +4,10 @@
 Adim (belge 24 s9):  attn = recipe.block_mask(batch, mask_fn) (CPU'da dense_mask: FlexAttention CPU'da geri yayilim
 yapmiyor); h = model._batch_hidden(batch, attn); kayip = recipe.output_loss(h, E, hedef).  bf16 autocast ve bloklarda
 compile(dynamic=False) CUDA'da; clip 1,0; AdamW (0,9 / 0,95, wd 0,1; CUDA'da fused), recipe.param_groups, recipe.wsd_lr.
---optimizer muon: bloklarin 2-B matrisleri torch.optim.Muon'a (adjust_lr_fn match_rms_adamw: guncelleme RMS'i AdamW'ninki,
-ayni --lr ve wd; liu2025_muonscalable), geri kalan ayni AdamW'ye; wsd_lr ikisine.  Muon yoksa kosu baslamadan DURUR.
+--optimizer muon (varsayilan; kullanici, 7 Ekim: "Muon da varsayılan olsun"): bloklarin 2-B matrisleri torch.optim.Muon'a
+(adjust_lr_fn match_rms_adamw: guncelleme RMS'i AdamW'ninki, ayni --lr ve wd; liu2025_muonscalable), geri kalan ayni
+AdamW'ye; wsd_lr ikisine.  Muon yoksa kosu baslamadan DURUR.  --lr zorunlu; Muon icin olculen 2e-3 (belge 39 kisa tarama
+5e-4 / 1e-3 / 2e-3 + 1 epok, OLCULENLER_z).  --optimizer adamw: eski tarif (olculen lr 5e-4).
 Veri: BATCH_ROWS satir x row_len (plan dosyasindan); epok 1 <data>/train_pack_plan_e1.npz, sonrakiler pack_plan(seed,
 epok).  --local: ham akisin yerel kopyasi (yalniz onbellek; sha256 = <split>_boundaries.json'daki).
 Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunluk sinirinda, epok sonunda ve bitiste;
@@ -21,12 +23,13 @@ Model Z varsayilani ogrenilen z (belge 35 (b); kullanici, 7 Ekim: "Şu an en iyi
 surdurulmez / uzatilmaz (kullanici, 6 Ekim: "eski koşuları uzatma niyetim yok"); okumada (_archived) eski transformer ve
 eski own_vocab Model Z yuklenir, oteki eski Model Z'ler durur.  Eski kod: git etiketi v2-before-cleanup-20261006.
 --global_layers N (belge 40 s6.2 Deney G; yalniz Model Z learned_z): son N blok tam causal, gercek hikaye konumuyla;
-maske ikilisi (yerel, global) _attn'dan, egitim / sinav / teshis ayni yol.
+maske ikilisi (yerel, global) _attn'dan, egitim / sinav / teshis ayni yol.  Varsayilan (belge 43; on kayit tuttu, 7 Ekim):
+model_z + learned_z 1 -> 1, oteki -> 0; --global_layers 0: G'siz Model Z (kiyas).  Eski checkpoint'te alan yoksa 0.
 
     python train.py --model transformer|model_z --lr LR --out <kosu> [--data <v2/simplestories_gpt2>]
                     [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
                     [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1] [--learned_z 0|1 (model_z; varsayilan 1)]
-                    [--optimizer adamw|muon] [--global_layers N (model_z learned_z; varsayilan 0)]
+                    [--optimizer muon|adamw (varsayilan muon)] [--global_layers N (model_z learned_z; varsayilan 1)]
 """
 import torch  # noqa: I001  (Windows: torch once)
 
@@ -301,7 +304,8 @@ def _git():
 def _args(argv):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--model", required=True, choices=("transformer", "model_z"))
-    ap.add_argument("--lr", type=float, required=True, help="tepe lr (WSD)")
+    ap.add_argument("--lr", type=float, required=True,
+                    help="tepe lr (WSD); olculen: muon 2e-3, adamw 5e-4 (belge 39, OLCULENLER_z)")
     ap.add_argument("--out", required=True, help="kosu klasoru")
     ap.add_argument("--data", default="/content/drive/MyDrive/v2/simplestories_gpt2", help="sinir ve plan dosyalari")
     ap.add_argument("--stream", default="/content/drive/MyDrive/simplestories", help="gpt2/{train,valid}.npy kok")
@@ -317,15 +321,19 @@ def _args(argv):
     ap.add_argument("--learned_z", type=int, default=None, choices=(0, 1),
                     help="model_z: 1 (varsayilan) z ogrenilir (belge 35 (b)): Z_k girdisi E(END), Z_k kendi cumlesini "
                          "okur; 0 formullu z.  transformer: 0")
-    ap.add_argument("--optimizer", default="adamw", choices=("adamw", "muon"),
-                    help="muon: bloklarin 2-B matrisleri Muon'a (match_rms_adamw, ayni --lr), geri kalan AdamW'ye")
-    ap.add_argument("--global_layers", type=int, default=0,
-                    help="model_z learned_z: son N blok tam causal, gercek konumla (belge 40 s6.2 Deney G)")
+    ap.add_argument("--optimizer", default="muon", choices=("adamw", "muon"),
+                    help="muon (varsayilan, 7 Ekim): bloklarin 2-B matrisleri Muon'a (match_rms_adamw, ayni --lr), geri "
+                         "kalan AdamW'ye; adamw: tek AdamW")
+    ap.add_argument("--global_layers", type=int, default=None,
+                    help="model_z learned_z: son N blok tam causal, gercek konumla (belge 40 s6.2 Deney G); varsayilan "
+                         "model_z + learned_z 1'de 1, oteki 0; 0: G'siz Model Z")
     ap.add_argument("--checkpoint_minutes", type=float, default=10,
                     help="en cok bu kadar duvar saati kaybi (sinav dahil); surdurmede degistirilebilir")
     args = ap.parse_args(argv)
     if args.learned_z is None:
         args.learned_z = int(args.model == "model_z")
+    if args.global_layers is None:                                       # belge 43: G varsayilan (7 Ekim)
+        args.global_layers = int(args.model == "model_z" and args.learned_z == 1)
     return args
 
 

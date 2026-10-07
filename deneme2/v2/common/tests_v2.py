@@ -708,7 +708,8 @@ def t_train():
     TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=3, max_tokens=4)
     base = ["--data", data, "--stream", root, "--device", "cpu", "--d", "16", "--layers", "1", "--heads", "2",
-            "--lr", "1e-2", "--checkpoint_minutes", "0"]                # 0: her gunluk sinirinda kayit
+            "--lr", "1e-2", "--checkpoint_minutes", "0", "--optimizer", "adamw"]   # 0: her gunluk sinirinda kayit;
+    # AdamW sabit (varsayilan muon, 7 Ekim); Muon testleri acikca muon, varsayilan testleri _unpin(base)
     out = lambda name: os.path.join(TMP, "runs", name)  # noqa: E731
     state = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
     same = lambda a, b: all(torch.equal(a[k], b[k]) for k in a) and a.keys() == b.keys()  # noqa: E731
@@ -952,7 +953,7 @@ def _train_learned(base, root, data, out, state, same, exits, TR):
     import traceback
     import recipe as R
     try:
-        cmd = base + ["--model", "model_z", "--learned_z", "1"]
+        cmd = base + ["--model", "model_z", "--learned_z", "1", "--global_layers", "0"]          # G'siz learned_z
         A = out("mzl_A")
         a = TR.main(cmd + ["--epochs", "2", "--out", A])
         L = [w["loss"] for w in a["log"]]
@@ -1008,7 +1009,7 @@ def _train_muon(base, root, data, out, state, same, exits, TR):
         st = D.TokenStories(root, data, "train")
         mats = {"blocks.*.%s.weight" % k: 1 for k in ("qkv", "proj", "gate_up", "down")}
         for model, adamw_run in (("transformer", "transformer_A"), ("model_z", "mzl_A")):
-            cmd = base + ["--model", model, "--optimizer", "muon"]
+            cmd = base + ["--model", model, "--optimizer", "muon", "--global_layers", "0"]   # AdamW kosusuyla ayni model
             A = out("muon_%s_A" % model)
             a = TR.main(cmd + ["--epochs", "2", "--out", A])
             L = [w["loss"] for w in a["log"]]
@@ -1060,9 +1061,14 @@ def _train_muon(base, root, data, out, state, same, exits, TR):
             msg = _exit_msg(TR.main, base + ["--model", "transformer", "--optimizer", "muon", "--out", out("nomuon")])
         finally:
             torch.optim.Muon = real
-        check("train: torch.optim.Muon yoksa --optimizer muon veri yuklenmeden DURUR (AdamW'ye dusmez); varsayilan adamw",
-              msg is not None and "Muon" in msg and not os.path.exists(out("nomuon"))
-              and TR._args(base + ["--model", "model_z", "--out", "x"]).optimizer == "adamw", str(msg))
+        try:
+            del torch.optim.Muon
+            msg2 = _exit_msg(TR.main, _unpin(base) + ["--model", "transformer", "--out", out("nomuon_default")])
+        finally:
+            torch.optim.Muon = real
+        check("train: torch.optim.Muon yoksa --optimizer muon ve varsayilan (muon) veri yuklenmeden DURUR (AdamW'ye dusmez)",
+              msg is not None and "Muon" in msg and not os.path.exists(out("nomuon")) and msg2 is not None and "Muon" in msg2
+              and not os.path.exists(out("nomuon_default")), str(msg))
     except Exception:  # noqa: BLE001
         check("train --optimizer muon", False, traceback.format_exc(limit=3))
 
@@ -1104,7 +1110,8 @@ def _train_global(base, root, data, out, exits, TR):
         check("train: transformer / formullu Model Z + --global_layers ve N > katman veri yuklenmeden DURUR; "
               "global_layers farkiyla surdurme (1 -> 0, 0 -> 1) checkpoint yuklenmeden DURUR, dosyalara dokunulmaz",
               all(exits(c) and not os.path.exists(c[-1]) for c in gone)
-              and exits(base + ["--model", "model_z", "--layers", "2", "--epochs", "2", "--out", A, "--resume", "1"])
+              and exits(base + ["--model", "model_z", "--layers", "2", "--global_layers", "0", "--epochs", "2", "--out", A,
+                                "--resume", "1"])
               and exits(base + ["--model", "model_z", "--learned_z", "1", "--global_layers", "1", "--epochs", "2",
                                 "--out", out("mzl_A"), "--resume", "1"])
               and mt == [os.path.getmtime(os.path.join(p, "checkpoint.pt")) for p in (A, out("mzl_A"))])
@@ -1113,12 +1120,30 @@ def _train_global(base, root, data, out, exits, TR):
         pack = torch.load(os.path.join(old, "checkpoint.pt"), weights_only=False)
         del pack["args"]["global_layers"]
         torch.save(pack, os.path.join(old, "checkpoint.pt"))
-        c = base + ["--model", "model_z", "--learned_z", "1", "--epochs", "2", "--out", old, "--resume", "1"]
+        c = base + ["--model", "model_z", "--learned_z", "1", "--global_layers", "0", "--epochs", "2", "--out", old,
+                    "--resume", "1"]
         r = _exit_msg(TR.main, c)
         check("train: global_layers alani olmayan checkpoint 0 sayilir (bitmis kosu olarak durur), 1 ile DURUR",
               r is None and exits(c + ["--global_layers", "1"]), str(r))
+        dflt = {k: (lambda x: (x.global_layers, x.optimizer))(TR._args(_unpin(base) + a + ["--out", "x"])) for k, a in (
+            ("model_z", ["--model", "model_z"]), ("model_z learned_z 0", ["--model", "model_z", "--learned_z", "0"]),
+            ("transformer", ["--model", "transformer"]), ("model_z acik 0", ["--model", "model_z", "--global_layers", "0"]),
+            ("model_z adamw", ["--model", "model_z", "--optimizer", "adamw"]))}
+        idt = TR.main(_unpin(base) + ["--model", "model_z", "--layers", "2", "--steps", "3", "--out", out("g_default")])["identity"]
+        check("train: varsayilanlar (7 Ekim): global_layers model_z (learned_z 1) 1, learned_z 0 ve transformer 0, acik 0 "
+              "aynen (belge 43); optimizer iki modelde muon, acik adamw aynen; varsayilan model_z kosusu kimlikte "
+              "(global_layers 1, muon, learned_z 1)", dflt == {
+                  "model_z": (1, "muon"), "model_z learned_z 0": (0, "muon"), "transformer": (0, "muon"),
+                  "model_z acik 0": (0, "muon"), "model_z adamw": (1, "adamw")}
+              and (idt["global_layers"], idt["optimizer"], idt["learned_z"]) == (1, "muon", 1), str(dflt))
     except Exception:  # noqa: BLE001
         check("train --global_layers", False, traceback.format_exc(limit=3))
+
+
+def _unpin(argv):
+    """argv'den --optimizer ciftini cikarir (varsayilan sinamasi)."""
+    i = argv.index("--optimizer")
+    return argv[:i] + argv[i + 2:]
 
 
 def _exit_msg(fn, *a):

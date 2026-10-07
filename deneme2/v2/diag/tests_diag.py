@@ -50,7 +50,7 @@ def t_readings():
     sha = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()  # noqa: E731
     variants = [("transformer", []), ("model_z", ["--learned_z", "0"])]
     if T2._learned_z_ready():
-        variants.append(("model_z_learned", ["--learned_z", "1"]))       # belge 35 (b); load_run kimlikten okur
+        variants.append(("model_z_learned", ["--learned_z", "1", "--global_layers", "0"]))   # belge 35 (b), G'siz
         variants.append(("model_z_global", ["--learned_z", "1", "--layers", "2", "--global_layers", "1"]))  # belge 40 G
     else:
         print("BEKLIYOR readings: learned_z modeli yok", flush=True)
@@ -59,7 +59,7 @@ def t_readings():
             model = "transformer" if name == "transformer" else "model_z"
             run = os.path.join(T2.TMP, "runs_readings", name)
             TR.main(base + ["--model", model, "--d", "16", "--layers", "1", "--heads", "2", "--lr", "1e-2", "--steps", "6",
-                            "--out", run, "--checkpoint_minutes", "0"] + extra)
+                            "--out", run, "--checkpoint_minutes", "0", "--optimizer", "adamw"] + extra)
             before = {n: (sha(os.path.join(run, n)), os.path.getmtime(os.path.join(run, n))) for n in TR.OUTPUTS}
             r = GR.main(base + ["--out", run, "--prompts", same_prompts])
             sj = json.load(open(os.path.join(run, "samples.json"), encoding="utf-8"))
@@ -142,12 +142,12 @@ def t_tools():
     base = ["--data", data, "--stream", root]
     runs = {}
     try:
-        for name, extra in (("transformer", []), ("model_z", ["--learned_z", "0"]), ("model_z_learned", ["--learned_z", "1"]),
+        for name, extra in (("transformer", []), ("model_z", ["--learned_z", "0"]), ("model_z_learned", ["--learned_z", "1", "--global_layers", "0"]),
                             ("model_z_global", ["--learned_z", "1", "--layers", "2", "--global_layers", "1"])):
             run = os.path.join(T2.TMP, "runs_tools", name)
             TR.main(base + ["--device", "cpu", "--model", "transformer" if name == "transformer" else "model_z", "--d", "16",
                             "--layers", "1", "--heads", "2", "--lr", "1e-2", "--steps", "6", "--out", run,
-                            "--checkpoint_minutes", "0"] + extra)
+                            "--checkpoint_minutes", "0", "--optimizer", "adamw"] + extra)
             runs[name] = run
         exam = {n: json.load(open(os.path.join(r, "results.json"), encoding="utf-8"))["exam"]["loss"]
                 for n, r in runs.items()}
