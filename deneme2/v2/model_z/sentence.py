@@ -18,6 +18,9 @@ global_layers N (belge 40 s6.2 Deney G; train.py varsayilani 1, belge 43 s9): so
 ayni hikayenin butun onceki konumlari, kelime ve Z, gercek sirayla); konum GERCEK hikaye konumu (story_positions =
 transformer duzeninin pos'u; mantiksal konumda farkli cumlelerin token'lari ayni konumu paylasir, belge 40 Gorus 4).
 Ilk 8 - N blok bugunku gibi.  attn: (yerel, global) ikilisi; onbellek global bloklarda butun gecmisin K/V'sini tutar.
+
+Aday havuzu (torba; belge 53-55, adlar onayli 7 Ekim): bag_index, bag_copy, BagHead, bag_loss, bag_rank; A0 (donuk model,
+yalniz secici) diag/bag_report.py.  Egitime ve uretime henuz bagli degil.
 """
 import math
 import os
@@ -316,3 +319,71 @@ class SummaryCache:
         self.sen_k = [None] * len(self.sen_k)                               # Z_k'den SONRA
         self.sen_v = [None] * len(self.sen_v)
         return self.logits
+
+
+# Aday havuzu (torba; belge 53, 54, 55).  Konum q'nun torbasi: q'dan once (dahil) son ozet sutunu (BOS / ZTOK).  Hedefleri
+# o torbadan: Z_k'nin kendisi (cumle k+1'in ilk token'i ya da EOS) ve cumle k+1'in token'lari; BOS'unki ilk cumle.
+# B_k = C u P_k u L_k: C cekirdek (core, VOCAB bool), P_k bag_copy, L_k BagHead puan sirasi.
+
+def bag_index(batch):
+    """-> (ids (B, T) konumun torbasi, rows, cols): torbalar (ozet sutunlari) satir sirasiyla numaralanir."""
+    summ = (batch.kind == BOS) | (batch.kind == ZTOK)
+    assert bool((batch.kind[:, 0] == BOS).all()), "her satir BOS ile baslar"
+    ids = summ.flatten().long().cumsum(0).view_as(summ) - 1
+    rows, cols = summ.nonzero(as_tuple=True)
+    return ids, rows, cols
+
+
+def bag_copy(batch, ids, rows, cols, core):
+    """-> P (n_torba, VOCAB) bool: ayni hikayede torbanin sutunundan once gecen TOKEN'lar, core disi.  Sutun c'deki kelime
+    c'nin torbasinin hedefidir; P'ye ancak bir SONRAKI torbadan girer (sizinti yok).  ZTOK (token 0) ve BOS girmez
+    (belge 55 O2).  SS'te boy siniri yok (belge 55 D3)."""
+    T, n = batch.kind.shape[1], len(rows)
+    bag_key = rows * T + batch.doc[rows, cols].long()                     # satir ve hikaye; torba sirasinda artan
+    r, c = (batch.kind == TOKEN).nonzero(as_tuple=True)
+    v = batch.tokens[r, c]
+    keep = ~core[v]
+    r, c, v = r[keep], c[keep], v[keep]
+    key = r * T + batch.doc[r, c].long()
+    word_key, inv = torch.unique(key * VOCAB + v, return_inverse=True)
+    first = torch.full_like(word_key, n).scatter_reduce(0, inv, ids[r, c] + 1, "amin")    # ilk gorulmeden sonraki torba
+    last = torch.searchsorted(bag_key, word_key // VOCAB, right=True) - 1                  # hikayenin son torbasi
+    lens = last - first + 1
+    off = torch.arange(int(lens.sum()), device=lens.device) - torch.repeat_interleave(lens.cumsum(0) - lens, lens)
+    P = torch.zeros(n, VOCAB, dtype=torch.bool, device=batch.kind.device)
+    P[torch.repeat_interleave(first, lens) + off, torch.repeat_interleave(word_key % VOCAB, lens)] = True
+    return P
+
+
+class BagHead(torch.nn.Module):
+    """Secici (belge 53 s3, 54 s6): puan_k(v) = log sum_j exp(q_kj . sg(e_v)) + b_v (+ disaridan onsel log p_meaning),
+    q_kj = W_j h_k, h_k ozet sutununun son durumu.  e_v'ye gradyan gitmez (belge 54 s4.3).  SentenceTransformer'in
+    disinda kurulur: ana modelin ilk agirliklari ve RNG'si degismez (belge 55 K2)."""
+
+    def __init__(self, d, queries=1, bias=None):
+        super().__init__()
+        self.queries = int(queries)
+        self.q = torch.nn.Linear(d, self.queries * d, bias=False)
+        torch.nn.init.normal_(self.q.weight, std=0.02)
+        self.bias = torch.nn.Parameter(torch.zeros(VOCAB) if bias is None else torch.as_tensor(bias).float().clone())
+
+    def forward(self, h, E):
+        """h (n, d), E (VOCAB, d) -> puan (n, VOCAB) fp32 (autocast kapali: egitim / sinav / uretim ayni sira, belge 55 O5)."""
+        with torch.autocast(h.device.type, enabled=False):
+            q = self.q(h.float()).view(len(h), self.queries, -1)
+            return torch.einsum("njd,vd->njv", q, E.detach().float()).logsumexp(1) + self.bias
+
+
+def bag_loss(score, allowed, bag, y):
+    """Torba kaybi (belge 53 s4, 54 s4.1): sum -log softmax_{v izinli}(puan)[y] -> (toplam, hedef sayisi); ortalama cagiranda
+    token basina havuzlanir.  score / allowed (n, VOCAB) bir torba dilimi; bag (dilim ici) / y izinli hedefler."""
+    lse = score.masked_fill(~allowed, float("-inf")).logsumexp(1)
+    return (lse[bag] - score[bag, y]).sum(), len(y)
+
+
+def bag_rank(score, allowed, bag, y):
+    """Hedefin L sirasi (0'dan): izinli kelimelerden puani buyuk olanlar + esitlerden kelime no'su kucuk olanlar.  L_k'nin
+    ilk M'si hedefi yakalar <=> sira < M."""
+    s, sy = score[bag], score[bag, y][:, None]
+    v = torch.arange(score.shape[1], device=score.device)
+    return (allowed[bag] & ((s > sy) | ((s == sy) & (v < y[:, None])))).sum(1)
