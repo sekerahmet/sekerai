@@ -27,10 +27,17 @@ uzatma niyetim yok").
 (yerel, global) _attn'dan, egitim / sinav / teshis ayni yol.  Varsayilan (belge 43; on kayit tuttu, 7 Ekim): model_z 1,
 transformer 0; --global_layers 0: G'siz Model Z (kiyas).  Eski checkpoint'te alan yoksa 0.
 
+--bag_stage factor (C0, iki modelde; belge 53 s9, 54, 55; adlar onayli 7 Ekim): sabit torba B = C = train sayiminda en
+sik --bag_core + END + EOS (<data>/train_token_counts.npy; yoksa DUR), iki asamali olasilik (recipe.two_stage_logprobs,
+DIGER = bag_other); egitim recipe.two_stage_loss (C tek matmul; tam sozluk yalniz kacan konumlarda ve --bag_full_frac
+payinda, adim tohumlu).  Gunlukte loss = iki asamali NLL (sinavla ayni tanim), bag: kacan orani, ort p(DIGER), tam CE.
+Kimlikte bag_k = |B|.  observe / shape (secicili asamalar) henuz yok.
+
     python train.py --model transformer|model_z --lr LR --out <kosu> [--data <v2/simplestories_gpt2>]
                     [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
                     [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1]
                     [--optimizer muon|adamw (varsayilan muon)] [--global_layers N (model_z; varsayilan 1)]
+                    [--bag_stage factor --bag_core 2048 [--bag_full_frac 0.05]]
 """
 import torch  # noqa: I001  (Windows: torch once)
 
@@ -62,7 +69,8 @@ READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
 READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
-            "learned_z", "optimizer", "global_layers")
+            "learned_z", "optimizer", "global_layers", "bag_stage", "bag_core", "bag_k", "bag_full_frac", "bag_core_sha256")
+NO_BAG = dict(bag_stage=None, bag_core=0, bag_k=0, bag_full_frac=0.0, bag_core_sha256=None)   # torbasiz / eski kosu
 LEGACY = ("meaning_sha256", "shared_vocab", "own_vocab", "open_z")   # temizlik oncesi kimlik alanlari (belge 33)
 TAG = "v2-before-cleanup-20261006"
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
@@ -150,10 +158,25 @@ def _global_error(args):
     return None
 
 
+def _bag_error(args):
+    """Torba bayraklari kurulamiyorsa ileti, yoksa None (args'ta yoksa kapali)."""
+    stage, core = getattr(args, "bag_stage", None), int(getattr(args, "bag_core", 0) or 0)
+    if stage is None:
+        return "--bag_core yalniz --bag_stage ile" if core else None
+    if stage != "factor":
+        return "--bag_stage %s henuz yok (C0: factor; belge 53 s9)" % stage
+    if core <= 0:
+        return "--bag_stage factor: --bag_core > 0 olmali"
+    if not 0.0 <= args.bag_full_frac <= 1.0:
+        return "--bag_full_frac 0..1 olmali"
+    return None
+
+
 def _build(args, dev):
     """-> (model, mask_fn, layout).  Model dosyalari yalniz burada import edilir.  Model Z: ogrenilen z (belge 35 (b));
     global_layers (args'ta yoksa 0): mask_fn (yerel, global) ikilisi.  Maske kurali yalniz burada secilir (egitim, sinav,
-    teshis ayni yol)."""
+    teshis ayni yol).  bag_stage factor: ilk agirliklardan SONRA recipe.attach_bag(bag_k) (C'yi main yazar, yuklemede
+    state_dict)."""
     root = os.path.dirname(HERE)
     if _global_error(args):
         sys.exit("DUR: " + _global_error(args))
@@ -161,11 +184,15 @@ def _build(args, dev):
     if args.model == "transformer":
         sys.path.insert(0, os.path.join(root, "transformer"))
         from baseline import BaselineTransformer
-        return BaselineTransformer(args.d, args.layers, args.heads).to(dev), R.document_mask, "transformer"
-    sys.path.insert(0, os.path.join(root, "model_z"))
-    from sentence import SentenceTransformer
-    model = SentenceTransformer(args.d, args.layers, args.heads, global_layers=int(getattr(args, "global_layers", 0)))
-    return model.to(dev), model.mask_fn, "model_z"
+        model, mask_fn, layout = BaselineTransformer(args.d, args.layers, args.heads).to(dev), R.document_mask, "transformer"
+    else:
+        sys.path.insert(0, os.path.join(root, "model_z"))
+        from sentence import SentenceTransformer
+        model = SentenceTransformer(args.d, args.layers, args.heads, global_layers=int(getattr(args, "global_layers", 0)))
+        model, mask_fn, layout = model.to(dev), model.mask_fn, "model_z"
+    if getattr(args, "bag_stage", None) == "factor":
+        R.attach_bag(model, args.bag_k)
+    return model, mask_fn, layout
 
 
 def _muon_missing():
@@ -208,16 +235,27 @@ def _attn(batch, mask_fn, cuda):
     return R.block_mask(batch, mask_fn) if cuda else R.dense_mask(batch, mask_fn)
 
 
-def _step(model, batch, mask_fn, opt, cuda):
-    """Tek egitim adimi -> (kayip, gradyan normu) cihazda (senkron yok)."""
+def _step(model, batch, mask_fn, opt, cuda, bag=None, timer=None):
+    """Tek egitim adimi -> (kayip, gradyan normu, torba ekleri ya da None) cihazda (senkron yok).  bag: recipe.bag_rows
+    (satirlar, sayilar) -> recipe.two_stage_loss (kayip = iki asamali NLL; geri yayilan amac = NLL + tam softmax payi).
+    timer: cikis kaleminin ileri suresi icin iki CUDA olayi."""
     with torch.autocast(batch.tokens.device.type, dtype=torch.bfloat16, enabled=cuda):
         h = model._batch_hidden(batch, _attn(batch, mask_fn, cuda))
-        loss = R.output_loss(h.flatten(0, 1), model.E.weight, batch.target.flatten())
+        if timer is not None:
+            timer[0].record()
+        if bag is None:
+            loss = goal = R.output_loss(h.flatten(0, 1), model.E.weight, batch.target.flatten())
+            extra = None
+        else:
+            goal, loss, extra = R.two_stage_loss(h.flatten(0, 1), model.E.weight, model.bag_other,
+                                                 batch.target.flatten(), model.bag_core_ids, *bag)
+        if timer is not None:
+            timer[1].record()
     opt.zero_grad(set_to_none=True)
-    loss.backward()
+    goal.backward()
     gn = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
     opt.step()
-    return loss.detach(), gn.detach()
+    return loss.detach(), gn.detach(), extra
 
 
 def _to_device(batch, dev):
@@ -307,6 +345,11 @@ def _args(argv):
     ap.add_argument("--global_layers", type=int, default=None,
                     help="model_z: son N blok tam causal, gercek konumla (belge 40 s6.2 Deney G); varsayilan model_z'de "
                          "1, transformer'da 0; 0: G'siz Model Z")
+    ap.add_argument("--bag_stage", default=None, choices=("observe", "shape", "factor"),
+                    help="torba asamasi (belge 53 s9): factor = C0, sabit cekirdekli iki asamali cikis; yoksa tam softmax")
+    ap.add_argument("--bag_core", type=int, default=0, help="C: train sayiminda en sik N token (+ END + EOS)")
+    ap.add_argument("--bag_full_frac", type=float, default=0.05,
+                    help="factor: gecerli hedeflerin bu payinda tam softmax CE de eklenir (belge 54 s2.3 yol a)")
     ap.add_argument("--checkpoint_minutes", type=float, default=10,
                     help="en cok bu kadar duvar saati kaybi (sinav dahil); surdurmede degistirilebilir")
     args = ap.parse_args(argv)
@@ -319,8 +362,9 @@ def main(argv=None):
     args = _args(argv)
     t0 = time.time()
     log = lambda msg: print("[%7.1f sn] %s" % (time.time() - t0, msg), flush=True)  # noqa: E731
-    if _global_error(args):                                              # veri yuklenmeden
-        sys.exit("DUR: " + _global_error(args))
+    for err in (_global_error(args), _bag_error(args)):                  # veri yuklenmeden
+        if err:
+            sys.exit("DUR: " + err)
     if args.optimizer == "muon" and _muon_missing():                    # sessizce AdamW'ye dusulmez
         sys.exit("DUR: --optimizer muon: %s" % _muon_missing())
     dev = torch.device(args.device)
@@ -345,7 +389,20 @@ def main(argv=None):
     assert len(story_bytes) == valid.n, "valid_bytes hikaye sayisi valid ile ayni degil"
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(os.path.join(args.stream, "gpt2", "tokenizer.json"))
+    bag = dict(NO_BAG)
+    if args.bag_stage:                                                   # C0: C sayimdan (belge 55 O1)
+        cpath = os.path.join(args.data, "train_token_counts.npy")
+        if not os.path.exists(cpath):
+            sys.exit("DUR: %s yok (data.token_counts ile bir kez uretilir)" % cpath)
+        core = R.core_ids(np.load(cpath), args.bag_core)
+        in_core = np.zeros(D.VOCAB, bool)
+        in_core[core] = True
+        bag = dict(bag_stage=args.bag_stage, bag_core=args.bag_core, bag_k=len(core), bag_full_frac=args.bag_full_frac,
+                   bag_core_sha256=hashlib.sha256(core.tobytes()).hexdigest())
+    args.bag_k = bag["bag_k"]
     model, mask_fn, layout = _build(args, dev)
+    if args.bag_stage:
+        model.bag_core_ids.copy_(torch.as_tensor(core))
     if cuda:
         for block in model.blocks:
             block.compile(dynamic=False)
@@ -353,7 +410,7 @@ def main(argv=None):
     ident = dict(model=args.model, d=args.d, layers=args.layers, heads=args.heads, lr=args.lr, seed=args.seed,
                  longest=train.max_sentence_tokens, row_len=row_len, batch_rows=BATCH_ROWS,
                  train_stream_sha256=train.meta["stream_sha256"], learned_z=int(args.model == "model_z"),
-                 optimizer=args.optimizer, global_layers=args.global_layers)       # learned_z: eski kosu ayrimi
+                 optimizer=args.optimizer, global_layers=args.global_layers, **bag)   # learned_z: eski kosu ayrimi
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -374,7 +431,7 @@ def main(argv=None):
             sys.exit("DUR: temizlik oncesi kosu surdurulmez / uzatilmaz (kullanici, 6 Ekim); eski kod: git etiketi %s" % TAG)
         if _archived(was):                                                # formullu Model Z (belge 44)
             sys.exit("DUR: " + _archived(was))
-        was = {"learned_z": 0, "optimizer": "adamw", "global_layers": 0, **was}   # alanlardan onceki kosu
+        was = {"learned_z": 0, "optimizer": "adamw", "global_layers": 0, **NO_BAG, **was}   # alanlardan onceki kosu
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:
@@ -416,6 +473,9 @@ def main(argv=None):
     if args.global_layers:
         log("global_layers %d: son %d blok tam causal (model_z_global_mask), gercek hikaye konumu" % (
             args.global_layers, args.global_layers))
+    if args.bag_stage:
+        log("torba %s: |B| = %d (en sik %d + END + EOS), tam softmax payi %g, dilim %d" % (
+            args.bag_stage, bag["bag_k"], args.bag_core, args.bag_full_frac, R.BAG_CHUNK))
     for k, g in opt_info["split"].items():
         if g["tensors"]:
             log("optimizer %s | %s: %d tensor, %d parametre | %s" % (args.optimizer, k, g["tensors"], g["params"],
@@ -431,7 +491,16 @@ def main(argv=None):
 
     def cpu_batch(step):
         rows, real = rows_of(step)
-        return D.build_batch(train, rows, layout, "cpu", row_len), real
+        b = D.build_batch(train, rows, layout, "cpu", row_len)
+        if not args.bag_stage:
+            return b, real, None
+        rng = np.random.default_rng(np.random.SeedSequence(args.seed, spawn_key=(step,)))   # adim tohumlu: surdurmede ayni
+        return b, real, R.bag_rows(b.target.numpy(), in_core, args.bag_full_frac, rng)
+
+    def bag_to(rows):
+        if rows is None or not cuda:
+            return rows
+        return {k: v.pin_memory().to(dev, non_blocking=True) for k, v in rows[0].items()}, rows[1]
 
     def save(dir_, step):
         R.Checkpoint.save(dir_, model, opt, step, plan_meta, history, ident)
@@ -443,18 +512,25 @@ def main(argv=None):
     for step in range(start, total):
         if win is None:
             sw.start(step)
-            win = dict(step0=step, loss=torch.zeros((), device=dev), gn=torch.zeros((), device=dev), tokens=0)
+            win = dict(step0=step, loss=torch.zeros((), device=dev), gn=torch.zeros((), device=dev), tokens=0,
+                       p_other=torch.zeros((), device=dev), full=torch.zeros((), device=dev), miss=0, valid=0, n_full=0)
             if cuda:
                 torch.cuda.reset_peak_memory_stats()
         lr = R.wsd_lr(step, total, args.lr, decay=DECAY)
         for g in opt.param_groups:
             g["lr"] = lr
-        batch, real = nxt
-        loss, gn = _step(model, _to_device(batch, dev), mask_fn, opt, cuda)
+        batch, real, rows = nxt
+        timer = (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)) if cuda else None
+        loss, gn, extra = _step(model, _to_device(batch, dev), mask_fn, opt, cuda, bag_to(rows), timer)
         nxt = cpu_batch(step + 1) if step + 1 < total else None          # GPU calisirken hazirlanir
         win["loss"] += loss
         win["gn"] += gn
         win["tokens"] += real
+        if extra is not None:                                            # torba: sayilar CPU'da, toplamlar cihazda
+            win["p_other"] += extra["p_other"]
+            win["full"] += extra["full"]
+            win["miss"], win["valid"], win["n_full"] = (win[k] + rows[1][c] for k, c in (
+                ("miss", "miss"), ("valid", "valid"), ("n_full", "full")))
         done = step + 1
         epoch = int(np.searchsorted(bounds, step, "right"))               # 1'den
         epoch_end = done == bounds[epoch]
@@ -469,10 +545,19 @@ def main(argv=None):
                    ms_per_step=round(1000 * s["seconds"] / k, 1), tokens_per_sec=s["tokens_per_sec"], first=first_window,
                    peak_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2) if cuda else None,
                    peak_reserved_gb=round(torch.cuda.max_memory_reserved() / 1e9, 2) if cuda else None)
+        if cuda:                                                         # son adimin cikis kalemi, yalniz ileri
+            rec["out_fwd_ms"] = round(timer[0].elapsed_time(timer[1]), 2)
+        if args.bag_stage:                                               # kalibrasyon: p_other ~ miss_rate (belge 54 s1.4)
+            rec["bag"] = dict(miss_rate=round(win["miss"] / max(win["valid"], 1), 4),
+                              p_other=round(win["p_other"].item() / max(win["valid"], 1), 4),
+                              full_ce=round(win["full"].item() / win["n_full"], 4) if win["n_full"] else None)
         history["log"].append(rec)
-        log("adim %d / %d (epok %d)  lr %.3g  kayip %.4f  grad %.3f | pencere %d adim %.1f sn  %.1f ms/adim  %.0f tok/sn%s%s"
+        log("adim %d / %d (epok %d)  lr %.3g  kayip %.4f  grad %.3f | pencere %d adim %.1f sn  %.1f ms/adim  %.0f tok/sn%s%s%s"
             % (done, total, epoch, lr, rec["loss"], rec["grad_norm"], k, s["seconds"], rec["ms_per_step"],
-               s["tokens_per_sec"], "  tepe %.1f GB (ayrilan %.1f)" % (rec["peak_gb"], rec["peak_reserved_gb"]) if cuda else "",
+               s["tokens_per_sec"], "  tepe %.1f GB (ayrilan %.1f)  cikis ileri %.1f ms" % (
+                   rec["peak_gb"], rec["peak_reserved_gb"], rec["out_fwd_ms"]) if cuda else "",
+               "  | kacan %.4f  p(DIGER) %.4f  tam CE %s" % (rec["bag"]["miss_rate"], rec["bag"]["p_other"],
+                                                            rec["bag"]["full_ce"]) if args.bag_stage else "",
                "  (ilk pencere: derleme dahil)" if first_window else ""))
         assert np.isfinite(rec["loss"]), "kayip sonlu degil; checkpoint yazilmadi"
         first_window, win = False, None

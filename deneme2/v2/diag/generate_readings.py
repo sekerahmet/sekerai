@@ -72,7 +72,8 @@ def load_run(out, data_dir, dev):
     longest = meta.get("max_sentence_tokens_all", meta["max_sentence_tokens"])      # = TokenStories.max_sentence_tokens
     assert longest == idt["longest"], "en uzun cumle %d, kosununki %d: baska veri" % (longest, idt["longest"])
     spec = SimpleNamespace(model=idt["model"], seed=idt["seed"], d=idt["d"], layers=idt["layers"], heads=idt["heads"],
-                           global_layers=idt.get("global_layers", 0))          # global_layers'tan onceki: 0
+                           global_layers=idt.get("global_layers", 0),          # global_layers'tan onceki: 0
+                           bag_stage=idt.get("bag_stage"), bag_k=idt.get("bag_k", 0))   # torba (C0): C state_dict'ten
     model, _, layout = T._build(spec, dev)
     model.load_state_dict(pack["state"])
     return model, idt

@@ -638,6 +638,25 @@ def t_bag():
     check("bag: secici kaybi E'ye gradyan vermez, secicinin agirliklari alir",
           model.E.weight.grad is None and head.q.weight.grad is not None and head.bias.grad is not None)
 
+    import recipe as R
+    R.attach_bag(model, 5)
+    model.bag_core_ids.copy_(torch.tensor([3, 7, 9, D.END_ID, D.EOS_ID]))
+    torch.nn.init.normal_(model.bag_other, std=0.5)
+    with torch.no_grad():
+        bb = D.build_batch(token_stories(BAG_STORIES), [[0]], "model_z", row_len=T)
+        want = model._logits(model._batch_hidden(bb)[0])
+        cache = SummaryCache(model)
+        got = [cache.logits]
+        for s in BAG_STORIES[0]:
+            got += [cache.append_token(t) for t in s] + [cache.close_sentence()]
+        pre = SummaryCache(model)
+        pre.prefill(BAG_STORIES[0][:2])
+    n = len(got)
+    zc = int((bb.kind[0] == ZTOK).nonzero()[1])
+    check("bag: torbali (C0) Model Z: SummaryCache (token token ve prefill) logit'i = batch yolunun iki asamali log p'si",
+          float((torch.stack(got) - want[:n]).abs().max()) < 1e-5 and float((pre.logits - want[zc]).abs().max()) < 1e-5
+          and float((want[:n].exp().sum(-1) - 1).abs().max()) < 1e-5)
+
 
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, bag=t_bag)

@@ -164,6 +164,15 @@ class SentenceTransformer(torch.nn.Module):
             x = block(x, real, attn[1]) if l >= first else block(x, batch.pos, attn[0])
         return self.norm(x)
 
+    def _logits(self, h):
+        """h (..., d) -> cikis: torbasiz h @ E^T; torbali (C0, recipe.attach_bag) iki asamali log p (recipe.
+        two_stage_logprobs: sinav, acc, uretim ayni dagilim; belge 55 K3)."""
+        lg = h @ self.E.weight.T
+        if not hasattr(self, "bag_core_ids"):
+            return lg
+        from recipe import bag_mask, two_stage_logprobs
+        return two_stage_logprobs(lg, bag_mask(self.bag_core_ids, lg.shape[-1]), h @ self.bag_other)
+
     def loss_per_target(self, batch, attn=None, chunk=4096):
         """-> nll (K,), pred (K,), target_kind (K,) (hedefli konumlar, satir sirasiyla; belge 21 s7 sozlesmesi)."""
         h = self._batch_hidden(batch, attn)
@@ -172,7 +181,7 @@ class SentenceTransformer(torch.nn.Module):
         nll = torch.empty(len(tgt), device=h.device)
         pred = torch.empty(len(tgt), dtype=torch.long, device=h.device)
         for r in range(0, len(tgt), chunk):
-            lg = (hk[r:r + chunk] @ self.E.weight.T).float()
+            lg = self._logits(hk[r:r + chunk]).float()
             nll[r:r + chunk] = F.cross_entropy(lg, tgt[r:r + chunk], reduction="none")
             pred[r:r + chunk] = lg.argmax(-1)
         return nll, pred, batch.target_kind[keep]
@@ -262,7 +271,7 @@ class SummaryCache:
                 self.sen_k[l] = k if self.sen_k[l] is None else torch.cat([self.sen_k[l], k], 2)
                 self.sen_v[l] = v if self.sen_v[l] is None else torch.cat([self.sen_v[l], v], 2)
             x = block._finish(x, a)
-        return (self.m.norm(x) @ self.m.E.weight.T)[0, -1]
+        return self.m._logits(self.m.norm(x))[0, -1]
 
     @torch.no_grad()
     def prefill(self, sents):
@@ -295,7 +304,7 @@ class SummaryCache:
         self.n_z, self.i, self.t = len(sents), 0, T - 1
         self.sen_k = [None] * len(self.sen_k)
         self.sen_v = [None] * len(self.sen_v)
-        self.logits = (self.m.norm(x) @ self.m.E.weight.T)[0, -1]
+        self.logits = self.m._logits(self.m.norm(x))[0, -1]
         return self.logits
 
     @torch.no_grad()

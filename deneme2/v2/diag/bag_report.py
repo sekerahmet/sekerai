@@ -8,13 +8,19 @@ havuzlanir (belge 54 s4.1), yalniz secicinin agirliklari ogrenir (model ve E don
 Olcu (sinav: exam_pack_plan.npz; ezber kontrolu: uydurmada gorulen ilk train batch'leri): L boyu M ve toplam boy K'ya gore
 C / P / L / kacan, tahmin edilen cumlenin sirasina ve hedef turune gore kacan; ayni M'de tabanlar (siklik dolgusu,
 meaning-yalniz); ornek: cumle cumle sonraki cumle + L'nin ilk 20'si.
+Kume secici (--bag_clusters N; kullanici, 7 Ekim: "küme seçiciyi de developer'a ver"): C disi, train'de gorulen token'lar
+donuk E'nin birim satirlariyla N kumeye (kuresel k-means, boy siniri CLUSTER_CAP x ortalama: dev kume yok; tohumlu,
+<out>/bag_clusters.npz sha256'li).  Puan q(h_k) . u_c + b_c (u_c merkezden, b_c log kume sikligindan baslar); torba kaybi
+kume uzerinde (hedefin kumesi), token basina havuz.  L = puan sirasiyla kumelerin YENI kelimeleri (C u P_k disi); M butcesini
+asacak kume ALINMAZ (|L| <= M; gercek ortalama l_actual).  Hedef, kumesi alindiysa yakalandi.  Tablolar kelime
+seciciyle ayni; maliyet (secici FLOP / token) raporda.
 Kisa deneme (kural 3 istisnasi): surdurme yok; --out'ta bag_head.pt varsa DURUR.
 
     python bag_report.py --run <kosu (agent.pt)> --out <klasor> [--data <v2/simplestories_gpt2>] [--stream <simplestories>]
                          [--bag_core 50] [--bag_prior <meaning kosusu>] [--queries 1] [--steps 2000] [--lr 1e-3]
-                         [--local /content/v2_cache] [--device cuda]
+                         [--local /content/v2_cache] [--device cuda] [--bag_clusters 1000]
 Sayim <data>/train_token_counts.npy; yoksa data.token_counts ile BIR kez uretilir (belge 55 O1).
-Cikti: <out>/config.json, bag_head.pt, bag_report.json, bag_examples.txt; sonda tek satir ozet.
+Cikti: <out>/config.json, bag_head.pt, bag_report.json, bag_examples.txt (kume: + bag_clusters.npz); sonda tek satir.
 """
 import torch  # noqa: I001  (Windows: torch once)
 
@@ -33,6 +39,7 @@ COMMON = os.path.join(os.path.dirname(HERE), "common")
 sys.path.insert(0, COMMON)
 sys.path.insert(0, HERE)
 import data as D  # noqa: E402
+import recipe as R  # noqa: E402  (core_ids: C'nin tek tanimi)
 import train as T  # noqa: E402  (_attn: egitimle ayni maske yolu)
 import generate_readings as GR  # noqa: E402  (load_run)
 
@@ -46,6 +53,7 @@ SENT_BINS = ((0, 0), (1, 1), (2, 5), (6, 10 ** 6))       # tahmin edilen cumleni
 KINDS = {D.TargetKind.FIRST: "first", D.TargetKind.MID: "mid", D.TargetKind.END: "end", D.TargetKind.EOS: "eos"}
 SRC_C, SRC_P, SRC_REST = 0, 1, 2
 CHUNK = 512                            # torba dilimi (puan (dilim, VOCAB) fp32)
+CLUSTER_ITERS, CLUSTER_CAP = 20, 1.5   # k-means turu; kume boyu en cok CLUSTER_CAP x ortalama (dev kume siniri)
 
 
 def _sha256(path):
@@ -62,8 +70,7 @@ def core_mask(counts, n, dev):
     rank = np.full(D.VOCAB, len(order), np.int64)
     rank[order] = np.arange(len(order))
     core = np.zeros(D.VOCAB, bool)
-    core[order[:n]] = True
-    core[[D.END_ID, D.EOS_ID]] = True
+    core[R.core_ids(counts, n)] = True
     return torch.as_tensor(core, device=dev), torch.as_tensor(rank, device=dev)
 
 
@@ -101,8 +108,52 @@ def prior_logp(prior, batch, ids, rows, cols, rank):
     return out
 
 
-def bag_batch(model, mask_fn, batch, core, cuda, prior=None, rank=None):
-    """Donuk ileri gecis + torba yapisi -> dict(h ozet durumlari, P, prior, hedefler: bag, y, kind, izinli)."""
+def _capped_assign(sim, limit):
+    """sim (m, n) -> atama (m,): token'lar en iyi benzerlik sirasiyla, dolmamis en yakin kumeye (acgozlu; kume <= limit)."""
+    top = sim.topk(min(32, sim.shape[1]), 1)
+    tv, ti = top.values.cpu().numpy(), top.indices.cpu().numpy()
+    load, out = np.zeros(sim.shape[1], np.int64), np.full(sim.shape[0], -1, np.int64)
+    for i in np.argsort(-tv[:, 0], kind="stable"):
+        for c in ti[i]:
+            if load[c] < limit:
+                break
+        else:                                                           # ilk 32 dolu: dolmamislarin en yakini
+            c = int(torch.where(torch.as_tensor(load < limit, device=sim.device), sim[i], -2.0).argmax())
+        out[i], load[c] = c, load[c] + 1
+    return torch.as_tensor(out, device=sim.device)
+
+
+def cluster_vocab(vec, n, seed):
+    """vec (m, d) birim satirlar -> (atama (m,), merkez (n, d) birim).  Kuresel k-means, CLUSTER_ITERS tur, boy siniri
+    ceil(CLUSTER_CAP * m / n); ilk merkezler torch.Generator(seed) ile secilen token'lar (deterministik)."""
+    g = torch.Generator().manual_seed(seed)
+    limit = math.ceil(CLUSTER_CAP * len(vec) / n)
+    cent = vec[torch.randperm(len(vec), generator=g)[:n].to(vec.device)].clone()
+    for _ in range(CLUSTER_ITERS):
+        assign = _capped_assign(vec @ cent.T, limit)
+        new = torch.zeros_like(cent).index_add_(0, assign, vec)
+        cent = torch.where(new.norm(dim=1, keepdim=True) > 0, torch.nn.functional.normalize(new, dim=1), cent)
+    return _capped_assign(vec @ cent.T, limit), cent
+
+
+class ClusterHead(torch.nn.Module):
+    """Kume secici: puan_k(c) = q(h_k) . u_c + b_c (u_c merkezden, b_c log kume sikligindan baslar)."""
+
+    def __init__(self, d, centers, bias):
+        super().__init__()
+        self.q = torch.nn.Linear(d, d, bias=False)
+        torch.nn.init.normal_(self.q.weight, std=0.02)
+        self.u = torch.nn.Parameter(centers.float().clone())
+        self.bias = torch.nn.Parameter(torch.as_tensor(bias).float().clone())
+
+    def forward(self, h):
+        with torch.autocast(h.device.type, enabled=False):
+            return self.q(h.float()) @ self.u.T + self.bias
+
+
+def bag_batch(model, mask_fn, batch, core, cuda, prior=None, rank=None, of=None):
+    """Donuk ileri gecis + torba yapisi -> dict(h ozet durumlari, P, prior, hedefler: bag, y, kind, izinli; of verilirse
+    cl: hedefin kumesi, -1 kumesiz)."""
     with torch.no_grad(), torch.autocast(batch.tokens.device.type, dtype=torch.bfloat16, enabled=cuda):
         h = model._batch_hidden(batch, T._attn(batch, mask_fn, cuda))
     ids, rows, cols = bag_index(batch)
@@ -112,7 +163,7 @@ def bag_batch(model, mask_fn, batch, core, cuda, prior=None, rank=None):
     src = torch.where(core[y], SRC_C, torch.where(P[bag, y], SRC_P, SRC_REST))
     pri = prior_logp(prior, batch, ids, rows, cols, rank) if prior is not None else None
     return dict(h=h[rows, cols].float(), P=P, prior=pri, bag=bag, y=y, src=src, kind=batch.target_kind[keep],
-                sent=batch.sent[rows, cols][bag].long() + 1, n=len(rows))
+                sent=batch.sent[rows, cols][bag].long() + 1, n=len(rows), cl=of[y] if of is not None else None)
 
 
 def scores(head, E, b, b0, b1, prior_on):
@@ -146,6 +197,49 @@ def fit_step(head, opt, E, b, core, prior_on):
         loss_sum += loss.detach()
     opt.step()
     return float(loss_sum) / max(total, 1), total
+
+
+def fit_step_cluster(head, opt, b):
+    """Kume torba kaybi: hedefin kumesine CE (C u P disi, kumeli hedefler; token basina havuz) -> (kayip, hedef sayisi)."""
+    m = (b["src"] == SRC_REST) & (b["cl"] >= 0)
+    total = int(m.sum())
+    opt.zero_grad(set_to_none=True)
+    s = head(b["h"])
+    loss = torch.nn.functional.cross_entropy(s[b["bag"][m]], b["cl"][m], reduction="sum")
+    (loss / max(total, 1)).backward()
+    opt.step()
+    return float(loss.detach()) / max(total, 1), total
+
+
+def _pc(P, cl):
+    """P (n, VOCAB) bool -> (n, kume) torbanin P'sindeki kume uyesi sayisi."""
+    elig = (cl["of"] >= 0).nonzero()[:, 0]
+    return torch.zeros(len(P), cl["n"], device=P.device).index_add_(1, cl["of"][elig], P[:, elig].float())
+
+
+@torch.no_grad()
+def cluster_ranks(b, scorers, cl):
+    """Kume puanlari -> ({ad: gerekli butce - 1 (hedef basina; C / P / kumesiz -1 ya da cok buyuk)}, {ad: (hedef, M)
+    gercek |L|}).  Torbada kume sirasi puana gore; yeni kelime = kume boyu - P'deki uyeleri; hedefin kumesine kadar
+    (dahil) birikimli yeni kelime = gereken butce; butceyi asan kume alinmaz."""
+    out = {k: torch.full_like(b["y"], -1) for k in scorers}
+    lsz = {k: torch.zeros(len(b["y"]), len(M_LIST), device=b["y"].device) for k in scorers}
+    rest = b["src"] == SRC_REST
+    Ms = torch.tensor(M_LIST, device=b["y"].device, dtype=torch.float)
+    for b0, b1, t0, t1 in _slices(b):
+        new = cl["size"][None].float() - _pc(b["P"][b0:b1], cl)
+        bag, m = b["bag"][t0:t1] - b0, rest[t0:t1]
+        c = b["cl"][t0:t1].clamp_min(0)
+        for k, f in scorers.items():
+            order = torch.sort(f(b0, b1), dim=1, descending=True, stable=True).indices
+            cum = new.gather(1, order).cumsum(1)
+            need = torch.empty_like(cum).scatter_(1, order, cum)              # kume -> sirasina kadar birikimli
+            r = need[bag, c].long() - 1
+            r = torch.where(b["cl"][t0:t1] >= 0, r, torch.full_like(r, 10 ** 9))   # kumesiz hedef hic yakalanmaz
+            out[k][t0:t1] = torch.where(m, r, out[k][t0:t1])
+            fill = torch.where(cum[:, :, None] <= Ms, cum[:, :, None], 0.0).amax(1)   # (torba, M) gercek |L|
+            lsz[k][t0:t1] = fill[bag]
+    return out, lsz
 
 
 @torch.no_grad()
@@ -186,13 +280,17 @@ def summarize(rows, n_core):
         by_sent = {_bin(*lo_hi): {str(m): round(miss(m, (rows["sent"] >= lo_hi[0]) & (rows["sent"] <= lo_hi[1])), 4)
                                      for m in (0, 512, 2048)} for lo_hi in SENT_BINS}
         by_kind = {nm: {str(m): round(miss(m, rows["kind"] == k), 4) for m in (0, 512, 2048)} for k, nm in KINDS.items()}
+        if "lsize_" + name in rows:                                       # kume: butceyi asan kume alinmaz
+            for i, m in enumerate(M_LIST):
+                by_m[str(m)]["l_actual"] = round(float(rows["lsize_" + name][:, i].mean()), 1)
         out[name] = dict(by_m=by_m, by_k=by_k, by_sent=by_sent, by_kind=by_kind)
     return out
 
 
-def _collect(acc, b, rk):
+def _collect(acc, b, rk, lsz=None):
     pk = b["P"].sum(1)[b["bag"]]
-    for k, v in dict(src=b["src"], kind=b["kind"], sent=b["sent"], pk=pk, **{"rank_" + n: r for n, r in rk.items()}).items():
+    for k, v in dict(src=b["src"], kind=b["kind"], sent=b["sent"], pk=pk, **{"rank_" + n: r for n, r in rk.items()},
+                     **{"lsize_" + n: x for n, x in (lsz or {}).items()}).items():
         acc.setdefault(k, []).append(v.cpu().numpy())
 
 
@@ -231,6 +329,7 @@ def _args(argv):
     ap.add_argument("--bag_core", type=int, default=50, help="C: train sayiminda en sik N (+ END + EOS)")
     ap.add_argument("--bag_prior", default=None, help="meaning kosusu (agent.pt); yoksa onsel yok")
     ap.add_argument("--queries", type=int, default=1, help="secicinin sorgu sayisi J (belge 54 s6)")
+    ap.add_argument("--bag_clusters", type=int, default=0, help="kume secici: kume sayisi (0: kelime secici)")
     ap.add_argument("--steps", type=int, default=2000)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=0)
@@ -252,6 +351,8 @@ def main(argv=None):
                 setattr(torch._dynamo.config, k, 32)
     elif os.name == "nt":
         T._no_power_throttling()
+    if args.bag_clusters and args.bag_prior:
+        sys.exit("DUR: --bag_clusters ile --bag_prior yok (meaning tasarimdan cikti, belge 53)")
     if os.path.exists(os.path.join(args.out, "bag_head.pt")):
         sys.exit("DUR: %s'de bag_head.pt var (kisa deneme, surdurme yok); yeni klasor" % args.out)
     os.makedirs(args.out, exist_ok=True)
@@ -279,10 +380,36 @@ def main(argv=None):
     ep = np.load(os.path.join(args.data, "exam_pack_plan.npz"))
     batches = lambda o, r, a, b: [r[o[i]:o[i + 1]].tolist() for i in range(a, min(b, len(o) - 1))]  # noqa: E731
     torch.manual_seed(args.seed)
-    bias = None if prior is not None else np.log(np.r_[counts, 0][:D.VOCAB] + 1.0)
-    head = BagHead(model.E.weight.shape[1], args.queries, bias).to(dev)
+    cnt_v = np.r_[counts, 0][:D.VOCAB].astype(np.float64)
+    d_model, cl, cl_info = model.E.weight.shape[1], None, None
+    if args.bag_clusters:
+        elig = torch.as_tensor(np.flatnonzero((cnt_v > 0) & ~core.cpu().numpy()), device=dev)
+        assign, cent = cluster_vocab(torch.nn.functional.normalize(E[elig].float(), dim=1), args.bag_clusters, args.seed)
+        of = torch.full((D.VOCAB,), -1, dtype=torch.long, device=dev)
+        of[elig] = assign
+        size = torch.bincount(assign, minlength=args.bag_clusters)
+        mass = torch.zeros(args.bag_clusters, dtype=torch.float64, device=dev).index_add_(
+            0, assign, torch.as_tensor(cnt_v, device=dev)[elig])
+        cl = dict(of=of, size=size, n=args.bag_clusters, logmass=mass.clamp_min(1).log().float())
+        cpath_cl = os.path.join(args.out, "bag_clusters.npz")
+        np.savez(cpath_cl, token=elig.cpu().numpy(), cluster=assign.cpu().numpy(), centers=cent.cpu().numpy(),
+                 seed=args.seed, iters=CLUSTER_ITERS, cap=CLUSTER_CAP)
+        sz = size.cpu().numpy()
+        cl_info = dict(file="bag_clusters.npz", sha256=_sha256(cpath_cl), tokens=int(len(elig)), clusters=args.bag_clusters,
+                       size_min=int(sz.min()), size_median=float(np.median(sz)), size_p90=float(np.percentile(sz, 90)),
+                       size_max=int(sz.max()), limit=math.ceil(CLUSTER_CAP * len(elig) / args.bag_clusters),
+                       empty=int((sz == 0).sum()), hist=np.histogram(sz, bins=[0, 1, 5, 10, 20, 30, 40, 60, 10 ** 6])[0].tolist())
+        log("kumeler: %d token -> %d kume, boy min %d / ortanca %.0f / p90 %.0f / max %d (sinir %d), bos %d | sha %s" % (
+            cl_info["tokens"], cl_info["clusters"], cl_info["size_min"], cl_info["size_median"], cl_info["size_p90"],
+            cl_info["size_max"], cl_info["limit"], cl_info["empty"], cl_info["sha256"][:12]))
+        head = ClusterHead(d_model, cent, cl["logmass"]).to(dev)
+    else:
+        bias = None if prior is not None else np.log(cnt_v + 1.0)
+        head = BagHead(d_model, args.queries, bias).to(dev)
     opt = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=0.0)
+    flop_bag = 2 * d_model * (d_model + args.bag_clusters) if cl else 2 * d_model * (d_model + D.VOCAB) * args.queries
     config = dict(args=vars(args), run_identity=idt, core=int(core.sum()), core_tokens=core.nonzero()[:, 0].tolist(),
+                  clusters=cl_info, selector_flop_per_bag=flop_bag,
                   counts_sha256=_sha256(cpath), bag_prior_sha256=prior["sha256"] if prior else None,
                   prior_window=PRIOR_WINDOW, prior_skip=PRIOR_SKIP, git=T._git(),
                   exam_set_sha256=str(ep["exam_set_sha256"]), torch=torch.__version__,
@@ -297,8 +424,9 @@ def main(argv=None):
         rows = batches(ro, rs, step * D.BATCH_ROWS, (step + 1) * D.BATCH_ROWS)
         if not rows:
             sys.exit("DUR: plan bitti (%d adim)" % step)
-        b = bag_batch(model, model.mask_fn, D.build_batch(train, rows, "model_z", dev, row_len), core, cuda, prior, rank)
-        win.append(fit_step(head, opt, E, b, core, prior_on))
+        b = bag_batch(model, model.mask_fn, D.build_batch(train, rows, "model_z", dev, row_len), core, cuda, prior, rank,
+                      cl["of"] if cl else None)
+        win.append(fit_step_cluster(head, opt, b) if cl else fit_step(head, opt, E, b, core, prior_on))
         if (step + 1) % 100 == 0 or step + 1 == args.steps:
             if cuda:
                 torch.cuda.synchronize()
@@ -313,11 +441,20 @@ def main(argv=None):
     freq = torch.log(torch.as_tensor(np.r_[counts, 0][:D.VOCAB] + 1.0, device=dev, dtype=torch.float))[None]
 
     def scorer_set(b):
-        f = dict(selector=lambda b0, b1: scores(head, E, b, b0, b1, prior_on).detach(),
-                 freq=lambda b0, b1: freq.expand(b1 - b0, -1))
+        f = dict(freq=lambda b0, b1: freq.expand(b1 - b0, -1))
+        if not cl:
+            f["selector"] = lambda b0, b1: scores(head, E, b, b0, b1, prior_on).detach()
         if prior_on:
             f["meaning"] = lambda b0, b1: b["prior"][b0:b1]
         return f
+
+    def cluster_set(b):
+        return dict(cluster=lambda b0, b1: head(b["h"][b0:b1]).detach(),
+                    cluster_freq=lambda b0, b1: cl["logmass"][None].expand(b1 - b0, -1)) if cl else {}
+
+    def as_words(f):                                                     # ornek dosyasi: kume puani kelimelere
+        return lambda b0, b1: torch.where(cl["of"] >= 0, f(b0, b1)[:, cl["of"].clamp_min(0)] + 1e-3 * freq / freq.max(),
+                                          torch.tensor(float("-inf"), device=dev))
 
     report, ex = {}, []
     for name, (st, o, r, n) in dict(exam=(valid, ep["row_offsets"], ep["row_stories"], len(ep["row_offsets"]) - 1),
@@ -325,26 +462,33 @@ def main(argv=None):
         acc = {}
         for a in range(0, n, D.BATCH_ROWS):
             batch = D.build_batch(st, batches(o, r, a, min(a + D.BATCH_ROWS, n)), "model_z", dev, row_len)
-            b = bag_batch(model, model.mask_fn, batch, core, cuda, prior, rank)
-            sc = scorer_set(b)
-            _collect(acc, b, ranks(b, core, sc))
+            b = bag_batch(model, model.mask_fn, batch, core, cuda, prior, rank, cl["of"] if cl else None)
+            sc, cs = scorer_set(b), cluster_set(b)
+            rk, lsz = cluster_ranks(b, cs, cl) if cl else ({}, {})
+            rk.update(ranks(b, core, sc))
+            _collect(acc, b, rk, lsz)
             if name == "exam" and a == 0:
                 with torch.no_grad():
-                    ex = examples(b, batch, core, sc, tok)
+                    ex = examples(b, batch, core, dict(sc, **{k: as_words(f) for k, f in cs.items()}), tok)
+                cost = dict(bags_per_target=round(b["n"] / len(b["y"]), 4), selector_flop_per_bag=flop_bag,
+                            selector_flop_per_target=round(flop_bag * b["n"] / len(b["y"])))
         report[name] = summarize(_concat(acc), int(core.sum()))
         log("%s: %d hedef, C %.3f P %.3f | kacan M 512 / 2048: %s" % (
             name, report[name]["targets"], report[name]["share_c"], report[name]["share_p"], ", ".join(
                 "%s %.4f / %.4f" % (k, report[name][k]["by_m"]["512"]["miss"], report[name][k]["by_m"]["2048"]["miss"])
-                for k in scorer_set(b))))
+                for k in list(cluster_set(b)) + list(scorer_set(b)))))
+    report["cost"] = cost
     json.dump(dict(config=config, report=report), open(os.path.join(args.out, "bag_report.json"), "w"), indent=1)
     open(os.path.join(args.out, "bag_examples.txt"), "w", encoding="utf-8").write("\n".join(ex) + "\n")
     e = report["exam"]
-    print("BAG A0 | C %d | onsel %s | J %d | sinav kacan M 512: %s | M 2048: %s | ezber (train_seen - sinav, M 512) %+.4f"
-          % (int(core.sum()), "meaning" if prior_on else "yok", args.queries,
+    main_sel = "cluster" if cl else "selector"
+    print("BAG A0 | C %d | onsel %s | %s | sinav kacan M 512: %s | M 2048: %s | ezber (train_seen - sinav, M 512) %+.4f"
+          " | secici %d FLOP/hedef" % (int(core.sum()), "meaning" if prior_on else "yok",
+                                      "kume %d" % args.bag_clusters if cl else "J %d" % args.queries,
              " ".join("%s %.4f" % (k, e[k]["by_m"]["512"]["miss"]) for k in e if isinstance(e[k], dict)),
              " ".join("%s %.4f" % (k, e[k]["by_m"]["2048"]["miss"]) for k in e if isinstance(e[k], dict)),
-             report["train_seen"]["selector"]["by_m"]["512"]["miss"] - e["selector"]["by_m"]["512"]["miss"]),
-          flush=True)
+             report["train_seen"][main_sel]["by_m"]["512"]["miss"] - e[main_sel]["by_m"]["512"]["miss"],
+             cost["selector_flop_per_target"]), flush=True)
     return report
 
 

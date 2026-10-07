@@ -245,7 +245,7 @@ def t_bag():
         cpath = os.path.join(data, "train_token_counts.npy")
         had = os.path.exists(cpath)
         rep = {k: BR.main(base + ["--out", os.path.join(T2.TMP, "bag_" + k)] + x)
-               for k, x in (("off", []), ("on", ["--bag_prior", mpath, "--queries", "2"]))}
+               for k, x in (("off", []), ("on", ["--bag_prior", mpath, "--queries", "2"]), ("cl", ["--bag_clusters", "4"]))}
         check("bag: sayim dosyasi yoktu, depodaki kodla uretildi (= data.token_counts)",
               not had and np.array_equal(np.load(cpath), DD.token_counts(root)))
         cfg = json.load(open(os.path.join(T2.TMP, "bag_on", "config.json"), encoding="utf-8"))
@@ -264,7 +264,15 @@ def t_bag():
                               for m in BR.M_LIST)
                     ok &= all(a >= b for a, b in zip(ms, ms[1:])) and abs(ms[0] - (1 - e["share_c"] - e["share_p"])) < 2e-4
         check("bag: paylar C + P + L + kacan = 1 her M'de, kacan M ile artmaz, M 0 = C u P disi (%s)" % sorted(names),
-              ok and names == {"selector", "freq", "meaning"})
+              ok and names == {"selector", "freq", "meaning", "cluster", "cluster_freq"})
+        ccfg = json.load(open(os.path.join(T2.TMP, "bag_cl", "config.json"), encoding="utf-8"))["clusters"]
+        z = np.load(os.path.join(T2.TMP, "bag_cl", "bag_clusters.npz"))
+        lm_ok = all(v["l_actual"] <= int(m) for v_ in (rep["cl"]["exam"]["cluster"]["by_m"],) for m, v in v_.items())
+        check("bag kume: dosya sha'si config'te; her uygun token tek kumede, boy <= sinir; |L| <= M; maliyet raporda",
+              ccfg["sha256"] == BR._sha256(os.path.join(T2.TMP, "bag_cl", "bag_clusters.npz"))
+              and len(z["token"]) == ccfg["tokens"] == len(set(z["token"].tolist()))
+              and np.bincount(z["cluster"]).max() <= ccfg["limit"] and lm_ok
+              and rep["cl"]["cost"]["selector_flop_per_bag"] == 2 * 16 * (16 + 4), str(ccfg))
         check("bag: ornek dosyasi dolu", os.path.getsize(os.path.join(T2.TMP, "bag_on", "bag_examples.txt")) > 100)
         try:
             BR.main(base + ["--out", os.path.join(T2.TMP, "bag_off")])
@@ -304,6 +312,35 @@ def t_bag():
         want = (torch.stack(P).mean(0) if P else torch.softmax(prior["bias"], -1)).clamp_min(1e-30).log()
         check("bag: meaning onseli (torba %d, %d oy) elle hesapla ayni" % (j, len(voters)),
               len(voters) > 1 and torch.allclose(b["prior"][j, :V], want, atol=1e-5))
+        g2 = torch.Generator().manual_seed(3)
+        nC, V_ = 5, DD.VOCAB
+        of = torch.full((V_,), -1, dtype=torch.long)
+        toks = torch.arange(100, 120)
+        of[toks] = torch.arange(20) % nC
+        cl = dict(of=of, size=torch.bincount(of[toks], minlength=nC), n=nC)
+        P = torch.zeros(3, V_, dtype=torch.bool)
+        P[1, [100, 105, 101]] = True
+        y = torch.tensor([100, 102, 107, 113, 119, 101, 104, 200])
+        bb = dict(P=P, bag=torch.tensor([0, 0, 0, 1, 1, 1, 2, 2]), y=y, n=3, cl=of[y],
+                  src=torch.tensor([BR.SRC_REST] * 5 + [BR.SRC_P, BR.SRC_REST, BR.SRC_REST]))
+        sc = torch.randn(3, nC, generator=g2)
+        rk, lsz = BR.cluster_ranks(bb, dict(c=lambda b0, b1: sc[b0:b1]), cl)
+        want, wl = [], []
+        for t in range(len(y)):
+            k, c = int(bb["bag"][t]), int(of[y[t]])
+            new = [int(cl["size"][j]) - int(P[k][toks][of[toks] == j].sum()) for j in range(nC)]
+            order = sorted(range(nC), key=lambda j: -float(sc[k, j]))
+            cum = np.cumsum([new[j] for j in order])
+            want.append(-1 if int(bb["src"][t]) != BR.SRC_REST else 10 ** 9 if c < 0 else int(cum[order.index(c)]) - 1)
+            wl.append([max([0] + [x for x in cum if x <= m]) for m in BR.M_LIST])
+        check("bag kume: gereken butce (sirali kumelerin birikimli YENI kelimesi) ve gercek |L| (butceyi asan kume "
+              "alinmaz) kaba kuvvetle ayni; kumesiz hedef hic yakalanmaz",
+              rk["c"].tolist() == want and lsz["c"].tolist() == [[float(x) for x in r] for r in wl], str(rk["c"].tolist()))
+        vec = torch.nn.functional.normalize(torch.randn(40, 6, generator=g2), dim=1)
+        a1, c1 = BR.cluster_vocab(vec, 4, 0)
+        a2, _ = BR.cluster_vocab(vec, 4, 0)
+        check("bag kume: k-means deterministik (ayni tohum ayni atama), boy <= ceil(1,5 x 10) = 15, merkez birim",
+              torch.equal(a1, a2) and int(torch.bincount(a1).max()) <= 15 and torch.allclose(c1.norm(dim=1), torch.ones(4)))
     except Exception:  # noqa: BLE001
         check("bag", False, traceback.format_exc(limit=4))
     finally:

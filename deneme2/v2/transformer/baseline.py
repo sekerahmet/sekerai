@@ -96,6 +96,15 @@ class BaselineTransformer(torch.nn.Module):
             attn = (batch.doc[:, :, None] == batch.doc[:, None, :]) & causal
         return self.hidden(batch.tokens, batch.pos, attn)
 
+    def _logits(self, h):
+        """h (..., d) -> cikis: torbasiz h @ E^T; torbali (C0, recipe.attach_bag) iki asamali log p (recipe.
+        two_stage_logprobs: sinav, acc, uretim ayni dagilim; belge 55 K3)."""
+        lg = h @ self.E.weight.T
+        if not hasattr(self, "bag_core_ids"):
+            return lg
+        from recipe import bag_mask, two_stage_logprobs
+        return two_stage_logprobs(lg, bag_mask(self.bag_core_ids, lg.shape[-1]), h @ self.bag_other)
+
     def loss_per_target(self, batch, attn=None, chunk=4096):
         """-> nll (K,), pred (K,), target_kind (K,) (hedefli konumlar, satir sirasiyla; belge 21 s7 sozlesmesi)."""
         h = self._batch_hidden(batch, attn)
@@ -104,7 +113,7 @@ class BaselineTransformer(torch.nn.Module):
         nll = torch.empty(len(tgt), device=h.device)
         pred = torch.empty(len(tgt), dtype=torch.long, device=h.device)
         for r in range(0, len(tgt), chunk):
-            lg = (hk[r:r + chunk] @ self.E.weight.T).float()
+            lg = self._logits(hk[r:r + chunk]).float()
             nll[r:r + chunk] = F.cross_entropy(lg, tgt[r:r + chunk], reduction="none")
             pred[r:r + chunk] = lg.argmax(-1)
         return nll, pred, batch.target_kind[keep]
@@ -126,7 +135,7 @@ class BaselineTransformer(torch.nn.Module):
             a = F.scaled_dot_product_attention(q, cache["k"][l][:, :, :n + t], cache["v"][l][:, :, :n + t],
                                                attn_mask=allowed)
             x = block._finish(x, a)
-        return (self.norm(x[:, -1]) @ self.E.weight.T)[0]
+        return self._logits(self.norm(x[:, -1]))[0]
 
     @torch.no_grad()
     def generate(self, prompts, max_sentences, max_tokens, generator=None, open_last=False, on_token=None):

@@ -11,15 +11,22 @@
     Checkpoint  model + optimizer + adim + plan + gecmis + args + RNG; .part'tan atomik; kesilip surdurulen = kesintisiz.
     SpeedWindow isinma sonrasi pencere: basta ve sonda synchronize; gercek (dolgusuz) token / sn ve duvar saati.
     output_loss egitim kaybi: tam CE, CUDA'da derlenmis (belge 24 §5 A); sinav loss_per_target'la kalir.
+    Torba C0 (--bag_stage factor; belge 53 s4 / s9, 54 s1-2, 55 K3 / O7 / O8; adlar onayli 7 Ekim): B = C sabit cekirdek
+                (core_ids), iki asamali olasilik.  Dagilimin TEK tanimi two_stage_logprobs (sinav, uretim, teshis onu
+                cagirir); egitimin hizli yolu two_stage_loss (C tek matmul, tam sozluk yalniz kacan + tam softmax payi
+                satirlarinda, sabit dilim) ona esitligiyle sinanir (tests_v2 recipe).
 """
 import math
 import os
 import time
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
-from data import Kind
+from data import END_ID, EOS_ID, VOCAB, Kind
+
+BAG_CHUNK = 2048            # tam sozluk satir dilimi (sabit sekil: compile tek grafik; dolgu en cok BAG_CHUNK - 1 satir)
 
 
 def document_mask(kind, doc, sent):
@@ -71,6 +78,104 @@ def output_loss(h, weight, target):
     if "output_loss" not in _COMPILED:
         _COMPILED["output_loss"] = torch.compile(_output_loss, dynamic=False)
     return _COMPILED["output_loss"](h, weight, target)
+
+
+def core_ids(counts, n):
+    """Train sayimi (data.token_counts; END yok) -> sabit cekirdek C (sirali int64): en sik n token + END + EOS (belge 55
+    O1)."""
+    order = np.argsort(-np.asarray(counts), kind="stable")
+    return np.unique(np.r_[order[:n], END_ID, EOS_ID]).astype(np.int64)
+
+
+def attach_bag(model, k):
+    """Modele torba: bag_core_ids (k,) tampon (agent.pt kendine yeter; degeri cagiran ya da state_dict yazar) ve bag_other
+    (d,) DIGER vektoru (sifir; s_O = h . bag_other).  Ilk agirliklardan sonra: RNG tuketmez (belge 55 K2)."""
+    w = model.E.weight
+    model.register_buffer("bag_core_ids", torch.zeros(k, dtype=torch.long, device=w.device))
+    model.bag_other = torch.nn.Parameter(torch.zeros(w.shape[1], device=w.device))
+    return model
+
+
+def bag_mask(ids, n=VOCAB):
+    return torch.zeros(n, dtype=torch.bool, device=ids.device).index_fill_(0, ids, True)
+
+
+def two_stage_logprobs(logits, in_bag, other):
+    """Iki asamali dagilimin TEK tanimi (belge 54 s1.1): logits (..., V), in_bag (V,) bool, other (...) DIGER logit'i ->
+    log p (..., V), toplam 1.  v in B: l_v - LSE(l_B, s_O); v disinda: s_O - LSE(l_B, s_O) + l_v - LSE_disari(l).
+    Disari bossa DIGER kapali (= log_softmax; belge 55 O7).  Tumleyen LSE maskeyle dogrudan (cikarma yok, belge 55 O8)."""
+    logits, other = logits.float(), other.float()
+    if bool(in_bag.all()):
+        return torch.log_softmax(logits, -1)
+    lse_in = torch.logaddexp(logits.masked_fill(~in_bag, float("-inf")).logsumexp(-1), other)
+    lse_out = logits.masked_fill(in_bag, float("-inf")).logsumexp(-1)
+    return torch.where(in_bag, logits - lse_in[..., None], (other - lse_in - lse_out)[..., None] + logits)
+
+
+def bag_rows(target, in_core, frac, rng):
+    """CPU hazirligi (veriden; GPU senkronu yok) -> (satirlar, sayilar).  Tam sozluk satirlari = kacan hedefler (hedef C
+    disi: sabit C'de yalniz veriye bagli) u tam softmax payi (gecerli hedeflerden round(frac * n) tanesi; rng adim
+    tohumlu, surdurmede ayni).  BAG_CHUNK'a dolgu: idx / miss / full / valid (n_dilim * BAG_CHUNK,)."""
+    chunk = BAG_CHUNK
+    t = np.asarray(target).reshape(-1)
+    valid = t >= 0
+    miss = valid & ~in_core[np.where(valid, t, 0)]
+    vi = np.flatnonzero(valid)
+    full = np.zeros(len(t), bool)
+    full[rng.choice(vi, int(round(frac * len(vi))), replace=False)] = True
+    idx = np.flatnonzero(miss | full)
+    pad = -len(idx) % chunk
+    rows = dict(idx=np.r_[idx, np.zeros(pad, np.int64)], miss=np.r_[miss[idx], np.zeros(pad, bool)],
+                full=np.r_[full[idx], np.zeros(pad, bool)], valid=np.r_[np.ones(len(idx), bool), np.zeros(pad, bool)])
+    return {k: torch.as_tensor(v) for k, v in rows.items()}, dict(miss=int(miss.sum()), valid=len(vi), full=int(full.sum()))
+
+
+def _bag_in(h, w_core, other, tpos):
+    """Torba ici (N, K) tek matmul -> (konum basina -log p: hedef B'de l_t ile, kacan s_O ile; p(DIGER))."""
+    lg, so = (h @ w_core.T).float(), (h @ other).float()
+    lse = torch.logaddexp(lg.logsumexp(-1), so)
+    tl = torch.where(tpos >= 0, lg.gather(1, tpos.clamp_min(0)[:, None])[:, 0], so)
+    return lse - tl, (so - lse).exp()
+
+
+def _bag_full(h, weight, target, in_core, miss, full):
+    """Tam sozluk satirlari (dilim, V) -> (kacanlarin -log softmax_disari[t] toplami, tam softmax CE toplami)."""
+    lg = (h @ weight.T).float()
+    t = lg.gather(1, target[:, None])[:, 0]
+    out = lg.masked_fill(in_core, float("-inf")).logsumexp(-1) - t
+    return torch.where(miss, out, 0.0).sum(), torch.where(full, lg.logsumexp(-1) - t, 0.0).sum()
+
+
+def _compiled(name, fn, h):
+    """CUDA'da derlenmis (bir kez sarilir, dynamic=False), CPU'da eager (output_loss ile ayni kural)."""
+    if not h.is_cuda:
+        return fn
+    if name not in _COMPILED:
+        _COMPILED[name] = torch.compile(fn, dynamic=False)
+    return _COMPILED[name]
+
+
+def two_stage_loss(h, weight, other, target, ids, rows, counts):
+    """Egitimin hizli yolu.  h (N, d), weight E (V, d), other bag_other, target (N,) (-100 hedefsiz), ids bag_core_ids,
+    rows / counts bag_rows'tan -> (amac, nll, ek).  nll = iki asamali dagilimin ortalama NLL'i (two_stage_logprobs ile
+    ayni; sinav tanimi); amac = nll + secilen satirlarin tam softmax CE toplami / gecerli hedef (belge 54 s2.3 yol a,
+    konum basina ayni agirlik); ek: p(DIGER) toplami, tam CE toplami (cihazda; senkron yok)."""
+    V = weight.shape[0]
+    in_core = bag_mask(ids, V)
+    where = torch.full((V,), -1, dtype=torch.long, device=ids.device)
+    where[ids] = torch.arange(len(ids), device=ids.device)
+    valid = target >= 0
+    term, p_other = _compiled("bag_in", _bag_in, h)(h, weight[ids], other, where[target.clamp_min(0)])
+    nll_sum = torch.where(valid, term, 0.0).sum()
+    full_sum = torch.zeros((), device=h.device)
+    for r in range(0, len(rows["idx"]), BAG_CHUNK):
+        i, ok = rows["idx"][r:r + BAG_CHUNK], rows["valid"][r:r + BAG_CHUNK]
+        o, f = _compiled("bag_full", _bag_full, h)(h[i], weight, target[i].clamp_min(0), in_core,
+                                                    rows["miss"][r:r + BAG_CHUNK] & ok, rows["full"][r:r + BAG_CHUNK] & ok)
+        nll_sum, full_sum = nll_sum + o, full_sum + f
+    n = max(counts["valid"], 1)
+    nll = nll_sum / n
+    return nll + full_sum / n, nll, dict(p_other=torch.where(valid, p_other, 0.0).sum().detach(), full=full_sum.detach())
 
 
 def wsd_lr(step, total, peak, warmup=0.01, decay=0.2):

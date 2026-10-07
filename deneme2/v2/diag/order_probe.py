@@ -69,12 +69,11 @@ def _rows(groups, row_len=D.ROW_LEN):
 def _nll(model, layout, st, rows):
     """-> (nll, tgt, kind) hedef basina, satir sirasiyla (dense maske: modelin kendi kurali, global_layers dahil)."""
     out = [], [], []
-    W = model.E.weight
     for r in rows:
         b = D.build_batch(st, [r], layout, "cpu")
         h = model._batch_hidden(b, None)
         keep = b.target >= 0
-        lg = torch.log_softmax((h[keep] @ W.T).float(), -1)
+        lg = torch.log_softmax(model._logits(h[keep]).float(), -1)         # torbali modelde iki asamali (belge 55 K3)
         out[0].append(-lg.gather(1, b.target[keep][:, None])[:, 0].numpy())
         out[1].append(b.target[keep].numpy())
         out[2].append(b.target_kind[keep].numpy())
@@ -91,7 +90,6 @@ def who_did_what(model, layout, enc):
         items.append((ans, oth))
         groups.append([s1, [ans] + enc(" smiled.")])
     st, rows = _stories(groups), _rows(groups)
-    W = model.E.weight
     m = []
     for r in rows:
         b = D.build_batch(st, [r], layout, "cpu")
@@ -99,7 +97,7 @@ def who_did_what(model, layout, enc):
         tokm = (b.kind[0] == D.Kind.TOKEN) & (b.sent[0] == 1)
         for j, i in enumerate(r):
             first = int(torch.nonzero(tokm & (b.doc[0] == j)).min())
-            lg = torch.log_softmax((h[first - 1] @ W.T).float(), -1)
+            lg = torch.log_softmax(model._logits(h[first - 1]).float(), -1)
             m.append(float(lg[items[i][0]] - lg[items[i][1]]))
     m = np.array(m)
     pairs = list(itertools.permutations(range(len(NAMES)), 2))

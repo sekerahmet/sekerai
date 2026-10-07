@@ -257,8 +257,33 @@ def t_imports():
     check("Model Z dosyasindan import yok", not bad, ", ".join(bad))
 
 
+@torch.no_grad()
+def t_bag():
+    """Torba C0 (recipe.attach_bag): sinav yolu (loss_per_target) ve onbellekli uretim yolu (_step) ayni iki asamali
+    dagilim (recipe.two_stage_logprobs; belge 55 K3); nll = -log p[hedef], toplam 1."""
+    import recipe as R
+    model = tiny()
+    R.attach_bag(model, 6)
+    model.bag_core_ids.copy_(torch.tensor([3, 5, 9, 12, D.END_ID, D.EOS_ID]))
+    torch.nn.init.normal_(model.bag_other, std=0.5)
+    seq = [D.EOS_ID] + [t for s in STORIES[3] for t in s + [D.END_ID]]
+    T = len(seq)
+    h = model.hidden(torch.tensor([seq]), torch.arange(T)[None], None)[0]
+    want = R.two_stage_logprobs(h @ model.E.weight.T, R.bag_mask(model.bag_core_ids), h @ model.bag_other)
+    cache = dict(k=[None] * len(model.blocks), v=[None] * len(model.blocks), T=T)
+    lg = [model._step(torch.tensor([seq[:1]]), cache, 0)] + [model._step(torch.tensor([[seq[i]]]), cache, i)
+                                                             for i in range(1, T)]
+    batch = D.build_batch(token_stories(STORIES), [[3]], "transformer", row_len=64)
+    nll = model.loss_per_target(batch)[0]
+    keep = batch.target[0] >= 0
+    ref = -want.gather(1, batch.target[0][keep][:T, None])[:, 0]
+    check("torba: onbellekli uretim logit'i = sinav yolunun iki asamali log p'si; nll = -log p; toplam 1",
+          float((torch.stack(lg) - want).abs().max()) < 1e-5 and float((nll - ref).abs().max()) < 1e-5
+          and float((want.exp().sum(-1) - 1).abs().max()) < 1e-5)
+
+
 GROUPS = dict(mask=t_mask, targets=t_targets, loss=t_loss, cache=t_cache, generate=t_generate, recipe=t_recipe,
-              flex=t_flex, imports=t_imports)
+              flex=t_flex, imports=t_imports, bag=t_bag)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(GROUPS)
