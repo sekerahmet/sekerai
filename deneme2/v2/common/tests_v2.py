@@ -1378,7 +1378,7 @@ def t_fineweb():
               and "peak_reserved_gb" in a["log"][0], str({k: rs[k] for k in ("mfu", "k_global", "k_local")}))
         _fineweb_knowledge(src, out, run, tok)
         _open_last(tok)
-        _d768(base, out, TR)
+        _d768()
     except Exception:  # noqa: BLE001
         check("fineweb", False, traceback.format_exc(limit=4))
     finally:
@@ -1461,21 +1461,18 @@ def _open_last(tok):
           "gecis); open_last=False = varsayilan", ok)
 
 
-def _d768(base, out, TR):
-    """d 768 / 12 head: 10 katman parametre sayisi (meta cihazda) ve 2 katmanli gercek kosu (sekil / derleme yolu, CPU)."""
+def _d768():
+    """d 768 / 12 head: 10 katman parametre sayisi (meta cihazda). Gercek kosu GPU'da (5p profil hucresi): CPU'da derleme
+    + 2 adim ~6 dk suruyordu (7 Ekim)."""
     import importlib
-    root = os.path.dirname(HERE)
+    for sub in ("model_z", "transformer"):
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), sub))
     SM, BL = importlib.import_module("sentence"), importlib.import_module("baseline")
     with torch.device("meta"):
         nz = sum(p.numel() for p in SM.SentenceTransformer(768, 10, 12, global_layers=1).parameters())
         nt = sum(p.numel() for p in BL.BaselineTransformer(768, 10, 12).parameters())
-    args = [x for x in base]
-    for k, v in (("--d", "768"), ("--heads", "12"), ("--layers", "2")):
-        args[args.index(k) + 1] = v
-    r = TR.main(args + ["--model", "model_z", "--steps", "2", "--out", os.path.join(TMP, "fw_runs", "d768")])
-    check("d 768 / 10 katman / 12 head: Model Z + G ve transformer ayni parametre sayisi (~109M); 2 katmanli d 768 Model Z "
-          "+ G kosusu (Muon) sonlu kayipla biter", nz == nt and 105e6 < nz < 112e6 and r["finished"]
-          and all(np.isfinite(w["loss"]) for w in r["log"]), "%.1fM" % (nz / 1e6))
+    check("d 768 / 10 katman / 12 head: Model Z + G ve transformer ayni parametre sayisi (~109M)",
+          nz == nt and 105e6 < nz < 112e6, "%.1fM" % (nz / 1e6))
 
 
 TESTS = dict(data=t_data, pack=t_pack, recipe=t_recipe, metrics=t_metrics, integration=t_integration,
