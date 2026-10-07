@@ -1,5 +1,5 @@
 """tests_v2 -- V2 common/ testleri (CPU).  Gruplar: data (hizli; GPT-2 tokenizer'i yerel HF onbelleginden ya da Drive'dan,
-yoksa tokenizer'li sinamalar ATLANIR), pack (sentetik), recipe (maske, WSD, gruplar, surdurme, hiz), metrics (sentence_repeat,
+yoksa tokenizer'li sinamalar ATLANIR), pack (sentetik), recipe (maske, WSD, gruplar, Muon, surdurme, hiz), metrics (sentence_repeat,
 normalize_words, story_generation, exam_scores), integration (iki modelin loss_per_target'i ve recipe.output_loss'u
 gercek build_batch ile; model dosyalari yalniz testte import edilir), train (train.py uctan uca, iki model, kucuk veri;
 eski kimlik reddi dahil; ~1-2 dk), drive (valid akisi: V1 ile birebir esleme, okuma istemleri), tokens (data.token_counts).  Teshis araclari:
@@ -401,6 +401,7 @@ def t_recipe():
           "CUDA RNG listesi CPU'da sinanamaz)", all(torch.equal(a, c) for a, c in zip(
               full.state_dict().values(), moved.state_dict().values())) and _raises(TypeError, torch.set_rng_state,
                                                                                      OnDevice(torch.get_rng_state())))
+    _recipe_muon(R)
     import time as _t
     sw = R.SpeedWindow()
     sw.start(5)
@@ -408,6 +409,86 @@ def t_recipe():
     r = sw.stop(15, 1000)
     check("SpeedWindow: adim sayisi, sure, token / sn", r["steps"] == 10 and 0.18 < r["seconds"] < 0.5
           and abs(r["tokens_per_sec"] * r["seconds"] / 1000 - 1) < 0.01, str(r))
+
+
+def _newton_schulz(G, steps=5, eps=1e-7):
+    """Basvuru: Keller Jordan Muon NS5 (jordan2024_muon; katsayilar 3,4445 / -4,7750 / 2,0315), bf16."""
+    a, b, c = 3.4445, -4.7750, 2.0315
+    tall = G.size(0) > G.size(1)
+    X = G.bfloat16()
+    X = X.T if tall else X
+    X = X / (X.norm() + eps)
+    for _ in range(steps):
+        A = X @ X.T
+        X = a * X + (b * A + c * A @ A) @ X
+    return (X.T if tall else X).float()
+
+
+def _recipe_muon(R):
+    """--optimizer muon'un tarifi: bolusum, Moonshot olcegi (liu2025_muonscalable denklem 4), MuonAdamW ile surdurme."""
+    import train as TR
+
+    class TinyBlocks(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.E = torch.nn.Embedding(50, 8)
+            self.z_in = torch.nn.Linear(16, 8, bias=False)
+            self.blocks = torch.nn.ModuleList([torch.nn.ModuleDict(dict(norm=torch.nn.RMSNorm(8),
+                                                                        lin=torch.nn.Linear(8, 8)))])
+            self.norm = torch.nn.RMSNorm(8)
+    tm = TinyBlocks()
+    blk = tm.blocks[0]
+    opt, info = TR._optimizer(tm, "muon", 1e-2, False)
+    mu = {id(p) for g in opt.muon.param_groups for p in g["params"]}
+    ad = [{id(p) for p in g["params"]} for g in opt.adamw.param_groups]
+    groups = [mu] + ad
+    every = sum(len(g) for g in groups) == len(set().union(*groups)) == len(list(tm.parameters()))
+    check("muon bolusumu: her parametre tam bir grupta; Muon'da yalniz blok 2-B agirligi; E, z_in (decay'li), blok bias / "
+          "norm AdamW'de; Muon wd 0,1 ve match_rms_adamw", every and mu == {id(blk.lin.weight)}
+          and ad == [{id(tm.z_in.weight)}, {id(tm.E.weight), id(blk.norm.weight), id(blk.lin.bias), id(tm.norm.weight)}]
+          and opt.muon.param_groups[0]["weight_decay"] == 0.1 and opt.muon.param_groups[0]["adjust_lr_fn"] ==
+          "match_rms_adamw" and info["split"]["muon"]["names"] == {"blocks.*.lin.weight": 1}, str(info["split"]))
+    torch.manual_seed(0)
+    W = torch.nn.Parameter(torch.randn(256, 64) * 0.02)
+    W0, g = W.detach().clone(), torch.randn(256, 64)
+    W.grad = g.clone()
+    lr = 1e-3
+    torch.optim.Muon([W], lr=lr, weight_decay=0.1, **TR.MUON).step()
+    want = -lr * 0.1 * W0 - lr * 0.2 * math.sqrt(256) * _newton_schulz(g)     # ilk adim: momentum yalniz olcek, NS'te gider
+    rel = ((W.detach() - W0) - want).norm().item() / want.norm().item()
+    rms = (_newton_schulz(g) * 0.2 * math.sqrt(256)).pow(2).mean().sqrt().item()
+    check("Muon (train.MUON) bir adim = W - lr (0,2 sqrt(max(A, B)) NS5(g) + wd W) (Moonshot denklem 4; bf16 NS gurultusu "
+          "~%2-4, 'original' olcekle fark %37); guncelleme RMS / lr ~0,2 (AdamW'ninki)", rel < 0.08 and 0.12 < rms < 0.28,
+          "goreli fark %.1e, RMS/lr %.3f" % (rel, rms))
+
+    def run(steps, save_at=None, dir_=None, load=False):
+        torch.manual_seed(0)
+        model = TinyBlocks()
+        opt = TR._optimizer(model, "muon", 1e-2, False)[0]
+        s0 = R.Checkpoint.load(dir_, model, opt)["step"] if load else 0
+        for s in range(s0, steps):
+            for gr in opt.param_groups:
+                gr["lr"] = R.wsd_lr(s, steps, 1e-2)
+            x = torch.randn(4, 16)
+            h = model.blocks[0]["lin"](model.blocks[0]["norm"](model.z_in(x)))
+            loss = model.norm(h).pow(2).mean() + h.pow(2).mean() + model.E(torch.tensor([1, 2])).pow(2).mean()
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            if s + 1 == save_at:
+                R.Checkpoint.save(dir_, model, opt, s + 1, {}, [], {})
+                return None
+        return model
+    full = run(10)
+    d_ = os.path.join(TMP, "ckpt_muon")
+    run(10, save_at=4, dir_=d_)
+    resumed = run(10, dir_=d_, load=True)
+    pack = torch.load(os.path.join(d_, "checkpoint.pt"), weights_only=False)["opt"]
+    check("MuonAdamW: 4 + 6 adim = kesintisiz 10 adim (agirlik bit duzeyinde); checkpoint'te iki optimizer (Muon "
+          "momentum_buffer, AdamW exp_avg); lr takvimi iki optimizer'in gruplarina", all(
+              torch.equal(a, c) for a, c in zip(full.state_dict().values(), resumed.state_dict().values()))
+          and set(pack) == {"adamw", "muon"} and "momentum_buffer" in pack["muon"]["state"][0]
+          and "exp_avg" in pack["adamw"]["state"][0] and len(opt.param_groups) == 3)
 
 
 def t_metrics():
@@ -809,6 +890,7 @@ def t_train():
             _train_learned(base, root, data, out, state, same, exits, TR)
         else:
             print("BEKLIYOR: learned_z modeli yok (SentenceTransformer(learned_z) / model_z_read_mask)", flush=True)
+        _train_muon(base, root, data, out, state, same, exits, TR)
     except Exception:  # noqa: BLE001
         check("train", False, traceback.format_exc(limit=3))
     finally:
@@ -913,6 +995,75 @@ def _train_learned(base, root, data, out, state, same, exits, TR):
               default == {"model_z": 1, "transformer": 0}, str(default))
     except Exception:  # noqa: BLE001
         check("train model_z --learned_z 1", False, traceback.format_exc(limit=3).splitlines()[-1])
+
+
+def _train_muon(base, root, data, out, state, same, exits, TR):
+    """--optimizer muon uctan uca (iki model, gercek modeller): kayip duser, ilk adim kaybi AdamW kosusuyla ayni (ayni
+    agirlik), ikinci farkli (optimizer gercekten degisti); bolusum (her parametre tam bir grupta, Muon'da yalniz blok
+    matrisleri, E degil; formullu Model Z'de z_in AdamW'de); kimlikte optimizer; kesilip surdurulen = kesintisiz; optimizer
+    farkiyla surdurme DURUR; optimizer alani olmayan eski checkpoint adamw sayilir; Muon yoksa veri yuklenmeden DURUR."""
+    import traceback
+    try:
+        st = D.TokenStories(root, data, "train")
+        mats = {"blocks.*.%s.weight" % k: 1 for k in ("qkv", "proj", "gate_up", "down")}
+        for model, adamw_run in (("transformer", "transformer_A"), ("model_z", "mzl_A")):
+            cmd = base + ["--model", model, "--optimizer", "muon"]
+            A = out("muon_%s_A" % model)
+            a = TR.main(cmd + ["--epochs", "2", "--out", A])
+            L = [w["loss"] for w in a["log"]]
+            ref = [w["loss"] for w in json.load(open(os.path.join(out(adamw_run), "results.json")))["log"]]
+            ck = torch.load(os.path.join(A, "checkpoint.pt"), weights_only=False)
+            check("train %s --optimizer muon: 2 epok kosar, kayip duser; ilk adim kaybi AdamW kosusuyla ayni, ikinci "
+                  "farkli; kimlikte optimizer muon; results.json'da bolusum; checkpoint'te iki optimizer" % model,
+                  np.mean(L[-3:]) < np.mean(L[:3]) - 0.5 and L[0] == ref[0] and L[1] != ref[1]
+                  and a["identity"]["optimizer"] == "muon" and a["optimizer"]["split"]["muon"]["names"] == mats
+                  and a["optimizer"]["muon"]["adjust_lr_fn"] == "match_rms_adamw" and set(ck["opt"]) == {"adamw", "muon"},
+                  "kayip %.3f -> %.3f (AdamW %.3f -> %.3f); ilk %.4f / %.4f" % (
+                      np.mean(L[:3]), np.mean(L[-3:]), np.mean(ref[:3]), np.mean(ref[-3:]), L[0], ref[0]))
+            for lz in ((1, 0) if model == "model_z" else (0,)):
+                args = TR._args(base + ["--model", model, "--learned_z", str(lz), "--optimizer", "muon", "--out", "x"])
+                m = TR._build(args, st.max_sentence_tokens, torch.device("cpu"))[0]
+                opt, info = TR._optimizer(m, "muon", 1e-2, False)
+                name = {id(p): n for n, p in m.named_parameters()}
+                mu = [name[id(p)] for g in opt.muon.param_groups for p in g["params"]]
+                ad = [name[id(p)] for g in opt.adamw.param_groups for p in g["params"]]
+                want = sorted(n for n, p in m.named_parameters() if n.startswith("blocks.") and p.dim() == 2)
+                check("train %s (learned_z %d) muon bolusumu: her parametre tam bir grupta; Muon = bloklarin 2-B "
+                      "matrisleri; E%s AdamW'de" % (model, lz, ", z_in (decay'li)" if lz == 0 and model == "model_z" else ""),
+                      sorted(mu + ad) == sorted(name.values()) and len(set(mu + ad)) == len(mu + ad)
+                      and sorted(mu) == want and "E.weight" in ad and (lz == 1 or model == "transformer"
+                                                                         or "z_in.weight" in info["split"]["adamw_decay"]["names"]),
+                      "Muon %d, AdamW %d tensor" % (len(mu), len(ad)))
+            stopped, bres = _cut_and_resume(TR, cmd + ["--epochs", "2"], out("muon_%s_B" % model))
+            check("train %s --optimizer muon: adim 4'te kesilip surdurulen = kesintisiz (agirlik bit duzeyinde, sinav ayni)"
+                  % model, stopped and same(state(A), state(out("muon_%s_B" % model))) and bres["exam"] == dict(
+                      a["exam"], seconds=bres["exam"]["seconds"]))
+            plain = base + ["--model", model]
+            mt = [os.path.getmtime(os.path.join(p, "checkpoint.pt")) for p in (A, out(adamw_run))]
+            check("train %s: optimizer farkiyla surdurme checkpoint yuklenmeden DURUR (muon -> adamw, adamw -> muon), "
+                  "dosyalara dokunulmaz" % model, exits(plain + ["--epochs", "2", "--out", A, "--resume", "1"])
+                  and exits(cmd + ["--epochs", "2", "--out", out(adamw_run), "--resume", "1"])
+                  and mt == [os.path.getmtime(os.path.join(p, "checkpoint.pt")) for p in (A, out(adamw_run))])
+        old = out("noopt")                                                # optimizer alanindan onceki kosu
+        shutil.copytree(out("transformer_A"), old)
+        pack = torch.load(os.path.join(old, "checkpoint.pt"), weights_only=False)
+        del pack["args"]["optimizer"]
+        torch.save(pack, os.path.join(old, "checkpoint.pt"))
+        cmd = base + ["--model", "transformer", "--epochs", "2", "--out", old, "--resume", "1"]
+        r = _exit_msg(TR.main, cmd)
+        check("train: optimizer alani olmayan checkpoint adamw sayilir (bitmis kosu olarak durur), muon ile DURUR",
+              r is None and exits(cmd + ["--optimizer", "muon"]), str(r))
+        real = torch.optim.Muon
+        del torch.optim.Muon
+        try:
+            msg = _exit_msg(TR.main, base + ["--model", "transformer", "--optimizer", "muon", "--out", out("nomuon")])
+        finally:
+            torch.optim.Muon = real
+        check("train: torch.optim.Muon yoksa --optimizer muon veri yuklenmeden DURUR (AdamW'ye dusmez); varsayilan adamw",
+              msg is not None and "Muon" in msg and not os.path.exists(out("nomuon"))
+              and TR._args(base + ["--model", "model_z", "--out", "x"]).optimizer == "adamw", str(msg))
+    except Exception:  # noqa: BLE001
+        check("train --optimizer muon", False, traceback.format_exc(limit=3))
 
 
 def _exit_msg(fn, *a):

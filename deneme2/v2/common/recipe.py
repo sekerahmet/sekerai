@@ -6,6 +6,8 @@
                 CPU egitimi ve testler; FlexAttention CPU'da geri yayilim yapmiyor) ayni mask_mod'dan.
     wsd_lr      warmup %1, sabit, son %20 dogrusal sifira; inisin ilk adimi = total - round(decay * total) (checkpoint).
     param_groups  AdamW: 2-B agirliklar decay'li (Model Z'nin z_in dahil); embedding, norm, bias, 1-B decay'siz.
+    muon_params / MuonAdamW  --optimizer muon: bloklarin 2-B matrisleri Muon'a, geri kalan AdamW'ye; iki optimizer tek
+                arayuzde (lr takvimi, checkpoint).
     Checkpoint  model + optimizer + adim + plan + gecmis + args + RNG; .part'tan atomik; kesilip surdurulen = kesintisiz.
     SpeedWindow isinma sonrasi pencere: basta ve sonda synchronize; gercek (dolgusuz) token / sn ve duvar saati.
     output_loss egitim kaybi: tam CE, CUDA'da derlenmis (belge 24 §5 A); sinav loss_per_target'la kalir.
@@ -82,16 +84,52 @@ def wsd_lr(step, total, peak, warmup=0.01, decay=0.2):
     return peak * (total - step) / max(1, total - down)
 
 
-def param_groups(model, weight_decay=0.1):
-    """-> AdamW gruplari: 2-B agirliklar (embedding haric) decay'li; embedding, norm, bias ve 1-B decay'siz."""
+def param_groups(model, weight_decay=0.1, skip=()):
+    """-> AdamW gruplari: 2-B agirliklar (embedding haric) decay'li; embedding, norm, bias ve 1-B decay'siz.  skip:
+    baska optimizer'in parametreleri (Muon)."""
     emb = {id(m.weight) for m in model.modules() if isinstance(m, torch.nn.Embedding)}
-    decay, no_decay, seen = [], [], set()
+    decay, no_decay, seen = [], [], {id(p) for p in skip}
     for p in model.parameters():
         if id(p) in seen or not p.requires_grad:
             continue
         seen.add(id(p))
         (decay if p.dim() >= 2 and id(p) not in emb else no_decay).append(p)
     return [dict(params=decay, weight_decay=weight_decay), dict(params=no_decay, weight_decay=0.0)]
+
+
+def muon_params(model):
+    """-> [(ad, p)] Muon'a gidenler: bloklarin (model.blocks) 2-B agirliklari (attention qkv / proj, MLP gate_up / down).
+    E (tied: giris + cikis), norm kazanclari, z_in gibi giris katmanlari ve 1-B her sey AdamW'de (belge 20 s4)."""
+    emb = {id(m.weight) for m in model.modules() if isinstance(m, torch.nn.Embedding)}
+    return [(n, p) for n, p in model.named_parameters()
+            if n.startswith("blocks.") and p.dim() == 2 and p.requires_grad and id(p) not in emb]
+
+
+class MuonAdamW:
+    """Muon + AdamW tek optimizer gibi: param_groups ikisinin gruplari (lr takvimi hepsine), step / zero_grad ikisine,
+    state_dict ikisini birden (checkpoint)."""
+
+    def __init__(self, muon, adamw):
+        self.muon, self.adamw = muon, adamw
+
+    @property
+    def param_groups(self):
+        return self.adamw.param_groups + self.muon.param_groups
+
+    def zero_grad(self, set_to_none=True):
+        self.adamw.zero_grad(set_to_none)
+        self.muon.zero_grad(set_to_none)
+
+    def step(self):
+        self.adamw.step()
+        self.muon.step()
+
+    def state_dict(self):
+        return dict(adamw=self.adamw.state_dict(), muon=self.muon.state_dict())
+
+    def load_state_dict(self, state):
+        self.adamw.load_state_dict(state["adamw"])
+        self.muon.load_state_dict(state["muon"])
 
 
 class Checkpoint:

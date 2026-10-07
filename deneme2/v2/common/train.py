@@ -4,6 +4,8 @@
 Adim (belge 24 s9):  attn = recipe.block_mask(batch, mask_fn) (CPU'da dense_mask: FlexAttention CPU'da geri yayilim
 yapmiyor); h = model._batch_hidden(batch, attn); kayip = recipe.output_loss(h, E, hedef).  bf16 autocast ve bloklarda
 compile(dynamic=False) CUDA'da; clip 1,0; AdamW (0,9 / 0,95, wd 0,1; CUDA'da fused), recipe.param_groups, recipe.wsd_lr.
+--optimizer muon: bloklarin 2-B matrisleri torch.optim.Muon'a (adjust_lr_fn match_rms_adamw: guncelleme RMS'i AdamW'ninki,
+ayni --lr ve wd; liu2025_muonscalable), geri kalan ayni AdamW'ye; wsd_lr ikisine.  Muon yoksa kosu baslamadan DURUR.
 Veri: BATCH_ROWS satir x row_len (plan dosyasindan); epok 1 <data>/train_pack_plan_e1.npz, sonrakiler pack_plan(seed,
 epok).  --local: ham akisin yerel kopyasi (yalniz onbellek; sha256 = <split>_boundaries.json'daki).
 Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunluk sinirinda, epok sonunda ve bitiste;
@@ -22,6 +24,7 @@ eski own_vocab Model Z yuklenir, oteki eski Model Z'ler durur.  Eski kod: git et
     python train.py --model transformer|model_z --lr LR --out <kosu> [--data <v2/simplestories_gpt2>]
                     [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
                     [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1] [--learned_z 0|1 (model_z; varsayilan 1)]
+                    [--optimizer adamw|muon]
 """
 import torch  # noqa: I001  (Windows: torch once)
 
@@ -30,6 +33,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -44,6 +48,7 @@ import metrics as M  # noqa: E402
 import recipe as R  # noqa: E402
 
 BETAS, WEIGHT_DECAY, CLIP = (0.9, 0.95), 0.1, 1.0         # belge 20 s4
+MUON = dict(momentum=0.95, nesterov=True, ns_steps=5, adjust_lr_fn="match_rms_adamw")   # torch varsayilanlari + Moonshot olcegi
 DECAY = 0.2                                                # recipe.wsd_lr varsayilani; inis basi checkpoint'i
 BATCH_ROWS = D.BATCH_ROWS
 LOG_EVERY = 100             # adim; gunluk satiri = bir hiz penceresi
@@ -51,7 +56,7 @@ READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
 READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
-            "learned_z")
+            "learned_z", "optimizer")
 LEGACY = ("meaning_sha256", "shared_vocab", "own_vocab", "open_z")   # temizlik oncesi kimlik alanlari (belge 33)
 TAG = "v2-before-cleanup-20261006"
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
@@ -155,6 +160,39 @@ def _build(args, longest, dev):
     from sentence import model_z_read_mask
     model = SentenceTransformer(SZ.keys_to(keys, dev), args.d, args.layers, args.heads, learned_z=True).to(dev)
     return model, model_z_read_mask, "model_z"
+
+
+def _muon_missing():
+    """torch.optim.Muon ve MUON ayarlari bu torch'ta kurulamiyorsa ileti, yoksa None."""
+    if not hasattr(torch.optim, "Muon"):
+        return "torch %s'te torch.optim.Muon yok" % torch.__version__
+    try:
+        torch.optim.Muon([torch.nn.Parameter(torch.zeros(2, 2))], **MUON)
+    except (TypeError, ValueError) as e:
+        return "torch %s: torch.optim.Muon(%s) kurulamadi: %s" % (torch.__version__, MUON, e)
+    return None
+
+
+def _optimizer(model, kind, lr, cuda):
+    """-> (optimizer, bilgi).  adamw: tek AdamW (recipe.param_groups).  muon: recipe.muon_params Muon'a (wd ayni),
+    geri kalan ayni ayarli AdamW'ye; recipe.MuonAdamW.  bilgi["split"]: grup basina tensor / parametre sayisi, ad deseni."""
+    fused = {"fused": True} if cuda else {}
+    muon = [p for _, p in R.muon_params(model)] if kind == "muon" else []
+    decay, no_decay = R.param_groups(model, WEIGHT_DECAY, skip=muon)
+    adamw = torch.optim.AdamW([decay, no_decay] if not muon else [g for g in (decay, no_decay) if g["params"]],
+                              lr=lr, betas=BETAS, **fused)                   # muon: transformer'da decay grubu bos
+    opt = R.MuonAdamW(torch.optim.Muon(muon, lr=lr, weight_decay=WEIGHT_DECAY, **MUON), adamw) if muon else adamw
+    names = {id(p): n for n, p in model.named_parameters()}
+
+    def summary(params):
+        pats = {}
+        for p in params:
+            k = re.sub(r"\.\d+\.", ".*.", names[id(p)])
+            pats[k] = pats.get(k, 0) + 1
+        return dict(tensors=len(params), params=sum(p.numel() for p in params), names=pats)
+    split = dict(muon=summary(muon), adamw_decay=summary(decay["params"]), adamw_no_decay=summary(no_decay["params"]))
+    return opt, dict(name=kind, split=split, adamw=dict(betas=BETAS, weight_decay=WEIGHT_DECAY, fused=cuda),
+                     muon=dict(MUON, weight_decay=WEIGHT_DECAY) if muon else None)
 
 
 def _attn(batch, mask_fn, cuda):
@@ -261,6 +299,8 @@ def _args(argv):
     ap.add_argument("--learned_z", type=int, default=None, choices=(0, 1),
                     help="model_z: 1 (varsayilan) z ogrenilir (belge 35 (b)): Z_k girdisi E(END), Z_k kendi cumlesini "
                          "okur; 0 formullu z.  transformer: 0")
+    ap.add_argument("--optimizer", default="adamw", choices=("adamw", "muon"),
+                    help="muon: bloklarin 2-B matrisleri Muon'a (match_rms_adamw, ayni --lr), geri kalan AdamW'ye")
     ap.add_argument("--checkpoint_minutes", type=float, default=10,
                     help="en cok bu kadar duvar saati kaybi (sinav dahil); surdurmede degistirilebilir")
     args = ap.parse_args(argv)
@@ -275,6 +315,8 @@ def main(argv=None):
     log = lambda msg: print("[%7.1f sn] %s" % (time.time() - t0, msg), flush=True)  # noqa: E731
     if args.learned_z and args.model == "transformer":                   # veri yuklenmeden (_build da durur)
         sys.exit("DUR: --learned_z yalniz model_z")
+    if args.optimizer == "muon" and _muon_missing():                    # sessizce AdamW'ye dusulmez
+        sys.exit("DUR: --optimizer muon: %s" % _muon_missing())
     dev = torch.device(args.device)
     cuda = dev.type == "cuda"
     if cuda:                                                             # GPU kapisi (kural 5)
@@ -303,11 +345,10 @@ def main(argv=None):
     if cuda:
         for block in model.blocks:
             block.compile(dynamic=False)
-    opt = torch.optim.AdamW(R.param_groups(model, WEIGHT_DECAY), lr=args.lr, betas=BETAS,
-                            **({"fused": True} if cuda else {}))
+    opt, opt_info = _optimizer(model, args.optimizer, args.lr, cuda)
     ident = dict(model=args.model, d=args.d, layers=args.layers, heads=args.heads, lr=args.lr, seed=args.seed,
                  longest=train.max_sentence_tokens, row_len=row_len, batch_rows=BATCH_ROWS,
-                 train_stream_sha256=train.meta["stream_sha256"], learned_z=args.learned_z)
+                 train_stream_sha256=train.meta["stream_sha256"], learned_z=args.learned_z, optimizer=args.optimizer)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -326,7 +367,7 @@ def main(argv=None):
         del peek
         if any(k in was for k in LEGACY):                                 # kullanici, 6 Ekim: eski kosu uzatilmaz
             sys.exit("DUR: temizlik oncesi kosu surdurulmez / uzatilmaz (kullanici, 6 Ekim); eski kod: git etiketi %s" % TAG)
-        was = {"learned_z": 0, **was}                                     # learned_z'den onceki (temizlik sonrasi) kosu
+        was = {"learned_z": 0, "optimizer": "adamw", **was}               # bu alanlardan onceki (temizlik sonrasi) kosu
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:
@@ -354,7 +395,7 @@ def main(argv=None):
                     shutil.move(os.path.join(args.out, name), os.path.join(arch, name))
             start, history = info["step"], info["history"]
             log("UZATMA: toplam %d -> %d, adim %d'den (inis basi; eski ciktilar %s)" % (old["total"], total, start, arch))
-    config = dict(identity=ident, plan=plan_meta, args=vars(args), params=params, env=dict(
+    config = dict(identity=ident, plan=plan_meta, args=vars(args), params=params, optimizer=opt_info, env=dict(
         torch=torch.__version__, device=torch.cuda.get_device_name(0) if cuda else "cpu", git=_git()),
         data=dict(train_stories=train.n, train_sentences=len(train.sent), exam_stories=int(len(exam_plan[1])),
                   exam_set_sha256=str(ep["exam_set_sha256"]) if "exam_set_sha256" in ep.files else None,
@@ -365,6 +406,10 @@ def main(argv=None):
         "basi %d | lr %g | cihaz %s, compile %s | sinav %d hikaye" % (
             args.model, args.d, args.layers, args.heads, params, train.n, BATCH_ROWS, row_len, per_epoch, total, down,
             args.lr, config["env"]["device"], cuda, len(exam_plan[1])))
+    for k, g in opt_info["split"].items():
+        if g["tensors"]:
+            log("optimizer %s | %s: %d tensor, %d parametre | %s" % (args.optimizer, k, g["tensors"], g["params"],
+                                                                     ", ".join("%s x%d" % kv for kv in g["names"].items())))
 
     lengths = train.lengths()
 
