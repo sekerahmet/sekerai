@@ -8,7 +8,8 @@ compile(dynamic=False) CUDA'da; clip 1,0; AdamW (0,9 / 0,95, wd 0,1; CUDA'da fus
 recipe.BatchedMuon'a (torch.optim.Muon matematigi; adjust_lr_fn match_rms_adamw: guncelleme RMS'i AdamW'ninki, ayni --lr
 ve wd; liu2025_muonscalable), geri kalan ayni AdamW'ye; wsd_lr ikisine.  Muon yoksa kosu baslamadan DURUR.  --lr
 zorunlu; Muon icin olculen 2e-3 (belge 39 kisa tarama 5e-4 / 1e-3 / 2e-3 + 1 epok, OLCULENLER_z).  --optimizer adamw:
-eski tarif (olculen lr 5e-4).
+eski tarif (olculen lr 5e-4).  --optimizer normuon (kullanici, 8 Ekim: "Ben nurmuon yapalım şimdiden dedim"):
+recipe.NorMuon (li2025_normuon Algorithm 1), ayni --lr (guncelleme RMS'i 0,2 lr); lr olculmedi.
 Veri: BATCH_ROWS satir x row_len (plan dosyasindan); epok 1 <data>/train_pack_plan_e1.npz, sonrakiler pack_plan(seed,
 epok).  --local: ham akisin yerel kopyasi (yalniz onbellek; sha256 = <split>_boundaries.json'daki).
 Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunluk sinirinda, epok sonunda ve bitiste;
@@ -39,7 +40,7 @@ p(DIGER), tam CE, secici kaybi; cikis ve secici ileri ms (CUDA olaylari).
     python train.py --model transformer|model_z --lr LR --out <kosu> [--data <v2/simplestories_gpt2>]
                     [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
                     [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1]
-                    [--optimizer muon|adamw (varsayilan muon)] [--global_layers N (model_z; varsayilan 1)]
+                    [--optimizer muon|normuon|adamw (varsayilan muon)] [--global_layers N (model_z; varsayilan 1)]
                     [--bag_k K [--bag_core 50] [--bag_weight 0.1] [--bag_full_frac 0.05]]
 """
 import torch  # noqa: I001  (Windows: torch once)
@@ -213,11 +214,12 @@ def _optimizer(model, kind, lr, cuda):
     """-> (optimizer, bilgi).  adamw: tek AdamW (recipe.param_groups).  muon: recipe.muon_params Muon'a (wd ayni),
     geri kalan ayni ayarli AdamW'ye; recipe.MuonAdamW.  bilgi["split"]: grup basina tensor / parametre sayisi, ad deseni."""
     fused = {"fused": True} if cuda else {}
-    muon = [p for _, p in R.muon_params(model)] if kind == "muon" else []
+    muon = [p for _, p in R.muon_params(model)] if kind in ("muon", "normuon") else []
     decay, no_decay = R.param_groups(model, WEIGHT_DECAY, skip=muon)
     adamw = torch.optim.AdamW([decay, no_decay] if not muon else [g for g in (decay, no_decay) if g["params"]],
                               lr=lr, betas=BETAS, **fused)                   # muon: transformer'da decay grubu bos
-    opt = R.MuonAdamW(R.BatchedMuon(muon, lr=lr, weight_decay=WEIGHT_DECAY, **MUON), adamw) if muon else adamw
+    cls = R.NorMuon if kind == "normuon" else R.BatchedMuon
+    opt = R.MuonAdamW(cls(muon, lr=lr, weight_decay=WEIGHT_DECAY, **MUON), adamw) if muon else adamw
     names = {id(p): n for n, p in model.named_parameters()}
 
     def summary(params):
@@ -228,7 +230,9 @@ def _optimizer(model, kind, lr, cuda):
         return dict(tensors=len(params), params=sum(p.numel() for p in params), names=pats)
     split = dict(muon=summary(muon), adamw_decay=summary(decay["params"]), adamw_no_decay=summary(no_decay["params"]))
     return opt, dict(name=kind, split=split, adamw=dict(betas=BETAS, weight_decay=WEIGHT_DECAY, fused=cuda),
-                     muon=dict(MUON, weight_decay=WEIGHT_DECAY) if muon else None)
+                     muon=dict(MUON, weight_decay=WEIGHT_DECAY, **(dict(beta2=R.NORMUON_BETA2, eps=R.NORMUON_EPS,
+                                                                     scale="0.2 lr sqrt(mn) / ||O^||_F")
+                                                                if kind == "normuon" else {})) if muon else None)
 
 
 def _attn(batch, mask_fn, cuda):
@@ -350,9 +354,10 @@ def _args(argv):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--resume", type=int, default=0)
-    ap.add_argument("--optimizer", default="muon", choices=("adamw", "muon"),
+    ap.add_argument("--optimizer", default="muon", choices=("adamw", "muon", "normuon"),
                     help="muon (varsayilan, 7 Ekim): bloklarin 2-B matrisleri Muon'a (match_rms_adamw, ayni --lr), geri "
-                         "kalan AdamW'ye; adamw: tek AdamW")
+                         "kalan AdamW'ye; normuon: Muon + noron basina normalizasyon (recipe.NorMuon, li2025_normuon, "
+                         "kullanici 8 Ekim); adamw: tek AdamW")
     ap.add_argument("--global_layers", type=int, default=None,
                     help="model_z: son N blok tam causal, gercek konumla (belge 40 s6.2 Deney G); varsayilan model_z'de "
                          "1, transformer'da 0; 0: G'siz Model Z")
@@ -389,8 +394,8 @@ def main(argv=None):
     for err in (_global_error(args), _bag_error(args)):                  # veri yuklenmeden
         if err:
             sys.exit("DUR: " + err)
-    if args.optimizer == "muon" and _muon_missing():                    # sessizce AdamW'ye dusulmez
-        sys.exit("DUR: --optimizer muon: %s" % _muon_missing())
+    if args.optimizer in ("muon", "normuon") and _muon_missing():      # sessizce AdamW'ye dusulmez
+        sys.exit("DUR: --optimizer %s: %s" % (args.optimizer, _muon_missing()))
     dev = torch.device(args.device)
     cuda = dev.type == "cuda"
     if cuda:                                                             # GPU kapisi (kural 5)

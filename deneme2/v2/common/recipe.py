@@ -498,7 +498,6 @@ class BatchedMuon(torch.optim.Muon if hasattr(torch.optim, "Muon") else torch.op
 
     @torch.no_grad()
     def step(self, closure=None):
-        from torch.optim._muon import _adjust_lr
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -516,10 +515,45 @@ class BatchedMuon(torch.optim.Muon if hasattr(torch.optim, "Muon") else torch.op
                 shapes.setdefault(tuple(p.shape), []).append(i)
             for shape, idx in shapes.items():
                 O = _ns_batched(torch.stack([ups[i] for i in idx]), g["ns_coefficients"], g["ns_steps"], g["eps"])
-                alr = _adjust_lr(g["lr"], g["adjust_lr_fn"], torch.Size(shape))
-                for j, i in enumerate(idx):
-                    ps[i].add_(O[j], alpha=-alr)
+                self._apply(g, shape, [ps[i] for i in idx], O)
         return loss
+
+    def _apply(self, g, shape, ps, O):
+        """Ayni bicimli matrislerin NS ciktisi O (k, m, n) -> W -= alr O (torch Muon'un _adjust_lr olcegi)."""
+        from torch.optim._muon import _adjust_lr
+        alr = _adjust_lr(g["lr"], g["adjust_lr_fn"], torch.Size(shape))
+        for j, p in enumerate(ps):
+            p.add_(O[j], alpha=-alr)
+
+
+NORMUON_BETA2 = 0.95      # li2025_normuon s4 deney ayari (beta1, beta2) = (0,95, 0,95); resmi kod varsayilani da 0,95
+NORMUON_EPS = 1e-10       # makalede deger yok; resmi kod (github.com/zichongli5/NorMuon, normuon.py) sqrt(v) + 1e-10
+
+
+class NorMuon(BatchedMuon):
+    """NorMuon (li2025_normuon, Algorithm 1): momentum ve NS BatchedMuon'la ayni (nesterov dahil, resmi kod gibi), sonra
+    satir (cikti noronu) basina ikinci moment v = b2 v + (1 - b2) mean_sutun(O * O) (satir 7), O^ = O / (sqrt(v) + eps)
+    (satir 9), eta^ = 0,2 lr sqrt(mn) / ||O^||_F (satir 10: guncelleme RMS'i 0,2 lr, AdamW'ninki), W -= eta^ O^ (satir 11;
+    wd BatchedMuon'da once).  adjust_lr_fn kullanilmaz.  Durum: momentum_buffer + second_momentum_buffer (m, 1) fp32."""
+
+    def __init__(self, params, beta2=NORMUON_BETA2, **kw):
+        super().__init__(params, **kw)
+        for g in self.param_groups:
+            g.setdefault("beta2", beta2)
+
+    def _apply(self, g, shape, ps, O):
+        m, n = shape
+        O = O.float()
+        for p in ps:
+            if "second_momentum_buffer" not in self.state[p]:
+                self.state[p]["second_momentum_buffer"] = torch.zeros(m, 1, dtype=torch.float, device=p.device)
+        v = torch.stack([self.state[p]["second_momentum_buffer"] for p in ps])
+        v.lerp_(O.square().mean(-1, keepdim=True), 1 - g["beta2"])
+        Oh = O / (v.sqrt() + NORMUON_EPS)
+        eta = 0.2 * g["lr"] * math.sqrt(m * n) / Oh.flatten(1).norm(dim=1)
+        for j, p in enumerate(ps):
+            self.state[p]["second_momentum_buffer"].copy_(v[j])
+            p.sub_((Oh[j] * eta[j]).to(p.dtype))
 
 
 class Checkpoint:

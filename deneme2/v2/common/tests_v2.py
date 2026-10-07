@@ -489,6 +489,65 @@ def _recipe_muon(R):
           "agirlik ve momentum_buffer bit esit; state_dict torch Muon'a yuklenir",
           all(torch.equal(x, y) for x, y in zip(pa, pb))
           and all(torch.equal(oa.state[x]["momentum_buffer"], ob.state[y]["momentum_buffer"]) for x, y in zip(pa, pb)))
+    _recipe_normuon(R, TR)
+
+
+def _recipe_normuon(R, TR):
+    """NorMuon (li2025_normuon Algorithm 1; kullanici, 8 Ekim): (a) ortak yol (momentum, nesterov, wd, NS) BatchedMuon'la
+    bit ayni (yalniz _apply farkli); (b) yiginli NorMuon = matris matris basvuru (Algorithm 1 satir 5-11, NS torch'un tek
+    matris NS'i); (c) ilk adimda W farkinin satir normlari esit (CV ~0), guncelleme RMS'i 0,2 lr; surdurme: 2 + 3 adim =
+    kesintisiz 5 (state_dict, second_momentum_buffer dahil)."""
+    from torch.optim._muon import _zeropower_via_newtonschulz
+    shapes = [(8, 24), (24, 8), (8, 24), (16, 16)]
+    g = torch.Generator().manual_seed(1)
+    init = [torch.randn(*s_, generator=g) * 0.02 for s_ in shapes]
+    grads = [[torch.randn(*s_, generator=g) for s_ in shapes] for _ in range(5)]
+    kw = dict(lr=2e-3, weight_decay=0.1, **TR.MUON)
+
+    def run(cls, steps, patch=None, opt_state=None, start=None):
+        ps = [torch.nn.Parameter((start[i] if start else init[i]).clone()) for i in range(len(shapes))]
+        opt = cls(ps, **kw)
+        if patch:
+            opt._apply = patch.__get__(opt)
+        if opt_state:
+            opt.load_state_dict(opt_state)
+        for t in steps:
+            for x, gr in zip(ps, grads[t]):
+                x.grad = gr.clone()
+            opt.step()
+        return ps, opt
+    a, oa = run(R.BatchedMuon, range(3))
+    b, ob = run(R.NorMuon, range(3), patch=R.BatchedMuon._apply)
+    same_a = all(torch.equal(x, y) for x, y in zip(a, b)) and all(
+        torch.equal(oa.state[x]["momentum_buffer"], ob.state[y]["momentum_buffer"]) for x, y in zip(a, b))
+    c, oc = run(R.NorMuon, range(3))
+    ref = [w.clone() for w in init]
+    M = [torch.zeros_like(w) for w in init]
+    v = [torch.zeros(w.shape[0], 1) for w in init]
+    for t in range(3):
+        for i, (m_, n_) in enumerate(shapes):
+            M[i].lerp_(grads[t][i], 1 - kw["momentum"])                      # satir 5 (EMA; nesterov resmi koddaki gibi)
+            u = grads[t][i].lerp(M[i], kw["momentum"])
+            pg = oc.param_groups[0]
+            O = _zeropower_via_newtonschulz(u, pg["ns_coefficients"], pg["ns_steps"], pg["eps"]).float()   # satir 6
+            v[i] = R.NORMUON_BETA2 * v[i] + (1 - R.NORMUON_BETA2) * (O * O).mean(1, keepdim=True)          # satir 7
+            Oh = O / (v[i].sqrt() + R.NORMUON_EPS)                                                          # satir 9
+            eta = 0.2 * kw["lr"] * (m_ * n_) ** 0.5 / Oh.norm()                                            # satir 10
+            ref[i] = ref[i] - kw["lr"] * kw["weight_decay"] * ref[i] - eta * Oh                            # satir 11
+    rel = max(float((x.detach() - r).norm() / (r - w).norm()) for x, r, w in zip(c, ref, init))
+    d, od = run(R.NorMuon, range(1), patch=None)
+    dw = [(x.detach() - w * (1 - kw["lr"] * kw["weight_decay"])) for x, w in zip(d, init)]
+    cv = max(float(r.std() / r.mean()) for r in (u_.norm(dim=1) for u_ in dw))
+    rms = [float(u_.square().mean().sqrt()) / kw["lr"] for u_ in dw]
+    e1, oe1 = run(R.NorMuon, range(2))
+    e2, _ = run(R.NorMuon, range(2, 5), opt_state=oe1.state_dict(), start=[x.detach() for x in e1])
+    full_, ofull = run(R.NorMuon, range(5))
+    check("NorMuon: (a) ortak yol = BatchedMuon (bit); (b) yiginli = matris matris Algorithm 1 basvurusu (goreli %.1e); "
+          "(c) ilk adim satir normlari esit (CV %.1e), RMS / lr %s; 2 + 3 adim = kesintisiz 5 (bit, ikinci moment dahil)"
+          % (rel, cv, [round(x, 3) for x in rms]),
+          same_a and rel < 1e-5 and cv < 1e-4 and all(abs(x - 0.2) < 1e-4 for x in rms)
+          and all(torch.equal(x, y) for x, y in zip(e2, full_))
+          and all("second_momentum_buffer" in ofull.state[x] for x in full_))
 
 
 def _recipe_bag(R):
@@ -1276,6 +1335,18 @@ def _train_global(base, root, data, out, exits, TR):
               rj["finished"] and rj["generation"] is None and "mid" in rj["readings_skipped"]
               and not os.path.exists(os.path.join(P, "samples.txt")) and lp.plan == ["loc", "mid", "glob"]
               and rp["identity"]["layer_plan"] == "loc1,mid1,glob1", str(rj.get("readings_skipped")))
+        N_ = base + ["--model", "model_z", "--layers", "2", "--optimizer", "normuon", "--epochs", "2"]   # kullanici, 8 Ekim
+        nr = TR.main(N_ + ["--out", out("normuon_A")])
+        stopped, nr2 = _cut_and_resume(TR, N_, out("normuon_cut"))
+        st_a = torch.load(os.path.join(out("normuon_A"), "agent.pt"), weights_only=False)["state"]
+        st_b = torch.load(os.path.join(out("normuon_cut"), "agent.pt"), weights_only=False)["state"]
+        ck = torch.load(os.path.join(out("normuon_cut"), "checkpoint.pt"), weights_only=False)["opt"]["muon"]
+        check("train --optimizer normuon: kosar, kayip duser, kimlikte normuon; adim 4'te kesilip surdurulen = kesintisiz "
+              "(bit); checkpoint'te second_momentum_buffer ve beta2",
+              nr["log"][-1]["loss"] < nr["log"][0]["loss"] and nr["identity"]["optimizer"] == "normuon" and stopped
+              and all(torch.equal(st_a[k], st_b[k]) for k in st_a)
+              and [w["loss"] for w in nr2["log"]] == [w["loss"] for w in nr["log"]]
+              and "second_momentum_buffer" in ck["state"][0] and ck["param_groups"][0]["beta2"] == R.NORMUON_BETA2)
         G = out("plan_glob_ends")                                          # glob her yerde (belge 60 B, 62)
         rg = TR.main(base + ["--model", "model_z", "--layer_plan", "glob1,loc1,glob1", "--steps", "3", "--out", G])
         lg_ = GR.load_run(G, data, torch.device("cpu"))[0]
