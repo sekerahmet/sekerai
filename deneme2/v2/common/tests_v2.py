@@ -634,7 +634,7 @@ def t_train():
     exits = lambda argv: _raises(SystemExit, TR.main, argv)  # noqa: E731
     try:
         for model in ("transformer", "model_z"):
-            cmd = base + ["--model", model]
+            cmd = base + ["--model", model] + (["--learned_z", "0"] if model == "model_z" else [])   # formullu yol
             a = TR.main(cmd + ["--epochs", "2", "--out", out(model + "_A")])
             total, per = a["plan"]["total"], a["plan"]["per_epoch"]
             L = [w["loss"] for w in a["log"]]
@@ -758,7 +758,8 @@ def t_train():
             if torch.__version__ != GOLDEN_TORCH:
                 print("ATLANDI: sabit deger torch %s ile, burada %s" % (GOLDEN_TORCH, torch.__version__), flush=True)
                 break
-            g = TR.main(base + ["--model", model, "--steps", "6", "--out", out("golden_" + model)])
+            g = TR.main(base + ["--model", model, "--steps", "6", "--out", out("golden_" + model)]
+                        + (["--learned_z", "0"] if model == "model_z" else []))
             st_ = torch.load(os.path.join(out("golden_" + model), "agent.pt"), weights_only=False)["state"]
             per = {k: hashlib.sha256(v.contiguous().numpy().tobytes()).hexdigest() for k, v in st_.items()}
             whole = hashlib.sha256("".join(k + per[k] for k in sorted(per)).encode()).hexdigest()
@@ -789,7 +790,7 @@ def t_train():
             loads[kind] = _exit_msg(GR.load_run, dst, data, dev)
         m = GR.load_run(out("legacy_own"), data, dev)[0]
         same_w = same(m.state_dict(), state(out("model_z_A")))
-        silent = not _raises(Exception, TR._build(TR._args(base + ["--model", "model_z", "--out", "x"]),
+        silent = not _raises(Exception, TR._build(TR._args(base + ["--model", "model_z", "--learned_z", "0", "--out", "x"]),
                                                   st.max_sentence_tokens, dev)[0].load_state_dict,
                              torch.load(os.path.join(out("legacy_iota"), "agent.pt"), weights_only=False)["state"])
         fresh = json.load(open(os.path.join(out("model_z_A"), "config.json")))["identity"]
@@ -899,7 +900,7 @@ def _train_learned(base, root, data, out, state, same, exits, TR):
               stopped and same(state(A), state(out("mzl_B"))) and bres["exam"] == dict(a["exam"],
                                                                                          seconds=bres["exam"]["seconds"]))
         mt = os.path.getmtime(os.path.join(A, "checkpoint.pt"))
-        plain = base + ["--model", "model_z"]
+        plain = base + ["--model", "model_z", "--learned_z", "0"]
         check("train: learned_z farkiyla surdurme checkpoint yuklenmeden DURUR (1 -> 0, 0 -> 1); transformer + "
               "--learned_z 1 veri yuklenmeden DURUR",
               exits(plain + ["--epochs", "2", "--out", A, "--resume", "1"])
@@ -907,6 +908,9 @@ def _train_learned(base, root, data, out, state, same, exits, TR):
               and os.path.getmtime(os.path.join(A, "checkpoint.pt")) == mt
               and exits(base + ["--model", "transformer", "--learned_z", "1", "--out", out("tf_learned")])
               and not os.path.exists(out("tf_learned")))
+        default = {m: TR._args(base + ["--model", m, "--out", "x"]).learned_z for m in ("model_z", "transformer")}
+        check("train: varsayilan learned_z model_z'de 1, transformer'da 0 (kullanici, 7 Ekim)",
+              default == {"model_z": 1, "transformer": 0}, str(default))
     except Exception:  # noqa: BLE001
         check("train model_z --learned_z 1", False, traceback.format_exc(limit=3).splitlines()[-1])
 

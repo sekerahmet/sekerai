@@ -14,13 +14,14 @@ Olcu: epok sonunda ve bitiste metrics.exam_scores (exam_pack_plan.npz; egitimle 
 Cikti: config.json, checkpoint.pt, decay_start/, results.json, agent.pt, samples.txt, samples.json.  Ek okuma kayitli
 kosudan: diag/generate_readings.py.
 
-Model Z (belge 33): z modelin ogrenilen E'sinden (eski --own_vocab yolu, tek yol).  Temizlik oncesi kosular
+Model Z varsayilani ogrenilen z (belge 35 (b); kullanici, 7 Ekim: "Şu an en iyisi o gibi"); --learned_z 0: formullu z
+(belge 33; z modelin ogrenilen E'sinden, eski --own_vocab yolu), yalniz eski kosularla kiyas icin.  Temizlik oncesi kosular
 surdurulmez / uzatilmaz (kullanici, 6 Ekim: "eski koşuları uzatma niyetim yok"); okumada (_archived) eski transformer ve
 eski own_vocab Model Z yuklenir, oteki eski Model Z'ler durur.  Eski kod: git etiketi v2-before-cleanup-20261006.
 
     python train.py --model transformer|model_z --lr LR --out <kosu> [--data <v2/simplestories_gpt2>]
                     [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
-                    [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1] [--learned_z 1 (model_z)]
+                    [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1] [--learned_z 0|1 (model_z; varsayilan 1)]
 """
 import torch  # noqa: I001  (Windows: torch once)
 
@@ -257,11 +258,15 @@ def _args(argv):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--resume", type=int, default=0)
-    ap.add_argument("--learned_z", type=int, default=0, choices=(0, 1),
-                    help="model_z: z ogrenilir (belge 35 (b)): Z_k girdisi E(END), Z_k kendi cumlesini okur")
+    ap.add_argument("--learned_z", type=int, default=None, choices=(0, 1),
+                    help="model_z: 1 (varsayilan) z ogrenilir (belge 35 (b)): Z_k girdisi E(END), Z_k kendi cumlesini "
+                         "okur; 0 formullu z.  transformer: 0")
     ap.add_argument("--checkpoint_minutes", type=float, default=10,
                     help="en cok bu kadar duvar saati kaybi (sinav dahil); surdurmede degistirilebilir")
-    return ap.parse_args(argv)
+    args = ap.parse_args(argv)
+    if args.learned_z is None:
+        args.learned_z = int(args.model == "model_z")
+    return args
 
 
 def main(argv=None):
