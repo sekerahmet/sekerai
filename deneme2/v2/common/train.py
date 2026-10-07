@@ -70,8 +70,9 @@ READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
 READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
-            "learned_z", "optimizer", "global_layers", "bag_k", "bag_core", "bag_weight", "bag_full_frac", "bag_core_sha256")
-NO_BAG = dict(bag_k=0, bag_core=0, bag_weight=0.0, bag_full_frac=0.0, bag_core_sha256=None)   # torbasiz / eski kosu
+            "learned_z", "optimizer", "global_layers", "bag_k", "bag_core", "bag_weight", "bag_full_frac", "bag_core_sha256",
+            "bag_sel_frac")
+NO_BAG = dict(bag_k=0, bag_core=0, bag_weight=0.0, bag_full_frac=0.0, bag_core_sha256=None, bag_sel_frac=1.0)   # torbasiz / eski kosu
 LEGACY = ("meaning_sha256", "shared_vocab", "own_vocab", "open_z")   # temizlik oncesi kimlik alanlari (belge 33)
 TAG = "v2-before-cleanup-20261006"
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
@@ -165,6 +166,8 @@ def _bag_error(args):
         return None
     if not 0.0 <= args.bag_full_frac <= 1.0:
         return "--bag_full_frac 0..1 olmali"
+    if not 0.0 < getattr(args, "bag_sel_frac", 1.0) <= 1.0:
+        return "--bag_sel_frac (0, 1] olmali"
     return None
 
 
@@ -345,6 +348,8 @@ def _args(argv):
     ap.add_argument("--bag_weight", type=float, default=0.1, help="secici kaybinin agirligi (lambda; olculmedi)")
     ap.add_argument("--bag_full_frac", type=float, default=0.05,
                     help="gecerli hedeflerin bu payinda tam softmax CE de eklenir (belge 54 s2.3 yol a)")
+    ap.add_argument("--bag_sel_frac", type=float, default=1.0,
+                    help="secici kaybi torbalarin bu payinda (rastgele, adim tohumlu); secim her torbada (kullanici, 7 Ekim)")
     ap.add_argument("--checkpoint_minutes", type=float, default=10,
                     help="en cok bu kadar duvar saati kaybi (sinav dahil); surdurmede degistirilebilir")
     args = ap.parse_args(argv)
@@ -393,6 +398,7 @@ def main(argv=None):
         core = R.core_ids(counts, args.bag_core)
         args.bag_n_core = len(core)
         bag = dict(bag_k=args.bag_k, bag_core=args.bag_core, bag_weight=args.bag_weight, bag_full_frac=args.bag_full_frac,
+                   bag_sel_frac=args.bag_sel_frac,
                    bag_core_sha256=hashlib.sha256(core.tobytes()).hexdigest())
     model, mask_fn, layout = _build(args, dev)
     if args.bag_k:
@@ -468,8 +474,8 @@ def main(argv=None):
         log("global_layers %d: son %d blok tam causal (model_z_global_mask), gercek hikaye konumu" % (
             args.global_layers, args.global_layers))
     if args.bag_k:
-        log("torba: K %d, C %d (en sik %d + END + EOS), lambda %g, tam softmax payi %g" % (
-            args.bag_k, len(core), args.bag_core, args.bag_weight, args.bag_full_frac))
+        log("torba: K %d, C %d (en sik %d + END + EOS), lambda %g, tam softmax payi %g, secici kaybi payi %g" % (
+            args.bag_k, len(core), args.bag_core, args.bag_weight, args.bag_full_frac, args.bag_sel_frac))
     for k, g in opt_info["split"].items():
         if g["tensors"]:
             log("optimizer %s | %s: %d tensor, %d parametre | %s" % (args.optimizer, k, g["tensors"], g["params"],
@@ -489,7 +495,7 @@ def main(argv=None):
         if not args.bag_k:
             return b, real, None
         rng = np.random.default_rng(np.random.SeedSequence(args.seed, spawn_key=(step,)))   # adim tohumlu: surdurmede ayni
-        return b, real, R.bag_full_mask(b.target.numpy(), args.bag_full_frac, rng)
+        return b, real, R.bag_full_mask(b.target.numpy(), args.bag_full_frac, rng, args.bag_sel_frac)
 
     def save(dir_, step):
         R.Checkpoint.save(dir_, model, opt, step, plan_meta, history, ident)

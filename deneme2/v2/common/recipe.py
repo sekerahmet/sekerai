@@ -189,9 +189,10 @@ class Bag(torch.nn.Module):
         n_p = torch.bincount(bag[keep], minlength=n)
         allowed = self.seen & ~bag_mask(self.core) & ~pbit
         sidx, spos = self.selectable()
-        score = self.scores(h, E, sidx).masked_fill(pbit[:, sidx], float("-inf"))   # (n, |sidx|): topk ve kayip ayni tensor
+        with torch.no_grad():                                                 # secim gradyansiz; kayip selector_loss'ta
+            score = self.scores(h, E, sidx).masked_fill(pbit[:, sidx], float("-inf"))   # (n, |sidx|)
         kk = min(R, len(sidx))                                                # secilebilir < R: kalan yerler bos (-1)
-        top = score.detach().topk(kk, 1)
+        top = score.topk(kk, 1)
         j = torch.arange(kk, device=dev)[None]
         lw = torch.where(torch.isfinite(top.values) & (j < (R - n_p)[:, None]), sidx[top.indices], -1)
         lw = torch.cat([lw, lw.new_full((n, R - kk), -1)], 1)
@@ -203,7 +204,7 @@ class Bag(torch.nn.Module):
         rows_, cols_ = ok_r.nonzero(as_tuple=True)
         inbag[rows_, cand_r[rows_, cols_]] = True
         return dict(inbag=inbag, pbit=pbit, cand_r=cand_r, ok_r=ok_r, score=score, sidx=sidx, spos=spos, allowed=allowed,
-                    p_over=(~keep).sum())
+                    p_over=(~keep).sum(), h=h, E=E)
 
     def batch_select(self, batch, h, E):
         """PackedBatch, h (B, T, d) -> select'in ciktisi + ids (B, T), rows, cols."""
@@ -217,13 +218,22 @@ class Bag(torch.nn.Module):
         w = w[~bag_mask(self.core)[w]]
         return self.select(h[None], E, (torch.zeros_like(w), w))["inbag"][0]
 
-    def selector_loss(self, sel, bag, y):
+    def selector_loss(self, sel, bag, y, keep=None):
         """Secici kaybi (belge 54 s4.1, token basina havuz): izinli (C u P_k disi, gorulmus) hedeflerde -log softmax_izinli
-        (puan)[y] -> (toplam, sayi)."""
-        m = sel["allowed"][bag, y]
-        b, t = bag[m], sel["spos"][y[m]]                                      # izinli => secilebilir (spos >= 0)
-        lse = sel["score"].logsumexp(1)                                       # score izinli disinda zaten -inf (select)
-        return (lse[b] - sel["score"][b, t]).sum(), m.sum()
+        (puan)[y] -> (toplam, sayi).  keep (n,) bool: kayip yalniz bu torbalarda (--bag_sel_frac; secim butun torbalarda).
+        Puan gradyanla yalniz kayba giren torbalar icin yeniden hesaplanir (secimin buyuk puan tensoru geri yayilmaz)."""
+        n, dev = len(sel["h"]), bag.device
+        if keep is None:
+            rows, hs, pb = torch.arange(n, device=dev), sel["h"], sel["pbit"][:, sel["sidx"]]
+        else:
+            rows = keep.nonzero()[:, 0]
+            hs, pb = sel["h"][rows], sel["pbit"][rows][:, sel["sidx"]]
+        rmap = torch.full((n,), -1, dtype=torch.long, device=dev)
+        rmap[rows] = torch.arange(len(rows), device=dev)
+        m = sel["allowed"][bag, y] & (rmap[bag] >= 0)
+        b, t = rmap[bag[m]], sel["spos"][y[m]]                                # izinli => secilebilir (spos >= 0)
+        s = self.scores(hs, sel["E"], sel["sidx"]).masked_fill(pb, float("-inf"))
+        return (s.logsumexp(1)[b] - s[b, t]).sum(), m.sum()
 
 
 def attach_bag(model, k, n_core):
@@ -232,13 +242,16 @@ def attach_bag(model, k, n_core):
     return model
 
 
-def bag_full_mask(target, frac, rng):
-    """CPU, veriden: gecerli hedeflerden round(frac * n) konum (tam softmax payi; rng adim tohumlu) -> (B * T,) bool."""
+def bag_full_mask(target, frac, rng, sel_frac=1.0):
+    """CPU, veriden (rng adim tohumlu) -> (B * T,) uint8: bit 0 tam softmax payi (gecerli hedeflerden round(frac * n)),
+    bit 1 secici kaybi ornegi (konum sel_frac olasilikla; torba, ozet sutunu isaretliyse kayba girer).  sel_frac 1'de rng
+    yalniz pay icin kullanilir (eski kosularla ayni sira)."""
     t = np.asarray(target).reshape(-1)
     vi = np.flatnonzero(t >= 0)
     full = np.zeros(len(t), bool)
     full[rng.choice(vi, int(round(frac * len(vi))), replace=False)] = True
-    return torch.as_tensor(full)
+    sel = rng.random(len(t)) < sel_frac if sel_frac < 1 else np.ones(len(t), bool)
+    return torch.as_tensor(full.astype(np.uint8) | (sel.astype(np.uint8) << 1))
 
 
 def _bag_group(hg, eu, mem, u, so, valid):
@@ -278,6 +291,8 @@ def bag_train_loss(model, batch, h, full, weight, timer=None):
     satirlarinin tam CE toplami / gecerli hedef + weight x secici kaybi.  Tek GPU senkronu (dilim sayilari).  timer: secici
     suresi icin iki CUDA olayi."""
     bag, E, dev = model.bag, model.E.weight, h.device
+    flags = full.to(torch.uint8) | 2 if full.dtype == torch.bool else full   # bool: yalniz tam pay (secici kaybi her torbada)
+    full = (flags & 1).bool()
     T = batch.kind.shape[1]
     if timer is not None:
         timer[0].record()
@@ -326,7 +341,7 @@ def bag_train_loss(model, batch, h, full, weight, timer=None):
         i, k = rows[r:r + BAG_CHUNK], ok[r:r + BAG_CHUNK]
         o, f = _compiled("bag_full", _bag_full, h)(hr[c], E, y[i], sel["inbag"][idf[i]], miss[i] & k, full[i] & k)
         term, full_sum = term + o, full_sum + f
-    ls, n_s = bag.selector_loss(sel, idf[valid], y[valid])
+    ls, n_s = bag.selector_loss(sel, idf[valid], y[valid], ((flags & 2) > 0)[start[:-1]])
     n_valid = valid.sum().clamp_min(1)
     nll = term / n_valid
     goal = nll + full_sum / n_valid + weight * ls / n_s.clamp_min(1)
