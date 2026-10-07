@@ -153,10 +153,26 @@ class Bag(torch.nn.Module):
         self.seen.copy_(cnt > 0)
         self.b_v.copy_((cnt + 1).log())
 
-    def scores(self, h, E):
-        """h (n, d) -> puan (n, VOCAB) fp32; matmul bf16, autocast'ten bagimsiz."""
+    def selectable(self):
+        """-> (sidx, spos): secilebilir kelimeler (train'de gorulmus, C disi; artan V indeksi) ve V -> sira (disinda -1).
+        Secici yalniz bunlari puanlar (oteki kelimeler zaten secilemez; SS'te ~%56 V)."""
+        ok = self.seen & ~bag_mask(self.core)
+        sidx = ok.nonzero()[:, 0]
+        spos = torch.full((VOCAB,), -1, dtype=torch.long, device=ok.device)
+        spos[sidx] = torch.arange(len(sidx), device=ok.device)
+        return sidx, spos
+
+    def scores(self, h, E, sidx):
+        """h (n, d) -> puan (n, |sidx|) fp32; matmul bf16, autocast'ten bagimsiz."""
         with torch.autocast(h.device.type, enabled=False):
-            return (self.q(h.float()).bfloat16() @ E.detach().bfloat16().T).float() + self.b_v
+            return (self.q(h.float()).bfloat16() @ E.detach()[sidx].bfloat16().T).float() + self.b_v[sidx]
+
+    @staticmethod
+    def full_score(sel):
+        """select ciktisi -> puan (n, VOCAB), secilemeyenler -inf (teshis / test icin; egitim yolu kullanmaz)."""
+        out = sel["score"].new_full((len(sel["score"]), VOCAB), float("-inf"))
+        out[:, sel["sidx"]] = sel["score"]
+        return out
 
     def select(self, h, E, pairs):
         """h (n, d) ozet durumlari, pairs bag_copy -> dict: inbag (n, VOCAB), pbit (P_k, kesilmis), cand_r / ok_r (n, R) P_k
@@ -172,17 +188,22 @@ class Bag(torch.nn.Module):
         pbit[bag[keep], word[keep]] = True
         n_p = torch.bincount(bag[keep], minlength=n)
         allowed = self.seen & ~bag_mask(self.core) & ~pbit
-        score = self.scores(h, E).masked_fill(~allowed, float("-inf"))          # bir kez: topk ve secici kaybi ayni tensor
-        top = score.detach().topk(R, 1)
+        sidx, spos = self.selectable()
+        score = self.scores(h, E, sidx).masked_fill(pbit[:, sidx], float("-inf"))   # (n, |sidx|): topk ve kayip ayni tensor
+        kk = min(R, len(sidx))                                                # secilebilir < R: kalan yerler bos (-1)
+        top = score.detach().topk(kk, 1)
+        j = torch.arange(kk, device=dev)[None]
+        lw = torch.where(torch.isfinite(top.values) & (j < (R - n_p)[:, None]), sidx[top.indices], -1)
+        lw = torch.cat([lw, lw.new_full((n, R - kk), -1)], 1)
         j = torch.arange(R, device=dev)[None]
-        lw = torch.where(torch.isfinite(top.values) & (j < (R - n_p)[:, None]), top.indices, -1)
         cand_r = torch.where(j < n_p[:, None], plist, lw.gather(1, (j - n_p[:, None]).clamp_min(0)))
         ok_r = cand_r >= 0
         inbag = pbit.clone()
         inbag[:, self.core] = True
         rows_, cols_ = ok_r.nonzero(as_tuple=True)
         inbag[rows_, cand_r[rows_, cols_]] = True
-        return dict(inbag=inbag, pbit=pbit, cand_r=cand_r, ok_r=ok_r, score=score, allowed=allowed, p_over=(~keep).sum())
+        return dict(inbag=inbag, pbit=pbit, cand_r=cand_r, ok_r=ok_r, score=score, sidx=sidx, spos=spos, allowed=allowed,
+                    p_over=(~keep).sum())
 
     def batch_select(self, batch, h, E):
         """PackedBatch, h (B, T, d) -> select'in ciktisi + ids (B, T), rows, cols."""
@@ -200,7 +221,7 @@ class Bag(torch.nn.Module):
         """Secici kaybi (belge 54 s4.1, token basina havuz): izinli (C u P_k disi, gorulmus) hedeflerde -log softmax_izinli
         (puan)[y] -> (toplam, sayi)."""
         m = sel["allowed"][bag, y]
-        b, t = bag[m], y[m]
+        b, t = bag[m], sel["spos"][y[m]]                                      # izinli => secilebilir (spos >= 0)
         lse = sel["score"].logsumexp(1)                                       # score izinli disinda zaten -inf (select)
         return (lse[b] - sel["score"][b, t]).sum(), m.sum()
 

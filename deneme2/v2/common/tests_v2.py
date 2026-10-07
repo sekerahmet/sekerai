@@ -540,8 +540,8 @@ def _recipe_bag(R):
             fi = full & (b.target.flatten() >= 0)
             ce = torch.nn.functional.cross_entropy(h0.flatten(0, 1)[fi] @ m.E.weight.T, b.target.flatten()[fi], reduction="sum")
             ids, y = sel["ids"].flatten()[pos], b.target.flatten()[pos]
-            allw = sel["allowed"]
-            man = sum(float(torch.logsumexp(sel["score"][i][allw[i]], 0) - sel["score"][i, w])
+            allw, fsc = sel["allowed"], R.Bag.full_score(sel)
+            man = sum(float(torch.logsumexp(fsc[i][allw[i]], 0) - fsc[i, w])
                       for i, w in zip(ids.tolist(), y.tolist()) if allw[i, w])
             nsel = sum(bool(allw[i, w]) for i, w in zip(ids.tolist(), y.tolist()))
             res.append(dict(layout=layout, nll=abs(float(nll) - float(ref)), rel=rel, goal=float(goal) == float(nll),

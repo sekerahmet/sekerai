@@ -247,7 +247,8 @@ def main(argv=None):
             batch = D.build_batch(st, batches(o, r, a, min(a + D.BATCH_ROWS, n)), layout, dev, row_len)
             with torch.no_grad():
                 b = bag_batch(model, mask_fn, bag, batch, cuda)
-                sc = dict(selector=lambda b0, b1, b=b: b["score"][b0:b1], freq=lambda b0, b1: freq.expand(b1 - b0, -1))
+                fs = R.Bag.full_score(b)
+                sc = dict(selector=lambda b0, b1, fs=fs: fs[b0:b1], freq=lambda b0, b1: freq.expand(b1 - b0, -1))
                 _collect(acc, b, ranks(b, sc))
                 if name == "exam" and a == 0:
                     ex = examples(b, batch, sc, tok)
