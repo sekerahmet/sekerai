@@ -1,35 +1,33 @@
 """sentence (V2) -- SentenceTransformer (Model Z), GPT-2 token.  Tarif belge/model_z_temel/22 (duzen, maske, onbellek),
-29 / 31 (z modelin kendi E'sinden), alanlar belge 21 (PackedBatch); temizlik belge 33 (kullanici, 6 Ekim: "model Z kendi
-E standart varsayılan olsun bunun dışındakiler arşive gitsen").  Eski secenekler (meaning, ortak sozluk, open_z):
-git etiketi v2-before-cleanup-20261006, arsiv/v2_20261006/.
+35 (ogrenilen z), 40 / 43 (global_layers); alanlar belge 21 (PackedBatch).  Formullu z (sentence_z, z_in / z_norm,
+--learned_z 0) kaldirildi (kullanici, 7 Ekim: "bence temizlik başlasın"; belge 44): git etiketi
+v2-before-formula-cleanup-20261007.  Daha eski secenekler (meaning, ortak sozluk, open_z): v2-before-cleanup-20261006.
 
-Hikaye tek dizi; cumle k'nin END'inin yerinde Z_k (girdi z_in(z_norm(z_k))), dizi boyu transformer akisiyla ayni,
-hedefler konum konum ayni:
+Hikaye tek dizi; cumle k'nin END'inin yerinde Z_k (girdi E(END), transformer'in END konumuyla ayni girdi), dizi boyu
+transformer akisiyla ayni, hedefler konum konum ayni:
     girdi   BOS  t_11 .. t_1L  [Z_1]  t_21 .. t_2L  [Z_2] ...  [Z_n]
     hedef   t_11 t_12 .. END   t_21   t_22 .. END   t_31  ...  EOS
     konum   0    1    .. L     1      2    ..       2     ...  n     (Z_k k; cumle k, token i: k-1+i)
-z (sentence_z): f(v) = [birim(E(v)[:h]) ; birim(E(v)[h:])] / sqrt(2), E modelin ogrenilen sozlugu (girdi ve cikis ile
-ayni; tam gradyan), yari ici R_t; z = [konum ; torba].
-Maske (model_z_mask, tek mask_mod -> dense ya da FlexAttention BlockMask): ayni hikaye, kv <= q, ve kv BOS/ZTOK ya da
-(q, kv ayni cumlenin token'i).  Uretim: SummaryCache (ozet onbellegi BOS + Z'ler kalici, cumle onbellegi cumle bitince
-silinir).  Tarif (Llama sinifi): pre-norm RMSNorm, RoPE, QK-norm (fp32), SwiGLU, bias yok, tied embedding.
+Maske (model_z_read_mask, tek mask_mod -> dense ya da FlexAttention BlockMask): ayni hikaye, kv <= q, ve kv BOS/ZTOK ya
+da (q, kv ayni cumlenin token'i; Z_k kendi cumlesinin token'larini da gorur).  Z_k'nin her katmandaki hali sonraki
+cumlelerin K/V'si (belge 35 (b)).  model_z_mask: okumasiz hali (teshis: z_ablate read_off).  Uretim: SummaryCache (ozet
+onbellegi BOS + Z'ler kalici, cumle onbellegi cumle bitince silinir).  Tarif (Llama sinifi): pre-norm RMSNorm, RoPE,
+QK-norm (fp32), SwiGLU, bias yok, tied embedding.
 
-learned_z (belge 35 Yol A (b); kullanici, 6 Ekim: "formüllü Z üzerine yatırım yapmıyoruz"): formul yok; Z_k girdisi
-E(END) (transformer'in END konumuyla ayni girdi), maske model_z_read_mask (Z_k ayrica kendi cumlesinin token'larini
-gorur); Z_k'nin her katmandaki hali sonraki cumlelerin K/V'si.  z_norm / z_in / anahtarlar yok.
-
-global_layers N (yalniz learned_z; belge 40 s6.2 Deney G): son N blok tam causal (model_z_global_mask: ayni hikayenin
-butun onceki konumlari, kelime ve Z, gercek sirayla); konum GERCEK hikaye konumu (story_positions = transformer duzeninin
-pos'u; mantiksal konumda farkli cumlelerin token'lari ayni konumu paylasir, belge 40 Gorus 4).  Ilk 8 - N blok bugunku
-gibi.  attn: (yerel, global) ikilisi; onbellek global bloklarda butun gecmisin K/V'sini tutar.
+global_layers N (belge 40 s6.2 Deney G; train.py varsayilani 1, belge 43 s9): son N blok tam causal (model_z_global_mask:
+ayni hikayenin butun onceki konumlari, kelime ve Z, gercek sirayla); konum GERCEK hikaye konumu (story_positions =
+transformer duzeninin pos'u; mantiksal konumda farkli cumlelerin token'lari ayni konumu paylasir, belge 40 Gorus 4).
+Ilk 8 - N blok bugunku gibi.  attn: (yerel, global) ikilisi; onbellek global bloklarda butun gecmisin K/V'sini tutar.
 """
 import math
+import os
+import sys
 
 import torch
 import torch.nn.functional as F
 
-from sentence_z import encode_z
-from data import END_ID, EOS_ID, VOCAB, Kind  # noqa: E402  (sentence_z common/'u yola ekledi)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "common"))
+from data import END_ID, EOS_ID, VOCAB, Kind  # noqa: E402
 
 BOS, TOKEN, END, ZTOK, PAD = Kind.BOS, Kind.TOKEN, Kind.END, Kind.ZTOK, Kind.PAD
 
@@ -57,7 +55,7 @@ def model_z_mask(kind, doc, sent):
 
 
 def model_z_read_mask(kind, doc, sent):
-    """learned_z maskesi: model_z_mask + ZTOK sorgusu kendi cumlesinin token'larini gorur (build_batch Z_k'nin sent'ine
+    """Ogrenilen z maskesi: model_z_mask + ZTOK sorgusu kendi cumlesinin token'larini gorur (build_batch Z_k'nin sent'ine
     kendi cumle numarasini yazar).  Z_k cumlenin sonunda: gordugu her token ondan once (belge 35 s1)."""
     def mask_mod(b, h, q, kv):
         kq, kk = kind[b, q], kind[b, kv]
@@ -126,29 +124,15 @@ class Block(torch.nn.Module):
             a = flex_attention(q, k, v, block_mask=attn)
         return self._finish(x, a)
 
-
 class SentenceTransformer(torch.nn.Module):
-    def __init__(self, keys, d=512, layers=8, heads=8, learned_z=False, global_layers=0):
+    def __init__(self, d=512, layers=8, heads=8, global_layers=0):
         super().__init__()
-        self.learned_z = bool(learned_z)
         self.global_layers = int(global_layers)
-        assert 0 <= self.global_layers <= layers and (self.learned_z or not self.global_layers), \
-            "global_layers 0..layers ve yalniz learned_z"
-        if self.learned_z:
-            keys = None                                          # formul yok: anahtar, z_norm, z_in kurulmaz
-        else:
-            assert keys["z_pos"] == d, "d (%d) = z'nin iki yarisi (%d) olmali: build_keys(longest, d // 2)" % (
-                d, keys["z_pos"])
-        self.keys = keys                                         # z anahtarlari (parametre degil, state_dict'te yok)
-        self.mask_fn = model_z_read_mask if self.learned_z else model_z_mask
-        if self.global_layers:                                   # (yerel, global): train._attn ikisini de kurar
-            self.mask_fn = (self.mask_fn, model_z_global_mask)
+        assert 0 <= self.global_layers <= layers, "global_layers 0..layers"
+        self.mask_fn = (model_z_read_mask, model_z_global_mask) if self.global_layers else model_z_read_mask
         self.END, self.EOS = END_ID, EOS_ID
         hidden = -(-int(8 * d / 3) // 8) * 8
-        self.E = torch.nn.Embedding(VOCAB, d)                    # kurma sirasi E, z_norm, z_in, blocks, norm (belge 33 s5)
-        if not self.learned_z:
-            self.z_norm = torch.nn.RMSNorm(keys["z"])
-            self.z_in = torch.nn.Linear(keys["z"], d, bias=False)
+        self.E = torch.nn.Embedding(VOCAB, d)                    # kurma sirasi E, blocks, norm (ilk agirlik bunu izler)
         self.blocks = torch.nn.ModuleList(Block(d, heads, hidden) for _ in range(layers))
         self.norm = torch.nn.RMSNorm(d)
         for name, p in self.named_parameters():
@@ -156,44 +140,12 @@ class SentenceTransformer(torch.nn.Module):
                 std = 0.02 / math.sqrt(2 * layers) if name.endswith(("proj.weight", "down.weight")) else 0.02
                 torch.nn.init.normal_(p, std=std)
 
-    def f_table(self):
-        """z'nin token vektorleri (VOCAB, d), guncel E'den: [birim(E[:h]) ; birim(E[h:])] / sqrt(2) (gradyanli).  Yalniz
-        formullu yol."""
-        assert not self.learned_z, "learned_z'de formullu z yok"
-        h = self.keys["half"]
-        E = self.E.weight.float()
-        n = lambda x: x / x.norm(dim=1, keepdim=True).clamp_min(1e-9)  # noqa: E731
-        return torch.cat([n(E[:, :h]), n(E[:, h:])], 1) / 2 ** 0.5
-
-    def _z(self, sents, device, F_table=None):
-        """Token listeleri (END yok) -> z (N, z_dim) fp32, cihazda (uretim; flat CPU'da kurulur).  F_table: generate
-        basinda bir kez kurulan tablo.  Yalniz formullu yol."""
-        assert not self.learned_z, "learned_z'de formullu z yok"
-        if not sents:
-            return torch.zeros(0, self.keys["z"], device=device)
-        L = max(1, max(len(s) for s in sents))
-        ids = torch.zeros(len(sents), L, dtype=torch.long)
-        mask = torch.zeros(len(sents), L, dtype=torch.bool)
-        for i, s in enumerate(sents):
-            ids[i, :len(s)] = torch.as_tensor(list(s), dtype=torch.long)
-            mask[i, :len(s)] = True
-        flat = tuple(x.to(device) for x in mask.nonzero(as_tuple=True))      # CPU'da: GPU senkronu yok
-        return encode_z(self.keys, self.f_table() if F_table is None else F_table, ids.to(device), mask.to(device), flat)
-
     def _batch_hidden(self, batch, attn=None):
-        """PackedBatch (belge 21: tokens, kind, pos, doc, sent, z_slots, z_sentences, z_flat) -> h; attn yoksa dense
-        maske.  z dogrudan Z_k satirlarina yazilir (zvec / boolean indeks / .any() / nonzero yok: GPU senkronu yok;
-        belge 24 s5 B, belge 33 s3).  global_layers: attn (yerel, global) ikilisi; tek maske DURUR (sessiz yanlis yok)."""
+        """PackedBatch (belge 21: tokens, kind, pos, doc, sent) -> h; attn yoksa dense maske.  Z_k girdisi E(END), okuma
+        maskeden.  global_layers: attn (yerel, global) ikilisi; tek maske DURUR (sessiz yanlis yok)."""
         B, T = batch.tokens.shape
         dev = batch.tokens.device
-        if self.learned_z:                                                  # Z_k girdisi E(END); okuma maskeden
-            x = self.E(torch.where(batch.kind == ZTOK, torch.full_like(batch.tokens, END_ID), batch.tokens))
-        else:
-            x = self.E(batch.tokens)
-            ids, mask = batch.z_sentences                                   # (n_z, Lmax), Z_k'nin cumlesi (belge 21)
-            if len(ids):                                                    # CPU tarafi uzunluk
-                z = encode_z(self.keys, self.f_table(), ids.to(dev), mask.to(dev), batch.z_flat)
-                x = x.index_put(batch.z_slots, self.z_in(self.z_norm(z)).to(x.dtype))
+        x = self.E(torch.where(batch.kind == ZTOK, torch.full_like(batch.tokens, END_ID), batch.tokens))
         if not self.global_layers:
             if attn is None:
                 attn = _dense(self.mask_fn(batch.kind, batch.doc, batch.sent), B, T, dev)
@@ -226,16 +178,7 @@ class SentenceTransformer(torch.nn.Module):
     def generate(self, prompts, max_sentences, max_tokens, generator=None):
         """prompts: hikaye basina istem cumleleri (token listeleri, END yok) -> her istem icin (uretilen cumleler,
         END ile bitti mi listesi, eos).  generator None: acgozlu, yoksa ornekleme.  SummaryCache ile, istem basina.
-        Cumle en cok min(max_tokens, longest) token: z'nin konum anahtari longest'e kadar (egitimin en uzun cumlesi);
-        kesilen cumle max_tokens kesimi gibi ended False ile doner (belge 26 B2).  learned_z: anahtar yok, sinir yalniz
-        max_tokens."""
-        dev = self.E.weight.device
-        if self.learned_z:
-            Ft, zf = None, lambda s: None                                   # noqa: E731
-        else:
-            max_tokens = min(max_tokens, len(self.keys["signs"]) - 1)
-            Ft = self.f_table()                                             # uretim boyunca E sabit: bir kez
-            zf = lambda s: self._z([s], dev, Ft)[0]                         # noqa: E731
+        Cumle en cok max_tokens token; kesilen cumle ended False ile doner (belge 26 B2)."""
         out = []
         for sents in prompts:
             cache = SummaryCache(self)
@@ -243,7 +186,7 @@ class SentenceTransformer(torch.nn.Module):
             for s in sents:
                 for t in s:
                     logits = cache.append_token(t)
-                logits = cache.close_sentence(zf(s))
+                logits = cache.close_sentence()
             gen, ended, eos = [], [], False
             while len(gen) < max_sentences:
                 cur, done = [], False
@@ -263,17 +206,16 @@ class SentenceTransformer(torch.nn.Module):
                     break
                 gen.append(cur)
                 ended.append(done)
-                logits = cache.close_sentence(zf(cur))
+                logits = cache.close_sentence()
             out.append((gen, ended, eos))
         return out
 
 
 class SummaryCache:
-    """Tek hikayenin KV onbellegi (22 s4): ozet (BOS + Z_1..Z_k; kelime gormedikleri icin kalici) ve cumle (simdiki
-    cumlenin token'lari; cumle bitince silinir).  Konumlar kendiliginden: token k+i, Z_k k.  Her cagri sonraki token'in
-    logit'ini dondurur (self.logits).  learned_z: Z_k ozet + kendi cumlesinin onbellegine bakar, K/V'si ozete yazilir,
-    cumle onbellegi ANCAK sonra silinir (belge 35 s4).  global_layers bloklari: butun gecmisin K/V'si (all_k / all_v),
-    gercek konumla (self.t: BOS 0, her token ve Z +1)."""
+    """Tek hikayenin KV onbellegi (22 s4, 35 s4): ozet (BOS + Z_1..Z_k; kalici) ve cumle (simdiki cumlenin token'lari).
+    Konumlar kendiliginden: token k+i, Z_k k.  Her cagri sonraki token'in logit'ini dondurur (self.logits).  Z_k ozet +
+    kendi cumlesinin onbellegine bakar, K/V'si ozete yazilir, cumle onbellegi ANCAK sonra silinir.  global_layers
+    bloklari: butun gecmisin K/V'si (all_k / all_v), gercek konumla (self.t: BOS 0, her token ve Z +1)."""
 
     def __init__(self, model):
         self.m = model
@@ -321,17 +263,14 @@ class SummaryCache:
         return self.logits
 
     @torch.no_grad()
-    def close_sentence(self, z=None):
-        """Cumle bitti: Z_k ozet onbellegine, cumle onbellegi silinir -> sonraki cumlenin ilk token'i (ya da EOS)
-        logit'i.  z (z_dim,) formullu yolda; learned_z'de None (girdi E(END), Z_k cumleyi okur)."""
+    def close_sentence(self):
+        """Cumle bitti: Z_k (girdi E(END), cumleyi okur) ozet onbellegine, cumle onbellegi silinir -> sonraki cumlenin ilk
+        token'i (ya da EOS) logit'i."""
         self.n_z += 1
         self.i = 0
         self.t += 1
-        if self.m.learned_z:
-            x = self.m.E(torch.tensor([[END_ID]], device=self.dev))
-        else:
-            x = self.m.z_in(self.m.z_norm(z.float()[None, None])).to(self.m.E.weight.dtype)
-        self.logits = self._step(x, self.n_z, read_sentence=self.m.learned_z, summary=True)
+        x = self.m.E(torch.tensor([[END_ID]], device=self.dev))
+        self.logits = self._step(x, self.n_z, read_sentence=True, summary=True)
         self.sen_k = [None] * len(self.sen_k)                               # Z_k'den SONRA
         self.sen_v = [None] * len(self.sen_v)
         return self.logits

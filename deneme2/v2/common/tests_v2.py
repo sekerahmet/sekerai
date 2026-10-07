@@ -2,7 +2,7 @@
 yoksa tokenizer'li sinamalar ATLANIR), pack (sentetik), recipe (maske, WSD, gruplar, Muon, surdurme, hiz), metrics (sentence_repeat,
 normalize_words, story_generation, exam_scores), integration (iki modelin loss_per_target'i ve recipe.output_loss'u
 gercek build_batch ile; model dosyalari yalniz testte import edilir), train (train.py uctan uca, iki model, kucuk veri;
-eski kimlik reddi dahil; ~1-2 dk), drive (valid akisi: V1 ile birebir esleme, okuma istemleri), tokens (data.token_counts).  Teshis araclari:
+eski kimlik reddi, etiketteki kodla esdegerlik dahil; ~3 dk), drive (valid akisi: V1 ile birebir esleme, okuma istemleri), tokens (data.token_counts).  Teshis araclari:
 diag/tests_diag.py.
 
     python tests_v2.py [--only data,pack,recipe,metrics,integration,train,drive,tokens]
@@ -45,7 +45,9 @@ TMP = tempfile.mkdtemp(prefix="tests_v2_")
 atexit.register(shutil.rmtree, TMP, True)          # train grubu ~200 MB birakiyordu
 RESULTS = []
 
-GOLDEN_TORCH = "2.14.0+cpu"     # belge 33 adim 4: v2-before-cleanup-20261006 --own_vocab 1 ile bit duzeyinde ayni olculdu
+GOLDEN_TORCH = "2.14.0+cpu"     # transformer: belge 33 adim 4 (v2-before-cleanup-20261006 ile bit duzeyinde ayni olculdu);
+# model_z (G 1) / model_z_g0: etiket v2-before-formula-cleanup-20261007 kodundan olculdu (7 Ekim, belge 44; --layers 2,
+# adamw, --steps 6; scratchpad golden_measure.py), bugunku kod ayni degeri verdi
 GOLDEN = {
  "transformer": {
   "first6": [
@@ -59,17 +61,16 @@ GOLDEN = {
   "sha": "960799ace9cc5ec81208fa6002fd7ef35d087b2a3af6a93b582e63f8be0c96ea"
  },
  "model_z": {
-  "first6": [
-   10.8346,
-   10.6259,
-   10.3602,
-   10.0859,
-   9.8245,
-   9.5621
-  ],
-  "sha": "654ac2820cf7d28f7e0c0bff79e4181e2b447bedc0b6454867385c71bf21ad68"
+  "first6": [10.8696, 10.6366, 10.3411, 10.0874, 9.8309, 9.5415],
+  "sha": "b6783484b90c6d6e97ad9e2683f143b99567739503bad1d93cc1f7776c4e54ae"
+ },
+ "model_z_g0": {
+  "first6": [10.8705, 10.6408, 10.3417, 10.0936, 9.831, 9.5423],
+  "sha": "bab46c04017cb4a3cb0abbf0a6a25c9025b64ebf98c13ac54f4c616ad429b0ae"
  }
 }
+GOLDEN_ARGS = {"transformer": ["--model", "transformer"], "model_z": ["--model", "model_z", "--layers", "2"],
+               "model_z_g0": ["--model", "model_z", "--layers", "2", "--global_layers", "0"]}
 
 
 def check(name, ok, info=""):
@@ -154,7 +155,6 @@ def _reference_batch(stories, row_stories_list, layout, row_len):
     B = len(row_stories_list)
     out = {f: np.full((B, row_len), v, np.int64) for f, v in (("tokens", 0), ("kind", K.PAD), ("pos", 0), ("doc", -1),
                                                                ("sent", -1), ("target", -100), ("target_kind", -1))}
-    zr, zc, zs = [], [], []
     for r, row in enumerate(row_stories_list):
         c = 0
         for d, h in enumerate(row):
@@ -170,10 +170,6 @@ def _reference_batch(stories, row_stories_list, layout, row_len):
                 ps = list(range(T))
             else:
                 ps = [0] + [q for k, x in enumerate(ss, 1) for q in list(range(k, k + len(x))) + [k]]
-                for k, x in enumerate(ss):
-                    zr.append(r)
-                    zc.append(c + sum(len(y) + 1 for y in ss[:k + 1]))
-                    zs.append(list(x))
                 seq = [0 if x == D.END_ID else x for x in seq]
                 kd = [K.ZTOK if x == K.END else x for x in kd]
             sl = slice(c, c + T)
@@ -181,7 +177,7 @@ def _reference_batch(stories, row_stories_list, layout, row_len):
                          ("target_kind", tk)):
                 out[f][r, sl] = v
             c += T
-    return out, zr, zc, zs
+    return out
 
 
 def t_pack():
@@ -219,19 +215,8 @@ def t_pack():
         bz.tokens[~endpos], bt.tokens[~endpos]) and torch.equal(bz.kind[~endpos], bt.kind[~endpos])
     check("iki duzen ayni boy ve hedef; model_z'de END'in yerinde ZTOK (token 0), baska fark yok (belge 22)",
           same and ztok)
-    zr, zc = bz.z_slots
-    ids, m = bz.z_sentences
-    zs = [ids[i][m[i]].tolist() for i in range(len(ids))]
-    zf = [bz.z_flat[0].tolist(), bz.z_flat[1].tolist()]
-    nz = [x.tolist() for x in m.nonzero(as_tuple=True)]
-    check("z_flat = z_sentences mask.nonzero (ayni sira, int64, CPU numpy'dan); transformer'da None", zf == nz
-          and all(x.dtype == torch.int64 for x in bz.z_flat) and bt.z_flat is None, str(zf))
-    check("ZTOK konumunun sent alani = kendi cumle numarasi (belge 35 Yol A okuma maskesi buna dayaniyor)",
-          bz.sent[bz.kind == K.ZTOK].tolist() == [0, 1, 2, 0, 0, 1] and torch.equal(bz.sent[zr, zc], torch.tensor(
-              [0, 1, 2, 0, 0, 1], dtype=bz.sent.dtype)), str(bz.sent[bz.kind == K.ZTOK].tolist()))
-    check("z_slots ZTOK konumlarini, z_sentences o Z'nin cumlesini veriyor (cumle sirasiyla)",
-          all(bz.kind[r, c] == K.ZTOK for r, c in zip(zr.tolist(), zc.tolist()))
-          and zs == [[10, 11, 12], [13], [14, 15], [20, 21], [30], [31, 32, 33]] and bt.z_slots is None)
+    check("ZTOK konumunun sent alani = kendi cumle numarasi (belge 35 okuma maskesi buna dayaniyor)",
+          bz.sent[bz.kind == K.ZTOK].tolist() == [0, 1, 2, 0, 0, 1], str(bz.sent[bz.kind == K.ZTOK].tolist()))
     rng = np.random.default_rng(1)
     st = _Synthetic([[rng.integers(0, 50000, int(rng.integers(1, 30))).tolist() for _ in range(int(rng.integers(1, 40)))]
                      for _ in range(120)])
@@ -240,14 +225,9 @@ def t_pack():
     ok = True
     for lay in ("transformer", "model_z"):
         b = D.build_batch(st, rows, lay)
-        ref, zr_, zc_, zs_ = _reference_batch(st, rows, lay, D.ROW_LEN)
+        ref = _reference_batch(st, rows, lay, D.ROW_LEN)
         ok &= all(np.array_equal(getattr(b, f).numpy(), ref[f]) for f in ref)
-        if lay == "model_z":
-            ids, m = b.z_sentences
-            ok &= b.z_slots[0].tolist() == zr_ and b.z_slots[1].tolist() == zc_ and [
-                ids[i][m[i]].tolist() for i in range(len(ids))] == zs_
-            ok &= all(torch.equal(x, y) for x, y in zip(b.z_flat, m.nonzero(as_tuple=True)))
-    check("build_batch (vektorel) = dongulu basvuru, 120 rastgele hikaye, 8 satir, iki duzen; z_flat = mask.nonzero", ok)
+    check("build_batch (vektorel) = dongulu basvuru, 120 rastgele hikaye, 8 satir, iki duzen", ok)
     check("doc / sent / story_ids", bt.doc[0].tolist() == [0] * 10 + [1] * 4 + [-1, -1]
           and bt.sent[0].tolist() == [-1, 0, 0, 0, 0, 1, 1, 2, 2, 2, -1, 0, 0, 0, -1, -1]
           and bt.story_ids.tolist() == [[0, 1], [2, -1]])
@@ -597,11 +577,10 @@ def t_integration():
         check("entegrasyon: transformer modeli kurulur", False, traceback.format_exc(limit=1).splitlines()[-1])
     try:
         sys.path.insert(0, os.path.join(root, "model_z"))
-        import sentence_z as SZ
-        from sentence import SentenceTransformer, model_z_mask
+        from sentence import SentenceTransformer
         torch.manual_seed(0)
-        models.append(("model_z", SentenceTransformer(SZ.build_keys(8, 8), d=16, layers=1, heads=2).eval(),
-                       model_z_mask))
+        mz = SentenceTransformer(d=16, layers=2, heads=2, global_layers=1).eval()     # train.py varsayilani (G 1)
+        models.append(("model_z", mz, mz.mask_fn))
     except Exception:  # noqa: BLE001
         check("entegrasyon: Model Z modeli kurulur", False, traceback.format_exc(limit=1).splitlines()[-1])
     for layout, model, mask_fn in models:
@@ -609,16 +588,16 @@ def t_integration():
             with torch.no_grad():
                 b = D.build_batch(st, rows[:2], layout, row_len=128)
                 nll, pred, tk = model.loss_per_target(b)
-                nll2, _, _ = model.loss_per_target(b, R.dense_mask(b, mask_fn))
+                nll2, _, _ = model.loss_per_target(b, _dense_pair(b, mask_fn))
             k = int((b.target >= 0).sum())
             ok = len(nll) == len(pred) == len(tk) == k and bool(torch.isfinite(nll).all()) and torch.equal(
                 tk, b.target_kind[b.target >= 0]) and (nll - nll2).abs().max().item() < 1e-5
             check("entegrasyon %s: loss_per_target(build_batch) sozlesmesi; recipe.dense_mask(maske fonksiyonu) = "
-                  "modelin kendi maskesi" % layout, ok, "hedef %d, fark %.1e" % (k, (nll - nll2).abs().max().item()))
+                  "modelin kendi maskesi (Model Z: yerel + global ikilisi)" % layout, ok, "hedef %d, fark %.1e" % (k, (nll - nll2).abs().max().item()))
             e = M.exam_scores(model, st, (ro, rs), nb, layout, batch_rows=2)
             check("entegrasyon %s: exam_scores uctan uca" % layout, math.isfinite(e["loss"]) and e["stories"] == st.n,
                   "kayip %.3f bpb %.3f" % (e["loss"], e["bits_per_byte"]))
-            dense = R.dense_mask(b, mask_fn)
+            dense = _dense_pair(b, mask_fn)
             ws = (model.E.weight, model.blocks[0].qkv.weight)
             la = R.output_loss(model._batch_hidden(b, dense).flatten(0, 1), model.E.weight, b.target.flatten())
             ga = torch.autograd.grad(la, ws)
@@ -630,8 +609,8 @@ def t_integration():
                   % layout, rel_loss < 1e-6 and rel < 1e-5,
                   "kayip goreli farki %.1e, gradyan goreli %.1e" % (rel_loss, rel))
             if layout == "model_z":
-                check("entegrasyon model_z: z_flat ile _batch_hidden + geri yayilim torch.nonzero'suz (GPU senkronu "
-                      "yok; vekil: nonzero yasak); z_flat'siz batch DURUR (sessiz geri donus yok)", *_no_nonzero(model, b, dense))
+                check("entegrasyon model_z: _batch_hidden + geri yayilim torch.nonzero'suz (GPU senkronu yok; vekil: "
+                      "nonzero yasak)", *_no_nonzero(model, b, dense))
         except Exception:  # noqa: BLE001
             check("entegrasyon %s: loss_per_target(build_batch)" % layout, False,
                   traceback.format_exc(limit=2).splitlines()[-1])
@@ -639,7 +618,6 @@ def t_integration():
 
 def _no_nonzero(model, b, dense):
     """torch.nonzero / Tensor.nonzero yasakken model_z _batch_hidden + output_loss geri yayilimi -> (gecti, bilgi)."""
-    import dataclasses
     import recipe as R
     real = (torch.Tensor.nonzero, torch.nonzero)
 
@@ -654,8 +632,13 @@ def _no_nonzero(model, b, dense):
         ok, info = False, str(e)
     finally:
         torch.Tensor.nonzero, torch.nonzero = real
-    stops = _raises(Exception, model._batch_hidden, dataclasses.replace(b, z_flat=None), dense)
-    return ok and stops, info + ("" if stops else " | z_flat=None ile kostu")
+    return ok, info
+
+
+def _dense_pair(b, mask_fn):
+    """recipe.dense_mask; mask_fn ikiliyse (global_layers) iki maske (train._attn'in CPU yolu)."""
+    import recipe as R
+    return tuple(R.dense_mask(b, f) for f in mask_fn) if isinstance(mask_fn, tuple) else R.dense_mask(b, mask_fn)
 
 
 def _train_root(tok_path):
@@ -693,8 +676,8 @@ def _train_root(tok_path):
 
 
 def t_train():
-    """train.py uctan uca (CPU, d 16, 1 katman, gercek build_batch / modeller / exam_scores / story_generation): kayip
-    duser, ilk adim kaybi bagimsiz hesapla ayni, lr = wsd_lr, results / samples alanlari, kesilip surdurulen = kesintisiz
+    """train.py uctan uca (CPU, d 16, 1 katman (Model Z 2: yerel + global), gercek build_batch / modeller / exam_scores /
+    story_generation): kayip duser, ilk adim kaybi bagimsiz hesapla ayni, lr = wsd_lr, results / samples alanlari, kesilip surdurulen = kesintisiz
     (bit duzeyinde), uzatma = bastan uzun kosu, bitmis kosu durur, ayar farki durur, --steps, yerel kopya sha'si."""
     import traceback
     import recipe as R
@@ -716,7 +699,7 @@ def t_train():
     exits = lambda argv: _raises(SystemExit, TR.main, argv)  # noqa: E731
     try:
         for model in ("transformer", "model_z"):
-            cmd = base + ["--model", model] + (["--learned_z", "0"] if model == "model_z" else [])   # formullu yol
+            cmd = base + ["--model", model] + (["--layers", "2"] if model == "model_z" else [])   # Model Z G 1
             a = TR.main(cmd + ["--epochs", "2", "--out", out(model + "_A")])
             total, per = a["plan"]["total"], a["plan"]["per_epoch"]
             L = [w["loss"] for w in a["log"]]
@@ -724,12 +707,12 @@ def t_train():
                   "%d adim (%s / epok), kayip %.3f -> %.3f" % (total, per, np.mean(L[:3]), np.mean(L[-3:])))
             args = TR._args(cmd + ["--out", "x"])
             st = D.TokenStories(root, data, "train")
-            m, mask_fn, layout = TR._build(args, st.max_sentence_tokens, torch.device("cpu"))
+            m, mask_fn, layout = TR._build(args, torch.device("cpu"))
             f = np.load(os.path.join(data, "train_pack_plan_e1.npz"))
             ro, rs = f["row_offsets"], f["row_stories"]
             b = D.build_batch(st, [rs[ro[r]:ro[r + 1]].tolist() for r in range(4)], layout, "cpu", 64)
             with torch.no_grad():
-                want = m.loss_per_target(b, R.dense_mask(b, mask_fn))[0].mean().item()
+                want = m.loss_per_target(b, _dense_pair(b, mask_fn))[0].mean().item()
             lr_ok = all(w["lr"] == R.wsd_lr(w["step"] - 1, total, 1e-2) for w in a["log"])
             check("train %s: ilk adim kaybi = loss_per_target (plan e1 satirlari 0-3, ayni tohum); lr = wsd_lr" % model,
                   abs(a["log"][0]["loss"] - want) < 1e-4 and lr_ok, "%.4f / %.4f" % (a["log"][0]["loss"], want))
@@ -782,11 +765,6 @@ def t_train():
             check("train %s: uzatma (1 -> 2 epok, inis basindan) = bastan 2 epok (bit duzeyinde); eski ciktilar %s" % (
                 model, os.path.basename(arch)), same(state(out(model + "_A")), state(out(model + "_C")))
                 and all(os.path.exists(os.path.join(arch, n)) for n in TR.OUTPUTS) and cres["plan"]["total"] == total)
-        TR.READING_LIMITS = dict(max_sentences=3, max_tokens=500)
-        early = _raises(AssertionError, TR.main, base + ["--model", "model_z", "--out", out("long")])
-        TR.READING_LIMITS = dict(max_sentences=3, max_tokens=4)
-        check("train model_z: okuma max_tokens > z konum anahtari egitimden ONCE durur (checkpoint yok)", early
-              and not os.path.exists(os.path.join(out("long"), "checkpoint.pt")))
         cmd = base + ["--model", "transformer"]
         A = out("transformer_A")
         mt = os.path.getmtime(os.path.join(A, "checkpoint.pt"))
@@ -836,61 +814,20 @@ def t_train():
         json.dump(meta, open(bj, "w"))
         check("train _local_copy: bayt bayt kopya; bozuk kopya yeniden kopyalanir; sinir dosyasinin sha'si tutmazsa durur",
               ok1 and ok2 and ok3)
-        for model in ("transformer", "model_z"):                       # sabit deger (belge 33 adim 4)
+        for model in GOLDEN:                                            # sabit deger (belge 33 adim 4, 44)
             if torch.__version__ != GOLDEN_TORCH:
                 print("ATLANDI: sabit deger torch %s ile, burada %s" % (GOLDEN_TORCH, torch.__version__), flush=True)
                 break
-            g = TR.main(base + ["--model", model, "--steps", "6", "--out", out("golden_" + model)]
-                        + (["--learned_z", "0"] if model == "model_z" else []))
+            g = TR.main(base + GOLDEN_ARGS[model] + ["--steps", "6", "--out", out("golden_" + model)])
             st_ = torch.load(os.path.join(out("golden_" + model), "agent.pt"), weights_only=False)["state"]
             per = {k: hashlib.sha256(v.contiguous().numpy().tobytes()).hexdigest() for k, v in st_.items()}
             whole = hashlib.sha256("".join(k + per[k] for k in sorted(per)).encode()).hexdigest()
-            check("train %s: sabit deger (temizlik oncesi --own_vocab 1 / transformer ile bit duzeyinde ayni olculen "
-                  "kosu): ilk 6 kayip ve agirlik sha256" % model, [w["loss"] for w in g["log"]][:6] == GOLDEN[model][
+            check("train %s: sabit deger (etiketteki kodla olculen kosu, GOLDEN yorumu): ilk 6 kayip ve agirlik sha256"
+                  % model, [w["loss"] for w in g["log"]][:6] == GOLDEN[model][
                       "first6"] and whole == GOLDEN[model]["sha"], whole[:16])
-        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
-        import generate_readings as GR
-        legacy = lambda d, **kv: (d.update({k: kv.get(k, 0) for k in TR.LEGACY}), d)[1]  # noqa: E731
-        st = D.TokenStories(root, data, "train")
-        dev = torch.device("cpu")
-        msgs, loads = {}, {}
-        for kind, src, kv in (("tf", out("transformer_A"), dict(meaning_sha256=None)),
-                              ("own", out("model_z_A"), dict(meaning_sha256=None, own_vocab=1)),
-                              ("iota", out("model_z_A"), dict(meaning_sha256="0" * 64))):
-            dst = out("legacy_" + kind)                                   # temizlik oncesi kimlikli kopya
-            shutil.copytree(src, dst)
-            for name, key in (("checkpoint.pt", "args"), ("agent.pt", "identity")):
-                pack = torch.load(os.path.join(dst, name), weights_only=False)
-                legacy(pack[key], **kv)
-                if kind == "iota":
-                    del pack[key]["own_vocab"], pack[key]["shared_vocab"], pack[key]["open_z"]   # e6e7847 kimligi
-                torch.save(pack, os.path.join(dst, name))
-            mt = os.path.getmtime(os.path.join(dst, "checkpoint.pt"))
-            msgs[kind] = (_exit_msg(TR.main, base + ["--model", "model_z" if kind != "tf" else "transformer",
-                                                     "--epochs", "3", "--out", dst, "--resume", "1"]) or "",
-                          os.path.getmtime(os.path.join(dst, "checkpoint.pt")) == mt)
-            loads[kind] = _exit_msg(GR.load_run, dst, data, dev)
-        m = GR.load_run(out("legacy_own"), data, dev)[0]
-        same_w = same(m.state_dict(), state(out("model_z_A")))
-        silent = not _raises(Exception, TR._build(TR._args(base + ["--model", "model_z", "--learned_z", "0", "--out", "x"]),
-                                                  st.max_sentence_tokens, dev)[0].load_state_dict,
-                             torch.load(os.path.join(out("legacy_iota"), "agent.pt"), weights_only=False)["state"])
-        fresh = json.load(open(os.path.join(out("model_z_A"), "config.json")))["identity"]
-        check("train: eski kimlikli checkpoint SURDURULMEZ (transformer, own, iota; iletide etiket, dosyaya dokunulmaz); "
-              "yeni kimlikte eski alanlar yok", all(TR.TAG in msg and kept for msg, kept in msgs.values())
-              and not set(fresh) & set(TR.LEGACY), msgs["own"][0][:120])
-        check("load_run: eski transformer ve eski own_vocab=1 Model Z yuklenir (agirlik ayni); eski iota Model Z DURUR "
-              "(iletide etiket; agirlik sekilleri ayni, strict yukleme hatasiz = sessiz risk)",
-              loads["tf"] is None and loads["own"] is None and same_w and TR.TAG in (loads["iota"] or "") and silent,
-              (loads["iota"] or "")[:120])
-        gone = [base + ["--model", "model_z", a, v, "--out", out("gone%d" % i)] for i, (a, v) in enumerate(
-            (("--meaning", "x.pt"), ("--own_vocab", "1"), ("--shared_vocab", "1"), ("--open_z", "2")))]
-        check("train: kaldirilan argumanlar (--meaning, --own_vocab, --shared_vocab, --open_z) veri yuklenmeden DURUR",
-              all(exits(c) and not os.path.exists(c[-1]) for c in gone))
-        if _learned_z_ready():
-            _train_learned(base, root, data, out, state, same, exits, TR)
-        else:
-            print("BEKLIYOR: learned_z modeli yok (SentenceTransformer(learned_z) / model_z_read_mask)", flush=True)
+        _train_learned(base, root, data, out, state, same, exits, TR)
+        _train_archived(base, data, out, state, same, exits, TR)
+        _train_equiv(base, root, data, prompts, out, state, same, TR)
         _train_muon(base, root, data, out, state, same, exits, TR)
         _train_global(base, root, data, out, exits, TR)
     except Exception:  # noqa: BLE001
@@ -913,14 +850,6 @@ def t_tokens():
     check("token_counts: parcali sayim = np.bincount (100.003 token, parca 7.919); dosya = donus; uzunluk GPT-2 sozlugu "
           "(EOS dahil); toplam = akis boyu", np.array_equal(c, want) and np.array_equal(disk, c)
           and len(c) == D.EOS_ID + 1 and int(c.sum()) == len(x) and c.dtype == np.int64)
-
-
-def _learned_z_ready():
-    """model_z/ learned_z'yi (belge 35 (b)) taniyor mu: SentenceTransformer(learned_z) ve model_z_read_mask."""
-    import inspect
-    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "model_z"))
-    import sentence as SM
-    return "learned_z" in inspect.signature(SM.SentenceTransformer).parameters and hasattr(SM, "model_z_read_mask")
 
 
 def _cut_and_resume(TR, cmd, out_dir):
@@ -947,18 +876,18 @@ def _cut_and_resume(TR, cmd, out_dir):
 
 
 def _train_learned(base, root, data, out, state, same, exits, TR):
-    """--learned_z 1 (belge 35 (b)) gercek SentenceTransformer ve gercek build_batch ile: kayip duser, kimlikte bayrak,
-    ilk adim (train._attn: model_z_read_mask) = modelin KENDI maskesiyle loss_per_target, okuma maskesi Z_k'ye kendi
-    cumlesini acar, kesilip surdurulen = kesintisiz, bayrak farkiyla surdurme ve transformer + bayrak DURUR."""
+    """G'siz Model Z (--global_layers 0) gercek SentenceTransformer ve gercek build_batch ile: kayip duser; ilk adim
+    (train._attn: model_z_read_mask) = modelin KENDI maskesiyle loss_per_target; okuma maskesi Z_k'ye kendi cumlesini
+    acar; kesilip surdurulen = kesintisiz."""
     import traceback
     import recipe as R
     try:
-        cmd = base + ["--model", "model_z", "--learned_z", "1", "--global_layers", "0"]          # G'siz learned_z
+        cmd = base + ["--model", "model_z", "--global_layers", "0"]
         A = out("mzl_A")
         a = TR.main(cmd + ["--epochs", "2", "--out", A])
         L = [w["loss"] for w in a["log"]]
         st = D.TokenStories(root, data, "train")
-        m, mask_fn, layout = TR._build(TR._args(cmd + ["--out", "x"]), st.max_sentence_tokens, torch.device("cpu"))
+        m, mask_fn, layout = TR._build(TR._args(cmd + ["--out", "x"]), torch.device("cpu"))
         f = np.load(os.path.join(data, "train_pack_plan_e1.npz"))
         ro, rs = f["row_offsets"], f["row_stories"]
         b = D.build_batch(st, [rs[ro[r]:ro[r + 1]].tolist() for r in range(4)], layout, "cpu", 64)
@@ -971,7 +900,7 @@ def _train_learned(base, root, data, out, state, same, exits, TR):
         tok = b.kind == D.Kind.TOKEN
         own = (b.sent[:, :, None] == b.sent[:, None, :]) & (b.doc[:, :, None] == b.doc[:, None, :]) & tok[:, None, :]
         extra = read & ~base_m
-        check("train model_z --learned_z 1: 2 epok kosar, kayip duser; kimlikte learned_z 1; ilk adim (train._attn, "
+        check("train model_z --global_layers 0: 2 epok kosar, kayip duser; kimlikte learned_z 1; ilk adim (train._attn, "
               "model_z_read_mask) = modelin kendi maskesiyle loss_per_target; okuma maskesi = model_z_mask + yalniz Z_k "
               "satirinda kendi cumlesinin token'lari", np.mean(L[-3:]) < np.mean(L[:3]) - 0.5
               and a["identity"]["learned_z"] == 1 and abs(a["log"][0]["loss"] - want) < 1e-4
@@ -980,23 +909,66 @@ def _train_learned(base, root, data, out, state, same, exits, TR):
               "kayip %.3f -> %.3f; ilk %.4f / %.4f; ek cift %d" % (np.mean(L[:3]), np.mean(L[-3:]), a["log"][0]["loss"],
                                                                  want, int(extra.sum())))
         stopped, bres = _cut_and_resume(TR, cmd + ["--epochs", "2"], out("mzl_B"))
-        check("train model_z --learned_z 1: adim 4'te kesilip surdurulen = kesintisiz (agirlik bit duzeyinde, sinav ayni)",
-              stopped and same(state(A), state(out("mzl_B"))) and bres["exam"] == dict(a["exam"],
-                                                                                         seconds=bres["exam"]["seconds"]))
-        mt = os.path.getmtime(os.path.join(A, "checkpoint.pt"))
-        plain = base + ["--model", "model_z", "--learned_z", "0"]
-        check("train: learned_z farkiyla surdurme checkpoint yuklenmeden DURUR (1 -> 0, 0 -> 1); transformer + "
-              "--learned_z 1 veri yuklenmeden DURUR",
-              exits(plain + ["--epochs", "2", "--out", A, "--resume", "1"])
-              and exits(cmd + ["--epochs", "2", "--out", out("model_z_A"), "--resume", "1"])
-              and os.path.getmtime(os.path.join(A, "checkpoint.pt")) == mt
-              and exits(base + ["--model", "transformer", "--learned_z", "1", "--out", out("tf_learned")])
-              and not os.path.exists(out("tf_learned")))
-        default = {m: TR._args(base + ["--model", m, "--out", "x"]).learned_z for m in ("model_z", "transformer")}
-        check("train: varsayilan learned_z model_z'de 1, transformer'da 0 (kullanici, 7 Ekim)",
-              default == {"model_z": 1, "transformer": 0}, str(default))
+        check("train model_z --global_layers 0: adim 4'te kesilip surdurulen = kesintisiz (agirlik bit duzeyinde, sinav "
+              "ayni)", stopped and same(state(A), state(out("mzl_B"))) and bres["exam"] == dict(
+                  a["exam"], seconds=bres["exam"]["seconds"]))
     except Exception:  # noqa: BLE001
-        check("train model_z --learned_z 1", False, traceback.format_exc(limit=3).splitlines()[-1])
+        check("train model_z --global_layers 0", False, traceback.format_exc(limit=3).splitlines()[-1])
+
+
+def _train_archived(base, data, out, state, same, exits, TR):
+    """Eski kimlikler (belge 33, 44): temizlik oncesi (6 Ekim; LEGACY alanli) ve formullu (learned_z 0) Model Z kosulari
+    load_run'da ve surdurmede DURUR (iletide git etiketi, dosyaya dokunulmaz); eski transformer yuklenir (surdurulmez);
+    global_layers / optimizer alani olmayan ogrenilen z kosusu (v2_mzl_d512_l8_lr5e-4_20261006_172433 kimligi) G'siz
+    yuklenir.  Kaldirilan argumanlar (--learned_z dahil) veri yuklenmeden DURUR."""
+    import traceback
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
+        import generate_readings as GR
+        dev = torch.device("cpu")
+        legacy = lambda d, **kv: (d.update({k: kv.get(k, 0) for k in TR.LEGACY}), d)[1]  # noqa: E731
+        formula = "v2-before-formula-cleanup-20261007"
+        msgs, loads = {}, {}
+        for kind, src, edit in (
+                ("tf", out("transformer_A"), lambda d: legacy(d, meaning_sha256=None)),
+                ("own", out("mzl_A"), lambda d: (d.pop("learned_z"), legacy(d, meaning_sha256=None, own_vocab=1))),
+                ("iota", out("mzl_A"), lambda d: [d.pop(k, None) for k in ("learned_z", "own_vocab", "shared_vocab",
+                                                                           "open_z")] and d.update(meaning_sha256="0" * 64)),
+                ("formula", out("mzl_A"), lambda d: d.update(learned_z=0)),
+                ("formula_old", out("mzl_A"), lambda d: [d.pop(k) for k in ("learned_z", "global_layers", "optimizer")]),
+                ("learned_old", out("mzl_A"), lambda d: [d.pop(k) for k in ("global_layers", "optimizer")])):
+            dst = out("old_" + kind)
+            shutil.copytree(src, dst)
+            for name, key in (("checkpoint.pt", "args"), ("agent.pt", "identity")):
+                pack = torch.load(os.path.join(dst, name), weights_only=False)
+                edit(pack[key])
+                torch.save(pack, os.path.join(dst, name))
+            mt = os.path.getmtime(os.path.join(dst, "checkpoint.pt"))
+            cmd = base + ["--model", "transformer" if kind == "tf" else "model_z"] + (
+                [] if kind == "tf" else ["--global_layers", "0"])
+            msgs[kind] = (_exit_msg(TR.main, cmd + ["--epochs", "2", "--out", dst, "--resume", "1"]) or "",
+                          os.path.getmtime(os.path.join(dst, "checkpoint.pt")) == mt)
+            loads[kind] = _exit_msg(GR.load_run, dst, data, dev)
+        m = GR.load_run(out("old_learned_old"), data, dev)[0]
+        fresh = json.load(open(os.path.join(out("mzl_A"), "config.json")))["identity"]
+        tags = dict(tf=TR.TAG, own=TR.TAG, iota=TR.TAG, formula=formula, formula_old=formula)
+        check("train: eski kimlikli checkpoint SURDURULMEZ (transformer, own, iota: etiket %s; formullu, alanlari "
+              "olmayan formullu: etiket %s; iletide etiket, dosyaya dokunulmaz); alanlari olmayan ogrenilen z bitmis kosu "
+              "olarak durur; yeni kimlikte eski alanlar yok, learned_z 1" % (TR.TAG, formula),
+              all(tags[k] in msgs[k][0] and msgs[k][1] for k in tags) and msgs["learned_old"] == ("", True) and not set(fresh) & set(TR.LEGACY) and fresh["learned_z"] == 1,
+              msgs["formula"][0][:140])
+        check("load_run: eski transformer yuklenir; temizlik oncesi (own, iota) ve formullu Model Z DURUR (iletide etiket); "
+              "global_layers / optimizer alani olmayan ogrenilen z G'siz yuklenir (agirlik ayni)",
+              loads["tf"] is None and all(tags[k] in (loads[k] or "") for k in ("own", "iota", "formula", "formula_old"))
+              and loads["learned_old"] is None and m.global_layers == 0 and same(m.state_dict(), state(out("mzl_A"))),
+              (loads["formula_old"] or "")[:140])
+        gone = [base + ["--model", "model_z", a, v, "--out", out("gone%d" % i)] for i, (a, v) in enumerate(
+            (("--meaning", "x.pt"), ("--own_vocab", "1"), ("--shared_vocab", "1"), ("--open_z", "2"), ("--learned_z", "1"),
+             ("--learned_z", "0")))]
+        check("train: kaldirilan argumanlar (--meaning, --own_vocab, --shared_vocab, --open_z, --learned_z) veri "
+              "yuklenmeden DURUR", all(exits(c) and not os.path.exists(c[-1]) for c in gone))
+    except Exception:  # noqa: BLE001
+        check("train eski kimlikler", False, traceback.format_exc(limit=3))
 
 
 def _train_muon(base, root, data, out, state, same, exits, TR):
@@ -1022,20 +994,17 @@ def _train_muon(base, root, data, out, state, same, exits, TR):
                   and a["optimizer"]["muon"]["adjust_lr_fn"] == "match_rms_adamw" and set(ck["opt"]) == {"adamw", "muon"},
                   "kayip %.3f -> %.3f (AdamW %.3f -> %.3f); ilk %.4f / %.4f" % (
                       np.mean(L[:3]), np.mean(L[-3:]), np.mean(ref[:3]), np.mean(ref[-3:]), L[0], ref[0]))
-            for lz in ((1, 0) if model == "model_z" else (0,)):
-                args = TR._args(base + ["--model", model, "--learned_z", str(lz), "--optimizer", "muon", "--out", "x"])
-                m = TR._build(args, st.max_sentence_tokens, torch.device("cpu"))[0]
-                opt, info = TR._optimizer(m, "muon", 1e-2, False)
-                name = {id(p): n for n, p in m.named_parameters()}
-                mu = [name[id(p)] for g in opt.muon.param_groups for p in g["params"]]
-                ad = [name[id(p)] for g in opt.adamw.param_groups for p in g["params"]]
-                want = sorted(n for n, p in m.named_parameters() if n.startswith("blocks.") and p.dim() == 2)
-                check("train %s (learned_z %d) muon bolusumu: her parametre tam bir grupta; Muon = bloklarin 2-B "
-                      "matrisleri; E%s AdamW'de" % (model, lz, ", z_in (decay'li)" if lz == 0 and model == "model_z" else ""),
-                      sorted(mu + ad) == sorted(name.values()) and len(set(mu + ad)) == len(mu + ad)
-                      and sorted(mu) == want and "E.weight" in ad and (lz == 1 or model == "transformer"
-                                                                         or "z_in.weight" in info["split"]["adamw_decay"]["names"]),
-                      "Muon %d, AdamW %d tensor" % (len(mu), len(ad)))
+            args = TR._args(base + ["--model", model, "--optimizer", "muon", "--out", "x"])
+            m = TR._build(args, torch.device("cpu"))[0]
+            opt, info = TR._optimizer(m, "muon", 1e-2, False)
+            name = {id(p): n for n, p in m.named_parameters()}
+            mu = [name[id(p)] for g in opt.muon.param_groups for p in g["params"]]
+            ad = [name[id(p)] for g in opt.adamw.param_groups for p in g["params"]]
+            want = sorted(n for n, p in m.named_parameters() if n.startswith("blocks.") and p.dim() == 2)
+            check("train %s muon bolusumu: her parametre tam bir grupta; Muon = bloklarin 2-B matrisleri; E AdamW'de"
+                  % model, sorted(mu + ad) == sorted(name.values()) and len(set(mu + ad)) == len(mu + ad)
+                  and sorted(mu) == want and "E.weight" in ad and not info["split"]["adamw_decay"]["tensors"],
+                  "Muon %d, AdamW %d tensor" % (len(mu), len(ad)))
             stopped, bres = _cut_and_resume(TR, cmd + ["--epochs", "2"], out("muon_%s_B" % model))
             check("train %s --optimizer muon: adim 4'te kesilip surdurulen = kesintisiz (agirlik bit duzeyinde, sinav ayni)"
                   % model, stopped and same(state(A), state(out("muon_%s_B" % model))) and bres["exam"] == dict(
@@ -1087,7 +1056,7 @@ def _train_global(base, root, data, out, exits, TR):
         a = TR.main(cmd + ["--epochs", "2", "--out", A])
         L = [w["loss"] for w in a["log"]]
         st = D.TokenStories(root, data, "train")
-        m, mask_fn, layout = TR._build(TR._args(cmd + ["--out", "x"]), st.max_sentence_tokens, torch.device("cpu"))
+        m, mask_fn, layout = TR._build(TR._args(cmd + ["--out", "x"]), torch.device("cpu"))
         f = np.load(os.path.join(data, "train_pack_plan_e1.npz"))
         ro, rs = f["row_offsets"], f["row_stories"]
         b = D.build_batch(st, [rs[ro[r]:ro[r + 1]].tolist() for r in range(4)], layout, "cpu", 64)
@@ -1104,40 +1073,96 @@ def _train_global(base, root, data, out, exits, TR):
               and lm.global_layers == 1 and m.global_layers == 1,
               "kayip %.3f -> %.3f; ilk %.4f / %.4f" % (np.mean(L[:3]), np.mean(L[-3:]), a["log"][0]["loss"], want))
         gone = [base + ["--model", "transformer", "--global_layers", "1", "--out", out("g_tf")],
-                base + ["--model", "model_z", "--learned_z", "0", "--global_layers", "1", "--out", out("g_lz0")],
                 base + ["--model", "model_z", "--global_layers", "2", "--out", out("g_big")]]   # base: 1 katman
         mt = [os.path.getmtime(os.path.join(p, "checkpoint.pt")) for p in (A, out("mzl_A"))]
-        check("train: transformer / formullu Model Z + --global_layers ve N > katman veri yuklenmeden DURUR; "
+        check("train: transformer + --global_layers ve N > katman veri yuklenmeden DURUR; "
               "global_layers farkiyla surdurme (1 -> 0, 0 -> 1) checkpoint yuklenmeden DURUR, dosyalara dokunulmaz",
               all(exits(c) and not os.path.exists(c[-1]) for c in gone)
               and exits(base + ["--model", "model_z", "--layers", "2", "--global_layers", "0", "--epochs", "2", "--out", A,
                                 "--resume", "1"])
-              and exits(base + ["--model", "model_z", "--learned_z", "1", "--global_layers", "1", "--epochs", "2",
-                                "--out", out("mzl_A"), "--resume", "1"])
+              and exits(base + ["--model", "model_z", "--global_layers", "1", "--epochs", "2", "--out", out("mzl_A"),
+                                "--resume", "1"])
               and mt == [os.path.getmtime(os.path.join(p, "checkpoint.pt")) for p in (A, out("mzl_A"))])
         old = out("noglobal")                                             # global_layers alanindan onceki kosu
         shutil.copytree(out("mzl_A"), old)
         pack = torch.load(os.path.join(old, "checkpoint.pt"), weights_only=False)
         del pack["args"]["global_layers"]
         torch.save(pack, os.path.join(old, "checkpoint.pt"))
-        c = base + ["--model", "model_z", "--learned_z", "1", "--global_layers", "0", "--epochs", "2", "--out", old,
-                    "--resume", "1"]
+        c = base + ["--model", "model_z", "--global_layers", "0", "--epochs", "2", "--out", old, "--resume", "1"]
         r = _exit_msg(TR.main, c)
         check("train: global_layers alani olmayan checkpoint 0 sayilir (bitmis kosu olarak durur), 1 ile DURUR",
               r is None and exits(c + ["--global_layers", "1"]), str(r))
         dflt = {k: (lambda x: (x.global_layers, x.optimizer))(TR._args(_unpin(base) + a + ["--out", "x"])) for k, a in (
-            ("model_z", ["--model", "model_z"]), ("model_z learned_z 0", ["--model", "model_z", "--learned_z", "0"]),
-            ("transformer", ["--model", "transformer"]), ("model_z acik 0", ["--model", "model_z", "--global_layers", "0"]),
+            ("model_z", ["--model", "model_z"]), ("transformer", ["--model", "transformer"]), ("model_z acik 0", ["--model", "model_z", "--global_layers", "0"]),
             ("model_z adamw", ["--model", "model_z", "--optimizer", "adamw"]))}
         idt = TR.main(_unpin(base) + ["--model", "model_z", "--layers", "2", "--steps", "3", "--out", out("g_default")])["identity"]
-        check("train: varsayilanlar (7 Ekim): global_layers model_z (learned_z 1) 1, learned_z 0 ve transformer 0, acik 0 "
-              "aynen (belge 43); optimizer iki modelde muon, acik adamw aynen; varsayilan model_z kosusu kimlikte "
-              "(global_layers 1, muon, learned_z 1)", dflt == {
-                  "model_z": (1, "muon"), "model_z learned_z 0": (0, "muon"), "transformer": (0, "muon"),
+        check("train: varsayilanlar (7 Ekim): global_layers model_z 1, transformer 0, acik 0 aynen (belge 43); optimizer "
+              "iki modelde muon, acik adamw aynen; varsayilan model_z kosusu kimlikte (global_layers 1, muon, learned_z 1)",
+              dflt == {"model_z": (1, "muon"), "transformer": (0, "muon"),
                   "model_z acik 0": (0, "muon"), "model_z adamw": (1, "adamw")}
               and (idt["global_layers"], idt["optimizer"], idt["learned_z"]) == (1, "muon", 1), str(dflt))
     except Exception:  # noqa: BLE001
         check("train --global_layers", False, traceback.format_exc(limit=3))
+
+
+EQUIV_TAG = "v2-before-formula-cleanup-20261007"
+EQUIV_RUNNER = """import torch  # noqa: I001
+import json
+import sys
+v2, argv = sys.argv[1], json.loads(sys.argv[2])
+sys.path.insert(0, v2 + "/common")
+import train as TR
+TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
+TR.READING_PROMPTS, TR.READING_LIMITS = sys.argv[3], dict(max_sentences=3, max_tokens=4)
+TR.main(argv)
+"""
+
+
+def _train_equiv(base, root, data, prompts, out, state, same, TR):
+    """Formul temizligi esdegerligi (belge 44; belge 33 adim 4 deseni): etiketteki train.py (git archive, ayri surec) =
+    bugunku train.py, varsayilan Muon ile Model Z (G 1), G'siz Model Z ve transformer, 2 epok: son agirlik bit duzeyinde,
+    adim adim kayip / gradyan normu / lr, sinavlar, okuma metni ve olculeri ayni."""
+    import subprocess
+    import traceback
+    import zipfile
+    try:
+        tmp = tempfile.mkdtemp(dir=TMP)
+        z = os.path.join(tmp, "tag.zip")
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
+        subprocess.run(["git", "-C", repo, "archive", "--format=zip", "-o", z, EQUIV_TAG, "deneme2/v2"], check=True,
+                       capture_output=True)
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print("ATLA esdegerlik: git etiketi %s okunamadi (%s)" % (EQUIV_TAG, e), flush=True)
+        return
+    try:
+        zipfile.ZipFile(z).extractall(tmp)
+        runner = os.path.join(tmp, "runner.py")
+        open(runner, "w", encoding="utf-8").write(EQUIV_RUNNER)
+        drop = lambda r: [dict(w, seconds=0, ms_per_step=0, tokens_per_sec=0) for w in r["log"]]  # noqa: E731
+        exams = lambda r: [dict(e, seconds=0) for e in r["exams"]]  # noqa: E731
+        bad, info = [], []
+        for name, extra in (("model_z", ["--model", "model_z", "--layers", "2"]),
+                            ("model_z_g0", ["--model", "model_z", "--layers", "2", "--global_layers", "0"]),
+                            ("transformer", ["--model", "transformer"])):
+            argv = _unpin(base) + extra + ["--epochs", "2"]
+            old, new = out("equiv_old_" + name), out("equiv_new_" + name)
+            p = subprocess.run([sys.executable, runner, os.path.join(tmp, "deneme2", "v2"), json.dumps(argv + [
+                "--out", old]), prompts], capture_output=True, text=True)
+            if p.returncode:
+                bad.append(name + ": eski kod kosmadi " + p.stderr[-300:])
+                continue
+            b = TR.main(argv + ["--out", new])
+            a = json.load(open(os.path.join(old, "results.json")))
+            sa, sb = (json.load(open(os.path.join(d, "samples.json"), encoding="utf-8")) for d in (old, new))
+            ok = dict(agirlik=same(state(old), state(new)), kayip=drop(a) == drop(b), sinav=exams(a) == exams(b),
+                      okuma=sa == sb, optimizer=a["identity"]["optimizer"] == b["identity"]["optimizer"] == "muon")
+            bad += ["%s: %s" % (name, k) for k, v in ok.items() if not v]
+            info.append("%s %d adim" % (name, len(b["log"])))
+        check("esdegerlik: etiket %s train.py = bugunku (Muon varsayilan; Model Z G 1, G'siz, transformer; 2 epok): son "
+              "agirlik bit duzeyinde, adim adim kayip / gradyan normu / lr, sinav, okuma ayni" % EQUIV_TAG, not bad,
+              "; ".join(bad) if bad else ", ".join(info))
+    except Exception:  # noqa: BLE001
+        check("esdegerlik (etiket %s)" % EQUIV_TAG, False, traceback.format_exc(limit=3))
 
 
 def _unpin(argv):

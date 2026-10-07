@@ -18,18 +18,19 @@ Olcu: epok sonunda ve bitiste metrics.exam_scores (exam_pack_plan.npz; egitimle 
 Cikti: config.json, checkpoint.pt, decay_start/, results.json, agent.pt, samples.txt, samples.json.  Ek okuma kayitli
 kosudan: diag/generate_readings.py.
 
-Model Z varsayilani ogrenilen z (belge 35 (b); kullanici, 7 Ekim: "Şu an en iyisi o gibi"); --learned_z 0: formullu z
-(belge 33; z modelin ogrenilen E'sinden, eski --own_vocab yolu), yalniz eski kosularla kiyas icin.  Temizlik oncesi kosular
-surdurulmez / uzatilmaz (kullanici, 6 Ekim: "eski koşuları uzatma niyetim yok"); okumada (_archived) eski transformer ve
-eski own_vocab Model Z yuklenir, oteki eski Model Z'ler durur.  Eski kod: git etiketi v2-before-cleanup-20261006.
---global_layers N (belge 40 s6.2 Deney G; yalniz Model Z learned_z): son N blok tam causal, gercek hikaye konumuyla;
-maske ikilisi (yerel, global) _attn'dan, egitim / sinav / teshis ayni yol.  Varsayilan (belge 43; on kayit tuttu, 7 Ekim):
-model_z + learned_z 1 -> 1, oteki -> 0; --global_layers 0: G'siz Model Z (kiyas).  Eski checkpoint'te alan yoksa 0.
+Model Z yalniz ogrenilen z (belge 35 (b)); formullu z ve --learned_z kaldirildi (kullanici, 7 Ekim: "bence temizlik
+başlasın"; belge 44; eski kod git etiketi v2-before-formula-cleanup-20261007).  Kimlikte learned_z (Model Z 1) eski
+kosulari ayirir: formullu ve temizlik oncesi (6 Ekim; etiket v2-before-cleanup-20261006) Model Z kosulari yuklenmez /
+surdurulmez (_archived); eski transformer yuklenir.  Temizlik oncesi kosular uzatilmaz (kullanici, 6 Ekim: "eski koşuları
+uzatma niyetim yok").
+--global_layers N (belge 40 s6.2 Deney G; yalniz Model Z): son N blok tam causal, gercek hikaye konumuyla; maske ikilisi
+(yerel, global) _attn'dan, egitim / sinav / teshis ayni yol.  Varsayilan (belge 43; on kayit tuttu, 7 Ekim): model_z 1,
+transformer 0; --global_layers 0: G'siz Model Z (kiyas).  Eski checkpoint'te alan yoksa 0.
 
     python train.py --model transformer|model_z --lr LR --out <kosu> [--data <v2/simplestories_gpt2>]
                     [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
-                    [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1] [--learned_z 0|1 (model_z; varsayilan 1)]
-                    [--optimizer muon|adamw (varsayilan muon)] [--global_layers N (model_z learned_z; varsayilan 1)]
+                    [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1]
+                    [--optimizer muon|adamw (varsayilan muon)] [--global_layers N (model_z; varsayilan 1)]
 """
 import torch  # noqa: I001  (Windows: torch once)
 
@@ -129,56 +130,42 @@ def _schedule(train, data_dir, seed, epochs, steps):
 
 
 def _archived(idt):
-    """Okuma (load_run): kimlik bu kodla kurulamiyorsa ileti, yoksa None.  Eski transformer ve eski own_vocab=1 Model Z
-    (agirliklari yeni varsayilanla bit duzeyinde ayni; belge 33 adim 4) yuklenir.  Oteki eski Model Z'ler (iota +
-    meaning, ortak sozluk, open_z) durur: iota'li olanin agirlik sekilleri AYNI, strict yukleme hata vermez, z yanlis
-    anahtarla kurulurdu (sessiz hata; olculdu)."""
-    if idt.get("model") != "model_z" or not any(k in idt for k in LEGACY):
+    """Okuma ve surdurme: kimlik bu kodla kurulamiyorsa ileti, yoksa None.  Model Z yalniz ogrenilen z (learned_z 1);
+    formullu (learned_z 0 ya da alan yok) ve temizlik oncesi (LEGACY alanli) Model Z durur: agirlik sekilleri cogunda bu
+    modelle ayni degil, ayni olanlar (iota) sessizce yanlis yuklenirdi.  Transformer her zaman yuklenir."""
+    if idt.get("model") != "model_z" or idt.get("learned_z") == 1:
         return None
-    old = {k: idt.get(k) for k in LEGACY}
-    if old == dict(meaning_sha256=None, shared_vocab=0, own_vocab=1, open_z=0):
-        return None
-    return "kosu temizlik oncesi bir Model Z yoluyla egitildi (%s); bu kodla yuklenmez -- git etiketi %s (git worktree " \
-           "add <klasor> %s)" % (old, TAG, TAG)
+    tag = TAG if any(k in idt for k in LEGACY) else "v2-before-formula-cleanup-20261007"
+    return "kosu formullu z / temizlik oncesi bir Model Z yoluyla egitildi; bu kodla yuklenmez -- git etiketi %s " \
+           "(git worktree add <klasor> %s)" % (tag, tag)
 
 
 def _global_error(args):
     """--global_layers kurulamiyorsa ileti, yoksa None (args'ta yoksa 0)."""
     gl = int(getattr(args, "global_layers", 0))
-    if gl and (args.model != "model_z" or not getattr(args, "learned_z", 0)):
-        return "--global_layers yalniz model_z --learned_z 1 (belge 40 s6.2)"
+    if gl and args.model != "model_z":
+        return "--global_layers yalniz model_z (belge 40 s6.2)"
     if not 0 <= gl <= args.layers:
         return "--global_layers %d: 0..%d olmali" % (gl, args.layers)
     return None
 
 
-def _build(args, longest, dev):
-    """-> (model, mask_fn, layout).  Model dosyalari yalniz burada import edilir.  Model Z: z modelin ogrenilen E'sinden
-    (belge 33; yarilar d / 2); learned_z (belge 35 (b); args'ta yoksa 0): Z_k girdisi E(END), Z_k kendi cumlesini okur
-    (model_z_read_mask); global_layers (args'ta yoksa 0): mask_fn (yerel, global) ikilisi.  Maske kurali yalniz burada
-    secilir (egitim, sinav, teshis ayni yol)."""
+def _build(args, dev):
+    """-> (model, mask_fn, layout).  Model dosyalari yalniz burada import edilir.  Model Z: ogrenilen z (belge 35 (b));
+    global_layers (args'ta yoksa 0): mask_fn (yerel, global) ikilisi.  Maske kurali yalniz burada secilir (egitim, sinav,
+    teshis ayni yol)."""
     root = os.path.dirname(HERE)
-    learned = bool(getattr(args, "learned_z", 0))
-    if args.model == "transformer" and learned:
-        sys.exit("DUR: --learned_z yalniz model_z")
     if _global_error(args):
         sys.exit("DUR: " + _global_error(args))
-    gl = int(getattr(args, "global_layers", 0))
     torch.manual_seed(args.seed)
     if args.model == "transformer":
         sys.path.insert(0, os.path.join(root, "transformer"))
         from baseline import BaselineTransformer
         return BaselineTransformer(args.d, args.layers, args.heads).to(dev), R.document_mask, "transformer"
     sys.path.insert(0, os.path.join(root, "model_z"))
-    import sentence_z as SZ
-    from sentence import SentenceTransformer, model_z_mask
-    keys = SZ.build_keys(longest, args.d // 2)
-    torch.manual_seed(args.seed)
-    if not learned:                                                      # varsayilan: cagri temizlik sonrasiyla ayni
-        return SentenceTransformer(SZ.keys_to(keys, dev), args.d, args.layers, args.heads).to(dev), model_z_mask, "model_z"
-    model = SentenceTransformer(SZ.keys_to(keys, dev), args.d, args.layers, args.heads, learned_z=True,
-                                global_layers=gl).to(dev)
-    return model, model.mask_fn, "model_z"
+    from sentence import SentenceTransformer
+    model = SentenceTransformer(args.d, args.layers, args.heads, global_layers=int(getattr(args, "global_layers", 0)))
+    return model.to(dev), model.mask_fn, "model_z"
 
 
 def _muon_missing():
@@ -237,12 +224,8 @@ def _to_device(batch, dev):
     """CPU PackedBatch -> cihaz; CUDA'da sabitlenmis bellekten non_blocking (sonraki batch GPU calisirken hazirlanir)."""
     if dev.type != "cuda":
         return batch
-    mv = lambda t: t.pin_memory().to(dev, non_blocking=True)  # noqa: E731
-    out = {}
-    for f in dataclasses.fields(batch):
-        v = getattr(batch, f.name)
-        out[f.name] = None if v is None else tuple(mv(x) for x in v) if isinstance(v, tuple) else mv(v)
-    return D.PackedBatch(**out)
+    return D.PackedBatch(**{f.name: getattr(batch, f.name).pin_memory().to(dev, non_blocking=True)
+                            for f in dataclasses.fields(batch)})
 
 
 class _Exam:
@@ -318,22 +301,17 @@ def _args(argv):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--resume", type=int, default=0)
-    ap.add_argument("--learned_z", type=int, default=None, choices=(0, 1),
-                    help="model_z: 1 (varsayilan) z ogrenilir (belge 35 (b)): Z_k girdisi E(END), Z_k kendi cumlesini "
-                         "okur; 0 formullu z.  transformer: 0")
     ap.add_argument("--optimizer", default="muon", choices=("adamw", "muon"),
                     help="muon (varsayilan, 7 Ekim): bloklarin 2-B matrisleri Muon'a (match_rms_adamw, ayni --lr), geri "
                          "kalan AdamW'ye; adamw: tek AdamW")
     ap.add_argument("--global_layers", type=int, default=None,
-                    help="model_z learned_z: son N blok tam causal, gercek konumla (belge 40 s6.2 Deney G); varsayilan "
-                         "model_z + learned_z 1'de 1, oteki 0; 0: G'siz Model Z")
+                    help="model_z: son N blok tam causal, gercek konumla (belge 40 s6.2 Deney G); varsayilan model_z'de "
+                         "1, transformer'da 0; 0: G'siz Model Z")
     ap.add_argument("--checkpoint_minutes", type=float, default=10,
                     help="en cok bu kadar duvar saati kaybi (sinav dahil); surdurmede degistirilebilir")
     args = ap.parse_args(argv)
-    if args.learned_z is None:
-        args.learned_z = int(args.model == "model_z")
     if args.global_layers is None:                                       # belge 43: G varsayilan (7 Ekim)
-        args.global_layers = int(args.model == "model_z" and args.learned_z == 1)
+        args.global_layers = int(args.model == "model_z")
     return args
 
 
@@ -341,8 +319,6 @@ def main(argv=None):
     args = _args(argv)
     t0 = time.time()
     log = lambda msg: print("[%7.1f sn] %s" % (time.time() - t0, msg), flush=True)  # noqa: E731
-    if args.learned_z and args.model == "transformer":                   # veri yuklenmeden (_build da durur)
-        sys.exit("DUR: --learned_z yalniz model_z")
     if _global_error(args):                                              # veri yuklenmeden
         sys.exit("DUR: " + _global_error(args))
     if args.optimizer == "muon" and _muon_missing():                    # sessizce AdamW'ye dusulmez
@@ -369,17 +345,15 @@ def main(argv=None):
     assert len(story_bytes) == valid.n, "valid_bytes hikaye sayisi valid ile ayni degil"
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(os.path.join(args.stream, "gpt2", "tokenizer.json"))
-    model, mask_fn, layout = _build(args, train.max_sentence_tokens, dev)
-    assert layout != "model_z" or READING_LIMITS["max_tokens"] <= train.max_sentence_tokens, \
-        "okuma: max_tokens'ta kesilen cumle z konum anahtarindan uzun olur (encode_z durur)"
+    model, mask_fn, layout = _build(args, dev)
     if cuda:
         for block in model.blocks:
             block.compile(dynamic=False)
     opt, opt_info = _optimizer(model, args.optimizer, args.lr, cuda)
     ident = dict(model=args.model, d=args.d, layers=args.layers, heads=args.heads, lr=args.lr, seed=args.seed,
                  longest=train.max_sentence_tokens, row_len=row_len, batch_rows=BATCH_ROWS,
-                 train_stream_sha256=train.meta["stream_sha256"], learned_z=args.learned_z, optimizer=args.optimizer,
-                 global_layers=args.global_layers)
+                 train_stream_sha256=train.meta["stream_sha256"], learned_z=int(args.model == "model_z"),
+                 optimizer=args.optimizer, global_layers=args.global_layers)       # learned_z: eski kosu ayrimi
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -398,6 +372,8 @@ def main(argv=None):
         del peek
         if any(k in was for k in LEGACY):                                 # kullanici, 6 Ekim: eski kosu uzatilmaz
             sys.exit("DUR: temizlik oncesi kosu surdurulmez / uzatilmaz (kullanici, 6 Ekim); eski kod: git etiketi %s" % TAG)
+        if _archived(was):                                                # formullu Model Z (belge 44)
+            sys.exit("DUR: " + _archived(was))
         was = {"learned_z": 0, "optimizer": "adamw", "global_layers": 0, **was}   # alanlardan onceki kosu
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])

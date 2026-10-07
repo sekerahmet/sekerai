@@ -7,9 +7,8 @@ token'larindan olusan cumle V1'de dusuyordu; burada komsusuna katilir (kelimeler
 
 Hikaye duzeni (iki model AYNI konum ve hedef; belge 22 §3): EOS(BOS) s_1 END s_2 END ... s_n END
     hedef: BOS -> s_1'in ilk token'i; s_k'nin token'i -> sonraki ya da END; END_k -> s_(k+1)'in ilk token'i ya da EOS.
-    layout model_z: END_k'nin yerinde ZTOK (token 0, girdisi z_k; ayri z token'i yok, dizi ayni boy); konum (RoPE):
-    transformer hikaye ici sira, model_z mantiksal (BOS 0, s_k'nin i. token'i (k-1)+i, Z_k k; k ve i 1'den) =
-    model_z/sentence.z_slot_positions.
+    layout model_z: END_k'nin yerinde ZTOK (token 0, girdisi E(END); ayri z token'i yok, dizi ayni boy); konum (RoPE):
+    transformer hikaye ici sira, model_z mantiksal (BOS 0, s_k'nin i. token'i (k-1)+i, Z_k k; k ve i 1'den).
 Drive'a bir kez (kural 9), <out>/:  <split>_sentence_offsets.npy (int64 (N, 2): ham akista [bas, son)), <split>_story_
 offsets.npy (int64 H+1: hikayenin ilk cumlesi), <split>_boundaries.json, train_pack_plan_e1.npz, exam_pack_plan.npz,
 train_token_counts.npy (token_counts).
@@ -34,7 +33,7 @@ EXAM_STORIES = 1000         # sinav alt kumesi (model_y exam_simplestories.exam_
 
 
 class Kind:
-    """PackedBatch.kind: token turu.  layout model_z'de END konumu ZTOK (girdisi z_k)."""
+    """PackedBatch.kind: token turu.  layout model_z'de END konumu ZTOK (Z_k)."""
     BOS, TOKEN, END, ZTOK, PAD = 0, 1, 2, 3, 4
 
 
@@ -239,7 +238,7 @@ def pack_plan(lengths, row_len=ROW_LEN, seed=0, epoch=1):
 
 @dataclass
 class PackedBatch:
-    """build_batch ciktisi; hepsi (B, T) ve cihazda (z_* ve story_ids haric bkz. alanlar).  belge 21 §5."""
+    """build_batch ciktisi; hepsi (B, T) ve cihazda (story_ids haric).  belge 21 §5."""
     tokens: torch.Tensor          # girdi token'i (END konumunda END_ID, model_z'de 0; dolgu 0)
     kind: torch.Tensor            # Kind
     pos: torch.Tensor             # RoPE konumu (duzene gore)
@@ -247,10 +246,6 @@ class PackedBatch:
     sent: torch.Tensor            # hikaye ici cumle no 0'dan (BOS, dolgu -1); END cumlesine ait
     target: torch.Tensor          # hedef token ya da -100
     target_kind: torch.Tensor     # TargetKind (hedefsiz -1)
-    z_slots: tuple                # (satir, sutun) ZTOK konumlari, z_sentences sirasiyla (yalniz model_z; yoksa None)
-    z_sentences: tuple            # (ids (n_z, Lmax) int64, mask) Z_k'nin cumlesi (yalniz model_z; yoksa None)
-    z_flat: tuple                 # (cumle, sira) z_sentences mask'inin gercek token'lari = mask.nonzero sirasi; CPU'da
-                                  # numpy'dan (GPU senkronu yok; yalniz model_z, yoksa None)
     story_ids: torch.Tensor       # (B, S_max) satirdaki hikaye kimlikleri, -1 dolgu
 
 
@@ -310,16 +305,7 @@ def build_batch(stories, row_stories_list, layout, device="cpu", row_len=ROW_LEN
         pos[erow, ecol] = sk + 1
         tokens[erow, ecol], kind[erow, ecol] = 0, Kind.ZTOK
     t = lambda a: torch.as_tensor(a, device=device)  # noqa: E731
-    z_slots = z_sentences = z_flat = None
-    if layout == "model_z":
-        Lm = int(L.max())
-        m = np.arange(Lm)[None] < L[:, None]
-        ids = np.where(m, np.asarray(stories.stream[np.minimum(st0[:, None] + np.arange(Lm), len(stories.stream) - 1)],
-                                     dtype=np.int64), 0)
-        z_slots, z_sentences = (t(erow), t(ecol)), (t(ids), t(m))
-        z_flat = tuple(t(a.astype(np.int64)) for a in np.nonzero(m))
-    return PackedBatch(t(tokens), t(kind), t(pos), t(doc), t(sent), t(target), t(tkind), z_slots, z_sentences, z_flat,
-                       t(sid))
+    return PackedBatch(t(tokens), t(kind), t(pos), t(doc), t(sent), t(target), t(tkind), t(sid))
 
 
 def token_counts(stream_root, out_dir=None, split="train", chunk=CHUNK):
@@ -342,7 +328,7 @@ def main(stream_root, out_dir):
     for split in ("valid", "train"):
         build_boundaries(stream_root, out_dir, split)
     metas = {sp: json.load(open(os.path.join(out_dir, sp + "_boundaries.json"), encoding="utf-8")) for sp in ("train", "valid")}
-    longest = max(m["max_sentence_tokens"] for m in metas.values())        # z konum anahtari: train + valid en uzunu
+    longest = max(m["max_sentence_tokens"] for m in metas.values())        # en uzun cumle: train + valid (kimlikte longest)
     for sp, m in metas.items():
         json.dump(dict(m, max_sentence_tokens_all=longest), open(os.path.join(out_dir, sp + "_boundaries.json"), "w",
                                                                  encoding="utf-8"), indent=1)

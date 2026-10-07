@@ -1,5 +1,5 @@
 """gap_v2 -- V2 acik analizi: Model Z - transformer, sinav hedefi basina nll ve kirilimlar (belge 28; ad onayli, 6 Ekim).
-diag/'a tasindi (belge 33 adim 5): kosular generate_readings.load_run ile (learned_z kimlikten), islev / icerik ayrimi
+diag/'a tasindi (belge 33 adim 5): kosular generate_readings.load_run ile (global_layers kimlikten), islev / icerik ayrimi
 train token sayimindan (data.token_counts; meaning yok).
 
 Iki model ayni sinavda (exam_pack_plan.npz, 1.000 hikaye), egitimle ayni maske yolu (train._attn: CUDA'da block_mask +
@@ -44,7 +44,7 @@ _ALPHA, _DIGIT, _APOS = 1, 2, 4
 
 def load(run, data_dir, dev):
     """Kosu klasoru -> (model eval, mask_fn, layout, identity); load_run + egitimin maske kurali (model.mask_fn: Model Z,
-    learned_z dahil; transformer: recipe.document_mask)."""
+    global_layers dahil; transformer: recipe.document_mask)."""
     model, idt = GR.load_run(run, data_dir, dev)
     mask_fn = getattr(model, "mask_fn", None) or R.document_mask
     return model.eval(), mask_fn, ("model_z" if idt["model"] == "model_z" else "transformer"), idt
@@ -253,7 +253,7 @@ def main(argv=None):
     for kind, run in (("transformer", args.tf), ("model_z", args.mz)):
         model, mask_fn, layout, idt = load(run, args.data, dev)
         assert idt["model"] == kind, "%s: kosu %s modeli" % (run, idt["model"])
-        idts[kind] = {k: idt.get(k) for k in ("model", "d", "layers", "heads", "seed", "learned_z", "global_layers")}
+        idts[kind] = {k: idt.get(k) for k in ("model", "d", "layers", "heads", "seed", "global_layers")}
         if dev.type == "cuda":
             for block in model.blocks:
                 block.compile(dynamic=False)

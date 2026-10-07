@@ -5,7 +5,7 @@
                 onceki dolguyu gorur (tamamen maskeli satir SDPA'da NaN).  block_mask (FlexAttention) ve dense_mask (SDPA,
                 CPU egitimi ve testler; FlexAttention CPU'da geri yayilim yapmiyor) ayni mask_mod'dan.
     wsd_lr      warmup %1, sabit, son %20 dogrusal sifira; inisin ilk adimi = total - round(decay * total) (checkpoint).
-    param_groups  AdamW: 2-B agirliklar decay'li (Model Z'nin z_in dahil); embedding, norm, bias, 1-B decay'siz.
+    param_groups  AdamW: 2-B agirliklar decay'li; embedding, norm, bias, 1-B decay'siz.
     muon_params / MuonAdamW  --optimizer muon: bloklarin 2-B matrisleri Muon'a, geri kalan AdamW'ye; iki optimizer tek
                 arayuzde (lr takvimi, checkpoint).
     Checkpoint  model + optimizer + adim + plan + gecmis + args + RNG; .part'tan atomik; kesilip surdurulen = kesintisiz.
@@ -99,7 +99,7 @@ def param_groups(model, weight_decay=0.1, skip=()):
 
 def muon_params(model):
     """-> [(ad, p)] Muon'a gidenler: bloklarin (model.blocks) 2-B agirliklari (attention qkv / proj, MLP gate_up / down).
-    E (tied: giris + cikis), norm kazanclari, z_in gibi giris katmanlari ve 1-B her sey AdamW'de (belge 20 s4)."""
+    E (tied: giris + cikis), norm kazanclari, bloklarin disindaki giris katmanlari ve 1-B her sey AdamW'de (belge 20 s4)."""
     emb = {id(m.weight) for m in model.modules() if isinstance(m, torch.nn.Embedding)}
     return [(n, p) for n, p in model.named_parameters()
             if n.startswith("blocks.") and p.dim() == 2 and p.requires_grad and id(p) not in emb]

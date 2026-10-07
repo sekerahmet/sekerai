@@ -1,5 +1,5 @@
 """order_probe -- sira sinamasi (belge 31; ad onayli): bir model sirayi okuyor mu.  diag/'a tasindi (belge 33 adim 5):
-kosular generate_readings.load_run ile (learned_z kimlikten), islev ayrimi train token sayimindan (gap_v2.token_counts).
+kosular generate_readings.load_run ile (global_layers kimlikten), islev ayrimi train token sayimindan (gap_v2.token_counts).
 
 1. Kim kime: "One day, A <eylem> B." -> ikinci cumlenin ilk token'inda A mi B mi.  8 dogal kalip (5 etken, cevap B; 3
    edilgen, cevap A), 10 ad, sirali ciftler (720 ornek).  (A, B) ve (B, A) ayni kelime torbasi.
@@ -67,7 +67,7 @@ def _rows(groups, row_len=D.ROW_LEN):
 
 @torch.no_grad()
 def _nll(model, layout, st, rows):
-    """-> (nll, tgt, kind) hedef basina, satir sirasiyla (dense maske: modelin kendi kurali, learned_z dahil)."""
+    """-> (nll, tgt, kind) hedef basina, satir sirasiyla (dense maske: modelin kendi kurali, global_layers dahil)."""
     out = [], [], []
     W = model.E.weight
     for r in rows:
@@ -83,19 +83,13 @@ def _nll(model, layout, st, rows):
 
 @torch.no_grad()
 def who_did_what(model, layout, enc):
-    """-> dict(dogruluk, sira_etkisi, sira_duyarliligi, kalip_marj); formullu Model Z'de kalip cumlesi z'nin konum
-    anahtarindan (egitimin en uzun cumlesi) uzunsa dict(atlandi=neden)."""
+    """-> dict(dogruluk, sira_etkisi, sira_duyarliligi, kalip_marj)."""
     items, groups = [], []
     for (pat, who), (a, b) in itertools.product(TEMPLATES, itertools.permutations(NAMES, 2)):
         s1 = enc(pat.format(A=a, B=b))
         ans, oth = (enc(a)[0], enc(b)[0]) if who == "A" else (enc(b)[0], enc(a)[0])
         items.append((ans, oth))
         groups.append([s1, [ans] + enc(" smiled.")])
-    keys = getattr(model, "keys", None)
-    longest = max(len(x) for g in groups for x in g)
-    if keys is not None and longest >= len(keys["signs"]):
-        return dict(atlandi="kalip cumlesi %d token > egitimin en uzun cumlesi %d (z konum anahtari)" % (
-            longest, len(keys["signs"]) - 1))
     st, rows = _stories(groups), _rows(groups)
     W = model.E.weight
     m = []
@@ -186,11 +180,10 @@ def main(argv=None):
         name = os.path.basename(os.path.normpath(run))
         r = dict(kim_kime=who_did_what(model, layout, enc), gecmis_karistirma=history_shuffle(model, layout, valid, pick,
                                                                                              func),
-                 identity={k: idt.get(k) for k in ("model", "d", "layers", "heads", "seed", "learned_z", "global_layers")})
+                 identity={k: idt.get(k) for k in ("model", "d", "layers", "heads", "seed", "global_layers")})
         res[name] = r
         k, g = r["kim_kime"], r["gecmis_karistirma"]
-        kk = k.get("atlandi") or "dogruluk %.3f, sira etkisi %.3f, duyarlilik %.3f" % (
-            k["dogruluk"], k["sira_etkisi"], k["sira_duyarliligi"])
+        kk = "dogruluk %.3f, sira etkisi %.3f, duyarlilik %.3f" % (k["dogruluk"], k["sira_etkisi"], k["sira_duyarliligi"])
         log("%-46s kim kime: %s | gecmis karistirma, yeni icerik: C0 %s, C1 %s, C1p %s" % (
             name, kk, g["C0"]["yeni_icerik"], g["C1"]["artis_yeni"], g["C1p"]["artis_yeni"]))
         del model

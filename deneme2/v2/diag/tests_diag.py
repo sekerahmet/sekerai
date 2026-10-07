@@ -1,6 +1,6 @@
 """tests_diag -- V2 teshis araclari testleri (CPU; belge 33 adim 5).  Gruplar: readings (generate_readings: kayitli
 kosudan okuma = train.py'ninki; arsiv kimligi durur; ek istem secimi Drive'dan), tools (gap_v2, order_probe,
-z_ablate; model-z-mathematician).  Yardimcilar common/tests_v2'den
+z_ablate; model-z-mathematician).  Formullu z cesitleri kaldirildi (belge 44).  Yardimcilar common/tests_v2'den
 (_train_root, tokenizer_path, DRIVE).
 
     python tests_diag.py [--only readings,tools]
@@ -48,12 +48,8 @@ def t_readings():
     same_prompts = os.path.join(root, "reading_prompts_same.json")
     shutil.copyfile(prompts, same_prompts)
     sha = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()  # noqa: E731
-    variants = [("transformer", []), ("model_z", ["--learned_z", "0"])]
-    if T2._learned_z_ready():
-        variants.append(("model_z_learned", ["--learned_z", "1", "--global_layers", "0"]))   # belge 35 (b), G'siz
-        variants.append(("model_z_global", ["--learned_z", "1", "--layers", "2", "--global_layers", "1"]))  # belge 40 G
-    else:
-        print("BEKLIYOR readings: learned_z modeli yok", flush=True)
+    variants = [("transformer", []), ("model_z_learned", ["--global_layers", "0"]),          # belge 35 (b), G'siz
+                ("model_z_global", ["--layers", "2"])]                                       # varsayilan G 1 (belge 43)
     try:
         for name, extra in variants:                                       # name: model ya da model_z_<cesit>
             model = "transformer" if name == "transformer" else "model_z"
@@ -87,23 +83,42 @@ def t_readings():
                   r2["reproduced"]["different"] == [labels[1]] and r2["reproduced"]["same"] == [labels[0], labels[2]])
             check("readings %s: reading_prompts.json (samples.* uzerine yazar) DURUR" % name,
                   T2._raises(AssertionError, GR.main, base + ["--out", run, "--prompts", prompts]))
-            if name == "model_z":
+            if name == "model_z_learned":
                 pack = torch.load(os.path.join(run, "agent.pt"), weights_only=False)
-                pack["identity"]["meaning_sha256"] = "0" * 64              # temizlik oncesi iota + meaning kimligi
+                pack["identity"]["learned_z"] = 0                          # formullu Model Z kimligi (belge 44)
                 torch.save(pack, os.path.join(run, "agent.pt"))
                 os.remove(os.path.join(run, "samples_same.json"))
                 msg = T2._exit_msg(GR.main, base + ["--out", run, "--prompts", same_prompts]) or ""
-                check("readings model_z: temizlik oncesi kimlik DURUR (iletide git etiketi), cikti yazilmaz",
-                      "v2-before-cleanup-20261006" in msg and not os.path.exists(os.path.join(run, "samples_same.json")),
-                      msg[:120])
+                check("readings model_z: formullu kimlik DURUR (iletide git etiketi), cikti yazilmaz",
+                      "v2-before-formula-cleanup-20261007" in msg
+                      and not os.path.exists(os.path.join(run, "samples_same.json")), msg[:120])
     except Exception:  # noqa: BLE001
         check("readings", False, traceback.format_exc(limit=3))
     finally:
         TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS = saved
     if T2.DRIVE is None:
-        print("ATLA readings (ek istem secimi): Drive yok", flush=True)
+        print("ATLA readings (ek istem secimi, Drive kosulari): Drive yok", flush=True)
         return
     data = T2.DRIVE + "/v2/simplestories_gpt2"
+    runs = T2.DRIVE + "/v2/runs/"
+    got = {}
+    for r in ("v2_mzl_d512_l8_lr5e-4_20261006_172433", "v2_mzl_g1_d512_l8_muon_lr2e-3_20261007_075626",
+              "v2_mzown_d512_l8_lr5e-4_20261006_143438"):
+        if not os.path.exists(runs + r + "/agent.pt"):
+            got[r] = "yok"
+            continue
+        try:
+            m, idt = GR.load_run(runs + r, data, torch.device("cpu"))
+            got[r] = (m.global_layers, idt.get("global_layers"))
+            del m
+        except SystemExit as e:
+            got[r] = str(e.code)
+    check("Drive kosulari (belge 44): eski ogrenilen z (global_layers alani yok) G'siz yuklenir, G kosusu G 1 ile; "
+          "temizlik oncesi formullu own_vocab kosusu DURUR (iletide etiket)",
+          got["v2_mzl_d512_l8_lr5e-4_20261006_172433"] == (0, None)
+          and got["v2_mzl_g1_d512_l8_muon_lr2e-3_20261007_075626"] == (1, 1)
+          and "v2-before-cleanup-20261006" in str(got["v2_mzown_d512_l8_lr5e-4_20261006_143438"]),
+          str({k[:22]: (v if not isinstance(v, str) else v[:60]) for k, v in got.items()}))
     spec, again = GR.extra_prompts(data), GR.extra_prompts(data)
     disk = json.load(open(GR.EXTRA_PROMPTS, encoding="utf-8"))
     fixed = {p["story"] for p in json.load(open(TR.READING_PROMPTS, encoding="utf-8"))["prompts"]}
@@ -142,8 +157,8 @@ def t_tools():
     base = ["--data", data, "--stream", root]
     runs = {}
     try:
-        for name, extra in (("transformer", []), ("model_z", ["--learned_z", "0"]), ("model_z_learned", ["--learned_z", "1", "--global_layers", "0"]),
-                            ("model_z_global", ["--learned_z", "1", "--layers", "2", "--global_layers", "1"])):
+        for name, extra in (("transformer", []), ("model_z_learned", ["--global_layers", "0"]),
+                            ("model_z_global", ["--layers", "2"])):
             run = os.path.join(T2.TMP, "runs_tools", name)
             TR.main(base + ["--device", "cpu", "--model", "transformer" if name == "transformer" else "model_z", "--d", "16",
                             "--layers", "1", "--heads", "2", "--lr", "1e-2", "--steps", "6", "--out", run,
@@ -152,55 +167,40 @@ def t_tools():
         exam = {n: json.load(open(os.path.join(r, "results.json"), encoding="utf-8"))["exam"]["loss"]
                 for n, r in runs.items()}
         out = os.path.join(T2.TMP, "tools_gap")
-        res = G.main(base + ["--tf", runs["transformer"], "--mz", runs["model_z"], "--out", out + "_a"])
+        res = G.main(base + ["--tf", runs["transformer"], "--mz", runs["model_z_learned"], "--out", out + "_a"])
         cpath = os.path.join(T2.TMP, "tools_counts.npy")
         import data as DD
         np.save(cpath, DD.token_counts(root))
-        res_c = G.main(base + ["--tf", runs["transformer"], "--mz", runs["model_z"], "--out", out + "_b",
+        res_c = G.main(base + ["--tf", runs["transformer"], "--mz", runs["model_z_learned"], "--out", out + "_b",
                                "--counts", cpath])
-        res_l = G.main(base + ["--tf", runs["transformer"], "--mz", runs["model_z_learned"], "--out", out + "_l"])
-        strip = lambda r: {k: v for k, v in r.items() if k != "girdi"}  # noqa: E731
-        check("tools gap_v2: tf / mz nll = egitimin sinav kaybi (load_run, egitimle ayni maske yolu; formullu ve "
-              "learned_z); --counts dosyasi = akistan sayim; ciktilar yazildi",
-              abs(res["toplam"]["tf"] - exam["transformer"]) < 1e-4 and abs(res["toplam"]["mz"] - exam["model_z"]) < 1e-4
-              and abs(res_l["toplam"]["mz"] - exam["model_z_learned"]) < 1e-4 and strip(res) == strip(res_c)
-              and res_l["girdi"]["identity"]["model_z"]["learned_z"] == 1
-              and all(os.path.exists(os.path.join(out + "_a", f)) for f in ("gap.json", "gap.md", "gap_targets.npz")),
-              "tf %.4f / %.4f, mz %.4f / %.4f, learned %.4f / %.4f" % (res["toplam"]["tf"], exam["transformer"],
-                                                                     res["toplam"]["mz"], exam["model_z"],
-                                                                     res_l["toplam"]["mz"], exam["model_z_learned"]))
         res_g = G.main(base + ["--tf", runs["transformer"], "--mz", runs["model_z_global"], "--out", out + "_g"])
-        za_g = ZA.main(base + ["--runs", runs["model_z_global"]])["model_z_global"]["kosullar"]
-        check("tools global_layers (belge 40 G): gap_v2 nll = egitimin sinav kaybi (load_run kimlikten, maske ikilisi); "
-              "z_ablate none = gap, read_off (yerel bloklar model_z_mask, global blok aynen) kaybi degistirir",
-              abs(res_g["toplam"]["mz"] - exam["model_z_global"]) < 1e-4
-              and abs(za_g["none"]["hepsi"] - res_g["toplam"]["mz"]) < 1e-4 and za_g["read_off"]["hepsi"] != za_g["none"]["hepsi"],
-              "mz %.4f / %.4f, read_off %+.4f" % (res_g["toplam"]["mz"], exam["model_z_global"], za_g["read_off"]["fark"]["hepsi"]))
+        strip = lambda r: {k: v for k, v in r.items() if k != "girdi"}  # noqa: E731
+        check("tools gap_v2: tf / mz nll = egitimin sinav kaybi (load_run, egitimle ayni maske yolu; G'siz ve G 1); "
+              "--counts dosyasi = akistan sayim; ciktilar yazildi",
+              abs(res["toplam"]["tf"] - exam["transformer"]) < 1e-4
+              and abs(res["toplam"]["mz"] - exam["model_z_learned"]) < 1e-4
+              and abs(res_g["toplam"]["mz"] - exam["model_z_global"]) < 1e-4 and strip(res) == strip(res_c)
+              and res_g["girdi"]["identity"]["model_z"]["global_layers"] == 1
+              and all(os.path.exists(os.path.join(out + "_a", f)) for f in ("gap.json", "gap.md", "gap_targets.npz")),
+              "tf %.4f / %.4f, mz %.4f / %.4f, G %.4f / %.4f" % (res["toplam"]["tf"], exam["transformer"],
+                                                               res["toplam"]["mz"], exam["model_z_learned"],
+                                                               res_g["toplam"]["mz"], exam["model_z_global"]))
         op = OP.main(base + ["--runs"] + list(runs.values()) + ["--stories", "4", "--out",
                                                                  os.path.join(T2.TMP, "tools_order.json")])
         fin = lambda d: all(np.isfinite(v) for v in d.values() if isinstance(v, float))  # noqa: E731
-        check("tools order_probe: uc kosu (model turu kimlikten), kim kime ve gecmis karistirma sonlu; formullu Model Z'de "
-              "kalip cumlesi egitimin en uzun cumlesinden uzunsa atlandi (kucuk veri), learned_z ve transformer kosar",
+        check("tools order_probe: uc kosu (model turu kimlikten), kim kime ve gecmis karistirma sonlu",
               set(op) == {os.path.basename(r) for r in runs.values()} and all(
-                  fin(r["kim_kime"]) and all(fin(c) for c in r["gecmis_karistirma"].values()) for r in op.values())
-              and op["model_z_learned"]["identity"]["learned_z"] == 1 and "atlandi" in op["model_z"]["kim_kime"]
-              and "sira_etkisi" in op["model_z_global"]["kim_kime"]
-              and "sira_etkisi" in op["model_z_learned"]["kim_kime"] and "sira_etkisi" in op["transformer"]["kim_kime"],
-              str({n: r["kim_kime"].get("sira_etkisi", "atlandi") for n, r in op.items()}))
-        za = ZA.main(base + ["--runs", runs["model_z"], runs["model_z_learned"]])
-        f, lz = za["model_z"]["kosullar"], za["model_z_learned"]["kosullar"]
-        import sentence as SM
-        m, _, _, _ = G.load(runs["model_z"], data, torch.device("cpu"))
-        cols = {c: set(ZA._zero_cols(m.keys, c)) for c in ZA.FORMULA[1:]}
-        check("tools z_ablate: none = gap_v2 nll (formullu, learned_z); z0 ve read_off kaybi degistirir; kanal sutunlari "
-              "bolum (pos | bag = half1 | half2 = z0, kesisim yok); encode_z geri yuklendi",
-              abs(f["none"]["hepsi"] - res["toplam"]["mz"]) < 1e-4 and abs(lz["none"]["hepsi"] - res_l["toplam"]["mz"]) < 1e-4
-              and f["z0"]["hepsi"] != f["none"]["hepsi"] and lz["read_off"]["hepsi"] != lz["none"]["hepsi"]
-              and set(f) == set(ZA.FORMULA) and set(lz) == set(ZA.LEARNED)
-              and cols["pos0"] | cols["bag0"] == cols["z0"] == cols["half1_0"] | cols["half2_0"]
-              and not cols["pos0"] & cols["bag0"] and not cols["half1_0"] & cols["half2_0"]
-              and SM.encode_z.__name__ == "encode_z",
-              "z0 %+.4f, read_off %+.4f" % (f["z0"]["fark"]["hepsi"], lz["read_off"]["fark"]["hepsi"]))
+                  fin(r["kim_kime"]) and all(fin(c) for c in r["gecmis_karistirma"].values()) and "sira_etkisi" in
+                  r["kim_kime"] for r in op.values()) and op["model_z_global"]["identity"]["global_layers"] == 1,
+              str({n: r["kim_kime"]["sira_etkisi"] for n, r in op.items()}))
+        za = ZA.main(base + ["--runs", runs["model_z_learned"], runs["model_z_global"]])
+        lz, gz = za["model_z_learned"]["kosullar"], za["model_z_global"]["kosullar"]
+        check("tools z_ablate: kosullar none / read_off; none = gap_v2 nll (G'siz, G 1); read_off kaybi degistirir (G 1'de "
+              "global blok aynen)", set(lz) == set(gz) == set(ZA.CONDS)
+              and abs(lz["none"]["hepsi"] - res["toplam"]["mz"]) < 1e-4
+              and abs(gz["none"]["hepsi"] - res_g["toplam"]["mz"]) < 1e-4
+              and lz["read_off"]["hepsi"] != lz["none"]["hepsi"] and gz["read_off"]["hepsi"] != gz["none"]["hepsi"],
+              "read_off %+.4f / %+.4f" % (lz["read_off"]["fark"]["hepsi"], gz["read_off"]["fark"]["hepsi"]))
     except Exception:  # noqa: BLE001
         check("tools", False, traceback.format_exc(limit=4))
     finally:
