@@ -294,11 +294,15 @@ def bag_train_loss(model, batch, h, full, weight, timer=None):
     # Torbalar duz konum sirasinda ardisik: grup g = torbalar [b0, b1) = konumlar [start[b0], start[b1]).
     start = torch.cat([sel["rows"] * T + sel["cols"], torch.tensor([len(hf)], device=dev)])
     groups = list(range(0, n, BAG_GROUP)) + [n]
-    Us = [inbag[b0:b1].any(0).nonzero()[:, 0] for b0, b1 in zip(groups[:-1], groups[1:])]
-    sizes = torch.tensor([len(u) for u in Us])
-    bounds = start[groups].tolist()                                      # senkron (dilim sinirlari)
-    eu_all = E[torch.cat(Us)]                                            # TEK toplama: geride tek dagitim
-    off = [0] + sizes.cumsum(0).tolist()
+    ng = len(groups) - 1
+    nz = torch.stack([inbag[b0:b1].any(0) for b0, b1 in zip(groups[:-1], groups[1:])]).nonzero()   # (grup, kelime)
+    host = torch.cat([start[groups], torch.bincount(nz[:, 0], minlength=ng)]).tolist()  # tek senkron: sinirlar + |U_g|
+    bounds, sizes = host[:ng + 1], host[ng + 1:]
+    Us = torch.split(nz[:, 1], sizes)
+    eu_all = E[nz[:, 1]]                                                 # TEK toplama: geride tek dagitim
+    off = [0]
+    for s in sizes:
+        off.append(off[-1] + s)
     so_all = (hf @ bag.other).float()
     upos = torch.full((VOCAB,), -1, dtype=torch.long, device=dev)
     term = p_other = torch.zeros((), device=dev)
