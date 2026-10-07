@@ -178,15 +178,12 @@ class SentenceTransformer(torch.nn.Module):
     def generate(self, prompts, max_sentences, max_tokens, generator=None):
         """prompts: hikaye basina istem cumleleri (token listeleri, END yok) -> her istem icin (uretilen cumleler,
         END ile bitti mi listesi, eos).  generator None: acgozlu, yoksa ornekleme.  SummaryCache ile, istem basina.
-        Cumle en cok max_tokens token; kesilen cumle ended False ile doner (belge 26 B2)."""
+        Cumle en cok max_tokens token; kesilen cumle ended False ile doner (belge 26 B2).  Istem tek ileri geciste
+        (SummaryCache.prefill, belge 46), uretim token token."""
         out = []
         for sents in prompts:
             cache = SummaryCache(self)
-            logits = cache.logits
-            for s in sents:
-                for t in s:
-                    logits = cache.append_token(t)
-                logits = cache.close_sentence()
+            logits = cache.prefill(sents)
             gen, ended, eos = [], [], False
             while len(gen) < max_sentences:
                 cur, done = [], False
@@ -215,7 +212,8 @@ class SummaryCache:
     """Tek hikayenin KV onbellegi (22 s4, 35 s4): ozet (BOS + Z_1..Z_k; kalici) ve cumle (simdiki cumlenin token'lari).
     Konumlar kendiliginden: token k+i, Z_k k.  Her cagri sonraki token'in logit'ini dondurur (self.logits).  Z_k ozet +
     kendi cumlesinin onbellegine bakar, K/V'si ozete yazilir, cumle onbellegi ANCAK sonra silinir.  global_layers
-    bloklari: butun gecmisin K/V'si (all_k / all_v), gercek konumla (self.t: BOS 0, her token ve Z +1)."""
+    bloklari: butun gecmisin K/V'si (all_k / all_v), gercek konumla (self.t: BOS 0, her token ve Z +1).  prefill: istem
+    tek ileri geciste (egitimin maskeleri ve konumlari), onbellek token token yolla ayni duruma gelir."""
 
     def __init__(self, model):
         self.m = model
@@ -252,6 +250,40 @@ class SummaryCache:
                 self.sen_v[l] = v if self.sen_v[l] is None else torch.cat([self.sen_v[l], v], 2)
             x = block._finish(x, a)
         return (self.m.norm(x) @ self.m.E.weight.T)[0, -1]
+
+    @torch.no_grad()
+    def prefill(self, sents):
+        """Yeni onbellek: BOS + istem cumleleri (her biri Z_k ile kapanir) tek ileri geciste -> sonraki token'in logit'i.
+        Yerel bloklar model_z_read_mask + mantiksal konum, global bloklar tam causal + gercek konum (egitimle ayni dense
+        maske); ozet = BOS + Z'lerin K/V'si, global = butun konumlar; cumle onbellegi bos (son Z_k'den sonra)."""
+        assert self.t == 0 and self.n_z == 0 and self.i == 0, "prefill yalniz yeni onbellekte"
+        tok, kind, pos, sent = [EOS_ID], [BOS], [0], [-1]
+        for k, x in enumerate(sents):
+            tok += list(x) + [END_ID]                                       # Z_k girdisi E(END)
+            kind += [TOKEN] * len(x) + [ZTOK]
+            pos += [k + 1 + i for i in range(len(x))] + [k + 1]
+            sent += [k] * (len(x) + 1)
+        T = len(tok)
+        t = lambda v: torch.tensor([v], device=self.dev)  # noqa: E731
+        kind, sent, doc = t(kind), t(sent), torch.zeros(1, T, dtype=torch.long, device=self.dev)
+        local = _dense(model_z_read_mask(kind, doc, sent), 1, T, self.dev)[:, None]
+        causal = torch.ones(T, T, dtype=torch.bool, device=self.dev).tril()
+        summ = ((kind == BOS) | (kind == ZTOK))[0]
+        x, lpos, real = self.m.E(t(tok)), t(pos), torch.arange(T, device=self.dev)[None]
+        for l, block in enumerate(self.m.blocks):
+            g = l >= self.first_global
+            q, k, v = block._qkv(x, real if g else lpos)
+            a = F.scaled_dot_product_attention(q, k, v, attn_mask=causal if g else local)
+            if g:
+                self.all_k[l], self.all_v[l] = k, v
+            else:
+                self.sum_k[l], self.sum_v[l] = k[:, :, summ], v[:, :, summ]
+            x = block._finish(x, a)
+        self.n_z, self.i, self.t = len(sents), 0, T - 1
+        self.sen_k = [None] * len(self.sen_k)
+        self.sen_v = [None] * len(self.sen_v)
+        self.logits = (self.m.norm(x) @ self.m.E.weight.T)[0, -1]
+        return self.logits
 
     @torch.no_grad()
     def append_token(self, token):

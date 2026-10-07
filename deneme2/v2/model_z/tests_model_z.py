@@ -2,7 +2,7 @@
 (z, z_flat, direct, generate_longest, formullu onbellek) kaldirildi (belge 44); eski hali git etiketi
 v2-before-formula-cleanup-20261007.
 
-    python tests_model_z.py [--only layout,flex,learned,global_,equiv]
+    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv]
 """
 import os
 import sys
@@ -411,6 +411,85 @@ def t_global():
     check("global: (read_mask, global_mask) BlockMask ikilisi (flex, CPU ileri) = dense", d < 1e-4, "fark %.1e" % d)
 
 
+def _generate_stepwise(model, prompts, max_sentences, max_tokens, generator=None):
+    """Basvuru: prefill oncesi generate (istem token token: append_token / close_sentence; 86ed345 sentence.py)."""
+    out = []
+    for sents in prompts:
+        cache = SummaryCache(model)
+        logits = cache.logits
+        for s in sents:
+            for t in s:
+                logits = cache.append_token(t)
+            logits = cache.close_sentence()
+        gen, ended, eos = [], [], False
+        while len(gen) < max_sentences:
+            cur, done = [], False
+            while len(cur) < max_tokens:
+                p = logits.float()
+                w = int(p.argmax()) if generator is None else int(torch.multinomial(
+                    torch.softmax(p, -1).cpu(), 1, generator=generator))
+                if w == model.EOS and not cur:
+                    eos = True
+                    break
+                if w in (model.END, model.EOS):
+                    done = True
+                    break
+                cur.append(w)
+                logits = cache.append_token(w)
+            if eos:
+                break
+            gen.append(cur)
+            ended.append(done)
+            logits = cache.close_sentence()
+        out.append((gen, ended, eos))
+    return out
+
+
+def t_prefill():
+    """SummaryCache.prefill (belge 46): istem tek ileri geciste = token token (logit ve onbellek fp32 ~1e-5, sayaclar
+    ayni); generate (prefill'li) = token token generate, acgozlu ve ornekleme, G 0 / 1 / 2, bos, kisa ve ~400 token'lik
+    istem."""
+    rng = np.random.default_rng(5)
+    rs = lambda n: [[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 15))] for _ in range(n)]  # noqa: E731
+    prompts = [[], rs(1), rs(3), rs(50)]
+    info, ok_cache, ok_gen = [], True, True
+    for gl in (0, 1, 2):
+        m = learned_model(d=32, layers=3, global_layers=gl)
+        dmax = 0.0
+        with torch.no_grad():
+            for sents in prompts:
+                a, b = SummaryCache(m), SummaryCache(m)
+                la = a.prefill(sents)
+                lb = b.logits
+                for x in sents:
+                    for t in x:
+                        lb = b.append_token(t)
+                    lb = b.close_sentence()
+                d = (la - lb).abs().max().item()
+                for ka, kb in ((a.sum_k, b.sum_k), (a.sum_v, b.sum_v), (a.all_k, b.all_k), (a.all_v, b.all_v)):
+                    for x, y in zip(ka, kb):
+                        ok_cache &= (x is None) == (y is None) and (x is None or x.shape == y.shape)
+                        d = max(d, 0.0 if x is None or x.shape != y.shape else (x - y).abs().max().item())
+                ok_cache &= (a.n_z, a.i, a.t) == (b.n_z, b.i, b.t) and all(k is None for k in a.sen_k)
+                dmax = max(dmax, d)
+                # prefill sonrasi decode da ayni: bir cumle daha token token
+                for t in (sents[0] if sents else [7, 8]):
+                    dmax = max(dmax, (a.append_token(t) - b.append_token(t)).abs().max().item())
+                dmax = max(dmax, (a.close_sentence() - b.close_sentence()).abs().max().item())
+        ok_cache &= dmax < 1e-5
+        g_new = m.generate(prompts, 4, 12)
+        g_old = _generate_stepwise(m, prompts, 4, 12)
+        s_new = m.generate(prompts, 4, 12, torch.Generator().manual_seed(11))
+        s_old = _generate_stepwise(m, prompts, 4, 12, torch.Generator().manual_seed(11))
+        ok_gen &= g_new == g_old and s_new == s_old
+        info.append("G%d fark %.1e" % (gl, dmax))
+    n = sum(len(x) + 1 for x in prompts[-1]) + 1
+    check("prefill: istem tek ileri gecis = token token (son logit, ozet ve global K/V, sayaclar; sonraki decode adimlari; "
+          "fp32 < 1e-5), G 0 / 1 / 2, istem 1 / 4 / %d konum" % n, ok_cache, "; ".join(info))
+    check("prefill: generate = token token generate (acgozlu + ornekleme, G 0 / 1 / 2, bos / kisa / %d konumluk istem), "
+          "token token ayni" % n, ok_gen)
+
+
 # --- eski kodla esdegerlik (belge 44; belge 33 s5 deseni): etiketteki ogrenilen z = bugunku Model Z, bit duzeyinde
 def _equiv_side(old):
     """Ayni tohum, ayni veri, G'siz ve G 1: ilk agirlik, 3 AdamW adiminin kayip ve gradyanlari, son agirlik, generate
@@ -482,7 +561,8 @@ def t_equiv():
           "greedy, sample)" % len(a), not bad and a.keys() == b.keys(), "farkli: %s" % bad if bad else "")
 
 
-TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, equiv=t_equiv)
+TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
+             equiv=t_equiv)
 
 if __name__ == "__main__":
     if SIDE is not None:
