@@ -891,6 +891,7 @@ def t_train():
         else:
             print("BEKLIYOR: learned_z modeli yok (SentenceTransformer(learned_z) / model_z_read_mask)", flush=True)
         _train_muon(base, root, data, out, state, same, exits, TR)
+        _train_global(base, root, data, out, exits, TR)
     except Exception:  # noqa: BLE001
         check("train", False, traceback.format_exc(limit=3))
     finally:
@@ -1064,6 +1065,60 @@ def _train_muon(base, root, data, out, state, same, exits, TR):
               and TR._args(base + ["--model", "model_z", "--out", "x"]).optimizer == "adamw", str(msg))
     except Exception:  # noqa: BLE001
         check("train --optimizer muon", False, traceback.format_exc(limit=3))
+
+
+def _train_global(base, root, data, out, exits, TR):
+    """--global_layers (belge 40 s6.2 Deney G) gercek SentenceTransformer ve build_batch ile: 2 epok kosar, kayip duser;
+    kimlikte global_layers; ilk adim kaybi (train._attn ikilisi) = modelin kendi (dense) maskesiyle loss_per_target;
+    load_run kimlikten okur; transformer, formullu yol, N > katman DURUR; global_layers farkiyla surdurme checkpoint
+    yuklenmeden DURUR; alani olmayan eski checkpoint 0 sayilir.  Bit duzeyinde surdurme sinanmaz (kullanici, 7 Ekim:
+    SS kisa deneme, kural 3 istisnasi)."""
+    import traceback
+    import recipe as R
+    try:
+        cmd = base + ["--model", "model_z", "--layers", "2", "--global_layers", "1"]
+        A = out("glob_A")
+        a = TR.main(cmd + ["--epochs", "2", "--out", A])
+        L = [w["loss"] for w in a["log"]]
+        st = D.TokenStories(root, data, "train")
+        m, mask_fn, layout = TR._build(TR._args(cmd + ["--out", "x"]), st.max_sentence_tokens, torch.device("cpu"))
+        f = np.load(os.path.join(data, "train_pack_plan_e1.npz"))
+        ro, rs = f["row_offsets"], f["row_stories"]
+        b = D.build_batch(st, [rs[ro[r]:ro[r + 1]].tolist() for r in range(4)], layout, "cpu", 64)
+        with torch.no_grad():
+            want = m.loss_per_target(b)[0].mean().item()                  # modelin kendi dense maske ikilisi
+            via = m.loss_per_target(b, TR._attn(b, mask_fn, False))[0].mean().item()
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
+        import generate_readings as GR
+        lm = GR.load_run(A, data, torch.device("cpu"))[0]
+        check("train model_z --global_layers 1: 2 epok kosar, kayip duser; kimlikte global_layers 1; ilk adim kaybi = "
+              "modelin kendi maskesiyle loss_per_target (train._attn ikilisi); load_run global_layers'i kimlikten okur",
+              np.mean(L[-3:]) < np.mean(L[:3]) - 0.5 and a["identity"]["global_layers"] == 1
+              and abs(a["log"][0]["loss"] - want) < 1e-4 and via == want and isinstance(mask_fn, tuple)
+              and lm.global_layers == 1 and m.global_layers == 1,
+              "kayip %.3f -> %.3f; ilk %.4f / %.4f" % (np.mean(L[:3]), np.mean(L[-3:]), a["log"][0]["loss"], want))
+        gone = [base + ["--model", "transformer", "--global_layers", "1", "--out", out("g_tf")],
+                base + ["--model", "model_z", "--learned_z", "0", "--global_layers", "1", "--out", out("g_lz0")],
+                base + ["--model", "model_z", "--global_layers", "2", "--out", out("g_big")]]   # base: 1 katman
+        mt = [os.path.getmtime(os.path.join(p, "checkpoint.pt")) for p in (A, out("mzl_A"))]
+        check("train: transformer / formullu Model Z + --global_layers ve N > katman veri yuklenmeden DURUR; "
+              "global_layers farkiyla surdurme (1 -> 0, 0 -> 1) checkpoint yuklenmeden DURUR, dosyalara dokunulmaz",
+              all(exits(c) and not os.path.exists(c[-1]) for c in gone)
+              and exits(base + ["--model", "model_z", "--layers", "2", "--epochs", "2", "--out", A, "--resume", "1"])
+              and exits(base + ["--model", "model_z", "--learned_z", "1", "--global_layers", "1", "--epochs", "2",
+                                "--out", out("mzl_A"), "--resume", "1"])
+              and mt == [os.path.getmtime(os.path.join(p, "checkpoint.pt")) for p in (A, out("mzl_A"))])
+        old = out("noglobal")                                             # global_layers alanindan onceki kosu
+        shutil.copytree(out("mzl_A"), old)
+        pack = torch.load(os.path.join(old, "checkpoint.pt"), weights_only=False)
+        del pack["args"]["global_layers"]
+        torch.save(pack, os.path.join(old, "checkpoint.pt"))
+        c = base + ["--model", "model_z", "--learned_z", "1", "--epochs", "2", "--out", old, "--resume", "1"]
+        r = _exit_msg(TR.main, c)
+        check("train: global_layers alani olmayan checkpoint 0 sayilir (bitmis kosu olarak durur), 1 ile DURUR",
+              r is None and exits(c + ["--global_layers", "1"]), str(r))
+    except Exception:  # noqa: BLE001
+        check("train --global_layers", False, traceback.format_exc(limit=3))
 
 
 def _exit_msg(fn, *a):

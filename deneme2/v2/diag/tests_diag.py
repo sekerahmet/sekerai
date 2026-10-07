@@ -51,11 +51,12 @@ def t_readings():
     variants = [("transformer", []), ("model_z", ["--learned_z", "0"])]
     if T2._learned_z_ready():
         variants.append(("model_z_learned", ["--learned_z", "1"]))       # belge 35 (b); load_run kimlikten okur
+        variants.append(("model_z_global", ["--learned_z", "1", "--layers", "2", "--global_layers", "1"]))  # belge 40 G
     else:
         print("BEKLIYOR readings: learned_z modeli yok", flush=True)
     try:
-        for name, extra in variants:                                       # name: model ya da model_z_learned
-            model = name.split("_learned")[0]
+        for name, extra in variants:                                       # name: model ya da model_z_<cesit>
+            model = "transformer" if name == "transformer" else "model_z"
             run = os.path.join(T2.TMP, "runs_readings", name)
             TR.main(base + ["--model", model, "--d", "16", "--layers", "1", "--heads", "2", "--lr", "1e-2", "--steps", "6",
                             "--out", run, "--checkpoint_minutes", "0"] + extra)
@@ -141,11 +142,12 @@ def t_tools():
     base = ["--data", data, "--stream", root]
     runs = {}
     try:
-        for name, extra in (("transformer", []), ("model_z", ["--learned_z", "0"]), ("model_z_learned", ["--learned_z", "1"])):
+        for name, extra in (("transformer", []), ("model_z", ["--learned_z", "0"]), ("model_z_learned", ["--learned_z", "1"]),
+                            ("model_z_global", ["--learned_z", "1", "--layers", "2", "--global_layers", "1"])):
             run = os.path.join(T2.TMP, "runs_tools", name)
-            TR.main(base + ["--device", "cpu", "--model", name.split("_learned")[0], "--d", "16", "--layers", "1",
-                            "--heads", "2", "--lr", "1e-2", "--steps", "6", "--out", run, "--checkpoint_minutes", "0"]
-                    + extra)
+            TR.main(base + ["--device", "cpu", "--model", "transformer" if name == "transformer" else "model_z", "--d", "16",
+                            "--layers", "1", "--heads", "2", "--lr", "1e-2", "--steps", "6", "--out", run,
+                            "--checkpoint_minutes", "0"] + extra)
             runs[name] = run
         exam = {n: json.load(open(os.path.join(r, "results.json"), encoding="utf-8"))["exam"]["loss"]
                 for n, r in runs.items()}
@@ -167,6 +169,13 @@ def t_tools():
               "tf %.4f / %.4f, mz %.4f / %.4f, learned %.4f / %.4f" % (res["toplam"]["tf"], exam["transformer"],
                                                                      res["toplam"]["mz"], exam["model_z"],
                                                                      res_l["toplam"]["mz"], exam["model_z_learned"]))
+        res_g = G.main(base + ["--tf", runs["transformer"], "--mz", runs["model_z_global"], "--out", out + "_g"])
+        za_g = ZA.main(base + ["--runs", runs["model_z_global"]])["model_z_global"]["kosullar"]
+        check("tools global_layers (belge 40 G): gap_v2 nll = egitimin sinav kaybi (load_run kimlikten, maske ikilisi); "
+              "z_ablate none = gap, read_off (yerel bloklar model_z_mask, global blok aynen) kaybi degistirir",
+              abs(res_g["toplam"]["mz"] - exam["model_z_global"]) < 1e-4
+              and abs(za_g["none"]["hepsi"] - res_g["toplam"]["mz"]) < 1e-4 and za_g["read_off"]["hepsi"] != za_g["none"]["hepsi"],
+              "mz %.4f / %.4f, read_off %+.4f" % (res_g["toplam"]["mz"], exam["model_z_global"], za_g["read_off"]["fark"]["hepsi"]))
         op = OP.main(base + ["--runs"] + list(runs.values()) + ["--stories", "4", "--out",
                                                                  os.path.join(T2.TMP, "tools_order.json")])
         fin = lambda d: all(np.isfinite(v) for v in d.values() if isinstance(v, float))  # noqa: E731
@@ -175,6 +184,7 @@ def t_tools():
               set(op) == {os.path.basename(r) for r in runs.values()} and all(
                   fin(r["kim_kime"]) and all(fin(c) for c in r["gecmis_karistirma"].values()) for r in op.values())
               and op["model_z_learned"]["identity"]["learned_z"] == 1 and "atlandi" in op["model_z"]["kim_kime"]
+              and "sira_etkisi" in op["model_z_global"]["kim_kime"]
               and "sira_etkisi" in op["model_z_learned"]["kim_kime"] and "sira_etkisi" in op["transformer"]["kim_kime"],
               str({n: r["kim_kime"].get("sira_etkisi", "atlandi") for n, r in op.items()}))
         za = ZA.main(base + ["--runs", runs["model_z"], runs["model_z_learned"]])

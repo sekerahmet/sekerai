@@ -253,7 +253,7 @@ def main(argv=None):
     for kind, run in (("transformer", args.tf), ("model_z", args.mz)):
         model, mask_fn, layout, idt = load(run, args.data, dev)
         assert idt["model"] == kind, "%s: kosu %s modeli" % (run, idt["model"])
-        idts[kind] = {k: idt.get(k) for k in ("model", "d", "layers", "heads", "seed", "learned_z")}
+        idts[kind] = {k: idt.get(k) for k in ("model", "d", "layers", "heads", "seed", "learned_z", "global_layers")}
         if dev.type == "cuda":
             for block in model.blocks:
                 block.compile(dynamic=False)

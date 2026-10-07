@@ -1,7 +1,7 @@
 """tests_model_z -- V2-Model Z testleri (CPU; belge 21, 22, 33).  GPU yok, Drive yok.  Meaning / ortak sozluk / open_z
 testleri arsivde (arsiv/v2_20261006/model_z/tests_model_z.py; git etiketi v2-before-cleanup-20261006).
 
-    python tests_model_z.py [--only z,z_flat,layout,cache,flex,direct,generate_longest,learned,equiv]
+    python tests_model_z.py [--only z,z_flat,layout,cache,flex,direct,generate_longest,learned,global_,equiv]
 """
 import os
 import sys
@@ -553,6 +553,117 @@ def t_learned():
     check("learned: model_z_read_mask BlockMask (flex, CPU ileri) = dense", d < 1e-4, "fark %.1e" % d)
 
 
+def t_global():
+    """global_layers (belge 40 s6.2 Deney G): 0 = bugunku learned_z (bit); son N blok tam causal (ayni hikaye), oteki
+    bloklar read_mask; global blokta konum = gercek (transformer duzeni) konum, bagimsiz basvuru ileri gecisiyle ayni ve
+    mantiksal konumla farkli; onbellek = tam hesap (N 1, 2); flex = dense; yanlis maske bicimi ve formullu yol DURUR."""
+    from sentence import model_z_global_mask, story_positions
+    rng = np.random.default_rng(1)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 10))] for _ in range(rng.integers(1, 6))]
+               for _ in range(20)]
+    rows = [list(range(i, i + 5)) for i in range(0, 20, 5)]
+    batch = real_batch(rows, 256, stories)
+    tb = D.build_batch(token_stories(stories), rows, "transformer", row_len=256)
+    B, T = batch.kind.shape
+
+    def model(gl, layers=3):
+        torch.manual_seed(0)
+        return SentenceTransformer(None, d=32, layers=layers, heads=2, learned_z=True, global_layers=gl).eval()
+    m0, base = model(0), learned_model(d=32, layers=3)
+    with torch.no_grad():
+        same0 = torch.equal(m0._batch_hidden(batch), base._batch_hidden(batch))
+    check("global: global_layers 0 = bugunku learned_z (agirlik ve hidden bit duzeyinde; mask_fn = read_mask)",
+          same0 and all(torch.equal(a, b) for a, b in zip(m0.state_dict().values(), base.state_dict().values()))
+          and m0.mask_fn is model_z_read_mask)
+    m1 = model(1)
+    seen = []
+    hooks = [blk.register_forward_pre_hook(lambda mod, a: seen.append((a[1], a[2]))) for blk in m1.blocks]
+    with torch.no_grad():
+        h1 = m1._batch_hidden(batch)
+    for hk in hooks:
+        hk.remove()
+    real = batch.kind != PAD
+    full = (batch.doc[:, :, None] == batch.doc[:, None, :]) & torch.ones(T, T, dtype=torch.bool).tril()
+    read = _dense(model_z_read_mask(batch.kind, batch.doc, batch.sent), B, T, "cpu")
+    glob = _dense(model_z_global_mask(batch.kind, batch.doc, batch.sent), B, T, "cpu")
+    rr = real[:, :, None] & real[:, None, :]
+    check("global N=1 maske: son blok tam causal (ayni hikaye, kelime + BOS + Z; gercek konumlar arasi = transformer "
+          "maskesi), ilk iki blok read_mask; mask_fn (yerel, global); bos satir yok",
+          torch.equal(seen[2][1], glob) and torch.equal(seen[0][1], read) and torch.equal(seen[1][1], read)
+          and torch.equal(glob & rr, full & rr) and not (glob & (real[:, :, None] ^ real[:, None, :])).any()
+          and bool(glob.any(-1).all()) and m1.mask_fn == (model_z_read_mask, model_z_global_mask))
+    sp = story_positions(batch.kind)
+    dup = uniq = True
+    for r, row in enumerate(rows):
+        for d_ in range(len(row)):
+            sel = batch.doc[r] == d_
+            dup &= len(batch.pos[r][sel].unique()) < int(sel.sum())       # mantiksal konum cakisir
+            uniq &= len(sp[r][sel].unique()) == int(sel.sum())
+    check("global konum: global bloga giden konum = transformer duzeninin pos'u (gercek konumlarda), yerel bloklara "
+          "mantiksal pos; her hikayede mantiksal konum cakisiyor, gercek konum cakismiyor",
+          torch.equal(seen[2][0][real], tb.pos[real]) and torch.equal(seen[0][0], batch.pos) and dup and uniq)
+
+    def manual(gpos):
+        """Bagimsiz ileri gecis: yerel bloklar mantiksal pos + read_mask, son blok gpos + tam causal maske."""
+        with torch.no_grad():
+            x = m1.E(torch.where(batch.kind == ZTOK, torch.full_like(batch.tokens, D.END_ID), batch.tokens))
+            for i, blk in enumerate(m1.blocks):
+                x = blk(x, gpos if i == 2 else batch.pos, glob if i == 2 else read)
+            return m1.norm(x)
+    d_real = (manual(torch.where(real, tb.pos, sp)) - h1)[real].abs().max().item()
+    d_log = (manual(batch.pos) - h1)[real].abs().max().item()
+    check("global konum (RoPE, q.k goreli konuma bagli): model = gercek konumlu basvuru (fark %.1e); mantiksal konumla "
+          "basvurudan farkli (%.1e)" % (d_real, d_log), d_real == 0 and d_log > 1e-3)
+    ok_cache, info = True, []
+    for gl in (1, 2):
+        mg = model(gl)
+        with torch.no_grad():
+            lg_full, _ = full_logits(mg, batch)
+            got = []
+            for row in rows:
+                for si in row:
+                    cache = SummaryCache(mg)
+                    got.append(cache.logits[None])
+                    for s in stories[si]:
+                        for t in s:
+                            got.append(cache.append_token(t)[None])
+                        got.append(cache.close_sentence()[None])
+        d = (torch.cat(got) - lg_full).abs().max().item()
+        a = mg.generate([stories[0][:1], stories[1][:2]], 3, 6, torch.Generator().manual_seed(0))
+        b = mg.generate([stories[0][:1], stories[1][:2]], 3, 6, torch.Generator().manual_seed(0))
+        ok_cache &= d < 1e-5 and a == b and cache.all_k[0] is None and cache.all_k[2].shape[2] == cache.t + 1
+        info.append("N=%d fark %.1e" % (gl, d))
+    check("global: SummaryCache (global bloklar butun gecmis, gercek konum) adim adim logit = tam ileri gecis (fp32, %d "
+          "hedef), N 1 ve 2; generate ayni tohum ayni metin" % len(lg_full), ok_cache, "; ".join(info))
+    stops = []
+    for attn in (read, (read, glob)):                                    # gl 1'e tek maske; gl 0'a ikili
+        for mm in ((m1,) if attn is read else (m0,)):
+            try:
+                mm._batch_hidden(batch, attn)
+                stops.append(False)
+            except AssertionError:
+                stops.append(True)
+    try:
+        SentenceTransformer(SZ.build_keys(8, 16), d=32, layers=2, heads=2, global_layers=1)
+        stops.append(False)
+    except AssertionError:
+        stops.append(True)
+    check("global: global_layers'a tek maske, global_layers 0'a ikili maske, formullu yol + global_layers DURUR", all(stops),
+          str(stops))
+    try:
+        from torch.nn.attention.flex_attention import create_block_mask
+        b4 = real_batch(rows[:2], 384, stories)
+        bms = tuple(create_block_mask(f(b4.kind, b4.doc, b4.sent), 2, None, 384, 384, device="cpu") for f in m1.mask_fn)
+        with torch.no_grad():
+            hf, hd = m1._batch_hidden(b4, bms), m1._batch_hidden(b4)
+    except Exception as e:  # noqa: BLE001
+        print("ATLA global flex: CPU'da kosmadi (%s)" % str(e).splitlines()[0][:120], flush=True)
+        return
+    keepf = b4.kind != PAD
+    d = (hf[keepf] - hd[keepf]).abs().max().item()
+    check("global: (read_mask, global_mask) BlockMask ikilisi (flex, CPU ileri) = dense", d < 1e-4, "fark %.1e" % d)
+
+
 # --- eski kodla esdegerlik (belge 33 s5): etiketteki own_vocab yolu = bugunku varsayilan, bit duzeyinde
 def _equiv_side(old):
     """Ayni tohum, ayni veri: ilk agirlik, 3 AdamW adiminin kayip ve gradyanlari, son agirlik, z, generate."""
@@ -629,7 +740,7 @@ def t_equiv():
 
 
 TESTS = dict(z=t_z, z_flat=t_z_flat, layout=t_layout, cache=t_cache, flex=t_flex, direct=t_direct,
-             generate_longest=t_generate_longest, learned=t_learned, equiv=t_equiv)
+             generate_longest=t_generate_longest, learned=t_learned, global_=t_global, equiv=t_equiv)
 
 if __name__ == "__main__":
     if SIDE is not None:

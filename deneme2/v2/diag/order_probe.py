@@ -186,7 +186,7 @@ def main(argv=None):
         name = os.path.basename(os.path.normpath(run))
         r = dict(kim_kime=who_did_what(model, layout, enc), gecmis_karistirma=history_shuffle(model, layout, valid, pick,
                                                                                              func),
-                 identity={k: idt.get(k) for k in ("model", "d", "layers", "heads", "seed", "learned_z")})
+                 identity={k: idt.get(k) for k in ("model", "d", "layers", "heads", "seed", "learned_z", "global_layers")})
         res[name] = r
         k, g = r["kim_kime"], r["gecmis_karistirma"]
         kk = k.get("atlandi") or "dogruluk %.3f, sira etkisi %.3f, duyarlilik %.3f" % (

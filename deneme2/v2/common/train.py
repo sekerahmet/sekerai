@@ -20,11 +20,13 @@ Model Z varsayilani ogrenilen z (belge 35 (b); kullanici, 7 Ekim: "Şu an en iyi
 (belge 33; z modelin ogrenilen E'sinden, eski --own_vocab yolu), yalniz eski kosularla kiyas icin.  Temizlik oncesi kosular
 surdurulmez / uzatilmaz (kullanici, 6 Ekim: "eski koşuları uzatma niyetim yok"); okumada (_archived) eski transformer ve
 eski own_vocab Model Z yuklenir, oteki eski Model Z'ler durur.  Eski kod: git etiketi v2-before-cleanup-20261006.
+--global_layers N (belge 40 s6.2 Deney G; yalniz Model Z learned_z): son N blok tam causal, gercek hikaye konumuyla;
+maske ikilisi (yerel, global) _attn'dan, egitim / sinav / teshis ayni yol.
 
     python train.py --model transformer|model_z --lr LR --out <kosu> [--data <v2/simplestories_gpt2>]
                     [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
                     [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1] [--learned_z 0|1 (model_z; varsayilan 1)]
-                    [--optimizer adamw|muon]
+                    [--optimizer adamw|muon] [--global_layers N (model_z learned_z; varsayilan 0)]
 """
 import torch  # noqa: I001  (Windows: torch once)
 
@@ -56,7 +58,7 @@ READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
 READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
-            "learned_z", "optimizer")
+            "learned_z", "optimizer", "global_layers")
 LEGACY = ("meaning_sha256", "shared_vocab", "own_vocab", "open_z")   # temizlik oncesi kimlik alanlari (belge 33)
 TAG = "v2-before-cleanup-20261006"
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
@@ -137,14 +139,28 @@ def _archived(idt):
            "add <klasor> %s)" % (old, TAG, TAG)
 
 
+def _global_error(args):
+    """--global_layers kurulamiyorsa ileti, yoksa None (args'ta yoksa 0)."""
+    gl = int(getattr(args, "global_layers", 0))
+    if gl and (args.model != "model_z" or not getattr(args, "learned_z", 0)):
+        return "--global_layers yalniz model_z --learned_z 1 (belge 40 s6.2)"
+    if not 0 <= gl <= args.layers:
+        return "--global_layers %d: 0..%d olmali" % (gl, args.layers)
+    return None
+
+
 def _build(args, longest, dev):
     """-> (model, mask_fn, layout).  Model dosyalari yalniz burada import edilir.  Model Z: z modelin ogrenilen E'sinden
     (belge 33; yarilar d / 2); learned_z (belge 35 (b); args'ta yoksa 0): Z_k girdisi E(END), Z_k kendi cumlesini okur
-    (model_z_read_mask).  Maske kurali yalniz burada secilir (egitim, sinav, teshis ayni yol)."""
+    (model_z_read_mask); global_layers (args'ta yoksa 0): mask_fn (yerel, global) ikilisi.  Maske kurali yalniz burada
+    secilir (egitim, sinav, teshis ayni yol)."""
     root = os.path.dirname(HERE)
     learned = bool(getattr(args, "learned_z", 0))
     if args.model == "transformer" and learned:
         sys.exit("DUR: --learned_z yalniz model_z")
+    if _global_error(args):
+        sys.exit("DUR: " + _global_error(args))
+    gl = int(getattr(args, "global_layers", 0))
     torch.manual_seed(args.seed)
     if args.model == "transformer":
         sys.path.insert(0, os.path.join(root, "transformer"))
@@ -157,9 +173,9 @@ def _build(args, longest, dev):
     torch.manual_seed(args.seed)
     if not learned:                                                      # varsayilan: cagri temizlik sonrasiyla ayni
         return SentenceTransformer(SZ.keys_to(keys, dev), args.d, args.layers, args.heads).to(dev), model_z_mask, "model_z"
-    from sentence import model_z_read_mask
-    model = SentenceTransformer(SZ.keys_to(keys, dev), args.d, args.layers, args.heads, learned_z=True).to(dev)
-    return model, model_z_read_mask, "model_z"
+    model = SentenceTransformer(SZ.keys_to(keys, dev), args.d, args.layers, args.heads, learned_z=True,
+                                global_layers=gl).to(dev)
+    return model, model.mask_fn, "model_z"
 
 
 def _muon_missing():
@@ -196,7 +212,9 @@ def _optimizer(model, kind, lr, cuda):
 
 
 def _attn(batch, mask_fn, cuda):
-    """Egitim, sinav (_Exam) ve teshis araclarinin tek maske yolu."""
+    """Egitim, sinav (_Exam) ve teshis araclarinin tek maske yolu; mask_fn ikiliyse (global_layers) iki maske."""
+    if isinstance(mask_fn, tuple):
+        return tuple(_attn(batch, f, cuda) for f in mask_fn)
     return R.block_mask(batch, mask_fn) if cuda else R.dense_mask(batch, mask_fn)
 
 
@@ -301,6 +319,8 @@ def _args(argv):
                          "okur; 0 formullu z.  transformer: 0")
     ap.add_argument("--optimizer", default="adamw", choices=("adamw", "muon"),
                     help="muon: bloklarin 2-B matrisleri Muon'a (match_rms_adamw, ayni --lr), geri kalan AdamW'ye")
+    ap.add_argument("--global_layers", type=int, default=0,
+                    help="model_z learned_z: son N blok tam causal, gercek konumla (belge 40 s6.2 Deney G)")
     ap.add_argument("--checkpoint_minutes", type=float, default=10,
                     help="en cok bu kadar duvar saati kaybi (sinav dahil); surdurmede degistirilebilir")
     args = ap.parse_args(argv)
@@ -315,6 +335,8 @@ def main(argv=None):
     log = lambda msg: print("[%7.1f sn] %s" % (time.time() - t0, msg), flush=True)  # noqa: E731
     if args.learned_z and args.model == "transformer":                   # veri yuklenmeden (_build da durur)
         sys.exit("DUR: --learned_z yalniz model_z")
+    if _global_error(args):                                              # veri yuklenmeden
+        sys.exit("DUR: " + _global_error(args))
     if args.optimizer == "muon" and _muon_missing():                    # sessizce AdamW'ye dusulmez
         sys.exit("DUR: --optimizer muon: %s" % _muon_missing())
     dev = torch.device(args.device)
@@ -348,7 +370,8 @@ def main(argv=None):
     opt, opt_info = _optimizer(model, args.optimizer, args.lr, cuda)
     ident = dict(model=args.model, d=args.d, layers=args.layers, heads=args.heads, lr=args.lr, seed=args.seed,
                  longest=train.max_sentence_tokens, row_len=row_len, batch_rows=BATCH_ROWS,
-                 train_stream_sha256=train.meta["stream_sha256"], learned_z=args.learned_z, optimizer=args.optimizer)
+                 train_stream_sha256=train.meta["stream_sha256"], learned_z=args.learned_z, optimizer=args.optimizer,
+                 global_layers=args.global_layers)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -367,7 +390,7 @@ def main(argv=None):
         del peek
         if any(k in was for k in LEGACY):                                 # kullanici, 6 Ekim: eski kosu uzatilmaz
             sys.exit("DUR: temizlik oncesi kosu surdurulmez / uzatilmaz (kullanici, 6 Ekim); eski kod: git etiketi %s" % TAG)
-        was = {"learned_z": 0, "optimizer": "adamw", **was}               # bu alanlardan onceki (temizlik sonrasi) kosu
+        was = {"learned_z": 0, "optimizer": "adamw", "global_layers": 0, **was}   # alanlardan onceki kosu
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:
@@ -406,6 +429,9 @@ def main(argv=None):
         "basi %d | lr %g | cihaz %s, compile %s | sinav %d hikaye" % (
             args.model, args.d, args.layers, args.heads, params, train.n, BATCH_ROWS, row_len, per_epoch, total, down,
             args.lr, config["env"]["device"], cuda, len(exam_plan[1])))
+    if args.global_layers:
+        log("global_layers %d: son %d blok tam causal (model_z_global_mask), gercek hikaye konumu" % (
+            args.global_layers, args.global_layers))
     for k, g in opt_info["split"].items():
         if g["tensors"]:
             log("optimizer %s | %s: %d tensor, %d parametre | %s" % (args.optimizer, k, g["tensors"], g["params"],

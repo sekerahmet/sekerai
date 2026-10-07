@@ -56,7 +56,7 @@ def ablated(model, cond):
         return
     if model.learned_z:
         assert cond == "read_off", cond
-        yield S.model_z_mask
+        yield (S.model_z_mask, model.mask_fn[1]) if model.global_layers else S.model_z_mask   # global bloklar aynen
         return
     cols = torch.tensor(_zero_cols(model.keys, cond))
     orig = S.encode_z
