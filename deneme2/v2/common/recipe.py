@@ -25,7 +25,7 @@ import torch.nn.functional as F
 
 from data import END_ID, EOS_ID, VOCAB, Kind
 
-BAG_GROUP = 256                   # grup basina torba (ardisik; grubun aday birlesimine tek matmul)
+BAG_GROUP = 512                   # grup basina torba (ardisik; grubun aday birlesimine tek matmul)
 BAG_CHUNK = 2048                  # tam sozluk satir dilimi
 
 
