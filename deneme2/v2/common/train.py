@@ -71,7 +71,7 @@ READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
 READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
-            "learned_z", "optimizer", "global_layers", "bag_k", "bag_core", "bag_weight", "bag_full_frac", "bag_core_sha256",
+            "learned_z", "optimizer", "global_layers", "layer_plan", "bag_k", "bag_core", "bag_weight", "bag_full_frac", "bag_core_sha256",
             "bag_sel_frac")
 NO_BAG = dict(bag_k=0, bag_core=0, bag_weight=0.0, bag_full_frac=0.0, bag_core_sha256=None, bag_sel_frac=1.0)   # torbasiz / eski kosu
 LEGACY = ("meaning_sha256", "shared_vocab", "own_vocab", "open_z")   # temizlik oncesi kimlik alanlari (belge 33)
@@ -188,7 +188,8 @@ def _build(args, dev):
     else:
         sys.path.insert(0, os.path.join(root, "model_z"))
         from sentence import SentenceTransformer
-        model = SentenceTransformer(args.d, args.layers, args.heads, global_layers=int(getattr(args, "global_layers", 0)))
+        model = SentenceTransformer(args.d, args.layers, args.heads, global_layers=int(getattr(args, "global_layers", 0)),
+                                    layer_plan=getattr(args, "layer_plan", None))
         model, mask_fn, layout = model.to(dev), model.mask_fn, "model_z"
     if getattr(args, "bag_k", 0):
         R.attach_bag(model, args.bag_k, args.bag_n_core)
@@ -353,6 +354,9 @@ def _args(argv):
     ap.add_argument("--global_layers", type=int, default=None,
                     help="model_z: son N blok tam causal, gercek konumla (belge 40 s6.2 Deney G); varsayilan model_z'de "
                          "1, transformer'da 0; 0: G'siz Model Z")
+    ap.add_argument("--layer_plan", default=None,
+                    help="model_z katman plani, ornek loc2,mid4,loc1,glob1 (mid: yalniz BOS + Z satirlari, belge 52); "
+                         "verilirse --layers ve --global_layers ondan")
     ap.add_argument("--bag_k", type=int, default=0, help="ogrenen torba boyu K = |C| + |P_k u L_k| siniri (0: tam softmax)")
     ap.add_argument("--bag_core", type=int, default=50, help="C: train sayiminda en sik N token (+ END + EOS)")
     ap.add_argument("--bag_weight", type=float, default=0.1, help="secici kaybinin agirligi (lambda; olculmedi)")
@@ -365,6 +369,14 @@ def _args(argv):
     args = ap.parse_args(argv)
     if args.global_layers is None:                                       # belge 43: G varsayilan (7 Ekim)
         args.global_layers = int(args.model == "model_z")
+    if args.layer_plan:
+        if args.model != "model_z":
+            sys.exit("DUR: --layer_plan yalniz model_z")
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "model_z"))
+        from sentence import parse_layer_plan
+        plan = parse_layer_plan(args.layer_plan)
+        args.layers = len(plan)
+        args.global_layers = len(plan) - len(plan[:max([i + 1 for i, k in enumerate(plan) if k != "glob"] or [0])])
     return args
 
 
@@ -421,7 +433,7 @@ def main(argv=None):
     ident = dict(model=args.model, d=args.d, layers=args.layers, heads=args.heads, lr=args.lr, seed=args.seed,
                  longest=train.max_sentence_tokens, row_len=row_len, batch_rows=BATCH_ROWS,
                  train_stream_sha256=train.meta["stream_sha256"], learned_z=int(args.model == "model_z"),
-                 optimizer=args.optimizer, global_layers=args.global_layers, **bag)   # learned_z: eski kosu ayrimi
+                 optimizer=args.optimizer, global_layers=args.global_layers, layer_plan=args.layer_plan, **bag)   # learned_z: eski kosu ayrimi
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -442,7 +454,7 @@ def main(argv=None):
             sys.exit("DUR: temizlik oncesi kosu surdurulmez / uzatilmaz (kullanici, 6 Ekim); eski kod: git etiketi %s" % TAG)
         if _archived(was):                                                # formullu Model Z (belge 44)
             sys.exit("DUR: " + _archived(was))
-        was = {"learned_z": 0, "optimizer": "adamw", "global_layers": 0, **NO_BAG, **was}   # alanlardan onceki kosu
+        was = {"learned_z": 0, "optimizer": "adamw", "global_layers": 0, "layer_plan": None, **NO_BAG, **was}   # alanlardan onceki kosu
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:
@@ -481,6 +493,8 @@ def main(argv=None):
         "basi %d | lr %g | cihaz %s, compile %s | sinav %d hikaye" % (
             args.model, args.d, args.layers, args.heads, params, train.n, BATCH_ROWS, row_len, per_epoch, total, down,
             args.lr, config["env"]["device"], cuda, len(exam_plan[1])))
+    if args.layer_plan:
+        log("layer_plan %s: %s" % (args.layer_plan, ",".join(model.plan)))
     if args.global_layers:
         log("global_layers %d: son %d blok tam causal (model_z_global_mask), gercek hikaye konumu" % (
             args.global_layers, args.global_layers))

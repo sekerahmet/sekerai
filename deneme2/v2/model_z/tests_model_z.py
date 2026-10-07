@@ -647,8 +647,69 @@ def t_bag():
           "fark %.1e" % float((torch.stack(got) - want).abs().max()))
 
 
+def t_plan():
+    """layer_plan (belge 52): 'loc2,glob1' = global_layers 1 (bit); mid = hikaye hikaye dolgusuz basvuru (ozet satirlari
+    BOS + Z_k, aralarinda causal, konum k; token'lar degismez); MID_PAD dolgusu sonucu degistirmez; sonraki cumleyi
+    degistirmek onceki konumlari degistirmez (sizinti yok); uretim onbellegi mid'de DURUR."""
+    import sentence as S
+    from sentence import model_z_global_mask, story_positions
+    rng = np.random.default_rng(3)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(2, 6))]
+               for _ in range(12)]
+    rows = [list(range(i, i + 4)) for i in range(0, 12, 4)]
+    batch = real_batch(rows, 160, stories)
+    B, T = batch.kind.shape
+
+    def make(**kw):
+        torch.manual_seed(0)
+        return SentenceTransformer(d=32, layers=3, heads=2, **kw).eval()
+    with torch.no_grad():
+        same = torch.equal(make(layer_plan="loc2,glob1")._batch_hidden(batch), make(global_layers=1)._batch_hidden(batch))
+    check("plan: 'loc2,glob1' = global_layers 1 (hidden bit duzeyinde)", same)
+    m = make(layer_plan="loc1,mid1,glob1")
+    read = _dense(model_z_read_mask(batch.kind, batch.doc, batch.sent), B, T, "cpu")
+    glob = _dense(model_z_global_mask(batch.kind, batch.doc, batch.sent), B, T, "cpu")
+    with torch.no_grad():
+        got = m._batch_hidden(batch)
+        x = m.E(torch.where(batch.kind == ZTOK, torch.full_like(batch.tokens, D.END_ID), batch.tokens))
+        x = m.blocks[0](x, batch.pos, read)
+        before = x.clone()
+        for r in range(B):
+            for d_ in batch.doc[r].unique().tolist():
+                if d_ < 0:
+                    continue
+                p = (((batch.kind[r] == BOS) | (batch.kind[r] == ZTOK)) & (batch.doc[r] == d_)).nonzero()[:, 0]
+                x[r, p] = m.blocks[1](before[r, p][None], batch.pos[r, p][None], None)[0]
+        tok = ~((batch.kind == BOS) | (batch.kind == ZTOK))
+        ref = m.norm(m.blocks[2](x, story_positions(batch.kind), glob))
+        saved = S.MID_PAD
+        S.MID_PAD = 1
+        try:
+            got1 = m._batch_hidden(batch)
+        finally:
+            S.MID_PAD = saved
+    check("plan mid: = hikaye hikaye dolgusuz basvuru (ozet satirlari causal, konum k); token'lar mid'de degismez; "
+          "MID_PAD 64 = 1", float((got - ref).abs().max()) < 1e-5 and torch.equal(x[tok], before[tok])
+          and float((got - got1).abs().max()) < 1e-5, "fark %.1e" % float((got - ref).abs().max()))
+    alt = [[list(s) for s in st] for st in stories]
+    alt[0][-1] = [(t + 7) % D.END_ID for t in alt[0][-1]]
+    b2 = real_batch(rows, 160, alt)
+    with torch.no_grad():
+        g2 = m._batch_hidden(b2)
+    first = batch.doc[0] == 0
+    last = int((first & (batch.sent[0] == int(batch.sent[0][first].max()))).nonzero()[0, 0])   # son cumlenin ilk konumu
+    check("plan mid: hikayenin son cumlesini degistirmek ondan onceki konumlari degistirmez (sizinti yok)",
+          torch.equal(got[0, :last], g2[0, :last]) and not torch.equal(got[0, last:], g2[0, last:]))
+    try:
+        SummaryCache(m)
+        stopped = False
+    except AssertionError:
+        stopped = True
+    check("plan mid: uretim onbellegi (SummaryCache) DURUR", stopped)
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
-             equiv=t_equiv, bag=t_bag)
+             equiv=t_equiv, bag=t_bag, plan=t_plan)
 
 if __name__ == "__main__":
     if SIDE is not None:

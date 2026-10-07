@@ -82,12 +82,46 @@ def story_positions(kind):
     return col - torch.where(kind == BOS, col, torch.zeros_like(col)).cummax(1).values
 
 
+MID_PAD = 64                          # mid satir sayisi bu katina dolgulanir (derleme sekil sayisi az kalir)
+
+
+def summary_index(batch, mult=MID_PAD):
+    """layer_plan 'mid' bloklari icin ozet satirlari (BOS + Z_k, satir basina sirayla) -> rows, cols, k (yerlestirme),
+    idx (B, S) toplama, spos (B, S) konum (BOS 0, Z_k k), smask (B, S, S) ayni hikaye + causal; dolgu kendi dolgusunu
+    gorur.  S = en uzun satirin ozet sayisi, mult katina yukari."""
+    sel = (batch.kind == BOS) | (batch.kind == ZTOK)
+    B, dev = sel.shape[0], sel.device
+    rows, cols = sel.nonzero(as_tuple=True)
+    k = (sel.long().cumsum(1) - 1)[rows, cols]
+    S = -(-int(sel.sum(1).max()) // mult) * mult
+    idx = torch.zeros(B, S, dtype=torch.long, device=dev)
+    sdoc = torch.full((B, S), -2, dtype=torch.long, device=dev)
+    spos = torch.zeros(B, S, dtype=batch.pos.dtype, device=dev)
+    idx[rows, k], sdoc[rows, k], spos[rows, k] = cols, batch.doc[rows, cols].long(), batch.pos[rows, cols]
+    q = torch.arange(S, device=dev)
+    causal = q[None, :, None] >= q[None, None, :]
+    pad = sdoc < 0
+    smask = causal & ((sdoc[:, :, None] == sdoc[:, None, :]) & ~pad[:, :, None] | pad[:, :, None] & pad[:, None, :])
+    return rows, cols, k, idx, spos, smask
+
+
 def _dense(mask_mod, B, T, device):
     """mask_mod -> bool (B, T, T) (SDPA yolu; CPU egitimi ve testler)."""
     b = torch.arange(B, device=device)[:, None, None]
     q = torch.arange(T, device=device)[None, :, None]
     kv = torch.arange(T, device=device)[None, None, :]
     return mask_mod(b, 0, q, kv)
+
+
+def parse_layer_plan(text):
+    """'loc2,mid4,loc1,glob1' -> ['loc', 'loc', 'mid', ...]."""
+    import re
+    out = []
+    for part in text.split(","):
+        m = re.fullmatch(r"(loc|mid|glob)(\d+)", part.strip())
+        assert m, "layer_plan parcasi loc / mid / glob + sayi olmali: %r" % part
+        out += [m.group(1)] * int(m.group(2))
+    return out
 
 
 class Block(torch.nn.Module):
@@ -129,11 +163,19 @@ class Block(torch.nn.Module):
         return self._finish(x, a)
 
 class SentenceTransformer(torch.nn.Module):
-    def __init__(self, d=512, layers=8, heads=8, global_layers=0):
+    def __init__(self, d=512, layers=8, heads=8, global_layers=0, layer_plan=None):
+        """layer_plan (ornek 'loc2,mid4,loc1,glob1'; belge 52): loc = yerel (model_z_read_mask), mid = yalniz ozet satirlari
+        (BOS + Z_k, aralarinda causal; token'lar atlar), glob = tam causal (yalniz sonda).  Verilirse layers ve
+        global_layers ondan; yoksa bugunku duzen (loc x (layers - global_layers), glob x global_layers)."""
         super().__init__()
+        self.plan = parse_layer_plan(layer_plan) if layer_plan else None
+        if self.plan:
+            layers = len(self.plan)
+            global_layers = layers - next((i + 1 for i in range(layers - 1, -1, -1) if self.plan[i] != "glob"), 0)
+            assert "glob" not in self.plan[:layers - global_layers], "layer_plan: glob yalniz sonda"
         self.global_layers = int(global_layers)
         assert 0 <= self.global_layers <= layers, "global_layers 0..layers"
-        self.mask_fn = (model_z_read_mask, model_z_global_mask) if self.global_layers else model_z_read_mask
+        self.mask_fn = (model_z_read_mask, model_z_global_mask) if self.global_layers or self.plan else model_z_read_mask
         self.END, self.EOS = END_ID, EOS_ID
         hidden = -(-int(8 * d / 3) // 8) * 8
         self.E = torch.nn.Embedding(VOCAB, d)                    # kurma sirasi E, blocks, norm (ilk agirlik bunu izler)
@@ -160,6 +202,18 @@ class SentenceTransformer(torch.nn.Module):
         if attn is None:
             attn = tuple(_dense(f(batch.kind, batch.doc, batch.sent), B, T, dev) for f in self.mask_fn)
         assert isinstance(attn, tuple) and len(attn) == 2, "global_layers: attn (yerel, global) ikilisi olmali"
+        if self.plan:
+            real, summ = story_positions(batch.kind), summary_index(batch) if "mid" in self.plan else None
+            for kind, block in zip(self.plan, self.blocks):
+                if kind == "loc":
+                    x = block(x, batch.pos, attn[0])
+                elif kind == "glob":
+                    x = block(x, real, attn[1])
+                else:
+                    rows, cols, k, idx, spos, smask = summ
+                    xs = block(x.gather(1, idx[..., None].expand(-1, -1, x.shape[-1])), spos, smask)
+                    x = x.index_put((rows, cols), xs[rows, k])
+            return self.norm(x)
         real, first = story_positions(batch.kind), len(self.blocks) - self.global_layers
         for l, block in enumerate(self.blocks):
             x = block(x, real, attn[1]) if l >= first else block(x, batch.pos, attn[0])
@@ -242,6 +296,7 @@ class SummaryCache:
     torba ozette (BOS, Z_k) secilir, P = kapanmis cumlelerin token'lari (past)."""
 
     def __init__(self, model):
+        assert "mid" not in (model.plan or ()), "layer_plan 'mid': uretim onbellegi yazilmadi (belge 52)"
         self.m = model
         self.dev = model.E.weight.device
         L = len(model.blocks)
