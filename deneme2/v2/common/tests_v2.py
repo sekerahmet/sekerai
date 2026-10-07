@@ -1347,6 +1347,25 @@ def _train_global(base, root, data, out, exits, TR):
               and all(torch.equal(st_a[k], st_b[k]) for k in st_a)
               and [w["loss"] for w in nr2["log"]] == [w["loss"] for w in nr["log"]]
               and "second_momentum_buffer" in ck["state"][0] and ck["param_groups"][0]["beta2"] == R.NORMUON_BETA2)
+        S_ = base + ["--model", "model_z", "--layers", "2", "--epochs", "2"]   # --stop_step (kullanici, 8 Ekim)
+        sa = TR.main(S_ + ["--out", out("stop_full")])
+        ss = TR.main(S_ + ["--stop_step", "4", "--out", out("stop_cut")])
+        sj = json.load(open(os.path.join(out("stop_cut"), "results.json")))
+        ok_files = all(os.path.exists(os.path.join(out("stop_cut"), f)) for f in ("agent.pt", "checkpoint.pt"))
+        ck_step = torch.load(os.path.join(out("stop_cut"), "checkpoint.pt"), weights_only=False)["step"]
+        early = _exit_msg(TR.main, S_ + ["--stop_step", "4", "--out", out("stop_cut"), "--resume", "1"])   # N <= adim: DUR
+        sr = TR.main(S_ + ["--out", out("stop_cut"), "--resume", "1"])
+        full_l = [w["loss"] for w in sa["log"]]
+        check("train --stop_step 4: durur, checkpoint.pt (adim 4) + agent.pt + results.json (finished False, stopped_at 4, "
+              "okuma yok); kayip egrisi stop'suz kosuyla adim 4'e kadar bit ayni; --resume 1 devam = kesintisiz (agirlik bit); N <= surdurulen adim DURUR",
+              ok_files and ck_step == 4 and sj["finished"] is False and sj["stopped_at"] == 4
+              and sj["readings_skipped"] == "stop_step" and [w["loss"] for w in ss["log"]] == full_l[:4]
+              and [w["loss"] for w in sr["log"]] == full_l and sr["finished"]
+              and all(torch.equal(x, y) for x, y in zip(*(torch.load(os.path.join(out(n_), "agent.pt"),
+                                                                     weights_only=False)["state"].values()
+                                                          for n_ in ("stop_full", "stop_cut"))))
+              and early is not None,
+              "%s / %s" % ([w["loss"] for w in ss["log"]], full_l[:4]))
         G = out("plan_glob_ends")                                          # glob her yerde (belge 60 B, 62)
         rg = TR.main(base + ["--model", "model_z", "--layer_plan", "glob1,loc1,glob1", "--steps", "3", "--out", G])
         lg_ = GR.load_run(G, data, torch.device("cpu"))[0]

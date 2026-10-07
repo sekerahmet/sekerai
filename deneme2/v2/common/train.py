@@ -12,6 +12,8 @@ eski tarif (olculen lr 5e-4).  --optimizer normuon (kullanici, 8 Ekim: "Ben nurm
 recipe.NorMuon (li2025_normuon Algorithm 1), ayni --lr (guncelleme RMS'i 0,2 lr); lr olculmedi.
 Veri: BATCH_ROWS satir x row_len (plan dosyasindan); epok 1 <data>/train_pack_plan_e1.npz, sonrakiler pack_plan(seed,
 epok).  --local: ham akisin yerel kopyasi (yalniz onbellek; sha256 = <split>_boundaries.json'daki).
+--stop_step N (kullanici, 8 Ekim): takvim degismeden adim N'de durur; checkpoint.pt + agent.pt + results.json (finished
+False, stopped_at, readings_skipped "stop_step"), son sinav ve okuma yok; --resume 1 kaldigi yerden.
 Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunluk sinirinda, epok sonunda ve bitiste;
 <out>/decay_start/ inisin ilk adiminda.  --resume 1: ayni toplam -> kaldigi yerden; buyuk toplam (--epochs / --steps) -> uzatma, inis basindan; eski
 ciktilar <out>/total_<eski toplam>/'a.  Bitmis kosu durur.
@@ -371,6 +373,9 @@ def _args(argv):
                     help="gecerli hedeflerin bu payinda tam softmax CE de eklenir (belge 54 s2.3 yol a)")
     ap.add_argument("--bag_sel_frac", type=float, default=1.0,
                     help="secici kaybi torbalarin bu payinda (rastgele, adim tohumlu); secim her torbada (kullanici, 7 Ekim)")
+    ap.add_argument("--stop_step", type=int, default=None,
+                    help="takvim (WSD, epok plani) degismeden adim N'de dur: checkpoint.pt (surdurulebilir) + agent.pt + "
+                         "results.json (finished False, stopped_at N); son sinav ve okuma yok (kullanici, 8 Ekim)")
     ap.add_argument("--checkpoint_minutes", type=float, default=10,
                     help="en cok bu kadar duvar saati kaybi (sinav dahil); surdurmede degistirilebilir")
     args = ap.parse_args(argv)
@@ -544,11 +549,14 @@ def main(argv=None):
     def save(dir_, step):
         R.Checkpoint.save(dir_, model, opt, step, plan_meta, history, ident)
 
+    end = total if args.stop_step is None else args.stop_step         # --stop_step: takvim total'den, dongu end'e
+    if not start < end <= total:
+        sys.exit("DUR: --stop_step %s: adim %d < N <= %d olmali" % (args.stop_step, start, total))
     sw, win = R.SpeedWindow(), None
     first_window, epoch_from, epoch_t0, saved_at = True, start, time.time(), time.time()
     ckpt_seconds = 60 * args.checkpoint_minutes                      # kimlige girmez (kullanici: buyuk kosuda 30 dk)
     nxt = cpu_batch(start) if start < total else None
-    for step in range(start, total):
+    for step in range(start, end):
         if win is None:
             sw.start(step)
             win = dict(step0=step, loss=torch.zeros((), device=dev), gn=torch.zeros((), device=dev), tokens=0, bag={})
@@ -570,8 +578,8 @@ def main(argv=None):
         done = step + 1
         epoch = int(np.searchsorted(bounds, step, "right"))               # 1'den
         epoch_end = done == bounds[epoch]
-        ckpt_due = epoch_end or done == total or (done % LOG_EVERY == 0
-                                                     and time.time() - saved_at >= ckpt_seconds)
+        ckpt_due = epoch_end or done in (total, end) or (done % LOG_EVERY == 0
+                                                            and time.time() - saved_at >= ckpt_seconds)
         if not (done % LOG_EVERY == 0 or ckpt_due or done == down):
             continue
         s = sw.stop(done, win["tokens"])                                 # pencere kapanir: kayit / sinav disarida
@@ -619,6 +627,15 @@ def main(argv=None):
         if ckpt_due:
             save(args.out, done)
             saved_at = time.time()
+    if end < total:                                                     # --stop_step: sinav ve okuma yok
+        results = dict(config, run=os.path.basename(os.path.normpath(args.out)), finished=False, stopped_at=end,
+                       readings_skipped="stop_step", exam=history["exams"][-1] if history["exams"] else None,
+                       exams=history["exams"], epochs=history["epochs"], generation=None, log=history["log"])
+        torch.save(dict(state=model.state_dict(), identity=ident, args=vars(args)), os.path.join(args.out, "agent.pt"))
+        json.dump(results, open(res_path, "w"), indent=1)
+        log("DURDU: --stop_step %d / %d (checkpoint.pt surdurulebilir, agent.pt, results.json; sinav ve okuma yok)" % (
+            end, total))
+        return results
     if not history["exams"] or history["exams"][-1]["step"] != total:   # bitis checkpoint'i var, sinavi yok
         ex = _exam(model, mask_fn, valid, exam_plan, story_bytes, layout, dev, cuda)
         history["exams"].append(dict(ex, step=total, epoch=len(per_epoch), full_epoch=bool(total == bounds[-1])))
