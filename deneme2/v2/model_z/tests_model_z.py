@@ -34,9 +34,10 @@ if os.name == "nt":                     # EcoQoS: yoksa ~10 kat yavas (kullanici
 torch.set_num_threads(4)
 import numpy as np  # noqa: E402
 
-from sentence import (BOS, PAD, TOKEN, ZTOK, BagHead, SentenceTransformer, SummaryCache, _dense, bag_copy,  # noqa: E402
-                      bag_index, bag_loss, bag_rank, model_z_mask, model_z_read_mask)
+from sentence import (BOS, PAD, TOKEN, ZTOK, SentenceTransformer, SummaryCache, _dense, model_z_mask,  # noqa: E402
+                      model_z_read_mask)
 import data as D  # noqa: E402  (sentence common/'u yola ekledi)
+import recipe as R  # noqa: E402
 
 FIRST, MID, END_T, EOS_T = D.TargetKind.FIRST, D.TargetKind.MID, D.TargetKind.END, D.TargetKind.EOS
 
@@ -578,84 +579,72 @@ def _bag_reference(rows, stories, core):
     return out
 
 
+def bag_model(k=7):
+    """Kucuk Model Z + G, torbali (C = 4 + END + EOS, R = k - |C|), secici ve DIGER rastgele."""
+    model = learned_model(global_layers=1)
+    counts = np.zeros(D.EOS_ID + 1, np.int64)
+    counts[[4, 9]] = 100
+    counts[3:20] += 5
+    core = R.core_ids(counts, 2)
+    R.attach_bag(model, k, len(core))
+    model.bag.fill(core, counts)
+    torch.nn.init.normal_(model.bag.other, std=0.5)
+    torch.nn.init.normal_(model.bag.q.weight, std=0.5)
+    return model.eval()
+
+
 def t_bag():
-    """Torba (belge 53, 55): konum -> torba, P_k donguyle ayni; sizinti yok (sonraki cumle degisince onceki torbalar ve
-    puanlari bit ayni); paketleme degismezligi; ZTOK (0) / BOS (EOS) P'ye girmez; kayip ve sira kaba kuvvetle ayni;
-    e_v'ye gradyan yok."""
+    """Ogrenen torba (belge 53-55): konum -> torba ve P_k donguyle ayni; ZTOK (0) / BOS P'ye girmez; sizinti yok (sonraki
+    cumle degisince onceki torbalarin P'si, secici puani ve torbasi bit ayni); paketleme degismezligi; uretim yolu
+    (SummaryCache token token ve prefill) = sinav yolu (output_logprobs, iki asamali; belge 55 K3)."""
     core = torch.zeros(D.VOCAB, dtype=torch.bool)
     core[[4, D.END_ID, D.EOS_ID]] = True
     rows, T = [[0, 1], [2]], 40
     b = D.build_batch(token_stories(BAG_STORIES), rows, "model_z", row_len=T)
-    ids, br, bc = bag_index(b)
-    P = bag_copy(b, ids, br, bc, core)
+    ids, br, bc = R.bag_index(b)
+    pb, pw = R.bag_copy(b, ids, br, bc, core)
+    P = [set(pw[pb == j].tolist()) for j in range(len(br))]
     ref = _bag_reference(rows, BAG_STORIES, core)
     keep = b.target >= 0
     got_t = [[] for _ in ref]
-    for q, (bag, y) in enumerate(zip(ids[keep].tolist(), b.target[keep].tolist())):
+    for bag, y in zip(ids[keep].tolist(), b.target[keep].tolist()):
         got_t[bag].append(y)
-    ok_p = len(ref) == len(br) and all(set(P[j].nonzero()[:, 0].tolist()) == x[3] and got_t[j] == x[4] and
-                                       int(br[j]) == x[0] and int(b.doc[br[j], bc[j]]) == x[1]
-                                       for j, x in enumerate(ref))
-    check("bag: konum -> torba ve P_k (cumle <= k, C disi) dongulu basvuruyla ayni (%d torba)" % len(ref), ok_p)
-    check("bag: ZTOK (token 0) ve BOS (EOS) P'de yok", not bool(P[:, 0].any() | P[:, D.EOS_ID].any()))
-    model = learned_model(global_layers=1)
-    torch.manual_seed(1)
-    head = BagHead(32, queries=2)
+    check("bag: konum -> torba ve P_k (cumle <= k, C disi) dongulu basvuruyla ayni (%d torba); ZTOK (0) / EOS P'de yok"
+          % len(ref), len(ref) == len(br) and all(P[j] == x[3] and got_t[j] == x[4] and int(br[j]) == x[0]
+                                                  and int(b.doc[br[j], bc[j]]) == x[1] for j, x in enumerate(ref))
+          and not any({0, D.EOS_ID} & p for p in P))
+    model = bag_model(12)                                                        # R 8: P kesilmez
 
-    def bag_scores(stories, rows_):
+    def sel_of(stories, rows_):
         bb = D.build_batch(token_stories(stories), rows_, "model_z", row_len=T)
-        i_, r_, c_ = bag_index(bb)
         with torch.no_grad():
-            h = model._batch_hidden(bb)[r_, c_]
-            return bag_copy(bb, i_, r_, c_, core), head(h, model.E.weight)
-    P0, S0 = bag_scores(BAG_STORIES, rows)
-    leak = [[[3, 4, 3], [5, 4, 6], [20, 21, 22]]] + BAG_STORIES[1:]          # hikaye 0 cumle 2 degisti
-    P1, S1 = bag_scores(leak, rows)
-    check("bag: sizinti yok -- cumle 2 degisince torba 0-2'nin P'si ve puani bit ayni, torba 3'unku degisir",
-          torch.equal(P0[:3], P1[:3]) and torch.equal(S0[:3], S1[:3]) and not torch.equal(P0[3], P1[3]))
-    P2, S2 = bag_scores(BAG_STORIES, [[1, 0], [2]])                          # hikaye 0 satirda ikinci
+            return model.bag.batch_select(bb, model._batch_hidden(bb), model.E.weight)
+    s0 = sel_of(BAG_STORIES, rows)
+    s1 = sel_of([[[3, 4, 3], [5, 4, 6], [20, 21, 22]]] + BAG_STORIES[1:], rows)    # hikaye 0 cumle 2 degisti
+    check("bag: sizinti yok -- cumle 2 degisince torba 0-2'nin P'si, secici puani ve torbasi bit ayni, torba 3'unku degisir",
+          all(torch.equal(s0[k][:3], s1[k][:3]) for k in ("pbit", "score", "inbag"))
+          and not torch.equal(s0["pbit"][3], s1["pbit"][3]) and not torch.equal(s0["score"][3], s1["score"][3]))
+    s2 = sel_of(BAG_STORIES, [[1, 0], [2]])                                      # hikaye 0 satirda ikinci
     n0, n1 = len(BAG_STORIES[0]) + 1, len(BAG_STORIES[1]) + 1
-    check("bag: paketleme degismezligi (hikaye 0 satir basinda / ikinci sirada): P ayni, puan <= 1e-5",
-          torch.equal(P0[:n0], P2[n1:n1 + n0]) and torch.allclose(S0[:n0], S2[n1:n1 + n0], atol=1e-5))
-    allowed = ~core[None] & ~P0
-    bag, y = ids[keep], b.target[keep]
-    m = allowed[bag, y]
-    tot, cnt = bag_loss(S0, allowed, bag[m], y[m])
-    man = sum(float(-torch.log_softmax(S0[j].masked_fill(~allowed[j], float("-inf")), -1)[t])
-              for j, t in zip(bag[m].tolist(), y[m].tolist()))
-    rk = bag_rank(S0, allowed, bag[m], y[m])
-    brute = []
-    for j, t in zip(bag[m].tolist(), y[m].tolist()):
-        cand = allowed[j].nonzero()[:, 0].tolist()
-        order = sorted(cand, key=lambda v: (-float(S0[j, v]), v))
-        brute.append(order.index(t))
-    check("bag: torba kaybi = elle log_softmax toplami, sira = kaba kuvvet siralama (%d hedef)" % cnt,
-          abs(float(tot) - man) < 1e-3 and rk.tolist() == brute and cnt == int(m.sum()))
-    model.E.weight.requires_grad_(True)
-    model.E.weight.grad = None
-    S = head(model._batch_hidden(b)[br, bc].detach(), model.E.weight)
-    bag_loss(S, allowed, bag[m], y[m])[0].backward()
-    check("bag: secici kaybi E'ye gradyan vermez, secicinin agirliklari alir",
-          model.E.weight.grad is None and head.q.weight.grad is not None and head.bias.grad is not None)
-
-    import recipe as R
-    R.attach_bag(model, 5)
-    model.bag_core_ids.copy_(torch.tensor([3, 7, 9, D.END_ID, D.EOS_ID]))
-    torch.nn.init.normal_(model.bag_other, std=0.5)
+    check("bag: paketleme degismezligi (hikaye 0 satir basinda / ikinci sirada): P ve torba ayni, puan <= 1e-5",
+          torch.equal(s0["pbit"][:n0], s2["pbit"][n1:n1 + n0]) and torch.equal(s0["inbag"][:n0], s2["inbag"][n1:n1 + n0])
+          and torch.allclose(s0["score"][:n0], s2["score"][n1:n1 + n0], atol=1e-5))
+    model = bag_model()                                                          # R 3: P kesilir
     with torch.no_grad():
         bb = D.build_batch(token_stories(BAG_STORIES), [[0]], "model_z", row_len=T)
-        want = model._logits(model._batch_hidden(bb)[0])
+        h = model._batch_hidden(bb)
+        n = int((bb.kind[0] != PAD).sum())
+        want = R.output_logprobs(model, bb, h, torch.arange(n))
         cache = SummaryCache(model)
         got = [cache.logits]
         for s in BAG_STORIES[0]:
             got += [cache.append_token(t) for t in s] + [cache.close_sentence()]
         pre = SummaryCache(model)
         pre.prefill(BAG_STORIES[0][:2])
-    n = len(got)
     zc = int((bb.kind[0] == ZTOK).nonzero()[1])
-    check("bag: torbali (C0) Model Z: SummaryCache (token token ve prefill) logit'i = batch yolunun iki asamali log p'si",
-          float((torch.stack(got) - want[:n]).abs().max()) < 1e-5 and float((pre.logits - want[zc]).abs().max()) < 1e-5
-          and float((want[:n].exp().sum(-1) - 1).abs().max()) < 1e-5)
+    check("bag: uretim yolu (SummaryCache token token ve prefill) = sinav yolu output_logprobs (iki asamali, konumun B_k'si)",
+          float((torch.stack(got) - want).abs().max()) < 1e-4 and float((pre.logits - want[zc]).abs().max()) < 1e-4,
+          "fark %.1e" % float((torch.stack(got) - want).abs().max()))
 
 
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,

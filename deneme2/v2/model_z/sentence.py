@@ -19,8 +19,7 @@ ayni hikayenin butun onceki konumlari, kelime ve Z, gercek sirayla); konum GERCE
 transformer duzeninin pos'u; mantiksal konumda farkli cumlelerin token'lari ayni konumu paylasir, belge 40 Gorus 4).
 Ilk 8 - N blok bugunku gibi.  attn: (yerel, global) ikilisi; onbellek global bloklarda butun gecmisin K/V'sini tutar.
 
-Aday havuzu (torba; belge 53-55, adlar onayli 7 Ekim): bag_index, bag_copy, BagHead, bag_loss, bag_rank; A0 (donuk model,
-yalniz secici) diag/bag_report.py.  Egitime ve uretime henuz bagli degil.
+Torba (--bag_k; recipe.Bag): sinav recipe.bag_loss_per_target, uretimde SummaryCache torbayi ozette (BOS / Z_k) secer.
 """
 import math
 import os
@@ -164,24 +163,26 @@ class SentenceTransformer(torch.nn.Module):
             x = block(x, real, attn[1]) if l >= first else block(x, batch.pos, attn[0])
         return self.norm(x)
 
-    def _logits(self, h):
-        """h (..., d) -> cikis: torbasiz h @ E^T; torbali (C0, recipe.attach_bag) iki asamali log p (recipe.
-        two_stage_logprobs: sinav, acc, uretim ayni dagilim; belge 55 K3)."""
+    def _logits(self, h, inbag=None):
+        """h (..., d) -> cikis: torbasiz h @ E^T; torbali iki asamali log p (inbag: torba, recipe.two_stage_logprobs)."""
         lg = h @ self.E.weight.T
-        if not hasattr(self, "bag_core_ids"):
+        if not hasattr(self, "bag"):
             return lg
-        from recipe import bag_mask, two_stage_logprobs
-        return two_stage_logprobs(lg, bag_mask(self.bag_core_ids, lg.shape[-1]), h @ self.bag_other)
+        from recipe import two_stage_logprobs
+        return two_stage_logprobs(lg, inbag, h @ self.bag.other)
 
     def loss_per_target(self, batch, attn=None, chunk=4096):
         """-> nll (K,), pred (K,), target_kind (K,) (hedefli konumlar, satir sirasiyla; belge 21 s7 sozlesmesi)."""
         h = self._batch_hidden(batch, attn)
         keep = batch.target >= 0
+        if hasattr(self, "bag"):
+            from recipe import bag_loss_per_target
+            return (*bag_loss_per_target(self, batch, h, chunk), batch.target_kind[keep])
         hk, tgt = h[keep], batch.target[keep]
         nll = torch.empty(len(tgt), device=h.device)
         pred = torch.empty(len(tgt), dtype=torch.long, device=h.device)
         for r in range(0, len(tgt), chunk):
-            lg = self._logits(hk[r:r + chunk]).float()
+            lg = (hk[r:r + chunk] @ self.E.weight.T).float()
             nll[r:r + chunk] = F.cross_entropy(lg, tgt[r:r + chunk], reduction="none")
             pred[r:r + chunk] = lg.argmax(-1)
         return nll, pred, batch.target_kind[keep]
@@ -235,7 +236,8 @@ class SummaryCache:
     Konumlar kendiliginden: token k+i, Z_k k.  Her cagri sonraki token'in logit'ini dondurur (self.logits).  Z_k ozet +
     kendi cumlesinin onbellegine bakar, K/V'si ozete yazilir, cumle onbellegi ANCAK sonra silinir.  global_layers
     bloklari: butun gecmisin K/V'si (all_k / all_v), gercek konumla (self.t: BOS 0, her token ve Z +1).  prefill: istem
-    tek ileri geciste (egitimin maskeleri ve konumlari), onbellek token token yolla ayni duruma gelir."""
+    tek ileri geciste (egitimin maskeleri ve konumlari), onbellek token token yolla ayni duruma gelir.  Torbali model:
+    torba ozette (BOS, Z_k) secilir, P = kapanmis cumlelerin token'lari (past)."""
 
     def __init__(self, model):
         self.m = model
@@ -246,8 +248,15 @@ class SummaryCache:
         self.all_k, self.all_v = [None] * L, [None] * L
         self.first_global = L - model.global_layers
         self.n_z, self.i, self.t = 0, 0, 0
+        self.past, self.cur, self.inbag = [], [], None
         x = model.E(torch.tensor([[EOS_ID]], device=self.dev))              # BOS = EOS token'i (belge 21 s1)
-        self.logits = self._step(x, 0, read_sentence=False, summary=True)
+        self.logits = self._out(self._step(x, 0, read_sentence=False, summary=True), summary=True)
+
+    def _out(self, hn, summary):
+        """Son konumun normlu durumu -> logit (torbali: ozette torba yeniden secilir)."""
+        if summary and hasattr(self.m, "bag"):
+            self.inbag = self.m.bag.select_one(hn[0, -1], self.m.E.weight, self.past)
+        return self.m._logits(hn, self.inbag)[0, -1]
 
     def _step(self, x, pos, read_sentence, summary):
         """read_sentence: cumle onbellegini de gor; summary: K/V ozete (yoksa cumle onbellegine) yazilir.  Global
@@ -271,7 +280,7 @@ class SummaryCache:
                 self.sen_k[l] = k if self.sen_k[l] is None else torch.cat([self.sen_k[l], k], 2)
                 self.sen_v[l] = v if self.sen_v[l] is None else torch.cat([self.sen_v[l], v], 2)
             x = block._finish(x, a)
-        return self.m._logits(self.m.norm(x))[0, -1]
+        return self.m.norm(x)
 
     @torch.no_grad()
     def prefill(self, sents):
@@ -304,7 +313,8 @@ class SummaryCache:
         self.n_z, self.i, self.t = len(sents), 0, T - 1
         self.sen_k = [None] * len(self.sen_k)
         self.sen_v = [None] * len(self.sen_v)
-        self.logits = self.m._logits(self.m.norm(x))[0, -1]
+        self.past = [t_ for x_ in sents for t_ in x_]
+        self.logits = self._out(self.m.norm(x), summary=True)
         return self.logits
 
     @torch.no_grad()
@@ -312,8 +322,9 @@ class SummaryCache:
         """Simdiki cumleye token -> sonraki token'in logit'i."""
         self.i += 1
         self.t += 1
+        self.cur.append(token)
         x = self.m.E(torch.tensor([[token]], device=self.dev))
-        self.logits = self._step(x, self.n_z + self.i, read_sentence=True, summary=False)
+        self.logits = self._out(self._step(x, self.n_z + self.i, read_sentence=True, summary=False), summary=False)
         return self.logits
 
     @torch.no_grad()
@@ -324,75 +335,9 @@ class SummaryCache:
         self.i = 0
         self.t += 1
         x = self.m.E(torch.tensor([[END_ID]], device=self.dev))
-        self.logits = self._step(x, self.n_z, read_sentence=True, summary=True)
+        self.past, self.cur = self.past + self.cur, []
+        self.logits = self._out(self._step(x, self.n_z, read_sentence=True, summary=True), summary=True)
         self.sen_k = [None] * len(self.sen_k)                               # Z_k'den SONRA
         self.sen_v = [None] * len(self.sen_v)
         return self.logits
 
-
-# Aday havuzu (torba; belge 53, 54, 55).  Konum q'nun torbasi: q'dan once (dahil) son ozet sutunu (BOS / ZTOK).  Hedefleri
-# o torbadan: Z_k'nin kendisi (cumle k+1'in ilk token'i ya da EOS) ve cumle k+1'in token'lari; BOS'unki ilk cumle.
-# B_k = C u P_k u L_k: C cekirdek (core, VOCAB bool), P_k bag_copy, L_k BagHead puan sirasi.
-
-def bag_index(batch):
-    """-> (ids (B, T) konumun torbasi, rows, cols): torbalar (ozet sutunlari) satir sirasiyla numaralanir."""
-    summ = (batch.kind == BOS) | (batch.kind == ZTOK)
-    assert bool((batch.kind[:, 0] == BOS).all()), "her satir BOS ile baslar"
-    ids = summ.flatten().long().cumsum(0).view_as(summ) - 1
-    rows, cols = summ.nonzero(as_tuple=True)
-    return ids, rows, cols
-
-
-def bag_copy(batch, ids, rows, cols, core):
-    """-> P (n_torba, VOCAB) bool: ayni hikayede torbanin sutunundan once gecen TOKEN'lar, core disi.  Sutun c'deki kelime
-    c'nin torbasinin hedefidir; P'ye ancak bir SONRAKI torbadan girer (sizinti yok).  ZTOK (token 0) ve BOS girmez
-    (belge 55 O2).  SS'te boy siniri yok (belge 55 D3)."""
-    T, n = batch.kind.shape[1], len(rows)
-    bag_key = rows * T + batch.doc[rows, cols].long()                     # satir ve hikaye; torba sirasinda artan
-    r, c = (batch.kind == TOKEN).nonzero(as_tuple=True)
-    v = batch.tokens[r, c]
-    keep = ~core[v]
-    r, c, v = r[keep], c[keep], v[keep]
-    key = r * T + batch.doc[r, c].long()
-    word_key, inv = torch.unique(key * VOCAB + v, return_inverse=True)
-    first = torch.full_like(word_key, n).scatter_reduce(0, inv, ids[r, c] + 1, "amin")    # ilk gorulmeden sonraki torba
-    last = torch.searchsorted(bag_key, word_key // VOCAB, right=True) - 1                  # hikayenin son torbasi
-    lens = last - first + 1
-    off = torch.arange(int(lens.sum()), device=lens.device) - torch.repeat_interleave(lens.cumsum(0) - lens, lens)
-    P = torch.zeros(n, VOCAB, dtype=torch.bool, device=batch.kind.device)
-    P[torch.repeat_interleave(first, lens) + off, torch.repeat_interleave(word_key % VOCAB, lens)] = True
-    return P
-
-
-class BagHead(torch.nn.Module):
-    """Secici (belge 53 s3, 54 s6): puan_k(v) = log sum_j exp(q_kj . sg(e_v)) + b_v (+ disaridan onsel log p_meaning),
-    q_kj = W_j h_k, h_k ozet sutununun son durumu.  e_v'ye gradyan gitmez (belge 54 s4.3).  SentenceTransformer'in
-    disinda kurulur: ana modelin ilk agirliklari ve RNG'si degismez (belge 55 K2)."""
-
-    def __init__(self, d, queries=1, bias=None):
-        super().__init__()
-        self.queries = int(queries)
-        self.q = torch.nn.Linear(d, self.queries * d, bias=False)
-        torch.nn.init.normal_(self.q.weight, std=0.02)
-        self.bias = torch.nn.Parameter(torch.zeros(VOCAB) if bias is None else torch.as_tensor(bias).float().clone())
-
-    def forward(self, h, E):
-        """h (n, d), E (VOCAB, d) -> puan (n, VOCAB) fp32 (autocast kapali: egitim / sinav / uretim ayni sira, belge 55 O5)."""
-        with torch.autocast(h.device.type, enabled=False):
-            q = self.q(h.float()).view(len(h), self.queries, -1)
-            return torch.einsum("njd,vd->njv", q, E.detach().float()).logsumexp(1) + self.bias
-
-
-def bag_loss(score, allowed, bag, y):
-    """Torba kaybi (belge 53 s4, 54 s4.1): sum -log softmax_{v izinli}(puan)[y] -> (toplam, hedef sayisi); ortalama cagiranda
-    token basina havuzlanir.  score / allowed (n, VOCAB) bir torba dilimi; bag (dilim ici) / y izinli hedefler."""
-    lse = score.masked_fill(~allowed, float("-inf")).logsumexp(1)
-    return (lse[bag] - score[bag, y]).sum(), len(y)
-
-
-def bag_rank(score, allowed, bag, y):
-    """Hedefin L sirasi (0'dan): izinli kelimelerden puani buyuk olanlar + esitlerden kelime no'su kucuk olanlar.  L_k'nin
-    ilk M'si hedefi yakalar <=> sira < M."""
-    s, sy = score[bag], score[bag, y][:, None]
-    v = torch.arange(score.shape[1], device=score.device)
-    return (allowed[bag] & ((s > sy) | ((s == sy) & (v < y[:, None])))).sum(1)

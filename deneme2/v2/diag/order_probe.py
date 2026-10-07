@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "common"))
 sys.path.insert(0, HERE)
 import data as D  # noqa: E402
 import gap_v2 as G  # noqa: E402  (load, target_features, token_counts, function_tokens)
+import recipe as R  # noqa: E402  (output_logprobs: torbali modelde iki asamali)
 from gap_v2 import target_features  # noqa: E402
 
 NAMES = [" Mia", " Leo", " Lily", " Max", " Sam", " Tom", " Ben", " Anna", " Zoe", " Jack"]
@@ -73,7 +74,7 @@ def _nll(model, layout, st, rows):
         b = D.build_batch(st, [r], layout, "cpu")
         h = model._batch_hidden(b, None)
         keep = b.target >= 0
-        lg = torch.log_softmax(model._logits(h[keep]).float(), -1)         # torbali modelde iki asamali (belge 55 K3)
+        lg = R.output_logprobs(model, b, h, keep.flatten().nonzero()[:, 0])
         out[0].append(-lg.gather(1, b.target[keep][:, None])[:, 0].numpy())
         out[1].append(b.target[keep].numpy())
         out[2].append(b.target_kind[keep].numpy())
@@ -93,11 +94,11 @@ def who_did_what(model, layout, enc):
     m = []
     for r in rows:
         b = D.build_batch(st, [r], layout, "cpu")
-        h = model._batch_hidden(b, None)[0]
+        h = model._batch_hidden(b, None)
         tokm = (b.kind[0] == D.Kind.TOKEN) & (b.sent[0] == 1)
         for j, i in enumerate(r):
             first = int(torch.nonzero(tokm & (b.doc[0] == j)).min())
-            lg = torch.log_softmax(model._logits(h[first - 1]).float(), -1)
+            lg = R.output_logprobs(model, b, h, torch.tensor([first - 1]))[0]
             m.append(float(lg[items[i][0]] - lg[items[i][1]]))
     m = np.array(m)
     pairs = list(itertools.permutations(range(len(NAMES)), 2))

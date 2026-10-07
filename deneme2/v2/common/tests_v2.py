@@ -474,10 +474,10 @@ def _recipe_muon(R):
 
 
 def _recipe_bag(R):
-    """Torba C0 (belge 54 s1.3, 55 K3 / O7 / O8): kahin kapisi (s_O = LSE disari -> her B'de log_softmax ve gradyan ayni),
-    B = V'de DIGER kapali, toplam 1; hizli yol (two_stage_loss) = two_stage_logprobs NLL'i ve gradyani (birden cok dilim +
-    dolgu); tam softmax payi dogru satirlar ve toplam; bag_rows kacan = C disi, adim tohumuyla ayni; core_ids; attach_bag
-    RNG tuketmez."""
+    """Ogrenen torba (belge 54 s1.3, 55 K1 / K3 / O7 / O8): kahin kapisi (s_O = LSE disari -> log_softmax, gradyan dahil),
+    B = V'de DIGER kapali, toplam 1; core_ids; hizli yol (bag_train_loss: torba basina bmm, birden cok dilim + dolgu, P
+    kesilmesi, kacan + pay satirlari) = output_logprobs (two_stage_logprobs, konum basina B_k) NLL'i ve gradyani; secici
+    kaybi elle; kaynak sayilari toplami; bag_full_mask adim tohumuyla ayni.  Iki duzen (Model Z: ZTOK, transformer: END)."""
     g = torch.Generator().manual_seed(0)
     V = 50
     lg = torch.randn(6, V, generator=g, dtype=torch.float64).float()
@@ -500,63 +500,62 @@ def _recipe_bag(R):
           ok and torch.equal(R.two_stage_logprobs(lg, allin, torch.full((6,), 50.0)), torch.log_softmax(lg, -1))
           and float((free.exp().sum(-1) - 1).abs().max()) < 1e-5)
     counts = np.arange(D.EOS_ID + 1)[::-1].copy()                          # 0 en sik
-    core = R.core_ids(counts, 30)
     check("torba: core_ids = en sik 30 + END + EOS, sirali tekil",
-          core.tolist() == sorted(set(range(30)) | {D.END_ID, D.EOS_ID}))
-    in_core = np.zeros(D.VOCAB, bool)
-    in_core[core] = True
-    d, N = 8, 70
-    h = torch.randn(N, d, generator=g)
-    W = torch.randn(D.VOCAB, d, generator=g) * 0.5
-    other = torch.randn(d, generator=g)
-    tgt = torch.where(torch.rand(N, generator=g) < 0.5, torch.randint(0, 30, (N,), generator=g),
-                      torch.randint(0, D.VOCAB, (N,), generator=g))
-    tgt[torch.randperm(N, generator=g)[:9]] = -100
-    tgt[3], tgt[4] = D.END_ID, D.EOS_ID
-    saved = R.BAG_CHUNK
-    R.BAG_CHUNK = 8                                                       # birden cok dilim + dolgu
+          R.core_ids(counts, 30).tolist() == sorted(set(range(30)) | {D.END_ID, D.EOS_ID}))
+    stories = [[[3, 40, 41, 3, 42], [43, 44, 40], [45, 46, 47, 48, 41]], [[50, 51], [52, 50, 53]],
+               [[60, 61, 62], [63], [64, 65, 60, 66]]]
+    counts = np.zeros(D.EOS_ID + 1, np.int64)
+    counts[[3, 4, 5]] = 1000
+    counts[40:70] = 5
+    core = R.core_ids(counts, 3)
+    saved = R.BAG_GROUP, R.BAG_CHUNK
+    R.BAG_GROUP, R.BAG_CHUNK = 2, 4                                        # birden cok dilim + dolgu
     try:
-        ids = torch.as_tensor(core)
-        rows0, c0 = R.bag_rows(tgt.numpy(), in_core, 0.0, np.random.default_rng(np.random.SeedSequence(0, spawn_key=(5,))))
-        hs, Ws, os_ = (x.clone().requires_grad_(True) for x in (h, W, other))
-        goal, nll, ex = R.two_stage_loss(hs, Ws, os_, tgt, ids, rows0, c0)
-        goal.backward()
-        goal, nll = goal.detach(), nll.detach()
-        hr, Wr, or_ = (x.clone().requires_grad_(True) for x in (h, W, other))
-        keep = tgt >= 0
-        lp = R.two_stage_logprobs(hr @ Wr.T, R.bag_mask(ids), hr @ or_)
-        ref = -lp[keep].gather(1, tgt[keep][:, None])[:, 0].mean()
-        ref.backward()
-        ref = ref.detach()
-        rel = max(float((a.grad - b_.grad).norm() / b_.grad.norm()) for a, b_ in ((hs, hr), (Ws, Wr), (os_, or_)))
-        miss_ok = rows0["miss"][rows0["valid"]].tolist() == [not in_core[int(tgt[i])] for i in rows0["idx"][rows0["valid"]]]
-        miss_n = int((keep & ~torch.as_tensor(in_core)[tgt.clamp_min(0)]).sum())
-        check("torba: hizli yol (C matmul + kacan satirlar, %d dilim) = two_stage_logprobs NLL'i ve gradyani (h, E, "
-              "bag_other); amac = nll (pay 0); kacan satirlar = hedef C disi (%d)" % (len(rows0["idx"]) // 8, miss_n),
-              abs(float(nll) - float(ref)) < 1e-5 and rel < 1e-5 and float(goal) == float(nll) and miss_ok
-              and c0["miss"] == miss_n and len(rows0["idx"]) % 8 == 0 and len(rows0["idx"]) > 8,
-              "nll %.6f / %.6f, gradyan goreli %.1e" % (float(nll), float(ref), rel))
-        rng = lambda: np.random.default_rng(np.random.SeedSequence(0, spawn_key=(5,)))  # noqa: E731
-        rows1, c1 = R.bag_rows(tgt.numpy(), in_core, 0.3, rng())
-        rows2, _ = R.bag_rows(tgt.numpy(), in_core, 0.3, rng())
-        goal1, nll1, ex1 = R.two_stage_loss(h, W, other, tgt, ids, rows1, c1)
-        fi = rows1["idx"][rows1["full"] & rows1["valid"]]
-        ce = torch.nn.functional.cross_entropy(h[fi] @ W.T, tgt[fi], reduction="sum")
-        check("torba: tam softmax payi round(0,3 x %d) = %d satir, gecerli hedeflerden, adim tohumuyla ayni secim; amac - "
-              "nll = bu satirlarin tam CE toplami / gecerli hedef; dolgu satirlari gecersiz" % (c1["valid"], c1["full"]),
-              c1["full"] == round(0.3 * c1["valid"]) and bool((tgt[fi] >= 0).all())
-              and all(torch.equal(rows1[k], rows2[k]) for k in rows1)
-              and abs(float(goal1 - nll1) - float(ce) / c1["valid"]) < 1e-5 and abs(float(ex1["full"]) - float(ce)) < 1e-4
-              and abs(float(nll1) - float(nll)) < 1e-6 and not bool(rows1["valid"][int(rows1["valid"].sum()):].any()))
+        res = []
+        for layout in ("model_z", "transformer"):
+            b = D.build_batch(_Synthetic(stories), [[0, 1], [2]], layout, row_len=40)
+            torch.manual_seed(1)
+            m = torch.nn.Module()
+            m.E = torch.nn.Embedding(D.VOCAB, 8)
+            R.attach_bag(m, len(core) + 3, len(core))                      # R = 3: P kesilir, L kucuk, kacan var
+            m.bag.fill(core, counts)
+            torch.nn.init.normal_(m.bag.other, std=0.5)
+            h0 = torch.randn(*b.kind.shape, 8, generator=g)
+            full = R.bag_full_mask(b.target.numpy(), 0.3, np.random.default_rng(np.random.SeedSequence(0, spawn_key=(5,))))
+            hs = h0.clone().requires_grad_(True)
+            goal, nll, ex = R.bag_train_loss(m, b, hs, torch.zeros_like(full), 0.0)
+            goal.backward()
+            gs = (hs.grad.clone(), m.E.weight.grad.clone(), m.bag.other.grad.clone())
+            m.zero_grad()
+            hr = h0.clone().requires_grad_(True)
+            pos = (b.target.flatten() >= 0).nonzero()[:, 0]
+            lp = R.output_logprobs(m, b, hr, pos)
+            ref = -lp.gather(1, b.target.flatten()[pos][:, None])[:, 0].mean()
+            ref.backward()
+            gr = (hr.grad, m.E.weight.grad, m.bag.other.grad)
+            rel = max(float((a - c).norm() / c.norm()) for a, c in zip(gs, gr))
+            m.zero_grad()
+            goal1, nll1, ex1 = R.bag_train_loss(m, b, h0, full, 0.5)
+            sel = m.bag.batch_select(b, h0, m.E.weight)
+            fi = full & (b.target.flatten() >= 0)
+            ce = torch.nn.functional.cross_entropy(h0.flatten(0, 1)[fi] @ m.E.weight.T, b.target.flatten()[fi], reduction="sum")
+            ids, y = sel["ids"].flatten()[pos], b.target.flatten()[pos]
+            allw = sel["allowed"]
+            man = sum(float(torch.logsumexp(sel["score"][i][allw[i]], 0) - sel["score"][i, w])
+                      for i, w in zip(ids.tolist(), y.tolist()) if allw[i, w])
+            nsel = sum(bool(allw[i, w]) for i, w in zip(ids.tolist(), y.tolist()))
+            res.append(dict(layout=layout, nll=abs(float(nll) - float(ref)), rel=rel, goal=float(goal) == float(nll),
+                            extra=abs(float(goal1 - nll1) - (float(ce) / len(pos) + 0.5 * man / nsel)),
+                            src=int(ex["c"] + ex["p"] + ex["l"] + ex["miss"]) == len(pos), miss=int(ex["miss"]),
+                            p_over=int(ex["p_over"]), full=int(ex1["n_full"]) == round(0.3 * len(pos))))
+        full2 = R.bag_full_mask(b.target.numpy(), 0.3, np.random.default_rng(np.random.SeedSequence(0, spawn_key=(5,))))
+        check("torba: hizli yol = output_logprobs NLL'i ve gradyani (h, E, other), iki duzen; amac - nll = pay satirlarinin "
+              "tam CE'si / hedef + lambda x secici kaybi (elle); kaynaklar toplami = hedef; kacan ve P kesilmesi var; pay "
+              "adim tohumuyla ayni",
+              all(r["nll"] < 1e-5 and r["rel"] < 1e-5 and r["goal"] and r["extra"] < 1e-4 and r["src"] and r["miss"] > 0
+                  and r["p_over"] > 0 and r["full"] for r in res) and torch.equal(full, full2), str(res))
     finally:
-        R.BAG_CHUNK = saved
-    m = torch.nn.Module()
-    m.E = torch.nn.Embedding(10, 4)
-    before = torch.get_rng_state()
-    R.attach_bag(m, 5)
-    check("torba: attach_bag RNG tuketmez; bag_other sifir, bag_core_ids tampon (state_dict'te)",
-          torch.equal(before, torch.get_rng_state()) and not bool(m.bag_other.detach().any())
-          and "bag_core_ids" in m.state_dict() and "bag_other" in dict(m.named_parameters()))
+        R.BAG_GROUP, R.BAG_CHUNK = saved
 
 
 def t_metrics():
@@ -1195,25 +1194,27 @@ def _train_global(base, root, data, out, exits, TR):
 
 
 def _train_bag(base, root, data, out, state, same, exits, TR):
-    """--bag_stage factor (C0) gercek modellerle: Model Z + G ve transformer kosar, kayip duser; ilk gunluk kaybi (hizli
-    yol) = ayni ilk agirlikla loss_per_target (two_stage_logprobs; sinav tanimi); gunlukte kacan / p(DIGER) / tam CE;
-    kimlikte bag alanlari; kesilip surdurulen = kesintisiz (bit; tam softmax payi adim tohumlu); load_run torbali kosuyu
-    strict yukler, uretir; sayim dosyasi yoksa, observe, bag_core'suz, bag_core farkiyla surdurme DURUR."""
+    """--bag_k (ogrenen torba) gercek modellerle: Model Z + G ve transformer kosar, kayip duser; ilk gunluk kaybi (hizli
+    yol) = ayni ilk agirlikla loss_per_target (output_logprobs; sinav tanimi); ana modelin ilk agirliklari torbasizla ayni;
+    gunlukte kaynaklar, p(DIGER), tam CE, secici kaybi; kesilip surdurulen = kesintisiz (bit); load_run strict yukler,
+    uretir; sayim dosyasi yok / pay disarida / bag_k farkiyla surdurme DURUR."""
     import traceback
     import recipe as R
     try:
         cpath = os.path.join(data, "train_token_counts.npy")
         np.save(cpath, D.token_counts(root))
-        cmd = base + ["--model", "model_z", "--layers", "2", "--global_layers", "1", "--bag_stage", "factor",
-                      "--bag_core", "5", "--bag_full_frac", "0.2", "--steps", "8"]
+        cmd = base + ["--model", "model_z", "--layers", "2", "--global_layers", "1", "--bag_k", "12", "--bag_core", "5",
+                      "--bag_full_frac", "0.2", "--bag_weight", "0.5", "--steps", "8"]
         A = out("bag_A")
         a = TR.main(cmd + ["--out", A])
         L = [w["loss"] for w in a["log"]]
         args = TR._args(cmd + ["--out", "x"])
         core = R.core_ids(np.load(cpath), 5)
-        args.bag_k = len(core)
+        args.bag_n_core = len(core)
         m, mask_fn, layout = TR._build(args, torch.device("cpu"))
-        m.bag_core_ids.copy_(torch.as_tensor(core))
+        m.bag.fill(core, np.load(cpath))
+        plain = TR._build(TR._args([x for x in cmd if x not in ("--bag_k", "12")] + ["--out", "x"]),
+                          torch.device("cpu"))[0].state_dict()
         st = D.TokenStories(root, data, "train")
         f = np.load(os.path.join(data, "train_pack_plan_e1.npz"))
         ro, rs = f["row_offsets"], f["row_stories"]
@@ -1221,39 +1222,37 @@ def _train_bag(base, root, data, out, state, same, exits, TR):
         with torch.no_grad():
             want = m.loss_per_target(b)[0].mean().item()
         idt, bg = a["identity"], a["log"][-1]["bag"]
-        check("train --bag_stage factor (Model Z + G): kosar, kayip duser; ilk gunluk kaybi (hizli yol) = loss_per_target "
-              "(two_stage_logprobs); kimlikte bag_stage / bag_core / bag_k (= |C| %d) / bag_full_frac / sha; gunlukte "
-              "kacan, p(DIGER), tam CE" % len(core),
-              L[-1] < L[0] and abs(a["log"][0]["loss"] - want) < 1e-4 and idt["bag_stage"] == "factor"
-              and idt["bag_core"] == 5 and idt["bag_k"] == len(core) and idt["bag_full_frac"] == 0.2
-              and len(idt["bag_core_sha256"]) == 64 and 0 < bg["miss_rate"] < 1 and 0 < bg["p_other"] < 1
-              and np.isfinite(bg["full_ce"]) and np.isfinite(a["exam"]["loss"]),
+        check("train --bag_k (Model Z + G): kosar, kayip duser; ilk gunluk kaybi (hizli yol) = loss_per_target; ana model "
+              "ilk agirliklari torbasizla ayni; kimlikte bag_k / bag_core / bag_weight / bag_full_frac / sha; gunlukte "
+              "C + P + L + kacan = 1, p(DIGER), tam CE, secici kaybi",
+              L[-1] < L[0] and abs(a["log"][0]["loss"] - want) < 1e-4
+              and all(torch.equal(v, m.state_dict()[k]) for k, v in plain.items())
+              and (idt["bag_k"], idt["bag_core"], idt["bag_weight"], idt["bag_full_frac"]) == (12, 5, 0.5, 0.2)
+              and len(idt["bag_core_sha256"]) == 64 and abs(bg["c"] + bg["p"] + bg["l"] + bg["miss"] - 1) < 2e-4
+              and 0 < bg["p_other"] < 1 and np.isfinite(bg["full_ce"]) and np.isfinite(bg["loss_selector"])
+              and np.isfinite(a["exam"]["loss"]),
               "kayip %.3f -> %.3f; ilk %.4f / %.4f; %s" % (L[0], L[-1], a["log"][0]["loss"], want, bg))
-        t = TR.main(base + ["--model", "transformer", "--bag_stage", "factor", "--bag_core", "5", "--steps", "4",
+        t = TR.main(base + ["--model", "transformer", "--bag_k", "12", "--bag_core", "5", "--steps", "4",
                             "--out", out("bag_tf")])
-        check("train --bag_stage factor (transformer): ayni yol kosar, sinav sonlu",
-              t["identity"]["bag_k"] == len(core) and np.isfinite(t["exam"]["loss"]) and "bag" in t["log"][-1])
+        check("train --bag_k (transformer, ozet = END): ayni yol kosar, sinav sonlu",
+              t["identity"]["bag_k"] == 12 and np.isfinite(t["exam"]["loss"]) and "bag" in t["log"][-1])
         stopped, r = _cut_and_resume(TR, cmd, out("bag_cut"))
-        check("train --bag_stage factor: adim 4'te kesilip surdurulen = kesintisiz (agirlik, bag_other, C bit duzeyinde)",
+        check("train --bag_k: adim 4'te kesilip surdurulen = kesintisiz (model, secici, DIGER bit duzeyinde)",
               stopped and same(state(A), state(out("bag_cut"))) and [w["loss"] for w in r["log"]] == L)
         sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
         import generate_readings as GR
         lm = GR.load_run(A, data, torch.device("cpu"))[0]
         gen = lm.generate([[[int(x) for x in st.sentences(0)[0]]]], 2, 4)
         check("train: load_run torbali kosuyu strict yukler (C state_dict'ten), generate calisir",
-              torch.equal(lm.bag_core_ids, torch.as_tensor(core)) and len(gen[0][0]) >= 1)
+              torch.equal(lm.bag.core, torch.as_tensor(core)) and len(gen) == 1 and isinstance(gen[0][0], list))
         os.rename(cpath, cpath + ".x")
         no_counts = exits(cmd + ["--out", out("bag_nocounts")])
         os.rename(cpath + ".x", cpath)
-        check("train: sayim dosyasi yok, --bag_stage observe, --bag_core'suz factor, factor'suz --bag_core, bag_core "
-              "farkiyla surdurme DURUR",
-              no_counts and exits(base + ["--model", "model_z", "--bag_stage", "observe", "--bag_core", "5", "--out",
-                                          out("bag_obs")])
-              and exits(base + ["--model", "model_z", "--bag_stage", "factor", "--out", out("bag_nocore")])
-              and exits(base + ["--model", "model_z", "--bag_core", "5", "--out", out("bag_nostage")])
-              and exits([x if x != "5" else "6" for x in cmd] + ["--out", A, "--resume", "1", "--steps", "10"]))
+        check("train: sayim dosyasi yok, --bag_full_frac 0..1 disi, bag_k farkiyla surdurme DURUR",
+              no_counts and exits(cmd + ["--bag_full_frac", "2", "--out", out("bag_frac")])
+              and exits([x if x != "12" else "13" for x in cmd] + ["--out", A, "--resume", "1", "--steps", "10"]))
     except Exception:  # noqa: BLE001
-        check("train --bag_stage", False, traceback.format_exc(limit=3))
+        check("train --bag_k", False, traceback.format_exc(limit=3))
 
 
 EQUIV_TAG = "v2-before-formula-cleanup-20261007"

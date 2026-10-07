@@ -133,9 +133,9 @@ def t_cache():
     worst = 0.0
     for m in (1, 4):                                            # istem m token, sonra birer birer
         cache = dict(k=[None] * len(model.blocks), v=[None] * len(model.blocks), T=T)
-        lg = [model._step(torch.tensor([seq[:m]]), cache, 0)]
+        lg = [model._logits(model._step(torch.tensor([seq[:m]]), cache, 0))[0]]
         for i in range(m, T):
-            lg.append(model._step(torch.tensor([[seq[i]]]), cache, i))
+            lg.append(model._logits(model._step(torch.tensor([[seq[i]]]), cache, i))[0])
         worst = max(worst, float((torch.stack(lg) - full[m - 1:]).abs().max()))
     check("test_cached_logits_equal_full: onbellekli logit = tam hesap (fp32)", worst < 1e-5, "en buyuk fark %.1e" % worst)
 
@@ -187,10 +187,10 @@ def t_generate():
         fed.append(tokens[0].tolist())
         out = torch.full((D.VOCAB,), -1e9)
         out[script[len(fed) - 1]] = 0
-        return out
-    model._step = scripted
+        return out[None]                                                  # _logits asagida birim: (1, V) logit
+    model._step, model._logits = scripted, lambda h, inbag=None: h
     got = model.generate([STORIES[0][:1]], max_sentences=5, max_tokens=2)
-    del model._step
+    del model._step, model._logits
     want_fed = [[D.EOS_ID] + STORIES[0][0] + [D.END_ID], [5], [D.END_ID], [6], [7], [D.END_ID]]
     check("generate kurali: cumle ici EOS cumleyi bitirir, max_tokens'ta kesilen kapanir (girdiye END), basta EOS biter",
           got == [([[5], [6, 7]], [True, False], True)] and fed == want_fed, "%s" % (got,))
@@ -258,28 +258,60 @@ def t_imports():
 
 
 @torch.no_grad()
+def _bag_naive(model, sents, max_sentences, max_tokens, opened):
+    """Onbelleksiz acgozlu basvuru: her adimda hikaye yeniden paketlenir, sinav yolu (recipe.output_logprobs, konumun B_k'si)."""
+    import recipe as R
+    done_s, cur = [list(s) for s in (sents[:-1] if opened else sents)], list(sents[-1]) if opened else []
+    gen, ended, eos = [], [], False
+    while len(gen) < max_sentences:
+        new, done = [], False
+        while len(new) < max_tokens:
+            st = done_s + ([cur + new] if cur + new else [])
+            b = D.build_batch(token_stories([st]), [[0]], "transformer", row_len=128)
+            n = int((b.target[0] >= 0).sum())
+            h = model._batch_hidden(b)
+            w = int(R.output_logprobs(model, b, h, torch.tensor([n - 2 if cur + new else n - 1]))[0].argmax())
+            if w == D.EOS_ID and not new and not opened:
+                eos = True
+                break
+            if w in (D.END_ID, D.EOS_ID):
+                done = True
+                break
+            new.append(w)
+        if eos:
+            break
+        gen.append(new)
+        ended.append(done)
+        done_s.append(cur + new)
+        cur, opened = [], False
+    return gen, ended, eos
+
+
+@torch.no_grad()
 def t_bag():
-    """Torba C0 (recipe.attach_bag): sinav yolu (loss_per_target) ve onbellekli uretim yolu (_step) ayni iki asamali
-    dagilim (recipe.two_stage_logprobs; belge 55 K3); nll = -log p[hedef], toplam 1."""
+    """Ogrenen torba (recipe.Bag): onbellekli uretim (generate; torba ozette secilir, P kapanmis cumleler) = onbelleksiz
+    sinav yolu (output_logprobs) ile acgozlu, istemli ve acik son cumleli; loss_per_target nll = -log p, toplam 1."""
     import recipe as R
     model = tiny()
-    R.attach_bag(model, 6)
-    model.bag_core_ids.copy_(torch.tensor([3, 5, 9, 12, D.END_ID, D.EOS_ID]))
-    torch.nn.init.normal_(model.bag_other, std=0.5)
-    seq = [D.EOS_ID] + [t for s in STORIES[3] for t in s + [D.END_ID]]
-    T = len(seq)
-    h = model.hidden(torch.tensor([seq]), torch.arange(T)[None], None)[0]
-    want = R.two_stage_logprobs(h @ model.E.weight.T, R.bag_mask(model.bag_core_ids), h @ model.bag_other)
-    cache = dict(k=[None] * len(model.blocks), v=[None] * len(model.blocks), T=T)
-    lg = [model._step(torch.tensor([seq[:1]]), cache, 0)] + [model._step(torch.tensor([[seq[i]]]), cache, i)
-                                                             for i in range(1, T)]
+    counts = np.zeros(D.EOS_ID + 1, np.int64)
+    counts[[3, 5]] = 100
+    counts[3:30] += 5
+    core = R.core_ids(counts, 2)
+    R.attach_bag(model, len(core) + 4, len(core))
+    model.bag.fill(core, counts)
+    torch.nn.init.normal_(model.bag.other, std=0.5)
+    torch.nn.init.normal_(model.bag.q.weight, std=0.5)
+    prompts = [STORIES[0][:2], STORIES[1]]
+    same = all(model.generate([p], 3, 4, open_last=o)[0] == _bag_naive(model, p, 3, 4, o) for p in prompts
+               for o in (False, True))
     batch = D.build_batch(token_stories(STORIES), [[3]], "transformer", row_len=64)
     nll = model.loss_per_target(batch)[0]
-    keep = batch.target[0] >= 0
-    ref = -want.gather(1, batch.target[0][keep][:T, None])[:, 0]
-    check("torba: onbellekli uretim logit'i = sinav yolunun iki asamali log p'si; nll = -log p; toplam 1",
-          float((torch.stack(lg) - want).abs().max()) < 1e-5 and float((nll - ref).abs().max()) < 1e-5
-          and float((want.exp().sum(-1) - 1).abs().max()) < 1e-5)
+    h = model._batch_hidden(batch)
+    pos = (batch.target.flatten() >= 0).nonzero()[:, 0]
+    lp = R.output_logprobs(model, batch, h, pos)
+    check("torba: onbellekli uretim = onbelleksiz sinav yolu (acgozlu; istemli, acik son cumleli); nll = -log p; toplam 1",
+          same and torch.allclose(nll, -lp.gather(1, batch.target.flatten()[pos][:, None])[:, 0], atol=1e-5)
+          and float((lp.exp().sum(-1) - 1).abs().max()) < 1e-5)
 
 
 GROUPS = dict(mask=t_mask, targets=t_targets, loss=t_loss, cache=t_cache, generate=t_generate, recipe=t_recipe,

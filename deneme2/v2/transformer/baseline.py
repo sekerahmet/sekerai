@@ -96,30 +96,32 @@ class BaselineTransformer(torch.nn.Module):
             attn = (batch.doc[:, :, None] == batch.doc[:, None, :]) & causal
         return self.hidden(batch.tokens, batch.pos, attn)
 
-    def _logits(self, h):
-        """h (..., d) -> cikis: torbasiz h @ E^T; torbali (C0, recipe.attach_bag) iki asamali log p (recipe.
-        two_stage_logprobs: sinav, acc, uretim ayni dagilim; belge 55 K3)."""
+    def _logits(self, h, inbag=None):
+        """h (..., d) -> cikis: torbasiz h @ E^T; torbali iki asamali log p (inbag: torba, recipe.two_stage_logprobs)."""
         lg = h @ self.E.weight.T
-        if not hasattr(self, "bag_core_ids"):
+        if not hasattr(self, "bag"):
             return lg
-        from recipe import bag_mask, two_stage_logprobs
-        return two_stage_logprobs(lg, bag_mask(self.bag_core_ids, lg.shape[-1]), h @ self.bag_other)
+        from recipe import two_stage_logprobs
+        return two_stage_logprobs(lg, inbag, h @ self.bag.other)
 
     def loss_per_target(self, batch, attn=None, chunk=4096):
         """-> nll (K,), pred (K,), target_kind (K,) (hedefli konumlar, satir sirasiyla; belge 21 s7 sozlesmesi)."""
         h = self._batch_hidden(batch, attn)
         keep = batch.target >= 0
+        if hasattr(self, "bag"):
+            from recipe import bag_loss_per_target
+            return (*bag_loss_per_target(self, batch, h, chunk), batch.target_kind[keep])
         hk, tgt = h[keep], batch.target[keep]
         nll = torch.empty(len(tgt), device=h.device)
         pred = torch.empty(len(tgt), dtype=torch.long, device=h.device)
         for r in range(0, len(tgt), chunk):
-            lg = self._logits(hk[r:r + chunk]).float()
+            lg = (hk[r:r + chunk] @ self.E.weight.T).float()
             nll[r:r + chunk] = F.cross_entropy(lg, tgt[r:r + chunk], reduction="none")
             pred[r:r + chunk] = lg.argmax(-1)
         return nll, pred, batch.target_kind[keep]
 
     def _step(self, tokens, cache, n):
-        """KV cache: yeni token'lar (1, t) konum n.. -> son konumun logit'i; cache = dict(k, v: katman basina (1, H, Tmax,
+        """KV cache: yeni token'lar (1, t) konum n.. -> son konumun normlu durumu (1, d; logit _logits ile); cache = dict(k, v: katman basina (1, H, Tmax,
         hd), ilk cagrida k'nin dtype'iyla ayrilir (autocast'te bf16), T: Tmax) yerinde dolar.  Yeni token'lar kendi
         aralarinda causal, onbellegin tamamini gorur."""
         t = tokens.shape[1]
@@ -135,7 +137,7 @@ class BaselineTransformer(torch.nn.Module):
             a = F.scaled_dot_product_attention(q, cache["k"][l][:, :, :n + t], cache["v"][l][:, :, :n + t],
                                                attn_mask=allowed)
             x = block._finish(x, a)
-        return self._logits(self.norm(x[:, -1]))[0]
+        return self.norm(x[:, -1])
 
     @torch.no_grad()
     def generate(self, prompts, max_sentences, max_tokens, generator=None, open_last=False, on_token=None):
@@ -143,8 +145,10 @@ class BaselineTransformer(torch.nn.Module):
         bitti mi listesi, eos).  generator None: acgozlu, yoksa ornekleme (sicaklik 1).  Model Z generate ile ayni kural:
         cumle basinda EOS hikayeyi bitirir, cumle icinde END ya da EOS cumleyi bitirir, max_tokens'ta kesilen cumle de
         kapanir (girdiye END).  open_last (belge 48): son istem cumlesine END eklenmez, ilk uretilen cumle onun devami.
-        on_token(w): her uretilen token'dan sonra, on_token(None): cumle kapaninca (akan yazim; cikti degismez)."""
+        on_token(w): her uretilen token'dan sonra, on_token(None): cumle kapaninca (akan yazim; cikti degismez).  Torbali
+        model: torba ozette (BOS, END) secilir, P = kapanmis cumlelerin token'lari."""
         dev = self.E.weight.device
+        bag = getattr(self, "bag", None)
         out = []
         for sents in prompts:
             opened = bool(open_last and sents)
@@ -152,7 +156,16 @@ class BaselineTransformer(torch.nn.Module):
             seq = seq[:-1] if opened else seq
             cache = dict(k=[None] * len(self.blocks), v=[None] * len(self.blocks),
                          T=len(seq) + max_sentences * (max_tokens + 1))
-            logits = self._step(torch.tensor([seq], device=dev), cache, 0)
+            past = [t for s in (sents[:-1] if opened else sents) for t in s]
+            open_toks = list(sents[-1]) if opened else []
+            last = len(seq) - len(open_toks) - 1                                  # son ozet (BOS / END)
+            inbag = None
+            hn = self._step(torch.tensor([seq[:last + 1] if bag is not None else seq], device=dev), cache, 0)
+            if bag is not None:
+                inbag = bag.select_one(hn[0], self.E.weight, past)
+                if open_toks:
+                    hn = self._step(torch.tensor([seq[last + 1:]], device=dev), cache, last + 1)
+            logits = self._logits(hn, inbag)[0]
             n = len(seq)
             gen, ended, eos = [], [], False
             while len(gen) < max_sentences:
@@ -170,7 +183,7 @@ class BaselineTransformer(torch.nn.Module):
                     cur.append(w)
                     if on_token is not None:
                         on_token(w)
-                    logits = self._step(torch.tensor([[w]], device=dev), cache, n)
+                    logits = self._logits(self._step(torch.tensor([[w]], device=dev), cache, n), inbag)[0]
                     n += 1
                 if eos:
                     break
@@ -179,7 +192,11 @@ class BaselineTransformer(torch.nn.Module):
                 if on_token is not None:
                     on_token(None)
                 opened = False
-                logits = self._step(torch.tensor([[END_ID]], device=dev), cache, n)
+                hn = self._step(torch.tensor([[END_ID]], device=dev), cache, n)
+                past, open_toks = past + open_toks + cur, []
+                if bag is not None:
+                    inbag = bag.select_one(hn[0], self.E.weight, past)
+                logits = self._logits(hn, inbag)[0]
                 n += 1
             out.append((gen, ended, eos))
         return out
