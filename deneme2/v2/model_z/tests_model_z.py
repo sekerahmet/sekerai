@@ -1071,6 +1071,7 @@ def t_gate():
     import train as TR
     import recipe as R
     from sentence import StaticCache, story_positions, summaries_last, model_z_global_mask
+    DM = 128                                                              # kapi 2: girdi d // 64 = 2 boyut
     rng = np.random.default_rng(13)
     stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(2, 6))]
                for _ in range(12)]
@@ -1080,15 +1081,15 @@ def t_gate():
 
     def make(gate=0, rand=True, **kw):
         torch.manual_seed(0)
-        m = SentenceTransformer(d=32, layers=3, heads=4, attn_gate=gate, **kw).eval()
+        m = SentenceTransformer(d=DM, layers=3, heads=4, attn_gate=gate, **kw).eval()
         if gate and rand:                                                 # kapi 0,5'ten uzak: head / satir farkli
             g = torch.Generator().manual_seed(1)
             with torch.no_grad():
                 for blk in m.blocks:
-                    blk.attn_gate.copy_(0.3 * torch.randn(blk.attn_gate.shape, generator=g))
+                    blk.attn_gate.copy_(1.5 / blk.attn_gate.shape[1] ** 0.5 * torch.randn(blk.attn_gate.shape, generator=g))
         return m
     torch.manual_seed(0)
-    off = SentenceTransformer(d=32, layers=3, heads=4, global_layers=1).eval()     # bayraksiz kurucu
+    off = SentenceTransformer(d=DM, layers=3, heads=4, global_layers=1).eval()     # bayraksiz kurucu
     base, on = make(global_layers=1, gate=0), make(global_layers=1, gate=1, rand=False)
     sd_on = on.state_dict()
     with torch.no_grad():
@@ -1097,7 +1098,7 @@ def t_gate():
     gk = [k for k in sd_on if k.endswith("attn_gate")]
     init_ok = all(torch.equal(v, base.state_dict()[k]) for k, v in sd_on.items() if k not in gk) and \
         set(sd_on) - set(gk) == set(base.state_dict()) and len(gk) == 3 and all(
-            not sd_on[k].any() and tuple(sd_on[k].shape) == (4, 32) for k in gk)
+            not sd_on[k].any() and tuple(sd_on[k].shape) == (4, DM) for k in gk)
     check("gate: kapali = bugunku model (attn_gate parametresi yok, agirlik ve hidden bit); acik: kapi disindaki ilk "
           "agirlik bit ayni, kapi (heads, d) sifir", same and init_ok and not any("attn_gate" in k for k in base.state_dict()))
 
@@ -1108,19 +1109,19 @@ def t_gate():
             ((loc, batch.pos), (loc, batch.pos), (glob, story_positions(batch.kind))))]:
         blk = make(global_layers=1, glob_kv_heads=2, gate=gv).blocks[l]
         with torch.no_grad():
-            x = torch.randn(B, T, 32)
+            x = torch.randn(B, T, DM)
             got = blk(x, pos, mask)
             q, k, v = blk._qkv(x, pos)
             rep = blk.heads // blk.kv_heads
             a_ = F_.scaled_dot_product_attention(q, k.repeat_interleave(rep, 1), v.repeat_interleave(rep, 1),
                                                  attn_mask=mask[:, None]).transpose(1, 2)
             xn = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + torch.finfo(x.dtype).eps) * blk.n1.weight
-            gate = torch.sigmoid(xn[..., :blk.attn_gate.shape[1]] @ blk.attn_gate.T)   # (B, T, H); 2: ilk 12 boyut
-            h = x + (a_ * gate[..., None]).reshape(B, T, 32) @ blk.proj.weight.T
+            gate = torch.sigmoid(xn[..., :blk.attn_gate.shape[1]] @ blk.attn_gate.T)   # (B, T, H); 2: ilk d // 64 boyut
+            h = x + (a_ * gate[..., None]).reshape(B, T, DM) @ blk.proj.weight.T
             gg, u = blk.gate_up(blk.n2(h)).chunk(2, -1)
             ref = h + blk.down(F_.silu(gg) * u)
         d_ = float((got - ref).abs().max())
-        ok &= d_ < 1e-5 and float(gate.std()) > 0.1 and tuple(blk.attn_gate.shape) == (4, 32 if gv == 1 else 12)
+        ok &= d_ < 1e-5 and float(gate.std()) > 0.1 and tuple(blk.attn_gate.shape) == (4, DM if gv == 1 else DM // 64)
         info.append("kapi %d blok %d (kv %d) %.1e" % (gv, l, blk.kv_heads, d_))
     first = batch.doc[0] == 0
     last = int((first & (batch.sent[0] == int(batch.sent[0][first].max()))).nonzero()[0, 0])
@@ -1131,12 +1132,12 @@ def t_gate():
         with torch.no_grad():
             h0 = m._batch_hidden(batch)
             pb, perm = summaries_last(batch)
-            h1 = m._batch_hidden(pb).gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, 32))
+            h1 = m._batch_hidden(pb).gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, DM))
             h2 = m._batch_hidden(real_batch(rows, 160, alt))
         ok &= float((h0 - h1).abs().max()) < 1e-5 and torch.equal(h0[0, :last], h2[0, :last]) and not torch.equal(
             h0[0, last:], h2[0, last:])
-    check("gate 1 / 2: blok = bagimsiz basvuru (SDPA ciktisi x sigmoid(n1(x) W^T) head basina, 2'de n1(x)[..., :12] ve W "
-          "(H, 12); proj, MLP; yerel + glob GQA); summaries_last ayni; sizinti yok (son cumle degisince onceki konumlar bit "
+    check("gate 1 / 2: blok = bagimsiz basvuru (SDPA ciktisi x sigmoid(n1(x) W^T) head basina, 2'de n1(x)[..., :d // 64] ve W "
+          "(H, d // 64), d 128; proj, MLP; yerel + glob GQA); summaries_last ayni; sizinti yok (son cumle degisince onceki konumlar bit "
           "ayni)", ok, "; ".join(info))
 
     rs = lambda n: [[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 15))] for _ in range(n)]  # noqa: E731
@@ -1202,7 +1203,7 @@ def t_gate():
                           carry=dict(gpos=gp, memory=True, m_max=128))
         with torch.no_grad():
             pb, perm = summaries_last(b)
-            lg = m._batch_hidden(pb).gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, 32)) @ m.E.weight.T
+            lg = m._batch_hidden(pb).gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, DM)) @ m.E.weight.T
             want = []
             for r, p_ in enumerate(pieces):
                 n = sum(len(x_) + 1 for x_ in p_) + (1 if gp[r] == 0 else 0)
@@ -1225,6 +1226,14 @@ def t_gate():
     check("gate: sifir baslangicta gradyan her bloga ulasir; attn_gate NorMuon grubunda (muon_params), adim kapiyi oynatir",
           all(g_ > 0 for g_ in gn) and all("blocks.%d.attn_gate" % i in names for i in range(3)) and moved,
           "grad %s" % ["%.2e" % g_ for g_ in gn])
+    try:
+        SentenceTransformer(d=32, layers=1, heads=4, attn_gate=2)
+        small = False
+    except AssertionError as e:
+        small = "d 32 < 64" in str(e)
+    w = {d_: tuple(SentenceTransformer(d=d_, layers=1, heads=4, attn_gate=2).blocks[0].attn_gate.shape) for d_ in (64, 768)}
+    check("gate 2: girdi genisligi d // 64 (d64 1, d768 12 = onceki sabit 12), d < 64 DURUR (assert)",
+          small and w == {64: (4, 1), 768: (4, 12)}, str(w))
 
 
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,

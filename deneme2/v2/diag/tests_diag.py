@@ -41,9 +41,10 @@ def t_readings():
         print("ATLA readings: GPT-2 tokenizer yok", flush=True)
         return
     root, data, prompts = T2._train_root(tp)
-    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT)
+    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO,
+             TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT)
     TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
-    TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT = 0.6, 0                # eski varsayilanlar: L1 / L2 G1, GQA yok (heads 2)
+    TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT = 0.6, 0, 0   # eski: L1 / L2 G1, GQA yok, kapisiz
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=6, max_tokens=4)
     base = ["--data", data, "--stream", root, "--device", "cpu"]
     same_prompts = os.path.join(root, "reading_prompts_same.json")
@@ -96,7 +97,8 @@ def t_readings():
     except Exception:  # noqa: BLE001
         check("readings", False, traceback.format_exc(limit=3))
     finally:
-        TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT = saved
+        (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO,
+         TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT) = saved
     if T2.DRIVE is None:
         print("ATLA readings (ek istem secimi, Drive kosulari): Drive yok", flush=True)
         return
@@ -154,9 +156,10 @@ def t_tools():
         print("ATLA tools: GPT-2 tokenizer yok", flush=True)
         return
     root, data, prompts = T2._train_root(tp)
-    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT)
+    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO,
+             TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT)
     TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
-    TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT = 0.6, 0                # eski varsayilanlar: L1 / L2 G1, GQA yok (heads 2)
+    TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT = 0.6, 0, 0   # eski: L1 / L2 G1, GQA yok, kapisiz
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=6, max_tokens=4)
     base = ["--data", data, "--stream", root]
     runs = {}
@@ -208,7 +211,8 @@ def t_tools():
     except Exception:  # noqa: BLE001
         check("tools", False, traceback.format_exc(limit=4))
     finally:
-        TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT = saved
+        (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO,
+         TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT) = saved
 
 
 def t_knowledge():

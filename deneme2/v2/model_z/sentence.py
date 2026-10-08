@@ -28,8 +28,9 @@ cikis (_logits) VOCAB'a kesilir: dolgu token'i hedef olmaz, uretilmez.
 attn_gate (belge 88a, 90a; kullanici, 8 Ekim: "o zaman attention head yapalım mı"): head basina sigmoid cikis kapisi,
 SDPA ciktisinda proj'dan once, girdi n1(x) (qiu2025 G1 headwise; resmi kod qiuzh20/gated_attention modeling_qwen3.py
 :309-317, :361-362); agirlik (heads, d) sifirdan (kapi 0,5).  attn_gate 2 (kullanici, 8 Ekim: "onaylıyorum, ikinci kolu da ekle"): girdi
-n1(x)[..., :12], W (heads, 12) (speedrun 124M, modded-nanogpt kayit 2025-08-23_SparseAttnGate: dampen = CastedLinear(dim //
-64, num_heads), x[..., :d_model // 64]).  Kapi Block._finish'te: egitim, prefill, SummaryCache, StaticCache ayni yol.
+n1(x)[..., :d // 64], W (heads, d // 64) (kullanici, 8 Ekim: "onaylıyorum, d // 64 yap"; speedrun 124M, modded-nanogpt
+kayit 2025-08-23_SparseAttnGate: dampen = CastedLinear(dim // 64, num_heads), x[..., :d_model // 64]; d768'de 12).  Kapi
+Block._finish'te: egitim, prefill, SummaryCache, StaticCache ayni yol.
 """
 import dataclasses
 import functools
@@ -203,8 +204,8 @@ def gqa_sdpa(q, k, v, mask=None):
 class Block(torch.nn.Module):
     def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0):
         """kv_heads (GQA; varsayilan heads): k / v head sayisi, heads'in boleni; qkv d -> d + 2 d kv / heads.
-        attn_gate 1 / 2: head basina cikis kapisi agirligi (heads, d) / (heads, 12) (girdi n1(x)'in ilk 12 boyutu), sifir
-        (RNG cekmez; kapisiz modelle ayni ilk agirlik)."""
+        attn_gate 1 / 2: head basina cikis kapisi agirligi (heads, d) / (heads, d // 64) (girdi n1(x)'in ilk d // 64
+        boyutu), sifir (RNG cekmez; kapisiz modelle ayni ilk agirlik)."""
         super().__init__()
         self.heads = heads
         self.kv_heads = int(kv_heads or heads)
@@ -215,8 +216,9 @@ class Block(torch.nn.Module):
         self.proj = torch.nn.Linear(d, d, bias=False)
         self.gate_up = torch.nn.Linear(d, 2 * hidden, bias=False)
         self.down = torch.nn.Linear(hidden, d, bias=False)
-        assert attn_gate in (0, 1, 2) and d >= 12, "attn_gate 0 / 1 / 2"
-        self.attn_gate = torch.nn.Parameter(torch.zeros(heads, d if attn_gate == 1 else 12)) if attn_gate else None
+        assert attn_gate in (0, 1, 2), "attn_gate 0 / 1 / 2"
+        assert attn_gate != 2 or d >= 64, "attn_gate 2: girdi d // 64 boyut, d %d < 64 (0 boyut)" % d
+        self.attn_gate = torch.nn.Parameter(torch.zeros(heads, d if attn_gate == 1 else d // 64)) if attn_gate else None
 
     def _gate(self, x):
         """Blok girdisi x (B, T, d) -> kapi sigmoid(n1(x)[..., :W sutunu] W^T) (B, T, heads); satir basina, maske / konum
@@ -225,8 +227,8 @@ class Block(torch.nn.Module):
 
     def _qkv(self, x, pos, gate=False):
         """-> q, k, v (RoPE'li); gate True (kapili blok, forward): ayni n1(x)'ten kapi da (B, T, heads) -> (q, k, v, kapi).
-        attn_gate 1: kapi agirligi qkv matmul'una ek satir (tek matmul), 2: n1(x)'in ilk 12 boyutu (belge 90a ek: ayri
-        _gate yolu n1'i ikinci kez hesaplayip kaydediyordu)."""
+        attn_gate 1: kapi agirligi qkv matmul'una ek satir (tek matmul), 2: n1(x)'in ilk d // 64 boyutu (belge 90a ek:
+        ayri _gate yolu n1'i ikinci kez hesaplayip kaydediyordu)."""
         B, T, d = x.shape
         hd = d // self.heads
         h = self.n1(x)
@@ -290,7 +292,7 @@ class SentenceTransformer(torch.nn.Module):
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
         dolunca glob onbelleginde yalniz Z'ler kalir, G parcada sifirlanir.  vocab_rows: E satir sayisi (>= VOCAB; dolgu
         satirlari sifir, ilk agirlik VOCAB'li modelle ayni).  attn_gate 1 / 2: her blokta head basina cikis kapisi
-        (2: girdi n1(x)'in ilk 12 boyutu; sifirdan; geri kalan ilk agirlik kapisiz modelle ayni)."""
+        (2: girdi n1(x)'in ilk d // 64 boyutu; sifirdan; geri kalan ilk agirlik kapisiz modelle ayni)."""
         super().__init__()
         self.carry_group, self.row_len = int(carry_group), ROW_LEN
         self.global_layers = int(global_layers)

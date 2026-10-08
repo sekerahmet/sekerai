@@ -40,9 +40,11 @@ devami, her katmanda onceki parcalarin BOS + Z'lerini (glob'da yalniz Z'leri) be
 model_z.  Sinavda continuation_exam (valid'in uzun belgeleri), gunlukte loss_cont.
 --attn_gate 1 (belge 88a, 90a; kullanici, 8 Ekim: "o zaman attention head yapalım mı"; yalniz model_z): her blokta head
 basina sigmoid cikis kapisi (sentence.Block._gate; girdi n1(x), agirlik sifirdan, kapi 0,5); agirlik (heads, d) bloklarin
-2-B matrisi oldugu icin Muon / NorMuon grubunda.  Varsayilan 0 = kapisiz (bit ayni); kimlikte, --resume'da verilmezse
-kosunun kimliginden; kapisiz checkpoint kapili surdurulmez (DUR).  --attn_gate 2 (kullanici, 8 Ekim: "onaylıyorum, ikinci
-kolu da ekle"): kapi girdisi n1(x)'in ilk 12 boyutu, W (heads, 12) (speedrun 124M tarifi; belge 88a s4.3, 90a).
+2-B matrisi oldugu icin Muon / NorMuon grubunda.  Acik 0 = kapisiz (bit ayni); kimlikte, --resume'da verilmezse kosunun
+kimliginden (alan yoksa 0); kapisiz checkpoint kapili surdurulmez (DUR).  --attn_gate 2 (kullanici, 8 Ekim: "onaylıyorum,
+ikinci kolu da ekle"; "onaylıyorum, d // 64 yap"): kapi girdisi n1(x)'in ilk d // 64 boyutu, W (heads, d // 64) (speedrun
+124M tarifi; belge 88a s4.3, 90a; d768'de 12); d < 64 DUR.  Varsayilan auto (kullanici, 8 Ekim: "gate 2 varsayılan"):
+model_z ve d >= 64 ise 2, aksi halde 0.
 --stop_step N (kullanici, 8 Ekim): takvim degismeden adim N'de durur; checkpoint.pt + agent.pt + results.json (finished
 False, stopped_at, readings_skipped "stop_step"), son sinav ve okuma yok; --resume 1 kaldigi yerden.
 Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunluk sinirinda, epok sonunda ve bitiste;
@@ -68,7 +70,8 @@ Varsayilanlar (kullanici, 8 Ekim: "Varsayılan yap ama kısa bir koşu ile son h
                     [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
                     [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1]
                     [--optimizer normuon|muon|adamw (varsayilan normuon)] [--global_layers N|auto (varsayilan auto)]
-                    [--glob_kv_heads N|auto (varsayilan auto)] [--carry_summaries 1] [--carry_group G] [--attn_gate 0|1|2]
+                    [--glob_kv_heads N|auto (varsayilan auto)] [--carry_summaries 1] [--carry_group G]
+                    [--attn_gate 0|1|2|auto (varsayilan auto)]
 """
 import torch  # noqa: I001  (Windows: torch once)
 
@@ -99,6 +102,7 @@ LOG_EVERY = 100             # adim; gunluk satiri = bir hiz penceresi
 MODEL_Z_GLOBAL_RATIO = 1 / 3   # global_layers auto (OLCULENLER_z: d768/L10 G1->G3 kazanc, d1024/L12 G3->G4 -0,0047)
 GLOB_KV_GROUP = 4              # glob_kv_heads auto = heads / 4
 GLOB_KV_DEFAULT = "auto"       # --glob_kv_heads verilmezse (kullanici, 8 Ekim: GQA varsayilan); testler eski 0'a sabitler
+ATTN_GATE_DEFAULT = "auto"     # --attn_gate verilmezse (kullanici, 8 Ekim: "gate 2 varsayılan"); testler eski 0'a sabitler
 LR_REF = (2e-3, 768, 0.5)      # lr auto = lr0 (d0 / d) ^ us (aci / adim ~ lr 0,2 sqrt(d) sabit); d1024 olcumu: 1,4 / 1,7e-3 duz, 1,73e-3 icinde
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate")   # --resume'da verilmezse kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
@@ -521,9 +525,9 @@ def _args(argv):
     ap.add_argument("--carry_group", type=int, default=None,
                     help="carry plani: belgenin ardisik en cok G parcasi ayni batch'te (carry_summaries 0 ile: K kontrolu, "
                          "bellek yok); varsayilan carry_summaries ise 4, degilse 0")
-    ap.add_argument("--attn_gate", type=int, default=None, choices=(0, 1, 2),
+    ap.add_argument("--attn_gate", type=lambda s: s if s == "auto" else int(s), default=None,
                     help="model_z: head basina attention cikis kapisi (belge 88a, 90a); 1 girdi n1(x), 2 girdi n1(x)'in "
-                         "ilk 12 boyutu; varsayilan 0; kimlikte; "
+                         "ilk d // 64 boyutu; auto (varsayilan): model_z ve d >= 64 ise 2, aksi 0; kimlikte; "
                          "--resume'da verilmezse kosunun kimliginden")
     ap.add_argument("--fp8", default="none", choices=("none", "tensorwise", "rowwise"),
                     help="MLP (gate_up, down) torchao Float8Linear tarifi; none: bf16 (kimlige girmez, --resume'da "
@@ -550,9 +554,16 @@ def _args(argv):
     if args.lr is None:
         args.lr = "auto"
     if args.attn_gate is None:
-        args.attn_gate = 0
+        args.attn_gate = ATTN_GATE_DEFAULT
+    if args.attn_gate == "auto":                                         # kimlige cozulmus sayi
+        args.attn_gate = 2 if args.model == "model_z" and args.d >= 64 else 0
+    if args.attn_gate not in (0, 1, 2):
+        sys.exit("DUR: --attn_gate %s: 0, 1, 2 ya da auto" % args.attn_gate)
     if args.attn_gate and args.model != "model_z":
         sys.exit("DUR: --attn_gate yalniz model_z")
+    if args.attn_gate == 2 and args.d < 64:
+        sys.exit("DUR: --attn_gate 2: kapi girdisi d // 64 boyut, d %d < 64 -> 0 boyut; d >= 64 ya da --attn_gate 0 / 1"
+                 % args.d)
     args.summaries_last = int(args.model == "model_z")                   # Model Z duzeni (kimlikte isaret)
     if args.carry_group is None:
         args.carry_group = 4 if args.carry_summaries else 0

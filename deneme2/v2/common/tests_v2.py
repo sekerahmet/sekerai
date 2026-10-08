@@ -841,10 +841,11 @@ def t_train():
         return
     root, data, prompts = _train_root(tp)
     saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO, TR.VOCAB_ROWS,
-             TR.GLOB_KV_DEFAULT)
+             TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT)
     TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
     TR.MODEL_Z_GLOBAL_RATIO = 0.6                                       # eski varsayilan: L1 / L2 G1 (8 Ekim)
     TR.GLOB_KV_DEFAULT = 0                      # eski varsayilan (GQA yok): GOLDEN / etiket bit, heads 2 (yeni _train_gqa_default)
+    TR.ATTN_GATE_DEFAULT = 0                    # eski varsayilan (kapisiz): GOLDEN / etiket bit (gercegi _train_gate'te)
     TR.VOCAB_ROWS = D.VOCAB                     # eski E boyu: GOLDEN / etiket esdegerligi bit (dolgulu yol _train_vocab'da)
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=3, max_tokens=4)
     base = ["--data", data, "--stream", root, "--device", "cpu", "--d", "16", "--layers", "1", "--heads", "2",
@@ -1038,7 +1039,7 @@ def t_train():
         check("train", False, traceback.format_exc(limit=3))
     finally:
         (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO, TR.VOCAB_ROWS,
-         TR.GLOB_KV_DEFAULT) = saved
+         TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT) = saved
 
 
 def t_tokens():
@@ -1412,12 +1413,42 @@ def _train_gate(base, root, data, out, state, same, exits, TR):
               names.get("blocks.*.attn_gate") == 2 and not any("attn_gate" in k for k in
                                                                n["optimizer"]["split"]["adamw_decay"]["names"]), str(names))
         two = out("gate_2")
-        r2 = TR.main(mz[:-1] + ["2", "--attn_gate", "2", "--out", two])
+        d64 = mz[:-1] + ["2", "--d", "64"]                                 # kapi 2 girdisi d // 64 (d16'da 0 -> DUR)
+        r2 = TR.main(d64 + ["--attn_gate", "2", "--out", two])
         s2 = state(two)
-        check("train --attn_gate 2: kosar (kayip sonlu), kapi (heads, 12) sifirdan oynadi, kimlikte 2; load_run (heads, 12) "
-              "kurar (agirlik bit)", all(np.isfinite(w["loss"]) for w in r2["log"]) and r2["identity"]["attn_gate"] == 2
-              and all(tuple(s2[k].shape) == (2, 12) and s2[k].abs().sum() > 0 for k in s2 if k.endswith("attn_gate"))
-              and same(s2, GR.load_run(two, data, torch.device("cpu"))[0].state_dict()))
+        small = _exit_msg(TR._args, mz + ["--attn_gate", "2", "--out", "x"])
+        check("train --attn_gate 2 (d64): kosar (kayip sonlu), kapi (heads, d // 64 = 1) sifirdan oynadi, kimlikte 2; load_run "
+              "kurar (agirlik bit); d16'da DUR", all(np.isfinite(w["loss"]) for w in r2["log"])
+              and r2["identity"]["attn_gate"] == 2 and all(tuple(s2[k].shape) == (2, 1) and s2[k].abs().sum() > 0
+                                                          for k in s2 if k.endswith("attn_gate"))
+              and same(s2, GR.load_run(two, data, torch.device("cpu"))[0].state_dict())
+              and small is not None and "d 16 < 64" in small, str(small))
+        TR.main(d64 + ["--out", out("gate_old")])                          # eski varsayilan (0) ile kapisiz d64 kosu
+        ck = os.path.join(out("gate_old0"), "checkpoint.pt")
+        os.makedirs(os.path.dirname(ck))
+        pack = torch.load(os.path.join(out("gate_old"), "checkpoint.pt"), weights_only=False)
+        del pack["args"]["attn_gate"]                                     # alani olmayan (8 Ekim oncesi) kosu
+        torch.save(pack, ck)
+        pinned = TR.ATTN_GATE_DEFAULT
+        TR.ATTN_GATE_DEFAULT = "auto"                                     # train.py'nin varsayilani
+        try:
+            arg = lambda a_: TR._args(base + a_ + ["--out", "x"]).attn_gate  # noqa: E731
+            ag = {k: arg(a_) for k, a_ in (
+                ("mz d768", ["--model", "model_z", "--d", "768"]), ("mz d64", ["--model", "model_z", "--d", "64"]),
+                ("mz d16", ["--model", "model_z"]), ("tf d768", ["--model", "transformer", "--d", "768"]),
+                ("tf auto", ["--model", "transformer", "--d", "768", "--attn_gate", "auto"]),
+                ("mz acik 0", ["--model", "model_z", "--d", "768", "--attn_gate", "0"]),
+                ("mz acik 1", ["--model", "model_z", "--d", "768", "--attn_gate", "1"]))}
+            old = [TR._args(d64 + ["--out", out(n_), "--resume", "1"]).attn_gate for n_ in ("gate_old", "gate_old0")]
+            rd = TR.main(d64 + ["--out", out("gate_def")])
+        finally:
+            TR.ATTN_GATE_DEFAULT = pinned
+        check("train --attn_gate varsayilan (ATTN_GATE_DEFAULT auto): model_z d >= 64 -> 2, d < 64 -> 0, transformer (acik "
+              "auto dahil) 0, acik 0 / 1 aynen; eski kapisiz kosu (alan 0 ya da yok) bayraksiz --resume'da 0; bayraksiz "
+              "d64 kosu = acik --attn_gate 2 kosusu (kimlik 2, agirlik bit)",
+              ag == {"mz d768": 2, "mz d64": 2, "mz d16": 0, "tf d768": 0, "tf auto": 0, "mz acik 0": 0, "mz acik 1": 1}
+              and old == [0, 0] and rd["identity"]["attn_gate"] == 2 and same(s2, state(out("gate_def"))),
+              "%s; eski %s" % (ag, old))
     except Exception:  # noqa: BLE001
         check("train --attn_gate", False, traceback.format_exc(limit=3))
 
@@ -1775,7 +1806,7 @@ def t_fineweb():
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(tp)
     saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS, MF.VALID_STRIDE, D.MAX_SENTENCE_TOKENS,
-             TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT)
+             TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT)
     try:
         fl_ss, q_ss = D.stream_tables(tok)
         fl_ss2, q_ss2 = D.stream_tables(tok, "ss")
@@ -1884,7 +1915,7 @@ def t_fineweb():
                   tr.n, int(cont.sum())))
         TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS = 4, 1, dict(max_sentences=3, max_tokens=4)
         TR.MODEL_Z_GLOBAL_RATIO = 0.6                                       # eski varsayilan: L1 / L2 G1 (8 Ekim)
-        TR.GLOB_KV_DEFAULT = 0                                              # eski varsayilan (heads 2)
+        TR.GLOB_KV_DEFAULT = TR.ATTN_GATE_DEFAULT = 0                       # eski varsayilanlar (heads 2, kapisiz)
         base = ["--data", out, "--stream", out, "--device", "cpu", "--d", "16", "--layers", "2", "--heads", "2", "--lr",
                 "1e-2", "--checkpoint_minutes", "0", "--optimizer", "muon"]          # 8 Ekim varsayilani normuon'dan once
         run = os.path.join(TMP, "fw_runs", "mzg")
@@ -1920,7 +1951,7 @@ def t_fineweb():
         check("fineweb", False, traceback.format_exc(limit=4))
     finally:
         (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS, MF.VALID_STRIDE, D.MAX_SENTENCE_TOKENS,
-         TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT) = saved
+         TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT) = saved
 
 
 def _fineweb_extend(src, out, texts, tok, TR, MF):
