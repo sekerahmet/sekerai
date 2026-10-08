@@ -6,7 +6,8 @@ eski kimlik reddi, etiketteki kodla esdegerlik dahil; ~3 dk), drive (valid akisi
 web profili, parca / continues, make_fineweb, FineWeb ile train, knowledge_exam, generate open_last, d 768).  Teshis araclari:
 diag/tests_diag.py.
 
-    python tests_v2.py [--only data,pack,recipe,metrics,integration,train,drive,tokens,fineweb]
+    python tests_v2.py [--only data,pack,recipe,metrics,integration,train,drive,tokens,fineweb,mtp]
+mtp (deneme/mtp, belge 90c): --mtp takvimi, ek hedefler, kayip, sizinti, train uctan uca (~1 dk).
 """
 import torch
 
@@ -2304,8 +2305,270 @@ def t_fp8():
               % (model, n), n == 2 * 2 and [n_ for n_, _ in __import__("recipe").muon_params(m)] == names)
 
 
+def _mtp_reference(stories, rows, n, row_len):
+    """data.mtp_targets'in bagimsiz basvurusu: hikaye hikaye girdi dizisi ve hedefleri yeniden kurulur (devam eden parcada
+    son hedef -100), k. ek hedef = hikaye sirasinda k sonraki konumun hedefi -> (build duzeni (B, T, n), (satir, doc) ->
+    hikayenin ilk sutunu)."""
+    cont = getattr(stories, "continues", None)
+    out = np.full((len(rows), row_len, n), -100, np.int64)
+    first = {}
+    for r, row in enumerate(rows):
+        c = 0
+        for d, h in enumerate(row):
+            ss = stories.sentences(int(h))
+            seq = [D.EOS_ID] + [t for x in ss for t in list(x) + [D.END_ID]]
+            nxt = seq[1:] + [-100 if cont is not None and cont[h] else D.EOS_ID]
+            for i in range(len(seq)):
+                for k in range(1, n + 1):
+                    if i + k < len(seq):
+                        out[r, c + i, k - 1] = nxt[i + k]
+            first[(r, d)] = c
+            c += len(seq)
+    return out, first
+
+
+def _mtp_official(total):
+    """modded-nanogpt kayit 53 (records/track_1_short/2025-12-22_MultiTokenPrediction, :1519-1530) takviminin kopyasi;
+    ana agirlik 1 atilir."""
+    out = []
+    for s in range(total + 1):
+        x = s / total
+        if x < 1/3:
+            w = [1.0, 0.5, 0.25 * (1 - 3*x)]
+        elif x < 2/3:
+            w = [1.0, 0.5 * (1 - (3*x - 1))]
+        else:
+            w = [1.0]
+        out.append((w[1:] + [0.0, 0.0])[:2])
+    return out
+
+
+def t_mtp():
+    """--mtp (deneme/mtp; ayni-logit MTP, belge 90c): takvim resmi kodla bit ayni ve sonda 0; ek hedefler bagimsiz
+    basvuruyla ayni (Z, cumle / hikaye / satir / dolgu siniri, devam parcasi, summaries_last); kayip / gradyan bagimsiz
+    formulle ayni; sizinti yok (gercek Model Z); train uctan uca: --mtp 0 GOLDEN bit, gunlukte loss = ana CE ve loss_mtp /
+    mtp_w ayri, sinav yalniz agirliklardan, kesilip surdurulen = kesintisiz, DUR'lar."""
+    import traceback
+    import recipe as R
+    import train as TR
+    root_v2 = os.path.dirname(HERE)
+    sys.path.insert(0, os.path.join(root_v2, "model_z"))
+    from sentence import SentenceTransformer, summaries_last
+    try:                                                                # 1. takvim
+        ok_off = all(R.mtp_weights(s, t, 2) == o for t in (3000, 1000, 9, 7, 1) for s, o in enumerate(_mtp_official(t)))
+        gen = []
+        for n in (1, 2, 3):
+            for t in (3000, 7):
+                ws = [R.mtp_weights(s, t, n) for s in range(t + 1)]
+                off = [s for s in range(t + 1) if not any(ws[s])]
+                gen.append(ws[0] == [0.5 ** k for k in range(1, n + 1)] and off == list(range(off[0], t + 1))
+                           and not any(ws[t - 1]) and all(ws[s][k] >= ws[s + 1][k] for s in range(t) for k in range(n))
+                           and (t < 100 or abs(off[0] / t - n / (n + 1)) < 1e-3))
+        w3 = [R.mtp_weights(s, 3000, 2) for s in (0, 500, 999, 1000, 1500, 1999, 2000, 2399, 2999)]
+        check("mtp takvim: n 2 resmi kodla (kayit 53 :1519-1530) her adimda bit ayni (toplam 3000 / 1000 / 9 / 7 / 1); "
+              "n 1-3: ilk adim 0,5^k, azalan, son 1 / (n + 1) payda ve son adimda 0", ok_off and all(gen),
+              "3000 adim: %s" % w3)
+    except Exception:  # noqa: BLE001
+        check("mtp takvim", False, traceback.format_exc(limit=3))
+    try:                                                                # 2. hedefler
+        E, P = D.EOS_ID, D.END_ID
+        st = _Synthetic([[[10, 11, 12], [13], [14, 15]], [[20, 21]]])
+        got = D.mtp_targets(D.build_batch(st, [[0, 1]], "model_z", row_len=16), 2)[0].T.tolist()
+        want = [[11, 12, P, 13, P, 14, 15, P, E, -100, 21, P, E, -100, -100, -100],
+                [12, P, 13, P, 14, 15, P, E, -100, -100, P, E, -100, -100, -100, -100]]
+        check("mtp hedef: elle yazilmis ornek (Z_1 -> t_2,2, son token -> sonraki cumlenin ilk token'i, hikaye / dolgu "
+              "siniri -100)", got == want, str(got))
+        rng = np.random.default_rng(5)
+        st = _Synthetic([[rng.integers(0, 50000, int(rng.integers(1, 9))).tolist() for _ in range(int(rng.integers(1, 7)))]
+                         for _ in range(60)])
+        st.continues = rng.random(st.n) < 0.2                            # FineWeb parcalari: son hedef yok
+        L = 1 + np.add.reduceat(st.sent[:, 1] - st.sent[:, 0] + 1, st.story[:-1])
+        ro, rs = D.pack_plan(L, 128, 0, 1)
+        rows = [rs[ro[r]:ro[r + 1]].tolist() for r in range(min(6, len(ro) - 1))] + [[]]   # bos satir (CUDA dolgusu)
+        ok, n_valid = True, 0
+        for n in (1, 2, 3):
+            b = D.build_batch(st, rows, "model_z", "cpu", 128)
+            mt = D.mtp_targets(b, n)
+            ref, first = _mtp_reference(st, rows, n, 128)
+            ok &= np.array_equal(mt.numpy(), ref)
+            pb, perm = summaries_last(b)
+            mp = mt.gather(1, perm[..., None].expand(-1, -1, n))          # train.cpu_batch'in yolu
+            want = np.full(mp.shape, -100, np.int64)                      # bagimsiz: (doc, gercek konum) -> build sutunu
+            for r in range(len(rows)):
+                for j in range(128):
+                    d = int(pb.doc[r, j])
+                    if d >= 0:
+                        want[r, j] = ref[r, first[(r, d)] + int(pb.real_pos[r, j])]
+            ok &= np.array_equal(mp.numpy(), want)
+            n_valid += int((mt >= 0).sum())
+        check("mtp hedef: bagimsiz basvuru = data.mtp_targets (60 rastgele hikaye, %20 devam parcasi, bos satir, n 1-3) "
+              "ve summaries_last duzeninde (doc, real_pos) ile = perm toplamasi (train yolu)", ok, "%d gecerli hedef" % n_valid)
+    except Exception:  # noqa: BLE001
+        check("mtp hedef", False, traceback.format_exc(limit=3))
+    try:                                                                # 3. kayip
+        torch.manual_seed(0)
+        N, d, K = 96, 8, 2
+        h = torch.randn(N, d, requires_grad=True)
+        Wt = torch.randn(D.VOCAB + 46, d) * 0.5
+        Wt[D.VOCAB:] = 0
+        Wt.requires_grad_(True)
+        tg = torch.randint(0, D.VOCAB, (N,))
+        tg[::7] = -100
+        ex = torch.randint(0, D.VOCAB, (N, K))
+        ex[::3, 0] = -100
+        ex[::4, 1] = -100
+        w = torch.tensor([0.5, 0.125])
+        loss, main, ce = R.output_loss_mtp(h, Wt, tg, ex, w)
+        ga = torch.autograd.grad(loss, (h, Wt))
+        lg = (h.double() @ Wt.double()[:D.VOCAB].T)                      # basvuru: float64, dolgu sutunu yok
+        cek = [torch.nn.functional.cross_entropy(lg, t, ignore_index=-100, reduction="none") for t in (tg, ex[:, 0], ex[:, 1])]
+        n0 = (tg >= 0).sum()
+        ref = cek[0].sum() / n0 + sum(float(w[k]) * cek[k + 1].sum() for k in range(K)) / n0
+        gr = torch.autograd.grad(ref, (h, Wt))
+        rel = max(((x.double() - y).norm() / y.norm()).item() for x, y in zip(ga, gr))
+        base = R.output_loss(h, Wt, tg)
+        l0, m0, _ = R.output_loss_mtp(h, Wt, tg, ex, torch.zeros(K))
+        g0 = torch.autograd.grad(l0, (h, Wt))
+        gb = torch.autograd.grad(base, (h, Wt))
+        ok = (abs(loss.item() - ref.item()) / ref.item() < 1e-6 and rel < 1e-5 and torch.equal(main, base)
+              and all(abs(ce[k].item() - (cek[k + 1].sum() / (ex[:, k] >= 0).sum()).item()) < 1e-5 for k in range(K))
+              and torch.equal(l0, base) and all(torch.equal(x, y) for x, y in zip(g0, gb))
+              and float(ga[1][D.VOCAB:].abs().max()) == 0.0)
+        check("mtp kayip: (sum CE_0 + sum_k w_k sum CE_k) / ana hedef sayisi = float64 basvuru (kayip, h / E gradyani); ana "
+              "CE = output_loss bit; w 0 -> output_loss (kayip ve gradyan bit); ek CE ortalamalari; dolgu satiri gradyani 0",
+              ok, "kayip %.6f / %.6f, gradyan goreli %.1e" % (loss.item(), ref.item(), rel))
+    except Exception:  # noqa: BLE001
+        check("mtp kayip", False, traceback.format_exc(limit=3))
+    try:                                                                # 4. sizinti (gercek Model Z, summaries_last)
+        rng = np.random.default_rng(7)
+        stories = [[rng.integers(0, 50000, int(rng.integers(1, 6))).tolist() for _ in range(int(rng.integers(2, 5)))]
+                   for _ in range(4)]
+        torch.manual_seed(0)
+        mz = SentenceTransformer(d=16, layers=2, heads=2, global_layers=1).eval()
+        n = 2
+
+        def per_pos(sts):
+            b = D.build_batch(_Synthetic(sts), [[0, 1], [2, 3]], "model_z", "cpu", 64)
+            mt = D.mtp_targets(b, n)
+            pb, perm = summaries_last(b)
+            tg = torch.cat([pb.target[..., None], mt.gather(1, perm[..., None].expand(-1, -1, n))], -1)
+            with torch.no_grad():
+                lsm = torch.log_softmax(mz._logits(mz._batch_hidden(pb)).float(), -1)
+            ce = -lsm.gather(-1, tg.clamp_min(0)) * (tg >= 0)
+            return ce.gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, n + 1)), b   # build sutunu sirasi
+        ce0, b0 = per_pos(stories)
+        ok, changed, cases = True, 0, 0
+        for s_ in range(4):
+            for si in range(len(stories[s_])):
+                for ti in range(len(stories[s_][si])):
+                    alt = [[list(x) for x in st_] for st_ in stories]
+                    alt[s_][si][ti] = (alt[s_][si][ti] + 1) % 50000
+                    ce1, b1 = per_pos(alt)
+                    q = np.flatnonzero(((b0.tokens != b1.tokens)).flatten().numpy())
+                    assert len(q) == 1
+                    r, qc = divmod(int(q[0]), 64)
+                    doc = int(b0.doc[r, qc])
+                    for p in range(64):
+                        if int(b0.doc[r, p]) != doc or p >= qc:
+                            continue                                     # oteki hikayeler asagida; p >= q serbest
+                        for k in range(n + 1):
+                            same = torch.equal(ce0[r, p, k], ce1[r, p, k])
+                            if p + k + 1 == qc:
+                                changed += not same
+                            else:
+                                ok &= same
+                    other = b0.doc[r] != doc
+                    ok &= torch.equal(ce0[r][other], ce1[r][other]) and torch.equal(ce0[1 - r], ce1[1 - r])
+                    cases += 1
+        check("mtp sizinti (gercek SentenceTransformer G1, summaries_last, fp32): token q degisince q'dan onceki her "
+              "konumun ana ve ek CE'si bit ayni, yalniz hedefi q olan (p + k + 1 = q) degisir; oteki hikayeler ayni",
+              ok and changed > 0, "%d degisiklik, %d etiket degisti" % (cases, changed))
+    except Exception:  # noqa: BLE001
+        check("mtp sizinti", False, traceback.format_exc(limit=3))
+    tp = tokenizer_path()                                               # 5. train uctan uca
+    if tp is None:
+        print("ATLA mtp train: GPT-2 tokenizer yok", flush=True)
+        return
+    root, data, prompts = _train_root(tp)
+    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.VOCAB_ROWS, TR.GLOB_KV_DEFAULT,
+             TR.ATTN_GATE_DEFAULT)
+    TR.BATCH_ROWS, TR.LOG_EVERY, TR.VOCAB_ROWS = 4, 1, D.VOCAB
+    TR.GLOB_KV_DEFAULT = TR.ATTN_GATE_DEFAULT = 0                     # eski varsayilanlar (heads 2; GOLDEN bit)
+    TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=3, max_tokens=4)
+    base = ["--data", data, "--stream", root, "--device", "cpu", "--d", "16", "--layers", "1", "--heads", "2",
+            "--lr", "1e-2", "--checkpoint_minutes", "0", "--optimizer", "adamw"]
+    out = lambda name: os.path.join(TMP, "runs_mtp", name)  # noqa: E731
+    state = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
+    try:
+        if torch.__version__ == GOLDEN_TORCH:
+            ok = True
+            for model in ("model_z", "model_z_g0"):
+                g = TR.main(base + GOLDEN_ARGS[model] + ["--mtp", "0", "--steps", "6", "--out", out("golden_" + model)])
+                per = {k: hashlib.sha256(v.contiguous().numpy().tobytes()).hexdigest()
+                       for k, v in state(out("golden_" + model)).items()}
+                whole = hashlib.sha256("".join(k + per[k] for k in sorted(per)).encode()).hexdigest()
+                ok &= [w["loss"] for w in g["log"]][:6] == GOLDEN[model]["first6"] and whole == GOLDEN[model]["sha"]
+                ok &= g["identity"]["mtp"] == 0 and "loss_mtp" not in g["log"][0]
+            check("mtp train --mtp 0: GOLDEN (model_z G1 / G0) ilk 6 kayip ve agirlik sha256 bit ayni; kimlikte mtp 0", ok)
+        else:
+            print("ATLANDI: GOLDEN torch %s ile, burada %s" % (GOLDEN_TORCH, torch.__version__), flush=True)
+        cmd = base + ["--model", "model_z", "--layers", "2", "--global_layers", "1", "--mtp", "2", "--steps", "9"]
+        a = TR.main(cmd + ["--out", out("mtp_A")])
+        args = TR._args(cmd + ["--out", "x"])
+        st = D.TokenStories(root, data, "train")
+        m, _, layout = TR._build(args, torch.device("cpu"))
+        f = np.load(os.path.join(data, "train_pack_plan_e1.npz"))
+        ro, rs = f["row_offsets"], f["row_stories"]
+        rows = [rs[ro[r]:ro[r + 1]].tolist() for r in range(4)]
+        b = D.build_batch(st, rows, layout, "cpu", 64)
+        ref, _ = _mtp_reference(st, rows, 2, 64)
+        with torch.no_grad():
+            lsm = torch.log_softmax(m._logits(m._batch_hidden(b)).float(), -1)   # build duzeni (prefill yolu)
+        tg = torch.cat([b.target[..., None], torch.as_tensor(ref)], -1)
+        nll = -lsm.gather(-1, tg.clamp_min(0))
+        want = [float(nll[..., k][tg[..., k] >= 0].mean()) for k in range(3)]
+        w = a["log"]
+        ok_log = (abs(w[0]["loss"] - want[0]) < 1e-4 and all(abs(x - y) < 1e-4 for x, y in zip(w[0]["loss_mtp"], want[1:]))
+                  and [x["mtp_w"] for x in w] == [[round(v, 6) for v in R.mtp_weights(x["step"] - 1, 9, 2)] for x in w]
+                  and [x["loss_mtp"] is None for x in w] == [not any(R.mtp_weights(x["step"] - 1, 9, 2)) for x in w]
+                  and w[-1]["mtp_w"] == [0.0, 0.0] and a["identity"]["mtp"] == 2)
+        check("mtp train --mtp 2 --steps 9: ilk adim gunluk kaybi = ana CE, loss_mtp = bagimsiz ek CE (build duzeni, "
+              "basvuru hedefleri); mtp_w = mtp_weights, son evrede 0 ve loss_mtp yok; kimlikte mtp 2", ok_log,
+              "ilk adim %s / %s %s; w %s" % (w[0]["loss"], w[0]["loss_mtp"], [round(x, 4) for x in want],
+                                             [x["mtp_w"] for x in w]))
+        import metrics as M
+        valid = D.TokenStories(root, data, "valid")
+        ep = np.load(os.path.join(data, "exam_pack_plan.npz"))
+        sb = np.load(os.path.join(root, "gpt2", "valid_bytes.npy"))
+        m.load_state_dict(state(out("mtp_A")))
+        m.row_len = 64
+        ex = TR._exam(m, m._masks(True), valid, (ep["row_offsets"], ep["row_stories"]), sb, layout,
+                      torch.device("cpu"), False, summaries_last)
+        check("mtp train: sinav yalniz agirliklardan (agent.pt'den bagimsiz _exam = kosunun sinavi; ana bas, MTP yok)",
+              dict(ex, seconds=0) == {k: v for k, v in dict(a["exam"], seconds=0).items() if k in ex}
+              and set(ex) <= set(a["exam"]), "kayip %.4f" % ex["loss"])
+        stopped, bres = _cut_and_resume(TR, cmd, out("mtp_B"))
+        check("mtp train: adim 4'te kesilip surdurulen = kesintisiz (agirlik bit, gunluk mtp alanlari ayni)",
+              stopped and all(torch.equal(x, y) for x, y in zip(state(out("mtp_A")).values(), state(out("mtp_B")).values()))
+              and [x["mtp_w"] for x in bres["log"]] == [x["mtp_w"] for x in a["log"]])
+        mz_ = base + ["--model", "model_z", "--layers", "2", "--global_layers", "1", "--steps", "9"]
+        msgs = [_exit_msg(TR.main, base + ["--model", "transformer", "--mtp", "2", "--out", out("x1")]),
+                _exit_msg(TR.main, cmd + ["--carry_group", "4", "--out", out("x2")]),
+                _exit_msg(TR.main, cmd + ["--carry_summaries", "1", "--out", out("x3")]),
+                _exit_msg(TR.main, mz_ + ["--mtp", "-1", "--out", out("x4")]),
+                _exit_msg(TR.main, mz_ + ["--out", out("mtp_A"), "--resume", "1"])]
+        check("mtp train DUR: transformer, --carry_group, --carry_summaries, --mtp -1; --mtp 2 kosusu --mtp 0 ile "
+              "--resume (kimlik farki)", all(x and "DUR" in x for x in msgs) and "mtp" in msgs[-1],
+              " | ".join(str(x)[:70] for x in msgs))
+    except Exception:  # noqa: BLE001
+        check("mtp train", False, traceback.format_exc(limit=3))
+    finally:
+        (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.VOCAB_ROWS, TR.GLOB_KV_DEFAULT,
+         TR.ATTN_GATE_DEFAULT) = saved
+
+
 TESTS = dict(fp8=t_fp8, data=t_data, pack=t_pack, recipe=t_recipe, metrics=t_metrics, integration=t_integration,
-             train=t_train, drive=t_drive, tokens=t_tokens, fineweb=t_fineweb)
+             train=t_train, drive=t_drive, tokens=t_tokens, fineweb=t_fineweb, mtp=t_mtp)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)

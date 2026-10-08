@@ -59,6 +59,11 @@ Olcu: epok sonunda ve bitiste metrics.exam_scores (exam_pack_plan.npz; egitimle 
 (recipe.SpeedWindow; ilk pencere derleme icerir, ozete girmez).  Sonda agent.pt ve results.json, SONRA
 metrics.story_generation (reading_prompts.json; okuma dusse de model kalir).  Cikti: config.json, checkpoint.pt, decay_start/, results.json, agent.pt, samples.txt, samples.json.
 Ek okuma kayitli kosudan: diag/generate_readings.py.
+--mtp N (deneme/mtp dali; kullanici, 8 Ekim: "A'yı onaylıyorum, başlat"; belge 88c, 90c): ayni-logit MTP, ek parametresiz
+(modded-nanogpt kayit 53): kayip = ana CE + agirlikli k+1 sonraki hedeflerin CE'si, ayni logit'ten (recipe.output_loss_mtp).
+Hedefler hikaye sirasinda (data.mtp_targets, summaries_last'tan once, ayni perm).  Agirlik recipe.mtp_weights(adim, toplam,
+N): son 1 / (N + 1) payda (WSD inisi dahil) yalniz ana hedef.  Sinav / bpb / okuma yalniz ana bas (dokunulmaz); gunlukte
+loss = ana CE, loss_mtp / mtp_w ayri.  Yalniz model_z; carry ile DUR; kimlikte (farkliysa --resume DUR).
 
 Eski kosular (kullanici, 8 Ekim: "V2 içinde temizlik kastettim"; belge 77): Model Z kimliginde summaries_last 1 degilse
 (8 Ekim oncesi; formullu / temizlik oncesi dahil; summaries_last 0), learned_z 0 ya da kaldirilan bir ozellik (z_bow,
@@ -119,7 +124,7 @@ READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_ge
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
-            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse")
+            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -229,6 +234,18 @@ def _carry_error(args):
     return None
 
 
+def _mtp_error(args):
+    """--mtp kurulamiyorsa ileti, yoksa None (args'ta yoksa 0)."""
+    n = getattr(args, "mtp", 0) or 0
+    if n < 0:
+        return "--mtp %d: 0 ya da pozitif olmali" % n
+    if n and args.model != "model_z":
+        return "--mtp: yalniz model_z (deneme/mtp)"
+    if n and (getattr(args, "carry_group", 0) or getattr(args, "carry_summaries", 0)):
+        return "--mtp ile --carry_summaries / --carry_group birlikte kurulmadi (parca siniri hedef zinciri; belge 88c s1.3)"
+    return None
+
+
 def _build(args, dev):
     """-> (model, mask_fn, layout).  Model dosyalari yalniz burada import edilir.  Model Z: ogrenilen z (belge 35 (b));
     global_layers (args'ta yoksa 0): mask_fn (yerel, global) ikilisi.  Maske kurali yalniz burada secilir (egitim, sinav,
@@ -328,21 +345,27 @@ def _attn(batch, mask_fn, cuda):
     return R.block_mask(batch, mask_fn) if cuda else R.dense_mask(batch, mask_fn)
 
 
-def _step(model, batch, mask_fn, opt, cuda, timer=None, cont=None):
+def _step(model, batch, mask_fn, opt, cuda, timer=None, cont=None, mtp=None):
     """Tek egitim adimi -> (kayip, gradyan normu, ek ya da None) cihazda.  timer: iki CUDA olayi, cikis kalemi (yalniz
     ileri).  cont (carry, _cont_mask): devam parcasi hedeflerinin kaybi yalniz olcu (gradyansiz) -> ek {"loss_cont":
-    toplam, "n_cont": sayi}."""
+    toplam, "n_cont": sayi}.  mtp (--mtp): (ek hedefler (B, T, K), agirlik (K,)) -> geri yayilim MTP kaybindan, donen
+    kayip ana CE; ek {"mtp_ce": (K,), "mtp_steps": 1}."""
     with torch.autocast(batch.tokens.device.type, dtype=torch.bfloat16, enabled=cuda):
         h = model._batch_hidden(batch, _attn(batch, mask_fn, cuda))
         if timer is not None:
             timer[0].record()
-        loss = R.output_loss(h.flatten(0, 1), model.E.weight, batch.target.flatten())
         extra = None
+        if mtp is None:
+            loss = main = R.output_loss(h.flatten(0, 1), model.E.weight, batch.target.flatten())
+        else:
+            loss, main, ce = R.output_loss_mtp(h.flatten(0, 1), model.E.weight, batch.target.flatten(),
+                                               mtp[0].flatten(0, 1), mtp[1])
+            extra = dict(mtp_ce=ce.detach(), mtp_steps=1)
         if cont is not None:
             with torch.no_grad():
                 lc = torch.nn.functional.cross_entropy(model._logits(h[cont]).float(), batch.target[cont],
                                                        reduction="sum")
-            extra = dict(loss_cont=lc, n_cont=cont.sum())
+            extra = dict(extra or {}, loss_cont=lc, n_cont=cont.sum())
         if timer is not None:
             timer[1].record()
     opt.zero_grad(set_to_none=True)
@@ -350,7 +373,7 @@ def _step(model, batch, mask_fn, opt, cuda, timer=None, cont=None):
     seen = getattr(model, "ngram_seen", None)                          # seyrek bigram yapragi kirpmaya dahil
     gn = torch.nn.utils.clip_grad_norm_(model.parameters() if seen is None else [*model.parameters(), seen[1]], CLIP)
     opt.step()
-    return loss.detach(), gn.detach(), extra
+    return main.detach(), gn.detach(), extra
 
 
 def _to_device(batch, dev):
@@ -547,6 +570,9 @@ def _args(argv):
                     help="model_z: head basina attention cikis kapisi (belge 88a, 90a); 1 girdi n1(x), 2 girdi n1(x)'in "
                          "ilk d // 64 boyutu; auto (varsayilan): model_z ve d >= 64 ise 2, aksi 0; kimlikte; "
                          "--resume'da verilmezse kosunun kimliginden")
+    ap.add_argument("--mtp", type=int, default=0,
+                    help="model_z: ayni-logit MTP ek hedef sayisi N (deneme/mtp, belge 90c; resmi kod N 2); agirlik "
+                         "recipe.mtp_weights, son 1 / (N + 1) payda 0; 0 kapali (eski yol)")
     ap.add_argument("--fp8", default="none", choices=("none", "tensorwise", "rowwise"),
                     help="MLP (gate_up, down) torchao Float8Linear tarifi; none: bf16 (kimlige girmez, --resume'da "
                          "degistirilebilir; kullanici, 8 Ekim)")
@@ -620,7 +646,7 @@ def main(argv=None):
     if (args.ngram_layers or args.ngram_sparse) and (not args.ngram_embed or not 0 <= args.ngram_layers <= args.layers
                                                      or args.ngram_sparse not in (0, 1)):
         ng_err = "--ngram_layers / --ngram_sparse: --ngram_embed ile, 0 <= K <= layers, sparse 0 / 1"
-    for err in (_global_error(args), _carry_error(args), ng_err):        # veri yuklenmeden
+    for err in (_global_error(args), _carry_error(args), ng_err, _mtp_error(args)):   # veri yuklenmeden
         if err:
             sys.exit("DUR: " + err)
     if args.optimizer in ("muon", "normuon") and _muon_missing():      # sessizce AdamW'ye dusulmez
@@ -683,7 +709,8 @@ def main(argv=None):
                  optimizer=args.optimizer, global_layers=args.global_layers,
                  summaries_last=args.summaries_last, glob_kv_heads=args.glob_kv_heads, carry_summaries=args.carry_summaries,
                  carry_group=args.carry_group, vocab_rows=args.vocab_rows, attn_gate=args.attn_gate,
-                 ngram_embed=args.ngram_embed, ngram_layers=args.ngram_layers, ngram_sparse=args.ngram_sparse)
+                 ngram_embed=args.ngram_embed, ngram_layers=args.ngram_layers, ngram_sparse=args.ngram_sparse,
+                 mtp=args.mtp)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -703,7 +730,7 @@ def main(argv=None):
         if _archived(was):                                                # eski / kaldirilan yol (belge 77)
             sys.exit("DUR: " + _archived(was))
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
-               "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0,
+               "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0,
                **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
@@ -746,6 +773,10 @@ def main(argv=None):
     if args.carry_group:
         log("carry: grup %d, bellek %s, M_max %d (devam parcasi %d / %d)" % (
             args.carry_group, bool(args.carry_summaries), m_max, int((gpos > 0).sum()), train.n))
+    if args.mtp:
+        log("mtp %d: ayni-logit MTP, agirlik %s (adim 0), ek hedefler kapali: adim >= %d; inis basi %d" % (
+            args.mtp, R.mtp_weights(0, total, args.mtp), next(s for s in range(total + 1)
+                                                              if not any(R.mtp_weights(s, total, args.mtp))), down))
     if args.global_layers:
         log("global_layers %d: son %d blok tam causal (model_z_global_mask), gercek hikaye konumu" % (
             args.global_layers, args.global_layers))
@@ -772,9 +803,12 @@ def main(argv=None):
         if cuda:                                                         # epok sonu eksik batch: bos (dolgu) satirla tam
             rows += [[]] * (BATCH_ROWS - len(rows))                      # boy, derleme sekli sabit (CPU'da agirlik bit ayni
         b = D.build_batch(train, rows, layout, "cpu", row_len, carry)     # kalsin diye yok: dW toplama sirasi degisiyor)
+        mt = D.mtp_targets(b, args.mtp) if args.mtp else None            # hikaye sirasinda, permutasyondan once
         if last is not None:
-            b = last(b)[0]
-        return b, real, _cont_mask(b, gp_t, ns_t) if carry else None     # carry: devam maskesi
+            b, perm = last(b)
+            if mt is not None:
+                mt = mt.gather(1, perm[..., None].expand(-1, -1, args.mtp))
+        return b, real, _cont_mask(b, gp_t, ns_t) if carry else None, mt  # carry: devam maskesi
 
     def save(dir_, step):
         R.Checkpoint.save(dir_, model, opt, step, plan_meta, history, ident)
@@ -801,11 +835,16 @@ def main(argv=None):
         lr = R.wsd_lr(step, total, args.lr, decay=DECAY)
         for g in opt.param_groups:
             g["lr"] = lr * g.get("lr_mult", 1.0)                         # bigram tablosu grubu: lr_mult
-        batch, real, cont = nxt
+        batch, real, cont, mt = nxt
         timer = tuple(torch.cuda.Event(enable_timing=True) for _ in range(2)) if cuda else None
         if cont is not None and cuda:
             cont = cont.pin_memory().to(dev, non_blocking=True)
-        loss, gn, extra = _step(model, _to_device(batch, dev), mask_fn, opt, cuda, timer, cont)
+        w_mtp = R.mtp_weights(step, total, args.mtp) if args.mtp else None
+        mtp = None
+        if w_mtp and any(w_mtp):                                         # son evre: eski yol (saf NTP)
+            mtp = (mt, torch.tensor(w_mtp))
+            mtp = tuple(t.pin_memory().to(dev, non_blocking=True) for t in mtp) if cuda else mtp
+        loss, gn, extra = _step(model, _to_device(batch, dev), mask_fn, opt, cuda, timer, cont, mtp)
         nxt = cpu_batch(step + 1) if step + 1 < total else None          # GPU calisirken hazirlanir
         win["loss"] += loss
         win["gn"] += gn
@@ -831,12 +870,18 @@ def main(argv=None):
         if carry:
             n_c = int(win["extra"]["n_cont"])
             rec["loss_cont"] = round(float(win["extra"]["loss_cont"]) / n_c, 4) if n_c else None
+        if args.mtp:                                                     # ek hedef CE (k = 1..N), pencere ortalamasi
+            n_m = win["extra"].get("mtp_steps", 0)
+            rec["loss_mtp"] = [round(v / n_m, 4) for v in win["extra"]["mtp_ce"].tolist()] if n_m else None
+            rec["mtp_w"] = [round(v, 6) for v in w_mtp]
         history["log"].append(rec)
         log("adim %d / %d (epok %d)  lr %.3g  kayip %.4f  grad %.3f | pencere %d adim %.1f sn  %.1f ms/adim  %.0f tok/sn%s%s"
             % (done, total, epoch, lr, rec["loss"], rec["grad_norm"], k, s["seconds"], rec["ms_per_step"],
                s["tokens_per_sec"], "  tepe %.1f GB (ayrilan %.1f)  cikis ileri %.1f ms" % (
                    rec["peak_gb"], rec["peak_reserved_gb"], rec["out_fwd_ms"]) if cuda else "",
-               ("  | devam %s" % rec["loss_cont"] if carry else "") + ("  (ilk pencere: derleme dahil)" if first_window else "")))
+               ("  | devam %s" % rec["loss_cont"] if carry else "")
+               + ("  | mtp w %s ce %s" % (rec["mtp_w"], rec["loss_mtp"]) if args.mtp else "")
+               + ("  (ilk pencere: derleme dahil)" if first_window else "")))
         assert np.isfinite(rec["loss"]), "kayip sonlu degil; checkpoint yazilmadi"
         first_window, win = False, None
         if done == down:
