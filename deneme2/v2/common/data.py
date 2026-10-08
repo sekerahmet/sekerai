@@ -496,6 +496,7 @@ class PackedBatch:
     target: torch.Tensor          # hedef token ya da -100
     target_kind: torch.Tensor     # TargetKind (hedefsiz -1)
     story_ids: torch.Tensor       # (B, S_max) satirdaki hikaye kimlikleri, -1 dolgu
+    real_pos: torch.Tensor = None  # yalniz summaries_last duzeninde: gercek hikaye konumu (sutundan turetilemez)
 
 
 def build_batch(stories, row_stories_list, layout, device="cpu", row_len=ROW_LEN):

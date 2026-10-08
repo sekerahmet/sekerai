@@ -2,7 +2,7 @@
 (z, z_flat, direct, generate_longest, formullu onbellek) kaldirildi (belge 44); eski hali git etiketi
 v2-before-formula-cleanup-20261007.
 
-    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,bag,plan,mask]
+    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,bag,plan,mask,summaries_last]
 """
 import os
 import sys
@@ -267,6 +267,81 @@ def t_mask():
                for _ in range(40)]
     _range_masks(real_batch([list(range(i, i + 5)) for i in range(0, 40, 5)], 400, stories))
     _range_masks_drive()
+
+
+def _perm_dense(batch, perm, fn):
+    """Bugunku dense maske (recipe dolgu kuraliyla) permute edilmis: M[perm[i], perm[j]]."""
+    import recipe as R
+    B, T = batch.kind.shape
+    Md = R.dense_mask(batch, fn)
+    return Md.gather(1, perm[:, :, None].expand(B, T, T)).gather(2, perm[:, None, :].expand(B, T, T))
+
+
+def _last_ranges(batch, tag):
+    """summaries_last aralik maskesi (yerel, global) = bugunku maskenin permute dense'i, butun (q, kv)."""
+    import recipe as R
+    from sentence import _LAST_GLOB, model_z_global_mask, model_z_summaries_last_ranges, summaries_last
+    pb, perm = summaries_last(batch)
+    out = []
+    for old, new in ((model_z_read_mask, model_z_summaries_last_ranges), (model_z_global_mask, _LAST_GLOB)):
+        ref = _perm_dense(batch, perm, old)
+        got = R.dense_mask(pb, new)
+        out.append((int((got != ref).sum()), int(ref.sum())))
+    order = pb.kind.long()
+    grouped = bool(((order == TOKEN).long().diff(dim=1) <= 0).all())               # token'lar satir basinda
+    check("summaries_last %s: iki aralik (yerel, global) = bugunku maskenin permute dense'i; token'lar basta" % tag,
+          all(o[0] == 0 for o in out) and grouped, "fark / gorulen: %s" % out)
+
+
+def t_summaries_last():
+    """summaries_last (belge 66): (a) aralik maskesi = permute dense (sentetik dolgulu + Drive'da SS / FineWeb satirlari);
+    (b) ayni model ve batch: konum basina hidden, loss_per_target ve parametre gradyani duzenden bagimsiz (fp32 dense), plan
+    (mid, glob her yerde) dahil."""
+    import recipe as R
+    from sentence import summaries_last
+    rng = np.random.default_rng(6)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 15))] for _ in range(rng.integers(1, 7))]
+               for _ in range(24)]
+    rows = [list(range(i, i + 4)) for i in range(0, 24, 4)]
+    batch = real_batch(rows, 300, stories)
+    _last_ranges(batch, "sentetik")
+    G = "G:/Drive'ım"
+    if os.path.isdir(G + "/v2"):
+        for tag, root, ddir in (("SS valid", G + "/simplestories", G + "/v2/simplestories_gpt2"),
+                                ("FineWeb valid", G + "/v2/fineweb_edu_s000", G + "/v2/fineweb_edu_s000")):
+            ts = D.TokenStories(root, ddir, "valid")
+            lens = ts.lengths()
+            fit = np.nonzero(lens <= 2048)[0][:3000]
+            ro, rs = D.pack_plan(lens[fit], 2048, 0, 1)
+            _last_ranges(D.build_batch(ts, [fit[rs[ro[r]:ro[r + 1]]].tolist() for r in range(6)], "model_z", "cpu", 2048),
+                         tag)
+    else:
+        print("ATLANDI summaries_last gercek satirlar: Drive yok", flush=True)
+    pb, perm = summaries_last(batch)
+    B, T = batch.kind.shape
+    res = []
+    for kw in (dict(global_layers=0), dict(global_layers=1), dict(layer_plan="loc1,mid1,glob1"),
+               dict(layer_plan="glob1,loc1,glob1")):
+        torch.manual_seed(0)
+        m = SentenceTransformer(d=32, layers=3, heads=2, **kw)
+        h0 = m._batch_hidden(batch)
+        h1 = m._batch_hidden(pb).gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, 32))
+        dh = float((h0 - h1).abs().max())
+        nll0 = m.loss_per_target(batch, R.dense_mask(batch, m.mask_fn) if not isinstance(m.mask_fn, tuple) else
+                                 tuple(R.dense_mask(batch, f) for f in m.mask_fn))[0]
+        mf = m._masks(True)
+        attn1 = R.dense_mask(pb, mf) if not isinstance(mf, tuple) else tuple(R.dense_mask(pb, f) for f in mf)
+        nll1 = m.loss_per_target(pb, attn1)[0]
+        old = (torch.arange(B)[:, None] * T + perm)[pb.target >= 0]
+        dn = float((nll0 - nll1[torch.argsort(old)]).abs().max())
+        g0 = torch.autograd.grad(nll0.mean(), list(m.parameters()), allow_unused=True)
+        g1 = torch.autograd.grad(nll1.mean(), list(m.parameters()), allow_unused=True)
+        dg = max(float((a - b_).norm() / max(float(a.norm()), 1e-12)) for a, b_ in zip(g0, g1) if a is not None)
+        res.append((str(kw), dh, dn, dg))
+    check("summaries_last: ayni model / batch -- hidden (konum basina), loss_per_target (hedef sirasina geri) ve parametre "
+          "gradyani duzenden bagimsiz (fp32 dense; G0, G1, mid, glob her yerde)",
+          all(r[1] < 1e-5 and r[2] < 1e-5 and r[3] < 1e-5 for r in res),
+          "; ".join("%s h %.1e nll %.1e grad %.1e" % r for r in res))
 
 
 def t_learned():
@@ -819,7 +894,7 @@ def t_plan():
 
 
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
-             equiv=t_equiv, mask=t_mask, bag=t_bag, plan=t_plan)
+             equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, bag=t_bag, plan=t_plan)
 
 if __name__ == "__main__":
     if SIDE is not None:

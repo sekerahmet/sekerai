@@ -1366,6 +1366,22 @@ def _train_global(base, root, data, out, exits, TR):
                                                           for n_ in ("stop_full", "stop_cut"))))
               and early is not None,
               "%s / %s" % ([w["loss"] for w in ss["log"]], full_l[:4]))
+        L_ = base + ["--model", "model_z", "--layers", "2", "--epochs", "2"]   # --summaries_last (belge 66)
+        l0 = TR.main(L_ + ["--out", out("last_off")])
+        l1 = TR.main(L_ + ["--summaries_last", "1", "--out", out("last_on")])
+        stopped_l, l2 = _cut_and_resume(TR, L_ + ["--summaries_last", "1"], out("last_cut"))
+        sl = lambda n_: torch.load(os.path.join(out(n_), "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        d_loss = max(abs(a_["loss"] - b_["loss"]) for a_, b_ in zip(l0["log"], l1["log"]))
+        check("train --summaries_last 1: kayip egrisi bugunku duzenle esit (<= 1e-3, fp32 toplama sirasi), sinav kaybi "
+              "esit (<= 1e-3), acc ayni; kimlikte summaries_last; kesilip surdurulen = kesintisiz (bit); transformer ve "
+              "torba ile DURUR",
+              d_loss <= 1e-3 and abs(l0["exam"]["loss"] - l1["exam"]["loss"]) <= 1e-3
+              and abs(l0["exam"]["acc"] - l1["exam"]["acc"]) <= 1e-3 and l1["identity"]["summaries_last"] == 1
+              and stopped_l and all(torch.equal(sl("last_on")[k], sl("last_cut")[k]) for k in sl("last_on"))
+              and [w["loss"] for w in l2["log"]] == [w["loss"] for w in l1["log"]]
+              and exits(base + ["--model", "transformer", "--summaries_last", "1", "--out", out("last_tf")])
+              and exits(L_ + ["--summaries_last", "1", "--bag_k", "64", "--out", out("last_bag")]),
+              "kayip farki %.1e, sinav %.4f / %.4f" % (d_loss, l0["exam"]["loss"], l1["exam"]["loss"]))
         G = out("plan_glob_ends")                                          # glob her yerde (belge 60 B, 62)
         rg = TR.main(base + ["--model", "model_z", "--layer_plan", "glob1,loc1,glob1", "--steps", "3", "--out", G])
         lg_ = GR.load_run(G, data, torch.device("cpu"))[0]

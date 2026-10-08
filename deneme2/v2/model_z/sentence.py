@@ -20,8 +20,13 @@ ayni hikayenin butun onceki konumlari, kelime ve Z, gercek sirayla); konum GERCE
 transformer duzeninin pos'u; mantiksal konumda farkli cumlelerin token'lari ayni konumu paylasir, belge 40 Gorus 4).
 Ilk 8 - N blok bugunku gibi.  attn: (yerel, global) ikilisi; onbellek global bloklarda butun gecmisin K/V'sini tutar.
 
+summaries_last (belge 66; kullanici, 8 Ekim: "Fikrine onay verdim"): satir bellekte [token'lar | ozetler | dolgu], her grupta
+eski sira; model ayni (attention disi konum konum, RoPE pos'tan, maske iliskiden); maske sorgu basina iki aralik
+(model_z_summaries_last_ranges).  Batch real_pos tasiyorsa bu duzen.
 Torba (--bag_k; recipe.Bag): sinav recipe.bag_loss_per_target, uretimde SummaryCache torbayi ozette (BOS / Z_k) secer.
 """
+import dataclasses
+import functools
 import math
 import os
 import sys
@@ -129,6 +134,51 @@ def summary_index(batch, mult=MID_PAD):
     return rows, cols, k, idx, spos, smask
 
 
+def summaries_last(batch):
+    """PackedBatch (build_batch duzeni) -> (ayni batch [token'lar | ozetler | dolgu] sirasinda, perm (B, T): yeni sutundaki
+    eski sutun).  Konum basina butun alanlar (tokens, kind, pos, doc, sent, target, target_kind) birlikte tasinir; gercek
+    hikaye konumu once hesaplanip real_pos olarak eklenir (glob katmanlari)."""
+    kind = batch.kind
+    B, T = kind.shape
+    group = torch.where(kind == PAD, 2, torch.where((kind == BOS) | (kind == ZTOK), 1, 0))
+    perm = torch.argsort(group * T + torch.arange(T, device=kind.device), dim=1)
+    g = lambda t: t.gather(1, perm)  # noqa: E731
+    return dataclasses.replace(batch, tokens=g(batch.tokens), kind=g(kind), pos=g(batch.pos), doc=g(batch.doc),
+                               sent=g(batch.sent), target=g(batch.target), target_kind=g(batch.target_kind),
+                               real_pos=g(story_positions(kind))), perm
+
+
+def model_z_summaries_last_ranges(kind, doc, sent, glob=False):
+    """summaries_last duzeninde (kind, doc, sent permute) yerel (glob False) ya da global maske -> mask_mod: sorgu basina
+    iki aralik, token [a0, a1] ve ozet [b0, b1] (dolgu: kendi kosusu).  Token'lar (hikaye, cumle), ozetler (hikaye, cumle +
+    1) sirasinda (BOS 0, Z_k k + 1): sinirlar searchsorted ile.  Yerel: token kendi cumlesinin basindan kendisine, Z_k kendi
+    cumlesinin token'lari, BOS hic; global: hikayenin ilk token'indan.  Ozet: hikayenin BOS'undan, token'da Z_(k-1)'e, Z_k'da
+    kendisine.  Dolgu kuralini icerir (includes_padding)."""
+    B, T = kind.shape
+    big, large = T + 2, 1 << 40
+    tok, summ, pad = kind == TOKEN, (kind == BOS) | (kind == ZTOK), kind == PAD
+    col = torch.arange(T, device=kind.device).expand(B, T)
+    d, s = doc.long() * big, sent.long()
+    ktok = torch.where(tok, d + s, large)                                   # artan: token'lar, sonra buyuk
+    ksum = torch.where(summ, d + s + 1, torch.where(tok, -1, large))        # artan: -1, ozetler, buyuk
+    a0 = torch.searchsorted(ktok, d if glob else d + s)
+    a1 = torch.where(tok, col, torch.searchsorted(ktok, d + s, right=True) - 1)
+    b0 = torch.searchsorted(ksum, d)
+    b1 = torch.searchsorted(ksum, d + s + summ.long(), right=True) - 1
+    a0 = torch.where(pad, (~pad).sum(1, keepdim=True).expand(B, T), a0)
+    a1 = torch.where(pad, col, a1)
+    b0, b1 = torch.where(pad, 1, b0), torch.where(pad, 0, b1)
+    a0, a1, b0, b1 = (t.int() for t in (a0, a1, b0, b1))
+
+    def mask_mod(b, h, q, kv):
+        return ((kv >= a0[b, q]) & (kv <= a1[b, q])) | ((kv >= b0[b, q]) & (kv <= b1[b, q]))
+    return mask_mod
+
+
+_LAST_GLOB = functools.partial(model_z_summaries_last_ranges, glob=True)
+model_z_summaries_last_ranges.includes_padding = _LAST_GLOB.includes_padding = True
+
+
 def _dense(mask_mod, B, T, device):
     """mask_mod -> bool (B, T, T) (SDPA yolu; CPU egitimi ve testler)."""
     b = torch.arange(B, device=device)[:, None, None]
@@ -210,19 +260,30 @@ class SentenceTransformer(torch.nn.Module):
                 std = 0.02 / math.sqrt(2 * layers) if name.endswith(("proj.weight", "down.weight")) else 0.02
                 torch.nn.init.normal_(p, std=std)
 
+    def _masks(self, last=False):
+        """Maske fonksiyonlari: bugunku duzen (mask_fn) ya da summaries_last duzeninde ayni yapida (tek / ikili)."""
+        if not last:
+            return self.mask_fn
+        return (model_z_summaries_last_ranges, _LAST_GLOB) if isinstance(self.mask_fn, tuple) else \
+            model_z_summaries_last_ranges
+
     def _batch_hidden(self, batch, attn=None):
         """PackedBatch (belge 21: tokens, kind, pos, doc, sent) -> h; attn yoksa dense maske.  Z_k girdisi E(END), okuma
-        maskeden.  global_layers: attn (yerel, global) ikilisi; tek maske DURUR (sessiz yanlis yok)."""
+        maskeden.  global_layers: attn (yerel, global) ikilisi; tek maske DURUR (sessiz yanlis yok).  batch.real_pos varsa
+        summaries_last duzeni: maskeler _masks(True), glob konumu real_pos."""
         B, T = batch.tokens.shape
         dev = batch.tokens.device
+        last = getattr(batch, "real_pos", None) is not None
+        mfn = self._masks(last)
+        real_of = lambda: batch.real_pos if last else story_positions(batch.kind)  # noqa: E731
         x = self.E(torch.where(batch.kind == ZTOK, torch.full_like(batch.tokens, END_ID), batch.tokens))
         if self.plan:                                                    # glob'suz planda tek maske
             if attn is None:
-                fns = self.mask_fn if isinstance(self.mask_fn, tuple) else (self.mask_fn,)
+                fns = mfn if isinstance(mfn, tuple) else (mfn,)
                 attn = tuple(_dense(f(batch.kind, batch.doc, batch.sent), B, T, dev) for f in fns)
             loc, glob = (tuple(attn) + (None,))[:2] if isinstance(attn, tuple) else (attn, None)
             assert (glob is None) == (not self.global_layers), "layer_plan: maske sayisi glob katmanlariyla uyusmuyor"
-            real, summ = story_positions(batch.kind), summary_index(batch) if "mid" in self.plan else None
+            real, summ = real_of(), summary_index(batch) if "mid" in self.plan else None
             for kind, block in zip(self.plan, self.blocks):
                 if kind == "loc":
                     x = block(x, batch.pos, loc)
@@ -235,15 +296,15 @@ class SentenceTransformer(torch.nn.Module):
             return self.norm(x)
         if not self.global_layers:
             if attn is None:
-                attn = _dense(self.mask_fn(batch.kind, batch.doc, batch.sent), B, T, dev)
+                attn = _dense(mfn(batch.kind, batch.doc, batch.sent), B, T, dev)
             assert not isinstance(attn, tuple), "global_layers 0: tek maske"
             for block in self.blocks:
                 x = block(x, batch.pos, attn)
             return self.norm(x)
         if attn is None:
-            attn = tuple(_dense(f(batch.kind, batch.doc, batch.sent), B, T, dev) for f in self.mask_fn)
+            attn = tuple(_dense(f(batch.kind, batch.doc, batch.sent), B, T, dev) for f in mfn)
         assert isinstance(attn, tuple) and len(attn) == 2, "global_layers: attn (yerel, global) ikilisi olmali"
-        real, first = story_positions(batch.kind), len(self.blocks) - self.global_layers
+        real, first = real_of(), len(self.blocks) - self.global_layers
         for l, block in enumerate(self.blocks):
             x = block(x, real, attn[1]) if l >= first else block(x, batch.pos, attn[0])
         return self.norm(x)

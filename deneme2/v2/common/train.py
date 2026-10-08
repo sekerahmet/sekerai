@@ -12,6 +12,9 @@ eski tarif (olculen lr 5e-4).  --optimizer normuon (kullanici, 8 Ekim: "Ben nurm
 recipe.NorMuon (li2025_normuon Algorithm 1), ayni --lr (guncelleme RMS'i 0,2 lr); lr olculmedi.
 Veri: BATCH_ROWS satir x row_len (plan dosyasindan); epok 1 <data>/train_pack_plan_e1.npz, sonrakiler pack_plan(seed,
 epok).  --local: ham akisin yerel kopyasi (yalniz onbellek; sha256 = <split>_boundaries.json'daki).
+--summaries_last 1 (belge 66; kullanici, 8 Ekim: "Fikrine onay verdim"): batch'ler sentence.summaries_last ile [token'lar |
+ozetler | dolgu] sirasinda (egitim ve sinav; sinav sonucu hedef sirasina geri), maske sorgu basina iki aralik; uretim
+degismez.  Torba ile DUR.
 --stop_step N (kullanici, 8 Ekim): takvim degismeden adim N'de durur; checkpoint.pt + agent.pt + results.json (finished
 False, stopped_at, readings_skipped "stop_step"), son sinav ve okuma yok; --resume 1 kaldigi yerden.
 Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunluk sinirinda, epok sonunda ve bitiste;
@@ -77,7 +80,7 @@ READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_ge
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "learned_z", "optimizer", "global_layers", "layer_plan", "bag_k", "bag_core", "bag_weight", "bag_full_frac", "bag_core_sha256",
-            "bag_sel_frac")
+            "bag_sel_frac", "summaries_last")
 NO_BAG = dict(bag_k=0, bag_core=0, bag_weight=0.0, bag_full_frac=0.0, bag_core_sha256=None, bag_sel_frac=1.0)   # torbasiz / eski kosu
 LEGACY = ("meaning_sha256", "shared_vocab", "own_vocab", "open_z")   # temizlik oncesi kimlik alanlari (belge 33)
 TAG = "v2-before-cleanup-20261006"
@@ -167,7 +170,9 @@ def _global_error(args):
 
 
 def _bag_error(args):
-    """Torba bayraklari kurulamiyorsa ileti, yoksa None (args'ta yoksa kapali)."""
+    """Torba ve summaries_last bayraklari kurulamiyorsa ileti, yoksa None (args'ta yoksa kapali)."""
+    if getattr(args, "summaries_last", 0) and (args.model != "model_z" or getattr(args, "bag_k", 0)):
+        return "--summaries_last yalniz model_z, torbasiz (belge 66)"
     if not getattr(args, "bag_k", 0):
         return None
     if not 0.0 <= args.bag_full_frac <= 1.0:
@@ -267,11 +272,12 @@ def _step(model, batch, mask_fn, opt, cuda, full=None, weight=0.0, timer=None, p
 
 
 def _to_device(batch, dev):
-    """CPU PackedBatch -> cihaz; CUDA'da sabitlenmis bellekten non_blocking (sonraki batch GPU calisirken hazirlanir)."""
+    """CPU PackedBatch -> cihaz; CUDA'da sabitlenmis bellekten non_blocking (sonraki batch GPU calisirken hazirlanir).
+    Bos alan (real_pos None) None kalir."""
     if dev.type != "cuda":
         return batch
-    return D.PackedBatch(**{f.name: getattr(batch, f.name).pin_memory().to(dev, non_blocking=True)
-                            for f in dataclasses.fields(batch)})
+    mv = lambda t: None if t is None else t.pin_memory().to(dev, non_blocking=True)  # noqa: E731
+    return D.PackedBatch(**{f.name: mv(getattr(batch, f.name)) for f in dataclasses.fields(batch)})
 
 
 def _to_device_bag(full, plan, dev):
@@ -286,17 +292,25 @@ def _to_device_bag(full, plan, dev):
 class _Exam:
     """exam_scores icin model: loss_per_target egitimle ayni maske yolundan (CUDA'da block_mask; belge 24 s5 I)."""
 
-    def __init__(self, model, mask_fn, cuda):
-        self.model, self.mask_fn, self.cuda = model, mask_fn, cuda
+    def __init__(self, model, mask_fn, cuda, last=None):
+        self.model, self.mask_fn, self.cuda, self.last = model, mask_fn, cuda, last
 
     def loss_per_target(self, batch):
-        return self.model.loss_per_target(batch, _attn(batch, self.mask_fn, self.cuda))
+        """last (sentence.summaries_last): batch o duzende islenir, sonuclar build_batch duzeninin hedef sirasina geri."""
+        if self.last is None:
+            return self.model.loss_per_target(batch, _attn(batch, self.mask_fn, self.cuda))
+        pb, perm = self.last(batch)
+        nll, pred, tk = self.model.loss_per_target(pb, _attn(pb, self.mask_fn, self.cuda))
+        T = perm.shape[1]
+        old = (torch.arange(len(perm), device=perm.device)[:, None] * T + perm)[pb.target >= 0]
+        order = torch.argsort(old)
+        return nll[order], pred[order], tk[order]
 
 
-def _exam(model, mask_fn, valid, plan, story_bytes, layout, dev, cuda):
+def _exam(model, mask_fn, valid, plan, story_bytes, layout, dev, cuda, last=None):
     t = time.time()
     with torch.autocast(dev.type, dtype=torch.bfloat16, enabled=cuda):
-        out = M.exam_scores(_Exam(model, mask_fn, cuda), valid, plan, story_bytes, layout, dev, BATCH_ROWS)
+        out = M.exam_scores(_Exam(model, mask_fn, cuda, last), valid, plan, story_bytes, layout, dev, BATCH_ROWS)
     return dict(out, seconds=round(time.time() - t, 2))
 
 
@@ -373,6 +387,8 @@ def _args(argv):
                     help="gecerli hedeflerin bu payinda tam softmax CE de eklenir (belge 54 s2.3 yol a)")
     ap.add_argument("--bag_sel_frac", type=float, default=1.0,
                     help="secici kaybi torbalarin bu payinda (rastgele, adim tohumlu); secim her torbada (kullanici, 7 Ekim)")
+    ap.add_argument("--summaries_last", type=int, default=0,
+                    help="model_z: satir bellekte [token'lar | ozetler | dolgu] (belge 66); model ayni, maske iki aralik")
     ap.add_argument("--stop_step", type=int, default=None,
                     help="takvim (WSD, epok plani) degismeden adim N'de dur: checkpoint.pt (surdurulebilir) + agent.pt + "
                          "results.json (finished False, stopped_at N); son sinav ve okuma yok (kullanici, 8 Ekim)")
@@ -442,6 +458,10 @@ def main(argv=None):
                    bag_sel_frac=args.bag_sel_frac,
                    bag_core_sha256=hashlib.sha256(core.tobytes()).hexdigest())
     model, mask_fn, layout = _build(args, dev)
+    last = None
+    if args.summaries_last:                                              # belge 66: [token'lar | ozetler | dolgu]
+        from sentence import summaries_last as last
+        mask_fn = model._masks(True)
     if args.bag_k:
         model.bag.fill(core, counts)
     if cuda:
@@ -451,7 +471,8 @@ def main(argv=None):
     ident = dict(model=args.model, d=args.d, layers=args.layers, heads=args.heads, lr=args.lr, seed=args.seed,
                  longest=train.max_sentence_tokens, row_len=row_len, batch_rows=BATCH_ROWS,
                  train_stream_sha256=train.meta["stream_sha256"], learned_z=int(args.model == "model_z"),
-                 optimizer=args.optimizer, global_layers=args.global_layers, layer_plan=args.layer_plan, **bag)   # learned_z: eski kosu ayrimi
+                 optimizer=args.optimizer, global_layers=args.global_layers, layer_plan=args.layer_plan,
+                 summaries_last=args.summaries_last, **bag)   # learned_z: eski kosu ayrimi
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -472,7 +493,7 @@ def main(argv=None):
             sys.exit("DUR: temizlik oncesi kosu surdurulmez / uzatilmaz (kullanici, 6 Ekim); eski kod: git etiketi %s" % TAG)
         if _archived(was):                                                # formullu Model Z (belge 44)
             sys.exit("DUR: " + _archived(was))
-        was = {"learned_z": 0, "optimizer": "adamw", "global_layers": 0, "layer_plan": None, **NO_BAG, **was}   # alanlardan onceki kosu
+        was = {"learned_z": 0, "optimizer": "adamw", "global_layers": 0, "layer_plan": None, "summaries_last": 0, **NO_BAG, **was}   # alanlardan onceki kosu
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:
@@ -540,6 +561,8 @@ def main(argv=None):
     def cpu_batch(step):
         rows, real = rows_of(step)
         b = D.build_batch(train, rows, layout, "cpu", row_len)
+        if last is not None:
+            b = last(b)[0]
         if not args.bag_k:
             return b, real, None, None
         rng = np.random.default_rng(np.random.SeedSequence(args.seed, spawn_key=(step,)))   # adim tohumlu: surdurmede ayni
@@ -618,7 +641,7 @@ def main(argv=None):
         if epoch_end or done == total:
             history["epochs"].append(dict(epoch=epoch, step=done, wall_seconds=round(time.time() - epoch_t0, 1),
                                           resumed=bool(epoch_from > bounds[epoch - 1])))
-            ex = _exam(model, mask_fn, valid, exam_plan, story_bytes, layout, dev, cuda)
+            ex = _exam(model, mask_fn, valid, exam_plan, story_bytes, layout, dev, cuda, last)
             history["exams"].append(dict(ex, step=done, epoch=epoch, full_epoch=bool(epoch_end)))
             log("SINAV adim %d: kayip %.4f  acc %.4f  acc_token %.4f  bpb %.4f  end_ok %.4f  eos_ok %.4f (%.1f sn)" % (
                 done, ex["loss"], ex["acc"], ex["acc_token"], ex["bits_per_byte"], ex["end_ok"], ex["eos_ok"],
@@ -637,7 +660,7 @@ def main(argv=None):
             end, total))
         return results
     if not history["exams"] or history["exams"][-1]["step"] != total:   # bitis checkpoint'i var, sinavi yok
-        ex = _exam(model, mask_fn, valid, exam_plan, story_bytes, layout, dev, cuda)
+        ex = _exam(model, mask_fn, valid, exam_plan, story_bytes, layout, dev, cuda, last)
         history["exams"].append(dict(ex, step=total, epoch=len(per_epoch), full_epoch=bool(total == bounds[-1])))
     speed = [w for w in history["log"] if not w["first"]]
     med = lambda key: float(np.median([w[key] for w in speed])) if speed else None  # noqa: E731
