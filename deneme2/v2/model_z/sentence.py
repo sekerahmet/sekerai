@@ -338,11 +338,15 @@ class SentenceTransformer(torch.nn.Module):
         (SummaryCache.prefill, belge 46), uretim token token.  open_last (belge 48): son istem cumlesi kapanmaz, ilk
         uretilen cumle onun devami (yalniz devam token'lari; max_tokens onlara).  on_token(w): her uretilen
         token'dan sonra, on_token(None): cumle kapaninca (akan yazim; cikti degismez).  stop_when(gen): her
-        kapanan cumleden sonra, True ise o istemin uretimi biter (cikti = tam uretimin oneki)."""
+        kapanan cumleden sonra, True ise o istemin uretimi biter (cikti = tam uretimin oneki).  Onbellek StaticCache (belge
+        84; STATIC_DECODE, carry'siz model), yoksa SummaryCache; fp32'de token token ayni."""
         out = []
+        static = STATIC_DECODE and StaticCache.supports(self)
         for sents in prompts:
-            cache = SummaryCache(self)
             opened = bool(open_last and sents)
+            n_open = len(sents[-1]) if opened else 0
+            cache = StaticCache(self, n_open + max_sentences * (max_tokens + 1) + 1, max_sentences + 1,
+                                n_open + max_tokens + 1) if static else SummaryCache(self)
             logits = cache.prefill(sents[:-1] if opened else sents)
             for t in (sents[-1] if opened else ()):
                 logits = cache.append_token(t)
@@ -503,3 +507,160 @@ class SummaryCache:
                     self.gkind, self.used = [ZTOK] * int(keep.sum()), 0
         return self.logits
 
+
+STATIC_DECODE = True       # generate: StaticCache (destekleyen modelde); False: SummaryCache (eski yol, kiyas icin)
+_COMPILED = {}             # derlenmis adim (surec basina bir kez; derleme hata verirse derlemesiz graph)
+
+
+def decode_sdpa(q, k, v, mask, f32_scores=False):
+    """Tek sorgu attention (Tq 1; belge 76 R1, belge 84): q (B, H, 1, hd), k / v (B, Hkv, S, hd), mask (B, S) bool (True =
+    gorulur) -> (B, H, 1, hd).  Grup katlama (head h -> kv h // G, enable_gqa eslemesi), skor fp32 (f32_scores: bf16'da
+    bmm out_dtype), maske, fp32 softmax, @ V.  Maskeli SDPA decode'da split-KV'siz efficient'a dusuyordu (belge 74 s7)."""
+    B, H, _, hd = q.shape
+    Hkv, S = k.shape[1], k.shape[2]
+    qf = (q * hd ** -0.5).reshape(B * Hkv, H // Hkv, hd)
+    kt = k.reshape(B * Hkv, S, hd).transpose(1, 2)
+    s = torch.bmm(qf, kt, out_dtype=torch.float32) if f32_scores else torch.bmm(qf, kt).float()
+    p = torch.softmax(s.view(B, Hkv, -1, S).masked_fill(~mask[:, None, None], float("-inf")), -1).to(v.dtype)
+    return torch.matmul(p, v).reshape(B, H, 1, hd)
+
+
+def _bmm_f32(t):
+    """bf16 / fp16 skorunu fp32 cikaran bmm (out_dtype) bu surumde / cihazda var mi (bir kez denenir)."""
+    if "bmm_f32" not in _COMPILED:
+        try:
+            a = t.new_zeros(1, 1, 8)
+            torch.bmm(a, a.transpose(1, 2), out_dtype=torch.float32)
+            _COMPILED["bmm_f32"] = True
+        except (RuntimeError, TypeError):
+            _COMPILED["bmm_f32"] = False
+    return _COMPILED["bmm_f32"]
+
+
+def _static_step(m, glob, f32, smax, w, z, sum_len, sen_len, tt, K, V, out):
+    """StaticCache'in tek adimi (yerinde; Python dallanmasi yok -> torch.compile / CUDA graph).  z: Z_k adimi (girdi E(END),
+    ozete yazilir, cumleyi okur), degilse token w (cumleye yazilir).  Konum: token ozet + cumle sayaci, Z ozet sayaci (=
+    SummaryCache'in n_z + i / n_z'si), glob gercek konum tt."""
+    x = m.E(torch.where(z, torch.full_like(w, END_ID), w))[:, None]
+    pos = torch.where(z, sum_len, sum_len + sen_len)[:, None]
+    slot = torch.where(z, sum_len, smax + sen_len)
+    ar = torch.arange(len(w), device=w.device)
+    loc = None
+    for l, block in enumerate(m.blocks):
+        g = glob[l]
+        j = torch.arange(K[l].shape[2], device=w.device)[None]
+        if g:
+            mask = j <= tt[:, None]
+        else:
+            if loc is None:                                              # ozet [0, sum_len (+ Z)), cumle [smax, ..]
+                loc = (j < (sum_len + z.long())[:, None]) | ((j >= smax) & (j < (smax + sen_len + (~z).long())[:, None]))
+            mask = loc
+        q, k, v = block._qkv(x, tt[:, None] if g else pos)
+        at = tt if g else slot
+        K[l][ar, :, at] = k[:, :, 0]
+        V[l][ar, :, at] = v[:, :, 0]
+        x = block._finish(x, decode_sdpa(q, K[l], V[l], mask, f32))
+    out.copy_(m._logits(m.norm(x[:, 0])))
+    sen_len.copy_(torch.where(z, torch.zeros_like(sen_len), sen_len + 1))
+    sum_len.add_(z.long())
+    tt.add_(1)
+
+
+class StaticCache:
+    """SummaryCache'in sabit tamponlu esi (belge 84): ayni arayuz (prefill, append_token, close_sentence -> sonraki
+    token'in logit'i) ve ayni matematik.  Istem SummaryCache.prefill ile islenir, K/V onceden ayrilmis tamponlara alinir
+    (yerel [ozet | cumle], glob gercek konumla); adim _static_step.  CUDA'da ilk adimda derlenir (torch.compile, surec
+    basina bir kez) ve CUDA graph'a yakalanir: adim basina tek replay.  positions / sentences / sentence_tokens: istemden
+    sonra en cok eklenecek konum, Z ve cumle token'i (asilirsa DURUR).  carry (parca siniri): supports False, SummaryCache."""
+    BUCKET = 1024                                                        # tampon boyu bu katina (derleme sekil sayisi az)
+
+    @staticmethod
+    def supports(model):
+        return not model.carry_group
+
+    def __init__(self, model, positions, sentences, sentence_tokens):
+        assert StaticCache.supports(model), "StaticCache: carry desteklenmez (SummaryCache)"
+        self.m, self.dev = model, model.E.weight.device
+        self.budget = (positions, sentences, sentence_tokens)
+        self.run = None
+
+    @torch.no_grad()
+    def prefill(self, sents):
+        """Istem SummaryCache.prefill ile -> sonraki token'in logit'i; K/V ve sayaclar sabit tamponlara."""
+        c = SummaryCache(self.m)
+        self.logits = c.prefill(sents)
+        L, up = len(self.m.blocks), lambda n: -(-n // self.BUCKET) * self.BUCKET  # noqa: E731
+        self.glob = c.glob
+        loc = [l for l in range(L) if not self.glob[l]]
+        nsum, T = (c.sum_k[loc[0]].shape[2] if loc else 0), c.t + 1
+        self.smax = up(nsum + self.budget[1] + 1)
+        self.limits = (self.smax, self.budget[2], up(T + self.budget[0]))  # ozet, cumle, glob konum sinirlari
+        self.n = [nsum, 0, T]                                            # host sayaclari (sinir denetimi)
+        self.K, self.V = [], []
+        for l in range(L):
+            sk, sv = (c.all_k[l], c.all_v[l]) if self.glob[l] else (c.sum_k[l], c.sum_v[l])
+            k = sk.new_zeros(1, sk.shape[1], self.limits[2] if self.glob[l] else self.smax + self.budget[2], sk.shape[3])
+            v = torch.zeros_like(k)
+            k[:, :, :sk.shape[2]], v[:, :, :sv.shape[2]] = sk, sv
+            self.K.append(k)
+            self.V.append(v)
+        one = lambda v_: torch.tensor([v_], device=self.dev)  # noqa: E731
+        self.state = (one(nsum), one(0), one(T))                         # sum_len, sen_len, tt
+        self.w, self.z = one(0), torch.zeros(1, dtype=torch.bool, device=self.dev)
+        self.out = self.logits.new_zeros(1, self.logits.shape[-1])
+        self.f32 = self.out.dtype != torch.float32 and _bmm_f32(self.out)
+        return self.logits
+
+    def _step(self):
+        _COMPILED.get("step", _static_step)(self.m, self.glob, self.f32, self.smax, self.w, self.z, *self.state, self.K,
+                                            self.V, self.out)
+
+    def _capture(self):
+        """Ilk adimda (CUDA): derleme + CUDA graph.  Isinma adimlarinin sayac ilerlemesi geri alinir; tamponlara
+        yazdiklari ya gecerli yuvalarin otesinde (maskeli) ya da replay'de ayni yuvaya yeniden yazilir."""
+        if self.dev.type != "cuda":
+            return self._step
+        if "step" not in _COMPILED:
+            _COMPILED["step"] = torch.compile(_static_step, dynamic=False)
+        saved = [t.clone() for t in self.state]
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(2):
+                try:
+                    self._step()
+                except Exception as e:  # noqa: BLE001
+                    if _COMPILED["step"] is _static_step:
+                        raise
+                    print("StaticCache: torch.compile olmadi, derlemesiz graph: %s" % str(e).splitlines()[0][:150])
+                    _COMPILED["step"] = _static_step
+                    self._step()
+                for t, v in zip(self.state, saved):
+                    t.copy_(v)
+        torch.cuda.current_stream().wait_stream(s)
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self._step()
+        return self.graph.replay
+
+    def _advance(self, w, z):
+        self.n = [self.n[0] + z, 0 if z else self.n[1] + 1, self.n[2] + 1]
+        assert all(a <= b for a, b in zip(self.n, self.limits)), \
+            "StaticCache: tampon asildi %s > %s (positions / sentences / sentence_tokens)" % (self.n, self.limits)
+        self.w.fill_(w)
+        self.z.fill_(z)
+        if self.run is None:
+            self.run = self._capture()
+        self.run()
+        self.logits = self.out[0]
+        return self.logits
+
+    @torch.no_grad()
+    def append_token(self, token):
+        """Simdiki cumleye token -> sonraki token'in logit'i."""
+        return self._advance(int(token), False)
+
+    @torch.no_grad()
+    def close_sentence(self):
+        """Cumle bitti: Z_k ozete -> sonraki cumlenin ilk token'i (ya da EOS) logit'i."""
+        return self._advance(END_ID, True)

@@ -165,17 +165,25 @@ class BaselineTransformer(torch.nn.Module):
         cumle basinda EOS hikayeyi bitirir, cumle icinde END ya da EOS cumleyi bitirir, max_tokens'ta kesilen cumle de
         kapanir (girdiye END).  open_last (belge 48): son istem cumlesine END eklenmez, ilk uretilen cumle onun devami.
         on_token(w): her uretilen token'dan sonra, on_token(None): cumle kapaninca (akan yazim; cikti degismez).  stop_when(gen): her
-        kapanan cumleden sonra, True ise o istemin uretimi biter (cikti = tam uretimin oneki)."""
+        kapanan cumleden sonra, True ise o istemin uretimi biter (cikti = tam uretimin oneki).  Onbellek StaticCache (belge
+        84; STATIC_DECODE), yoksa _step + dict onbellek; fp32'de token token ayni."""
         dev = self.E.weight.device
         out = []
         for sents in prompts:
             opened = bool(open_last and sents)
             seq = [EOS_ID] + [t for s in sents for t in list(s) + [END_ID]]
             seq = seq[:-1] if opened else seq
-            cache = dict(k=[None] * len(self.blocks), v=[None] * len(self.blocks),
-                         T=len(seq) + max_sentences * (max_tokens + 1))
-            logits = self._logits(self._step(torch.tensor([seq], device=dev), cache, 0))[0]
-            n = len(seq)
+            if STATIC_DECODE:
+                sc = StaticCache(self, max_sentences * (max_tokens + 1) + 1)
+                logits, step = sc.prefill(seq), sc.append
+            else:
+                cache = dict(k=[None] * len(self.blocks), v=[None] * len(self.blocks),
+                             T=len(seq) + max_sentences * (max_tokens + 1))
+                logits, n = self._logits(self._step(torch.tensor([seq], device=dev), cache, 0))[0], [len(seq)]
+
+                def step(w, cache=cache, n=n):
+                    n[0] += 1
+                    return self._logits(self._step(torch.tensor([[w]], device=dev), cache, n[0] - 1))[0]
             gen, ended, eos = [], [], False
             while len(gen) < max_sentences:
                 cur, done = [], False
@@ -192,8 +200,7 @@ class BaselineTransformer(torch.nn.Module):
                     cur.append(w)
                     if on_token is not None:
                         on_token(w)
-                    logits = self._logits(self._step(torch.tensor([[w]], device=dev), cache, n))[0]
-                    n += 1
+                    logits = step(w)
                 if eos:
                     break
                 gen.append(cur)
@@ -203,7 +210,112 @@ class BaselineTransformer(torch.nn.Module):
                 if stop_when is not None and stop_when(gen):
                     break
                 opened = False
-                logits = self._logits(self._step(torch.tensor([[END_ID]], device=dev), cache, n))[0]
-                n += 1
+                logits = step(END_ID)
             out.append((gen, ended, eos))
         return out
+
+
+STATIC_DECODE = True       # generate: StaticCache; False: _step + dict onbellek (eski yol, kiyas icin)
+_COMPILED = {}             # derlenmis adim (surec basina bir kez; derleme hata verirse derlemesiz graph)
+
+
+def decode_sdpa(q, k, v, mask, f32_scores=False):
+    """Model Z sentence.decode_sdpa ile ayni (kopya; belge 84): Tq 1, grup katlama, skor fp32, maske (B, S), @ V."""
+    B, H, _, hd = q.shape
+    Hkv, S = k.shape[1], k.shape[2]
+    qf = (q * hd ** -0.5).reshape(B * Hkv, H // Hkv, hd)
+    kt = k.reshape(B * Hkv, S, hd).transpose(1, 2)
+    s = torch.bmm(qf, kt, out_dtype=torch.float32) if f32_scores else torch.bmm(qf, kt).float()
+    p = torch.softmax(s.view(B, Hkv, -1, S).masked_fill(~mask[:, None, None], float("-inf")), -1).to(v.dtype)
+    return torch.matmul(p, v).reshape(B, H, 1, hd)
+
+
+def _bmm_f32(t):
+    """bf16 / fp16 skorunu fp32 cikaran bmm (out_dtype) var mi (bir kez denenir)."""
+    if "bmm_f32" not in _COMPILED:
+        try:
+            a = t.new_zeros(1, 1, 8)
+            torch.bmm(a, a.transpose(1, 2), out_dtype=torch.float32)
+            _COMPILED["bmm_f32"] = True
+        except (RuntimeError, TypeError):
+            _COMPILED["bmm_f32"] = False
+    return _COMPILED["bmm_f32"]
+
+
+def _static_step(m, f32, w, n, K, V, out):
+    """StaticCache'in tek adimi (yerinde, dallanmasiz): token w konum n'de, onbellek [0, n] -> out logit, n += 1."""
+    x = m.E(w)[:, None]
+    ar = torch.arange(len(w), device=w.device)
+    mask = torch.arange(K[0].shape[2], device=w.device)[None] <= n[:, None]
+    for l, block in enumerate(m.blocks):
+        q, k, v = block._qkv(x, n[:, None])
+        K[l][ar, :, n] = k[:, :, 0]
+        V[l][ar, :, n] = v[:, :, 0]
+        x = block._finish(x, decode_sdpa(q, K[l], V[l], mask, f32))
+    out.copy_(m._logits(m.norm(x[:, 0])))
+    n.add_(1)
+
+
+class StaticCache:
+    """Sabit tamponlu KV onbellegi (belge 84; Model Z sentence.StaticCache'in transformer esi): istem _step ile tek
+    geciste (tampona dogrudan), sonra adim basina _static_step; CUDA'da ilk adimda derlenip CUDA graph'a yakalanir.
+    positions: istemden sonra en cok eklenecek konum (asilirsa DURUR)."""
+    BUCKET = 1024
+
+    def __init__(self, model, positions):
+        self.m, self.dev, self.positions, self.run = model, model.E.weight.device, positions, None
+
+    @torch.no_grad()
+    def prefill(self, seq):
+        """seq (token listesi, BOS dahil) -> son konumun logit'i."""
+        T = len(seq)
+        self.limit = -(-(T + self.positions) // self.BUCKET) * self.BUCKET
+        cache = dict(k=[None] * len(self.m.blocks), v=[None] * len(self.m.blocks), T=self.limit)
+        hn = self.m._step(torch.tensor([seq], device=self.dev), cache, 0)
+        self.K, self.V, self.t = cache["k"], cache["v"], T
+        self.logits = self.m._logits(hn)[0]
+        self.n, self.w = torch.tensor([T], device=self.dev), torch.zeros(1, dtype=torch.long, device=self.dev)
+        self.out = self.logits.new_zeros(1, self.logits.shape[-1])
+        self.f32 = self.out.dtype != torch.float32 and _bmm_f32(self.out)
+        return self.logits
+
+    def _step(self):
+        _COMPILED.get("step", _static_step)(self.m, self.f32, self.w, self.n, self.K, self.V, self.out)
+
+    def _capture(self):
+        """sentence.StaticCache._capture ile ayni: derleme (bir kez; hata -> derlemesiz) + CUDA graph."""
+        if self.dev.type != "cuda":
+            return self._step
+        if "step" not in _COMPILED:
+            _COMPILED["step"] = torch.compile(_static_step, dynamic=False)
+        saved = self.n.clone()
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(2):
+                try:
+                    self._step()
+                except Exception as e:  # noqa: BLE001
+                    if _COMPILED["step"] is _static_step:
+                        raise
+                    print("StaticCache: torch.compile olmadi, derlemesiz graph: %s" % str(e).splitlines()[0][:150])
+                    _COMPILED["step"] = _static_step
+                    self._step()
+                self.n.copy_(saved)
+        torch.cuda.current_stream().wait_stream(s)
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self._step()
+        return self.graph.replay
+
+    @torch.no_grad()
+    def append(self, token):
+        """Token (cumle token'i ya da END) -> sonraki token'in logit'i."""
+        self.t += 1
+        assert self.t <= self.limit, "StaticCache: tampon asildi (%d > %d)" % (self.t, self.limit)
+        self.w.fill_(int(token))
+        if self.run is None:
+            self.run = self._capture()
+        self.run()
+        self.logits = self.out[0]
+        return self.logits

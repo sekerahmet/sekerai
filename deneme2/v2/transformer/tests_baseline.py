@@ -188,9 +188,11 @@ def t_generate():
         out = torch.full((D.VOCAB,), -1e9)
         out[script[len(fed) - 1]] = 0
         return out[None]                                                  # _logits asagida birim: (1, V) logit
-    model._step, model._logits = scripted, lambda h: h
+    import baseline                                                       # kural sinamasi _step'i sarar: eski yol
+    model._step, model._logits, baseline.STATIC_DECODE = scripted, lambda h: h, False
     got = model.generate([STORIES[0][:1]], max_sentences=5, max_tokens=2)
     del model._step, model._logits
+    baseline.STATIC_DECODE = True
     want_fed = [[D.EOS_ID] + STORIES[0][0] + [D.END_ID], [5], [D.END_ID], [6], [7], [D.END_ID]]
     check("generate kurali: cumle ici EOS cumleyi bitirir, max_tokens'ta kesilen kapanir (girdiye END), basta EOS biter",
           got == [([[5], [6, 7]], [True, False], True)] and fed == want_fed, "%s" % (got,))

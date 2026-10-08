@@ -734,6 +734,28 @@ def t_prefill():
         s_old = _generate_stepwise(m, prompts, 4, 12, torch.Generator().manual_seed(11))
         ok_gen &= g_new == g_old and s_new == s_old
         info.append("G%d fark %.1e" % (gl, dmax))
+    from sentence import StaticCache
+    sd = 0.0                                                              # StaticCache = SummaryCache (belge 84)
+    for kw in (dict(global_layers=0), dict(global_layers=1, glob_kv_heads=1), dict(global_layers=3)):
+        torch.manual_seed(0)
+        m = SentenceTransformer(32, 3, 2, **kw).eval()
+        with torch.no_grad():
+            for sents in prompts:
+                a, b = SummaryCache(m), StaticCache(m, 64, 8, 16)
+                sd = max(sd, float((a.prefill(sents) - b.prefill(sents)).abs().max()))
+                for t in [5, 6, -1, 7, -1]:
+                    la, lb = (a.close_sentence(), b.close_sentence()) if t < 0 else (a.append_token(t), b.append_token(t))
+                    sd = max(sd, float((la - lb).abs().max()))
+    try:
+        c = StaticCache(m, 64, 8, 2)
+        c.prefill([])
+        [c.append_token(5) for _ in range(3)]
+        stops = False
+    except AssertionError:
+        stops = True
+    check("StaticCache (belge 84) adim adim = SummaryCache (fp32 < 1e-5; G 0 / 1 GQA / hepsi glob; bos, kisa, uzun istem, "
+          "token ve Z adimi), tampon asimi DURUR, carry desteklenmez (SummaryCache)", sd < 1e-5 and stops
+          and not StaticCache.supports(SentenceTransformer(32, 3, 2, global_layers=1, carry_group=2)), "fark %.1e" % sd)
     n = sum(len(x) + 1 for x in prompts[-1]) + 1
     check("prefill: istem tek ileri gecis = token token (son logit, ozet ve global K/V, sayaclar; sonraki decode adimlari; "
           "fp32 < 1e-5), G 0 / 1 / 2, istem 1 / 4 / %d konum" % n, ok_cache, "; ".join(info))
