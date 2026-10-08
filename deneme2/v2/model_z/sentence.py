@@ -27,6 +27,8 @@ z_bow ve layer_plan (mid / glob her yerde) kaldirildi (kullanici, 8 Ekim: "Kod t
 eski kod git commit 7bec0ae.
 Torba (--bag_k) ve egitimde summaries_last 0 kaldirildi (kullanici, 8 Ekim: "Torbada gereksiz gibi"; belge 77; git etiketi
 v2-before-cleanup-20261008); bugunku duzen (Z'ler arada) teshis / prefill yolunda kalir (ayni hesap).
+Sozluk dolgusu (belge 89; kullanici, 8 Ekim: "sözlük dolgusu ok, ekle"): vocab_rows > VOCAB ise E'nin dolgu satirlari sifir,
+cikis (_logits) VOCAB'a kesilir: dolgu token'i hedef olmaz, uretilmez.
 """
 import dataclasses
 import functools
@@ -254,11 +256,12 @@ class Block(torch.nn.Module):
         return self._finish(x, a)
 
 class SentenceTransformer(torch.nn.Module):
-    def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0):
+    def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
-        dolunca glob onbelleginde yalniz Z'ler kalir, G parcada sifirlanir."""
+        dolunca glob onbelleginde yalniz Z'ler kalir, G parcada sifirlanir.  vocab_rows: E satir sayisi (>= VOCAB; dolgu
+        satirlari sifir, ilk agirlik VOCAB'li modelle ayni)."""
         super().__init__()
         self.carry_group, self.row_len = int(carry_group), ROW_LEN
         self.global_layers = int(global_layers)
@@ -266,14 +269,20 @@ class SentenceTransformer(torch.nn.Module):
         self.mask_fn = (model_z_read_mask, model_z_global_mask) if self.global_layers else model_z_read_mask
         self.END, self.EOS = END_ID, EOS_ID
         hidden = -(-int(8 * d / 3) // 8) * 8
-        self.E = torch.nn.Embedding(VOCAB, d)                    # kurma sirasi E, blocks, norm (ilk agirlik bunu izler)
+        assert vocab_rows >= VOCAB, "vocab_rows >= VOCAB"
+        self.E = torch.nn.Embedding(VOCAB, d)               # kurma sirasi E, blocks, norm (ilk agirlik bunu izler)
+        if vocab_rows > VOCAB:                                   # kurulum RNG'si VOCAB'li modelle ayni; dolgu sifir
+            self.E = torch.nn.Embedding(vocab_rows, d, _weight=torch.zeros(vocab_rows, d))
         kinds = ["loc"] * (layers - self.global_layers) + ["glob"] * self.global_layers
         self.blocks = torch.nn.ModuleList(Block(d, heads, hidden, glob_kv_heads if k == "glob" else None) for k in kinds)
         self.norm = torch.nn.RMSNorm(d)
         for name, p in self.named_parameters():
             if p.dim() == 2:
                 std = 0.02 / math.sqrt(2 * layers) if name.endswith(("proj.weight", "down.weight")) else 0.02
-                torch.nn.init.normal_(p, std=std)
+                with torch.no_grad():
+                    (p[:VOCAB] if name == "E.weight" else p).normal_(0.0, std)   # dolgu satiri rastgele sayi cekmez
+        with torch.no_grad():
+            self.E.weight[VOCAB:].zero_()
 
     def _masks(self, last=False):
         """Maske fonksiyonlari: bugunku duzen (mask_fn) ya da summaries_last duzeninde ayni yapida (tek / ikili)."""
@@ -313,8 +322,8 @@ class SentenceTransformer(torch.nn.Module):
         return self.norm(x)
 
     def _logits(self, h):
-        """h (..., d) -> cikis h @ E^T (bagli embedding)."""
-        return h @ self.E.weight.T
+        """h (..., d) -> cikis h @ E^T (bagli embedding), VOCAB sutun (sozluk dolgusu kesilir)."""
+        return (h @ self.E.weight.T)[..., :VOCAB]
 
     def loss_per_target(self, batch, attn=None, chunk=4096):
         """-> nll (K,), pred (K,), target_kind (K,) (hedefli konumlar, satir sirasiyla; belge 21 s7 sozlesmesi)."""
@@ -324,7 +333,7 @@ class SentenceTransformer(torch.nn.Module):
         nll = torch.empty(len(tgt), device=h.device)
         pred = torch.empty(len(tgt), dtype=torch.long, device=h.device)
         for r in range(0, len(tgt), chunk):
-            lg = (hk[r:r + chunk] @ self.E.weight.T).float()
+            lg = self._logits(hk[r:r + chunk]).float()
             nll[r:r + chunk] = F.cross_entropy(lg, tgt[r:r + chunk], reduction="none")
             pred[r:r + chunk] = lg.argmax(-1)
         return nll, pred, batch.target_kind[keep]

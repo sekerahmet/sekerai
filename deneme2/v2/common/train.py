@@ -26,6 +26,9 @@ Model Z egitim / sinav duzeni summaries_last (belge 66; kullanici, 8 Ekim: "Fikr
 sentence.summaries_last ile [token'lar | ozetler | dolgu] sirasinda (sinav sonucu hedef sirasina geri), maske sorgu basina
 iki aralik; uretim degismez.  --summaries_last bayragi ve torba (--bag_k) kaldirildi (kullanici, 8 Ekim: "Torbada gereksiz
 gibi"; belge 77); kimlikte summaries_last duzen isareti (model_z 1).
+Sozluk dolgusu (belge 89; kullanici, 8 Ekim: "sözlük dolgusu ok, ekle"): yeni kosuda E VOCAB_ROWS (50.304, 64'un kati)
+satir; dolgu satirlari sifir, egitim kaybinda dolgu sutunu -inf, cikis VOCAB'a kesilir (hedef olmaz, uretilmez).  Kimlikte
+vocab_rows; alani olmayan eski kosu VOCAB (50.258) ile yuklenir ve surer.
 --glob_kv_heads N|auto (kullanici, 8 Ekim: "bu duurmda GOA yı da sıraya koy o zaman bakalım"; uretim hizi): GQA, k / v
 N head yalniz tam causal katmanlarda (Model Z glob; transformer'da her katman, kiyas icin); yerel katmanlar tam head
 (Z K/V kanali daralmaz).  auto = heads / GLOB_KV_GROUP (bolunmezse DUR).  Varsayilan 0 = heads (bit ayni); kimlikte
@@ -93,6 +96,7 @@ MODEL_Z_GLOBAL_RATIO = 1 / 3   # global_layers auto (OLCULENLER_z: d768/L10 G1->
 GLOB_KV_GROUP = 4              # glob_kv_heads auto = heads / 4
 LR_REF = (2e-3, 768, 0.5)      # lr auto = lr0 (d0 / d) ^ us (aci / adim ~ lr 0,2 sqrt(d) sabit); d1024 olcumu: 1,4 / 1,7e-3 duz, 1,73e-3 icinde
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr")   # --resume'da verilmezse kimlikten
+VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
 COMPILE_MODE = "max-autotune-no-cudagraphs"   # bloklarin derleme modu (5w: torba K 1024 -2,9 ms/adim; kullanici, 7 Ekim)
@@ -100,7 +104,7 @@ READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
 READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
-            "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group")
+            "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -221,7 +225,8 @@ def _build(args, dev):
     if args.model == "transformer":
         sys.path.insert(0, os.path.join(root, "transformer"))
         from baseline import BaselineTransformer
-        model = BaselineTransformer(args.d, args.layers, args.heads, kv_heads=getattr(args, "glob_kv_heads", 0) or None)
+        model = BaselineTransformer(args.d, args.layers, args.heads, kv_heads=getattr(args, "glob_kv_heads", 0) or None,
+                                    vocab_rows=getattr(args, "vocab_rows", D.VOCAB))
         model, mask_fn, layout = model.to(dev), R.document_mask, "transformer"
     else:
         sys.path.insert(0, os.path.join(root, "model_z"))
@@ -229,7 +234,7 @@ def _build(args, dev):
         model = SentenceTransformer(args.d, args.layers, args.heads, global_layers=int(getattr(args, "global_layers", 0)),
                                     glob_kv_heads=getattr(args, "glob_kv_heads", 0) or None,
                                     carry_group=int(getattr(args, "carry_group", 0) or 0) if getattr(args, "carry_summaries", 0)
-                                    else 0)
+                                    else 0, vocab_rows=getattr(args, "vocab_rows", D.VOCAB))
         model, mask_fn, layout = model.to(dev), model.mask_fn, "model_z"
     return model, mask_fn, layout
 
@@ -313,7 +318,7 @@ def _step(model, batch, mask_fn, opt, cuda, timer=None, cont=None):
         extra = None
         if cont is not None:
             with torch.no_grad():
-                lc = torch.nn.functional.cross_entropy((h[cont] @ model.E.weight.T).float(), batch.target[cont],
+                lc = torch.nn.functional.cross_entropy(model._logits(h[cont]).float(), batch.target[cont],
                                                        reduction="sum")
             extra = dict(loss_cont=lc, n_cont=cont.sum())
         if timer is not None:
@@ -520,10 +525,11 @@ def _args(argv):
     args = ap.parse_args(argv)
     args.defaulted = [k for k in INHERIT if getattr(args, k) is None]
     ckpt = os.path.join(args.out, "checkpoint.pt")
-    if args.resume and args.defaulted and os.path.exists(ckpt):         # varsayilan degisse de kosu kendi ayariyla surer
-        was = torch.load(ckpt, map_location="cpu", weights_only=False, mmap=True)["args"]
-        for k in args.defaulted:
-            setattr(args, k, was.get(k, 0 if k == "glob_kv_heads" else None))   # glob_kv_heads 8 Ekim'de eklendi
+    was = torch.load(ckpt, map_location="cpu", weights_only=False, mmap=True)["args"] \
+        if args.resume and os.path.exists(ckpt) else None               # varsayilan degisse de kosu kendi ayariyla surer
+    for k in args.defaulted if was is not None else ():
+        setattr(args, k, was.get(k, 0 if k == "glob_kv_heads" else None))   # glob_kv_heads 8 Ekim'de eklendi
+    args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
     if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
         args.optimizer = DEFAULT_OPTIMIZER
     if args.global_layers is None:
@@ -626,7 +632,7 @@ def main(argv=None):
                  train_stream_sha256=train.meta["stream_sha256"],
                  optimizer=args.optimizer, global_layers=args.global_layers,
                  summaries_last=args.summaries_last, glob_kv_heads=args.glob_kv_heads, carry_summaries=args.carry_summaries,
-                 carry_group=args.carry_group)
+                 carry_group=args.carry_group, vocab_rows=args.vocab_rows)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -645,7 +651,7 @@ def main(argv=None):
         del peek
         if _archived(was):                                                # eski / kaldirilan yol (belge 77)
             sys.exit("DUR: " + _archived(was))
-        was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, **was}   # 8 Ekim'de eklenen alanlar
+        was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, **was}   # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:

@@ -828,9 +828,10 @@ def t_train():
         print("ATLA train: GPT-2 tokenizer yok", flush=True)
         return
     root, data, prompts = _train_root(tp)
-    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO)
+    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO, TR.VOCAB_ROWS)
     TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
     TR.MODEL_Z_GLOBAL_RATIO = 0.6                                       # eski varsayilan: L1 / L2 G1 (8 Ekim)
+    TR.VOCAB_ROWS = D.VOCAB                     # eski E boyu: GOLDEN / etiket esdegerligi bit (dolgulu yol _train_vocab'da)
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=3, max_tokens=4)
     base = ["--data", data, "--stream", root, "--device", "cpu", "--d", "16", "--layers", "1", "--heads", "2",
             "--lr", "1e-2", "--checkpoint_minutes", "0", "--optimizer", "adamw"]   # 0: her gunluk sinirinda kayit;
@@ -972,6 +973,7 @@ def t_train():
         _train_equiv(base, root, data, prompts, out, state, same, TR)
         _train_muon(base, root, data, out, state, same, exits, TR)
         _train_global(base, root, data, out, exits, TR)
+        _train_vocab(base, data, out, TR)
         import copy                                                     # epok sonu eksik batch dolgusu (8 Ekim)
         import types
         import recipe as R
@@ -1018,7 +1020,7 @@ def t_train():
     except Exception:  # noqa: BLE001
         check("train", False, traceback.format_exc(limit=3))
     finally:
-        TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO = saved
+        TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO, TR.VOCAB_ROWS = saved
 
 
 def t_tokens():
@@ -1058,6 +1060,59 @@ def _cut_and_resume(TR, cmd, out_dir):
     finally:
         R.Checkpoint.save = staticmethod(orig)
     return stopped, TR.main(cmd + ["--out", out_dir, "--resume", "1"])
+
+
+def _train_vocab(base, data, out, TR):
+    """Sozluk dolgusu (belge 89): VOCAB_ROWS 50.304 ile Model Z (G1) ve transformer 2 epok = ayni ayarla eski boy (50.258)
+    kosusu (kayip egrisi / sinav gunlugun 4 basamaginda, <= 1e-4: fp32 matmul blok sirasi; ilk agirlik gercek satirlarda
+    bit), E 50.304 satir, dolgu satirlari egitimden sonra da sifir, kimlikte vocab_rows, okuma yazilir; eski boylu kosu
+    (kimliginde vocab_rows yok) yeni varsayilanla --resume'da kendi boyuyla surer = kesintisiz (bit), load_run 50.258
+    satirla kurar."""
+    import traceback
+    pinned = TR.VOCAB_ROWS
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
+        import generate_readings as GR
+        rows = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]["E.weight"]  # noqa: E731
+        diffs, ok = {}, []
+        for name, extra in (("model_z", ["--model", "model_z", "--layers", "2"]), ("transformer", ["--model", "transformer"])):
+            cmd = base + extra + ["--epochs", "2"]
+            TR.VOCAB_ROWS = D.VOCAB
+            a = TR.main(cmd + ["--out", out("voc_old_" + name)])
+            TR.VOCAB_ROWS = 50304
+            b = TR.main(cmd + ["--out", out("voc_new_" + name)])
+            Ea, Eb = rows(out("voc_old_" + name)), rows(out("voc_new_" + name))
+            diffs[name] = max(max(abs(x["loss"] - y["loss"]) for x, y in zip(a["log"], b["log"])),
+                              abs(a["exam"]["loss"] - b["exam"]["loss"]))
+            ok.append(diffs[name] <= 1.5e-4 and len(a["log"]) == len(b["log"]) and tuple(Eb.shape) == (50304, 16)
+                      and tuple(Ea.shape) == (D.VOCAB, 16) and bool((Eb[D.VOCAB:] == 0).all())
+                      and a["identity"]["vocab_rows"] == D.VOCAB and b["identity"]["vocab_rows"] == 50304
+                      and b["generation"])
+        TR.VOCAB_ROWS = D.VOCAB
+        S_ = base + ["--model", "model_z", "--layers", "2", "--epochs", "2"]
+        old = out("voc_pre")                                              # sozluk dolgusundan onceki kosu (alan yok)
+        TR.main(S_ + ["--stop_step", "4", "--out", old])
+        for fn, key in (("checkpoint.pt", "args"), ("agent.pt", "identity")):
+            pack = torch.load(os.path.join(old, fn), weights_only=False)
+            del pack[key]["vocab_rows"]
+            torch.save(pack, os.path.join(old, fn))
+        loaded = GR.load_run(old, data, torch.device("cpu"))[0].E.weight.shape[0]
+        TR.VOCAB_ROWS = 50304                                             # yeni varsayilan
+        r = TR.main(S_ + ["--out", old, "--resume", "1"])
+        ref = json.load(open(os.path.join(out("stop_full"), "results.json")))
+        resumed = [w["loss"] for w in r["log"]] == [w["loss"] for w in ref["log"]] and r["identity"]["vocab_rows"] == D.VOCAB
+        st_ = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        ref_w = st_(out("stop_full"))
+        same_w = all(torch.equal(v, ref_w[k]) for k, v in st_(old).items())
+        check("train sozluk dolgusu (belge 89): VOCAB_ROWS 50.304 ile Model Z G1 / transformer 2 epok = eski boy (kayip egrisi "
+              "ve sinav <= 1e-4, 4 basamak), E 50.304, dolgu satirlari egitim sonunda sifir, kimlikte vocab_rows, okuma yazilir; "
+              "vocab_rows alani olmayan eski kosu yeni varsayilanla load_run'da 50.258, --resume'da kendi boyuyla = kesintisiz "
+              "(kayip ve agirlik bit)", all(ok) and loaded == D.VOCAB and resumed and same_w,
+              "fark %s, yuklenen %d" % ({k: "%.1e" % v for k, v in diffs.items()}, loaded))
+    except Exception:  # noqa: BLE001
+        check("train sozluk dolgusu", False, traceback.format_exc(limit=3))
+    finally:
+        TR.VOCAB_ROWS = pinned
 
 
 def _train_learned(base, root, data, out, state, same, exits, TR):

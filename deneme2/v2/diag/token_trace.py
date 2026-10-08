@@ -143,11 +143,10 @@ def trace(model, batch, conds, top_k, heads):
     finally:
         for hk in hooks:
             hk.remove()
-    E = model.E.weight
     t_ = tgt.clamp_min(0)
 
     def score(hn):
-        lp = torch.log_softmax((hn @ E.T).float(), -1)
+        lp = torch.log_softmax(model._logits(hn).float(), -1)
         tl = lp.gather(1, t_[:, None])[:, 0]
         return lp, tl, (lp > tl[:, None]).sum(1)
     lp, logp, rank = score(h)

@@ -1,7 +1,7 @@
 """tests_baseline (V2) -- V2-transformer testleri (CPU; belge 20, 21).  common/data.build_batch ile sentetik hikayeler;
 GPU / Drive yok.  Model Z dosyasindan import yok.
 
-    python tests_baseline.py [--only mask,targets,loss,cache,generate,recipe,flex,imports]
+    python tests_baseline.py [--only mask,targets,loss,cache,generate,recipe,flex,imports,gqa,vocab]
 """
 import ast
 import math
@@ -260,6 +260,47 @@ def t_imports():
 
 
 @torch.no_grad()
+def t_vocab():
+    """Sozluk dolgusu (belge 89): vocab_rows 50.304 -> ilk agirlik gercek satirlarda VOCAB'li modelle bit, dolgu sifir;
+    dolgu satirlari buyuk rastgele iken (duz argmax dolguya duser) _logits VOCAB sutun ve ayni, loss_per_target ayni,
+    generate (StaticCache ve dict onbellek; acgozlu ve ornekleme) VOCAB'li modelle token token ayni, token < VOCAB."""
+    import baseline
+    rows = 50304
+    a = tiny()
+    torch.manual_seed(0)
+    b = BaselineTransformer(32, 2, 2, vocab_rows=rows).eval()
+    sa, sb = a.state_dict(), b.state_dict()
+    init_ok = all(torch.equal(sa[k], sb[k][:D.VOCAB] if k == "E.weight" else sb[k]) for k in sa) \
+        and bool((sb["E.weight"][D.VOCAB:] == 0).all())
+    with torch.no_grad():
+        b.E.weight[D.VOCAB:] = torch.randn(rows - D.VOCAB, 32, generator=torch.Generator().manual_seed(3)) * 50
+    batch = D.build_batch(token_stories([[[3, 4, 5], [6, 7]], [[8], [9, 10, 11]]]), [[0, 1]], "transformer", row_len=32)
+    with torch.no_grad():
+        h = b._batch_hidden(batch)
+        raw_pad = float(((h @ b.E.weight.T).argmax(-1) >= D.VOCAB).float().mean())
+        na, pa, _ = a.loss_per_target(batch)
+        nb, pb, _ = b.loss_per_target(batch)
+        near = lambda x, y: float((x - y).abs().max()) <= 1e-5  # noqa: E731  (fp32 matmul blok sirasi ~1e-7)
+        out_ok = b._logits(h).shape[-1] == D.VOCAB and near(a._logits(h), b._logits(h)) and near(na, nb) \
+            and torch.equal(pa, pb)
+    prompts = [[], [[3, 4, 5]], [[3, 4, 5], [6, 7, 8, 9]]]
+    gens, saved = {}, baseline.STATIC_DECODE
+    try:
+        for static in (True, False):
+            baseline.STATIC_DECODE = static
+            for name, m in (("a", a), ("b", b)):
+                with torch.no_grad():
+                    gens[name, static] = (m.generate(prompts, 3, 8), m.generate(prompts, 3, 8, torch.Generator().manual_seed(5)))
+    finally:
+        baseline.STATIC_DECODE = saved
+    toks = [t for g in gens.values() for out in g for gen, _, _ in out for s_ in gen for t in s_]
+    gen_ok = all(gens["a", s_] == gens["b", s_] for s_ in (True, False)) and toks and max(toks) < D.VOCAB
+    check("sozluk dolgusu (vocab_rows 50.304): ilk agirlik bit, dolgu sifir; dolgu buyuk rastgele iken (duz argmax'in %.0f%%'i "
+          "dolgu) _logits / loss_per_target <= 1e-5 (tahmin ayni), generate (StaticCache + dict onbellek, acgozlu + ornekleme) ayni, token < "
+          "VOCAB (%d token)" % (100 * raw_pad, len(toks)), init_ok and raw_pad > 0.5 and out_ok and gen_ok,
+          "init %s, cikis %s, uretim %s" % (init_ok, out_ok, gen_ok))
+
+
 def t_gqa():
     """kv_heads (GQA kiyasi): kv = heads bugunkuyle bit ayni; kv 2: blok = k / v tekrarli basvuru; onbellekli generate =
     onbelleksiz acgozlu."""
@@ -302,7 +343,7 @@ def t_gqa():
 
 
 GROUPS = dict(mask=t_mask, targets=t_targets, loss=t_loss, cache=t_cache, generate=t_generate, recipe=t_recipe,
-              flex=t_flex, imports=t_imports, gqa=t_gqa)
+              flex=t_flex, imports=t_imports, gqa=t_gqa, vocab=t_vocab)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(GROUPS)

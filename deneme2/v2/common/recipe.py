@@ -20,7 +20,7 @@ import time
 import torch
 import torch.nn.functional as F
 
-from data import Kind
+from data import VOCAB, Kind
 
 ATTN_BLOCK = 64                   # FlexAttention blok boyu (SS d512 attention -%14, belge 37; 5w -2,7 ms/adim; bf16 esdeger)
 
@@ -71,7 +71,10 @@ def block_mask(batch, mask_fn):
 
 
 def _output_loss(h, weight, target):
-    return F.cross_entropy((h @ weight.T).float(), target, ignore_index=-100)
+    lg = (h @ weight.T).float()
+    if lg.shape[1] > VOCAB:                                              # sozluk dolgusu: dolgu sutunu -inf (belge 89)
+        lg = lg.masked_fill(torch.arange(lg.shape[1], device=lg.device) >= VOCAB, float("-inf"))
+    return F.cross_entropy(lg, target, ignore_index=-100)
 
 
 _COMPILED = {}
@@ -88,8 +91,8 @@ def output_loss(h, weight, target):
 
 
 def output_logprobs(model, batch, h, pos):
-    """Konumlar (duz indeks) -> log p (n, V) = log_softmax(h E^T) (teshis ve basvuru testleri)."""
-    return torch.log_softmax((h.flatten(0, 1)[pos] @ model.E.weight.T).float(), -1)
+    """Konumlar (duz indeks) -> log p (n, VOCAB) = log_softmax(model._logits(h)) (teshis ve basvuru testleri)."""
+    return torch.log_softmax(model._logits(h.flatten(0, 1)[pos]).float(), -1)
 
 
 def wsd_lr(step, total, peak, warmup=0.01, decay=0.2):

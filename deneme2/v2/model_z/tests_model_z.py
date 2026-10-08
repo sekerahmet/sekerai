@@ -2,7 +2,7 @@
 (z, z_flat, direct, generate_longest, formullu onbellek) kaldirildi (belge 44); eski hali git etiketi
 v2-before-formula-cleanup-20261007.
 
-    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,mask,summaries_last,gqa,carry]
+    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,mask,summaries_last,gqa,carry,vocab]
 """
 import os
 import sys
@@ -931,8 +931,61 @@ def t_carry():
               i, o[0], o[1], o[2]) for i, o in enumerate(out)))
 
 
+def t_vocab():
+    """Sozluk dolgusu (belge 89): vocab_rows 50.304 -> ilk agirlik gercek satirlarda VOCAB'li modelle bit, dolgu satirlari
+    sifir.  Dolgu satirlari buyuk rastgele yapilinca (duz h E^T'de argmax dolguya duser: test bos degil) cikti degismez:
+    _logits VOCAB sutun ve loss_per_target ayni (<= 1e-5, fp32 matmul blok sirasi; tahmin ayni), output_loss ayni ve
+    dolgu satiri gradyani 0, generate (StaticCache ve
+    SummaryCache; acgozlu ve ornekleme) VOCAB'li modelle token token ayni, uretilen her token < VOCAB."""
+    import recipe as R
+    import sentence as S
+    rows = 50304
+    torch.manual_seed(0)
+    a = SentenceTransformer(32, 3, 2, global_layers=1).eval()
+    torch.manual_seed(0)
+    b = SentenceTransformer(32, 3, 2, global_layers=1, vocab_rows=rows).eval()
+    sa, sb = a.state_dict(), b.state_dict()
+    init_ok = all(torch.equal(sa[k], sb[k][:D.VOCAB] if k == "E.weight" else sb[k]) for k in sa) \
+        and tuple(sb["E.weight"].shape) == (rows, 32) and bool((sb["E.weight"][D.VOCAB:] == 0).all())
+    with torch.no_grad():
+        b.E.weight[D.VOCAB:] = torch.randn(rows - D.VOCAB, 32, generator=torch.Generator().manual_seed(3)) * 50
+    batch = real_batch([[0, 1], [2]], 64)
+    with torch.no_grad():
+        h = b._batch_hidden(batch)
+        raw_pad = float(((h @ b.E.weight.T).argmax(-1) >= D.VOCAB).float().mean())
+        la, lb = a._logits(h), b._logits(h)
+        na, pa, _ = a.loss_per_target(batch)
+        nb, pb, _ = b.loss_per_target(batch)
+    hh = h.flatten(0, 1).detach()
+    E = b.E.weight.detach().clone().requires_grad_(True)
+    loss_b = R.output_loss(hh, E, batch.target.flatten())
+    loss_b.backward()
+    loss_a = R.output_loss(hh, a.E.weight.detach(), batch.target.flatten())
+    near = lambda x, y: float((x - y).abs().max()) <= 1e-5  # noqa: E731  (fp32 matmul blok sirasi ~1e-7)
+    out_ok = la.shape[-1] == D.VOCAB and near(la, lb) and near(na, nb) and torch.equal(pa, pb) \
+        and float((loss_a - loss_b).abs()) < 1e-6 and bool((E.grad[D.VOCAB:] == 0).all()) and bool(E.grad[:D.VOCAB].any())
+    rng = np.random.default_rng(4)
+    prompts = [[], [[int(x) for x in rng.integers(0, D.END_ID, 6)]], [[3, 4, 5], [6, 7, 8, 9]]]
+    gens, saved = {}, S.STATIC_DECODE
+    try:
+        for static in (True, False):
+            S.STATIC_DECODE = static
+            for name, m in (("a", a), ("b", b)):
+                with torch.no_grad():
+                    gens[name, static] = (m.generate(prompts, 3, 8), m.generate(prompts, 3, 8, torch.Generator().manual_seed(5)))
+    finally:
+        S.STATIC_DECODE = saved
+    toks = [t for g in gens.values() for out in g for gen, _, _ in out for s_ in gen for t in s_]
+    gen_ok = all(gens["a", s_] == gens["b", s_] for s_ in (True, False)) and toks and max(toks) < D.VOCAB
+    check("sozluk dolgusu (vocab_rows 50.304): ilk agirlik gercek satirlarda bit, dolgu sifir; dolgu satirlari buyuk "
+          "rastgele iken (duz h E^T argmax'inin %.0f%%'i dolgu) _logits VOCAB sutun, _logits / loss_per_target <= 1e-5, "
+          "output_loss ayni ve dolgu gradyani 0, generate (StaticCache + SummaryCache, acgozlu + ornekleme) ayni, uretilen "
+          "token < VOCAB (%d token)" % (100 * raw_pad, len(toks)), init_ok and raw_pad > 0.5 and out_ok and gen_ok,
+          "init %s, cikis %s, uretim %s" % (init_ok, out_ok, gen_ok))
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
-             equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry)
+             equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab)
 
 if __name__ == "__main__":
     if SIDE is not None:
