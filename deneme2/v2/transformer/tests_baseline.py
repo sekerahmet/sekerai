@@ -188,7 +188,7 @@ def t_generate():
         out = torch.full((D.VOCAB,), -1e9)
         out[script[len(fed) - 1]] = 0
         return out[None]                                                  # _logits asagida birim: (1, V) logit
-    model._step, model._logits = scripted, lambda h, inbag=None: h
+    model._step, model._logits = scripted, lambda h: h
     got = model.generate([STORIES[0][:1]], max_sentences=5, max_tokens=2)
     del model._step, model._logits
     want_fed = [[D.EOS_ID] + STORIES[0][0] + [D.END_ID], [5], [D.END_ID], [6], [7], [D.END_ID]]
@@ -258,63 +258,6 @@ def t_imports():
 
 
 @torch.no_grad()
-def _bag_naive(model, sents, max_sentences, max_tokens, opened):
-    """Onbelleksiz acgozlu basvuru: her adimda hikaye yeniden paketlenir, sinav yolu (recipe.output_logprobs, konumun B_k'si)."""
-    import recipe as R
-    done_s, cur = [list(s) for s in (sents[:-1] if opened else sents)], list(sents[-1]) if opened else []
-    gen, ended, eos = [], [], False
-    while len(gen) < max_sentences:
-        new, done = [], False
-        while len(new) < max_tokens:
-            st = done_s + ([cur + new] if cur + new else [])
-            b = D.build_batch(token_stories([st]), [[0]], "transformer", row_len=128)
-            n = int((b.target[0] >= 0).sum())
-            h = model._batch_hidden(b)
-            w = int(R.output_logprobs(model, b, h, torch.tensor([n - 2 if cur + new else n - 1]))[0].argmax())
-            if w == D.EOS_ID and not new and not opened:
-                eos = True
-                break
-            if w in (D.END_ID, D.EOS_ID):
-                done = True
-                break
-            new.append(w)
-        if eos:
-            break
-        gen.append(new)
-        ended.append(done)
-        done_s.append(cur + new)
-        cur, opened = [], False
-    return gen, ended, eos
-
-
-@torch.no_grad()
-def t_bag():
-    """Ogrenen torba (recipe.Bag): onbellekli uretim (generate; torba ozette secilir, P kapanmis cumleler) = onbelleksiz
-    sinav yolu (output_logprobs) ile acgozlu, istemli ve acik son cumleli; loss_per_target nll = -log p, toplam 1."""
-    import recipe as R
-    model = tiny()
-    counts = np.zeros(D.EOS_ID + 1, np.int64)
-    counts[[3, 5]] = 100
-    counts[3:30] += 5
-    core = R.core_ids(counts, 2)
-    R.attach_bag(model, len(core) + 4, len(core))
-    model.bag.fill(core, counts)
-    torch.nn.init.normal_(model.bag.other, std=0.5)
-    torch.nn.init.normal_(model.bag.q.weight, std=0.5)
-    prompts = [STORIES[0][:2], STORIES[1]]
-    same = all(model.generate([p], 3, 4, open_last=o)[0] == _bag_naive(model, p, 3, 4, o) for p in prompts
-               for o in (False, True))
-    batch = D.build_batch(token_stories(STORIES), [[3]], "transformer", row_len=64)
-    nll = model.loss_per_target(batch)[0]
-    h = model._batch_hidden(batch)
-    pos = (batch.target.flatten() >= 0).nonzero()[:, 0]
-    lp = R.output_logprobs(model, batch, h, pos)
-    check("torba: onbellekli uretim = onbelleksiz sinav yolu (acgozlu; istemli, acik son cumleli); nll = -log p; toplam 1",
-          same and torch.allclose(nll, -lp.gather(1, batch.target.flatten()[pos][:, None])[:, 0], atol=1e-5)
-          and float((lp.exp().sum(-1) - 1).abs().max()) < 1e-5)
-
-
-@torch.no_grad()
 def t_gqa():
     """kv_heads (GQA kiyasi): kv = heads bugunkuyle bit ayni; kv 2: blok = k / v tekrarli basvuru; onbellekli generate =
     onbelleksiz acgozlu."""
@@ -357,7 +300,7 @@ def t_gqa():
 
 
 GROUPS = dict(mask=t_mask, targets=t_targets, loss=t_loss, cache=t_cache, generate=t_generate, recipe=t_recipe,
-              flex=t_flex, imports=t_imports, bag=t_bag, gqa=t_gqa)
+              flex=t_flex, imports=t_imports, gqa=t_gqa)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(GROUPS)

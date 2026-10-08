@@ -2,8 +2,8 @@
 kapatma etkisi (belge 80; kullanici, 8 Ekim: "bir cümleyi alıp model adım adım ne üretiyor ona bakmadık. Yani nerede ne
 üretiyor, nerede ne işe yarıyor onu da kontrol etsek güzel olur"; adlar: "İsimler ok").
 
-Kosu generate_readings.load_run ile; tek hikayelik batch, egitim duzeni (summaries_last 0: agirlik ayni, cikti konum basina
-esit), fp32, dense maske (modelin kendi kurali).  Konum basina:
+Kosu generate_readings.load_run ile; tek hikayelik batch, Z'ler arada duzen (egitim summaries_last ile; agirlik ayni,
+cikti konum basina esit), fp32, dense maske (modelin kendi kurali).  Konum basina:
     tahmin   ilk --top_k aday + olasilik; dogru (sonraki) token'in olasiligi ve sirasi (0: ilk aday)
     lens     her blok ciktisi -> model.norm + bagli E: dogru token'in log-olasiligi / sirasi / ilk aday
     attn     katman basina head ortalamasi (--heads: head basina da) CATEGORIES kutlesi + en cok bakilan 3 konum;
@@ -131,7 +131,7 @@ def trace(model, batch, conds, top_k, heads):
     """Tek hikayelik batch (B 1, model_z duzeni) -> dict: input_kind, sent, target, target_kind, logp, rank, top_ids,
     top_p (konum basina); lens_logp / lens_rank / lens_top1 (L, T); attn (L, T, 5) head ortalamasi, attn_top (L, T, 3)
     konum ve agirlik, attn_heads (L, H, T, 5) (heads); ablation {kosul: (T,) fark ya da None}.  fp32, dense maske."""
-    assert batch.kind.shape[0] == 1 and not hasattr(model, "bag"), "tek hikaye, torbasiz Model Z"
+    assert batch.kind.shape[0] == 1, "tek hikaye"
     kind, sent, tgt = batch.kind[0], batch.sent[0], batch.target[0]
     T = kind.shape[0]
     has = tgt >= 0
@@ -262,8 +262,8 @@ def main(argv=None):
     dev = G.setup(args.device, log)
     stream = args.stream or args.data
     model, _, layout, idt = G.load(args.run, args.data, dev)
-    if layout != "model_z" or hasattr(model, "bag"):
-        sys.exit("DUR: token_trace yalniz torbasiz Model Z (%s)" % args.run)
+    if layout != "model_z":
+        sys.exit("DUR: token_trace yalniz Model Z (%s)" % args.run)
     model = model.float()
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(os.path.join(stream, "gpt2", "tokenizer.json"))

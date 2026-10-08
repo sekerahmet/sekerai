@@ -1,9 +1,9 @@
 """tests_diag -- V2 teshis araclari testleri (CPU; belge 33 adim 5).  Gruplar: readings (generate_readings: kayitli
 kosudan okuma = train.py'ninki; arsiv kimligi durur; ek istem secimi Drive'dan), tools (gap_v2, order_probe,
-z_ablate; model-z-mathematician), bag (bag_report: A0 ve torbali kosu, belge 53-55), trace (token_trace, belge 80).  Formullu z cesitleri kaldirildi
-(belge 44).  Yardimcilar common/tests_v2'den (_train_root, tokenizer_path, DRIVE).
+z_ablate; model-z-mathematician), knowledge, trace (token_trace, belge 80).  Formullu z cesitleri (belge 44) ve torba
+(bag_report; belge 77) kaldirildi.  Yardimcilar common/tests_v2'den (_train_root, tokenizer_path, DRIVE).
 
-    python tests_diag.py [--only readings,tools,bag,knowledge,trace]
+    python tests_diag.py [--only readings,tools,knowledge,trace]
 """
 import torch
 
@@ -41,10 +41,9 @@ def t_readings():
         print("ATLA readings: GPT-2 tokenizer yok", flush=True)
         return
     root, data, prompts = T2._train_root(tp)
-    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO,
-             TR.MODEL_Z_SUMMARIES_LAST)
+    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO)
     TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
-    TR.MODEL_Z_GLOBAL_RATIO, TR.MODEL_Z_SUMMARIES_LAST = 0.6, 0            # eski varsayilan: L1 / L2 G1 (8 Ekim)
+    TR.MODEL_Z_GLOBAL_RATIO = 0.6                                       # eski varsayilan: L1 / L2 G1 (8 Ekim)
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=6, max_tokens=4)
     base = ["--data", data, "--stream", root, "--device", "cpu"]
     same_prompts = os.path.join(root, "reading_prompts_same.json")
@@ -97,8 +96,7 @@ def t_readings():
     except Exception:  # noqa: BLE001
         check("readings", False, traceback.format_exc(limit=3))
     finally:
-        (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO,
-         TR.MODEL_Z_SUMMARIES_LAST) = saved
+        TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO = saved
     if T2.DRIVE is None:
         print("ATLA readings (ek istem secimi, Drive kosulari): Drive yok", flush=True)
         return
@@ -156,10 +154,9 @@ def t_tools():
         print("ATLA tools: GPT-2 tokenizer yok", flush=True)
         return
     root, data, prompts = T2._train_root(tp)
-    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO,
-             TR.MODEL_Z_SUMMARIES_LAST)
+    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO)
     TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
-    TR.MODEL_Z_GLOBAL_RATIO, TR.MODEL_Z_SUMMARIES_LAST = 0.6, 0            # eski varsayilan: L1 / L2 G1 (8 Ekim)
+    TR.MODEL_Z_GLOBAL_RATIO = 0.6                                       # eski varsayilan: L1 / L2 G1 (8 Ekim)
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=6, max_tokens=4)
     base = ["--data", data, "--stream", root]
     runs = {}
@@ -211,107 +208,7 @@ def t_tools():
     except Exception:  # noqa: BLE001
         check("tools", False, traceback.format_exc(limit=4))
     finally:
-        (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO,
-         TR.MODEL_Z_SUMMARIES_LAST) = saved
-
-
-def t_bag():
-    """bag_report: gercek kucuk train.py kosulari uzerinde A0 (torbasiz model donuk, secici uydurulur) ve torbali kosunun
-    kendi torbasi; sayim dosyasi yoksa DURUR; paylar C + P + L + kacan = 1 her M'de, kacan M ile artmaz; torbali kosuda
-    K = bag_k satiri = modelin kendi torbasinin kacani (Bag.select ile dogrudan); uydurma ana modeli degistirmez; ayni
-    klasorde ikinci kosu durur."""
-    import traceback
-    import bag_report as BR
-    import data as DD
-    import generate_readings as GR
-    import recipe as R
-    import train as TR
-    tp = T2.tokenizer_path()
-    if tp is None:
-        print("ATLA bag: GPT-2 tokenizer yok", flush=True)
-        return
-    root, data, prompts = T2._train_root(tp)
-    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, DD.BATCH_ROWS,
-             TR.MODEL_Z_GLOBAL_RATIO, TR.MODEL_Z_SUMMARIES_LAST)
-    TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
-    TR.MODEL_Z_GLOBAL_RATIO, TR.MODEL_Z_SUMMARIES_LAST = 0.6, 0            # eski varsayilan: L1 / L2 G1 (8 Ekim)
-    TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=6, max_tokens=4)
-    try:
-        base_tr = ["--data", data, "--stream", root, "--device", "cpu", "--model", "model_z", "--d", "16", "--layers", "2",
-                   "--heads", "2", "--lr", "1e-2", "--steps", "4", "--checkpoint_minutes", "0"]
-        run = os.path.join(T2.TMP, "runs_bag", "mz")
-        TR.main(base_tr + ["--out", run])
-        DD.BATCH_ROWS = 4
-        base = ["--data", data, "--stream", root, "--device", "cpu", "--bag_core", "5", "--steps", "3", "--seen_batches", "1"]
-        cpath = os.path.join(data, "train_token_counts.npy")
-        try:
-            BR.main(base + ["--run", run, "--out", os.path.join(T2.TMP, "bag_nocount")])
-            no_count = False
-        except SystemExit as e:
-            no_count = "yok" in str(e)
-        np.save(cpath, DD.token_counts(root))
-        brun = os.path.join(T2.TMP, "runs_bag", "mz_bag")
-        TR.main(base_tr + ["--bag_k", "12", "--bag_core", "5", "--out", brun])
-        rep = {k: BR.main(base + ["--run", r, "--out", os.path.join(T2.TMP, "bag_" + k)])
-               for k, r in (("a0", run), ("trained", brun))}
-        ok = True
-        for r in rep.values():
-            for part in ("exam", "train_seen"):
-                e = r[part]
-                for sc in ("selector", "freq"):
-                    bm = e[sc]["by_m"]
-                    ms = [bm[str(m)]["miss"] for m in BR.M_LIST]
-                    ok &= all(abs(e["share_c"] + e["share_p"] + bm[str(m)]["share_l"] + bm[str(m)]["miss"] - 1) < 2e-4
-                              for m in BR.M_LIST)
-                    ok &= all(a >= b for a, b in zip(ms, ms[1:])) and abs(ms[0] - (1 - e["share_c"] - e["share_p"])) < 2e-4
-        modes = [json.load(open(os.path.join(T2.TMP, "bag_" + k, "config.json")))["mode"] for k in ("a0", "trained")]
-        check("bag_report: sayim dosyasi yoksa DURUR; A0 ve torbali kosu; paylar toplami 1, kacan M ile artmaz",
-              no_count and ok and modes == ["A0", "trained"]
-              and os.path.getsize(os.path.join(T2.TMP, "bag_a0", "bag_examples.txt")) > 100)
-        model, idt = GR.load_run(brun, data, torch.device("cpu"))
-        model.eval()
-        va = DD.TokenStories(root, data, "valid")
-        ep = np.load(os.path.join(data, "exam_pack_plan.npz"))
-        ro, rs = ep["row_offsets"], ep["row_stories"]
-        miss = n = 0
-        with torch.no_grad():
-            for a in range(0, len(ro) - 1, 4):
-                b = DD.build_batch(va, [rs[ro[i]:ro[i + 1]].tolist() for i in range(a, min(a + 4, len(ro) - 1))], "model_z",
-                                   "cpu", 64)
-                sel = model.bag.batch_select(b, model._batch_hidden(b), model.E.weight)
-                keep = b.target >= 0
-                miss += int((~sel["inbag"][sel["ids"][keep], b.target[keep]]).sum())
-                n += int(keep.sum())
-        got = rep["trained"]["exam"]["selector"]["by_k"]["12"]["miss"]
-        check("bag_report: torbali kosuda K = bag_k kacani = modelin kendi torbasinin kacani (%.4f / %.4f)" % (got, miss / n),
-              abs(got - miss / n) < 1e-4)
-        m0, _ = GR.load_run(run, data, torch.device("cpu"))
-        m0.eval().requires_grad_(False)
-        before = {k: v.clone() for k, v in m0.state_dict().items()}
-        core = R.core_ids(np.load(cpath), 5)
-        bag = R.Bag(16, len(core) + 64, len(core))
-        bag.fill(core, np.load(cpath))
-        opt = torch.optim.AdamW(bag.parameters(), lr=1e-2)
-        tr = DD.TokenStories(root, data, "train")
-        f = np.load(os.path.join(data, "train_pack_plan_e1.npz"))
-        batch = DD.build_batch(tr, [f["row_stories"][f["row_offsets"][i]:f["row_offsets"][i + 1]].tolist() for i in range(4)],
-                               "model_z", "cpu", int(f["row_len"]))
-        q0 = bag.q.weight.clone()
-        l1 = [BR.fit_step(bag, opt, BR.bag_batch(m0, m0.mask_fn, bag, batch, False))[0] for _ in range(3)]
-        check("bag_report A0: uydurma ana modeli degistirmez, seciciyi degistirir, ayni batch'te kayip duser",
-              all(torch.equal(before[k], v) for k, v in m0.state_dict().items()) and not torch.equal(q0, bag.q.weight)
-              and l1[-1] < l1[0], str([round(x, 4) for x in l1]))
-        try:
-            BR.main(base + ["--run", run, "--out", os.path.join(T2.TMP, "bag_a0")])
-            stopped = False
-        except SystemExit as e:
-            stopped = "bag_report.json var" in str(e)
-        check("bag_report: ayni klasorde ikinci kosu durur (kisa deneme, surdurme yok)", stopped)
-    except Exception:  # noqa: BLE001
-        check("bag", False, traceback.format_exc(limit=4))
-    finally:
-        (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, DD.BATCH_ROWS,
-         TR.MODEL_Z_GLOBAL_RATIO, TR.MODEL_Z_SUMMARIES_LAST) = saved
+        TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO = saved
 
 
 def t_knowledge():
@@ -395,8 +292,8 @@ def t_trace():
         base = ["--data", data, "--stream", root, "--device", "cpu", "--model", "model_z", "--d", "16", "--heads", "4",
                 "--steps", "6", "--checkpoint_minutes", "0"]
         runs = {}
-        for name, extra in (("g2kv", ["--layers", "3", "--global_layers", "2", "--glob_kv_heads", "2", "--summaries_last",
-                                      "1"]), ("g0", ["--layers", "2", "--global_layers", "0", "--summaries_last", "0"]),
+        for name, extra in (("g2kv", ["--layers", "3", "--global_layers", "2", "--glob_kv_heads", "2"]),
+                            ("g0", ["--layers", "2", "--global_layers", "0"]),
                             ("rand", ["--layers", "3", "--global_layers", "2", "--glob_kv_heads", "2", "--lr", "1e-9",
                                       "--steps", "1"])):     # neredeyse ilk agirlik: uretim END / EOS'a erken dusmez
             runs[name] = os.path.join(T2.TMP, "runs_trace", name)
@@ -489,7 +386,7 @@ def t_trace():
         (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS) = saved
 
 
-TESTS = dict(readings=t_readings, tools=t_tools, bag=t_bag, knowledge=t_knowledge, trace=t_trace)
+TESTS = dict(readings=t_readings, tools=t_tools, knowledge=t_knowledge, trace=t_trace)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)

@@ -73,10 +73,8 @@ def load_run(out, data_dir, dev):
     assert longest == idt["longest"], "en uzun cumle %d, kosununki %d: baska veri" % (longest, idt["longest"])
     spec = SimpleNamespace(model=idt["model"], seed=idt["seed"], d=idt["d"], layers=idt["layers"], heads=idt["heads"],
                            global_layers=idt.get("global_layers", 0),          # global_layers'tan onceki: 0
-                           bag_k=idt.get("bag_k", 0),
                            carry_summaries=idt.get("carry_summaries", 0), carry_group=idt.get("carry_group", 0),
-                           glob_kv_heads=idt.get("glob_kv_heads", 0),
-                           bag_n_core=len(pack["state"]["bag.core"]) if idt.get("bag_k") else 0)   # C state_dict'ten
+                           glob_kv_heads=idt.get("glob_kv_heads", 0))
     model, _, layout = T._build(spec, dev)
     model.load_state_dict(pack["state"])
     if layout == "model_z":

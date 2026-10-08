@@ -47,8 +47,9 @@ atexit.register(shutil.rmtree, TMP, True)          # train grubu ~200 MB birakiy
 RESULTS = []
 
 GOLDEN_TORCH = "2.14.0+cpu"     # transformer: belge 33 adim 4 (v2-before-cleanup-20261006 ile bit duzeyinde ayni olculdu);
-# model_z (G 1) / model_z_g0: etiket v2-before-formula-cleanup-20261007 kodundan olculdu (7 Ekim, belge 44; --layers 2,
-# adamw, --steps 6; scratchpad golden_measure.py), bugunku kod ayni degeri verdi
+# model_z (G 1) / model_z_g0: summaries_last duzeninde etiket v2-before-cleanup-20261008 kodundan --summaries_last 1 ile
+# olculdu (8 Ekim, belge 77 ek 2; --layers 2, adamw, --steps 6; scratchpad golden_measure_sl.py), bugunku kod bit ayni;
+# eski (Z'ler arada) degerleri 7 Ekim belge 44
 GOLDEN = {
  "transformer": {
   "first6": [
@@ -63,16 +64,16 @@ GOLDEN = {
  },
  "model_z": {
   "first6": [10.8696, 10.6366, 10.3411, 10.0874, 9.8309, 9.5415],
-  "sha": "b6783484b90c6d6e97ad9e2683f143b99567739503bad1d93cc1f7776c4e54ae"
+  "sha": "ee120c895da9348743f1e09cedf8ed6fc57dfc995d220f530eece118536ff119"
  },
  "model_z_g0": {
   "first6": [10.8705, 10.6408, 10.3417, 10.0936, 9.831, 9.5423],
-  "sha": "bab46c04017cb4a3cb0abbf0a6a25c9025b64ebf98c13ac54f4c616ad429b0ae"
+  "sha": "0f1534acdeb59509b1f474822d988948a61754dd7d857331cb6542823638e343"
  }
 }
-GOLDEN_ARGS = {"transformer": ["--model", "transformer"],                # eski davranis acik bayrakla (8 Ekim
-               "model_z": ["--model", "model_z", "--layers", "2", "--global_layers", "1", "--summaries_last", "0"],
-               "model_z_g0": ["--model", "model_z", "--layers", "2", "--global_layers", "0", "--summaries_last", "0"]}
+GOLDEN_ARGS = {"transformer": ["--model", "transformer"],                # G acik bayrakla (varsayilan auto, 8 Ekim)
+               "model_z": ["--model", "model_z", "--layers", "2", "--global_layers", "1"],
+               "model_z_g0": ["--model", "model_z", "--layers", "2", "--global_layers", "0"]}
 
 
 def check(name, ok, info=""):
@@ -445,7 +446,6 @@ def t_recipe():
               full.state_dict().values(), moved.state_dict().values())) and _raises(TypeError, torch.set_rng_state,
                                                                                      OnDevice(torch.get_rng_state())))
     _recipe_muon(R)
-    _recipe_bag(R)
     import time as _t
     sw = R.SpeedWindow()
     sw.start(5)
@@ -610,149 +610,6 @@ def _recipe_normuon(R, TR):
           same_a and rel < 1e-5 and cv < 1e-4 and all(abs(x - 0.2) < 1e-4 for x in rms)
           and all(torch.equal(x, y) for x, y in zip(e2, full_))
           and all("second_momentum_buffer" in ofull.state[x] for x in full_))
-
-
-def _recipe_bag(R):
-    """Ogrenen torba (belge 54 s1.3, 55 K1 / K3 / O7 / O8): kahin kapisi (s_O = LSE disari -> log_softmax, gradyan dahil),
-    B = V'de DIGER kapali, toplam 1; core_ids; hizli yol (bag_train_loss: torba basina bmm, birden cok dilim + dolgu, P
-    kesilmesi, kacan + pay satirlari) = output_logprobs (two_stage_logprobs, konum basina B_k) NLL'i ve gradyani; secici
-    kaybi elle; kaynak sayilari toplami; bag_full_mask adim tohumuyla ayni.  Iki duzen (Model Z: ZTOK, transformer: END)."""
-    g = torch.Generator().manual_seed(0)
-    V = 50
-    lg = torch.randn(6, V, generator=g, dtype=torch.float64).float()
-    t = torch.randint(0, V, (6,), generator=g)
-    ok = True
-    for k in (1, 7, 25, V - 1):
-        inb = torch.zeros(V, dtype=torch.bool)
-        inb[torch.randperm(V, generator=g)[:k]] = True
-        a = lg.clone().requires_grad_(True)
-        b_ = lg.clone().requires_grad_(True)
-        lp = R.two_stage_logprobs(a, inb, a.masked_fill(inb, float("-inf")).logsumexp(-1))
-        ref = torch.log_softmax(b_, -1)
-        lp.gather(1, t[:, None]).sum().backward()
-        ref.gather(1, t[:, None]).sum().backward()
-        ok &= torch.allclose(lp, ref, atol=1e-6) and torch.allclose(a.grad, b_.grad, atol=1e-6)
-    allin = torch.ones(V, dtype=torch.bool)
-    free = R.two_stage_logprobs(lg, inb, torch.randn(6, generator=g))
-    check("torba: kahin DIGER (LSE disari) iken iki asamali = log_softmax, gradyan dahil (|B| 1 / 7 / 25 / V-1); B = V'de "
-          "DIGER kapali (birebir); serbest DIGER'de toplam 1",
-          ok and torch.equal(R.two_stage_logprobs(lg, allin, torch.full((6,), 50.0)), torch.log_softmax(lg, -1))
-          and float((free.exp().sum(-1) - 1).abs().max()) < 1e-5)
-    counts = np.arange(D.EOS_ID + 1)[::-1].copy()                          # 0 en sik
-    check("torba: core_ids = en sik 30 + END + EOS, sirali tekil",
-          R.core_ids(counts, 30).tolist() == sorted(set(range(30)) | {D.END_ID, D.EOS_ID}))
-    stories = [[[3, 40, 41, 3, 42], [43, 44, 40], [45, 46, 47, 48, 41]], [[50, 51], [52, 50, 53]],
-               [[60, 61, 62], [63], [64, 65, 60, 66]]]
-    counts = np.zeros(D.EOS_ID + 1, np.int64)
-    counts[[3, 4, 5]] = 1000
-    counts[40:70] = 5
-    core = R.core_ids(counts, 3)
-    saved = R.BAG_GROUP, R.BAG_CHUNK
-    R.BAG_GROUP, R.BAG_CHUNK = 2, 4                                        # birden cok dilim + dolgu
-    try:
-        res = []
-        for layout in ("model_z", "transformer"):
-            b = D.build_batch(_Synthetic(stories), [[0, 1], [2]], layout, row_len=40)
-            torch.manual_seed(1)
-            m = torch.nn.Module()
-            m.E = torch.nn.Embedding(D.VOCAB, 8)
-            R.attach_bag(m, len(core) + 3, len(core))                      # R = 3: P kesilir, L kucuk, kacan var
-            m.bag.fill(core, counts)
-            torch.nn.init.normal_(m.bag.other, std=0.5)
-            h0 = torch.randn(*b.kind.shape, 8, generator=g)
-            full = R.bag_full_mask(b.target.numpy(), 0.3, np.random.default_rng(np.random.SeedSequence(0, spawn_key=(5,))))
-            hs = h0.clone().requires_grad_(True)
-            goal, nll, ex = R.bag_train_loss(m, b, hs, torch.zeros(full.shape, dtype=torch.bool), 0.0)   # pay yok, lambda 0
-            goal.backward()
-            gs = (hs.grad.clone(), m.E.weight.grad.clone(), m.bag.other.grad.clone())
-            m.zero_grad()
-            hr = h0.clone().requires_grad_(True)
-            pos = (b.target.flatten() >= 0).nonzero()[:, 0]
-            lp = R.output_logprobs(m, b, hr, pos)
-            ref = -lp.gather(1, b.target.flatten()[pos][:, None])[:, 0].mean()
-            ref.backward()
-            gr = (hr.grad, m.E.weight.grad, m.bag.other.grad)
-            rel = max(float((a - c).norm() / c.norm()) for a, c in zip(gs, gr))
-            m.zero_grad()
-            goal1, nll1, ex1 = R.bag_train_loss(m, b, h0, full, 0.5)
-            sel = m.bag.batch_select(b, h0, m.E.weight)
-            fi = full & (b.target.flatten() >= 0)
-            ce = torch.nn.functional.cross_entropy(h0.flatten(0, 1)[fi] @ m.E.weight.T, b.target.flatten()[fi], reduction="sum")
-            ids, y = sel["ids"].flatten()[pos], b.target.flatten()[pos]
-            allw, fsc = sel["allowed"], R.Bag.full_score(sel)
-            man = sum(float(torch.logsumexp(fsc[i][allw[i]], 0) - fsc[i, w])
-                      for i, w in zip(ids.tolist(), y.tolist()) if allw[i, w])
-            nsel = sum(bool(allw[i, w]) for i, w in zip(ids.tolist(), y.tolist()))
-            res.append(dict(layout=layout, nll=abs(float(nll) - float(ref)), rel=rel, goal=float(goal) == float(nll),
-                            extra=abs(float(goal1 - nll1) - (float(ce) / len(pos) + 0.5 * man / nsel)),
-                            src=int(ex["c"] + ex["p"] + ex["l"] + ex["miss"]) == len(pos), miss=int(ex["miss"]),
-                            p_over=int(ex["p_over"]), full=int(ex1["n_full"]) == round(0.3 * len(pos))))
-        full2 = R.bag_full_mask(b.target.numpy(), 0.3, np.random.default_rng(np.random.SeedSequence(0, spawn_key=(5,))))
-        check("torba: hizli yol = output_logprobs NLL'i ve gradyani (h, E, other), iki duzen; amac - nll = pay satirlarinin "
-              "tam CE'si / hedef + lambda x secici kaybi (elle); kaynaklar toplami = hedef; kacan ve P kesilmesi var; pay "
-              "adim tohumuyla ayni",
-              all(r["nll"] < 1e-5 and r["rel"] < 1e-5 and r["goal"] and r["extra"] < 1e-4 and r["src"] and r["miss"] > 0
-                  and r["p_over"] > 0 and r["full"] for r in res) and torch.equal(full, full2), str(res))
-        R.BAG_GROUP = 256
-        long = [[[40 + i % 30 for i in range(230)], [41, 42]], [[43, 44]]]          # SS train en uzun cumle 227 (GPU coktu)
-        out_ = []
-        for layout in ("model_z", "transformer"):
-            b = D.build_batch(_Synthetic(long), [[0, 1]], layout, row_len=256)
-            hl = torch.randn(*b.kind.shape, 8, generator=g)
-            nll_l = R.bag_train_loss(m, b, hl, torch.zeros(b.kind.numel(), dtype=torch.bool), 0.0)[1]
-            pos = (b.target.flatten() >= 0).nonzero()[:, 0]
-            ref_l = -R.output_logprobs(m, b, hl, pos).gather(1, b.target.flatten()[pos][:, None])[:, 0].mean()
-            out_.append(abs(float(nll_l) - float(ref_l)))
-        check("torba: 128'den uzun torba (230 token'lik cumle, satir 256) iki duzende hizli yol = output_logprobs",
-              max(out_) < 1e-5, str(out_))
-        R.BAG_GROUP = 2
-        ok_plan, ok_sel = True, True
-        for layout in ("model_z", "transformer"):                         # belge 57 D2
-            b = D.build_batch(_Synthetic(stories), [[0, 1], [2]], layout, row_len=40)
-            torch.manual_seed(1)
-            m = torch.nn.Module()
-            m.E = torch.nn.Embedding(D.VOCAB, 8)
-            R.attach_bag(m, len(core) + 3, len(core))
-            m.bag.fill(core, counts)
-            torch.nn.init.normal_(m.bag.other, std=0.5)
-            torch.nn.init.normal_(m.bag.q.weight, std=0.5)
-            h0 = torch.randn(*b.kind.shape, 8, generator=g)
-            for sf in (1.0, 0.5):
-                flags = R.bag_full_mask(b.target.numpy(), 0.3, np.random.default_rng(np.random.SeedSequence(0, spawn_key=(5,))),
-                                        sf)
-                out = []
-                for plan in (R.bag_plan(b, flags, torch.as_tensor(core)), None):
-                    m.zero_grad()
-                    hp = h0.clone().requires_grad_(True)
-                    goal_, nll_, ex_ = R.bag_train_loss(m, b, hp, flags, 0.5, plan=plan)
-                    goal_.backward()
-                    out.append((float(goal_), float(nll_), {k: float(v) for k, v in ex_.items()}, hp.grad.clone(),
-                                m.bag.q.weight.grad.clone()))
-                ok_plan &= out[0][:3] == out[1][:3] and torch.equal(out[0][3], out[1][3]) and torch.equal(out[0][4],
-                                                                                                         out[1][4])
-                sel = m.bag.batch_select(b, h0, m.E.weight)
-                T = b.kind.shape[1]
-                keep = {j for j in range(len(sel["rows"]))
-                        if int(flags[int(sel["rows"][j]) * T + int(sel["cols"][j])]) & 2}
-                fsc, allw = R.Bag.full_score(sel), sel["allowed"]
-                tot = n = 0
-                for q in (b.target.flatten() >= 0).nonzero()[:, 0].tolist():
-                    j, w = int(sel["ids"].flatten()[q]), int(b.target.flatten()[q])
-                    if j in keep and bool(allw[j, w]):
-                        sc = fsc[j].masked_fill(~allw[j], float("-inf"))
-                        tot, n = tot + float(torch.logsumexp(sc, 0) - sc[w]), n + 1
-                got = out[0][2]["loss_selector"] / max(out[0][2]["n_selector"], 1)
-                ok_sel &= abs(got - tot / max(n, 1)) < 1e-4 and (sf == 1.0) == (len(keep) == len(sel["rows"]))
-        t_ = np.arange(50) - 5
-        a_ = R.bag_full_mask(t_, 0.3, np.random.default_rng(7))
-        old = np.zeros(50, bool)
-        old[np.random.default_rng(7).choice(np.flatnonzero(t_ >= 0), int(round(0.3 * 45)), replace=False)] = True
-        check("torba: bag_plan (CPU'da kurulmus) = plansiz yol (amac, nll, ekler, h ve q gradyani bit; iki duzen, sel_frac 1 "
-              "ve 0,5); sel_frac 0,5'te secici kaybi = yalniz bit 1'li torbalarin elle hesabi; sel_frac 1'de bit 0 eski rng "
-              "sirasi, bit 1 hepsi", ok_plan and ok_sel and np.array_equal(a_.numpy() & 1, old)
-              and bool(((a_.numpy() & 2) > 0).all()))
-    finally:
-        R.BAG_GROUP, R.BAG_CHUNK = saved
 
 
 def t_metrics():
@@ -971,10 +828,9 @@ def t_train():
         print("ATLA train: GPT-2 tokenizer yok", flush=True)
         return
     root, data, prompts = _train_root(tp)
-    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO,
-             TR.MODEL_Z_SUMMARIES_LAST)
+    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO)
     TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
-    TR.MODEL_Z_GLOBAL_RATIO, TR.MODEL_Z_SUMMARIES_LAST = 0.6, 0            # eski varsayilan: L1 / L2 G1 (8 Ekim)
+    TR.MODEL_Z_GLOBAL_RATIO = 0.6                                       # eski varsayilan: L1 / L2 G1 (8 Ekim)
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=3, max_tokens=4)
     base = ["--data", data, "--stream", root, "--device", "cpu", "--d", "16", "--layers", "1", "--heads", "2",
             "--lr", "1e-2", "--checkpoint_minutes", "0", "--optimizer", "adamw"]   # 0: her gunluk sinirinda kayit;
@@ -1116,7 +972,6 @@ def t_train():
         _train_equiv(base, root, data, prompts, out, state, same, TR)
         _train_muon(base, root, data, out, state, same, exits, TR)
         _train_global(base, root, data, out, exits, TR)
-        _train_bag(base, root, data, out, state, same, exits, TR)
         import copy                                                     # epok sonu eksik batch dolgusu (8 Ekim)
         import types
         import recipe as R
@@ -1127,10 +982,9 @@ def t_train():
         part = [rs[ro[r]:ro[r + 1]].tolist() for r in range(n_rows - n_rows % TR.BATCH_ROWS, n_rows)]
         padded = part + [[]] * (TR.BATCH_ROWS - len(part))
         diffs = {}
-        mz = ["--model", "model_z", "--layers", "2", "--global_layers", "1", "--summaries_last", "0"]
+        mz = ["--model", "model_z", "--layers", "2", "--global_layers", "1"]
         for name, extra in (("transformer", ["--model", "transformer"]), ("model_z G1", mz),
-                            ("model_z G0", mz[:4] + ["--global_layers", "0", "--summaries_last", "0"]),
-                            ("model_z summaries_last", mz[:-1] + ["1"])):   # torba dolgulanmaz (bag_index)
+                            ("model_z G0", mz[:4] + ["--global_layers", "0"])):
             args = TR._args(base + extra + ["--out", "x"])
             m0, mask_fn, layout = TR._build(args, torch.device("cpu"))
             if args.summaries_last:
@@ -1152,7 +1006,7 @@ def t_train():
         want = D.build_batch(st, padded, "transformer", "cpu", 64)
         fields = ("tokens", "kind", "pos", "doc", "sent", "target", "target_kind", "story_ids")
         check("train epok sonu eksik batch (%d / %d satir): bos satirla tamamlanan batch (CUDA egitim yolu) dolgusuzla ayni "
-              "kayip / gradyan normu / gradyan (fp32 <= 1e-6; transformer, Model Z G1 / G0 / summaries_last); "
+              "kayip / gradyan normu / gradyan (fp32 <= 1e-6; transformer, Model Z G1 / G0, summaries_last duzeni); "
               "build_batch'in bos satiri = tam dolgu satiri, dolu satirlar aynen; sinav (_Exam) eksik batch'i ayni dolguyla "
               "tamamlar" % (len(part), TR.BATCH_ROWS),
               0 < len(part) < TR.BATCH_ROWS and max(diffs.values()) <= 1e-6
@@ -1164,8 +1018,7 @@ def t_train():
     except Exception:  # noqa: BLE001
         check("train", False, traceback.format_exc(limit=3))
     finally:
-        (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO,
-         TR.MODEL_Z_SUMMARIES_LAST) = saved
+        TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO = saved
 
 
 def t_tokens():
@@ -1249,10 +1102,10 @@ def _train_learned(base, root, data, out, state, same, exits, TR):
 
 
 def _train_archived(base, data, out, state, same, exits, TR):
-    """Eski kimlikler (belge 77): Model Z'de summaries_last alani olmayan (8 Ekim oncesi; formullu / temizlik oncesi dahil)
-    ve learned_z 0 (formullu) kosu load_run'da ve surdurmede DURUR (iletide git etiketleri, dosyaya dokunulmaz); eski
-    alanli transformer yuklenir; yeni kimlikte learned_z yok.  Kaldirilan argumanlar (--learned_z dahil) veri yuklenmeden
-    DURUR."""
+    """Eski kimlikler (belge 77): Model Z'de summaries_last alani olmayan (8 Ekim oncesi; formullu / temizlik oncesi dahil),
+    summaries_last 0, learned_z 0 (formullu) ve torbali (transformer dahil) kosu load_run'da ve surdurmede DURUR (iletide
+    git etiketleri, dosyaya dokunulmaz); eski alanli transformer yuklenir; yeni kimlikte learned_z yok.  Kaldirilan
+    argumanlar (--learned_z, --summaries_last, --bag_k dahil) veri yuklenmeden DURUR."""
     import traceback
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
@@ -1263,7 +1116,9 @@ def _train_archived(base, data, out, state, same, exits, TR):
                 ("tf", out("transformer_A"), lambda d: d.update(meaning_sha256=None)),
                 ("pre8", out("mzl_A"), lambda d: d.pop("summaries_last")),
                 ("legacy", out("mzl_A"), lambda d: (d.pop("summaries_last"), d.update(meaning_sha256=None, own_vocab=1))),
-                ("formula", out("mzl_A"), lambda d: d.update(learned_z=0))):
+                ("formula", out("mzl_A"), lambda d: d.update(learned_z=0)),
+                ("sl0", out("mzl_A"), lambda d: d.update(summaries_last=0)),
+                ("tfbag", out("transformer_A"), lambda d: d.update(bag_k=64))):
             dst = out("old_" + kind)
             shutil.copytree(src, dst)
             for name, key in (("checkpoint.pt", "args"), ("agent.pt", "identity")):
@@ -1271,23 +1126,27 @@ def _train_archived(base, data, out, state, same, exits, TR):
                 edit(pack[key])
                 torch.save(pack, os.path.join(dst, name))
             mt = os.path.getmtime(os.path.join(dst, "checkpoint.pt"))
-            cmd = base + (["--model", "transformer"] if kind == "tf" else ["--model", "model_z", "--global_layers", "0"])
+            cmd = base + (["--model", "transformer"] if kind.startswith("tf") else ["--model", "model_z", "--global_layers",
+                                                                                  "0"])
             msgs[kind] = (_exit_msg(TR.main, cmd + ["--epochs", "2", "--out", dst, "--resume", "1"]) or "",
                           os.path.getmtime(os.path.join(dst, "checkpoint.pt")) == mt)
             loads[kind] = _exit_msg(GR.load_run, dst, data, dev)
         fresh = json.load(open(os.path.join(out("mzl_A"), "config.json")))["identity"]
         tag = "v2-before-cleanup-20261008"
-        check("train / load_run: Model Z'de summaries_last alani olmayan (8 Ekim oncesi; temizlik oncesi alanli dahil) ve "
-              "formullu (learned_z 0) kimlik surdurmede ve load_run'da DURUR (iletide %s ve eski etiketler), dosyaya "
-              "dokunulmaz; eski alanli transformer yuklenir; yeni kimlikte learned_z yok" % tag,
-              all(tag in msgs[k][0] and msgs[k][1] and tag in (loads[k] or "") for k in ("pre8", "legacy", "formula"))
+        check("train / load_run: Model Z'de summaries_last alani olmayan (8 Ekim oncesi; temizlik oncesi alanli dahil), "
+              "summaries_last 0, formullu (learned_z 0) ve torbali (transformer) kimlik surdurmede ve load_run'da DURUR "
+              "(iletide %s ve eski etiketler), dosyaya dokunulmaz; eski alanli transformer yuklenir; yeni kimlikte learned_z "
+              "yok" % tag,
+              all(tag in msgs[k][0] and msgs[k][1] and tag in (loads[k] or "")
+                  for k in ("pre8", "legacy", "formula", "sl0", "tfbag"))
               and "v2-before-formula-cleanup-20261007" in msgs["formula"][0] and loads["tf"] is None
               and "learned_z" not in fresh, msgs["pre8"][0][:140])
         gone = [base + ["--model", "model_z", a, v, "--out", out("gone%d" % i)] for i, (a, v) in enumerate(
             (("--meaning", "x.pt"), ("--own_vocab", "1"), ("--shared_vocab", "1"), ("--open_z", "2"), ("--learned_z", "1"),
-             ("--learned_z", "0")))]
-        check("train: kaldirilan argumanlar (--meaning, --own_vocab, --shared_vocab, --open_z, --learned_z) veri "
-              "yuklenmeden DURUR", all(exits(c) and not os.path.exists(c[-1]) for c in gone))
+             ("--learned_z", "0"), ("--summaries_last", "1"), ("--summaries_last", "0"), ("--bag_k", "64"),
+             ("--bag_core", "50")))]
+        check("train: kaldirilan argumanlar (--meaning, --own_vocab, --shared_vocab, --open_z, --learned_z, "
+              "--summaries_last, --bag_k / --bag_core) veri yuklenmeden DURUR", all(exits(c) and not os.path.exists(c[-1]) for c in gone))
     except Exception:  # noqa: BLE001
         check("train eski kimlikler", False, traceback.format_exc(limit=3))
 
@@ -1414,8 +1273,8 @@ def _train_global(base, root, data, out, exits, TR):
         r = _exit_msg(TR.main, c)
         check("train: global_layers alani olmayan (eski) checkpoint surdurmede DURUR (belge 77)", r is not None and "DUR" in r,
               str(r))
-        pinned = (TR.MODEL_Z_GLOBAL_RATIO, TR.MODEL_Z_SUMMARIES_LAST)
-        TR.MODEL_Z_GLOBAL_RATIO, TR.MODEL_Z_SUMMARIES_LAST = 1 / 3, 1       # train.py'nin gercek varsayilani
+        pinned = TR.MODEL_Z_GLOBAL_RATIO
+        TR.MODEL_Z_GLOBAL_RATIO = 1 / 3                                     # train.py'nin gercek varsayilani
         try:
             pick = lambda x: (x.global_layers, x.summaries_last, x.optimizer)  # noqa: E731
             arg = lambda a: TR._args(_unpin(base) + a + ["--out", "x"])  # noqa: E731
@@ -1427,8 +1286,7 @@ def _train_global(base, root, data, out, exits, TR):
                 ("model_z L12 auto", ["--model", "model_z", "--layers", "12", "--global_layers", "auto"]),
                 ("transformer", ["--model", "transformer", "--layers", "12"]),
                 ("transformer auto", ["--model", "transformer", "--layers", "12", "--global_layers", "auto"]),
-                ("model_z acik 0", ["--model", "model_z", "--global_layers", "0", "--summaries_last", "0"]),
-                ("model_z torba", ["--model", "model_z", "--layers", "12", "--bag_k", "64"]),
+                ("model_z acik 0", ["--model", "model_z", "--global_layers", "0"]),
                 ("model_z adamw", ["--model", "model_z", "--layers", "12", "--optimizer", "adamw"]))}
             r_def = TR.main(nolr(_unpin(base)) + ["--model", "model_z", "--layers", "6", "--steps", "3",
                                                   "--out", out("g_default")])
@@ -1436,17 +1294,14 @@ def _train_global(base, root, data, out, exits, TR):
             def_again = _exit_msg(TR.main, nolr(_unpin(base)) + ["--model", "model_z", "--layers", "6", "--lr", "auto",
                                                                  "--steps", "3", "--out", out("g_default"), "--resume", "1"])
             OLD = _unpin(base) + ["--model", "model_z", "--layers", "4", "--epochs", "2"]    # eski kosu: G3 (auto 1)
-            TR.main(OLD + ["--global_layers", "3", "--summaries_last", "0", "--optimizer", "muon", "--stop_step", "4",
-                           "--out", out("old_run")])
+            TR.main(OLD + ["--global_layers", "3", "--optimizer", "muon", "--stop_step", "4", "--out", out("old_run")])
             ck = os.path.join(out("old_run"), "checkpoint.pt")
             pack = torch.load(ck, weights_only=False)
             del pack["args"]["glob_kv_heads"]                                 # 065800 / 082421 gibi (alan 8 Ekim'de)
             torch.save(pack, ck)
             r_old = TR.main(nolr(OLD) + ["--out", out("old_run"), "--resume", "1"])   # optimizer, lr de kimlikten
-            r_ref = TR.main(OLD + ["--global_layers", "3", "--summaries_last", "0", "--optimizer", "muon", "--out",
-                                   out("old_ref")])
+            r_ref = TR.main(OLD + ["--global_layers", "3", "--optimizer", "muon", "--out", out("old_ref")])
             fp8_cpu = _exit_msg(TR.main, OLD + ["--global_layers", "1", "--fp8", "tensorwise", "--out", out("fp8_cpu")])
-            stop_bag = _exit_msg(TR.main, OLD + ["--summaries_last", "1", "--bag_k", "64", "--out", out("sl_bag")])
             kv = {h: arg(["--model", "model_z", "--layers", "3", "--heads", str(h), "--glob_kv_heads", "auto"]).glob_kv_heads
                   for h in (16, 12, 8, 4)}
             kv_bad = [_exit_msg(TR._args, _unpin(base) + ["--model", "model_z", "--heads", str(h), "--glob_kv_heads", "auto",
@@ -1463,18 +1318,18 @@ def _train_global(base, root, data, out, exits, TR):
             adamw_resume = _exit_msg(TR.main, nolr(_unpin(base)) + ["--model", "model_z", "--global_layers", "0",
                                                                     "--epochs", "2", "--out", out("mzl_A"), "--resume", "1"])
         finally:
-            TR.MODEL_Z_GLOBAL_RATIO, TR.MODEL_Z_SUMMARIES_LAST = pinned
+            TR.MODEL_Z_GLOBAL_RATIO = pinned
         sw = lambda n_: torch.load(os.path.join(out(n_), "agent.pt"), weights_only=False)["state"]  # noqa: E731
         check("train: varsayilanlar (8 Ekim): model_z G auto = round(L / 3) (L10 3, L12 4, L24 8) + summaries_last 1, "
-              "transformer 0 / 0 (auto da 0), torbada summaries_last 0 (acik 1 DURUR); optimizer "
+              "transformer 0 / 0 (auto da 0); optimizer "
               "normuon; varsayilan kosu (L6 -> G2, --lr verilmeden auto) egitir, sinav ve okuma uretir, segments'ta fp8 "
               "none, --lr auto ile --resume kimlik denetiminden gecer; eski kimlikli kosu (G3 L4, muon, lr 1e-2, "
-              "summaries_last 0, glob_kv_heads alani yok) bayraksiz (--lr dahil) --resume ile G3 / lr 1e-2 kalir (auto "
+              "glob_kv_heads alani yok) bayraksiz (--lr dahil) --resume ile G3 / lr 1e-2 kalir (auto "
               "1'e / 0,0139'a donmez) = kesintisiz (bit); CPU'da --fp8 DURUR",
               dflt == {"model_z L10": (3, 1, "normuon"), "model_z L12": (4, 1, "normuon"),
                        "model_z L24": (8, 1, "normuon"), "model_z L12 auto": (4, 1, "normuon"),
                        "transformer": (0, 0, "normuon"), "transformer auto": (0, 0, "normuon"),
-                       "model_z acik 0": (0, 0, "normuon"), "model_z torba": (4, 0, "normuon"),
+                       "model_z acik 0": (0, 1, "normuon"),
                        "model_z adamw": (4, 1, "adamw")}
               and (idt["global_layers"], idt["summaries_last"], idt["optimizer"]) == (2, 1, "normuon")
               and idt["lr"] == 2e-3 * (768 / 16) ** 0.5 and def_again is None and r_old["identity"]["lr"] == 1e-2
@@ -1484,9 +1339,9 @@ def _train_global(base, root, data, out, exits, TR):
               and np.isfinite(r_def["exam"]["loss"]) and r_def["generation"]
               and os.path.exists(os.path.join(out("g_default"), "samples.txt"))
               and (r_old["identity"]["global_layers"], r_old["identity"]["summaries_last"],
-                   r_old["identity"]["glob_kv_heads"]) == (3, 0, 0) and r_old["finished"]
+                   r_old["identity"]["glob_kv_heads"]) == (3, 1, 0) and r_old["finished"]
               and [w["loss"] for w in r_old["log"]] == [w["loss"] for w in r_ref["log"]]
-              and all(torch.equal(v, sw("old_ref")[k]) for k, v in sw("old_run").items()) and stop_bag is not None,
+              and all(torch.equal(v, sw("old_ref")[k]) for k, v in sw("old_run").items()),
               "%s; resume %s" % (dflt, def_again))
         check("train auto (8 Ekim): --glob_kv_heads auto = heads / 4 (16 4, 12 3, 8 2, 4 1), 4'e bolunmezse (6, 2) DUR, "
               "varsayilan 0; --lr verilmezse auto = 2e-3 sqrt(768 / d) (d768 tam 2e-3, d1024 1,732e-3, d1280 1,549e-3; "
@@ -1532,18 +1387,6 @@ def _train_global(base, root, data, out, exits, TR):
                                                           for n_ in ("stop_full", "stop_cut"))))
               and early is not None,
               "%s / %s" % ([w["loss"] for w in ss["log"]], full_l[:4]))
-        L_ = base + ["--model", "model_z", "--layers", "2", "--epochs", "2"]   # --summaries_last (belge 66)
-        l0 = TR.main(L_ + ["--out", out("last_off")])
-        l1 = TR.main(L_ + ["--summaries_last", "1", "--out", out("last_on")])
-        d_loss = max(abs(a_["loss"] - b_["loss"]) for a_, b_ in zip(l0["log"], l1["log"]))
-        check("train --summaries_last 1: kayip egrisi bugunku duzenle esit (<= 1e-3, fp32 toplama sirasi), sinav kaybi "
-              "esit (<= 1e-3), acc ayni; kimlikte summaries_last; transformer ve "
-              "torba ile DURUR",
-              d_loss <= 1e-3 and abs(l0["exam"]["loss"] - l1["exam"]["loss"]) <= 1e-3
-              and abs(l0["exam"]["acc"] - l1["exam"]["acc"]) <= 1e-3 and l1["identity"]["summaries_last"] == 1
-              and exits(base + ["--model", "transformer", "--summaries_last", "1", "--out", out("last_tf")])
-              and exits(L_ + ["--summaries_last", "1", "--bag_k", "64", "--out", out("last_bag")]),
-              "kayip farki %.1e, sinav %.4f / %.4f" % (d_loss, l0["exam"]["loss"], l1["exam"]["loss"]))
         old = {}                                                          # kod temizligi (belge 77)
         for name_, fields in (("kept", dict(z_bow_weight=0.0, layer_plan=None)), ("zbow", dict(z_bow_weight=0.5)),
                               ("mid", dict(layer_plan="loc1,mid1,glob1")), ("zra", dict(z_reads_all=2)),
@@ -1596,69 +1439,7 @@ def _train_global(base, root, data, out, exits, TR):
         check("train --global_layers", False, traceback.format_exc(limit=3))
 
 
-def _train_bag(base, root, data, out, state, same, exits, TR):
-    """--bag_k (ogrenen torba) gercek modellerle: Model Z + G ve transformer kosar, kayip duser; ilk gunluk kaybi (hizli
-    yol) = ayni ilk agirlikla loss_per_target (output_logprobs; sinav tanimi); ana modelin ilk agirliklari torbasizla ayni;
-    gunlukte kaynaklar, p(DIGER), tam CE, secici kaybi; kesilip surdurulen = kesintisiz (bit); load_run strict yukler,
-    uretir; sayim dosyasi yok / pay disarida / bag_k farkiyla surdurme DURUR."""
-    import traceback
-    import recipe as R
-    try:
-        cpath = os.path.join(data, "train_token_counts.npy")
-        np.save(cpath, D.token_counts(root))
-        cmd = base + ["--model", "model_z", "--layers", "2", "--global_layers", "1", "--bag_k", "12", "--bag_core", "5",
-                      "--bag_full_frac", "0.2", "--bag_weight", "0.5", "--steps", "8"]
-        A = out("bag_A")
-        a = TR.main(cmd + ["--out", A])
-        L = [w["loss"] for w in a["log"]]
-        args = TR._args(cmd + ["--out", "x"])
-        core = R.core_ids(np.load(cpath), 5)
-        args.bag_n_core = len(core)
-        m, mask_fn, layout = TR._build(args, torch.device("cpu"))
-        m.bag.fill(core, np.load(cpath))
-        plain = TR._build(TR._args([x for x in cmd if x not in ("--bag_k", "12")] + ["--out", "x"]),
-                          torch.device("cpu"))[0].state_dict()
-        st = D.TokenStories(root, data, "train")
-        f = np.load(os.path.join(data, "train_pack_plan_e1.npz"))
-        ro, rs = f["row_offsets"], f["row_stories"]
-        b = D.build_batch(st, [rs[ro[r]:ro[r + 1]].tolist() for r in range(4)], layout, "cpu", 64)
-        with torch.no_grad():
-            want = m.loss_per_target(b)[0].mean().item()
-        idt, bg = a["identity"], a["log"][-1]["bag"]
-        check("train --bag_k (Model Z + G): kosar, kayip duser; ilk gunluk kaybi (hizli yol) = loss_per_target; ana model "
-              "ilk agirliklari torbasizla ayni; kimlikte bag_k / bag_core / bag_weight / bag_full_frac / sha; gunlukte "
-              "C + P + L + kacan = 1, p(DIGER), tam CE, secici kaybi",
-              L[-1] < L[0] and abs(a["log"][0]["loss"] - want) < 1e-4
-              and all(torch.equal(v, m.state_dict()[k]) for k, v in plain.items())
-              and (idt["bag_k"], idt["bag_core"], idt["bag_weight"], idt["bag_full_frac"]) == (12, 5, 0.5, 0.2)
-              and len(idt["bag_core_sha256"]) == 64 and abs(bg["c"] + bg["p"] + bg["l"] + bg["miss"] - 1) < 2e-4
-              and 0 < bg["p_other"] < 1 and np.isfinite(bg["full_ce"]) and np.isfinite(bg["loss_selector"])
-              and np.isfinite(a["exam"]["loss"]),
-              "kayip %.3f -> %.3f; ilk %.4f / %.4f; %s" % (L[0], L[-1], a["log"][0]["loss"], want, bg))
-        t = TR.main(base + ["--model", "transformer", "--bag_k", "12", "--bag_core", "5", "--steps", "4",
-                            "--out", out("bag_tf")])
-        check("train --bag_k (transformer, ozet = END): ayni yol kosar, sinav sonlu",
-              t["identity"]["bag_k"] == 12 and np.isfinite(t["exam"]["loss"]) and "bag" in t["log"][-1])
-        stopped, r = _cut_and_resume(TR, cmd, out("bag_cut"))
-        check("train --bag_k: adim 4'te kesilip surdurulen = kesintisiz (model, secici, DIGER bit duzeyinde)",
-              stopped and same(state(A), state(out("bag_cut"))) and [w["loss"] for w in r["log"]] == L)
-        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
-        import generate_readings as GR
-        lm = GR.load_run(A, data, torch.device("cpu"))[0]
-        gen = lm.generate([[[int(x) for x in st.sentences(0)[0]]]], 2, 4)
-        check("train: load_run torbali kosuyu strict yukler (C state_dict'ten), generate calisir",
-              torch.equal(lm.bag.core, torch.as_tensor(core)) and len(gen) == 1 and isinstance(gen[0][0], list))
-        os.rename(cpath, cpath + ".x")
-        no_counts = exits(cmd + ["--out", out("bag_nocounts")])
-        os.rename(cpath + ".x", cpath)
-        check("train: sayim dosyasi yok, --bag_full_frac 0..1 disi, bag_k farkiyla surdurme DURUR",
-              no_counts and exits(cmd + ["--bag_full_frac", "2", "--out", out("bag_frac")])
-              and exits([x if x != "12" else "13" for x in cmd] + ["--out", A, "--resume", "1", "--steps", "10"]))
-    except Exception:  # noqa: BLE001
-        check("train --bag_k", False, traceback.format_exc(limit=3))
-
-
-EQUIV_TAG = "v2-before-formula-cleanup-20261007"
+EQUIV_TAG = "v2-before-cleanup-20261008"    # f34cf9b (torba / summaries_last 0 oncesi); o kod 20261007 etiketine bit esitti
 EQUIV_RUNNER = """import torch  # noqa: I001
 import json
 import sys
@@ -1672,9 +1453,9 @@ TR.main(argv)
 
 
 def _train_equiv(base, root, data, prompts, out, state, same, TR):
-    """Formul temizligi esdegerligi (belge 44; belge 33 adim 4 deseni): etiketteki train.py (git archive, ayri surec) =
-    bugunku train.py, varsayilan Muon ile Model Z (G 1), G'siz Model Z ve transformer, 2 epok: son agirlik bit duzeyinde,
-    adim adim kayip / gradyan normu / lr, sinavlar, okuma metni ve olculeri ayni."""
+    """Temizlik esdegerligi (belge 44, 77; belge 33 adim 4 deseni): etiketteki train.py (git archive, ayri surec; Model Z
+    orada varsayilan summaries_last 1) = bugunku train.py, Muon ile Model Z (G 1), G'siz Model Z ve transformer, 2 epok:
+    son agirlik bit duzeyinde, adim adim kayip / gradyan normu / lr, sinavlar, okuma metni ve olculeri ayni."""
     import subprocess
     import traceback
     import zipfile
@@ -1698,7 +1479,7 @@ def _train_equiv(base, root, data, prompts, out, state, same, TR):
         for name, extra in (("model_z", ["--model", "model_z", "--layers", "2"]),
                             ("model_z_g0", ["--model", "model_z", "--layers", "2", "--global_layers", "0"]),
                             ("transformer", ["--model", "transformer"])):
-            argv = _unpin(base) + extra + ["--epochs", "2", "--optimizer", "muon"]   # etiketin varsayilani muon
+            argv = _unpin(base) + extra + ["--epochs", "2", "--optimizer", "muon"]   # duz Muon (varsayilan normuon)
             old, new = out("equiv_old_" + name), out("equiv_new_" + name)
             p = subprocess.run([sys.executable, runner, os.path.join(tmp, "deneme2", "v2"), json.dumps(argv + [
                 "--out", old]), prompts], capture_output=True, text=True)
@@ -1712,7 +1493,7 @@ def _train_equiv(base, root, data, prompts, out, state, same, TR):
                       okuma=sa == sb, optimizer=a["identity"]["optimizer"] == b["identity"]["optimizer"] == "muon")
             bad += ["%s: %s" % (name, k) for k, v in ok.items() if not v]
             info.append("%s %d adim" % (name, len(b["log"])))
-        check("esdegerlik: etiket %s train.py = bugunku (Muon varsayilan; Model Z G 1, G'siz, transformer; 2 epok): son "
+        check("esdegerlik: etiket %s train.py = bugunku (Muon; Model Z G 1, G'siz, transformer; 2 epok): son "
               "agirlik bit duzeyinde, adim adim kayip / gradyan normu / lr, sinav, okuma ayni" % EQUIV_TAG, not bad,
               "; ".join(bad) if bad else ", ".join(info))
     except Exception:  # noqa: BLE001
@@ -1795,7 +1576,7 @@ def t_fineweb():
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(tp)
     saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS, MF.VALID_STRIDE, D.MAX_SENTENCE_TOKENS,
-             TR.MODEL_Z_GLOBAL_RATIO, TR.MODEL_Z_SUMMARIES_LAST)
+             TR.MODEL_Z_GLOBAL_RATIO)
     try:
         fl_ss, q_ss = D.stream_tables(tok)
         fl_ss2, q_ss2 = D.stream_tables(tok, "ss")
@@ -1903,7 +1684,7 @@ def t_fineweb():
               and va.n == len(np.load(os.path.join(out, "gpt2", "valid_bytes.npy"))), "parca %d / devam %d" % (
                   tr.n, int(cont.sum())))
         TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS = 4, 1, dict(max_sentences=3, max_tokens=4)
-        TR.MODEL_Z_GLOBAL_RATIO, TR.MODEL_Z_SUMMARIES_LAST = 0.6, 0            # eski varsayilan: L1 / L2 G1 (8 Ekim)
+        TR.MODEL_Z_GLOBAL_RATIO = 0.6                                       # eski varsayilan: L1 / L2 G1 (8 Ekim)
         base = ["--data", out, "--stream", out, "--device", "cpu", "--d", "16", "--layers", "2", "--heads", "2", "--lr",
                 "1e-2", "--checkpoint_minutes", "0", "--optimizer", "muon"]          # 8 Ekim varsayilani normuon'dan once
         run = os.path.join(TMP, "fw_runs", "mzg")
@@ -1938,8 +1719,8 @@ def t_fineweb():
     except Exception:  # noqa: BLE001
         check("fineweb", False, traceback.format_exc(limit=4))
     finally:
-        (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS, MF.VALID_STRIDE, D.MAX_SENTENCE_TOKENS, TR.MODEL_Z_GLOBAL_RATIO,
-         TR.MODEL_Z_SUMMARIES_LAST) = saved
+        (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS, MF.VALID_STRIDE, D.MAX_SENTENCE_TOKENS,
+         TR.MODEL_Z_GLOBAL_RATIO) = saved
 
 
 def _fineweb_extend(src, out, texts, tok, TR, MF):
@@ -2083,8 +1864,7 @@ def _fineweb_carry(tp, TR, MF):
     """--carry_summaries / --carry_group (belge 83), uzun valid belgeli sentetik FineWeb ile: C (bellek) ve K (ayni plan,
     bellek yok) kosar; kimlikte; sinavda continuation (devam hedefleri, iki kolda ayni hedef sayisi), gunlukte loss_cont;
     ayni plan (plan_sha256); C kesilip surdurulen = kesintisiz (bit); okuma (carry uretimi) yazilir; load_run carry_group /
-    row_len'i kimlikten kurar; birlesik 10BT klasoruyle (fw_10bt) kosar; DUR: transformer, summaries_last 0, z_reads_all,
-    grup 1, parcasiz veri."""
+    row_len'i kimlikten kurar; birlesik 10BT klasoruyle (fw_10bt) kosar; DUR: transformer, grup 1, parcasiz veri."""
     import traceback
     try:
         src, _ = _fake_fineweb(tp, n_docs=60, long_every=8)               # uzun belgeler valid'e de duser (15, 55)
@@ -2092,7 +1872,7 @@ def _fineweb_carry(tp, TR, MF):
         MF.main(["prepare", "--src", src, "--out", out, "--workers", "1"])
         o = lambda n_: os.path.join(TMP, "carry_runs", n_)  # noqa: E731
         base = ["--data", out, "--stream", out, "--device", "cpu", "--model", "model_z", "--d", "16", "--layers", "2",
-                "--heads", "2", "--lr", "1e-2", "--checkpoint_minutes", "0", "--epochs", "2", "--summaries_last", "1"]
+                "--heads", "2", "--lr", "1e-2", "--checkpoint_minutes", "0", "--epochs", "2"]
         C, K = base + ["--carry_summaries", "1"], base + ["--carry_group", "4"]
         c1 = TR.main(C + ["--out", o("C")])
         stopped, c2 = _cut_and_resume(TR, C, o("C_cut"))
@@ -2104,19 +1884,19 @@ def _fineweb_carry(tp, TR, MF):
         cc, kc = c1["exam"]["continuation"], k1["exam"]["continuation"]
         lc = [w.get("loss_cont") for w in c1["log"]]
         bad = [_exit_msg(TR.main, a + ["--out", o("bad%d" % i)]) for i, a in enumerate((
-            C + ["--model", "transformer"], C + ["--summaries_last", "0"], C + ["--carry_group", "1"]))]
+            C + ["--model", "transformer"], C + ["--carry_group", "1"]))]
         root, data, _ = _train_root(tp)                                      # parcasiz (SS benzeri) veri
         bad.append(_exit_msg(TR.main, ["--data", data, "--stream", root, "--device", "cpu", "--model", "model_z", "--d", "16",
-                                       "--layers", "2", "--heads", "2", "--steps", "2", "--summaries_last", "1",
-                                       "--carry_summaries", "1", "--out", o("bad_ss")]))
+                                       "--layers", "2", "--heads", "2", "--steps", "2", "--carry_summaries", "1",
+                                       "--out", o("bad_ss")]))
         mo = os.path.join(TMP, "fw_10bt")                                    # _fineweb_extend'in birlesik klasoru
         r10 = TR.main(["--data", mo, "--stream", mo, "--device", "cpu", "--model", "model_z", "--d", "16", "--layers", "2",
-                       "--heads", "2", "--steps", "3", "--summaries_last", "1", "--carry_summaries", "1", "--checkpoint_minutes",
-                       "0", "--out", o("C10bt")])
+                       "--heads", "2", "--steps", "3", "--carry_summaries", "1", "--checkpoint_minutes", "0",
+                       "--out", o("C10bt")])
         check("train --carry_summaries 1 / --carry_group 4 (K): kosar, kimlikte; continuation sinavi (devam hedefi %s, iki "
               "kolda ayni sayi; loss C %s / K %s), gunlukte loss_cont; ayni plan; C kesilip surdurulen = kesintisiz (bit); "
               "okuma yazildi; load_run carry_group / row_len; birlesik 10BT klasoruyle kosar; DUR (transformer, "
-              "summaries_last 0, grup 1, parcasiz veri)" % (cc and cc["targets"], cc and cc["loss"],
+              "grup 1, parcasiz veri)" % (cc and cc["targets"], cc and cc["loss"],
                                                                         kc and kc["loss"]),
               c1["identity"]["carry_summaries"] == 1 and c1["identity"]["carry_group"] == 4
               and k1["identity"]["carry_summaries"] == 0 and k1["identity"]["carry_group"] == 4
@@ -2232,8 +2012,7 @@ def t_fp8():
         return
     import argparse
     for model in ("model_z", "transformer"):
-        args = argparse.Namespace(model=model, d=64, layers=2, heads=2, seed=0, global_layers=1 if model == "model_z" else 0,
-                                  bag_k=0)
+        args = argparse.Namespace(model=model, d=64, layers=2, heads=2, seed=0, global_layers=1 if model == "model_z" else 0)
         m = TR._build(args, torch.device("cpu"))[0]
         names = [n for n, _ in __import__("recipe").muon_params(m)]
         sd = {k: v.clone() for k, v in m.state_dict().items()}

@@ -25,7 +25,8 @@ eski sira; model ayni (attention disi konum konum, RoPE pos'tan, maske iliskiden
 (model_z_summaries_last_ranges).  Batch real_pos tasiyorsa bu duzen.
 z_bow ve layer_plan (mid / glob her yerde) kaldirildi (kullanici, 8 Ekim: "Kod temizliği de başlasın bence"; belge 77):
 eski kod git commit 7bec0ae.
-Torba (--bag_k; recipe.Bag): sinav recipe.bag_loss_per_target, uretimde SummaryCache torbayi ozette (BOS / Z_k) secer.
+Torba (--bag_k) ve egitimde summaries_last 0 kaldirildi (kullanici, 8 Ekim: "Torbada gereksiz gibi"; belge 77; git etiketi
+v2-before-cleanup-20261008); bugunku duzen (Z'ler arada) teshis / prefill yolunda kalir (ayni hesap).
 """
 import dataclasses
 import functools
@@ -311,21 +312,14 @@ class SentenceTransformer(torch.nn.Module):
             x = block(x, real, w(attn[1])) if l >= first else block(x, batch.pos, w(attn[0]))
         return self.norm(x)
 
-    def _logits(self, h, inbag=None):
-        """h (..., d) -> cikis: torbasiz h @ E^T; torbali iki asamali log p (inbag: torba, recipe.two_stage_logprobs)."""
-        lg = h @ self.E.weight.T
-        if not hasattr(self, "bag"):
-            return lg
-        from recipe import two_stage_logprobs
-        return two_stage_logprobs(lg, inbag, h @ self.bag.other)
+    def _logits(self, h):
+        """h (..., d) -> cikis h @ E^T (bagli embedding)."""
+        return h @ self.E.weight.T
 
     def loss_per_target(self, batch, attn=None, chunk=4096):
         """-> nll (K,), pred (K,), target_kind (K,) (hedefli konumlar, satir sirasiyla; belge 21 s7 sozlesmesi)."""
         h = self._batch_hidden(batch, attn)
         keep = batch.target >= 0
-        if hasattr(self, "bag"):
-            from recipe import bag_loss_per_target
-            return (*bag_loss_per_target(self, batch, h, chunk), batch.target_kind[keep])
         hk, tgt = h[keep], batch.target[keep]
         nll = torch.empty(len(tgt), device=h.device)
         pred = torch.empty(len(tgt), dtype=torch.long, device=h.device)
@@ -388,8 +382,7 @@ class SummaryCache:
     Konumlar kendiliginden: token k+i, Z_k k.  Her cagri sonraki token'in logit'ini dondurur (self.logits).  Z_k ozet +
     kendi cumlesinin onbellegine bakar, K/V'si ozete yazilir, cumle onbellegi ANCAK sonra silinir.  global_layers
     bloklari: butun gecmisin K/V'si (all_k / all_v), gercek konumla (self.t: BOS 0, her token ve Z +1).  prefill: istem
-    tek ileri geciste (egitimin maskeleri ve konumlari), onbellek token token yolla ayni duruma gelir.  Torbali model:
-    torba ozette (BOS, Z_k) secilir, P = kapanmis cumlelerin token'lari (past).  carry (model.carry_group, belge 83): cumle
+    tek ileri geciste (egitimin maskeleri ve konumlari), onbellek token token yolla ayni duruma gelir.  carry (model.carry_group, belge 83): cumle
     kapaninca parca dolu (used > row_len - MAX_SENTENCE_TOKENS - 1) ise yeni parca: glob onbelleginde yalniz Z'ler kalir
     (BOS ve token'lar atilir), konumlar surer; carry_group'uncu parcada onbellek sifirlanir (yeni hikaye, BOS)."""
 
@@ -402,16 +395,13 @@ class SummaryCache:
         self.all_k, self.all_v = [None] * L, [None] * L
         self.glob = [l >= L - model.global_layers for l in range(L)]
         self.n_z, self.i, self.t = 0, 0, 0
-        self.past, self.cur, self.inbag = [], [], None
         self.piece, self.used, self.gkind = 0, 1, []                       # carry: parca no, parcadaki konum, glob tur
         x = model.E(torch.tensor([[EOS_ID]], device=self.dev))              # BOS = EOS token'i (belge 21 s1)
         self.logits = self._out(self._step(x, 0, read_sentence=False, summary=True), summary=True)
 
     def _out(self, hn, summary):
-        """Son konumun normlu durumu -> logit (torbali: ozette torba yeniden secilir)."""
-        if summary and hasattr(self.m, "bag"):
-            self.inbag = self.m.bag.select_one(hn[0, -1], self.m.E.weight, self.past)
-        return self.m._logits(hn, self.inbag)[0, -1]
+        """Son konumun normlu durumu -> logit."""
+        return self.m._logits(hn)[0, -1]
 
     def _step(self, x, pos, read_sentence, summary):
         """read_sentence: cumle onbellegini de gor; summary: K/V ozete (yoksa cumle onbellegine) yazilir.  Global
@@ -475,7 +465,6 @@ class SummaryCache:
         self.n_z, self.i, self.t = len(sents), 0, T - 1
         self.sen_k = [None] * len(self.sen_k)
         self.sen_v = [None] * len(self.sen_v)
-        self.past = [t_ for x_ in sents for t_ in x_]
         self.logits = self._out(self.m.norm(x), summary=True)
         return self.logits
 
@@ -484,7 +473,6 @@ class SummaryCache:
         """Simdiki cumleye token -> sonraki token'in logit'i."""
         self.i += 1
         self.t += 1
-        self.cur.append(token)
         x = self.m.E(torch.tensor([[token]], device=self.dev))
         self.logits = self._out(self._step(x, self.n_z + self.i, read_sentence=True, summary=False), summary=False)
         return self.logits
@@ -498,7 +486,6 @@ class SummaryCache:
         self.i = 0
         self.t += 1
         x = self.m.E(torch.tensor([[END_ID]], device=self.dev))
-        self.past, self.cur = self.past + self.cur, []
         self.logits = self._out(self._step(x, self.n_z, read_sentence=True, summary=True), summary=True)
         self.sen_k = [None] * len(self.sen_k)                               # Z_k'den SONRA
         self.sen_v = [None] * len(self.sen_v)

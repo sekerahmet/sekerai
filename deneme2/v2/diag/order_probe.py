@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "common"))
 sys.path.insert(0, HERE)
 import data as D  # noqa: E402
 import gap_v2 as G  # noqa: E402  (load, target_features, token_counts, function_tokens)
-import recipe as R  # noqa: E402  (output_logprobs: torbali modelde iki asamali)
+import recipe as R  # noqa: E402
 from gap_v2 import target_features  # noqa: E402
 
 NAMES = [" Mia", " Leo", " Lily", " Max", " Sam", " Tom", " Ben", " Anna", " Zoe", " Jack"]

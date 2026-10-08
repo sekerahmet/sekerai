@@ -2,7 +2,7 @@
 (z, z_flat, direct, generate_longest, formullu onbellek) kaldirildi (belge 44); eski hali git etiketi
 v2-before-formula-cleanup-20261007.
 
-    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,bag,mask,summaries_last,gqa,carry]
+    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,mask,summaries_last,gqa,carry]
 """
 import os
 import sys
@@ -37,7 +37,6 @@ import numpy as np  # noqa: E402
 from sentence import (BOS, PAD, TOKEN, ZTOK, SentenceTransformer, SummaryCache, _dense, model_z_mask,  # noqa: E402
                       model_z_read_mask)
 import data as D  # noqa: E402  (sentence common/'u yola ekledi)
-import recipe as R  # noqa: E402
 
 FIRST, MID, END_T, EOS_T = D.TargetKind.FIRST, D.TargetKind.MID, D.TargetKind.END, D.TargetKind.EOS
 
@@ -813,91 +812,6 @@ def t_equiv():
           "greedy, sample)" % len(a), not bad and a.keys() == b.keys(), "farkli: %s" % bad if bad else "")
 
 
-BAG_STORIES = [[[3, 4, 3], [5, 4, 6], [7, 3, 8]], [[9], [9, 10], [11]], [[12, 13], [14]]]
-
-
-def _bag_reference(rows, stories, core):
-    """Dongulu basvuru: satir satir torbalar [(satir, hikaye, cumle k (-1 BOS), P kumesi, hedefler)]."""
-    out = []
-    for r, row in enumerate(rows):
-        for di, i in enumerate(row):
-            st = stories[i]
-            for k in range(-1, len(st)):
-                P = {t for s in st[:k + 1] for t in s if not core[t]}
-                nxt = st[k + 1] + [D.END_ID] if k + 1 < len(st) else []
-                tg = ([nxt[0]] + nxt[1:]) if nxt else [D.EOS_ID]
-                out.append((r, di, k, P, tg))
-    return out
-
-
-def bag_model(k=7):
-    """Kucuk Model Z + G, torbali (C = 4 + END + EOS, R = k - |C|), secici ve DIGER rastgele."""
-    model = learned_model(global_layers=1)
-    counts = np.zeros(D.EOS_ID + 1, np.int64)
-    counts[[4, 9]] = 100
-    counts[3:20] += 5
-    core = R.core_ids(counts, 2)
-    R.attach_bag(model, k, len(core))
-    model.bag.fill(core, counts)
-    torch.nn.init.normal_(model.bag.other, std=0.5)
-    torch.nn.init.normal_(model.bag.q.weight, std=0.5)
-    return model.eval()
-
-
-def t_bag():
-    """Ogrenen torba (belge 53-55): konum -> torba ve P_k donguyle ayni; ZTOK (0) / BOS P'ye girmez; sizinti yok (sonraki
-    cumle degisince onceki torbalarin P'si, secici puani ve torbasi bit ayni); paketleme degismezligi; uretim yolu
-    (SummaryCache token token ve prefill) = sinav yolu (output_logprobs, iki asamali; belge 55 K3)."""
-    core = torch.zeros(D.VOCAB, dtype=torch.bool)
-    core[[4, D.END_ID, D.EOS_ID]] = True
-    rows, T = [[0, 1], [2]], 40
-    b = D.build_batch(token_stories(BAG_STORIES), rows, "model_z", row_len=T)
-    ids, br, bc = R.bag_index(b)
-    pb, pw = R.bag_copy(b, ids, br, bc, core)
-    P = [set(pw[pb == j].tolist()) for j in range(len(br))]
-    ref = _bag_reference(rows, BAG_STORIES, core)
-    keep = b.target >= 0
-    got_t = [[] for _ in ref]
-    for bag, y in zip(ids[keep].tolist(), b.target[keep].tolist()):
-        got_t[bag].append(y)
-    check("bag: konum -> torba ve P_k (cumle <= k, C disi) dongulu basvuruyla ayni (%d torba); ZTOK (0) / EOS P'de yok"
-          % len(ref), len(ref) == len(br) and all(P[j] == x[3] and got_t[j] == x[4] and int(br[j]) == x[0]
-                                                  and int(b.doc[br[j], bc[j]]) == x[1] for j, x in enumerate(ref))
-          and not any({0, D.EOS_ID} & p for p in P))
-    model = bag_model(12)                                                        # R 8: P kesilmez
-
-    def sel_of(stories, rows_):
-        bb = D.build_batch(token_stories(stories), rows_, "model_z", row_len=T)
-        with torch.no_grad():
-            return model.bag.batch_select(bb, model._batch_hidden(bb), model.E.weight)
-    s0 = sel_of(BAG_STORIES, rows)
-    s1 = sel_of([[[3, 4, 3], [5, 4, 6], [20, 21, 22]]] + BAG_STORIES[1:], rows)    # hikaye 0 cumle 2 degisti
-    check("bag: sizinti yok -- cumle 2 degisince torba 0-2'nin P'si, secici puani ve torbasi bit ayni, torba 3'unku degisir",
-          all(torch.equal(s0[k][:3], s1[k][:3]) for k in ("pbit", "score", "inbag"))
-          and not torch.equal(s0["pbit"][3], s1["pbit"][3]) and not torch.equal(s0["score"][3], s1["score"][3]))
-    s2 = sel_of(BAG_STORIES, [[1, 0], [2]])                                      # hikaye 0 satirda ikinci
-    n0, n1 = len(BAG_STORIES[0]) + 1, len(BAG_STORIES[1]) + 1
-    check("bag: paketleme degismezligi (hikaye 0 satir basinda / ikinci sirada): P ve torba ayni, puan <= 1e-5",
-          torch.equal(s0["pbit"][:n0], s2["pbit"][n1:n1 + n0]) and torch.equal(s0["inbag"][:n0], s2["inbag"][n1:n1 + n0])
-          and torch.allclose(s0["score"][:n0], s2["score"][n1:n1 + n0], atol=1e-5))
-    model = bag_model()                                                          # R 3: P kesilir
-    with torch.no_grad():
-        bb = D.build_batch(token_stories(BAG_STORIES), [[0]], "model_z", row_len=T)
-        h = model._batch_hidden(bb)
-        n = int((bb.kind[0] != PAD).sum())
-        want = R.output_logprobs(model, bb, h, torch.arange(n))
-        cache = SummaryCache(model)
-        got = [cache.logits]
-        for s in BAG_STORIES[0]:
-            got += [cache.append_token(t) for t in s] + [cache.close_sentence()]
-        pre = SummaryCache(model)
-        pre.prefill(BAG_STORIES[0][:2])
-    zc = int((bb.kind[0] == ZTOK).nonzero()[1])
-    check("bag: uretim yolu (SummaryCache token token ve prefill) = sinav yolu output_logprobs (iki asamali, konumun B_k'si)",
-          float((torch.stack(got) - want).abs().max()) < 1e-4 and float((pre.logits - want[zc]).abs().max()) < 1e-4,
-          "fark %.1e" % float((torch.stack(got) - want).abs().max()))
-
-
 def t_carry():
     """--carry_summaries (belge 83): (a) G'siz modelde carry batch'indeki parcalar = bolunmemis belgenin tam ileri gecisi;
     G1'de glob maskesi "sonraki parca onceki parcalarin yalniz Z'lerini gorur" olan bolunmemis basvuruyla ayni (fp32);
@@ -996,7 +910,7 @@ def t_carry():
 
 
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
-             equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, bag=t_bag, carry=t_carry)
+             equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry)
 
 if __name__ == "__main__":
     if SIDE is not None:
