@@ -756,6 +756,15 @@ def t_prefill():
     check("StaticCache (belge 84) adim adim = SummaryCache (fp32 < 1e-5; G 0 / 1 GQA / hepsi glob; bos, kisa, uzun istem, "
           "token ve Z adimi), tampon asimi DURUR, carry desteklenmez (SummaryCache)", sd < 1e-5 and stops
           and not StaticCache.supports(SentenceTransformer(32, 3, 2, global_layers=1, carry_group=2)), "fark %.1e" % sd)
+    from sentence import decode_sdpa, _SPLIT                                 # parcali (split-KV, belge 92) = fp64 basvuru
+    g_ = torch.Generator().manual_seed(4)
+    q_, k_ = torch.randn(2, 4, 1, 16, generator=g_), torch.randn(2, 2, 4 * _SPLIT, 16, generator=g_)
+    v_, m_ = torch.randn(2, 2, 4 * _SPLIT, 16, generator=g_), torch.arange(4 * _SPLIT)[None] < torch.tensor([[_SPLIT + 5], [3]])
+    ref_ = torch.nn.functional.scaled_dot_product_attention(q_.double(), k_.double().repeat_interleave(2, 1),
+                                                            v_.double().repeat_interleave(2, 1), attn_mask=m_[:, None, None])
+    sp_ = float((decode_sdpa(q_, k_, v_, m_).double() - ref_).abs().max())
+    check("decode_sdpa parcali (S = 4 x _SPLIT, satir basina farkli uzunluk, tamamen maskeli parcalar) = fp64 basvuru",
+          sp_ < 1e-5, "fark %.1e" % sp_)
     n = sum(len(x) + 1 for x in prompts[-1]) + 1
     check("prefill: istem tek ileri gecis = token token (son logit, ozet ve global K/V, sayaclar; sonraki decode adimlari; "
           "fp32 < 1e-5), G 0 / 1 / 2, istem 1 / 4 / %d konum" % n, ok_cache, "; ".join(info))

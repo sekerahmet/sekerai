@@ -303,15 +303,34 @@ STATIC_DECODE = True       # generate: StaticCache; False: _step + dict onbellek
 _COMPILED = {}             # derlenmis adim (surec basina bir kez; derleme hata verirse derlemesiz graph)
 
 
+_SPLIT = 1024              # decode_sdpa: anahtar boyu >= 4 x bu ise parcali (split-KV, belge 92); parca boyu
+
+
 def decode_sdpa(q, k, v, mask, f32_scores=False):
-    """Model Z sentence.decode_sdpa ile ayni (kopya; belge 84): Tq 1, grup katlama, skor fp32, maske (B, S), @ V."""
+    """Model Z sentence.decode_sdpa ile ayni (kopya; belge 84, 92): Tq 1, grup katlama, skor fp32, maske (B, S), @ V;
+    uzun anahtarda parcali (split-KV)."""
     B, H, _, hd = q.shape
     Hkv, S = k.shape[1], k.shape[2]
-    qf = (q * hd ** -0.5).reshape(B * Hkv, H // Hkv, hd)
-    kt = k.reshape(B * Hkv, S, hd).transpose(1, 2)
+    if S < 4 * _SPLIT or S % _SPLIT:
+        qf = (q * hd ** -0.5).reshape(B * Hkv, H // Hkv, hd)
+        kt = k.reshape(B * Hkv, S, hd).transpose(1, 2)
+        s = torch.bmm(qf, kt, out_dtype=torch.float32) if f32_scores else torch.bmm(qf, kt).float()
+        p = torch.softmax(s.view(B, Hkv, -1, S).masked_fill(~mask[:, None, None], float("-inf")), -1).to(v.dtype)
+        return torch.matmul(p, v).reshape(B, H, 1, hd)
+    G, C = H // Hkv, _SPLIT
+    nC = S // C
+    N = B * Hkv * nC
+    qf = (q * hd ** -0.5).reshape(B, Hkv, 1, G, hd).expand(B, Hkv, nC, G, hd).reshape(N, G, hd)
+    kt = k.reshape(N, C, hd).transpose(1, 2)
     s = torch.bmm(qf, kt, out_dtype=torch.float32) if f32_scores else torch.bmm(qf, kt).float()
-    p = torch.softmax(s.view(B, Hkv, -1, S).masked_fill(~mask[:, None, None], float("-inf")), -1).to(v.dtype)
-    return torch.matmul(p, v).reshape(B, H, 1, hd)
+    s = s.view(B, Hkv, nC, G, C).masked_fill(~mask.view(B, 1, nC, 1, C), float("-inf"))
+    m = s.amax(-1, keepdim=True)
+    m = torch.where(torch.isfinite(m), m, torch.zeros_like(m))           # tamamen maskeli parca: katkisi 0
+    e = torch.exp(s - m)
+    o = torch.bmm(e.to(v.dtype).view(N, G, C), v.reshape(N, C, hd)).float().view(B, Hkv, nC, G, hd)
+    wgt = torch.exp(m - m.amax(2, keepdim=True))
+    out = (o * wgt).sum(2) / (e.sum(-1, keepdim=True) * wgt).sum(2)
+    return out.to(v.dtype).reshape(B, H, 1, hd)
 
 
 def _bmm_f32(t):
@@ -358,24 +377,30 @@ class StaticCache:
 
     @torch.no_grad()
     def prefill_rows(self, seqs):
-        """seqs: satir basina token listesi (BOS dahil) -> (B, V) son konumun logit'i.  Satir basina _step (dict onbellek,
-        satirin kendi boyunda), K/V sabit tampona (boy satirlarin en buyugune gore kademe)."""
+        """seqs: satir basina token listesi (BOS dahil) -> (B, V) son konumun logit'i.  Butun satirlar tek ileri geciste
+        (belge 92; once satir basina _step): sagdan dolgu, causal (is_causal; dolgu gercek konumdan sonra), K/V sabit
+        tampona (boy satirlarin en buyugune gore kademe)."""
         b, B, L = self.BUCKET, len(seqs), len(self.m.blocks)
-        self.limit = next(t for k in range(40) for t in (b << k, (3 * b // 2) << k) if t >= max(map(len, seqs)) + self.positions)
-        self.K, self.V, logits = [None] * L, [None] * L, []
-        for r, seq in enumerate(seqs):
-            cache = dict(k=[None] * L, v=[None] * L, T=len(seq))
-            logits.append(self.m._logits(self.m._step(torch.tensor([seq], device=self.dev), cache, 0))[0])
-            for l in range(L):
-                if self.K[l] is None:
-                    ref = cache["k"][l]
-                    self.K[l] = ref.new_zeros(B, ref.shape[1], self.limit, ref.shape[3])
-                    self.V[l] = torch.zeros_like(self.K[l])
-                self.K[l][r, :, :len(seq)], self.V[l][r, :, :len(seq)] = cache["k"][l][0], cache["v"][l][0]
-        self.t = [len(s) for s in seqs]
-        self.n = torch.tensor(self.t, device=self.dev)
+        T = [len(s) for s in seqs]
+        Tp = max(T)
+        self.limit = next(t for k in range(40) for t in (b << k, (3 * b // 2) << k) if t >= Tp + self.positions)
+        tok = torch.tensor([list(s) + [0] * (Tp - len(s)) for s in seqs], device=self.dev)
+        pos = torch.arange(Tp, device=self.dev).expand(B, Tp)
+        x = self.m.E(tok)
+        self.K, self.V = [], []
+        for block in self.m.blocks:
+            q, k, v = block._qkv(x, pos)
+            kb = k.new_zeros(B, k.shape[1], self.limit, k.shape[3])
+            vb = torch.zeros_like(kb)
+            kb[:, :, :Tp], vb[:, :, :Tp] = k, v                           # dolgu yuvalari maskede, ustune yazilir
+            self.K.append(kb)
+            self.V.append(vb)
+            x = block._finish(x, F.scaled_dot_product_attention(q, k, v, is_causal=True,
+                                                                enable_gqa=block.kv_heads != block.heads))
+        self.t = T
+        self.n = torch.tensor(T, device=self.dev)
         self.w, self.live = torch.zeros(B, dtype=torch.long, device=self.dev), torch.ones(B, dtype=torch.bool, device=self.dev)
-        self.logits = torch.stack(logits)
+        self.logits = self.m._logits(self.m.norm(x[torch.arange(B, device=self.dev), self.n - 1]))
         self.out = torch.zeros_like(self.logits)
         self.f32 = self.out.dtype != torch.float32 and _bmm_f32(self.out)
         return self.logits

@@ -370,6 +370,15 @@ def t_gqa():
     check("gqa_sdpa (belge 74): Tq 1 katlama, Tq > 1 genisletme = enable_gqa basvurusu; _step parca parca = tek gecis",
           worst < 1e-6 and float((steps[-1] - hn).abs().max()) < 1e-5, "en buyuk fark %.1e, adim %.1e" % (
               worst, float((steps[-1] - hn).abs().max())))
+    from baseline import decode_sdpa, _SPLIT                                 # parcali (split-KV, belge 92) = fp64 basvuru
+    g_ = torch.Generator().manual_seed(4)
+    q_, k_ = torch.randn(2, 4, 1, 16, generator=g_), torch.randn(2, 2, 4 * _SPLIT, 16, generator=g_)
+    v_, m_ = torch.randn(2, 2, 4 * _SPLIT, 16, generator=g_), torch.arange(4 * _SPLIT)[None] < torch.tensor([[_SPLIT + 5], [3]])
+    ref_ = torch.nn.functional.scaled_dot_product_attention(q_.double(), k_.double().repeat_interleave(2, 1),
+                                                            v_.double().repeat_interleave(2, 1), attn_mask=m_[:, None, None])
+    sp_ = float((decode_sdpa(q_, k_, v_, m_).double() - ref_).abs().max())
+    check("decode_sdpa parcali (S = 4 x _SPLIT, satir basina farkli uzunluk, tamamen maskeli parcalar) = fp64 basvuru",
+          sp_ < 1e-5, "fark %.1e" % sp_)
 
 
 GROUPS = dict(mask=t_mask, targets=t_targets, loss=t_loss, cache=t_cache, generate=t_generate, recipe=t_recipe,
