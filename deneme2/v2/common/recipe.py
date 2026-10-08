@@ -1,8 +1,8 @@
 """recipe -- V2 ortak egitim tarifi (iki model ayni kod; belge 20 §4, 21 §6; adlar onayli, kullanici 6 Ekim).
 
     maske       mask_fn(kind, doc, sent) -> mask_mod(b, h, q, kv) (FlexAttention imzasi).  Model kendi fonksiyonunu verir
-                (Model Z: model_z_mask); transformer icin document_mask.  Ortak dolgu kurali: dolgu, ayni satirdaki
-                onceki dolguyu gorur (tamamen maskeli satir SDPA'da NaN).  block_mask (FlexAttention) ve dense_mask (SDPA,
+                (Model Z: model._masks(True), summaries_last aralik maskeleri); transformer icin document_mask.  Ortak
+                dolgu kurali: dolgu, ayni satirdaki onceki dolguyu gorur (tamamen maskeli satir SDPA'da NaN).  block_mask (FlexAttention) ve dense_mask (SDPA,
                 CPU egitimi ve testler; FlexAttention CPU'da geri yayilim yapmiyor) ayni mask_mod'dan.
     wsd_lr      warmup %1, sabit, son %20 dogrusal sifira; inisin ilk adimi = total - round(decay * total) (checkpoint).
     param_groups  AdamW: 2-B agirliklar decay'li; embedding, norm, bias, 1-B decay'siz.
@@ -227,7 +227,7 @@ class NorMuon(BatchedMuon):
         v = torch.stack([self.state[p]["second_momentum_buffer"] for p in ps])
         v.lerp_(O.square().mean(-1, keepdim=True), 1 - g["beta2"])
         Oh = O / (v.sqrt() + NORMUON_EPS)
-        eta = 0.2 * g["lr"] * math.sqrt(m * n) / Oh.flatten(1).norm(dim=1)
+        eta = 0.2 * g["lr"] * math.sqrt(m * n) / Oh.flatten(1).norm(dim=1).clamp_min(NORMUON_EPS)   # O 0: NaN yok
         for j, p in enumerate(ps):
             self.state[p]["second_momentum_buffer"].copy_(v[j])
             p.sub_((Oh[j] * eta[j]).to(p.dtype))

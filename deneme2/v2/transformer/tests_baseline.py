@@ -1,7 +1,7 @@
 """tests_baseline (V2) -- V2-transformer testleri (CPU; belge 20, 21).  common/data.build_batch ile sentetik hikayeler;
 GPU / Drive yok.  Model Z dosyasindan import yok.
 
-    python tests_baseline.py [--only mask,targets,loss,cache,generate,recipe,flex,imports,gqa,vocab]
+    python tests_baseline.py [--only mask,targets,loss,cache,generate,recipe,flex,imports,gqa,vocab,limit]
 """
 import ast
 import math
@@ -301,6 +301,36 @@ def t_vocab():
           "init %s, cikis %s, uretim %s" % (init_ok, out_ok, gen_ok))
 
 
+def t_limit():
+    import baseline as MOD
+    MAKE = lambda: tiny()  # noqa: E731
+    """Uretim konum siniri (belge 89b; hakem A b3 / B B7): row_len 30 iken ornekleme uretimi (ayni tohum) row_len'siz
+    uretimin oneki, son cumle kesik (ended False), islenen konum (BOS + token + kapanis) <= 30; sinirsiz uretim 30'u asiyor
+    (test bos degil); StaticCache ve eski yol, istem kapali / acik (open_last)."""
+    def used(prompt, gen, opened, closes):                      # islenen konum: BOS + istem + token + kapanis
+        return 1 + sum(len(s_) + 1 for s_ in prompt) - opened + sum(map(len, gen)) + closes
+    prompt, ok, info = [[3, 4, 5, 6], [7, 8, 9]], [], []
+    saved = MOD.STATIC_DECODE
+    try:
+        for static in (True, False):
+            MOD.STATIC_DECODE = static
+            for opened in (False, True):
+                m = MAKE()
+                m.row_len = 100000
+                full = m.generate([prompt], 12, 6, torch.Generator().manual_seed(1), open_last=opened)[0]
+                m.row_len = 30
+                lim = m.generate([prompt], 12, 6, torch.Generator().manual_seed(1), open_last=opened)[0]
+                g, f = lim[0], full[0]
+                prefix = len(g) >= 1 and g[:-1] == f[:len(g) - 1] and f[len(g) - 1][:len(g[-1])] == g[-1]
+                ok.append(prefix and lim[1][-1] is False and used(prompt, g, opened, len(g) - 1) <= 30
+                          and used(prompt, f, opened, len(f)) > 30 and m.max_positions() == 30)
+                info.append("%d/%d" % (used(prompt, g, opened, len(g) - 1), used(prompt, f, opened, len(f))))
+    finally:
+        MOD.STATIC_DECODE = saved
+    check("uretim konum siniri (row_len 30): sinirli uretim = sinirsizin oneki, son cumle kesik, konum <= 30 (sinirsiz "
+          "> 30); StaticCache + eski yol, open_last 0 / 1", all(ok), "konum " + ", ".join(info))
+
+
 def t_gqa():
     """kv_heads (GQA kiyasi): kv = heads bugunkuyle bit ayni; kv 2: blok = k / v tekrarli basvuru; onbellekli generate =
     onbelleksiz acgozlu."""
@@ -343,7 +373,7 @@ def t_gqa():
 
 
 GROUPS = dict(mask=t_mask, targets=t_targets, loss=t_loss, cache=t_cache, generate=t_generate, recipe=t_recipe,
-              flex=t_flex, imports=t_imports, gqa=t_gqa, vocab=t_vocab)
+              flex=t_flex, imports=t_imports, gqa=t_gqa, vocab=t_vocab, limit=t_limit)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(GROUPS)

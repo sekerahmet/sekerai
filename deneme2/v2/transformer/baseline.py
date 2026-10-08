@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "common"))
-from data import END_ID, EOS_ID, VOCAB  # noqa: E402
+from data import END_ID, EOS_ID, ROW_LEN, VOCAB  # noqa: E402
 
 
 def rope(x, pos, base=10000.0):
@@ -98,7 +98,7 @@ class BaselineTransformer(torch.nn.Module):
         """kv_heads: her katmanda k / v head sayisi (GQA kiyasi; varsayilan heads).  vocab_rows: E satir sayisi (>= VOCAB;
         dolgu satirlari sifir, ilk agirlik VOCAB'li modelle ayni)."""
         super().__init__()
-        self.END, self.EOS = END_ID, EOS_ID
+        self.END, self.EOS, self.row_len = END_ID, EOS_ID, ROW_LEN
         hidden = -(-int(8 * d / 3) // 8) * 8
         assert vocab_rows >= VOCAB, "vocab_rows >= VOCAB"
         self.E = torch.nn.Embedding(VOCAB, d)
@@ -113,6 +113,10 @@ class BaselineTransformer(torch.nn.Module):
                     (p[:VOCAB] if name == "E.weight" else p).normal_(0.0, std)   # dolgu satiri rastgele sayi cekmez
         with torch.no_grad():
             self.E.weight[VOCAB:].zero_()
+
+    def max_positions(self):
+        """Uretimde hikaye basina konum siniri: egitim satiri row_len (belge 89b)."""
+        return self.row_len
 
     def hidden(self, tokens, pos, attn):
         """tokens, pos (B, T); attn: None / dense / BlockMask -> h (B, T, d)."""
@@ -174,13 +178,15 @@ class BaselineTransformer(torch.nn.Module):
         kapanir (girdiye END).  open_last (belge 48): son istem cumlesine END eklenmez, ilk uretilen cumle onun devami.
         on_token(w): her uretilen token'dan sonra, on_token(None): cumle kapaninca (akan yazim; cikti degismez).  stop_when(gen): her
         kapanan cumleden sonra, True ise o istemin uretimi biter (cikti = tam uretimin oneki).  Onbellek StaticCache (belge
-        84; STATIC_DECODE), yoksa _step + dict onbellek; fp32'de token token ayni."""
+        84; STATIC_DECODE), yoksa _step + dict onbellek; fp32'de token token ayni.  Konum siniri (belge 89b): hikaye
+        row_len'i asmaz; sinira gelince o anki cumle kesik (ended False) doner, uretim biter."""
         dev = self.E.weight.device
-        out = []
+        out, limit = [], self.max_positions()
         for sents in prompts:
             opened = bool(open_last and sents)
             seq = [EOS_ID] + [t for s in sents for t in list(s) + [END_ID]]
             seq = seq[:-1] if opened else seq
+            used = len(seq)
             if STATIC_DECODE:
                 sc = StaticCache(self, max_sentences * (max_tokens + 1) + 1)
                 logits, step = sc.prefill(seq), sc.append
@@ -192,10 +198,13 @@ class BaselineTransformer(torch.nn.Module):
                 def step(w, cache=cache, n=n):
                     n[0] += 1
                     return self._logits(self._step(torch.tensor([[w]], device=dev), cache, n[0] - 1))[0]
-            gen, ended, eos = [], [], False
+            gen, ended, eos, full = [], [], False, False
             while len(gen) < max_sentences:
                 cur, done = [], False
                 while len(cur) < max_tokens:
+                    if used + 2 > limit:                         # sonraki token + kapanis egitim boyunu asar (belge 89b)
+                        full = True
+                        break
                     p = logits.float()
                     w = int(p.argmax()) if generator is None else int(torch.multinomial(
                         torch.softmax(p, -1).cpu(), 1, generator=generator))
@@ -209,16 +218,18 @@ class BaselineTransformer(torch.nn.Module):
                     if on_token is not None:
                         on_token(w)
                     logits = step(w)
-                if eos:
+                    used += 1
+                if eos or (full and not cur):
                     break
                 gen.append(cur)
                 ended.append(done)
                 if on_token is not None:
                     on_token(None)
-                if stop_when is not None and stop_when(gen):
+                if full or (stop_when is not None and stop_when(gen)):
                     break
                 opened = False
                 logits = step(END_ID)
+                used += 1
             out.append((gen, ended, eos))
         return out
 

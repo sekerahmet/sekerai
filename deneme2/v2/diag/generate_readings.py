@@ -76,10 +76,9 @@ def load_run(out, data_dir, dev):
                            carry_summaries=idt.get("carry_summaries", 0), carry_group=idt.get("carry_group", 0),
                            glob_kv_heads=idt.get("glob_kv_heads", 0),
                            vocab_rows=idt.get("vocab_rows", D.VOCAB))            # sozluk dolgusundan onceki: VOCAB
-    model, _, layout = T._build(spec, dev)
+    model, _, _ = T._build(spec, dev)
     model.load_state_dict(pack["state"])
-    if layout == "model_z":
-        model.row_len = idt["row_len"]                                   # carry uretiminde parca boyu
+    model.row_len = idt["row_len"]                                       # uretim konum siniri, carry parca boyu
     return model, idt
 
 

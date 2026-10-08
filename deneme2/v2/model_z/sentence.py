@@ -1,7 +1,6 @@
 """sentence (V2) -- SentenceTransformer (Model Z), GPT-2 token.  Tarif belge/model_z_temel/22 (duzen, maske, onbellek),
-35 (ogrenilen z), 40 / 43 (global_layers); alanlar belge 21 (PackedBatch).  Formullu z (sentence_z, z_in / z_norm,
---learned_z 0) kaldirildi (kullanici, 7 Ekim: "bence temizlik başlasın"; belge 44): git etiketi
-v2-before-formula-cleanup-20261007.  Daha eski secenekler (meaning, ortak sozluk, open_z): v2-before-cleanup-20261006.
+35 (ogrenilen z), 40 / 43 (global_layers); alanlar belge 21 (PackedBatch).  Kaldirilan secenekler ve eski kodun git
+etiketleri: belge 44, 77 (train._archived iletisi).
 
 Hikaye tek dizi; cumle k'nin END'inin yerinde Z_k (girdi E(END), transformer'in END konumuyla ayni girdi), dizi boyu
 transformer akisiyla ayni, hedefler konum konum ayni:
@@ -22,11 +21,8 @@ Gorus 4).  Ilk L - N blok yerel.  attn: (yerel, global) ikilisi; onbellek global
 
 summaries_last (belge 66; kullanici, 8 Ekim: "Fikrine onay verdim"): satir bellekte [token'lar | ozetler | dolgu], her grupta
 eski sira; model ayni (attention disi konum konum, RoPE pos'tan, maske iliskiden); maske sorgu basina iki aralik
-(model_z_summaries_last_ranges).  Batch real_pos tasiyorsa bu duzen.
-z_bow ve layer_plan (mid / glob her yerde) kaldirildi (kullanici, 8 Ekim: "Kod temizliği de başlasın bence"; belge 77):
-eski kod git commit 7bec0ae.
-Torba (--bag_k) ve egitimde summaries_last 0 kaldirildi (kullanici, 8 Ekim: "Torbada gereksiz gibi"; belge 77; git etiketi
-v2-before-cleanup-20261008); bugunku duzen (Z'ler arada) teshis / prefill yolunda kalir (ayni hesap).
+(model_z_summaries_last_ranges).  Batch real_pos tasiyorsa bu duzen; egitim ve sinav hep bu duzende, Z'ler arada duzen
+teshis / prefill yolunda (ayni hesap).
 Sozluk dolgusu (belge 89; kullanici, 8 Ekim: "sözlük dolgusu ok, ekle"): vocab_rows > VOCAB ise E'nin dolgu satirlari sifir,
 cikis (_logits) VOCAB'a kesilir: dolgu token'i hedef olmaz, uretilmez.
 """
@@ -284,6 +280,10 @@ class SentenceTransformer(torch.nn.Module):
         with torch.no_grad():
             self.E.weight[VOCAB:].zero_()
 
+    def max_positions(self):
+        """Uretimde hikaye basina konum siniri: egitim satiri row_len; carry belleginde carry_group parca (belge 89b)."""
+        return self.row_len * max(self.carry_group, 1)
+
     def _masks(self, last=False):
         """Maske fonksiyonlari: bugunku duzen (mask_fn) ya da summaries_last duzeninde ayni yapida (tek / ikili)."""
         if not last:
@@ -348,8 +348,9 @@ class SentenceTransformer(torch.nn.Module):
         uretilen cumle onun devami (yalniz devam token'lari; max_tokens onlara).  on_token(w): her uretilen
         token'dan sonra, on_token(None): cumle kapaninca (akan yazim; cikti degismez).  stop_when(gen): her
         kapanan cumleden sonra, True ise o istemin uretimi biter (cikti = tam uretimin oneki).  Onbellek StaticCache (belge
-        84; STATIC_DECODE, carry'siz model), yoksa SummaryCache; fp32'de token token ayni."""
-        out = []
+        84; STATIC_DECODE, carry'siz model), yoksa SummaryCache; fp32'de token token ayni.  Konum siniri (belge 89b): hikaye
+        max_positions()'i (egitim satiri) asmaz; sinira gelince o anki cumle kesik (ended False) doner, uretim biter."""
+        out, limit = [], self.max_positions()
         static = STATIC_DECODE and StaticCache.supports(self)
         for sents in prompts:
             opened = bool(open_last and sents)
@@ -359,10 +360,14 @@ class SentenceTransformer(torch.nn.Module):
             logits = cache.prefill(sents[:-1] if opened else sents)
             for t in (sents[-1] if opened else ()):
                 logits = cache.append_token(t)
-            gen, ended, eos = [], [], False
+            used = 1 + sum(len(s) + 1 for s in sents) - opened                 # BOS + token'lar + Z'ler (acik cumlede Z yok)
+            gen, ended, eos, full = [], [], False, False
             while len(gen) < max_sentences:
                 cur, done = [], False
                 while len(cur) < max_tokens:
+                    if used + 2 > limit:                         # sonraki token + kapanis egitim boyunu asar (belge 89b)
+                        full = True
+                        break
                     p = logits.float()
                     w = int(p.argmax()) if generator is None else int(torch.multinomial(
                         torch.softmax(p, -1).cpu(), 1, generator=generator))
@@ -376,16 +381,18 @@ class SentenceTransformer(torch.nn.Module):
                     if on_token is not None:
                         on_token(w)
                     logits = cache.append_token(w)
-                if eos:
+                    used += 1
+                if eos or (full and not cur):
                     break
                 gen.append(cur)
                 ended.append(done)
                 if on_token is not None:
                     on_token(None)
-                if stop_when is not None and stop_when(gen):
+                if full or (stop_when is not None and stop_when(gen)):
                     break
                 opened = False
                 logits = cache.close_sentence()
+                used += 1
             out.append((gen, ended, eos))
         return out
 

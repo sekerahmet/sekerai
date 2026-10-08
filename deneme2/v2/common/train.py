@@ -4,16 +4,14 @@
 Adim (belge 24 s9):  attn = recipe.block_mask(batch, mask_fn) (CPU'da dense_mask: FlexAttention CPU'da geri yayilim
 yapmiyor); h = model._batch_hidden(batch, attn); kayip = recipe.output_loss(h, E, hedef).  bf16 autocast ve bloklarda
 compile(dynamic=False) CUDA'da; clip 1,0; AdamW (0,9 / 0,95, wd 0,1; CUDA'da fused), recipe.param_groups, recipe.wsd_lr.
---optimizer normuon VARSAYILAN (kullanici, 8 Ekim: "normuon bence standart yapalım. büyüdükçe etkisini gösterdi"; d1024 / L12
-ayni adimda -0,012; --resume'da acik verilmezse kosunun kimliginden).  --optimizer muon (7 Ekim
-varsayilani): bloklarin 2-B matrisleri
-recipe.BatchedMuon'a (torch.optim.Muon matematigi; adjust_lr_fn match_rms_adamw: guncelleme RMS'i AdamW'ninki, ayni --lr
-ve wd; liu2025_muonscalable), geri kalan ayni AdamW'ye; wsd_lr ikisine.  Muon yoksa kosu baslamadan DURUR.  --lr
+--optimizer normuon VARSAYILAN (kullanici, 8 Ekim: "Ben nurmuon yapalım şimdiden dedim"; "normuon bence standart yapalım.
+büyüdükçe etkisini gösterdi"; d1024 / L12 ayni adimda -0,012; --resume'da acik verilmezse kosunun kimliginden):
+recipe.NorMuon (li2025_normuon Algorithm 1), ayni --lr (guncelleme RMS'i 0,2 lr).  --optimizer muon (7 Ekim
+varsayilani): bloklarin 2-B matrisleri recipe.BatchedMuon'a (torch.optim.Muon matematigi; adjust_lr_fn match_rms_adamw:
+guncelleme RMS'i AdamW'ninki, ayni --lr ve wd; liu2025_muonscalable), geri kalan ayni AdamW'ye; wsd_lr ikisine.  Muon yoksa kosu baslamadan DURUR.  --lr
 sayi ya da auto (varsayilan; kullanici, 8 Ekim: "her lr kendi modeline özgü D ye göre"): muon / normuon'da LR_REF[0]
 (LR_REF[1] / d) ^ LR_REF[2] (adim basina aci ~ lr 0,2 sqrt(d) sabit; d768'de olculen 2e-3, belge 39 + OLCULENLER_z);
 adamw'de sayi sart (DUR).  --optimizer adamw: eski tarif (olculen lr 5e-4).
---optimizer normuon (kullanici, 8 Ekim: "Ben nurmuon yapalım şimdiden dedim"): recipe.NorMuon (li2025_normuon
-Algorithm 1), ayni --lr (guncelleme RMS'i 0,2 lr).
 --fp8 none|tensorwise|rowwise (kullanici, 8 Ekim: "fp8 de dene bakalım. fp8 dikkatli dene"; varsayilan none): torchao
 Float8Linear yalniz MLP'de (gate_up, down), compile'dan once; agirliklar fp32, state_dict adlari ayni (kosu basinda
 denetlenir) -> ayni kosu --resume ile FP8 acik / kapali surer; KIMLIGE GIRMEZ, kip her segmentte gunlukte ve results.json
@@ -616,8 +614,7 @@ def main(argv=None):
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(os.path.join(args.stream, "gpt2", "tokenizer.json"))
     model, mask_fn, layout = _build(args, dev)
-    if layout == "model_z":
-        model.row_len = row_len                                          # carry uretiminde parca boyu
+    model.row_len = row_len                                              # uretim konum siniri, carry parca boyu
     last = None
     if args.summaries_last:                                              # belge 66: [token'lar | ozetler | dolgu]
         from sentence import summaries_last as last
@@ -727,9 +724,13 @@ def main(argv=None):
         R.Checkpoint.save(dir_, model, opt, step, plan_meta, history, ident)
 
     end = total if args.stop_step is None else args.stop_step         # --stop_step: takvim total'den, dongu end'e
-    if not start < end <= total:
+    finishing = start == total and args.stop_step is None              # bitis checkpoint'i var, results yok (belge 89b)
+    if finishing:
+        log("BITIS: adim %d / %d checkpoint'te; egitim yok, sinav (yoksa) + agent.pt + results.json + okuma" % (total, total))
+    elif not start < end <= total:
         sys.exit("DUR: --stop_step %s: adim %d < N <= %d olmali" % (args.stop_step, start, total))
-    history.setdefault("segments", []).append(dict(start=start, fp8=args.fp8, fp8_linears=n_fp8))   # kimlik disi kip
+    else:
+        history.setdefault("segments", []).append(dict(start=start, fp8=args.fp8, fp8_linears=n_fp8))   # kimlik disi kip
     log("fp8 %s (%d Linear)" % (args.fp8, n_fp8))
     sw, win = R.SpeedWindow(), None
     first_window, epoch_from, epoch_t0, saved_at = True, start, time.time(), time.time()

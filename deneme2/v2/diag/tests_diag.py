@@ -141,9 +141,9 @@ def t_readings():
 
 def t_tools():
     """Matematikcinin teshis araclari (gap_v2, order_probe, z_ablate; belge 33 adim 5): gercek train.py kosulari (transformer,
-    formullu Model Z, learned_z) load_run ile; gap_v2 nll'i egitimin sinav kaybi; hedefler bagimsiz donguyle (aracin icinde
-    assert); sayim dosyasi = akistan sayim; order_probe sonlu; z_ablate kosullari (none = gap, kapatma etkili, encode_z geri
-    yuklenir, sutun bolumleri)."""
+    Model Z G'siz ve G 1; varsayilan duzen summaries_last ile egitilir / sinanir) load_run ile; gap_v2 nll'i egitimin sinav
+    kaybi; hedefler bagimsiz donguyle (aracin icinde assert); sayim dosyasi = akistan sayim; order_probe sonlu; z_ablate
+    kosullari (none = gap, read_off kaybi degistirir)."""
     import traceback
     import gap_v2 as G
     import order_probe as OP

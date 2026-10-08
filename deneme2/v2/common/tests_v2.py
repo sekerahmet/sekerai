@@ -11,7 +11,6 @@ diag/tests_diag.py.
 import torch
 
 import atexit  # noqa: E402
-import atexit  # noqa: E402
 import glob  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
@@ -130,8 +129,8 @@ def t_data():
           and st.meta["merged_blank"] == 1, str({k: st.meta[k] for k in ("stories", "sentences", "merged_blank")}))
     b = D.build_batch(st, [[0, 1, 2]], "transformer")
     real = (b.kind != D.Kind.PAD).sum().item()
-    check("lengths = build_batch'teki gercek boy", real == st.lengths().sum() and
-          st.lengths("model_z").tolist() == st.lengths().tolist())
+    check("lengths = build_batch'teki gercek boy (iki duzende ayni)", real == st.lengths().sum()
+          and real == (D.build_batch(st, [[0, 1, 2]], "model_z").kind != D.Kind.PAD).sum().item())
 
 
 class _Synthetic:
@@ -610,6 +609,19 @@ def _recipe_normuon(R, TR):
           same_a and rel < 1e-5 and cv < 1e-4 and all(abs(x - 0.2) < 1e-4 for x in rms)
           and all(torch.equal(x, y) for x, y in zip(e2, full_))
           and all("second_momentum_buffer" in ofull.state[x] for x in full_))
+    zero = []                                                    # hakem A b7 / B B4: sifir momentumlu matris
+    for cls in (R.NorMuon, R.BatchedMuon):
+        torch.manual_seed(0)
+        a, b = torch.nn.Parameter(torch.randn(8, 16) * 0.02), torch.nn.Parameter(torch.randn(8, 16) * 0.02)
+        a0 = a.detach().clone()
+        opt = cls([a, b], lr=2e-3, weight_decay=0.1, momentum=0.95, nesterov=True, ns_steps=5,
+                  adjust_lr_fn="match_rms_adamw")
+        a.grad, b.grad = torch.zeros_like(a), torch.randn_like(b)
+        opt.step()
+        zero.append(bool(torch.isfinite(a).all() and torch.isfinite(b).all())
+                    and torch.equal(a.detach(), a0 * (1 - 2e-3 * 0.1)))
+    check("NorMuon / BatchedMuon: gradyani tam sifir matris (momentum 0) bir adimda NaN uretmez, yalniz wd kadar degisir "
+          "(eta paydasi clamp_min(NORMUON_EPS))", all(zero), str(zero))
 
 
 def t_metrics():
@@ -974,6 +986,7 @@ def t_train():
         _train_muon(base, root, data, out, state, same, exits, TR)
         _train_global(base, root, data, out, exits, TR)
         _train_vocab(base, data, out, TR)
+        _train_finish(base, out, TR)
         import copy                                                     # epok sonu eksik batch dolgusu (8 Ekim)
         import types
         import recipe as R
@@ -1060,6 +1073,31 @@ def _cut_and_resume(TR, cmd, out_dir):
     finally:
         R.Checkpoint.save = staticmethod(orig)
     return stopped, TR.main(cmd + ["--out", out_dir, "--resume", "1"])
+
+
+def _train_finish(base, out, TR):
+    """Bitis checkpoint'i yazilip results.json / agent.pt / okuma yazilmadan kopan kosu (hakem A b5, B B2; belge 89b):
+    --resume 1 egitimsiz bitirir: finished True, agent.pt ve sinav kesintisiz kosununkiyle ayni, samples yazilir; bitmis
+    kosuya --stop_step verilirse eski DUR iletisi."""
+    import traceback
+    try:
+        cmd = base + ["--model", "transformer", "--steps", "6"]
+        a = TR.main(cmd + ["--out", out("fin_ref")])
+        TR.main(cmd + ["--out", out("fin_cut")])
+        for name in ("results.json", "agent.pt", "samples.json", "samples.txt"):
+            os.remove(os.path.join(out("fin_cut"), name))
+        stop = _exit_msg(TR.main, cmd + ["--out", out("fin_cut"), "--resume", "1", "--stop_step", "6"])
+        r = TR.main(cmd + ["--out", out("fin_cut"), "--resume", "1"])
+        st_ = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        ref, got = st_(out("fin_ref")), st_(out("fin_cut"))
+        check("train: bitis checkpoint'i sonrasi kopan kosu --resume 1 ile egitimsiz biter (finished, agent.pt bit = "
+              "kesintisiz, sinav ayni, okuma yazildi, segments ayni); --stop_step verilirse DUR iletisi",
+              r["finished"] and all(torch.equal(ref[k], got[k]) for k in ref)
+              and dict(r["exam"], seconds=0) == dict(a["exam"], seconds=0) and r["segments"] == a["segments"] and len(r["log"]) == len(a["log"])
+              and os.path.exists(os.path.join(out("fin_cut"), "samples.json")) and r["generation"]
+              and stop is not None and "--stop_step 6" in stop, str(stop))
+    except Exception:  # noqa: BLE001
+        check("train bitis sonrasi surdurme", False, traceback.format_exc(limit=3))
 
 
 def _train_vocab(base, data, out, TR):
@@ -1209,8 +1247,8 @@ def _train_archived(base, data, out, state, same, exits, TR):
 def _train_muon(base, root, data, out, state, same, exits, TR):
     """--optimizer muon uctan uca (iki model, gercek modeller): kayip duser, ilk adim kaybi AdamW kosusuyla ayni (ayni
     agirlik), ikinci farkli (optimizer gercekten degisti); bolusum (her parametre tam bir grupta, Muon'da yalniz blok
-    matrisleri, E degil; formullu Model Z'de z_in AdamW'de); kimlikte optimizer; kesilip surdurulen = kesintisiz; optimizer
-    farkiyla surdurme DURUR; optimizer alani olmayan eski checkpoint adamw sayilir; Muon yoksa veri yuklenmeden DURUR."""
+    matrisleri, E degil); kimlikte optimizer; kesilip surdurulen = kesintisiz; optimizer farkiyla ve optimizer alani olmayan
+    eski checkpoint'le surdurme DURUR; Muon yoksa veri yuklenmeden DURUR."""
     import traceback
     try:
         st = D.TokenStories(root, data, "train")
@@ -1281,8 +1319,8 @@ def _train_muon(base, root, data, out, state, same, exits, TR):
 def _train_global(base, root, data, out, exits, TR):
     """--global_layers (belge 40 s6.2 Deney G) gercek SentenceTransformer ve build_batch ile: 2 epok kosar, kayip duser;
     kimlikte global_layers; ilk adim kaybi (train._attn ikilisi) = modelin kendi (dense) maskesiyle loss_per_target;
-    load_run kimlikten okur; transformer, formullu yol, N > katman DURUR; global_layers farkiyla surdurme checkpoint
-    yuklenmeden DURUR; alani olmayan eski checkpoint 0 sayilir.  Bit duzeyinde surdurme sinanmaz (kullanici, 7 Ekim:
+    load_run kimlikten okur; transformer, N > katman DURUR; global_layers farkiyla ve alani olmayan eski checkpoint'le
+    surdurme checkpoint yuklenmeden DURUR.  Bit duzeyinde surdurme sinanmaz (kullanici, 7 Ekim:
     SS kisa deneme, kural 3 istisnasi)."""
     import traceback
     import recipe as R

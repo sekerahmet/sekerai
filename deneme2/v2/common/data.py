@@ -452,9 +452,8 @@ class TokenStories:
         """Hikaye i -> cumle token dizileri (int64, END yok)."""
         return [np.asarray(self.stream[s:t]).astype(np.int64) for s, t in self.sent[self.story[i]:self.story[i + 1]]]
 
-    def lengths(self, layout="transformer"):
+    def lengths(self):
         """Hikaye basina dizi boyu 1 + sum(L_k + 1) -- iki duzende ayni (belge 22 §3)."""
-        assert layout in ("transformer", "model_z")
         L = self.sent[:, 1] - self.sent[:, 0] + 1
         return np.add.reduceat(L, self.story[:-1]) + 1
 

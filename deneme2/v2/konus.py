@@ -209,8 +209,10 @@ def main():
             with torch.no_grad():
                 (out, ended, eos), = state["model"].generate([sents], n, MAX_TOKENS, generator=gen, open_last=opened,
                                                              on_token=stream)
-            print("\n   -- %d cumle, %d token%s" % (len(out), sum(map(len, out)),
-                                                  ", model durdu (EOS)" if eos else ", cumle sinirina geldi"))
+            limit = state["model"].max_positions()                     # uretim konum siniri (belge 89b)
+            used = 1 + sum(len(s) + 1 for s in sents) - opened + sum(len(o) + 1 for o in out)
+            print("\n   -- %d cumle, %d token%s" % (len(out), sum(map(len, out)), ", model durdu (EOS)" if eos else (
+                ", egitim boyu doldu (%d konum)" % limit if used + 2 > limit else ", cumle sinirina geldi")))
         except KeyboardInterrupt:                           # Ctrl+C: o ana kadarki cikti ekranda kalir
             print("\n   -- kesildi")
         print()

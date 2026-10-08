@@ -2,7 +2,7 @@
 (z, z_flat, direct, generate_longest, formullu onbellek) kaldirildi (belge 44); eski hali git etiketi
 v2-before-formula-cleanup-20261007.
 
-    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,mask,summaries_last,gqa,carry,vocab]
+    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,mask,summaries_last,gqa,carry,vocab,limit,flex_ranges]
 """
 import os
 import sys
@@ -984,8 +984,75 @@ def t_vocab():
           "init %s, cikis %s, uretim %s" % (init_ok, out_ok, gen_ok))
 
 
+def t_flex_ranges():
+    """FlexAttention yolu (recipe.block_mask, CPU ileri) = dense yol (hakem B B10, betik hakemB/b6): egitimin varsayilan
+    maskeleri summaries_last aralik maskesi (G0 / G1) ve summaries_last + carry bellegi (anahtar T + M), gercek
+    build_batch; dolgu disi konumlarda hidden <= 1e-5."""
+    import recipe as R
+    from sentence import summaries_last
+    rng = np.random.default_rng(1)
+    rs = lambda n, k: [[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, k))] for _ in range(n)]  # noqa: E731
+    sents = rs(30, 9)
+    groups = [sents[:12], sents[12:22], sents[22:]] + [rs(2, 6) for _ in range(6)]
+    stream, sent, story = [], [], [0]
+    for g in groups:
+        for x in g:
+            sent.append((len(stream), len(stream) + len(x)))
+            stream += x
+        story.append(len(sent))
+        stream.append(D.EOS_ID)
+    st = SimpleNamespace(stream=np.array(stream, np.int64), sent=np.array(sent, np.int64), story=np.array(story),
+                         continues=np.array([True, True] + [False] * 7))
+    rows, diffs = [[0, 3, 4], [1, 5, 6], [2, 7, 8]], {}
+    for name, carry in (("aralik", None), ("aralik+carry", dict(gpos=np.array([0, 1, 2] + [0] * 6), memory=True, m_max=64))):
+        pb, _ = summaries_last(D.build_batch(st, rows, "model_z", row_len=128, carry=carry))
+        for G in (0, 1):
+            torch.manual_seed(0)
+            m = SentenceTransformer(d=32, layers=3, heads=2, global_layers=G).eval()
+            mf = m._masks(True)
+            fns = mf if isinstance(mf, tuple) else (mf,)
+            wrap = (lambda t: t) if G else (lambda t: t[0])  # noqa: E731
+            with torch.no_grad():
+                hf = m._batch_hidden(pb, wrap(tuple(R.block_mask(pb, f) for f in fns)))
+                hd = m._batch_hidden(pb, wrap(tuple(R.dense_mask(pb, f) for f in fns)))
+            keep = pb.kind != D.Kind.PAD
+            diffs["%s G%d" % (name, G)] = float((hf[keep] - hd[keep]).abs().max())
+    check("FlexAttention = dense: summaries_last aralik maskesi ve aralik + carry bellegi (anahtar T + M), G0 / G1 "
+          "(<= 1e-5)", max(diffs.values()) <= 1e-5, ", ".join("%s %.1e" % kv for kv in diffs.items()))
+
+
+def t_limit():
+    import sentence as MOD
+    MAKE = lambda: (torch.manual_seed(0), SentenceTransformer(32, 2, 2, global_layers=1).eval())[1]  # noqa: E731
+    """Uretim konum siniri (belge 89b; hakem A b3 / B B7): row_len 30 iken ornekleme uretimi (ayni tohum) row_len'siz
+    uretimin oneki, son cumle kesik (ended False), islenen konum (BOS + token + kapanis) <= 30; sinirsiz uretim 30'u asiyor
+    (test bos degil); StaticCache ve eski yol, istem kapali / acik (open_last)."""
+    def used(prompt, gen, opened, closes):                      # islenen konum: BOS + istem + token + kapanis
+        return 1 + sum(len(s_) + 1 for s_ in prompt) - opened + sum(map(len, gen)) + closes
+    prompt, ok, info = [[3, 4, 5, 6], [7, 8, 9]], [], []
+    saved = MOD.STATIC_DECODE
+    try:
+        for static in (True, False):
+            MOD.STATIC_DECODE = static
+            for opened in (False, True):
+                m = MAKE()
+                m.row_len = 100000
+                full = m.generate([prompt], 12, 6, torch.Generator().manual_seed(1), open_last=opened)[0]
+                m.row_len = 30
+                lim = m.generate([prompt], 12, 6, torch.Generator().manual_seed(1), open_last=opened)[0]
+                g, f = lim[0], full[0]
+                prefix = len(g) >= 1 and g[:-1] == f[:len(g) - 1] and f[len(g) - 1][:len(g[-1])] == g[-1]
+                ok.append(prefix and lim[1][-1] is False and used(prompt, g, opened, len(g) - 1) <= 30
+                          and used(prompt, f, opened, len(f)) > 30 and m.max_positions() == 30)
+                info.append("%d/%d" % (used(prompt, g, opened, len(g) - 1), used(prompt, f, opened, len(f))))
+    finally:
+        MOD.STATIC_DECODE = saved
+    check("uretim konum siniri (row_len 30): sinirli uretim = sinirsizin oneki, son cumle kesik, konum <= 30 (sinirsiz "
+          "> 30); StaticCache + eski yol, open_last 0 / 1", all(ok), "konum " + ", ".join(info))
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
-             equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab)
+             equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab, limit=t_limit, flex_ranges=t_flex_ranges)
 
 if __name__ == "__main__":
     if SIDE is not None:
