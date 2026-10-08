@@ -25,6 +25,10 @@ eski sira; model ayni (attention disi konum konum, RoPE pos'tan, maske iliskiden
 teshis / prefill yolunda (ayni hesap).
 Sozluk dolgusu (belge 89; kullanici, 8 Ekim: "sözlük dolgusu ok, ekle"): vocab_rows > VOCAB ise E'nin dolgu satirlari sifir,
 cikis (_logits) VOCAB'a kesilir: dolgu token'i hedef olmaz, uretilmez.
+attn_gate (belge 88a, 90a; kullanici, 8 Ekim: "o zaman attention head yapalım mı"): head basina sigmoid cikis kapisi,
+SDPA ciktisinda proj'dan once, girdi n1(x) (qiu2025 G1 headwise; resmi kod qiuzh20/gated_attention modeling_qwen3.py
+:309-317, :361-362); agirlik (heads, d) sifirdan (kapi 0,5).  Kapi Block._finish'te: egitim, prefill, SummaryCache,
+StaticCache ayni yol.
 """
 import dataclasses
 import functools
@@ -196,8 +200,9 @@ def gqa_sdpa(q, k, v, mask=None):
 
 
 class Block(torch.nn.Module):
-    def __init__(self, d, heads, hidden, kv_heads=None):
-        """kv_heads (GQA; varsayilan heads): k / v head sayisi, heads'in boleni; qkv d -> d + 2 d kv / heads."""
+    def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=False):
+        """kv_heads (GQA; varsayilan heads): k / v head sayisi, heads'in boleni; qkv d -> d + 2 d kv / heads.
+        attn_gate: head basina cikis kapisi agirligi (heads, d), sifir (RNG cekmez; kapisiz modelle ayni ilk agirlik)."""
         super().__init__()
         self.heads = heads
         self.kv_heads = int(kv_heads or heads)
@@ -208,6 +213,11 @@ class Block(torch.nn.Module):
         self.proj = torch.nn.Linear(d, d, bias=False)
         self.gate_up = torch.nn.Linear(d, 2 * hidden, bias=False)
         self.down = torch.nn.Linear(hidden, d, bias=False)
+        self.attn_gate = torch.nn.Parameter(torch.zeros(heads, d)) if attn_gate else None
+
+    def _gate(self, x):
+        """Blok girdisi x (B, T, d) -> kapi sigmoid(n1(x) W^T) (B, T, heads); satir basina, maske / konum kullanmaz."""
+        return torch.sigmoid(F.linear(self.n1(x), self.attn_gate))
 
     def _qkv(self, x, pos):
         B, T, d = x.shape
@@ -224,7 +234,10 @@ class Block(torch.nn.Module):
 
     def _finish(self, x, a):
         B, T, d = x.shape
-        x = x + self.proj(a.transpose(1, 2).reshape(B, T, d))
+        a = a.transpose(1, 2)                                               # (B, T, heads, hd)
+        if self.attn_gate is not None:
+            a = a * self._gate(x)[..., None]
+        x = x + self.proj(a.reshape(B, T, d))
         g, u = self.gate_up(self.n2(x)).chunk(2, -1)
         return x + self.down(F.silu(g) * u)
 
@@ -252,12 +265,14 @@ class Block(torch.nn.Module):
         return self._finish(x, a)
 
 class SentenceTransformer(torch.nn.Module):
-    def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB):
+    def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
+                 attn_gate=0):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
         dolunca glob onbelleginde yalniz Z'ler kalir, G parcada sifirlanir.  vocab_rows: E satir sayisi (>= VOCAB; dolgu
-        satirlari sifir, ilk agirlik VOCAB'li modelle ayni)."""
+        satirlari sifir, ilk agirlik VOCAB'li modelle ayni).  attn_gate 1: her blokta head basina cikis kapisi
+        (sifirdan; geri kalan ilk agirlik kapisiz modelle ayni)."""
         super().__init__()
         self.carry_group, self.row_len = int(carry_group), ROW_LEN
         self.global_layers = int(global_layers)
@@ -270,10 +285,11 @@ class SentenceTransformer(torch.nn.Module):
         if vocab_rows > VOCAB:                                   # kurulum RNG'si VOCAB'li modelle ayni; dolgu sifir
             self.E = torch.nn.Embedding(vocab_rows, d, _weight=torch.zeros(vocab_rows, d))
         kinds = ["loc"] * (layers - self.global_layers) + ["glob"] * self.global_layers
-        self.blocks = torch.nn.ModuleList(Block(d, heads, hidden, glob_kv_heads if k == "glob" else None) for k in kinds)
+        self.blocks = torch.nn.ModuleList(Block(d, heads, hidden, glob_kv_heads if k == "glob" else None,
+                                                bool(attn_gate)) for k in kinds)
         self.norm = torch.nn.RMSNorm(d)
         for name, p in self.named_parameters():
-            if p.dim() == 2:
+            if p.dim() == 2 and not name.endswith("attn_gate"):          # kapi sifir kalir
                 std = 0.02 / math.sqrt(2 * layers) if name.endswith(("proj.weight", "down.weight")) else 0.02
                 with torch.no_grad():
                     (p[:VOCAB] if name == "E.weight" else p).normal_(0.0, std)   # dolgu satiri rastgele sayi cekmez

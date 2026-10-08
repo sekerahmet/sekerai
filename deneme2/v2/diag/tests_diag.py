@@ -271,7 +271,8 @@ def t_trace():
     blok ciktisi (her katman), kategoriler toplami 1, yerel katmanda onceki cumle token'i 0; son katman lens'i = son tahmin;
     none log-olasiligi = loss_per_target = summaries_last sinav yolu (_Exam); read_off = z_ablate maskesiyle; z_unseen maskesi
     = okuma maskesi eksi (TOKEN -> ZTOK); hook'lar sonra model bit ayni; text_story metni kayipsiz; main: JSON / md, istem +
-    serbest metin, --generate = model.generate (uretilen konumda ilk aday), G'siz kosuda g_* null."""
+    serbest metin, --generate = model.generate (uretilen konumda ilk aday), G'siz kosuda g_* null; --attn_gate kosusunda
+    kapi ve bos_gated elle hesapla ayni (belge 90a)."""
     import traceback
     import data as D
     import gap_v2 as G
@@ -406,6 +407,38 @@ def t_trace():
               and pages["g0"][0]["texts"][0]["abl"]["g_off"] is None
               and all(k in html for k in ('"prompt.json"', '"gen.json"', "t[12]", "t[11]", "t[9], t[10]")),
               str({k: v[1] for k, v in pages.items()}))
+        runs["gate"] = os.path.join(T2.TMP, "runs_trace", "gate")
+        TR.main(base + ["--layers", "3", "--global_layers", "2", "--glob_kv_heads", "2", "--attn_gate", "1", "--out",
+                        runs["gate"]])
+        mg = G.load(runs["gate"], data, cpu)[0]
+        rgt = TT.trace(mg, batch, ["read_off"], 5, True)
+        ins = []
+        hooks = [b.register_forward_pre_hook(lambda m, args: ins.append(args)) for b in mg.blocks]
+        with torch.no_grad():
+            mg._batch_hidden(batch)
+        for h in hooks:
+            h.remove()
+        dg, db = 0.0, 0.0
+        for l, (b, (x, pos, mask)) in enumerate(zip(mg.blocks, ins)):
+            xn = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + torch.finfo(x.dtype).eps) * b.n1.weight
+            g = torch.sigmoid(xn @ b.attn_gate.T)[0]                                    # (T, H)
+            w = TT.attention_weights(b, x, pos, mask)[0]
+            bos = (w * (batch.kind[0] == D.Kind.BOS)[None, None, :]).sum(-1)            # (H, T); BOS konumu q'da da var
+            bos = bos - torch.where(batch.kind[0] == D.Kind.BOS, w.diagonal(dim1=1, dim2=2), torch.zeros(()))
+            dg = max(dg, float((rgt["gate"][l] - g.mean(1)).abs().max()))
+            db = max(db, float((rgt["bos_gated"][l] - (g.T * bos).mean(0)).abs().max()))
+        go = os.path.join(T2.TMP, "trace_gate")
+        rj = TT.main(["--run", runs["gate"], "--data", data, "--stream", root, "--prompts", prompts, "--device", "cpu",
+                      "--out", go, "--heads", "--conds", "read_off"])
+        md = open(os.path.join(go, "token_trace.md"), encoding="utf-8").read()
+        tk = rj["texts"][0]["tokens"][0]
+        check("token_trace --attn_gate: katman basina kapi = sigmoid(n1(x) W^T) head ortalamasi, bos_gated = kapi x BOS kutlesi "
+              "(elle, fark %.1e / %.1e); JSON attn[l].gate / bos_gated, gate_heads (L, H); ozet ve md tablosunda gate "
+              "sutunu; kapisiz kosuda alan yok" % (dg, db),
+              dg < 1e-5 and db < 1e-5 and {"gate", "bos_gated"} <= set(tk["attn"][0])
+              and tuple(np.shape(tk["gate_heads"])) == (3, 4) and "gate" in rj["summary"]["attn_by_layer"][0]
+              and "| gate | bos_gated |" in md and "gate" not in js["texts"][0]["tokens"][0]["attn"][0]
+              and "gate" not in r0["summary"]["attn_by_layer"][0])
     except Exception:  # noqa: BLE001
         check("trace", False, traceback.format_exc(limit=4))
     finally:

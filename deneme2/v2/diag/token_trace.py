@@ -14,6 +14,8 @@ cikti konum basina esit), fp32, dense maske (modelin kendi kurali).  Konum basin
              g_off     G bloklari atlanir (cikti = girdi)
              g_local   G bloklari yerel blok gibi (yerel maske + mantiksal konum)
              'a+b'     birlesim (ornek read_off+g_off: gecmissiz taban); G'siz modelde g_* null
+    gate     --attn_gate'li kosuda katman basina cikis kapisi (head ortalamasi; --heads: head basina) ve bos_gated =
+             head ortalamasi kapi x BOS kutlesi (BOS'tan proj'a gecen pay; belge 90a)
 Uyari (z_ablate gibi): kapatma yon icindir; model o kosulu egitimde gormedi.
 Metinler: --prompts (varsayilan <data>/reading_prompts.json) hikayelerinin tamami, gercek metin; --text serbest metin
 (veri klasorunun cumle profiliyle bolunur); --generate N: istem + modelin acgozlu N cumlesi (generate) izlenir.
@@ -132,7 +134,8 @@ def _condition(model, cond, batch):
 def trace(model, batch, conds, top_k, heads):
     """Tek hikayelik batch (B 1, model_z duzeni) -> dict: input_kind, sent, target, target_kind, logp, rank, top_ids,
     top_p (konum basina); lens_logp / lens_rank / lens_top1 (L, T); attn (L, T, 5) head ortalamasi, attn_top (L, T, 3)
-    konum ve agirlik, attn_heads (L, H, T, 5) (heads); ablation {kosul: (T,) fark ya da None}.  fp32, dense maske."""
+    konum ve agirlik, attn_heads (L, H, T, 5) (heads); gate (L, T) head ortalamasi, gate_heads (L, H, T), bos_gated (L, T)
+    (kapisiz modelde None); ablation {kosul: (T,) fark ya da None}.  fp32, dense maske."""
     assert batch.kind.shape[0] == 1, "tek hikaye"
     kind, sent, tgt = batch.kind[0], batch.sent[0], batch.target[0]
     T = kind.shape[0]
@@ -167,10 +170,15 @@ def trace(model, batch, conds, top_k, heads):
     attn = torch.empty(L, T, len(CATEGORIES))
     attn_top_i, attn_top_w = torch.empty(L, T, 3, dtype=torch.long), torch.empty(L, T, 3)
     attn_heads = torch.empty(L, model.blocks[0].heads, T, len(CATEGORIES)) if heads else None
+    gated = model.blocks[0].attn_gate is not None
+    gate_heads, bos_gated = (torch.empty(L, model.blocks[0].heads, T) if gated else None for _ in range(2))
     for l, (block, (x, pos, mask)) in enumerate(zip(model.blocks, ins)):
         w = attention_weights(block, x, pos, mask)[0]                                                # (H, T, T)
         per = torch.einsum("hqk,qkc->hqc", w, cat)
         attn[l] = per.mean(0).cpu()
+        if gated:
+            g = block._gate(x)[0].T                                                                  # (H, T)
+            gate_heads[l], bos_gated[l] = g.cpu(), (g * per[:, :, 2]).cpu()
         if heads:
             attn_heads[l] = per.cpu()
         tw, ti = w.mean(0).topk(min(3, T), -1)
@@ -183,7 +191,8 @@ def trace(model, batch, conds, top_k, heads):
     return dict(input_kind=kind.cpu(), sent=sent.cpu(), target=tgt.cpu(), target_kind=batch.target_kind[0].cpu(),
                 has_target=keep, logp=logp.cpu(), rank=rank.cpu(), top_ids=top_ids.cpu(), top_p=top_p.cpu(),
                 lens_logp=lens_logp, lens_rank=lens_rank, lens_top1=lens_top1, attn=attn, attn_top=(attn_top_i, attn_top_w),
-                attn_heads=attn_heads, ablation=ablation)
+                attn_heads=attn_heads, gate=gate_heads.mean(1) if gated else None, gate_heads=gate_heads,
+                bos_gated=bos_gated.mean(1) if gated else None, ablation=ablation)
 
 
 def _args(argv):
@@ -227,11 +236,15 @@ def _entries(tok, r, n_prompt, generated, top_k, heads):
                             top1=dec(r["lens_top1"][l, i])) for l in range(L)],
                  attn=[dict(layer=l, **{c: round(float(r["attn"][l, i, j]), 4) for j, c in enumerate(CATEGORIES)},
                             top=[[int(a), round(float(b), 4)] for a, b in zip(r["attn_top"][0][l, i].tolist(),
-                                                                              r["attn_top"][1][l, i].tolist())])
+                                                                              r["attn_top"][1][l, i].tolist())],
+                            **({} if r["gate"] is None else dict(gate=round(float(r["gate"][l, i]), 4),
+                                                                bos_gated=round(float(r["bos_gated"][l, i]), 4))))
                        for l in range(L)],
                  ablation={c: None if v is None else round(float(v[i]), 4) for c, v in r["ablation"].items()})
         if heads:
             e["attn_heads"] = np.round(r["attn_heads"][:, :, i], 4).tolist()
+            if r["gate_heads"] is not None:
+                e["gate_heads"] = np.round(r["gate_heads"][:, :, i], 4).tolist()
         out.append(e)
     return out
 
@@ -273,7 +286,8 @@ def _summary(tokens, n_layers, n_glob):
               for t in tokens if t["rank"] == 0]
     out["formed_layer"] = dict(counts=np.bincount(formed, minlength=n_layers).tolist() if formed else [0] * n_layers,
                                in_global=round(float(np.mean([f >= n_layers - n_glob for f in formed])), 4) if formed else None)
-    out["attn_by_layer"] = [{c: round(float(np.mean([t["attn"][l][c] for t in tokens])), 4) for c in CATEGORIES}
+    cols = list(CATEGORIES) + (["gate", "bos_gated"] if tokens and "gate" in tokens[0]["attn"][0] else [])
+    out["attn_by_layer"] = [{c: round(float(np.mean([t["attn"][l][c] for t in tokens])), 4) for c in cols}
                             for l in range(n_layers)]
     return out
 
@@ -340,9 +354,9 @@ def main(argv=None):
         md.append("| %s | %s |" % (c, " | ".join("%+.4f" % v[k] if k in v else "-" for k in keys)))
     md += ["", "Olusma katmani (dogru token'in ilk kez kalici ilk aday oldugu katman; son tahmini dogru konumlar): %s; G "
            "katmaninda olusan pay %s." % (s_["formed_layer"]["counts"], s_["formed_layer"]["in_global"]), "",
-           "| katman | tur | " + " | ".join(CATEGORIES) + " |", "|" + "---|" * (2 + len(CATEGORIES))]
+           "| katman | tur | " + " | ".join(s_["attn_by_layer"][0]) + " |", "|" + "---|" * (2 + len(s_["attn_by_layer"][0]))]
     for l, a in enumerate(s_["attn_by_layer"]):
-        md.append("| %d | %s | %s |" % (l, res["layers"][l]["kind"], " | ".join("%.3f" % a[c] for c in CATEGORIES)))
+        md.append("| %d | %s | %s |" % (l, res["layers"][l]["kind"], " | ".join("%.3f" % v for v in a.values())))
     worst = sorted(((t["ablation"].get(c) or 0, c, x["label"], t["i"], t["text"], t["target"]) for x in texts
                     for t in x["tokens"] for c in conds), key=lambda z: z[0])[:10]
     md += ["", "En cok etkilenen 10 konum (kosul, metin, konum, girdi -> hedef, fark):", ""]

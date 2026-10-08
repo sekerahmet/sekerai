@@ -38,6 +38,10 @@ gruptaki sonraki parcanin ilk token'ini hedefler.  carry_summaries 1: devam parc
 devami, her katmanda onceki parcalarin BOS + Z'lerini (glob'da yalniz Z'leri) bellek olarak okur (gradyan akar; KV =
 [satir || bellek], M_max plandan); --carry_group G tek basina = K kontrolu (ayni plan / hedef, BOS'lu, bellek yok).  Yalniz
 model_z.  Sinavda continuation_exam (valid'in uzun belgeleri), gunlukte loss_cont.
+--attn_gate 1 (belge 88a, 90a; kullanici, 8 Ekim: "o zaman attention head yapalım mı"; yalniz model_z): her blokta head
+basina sigmoid cikis kapisi (sentence.Block._gate; girdi n1(x), agirlik sifirdan, kapi 0,5); agirlik (heads, d) bloklarin
+2-B matrisi oldugu icin Muon / NorMuon grubunda.  Varsayilan 0 = kapisiz (bit ayni); kimlikte, --resume'da verilmezse
+kosunun kimliginden; kapisiz checkpoint kapili surdurulmez (DUR).
 --stop_step N (kullanici, 8 Ekim): takvim degismeden adim N'de durur; checkpoint.pt + agent.pt + results.json (finished
 False, stopped_at, readings_skipped "stop_step"), son sinav ve okuma yok; --resume 1 kaldigi yerden.
 Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunluk sinirinda, epok sonunda ve bitiste;
@@ -56,14 +60,14 @@ Transformer yuklenir.
 ikilisi (yerel, global) _attn'dan, egitim / sinav / teshis ayni yol.  --global_layers 0: G'siz Model Z (kiyas).
 Varsayilanlar (kullanici, 8 Ekim: "Varsayılan yap ama kısa bir koşu ile son halin çalıştığından emin olalım"; "G yi de
 ölçüye bağlayalım"): model_z'de global_layers auto = round(layers x MODEL_Z_GLOBAL_RATIO) (L10 3, L12 4, L24 8; transformer
-0).  --resume 1'de acikca verilmeyen global_layers / optimizer / glob_kv_heads / lr kosunun kimliginden
+0).  --resume 1'de acikca verilmeyen global_layers / optimizer / glob_kv_heads / lr / attn_gate kosunun kimliginden
 (INHERIT): eski kosular varsayilan degisse de kendi ayariyla surer.  Kimlikte "auto" degil cozulmus sayi.
 
     python train.py --model transformer|model_z --out <kosu> [--lr LR|auto (varsayilan auto)] [--data <v2/simplestories_gpt2>]
                     [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
                     [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1]
                     [--optimizer normuon|muon|adamw (varsayilan normuon)] [--global_layers N|auto (varsayilan auto)]
-                    [--glob_kv_heads N|auto (varsayilan auto)] [--carry_summaries 1] [--carry_group G]
+                    [--glob_kv_heads N|auto (varsayilan auto)] [--carry_summaries 1] [--carry_group G] [--attn_gate 0|1]
 """
 import torch  # noqa: I001  (Windows: torch once)
 
@@ -95,7 +99,7 @@ MODEL_Z_GLOBAL_RATIO = 1 / 3   # global_layers auto (OLCULENLER_z: d768/L10 G1->
 GLOB_KV_GROUP = 4              # glob_kv_heads auto = heads / 4
 GLOB_KV_DEFAULT = "auto"       # --glob_kv_heads verilmezse (kullanici, 8 Ekim: GQA varsayilan); testler eski 0'a sabitler
 LR_REF = (2e-3, 768, 0.5)      # lr auto = lr0 (d0 / d) ^ us (aci / adim ~ lr 0,2 sqrt(d) sabit); d1024 olcumu: 1,4 / 1,7e-3 duz, 1,73e-3 icinde
-INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr")   # --resume'da verilmezse kimlikten
+INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate")   # --resume'da verilmezse kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
@@ -104,7 +108,8 @@ READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
 READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
-            "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows")
+            "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
+            "attn_gate")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -234,7 +239,8 @@ def _build(args, dev):
         model = SentenceTransformer(args.d, args.layers, args.heads, global_layers=int(getattr(args, "global_layers", 0)),
                                     glob_kv_heads=getattr(args, "glob_kv_heads", 0) or None,
                                     carry_group=int(getattr(args, "carry_group", 0) or 0) if getattr(args, "carry_summaries", 0)
-                                    else 0, vocab_rows=getattr(args, "vocab_rows", D.VOCAB))
+                                    else 0, vocab_rows=getattr(args, "vocab_rows", D.VOCAB),
+                                    attn_gate=int(getattr(args, "attn_gate", 0) or 0))
         model, mask_fn, layout = model.to(dev), model.mask_fn, "model_z"
     return model, mask_fn, layout
 
@@ -514,6 +520,9 @@ def _args(argv):
     ap.add_argument("--carry_group", type=int, default=None,
                     help="carry plani: belgenin ardisik en cok G parcasi ayni batch'te (carry_summaries 0 ile: K kontrolu, "
                          "bellek yok); varsayilan carry_summaries ise 4, degilse 0")
+    ap.add_argument("--attn_gate", type=int, default=None, choices=(0, 1),
+                    help="model_z: head basina attention cikis kapisi (belge 88a, 90a); varsayilan 0; kimlikte; "
+                         "--resume'da verilmezse kosunun kimliginden")
     ap.add_argument("--fp8", default="none", choices=("none", "tensorwise", "rowwise"),
                     help="MLP (gate_up, down) torchao Float8Linear tarifi; none: bf16 (kimlige girmez, --resume'da "
                          "degistirilebilir; kullanici, 8 Ekim)")
@@ -528,7 +537,7 @@ def _args(argv):
     was = torch.load(ckpt, map_location="cpu", weights_only=False, mmap=True)["args"] \
         if args.resume and os.path.exists(ckpt) else None               # varsayilan degisse de kosu kendi ayariyla surer
     for k in args.defaulted if was is not None else ():
-        setattr(args, k, was.get(k, 0 if k == "glob_kv_heads" else None))   # glob_kv_heads 8 Ekim'de eklendi
+        setattr(args, k, was.get(k, 0 if k in ("glob_kv_heads", "attn_gate") else None))   # 8 Ekim'de eklenenler
     args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
     if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
         args.optimizer = DEFAULT_OPTIMIZER
@@ -538,6 +547,10 @@ def _args(argv):
         args.glob_kv_heads = GLOB_KV_DEFAULT
     if args.lr is None:
         args.lr = "auto"
+    if args.attn_gate is None:
+        args.attn_gate = 0
+    if args.attn_gate and args.model != "model_z":
+        sys.exit("DUR: --attn_gate yalniz model_z")
     args.summaries_last = int(args.model == "model_z")                   # Model Z duzeni (kimlikte isaret)
     if args.carry_group is None:
         args.carry_group = 4 if args.carry_summaries else 0
@@ -633,7 +646,7 @@ def main(argv=None):
                  train_stream_sha256=train.meta["stream_sha256"],
                  optimizer=args.optimizer, global_layers=args.global_layers,
                  summaries_last=args.summaries_last, glob_kv_heads=args.glob_kv_heads, carry_summaries=args.carry_summaries,
-                 carry_group=args.carry_group, vocab_rows=args.vocab_rows)
+                 carry_group=args.carry_group, vocab_rows=args.vocab_rows, attn_gate=args.attn_gate)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -652,7 +665,8 @@ def main(argv=None):
         del peek
         if _archived(was):                                                # eski / kaldirilan yol (belge 77)
             sys.exit("DUR: " + _archived(was))
-        was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, **was}   # sonradan eklenenler
+        was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
+               **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:

@@ -75,7 +75,8 @@ def load_run(out, data_dir, dev):
                            global_layers=idt.get("global_layers", 0),          # global_layers'tan onceki: 0
                            carry_summaries=idt.get("carry_summaries", 0), carry_group=idt.get("carry_group", 0),
                            glob_kv_heads=idt.get("glob_kv_heads", 0),
-                           vocab_rows=idt.get("vocab_rows", D.VOCAB))            # sozluk dolgusundan onceki: VOCAB
+                           vocab_rows=idt.get("vocab_rows", D.VOCAB),            # sozluk dolgusundan onceki: VOCAB
+                           attn_gate=idt.get("attn_gate", 0))
     model, _, _ = T._build(spec, dev)
     model.load_state_dict(pack["state"])
     model.row_len = idt["row_len"]                                       # uretim konum siniri, carry parca boyu

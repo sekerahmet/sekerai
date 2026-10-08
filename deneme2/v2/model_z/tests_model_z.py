@@ -2,7 +2,8 @@
 (z, z_flat, direct, generate_longest, formullu onbellek) kaldirildi (belge 44); eski hali git etiketi
 v2-before-formula-cleanup-20261007.
 
-    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,mask,summaries_last,gqa,carry,vocab,limit,flex_ranges]
+    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,mask,summaries_last,gqa,carry,vocab,limit,flex_ranges,
+                            gate]
 """
 import os
 import sys
@@ -1060,8 +1061,170 @@ def t_limit():
           "> 30); StaticCache + eski yol, open_last 0 / 1", all(ok), "konum " + ", ".join(info))
 
 
+def t_gate():
+    """attn_gate (belge 88a, 90a): (a) kapali = bugunku model (parametre yok, agirlik ve hidden bit); acik: kapi disindaki
+    ilk agirlik kapisizla bit ayni, kapi sifir (0,5); (b) blok = bagimsiz basvuru (SDPA ciktisi (B, T, H, hd) x
+    sigmoid(n1(x) W^T), sonra proj, MLP; yerel ve glob GQA); summaries_last ayni; sizinti yok; (c) SummaryCache adim adim
+    ve prefill = tam ileri, StaticCache = SummaryCache, generate = token token (acgozlu + ornekleme), G 0 / 1 GQA / hepsi
+    glob; carry uretimi = carry batch'inin tam ileri gecisi; (d) gradyan kapiya ulasir, NorMuon grubunda."""
+    import torch.nn.functional as F_
+    import train as TR
+    import recipe as R
+    from sentence import StaticCache, story_positions, summaries_last, model_z_global_mask
+    rng = np.random.default_rng(13)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(2, 6))]
+               for _ in range(12)]
+    rows = [list(range(i, i + 4)) for i in range(0, 12, 4)]
+    batch = real_batch(rows, 160, stories)
+    B, T = batch.kind.shape
+
+    def make(gate=0, rand=True, **kw):
+        torch.manual_seed(0)
+        m = SentenceTransformer(d=32, layers=3, heads=4, attn_gate=gate, **kw).eval()
+        if gate and rand:                                                 # kapi 0,5'ten uzak: head / satir farkli
+            g = torch.Generator().manual_seed(1)
+            with torch.no_grad():
+                for blk in m.blocks:
+                    blk.attn_gate.copy_(0.3 * torch.randn(blk.attn_gate.shape, generator=g))
+        return m
+    torch.manual_seed(0)
+    off = SentenceTransformer(d=32, layers=3, heads=4, global_layers=1).eval()     # bayraksiz kurucu
+    base, on = make(global_layers=1, gate=0), make(global_layers=1, gate=1, rand=False)
+    sd_on = on.state_dict()
+    with torch.no_grad():
+        same = all(torch.equal(a_, b_) for a_, b_ in zip(off.state_dict().values(), base.state_dict().values())) and \
+            torch.equal(off._batch_hidden(batch), base._batch_hidden(batch))
+    gk = [k for k in sd_on if k.endswith("attn_gate")]
+    init_ok = all(torch.equal(v, base.state_dict()[k]) for k, v in sd_on.items() if k not in gk) and \
+        set(sd_on) - set(gk) == set(base.state_dict()) and len(gk) == 3 and all(
+            not sd_on[k].any() and tuple(sd_on[k].shape) == (4, 32) for k in gk)
+    check("gate: kapali = bugunku model (attn_gate parametresi yok, agirlik ve hidden bit); acik: kapi disindaki ilk "
+          "agirlik bit ayni, kapi (heads, d) sifir", same and init_ok and not any("attn_gate" in k for k in base.state_dict()))
+
+    ok, info = True, []
+    glob = _dense(model_z_global_mask(batch.kind, batch.doc, batch.sent), B, T, "cpu")
+    loc = _dense(model_z_read_mask(batch.kind, batch.doc, batch.sent), B, T, "cpu")
+    m = make(global_layers=1, glob_kv_heads=2, gate=1)
+    for l, (mask, pos) in enumerate(((loc, batch.pos), (loc, batch.pos), (glob, story_positions(batch.kind)))):
+        blk = m.blocks[l]
+        with torch.no_grad():
+            x = torch.randn(B, T, 32)
+            got = blk(x, pos, mask)
+            q, k, v = blk._qkv(x, pos)
+            rep = blk.heads // blk.kv_heads
+            a_ = F_.scaled_dot_product_attention(q, k.repeat_interleave(rep, 1), v.repeat_interleave(rep, 1),
+                                                 attn_mask=mask[:, None]).transpose(1, 2)
+            xn = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + torch.finfo(x.dtype).eps) * blk.n1.weight
+            gate = torch.sigmoid(xn @ blk.attn_gate.T)                       # (B, T, H)
+            h = x + (a_ * gate[..., None]).reshape(B, T, 32) @ blk.proj.weight.T
+            gg, u = blk.gate_up(blk.n2(h)).chunk(2, -1)
+            ref = h + blk.down(F_.silu(gg) * u)
+        d_ = float((got - ref).abs().max())
+        ok &= d_ < 1e-5 and float(gate.std()) > 0.1
+        info.append("blok %d (kv %d) %.1e" % (l, blk.kv_heads, d_))
+    with torch.no_grad():
+        h0 = m._batch_hidden(batch)
+        pb, perm = summaries_last(batch)
+        h1 = m._batch_hidden(pb).gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, 32))
+        alt = [[list(s_) for s_ in st] for st in stories]
+        alt[0][-1] = [(t + 7) % D.END_ID for t in alt[0][-1]]
+        h2 = m._batch_hidden(real_batch(rows, 160, alt))
+    first = batch.doc[0] == 0
+    last = int((first & (batch.sent[0] == int(batch.sent[0][first].max()))).nonzero()[0, 0])
+    check("gate: blok = bagimsiz basvuru (SDPA ciktisi x sigmoid(n1(x) W^T) head basina, proj, MLP; yerel + glob GQA); "
+          "summaries_last ayni; sizinti yok (son cumle degisince onceki konumlar bit ayni)",
+          ok and float((h0 - h1).abs().max()) < 1e-5 and torch.equal(h0[0, :last], h2[0, :last])
+          and not torch.equal(h0[0, last:], h2[0, last:]), "; ".join(info))
+
+    rs = lambda n: [[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 15))] for _ in range(n)]  # noqa: E731
+    prompts = [[], rs(1), rs(3), rs(30)]
+    res = []
+    for kw in (dict(global_layers=0), dict(global_layers=1, glob_kv_heads=2), dict(global_layers=3)):
+        m = make(gate=1, **kw)
+        with torch.no_grad():
+            keep = batch.target >= 0
+            lg_full = m._batch_hidden(batch)[keep] @ m.E.weight.T
+            out = []
+            for row in rows:
+                for si in row:
+                    c = SummaryCache(m)
+                    out.append(c.logits[None])
+                    for s_ in stories[si]:
+                        out += [c.append_token(t)[None] for t in s_] + [c.close_sentence()[None]]
+            d_step = float((torch.cat(out) - lg_full).abs().max())
+            d_pre, d_static = 0.0, 0.0
+            for sents in prompts:
+                a, b, s = SummaryCache(m), SummaryCache(m), StaticCache(m, 64, 8, 16)
+                la, ls = a.prefill(sents), s.prefill(sents)
+                lb = b.logits
+                for x_ in sents:
+                    for t in x_:
+                        lb = b.append_token(t)
+                    lb = b.close_sentence()
+                d_pre = max(d_pre, float((la - lb).abs().max()))
+                d_static = max(d_static, float((la - ls).abs().max()))
+                for t in [5, 6, -1, 7, -1]:
+                    x1, x2 = (a.close_sentence(), s.close_sentence()) if t < 0 else (a.append_token(t), s.append_token(t))
+                    d_static = max(d_static, float((x1 - x2).abs().max()))
+        gen_ok = m.generate(prompts, 4, 12) == _generate_stepwise(m, prompts, 4, 12) and m.generate(
+            prompts, 4, 12, torch.Generator().manual_seed(11)) == _generate_stepwise(
+            m, prompts, 4, 12, torch.Generator().manual_seed(11))
+        res.append((kw, d_step, d_pre, d_static, gen_ok))
+    check("gate: SummaryCache adim adim = tam ileri, prefill = adim adim, StaticCache = SummaryCache (fp32 < 1e-5), generate "
+          "= token token (acgozlu + ornekleme); G0 / G1 GQA kv 2 / hepsi glob",
+          all(r_[1] < 1e-5 and r_[2] < 1e-5 and r_[3] < 1e-5 and r_[4] for r_ in res),
+          "; ".join("G%d adim %.1e prefill %.1e static %.1e gen %s" % (r_[0]["global_layers"], *r_[1:]) for r_ in res))
+
+    sents = [[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(30)]
+    RL, G_ = 160, 2
+    pieces, cur, used, k = [], [], 1, 0                                       # uretim kurali (SummaryCache, t_carry)
+    for x_ in sents:
+        cur.append(x_)
+        used += len(x_) + 1
+        if used > RL - D.MAX_SENTENCE_TOKENS - 1:
+            pieces.append(cur)
+            k += 1
+            cur, used = [], (1 if k % G_ == 0 else 0)
+    pieces += [cur] if cur else []
+    st = token_stories(pieces)
+    st.continues = np.array([i < len(pieces) - 1 for i in range(len(pieces))])
+    gp = np.arange(len(pieces)) % G_
+    cres = []
+    for gl in (0, 1):
+        m = make(gate=1, global_layers=gl, carry_group=G_)
+        m.row_len = RL
+        b = D.build_batch(st, [[i] for i in range(len(pieces))], "model_z", row_len=RL,
+                          carry=dict(gpos=gp, memory=True, m_max=128))
+        with torch.no_grad():
+            pb, perm = summaries_last(b)
+            lg = m._batch_hidden(pb).gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, 32)) @ m.E.weight.T
+            want = []
+            for r, p_ in enumerate(pieces):
+                n = sum(len(x_) + 1 for x_ in p_) + (1 if gp[r] == 0 else 0)
+                reset = r + 1 < len(pieces) and gp[r + 1] == 0
+                want += [lg[r, c] for c in range(n - int(reset))]
+            c = SummaryCache(m)
+            got = [c.logits] + [y for x_ in sents for y in [c.append_token(t) for t in x_] + [c.close_sentence()]]
+        cres.append(max(float((a_ - b_).abs().max()) for a_, b_ in zip(got, want)))
+    check("gate carry: SummaryCache carry adim adim = carry batch'inin tam ileri gecisi (%d parca, G0 / G1)" % len(pieces),
+          max(cres) < 1e-5, "fark %s" % ["%.1e" % v for v in cres])
+
+    m = make(global_layers=1, gate=1, rand=False)
+    m.train()
+    opt = TR._optimizer(m, "normuon", 1e-2, False)[0]
+    names = [n for n, _ in R.muon_params(m)]
+    m.loss_per_target(batch)[0].mean().backward()
+    gn = [float(blk.attn_gate.grad.abs().sum()) for blk in m.blocks]
+    opt.step()
+    moved = all(blk.attn_gate.abs().sum() > 0 and torch.isfinite(blk.attn_gate).all() for blk in m.blocks)
+    check("gate: sifir baslangicta gradyan her bloga ulasir; attn_gate NorMuon grubunda (muon_params), adim kapiyi oynatir",
+          all(g_ > 0 for g_ in gn) and all("blocks.%d.attn_gate" % i in names for i in range(3)) and moved,
+          "grad %s" % ["%.2e" % g_ for g_ in gn])
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
-             equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab, limit=t_limit, flex_ranges=t_flex_ranges)
+             equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab, limit=t_limit, flex_ranges=t_flex_ranges,
+             gate=t_gate)
 
 if __name__ == "__main__":
     if SIDE is not None:

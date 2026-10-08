@@ -987,6 +987,7 @@ def t_train():
         _train_equiv(base, root, data, prompts, out, state, same, TR)
         _train_muon(base, root, data, out, state, same, exits, TR)
         _train_global(base, root, data, out, exits, TR)
+        _train_gate(base, root, data, out, state, same, exits, TR)
         _train_vocab(base, data, out, TR)
         _train_finish(base, out, TR)
         _train_gqa_default(base, out, TR)
@@ -1362,6 +1363,56 @@ def _train_muon(base, root, data, out, state, same, exits, TR):
               and not os.path.exists(out("nomuon_default")), str(msg))
     except Exception:  # noqa: BLE001
         check("train --optimizer muon", False, traceback.format_exc(limit=3))
+
+
+def _train_gate(base, root, data, out, state, same, exits, TR):
+    """--attn_gate 1 (belge 90a): kosar, ilk adim kaybi = kapili modelin loss_per_target'i (kapisizdan farkli), kapi
+    oynar, kimlikte; kesilip surdurulen = kesintisiz (bit); --resume'da bayraksiz kimlikten; kapisiz checkpoint kapili
+    surdurulmez, transformer'da DUR (dosyaya dokunulmaz); load_run kapili kurar; NorMuon'da kapi muon grubunda."""
+    import traceback
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
+        import generate_readings as GR
+        mz = base + ["--model", "model_z", "--layers", "2", "--global_layers", "1", "--steps", "8"]
+        cmd = mz + ["--attn_gate", "1"]
+        A = out("gate_A")
+        a = TR.main(cmd + ["--out", A])
+        u = TR.main(mz + ["--out", out("gate_U")])
+        st = D.TokenStories(root, data, "train")
+        m, mask_fn, layout = TR._build(TR._args(cmd + ["--out", "x"]), torch.device("cpu"))
+        f = np.load(os.path.join(data, "train_pack_plan_e1.npz"))
+        ro, rs = f["row_offsets"], f["row_stories"]
+        b = D.build_batch(st, [rs[ro[r]:ro[r + 1]].tolist() for r in range(4)], layout, "cpu", 64)
+        with torch.no_grad():
+            want = m.loss_per_target(b)[0].mean().item()
+        sa = state(A)
+        gk = [k for k in sa if k.endswith("attn_gate")]
+        check("train --attn_gate 1: kosar; ilk adim kaybi = kapili modelin loss_per_target'i, kapisizdan farkli; kapi (2 blok) "
+              "sifirdan oynadi; kimlikte", abs(a["log"][0]["loss"] - want) < 1e-4
+              and abs(a["log"][0]["loss"] - u["log"][0]["loss"]) > 1e-4 and len(gk) == 2 and all(sa[k].abs().sum() > 0
+                                                                                             for k in gk)
+              and a["identity"]["attn_gate"] == 1 and u["identity"]["attn_gate"] == 0,
+              "ilk kayip %.4f / %.4f, kapisiz %.4f" % (a["log"][0]["loss"], want, u["log"][0]["loss"]))
+        stopped, bres = _cut_and_resume(TR, cmd, out("gate_B"))
+        inherit = TR._args(mz + ["--out", out("gate_B"), "--resume", "1"]).attn_gate
+        U = os.path.join(out("gate_U"), "checkpoint.pt")
+        mt = os.path.getmtime(U)
+        lm = GR.load_run(A, data, torch.device("cpu"))[0]
+        check("train --attn_gate 1: adim 4'te kesilip surdurulen = kesintisiz (bit); --resume'da bayraksiz kimlikten (1); "
+              "kapisiz checkpoint --attn_gate 1 ile surdurulmez (dosyaya dokunulmaz), transformer --attn_gate 1 DUR; "
+              "load_run kapili kurar (agirlik bit)",
+              stopped and same(sa, state(out("gate_B"))) and bres["exam"] == dict(a["exam"], seconds=bres["exam"]["seconds"])
+              and inherit == 1 and exits(cmd + ["--out", out("gate_U"), "--resume", "1"]) and os.path.getmtime(U) == mt
+              and exits(base + ["--model", "transformer", "--attn_gate", "1", "--steps", "2", "--out", out("gate_T")])
+              and not os.path.exists(out("gate_T")) and lm.blocks[0].attn_gate is not None
+              and same(sa, lm.state_dict()))
+        n = TR.main(_unpin(cmd) + ["--steps", "2", "--out", out("gate_N")])
+        names = n["optimizer"]["split"]["muon"]["names"]
+        check("train --attn_gate 1 --optimizer normuon (varsayilan): kapi (blocks.*.attn_gate) NorMuon grubunda",
+              names.get("blocks.*.attn_gate") == 2 and not any("attn_gate" in k for k in
+                                                               n["optimizer"]["split"]["adamw_decay"]["names"]), str(names))
+    except Exception:  # noqa: BLE001
+        check("train --attn_gate", False, traceback.format_exc(limit=3))
 
 
 def _train_global(base, root, data, out, exits, TR):
