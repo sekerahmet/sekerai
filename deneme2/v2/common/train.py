@@ -32,9 +32,10 @@ vocab_rows; alani olmayan eski kosu VOCAB (50.258) ile yuklenir ve surer.
 Kimlikte; transformer ile DUR.  Hiz secenekleri (belge 90b ek; deneme): --ngram_layers K yalniz ilk K blok girdisine
 (0 hepsi), --ngram_sparse 1 tabloyu yalniz okunan satirlarla gunceller (recipe.NgramRowAdam: beta1 0 Adam, yogun
 AdamW(0, beta2) ile ayni matematik).  Varsayilan auto (kullanici, 8 Ekim: "gate 2 ve n gram girdi"; NGRAM_DEFAULT):
-model_z'de 5 x vocab_rows satir (50.304'te 251.520) ve --ngram_layers verilmezse 1 (yalniz ilk blok girdisi; d768 3.000 adim
-3,3405 / 219,8 ms, taban 3,3567 / 210,9, belge 93 ek), transformer'da 0.  Acik --ngram_embed 0 eski davranis (bit ayni);
---ngram_sparse varsayilani 0.  Uc alan INHERIT'te (alan yoksa 0).
+model_z'de 5 x vocab_rows satir (50.304'te 251.520), transformer'da 0.  n-gram acikken (auto ya da acik N) --ngram_layers
+verilmezse 1 (yalniz ilk blok girdisi; d768 3.000 adim 3,3405 / 219,8 ms, taban 3,3567 / 210,9, belge 93 ek); acik
+--ngram_layers 0 butun katmanlar.  Acik --ngram_embed 0 eski davranis (bit ayni); --ngram_sparse varsayilani 0.  Uc alan
+INHERIT'te (alan yoksa 0: eski kosu kendi ayariyla surer).
 --glob_kv_heads N|auto (kullanici, 8 Ekim: "bu duurmda GOA yı da sıraya koy o zaman bakalım"; uretim hizi): GQA, k / v
 N head yalniz tam causal katmanlarda (Model Z glob; transformer'da her katman, kiyas icin); yerel katmanlar tam head
 (Z K/V kanali daralmaz).  Varsayilan auto (kullanici, 8 Ekim: "GQA'yı varsayılan yap, ona karar verdik son koşuda bu
@@ -568,7 +569,7 @@ def _args(argv):
                     help="Model Z bigram embedding tablosu satir sayisi; auto (varsayilan): model_z 5 x vocab_rows, "
                          "transformer 0; 0 kapali; kimlikte, --resume'da verilmezse kosunun kimliginden (belge 88b, 93)")
     ap.add_argument("--ngram_layers", type=int, default=None,
-                    help="bigram yalniz ilk K blok girdisine (0: hepsi); verilmezse auto n-gram'da 1, aksi 0 (belge 90b ek)")
+                    help="bigram yalniz ilk K blok girdisine (0: hepsi); verilmezse n-gram aciksa 1 (belge 93 ek)")
     ap.add_argument("--ngram_sparse", type=int, default=None,
                     help="1: bigram tablosu yalniz okunan satirlarla guncellenir (beta1 0 seyrek Adam; deneme)")
     ap.add_argument("--carry_group", type=int, default=None,
@@ -616,13 +617,12 @@ def _args(argv):
     if args.attn_gate == 2 and args.d < 64:
         sys.exit("DUR: --attn_gate 2: kapi girdisi d // 64 boyut, d %d < 64 -> 0 boyut; d >= 64 ya da --attn_gate 0 / 1"
                  % args.d)
-    ngram_auto = args.ngram_embed is None and NGRAM_DEFAULT == "auto" or args.ngram_embed == "auto"
     if args.ngram_embed is None:
         args.ngram_embed = NGRAM_DEFAULT
     if args.ngram_embed == "auto":                                       # 5 x sozluk satiri (belge 90b), yalniz Model Z
         args.ngram_embed = 5 * args.vocab_rows if args.model == "model_z" else 0
     if args.ngram_layers is None:
-        args.ngram_layers = 1 if ngram_auto and args.ngram_embed else 0  # auto n-gram tek katman (belge 93 ek)
+        args.ngram_layers = 1 if args.ngram_embed else 0                # n-gram aciksa tek katman (belge 93 ek); 0 = hepsi
     if args.ngram_sparse is None:
         args.ngram_sparse = 0
     args.summaries_last = int(args.model == "model_z")                   # Model Z duzeni (kimlikte isaret)

@@ -1190,7 +1190,8 @@ def _train_ngram(base, data, out, TR):
                 ("mz d768", ["--model", "model_z", "--d", "768"]), ("tf d768", ["--model", "transformer", "--d", "768"]),
                 ("mz acik 0", ["--model", "model_z", "--ngram_embed", "0"]),
                 ("mz auto K3", ["--model", "model_z", "--layers", "3", "--ngram_layers", "3"]),
-                ("mz acik 64", ["--model", "model_z", "--ngram_embed", "64"]))}
+                ("mz acik 64", ["--model", "model_z", "--ngram_embed", "64"]),
+                ("mz acik 64 K0", ["--model", "model_z", "--ngram_embed", "64", "--ngram_layers", "0"]))}
             old = [ng(mz + ["--out", out(n_), "--resume", "1"]) for n_ in ("ng_old", "ng_old0")]
             rd = TR.main(mz + ["--out", out("ng_def")])
             inh = ng(mz + ["--out", out("ng_def"), "--resume", "1"])
@@ -1199,11 +1200,11 @@ def _train_ngram(base, data, out, TR):
         finally:
             TR.NGRAM_DEFAULT, TR.VOCAB_ROWS = pinned
         check("train --ngram_embed varsayilan (NGRAM_DEFAULT auto): model_z 5 x vocab_rows (%d) + ngram_layers 1, "
-              "transformer 0, acik 0 aynen, auto'da acik --ngram_layers aynen, acik N'de layers 0 (hepsi); eski n-gram'siz "
+              "transformer 0, acik 0 aynen, acik --ngram_layers aynen, acik N'de de layers 1, acik layers 0 = hepsi; eski n-gram'siz "
               "kosu (alan 0 ya da yok) bayraksiz --resume'da 0; varsayilan kosu bayraksiz --resume'da kendi degeriyle; "
               "bayraksiz kosu = acik --ngram_embed %d --ngram_layers 1 kosusu (kayip egrisi + agirlik bit)" % (rows, rows),
               rows == 251520 and got == {"mz d768": (rows, 1, 0), "tf d768": (0, 0, 0), "mz acik 0": (0, 0, 0),
-                                         "mz auto K3": (rows, 3, 0), "mz acik 64": (64, 0, 0)}
+                                         "mz auto K3": (rows, 3, 0), "mz acik 64": (64, 1, 0), "mz acik 64 K0": (64, 0, 0)}
               and old == [(0, 0, 0), (0, 0, 0)] and inh == (rows, 1, 0)
               and (rd["identity"]["ngram_embed"], rd["identity"]["ngram_layers"]) == (rows, 1)
               and [w["loss"] for w in rd["log"]] == [w["loss"] for w in rx["log"]]
@@ -1488,7 +1489,7 @@ def _train_combo(base, data, out, state, same, exits, TR):
               and stopped and same(sa, state(out("combo_B"))) and [w["loss"] for w in r["log"]] == [w["loss"] for w in a["log"]]
               and same(sa, lm.state_dict()) and lm.ngram is not None and lm.blocks[0].attn_gate is not None
               and bad[0] is not None and "'mtp': (2, 0)" in bad[0] and bad[1] is not None and "--mtp ile --carry" in bad[1]
-              and (inh.ngram_embed, inh.ngram_layers, inh.ngram_sparse) == (64, 0, 0), str(bad))
+              and (inh.ngram_embed, inh.ngram_layers, inh.ngram_sparse) == (64, 1, 0), str(bad))
         cmd2 = cmd + ["--ngram_layers", "1", "--ngram_sparse", "1"]
         a2 = TR.main(cmd2 + ["--out", out("combo_sparse_A")])
         stopped2, r2 = _cut_and_resume(TR, cmd2, out("combo_sparse_B"))
