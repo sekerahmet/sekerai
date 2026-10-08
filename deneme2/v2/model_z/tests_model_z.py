@@ -2,7 +2,7 @@
 (z, z_flat, direct, generate_longest, formullu onbellek) kaldirildi (belge 44); eski hali git etiketi
 v2-before-formula-cleanup-20261007.
 
-    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,bag,plan,mask,summaries_last]
+    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,bag,plan,mask,summaries_last,z_bow]
 """
 import os
 import sys
@@ -342,6 +342,98 @@ def t_summaries_last():
           "gradyani duzenden bagimsiz (fp32 dense; G0, G1, mid, glob her yerde)",
           all(r[1] < 1e-5 and r[2] < 1e-5 and r[3] < 1e-5 for r in res),
           "; ".join("%s h %.1e nll %.1e grad %.1e" % r for r in res))
+
+
+def _bow_brute(batch):
+    """Kaba kuvvet: Z_k (duz konum) -> cumle k + 1'in TOKEN token'lari (sirali liste), satir / hikaye / cumle dongusuyle."""
+    B, T = batch.kind.shape
+    out = {}
+    for r in range(B):
+        for c in range(T):
+            if int(batch.kind[r, c]) != ZTOK:
+                continue
+            d, k = int(batch.doc[r, c]), int(batch.sent[r, c])
+            w = sorted(int(batch.tokens[r, j]) for j in range(T) if int(batch.kind[r, j]) == TOKEN
+                       and int(batch.doc[r, j]) == d and int(batch.sent[r, j]) == k + 1)
+            if w:
+                out[r * T + c] = w
+    return out
+
+
+def _bow_of(tgt):
+    return {int(z): sorted(tgt["word"][tgt["pz"] == i].tolist()) for i, z in enumerate(tgt["zpos"].tolist())}
+
+
+def t_z_bow():
+    """z_bow (belge 68 fikir 1): hedef = kaba kuvvet (sentetik dolgulu + Drive'da SS / FineWeb satirlari), summaries_last'ta
+    da (ayni Z -> ayni torba); kayip summaries_last 0 / 1 ayni (fp32); gradyan yalniz hedefli Z satirlarina; z_bow_layer
+    kurali; sonraki cumleyi degistirmek ozelligi degistirmez (hedef yalniz kayipta)."""
+    from sentence import summaries_last, z_bow_loss, z_bow_targets
+    rng = np.random.default_rng(8)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 12))] for _ in range(rng.integers(1, 6))]
+               for _ in range(20)]
+    batch = real_batch([list(range(i, i + 4)) for i in range(0, 20, 4)], 260, stories)
+    sets = [("sentetik", batch)]
+    G = "G:/Drive'ım"
+    if os.path.isdir(G + "/v2"):
+        for tag, root, ddir in (("SS valid", G + "/simplestories", G + "/v2/simplestories_gpt2"),
+                                ("FineWeb valid", G + "/v2/fineweb_edu_s000", G + "/v2/fineweb_edu_s000")):
+            ts = D.TokenStories(root, ddir, "valid")
+            lens = ts.lengths()
+            fit = np.nonzero(lens <= 2048)[0][:2000]
+            ro, rs = D.pack_plan(lens[fit], 2048, 0, 1)
+            sets.append((tag, D.build_batch(ts, [fit[rs[ro[r]:ro[r + 1]]].tolist() for r in range(3)], "model_z", "cpu",
+                                            2048)))
+    else:
+        print("ATLANDI z_bow gercek satirlar: Drive yok", flush=True)
+    ok, info = True, []
+    for tag, b in sets:
+        ref = _bow_brute(b)
+        got = _bow_of(z_bow_targets(b))
+        pb, perm = summaries_last(b)
+        T = b.kind.shape[1]
+        back = {int(perm.flatten()[z] + (z // T) * T): w for z, w in _bow_of(z_bow_targets(pb)).items()}  # yeni -> eski
+        ok &= got == ref and back == ref
+        info.append("%s %d Z" % (tag, len(ref)))
+    check("z_bow: hedef (Z_k -> cumle k + 1'in token'lari, tekrarli) = kaba kuvvet; summaries_last'ta ayni; son Z hedefsiz",
+          ok, "; ".join(info))
+    torch.manual_seed(0)
+    kinds = {}
+    for kw in (dict(global_layers=0), dict(global_layers=1), dict(layer_plan="glob1,loc1,glob1"),
+               dict(layer_plan="loc1,mid1,glob1"), dict(global_layers=3)):
+        kinds[str(kw)] = SentenceTransformer(d=16, layers=3, heads=2, **kw).z_bow_layer()
+    m = SentenceTransformer(d=32, layers=3, heads=2, global_layers=1)
+    m.z_bow_norm = torch.nn.RMSNorm(32)
+    torch.nn.init.normal_(m.z_bow_norm.weight, 1.0, 0.3)
+    h0, xt0 = m._batch_hidden(batch, tap=True)
+    l0, n0 = z_bow_loss(m, xt0, z_bow_targets(batch))
+    pb, perm = summaries_last(batch)
+    _, xt1 = m._batch_hidden(pb, tap=True)
+    l1, n1 = z_bow_loss(m, xt1, z_bow_targets(pb))
+    xg = xt0.detach().requires_grad_(True)
+    tg = z_bow_targets(batch)
+    z_bow_loss(m, xg, tg)[0].backward()
+    rows = (xg.grad.abs().sum(-1) > 0).flatten().nonzero()[:, 0]
+    ref_t = torch.zeros(1)
+    man = []
+    for z, w in _bow_brute(batch).items():
+        r_, c_ = divmod(z, batch.kind.shape[1])
+        lg = torch.log_softmax(torch.nn.functional.rms_norm(xt0[r_, c_], (32,), m.z_bow_norm.weight) @ m.E.weight.T, -1)
+        man.append(float(-lg[w].mean()))
+    alt = [[list(s_) for s_ in st] for st in stories]
+    alt[0][-1] = [(t + 7) % D.END_ID for t in alt[0][-1]]
+    b2 = real_batch([list(range(i, i + 4)) for i in range(0, 20, 4)], 260, alt)
+    _, xt2 = m._batch_hidden(b2, tap=True)
+    first = batch.doc[0] == 0
+    lastc = int((first & (batch.sent[0] == int(batch.sent[0][first].max()))).nonzero()[0, 0])
+    check("z_bow: kayip = elle (Z basina ortalama, Z'ler uzerinde ortalama); summaries_last 0 / 1 ayni; gradyan yalniz "
+          "hedefli Z satirlarinda; ozellik sonraki cumleden bagimsiz; z_bow_layer = son glob olmayan blok %s" % kinds,
+          abs(float(l0) - float(np.mean(man))) < 1e-5 and abs(float(l0) - float(l1)) < 1e-5 and n0 == n1 == len(man)
+          and torch.equal(rows.sort().values, tg["zpos"].sort().values)
+          and torch.equal(xt0[0, :lastc], xt2[0, :lastc])
+          and kinds == {"{'global_layers': 0}": 2, "{'global_layers': 1}": 1, "{'layer_plan': 'glob1,loc1,glob1'}": 1,
+                        "{'layer_plan': 'loc1,mid1,glob1'}": 1, "{'global_layers': 3}": None},
+          "kayip %.6f / elle %.6f / sirali %.6f" % (float(l0), float(np.mean(man)), float(l1)))
 
 
 def t_learned():
@@ -894,7 +986,7 @@ def t_plan():
 
 
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
-             equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, bag=t_bag, plan=t_plan)
+             equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, z_bow=t_z_bow, bag=t_bag, plan=t_plan)
 
 if __name__ == "__main__":
     if SIDE is not None:

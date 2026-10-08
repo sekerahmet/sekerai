@@ -1415,6 +1415,24 @@ def _train_global(base, root, data, out, exits, TR):
               and exits(base + ["--model", "transformer", "--summaries_last", "1", "--out", out("last_tf")])
               and exits(L_ + ["--summaries_last", "1", "--bag_k", "64", "--out", out("last_bag")]),
               "kayip farki %.1e, sinav %.4f / %.4f" % (d_loss, l0["exam"]["loss"], l1["exam"]["loss"]))
+        ZB = base + ["--model", "model_z", "--layers", "2", "--epochs", "2", "--z_bow_weight", "0.5"]   # belge 68 fikir 1
+        zb1 = TR.main(ZB + ["--out", out("zbow_A")])
+        stopped_z, zb2 = _cut_and_resume(TR, ZB, out("zbow_cut"))
+        sz = lambda n_: torch.load(os.path.join(out(n_), "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        zl = [w["z_bow"] for w in zb1["log"]]
+        zs = TR.main(ZB + ["--summaries_last", "1", "--out", out("zbow_last")])
+        d_zb = max(abs(a_["z_bow"] - b_["z_bow"]) + abs(a_["loss"] - b_["loss"]) for a_, b_ in zip(zb1["log"], zs["log"]))
+        check("train --z_bow_weight 0,5: kosar, gunlukte z_bow (duser), sinav sonlu, kimlikte; z_bow_norm agent.pt'de, "
+              "load_run yukler; kesilip surdurulen = kesintisiz (bit); summaries_last 1 ile ayni egri; transformer ve torba ile "
+              "DURUR",
+              zl[-1] < zl[0] and np.isfinite(zb1["exam"]["loss"]) and zb1["identity"]["z_bow_weight"] == 0.5
+              and "z_bow_norm.weight" in sz("zbow_A") and stopped_z
+              and all(torch.equal(sz("zbow_A")[k], sz("zbow_cut")[k]) for k in sz("zbow_A"))
+              and [w["loss"] for w in zb2["log"]] == [w["loss"] for w in zb1["log"]]
+              and hasattr(GR.load_run(out("zbow_A"), data, torch.device("cpu"))[0], "z_bow_norm")
+              and exits(base + ["--model", "transformer", "--z_bow_weight", "0.5", "--out", out("zbow_tf")])
+              and exits(ZB + ["--bag_k", "64", "--out", out("zbow_bag")]) and d_zb <= 2e-3,
+              "z_bow %s; summaries_last 1 ile fark %.1e" % (zl[:3], d_zb))
         G = out("plan_glob_ends")                                          # glob her yerde (belge 60 B, 62)
         rg = TR.main(base + ["--model", "model_z", "--layer_plan", "glob1,loc1,glob1", "--steps", "3", "--out", G])
         lg_ = GR.load_run(G, data, torch.device("cpu"))[0]

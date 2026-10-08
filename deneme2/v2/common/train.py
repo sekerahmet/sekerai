@@ -15,6 +15,9 @@ epok).  --local: ham akisin yerel kopyasi (yalniz onbellek; sha256 = <split>_bou
 --summaries_last 1 (belge 66; kullanici, 8 Ekim: "Fikrine onay verdim"): batch'ler sentence.summaries_last ile [token'lar |
 ozetler | dolgu] sirasinda (egitim ve sinav; sinav sonucu hedef sirasina geri), maske sorgu basina iki aralik; uretim
 degismez.  Torba ile DUR.
+--z_bow_weight W (kullanici, 8 Ekim: "Onayladım"; belge 68 fikir 1): amac = token CE + W x z_bow (Z_k'nin z_bow_layer
+ciktisindan z_bow_norm + bagli E ile sonraki cumlenin token torbasi, sentence.z_bow_loss); varsayilan 0, torba ile DUR,
+sinav degismez; gunlukte z_bow.
 --stop_step N (kullanici, 8 Ekim): takvim degismeden adim N'de durur; checkpoint.pt + agent.pt + results.json (finished
 False, stopped_at, readings_skipped "stop_step"), son sinav ve okuma yok; --resume 1 kaldigi yerden.
 Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunluk sinirinda, epok sonunda ve bitiste;
@@ -88,7 +91,7 @@ READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_ge
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "learned_z", "optimizer", "global_layers", "layer_plan", "bag_k", "bag_core", "bag_weight", "bag_full_frac", "bag_core_sha256",
-            "bag_sel_frac", "summaries_last")
+            "bag_sel_frac", "summaries_last", "z_bow_weight")
 NO_BAG = dict(bag_k=0, bag_core=0, bag_weight=0.0, bag_full_frac=0.0, bag_core_sha256=None, bag_sel_frac=1.0)   # torbasiz / eski kosu
 LEGACY = ("meaning_sha256", "shared_vocab", "own_vocab", "open_z")   # temizlik oncesi kimlik alanlari (belge 33)
 TAG = "v2-before-cleanup-20261006"
@@ -181,6 +184,8 @@ def _bag_error(args):
     """Torba ve summaries_last bayraklari kurulamiyorsa ileti, yoksa None (args'ta yoksa kapali)."""
     if getattr(args, "summaries_last", 0) and (args.model != "model_z" or getattr(args, "bag_k", 0)):
         return "--summaries_last yalniz model_z, torbasiz (belge 66)"
+    if getattr(args, "z_bow_weight", 0.0) and (args.model != "model_z" or getattr(args, "bag_k", 0)):
+        return "--z_bow_weight yalniz model_z, torbasiz"
     if not getattr(args, "bag_k", 0):
         return None
     if not 0.0 <= args.bag_full_frac <= 1.0:
@@ -211,6 +216,10 @@ def _build(args, dev):
         model, mask_fn, layout = model.to(dev), model.mask_fn, "model_z"
     if getattr(args, "bag_k", 0):
         R.attach_bag(model, args.bag_k, args.bag_n_core)
+    if getattr(args, "z_bow_weight", 0.0):                                # ilk agirliklardan sonra (RNG tuketmez)
+        if model.z_bow_layer() is None:
+            sys.exit("DUR: --z_bow_weight: glob olmayan blok yok")
+        model.z_bow_norm = torch.nn.RMSNorm(args.d).to(dev)
     return model, mask_fn, layout
 
 
@@ -257,12 +266,18 @@ def _attn(batch, mask_fn, cuda):
     return R.block_mask(batch, mask_fn) if cuda else R.dense_mask(batch, mask_fn)
 
 
-def _step(model, batch, mask_fn, opt, cuda, full=None, weight=0.0, timer=None, plan=None):
+def _step(model, batch, mask_fn, opt, cuda, full=None, weight=0.0, timer=None, plan=None, bow=None):
     """Tek egitim adimi -> (kayip, gradyan normu, torba ekleri ya da None) cihazda.  full: torbali modelde tam softmax payi
     -> recipe.bag_train_loss (kayip = iki asamali NLL; amac + secici kaybi; plan: recipe.bag_plan, tek senkron).  timer: dort CUDA olayi, cikis
-    kalemi ve icindeki secici (yalniz ileri)."""
+    kalemi ve icindeki secici (yalniz ileri).  bow: (z_bow_weight, sentence.z_bow_targets cihazda) -> amac += agirlik x
+    z_bow kaybi; ek {"z_bow": kayip, "z_bow_n": hedefli Z}."""
     with torch.autocast(batch.tokens.device.type, dtype=torch.bfloat16, enabled=cuda):
-        h = model._batch_hidden(batch, _attn(batch, mask_fn, cuda))
+        if bow is None:
+            h = model._batch_hidden(batch, _attn(batch, mask_fn, cuda))
+        else:
+            from sentence import z_bow_loss
+            h, xt = model._batch_hidden(batch, _attn(batch, mask_fn, cuda), tap=True)
+            zb, zn = z_bow_loss(model, xt, bow[1])
         if timer is not None:
             timer[0].record()
         if full is None:
@@ -272,6 +287,9 @@ def _step(model, batch, mask_fn, opt, cuda, full=None, weight=0.0, timer=None, p
             goal, loss, extra = R.bag_train_loss(model, batch, h, full, weight, timer and timer[2:], plan)
         if timer is not None:
             timer[1].record()
+    if bow is not None:
+        goal = goal + bow[0] * zb
+        extra = dict(extra or {}, z_bow=zb.detach() * zn, z_bow_n=zn)
     opt.zero_grad(set_to_none=True)
     goal.backward()
     gn = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
@@ -398,6 +416,8 @@ def _args(argv):
     ap.add_argument("--summaries_last", type=int, default=None,
                     help="model_z: satir bellekte [token'lar | ozetler | dolgu] (belge 66); model ayni, maske iki aralik; "
                          "varsayilan model_z torbasiz 1, aksi 0; --resume'da verilmezse kosunun kimliginden")
+    ap.add_argument("--z_bow_weight", type=float, default=0.0,
+                    help="model_z: Z_k'dan sonraki cumlenin token torbasi ek kaybi agirligi (0: kapali; kullanici, 8 Ekim)")
     ap.add_argument("--stop_step", type=int, default=None,
                     help="takvim (WSD, epok plani) degismeden adim N'de dur: checkpoint.pt (surdurulebilir) + agent.pt + "
                          "results.json (finished False, stopped_at N); son sinav ve okuma yok (kullanici, 8 Ekim)")
@@ -478,6 +498,8 @@ def main(argv=None):
                    bag_core_sha256=hashlib.sha256(core.tobytes()).hexdigest())
     model, mask_fn, layout = _build(args, dev)
     last = None
+    if args.z_bow_weight:
+        from sentence import z_bow_targets
     if args.summaries_last:                                              # belge 66: [token'lar | ozetler | dolgu]
         from sentence import summaries_last as last
         mask_fn = model._masks(True)
@@ -491,7 +513,7 @@ def main(argv=None):
                  longest=train.max_sentence_tokens, row_len=row_len, batch_rows=BATCH_ROWS,
                  train_stream_sha256=train.meta["stream_sha256"], learned_z=int(args.model == "model_z"),
                  optimizer=args.optimizer, global_layers=args.global_layers, layer_plan=args.layer_plan,
-                 summaries_last=args.summaries_last, **bag)   # learned_z: eski kosu ayrimi
+                 summaries_last=args.summaries_last, z_bow_weight=args.z_bow_weight, **bag)   # learned_z: eski kosu ayrimi
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -512,7 +534,7 @@ def main(argv=None):
             sys.exit("DUR: temizlik oncesi kosu surdurulmez / uzatilmaz (kullanici, 6 Ekim); eski kod: git etiketi %s" % TAG)
         if _archived(was):                                                # formullu Model Z (belge 44)
             sys.exit("DUR: " + _archived(was))
-        was = {"learned_z": 0, "optimizer": "adamw", "global_layers": 0, "layer_plan": None, "summaries_last": 0, **NO_BAG, **was}   # alanlardan onceki kosu
+        was = {"learned_z": 0, "optimizer": "adamw", "global_layers": 0, "layer_plan": None, "summaries_last": 0, "z_bow_weight": 0.0, **NO_BAG, **was}   # alanlardan onceki kosu
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:
@@ -583,7 +605,7 @@ def main(argv=None):
         if last is not None:
             b = last(b)[0]
         if not args.bag_k:
-            return b, real, None, None
+            return b, real, None, z_bow_targets(b) if args.z_bow_weight else None
         rng = np.random.default_rng(np.random.SeedSequence(args.seed, spawn_key=(step,)))   # adim tohumlu: surdurmede ayni
         full = R.bag_full_mask(b.target.numpy(), args.bag_full_frac, rng, args.bag_sel_frac)
         return b, real, full, R.bag_plan(b, full, core_cpu)                # torba yapisi CPU'da (adimda senkron yok)
@@ -609,8 +631,14 @@ def main(argv=None):
             g["lr"] = lr
         batch, real, full, plan = nxt
         timer = tuple(torch.cuda.Event(enable_timing=True) for _ in range(4)) if cuda else None
+        bow = None
+        if args.z_bow_weight:                                             # z_bow hedefleri plan yerinde tasinir
+            bow = (args.z_bow_weight, {k: v.pin_memory().to(dev, non_blocking=True) if cuda else v
+                                       for k, v in plan.items()})
+            plan = None
         full, plan = _to_device_bag(full, plan, dev)
-        loss, gn, extra = _step(model, _to_device(batch, dev), mask_fn, opt, cuda, full, args.bag_weight, timer, plan)
+        loss, gn, extra = _step(model, _to_device(batch, dev), mask_fn, opt, cuda, full, args.bag_weight, timer, plan,
+                                bow)
         nxt = cpu_batch(step + 1) if step + 1 < total else None          # GPU calisirken hazirlanir
         win["loss"] += loss
         win["gn"] += gn
@@ -635,6 +663,8 @@ def main(argv=None):
             rec["out_fwd_ms"] = round(timer[0].elapsed_time(timer[1]), 2)
             if args.bag_k:
                 rec["selector_fwd_ms"] = round(timer[2].elapsed_time(timer[3]), 2)
+        if args.z_bow_weight:
+            rec["z_bow"] = round(float(win["bag"]["z_bow"]) / max(float(win["bag"]["z_bow_n"]), 1), 4)
         if args.bag_k:                                                   # kalibrasyon: p_other ~ miss (belge 54 s1.4)
             w = {k: float(v) for k, v in win["bag"].items()}
             n_ = max(w["valid"], 1)
@@ -652,7 +682,8 @@ def main(argv=None):
                "  | C %.3f P %.3f L %.3f kacan %.4f p(DIGER) %.4f tam CE %s secici %.3f" % tuple(
                    rec["bag"][k] for k in ("c", "p", "l", "miss", "p_other", "full_ce", "loss_selector"))
                if args.bag_k else "",
-               "  (ilk pencere: derleme dahil)" if first_window else ""))
+               ("  | z_bow %.4f" % rec["z_bow"] if args.z_bow_weight else "")
+               + ("  (ilk pencere: derleme dahil)" if first_window else "")))
         assert np.isfinite(rec["loss"]), "kayip sonlu degil; checkpoint yazilmadi"
         first_window, win = False, None
         if done == down:
