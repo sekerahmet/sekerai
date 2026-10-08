@@ -28,6 +28,19 @@ def rope(x, pos, base=10000.0):
     return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], -1)
 
 
+def gqa_sdpa(q, k, v, mask=None):
+    """Model Z sentence.gqa_sdpa ile ayni (kopya; belge 74): GQA'da maskeli SDPA math'a dusmesin.  Esit head dogrudan SDPA,
+    Tq 1 grup Tq'ya katlanir, Tq > 1 k / v head boyunca gecici genisletilir."""
+    H, Hkv = q.shape[1], k.shape[1]
+    if H == Hkv:
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+    B, _, Tq, hd = q.shape
+    if Tq == 1 and (mask is None or mask.shape[-2] == 1 and (mask.dim() < 3 or mask.shape[-3] == 1)):
+        return F.scaled_dot_product_attention(q.reshape(B, Hkv, H // Hkv, hd), k, v, attn_mask=mask).reshape(B, H, 1, hd)
+    return F.scaled_dot_product_attention(q, k.repeat_interleave(H // Hkv, 1), v.repeat_interleave(H // Hkv, 1),
+                                          attn_mask=mask)
+
+
 class Block(torch.nn.Module):
     """Model Z V2 Block ile ayni tarif (kopya)."""
 
@@ -70,7 +83,7 @@ class Block(torch.nn.Module):
         if attn is None:
             a = F.scaled_dot_product_attention(q, k, v, is_causal=True, **gqa)
         elif torch.is_tensor(attn):
-            a = F.scaled_dot_product_attention(q, k, v, attn_mask=attn[:, None], **gqa)
+            a = gqa_sdpa(q, k, v, attn[:, None])
         else:
             from torch.nn.attention.flex_attention import flex_attention
             bs = attn.BLOCK_SIZE[0]                     # 128 disinda varsayilan cekirdek hata veriyor (belge 37)
@@ -147,9 +160,7 @@ class BaselineTransformer(torch.nn.Module):
                 cache["k"][l] = k.new_zeros(1, k.shape[1], cache["T"], k.shape[3])
                 cache["v"][l] = v.new_zeros(1, v.shape[1], cache["T"], v.shape[3])
             cache["k"][l][:, :, n:n + t], cache["v"][l][:, :, n:n + t] = k, v
-            a = F.scaled_dot_product_attention(q, cache["k"][l][:, :, :n + t], cache["v"][l][:, :, :n + t],
-                                               enable_gqa=block.kv_heads != block.heads,
-                                               attn_mask=allowed)
+            a = gqa_sdpa(q, cache["k"][l][:, :, :n + t], cache["v"][l][:, :, :n + t], allowed)
             x = block._finish(x, a)
         return self.norm(x[:, -1])
 

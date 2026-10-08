@@ -436,6 +436,28 @@ def t_z_bow():
           "kayip %.6f / elle %.6f / sirali %.6f" % (float(l0), float(np.mean(man)), float(l1)))
 
 
+def _gqa_sdpa_cases(fn):
+    """fn (gqa_sdpa) -> (ok, bilgi): (B 3, H 4, Hkv 2, hd 8, S 7); maskeler Tq 1: yok, (B, 1, 1, S), (1, S); Tq 5: (B, 1, 5, S),
+    (5, S) (her satirda kv 0 acik).  Basvuru SDPA enable_gqa (math tanimi: k / v repeat_interleave); esit head torch.equal."""
+    F_ = torch.nn.functional
+    g = torch.Generator().manual_seed(3)
+    k, v = torch.randn(3, 2, 7, 8, generator=g), torch.randn(3, 2, 7, 8, generator=g)
+    worst = 0.0
+    for tq in (1, 5):
+        q = torch.randn(3, 4, tq, 8, generator=g)
+        for shape in ((None,), (3, 1, tq, 7), (tq, 7)):
+            m = None if shape == (None,) else torch.rand(*shape, generator=g) < 0.6
+            if m is not None:
+                m[..., 0] = True
+            ref = F_.scaled_dot_product_attention(q, k, v, attn_mask=m, enable_gqa=True)
+            worst = max(worst, float((fn(q, k, v, m) - ref).abs().max()))
+    q = torch.randn(3, 2, 5, 8, generator=g)
+    m = torch.rand(3, 1, 5, 7, generator=g) < 0.6
+    m[..., 0] = True
+    same = torch.equal(fn(q, k, v, m), F_.scaled_dot_product_attention(q, k, v, attn_mask=m))
+    return worst < 1e-6 and same, "en buyuk fark %.1e, esit head bit ayni %s" % (worst, same)
+
+
 def t_gqa():
     """glob_kv_heads (GQA, 8 Ekim): None / heads = bugunku (agirlik ve hidden bit); kv 2 (heads 4): yalniz glob bloklari
     daralir, blok ciktisi = k / v'yi acikca tekrarlayan basvuru (dense), plan (glob1,loc1,glob1) dahil; summaries_last ayni;
@@ -443,7 +465,7 @@ def t_gqa():
     gruplari calisir."""
     import recipe as R
     import train as TR
-    from sentence import model_z_global_mask, story_positions, summaries_last
+    from sentence import gqa_sdpa, model_z_global_mask, story_positions, summaries_last
     rng = np.random.default_rng(9)
     stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(2, 6))]
                for _ in range(12)]
@@ -508,6 +530,8 @@ def t_gqa():
     check("gqa kv 2: sizinti yok; SummaryCache adim adim ve prefill = tam ileri (glob onbellegi kv head)",
           torch.equal(g1[0, :last], g2[0, :last]) and d3 < 1e-5 and float((pre.logits - torch.cat(out)[k_pre]).abs().max())
           < 1e-5 and cache.all_k[2].shape[1] == 2, "fark %.1e" % d3)
+    check("gqa_sdpa (belge 74): Tq 1 katlama ve Tq > 1 genisletme = enable_gqa basvurusu, esit head bit ayni",
+          *_gqa_sdpa_cases(gqa_sdpa))
     nm = SentenceTransformer(d=32, layers=3, heads=4, global_layers=1, glob_kv_heads=2)
     opt = TR._optimizer(nm, "normuon", 1e-2, False)[0]
     names = [n for n, _ in R.muon_params(nm)]

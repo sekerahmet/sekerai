@@ -335,6 +335,25 @@ def t_gqa():
     check("gqa: kv_heads = heads bit ayni; kv 2 blok = tekrarli basvuru; onbellekli generate = onbelleksiz",
           same and float((blk(x, pos, None) - ref).abs().max()) < 1e-5 and k.shape[1] == 2
           and gen[0] == naive_generate(m, STORIES[0][:1], 3, 4))
+    from baseline import gqa_sdpa
+    g = torch.Generator().manual_seed(3)
+    kk, vv = torch.randn(3, 2, 7, 8, generator=g), torch.randn(3, 2, 7, 8, generator=g)
+    worst = 0.0
+    for tq in (1, 5):
+        qq = torch.randn(3, 4, tq, 8, generator=g)
+        for mm in (None, torch.rand(3, 1, tq, 7, generator=g) < 0.6, torch.rand(tq, 7, generator=g) < 0.6):
+            if mm is not None:
+                mm[..., 0] = True
+            want = torch.nn.functional.scaled_dot_product_attention(qq, kk, vv, attn_mask=mm, enable_gqa=True)
+            worst = max(worst, float((gqa_sdpa(qq, kk, vv, mm) - want).abs().max()))
+    hn = m._step(torch.tensor([[D.EOS_ID] + STORIES[0][0] + [D.END_ID]]), dict(k=[None] * 2, v=[None] * 2, T=16), 0)
+    cache = dict(k=[None] * 2, v=[None] * 2, T=16)
+    seq = [D.EOS_ID] + STORIES[0][0] + [D.END_ID]
+    m._step(torch.tensor([seq[:2]]), cache, 0)
+    steps = [m._step(torch.tensor([[t]]), cache, 2 + i) for i, t in enumerate(seq[2:])]
+    check("gqa_sdpa (belge 74): Tq 1 katlama, Tq > 1 genisletme = enable_gqa basvurusu; _step parca parca = tek gecis",
+          worst < 1e-6 and float((steps[-1] - hn).abs().max()) < 1e-5, "en buyuk fark %.1e, adim %.1e" % (
+              worst, float((steps[-1] - hn).abs().max())))
 
 
 GROUPS = dict(mask=t_mask, targets=t_targets, loss=t_loss, cache=t_cache, generate=t_generate, recipe=t_recipe,

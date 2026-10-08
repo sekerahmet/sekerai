@@ -226,6 +226,20 @@ def _dense(mask_mod, B, T, device):
     return mask_mod(b, 0, q, kv)
 
 
+def gqa_sdpa(q, k, v, mask=None):
+    """SDPA; GQA'da (k / v daha az head) fused cekirdege giden yol (belge 74: enable_gqa + maske math'a dusuyordu, fp32
+    B x H x Tq x S).  Esit head: dogrudan SDPA (bit ayni).  Tq 1: grup Tq'ya katlanir (q (B, Hkv, G, hd), maske satirca
+    yayinlanir; K / V bir kez okunur); Tq > 1: k / v head boyunca gecici genisletilir (onbellek kucuk kalir)."""
+    H, Hkv = q.shape[1], k.shape[1]
+    if H == Hkv:
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+    B, _, Tq, hd = q.shape
+    if Tq == 1 and (mask is None or mask.shape[-2] == 1 and (mask.dim() < 3 or mask.shape[-3] == 1)):
+        return F.scaled_dot_product_attention(q.reshape(B, Hkv, H // Hkv, hd), k, v, attn_mask=mask).reshape(B, H, 1, hd)
+    return F.scaled_dot_product_attention(q, k.repeat_interleave(H // Hkv, 1), v.repeat_interleave(H // Hkv, 1),
+                                          attn_mask=mask)
+
+
 def parse_layer_plan(text):
     """'loc2,mid4,loc1,glob1' -> ['loc', 'loc', 'mid', ...]."""
     import re
@@ -277,7 +291,7 @@ class Block(torch.nn.Module):
         if attn is None:
             a = F.scaled_dot_product_attention(q, k, v, is_causal=True, **gqa)
         elif torch.is_tensor(attn):
-            a = F.scaled_dot_product_attention(q, k, v, attn_mask=attn[:, None], **gqa)
+            a = gqa_sdpa(q, k, v, attn[:, None])
         else:
             from torch.nn.attention.flex_attention import flex_attention
             bs = attn.BLOCK_SIZE[0]                     # 128 disinda varsayilan cekirdek hata veriyor (belge 37)
@@ -483,8 +497,7 @@ class SummaryCache:
                 q, k, v = block._qkv(x, torch.tensor([[self.t]], device=self.dev))
                 self.all_k[l] = k if self.all_k[l] is None else torch.cat([self.all_k[l], k], 2)
                 self.all_v[l] = v if self.all_v[l] is None else torch.cat([self.all_v[l], v], 2)
-                x = block._finish(x, F.scaled_dot_product_attention(q, self.all_k[l], self.all_v[l],
-                                                                    enable_gqa=block.kv_heads != block.heads))
+                x = block._finish(x, gqa_sdpa(q, self.all_k[l], self.all_v[l]))
                 continue
             q, k, v = block._qkv(x, p)
             ks = [c for c in (self.sum_k[l], self.sen_k[l] if read_sentence else None) if c is not None] + [k]
@@ -521,8 +534,7 @@ class SummaryCache:
         for l, block in enumerate(self.m.blocks):
             g = self.glob[l]
             q, k, v = block._qkv(x, real if g else lpos)
-            a = F.scaled_dot_product_attention(q, k, v, attn_mask=causal if g else local,
-                                               enable_gqa=block.kv_heads != block.heads)
+            a = gqa_sdpa(q, k, v, causal if g else local)
             if g:
                 self.all_k[l], self.all_v[l] = k, v
             else:
