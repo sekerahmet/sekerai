@@ -233,7 +233,7 @@ def vocab_text(stream):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--tf", required=True, help="transformer kosu klasoru (agent.pt)")
+    ap.add_argument("--tf", required=True, help="taban kosu klasoru (agent.pt): transformer ya da Model Z (iki Model Z kiyasi)")
     ap.add_argument("--mz", required=True, help="Model Z kosu klasoru (agent.pt)")
     ap.add_argument("--data", required=True)
     ap.add_argument("--stream", required=True)
@@ -252,7 +252,7 @@ def main(argv=None):
     res_nll, idts = {}, {}
     for kind, run in (("transformer", args.tf), ("model_z", args.mz)):
         model, mask_fn, layout, idt = load(run, args.data, dev)
-        assert idt["model"] == kind, "%s: kosu %s modeli" % (run, idt["model"])
+        assert kind == "transformer" or idt["model"] == kind, "%s: kosu %s modeli" % (run, idt["model"])  # --tf: taban (tf ya da Model Z)
         idts[kind] = {k: idt.get(k) for k in ("model", "d", "layers", "heads", "seed", "global_layers")}
         if dev.type == "cuda":
             for block in model.blocks:
