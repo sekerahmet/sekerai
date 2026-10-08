@@ -31,13 +31,16 @@ CONDS = ("none", "read_off")
 
 @contextlib.contextmanager
 def ablated(model, cond):
-    """-> mask_fn: none modelin kendi kurali; read_off yerel bloklarda model_z_mask (global bloklar aynen)."""
+    """-> mask_fn: none modelin kendi kurali; read_off yerel bloklarda (z_reads_all katmanlari dahil) model_z_mask, global
+    bloklar aynen."""
     S = sys.modules[type(model).__module__]
     if cond == "none":
         yield model.mask_fn
         return
     assert cond == "read_off", cond
-    yield (S.model_z_mask, model.mask_fn[1]) if model.global_layers else S.model_z_mask
+    fns = model.mask_fn if isinstance(model.mask_fn, tuple) else (model.mask_fn,)
+    out = tuple(f if model.global_layers and i == len(fns) - 1 else S.model_z_mask for i, f in enumerate(fns))
+    yield out if len(out) > 1 else out[0]
 
 
 def ablate(model, layout, valid, rows, dev, conds):

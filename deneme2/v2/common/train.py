@@ -29,6 +29,11 @@ degismez.  Torba ile DUR.
 N head yalniz tam causal katmanlarda (Model Z glob; transformer'da her katman, kiyas icin); yerel katmanlar tam head
 (Z K/V kanali daralmaz).  auto = heads / GLOB_KV_GROUP (bolunmezse DUR).  Varsayilan 0 = heads (bit ayni); kimlikte
 (sekil degisir).
+--z_reads_all N (belge 79 oneri 1; kullanici, 8 Ekim: "Olur kabul"): son N yerel katmanda yalniz Z sorgusu hikayenin
+basindan butun token'lari gorur (sentence model_z_read_mask z_reads_all; summaries_last'ta da); token satirlari ayni.  0
+bugunku (bit ayni).  Kimlikte.
+--glob_drop P (belge 79 oneri 3, 78b 4.1): egitim adimlarinin P payinda (adim tohumlu; surdurmede ayni) glob katmanlari yerel
+maskeyle (gercek konum) kosar; sinav / uretim tam G.  0 bugunku (bit ayni).  Kimlikte.
 --stop_step N (kullanici, 8 Ekim): takvim degismeden adim N'de durur; checkpoint.pt + agent.pt + results.json (finished
 False, stopped_at, readings_skipped "stop_step"), son sinav ve okuma yok; --resume 1 kaldigi yerden.
 Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunluk sinirinda, epok sonunda ve bitiste;
@@ -108,7 +113,7 @@ READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_ge
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "learned_z", "optimizer", "global_layers", "bag_k", "bag_core", "bag_weight", "bag_full_frac", "bag_core_sha256",
-            "bag_sel_frac", "summaries_last", "glob_kv_heads")
+            "bag_sel_frac", "summaries_last", "glob_kv_heads", "z_reads_all", "glob_drop")
 NO_BAG = dict(bag_k=0, bag_core=0, bag_weight=0.0, bag_full_frac=0.0, bag_core_sha256=None, bag_sel_frac=1.0)   # torbasiz / eski kosu
 LEGACY = ("meaning_sha256", "shared_vocab", "own_vocab", "open_z")   # temizlik oncesi kimlik alanlari (belge 33)
 TAG = "v2-before-cleanup-20261006"
@@ -210,6 +215,11 @@ def _global_error(args):
         return "--glob_kv_heads %d: heads (%d) boleni olmali" % (kv, args.heads)
     if kv and args.model == "model_z" and not gl:
         return "--glob_kv_heads: model_z'de glob katmani yok"
+    za, gd = int(getattr(args, "z_reads_all", 0)), float(getattr(args, "glob_drop", 0.0))
+    if za and (args.model != "model_z" or not 0 <= za <= args.layers - gl):
+        return "--z_reads_all %d: yalniz model_z, 0..yerel katman sayisi (%d)" % (za, args.layers - gl)
+    if gd and (args.model != "model_z" or not gl or not 0.0 <= gd <= 1.0):
+        return "--glob_drop %g: yalniz glob katmanli model_z, 0..1" % gd
     return None
 
 
@@ -244,7 +254,8 @@ def _build(args, dev):
         sys.path.insert(0, os.path.join(root, "model_z"))
         from sentence import SentenceTransformer
         model = SentenceTransformer(args.d, args.layers, args.heads, global_layers=int(getattr(args, "global_layers", 0)),
-                                    glob_kv_heads=getattr(args, "glob_kv_heads", 0) or None)
+                                    glob_kv_heads=getattr(args, "glob_kv_heads", 0) or None,
+                                    z_reads_all=int(getattr(args, "z_reads_all", 0)))
         model, mask_fn, layout = model.to(dev), model.mask_fn, "model_z"
     if getattr(args, "bag_k", 0):
         R.attach_bag(model, args.bag_k, args.bag_n_core)
@@ -469,6 +480,11 @@ def _args(argv):
                     help="GQA: tam causal katmanlarda (model_z glob, transformer hepsi) k / v head sayisi, heads'in "
                          "boleni ya da auto (heads / GLOB_KV_GROUP); varsayilan 0 (heads); kimlikte; --resume'da "
                          "verilmezse kosunun kimliginden")
+    ap.add_argument("--z_reads_all", type=int, default=0,
+                    help="model_z: son N yerel katmanda Z sorgusu hikayenin butun gecmisini gorur (belge 79; 0: kapali)")
+    ap.add_argument("--glob_drop", type=float, default=0.0,
+                    help="model_z: egitim adimlarinin bu payinda glob katmanlari yerel maskeyle (adim tohumlu; sinav / "
+                         "uretim tam G; belge 79 / 78b)")
     ap.add_argument("--fp8", default="none", choices=("none", "tensorwise", "rowwise"),
                     help="MLP (gate_up, down) torchao Float8Linear tarifi; none: bf16 (kimlige girmez, --resume'da "
                          "degistirilebilir; kullanici, 8 Ekim)")
@@ -585,7 +601,8 @@ def main(argv=None):
                  longest=train.max_sentence_tokens, row_len=row_len, batch_rows=BATCH_ROWS,
                  train_stream_sha256=train.meta["stream_sha256"], learned_z=int(args.model == "model_z"),
                  optimizer=args.optimizer, global_layers=args.global_layers,
-                 summaries_last=args.summaries_last, glob_kv_heads=args.glob_kv_heads,
+                 summaries_last=args.summaries_last, glob_kv_heads=args.glob_kv_heads, z_reads_all=args.z_reads_all,
+                 glob_drop=args.glob_drop,
                  **bag)   # learned_z: eski kosu ayrimi
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
@@ -607,7 +624,7 @@ def main(argv=None):
             sys.exit("DUR: temizlik oncesi kosu surdurulmez / uzatilmaz (kullanici, 6 Ekim); eski kod: git etiketi %s" % TAG)
         if _archived(was):                                                # formullu Model Z (belge 44)
             sys.exit("DUR: " + _archived(was))
-        was = {"learned_z": 0, "optimizer": "adamw", "global_layers": 0, "summaries_last": 0, "glob_kv_heads": 0, **NO_BAG, **was}   # alanlardan onceki kosu
+        was = {"learned_z": 0, "optimizer": "adamw", "global_layers": 0, "summaries_last": 0, "glob_kv_heads": 0, "z_reads_all": 0, "glob_drop": 0.0, **NO_BAG, **was}   # alanlardan onceki kosu
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:
@@ -705,9 +722,12 @@ def main(argv=None):
         for g in opt.param_groups:
             g["lr"] = lr
         batch, real, full, plan = nxt
+        drop = args.glob_drop and np.random.default_rng(np.random.SeedSequence(args.seed, spawn_key=(step, 1))).random() \
+            < args.glob_drop                                             # adim tohumlu (torbanin anahtari (step,))
         timer = tuple(torch.cuda.Event(enable_timing=True) for _ in range(4)) if cuda else None
         full, plan = _to_device_bag(full, plan, dev)
-        loss, gn, extra = _step(model, _to_device(batch, dev), mask_fn, opt, cuda, full, args.bag_weight, timer, plan)
+        loss, gn, extra = _step(model, _to_device(batch, dev), mask_fn[:-1] + mask_fn[:1] if drop else mask_fn, opt, cuda,
+                                full, args.bag_weight, timer, plan)          # glob_drop: glob maskesi yerine yerel
         nxt = cpu_batch(step + 1) if step + 1 < total else None          # GPU calisirken hazirlanir
         win["loss"] += loss
         win["gn"] += gn

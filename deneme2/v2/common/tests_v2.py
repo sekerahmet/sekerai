@@ -1506,12 +1506,15 @@ def _train_global(base, root, data, out, exits, TR):
             for fn, key in (("checkpoint.pt", "args"), ("agent.pt", "identity")):
                 pack = torch.load(os.path.join(D_, fn), weights_only=False)
                 pack[key].update(fields)
+                for f_ in ("z_reads_all", "glob_drop"):                   # 2759b46 kimliginde bu alanlar yok
+                    pack[key].pop(f_)
                 torch.save(pack, os.path.join(D_, fn))
             mt_ = os.path.getmtime(os.path.join(D_, "checkpoint.pt"))
             old[name_] = (_exit_msg(TR.main, S_ + ["--out", D_, "--resume", "1"]),
                           _exit_msg(GR.load_run, D_, data, torch.device("cpu")), mt_)
         kept = json.load(open(os.path.join(out("clean_kept"), "results.json")))
-        check("kod temizligi (belge 77): kimliginde z_bow_weight 0 / layer_plan None olan kosu (d1024 tam kosusu gibi) yeni "
+        check("kod temizligi (belge 77): kimliginde z_bow_weight 0 / layer_plan None olan, z_reads_all / glob_drop alani "
+              "olmayan kosu (d1024 tam kosusu gibi) yeni "
               "kodla --resume edilir = kesintisiz (kayip egrisi bit); z_bow_weight 0,5 ya da layer_plan'li kosu surdurmede "
               "ve load_run'da DURUR (iletide commit 7bec0ae), checkpoint'e dokunulmaz; --z_bow_weight / --layer_plan "
               "argumanlari yok",
@@ -1522,6 +1525,31 @@ def _train_global(base, root, data, out, exits, TR):
               and _raises(SystemExit, TR._args, S_ + ["--z_bow_weight", "0.5", "--out", "x"])
               and _raises(SystemExit, TR._args, S_ + ["--layer_plan", "loc1,glob1", "--out", "x"]),
               str({k: (v[0] or "")[:60] for k, v in old.items()}))
+        ZR = base + ["--model", "model_z", "--layers", "3", "--global_layers", "1", "--z_reads_all", "2", "--summaries_last",
+                     "1", "--epochs", "2"]                                  # belge 79 oneri 1 + 3 (kullanici, 8 Ekim)
+        zr = TR.main(ZR + ["--glob_drop", "0.25", "--out", out("zr_A")])
+        stopped_zr, zr2 = _cut_and_resume(TR, ZR + ["--glob_drop", "0.25"], out("zr_cut"))
+        zr0 = TR.main(ZR + ["--out", out("zr_nodrop")])
+        drops = [bool(np.random.default_rng(np.random.SeedSequence(0, spawn_key=(s_, 1))).random() < 0.25)
+                 for s_ in range(len(zr["log"]))]
+        k_ = drops.index(True)                                             # ilk birakilan adim (3): oncesi ayni, kendisi farkli
+        la, l0 = [w["loss"] for w in zr["log"]], [w["loss"] for w in zr0["log"]]
+        szr = lambda n_: torch.load(os.path.join(out(n_), "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        lzr = GR.load_run(out("zr_A"), data, torch.device("cpu"))[0]
+        bad_zr = [_exit_msg(TR.main, base + a + ["--out", out("zr_bad%d" % i)]) for i, a in enumerate((
+            ["--model", "transformer", "--z_reads_all", "1"], ["--model", "model_z", "--layers", "3", "--global_layers", "1",
+                                                              "--z_reads_all", "3"],
+            ["--model", "model_z", "--layers", "2", "--global_layers", "0", "--glob_drop", "0.5"],
+            ["--model", "model_z", "--layers", "2", "--global_layers", "1", "--glob_drop", "1.5"]))]
+        check("train --z_reads_all 2 --glob_drop 0,25 (G1, summaries_last 1): kosar, sinav / okuma uretir, kimlikte; kesilip "
+              "surdurulen = kesintisiz (bit; birakma adim tohumlu); glob_drop 0 kosusuyla ilk birakilan adima (%d) kadar kayip "
+              "bit ayni, o adimda farkli; load_run z_reads_all'u kimlikten kurar; transformer / yerel katmandan fazla / "
+              "glob'suz / 0..1 disi DURUR" % k_,
+              zr["identity"]["z_reads_all"] == 2 and zr["identity"]["glob_drop"] == 0.25 and np.isfinite(zr["exam"]["loss"])
+              and zr["generation"] and stopped_zr and all(torch.equal(szr("zr_A")[k], szr("zr_cut")[k]) for k in szr("zr_A"))
+              and [w["loss"] for w in zr2["log"]] == la and k_ > 0 and la[:k_] == l0[:k_] and la[k_] != l0[k_]
+              and lzr.z_reads_all == 2 and all(m_ is not None and "DUR" in m_ for m_ in bad_zr),
+              "birakilan adimlar %s; DUR %s" % ([i for i, d_ in enumerate(drops) if d_][:6], [(m_ or "")[:40] for m_ in bad_zr]))
         QK = base + ["--model", "model_z", "--layers", "2", "--heads", "2", "--global_layers", "1", "--epochs", "2",
                      "--glob_kv_heads", "1"]                                 # GQA (8 Ekim)
         q1 = TR.main(QK + ["--out", out("gqa_A")])
