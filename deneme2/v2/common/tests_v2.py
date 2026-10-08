@@ -2695,8 +2695,81 @@ def t_mtp():
          TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT, TR.MTP_DEFAULT) = saved
 
 
+def t_compile():
+    """Derleme ayari ve onbellegi (belge 94 s10.1): koordinat-inis kapali = modun secenekleri eksi o ayar; onbellek CPU'da
+    kapali; sahte GPU / artifact'larla: yukleme butun parcalari okur, yazma yalniz yuklenmemis artifact varsa."""
+    import types
+    import train as TR
+    from torch.compiler._cache import CacheInfo
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "model_z"))
+    from model import SentenceTransformer
+    saved = TR.COMPILE_COORD_DESCENT
+    try:
+        TR.COMPILE_COORD_DESCENT = False
+        want = dict(torch._inductor.list_mode_options(TR.COMPILE_MODE), coordinate_descent_tuning=False)
+        kw = TR._compile_kwargs()
+        check("compile: koordinat-inis kapali -> options = mod secenekleri, yalniz coordinate_descent_tuning False",
+              kw == dict(options=want) and want.get("max_autotune") is True, kw)
+        TR.COMPILE_COORD_DESCENT = True
+        check("compile: koordinat-inis acik -> mode = COMPILE_MODE (eski yol)", TR._compile_kwargs() == dict(
+            mode=TR.COMPILE_MODE))
+    finally:
+        TR.COMPILE_COORD_DESCENT = saved
+    model = SentenceTransformer(16, 1, 2)
+    out = os.path.join(TMP, "cc", "runs", "r1")
+    args = types.SimpleNamespace(out=out)
+    logs = []
+    check("compile onbellegi: CPU'da kapali (yol yok, yukle / yaz islem yapmaz)",
+          TR._CompileCache(args, model, False, logs.append).path is None)
+    fake = dict(saves=[])
+
+    def load(data):
+        info = CacheInfo()
+        for k in data.decode().split(","):
+            info.artifacts["inductor"].append(k)
+        return info
+
+    def save():
+        keys = fake["saves"].pop(0)
+        info = CacheInfo()
+        info.artifacts["inductor"].extend(keys)
+        return ",".join(keys).encode(), info
+    orig = (torch.cuda.get_device_name, torch.compiler.load_cache_artifacts, torch.compiler.save_cache_artifacts)
+    torch.cuda.get_device_name = lambda *a: "sahte GPU"
+    torch.compiler.load_cache_artifacts, torch.compiler.save_cache_artifacts = load, save
+    try:
+        root = os.path.join(TMP, "cc", "runs", "compile_cache")
+        c1 = TR._CompileCache(args, model, True, logs.append)
+        c1.load()
+        fake["saves"] = [["k1", "k2"]]
+        c1.save()
+        parts1 = sorted(os.listdir(root))
+        c2 = TR._CompileCache(args, model, True, logs.append)
+        c2.path = c2.path.replace(".bin", "_b.bin")                      # ayni saniyede ikinci surec
+        c2.load()
+        fake["saves"] = [["k1", "k2"], ["k1", "k2", "k3"]]
+        c2.save()
+        parts2 = sorted(os.listdir(root))
+        c2.save()
+        parts3 = sorted(os.listdir(root))
+        c3 = TR._CompileCache(args, model, True, logs.append)
+        c3.load()
+        TR.COMPILE_COORD_DESCENT = not saved
+        key_flag = TR._CompileCache(args, model, True, logs.append).key
+        TR.COMPILE_COORD_DESCENT = saved
+        check("compile onbellegi: --out'un ustunde compile_cache/, ilk kayit tek parca", len(parts1) == 1
+              and parts1[0].startswith(c1.key + "_") and os.path.dirname(c1.path) == root, parts1)
+        check("compile onbellegi: yuklenenin aynisi yazilmaz, yeni artifact gelince surecin parcasi yazilir",
+              len(parts2) == 1 and len(parts3) == 2 and c2.seen == {("inductor", "k1"), ("inductor", "k2")}, parts3)
+        check("compile onbellegi: yukleme butun parcalari okur; anahtar derleme ayariyla degisir",
+              c3.seen == {("inductor", k) for k in ("k1", "k2", "k3")} and key_flag != c3.key, (c3.seen, key_flag))
+    finally:
+        TR.COMPILE_COORD_DESCENT = saved
+        torch.cuda.get_device_name, torch.compiler.load_cache_artifacts, torch.compiler.save_cache_artifacts = orig
+
+
 TESTS = dict(fp8=t_fp8, data=t_data, pack=t_pack, recipe=t_recipe, metrics=t_metrics, integration=t_integration,
-             train=t_train, drive=t_drive, tokens=t_tokens, fineweb=t_fineweb, mtp=t_mtp)
+             train=t_train, drive=t_drive, tokens=t_tokens, fineweb=t_fineweb, mtp=t_mtp, compile=t_compile)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)

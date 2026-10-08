@@ -53,7 +53,7 @@ def arm(name, a, batches, steps, warmup, prof):
     if name == "frozen_all":
         model.ngram.weight.requires_grad_(False)
     for block in model.blocks:
-        block.compile(dynamic=False, mode=TR.COMPILE_MODE)
+        block.compile(dynamic=False, **TR._compile_kwargs())
     opt, _ = TR._optimizer(model, args.optimizer, args.lr, True)
     for g in opt.param_groups:
         g["lr"] = args.lr * g.get("lr_mult", 1.0)

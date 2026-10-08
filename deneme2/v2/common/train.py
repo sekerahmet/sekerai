@@ -130,6 +130,8 @@ VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dol
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
 COMPILE_MODE = "max-autotune-no-cudagraphs"   # bloklarin derleme modu (5w: torba K 1024 -2,9 ms/adim; kullanici, 7 Ekim)
+COMPILE_COORD_DESCENT = False   # max-autotune'un koordinat-inis ayari (belge 94 s7.4: soguk derlemenin 60 / 90 sn'si)
+COMPILE_CACHE = "auto"          # derleme onbellegi (torch mega-cache) klasoru; auto: --out'un ustunde compile_cache/, None kapali
 READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
 READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
@@ -347,6 +349,68 @@ def _optimizer(model, kind, lr, cuda):
                      muon=dict(MUON, weight_decay=WEIGHT_DECAY, **(dict(beta2=R.NORMUON_BETA2, eps=R.NORMUON_EPS,
                                                                      scale="0.2 lr sqrt(mn) / ||O^||_F")
                                                                 if kind == "normuon" else {})) if muon else None)
+
+
+def _compile_kwargs():
+    """Bloklarin torch.compile ayari: COMPILE_MODE; max-autotune'da COMPILE_COORD_DESCENT False ise modun secenekleri
+    koordinat-inissiz (GEMM sablon secimi ayni; yalniz Triton nokta / indirgeme cekirdeklerinin blok boyu aramasi kalkar)."""
+    if not COMPILE_MODE or COMPILE_COORD_DESCENT or "max-autotune" not in COMPILE_MODE:
+        return dict(mode=COMPILE_MODE)
+    return dict(options=dict(torch._inductor.list_mode_options(COMPILE_MODE), coordinate_descent_tuning=False))
+
+
+class _CompileCache:
+    """Derleme onbellegi runtime'lar arasi (torch.compiler load / save_cache_artifacts): klasorde <anahtar>_*.bin parcalari.
+    Anahtar: torch / CUDA / GPU / derleme ayari / train + recipe + model kaynaginin sha256'si (kod degisince yeni anahtar).
+    Yukleme derlemeden once; kayit yalniz yuklenmemis artifact varsa, surec basina tek dosyaya (kumulatif).  Hata kosuyu
+    durdurmaz, gunluge yazilir."""
+
+    def __init__(self, args, model, cuda, log):
+        self.log, self.path, self.seen = log, None, set()
+        if not cuda or not COMPILE_CACHE:
+            return
+        up = os.path.dirname(os.path.normpath(os.path.abspath(args.out)))
+        self.root = os.path.join(up, "compile_cache") if COMPILE_CACHE == "auto" else COMPILE_CACHE
+        h = hashlib.sha256()
+        for part in (torch.__version__, str(torch.version.cuda), torch.cuda.get_device_name(0), COMPILE_MODE,
+                     str(COMPILE_COORD_DESCENT)):
+            h.update(part.encode())
+        for f in (os.path.abspath(__file__), R.__file__, sys.modules[type(model).__module__].__file__):
+            h.update(open(f, "rb").read())
+        self.key = h.hexdigest()[:16]
+        self.path = os.path.join(self.root, "%s_%s_%d.bin" % (self.key, time.strftime("%Y%m%d_%H%M%S"), os.getpid()))
+
+    def load(self):
+        if self.path is None:
+            return
+        try:
+            import glob
+            parts = sorted(glob.glob(os.path.join(self.root, self.key + "_*.bin")))
+            for p in parts:
+                info = torch.compiler.load_cache_artifacts(open(p, "rb").read())
+                self.seen |= {(t, k) for t, ks in (info.artifacts.items() if info else ()) for k in ks}
+            self.log("derleme onbellegi %s: %d parca, %d artifact yuklendi" % (self.key, len(parts), len(self.seen)))
+        except Exception as e:                                           # noqa: BLE001
+            self.log("UYARI: derleme onbellegi yuklenemedi (%r); soguk derleme" % e)
+
+    def save(self):
+        if self.path is None:
+            return
+        try:
+            r = torch.compiler.save_cache_artifacts()
+            if r is None:
+                return
+            data, info = r
+            new = {(t, k) for t, ks in info.artifacts.items() for k in ks} - self.seen
+            if not new:
+                return
+            os.makedirs(self.root, exist_ok=True)
+            open(self.path + ".part", "wb").write(data)
+            os.replace(self.path + ".part", self.path)
+            self.log("derleme onbellegi yazildi: %s (%d yeni artifact, %.1f MB)" % (
+                os.path.basename(self.path), len(new), len(data) / 1e6))
+        except Exception as e:                                           # noqa: BLE001
+            self.log("UYARI: derleme onbellegi yazilamadi (%r)" % e)
 
 
 def _attn(batch, mask_fn, cuda):
@@ -729,8 +793,10 @@ def main(argv=None):
     n_fp8 = _fp8(model, args.fp8) if args.fp8 != "none" else 0          # compile ve optimizer'dan once
     if cuda:
         for block in model.blocks:
-            block.compile(dynamic=False, mode=COMPILE_MODE)
+            block.compile(dynamic=False, **_compile_kwargs())
     opt, opt_info = _optimizer(model, args.optimizer, args.lr, cuda)
+    ccache = _CompileCache(args, model, cuda, log)
+    ccache.load()                                                        # derlemeden (ilk adim) once
     ident = dict(model=args.model, d=args.d, layers=args.layers, heads=args.heads, lr=args.lr, seed=args.seed,
                  longest=train.max_sentence_tokens, row_len=row_len, batch_rows=BATCH_ROWS,
                  train_stream_sha256=train.meta["stream_sha256"],
@@ -810,8 +876,8 @@ def main(argv=None):
             args.global_layers, args.global_layers))
     if cuda:
         import torch._inductor.config as inductor_config
-        log("hiz: derleme modu %s (autotune alt surecte %s), attention blok %d, Muon %s" % (
-            COMPILE_MODE, getattr(inductor_config, "autotune_in_subproc", None), R.ATTN_BLOCK,
+        log("hiz: derleme modu %s, koordinat-inis %s (autotune alt surecte %s), attention blok %d, Muon %s" % (
+            COMPILE_MODE, COMPILE_COORD_DESCENT, getattr(inductor_config, "autotune_in_subproc", None), R.ATTN_BLOCK,
             type(getattr(opt, "muon", opt)).__name__))
     for k, g in opt_info["split"].items():
         if g["tensors"]:
@@ -873,6 +939,8 @@ def main(argv=None):
             mtp = (mt, torch.tensor(w_mtp))
             mtp = tuple(t.pin_memory().to(dev, non_blocking=True) for t in mtp) if cuda else mtp
         loss, gn, extra = _step(model, _to_device(batch, dev), mask_fn, opt, cuda, timer, cont, mtp)
+        if step == start:
+            ccache.save()                                                # ilk adimin derlemesi (ileri + geri + kayip)
         nxt = cpu_batch(step + 1) if step + 1 < total else None          # GPU calisirken hazirlanir
         win["loss"] += loss
         win["gn"] += gn
@@ -930,6 +998,7 @@ def main(argv=None):
         if ckpt_due:
             save(args.out, done)
             saved_at = time.time()
+    ccache.save()
     if end < total:                                                     # --stop_step: sinav ve okuma yok
         results = dict(config, run=os.path.basename(os.path.normpath(args.out)), finished=False, stopped_at=end,
                        readings_skipped="stop_step", exam=history["exams"][-1] if history["exams"] else None,
@@ -964,6 +1033,7 @@ def main(argv=None):
               indent=1, ensure_ascii=False)
     results["generation"] = gen
     json.dump(results, open(res_path, "w"), indent=1)
+    ccache.save()                                                        # sinav / uretim derlemeleri
     gen = results["generation"] or {}
     log("BITTI: %s | sinav kayip %.4f bpb %.4f | sentence_repeat %s | story_loop %s" % (
         args.out, results["exam"]["loss"], results["exam"]["bits_per_byte"],
