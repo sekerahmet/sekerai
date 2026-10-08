@@ -46,13 +46,11 @@ import sys
 
 import torch
 import torch.nn.functional as F
-import torch.utils.checkpoint
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "common"))
 from data import END_ID, EOS_ID, MAX_SENTENCE_TOKENS, ROW_LEN, VOCAB, Kind  # noqa: E402
 
 BOS, TOKEN, END, ZTOK, PAD = Kind.BOS, Kind.TOKEN, Kind.END, Kind.ZTOK, Kind.PAD
-BLOCK_RECOMPUTE = ("swiglu", "gate")   # egitimde saklanmayip geri yolda yeniden hesaplanan matmul girdileri (belge 94 s10.2)
 
 
 def bigram_ids(tokens, prev, rows):
@@ -222,22 +220,6 @@ def gqa_sdpa(q, k, v, mask=None):
                                           attn_mask=mask)
 
 
-def _swiglu(g, u):
-    return F.silu(g) * u
-
-
-def _gated(a, g):
-    return a * g[..., None]
-
-
-def _recompute(name, fn, *xs):
-    """fn(*xs); name BLOCK_RECOMPUTE'taysa ve gradyan aciksa sonucu saklanmaz, geri yolda girdilerinden yeniden hesaplanir
-    (torch.utils.checkpoint; deger ve gradyan ayni).  Derlenen blokta ileri yoldaki yazma cekirdegi (matmul girdisi) kalkar."""
-    if name in BLOCK_RECOMPUTE and torch.is_grad_enabled() and any(x.requires_grad for x in xs):
-        return torch.utils.checkpoint.checkpoint(fn, *xs, use_reentrant=False, preserve_rng_state=False)
-    return fn(*xs)
-
-
 class Block(torch.nn.Module):
     def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0):
         """kv_heads (GQA; varsayilan heads): k / v head sayisi, heads'in boleni; qkv d -> d + 2 d kv / heads.
@@ -293,10 +275,10 @@ class Block(torch.nn.Module):
         B, T, d = x.shape
         a = a.transpose(1, 2)                                               # (B, T, heads, hd)
         if self.attn_gate is not None:
-            a = _recompute("gate", _gated, a, self._gate(x) if g is None else g)
+            a = a * (self._gate(x) if g is None else g)[..., None]
         x = x + self.proj(a.reshape(B, T, d))
         g, u = self.gate_up(self.n2(x)).chunk(2, -1)
-        return x + self.down(_recompute("swiglu", _swiglu, g, u))
+        return x + self.down(F.silu(g) * u)
 
     def forward(self, x, pos, attn):
         """attn: None (duz causal), bool (B, T, T) (dense) ya da FlexAttention BlockMask; carry: (maske, mem_rows,

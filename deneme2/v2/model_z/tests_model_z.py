@@ -3,7 +3,7 @@
 v2-before-formula-cleanup-20261007.
 
     python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,mask,summaries_last,gqa,carry,vocab,limit,flex_ranges,
-                            gate,ngram,ngram_fast,combo,recompute]
+                            gate,ngram,ngram_fast,combo]
 """
 import os
 import sys
@@ -1554,55 +1554,10 @@ def t_combo():
           "G1)" % len(pieces), max(cres) < 1e-5, "fark %s" % ["%.1e" % v for v in cres])
 
 
-def _train_run(recompute, steps=3):
-    """Gercek egitim adimi (train._step: MTP 2 kaybi, clip, NorMuon + AdamW) varsayilan yapida kucuk Model Z (G1 GQA, kapi 2,
-    bigram k1) -> adim basina (kayip, butun gradyanlar, butun parametreler).  model.BLOCK_RECOMPUTE = recompute."""
-    import model as MZ
-    import train as TR
-    from model import summaries_last
-    rng = np.random.default_rng(5)
-    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(2, 6))]
-               for _ in range(8)]
-    saved = MZ.BLOCK_RECOMPUTE
-    MZ.BLOCK_RECOMPUTE = recompute
-    try:
-        torch.manual_seed(0)
-        m = SentenceTransformer(d=128, layers=3, heads=4, global_layers=1, glob_kv_heads=2, attn_gate=2, ngram_rows=97,
-                                ngram_layers=1)
-        opt, _ = TR._optimizer(m, "normuon", 2e-3, False)
-        mask_fn = m._masks(True)
-        out = []
-        for k in range(steps):
-            b = real_batch([list(range((2 * k) % 8, (2 * k) % 8 + 2)), list(range((2 * k + 4) % 8, (2 * k + 4) % 8 + 2))],
-                           160, stories)
-            mt = D.mtp_targets(b, 2)
-            b, perm = summaries_last(b)
-            mt = mt.gather(1, perm[..., None].expand(-1, -1, 2))
-            loss, gn, _ = TR._step(m, b, mask_fn, opt, False, mtp=(mt, torch.tensor([0.5, 0.25])))
-            out.append((loss.clone(), {n: q.grad.clone() for n, q in m.named_parameters() if q.grad is not None},
-                        {n: q.detach().clone() for n, q in m.named_parameters()}))
-        return out
-    finally:
-        MZ.BLOCK_RECOMPUTE = saved
-
-
-def t_recompute():
-    """BLOCK_RECOMPUTE (belge 94 s10.2): SwiGLU ve kapi carpimi saklanmayip geri yolda yeniden hesaplanir.  Gercek egitim
-    adimlariyla (train._step, MTP 2, NorMuon) fp32 CPU: kayip, butun gradyanlar ve guncellenmis parametreler 3 adimda
-    recompute'suz yolla BIT ayni."""
-    a, b = _train_run(()), _train_run(("swiglu", "gate"))
-    same = all(torch.equal(la, lb) and ga.keys() == gb.keys() and all(torch.equal(ga[n], gb[n]) for n in ga)
-               and all(torch.equal(pa[n], pb[n]) for n in pa) for (la, ga, pa), (lb, gb, pb) in zip(a, b))
-    moved = float(max((a[-1][2][n] - a[0][2][n]).abs().max() for n in a[0][2]))
-    check("recompute: SwiGLU + kapi yeniden hesaplanan = saklanan; 3 egitim adiminda kayip / gradyan / parametre bit ayni "
-          "(%d gradyan tensoru)" % len(a[0][1]), same and moved > 0 and len(a[0][1]) == len(list(a[0][2])),
-          "kayip %s, parametre hareketi %.2e" % ([round(float(x[0]), 5) for x in a], moved))
-
-
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab,
              limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast,
-             combo=t_combo, recompute=t_recompute)
+             combo=t_combo)
 
 if __name__ == "__main__":
     if SIDE is not None:
