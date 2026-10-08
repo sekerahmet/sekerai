@@ -338,9 +338,74 @@ class SentenceTransformer(torch.nn.Module):
             pred[r:r + chunk] = lg.argmax(-1)
         return nll, pred, batch.target_kind[keep]
 
+    def _row_rule(self, w, opened, used, limit, max_sentences, max_tokens, stop_when):
+        """generate'in tek istem kurali (birebir), adim adim: w ilk argmax; ('tok' token, False) / (END, True) verir ve
+        sonraki argmax'i alir; bitince (cumleler, ended, eos) dondurur (toplu uretim, belge 91)."""
+        gen, ended, eos, full = [], [], False, False
+        while len(gen) < max_sentences:
+            cur, done = [], False
+            while len(cur) < max_tokens:
+                if used + 2 > limit:
+                    full = True
+                    break
+                if w == self.EOS and not cur and not opened:
+                    eos = True
+                    break
+                if w in (self.END, self.EOS):
+                    done = True
+                    break
+                cur.append(w)
+                w = yield w, False
+                used += 1
+            if eos or (full and not cur):
+                break
+            gen.append(cur)
+            ended.append(done)
+            if full or (stop_when is not None and stop_when(gen)):
+                break
+            opened = False
+            w = yield END_ID, True
+            used += 1
+        return gen, ended, eos
+
+    def _generate_rows(self, prompts, max_sentences, max_tokens, open_last, stop_when):
+        """Acgozlu toplu uretim (belge 91): istemler tek StaticCache'te satir satir, adim basina tek replay; satir kurali
+        _row_rule (= tek istem generate); biten satir canli degil.  -> generate ciktisi (istem sirasiyla)."""
+        limit = self.max_positions()
+        opened = [bool(open_last and s) for s in prompts]
+        pre = [s[:-1] if o else s for s, o in zip(prompts, opened)]
+        opens = [list(s[-1]) if o else [] for s, o in zip(prompts, opened)]
+        n_open = max(len(o) for o in opens)
+        cache = StaticCache(self, max(n_open + 1, min(n_open + max_sentences * (max_tokens + 1) + 1, limit - min(
+            1 + sum(len(x) + 1 for x in p) for p in pre))), max_sentences + 1, n_open + max_tokens + 1)
+        am = cache.prefill_rows(pre, opens).float().argmax(-1).tolist()
+        rules, act, res = [], [], [None] * len(prompts)
+        for r, s in enumerate(prompts):
+            g = self._row_rule(am[r], opened[r], 1 + sum(len(x) + 1 for x in s) - opened[r], limit, max_sentences,
+                               max_tokens, stop_when)
+            rules.append(g)
+            try:
+                act.append(next(g))
+            except StopIteration as e:
+                act.append(None)
+                res[r] = e.value
+        while any(a is not None for a in act):
+            live = [a is not None for a in act]
+            am = cache.step_rows([a[0] if a else 0 for a in act], [bool(a and a[1]) for a in act], live)
+            am = am.float().argmax(-1).tolist()
+            for r, g in enumerate(rules):
+                if act[r] is None:
+                    continue
+                try:
+                    act[r] = g.send(am[r])
+                except StopIteration as e:
+                    act[r] = None
+                    res[r] = e.value
+        return res
+
     @torch.no_grad()
     def generate(self, prompts, max_sentences, max_tokens, generator=None, open_last=False, on_token=None,
-                 stop_when=None):
+                 stop_when=None, batch_size=32):
         """prompts: hikaye basina istem cumleleri (token listeleri, END yok) -> her istem icin (uretilen cumleler,
         END ile bitti mi listesi, eos).  generator None: acgozlu, yoksa ornekleme.  SummaryCache ile, istem basina.
         Cumle en cok max_tokens token; kesilen cumle ended False ile doner (belge 26 B2).  Istem tek ileri geciste
@@ -349,9 +414,15 @@ class SentenceTransformer(torch.nn.Module):
         token'dan sonra, on_token(None): cumle kapaninca (akan yazim; cikti degismez).  stop_when(gen): her
         kapanan cumleden sonra, True ise o istemin uretimi biter (cikti = tam uretimin oneki).  Onbellek StaticCache (belge
         84; STATIC_DECODE, carry'siz model), yoksa SummaryCache; fp32'de token token ayni.  Konum siniri (belge 89b): hikaye
-        max_positions()'i (egitim satiri) asmaz; sinira gelince o anki cumle kesik (ended False) doner, uretim biter."""
+        max_positions()'i (egitim satiri) asmaz; sinira gelince o anki cumle kesik (ended False) doner, uretim biter.
+        batch_size (belge 91): acgozlu, on_token'siz ve StaticCache'li uretimde istemler bu boyda toplu (_generate_rows);
+        cikti tek tek uretimle ayni (fp32 token token)."""
         out, limit = [], self.max_positions()
         static = STATIC_DECODE and StaticCache.supports(self)
+        if static and generator is None and on_token is None and batch_size > 1 and len(prompts) > 1:
+            for i in range(0, len(prompts), batch_size):
+                out += self._generate_rows(prompts[i:i + batch_size], max_sentences, max_tokens, open_last, stop_when)
+            return out
         for sents in prompts:
             opened = bool(open_last and sents)
             n_open = len(sents[-1]) if opened else 0
@@ -554,9 +625,10 @@ def _bmm_f32(t):
     return _COMPILED["bmm_f32"]
 
 
-def _static_step(m, glob, f32, smax, w, z, sum_len, sen_len, tt, K, V, out):
-    """StaticCache'in tek adimi (yerinde; Python dallanmasi yok -> torch.compile / CUDA graph).  z: Z_k adimi (girdi E(END),
-    ozete yazilir, cumleyi okur), degilse token w (cumleye yazilir).  Konum: token ozet + cumle sayaci, Z ozet sayaci (=
+def _static_step(m, glob, f32, smax, w, z, live, sum_len, sen_len, tt, K, V, out):
+    """StaticCache'in tek adimi, satir basina (yerinde; Python dallanmasi yok -> torch.compile / CUDA graph).  z: Z_k adimi
+    (girdi E(END), ozete yazilir, cumleyi okur), degilse token w (cumleye yazilir).  live False satirin sayaclari ilerlemez
+    (yazdigi bos yuva maskede; toplu uretimde biten satir).  Konum: token ozet + cumle sayaci, Z ozet sayaci (=
     SummaryCache'in n_z + i / n_z'si), glob gercek konum tt."""
     x = m.E(torch.where(z, torch.full_like(w, END_ID), w))[:, None]
     pos = torch.where(z, sum_len, sum_len + sen_len)[:, None]
@@ -578,9 +650,9 @@ def _static_step(m, glob, f32, smax, w, z, sum_len, sen_len, tt, K, V, out):
         V[l][ar, :, at] = v[:, :, 0]
         x = block._finish(x, decode_sdpa(q, K[l], V[l], mask, f32))
     out.copy_(m._logits(m.norm(x[:, 0])))
-    sen_len.copy_(torch.where(z, torch.zeros_like(sen_len), sen_len + 1))
-    sum_len.add_(z.long())
-    tt.add_(1)
+    sen_len.copy_(torch.where(live, torch.where(z, torch.zeros_like(sen_len), sen_len + 1), sen_len))
+    sum_len.add_((z & live).long())
+    tt.add_(live.long())
 
 
 class StaticCache:
@@ -588,7 +660,9 @@ class StaticCache:
     token'in logit'i) ve ayni matematik.  Istem SummaryCache.prefill ile islenir, K/V onceden ayrilmis tamponlara alinir
     (yerel [ozet | cumle], glob gercek konumla); adim _static_step.  CUDA'da ilk adimda derlenir (torch.compile, surec
     basina bir kez) ve CUDA graph'a yakalanir: adim basina tek replay.  positions / sentences / sentence_tokens: istemden
-    sonra en cok eklenecek konum, Z ve cumle token'i (asilirsa DURUR).  carry (parca siniri): supports False, SummaryCache."""
+    sonra en cok eklenecek konum, Z ve cumle token'i (asilirsa DURUR).  Toplu (belge 91): prefill_rows birden cok istemi
+    satir satir yukler (satir basina SummaryCache.prefill + acik cumle), step_rows satir basina token / Z / canli adimi.
+    carry (parca siniri): supports False, SummaryCache."""
     BUCKET = 256         # tampon boylari kademeli: BUCKET x {1, 1,5} x 2^k (sekil basina bir derleme; dec84: istem basina
                          # degisen boy her istemde yeniden derletiyordu, 8'den sonra derlemesiz)
 
@@ -604,35 +678,56 @@ class StaticCache:
 
     @torch.no_grad()
     def prefill(self, sents):
-        """Istem SummaryCache.prefill ile -> sonraki token'in logit'i; K/V ve sayaclar sabit tamponlara."""
-        c = SummaryCache(self.m)
-        self.logits = c.prefill(sents)
-        L, b = len(self.m.blocks), self.BUCKET
+        """Tek istem -> sonraki token'in logit'i (prefill_rows'un tek satiri)."""
+        return self.prefill_rows([sents])[0]
+
+    @torch.no_grad()
+    def prefill_rows(self, prompts, opens=None):
+        """prompts: satir basina istem cumleleri, opens: satir basina acik son cumlenin token'lari (yoksa bos) -> (B, V)
+        sonraki token'in logit'i.  Satir basina SummaryCache.prefill (+ acik token'lar onun yoluyla), K/V ve sayaclar sabit
+        tamponlara (boy satirlarin en buyugune gore kademe)."""
+        opens = opens or [()] * len(prompts)
+        cs = []
+        for sents, op in zip(prompts, opens):
+            c = SummaryCache(self.m)
+            c.prefill(sents)
+            for t in op:
+                c.append_token(t)
+            cs.append(c)
+        L, b, B = len(self.m.blocks), self.BUCKET, len(cs)
         up = lambda n: next(t for k in range(40) for t in (b << k, (3 * b // 2) << k) if t >= n)  # noqa: E731
-        self.glob = c.glob
+        self.glob = cs[0].glob
         loc = [l for l in range(L) if not self.glob[l]]
-        nsum, T = (c.sum_k[loc[0]].shape[2] if loc else 0), c.t + 1
-        self.smax = up(nsum + self.budget[1] + 1)
-        self.limits = (self.smax, up(self.budget[2]), up(T + self.budget[0]))  # ozet, cumle, glob konum sinirlari
-        self.n = [nsum, 0, T]                                            # host sayaclari (sinir denetimi)
+        nsum = [c.sum_k[loc[0]].shape[2] if loc else 0 for c in cs]
+        T, sen = [c.t + 1 for c in cs], [c.i for c in cs]
+        self.smax = up(max(nsum) + self.budget[1] + 1)
+        self.limits = (self.smax, up(self.budget[2]), up(max(T) + self.budget[0]))  # ozet, cumle, glob konum sinirlari
+        self.n = [list(x) for x in zip(nsum, sen, T)]                   # satir basina host sayaclari (sinir denetimi)
         self.K, self.V = [], []
         for l in range(L):
-            sk, sv = (c.all_k[l], c.all_v[l]) if self.glob[l] else (c.sum_k[l], c.sum_v[l])
-            k = sk.new_zeros(1, sk.shape[1], self.limits[2] if self.glob[l] else self.smax + self.limits[1], sk.shape[3])
+            ref = cs[0].all_k[l] if self.glob[l] else cs[0].sum_k[l]
+            size = self.limits[2] if self.glob[l] else self.smax + self.limits[1]
+            k = ref.new_zeros(B, ref.shape[1], size, ref.shape[3])
             v = torch.zeros_like(k)
-            k[:, :, :sk.shape[2]], v[:, :, :sv.shape[2]] = sk, sv
+            for r, c in enumerate(cs):
+                parts = [(0, c.all_k[l], c.all_v[l])] if self.glob[l] else [(0, c.sum_k[l], c.sum_v[l])] + (
+                    [(self.smax, c.sen_k[l], c.sen_v[l])] if c.sen_k[l] is not None else [])
+                for at, sk, sv in parts:
+                    k[r, :, at:at + sk.shape[2]], v[r, :, at:at + sv.shape[2]] = sk[0], sv[0]
             self.K.append(k)
             self.V.append(v)
-        one = lambda v_: torch.tensor([v_], device=self.dev)  # noqa: E731
-        self.state = (one(nsum), one(0), one(T))                         # sum_len, sen_len, tt
-        self.w, self.z = one(0), torch.zeros(1, dtype=torch.bool, device=self.dev)
-        self.out = self.logits.new_zeros(1, self.logits.shape[-1])
+        lt = lambda x: torch.tensor(x, device=self.dev)  # noqa: E731
+        self.state = (lt(nsum), lt(sen), lt(T))                          # sum_len, sen_len, tt
+        self.w, self.z = lt([0] * B), torch.zeros(B, dtype=torch.bool, device=self.dev)
+        self.live = torch.ones(B, dtype=torch.bool, device=self.dev)
+        self.logits = torch.stack([c.logits for c in cs])
+        self.out = torch.zeros_like(self.logits)
         self.f32 = self.out.dtype != torch.float32 and _bmm_f32(self.out)
         return self.logits
 
     def _step(self):
-        _COMPILED.get("step", _static_step)(self.m, self.glob, self.f32, self.smax, self.w, self.z, *self.state, self.K,
-                                            self.V, self.out)
+        _COMPILED.get("step", _static_step)(self.m, self.glob, self.f32, self.smax, self.w, self.z, self.live, *self.state,
+                                            self.K, self.V, self.out)
 
     def _capture(self):
         """Ilk adimda (CUDA): derleme + CUDA graph.  Isinma adimlarinin sayac ilerlemesi geri alinir; tamponlara
@@ -665,24 +760,34 @@ class StaticCache:
             self._step()
         return self.graph.replay
 
-    def _advance(self, w, z):
-        self.n = [self.n[0] + z, 0 if z else self.n[1] + 1, self.n[2] + 1]
-        assert all(a <= b for a, b in zip(self.n, self.limits)), \
-            "StaticCache: tampon asildi %s > %s (positions / sentences / sentence_tokens)" % (self.n, self.limits)
-        self.w.fill_(w)
-        self.z.fill_(z)
+    @torch.no_grad()
+    def step_rows(self, w, z, live):
+        """Satir basina token w, Z bayragi z, canli live (listeler) -> (B, V) sonraki logit.  Canli olmayan satir ilerlemez."""
+        for n, z_, l_ in zip(self.n, z, live):
+            if l_:
+                n[:] = [n[0] + z_, 0 if z_ else n[1] + 1, n[2] + 1]
+                assert all(a <= b for a, b in zip(n, self.limits)), \
+                    "StaticCache: tampon asildi %s > %s (positions / sentences / sentence_tokens)" % (n, self.limits)
+        if len(w) == 1:                                                  # tek satir: kopyasiz doldurma
+            self.w.fill_(int(w[0]))
+            self.z.fill_(bool(z[0]))
+            self.live.fill_(bool(live[0]))
+        else:
+            self.w.copy_(torch.tensor(w))
+            self.z.copy_(torch.tensor(z))
+            self.live.copy_(torch.tensor(live))
         if self.run is None:
             self.run = self._capture()
         self.run()
-        self.logits = self.out[0]
-        return self.logits
+        self.logits = self.out
+        return self.out
 
     @torch.no_grad()
     def append_token(self, token):
-        """Simdiki cumleye token -> sonraki token'in logit'i."""
-        return self._advance(int(token), False)
+        """Simdiki cumleye token -> sonraki token'in logit'i (tek satir)."""
+        return self.step_rows([token], [False], [True])[0]
 
     @torch.no_grad()
     def close_sentence(self):
-        """Cumle bitti: Z_k ozete -> sonraki cumlenin ilk token'i (ya da EOS) logit'i."""
-        return self._advance(END_ID, True)
+        """Cumle bitti: Z_k ozete -> sonraki cumlenin ilk token'i (ya da EOS) logit'i (tek satir)."""
+        return self.step_rows([END_ID], [True], [True])[0]
