@@ -67,7 +67,9 @@ Ek okuma kayitli kosudan: diag/generate_readings.py.
 (modded-nanogpt kayit 53): kayip = ana CE + agirlikli k+1 sonraki hedeflerin CE'si, ayni logit'ten (recipe.output_loss_mtp).
 Hedefler hikaye sirasinda (data.mtp_targets, summaries_last'tan once, ayni perm).  Agirlik recipe.mtp_weights(adim, toplam,
 N): son 1 / (N + 1) payda (WSD inisi dahil) yalniz ana hedef.  Sinav / bpb / okuma yalniz ana bas (dokunulmaz); gunlukte
-loss = ana CE, loss_mtp / mtp_w ayri.  Yalniz model_z; carry ile DUR; kimlikte (farkliysa --resume DUR).
+loss = ana CE, loss_mtp / mtp_w ayri.  Yalniz model_z; acik --mtp N carry ile DUR; kimlikte.  Varsayilan auto (kullanici,
+8 Ekim: "Bu mtp varsayılan olsun yeni kod da atlama"; MTP_DEFAULT): model_z 2 (carry'de 0, gunlukte yazilir), transformer
+0; acik --mtp 0 eski davranis (bit ayni); INHERIT'te (alan yoksa 0: eski kosu kendi ayariyla surer).
 
 Eski kosular (kullanici, 8 Ekim: "V2 içinde temizlik kastettim"; belge 77): Model Z kimliginde summaries_last 1 degilse
 (8 Ekim oncesi; formullu / temizlik oncesi dahil; summaries_last 0), learned_z 0 ya da kaldirilan bir ozellik (z_bow,
@@ -87,7 +89,7 @@ Varsayilanlar (kullanici, 8 Ekim: "Varsayılan yap ama kısa bir koşu ile son h
                     [--glob_kv_heads N|auto (varsayilan auto)] [--carry_summaries 1] [--carry_group G]
                     [--attn_gate 0|1|2|auto (varsayilan auto)] [--ngram_embed N|auto (varsayilan auto)] [--ngram_layers K]
                     [--ngram_sparse 1]
-                    [--mtp N]
+                    [--mtp N|auto (varsayilan auto)]
 """
 import torch  # noqa: I001  (Windows: torch once)
 
@@ -120,9 +122,10 @@ GLOB_KV_GROUP = 4              # glob_kv_heads auto = heads / 4
 GLOB_KV_DEFAULT = "auto"       # --glob_kv_heads verilmezse (kullanici, 8 Ekim: GQA varsayilan); testler eski 0'a sabitler
 ATTN_GATE_DEFAULT = "auto"     # --attn_gate verilmezse (kullanici, 8 Ekim: "gate 2 varsayılan"); testler eski 0'a sabitler
 NGRAM_DEFAULT = "auto"         # --ngram_embed verilmezse (kullanici, 8 Ekim: "gate 2 ve n gram girdi"); testler eski 0'a sabitler
+MTP_DEFAULT = "auto"           # --mtp verilmezse (kullanici, 8 Ekim: "Bu mtp varsayılan olsun"); testler eski 0'a sabitler
 LR_REF = (2e-3, 768, 0.5)      # lr auto = lr0 (d0 / d) ^ us (aci / adim ~ lr 0,2 sqrt(d) sabit); d1024 olcumu: 1,4 / 1,7e-3 duz, 1,73e-3 icinde
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ngram_embed", "ngram_layers",
-           "ngram_sparse")   # --resume'da verilmezse kimlikten
+           "ngram_sparse", "mtp")   # --resume'da verilmezse kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
@@ -579,9 +582,10 @@ def _args(argv):
                     help="model_z: head basina attention cikis kapisi (belge 88a, 90a); 1 girdi n1(x), 2 girdi n1(x)'in "
                          "ilk d // 64 boyutu; auto (varsayilan): model_z ve d >= 64 ise 2, aksi 0; kimlikte; "
                          "--resume'da verilmezse kosunun kimliginden")
-    ap.add_argument("--mtp", type=int, default=0,
-                    help="model_z: ayni-logit MTP ek hedef sayisi N (deneme/mtp, belge 90c; resmi kod N 2); agirlik "
-                         "recipe.mtp_weights, son 1 / (N + 1) payda 0; 0 kapali (eski yol)")
+    ap.add_argument("--mtp", type=lambda s: s if s == "auto" else int(s), default=None,
+                    help="model_z: ayni-logit MTP ek hedef sayisi N (belge 90c; resmi kod N 2); agirlik recipe.mtp_weights, "
+                         "son 1 / (N + 1) payda 0; auto (varsayilan): model_z 2 (carry'de 0), transformer 0; 0 kapali; "
+                         "--resume'da verilmezse kosunun kimliginden")
     ap.add_argument("--fp8", default="none", choices=("none", "tensorwise", "rowwise"),
                     help="MLP (gate_up, down) torchao Float8Linear tarifi; none: bf16 (kimlige girmez, --resume'da "
                          "degistirilebilir; kullanici, 8 Ekim)")
@@ -596,7 +600,7 @@ def _args(argv):
     was = torch.load(ckpt, map_location="cpu", weights_only=False, mmap=True)["args"] \
         if args.resume and os.path.exists(ckpt) else None               # varsayilan degisse de kosu kendi ayariyla surer
     for k in args.defaulted if was is not None else ():
-        setattr(args, k, was.get(k, 0 if k in ("glob_kv_heads", "attn_gate") or k.startswith("ngram") else None))
+        setattr(args, k, was.get(k, 0 if k in ("glob_kv_heads", "attn_gate") or k.startswith("ngram") or k == "mtp" else None))
     args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
     if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
         args.optimizer = DEFAULT_OPTIMIZER
@@ -629,6 +633,13 @@ def _args(argv):
     if args.carry_group is None:
         args.carry_group = 4 if args.carry_summaries else 0
     auto = []                                                            # kimlige cozulmus sayi girer
+    if args.mtp is None:
+        args.mtp = MTP_DEFAULT
+    if args.mtp == "auto":                                               # carry ile MTP kurulmadi (_mtp_error): 0
+        carry = bool(args.carry_summaries or args.carry_group)
+        args.mtp = 2 if args.model == "model_z" and not carry else 0
+        if args.model == "model_z":
+            auto.append("mtp %d%s" % (args.mtp, " (carry: MTP ile birlikte kurulmadi, auto 0)" if carry else ""))
     if args.global_layers == "auto":
         args.global_layers = round(args.layers * MODEL_Z_GLOBAL_RATIO) if args.model == "model_z" else 0
         if args.model == "model_z":

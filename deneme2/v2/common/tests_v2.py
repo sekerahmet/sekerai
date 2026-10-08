@@ -842,12 +842,13 @@ def t_train():
         return
     root, data, prompts = _train_root(tp)
     saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO, TR.VOCAB_ROWS,
-             TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT)
+             TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT, TR.MTP_DEFAULT)
     TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
     TR.MODEL_Z_GLOBAL_RATIO = 0.6                                       # eski varsayilan: L1 / L2 G1 (8 Ekim)
     TR.GLOB_KV_DEFAULT = 0                      # eski varsayilan (GQA yok): GOLDEN / etiket bit, heads 2 (yeni _train_gqa_default)
     TR.ATTN_GATE_DEFAULT = 0                    # eski varsayilan (kapisiz): GOLDEN / etiket bit (gercegi _train_gate'te)
     TR.NGRAM_DEFAULT = 0                        # eski varsayilan (n-gram yok): GOLDEN bit (gercegi _train_ngram)
+    TR.MTP_DEFAULT = 0                          # eski varsayilan (MTP yok): GOLDEN bit (gercegi t_mtp)
     TR.VOCAB_ROWS = D.VOCAB                     # eski E boyu: GOLDEN / etiket esdegerligi bit (dolgulu yol _train_vocab'da)
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=3, max_tokens=4)
     base = ["--data", data, "--stream", root, "--device", "cpu", "--d", "16", "--layers", "1", "--heads", "2",
@@ -1043,7 +1044,7 @@ def t_train():
         check("train", False, traceback.format_exc(limit=3))
     finally:
         (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO, TR.VOCAB_ROWS,
-         TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT) = saved
+         TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT, TR.MTP_DEFAULT) = saved
 
 
 def t_tokens():
@@ -1460,7 +1461,7 @@ def _train_muon(base, root, data, out, state, same, exits, TR):
 def _train_combo(base, data, out, state, same, exits, TR):
     """Birlesim (belge 93): kapi 2 + bigram + MTP birlikte (NorMuon, d64): kosar, kimlikte uc alan, gunlukte loss_mtp;
     kapi NorMuon'da, tablo AdamW lr_mult grubunda; adim 4'te kesilip surdurulen = kesintisiz (agirlik ve kayip egrisi bit);
-    load_run uc parcayi kurar (agirlik bit); --mtp'siz --resume DUR (kimlik farki), --ngram_embed'siz --resume kimlikten
+    load_run uc parcayi kurar (agirlik bit); acik --mtp 0 ile --resume DUR (kimlik farki), --ngram_embed'siz --resume kimlikten
     surer (INHERIT), carry ile DUR;
     seyrek bigram (--ngram_layers 1 --ngram_sparse 1) + kapi + MTP de kosar ve kesintisiz surer."""
     import traceback
@@ -1476,12 +1477,12 @@ def _train_combo(base, data, out, state, same, exits, TR):
         lm = GR.load_run(A, data, torch.device("cpu"))[0]
         split = a["optimizer"]["split"]
         idt = a["identity"]
-        bad = [_exit_msg(TR.main, mz + ["--attn_gate", "2", "--ngram_embed", "64", "--out", A, "--resume", "1"]),
+        bad = [_exit_msg(TR.main, mz + ["--attn_gate", "2", "--ngram_embed", "64", "--mtp", "0", "--out", A, "--resume", "1"]),
                _exit_msg(TR.main, cmd + ["--carry_summaries", "1", "--out", out("combo_carry")])]
         inh = TR._args(mz + ["--attn_gate", "2", "--mtp", "2", "--out", A, "--resume", "1"])   # n-gram INHERIT'te
         check("train birlesim (--attn_gate 2 --ngram_embed 64 --mtp 2, NorMuon, d64): kosar, kimlikte uc alan, gunlukte "
               "loss_mtp; kapi NorMuon'da, tablo lr_mult grubunda; adim 4'te kesilip surdurulen = kesintisiz (agirlik + kayip "
-              "egrisi bit); load_run kurar (bit); --mtp'siz --resume ve carry DURUR, --ngram_embed'siz --resume kimlikten (64)",
+              "egrisi bit); load_run kurar (bit); acik --mtp 0 ile --resume ve carry DURUR, --ngram_embed'siz --resume kimlikten (64)",
               a["finished"] and (idt["attn_gate"], idt["ngram_embed"], idt["mtp"]) == (2, 64, 2)
               and a["log"][0]["loss_mtp"] is not None and all(np.isfinite(w["loss"]) for w in a["log"])
               and tuple(sa["blocks.0.attn_gate"].shape) == (2, 1) and tuple(sa["ngram.weight"].shape) == (64, 64)
@@ -1941,7 +1942,7 @@ def t_fineweb():
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(tp)
     saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS, MF.VALID_STRIDE, D.MAX_SENTENCE_TOKENS,
-             TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT)
+             TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT, TR.MTP_DEFAULT)
     try:
         fl_ss, q_ss = D.stream_tables(tok)
         fl_ss2, q_ss2 = D.stream_tables(tok, "ss")
@@ -2050,7 +2051,7 @@ def t_fineweb():
                   tr.n, int(cont.sum())))
         TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS = 4, 1, dict(max_sentences=3, max_tokens=4)
         TR.MODEL_Z_GLOBAL_RATIO = 0.6                                       # eski varsayilan: L1 / L2 G1 (8 Ekim)
-        TR.GLOB_KV_DEFAULT = TR.ATTN_GATE_DEFAULT = TR.NGRAM_DEFAULT = 0    # eski varsayilanlar
+        TR.GLOB_KV_DEFAULT = TR.ATTN_GATE_DEFAULT = TR.NGRAM_DEFAULT = TR.MTP_DEFAULT = 0    # eski varsayilanlar
         base = ["--data", out, "--stream", out, "--device", "cpu", "--d", "16", "--layers", "2", "--heads", "2", "--lr",
                 "1e-2", "--checkpoint_minutes", "0", "--optimizer", "muon"]          # 8 Ekim varsayilani normuon'dan once
         run = os.path.join(TMP, "fw_runs", "mzg")
@@ -2086,7 +2087,7 @@ def t_fineweb():
         check("fineweb", False, traceback.format_exc(limit=4))
     finally:
         (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS, MF.VALID_STRIDE, D.MAX_SENTENCE_TOKENS,
-         TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT) = saved
+         TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT, TR.MTP_DEFAULT) = saved
 
 
 def _fineweb_extend(src, out, texts, tok, TR, MF):
@@ -2583,9 +2584,9 @@ def t_mtp():
         return
     root, data, prompts = _train_root(tp)
     saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.VOCAB_ROWS, TR.GLOB_KV_DEFAULT,
-             TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT)
+             TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT, TR.MTP_DEFAULT)
     TR.BATCH_ROWS, TR.LOG_EVERY, TR.VOCAB_ROWS = 4, 1, D.VOCAB
-    TR.GLOB_KV_DEFAULT = TR.ATTN_GATE_DEFAULT = TR.NGRAM_DEFAULT = 0      # eski varsayilanlar (GOLDEN bit)
+    TR.GLOB_KV_DEFAULT = TR.ATTN_GATE_DEFAULT = TR.NGRAM_DEFAULT = TR.MTP_DEFAULT = 0      # eski varsayilanlar (GOLDEN bit)
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=3, max_tokens=4)
     base = ["--data", data, "--stream", root, "--device", "cpu", "--d", "16", "--layers", "1", "--heads", "2",
             "--lr", "1e-2", "--checkpoint_minutes", "0", "--optimizer", "adamw"]
@@ -2648,15 +2649,50 @@ def t_mtp():
                 _exit_msg(TR.main, cmd + ["--carry_group", "4", "--out", out("x2")]),
                 _exit_msg(TR.main, cmd + ["--carry_summaries", "1", "--out", out("x3")]),
                 _exit_msg(TR.main, mz_ + ["--mtp", "-1", "--out", out("x4")]),
-                _exit_msg(TR.main, mz_ + ["--out", out("mtp_A"), "--resume", "1"])]
-        check("mtp train DUR: transformer, --carry_group, --carry_summaries, --mtp -1; --mtp 2 kosusu --mtp 0 ile "
+                _exit_msg(TR.main, mz_ + ["--mtp", "0", "--out", out("mtp_A"), "--resume", "1"])]
+        check("mtp train DUR: transformer, --carry_group, --carry_summaries, --mtp -1; --mtp 2 kosusu acik --mtp 0 ile "
               "--resume (kimlik farki)", all(x and "DUR" in x for x in msgs) and "mtp" in msgs[-1],
               " | ".join(str(x)[:70] for x in msgs))
+        import contextlib                                                # varsayilan (MTP_DEFAULT; belge 93 ek)
+        import io
+        sm = mz_[:-1] + ["3"]
+        TR.main(sm + ["--out", out("mtp_old")])                         # eski varsayilan (0) ile MTP'siz kosu
+        os.makedirs(out("mtp_old0"))
+        pack = torch.load(os.path.join(out("mtp_old"), "checkpoint.pt"), weights_only=False)
+        del pack["args"]["mtp"]                                         # alani olmayan (birlesim oncesi) kosu
+        torch.save(pack, os.path.join(out("mtp_old0"), "checkpoint.pt"))
+        pinned = TR.MTP_DEFAULT
+        TR.MTP_DEFAULT = "auto"                                         # train.py'nin varsayilani
+        try:
+            mt_ = lambda a_: TR._args(a_).mtp  # noqa: E731
+            got = {k: mt_(base + a_ + ["--out", "x"]) for k, a_ in (
+                ("mz", ["--model", "model_z"]), ("tf", ["--model", "transformer"]),
+                ("mz carry_summaries", ["--model", "model_z", "--carry_summaries", "1"]),
+                ("mz carry_group", ["--model", "model_z", "--carry_group", "4"]),
+                ("mz acik 0", ["--model", "model_z", "--mtp", "0"]))}
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                TR._args(base + ["--model", "model_z", "--carry_summaries", "1", "--out", "x"])
+            old_ = [mt_(sm + ["--out", out(n_), "--resume", "1"]) for n_ in ("mtp_old", "mtp_old0")]
+            inh = mt_(mz_ + ["--out", out("mtp_A"), "--resume", "1"])
+            rd = TR.main(sm + ["--out", out("mtp_def")])
+        finally:
+            TR.MTP_DEFAULT = pinned
+        rx = TR.main(sm + ["--mtp", "2", "--out", out("mtp_exp")])
+        check("mtp varsayilan (MTP_DEFAULT auto): model_z 2, transformer 0, carry (summaries / group) 0 ve gunlukte "
+              "yazilir, acik 0 aynen; eski MTP'siz kosu (alan 0 ya da yok) bayraksiz --resume'da 0; --mtp 2 kosusu "
+              "bayraksiz --resume'da 2; bayraksiz kosu = acik --mtp 2 kosusu (kayip egrisi + agirlik bit)",
+              got == {"mz": 2, "tf": 0, "mz carry_summaries": 0, "mz carry_group": 0, "mz acik 0": 0}
+              and "carry" in buf.getvalue() and old_ == [0, 0] and inh == 2 and rd["identity"]["mtp"] == 2
+              and [w["loss"] for w in rd["log"]] == [w["loss"] for w in rx["log"]]
+              and [w.get("loss_mtp") for w in rd["log"]] == [w.get("loss_mtp") for w in rx["log"]]
+              and all(torch.equal(x, y) for x, y in zip(state(out("mtp_def")).values(), state(out("mtp_exp")).values())),
+              "%s; eski %s; devam %s; %s" % (got, old_, inh, buf.getvalue().strip()[:90]))
     except Exception:  # noqa: BLE001
         check("mtp train", False, traceback.format_exc(limit=3))
     finally:
         (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.VOCAB_ROWS, TR.GLOB_KV_DEFAULT,
-         TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT) = saved
+         TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT, TR.MTP_DEFAULT) = saved
 
 
 TESTS = dict(fp8=t_fp8, data=t_data, pack=t_pack, recipe=t_recipe, metrics=t_metrics, integration=t_integration,
