@@ -4,12 +4,18 @@
 Adim (belge 24 s9):  attn = recipe.block_mask(batch, mask_fn) (CPU'da dense_mask: FlexAttention CPU'da geri yayilim
 yapmiyor); h = model._batch_hidden(batch, attn); kayip = recipe.output_loss(h, E, hedef).  bf16 autocast ve bloklarda
 compile(dynamic=False) CUDA'da; clip 1,0; AdamW (0,9 / 0,95, wd 0,1; CUDA'da fused), recipe.param_groups, recipe.wsd_lr.
---optimizer muon (varsayilan; kullanici, 7 Ekim: "Muon da varsayılan olsun"): bloklarin 2-B matrisleri
+--optimizer normuon VARSAYILAN (kullanici, 8 Ekim: "normuon bence standart yapalım. büyüdükçe etkisini gösterdi"; d1024 / L12
+ayni adimda -0,012; --resume'da acik verilmezse kosunun kimliginden, alan yoksa adamw).  --optimizer muon (7 Ekim
+varsayilani): bloklarin 2-B matrisleri
 recipe.BatchedMuon'a (torch.optim.Muon matematigi; adjust_lr_fn match_rms_adamw: guncelleme RMS'i AdamW'ninki, ayni --lr
 ve wd; liu2025_muonscalable), geri kalan ayni AdamW'ye; wsd_lr ikisine.  Muon yoksa kosu baslamadan DURUR.  --lr
 zorunlu; Muon icin olculen 2e-3 (belge 39 kisa tarama 5e-4 / 1e-3 / 2e-3 + 1 epok, OLCULENLER_z).  --optimizer adamw:
 eski tarif (olculen lr 5e-4).  --optimizer normuon (kullanici, 8 Ekim: "Ben nurmuon yapalım şimdiden dedim"):
-recipe.NorMuon (li2025_normuon Algorithm 1), ayni --lr (guncelleme RMS'i 0,2 lr); lr olculmedi.
+recipe.NorMuon (li2025_normuon Algorithm 1), ayni --lr (guncelleme RMS'i 0,2 lr).
+--fp8 none|tensorwise|rowwise (kullanici, 8 Ekim: "fp8 de dene bakalım. fp8 dikkatli dene"; varsayilan none): torchao
+Float8Linear yalniz MLP'de (gate_up, down), compile'dan once; agirliklar fp32, state_dict adlari ayni (kosu basinda
+denetlenir) -> ayni kosu --resume ile FP8 acik / kapali surer; KIMLIGE GIRMEZ, kip her segmentte gunlukte ve results.json
+segments'ta.  CUDA ve torchao ister, yoksa DURUR (bf16'ya sessizce dusmez).
 Veri: BATCH_ROWS satir x row_len (plan dosyasindan); epok 1 <data>/train_pack_plan_e1.npz, sonrakiler pack_plan(seed,
 epok).  --local: ham akisin yerel kopyasi (yalniz onbellek; sha256 = <split>_boundaries.json'daki).
 --summaries_last 1 (belge 66; kullanici, 8 Ekim: "Fikrine onay verdim"): batch'ler sentence.summaries_last ile [token'lar |
@@ -52,7 +58,7 @@ p(DIGER), tam CE, secici kaybi; cikis ve secici ileri ms (CUDA olaylari).
     python train.py --model transformer|model_z --lr LR --out <kosu> [--data <v2/simplestories_gpt2>]
                     [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
                     [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1]
-                    [--optimizer muon|normuon|adamw (varsayilan muon)] [--global_layers N (model_z; varsayilan 3)]
+                    [--optimizer normuon|muon|adamw (varsayilan normuon)] [--global_layers N (model_z; varsayilan 3)]
                     [--summaries_last 0|1 (model_z torbasiz; varsayilan 1)]
                     [--bag_k K [--bag_core 50] [--bag_weight 0.1] [--bag_full_frac 0.05]]
 """
@@ -84,7 +90,9 @@ BATCH_ROWS = D.BATCH_ROWS
 LOG_EVERY = 100             # adim; gunluk satiri = bir hiz penceresi
 MODEL_Z_GLOBAL_LAYERS = 3   # model_z varsayilani (kullanici, 8 Ekim; G3 + aralik maskesi + summaries_last + Muon)
 MODEL_Z_SUMMARIES_LAST = 1  # model_z torbasiz varsayilani (belge 66)
-INHERIT = dict(global_layers=0, summaries_last=0)   # --resume'da acik verilmezse kimlikten (alan yoksa bu deger)
+INHERIT = dict(global_layers=0, summaries_last=0, optimizer="adamw")   # --resume'da acik verilmezse kimlikten (alan
+DEFAULT_OPTIMIZER = "normuon"                       # yoksa bu deger); optimizer varsayilani (kullanici, 8 Ekim)
+FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
 COMPILE_MODE = "max-autotune-no-cudagraphs"   # bloklarin derleme modu (5w: torba K 1024 -2,9 ms/adim; kullanici, 7 Ekim)
 READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
 READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
@@ -221,6 +229,30 @@ def _build(args, dev):
             sys.exit("DUR: --z_bow_weight: glob olmayan blok yok")
         model.z_bow_norm = torch.nn.RMSNorm(args.d).to(dev)
     return model, mask_fn, layout
+
+
+def _fp8_missing(cuda):
+    """--fp8 kurulamiyorsa ileti (CUDA yok / torchao yok), yoksa None."""
+    if not cuda:
+        return "FP8 (torchao Float8Linear) CUDA ister"
+    try:
+        from torchao.float8 import Float8LinearConfig, convert_to_float8_training  # noqa: F401
+    except ImportError as e:
+        return "torchao.float8 yok (%s)" % e
+    return None
+
+
+def _fp8(model, recipe):
+    """MLP Linear'lari (FP8_MODULES) torchao Float8Linear'a, compile'dan ONCE; state_dict adlari ve parametre sekilleri ayni
+    kalmali (checkpoint / agent.pt FP8 <-> bf16 birebir; Muon ayrimi ad desenine dayanir) -> denetlenir, degilse DUR."""
+    from torchao.float8 import Float8LinearConfig, convert_to_float8_training
+    before = {k: tuple(v.shape) for k, v in model.state_dict().items()}
+    convert_to_float8_training(model, config=Float8LinearConfig.from_recipe_name(recipe),
+                               module_filter_fn=lambda m, fqn: fqn.split(".")[-1] in FP8_MODULES)
+    after = {k: tuple(v.shape) for k, v in model.state_dict().items()}
+    if before != after:
+        sys.exit("DUR: --fp8: state_dict adlari / sekilleri degisti (%s)" % sorted(set(before) ^ set(after))[:5])
+    return sum(type(m).__name__ == "Float8Linear" for m in model.modules())
 
 
 def _muon_missing():
@@ -396,10 +428,10 @@ def _args(argv):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--resume", type=int, default=0)
-    ap.add_argument("--optimizer", default="muon", choices=("adamw", "muon", "normuon"),
-                    help="muon (varsayilan, 7 Ekim): bloklarin 2-B matrisleri Muon'a (match_rms_adamw, ayni --lr), geri "
-                         "kalan AdamW'ye; normuon: Muon + noron basina normalizasyon (recipe.NorMuon, li2025_normuon, "
-                         "kullanici 8 Ekim); adamw: tek AdamW")
+    ap.add_argument("--optimizer", default=None, choices=("adamw", "muon", "normuon"),
+                    help="normuon (varsayilan, 8 Ekim): Muon + noron basina normalizasyon (recipe.NorMuon, li2025_normuon); "
+                         "muon: bloklarin 2-B matrisleri Muon'a (match_rms_adamw, ayni --lr), geri kalan AdamW'ye; adamw: "
+                         "tek AdamW; --resume'da verilmezse kosunun kimliginden")
     ap.add_argument("--global_layers", type=int, default=None,
                     help="model_z: son N blok tam causal, gercek konumla (belge 40 s6.2 Deney G); varsayilan model_z'de "
                          "3 (8 Ekim), transformer'da 0; 0: G'siz Model Z; --resume'da verilmezse kosunun kimliginden")
@@ -418,6 +450,9 @@ def _args(argv):
                          "varsayilan model_z torbasiz 1, aksi 0; --resume'da verilmezse kosunun kimliginden")
     ap.add_argument("--z_bow_weight", type=float, default=0.0,
                     help="model_z: Z_k'dan sonraki cumlenin token torbasi ek kaybi agirligi (0: kapali; kullanici, 8 Ekim)")
+    ap.add_argument("--fp8", default="none", choices=("none", "tensorwise", "rowwise"),
+                    help="MLP (gate_up, down) torchao Float8Linear tarifi; none: bf16 (kimlige girmez, --resume'da "
+                         "degistirilebilir; kullanici, 8 Ekim)")
     ap.add_argument("--stop_step", type=int, default=None,
                     help="takvim (WSD, epok plani) degismeden adim N'de dur: checkpoint.pt (surdurulebilir) + agent.pt + "
                          "results.json (finished False, stopped_at N); son sinav ve okuma yok (kullanici, 8 Ekim)")
@@ -425,6 +460,8 @@ def _args(argv):
                     help="en cok bu kadar duvar saati kaybi (sinav dahil); surdurmede degistirilebilir")
     args = ap.parse_args(argv)
     args.defaulted = [k for k in INHERIT if getattr(args, k) is None and not (k == "global_layers" and args.layer_plan)]
+    if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
+        args.optimizer = DEFAULT_OPTIMIZER
     if args.global_layers is None:                                       # 8 Ekim: G3 varsayilan
         args.global_layers = MODEL_Z_GLOBAL_LAYERS if args.model == "model_z" else 0
     if args.summaries_last is None:
@@ -458,6 +495,8 @@ def main(argv=None):
         sys.exit("DUR: --optimizer %s: %s" % (args.optimizer, _muon_missing()))
     dev = torch.device(args.device)
     cuda = dev.type == "cuda"
+    if args.fp8 != "none" and _fp8_missing(cuda):                        # bf16'ya sessizce dusulmez
+        sys.exit("DUR: --fp8 %s: %s" % (args.fp8, _fp8_missing(cuda)))
     if cuda:                                                             # GPU kapisi (kural 5)
         assert torch.cuda.is_available(), "GPU YOK"
         for k in ("cache_size_limit", "recompile_limit"):                # beklenen giris ~4-6 (egitim / sinav x tam /
@@ -505,6 +544,7 @@ def main(argv=None):
         mask_fn = model._masks(True)
     if args.bag_k:
         model.bag.fill(core, counts)
+    n_fp8 = _fp8(model, args.fp8) if args.fp8 != "none" else 0          # compile ve optimizer'dan once
     if cuda:
         for block in model.blocks:
             block.compile(dynamic=False, mode=COMPILE_MODE)
@@ -616,6 +656,8 @@ def main(argv=None):
     end = total if args.stop_step is None else args.stop_step         # --stop_step: takvim total'den, dongu end'e
     if not start < end <= total:
         sys.exit("DUR: --stop_step %s: adim %d < N <= %d olmali" % (args.stop_step, start, total))
+    history.setdefault("segments", []).append(dict(start=start, fp8=args.fp8, fp8_linears=n_fp8))   # kimlik disi kip
+    log("fp8 %s (%d Linear)" % (args.fp8, n_fp8))
     sw, win = R.SpeedWindow(), None
     first_window, epoch_from, epoch_t0, saved_at = True, start, time.time(), time.time()
     ckpt_seconds = 60 * args.checkpoint_minutes                      # kimlige girmez (kullanici: buyuk kosuda 30 dk)
@@ -703,7 +745,8 @@ def main(argv=None):
     if end < total:                                                     # --stop_step: sinav ve okuma yok
         results = dict(config, run=os.path.basename(os.path.normpath(args.out)), finished=False, stopped_at=end,
                        readings_skipped="stop_step", exam=history["exams"][-1] if history["exams"] else None,
-                       exams=history["exams"], epochs=history["epochs"], generation=None, log=history["log"])
+                       exams=history["exams"], epochs=history["epochs"], generation=None, log=history["log"],
+                       segments=history["segments"])
         torch.save(dict(state=model.state_dict(), identity=ident, args=vars(args)), os.path.join(args.out, "agent.pt"))
         json.dump(results, open(res_path, "w"), indent=1)
         log("DURDU: --stop_step %d / %d (checkpoint.pt surdurulebilir, agent.pt, results.json; sinav ve okuma yok)" % (
@@ -716,6 +759,7 @@ def main(argv=None):
     med = lambda key: float(np.median([w[key] for w in speed])) if speed else None  # noqa: E731
     results = dict(config, run=os.path.basename(os.path.normpath(args.out)), finished=True, exam=history["exams"][-1],
                    exams=history["exams"], epochs=history["epochs"], generation=None, log=history["log"],
+                   segments=history["segments"],
                    speed=dict(windows=len(speed), tokens_per_sec_median=med("tokens_per_sec"),
                               ms_per_step_median=med("ms_per_step"), note="pencere ortancasi; ilk pencere (derleme) haric"))
     torch.save(dict(state=model.state_dict(), identity=ident, args=vars(args)), os.path.join(args.out, "agent.pt"))

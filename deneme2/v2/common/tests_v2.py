@@ -917,7 +917,7 @@ def t_train():
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=3, max_tokens=4)
     base = ["--data", data, "--stream", root, "--device", "cpu", "--d", "16", "--layers", "1", "--heads", "2",
             "--lr", "1e-2", "--checkpoint_minutes", "0", "--optimizer", "adamw"]   # 0: her gunluk sinirinda kayit;
-    # AdamW sabit (varsayilan muon, 7 Ekim); Muon testleri acikca muon, varsayilan testleri _unpin(base)
+    # AdamW sabit (varsayilan normuon, 8 Ekim); Muon testleri acikca muon, varsayilan testleri _unpin(base)
     out = lambda name: os.path.join(TMP, "runs", name)  # noqa: E731
     state = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
     same = lambda a, b: all(torch.equal(a[k], b[k]) for k in a) and a.keys() == b.keys()  # noqa: E731
@@ -1262,7 +1262,8 @@ def _train_muon(base, root, data, out, state, same, exits, TR):
             msg2 = _exit_msg(TR.main, _unpin(base) + ["--model", "transformer", "--out", out("nomuon_default")])
         finally:
             torch.optim.Muon = real
-        check("train: torch.optim.Muon yoksa --optimizer muon ve varsayilan (muon) veri yuklenmeden DURUR (AdamW'ye dusmez)",
+        check("train: torch.optim.Muon yoksa --optimizer muon ve varsayilan (normuon) veri yuklenmeden DURUR (AdamW'ye "
+              "dusmez)",
               msg is not None and "Muon" in msg and not os.path.exists(out("nomuon")) and msg2 is not None and "Muon" in msg2
               and not os.path.exists(out("nomuon_default")), str(msg))
     except Exception:  # noqa: BLE001
@@ -1333,24 +1334,31 @@ def _train_global(base, root, data, out, exits, TR):
                                             out("g_default")])
             idt = r_def["identity"]
             OLD = _unpin(base) + ["--model", "model_z", "--layers", "2", "--epochs", "2"]    # eski kosu: G1, sirasiz
-            TR.main(OLD + ["--global_layers", "1", "--summaries_last", "0", "--stop_step", "4", "--out", out("old_run")])
+            TR.main(OLD + ["--global_layers", "1", "--summaries_last", "0", "--optimizer", "muon", "--stop_step", "4",
+                           "--out", out("old_run")])
             ck = os.path.join(out("old_run"), "checkpoint.pt")
             pack = torch.load(ck, weights_only=False)
             del pack["args"]["summaries_last"]                                # alanindan onceki kosu
             torch.save(pack, ck)
-            r_old = TR.main(OLD + ["--out", out("old_run"), "--resume", "1"])
-            r_ref = TR.main(OLD + ["--global_layers", "1", "--summaries_last", "0", "--out", out("old_ref")])
+            r_old = TR.main(OLD + ["--out", out("old_run"), "--resume", "1"])   # optimizer de kimlikten (muon)
+            r_ref = TR.main(OLD + ["--global_layers", "1", "--summaries_last", "0", "--optimizer", "muon", "--out",
+                                   out("old_ref")])
+            fp8_cpu = _exit_msg(TR.main, OLD + ["--global_layers", "1", "--fp8", "tensorwise", "--out", out("fp8_cpu")])
             stop_bag = _exit_msg(TR.main, OLD + ["--summaries_last", "1", "--bag_k", "64", "--out", out("sl_bag")])
         finally:
             TR.MODEL_Z_GLOBAL_LAYERS, TR.MODEL_Z_SUMMARIES_LAST = pinned
         sw = lambda n_: torch.load(os.path.join(out(n_), "agent.pt"), weights_only=False)["state"]  # noqa: E731
         check("train: varsayilanlar (8 Ekim): model_z G3 + summaries_last 1, transformer 0 / 0, torbada summaries_last 0 "
-              "(acik 1 DURUR), plan G'yi plandan; optimizer muon; varsayilan kosu (G3, sirasiz degil) egitir, sinav ve "
-              "okuma uretir; eski kimlikli kosu (G1, summaries_last alani yok) bayraksiz --resume ile ayni ayarla surer = "
-              "kesintisiz (bit)",
-              dflt == {"model_z": (3, 1, "muon"), "transformer": (0, 0, "muon"), "model_z acik 0": (0, 0, "muon"),
-                       "model_z torba": (3, 0, "muon"), "model_z adamw": (3, 1, "adamw"), "model_z plan": (2, 1, "muon")}
-              and (idt["global_layers"], idt["summaries_last"], idt["optimizer"]) == (3, 1, "muon")
+              "(acik 1 DURUR), plan G'yi plandan; optimizer normuon (8 Ekim); varsayilan kosu egitir, sinav ve okuma "
+              "uretir, segments'ta fp8 none; eski kimlikli kosu (G1, muon, summaries_last alani yok) bayraksiz --resume "
+              "ile ayni ayarla surer = kesintisiz (bit); CPU'da --fp8 DURUR",
+              dflt == {"model_z": (3, 1, "normuon"), "transformer": (0, 0, "normuon"),
+                       "model_z acik 0": (0, 0, "normuon"), "model_z torba": (3, 0, "normuon"),
+                       "model_z adamw": (3, 1, "adamw"), "model_z plan": (2, 1, "normuon")}
+              and (idt["global_layers"], idt["summaries_last"], idt["optimizer"]) == (3, 1, "normuon")
+              and r_def["segments"] == [dict(start=0, fp8="none", fp8_linears=0)]
+              and r_old["identity"]["optimizer"] == "muon" and len(r_old["segments"]) == 2
+              and fp8_cpu is not None and "CUDA" in fp8_cpu
               and np.isfinite(r_def["exam"]["loss"]) and r_def["generation"]
               and os.path.exists(os.path.join(out("g_default"), "samples.txt"))
               and (r_old["identity"]["global_layers"], r_old["identity"]["summaries_last"]) == (1, 0) and r_old["finished"]
@@ -1546,7 +1554,7 @@ def _train_equiv(base, root, data, prompts, out, state, same, TR):
         for name, extra in (("model_z", ["--model", "model_z", "--layers", "2"]),
                             ("model_z_g0", ["--model", "model_z", "--layers", "2", "--global_layers", "0"]),
                             ("transformer", ["--model", "transformer"])):
-            argv = _unpin(base) + extra + ["--epochs", "2"]
+            argv = _unpin(base) + extra + ["--epochs", "2", "--optimizer", "muon"]   # etiketin varsayilani muon
             old, new = out("equiv_old_" + name), out("equiv_new_" + name)
             p = subprocess.run([sys.executable, runner, os.path.join(tmp, "deneme2", "v2"), json.dumps(argv + [
                 "--out", old]), prompts], capture_output=True, text=True)
@@ -1753,7 +1761,7 @@ def t_fineweb():
         TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS = 4, 1, dict(max_sentences=3, max_tokens=4)
         TR.MODEL_Z_GLOBAL_LAYERS, TR.MODEL_Z_SUMMARIES_LAST = 1, 0          # testler eski varsayilanla (8 Ekim)
         base = ["--data", out, "--stream", out, "--device", "cpu", "--d", "16", "--layers", "2", "--heads", "2", "--lr",
-                "1e-2", "--checkpoint_minutes", "0"]
+                "1e-2", "--checkpoint_minutes", "0", "--optimizer", "muon"]          # 8 Ekim varsayilani normuon'dan once
         run = os.path.join(TMP, "fw_runs", "mzg")
         a = TR.main(base + ["--model", "model_z", "--epochs", "2", "--out", run])
         L = [w["loss"] for w in a["log"]]
@@ -1878,7 +1886,29 @@ def _d768():
           nz == nt and 105e6 < nz < 112e6, "%.1fM" % (nz / 1e6))
 
 
-TESTS = dict(data=t_data, pack=t_pack, recipe=t_recipe, metrics=t_metrics, integration=t_integration,
+def t_fp8():
+    """--fp8 (8 Ekim): torchao varsa MLP Float8Linear donusumu state_dict adlarini / sekillerini ve Muon ayrimini
+    degistirmez (CUDA yoksa yalniz bu); torchao yoksa ATLANDI."""
+    import train as TR
+    try:
+        import torchao.float8  # noqa: F401
+    except ImportError:
+        print("ATLANDI fp8: torchao yok (GPU sinamasi ana oturumda)", flush=True)
+        return
+    import argparse
+    for model in ("model_z", "transformer"):
+        args = argparse.Namespace(model=model, d=64, layers=2, heads=2, seed=0, global_layers=1 if model == "model_z" else 0,
+                                  layer_plan=None, bag_k=0, z_bow_weight=0.0)
+        m = TR._build(args, torch.device("cpu"))[0]
+        names = [n for n, _ in __import__("recipe").muon_params(m)]
+        sd = {k: v.clone() for k, v in m.state_dict().items()}
+        n = TR._fp8(m, "tensorwise")
+        m.load_state_dict(sd)
+        check("fp8 %s: %d Linear donustu, state_dict adlari / sekilleri ayni, bf16 state_dict yuklenir, Muon ayrimi ayni"
+              % (model, n), n == 2 * 2 and [n_ for n_, _ in __import__("recipe").muon_params(m)] == names)
+
+
+TESTS = dict(fp8=t_fp8, data=t_data, pack=t_pack, recipe=t_recipe, metrics=t_metrics, integration=t_integration,
              train=t_train, drive=t_drive, tokens=t_tokens, fineweb=t_fineweb)
 
 if __name__ == "__main__":
