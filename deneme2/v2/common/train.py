@@ -29,7 +29,9 @@ satir; dolgu satirlari sifir, egitim kaybinda dolgu sutunu -inf, cikis VOCAB'a k
 vocab_rows; alani olmayan eski kosu VOCAB (50.258) ile yuklenir ve surer.
 --ngram_embed N (deneme; kullanici, 8 Ekim: "isimler ok, başlat"; belge 88b, 90b): Model Z bigram embedding tablosu N satir
 (0 kapali, varsayilan; deneme 251520 = 5 x 50.304), sentence.bigram_ids; tablo AdamW wd 0, lr x recipe.NGRAM_LR_MULT.
-Kimlikte; transformer ile DUR.
+Kimlikte; transformer ile DUR.  Hiz secenekleri (belge 90b ek; deneme): --ngram_layers K yalniz ilk K blok girdisine
+(0 hepsi), --ngram_sparse 1 tabloyu yalniz okunan satirlarla gunceller (recipe.NgramRowAdam: beta1 0 Adam, yogun
+AdamW(0, beta2) ile ayni matematik).
 --glob_kv_heads N|auto (kullanici, 8 Ekim: "bu duurmda GOA yı da sıraya koy o zaman bakalım"; uretim hizi): GQA, k / v
 N head yalniz tam causal katmanlarda (Model Z glob; transformer'da her katman, kiyas icin); yerel katmanlar tam head
 (Z K/V kanali daralmaz).  Varsayilan auto (kullanici, 8 Ekim: "GQA'yı varsayılan yap, ona karar verdik son koşuda bu
@@ -108,7 +110,7 @@ READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_ge
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
-            "ngram_embed")
+            "ngram_embed", "ngram_layers", "ngram_sparse")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -239,7 +241,9 @@ def _build(args, dev):
                                     glob_kv_heads=getattr(args, "glob_kv_heads", 0) or None,
                                     carry_group=int(getattr(args, "carry_group", 0) or 0) if getattr(args, "carry_summaries", 0)
                                     else 0, vocab_rows=getattr(args, "vocab_rows", D.VOCAB),
-                                    ngram_rows=getattr(args, "ngram_embed", 0) or 0)
+                                    ngram_rows=getattr(args, "ngram_embed", 0) or 0,
+                                    ngram_layers=getattr(args, "ngram_layers", 0) or 0,
+                                    ngram_sparse=bool(getattr(args, "ngram_sparse", 0)))
         model, mask_fn, layout = model.to(dev), model.mask_fn, "model_z"
     return model, mask_fn, layout
 
@@ -289,6 +293,8 @@ def _optimizer(model, kind, lr, cuda):
                               lr=lr, betas=BETAS, **fused)                   # muon: transformer'da decay grubu bos
     cls = R.NorMuon if kind == "normuon" else R.BatchedMuon
     opt = R.MuonAdamW(cls(muon, lr=lr, weight_decay=WEIGHT_DECAY, **MUON), adamw) if muon else adamw
+    if getattr(model, "ngram_sparse", False) and model.ngram is not None:   # tablo seyrek satir Adam'da
+        opt = R.NgramRowAdam(opt, model, lr, BETAS[1])
     names = {id(p): n for n, p in model.named_parameters()}
 
     def summary(params):
@@ -331,7 +337,8 @@ def _step(model, batch, mask_fn, opt, cuda, timer=None, cont=None):
             timer[1].record()
     opt.zero_grad(set_to_none=True)
     loss.backward()
-    gn = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
+    seen = getattr(model, "ngram_seen", None)                          # seyrek bigram yapragi kirpmaya dahil
+    gn = torch.nn.utils.clip_grad_norm_(model.parameters() if seen is None else [*model.parameters(), seen[1]], CLIP)
     opt.step()
     return loss.detach(), gn.detach(), extra
 
@@ -519,6 +526,10 @@ def _args(argv):
                     help="model_z: parcalar arasi Z bellegi (belge 81b, 83; carry_group varsayilani 4); 0 kapali")
     ap.add_argument("--ngram_embed", type=int, default=0,
                     help="Model Z bigram embedding tablosu satir sayisi (0 kapali; deneme 251520; belge 88b)")
+    ap.add_argument("--ngram_layers", type=int, default=0,
+                    help="bigram yalniz ilk K blok girdisine (0: hepsi; deneme, belge 90b ek)")
+    ap.add_argument("--ngram_sparse", type=int, default=0,
+                    help="1: bigram tablosu yalniz okunan satirlarla guncellenir (beta1 0 seyrek Adam; deneme)")
     ap.add_argument("--carry_group", type=int, default=None,
                     help="carry plani: belgenin ardisik en cok G parcasi ayni batch'te (carry_summaries 0 ile: K kontrolu, "
                          "bellek yok); varsayilan carry_summaries ise 4, degilse 0")
@@ -581,6 +592,9 @@ def main(argv=None):
                                                                                  for k in args.defaulted}))
     ng_err = "--ngram_embed: yalniz model_z, satir >= 0" if args.ngram_embed < 0 or (
         args.ngram_embed and args.model != "model_z") else None
+    if (args.ngram_layers or args.ngram_sparse) and (not args.ngram_embed or not 0 <= args.ngram_layers <= args.layers
+                                                     or args.ngram_sparse not in (0, 1)):
+        ng_err = "--ngram_layers / --ngram_sparse: --ngram_embed ile, 0 <= K <= layers, sparse 0 / 1"
     for err in (_global_error(args), _carry_error(args), ng_err):        # veri yuklenmeden
         if err:
             sys.exit("DUR: " + err)
@@ -643,7 +657,8 @@ def main(argv=None):
                  train_stream_sha256=train.meta["stream_sha256"],
                  optimizer=args.optimizer, global_layers=args.global_layers,
                  summaries_last=args.summaries_last, glob_kv_heads=args.glob_kv_heads, carry_summaries=args.carry_summaries,
-                 carry_group=args.carry_group, vocab_rows=args.vocab_rows, ngram_embed=args.ngram_embed)
+                 carry_group=args.carry_group, vocab_rows=args.vocab_rows, ngram_embed=args.ngram_embed,
+                 ngram_layers=args.ngram_layers, ngram_sparse=args.ngram_sparse)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -662,7 +677,7 @@ def main(argv=None):
         del peek
         if _archived(was):                                                # eski / kaldirilan yol (belge 77)
             sys.exit("DUR: " + _archived(was))
-        was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "ngram_embed": 0,
+        was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0,
                **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])

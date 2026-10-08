@@ -1151,6 +1151,25 @@ def _train_ngram(base, data, out, TR):
               and tg[0]["lr"] == R.NGRAM_LR_MULT * base_lr[0] and stopped and all(torch.equal(sa[k], sb[k]) for k in sa)
               and [w["loss"] for w in r["log"]] == [w["loss"] for w in a["log"]] and m.ngram.num_embeddings == 64
               and all(b_ is not None and "ngram_embed" in b_ for b_ in bad), str(bad))
+        cmd2 = cmd + ["--ngram_layers", "1", "--ngram_sparse", "1"]                  # hiz secenekleri (belge 90b ek)
+        a2 = TR.main(cmd2 + ["--out", out("ngram_fast_A")])
+        stopped2, r2 = _cut_and_resume(TR, cmd2, out("ngram_fast_cut"))
+        s2a, s2b = st_(out("ngram_fast_A")), st_(out("ngram_fast_cut"))
+        ck2 = torch.load(os.path.join(out("ngram_fast_A"), "checkpoint.pt"), weights_only=False)["opt"]
+        m2 = GR.load_run(out("ngram_fast_A"), data, torch.device("cpu"))[0]
+        bad2 = [_exit_msg(TR.main, base + x + ["--out", out("ngram_fbad%d" % i)]) for i, x in enumerate((
+            ["--model", "model_z", "--ngram_layers", "1"], ["--model", "model_z", "--ngram_embed", "64", "--ngram_layers", "9"],
+            ["--model", "model_z", "--ngram_embed", "64", "--ngram_sparse", "2"]))]
+        check("train --ngram_layers 1 --ngram_sparse 1: kosar, kimlikte, lambda 1 tane, tablo egitilmis; optimizer durumu "
+              "seyrek (v, last, t); kesilip surdurulen = kesintisiz (bit); load_run kurar; --ngram_embed'siz / K > katman / "
+              "sparse 2 DURUR",
+              a2["finished"] and (a2["identity"]["ngram_layers"], a2["identity"]["ngram_sparse"]) == (1, 1)
+              and tuple(s2a["ngram_lambdas"].shape) == (1,) and bool(s2a["ngram.weight"].any())
+              and set(ck2["ngram"]) == {"v", "last", "t", "lr"} and ck2["ngram"]["t"] == len(a2["log"])
+              and stopped2 and all(torch.equal(s2a[k], s2b[k]) for k in s2a)
+              and [w["loss"] for w in r2["log"]] == [w["loss"] for w in a2["log"]]
+              and m2.ngram_layers == 1 and m2.ngram_sparse and all(b_ is not None and "ngram" in b_ for b_ in bad2),
+              str(bad2))
     except Exception:  # noqa: BLE001
         check("train --ngram_embed", False, traceback.format_exc(limit=3))
 

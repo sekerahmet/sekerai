@@ -28,7 +28,9 @@ cikis (_logits) VOCAB'a kesilir: dolgu token'i hedef olmaz, uretilmez.
 Bigram embedding (deneme, --ngram_embed N; belge 88b, 90b; modded-nanogpt kayit #1 bicimi): N satirlik ayri tablo (sifir
 baslangic), (onceki, simdiki) token hash'i; her blok girdisine katman basina lambda (0,1) ile eklenir.  Onceki token yalniz
 ayni (doc, sent) cumlesinin TOKEN'i ise, degilse END nobetcisi (cumle siniri asilmaz; iki duzende ayni); Z / BOS / dolgu
-satirlarina 0.  Uretimde SummaryCache prev, StaticCache prev tamponu.
+satirlarina 0.  Uretimde SummaryCache prev, StaticCache prev tamponu.  Hiz (belge 90b ek): ngram_layers K yalniz ilk K
+blok girdisine ekler (0: hepsi); ngram_sparse egitimde tabloyu yalniz okunan satirlarla (ngram_seen) gunceller
+(recipe.NgramRowAdam).
 """
 import dataclasses
 import functools
@@ -270,13 +272,15 @@ class Block(torch.nn.Module):
 
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
-                 ngram_rows=0):
+                 ngram_rows=0, ngram_layers=0, ngram_sparse=False):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
         dolunca glob onbelleginde yalniz Z'ler kalir, G parcada sifirlanir.  vocab_rows: E satir sayisi (>= VOCAB; dolgu
         satirlari sifir, ilk agirlik VOCAB'li modelle ayni).  ngram_rows: bigram tablosu satiri (0 kapali; tablo ve lambda
-        ilk agirliklardan SONRA, RNG cekmeden: diger agirliklar kapali modelle ayni)."""
+        ilk agirliklardan SONRA, RNG cekmeden: diger agirliklar kapali modelle ayni).  ngram_layers K: yalniz ilk K blok
+        (0: hepsi; lambda K tane).  ngram_sparse: egitimde (gradyan acikken) okunan satirlar ayri yaprak (ngram_seen), tablo
+        gradyani yogun olusmaz."""
         super().__init__()
         self.carry_group, self.row_len = int(carry_group), ROW_LEN
         self.global_layers = int(global_layers)
@@ -298,14 +302,22 @@ class SentenceTransformer(torch.nn.Module):
                     (p[:VOCAB] if name == "E.weight" else p).normal_(0.0, std)   # dolgu satiri rastgele sayi cekmez
         with torch.no_grad():
             self.E.weight[VOCAB:].zero_()
-        self.ngram = None
+        self.ngram, self.ngram_seen = None, None
+        self.ngram_layers, self.ngram_sparse = int(ngram_layers) or layers, bool(ngram_sparse)
         if ngram_rows:                                                  # sifir tablo, lambda 0,1 (kayit #1)
             self.ngram = torch.nn.Embedding(int(ngram_rows), d, _weight=torch.zeros(int(ngram_rows), d))
-            self.ngram_lambdas = torch.nn.Parameter(torch.full((layers,), 0.1))
+            self.ngram_lambdas = torch.nn.Parameter(torch.full((self.ngram_layers,), 0.1))
 
     def _ngram(self, tokens, prev, is_token):
-        """Bigram vektoru (..., d): tablo[bigram_ids(tokens, prev)], yalniz is_token konumlarinda (Z / BOS / dolgu 0)."""
-        g = self.ngram(bigram_ids(tokens, prev, self.ngram.num_embeddings))
+        """Bigram vektoru (..., d): tablo[bigram_ids(tokens, prev)], yalniz is_token konumlarinda (Z / BOS / dolgu 0).
+        ngram_sparse ve gradyan aciksa okunan satirlar tek yaprak (ngram_seen = (satirlar, yaprak); NgramRowAdam okur)."""
+        ids = bigram_ids(tokens, prev, self.ngram.num_embeddings)
+        if self.ngram_sparse and torch.is_grad_enabled() and self.ngram.weight.requires_grad:
+            uniq, inv = torch.unique(ids, return_inverse=True)
+            self.ngram_seen = (uniq, self.ngram.weight.detach()[uniq].requires_grad_())
+            g = self.ngram_seen[1][inv]
+        else:
+            g = self.ngram(ids)
         return g * is_token[..., None].to(g.dtype)
 
     def max_positions(self):
@@ -330,7 +342,8 @@ class SentenceTransformer(torch.nn.Module):
         x = self.E(torch.where(batch.kind == ZTOK, torch.full_like(batch.tokens, END_ID), batch.tokens))
         g = None if self.ngram is None else self._ngram(
             batch.tokens, bigram_prev(batch.tokens, batch.kind, batch.doc, batch.sent), batch.kind == TOKEN)
-        add = (lambda x_, l: x_) if g is None else (lambda x_, l: x_ + self.ngram_lambdas[l] * g)  # noqa: E731
+        add = (lambda x_, l: x_) if g is None else (  # noqa: E731
+            lambda x_, l: x_ + self.ngram_lambdas[l] * g if l < self.ngram_layers else x_)
         mem = getattr(batch, "mem_rows", None) is not None              # carry bellegi (belge 83)
         if mem and attn is None:
             import recipe as R
@@ -534,7 +547,7 @@ class SummaryCache:
         p = torch.tensor([[pos]], device=self.dev)
         self.gkind.append(ZTOK if summary and read_sentence else BOS if summary else TOKEN)
         for l, block in enumerate(self.m.blocks):
-            if g is not None:
+            if g is not None and l < self.m.ngram_layers:
                 x = x + self.m.ngram_lambdas[l] * g
             if self.glob[l]:
                 q, k, v = block._qkv(x, torch.tensor([[self.t]], device=self.dev))
@@ -582,7 +595,7 @@ class SummaryCache:
         x, lpos, real = self.m.E(t(tok)), t(pos), torch.arange(T, device=self.dev)[None]
         gr = None if self.m.ngram is None else self.m._ngram(t(tok), bigram_prev(t(tok), kind, doc, sent), kind == TOKEN)
         for l, block in enumerate(self.m.blocks):
-            if gr is not None:
+            if gr is not None and l < self.m.ngram_layers:
                 x = x + self.m.ngram_lambdas[l] * gr
             g = self.glob[l]
             q, k, v = block._qkv(x, real if g else lpos)
@@ -681,7 +694,7 @@ def _static_step(m, glob, f32, smax, w, z, live, sum_len, sen_len, tt, prev, K, 
     ar = torch.arange(len(w), device=w.device)
     loc = None
     for l, block in enumerate(m.blocks):
-        if gr is not None:
+        if gr is not None and l < m.ngram_layers:
             x = x + m.ngram_lambdas[l] * gr
         g = glob[l]
         j = torch.arange(K[l].shape[2], device=w.device)[None]

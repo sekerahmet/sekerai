@@ -2,7 +2,7 @@
 (z, z_flat, direct, generate_longest, formullu onbellek) kaldirildi (belge 44); eski hali git etiketi
 v2-before-formula-cleanup-20261007.
 
-    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,mask,summaries_last,gqa,carry,vocab,limit,flex_ranges,ngram]
+    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,mask,summaries_last,gqa,carry,vocab,limit,flex_ranges,ngram,ngram_fast]
 """
 import os
 import sys
@@ -1143,8 +1143,107 @@ def t_ngram():
               [k for k, v in out.items() if not v] or "hepsi", dmax))
 
 
+def t_ngram_fast():
+    """Bigram hiz secenekleri (belge 90b ek): (a) ngram_layers 1 = butun katmanli modelde lambda[1:] = 0 (hidden bit);
+    uretim (SummaryCache, StaticCache) = tam ileri (K 1); (b) ngram_sparse: hidden bit ayni, yaprak gradyani = yogun tablo
+    gradyaninin okunan satirlari (<= 1e-6), yogun gradyan baska satirda 0; (c) NgramRowAdam 6 adim, satirlarin bir kismi
+    bazi adimlarda okunmadan = torch AdamW(betas (0, b2), wd 0) yogun tablo (goreli <= 1e-5), okunmayan satir hic
+    oynamaz; state_dict ile yarida birakip surdurmek = kesintisiz (bit)."""
+    import recipe as R
+    import sentence as S
+    rng = np.random.default_rng(7)
+    rs = lambda n: [[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 7))] for _ in range(n)]  # noqa: E731
+    stories = [rs(4), rs(3), rs(5)]
+    batch = real_batch([[0, 1], [2]], 64, stories)
+    out = {}
+
+    def make(**kw):
+        torch.manual_seed(0)
+        m = SentenceTransformer(32, 3, 2, global_layers=1, ngram_rows=97, **kw).eval()
+        with torch.no_grad():
+            m.ngram.weight.normal_(0, 0.5, generator=torch.Generator().manual_seed(1))
+        return m
+    full, k1 = make(), make(ngram_layers=1)
+    with torch.no_grad():
+        full.ngram_lambdas.copy_(torch.tensor([0.3, 0.0, 0.0]))
+        k1.ngram_lambdas.copy_(torch.tensor([0.3]))
+        out["layers"] = torch.equal(full._batch_hidden(batch), k1._batch_hidden(batch)) and k1.ngram_lambdas.shape == (1,)
+        sents = stories[1] + stories[0][:2]
+        one = real_batch([[0]], 64, [sents])
+        hf = k1._logits(k1._batch_hidden(one))[0][one.kind[0] != PAD]
+        c, sc = SummaryCache(k1), S.StaticCache(k1, 64, 8, 16)
+        steps, la = [c.logits], sc.prefill([])
+        dg = float((la - c.logits).abs().max())
+        for x in sents:
+            for t_ in x:
+                steps.append(c.append_token(t_))
+                dg = max(dg, float((sc.append_token(t_) - steps[-1]).abs().max()))
+            steps.append(c.close_sentence())
+            dg = max(dg, float((sc.close_sentence() - steps[-1]).abs().max()))
+        dg = max(dg, float((torch.stack(steps) - hf).abs().max()))
+    out["gen"] = dg < 1e-5
+    dense, sparse = make(), make(ngram_sparse=True)
+    dense.train()
+    sparse.train()
+    ld = dense.loss_per_target(batch)[0].mean()
+    ls = sparse.loss_per_target(batch)[0].mean()
+    ld.backward()
+    ls.backward()
+    uniq, leaf = sparse.ngram_seen
+    gd = dense.ngram.weight.grad
+    rest = torch.ones(97, dtype=torch.bool)
+    rest[uniq] = False
+    out["sparse"] = torch.equal(ld, ls) and float((leaf.grad - gd[uniq]).abs().max()) <= 1e-6 \
+        and not gd[rest].any() and sparse.ngram.weight.grad is None
+    w0 = torch.randn(97, 8, generator=torch.Generator().manual_seed(3))
+    ref = torch.nn.Parameter(w0.clone())
+    adam = torch.optim.AdamW([ref], lr=1e-2, betas=(0.0, 0.95), weight_decay=0.0, eps=1e-8)
+    holder = SimpleNamespace(ngram=SimpleNamespace(weight=torch.nn.Parameter(w0.clone())), ngram_seen=None)
+    base = SimpleNamespace(step=lambda: None, zero_grad=lambda s=True: None, param_groups=[], state_dict=lambda: {},
+                           load_state_dict=lambda s: None)
+    row = R.NgramRowAdam(base, holder, 1e-2, 0.95)
+    gen = torch.Generator().manual_seed(4)
+    never = torch.arange(90, 97)                                             # hic okunmayan satirlar
+    saved = None
+    for step in range(6):
+        ids = torch.randint(0, 90, (40,), generator=gen) if step != 3 else torch.randint(0, 10, (40,), generator=gen)
+        gr = torch.randn(40, 8, generator=gen)
+        dg_ = torch.zeros(97, 8).index_add_(0, ids, gr)
+        ref.grad = dg_
+        adam.step()
+        u, inv = torch.unique(ids, return_inverse=True)
+        lf = holder.ngram.weight.detach()[u].requires_grad_()
+        lf.grad = torch.zeros(len(u), 8).index_add_(0, inv, gr)
+        holder.ngram_seen = (u, lf)
+        row.step()
+        if step == 2:
+            saved = (holder.ngram.weight.detach().clone(), {k: (v.clone() if torch.is_tensor(v) else v)
+                                                            for k, v in row.state_dict()["ngram"].items()})
+    rel = float(((holder.ngram.weight - ref).abs() / ref.abs().clamp_min(1e-3)).max())
+    out["adam"] = rel <= 1e-5 and torch.equal(holder.ngram.weight[never], w0[never])
+    holder2 = SimpleNamespace(ngram=SimpleNamespace(weight=torch.nn.Parameter(saved[0])), ngram_seen=None)
+    row2 = R.NgramRowAdam(base, holder2, 1e-2, 0.95)
+    row2.load_state_dict(dict(base={}, ngram=saved[1]))
+    gen = torch.Generator().manual_seed(4)
+    for step in range(6):
+        ids = torch.randint(0, 90, (40,), generator=gen) if step != 3 else torch.randint(0, 10, (40,), generator=gen)
+        gr = torch.randn(40, 8, generator=gen)
+        if step < 3:
+            continue
+        u, inv = torch.unique(ids, return_inverse=True)
+        lf = holder2.ngram.weight.detach()[u].requires_grad_()
+        lf.grad = torch.zeros(len(u), 8).index_add_(0, inv, gr)
+        holder2.ngram_seen = (u, lf)
+        row2.step()
+    out["resume"] = torch.equal(holder2.ngram.weight, holder.ngram.weight)
+    check("ngram hiz secenekleri: ngram_layers 1 = lambda[1:] 0 (hidden bit), uretim (SummaryCache / StaticCache) = tam "
+          "ileri; ngram_sparse ileri bit, yaprak gradyani = yogun gradyanin okunan satirlari, yogun tablo gradyani olusmaz; "
+          "NgramRowAdam = AdamW(0, 0,95) yogun (goreli %.1e), okunmayan satir oynamaz; state_dict ile surdurme bit" % rel,
+          all(out.values()), "%s, uretim farki %.1e" % ([k for k, v in out.items() if not v] or "hepsi", dg))
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
-             equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab, limit=t_limit, flex_ranges=t_flex_ranges, ngram=t_ngram)
+             equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab, limit=t_limit, flex_ranges=t_flex_ranges, ngram=t_ngram, ngram_fast=t_ngram_fast)
 
 if __name__ == "__main__":
     if SIDE is not None:

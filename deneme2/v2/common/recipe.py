@@ -110,11 +110,13 @@ def wsd_lr(step, total, peak, warmup=0.01, decay=0.2):
 def param_groups(model, weight_decay=0.1, skip=()):
     """-> AdamW gruplari: 2-B agirliklar (embedding haric) decay'li; embedding, norm, bias ve 1-B decay'siz.  skip:
     baska optimizer'in parametreleri (Muon).  Bigram tablosu (model.ngram) ayri grup: wd 0, lr_mult NGRAM_LR_MULT
-    (egitim dongusu lr x lr_mult yazar)."""
+    (egitim dongusu lr x lr_mult yazar); model.ngram_sparse ise tablo hic yok (NgramRowAdam'da)."""
     emb = {id(m.weight) for m in model.modules() if isinstance(m, torch.nn.Embedding)}
     ng = getattr(model, "ngram", None)
     ng = {id(ng.weight)} if ng is not None else set()
     decay, no_decay, table, seen = [], [], [], {id(p) for p in skip}
+    if getattr(model, "ngram_sparse", False):
+        seen |= ng
     for p in model.parameters():
         if id(p) in seen or not p.requires_grad:
             continue
@@ -122,6 +124,53 @@ def param_groups(model, weight_decay=0.1, skip=()):
         (table if id(p) in ng else decay if p.dim() >= 2 and id(p) not in emb else no_decay).append(p)
     groups = [dict(params=decay, weight_decay=weight_decay), dict(params=no_decay, weight_decay=0.0)]
     return groups + ([dict(params=table, weight_decay=0.0, lr_mult=NGRAM_LR_MULT)] if table else [])
+
+
+class NgramRowAdam:
+    """Bigram tablosunun seyrek satir Adam'i (--ngram_sparse 1; belge 90b ek): beta1 0, wd 0, eleman basina v.  Adimda yalniz
+    model.ngram_seen satirlari (o adimda okunanlar; yaprak gradyani kirpmaya dahil) guncellenir; dokunulmayan satirin
+    v'sindeki beta2 sonumu dokunuldugu adimda beta2^aralik ile topluca uygulanir.  Dokunulmayan satir AdamW(beta1 0)'da da
+    hareket etmez -> yogun AdamW(betas (0, beta2), wd 0) ile ayni matematik (fp sirasi haric).  Ana optimizer'i sarar:
+    param_groups (tablo grubu lr_mult'lu) / step / zero_grad / state_dict ikisini birden."""
+
+    def __init__(self, base, model, lr, beta2, eps=1e-8):
+        self.base, self.m = base, model
+        w = model.ngram.weight
+        self.group = dict(params=[w], lr=lr, lr_mult=NGRAM_LR_MULT, beta2=beta2, eps=eps, weight_decay=0.0)
+        self.v = torch.zeros_like(w)
+        self.last = torch.zeros(w.shape[0], dtype=torch.long, device=w.device)
+        self.t = 0
+
+    @property
+    def param_groups(self):
+        return self.base.param_groups + [self.group]
+
+    def zero_grad(self, set_to_none=True):
+        self.base.zero_grad(set_to_none)
+
+    @torch.no_grad()
+    def step(self):
+        self.base.step()
+        self.t += 1
+        seen, self.m.ngram_seen = self.m.ngram_seen, None
+        if seen is None or seen[1].grad is None:
+            return
+        uniq, g = seen[0], seen[1].grad.float()
+        b2, t = self.group["beta2"], self.t
+        v = self.v[uniq] * (b2 ** (t - self.last[uniq]).double()).float()[:, None] + (1 - b2) * g * g
+        self.v[uniq], self.last[uniq] = v, t
+        w = self.m.ngram.weight
+        w[uniq] = w[uniq] - self.group["lr"] * g / (v.sqrt() / math.sqrt(1 - b2 ** t) + self.group["eps"])
+
+    def state_dict(self):
+        return dict(base=self.base.state_dict(), ngram=dict(v=self.v, last=self.last, t=self.t, lr=self.group["lr"]))
+
+    def load_state_dict(self, state):
+        self.base.load_state_dict(state["base"])
+        n = state["ngram"]
+        self.v.copy_(n["v"])
+        self.last.copy_(n["last"])
+        self.t, self.group["lr"] = n["t"], n["lr"]
 
 
 def muon_params(model):
