@@ -253,7 +253,7 @@ def t_imports():
         for node in ast.walk(ast.parse(open(os.path.join(HERE, f), encoding="utf-8").read())):
             names = [a.name for a in node.names] if isinstance(node, ast.Import) else \
                 [node.module] if isinstance(node, ast.ImportFrom) else []
-            bad += ["%s: %s" % (f, x) for x in names if x and x.split(".")[0] in ("sentence", "sentence_z", "model_z")]
+            bad += ["%s: %s" % (f, x) for x in names if x and x.split(".")[0] in ("model", "sentence", "sentence_z", "model_z")]
             if isinstance(node, ast.Constant) and isinstance(node.value, str) and "model_z" == node.value:
                 bad.append("%s: model_z yolu" % f)
     check("Model Z dosyasindan import yok", not bad, ", ".join(bad))

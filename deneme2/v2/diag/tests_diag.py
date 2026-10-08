@@ -232,7 +232,7 @@ def t_knowledge():
     root = os.path.dirname(HERE)
     sys.path.insert(0, os.path.join(root, "model_z"))
     sys.path.insert(0, os.path.join(root, "transformer"))
-    SM, BL = importlib.import_module("sentence"), importlib.import_module("baseline")
+    SM, BL = importlib.import_module("model"), importlib.import_module("baseline")
     facts = [dict(id="f%d" % i, category="c", topic=["x"], key=[k], distractors=[d_], prompt=pr) for i, (pr, k, d_) in
              enumerate((("The capital of France is", "Paris", "Lyon"), ("World War II began in", "1939", "1914"),
                         ("Water boils at", "100", "90"), ("The largest planet is", "Jupiter", "Saturn")))]

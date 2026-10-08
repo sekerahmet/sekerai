@@ -35,9 +35,9 @@ if os.name == "nt":                     # EcoQoS: yoksa ~10 kat yavas (kullanici
 torch.set_num_threads(4)
 import numpy as np  # noqa: E402
 
-from sentence import (BOS, PAD, TOKEN, ZTOK, SentenceTransformer, SummaryCache, _dense, model_z_mask,  # noqa: E402
+from model import (BOS, PAD, TOKEN, ZTOK, SentenceTransformer, SummaryCache, _dense, model_z_mask,  # noqa: E402
                       model_z_read_mask)
-import data as D  # noqa: E402  (sentence common/'u yola ekledi)
+import data as D  # noqa: E402  (model common/'u yola ekledi)
 
 FIRST, MID, END_T, EOS_T = D.TargetKind.FIRST, D.TargetKind.MID, D.TargetKind.END, D.TargetKind.EOS
 
@@ -222,7 +222,7 @@ def _range_masks(batch, tag="sentetik"):
     """Aralik maskesi (belge 65 (a)) = eski formul + recipe._with_padding, dense, butun (q, kv); recipe.dense_mask
     (includes_padding: sarmasiz) ve _with_padding(yeni) de ayni.  -> (yerel fark, global fark, gorulen)."""
     import recipe as R
-    from sentence import model_z_global_mask
+    from model import model_z_global_mask
     B, T = batch.kind.shape
     k, d_, s_ = batch.kind, batch.doc, batch.sent
     out = []
@@ -280,7 +280,7 @@ def _perm_dense(batch, perm, fn):
 def _last_ranges(batch, tag):
     """summaries_last aralik maskesi (yerel, global) = bugunku maskenin permute dense'i, butun (q, kv)."""
     import recipe as R
-    from sentence import _LAST_GLOB, model_z_global_mask, model_z_summaries_last_ranges, summaries_last
+    from model import _LAST_GLOB, model_z_global_mask, model_z_summaries_last_ranges, summaries_last
     pb, perm = summaries_last(batch)
     out = []
     for old, new in ((model_z_read_mask, model_z_summaries_last_ranges), (model_z_global_mask, _LAST_GLOB)):
@@ -298,7 +298,7 @@ def t_summaries_last():
     (b) ayni model ve batch: konum basina hidden, loss_per_target ve parametre gradyani duzenden bagimsiz (fp32 dense),
     G0 / G1 / G2."""
     import recipe as R
-    from sentence import summaries_last
+    from model import summaries_last
     rng = np.random.default_rng(6)
     stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 15))] for _ in range(rng.integers(1, 7))]
                for _ in range(24)]
@@ -372,7 +372,7 @@ def t_gqa():
     gruplari calisir."""
     import recipe as R
     import train as TR
-    from sentence import gqa_sdpa, model_z_global_mask, story_positions, summaries_last
+    from model import gqa_sdpa, model_z_global_mask, story_positions, summaries_last
     rng = np.random.default_rng(9)
     stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(2, 6))]
                for _ in range(12)]
@@ -544,7 +544,7 @@ def t_global():
     bloklar read_mask; global blokta konum = gercek (transformer duzeni) konum, bagimsiz basvuru ileri gecisiyle ayni ve
     mantiksal konumla farkli; onbellek = tam hesap (N 1, 2); flex = dense; yanlis maske bicimi ve N > katman DURUR; butun
     bloklar global = transformer (bit)."""
-    from sentence import model_z_global_mask, story_positions
+    from model import model_z_global_mask, story_positions
     rng = np.random.default_rng(1)
     stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 10))] for _ in range(rng.integers(1, 6))]
                for _ in range(20)]
@@ -735,7 +735,7 @@ def t_prefill():
         s_old = _generate_stepwise(m, prompts, 4, 12, torch.Generator().manual_seed(11))
         ok_gen &= g_new == g_old and s_new == s_old
         info.append("G%d fark %.1e" % (gl, dmax))
-    from sentence import StaticCache
+    from model import StaticCache
     sd = 0.0                                                              # StaticCache = SummaryCache (belge 84)
     for kw in (dict(global_layers=0), dict(global_layers=1, glob_kv_heads=1), dict(global_layers=3)):
         torch.manual_seed(0)
@@ -757,7 +757,7 @@ def t_prefill():
     check("StaticCache (belge 84) adim adim = SummaryCache (fp32 < 1e-5; G 0 / 1 GQA / hepsi glob; bos, kisa, uzun istem, "
           "token ve Z adimi), tampon asimi DURUR, carry desteklenmez (SummaryCache)", sd < 1e-5 and stops
           and not StaticCache.supports(SentenceTransformer(32, 3, 2, global_layers=1, carry_group=2)), "fark %.1e" % sd)
-    from sentence import decode_sdpa, _SPLIT                                 # parcali (split-KV, belge 92) = fp64 basvuru
+    from model import decode_sdpa, _SPLIT                                 # parcali (split-KV, belge 92) = fp64 basvuru
     g_ = torch.Generator().manual_seed(4)
     q_, k_ = torch.randn(2, 4, 1, 16, generator=g_), torch.randn(2, 2, 4 * _SPLIT, 16, generator=g_)
     v_, m_ = torch.randn(2, 2, 4 * _SPLIT, 16, generator=g_), torch.arange(4 * _SPLIT)[None] < torch.tensor([[_SPLIT + 5], [3]])
@@ -823,11 +823,12 @@ def t_equiv():
     ayni tohumda agirlik, kayip, gradyan, 3 adim sonrasi agirlik, generate (acgozlu + ornekleme) bit duzeyinde."""
     tmp = tempfile.mkdtemp(prefix="tests_model_z_equiv_")
     try:
-        for src in ("common/data.py", "common/recipe.py", "model_z/sentence.py", "model_z/sentence_z.py"):   # recipe: ust import
+        for src, dst in (("common/data.py",) * 2, ("common/recipe.py",) * 2, ("model_z/sentence.py", "model_z/model.py"),
+                         ("model_z/sentence_z.py",) * 2):          # recipe: ust import; etiketteki sentence.py = bugunku model.py
             txt = subprocess.run(["git", "-C", REPO, "show", "%s:deneme2/v2/%s" % (TAG, src)], capture_output=True,
                                  check=True).stdout
-            os.makedirs(os.path.dirname(os.path.join(tmp, src)), exist_ok=True)
-            with open(os.path.join(tmp, src), "wb") as f:
+            os.makedirs(os.path.dirname(os.path.join(tmp, dst)), exist_ok=True)
+            with open(os.path.join(tmp, dst), "wb") as f:
                 f.write(txt)
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         print("ATLA equiv: git etiketi %s okunamadi (%s)" % (TAG, e), flush=True)
@@ -851,7 +852,7 @@ def t_carry():
     yalniz onceki satirlar; (c) SummaryCache carry (parca dolunca glob'da yalniz Z, carry_group'ta sifirlama) adim adim =
     tam ileri.  G1 kollari GQA ile de (glob_kv_heads 1, heads 4; GQA varsayilan, kullanici 8 Ekim)."""
     import recipe as R
-    from sentence import model_z_read_mask, summaries_last
+    from model import model_z_read_mask, summaries_last
     rng = np.random.default_rng(1)
     sents = [[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(14)]
     pieces = [sents[:5], sents[5:9], sents[9:]]
@@ -948,7 +949,7 @@ def t_vocab():
     dolgu satiri gradyani 0, generate (StaticCache ve
     SummaryCache; acgozlu ve ornekleme) VOCAB'li modelle token token ayni, uretilen her token < VOCAB."""
     import recipe as R
-    import sentence as S
+    import model as S
     rows = 50304
     torch.manual_seed(0)
     a = SentenceTransformer(32, 3, 2, global_layers=1).eval()
@@ -999,7 +1000,7 @@ def t_flex_ranges():
     maskeleri summaries_last aralik maskesi (G0 / G1) ve summaries_last + carry bellegi (anahtar T + M), gercek
     build_batch; dolgu disi konumlarda hidden <= 1e-5."""
     import recipe as R
-    from sentence import summaries_last
+    from model import summaries_last
     rng = np.random.default_rng(1)
     rs = lambda n, k: [[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, k))] for _ in range(n)]  # noqa: E731
     sents = rs(30, 9)
@@ -1032,7 +1033,7 @@ def t_flex_ranges():
 
 
 def t_limit():
-    import sentence as MOD
+    import model as MOD
     MAKE = lambda: (torch.manual_seed(0), SentenceTransformer(32, 2, 2, global_layers=1).eval())[1]  # noqa: E731
     """Uretim konum siniri (belge 89b; hakem A b3 / B B7): row_len 30 iken ornekleme uretimi (ayni tohum) row_len'siz
     uretimin oneki, son cumle kesik (ended False), islenen konum (BOS + token + kapanis) <= 30; sinirsiz uretim 30'u asiyor
@@ -1070,7 +1071,7 @@ def t_gate():
     import torch.nn.functional as F_
     import train as TR
     import recipe as R
-    from sentence import StaticCache, story_positions, summaries_last, model_z_global_mask
+    from model import StaticCache, story_positions, summaries_last, model_z_global_mask
     DM = 128                                                              # kapi 2: girdi d // 64 = 2 boyut
     rng = np.random.default_rng(13)
     stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(2, 6))]
@@ -1243,8 +1244,8 @@ def t_ngram():
     duzeninde permutasyonla ayni; (c) sizinti: cumle k degisince cumle k+1'in bigram'lari ayni; (d) dolu tablo + lambda:
     iki duzende hidden ayni (<= 1e-5), tablo gradyani yalniz TOKEN bigram satirlarinda; (e) uretim: SummaryCache adim adim
     (prefill dahil) = tam ileri gecis, StaticCache adim adim = SummaryCache (fp32 < 1e-5), G0 / G1."""
-    import sentence as S
-    from sentence import bigram_ids, bigram_prev, summaries_last
+    import model as S
+    from model import bigram_ids, bigram_prev, summaries_last
     rows_n = 97
     rng = np.random.default_rng(3)
     rs = lambda n: [[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 7))] for _ in range(n)]  # noqa: E731
@@ -1335,7 +1336,7 @@ def t_ngram_fast():
     bazi adimlarda okunmadan = torch AdamW(betas (0, b2), wd 0) yogun tablo (goreli <= 1e-5), okunmayan satir hic
     oynamaz; state_dict ile yarida birakip surdurmek = kesintisiz (bit)."""
     import recipe as R
-    import sentence as S
+    import model as S
     rng = np.random.default_rng(7)
     rs = lambda n: [[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 7))] for _ in range(n)]  # noqa: E731
     stories = [rs(4), rs(3), rs(5)]
@@ -1432,7 +1433,7 @@ def t_combo():
     yok; summaries_last ayni; (b) SummaryCache adim adim = tam ileri, prefill = adim adim, StaticCache (tek satir ve
     toplu prefill_rows + acik cumle, step_rows) = SummaryCache, generate = token token (acgozlu + ornekleme); (c) carry
     uretimi (bigram + kapi) = carry batch'inin tam ileri gecisi.  MTP modelde degil (yalniz egitim kaybi; tests_v2)."""
-    from sentence import StaticCache, summaries_last
+    from model import StaticCache, summaries_last
     DM = 128
     rng = np.random.default_rng(21)
     stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(2, 6))]

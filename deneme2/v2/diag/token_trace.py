@@ -46,7 +46,7 @@ sys.path.insert(0, HERE)
 import data as D  # noqa: E402
 import gap_v2 as G  # noqa: E402  (load, setup, KINDS)
 import z_ablate as ZA  # noqa: E402  (read_off)
-import sentence as S  # noqa: E402
+import model as S  # noqa: E402
 
 CATEGORIES = ("self", "own_sentence", "bos", "prev_z", "prev_tokens")
 CONDS = "read_off,z_unseen,g_off,g_local,read_off+g_off"

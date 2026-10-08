@@ -273,7 +273,7 @@ def _build(args, dev):
         model, mask_fn, layout = model.to(dev), R.document_mask, "transformer"
     else:
         sys.path.insert(0, os.path.join(root, "model_z"))
-        from sentence import SentenceTransformer
+        from model import SentenceTransformer
         model = SentenceTransformer(args.d, args.layers, args.heads, global_layers=int(getattr(args, "global_layers", 0)),
                                     glob_kv_heads=getattr(args, "glob_kv_heads", 0) or None,
                                     carry_group=int(getattr(args, "carry_group", 0) or 0) if getattr(args, "carry_summaries", 0)
@@ -724,7 +724,7 @@ def main(argv=None):
     model.row_len = row_len                                              # uretim konum siniri, carry parca boyu
     last = None
     if args.summaries_last:                                              # belge 66: [token'lar | ozetler | dolgu]
-        from sentence import summaries_last as last
+        from model import summaries_last as last
         mask_fn = model._masks(True)
     n_fp8 = _fp8(model, args.fp8) if args.fp8 != "none" else 0          # compile ve optimizer'dan once
     if cuda:

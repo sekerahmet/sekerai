@@ -731,7 +731,7 @@ def t_integration():
         check("entegrasyon: transformer modeli kurulur", False, traceback.format_exc(limit=1).splitlines()[-1])
     try:
         sys.path.insert(0, os.path.join(root, "model_z"))
-        from sentence import SentenceTransformer
+        from model import SentenceTransformer
         torch.manual_seed(0)
         mz = SentenceTransformer(d=16, layers=2, heads=2, global_layers=1).eval()     # train.py varsayilani (G 1)
         models.append(("model_z", mz, mz.mask_fn))
@@ -1013,7 +1013,7 @@ def t_train():
             args = TR._args(base + extra + ["--out", "x"])
             m0, mask_fn, layout = TR._build(args, torch.device("cpu"))
             if args.summaries_last:
-                from sentence import summaries_last
+                from model import summaries_last
                 mask_fn = m0._masks(True)
             res = []
             for rows in (part, padded):
@@ -1314,7 +1314,7 @@ def _train_learned(base, root, data, out, state, same, exits, TR):
         with torch.no_grad():
             want = m.loss_per_target(b)[0].mean().item()                  # modelin kendi (recipe'siz) maskesi
         sys.path.insert(0, os.path.join(os.path.dirname(HERE), "model_z"))
-        from sentence import model_z_mask
+        from model import model_z_mask
         read, base_m = R.dense_mask(b, mask_fn), R.dense_mask(b, model_z_mask)
         z = b.kind == D.Kind.ZTOK
         tok = b.kind == D.Kind.TOKEN
@@ -2321,7 +2321,7 @@ def _open_last(tok):
     root = os.path.dirname(HERE)
     sys.path.insert(0, os.path.join(root, "model_z"))
     sys.path.insert(0, os.path.join(root, "transformer"))
-    SM, BL = importlib.import_module("sentence"), importlib.import_module("baseline")
+    SM, BL = importlib.import_module("model"), importlib.import_module("baseline")
     s1, s2 = tok.encode("The cat sat on the mat.").ids, tok.encode(" The dog").ids
     ok = True
     for name, m in (("model_z", None), ("transformer", None)):
@@ -2360,7 +2360,7 @@ def _d768():
     import importlib
     for sub in ("model_z", "transformer"):
         sys.path.insert(0, os.path.join(os.path.dirname(HERE), sub))
-    SM, BL = importlib.import_module("sentence"), importlib.import_module("baseline")
+    SM, BL = importlib.import_module("model"), importlib.import_module("baseline")
     with torch.device("meta"):
         nz = sum(p.numel() for p in SM.SentenceTransformer(768, 10, 12, global_layers=1).parameters())
         nt = sum(p.numel() for p in BL.BaselineTransformer(768, 10, 12).parameters())
@@ -2437,7 +2437,7 @@ def t_mtp():
     import train as TR
     root_v2 = os.path.dirname(HERE)
     sys.path.insert(0, os.path.join(root_v2, "model_z"))
-    from sentence import SentenceTransformer, summaries_last
+    from model import SentenceTransformer, summaries_last
     try:                                                                # 1. takvim
         ok_off = all(R.mtp_weights(s, t, 2) == o for t in (3000, 1000, 9, 7, 1) for s, o in enumerate(_mtp_official(t)))
         gen = []

@@ -33,7 +33,7 @@ ARMS = dict(base=[], dense_all=["E"], dense_k1=["E", "--ngram_layers", "1"], spa
 
 def _batches(data, layout, n):
     """Plan e1'in ilk n batch'i, train.py'nin cpu_batch'i gibi (summaries_last), cihazda."""
-    from sentence import summaries_last
+    from model import summaries_last
     st = D.TokenStories(data, data, "train")
     f = np.load(os.path.join(data, "train_pack_plan_e1.npz"))
     ro, rs, row_len = f["row_offsets"], f["row_stories"], int(f["row_len"])
