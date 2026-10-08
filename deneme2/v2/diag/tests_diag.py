@@ -443,6 +443,21 @@ def t_trace():
               and tuple(np.shape(tk["gate_heads"])) == (3, 4) and "gate" in rj["summary"]["attn_by_layer"][0]
               and "| gate | bos_gated |" in md and "gate" not in js["texts"][0]["tokens"][0]["attn"][0]
               and "gate" not in r0["summary"]["attn_by_layer"][0])
+        runs["combo"] = os.path.join(T2.TMP, "runs_trace", "combo")      # birlesim (belge 93): kapi 2 + bigram + MTP
+        TR.main(base + ["--layers", "3", "--global_layers", "2", "--d", "64", "--ngram_embed", "64", "--mtp", "2", "--out",
+                        runs["combo"]])
+        mc = G.load(runs["combo"], data, cpu)[0]
+        rc = TT.trace(mc, batch, ["read_off", "g_off"], 5, False)
+        with torch.no_grad():
+            nll_c = mc.loss_per_target(batch)[0]
+        dc = float((rc["logp"][rc["has_target"]] + nll_c).abs().max())
+        jc = TT.main(["--run", runs["combo"], "--data", data, "--stream", root, "--prompts", prompts, "--generate", "2",
+                      "--device", "cpu", "--out", os.path.join(T2.TMP, "trace_combo"), "--conds", "read_off"])
+        check("token_trace birlesim kosusu (kapi 2 + bigram + MTP; d64): none log-olasiligi = loss_per_target (fark %.1e); "
+              "katman basina kapi; --generate 2 calisir" % dc,
+              dc < 1e-5 and mc.ngram is not None and mc.blocks[0].attn_gate is not None and rc["gate"] is not None
+              and "gate" in jc["summary"]["attn_by_layer"][0]
+              and any(t["generated"] for x in jc["texts"] for t in x["tokens"]))
     except Exception:  # noqa: BLE001
         check("trace", False, traceback.format_exc(limit=4))
     finally:

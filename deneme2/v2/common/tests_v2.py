@@ -990,6 +990,7 @@ def t_train():
         _train_muon(base, root, data, out, state, same, exits, TR)
         _train_global(base, root, data, out, exits, TR)
         _train_gate(base, root, data, out, state, same, exits, TR)
+        _train_combo(base, data, out, state, same, exits, TR)
         _train_vocab(base, data, out, TR)
         _train_finish(base, out, TR)
         _train_gqa_default(base, out, TR)
@@ -1416,6 +1417,49 @@ def _train_muon(base, root, data, out, state, same, exits, TR):
               and not os.path.exists(out("nomuon_default")), str(msg))
     except Exception:  # noqa: BLE001
         check("train --optimizer muon", False, traceback.format_exc(limit=3))
+
+
+def _train_combo(base, data, out, state, same, exits, TR):
+    """Birlesim (belge 93): kapi 2 + bigram + MTP birlikte (NorMuon, d64): kosar, kimlikte uc alan, gunlukte loss_mtp;
+    kapi NorMuon'da, tablo AdamW lr_mult grubunda; adim 4'te kesilip surdurulen = kesintisiz (agirlik ve kayip egrisi bit);
+    load_run uc parcayi kurar (agirlik bit); --mtp'siz / --ngram_embed'siz --resume DUR (kimlik farki), carry ile DUR;
+    seyrek bigram (--ngram_layers 1 --ngram_sparse 1) + kapi + MTP de kosar ve kesintisiz surer."""
+    import traceback
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
+        import generate_readings as GR
+        mz = _unpin(base) + ["--model", "model_z", "--layers", "2", "--global_layers", "1", "--d", "64", "--steps", "9"]
+        cmd = mz + ["--attn_gate", "2", "--ngram_embed", "64", "--mtp", "2"]
+        A = out("combo_A")
+        a = TR.main(cmd + ["--out", A])
+        sa = state(A)
+        stopped, r = _cut_and_resume(TR, cmd, out("combo_B"))
+        lm = GR.load_run(A, data, torch.device("cpu"))[0]
+        split = a["optimizer"]["split"]
+        idt = a["identity"]
+        bad = [_exit_msg(TR.main, mz + x + ["--out", A, "--resume", "1"]) for x in (
+            ["--attn_gate", "2", "--ngram_embed", "64"], ["--attn_gate", "2", "--mtp", "2"])] + [
+            _exit_msg(TR.main, cmd + ["--carry_summaries", "1", "--out", out("combo_carry")])]
+        check("train birlesim (--attn_gate 2 --ngram_embed 64 --mtp 2, NorMuon, d64): kosar, kimlikte uc alan, gunlukte "
+              "loss_mtp; kapi NorMuon'da, tablo lr_mult grubunda; adim 4'te kesilip surdurulen = kesintisiz (agirlik + kayip "
+              "egrisi bit); load_run kurar (bit); --mtp'siz / --ngram_embed'siz --resume ve carry DURUR",
+              a["finished"] and (idt["attn_gate"], idt["ngram_embed"], idt["mtp"]) == (2, 64, 2)
+              and a["log"][0]["loss_mtp"] is not None and all(np.isfinite(w["loss"]) for w in a["log"])
+              and tuple(sa["blocks.0.attn_gate"].shape) == (2, 1) and tuple(sa["ngram.weight"].shape) == (64, 64)
+              and split["muon"]["names"].get("blocks.*.attn_gate") == 2 and "adamw_ngram" in split
+              and stopped and same(sa, state(out("combo_B"))) and [w["loss"] for w in r["log"]] == [w["loss"] for w in a["log"]]
+              and same(sa, lm.state_dict()) and lm.ngram is not None and lm.blocks[0].attn_gate is not None
+              and bad[0] is not None and "'mtp': (2, 0)" in bad[0] and bad[1] is not None and "'ngram_embed': (64, 0)" in bad[1]
+              and bad[2] is not None and "--mtp ile --carry" in bad[2], str(bad))
+        cmd2 = cmd + ["--ngram_layers", "1", "--ngram_sparse", "1"]
+        a2 = TR.main(cmd2 + ["--out", out("combo_sparse_A")])
+        stopped2, r2 = _cut_and_resume(TR, cmd2, out("combo_sparse_B"))
+        check("train birlesim + seyrek bigram (--ngram_layers 1 --ngram_sparse 1): kosar, kesilip surdurulen = kesintisiz "
+              "(agirlik + kayip egrisi bit)", a2["finished"] and stopped2
+              and same(state(out("combo_sparse_A")), state(out("combo_sparse_B")))
+              and [w["loss"] for w in r2["log"]] == [w["loss"] for w in a2["log"]])
+    except Exception:  # noqa: BLE001
+        check("train birlesim", False, traceback.format_exc(limit=3))
 
 
 def _train_gate(base, root, data, out, state, same, exits, TR):

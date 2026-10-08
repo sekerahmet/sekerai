@@ -3,7 +3,7 @@
 v2-before-formula-cleanup-20261007.
 
     python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,mask,summaries_last,gqa,carry,vocab,limit,flex_ranges,
-                            gate,ngram,ngram_fast]
+                            gate,ngram,ngram_fast,combo]
 """
 import os
 import sys
@@ -1427,9 +1427,136 @@ def t_ngram_fast():
           all(out.values()), "%s, uretim farki %.1e" % ([k for k, v in out.items() if not v] or "hepsi", dg))
 
 
+def t_combo():
+    """Birlesim (belge 93): kapi 2 + bigram (+ GQA) tek modelde: (a) gradyan kapiya, tabloya, lambda'ya ulasir; sizinti
+    yok; summaries_last ayni; (b) SummaryCache adim adim = tam ileri, prefill = adim adim, StaticCache (tek satir ve
+    toplu prefill_rows + acik cumle, step_rows) = SummaryCache, generate = token token (acgozlu + ornekleme); (c) carry
+    uretimi (bigram + kapi) = carry batch'inin tam ileri gecisi.  MTP modelde degil (yalniz egitim kaybi; tests_v2)."""
+    from sentence import StaticCache, summaries_last
+    DM = 128
+    rng = np.random.default_rng(21)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(2, 6))]
+               for _ in range(8)]
+    rows = [list(range(i, i + 4)) for i in range(0, 8, 4)]
+    batch = real_batch(rows, 160, stories)
+
+    def make(**kw):
+        torch.manual_seed(0)
+        m = SentenceTransformer(d=DM, layers=3, heads=4, attn_gate=2, ngram_rows=97, **kw).eval()
+        g = torch.Generator().manual_seed(3)                              # egitilmis gibi: kapi, tablo, lambda sifirdan uzak
+        with torch.no_grad():
+            for blk in m.blocks:
+                blk.attn_gate.copy_(1.5 / blk.attn_gate.shape[1] ** 0.5 * torch.randn(blk.attn_gate.shape, generator=g))
+            m.ngram.weight.copy_(torch.randn(m.ngram.weight.shape, generator=g))
+            m.ngram_lambdas.copy_(0.5 + torch.rand(m.ngram_lambdas.shape, generator=g))
+        return m
+    m = make(global_layers=1, glob_kv_heads=2)
+    m.train()
+    m.loss_per_target(batch)[0].mean().backward()
+    grads = dict(gate=min(float(b.attn_gate.grad.abs().sum()) for b in m.blocks), table=float(m.ngram.weight.grad.abs().sum()),
+                 lam=float(m.ngram_lambdas.grad.abs().sum()))
+    m.eval()
+    alt = [[list(s_) for s_ in st] for st in stories]
+    alt[0][-1] = [(t + 7) % D.END_ID for t in alt[0][-1]]
+    first = batch.doc[0] == 0
+    last = int((first & (batch.sent[0] == int(batch.sent[0][first].max()))).nonzero()[0, 0])
+    with torch.no_grad():
+        h0, h2 = m._batch_hidden(batch), m._batch_hidden(real_batch(rows, 160, alt))
+        pb, perm = summaries_last(batch)
+        h1 = m._batch_hidden(pb).gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, DM))
+    check("combo: kapi 2 + bigram + GQA: gradyan kapi / tablo / lambda'ya ulasir; sizinti yok; summaries_last ayni",
+          all(v > 0 for v in grads.values()) and torch.equal(h0[0, :last], h2[0, :last])
+          and float((h0 - h1).abs().max()) < 1e-5, str(grads))
+
+    rs = lambda n: [[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 15))] for _ in range(n)]  # noqa: E731
+    prompts = [[], rs(1), rs(3), rs(20)]
+    res = []
+    for kw in (dict(global_layers=0), dict(global_layers=1, glob_kv_heads=2), dict(global_layers=3)):
+        m = make(**kw)
+        with torch.no_grad():
+            keep = batch.target >= 0
+            lg_full = m._batch_hidden(batch)[keep] @ m.E.weight.T
+            out = []
+            for row in rows:
+                for si in row:
+                    c = SummaryCache(m)
+                    out.append(c.logits[None])
+                    for s_ in stories[si]:
+                        out += [c.append_token(t)[None] for t in s_] + [c.close_sentence()[None]]
+            d_step = float((torch.cat(out) - lg_full).abs().max())
+            d_pre = d_st = 0.0
+            for sents in prompts:
+                a, b = SummaryCache(m), SummaryCache(m)
+                la, lb = a.prefill(sents), b.logits
+                for x_ in sents:
+                    for t in x_:
+                        lb = b.append_token(t)
+                    lb = b.close_sentence()
+                d_pre = max(d_pre, float((la - lb).abs().max()))
+            opens = [(), (5, 6), (7,), (8, 9, 10)]                         # toplu prefill + acik cumle
+            st = StaticCache(m, 64, 8, 16)
+            ls = st.prefill_rows(prompts, opens)
+            ref = []
+            for sents, op in zip(prompts, opens):
+                c = SummaryCache(m)
+                lr_ = c.prefill(sents)
+                for t in op:
+                    lr_ = c.append_token(t)
+                ref.append(c)
+                d_st = max(d_st, float((lr_ - ls[len(ref) - 1]).abs().max()))
+            for w_, z_ in ((11, False), (0, True), (12, False), (13, False)):
+                ls = st.step_rows([w_] * 4, [z_] * 4, [True] * 4)
+                for r, c in enumerate(ref):
+                    lr_ = c.close_sentence() if z_ else c.append_token(w_)
+                    d_st = max(d_st, float((lr_ - ls[r]).abs().max()))
+        gen_ok = m.generate(prompts, 4, 12) == _generate_stepwise(m, prompts, 4, 12) and m.generate(
+            prompts, 4, 12, torch.Generator().manual_seed(11)) == _generate_stepwise(
+            m, prompts, 4, 12, torch.Generator().manual_seed(11))
+        res.append((kw["global_layers"], d_step, d_pre, d_st, gen_ok))
+    check("combo: SummaryCache adim adim = tam ileri, prefill = adim adim, StaticCache (toplu prefill_rows + acik cumle + "
+          "step_rows) = SummaryCache (fp32 < 1e-5), generate = token token; G0 / G1 GQA / hepsi glob",
+          all(r_[1] < 1e-5 and r_[2] < 1e-5 and r_[3] < 1e-5 and r_[4] for r_ in res),
+          "; ".join("G%d adim %.1e prefill %.1e static %.1e gen %s" % r_ for r_ in res))
+
+    sents = [[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(30)]
+    RL, G_ = 160, 2
+    pieces, cur, used, k = [], [], 1, 0                                       # uretim kurali (SummaryCache, t_carry)
+    for x_ in sents:
+        cur.append(x_)
+        used += len(x_) + 1
+        if used > RL - D.MAX_SENTENCE_TOKENS - 1:
+            pieces.append(cur)
+            k += 1
+            cur, used = [], (1 if k % G_ == 0 else 0)
+    pieces += [cur] if cur else []
+    st_ = token_stories(pieces)
+    st_.continues = np.array([i < len(pieces) - 1 for i in range(len(pieces))])
+    gp = np.arange(len(pieces)) % G_
+    cres = []
+    for gl in (0, 1):
+        m = make(global_layers=gl, carry_group=G_)
+        m.row_len = RL
+        b = D.build_batch(st_, [[i] for i in range(len(pieces))], "model_z", row_len=RL,
+                          carry=dict(gpos=gp, memory=True, m_max=128))
+        with torch.no_grad():
+            pb, perm = summaries_last(b)
+            lg = m._batch_hidden(pb).gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, DM)) @ m.E.weight.T
+            want = []
+            for r, p_ in enumerate(pieces):
+                n = sum(len(x_) + 1 for x_ in p_) + (1 if gp[r] == 0 else 0)
+                reset = r + 1 < len(pieces) and gp[r + 1] == 0
+                want += [lg[r, c] for c in range(n - int(reset))]
+            c = SummaryCache(m)
+            got = [c.logits] + [y for x_ in sents for y in [c.append_token(t) for t in x_] + [c.close_sentence()]]
+        cres.append(max(float((a_ - b_).abs().max()) for a_, b_ in zip(got, want)))
+    check("combo carry (kapi 2 + bigram): SummaryCache carry adim adim = carry batch'inin tam ileri gecisi (%d parca, G0 / "
+          "G1)" % len(pieces), max(cres) < 1e-5, "fark %s" % ["%.1e" % v for v in cres])
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab,
-             limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast)
+             limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast,
+             combo=t_combo)
 
 if __name__ == "__main__":
     if SIDE is not None:

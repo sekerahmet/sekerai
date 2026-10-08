@@ -81,7 +81,8 @@ Varsayilanlar (kullanici, 8 Ekim: "Varsayılan yap ama kısa bir koşu ile son h
                     [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1]
                     [--optimizer normuon|muon|adamw (varsayilan normuon)] [--global_layers N|auto (varsayilan auto)]
                     [--glob_kv_heads N|auto (varsayilan auto)] [--carry_summaries 1] [--carry_group G]
-                    [--attn_gate 0|1|2|auto (varsayilan auto)]
+                    [--attn_gate 0|1|2|auto (varsayilan auto)] [--ngram_embed N] [--ngram_layers K] [--ngram_sparse 1]
+                    [--mtp N]
 """
 import torch  # noqa: I001  (Windows: torch once)
 
