@@ -20,8 +20,10 @@ Metinler: --prompts (varsayilan <data>/reading_prompts.json) hikayelerinin tamam
 
     python token_trace.py --run <kosu> --data <v2/fineweb_edu_s000> [--stream <kok>] [--prompts <json>] [--text "..."]
                           [--generate N] [--top_k 5] [--heads] [--conds read_off,z_unseen,g_off,g_local,read_off+g_off]
-                          [--device cuda] --out <klasor>
-Cikti: <out>/token_trace.json (sayfa icin duz; belge 80 s3), <out>/token_trace.md (ozet).
+                          [--device cuda] [--page] --out <klasor>
+Cikti: <out>/token_trace.json (sayfa icin duz; belge 80 s3), <out>/token_trace.md (ozet); --page (kullanici, 8 Ekim:
+"isimler ok, ekle"): token_trace_view.html'in okudugu sikistirilmis veri <out>/prompt.json (--generate'de gen.json), ASCII;
+sayfa ayni klasorden fetch ile okur (sayfayi o klasore kopyala).
 """
 import torch  # noqa: I001  (Windows: torch once)
 
@@ -197,6 +199,8 @@ def _args(argv):
     ap.add_argument("--heads", action="store_true", help="head basina attention kategorileri de")
     ap.add_argument("--conds", default=CONDS, help="virgulle kapatma kosullari ('a+b' birlesim; bos: yok)")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--page", action="store_true", help="token_trace_view.html'in verisi: <out>/prompt.json (--generate'de "
+                                                         "gen.json); sayfa ayni klasorden okur")
     ap.add_argument("--out", required=True)
     return ap.parse_args(argv)
 
@@ -230,6 +234,26 @@ def _entries(tok, r, n_prompt, generated, top_k, heads):
             e["attn_heads"] = np.round(r["attn_heads"][:, :, i], 4).tolist()
         out.append(e)
     return out
+
+
+def _page(res):
+    """token_trace.json -> token_trace_view.html verisi (sikistirilmis): {run, layers, conds, texts: [{label, source, psent,
+    logp, top1, abl, tok}]}; tok = [metin, tur (TOKEN 0 / Z 1 / BOS 2 / diger 3), cumle, uretildi 0/1, hedef, hedef turu,
+    p_target, sira, ilk adaylar [[token, p]], lens p_target, lens ilk aday, attention (CATEGORIES) katman basina, kapatma
+    farki (conds sirasiyla)]."""
+    conds = res["conditions"]
+    r3 = lambda x: None if x is None else round(x, 3)  # noqa: E731
+    kind = {"TOKEN": 0, "Z": 1, "BOS": 2}
+
+    def tok(t):
+        return [t["text"], kind.get(t["input_kind"], 3), t["sent"], int(t["generated"]), t["target"], t["target_kind"],
+                r3(t["p_target"]), t["rank"], [[w, r3(p)] for w, p in t["top"]], [r3(x["p_target"]) for x in t["lens"]],
+                [x["top1"] for x in t["lens"]], [[round(a[c], 2) if a[c] else 0 for c in CATEGORIES] for a in t["attn"]],
+                [r3(t["ablation"][c]) for c in conds]]
+    return dict(run=res["run"], layers=[x["kind"] for x in res["layers"]], conds=conds,
+                texts=[dict(label=x["label"], source=x["source"], psent=x["prompt_sentences"], logp=x["summary"]["logp"],
+                            top1=x["summary"]["top1"], abl={c: x["summary"]["ablation"][c] for c in conds},
+                            tok=[tok(t) for t in x["tokens"]]) for x in res["texts"]])
 
 
 def _summary(tokens, n_layers, n_glob):
@@ -324,6 +348,9 @@ def main(argv=None):
     md += ["", "En cok etkilenen 10 konum (kosul, metin, konum, girdi -> hedef, fark):", ""]
     md += ["- %s | %s | %d | %r -> %r | %+.3f" % (c, lab, i, a, b, d) for d, c, lab, i, a, b in worst]
     open(os.path.join(args.out, "token_trace.md"), "w", encoding="utf-8").write("\n".join(md) + "\n")
+    if args.page:                                                        # ascii: yarim bayt token'larinin U+FFFD'si
+        json.dump(_page(res), open(os.path.join(args.out, "gen.json" if args.generate else "prompt.json"), "w"),
+                  ensure_ascii=True, separators=(",", ":"))
     log("BITTI: %s" % args.out)
     return res
 

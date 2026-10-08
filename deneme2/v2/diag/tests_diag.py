@@ -353,14 +353,14 @@ def t_trace():
               str([tok.decode(s.tolist()) for s in ts.sentences(0)]))
         out = os.path.join(T2.TMP, "trace_out")
         TT.main(["--run", runs["g2kv"], "--data", data, "--stream", root, "--prompts", prompts, "--text", text,
-                       "--device", "cpu", "--out", out, "--heads"])
+                       "--device", "cpu", "--out", out, "--heads", "--page"])
         js = json.load(open(os.path.join(out, "token_trace.json"), encoding="utf-8"))
         keys = {"i", "text", "input_kind", "sent", "pos_in_sent", "generated", "target", "target_kind", "p_target", "rank",
                 "top", "lens", "attn", "ablation", "attn_heads"}
         lengths = [x["length"] for x in js["texts"]]
         gen_out = os.path.join(T2.TMP, "trace_gen")
         rg = TT.main(["--run", runs["rand"], "--data", data, "--stream", root, "--prompts", prompts, "--generate", "2",
-                      "--device", "cpu", "--out", gen_out, "--conds", "read_off"])
+                      "--device", "cpu", "--out", gen_out, "--conds", "read_off", "--page"])
         pj = json.load(open(prompts, encoding="utf-8"))["prompts"]
         m2 = G.load(runs["rand"], data, cpu)[0]
         want = [m2.generate([[s.tolist() for s in valid.sentences(p["story"])[:p["sentences"]]]], max_sentences=2,
@@ -369,7 +369,7 @@ def t_trace():
         n_gen = [sum(len(s) for s in w) for w in want]
         near = all(t["p_target"] >= t["top"][0][1] - 1e-5 for g in got for t in g)
         r0 = TT.main(["--run", runs["g0"], "--data", data, "--stream", root, "--prompts", prompts, "--device", "cpu",
-                      "--out", os.path.join(T2.TMP, "trace_g0")])
+                      "--out", os.path.join(T2.TMP, "trace_g0"), "--page"])
         check("token_trace main: JSON (3 istem + 1 serbest metin; konum sayisi = hikaye boyu; alanlar tam; katman turleri), "
               "md yazildi; --generate 2 = model.generate (uretilen token sayisi, uretilen konumda ilk aday); G'siz kosuda "
               "g_* null, read_off sayi",
@@ -380,6 +380,32 @@ def t_trace():
               and [len(g) for g in got] == n_gen and min(n_gen) > 0 and near
               and r0["summary"]["ablation"]["g_off"] is None and r0["summary"]["ablation"]["read_off"] is not None,
               "uretilen %s / %s" % ([len(g) for g in got], n_gen))
+        pages = {}                                                           # --page (token_trace_view.html verisi)
+        for name, d_, res_ in (("prompt", out, js), ("gen", gen_out, rg), ("g0", os.path.join(T2.TMP, "trace_g0"), r0)):
+            f_ = os.path.join(d_, "gen.json" if name == "gen" else "prompt.json")
+            raw = open(f_, "rb").read()
+            pages[name] = (json.loads(raw), max(raw) < 128, json.loads(json.dumps(TT._page(json.loads(json.dumps(res_))))))
+        html = open(os.path.join(HERE, "token_trace_view.html"), encoding="utf-8").read()
+
+        def page_ok(pg, res_):
+            L, C = len(pg["layers"]), len(pg["conds"])
+            return pg["layers"] == [l_["kind"] for l_ in res_["layers"]] and pg["conds"] == res_["conditions"] \
+                and all(set(x) == {"label", "source", "psent", "logp", "top1", "abl", "tok"} for x in pg["texts"]) \
+                and [len(x["tok"]) for x in pg["texts"]] == [len(x["tokens"]) for x in res_["texts"]] \
+                and all(len(t) == 13 and t[1] in (0, 1, 2, 3) and len(t[9]) == len(t[10]) == len(t[11]) == L
+                        and all(len(a) == 5 for a in t[11]) and len(t[12]) == C and t[3] in (0, 1)
+                        for x in pg["texts"] for t in x["tok"])
+        g0abl = pages["g0"][0]["conds"].index("g_off")
+        check("token_trace --page: prompt.json / gen.json (--generate) ASCII, = _page(sonuc) (gidis-donus), alanlar sayfanin "
+              "indeksleriyle (tok 13 alan, lens / attn katman sayisi, kapatma conds sayisi, tur 0-3); uretilen token'lar "
+              "isaretli; G'siz kosuda g_off null; token_trace_view.html prompt.json / gen.json ve t[12] / t[11] okur",
+              all(v[1] and v[0] == v[2] for v in pages.values()) and page_ok(pages["prompt"][0], js)
+              and page_ok(pages["gen"][0], rg) and page_ok(pages["g0"][0], r0)
+              and any(t[3] == 1 for x in pages["gen"][0]["texts"] for t in x["tok"])
+              and all(t[12][g0abl] is None for x in pages["g0"][0]["texts"] for t in x["tok"])
+              and pages["g0"][0]["texts"][0]["abl"]["g_off"] is None
+              and all(k in html for k in ('"prompt.json"', '"gen.json"', "t[12]", "t[11]", "t[9], t[10]")),
+              str({k: v[1] for k, v in pages.items()}))
     except Exception:  # noqa: BLE001
         check("trace", False, traceback.format_exc(limit=4))
     finally:

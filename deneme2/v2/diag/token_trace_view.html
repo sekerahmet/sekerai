@@ -1,0 +1,186 @@
+<title>Model Z Token İzi</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Düzen: solda metin listesi, ortada token akışı (renk = seçilen ölçü), sağda tıklanan token'ın katman katman dökümü */
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --fg: #1d2330; --muted: #5d6676; --line: #dde1e8;
+  --accent: #2d5b9a; --hot: #d2552b; --cool: #2e8a6e; --z: #7a4fb0; --glob: #b07a1e;
+  --font-ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-tok: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #12151b; --panel: #1a1f28; --fg: #e3e7ee; --muted: #98a2b3; --line: #2c333f;
+  --accent: #7ea6e0; --hot: #f08a62; --cool: #5cc2a2; --z: #b892e6; --glob: #e0b45a; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #12151b; --panel: #1a1f28; --fg: #e3e7ee; --muted: #98a2b3; --line: #2c333f;
+  --accent: #7ea6e0; --hot: #f08a62; --cool: #5cc2a2; --z: #b892e6; --glob: #e0b45a; color-scheme: dark }
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-ui); font-size: 14px; line-height: 1.5; margin: 0; padding-inline: 16px; padding-block: 16px 32px }
+h1 { font-size: 20px; font-weight: 600; margin: 0; text-wrap: balance }
+h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px }
+.sub { color: var(--muted); font-size: 13px; margin: 4px 0 0; max-width: 72ch }
+.wrap { display: grid; grid-template-columns: 220px minmax(0, 1fr) 340px; gap: 16px; margin-top: 16px; align-items: start }
+@media (max-width: 1100px) { .wrap { grid-template-columns: minmax(0, 1fr) } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; min-width: 0 }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px }
+.seg button, .list button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--fg); border-radius: 6px; padding: 5px 9px; cursor: pointer }
+.seg button[aria-pressed="true"], .list button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 500 }
+button:focus-visible, .tok:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px }
+.list { display: flex; flex-direction: column; gap: 6px }
+.list button { text-align: left; display: flex; justify-content: space-between; gap: 8px }
+.list small { color: var(--muted); font-variant-numeric: tabular-nums }
+.stats { display: flex; flex-wrap: wrap; gap: 16px; font-size: 13px; color: var(--muted); margin-bottom: 10px; font-variant-numeric: tabular-nums }
+.stats b { color: var(--fg); font-weight: 500 }
+.legend { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); margin: 6px 0 12px; flex-wrap: wrap }
+.ramp { width: 120px; height: 10px; border-radius: 3px; background: linear-gradient(90deg, color-mix(in oklab, var(--hot) 0%, var(--panel)), var(--hot)) }
+.flow { font-family: var(--font-tok); font-size: 13.5px; line-height: 2; white-space: pre-wrap; word-break: break-word }
+.tok { border-radius: 3px; cursor: pointer; padding: 1px 0 }
+.tok.sel { outline: 2px solid var(--accent) }
+.tok.gen { text-decoration: underline dotted var(--muted); text-underline-offset: 4px }
+.ztok { display: inline-block; font-size: 10px; line-height: 1; padding: 3px 4px; margin: 0 3px; border-radius: 3px; border: 1px solid var(--z); color: var(--z); vertical-align: 2px; cursor: pointer }
+.ztok.sel { background: var(--z); color: var(--panel) }
+.bos { color: var(--muted); font-size: 11px }
+.det h3 { font-family: var(--font-tok); font-size: 15px; font-weight: 500; margin: 0 0 4px; word-break: break-all }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 13px; margin-bottom: 12px; font-variant-numeric: tabular-nums }
+.kv span:nth-child(odd) { color: var(--muted) }
+.bars { display: flex; flex-direction: column; gap: 4px; margin-bottom: 14px }
+.bar { display: grid; grid-template-columns: 110px 1fr 52px; gap: 8px; align-items: center; font-size: 12.5px; font-variant-numeric: tabular-nums }
+.bar .lbl { font-family: var(--font-tok); overflow: hidden; text-overflow: ellipsis; white-space: pre }
+.bar .trk { height: 10px; background: color-mix(in oklab, var(--line) 60%, transparent); border-radius: 2px; position: relative; overflow: hidden }
+.bar .fill { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: 2px }
+.bar.ok .lbl { color: var(--cool); font-weight: 500 }
+.bar .num { text-align: right; color: var(--muted) }
+.abl .trk { overflow: visible }
+.abl .fill { background: var(--hot) }
+.abl .fill.pos { background: var(--cool) }
+svg text { fill: var(--muted); font-family: var(--font-ui); font-size: 10px }
+.note { font-size: 12px; color: var(--muted); margin: 6px 0 14px }
+.empty { color: var(--muted); font-size: 13px }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 4px }
+</style>
+
+<header>
+  <h1>Model Z Token İzi</h1>
+  <p class="sub" id="runline">d1024 · G4 + GQA4 tam koşu · yükleniyor…</p>
+</header>
+
+<div class="wrap">
+  <nav class="card" aria-label="Metinler">
+    <h2>Kaynak</h2>
+    <div class="seg" id="srcSeg">
+      <button id="src-prompt" aria-pressed="true">Okuma istemleri</button>
+      <button id="src-gen" aria-pressed="false">Modelin ürettiği</button>
+    </div>
+    <div class="list" id="textList"></div>
+  </nav>
+
+  <main class="card" aria-label="Token akışı">
+    <div class="stats" id="stats"></div>
+    <h2>Renk ölçüsü</h2>
+    <div class="seg" id="metricSeg"></div>
+    <div class="legend" id="legend"></div>
+    <div class="flow" id="flow"></div>
+  </main>
+
+  <aside class="card det" id="detail" aria-label="Token ayrıntısı">
+    <p class="empty">Ayrıntı için akıştan bir token'a tıkla. Mor <b>Z</b> kutuları cümle sonu özetleri.</p>
+  </aside>
+</div>
+
+<script>
+const METRICS = [
+  { id: "p", name: "Doğru token olasılığı", note: "Koyu = model doğru token'a düşük olasılık verdi (zorlandığı yer).", val: t => t[6] == null ? null : 1 - t[6] },
+  { id: "z", name: "Z kapatılınca kayıp", note: "Koyu = Z okuması kapatılınca (read_off) doğru token'ın log-olasılığı en çok düştü: Z'nin işe yaradığı yer.", val: t => abl(t, "read_off") },
+  { id: "zu", name: "Önceki Z'ler gizlenince", note: "Koyu = token önceki cümlelerin Z özetlerini göremeyince (z_unseen) en çok zarar gören yer.", val: t => abl(t, "z_unseen") },
+  { id: "g", name: "G katmanları kapatılınca", note: "Koyu = tam causal G katmanları atlanınca (g_off) en çok zarar gören yer.", val: t => abl(t, "g_off") },
+  { id: "bos", name: "BOS'a giden attention", note: "Koyu = yerel katmanlarda attention'ın büyük kısmı BOS'a (boşa) gidiyor.", val: t => bosShare(t) },
+];
+let DATA = {}, src = "prompt", textIdx = 0, metric = "p", selIdx = null;
+const $ = id => document.getElementById(id);
+function abl(t, c) { const i = DATA[src].conds.indexOf(c); const v = t[12][i]; return v == null ? null : Math.max(0, Math.min(1, -v / 3)); }
+function bosShare(t) { const L = DATA[src].layers; let s = 0, n = 0; t[11].forEach((a, i) => { if (L[i] === "loc") { s += a[2]; n++ } }); return n ? s / n : null; }
+function fmt(x, d = 3) { return x == null ? "–" : (+x).toFixed(d); }
+
+async function load() {
+  for (const [k, f] of [["prompt", "prompt.json"], ["gen", "gen.json"]]) {
+    try { DATA[k] = await (await fetch(f)).json(); } catch (e) { DATA[k] = null; }
+  }
+  if (!DATA.prompt) { $("flow").textContent = "Veri yüklenemedi (prompt.json)."; return; }
+  const L = DATA.prompt.layers, ng = L.filter(x => x === "glob").length;
+  $("runline").textContent = `Koşu ${DATA.prompt.run} · ${L.length} katman (${L.length - ng} yerel, ${ng} G) · 10 okuma istemi; renkler token başına ölçülür`;
+  $("metricSeg").innerHTML = METRICS.map(m => `<button data-m="${m.id}" aria-pressed="${m.id === metric}">${m.name}</button>`).join("");
+  $("metricSeg").onclick = e => { const b = e.target.closest("button"); if (!b) return; metric = b.dataset.m; renderMetricSeg(); renderFlow(); };
+  $("src-prompt").onclick = () => setSrc("prompt"); $("src-gen").onclick = () => setSrc("gen");
+  renderList(); renderFlow();
+}
+function setSrc(s) { if (!DATA[s]) return; src = s; textIdx = 0; selIdx = null; $("src-prompt").setAttribute("aria-pressed", s === "prompt"); $("src-gen").setAttribute("aria-pressed", s === "gen"); renderList(); renderFlow(); renderDetail(); }
+function renderMetricSeg() { [...$("metricSeg").children].forEach(b => b.setAttribute("aria-pressed", b.dataset.m === metric)); }
+function renderList() {
+  $("textList").innerHTML = DATA[src].texts.map((t, i) => `<button data-i="${i}" aria-pressed="${i === textIdx}"><span>${t.label}</span><small>${t.tok.length}</small></button>`).join("");
+  $("textList").onclick = e => { const b = e.target.closest("button"); if (!b) return; textIdx = +b.dataset.i; selIdx = null; renderList(); renderFlow(); renderDetail(); };
+}
+function renderFlow() {
+  const T = DATA[src].texts[textIdx], M = METRICS.find(m => m.id === metric);
+  const a = T.abl, cs = DATA[src].conds;
+  $("stats").innerHTML = `<span>ortalama log p <b>${fmt(T.logp)}</b></span><span>ilk aday doğru <b>${fmt(T.top1 * 100, 1)}%</b></span>` +
+    cs.map(c => `<span>${c} <b>${fmt(a[c].all)}</b></span>`).join("");
+  $("legend").innerHTML = `<span>düşük</span><span class="ramp"></span><span>yüksek</span><span>· ${M.note}</span>` +
+    (src === "gen" ? `<span>· altı noktalı token'lar modelin kendi ürettiği</span>` : "");
+  const parts = [];
+  T.tok.forEach((t, i) => {
+    const sel = i === selIdx ? " sel" : "";
+    if (t[1] === 2) { parts.push(`<span class="bos tok${sel}" data-i="${i}" tabindex="0">[BOS] </span>`); return; }
+    if (t[1] === 1) { parts.push(`<span class="ztok${sel}" data-i="${i}" tabindex="0" title="Z: cümle ${t[2]} özeti">Z</span>\n`); return; }
+    const v = M.val(t), pct = v == null ? 0 : Math.round(Math.min(1, v) * 85);
+    const txt = t[0].replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    parts.push(`<span class="tok${sel}${t[3] ? " gen" : ""}" data-i="${i}" tabindex="0" style="background:color-mix(in oklab, var(--hot) ${pct}%, transparent)">${txt}</span>`);
+  });
+  $("flow").innerHTML = parts.join("");
+  $("flow").onclick = e => { const s = e.target.closest("[data-i]"); if (!s) return; selIdx = +s.dataset.i; renderFlow(); renderDetail(); };
+  $("flow").onkeydown = e => { if (e.key === "Enter") { const s = e.target.closest("[data-i]"); if (s) { selIdx = +s.dataset.i; renderFlow(); renderDetail(); } } };
+}
+function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/ /g, "·").replace(/\n/g, "⏎"); }
+function renderDetail() {
+  const D = $("detail");
+  if (selIdx == null) { D.innerHTML = `<p class="empty">Ayrıntı için akıştan bir token'a tıkla. Mor <b>Z</b> kutuları cümle sonu özetleri.</p>`; return; }
+  const S = DATA[src], t = S.texts[textIdx].tok[selIdx], L = S.layers;
+  const kind = ["kelime", "Z (cümle özeti)", "BOS", "?"][t[1]];
+  let h = `<h2>Seçili konum</h2><h3>${esc(t[0])}</h3><div class="kv">
+    <span>tür</span><span>${kind}${t[3] ? " · model üretti" : ""}</span><span>cümle</span><span>${t[2]}</span>
+    <span>sonraki doğru token</span><span style="font-family:var(--font-tok)">${esc(t[4])} <small>(${t[5]})</small></span>
+    <span>olasılığı</span><span>${fmt(t[6])} · sıra ${t[7]}</span></div>`;
+  h += `<h2>Modelin ilk 5 adayı</h2><div class="bars">` + t[8].map(([w, p]) =>
+    `<div class="bar${w === t[4] ? " ok" : ""}"><span class="lbl">${esc(w)}</span><span class="trk"><span class="fill" style="width:${(p * 100).toFixed(1)}%"></span></span><span class="num">${fmt(p)}</span></div>`).join("") + `</div>`;
+  h += `<h2>Katman katman: doğru token olasılığı</h2>` + lensChart(t[9], t[10], L);
+  h += `<p class="note">Her blok çıkışı son normdan geçirilip okundu (logit lens). <span class="sw" style="background:var(--glob)"></span>G katmanları.</p>`;
+  h += `<h2>Attention nereye gidiyor (katman başına)</h2>` + attnChart(t[11], L);
+  h += `<p class="note"><span class="sw" style="background:var(--muted)"></span>kendisi <span class="sw" style="background:var(--accent)"></span>kendi cümlesi <span class="sw" style="background:var(--hot)"></span>BOS <span class="sw" style="background:var(--z)"></span>önceki Z'ler <span class="sw" style="background:var(--glob)"></span>önceki cümle token'ları (yalnız G)</p>`;
+  h += `<h2>Kapatınca doğru token'ın log-olasılık farkı</h2><div class="bars abl">` + S.conds.map((c, i) => {
+    const v = t[12][i]; if (v == null) return "";
+    const w = Math.min(100, Math.abs(v) / 6 * 100);
+    return `<div class="bar"><span class="lbl">${c}</span><span class="trk"><span class="fill${v > 0 ? " pos" : ""}" style="width:${w}%"></span></span><span class="num">${v > 0 ? "+" : ""}${fmt(v, 2)}</span></div>`;
+  }).join("") + `</div><p class="note">Negatif = o parça kapatılınca model bu tahminde kötüleşti, yani o parça burada işe yarıyordu. Ölçek: tam çubuk = 6 nat.</p>`;
+  D.innerHTML = h;
+}
+function lensChart(ps, tops, L) {
+  const W = 300, H = 120, pl = 26, pb = 18, n = ps.length, x = i => pl + i * (W - pl - 8) / (n - 1), y = p => 8 + (1 - p) * (H - pb - 8);
+  let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Katman başına doğru token olasılığı">`;
+  L.forEach((k, i) => { if (k === "glob") s += `<rect x="${x(i) - 8}" y="6" width="16" height="${H - pb - 4}" fill="var(--glob)" opacity=".12"></rect>`; });
+  [0, .5, 1].forEach(v => s += `<line x1="${pl}" x2="${W - 8}" y1="${y(v)}" y2="${y(v)}" stroke="var(--line)"></line><text x="2" y="${y(v) + 3}">${v}</text>`);
+  s += `<polyline fill="none" stroke="var(--accent)" stroke-width="2" points="${ps.map((p, i) => `${x(i)},${y(p || 0)}`).join(" ")}"></polyline>`;
+  ps.forEach((p, i) => { s += `<circle cx="${x(i)}" cy="${y(p || 0)}" r="2.6" fill="var(--accent)"><title>L${i} ${L[i]}: p ${fmt(p)}, ilk aday ${tops[i]}</title></circle>`; if (i % 2 === 0 || i === n - 1) s += `<text x="${x(i) - 4}" y="${H - 4}">L${i}</text>`; });
+  return s + `</svg>`;
+}
+function attnChart(A, L) {
+  const W = 300, rowH = 12, gap = 3, pl = 34, H = A.length * (rowH + gap) + 4, cols = ["var(--muted)", "var(--accent)", "var(--hot)", "var(--z)", "var(--glob)"];
+  let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Katman başına attention dağılımı">`;
+  A.forEach((a, i) => {
+    let x0 = pl; const yy = 2 + i * (rowH + gap), tot = a.reduce((u, v) => u + v, 0) || 1;
+    s += `<text x="2" y="${yy + 9}">L${i}${L[i] === "glob" ? " G" : ""}</text>`;
+    a.forEach((v, j) => { const w = (W - pl - 4) * v / tot; if (w > 0) s += `<rect x="${x0}" y="${yy}" width="${w}" height="${rowH}" fill="${cols[j]}"><title>${["kendisi", "kendi cümlesi", "BOS", "önceki Z", "önceki token"][j]} ${fmt(v, 2)}</title></rect>`; x0 += w; });
+  });
+  return s + `</svg>`;
+}
+load();
+</script>
