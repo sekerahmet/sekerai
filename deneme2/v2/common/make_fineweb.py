@@ -7,6 +7,11 @@ hicbir dosyasi yazilmaz / silinmez (cikti kaynagin icinde olamaz; kaynak dosyala
              _story_offsets / _boundaries (data.build_boundaries, profile="web"), train_story_continues.npy (uzun belge
              cumle sinirinda satira sigan parcalara; devam eden parcada EOS hedefi yok), exam_stories.{npy,json},
              train_pack_plan_e1.npz, exam_pack_plan.npz, train_token_counts.npy, reading_prompts.json, source.json (en son).
+    extend   ek shard (--shard N, yalniz train; kullanici, 8 Ekim: "shard hazirligini da yap"): bos / ic eot'lu belge ve
+             --base sinav belgesinin birebir / ilk 64 token kopyasi duser (source.json dropped_exam_full / _prefix); cumle,
+             parca kurali prepare ile ayni; sinav cumlesi sizintisi exam_sentence_leak_rate (+ hit listesi).
+    merge    --base + --parts -> tek V2 klasoru (v2/fineweb_edu_10bt): train akisi art arda (ofsetler kaydirilir),
+             gpt2/train_doc_shards.npy, plan / sayim birlesikte; valid / sinav / okuma --base'ten kopya (kiyaslar surer).
     gate     cumle bolme kapisi: rastgele N train belgesinde web profili sinirlari = satir + nltk punkt sinirlari mi
              (kesinlik / duyarlilik, uyusmayan ornekler siniflanmis, cumle boyu, zorla bolunen oran).
 
@@ -16,6 +21,9 @@ belgesi olmayan belgelerden tohum 0 permutasyonunun ilk EXAM_DOCS'u, sirali.  Cu
 cumlelerinin train'de birebir gecme orani) source.json'a yazilir.
 
     python make_fineweb.py prepare --src <fineweb koku> --out <v2/fineweb_edu_s000> [--local <yerel kopya>] [--workers N]
+    python make_fineweb.py extend --src <fineweb koku> --base <v2/fineweb_edu_s000> --shard N --out <v2/fineweb_edu_parts/sNNN>
+                                  [--local <yerel kopya>] [--workers N]
+    python make_fineweb.py merge --base <v2/fineweb_edu_s000> --parts <sNNN ...> --out <v2/fineweb_edu_10bt>
     python make_fineweb.py gate --src <fineweb koku> [--docs 1000] [--row_groups 0 (hepsi)] [--out <rapor klasoru>]
 """
 import torch  # noqa: I001  (Windows: torch once)
@@ -83,10 +91,10 @@ def _shard_files(root, i=SHARD):
                 tokenizer=os.path.join(root, "gpt2", "tokenizer.json"))
 
 
-def _local_copy(src, local):
+def _local_copy(src, local, i=SHARD):
     """Kaynak shard dosyalari -> yerel kopya (yalniz okunur kaynaktan; varsa ve boyu tutuyorsa atlanir)."""
-    files = _shard_files(src)
-    out = _shard_files(local)
+    files = _shard_files(src, i)
+    out = _shard_files(local, i)
     os.makedirs(os.path.join(local, "gpt2"), exist_ok=True)
     for k, p in files.items():
         if not (os.path.exists(out[k]) and os.path.getsize(out[k]) == os.path.getsize(p)):
@@ -277,6 +285,191 @@ def prepare(args):
     return src_meta
 
 
+def _exam_sets(base):
+    """--base (s000) sinav belgeleri -> (tam belge ozetleri, ilk PREFIX_TOKENS token ozetleri, >= LEAK_MIN_TOKENS sinav
+    cumlelerinin ozet listesi); prepare'deki tanimlar."""
+    valid = D.TokenStories(base, base, "valid")
+    pick = np.load(os.path.join(base, "exam_stories.npy")).tolist()
+    full, pre = set(), set()
+    for i in pick:
+        s, t = int(valid.sent[valid.story[i], 0]), int(valid.sent[valid.story[i + 1] - 1, 1])
+        full.add(_hash(valid.stream[s:t]))
+        pre.add(_hash(valid.stream[s:min(t, s + PREFIX_TOKENS)]))
+    ex = [_hash(valid.stream[a:b]) for i in pick for a, b in valid.sent[valid.story[i]:valid.story[i + 1]].tolist()
+          if b - a >= LEAK_MIN_TOKENS]
+    return full, pre, ex
+
+
+def _sentence_hits(train, ex):
+    """train cumlelerinde (>= LEAK_MIN_TOKENS) birebir gecen sinav cumleleri -> ex indeksleri (prepare'in cumle sizintisi)."""
+    want, found = set(ex), set()
+    for a, b in train.sent[(train.sent[:, 1] - train.sent[:, 0]) >= LEAK_MIN_TOKENS].tolist():
+        h = _hash(train.stream[a:b])
+        if h in want:
+            found.add(h)
+    return [k for k, h in enumerate(ex) if h in found]
+
+
+def extend(args):
+    """Ek shard (--shard N) -> yalniz train klasoru: bos / ic eot'lu belge ve --base sinav belgesinin birebir ya da ilk
+    PREFIX_TOKENS token kopyasi duser; cumle / parca kurali prepare ile ayni; source.json en son."""
+    from tokenizers import Tokenizer
+    t0 = time.time()
+    log = lambda m: print("[%6.0f sn] %s" % (time.time() - t0, m), flush=True)  # noqa: E731
+    _guard(args.src, args.out)
+    if args.local:
+        _guard(args.src, args.local)
+    src = _local_copy(args.src, args.local, args.shard) if args.local else args.src
+    files = _shard_files(src, args.shard)
+    x, off, L, _, meta = _docs(files)
+    sha_bin = _sha256(files["bin"])
+    assert sha_bin == meta["sha256"], "DUR: shard akisinin sha256'si shard json'dakiyle ayni degil"
+    assert _tokenizer_canon_sha(files["tokenizer"]) == GPT2_TOKENIZER_CANON_SHA, "DUR: tokenizer SS'tekiyle ayni degil"
+    base_src = json.load(open(os.path.join(args.base, "source.json"), encoding="utf-8"))
+    assert base_src["source"]["shard"] != meta["shard"], "DUR: --shard --base'in shard'i"
+    log("kaynak: %s | %d belge, %d token, sha tutuyor" % (files["bin"], meta["docs"], meta["tokens"]))
+    out = args.out
+    os.makedirs(os.path.join(out, "gpt2"), exist_ok=True)
+    shutil.copyfile(files["tokenizer"], os.path.join(out, "gpt2", "tokenizer.json"))
+    tok = Tokenizer.from_file(files["tokenizer"])
+    keep, _ = _keep(x, off, tok)
+    full, pre, ex = _exam_sets(args.base)
+    hit_full, hit_pre = np.zeros(len(off), bool), np.zeros(len(off), bool)
+    for i in np.flatnonzero(keep).tolist():                              # belge metni = [eot]'tan sonrasi
+        s, t = int(off[i]) + 1, int(off[i] + L[i])
+        hit_full[i] = _hash(x[s:t]) in full
+        hit_pre[i] = not hit_full[i] and _hash(x[s:min(t, s + PREFIX_TOKENS)]) in pre
+    train_ids = np.flatnonzero(keep & ~hit_full & ~hit_pre)
+    _write_stream(x, off, L, train_ids, os.path.join(out, "gpt2", "train.npy"))
+    np.save(os.path.join(out, "gpt2", "train_doc_ids.npy"), train_ids)
+    log("ayirma: train %d belge, dusen %d (bos / ic eot), sinav kopyasi birebir %d, ilk %d token %d" % (
+        len(train_ids), int((~keep).sum()), int(hit_full.sum()), PREFIX_TOKENS, int(hit_pre.sum())))
+    m = D.build_boundaries(out, out, "train", profile="web", workers=args.workers)
+    train = D.TokenStories(out, out, "train")
+    assert train.n == len(train_ids), "bos hikaye dustu: belge / hikaye sirasi kaydi"
+    story, cont, _ = _pieces(train, D.ROW_LEN, tok)
+    np.save(os.path.join(out, "train_story_offsets.npy"), story)
+    np.save(os.path.join(out, "train_story_continues.npy"), cont)
+    json.dump(dict(m, max_sentence_tokens_all=m["max_sentence_tokens"], stories=int(len(cont)), documents=int(len(train_ids)),
+                   pieces_continuing=int(cont.sum()),
+                   piece_rule="belge 47 s3 A: 1 + sum(L + 1) <= %d, cumle sinirinda, sirali; parca sonundaki giris / baslik "
+                              "satiri sonraki parcaya" % D.ROW_LEN),
+              open(os.path.join(out, "train_boundaries.json"), "w", encoding="utf-8"), indent=1)
+    train = D.TokenStories(out, out, "train")
+    hits = _sentence_hits(train, ex)
+    D.token_counts(out, out)
+    log("parca: %d belge -> %d parca (%d devam eden); sinav cumlesi sizintisi %d / %d" % (
+        len(train_ids), train.n, int(cont.sum()), len(hits), len(ex)))
+    src_meta = dict(source=dict(shard=meta["shard"], parquet=meta["source"], parquet_sha256=meta["source_sha256"],
+                                stream_sha256=sha_bin, tokenizer_sha256=_sha256(files["tokenizer"]), docs=meta["docs"],
+                                tokens=meta["tokens"]),
+                    split=dict(rule="yalniz train (valid / sinav / okuma --base'ten); bos / ic eot'lu belge ve --base sinav "
+                                    "belgesinin birebir ya da ilk %d token kopyasi duser" % PREFIX_TOKENS,
+                               train_docs=int(len(train_ids)), dropped=int((~keep).sum()),
+                               dropped_exam_full=int(hit_full.sum()), dropped_exam_prefix=int(hit_pre.sum())),
+                    base=dict(path=args.base, exam_sha256=base_src["exam"]["sha256"]),
+                    streams=dict(train=_sha256(os.path.join(out, "gpt2", "train.npy"))),
+                    sentences=dict(profile="web", max_sentence_tokens=D.MAX_SENTENCE_TOKENS, longest=m["max_sentence_tokens"],
+                                   forced_splits=dict(train=m["forced_splits"])),
+                    pieces=dict(row_len=D.ROW_LEN, train_pieces=int(train.n), continuing=int(cont.sum())),
+                    exam_sentence_leak_rate=round(len(hits) / max(1, len(ex)), 4), exam_sentence_hits=hits,
+                    created=time.strftime("%Y-%m-%d %H:%M:%S"), seconds=round(time.time() - t0, 1))
+    json.dump(src_meta, open(os.path.join(out, "source.json"), "w", encoding="utf-8"), indent=1)
+    log("BITTI: %s" % out)
+    return src_meta
+
+
+def merge(args):
+    """--base (s000, prepare) + --parts (extend) -> tek V2 klasoru: train akisi art arda, cumle ofsetleri akis boyu kadar,
+    hikaye ofsetleri cumle sayisi kadar kaydirilir; valid / sinav / okuma --base'ten kopya; plan ve sayim birlesikte."""
+    t0 = time.time()
+    log = lambda m: print("[%6.0f sn] %s" % (time.time() - t0, m), flush=True)  # noqa: E731
+    out, dirs = args.out, [args.base] + list(args.parts)
+    for d in dirs:
+        _guard(d, out)
+    bsrc = json.load(open(os.path.join(args.base, "source.json"), encoding="utf-8"))
+    srcs = [json.load(open(os.path.join(p, "source.json"), encoding="utf-8")) for p in args.parts]   # yoksa yarim parca
+    exam_sha = bsrc["exam"]["sha256"]
+    assert all(s["base"]["exam_sha256"] == exam_sha for s in srcs), "DUR: parca baska bir --base sinaviyla hazirlanmis"
+    shards = [bsrc["source"]["shard"]] + [s["source"]["shard"] for s in srcs]
+    assert len(set(shards)) == len(shards), "DUR: ayni shard iki kez: %s" % shards
+    os.makedirs(os.path.join(out, "gpt2"), exist_ok=True)
+    streams = [np.load(os.path.join(d, "gpt2", "train.npy"), mmap_mode="r") for d in dirs]
+    sents = [np.load(os.path.join(d, "train_sentence_offsets.npy"), mmap_mode="r") for d in dirs]
+    tok_shift, sent_shift = np.r_[0, np.cumsum([len(a) for a in streams])], np.r_[0, np.cumsum([len(a) for a in sents])]
+    path = os.path.join(out, "gpt2", "train.npy")
+    y = np.lib.format.open_memmap(path + ".part", mode="w+", dtype=np.uint16, shape=(int(tok_shift[-1]),))
+    z = np.lib.format.open_memmap(os.path.join(out, "train_sentence_offsets.npy.part"), mode="w+", dtype=np.int64,
+                                  shape=(int(sent_shift[-1]), 2))
+    step = 1 << 27
+    for k, (a, s) in enumerate(zip(streams, sents)):
+        for c in range(0, len(a), step):
+            y[tok_shift[k] + c:tok_shift[k] + min(c + step, len(a))] = a[c:c + step]
+        for c in range(0, len(s), step):
+            z[sent_shift[k] + c:sent_shift[k] + min(c + step, len(s))] = s[c:c + step] + tok_shift[k]
+        log("akis: %s (%d token, %d cumle)" % (dirs[k], len(a), len(s)))
+    y.flush()
+    z.flush()
+    del y, z, streams, sents
+    os.replace(path + ".part", path)
+    os.replace(os.path.join(out, "train_sentence_offsets.npy.part"), os.path.join(out, "train_sentence_offsets.npy"))
+    story, cont, ids, shard_of = [], [], [], []
+    for k, d in enumerate(dirs):
+        st = np.load(os.path.join(d, "train_story_offsets.npy"))
+        story.append(st[:-1] + sent_shift[k])
+        cont.append(np.load(os.path.join(d, "train_story_continues.npy")))
+        ids.append(np.load(os.path.join(d, "gpt2", "train_doc_ids.npy")))
+        shard_of.append(np.full(len(ids[-1]), int(shards[k].split("_")[1]), np.int16))
+    np.save(os.path.join(out, "train_story_offsets.npy"), np.r_[np.concatenate(story), sent_shift[-1]].astype(np.int64))
+    np.save(os.path.join(out, "train_story_continues.npy"), np.concatenate(cont))
+    np.save(os.path.join(out, "gpt2", "train_doc_ids.npy"), np.concatenate(ids))
+    np.save(os.path.join(out, "gpt2", "train_doc_shards.npy"), np.concatenate(shard_of))
+    np.save(os.path.join(out, "train_token_counts.npy"), sum(np.load(os.path.join(d, "train_token_counts.npy")) for d in dirs))
+    for f in ("gpt2/valid.npy", "gpt2/valid_bytes.npy", "gpt2/valid_doc_ids.npy", "gpt2/tokenizer.json",
+              "valid_sentence_offsets.npy", "valid_story_offsets.npy", "valid_boundaries.json", "exam_stories.npy",
+              "exam_stories.json", "exam_pack_plan.npz", "reading_prompts.json"):     # sinav ve okuma --base'le ayni
+        shutil.copyfile(os.path.join(args.base, f), os.path.join(out, f))
+    metas = [json.load(open(os.path.join(d, "train_boundaries.json"), encoding="utf-8")) for d in dirs]
+    sha = _sha256(path)
+    add = lambda key: int(sum(m[key] for m in metas))  # noqa: E731
+    json.dump(dict(metas[0], stream=path, stream_sha256=sha, forced_splits=add("forced_splits"), stories=add("stories"),
+                   sentences=add("sentences"), tokens_in_sentences=add("tokens_in_sentences"),
+                   merged_blank=add("merged_blank"), max_sentence_tokens=max(m["max_sentence_tokens"] for m in metas),
+                   max_sentence_tokens_all=max(m["max_sentence_tokens_all"] for m in metas), documents=add("documents"),
+                   pieces_continuing=add("pieces_continuing"), shards=shards, created=time.strftime("%Y-%m-%d %H:%M:%S")),
+              open(os.path.join(out, "train_boundaries.json"), "w", encoding="utf-8"), indent=1)
+    train = D.TokenStories(out, out, "train")
+    assert train.n == len(np.concatenate(cont)), "parca sayisi tutmuyor"
+    log("birlesik: %d token, %d parca, sha %s" % (len(train.stream), train.n, sha[:16]))
+    _, _, ex = _exam_sets(args.base)
+    hits = set(_sentence_hits(D.TokenStories(args.base, args.base, "train"), ex))
+    for s in srcs:
+        hits |= set(s["exam_sentence_hits"])
+    lengths = train.lengths()
+    ro, rs = D.pack_plan(lengths, D.ROW_LEN, 0, 1)
+    np.savez(os.path.join(out, "train_pack_plan_e1.npz"), row_offsets=ro, row_stories=rs, seed=0, epoch=1, row_len=D.ROW_LEN)
+    log("paket: train %d satir (%d adim, doluluk %.3f); sinav cumlesi sizintisi %d / %d" % (
+        len(ro) - 1, -(-(len(ro) - 1) // D.BATCH_ROWS), lengths.sum() / ((len(ro) - 1) * D.ROW_LEN), len(hits), len(ex)))
+    src_meta = dict(source=dict(base=bsrc["source"], shards=[s["source"] for s in srcs]),
+                    split=dict(rule="--base train + parcalarin train'i (extend); valid / sinav / okuma --base'ten",
+                               train_docs=int(sum(len(i) for i in ids)), dropped=int(bsrc["split"]["dropped"] + sum(
+                                   s["split"]["dropped"] for s in srcs)),
+                               dropped_exam_full=int(sum(s["split"]["dropped_exam_full"] for s in srcs)),
+                               dropped_exam_prefix=int(sum(s["split"]["dropped_exam_prefix"] for s in srcs))),
+                    streams=dict(train=sha, valid=bsrc["streams"]["valid"]),
+                    parts=[dict(path=p, shard=s["source"]["shard"], train_sha256=s["streams"]["train"],
+                                train_docs=s["split"]["train_docs"]) for p, s in zip(args.parts, srcs)],
+                    sentences=dict(bsrc["sentences"], longest=max(m["max_sentence_tokens"] for m in metas),
+                                   forced_splits=dict(valid=bsrc["sentences"]["forced_splits"]["valid"],
+                                                      train=add("forced_splits"))),
+                    pieces=dict(row_len=D.ROW_LEN, train_pieces=int(train.n), continuing=add("pieces_continuing")),
+                    exam=bsrc["exam"], exam_sentence_leak_rate=round(len(hits) / max(1, len(ex)), 4),
+                    created=time.strftime("%Y-%m-%d %H:%M:%S"), seconds=round(time.time() - t0, 1))
+    json.dump(src_meta, open(os.path.join(out, "source.json"), "w", encoding="utf-8"), indent=1)
+    log("BITTI: %s" % out)
+    return src_meta
+
+
 # --- cumle bolme kapisi
 _URL = re.compile(r"https?://|www\.|\.(com|org|net|edu|gov)\b", re.I)
 _NUMLINE = re.compile(r"^\s*(?:[-*•]\s*)?(?:\d{1,3}|[a-zA-Z])\.\s*$")   # satir basi liste numarasi (bilerek birlesik)
@@ -420,6 +613,17 @@ def _args(argv):
     p.add_argument("--out", required=True)
     p.add_argument("--local", default=None, help="kaynak shard'in yerel kopyasi (Colab /content/...)")
     p.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
+    e = sub.add_parser("extend")
+    e.add_argument("--src", required=True, help="fineweb koku (SALT OKUNUR)")
+    e.add_argument("--base", required=True, help="prepare ile hazirlanmis s000 klasoru (valid / sinav / okuma)")
+    e.add_argument("--shard", type=int, required=True, help="ek shard no (shard_NNN)")
+    e.add_argument("--out", required=True, help="parca klasoru (v2/fineweb_edu_parts/sNNN)")
+    e.add_argument("--local", default=None, help="kaynak shard'in yerel kopyasi (Colab /content/...)")
+    e.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
+    m = sub.add_parser("merge")
+    m.add_argument("--base", required=True, help="s000 klasoru (prepare)")
+    m.add_argument("--parts", required=True, nargs="+", help="extend parca klasorleri (shard sirasiyla)")
+    m.add_argument("--out", required=True, help="birlesik klasor (v2/fineweb_edu_10bt)")
     g = sub.add_parser("gate")
     g.add_argument("--src", required=True)
     g.add_argument("--docs", type=int, default=1000)
@@ -436,7 +640,7 @@ def main(argv=None):
         import train as TR
         TR._no_power_throttling()
     args = _args(argv)
-    return prepare(args) if args.cmd == "prepare" else gate(args)
+    return dict(prepare=prepare, extend=extend, merge=merge, gate=gate)[args.cmd](args)
 
 
 if __name__ == "__main__":

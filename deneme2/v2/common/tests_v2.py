@@ -1899,6 +1899,7 @@ def t_fineweb():
               and abs(rs["mfu"] - rs["tokens_per_sec"] * (6 * a["params"] + 12 * 16 * (kg + kl)) / RS.PEAK) < 1e-4
               and "peak_reserved_gb" in a["log"][0], str({k: rs[k] for k in ("mfu", "k_global", "k_local")}))
         _fineweb_knowledge(src, out, run, tok)
+        _fineweb_extend(src, out, texts, tok, TR, MF)
         _open_last(tok)
         _d768()
     except Exception:  # noqa: BLE001
@@ -1906,6 +1907,143 @@ def t_fineweb():
     finally:
         (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS, MF.VALID_STRIDE, D.MAX_SENTENCE_TOKENS, TR.MODEL_Z_GLOBAL_RATIO,
          TR.MODEL_Z_SUMMARIES_LAST) = saved
+
+
+def _fineweb_extend(src, out, texts, tok, TR, MF):
+    """make_fineweb extend / merge (belge 75): 2 ek sentetik shard; birlesik klasor = birlesik akista bastan
+    build_boundaries + _pieces (bit); --base sinav belgesinin birebir ve ilk 64 token kopyasi duser; valid / sinav / okuma
+    --base ile bayt ayni; train.py birlesikle shard karisik batch'te ve epok sonu eksik batch oncesinde kesilip surdurulen =
+    kesintisiz (bit); _local_copy yer yetmezse DURUR; prepare (s000) HEAD koduyla bit ayni."""
+    import importlib.util
+    import subprocess
+    import traceback
+    try:
+        vid = np.load(os.path.join(out, "gpt2", "valid_doc_ids.npy"))
+        exam = np.load(os.path.join(out, "exam_stories.npy"))
+        full_copy, pre_copy = texts[vid[exam[0]]], texts[vid[exam[1]]] + " An extra tail sentence is here."
+        assert len(tok.encode(texts[vid[exam[1]]]).ids) > 64, "on ek sinamasi icin sinav belgesi kisa"
+        for shard, n0, extra in ((1, 1000, [full_copy, pre_copy]), (2, 2000, [])):
+            docs = ["Document %d. The capital of %s is near. It has many people, said Dr. Lee.\n- one item\n%s" % (
+                n0 + i, ["France", "Italy"][i % 2], " ".join("Line %d is fine." % j for j in range(3 + i % 5)))
+                for i in range(30)]
+            docs[7] += " " + " ".join("Long part %d continues the long document." % j for j in range(330))
+            docs = docs[:10] + extra + docs[10:]
+            ids = [[D.EOS_ID] + tok.encode(t).ids for t in docs]
+            base = os.path.join(src, "gpt2", "shard_%03d" % shard)
+            flat = np.array([t for d in ids for t in d], np.uint16)
+            flat.tofile(base + ".bin")
+            np.save(base + "_offsets.npy", np.r_[0, np.cumsum([len(d) for d in ids])[:-1]].astype(np.int64))
+            np.save(base + "_bytes.npy", np.array([len(t.encode()) for t in docs], np.int32))
+            json.dump(dict(shard="shard_%03d" % shard, source="sample/10BT/%03d_00000.parquet" % shard,
+                           source_sha256="test", docs=len(docs), tokens=int(len(flat)), eot=D.EOS_ID,
+                           doc_format="[eot] + text", sha256=hashlib.sha256(flat.tobytes()).hexdigest()),
+                      open(base + ".json", "w"))
+        p1, p2, mo = (os.path.join(TMP, "fw_parts", "s001"), os.path.join(TMP, "fw_parts", "s002"),
+                      os.path.join(TMP, "fw_10bt"))
+        MF.main(["extend", "--src", src, "--base", out, "--shard", "1", "--out", p1, "--local",
+                 os.path.join(TMP, "fw_local_x"), "--workers", "2"])
+        MF.main(["extend", "--src", src, "--base", out, "--shard", "2", "--out", p2, "--workers", "1"])
+        MF.main(["merge", "--base", out, "--parts", p1, p2, "--out", mo])
+        ref = os.path.join(TMP, "fw_ref")                                     # basvuru: birlesik akista bastan
+        os.makedirs(os.path.join(ref, "gpt2"))
+        np.save(os.path.join(ref, "gpt2", "train.npy"), np.concatenate(
+            [np.load(os.path.join(d, "gpt2", "train.npy")) for d in (out, p1, p2)]))
+        shutil.copyfile(os.path.join(out, "gpt2", "tokenizer.json"), os.path.join(ref, "gpt2", "tokenizer.json"))
+        D.build_boundaries(ref, ref, "train", profile="web", workers=1)
+        story, cont, _ = MF._pieces(D.TokenStories(ref, ref, "train"), D.ROW_LEN, tok)
+        ld = lambda d, f: np.load(os.path.join(d, f))  # noqa: E731
+        mt = D.TokenStories(mo, mo, "train")
+        f = ld(mo, "train_pack_plan_e1.npz")
+        ro, rs = D.pack_plan(mt.lengths(), D.ROW_LEN, 0, 1)
+        bj = json.load(open(os.path.join(mo, "train_boundaries.json"), encoding="utf-8"))
+        same_bytes = lambda a, b: open(a, "rb").read() == open(b, "rb").read()  # noqa: E731
+        copied = ("gpt2/valid.npy", "gpt2/valid_bytes.npy", "gpt2/tokenizer.json", "valid_sentence_offsets.npy",
+                  "valid_story_offsets.npy", "valid_boundaries.json", "exam_stories.npy", "exam_stories.json",
+                  "exam_pack_plan.npz", "reading_prompts.json")
+        check("make_fineweb merge: birlesik akis = s000 + s001 + s002 train (bayt); cumle / hikaye ofsetleri, continues = "
+              "birlesik akista bastan build_boundaries + _pieces (bit); plan = pack_plan(birlesik, tohum 0); sayim = "
+              "token_counts(birlesik); boundaries stream_sha256 = dosya; valid / sinav / okuma --base ile bayt ayni",
+              np.array_equal(ld(mo, "gpt2/train.npy"), ld(ref, "gpt2/train.npy"))
+              and np.array_equal(ld(mo, "train_sentence_offsets.npy"), ld(ref, "train_sentence_offsets.npy"))
+              and np.array_equal(ld(mo, "train_story_offsets.npy"), story)
+              and np.array_equal(ld(mo, "train_story_continues.npy"), cont)
+              and np.array_equal(f["row_offsets"], ro) and np.array_equal(f["row_stories"], rs)
+              and np.array_equal(ld(mo, "train_token_counts.npy"), D.token_counts(ref))
+              and bj["stream_sha256"] == hashlib.sha256(open(os.path.join(mo, "gpt2", "train.npy"), "rb").read()).hexdigest()
+              and bj["max_sentence_tokens_all"] == D.TokenStories(out, out, "train").max_sentence_tokens
+              and all(same_bytes(os.path.join(out, c), os.path.join(mo, c)) for c in copied),
+              "%d parca, %d satir" % (mt.n, len(ro) - 1))
+        s1, s2, sm = (json.load(open(os.path.join(d, "source.json"), encoding="utf-8")) for d in (p1, p2, mo))
+        t1 = ld(p1, "gpt2/train_doc_ids.npy")
+        shards = ld(mo, "gpt2/train_doc_shards.npy")
+        check("make_fineweb extend: --base sinav belgesinin birebir (1) ve ilk 64 token (1) kopyasi duser, sayilar "
+              "source.json'da (birlesikte toplam); oteki shard'da 0; train_doc_shards belge sayisiyla; sinav cumlesi "
+              "sizintisi orani yazili",
+              (s1["split"]["dropped_exam_full"], s1["split"]["dropped_exam_prefix"]) == (1, 1)
+              and not {10, 11} & set(t1.tolist()) and len(t1) == 30
+              and (s2["split"]["dropped_exam_full"], s2["split"]["dropped_exam_prefix"]) == (0, 0)
+              and (sm["split"]["dropped_exam_full"], sm["split"]["dropped_exam_prefix"]) == (1, 1)
+              and np.bincount(shards).tolist() == [sm["split"]["train_docs"] - 60, 30, 30]
+              and 0 <= sm["exam_sentence_leak_rate"] <= 1 and "exam_sentence_leak_rate" in s1,
+              str(s1["split"]))
+        piece_doc = np.cumsum(np.r_[True, ~mt.continues[:-1]]) - 1           # parca -> belge -> shard
+        per_e1 = -(-(len(ro) - 1) // TR.BATCH_ROWS)
+        mixed = [s_ for s_ in range(1, per_e1) if len({int(shards[piece_doc[k]]) for r in range(
+            s_ * TR.BATCH_ROWS, min((s_ + 1) * TR.BATCH_ROWS, len(ro) - 1)) for k in rs[ro[r]:ro[r + 1]]}) > 1]
+        cut1, cut2 = mixed[0], per_e1 - 1                                     # karisik batch; epok sonu eksik batch onu
+        base = ["--data", mo, "--stream", mo, "--device", "cpu", "--d", "16", "--layers", "2", "--heads", "2", "--lr",
+                "1e-2", "--checkpoint_minutes", "0", "--model", "model_z", "--epochs", "2"]
+        a = TR.main(base + ["--out", os.path.join(TMP, "fw_10bt_A")])
+        B = os.path.join(TMP, "fw_10bt_B")
+        TR.main(base + ["--stop_step", str(cut1), "--out", B])
+        if cut2 > cut1:
+            TR.main(base + ["--stop_step", str(cut2), "--out", B, "--resume", "1"])
+        b = TR.main(base + ["--out", B, "--resume", "1"])
+        sa, sb = (torch.load(os.path.join(d, "agent.pt"), weights_only=False)["state"] for d in
+                  (os.path.join(TMP, "fw_10bt_A"), B))
+        check("train.py birlesik klasorle: kosar; adim %d (batch'te birden cok shard) ve %d'de (epok sonu eksik batch'ten "
+              "once; son batch %d / %d satir) kesilip surdurulen = kesintisiz (kayip egrisi ve agirlik bit)" % (
+                  cut1, cut2, (len(ro) - 1) % TR.BATCH_ROWS or TR.BATCH_ROWS, TR.BATCH_ROWS),
+              cut2 > cut1 and b["finished"] and [w["loss"] for w in a["log"]] == [w["loss"] for w in b["log"]]
+              and all(torch.equal(sa[k], sb[k]) for k in sa) and a["identity"]["train_stream_sha256"] == bj["stream_sha256"],
+              "kesim %s" % [cut1, cut2])
+        real = TR.shutil.disk_usage
+        TR.shutil.disk_usage = lambda p: real(p)._replace(free=1000)
+        try:
+            msg = _exit_msg(TR._local_copy, mo, os.path.join(TMP, "fw_local_full"), mo)
+        finally:
+            TR.shutil.disk_usage = real
+        check("train _local_copy: yer yetmezse kopyadan once DURUR (gereken / bos GB iletide)",
+              msg is not None and "GB" in msg and not os.path.exists(os.path.join(TMP, "fw_local_full", "gpt2", "train.npy")),
+              str(msg))
+        hd = os.path.join(TMP, "mf_head")                                     # prepare: HEAD kodu = bugunku (bit)
+        os.makedirs(hd)
+        code = subprocess.run(["git", "-C", HERE, "show", "HEAD:deneme2/v2/common/make_fineweb.py"], capture_output=True,
+                              check=True).stdout
+        open(os.path.join(hd, "make_fineweb_head.py"), "wb").write(code)
+        spec = importlib.util.spec_from_file_location("make_fineweb_head", os.path.join(hd, "make_fineweb_head.py"))
+        MH = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(MH)
+        MH.VALID_STRIDE = MF.VALID_STRIDE
+        oh = os.path.join(TMP, "fw_out_head")
+        MH.main(["prepare", "--src", src, "--out", oh, "--workers", "2"])
+        drop = lambda j: {k: v for k, v in j.items() if k not in ("created", "seconds", "stream")}  # noqa: E731
+        diff = []
+        for root_, _, files in os.walk(out):
+            for fn in files:
+                rel = os.path.relpath(os.path.join(root_, fn), out)
+                a_, b_ = os.path.join(out, rel), os.path.join(oh, rel)
+                if fn.endswith(".json"):
+                    ok = drop(json.load(open(a_, encoding="utf-8"))) == drop(json.load(open(b_, encoding="utf-8")))
+                else:
+                    ok = same_bytes(a_, b_)
+                if not ok:
+                    diff.append(rel)
+        check("make_fineweb prepare (s000 yolu) HEAD koduyla bit ayni (json'larda tarih / sure / yol haric)", not diff,
+              str(diff))
+    except Exception:  # noqa: BLE001
+        check("fineweb extend / merge", False, traceback.format_exc(limit=4))
+
 
 
 def _fineweb_knowledge(src, out, run, tok):

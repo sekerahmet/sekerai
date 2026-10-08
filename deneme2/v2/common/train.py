@@ -142,7 +142,14 @@ def _sha256(path):
 
 def _local_copy(stream_root, local, data_dir, splits=("train", "valid")):
     """<stream_root>/gpt2/<split>.npy -> <local>/gpt2/<split>.npy; varsa ve sha256 tutuyorsa yeniden kopyalanmaz.  sha256,
-    sinirlarin hesaplandigi akisinki (<split>_boundaries.json) olmali: kopya = sinirlarin akisi, bayt bayt."""
+    sinirlarin hesaplandigi akisinki (<split>_boundaries.json) olmali: kopya = sinirlarin akisi, bayt bayt.  Yer yetmezse
+    kopyadan once DURUR (10BT akisi 19,9 GB)."""
+    os.makedirs(os.path.join(local, "gpt2"), exist_ok=True)
+    pairs = [(os.path.join(stream_root, "gpt2", sp + ".npy"), os.path.join(local, "gpt2", sp + ".npy")) for sp in splits]
+    need = sum(os.path.getsize(s) for s, d in pairs if not (os.path.exists(d) and os.path.getsize(d) == os.path.getsize(s)))
+    free = shutil.disk_usage(os.path.join(local, "gpt2")).free
+    if need > free:
+        sys.exit("DUR: --local %s: kopya icin %.1f GB gerekli, %.1f GB bos" % (local, need / 1e9, free / 1e9))
     for split in splits:
         want = json.load(open(os.path.join(data_dir, split + "_boundaries.json"), encoding="utf-8"))["stream_sha256"]
         src, dst = os.path.join(stream_root, "gpt2", split + ".npy"), os.path.join(local, "gpt2", split + ".npy")
