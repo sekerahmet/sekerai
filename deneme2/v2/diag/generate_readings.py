@@ -78,7 +78,7 @@ def load_run(out, data_dir, dev):
                            vocab_rows=idt.get("vocab_rows", D.VOCAB),            # sozluk dolgusundan onceki: VOCAB
                            attn_gate=idt.get("attn_gate", 0),
                            ngram_embed=idt.get("ngram_embed", 0), ngram_layers=idt.get("ngram_layers", 0),
-                           ngram_sparse=idt.get("ngram_sparse", 0))
+                           ngram_sparse=idt.get("ngram_sparse", 0), vocab=idt.get("vocab", "gpt2"))
     model, _, _ = T._build(spec, dev)
     model.load_state_dict(pack["state"])
     model.row_len = idt["row_len"]                                       # uretim konum siniri, carry parca boyu
@@ -111,10 +111,9 @@ def main(argv=None):
     spec = json.load(open(args.prompts, encoding="utf-8"))["prompts"]
     model, idt = load_run(args.out, args.data, dev)
     valid = D.TokenStories(args.stream, args.data, "valid")
-    got = T._sha256(os.path.join(args.stream, "gpt2", "valid.npy"))
+    got = T._sha256(os.path.join(args.stream, valid.vocab.stream_dir, "valid.npy"))
     assert got == valid.meta["stream_sha256"], "valid akisi sinir dosyasindakiyle ayni degil"
-    from tokenizers import Tokenizer
-    tok = Tokenizer.from_file(os.path.join(args.stream, "gpt2", "tokenizer.json"))
+    tok = D.load_tokenizer(args.stream, valid.vocab)
     log("%s | %s | istem %s (%d)" % (args.out, idt, args.prompts, len(spec)))
     reproduced = None
     old_path = os.path.join(args.out, "samples.json")

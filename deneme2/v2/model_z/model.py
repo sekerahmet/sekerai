@@ -24,7 +24,8 @@ eski sira; model ayni (attention disi konum konum, RoPE pos'tan, maske iliskiden
 (model_z_summaries_last_ranges).  Batch real_pos tasiyorsa bu duzen; egitim ve sinav hep bu duzende, Z'ler arada duzen
 teshis / prefill yolunda (ayni hesap).
 Sozluk dolgusu (belge 89; kullanici, 8 Ekim: "sözlük dolgusu ok, ekle"): vocab_rows > VOCAB ise E'nin dolgu satirlari sifir,
-cikis (_logits) VOCAB'a kesilir: dolgu token'i hedef olmaz, uretilmez.
+cikis (_logits) VOCAB'a kesilir: dolgu token'i hedef olmaz, uretilmez.  Sozluk parametresi (belge 96): vocab (data.Vocab,
+varsayilan GPT2); END / EOS / cikis sutunu model.vocab'dan (GPT2'de sabitlerle ayni).
 attn_gate (belge 88a, 90a; kullanici, 8 Ekim: "o zaman attention head yapalım mı"): head basina sigmoid cikis kapisi,
 SDPA ciktisinda proj'dan once, girdi n1(x) (qiu2025 G1 headwise; resmi kod qiuzh20/gated_attention modeling_qwen3.py
 :309-317, :361-362); agirlik (heads, d) sifirdan (kapi 0,5).  attn_gate 2 (kullanici, 8 Ekim: "onaylıyorum, ikinci kolu da ekle"): girdi
@@ -48,7 +49,7 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "common"))
-from data import END_ID, EOS_ID, MAX_SENTENCE_TOKENS, ROW_LEN, VOCAB, Kind  # noqa: E402
+from data import END_ID, GPT2, MAX_SENTENCE_TOKENS, ROW_LEN, VOCAB, Kind  # noqa: E402
 
 BOS, TOKEN, END, ZTOK, PAD = Kind.BOS, Kind.TOKEN, Kind.END, Kind.ZTOK, Kind.PAD
 
@@ -58,12 +59,12 @@ def bigram_ids(tokens, prev, rows):
     return ((36313 * tokens) ^ (27191 * prev)) % rows
 
 
-def bigram_prev(tokens, kind, doc, sent):
+def bigram_prev(tokens, kind, doc, sent, end=END_ID):
     """Satir (B, T) -> konum basina onceki token: bir onceki konum ayni (doc, sent) cumlesinin TOKEN'i ise onun kimligi,
     degilse END (cumle basi; summaries_last'ta komsu cumlenin token'i da END olur).  Konuma degil alanlara bakar."""
     ok = (kind[:, :-1] == TOKEN) & (doc[:, :-1] == doc[:, 1:]) & (sent[:, :-1] == sent[:, 1:])
-    prev = torch.where(ok, tokens[:, :-1], torch.full_like(tokens[:, :-1], END_ID))
-    return torch.cat([torch.full_like(tokens[:, :1], END_ID), prev], 1)
+    prev = torch.where(ok, tokens[:, :-1], torch.full_like(tokens[:, :-1], end))
+    return torch.cat([torch.full_like(tokens[:, :1], end), prev], 1)
 
 
 def rope(x, pos, base=10000.0):
@@ -305,7 +306,7 @@ class Block(torch.nn.Module):
 
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
-                 attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False):
+                 attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, vocab=GPT2):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -315,17 +316,19 @@ class SentenceTransformer(torch.nn.Module):
         ngram_rows: bigram tablosu satiri (0 kapali; tablo ve lambda
         ilk agirliklardan SONRA, RNG cekmeden: diger agirliklar kapali modelle ayni).  ngram_layers K: yalniz ilk K blok
         (0: hepsi; lambda K tane).  ngram_sparse: egitimde (gradyan acikken) okunan satirlar ayri yaprak (ngram_seen), tablo
-        gradyani yogun olusmaz."""
+        gradyani yogun olusmaz.  vocab: data.Vocab (belge 96; END / EOS / cikis sutunu; vocab_rows >= vocab.size)."""
         super().__init__()
+        self.vocab = vocab
         self.carry_group, self.row_len = int(carry_group), ROW_LEN
         self.global_layers = int(global_layers)
         assert 0 <= self.global_layers <= layers, "global_layers 0..layers"
         self.mask_fn = (model_z_read_mask, model_z_global_mask) if self.global_layers else model_z_read_mask
-        self.END, self.EOS = END_ID, EOS_ID
+        self.END, self.EOS = vocab.end, vocab.eos
         hidden = -(-int(8 * d / 3) // 8) * 8
-        assert vocab_rows >= VOCAB, "vocab_rows >= VOCAB"
-        self.E = torch.nn.Embedding(VOCAB, d)               # kurma sirasi E, blocks, norm (ilk agirlik bunu izler)
-        if vocab_rows > VOCAB:                                   # kurulum RNG'si VOCAB'li modelle ayni; dolgu sifir
+        n = vocab.size
+        assert vocab_rows >= n, "vocab_rows >= vocab.size"
+        self.E = torch.nn.Embedding(n, d)                   # kurma sirasi E, blocks, norm (ilk agirlik bunu izler)
+        if vocab_rows > n:                                       # kurulum RNG'si dolgusuz modelle ayni; dolgu sifir
             self.E = torch.nn.Embedding(vocab_rows, d, _weight=torch.zeros(vocab_rows, d))
         kinds = ["loc"] * (layers - self.global_layers) + ["glob"] * self.global_layers
         self.blocks = torch.nn.ModuleList(Block(d, heads, hidden, glob_kv_heads if k == "glob" else None,
@@ -335,9 +338,9 @@ class SentenceTransformer(torch.nn.Module):
             if p.dim() == 2 and not name.endswith("attn_gate"):          # kapi sifir kalir
                 std = 0.02 / math.sqrt(2 * layers) if name.endswith(("proj.weight", "down.weight")) else 0.02
                 with torch.no_grad():
-                    (p[:VOCAB] if name == "E.weight" else p).normal_(0.0, std)   # dolgu satiri rastgele sayi cekmez
+                    (p[:n] if name == "E.weight" else p).normal_(0.0, std)   # dolgu satiri rastgele sayi cekmez
         with torch.no_grad():
-            self.E.weight[VOCAB:].zero_()
+            self.E.weight[n:].zero_()
         self.ngram, self.ngram_seen = None, None
         self.ngram_layers, self.ngram_sparse = int(ngram_layers) or layers, bool(ngram_sparse)
         if ngram_rows:                                                  # sifir tablo, lambda 0,1 (kayit #1)
@@ -375,9 +378,9 @@ class SentenceTransformer(torch.nn.Module):
         dev = batch.tokens.device
         last = getattr(batch, "real_pos", None) is not None
         mfn = self._masks(last)
-        x = self.E(torch.where(batch.kind == ZTOK, torch.full_like(batch.tokens, END_ID), batch.tokens))
+        x = self.E(torch.where(batch.kind == ZTOK, torch.full_like(batch.tokens, self.END), batch.tokens))
         g = None if self.ngram is None else self._ngram(
-            batch.tokens, bigram_prev(batch.tokens, batch.kind, batch.doc, batch.sent), batch.kind == TOKEN)
+            batch.tokens, bigram_prev(batch.tokens, batch.kind, batch.doc, batch.sent, self.END), batch.kind == TOKEN)
         add = (lambda x_, l: x_) if g is None else (  # noqa: E731
             lambda x_, l: x_ + self.ngram_lambdas[l] * g if l < self.ngram_layers else x_)
         mem = getattr(batch, "mem_rows", None) is not None              # carry bellegi (belge 83)
@@ -403,8 +406,8 @@ class SentenceTransformer(torch.nn.Module):
         return self.norm(x)
 
     def _logits(self, h):
-        """h (..., d) -> cikis h @ E^T (bagli embedding), VOCAB sutun (sozluk dolgusu kesilir)."""
-        return (h @ self.E.weight.T)[..., :VOCAB]
+        """h (..., d) -> cikis h @ E^T (bagli embedding), vocab.size sutun (sozluk dolgusu kesilir)."""
+        return (h @ self.E.weight.T)[..., :self.vocab.size]
 
     def loss_per_target(self, batch, attn=None, chunk=4096):
         """-> nll (K,), pred (K,), target_kind (K,) (hedefli konumlar, satir sirasiyla; belge 21 s7 sozlesmesi)."""
@@ -445,7 +448,7 @@ class SentenceTransformer(torch.nn.Module):
             if full or (stop_when is not None and stop_when(gen)):
                 break
             opened = False
-            w = yield END_ID, True
+            w = yield self.END, True
             used += 1
         return gen, ended, eos
 
@@ -569,8 +572,8 @@ class SummaryCache:
         self.glob = [l >= L - model.global_layers for l in range(L)]
         self.n_z, self.i, self.t = 0, 0, 0
         self.piece, self.used, self.gkind = 0, 1, []                       # carry: parca no, parcadaki konum, glob tur
-        self.prev = END_ID                                                  # bigram: cumledeki onceki token (yoksa END)
-        x = model.E(torch.tensor([[EOS_ID]], device=self.dev))              # BOS = EOS token'i (belge 21 s1)
+        self.prev = model.END                                               # bigram: cumledeki onceki token (yoksa END)
+        x = model.E(torch.tensor([[model.EOS]], device=self.dev))           # BOS = EOS token'i (belge 21 s1)
         self.logits = self._out(self._step(x, 0, read_sentence=False, summary=True), summary=True)
 
     def _out(self, hn, summary):
@@ -616,9 +619,9 @@ class SummaryCache:
                     self.append_token(t_)
                 self.close_sentence()
             return self.logits
-        tok, kind, pos, sent = [EOS_ID], [BOS], [0], [-1]
+        tok, kind, pos, sent = [self.m.EOS], [BOS], [0], [-1]
         for k, x in enumerate(sents):
-            tok += list(x) + [END_ID]                                       # Z_k girdisi E(END)
+            tok += list(x) + [self.m.END]                                   # Z_k girdisi E(END)
             kind += [TOKEN] * len(x) + [ZTOK]
             pos += [k + 1 + i for i in range(len(x))] + [k + 1]
             sent += [k] * (len(x) + 1)
@@ -629,7 +632,8 @@ class SummaryCache:
         causal = torch.ones(T, T, dtype=torch.bool, device=self.dev).tril()
         summ = ((kind == BOS) | (kind == ZTOK))[0]
         x, lpos, real = self.m.E(t(tok)), t(pos), torch.arange(T, device=self.dev)[None]
-        gr = None if self.m.ngram is None else self.m._ngram(t(tok), bigram_prev(t(tok), kind, doc, sent), kind == TOKEN)
+        gr = None if self.m.ngram is None else self.m._ngram(t(tok), bigram_prev(t(tok), kind, doc, sent, self.m.END),
+                                                                  kind == TOKEN)
         for l, block in enumerate(self.m.blocks):
             if gr is not None and l < self.m.ngram_layers:
                 x = x + self.m.ngram_lambdas[l] * gr
@@ -667,10 +671,10 @@ class SummaryCache:
         token'i (ya da EOS) logit'i."""
         n = self.i                                                          # cumlenin token sayisi
         self.n_z += 1
-        self.prev = END_ID
+        self.prev = self.m.END
         self.i = 0
         self.t += 1
-        x = self.m.E(torch.tensor([[END_ID]], device=self.dev))
+        x = self.m.E(torch.tensor([[self.m.END]], device=self.dev))
         self.logits = self._out(self._step(x, self.n_z, read_sentence=True, summary=True), summary=True)
         self.sen_k = [None] * len(self.sen_k)                               # Z_k'den SONRA
         self.sen_v = [None] * len(self.sen_v)
@@ -743,7 +747,7 @@ def _static_step(m, glob, f32, smax, w, z, live, sum_len, sen_len, tt, prev, K, 
     (girdi E(END), ozete yazilir, cumleyi okur), degilse token w (cumleye yazilir).  live False satirin sayaclari ilerlemez
     (yazdigi bos yuva maskede; toplu uretimde biten satir).  Konum: token ozet + cumle sayaci, Z ozet sayaci (=
     SummaryCache'in n_z + i / n_z'si), glob gercek konum tt.  prev: bigram'in onceki token'i (Z adiminda END'e doner)."""
-    x = m.E(torch.where(z, torch.full_like(w, END_ID), w))[:, None]
+    x = m.E(torch.where(z, torch.full_like(w, m.END), w))[:, None]
     gr = None if m.ngram is None else m._ngram(w, prev, ~z)[:, None]
     pos = torch.where(z, sum_len, sum_len + sen_len)[:, None]
     slot = torch.where(z, sum_len, smax + sen_len)
@@ -769,7 +773,7 @@ def _static_step(m, glob, f32, smax, w, z, live, sum_len, sen_len, tt, prev, K, 
     sen_len.copy_(torch.where(live, torch.where(z, torch.zeros_like(sen_len), sen_len + 1), sen_len))
     sum_len.add_((z & live).long())
     tt.add_(live.long())
-    prev.copy_(torch.where(live, torch.where(z, torch.full_like(w, END_ID), w), prev))
+    prev.copy_(torch.where(live, torch.where(z, torch.full_like(w, m.END), w), prev))
 
 
 class StaticCache:
@@ -810,9 +814,9 @@ class StaticCache:
         up = lambda n: next(t for k in range(40) for t in (b << k, (3 * b // 2) << k) if t >= n)  # noqa: E731
         rows = []
         for sents, op in zip(prompts, opens):
-            tok, kind, pos, sent = [EOS_ID], [BOS], [0], [-1]
+            tok, kind, pos, sent = [self.m.EOS], [BOS], [0], [-1]
             for k_, x in enumerate(sents):
-                tok += list(x) + [END_ID]                                   # Z_k girdisi E(END)
+                tok += list(x) + [self.m.END]                               # Z_k girdisi E(END)
                 kind += [TOKEN] * len(x) + [ZTOK]
                 pos += [k_ + 1 + i for i in range(len(x))] + [k_ + 1]
                 sent += [k_] * (len(x) + 1)
@@ -830,8 +834,9 @@ class StaticCache:
         doc = torch.where(kind == PAD, -1, 0)
         local = _dense(model_z_read_mask(kind, doc, sent), B, Tp, dev)[:, None]
         real = torch.arange(Tp, device=dev).expand(B, Tp)
-        x = self.m.E(torch.where(kind == ZTOK, torch.full_like(tok, END_ID), tok))
-        gr = None if self.m.ngram is None else self.m._ngram(tok, bigram_prev(tok, kind, doc, sent), kind == TOKEN)
+        x = self.m.E(torch.where(kind == ZTOK, torch.full_like(tok, self.m.END), tok))
+        gr = None if self.m.ngram is None else self.m._ngram(tok, bigram_prev(tok, kind, doc, sent, self.m.END),
+                                                             kind == TOKEN)
         self.glob = [l >= L - self.m.global_layers for l in range(L)]
         ks, vs = [], []
         for l, block in enumerate(self.m.blocks):
@@ -869,7 +874,7 @@ class StaticCache:
                 vb[r, :, self.smax:self.smax + len(i_o)] = vv[r][:, i_o]
             self.K.append(kb)
             self.V.append(vb)
-        prev = [r[0][-1] if r[5] else END_ID for r in rows]             # bigram: acik cumlenin son token'i
+        prev = [r[0][-1] if r[5] else self.m.END for r in rows]             # bigram: acik cumlenin son token'i
         self.state = (lt(nsum), lt(sen), lt(T), lt(prev))               # sum_len, sen_len, tt, prev
         self.w, self.z = lt([0] * B), torch.zeros(B, dtype=torch.bool, device=dev)
         self.live = torch.ones(B, dtype=torch.bool, device=dev)
@@ -942,4 +947,4 @@ class StaticCache:
     @torch.no_grad()
     def close_sentence(self):
         """Cumle bitti: Z_k ozete -> sonraki cumlenin ilk token'i (ya da EOS) logit'i (tek satir)."""
-        return self.step_rows([END_ID], [True], [True])[0]
+        return self.step_rows([self.m.END], [True], [True])[0]

@@ -14,6 +14,9 @@ Hikaye duzeni (iki model AYNI konum ve hedef; belge 22 §3): EOS(BOS) s_1 END s_
     hedef: BOS -> s_1'in ilk token'i; s_k'nin token'i -> sonraki ya da END; END_k -> s_(k+1)'in ilk token'i ya da EOS.
     layout model_z: END_k'nin yerinde ZTOK (token 0, girdisi E(END); ayri z token'i yok, dizi ayni boy); konum (RoPE):
     transformer hikaye ici sira, model_z mantiksal (BOS 0, s_k'nin i. token'i (k-1)+i, Z_k k; k ve i 1'den).
+Sozluk (belge 96; kullanici, 9 Ekim: "ama o kadar büyük sözlüğe gerek var mı ?"): Vocab (GPT2 varsayilan; ASCII
+karakter duzeyi, matematik verisi).  Veri klasorunde vocab.json varsa sozluk ondan (data_vocab), yoksa GPT2; ham akis
+<stream_root>/<vocab.stream_dir>/<split>.npy.  GPT-2 yolu birebir ayni (sabitler ayni).
 Drive'a bir kez (kural 9), <out>/:  <split>_sentence_offsets.npy (int64 (N, 2): ham akista [bas, son)), <split>_story_
 offsets.npy (int64 H+1: hikayenin ilk cumlesi), <split>_boundaries.json, train_pack_plan_e1.npz, exam_pack_plan.npz,
 train_token_counts.npy (token_counts).
@@ -31,11 +34,68 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-EOS_ID, END_ID, VOCAB = 50256, 50257, 50258
+EOS_ID, END_ID, VOCAB = 50256, 50257, 50258                    # GPT-2 (+ END); GPT2 sozlugunun sayilari
 ROW_LEN, BATCH_ROWS = 2048, 32
 CHUNK = 20_000_000          # sinir hesabi bu kadar token'lik parcalarla (hikaye sinirinda)
 MAX_SENTENCE_TOKENS = 128   # web profili: daha uzun cumle bolunur (belge 47 s2)
 EXAM_STORIES = 1000         # sinav alt kumesi (model_y exam_simplestories.exam_rows ile ayni kural)
+
+
+@dataclass(frozen=True)
+class Vocab:
+    """Sozluk: size cikis sutunu (token'lar + EOS + END), eos (BOS da bu), end, stream_dir ham akis alt klasoru; rows E
+    satiri (64'un kati, sozluk dolgusu belge 89)."""
+    name: str
+    size: int
+    eos: int
+    end: int
+    stream_dir: str
+
+    @property
+    def rows(self):
+        return -(-self.size // 64) * 64
+
+
+GPT2 = Vocab("gpt2", VOCAB, EOS_ID, END_ID, "gpt2")
+ASCII = Vocab("ascii", 97, 95, 96, "ascii")       # 95 yazdirilabilir ASCII (kod - 32) + EOS + END; E 128 satir
+VOCABS = {v.name: v for v in (GPT2, ASCII)}
+
+
+def data_vocab(data_dir):
+    """Veri klasoru -> Vocab: <data_dir>/vocab.json ("name") varsa o, yoksa GPT2 (eski klasorler)."""
+    p = os.path.join(data_dir, "vocab.json") if data_dir else ""
+    return VOCABS[json.load(open(p, encoding="utf-8"))["name"]] if p and os.path.exists(p) else GPT2
+
+
+class AsciiTokenizer:
+    """ASCII sozlugu icin tokenizers.Tokenizer arayuzunun kullanilan kismi: encode(metin).ids, decode(ids) (EOS / END
+    atilir), get_vocab_size, token_to_id."""
+
+    class _Enc:
+        def __init__(self, ids):
+            self.ids = ids
+
+    def encode(self, text, add_special_tokens=False):
+        ids = [ord(c) - 32 for c in text]
+        assert all(0 <= i < 95 for i in ids), "yazdirilabilir ASCII disi karakter"
+        return self._Enc(ids)
+
+    def decode(self, ids):
+        return "".join(chr(int(i) + 32) for i in ids if 0 <= int(i) < 95)
+
+    def get_vocab_size(self):
+        return ASCII.size
+
+    def token_to_id(self, s):
+        return {"<|endoftext|>": ASCII.eos, "<|end|>": ASCII.end}.get(s)
+
+
+def load_tokenizer(stream_root, vocab=GPT2):
+    """Sozlugun tokenizer'i: GPT2 <stream_root>/gpt2/tokenizer.json, ASCII AsciiTokenizer."""
+    if vocab.name == "ascii":
+        return AsciiTokenizer()
+    from tokenizers import Tokenizer
+    return Tokenizer.from_file(os.path.join(stream_root, vocab.stream_dir, "tokenizer.json"))
 
 
 class Kind:
@@ -438,7 +498,9 @@ class TokenStories:
     (main yazdiysa train + valid en uzunu; z konum anahtari bundan, belge 22)."""
 
     def __init__(self, stream_root, data_dir, split):
-        self.stream = np.load(os.path.join(stream_root, "gpt2", split + ".npy"), mmap_mode="r")
+        self.vocab = data_vocab(data_dir)                                 # vocab.json yoksa GPT2
+        self.answer_only = False                                         # True: yalniz son cumle hedefi (build_batch)
+        self.stream = np.load(os.path.join(stream_root, self.vocab.stream_dir, split + ".npy"), mmap_mode="r")
         self.sent = np.load(os.path.join(data_dir, split + "_sentence_offsets.npy"))
         self.story = np.load(os.path.join(data_dir, split + "_story_offsets.npy"))
         self.meta = json.load(open(os.path.join(data_dir, split + "_boundaries.json"), encoding="utf-8"))
@@ -558,8 +620,11 @@ def build_batch(stories, row_stories_list, layout, device="cpu", row_len=ROW_LEN
     carry (belge 81b, 83; model_z): dict(gpos (hikaye basina gruptaki sira), memory, m_max).  Gruptaki sonraki parcanin
     oncesi: son Z'nin hedefi sonraki parcanin ilk token'i (FIRST).  memory: devam parcasi (gpos > 0; satir basinda) BOS'suz,
     mantiksal konum + onceki parcalarin cumle sayisi, gercek konum (real_pos) + onceki parcalarin boyu; mem_rows / mem_cols
-    onceki parcalarin BOS + Z sutunlari (sirayla)."""
+    onceki parcalarin BOS + Z sutunlari (sirayla).  Sozluk stories.vocab'dan (yoksa GPT2).  stories.answer_only (belge 96):
+    hedef yalniz son cumlede (cevap): son cumlenin token'lari, onun END'i (EOS) ve onceki END / Z (cevabin ilk token'i)."""
     assert layout in ("transformer", "model_z")
+    voc = getattr(stories, "vocab", GPT2)
+    EOS_ID, END_ID = voc.eos, voc.end                                   # noqa: N806  (GPT2'de modul sabitleri)
     B = len(row_stories_list)
     per_row = np.array([len(r) for r in row_stories_list])
     sid = np.full((B, per_row.max()), -1, np.int64)
@@ -613,6 +678,12 @@ def build_batch(stories, row_stories_list, layout, device="cpu", row_len=ROW_LEN
         c = np.asarray(cont, dtype=bool)[h]
         target[hrow[c], last[c]] = -100
         tkind[hrow[c], last[c]] = -1
+    if getattr(stories, "answer_only", False):                         # cevap disi hedefler -100 (belge 96)
+        assert gpos is None, "answer_only ile carry kurulmadi"
+        keep = np.zeros((B, row_len), bool)
+        keep[trow, tcol] = sk[ts] == n[sh[ts]] - 1
+        keep[erow, ecol] = sk >= n[sh] - 2
+        target[~keep], tkind[~keep] = -100, -1
     noff, loff = np.zeros(len(h), np.int64), np.zeros(len(h), np.int64)
     if gpos is not None:                                                 # gruptaki sonraki parca: son Z -> ilk token'i
         nxt = np.minimum(h + 1, len(gpos) - 1)

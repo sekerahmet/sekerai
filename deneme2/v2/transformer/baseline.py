@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "common"))
-from data import END_ID, EOS_ID, ROW_LEN, VOCAB  # noqa: E402
+from data import GPT2, ROW_LEN, VOCAB  # noqa: E402
 
 
 def rope(x, pos, base=10000.0):
@@ -94,15 +94,17 @@ class Block(torch.nn.Module):
 
 
 class BaselineTransformer(torch.nn.Module):
-    def __init__(self, d=512, layers=8, heads=8, kv_heads=None, vocab_rows=VOCAB):
+    def __init__(self, d=512, layers=8, heads=8, kv_heads=None, vocab_rows=VOCAB, vocab=GPT2):
         """kv_heads: her katmanda k / v head sayisi (GQA kiyasi; varsayilan heads).  vocab_rows: E satir sayisi (>= VOCAB;
-        dolgu satirlari sifir, ilk agirlik VOCAB'li modelle ayni)."""
+        dolgu satirlari sifir, ilk agirlik VOCAB'li modelle ayni).  vocab: data.Vocab (belge 96; END / EOS / cikis sutunu)."""
         super().__init__()
-        self.END, self.EOS, self.row_len = END_ID, EOS_ID, ROW_LEN
+        self.vocab = vocab
+        self.END, self.EOS, self.row_len = vocab.end, vocab.eos, ROW_LEN
+        n = vocab.size
         hidden = -(-int(8 * d / 3) // 8) * 8
-        assert vocab_rows >= VOCAB, "vocab_rows >= VOCAB"
-        self.E = torch.nn.Embedding(VOCAB, d)
-        if vocab_rows > VOCAB:                                   # kurulum RNG'si VOCAB'li modelle ayni; dolgu sifir
+        assert vocab_rows >= n, "vocab_rows >= vocab.size"
+        self.E = torch.nn.Embedding(n, d)
+        if vocab_rows > n:                                       # kurulum RNG'si dolgusuz modelle ayni; dolgu sifir
             self.E = torch.nn.Embedding(vocab_rows, d, _weight=torch.zeros(vocab_rows, d))
         self.blocks = torch.nn.ModuleList(Block(d, heads, hidden, kv_heads) for _ in range(layers))
         self.norm = torch.nn.RMSNorm(d)
@@ -110,9 +112,9 @@ class BaselineTransformer(torch.nn.Module):
             if p.dim() == 2:
                 std = 0.02 / math.sqrt(2 * layers) if name.endswith(("proj.weight", "down.weight")) else 0.02
                 with torch.no_grad():
-                    (p[:VOCAB] if name == "E.weight" else p).normal_(0.0, std)   # dolgu satiri rastgele sayi cekmez
+                    (p[:n] if name == "E.weight" else p).normal_(0.0, std)   # dolgu satiri rastgele sayi cekmez
         with torch.no_grad():
-            self.E.weight[VOCAB:].zero_()
+            self.E.weight[n:].zero_()
 
     def max_positions(self):
         """Uretimde hikaye basina konum siniri: egitim satiri row_len (belge 89b)."""
@@ -136,7 +138,7 @@ class BaselineTransformer(torch.nn.Module):
 
     def _logits(self, h):
         """h (..., d) -> cikis h @ E^T (bagli embedding)."""
-        return (h @ self.E.weight.T)[..., :VOCAB]
+        return (h @ self.E.weight.T)[..., :self.vocab.size]
 
     def loss_per_target(self, batch, attn=None, chunk=4096):
         """-> nll (K,), pred (K,), target_kind (K,) (hedefli konumlar, satir sirasiyla; belge 21 s7 sozlesmesi)."""
@@ -195,7 +197,7 @@ class BaselineTransformer(torch.nn.Module):
             if full or (stop_when is not None and stop_when(gen)):
                 break
             opened = False
-            w = yield END_ID
+            w = yield self.END
             used += 1
         return gen, ended, eos
 
@@ -204,7 +206,8 @@ class BaselineTransformer(torch.nn.Module):
         _row_rule (= tek istem generate); biten satir canli degil.  -> generate ciktisi (istem sirasiyla)."""
         limit = self.max_positions()
         opened = [bool(open_last and s) for s in prompts]
-        seqs = [([EOS_ID] + [t for s in p for t in list(s) + [END_ID]])[:-1 if o else None] for p, o in zip(prompts, opened)]
+        seqs = [([self.EOS] + [t for s in p for t in list(s) + [self.END]])[:-1 if o else None]
+                for p, o in zip(prompts, opened)]
         cache = StaticCache(self, max(1, min(max_sentences * (max_tokens + 1) + 1, limit - min(map(len, seqs)))))
         am = cache.prefill_rows(seqs).float().argmax(-1).tolist()
         rules, act, res = [], [], [None] * len(prompts)
@@ -249,7 +252,7 @@ class BaselineTransformer(torch.nn.Module):
             return out
         for sents in prompts:
             opened = bool(open_last and sents)
-            seq = [EOS_ID] + [t for s in sents for t in list(s) + [END_ID]]
+            seq = [self.EOS] + [t for s in sents for t in list(s) + [self.END]]
             seq = seq[:-1] if opened else seq
             used = len(seq)
             if STATIC_DECODE:
@@ -293,7 +296,7 @@ class BaselineTransformer(torch.nn.Module):
                 if full or (stop_when is not None and stop_when(gen)):
                     break
                 opened = False
-                logits = step(END_ID)
+                logits = step(self.END)
                 used += 1
             out.append((gen, ended, eos))
         return out

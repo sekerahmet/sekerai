@@ -54,6 +54,11 @@ kimliginden (alan yoksa 0); kapisiz checkpoint kapili surdurulmez (DUR).  --attn
 ikinci kolu da ekle"; "onaylıyorum, d // 64 yap"): kapi girdisi n1(x)'in ilk d // 64 boyutu, W (heads, d // 64) (speedrun
 124M tarifi; belge 88a s4.3, 90a; d768'de 12); d < 64 DUR.  Varsayilan auto (kullanici, 8 Ekim: "gate 2 varsayılan"):
 model_z ve d >= 64 ise 2, aksi halde 0.
+Sozluk (belge 96; kullanici, 9 Ekim: "ama o kadar büyük sözlüğe gerek var mı ?"): veri klasorunun vocab.json'u (yoksa
+GPT-2; data.data_vocab); E satiri yeni kosuda GPT-2'de VOCAB_ROWS, digerinde vocab.rows; kimlikte vocab (alan yoksa gpt2).
+--answer_only 1 (belge 96; matematik verisi: belge = soru + cevap): egitim hedefi yalniz son cumle (cevap; data.build_batch);
+sinav (exam_scores) da yalniz cevap hedeflerinde, bpb paydasi cevap bayti (<sd>/valid_answer_bytes.npy); carry ile DUR.
+Kimlikte.
 --stop_step N (kullanici, 8 Ekim): takvim degismeden adim N'de durur; checkpoint.pt + agent.pt + results.json (finished
 False, stopped_at, readings_skipped "stop_step"), son sinav ve okuma yok; --resume 1 kaldigi yerden.
 Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunluk sinirinda, epok sonunda ve bitiste;
@@ -135,7 +140,7 @@ READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_ge
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
-            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp")
+            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "vocab", "answer_only")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -162,18 +167,19 @@ def _sha256(path):
 
 
 def _local_copy(stream_root, local, data_dir, splits=("train", "valid")):
-    """<stream_root>/gpt2/<split>.npy -> <local>/gpt2/<split>.npy; varsa ve sha256 tutuyorsa yeniden kopyalanmaz.  sha256,
-    sinirlarin hesaplandigi akisinki (<split>_boundaries.json) olmali: kopya = sinirlarin akisi, bayt bayt.  Yer yetmezse
-    kopyadan once DURUR (10BT akisi 19,9 GB)."""
-    os.makedirs(os.path.join(local, "gpt2"), exist_ok=True)
-    pairs = [(os.path.join(stream_root, "gpt2", sp + ".npy"), os.path.join(local, "gpt2", sp + ".npy")) for sp in splits]
+    """<stream_root>/<sd>/<split>.npy -> <local>/<sd>/<split>.npy (sd: sozlugun akis klasoru, GPT-2'de gpt2); varsa ve
+    sha256 tutuyorsa yeniden kopyalanmaz.  sha256, sinirlarin hesaplandigi akisinki (<split>_boundaries.json) olmali: kopya =
+    sinirlarin akisi, bayt bayt.  Yer yetmezse kopyadan once DURUR (10BT akisi 19,9 GB)."""
+    sd = D.data_vocab(data_dir).stream_dir
+    os.makedirs(os.path.join(local, sd), exist_ok=True)
+    pairs = [(os.path.join(stream_root, sd, sp + ".npy"), os.path.join(local, sd, sp + ".npy")) for sp in splits]
     need = sum(os.path.getsize(s) for s, d in pairs if not (os.path.exists(d) and os.path.getsize(d) == os.path.getsize(s)))
-    free = shutil.disk_usage(os.path.join(local, "gpt2")).free
+    free = shutil.disk_usage(os.path.join(local, sd)).free
     if need > free:
         sys.exit("DUR: --local %s: kopya icin %.1f GB gerekli, %.1f GB bos" % (local, need / 1e9, free / 1e9))
     for split in splits:
         want = json.load(open(os.path.join(data_dir, split + "_boundaries.json"), encoding="utf-8"))["stream_sha256"]
-        src, dst = os.path.join(stream_root, "gpt2", split + ".npy"), os.path.join(local, "gpt2", split + ".npy")
+        src, dst = os.path.join(stream_root, sd, split + ".npy"), os.path.join(local, sd, split + ".npy")
         if os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(src) and _sha256(dst) == want:
             continue
         os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -269,7 +275,8 @@ def _build(args, dev):
         sys.path.insert(0, os.path.join(root, "transformer"))
         from baseline import BaselineTransformer
         model = BaselineTransformer(args.d, args.layers, args.heads, kv_heads=getattr(args, "glob_kv_heads", 0) or None,
-                                    vocab_rows=getattr(args, "vocab_rows", D.VOCAB))
+                                    vocab_rows=getattr(args, "vocab_rows", D.VOCAB),
+                                    vocab=D.VOCABS[getattr(args, "vocab", "gpt2")])
         model, mask_fn, layout = model.to(dev), R.document_mask, "transformer"
     else:
         sys.path.insert(0, os.path.join(root, "model_z"))
@@ -281,7 +288,8 @@ def _build(args, dev):
                                     attn_gate=int(getattr(args, "attn_gate", 0) or 0),
                                     ngram_rows=getattr(args, "ngram_embed", 0) or 0,
                                     ngram_layers=getattr(args, "ngram_layers", 0) or 0,
-                                    ngram_sparse=bool(getattr(args, "ngram_sparse", 0)))
+                                    ngram_sparse=bool(getattr(args, "ngram_sparse", 0)),
+                                    vocab=D.VOCABS[getattr(args, "vocab", "gpt2")])
         model, mask_fn, layout = model.to(dev), model.mask_fn, "model_z"
     return model, mask_fn, layout
 
@@ -367,10 +375,10 @@ def _step(model, batch, mask_fn, opt, cuda, timer=None, cont=None, mtp=None):
             timer[0].record()
         extra = None
         if mtp is None:
-            loss = main = R.output_loss(h.flatten(0, 1), model.E.weight, batch.target.flatten())
+            loss = main = R.output_loss(h.flatten(0, 1), model.E.weight, batch.target.flatten(), model.vocab.size)
         else:
             loss, main, ce = R.output_loss_mtp(h.flatten(0, 1), model.E.weight, batch.target.flatten(),
-                                               mtp[0].flatten(0, 1), mtp[1])
+                                               mtp[0].flatten(0, 1), mtp[1], model.vocab.size)
             extra = dict(mtp_ce=ce.detach(), mtp_steps=1)
         if cont is not None:
             with torch.no_grad():
@@ -592,6 +600,8 @@ def _args(argv):
     ap.add_argument("--stop_step", type=int, default=None,
                     help="takvim (WSD, epok plani) degismeden adim N'de dur: checkpoint.pt (surdurulebilir) + agent.pt + "
                          "results.json (finished False, stopped_at N); son sinav ve okuma yok (kullanici, 8 Ekim)")
+    ap.add_argument("--answer_only", type=int, default=0, choices=(0, 1),
+                    help="egitim hedefi yalniz her belgenin son cumlesi (cevap; matematik verisi, belge 96); kimlikte")
     ap.add_argument("--checkpoint_minutes", type=float, default=10,
                     help="en cok bu kadar duvar saati kaybi (sinav dahil); surdurmede degistirilebilir")
     args = ap.parse_args(argv)
@@ -601,7 +611,11 @@ def _args(argv):
         if args.resume and os.path.exists(ckpt) else None               # varsayilan degisse de kosu kendi ayariyla surer
     for k in args.defaulted if was is not None else ():
         setattr(args, k, was.get(k, 0 if k in ("glob_kv_heads", "attn_gate") or k.startswith("ngram") or k == "mtp" else None))
-    args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
+    voc = D.data_vocab(args.data)                                        # sozluk veriden (vocab.json; yoksa GPT-2)
+    args.vocab = voc.name
+    args.vocab_rows = (VOCAB_ROWS if voc is D.GPT2 else voc.rows) if was is None else was.get("vocab_rows", D.VOCAB)
+    if args.answer_only and (args.carry_summaries or args.carry_group):
+        sys.exit("DUR: --answer_only ile --carry_summaries / --carry_group kurulmadi")
     if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
         args.optimizer = DEFAULT_OPTIMIZER
     if args.global_layers is None:
@@ -699,7 +713,9 @@ def main(argv=None):
     stream = _local_copy(args.stream, args.local, args.data) if args.local else args.stream
     log("ham akis: %s%s" % (stream, " (yerel kopya, sha256 sinir dosyasiyla ayni)" if args.local else ""))
     train = D.TokenStories(stream, args.data, "train")
+    train.answer_only = bool(args.answer_only)                           # hedef yalniz son cumle (cevap)
     valid = D.TokenStories(stream, args.data, "valid")
+    valid.answer_only = train.answer_only
     if args.carry_group and train.continues is None:
         sys.exit("DUR: --carry_group: veri parcali degil (train_story_continues.npy yok)")
     plans, per_epoch, row_len, total = _schedule(train, args.data, args.seed, args.epochs, args.steps, args.carry_group)
@@ -716,10 +732,10 @@ def main(argv=None):
     down = _decay_start(total)
     ep = np.load(os.path.join(args.data, "exam_pack_plan.npz"))
     exam_plan = (ep["row_offsets"], ep["row_stories"])
-    story_bytes = np.load(os.path.join(args.stream, "gpt2", "valid_bytes.npy"))
+    story_bytes = np.load(os.path.join(args.stream, valid.vocab.stream_dir, "valid_answer_bytes.npy" if args.answer_only
+                                       else "valid_bytes.npy"))                # answer_only: bpb cevap baytina
     assert len(story_bytes) == valid.n, "valid_bytes hikaye sayisi valid ile ayni degil"
-    from tokenizers import Tokenizer
-    tok = Tokenizer.from_file(os.path.join(args.stream, "gpt2", "tokenizer.json"))
+    tok = D.load_tokenizer(args.stream, valid.vocab)
     model, mask_fn, layout = _build(args, dev)
     model.row_len = row_len                                              # uretim konum siniri, carry parca boyu
     last = None
@@ -738,7 +754,8 @@ def main(argv=None):
                  summaries_last=args.summaries_last, glob_kv_heads=args.glob_kv_heads, carry_summaries=args.carry_summaries,
                  carry_group=args.carry_group, vocab_rows=args.vocab_rows, attn_gate=args.attn_gate,
                  ngram_embed=args.ngram_embed, ngram_layers=args.ngram_layers, ngram_sparse=args.ngram_sparse,
-                 mtp=args.mtp)
+                 mtp=args.mtp, vocab=args.vocab,
+                 answer_only=args.answer_only)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -758,7 +775,7 @@ def main(argv=None):
         if _archived(was):                                                # eski / kaldirilan yol (belge 77)
             sys.exit("DUR: " + _archived(was))
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
-               "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0,
+               "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "vocab": "gpt2", "answer_only": 0,
                **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])

@@ -72,48 +72,49 @@ def block_mask(batch, mask_fn):
     return create_block_mask(mod, B, None, T, S, device=dev, BLOCK_SIZE=ATTN_BLOCK, _compile=dev.type == "cuda")
 
 
-def _output_loss(h, weight, target):
+def _output_loss(h, weight, target, n_out=VOCAB):
     lg = (h @ weight.T).float()
-    if lg.shape[1] > VOCAB:                                              # sozluk dolgusu: dolgu sutunu -inf (belge 89)
-        lg = lg.masked_fill(torch.arange(lg.shape[1], device=lg.device) >= VOCAB, float("-inf"))
+    if lg.shape[1] > n_out:                                              # sozluk dolgusu: dolgu sutunu -inf (belge 89)
+        lg = lg.masked_fill(torch.arange(lg.shape[1], device=lg.device) >= n_out, float("-inf"))
     return F.cross_entropy(lg, target, ignore_index=-100)
 
 
 _COMPILED = {}
 
 
-def output_loss(h, weight, target):
-    """h (N, d), weight (V, d), target (N,) (-100 hedefsiz) -> hedefli konumlarda ortalama CE (logit fp32).
-    CUDA'da derlenmis (bir kez sarilir), CPU'da eager (Windows'ta inductor icin MSVC yok)."""
+def output_loss(h, weight, target, n_out=VOCAB):
+    """h (N, d), weight (V, d), target (N,) (-100 hedefsiz) -> hedefli konumlarda ortalama CE (logit fp32).  n_out:
+    sozlugun gercek sutunu (model.vocab.size; fazlasi dolgu, -inf).  CUDA'da derlenmis (bir kez sarilir), CPU'da eager
+    (Windows'ta inductor icin MSVC yok)."""
     if not h.is_cuda:
-        return _output_loss(h, weight, target)
+        return _output_loss(h, weight, target, n_out)
     if "output_loss" not in _COMPILED:
         _COMPILED["output_loss"] = torch.compile(_output_loss, dynamic=False)
-    return _COMPILED["output_loss"](h, weight, target)
+    return _COMPILED["output_loss"](h, weight, target, n_out)
 
 
-def _output_loss_mtp(h, weight, target, extra, w):
+def _output_loss_mtp(h, weight, target, extra, w, n_out=VOCAB):
     """Ana CE output_loss'unkiyle ayni (bit); her ek hedef ayri F.cross_entropy (sum) ayni logit'ten: her cagri tek
     tuketicili, derleyici tabandaki CE gibi birlestirir (belge 90c s11, ce_prof: taban +0,71 ms; log_softmax tablosu
     +14,3 ms / +13 GB, where karsilastirmasi +17,3 ms / +19,6 GB)."""
     lg = (h @ weight.T).float()
-    if lg.shape[1] > VOCAB:
-        lg = lg.masked_fill(torch.arange(lg.shape[1], device=lg.device) >= VOCAB, float("-inf"))
+    if lg.shape[1] > n_out:
+        lg = lg.masked_fill(torch.arange(lg.shape[1], device=lg.device) >= n_out, float("-inf"))
     main = F.cross_entropy(lg, target, ignore_index=-100)
     ce = torch.stack([F.cross_entropy(lg, extra[:, k], ignore_index=-100, reduction="sum") for k in range(extra.shape[1])])
     return main + (w * ce).sum() / (target >= 0).sum(), main, ce / (extra >= 0).sum(0).clamp_min(1)
 
 
-def output_loss_mtp(h, weight, target, extra, w):
+def output_loss_mtp(h, weight, target, extra, w, n_out=VOCAB):
     """Ayni-logit MTP (modded-nanogpt kayit 53, ek parametresiz; belge 88c, 90c): h (N, d), target (N,), extra (N, K)
     k+1 sonraki hedefler (-100 hedefsiz), w (K,) agirlik tensoru -> (kayip, ana CE, ek CE (K,) ortalamalari).  kayip =
     [sum CE_0 + sum_k w_k sum CE_k] / ana hedef sayisi (resmi kodun sum'i, ana terim output_loss ile ayni olcek); gecersiz
     ek hedef 0 katki (payda degismez, resmi kod gibi).  CUDA'da derlenmis, CPU'da eager."""
     if not h.is_cuda:
-        return _output_loss_mtp(h, weight, target, extra, w)
+        return _output_loss_mtp(h, weight, target, extra, w, n_out)
     if "output_loss_mtp" not in _COMPILED:
         _COMPILED["output_loss_mtp"] = torch.compile(_output_loss_mtp, dynamic=False)
-    return _COMPILED["output_loss_mtp"](h, weight, target, extra, w)
+    return _COMPILED["output_loss_mtp"](h, weight, target, extra, w, n_out)
 
 
 def mtp_weights(step, total, n):

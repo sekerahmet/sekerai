@@ -6,7 +6,7 @@ eski kimlik reddi, etiketteki kodla esdegerlik dahil; ~3 dk), drive (valid akisi
 web profili, parca / continues, make_fineweb, FineWeb ile train, knowledge_exam, generate open_last, d 768).  Teshis araclari:
 diag/tests_diag.py.
 
-    python tests_v2.py [--only data,pack,recipe,metrics,integration,train,drive,tokens,fineweb,mtp]
+    python tests_v2.py [--only data,pack,recipe,metrics,integration,train,drive,tokens,fineweb,mtp,math]
 mtp (deneme/mtp, belge 90c): --mtp takvimi, ek hedefler, kayip, sizinti, train uctan uca (~1 dk).
 """
 import torch
@@ -2695,8 +2695,164 @@ def t_mtp():
          TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT, TR.MTP_DEFAULT) = saved
 
 
+_MATH_TRAIN = {
+    "arithmetic__add_or_sub": [("What is 5 + 3?", "8"), ("Calculate -2 - 7.", "-9"), ("Add 0.5 and 12.", "12.5"),
+                               ("What is 10 - 4?", "6"), ("Sum 3 and 3.", "6"), ("Work out 1 + 1.", "2")],
+    "algebra__linear_1d": [("Solve 2*x + 4 = 10 for x.", "3"), ("Solve -3*k = 9 for k.", "-3"),
+                           ("Let w = 2. Solve w*b = 8 for b.", "4"), ("Solve 5*y - 5 = 0 for y.", "1")],
+    "numbers__is_prime": [("Is 7 prime?", "True"), ("Is 12 a prime number?", "False"), ("Is 97 prime?", "True"),
+                          ("Is 21 prime?", "False")],
+}
+_MATH_TEST = {
+    "interpolate": {"arithmetic__add_or_sub": [("What is 5 + 3?", "8"), ("What is 9 - 2?", "7")],   # ilki train'de
+                    "algebra__linear_1d": [("Let t = 1. Solve 4*a = 8 for a.", "2")],
+                    "numbers__is_prime": [("Is 11 prime?", "True"), ("Is 15 prime?", "False")]},
+    "extrapolate": {"arithmetic__add_or_sub_big": [("What is 123456 + 654321?", "777777")]},
+}
+
+
+def _math_src(root):
+    """Elle yazilmis Mathematics Dataset agaci (belgelenen bicim: soru satiri, cevap satiri; train-hard bos)."""
+    for d, mods in (("train-easy", _MATH_TRAIN), ("train-medium", _MATH_TRAIN), ("train-hard", {}), *_MATH_TEST.items()):
+        os.makedirs(os.path.join(root, d), exist_ok=True)
+        for m, pairs in mods.items():
+            open(os.path.join(root, d, m + ".txt"), "w", newline="\n").write("".join("%s\n%s\n" % p for p in pairs))
+    return root
+
+
+def t_math():
+    """Mathematics Dataset (belge 96): make_math (elle yazilmis satirlar; soru one / split) -> akis = soru + cevap + EOS,
+    cumle sinirlari, modul, bayt, sinav temizligi (train'de soru / cift, en sik cevap tabani, extrapolate _big -> train
+    modulu), yazdirilabilir disi DUR; ASCII build_batch (EOS 95, END 96) ve answer_only hedefleri = basvuru; train.py iki
+    model ASCII sozluguyle (E 128 satir, cikis 97 sutun, dolgu gradyani 0, kesilip surdurulen bit, load_run, uretim < 97);
+    math_exam (exact, taban, cevap kaybi / bpb)."""
+    import traceback
+    import make_math as MM
+    import recipe as R
+    import train as TR
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
+    import generate_readings as GR
+    import math_exam as ME
+    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS)
+    try:
+        src = _math_src(os.path.join(TMP, "math_src"))
+        outs = {}
+        for mode in ("one", "split"):
+            outs[mode] = os.path.join(TMP, "math_" + mode)
+            MM.main(["--src", src, "--out", outs[mode], "--question", mode, "--exam_per_module", "1"])
+        tok = D.AsciiTokenizer()
+        ok, info = True, []
+        for mode, out in outs.items():
+            meta = json.load(open(os.path.join(out, "math_meta.json")))
+            for split, docs in (("train", [(m, q, a) for m in sorted(_MATH_TRAIN) for d in ("e", "m")   # make_math sirasi
+                                           for q, a in _MATH_TRAIN[m]]),
+                                ("valid", [(m, q, a) for m in sorted(_MATH_TEST["interpolate"])
+                                           for q, a in _MATH_TEST["interpolate"][m]]),
+                                ("extrapolate", [(m, q, a) for m, v in _MATH_TEST["extrapolate"].items() for q, a in v])):
+                st = D.TokenStories(out, out, split)
+                mod = np.load(os.path.join(out, split + "_doc_module.npy"))
+                nb = np.load(os.path.join(out, "ascii", split + "_bytes.npy"))
+                eos = np.flatnonzero(np.asarray(st.stream) == D.ASCII.eos)
+                for i, (m, q, a) in enumerate(docs):
+                    ss = [tok.decode(s.tolist()) for s in st.sentences(i)]
+                    want = [q] if mode == "one" else MM.SPLIT_RE.split(q)
+                    ok &= ss == want + [a] and meta["modules"][int(mod[i])] == m and nb[i] == len(q) + len(a)
+                ok &= st.vocab is D.ASCII and len(eos) == len(docs) and st.n == len(docs)
+            info.append("%s: Let.. = %s" % (mode, [tok.decode(s.tolist()) for s in D.TokenStories(out, out, "valid")
+                                                   .sentences(1)]))
+        cl = json.load(open(os.path.join(outs["one"], "math_meta.json")))["cleanliness"]
+        bsrc = _math_src(os.path.join(TMP, "math_bad"))
+        with open(os.path.join(bsrc, "train-easy", "numbers__is_prime.txt"), "a", encoding="utf-8") as fh:
+            fh.write("Is 5 prim\u00e9?\nTrue\n")                        # ASCII disi karakter
+        bad = _raises(Exception, MM.main, ["--src", bsrc, "--out", os.path.join(TMP, "math_bad_out")])
+        check("math make_math: akis = soru + cevap (+ EOS), cumleler (one: soru tek; split: '. ' + buyuk harf), modul, bayt; "
+              "temizlik: train'de soru 1 / cift 1 (arithmetic), extrapolate _big -> arithmetic__add_or_sub, en sik cevap tabani "
+              "(is_prime True 0,5); ASCII disi karakter DUR", ok and cl["valid"]["arithmetic__add_or_sub"]["question_in_train"] == 1
+              and cl["valid"]["arithmetic__add_or_sub"]["pair_in_train"] == 1
+              and cl["valid"]["numbers__is_prime"]["most_frequent_answer_acc"] == 0.5
+              and cl["extrapolate"]["arithmetic__add_or_sub_big"]["train_module"] == "arithmetic__add_or_sub"
+              and bad, "; ".join(info))
+    except Exception:  # noqa: BLE001
+        check("math make_math", False, traceback.format_exc(limit=3))
+        return
+    try:
+        st = D.TokenStories(outs["split"], outs["split"], "train")
+        rows = [[0, 1, 2, 3], [4, 9, 13], [20]]
+        b0 = D.build_batch(st, rows, "model_z", "cpu", 128)
+        st.answer_only = True
+        b1 = D.build_batch(st, rows, "model_z", "cpu", 128)
+        bt = D.build_batch(st, rows, "transformer", "cpu", 128)
+        st.answer_only = False
+        bt0 = D.build_batch(st, rows, "transformer", "cpu", 128)
+        want = torch.full_like(b0.target, -100)                         # basvuru: son cumle + onceki END'in hedefi
+        for r in range(len(rows)):
+            for c in range(128):
+                k, s, d = int(b0.kind[r, c]), int(b0.sent[r, c]), int(b0.doc[r, c])
+                if d < 0 or k == D.Kind.BOS:
+                    continue
+                n = int((b0.doc[r] == d).logical_and(b0.kind[r] == D.Kind.ZTOK).sum())
+                if s == n - 1 or (k == D.Kind.ZTOK and s == n - 2):
+                    want[r, c] = b0.target[r, c]
+        check("math build_batch ASCII: BOS EOS 95, Z / END 96 (transformer END girdisi 96), son hedef EOS 95; answer_only "
+              "hedefleri = basvuru (son cumle + sorunun son Z'si), iki duzende ayni konumlar",
+              int(b0.tokens[0, 0]) == 95 and int((bt0.tokens == 96).sum()) == int((b0.kind == D.Kind.ZTOK).sum())
+              and int((b0.target == 95).sum()) == 8 and torch.equal(b1.target, want)
+              and torch.equal(b1.target >= 0, bt.target >= 0)
+              and torch.equal(bt.target[bt.target >= 0], b1.target[b1.target >= 0]),
+              "hedef %d / %d" % (int((b1.target >= 0).sum()), int((b0.target >= 0).sum())))
+    except Exception:  # noqa: BLE001
+        check("math build_batch", False, traceback.format_exc(limit=3))
+    try:
+        TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS = 4, 1, dict(max_sentences=2, max_tokens=8)
+        out = outs["one"]
+        base = ["--data", out, "--stream", out, "--device", "cpu", "--d", "64", "--layers", "2", "--heads", "4",
+                "--checkpoint_minutes", "0"]
+        runs, res = {}, {}
+        for m in ("model_z", "transformer"):
+            runs[m] = os.path.join(TMP, "runs", "math_" + m)
+            res[m] = TR.main(base + ["--model", m, "--steps", "6", "--answer_only", "1", "--out", runs[m]])
+        cmd = base + ["--model", "model_z", "--steps", "6", "--answer_only", "1"]
+        stopped, rb = _cut_and_resume(TR, cmd, os.path.join(TMP, "runs", "math_cut"))
+        st_ = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        sa, sb = st_(runs["model_z"]), st_(os.path.join(TMP, "runs", "math_cut"))
+        lm = GR.load_run(runs["model_z"], out, torch.device("cpu"))[0]
+        lt = GR.load_run(runs["transformer"], out, torch.device("cpu"))[0]
+        h = torch.randn(5, 64, requires_grad=True)
+        W = lm.E.weight.detach().clone().requires_grad_(True)
+        R.output_loss(h, W, torch.tensor([1, 2, 3, 96, 95]), lm.vocab.size).backward()
+        gen = lm.generate([[[40, 41]], [[50]]], 2, 6) + lt.generate([[[40, 41]], [[50]]], 2, 6)
+        ids = [t for g, _, _ in gen for s in g for t in s]
+        idt = {m: r["identity"] for m, r in res.items()}
+        check("math train: iki model ASCII sozluguyle kosar (kimlik vocab ascii, vocab_rows 128, answer_only 1), E 128 "
+              "satir, cikis 97 sutun; dolgu sutunlari gradyan 0; model_z kesilip surdurulen = kesintisiz (bit); load_run "
+              "ASCII kurar (bit); uretilen token < 97",
+              all(i["vocab"] == "ascii" and i["vocab_rows"] == 128 and i["answer_only"] == 1 for i in idt.values())
+              and tuple(sa["E.weight"].shape) == (128, 64) and lm._logits(torch.zeros(1, 64)).shape[-1] == 97
+              and float(W.grad[97:].abs().sum()) == 0 and float(W.grad[:97].abs().sum()) > 0
+              and stopped and all(torch.equal(sa[k], sb[k]) for k in sa)
+              and [w["loss"] for w in rb["log"]] == [w["loss"] for w in res["model_z"]["log"]]
+              and all(torch.equal(v, lm.state_dict()[k]) for k, v in sa.items()) and lm.vocab is D.ASCII
+              and lt.vocab is D.ASCII and all(0 <= t < 97 for t in ids),
+              "kayip %s / %s" % ([w["loss"] for w in res["model_z"]["log"]], [w["loss"] for w in res["transformer"]["log"]]))
+        ex = {m: ME.main(["--run", runs[m], "--data", out, "--device", "cpu", "--per_module", "0"]) for m in runs}
+        v = ex["model_z"]["splits"]["valid"]
+        check("math_exam: iki model, valid + extrapolate; modul basina n, exact [0, 1], taban (en sik cevap: valid is_prime "
+              "0,5, ortalama 1/6), cevap kaybi / bpb sonlu; math_exam.json / .md",
+              all(set(e["splits"]) == {"valid", "extrapolate"} for e in ex.values())
+              and {k: x["n"] for k, x in v["modules"].items()} == {"algebra__linear_1d": 1, "arithmetic__add_or_sub": 2,
+                                                                 "numbers__is_prime": 2}
+              and abs(v["baseline_overall"] - 0.5 / 3) < 1e-3 and 0 <= v["overall"] <= 1
+              and all(np.isfinite(e["splits"][s]["answer_bpb"]) for e in ex.values() for s in e["splits"])
+              and os.path.exists(os.path.join(runs["transformer"], "math_exam.md")),
+              str({m: {s: (x["overall"], x["answer_loss"]) for s, x in e["splits"].items()} for m, e in ex.items()}))
+    except Exception:  # noqa: BLE001
+        check("math train / exam", False, traceback.format_exc(limit=3))
+    finally:
+        TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS = saved
+
+
 TESTS = dict(fp8=t_fp8, data=t_data, pack=t_pack, recipe=t_recipe, metrics=t_metrics, integration=t_integration,
-             train=t_train, drive=t_drive, tokens=t_tokens, fineweb=t_fineweb, mtp=t_mtp)
+             train=t_train, drive=t_drive, tokens=t_tokens, fineweb=t_fineweb, mtp=t_mtp, math=t_math)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)
