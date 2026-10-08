@@ -142,12 +142,14 @@ class BaselineTransformer(torch.nn.Module):
         return self.norm(x[:, -1])
 
     @torch.no_grad()
-    def generate(self, prompts, max_sentences, max_tokens, generator=None, open_last=False, on_token=None):
+    def generate(self, prompts, max_sentences, max_tokens, generator=None, open_last=False, on_token=None,
+                 stop_when=None):
         """prompts: hikaye basina istem cumleleri (token listeleri, END yok) -> her istem icin (uretilen cumleler, END ile
         bitti mi listesi, eos).  generator None: acgozlu, yoksa ornekleme (sicaklik 1).  Model Z generate ile ayni kural:
         cumle basinda EOS hikayeyi bitirir, cumle icinde END ya da EOS cumleyi bitirir, max_tokens'ta kesilen cumle de
         kapanir (girdiye END).  open_last (belge 48): son istem cumlesine END eklenmez, ilk uretilen cumle onun devami.
-        on_token(w): her uretilen token'dan sonra, on_token(None): cumle kapaninca (akan yazim; cikti degismez).  Torbali
+        on_token(w): her uretilen token'dan sonra, on_token(None): cumle kapaninca (akan yazim; cikti degismez).  stop_when(gen): her
+        kapanan cumleden sonra, True ise o istemin uretimi biter (cikti = tam uretimin oneki).  Torbali
         model: torba ozette (BOS, END) secilir, P = kapanmis cumlelerin token'lari."""
         dev = self.E.weight.device
         bag = getattr(self, "bag", None)
@@ -193,6 +195,8 @@ class BaselineTransformer(torch.nn.Module):
                 ended.append(done)
                 if on_token is not None:
                     on_token(None)
+                if stop_when is not None and stop_when(gen):
+                    break
                 opened = False
                 hn = self._step(torch.tensor([[END_ID]], device=dev), cache, n)
                 past, open_toks = past + open_toks + cur, []

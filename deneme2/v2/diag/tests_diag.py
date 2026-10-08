@@ -3,7 +3,7 @@ kosudan okuma = train.py'ninki; arsiv kimligi durur; ek istem secimi Drive'dan),
 z_ablate; model-z-mathematician), bag (bag_report: A0 ve torbali kosu, belge 53-55).  Formullu z cesitleri kaldirildi
 (belge 44).  Yardimcilar common/tests_v2'den (_train_root, tokenizer_path, DRIVE).
 
-    python tests_diag.py [--only readings,tools,bag]
+    python tests_diag.py [--only readings,tools,bag,knowledge]
 """
 import torch
 
@@ -312,7 +312,62 @@ def t_bag():
          TR.MODEL_Z_GLOBAL_LAYERS, TR.MODEL_Z_SUMMARIES_LAST) = saved
 
 
-TESTS = dict(readings=t_readings, tools=t_tools, bag=t_bag)
+def t_knowledge():
+    """knowledge_exam run hizlandirmasi (8 Ekim): tek uretim -> satirlar eski iki uretimli kodla (5 + 80 cumle) birebir
+    (loop_tail 0); loop_tail 5'te cevap / puan ayni, durma uretimi tam uretimin oneki, dongu isaretli; stop_when iki
+    modelde onek.  Kucuk rastgele modeller (acgozlu, hizla donguye girer), GPT-2 tokenizer."""
+    import importlib
+    import knowledge_exam as KE
+    tp = T2.tokenizer_path()
+    if tp is None:
+        print("ATLA knowledge: GPT-2 tokenizer yok", flush=True)
+        return
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(tp)
+    root = os.path.dirname(HERE)
+    sys.path.insert(0, os.path.join(root, "model_z"))
+    sys.path.insert(0, os.path.join(root, "transformer"))
+    SM, BL = importlib.import_module("sentence"), importlib.import_module("baseline")
+    facts = [dict(id="f%d" % i, category="c", topic=["x"], key=[k], distractors=[d_], prompt=pr) for i, (pr, k, d_) in
+             enumerate((("The capital of France is", "Paris", "Lyon"), ("World War II began in", "1939", "1914"),
+                        ("Water boils at", "100", "90"), ("The largest planet is", "Jupiter", "Saturn")))]
+    counts = {f["id"]: dict(band="0", docs_same=0) for f in facts}
+    lookup = {f["id"]: dict(answer="", score="BOS") for f in facts}
+    dec = lambda ids: tok.decode(list(ids))  # noqa: E731
+    prompts = [[tok.encode(f["prompt"]).ids] for f in facts]
+    ok_old, ok_new, ok_pre, info = True, True, True, []
+    for name in ("model_z", "transformer"):
+        torch.manual_seed(0)
+        m = (SM.SentenceTransformer(32, 2, 2, global_layers=1) if name == "model_z" else BL.BaselineTransformer(32, 2, 2)).eval()
+        with torch.no_grad():
+            ans = m.generate(prompts, open_last=True, **KE.ANSWER)              # eski kod: iki ayri uretim
+            stop = m.generate(prompts, open_last=True, **KE.STOP)
+        old = []
+        for f, p_, (g, e, eos), (g2, e2, eos2) in zip(facts, prompts, ans, stop):
+            w = "".join(dec(s_) for s_ in g[:2])
+            old.append(dict(answer=w, score=KE.score(w, f)[0], stop_eos=bool(eos2), stop_sentences=len(g2),
+                            stop_tokens=int(sum(len(s_) for s_ in g2)), stop_text=dec(p_[0]) + "".join(dec(s_) for s_ in g2)))
+        keys = list(old[0])
+        r0 = KE.answer_rows(m, facts, prompts, counts, lookup, dec, 0)
+        r5 = KE.answer_rows(m, facts, prompts, counts, lookup, dec, 5)
+        ok_old &= [{k: r[k] for k in keys} for r in r0] == old and not any(r["stop_loop"] for r in r0)
+        ok_new &= all(a_["answer"] == b_["answer"] and a_["score"] == b_["score"] and a_["stop_text"].startswith(
+            b_["stop_text"]) and b_["stop_sentences"] <= a_["stop_sentences"] for a_, b_ in zip(r0, r5))
+        with torch.no_grad():
+            pre = m.generate(prompts, open_last=True, stop_when=KE.loop_stop(5), **KE.STOP)
+        ok_pre &= all(gp == gf[:len(gp)] and ep == ef[:len(ep)] for (gp, ep, _), (gf, ef, _) in zip(pre, stop))
+        info.append("%s: cumle %s -> %s, dongu %d" % (name, [r["stop_sentences"] for r in r0],
+                                                       [r["stop_sentences"] for r in r5], sum(r["stop_loop"] for r in r5)))
+    check("knowledge_exam: tek uretim (loop_tail 0) = eski iki uretimli satirlar birebir (cevap, puan, EOS, cumle / token, "
+          "metin); loop_tail 5 cevap / puan ayni, durma metni tam uretimin oneki; stop_when iki modelde onek",
+          ok_old and ok_new and ok_pre and all("dongu 0" not in x for x in info), "; ".join(info))
+    st = KE.loop_stop(2)
+    check("knowledge_exam loop_stop: son 2 cumle daha once uretilmis -> dur; yeni cumle -> surer",
+          st([[1], [2], [1], [2]]) and not st([[1], [2], [1], [3]]) and not st([[1], [1]]) and st([[1], [1], [1]])
+          and KE.loop_stop(0) is None)
+
+
+TESTS = dict(readings=t_readings, tools=t_tools, bag=t_bag, knowledge=t_knowledge)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)

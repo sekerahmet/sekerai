@@ -387,13 +387,15 @@ class SentenceTransformer(torch.nn.Module):
         return nll, pred, batch.target_kind[keep]
 
     @torch.no_grad()
-    def generate(self, prompts, max_sentences, max_tokens, generator=None, open_last=False, on_token=None):
+    def generate(self, prompts, max_sentences, max_tokens, generator=None, open_last=False, on_token=None,
+                 stop_when=None):
         """prompts: hikaye basina istem cumleleri (token listeleri, END yok) -> her istem icin (uretilen cumleler,
         END ile bitti mi listesi, eos).  generator None: acgozlu, yoksa ornekleme.  SummaryCache ile, istem basina.
         Cumle en cok max_tokens token; kesilen cumle ended False ile doner (belge 26 B2).  Istem tek ileri geciste
         (SummaryCache.prefill, belge 46), uretim token token.  open_last (belge 48): son istem cumlesi kapanmaz, ilk
         uretilen cumle onun devami (yalniz devam token'lari; max_tokens onlara).  on_token(w): her uretilen
-        token'dan sonra, on_token(None): cumle kapaninca (akan yazim; cikti degismez)."""
+        token'dan sonra, on_token(None): cumle kapaninca (akan yazim; cikti degismez).  stop_when(gen): her
+        kapanan cumleden sonra, True ise o istemin uretimi biter (cikti = tam uretimin oneki)."""
         out = []
         for sents in prompts:
             cache = SummaryCache(self)
@@ -424,6 +426,8 @@ class SentenceTransformer(torch.nn.Module):
                 ended.append(done)
                 if on_token is not None:
                     on_token(None)
+                if stop_when is not None and stop_when(gen):
+                    break
                 opened = False
                 logits = cache.close_sentence()
             out.append((gen, ended, eos))

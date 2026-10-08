@@ -7,7 +7,10 @@ gelsin"; "kısa olması değil tutarlı gelmesi önemli").
            arama tablosu tabani: istemin train'de gecen en uzun son eki (kelime, geriye cekilerek) ve ardindan en sik 5
            kelime.  Row group'lar surec havuzunda.  -> <out>/facts.json (kopya), counts.json, lookup.json.
     run    kayitli kosudan (generate_readings.load_run) acgozlu uretim: istem tek acik cumle (generate open_last=True),
-           max_sentences 5 / max_tokens 64 (cevap) ve 80 (durma: EOS orani, cumle / token sayisi); puan: cevap penceresi
+           TEK uretim max_sentences 80 / max_tokens 64: cevap = ilk 5 cumle (acgozlu: ayri 5 cumlelik uretimle ayni),
+           durma = EOS orani, cumle / token sayisi.  --loop_tail L (varsayilan 5; 0 kapali): son L uretilen cumlenin
+           hepsi daha once uretilmisse (token dizisi birebir) uretim durur, satir stop_loop True; o zaman stop_eos
+           "dongu tespitinden ONCE EOS" demektir (L 0 = eski tanim: 80 cumleye kadar).  puan: cevap penceresi
            (istemi tamamlayan cumle + sonraki cumle) icinde anahtar (yazim cesitleri) varsa ve ondan once celdirici yoksa
            DOGRU, once / yalniz celdirici YANLIS, ikisi de yoksa BOS.  Bant bant ve arama tablosu tabaniyla ayni puanlama.
            -> <kosu>/knowledge_exam.json, knowledge_exam.txt.
@@ -39,8 +42,9 @@ WINDOW = 200                # (b) konu ile anahtar arasi en cok karakter
 BANDS = ((100, ">= 100"), (10, "10-100"), (1, "1-10"), (0, "0"))
 SNIPPETS = 200              # son ek basina toplanan devam ornegi (surec basina)
 LOOKUP_WORDS = 5
-ANSWER = dict(max_sentences=5, max_tokens=64)
+ANSWER = dict(max_sentences=5, max_tokens=64)          # cevap = durma uretiminin ilk 5 cumlesi
 STOP = dict(max_sentences=80, max_tokens=64)
+LOOP_TAIL = 5               # erken durma: son 5 cumle tekrar (metrics.story_loop'un kuyrugu; token dizisiyle)
 
 
 def band(n):
@@ -63,6 +67,41 @@ def score(text, fact):
     if dp is not None:
         return "YANLIS", kp, dp
     return "BOS", kp, dp
+
+
+def loop_stop(tail):
+    """-> stop_when(gen): son tail uretilen cumlenin her biri ondan once uretilmisse True (tail 0: None, durma yok)."""
+    if not tail:
+        return None
+
+    def stop(gen):
+        if len(gen) < tail:
+            return False
+        seen = {tuple(s) for s in gen[:-tail]}
+        for s in gen[-tail:]:
+            if tuple(s) not in seen:
+                return False
+            seen.add(tuple(s))
+        return True
+    return stop
+
+
+def answer_rows(model, facts, prompts, counts, lookup, dec, tail):
+    """Tek acgozlu uretim -> satirlar (cevap penceresi ilk 2 cumle, puan, durma alanlari)."""
+    stop_when = loop_stop(tail)
+    rows = []
+    with torch.no_grad():
+        outs = model.generate(prompts, open_last=True, stop_when=stop_when, **STOP)
+    for f, p, (g, e, eos) in zip(facts, prompts, outs):
+        window = "".join(dec(s) for s in g[:ANSWER["max_sentences"]][:2])
+        res, kp, dp = score(window, f)
+        rows.append(dict(id=f["id"], category=f["category"], band=counts[f["id"]]["band"],
+                         docs_same=counts[f["id"]]["docs_same"], prompt=f["prompt"], answer=window, score=res,
+                         lookup=lookup[f["id"]]["answer"], lookup_score=lookup[f["id"]]["score"],
+                         stop_eos=bool(eos), stop_sentences=len(g), stop_tokens=int(sum(len(s) for s in g)),
+                         stop_loop=bool(stop_when and not eos and stop_when(g)),
+                         stop_text=dec(p[0]) + "".join(dec(s) for s in g)))
+    return rows
 
 
 def _suffixes(prompt):
@@ -173,18 +212,7 @@ def run(args):
     lookup = {c["id"]: c for c in json.load(open(os.path.join(args.knowledge, "lookup.json"), encoding="utf-8"))["facts"]}
     dec = lambda ids: tok.decode(list(ids))  # noqa: E731
     prompts = [[tok.encode(f["prompt"]).ids] for f in facts]
-    rows = []
-    with torch.no_grad():
-        ans = model.generate(prompts, open_last=True, **ANSWER)
-        stop = model.generate(prompts, open_last=True, **STOP)
-    for f, p, (g, e, eos), (g2, e2, eos2) in zip(facts, prompts, ans, stop):
-        window = "".join(dec(s) for s in g[:2])
-        res, kp, dp = score(window, f)
-        rows.append(dict(id=f["id"], category=f["category"], band=counts[f["id"]]["band"],
-                         docs_same=counts[f["id"]]["docs_same"], prompt=f["prompt"], answer=window, score=res,
-                         lookup=lookup[f["id"]]["answer"], lookup_score=lookup[f["id"]]["score"],
-                         stop_eos=bool(eos2), stop_sentences=len(g2), stop_tokens=int(sum(len(s) for s in g2)),
-                         stop_text=dec(p[0]) + "".join(dec(s) for s in g2)))
+    rows = answer_rows(model, facts, prompts, counts, lookup, dec, args.loop_tail)
     summ = {}
     for bname in [n for _, n in BANDS] + ["hepsi"]:
         r = [x for x in rows if bname == "hepsi" or x["band"] == bname]
@@ -192,8 +220,10 @@ def run(args):
             summ[bname] = dict(n=len(r), **{k: round(sum(x["score"] == k for x in r) / len(r), 3) for k in ("DOGRU", "YANLIS", "BOS")},
                                lookup_dogru=round(sum(x["lookup_score"] == "DOGRU" for x in r) / len(r), 3),
                                eos=round(float(np.mean([x["stop_eos"] for x in r])), 3),
-                               stop_sentences=round(float(np.mean([x["stop_sentences"] for x in r])), 1))
-    out = dict(run=os.path.basename(os.path.normpath(args.run)), identity=idt, answer=ANSWER, stop=STOP, summary=summ,
+                               stop_sentences=round(float(np.mean([x["stop_sentences"] for x in r])), 1),
+                               stop_loop=round(float(np.mean([x["stop_loop"] for x in r])), 3))
+    out = dict(run=os.path.basename(os.path.normpath(args.run)), identity=idt, answer=ANSWER, stop=STOP,
+               loop_tail=args.loop_tail, summary=summ,
                rows=rows, seconds=round(time.time() - t0, 1))
     json.dump(out, open(os.path.join(args.run, "knowledge_exam.json"), "w", encoding="utf-8"), indent=1, ensure_ascii=False)
     txt = []
@@ -201,7 +231,8 @@ def run(args):
         txt += ["=== %s | %s | bant %s (%d belge) | %s | arama tablosu: %s (%s)" % (
             x["id"], x["category"], x["band"], x["docs_same"], x["score"], x["lookup"], x["lookup_score"]),
             x["prompt"] + " >>> " + x["answer"].replace("\n", "\\n"),
-            "--- durma: EOS %s, %d cumle, %d token" % (x["stop_eos"], x["stop_sentences"], x["stop_tokens"]), ""]
+            "--- durma: EOS %s, %d cumle, %d token%s" % (x["stop_eos"], x["stop_sentences"], x["stop_tokens"],
+                                                         ", dongu" if x["stop_loop"] else ""), ""]
     open(os.path.join(args.run, "knowledge_exam.txt"), "w", encoding="utf-8").write("\n".join(txt))
     print(json.dumps(summ, indent=1), flush=True)
     return out
@@ -222,6 +253,8 @@ def _args(argv):
     r.add_argument("--data", required=True)
     r.add_argument("--knowledge", required=True)
     r.add_argument("--device", default="cuda")
+    r.add_argument("--loop_tail", type=int, default=LOOP_TAIL,
+                   help="son N cumle tekrarinda uretimi durdur (0: eski tanim, 80 cumleye kadar)")
     return ap.parse_args(argv)
 
 
