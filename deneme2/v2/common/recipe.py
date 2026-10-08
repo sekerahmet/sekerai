@@ -298,30 +298,75 @@ NORMUON_BETA2 = 0.95      # li2025_normuon s4 deney ayari (beta1, beta2) = (0,95
 NORMUON_EPS = 1e-10       # makalede deger yok; resmi kod (github.com/zichongli5/NorMuon, normuon.py) sqrt(v) + 1e-10
 
 
+def _momentum_stack(grads, bufs, momentum, nesterov):
+    """Ayni bicimli grup: momentum (bufs yerinde) + nesterov -> NS girdisi yigin (k, m, n) bf16."""
+    torch._foreach_lerp_(bufs, grads, 1 - momentum)
+    ups = torch._foreach_lerp(grads, bufs, momentum) if nesterov else bufs
+    return torch.stack(ups).bfloat16()
+
+
+def _normuon_post(O, v, beta2, scale):
+    """NorMuon satir 7-10, yigin: O (k, m, n), v (k, m, 1) -> (guncelleme O^ eta^ (k, m, n) fp32, yeni v)."""
+    O = O.float()
+    v = v.lerp(O.square().mean(-1, keepdim=True), 1 - beta2)
+    Oh = O / (v.sqrt() + NORMUON_EPS)
+    eta = scale / Oh.flatten(1).norm(dim=1).clamp_min(NORMUON_EPS)                 # O 0: NaN yok
+    return Oh * eta[:, None, None], v
+
+
+def _opt_fn(fn, cuda):
+    """CUDA'da derlenmis (fonksiyon basina bir kez sarilir; eleman isleri birlesir, belge 94 s10.3), CPU'da eager."""
+    if not cuda:
+        return fn
+    if fn.__name__ not in _COMPILED:
+        _COMPILED[fn.__name__] = torch.compile(fn, dynamic=False)
+    return _COMPILED[fn.__name__]
+
+
 class NorMuon(BatchedMuon):
     """NorMuon (li2025_normuon, Algorithm 1): momentum ve NS BatchedMuon'la ayni (nesterov dahil, resmi kod gibi), sonra
     satir (cikti noronu) basina ikinci moment v = b2 v + (1 - b2) mean_sutun(O * O) (satir 7), O^ = O / (sqrt(v) + eps)
     (satir 9), eta^ = 0,2 lr sqrt(mn) / ||O^||_F (satir 10: guncelleme RMS'i 0,2 lr, AdamW'ninki), W -= eta^ O^ (satir 11;
-    wd BatchedMuon'da once).  adjust_lr_fn kullanilmaz.  Durum: momentum_buffer + second_momentum_buffer (m, 1) fp32."""
+    wd once).  adjust_lr_fn kullanilmaz.  Durum: momentum_buffer + second_momentum_buffer (m, 1) fp32.  Ayni bicimli grup
+    basina: momentum + yigin ve satir 7-10 CUDA'da derlenmis tek fonksiyon (_momentum_stack, _normuon_post); CPU'da ayni
+    islemler eager (8 Ekim kodu ile bit ayni, tests_v2 normuon)."""
 
     def __init__(self, params, beta2=NORMUON_BETA2, **kw):
         super().__init__(params, **kw)
         for g in self.param_groups:
             g.setdefault("beta2", beta2)
 
-    def _apply(self, g, shape, ps, O):
-        m, n = shape
-        O = O.float()
-        for p in ps:
-            if "second_momentum_buffer" not in self.state[p]:
-                self.state[p]["second_momentum_buffer"] = torch.zeros(m, 1, dtype=torch.float, device=p.device)
-        v = torch.stack([self.state[p]["second_momentum_buffer"] for p in ps])
-        v.lerp_(O.square().mean(-1, keepdim=True), 1 - g["beta2"])
-        Oh = O / (v.sqrt() + NORMUON_EPS)
-        eta = 0.2 * g["lr"] * math.sqrt(m * n) / Oh.flatten(1).norm(dim=1).clamp_min(NORMUON_EPS)   # O 0: NaN yok
-        for j, p in enumerate(ps):
-            self.state[p]["second_momentum_buffer"].copy_(v[j])
-            p.sub_((Oh[j] * eta[j]).to(p.dtype))
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        for g in self.param_groups:
+            ps, grads, bufs = [], [], []
+            self._init_group(g, ps, grads, bufs)
+            if not ps:
+                continue
+            cuda = ps[0].is_cuda
+            shapes = {}
+            for i, p in enumerate(ps):
+                shapes.setdefault(tuple(p.shape), []).append(i)
+            for (m, n), idx in shapes.items():
+                pp = [ps[i] for i in idx]
+                for p in pp:
+                    if "second_momentum_buffer" not in self.state[p]:
+                        self.state[p]["second_momentum_buffer"] = torch.zeros(m, 1, dtype=torch.float, device=p.device)
+                vs = [self.state[p]["second_momentum_buffer"] for p in pp]
+                G = _opt_fn(_momentum_stack, cuda)([grads[i] for i in idx], [bufs[i] for i in idx], g["momentum"],
+                                                   g["nesterov"])
+                torch._foreach_mul_(pp, 1 - g["lr"] * g["weight_decay"])
+                O = _ns_batched(G, g["ns_coefficients"], g["ns_steps"], g["eps"])
+                scale = 0.2 * g["lr"] * math.sqrt(m * n)
+                U, v = _opt_fn(_normuon_post, cuda)(O, torch.stack(vs), g["beta2"], torch.tensor(scale, dtype=torch.float64)
+                                                    if cuda else scale)        # CUDA: lr her adim degisir, yeniden derleme yok
+                torch._foreach_copy_(vs, list(v.unbind(0)))
+                torch._foreach_sub_(pp, list(U.unbind(0)))
+        return loss
 
 
 class Checkpoint:
