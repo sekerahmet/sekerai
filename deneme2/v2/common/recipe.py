@@ -22,6 +22,7 @@ import torch.nn.functional as F
 
 from data import VOCAB, Kind
 
+NGRAM_LR_MULT = 5.0               # bigram tablosu lr carpani (Engram x5, belge 88b s2.1; deneme)
 ATTN_BLOCK = 64                   # FlexAttention blok boyu (SS d512 attention -%14, belge 37; 5w -2,7 ms/adim; bf16 esdeger)
 
 
@@ -108,15 +109,19 @@ def wsd_lr(step, total, peak, warmup=0.01, decay=0.2):
 
 def param_groups(model, weight_decay=0.1, skip=()):
     """-> AdamW gruplari: 2-B agirliklar (embedding haric) decay'li; embedding, norm, bias ve 1-B decay'siz.  skip:
-    baska optimizer'in parametreleri (Muon)."""
+    baska optimizer'in parametreleri (Muon).  Bigram tablosu (model.ngram) ayri grup: wd 0, lr_mult NGRAM_LR_MULT
+    (egitim dongusu lr x lr_mult yazar)."""
     emb = {id(m.weight) for m in model.modules() if isinstance(m, torch.nn.Embedding)}
-    decay, no_decay, seen = [], [], {id(p) for p in skip}
+    ng = getattr(model, "ngram", None)
+    ng = {id(ng.weight)} if ng is not None else set()
+    decay, no_decay, table, seen = [], [], [], {id(p) for p in skip}
     for p in model.parameters():
         if id(p) in seen or not p.requires_grad:
             continue
         seen.add(id(p))
-        (decay if p.dim() >= 2 and id(p) not in emb else no_decay).append(p)
-    return [dict(params=decay, weight_decay=weight_decay), dict(params=no_decay, weight_decay=0.0)]
+        (table if id(p) in ng else decay if p.dim() >= 2 and id(p) not in emb else no_decay).append(p)
+    groups = [dict(params=decay, weight_decay=weight_decay), dict(params=no_decay, weight_decay=0.0)]
+    return groups + ([dict(params=table, weight_decay=0.0, lr_mult=NGRAM_LR_MULT)] if table else [])
 
 
 def muon_params(model):
