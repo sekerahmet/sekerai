@@ -32,8 +32,12 @@ kosulari ayirir: formullu ve temizlik oncesi (6 Ekim; etiket v2-before-cleanup-2
 surdurulmez (_archived); eski transformer yuklenir.  Temizlik oncesi kosular uzatilmaz (kullanici, 6 Ekim: "eski koşuları
 uzatma niyetim yok").
 --global_layers N (belge 40 s6.2 Deney G; yalniz Model Z): son N blok tam causal, gercek hikaye konumuyla; maske ikilisi
-(yerel, global) _attn'dan, egitim / sinav / teshis ayni yol.  Varsayilan (belge 43; on kayit tuttu, 7 Ekim): model_z 1,
-transformer 0; --global_layers 0: G'siz Model Z (kiyas).  Eski checkpoint'te alan yoksa 0.
+(yerel, global) _attn'dan, egitim / sinav / teshis ayni yol.  --global_layers 0: G'siz Model Z (kiyas).  Eski
+checkpoint'te alan yoksa 0.
+Varsayilanlar (kullanici, 8 Ekim: "Varsayılan yap ama kısa bir koşu ile son halin çalıştığından emin olalım"): model_z'de
+global_layers MODEL_Z_GLOBAL_LAYERS (3) ve torbasiz summaries_last MODEL_Z_SUMMARIES_LAST (1); transformer ve --bag_k'da
+summaries_last 0 (acik 1 DURUR).  --resume 1'de acikca verilmeyen global_layers / summaries_last kosunun kimliginden (alan
+yoksa 0): eski G1 / summaries_last 0 kosulari degismeden surer.
 
 --bag_k K (iki modelde; belge 53-55, adlar onayli 7 Ekim; kullanici, 7 Ekim: "burda öğrenme kalite ve hıza etkisi ne"):
 ogrenen torba B_k = C u P_k u L_k, |B_k| <= K (recipe.Bag): C en sik --bag_core + END + EOS (<data>/train_token_counts.npy),
@@ -45,7 +49,8 @@ p(DIGER), tam CE, secici kaybi; cikis ve secici ileri ms (CUDA olaylari).
     python train.py --model transformer|model_z --lr LR --out <kosu> [--data <v2/simplestories_gpt2>]
                     [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
                     [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1]
-                    [--optimizer muon|normuon|adamw (varsayilan muon)] [--global_layers N (model_z; varsayilan 1)]
+                    [--optimizer muon|normuon|adamw (varsayilan muon)] [--global_layers N (model_z; varsayilan 3)]
+                    [--summaries_last 0|1 (model_z torbasiz; varsayilan 1)]
                     [--bag_k K [--bag_core 50] [--bag_weight 0.1] [--bag_full_frac 0.05]]
 """
 import torch  # noqa: I001  (Windows: torch once)
@@ -74,6 +79,9 @@ MUON = dict(momentum=0.95, nesterov=True, ns_steps=5, adjust_lr_fn="match_rms_ad
 DECAY = 0.2                                                # recipe.wsd_lr varsayilani; inis basi checkpoint'i
 BATCH_ROWS = D.BATCH_ROWS
 LOG_EVERY = 100             # adim; gunluk satiri = bir hiz penceresi
+MODEL_Z_GLOBAL_LAYERS = 3   # model_z varsayilani (kullanici, 8 Ekim; G3 + aralik maskesi + summaries_last + Muon)
+MODEL_Z_SUMMARIES_LAST = 1  # model_z torbasiz varsayilani (belge 66)
+INHERIT = dict(global_layers=0, summaries_last=0)   # --resume'da acik verilmezse kimlikten (alan yoksa bu deger)
 COMPILE_MODE = "max-autotune-no-cudagraphs"   # bloklarin derleme modu (5w: torba K 1024 -2,9 ms/adim; kullanici, 7 Ekim)
 READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
 READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
@@ -376,7 +384,7 @@ def _args(argv):
                          "kullanici 8 Ekim); adamw: tek AdamW")
     ap.add_argument("--global_layers", type=int, default=None,
                     help="model_z: son N blok tam causal, gercek konumla (belge 40 s6.2 Deney G); varsayilan model_z'de "
-                         "1, transformer'da 0; 0: G'siz Model Z")
+                         "3 (8 Ekim), transformer'da 0; 0: G'siz Model Z; --resume'da verilmezse kosunun kimliginden")
     ap.add_argument("--layer_plan", default=None,
                     help="model_z katman plani, ornek loc2,mid4,loc1,glob1 (mid: yalniz BOS + Z satirlari, belge 52); "
                          "verilirse --layers ve --global_layers ondan")
@@ -387,16 +395,20 @@ def _args(argv):
                     help="gecerli hedeflerin bu payinda tam softmax CE de eklenir (belge 54 s2.3 yol a)")
     ap.add_argument("--bag_sel_frac", type=float, default=1.0,
                     help="secici kaybi torbalarin bu payinda (rastgele, adim tohumlu); secim her torbada (kullanici, 7 Ekim)")
-    ap.add_argument("--summaries_last", type=int, default=0,
-                    help="model_z: satir bellekte [token'lar | ozetler | dolgu] (belge 66); model ayni, maske iki aralik")
+    ap.add_argument("--summaries_last", type=int, default=None,
+                    help="model_z: satir bellekte [token'lar | ozetler | dolgu] (belge 66); model ayni, maske iki aralik; "
+                         "varsayilan model_z torbasiz 1, aksi 0; --resume'da verilmezse kosunun kimliginden")
     ap.add_argument("--stop_step", type=int, default=None,
                     help="takvim (WSD, epok plani) degismeden adim N'de dur: checkpoint.pt (surdurulebilir) + agent.pt + "
                          "results.json (finished False, stopped_at N); son sinav ve okuma yok (kullanici, 8 Ekim)")
     ap.add_argument("--checkpoint_minutes", type=float, default=10,
                     help="en cok bu kadar duvar saati kaybi (sinav dahil); surdurmede degistirilebilir")
     args = ap.parse_args(argv)
-    if args.global_layers is None:                                       # belge 43: G varsayilan (7 Ekim)
-        args.global_layers = int(args.model == "model_z")
+    args.defaulted = [k for k in INHERIT if getattr(args, k) is None and not (k == "global_layers" and args.layer_plan)]
+    if args.global_layers is None:                                       # 8 Ekim: G3 varsayilan
+        args.global_layers = MODEL_Z_GLOBAL_LAYERS if args.model == "model_z" else 0
+    if args.summaries_last is None:
+        args.summaries_last = MODEL_Z_SUMMARIES_LAST if args.model == "model_z" and not args.bag_k else 0
     if args.layer_plan:
         if args.model != "model_z":
             sys.exit("DUR: --layer_plan yalniz model_z")
@@ -412,6 +424,13 @@ def main(argv=None):
     args = _args(argv)
     t0 = time.time()
     log = lambda msg: print("[%7.1f sn] %s" % (time.time() - t0, msg), flush=True)  # noqa: E731
+    ckpt0 = os.path.join(args.out, "checkpoint.pt")
+    if args.resume and args.defaulted and os.path.exists(ckpt0):        # varsayilan degisse de kosu kendi ayariyla surer
+        was0 = torch.load(ckpt0, map_location="cpu", weights_only=False, mmap=True)["args"]
+        for k in args.defaulted:
+            setattr(args, k, was0.get(k, INHERIT[k]))
+        log("surdurme: verilmeyen %s kosunun kimliginden: %s" % (args.defaulted, {k: getattr(args, k)
+                                                                                 for k in args.defaulted}))
     for err in (_global_error(args), _bag_error(args)):                  # veri yuklenmeden
         if err:
             sys.exit("DUR: " + err)

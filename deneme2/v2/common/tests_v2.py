@@ -70,8 +70,9 @@ GOLDEN = {
   "sha": "bab46c04017cb4a3cb0abbf0a6a25c9025b64ebf98c13ac54f4c616ad429b0ae"
  }
 }
-GOLDEN_ARGS = {"transformer": ["--model", "transformer"], "model_z": ["--model", "model_z", "--layers", "2"],
-               "model_z_g0": ["--model", "model_z", "--layers", "2", "--global_layers", "0"]}
+GOLDEN_ARGS = {"transformer": ["--model", "transformer"],                # eski davranis acik bayrakla (8 Ekim
+               "model_z": ["--model", "model_z", "--layers", "2", "--global_layers", "1", "--summaries_last", "0"],
+               "model_z_g0": ["--model", "model_z", "--layers", "2", "--global_layers", "0", "--summaries_last", "0"]}
 
 
 def check(name, ok, info=""):
@@ -909,8 +910,10 @@ def t_train():
         print("ATLA train: GPT-2 tokenizer yok", flush=True)
         return
     root, data, prompts = _train_root(tp)
-    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS)
+    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_LAYERS,
+             TR.MODEL_Z_SUMMARIES_LAST)
     TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
+    TR.MODEL_Z_GLOBAL_LAYERS, TR.MODEL_Z_SUMMARIES_LAST = 1, 0              # testler eski varsayilanla (8 Ekim)
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=3, max_tokens=4)
     base = ["--data", data, "--stream", root, "--device", "cpu", "--d", "16", "--layers", "1", "--heads", "2",
             "--lr", "1e-2", "--checkpoint_minutes", "0", "--optimizer", "adamw"]   # 0: her gunluk sinirinda kayit;
@@ -1056,7 +1059,8 @@ def t_train():
     except Exception:  # noqa: BLE001
         check("train", False, traceback.format_exc(limit=3))
     finally:
-        TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS = saved
+        (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_LAYERS,
+         TR.MODEL_Z_SUMMARIES_LAST) = saved
 
 
 def t_tokens():
@@ -1315,15 +1319,44 @@ def _train_global(base, root, data, out, exits, TR):
         r = _exit_msg(TR.main, c)
         check("train: global_layers alani olmayan checkpoint 0 sayilir (bitmis kosu olarak durur), 1 ile DURUR",
               r is None and exits(c + ["--global_layers", "1"]), str(r))
-        dflt = {k: (lambda x: (x.global_layers, x.optimizer))(TR._args(_unpin(base) + a + ["--out", "x"])) for k, a in (
-            ("model_z", ["--model", "model_z"]), ("transformer", ["--model", "transformer"]), ("model_z acik 0", ["--model", "model_z", "--global_layers", "0"]),
-            ("model_z adamw", ["--model", "model_z", "--optimizer", "adamw"]))}
-        idt = TR.main(_unpin(base) + ["--model", "model_z", "--layers", "2", "--steps", "3", "--out", out("g_default")])["identity"]
-        check("train: varsayilanlar (7 Ekim): global_layers model_z 1, transformer 0, acik 0 aynen (belge 43); optimizer "
-              "iki modelde muon, acik adamw aynen; varsayilan model_z kosusu kimlikte (global_layers 1, muon, learned_z 1)",
-              dflt == {"model_z": (1, "muon"), "transformer": (0, "muon"),
-                  "model_z acik 0": (0, "muon"), "model_z adamw": (1, "adamw")}
-              and (idt["global_layers"], idt["optimizer"], idt["learned_z"]) == (1, "muon", 1), str(dflt))
+        pinned = (TR.MODEL_Z_GLOBAL_LAYERS, TR.MODEL_Z_SUMMARIES_LAST)
+        TR.MODEL_Z_GLOBAL_LAYERS, TR.MODEL_Z_SUMMARIES_LAST = 3, 1           # train.py'nin gercek varsayilani
+        try:
+            pick = lambda x: (x.global_layers, x.summaries_last, x.optimizer)  # noqa: E731
+            dflt = {k: pick(TR._args(_unpin(base) + a + ["--out", "x"])) for k, a in (
+                ("model_z", ["--model", "model_z", "--layers", "4"]), ("transformer", ["--model", "transformer"]),
+                ("model_z acik 0", ["--model", "model_z", "--global_layers", "0", "--summaries_last", "0"]),
+                ("model_z torba", ["--model", "model_z", "--layers", "4", "--bag_k", "64"]),
+                ("model_z adamw", ["--model", "model_z", "--layers", "4", "--optimizer", "adamw"]),
+                ("model_z plan", ["--model", "model_z", "--layer_plan", "glob1,loc2,glob1"]))}
+            r_def = TR.main(_unpin(base) + ["--model", "model_z", "--layers", "4", "--steps", "3", "--out",
+                                            out("g_default")])
+            idt = r_def["identity"]
+            OLD = _unpin(base) + ["--model", "model_z", "--layers", "2", "--epochs", "2"]    # eski kosu: G1, sirasiz
+            TR.main(OLD + ["--global_layers", "1", "--summaries_last", "0", "--stop_step", "4", "--out", out("old_run")])
+            ck = os.path.join(out("old_run"), "checkpoint.pt")
+            pack = torch.load(ck, weights_only=False)
+            del pack["args"]["summaries_last"]                                # alanindan onceki kosu
+            torch.save(pack, ck)
+            r_old = TR.main(OLD + ["--out", out("old_run"), "--resume", "1"])
+            r_ref = TR.main(OLD + ["--global_layers", "1", "--summaries_last", "0", "--out", out("old_ref")])
+            stop_bag = _exit_msg(TR.main, OLD + ["--summaries_last", "1", "--bag_k", "64", "--out", out("sl_bag")])
+        finally:
+            TR.MODEL_Z_GLOBAL_LAYERS, TR.MODEL_Z_SUMMARIES_LAST = pinned
+        sw = lambda n_: torch.load(os.path.join(out(n_), "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        check("train: varsayilanlar (8 Ekim): model_z G3 + summaries_last 1, transformer 0 / 0, torbada summaries_last 0 "
+              "(acik 1 DURUR), plan G'yi plandan; optimizer muon; varsayilan kosu (G3, sirasiz degil) egitir, sinav ve "
+              "okuma uretir; eski kimlikli kosu (G1, summaries_last alani yok) bayraksiz --resume ile ayni ayarla surer = "
+              "kesintisiz (bit)",
+              dflt == {"model_z": (3, 1, "muon"), "transformer": (0, 0, "muon"), "model_z acik 0": (0, 0, "muon"),
+                       "model_z torba": (3, 0, "muon"), "model_z adamw": (3, 1, "adamw"), "model_z plan": (2, 1, "muon")}
+              and (idt["global_layers"], idt["summaries_last"], idt["optimizer"]) == (3, 1, "muon")
+              and np.isfinite(r_def["exam"]["loss"]) and r_def["generation"]
+              and os.path.exists(os.path.join(out("g_default"), "samples.txt"))
+              and (r_old["identity"]["global_layers"], r_old["identity"]["summaries_last"]) == (1, 0) and r_old["finished"]
+              and [w["loss"] for w in r_old["log"]] == [w["loss"] for w in r_ref["log"]]
+              and all(torch.equal(v, sw("old_ref")[k]) for k, v in sw("old_run").items()) and stop_bag is not None,
+              str(dflt))
         P = out("plan_mid")                                                # belge 57 K1
         rp = TR.main(base + ["--model", "model_z", "--layer_plan", "loc1,mid1,glob1", "--steps", "3", "--out", P])
         sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
@@ -1591,7 +1624,8 @@ def t_fineweb():
         return
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(tp)
-    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS, MF.VALID_STRIDE, D.MAX_SENTENCE_TOKENS)
+    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS, MF.VALID_STRIDE, D.MAX_SENTENCE_TOKENS,
+             TR.MODEL_Z_GLOBAL_LAYERS, TR.MODEL_Z_SUMMARIES_LAST)
     try:
         fl_ss, q_ss = D.stream_tables(tok)
         fl_ss2, q_ss2 = D.stream_tables(tok, "ss")
@@ -1699,6 +1733,7 @@ def t_fineweb():
               and va.n == len(np.load(os.path.join(out, "gpt2", "valid_bytes.npy"))), "parca %d / devam %d" % (
                   tr.n, int(cont.sum())))
         TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS = 4, 1, dict(max_sentences=3, max_tokens=4)
+        TR.MODEL_Z_GLOBAL_LAYERS, TR.MODEL_Z_SUMMARIES_LAST = 1, 0          # testler eski varsayilanla (8 Ekim)
         base = ["--data", out, "--stream", out, "--device", "cpu", "--d", "16", "--layers", "2", "--heads", "2", "--lr",
                 "1e-2", "--checkpoint_minutes", "0"]
         run = os.path.join(TMP, "fw_runs", "mzg")
@@ -1731,7 +1766,8 @@ def t_fineweb():
     except Exception:  # noqa: BLE001
         check("fineweb", False, traceback.format_exc(limit=4))
     finally:
-        TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS, MF.VALID_STRIDE, D.MAX_SENTENCE_TOKENS = saved
+        (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS, MF.VALID_STRIDE, D.MAX_SENTENCE_TOKENS, TR.MODEL_Z_GLOBAL_LAYERS,
+         TR.MODEL_Z_SUMMARIES_LAST) = saved
 
 
 def _fineweb_knowledge(src, out, run, tok):
