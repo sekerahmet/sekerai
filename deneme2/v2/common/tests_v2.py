@@ -2840,8 +2840,63 @@ def t_normuon():
           [round(float(x[0]), 5) for x in a])
 
 
+def t_clipfold():
+    """CLIP_IN_OPTIMIZER (belge 94 s11.1): clip katsayisi gradyani yerinde carpmak yerine optimizer'a.  Birlesik AdamW (CPU'da da
+    fused) + NorMuon, gercek egitim adimlari (train._step, MTP 2), kucuk Model Z: (a) kirpma yokken (katsayi 1) 3 adimda
+    kayip / grad normu / parametreler BIT ayni; (b) kirpma varken (ilk adim, norm > 1) grad normu bit ayni, Muon
+    parametreleri bit ayni, AdamW parametreleri g * c yerine g / (1 / c): fark <= 1e-6 x parametre olcegi."""
+    import types
+    import train as TR
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "model_z"))
+    from model import SentenceTransformer, summaries_last
+    rng = np.random.default_rng(11)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(2, 6))]
+               for _ in range(8)]
+    flat, sent, story = [], [], [0]
+    for s_ in stories:
+        for t in s_:
+            sent.append((len(flat), len(flat) + len(t)))
+            flat += t
+        story.append(len(sent))
+    st = types.SimpleNamespace(stream=np.array(flat, np.int64), sent=np.array(sent, np.int64), story=np.array(story))
+
+    def run(fold, clip, steps):
+        saved = TR.CLIP_IN_OPTIMIZER, TR.CLIP
+        TR.CLIP_IN_OPTIMIZER, TR.CLIP = fold, clip
+        try:
+            torch.manual_seed(0)
+            m = SentenceTransformer(d=128, layers=3, heads=4, global_layers=1, glob_kv_heads=2, attn_gate=2,
+                                    ngram_rows=97, ngram_layers=1)
+            opt, _ = TR._optimizer(m, "normuon", 2e-3, True)               # True: birlesik AdamW (CPU'da da var)
+            out = []
+            for k in range(steps):
+                b = D.build_batch(st, [[(2 * k) % 8, (2 * k + 1) % 8], [(2 * k + 4) % 8, (2 * k + 5) % 8]], "model_z",
+                                  row_len=160)
+                mt = D.mtp_targets(b, 2)
+                b, perm = summaries_last(b)
+                mt = mt.gather(1, perm[..., None].expand(-1, -1, 2))
+                loss, gn, _ = TR._step(m, b, m._masks(True), opt, False, mtp=(mt, torch.tensor([0.5, 0.25])))
+                out.append((loss.clone(), gn.clone(), {n: q.detach().clone() for n, q in m.named_parameters()}))
+            muon = {n for n, q in m.named_parameters() if any(q is x for x in opt.muon.param_groups[0]["params"])}
+            return out, muon, opt.grad_coef_ok
+        finally:
+            TR.CLIP_IN_OPTIMIZER, TR.CLIP = saved
+    (a, _, ok), (b, _, _) = run(False, 1e9, 3), run(True, 1e9, 3)
+    same = all(torch.equal(la, lb) and torch.equal(ga, gb) and all(torch.equal(pa[n], pb[n]) for n in pa)
+               for (la, ga, pa), (lb, gb, pb) in zip(a, b))
+    check("clipfold: kirpma yokken (katsayi 1) 3 adimda kayip / grad normu / parametreler bit ayni", same and ok,
+          [round(float(x[0]), 5) for x in a])
+    (c, muon, _), (d, _, _) = run(False, 1.0, 1), run(True, 1.0, 1)
+    (_, gc, pc), (_, gd, pd) = c[0], d[0]
+    rest = [n for n in pc if n not in muon]
+    rel = max(float((pc[n] - pd[n]).abs().max() / pc[n].abs().max().clamp_min(1e-12)) for n in rest)
+    check("clipfold: kirpma varken (grad normu %.3f > 1) norm ve %d Muon parametresi bit ayni, AdamW %d parametresi "
+          "goreli <= 1e-6 (%.1e)" % (float(gc), len(muon), len(rest), rel), float(gc) > 1 and torch.equal(gc, gd)
+          and all(torch.equal(pc[n], pd[n]) for n in muon) and rel <= 1e-6 and len(muon) > 0)
+
+
 TESTS = dict(fp8=t_fp8, data=t_data, pack=t_pack, recipe=t_recipe, metrics=t_metrics, integration=t_integration,
-             train=t_train, drive=t_drive, tokens=t_tokens, fineweb=t_fineweb, mtp=t_mtp, compile=t_compile, normuon=t_normuon)
+             train=t_train, drive=t_drive, tokens=t_tokens, fineweb=t_fineweb, mtp=t_mtp, compile=t_compile, normuon=t_normuon, clipfold=t_clipfold)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)
