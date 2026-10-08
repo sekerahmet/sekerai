@@ -41,10 +41,10 @@ def t_readings():
         print("ATLA readings: GPT-2 tokenizer yok", flush=True)
         return
     root, data, prompts = T2._train_root(tp)
-    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_LAYERS,
+    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO,
              TR.MODEL_Z_SUMMARIES_LAST)
     TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
-    TR.MODEL_Z_GLOBAL_LAYERS, TR.MODEL_Z_SUMMARIES_LAST = 1, 0              # testler eski varsayilanla (8 Ekim)
+    TR.MODEL_Z_GLOBAL_RATIO, TR.MODEL_Z_SUMMARIES_LAST = 0.6, 0            # eski varsayilan: L1 / L2 G1 (8 Ekim)
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=6, max_tokens=4)
     base = ["--data", data, "--stream", root, "--device", "cpu"]
     same_prompts = os.path.join(root, "reading_prompts_same.json")
@@ -97,7 +97,7 @@ def t_readings():
     except Exception:  # noqa: BLE001
         check("readings", False, traceback.format_exc(limit=3))
     finally:
-        (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_LAYERS,
+        (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO,
          TR.MODEL_Z_SUMMARIES_LAST) = saved
     if T2.DRIVE is None:
         print("ATLA readings (ek istem secimi, Drive kosulari): Drive yok", flush=True)
@@ -154,10 +154,10 @@ def t_tools():
         print("ATLA tools: GPT-2 tokenizer yok", flush=True)
         return
     root, data, prompts = T2._train_root(tp)
-    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_LAYERS,
+    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO,
              TR.MODEL_Z_SUMMARIES_LAST)
     TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
-    TR.MODEL_Z_GLOBAL_LAYERS, TR.MODEL_Z_SUMMARIES_LAST = 1, 0              # testler eski varsayilanla (8 Ekim)
+    TR.MODEL_Z_GLOBAL_RATIO, TR.MODEL_Z_SUMMARIES_LAST = 0.6, 0            # eski varsayilan: L1 / L2 G1 (8 Ekim)
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=6, max_tokens=4)
     base = ["--data", data, "--stream", root]
     runs = {}
@@ -209,7 +209,7 @@ def t_tools():
     except Exception:  # noqa: BLE001
         check("tools", False, traceback.format_exc(limit=4))
     finally:
-        (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_LAYERS,
+        (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO,
          TR.MODEL_Z_SUMMARIES_LAST) = saved
 
 
@@ -230,9 +230,9 @@ def t_bag():
         return
     root, data, prompts = T2._train_root(tp)
     saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, DD.BATCH_ROWS,
-             TR.MODEL_Z_GLOBAL_LAYERS, TR.MODEL_Z_SUMMARIES_LAST)
+             TR.MODEL_Z_GLOBAL_RATIO, TR.MODEL_Z_SUMMARIES_LAST)
     TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
-    TR.MODEL_Z_GLOBAL_LAYERS, TR.MODEL_Z_SUMMARIES_LAST = 1, 0              # testler eski varsayilanla (8 Ekim)
+    TR.MODEL_Z_GLOBAL_RATIO, TR.MODEL_Z_SUMMARIES_LAST = 0.6, 0            # eski varsayilan: L1 / L2 G1 (8 Ekim)
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=6, max_tokens=4)
     try:
         base_tr = ["--data", data, "--stream", root, "--device", "cpu", "--model", "model_z", "--d", "16", "--layers", "2",
@@ -309,7 +309,7 @@ def t_bag():
         check("bag", False, traceback.format_exc(limit=4))
     finally:
         (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, DD.BATCH_ROWS,
-         TR.MODEL_Z_GLOBAL_LAYERS, TR.MODEL_Z_SUMMARIES_LAST) = saved
+         TR.MODEL_Z_GLOBAL_RATIO, TR.MODEL_Z_SUMMARIES_LAST) = saved
 
 
 def t_knowledge():

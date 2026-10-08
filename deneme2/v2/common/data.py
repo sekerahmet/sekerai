@@ -519,7 +519,7 @@ def build_batch(stories, row_stories_list, layout, device="cpu", row_len=ROW_LEN
     st0, L = stories.sent[si, 0], stories.sent[si, 1] - stories.sent[si, 0]
     slen = np.add.reduceat(L + 1, first_sent) + 1                        # hikaye boyu 1 + sum(L + 1)
     cs = excl(slen)
-    start = cs - cs[np.r_[0, np.cumsum(per_row)[:-1]]][hrow]             # hikayenin satirdaki ilk sutunu
+    start = cs - cs[np.r_[0, np.cumsum(per_row)[:-1]][hrow]]             # hikayenin satirdaki ilk sutunu (bos satir: dolgu)
     assert (start + slen <= row_len).all(), "satir tasti"
     cl = excl(L + 1)
     s0 = start[sh] + 1 + cl - cl[first_sent[sh]]                         # cumlenin ilk sutunu

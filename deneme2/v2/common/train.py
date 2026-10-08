@@ -9,24 +9,29 @@ ayni adimda -0,012; --resume'da acik verilmezse kosunun kimliginden, alan yoksa 
 varsayilani): bloklarin 2-B matrisleri
 recipe.BatchedMuon'a (torch.optim.Muon matematigi; adjust_lr_fn match_rms_adamw: guncelleme RMS'i AdamW'ninki, ayni --lr
 ve wd; liu2025_muonscalable), geri kalan ayni AdamW'ye; wsd_lr ikisine.  Muon yoksa kosu baslamadan DURUR.  --lr
-zorunlu; Muon icin olculen 2e-3 (belge 39 kisa tarama 5e-4 / 1e-3 / 2e-3 + 1 epok, OLCULENLER_z).  --optimizer adamw:
-eski tarif (olculen lr 5e-4).  --optimizer normuon (kullanici, 8 Ekim: "Ben nurmuon yapalım şimdiden dedim"):
-recipe.NorMuon (li2025_normuon Algorithm 1), ayni --lr (guncelleme RMS'i 0,2 lr).
+sayi ya da auto (varsayilan; kullanici, 8 Ekim: "her lr kendi modeline özgü D ye göre"): muon / normuon'da LR_REF[0]
+(LR_REF[1] / d) ^ LR_REF[2] (adim basina aci ~ lr 0,2 sqrt(d) sabit; d768'de olculen 2e-3, belge 39 + OLCULENLER_z);
+adamw'de sayi sart (DUR).  --optimizer adamw: eski tarif (olculen lr 5e-4).
+--optimizer normuon (kullanici, 8 Ekim: "Ben nurmuon yapalım şimdiden dedim"): recipe.NorMuon (li2025_normuon
+Algorithm 1), ayni --lr (guncelleme RMS'i 0,2 lr).
 --fp8 none|tensorwise|rowwise (kullanici, 8 Ekim: "fp8 de dene bakalım. fp8 dikkatli dene"; varsayilan none): torchao
 Float8Linear yalniz MLP'de (gate_up, down), compile'dan once; agirliklar fp32, state_dict adlari ayni (kosu basinda
 denetlenir) -> ayni kosu --resume ile FP8 acik / kapali surer; KIMLIGE GIRMEZ, kip her segmentte gunlukte ve results.json
 segments'ta.  CUDA ve torchao ister, yoksa DURUR (bf16'ya sessizce dusmez).
 Veri: BATCH_ROWS satir x row_len (plan dosyasindan); epok 1 <data>/train_pack_plan_e1.npz, sonrakiler pack_plan(seed,
-epok).  --local: ham akisin yerel kopyasi (yalniz onbellek; sha256 = <split>_boundaries.json'daki).
+epok).  --local: ham akisin yerel kopyasi (yalniz onbellek; sha256 = <split>_boundaries.json'daki).  Epok sonu eksik batch
+CUDA'da bos (dolgu) satirla BATCH_ROWS'a tamamlanir, sinavin eksik batch'i her yerde (kullanici, 8 Ekim: "epok sonu
+derlemeyi de ekle"): derleme sekli sabit, veri atilmaz, dolgu hedefsiz.  Torbada yok (recipe.bag_index satir basi BOS ister).
 --summaries_last 1 (belge 66; kullanici, 8 Ekim: "Fikrine onay verdim"): batch'ler sentence.summaries_last ile [token'lar |
 ozetler | dolgu] sirasinda (egitim ve sinav; sinav sonucu hedef sirasina geri), maske sorgu basina iki aralik; uretim
 degismez.  Torba ile DUR.
 --z_bow_weight W (kullanici, 8 Ekim: "Onayladım"; belge 68 fikir 1): amac = token CE + W x z_bow (Z_k'nin z_bow_layer
 ciktisindan z_bow_norm + bagli E ile sonraki cumlenin token torbasi, sentence.z_bow_loss); varsayilan 0, torba ile DUR,
 sinav degismez; gunlukte z_bow.
---glob_kv_heads N (kullanici, 8 Ekim: "bu duurmda GOA yı da sıraya koy o zaman bakalım"; uretim hizi): GQA, k / v N head
-yalniz tam causal katmanlarda (Model Z glob; transformer'da her katman, kiyas icin); yerel / mid katmanlar tam head (Z
-K/V kanali daralmaz).  Varsayilan 0 = heads (bit ayni); kimlikte (sekil degisir).
+--glob_kv_heads N|auto (kullanici, 8 Ekim: "bu duurmda GOA yı da sıraya koy o zaman bakalım"; uretim hizi): GQA, k / v
+N head yalniz tam causal katmanlarda (Model Z glob; transformer'da her katman, kiyas icin); yerel / mid katmanlar tam head
+(Z K/V kanali daralmaz).  auto = heads / GLOB_KV_GROUP (bolunmezse DUR).  Varsayilan 0 = heads (bit ayni); kimlikte
+(sekil degisir).
 --stop_step N (kullanici, 8 Ekim): takvim degismeden adim N'de durur; checkpoint.pt + agent.pt + results.json (finished
 False, stopped_at, readings_skipped "stop_step"), son sinav ve okuma yok; --resume 1 kaldigi yerden.
 Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunluk sinirinda, epok sonunda ve bitiste;
@@ -43,13 +48,14 @@ başlasın"; belge 44; eski kod git etiketi v2-before-formula-cleanup-20261007).
 kosulari ayirir: formullu ve temizlik oncesi (6 Ekim; etiket v2-before-cleanup-20261006) Model Z kosulari yuklenmez /
 surdurulmez (_archived); eski transformer yuklenir.  Temizlik oncesi kosular uzatilmaz (kullanici, 6 Ekim: "eski koşuları
 uzatma niyetim yok").
---global_layers N (belge 40 s6.2 Deney G; yalniz Model Z): son N blok tam causal, gercek hikaye konumuyla; maske ikilisi
-(yerel, global) _attn'dan, egitim / sinav / teshis ayni yol.  --global_layers 0: G'siz Model Z (kiyas).  Eski
+--global_layers N|auto (belge 40 s6.2 Deney G; yalniz Model Z): son N blok tam causal, gercek hikaye konumuyla; maske
+ikilisi (yerel, global) _attn'dan, egitim / sinav / teshis ayni yol.  --global_layers 0: G'siz Model Z (kiyas).  Eski
 checkpoint'te alan yoksa 0.
-Varsayilanlar (kullanici, 8 Ekim: "Varsayılan yap ama kısa bir koşu ile son halin çalıştığından emin olalım"): model_z'de
-global_layers MODEL_Z_GLOBAL_LAYERS (3) ve torbasiz summaries_last MODEL_Z_SUMMARIES_LAST (1); transformer ve --bag_k'da
-summaries_last 0 (acik 1 DURUR).  --resume 1'de acikca verilmeyen global_layers / summaries_last kosunun kimliginden (alan
-yoksa 0): eski G1 / summaries_last 0 kosulari degismeden surer.
+Varsayilanlar (kullanici, 8 Ekim: "Varsayılan yap ama kısa bir koşu ile son halin çalıştığından emin olalım"; "G yi de
+ölçüye bağlayalım"): model_z'de global_layers auto = round(layers x MODEL_Z_GLOBAL_RATIO) (L10 3, L12 4, L24 8; transformer
+0) ve torbasiz summaries_last MODEL_Z_SUMMARIES_LAST (1); transformer ve --bag_k'da summaries_last 0 (acik 1 DURUR).
+--resume 1'de acikca verilmeyen global_layers / summaries_last / optimizer / glob_kv_heads / lr kosunun kimliginden
+(INHERIT): eski kosular varsayilan degisse de kendi ayariyla surer.  Kimlikte "auto" degil cozulmus sayi.
 
 --bag_k K (iki modelde; belge 53-55, adlar onayli 7 Ekim; kullanici, 7 Ekim: "burda öğrenme kalite ve hıza etkisi ne"):
 ogrenen torba B_k = C u P_k u L_k, |B_k| <= K (recipe.Bag): C en sik --bag_core + END + EOS (<data>/train_token_counts.npy),
@@ -58,10 +64,11 @@ recipe.bag_train_loss (torba basina aday bmm; tam sozluk yalniz kacan ve --bag_f
 secici kaybi (Z'ye akar).  Gunlukte loss = iki asamali NLL (sinavla ayni tanim); bag: kaynak kaynak (C / P / L / kacan),
 p(DIGER), tam CE, secici kaybi; cikis ve secici ileri ms (CUDA olaylari).
 
-    python train.py --model transformer|model_z --lr LR --out <kosu> [--data <v2/simplestories_gpt2>]
+    python train.py --model transformer|model_z --out <kosu> [--lr LR|auto (varsayilan auto)] [--data <v2/simplestories_gpt2>]
                     [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
                     [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1]
-                    [--optimizer normuon|muon|adamw (varsayilan normuon)] [--global_layers N (model_z; varsayilan 3)]
+                    [--optimizer normuon|muon|adamw (varsayilan normuon)] [--global_layers N|auto (varsayilan auto)]
+                    [--glob_kv_heads N|auto (varsayilan 0)]
                     [--summaries_last 0|1 (model_z torbasiz; varsayilan 1)]
                     [--bag_k K [--bag_core 50] [--bag_weight 0.1] [--bag_full_frac 0.05]]
 """
@@ -91,10 +98,12 @@ MUON = dict(momentum=0.95, nesterov=True, ns_steps=5, adjust_lr_fn="match_rms_ad
 DECAY = 0.2                                                # recipe.wsd_lr varsayilani; inis basi checkpoint'i
 BATCH_ROWS = D.BATCH_ROWS
 LOG_EVERY = 100             # adim; gunluk satiri = bir hiz penceresi
-MODEL_Z_GLOBAL_LAYERS = 3   # model_z varsayilani (kullanici, 8 Ekim; G3 + aralik maskesi + summaries_last + Muon)
-MODEL_Z_SUMMARIES_LAST = 1  # model_z torbasiz varsayilani (belge 66)
-INHERIT = dict(global_layers=0, summaries_last=0, optimizer="adamw")   # --resume'da acik verilmezse kimlikten (alan
-DEFAULT_OPTIMIZER = "normuon"                       # yoksa bu deger); optimizer varsayilani (kullanici, 8 Ekim)
+MODEL_Z_GLOBAL_RATIO = 1 / 3   # global_layers auto (OLCULENLER_z: d768/L10 G1->G3 kazanc, d1024/L12 G3->G4 -0,0047)
+GLOB_KV_GROUP = 4              # glob_kv_heads auto = heads / 4
+LR_REF = (2e-3, 768, 0.5)      # lr auto = lr0 (d0 / d) ^ us (aci / adim ~ lr 0,2 sqrt(d) sabit); d1024 olcumu: 1,4 / 1,7e-3 duz, 1,73e-3 icinde
+MODEL_Z_SUMMARIES_LAST = 1     # model_z torbasiz varsayilani (belge 66)
+INHERIT = dict(global_layers=0, summaries_last=0, optimizer="adamw", glob_kv_heads=0, lr="auto")   # --resume'da verilmezse
+DEFAULT_OPTIMIZER = "normuon"                                   # kimlikten (alan yoksa bu deger); kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
 COMPILE_MODE = "max-autotune-no-cudagraphs"   # bloklarin derleme modu (5w: torba K 1024 -2,9 ms/adim; kullanici, 7 Ekim)
 READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
@@ -364,7 +373,14 @@ class _Exam:
         self.model, self.mask_fn, self.cuda, self.last = model, mask_fn, cuda, last
 
     def loss_per_target(self, batch):
-        """last (sentence.summaries_last): batch o duzende islenir, sonuclar build_batch duzeninin hedef sirasina geri."""
+        """last (sentence.summaries_last): batch o duzende islenir, sonuclar build_batch duzeninin hedef sirasina geri.
+        Eksik son batch build_batch'in bos satir dolgusuyla BATCH_ROWS'a tamamlanir (derleme sekli sabit; dolgu satiri
+        hedefsiz, cikti ayni); torbali modelde tamamlanmaz."""
+        n = BATCH_ROWS - len(batch.kind)
+        if n > 0 and not hasattr(self.model, "bag"):                    # torba: recipe.bag_index satir basi BOS ister
+            fill = dict(tokens=0, kind=D.Kind.PAD, pos=0, doc=-1, sent=-1, target=-100, target_kind=-1, story_ids=-1)
+            batch = D.PackedBatch(**{k: torch.cat([getattr(batch, k), getattr(batch, k).new_full(
+                (n, getattr(batch, k).shape[1]), v)]) for k, v in fill.items()})
         if self.last is None:
             return self.model.loss_per_target(batch, _attn(batch, self.mask_fn, self.cuda))
         pb, perm = self.last(batch)
@@ -424,8 +440,9 @@ def _git():
 def _args(argv):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--model", required=True, choices=("transformer", "model_z"))
-    ap.add_argument("--lr", type=float, required=True,
-                    help="tepe lr (WSD); olculen: muon 2e-3, adamw 5e-4 (belge 39, OLCULENLER_z)")
+    ap.add_argument("--lr", type=lambda s: s if s == "auto" else float(s), default=None,
+                    help="tepe lr (WSD); auto (varsayilan; muon / normuon): LR_REF[0] (LR_REF[1] / d) ^ LR_REF[2]; adamw'de "
+                         "sayi sart (olculen 5e-4); --resume'da verilmezse kosunun kimliginden (belge 39, OLCULENLER_z)")
     ap.add_argument("--out", required=True, help="kosu klasoru")
     ap.add_argument("--data", default="/content/drive/MyDrive/v2/simplestories_gpt2", help="sinir ve plan dosyalari")
     ap.add_argument("--stream", default="/content/drive/MyDrive/simplestories", help="gpt2/{train,valid}.npy kok")
@@ -442,9 +459,10 @@ def _args(argv):
                     help="normuon (varsayilan, 8 Ekim): Muon + noron basina normalizasyon (recipe.NorMuon, li2025_normuon); "
                          "muon: bloklarin 2-B matrisleri Muon'a (match_rms_adamw, ayni --lr), geri kalan AdamW'ye; adamw: "
                          "tek AdamW; --resume'da verilmezse kosunun kimliginden")
-    ap.add_argument("--global_layers", type=int, default=None,
-                    help="model_z: son N blok tam causal, gercek konumla (belge 40 s6.2 Deney G); varsayilan model_z'de "
-                         "3 (8 Ekim), transformer'da 0; 0: G'siz Model Z; --resume'da verilmezse kosunun kimliginden")
+    ap.add_argument("--global_layers", type=lambda s: s if s == "auto" else int(s), default=None,
+                    help="model_z: son N blok tam causal, gercek konumla (belge 40 s6.2 Deney G); auto (varsayilan): "
+                         "round(layers x MODEL_Z_GLOBAL_RATIO), transformer'da 0; 0: G'siz Model Z; --resume'da "
+                         "verilmezse kosunun kimliginden")
     ap.add_argument("--layer_plan", default=None,
                     help="model_z katman plani, ornek loc2,mid4,loc1,glob1 (mid: yalniz BOS + Z satirlari, belge 52); "
                          "verilirse --layers ve --global_layers ondan")
@@ -458,9 +476,10 @@ def _args(argv):
     ap.add_argument("--summaries_last", type=int, default=None,
                     help="model_z: satir bellekte [token'lar | ozetler | dolgu] (belge 66); model ayni, maske iki aralik; "
                          "varsayilan model_z torbasiz 1, aksi 0; --resume'da verilmezse kosunun kimliginden")
-    ap.add_argument("--glob_kv_heads", type=int, default=0,
+    ap.add_argument("--glob_kv_heads", type=lambda s: s if s == "auto" else int(s), default=None,
                     help="GQA: tam causal katmanlarda (model_z glob, transformer hepsi) k / v head sayisi, heads'in "
-                         "boleni (0: heads; kimlikte; kullanici, 8 Ekim)")
+                         "boleni ya da auto (heads / GLOB_KV_GROUP); varsayilan 0 (heads); kimlikte; --resume'da "
+                         "verilmezse kosunun kimliginden")
     ap.add_argument("--z_bow_weight", type=float, default=0.0,
                     help="model_z: Z_k'dan sonraki cumlenin token torbasi ek kaybi agirligi (0: kapali; kullanici, 8 Ekim)")
     ap.add_argument("--fp8", default="none", choices=("none", "tensorwise", "rowwise"),
@@ -473,10 +492,19 @@ def _args(argv):
                     help="en cok bu kadar duvar saati kaybi (sinav dahil); surdurmede degistirilebilir")
     args = ap.parse_args(argv)
     args.defaulted = [k for k in INHERIT if getattr(args, k) is None and not (k == "global_layers" and args.layer_plan)]
+    ckpt = os.path.join(args.out, "checkpoint.pt")
+    if args.resume and args.defaulted and os.path.exists(ckpt):         # varsayilan degisse de kosu kendi ayariyla surer
+        was = torch.load(ckpt, map_location="cpu", weights_only=False, mmap=True)["args"]
+        for k in args.defaulted:
+            setattr(args, k, was.get(k, INHERIT[k]))
     if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
         args.optimizer = DEFAULT_OPTIMIZER
-    if args.global_layers is None:                                       # 8 Ekim: G3 varsayilan
-        args.global_layers = MODEL_Z_GLOBAL_LAYERS if args.model == "model_z" else 0
+    if args.global_layers is None:
+        args.global_layers = "auto"
+    if args.glob_kv_heads is None:
+        args.glob_kv_heads = 0                                           # uretim hizi olcumunden sonra "auto"
+    if args.lr is None:
+        args.lr = "auto"
     if args.summaries_last is None:
         args.summaries_last = MODEL_Z_SUMMARIES_LAST if args.model == "model_z" and not args.bag_k else 0
     if args.layer_plan:
@@ -487,6 +515,23 @@ def _args(argv):
         plan = parse_layer_plan(args.layer_plan)
         args.layers = len(plan)
         args.global_layers = plan.count("glob")
+    auto = []                                                            # kimlige cozulmus sayi girer
+    if args.global_layers == "auto":
+        args.global_layers = round(args.layers * MODEL_Z_GLOBAL_RATIO) if args.model == "model_z" else 0
+        if args.model == "model_z":
+            auto.append("global_layers %d (round(%d x %.4g))" % (args.global_layers, args.layers, MODEL_Z_GLOBAL_RATIO))
+    if args.glob_kv_heads == "auto":
+        if args.heads % GLOB_KV_GROUP:
+            sys.exit("DUR: --glob_kv_heads auto: heads %d, %d'e bolunmuyor; sayi ver" % (args.heads, GLOB_KV_GROUP))
+        args.glob_kv_heads = args.heads // GLOB_KV_GROUP
+        auto.append("glob_kv_heads %d (%d / %d)" % (args.glob_kv_heads, args.heads, GLOB_KV_GROUP))
+    if args.lr == "auto":
+        if args.optimizer == "adamw":
+            sys.exit("DUR: --lr auto (varsayilan) yalniz muon / normuon (LR_REF Muon'da olculdu); adamw'de --lr sayi ver")
+        args.lr = LR_REF[0] * (LR_REF[1] / args.d) ** LR_REF[2]
+        auto.append("lr %.6g (%g x (%d / %d) ^ %g)" % (args.lr, LR_REF[0], LR_REF[1], args.d, LR_REF[2]))
+    if auto:
+        print("auto: " + ", ".join(auto), flush=True)
     return args
 
 
@@ -495,10 +540,7 @@ def main(argv=None):
     t0 = time.time()
     log = lambda msg: print("[%7.1f sn] %s" % (time.time() - t0, msg), flush=True)  # noqa: E731
     ckpt0 = os.path.join(args.out, "checkpoint.pt")
-    if args.resume and args.defaulted and os.path.exists(ckpt0):        # varsayilan degisse de kosu kendi ayariyla surer
-        was0 = torch.load(ckpt0, map_location="cpu", weights_only=False, mmap=True)["args"]
-        for k in args.defaulted:
-            setattr(args, k, was0.get(k, INHERIT[k]))
+    if args.resume and args.defaulted and os.path.exists(ckpt0):        # _args kimlikten aldi
         log("surdurme: verilmeyen %s kosunun kimliginden: %s" % (args.defaulted, {k: getattr(args, k)
                                                                                  for k in args.defaulted}))
     for err in (_global_error(args), _bag_error(args)):                  # veri yuklenmeden
@@ -655,7 +697,9 @@ def main(argv=None):
 
     def cpu_batch(step):
         rows, real = rows_of(step)
-        b = D.build_batch(train, rows, layout, "cpu", row_len)
+        if cuda and not args.bag_k:                                      # epok sonu eksik batch: bos (dolgu) satirla tam
+            rows += [[]] * (BATCH_ROWS - len(rows))                      # boy, derleme sekli sabit (CPU'da agirlik bit ayni
+        b = D.build_batch(train, rows, layout, "cpu", row_len)           # kalsin diye yok: dW toplama sirasi degisiyor)
         if last is not None:
             b = last(b)[0]
         if not args.bag_k:
