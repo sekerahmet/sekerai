@@ -992,6 +992,7 @@ def t_train():
         _train_vocab(base, data, out, TR)
         _train_finish(base, out, TR)
         _train_gqa_default(base, out, TR)
+        _train_ngram(base, data, out, TR)
         import copy                                                     # epok sonu eksik batch dolgusu (8 Ekim)
         import types
         import recipe as R
@@ -1123,6 +1124,56 @@ def _train_gqa_default(base, out, TR):
         check("train GQA varsayilan", False, traceback.format_exc(limit=3))
     finally:
         TR.GLOB_KV_DEFAULT = pinned
+
+
+def _train_ngram(base, data, out, TR):
+    """--ngram_embed (deneme, belge 90b): Model Z 2 epok kosar, kimlikte; tablo agent.pt'de (N x d); optimizer'da tablo
+    grubu wd 0, lr = NGRAM_LR_MULT x taban; adim 4'te kesilip surdurulen = kesintisiz (bit); load_run tabloyu kurar;
+    transformer ve negatif deger DURUR."""
+    import traceback
+    import recipe as R
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
+        import generate_readings as GR
+        cmd = base + ["--model", "model_z", "--layers", "2", "--epochs", "2", "--ngram_embed", "64"]
+        a = TR.main(cmd + ["--out", out("ngram_A")])
+        stopped, r = _cut_and_resume(TR, cmd, out("ngram_cut"))
+        st_ = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        sa, sb = st_(out("ngram_A")), st_(out("ngram_cut"))
+        groups = torch.load(os.path.join(out("ngram_A"), "checkpoint.pt"), weights_only=False)["opt"]["param_groups"]
+        tg = [g for g in groups if g.get("lr_mult")]
+        base_lr = [g["lr"] for g in groups if not g.get("lr_mult")]
+        m = GR.load_run(out("ngram_A"), data, torch.device("cpu"))[0]
+        bad = [_exit_msg(TR.main, base + x + ["--out", out("ngram_bad%d" % i)]) for i, x in enumerate((
+            ["--model", "transformer", "--ngram_embed", "64"], ["--model", "model_z", "--ngram_embed", "-1"]))]
+        check("train --ngram_embed 64: kosar, kimlikte, tablo (64 x 16) agent.pt'de ve egitilmis; tablo grubu wd 0, lr = "
+              "%g x taban; kesilip surdurulen = kesintisiz (bit); load_run kurar; transformer / negatif DURUR" % R.NGRAM_LR_MULT,
+              a["finished"] and a["identity"]["ngram_embed"] == 64 and tuple(sa["ngram.weight"].shape) == (64, 16)
+              and bool(sa["ngram.weight"].any()) and len(tg) == 1 and tg[0]["weight_decay"] == 0.0
+              and tg[0]["lr"] == R.NGRAM_LR_MULT * base_lr[0] and stopped and all(torch.equal(sa[k], sb[k]) for k in sa)
+              and [w["loss"] for w in r["log"]] == [w["loss"] for w in a["log"]] and m.ngram.num_embeddings == 64
+              and all(b_ is not None and "ngram_embed" in b_ for b_ in bad), str(bad))
+        cmd2 = cmd + ["--ngram_layers", "1", "--ngram_sparse", "1"]                  # hiz secenekleri (belge 90b ek)
+        a2 = TR.main(cmd2 + ["--out", out("ngram_fast_A")])
+        stopped2, r2 = _cut_and_resume(TR, cmd2, out("ngram_fast_cut"))
+        s2a, s2b = st_(out("ngram_fast_A")), st_(out("ngram_fast_cut"))
+        ck2 = torch.load(os.path.join(out("ngram_fast_A"), "checkpoint.pt"), weights_only=False)["opt"]
+        m2 = GR.load_run(out("ngram_fast_A"), data, torch.device("cpu"))[0]
+        bad2 = [_exit_msg(TR.main, base + x + ["--out", out("ngram_fbad%d" % i)]) for i, x in enumerate((
+            ["--model", "model_z", "--ngram_layers", "1"], ["--model", "model_z", "--ngram_embed", "64", "--ngram_layers", "9"],
+            ["--model", "model_z", "--ngram_embed", "64", "--ngram_sparse", "2"]))]
+        check("train --ngram_layers 1 --ngram_sparse 1: kosar, kimlikte, lambda 1 tane, tablo egitilmis; optimizer durumu "
+              "seyrek (v, last, t); kesilip surdurulen = kesintisiz (bit); load_run kurar; --ngram_embed'siz / K > katman / "
+              "sparse 2 DURUR",
+              a2["finished"] and (a2["identity"]["ngram_layers"], a2["identity"]["ngram_sparse"]) == (1, 1)
+              and tuple(s2a["ngram_lambdas"].shape) == (1,) and bool(s2a["ngram.weight"].any())
+              and set(ck2["ngram"]) == {"v", "last", "t", "lr"} and ck2["ngram"]["t"] == len(a2["log"])
+              and stopped2 and all(torch.equal(s2a[k], s2b[k]) for k in s2a)
+              and [w["loss"] for w in r2["log"]] == [w["loss"] for w in a2["log"]]
+              and m2.ngram_layers == 1 and m2.ngram_sparse and all(b_ is not None and "ngram" in b_ for b_ in bad2),
+              str(bad2))
+    except Exception:  # noqa: BLE001
+        check("train --ngram_embed", False, traceback.format_exc(limit=3))
 
 
 def _train_finish(base, out, TR):
