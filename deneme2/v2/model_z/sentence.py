@@ -9,7 +9,8 @@ transformer akisiyla ayni, hedefler konum konum ayni:
     hedef   t_11 t_12 .. END   t_21   t_22 .. END   t_31  ...  EOS
     konum   0    1    .. L     1      2    ..       2     ...  n     (Z_k k; cumle k, token i: k-1+i)
 Maske (model_z_read_mask, tek mask_mod -> dense ya da FlexAttention BlockMask): ayni hikaye, kv <= q, ve kv BOS/ZTOK ya
-da (q, kv ayni cumlenin token'i; Z_k kendi cumlesinin token'larini da gorur).  Z_k'nin her katmandaki hali sonraki
+da (q, kv ayni cumlenin token'i; Z_k kendi cumlesinin token'larini da gorur); aralik bicimi model_z_read_bounds ile
+(belge 65 (a)).  Z_k'nin her katmandaki hali sonraki
 cumlelerin K/V'si (belge 35 (b)).  model_z_mask: okumasiz hali (teshis: z_ablate read_off).  Uretim: SummaryCache (ozet
 onbellegi BOS + Z'ler kalici, cumle onbellegi cumle bitince silinir).  Tarif (Llama sinifi): pre-norm RMSNorm, RoPE,
 QK-norm (fp32), SwiGLU, bias yok, tied embedding.
@@ -56,23 +57,46 @@ def model_z_mask(kind, doc, sent):
     return mask_mod
 
 
+def model_z_read_bounds(kind):
+    """kind (B, T) -> (lo, ds, summ): sorgu basina aralik (belge 65 (a)).  ds = hikayenin (dolguda dolgu kosusunun) ilk
+    sutunu, lo = parcanin ilk sutunu (son ozetten sonraki; BOS'ta kendisi, Z_k'da cumlesinin ilk token'i), summ = BOS |
+    ZTOK.  build_batch duzenine dayanir: hikaye BOS ile baslar, hikayeler bitisik, dolgu yalniz satir sonunda tek kosu,
+    cumle siniri Z_k (tests_model_z 'mask' gercek SS / FineWeb satirlariyla eski formule esitligi sinar)."""
+    B, T = kind.shape
+    col = torch.arange(T, device=kind.device).expand(B, T)
+    summ = (kind == BOS) | (kind == ZTOK)
+    pad = kind == PAD
+    first_pad = pad & ~torch.cat([torch.zeros_like(pad[:, :1]), pad[:, :-1]], 1)
+    after_summ = torch.cat([torch.zeros_like(summ[:, :1]), summ[:, :-1]], 1) & ~pad
+    zero = torch.zeros_like(col)
+    ds = torch.where((kind == BOS) | first_pad, col, zero).cummax(1).values
+    lo = torch.where((kind == BOS) | first_pad | after_summ, col, zero).cummax(1).values
+    return lo.int(), ds.int(), summ
+
+
 def model_z_read_mask(kind, doc, sent):
-    """Ogrenilen z maskesi: model_z_mask + ZTOK sorgusu kendi cumlesinin token'larini gorur (build_batch Z_k'nin sent'ine
-    kendi cumle numarasini yazar).  Z_k cumlenin sonunda: gordugu her token ondan once (belge 35 s1)."""
+    """Ogrenilen z maskesi: model_z_mask + ZTOK sorgusu kendi cumlesinin token'larini gorur.  Aralik bicimi (belge 65
+    (a); sorgu basina lo / ds, kv tarafinda yalniz ozet biti): kv <= q ve (kv >= lo[q] ya da kv ozet ve kv >= ds[q]).
+    Dolgu kuralini icerir (includes_padding): dolgu kendi kosusunu gorur, gercek konum dolguyu gormez.  doc, sent imza
+    icin (model_z_read_bounds yalniz kind'den)."""
+    lo, ds, summ = model_z_read_bounds(kind)
+
     def mask_mod(b, h, q, kv):
-        kq, kk = kind[b, q], kind[b, kv]
-        summary = (kk == BOS) | (kk == ZTOK)
-        word = ((kq == TOKEN) | (kq == END) | (kq == ZTOK)) & ((kk == TOKEN) | (kk == END)) & (sent[b, q] == sent[b, kv])
-        pad = (kq == PAD) & (kk == PAD)
-        return (doc[b, q] == doc[b, kv]) & (kv <= q) & (summary | word | pad)
+        return (kv <= q) & ((kv >= lo[b, q]) | (summ[b, kv] & (kv >= ds[b, q])))
     return mask_mod
 
 
 def model_z_global_mask(kind, doc, sent):
-    """global_layers bloklari: ayni hikaye ve kv <= q (kelime, BOS, Z hepsi).  Dolgu (doc -1) yalniz dolguyu gorur."""
+    """global_layers bloklari: ayni hikaye ve kv <= q (kelime, BOS, Z hepsi); aralik bicimi kv >= ds[q] (belge 65 (a)).
+    Dolgu yalniz kendi kosusunu gorur (includes_padding)."""
+    _, ds, _ = model_z_read_bounds(kind)
+
     def mask_mod(b, h, q, kv):
-        return (doc[b, q] == doc[b, kv]) & (kv <= q)
+        return (kv <= q) & (kv >= ds[b, q])
     return mask_mod
+
+
+model_z_read_mask.includes_padding = model_z_global_mask.includes_padding = True   # recipe sarmaz (belge 65 olcumu)
 
 
 def story_positions(kind):

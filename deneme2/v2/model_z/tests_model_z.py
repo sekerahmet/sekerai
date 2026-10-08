@@ -2,7 +2,7 @@
 (z, z_flat, direct, generate_longest, formullu onbellek) kaldirildi (belge 44); eski hali git etiketi
 v2-before-formula-cleanup-20261007.
 
-    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,bag]
+    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,bag,plan,mask]
 """
 import os
 import sys
@@ -198,6 +198,75 @@ def ref_read_mask(kind, doc):
                     continue
                 out[b, q, kv] = kk in (BOS, ZTOK) or (kk == TOKEN and kq in (TOKEN, ZTOK) and sid[q] == sid[kv])
     return out
+
+
+def _old_read_mask(kind, doc, sent):
+    """Aralik bicimi oncesi model_z_read_mask (belge 65 (a) oncesi, basvuru)."""
+    def mask_mod(b, h, q, kv):
+        kq, kk = kind[b, q], kind[b, kv]
+        summary = (kk == BOS) | (kk == ZTOK)
+        word = ((kq == TOKEN) | (kq == D.Kind.END) | (kq == ZTOK)) & ((kk == TOKEN) | (kk == D.Kind.END)) & (
+            sent[b, q] == sent[b, kv])
+        pad = (kq == PAD) & (kk == PAD)
+        return (doc[b, q] == doc[b, kv]) & (kv <= q) & (summary | word | pad)
+    return mask_mod
+
+
+def _old_global_mask(kind, doc, sent):
+    def mask_mod(b, h, q, kv):
+        return (doc[b, q] == doc[b, kv]) & (kv <= q)
+    return mask_mod
+
+
+def _range_masks(batch, tag="sentetik"):
+    """Aralik maskesi (belge 65 (a)) = eski formul + recipe._with_padding, dense, butun (q, kv); recipe.dense_mask
+    (includes_padding: sarmasiz) ve _with_padding(yeni) de ayni.  -> (yerel fark, global fark, gorulen)."""
+    import recipe as R
+    from sentence import model_z_global_mask
+    B, T = batch.kind.shape
+    k, d_, s_ = batch.kind, batch.doc, batch.sent
+    out = []
+    for new, old in ((model_z_read_mask, _old_read_mask), (model_z_global_mask, _old_global_mask)):
+        ref = _dense(R._with_padding(old(k, d_, s_), k, d_), B, T, "cpu")
+        got = _dense(new(k, d_, s_), B, T, "cpu")
+        wrapped = _dense(R._with_padding(new(k, d_, s_), k, d_), B, T, "cpu")
+        out.append((int((got != ref).sum()) + int((wrapped != ref).sum())
+                    + int((R.dense_mask(batch, new) != ref).sum()), int(ref.sum())))
+    check("mask %s: aralik bicimi (yerel, global) = eski formul + dolgu kurali; sarmasiz, _with_padding'li ve "
+          "recipe.dense_mask ayni (%d satir x %d)" % (tag, B, T), all(o[0] == 0 for o in out),
+          "fark / gorulen: %s" % out)
+
+
+def _range_masks_drive():
+    """Gercek satirlar (Drive varsa): SS valid, FineWeb valid, FineWeb train, 8'er satir x 2048."""
+    G = "G:/Drive'ım"
+    sets = (("SS valid", G + "/simplestories", G + "/v2/simplestories_gpt2", "valid"),
+            ("FineWeb valid", G + "/v2/fineweb_edu_s000", G + "/v2/fineweb_edu_s000", "valid"),
+            ("FineWeb train", G + "/v2/fineweb_edu_s000", G + "/v2/fineweb_edu_s000", "train"))
+    if not os.path.isdir(G + "/v2"):
+        print("ATLANDI mask gercek satirlar: Drive yok", flush=True)
+        return
+    for tag, root, ddir, split in sets:
+        ts = D.TokenStories(root, ddir, split)
+        if split == "train":
+            f = np.load(os.path.join(ddir, "train_pack_plan_e1.npz"))
+            ro, rs = f["row_offsets"], f["row_stories"]
+            rows = [rs[ro[r]:ro[r + 1]].tolist() for r in range(8)]
+        else:
+            lens = ts.lengths()
+            fit = np.nonzero(lens <= 2048)[0][:4000]
+            ro, rs = D.pack_plan(lens[fit], 2048, 0, 1)
+            rows = [fit[rs[ro[r]:ro[r + 1]]].tolist() for r in range(8)]
+        _range_masks(D.build_batch(ts, rows, "model_z", "cpu", 2048), tag)
+
+
+def t_mask():
+    """Aralik maskesi (belge 65 (a)): sentetik (dolgulu) ve gercek SS / FineWeb satirlari, eski formule esit."""
+    rng = np.random.default_rng(5)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 20))] for _ in range(rng.integers(1, 8))]
+               for _ in range(40)]
+    _range_masks(real_batch([list(range(i, i + 5)) for i in range(0, 40, 5)], 400, stories))
+    _range_masks_drive()
 
 
 def t_learned():
@@ -750,7 +819,7 @@ def t_plan():
 
 
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
-             equiv=t_equiv, bag=t_bag, plan=t_plan)
+             equiv=t_equiv, mask=t_mask, bag=t_bag, plan=t_plan)
 
 if __name__ == "__main__":
     if SIDE is not None:

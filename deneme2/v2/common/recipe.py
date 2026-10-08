@@ -47,10 +47,17 @@ def _with_padding(mask_mod, kind, doc):
     return mod
 
 
+def _padded(batch, mask_fn):
+    """mask_fn'in mask_mod'u, dolgu kuraliyla: mask_fn.includes_padding ise kendisi (kural icinde; sarma kv tarafina
+    kind yuklemesi ekler), yoksa _with_padding."""
+    mod = mask_fn(batch.kind, batch.doc, batch.sent)
+    return mod if getattr(mask_fn, "includes_padding", False) else _with_padding(mod, batch.kind, batch.doc)
+
+
 def dense_mask(batch, mask_fn):
     """-> bool (B, T, T) (SDPA attn_mask: True = gorulur)."""
     B, T = batch.kind.shape
-    mod = _with_padding(mask_fn(batch.kind, batch.doc, batch.sent), batch.kind, batch.doc)
+    mod = _padded(batch, mask_fn)
     dev = batch.kind.device
     return mod(torch.arange(B, device=dev)[:, None, None], 0, torch.arange(T, device=dev)[None, :, None],
                torch.arange(T, device=dev)[None, None, :])
@@ -60,7 +67,7 @@ def block_mask(batch, mask_fn):
     """-> FlexAttention BlockMask (GPU'da derlenerek kurulur)."""
     from torch.nn.attention.flex_attention import create_block_mask
     B, T = batch.kind.shape
-    mod = _with_padding(mask_fn(batch.kind, batch.doc, batch.sent), batch.kind, batch.doc)
+    mod = _padded(batch, mask_fn)
     dev = batch.kind.device
     return create_block_mask(mod, B, None, T, T, device=dev, BLOCK_SIZE=ATTN_BLOCK, _compile=dev.type == "cuda")
 
