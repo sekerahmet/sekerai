@@ -2,7 +2,7 @@
 (z, z_flat, direct, generate_longest, formullu onbellek) kaldirildi (belge 44); eski hali git etiketi
 v2-before-formula-cleanup-20261007.
 
-    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,bag,plan,mask,summaries_last,z_bow]
+    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,bag,plan,mask,summaries_last,z_bow,gqa]
 """
 import os
 import sys
@@ -436,6 +436,90 @@ def t_z_bow():
           "kayip %.6f / elle %.6f / sirali %.6f" % (float(l0), float(np.mean(man)), float(l1)))
 
 
+def t_gqa():
+    """glob_kv_heads (GQA, 8 Ekim): None / heads = bugunku (agirlik ve hidden bit); kv 2 (heads 4): yalniz glob bloklari
+    daralir, blok ciktisi = k / v'yi acikca tekrarlayan basvuru (dense), plan (glob1,loc1,glob1) dahil; summaries_last ayni;
+    sizinti yok; SummaryCache adim adim + prefill = tam ileri (onbellek glob'ta kv head); BatchedMuon / NorMuon sekil
+    gruplari calisir."""
+    import recipe as R
+    import train as TR
+    from sentence import model_z_global_mask, story_positions, summaries_last
+    rng = np.random.default_rng(9)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(2, 6))]
+               for _ in range(12)]
+    rows = [list(range(i, i + 4)) for i in range(0, 12, 4)]
+    batch = real_batch(rows, 160, stories)
+    B, T = batch.kind.shape
+
+    def make(**kw):
+        torch.manual_seed(0)
+        return SentenceTransformer(d=32, layers=3, heads=4, **kw).eval()
+    base = make(global_layers=1)
+    same = all(torch.equal(a_, b_) for a_, b_ in zip(base.state_dict().values(), make(global_layers=1, glob_kv_heads=4)
+                                                     .state_dict().values()))
+    with torch.no_grad():
+        same &= torch.equal(base._batch_hidden(batch), make(global_layers=1, glob_kv_heads=4)._batch_hidden(batch))
+    check("gqa: glob_kv_heads = heads (ya da None) bugunku model (agirlik ve hidden bit)", same)
+    ok, info = True, []
+    glob = _dense(model_z_global_mask(batch.kind, batch.doc, batch.sent), B, T, "cpu")
+    for kw in (dict(global_layers=1), dict(layer_plan="glob1,loc1,glob1")):
+        m = make(glob_kv_heads=2, **kw)
+        kv = [blk.kv_heads for blk in m.blocks]
+        shapes = [tuple(blk.qkv.weight.shape) for blk in m.blocks]
+        l = kv.index(2)
+        blk = m.blocks[l]
+        with torch.no_grad():
+            x = torch.randn(B, T, 32)
+            pos = story_positions(batch.kind)
+            got = blk(x, pos, glob)
+            q, k, v = blk._qkv(x, pos)
+            a_ = torch.nn.functional.scaled_dot_product_attention(q, k.repeat_interleave(2, 1), v.repeat_interleave(2, 1),
+                                                                  attn_mask=glob[:, None])
+            ref = blk._finish(x, a_)
+        ok &= float((got - ref).abs().max()) < 1e-5 and k.shape[1] == 2 and q.shape[1] == 4
+        info.append("%s kv %s qkv %s fark %.1e" % (kw, kv, shapes, float((got - ref).abs().max())))
+        with torch.no_grad():
+            h0 = m._batch_hidden(batch)
+            pb, perm = summaries_last(batch)
+            h1 = m._batch_hidden(pb).gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, 32))
+        ok &= float((h0 - h1).abs().max()) < 1e-5
+    check("gqa kv 2: yalniz glob bloklari daralir, blok = k / v tekrarli basvuru (dense), summaries_last ayni", ok,
+          "; ".join(info))
+    m = make(global_layers=1, glob_kv_heads=2)
+    alt = [[list(s_) for s_ in st] for st in stories]
+    alt[0][-1] = [(t + 7) % D.END_ID for t in alt[0][-1]]
+    with torch.no_grad():
+        g1, g2 = m._batch_hidden(batch), m._batch_hidden(real_batch(rows, 160, alt))
+        keep = batch.target >= 0
+        lg_full = g1[keep] @ m.E.weight.T
+        out = []
+        for row in rows:
+            for si in row:
+                cache = SummaryCache(m)
+                out.append(cache.logits[None])
+                for s_ in stories[si]:
+                    out += [cache.append_token(t)[None] for t in s_] + [cache.close_sentence()[None]]
+        pre = SummaryCache(m)
+        pre.prefill(stories[0][:2])
+    first = batch.doc[0] == 0
+    last = int((first & (batch.sent[0] == int(batch.sent[0][first].max()))).nonzero()[0, 0])
+    k_pre = 1 + sum(len(s_) + 1 for s_ in stories[0][:2]) - 1
+    d3 = float((torch.cat(out) - lg_full).abs().max())
+    check("gqa kv 2: sizinti yok; SummaryCache adim adim ve prefill = tam ileri (glob onbellegi kv head)",
+          torch.equal(g1[0, :last], g2[0, :last]) and d3 < 1e-5 and float((pre.logits - torch.cat(out)[k_pre]).abs().max())
+          < 1e-5 and cache.all_k[2].shape[1] == 2, "fark %.1e" % d3)
+    nm = SentenceTransformer(d=32, layers=3, heads=4, global_layers=1, glob_kv_heads=2)
+    opt = TR._optimizer(nm, "normuon", 1e-2, False)[0]
+    names = [n for n, _ in R.muon_params(nm)]
+    loss = nm.loss_per_target(batch)[0].mean()
+    loss.backward()
+    w0 = nm.blocks[2].qkv.weight.clone()
+    opt.step()
+    check("gqa: muon_params deseni ayni (glob qkv %s dahil), NorMuon adimi sekil gruplariyla calisir" % (
+        tuple(nm.blocks[2].qkv.weight.shape),), "blocks.2.qkv.weight" in names and not torch.equal(w0, nm.blocks[2].qkv.weight)
+          and torch.isfinite(nm.blocks[2].qkv.weight).all())
+
+
 def t_learned():
     """Ogrenilen z: model_z_read_mask = basvuru; z parcasi yok; nedensellik; gecmisin tek yolu okuma (gradyan); onbellek =
     tam hesap; flex = dense; gercek build_batch."""
@@ -777,7 +861,7 @@ def t_equiv():
     ayni tohumda agirlik, kayip, gradyan, 3 adim sonrasi agirlik, generate (acgozlu + ornekleme) bit duzeyinde."""
     tmp = tempfile.mkdtemp(prefix="tests_model_z_equiv_")
     try:
-        for src in ("common/data.py", "model_z/sentence.py", "model_z/sentence_z.py"):
+        for src in ("common/data.py", "common/recipe.py", "model_z/sentence.py", "model_z/sentence_z.py"):   # recipe: ust import
             txt = subprocess.run(["git", "-C", REPO, "show", "%s:deneme2/v2/%s" % (TAG, src)], capture_output=True,
                                  check=True).stdout
             os.makedirs(os.path.dirname(os.path.join(tmp, src)), exist_ok=True)
@@ -986,7 +1070,7 @@ def t_plan():
 
 
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
-             equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, z_bow=t_z_bow, bag=t_bag, plan=t_plan)
+             equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, z_bow=t_z_bow, gqa=t_gqa, bag=t_bag, plan=t_plan)
 
 if __name__ == "__main__":
     if SIDE is not None:

@@ -75,6 +75,7 @@ def load_run(out, data_dir, dev):
                            global_layers=idt.get("global_layers", 0),          # global_layers'tan onceki: 0
                            layer_plan=idt.get("layer_plan"),
                            bag_k=idt.get("bag_k", 0), z_bow_weight=idt.get("z_bow_weight", 0.0),
+                           glob_kv_heads=idt.get("glob_kv_heads", 0),
                            bag_n_core=len(pack["state"]["bag.core"]) if idt.get("bag_k") else 0)   # C state_dict'ten
     model, _, layout = T._build(spec, dev)
     model.load_state_dict(pack["state"])

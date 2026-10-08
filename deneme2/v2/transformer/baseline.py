@@ -31,11 +31,14 @@ def rope(x, pos, base=10000.0):
 class Block(torch.nn.Module):
     """Model Z V2 Block ile ayni tarif (kopya)."""
 
-    def __init__(self, d, heads, hidden):
+    def __init__(self, d, heads, hidden, kv_heads=None):
+        """kv_heads (GQA; varsayilan heads): k / v head sayisi, heads'in boleni; qkv d -> d + 2 d kv / heads."""
         super().__init__()
         self.heads = heads
+        self.kv_heads = int(kv_heads or heads)
+        assert self.kv_heads > 0 and heads % self.kv_heads == 0, "kv_heads heads'in boleni olmali"
         self.n1, self.n2 = torch.nn.RMSNorm(d), torch.nn.RMSNorm(d)
-        self.qkv = torch.nn.Linear(d, 3 * d, bias=False)
+        self.qkv = torch.nn.Linear(d, d + 2 * d * self.kv_heads // heads, bias=False)
         self.q_norm, self.k_norm = torch.nn.RMSNorm(d // heads), torch.nn.RMSNorm(d // heads)
         self.proj = torch.nn.Linear(d, d, bias=False)
         self.gate_up = torch.nn.Linear(d, 2 * hidden, bias=False)
@@ -43,7 +46,13 @@ class Block(torch.nn.Module):
 
     def _qkv(self, x, pos):
         B, T, d = x.shape
-        q, k, v = self.qkv(self.n1(x)).view(B, T, 3, self.heads, d // self.heads).permute(2, 0, 3, 1, 4)
+        hd = d // self.heads
+        if self.kv_heads == self.heads:
+            q, k, v = self.qkv(self.n1(x)).view(B, T, 3, self.heads, hd).permute(2, 0, 3, 1, 4)
+        else:                                                                # GQA: k / v kv_heads
+            q, k, v = self.qkv(self.n1(x)).split([d, self.kv_heads * hd, self.kv_heads * hd], -1)
+            q = q.view(B, T, self.heads, hd).transpose(1, 2)
+            k, v = (t.view(B, T, self.kv_heads, hd).transpose(1, 2) for t in (k, v))
         with torch.autocast(x.device.type, enabled=False):                  # QK-norm fp32 (belge 20 s4)
             q, k = self.q_norm(q.float()).to(v.dtype), self.k_norm(k.float()).to(v.dtype)
         return rope(q, pos), rope(k, pos), v
@@ -57,25 +66,27 @@ class Block(torch.nn.Module):
     def forward(self, x, pos, attn):
         """attn: None (duz causal), bool (B, T, T) (dense) ya da FlexAttention BlockMask."""
         q, k, v = self._qkv(x, pos)
+        gqa = dict(enable_gqa=True) if self.kv_heads != self.heads else {}
         if attn is None:
-            a = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+            a = F.scaled_dot_product_attention(q, k, v, is_causal=True, **gqa)
         elif torch.is_tensor(attn):
-            a = F.scaled_dot_product_attention(q, k, v, attn_mask=attn[:, None])
+            a = F.scaled_dot_product_attention(q, k, v, attn_mask=attn[:, None], **gqa)
         else:
             from torch.nn.attention.flex_attention import flex_attention
             bs = attn.BLOCK_SIZE[0]                     # 128 disinda varsayilan cekirdek hata veriyor (belge 37)
             a = flex_attention(q, k, v, block_mask=attn, kernel_options=None if bs == 128 else dict.fromkeys(
-                ("BLOCK_M", "BLOCK_N", "BLOCK_M1", "BLOCK_N1", "BLOCK_M2", "BLOCK_N2"), bs))
+                ("BLOCK_M", "BLOCK_N", "BLOCK_M1", "BLOCK_N1", "BLOCK_M2", "BLOCK_N2"), bs), **gqa)
         return self._finish(x, a)
 
 
 class BaselineTransformer(torch.nn.Module):
-    def __init__(self, d=512, layers=8, heads=8):
+    def __init__(self, d=512, layers=8, heads=8, kv_heads=None):
+        """kv_heads: her katmanda k / v head sayisi (GQA kiyasi; varsayilan heads)."""
         super().__init__()
         self.END, self.EOS = END_ID, EOS_ID
         hidden = -(-int(8 * d / 3) // 8) * 8
         self.E = torch.nn.Embedding(VOCAB, d)
-        self.blocks = torch.nn.ModuleList(Block(d, heads, hidden) for _ in range(layers))
+        self.blocks = torch.nn.ModuleList(Block(d, heads, hidden, kv_heads) for _ in range(layers))
         self.norm = torch.nn.RMSNorm(d)
         for name, p in self.named_parameters():
             if p.dim() == 2:
@@ -137,6 +148,7 @@ class BaselineTransformer(torch.nn.Module):
                 cache["v"][l] = v.new_zeros(1, v.shape[1], cache["T"], v.shape[3])
             cache["k"][l][:, :, n:n + t], cache["v"][l][:, :, n:n + t] = k, v
             a = F.scaled_dot_product_attention(q, cache["k"][l][:, :, :n + t], cache["v"][l][:, :, :n + t],
+                                               enable_gqa=block.kv_heads != block.heads,
                                                attn_mask=allowed)
             x = block._finish(x, a)
         return self.norm(x[:, -1])

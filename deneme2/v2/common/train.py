@@ -24,6 +24,9 @@ degismez.  Torba ile DUR.
 --z_bow_weight W (kullanici, 8 Ekim: "Onayladım"; belge 68 fikir 1): amac = token CE + W x z_bow (Z_k'nin z_bow_layer
 ciktisindan z_bow_norm + bagli E ile sonraki cumlenin token torbasi, sentence.z_bow_loss); varsayilan 0, torba ile DUR,
 sinav degismez; gunlukte z_bow.
+--glob_kv_heads N (kullanici, 8 Ekim: "bu duurmda GOA yı da sıraya koy o zaman bakalım"; uretim hizi): GQA, k / v N head
+yalniz tam causal katmanlarda (Model Z glob; transformer'da her katman, kiyas icin); yerel / mid katmanlar tam head (Z
+K/V kanali daralmaz).  Varsayilan 0 = heads (bit ayni); kimlikte (sekil degisir).
 --stop_step N (kullanici, 8 Ekim): takvim degismeden adim N'de durur; checkpoint.pt + agent.pt + results.json (finished
 False, stopped_at, readings_skipped "stop_step"), son sinav ve okuma yok; --resume 1 kaldigi yerden.
 Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunluk sinirinda, epok sonunda ve bitiste;
@@ -99,7 +102,7 @@ READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_ge
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "learned_z", "optimizer", "global_layers", "layer_plan", "bag_k", "bag_core", "bag_weight", "bag_full_frac", "bag_core_sha256",
-            "bag_sel_frac", "summaries_last", "z_bow_weight")
+            "bag_sel_frac", "summaries_last", "z_bow_weight", "glob_kv_heads")
 NO_BAG = dict(bag_k=0, bag_core=0, bag_weight=0.0, bag_full_frac=0.0, bag_core_sha256=None, bag_sel_frac=1.0)   # torbasiz / eski kosu
 LEGACY = ("meaning_sha256", "shared_vocab", "own_vocab", "open_z")   # temizlik oncesi kimlik alanlari (belge 33)
 TAG = "v2-before-cleanup-20261006"
@@ -185,6 +188,11 @@ def _global_error(args):
         return "--global_layers yalniz model_z (belge 40 s6.2)"
     if not 0 <= gl <= args.layers:
         return "--global_layers %d: 0..%d olmali" % (gl, args.layers)
+    kv = int(getattr(args, "glob_kv_heads", 0) or 0)
+    if kv and (kv < 0 or args.heads % kv):
+        return "--glob_kv_heads %d: heads (%d) boleni olmali" % (kv, args.heads)
+    if kv and args.model == "model_z" and not gl:
+        return "--glob_kv_heads: model_z'de glob katmani yok"
     return None
 
 
@@ -215,12 +223,14 @@ def _build(args, dev):
     if args.model == "transformer":
         sys.path.insert(0, os.path.join(root, "transformer"))
         from baseline import BaselineTransformer
-        model, mask_fn, layout = BaselineTransformer(args.d, args.layers, args.heads).to(dev), R.document_mask, "transformer"
+        model = BaselineTransformer(args.d, args.layers, args.heads, kv_heads=getattr(args, "glob_kv_heads", 0) or None)
+        model, mask_fn, layout = model.to(dev), R.document_mask, "transformer"
     else:
         sys.path.insert(0, os.path.join(root, "model_z"))
         from sentence import SentenceTransformer
         model = SentenceTransformer(args.d, args.layers, args.heads, global_layers=int(getattr(args, "global_layers", 0)),
-                                    layer_plan=getattr(args, "layer_plan", None))
+                                    layer_plan=getattr(args, "layer_plan", None),
+                                    glob_kv_heads=getattr(args, "glob_kv_heads", 0) or None)
         model, mask_fn, layout = model.to(dev), model.mask_fn, "model_z"
     if getattr(args, "bag_k", 0):
         R.attach_bag(model, args.bag_k, args.bag_n_core)
@@ -448,6 +458,9 @@ def _args(argv):
     ap.add_argument("--summaries_last", type=int, default=None,
                     help="model_z: satir bellekte [token'lar | ozetler | dolgu] (belge 66); model ayni, maske iki aralik; "
                          "varsayilan model_z torbasiz 1, aksi 0; --resume'da verilmezse kosunun kimliginden")
+    ap.add_argument("--glob_kv_heads", type=int, default=0,
+                    help="GQA: tam causal katmanlarda (model_z glob, transformer hepsi) k / v head sayisi, heads'in "
+                         "boleni (0: heads; kimlikte; kullanici, 8 Ekim)")
     ap.add_argument("--z_bow_weight", type=float, default=0.0,
                     help="model_z: Z_k'dan sonraki cumlenin token torbasi ek kaybi agirligi (0: kapali; kullanici, 8 Ekim)")
     ap.add_argument("--fp8", default="none", choices=("none", "tensorwise", "rowwise"),
@@ -553,7 +566,8 @@ def main(argv=None):
                  longest=train.max_sentence_tokens, row_len=row_len, batch_rows=BATCH_ROWS,
                  train_stream_sha256=train.meta["stream_sha256"], learned_z=int(args.model == "model_z"),
                  optimizer=args.optimizer, global_layers=args.global_layers, layer_plan=args.layer_plan,
-                 summaries_last=args.summaries_last, z_bow_weight=args.z_bow_weight, **bag)   # learned_z: eski kosu ayrimi
+                 summaries_last=args.summaries_last, z_bow_weight=args.z_bow_weight, glob_kv_heads=args.glob_kv_heads,
+                 **bag)   # learned_z: eski kosu ayrimi
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -574,7 +588,7 @@ def main(argv=None):
             sys.exit("DUR: temizlik oncesi kosu surdurulmez / uzatilmaz (kullanici, 6 Ekim); eski kod: git etiketi %s" % TAG)
         if _archived(was):                                                # formullu Model Z (belge 44)
             sys.exit("DUR: " + _archived(was))
-        was = {"learned_z": 0, "optimizer": "adamw", "global_layers": 0, "layer_plan": None, "summaries_last": 0, "z_bow_weight": 0.0, **NO_BAG, **was}   # alanlardan onceki kosu
+        was = {"learned_z": 0, "optimizer": "adamw", "global_layers": 0, "layer_plan": None, "summaries_last": 0, "z_bow_weight": 0.0, "glob_kv_heads": 0, **NO_BAG, **was}   # alanlardan onceki kosu
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:

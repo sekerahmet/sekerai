@@ -314,8 +314,31 @@ def t_bag():
           and float((lp.exp().sum(-1) - 1).abs().max()) < 1e-5)
 
 
+@torch.no_grad()
+def t_gqa():
+    """kv_heads (GQA kiyasi): kv = heads bugunkuyle bit ayni; kv 2: blok = k / v tekrarli basvuru; onbellekli generate =
+    onbelleksiz acgozlu."""
+    torch.manual_seed(0)
+    a = BaselineTransformer(32, 2, 4)
+    torch.manual_seed(0)
+    b = BaselineTransformer(32, 2, 4, kv_heads=4)
+    same = all(torch.equal(x, y) for x, y in zip(a.state_dict().values(), b.state_dict().values()))
+    torch.manual_seed(0)
+    m = BaselineTransformer(32, 2, 4, kv_heads=2).eval()
+    blk = m.blocks[0]
+    x = torch.randn(2, 9, 32)
+    pos = torch.arange(9)[None].expand(2, 9)
+    q, k, v = blk._qkv(x, pos)
+    ref = blk._finish(x, torch.nn.functional.scaled_dot_product_attention(q, k.repeat_interleave(2, 1),
+                                                                         v.repeat_interleave(2, 1), is_causal=True))
+    gen = m.generate([STORIES[0][:1]], 3, 4)
+    check("gqa: kv_heads = heads bit ayni; kv 2 blok = tekrarli basvuru; onbellekli generate = onbelleksiz",
+          same and float((blk(x, pos, None) - ref).abs().max()) < 1e-5 and k.shape[1] == 2
+          and gen[0] == naive_generate(m, STORIES[0][:1], 3, 4))
+
+
 GROUPS = dict(mask=t_mask, targets=t_targets, loss=t_loss, cache=t_cache, generate=t_generate, recipe=t_recipe,
-              flex=t_flex, imports=t_imports, bag=t_bag)
+              flex=t_flex, imports=t_imports, bag=t_bag, gqa=t_gqa)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(GROUPS)

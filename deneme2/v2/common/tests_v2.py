@@ -1441,6 +1441,26 @@ def _train_global(base, root, data, out, exits, TR):
               and exits(base + ["--model", "transformer", "--z_bow_weight", "0.5", "--out", out("zbow_tf")])
               and exits(ZB + ["--bag_k", "64", "--out", out("zbow_bag")]) and d_zb <= 2e-3,
               "z_bow %s; summaries_last 1 ile fark %.1e" % (zl[:3], d_zb))
+        QK = base + ["--model", "model_z", "--layers", "2", "--heads", "2", "--global_layers", "1", "--epochs", "2",
+                     "--glob_kv_heads", "1"]                                 # GQA (8 Ekim)
+        q1 = TR.main(QK + ["--out", out("gqa_A")])
+        stopped_q, q2 = _cut_and_resume(TR, QK, out("gqa_cut"))
+        sq = lambda n_: torch.load(os.path.join(out(n_), "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        qt = TR.main(base + ["--model", "transformer", "--heads", "2", "--glob_kv_heads", "1", "--steps", "3",
+                             "--out", out("gqa_tf")])
+        check("train --glob_kv_heads 1 (heads 2): Model Z kosar, kimlikte; glob qkv daralmis (agent.pt), load_run yukler; "
+              "kesilip surdurulen = kesintisiz (bit); transformer'da da kosar; bolen degil / glob'suz model_z / bayraksiz "
+              "surdurme DURUR",
+              q1["identity"]["glob_kv_heads"] == 1 and tuple(sq("gqa_A")["blocks.1.qkv.weight"].shape) == (32, 16)
+              and tuple(sq("gqa_A")["blocks.0.qkv.weight"].shape) == (48, 16) and stopped_q
+              and all(torch.equal(sq("gqa_A")[k], sq("gqa_cut")[k]) for k in sq("gqa_A"))
+              and [w["loss"] for w in q2["log"]] == [w["loss"] for w in q1["log"]]
+              and GR.load_run(out("gqa_A"), data, torch.device("cpu"))[0].blocks[1].kv_heads == 1
+              and np.isfinite(qt["exam"]["loss"])
+              and exits(base + ["--model", "model_z", "--heads", "2", "--glob_kv_heads", "3", "--out", out("gqa_bad")])
+              and exits(base + ["--model", "model_z", "--global_layers", "0", "--glob_kv_heads", "1", "--out", out("gqa_g0")])
+              and exits([x for x in QK if x not in ("--glob_kv_heads",)][:-1] + ["--out", out("gqa_A"), "--resume", "1",
+                                                                               "--epochs", "3"]))
         G = out("plan_glob_ends")                                          # glob her yerde (belge 60 B, 62)
         rg = TR.main(base + ["--model", "model_z", "--layer_plan", "glob1,loc1,glob1", "--steps", "3", "--out", G])
         lg_ = GR.load_run(G, data, torch.device("cpu"))[0]
