@@ -233,9 +233,18 @@ class MuonAdamW:
         self.adamw.zero_grad(set_to_none)
         self.muon.zero_grad(set_to_none)
 
-    def step(self):
+    @property
+    def grad_coef_ok(self):
+        """Kirpma katsayisi adima verilebilir mi (train.CLIP_IN_OPTIMIZER): AdamW birlesik (fused; grad_scale okur)."""
+        return bool(self.adamw.defaults.get("fused"))
+
+    def step(self, grad_coef=None):
+        """grad_coef (0-d tensor; clip katsayisi): gradyanlar yerinde carpilmaz -- birlesik AdamW grad_scale = 1 / katsayi
+        ile boler, Muon momentumda carpar (belge 94 s11.1)."""
+        self.adamw.grad_scale = None if grad_coef is None else grad_coef.reciprocal()
         self.adamw.step()
-        self.muon.step()
+        self.adamw.grad_scale = None
+        self.muon.step(grad_coef=grad_coef)
 
     def state_dict(self):
         return dict(adamw=self.adamw.state_dict(), muon=self.muon.state_dict())
@@ -265,7 +274,7 @@ class BatchedMuon(torch.optim.Muon if hasattr(torch.optim, "Muon") else torch.op
     recipe); GPU'da olculmedi, bmm toplama sirasi addmm'den farkli olabilir."""
 
     @torch.no_grad()
-    def step(self, closure=None):
+    def step(self, closure=None, grad_coef=None):
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -275,6 +284,8 @@ class BatchedMuon(torch.optim.Muon if hasattr(torch.optim, "Muon") else torch.op
             self._init_group(g, ps, grads, bufs)
             if not ps:
                 continue
+            if grad_coef is not None:                                    # clip katsayisi (MuonAdamW.step)
+                torch._foreach_mul_(grads, grad_coef)
             torch._foreach_lerp_(bufs, grads, 1 - g["momentum"])
             ups = torch._foreach_lerp(grads, bufs, g["momentum"]) if g["nesterov"] else bufs
             torch._foreach_mul_(ps, 1 - g["lr"] * g["weight_decay"])
@@ -298,8 +309,10 @@ NORMUON_BETA2 = 0.95      # li2025_normuon s4 deney ayari (beta1, beta2) = (0,95
 NORMUON_EPS = 1e-10       # makalede deger yok; resmi kod (github.com/zichongli5/NorMuon, normuon.py) sqrt(v) + 1e-10
 
 
-def _momentum_stack(grads, bufs, momentum, nesterov):
-    """Ayni bicimli grup: momentum (bufs yerinde) + nesterov -> NS girdisi yigin (k, m, n) bf16."""
+def _momentum_stack(grads, bufs, momentum, nesterov, coef=None):
+    """Ayni bicimli grup: (clip katsayisi coef) momentum (bufs yerinde) + nesterov -> NS girdisi yigin (k, m, n) bf16."""
+    if coef is not None:
+        grads = torch._foreach_mul(grads, coef)
     torch._foreach_lerp_(bufs, grads, 1 - momentum)
     ups = torch._foreach_lerp(grads, bufs, momentum) if nesterov else bufs
     return torch.stack(ups).bfloat16()
@@ -337,7 +350,7 @@ class NorMuon(BatchedMuon):
             g.setdefault("beta2", beta2)
 
     @torch.no_grad()
-    def step(self, closure=None):
+    def step(self, closure=None, grad_coef=None):
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -358,7 +371,7 @@ class NorMuon(BatchedMuon):
                         self.state[p]["second_momentum_buffer"] = torch.zeros(m, 1, dtype=torch.float, device=p.device)
                 vs = [self.state[p]["second_momentum_buffer"] for p in pp]
                 G = _opt_fn(_momentum_stack, cuda)([grads[i] for i in idx], [bufs[i] for i in idx], g["momentum"],
-                                                   g["nesterov"])
+                                                   g["nesterov"], grad_coef)
                 torch._foreach_mul_(pp, 1 - g["lr"] * g["weight_decay"])
                 O = _ns_batched(G, g["ns_coefficients"], g["ns_steps"], g["eps"])
                 scale = 0.2 * g["lr"] * math.sqrt(m * n)
