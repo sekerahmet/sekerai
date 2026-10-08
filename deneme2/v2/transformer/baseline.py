@@ -188,7 +188,7 @@ class BaselineTransformer(torch.nn.Module):
             seq = seq[:-1] if opened else seq
             used = len(seq)
             if STATIC_DECODE:
-                sc = StaticCache(self, max_sentences * (max_tokens + 1) + 1)
+                sc = StaticCache(self, max(1, min(max_sentences * (max_tokens + 1) + 1, limit - used)))
                 logits, step = sc.prefill(seq), sc.append
             else:
                 cache = dict(k=[None] * len(self.blocks), v=[None] * len(self.blocks),
@@ -279,7 +279,7 @@ class StaticCache:
     """Sabit tamponlu KV onbellegi (belge 84; Model Z sentence.StaticCache'in transformer esi): istem _step ile tek
     geciste (tampona dogrudan), sonra adim basina _static_step; CUDA'da ilk adimda derlenip CUDA graph'a yakalanir.
     positions: istemden sonra en cok eklenecek konum (asilirsa DURUR)."""
-    BUCKET = 1024
+    BUCKET = 256         # sentence.StaticCache ile ayni kademeler: BUCKET x {1, 1,5} x 2^k
 
     def __init__(self, model, positions):
         self.m, self.dev, self.positions, self.run = model, model.E.weight.device, positions, None
@@ -288,7 +288,8 @@ class StaticCache:
     def prefill(self, seq):
         """seq (token listesi, BOS dahil) -> son konumun logit'i."""
         T = len(seq)
-        self.limit = -(-(T + self.positions) // self.BUCKET) * self.BUCKET
+        b = self.BUCKET
+        self.limit = next(t for k in range(40) for t in (b << k, (3 * b // 2) << k) if t >= T + self.positions)
         cache = dict(k=[None] * len(self.m.blocks), v=[None] * len(self.m.blocks), T=self.limit)
         hn = self.m._step(torch.tensor([seq], device=self.dev), cache, 0)
         self.K, self.V, self.t = cache["k"], cache["v"], T
@@ -307,6 +308,9 @@ class StaticCache:
             return self._step
         if "step" not in _COMPILED:
             _COMPILED["step"] = torch.compile(_static_step, dynamic=False)
+            for k in ("recompile_limit", "cache_size_limit"):                 # kademe x dtype x model sekilleri
+                if getattr(torch._dynamo.config, k, 64) < 64:
+                    setattr(torch._dynamo.config, k, 64)
         saved = self.n.clone()
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())

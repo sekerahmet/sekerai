@@ -749,7 +749,7 @@ def t_prefill():
     try:
         c = StaticCache(m, 64, 8, 2)
         c.prefill([])
-        [c.append_token(5) for _ in range(3)]
+        [c.append_token(5) for _ in range(300)]                          # cumle kademesi 256 asilir
         stops = False
     except AssertionError:
         stops = True

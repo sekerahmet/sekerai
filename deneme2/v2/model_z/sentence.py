@@ -355,8 +355,9 @@ class SentenceTransformer(torch.nn.Module):
         for sents in prompts:
             opened = bool(open_last and sents)
             n_open = len(sents[-1]) if opened else 0
-            cache = StaticCache(self, n_open + max_sentences * (max_tokens + 1) + 1, max_sentences + 1,
-                                n_open + max_tokens + 1) if static else SummaryCache(self)
+            t0 = 1 + sum(len(s) + 1 for s in (sents[:-1] if opened else sents))   # prefill sonrasi konum
+            cache = StaticCache(self, max(n_open + 1, min(n_open + max_sentences * (max_tokens + 1) + 1, limit - t0)),
+                                max_sentences + 1, n_open + max_tokens + 1) if static else SummaryCache(self)
             logits = cache.prefill(sents[:-1] if opened else sents)
             for t in (sents[-1] if opened else ()):
                 logits = cache.append_token(t)
@@ -588,7 +589,8 @@ class StaticCache:
     (yerel [ozet | cumle], glob gercek konumla); adim _static_step.  CUDA'da ilk adimda derlenir (torch.compile, surec
     basina bir kez) ve CUDA graph'a yakalanir: adim basina tek replay.  positions / sentences / sentence_tokens: istemden
     sonra en cok eklenecek konum, Z ve cumle token'i (asilirsa DURUR).  carry (parca siniri): supports False, SummaryCache."""
-    BUCKET = 1024                                                        # tampon boyu bu katina (derleme sekil sayisi az)
+    BUCKET = 256         # tampon boylari kademeli: BUCKET x {1, 1,5} x 2^k (sekil basina bir derleme; dec84: istem basina
+                         # degisen boy her istemde yeniden derletiyordu, 8'den sonra derlemesiz)
 
     @staticmethod
     def supports(model):
@@ -605,17 +607,18 @@ class StaticCache:
         """Istem SummaryCache.prefill ile -> sonraki token'in logit'i; K/V ve sayaclar sabit tamponlara."""
         c = SummaryCache(self.m)
         self.logits = c.prefill(sents)
-        L, up = len(self.m.blocks), lambda n: -(-n // self.BUCKET) * self.BUCKET  # noqa: E731
+        L, b = len(self.m.blocks), self.BUCKET
+        up = lambda n: next(t for k in range(40) for t in (b << k, (3 * b // 2) << k) if t >= n)  # noqa: E731
         self.glob = c.glob
         loc = [l for l in range(L) if not self.glob[l]]
         nsum, T = (c.sum_k[loc[0]].shape[2] if loc else 0), c.t + 1
         self.smax = up(nsum + self.budget[1] + 1)
-        self.limits = (self.smax, self.budget[2], up(T + self.budget[0]))  # ozet, cumle, glob konum sinirlari
+        self.limits = (self.smax, up(self.budget[2]), up(T + self.budget[0]))  # ozet, cumle, glob konum sinirlari
         self.n = [nsum, 0, T]                                            # host sayaclari (sinir denetimi)
         self.K, self.V = [], []
         for l in range(L):
             sk, sv = (c.all_k[l], c.all_v[l]) if self.glob[l] else (c.sum_k[l], c.sum_v[l])
-            k = sk.new_zeros(1, sk.shape[1], self.limits[2] if self.glob[l] else self.smax + self.budget[2], sk.shape[3])
+            k = sk.new_zeros(1, sk.shape[1], self.limits[2] if self.glob[l] else self.smax + self.limits[1], sk.shape[3])
             v = torch.zeros_like(k)
             k[:, :, :sk.shape[2]], v[:, :, :sv.shape[2]] = sk, sv
             self.K.append(k)
@@ -638,6 +641,9 @@ class StaticCache:
             return self._step
         if "step" not in _COMPILED:
             _COMPILED["step"] = torch.compile(_static_step, dynamic=False)
+            for k in ("recompile_limit", "cache_size_limit"):                 # kademe x dtype x model sekilleri
+                if getattr(torch._dynamo.config, k, 64) < 64:
+                    setattr(torch._dynamo.config, k, 64)
         saved = [t.clone() for t in self.state]
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
