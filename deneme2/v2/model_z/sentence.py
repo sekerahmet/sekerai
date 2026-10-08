@@ -223,24 +223,38 @@ class Block(torch.nn.Module):
         kullanmaz."""
         return torch.sigmoid(F.linear(self.n1(x)[..., :self.attn_gate.shape[1]], self.attn_gate))
 
-    def _qkv(self, x, pos):
+    def _qkv(self, x, pos, gate=False):
+        """-> q, k, v (RoPE'li); gate True (kapili blok, forward): ayni n1(x)'ten kapi da (B, T, heads) -> (q, k, v, kapi).
+        attn_gate 1: kapi agirligi qkv matmul'una ek satir (tek matmul), 2: n1(x)'in ilk 12 boyutu (belge 90a ek: ayri
+        _gate yolu n1'i ikinci kez hesaplayip kaydediyordu)."""
         B, T, d = x.shape
         hd = d // self.heads
+        h = self.n1(x)
+        if gate:
+            if self.attn_gate.shape[1] == d:
+                out = F.linear(h, torch.cat([self.qkv.weight, self.attn_gate]))
+                out, g = out[..., :-self.heads], out[..., -self.heads:]
+            else:
+                out, g = self.qkv(h), F.linear(h[..., :self.attn_gate.shape[1]], self.attn_gate)
+            g = torch.sigmoid(g)
+        else:
+            out = self.qkv(h)
         if self.kv_heads == self.heads:
-            q, k, v = self.qkv(self.n1(x)).view(B, T, 3, self.heads, hd).permute(2, 0, 3, 1, 4)
+            q, k, v = out.view(B, T, 3, self.heads, hd).permute(2, 0, 3, 1, 4)
         else:                                                                # GQA: k / v kv_heads
-            q, k, v = self.qkv(self.n1(x)).split([d, self.kv_heads * hd, self.kv_heads * hd], -1)
+            q, k, v = out.split([d, self.kv_heads * hd, self.kv_heads * hd], -1)
             q = q.view(B, T, self.heads, hd).transpose(1, 2)
             k, v = (t.view(B, T, self.kv_heads, hd).transpose(1, 2) for t in (k, v))
         with torch.autocast(x.device.type, enabled=False):                  # QK-norm fp32 (V2 tarifi, belge 20 s4)
             q, k = self.q_norm(q.float()).to(v.dtype), self.k_norm(k.float()).to(v.dtype)
-        return rope(q, pos), rope(k, pos), v
+        return (rope(q, pos), rope(k, pos), v) + ((g,) if gate else ())
 
-    def _finish(self, x, a):
+    def _finish(self, x, a, g=None):
+        """g: _qkv(gate=True)'nun kapisi; yoksa (onbellek yollari) _gate(x)."""
         B, T, d = x.shape
         a = a.transpose(1, 2)                                               # (B, T, heads, hd)
         if self.attn_gate is not None:
-            a = a * self._gate(x)[..., None]
+            a = a * (self._gate(x) if g is None else g)[..., None]
         x = x + self.proj(a.reshape(B, T, d))
         g, u = self.gate_up(self.n2(x)).chunk(2, -1)
         return x + self.down(F.silu(g) * u)
@@ -251,7 +265,7 @@ class Block(torch.nn.Module):
         mem = None
         if isinstance(attn, tuple):
             attn, mem = attn[0], attn[1:]
-        q, k, v = self._qkv(x, pos)
+        q, k, v, *g = self._qkv(x, pos, gate=self.attn_gate is not None)
         if mem is not None:
             r, c = mem[0].clamp_min(0), mem[1].clamp_min(0)                 # bos yuva maskeyle kapali
             k = torch.cat([k, k[r, :, c].permute(0, 2, 1, 3)], 2)
@@ -266,7 +280,7 @@ class Block(torch.nn.Module):
             bs = attn.BLOCK_SIZE[0]                     # 128 disinda varsayilan cekirdek hata veriyor (belge 37)
             a = flex_attention(q, k, v, block_mask=attn, kernel_options=None if bs == 128 else dict.fromkeys(
                 ("BLOCK_M", "BLOCK_N", "BLOCK_M1", "BLOCK_N1", "BLOCK_M2", "BLOCK_N2"), bs), **gqa)
-        return self._finish(x, a)
+        return self._finish(x, a, *g)
 
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
