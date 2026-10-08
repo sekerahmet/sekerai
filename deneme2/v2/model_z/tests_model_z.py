@@ -2,7 +2,7 @@
 (z, z_flat, direct, generate_longest, formullu onbellek) kaldirildi (belge 44); eski hali git etiketi
 v2-before-formula-cleanup-20261007.
 
-    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,bag,plan,mask,summaries_last,z_bow,gqa]
+    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,bag,mask,summaries_last,gqa]
 """
 import os
 import sys
@@ -295,8 +295,8 @@ def _last_ranges(batch, tag):
 
 def t_summaries_last():
     """summaries_last (belge 66): (a) aralik maskesi = permute dense (sentetik dolgulu + Drive'da SS / FineWeb satirlari);
-    (b) ayni model ve batch: konum basina hidden, loss_per_target ve parametre gradyani duzenden bagimsiz (fp32 dense), plan
-    (mid, glob her yerde) dahil."""
+    (b) ayni model ve batch: konum basina hidden, loss_per_target ve parametre gradyani duzenden bagimsiz (fp32 dense),
+    G0 / G1 / G2."""
     import recipe as R
     from sentence import summaries_last
     rng = np.random.default_rng(6)
@@ -320,8 +320,7 @@ def t_summaries_last():
     pb, perm = summaries_last(batch)
     B, T = batch.kind.shape
     res = []
-    for kw in (dict(global_layers=0), dict(global_layers=1), dict(layer_plan="loc1,mid1,glob1"),
-               dict(layer_plan="glob1,loc1,glob1")):
+    for kw in (dict(global_layers=0), dict(global_layers=1), dict(global_layers=2)):
         torch.manual_seed(0)
         m = SentenceTransformer(d=32, layers=3, heads=2, **kw)
         h0 = m._batch_hidden(batch)
@@ -339,101 +338,9 @@ def t_summaries_last():
         dg = max(float((a - b_).norm() / max(float(a.norm()), 1e-12)) for a, b_ in zip(g0, g1) if a is not None)
         res.append((str(kw), dh, dn, dg))
     check("summaries_last: ayni model / batch -- hidden (konum basina), loss_per_target (hedef sirasina geri) ve parametre "
-          "gradyani duzenden bagimsiz (fp32 dense; G0, G1, mid, glob her yerde)",
+          "gradyani duzenden bagimsiz (fp32 dense; G0, G1, G2)",
           all(r[1] < 1e-5 and r[2] < 1e-5 and r[3] < 1e-5 for r in res),
           "; ".join("%s h %.1e nll %.1e grad %.1e" % r for r in res))
-
-
-def _bow_brute(batch):
-    """Kaba kuvvet: Z_k (duz konum) -> cumle k + 1'in TOKEN token'lari (sirali liste), satir / hikaye / cumle dongusuyle."""
-    B, T = batch.kind.shape
-    out = {}
-    for r in range(B):
-        for c in range(T):
-            if int(batch.kind[r, c]) != ZTOK:
-                continue
-            d, k = int(batch.doc[r, c]), int(batch.sent[r, c])
-            w = sorted(int(batch.tokens[r, j]) for j in range(T) if int(batch.kind[r, j]) == TOKEN
-                       and int(batch.doc[r, j]) == d and int(batch.sent[r, j]) == k + 1)
-            if w:
-                out[r * T + c] = w
-    return out
-
-
-def _bow_of(tgt):
-    return {int(z): sorted(tgt["word"][tgt["pz"] == i].tolist()) for i, z in enumerate(tgt["zpos"].tolist())}
-
-
-def t_z_bow():
-    """z_bow (belge 68 fikir 1): hedef = kaba kuvvet (sentetik dolgulu + Drive'da SS / FineWeb satirlari), summaries_last'ta
-    da (ayni Z -> ayni torba); kayip summaries_last 0 / 1 ayni (fp32); gradyan yalniz hedefli Z satirlarina; z_bow_layer
-    kurali; sonraki cumleyi degistirmek ozelligi degistirmez (hedef yalniz kayipta)."""
-    from sentence import summaries_last, z_bow_loss, z_bow_targets
-    rng = np.random.default_rng(8)
-    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 12))] for _ in range(rng.integers(1, 6))]
-               for _ in range(20)]
-    batch = real_batch([list(range(i, i + 4)) for i in range(0, 20, 4)], 260, stories)
-    sets = [("sentetik", batch)]
-    G = "G:/Drive'ım"
-    if os.path.isdir(G + "/v2"):
-        for tag, root, ddir in (("SS valid", G + "/simplestories", G + "/v2/simplestories_gpt2"),
-                                ("FineWeb valid", G + "/v2/fineweb_edu_s000", G + "/v2/fineweb_edu_s000")):
-            ts = D.TokenStories(root, ddir, "valid")
-            lens = ts.lengths()
-            fit = np.nonzero(lens <= 2048)[0][:2000]
-            ro, rs = D.pack_plan(lens[fit], 2048, 0, 1)
-            sets.append((tag, D.build_batch(ts, [fit[rs[ro[r]:ro[r + 1]]].tolist() for r in range(3)], "model_z", "cpu",
-                                            2048)))
-    else:
-        print("ATLANDI z_bow gercek satirlar: Drive yok", flush=True)
-    ok, info = True, []
-    for tag, b in sets:
-        ref = _bow_brute(b)
-        got = _bow_of(z_bow_targets(b))
-        pb, perm = summaries_last(b)
-        T = b.kind.shape[1]
-        back = {int(perm.flatten()[z] + (z // T) * T): w for z, w in _bow_of(z_bow_targets(pb)).items()}  # yeni -> eski
-        ok &= got == ref and back == ref
-        info.append("%s %d Z" % (tag, len(ref)))
-    check("z_bow: hedef (Z_k -> cumle k + 1'in token'lari, tekrarli) = kaba kuvvet; summaries_last'ta ayni; son Z hedefsiz",
-          ok, "; ".join(info))
-    torch.manual_seed(0)
-    kinds = {}
-    for kw in (dict(global_layers=0), dict(global_layers=1), dict(layer_plan="glob1,loc1,glob1"),
-               dict(layer_plan="loc1,mid1,glob1"), dict(global_layers=3)):
-        kinds[str(kw)] = SentenceTransformer(d=16, layers=3, heads=2, **kw).z_bow_layer()
-    m = SentenceTransformer(d=32, layers=3, heads=2, global_layers=1)
-    m.z_bow_norm = torch.nn.RMSNorm(32)
-    torch.nn.init.normal_(m.z_bow_norm.weight, 1.0, 0.3)
-    h0, xt0 = m._batch_hidden(batch, tap=True)
-    l0, n0 = z_bow_loss(m, xt0, z_bow_targets(batch))
-    pb, perm = summaries_last(batch)
-    _, xt1 = m._batch_hidden(pb, tap=True)
-    l1, n1 = z_bow_loss(m, xt1, z_bow_targets(pb))
-    xg = xt0.detach().requires_grad_(True)
-    tg = z_bow_targets(batch)
-    z_bow_loss(m, xg, tg)[0].backward()
-    rows = (xg.grad.abs().sum(-1) > 0).flatten().nonzero()[:, 0]
-    ref_t = torch.zeros(1)
-    man = []
-    for z, w in _bow_brute(batch).items():
-        r_, c_ = divmod(z, batch.kind.shape[1])
-        lg = torch.log_softmax(torch.nn.functional.rms_norm(xt0[r_, c_], (32,), m.z_bow_norm.weight) @ m.E.weight.T, -1)
-        man.append(float(-lg[w].mean()))
-    alt = [[list(s_) for s_ in st] for st in stories]
-    alt[0][-1] = [(t + 7) % D.END_ID for t in alt[0][-1]]
-    b2 = real_batch([list(range(i, i + 4)) for i in range(0, 20, 4)], 260, alt)
-    _, xt2 = m._batch_hidden(b2, tap=True)
-    first = batch.doc[0] == 0
-    lastc = int((first & (batch.sent[0] == int(batch.sent[0][first].max()))).nonzero()[0, 0])
-    check("z_bow: kayip = elle (Z basina ortalama, Z'ler uzerinde ortalama); summaries_last 0 / 1 ayni; gradyan yalniz "
-          "hedefli Z satirlarinda; ozellik sonraki cumleden bagimsiz; z_bow_layer = son glob olmayan blok %s" % kinds,
-          abs(float(l0) - float(np.mean(man))) < 1e-5 and abs(float(l0) - float(l1)) < 1e-5 and n0 == n1 == len(man)
-          and torch.equal(rows.sort().values, tg["zpos"].sort().values)
-          and torch.equal(xt0[0, :lastc], xt2[0, :lastc])
-          and kinds == {"{'global_layers': 0}": 2, "{'global_layers': 1}": 1, "{'layer_plan': 'glob1,loc1,glob1'}": 1,
-                        "{'layer_plan': 'loc1,mid1,glob1'}": 1, "{'global_layers': 3}": None},
-          "kayip %.6f / elle %.6f / sirali %.6f" % (float(l0), float(np.mean(man)), float(l1)))
 
 
 def _gqa_sdpa_cases(fn):
@@ -460,7 +367,7 @@ def _gqa_sdpa_cases(fn):
 
 def t_gqa():
     """glob_kv_heads (GQA, 8 Ekim): None / heads = bugunku (agirlik ve hidden bit); kv 2 (heads 4): yalniz glob bloklari
-    daralir, blok ciktisi = k / v'yi acikca tekrarlayan basvuru (dense), plan (glob1,loc1,glob1) dahil; summaries_last ayni;
+    daralir, blok ciktisi = k / v'yi acikca tekrarlayan basvuru (dense), G1 ve G2; summaries_last ayni;
     sizinti yok; SummaryCache adim adim + prefill = tam ileri (onbellek glob'ta kv head); BatchedMuon / NorMuon sekil
     gruplari calisir."""
     import recipe as R
@@ -484,7 +391,7 @@ def t_gqa():
     check("gqa: glob_kv_heads = heads (ya da None) bugunku model (agirlik ve hidden bit)", same)
     ok, info = True, []
     glob = _dense(model_z_global_mask(batch.kind, batch.doc, batch.sent), B, T, "cpu")
-    for kw in (dict(global_layers=1), dict(layer_plan="glob1,loc1,glob1")):
+    for kw in (dict(global_layers=1), dict(global_layers=2)):
         m = make(glob_kv_heads=2, **kw)
         kv = [blk.kv_heads for blk in m.blocks]
         shapes = [tuple(blk.qkv.weight.shape) for blk in m.blocks]
@@ -991,110 +898,8 @@ def t_bag():
           "fark %.1e" % float((torch.stack(got) - want).abs().max()))
 
 
-def t_plan():
-    """layer_plan (belge 52): 'loc2,glob1' = global_layers 1 (bit); mid = hikaye hikaye dolgusuz basvuru (ozet satirlari
-    BOS + Z_k, aralarinda causal, konum k; token'lar degismez); MID_PAD dolgusu sonucu degistirmez; sonraki cumleyi
-    degistirmek onceki konumlari degistirmez (sizinti yok); uretim onbellegi mid'de DURUR."""
-    import sentence as S
-    from sentence import model_z_global_mask, story_positions
-    rng = np.random.default_rng(3)
-    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(2, 6))]
-               for _ in range(12)]
-    rows = [list(range(i, i + 4)) for i in range(0, 12, 4)]
-    batch = real_batch(rows, 160, stories)
-    B, T = batch.kind.shape
-
-    def make(**kw):
-        torch.manual_seed(0)
-        return SentenceTransformer(d=32, layers=3, heads=2, **kw).eval()
-    with torch.no_grad():
-        same = torch.equal(make(layer_plan="loc2,glob1")._batch_hidden(batch), make(global_layers=1)._batch_hidden(batch))
-    check("plan: 'loc2,glob1' = global_layers 1 (hidden bit duzeyinde)", same)
-    m = make(layer_plan="loc1,mid1,glob1")
-    read = _dense(model_z_read_mask(batch.kind, batch.doc, batch.sent), B, T, "cpu")
-    glob = _dense(model_z_global_mask(batch.kind, batch.doc, batch.sent), B, T, "cpu")
-    with torch.no_grad():
-        got = m._batch_hidden(batch)
-        x = m.E(torch.where(batch.kind == ZTOK, torch.full_like(batch.tokens, D.END_ID), batch.tokens))
-        x = m.blocks[0](x, batch.pos, read)
-        before = x.clone()
-        for r in range(B):
-            for d_ in batch.doc[r].unique().tolist():
-                if d_ < 0:
-                    continue
-                p = (((batch.kind[r] == BOS) | (batch.kind[r] == ZTOK)) & (batch.doc[r] == d_)).nonzero()[:, 0]
-                x[r, p] = m.blocks[1](before[r, p][None], batch.pos[r, p][None], None)[0]
-        tok = ~((batch.kind == BOS) | (batch.kind == ZTOK))
-        ref = m.norm(m.blocks[2](x, story_positions(batch.kind), glob))
-        saved = S.MID_PAD
-        S.MID_PAD = 1
-        try:
-            got1 = m._batch_hidden(batch)
-        finally:
-            S.MID_PAD = saved
-    check("plan mid: = hikaye hikaye dolgusuz basvuru (ozet satirlari causal, konum k); token'lar mid'de degismez; "
-          "MID_PAD 64 = 1", float((got - ref).abs().max()) < 1e-5 and torch.equal(x[tok], before[tok])
-          and float((got - got1).abs().max()) < 1e-5, "fark %.1e" % float((got - ref).abs().max()))
-    alt = [[list(s) for s in st] for st in stories]
-    alt[0][-1] = [(t + 7) % D.END_ID for t in alt[0][-1]]
-    b2 = real_batch(rows, 160, alt)
-    with torch.no_grad():
-        g2 = m._batch_hidden(b2)
-    first = batch.doc[0] == 0
-    last = int((first & (batch.sent[0] == int(batch.sent[0][first].max()))).nonzero()[0, 0])   # son cumlenin ilk konumu
-    check("plan mid: hikayenin son cumlesini degistirmek ondan onceki konumlari degistirmez (sizinti yok)",
-          torch.equal(got[0, :last], g2[0, :last]) and not torch.equal(got[0, last:], g2[0, last:]))
-    try:
-        SummaryCache(m)
-        stopped = False
-    except AssertionError:
-        stopped = True
-    check("plan mid: uretim onbellegi (SummaryCache) DURUR", stopped)
-    m2 = make(layer_plan="loc1,mid1,loc1")                                       # glob'suz plan (belge 57 K2)
-    with torch.no_grad():
-        ref2 = m2.norm(m2.blocks[2](x, batch.pos, read))                         # x: mid'den sonraki basvuru (blok 0-1 ayni)
-        got2 = m2._batch_hidden(batch)
-        got3 = m2._batch_hidden(batch, read)                                     # egitim yolu: tek maske
-    check("plan glob'suz (loc1,mid1,loc1): tek maske, dense ve egitim yolu = basvuru",
-          m2.global_layers == 0 and not isinstance(m2.mask_fn, tuple) and float((got2 - ref2).abs().max()) < 1e-5
-          and torch.equal(got2, got3), "fark %.1e" % float((got2 - ref2).abs().max()))
-    m3 = make(layer_plan="glob1,loc1,glob1")                                     # glob her yerde (belge 60 B, 62)
-    real = story_positions(batch.kind)
-    with torch.no_grad():
-        x3 = m3.E(torch.where(batch.kind == ZTOK, torch.full_like(batch.tokens, D.END_ID), batch.tokens))
-        x3 = m3.blocks[0](x3, real, glob)
-        x3 = m3.blocks[1](x3, batch.pos, read)
-        ref3 = m3.norm(m3.blocks[2](x3, real, glob))
-        got4 = m3._batch_hidden(batch)
-        got5 = m3._batch_hidden(batch, (read, glob))
-        g6 = m3._batch_hidden(b2)
-    check("plan glob1,loc1,glob1: global_layers 2, ilk ve son katman tam causal + gercek konum = katman katman basvuru "
-          "(dense ve egitim yolu); son cumleyi degistirmek onceki konumlari degistirmez",
-          m3.global_layers == 2 and float((got4 - ref3).abs().max()) < 1e-5 and torch.equal(got4, got5)
-          and torch.equal(got4[0, :last], g6[0, :last]) and not torch.equal(got4[0, last:], g6[0, last:]),
-          "fark %.1e" % float((got4 - ref3).abs().max()))
-    with torch.no_grad():
-        keep = batch.target >= 0
-        lg_full = (got4[keep] @ m3.E.weight.T)
-        out = []
-        for row in rows:
-            for si in row:
-                cache = SummaryCache(m3)
-                out.append(cache.logits[None])
-                for s_ in stories[si]:
-                    out += [cache.append_token(t)[None] for t in s_] + [cache.close_sentence()[None]]
-        pre = SummaryCache(m3)
-        pre.prefill(stories[0][:2])
-        seq = [D.EOS_ID] + [t for s_ in stories[0][:2] for t in s_ + [D.END_ID]]
-        k_pre = len(seq) - 1                                                    # Z_2'nin hedef sirasi (hikaye 0)
-    d3 = float((torch.cat(out) - lg_full).abs().max())
-    check("plan glob1,loc1,glob1: SummaryCache (katman basina glob bayragi) adim adim logit ve prefill = tam ileri gecis",
-          d3 < 1e-5 and float((pre.logits - torch.cat(out)[k_pre]).abs().max()) < 1e-5
-          and cache.all_k[1] is None and cache.all_k[0].shape[2] == cache.t + 1, "fark %.1e" % d3)
-
-
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
-             equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, z_bow=t_z_bow, gqa=t_gqa, bag=t_bag, plan=t_plan)
+             equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, bag=t_bag)
 
 if __name__ == "__main__":
     if SIDE is not None:

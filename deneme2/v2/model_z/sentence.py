@@ -15,16 +15,16 @@ cumlelerin K/V'si (belge 35 (b)).  model_z_mask: okumasiz hali (teshis: z_ablate
 onbellegi BOS + Z'ler kalici, cumle onbellegi cumle bitince silinir).  Tarif (Llama sinifi): pre-norm RMSNorm, RoPE,
 QK-norm (fp32), SwiGLU, bias yok, tied embedding.
 
-global_layers N (belge 40 s6.2 Deney G; train.py varsayilani 1, belge 43 s9): son N blok tam causal (model_z_global_mask:
-ayni hikayenin butun onceki konumlari, kelime ve Z, gercek sirayla); konum GERCEK hikaye konumu (story_positions =
-transformer duzeninin pos'u; mantiksal konumda farkli cumlelerin token'lari ayni konumu paylasir, belge 40 Gorus 4).
-Ilk 8 - N blok bugunku gibi.  attn: (yerel, global) ikilisi; onbellek global bloklarda butun gecmisin K/V'sini tutar.
+global_layers N (belge 40 s6.2 Deney G; train.py varsayilani auto = round(L / 3)): son N blok tam causal
+(model_z_global_mask: ayni hikayenin butun onceki konumlari, kelime ve Z, gercek sirayla); konum GERCEK hikaye konumu
+(story_positions = transformer duzeninin pos'u; mantiksal konumda farkli cumlelerin token'lari ayni konumu paylasir, belge 40
+Gorus 4).  Ilk L - N blok yerel.  attn: (yerel, global) ikilisi; onbellek global bloklarda butun gecmisin K/V'sini tutar.
 
 summaries_last (belge 66; kullanici, 8 Ekim: "Fikrine onay verdim"): satir bellekte [token'lar | ozetler | dolgu], her grupta
 eski sira; model ayni (attention disi konum konum, RoPE pos'tan, maske iliskiden); maske sorgu basina iki aralik
 (model_z_summaries_last_ranges).  Batch real_pos tasiyorsa bu duzen.
-z_bow (--z_bow_weight; kullanici, 8 Ekim: "Onayladım"; belge 68 fikir 1): ek kayip, Z_k'nin bow katmani ciktisindan (son glob
-olmayan blok; z_bow_layer) z_bow_norm + bagli E ile sonraki cumlenin token torbasi (z_bow_targets, z_bow_loss).
+z_bow ve layer_plan (mid / glob her yerde) kaldirildi (kullanici, 8 Ekim: "Kod temizliği de başlasın bence"; belge 77):
+eski kod git commit 7bec0ae.
 Torba (--bag_k; recipe.Bag): sinav recipe.bag_loss_per_target, uretimde SummaryCache torbayi ozette (BOS / Z_k) secer.
 """
 import dataclasses
@@ -113,29 +113,6 @@ def story_positions(kind):
     return col - torch.where(kind == BOS, col, torch.zeros_like(col)).cummax(1).values
 
 
-MID_PAD = 64                          # mid satir sayisi bu katina dolgulanir (derleme sekil sayisi az kalir)
-
-
-def summary_index(batch, mult=MID_PAD):
-    """layer_plan 'mid' bloklari icin ozet satirlari (BOS + Z_k, satir basina sirayla) -> rows, cols, k (yerlestirme),
-    idx (B, S) toplama, spos (B, S) konum (BOS 0, Z_k k), smask (B, S, S) ayni hikaye + causal; dolgu kendi dolgusunu
-    gorur.  S = en uzun satirin ozet sayisi, mult katina yukari."""
-    sel = (batch.kind == BOS) | (batch.kind == ZTOK)
-    B, dev = sel.shape[0], sel.device
-    rows, cols = sel.nonzero(as_tuple=True)
-    k = (sel.long().cumsum(1) - 1)[rows, cols]
-    S = -(-int(sel.sum(1).max()) // mult) * mult
-    idx = torch.zeros(B, S, dtype=torch.long, device=dev)
-    sdoc = torch.full((B, S), -2, dtype=torch.long, device=dev)
-    spos = torch.zeros(B, S, dtype=batch.pos.dtype, device=dev)
-    idx[rows, k], sdoc[rows, k], spos[rows, k] = cols, batch.doc[rows, cols].long(), batch.pos[rows, cols]
-    q = torch.arange(S, device=dev)
-    causal = q[None, :, None] >= q[None, None, :]
-    pad = sdoc < 0
-    smask = causal & ((sdoc[:, :, None] == sdoc[:, None, :]) & ~pad[:, :, None] | pad[:, :, None] & pad[:, None, :])
-    return rows, cols, k, idx, spos, smask
-
-
 def summaries_last(batch):
     """PackedBatch (build_batch duzeni) -> (ayni batch [token'lar | ozetler | dolgu] sirasinda, perm (B, T): yeni sutundaki
     eski sutun).  Konum basina butun alanlar (tokens, kind, pos, doc, sent, target, target_kind) birlikte tasinir; gercek
@@ -181,43 +158,6 @@ _LAST_GLOB = functools.partial(model_z_summaries_last_ranges, glob=True)
 model_z_summaries_last_ranges.includes_padding = _LAST_GLOB.includes_padding = True
 
 
-def z_bow_targets(batch):
-    """z_bow hedefleri (CPU'da batch'le; duzenden bagimsiz, summaries_last dahil) -> dict: zpos (n_z,) hedefi olan Z_k'larin
-    duz konumu, pz (n_c,) cift basina zpos sirasi, word (n_c,) cumle k + 1'in TOKEN token'lari (tekrar sayilir), inv_n (n_z,)
-    1 / n_k.  Hikayenin son Z'si (sonraki cumle yok) hedefsiz, atlanir.  Hedef yalniz kayipta (girdi degil)."""
-    kind = batch.kind
-    B, T = kind.shape
-    big = T + 2
-    row = torch.arange(B, device=kind.device)[:, None].expand(B, T)
-    key = (row * big + batch.doc.long()) * big + batch.sent.long()        # (satir, hikaye, cumle)
-    zr, zc = (kind == ZTOK).nonzero(as_tuple=True)
-    zkey, zord = key[zr, zc].sort()
-    tr, tc = (kind == TOKEN).nonzero(as_tuple=True)
-    want = key[tr, tc] - 1                                                 # cumle k + 1'in token'i -> Z_k
-    i = torch.searchsorted(zkey, want).clamp_max(max(len(zkey) - 1, 0))
-    hit = (zkey[i] == want) if len(zkey) else torch.zeros_like(want, dtype=torch.bool)
-    zi, word = zord[i[hit]], batch.tokens[tr[hit], tc[hit]]
-    used, pz = torch.unique(zi, return_inverse=True)
-    n = torch.bincount(pz, minlength=len(used))
-    return dict(zpos=(zr * T + zc)[used], pz=pz, word=word, inv_n=1.0 / n.float())
-
-
-def _z_bow_sum(hz, w, E, pz, word, inv_n):
-    """-> sum_k (1 / n_k) sum_w -log softmax(rmsnorm(h_Zk) E^T)[w] (z_bow_norm agirligi w)."""
-    lg = (F.rms_norm(hz, (hz.shape[-1],), w) @ E.T).float()
-    return ((lg.logsumexp(-1)[pz] - lg[pz, word]) * inv_n[pz]).sum()
-
-
-def z_bow_loss(model, xt, tgt):
-    """xt (B, T, d) z_bow_layer ciktisi, tgt z_bow_targets (cihazda) -> (Z basina ortalama kayip, hedefli Z sayisi).
-    Bas: model.z_bow_norm (RMSNorm, d) + bagli E; yeni matris yok."""
-    import recipe as R
-    hz = xt.flatten(0, 1)[tgt["zpos"]]
-    fn = R._compiled("z_bow", _z_bow_sum, hz, dynamic=True)
-    total = fn(hz, model.z_bow_norm.weight, model.E.weight, tgt["pz"], tgt["word"], tgt["inv_n"])
-    return total / max(len(tgt["zpos"]), 1), len(tgt["zpos"])
-
-
 def _dense(mask_mod, B, T, device):
     """mask_mod -> bool (B, T, T) (SDPA yolu; CPU egitimi ve testler)."""
     b = torch.arange(B, device=device)[:, None, None]
@@ -238,17 +178,6 @@ def gqa_sdpa(q, k, v, mask=None):
         return F.scaled_dot_product_attention(q.reshape(B, Hkv, H // Hkv, hd), k, v, attn_mask=mask).reshape(B, H, 1, hd)
     return F.scaled_dot_product_attention(q, k.repeat_interleave(H // Hkv, 1), v.repeat_interleave(H // Hkv, 1),
                                           attn_mask=mask)
-
-
-def parse_layer_plan(text):
-    """'loc2,mid4,loc1,glob1' -> ['loc', 'loc', 'mid', ...]."""
-    import re
-    out = []
-    for part in text.split(","):
-        m = re.fullmatch(r"(loc|mid|glob)(\d+)", part.strip())
-        assert m, "layer_plan parcasi loc / mid / glob + sayi olmali: %r" % part
-        out += [m.group(1)] * int(m.group(2))
-    return out
 
 
 class Block(torch.nn.Module):
@@ -300,24 +229,18 @@ class Block(torch.nn.Module):
         return self._finish(x, a)
 
 class SentenceTransformer(torch.nn.Module):
-    def __init__(self, d=512, layers=8, heads=8, global_layers=0, layer_plan=None, glob_kv_heads=None):
-        """layer_plan (ornek 'loc2,mid4,loc1,glob1'; belge 52): loc = yerel (model_z_read_mask), mid = yalniz ozet satirlari
-        (BOS + Z_k, aralarinda causal; token'lar atlar), glob = tam causal (her yerde; ornek glob1,loc8,glob1).  Verilirse
-        layers ondan, global_layers = glob sayisi; yoksa bugunku duzen (loc x (layers - global_layers), glob x
-        global_layers).  glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta),
-        yerel / mid bloklar tam head."""
+    def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None):
+        """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
+        glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
+        head."""
         super().__init__()
-        self.plan = parse_layer_plan(layer_plan) if layer_plan else None
-        if self.plan:
-            layers = len(self.plan)
-            global_layers = self.plan.count("glob")
         self.global_layers = int(global_layers)
         assert 0 <= self.global_layers <= layers, "global_layers 0..layers"
         self.mask_fn = (model_z_read_mask, model_z_global_mask) if self.global_layers else model_z_read_mask
         self.END, self.EOS = END_ID, EOS_ID
         hidden = -(-int(8 * d / 3) // 8) * 8
         self.E = torch.nn.Embedding(VOCAB, d)                    # kurma sirasi E, blocks, norm (ilk agirlik bunu izler)
-        kinds = self.plan or ["loc"] * (layers - self.global_layers) + ["glob"] * self.global_layers
+        kinds = ["loc"] * (layers - self.global_layers) + ["glob"] * self.global_layers
         self.blocks = torch.nn.ModuleList(Block(d, heads, hidden, glob_kv_heads if k == "glob" else None) for k in kinds)
         self.norm = torch.nn.RMSNorm(d)
         for name, p in self.named_parameters():
@@ -332,61 +255,30 @@ class SentenceTransformer(torch.nn.Module):
         return (model_z_summaries_last_ranges, _LAST_GLOB) if isinstance(self.mask_fn, tuple) else \
             model_z_summaries_last_ranges
 
-    def z_bow_layer(self):
-        """z_bow ozelliginin blogu: son glob OLMAYAN blok (glob'lar sonda ise ilk sondaki glob'un girdisi; G0'da son blok;
-        planda son loc / mid).  Hepsi glob ise None."""
-        kinds = self.plan or ["loc"] * (len(self.blocks) - self.global_layers) + ["glob"] * self.global_layers
-        return max([l for l, k in enumerate(kinds) if k != "glob"], default=None)
-
-    def _batch_hidden(self, batch, attn=None, tap=False):
+    def _batch_hidden(self, batch, attn=None):
         """PackedBatch (belge 21: tokens, kind, pos, doc, sent) -> h; attn yoksa dense maske.  Z_k girdisi E(END), okuma
         maskeden.  global_layers: attn (yerel, global) ikilisi; tek maske DURUR (sessiz yanlis yok).  batch.real_pos varsa
-        summaries_last duzeni: maskeler _masks(True), glob konumu real_pos.  tap: (h, z_bow_layer blogunun ciktisi)."""
-        out = self._hidden(batch, attn, self.z_bow_layer() if tap else None)
-        return out if tap else out[0]
-
-    def _hidden(self, batch, attn, tap):
+        summaries_last duzeni: maskeler _masks(True), glob konumu real_pos."""
         B, T = batch.tokens.shape
         dev = batch.tokens.device
         last = getattr(batch, "real_pos", None) is not None
         mfn = self._masks(last)
-        real_of = lambda: batch.real_pos if last else story_positions(batch.kind)  # noqa: E731
         x = self.E(torch.where(batch.kind == ZTOK, torch.full_like(batch.tokens, END_ID), batch.tokens))
-        xt = None
-        if self.plan:                                                    # glob'suz planda tek maske
-            if attn is None:
-                fns = mfn if isinstance(mfn, tuple) else (mfn,)
-                attn = tuple(_dense(f(batch.kind, batch.doc, batch.sent), B, T, dev) for f in fns)
-            loc, glob = (tuple(attn) + (None,))[:2] if isinstance(attn, tuple) else (attn, None)
-            assert (glob is None) == (not self.global_layers), "layer_plan: maske sayisi glob katmanlariyla uyusmuyor"
-            real, summ = real_of(), summary_index(batch) if "mid" in self.plan else None
-            for l, (kind, block) in enumerate(zip(self.plan, self.blocks)):
-                if kind == "loc":
-                    x = block(x, batch.pos, loc)
-                elif kind == "glob":
-                    x = block(x, real, glob)
-                else:
-                    rows, cols, k, idx, spos, smask = summ
-                    xs = block(x.gather(1, idx[..., None].expand(-1, -1, x.shape[-1])), spos, smask)
-                    x = x.index_put((rows, cols), xs[rows, k])
-                xt = x if l == tap else xt
-            return self.norm(x), xt
         if not self.global_layers:
             if attn is None:
                 attn = _dense(mfn(batch.kind, batch.doc, batch.sent), B, T, dev)
             assert not isinstance(attn, tuple), "global_layers 0: tek maske"
-            for l, block in enumerate(self.blocks):
+            for block in self.blocks:
                 x = block(x, batch.pos, attn)
-                xt = x if l == tap else xt
-            return self.norm(x), xt
+            return self.norm(x)
         if attn is None:
             attn = tuple(_dense(f(batch.kind, batch.doc, batch.sent), B, T, dev) for f in mfn)
         assert isinstance(attn, tuple) and len(attn) == 2, "global_layers: attn (yerel, global) ikilisi olmali"
-        real, first = real_of(), len(self.blocks) - self.global_layers
+        real = batch.real_pos if last else story_positions(batch.kind)
+        first = len(self.blocks) - self.global_layers
         for l, block in enumerate(self.blocks):
             x = block(x, real, attn[1]) if l >= first else block(x, batch.pos, attn[0])
-            xt = x if l == tap else xt
-        return self.norm(x), xt
+        return self.norm(x)
 
     def _logits(self, h, inbag=None):
         """h (..., d) -> cikis: torbasiz h @ E^T; torbali iki asamali log p (inbag: torba, recipe.two_stage_logprobs)."""
@@ -469,14 +361,13 @@ class SummaryCache:
     torba ozette (BOS, Z_k) secilir, P = kapanmis cumlelerin token'lari (past)."""
 
     def __init__(self, model):
-        assert "mid" not in (model.plan or ()), "layer_plan 'mid': uretim onbellegi yazilmadi (belge 52)"
         self.m = model
         self.dev = model.E.weight.device
         L = len(model.blocks)
         self.sum_k, self.sum_v = [None] * L, [None] * L
         self.sen_k, self.sen_v = [None] * L, [None] * L
         self.all_k, self.all_v = [None] * L, [None] * L
-        self.glob = [k == "glob" for k in model.plan] if model.plan else [l >= L - model.global_layers for l in range(L)]
+        self.glob = [l >= L - model.global_layers for l in range(L)]
         self.n_z, self.i, self.t = 0, 0, 0
         self.past, self.cur, self.inbag = [], [], None
         x = model.E(torch.tensor([[EOS_ID]], device=self.dev))              # BOS = EOS token'i (belge 21 s1)
