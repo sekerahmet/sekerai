@@ -653,6 +653,18 @@ def build_batch(stories, row_stories_list, layout, device="cpu", row_len=ROW_LEN
                        mem_rows=t(mem_rows), mem_cols=t(mem_cols))
 
 
+def mtp_targets(batch, n):
+    """build_batch duzenindeki batch -> (B, T, n) int64: k. sutun (k 1..n) konum p'nin ayni-logit MTP hedefi = target[p + k]
+    (hikaye sirasinda k token sonrasinin hedefi), p + k ayni hikayede (doc esit) degilse ya da dolguysa -100 (--mtp, belge
+    90c).  summaries_last'tan ONCE (sutun = hikaye sirasi), sonra ayni perm ile toplanir; carry'de kullanilmaz."""
+    B, T = batch.target.shape
+    out = batch.target.new_full((B, T, n), -100)
+    for k in range(1, min(n, T - 1) + 1):
+        same = (batch.doc[:, :-k] == batch.doc[:, k:]) & (batch.doc[:, :-k] >= 0)
+        out[:, :-k, k - 1] = torch.where(same, batch.target[:, k:], -100)
+    return out
+
+
 def token_counts(stream_root, out_dir=None, split="train", chunk=CHUNK):
     """<stream_root>/gpt2/<split>.npy -> token basina sayim (int64, uzunluk EOS_ID + 1), chunk'lik parcalarla (bellek: parca
     basina 8 x chunk bayt).  out_dir verilirse <out_dir>/<split>_token_counts.npy (belge 33 s2: teshis araclarinin islev /

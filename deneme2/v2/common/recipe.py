@@ -11,6 +11,7 @@
     Checkpoint  model + optimizer + adim + plan + gecmis + args + RNG; .part'tan atomik; kesilip surdurulen = kesintisiz.
     SpeedWindow isinma sonrasi pencere: basta ve sonda synchronize; gercek (dolgusuz) token / sn ve duvar saati.
     output_loss egitim kaybi: tam CE, CUDA'da derlenmis (belge 24 §5 A); sinav loss_per_target'la kalir.
+    output_loss_mtp / mtp_weights  --mtp (deneme/mtp, belge 90c): ayni-logit MTP kaybi ve agirlik takvimi; sinav dokunulmaz.
     Torba (--bag_k) kaldirildi (kullanici, 8 Ekim: "Torbada gereksiz gibi"; belge 77): git etiketi v2-before-cleanup-20261008.
 """
 import math
@@ -88,6 +89,41 @@ def output_loss(h, weight, target):
     if "output_loss" not in _COMPILED:
         _COMPILED["output_loss"] = torch.compile(_output_loss, dynamic=False)
     return _COMPILED["output_loss"](h, weight, target)
+
+
+def _output_loss_mtp(h, weight, target, extra, w):
+    lg = (h @ weight.T).float()
+    if lg.shape[1] > VOCAB:
+        lg = lg.masked_fill(torch.arange(lg.shape[1], device=lg.device) >= VOCAB, float("-inf"))
+    lsm = F.log_softmax(lg, -1)                                          # ortak logsumexp; nll geri yayilimi noktasal
+    main = F.nll_loss(lsm, target, ignore_index=-100)                    # = F.cross_entropy (ayni aten yolu)
+    ce = torch.stack([F.nll_loss(lsm, extra[:, k], ignore_index=-100, reduction="sum") for k in range(extra.shape[1])])
+    loss = main + (w * ce).sum() / (target >= 0).sum()
+    return loss, main, ce / (extra >= 0).sum(0).clamp_min(1)
+
+
+def output_loss_mtp(h, weight, target, extra, w):
+    """Ayni-logit MTP (modded-nanogpt kayit 53, ek parametresiz; belge 88c, 90c): h (N, d), target (N,), extra (N, K)
+    k+1 sonraki hedefler (-100 hedefsiz), w (K,) agirlik tensoru -> (kayip, ana CE, ek CE (K,) ortalamalari).  kayip =
+    [sum CE_0 + sum_k w_k sum CE_k] / ana hedef sayisi (resmi kodun sum'i, ana terim output_loss ile ayni olcek); gecersiz
+    ek hedef 0 katki (payda degismez, resmi kod gibi).  CUDA'da derlenmis, CPU'da eager."""
+    if not h.is_cuda:
+        return _output_loss_mtp(h, weight, target, extra, w)
+    if "output_loss_mtp" not in _COMPILED:
+        _COMPILED["output_loss_mtp"] = torch.compile(_output_loss_mtp, dynamic=False)
+    return _COMPILED["output_loss_mtp"](h, weight, target, extra, w)
+
+
+def mtp_weights(step, total, n):
+    """Adim (0'dan) -> ek hedef agirliklari [w_1 .. w_n].  Resmi takvim (modded-nanogpt kayit 53, x = adim / toplam; n 2:
+    [1, 0,5, 0,25->0] -> [1, 0,5->0] -> [1]) n'ye genellenir: n + 1 esit evre; evre p < n'de k <= n - p ek hedef 0,5^k,
+    en uzagi evre icinde dogrusal 0'a; son evre yalniz ana hedef (WSD inisi bu evrede: sinav saf NTP basini olcer)."""
+    x = step / total
+    p = sum(x >= j / (n + 1) for j in range(1, n + 1))                  # resmi kodun x < 1/3, x < 2/3 karsilastirmasi
+    w = [0.5 ** k if k <= n - p else 0.0 for k in range(1, n + 1)]
+    if p < n:
+        w[n - p - 1] *= 1 - ((n + 1) * x - p)
+    return w
 
 
 def output_logprobs(model, batch, h, pos):
