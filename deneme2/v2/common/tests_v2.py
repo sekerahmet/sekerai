@@ -233,6 +233,67 @@ def t_pack():
     check("doc / sent / story_ids", bt.doc[0].tolist() == [0] * 10 + [1] * 4 + [-1, -1]
           and bt.sent[0].tolist() == [-1, 0, 0, 0, 0, 1, 1, 2, 2, 2, -1, 0, 0, 0, -1, -1]
           and bt.story_ids.tolist() == [[0, 1], [2, -1]])
+    _pack_carry()
+
+
+def _pack_carry():
+    """carry (belge 83): carry_pack_plan ve build_batch(carry) -- plan kurallari; K / C kipinde hedef, BOS, konum, bellek."""
+    rng = np.random.default_rng(3)
+    n_doc = 400
+    pieces = rng.choice([1, 1, 1, 2, 3, 5, 9], n_doc)                      # belge basina parca
+    L = np.concatenate([[2048 if k + 1 < n else int(rng.integers(100, 2049)) for k in range(n)] if n > 1 else
+                        [int(rng.integers(20, 900))] for n in pieces])
+    cont = np.concatenate([[k + 1 < n for k in range(n)] for n in pieces]).astype(bool)
+    first = np.r_[True, ~cont[:-1]]
+    gpos = (np.arange(len(L)) - np.flatnonzero(first)[np.cumsum(first) - 1]) % 4
+    ro, rs = D.carry_pack_plan(L, cont, 2048, 0, 1, 4, 32)
+    rows = [rs[ro[r]:ro[r + 1]].tolist() for r in range(len(ro) - 1)]
+    where = {s_: (r, i) for r, row in enumerate(rows) for i, s_ in enumerate(row)}
+    chain = np.zeros(len(L), bool)                                       # 2+ parcali grubun uyesi
+    for a in np.flatnonzero(gpos == 0):
+        b_ = a + 1
+        while b_ < len(L) and gpos[b_] > 0:
+            b_ += 1
+        chain[a:b_] = b_ - a > 1
+    ok_chain = all(where[s_][1] == 0 and (gpos[s_] == 0 or (where[s_][0] == where[s_ - 1][0] + 1
+                                                                and where[s_][0] // 32 == where[s_ - 1][0] // 32))
+                   for s_ in np.flatnonzero(chain).tolist())
+    per_row = [sum(chain[x] for x in row) for row in rows]
+    empty = [r for r, row in enumerate(rows) if not row]
+    ro2, rs2 = D.carry_pack_plan(L, cont, 2048, 0, 1, 4, 32)
+    ro3, rs3 = D.carry_pack_plan(L, cont, 2048, 0, 2, 4, 32)
+    check("carry_pack_plan: her parca bir kez, satir <= 2048; zincir parcasi satir basinda, onceki parcanin hemen sonraki "
+          "satirinda ve ayni batch'te; satirda en cok bir zincir parcasi; bos (dolgu) satir <= %1; ayni tohum / epok "
+          "ayni, baska epok baska",
+          sorted(rs.tolist()) == list(range(len(L))) and all(L[r].sum() <= 2048 for r in rows if r) and ok_chain
+          and max(per_row) == 1 and len(empty) <= 0.01 * len(rows) and np.array_equal(rs, rs2)
+          and np.array_equal(ro, ro2) and not np.array_equal(rs, rs3),
+          "%d satir, %d zincir parcasi, %d bos satir, doluluk %.3f" % (len(rows), int(chain.sum()), len(empty),
+                                                                       L.sum() / (len(rows) * 2048)))
+    E = D.EOS_ID
+    st = _Synthetic([[[10, 11], [12]], [[20, 21, 22], [23]], [[30], [31]], [[40, 41]]])   # belge: parca 0, 1, 2; tek hikaye
+    st.continues = np.array([True, True, False, False])
+    gp = np.array([0, 1, 2, 0])
+    bk = D.build_batch(st, [[0, 3], [1], [2]], "model_z", row_len=16, carry=dict(gpos=gp, memory=False, m_max=8))
+    bc = D.build_batch(st, [[0, 3], [1], [2]], "model_z", row_len=16, carry=dict(gpos=gp, memory=True, m_max=8))
+    K, T_ = D.Kind, D.TargetKind
+    zk = lambda b, r: [c for c in range(16) if int(b.kind[r, c]) == K.ZTOK]  # noqa: E731
+    lastA, lastB = zk(bk, 0)[1], zk(bk, 1)[-1]
+    ok_k = (int(bk.target[0, lastA]) == 20 and int(bk.target_kind[0, lastA]) == T_.FIRST and int(bk.target[1, lastB]) == 30
+            and int(bk.kind[1, 0]) == K.BOS and bk.mem_rows is None and bk.pos[1, :5].tolist() == [0, 1, 2, 3, 1]
+            and int(bk.target[2, zk(bk, 2)[-1]]) == E)
+    ok_c = (int(bc.target[0, zk(bc, 0)[1]]) == 20 and int(bc.kind[1, 0]) == K.TOKEN and bc.tokens[1, :3].tolist() == [20, 21, 22]
+            and bc.pos[1, :6].tolist() == [3, 4, 5, 3, 4, 4] and bc.pos[2, :4].tolist() == [5, 5, 6, 6]
+            and bc.real_pos[1, :6].tolist() == [6, 7, 8, 9, 10, 11] and bc.real_pos[2, 0] == 12
+            and bc.mem_rows[1].tolist() == [0, 0, 0] + [-1] * 5 and bc.mem_cols[1, :3].tolist() == [0, 3, 5]
+            and bc.mem_rows[2, :5].tolist() == [0, 0, 0, 1, 1] and bc.mem_cols[2, :5].tolist() == [0, 3, 5, 3, 5]
+            and bool((bc.mem_rows[0] == -1).all()) and int(bc.kind[0, 0]) == K.BOS)
+    check("build_batch carry: K (bellek yok) devam parcasi BOS'lu, bugunku konum, A'nin son Z'si B'nin ilk token'ini "
+          "(FIRST) hedefler, grubun son parcasi EOS; C devam parcasi BOS'suz, mantiksal konum + onceki cumle sayisi, gercek "
+          "konum + onceki boy, bellek = onceki parcalarin BOS + Z sutunlari sirayla", ok_k and ok_c,
+          "K pos %s | C pos %s real %s mem %s / %s" % (bk.pos[1, :5].tolist(), bc.pos[1, :6].tolist(),
+                                                       bc.real_pos[1, :6].tolist(), bc.mem_rows[2, :5].tolist(),
+                                                       bc.mem_cols[2, :5].tolist()))
 
 
 def t_drive():
@@ -1912,6 +1973,7 @@ def t_fineweb():
               and "peak_reserved_gb" in a["log"][0], str({k: rs[k] for k in ("mfu", "k_global", "k_local")}))
         _fineweb_knowledge(src, out, run, tok)
         _fineweb_extend(src, out, texts, tok, TR, MF)
+        _fineweb_carry(tp, TR, MF)
         _open_last(tok)
         _d768()
     except Exception:  # noqa: BLE001
@@ -2056,6 +2118,59 @@ def _fineweb_extend(src, out, texts, tok, TR, MF):
     except Exception:  # noqa: BLE001
         check("fineweb extend / merge", False, traceback.format_exc(limit=4))
 
+
+
+def _fineweb_carry(tp, TR, MF):
+    """--carry_summaries / --carry_group (belge 83), uzun valid belgeli sentetik FineWeb ile: C (bellek) ve K (ayni plan,
+    bellek yok) kosar; kimlikte; sinavda continuation (devam hedefleri, iki kolda ayni hedef sayisi), gunlukte loss_cont;
+    ayni plan (plan_sha256); C kesilip surdurulen = kesintisiz (bit); okuma (carry uretimi) yazilir; load_run carry_group /
+    row_len'i kimlikten kurar; birlesik 10BT klasoruyle (fw_10bt) kosar; DUR: transformer, summaries_last 0, z_reads_all,
+    grup 1, parcasiz veri."""
+    import traceback
+    try:
+        src, _ = _fake_fineweb(tp, n_docs=60, long_every=8)               # uzun belgeler valid'e de duser (15, 55)
+        out = os.path.join(TMP, "fw_carry")
+        MF.main(["prepare", "--src", src, "--out", out, "--workers", "1"])
+        o = lambda n_: os.path.join(TMP, "carry_runs", n_)  # noqa: E731
+        base = ["--data", out, "--stream", out, "--device", "cpu", "--model", "model_z", "--d", "16", "--layers", "2",
+                "--heads", "2", "--lr", "1e-2", "--checkpoint_minutes", "0", "--epochs", "2", "--summaries_last", "1"]
+        C, K = base + ["--carry_summaries", "1"], base + ["--carry_group", "4"]
+        c1 = TR.main(C + ["--out", o("C")])
+        stopped, c2 = _cut_and_resume(TR, C, o("C_cut"))
+        k1 = TR.main(K + ["--out", o("K")])
+        st = lambda n_: torch.load(os.path.join(o(n_), "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
+        import generate_readings as GR
+        lm = GR.load_run(o("C"), out, torch.device("cpu"))[0]
+        cc, kc = c1["exam"]["continuation"], k1["exam"]["continuation"]
+        lc = [w.get("loss_cont") for w in c1["log"]]
+        bad = [_exit_msg(TR.main, a + ["--out", o("bad%d" % i)]) for i, a in enumerate((
+            C + ["--model", "transformer"], C + ["--summaries_last", "0"],
+            C + ["--z_reads_all", "1"], C + ["--carry_group", "1"]))]
+        root, data, _ = _train_root(tp)                                      # parcasiz (SS benzeri) veri
+        bad.append(_exit_msg(TR.main, ["--data", data, "--stream", root, "--device", "cpu", "--model", "model_z", "--d", "16",
+                                       "--layers", "2", "--heads", "2", "--steps", "2", "--summaries_last", "1",
+                                       "--carry_summaries", "1", "--out", o("bad_ss")]))
+        mo = os.path.join(TMP, "fw_10bt")                                    # _fineweb_extend'in birlesik klasoru
+        r10 = TR.main(["--data", mo, "--stream", mo, "--device", "cpu", "--model", "model_z", "--d", "16", "--layers", "2",
+                       "--heads", "2", "--steps", "3", "--summaries_last", "1", "--carry_summaries", "1", "--checkpoint_minutes",
+                       "0", "--out", o("C10bt")])
+        check("train --carry_summaries 1 / --carry_group 4 (K): kosar, kimlikte; continuation sinavi (devam hedefi %s, iki "
+              "kolda ayni sayi; loss C %s / K %s), gunlukte loss_cont; ayni plan; C kesilip surdurulen = kesintisiz (bit); "
+              "okuma yazildi; load_run carry_group / row_len; birlesik 10BT klasoruyle kosar; DUR (transformer, "
+              "summaries_last 0, z_reads_all, grup 1, parcasiz veri)" % (cc and cc["targets"], cc and cc["loss"],
+                                                                        kc and kc["loss"]),
+              c1["identity"]["carry_summaries"] == 1 and c1["identity"]["carry_group"] == 4
+              and k1["identity"]["carry_summaries"] == 0 and k1["identity"]["carry_group"] == 4
+              and cc["targets"] > 0 and cc["targets"] == kc["targets"] and np.isfinite(cc["loss"]) and cc["docs"] == 2
+              and any(x is not None for x in lc) and c1["plan"]["plan_sha256"] == k1["plan"]["plan_sha256"]
+              and stopped and all(torch.equal(st("C")[k_], st("C_cut")[k_]) for k_ in st("C"))
+              and [w["loss"] for w in c2["log"]] == [w["loss"] for w in c1["log"]] and c1["generation"]
+              and lm.carry_group == 4 and lm.row_len == D.ROW_LEN and np.isfinite(r10["exam"]["loss"])
+              and all(m_ is not None and "DUR" in m_ for m_ in bad),
+              "DUR %s" % [(m_ or "")[:50] for m_ in bad])
+    except Exception:  # noqa: BLE001
+        check("fineweb carry", False, traceback.format_exc(limit=4))
 
 
 def _fineweb_knowledge(src, out, run, tok):

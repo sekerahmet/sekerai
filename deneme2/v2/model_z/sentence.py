@@ -37,7 +37,7 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "common"))
-from data import END_ID, EOS_ID, VOCAB, Kind  # noqa: E402
+from data import END_ID, EOS_ID, MAX_SENTENCE_TOKENS, ROW_LEN, VOCAB, Kind  # noqa: E402
 
 BOS, TOKEN, END, ZTOK, PAD = Kind.BOS, Kind.TOKEN, Kind.END, Kind.ZTOK, Kind.PAD
 
@@ -119,24 +119,30 @@ def story_positions(kind):
 def summaries_last(batch):
     """PackedBatch (build_batch duzeni) -> (ayni batch [token'lar | ozetler | dolgu] sirasinda, perm (B, T): yeni sutundaki
     eski sutun).  Konum basina butun alanlar (tokens, kind, pos, doc, sent, target, target_kind) birlikte tasinir; gercek
-    hikaye konumu once hesaplanip real_pos olarak eklenir (glob katmanlari)."""
+    hikaye konumu once hesaplanip real_pos olarak eklenir (glob katmanlari; carry batch'i getirdiyse onunki).  carry
+    bellegi: mem_cols kaynak satirin yeni sutununa."""
     kind = batch.kind
     B, T = kind.shape
     group = torch.where(kind == PAD, 2, torch.where((kind == BOS) | (kind == ZTOK), 1, 0))
     perm = torch.argsort(group * T + torch.arange(T, device=kind.device), dim=1)
     g = lambda t: t.gather(1, perm)  # noqa: E731
+    mem = {}
+    if batch.mem_rows is not None:                                       # eski sutun -> yeni sutun (kaynak satirda)
+        inv, r = torch.argsort(perm, 1), batch.mem_rows.clamp_min(0)
+        mem = dict(mem_cols=torch.where(batch.mem_rows >= 0, inv[r, batch.mem_cols.clamp_min(0)], -1))
     return dataclasses.replace(batch, tokens=g(batch.tokens), kind=g(kind), pos=g(batch.pos), doc=g(batch.doc),
                                sent=g(batch.sent), target=g(batch.target), target_kind=g(batch.target_kind),
-                               real_pos=g(story_positions(kind))), perm
+                               real_pos=g(story_positions(kind) if batch.real_pos is None else batch.real_pos), **mem), perm
 
 
-def model_z_summaries_last_ranges(kind, doc, sent, glob=False, z_reads_all=False):
+def model_z_summaries_last_ranges(kind, doc, sent, glob=False, z_reads_all=False, n_mem=None):
     """summaries_last duzeninde (kind, doc, sent permute) yerel (glob False) ya da global maske -> mask_mod: sorgu basina
     iki aralik, token [a0, a1] ve ozet [b0, b1] (dolgu: kendi kosusu).  Token'lar (hikaye, cumle), ozetler (hikaye, cumle +
     1) sirasinda (BOS 0, Z_k k + 1): sinirlar searchsorted ile.  Yerel: token kendi cumlesinin basindan kendisine, Z_k kendi
     cumlesinin token'lari, BOS hic; global: hikayenin ilk token'indan.  Ozet: hikayenin BOS'undan, token'da Z_(k-1)'e, Z_k'da
-    kendisine.  z_reads_all: yerelde Z_k'nin token araligi hikayenin ilk token'indan.  Dolgu kuralini icerir
-    (includes_padding)."""
+    kendisine.  z_reads_all: yerelde Z_k'nin token araligi hikayenin ilk token'indan.  n_mem (B,) (carry bellegi, belge 83):
+    satirin ilk hikayesinin sorgulari ucuncu araligi [T, T + n_mem) gorur (glob'da BOS yuvasi haric, [T + 1, ...)); anahtar
+    uzunlugu T + M.  Dolgu kuralini icerir (includes_padding)."""
     B, T = kind.shape
     big, large = T + 2, 1 << 40
     tok, summ, pad = kind == TOKEN, (kind == BOS) | (kind == ZTOK), kind == PAD
@@ -155,8 +161,17 @@ def model_z_summaries_last_ranges(kind, doc, sent, glob=False, z_reads_all=False
     b0, b1 = torch.where(pad, 1, b0), torch.where(pad, 0, b1)
     a0, a1, b0, b1 = (t.int() for t in (a0, a1, b0, b1))
 
+    if n_mem is None:
+        def mask_mod(b, h, q, kv):
+            return ((kv >= a0[b, q]) & (kv <= a1[b, q])) | ((kv >= b0[b, q]) & (kv <= b1[b, q]))
+        return mask_mod
+    has = (doc == 0) & ~pad & (n_mem[:, None] > 0)
+    c0 = torch.where(has, T + int(glob), T + 1).int()
+    c1 = torch.where(has, T + n_mem[:, None].expand(B, T) - 1, T).int()
+
     def mask_mod(b, h, q, kv):
-        return ((kv >= a0[b, q]) & (kv <= a1[b, q])) | ((kv >= b0[b, q]) & (kv <= b1[b, q]))
+        return ((kv >= a0[b, q]) & (kv <= a1[b, q])) | ((kv >= b0[b, q]) & (kv <= b1[b, q])) | (
+            (kv >= c0[b, q]) & (kv <= c1[b, q]))
     return mask_mod
 
 
@@ -223,8 +238,16 @@ class Block(torch.nn.Module):
         return x + self.down(F.silu(g) * u)
 
     def forward(self, x, pos, attn):
-        """attn: None (duz causal), bool (B, T, T) (dense) ya da FlexAttention BlockMask."""
+        """attn: None (duz causal), bool (B, T, T) (dense) ya da FlexAttention BlockMask; carry: (maske, mem_rows,
+        mem_cols) -> K / V = [satir || ayni katmanda kaynak satirlarin bellek sutunlari] (anahtar T + M)."""
+        mem = None
+        if isinstance(attn, tuple):
+            attn, mem = attn[0], attn[1:]
         q, k, v = self._qkv(x, pos)
+        if mem is not None:
+            r, c = mem[0].clamp_min(0), mem[1].clamp_min(0)                 # bos yuva maskeyle kapali
+            k = torch.cat([k, k[r, :, c].permute(0, 2, 1, 3)], 2)
+            v = torch.cat([v, v[r, :, c].permute(0, 2, 1, 3)], 2)
         gqa = dict(enable_gqa=True) if self.kv_heads != self.heads else {}
         if attn is None:
             a = F.scaled_dot_product_attention(q, k, v, is_causal=True, **gqa)
@@ -238,12 +261,14 @@ class Block(torch.nn.Module):
         return self._finish(x, a)
 
 class SentenceTransformer(torch.nn.Module):
-    def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, z_reads_all=0):
+    def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, z_reads_all=0, carry_group=0):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  z_reads_all N (belge 79 oneri 1): son N yerel blokta Z sorgusu hikayenin butun gecmisini gorur; mask_fn
-        (yerel, z_reads_all[, global])."""
+        (yerel, z_reads_all[, global]).  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
+        dolunca glob onbelleginde yalniz Z'ler kalir, G parcada sifirlanir."""
         super().__init__()
+        self.carry_group, self.row_len = int(carry_group), ROW_LEN
         self.global_layers, self.z_reads_all = int(global_layers), int(z_reads_all)
         assert 0 <= self.global_layers <= layers, "global_layers 0..layers"
         assert 0 <= self.z_reads_all <= layers - self.global_layers, "z_reads_all 0..yerel katman sayisi"
@@ -279,6 +304,11 @@ class SentenceTransformer(torch.nn.Module):
         last = getattr(batch, "real_pos", None) is not None
         mfn = self._masks(last)
         x = self.E(torch.where(batch.kind == ZTOK, torch.full_like(batch.tokens, END_ID), batch.tokens))
+        mem = getattr(batch, "mem_rows", None) is not None              # carry bellegi (belge 83)
+        if mem and attn is None:
+            import recipe as R
+            attn = tuple(R.dense_mask(batch, f) for f in mfn) if isinstance(mfn, tuple) else R.dense_mask(batch, mfn)
+        w = (lambda a: (a, batch.mem_rows, batch.mem_cols)) if mem else (lambda a: a)  # noqa: E731
         if self.z_reads_all:                                             # attn (yerel, z_reads_all[, global])
             if attn is None:
                 attn = tuple(_dense(f(batch.kind, batch.doc, batch.sent), B, T, dev) for f in mfn)
@@ -287,16 +317,16 @@ class SentenceTransformer(torch.nn.Module):
             first = len(self.blocks) - self.global_layers
             for l, block in enumerate(self.blocks):
                 if l >= first:
-                    x = block(x, real, attn[2])
+                    x = block(x, real, w(attn[2]))
                 else:
-                    x = block(x, batch.pos, attn[1] if l >= first - self.z_reads_all else attn[0])
+                    x = block(x, batch.pos, w(attn[1] if l >= first - self.z_reads_all else attn[0]))
             return self.norm(x)
         if not self.global_layers:
             if attn is None:
                 attn = _dense(mfn(batch.kind, batch.doc, batch.sent), B, T, dev)
             assert not isinstance(attn, tuple), "global_layers 0: tek maske"
             for block in self.blocks:
-                x = block(x, batch.pos, attn)
+                x = block(x, batch.pos, w(attn))
             return self.norm(x)
         if attn is None:
             attn = tuple(_dense(f(batch.kind, batch.doc, batch.sent), B, T, dev) for f in mfn)
@@ -304,7 +334,7 @@ class SentenceTransformer(torch.nn.Module):
         real = batch.real_pos if last else story_positions(batch.kind)
         first = len(self.blocks) - self.global_layers
         for l, block in enumerate(self.blocks):
-            x = block(x, real, attn[1]) if l >= first else block(x, batch.pos, attn[0])
+            x = block(x, real, w(attn[1])) if l >= first else block(x, batch.pos, w(attn[0]))
         return self.norm(x)
 
     def _logits(self, h, inbag=None):
@@ -385,7 +415,9 @@ class SummaryCache:
     kendi cumlesinin onbellegine bakar, K/V'si ozete yazilir, cumle onbellegi ANCAK sonra silinir.  global_layers
     bloklari: butun gecmisin K/V'si (all_k / all_v), gercek konumla (self.t: BOS 0, her token ve Z +1).  prefill: istem
     tek ileri geciste (egitimin maskeleri ve konumlari), onbellek token token yolla ayni duruma gelir.  Torbali model:
-    torba ozette (BOS, Z_k) secilir, P = kapanmis cumlelerin token'lari (past)."""
+    torba ozette (BOS, Z_k) secilir, P = kapanmis cumlelerin token'lari (past).  carry (model.carry_group, belge 83): cumle
+    kapaninca parca dolu (used > row_len - MAX_SENTENCE_TOKENS - 1) ise yeni parca: glob onbelleginde yalniz Z'ler kalir
+    (BOS ve token'lar atilir), konumlar surer; carry_group'uncu parcada onbellek sifirlanir (yeni hikaye, BOS)."""
 
     def __init__(self, model):
         self.m = model
@@ -398,6 +430,7 @@ class SummaryCache:
         self.zall = [L - model.global_layers - model.z_reads_all <= l < L - model.global_layers for l in range(L)]
         self.n_z, self.i, self.t = 0, 0, 0
         self.past, self.cur, self.inbag = [], [], None
+        self.piece, self.used, self.gkind = 0, 1, []                       # carry: parca no, parcadaki konum, glob tur
         x = model.E(torch.tensor([[EOS_ID]], device=self.dev))              # BOS = EOS token'i (belge 21 s1)
         self.logits = self._out(self._step(x, 0, read_sentence=False, summary=True), summary=True)
 
@@ -411,6 +444,7 @@ class SummaryCache:
         """read_sentence: cumle onbellegini de gor; summary: K/V ozete (yoksa cumle onbellegine) yazilir.  Global
         bloklar: gercek konum self.t, butun gecmis."""
         p = torch.tensor([[pos]], device=self.dev)
+        self.gkind.append(ZTOK if summary and read_sentence else BOS if summary else TOKEN)
         for l, block in enumerate(self.m.blocks):
             if self.glob[l]:
                 q, k, v = block._qkv(x, torch.tensor([[self.t]], device=self.dev))
@@ -444,6 +478,12 @@ class SummaryCache:
         Yerel bloklar model_z_read_mask + mantiksal konum, global bloklar tam causal + gercek konum (egitimle ayni dense
         maske); ozet = BOS + Z'lerin K/V'si, global = butun konumlar; cumle onbellegi bos (son Z_k'den sonra)."""
         assert self.t == 0 and self.n_z == 0 and self.i == 0, "prefill yalniz yeni onbellekte"
+        if self.m.carry_group:                                           # carry: parca sinirlari token token yolda
+            for x_ in sents:
+                for t_ in x_:
+                    self.append_token(t_)
+                self.close_sentence()
+            return self.logits
         tok, kind, pos, sent = [EOS_ID], [BOS], [0], [-1]
         for k, x in enumerate(sents):
             tok += list(x) + [END_ID]                                       # Z_k girdisi E(END)
@@ -491,6 +531,7 @@ class SummaryCache:
     def close_sentence(self):
         """Cumle bitti: Z_k (girdi E(END), cumleyi okur) ozet onbellegine, cumle onbellegi silinir -> sonraki cumlenin ilk
         token'i (ya da EOS) logit'i."""
+        n = self.i                                                          # cumlenin token sayisi
         self.n_z += 1
         self.i = 0
         self.t += 1
@@ -499,5 +540,17 @@ class SummaryCache:
         self.logits = self._out(self._step(x, self.n_z, read_sentence=True, summary=True), summary=True)
         self.sen_k = [None] * len(self.sen_k)                               # Z_k'den SONRA
         self.sen_v = [None] * len(self.sen_v)
+        if self.m.carry_group:
+            self.used += n + 1
+            if self.used > self.m.row_len - MAX_SENTENCE_TOKENS - 1:        # sonraki cumle sigmayabilir: yeni parca
+                self.piece += 1
+                if self.piece == self.m.carry_group:                        # grup bitti: yeni hikaye (BOS, bellek yok)
+                    self.__init__(self.m)
+                else:                                                       # glob: yalniz Z'ler (BOS, token'lar atilir)
+                    keep = torch.tensor([k == ZTOK for k in self.gkind], device=self.dev)
+                    for l, g in enumerate(self.glob):
+                        if g:
+                            self.all_k[l], self.all_v[l] = self.all_k[l][:, :, keep], self.all_v[l][:, :, keep]
+                    self.gkind, self.used = [ZTOK] * int(keep.sum()), 0
         return self.logits
 

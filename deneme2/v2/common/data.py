@@ -485,6 +485,58 @@ def pack_plan(lengths, row_len=ROW_LEN, seed=0, epoch=1):
                                                                                    dtype=np.int32)
 
 
+def carry_pack_plan(lengths, continues, row_len=ROW_LEN, seed=0, epoch=1, group=4, batch_rows=BATCH_ROWS):
+    """--carry_group plani (belge 81b s1.2, 83) -> pack_plan bicimi.  Belgenin ardisik <= group parcasi bir zincir: her parca
+    kendi satirinin BASINDA, zincir ayni batch'te ardisik satirlarda (batch = satir // batch_rows); satirda en cok bir zincir
+    parcasi.  Tek parcali grup (kisa belge, group'luk bolmenin artigi) serbest: son acik 16 satirdan ilk sigana (pack_plan
+    kurali; zincir satirlarinin kalanina da).  Karistirma birim duzeyinde, default_rng([seed, epoch]); batch'e sigmayan zincir
+    sonraki batch'in basina ertelenir; plan sonunda kalan yere sigan ilk zincir, hicbiri sigmazsa bos satir (dolgu)."""
+    lengths, cont = np.asarray(lengths), np.asarray(continues, dtype=bool)
+    assert lengths.max() <= row_len and 2 <= group <= batch_rows
+    first = np.r_[True, ~cont[:-1]]                                      # belgenin ilk parcasi
+    gpos = (np.arange(len(lengths)) - np.flatnonzero(first)[np.cumsum(first) - 1]) % group
+    starts = np.flatnonzero(gpos == 0)
+    units = [list(range(a, b)) for a, b in zip(starts.tolist(), np.r_[starts[1:], len(lengths)].tolist())]
+    rows, free, open_, deferred = [], [], [], []
+
+    def new_row(i):
+        rows.append([i])
+        free.append(row_len - int(lengths[i]))
+        open_.append(len(rows) - 1)
+        if len(open_) > 16:                                              # en eski acik satir kapanir
+            open_.pop(0)
+
+    for u in (units[k] for k in np.random.default_rng([seed, epoch]).permutation(len(units)).tolist()):
+        if len(u) > 1 and len(rows) % batch_rows + len(u) > batch_rows:
+            deferred.append(u)
+        elif len(u) > 1:
+            for i in u:
+                new_row(i)
+        else:
+            i, n = u[0], int(lengths[u[0]])
+            for j in open_:
+                if free[j] >= n:
+                    rows[j].append(i)
+                    free[j] -= n
+                    break
+            else:
+                new_row(i)
+        while deferred and len(rows) % batch_rows == 0:                 # batch basi: ertelenen zincirler once
+            for i in deferred.pop(0):
+                new_row(i)
+    while deferred:                                                      # plan sonu: kalan yere sigan ilk zincir
+        room = batch_rows - len(rows) % batch_rows
+        k = next((k for k, u in enumerate(deferred) if len(u) <= room), None)
+        if k is None:                                                    # hicbiri sigmiyor: bos satir (dolgu)
+            rows += [[] for _ in range(room)]
+            free += [0] * room
+            continue
+        for i in deferred.pop(k):
+            new_row(i)
+    return np.r_[0, np.cumsum([len(r) for r in rows])].astype(np.int64), np.array([i for r in rows for i in r],
+                                                                                   dtype=np.int32)
+
+
 @dataclass
 class PackedBatch:
     """build_batch ciktisi; hepsi (B, T) ve cihazda (story_ids haric).  belge 21 §5."""
@@ -496,12 +548,18 @@ class PackedBatch:
     target: torch.Tensor          # hedef token ya da -100
     target_kind: torch.Tensor     # TargetKind (hedefsiz -1)
     story_ids: torch.Tensor       # (B, S_max) satirdaki hikaye kimlikleri, -1 dolgu
-    real_pos: torch.Tensor = None  # yalniz summaries_last duzeninde: gercek hikaye konumu (sutundan turetilemez)
+    real_pos: torch.Tensor = None  # summaries_last duzeninde (ve carry belleginde): gercek hikaye konumu
+    mem_rows: torch.Tensor = None  # carry bellegi (B, M_max): kaynak satir (onceki parcalarin BOS + Z'leri), -1 bos
+    mem_cols: torch.Tensor = None  # (B, M_max) kaynak sutun
 
 
-def build_batch(stories, row_stories_list, layout, device="cpu", row_len=ROW_LEN):
+def build_batch(stories, row_stories_list, layout, device="cpu", row_len=ROW_LEN, carry=None):
     """stories (TokenStories: stream, sent (N, 2), story (H+1)), satir basina hikaye kimlikleri -> PackedBatch.  Vektorel
-    (numpy; olculdu: Python dongusunun ~10 kati hizli, tests_v2 'pack' dongulu basvuruyla esitligi sinar)."""
+    (numpy; olculdu: Python dongusunun ~10 kati hizli, tests_v2 'pack' dongulu basvuruyla esitligi sinar).
+    carry (belge 81b, 83; model_z): dict(gpos (hikaye basina gruptaki sira), memory, m_max).  Gruptaki sonraki parcanin
+    oncesi: son Z'nin hedefi sonraki parcanin ilk token'i (FIRST).  memory: devam parcasi (gpos > 0; satir basinda) BOS'suz,
+    mantiksal konum + onceki parcalarin cumle sayisi, gercek konum (real_pos) + onceki parcalarin boyu; mem_rows / mem_cols
+    onceki parcalarin BOS + Z sutunlari (sirayla)."""
     assert layout in ("transformer", "model_z")
     B = len(row_stories_list)
     per_row = np.array([len(r) for r in row_stories_list])
@@ -517,12 +575,15 @@ def build_batch(stories, row_stories_list, layout, device="cpu", row_len=ROW_LEN
     sh = np.repeat(np.arange(len(h)), n)                                 # cumlenin hikayesi (batch ici)
     sk = np.arange(n.sum()) - first_sent[sh]                             # hikaye ici cumle no (0'dan)
     st0, L = stories.sent[si, 0], stories.sent[si, 1] - stories.sent[si, 0]
-    slen = np.add.reduceat(L + 1, first_sent) + 1                        # hikaye boyu 1 + sum(L + 1)
+    gpos = None if carry is None else np.asarray(carry["gpos"])
+    nob = (gpos[h] > 0) if gpos is not None and carry["memory"] else np.zeros(len(h), bool)   # BOS'suz devam parcasi
+    bos = (~nob).astype(np.int64)
+    slen = np.add.reduceat(L + 1, first_sent) + bos                      # hikaye boyu 1 + sum(L + 1) (devamda BOS yok)
     cs = excl(slen)
     start = cs - cs[np.r_[0, np.cumsum(per_row)[:-1]][hrow]]             # hikayenin satirdaki ilk sutunu (bos satir: dolgu)
     assert (start + slen <= row_len).all(), "satir tasti"
     cl = excl(L + 1)
-    s0 = start[sh] + 1 + cl - cl[first_sent[sh]]                         # cumlenin ilk sutunu
+    s0 = start[sh] + bos[sh] + cl - cl[first_sent[sh]]                   # cumlenin ilk sutunu
     ts = np.repeat(np.arange(len(L)), L)                                 # token'in cumlesi
     j = np.arange(L.sum()) - excl(L)[ts]                                 # cumle ici sira (0'dan)
     trow, tcol = hrow[sh[ts]], s0[ts] + j
@@ -532,7 +593,8 @@ def build_batch(stories, row_stories_list, layout, device="cpu", row_len=ROW_LEN
     pos = np.zeros((B, row_len), np.int64)
     doc = np.full((B, row_len), -1, np.int32)
     sent = np.full((B, row_len), -1, np.int32)
-    tokens[hrow, start], kind[hrow, start], doc[hrow, start] = EOS_ID, Kind.BOS, hdoc
+    tokens[hrow[~nob], start[~nob]], kind[hrow[~nob], start[~nob]], doc[hrow[~nob], start[~nob]] = EOS_ID, Kind.BOS, \
+        hdoc[~nob]
     tokens[trow, tcol] = np.asarray(stories.stream[st0[ts] + j], dtype=np.int64)
     kind[trow, tcol], doc[trow, tcol], sent[trow, tcol] = Kind.TOKEN, hdoc[sh[ts]], sk[ts]
     tokens[erow, ecol], kind[erow, ecol], doc[erow, ecol], sent[erow, ecol] = END_ID, Kind.END, hdoc[sh], sk
@@ -552,15 +614,44 @@ def build_batch(stories, row_stories_list, layout, device="cpu", row_len=ROW_LEN
         c = np.asarray(cont, dtype=bool)[h]
         target[hrow[c], last[c]] = -100
         tkind[hrow[c], last[c]] = -1
+    noff, loff = np.zeros(len(h), np.int64), np.zeros(len(h), np.int64)
+    if gpos is not None:                                                 # gruptaki sonraki parca: son Z -> ilk token'i
+        nxt = np.minimum(h + 1, len(gpos) - 1)
+        g = (h + 1 < len(gpos)) & (gpos[nxt] > 0)
+        target[hrow[g], last[g]] = np.asarray(stories.stream[stories.sent[stories.story[h[g] + 1], 0]], dtype=np.int64)
+        tkind[hrow[g], last[g]] = TargetKind.FIRST
+        for x in np.flatnonzero(nob).tolist():                           # onceki parcalar: cumle sayisi, boy (BOS dahil)
+            a, b = stories.story[h[x] - gpos[h[x]]], stories.story[h[x]]
+            noff[x] = b - a
+            loff[x] = 1 + int((stories.sent[a:b, 1] - stories.sent[a:b, 0]).sum()) + (b - a)
     if layout == "transformer":                                          # hikaye ici sira
         pos[trow, tcol] = tcol - start[sh[ts]]
         pos[erow, ecol] = ecol - start[sh]
     else:                                                                # mantiksal: BOS 0, (k-1)+i, Z_k k
-        pos[trow, tcol] = sk[ts] + j + 1
-        pos[erow, ecol] = sk + 1
+        pos[trow, tcol] = sk[ts] + j + 1 + noff[sh[ts]]
+        pos[erow, ecol] = sk + 1 + noff[sh]
         tokens[erow, ecol], kind[erow, ecol] = 0, Kind.ZTOK
     t = lambda a: torch.as_tensor(a, device=device)  # noqa: E731
-    return PackedBatch(t(tokens), t(kind), t(pos), t(doc), t(sent), t(target), t(tkind), t(sid))
+    if not nob.any() and not (carry is not None and carry["memory"]):
+        return PackedBatch(t(tokens), t(kind), t(pos), t(doc), t(sent), t(target), t(tkind), t(sid))
+    real = np.zeros((B, row_len), np.int64)                              # gercek konum: hikaye basindan + onceki boy
+    real[trow, tcol] = tcol - start[sh[ts]] + loff[sh[ts]]
+    real[erow, ecol] = ecol - start[sh] + loff[sh]
+    M = int(carry["m_max"])
+    mem_rows, mem_cols = np.full((B, M), -1, np.int64), np.full((B, M), -1, np.int64)
+    at = {int(s_): x for x, s_ in enumerate(h.tolist())}                 # hikaye -> batch ici sira
+    for x in np.flatnonzero(nob).tolist():
+        assert hdoc[x] == 0, "devam parcasi satirin basinda olmali (carry_pack_plan)"
+        src = []
+        for s_ in range(int(h[x]) - int(gpos[h[x]]), int(h[x])):
+            y = at[s_]                                                   # onceki parca ayni batch'te olmali
+            src += [(hrow[y], start[y])] if gpos[s_] == 0 else []
+            src += [(hrow[y], c) for c in ecol[first_sent[y]:first_sent[y] + n[y]].tolist()]
+        assert len(src) <= M, "bellek %d > m_max %d" % (len(src), M)
+        mem_rows[hrow[x], :len(src)] = [r for r, _ in src]
+        mem_cols[hrow[x], :len(src)] = [c for _, c in src]
+    return PackedBatch(t(tokens), t(kind), t(pos), t(doc), t(sent), t(target), t(tkind), t(sid), real_pos=t(real),
+                       mem_rows=t(mem_rows), mem_cols=t(mem_cols))
 
 
 def token_counts(stream_root, out_dir=None, split="train", chunk=CHUNK):

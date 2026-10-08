@@ -34,6 +34,12 @@ basindan butun token'lari gorur (sentence model_z_read_mask z_reads_all; summari
 bugunku (bit ayni).  Kimlikte.
 --glob_drop P (belge 79 oneri 3, 78b 4.1): egitim adimlarinin P payinda (adim tohumlu; surdurmede ayni) glob katmanlari yerel
 maskeyle (gercek konum) kosar; sinav / uretim tam G.  0 bugunku (bit ayni).  Kimlikte.
+--carry_summaries 1 / --carry_group G (belge 81b, 83; kullanici, 8 Ekim: "isimler ok, carry kodunu başlat"): belgenin
+ardisik <= G parcasi ayni batch'te ardisik satirlarda (data.carry_pack_plan, kosu basinda, dosyasiz); parcanin son Z'si
+gruptaki sonraki parcanin ilk token'ini hedefler.  carry_summaries 1: devam parcasi BOS'suz, konum onceki parcalarin
+devami, her katmanda onceki parcalarin BOS + Z'lerini (glob'da yalniz Z'leri) bellek olarak okur (gradyan akar; KV =
+[satir || bellek], M_max plandan); --carry_group G tek basina = K kontrolu (ayni plan / hedef, BOS'lu, bellek yok).  Yalniz
+model_z, summaries_last 1, torbasiz, z_reads_all 0.  Sinavda continuation_exam (valid'in uzun belgeleri), gunlukte loss_cont.
 --stop_step N (kullanici, 8 Ekim): takvim degismeden adim N'de durur; checkpoint.pt + agent.pt + results.json (finished
 False, stopped_at, readings_skipped "stop_step"), son sinav ve okuma yok; --resume 1 kaldigi yerden.
 Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunluk sinirinda, epok sonunda ve bitiste;
@@ -113,7 +119,7 @@ READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_ge
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "learned_z", "optimizer", "global_layers", "bag_k", "bag_core", "bag_weight", "bag_full_frac", "bag_core_sha256",
-            "bag_sel_frac", "summaries_last", "glob_kv_heads", "z_reads_all", "glob_drop")
+            "bag_sel_frac", "summaries_last", "glob_kv_heads", "z_reads_all", "glob_drop", "carry_summaries", "carry_group")
 NO_BAG = dict(bag_k=0, bag_core=0, bag_weight=0.0, bag_full_frac=0.0, bag_core_sha256=None, bag_sel_frac=1.0)   # torbasiz / eski kosu
 LEGACY = ("meaning_sha256", "shared_vocab", "own_vocab", "open_z")   # temizlik oncesi kimlik alanlari (belge 33)
 TAG = "v2-before-cleanup-20261006"
@@ -170,16 +176,18 @@ def _decay_start(total):
     return total - round(DECAY * total)
 
 
-def _schedule(train, data_dir, seed, epochs, steps):
+def _schedule(train, data_dir, seed, epochs, steps, carry_group=0):
     """-> (epok planlari [(row_offsets, row_stories)], epok basina adim, row_len, toplam adim).  steps verilirse toplam o
-    (gerektigi kadar epok), yoksa epochs epok."""
+    (gerektigi kadar epok), yoksa epochs epok.  carry_group: her epok data.carry_pack_plan (dosyasiz)."""
     f = np.load(os.path.join(data_dir, "train_pack_plan_e1.npz"))
     row_len = int(f["row_len"])
     lengths = train.lengths()
     plans, per = [], []
     while True:
         e = len(plans) + 1
-        if e == 1 and int(f["seed"]) == seed and int(f["epoch"]) == 1:
+        if carry_group:
+            plans.append(D.carry_pack_plan(lengths, train.continues, row_len, seed, e, carry_group, BATCH_ROWS))
+        elif e == 1 and int(f["seed"]) == seed and int(f["epoch"]) == 1:
             plans.append((f["row_offsets"], f["row_stories"]))
         else:
             plans.append(D.pack_plan(lengths, row_len, seed, e))
@@ -227,6 +235,11 @@ def _bag_error(args):
     """Torba ve summaries_last bayraklari kurulamiyorsa ileti, yoksa None (args'ta yoksa kapali)."""
     if getattr(args, "summaries_last", 0) and (args.model != "model_z" or getattr(args, "bag_k", 0)):
         return "--summaries_last yalniz model_z, torbasiz (belge 66)"
+    cg = getattr(args, "carry_group", 0) or 0
+    if (cg or getattr(args, "carry_summaries", 0)) and (args.model != "model_z" or getattr(args, "bag_k", 0) or cg < 2
+                                                        or not getattr(args, "summaries_last", 0)
+                                                        or getattr(args, "z_reads_all", 0)):
+        return "--carry_summaries / --carry_group: yalniz model_z, torbasiz, summaries_last 1, z_reads_all 0, grup >= 2"
     if not getattr(args, "bag_k", 0):
         return None
     if not 0.0 <= args.bag_full_frac <= 1.0:
@@ -255,7 +268,9 @@ def _build(args, dev):
         from sentence import SentenceTransformer
         model = SentenceTransformer(args.d, args.layers, args.heads, global_layers=int(getattr(args, "global_layers", 0)),
                                     glob_kv_heads=getattr(args, "glob_kv_heads", 0) or None,
-                                    z_reads_all=int(getattr(args, "z_reads_all", 0)))
+                                    z_reads_all=int(getattr(args, "z_reads_all", 0)),
+                                    carry_group=int(getattr(args, "carry_group", 0) or 0) if getattr(args, "carry_summaries", 0)
+                                    else 0)
         model, mask_fn, layout = model.to(dev), model.mask_fn, "model_z"
     if getattr(args, "bag_k", 0):
         R.attach_bag(model, args.bag_k, args.bag_n_core)
@@ -329,10 +344,11 @@ def _attn(batch, mask_fn, cuda):
     return R.block_mask(batch, mask_fn) if cuda else R.dense_mask(batch, mask_fn)
 
 
-def _step(model, batch, mask_fn, opt, cuda, full=None, weight=0.0, timer=None, plan=None):
+def _step(model, batch, mask_fn, opt, cuda, full=None, weight=0.0, timer=None, plan=None, cont=None):
     """Tek egitim adimi -> (kayip, gradyan normu, torba ekleri ya da None) cihazda.  full: torbali modelde tam softmax payi
     -> recipe.bag_train_loss (kayip = iki asamali NLL; amac + secici kaybi; plan: recipe.bag_plan, tek senkron).  timer:
-    dort CUDA olayi, cikis kalemi ve icindeki secici (yalniz ileri)."""
+    dort CUDA olayi, cikis kalemi ve icindeki secici (yalniz ileri).  cont (carry, _cont_mask): devam parcasi hedeflerinin
+    kaybi yalniz olcu (gradyansiz) -> ek {"loss_cont": toplam, "n_cont": sayi}."""
     with torch.autocast(batch.tokens.device.type, dtype=torch.bfloat16, enabled=cuda):
         h = model._batch_hidden(batch, _attn(batch, mask_fn, cuda))
         if timer is not None:
@@ -340,6 +356,11 @@ def _step(model, batch, mask_fn, opt, cuda, full=None, weight=0.0, timer=None, p
         if full is None:
             loss = goal = R.output_loss(h.flatten(0, 1), model.E.weight, batch.target.flatten())
             extra = None
+            if cont is not None:
+                with torch.no_grad():
+                    lc = torch.nn.functional.cross_entropy((h[cont] @ model.E.weight.T).float(), batch.target[cont],
+                                                           reduction="sum")
+                extra = dict(loss_cont=lc, n_cont=cont.sum())
         else:
             goal, loss, extra = R.bag_train_loss(model, batch, h, full, weight, timer and timer[2:], plan)
         if timer is not None:
@@ -392,6 +413,75 @@ class _Exam:
         old = (torch.arange(len(perm), device=perm.device)[:, None] * T + perm)[pb.target >= 0]
         order = torch.argsort(old)
         return nll[order], pred[order], tk[order]
+
+
+def _cont_mask(batch, gpos, nsent):
+    """carry: hedefi gruptaki bir devam parcasinin (gpos > 0) token'i olan konumlar -> bool (B, T): devam parcasinin
+    konumlari (BOS haric) ve onceki parcanin son Z'si (hedefi devamin ilk token'i).  gpos, nsent: hikaye basina (tensor)."""
+    doc = batch.doc.long()
+    sid = batch.story_ids.gather(1, doc.clamp_min(0))
+    nxt = torch.where(sid + 1 < len(gpos), gpos[(sid + 1).clamp(max=len(gpos) - 1)], 0)
+    last_z = (batch.kind == D.Kind.ZTOK) & (batch.sent.long() == nsent[sid] - 1)
+    return (doc >= 0) & (batch.target >= 0) & (((gpos[sid] > 0) & (batch.kind != D.Kind.BOS)) | (last_z & (nxt > 0)))
+
+
+@torch.no_grad()
+def continuation_exam(model, mask_fn, valid, tok, group, memory, m_max, dev, cuda, last, row_len, docs=500):
+    """Devam parcasi sinavi (belge 81b s6, 83): valid'de model_z boyu > row_len belgelerden tohum 0 ile en cok docs tanesi,
+    make_fineweb parca kuraliyla parcalara, group'luk zincirlere; zincirin her parcasi kendi satirinda (egitim plani gibi),
+    memory'de bellekli.  Olcu yalniz devam hedeflerinde (_cont_mask) -> dict(loss, first, mid, buckets (parca ici konum),
+    docs, chains, targets, seconds) ya da uzun belge yoksa None."""
+    import make_fineweb as MF
+    from types import SimpleNamespace
+    t0 = time.time()
+    pick = np.flatnonzero(valid.lengths() > row_len)
+    pick = np.sort(pick[np.random.default_rng(0).permutation(len(pick))[:docs]])
+    if not len(pick):
+        return None
+    sent = np.concatenate([valid.sent[valid.story[i]:valid.story[i + 1]] for i in pick])
+    sub = SimpleNamespace(stream=valid.stream, sent=sent, n=len(pick),
+                          story=np.r_[0, np.cumsum([valid.story[i + 1] - valid.story[i] for i in pick])])
+    story, cont, _ = MF._pieces(sub, row_len, tok)
+    pcs = SimpleNamespace(stream=valid.stream, sent=sent, story=story, continues=cont)
+    first = np.r_[True, ~cont[:-1]]
+    gpos = (np.arange(len(cont)) - np.flatnonzero(first)[np.cumsum(first) - 1]) % group
+    starts = np.flatnonzero(gpos == 0)
+    chains = [list(range(a, b)) for a, b in zip(starts.tolist(), np.r_[starts[1:], len(cont)].tolist()) if b - a > 1]
+    idx = np.arange(len(cont))
+    need = int(np.where(gpos > 0, 1 + story[idx] - story[idx - gpos], 0).max())
+    M = max(m_max, -(-need // 128) * 128)
+    batches, cur = [], []
+    for c in chains:
+        if len(cur) + len(c) > BATCH_ROWS:
+            batches.append(cur)
+            cur = []
+        cur += [[x] for x in c]
+    batches += [cur] if cur else []
+    gp_t, ns_t = torch.as_tensor(gpos), torch.as_tensor(np.diff(story))
+    edges = (0, 64, 256, 1024, 10 ** 9)
+    acc = dict(all=[0.0, 0], first=[0.0, 0], mid=[0.0, 0], **{"%d-%d" % (a, b - 1) if b < 10 ** 9 else "%d+" % a: [0.0, 0]
+                                                              for a, b in zip(edges[:-1], edges[1:])})
+    for rows in batches:
+        rows = rows + [[]] * (BATCH_ROWS - len(rows)) if cuda else rows
+        b = D.build_batch(pcs, rows, "model_z", "cpu", row_len, carry=dict(gpos=gpos, memory=memory, m_max=M))
+        cm = _cont_mask(b, gp_t, ns_t)
+        sid = b.story_ids.gather(1, b.doc.long().clamp_min(0))
+        rel = torch.where(gp_t[sid] > 0, torch.arange(row_len)[None] - (0 if memory else 1), 0)   # parca ici konum
+        if last is not None:
+            b, perm = last(b)
+            cm, rel = cm.gather(1, perm), rel.gather(1, perm)
+        b = _to_device(b, dev)
+        with torch.autocast(dev.type, dtype=torch.bfloat16, enabled=cuda):
+            nll, _, tk = model.loss_per_target(b, _attn(b, mask_fn, cuda))
+        keep = (b.target >= 0).cpu()
+        c, r, nll, tk = cm[keep], rel[keep], nll.float().cpu(), tk.cpu()
+        for name, m in [("all", c), ("first", c & (tk == D.TargetKind.FIRST)), ("mid", c & (tk == D.TargetKind.MID))] + [
+                (k, c & (r >= a) & (r < b_)) for k, a, b_ in zip(list(acc)[3:], edges[:-1], edges[1:])]:
+            acc[name][0] += float(nll[m].double().sum())
+            acc[name][1] += int(m.sum())
+    avg = {k: round(v[0] / v[1], 4) if v[1] else None for k, v in acc.items()}
+    return dict(loss=avg["all"], first=avg["first"], mid=avg["mid"], buckets={k: avg[k] for k in list(acc)[3:]},
+                docs=int(len(pick)), chains=len(chains), targets=acc["all"][1], seconds=round(time.time() - t0, 2))
 
 
 def _exam(model, mask_fn, valid, plan, story_bytes, layout, dev, cuda, last=None):
@@ -485,6 +575,11 @@ def _args(argv):
     ap.add_argument("--glob_drop", type=float, default=0.0,
                     help="model_z: egitim adimlarinin bu payinda glob katmanlari yerel maskeyle (adim tohumlu; sinav / "
                          "uretim tam G; belge 79 / 78b)")
+    ap.add_argument("--carry_summaries", type=int, default=0,
+                    help="model_z: parcalar arasi Z bellegi (belge 81b, 83; carry_group varsayilani 4); 0 kapali")
+    ap.add_argument("--carry_group", type=int, default=None,
+                    help="carry plani: belgenin ardisik en cok G parcasi ayni batch'te (carry_summaries 0 ile: K kontrolu, "
+                         "bellek yok); varsayilan carry_summaries ise 4, degilse 0")
     ap.add_argument("--fp8", default="none", choices=("none", "tensorwise", "rowwise"),
                     help="MLP (gate_up, down) torchao Float8Linear tarifi; none: bf16 (kimlige girmez, --resume'da "
                          "degistirilebilir; kullanici, 8 Ekim)")
@@ -510,6 +605,8 @@ def _args(argv):
         args.lr = "auto"
     if args.summaries_last is None:
         args.summaries_last = MODEL_Z_SUMMARIES_LAST if args.model == "model_z" and not args.bag_k else 0
+    if args.carry_group is None:
+        args.carry_group = 4 if args.carry_summaries else 0
     auto = []                                                            # kimlige cozulmus sayi girer
     if args.global_layers == "auto":
         args.global_layers = round(args.layers * MODEL_Z_GLOBAL_RATIO) if args.model == "model_z" else 0
@@ -564,7 +661,18 @@ def main(argv=None):
     log("ham akis: %s%s" % (stream, " (yerel kopya, sha256 sinir dosyasiyla ayni)" if args.local else ""))
     train = D.TokenStories(stream, args.data, "train")
     valid = D.TokenStories(stream, args.data, "valid")
-    plans, per_epoch, row_len, total = _schedule(train, args.data, args.seed, args.epochs, args.steps)
+    if args.carry_group and train.continues is None:
+        sys.exit("DUR: --carry_group: veri parcali degil (train_story_continues.npy yok)")
+    plans, per_epoch, row_len, total = _schedule(train, args.data, args.seed, args.epochs, args.steps, args.carry_group)
+    carry, m_max = None, 0
+    if args.carry_group:                                                 # grup sirasi, bellek boyu (BOS + onceki Z'ler)
+        cont_ = np.asarray(train.continues, bool)
+        first_ = np.r_[True, ~cont_[:-1]]
+        gpos = (np.arange(train.n) - np.flatnonzero(first_)[np.cumsum(first_) - 1]) % args.carry_group
+        idx_ = np.arange(train.n)
+        m_max = max(128, -(-int(np.where(gpos > 0, 1 + train.story[idx_] - train.story[idx_ - gpos], 0).max()) // 128) * 128)
+        carry = dict(gpos=gpos, memory=bool(args.carry_summaries), m_max=m_max)
+        gp_t, ns_t = torch.as_tensor(gpos), torch.as_tensor(np.diff(train.story))
     bounds = np.cumsum([0] + per_epoch)
     down = _decay_start(total)
     ep = np.load(os.path.join(args.data, "exam_pack_plan.npz"))
@@ -586,6 +694,8 @@ def main(argv=None):
                    bag_sel_frac=args.bag_sel_frac,
                    bag_core_sha256=hashlib.sha256(core.tobytes()).hexdigest())
     model, mask_fn, layout = _build(args, dev)
+    if layout == "model_z":
+        model.row_len = row_len                                          # carry uretiminde parca boyu
     last = None
     if args.summaries_last:                                              # belge 66: [token'lar | ozetler | dolgu]
         from sentence import summaries_last as last
@@ -602,7 +712,7 @@ def main(argv=None):
                  train_stream_sha256=train.meta["stream_sha256"], learned_z=int(args.model == "model_z"),
                  optimizer=args.optimizer, global_layers=args.global_layers,
                  summaries_last=args.summaries_last, glob_kv_heads=args.glob_kv_heads, z_reads_all=args.z_reads_all,
-                 glob_drop=args.glob_drop,
+                 glob_drop=args.glob_drop, carry_summaries=args.carry_summaries, carry_group=args.carry_group,
                  **bag)   # learned_z: eski kosu ayrimi
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
@@ -624,7 +734,8 @@ def main(argv=None):
             sys.exit("DUR: temizlik oncesi kosu surdurulmez / uzatilmaz (kullanici, 6 Ekim); eski kod: git etiketi %s" % TAG)
         if _archived(was):                                                # formullu Model Z (belge 44)
             sys.exit("DUR: " + _archived(was))
-        was = {"learned_z": 0, "optimizer": "adamw", "global_layers": 0, "summaries_last": 0, "glob_kv_heads": 0, "z_reads_all": 0, "glob_drop": 0.0, **NO_BAG, **was}   # alanlardan onceki kosu
+        was = {"learned_z": 0, "optimizer": "adamw", "global_layers": 0, "summaries_last": 0, "glob_kv_heads": 0, "z_reads_all": 0, "glob_drop": 0.0, "carry_summaries": 0, "carry_group": 0,
+               **NO_BAG, **was}   # alanlardan onceki kosu
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:
@@ -663,6 +774,9 @@ def main(argv=None):
         "basi %d | lr %g | cihaz %s, compile %s | sinav %d hikaye" % (
             args.model, args.d, args.layers, args.heads, params, train.n, BATCH_ROWS, row_len, per_epoch, total, down,
             args.lr, config["env"]["device"], cuda, len(exam_plan[1])))
+    if args.carry_group:
+        log("carry: grup %d, bellek %s, M_max %d (devam parcasi %d / %d)" % (
+            args.carry_group, bool(args.carry_summaries), m_max, int((gpos > 0).sum()), train.n))
     if args.global_layers:
         log("global_layers %d: son %d blok tam causal (model_z_global_mask), gercek hikaye konumu" % (
             args.global_layers, args.global_layers))
@@ -691,11 +805,11 @@ def main(argv=None):
         rows, real = rows_of(step)
         if cuda and not args.bag_k:                                      # epok sonu eksik batch: bos (dolgu) satirla tam
             rows += [[]] * (BATCH_ROWS - len(rows))                      # boy, derleme sekli sabit (CPU'da agirlik bit ayni
-        b = D.build_batch(train, rows, layout, "cpu", row_len)           # kalsin diye yok: dW toplama sirasi degisiyor)
+        b = D.build_batch(train, rows, layout, "cpu", row_len, carry)     # kalsin diye yok: dW toplama sirasi degisiyor)
         if last is not None:
             b = last(b)[0]
         if not args.bag_k:
-            return b, real, None, None
+            return b, real, None, _cont_mask(b, gp_t, ns_t) if carry else None   # carry: plan yerinde devam maskesi
         rng = np.random.default_rng(np.random.SeedSequence(args.seed, spawn_key=(step,)))   # adim tohumlu: surdurmede ayni
         full = R.bag_full_mask(b.target.numpy(), args.bag_full_frac, rng, args.bag_sel_frac)
         return b, real, full, R.bag_plan(b, full, core_cpu)                # torba yapisi CPU'da (adimda senkron yok)
@@ -725,9 +839,12 @@ def main(argv=None):
         drop = args.glob_drop and np.random.default_rng(np.random.SeedSequence(args.seed, spawn_key=(step, 1))).random() \
             < args.glob_drop                                             # adim tohumlu (torbanin anahtari (step,))
         timer = tuple(torch.cuda.Event(enable_timing=True) for _ in range(4)) if cuda else None
+        cont = None
+        if carry:
+            cont, plan = plan.pin_memory().to(dev, non_blocking=True) if cuda else plan, None
         full, plan = _to_device_bag(full, plan, dev)
         loss, gn, extra = _step(model, _to_device(batch, dev), mask_fn[:-1] + mask_fn[:1] if drop else mask_fn, opt, cuda,
-                                full, args.bag_weight, timer, plan)          # glob_drop: glob maskesi yerine yerel
+                                full, args.bag_weight, timer, plan, cont)    # glob_drop: glob maskesi yerine yerel
         nxt = cpu_batch(step + 1) if step + 1 < total else None          # GPU calisirken hazirlanir
         win["loss"] += loss
         win["gn"] += gn
@@ -752,6 +869,9 @@ def main(argv=None):
             rec["out_fwd_ms"] = round(timer[0].elapsed_time(timer[1]), 2)
             if args.bag_k:
                 rec["selector_fwd_ms"] = round(timer[2].elapsed_time(timer[3]), 2)
+        if carry:
+            n_c = int(win["bag"]["n_cont"])
+            rec["loss_cont"] = round(float(win["bag"]["loss_cont"]) / n_c, 4) if n_c else None
         if args.bag_k:                                                   # kalibrasyon: p_other ~ miss (belge 54 s1.4)
             w = {k: float(v) for k, v in win["bag"].items()}
             n_ = max(w["valid"], 1)
@@ -769,7 +889,7 @@ def main(argv=None):
                "  | C %.3f P %.3f L %.3f kacan %.4f p(DIGER) %.4f tam CE %s secici %.3f" % tuple(
                    rec["bag"][k] for k in ("c", "p", "l", "miss", "p_other", "full_ce", "loss_selector"))
                if args.bag_k else "",
-               "  (ilk pencere: derleme dahil)" if first_window else ""))
+               ("  | devam %s" % rec["loss_cont"] if carry else "") + ("  (ilk pencere: derleme dahil)" if first_window else "")))
         assert np.isfinite(rec["loss"]), "kayip sonlu degil; checkpoint yazilmadi"
         first_window, win = False, None
         if done == down:
@@ -778,6 +898,10 @@ def main(argv=None):
             history["epochs"].append(dict(epoch=epoch, step=done, wall_seconds=round(time.time() - epoch_t0, 1),
                                           resumed=bool(epoch_from > bounds[epoch - 1])))
             ex = _exam(model, mask_fn, valid, exam_plan, story_bytes, layout, dev, cuda, last)
+            if carry:
+                ex["continuation"] = continuation_exam(model, mask_fn, valid, tok, args.carry_group, carry["memory"], m_max,
+                                                       dev, cuda, last, row_len)
+                log("DEVAM SINAVI adim %d: %s" % (done, ex["continuation"]))
             history["exams"].append(dict(ex, step=done, epoch=epoch, full_epoch=bool(epoch_end)))
             log("SINAV adim %d: kayip %.4f  acc %.4f  acc_token %.4f  bpb %.4f  end_ok %.4f  eos_ok %.4f (%.1f sn)" % (
                 done, ex["loss"], ex["acc"], ex["acc_token"], ex["bits_per_byte"], ex["end_ok"], ex["eos_ok"],
@@ -798,6 +922,9 @@ def main(argv=None):
         return results
     if not history["exams"] or history["exams"][-1]["step"] != total:   # bitis checkpoint'i var, sinavi yok
         ex = _exam(model, mask_fn, valid, exam_plan, story_bytes, layout, dev, cuda, last)
+        if carry:
+            ex["continuation"] = continuation_exam(model, mask_fn, valid, tok, args.carry_group, carry["memory"], m_max,
+                                                   dev, cuda, last, row_len)
         history["exams"].append(dict(ex, step=total, epoch=len(per_epoch), full_epoch=bool(total == bounds[-1])))
     speed = [w for w in history["log"] if not w["first"]]
     med = lambda key: float(np.median([w[key] for w in speed])) if speed else None  # noqa: E731

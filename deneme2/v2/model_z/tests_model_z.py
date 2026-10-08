@@ -2,7 +2,7 @@
 (z, z_flat, direct, generate_longest, formullu onbellek) kaldirildi (belge 44); eski hali git etiketi
 v2-before-formula-cleanup-20261007.
 
-    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,bag,mask,summaries_last,gqa]
+    python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,bag,mask,summaries_last,gqa,carry]
 """
 import os
 import sys
@@ -938,8 +938,105 @@ def t_bag():
           "fark %.1e" % float((torch.stack(got) - want).abs().max()))
 
 
+def t_carry():
+    """--carry_summaries (belge 83): (a) G'siz modelde carry batch'indeki parcalar = bolunmemis belgenin tam ileri gecisi;
+    G1'de glob maskesi "sonraki parca onceki parcalarin yalniz Z'lerini gorur" olan bolunmemis basvuruyla ayni (fp32);
+    (b) sizinti: bellek sutunlari yalniz devam satirinin ilk hikayesine, gecerli yuvalara (glob'da BOS haric), kaynak
+    yalniz onceki satirlar; (c) SummaryCache carry (parca dolunca glob'da yalniz Z, carry_group'ta sifirlama) adim adim =
+    tam ileri."""
+    import recipe as R
+    from sentence import model_z_read_mask, summaries_last
+    rng = np.random.default_rng(1)
+    sents = [[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(14)]
+    pieces = [sents[:5], sents[5:9], sents[9:]]
+    other = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 6))] for _ in range(2)] for _ in range(3)]
+    st = token_stories(pieces + other)
+    st.continues = np.array([True, True, False, False, False, False])
+    gpos = np.array([0, 1, 2, 0, 0, 0])
+    T = 80
+    rows = [[0, 3], [1, 4], [2, 5]]
+    b = D.build_batch(st, rows, "model_z", row_len=T, carry=dict(gpos=gpos, memory=True, m_max=32))
+    bu = D.build_batch(token_stories([sents]), [[0]], "model_z", row_len=2 * T)
+    lens = [sum(len(x) + 1 for x in p_) + (1 if i == 0 else 0) for i, p_ in enumerate(pieces)]
+    res = []
+    for G in (0, 1):
+        torch.manual_seed(0)
+        m = SentenceTransformer(d=32, layers=3, heads=2, global_layers=G).eval()
+        with torch.no_grad():
+            pb, perm = summaries_last(b)
+            hc = m._batch_hidden(pb).gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, 32))
+            if G == 0:
+                pu, permu = summaries_last(bu)
+                hu = m._batch_hidden(pu).gather(1, torch.argsort(permu, 1)[..., None].expand(-1, -1, 32))
+            else:
+                k_, d_, s_ = bu.kind, bu.doc, bu.sent
+                ar = torch.arange(2 * T)
+                pc = torch.bucketize(ar, torch.tensor(np.cumsum(lens)), right=True)        # konumun parcasi
+                real, causal = d_[0] >= 0, ar[:, None] >= ar[None, :]
+                glob = causal & (((pc[:, None] == pc[None, :]) | ((k_[0][None, :] == ZTOK) & (pc[None, :] < pc[:, None])))
+                                 & real[:, None] & real[None, :] | (~real[:, None] & ~real[None, :]))
+                hu = m._batch_hidden(bu, (_dense(model_z_read_mask(k_, d_, s_), 1, 2 * T, "cpu"), glob[None]))
+        off = np.r_[0, np.cumsum(lens)]
+        res.append(max(float((hc[r, :lens[r]] - hu[0, off[r]:off[r + 1]]).abs().max()) for r in range(3)))
+    pb, _ = summaries_last(b)
+    M = pb.mem_rows.shape[1]
+    first = (pb.doc == 0) & (pb.kind != PAD)
+    leak = True
+    for f, glob in ((m._masks(True)[0], False), (m._masks(True)[-1], True)):
+        dm = R.dense_mask(pb, f)[:, :, T:]                                   # (B, T, M) bellek bolumu
+        n = (pb.mem_rows >= 0).sum(1)
+        want = first[:, :, None] & (torch.arange(M)[None, None, :] < n[:, None, None]) & (
+            torch.arange(M)[None, None, :] >= int(glob))
+        leak &= torch.equal(dm, want)
+    src_ok = all(int(r_) < r for r in range(3) for r_ in pb.mem_rows[r].tolist() if r_ >= 0)
+    check("carry: G'siz parcalar = bolunmemis belge (fark %.1e), G1 = 'onceki parcalarin yalniz Z'si' glob maskeli basvuru "
+          "(fark %.1e); bellek yalniz devam satirinin ilk hikayesine, gecerli yuvalara (glob'da BOS'suz), kaynak yalniz "
+          "onceki satirlar" % tuple(res), max(res) < 1e-5 and leak and src_ok)
+    sents = [[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(30)]
+    RL, G_ = 160, 2
+    pieces, cur, used, k = [], [], 1, 0                                       # uretim kurali (SummaryCache)
+    for x in sents:
+        cur.append(x)
+        used += len(x) + 1
+        if used > RL - D.MAX_SENTENCE_TOKENS - 1:
+            pieces.append(cur)
+            k += 1
+            cur, used = [], (1 if k % G_ == 0 else 0)
+    pieces += [cur] if cur else []
+    st = token_stories(pieces)
+    st.continues = np.array([i < len(pieces) - 1 for i in range(len(pieces))])
+    gp = np.arange(len(pieces)) % G_
+    out = []
+    for gl in (0, 1):
+        torch.manual_seed(0)
+        m = SentenceTransformer(d=32, layers=3, heads=2, global_layers=gl, carry_group=G_).eval()
+        m.row_len = RL
+        b = D.build_batch(st, [[i] for i in range(len(pieces))], "model_z", row_len=RL,
+                          carry=dict(gpos=gp, memory=True, m_max=128))
+        with torch.no_grad():
+            pb, perm = summaries_last(b)
+            lg = m._batch_hidden(pb).gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, 32)) @ m.E.weight.T
+            want = []
+            for r, p_ in enumerate(pieces):
+                n = sum(len(x) + 1 for x in p_) + (1 if gp[r] == 0 else 0)
+                reset = r + 1 < len(pieces) and gp[r + 1] == 0                # sifirlamada son Z'nin hedefi yok
+                want += [lg[r, c] for c in range(n - int(reset))]
+            c = SummaryCache(m)
+            got = [c.logits]
+            for x in sents:
+                got += [c.append_token(t) for t in x] + [c.close_sentence()]
+            pre = SummaryCache(m)
+            pre.prefill(sents[:9])
+        out.append((max(float((a - b_).abs().max()) for a, b_ in zip(got, want)), len(want),
+                    float((pre.logits - got[sum(len(x) + 1 for x in sents[:9])]).abs().max())))
+    check("carry uretim: SummaryCache adim adim (parca dolunca glob'da yalniz Z'ler, %d parcada sifirlama) = carry batch'inin "
+          "tam ileri gecisi, %d parca; prefill = adim adim" % (G_, len(pieces)),
+          all(o[0] < 1e-5 and o[2] < 1e-5 for o in out), "; ".join("G%d fark %.1e (%d konum), prefill %.1e" % (
+              i, o[0], o[1], o[2]) for i, o in enumerate(out)))
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
-             equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, bag=t_bag)
+             equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, bag=t_bag, carry=t_carry)
 
 if __name__ == "__main__":
     if SIDE is not None:
