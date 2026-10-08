@@ -29,8 +29,9 @@ satir; dolgu satirlari sifir, egitim kaybinda dolgu sutunu -inf, cikis VOCAB'a k
 vocab_rows; alani olmayan eski kosu VOCAB (50.258) ile yuklenir ve surer.
 --glob_kv_heads N|auto (kullanici, 8 Ekim: "bu duurmda GOA yı da sıraya koy o zaman bakalım"; uretim hizi): GQA, k / v
 N head yalniz tam causal katmanlarda (Model Z glob; transformer'da her katman, kiyas icin); yerel katmanlar tam head
-(Z K/V kanali daralmaz).  auto = heads / GLOB_KV_GROUP (bolunmezse DUR).  Varsayilan 0 = heads (bit ayni); kimlikte
-(sekil degisir).
+(Z K/V kanali daralmaz).  Varsayilan auto (kullanici, 8 Ekim: "GQA'yı varsayılan yap, ona karar verdik son koşuda bu
+yüzden yaptık"): Model Z ve global_layers > 0 ise heads / GLOB_KV_GROUP (bolunmezse DUR), aksi halde (transformer, G'siz
+Model Z) 0 = heads.  Acik 0 eski davranis (bit ayni); kimlikte (sekil degisir).
 --carry_summaries 1 / --carry_group G (belge 81b, 83; kullanici, 8 Ekim: "isimler ok, carry kodunu başlat"): belgenin
 ardisik <= G parcasi ayni batch'te ardisik satirlarda (data.carry_pack_plan, kosu basinda, dosyasiz); parcanin son Z'si
 gruptaki sonraki parcanin ilk token'ini hedefler.  carry_summaries 1: devam parcasi BOS'suz, konum onceki parcalarin
@@ -62,7 +63,7 @@ Varsayilanlar (kullanici, 8 Ekim: "Varsayılan yap ama kısa bir koşu ile son h
                     [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
                     [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1]
                     [--optimizer normuon|muon|adamw (varsayilan normuon)] [--global_layers N|auto (varsayilan auto)]
-                    [--glob_kv_heads N|auto (varsayilan 0)] [--carry_summaries 1] [--carry_group G]
+                    [--glob_kv_heads N|auto (varsayilan auto)] [--carry_summaries 1] [--carry_group G]
 """
 import torch  # noqa: I001  (Windows: torch once)
 
@@ -92,6 +93,7 @@ BATCH_ROWS = D.BATCH_ROWS
 LOG_EVERY = 100             # adim; gunluk satiri = bir hiz penceresi
 MODEL_Z_GLOBAL_RATIO = 1 / 3   # global_layers auto (OLCULENLER_z: d768/L10 G1->G3 kazanc, d1024/L12 G3->G4 -0,0047)
 GLOB_KV_GROUP = 4              # glob_kv_heads auto = heads / 4
+GLOB_KV_DEFAULT = "auto"       # --glob_kv_heads verilmezse (kullanici, 8 Ekim: GQA varsayilan); testler eski 0'a sabitler
 LR_REF = (2e-3, 768, 0.5)      # lr auto = lr0 (d0 / d) ^ us (aci / adim ~ lr 0,2 sqrt(d) sabit); d1024 olcumu: 1,4 / 1,7e-3 duz, 1,73e-3 icinde
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr")   # --resume'da verilmezse kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
@@ -505,8 +507,8 @@ def _args(argv):
                          "verilmezse kosunun kimliginden")
     ap.add_argument("--glob_kv_heads", type=lambda s: s if s == "auto" else int(s), default=None,
                     help="GQA: tam causal katmanlarda (model_z glob, transformer hepsi) k / v head sayisi, heads'in "
-                         "boleni ya da auto (heads / GLOB_KV_GROUP); varsayilan 0 (heads); kimlikte; --resume'da "
-                         "verilmezse kosunun kimliginden")
+                         "boleni ya da auto (varsayilan: model_z G > 0 ise heads / GLOB_KV_GROUP, aksi 0); kimlikte; "
+                         "--resume'da verilmezse kosunun kimliginden")
     ap.add_argument("--carry_summaries", type=int, default=0,
                     help="model_z: parcalar arasi Z bellegi (belge 81b, 83; carry_group varsayilani 4); 0 kapali")
     ap.add_argument("--carry_group", type=int, default=None,
@@ -533,7 +535,7 @@ def _args(argv):
     if args.global_layers is None:
         args.global_layers = "auto"
     if args.glob_kv_heads is None:
-        args.glob_kv_heads = 0                                           # uretim hizi olcumunden sonra "auto"
+        args.glob_kv_heads = GLOB_KV_DEFAULT
     if args.lr is None:
         args.lr = "auto"
     args.summaries_last = int(args.model == "model_z")                   # Model Z duzeni (kimlikte isaret)
@@ -544,6 +546,8 @@ def _args(argv):
         args.global_layers = round(args.layers * MODEL_Z_GLOBAL_RATIO) if args.model == "model_z" else 0
         if args.model == "model_z":
             auto.append("global_layers %d (round(%d x %.4g))" % (args.global_layers, args.layers, MODEL_Z_GLOBAL_RATIO))
+    if args.glob_kv_heads == "auto" and (args.model != "model_z" or not args.global_layers):
+        args.glob_kv_heads = 0                                           # transformer / G'siz Model Z: GQA yok
     if args.glob_kv_heads == "auto":
         if args.heads % GLOB_KV_GROUP:
             sys.exit("DUR: --glob_kv_heads auto: heads %d, %d'e bolunmuyor; sayi ver" % (args.heads, GLOB_KV_GROUP))

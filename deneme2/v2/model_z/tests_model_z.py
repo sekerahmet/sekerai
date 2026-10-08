@@ -839,7 +839,7 @@ def t_carry():
     G1'de glob maskesi "sonraki parca onceki parcalarin yalniz Z'lerini gorur" olan bolunmemis basvuruyla ayni (fp32);
     (b) sizinti: bellek sutunlari yalniz devam satirinin ilk hikayesine, gecerli yuvalara (glob'da BOS haric), kaynak
     yalniz onceki satirlar; (c) SummaryCache carry (parca dolunca glob'da yalniz Z, carry_group'ta sifirlama) adim adim =
-    tam ileri."""
+    tam ileri.  G1 kollari GQA ile de (glob_kv_heads 1, heads 4; GQA varsayilan, kullanici 8 Ekim)."""
     import recipe as R
     from sentence import model_z_read_mask, summaries_last
     rng = np.random.default_rng(1)
@@ -855,9 +855,9 @@ def t_carry():
     bu = D.build_batch(token_stories([sents]), [[0]], "model_z", row_len=2 * T)
     lens = [sum(len(x) + 1 for x in p_) + (1 if i == 0 else 0) for i, p_ in enumerate(pieces)]
     res = []
-    for G in (0, 1):
+    for G, kv, h in ((0, None, 2), (1, None, 2), (1, 1, 4)):
         torch.manual_seed(0)
-        m = SentenceTransformer(d=32, layers=3, heads=2, global_layers=G).eval()
+        m = SentenceTransformer(d=32, layers=3, heads=h, global_layers=G, glob_kv_heads=kv).eval()
         with torch.no_grad():
             pb, perm = summaries_last(b)
             hc = m._batch_hidden(pb).gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, 32))
@@ -886,7 +886,7 @@ def t_carry():
         leak &= torch.equal(dm, want)
     src_ok = all(int(r_) < r for r in range(3) for r_ in pb.mem_rows[r].tolist() if r_ >= 0)
     check("carry: G'siz parcalar = bolunmemis belge (fark %.1e), G1 = 'onceki parcalarin yalniz Z'si' glob maskeli basvuru "
-          "(fark %.1e); bellek yalniz devam satirinin ilk hikayesine, gecerli yuvalara (glob'da BOS'suz), kaynak yalniz "
+          "(fark %.1e; GQA kv 1 %.1e); bellek yalniz devam satirinin ilk hikayesine, gecerli yuvalara (glob'da BOS'suz), kaynak yalniz "
           "onceki satirlar" % tuple(res), max(res) < 1e-5 and leak and src_ok)
     sents = [[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(30)]
     RL, G_ = 160, 2
@@ -903,9 +903,9 @@ def t_carry():
     st.continues = np.array([i < len(pieces) - 1 for i in range(len(pieces))])
     gp = np.arange(len(pieces)) % G_
     out = []
-    for gl in (0, 1):
+    for gl, kv, h in ((0, None, 2), (1, None, 2), (1, 1, 4)):
         torch.manual_seed(0)
-        m = SentenceTransformer(d=32, layers=3, heads=2, global_layers=gl, carry_group=G_).eval()
+        m = SentenceTransformer(d=32, layers=3, heads=h, global_layers=gl, glob_kv_heads=kv, carry_group=G_).eval()
         m.row_len = RL
         b = D.build_batch(st, [[i] for i in range(len(pieces))], "model_z", row_len=RL,
                           carry=dict(gpos=gp, memory=True, m_max=128))
@@ -926,9 +926,9 @@ def t_carry():
         out.append((max(float((a - b_).abs().max()) for a, b_ in zip(got, want)), len(want),
                     float((pre.logits - got[sum(len(x) + 1 for x in sents[:9])]).abs().max())))
     check("carry uretim: SummaryCache adim adim (parca dolunca glob'da yalniz Z'ler, %d parcada sifirlama) = carry batch'inin "
-          "tam ileri gecisi, %d parca; prefill = adim adim" % (G_, len(pieces)),
-          all(o[0] < 1e-5 and o[2] < 1e-5 for o in out), "; ".join("G%d fark %.1e (%d konum), prefill %.1e" % (
-              i, o[0], o[1], o[2]) for i, o in enumerate(out)))
+          "tam ileri gecisi, %d parca; prefill = adim adim; G0, G1, G1 GQA kv 1" % (G_, len(pieces)),
+          all(o[0] < 1e-5 and o[2] < 1e-5 for o in out), "; ".join("%s fark %.1e (%d konum), prefill %.1e" % (
+              nm, o[0], o[1], o[2]) for nm, o in zip(("G0", "G1", "G1 kv1"), out)))
 
 
 def t_vocab():

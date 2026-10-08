@@ -840,9 +840,11 @@ def t_train():
         print("ATLA train: GPT-2 tokenizer yok", flush=True)
         return
     root, data, prompts = _train_root(tp)
-    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO, TR.VOCAB_ROWS)
+    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO, TR.VOCAB_ROWS,
+             TR.GLOB_KV_DEFAULT)
     TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
     TR.MODEL_Z_GLOBAL_RATIO = 0.6                                       # eski varsayilan: L1 / L2 G1 (8 Ekim)
+    TR.GLOB_KV_DEFAULT = 0                      # eski varsayilan (GQA yok): GOLDEN / etiket bit, heads 2 (yeni _train_gqa_default)
     TR.VOCAB_ROWS = D.VOCAB                     # eski E boyu: GOLDEN / etiket esdegerligi bit (dolgulu yol _train_vocab'da)
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=3, max_tokens=4)
     base = ["--data", data, "--stream", root, "--device", "cpu", "--d", "16", "--layers", "1", "--heads", "2",
@@ -987,6 +989,7 @@ def t_train():
         _train_global(base, root, data, out, exits, TR)
         _train_vocab(base, data, out, TR)
         _train_finish(base, out, TR)
+        _train_gqa_default(base, out, TR)
         import copy                                                     # epok sonu eksik batch dolgusu (8 Ekim)
         import types
         import recipe as R
@@ -1033,7 +1036,8 @@ def t_train():
     except Exception:  # noqa: BLE001
         check("train", False, traceback.format_exc(limit=3))
     finally:
-        TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO, TR.VOCAB_ROWS = saved
+        (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO, TR.VOCAB_ROWS,
+         TR.GLOB_KV_DEFAULT) = saved
 
 
 def t_tokens():
@@ -1073,6 +1077,50 @@ def _cut_and_resume(TR, cmd, out_dir):
     finally:
         R.Checkpoint.save = staticmethod(orig)
     return stopped, TR.main(cmd + ["--out", out_dir, "--resume", "1"])
+
+
+def _train_gqa_default(base, out, TR):
+    """GQA varsayilan (kullanici, 8 Ekim: "GQA'yı varsayılan yap"): --glob_kv_heads verilmezse auto = Model Z ve G > 0 ise
+    heads / 4 (L10 heads 12 -> 3, L3 heads 8 -> 2, L2 heads 4 -> 1), G'siz Model Z / transformer / acik auto'lu transformer
+    0; heads 4'e bolunmezse (model_z G > 0) DUR; varsayilan kosu kimlikte 1 ve glob qkv daralmis; glob_kv_heads alani
+    olmayan ve alani 0 olan eski kosu bayraksiz --resume'da 0 kalir = kesintisiz (bit)."""
+    import traceback
+    pinned = TR.GLOB_KV_DEFAULT
+    try:
+        S_ = base + ["--model", "model_z", "--layers", "2", "--epochs", "2"]          # TR.GLOB_KV_DEFAULT 0 iken
+        for name, drop in (("kv_old_keep", False), ("kv_old_drop", True)):
+            TR.main(S_ + ["--stop_step", "4", "--out", out(name)])
+            if drop:
+                ck = os.path.join(out(name), "checkpoint.pt")
+                pack = torch.load(ck, weights_only=False)
+                del pack["args"]["glob_kv_heads"]
+                torch.save(pack, ck)
+        TR.GLOB_KV_DEFAULT = "auto"                                                   # train.py'nin varsayilani
+        arg = lambda a: TR._args(base + a + ["--out", "x"])  # noqa: E731
+        kv = {k: arg(a).glob_kv_heads for k, a in (
+            ("mz L10 h12", ["--model", "model_z", "--layers", "10", "--heads", "12"]),
+            ("mz L3 h8", ["--model", "model_z", "--layers", "3", "--heads", "8"]),
+            ("mz G0 h12", ["--model", "model_z", "--layers", "10", "--heads", "12", "--global_layers", "0"]),
+            ("tf h12", ["--model", "transformer", "--layers", "10", "--heads", "12"]),
+            ("tf h12 auto", ["--model", "transformer", "--layers", "10", "--heads", "12", "--glob_kv_heads", "auto"]),
+            ("mz acik 0", ["--model", "model_z", "--layers", "10", "--heads", "12", "--glob_kv_heads", "0"]))}
+        bad = _exit_msg(TR._args, base + ["--model", "model_z", "--layers", "10", "--heads", "6", "--out", "x"])
+        r = TR.main(base + ["--model", "model_z", "--layers", "2", "--heads", "4", "--steps", "3", "--out", out("kv_def")])
+        st = torch.load(os.path.join(out("kv_def"), "agent.pt"), weights_only=False)["state"]
+        res = {n: TR.main(S_ + ["--out", out(n), "--resume", "1"]) for n in ("kv_old_keep", "kv_old_drop")}
+        ref = [w["loss"] for w in json.load(open(os.path.join(out("stop_full"), "results.json")))["log"]]
+        check("train GQA varsayilan: auto = model_z G > 0 ise heads / 4 (L10 h12 3, L3 h8 2), G'siz Model Z / transformer "
+              "(acik auto dahil) / acik 0 -> 0; heads 6 DUR; varsayilan kosu (h4) kimlikte 1, glob qkv daralmis; eski kosu "
+              "(alan 0 ya da yok) bayraksiz --resume'da 0 = kesintisiz (bit)",
+              kv == {"mz L10 h12": 3, "mz L3 h8": 2, "mz G0 h12": 0, "tf h12": 0, "tf h12 auto": 0, "mz acik 0": 0}
+              and bad is not None and "bolunmuyor" in bad and r["identity"]["glob_kv_heads"] == 1
+              and tuple(st["blocks.1.qkv.weight"].shape) == (24, 16) and tuple(st["blocks.0.qkv.weight"].shape) == (48, 16)
+              and all(x["identity"]["glob_kv_heads"] == 0 and [w["loss"] for w in x["log"]] == ref for x in res.values()),
+              "%s; %s" % (kv, bad))
+    except Exception:  # noqa: BLE001
+        check("train GQA varsayilan", False, traceback.format_exc(limit=3))
+    finally:
+        TR.GLOB_KV_DEFAULT = pinned
 
 
 def _train_finish(base, out, TR):
@@ -1397,8 +1445,8 @@ def _train_global(base, root, data, out, exits, TR):
             fp8_cpu = _exit_msg(TR.main, OLD + ["--global_layers", "1", "--fp8", "tensorwise", "--out", out("fp8_cpu")])
             kv = {h: arg(["--model", "model_z", "--layers", "3", "--heads", str(h), "--glob_kv_heads", "auto"]).glob_kv_heads
                   for h in (16, 12, 8, 4)}
-            kv_bad = [_exit_msg(TR._args, _unpin(base) + ["--model", "model_z", "--heads", str(h), "--glob_kv_heads", "auto",
-                                                         "--out", "x"]) for h in (6, 2)]
+            kv_bad = [_exit_msg(TR._args, _unpin(base) + ["--model", "model_z", "--layers", "3", "--heads", str(h),
+                                                         "--glob_kv_heads", "auto", "--out", "x"]) for h in (6, 2)]  # G1
             kv_def = (arg(["--model", "model_z"]).glob_kv_heads, arg(["--model", "transformer"]).glob_kv_heads)
             lr = {d_: TR._args(nolr(_unpin(base)) + ["--model", "model_z", "--d", str(d_), "--out", "x"]).lr
                   for d_ in (768, 1024, 1280)}
@@ -1437,7 +1485,7 @@ def _train_global(base, root, data, out, exits, TR):
               and all(torch.equal(v, sw("old_ref")[k]) for k, v in sw("old_run").items()),
               "%s; resume %s" % (dflt, def_again))
         check("train auto (8 Ekim): --glob_kv_heads auto = heads / 4 (16 4, 12 3, 8 2, 4 1), 4'e bolunmezse (6, 2) DUR, "
-              "varsayilan 0; --lr verilmezse auto = 2e-3 sqrt(768 / d) (d768 tam 2e-3, d1024 1,732e-3, d1280 1,549e-3; "
+              "testte sabit eski varsayilan 0 (GQA varsayilani _train_gqa_default'ta); --lr verilmezse auto = 2e-3 sqrt(768 / d) (d768 tam 2e-3, d1024 1,732e-3, d1280 1,549e-3; "
               "acik auto ayni), adamw'de (varsayilan ya da acik auto) DUR, --resume'da kimlikten gelen adamw ile de DUR "
               "(checkpoint'e dokunulmaz); adamw kosusu --lr'siz --resume ile kimlikten lr alir",
               kv == {16: 4, 12: 3, 8: 2, 4: 1} and all(m_ is not None and "bolunmuyor" in m_ for m_ in kv_bad)
@@ -1669,7 +1717,7 @@ def t_fineweb():
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(tp)
     saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS, MF.VALID_STRIDE, D.MAX_SENTENCE_TOKENS,
-             TR.MODEL_Z_GLOBAL_RATIO)
+             TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT)
     try:
         fl_ss, q_ss = D.stream_tables(tok)
         fl_ss2, q_ss2 = D.stream_tables(tok, "ss")
@@ -1778,6 +1826,7 @@ def t_fineweb():
                   tr.n, int(cont.sum())))
         TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS = 4, 1, dict(max_sentences=3, max_tokens=4)
         TR.MODEL_Z_GLOBAL_RATIO = 0.6                                       # eski varsayilan: L1 / L2 G1 (8 Ekim)
+        TR.GLOB_KV_DEFAULT = 0                                              # eski varsayilan (heads 2)
         base = ["--data", out, "--stream", out, "--device", "cpu", "--d", "16", "--layers", "2", "--heads", "2", "--lr",
                 "1e-2", "--checkpoint_minutes", "0", "--optimizer", "muon"]          # 8 Ekim varsayilani normuon'dan once
         run = os.path.join(TMP, "fw_runs", "mzg")
@@ -1813,7 +1862,7 @@ def t_fineweb():
         check("fineweb", False, traceback.format_exc(limit=4))
     finally:
         (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS, MF.VALID_STRIDE, D.MAX_SENTENCE_TOKENS,
-         TR.MODEL_Z_GLOBAL_RATIO) = saved
+         TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT) = saved
 
 
 def _fineweb_extend(src, out, texts, tok, TR, MF):
