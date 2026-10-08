@@ -1,9 +1,9 @@
 """tests_diag -- V2 teshis araclari testleri (CPU; belge 33 adim 5).  Gruplar: readings (generate_readings: kayitli
 kosudan okuma = train.py'ninki; arsiv kimligi durur; ek istem secimi Drive'dan), tools (gap_v2, order_probe,
-z_ablate; model-z-mathematician), bag (bag_report: A0 ve torbali kosu, belge 53-55).  Formullu z cesitleri kaldirildi
+z_ablate; model-z-mathematician), bag (bag_report: A0 ve torbali kosu, belge 53-55), trace (token_trace, belge 80).  Formullu z cesitleri kaldirildi
 (belge 44).  Yardimcilar common/tests_v2'den (_train_root, tokenizer_path, DRIVE).
 
-    python tests_diag.py [--only readings,tools,bag,knowledge]
+    python tests_diag.py [--only readings,tools,bag,knowledge,trace]
 """
 import torch
 
@@ -367,7 +367,127 @@ def t_knowledge():
           and KE.loop_stop(0) is None)
 
 
-TESTS = dict(readings=t_readings, tools=t_tools, bag=t_bag, knowledge=t_knowledge)
+def t_trace():
+    """token_trace (belge 80): G2 + GQA (kv 2) + summaries_last 1 ve G'siz kosu, gercek build_batch.  Elle attention x v =
+    blok ciktisi (her katman), kategoriler toplami 1, yerel katmanda onceki cumle token'i 0; son katman lens'i = son tahmin;
+    none log-olasiligi = loss_per_target = summaries_last sinav yolu (_Exam); read_off = z_ablate maskesiyle; z_unseen maskesi
+    = okuma maskesi eksi (TOKEN -> ZTOK); hook'lar sonra model bit ayni; text_story metni kayipsiz; main: JSON / md, istem +
+    serbest metin, --generate = model.generate (uretilen konumda ilk aday), G'siz kosuda g_* null."""
+    import traceback
+    import data as D
+    import gap_v2 as G
+    import token_trace as TT
+    import train as TR
+    import z_ablate as ZA
+    tp = T2.tokenizer_path()
+    if tp is None:
+        print("ATLA trace: GPT-2 tokenizer yok", flush=True)
+        return
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(tp)
+    root, data, prompts = T2._train_root(tp)
+    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS)
+    TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
+    TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=3, max_tokens=4)
+    try:
+        base = ["--data", data, "--stream", root, "--device", "cpu", "--model", "model_z", "--d", "16", "--heads", "4",
+                "--steps", "6", "--checkpoint_minutes", "0"]
+        runs = {}
+        for name, extra in (("g2kv", ["--layers", "3", "--global_layers", "2", "--glob_kv_heads", "2", "--summaries_last",
+                                      "1"]), ("g0", ["--layers", "2", "--global_layers", "0", "--summaries_last", "0"]),
+                            ("rand", ["--layers", "3", "--global_layers", "2", "--glob_kv_heads", "2", "--lr", "1e-9",
+                                      "--steps", "1"])):     # neredeyse ilk agirlik: uretim END / EOS'a erken dusmez
+            runs[name] = os.path.join(T2.TMP, "runs_trace", name)
+            TR.main(base + extra + ["--out", runs[name]])
+        cpu = torch.device("cpu")
+        model = G.load(runs["g2kv"], data, cpu)[0]
+        S = sys.modules[type(model).__module__]
+        valid = D.TokenStories(root, data, "valid")
+        sents = [s.tolist() for s in valid.sentences(1)]
+        st = TT.text_story(tok, [sents], "ss")
+        n = 1 + sum(len(s) + 1 for s in sents)
+        batch = D.build_batch(st, [[0]], "model_z", "cpu", row_len=n)
+        with torch.no_grad():
+            before = model._batch_hidden(batch)
+        ins = []
+        hooks = [b.register_forward_pre_hook(lambda m, args: ins.append(args)) for b in model.blocks]
+        with torch.no_grad():
+            model._batch_hidden(batch)
+            worst = 0.0
+            for b, (x, pos, mask) in zip(model.blocks, ins):
+                w = TT.attention_weights(b, x, pos, mask)
+                q, k, v = b._qkv(x, pos)
+                a = w @ v.repeat_interleave(b.heads // b.kv_heads, 1)
+                worst = max(worst, float((b._finish(x, a) - b(x, pos, mask)).abs().max()))
+        for h in hooks:
+            h.remove()
+        r = TT.trace(model, batch, TT.CONDS.split(","), 5, True)
+        has = r["has_target"]
+        with torch.no_grad():
+            after = model._batch_hidden(batch)
+            nll = model.loss_per_target(batch)[0]
+            nll_last = TR._Exam(model, model._masks(True), False, S.summaries_last).loss_per_target(batch)[0]
+            with ZA.ablated(model, "read_off") as fn:
+                ro = model.loss_per_target(batch, tuple(S._dense(f(batch.kind, batch.doc, batch.sent), 1, n, "cpu")
+                                                        for f in fn))[0]
+        read = S._dense(S.model_z_read_mask(batch.kind, batch.doc, batch.sent), 1, n, "cpu")
+        uns = S._dense(TT.model_z_unseen_mask(batch.kind, batch.doc, batch.sent), 1, n, "cpu")
+        tz = (batch.kind[:, :, None] == S.TOKEN) & (batch.kind[:, None, :] == S.ZTOK)
+        lp = r["logp"][has]
+        check("token_trace: elle attention x v = blok ciktisi (3 katman, GQA kv 2; fark %.1e); kategoriler toplami 1; yerel "
+              "katmanda onceki cumle token'i 0; head basina boyut; son katman lens'i = son tahmin" % worst,
+              worst < 1e-5 and bool(torch.allclose(r["attn"].sum(-1), torch.ones(()), atol=1e-5))
+              and float(r["attn"][0, :, 4].abs().max()) < 1e-6 and tuple(r["attn_heads"].shape) == (3, 4, n, 5)
+              and bool(torch.allclose(r["lens_logp"][-1], r["logp"], atol=1e-5))
+              and torch.equal(r["lens_rank"][-1], r["rank"]))
+        check("token_trace: none log-olasiligi = loss_per_target = summaries_last sinav yolu; read_off farki = z_ablate "
+              "maskesiyle; z_unseen = okuma maskesi eksi TOKEN -> ZTOK; hook'lar kaldirildi (model bit ayni); g_off / g_local "
+              "sonlu", float((lp + nll).abs().max()) < 1e-5 and float((lp + nll_last).abs().max()) < 1e-5
+              and float((r["ablation"]["read_off"][has] - (-ro - lp)).abs().max()) < 1e-5
+              and torch.equal(uns, read & ~tz) and bool((read & tz).any()) and torch.equal(before, after)
+              and all(bool(torch.isfinite(r["ablation"][c]).all()) for c in ("g_off", "g_local", "read_off+g_off")),
+              "nll fark %.1e / %.1e" % (float((lp + nll).abs().max()), float((lp + nll_last).abs().max())))
+        text = "Lily had a red ball. She liked it a lot. Then she went home."
+        ts = TT.text_story(tok, [text], "ss")
+        check("token_trace text_story: serbest metin cumlelere bolunur, token'lar kayipsiz (decode = metin)",
+              tok.decode(np.concatenate(ts.sentences(0)).tolist()) == text and len(ts.sentences(0)) == 3,
+              str([tok.decode(s.tolist()) for s in ts.sentences(0)]))
+        out = os.path.join(T2.TMP, "trace_out")
+        TT.main(["--run", runs["g2kv"], "--data", data, "--stream", root, "--prompts", prompts, "--text", text,
+                       "--device", "cpu", "--out", out, "--heads"])
+        js = json.load(open(os.path.join(out, "token_trace.json"), encoding="utf-8"))
+        keys = {"i", "text", "input_kind", "sent", "pos_in_sent", "generated", "target", "target_kind", "p_target", "rank",
+                "top", "lens", "attn", "ablation", "attn_heads"}
+        lengths = [x["length"] for x in js["texts"]]
+        gen_out = os.path.join(T2.TMP, "trace_gen")
+        rg = TT.main(["--run", runs["rand"], "--data", data, "--stream", root, "--prompts", prompts, "--generate", "2",
+                      "--device", "cpu", "--out", gen_out, "--conds", "read_off"])
+        pj = json.load(open(prompts, encoding="utf-8"))["prompts"]
+        m2 = G.load(runs["rand"], data, cpu)[0]
+        want = [m2.generate([[s.tolist() for s in valid.sentences(p["story"])[:p["sentences"]]]], max_sentences=2,
+                            max_tokens=128)[0][0] for p in pj]
+        got = [[t for t in x["tokens"] if t["generated"] and t["input_kind"] == "TOKEN"] for x in rg["texts"]]
+        n_gen = [sum(len(s) for s in w) for w in want]
+        near = all(t["p_target"] >= t["top"][0][1] - 1e-5 for g in got for t in g)
+        r0 = TT.main(["--run", runs["g0"], "--data", data, "--stream", root, "--prompts", prompts, "--device", "cpu",
+                      "--out", os.path.join(T2.TMP, "trace_g0")])
+        check("token_trace main: JSON (3 istem + 1 serbest metin; konum sayisi = hikaye boyu; alanlar tam; katman turleri), "
+              "md yazildi; --generate 2 = model.generate (uretilen token sayisi, uretilen konumda ilk aday); G'siz kosuda "
+              "g_* null, read_off sayi",
+              len(js["texts"]) == 4 and [len(x["tokens"]) for x in js["texts"]] == lengths
+              and all(set(t) == keys for x in js["texts"] for t in x["tokens"])
+              and [l_["kind"] for l_ in js["layers"]] == ["loc", "glob", "glob"]
+              and os.path.exists(os.path.join(out, "token_trace.md")) and js["texts"][3]["source"] == "text"
+              and [len(g) for g in got] == n_gen and min(n_gen) > 0 and near
+              and r0["summary"]["ablation"]["g_off"] is None and r0["summary"]["ablation"]["read_off"] is not None,
+              "uretilen %s / %s" % ([len(g) for g in got], n_gen))
+    except Exception:  # noqa: BLE001
+        check("trace", False, traceback.format_exc(limit=4))
+    finally:
+        (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS) = saved
+
+
+TESTS = dict(readings=t_readings, tools=t_tools, bag=t_bag, knowledge=t_knowledge, trace=t_trace)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)
