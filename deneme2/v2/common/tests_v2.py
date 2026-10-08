@@ -842,11 +842,12 @@ def t_train():
         return
     root, data, prompts = _train_root(tp)
     saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO, TR.VOCAB_ROWS,
-             TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT)
+             TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT)
     TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
     TR.MODEL_Z_GLOBAL_RATIO = 0.6                                       # eski varsayilan: L1 / L2 G1 (8 Ekim)
     TR.GLOB_KV_DEFAULT = 0                      # eski varsayilan (GQA yok): GOLDEN / etiket bit, heads 2 (yeni _train_gqa_default)
     TR.ATTN_GATE_DEFAULT = 0                    # eski varsayilan (kapisiz): GOLDEN / etiket bit (gercegi _train_gate'te)
+    TR.NGRAM_DEFAULT = 0                        # eski varsayilan (n-gram yok): GOLDEN bit (gercegi _train_ngram)
     TR.VOCAB_ROWS = D.VOCAB                     # eski E boyu: GOLDEN / etiket esdegerligi bit (dolgulu yol _train_vocab'da)
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=3, max_tokens=4)
     base = ["--data", data, "--stream", root, "--device", "cpu", "--d", "16", "--layers", "1", "--heads", "2",
@@ -1042,7 +1043,7 @@ def t_train():
         check("train", False, traceback.format_exc(limit=3))
     finally:
         (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO, TR.VOCAB_ROWS,
-         TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT) = saved
+         TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT) = saved
 
 
 def t_tokens():
@@ -1174,6 +1175,42 @@ def _train_ngram(base, data, out, TR):
               and [w["loss"] for w in r2["log"]] == [w["loss"] for w in a2["log"]]
               and m2.ngram_layers == 1 and m2.ngram_sparse and all(b_ is not None and "ngram" in b_ for b_ in bad2),
               str(bad2))
+        mz = base + ["--model", "model_z", "--layers", "2", "--steps", "3"]   # varsayilan (NGRAM_DEFAULT; belge 93 ek)
+        TR.main(mz + ["--out", out("ng_old")])                              # eski varsayilan (0) ile n-gram'siz kosu
+        os.makedirs(out("ng_old0"))
+        pack = torch.load(os.path.join(out("ng_old"), "checkpoint.pt"), weights_only=False)
+        for k in ("ngram_embed", "ngram_layers", "ngram_sparse"):         # alani olmayan (birlesim oncesi) kosu
+            del pack["args"][k]
+        torch.save(pack, os.path.join(out("ng_old0"), "checkpoint.pt"))
+        pinned = (TR.NGRAM_DEFAULT, TR.VOCAB_ROWS)
+        TR.NGRAM_DEFAULT, TR.VOCAB_ROWS = "auto", -(-D.VOCAB // 64) * 64     # train.py'nin varsayilanlari
+        try:
+            ng = lambda a_: (lambda x: (x.ngram_embed, x.ngram_layers, x.ngram_sparse))(TR._args(a_))  # noqa: E731
+            got = {k: ng(base + a_ + ["--out", "x"]) for k, a_ in (
+                ("mz d768", ["--model", "model_z", "--d", "768"]), ("tf d768", ["--model", "transformer", "--d", "768"]),
+                ("mz acik 0", ["--model", "model_z", "--ngram_embed", "0"]),
+                ("mz auto K3", ["--model", "model_z", "--layers", "3", "--ngram_layers", "3"]),
+                ("mz acik 64", ["--model", "model_z", "--ngram_embed", "64"]))}
+            old = [ng(mz + ["--out", out(n_), "--resume", "1"]) for n_ in ("ng_old", "ng_old0")]
+            rd = TR.main(mz + ["--out", out("ng_def")])
+            inh = ng(mz + ["--out", out("ng_def"), "--resume", "1"])
+            rows = 5 * TR.VOCAB_ROWS
+            rx = TR.main(mz + ["--ngram_embed", str(rows), "--ngram_layers", "1", "--out", out("ng_exp")])
+        finally:
+            TR.NGRAM_DEFAULT, TR.VOCAB_ROWS = pinned
+        check("train --ngram_embed varsayilan (NGRAM_DEFAULT auto): model_z 5 x vocab_rows (%d) + ngram_layers 1, "
+              "transformer 0, acik 0 aynen, auto'da acik --ngram_layers aynen, acik N'de layers 0 (hepsi); eski n-gram'siz "
+              "kosu (alan 0 ya da yok) bayraksiz --resume'da 0; varsayilan kosu bayraksiz --resume'da kendi degeriyle; "
+              "bayraksiz kosu = acik --ngram_embed %d --ngram_layers 1 kosusu (kayip egrisi + agirlik bit)" % (rows, rows),
+              rows == 251520 and got == {"mz d768": (rows, 1, 0), "tf d768": (0, 0, 0), "mz acik 0": (0, 0, 0),
+                                         "mz auto K3": (rows, 3, 0), "mz acik 64": (64, 0, 0)}
+              and old == [(0, 0, 0), (0, 0, 0)] and inh == (rows, 1, 0)
+              and (rd["identity"]["ngram_embed"], rd["identity"]["ngram_layers"]) == (rows, 1)
+              and [w["loss"] for w in rd["log"]] == [w["loss"] for w in rx["log"]]
+              and all(torch.equal(a_, b_) for a_, b_ in zip(*(torch.load(os.path.join(out(n_), "agent.pt"),
+                                                                          weights_only=False)["state"].values()
+                                                               for n_ in ("ng_def", "ng_exp")))),
+              "%s; eski %s; devam %s" % (got, old, inh))
     except Exception:  # noqa: BLE001
         check("train --ngram_embed", False, traceback.format_exc(limit=3))
 
@@ -1422,7 +1459,8 @@ def _train_muon(base, root, data, out, state, same, exits, TR):
 def _train_combo(base, data, out, state, same, exits, TR):
     """Birlesim (belge 93): kapi 2 + bigram + MTP birlikte (NorMuon, d64): kosar, kimlikte uc alan, gunlukte loss_mtp;
     kapi NorMuon'da, tablo AdamW lr_mult grubunda; adim 4'te kesilip surdurulen = kesintisiz (agirlik ve kayip egrisi bit);
-    load_run uc parcayi kurar (agirlik bit); --mtp'siz / --ngram_embed'siz --resume DUR (kimlik farki), carry ile DUR;
+    load_run uc parcayi kurar (agirlik bit); --mtp'siz --resume DUR (kimlik farki), --ngram_embed'siz --resume kimlikten
+    surer (INHERIT), carry ile DUR;
     seyrek bigram (--ngram_layers 1 --ngram_sparse 1) + kapi + MTP de kosar ve kesintisiz surer."""
     import traceback
     try:
@@ -1437,20 +1475,20 @@ def _train_combo(base, data, out, state, same, exits, TR):
         lm = GR.load_run(A, data, torch.device("cpu"))[0]
         split = a["optimizer"]["split"]
         idt = a["identity"]
-        bad = [_exit_msg(TR.main, mz + x + ["--out", A, "--resume", "1"]) for x in (
-            ["--attn_gate", "2", "--ngram_embed", "64"], ["--attn_gate", "2", "--mtp", "2"])] + [
-            _exit_msg(TR.main, cmd + ["--carry_summaries", "1", "--out", out("combo_carry")])]
+        bad = [_exit_msg(TR.main, mz + ["--attn_gate", "2", "--ngram_embed", "64", "--out", A, "--resume", "1"]),
+               _exit_msg(TR.main, cmd + ["--carry_summaries", "1", "--out", out("combo_carry")])]
+        inh = TR._args(mz + ["--attn_gate", "2", "--mtp", "2", "--out", A, "--resume", "1"])   # n-gram INHERIT'te
         check("train birlesim (--attn_gate 2 --ngram_embed 64 --mtp 2, NorMuon, d64): kosar, kimlikte uc alan, gunlukte "
               "loss_mtp; kapi NorMuon'da, tablo lr_mult grubunda; adim 4'te kesilip surdurulen = kesintisiz (agirlik + kayip "
-              "egrisi bit); load_run kurar (bit); --mtp'siz / --ngram_embed'siz --resume ve carry DURUR",
+              "egrisi bit); load_run kurar (bit); --mtp'siz --resume ve carry DURUR, --ngram_embed'siz --resume kimlikten (64)",
               a["finished"] and (idt["attn_gate"], idt["ngram_embed"], idt["mtp"]) == (2, 64, 2)
               and a["log"][0]["loss_mtp"] is not None and all(np.isfinite(w["loss"]) for w in a["log"])
               and tuple(sa["blocks.0.attn_gate"].shape) == (2, 1) and tuple(sa["ngram.weight"].shape) == (64, 64)
               and split["muon"]["names"].get("blocks.*.attn_gate") == 2 and "adamw_ngram" in split
               and stopped and same(sa, state(out("combo_B"))) and [w["loss"] for w in r["log"]] == [w["loss"] for w in a["log"]]
               and same(sa, lm.state_dict()) and lm.ngram is not None and lm.blocks[0].attn_gate is not None
-              and bad[0] is not None and "'mtp': (2, 0)" in bad[0] and bad[1] is not None and "'ngram_embed': (64, 0)" in bad[1]
-              and bad[2] is not None and "--mtp ile --carry" in bad[2], str(bad))
+              and bad[0] is not None and "'mtp': (2, 0)" in bad[0] and bad[1] is not None and "--mtp ile --carry" in bad[1]
+              and (inh.ngram_embed, inh.ngram_layers, inh.ngram_sparse) == (64, 0, 0), str(bad))
         cmd2 = cmd + ["--ngram_layers", "1", "--ngram_sparse", "1"]
         a2 = TR.main(cmd2 + ["--out", out("combo_sparse_A")])
         stopped2, r2 = _cut_and_resume(TR, cmd2, out("combo_sparse_B"))
@@ -1902,7 +1940,7 @@ def t_fineweb():
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(tp)
     saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS, MF.VALID_STRIDE, D.MAX_SENTENCE_TOKENS,
-             TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT)
+             TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT)
     try:
         fl_ss, q_ss = D.stream_tables(tok)
         fl_ss2, q_ss2 = D.stream_tables(tok, "ss")
@@ -2011,7 +2049,7 @@ def t_fineweb():
                   tr.n, int(cont.sum())))
         TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS = 4, 1, dict(max_sentences=3, max_tokens=4)
         TR.MODEL_Z_GLOBAL_RATIO = 0.6                                       # eski varsayilan: L1 / L2 G1 (8 Ekim)
-        TR.GLOB_KV_DEFAULT = TR.ATTN_GATE_DEFAULT = 0                       # eski varsayilanlar (heads 2, kapisiz)
+        TR.GLOB_KV_DEFAULT = TR.ATTN_GATE_DEFAULT = TR.NGRAM_DEFAULT = 0    # eski varsayilanlar
         base = ["--data", out, "--stream", out, "--device", "cpu", "--d", "16", "--layers", "2", "--heads", "2", "--lr",
                 "1e-2", "--checkpoint_minutes", "0", "--optimizer", "muon"]          # 8 Ekim varsayilani normuon'dan once
         run = os.path.join(TMP, "fw_runs", "mzg")
@@ -2047,7 +2085,7 @@ def t_fineweb():
         check("fineweb", False, traceback.format_exc(limit=4))
     finally:
         (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_LIMITS, MF.VALID_STRIDE, D.MAX_SENTENCE_TOKENS,
-         TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT) = saved
+         TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT) = saved
 
 
 def _fineweb_extend(src, out, texts, tok, TR, MF):
@@ -2535,9 +2573,9 @@ def t_mtp():
         return
     root, data, prompts = _train_root(tp)
     saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.VOCAB_ROWS, TR.GLOB_KV_DEFAULT,
-             TR.ATTN_GATE_DEFAULT)
+             TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT)
     TR.BATCH_ROWS, TR.LOG_EVERY, TR.VOCAB_ROWS = 4, 1, D.VOCAB
-    TR.GLOB_KV_DEFAULT = TR.ATTN_GATE_DEFAULT = 0                     # eski varsayilanlar (heads 2; GOLDEN bit)
+    TR.GLOB_KV_DEFAULT = TR.ATTN_GATE_DEFAULT = TR.NGRAM_DEFAULT = 0      # eski varsayilanlar (GOLDEN bit)
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=3, max_tokens=4)
     base = ["--data", data, "--stream", root, "--device", "cpu", "--d", "16", "--layers", "1", "--heads", "2",
             "--lr", "1e-2", "--checkpoint_minutes", "0", "--optimizer", "adamw"]
@@ -2608,7 +2646,7 @@ def t_mtp():
         check("mtp train", False, traceback.format_exc(limit=3))
     finally:
         (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.VOCAB_ROWS, TR.GLOB_KV_DEFAULT,
-         TR.ATTN_GATE_DEFAULT) = saved
+         TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT) = saved
 
 
 TESTS = dict(fp8=t_fp8, data=t_data, pack=t_pack, recipe=t_recipe, metrics=t_metrics, integration=t_integration,

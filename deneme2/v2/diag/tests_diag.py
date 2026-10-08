@@ -42,9 +42,10 @@ def t_readings():
         return
     root, data, prompts = T2._train_root(tp)
     saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO,
-             TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT)
+             TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT)
     TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
-    TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT = 0.6, 0, 0   # eski: L1 / L2 G1, GQA yok, kapisiz
+    (TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT,
+     TR.NGRAM_DEFAULT) = 0.6, 0, 0, 0   # eski: L1 / L2 G1, GQA yok, kapisiz, n-gram yok
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=6, max_tokens=4)
     base = ["--data", data, "--stream", root, "--device", "cpu"]
     same_prompts = os.path.join(root, "reading_prompts_same.json")
@@ -98,7 +99,7 @@ def t_readings():
         check("readings", False, traceback.format_exc(limit=3))
     finally:
         (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO,
-         TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT) = saved
+         TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT) = saved
     if T2.DRIVE is None:
         print("ATLA readings (ek istem secimi, Drive kosulari): Drive yok", flush=True)
         return
@@ -157,9 +158,10 @@ def t_tools():
         return
     root, data, prompts = T2._train_root(tp)
     saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO,
-             TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT)
+             TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT)
     TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
-    TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT = 0.6, 0, 0   # eski: L1 / L2 G1, GQA yok, kapisiz
+    (TR.MODEL_Z_GLOBAL_RATIO, TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT,
+     TR.NGRAM_DEFAULT) = 0.6, 0, 0, 0   # eski: L1 / L2 G1, GQA yok, kapisiz, n-gram yok
     TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=6, max_tokens=4)
     base = ["--data", data, "--stream", root]
     runs = {}
@@ -212,7 +214,7 @@ def t_tools():
         check("tools", False, traceback.format_exc(limit=4))
     finally:
         (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO,
-         TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT) = saved
+         TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT) = saved
 
 
 def t_knowledge():

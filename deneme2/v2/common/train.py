@@ -31,7 +31,10 @@ vocab_rows; alani olmayan eski kosu VOCAB (50.258) ile yuklenir ve surer.
 (0 kapali, varsayilan; deneme 251520 = 5 x 50.304), sentence.bigram_ids; tablo AdamW wd 0, lr x recipe.NGRAM_LR_MULT.
 Kimlikte; transformer ile DUR.  Hiz secenekleri (belge 90b ek; deneme): --ngram_layers K yalniz ilk K blok girdisine
 (0 hepsi), --ngram_sparse 1 tabloyu yalniz okunan satirlarla gunceller (recipe.NgramRowAdam: beta1 0 Adam, yogun
-AdamW(0, beta2) ile ayni matematik).
+AdamW(0, beta2) ile ayni matematik).  Varsayilan auto (kullanici, 8 Ekim: "gate 2 ve n gram girdi"; NGRAM_DEFAULT):
+model_z'de 5 x vocab_rows satir (50.304'te 251.520) ve --ngram_layers verilmezse 1 (yalniz ilk blok girdisi; d768 3.000 adim
+3,3405 / 219,8 ms, taban 3,3567 / 210,9, belge 93 ek), transformer'da 0.  Acik --ngram_embed 0 eski davranis (bit ayni);
+--ngram_sparse varsayilani 0.  Uc alan INHERIT'te (alan yoksa 0).
 --glob_kv_heads N|auto (kullanici, 8 Ekim: "bu duurmda GOA yı da sıraya koy o zaman bakalım"; uretim hizi): GQA, k / v
 N head yalniz tam causal katmanlarda (Model Z glob; transformer'da her katman, kiyas icin); yerel katmanlar tam head
 (Z K/V kanali daralmaz).  Varsayilan auto (kullanici, 8 Ekim: "GQA'yı varsayılan yap, ona karar verdik son koşuda bu
@@ -81,7 +84,8 @@ Varsayilanlar (kullanici, 8 Ekim: "Varsayılan yap ama kısa bir koşu ile son h
                     [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1]
                     [--optimizer normuon|muon|adamw (varsayilan normuon)] [--global_layers N|auto (varsayilan auto)]
                     [--glob_kv_heads N|auto (varsayilan auto)] [--carry_summaries 1] [--carry_group G]
-                    [--attn_gate 0|1|2|auto (varsayilan auto)] [--ngram_embed N] [--ngram_layers K] [--ngram_sparse 1]
+                    [--attn_gate 0|1|2|auto (varsayilan auto)] [--ngram_embed N|auto (varsayilan auto)] [--ngram_layers K]
+                    [--ngram_sparse 1]
                     [--mtp N]
 """
 import torch  # noqa: I001  (Windows: torch once)
@@ -114,8 +118,10 @@ MODEL_Z_GLOBAL_RATIO = 1 / 3   # global_layers auto (OLCULENLER_z: d768/L10 G1->
 GLOB_KV_GROUP = 4              # glob_kv_heads auto = heads / 4
 GLOB_KV_DEFAULT = "auto"       # --glob_kv_heads verilmezse (kullanici, 8 Ekim: GQA varsayilan); testler eski 0'a sabitler
 ATTN_GATE_DEFAULT = "auto"     # --attn_gate verilmezse (kullanici, 8 Ekim: "gate 2 varsayılan"); testler eski 0'a sabitler
+NGRAM_DEFAULT = "auto"         # --ngram_embed verilmezse (kullanici, 8 Ekim: "gate 2 ve n gram girdi"); testler eski 0'a sabitler
 LR_REF = (2e-3, 768, 0.5)      # lr auto = lr0 (d0 / d) ^ us (aci / adim ~ lr 0,2 sqrt(d) sabit); d1024 olcumu: 1,4 / 1,7e-3 duz, 1,73e-3 icinde
-INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate")   # --resume'da verilmezse kimlikten
+INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ngram_embed", "ngram_layers",
+           "ngram_sparse")   # --resume'da verilmezse kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
@@ -558,11 +564,12 @@ def _args(argv):
                          "--resume'da verilmezse kosunun kimliginden")
     ap.add_argument("--carry_summaries", type=int, default=0,
                     help="model_z: parcalar arasi Z bellegi (belge 81b, 83; carry_group varsayilani 4); 0 kapali")
-    ap.add_argument("--ngram_embed", type=int, default=0,
-                    help="Model Z bigram embedding tablosu satir sayisi (0 kapali; deneme 251520; belge 88b)")
-    ap.add_argument("--ngram_layers", type=int, default=0,
-                    help="bigram yalniz ilk K blok girdisine (0: hepsi; deneme, belge 90b ek)")
-    ap.add_argument("--ngram_sparse", type=int, default=0,
+    ap.add_argument("--ngram_embed", type=lambda s: s if s == "auto" else int(s), default=None,
+                    help="Model Z bigram embedding tablosu satir sayisi; auto (varsayilan): model_z 5 x vocab_rows, "
+                         "transformer 0; 0 kapali; kimlikte, --resume'da verilmezse kosunun kimliginden (belge 88b, 93)")
+    ap.add_argument("--ngram_layers", type=int, default=None,
+                    help="bigram yalniz ilk K blok girdisine (0: hepsi); verilmezse auto n-gram'da 1, aksi 0 (belge 90b ek)")
+    ap.add_argument("--ngram_sparse", type=int, default=None,
                     help="1: bigram tablosu yalniz okunan satirlarla guncellenir (beta1 0 seyrek Adam; deneme)")
     ap.add_argument("--carry_group", type=int, default=None,
                     help="carry plani: belgenin ardisik en cok G parcasi ayni batch'te (carry_summaries 0 ile: K kontrolu, "
@@ -588,7 +595,7 @@ def _args(argv):
     was = torch.load(ckpt, map_location="cpu", weights_only=False, mmap=True)["args"] \
         if args.resume and os.path.exists(ckpt) else None               # varsayilan degisse de kosu kendi ayariyla surer
     for k in args.defaulted if was is not None else ():
-        setattr(args, k, was.get(k, 0 if k in ("glob_kv_heads", "attn_gate") else None))   # 8 Ekim'de eklenenler
+        setattr(args, k, was.get(k, 0 if k in ("glob_kv_heads", "attn_gate") or k.startswith("ngram") else None))
     args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
     if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
         args.optimizer = DEFAULT_OPTIMIZER
@@ -609,6 +616,15 @@ def _args(argv):
     if args.attn_gate == 2 and args.d < 64:
         sys.exit("DUR: --attn_gate 2: kapi girdisi d // 64 boyut, d %d < 64 -> 0 boyut; d >= 64 ya da --attn_gate 0 / 1"
                  % args.d)
+    ngram_auto = args.ngram_embed is None and NGRAM_DEFAULT == "auto" or args.ngram_embed == "auto"
+    if args.ngram_embed is None:
+        args.ngram_embed = NGRAM_DEFAULT
+    if args.ngram_embed == "auto":                                       # 5 x sozluk satiri (belge 90b), yalniz Model Z
+        args.ngram_embed = 5 * args.vocab_rows if args.model == "model_z" else 0
+    if args.ngram_layers is None:
+        args.ngram_layers = 1 if ngram_auto and args.ngram_embed else 0  # auto n-gram tek katman (belge 93 ek)
+    if args.ngram_sparse is None:
+        args.ngram_sparse = 0
     args.summaries_last = int(args.model == "model_z")                   # Model Z duzeni (kimlikte isaret)
     if args.carry_group is None:
         args.carry_group = 4 if args.carry_summaries else 0
