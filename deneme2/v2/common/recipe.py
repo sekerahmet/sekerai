@@ -93,18 +93,15 @@ def output_loss(h, weight, target):
 
 
 def _output_loss_mtp(h, weight, target, extra, w):
-    """Ana CE output_loss'unkiyle ayni (F.cross_entropy, bit); ek CE_k = logsumexp - z[hedef_k] (belge 90c ek): (N, V)
-    log_softmax tablosu kurulmaz (fp32 N x V ~13 GB; ek tam gecisler).  Hedef logit'i sutun karsilastirmasiyla (gather
-    degil: geri yolu tam boy scatter tamponu acmasin); derleyici logsumexp ile tek indirgemede, geri yolu noktasal."""
+    """Ana CE output_loss'unkiyle ayni (bit); her ek hedef ayri F.cross_entropy (sum) ayni logit'ten: her cagri tek
+    tuketicili, derleyici tabandaki CE gibi birlestirir (belge 90c s11, ce_prof: taban +0,71 ms; log_softmax tablosu
+    +14,3 ms / +13 GB, where karsilastirmasi +17,3 ms / +19,6 GB)."""
     lg = (h @ weight.T).float()
-    cols = torch.arange(lg.shape[1], device=lg.device)
     if lg.shape[1] > VOCAB:
-        lg = lg.masked_fill(cols >= VOCAB, float("-inf"))
+        lg = lg.masked_fill(torch.arange(lg.shape[1], device=lg.device) >= VOCAB, float("-inf"))
     main = F.cross_entropy(lg, target, ignore_index=-100)
-    ok = extra >= 0
-    z = torch.stack([torch.where(cols == extra[:, k:k + 1], lg, 0.0).sum(-1) for k in range(extra.shape[1])], 1)
-    ce = ((torch.logsumexp(lg, -1)[:, None] - z) * ok).sum(0)
-    return main + (w * ce).sum() / (target >= 0).sum(), main, ce / ok.sum(0).clamp_min(1)
+    ce = torch.stack([F.cross_entropy(lg, extra[:, k], ignore_index=-100, reduction="sum") for k in range(extra.shape[1])])
+    return main + (w * ce).sum() / (target >= 0).sum(), main, ce / (extra >= 0).sum(0).clamp_min(1)
 
 
 def output_loss_mtp(h, weight, target, extra, w):

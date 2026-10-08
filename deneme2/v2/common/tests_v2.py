@@ -2513,13 +2513,22 @@ def t_mtp():
         l0, m0, _ = R.output_loss_mtp(h, Wt, tg, ex, torch.zeros(K))
         g0 = torch.autograd.grad(l0, (h, Wt))
         gb = torch.autograd.grad(base, (h, Wt))
-        ok = (abs(loss.item() - ref.item()) / ref.item() < 1e-6 and rel < 1e-5 and torch.equal(main, base)
+        lsm = torch.log_softmax((h @ Wt.T).masked_fill(torch.arange(Wt.shape[0]) >= D.VOCAB, float("-inf")), -1)
+        o_ce = torch.stack([torch.nn.functional.nll_loss(lsm, ex[:, k], ignore_index=-100, reduction="sum") for k in range(K)])
+        o_main = torch.nn.functional.nll_loss(lsm, tg, ignore_index=-100)           # 994055a yazimi (log_softmax + nll)
+        o_loss = o_main + (w * o_ce).sum() / n0
+        go = torch.autograd.grad(o_loss, (h, Wt))
+        rel_o = max([abs((loss - o_loss).item()) / o_loss.item(), abs((main - o_main).item()) / o_main.item()]
+                    + [((x - y).norm() / y.norm()).item() for x, y in zip(ga, go)]
+                    + [abs((ce[k] * (ex[:, k] >= 0).sum() - o_ce[k]).item()) / o_ce[k].item() for k in range(K)])
+        ok = (abs(loss.item() - ref.item()) / ref.item() < 1e-6 and rel < 1e-5 and torch.equal(main, base) and rel_o < 1e-6
               and all(abs(ce[k].item() - (cek[k + 1].sum() / (ex[:, k] >= 0).sum()).item()) < 1e-5 for k in range(K))
               and torch.equal(l0, base) and all(torch.equal(x, y) for x, y in zip(g0, gb))
               and float(ga[1][D.VOCAB:].abs().max()) == 0.0)
-        check("mtp kayip: (sum CE_0 + sum_k w_k sum CE_k) / ana hedef sayisi = float64 basvuru (kayip, h / E gradyani); ana "
-              "CE = output_loss bit; w 0 -> output_loss (kayip ve gradyan bit); ek CE ortalamalari; dolgu satiri gradyani 0",
-              ok, "kayip %.6f / %.6f, gradyan goreli %.1e" % (loss.item(), ref.item(), rel))
+        check("mtp kayip: (sum CE_0 + sum_k w_k sum CE_k) / ana hedef sayisi = float64 basvuru (kayip, h / E gradyani) ve "
+              "994055a yazimi (log_softmax + nll_loss); ana CE = output_loss bit; w 0 -> output_loss (kayip ve gradyan bit); ek CE ortalamalari; dolgu satiri gradyani 0",
+              ok, "kayip %.6f / %.6f, gradyan goreli %.1e; 994055a yazimina (kayip, ana, ek CE, dh, dE) goreli %.1e" % (
+                  loss.item(), ref.item(), rel, rel_o))
     except Exception:  # noqa: BLE001
         check("mtp kayip", False, traceback.format_exc(limit=3))
     try:                                                                # 4. sizinti (gercek Model Z, summaries_last)
