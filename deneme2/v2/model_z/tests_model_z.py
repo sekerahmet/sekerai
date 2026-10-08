@@ -1104,9 +1104,9 @@ def t_gate():
     ok, info = True, []
     glob = _dense(model_z_global_mask(batch.kind, batch.doc, batch.sent), B, T, "cpu")
     loc = _dense(model_z_read_mask(batch.kind, batch.doc, batch.sent), B, T, "cpu")
-    m = make(global_layers=1, glob_kv_heads=2, gate=1)
-    for l, (mask, pos) in enumerate(((loc, batch.pos), (loc, batch.pos), (glob, story_positions(batch.kind)))):
-        blk = m.blocks[l]
+    for gv, l, (mask, pos) in [(gv, l, mp) for gv in (1, 2) for l, mp in enumerate(
+            ((loc, batch.pos), (loc, batch.pos), (glob, story_positions(batch.kind))))]:
+        blk = make(global_layers=1, glob_kv_heads=2, gate=gv).blocks[l]
         with torch.no_grad():
             x = torch.randn(B, T, 32)
             got = blk(x, pos, mask)
@@ -1115,32 +1115,36 @@ def t_gate():
             a_ = F_.scaled_dot_product_attention(q, k.repeat_interleave(rep, 1), v.repeat_interleave(rep, 1),
                                                  attn_mask=mask[:, None]).transpose(1, 2)
             xn = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + torch.finfo(x.dtype).eps) * blk.n1.weight
-            gate = torch.sigmoid(xn @ blk.attn_gate.T)                       # (B, T, H)
+            gate = torch.sigmoid(xn[..., :blk.attn_gate.shape[1]] @ blk.attn_gate.T)   # (B, T, H); 2: ilk 12 boyut
             h = x + (a_ * gate[..., None]).reshape(B, T, 32) @ blk.proj.weight.T
             gg, u = blk.gate_up(blk.n2(h)).chunk(2, -1)
             ref = h + blk.down(F_.silu(gg) * u)
         d_ = float((got - ref).abs().max())
-        ok &= d_ < 1e-5 and float(gate.std()) > 0.1
-        info.append("blok %d (kv %d) %.1e" % (l, blk.kv_heads, d_))
-    with torch.no_grad():
-        h0 = m._batch_hidden(batch)
-        pb, perm = summaries_last(batch)
-        h1 = m._batch_hidden(pb).gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, 32))
-        alt = [[list(s_) for s_ in st] for st in stories]
-        alt[0][-1] = [(t + 7) % D.END_ID for t in alt[0][-1]]
-        h2 = m._batch_hidden(real_batch(rows, 160, alt))
+        ok &= d_ < 1e-5 and float(gate.std()) > 0.1 and tuple(blk.attn_gate.shape) == (4, 32 if gv == 1 else 12)
+        info.append("kapi %d blok %d (kv %d) %.1e" % (gv, l, blk.kv_heads, d_))
     first = batch.doc[0] == 0
     last = int((first & (batch.sent[0] == int(batch.sent[0][first].max()))).nonzero()[0, 0])
-    check("gate: blok = bagimsiz basvuru (SDPA ciktisi x sigmoid(n1(x) W^T) head basina, proj, MLP; yerel + glob GQA); "
-          "summaries_last ayni; sizinti yok (son cumle degisince onceki konumlar bit ayni)",
-          ok and float((h0 - h1).abs().max()) < 1e-5 and torch.equal(h0[0, :last], h2[0, :last])
-          and not torch.equal(h0[0, last:], h2[0, last:]), "; ".join(info))
+    alt = [[list(s_) for s_ in st] for st in stories]
+    alt[0][-1] = [(t + 7) % D.END_ID for t in alt[0][-1]]
+    for gv in (1, 2):
+        m = make(global_layers=1, glob_kv_heads=2, gate=gv)
+        with torch.no_grad():
+            h0 = m._batch_hidden(batch)
+            pb, perm = summaries_last(batch)
+            h1 = m._batch_hidden(pb).gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, 32))
+            h2 = m._batch_hidden(real_batch(rows, 160, alt))
+        ok &= float((h0 - h1).abs().max()) < 1e-5 and torch.equal(h0[0, :last], h2[0, :last]) and not torch.equal(
+            h0[0, last:], h2[0, last:])
+    check("gate 1 / 2: blok = bagimsiz basvuru (SDPA ciktisi x sigmoid(n1(x) W^T) head basina, 2'de n1(x)[..., :12] ve W "
+          "(H, 12); proj, MLP; yerel + glob GQA); summaries_last ayni; sizinti yok (son cumle degisince onceki konumlar bit "
+          "ayni)", ok, "; ".join(info))
 
     rs = lambda n: [[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 15))] for _ in range(n)]  # noqa: E731
     prompts = [[], rs(1), rs(3), rs(30)]
     res = []
-    for kw in (dict(global_layers=0), dict(global_layers=1, glob_kv_heads=2), dict(global_layers=3)):
-        m = make(gate=1, **kw)
+    for gv, kw in [(gv, kw) for gv in (1, 2) for kw in (dict(global_layers=0), dict(global_layers=1, glob_kv_heads=2),
+                                                          dict(global_layers=3))]:
+        m = make(gate=gv, **kw)
         with torch.no_grad():
             keep = batch.target >= 0
             lg_full = m._batch_hidden(batch)[keep] @ m.E.weight.T
@@ -1169,11 +1173,12 @@ def t_gate():
         gen_ok = m.generate(prompts, 4, 12) == _generate_stepwise(m, prompts, 4, 12) and m.generate(
             prompts, 4, 12, torch.Generator().manual_seed(11)) == _generate_stepwise(
             m, prompts, 4, 12, torch.Generator().manual_seed(11))
-        res.append((kw, d_step, d_pre, d_static, gen_ok))
-    check("gate: SummaryCache adim adim = tam ileri, prefill = adim adim, StaticCache = SummaryCache (fp32 < 1e-5), generate "
+        res.append((gv, kw, d_step, d_pre, d_static, gen_ok))
+    check("gate 1 / 2: SummaryCache adim adim = tam ileri, prefill = adim adim, StaticCache = SummaryCache (fp32 < 1e-5), generate "
           "= token token (acgozlu + ornekleme); G0 / G1 GQA kv 2 / hepsi glob",
-          all(r_[1] < 1e-5 and r_[2] < 1e-5 and r_[3] < 1e-5 and r_[4] for r_ in res),
-          "; ".join("G%d adim %.1e prefill %.1e static %.1e gen %s" % (r_[0]["global_layers"], *r_[1:]) for r_ in res))
+          all(r_[2] < 1e-5 and r_[3] < 1e-5 and r_[4] < 1e-5 and r_[5] for r_ in res),
+          "; ".join("kapi %d G%d adim %.1e prefill %.1e static %.1e gen %s" % (r_[0], r_[1]["global_layers"], *r_[2:])
+                    for r_ in res))
 
     sents = [[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(30)]
     RL, G_ = 160, 2
@@ -1190,8 +1195,8 @@ def t_gate():
     st.continues = np.array([i < len(pieces) - 1 for i in range(len(pieces))])
     gp = np.arange(len(pieces)) % G_
     cres = []
-    for gl in (0, 1):
-        m = make(gate=1, global_layers=gl, carry_group=G_)
+    for gv, gl in ((1, 0), (1, 1), (2, 1)):
+        m = make(gate=gv, global_layers=gl, carry_group=G_)
         m.row_len = RL
         b = D.build_batch(st, [[i] for i in range(len(pieces))], "model_z", row_len=RL,
                           carry=dict(gpos=gp, memory=True, m_max=128))
@@ -1206,7 +1211,7 @@ def t_gate():
             c = SummaryCache(m)
             got = [c.logits] + [y for x_ in sents for y in [c.append_token(t) for t in x_] + [c.close_sentence()]]
         cres.append(max(float((a_ - b_).abs().max()) for a_, b_ in zip(got, want)))
-    check("gate carry: SummaryCache carry adim adim = carry batch'inin tam ileri gecisi (%d parca, G0 / G1)" % len(pieces),
+    check("gate carry: SummaryCache carry adim adim = carry batch'inin tam ileri gecisi (%d parca; kapi 1 G0 / G1, kapi 2 G1)" % len(pieces),
           max(cres) < 1e-5, "fark %s" % ["%.1e" % v for v in cres])
 
     m = make(global_layers=1, gate=1, rand=False)

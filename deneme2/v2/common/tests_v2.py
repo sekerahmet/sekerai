@@ -1411,6 +1411,13 @@ def _train_gate(base, root, data, out, state, same, exits, TR):
         check("train --attn_gate 1 --optimizer normuon (varsayilan): kapi (blocks.*.attn_gate) NorMuon grubunda",
               names.get("blocks.*.attn_gate") == 2 and not any("attn_gate" in k for k in
                                                                n["optimizer"]["split"]["adamw_decay"]["names"]), str(names))
+        two = out("gate_2")
+        r2 = TR.main(mz[:-1] + ["2", "--attn_gate", "2", "--out", two])
+        s2 = state(two)
+        check("train --attn_gate 2: kosar (kayip sonlu), kapi (heads, 12) sifirdan oynadi, kimlikte 2; load_run (heads, 12) "
+              "kurar (agirlik bit)", all(np.isfinite(w["loss"]) for w in r2["log"]) and r2["identity"]["attn_gate"] == 2
+              and all(tuple(s2[k].shape) == (2, 12) and s2[k].abs().sum() > 0 for k in s2 if k.endswith("attn_gate"))
+              and same(s2, GR.load_run(two, data, torch.device("cpu"))[0].state_dict()))
     except Exception:  # noqa: BLE001
         check("train --attn_gate", False, traceback.format_exc(limit=3))
 

@@ -41,7 +41,8 @@ model_z.  Sinavda continuation_exam (valid'in uzun belgeleri), gunlukte loss_con
 --attn_gate 1 (belge 88a, 90a; kullanici, 8 Ekim: "o zaman attention head yapalım mı"; yalniz model_z): her blokta head
 basina sigmoid cikis kapisi (sentence.Block._gate; girdi n1(x), agirlik sifirdan, kapi 0,5); agirlik (heads, d) bloklarin
 2-B matrisi oldugu icin Muon / NorMuon grubunda.  Varsayilan 0 = kapisiz (bit ayni); kimlikte, --resume'da verilmezse
-kosunun kimliginden; kapisiz checkpoint kapili surdurulmez (DUR).
+kosunun kimliginden; kapisiz checkpoint kapili surdurulmez (DUR).  --attn_gate 2 (kullanici, 8 Ekim: "onaylıyorum, ikinci
+kolu da ekle"): kapi girdisi n1(x)'in ilk 12 boyutu, W (heads, 12) (speedrun 124M tarifi; belge 88a s4.3, 90a).
 --stop_step N (kullanici, 8 Ekim): takvim degismeden adim N'de durur; checkpoint.pt + agent.pt + results.json (finished
 False, stopped_at, readings_skipped "stop_step"), son sinav ve okuma yok; --resume 1 kaldigi yerden.
 Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunluk sinirinda, epok sonunda ve bitiste;
@@ -67,7 +68,7 @@ Varsayilanlar (kullanici, 8 Ekim: "Varsayılan yap ama kısa bir koşu ile son h
                     [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
                     [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1]
                     [--optimizer normuon|muon|adamw (varsayilan normuon)] [--global_layers N|auto (varsayilan auto)]
-                    [--glob_kv_heads N|auto (varsayilan auto)] [--carry_summaries 1] [--carry_group G] [--attn_gate 0|1]
+                    [--glob_kv_heads N|auto (varsayilan auto)] [--carry_summaries 1] [--carry_group G] [--attn_gate 0|1|2]
 """
 import torch  # noqa: I001  (Windows: torch once)
 
@@ -520,8 +521,9 @@ def _args(argv):
     ap.add_argument("--carry_group", type=int, default=None,
                     help="carry plani: belgenin ardisik en cok G parcasi ayni batch'te (carry_summaries 0 ile: K kontrolu, "
                          "bellek yok); varsayilan carry_summaries ise 4, degilse 0")
-    ap.add_argument("--attn_gate", type=int, default=None, choices=(0, 1),
-                    help="model_z: head basina attention cikis kapisi (belge 88a, 90a); varsayilan 0; kimlikte; "
+    ap.add_argument("--attn_gate", type=int, default=None, choices=(0, 1, 2),
+                    help="model_z: head basina attention cikis kapisi (belge 88a, 90a); 1 girdi n1(x), 2 girdi n1(x)'in "
+                         "ilk 12 boyutu; varsayilan 0; kimlikte; "
                          "--resume'da verilmezse kosunun kimliginden")
     ap.add_argument("--fp8", default="none", choices=("none", "tensorwise", "rowwise"),
                     help="MLP (gate_up, down) torchao Float8Linear tarifi; none: bf16 (kimlige girmez, --resume'da "

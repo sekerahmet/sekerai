@@ -27,8 +27,9 @@ Sozluk dolgusu (belge 89; kullanici, 8 Ekim: "sözlük dolgusu ok, ekle"): vocab
 cikis (_logits) VOCAB'a kesilir: dolgu token'i hedef olmaz, uretilmez.
 attn_gate (belge 88a, 90a; kullanici, 8 Ekim: "o zaman attention head yapalım mı"): head basina sigmoid cikis kapisi,
 SDPA ciktisinda proj'dan once, girdi n1(x) (qiu2025 G1 headwise; resmi kod qiuzh20/gated_attention modeling_qwen3.py
-:309-317, :361-362); agirlik (heads, d) sifirdan (kapi 0,5).  Kapi Block._finish'te: egitim, prefill, SummaryCache,
-StaticCache ayni yol.
+:309-317, :361-362); agirlik (heads, d) sifirdan (kapi 0,5).  attn_gate 2 (kullanici, 8 Ekim: "onaylıyorum, ikinci kolu da ekle"): girdi
+n1(x)[..., :12], W (heads, 12) (speedrun 124M, modded-nanogpt kayit 2025-08-23_SparseAttnGate: dampen = CastedLinear(dim //
+64, num_heads), x[..., :d_model // 64]).  Kapi Block._finish'te: egitim, prefill, SummaryCache, StaticCache ayni yol.
 """
 import dataclasses
 import functools
@@ -200,9 +201,10 @@ def gqa_sdpa(q, k, v, mask=None):
 
 
 class Block(torch.nn.Module):
-    def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=False):
+    def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0):
         """kv_heads (GQA; varsayilan heads): k / v head sayisi, heads'in boleni; qkv d -> d + 2 d kv / heads.
-        attn_gate: head basina cikis kapisi agirligi (heads, d), sifir (RNG cekmez; kapisiz modelle ayni ilk agirlik)."""
+        attn_gate 1 / 2: head basina cikis kapisi agirligi (heads, d) / (heads, 12) (girdi n1(x)'in ilk 12 boyutu), sifir
+        (RNG cekmez; kapisiz modelle ayni ilk agirlik)."""
         super().__init__()
         self.heads = heads
         self.kv_heads = int(kv_heads or heads)
@@ -213,11 +215,13 @@ class Block(torch.nn.Module):
         self.proj = torch.nn.Linear(d, d, bias=False)
         self.gate_up = torch.nn.Linear(d, 2 * hidden, bias=False)
         self.down = torch.nn.Linear(hidden, d, bias=False)
-        self.attn_gate = torch.nn.Parameter(torch.zeros(heads, d)) if attn_gate else None
+        assert attn_gate in (0, 1, 2) and d >= 12, "attn_gate 0 / 1 / 2"
+        self.attn_gate = torch.nn.Parameter(torch.zeros(heads, d if attn_gate == 1 else 12)) if attn_gate else None
 
     def _gate(self, x):
-        """Blok girdisi x (B, T, d) -> kapi sigmoid(n1(x) W^T) (B, T, heads); satir basina, maske / konum kullanmaz."""
-        return torch.sigmoid(F.linear(self.n1(x), self.attn_gate))
+        """Blok girdisi x (B, T, d) -> kapi sigmoid(n1(x)[..., :W sutunu] W^T) (B, T, heads); satir basina, maske / konum
+        kullanmaz."""
+        return torch.sigmoid(F.linear(self.n1(x)[..., :self.attn_gate.shape[1]], self.attn_gate))
 
     def _qkv(self, x, pos):
         B, T, d = x.shape
@@ -271,8 +275,8 @@ class SentenceTransformer(torch.nn.Module):
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
         dolunca glob onbelleginde yalniz Z'ler kalir, G parcada sifirlanir.  vocab_rows: E satir sayisi (>= VOCAB; dolgu
-        satirlari sifir, ilk agirlik VOCAB'li modelle ayni).  attn_gate 1: her blokta head basina cikis kapisi
-        (sifirdan; geri kalan ilk agirlik kapisiz modelle ayni)."""
+        satirlari sifir, ilk agirlik VOCAB'li modelle ayni).  attn_gate 1 / 2: her blokta head basina cikis kapisi
+        (2: girdi n1(x)'in ilk 12 boyutu; sifirdan; geri kalan ilk agirlik kapisiz modelle ayni)."""
         super().__init__()
         self.carry_group, self.row_len = int(carry_group), ROW_LEN
         self.global_layers = int(global_layers)
@@ -286,7 +290,7 @@ class SentenceTransformer(torch.nn.Module):
             self.E = torch.nn.Embedding(vocab_rows, d, _weight=torch.zeros(vocab_rows, d))
         kinds = ["loc"] * (layers - self.global_layers) + ["glob"] * self.global_layers
         self.blocks = torch.nn.ModuleList(Block(d, heads, hidden, glob_kv_heads if k == "glob" else None,
-                                                bool(attn_gate)) for k in kinds)
+                                                int(attn_gate)) for k in kinds)
         self.norm = torch.nn.RMSNorm(d)
         for name, p in self.named_parameters():
             if p.dim() == 2 and not name.endswith("attn_gate"):          # kapi sifir kalir
