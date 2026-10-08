@@ -119,9 +119,9 @@ def full_logits(model, batch):
     return h[keep] @ model.E.weight.T, batch.target[keep]
 
 
-def learned_model(d=32, layers=2, heads=2, global_layers=0, z_reads_all=0):
+def learned_model(d=32, layers=2, heads=2, global_layers=0):
     torch.manual_seed(0)
-    return SentenceTransformer(d=d, layers=layers, heads=heads, global_layers=global_layers, z_reads_all=z_reads_all).eval()
+    return SentenceTransformer(d=d, layers=layers, heads=heads, global_layers=global_layers).eval()
 
 
 def t_layout():
@@ -235,16 +235,6 @@ def _range_masks(batch, tag="sentetik"):
     check("mask %s: aralik bicimi (yerel, global) = eski formul + dolgu kurali; sarmasiz, _with_padding'li ve "
           "recipe.dense_mask ayni (%d satir x %d)" % (tag, B, T), all(o[0] == 0 for o in out),
           "fark / gorulen: %s" % out)
-    from sentence import _ZALL
-    ar = torch.arange(T)
-    story = (d_[:, :, None] == d_[:, None, :]) & (d_[:, :, None] >= 0) & (ar[None, None, :] <= ar[None, :, None])
-    read = _dense(R._with_padding(_old_read_mask(k, d_, s_), k, d_), B, T, "cpu")
-    ref_z = torch.where((k == ZTOK)[:, :, None], story, read)
-    got_z = R.dense_mask(batch, _ZALL)
-    check("mask %s: z_reads_all = Z satiri ayni hikayenin kv <= q her konumu, oteki satirlar okuma maskesi; Z satirinda "
-          "gelecek / baska hikaye yok" % tag, torch.equal(got_z, ref_z) and not bool((got_z & (k == ZTOK)[:, :, None]
-                                                                                       & ~story).any()),
-          "fark %d, Z satirinda ek gorulen %d" % (int((got_z != ref_z).sum()), int((got_z & ~read).sum())))
 
 
 def _range_masks_drive():
@@ -290,18 +280,16 @@ def _perm_dense(batch, perm, fn):
 def _last_ranges(batch, tag):
     """summaries_last aralik maskesi (yerel, global) = bugunku maskenin permute dense'i, butun (q, kv)."""
     import recipe as R
-    from sentence import _LAST_GLOB, _LAST_ZALL, _ZALL, model_z_global_mask, model_z_summaries_last_ranges, summaries_last
+    from sentence import _LAST_GLOB, model_z_global_mask, model_z_summaries_last_ranges, summaries_last
     pb, perm = summaries_last(batch)
     out = []
-    for old, new in ((model_z_read_mask, model_z_summaries_last_ranges), (model_z_global_mask, _LAST_GLOB),
-                     (_ZALL, _LAST_ZALL)):
+    for old, new in ((model_z_read_mask, model_z_summaries_last_ranges), (model_z_global_mask, _LAST_GLOB)):
         ref = _perm_dense(batch, perm, old)
         got = R.dense_mask(pb, new)
         out.append((int((got != ref).sum()), int(ref.sum())))
     order = pb.kind.long()
     grouped = bool(((order == TOKEN).long().diff(dim=1) <= 0).all())               # token'lar satir basinda
-    check("summaries_last %s: iki aralik (yerel, global, z_reads_all) = bugunku maskenin permute dense'i; token'lar "
-          "basta" % tag,
+    check("summaries_last %s: iki aralik (yerel, global) = bugunku maskenin permute dense'i; token'lar basta" % tag,
           all(o[0] == 0 for o in out) and grouped, "fark / gorulen: %s" % out)
 
 
@@ -332,8 +320,7 @@ def t_summaries_last():
     pb, perm = summaries_last(batch)
     B, T = batch.kind.shape
     res = []
-    for kw in (dict(global_layers=0), dict(global_layers=1), dict(global_layers=2), dict(global_layers=1, z_reads_all=2),
-               dict(z_reads_all=1)):
+    for kw in (dict(global_layers=0), dict(global_layers=1), dict(global_layers=2)):
         torch.manual_seed(0)
         m = SentenceTransformer(d=32, layers=3, heads=2, **kw)
         h0 = m._batch_hidden(batch)
@@ -351,7 +338,7 @@ def t_summaries_last():
         dg = max(float((a - b_).norm() / max(float(a.norm()), 1e-12)) for a, b_ in zip(g0, g1) if a is not None)
         res.append((str(kw), dh, dn, dg))
     check("summaries_last: ayni model / batch -- hidden (konum basina), loss_per_target (hedef sirasina geri) ve parametre "
-          "gradyani duzenden bagimsiz (fp32 dense; G0, G1, G2, G1 + z_reads_all 2, z_reads_all 1)",
+          "gradyani duzenden bagimsiz (fp32 dense; G0, G1, G2)",
           all(r[1] < 1e-5 and r[2] < 1e-5 and r[3] < 1e-5 for r in res),
           "; ".join("%s h %.1e nll %.1e grad %.1e" % r for r in res))
 
@@ -718,8 +705,8 @@ def t_prefill():
     rs = lambda n: [[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 15))] for _ in range(n)]  # noqa: E731
     prompts = [[], rs(1), rs(3), rs(50)]
     info, ok_cache, ok_gen = [], True, True
-    for gl, za in ((0, 0), (1, 0), (2, 0), (1, 2), (0, 1)):
-        m = learned_model(d=32, layers=3, global_layers=gl, z_reads_all=za)
+    for gl in (0, 1, 2):
+        m = learned_model(d=32, layers=3, global_layers=gl)
         dmax = 0.0
         with torch.no_grad():
             for sents in prompts:
@@ -747,39 +734,12 @@ def t_prefill():
         s_new = m.generate(prompts, 4, 12, torch.Generator().manual_seed(11))
         s_old = _generate_stepwise(m, prompts, 4, 12, torch.Generator().manual_seed(11))
         ok_gen &= g_new == g_old and s_new == s_old
-        info.append("G%d z%d fark %.1e" % (gl, za, dmax))
+        info.append("G%d fark %.1e" % (gl, dmax))
     n = sum(len(x) + 1 for x in prompts[-1]) + 1
     check("prefill: istem tek ileri gecis = token token (son logit, ozet ve global K/V, sayaclar; sonraki decode adimlari; "
           "fp32 < 1e-5), G 0 / 1 / 2, istem 1 / 4 / %d konum" % n, ok_cache, "; ".join(info))
-    check("prefill: generate = token token generate (acgozlu + ornekleme, G 0 / 1 / 2, z_reads_all, bos / kisa / %d "
-          "konumluk istem), token token ayni" % n, ok_gen)
-    stories = [rs(int(rng.integers(2, 6))) for _ in range(6)]                 # z_reads_all: onbellek = tam ileri
-    alt = [[list(x) for x in st] for st in stories]
-    alt[0][-1] = [(t + 7) % D.END_ID for t in alt[0][-1]]
-    rows = [[0, 1, 2], [3, 4, 5]]
-    T = max(sum(1 + sum(len(x) + 1 for x in stories[i]) for i in r) for r in rows) + 3
-    batch = real_batch(rows, T, stories)
-    res = []
-    for gl, za in ((1, 2), (0, 1), (0, 3)):
-        m = learned_model(d=32, layers=3, global_layers=gl, z_reads_all=za)
-        with torch.no_grad():
-            g1, g2 = m._batch_hidden(batch), m._batch_hidden(real_batch(rows, T, alt))
-            lg_full = g1[batch.target >= 0] @ m.E.weight.T
-            out = []
-            for row in rows:
-                for si in row:
-                    cache = SummaryCache(m)
-                    out.append(cache.logits[None])
-                    for x in stories[si]:
-                        out += [cache.append_token(t)[None] for t in x] + [cache.close_sentence()[None]]
-        first = batch.doc[0] == 0
-        last = int((first & (batch.sent[0] == int(batch.sent[0][first].max()))).nonzero()[0, 0])
-        res.append((gl, za, float((torch.cat(out) - lg_full).abs().max()), torch.equal(g1[0, :last], g2[0, :last]),
-                    sum(int(k is not None and k.shape[2] > 0) for k in cache.all_k)))
-    check("z_reads_all: SummaryCache adim adim (Z adimi gecmis token K/V'sine bakar) = tam ileri (yerel z_reads_all maskesi), "
-          "sizinti yok (sonraki cumle onceki konumlari degistirmez); token K/V'si yalniz z_reads_all ve glob katmanlarinda",
-          all(r[2] < 1e-5 and r[3] for r in res) and [r[4] for r in res] == [3, 1, 3],
-          "; ".join("G%d z%d fark %.1e, bellekli katman %d" % (r[0], r[1], r[2], r[4]) for r in res))
+    check("prefill: generate = token token generate (acgozlu + ornekleme, G 0 / 1 / 2, bos / kisa / %d konumluk istem), "
+          "token token ayni" % n, ok_gen)
 
 
 # --- eski kodla esdegerlik (belge 44; belge 33 s5 deseni): etiketteki ogrenilen z = bugunku Model Z, bit duzeyinde

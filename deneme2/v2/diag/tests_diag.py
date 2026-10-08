@@ -105,22 +105,24 @@ def t_readings():
     data = T2.DRIVE + "/v2/simplestories_gpt2"
     runs = T2.DRIVE + "/v2/runs/"
     got = {}
-    for r in ("v2_mzl_d512_l8_lr5e-4_20261006_172433", "v2_mzl_g1_d512_l8_muon_lr2e-3_20261007_075626",
-              "v2_mzown_d512_l8_lr5e-4_20261006_143438"):
+    for r, dd in (("v2_mzl_d512_l8_lr5e-4_20261006_172433", data), ("v2_mzl_g1_d512_l8_muon_lr2e-3_20261007_075626", data),
+                  ("v2_mzown_d512_l8_lr5e-4_20261006_143438", data),
+                  ("v2_mzl_g3_fw_d768_l10_muon_lr2e-3_20261008_065800", T2.DRIVE + "/v2/fineweb_edu_s000")):
         if not os.path.exists(runs + r + "/agent.pt"):
             got[r] = "yok"
             continue
         try:
-            m, idt = GR.load_run(runs + r, data, torch.device("cpu"))
+            m, idt = GR.load_run(runs + r, dd, torch.device("cpu"))
             got[r] = (m.global_layers, idt.get("global_layers"))
             del m
         except SystemExit as e:
             got[r] = str(e.code)
-    check("Drive kosulari (belge 44): eski ogrenilen z (global_layers alani yok) G'siz yuklenir, G kosusu G 1 ile; "
-          "temizlik oncesi formullu own_vocab kosusu DURUR (iletide etiket)",
-          got["v2_mzl_d512_l8_lr5e-4_20261006_172433"] == (0, None)
-          and got["v2_mzl_g1_d512_l8_muon_lr2e-3_20261007_075626"] == (1, 1)
-          and "v2-before-cleanup-20261006" in str(got["v2_mzown_d512_l8_lr5e-4_20261006_143438"]),
+    tag = "v2-before-cleanup-20261008"
+    check("Drive kosulari (belge 77): 8 Ekim oncesi Model Z (ogrenilen z, G1 muon; summaries_last alani yok) ve temizlik "
+          "oncesi own_vocab DURUR (iletide etiketler); 8 Ekim G3 kosusu (065800) yuklenir",
+          tag in str(got["v2_mzl_d512_l8_lr5e-4_20261006_172433"]) and tag in str(got["v2_mzl_g1_d512_l8_muon_lr2e-3_20261007_075626"])
+          and "v2-before-cleanup-20261006" in str(got["v2_mzown_d512_l8_lr5e-4_20261006_143438"])
+          and got["v2_mzl_g3_fw_d768_l10_muon_lr2e-3_20261008_065800"] in ((3, 3), "yok"),
           str({k[:22]: (v if not isinstance(v, str) else v[:60]) for k, v in got.items()}))
     spec, again = GR.extra_prompts(data), GR.extra_prompts(data)
     disk = json.load(open(GR.EXTRA_PROMPTS, encoding="utf-8"))
@@ -396,9 +398,7 @@ def t_trace():
         for name, extra in (("g2kv", ["--layers", "3", "--global_layers", "2", "--glob_kv_heads", "2", "--summaries_last",
                                       "1"]), ("g0", ["--layers", "2", "--global_layers", "0", "--summaries_last", "0"]),
                             ("rand", ["--layers", "3", "--global_layers", "2", "--glob_kv_heads", "2", "--lr", "1e-9",
-                                      "--steps", "1"]),      # neredeyse ilk agirlik: uretim END / EOS'a erken dusmez
-                            ("zr", ["--layers", "3", "--global_layers", "1", "--z_reads_all", "1", "--summaries_last",
-                                    "1"])):                            # belge 82
+                                      "--steps", "1"])):     # neredeyse ilk agirlik: uretim END / EOS'a erken dusmez
             runs[name] = os.path.join(T2.TMP, "runs_trace", name)
             TR.main(base + extra + ["--out", runs[name]])
         cpu = torch.device("cpu")
@@ -449,34 +449,6 @@ def t_trace():
               and torch.equal(uns, read & ~tz) and bool((read & tz).any()) and torch.equal(before, after)
               and all(bool(torch.isfinite(r["ablation"][c]).all()) for c in ("g_off", "g_local", "read_off+g_off")),
               "nll fark %.1e / %.1e" % (float((lp + nll).abs().max()), float((lp + nll_last).abs().max())))
-        mz_ = G.load(runs["zr"], data, cpu)[0]                            # z_reads_all 1 (belge 82)
-        ins = []
-        hooks = [b.register_forward_pre_hook(lambda m, args: ins.append(args)) for b in mz_.blocks]
-        with torch.no_grad():
-            mz_._batch_hidden(batch)
-            wz = 0.0
-            for b, (x, pos, mask) in zip(mz_.blocks, ins):
-                q, k, v = b._qkv(x, pos)
-                a = TT.attention_weights(b, x, pos, mask) @ v.repeat_interleave(b.heads // b.kv_heads, 1)
-                wz = max(wz, float((b._finish(x, a) - b(x, pos, mask)).abs().max()))
-        for h in hooks:
-            h.remove()
-        rz = TT.trace(mz_, batch, TT.CONDS.split(","), 5, False)
-        with torch.no_grad():
-            nz = mz_.loss_per_target(batch)[0]
-            with ZA.ablated(mz_, "read_off") as fn:
-                roz = mz_.loss_per_target(batch, tuple(S._dense(f(batch.kind, batch.doc, batch.sent), 1, n, "cpu")
-                                                       for f in fn))[0]
-        zq, tq = batch.kind[0] == S.ZTOK, batch.kind[0] == S.TOKEN
-        later = batch.sent[0] > 0
-        check("token_trace z_reads_all 1 (G1, summaries_last 1): elle attention x v = blok (fark %.1e); none = "
-              "loss_per_target; read_off = z_ablate; Z satiri z_reads_all katmaninda (1) onceki cumle token'larina "
-              "bakar, katman 0'da bakmaz; token satiri bakmaz; butun kosullar sonlu" % wz,
-              wz < 1e-5 and float((rz["logp"][rz["has_target"]] + nz).abs().max()) < 1e-5
-              and float((rz["ablation"]["read_off"][rz["has_target"]] - (-roz - rz["logp"][rz["has_target"]])).abs().max())
-              < 1e-5 and float(rz["attn"][1:2, zq & later, 4].min()) > 0 and float(rz["attn"][:2, tq, 4].abs().max()) < 1e-6
-              and float(rz["attn"][0, zq, 4].abs().max()) < 1e-6
-              and all(bool(torch.isfinite(v).all()) for v in rz["ablation"].values()))
         text = "Lily had a red ball. She liked it a lot. Then she went home."
         ts = TT.text_story(tok, [text], "ss")
         check("token_trace text_story: serbest metin cumlelere bolunur, token'lar kayipsiz (decode = metin)",

@@ -27,7 +27,6 @@ import torch  # noqa: I001  (Windows: torch once)
 
 import argparse
 import contextlib
-import functools
 import json
 import os
 import sys
@@ -50,10 +49,9 @@ CONDS = "read_off,z_unseen,g_off,g_local,read_off+g_off"
 KIND_NAME = {int(D.Kind.BOS): "BOS", int(D.Kind.TOKEN): "TOKEN", int(D.Kind.ZTOK): "Z"}
 
 
-def model_z_unseen_mask(kind, doc, sent, z_reads_all=False):
-    """model_z_read_mask, ama TOKEN sorgusu ZTOK anahtarini (onceki Z'ler) gormez; Z_k ve BOS aynen (z_reads_all
-    katmaninda Z_k butun gecmisi).  Dolgu kurali icinde."""
-    read = S.model_z_read_mask(kind, doc, sent, z_reads_all)
+def model_z_unseen_mask(kind, doc, sent):
+    """model_z_read_mask, ama TOKEN sorgusu ZTOK anahtarini (onceki Z'ler) gormez; Z_k ve BOS aynen.  Dolgu kurali icinde."""
+    read = S.model_z_read_mask(kind, doc, sent)
 
     def mask_mod(b, h, q, kv):
         return read(b, h, q, kv) & ~((kind[b, q] == S.TOKEN) & (kind[b, kv] == S.ZTOK))
@@ -108,15 +106,13 @@ def _condition(model, cond, batch):
     if "read_off" in parts:
         with ZA.ablated(model, "read_off") as fn:
             mask_fn = fn
-    elif "z_unseen" in parts:                                            # yerel (ve z_reads_all) katmanlar
-        zall = functools.partial(model_z_unseen_mask, z_reads_all=True)
-        zall.includes_padding = True
-        mask_fn = ((model_z_unseen_mask,) + ((zall,) if model.z_reads_all else ()) + ((model.mask_fn[-1],) if G_ else ()))
+    elif "z_unseen" in parts:
+        mask_fn = (model_z_unseen_mask, model.mask_fn[1]) if G_ else model_z_unseen_mask
     else:
         mask_fn = model.mask_fn
     fns = mask_fn if isinstance(mask_fn, tuple) else (mask_fn,)
     attn = tuple(S._dense(f(batch.kind, batch.doc, batch.sent), B, T, batch.kind.device) for f in fns)
-    attn = attn if len(attn) > 1 else attn[0]
+    attn = attn if G_ else attn[0]
     hooks = []
     for block in model.blocks[len(model.blocks) - G_:]:
         if "g_off" in parts:
