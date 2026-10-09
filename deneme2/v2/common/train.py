@@ -655,7 +655,7 @@ def _args(argv):
     ap.add_argument("--g_latent_explore", type=float, default=None,
                     help="esnek r: egitimde rastgele kademe olasiligi (varsayilan 0; inis evresinde en cok 0,05)")
     ap.add_argument("--g_latent_rule", type=int, default=None,
-                    help="esnek r kurali: sik token'lar (ilk 50 + noktalama) bu kademede, kalani r_max (secici yok)")
+                    help="esnek r kurali: sik token'lar (ilk 50 + noktalama) bu kademede, kalani r_max ya da (iki kademede) oteki kademe; secici yok")
     ap.add_argument("--g_latent_score", type=int, default=None,
                     help="--g_latent_rank ile: 1 latent K'ya kv head basina ogrenilen olcek (belge 102 s11; 0 kapali)")
     ap.add_argument("--mtp", type=lambda s: s if s == "auto" else int(s), default=None,
@@ -819,12 +819,14 @@ def main(argv=None):
             freq = np.zeros(D.VOCAB, bool)
             freq[np.argsort(-c.numpy())[:50]] = True
             freq[:len(cnt)] |= np.array([not any(ch.isalnum() for ch in tok.decode([i])) for i in range(len(cnt))])
-            tab = torch.full((D.VOCAB,), len(args.g_latent_tiers) - 1, dtype=torch.long)
-            tab[torch.from_numpy(freq)] = args.g_latent_tiers.index(args.g_latent_rule)
+            ri = args.g_latent_tiers.index(args.g_latent_rule)
+            rest = 1 - ri if len(args.g_latent_tiers) == 2 else len(args.g_latent_tiers) - 1   # iki kademe: kalan oteki
+            tab = torch.full((D.VOCAB,), rest, dtype=torch.long)
+            tab[torch.from_numpy(freq)] = ri
             model.tier_of_token.copy_(tab.to(model.tier_of_token.device))
             log("g_latent_rule %d: %d token turu kademe %d (metinde pay %.3f), kalani %d" % (
                 args.g_latent_rule, int(freq.sum()), args.g_latent_rule, float(c.numpy()[freq].sum() / c.sum()),
-                args.g_latent_tiers[-1]))
+                args.g_latent_tiers[rest]))
     model.row_len = row_len                                              # uretim konum siniri, carry parca boyu
     last = None
     if args.summaries_last:                                              # belge 66: [token'lar | ozetler | dolgu]
