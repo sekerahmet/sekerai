@@ -137,7 +137,7 @@ MTP_DEFAULT = 0                # --mtp verilmezse (kullanici, 9 Ekim, n-gram ile
 LR_REF = (2e-3, 768, 0.5)      # lr auto = lr0 (d0 / d) ^ us (aci / adim ~ lr 0,2 sqrt(d) sabit); d1024 olcumu: 1,4 / 1,7e-3 duz, 1,73e-3 icinde
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ngram_embed", "ngram_layers",
            "ngram_sparse", "mtp", "g_latent_rank", "g_raw_sentences", "g_latent_rope", "g_latent_score", "g_latent_tiers",
-           "g_latent_budget", "g_latent_price", "g_latent_explore")   # --resume: kimlikten
+           "g_latent_budget", "g_latent_price", "g_latent_explore", "g_latent_rule")   # --resume: kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
@@ -149,7 +149,8 @@ SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
             "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_latent_rank", "g_raw_sentences",
-            "g_latent_rope", "g_latent_score", "g_latent_tiers", "g_latent_budget", "g_latent_price", "g_latent_explore")
+            "g_latent_rope", "g_latent_score", "g_latent_tiers", "g_latent_budget", "g_latent_price", "g_latent_explore",
+            "g_latent_rule")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -267,8 +268,11 @@ def _latent_error(args):
     if k and not r:
         return "--g_raw_sentences yalniz --g_latent_rank ile"
     tiers, bud, pri = args.g_latent_tiers, args.g_latent_budget, args.g_latent_price
-    if tiers and (not r or tiers != sorted(set(tiers)) or tiers[0] <= 0 or tiers[-1] != r or not bud or pri
-                  or not tiers[0] <= bud <= tiers[-1] or not 0 <= args.g_latent_explore <= 1):
+    rule = getattr(args, "g_latent_rule", 0) or 0
+    if rule and (not tiers or rule not in tiers or bud or pri):
+        return "--g_latent_rule R: --g_latent_tiers R,...,r_max ile, butce / fiyat yok"
+    if tiers and not rule and (not r or tiers != sorted(set(tiers)) or tiers[0] <= 0 or tiers[-1] != r or not bud or pri
+                               or not tiers[0] <= bud <= tiers[-1] or not 0 <= args.g_latent_explore <= 1):
         return "--g_latent_tiers: artan, son = --g_latent_rank; --g_latent_budget (kademe araliginda) gerek; --g_latent_price yok"
     if not tiers and (bud or pri):
         return "--g_latent_budget / --g_latent_price yalniz --g_latent_tiers ile"
@@ -326,7 +330,8 @@ def _build(args, dev):
                                     g_latent_tiers=tuple(getattr(args, "g_latent_tiers", None) or ()),
                                     g_latent_budget=getattr(args, "g_latent_budget", 0) or 0,
                                     g_latent_price=getattr(args, "g_latent_price", 0) or 0,
-                                    g_latent_explore=getattr(args, "g_latent_explore", 0) or 0)
+                                    g_latent_explore=getattr(args, "g_latent_explore", 0) or 0,
+                                    g_latent_rule=getattr(args, "g_latent_rule", 0) or 0)
         model, mask_fn, layout = model.to(dev), model.mask_fn, "model_z"
     return model, mask_fn, layout
 
@@ -649,6 +654,8 @@ def _args(argv):
     ap.add_argument("--g_latent_price", type=float, default=None, help="esnek r: bu surumde yok (DUR)")
     ap.add_argument("--g_latent_explore", type=float, default=None,
                     help="esnek r: egitimde rastgele kademe olasiligi (varsayilan 0; inis evresinde en cok 0,05)")
+    ap.add_argument("--g_latent_rule", type=int, default=None,
+                    help="esnek r kurali: sik token'lar (ilk 50 + noktalama) bu kademede, kalani r_max (secici yok)")
     ap.add_argument("--g_latent_score", type=int, default=None,
                     help="--g_latent_rank ile: 1 latent K'ya kv head basina ogrenilen olcek (belge 102 s11; 0 kapali)")
     ap.add_argument("--mtp", type=lambda s: s if s == "auto" else int(s), default=None,
@@ -676,6 +683,7 @@ def _args(argv):
     t = args.g_latent_tiers
     args.g_latent_tiers = [int(x) for x in t.split(",") if x.strip()] if isinstance(t, str) else list(t or [])
     args.g_latent_budget, args.g_latent_price = float(args.g_latent_budget or 0), float(args.g_latent_price or 0)
+    args.g_latent_rule = int(args.g_latent_rule or 0)
     if args.g_latent_explore is None:
         args.g_latent_explore = 0.0
     args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
@@ -807,6 +815,16 @@ def main(argv=None):
         c[:len(cnt)] = cnt
         c = torch.tensor(c, dtype=torch.float) + 1
         model.tok_surprisal.copy_(-(c / c.sum()).log().to(model.tok_surprisal.device))
+        if args.g_latent_rule:                                           # kural: ilk 50 sik + harf-rakamsiz -> kademe R
+            freq = np.zeros(D.VOCAB, bool)
+            freq[np.argsort(-c.numpy())[:50]] = True
+            freq[:len(cnt)] |= np.array([not any(ch.isalnum() for ch in tok.decode([i])) for i in range(len(cnt))])
+            tab = torch.full((D.VOCAB,), len(args.g_latent_tiers) - 1, dtype=torch.long)
+            tab[torch.from_numpy(freq)] = args.g_latent_tiers.index(args.g_latent_rule)
+            model.tier_of_token.copy_(tab.to(model.tier_of_token.device))
+            log("g_latent_rule %d: %d token turu kademe %d (metinde pay %.3f), kalani %d" % (
+                args.g_latent_rule, int(freq.sum()), args.g_latent_rule, float(c.numpy()[freq].sum() / c.sum()),
+                args.g_latent_tiers[-1]))
     model.row_len = row_len                                              # uretim konum siniri, carry parca boyu
     last = None
     if args.summaries_last:                                              # belge 66: [token'lar | ozetler | dolgu]
@@ -827,7 +845,7 @@ def main(argv=None):
                  mtp=args.mtp, g_latent_rank=args.g_latent_rank, g_raw_sentences=args.g_raw_sentences,
                  g_latent_rope=args.g_latent_rope, g_latent_score=args.g_latent_score, g_latent_tiers=args.g_latent_tiers,
                  g_latent_budget=args.g_latent_budget, g_latent_price=args.g_latent_price,
-                 g_latent_explore=args.g_latent_explore)
+                 g_latent_explore=args.g_latent_explore, g_latent_rule=args.g_latent_rule)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -848,7 +866,7 @@ def main(argv=None):
             sys.exit("DUR: " + _archived(was))
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
                "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_latent_rank": 0, "g_raw_sentences": 0, "g_latent_rope": 0, "g_latent_score": 0,
-               "g_latent_tiers": [], "g_latent_budget": 0.0, "g_latent_price": 0.0, "g_latent_explore": 0.0,
+               "g_latent_tiers": [], "g_latent_budget": 0.0, "g_latent_price": 0.0, "g_latent_explore": 0.0, "g_latent_rule": 0,
                **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])

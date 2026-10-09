@@ -452,7 +452,7 @@ class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
                  attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_latent_rank=0, g_raw_sentences=0,
                  g_latent_rope=0, g_latent_score=0, g_latent_tiers=(), g_latent_budget=0.0, g_latent_price=0.0,
-                 g_latent_explore=0.3):
+                 g_latent_explore=0.3, g_latent_rule=0):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -480,6 +480,8 @@ class SentenceTransformer(torch.nn.Module):
             "g_latent_tiers: artan, son = g_latent_rank"
         self.tier_budget, self.tier_price, self.tier_p = float(g_latent_budget), float(g_latent_price), float(g_latent_explore)
         self.tier_p_late = TIER_EXPLORE_LATE
+        self.g_latent_rule = int(g_latent_rule)                         # sik token kademesi (kural; secici calismaz)
+        assert not self.g_latent_rule or self.g_latent_rule in self.g_latent_tiers, "g_latent_rule kademelerden biri"
         assert self.g_latent_rank >= 0 and self.g_raw_sentences >= 0, "g_latent_rank / g_raw_sentences >= 0"
         assert not self.g_latent_rank or (self.global_layers and not carry_group), "g_latent: glob katmani gerek, carry yok"
         self._latent = g_latent_masks(self.g_raw_sentences) if self.g_latent_rank else None
@@ -519,6 +521,7 @@ class SentenceTransformer(torch.nn.Module):
             self.register_buffer("tier_cut", torch.zeros(n - 1))                     # puan esikleri (sinav / uretim)
             self.register_buffer("tok_surprisal", torch.zeros(VOCAB))                # -log p(token), train.py doldurur
             self.register_buffer("tier_step", torch.zeros((), dtype=torch.long))
+            self.register_buffer("tier_of_token", torch.full((VOCAB,), n - 1, dtype=torch.long))   # kural: train.py doldurur
         self.ngram, self.ngram_seen = None, None
         self.ngram_layers, self.ngram_sparse = int(ngram_layers) or layers, bool(ngram_sparse)
         if ngram_rows:                                                  # sifir tablo, lambda 0,1 (kayit #1)
@@ -544,10 +547,15 @@ class SentenceTransformer(torch.nn.Module):
         q = min(max((self.tier_budget - low) / (r[-1] - low), 0.0), 1.0)
         return [(1 - q) / (len(r) - 1)] * (len(r) - 1) + [q]
 
-    def _tier_pick(self, x, block, batch=None):
-        """Esnek r: ilk G blogunun n1(x)'i (detach) -> onem puani s.  Egitim (batch): okunan token'lar s'ye gore siralanir,
+    def _tier_pick(self, x, block, batch=None, tokens=None):
+        """g_latent_rule: kademe token kimliginden (tier_of_token; tokens = batch.tokens ya da uretimde verilen).
+        Esnek r: ilk G blogunun n1(x)'i (detach) -> onem puani s.  Egitim (batch): okunan token'lar s'ye gore siralanir,
         paylar (_tier_fracs) alttan doldurulur (esitlik adim tohumlu gurultuyle bozulur), esikler tier_cut'a EMA; sinav /
         uretim: s tier_cut'la kademelenir.  -> kademe (B, T), ic ice maske m (B, T, r)."""
+        if self.g_latent_rule:
+            tk = batch.tokens if batch is not None else tokens
+            tier = self.tier_of_token[tk.long().clamp(0, VOCAB - 1)]
+            return tier, (torch.arange(self.g_latent_rank, device=x.device) < self.tier_r[tier][..., None]).float()
         s = self.tier_select(block.n1(x).detach().float())[..., 0]
         if torch.is_grad_enabled() and self.training and batch is not None:
             doc1 = batch.doc.long() + 1                                     # okunan token: hikayede K + 1 sonrasi cumle var
@@ -835,13 +843,14 @@ class SummaryCache:
         self.piece, self.used, self.gkind = 0, 1, []                       # carry: parca no, parcadaki konum, glob tur
         self.prev = END_ID                                                  # bigram: cumledeki onceki token (yoksa END)
         x = model.E(torch.tensor([[EOS_ID]], device=self.dev))              # BOS = EOS token'i (belge 21 s1)
-        self.logits = self._out(self._step(x, 0, read_sentence=False, summary=True), summary=True)
+        self.logits = self._out(self._step(x, 0, read_sentence=False, summary=True,
+                                           tok=torch.tensor([[EOS_ID]], device=self.dev)), summary=True)
 
     def _out(self, hn, summary):
         """Son konumun normlu durumu -> logit."""
         return self.m._logits(hn)[0, -1]
 
-    def _step(self, x, pos, read_sentence, summary, g=None):
+    def _step(self, x, pos, read_sentence, summary, g=None, tok=None):
         """read_sentence: cumle onbellegini de gor; summary: K/V ozete (yoksa cumle onbellegine) yazilir.  Global
         bloklar: gercek konum self.t, butun gecmis.  g: bigram vektoru (her blok girdisine lambda ile)."""
         p = torch.tensor([[pos]], device=self.dev)
@@ -855,7 +864,7 @@ class SummaryCache:
             if g is not None and l < self.m.ngram_layers:
                 x = x + self.m.ngram_lambdas[l] * g
             if l == self.first_glob and getattr(self.m, "tier_select", None) is not None:   # esnek r: argmax kademe
-                tier, tmask = self.m._tier_pick(x, block)
+                tier, tmask = self.m._tier_pick(x, block, tokens=tok)
             if l == self.first_glob and self.absorb:
                 self.raw_meta.append((self.gkind[-1], s_q, 0 if tier is None else int(tier)))
             if self.glob[l] and self.absorb:                               # ham + latent (absorb), adim 2
@@ -995,7 +1004,7 @@ class SummaryCache:
                 x = x + self.m.ngram_lambdas[l] * gr
             g = self.glob[l]
             if l == self.first_glob and getattr(self.m, "tier_select", None) is not None:   # esnek r: argmax kademe
-                tier, tmask = self.m._tier_pick(x, block)
+                tier, tmask = self.m._tier_pick(x, block, tokens=t(tok))
                 self.raw_meta = [(kd, sn, int(tt)) for (kd, sn, _), tt in zip(self.raw_meta, tier[0].tolist())]
             lat = g and block.kv_down is not None
             q, k, v, *c = block._qkv(x, real if g else lpos, latent=lat, tier=tier if g else None, tmask=tmask if g else None)
@@ -1026,7 +1035,8 @@ class SummaryCache:
             g = self.m._ngram(torch.tensor([[token]], device=self.dev), torch.tensor([[self.prev]], device=self.dev),
                               torch.ones(1, 1, dtype=torch.bool, device=self.dev))
         self.prev = token
-        self.logits = self._out(self._step(x, self.n_z + self.i, read_sentence=True, summary=False, g=g), summary=False)
+        self.logits = self._out(self._step(x, self.n_z + self.i, read_sentence=True, summary=False, g=g,
+                                           tok=torch.tensor([[token]], device=self.dev)), summary=False)
         return self.logits
 
     @torch.no_grad()
@@ -1039,7 +1049,8 @@ class SummaryCache:
         self.i = 0
         self.t += 1
         x = self.m.E(torch.tensor([[END_ID]], device=self.dev))
-        self.logits = self._out(self._step(x, self.n_z, read_sentence=True, summary=True), summary=True)
+        self.logits = self._out(self._step(x, self.n_z, read_sentence=True, summary=True,
+                                           tok=torch.tensor([[END_ID]], device=self.dev)), summary=True)
         self.sen_k = [None] * len(self.sen_k)                               # Z_k'den SONRA
         self.sen_v = [None] * len(self.sen_v)
         if self.m.carry_group:
