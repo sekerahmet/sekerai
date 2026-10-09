@@ -50,7 +50,14 @@ basina RMS skaleriyle saklanir, attention absorb yoluyla (V3 :480-495).
 --g_latent_score 1 (belge 102 s11; kullanici, 9 Ekim: "Olur kur"): latent anahtar K'si a[t, g] ile carpilir (QK-norm ve
 RoPE'den sonra; skor dogrusal: a * skor), t anahtar token'inin kademesi (esnek r; sabit r'de tek), g kv head; a 1 baslar
 (cikis kapali modelle ayni).  score_mod yok (ogrenilen a'nin flex geri yayilimi GPU'da adimi 19x yavaslatti); kayma yok.
+Esnek r (belge 103; --g_latent_tiers 32,64,128,256 ve --g_latent_budget / --g_latent_price, --g_latent_explore): token
+basina kademe; latent c'nin ilk r_t boyutu (ic ice), maske c * m (m tier_select'ten, sert); secici girdisi ilk G katmaninin
+n1(x)'i (detach); secici Taylor kritigiyle egitilir (tier_update: dL/dm = g * c, kademe basina birinci derece kayip farki +
+lambda r / r_max, argmin'e CE; lambda ana aga girmez).  Uretimde argmax, absorb onbellegi kademe basina.
 """
+
+TIER_ETA = 1e-3             # butce kilidi: lambda <- max(0, lambda + eta (r / butce - 1)) (belge 103 s2.3)
+TIER_EXPLORE_LATE = 0.05    # inis evresinde kesif (belge 103 s3 okuma 6)
 import dataclasses
 import functools
 import math
@@ -329,7 +336,7 @@ class Block(torch.nn.Module):
         kullanmaz."""
         return torch.sigmoid(F.linear(self.n1(x)[..., :self.attn_gate.shape[1]], self.attn_gate))
 
-    def _qkv(self, x, pos, gate=False, latent=False, tier=None):
+    def _qkv(self, x, pos, gate=False, latent=False, tier=None, tmask=None):
         """-> q, k, v (RoPE'li); gate True (kapili blok, forward): ayni n1(x)'ten kapi da (B, T, heads) -> (q, k, v, kapi).
         latent True (g_latent): sonuna ayni n1(x)'ten latent K / V (_latent_kv) eklenir.
         attn_gate 1: kapi agirligi qkv matmul'una ek satir (tek matmul), 2: n1(x)'in ilk d // 64 boyutu (belge 90a ek:
@@ -355,26 +362,27 @@ class Block(torch.nn.Module):
         with torch.autocast(x.device.type, enabled=False):                  # QK-norm fp32 (V2 tarifi, belge 20 s4)
             q, k = self.q_norm(q.float()).to(v.dtype), self.k_norm(k.float()).to(v.dtype)
         return (self._rope(q, pos), self._rope(k, pos), v) + ((g,) if gate else ()) + (
-            self._latent_kv(h, pos, tier) if latent else ())
+            self._latent_kv(h, pos, tier, tmask) if latent else ())
 
     def _rope(self, t, pos):
         """RoPE: butun head (bugunku) ya da latent_rope'ta yalniz son dr boyut (V3 q_pe / k_pe)."""
         dr = self.latent_rope
         return torch.cat([t[..., :-dr], rope(t[..., -dr:], pos)], -1) if dr else rope(t, pos)
 
-    def _latent_kv(self, h, pos, tier=None):
+    def _latent_kv(self, h, pos, tier=None, tmask=None):
         """n1(x) (B, T, d) -> latent K (RoPE'li, QK-norm'lu), V (B, kv_heads, T, hd): c = kv_norm(kv_down h), [k; v] =
         kv_up c (V3 :468-475, naive yol); k_norm ve RoPE ham anahtarla ortak (ayni softmax).  latent_rope: k = [W_uk c ;
-        k_pe] (k_pe head'lerde ortak, V3 :469-470)."""
+        k_pe] (k_pe head'lerde ortak, V3 :469-470).  tmask (B, T, r): esnek r ic ice maskesi (c * m, norm'dan sonra)."""
         B, T, d = h.shape
         hd, dr, r = d // self.heads, self.latent_rope, self.latent_rank
+        cm = (lambda c: c) if tmask is None else (lambda c: c * tmask)  # noqa: E731
         if dr:
             a = self.kv_down(h)
-            kv = self.kv_up(self.kv_norm(a[..., :r])).view(B, T, self.kv_heads, 2 * hd - dr)
+            kv = self.kv_up(cm(self.kv_norm(a[..., :r]))).view(B, T, self.kv_heads, 2 * hd - dr)
             k = torch.cat([kv[..., :hd - dr], a[..., None, r:].expand(B, T, self.kv_heads, dr)], -1).transpose(1, 2)
             v = kv[..., hd - dr:].transpose(1, 2)
         else:
-            k, v = self.kv_up(self.kv_norm(self.kv_down(h))).view(B, T, 2, self.kv_heads, hd).permute(2, 0, 3, 1, 4)
+            k, v = self.kv_up(cm(self.kv_norm(self.kv_down(h)))).view(B, T, 2, self.kv_heads, hd).permute(2, 0, 3, 1, 4)
         with torch.autocast(h.device.type, enabled=False):
             k = self.k_norm(k.float()).to(v.dtype)
         k = self._rope(k, pos)
@@ -383,7 +391,7 @@ class Block(torch.nn.Module):
             k = k * self.lat_scale.view(-1, self.kv_heads)[t].transpose(1, 2)[..., None].to(k.dtype)
         return k, v
 
-    def _latent_parts(self, h, pos):
+    def _latent_parts(self, h, pos, tmask=None):
         """Absorb onbellegi (latent_rope): n1(x) (B, T, d) -> c (B, T, r), R = rope(w_p * k_pe) (B, T, dr), s (B,
         kv_heads, T) = egitimdeki k_norm'un head basina RMS katsayisi (rsqrt(mean([W_uk c ; k_pe]^2) + eps)).  Egitimin
         anahtari: s * [w_n * W_uk c ; R]."""
@@ -391,6 +399,7 @@ class Block(torch.nn.Module):
         hd, dr, r = d // self.heads, self.latent_rope, self.latent_rank
         a = self.kv_down(h)
         c, kpe = self.kv_norm(a[..., :r]), a[..., r:]
+        c = c if tmask is None else c * tmask.to(c.dtype)                   # esnek r: kesik latent (s de kesikten)
         kn = self.kv_up(c).view(B, T, self.kv_heads, 2 * hd - dr)[..., :hd - dr]
         with torch.autocast(h.device.type, enabled=False):
             u = torch.cat([kn.float(), kpe.float()[:, :, None].expand(B, T, self.kv_heads, dr)], -1)
@@ -409,15 +418,15 @@ class Block(torch.nn.Module):
         g, u = self.gate_up(self.n2(x)).chunk(2, -1)
         return x + self.down(F.silu(g) * u)
 
-    def forward(self, x, pos, attn, tier=None):
+    def forward(self, x, pos, attn, tier=None, tmask=None):
         """attn: None (duz causal), bool (B, T, T) (dense) ya da FlexAttention BlockMask; carry: (maske, mem_rows,
         mem_cols) -> K / V = [satir || ayni katmanda kaynak satirlarin bellek sutunlari] (anahtar T + M).  tier (B, T):
-        latent_score kademe indisi (yoksa 0)."""
+        latent_score kademe indisi (yoksa 0); tmask (B, T, r) esnek r maskesi."""
         mem = None
         if isinstance(attn, tuple):
             attn, mem = attn[0], attn[1:]
         lat = self.kv_down is not None
-        q, k, v, *g = self._qkv(x, pos, gate=self.attn_gate is not None, latent=lat, tier=tier)
+        q, k, v, *g = self._qkv(x, pos, gate=self.attn_gate is not None, latent=lat, tier=tier, tmask=tmask)
         if lat:                                                             # anahtar [ham | latent] (maske 2T)
             g, (kc, vc) = g[:-2], g[-2:]
             k, v = torch.cat([k, kc], 2), torch.cat([v, vc], 2)
@@ -441,7 +450,8 @@ class Block(torch.nn.Module):
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
                  attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_latent_rank=0, g_raw_sentences=0,
-                 g_latent_rope=0, g_latent_score=0, g_latent_tiers=1):
+                 g_latent_rope=0, g_latent_score=0, g_latent_tiers=(), g_latent_budget=0.0, g_latent_price=0.0,
+                 g_latent_explore=0.3):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -454,14 +464,21 @@ class SentenceTransformer(torch.nn.Module):
         gradyani yogun olusmaz.  g_latent_rank r / g_raw_sentences K (belge 102): glob bloklarinda eski cumle token'lari
         latent'ten (0 kapali); latent agirliklari butun ilk agirliklardan SONRA ceker (geri kalan kapali modelle ayni).
         g_latent_rope dr: glob'da ayrik RoPE + uretimde absorb (belge 102 s9; 0: sade yol).  g_latent_score 1: latent
-        K olcegi (belge 102 s11), g_latent_tiers kademe sayisi (esnek r; sabit r 1)."""
+        K olcegi (belge 102 s11).  g_latent_tiers (r_1 < .. < r_n = g_latent_rank; bos: sabit r): esnek r (belge 103),
+        g_latent_budget (ortalama r, lambda kilidi) ya da g_latent_price (sabit lambda), g_latent_explore (kesif olasiligi;
+        egitim dongusu tier_p ile degistirir)."""
         super().__init__()
         self.carry_group, self.row_len = int(carry_group), ROW_LEN
         self.global_layers = int(global_layers)
         assert 0 <= self.global_layers <= layers, "global_layers 0..layers"
         self.g_latent_rank, self.g_raw_sentences, self.g_latent_rope = int(g_latent_rank), int(g_raw_sentences), \
             int(g_latent_rope)
-        self.g_latent_score, self.g_latent_tiers = int(g_latent_score), int(g_latent_tiers)
+        self.g_latent_score, self.g_latent_tiers = int(g_latent_score), tuple(int(t) for t in g_latent_tiers or ())
+        assert not self.g_latent_tiers or (list(self.g_latent_tiers) == sorted(set(self.g_latent_tiers))
+                                           and self.g_latent_tiers[-1] == self.g_latent_rank and self.g_latent_tiers[0] > 0), \
+            "g_latent_tiers: artan, son = g_latent_rank"
+        self.tier_budget, self.tier_price, self.tier_p = float(g_latent_budget), float(g_latent_price), float(g_latent_explore)
+        self.tier_p_late = TIER_EXPLORE_LATE
         assert self.g_latent_rank >= 0 and self.g_raw_sentences >= 0, "g_latent_rank / g_raw_sentences >= 0"
         assert not self.g_latent_rank or (self.global_layers and not carry_group), "g_latent: glob katmani gerek, carry yok"
         self._latent = g_latent_masks(self.g_raw_sentences) if self.g_latent_rank else None
@@ -477,7 +494,7 @@ class SentenceTransformer(torch.nn.Module):
         self.blocks = torch.nn.ModuleList(Block(d, heads, hidden, glob_kv_heads if k == "glob" else None,
                                                 int(attn_gate), self.g_latent_rank if k == "glob" else 0,
                                                 self.g_latent_rope if k == "glob" else 0,
-                                                self.g_latent_score if k == "glob" else 0, self.g_latent_tiers)
+                                                self.g_latent_score if k == "glob" else 0, max(len(self.g_latent_tiers), 1))
                                           for k in kinds)
         self.norm = torch.nn.RMSNorm(d)
         for name, p in self.named_parameters():
@@ -490,6 +507,16 @@ class SentenceTransformer(torch.nn.Module):
             for name, p in self.named_parameters():                      # g_latent: en sonda (V3'te init yok; 0,02)
                 if name.endswith(("kv_down.weight", "kv_up.weight")):
                     p.normal_(0.0, 0.02)
+        self.tier_select, self._tier_ctx, self._tier_n = None, None, None
+        if self.g_latent_tiers:                                         # secici: sifir agirlik, en ust kademe onde (RNG yok)
+            n = len(self.g_latent_tiers)
+            self.tier_select = torch.nn.utils.skip_init(torch.nn.Linear, d, n)
+            with torch.no_grad():
+                self.tier_select.weight.zero_()
+                self.tier_select.bias.copy_(torch.arange(n, dtype=torch.float) / n)
+            self.register_buffer("tier_r", torch.tensor(self.g_latent_tiers), persistent=False)
+            self.register_buffer("tier_lambda", torch.tensor(self.tier_price if self.tier_price else 0.0))
+            self.register_buffer("tier_step", torch.zeros((), dtype=torch.long))
         self.ngram, self.ngram_seen = None, None
         self.ngram_layers, self.ngram_sparse = int(ngram_layers) or layers, bool(ngram_sparse)
         if ngram_rows:                                                  # sifir tablo, lambda 0,1 (kayit #1)
@@ -507,6 +534,53 @@ class SentenceTransformer(torch.nn.Module):
         else:
             g = self.ngram(ids)
         return g * is_token[..., None].to(g.dtype)
+
+    def _tier_pick(self, x, block, batch=None):
+        """Esnek r: ilk G blogunun n1(x)'i (detach) -> secici logit'i, kademe (argmax; egitimde tier_p olasilikla rastgele),
+        ic ice maske m (B, T, r) (egitimde yaprak: dL/dm = Taylor kritigi).  batch verilirse kritik baglami saklanir."""
+        logits = self.tier_select(block.n1(x).detach().float())
+        top = logits.argmax(-1)
+        tier, train = top, torch.is_grad_enabled() and self.training
+        if train and self.tier_p > 0:
+            if self._tier_n is None:
+                self._tier_n = int(self.tier_step)
+            gen = torch.Generator(device=x.device).manual_seed(1000003 * self._tier_n + 12345)
+            rnd = torch.rand(top.shape, generator=gen, device=x.device) < self.tier_p
+            tier = torch.where(rnd, torch.randint(0, len(self.g_latent_tiers), top.shape, generator=gen, device=x.device), top)
+        m = (torch.arange(self.g_latent_rank, device=x.device) < self.tier_r[tier][..., None]).float()
+        if train and batch is not None:
+            m.requires_grad_(True)
+            doc1 = batch.doc.long() + 1                                     # okunan token: hikayede K + 1 sonrasi cumle var
+            smax = torch.full((doc1.shape[0], doc1.shape[1] + 1), -1, dtype=torch.long, device=x.device)
+            smax = smax.scatter_reduce(1, doc1, batch.sent.long(), "amax").gather(1, doc1)
+            read = (batch.kind == TOKEN) & (smax > batch.sent.long() + self.g_raw_sentences)
+            self._tier_ctx = dict(logits=logits, tier=tier, top=top, m=m, read=read)
+        return tier, m
+
+    def tier_update(self, n_targets):
+        """Ana geri yayilimdan sonra (belge 103 s2.2): Taylor kritigi dL / dm -> kademe basina birinci derece kayip farki,
+        maliyet N dL + lambda r / r_max, argmin'e secici CE (geri yayilir); butcede lambda kilidi.  -> gunluk tensorleri."""
+        ctx, self._tier_ctx = self._tier_ctx, None
+        if ctx is None or ctx["m"].grad is None:
+            return {}
+        n, rmax = len(self.g_latent_tiers), float(self.g_latent_rank)
+        P = ctx["m"].grad.float().cumsum(-1)[..., self.tier_r - 1]          # (B, T, n): ilk r_t boyutun toplam katkisi
+        cur = P.gather(-1, ctx["tier"][..., None])
+        lam = self.tier_lambda.float()
+        cost = n_targets.float() * (P - cur) + lam * self.tier_r.float() / rmax
+        read = ctx["read"].float()
+        cnt = read.sum().clamp_min(1)
+        ce = (F.cross_entropy(ctx["logits"].float().flatten(0, 1), cost.argmin(-1).flatten(), reduction="none") * read.flatten()
+              ).sum() / cnt
+        ce.backward()
+        r_mean = (self.tier_r[ctx["top"]].float() * read).sum() / cnt     # gercek (argmax) ortalama r
+        hist = (F.one_hot(ctx["top"], n).float() * read[..., None]).sum((0, 1)) / cnt
+        with torch.no_grad():
+            if self.tier_budget:
+                self.tier_lambda.copy_((lam + TIER_ETA * (r_mean / self.tier_budget - 1)).clamp_min(0))
+            self.tier_step.add_(1)
+        self._tier_n = (self._tier_n or 0) + 1
+        return dict(tier_ce=ce.detach(), tier_mean=r_mean.detach(), tier_hist=hist, tier_lambda=lam.detach(), tier_steps=1)
 
     def max_positions(self):
         """Uretimde hikaye basina konum siniri: egitim satiri row_len; carry belleginde carry_group parca (belge 89b)."""
@@ -549,10 +623,13 @@ class SentenceTransformer(torch.nn.Module):
         assert isinstance(attn, tuple) and len(attn) == 2, "global_layers: attn (yerel, global) ikilisi olmali"
         real = batch.real_pos if last else story_positions(batch.kind)
         first = len(self.blocks) - self.global_layers
+        tier, tmask = getattr(batch, "g_tier", None), None
         for l, block in enumerate(self.blocks):
             x = add(x, l)
-            if l >= first and block.lat_scale is not None:                 # kademe indisi (yoksa 0; esnek r, belge 103)
-                x = block(x, real, w(attn[1]), tier=getattr(batch, "g_tier", None))
+            if l == first and self.tier_select is not None:                # esnek r: kademe ilk G blogunda bir kez
+                tier, tmask = self._tier_pick(x, block, batch)
+            if l >= first and (block.lat_scale is not None or tmask is not None):
+                x = block(x, real, w(attn[1]), tier=tier, tmask=tmask)
                 continue
             x = block(x, real, w(attn[1])) if l >= first else block(x, batch.pos, w(attn[0]))
         return self.norm(x)
@@ -723,11 +800,11 @@ class SummaryCache:
         self.all_k, self.all_v = [None] * L, [None] * L
         self.all_kc, self.all_vc, self.gsent = [None] * L, [None] * L, []      # g_latent: latent K / V, konum cumlesi
         self.absorb = bool(getattr(model, "g_latent_rope", 0))           # absorb: glob onbellegi ham + latent (belge 102 s9)
-        assert not getattr(model, "g_latent_score", 0) or model.g_latent_tiers == 1, \
-            "g_latent_tiers > 1: kademeli onbellek yok (yalniz sabit r, kademe 0)"
-        self.raw_meta = []                                                  # ham glob konumlari (tur, cumle)
+        self.ranks = tuple(getattr(model, "g_latent_tiers", ()) or ()) or (getattr(model, "g_latent_rank", 0),)
+        self.first_glob = L - model.global_layers
+        self.raw_meta = []                                                  # ham glob konumlari (tur, cumle, kademe)
         self.raw_k, self.raw_v, self.raw_c, self.raw_r, self.raw_s = ([None] * L for _ in range(5))
-        self.lat_c, self.lat_r, self.lat_s = ([None] * L for _ in range(3))
+        self.lat_c, self.lat_r, self.lat_s = ([[None] * len(self.ranks) for _ in range(L)] for _ in range(3))
         self.glob = [l >= L - model.global_layers for l in range(L)]
         self.n_z, self.i, self.t = 0, 0, 0
         self.piece, self.used, self.gkind = 0, 1, []                       # carry: parca no, parcadaki konum, glob tur
@@ -748,19 +825,23 @@ class SummaryCache:
         self.gsent.append(s_q)
         if self.absorb:
             self._spill(s_q)
-            self.raw_meta.append((self.gkind[-1], s_q))
+        tier = tmask = None
         for l, block in enumerate(self.m.blocks):
             if g is not None and l < self.m.ngram_layers:
                 x = x + self.m.ngram_lambdas[l] * g
+            if l == self.first_glob and getattr(self.m, "tier_select", None) is not None:   # esnek r: argmax kademe
+                tier, tmask = self.m._tier_pick(x, block)
+            if l == self.first_glob and self.absorb:
+                self.raw_meta.append((self.gkind[-1], s_q, 0 if tier is None else int(tier)))
             if self.glob[l] and self.absorb:                               # ham + latent (absorb), adim 2
                 tt = torch.tensor([[self.t]], device=self.dev)
                 q, k, v = block._qkv(x, tt)
-                self._raw_add(l, k, v, block._latent_parts(block.n1(x), tt))
+                self._raw_add(l, k, v, block._latent_parts(block.n1(x), tt, tmask))
                 x = block._finish(x, self._absorb(l, block, q))
                 continue
             if self.glob[l]:
                 lat = block.kv_down is not None
-                q, k, v, *c = block._qkv(x, torch.tensor([[self.t]], device=self.dev), latent=lat)
+                q, k, v, *c = block._qkv(x, torch.tensor([[self.t]], device=self.dev), latent=lat, tier=tier, tmask=tmask)
                 self.all_k[l] = k if self.all_k[l] is None else torch.cat([self.all_k[l], k], 2)
                 self.all_v[l] = v if self.all_v[l] is None else torch.cat([self.all_v[l], v], 2)
                 K, V = self.all_k[l], self.all_v[l]
@@ -794,16 +875,21 @@ class SummaryCache:
 
     def _spill(self, s_q):
         """Eskiyen ham konumlar (TOKEN, cumlesi < s_q - K) latent onbellege: ham K / V silinir, c / R / s tasinir."""
-        old = [i for i, (kd, sn) in enumerate(self.raw_meta) if kd == TOKEN and sn < s_q - self.m.g_raw_sentences]
+        old = [i for i, (kd, sn, _) in enumerate(self.raw_meta) if kd == TOKEN and sn < s_q - self.m.g_raw_sentences]
         if not old:
             return
-        o = torch.tensor(old, device=self.dev)
         keep = torch.tensor([i for i in range(len(self.raw_meta)) if i not in set(old)], device=self.dev)
         cat = lambda a, b, dim: b if a is None else torch.cat([a, b], dim)  # noqa: E731
         for l, g in enumerate(self.glob):
             if g:
-                self.lat_c[l], self.lat_r[l] = cat(self.lat_c[l], self.raw_c[l][o], 0), cat(self.lat_r[l], self.raw_r[l][o], 0)
-                self.lat_s[l] = cat(self.lat_s[l], self.raw_s[l][:, o], 1)
+                for t, rt in enumerate(self.ranks):                          # kademe basina tampon: c[:r_t], R, s
+                    sel = [i for i in old if self.raw_meta[i][2] == t]
+                    if not sel:
+                        continue
+                    o = torch.tensor(sel, device=self.dev)
+                    self.lat_c[l][t] = cat(self.lat_c[l][t], self.raw_c[l][o][:, :rt], 0)
+                    self.lat_r[l][t] = cat(self.lat_r[l][t], self.raw_r[l][o], 0)
+                    self.lat_s[l][t] = cat(self.lat_s[l][t], self.raw_s[l][:, o], 1)
                 self.raw_k[l], self.raw_v[l] = self.raw_k[l][:, :, keep], self.raw_v[l][:, :, keep]
                 self.raw_c[l], self.raw_r[l], self.raw_s[l] = self.raw_c[l][keep], self.raw_r[l][keep], self.raw_s[l][:, keep]
         self.raw_meta = [m for i, m in enumerate(self.raw_meta) if i not in set(old)]
@@ -817,21 +903,28 @@ class SummaryCache:
         K, Vr = self.raw_k[l][0].float(), self.raw_v[l][0].float()
         sc = qg @ K.transpose(-1, -2)
         W = block.kv_up.weight.float().view(kvh, 2 * hd - dr, r)
-        lat = self.lat_c[l] is not None
-        sc = sc * hd ** -0.5
-        if lat:                                                             # latent onbellek kendi dtype'inda okunur
-            C, dt = self.lat_c[l], self.lat_c[l].dtype
-            qa = torch.einsum("kgn,knr->kgr", qg[..., :hd - dr] * block.k_norm.weight[:hd - dr].float(), W[:, :hd - dr])
-            so = ((qa.to(dt) @ C.T).float() + (qg[..., hd - dr:].to(dt) @ self.lat_r[l].T).float()) * self.lat_s[l][:, None, :]
-            so = so * hd ** -0.5
-            if block.lat_scale is not None:                                 # kademe 0 (sabit r): kv head basina a
-                so = so * block.lat_scale.float().view(-1, kvh)[0][:, None, None]
-            sc = torch.cat([sc, so], -1)
-        p = torch.softmax(sc, -1)
+        qa = torch.einsum("kgn,knr->kgr", qg[..., :hd - dr] * block.k_norm.weight[:hd - dr].float(), W[:, :hd - dr])
+        scs, tiers = [sc * hd ** -0.5], []
+        for t, rt in enumerate(self.ranks):                                 # kademe basina tampon, kendi genisliginde
+            C = self.lat_c[l][t]
+            if C is None:
+                continue
+            dt = C.dtype
+            so = ((qa[..., :rt].to(dt) @ C.T).float() + (qg[..., hd - dr:].to(dt) @ self.lat_r[l][t].T).float()) * \
+                self.lat_s[l][t][:, None, :] * hd ** -0.5
+            if block.lat_scale is not None:                                 # kv head x kademe olcegi
+                so = so * block.lat_scale.float().view(-1, kvh)[t][:, None, None]
+            scs.append(so)
+            tiers.append((t, rt, C))
+        p = torch.softmax(torch.cat(scs, -1), -1)
         n = K.shape[1]
         o = p[..., :n] @ Vr
-        if lat:
-            o = o + torch.einsum("kgr,khr->kgh", (p[..., n:].to(dt) @ C).float(), W[:, hd - dr:])
+        if tiers:
+            acc = torch.zeros(kvh, H // kvh, r, device=q.device)
+            for t, rt, C in tiers:                                          # sifirla doldurulmus p c, tek W_uv carpimi
+                acc[..., :rt] += (p[..., n:n + C.shape[0]].to(C.dtype) @ C).float()
+                n += C.shape[0]
+            o = o + torch.einsum("kgr,khr->kgh", acc, W[:, hd - dr:])
         return o.reshape(1, H, 1, hd).to(q.dtype)
 
     def _old(self, s_q):
@@ -865,21 +958,25 @@ class SummaryCache:
         if self.m.g_latent_rank:                                         # glob: [ham | latent] maskesi (egitimle ayni)
             causal = _dense(self.m._latent[0](kind, doc, sent), 1, T, self.dev, 2 * T)[0]
             self.gkind, self.gsent = kind[0].tolist(), sent[0].tolist()
-            self.raw_meta = list(zip(self.gkind, self.gsent))             # BOS adimi (kurucu) dahil hepsi yeniden
+            self.raw_meta = [(kd, sn, 0) for kd, sn in zip(self.gkind, self.gsent)]   # BOS adimi (kurucu) dahil hepsi yeniden
             L = len(self.m.blocks)
             self.raw_k, self.raw_v, self.raw_c, self.raw_r, self.raw_s = ([None] * L for _ in range(5))
         summ = ((kind == BOS) | (kind == ZTOK))[0]
         x, lpos, real = self.m.E(t(tok)), t(pos), torch.arange(T, device=self.dev)[None]
         gr = None if self.m.ngram is None else self.m._ngram(t(tok), bigram_prev(t(tok), kind, doc, sent), kind == TOKEN)
+        tier = tmask = None
         for l, block in enumerate(self.m.blocks):
             if gr is not None and l < self.m.ngram_layers:
                 x = x + self.m.ngram_lambdas[l] * gr
             g = self.glob[l]
+            if l == self.first_glob and getattr(self.m, "tier_select", None) is not None:   # esnek r: argmax kademe
+                tier, tmask = self.m._tier_pick(x, block)
+                self.raw_meta = [(kd, sn, int(tt)) for (kd, sn, _), tt in zip(self.raw_meta, tier[0].tolist())]
             lat = g and block.kv_down is not None
-            q, k, v, *c = block._qkv(x, real if g else lpos, latent=lat)
+            q, k, v, *c = block._qkv(x, real if g else lpos, latent=lat, tier=tier if g else None, tmask=tmask if g else None)
             a = gqa_sdpa(q, *((torch.cat([k, c[0]], 2), torch.cat([v, c[1]], 2)) if lat else (k, v)), causal if g else local)
             if g and self.absorb:                                       # hepsi hama; sonraki adim eskileri devreder
-                self._raw_add(l, k, v, block._latent_parts(block.n1(x), real))
+                self._raw_add(l, k, v, block._latent_parts(block.n1(x), real, tmask))
             elif g:
                 if lat:
                     self.all_kc[l], self.all_vc[l] = c

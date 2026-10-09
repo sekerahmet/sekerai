@@ -2892,6 +2892,28 @@ def t_g_latent():
               "egitimle degisti", all(np.isfinite(w["loss"]) for w in sc["log"]) and sc["identity"]["g_latent_score"] == 1
               and tuple(ms.blocks[1].lat_scale.shape) == (2,) and not torch.equal(ms.blocks[1].lat_scale.detach(),
                                                                                   torch.ones(2)))
+        fx = base + ["--g_latent_rank", "16", "--g_latent_tiers", "4,8,16", "--g_latent_budget", "8", "--g_latent_score", "1",
+                     "--steps", "8"]
+        fa = TR.main(fx + ["--out", out("flex")])
+        recs = [w_ for w_ in fa["log"] if "tier_hist" in w_]
+        stopped, _ = _cut_and_resume(TR, fx, out("flex_cut"))
+        a_, b_ = state(out("flex")), state(out("flex_cut"))
+        mf, _ = GR.load_run(out("flex"), data, torch.device("cpu"))
+        check("g_latent_tiers: train kosar; gunlukte tier_hist / tier_mean / tier_lambda / tier_ce; kimlikte kademe / butce / "
+              "kesif; kesilip surdurulen = kesintisiz (lambda, adim sayaci, kesif RNG dahil bit); load_run secicili kurar",
+              len(recs) == len(fa["log"]) and abs(sum(recs[-1]["tier_hist"]) - 1) < 1e-3
+              and fa["identity"]["g_latent_tiers"] == [4, 8, 16] and fa["identity"]["g_latent_budget"] == 8
+              and fa["identity"]["g_latent_explore"] == 0.3 and stopped and a_.keys() == b_.keys()
+              and all(torch.equal(a_[k], b_[k]) for k in a_) and mf.tier_select is not None and mf.g_latent_tiers == (4, 8, 16),
+              "son %s" % {k: recs[-1][k] for k in ("tier_hist", "tier_mean", "tier_lambda", "tier_ce")})
+        fm = [_exit_msg(TR.main, base + f_ + ["--steps", "2", "--out", out("dur")]) for f_ in (
+            ["--g_latent_rank", "16", "--g_latent_tiers", "4,8,12", "--g_latent_budget", "8"],
+            ["--g_latent_rank", "16", "--g_latent_tiers", "4,8,16"],
+            ["--g_latent_rank", "16", "--g_latent_tiers", "4,8,16", "--g_latent_budget", "8", "--g_latent_price", "0.01"],
+            ["--g_latent_rank", "16", "--g_latent_tiers", "4,8,16", "--g_latent_budget", "20"],
+            ["--g_latent_rank", "16", "--g_latent_budget", "8"])]
+        check("g_latent_tiers DUR: son kademe != r, butce / fiyat yok ya da ikisi, butce kademe disinda, kademesiz butce",
+              all(x is not None for x in fm), str(fm))
     except Exception:  # noqa: BLE001
         check("g_latent", False, traceback.format_exc(limit=5))
     finally:

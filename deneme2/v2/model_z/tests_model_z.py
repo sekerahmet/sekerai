@@ -3,7 +3,7 @@
 v2-before-formula-cleanup-20261007.
 
     python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,mask,summaries_last,gqa,carry,vocab,limit,flex_ranges,
-                            gate,ngram,ngram_fast,combo,g_latent,g_latent_rope,g_latent_score]
+                            gate,ngram,ngram_fast,combo,g_latent,g_latent_rope,g_latent_score,g_latent_tiers]
 """
 import os
 import sys
@@ -1717,7 +1717,7 @@ def t_g_latent_rope():
                     ns = len(stories[si])                                  # son sorgu Z_(ns-1): eski < ns - 1 - K
                     cut = max(ns - 1 - K, 0)
                     want = (1 + ns + sum(len(x_) for x_ in stories[si][cut:]), sum(len(x_) for x_ in stories[si][:cut]))
-                    got = (c.raw_k[2].shape[2], 0 if c.lat_c[2] is None else c.lat_c[2].shape[0])
+                    got = (c.raw_k[2].shape[2], sum(C.shape[0] for C in c.lat_c[2] if C is not None))
                     sizes.append(got == want and c.all_k[2] is None)
             pre = SummaryCache(m)
             pre.prefill(stories[0][:3])
@@ -1749,7 +1749,7 @@ def t_g_latent_score():
     pb, perm = summaries_last(batch)
     inv = torch.argsort(perm, 1)
 
-    def make(score, tiers=1, rope=0, rand=False):
+    def make(score, tiers=(), rope=0, rand=False):
         torch.manual_seed(0)
         m = SentenceTransformer(d=32, layers=3, heads=4, global_layers=2, glob_kv_heads=2, g_latent_rank=8,
                                 g_raw_sentences=0, g_latent_rope=rope, g_latent_score=score, g_latent_tiers=tiers).eval()
@@ -1771,7 +1771,7 @@ def t_g_latent_score():
           d0 < 1e-6 and d1 < 1e-6 and all(torch.equal(sd_on[k], v) for k, v in sd_off.items())
           and not any("lat_" in n for n in muon) and tuple(on.blocks[1].lat_scale.shape) == (2,))
 
-    m = make(1, tiers=2, rand=True)
+    m = make(1, tiers=(4, 8), rand=True)                                 # 2 kademe (secici var; blok sinamasi g_tier ile)
     tier = torch.from_numpy(rng.integers(0, 2, batch.kind.shape)).long()
     B, T = batch.kind.shape
     blk = m.blocks[1]
@@ -1791,31 +1791,23 @@ def t_g_latent_score():
         s = torch.cat([s[..., :T], s[..., T:] * a], -1).masked_fill(~gm[:, None], -torch.inf)
         ref = blk._finish(x, torch.softmax(s, -1) @ Vv)
     dref = float((got - ref).abs().max())
-    bt = SimpleNamespace(**{**batch.__dict__, "g_tier": tier})
+    m = make(1, rand=True)
     m.train()
-    m.loss_per_target(bt)[0].mean().backward()
+    m.loss_per_target(batch)[0].mean().backward()
     grads = [float(b.lat_scale.grad.abs().sum()) for b in m.blocks if b.lat_scale is not None]
     m.eval()
     with torch.no_grad():
-        nd = m.loss_per_target(bt, tuple(R.dense_mask(batch, f) for f in m.mask_fn))[0]
-        nf = m.loss_per_target(bt, tuple(R.block_mask(batch, f) for f in m.mask_fn))[0]
-        h0 = m._batch_hidden(bt)
+        nd = m.loss_per_target(batch, tuple(R.dense_mask(batch, f) for f in m.mask_fn))[0]
+        nf = m.loss_per_target(batch, tuple(R.block_mask(batch, f) for f in m.mask_fn))[0]
+        h0 = m._batch_hidden(batch)
         alt = [[list(s_) for s_ in st] for st in stories]
         alt[0][-1] = [(t + 7) % D.END_ID for t in alt[0][-1]]
-        b2 = real_batch(rows, 192, alt)
-        h2 = m._batch_hidden(SimpleNamespace(**{**b2.__dict__, "g_tier": tier}))
-        t2 = tier.clone()
-        first = (batch.doc[0] == 0) & (batch.sent[0] == 0) & (batch.kind[0] == TOKEN)
-        t2[0, first] = 1 - t2[0, first]
-        h3 = m._batch_hidden(SimpleNamespace(**{**batch.__dict__, "g_tier": t2}))
+        h2 = m._batch_hidden(real_batch(rows, 192, alt))
     last = int(((batch.doc[0] == 0) & (batch.sent[0] == int(batch.sent[0][batch.doc[0] == 0].max()))).nonzero()[0, 0])
-    s01 = (batch.doc[0] == 0) & (batch.sent[0] <= 0)
-    later = (batch.doc[0] == 0) & (batch.sent[0] >= 1)
-    check("g_latent_score 2 kademe, rastgele a / g_tier: blok = latent skoru a[t, g] ile carpan basvuru (fark %.1e); flex "
-          "(score_mod'suz) = dense (fark %.1e); gradyan a'ya; sizinti yok; kademe yalniz eskimis token'larin skorunu "
-          "degistirir" % (dref, float((nd - nf).abs().max())),
-          dref < 1e-5 and float((nd - nf).abs().max()) < 1e-5 and min(grads) > 0 and torch.equal(h0[0, :last], h2[0, :last])
-          and torch.equal(h0[0, s01], h3[0, s01]) and not torch.equal(h0[0, later], h3[0, later]),
+    check("g_latent_score: blok (2 kademe, rastgele a / g_tier) = latent skoru a[t, g] ile carpan basvuru (fark %.1e); "
+          "flex (score_mod'suz) = dense (fark %.1e); gradyan a'ya; sizinti yok (karisik kademeler g_latent_tiers grubunda)"
+          % (dref, float((nd - nf).abs().max())),
+          dref < 1e-5 and float((nd - nf).abs().max()) < 1e-5 and min(grads) > 0 and torch.equal(h0[0, :last], h2[0, :last]),
           "grad %s" % ["%.2g" % g_ for g_ in grads])
 
     ok, info = True, []
@@ -1845,11 +1837,155 @@ def t_g_latent_score():
           "Z'ler arada", ok, "; ".join(info))
 
 
+def t_g_latent_tiers():
+    """Esnek r (belge 103): (a) baslangicta secici en ust kademe (cikis sabit r_max modeliyle ayni, diger ilk agirliklar ayni,
+    tier_select AdamW'de); (b) Taylor kritigi dL / dm = yonlu turev (merkezi fark); (c) tier_update: secici CE geri yayilir,
+    butcede lambda r > butce iken artar; secici kendi kritik hedefini ogreniyor ve kademe dagitiyor (kucuk CPU sinamasi);
+    (d) kademeler karisikken flex = dense, sizinti yok; SummaryCache sade ve absorb (kademe basina tampon, genislik r_t) adim
+    adim + prefill = tam ileri."""
+    import recipe as R
+    rng = np.random.default_rng(61)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(2, 9))] for _ in range(rng.integers(3, 7))]
+               for _ in range(8)]
+    rows = [list(range(i, i + 4)) for i in range(0, 8, 4)]
+    batch = real_batch(rows, 192, stories)
+    TI = (4, 8, 16)
+
+    def make(tiers=TI, rope=0, score=1, rand_sel=False, **kw):
+        torch.manual_seed(0)
+        m = SentenceTransformer(d=32, layers=3, heads=4, global_layers=2, glob_kv_heads=2, g_latent_rank=16,
+                                g_latent_rope=rope, g_latent_score=score, g_latent_tiers=tiers, **kw)
+        if rand_sel and m.tier_select is not None:
+            g = torch.Generator().manual_seed(9)
+            with torch.no_grad():
+                m.tier_select.weight.copy_(torch.randn(m.tier_select.weight.shape, generator=g))
+                m.tier_select.bias.zero_()
+        return m
+    fixed, flex = make(tiers=()), make(g_latent_budget=8)
+    with torch.no_grad():
+        d0 = float((fixed._batch_hidden(batch) - flex._batch_hidden(batch)).abs().max())
+    sd_f, sd_x = fixed.state_dict(), flex.state_dict()
+    muon = {n for n, _ in R.muon_params(flex)}
+    check("g_latent_tiers baslangic: secici en ust kademe -> cikis sabit r_max ile ayni (fark %.1e); diger ilk agirliklar "
+          "ayni; tier_select Muon'da degil" % d0,
+          d0 < 1e-6 and all(torch.equal(sd_x[k], v) for k, v in sd_f.items() if "lat_scale" not in k)
+          and not any("tier" in n for n in muon))
+
+    m = make(rand_sel=True, g_latent_price=0.05)
+    m.train()
+    m.tier_p = 0.0
+    nt = (batch.target >= 0).sum()
+    loss = m.loss_per_target(batch)[0].sum() / nt
+    loss.backward()
+    mg = m._tier_ctx["m"].grad.clone()
+    m0 = m._tier_ctx["m"].detach()
+    delta = torch.randn(mg.shape, generator=torch.Generator().manual_seed(3)) * m._tier_ctx["read"][..., None]
+    eps = 0.02                                                          # fp32 kayip cozunurlugu ~1e-6: fark ~1e-4
+
+    def loss_at(mm):
+        m._tier_ctx = None
+        orig = m._tier_pick
+
+        def pick(x, block, b=None):
+            return orig(x, block, b)[0], mm
+        m._tier_pick = pick
+        try:
+            with torch.no_grad():
+                return float(m.loss_per_target(batch)[0].sum() / nt)
+        finally:
+            del m._tier_pick
+    fd = (loss_at(m0 + eps * delta) - loss_at(m0 - eps * delta)) / (2 * eps)
+    an = float((mg * delta).sum())
+    check("g_latent_tiers Taylor kritigi: dL / dm (geri yayilimdan, G katmanlarinin toplami) = merkezi fark yonlu turevi "
+          "(%.4e / %.4e)" % (an, fd), abs(an - fd) < 0.05 * abs(fd))
+
+    mb = make(rand_sel=True, g_latent_budget=6)
+    mb.train()
+    mb.tier_p = 0.3
+    lam0 = float(mb.tier_lambda)
+    (mb.loss_per_target(batch)[0].sum() / nt).backward()
+    st = mb.tier_update(nt)
+    g_sel = float(mb.tier_select.weight.grad.abs().sum())
+    check("g_latent_tiers tier_update: secici CE geri yayilir; butce 6 < ortalama r iken lambda artar; gunluk alanlari",
+          g_sel > 0 and float(mb.tier_lambda) > lam0 and set(st) >= {"tier_ce", "tier_mean", "tier_hist", "tier_lambda"},
+          "r %.2f lambda %.4f" % (float(st["tier_mean"]), float(mb.tier_lambda)))
+
+    # kucuk CPU sinamasi: ana agirliklar sabit, yalniz secici (Taylor hedefine CE) -> hedefi ogrenir, kademe dagitir
+    ms = make(g_latent_price=0.002)
+    for p_ in ms.parameters():
+        p_.requires_grad_(False)
+    ms.tier_select.weight.requires_grad_(True)
+    ms.tier_select.bias.requires_grad_(True)
+    opt = torch.optim.Adam(ms.tier_select.parameters(), lr=0.05)
+    ms.train()
+    ms.tier_p = 0.3
+    ces = []
+    for step in range(60):
+        opt.zero_grad()
+        (ms.loss_per_target(batch)[0].sum() / nt).backward()
+        ces.append(float(ms.tier_update(nt)["tier_ce"]))
+        opt.step()
+    ms.train()
+    ms.tier_p = 0.0
+    (ms.loss_per_target(batch)[0].sum() / nt).backward()
+    ctx = dict(ms._tier_ctx)
+    P = ctx["m"].grad.cumsum(-1)[..., ms.tier_r - 1]                    # kritik hedefi bagimsiz yazim (belge 103 s2.2)
+    cost = nt * (P - P.gather(-1, ctx["tier"][..., None])) + ms.tier_lambda * ms.tier_r / 16.0
+    tgt, rd = cost.argmin(-1)[ctx["read"]], ctx["read"]
+    top = ctx["top"][rd]
+    agree = float((top == tgt).float().mean())
+    tfreq = torch.bincount(tgt, minlength=3).float() / len(tgt)
+    hist = (torch.bincount(top, minlength=3).float() / len(top)).tolist()
+    ms.tier_update(nt)
+    check("g_latent_tiers secici (ana agirliklar sabit, 60 adim): kritik hedefini ogreniyor (CE %.3f -> %.3f; uyum %.2f, "
+          "en sik hedef %.2f) ve kademe dagitiyor (hedef hist %s, argmax hist %s)" % (
+              np.mean(ces[:5]), np.mean(ces[-5:]), agree, float(tfreq.max()), [round(h, 2) for h in tfreq.tolist()],
+              [round(h, 2) for h in hist]),
+          np.mean(ces[-5:]) < np.mean(ces[:5]) and agree > float(tfreq.max()) and sorted(hist)[-2] > 0.05)
+
+    ok, info = True, []
+    for rope in (0, 4):
+        m = make(rope=rope, rand_sel=True, g_latent_price=0.05).eval()
+        with torch.no_grad():
+            g1 = m._batch_hidden(batch)
+            nd = m.loss_per_target(batch, tuple(R.dense_mask(batch, f) for f in m.mask_fn))[0]
+            nf = m.loss_per_target(batch, tuple(R.block_mask(batch, f) for f in m.mask_fn))[0]
+            alt = [[list(s_) for s_ in st_] for st_ in stories]
+            alt[0][-1] = [(t + 7) % D.END_ID for t in alt[0][-1]]
+            g2 = m._batch_hidden(real_batch(rows, 192, alt))
+            first = batch.doc[0] == 0
+            last = int((first & (batch.sent[0] == int(batch.sent[0][first].max()))).nonzero()[0, 0])
+            lg = g1[batch.target >= 0] @ m.E.weight.T
+            out, widths = [], set()
+            for row in rows:
+                for si in row:
+                    c = SummaryCache(m)
+                    out.append(c.logits[None])
+                    for s_ in stories[si]:
+                        out += [c.append_token(t)[None] for t in s_] + [c.close_sentence()[None]]
+                    if rope:
+                        widths |= {(t, C.shape[1]) for t, C in enumerate(c.lat_c[2]) if C is not None}
+            pre = SummaryCache(m)
+            pre.prefill(stories[0][:2])
+            k_pre = 1 + sum(len(s_) + 1 for s_ in stories[0][:2]) - 1
+            steps = [pre.logits] + [pre.append_token(t) for t in stories[0][2]] + [pre.close_sentence()]
+            ref = torch.cat(out)[k_pre:k_pre + len(steps)]
+            d1 = float((torch.cat(out) - lg).abs().max())
+            d2 = max(float((s_ - o_).abs().max()) for s_, o_ in zip(steps, ref))
+        wok = not rope or (len(widths) >= 2 and all(w == TI[t] for t, w in widths))
+        ok &= d1 < 1e-5 and d2 < 1e-5 and float((nd - nf).abs().max()) < 1e-5 and torch.equal(g1[0, :last], g2[0, :last]) \
+            and wok
+        info.append("rope %d: adim %.1e prefill %.1e flex %.1e tampon (kademe, genislik) %s" % (
+            rope, d1, d2, float((nd - nf).abs().max()), sorted(widths)))
+    check("g_latent_tiers karisik kademe: flex = dense; sizinti yok; SummaryCache sade ve absorb (kademe basina tampon, "
+          "genislik r_t) adim adim + prefill = tam ileri", ok, "; ".join(info))
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab,
              limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast,
              combo=t_combo, g_latent=t_g_latent, g_latent_rope=t_g_latent_rope,
-             g_latent_score=t_g_latent_score)
+             g_latent_score=t_g_latent_score, g_latent_tiers=t_g_latent_tiers)
 
 if __name__ == "__main__":
     if SIDE is not None:
