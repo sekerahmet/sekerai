@@ -221,11 +221,12 @@ def gqa_sdpa(q, k, v, mask=None):
 
 
 class Block(torch.nn.Module):
-    def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0):
-        """kv_heads (GQA; varsayilan heads): k / v head sayisi, heads'in boleni; qkv d -> d + 2 d kv / heads.
+    def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0, nope=False):
+        """kv_heads (GQA; varsayilan heads): k / v head sayisi, heads'in boleni; qkv d -> d + 2 d kv / heads.  nope: RoPE yok.
         attn_gate 1 / 2: head basina cikis kapisi agirligi (heads, d) / (heads, d // 64) (girdi n1(x)'in ilk d // 64
         boyutu), sifir (RNG cekmez; kapisiz modelle ayni ilk agirlik)."""
         super().__init__()
+        self.nope = bool(nope)                                              # g_nope: konum yerel katmanlardan
         self.heads = heads
         self.kv_heads = int(kv_heads or heads)
         assert self.kv_heads > 0 and heads % self.kv_heads == 0, "kv_heads heads'in boleni olmali"
@@ -268,7 +269,9 @@ class Block(torch.nn.Module):
             k, v = (t.view(B, T, self.kv_heads, hd).transpose(1, 2) for t in (k, v))
         with torch.autocast(x.device.type, enabled=False):                  # QK-norm fp32 (V2 tarifi, belge 20 s4)
             q, k = self.q_norm(q.float()).to(v.dtype), self.k_norm(k.float()).to(v.dtype)
-        return (rope(q, pos), rope(k, pos), v) + ((g,) if gate else ())
+        if not self.nope:
+            q, k = rope(q, pos), rope(k, pos)
+        return (q, k, v) + ((g,) if gate else ())
 
     def _finish(self, x, a, g=None):
         """g: _qkv(gate=True)'nun kapisi; yoksa (onbellek yollari) _gate(x)."""
@@ -305,7 +308,7 @@ class Block(torch.nn.Module):
 
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
-                 attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False):
+                 attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -328,8 +331,9 @@ class SentenceTransformer(torch.nn.Module):
         if vocab_rows > VOCAB:                                   # kurulum RNG'si VOCAB'li modelle ayni; dolgu sifir
             self.E = torch.nn.Embedding(vocab_rows, d, _weight=torch.zeros(vocab_rows, d))
         kinds = ["loc"] * (layers - self.global_layers) + ["glob"] * self.global_layers
+        self.g_nope = int(g_nope)                                           # G (glob) bloklarinda RoPE yok
         self.blocks = torch.nn.ModuleList(Block(d, heads, hidden, glob_kv_heads if k == "glob" else None,
-                                                int(attn_gate)) for k in kinds)
+                                                int(attn_gate), bool(self.g_nope) and k == "glob") for k in kinds)
         self.norm = torch.nn.RMSNorm(d)
         for name, p in self.named_parameters():
             if p.dim() == 2 and not name.endswith("attn_gate"):          # kapi sifir kalir
