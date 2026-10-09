@@ -2875,16 +2875,22 @@ def t_g_latent():
         msgs = [_exit_msg(TR.main, base + f_ + ["--steps", "2", "--out", out("dur")]) for f_ in (
             ["--g_latent_rank", "-1"], ["--g_raw_sentences", "1"], ["--g_latent_rank", "8", "--global_layers", "0"],
             ["--g_latent_rank", "8", "--carry_summaries", "1"], ["--g_latent_rope", "4"],
-            ["--g_latent_rank", "8", "--g_latent_rope", "3"], ["--g_latent_rank", "8", "--g_latent_rope", "16"])]
+            ["--g_latent_rank", "8", "--g_latent_rope", "3"], ["--g_latent_rank", "8", "--g_latent_rope", "16"],
+            ["--g_latent_score", "1"], ["--g_latent_rank", "8", "--g_latent_score", "2"])]
         msgs.append(_exit_msg(TR.main, base[:-2] + ["--model", "transformer", "--global_layers", "0", "--g_latent_rank",
                                                      "8", "--steps", "2", "--out", out("dur")]))
-        check("g_latent: r < 0, r'siz K, G'siz, carry, transformer, r'siz / tek / >= head boyu rope DURUR",
+        check("g_latent: r < 0, r'siz K, G'siz, carry, transformer, r'siz / tek / >= head boyu rope, r'siz / 2 score DURUR",
               all(x is not None for x in msgs), str(msgs))
         ar = TR.main(base + ["--g_latent_rank", "8", "--g_latent_rope", "4", "--steps", "6", "--out", out("rope")])
         mr, _ = GR.load_run(out("rope"), data, torch.device("cpu"))
         check("g_latent_rope: train kosar (kayip sonlu), kimlikte dr 4, load_run ayrik RoPE'li kurar",
               all(np.isfinite(w["loss"]) for w in ar["log"]) and ar["identity"]["g_latent_rope"] == 4
               and mr.blocks[1].latent_rope == 4 and tuple(mr.blocks[1].kv_down.weight.shape) == (12, 32))
+        sc = TR.main(base + ["--g_latent_rank", "8", "--g_latent_score", "1", "--steps", "6", "--out", out("score")])
+        ms, _ = GR.load_run(out("score"), data, torch.device("cpu"))
+        check("g_latent_score: train kosar (kayip sonlu), kimlikte 1, load_run lat_scale / lat_bias'li kurar, a / b egitimle "
+              "degisti", all(np.isfinite(w["loss"]) for w in sc["log"]) and sc["identity"]["g_latent_score"] == 1
+              and ms.blocks[1].lat_scale is not None and not torch.equal(ms.blocks[1].lat_bias.detach(), torch.zeros(4)))
     except Exception:  # noqa: BLE001
         check("g_latent", False, traceback.format_exc(limit=5))
     finally:

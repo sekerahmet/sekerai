@@ -3,7 +3,7 @@
 v2-before-formula-cleanup-20261007.
 
     python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,mask,summaries_last,gqa,carry,vocab,limit,flex_ranges,
-                            gate,ngram,ngram_fast,combo,g_latent,g_latent_rope]
+                            gate,ngram,ngram_fast,combo,g_latent,g_latent_rope,g_latent_score]
 """
 import os
 import sys
@@ -1734,10 +1734,105 @@ def t_g_latent_rope():
           "K + 1 cumle, eski token'lar yalniz latent (c / R / s); generate calisir", ok, "; ".join(info))
 
 
+def t_g_latent_score():
+    """g_latent_score (belge 102 s11): (a) a 1 / b 0 ile cikis kapali modelle ayni, diger ilk agirliklar ayni, lat_scale /
+    lat_bias 1-B (AdamW); (b) a / b rastgele, 2 kademe, rastgele g_tier: flex score_mod (CPU) = dense, gradyan a / b'ye
+    ulasir, sizinti yok, kademe yalniz eskiyen token'larin skorunu degistirir; (c) SummaryCache (sade) adim adim ve absorb
+    (rope) adim adim + prefill = tam ileri."""
+    import recipe as R
+    from model import summaries_last
+    rng = np.random.default_rng(51)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(3, 7))]
+               for _ in range(8)]
+    rows = [list(range(i, i + 4)) for i in range(0, 8, 4)]
+    batch = real_batch(rows, 192, stories)
+    pb, perm = summaries_last(batch)
+    inv = torch.argsort(perm, 1)
+
+    def make(score, tiers=1, rope=0, rand=False):
+        torch.manual_seed(0)
+        m = SentenceTransformer(d=32, layers=3, heads=4, global_layers=2, glob_kv_heads=2, g_latent_rank=8,
+                                g_raw_sentences=0, g_latent_rope=rope, g_latent_score=score, g_latent_tiers=tiers).eval()
+        if rand:
+            g = torch.Generator().manual_seed(7)
+            with torch.no_grad():
+                for blk in m.blocks:
+                    if blk.lat_scale is not None:
+                        blk.lat_scale.copy_(0.5 + torch.rand(blk.lat_scale.shape, generator=g))
+                        blk.lat_bias.copy_(torch.randn(blk.lat_bias.shape, generator=g))
+        return m
+    off, on = make(0), make(1)
+    sd_off, sd_on = off.state_dict(), on.state_dict()
+    with torch.no_grad():
+        d0 = float((off._batch_hidden(batch) - on._batch_hidden(batch)).abs().max())
+        d1 = float((off._batch_hidden(pb) - on._batch_hidden(pb)).abs().max())
+    muon = {n for n, _ in R.muon_params(on)}
+    check("g_latent_score a 1 / b 0: cikis kapali modelle ayni (iki duzen, fark %.1e / %.1e); diger ilk agirliklar ayni; "
+          "lat_scale / lat_bias 1-B, Muon'da degil" % (d0, d1),
+          d0 < 1e-5 and d1 < 1e-5 and all(torch.equal(sd_on[k], v) for k, v in sd_off.items())
+          and not any("lat_" in n for n in muon) and on.blocks[1].lat_scale.dim() == 1)
+
+    m = make(1, tiers=2, rand=True)
+    tier = torch.from_numpy(rng.integers(0, 2, batch.kind.shape)).long()
+    bt = SimpleNamespace(**{**batch.__dict__, "g_tier": tier})
+    m.train()
+    m.loss_per_target(bt)[0].mean().backward()
+    grads = [float(b.lat_scale.grad.abs().sum()) + float(b.lat_bias.grad.abs().sum()) for b in m.blocks
+             if b.lat_scale is not None]
+    m.eval()
+    with torch.no_grad():
+        nd = m.loss_per_target(bt, tuple(R.dense_mask(batch, f) for f in m.mask_fn))[0]
+        nf = m.loss_per_target(bt, tuple(R.block_mask(batch, f) for f in m.mask_fn))[0]
+        h0 = m._batch_hidden(bt)
+        alt = [[list(s_) for s_ in st] for st in stories]
+        alt[0][-1] = [(t + 7) % D.END_ID for t in alt[0][-1]]
+        b2 = real_batch(rows, 192, alt)
+        h2 = m._batch_hidden(SimpleNamespace(**{**b2.__dict__, "g_tier": tier}))
+        t2 = tier.clone()
+        first = (batch.doc[0] == 0) & (batch.sent[0] == 0) & (batch.kind[0] == TOKEN)
+        t2[0, first] = 1 - t2[0, first]                                    # ilk hikayenin ilk cumlesinin kademesi
+        h3 = m._batch_hidden(SimpleNamespace(**{**batch.__dict__, "g_tier": t2}))
+    last = int(((batch.doc[0] == 0) & (batch.sent[0] == int(batch.sent[0][batch.doc[0] == 0].max()))).nonzero()[0, 0])
+    s01 = (batch.doc[0] == 0) & (batch.sent[0] <= 0)                        # cumle 0 (ve BOS): kademe degisikligini gormez
+    later = (batch.doc[0] == 0) & (batch.sent[0] >= 1)
+    check("g_latent_score 2 kademe, rastgele a / b / g_tier: flex score_mod (CPU) = dense (fark %.1e); gradyan a / b'ye; "
+          "sizinti yok; kademe yalniz eskimis token'larin skorunu degistirir" % float((nd - nf).abs().max()),
+          float((nd - nf).abs().max()) < 1e-5 and min(grads) > 0 and torch.equal(h0[0, :last], h2[0, :last])
+          and torch.equal(h0[0, s01], h3[0, s01]) and not torch.equal(h0[0, later], h3[0, later]),
+          "grad %s" % ["%.2g" % g for g in grads])
+
+    ok, info = True, []
+    for rope in (0, 4):
+        m = make(1, rope=rope, rand=True)
+        with torch.no_grad():
+            lg = m._batch_hidden(batch)[batch.target >= 0] @ m.E.weight.T
+            hl = m._batch_hidden(pb).gather(1, inv[..., None].expand(-1, -1, 32))
+            out = []
+            for row in rows:
+                for si in row:
+                    c = SummaryCache(m)
+                    out.append(c.logits[None])
+                    for s_ in stories[si]:
+                        out += [c.append_token(t)[None] for t in s_] + [c.close_sentence()[None]]
+            pre = SummaryCache(m)
+            pre.prefill(stories[0][:2])
+            k_pre = 1 + sum(len(s_) + 1 for s_ in stories[0][:2]) - 1
+            steps = [pre.logits] + [pre.append_token(t) for t in stories[0][2]] + [pre.close_sentence()]
+            ref = torch.cat(out)[k_pre:k_pre + len(steps)]
+            d1 = float((torch.cat(out) - lg).abs().max())
+            d2 = max(float((s_ - o_).abs().max()) for s_, o_ in zip(steps, ref))
+            d3 = float((m._batch_hidden(batch) - hl).abs().max())
+        ok &= d1 < 1e-5 and d2 < 1e-5 and d3 < 1e-5
+        info.append("rope %d: adim %.1e prefill + devam %.1e summaries_last %.1e" % (rope, d1, d2, d3))
+    check("g_latent_score onbellek: SummaryCache (sade) ve absorb (rope) adim adim + prefill = tam ileri; summaries_last = "
+          "Z'ler arada", ok, "; ".join(info))
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab,
              limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast,
-             combo=t_combo, g_latent=t_g_latent, g_latent_rope=t_g_latent_rope)
+             combo=t_combo, g_latent=t_g_latent, g_latent_rope=t_g_latent_rope,
+             g_latent_score=t_g_latent_score)
 
 if __name__ == "__main__":
     if SIDE is not None:
