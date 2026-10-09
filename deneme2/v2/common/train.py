@@ -76,7 +76,8 @@ cümle gördüğünü pencere yapalım. K=0 yani kendi cümlesi ham olur"): Mode
 token basina latent'ten (MLA turu).  Varsayilan 0 (kapali, bit ayni); yalniz model_z, global_layers > 0, carry'siz;
 kimlikte, INHERIT'te (alan yoksa 0).  --g_latent_rope dr (belge 102 s9; kullanici, 9 Ekim: "Bir de üretimi hızlandırması
 lazım"): glob'da ayrik RoPE (son dr boyut) + uretimde absorb; 0 sade yol (bit ayni).  --g_latent_score 1 (belge 102
-s11; kullanici, 9 Ekim: "Olur kur"): latent skorlarina head (x kademe) basina ogrenilen olcek / kayma (1 / 0 baslar).
+s11; kullanici, 9 Ekim: "Olur kur"): yalniz olcek, latent K'ya kv head (x kademe) basina ogrenilen carpan (1 baslar; kayma
+yok, score_mod yok).
 
 Eski kosular (kullanici, 8 Ekim: "V2 içinde temizlik kastettim"; belge 77): Model Z kimliginde summaries_last 1 degilse
 (8 Ekim oncesi; formullu / temizlik oncesi dahil; summaries_last 0), learned_z 0 ya da kaldirilan bir ozellik (z_bow,
@@ -624,7 +625,7 @@ def _args(argv):
     ap.add_argument("--g_latent_rope", type=int, default=None,
                     help="--g_latent_rank ile: glob'da ayrik RoPE boyu dr (cift, < head boyu) + uretimde absorb (belge 102 s9; 0 kapali)")
     ap.add_argument("--g_latent_score", type=int, default=None,
-                    help="--g_latent_rank ile: 1 latent skorlarina head basina ogrenilen olcek / kayma (belge 102 s11; 0 kapali)")
+                    help="--g_latent_rank ile: 1 latent K'ya kv head basina ogrenilen olcek (belge 102 s11; 0 kapali)")
     ap.add_argument("--mtp", type=lambda s: s if s == "auto" else int(s), default=None,
                     help="model_z: ayni-logit MTP ek hedef sayisi N (belge 90c; resmi kod N 2); agirlik recipe.mtp_weights, "
                          "son 1 / (N + 1) payda 0; varsayilan 0 (9 Ekim); auto: model_z 2 (carry'de 0), transformer 0; 0 kapali; "

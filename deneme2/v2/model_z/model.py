@@ -47,9 +47,9 @@ RoPE ve QK-norm yukari izdusumden SONRA, token'in gercek konumunda (MLA'nin ayri
 son dr boyutunda (ham ve latent anahtar, sorgu); latent anahtar [W_uk c ; k_pe] (k_pe kv_down'un son dr boyutu, head'lerde
 ortak; V3 :466-470), QK-norm butun head uzerinde.  Uretimde (SummaryCache) eski token'lar yalniz c + rope'lu k_pe + head
 basina RMS skaleriyle saklanir, attention absorb yoluyla (V3 :480-495).
---g_latent_score 1 (belge 102 s11; kullanici, 9 Ekim: "Olur kur"): latent anahtarlarin skoru a[t, h] * skor + b[t, h] (t: anahtar
-token'inin kademesi, esnek r icin; sabit r'de tek kademe); a 1, b 0 baslar (cikis kapali modelle ayni).  Flex'te score_mod
-(tablolar disarida), dense / onbellek / absorb yolunda ayni formul.
+--g_latent_score 1 (belge 102 s11; kullanici, 9 Ekim: "Olur kur"): latent anahtar K'si a[t, g] ile carpilir (QK-norm ve
+RoPE'den sonra; skor dogrusal: a * skor), t anahtar token'inin kademesi (esnek r; sabit r'de tek), g kv head; a 1 baslar
+(cikis kapali modelle ayni).  score_mod yok (ogrenilen a'nin flex geri yayilimi GPU'da adimi 19x yavaslatti); kayma yok.
 """
 import dataclasses
 import functools
@@ -294,8 +294,8 @@ class Block(torch.nn.Module):
         boyutu), sifir (RNG cekmez; kapisiz modelle ayni ilk agirlik).  latent_rank r (g_latent): kv_down d -> r,
         kv_norm (r), kv_up r -> 2 kv boyu (V3 wkv_a / kv_norm / wkv_b); ilk agirliklari model sonda ceker.
         latent_rope dr (ayrik RoPE): kv_down d -> r + dr (son dr k_pe), kv_up r -> kv_heads (2 hd - dr); bu blokta RoPE
-        head'in son dr boyutunda.  latent_score: latent skor olcegi lat_scale (1) / kaymasi lat_bias (0), latent_tiers x
-        heads (1-B saklanir: AdamW, decay'siz); kademe indisi forward'in tier'indan (yoksa 0)."""
+        head'in son dr boyutunda.  latent_score: latent K olcegi lat_scale (1), latent_tiers x kv_heads (1-B: AdamW,
+        decay'siz); kademe indisi forward'in tier'indan (yoksa 0)."""
         super().__init__()
         self.heads = heads
         self.kv_heads = int(kv_heads or heads)
@@ -318,19 +318,18 @@ class Block(torch.nn.Module):
             self.kv_down = lin(d, latent_rank + self.latent_rope)
             self.kv_up = lin(latent_rank, self.kv_heads * (2 * hd - self.latent_rope))
             self.kv_norm = torch.nn.RMSNorm(latent_rank)
-        self.lat_scale = self.lat_bias = None
+        self.lat_scale = None
         assert not latent_score or latent_rank, "latent_score: latent_rank ile"
         if latent_score:
             self.lat_tiers = int(latent_tiers)
-            self.lat_scale = torch.nn.Parameter(torch.ones(self.lat_tiers * heads))
-            self.lat_bias = torch.nn.Parameter(torch.zeros(self.lat_tiers * heads))
+            self.lat_scale = torch.nn.Parameter(torch.ones(self.lat_tiers * self.kv_heads))
 
     def _gate(self, x):
         """Blok girdisi x (B, T, d) -> kapi sigmoid(n1(x)[..., :W sutunu] W^T) (B, T, heads); satir basina, maske / konum
         kullanmaz."""
         return torch.sigmoid(F.linear(self.n1(x)[..., :self.attn_gate.shape[1]], self.attn_gate))
 
-    def _qkv(self, x, pos, gate=False, latent=False):
+    def _qkv(self, x, pos, gate=False, latent=False, tier=None):
         """-> q, k, v (RoPE'li); gate True (kapili blok, forward): ayni n1(x)'ten kapi da (B, T, heads) -> (q, k, v, kapi).
         latent True (g_latent): sonuna ayni n1(x)'ten latent K / V (_latent_kv) eklenir.
         attn_gate 1: kapi agirligi qkv matmul'una ek satir (tek matmul), 2: n1(x)'in ilk d // 64 boyutu (belge 90a ek:
@@ -356,14 +355,14 @@ class Block(torch.nn.Module):
         with torch.autocast(x.device.type, enabled=False):                  # QK-norm fp32 (V2 tarifi, belge 20 s4)
             q, k = self.q_norm(q.float()).to(v.dtype), self.k_norm(k.float()).to(v.dtype)
         return (self._rope(q, pos), self._rope(k, pos), v) + ((g,) if gate else ()) + (
-            self._latent_kv(h, pos) if latent else ())
+            self._latent_kv(h, pos, tier) if latent else ())
 
     def _rope(self, t, pos):
         """RoPE: butun head (bugunku) ya da latent_rope'ta yalniz son dr boyut (V3 q_pe / k_pe)."""
         dr = self.latent_rope
         return torch.cat([t[..., :-dr], rope(t[..., -dr:], pos)], -1) if dr else rope(t, pos)
 
-    def _latent_kv(self, h, pos):
+    def _latent_kv(self, h, pos, tier=None):
         """n1(x) (B, T, d) -> latent K (RoPE'li, QK-norm'lu), V (B, kv_heads, T, hd): c = kv_norm(kv_down h), [k; v] =
         kv_up c (V3 :468-475, naive yol); k_norm ve RoPE ham anahtarla ortak (ayni softmax).  latent_rope: k = [W_uk c ;
         k_pe] (k_pe head'lerde ortak, V3 :469-470)."""
@@ -378,7 +377,11 @@ class Block(torch.nn.Module):
             k, v = self.kv_up(self.kv_norm(self.kv_down(h))).view(B, T, 2, self.kv_heads, hd).permute(2, 0, 3, 1, 4)
         with torch.autocast(h.device.type, enabled=False):
             k = self.k_norm(k.float()).to(v.dtype)
-        return self._rope(k, pos), v
+        k = self._rope(k, pos)
+        if self.lat_scale is not None:                                      # a[t, g] (kademe x kv head), skor a * skor
+            t = torch.zeros(B, T, dtype=torch.long, device=h.device) if tier is None else tier.long()
+            k = k * self.lat_scale.view(-1, self.kv_heads)[t].transpose(1, 2)[..., None].to(k.dtype)
+        return k, v
 
     def _latent_parts(self, h, pos):
         """Absorb onbellegi (latent_rope): n1(x) (B, T, d) -> c (B, T, r), R = rope(w_p * k_pe) (B, T, dr), s (B,
@@ -406,25 +409,6 @@ class Block(torch.nn.Module):
         g, u = self.gate_up(self.n2(x)).chunk(2, -1)
         return x + self.down(F.silu(g) * u)
 
-    def _score_ab(self, tier):
-        """tier (B, S) kademe indisi -> latent skor olcegi a, kaymasi b (B, H, 1, S) fp32."""
-        H = self.heads
-        a = self.lat_scale.float().view(-1, H)[tier].permute(0, 2, 1)[:, :, None]
-        b = self.lat_bias.float().view(-1, H)[tier].permute(0, 2, 1)[:, :, None]
-        return a, b
-
-    def _attend_scored(self, q, k, v, lat, tier, mask=None):
-        """latent_score dense yolu: skor = q k / sqrt(hd); latent anahtarda (lat (B, S) bool) a skor + b; maske (B, T, S)
-        ya da None -> cikis (B, H, T, hd)."""
-        g = self.heads // k.shape[1]
-        kr, vr = k.repeat_interleave(g, 1).float(), v.repeat_interleave(g, 1).float()
-        s = (q.float() @ kr.transpose(-1, -2)) * q.shape[-1] ** -0.5
-        a, b = self._score_ab(tier)
-        s = torch.where(lat[:, None, None, :], s * a + b, s)
-        if mask is not None:
-            s = s.masked_fill(~mask[:, None], -torch.inf)
-        return (torch.softmax(s, -1) @ vr).to(q.dtype)
-
     def forward(self, x, pos, attn, tier=None):
         """attn: None (duz causal), bool (B, T, T) (dense) ya da FlexAttention BlockMask; carry: (maske, mem_rows,
         mem_cols) -> K / V = [satir || ayni katmanda kaynak satirlarin bellek sutunlari] (anahtar T + M).  tier (B, T):
@@ -433,12 +417,10 @@ class Block(torch.nn.Module):
         if isinstance(attn, tuple):
             attn, mem = attn[0], attn[1:]
         lat = self.kv_down is not None
-        q, k, v, *g = self._qkv(x, pos, gate=self.attn_gate is not None, latent=lat)
+        q, k, v, *g = self._qkv(x, pos, gate=self.attn_gate is not None, latent=lat, tier=tier)
         if lat:                                                             # anahtar [ham | latent] (maske 2T)
             g, (kc, vc) = g[:-2], g[-2:]
             k, v = torch.cat([k, kc], 2), torch.cat([v, vc], 2)
-        if lat and self.lat_scale is not None:                              # latent skor olcegi / kaymasi
-            return self._finish(x, self._attend_latent_scored(q, k, v, attn, tier), *g)
         if mem is not None:
             r, c = mem[0].clamp_min(0), mem[1].clamp_min(0)                 # bos yuva maskeyle kapali
             k = torch.cat([k, k[r, :, c].permute(0, 2, 1, 3)], 2)
@@ -454,27 +436,6 @@ class Block(torch.nn.Module):
             a = flex_attention(q, k, v, block_mask=attn, kernel_options=None if bs == 128 else dict.fromkeys(
                 ("BLOCK_M", "BLOCK_N", "BLOCK_M1", "BLOCK_N1", "BLOCK_M2", "BLOCK_N2"), bs), **gqa)
         return self._finish(x, a, *g)
-
-    def _attend_latent_scored(self, q, k, v, attn, tier):
-        """Egitim yolu, anahtar [ham T | latent T]: dense ya da flex score_mod (tablolar disarida: latent mi, kademe)."""
-        B, _, T, _ = q.shape
-        S = k.shape[2]
-        tier = torch.zeros(B, T, dtype=torch.long, device=q.device) if tier is None else tier.long()
-        tierk = torch.cat([tier, tier], 1)                                  # anahtar -> kademe (B, 2T)
-        latk = torch.arange(S, device=q.device) >= T                        # anahtar -> latent mi
-        if torch.is_tensor(attn):
-            return self._attend_scored(q, k, v, latk.expand(B, S), tierk, attn)
-        from torch.nn.attention.flex_attention import flex_attention
-        H = self.heads
-        a, b = self.lat_scale.view(-1, H), self.lat_bias.view(-1, H)
-
-        def score_mod(score, bi, h, qi, kv):
-            t = tierk[bi, kv]
-            return torch.where(latk[kv], score * a[t, h] + b[t, h], score)
-        bs = attn.BLOCK_SIZE[0]
-        gqa = dict(enable_gqa=True) if self.kv_heads != self.heads else {}
-        return flex_attention(q, k, v, score_mod=score_mod, block_mask=attn, kernel_options=None if bs == 128 else
-                              dict.fromkeys(("BLOCK_M", "BLOCK_N", "BLOCK_M1", "BLOCK_N1", "BLOCK_M2", "BLOCK_N2"), bs), **gqa)
 
 
 class SentenceTransformer(torch.nn.Module):
@@ -493,7 +454,7 @@ class SentenceTransformer(torch.nn.Module):
         gradyani yogun olusmaz.  g_latent_rank r / g_raw_sentences K (belge 102): glob bloklarinda eski cumle token'lari
         latent'ten (0 kapali); latent agirliklari butun ilk agirliklardan SONRA ceker (geri kalan kapali modelle ayni).
         g_latent_rope dr: glob'da ayrik RoPE + uretimde absorb (belge 102 s9; 0: sade yol).  g_latent_score 1: latent
-        skor olcegi / kaymasi (belge 102 s11), g_latent_tiers kademe sayisi (esnek r; sabit r 1)."""
+        K olcegi (belge 102 s11), g_latent_tiers kademe sayisi (esnek r; sabit r 1)."""
         super().__init__()
         self.carry_group, self.row_len = int(carry_group), ROW_LEN
         self.global_layers = int(global_layers)
@@ -806,12 +767,8 @@ class SummaryCache:
                 if lat:                                                     # eski cumle token'lari latent'ten
                     self.all_kc[l] = c[0] if self.all_kc[l] is None else torch.cat([self.all_kc[l], c[0]], 2)
                     self.all_vc[l] = c[1] if self.all_vc[l] is None else torch.cat([self.all_vc[l], c[1]], 2)
-                    old = self._old(s_q)
-                    K, V = torch.where(old[None, None, :, None], self.all_kc[l], K), torch.where(old[None, None, :, None],
-                                                                                                self.all_vc[l], V)
-                    if block.lat_scale is not None:                         # kademe 0 (sabit r; esnek r onbellegi yok)
-                        x = block._finish(x, block._attend_scored(q, K, V, old[None], torch.zeros_like(old[None]).long()))
-                        continue
+                    old = self._old(s_q)[None, None, :, None]
+                    K, V = torch.where(old, self.all_kc[l], K), torch.where(old, self.all_vc[l], V)
                 x = block._finish(x, gqa_sdpa(q, K, V))
                 continue
             q, k, v = block._qkv(x, p)
@@ -867,9 +824,8 @@ class SummaryCache:
             qa = torch.einsum("kgn,knr->kgr", qg[..., :hd - dr] * block.k_norm.weight[:hd - dr].float(), W[:, :hd - dr])
             so = ((qa.to(dt) @ C.T).float() + (qg[..., hd - dr:].to(dt) @ self.lat_r[l].T).float()) * self.lat_s[l][:, None, :]
             so = so * hd ** -0.5
-            if block.lat_scale is not None:                                 # kademe 0 (sabit r)
-                so = so * block.lat_scale.float().view(-1, H)[0].view(kvh, H // kvh, 1) + \
-                    block.lat_bias.float().view(-1, H)[0].view(kvh, H // kvh, 1)
+            if block.lat_scale is not None:                                 # kademe 0 (sabit r): kv head basina a
+                so = so * block.lat_scale.float().view(-1, kvh)[0][:, None, None]
             sc = torch.cat([sc, so], -1)
         p = torch.softmax(sc, -1)
         n = K.shape[1]
@@ -921,11 +877,7 @@ class SummaryCache:
             g = self.glob[l]
             lat = g and block.kv_down is not None
             q, k, v, *c = block._qkv(x, real if g else lpos, latent=lat)
-            if lat and block.lat_scale is not None:
-                a = block._attend_latent_scored(q, torch.cat([k, c[0]], 2), torch.cat([v, c[1]], 2), causal[None], None)
-            else:
-                a = gqa_sdpa(q, *((torch.cat([k, c[0]], 2), torch.cat([v, c[1]], 2)) if lat else (k, v)),
-                             causal if g else local)
+            a = gqa_sdpa(q, *((torch.cat([k, c[0]], 2), torch.cat([v, c[1]], 2)) if lat else (k, v)), causal if g else local)
             if g and self.absorb:                                       # hepsi hama; sonraki adim eskileri devreder
                 self._raw_add(l, k, v, block._latent_parts(block.n1(x), real))
             elif g:

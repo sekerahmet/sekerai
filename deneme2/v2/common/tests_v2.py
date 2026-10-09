@@ -2888,9 +2888,10 @@ def t_g_latent():
               and mr.blocks[1].latent_rope == 4 and tuple(mr.blocks[1].kv_down.weight.shape) == (12, 32))
         sc = TR.main(base + ["--g_latent_rank", "8", "--g_latent_score", "1", "--steps", "6", "--out", out("score")])
         ms, _ = GR.load_run(out("score"), data, torch.device("cpu"))
-        check("g_latent_score: train kosar (kayip sonlu), kimlikte 1, load_run lat_scale / lat_bias'li kurar, a / b egitimle "
-              "degisti", all(np.isfinite(w["loss"]) for w in sc["log"]) and sc["identity"]["g_latent_score"] == 1
-              and ms.blocks[1].lat_scale is not None and not torch.equal(ms.blocks[1].lat_bias.detach(), torch.zeros(4)))
+        check("g_latent_score: train kosar (kayip sonlu), kimlikte 1, load_run lat_scale'li kurar (kv head basina), a "
+              "egitimle degisti", all(np.isfinite(w["loss"]) for w in sc["log"]) and sc["identity"]["g_latent_score"] == 1
+              and tuple(ms.blocks[1].lat_scale.shape) == (2,) and not torch.equal(ms.blocks[1].lat_scale.detach(),
+                                                                                  torch.ones(2)))
     except Exception:  # noqa: BLE001
         check("g_latent", False, traceback.format_exc(limit=5))
     finally:

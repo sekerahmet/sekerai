@@ -1735,12 +1735,12 @@ def t_g_latent_rope():
 
 
 def t_g_latent_score():
-    """g_latent_score (belge 102 s11): (a) a 1 / b 0 ile cikis kapali modelle ayni, diger ilk agirliklar ayni, lat_scale /
-    lat_bias 1-B (AdamW); (b) a / b rastgele, 2 kademe, rastgele g_tier: flex score_mod (CPU) = dense, gradyan a / b'ye
-    ulasir, sizinti yok, kademe yalniz eskiyen token'larin skorunu degistirir; (c) SummaryCache (sade) adim adim ve absorb
-    (rope) adim adim + prefill = tam ileri."""
+    """g_latent_score (belge 102 s11; yalniz olcek, latent K'ya kv head x kademe carpani): (a) a 1 -> cikis kapali modelle
+    ayni, diger ilk agirliklar ayni, lat_scale 1-B (AdamW); (b) blok cikisi = latent skorlari a[t, g] ile carpan bagimsiz
+    basvuru (2 kademe, rastgele a / g_tier); flex (score_mod'suz) = dense; gradyan a'ya; sizinti yok; kademe yalniz
+    eskimis token'larin skorunu degistirir; (c) SummaryCache (sade) ve absorb (rope) adim adim + prefill = tam ileri."""
     import recipe as R
-    from model import summaries_last
+    from model import story_positions, summaries_last
     rng = np.random.default_rng(51)
     stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(3, 7))]
                for _ in range(8)]
@@ -1758,8 +1758,7 @@ def t_g_latent_score():
             with torch.no_grad():
                 for blk in m.blocks:
                     if blk.lat_scale is not None:
-                        blk.lat_scale.copy_(0.5 + torch.rand(blk.lat_scale.shape, generator=g))
-                        blk.lat_bias.copy_(torch.randn(blk.lat_bias.shape, generator=g))
+                        blk.lat_scale.copy_(0.3 + 1.5 * torch.rand(blk.lat_scale.shape, generator=g))
         return m
     off, on = make(0), make(1)
     sd_off, sd_on = off.state_dict(), on.state_dict()
@@ -1767,18 +1766,35 @@ def t_g_latent_score():
         d0 = float((off._batch_hidden(batch) - on._batch_hidden(batch)).abs().max())
         d1 = float((off._batch_hidden(pb) - on._batch_hidden(pb)).abs().max())
     muon = {n for n, _ in R.muon_params(on)}
-    check("g_latent_score a 1 / b 0: cikis kapali modelle ayni (iki duzen, fark %.1e / %.1e); diger ilk agirliklar ayni; "
-          "lat_scale / lat_bias 1-B, Muon'da degil" % (d0, d1),
-          d0 < 1e-5 and d1 < 1e-5 and all(torch.equal(sd_on[k], v) for k, v in sd_off.items())
-          and not any("lat_" in n for n in muon) and on.blocks[1].lat_scale.dim() == 1)
+    check("g_latent_score a 1: cikis kapali modelle ayni (iki duzen, fark %.1e / %.1e); diger ilk agirliklar ayni; "
+          "lat_scale 1-B (kademe x kv head), Muon'da degil" % (d0, d1),
+          d0 < 1e-6 and d1 < 1e-6 and all(torch.equal(sd_on[k], v) for k, v in sd_off.items())
+          and not any("lat_" in n for n in muon) and tuple(on.blocks[1].lat_scale.shape) == (2,))
 
     m = make(1, tiers=2, rand=True)
     tier = torch.from_numpy(rng.integers(0, 2, batch.kind.shape)).long()
+    B, T = batch.kind.shape
+    blk = m.blocks[1]
+    gm = _dense(m.mask_fn[1](batch.kind, batch.doc, batch.sent), B, T, "cpu", 2 * T)
+    with torch.no_grad():
+        x = torch.randn(B, T, 32)
+        pos = story_positions(batch.kind)
+        got = blk(x, pos, gm, tier=tier)
+        a0 = blk.lat_scale.clone()
+        blk.lat_scale.fill_(1.0)                                            # olceksiz latent K (basvuru olcegi kendisi koyar)
+        q, k, v, kc, vc = blk._qkv(x, pos, latent=True)
+        blk.lat_scale.copy_(a0)
+        a = blk.lat_scale.view(2, 2)[tier].permute(0, 2, 1)                # (B, kv, T) -> head basina
+        a = a.repeat_interleave(2, 1)[:, :, None, :]
+        K, Vv = torch.cat([k, kc], 2).repeat_interleave(2, 1), torch.cat([v, vc], 2).repeat_interleave(2, 1)
+        s = q @ K.transpose(-1, -2) / 8 ** 0.5
+        s = torch.cat([s[..., :T], s[..., T:] * a], -1).masked_fill(~gm[:, None], -torch.inf)
+        ref = blk._finish(x, torch.softmax(s, -1) @ Vv)
+    dref = float((got - ref).abs().max())
     bt = SimpleNamespace(**{**batch.__dict__, "g_tier": tier})
     m.train()
     m.loss_per_target(bt)[0].mean().backward()
-    grads = [float(b.lat_scale.grad.abs().sum()) + float(b.lat_bias.grad.abs().sum()) for b in m.blocks
-             if b.lat_scale is not None]
+    grads = [float(b.lat_scale.grad.abs().sum()) for b in m.blocks if b.lat_scale is not None]
     m.eval()
     with torch.no_grad():
         nd = m.loss_per_target(bt, tuple(R.dense_mask(batch, f) for f in m.mask_fn))[0]
@@ -1790,16 +1806,17 @@ def t_g_latent_score():
         h2 = m._batch_hidden(SimpleNamespace(**{**b2.__dict__, "g_tier": tier}))
         t2 = tier.clone()
         first = (batch.doc[0] == 0) & (batch.sent[0] == 0) & (batch.kind[0] == TOKEN)
-        t2[0, first] = 1 - t2[0, first]                                    # ilk hikayenin ilk cumlesinin kademesi
+        t2[0, first] = 1 - t2[0, first]
         h3 = m._batch_hidden(SimpleNamespace(**{**batch.__dict__, "g_tier": t2}))
     last = int(((batch.doc[0] == 0) & (batch.sent[0] == int(batch.sent[0][batch.doc[0] == 0].max()))).nonzero()[0, 0])
-    s01 = (batch.doc[0] == 0) & (batch.sent[0] <= 0)                        # cumle 0 (ve BOS): kademe degisikligini gormez
+    s01 = (batch.doc[0] == 0) & (batch.sent[0] <= 0)
     later = (batch.doc[0] == 0) & (batch.sent[0] >= 1)
-    check("g_latent_score 2 kademe, rastgele a / b / g_tier: flex score_mod (CPU) = dense (fark %.1e); gradyan a / b'ye; "
-          "sizinti yok; kademe yalniz eskimis token'larin skorunu degistirir" % float((nd - nf).abs().max()),
-          float((nd - nf).abs().max()) < 1e-5 and min(grads) > 0 and torch.equal(h0[0, :last], h2[0, :last])
+    check("g_latent_score 2 kademe, rastgele a / g_tier: blok = latent skoru a[t, g] ile carpan basvuru (fark %.1e); flex "
+          "(score_mod'suz) = dense (fark %.1e); gradyan a'ya; sizinti yok; kademe yalniz eskimis token'larin skorunu "
+          "degistirir" % (dref, float((nd - nf).abs().max())),
+          dref < 1e-5 and float((nd - nf).abs().max()) < 1e-5 and min(grads) > 0 and torch.equal(h0[0, :last], h2[0, :last])
           and torch.equal(h0[0, s01], h3[0, s01]) and not torch.equal(h0[0, later], h3[0, later]),
-          "grad %s" % ["%.2g" % g for g in grads])
+          "grad %s" % ["%.2g" % g_ for g_ in grads])
 
     ok, info = True, []
     for rope in (0, 4):
