@@ -296,7 +296,7 @@ def gqa_sdpa(q, k, v, mask=None):
 
 class Block(torch.nn.Module):
     def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0, latent_rank=0, latent_rope=0, latent_score=0,
-                 latent_tiers=1):
+                 latent_tiers=1, nope=False):
         """kv_heads (GQA; varsayilan heads): k / v head sayisi, heads'in boleni; qkv d -> d + 2 d kv / heads.
         attn_gate 1 / 2: head basina cikis kapisi agirligi (heads, d) / (heads, d // 64) (girdi n1(x)'in ilk d // 64
         boyutu), sifir (RNG cekmez; kapisiz modelle ayni ilk agirlik).  latent_rank r (g_latent): kv_down d -> r,
@@ -318,6 +318,8 @@ class Block(torch.nn.Module):
         assert attn_gate != 2 or d >= 64, "attn_gate 2: girdi d // 64 boyut, d %d < 64 (0 boyut)" % d
         self.attn_gate = torch.nn.Parameter(torch.zeros(heads, d if attn_gate == 1 else d // 64)) if attn_gate else None
         self.kv_down, self.latent_rank, self.latent_rope = None, int(latent_rank), int(latent_rope)
+        self.nope = bool(nope)                                              # RoPE yok (g_nope: konum yerel katmanlardan)
+        assert not (self.nope and self.latent_rope), "nope ile latent_rope birlikte olmaz"
         hd = d // heads
         assert not latent_rope or (latent_rank and latent_rope % 2 == 0 and 0 < latent_rope < hd), \
             "latent_rope: latent_rank ile, cift, 0 < dr < head boyu"
@@ -366,7 +368,9 @@ class Block(torch.nn.Module):
             self._latent_kv(h, pos, tier, tmask) if latent else ())
 
     def _rope(self, t, pos):
-        """RoPE: butun head (bugunku) ya da latent_rope'ta yalniz son dr boyut (V3 q_pe / k_pe)."""
+        """RoPE: butun head (bugunku) ya da latent_rope'ta yalniz son dr boyut (V3 q_pe / k_pe); nope: yok."""
+        if self.nope:
+            return t
         dr = self.latent_rope
         return torch.cat([t[..., :-dr], rope(t[..., -dr:], pos)], -1) if dr else rope(t, pos)
 
@@ -452,7 +456,7 @@ class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
                  attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_latent_rank=0, g_raw_sentences=0,
                  g_latent_rope=0, g_latent_score=0, g_latent_tiers=(), g_latent_budget=0.0, g_latent_price=0.0,
-                 g_latent_explore=0.3, g_latent_rule=0, g_latent_seen=""):
+                 g_latent_explore=0.3, g_latent_rule=0, g_latent_seen="", g_nope=0):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -482,6 +486,8 @@ class SentenceTransformer(torch.nn.Module):
         self.tier_p_late = TIER_EXPLORE_LATE
         self.g_latent_rule = int(g_latent_rule)                         # sik token kademesi (kural; secici calismaz)
         self.g_latent_seen = str(g_latent_seen or "")                    # gorme sikligi indeksi (kademe token'dan)
+        self.g_nope = int(g_nope)                                           # G bloklarinda RoPE yok
+        assert not self.g_nope or self.global_layers, "g_nope: glob katmani gerek"
         self.tier_fixed = bool(self.g_latent_rule or self.g_latent_seen)
         assert not self.g_latent_rule or self.g_latent_rule in self.g_latent_tiers, "g_latent_rule kademelerden biri"
         assert self.g_latent_rank >= 0 and self.g_raw_sentences >= 0, "g_latent_rank / g_raw_sentences >= 0"
@@ -499,7 +505,8 @@ class SentenceTransformer(torch.nn.Module):
         self.blocks = torch.nn.ModuleList(Block(d, heads, hidden, glob_kv_heads if k == "glob" else None,
                                                 int(attn_gate), self.g_latent_rank if k == "glob" else 0,
                                                 self.g_latent_rope if k == "glob" else 0,
-                                                self.g_latent_score if k == "glob" else 0, max(len(self.g_latent_tiers), 1))
+                                                self.g_latent_score if k == "glob" else 0, max(len(self.g_latent_tiers), 1),
+                                                bool(self.g_nope) and k == "glob")
                                           for k in kinds)
         self.norm = torch.nn.RMSNorm(d)
         for name, p in self.named_parameters():
