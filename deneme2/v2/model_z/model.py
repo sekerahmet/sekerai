@@ -452,7 +452,7 @@ class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
                  attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_latent_rank=0, g_raw_sentences=0,
                  g_latent_rope=0, g_latent_score=0, g_latent_tiers=(), g_latent_budget=0.0, g_latent_price=0.0,
-                 g_latent_explore=0.3, g_latent_rule=0):
+                 g_latent_explore=0.3, g_latent_rule=0, g_latent_seen=""):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -481,6 +481,8 @@ class SentenceTransformer(torch.nn.Module):
         self.tier_budget, self.tier_price, self.tier_p = float(g_latent_budget), float(g_latent_price), float(g_latent_explore)
         self.tier_p_late = TIER_EXPLORE_LATE
         self.g_latent_rule = int(g_latent_rule)                         # sik token kademesi (kural; secici calismaz)
+        self.g_latent_seen = str(g_latent_seen or "")                    # gorme sikligi indeksi (kademe token'dan)
+        self.tier_fixed = bool(self.g_latent_rule or self.g_latent_seen)
         assert not self.g_latent_rule or self.g_latent_rule in self.g_latent_tiers, "g_latent_rule kademelerden biri"
         assert self.g_latent_rank >= 0 and self.g_raw_sentences >= 0, "g_latent_rank / g_raw_sentences >= 0"
         assert not self.g_latent_rank or (self.global_layers and not carry_group), "g_latent: glob katmani gerek, carry yok"
@@ -552,7 +554,7 @@ class SentenceTransformer(torch.nn.Module):
         Esnek r: ilk G blogunun n1(x)'i (detach) -> onem puani s.  Egitim (batch): okunan token'lar s'ye gore siralanir,
         paylar (_tier_fracs) alttan doldurulur (esitlik adim tohumlu gurultuyle bozulur), esikler tier_cut'a EMA; sinav /
         uretim: s tier_cut'la kademelenir.  -> kademe (B, T), ic ice maske m (B, T, r)."""
-        if self.g_latent_rule:
+        if self.tier_fixed:
             tk = batch.tokens if batch is not None else tokens
             tier = self.tier_of_token[tk.long().clamp(0, VOCAB - 1)]
             return tier, (torch.arange(self.g_latent_rank, device=x.device) < self.tier_r[tier][..., None]).float()

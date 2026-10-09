@@ -83,7 +83,7 @@ def load_run(out, data_dir, dev):
                            g_latent_rope=idt.get("g_latent_rope", 0), g_latent_score=idt.get("g_latent_score", 0),
                            g_latent_tiers=idt.get("g_latent_tiers", []), g_latent_budget=idt.get("g_latent_budget", 0),
                            g_latent_price=idt.get("g_latent_price", 0), g_latent_explore=idt.get("g_latent_explore", 0),
-                           g_latent_rule=idt.get("g_latent_rule", 0))
+                           g_latent_rule=idt.get("g_latent_rule", 0), g_latent_seen=idt.get("g_latent_seen", ""))
     model, _, _ = T._build(spec, dev)
     model.load_state_dict(pack["state"])
     model.row_len = idt["row_len"]                                       # uretim konum siniri, carry parca boyu
