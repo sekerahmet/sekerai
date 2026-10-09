@@ -349,21 +349,24 @@ def fp8_tiles(x, tile):
 class _Fp8BlockRef(torch.autograd.Function):
     """Ince taneli FP8 Linear'in saf torch basvurusu (her cihaz; GPU cekirdeginin olcutu ve CPU sayisal incelemesi).
     Uc GEMM de nicemlenmis girdilerle, fp32 birikimle: ileri x 1 x B / W B x B; dX dY 1 x B / W B x B; dW dY^T 1 x B
-    (token boyunca) / x B x 1 (token boyunca).  Butun tensorler E4M3."""
+    (token boyunca) / x B x 1 (token boyunca).  Butun tensorler E4M3.  Icerde autocast kapali: ileri ve geri GEMM'ler ayni
+    fp32 operandla (belge 100b)."""
 
     @staticmethod
     def forward(ctx, x, w, block):
         ctx.save_for_backward(x, w)
         ctx.block = block
-        return (fp8_tiles(x, (1, block))[0] @ fp8_tiles(w, (block, block))[0].t()).to(x.dtype)
+        with torch.autocast(x.device.type, enabled=False):
+            return (fp8_tiles(x, (1, block))[0] @ fp8_tiles(w, (block, block))[0].t()).to(x.dtype)
 
     @staticmethod
     def backward(ctx, g):
         x, w = ctx.saved_tensors
         b = ctx.block
         g = g.contiguous()
-        dx = fp8_tiles(g, (1, b))[0] @ fp8_tiles(w, (b, b))[0]
-        dw = fp8_tiles(g.t(), (1, b))[0] @ fp8_tiles(x, (b, 1))[0]
+        with torch.autocast(g.device.type, enabled=False):
+            dx = fp8_tiles(g, (1, b))[0] @ fp8_tiles(w, (b, b))[0]
+            dw = fp8_tiles(g.t(), (1, b))[0] @ fp8_tiles(x, (b, 1))[0]
         return dx.to(x.dtype), dw.to(w.dtype), None
 
 
