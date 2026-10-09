@@ -799,8 +799,10 @@ def main(argv=None):
         cpath = os.path.join(args.data, "train_token_counts.npy")
         if not os.path.exists(cpath):
             sys.exit("DUR: esnek r icin %s gerek" % cpath)
-        c = torch.tensor(np.load(cpath)[:D.VOCAB], dtype=torch.float) + 1
-        assert len(c) == D.VOCAB, "train_token_counts boyu"
+        c = np.zeros(D.VOCAB)                                            # sayim END'siz (V - 1)
+        cnt = np.load(cpath)[:D.VOCAB]
+        c[:len(cnt)] = cnt
+        c = torch.tensor(c, dtype=torch.float) + 1
         model.tok_surprisal.copy_(-(c / c.sum()).log().to(model.tok_surprisal.device))
     model.row_len = row_len                                              # uretim konum siniri, carry parca boyu
     last = None
