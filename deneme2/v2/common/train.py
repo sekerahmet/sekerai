@@ -54,11 +54,6 @@ kimliginden (alan yoksa 0); kapisiz checkpoint kapili surdurulmez (DUR).  --attn
 ikinci kolu da ekle"; "onaylıyorum, d // 64 yap"): kapi girdisi n1(x)'in ilk d // 64 boyutu, W (heads, d // 64) (speedrun
 124M tarifi; belge 88a s4.3, 90a; d768'de 12); d < 64 DUR.  Varsayilan auto (kullanici, 8 Ekim: "gate 2 varsayılan"):
 model_z ve d >= 64 ise 2, aksi halde 0.
---model v4_small / model_beta (belge 99; kullanici, 9 Ekim: "beta bence deepseek flash üzerine kurabiliriz model Z
-yerine"): model_beta/beta.py V4Small, transformer duzeni.  v4_small: DeepSeek-V4 dikkatinin kucuk yogun tabani (ham pencere
-128 + CSA / HCA sikistirma); model_beta: ayni taban, pencere yerine CUMLE siniri; --raw_sentences K (kullanici, 9 Ekim:
-"olur"): ham kisim = BOS + kendi cumlesi + onceki K cumle (varsayilan 0; yalniz model_beta; INHERIT'te, alan yoksa 0).
-Z, G, carry, kapi, n-gram, MTP yok (auto'lar 0; acik verilirse DUR).
 --stop_step N (kullanici, 8 Ekim): takvim degismeden adim N'de durur; checkpoint.pt + agent.pt + results.json (finished
 False, stopped_at, readings_skipped "stop_step"), son sinav ve okuma yok; --resume 1 kaldigi yerden.
 Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunluk sinirinda, epok sonunda ve bitiste;
@@ -128,10 +123,9 @@ GLOB_KV_DEFAULT = "auto"       # --glob_kv_heads verilmezse (kullanici, 8 Ekim: 
 ATTN_GATE_DEFAULT = "auto"     # --attn_gate verilmezse (kullanici, 8 Ekim: "gate 2 varsayılan"); testler eski 0'a sabitler
 NGRAM_DEFAULT = "auto"         # --ngram_embed verilmezse (kullanici, 8 Ekim: "gate 2 ve n gram girdi"); testler eski 0'a sabitler
 MTP_DEFAULT = "auto"           # --mtp verilmezse (kullanici, 8 Ekim: "Bu mtp varsayılan olsun"); testler eski 0'a sabitler
-BETA_MODELS = ("v4_small", "model_beta")   # model_beta/beta.py V4Small: taban (pencere) / Model Beta (cumle siniri), belge 99
 LR_REF = (2e-3, 768, 0.5)      # lr auto = lr0 (d0 / d) ^ us (aci / adim ~ lr 0,2 sqrt(d) sabit); d1024 olcumu: 1,4 / 1,7e-3 duz, 1,73e-3 icinde
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ngram_embed", "ngram_layers",
-           "ngram_sparse", "mtp", "raw_sentences")   # --resume'da verilmezse kimlikten
+           "ngram_sparse", "mtp")   # --resume'da verilmezse kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
@@ -141,7 +135,7 @@ READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_ge
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
-            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "beta")
+            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -271,17 +265,6 @@ def _build(args, dev):
     if _global_error(args):
         sys.exit("DUR: " + _global_error(args))
     torch.manual_seed(args.seed)
-    if args.model in BETA_MODELS:                                      # belge 99
-        sys.path.insert(0, os.path.join(root, "model_beta"))
-        from beta import V4Small
-        want = getattr(args, "beta", None)                             # yukleme: kosunun sabitleri bu kodunkiyle ayni mi
-        want = None if want is None else {"raw_sentences": 0, **want}   # alan yoksa 0 (9 Ekim oncesi Beta)
-        rs = getattr(args, "raw_sentences", None)
-        model = V4Small(args.d, args.layers, args.heads, sentence=args.model == "model_beta",
-                        vocab_rows=getattr(args, "vocab_rows", D.VOCAB),
-                        raw_sentences=(want or {}).get("raw_sentences", 0) if rs is None else rs)
-        assert want is None or want == model.config(), "beta sabitleri farkli: kosu %s, kod %s" % (want, model.config())
-        return model.to(dev), model.mask_fn, "transformer"
     if args.model == "transformer":
         sys.path.insert(0, os.path.join(root, "transformer"))
         from baseline import BaselineTransformer
@@ -555,7 +538,7 @@ def _git():
 
 def _args(argv):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--model", required=True, choices=("transformer", "model_z") + BETA_MODELS)
+    ap.add_argument("--model", required=True, choices=("transformer", "model_z"))
     ap.add_argument("--lr", type=lambda s: s if s == "auto" else float(s), default=None,
                     help="tepe lr (WSD); auto (varsayilan; muon / normuon): LR_REF[0] (LR_REF[1] / d) ^ LR_REF[2]; adamw'de "
                          "sayi sart (olculen 5e-4); --resume'da verilmezse kosunun kimliginden (belge 39, OLCULENLER_z)")
@@ -599,8 +582,6 @@ def _args(argv):
                     help="model_z: head basina attention cikis kapisi (belge 88a, 90a); 1 girdi n1(x), 2 girdi n1(x)'in "
                          "ilk d // 64 boyutu; auto (varsayilan): model_z ve d >= 64 ise 2, aksi 0; kimlikte; "
                          "--resume'da verilmezse kosunun kimliginden")
-    ap.add_argument("--raw_sentences", type=int, default=None,
-                    help="model_beta: ham kisma giren onceki cumle sayisi K (belge 99; varsayilan 0)")
     ap.add_argument("--mtp", type=lambda s: s if s == "auto" else int(s), default=None,
                     help="model_z: ayni-logit MTP ek hedef sayisi N (belge 90c; resmi kod N 2); agirlik recipe.mtp_weights, "
                          "son 1 / (N + 1) payda 0; auto (varsayilan): model_z 2 (carry'de 0), transformer 0; 0 kapali; "
@@ -619,10 +600,8 @@ def _args(argv):
     was = torch.load(ckpt, map_location="cpu", weights_only=False, mmap=True)["args"] \
         if args.resume and os.path.exists(ckpt) else None               # varsayilan degisse de kosu kendi ayariyla surer
     for k in args.defaulted if was is not None else ():
-        setattr(args, k, was.get(k, 0 if k in ("glob_kv_heads", "attn_gate", "mtp", "raw_sentences") or k.startswith("ngram")
-                                 else None))
+        setattr(args, k, was.get(k, 0 if k in ("glob_kv_heads", "attn_gate") or k.startswith("ngram") or k == "mtp" else None))
     args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
-    args.raw_sentences = args.raw_sentences or 0
     if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
         args.optimizer = DEFAULT_OPTIMIZER
     if args.global_layers is None:
@@ -695,12 +674,7 @@ def main(argv=None):
     if (args.ngram_layers or args.ngram_sparse) and (not args.ngram_embed or not 0 <= args.ngram_layers <= args.layers
                                                      or args.ngram_sparse not in (0, 1)):
         ng_err = "--ngram_layers / --ngram_sparse: --ngram_embed ile, 0 <= K <= layers, sparse 0 / 1"
-    beta_err = "--model %s: GQA / kapi / n-gram / MTP / global_layers / FP8 yok (belge 99)" % args.model if args.model in \
-        BETA_MODELS and (any((args.glob_kv_heads, args.attn_gate, args.ngram_embed, args.mtp, args.global_layers))
-                         or args.fp8 != "none") else None
-    if args.raw_sentences < 0 or (args.raw_sentences and args.model != "model_beta"):
-        beta_err = "--raw_sentences %d: yalniz model_beta, >= 0 (belge 99)" % args.raw_sentences
-    for err in (_global_error(args), _carry_error(args), ng_err, _mtp_error(args), beta_err):   # veri yuklenmeden
+    for err in (_global_error(args), _carry_error(args), ng_err, _mtp_error(args)):   # veri yuklenmeden
         if err:
             sys.exit("DUR: " + err)
     if args.optimizer in ("muon", "normuon") and _muon_missing():      # sessizce AdamW'ye dusulmez
@@ -764,7 +738,7 @@ def main(argv=None):
                  summaries_last=args.summaries_last, glob_kv_heads=args.glob_kv_heads, carry_summaries=args.carry_summaries,
                  carry_group=args.carry_group, vocab_rows=args.vocab_rows, attn_gate=args.attn_gate,
                  ngram_embed=args.ngram_embed, ngram_layers=args.ngram_layers, ngram_sparse=args.ngram_sparse,
-                 mtp=args.mtp, beta=model.config() if args.model in BETA_MODELS else None)
+                 mtp=args.mtp)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -786,9 +760,7 @@ def main(argv=None):
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
                "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0,
                **was}                                                    # sonradan eklenenler
-        if was.get("beta"):
-            was["beta"] = {"raw_sentences": 0, **was["beta"]}            # 9 Ekim (raw_sentences) oncesi Beta
-        diff ={k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
+        diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:
             diff["plan_sha256"] = "veri sirasi farkli"

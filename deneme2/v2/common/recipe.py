@@ -52,17 +52,12 @@ def _padded(batch, mask_fn):
     return mod if getattr(mask_fn, "includes_padding", False) else _with_padding(mod, batch.kind, batch.doc)
 
 
-def _kv_len(mask_fn, T):
-    return mask_fn.kv_len(T) if hasattr(mask_fn, "kv_len") else T
-
-
 def dense_mask(batch, mask_fn):
-    """-> bool (B, T, S + M) (SDPA attn_mask: True = gorulur; S = mask_fn.kv_len(T) (model_beta: ham + girdi yuvasi), yoksa
-    T; M carry bellek yuvasi, yoksa 0)."""
+    """-> bool (B, T, T + M) (SDPA attn_mask: True = gorulur; M carry bellek yuvasi, yoksa 0)."""
     B, T = batch.kind.shape
     mod = _padded(batch, mask_fn)
     dev = batch.kind.device
-    S = _kv_len(mask_fn, T) + (batch.mem_rows.shape[1] if getattr(batch, "mem_rows", None) is not None else 0)
+    S = T + (batch.mem_rows.shape[1] if getattr(batch, "mem_rows", None) is not None else 0)
     return mod(torch.arange(B, device=dev)[:, None, None], 0, torch.arange(T, device=dev)[None, :, None],
                torch.arange(S, device=dev)[None, None, :])
 
@@ -73,8 +68,7 @@ def block_mask(batch, mask_fn):
     B, T = batch.kind.shape
     mod = _padded(batch, mask_fn)
     dev = batch.kind.device
-    S = _kv_len(mask_fn, T) + (batch.mem_rows.shape[1] if getattr(batch, "mem_rows", None) is not None
-                               else 0)                                   # carry: T + M; model_beta: 2T
+    S = T + (batch.mem_rows.shape[1] if getattr(batch, "mem_rows", None) is not None else 0)   # carry: anahtar T + M
     return create_block_mask(mod, B, None, T, S, device=dev, BLOCK_SIZE=ATTN_BLOCK, _compile=dev.type == "cuda")
 
 

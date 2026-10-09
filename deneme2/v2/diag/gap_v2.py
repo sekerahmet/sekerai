@@ -252,8 +252,7 @@ def main(argv=None):
     res_nll, idts = {}, {}
     for kind, run in (("transformer", args.tf), ("model_z", args.mz)):
         model, mask_fn, layout, idt = load(run, args.data, dev)
-        assert kind == "transformer" or idt["model"] in (kind, "v4_small", "model_beta"), \
-            "%s: kosu %s modeli" % (run, idt["model"])         # --tf: taban (tf ya da Model Z); --mz: Model Z ya da Beta
+        assert kind == "transformer" or idt["model"] == kind, "%s: kosu %s modeli" % (run, idt["model"])  # --tf: taban (tf ya da Model Z)
         idts[kind] = {k: idt.get(k) for k in ("model", "d", "layers", "heads", "seed", "global_layers")}
         if dev.type == "cuda":
             for block in model.blocks:
