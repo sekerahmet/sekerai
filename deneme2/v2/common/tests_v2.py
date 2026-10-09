@@ -555,8 +555,8 @@ def _recipe_muon(R):
 
 
 def _recipe_normuon(R, TR):
-    """NorMuon (li2025_normuon Algorithm 1; kullanici, 8 Ekim): (a) ortak yol (momentum, nesterov, wd, NS) BatchedMuon'la
-    bit ayni (yalniz _apply farkli); (b) yiginli NorMuon = matris matris basvuru (Algorithm 1 satir 5-11, NS torch'un tek
+    """NorMuon (li2025_normuon Algorithm 1; kullanici, 8 Ekim): (a) momentum yolu BatchedMuon'la bit ayni (8 Ekim koduyla
+    butun yol bit ayni: t_normuon); (b) yiginli NorMuon = matris matris basvuru (Algorithm 1 satir 5-11, NS torch'un tek
     matris NS'i); (c) ilk adimda W farkinin satir normlari esit (CV ~0), guncelleme RMS'i 0,2 lr; surdurme: 2 + 3 adim =
     kesintisiz 5 (state_dict, second_momentum_buffer dahil)."""
     from torch.optim._muon import _zeropower_via_newtonschulz
@@ -579,9 +579,8 @@ def _recipe_normuon(R, TR):
             opt.step()
         return ps, opt
     a, oa = run(R.BatchedMuon, range(3))
-    b, ob = run(R.NorMuon, range(3), patch=R.BatchedMuon._apply)
-    same_a = all(torch.equal(x, y) for x, y in zip(a, b)) and all(
-        torch.equal(oa.state[x]["momentum_buffer"], ob.state[y]["momentum_buffer"]) for x, y in zip(a, b))
+    b, ob = run(R.NorMuon, range(3))                                     # 9 Ekim: NorMuon kendi step'i (_apply yok)
+    same_a = all(torch.equal(oa.state[x]["momentum_buffer"], ob.state[y]["momentum_buffer"]) for x, y in zip(a, b))
     c, oc = run(R.NorMuon, range(3))
     ref = [w.clone() for w in init]
     M = [torch.zeros_like(w) for w in init]
@@ -604,7 +603,7 @@ def _recipe_normuon(R, TR):
     e1, oe1 = run(R.NorMuon, range(2))
     e2, _ = run(R.NorMuon, range(2, 5), opt_state=oe1.state_dict(), start=[x.detach() for x in e1])
     full_, ofull = run(R.NorMuon, range(5))
-    check("NorMuon: (a) ortak yol = BatchedMuon (bit); (b) yiginli = matris matris Algorithm 1 basvurusu (goreli %.1e); "
+    check("NorMuon: (a) momentum = BatchedMuon (bit); (b) yiginli = matris matris Algorithm 1 basvurusu (goreli %.1e); "
           "(c) ilk adim satir normlari esit (CV %.1e), RMS / lr %s; 2 + 3 adim = kesintisiz 5 (bit, ikinci moment dahil)"
           % (rel, cv, [round(x, 3) for x in rms]),
           same_a and rel < 1e-5 and cv < 1e-4 and all(abs(x - 0.2) < 1e-4 for x in rms)
@@ -2695,8 +2694,137 @@ def t_mtp():
          TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT, TR.MTP_DEFAULT) = saved
 
 
+def _ref_normuon():
+    """8 Ekim (751f294) NorMuon'u sinifi (t_normuon basvurusu); recipe ancak burada import edilir."""
+    import recipe as R
+
+    class _RefNorMuon(R.BatchedMuon):
+        """8 Ekim (751f294) NorMuon'u, birebir: BatchedMuon.step + parametre basina _apply (t_normuon basvurusu)."""
+
+        def _apply(self, g, shape, ps, O):
+            m, n = shape
+            O = O.float()
+            for p in ps:
+                if "second_momentum_buffer" not in self.state[p]:
+                    self.state[p]["second_momentum_buffer"] = torch.zeros(m, 1, dtype=torch.float, device=p.device)
+            v = torch.stack([self.state[p]["second_momentum_buffer"] for p in ps])
+            v.lerp_(O.square().mean(-1, keepdim=True), 1 - g["beta2"])
+            Oh = O / (v.sqrt() + R.NORMUON_EPS)
+            eta = 0.2 * g["lr"] * math.sqrt(m * n) / Oh.flatten(1).norm(dim=1).clamp_min(R.NORMUON_EPS)
+            for j, p in enumerate(ps):
+                self.state[p]["second_momentum_buffer"].copy_(v[j])
+                p.sub_((Oh[j] * eta[j]).to(p.dtype))
+
+    return _RefNorMuon, R
+
+
+def t_normuon():
+    """NorMuon grup basina birlesik yol (belge 94 s10.3) = 8 Ekim kodu: gercek egitim adimlariyla (train._step, MTP 2,
+    clip, NorMuon + AdamW; varsayilan yapida kucuk Model Z) fp32 CPU, lr her adim farkli: 4 adimda kayip, gradyan,
+    parametre, momentum ve ikinci moment tamponlari BIT ayni."""
+    import types
+    import train as TR
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "model_z"))
+    from model import SentenceTransformer, summaries_last
+    rng = np.random.default_rng(9)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(2, 6))]
+               for _ in range(8)]
+    flat, sent, story = [], [], [0]
+    for s_ in stories:
+        for t in s_:
+            sent.append((len(flat), len(flat) + len(t)))
+            flat += t
+        story.append(len(sent))
+    st = types.SimpleNamespace(stream=np.array(flat, np.int64), sent=np.array(sent, np.int64), story=np.array(story))
+
+    def run(ref):
+        torch.manual_seed(0)
+        m = SentenceTransformer(d=128, layers=3, heads=4, global_layers=1, glob_kv_heads=2, attn_gate=2, ngram_rows=97,
+                                ngram_layers=1)
+        opt, _ = TR._optimizer(m, "normuon", 2e-3, False)
+        if ref:
+            opt.muon.__class__ = _ref_normuon()[0]
+        out = []
+        for k in range(4):
+            for g in opt.param_groups:
+                g["lr"] = (2e-3, 1.7e-3, 9e-4, 3e-4)[k] * g.get("lr_mult", 1.0)
+            b = D.build_batch(st, [[(2 * k) % 8, (2 * k + 1) % 8], [(2 * k + 4) % 8, (2 * k + 5) % 8]], "model_z",
+                              row_len=160)
+            mt = D.mtp_targets(b, 2)
+            b, perm = summaries_last(b)
+            mt = mt.gather(1, perm[..., None].expand(-1, -1, 2))
+            loss, _, _ = TR._step(m, b, m._masks(True), opt, False, mtp=(mt, torch.tensor([0.5, 0.25])))
+            sd = opt.muon.state
+            out.append((loss.clone(), {n: q.detach().clone() for n, q in m.named_parameters()},
+                        [t.clone() for q in opt.muon.param_groups[0]["params"] for t in (
+                            sd[q]["momentum_buffer"], sd[q]["second_momentum_buffer"])]))
+        return out, type(opt.muon).__name__
+    (a, na), (b, nb) = run(False), run(True)
+    same = all(torch.equal(la, lb) and all(torch.equal(pa[n], pb[n]) for n in pa)
+               and all(torch.equal(x, y) for x, y in zip(sa, sb)) for (la, pa, sa), (lb, pb, sb) in zip(a, b))
+    check("normuon: grup basina birlesik yol = 8 Ekim NorMuon (%s / %s), 4 adim kayip / parametre / iki tampon bit ayni"
+          % (na, nb), same and na == "NorMuon" and nb == "_RefNorMuon" and len(a[0][2]) > 0,
+          [round(float(x[0]), 5) for x in a])
+
+
+def t_clipfold():
+    """CLIP_IN_OPTIMIZER (belge 94 s11.1): clip katsayisi gradyani yerinde carpmak yerine optimizer'a.  Birlesik AdamW (CPU'da da
+    fused) + NorMuon, gercek egitim adimlari (train._step, MTP 2), kucuk Model Z: (a) kirpma yokken (katsayi 1) 3 adimda
+    kayip / grad normu / parametreler BIT ayni; (b) kirpma varken (ilk adim, norm > 1) grad normu bit ayni, Muon
+    parametreleri bit ayni, AdamW parametreleri g * c yerine g / (1 / c): fark <= 1e-6 x parametre olcegi."""
+    import types
+    import train as TR
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "model_z"))
+    from model import SentenceTransformer, summaries_last
+    rng = np.random.default_rng(11)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(2, 6))]
+               for _ in range(8)]
+    flat, sent, story = [], [], [0]
+    for s_ in stories:
+        for t in s_:
+            sent.append((len(flat), len(flat) + len(t)))
+            flat += t
+        story.append(len(sent))
+    st = types.SimpleNamespace(stream=np.array(flat, np.int64), sent=np.array(sent, np.int64), story=np.array(story))
+
+    def run(fold, clip, steps):
+        saved = TR.CLIP_IN_OPTIMIZER, TR.CLIP
+        TR.CLIP_IN_OPTIMIZER, TR.CLIP = fold, clip
+        try:
+            torch.manual_seed(0)
+            m = SentenceTransformer(d=128, layers=3, heads=4, global_layers=1, glob_kv_heads=2, attn_gate=2,
+                                    ngram_rows=97, ngram_layers=1)
+            opt, _ = TR._optimizer(m, "normuon", 2e-3, True)               # True: birlesik AdamW (CPU'da da var)
+            out = []
+            for k in range(steps):
+                b = D.build_batch(st, [[(2 * k) % 8, (2 * k + 1) % 8], [(2 * k + 4) % 8, (2 * k + 5) % 8]], "model_z",
+                                  row_len=160)
+                mt = D.mtp_targets(b, 2)
+                b, perm = summaries_last(b)
+                mt = mt.gather(1, perm[..., None].expand(-1, -1, 2))
+                loss, gn, _ = TR._step(m, b, m._masks(True), opt, False, mtp=(mt, torch.tensor([0.5, 0.25])))
+                out.append((loss.clone(), gn.clone(), {n: q.detach().clone() for n, q in m.named_parameters()}))
+            muon = {n for n, q in m.named_parameters() if any(q is x for x in opt.muon.param_groups[0]["params"])}
+            return out, muon, opt.grad_coef_ok
+        finally:
+            TR.CLIP_IN_OPTIMIZER, TR.CLIP = saved
+    (a, _, ok), (b, _, _) = run(False, 1e9, 3), run(True, 1e9, 3)
+    same = all(torch.equal(la, lb) and torch.equal(ga, gb) and all(torch.equal(pa[n], pb[n]) for n in pa)
+               for (la, ga, pa), (lb, gb, pb) in zip(a, b))
+    check("clipfold: kirpma yokken (katsayi 1) 3 adimda kayip / grad normu / parametreler bit ayni", same and ok,
+          [round(float(x[0]), 5) for x in a])
+    (c, muon, _), (d, _, _) = run(False, 1.0, 1), run(True, 1.0, 1)
+    (_, gc, pc), (_, gd, pd) = c[0], d[0]
+    rest = [n for n in pc if n not in muon]
+    rel = max(float((pc[n] - pd[n]).abs().max() / pc[n].abs().max().clamp_min(1e-12)) for n in rest)
+    check("clipfold: kirpma varken (grad normu %.3f > 1) norm ve %d Muon parametresi bit ayni, AdamW %d parametresi "
+          "goreli <= 1e-6 (%.1e)" % (float(gc), len(muon), len(rest), rel), float(gc) > 1 and torch.equal(gc, gd)
+          and all(torch.equal(pc[n], pd[n]) for n in muon) and rel <= 1e-6 and len(muon) > 0)
+
+
 TESTS = dict(fp8=t_fp8, data=t_data, pack=t_pack, recipe=t_recipe, metrics=t_metrics, integration=t_integration,
-             train=t_train, drive=t_drive, tokens=t_tokens, fineweb=t_fineweb, mtp=t_mtp)
+             train=t_train, drive=t_drive, tokens=t_tokens, fineweb=t_fineweb, mtp=t_mtp, normuon=t_normuon,
+             clipfold=t_clipfold)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)
