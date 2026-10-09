@@ -308,7 +308,7 @@ class Block(torch.nn.Module):
 
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
-                 attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, local_mlp=0):
+                 attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, local_mlp=0, local_mlp_keep=-1):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -332,15 +332,19 @@ class SentenceTransformer(torch.nn.Module):
             self.E = torch.nn.Embedding(vocab_rows, d, _weight=torch.zeros(vocab_rows, d))
         kinds = ["loc"] * (layers - self.global_layers) + ["glob"] * self.global_layers
         self.g_nope = int(g_nope)                                           # G (glob) bloklarinda RoPE yok
-        self.local_mlp = int(local_mlp)                                     # yerel MLP ic genisligi; G toplami korur
-        width = dict(loc=hidden, glob=hidden)
+        self.local_mlp, self.local_mlp_keep = int(local_mlp), int(local_mlp_keep)
+        widths = [hidden] * layers                                          # katman basina MLP ic genisligi
         if self.local_mlp:
             n_loc = layers - self.global_layers
             assert self.global_layers and 0 < self.local_mlp, "local_mlp: G katmani gerek"
-            width = dict(loc=self.local_mlp, glob=round((layers * hidden - n_loc * self.local_mlp) / self.global_layers / 64) * 64)
-        self.mlp_widths = width
-        self.blocks = torch.nn.ModuleList(Block(d, heads, width[k], glob_kv_heads if k == "glob" else None,
-                                                int(attn_gate), bool(self.g_nope) and k == "glob") for k in kinds)
+            if self.local_mlp_keep < 0:                                     # yer degistirme: G toplami korur
+                g_w = round((layers * hidden - n_loc * self.local_mlp) / self.global_layers / 64) * 64
+                widths = [self.local_mlp] * n_loc + [g_w] * self.global_layers
+            else:                                                           # kesme: ilk keep yerel tam, kalan yerel dar, G ayni
+                widths = [hidden if i < self.local_mlp_keep else self.local_mlp for i in range(n_loc)] + [hidden] * self.global_layers
+        self.mlp_widths = widths
+        self.blocks = torch.nn.ModuleList(Block(d, heads, widths[i], glob_kv_heads if k == "glob" else None,
+                                                int(attn_gate), bool(self.g_nope) and k == "glob") for i, k in enumerate(kinds))
         self.norm = torch.nn.RMSNorm(d)
         for name, p in self.named_parameters():
             if p.dim() == 2 and not name.endswith("attn_gate"):          # kapi sifir kalir
