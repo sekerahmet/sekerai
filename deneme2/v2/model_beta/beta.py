@@ -115,7 +115,7 @@ def make_mask(m, sentence, raw_sentences=0):
             s = se.clamp(min=0)
             comp = (kv >= T) & (se >= 0) & (s <= q) & (doc[b, s] == doc[b, q])
             if sentence:
-                comp &= sent[b, s] < sent[b, q]
+                comp = comp & (sent[b, s] < sent[b, q])                  # yerinde degil: flex alt grafigi copy_ derleyemez
             return raw | comp
         return mask_mod
     mask_fn.includes_padding = True                                         # recipe sarmaz
