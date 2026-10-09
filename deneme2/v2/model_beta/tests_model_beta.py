@@ -48,7 +48,7 @@ def _rows():
     return va, D.build_batch(va, rows, "transformer", "cpu", 64), rows
 
 
-def _reference(batch, m, sentence):
+def _reference(batch, m, sentence, raw=0):
     """Bagimsiz dongu: (B, T, 2T) gorunurluk, yuva -> grup token listesi, hikaye ici konum.  Hikaye BOS ile, cumle END
     ile ayrilir (batch.sent / doc kullanilmaz; yalniz kind)."""
     kind = batch.kind.tolist()
@@ -87,7 +87,7 @@ def _reference(batch, m, sentence):
             for j in range(q + 1):
                 if story[j] != story[q]:
                     continue
-                vis[b, q, j] = (sidx[j] == sidx[q] or sidx[j] == -1) if sentence else q - j < BT.WINDOW
+                vis[b, q, j] = (0 <= sidx[q] - sidx[j] <= raw or sidx[j] == -1) if sentence else q - j < BT.WINDOW
             if m:
                 for e, (end, cols) in enumerate(grp):
                     if story[end] == story[q] and end <= q and (not sentence or sidx[end] < sidx[q]):
@@ -106,11 +106,12 @@ def t_mask():
     old = _pin(**SMALL)
     try:
         real = (b.kind != D.Kind.PAD).numpy()
-        for sentence, ms in ((False, (0, BT.CSA, BT.HCA)), (True, (0, BT.CSA, BT.SENTENCE))):
+        for sentence, raw, ms in ((False, 0, (0, BT.CSA, BT.HCA)), (True, 0, (0, BT.CSA, BT.SENTENCE)),
+                                  (True, 1, (0, BT.CSA, BT.SENTENCE)), (True, 3, (0, BT.CSA, BT.SENTENCE))):
             for m in ms:
-                f = BT.make_mask(m, sentence)
+                f = BT.make_mask(m, sentence, raw)
                 mask = BT.dense(f, b.kind, b.doc, b.sent).numpy()
-                vis, slots, pin = _reference(b, m, sentence)
+                vis, slots, pin = _reference(b, m, sentence, raw)
                 S = mask.shape[2]
                 ok = np.array_equal(mask[real], vis[:, :, :S][real]) and mask.any(-1).all()
                 n = sum(len(g) for g in slots)
@@ -123,16 +124,16 @@ def t_mask():
                         inside = {c for _, cols in grp for c in cols}
                         ok &= all(int(gid[r, j]) == b.kind.shape[1] for j in range(b.kind.shape[1]) if j not in inside)
                 check("mask %s m %s: dense maske = bagimsiz dongu (gercek satirlar); yuva / grup / konum ayni; her satirda "
-                      "en az bir anahtar" % ("beta" if sentence else "taban", m), ok, "%d girdi" % n)
+                      "en az bir anahtar" % ("beta K %d" % raw if sentence else "taban", m), ok, "%d girdi" % n)
         check("mask: batch.pos = hikaye ici konum (BOS 0)", np.array_equal(b.pos.numpy()[real], _reference(b, 0, False)[2][real]))
     finally:
         _pin(**old)
 
 
-def _model(sentence, seed=0, ratios=None):
+def _model(sentence, seed=0, ratios=None, raw=0):
     torch.manual_seed(seed)
     r = ratios or ((0, BT.CSA, BT.SENTENCE if sentence else BT.HCA))
-    return BT.V4Small(32, len(r), 2, sentence=sentence, ratios=r).eval()
+    return BT.V4Small(32, len(r), 2, sentence=sentence, ratios=r, raw_sentences=raw).eval()
 
 
 def t_model():
@@ -146,9 +147,9 @@ def t_model():
     va, b, rows = got
     old = _pin(**SMALL)
     try:
-        for sentence in (False, True):
-            name = "beta" if sentence else "taban"
-            m = _model(sentence)
+        for sentence, raw in ((False, 0), (True, 0), (True, 1)):
+            name = "beta K %d" % raw if sentence else "taban"
+            m = _model(sentence, raw=raw)
             blk = m.blocks[1]
             x = torch.randn(b.tokens.shape + (32,))
             h = blk.n1(x)
@@ -193,15 +194,18 @@ def t_model():
                         blk_.compressor.wkv.weight.data.zero_()
                 with torch.no_grad():
                     ha, hb = m._batch_hidden(b), m._batch_hidden(b3)
-                s1 = [j for j in cols if int(b.sent[r0, j]) >= 1]
-                m2 = _model(sentence)
+                far = [j for j in cols if int(b.sent[r0, j]) > raw]                  # ham kismin disi
+                near = [j for j in cols if 1 <= int(b.sent[r0, j]) <= raw]             # K > 0: ham kisimda
+                m2 = _model(sentence, raw=raw)
                 with torch.no_grad():
                     hc, hd = m2._batch_hidden(b), m2._batch_hidden(b3)
-                check("model beta: onceki cumle yalniz sikistirilmis yoldan: Compressor.wkv 0 iken cumle 0'daki degisiklik "
-                      "sonraki cumlelere ulasmaz, aciksa ulasir",
-                      torch.equal(ha[r0, s1], hb[r0, s1]) and not torch.equal(hc[r0, s1], hd[r0, s1]))
+                check("model %s: K 0: cumle 0 sonraki cumlelere yalniz sikistirilmis yoldan (Compressor.wkv 0 iken ulasmaz, "
+                      "aciksa ulasir); K > 0: ham kisimdaki cumleye Compressor kapaliyken de ulasir (katmanlar boyunca "
+                      "alici alan buyur, uzaktaki cumle ayrica sinanmaz)" % name,
+                      (not raw and far and torch.equal(ha[r0, far], hb[r0, far]) and not torch.equal(hc[r0, far], hd[r0, far]))
+                      or (raw and near and not torch.equal(ha[r0, near], hb[r0, near])))
 
-            m = _model(sentence)
+            m = _model(sentence, raw=raw)
             attn = tuple(R.block_mask(b, f) for f in m.mask_fn)
             with torch.no_grad():
                 nd = m.loss_per_target(b)[0]
@@ -266,9 +270,22 @@ def t_train():
                   and a["identity"]["beta"] == mm.config(), "kayip %.3f -> %.3f, ilk %.4f / %.4f" % (
                       np.mean(L[:3]), np.mean(L[-3:]), L[0], want))
         msgs = [T2._exit_msg(TR.main, base + ["--model", "model_beta", "--steps", "2", "--out", out("dur")] + f)
-                for f in (["--mtp", "2"], ["--glob_kv_heads", "2"], ["--fp8", "rowwise"])]
-        check("train: model_beta + --mtp 2 / --glob_kv_heads 2 / --fp8 DURUR (v1'de yok)",
-              all(m is not None for m in msgs) and "model_beta" in msgs[1] and "model_beta" in msgs[2], str(msgs))
+                for f in (["--mtp", "2"], ["--glob_kv_heads", "2"], ["--fp8", "rowwise"], ["--raw_sentences", "-1"])]
+        msgs += [T2._exit_msg(TR.main, base + ["--model", mo, "--steps", "2", "--raw_sentences", "1", "--out", out("dur")])
+                 for mo in ("v4_small", "transformer")]
+        check("train: model_beta + --mtp 2 / --glob_kv_heads 2 / --fp8 / --raw_sentences -1 DURUR; --raw_sentences "
+              "v4_small / transformer'da DURUR", all(m is not None for m in msgs) and "model_beta" in msgs[1]
+              and "model_beta" in msgs[2] and all("raw_sentences" in m for m in msgs[3:]), str(msgs))
+
+        a = TR.main(base + ["--model", "model_beta", "--steps", "4", "--raw_sentences", "2", "--out", out("raw2")])
+        mr, idr = GR.load_run(out("raw2"), data, torch.device("cpu"))
+        args = TR._args(base + ["--model", "model_beta", "--out", "x"])
+        args.beta = {k: v for k, v in mr.config().items() if k != "raw_sentences"}
+        args.raw_sentences = None
+        old_cfg = TR._build(args, torch.device("cpu"))[0].raw_sentences
+        check("train: --raw_sentences 2 kimlikte (beta.raw_sentences 2) ve load_run onu kurar; alani olmayan eski Beta "
+              "kimligi 0 ile kurulur", a["identity"]["beta"]["raw_sentences"] == 2 and mr.raw_sentences == 2
+              and idr["beta"]["raw_sentences"] == 2 and old_cfg == 0)
 
         cmd = base + ["--model", "model_beta", "--steps", "8"]
         stopped, _ = T2._cut_and_resume(TR, cmd, out("cut"))

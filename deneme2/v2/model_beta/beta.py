@@ -12,8 +12,9 @@ yok) m token'i boyut basina softmax kapisiyla tek girdiye toplar, RMSNorm, RoPE 
 
 Iki duzen (sentence):
     False (taban, V4): ham pencere son WINDOW token; grup = hikayede m'lik ardisik token, tamamlaninca gorunur.
-    True  (Model Beta): ham pencere = BOS + kendi cumlesi; grup = cumle icinde m'lik parca (cumle sonu son parcayi
-          kapatir), ratio SENTENCE = cumle basina tek girdi; yalniz onceki cumlelerin girdileri gorunur.
+    True  (Model Beta): ham pencere = BOS + kendi cumlesi + onceki raw_sentences (K) cumle; grup = cumle icinde m'lik
+          parca (cumle sonu son parcayi kapatir), ratio SENTENCE = cumle basina tek girdi; onceki BUTUN cumlelerin girdileri
+          gorunur (K > 0'da ham kisimla ortusur, V4'te de pencere ile girdiler ortusur).
 Egitim: anahtar [ham T | girdi yuvalari T] (yuva = grubun sirasi), maske katman turu basina (mask_fn ikilisi gibi demet).
 Uretim: her adimda tam ileri (onbelleksiz, v1).
 """
@@ -93,8 +94,9 @@ def groups(kind, doc, sent, m, sentence):
     return gid, slot_end[:, :T], slot_pos[:, :T].clamp(max=T - 1)
 
 
-def make_mask(m, sentence):
-    """Katman turu -> mask_fn(kind, doc, sent) -> mask_mod(b, h, q, kv); kv < T ham anahtar, kv >= T girdi yuvasi."""
+def make_mask(m, sentence, raw_sentences=0):
+    """Katman turu -> mask_fn(kind, doc, sent) -> mask_mod(b, h, q, kv); kv < T ham anahtar, kv >= T girdi yuvasi.
+    raw_sentences K (Beta): ham = BOS + 0 <= sent[q] - sent[j] <= K."""
     def mask_fn(kind, doc, sent):
         T = kind.shape[1]
         slot_end = groups(kind, doc, sent, m, sentence)[1] if m else None
@@ -102,7 +104,8 @@ def make_mask(m, sentence):
         def mask_mod(b, h, q, kv):
             j = kv.clamp(max=T - 1)
             if sentence:
-                raw = (j <= q) & ((sent[b, j] == sent[b, q]) | (kind[b, j] == BOS))
+                d = sent[b, q] - sent[b, j]
+                raw = (j <= q) & (((d >= 0) & (d <= raw_sentences)) | (kind[b, j] == BOS))
             else:
                 raw = (j <= q) & (q - j < WINDOW)
             raw = (kv < T) & raw & (doc[b, j] == doc[b, q])
@@ -209,15 +212,18 @@ class V4Block(torch.nn.Module):
 
 
 class V4Small(torch.nn.Module):
-    def __init__(self, d=512, layers=8, heads=8, sentence=False, ratios=None, vocab_rows=VOCAB):
+    def __init__(self, d=512, layers=8, heads=8, sentence=False, ratios=None, vocab_rows=VOCAB, raw_sentences=0):
         """sentence: False taban (V4 pencere), True Model Beta (cumle siniri).  ratios: katman basina m (0 yalniz pencere);
-        yoksa layer_ratios.  vocab_rows: E satir sayisi (baseline ile ayni sozluk dolgusu)."""
+        yoksa layer_ratios.  vocab_rows: E satir sayisi (baseline ile ayni sozluk dolgusu).  raw_sentences: Beta'da ham
+        kisma giren onceki cumle sayisi (taban 0)."""
         super().__init__()
         self.END, self.EOS, self.row_len, self.sentence = END_ID, EOS_ID, ROW_LEN, sentence
         self.ratios = tuple(ratios) if ratios is not None else layer_ratios(layers, sentence)
         assert len(self.ratios) == layers
         self.kinds = sorted(set(self.ratios), key=self.ratios.index)                 # katman turleri (maske basina)
-        self.mask_fn = tuple(make_mask(m, sentence) for m in self.kinds)
+        assert raw_sentences >= 0 and (sentence or not raw_sentences), "raw_sentences yalniz Beta, >= 0"
+        self.raw_sentences = raw_sentences
+        self.mask_fn = tuple(make_mask(m, sentence, raw_sentences) for m in self.kinds)
         hidden = -(-int(8 * d / 3) // 8) * 8
         assert vocab_rows >= VOCAB, "vocab_rows >= VOCAB"
         self.E = torch.nn.Embedding(VOCAB, d)
@@ -235,7 +241,7 @@ class V4Small(torch.nn.Module):
 
     def config(self):
         """Modul sabitleri (kimlikte saklanir; yuklemede ayni olmali)."""
-        return dict(ratios=list(self.ratios), sentence=self.sentence, window=WINDOW, head_dim=HEAD_DIM, rope_dim=ROPE_DIM,
+        return dict(ratios=list(self.ratios), sentence=self.sentence, raw_sentences=self.raw_sentences, window=WINDOW, head_dim=HEAD_DIM, rope_dim=ROPE_DIM,
                     o_groups=O_GROUPS, q_head_norm=Q_HEAD_NORM, norm_eps=NORM_EPS,
                     rope_theta=[ROPE_THETA, COMPRESS_ROPE_THETA])
 
