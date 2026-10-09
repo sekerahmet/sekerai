@@ -135,6 +135,7 @@ VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dol
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
 COMPILE_MODE = "max-autotune-no-cudagraphs"   # bloklarin derleme modu (5w: torba K 1024 -2,9 ms/adim; kullanici, 7 Ekim)
+CLIP_IN_OPTIMIZER = True       # clip katsayisi optimizer'a (grad yerinde carpilmaz; belge 94 s11.1), destekleyen optimizer'da
 READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
 READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
@@ -390,8 +391,13 @@ def _step(model, batch, mask_fn, opt, cuda, timer=None, cont=None, mtp=None):
     opt.zero_grad(set_to_none=True)
     loss.backward()
     seen = getattr(model, "ngram_seen", None)                          # seyrek bigram yapragi kirpmaya dahil
-    gn = torch.nn.utils.clip_grad_norm_(model.parameters() if seen is None else [*model.parameters(), seen[1]], CLIP)
-    opt.step()
+    params = list(model.parameters()) if seen is None else [*model.parameters(), seen[1]]
+    if CLIP_IN_OPTIMIZER and getattr(opt, "grad_coef_ok", False):       # clip_grad_norm_ ile ayni norm ve katsayi;
+        gn = torch.nn.utils.get_total_norm([p.grad for p in params if p.grad is not None])   # carpim optimizer'da
+        opt.step(grad_coef=torch.clamp(CLIP / (gn + 1e-6), max=1.0))
+    else:
+        gn = torch.nn.utils.clip_grad_norm_(params, CLIP)
+        opt.step()
     return main.detach(), gn.detach(), extra
 
 
