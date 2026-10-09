@@ -837,6 +837,9 @@ def main(argv=None):
             tab = torch.full((D.VOCAB,), rest, dtype=torch.long)
             tab[torch.from_numpy(freq)] = ri
             model.tier_of_token.copy_(tab.to(model.tier_of_token.device))
+            log("g_latent_rule %d: %d token turu kademe %d (metinde pay %.3f), kalani %d" % (
+                args.g_latent_rule, int(freq.sum()), args.g_latent_rule, float(c.numpy()[freq].sum() / c.sum()),
+                args.g_latent_tiers[rest]))
         if args.g_latent_seen:                                           # gorme sikligi indeksi: sayim x gorulen / toplam
             full = np.zeros(D.VOCAB)
             full[:len(cnt)] = cnt
@@ -851,9 +854,6 @@ def main(argv=None):
             log("g_latent_seen %s: gorulen / toplam %.3f | kademe %s | tur %s | metinde pay %s | ortalama r %.1f" % (
                 args.g_latent_seen, frac, args.g_latent_tiers, [int((tab == i).sum()) for i in range(top + 1)],
                 [round(s, 3) for s in share], sum(s * r for s, r in zip(share, args.g_latent_tiers))))
-            log("g_latent_rule %d: %d token turu kademe %d (metinde pay %.3f), kalani %d" % (
-                args.g_latent_rule, int(freq.sum()), args.g_latent_rule, float(c.numpy()[freq].sum() / c.sum()),
-                args.g_latent_tiers[rest]))
     model.row_len = row_len                                              # uretim konum siniri, carry parca boyu
     last = None
     if args.summaries_last:                                              # belge 66: [token'lar | ozetler | dolgu]
