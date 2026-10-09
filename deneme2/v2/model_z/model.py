@@ -575,7 +575,7 @@ class SentenceTransformer(torch.nn.Module):
 
     def _tier_label(self, tok, kind, doc, sent):
         """Onem etiketi: token ayni hikayede onu latent'ten okuyan bir cumlede (sent > sent_j + K) yeniden geciyorsa
-        -log p(token) (nadir tekrar daha onemli), degilse 0."""
+        -log p(token) / log V (nadir tekrar daha onemli), degilse 0."""
         B, T = tok.shape
         is_t = kind == TOKEN
         row = torch.arange(B, device=tok.device)[:, None]
@@ -585,7 +585,7 @@ class SentenceTransformer(torch.nn.Module):
         smax = torch.full((int(inv.max()) + 1,), -1, dtype=torch.long, device=tok.device).scatter_reduce(
             0, inv.flatten(), torch.where(is_t, sent.long(), -1).flatten(), "amax")
         later = is_t & (smax[inv] > sent.long() + self.g_raw_sentences)
-        return later.float() * self.tok_surprisal[tok.long().clamp(0, VOCAB - 1)]
+        return later.float() * self.tok_surprisal[tok.long().clamp(0, VOCAB - 1)] / math.log(VOCAB)   # ~[0, 1,5]
 
     def tier_update(self, n_targets):
         """Ana geri yayilimdan sonra: secici puani s onem etiketine (_tier_label) MSE ile, okunan token'larda (geri yayilir).

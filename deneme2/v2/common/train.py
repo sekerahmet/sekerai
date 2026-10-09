@@ -430,6 +430,9 @@ def _step(model, batch, mask_fn, opt, cuda, timer=None, cont=None, mtp=None):
         extra = dict(extra or {}, **model.tier_update((batch.target >= 0).sum()))
     seen = getattr(model, "ngram_seen", None)                          # seyrek bigram yapragi kirpmaya dahil
     params = list(model.parameters()) if seen is None else [*model.parameters(), seen[1]]
+    if getattr(model, "tier_select", None) is not None:                # secici kirpma normuna girmez (ana adimi kucultmesin)
+        sel = {id(p) for p in model.tier_select.parameters()}
+        params = [p for p in params if id(p) not in sel]
     if CLIP_IN_OPTIMIZER and getattr(opt, "grad_coef_ok", False):       # clip_grad_norm_ ile ayni norm ve katsayi;
         gn = torch.nn.utils.get_total_norm([p.grad for p in params if p.grad is not None])   # carpim optimizer'da
         opt.step(grad_coef=torch.clamp(CLIP / (gn + 1e-6), max=1.0))
