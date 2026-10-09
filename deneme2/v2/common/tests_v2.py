@@ -8,6 +8,7 @@ diag/tests_diag.py.
 
     python tests_v2.py [--only data,pack,recipe,metrics,integration,train,drive,tokens,fineweb,mtp]
 mtp (deneme/mtp, belge 90c): --mtp takvimi, ek hedefler, kayip, sizinti, train uctan uca (~1 dk).
+g_latent (deneme/z2-g-latent, belge 102): --g_latent_rank / --g_raw_sentences train uctan uca, surdurme, DUR.
 """
 import torch
 
@@ -2822,9 +2823,71 @@ def t_clipfold():
           and all(torch.equal(pc[n], pd[n]) for n in muon) and rel <= 1e-6 and len(muon) > 0)
 
 
+def t_g_latent():
+    """--g_latent_rank / --g_raw_sentences (belge 102) train.py uctan uca (CPU, d 32): kayip duser, ilk adim kaybi =
+    loss_per_target (summaries_last maskeleri), kimlikte alanlar; kesilip surdurulen = kesintisiz (bit; bayraksiz --resume
+    kimlikten alir); load_run latent modeli kurar; kurulamayan bayrak DURUR."""
+    import traceback
+    import train as TR
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
+    import generate_readings as GR
+    tp = tokenizer_path()
+    if tp is None:
+        print("ATLA g_latent: GPT-2 tokenizer yok", flush=True)
+        return
+    root, data, prompts = _train_root(tp)
+    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.VOCAB_ROWS, TR.GLOB_KV_DEFAULT,
+             TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT, TR.MTP_DEFAULT)
+    TR.BATCH_ROWS, TR.LOG_EVERY, TR.VOCAB_ROWS = 4, 1, D.VOCAB
+    TR.GLOB_KV_DEFAULT = TR.ATTN_GATE_DEFAULT = TR.NGRAM_DEFAULT = TR.MTP_DEFAULT = 0
+    TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=3, max_tokens=4)
+    base = ["--data", data, "--stream", root, "--device", "cpu", "--d", "32", "--layers", "2", "--heads", "2",
+            "--global_layers", "1", "--lr", "1e-2", "--checkpoint_minutes", "0", "--optimizer", "adamw", "--model", "model_z"]
+    out = lambda name: os.path.join(TMP, "runs_glat", name)  # noqa: E731
+    state = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
+    try:
+        cmd = base + ["--g_latent_rank", "8", "--g_raw_sentences", "1", "--steps", "12"]
+        a = TR.main(cmd + ["--out", out("a")])
+        L = [w["loss"] for w in a["log"]]
+        args = TR._args(cmd + ["--out", "x"])
+        m, _, layout = TR._build(args, torch.device("cpu"))
+        st = D.TokenStories(root, data, "train")
+        f = np.load(os.path.join(data, "train_pack_plan_e1.npz"))
+        ro, rs = f["row_offsets"], f["row_stories"]
+        import model as MZ
+        b = MZ.summaries_last(D.build_batch(st, [rs[ro[r]:ro[r + 1]].tolist() for r in range(4)], layout, "cpu", 64))[0]
+        with torch.no_grad():
+            want = m.loss_per_target(b, TR._attn(b, m._masks(True), False))[0].mean().item()
+        idt = a["identity"]
+        check("g_latent train: 12 adim, kayip duser; ilk adim kaybi = loss_per_target; kimlikte r 8, K 1; glob blogunda latent",
+              np.mean(L[-3:]) < np.mean(L[:3]) - 0.3 and abs(L[0] - want) < 1e-4 and idt["g_latent_rank"] == 8
+              and idt["g_raw_sentences"] == 1 and m.blocks[1].kv_down is not None and m.blocks[0].kv_down is None,
+              "kayip %.3f -> %.3f, ilk %.4f / %.4f" % (np.mean(L[:3]), np.mean(L[-3:]), L[0], want))
+        c8 = base + ["--g_latent_rank", "8", "--g_raw_sentences", "1", "--steps", "8"]
+        stopped, _ = _cut_and_resume(TR, c8, out("cut"))
+        TR.main(c8 + ["--out", out("full")])
+        a_, b_ = state(out("full")), state(out("cut"))
+        check("g_latent train: adim 4'te kesilip surdurulen = kesintisiz (agirliklar bit ayni)",
+              stopped and a_.keys() == b_.keys() and all(torch.equal(a_[k], b_[k]) for k in a_))
+        mz, idl = GR.load_run(out("a"), data, torch.device("cpu"))
+        check("g_latent: load_run kimlikten r / K ile kurar", mz.g_latent_rank == 8 and mz.g_raw_sentences == 1
+              and mz.blocks[1].kv_down is not None)
+        msgs = [_exit_msg(TR.main, base + f_ + ["--steps", "2", "--out", out("dur")]) for f_ in (
+            ["--g_latent_rank", "-1"], ["--g_raw_sentences", "1"], ["--g_latent_rank", "8", "--global_layers", "0"],
+            ["--g_latent_rank", "8", "--carry_summaries", "1"])]
+        msgs.append(_exit_msg(TR.main, base[:-2] + ["--model", "transformer", "--global_layers", "0", "--g_latent_rank",
+                                                     "8", "--steps", "2", "--out", out("dur")]))
+        check("g_latent: r < 0, r'siz K, G'siz, carry ve transformer DURUR", all(x is not None for x in msgs), str(msgs))
+    except Exception:  # noqa: BLE001
+        check("g_latent", False, traceback.format_exc(limit=5))
+    finally:
+        (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.VOCAB_ROWS, TR.GLOB_KV_DEFAULT,
+         TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT, TR.MTP_DEFAULT) = saved
+
+
 TESTS = dict(fp8=t_fp8, data=t_data, pack=t_pack, recipe=t_recipe, metrics=t_metrics, integration=t_integration,
              train=t_train, drive=t_drive, tokens=t_tokens, fineweb=t_fineweb, mtp=t_mtp, normuon=t_normuon,
-             clipfold=t_clipfold)
+             clipfold=t_clipfold, g_latent=t_g_latent)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)

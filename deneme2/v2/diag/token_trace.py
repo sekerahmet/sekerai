@@ -68,6 +68,7 @@ model_z_unseen_mask.includes_padding = True
 def attention_weights(block, x, pos, mask):
     """Blok girdisi x (B, T, d), konum, dense maske (B, T, T) -> attention agirliklari (B, H, T, T) fp32; GQA'da k head
     boyunca tekrarlanir (SDPA enable_gqa tanimi)."""
+    assert getattr(block, "kv_down", None) is None, "g_latent glob blogu: attention_weights latent anahtari bilmez"
     q, k, v = block._qkv(x, pos)
     k = k.repeat_interleave(block.heads // block.kv_heads, 1)
     s = (q.float() @ k.float().transpose(-1, -2)) / q.shape[-1] ** 0.5

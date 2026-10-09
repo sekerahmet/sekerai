@@ -37,6 +37,12 @@ ayni (doc, sent) cumlesinin TOKEN'i ise, degilse END nobetcisi (cumle siniri asi
 satirlarina 0.  Uretimde SummaryCache prev, StaticCache prev tamponu.  Hiz (belge 90b ek): ngram_layers K yalniz ilk K
 blok girdisine ekler (0: hepsi); ngram_sparse egitimde tabloyu yalniz okunan satirlarla (ngram_seen) gunceller
 (recipe.NgramRowAdam).
+G latent (deneme, --g_latent_rank r, --g_raw_sentences K; belge 102; kullanici, 9 Ekim: "token vektör ama r bir izdüşüm";
+"kaç cümle gördüğünü pencere yapalım. K=0 yani kendi cümlesi ham olur"): glob bloklarinda sorgunun cumlesi ve onceki K
+cumle (+ BOS, Z'ler) ham K / V; daha eski cumlelerin token'lari token basina latent c = RMSNorm(W_down n1(x)) (r), K / V =
+W_up c (DeepSeek-V3 MLA, inference/model.py :430-432 wkv_a / kv_norm / wkv_b; egitimde yeniden acilir, naive yol :471-479).
+RoPE ve QK-norm yukari izdusumden SONRA, token'in gercek konumunda (MLA'nin ayrik RoPE'si yerine; belge 102 s3).  Anahtar
+[ham T | latent T], maske model_z_global_latent_mask / model_z_last_latent_ranges.
 """
 import dataclasses
 import functools
@@ -165,20 +171,8 @@ def model_z_summaries_last_ranges(kind, doc, sent, glob=False, n_mem=None):
     satirin ilk hikayesinin sorgulari ucuncu araligi [T, T + n_mem) gorur (glob'da BOS yuvasi haric, [T + 1, ...)); anahtar
     uzunlugu T + M.  Dolgu kuralini icerir (includes_padding)."""
     B, T = kind.shape
-    big, large = T + 2, 1 << 40
-    tok, summ, pad = kind == TOKEN, (kind == BOS) | (kind == ZTOK), kind == PAD
-    col = torch.arange(T, device=kind.device).expand(B, T)
-    d, s = doc.long() * big, sent.long()
-    ktok = torch.where(tok, d + s, large)                                   # artan: token'lar, sonra buyuk
-    ksum = torch.where(summ, d + s + 1, torch.where(tok, -1, large))        # artan: -1, ozetler, buyuk
-    a0 = torch.searchsorted(ktok, d if glob else d + s)
-    a1 = torch.where(tok, col, torch.searchsorted(ktok, d + s, right=True) - 1)
-    b0 = torch.searchsorted(ksum, d)
-    b1 = torch.searchsorted(ksum, d + s + summ.long(), right=True) - 1
-    a0 = torch.where(pad, (~pad).sum(1, keepdim=True).expand(B, T), a0)
-    a1 = torch.where(pad, col, a1)
-    b0, b1 = torch.where(pad, 1, b0), torch.where(pad, 0, b1)
-    a0, a1, b0, b1 = (t.int() for t in (a0, a1, b0, b1))
+    a0, a1, b0, b1 = _last_bounds(kind, doc, sent, glob)[:4]
+    pad = kind == PAD
 
     if n_mem is None:
         def mask_mod(b, h, q, kv):
@@ -194,15 +188,77 @@ def model_z_summaries_last_ranges(kind, doc, sent, glob=False, n_mem=None):
     return mask_mod
 
 
+def _last_bounds(kind, doc, sent, glob):
+    """summaries_last aralik sinirlari (a0, a1, b0, b1) int + token anahtari ktok ve d, s (g_latent icin)."""
+    B, T = kind.shape
+    big, large = T + 2, 1 << 40
+    tok, summ, pad = kind == TOKEN, (kind == BOS) | (kind == ZTOK), kind == PAD
+    col = torch.arange(T, device=kind.device).expand(B, T)
+    d, s = doc.long() * big, sent.long()
+    ktok = torch.where(tok, d + s, large)                                   # artan: token'lar, sonra buyuk
+    ksum = torch.where(summ, d + s + 1, torch.where(tok, -1, large))        # artan: -1, ozetler, buyuk
+    a0 = torch.searchsorted(ktok, d if glob else d + s)
+    a1 = torch.where(tok, col, torch.searchsorted(ktok, d + s, right=True) - 1)
+    b0 = torch.searchsorted(ksum, d)
+    b1 = torch.searchsorted(ksum, d + s + summ.long(), right=True) - 1
+    a0 = torch.where(pad, (~pad).sum(1, keepdim=True).expand(B, T), a0)
+    a1 = torch.where(pad, col, a1)
+    b0, b1 = torch.where(pad, 1, b0), torch.where(pad, 0, b1)
+    return tuple(t.int() for t in (a0, a1, b0, b1)) + (ktok, d, s)
+
+
 _LAST_GLOB = functools.partial(model_z_summaries_last_ranges, glob=True)
 model_z_summaries_last_ranges.includes_padding = _LAST_GLOB.includes_padding = True
 
 
-def _dense(mask_mod, B, T, device):
-    """mask_mod -> bool (B, T, T) (SDPA yolu; CPU egitimi ve testler)."""
+def model_z_global_latent_mask(kind, doc, sent, raw_sentences=0):
+    """g_latent glob maskesi (Z'ler arada duzen), anahtar [ham T | latent T]: model_z_global_mask'in gordugu j, eski
+    token ise (TOKEN, sent[j] < sent[q] - K) latent yuvasi T + j'den, degilse ham j'den.  Dolgu kendi kosusu (ham)."""
+    _, ds, _ = model_z_read_bounds(kind)
+    T = kind.shape[1]
+
+    def mask_mod(b, h, q, kv):
+        j = torch.where(kv < T, kv, kv - T)
+        old = (kind[b, j] == TOKEN) & (sent[b, j] < sent[b, q] - raw_sentences)
+        return (j <= q) & (j >= ds[b, q]) & torch.where(kv < T, ~old, old)
+    return mask_mod
+
+
+def model_z_last_latent_ranges(kind, doc, sent, raw_sentences=0):
+    """g_latent glob maskesi (summaries_last duzeni), anahtar [ham T | latent T]: ham token [r0, a1] (cumle
+    max(s - K, 0)'in ilk token'indan), ozet [b0, b1] (_LAST_GLOB ile ayni), latent [T + a0, T + r0 - 1] (hikayenin ilk
+    token'indan r0'a).  Dolguda latent bos."""
+    T = kind.shape[1]
+    a0, a1, b0, b1, ktok, d, s = _last_bounds(kind, doc, sent, True)
+    r0 = torch.searchsorted(ktok, d + (s - raw_sentences).clamp_min(0)).int()
+    r0 = torch.where(kind == PAD, a0, torch.maximum(r0, a0))
+
+    def mask_mod(b, h, q, kv):
+        raw = ((kv >= r0[b, q]) & (kv <= a1[b, q])) | ((kv >= b0[b, q]) & (kv <= b1[b, q]))
+        return raw | ((kv >= a0[b, q] + T) & (kv < r0[b, q] + T))
+    return mask_mod
+
+
+def g_latent_masks(raw_sentences):
+    """-> (Z'ler arada, summaries_last) g_latent glob mask_fn'leri; anahtar boyu 2T (kv_len), dolgu kurali icinde."""
+    out = []
+    for f in (model_z_global_latent_mask, model_z_last_latent_ranges):
+        p = functools.partial(f, raw_sentences=raw_sentences)
+        p.includes_padding, p.kv_len = True, (lambda T: 2 * T)
+        out.append(p)
+    return tuple(out)
+
+
+def kv_len(mask_fn, T):
+    """mask_fn'in anahtar boyu (g_latent 2T), yoksa T."""
+    return mask_fn.kv_len(T) if hasattr(mask_fn, "kv_len") else T
+
+
+def _dense(mask_mod, B, T, device, S=None):
+    """mask_mod -> bool (B, T, S) (S yoksa T; SDPA yolu; CPU egitimi ve testler)."""
     b = torch.arange(B, device=device)[:, None, None]
     q = torch.arange(T, device=device)[None, :, None]
-    kv = torch.arange(T, device=device)[None, None, :]
+    kv = torch.arange(T if S is None else S, device=device)[None, None, :]
     return mask_mod(b, 0, q, kv)
 
 
@@ -221,10 +277,11 @@ def gqa_sdpa(q, k, v, mask=None):
 
 
 class Block(torch.nn.Module):
-    def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0):
+    def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0, latent_rank=0):
         """kv_heads (GQA; varsayilan heads): k / v head sayisi, heads'in boleni; qkv d -> d + 2 d kv / heads.
         attn_gate 1 / 2: head basina cikis kapisi agirligi (heads, d) / (heads, d // 64) (girdi n1(x)'in ilk d // 64
-        boyutu), sifir (RNG cekmez; kapisiz modelle ayni ilk agirlik)."""
+        boyutu), sifir (RNG cekmez; kapisiz modelle ayni ilk agirlik).  latent_rank r (g_latent): kv_down d -> r,
+        kv_norm (r), kv_up r -> 2 kv boyu (V3 wkv_a / kv_norm / wkv_b); ilk agirliklari model sonda ceker."""
         super().__init__()
         self.heads = heads
         self.kv_heads = int(kv_heads or heads)
@@ -238,14 +295,21 @@ class Block(torch.nn.Module):
         assert attn_gate in (0, 1, 2), "attn_gate 0 / 1 / 2"
         assert attn_gate != 2 or d >= 64, "attn_gate 2: girdi d // 64 boyut, d %d < 64 (0 boyut)" % d
         self.attn_gate = torch.nn.Parameter(torch.zeros(heads, d if attn_gate == 1 else d // 64)) if attn_gate else None
+        self.kv_down = None
+        if latent_rank:
+            kv = d * self.kv_heads // heads
+            lin = functools.partial(torch.nn.utils.skip_init, torch.nn.Linear, bias=False)   # RNG cekmez (agirlik sonda)
+            self.kv_down, self.kv_up = lin(d, latent_rank), lin(latent_rank, 2 * kv)
+            self.kv_norm = torch.nn.RMSNorm(latent_rank)
 
     def _gate(self, x):
         """Blok girdisi x (B, T, d) -> kapi sigmoid(n1(x)[..., :W sutunu] W^T) (B, T, heads); satir basina, maske / konum
         kullanmaz."""
         return torch.sigmoid(F.linear(self.n1(x)[..., :self.attn_gate.shape[1]], self.attn_gate))
 
-    def _qkv(self, x, pos, gate=False):
+    def _qkv(self, x, pos, gate=False, latent=False):
         """-> q, k, v (RoPE'li); gate True (kapili blok, forward): ayni n1(x)'ten kapi da (B, T, heads) -> (q, k, v, kapi).
+        latent True (g_latent): sonuna ayni n1(x)'ten latent K / V (_latent_kv) eklenir.
         attn_gate 1: kapi agirligi qkv matmul'una ek satir (tek matmul), 2: n1(x)'in ilk d // 64 boyutu (belge 90a ek:
         ayri _gate yolu n1'i ikinci kez hesaplayip kaydediyordu)."""
         B, T, d = x.shape
@@ -268,7 +332,17 @@ class Block(torch.nn.Module):
             k, v = (t.view(B, T, self.kv_heads, hd).transpose(1, 2) for t in (k, v))
         with torch.autocast(x.device.type, enabled=False):                  # QK-norm fp32 (V2 tarifi, belge 20 s4)
             q, k = self.q_norm(q.float()).to(v.dtype), self.k_norm(k.float()).to(v.dtype)
-        return (rope(q, pos), rope(k, pos), v) + ((g,) if gate else ())
+        return (rope(q, pos), rope(k, pos), v) + ((g,) if gate else ()) + (self._latent_kv(h, pos) if latent else ())
+
+    def _latent_kv(self, h, pos):
+        """n1(x) (B, T, d) -> latent K (RoPE'li, QK-norm'lu), V (B, kv_heads, T, hd): c = kv_norm(kv_down h), [k; v] =
+        kv_up c (V3 :468-475, naive yol); k_norm ve RoPE ham anahtarla ortak (ayni softmax)."""
+        B, T, d = h.shape
+        hd = d // self.heads
+        k, v = self.kv_up(self.kv_norm(self.kv_down(h))).view(B, T, 2, self.kv_heads, hd).permute(2, 0, 3, 1, 4)
+        with torch.autocast(h.device.type, enabled=False):
+            k = self.k_norm(k.float()).to(v.dtype)
+        return rope(k, pos), v
 
     def _finish(self, x, a, g=None):
         """g: _qkv(gate=True)'nun kapisi; yoksa (onbellek yollari) _gate(x)."""
@@ -286,7 +360,11 @@ class Block(torch.nn.Module):
         mem = None
         if isinstance(attn, tuple):
             attn, mem = attn[0], attn[1:]
-        q, k, v, *g = self._qkv(x, pos, gate=self.attn_gate is not None)
+        lat = self.kv_down is not None
+        q, k, v, *g = self._qkv(x, pos, gate=self.attn_gate is not None, latent=lat)
+        if lat:                                                             # anahtar [ham | latent] (maske 2T)
+            g, (kc, vc) = g[:-2], g[-2:]
+            k, v = torch.cat([k, kc], 2), torch.cat([v, vc], 2)
         if mem is not None:
             r, c = mem[0].clamp_min(0), mem[1].clamp_min(0)                 # bos yuva maskeyle kapali
             k = torch.cat([k, k[r, :, c].permute(0, 2, 1, 3)], 2)
@@ -305,7 +383,7 @@ class Block(torch.nn.Module):
 
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
-                 attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False):
+                 attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_latent_rank=0, g_raw_sentences=0):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -315,12 +393,18 @@ class SentenceTransformer(torch.nn.Module):
         ngram_rows: bigram tablosu satiri (0 kapali; tablo ve lambda
         ilk agirliklardan SONRA, RNG cekmeden: diger agirliklar kapali modelle ayni).  ngram_layers K: yalniz ilk K blok
         (0: hepsi; lambda K tane).  ngram_sparse: egitimde (gradyan acikken) okunan satirlar ayri yaprak (ngram_seen), tablo
-        gradyani yogun olusmaz."""
+        gradyani yogun olusmaz.  g_latent_rank r / g_raw_sentences K (belge 102): glob bloklarinda eski cumle token'lari
+        latent'ten (0 kapali); latent agirliklari butun ilk agirliklardan SONRA ceker (geri kalan kapali modelle ayni)."""
         super().__init__()
         self.carry_group, self.row_len = int(carry_group), ROW_LEN
         self.global_layers = int(global_layers)
         assert 0 <= self.global_layers <= layers, "global_layers 0..layers"
-        self.mask_fn = (model_z_read_mask, model_z_global_mask) if self.global_layers else model_z_read_mask
+        self.g_latent_rank, self.g_raw_sentences = int(g_latent_rank), int(g_raw_sentences)
+        assert self.g_latent_rank >= 0 and self.g_raw_sentences >= 0, "g_latent_rank / g_raw_sentences >= 0"
+        assert not self.g_latent_rank or (self.global_layers and not carry_group), "g_latent: glob katmani gerek, carry yok"
+        self._latent = g_latent_masks(self.g_raw_sentences) if self.g_latent_rank else None
+        self.mask_fn = (model_z_read_mask, self._latent[0] if self._latent else model_z_global_mask) if self.global_layers \
+            else model_z_read_mask
         self.END, self.EOS = END_ID, EOS_ID
         hidden = -(-int(8 * d / 3) // 8) * 8
         assert vocab_rows >= VOCAB, "vocab_rows >= VOCAB"
@@ -329,15 +413,18 @@ class SentenceTransformer(torch.nn.Module):
             self.E = torch.nn.Embedding(vocab_rows, d, _weight=torch.zeros(vocab_rows, d))
         kinds = ["loc"] * (layers - self.global_layers) + ["glob"] * self.global_layers
         self.blocks = torch.nn.ModuleList(Block(d, heads, hidden, glob_kv_heads if k == "glob" else None,
-                                                int(attn_gate)) for k in kinds)
+                                                int(attn_gate), self.g_latent_rank if k == "glob" else 0) for k in kinds)
         self.norm = torch.nn.RMSNorm(d)
         for name, p in self.named_parameters():
-            if p.dim() == 2 and not name.endswith("attn_gate"):          # kapi sifir kalir
+            if p.dim() == 2 and not name.endswith(("attn_gate", "kv_down.weight", "kv_up.weight")):   # kapi sifir kalir
                 std = 0.02 / math.sqrt(2 * layers) if name.endswith(("proj.weight", "down.weight")) else 0.02
                 with torch.no_grad():
                     (p[:VOCAB] if name == "E.weight" else p).normal_(0.0, std)   # dolgu satiri rastgele sayi cekmez
         with torch.no_grad():
             self.E.weight[VOCAB:].zero_()
+            for name, p in self.named_parameters():                      # g_latent: en sonda (V3'te init yok; 0,02)
+                if name.endswith(("kv_down.weight", "kv_up.weight")):
+                    p.normal_(0.0, 0.02)
         self.ngram, self.ngram_seen = None, None
         self.ngram_layers, self.ngram_sparse = int(ngram_layers) or layers, bool(ngram_sparse)
         if ngram_rows:                                                  # sifir tablo, lambda 0,1 (kayit #1)
@@ -364,8 +451,8 @@ class SentenceTransformer(torch.nn.Module):
         """Maske fonksiyonlari: bugunku duzen (mask_fn) ya da summaries_last duzeninde ayni yapida (tek / ikili)."""
         if not last:
             return self.mask_fn
-        return (model_z_summaries_last_ranges, _LAST_GLOB) if isinstance(self.mask_fn, tuple) else \
-            model_z_summaries_last_ranges
+        glob = self._latent[1] if self._latent else _LAST_GLOB
+        return (model_z_summaries_last_ranges, glob) if isinstance(self.mask_fn, tuple) else model_z_summaries_last_ranges
 
     def _batch_hidden(self, batch, attn=None):
         """PackedBatch (belge 21: tokens, kind, pos, doc, sent) -> h; attn yoksa dense maske.  Z_k girdisi E(END), okuma
@@ -393,7 +480,7 @@ class SentenceTransformer(torch.nn.Module):
                 x = block(add(x, l), batch.pos, w(attn))
             return self.norm(x)
         if attn is None:
-            attn = tuple(_dense(f(batch.kind, batch.doc, batch.sent), B, T, dev) for f in mfn)
+            attn = tuple(_dense(f(batch.kind, batch.doc, batch.sent), B, T, dev, kv_len(f, T)) for f in mfn)
         assert isinstance(attn, tuple) and len(attn) == 2, "global_layers: attn (yerel, global) ikilisi olmali"
         real = batch.real_pos if last else story_positions(batch.kind)
         first = len(self.blocks) - self.global_layers
@@ -566,6 +653,7 @@ class SummaryCache:
         self.sum_k, self.sum_v = [None] * L, [None] * L
         self.sen_k, self.sen_v = [None] * L, [None] * L
         self.all_k, self.all_v = [None] * L, [None] * L
+        self.all_kc, self.all_vc, self.gsent = [None] * L, [None] * L, []      # g_latent: latent K / V, konum cumlesi
         self.glob = [l >= L - model.global_layers for l in range(L)]
         self.n_z, self.i, self.t = 0, 0, 0
         self.piece, self.used, self.gkind = 0, 1, []                       # carry: parca no, parcadaki konum, glob tur
@@ -582,14 +670,23 @@ class SummaryCache:
         bloklar: gercek konum self.t, butun gecmis.  g: bigram vektoru (her blok girdisine lambda ile)."""
         p = torch.tensor([[pos]], device=self.dev)
         self.gkind.append(ZTOK if summary and read_sentence else BOS if summary else TOKEN)
+        s_q = -1 if summary and not read_sentence else self.n_z - 1 if summary else self.n_z
+        self.gsent.append(s_q)
         for l, block in enumerate(self.m.blocks):
             if g is not None and l < self.m.ngram_layers:
                 x = x + self.m.ngram_lambdas[l] * g
             if self.glob[l]:
-                q, k, v = block._qkv(x, torch.tensor([[self.t]], device=self.dev))
+                lat = block.kv_down is not None
+                q, k, v, *c = block._qkv(x, torch.tensor([[self.t]], device=self.dev), latent=lat)
                 self.all_k[l] = k if self.all_k[l] is None else torch.cat([self.all_k[l], k], 2)
                 self.all_v[l] = v if self.all_v[l] is None else torch.cat([self.all_v[l], v], 2)
-                x = block._finish(x, gqa_sdpa(q, self.all_k[l], self.all_v[l]))
+                K, V = self.all_k[l], self.all_v[l]
+                if lat:                                                     # eski cumle token'lari latent'ten
+                    self.all_kc[l] = c[0] if self.all_kc[l] is None else torch.cat([self.all_kc[l], c[0]], 2)
+                    self.all_vc[l] = c[1] if self.all_vc[l] is None else torch.cat([self.all_vc[l], c[1]], 2)
+                    old = self._old(s_q)[None, None, :, None]
+                    K, V = torch.where(old, self.all_kc[l], K), torch.where(old, self.all_vc[l], V)
+                x = block._finish(x, gqa_sdpa(q, K, V))
                 continue
             q, k, v = block._qkv(x, p)
             ks = [c for c in (self.sum_k[l], self.sen_k[l] if read_sentence else None) if c is not None] + [k]
@@ -603,6 +700,11 @@ class SummaryCache:
                 self.sen_v[l] = v if self.sen_v[l] is None else torch.cat([self.sen_v[l], v], 2)
             x = block._finish(x, a)
         return self.m.norm(x)
+
+    def _old(self, s_q):
+        """g_latent: glob onbellek konumlarindan latent'ten okunanlar (TOKEN ve cumlesi < s_q - K)."""
+        kind = torch.tensor(self.gkind, device=self.dev)
+        return (kind == TOKEN) & (torch.tensor(self.gsent, device=self.dev) < s_q - self.m.g_raw_sentences)
 
     @torch.no_grad()
     def prefill(self, sents):
@@ -627,6 +729,9 @@ class SummaryCache:
         kind, sent, doc = t(kind), t(sent), torch.zeros(1, T, dtype=torch.long, device=self.dev)
         local = _dense(model_z_read_mask(kind, doc, sent), 1, T, self.dev)[:, None]
         causal = torch.ones(T, T, dtype=torch.bool, device=self.dev).tril()
+        if self.m.g_latent_rank:                                         # glob: [ham | latent] maskesi (egitimle ayni)
+            causal = _dense(self.m._latent[0](kind, doc, sent), 1, T, self.dev, 2 * T)[0]
+            self.gkind, self.gsent = kind[0].tolist(), sent[0].tolist()
         summ = ((kind == BOS) | (kind == ZTOK))[0]
         x, lpos, real = self.m.E(t(tok)), t(pos), torch.arange(T, device=self.dev)[None]
         gr = None if self.m.ngram is None else self.m._ngram(t(tok), bigram_prev(t(tok), kind, doc, sent), kind == TOKEN)
@@ -634,8 +739,11 @@ class SummaryCache:
             if gr is not None and l < self.m.ngram_layers:
                 x = x + self.m.ngram_lambdas[l] * gr
             g = self.glob[l]
-            q, k, v = block._qkv(x, real if g else lpos)
-            a = gqa_sdpa(q, k, v, causal if g else local)
+            lat = g and block.kv_down is not None
+            q, k, v, *c = block._qkv(x, real if g else lpos, latent=lat)
+            a = gqa_sdpa(q, *((torch.cat([k, c[0]], 2), torch.cat([v, c[1]], 2)) if lat else (k, v)), causal if g else local)
+            if lat:
+                self.all_kc[l], self.all_vc[l] = c
             if g:
                 self.all_k[l], self.all_v[l] = k, v
             else:
@@ -785,7 +893,7 @@ class StaticCache:
 
     @staticmethod
     def supports(model):
-        return not model.carry_group
+        return not model.carry_group and not getattr(model, "g_latent_rank", 0)      # g_latent: SummaryCache (belge 102)
 
     def __init__(self, model, positions, sentences, sentence_tokens):
         assert StaticCache.supports(model), "StaticCache: carry desteklenmez (SummaryCache)"

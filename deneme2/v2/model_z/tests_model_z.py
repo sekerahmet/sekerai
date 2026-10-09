@@ -3,7 +3,7 @@
 v2-before-formula-cleanup-20261007.
 
     python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,mask,summaries_last,gqa,carry,vocab,limit,flex_ranges,
-                            gate,ngram,ngram_fast,combo]
+                            gate,ngram,ngram_fast,combo,g_latent]
 """
 import os
 import sys
@@ -1554,10 +1554,111 @@ def t_combo():
           "G1)" % len(pieces), max(cres) < 1e-5, "fark %s" % ["%.1e" % v for v in cres])
 
 
+def t_g_latent():
+    """g_latent (belge 102): (a) maske: [ham | latent] iki yari ayrik, birlesimi bugunku glob maskesi (iki duzen), latent
+    yari = eski token'lar (TOKEN, sent < sent[q] - K) bagimsiz kuralla; (b) kapaliyken agirlik ve hidden bit, acikken
+    latent disi ilk agirliklar ayni; (c) esdegerlik: r = d, W_down = I, W_up = qkv'nin k / v satirlari -> bugunku model
+    (iki duzen, K 0 / 1); (d) sizinti yok, gradyan W_down / W_up'a ulasir, flex BlockMask = dense; (e) SummaryCache adim
+    adim ve prefill = tam ileri, generate SummaryCache'le calisir (StaticCache desteklemez)."""
+    import recipe as R
+    from model import (_LAST_GLOB, StaticCache, g_latent_masks, kv_len, model_z_global_mask, summaries_last)
+    rng = np.random.default_rng(31)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(2, 7))]
+               for _ in range(12)]
+    rows = [list(range(i, i + 4)) for i in range(0, 12, 4)]
+    batch = real_batch(rows, 192, stories)
+    pb, perm = summaries_last(batch)
+    inv = torch.argsort(perm, 1)
+    B, T = batch.kind.shape
+    ok, n_old = True, []
+    for K in (0, 1, 2):
+        for name, bt, base_fn, f in (("arada", batch, model_z_global_mask, g_latent_masks(K)[0]),
+                                     ("summaries_last", pb, _LAST_GLOB, g_latent_masks(K)[1])):
+            m2 = _dense(f(bt.kind, bt.doc, bt.sent), B, T, "cpu", kv_len(f, T))
+            raw, lat = m2[..., :T], m2[..., T:]
+            base = _dense(base_fn(bt.kind, bt.doc, bt.sent), B, T, "cpu")
+            old = (bt.kind[:, None, :] == TOKEN) & (bt.sent[:, None, :] < bt.sent[:, :, None] - K)
+            ok &= not (raw & lat).any() and torch.equal(raw | lat, base) and torch.equal(lat, base & old)
+            n_old.append(int(lat.sum()))
+    check("g_latent maske: iki yari ayrik, birlesim = bugunku glob maskesi, latent = eski token'lar (Z'ler arada ve "
+          "summaries_last, K 0 / 1 / 2; gercek build_batch)", ok and min(n_old) > 0, "latent cift %s" % n_old)
+
+    def make(**kw):
+        torch.manual_seed(0)
+        return SentenceTransformer(d=32, layers=3, heads=4, global_layers=2, glob_kv_heads=2, **kw).eval()
+    off, on = make(), make(g_latent_rank=8, g_raw_sentences=1)
+    sd_off, sd_on = off.state_dict(), on.state_dict()
+    same = sd_off.keys() == make(g_latent_rank=0).state_dict().keys() and all(
+        torch.equal(sd_on[k], v) for k, v in sd_off.items())
+    extra = sorted(k for k in sd_on if k not in sd_off)
+    check("g_latent kapali: parametreler bugunku model; acik: latent disi ilk agirliklar ayni (latent agirliklari sonda)",
+          same and all(".kv_" in k for k in extra) and len(extra) == 6, str(extra))
+
+    res = []
+    for K in (0, 1):
+        base, lat = make(), make(g_latent_rank=32, g_raw_sentences=K)
+        with torch.no_grad():
+            for m in (base, lat):                                           # artik akim ~1: kv_norm eps'i ihmal edilir
+                m.E.weight.mul_(50)
+            for blk in lat.blocks:
+                if blk.kv_down is not None:
+                    blk.kv_down.weight.copy_(torch.eye(32))
+                    blk.kv_up.weight.copy_(blk.qkv.weight[32:])
+            h0 = base._batch_hidden(batch)
+            h1 = lat._batch_hidden(batch)
+            h2 = lat._batch_hidden(pb).gather(1, inv[..., None].expand(-1, -1, 32))
+        res.append(max(float((h0 - h1).abs().max()), float((h0 - h2).abs().max())) / float(h0.abs().max()))
+    check("g_latent esdegerlik: r = d, W_down = I, W_up = [W_k; W_v] -> bugunku model (iki duzen, K 0 / 1; goreli fark %s)" % (
+        ["%.1e" % r for r in res]), max(res) < 1e-5)
+
+    m = make(g_latent_rank=8, g_raw_sentences=0)
+    alt = [[list(s_) for s_ in st] for st in stories]
+    alt[0][-1] = [(t + 7) % D.END_ID for t in alt[0][-1]]
+    first = batch.doc[0] == 0
+    last = int((first & (batch.sent[0] == int(batch.sent[0][first].max()))).nonzero()[0, 0])
+    m.train()
+    m.loss_per_target(batch)[0].mean().backward()
+    grads = [float(b.kv_down.weight.grad.abs().sum()) + float(b.kv_up.weight.grad.abs().sum()) for b in m.blocks
+             if b.kv_down is not None]
+    m.eval()
+    with torch.no_grad():
+        g1, g2 = m._batch_hidden(batch), m._batch_hidden(real_batch(rows, 192, alt))
+        nd = m.loss_per_target(pb, tuple(R.dense_mask(pb, f) for f in m._masks(True)))[0]
+        nf = m.loss_per_target(pb, tuple(R.block_mask(pb, f) for f in m._masks(True)))[0]
+        h_last = m._batch_hidden(pb).gather(1, inv[..., None].expand(-1, -1, 32))
+    check("g_latent: sizinti yok; gradyan W_down / W_up'a ulasir; summaries_last = Z'ler arada; flex BlockMask (CPU) = "
+          "dense (fark %.1e)" % float((nd - nf).abs().max()),
+          torch.equal(g1[0, :last], g2[0, :last]) and min(grads) > 0 and float((g1 - h_last).abs().max()) < 1e-5
+          and float((nd - nf).abs().max()) < 1e-5, "grad %s" % ["%.2g" % g for g in grads])
+
+    out_ok, info = True, []
+    for K in (0, 1):
+        m = make(g_latent_rank=8, g_raw_sentences=K)
+        with torch.no_grad():
+            g1 = m._batch_hidden(batch)
+            lg = g1[batch.target >= 0] @ m.E.weight.T
+            out = []
+            for row in rows:
+                for si in row:
+                    c = SummaryCache(m)
+                    out.append(c.logits[None])
+                    for s_ in stories[si]:
+                        out += [c.append_token(t)[None] for t in s_] + [c.close_sentence()[None]]
+            pre = SummaryCache(m)
+            pre.prefill(stories[0][:3])
+            k_pre = 1 + sum(len(s_) + 1 for s_ in stories[0][:3]) - 1
+            d1, d2 = float((torch.cat(out) - lg).abs().max()), float((pre.logits - torch.cat(out)[k_pre]).abs().max())
+            gen = m.generate([stories[0][:2], stories[1][:1]], 3, 5)
+        out_ok &= d1 < 1e-5 and d2 < 1e-5 and len(gen) == 2 and not StaticCache.supports(m)
+        info.append("K %d: adim %.1e prefill %.1e" % (K, d1, d2))
+    check("g_latent: SummaryCache adim adim ve prefill = tam ileri; generate SummaryCache'le (StaticCache desteklemez)",
+          out_ok, "; ".join(info))
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab,
              limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast,
-             combo=t_combo)
+             combo=t_combo, g_latent=t_g_latent)
 
 if __name__ == "__main__":
     if SIDE is not None:
