@@ -308,7 +308,7 @@ class Block(torch.nn.Module):
 
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
-                 attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, local_mlp=0, local_mlp_keep=-1):
+                 attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, local_mlp=0, local_mlp_keep=-1, mlp_widths=()):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -342,6 +342,9 @@ class SentenceTransformer(torch.nn.Module):
                 widths = [self.local_mlp] * n_loc + [g_w] * self.global_layers
             else:                                                           # kesme: ilk keep yerel tam, kalan yerel dar, G ayni
                 widths = [hidden if i < self.local_mlp_keep else self.local_mlp for i in range(n_loc)] + [hidden] * self.global_layers
+        if mlp_widths:                                                      # katman basina acik genislik (oncelikli)
+            assert len(mlp_widths) == layers and not self.local_mlp, "mlp_widths: katman sayisi kadar, local_mlp'siz"
+            widths = [int(w) for w in mlp_widths]
         self.mlp_widths = widths
         self.blocks = torch.nn.ModuleList(Block(d, heads, widths[i], glob_kv_heads if k == "glob" else None,
                                                 int(attn_gate), bool(self.g_nope) and k == "glob") for i, k in enumerate(kinds))

@@ -127,7 +127,7 @@ MTP_DEFAULT = 0                # --mtp verilmezse (kullanici, 9 Ekim, n-gram ile
 NOPE_DEFAULT = 1               # --g_nope verilmezse, G'li Model Z (kullanici, 10 Ekim: "öncelikle nope varsaylan olsun")
 LR_REF = (2e-3, 768, 0.5)      # lr auto = lr0 (d0 / d) ^ us (aci / adim ~ lr 0,2 sqrt(d) sabit); d1024 olcumu: 1,4 / 1,7e-3 duz, 1,73e-3 icinde
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ngram_embed", "ngram_layers",
-           "ngram_sparse", "mtp", "g_nope", "local_mlp", "local_mlp_keep")   # --resume'da verilmezse kimlikten
+           "ngram_sparse", "mtp", "g_nope", "local_mlp", "local_mlp_keep", "mlp_widths")   # --resume'da verilmezse kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
@@ -138,7 +138,7 @@ READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_ge
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
-            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "local_mlp", "local_mlp_keep")
+            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "local_mlp", "local_mlp_keep", "mlp_widths")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -287,7 +287,8 @@ def _build(args, dev):
                                     ngram_sparse=bool(getattr(args, "ngram_sparse", 0)),
                                     g_nope=getattr(args, "g_nope", 0) or 0,
                                     local_mlp=getattr(args, "local_mlp", 0) or 0,
-                                    local_mlp_keep=-1 if getattr(args, "local_mlp_keep", None) is None else args.local_mlp_keep)
+                                    local_mlp_keep=-1 if getattr(args, "local_mlp_keep", None) is None else args.local_mlp_keep,
+                                    mlp_widths=tuple(getattr(args, "mlp_widths", None) or ()))
         model, mask_fn, layout = model.to(dev), model.mask_fn, "model_z"
     return model, mask_fn, layout
 
@@ -595,6 +596,7 @@ def _args(argv):
                          "--resume'da verilmezse kosunun kimliginden")
     ap.add_argument("--local_mlp", type=int, default=None,
                     help="yerel bloklarin MLP ic genisligi; G bloklari toplami koruyacak genislikte (0: hepsi ayni)")
+    ap.add_argument("--mlp_widths", default=None, help="katman basina MLP ic genisligi, virgulle (orn. 2048,1024,...); yerel once, G sonra")
     ap.add_argument("--local_mlp_keep", type=int, default=None,
                     help="--local_mlp ile: ilk K yerel katman tam genislikte, kalan yerel dar, G degismez (verilmezse yer degistirme)")
     ap.add_argument("--g_nope", type=int, default=None,
@@ -663,6 +665,10 @@ def _args(argv):
             auto.append("global_layers %d (round(%d x %.4g))" % (args.global_layers, args.layers, MODEL_Z_GLOBAL_RATIO))
     args.local_mlp = int(args.local_mlp or 0)
     args.local_mlp_keep = -1 if args.local_mlp_keep is None else int(args.local_mlp_keep)
+    w = args.mlp_widths
+    args.mlp_widths = [int(x) for x in w.split(",") if x.strip()] if isinstance(w, str) else list(w or [])
+    if args.mlp_widths and (args.model != "model_z" or len(args.mlp_widths) != args.layers or args.local_mlp):
+        sys.exit("DUR: --mlp_widths: Model Z, katman sayisi kadar deger, --local_mlp'siz")
     if args.local_mlp and (args.model != "model_z" or not args.global_layers):
         sys.exit("DUR: --local_mlp yalniz G katmanli Model Z'de")
     if args.g_nope is None:                                              # G'li Model Z'de varsayilan, oteki 0
@@ -763,7 +769,7 @@ def main(argv=None):
                  summaries_last=args.summaries_last, glob_kv_heads=args.glob_kv_heads, carry_summaries=args.carry_summaries,
                  carry_group=args.carry_group, vocab_rows=args.vocab_rows, attn_gate=args.attn_gate,
                  ngram_embed=args.ngram_embed, ngram_layers=args.ngram_layers, ngram_sparse=args.ngram_sparse,
-                 mtp=args.mtp, g_nope=args.g_nope, local_mlp=args.local_mlp, local_mlp_keep=args.local_mlp_keep)
+                 mtp=args.mtp, g_nope=args.g_nope, local_mlp=args.local_mlp, local_mlp_keep=args.local_mlp_keep, mlp_widths=args.mlp_widths)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -783,7 +789,7 @@ def main(argv=None):
         if _archived(was):                                                # eski / kaldirilan yol (belge 77)
             sys.exit("DUR: " + _archived(was))
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
-               "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "local_mlp": 0, "local_mlp_keep": -1,
+               "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "local_mlp": 0, "local_mlp_keep": -1, "mlp_widths": [],
                **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
