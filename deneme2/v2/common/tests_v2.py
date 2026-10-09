@@ -20,6 +20,7 @@ import os  # noqa: E402
 import shutil  # noqa: E402
 import sys  # noqa: E402
 import tempfile  # noqa: E402
+import types  # noqa: E402
 
 import numpy as np  # noqa: E402
 
@@ -2695,8 +2696,82 @@ def t_mtp():
          TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT, TR.MTP_DEFAULT) = saved
 
 
+def t_fp8block():
+    """--fp8 blockwise (belge 100), CPU, saf torch basvurusu (fp8_backend reference): (a) fp8_tiles karo olcegi: sifir karo
+    sifir, ogenin hatasi E4M3 yarim adimi icinde, aykiri satir yalniz kendi karosunu bozar; (b) basvuru autograd'i = elle
+    nicemlenmis uc GEMM (bit); (c) dort model (model_z, transformer, v4_small, model_beta): bloklarin karo kati Linear'lari
+    donusur, state_dict ve Muon ayrimi ayni, bf16 autocast'te ileri + geri calisir; cikis bf16'ya goreli <= 0,10, donusen
+    agirlik gradyani <= 0,15 (E4M3 oge basina ~%3 GEMM gurultusu iki blokta birikir; kablolama hatasi ~1 verir); autocast
+    disinda (modelin bilerek tam hassasiyet hesabi, or. Beta Compressor) duz Linear, bit ayni."""
+    import recipe as R
+    import train as TR
+    g = torch.Generator().manual_seed(0)
+    x = torch.randn(256, 384, generator=g)
+    x[3] *= 1000.0                                                       # aykiri satir
+    x[:, 128:256] = 0.0                                                  # sifir karolar
+    xq, _ = R.fp8_tiles(x, (1, 128))
+    nz = x != 0
+    err = ((xq - x).abs() / x.abs().clamp_min(1e-30))[nz & (x.abs() > x.abs().amax(1, keepdim=True) * 2 ** -6)]
+    other = torch.cat([xq[:3] - x[:3], xq[4:] - x[4:]]).norm() / torch.cat([x[:3], x[4:]]).norm()
+    check("fp8block: karo olcegi -- sifir karo sifir, normal ogeler goreli <= 2^-4, aykiri satir digerlerini bozmaz",
+          bool((xq[:, 128:256] == 0).all()) and float(err.max()) <= 2 ** -4 + 1e-6 and float(other) < 0.04,
+          "en buyuk %.4f, diger satirlar %.4f" % (float(err.max()), float(other)))
+    w = torch.randn(256, 384, generator=g) * 0.02
+    xx = torch.randn(512, 384, generator=g).requires_grad_()
+    ww = w.clone().requires_grad_()
+    y = R._Fp8BlockRef.apply(xx, ww, 128)
+    gy = torch.randn_like(y)
+    y.backward(gy)
+    q = lambda t, k: R.fp8_tiles(t, k)[0]  # noqa: E731
+    same = (torch.equal(y, q(xx.detach(), (1, 128)) @ q(w, (128, 128)).t())
+            and torch.equal(xx.grad, q(gy, (1, 128)) @ q(w, (128, 128)))
+            and torch.equal(ww.grad, q(gy.t().contiguous(), (1, 128)) @ q(xx.detach(), (128, 1))))
+    check("fp8block: basvuru autograd = elle nicemlenmis ileri / dX / dW (bit)", same)
+    for model in ("model_z", "transformer", "v4_small", "model_beta"):
+        extra = ["--glob_kv_heads", "2"] if model == "model_z" else []
+        a = TR._args(["--model", model, "--d", "256", "--layers", "2", "--heads", "4", "--out", os.path.join(TMP, "f8")]
+                     + extra)
+        torch.manual_seed(0)
+        m0, mf0, _ = TR._build(a, torch.device("cpu"))
+        torch.manual_seed(0)
+        m1 = TR._build(a, torch.device("cpu"))[0]
+        m1.load_state_dict(m0.state_dict())
+        names = [n for n, _ in R.muon_params(m1)]
+        sd = {k: tuple(v.shape) for k, v in m1.state_dict().items()}
+        done, skipped = R.fp8_blockwise(m1, 128, "reference")
+        rows = [[0, 1], [2, 3]]
+        st = types.SimpleNamespace(stream=np.arange(400) % 300 + 5, sent=np.array([[i * 10, i * 10 + 9] for i in range(40)]),
+                                   story=np.arange(0, 41, 5))
+        layout = "model_z" if model == "model_z" else "transformer"
+        b = D.build_batch(st, rows, layout, "cpu", 128)
+        if model == "model_z":
+            from model import summaries_last
+            b, _ = summaries_last(b)
+        outs = []
+        for m in (m0, m1):                                               # FP8 yalniz autocast'te (egitim yolu): CPU bf16
+            mf = m._masks(True) if model == "model_z" else mf0
+            with torch.autocast("cpu", dtype=torch.bfloat16):
+                h = m._batch_hidden(b, TR._attn(b, mf, False))
+                loss = R.output_loss(h.flatten(0, 1).float(), m.E.weight, b.target.flatten())
+            loss.backward()
+            outs.append((h.detach().float(), {n: p.grad for n, p in m.named_parameters() if p.grad is not None}))
+        with torch.no_grad():                                            # autocast disi: duz Linear (bit)
+            lin = next(mm for n, mm in m1.blocks.named_modules() if n in done)
+            xin = torch.randn(4, lin.in_features)
+            plain = torch.equal(lin(xin), torch.nn.functional.linear(xin, lin.weight))
+        (h0, g0), (h1, g1) = outs
+        conv = ["blocks.%s.weight" % n for n in done]
+        gerr = max(float((g1[n] - g0[n]).norm() / g0[n].norm()) for n in conv)
+        herr = float((h1 - h0).norm() / h0.norm())
+        check("fp8block %s: %d Linear donustu (%d bf16 kaldi), state_dict ve Muon ayrimi ayni; cikis goreli %.4f, donusen "
+              "agirlik gradyani goreli en cok %.4f; autocast disi duz Linear" % (model, len(done), len(skipped), herr, gerr),
+              len(done) > 0 and plain and sd == {k: tuple(v.shape) for k, v in m1.state_dict().items()}
+              and names == [n for n, _ in R.muon_params(m1)] and herr < 0.10 and gerr < 0.15
+              and all(type(mm).__name__ == "Fp8BlockLinear" for n, mm in m1.blocks.named_modules() if n in done))
+
+
 TESTS = dict(fp8=t_fp8, data=t_data, pack=t_pack, recipe=t_recipe, metrics=t_metrics, integration=t_integration,
-             train=t_train, drive=t_drive, tokens=t_tokens, fineweb=t_fineweb, mtp=t_mtp)
+             train=t_train, drive=t_drive, tokens=t_tokens, fineweb=t_fineweb, mtp=t_mtp, fp8block=t_fp8block)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)

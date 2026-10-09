@@ -134,6 +134,8 @@ INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ng
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
+FP8_BLOCK = 128                 # --fp8 blockwise karo boyu (DeepSeek-V3: etkinlik 1 x 128, agirlik 128 x 128; belge 100)
+FP8_BLOCK_BACKEND = "triton"    # --fp8 blockwise GEMM: triton / cublas (torchao fp8_blockwise_mm) / reference (saf torch)
 COMPILE_MODE = "max-autotune-no-cudagraphs"   # bloklarin derleme modu (5w: torba K 1024 -2,9 ms/adim; kullanici, 7 Ekim)
 READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
 READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
@@ -299,28 +301,36 @@ def _build(args, dev):
     return model, mask_fn, layout
 
 
-def _fp8_missing(cuda):
+def _fp8_missing(cuda, recipe="tensorwise"):
     """--fp8 kurulamiyorsa ileti (CUDA yok / torchao yok), yoksa None."""
     if not cuda:
-        return "FP8 (torchao Float8Linear) CUDA ister"
+        return "FP8 (torchao) CUDA ister"
     try:
-        from torchao.float8 import Float8LinearConfig, convert_to_float8_training  # noqa: F401
+        if recipe == "blockwise":
+            from torchao.prototype.blockwise_fp8_training.linear import fp8_blockwise_mm  # noqa: F401
+        else:
+            from torchao.float8 import Float8LinearConfig, convert_to_float8_training  # noqa: F401
     except ImportError as e:
-        return "torchao.float8 yok (%s)" % e
+        return "torchao FP8 (%s) yok: %s" % (recipe, e)
     return None
 
 
 def _fp8(model, recipe):
     """MLP Linear'lari (FP8_MODULES) torchao Float8Linear'a, compile'dan ONCE; state_dict adlari ve parametre sekilleri ayni
     kalmali (checkpoint / agent.pt FP8 <-> bf16 birebir; Muon ayrimi ad desenine dayanir) -> denetlenir, degilse DUR."""
-    from torchao.float8 import Float8LinearConfig, convert_to_float8_training
     before = {k: tuple(v.shape) for k, v in model.state_dict().items()}
-    convert_to_float8_training(model, config=Float8LinearConfig.from_recipe_name(recipe),
-                               module_filter_fn=lambda m, fqn: fqn.split(".")[-1] in FP8_MODULES)
+    if recipe == "blockwise":                                            # belge 100: bloklarin butun Linear'lari
+        done, skipped = R.fp8_blockwise(model, FP8_BLOCK, FP8_BLOCK_BACKEND)
+        print("fp8 blockwise (%d, %s): %d Linear; karo kati olmayan, bf16 kalan %d: %s" % (
+            FP8_BLOCK, FP8_BLOCK_BACKEND, len(done), len(skipped), skipped[:8]), flush=True)
+    else:
+        from torchao.float8 import Float8LinearConfig, convert_to_float8_training
+        convert_to_float8_training(model, config=Float8LinearConfig.from_recipe_name(recipe),
+                                   module_filter_fn=lambda m, fqn: fqn.split(".")[-1] in FP8_MODULES)
     after = {k: tuple(v.shape) for k, v in model.state_dict().items()}
     if before != after:
         sys.exit("DUR: --fp8: state_dict adlari / sekilleri degisti (%s)" % sorted(set(before) ^ set(after))[:5])
-    return sum(type(m).__name__ == "Float8Linear" for m in model.modules())
+    return sum(type(m).__name__ in ("Float8Linear", "Fp8BlockLinear") for m in model.modules())
 
 
 def _muon_missing():
@@ -599,8 +609,9 @@ def _args(argv):
                     help="model_z: ayni-logit MTP ek hedef sayisi N (belge 90c; resmi kod N 2); agirlik recipe.mtp_weights, "
                          "son 1 / (N + 1) payda 0; auto (varsayilan): model_z 2 (carry'de 0), transformer 0; 0 kapali; "
                          "--resume'da verilmezse kosunun kimliginden")
-    ap.add_argument("--fp8", default="none", choices=("none", "tensorwise", "rowwise"),
-                    help="MLP (gate_up, down) torchao Float8Linear tarifi; none: bf16 (kimlige girmez, --resume'da "
+    ap.add_argument("--fp8", default="none", choices=("none", "tensorwise", "rowwise", "blockwise"),
+                    help="tensorwise / rowwise: MLP (gate_up, down) torchao Float8Linear; blockwise: bloklarin butun "
+                         "Linear'lari DeepSeek-V3 ince taneli FP8 (belge 100); none: bf16 (kimlige girmez, --resume'da "
                          "degistirilebilir; kullanici, 8 Ekim)")
     ap.add_argument("--stop_step", type=int, default=None,
                     help="takvim (WSD, epok plani) degismeden adim N'de dur: checkpoint.pt (surdurulebilir) + agent.pt + "
@@ -697,8 +708,8 @@ def main(argv=None):
         sys.exit("DUR: --optimizer %s: %s" % (args.optimizer, _muon_missing()))
     dev = torch.device(args.device)
     cuda = dev.type == "cuda"
-    if args.fp8 != "none" and _fp8_missing(cuda):                        # bf16'ya sessizce dusulmez
-        sys.exit("DUR: --fp8 %s: %s" % (args.fp8, _fp8_missing(cuda)))
+    if args.fp8 != "none" and _fp8_missing(cuda, args.fp8):              # bf16'ya sessizce dusulmez
+        sys.exit("DUR: --fp8 %s: %s" % (args.fp8, _fp8_missing(cuda, args.fp8)))
     if cuda:                                                             # GPU kapisi (kural 5)
         assert torch.cuda.is_available(), "GPU YOK"
         for k in ("cache_size_limit", "recompile_limit"):                # beklenen giris ~4-6 (egitim / sinav x tam /

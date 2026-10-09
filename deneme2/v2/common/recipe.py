@@ -330,6 +330,80 @@ class NorMuon(BatchedMuon):
             p.sub_((Oh[j] * eta[j]).to(p.dtype))
 
 
+FP8_E4M3_MAX = 448.0     # float8_e4m3fn en buyuk deger
+
+
+def fp8_tiles(x, tile):
+    """Ince taneli FP8 nicemleme, basvuru (saf torch; DeepSeek-V3 s3.3.2, belge 100): x (R, C) -> (dequant fp32, olcek).
+    tile (r, c) karosu basina amax, olcek s = 448 / amax (fp32, uzerine yuvarlama yok), q = e4m3(clamp(x s)), x~ = q / s.
+    R, C karo boyunun kati olmali."""
+    R, C = x.shape
+    r, c = tile
+    assert R % r == 0 and C % c == 0, "fp8_tiles: %s, karo %s'nin kati degil" % (tuple(x.shape), tile)
+    xt = x.float().reshape(R // r, r, C // c, c)
+    s = FP8_E4M3_MAX / xt.abs().amax(dim=(1, 3), keepdim=True).clamp_min(1e-12)
+    q = (xt * s).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(torch.float8_e4m3fn)
+    return (q.float() / s).reshape(R, C), s.reshape(R // r, C // c)
+
+
+class _Fp8BlockRef(torch.autograd.Function):
+    """Ince taneli FP8 Linear'in saf torch basvurusu (her cihaz; GPU cekirdeginin olcutu ve CPU sayisal incelemesi).
+    Uc GEMM de nicemlenmis girdilerle, fp32 birikimle: ileri x 1 x B / W B x B; dX dY 1 x B / W B x B; dW dY^T 1 x B
+    (token boyunca) / x B x 1 (token boyunca).  Butun tensorler E4M3."""
+
+    @staticmethod
+    def forward(ctx, x, w, block):
+        ctx.save_for_backward(x, w)
+        ctx.block = block
+        return (fp8_tiles(x, (1, block))[0] @ fp8_tiles(w, (block, block))[0].t()).to(x.dtype)
+
+    @staticmethod
+    def backward(ctx, g):
+        x, w = ctx.saved_tensors
+        b = ctx.block
+        g = g.contiguous()
+        dx = fp8_tiles(g, (1, b))[0] @ fp8_tiles(w, (b, b))[0]
+        dw = fp8_tiles(g.t(), (1, b))[0] @ fp8_tiles(x, (b, 1))[0]
+        return dx.to(x.dtype), dw.to(w.dtype), None
+
+
+class Fp8BlockLinear(torch.nn.Linear):
+    """nn.Linear'in ince taneli FP8 hali (--fp8 blockwise; belge 100): agirlik ve state_dict ayni (sinif degisimi).  YALNIZ
+    autocast acikken (bf16 egitim yolu): girdi autocast tipinde, cikis ayni tipte.  Autocast kapaliysa model o Linear'i
+    bilerek tam hassasiyette hesapliyor (or. Beta Compressor, fp32): duz nn.Linear.  fp8_backend: "triton" / "cublas"
+    (torchao fp8_blockwise_mm: Triton ya da F.scaled_mm blok olcekli), "reference" (_Fp8BlockRef, saf torch)."""
+    fp8_block, fp8_backend = 128, "triton"
+
+    def forward(self, x):
+        shape, dev = x.shape, x.device.type
+        if not torch.is_autocast_enabled(dev):
+            return super().forward(x)
+        dt = torch.get_autocast_dtype(dev)
+        x2 = x.reshape(-1, shape[-1]).to(dt)
+        if self.fp8_backend == "reference":
+            y = _Fp8BlockRef.apply(x2, self.weight, self.fp8_block)
+        else:
+            from torchao.prototype.blockwise_fp8_training.linear import fp8_blockwise_mm
+            y = fp8_blockwise_mm.apply(x2.contiguous(), self.weight, self.fp8_block, dt, self.fp8_backend == "triton")
+        return y.reshape(*shape[:-1], y.shape[-1])
+
+
+def fp8_blockwise(model, block=128, backend="triton"):
+    """model.blocks altindaki nn.Linear'lar -> Fp8BlockLinear (giris ve cikis boyu block'un kati olanlar; DeepSeek-V3:
+    embedding, cikis basi, norm, attention, kapi ve n-gram yuksek hassasiyette kalir).  -> (donusen, atlanan) adlar."""
+    done, skipped = [], []
+    for name, m in model.blocks.named_modules():
+        if type(m) is not torch.nn.Linear:
+            continue
+        if m.in_features % block or m.out_features % block:
+            skipped.append("%s (%d x %d)" % (name, m.out_features, m.in_features))
+            continue
+        m.__class__ = Fp8BlockLinear
+        m.fp8_block, m.fp8_backend = block, backend
+        done.append(name)
+    return done, skipped
+
+
 class Checkpoint:
     """Surdurme paketi: <dir>/checkpoint.pt (yarim dosya kalmaz)."""
 
