@@ -79,7 +79,8 @@ def load_run(out, data_dir, dev):
                            attn_gate=idt.get("attn_gate", 0),
                            ngram_embed=idt.get("ngram_embed", 0), ngram_layers=idt.get("ngram_layers", 0),
                            ngram_sparse=idt.get("ngram_sparse", 0),
-                           g_latent_rank=idt.get("g_latent_rank", 0), g_raw_sentences=idt.get("g_raw_sentences", 0))
+                           g_latent_rank=idt.get("g_latent_rank", 0), g_raw_sentences=idt.get("g_raw_sentences", 0),
+                           g_latent_rope=idt.get("g_latent_rope", 0))
     model, _, _ = T._build(spec, dev)
     model.load_state_dict(pack["state"])
     model.row_len = idt["row_len"]                                       # uretim konum siniri, carry parca boyu

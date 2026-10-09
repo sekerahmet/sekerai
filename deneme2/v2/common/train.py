@@ -74,7 +74,8 @@ n-gram ile birlikte; 8 Ekim'den 9 Ekim'e auto idi).  --mtp auto: model_z 2 (carr
 --g_latent_rank r / --g_raw_sentences K (deneme, belge 102; kullanici, 9 Ekim: "token vektör ama r bir izdüşüm"; "kaç
 cümle gördüğünü pencere yapalım. K=0 yani kendi cümlesi ham olur"): Model Z glob katmanlarinda K + 1 cumleden eski token'lar
 token basina latent'ten (MLA turu).  Varsayilan 0 (kapali, bit ayni); yalniz model_z, global_layers > 0, carry'siz;
-kimlikte, INHERIT'te (alan yoksa 0).
+kimlikte, INHERIT'te (alan yoksa 0).  --g_latent_rope dr (belge 102 s9; kullanici, 9 Ekim: "Bir de üretimi hızlandırması
+lazım"): glob'da ayrik RoPE (son dr boyut) + uretimde absorb; 0 sade yol (bit ayni).
 
 Eski kosular (kullanici, 8 Ekim: "V2 içinde temizlik kastettim"; belge 77): Model Z kimliginde summaries_last 1 degilse
 (8 Ekim oncesi; formullu / temizlik oncesi dahil; summaries_last 0), learned_z 0 ya da kaldirilan bir ozellik (z_bow,
@@ -130,7 +131,7 @@ NGRAM_DEFAULT = 0              # --ngram_embed verilmezse (kullanici, 9 Ekim: ka
 MTP_DEFAULT = 0                # --mtp verilmezse (kullanici, 9 Ekim, n-gram ile birlikte; 8 Ekim auto)
 LR_REF = (2e-3, 768, 0.5)      # lr auto = lr0 (d0 / d) ^ us (aci / adim ~ lr 0,2 sqrt(d) sabit); d1024 olcumu: 1,4 / 1,7e-3 duz, 1,73e-3 icinde
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ngram_embed", "ngram_layers",
-           "ngram_sparse", "mtp", "g_latent_rank", "g_raw_sentences")   # --resume'da verilmezse kimlikten
+           "ngram_sparse", "mtp", "g_latent_rank", "g_raw_sentences", "g_latent_rope")   # --resume'da verilmezse kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
@@ -141,7 +142,8 @@ READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_ge
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
-            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_latent_rank", "g_raw_sentences")
+            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_latent_rank", "g_raw_sentences",
+            "g_latent_rope")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -258,6 +260,9 @@ def _latent_error(args):
         return "--g_latent_rank / --g_raw_sentences >= 0"
     if k and not r:
         return "--g_raw_sentences yalniz --g_latent_rank ile"
+    dr, hd = args.g_latent_rope, args.d // args.heads
+    if dr and (not r or dr % 2 or not 0 < dr < hd):
+        return "--g_latent_rope %d: --g_latent_rank ile, cift, 0 < dr < head boyu %d" % (dr, hd)
     if r and (args.model != "model_z" or not args.global_layers or args.carry_group or args.carry_summaries):
         return "--g_latent_rank: yalniz model_z, global_layers > 0, carry'siz"
     return None
@@ -301,7 +306,8 @@ def _build(args, dev):
                                     ngram_layers=getattr(args, "ngram_layers", 0) or 0,
                                     ngram_sparse=bool(getattr(args, "ngram_sparse", 0)),
                                     g_latent_rank=getattr(args, "g_latent_rank", 0) or 0,
-                                    g_raw_sentences=getattr(args, "g_raw_sentences", 0) or 0)
+                                    g_raw_sentences=getattr(args, "g_raw_sentences", 0) or 0,
+                                    g_latent_rope=getattr(args, "g_latent_rope", 0) or 0)
         model, mask_fn, layout = model.to(dev), model.mask_fn, "model_z"
     return model, mask_fn, layout
 
@@ -611,6 +617,8 @@ def _args(argv):
                     help="model_z glob: K + 1 cumleden eski token'lar token basina latent'ten, rank r (belge 102; 0 kapali)")
     ap.add_argument("--g_raw_sentences", type=int, default=None,
                     help="--g_latent_rank ile: glob'da ham kalan onceki cumle sayisi K (varsayilan 0: yalniz kendi cumlesi)")
+    ap.add_argument("--g_latent_rope", type=int, default=None,
+                    help="--g_latent_rank ile: glob'da ayrik RoPE boyu dr (cift, < head boyu) + uretimde absorb (belge 102 s9; 0 kapali)")
     ap.add_argument("--mtp", type=lambda s: s if s == "auto" else int(s), default=None,
                     help="model_z: ayni-logit MTP ek hedef sayisi N (belge 90c; resmi kod N 2); agirlik recipe.mtp_weights, "
                          "son 1 / (N + 1) payda 0; varsayilan 0 (9 Ekim); auto: model_z 2 (carry'de 0), transformer 0; 0 kapali; "
@@ -632,6 +640,7 @@ def _args(argv):
         setattr(args, k, was.get(k, 0 if k in ("glob_kv_heads", "attn_gate", "mtp") or k.startswith(("ngram", "g_"))
                                  else None))
     args.g_latent_rank, args.g_raw_sentences = args.g_latent_rank or 0, args.g_raw_sentences or 0
+    args.g_latent_rope = args.g_latent_rope or 0
     args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
     if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
         args.optimizer = DEFAULT_OPTIMIZER
@@ -769,7 +778,8 @@ def main(argv=None):
                  summaries_last=args.summaries_last, glob_kv_heads=args.glob_kv_heads, carry_summaries=args.carry_summaries,
                  carry_group=args.carry_group, vocab_rows=args.vocab_rows, attn_gate=args.attn_gate,
                  ngram_embed=args.ngram_embed, ngram_layers=args.ngram_layers, ngram_sparse=args.ngram_sparse,
-                 mtp=args.mtp, g_latent_rank=args.g_latent_rank, g_raw_sentences=args.g_raw_sentences)
+                 mtp=args.mtp, g_latent_rank=args.g_latent_rank, g_raw_sentences=args.g_raw_sentences,
+                 g_latent_rope=args.g_latent_rope)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -789,7 +799,7 @@ def main(argv=None):
         if _archived(was):                                                # eski / kaldirilan yol (belge 77)
             sys.exit("DUR: " + _archived(was))
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
-               "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_latent_rank": 0, "g_raw_sentences": 0,
+               "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_latent_rank": 0, "g_raw_sentences": 0, "g_latent_rope": 0,
                **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])

@@ -43,6 +43,10 @@ cumle (+ BOS, Z'ler) ham K / V; daha eski cumlelerin token'lari token basina lat
 W_up c (DeepSeek-V3 MLA, inference/model.py :430-432 wkv_a / kv_norm / wkv_b; egitimde yeniden acilir, naive yol :471-479).
 RoPE ve QK-norm yukari izdusumden SONRA, token'in gercek konumunda (MLA'nin ayrik RoPE'si yerine; belge 102 s3).  Anahtar
 [ham T | latent T], maske model_z_global_latent_mask / model_z_last_latent_ranges.
+--g_latent_rope dr (belge 102 s9; kullanici, 9 Ekim: "Bir de üretimi hızlandırması lazım"): glob bloklarinda RoPE head'in
+son dr boyutunda (ham ve latent anahtar, sorgu); latent anahtar [W_uk c ; k_pe] (k_pe kv_down'un son dr boyutu, head'lerde
+ortak; V3 :466-470), QK-norm butun head uzerinde.  Uretimde (SummaryCache) eski token'lar yalniz c + rope'lu k_pe + head
+basina RMS skaleriyle saklanir, attention absorb yoluyla (V3 :480-495).
 """
 import dataclasses
 import functools
@@ -280,11 +284,13 @@ def gqa_sdpa(q, k, v, mask=None):
 
 
 class Block(torch.nn.Module):
-    def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0, latent_rank=0):
+    def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0, latent_rank=0, latent_rope=0):
         """kv_heads (GQA; varsayilan heads): k / v head sayisi, heads'in boleni; qkv d -> d + 2 d kv / heads.
         attn_gate 1 / 2: head basina cikis kapisi agirligi (heads, d) / (heads, d // 64) (girdi n1(x)'in ilk d // 64
         boyutu), sifir (RNG cekmez; kapisiz modelle ayni ilk agirlik).  latent_rank r (g_latent): kv_down d -> r,
-        kv_norm (r), kv_up r -> 2 kv boyu (V3 wkv_a / kv_norm / wkv_b); ilk agirliklari model sonda ceker."""
+        kv_norm (r), kv_up r -> 2 kv boyu (V3 wkv_a / kv_norm / wkv_b); ilk agirliklari model sonda ceker.
+        latent_rope dr (ayrik RoPE): kv_down d -> r + dr (son dr k_pe), kv_up r -> kv_heads (2 hd - dr); bu blokta RoPE
+        head'in son dr boyutunda."""
         super().__init__()
         self.heads = heads
         self.kv_heads = int(kv_heads or heads)
@@ -298,11 +304,14 @@ class Block(torch.nn.Module):
         assert attn_gate in (0, 1, 2), "attn_gate 0 / 1 / 2"
         assert attn_gate != 2 or d >= 64, "attn_gate 2: girdi d // 64 boyut, d %d < 64 (0 boyut)" % d
         self.attn_gate = torch.nn.Parameter(torch.zeros(heads, d if attn_gate == 1 else d // 64)) if attn_gate else None
-        self.kv_down = None
+        self.kv_down, self.latent_rank, self.latent_rope = None, int(latent_rank), int(latent_rope)
+        hd = d // heads
+        assert not latent_rope or (latent_rank and latent_rope % 2 == 0 and 0 < latent_rope < hd), \
+            "latent_rope: latent_rank ile, cift, 0 < dr < head boyu"
         if latent_rank:
-            kv = d * self.kv_heads // heads
             lin = functools.partial(torch.nn.utils.skip_init, torch.nn.Linear, bias=False)   # RNG cekmez (agirlik sonda)
-            self.kv_down, self.kv_up = lin(d, latent_rank), lin(latent_rank, 2 * kv)
+            self.kv_down = lin(d, latent_rank + self.latent_rope)
+            self.kv_up = lin(latent_rank, self.kv_heads * (2 * hd - self.latent_rope))
             self.kv_norm = torch.nn.RMSNorm(latent_rank)
 
     def _gate(self, x):
@@ -335,17 +344,46 @@ class Block(torch.nn.Module):
             k, v = (t.view(B, T, self.kv_heads, hd).transpose(1, 2) for t in (k, v))
         with torch.autocast(x.device.type, enabled=False):                  # QK-norm fp32 (V2 tarifi, belge 20 s4)
             q, k = self.q_norm(q.float()).to(v.dtype), self.k_norm(k.float()).to(v.dtype)
-        return (rope(q, pos), rope(k, pos), v) + ((g,) if gate else ()) + (self._latent_kv(h, pos) if latent else ())
+        return (self._rope(q, pos), self._rope(k, pos), v) + ((g,) if gate else ()) + (
+            self._latent_kv(h, pos) if latent else ())
+
+    def _rope(self, t, pos):
+        """RoPE: butun head (bugunku) ya da latent_rope'ta yalniz son dr boyut (V3 q_pe / k_pe)."""
+        dr = self.latent_rope
+        return torch.cat([t[..., :-dr], rope(t[..., -dr:], pos)], -1) if dr else rope(t, pos)
 
     def _latent_kv(self, h, pos):
         """n1(x) (B, T, d) -> latent K (RoPE'li, QK-norm'lu), V (B, kv_heads, T, hd): c = kv_norm(kv_down h), [k; v] =
-        kv_up c (V3 :468-475, naive yol); k_norm ve RoPE ham anahtarla ortak (ayni softmax)."""
+        kv_up c (V3 :468-475, naive yol); k_norm ve RoPE ham anahtarla ortak (ayni softmax).  latent_rope: k = [W_uk c ;
+        k_pe] (k_pe head'lerde ortak, V3 :469-470)."""
         B, T, d = h.shape
-        hd = d // self.heads
-        k, v = self.kv_up(self.kv_norm(self.kv_down(h))).view(B, T, 2, self.kv_heads, hd).permute(2, 0, 3, 1, 4)
+        hd, dr, r = d // self.heads, self.latent_rope, self.latent_rank
+        if dr:
+            a = self.kv_down(h)
+            kv = self.kv_up(self.kv_norm(a[..., :r])).view(B, T, self.kv_heads, 2 * hd - dr)
+            k = torch.cat([kv[..., :hd - dr], a[..., None, r:].expand(B, T, self.kv_heads, dr)], -1).transpose(1, 2)
+            v = kv[..., hd - dr:].transpose(1, 2)
+        else:
+            k, v = self.kv_up(self.kv_norm(self.kv_down(h))).view(B, T, 2, self.kv_heads, hd).permute(2, 0, 3, 1, 4)
         with torch.autocast(h.device.type, enabled=False):
             k = self.k_norm(k.float()).to(v.dtype)
-        return rope(k, pos), v
+        return self._rope(k, pos), v
+
+    def _latent_parts(self, h, pos):
+        """Absorb onbellegi (latent_rope): n1(x) (B, T, d) -> c (B, T, r), R = rope(w_p * k_pe) (B, T, dr), s (B,
+        kv_heads, T) = egitimdeki k_norm'un head basina RMS katsayisi (rsqrt(mean([W_uk c ; k_pe]^2) + eps)).  Egitimin
+        anahtari: s * [w_n * W_uk c ; R]."""
+        B, T, d = h.shape
+        hd, dr, r = d // self.heads, self.latent_rope, self.latent_rank
+        a = self.kv_down(h)
+        c, kpe = self.kv_norm(a[..., :r]), a[..., r:]
+        kn = self.kv_up(c).view(B, T, self.kv_heads, 2 * hd - dr)[..., :hd - dr]
+        with torch.autocast(h.device.type, enabled=False):
+            u = torch.cat([kn.float(), kpe.float()[:, :, None].expand(B, T, self.kv_heads, dr)], -1)
+            eps = self.k_norm.eps if self.k_norm.eps is not None else torch.finfo(torch.float32).eps
+            s = torch.rsqrt(u.square().mean(-1) + eps).transpose(1, 2)
+            R = rope((kpe.float() * self.k_norm.weight[hd - dr:].float())[:, None], pos)[:, 0]
+        return c, R, s
 
     def _finish(self, x, a, g=None):
         """g: _qkv(gate=True)'nun kapisi; yoksa (onbellek yollari) _gate(x)."""
@@ -386,7 +424,8 @@ class Block(torch.nn.Module):
 
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
-                 attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_latent_rank=0, g_raw_sentences=0):
+                 attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_latent_rank=0, g_raw_sentences=0,
+                 g_latent_rope=0):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -397,12 +436,14 @@ class SentenceTransformer(torch.nn.Module):
         ilk agirliklardan SONRA, RNG cekmeden: diger agirliklar kapali modelle ayni).  ngram_layers K: yalniz ilk K blok
         (0: hepsi; lambda K tane).  ngram_sparse: egitimde (gradyan acikken) okunan satirlar ayri yaprak (ngram_seen), tablo
         gradyani yogun olusmaz.  g_latent_rank r / g_raw_sentences K (belge 102): glob bloklarinda eski cumle token'lari
-        latent'ten (0 kapali); latent agirliklari butun ilk agirliklardan SONRA ceker (geri kalan kapali modelle ayni)."""
+        latent'ten (0 kapali); latent agirliklari butun ilk agirliklardan SONRA ceker (geri kalan kapali modelle ayni).
+        g_latent_rope dr: glob'da ayrik RoPE + uretimde absorb (belge 102 s9; 0: sade yol)."""
         super().__init__()
         self.carry_group, self.row_len = int(carry_group), ROW_LEN
         self.global_layers = int(global_layers)
         assert 0 <= self.global_layers <= layers, "global_layers 0..layers"
-        self.g_latent_rank, self.g_raw_sentences = int(g_latent_rank), int(g_raw_sentences)
+        self.g_latent_rank, self.g_raw_sentences, self.g_latent_rope = int(g_latent_rank), int(g_raw_sentences), \
+            int(g_latent_rope)
         assert self.g_latent_rank >= 0 and self.g_raw_sentences >= 0, "g_latent_rank / g_raw_sentences >= 0"
         assert not self.g_latent_rank or (self.global_layers and not carry_group), "g_latent: glob katmani gerek, carry yok"
         self._latent = g_latent_masks(self.g_raw_sentences) if self.g_latent_rank else None
@@ -416,7 +457,8 @@ class SentenceTransformer(torch.nn.Module):
             self.E = torch.nn.Embedding(vocab_rows, d, _weight=torch.zeros(vocab_rows, d))
         kinds = ["loc"] * (layers - self.global_layers) + ["glob"] * self.global_layers
         self.blocks = torch.nn.ModuleList(Block(d, heads, hidden, glob_kv_heads if k == "glob" else None,
-                                                int(attn_gate), self.g_latent_rank if k == "glob" else 0) for k in kinds)
+                                                int(attn_gate), self.g_latent_rank if k == "glob" else 0,
+                                                self.g_latent_rope if k == "glob" else 0) for k in kinds)
         self.norm = torch.nn.RMSNorm(d)
         for name, p in self.named_parameters():
             if p.dim() == 2 and not name.endswith(("attn_gate", "kv_down.weight", "kv_up.weight")):   # kapi sifir kalir
@@ -657,6 +699,10 @@ class SummaryCache:
         self.sen_k, self.sen_v = [None] * L, [None] * L
         self.all_k, self.all_v = [None] * L, [None] * L
         self.all_kc, self.all_vc, self.gsent = [None] * L, [None] * L, []      # g_latent: latent K / V, konum cumlesi
+        self.absorb = bool(getattr(model, "g_latent_rope", 0))           # absorb: glob onbellegi ham + latent (belge 102 s9)
+        self.raw_meta = []                                                  # ham glob konumlari (tur, cumle)
+        self.raw_k, self.raw_v, self.raw_c, self.raw_r, self.raw_s = ([None] * L for _ in range(5))
+        self.lat_c, self.lat_r, self.lat_s = ([None] * L for _ in range(3))
         self.glob = [l >= L - model.global_layers for l in range(L)]
         self.n_z, self.i, self.t = 0, 0, 0
         self.piece, self.used, self.gkind = 0, 1, []                       # carry: parca no, parcadaki konum, glob tur
@@ -675,9 +721,18 @@ class SummaryCache:
         self.gkind.append(ZTOK if summary and read_sentence else BOS if summary else TOKEN)
         s_q = -1 if summary and not read_sentence else self.n_z - 1 if summary else self.n_z
         self.gsent.append(s_q)
+        if self.absorb:
+            self._spill(s_q)
+            self.raw_meta.append((self.gkind[-1], s_q))
         for l, block in enumerate(self.m.blocks):
             if g is not None and l < self.m.ngram_layers:
                 x = x + self.m.ngram_lambdas[l] * g
+            if self.glob[l] and self.absorb:                               # ham + latent (absorb), adim 2
+                tt = torch.tensor([[self.t]], device=self.dev)
+                q, k, v = block._qkv(x, tt)
+                self._raw_add(l, k, v, block._latent_parts(block.n1(x), tt))
+                x = block._finish(x, self._absorb(l, block, q))
+                continue
             if self.glob[l]:
                 lat = block.kv_down is not None
                 q, k, v, *c = block._qkv(x, torch.tensor([[self.t]], device=self.dev), latent=lat)
@@ -703,6 +758,52 @@ class SummaryCache:
                 self.sen_v[l] = v if self.sen_v[l] is None else torch.cat([self.sen_v[l], v], 2)
             x = block._finish(x, a)
         return self.m.norm(x)
+
+    def _raw_add(self, l, k, v, parts):
+        """Ham glob onbellegine konum(lar) ekle: K / V (1, kv, n, hd) ve sonra latent'e devredilecek c, R, s."""
+        c, R, s = parts
+        cat = lambda a, b, dim: b if a is None else torch.cat([a, b], dim)  # noqa: E731
+        self.raw_k[l], self.raw_v[l] = cat(self.raw_k[l], k, 2), cat(self.raw_v[l], v, 2)
+        self.raw_c[l], self.raw_r[l], self.raw_s[l] = cat(self.raw_c[l], c[0], 0), cat(self.raw_r[l], R[0].to(c.dtype), 0), \
+            cat(self.raw_s[l], s[0], 1)                                     # c, R model dtype'inda; s fp32
+
+    def _spill(self, s_q):
+        """Eskiyen ham konumlar (TOKEN, cumlesi < s_q - K) latent onbellege: ham K / V silinir, c / R / s tasinir."""
+        old = [i for i, (kd, sn) in enumerate(self.raw_meta) if kd == TOKEN and sn < s_q - self.m.g_raw_sentences]
+        if not old:
+            return
+        o = torch.tensor(old, device=self.dev)
+        keep = torch.tensor([i for i in range(len(self.raw_meta)) if i not in set(old)], device=self.dev)
+        cat = lambda a, b, dim: b if a is None else torch.cat([a, b], dim)  # noqa: E731
+        for l, g in enumerate(self.glob):
+            if g:
+                self.lat_c[l], self.lat_r[l] = cat(self.lat_c[l], self.raw_c[l][o], 0), cat(self.lat_r[l], self.raw_r[l][o], 0)
+                self.lat_s[l] = cat(self.lat_s[l], self.raw_s[l][:, o], 1)
+                self.raw_k[l], self.raw_v[l] = self.raw_k[l][:, :, keep], self.raw_v[l][:, :, keep]
+                self.raw_c[l], self.raw_r[l], self.raw_s[l] = self.raw_c[l][keep], self.raw_r[l][keep], self.raw_s[l][:, keep]
+        self.raw_meta = [m for i, m in enumerate(self.raw_meta) if i not in set(old)]
+
+    def _absorb(self, l, block, q):
+        """Tek sorgu q (1, H, 1, hd) -> attention ciktisi (1, H, 1, hd): ham anahtarlar dogrudan, eski token'lar latent
+        uzayda (V3 :480-495): skor = s * [(q_n * w_n) W_uk c + q_pe . R] / sqrt(hd), cikis W_uv (p c)."""
+        H, kvh = block.heads, block.kv_heads
+        hd, dr, r = q.shape[-1], block.latent_rope, block.latent_rank
+        qg = q[0, :, 0].view(kvh, H // kvh, hd).float()
+        K, Vr = self.raw_k[l][0].float(), self.raw_v[l][0].float()
+        sc = qg @ K.transpose(-1, -2)
+        W = block.kv_up.weight.float().view(kvh, 2 * hd - dr, r)
+        lat = self.lat_c[l] is not None
+        if lat:                                                             # latent onbellek kendi dtype'inda okunur
+            C, dt = self.lat_c[l], self.lat_c[l].dtype
+            qa = torch.einsum("kgn,knr->kgr", qg[..., :hd - dr] * block.k_norm.weight[:hd - dr].float(), W[:, :hd - dr])
+            so = ((qa.to(dt) @ C.T).float() + (qg[..., hd - dr:].to(dt) @ self.lat_r[l].T).float()) * self.lat_s[l][:, None, :]
+            sc = torch.cat([sc, so], -1)
+        p = torch.softmax(sc * hd ** -0.5, -1)
+        n = K.shape[1]
+        o = p[..., :n] @ Vr
+        if lat:
+            o = o + torch.einsum("kgr,khr->kgh", (p[..., n:].to(dt) @ C).float(), W[:, hd - dr:])
+        return o.reshape(1, H, 1, hd).to(q.dtype)
 
     def _old(self, s_q):
         """g_latent: glob onbellek konumlarindan latent'ten okunanlar (TOKEN ve cumlesi < s_q - K)."""
@@ -735,6 +836,9 @@ class SummaryCache:
         if self.m.g_latent_rank:                                         # glob: [ham | latent] maskesi (egitimle ayni)
             causal = _dense(self.m._latent[0](kind, doc, sent), 1, T, self.dev, 2 * T)[0]
             self.gkind, self.gsent = kind[0].tolist(), sent[0].tolist()
+            self.raw_meta = list(zip(self.gkind, self.gsent))             # BOS adimi (kurucu) dahil hepsi yeniden
+            L = len(self.m.blocks)
+            self.raw_k, self.raw_v, self.raw_c, self.raw_r, self.raw_s = ([None] * L for _ in range(5))
         summ = ((kind == BOS) | (kind == ZTOK))[0]
         x, lpos, real = self.m.E(t(tok)), t(pos), torch.arange(T, device=self.dev)[None]
         gr = None if self.m.ngram is None else self.m._ngram(t(tok), bigram_prev(t(tok), kind, doc, sent), kind == TOKEN)
@@ -745,9 +849,11 @@ class SummaryCache:
             lat = g and block.kv_down is not None
             q, k, v, *c = block._qkv(x, real if g else lpos, latent=lat)
             a = gqa_sdpa(q, *((torch.cat([k, c[0]], 2), torch.cat([v, c[1]], 2)) if lat else (k, v)), causal if g else local)
-            if lat:
-                self.all_kc[l], self.all_vc[l] = c
-            if g:
+            if g and self.absorb:                                       # hepsi hama; sonraki adim eskileri devreder
+                self._raw_add(l, k, v, block._latent_parts(block.n1(x), real))
+            elif g:
+                if lat:
+                    self.all_kc[l], self.all_vc[l] = c
                 self.all_k[l], self.all_v[l] = k, v
             else:
                 self.sum_k[l], self.sum_v[l] = k[:, :, summ], v[:, :, summ]

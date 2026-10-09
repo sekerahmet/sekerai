@@ -3,7 +3,7 @@
 v2-before-formula-cleanup-20261007.
 
     python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,mask,summaries_last,gqa,carry,vocab,limit,flex_ranges,
-                            gate,ngram,ngram_fast,combo,g_latent]
+                            gate,ngram,ngram_fast,combo,g_latent,g_latent_rope]
 """
 import os
 import sys
@@ -1655,10 +1655,89 @@ def t_g_latent():
           out_ok, "; ".join(info))
 
 
+def t_g_latent_rope():
+    """g_latent_rope (belge 102 s9): ayrik RoPE egitim yolu (sekiller, sizinti yok, gradyan, summaries_last = Z'ler arada,
+    flex = dense); SummaryCache absorb adim adim ve prefill + devam = tam ileri (K 0 / 1; norm agirliklari 1'den uzak);
+    hikaye sonunda ham onbellek = BOS + Z'ler + son K + 1 cumle, latent = daha eski token'lar (ham K / V'leri silinmis);
+    generate calisir."""
+    import recipe as R
+    from model import summaries_last
+    rng = np.random.default_rng(41)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(4, 7))]
+               for _ in range(8)]
+    rows = [list(range(i, i + 4)) for i in range(0, 8, 4)]
+    batch = real_batch(rows, 192, stories)
+    pb, perm = summaries_last(batch)
+    inv = torch.argsort(perm, 1)
+
+    def make(K):
+        torch.manual_seed(0)
+        m = SentenceTransformer(d=32, layers=3, heads=4, global_layers=2, glob_kv_heads=2, g_latent_rank=8,
+                                g_raw_sentences=K, g_latent_rope=4).eval()
+        g = torch.Generator().manual_seed(5)
+        with torch.no_grad():
+            for blk in m.blocks:
+                blk.k_norm.weight.copy_(0.5 + torch.rand(blk.k_norm.weight.shape, generator=g))
+                blk.q_norm.weight.copy_(0.5 + torch.rand(blk.q_norm.weight.shape, generator=g))
+        return m
+    m = make(0)
+    alt = [[list(s_) for s_ in st] for st in stories]
+    alt[0][-1] = [(t + 7) % D.END_ID for t in alt[0][-1]]
+    first = batch.doc[0] == 0
+    last = int((first & (batch.sent[0] == int(batch.sent[0][first].max()))).nonzero()[0, 0])
+    m.train()
+    m.loss_per_target(batch)[0].mean().backward()
+    grads = [float(b.kv_down.weight.grad.abs().sum()) + float(b.kv_up.weight.grad.abs().sum()) for b in m.blocks
+             if b.kv_down is not None]
+    m.eval()
+    with torch.no_grad():
+        g1, g2 = m._batch_hidden(batch), m._batch_hidden(real_batch(rows, 192, alt))
+        h_last = m._batch_hidden(pb).gather(1, inv[..., None].expand(-1, -1, 32))
+        nd = m.loss_per_target(pb, tuple(R.dense_mask(pb, f) for f in m._masks(True)))[0]
+        nf = m.loss_per_target(pb, tuple(R.block_mask(pb, f) for f in m._masks(True)))[0]
+    shapes = (tuple(m.blocks[1].kv_down.weight.shape), tuple(m.blocks[1].kv_up.weight.shape))
+    check("g_latent_rope egitim: kv_down d -> r + dr, kv_up r -> kv (2 hd - dr) %s; sizinti yok; gradyan; summaries_last = "
+          "Z'ler arada; flex = dense (fark %.1e)" % (shapes, float((nd - nf).abs().max())),
+          shapes == ((12, 32), (24, 8)) and torch.equal(g1[0, :last], g2[0, :last]) and min(grads) > 0
+          and float((g1 - h_last).abs().max()) < 1e-5 and float((nd - nf).abs().max()) < 1e-5,
+          "grad %s" % ["%.2g" % g for g in grads])
+
+    ok, info = True, []
+    for K in (0, 1):
+        m = make(K)
+        with torch.no_grad():
+            lg = m._batch_hidden(batch)[batch.target >= 0] @ m.E.weight.T
+            out, sizes = [], []
+            for row in rows:
+                for si in row:
+                    c = SummaryCache(m)
+                    out.append(c.logits[None])
+                    for s_ in stories[si]:
+                        out += [c.append_token(t)[None] for t in s_] + [c.close_sentence()[None]]
+                    ns = len(stories[si])                                  # son sorgu Z_(ns-1): eski < ns - 1 - K
+                    cut = max(ns - 1 - K, 0)
+                    want = (1 + ns + sum(len(x_) for x_ in stories[si][cut:]), sum(len(x_) for x_ in stories[si][:cut]))
+                    got = (c.raw_k[2].shape[2], 0 if c.lat_c[2] is None else c.lat_c[2].shape[0])
+                    sizes.append(got == want and c.all_k[2] is None)
+            pre = SummaryCache(m)
+            pre.prefill(stories[0][:3])
+            sizes.append(pre.all_k[2] is None and pre.all_kc[2] is None)      # absorb prefill'i eski yolun K / V'sini tutmaz
+            k_pre = 1 + sum(len(s_) + 1 for s_ in stories[0][:3]) - 1
+            steps = [pre.logits] + [pre.append_token(t) for t in stories[0][3]] + [pre.close_sentence()]
+            ref = torch.cat(out)[k_pre:k_pre + len(steps)]
+            d1 = float((torch.cat(out) - lg).abs().max())
+            d2 = max(float((s_ - o_).abs().max()) for s_, o_ in zip(steps, ref))
+            gen = m.generate([stories[0][:2], stories[1][:1]], 3, 5)
+        ok &= d1 < 1e-5 and d2 < 1e-5 and len(gen) == 2 and all(sizes)
+        info.append("K %d: adim %.1e prefill + devam %.1e, onbellek boyu %d / %d" % (K, d1, d2, sum(sizes), len(sizes)))
+    check("g_latent_rope uretim: SummaryCache absorb adim adim ve prefill + devam = tam ileri; ham onbellek BOS + Z + son "
+          "K + 1 cumle, eski token'lar yalniz latent (c / R / s); generate calisir", ok, "; ".join(info))
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab,
              limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast,
-             combo=t_combo, g_latent=t_g_latent)
+             combo=t_combo, g_latent=t_g_latent, g_latent_rope=t_g_latent_rope)
 
 if __name__ == "__main__":
     if SIDE is not None:
