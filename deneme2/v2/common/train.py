@@ -78,9 +78,9 @@ kimlikte, INHERIT'te (alan yoksa 0).  --g_latent_rope dr (belge 102 s9; kullanic
 lazım"): glob'da ayrik RoPE (son dr boyut) + uretimde absorb; 0 sade yol (bit ayni).  --g_latent_score 1 (belge 102
 s11; kullanici, 9 Ekim: "Olur kur"): yalniz olcek, latent K'ya kv head (x kademe) basina ogrenilen carpan (1 baslar; kayma
 yok, score_mod yok).  Esnek r (belge 103; kullanici, 9 Ekim: "bu arada hazır olunca GPU da başlat beni bekleme isimler
-onaylı"): --g_latent_tiers 32,64,128,256 (son = --g_latent_rank) ile --g_latent_budget R (lambda kilidi) ya da
---g_latent_price lambda (biri), --g_latent_explore p (varsayilan 0,3; inis evresinde 0,05); gunlukte tier_hist / tier_mean /
-tier_lambda / tier_ce.
+onaylı"): --g_latent_tiers 32,64,128,256 (son = --g_latent_rank) ile --g_latent_budget R (onem sirasina gore paylar; 9 Ekim
+importance_probe sonrasi, Taylor secicisi kaldirildi), --g_latent_explore p (varsayilan 0); gunlukte tier_hist / tier_mean /
+tier_hit / tier_ce.
 
 Eski kosular (kullanici, 8 Ekim: "V2 içinde temizlik kastettim"; belge 77): Model Z kimliginde summaries_last 1 degilse
 (8 Ekim oncesi; formullu / temizlik oncesi dahil; summaries_last 0), learned_z 0 ya da kaldirilan bir ozellik (z_bow,
@@ -267,9 +267,9 @@ def _latent_error(args):
     if k and not r:
         return "--g_raw_sentences yalniz --g_latent_rank ile"
     tiers, bud, pri = args.g_latent_tiers, args.g_latent_budget, args.g_latent_price
-    if tiers and (not r or tiers != sorted(set(tiers)) or tiers[0] <= 0 or tiers[-1] != r or (bud > 0) == (pri > 0)
-                  or (bud and not tiers[0] <= bud <= tiers[-1]) or not 0 <= args.g_latent_explore <= 1):
-        return "--g_latent_tiers: artan, son = --g_latent_rank; --g_latent_budget (kademe araliginda) ya da --g_latent_price (biri)"
+    if tiers and (not r or tiers != sorted(set(tiers)) or tiers[0] <= 0 or tiers[-1] != r or not bud or pri
+                  or not tiers[0] <= bud <= tiers[-1] or not 0 <= args.g_latent_explore <= 1):
+        return "--g_latent_tiers: artan, son = --g_latent_rank; --g_latent_budget (kademe araliginda) gerek; --g_latent_price yok"
     if not tiers and (bud or pri):
         return "--g_latent_budget / --g_latent_price yalniz --g_latent_tiers ile"
     if args.g_latent_score not in (0, 1) or (args.g_latent_score and not r):
@@ -426,7 +426,7 @@ def _step(model, batch, mask_fn, opt, cuda, timer=None, cont=None, mtp=None):
             timer[1].record()
     opt.zero_grad(set_to_none=True)
     loss.backward()
-    if getattr(model, "tier_select", None) is not None:                # esnek r: secici CE (Taylor kritigi, belge 103)
+    if getattr(model, "tier_select", None) is not None:                # esnek r: secici onem etiketine (MSE)
         extra = dict(extra or {}, **model.tier_update((batch.target >= 0).sum()))
     seen = getattr(model, "ngram_seen", None)                          # seyrek bigram yapragi kirpmaya dahil
     params = list(model.parameters()) if seen is None else [*model.parameters(), seen[1]]
@@ -642,10 +642,10 @@ def _args(argv):
                     help="--g_latent_rank ile: glob'da ayrik RoPE boyu dr (cift, < head boyu) + uretimde absorb (belge 102 s9; 0 kapali)")
     ap.add_argument("--g_latent_tiers", default=None,
                     help="esnek r kademeleri, artan, son = --g_latent_rank (orn. 32,64,128,256; belge 103); bos: sabit r")
-    ap.add_argument("--g_latent_budget", type=float, default=None, help="esnek r: ortalama r butcesi (lambda kilidi)")
-    ap.add_argument("--g_latent_price", type=float, default=None, help="esnek r: sabit fiyat lambda (butcenin yerine)")
+    ap.add_argument("--g_latent_budget", type=float, default=None, help="esnek r: ortalama r butcesi (onem sirasina gore paylar)")
+    ap.add_argument("--g_latent_price", type=float, default=None, help="esnek r: bu surumde yok (DUR)")
     ap.add_argument("--g_latent_explore", type=float, default=None,
-                    help="esnek r: egitimde rastgele kademe olasiligi (varsayilan 0,3; inis evresinde 0,05)")
+                    help="esnek r: egitimde rastgele kademe olasiligi (varsayilan 0; inis evresinde en cok 0,05)")
     ap.add_argument("--g_latent_score", type=int, default=None,
                     help="--g_latent_rank ile: 1 latent K'ya kv head basina ogrenilen olcek (belge 102 s11; 0 kapali)")
     ap.add_argument("--mtp", type=lambda s: s if s == "auto" else int(s), default=None,
@@ -674,7 +674,7 @@ def _args(argv):
     args.g_latent_tiers = [int(x) for x in t.split(",") if x.strip()] if isinstance(t, str) else list(t or [])
     args.g_latent_budget, args.g_latent_price = float(args.g_latent_budget or 0), float(args.g_latent_price or 0)
     if args.g_latent_explore is None:
-        args.g_latent_explore = 0.3 if args.g_latent_tiers else 0.0
+        args.g_latent_explore = 0.0
     args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
     if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
         args.optimizer = DEFAULT_OPTIMIZER
@@ -795,6 +795,13 @@ def main(argv=None):
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(os.path.join(args.stream, "gpt2", "tokenizer.json"))
     model, mask_fn, layout = _build(args, dev)
+    if args.g_latent_tiers:                                              # esnek r onem etiketi: -log p(token), train sayimi
+        cpath = os.path.join(args.data, "train_token_counts.npy")
+        if not os.path.exists(cpath):
+            sys.exit("DUR: esnek r icin %s gerek" % cpath)
+        c = torch.tensor(np.load(cpath)[:D.VOCAB], dtype=torch.float) + 1
+        assert len(c) == D.VOCAB, "train_token_counts boyu"
+        model.tok_surprisal.copy_(-(c / c.sum()).log().to(model.tok_surprisal.device))
     model.row_len = row_len                                              # uretim konum siniri, carry parca boyu
     last = None
     if args.summaries_last:                                              # belge 66: [token'lar | ozetler | dolgu]
@@ -951,7 +958,7 @@ def main(argv=None):
             mtp = (mt, torch.tensor(w_mtp))
             mtp = tuple(t.pin_memory().to(dev, non_blocking=True) for t in mtp) if cuda else mtp
         if getattr(model, "tier_select", None) is not None:            # kesif: inis evresinde tier_p_late
-            model.tier_p = args.g_latent_explore if step < down else model.tier_p_late
+            model.tier_p = args.g_latent_explore if step < down else min(args.g_latent_explore, model.tier_p_late)
         loss, gn, extra = _step(model, _to_device(batch, dev), mask_fn, opt, cuda, timer, cont, mtp)
         nxt = cpu_batch(step + 1) if step + 1 < total else None          # GPU calisirken hazirlanir
         win["loss"] += loss
@@ -986,10 +993,10 @@ def main(argv=None):
         if n_t:                                                          # esnek r: pencere ortalamalari (belge 103 s4)
             rec.update(tier_hist=[round(v / n_t, 4) for v in win["extra"]["tier_hist"].tolist()],
                        tier_mean=round(float(win["extra"]["tier_mean"]) / n_t, 2),
-                       tier_lambda=round(float(win["extra"]["tier_lambda"]) / n_t, 5),
+                       tier_hit=round(float(win["extra"]["tier_hit"]) / n_t, 4),
                        tier_ce=round(float(win["extra"]["tier_ce"]) / n_t, 4))
-            log("  kademe: hist %s  ortalama r %.1f  lambda %.4g  secici ce %.4f" % (
-                rec["tier_hist"], rec["tier_mean"], rec["tier_lambda"], rec["tier_ce"]))
+            log("  kademe: hist %s  ortalama r %.1f  onem isabeti (ust kademe) %.3f  secici mse %.4f" % (
+                rec["tier_hist"], rec["tier_mean"], rec["tier_hit"], rec["tier_ce"]))
         history["log"].append(rec)
         log("adim %d / %d (epok %d)  lr %.3g  kayip %.4f  grad %.3f | pencere %d adim %.1f sn  %.1f ms/adim  %.0f tok/sn%s%s"
             % (done, total, epoch, lr, rec["loss"], rec["grad_norm"], k, s["seconds"], rec["ms_per_step"],

@@ -50,13 +50,14 @@ basina RMS skaleriyle saklanir, attention absorb yoluyla (V3 :480-495).
 --g_latent_score 1 (belge 102 s11; kullanici, 9 Ekim: "Olur kur"): latent anahtar K'si a[t, g] ile carpilir (QK-norm ve
 RoPE'den sonra; skor dogrusal: a * skor), t anahtar token'inin kademesi (esnek r; sabit r'de tek), g kv head; a 1 baslar
 (cikis kapali modelle ayni).  score_mod yok (ogrenilen a'nin flex geri yayilimi GPU'da adimi 19x yavaslatti); kayma yok.
-Esnek r (belge 103; --g_latent_tiers 32,64,128,256 ve --g_latent_budget / --g_latent_price, --g_latent_explore): token
-basina kademe; latent c'nin ilk r_t boyutu (ic ice), maske c * m (m tier_select'ten, sert); secici girdisi ilk G katmaninin
-n1(x)'i (detach); secici Taylor kritigiyle egitilir (tier_update: dL/dm = g * c, kademe basina birinci derece kayip farki +
-lambda r / r_max, argmin'e CE; lambda ana aga girmez).  Uretimde argmax, absorb onbellegi kademe basina.
+Esnek r (--g_latent_tiers 32,64,128,256, --g_latent_budget B): token basina kademe; latent c'nin ilk r_t boyutu (ic ice),
+maske c * m.  Secici (tier_select) ilk G katmaninin n1(x)'inden (detach) onem puani verir; egitimde okunan token'lar puana gore
+siralanip kademelere paylastirilir (butce tam), sinav / uretimde esiklerle (tier_cut).  Puanin hedefi: token sonraki bir
+cumlede yeniden geciyorsa -log p(token), degilse 0 (9 Ekim importance_probe: onemin tamami sonraki tekrarlardan; Taylor
+secicisi F128'de noktalamayi secti, sinav 3,3828).
 """
 
-TIER_ETA = 1e-3             # butce kilidi: lambda <- max(0, lambda + eta (r / butce - 1)) (belge 103 s2.3)
+TIER_CUT_EMA = 0.99         # esnek r: sinav / uretim kademe esikleri, egitim esiklerinin EMA'si
 TIER_EXPLORE_LATE = 0.05    # inis evresinde kesif (belge 103 s3 okuma 6)
 import dataclasses
 import functools
@@ -510,12 +511,13 @@ class SentenceTransformer(torch.nn.Module):
         self.tier_select, self._tier_ctx, self._tier_n = None, None, None
         if self.g_latent_tiers:                                         # secici: sifir agirlik, en ust kademe onde (RNG yok)
             n = len(self.g_latent_tiers)
-            self.tier_select = torch.nn.utils.skip_init(torch.nn.Linear, d, n)
+            self.tier_select = torch.nn.utils.skip_init(torch.nn.Linear, d, 1)      # onem puani
             with torch.no_grad():
                 self.tier_select.weight.zero_()
-                self.tier_select.bias.copy_(torch.arange(n, dtype=torch.float) / n)
+                self.tier_select.bias.zero_()
             self.register_buffer("tier_r", torch.tensor(self.g_latent_tiers), persistent=False)
-            self.register_buffer("tier_lambda", torch.tensor(self.tier_price if self.tier_price else 0.0))
+            self.register_buffer("tier_cut", torch.zeros(n - 1))                     # puan esikleri (sinav / uretim)
+            self.register_buffer("tok_surprisal", torch.zeros(VOCAB))                # -log p(token), train.py doldurur
             self.register_buffer("tier_step", torch.zeros((), dtype=torch.long))
         self.ngram, self.ngram_seen = None, None
         self.ngram_layers, self.ngram_sparse = int(ngram_layers) or layers, bool(ngram_sparse)
@@ -535,52 +537,75 @@ class SentenceTransformer(torch.nn.Module):
             g = self.ngram(ids)
         return g * is_token[..., None].to(g.dtype)
 
+    def _tier_fracs(self):
+        """Butce -> kademe paylari (artan): en ust kademe q, alttakiler esit (1 - q) / (n - 1); q = (B - alt ort) / (r_max - alt ort)."""
+        r = [float(t) for t in self.g_latent_tiers]
+        low = sum(r[:-1]) / (len(r) - 1)
+        q = min(max((self.tier_budget - low) / (r[-1] - low), 0.0), 1.0)
+        return [(1 - q) / (len(r) - 1)] * (len(r) - 1) + [q]
+
     def _tier_pick(self, x, block, batch=None):
-        """Esnek r: ilk G blogunun n1(x)'i (detach) -> secici logit'i, kademe (argmax; egitimde tier_p olasilikla rastgele),
-        ic ice maske m (B, T, r) (egitimde yaprak: dL/dm = Taylor kritigi).  batch verilirse kritik baglami saklanir."""
-        logits = self.tier_select(block.n1(x).detach().float())
-        top = logits.argmax(-1)
-        tier, train = top, torch.is_grad_enabled() and self.training
-        if train and self.tier_p > 0:
-            if self._tier_n is None:
-                self._tier_n = int(self.tier_step)
-            gen = torch.Generator(device=x.device).manual_seed(1000003 * self._tier_n + 12345)
-            rnd = torch.rand(top.shape, generator=gen, device=x.device) < self.tier_p
-            tier = torch.where(rnd, torch.randint(0, len(self.g_latent_tiers), top.shape, generator=gen, device=x.device), top)
-        m = (torch.arange(self.g_latent_rank, device=x.device) < self.tier_r[tier][..., None]).float()
-        if train and batch is not None:
-            m.requires_grad_(True)
+        """Esnek r: ilk G blogunun n1(x)'i (detach) -> onem puani s.  Egitim (batch): okunan token'lar s'ye gore siralanir,
+        paylar (_tier_fracs) alttan doldurulur (esitlik adim tohumlu gurultuyle bozulur), esikler tier_cut'a EMA; sinav /
+        uretim: s tier_cut'la kademelenir.  -> kademe (B, T), ic ice maske m (B, T, r)."""
+        s = self.tier_select(block.n1(x).detach().float())[..., 0]
+        if torch.is_grad_enabled() and self.training and batch is not None:
             doc1 = batch.doc.long() + 1                                     # okunan token: hikayede K + 1 sonrasi cumle var
             smax = torch.full((doc1.shape[0], doc1.shape[1] + 1), -1, dtype=torch.long, device=x.device)
             smax = smax.scatter_reduce(1, doc1, batch.sent.long(), "amax").gather(1, doc1)
             read = (batch.kind == TOKEN) & (smax > batch.sent.long() + self.g_raw_sentences)
-            self._tier_ctx = dict(logits=logits, tier=tier, top=top, m=m, read=read)
+            gen = torch.Generator(device=x.device).manual_seed(1000003 * int(self.tier_step) + 12345)
+            sr = s.detach() + 1e-6 * torch.rand(s.shape, generator=gen, device=x.device)
+            fr = torch.tensor(self._tier_fracs(), device=x.device).cumsum(0)[:-1]
+            cut = torch.quantile(sr[read], fr) if bool(read.any()) else self.tier_cut
+            tier = torch.bucketize(sr, cut)
+            if self.tier_p > 0:
+                rnd = torch.rand(s.shape, generator=gen, device=x.device) < self.tier_p
+                tier = torch.where(rnd, torch.randint(0, len(self.g_latent_tiers), s.shape, generator=gen, device=x.device),
+                                   tier)
+            with torch.no_grad():
+                self.tier_cut.copy_(cut if int(self.tier_step) == 0 else
+                                    TIER_CUT_EMA * self.tier_cut + (1 - TIER_CUT_EMA) * cut)
+            self._tier_ctx = dict(s=s, tier=tier, read=read, tok=batch.tokens, kind=batch.kind, doc=batch.doc,
+                                  sent=batch.sent)
+        else:
+            tier = torch.bucketize(s, self.tier_cut)
+        m = (torch.arange(self.g_latent_rank, device=x.device) < self.tier_r[tier][..., None]).float()
         return tier, m
 
+    def _tier_label(self, tok, kind, doc, sent):
+        """Onem etiketi: token ayni hikayede onu latent'ten okuyan bir cumlede (sent > sent_j + K) yeniden geciyorsa
+        -log p(token) (nadir tekrar daha onemli), degilse 0."""
+        B, T = tok.shape
+        is_t = kind == TOKEN
+        row = torch.arange(B, device=tok.device)[:, None]
+        key = (row * (int(doc.max()) + 2) + doc.long() + 1) * VOCAB + tok.long()
+        key = torch.where(is_t, key, -1 - torch.arange(B * T, device=tok.device).view(B, T))
+        _, inv = torch.unique(key, return_inverse=True)
+        smax = torch.full((int(inv.max()) + 1,), -1, dtype=torch.long, device=tok.device).scatter_reduce(
+            0, inv.flatten(), torch.where(is_t, sent.long(), -1).flatten(), "amax")
+        later = is_t & (smax[inv] > sent.long() + self.g_raw_sentences)
+        return later.float() * self.tok_surprisal[tok.long().clamp(0, VOCAB - 1)]
+
     def tier_update(self, n_targets):
-        """Ana geri yayilimdan sonra (belge 103 s2.2): Taylor kritigi dL / dm -> kademe basina birinci derece kayip farki,
-        maliyet N dL + lambda r / r_max, argmin'e secici CE (geri yayilir); butcede lambda kilidi.  -> gunluk tensorleri."""
+        """Ana geri yayilimdan sonra: secici puani s onem etiketine (_tier_label) MSE ile, okunan token'larda (geri yayilir).
+        -> gunluk: tier_ce (MSE), tier_mean, tier_hist, tier_hit (etiket kutlesinin en ust kademeye dusen payi)."""
         ctx, self._tier_ctx = self._tier_ctx, None
-        if ctx is None or ctx["m"].grad is None:
+        if ctx is None:
             return {}
-        n, rmax = len(self.g_latent_tiers), float(self.g_latent_rank)
-        P = ctx["m"].grad.float().cumsum(-1)[..., self.tier_r - 1]          # (B, T, n): ilk r_t boyutun toplam katkisi
-        cur = P.gather(-1, ctx["tier"][..., None])
-        lam = self.tier_lambda.float()
-        cost = n_targets.float() * (P - cur) + lam * self.tier_r.float() / rmax
+        n = len(self.g_latent_tiers)
+        y = self._tier_label(ctx["tok"], ctx["kind"], ctx["doc"], ctx["sent"])
         read = ctx["read"].float()
         cnt = read.sum().clamp_min(1)
-        ce = (F.cross_entropy(ctx["logits"].float().flatten(0, 1), cost.argmin(-1).flatten(), reduction="none") * read.flatten()
-              ).sum() / cnt
-        ce.backward()
-        r_mean = (self.tier_r[ctx["top"]].float() * read).sum() / cnt     # gercek (argmax) ortalama r
-        hist = (F.one_hot(ctx["top"], n).float() * read[..., None]).sum((0, 1)) / cnt
+        mse = ((ctx["s"] - y) ** 2 * read).sum() / cnt
+        mse.backward()
+        top = ctx["tier"]
+        r_mean = (self.tier_r[top].float() * read).sum() / cnt
+        hist = (F.one_hot(top, n).float() * read[..., None]).sum((0, 1)) / cnt
+        hit = (y * read * (top == n - 1)).sum() / (y * read).sum().clamp_min(1e-9)
         with torch.no_grad():
-            if self.tier_budget:
-                self.tier_lambda.copy_((lam + TIER_ETA * (r_mean / self.tier_budget - 1)).clamp_min(0))
             self.tier_step.add_(1)
-        self._tier_n = (self._tier_n or 0) + 1
-        return dict(tier_ce=ce.detach(), tier_mean=r_mean.detach(), tier_hist=hist, tier_lambda=lam.detach(), tier_steps=1)
+        return dict(tier_ce=mse.detach(), tier_mean=r_mean.detach(), tier_hist=hist, tier_hit=hit.detach(), tier_steps=1)
 
     def max_positions(self):
         """Uretimde hikaye basina konum siniri: egitim satiri row_len; carry belleginde carry_group parca (belge 89b)."""
