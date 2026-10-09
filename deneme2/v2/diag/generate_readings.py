@@ -78,7 +78,8 @@ def load_run(out, data_dir, dev):
                            vocab_rows=idt.get("vocab_rows", D.VOCAB),            # sozluk dolgusundan onceki: VOCAB
                            attn_gate=idt.get("attn_gate", 0),
                            ngram_embed=idt.get("ngram_embed", 0), ngram_layers=idt.get("ngram_layers", 0),
-                           ngram_sparse=idt.get("ngram_sparse", 0), g_nope=idt.get("g_nope", 0))
+                           ngram_sparse=idt.get("ngram_sparse", 0), g_nope=idt.get("g_nope", 0),
+                           local_mlp=idt.get("local_mlp", 0))
     model, _, _ = T._build(spec, dev)
     model.load_state_dict(pack["state"])
     model.row_len = idt["row_len"]                                       # uretim konum siniri, carry parca boyu
