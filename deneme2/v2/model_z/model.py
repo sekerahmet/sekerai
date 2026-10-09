@@ -216,11 +216,13 @@ def model_z_global_latent_mask(kind, doc, sent, raw_sentences=0):
     token ise (TOKEN, sent[j] < sent[q] - K) latent yuvasi T + j'den, degilse ham j'den.  Dolgu kendi kosusu (ham)."""
     _, ds, _ = model_z_read_bounds(kind)
     T = kind.shape[1]
+    ar = torch.arange(2 * T, device=kind.device)
+    jt, lt = ar % T, ar >= T                                    # anahtar -> konum, latent mi (T mask_mod disinda: derlemede SymInt)
 
     def mask_mod(b, h, q, kv):
-        j = torch.where(kv < T, kv, kv - T)
+        j, lat = jt[kv], lt[kv]
         old = (kind[b, j] == TOKEN) & (sent[b, j] < sent[b, q] - raw_sentences)
-        return (j <= q) & (j >= ds[b, q]) & torch.where(kv < T, ~old, old)
+        return (j <= q) & (j >= ds[b, q]) & (old == lat)
     return mask_mod
 
 
@@ -232,10 +234,11 @@ def model_z_last_latent_ranges(kind, doc, sent, raw_sentences=0):
     a0, a1, b0, b1, ktok, d, s = _last_bounds(kind, doc, sent, True)
     r0 = torch.searchsorted(ktok, d + (s - raw_sentences).clamp_min(0)).int()
     r0 = torch.where(kind == PAD, a0, torch.maximum(r0, a0))
+    la0, lr0 = (a0 + T).int(), (r0 + T).int()                 # latent yuva sinirlari (T mask_mod disinda: derlemede SymInt)
 
     def mask_mod(b, h, q, kv):
         raw = ((kv >= r0[b, q]) & (kv <= a1[b, q])) | ((kv >= b0[b, q]) & (kv <= b1[b, q]))
-        return raw | ((kv >= a0[b, q] + T) & (kv < r0[b, q] + T))
+        return raw | ((kv >= la0[b, q]) & (kv < lr0[b, q]))
     return mask_mod
 
 
