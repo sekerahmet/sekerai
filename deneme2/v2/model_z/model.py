@@ -256,6 +256,13 @@ class Block(torch.nn.Module):
         self.qkv = torch.nn.Linear(d, d + 2 * (d // heads) * kv_all, bias=False)
         self.q_norm, self.k_norm = torch.nn.RMSNorm(d // heads), torch.nn.RMSNorm(d // heads)
         self.proj = torch.nn.Linear(d, d, bias=False)
+        self.split = self.seq and int(seq) == 2                             # sirali, ayri dogrusallar (dilim / cat yok; hiz)
+        if self.split:
+            hd_, own_ = d // heads, heads - self.g_heads
+            self.qkv = torch.nn.Linear(d, (own_ + 2 * self.kv_heads) * hd_, bias=False)
+            self.g_qkv = torch.nn.Linear(d, (self.g_heads + 2 * self.g_kv_heads) * hd_, bias=False)
+            self.proj = torch.nn.Linear(own_ * hd_, d, bias=False)
+            self.g_proj = torch.nn.Linear(self.g_heads * hd_, d, bias=False)
         self.gate_up = torch.nn.Linear(d, 2 * hidden, bias=False)
         self.down = torch.nn.Linear(hidden, d, bias=False)
         assert attn_gate in (0, 1, 2), "attn_gate 0 / 1 / 2"
@@ -320,7 +327,7 @@ class Block(torch.nn.Module):
         W, P, k0, v0 = self.qkv.weight, self.proj.weight, d, d + (kl + kg) * hd
 
         def group(h, rows, nq, nk, p, at):
-            q, k, v = F.linear(h, torch.cat(rows)).split([nq * hd, nk * hd, nk * hd], -1)
+            q, k, v = (rows(h) if callable(rows) else F.linear(h, torch.cat(rows))).split([nq * hd, nk * hd, nk * hd], -1)
             q = q.view(B, T, nq, hd).transpose(1, 2)
             k, v = (t.view(B, T, nk, hd).transpose(1, 2) for t in (k, v))
             with torch.autocast(x.device.type, enabled=False):
@@ -330,15 +337,18 @@ class Block(torch.nn.Module):
             return _attend(q, k, v, at).transpose(1, 2)                     # (B, T, nq, hd)
 
         h = self.n1(x)
-        a = group(h, (W[own * hd:d], W[k0 + kl * hd:v0], W[v0 + kl * hd:]), self.g_heads, kg, None if self.nope else real, ag)
+        a = group(h, self.g_qkv if self.split else (W[own * hd:d], W[k0 + kl * hd:v0], W[v0 + kl * hd:]), self.g_heads, kg,
+                  None if self.nope else real, ag)
         if self.attn_gate is not None:
             a = a * torch.sigmoid(F.linear(h[..., :self.attn_gate.shape[1]], self.attn_gate[own:]))[..., None]
-        x = x + F.linear(a.reshape(B, T, self.g_heads * hd), P[:, own * hd:])
+        a = a.reshape(B, T, self.g_heads * hd)
+        x = x + (self.g_proj(a) if self.split else F.linear(a, P[:, own * hd:]))
         h = self.n1b(x)
-        a = group(h, (W[:own * hd], W[k0:k0 + kl * hd], W[v0:v0 + kl * hd]), own, kl, pos, al)
+        a = group(h, self.qkv if self.split else (W[:own * hd], W[k0:k0 + kl * hd], W[v0:v0 + kl * hd]), own, kl, pos, al)
         if self.attn_gate is not None:
             a = a * torch.sigmoid(F.linear(h[..., :self.attn_gate.shape[1]], self.attn_gate[:own]))[..., None]
-        x = x + F.linear(a.reshape(B, T, own * hd), P[:, :own * hd])
+        a = a.reshape(B, T, own * hd)
+        x = x + (self.proj(a) if self.split else F.linear(a, P[:, :own * hd]))
         g, u = self.gate_up(self.n2(x)).chunk(2, -1)
         return x + self.down(F.silu(g) * u)
 
@@ -398,8 +408,11 @@ class SentenceTransformer(torch.nn.Module):
             self.E = torch.nn.Embedding(vocab_rows, d, _weight=torch.zeros(vocab_rows, d))
         kinds = ["loc"] * (layers - self.global_layers) + ["glob"] * self.global_layers
         self.g_layout = g_layout                                           # top: son N blok; interleave: esit aralik, son G
-        assert g_layout in ("top", "interleave"), "g_layout top / interleave"
-        if g_layout == "interleave" and self.global_layers:
+        if g_layout not in ("top", "interleave"):                         # elle: "3,6,9" (G blok numaralari, 0'dan)
+            at = {int(v) for v in str(g_layout).split(",")}
+            assert len(at) == self.global_layers and all(0 <= l < layers for l in at),                 "g_layout %s: %d farkli blok, 0..%d" % (g_layout, self.global_layers, layers - 1)
+            kinds = ["glob" if l in at else "loc" for l in range(layers)]
+        elif g_layout == "interleave" and self.global_layers:
             at = {round((i + 1) * layers / self.global_layers) - 1 for i in range(self.global_layers)}
             kinds = ["glob" if l in at else "loc" for l in range(layers)]
         self.mix_g_heads = int(mix_g_heads)                                # deneme/mixed-layer: her blok yerel + G head
@@ -427,7 +440,7 @@ class SentenceTransformer(torch.nn.Module):
         self.is_glob = [k == "glob" for k in kinds]                         # blok basina G mi (onbellekler de buradan)
         self.blocks = torch.nn.ModuleList(
             Block(d, heads, self.mlp_widths[i], self.mix_kv[0], int(attn_gate), bool(self.g_nope), self.mix_g_heads,
-                  self.mix_kv[1], bool(mix_seq)) if k == "mix" else
+                  self.mix_kv[1], int(mix_seq)) if k == "mix" else
             Block(d, heads, self.mlp_widths[i], glob_kv_heads if k == "glob" else (self.local_kv_heads or None),
                   int(attn_gate), bool(self.g_nope) and k == "glob") for i, k in enumerate(kinds))
         self.norm = torch.nn.RMSNorm(d)

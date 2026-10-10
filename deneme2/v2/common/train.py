@@ -650,10 +650,11 @@ def _args(argv):
     ap.add_argument("--mix_g_heads", type=int, default=None,
                     help="deneme/mixed-layer: her blokta son N head G (tam causal, gercek konum), kalan yerel (Z'li); ortak MLP, "
                          "oran head payiyla agirlikli; 0 kapali (G katmanlari ayri)")
-    ap.add_argument("--g_layout", default=None, choices=("top", "interleave"),
-                    help="deneme: G katmanlarinin yeri; top (varsayilan) son N blok, interleave esit aralikli + son blok G")
+    ap.add_argument("--g_layout", default=None,
+                    help="deneme: G katmanlarinin yeri; top (varsayilan) son N blok, interleave esit aralikli + son blok G, "
+                         "ya da blok numaralari '3,6,9' (0'dan, global_layers tane)")
     ap.add_argument("--mix_seq", type=int, default=None,
-                    help="deneme/mixed-layer: 1 karma blok sirali (once G head'leri, sonra yerel n1b(x1)'den), 0 paralel")
+                    help="deneme/mixed-layer: 1 karma blok sirali (once G head'leri, sonra yerel n1b(x1)'den; qkv / proj dilimli), 2 ayni sirali ayri dogrusallar (hiz), 0 paralel")
     ap.add_argument("--mix_kv", default=None, help="deneme/mixed-layer: yerel,G k / v head (verilmezse head payina gore)")
     ap.add_argument("--g_nope", type=int, default=None,
                     help="1: G (tam) katmanlarinda RoPE yok, konum yerel katmanlardan (G'li Model Z'de varsayilan; 0 eski RoPE'li)")
@@ -927,9 +928,9 @@ def main(argv=None):
     if args.mix_g_heads:
         log("mix_g_heads %d: her blokta %d yerel + %d G head, kv %s, MLP genislik %s (global_layers yalniz maske ikilisi)" % (
             args.mix_g_heads, args.heads - args.mix_g_heads, args.mix_g_heads, model.mix_kv, model.mlp_widths[0]))
-    elif args.global_layers and args.g_layout == "interleave":
-        log("global_layers %d, g_layout interleave: G bloklari %s (tam causal, gercek konum)" % (
-            args.global_layers, [l for l, g in enumerate(model.is_glob) if g]))
+    elif args.global_layers and args.g_layout != "top":
+        log("global_layers %d, g_layout %s: G bloklari %s (tam causal, gercek konum)" % (
+            args.global_layers, args.g_layout, [l for l, g in enumerate(model.is_glob) if g]))
     elif args.global_layers:
         log("global_layers %d: son %d blok tam causal (model_z_global_mask), gercek hikaye konumu" % (
             args.global_layers, args.global_layers))
