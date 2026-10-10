@@ -37,7 +37,7 @@ def gqa_sdpa(q, k, v, mask=None):
         return F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
     B, _, Tq, hd = q.shape
     if Tq == 1 and (mask is None or mask.shape[-2] == 1 and (mask.dim() < 3 or mask.shape[-3] == 1)):
-        return F.scaled_dot_product_attention(q.reshape(B, Hkv, H // Hkv, hd), k, v, attn_mask=mask).reshape(B, H, 1, hd)
+        return F.scaled_dot_product_attention(q.reshape(B, Hkv, H // Hkv, hd), k, v, attn_mask=mask).reshape(B, H, 1, v.shape[-1])
     return F.scaled_dot_product_attention(q, k.repeat_interleave(H // Hkv, 1), v.repeat_interleave(H // Hkv, 1),
                                           attn_mask=mask)
 
@@ -310,13 +310,13 @@ def decode_sdpa(q, k, v, mask, f32_scores=False):
     """Model Z sentence.decode_sdpa ile ayni (kopya; belge 84, 92): Tq 1, grup katlama, skor fp32, maske (B, S), @ V;
     uzun anahtarda parcali (split-KV)."""
     B, H, _, hd = q.shape
-    Hkv, S = k.shape[1], k.shape[2]
+    Hkv, S, dv = k.shape[1], k.shape[2], v.shape[-1]                       # dv: v boyu (Model S qk_dim'de hd'den farkli)
     if S < 4 * _SPLIT or S % _SPLIT:
         qf = (q * hd ** -0.5).reshape(B * Hkv, H // Hkv, hd)
         kt = k.reshape(B * Hkv, S, hd).transpose(1, 2)
         s = torch.bmm(qf, kt, out_dtype=torch.float32) if f32_scores else torch.bmm(qf, kt).float()
         p = torch.softmax(s.view(B, Hkv, -1, S).masked_fill(~mask[:, None, None], float("-inf")), -1).to(v.dtype)
-        return torch.matmul(p, v).reshape(B, H, 1, hd)
+        return torch.matmul(p, v).reshape(B, H, 1, dv)
     G, C = H // Hkv, _SPLIT
     nC = S // C
     N = B * Hkv * nC
@@ -327,10 +327,10 @@ def decode_sdpa(q, k, v, mask, f32_scores=False):
     m = s.amax(-1, keepdim=True)
     m = torch.where(torch.isfinite(m), m, torch.zeros_like(m))           # tamamen maskeli parca: katkisi 0
     e = torch.exp(s - m)
-    o = torch.bmm(e.to(v.dtype).view(N, G, C), v.reshape(N, C, hd)).float().view(B, Hkv, nC, G, hd)
+    o = torch.bmm(e.to(v.dtype).view(N, G, C), v.reshape(N, C, dv)).float().view(B, Hkv, nC, G, dv)
     wgt = torch.exp(m - m.amax(2, keepdim=True))
     out = (o * wgt).sum(2) / (e.sum(-1, keepdim=True) * wgt).sum(2)
-    return out.to(v.dtype).reshape(B, H, 1, hd)
+    return out.to(v.dtype).reshape(B, H, 1, dv)
 
 
 def _bmm_f32(t):
@@ -391,7 +391,7 @@ class StaticCache:
         for block in self.m.blocks:
             q, k, v = block._qkv(x, pos)
             kb = k.new_zeros(B, k.shape[1], self.limit, k.shape[3])
-            vb = torch.zeros_like(kb)
+            vb = v.new_zeros(B, v.shape[1], self.limit, v.shape[3])           # v boyu k'den farkli olabilir (Model S qk_dim)
             kb[:, :, :Tp], vb[:, :, :Tp] = k, v                           # dolgu yuvalari maskede, ustune yazilir
             self.K.append(kb)
             self.V.append(vb)

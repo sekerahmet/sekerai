@@ -317,6 +317,50 @@ def t_fold():
               "cikis %.1e, gradyan (goreli) %.1e" % (d_y, d_g))
 
 
+def t_qk():
+    """Parca 8, qk_dim < head boyu: A = elle formul (q / k qk boyutunda, softmax olcegi 1 / sqrt(qk)); matris azalmasi tam
+    q / k kadar; split ve mix modelinde KV cache adimi = tam ileri, toplu uretim (StaticCache) = tek tek."""
+    from model import ModelS
+    from operators import AttentionOp
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "deneme2", "v2", "transformer"))
+    import baseline as BL
+    torch.manual_seed(7)
+    B, T, d, H, Hkv, qk = 2, 9, 32, 4, 2, 4
+    u = torch.randn(B, T, d)
+    pos = torch.arange(T).expand(B, T)
+    A = AttentionOp(d, H, Hkv, qk_dim=qk)
+    with torch.no_grad():
+        got = A(u, Context(pos))
+        h = A.P(u)
+        q = A.q_P(A.w_q(h).view(B, T, H, qk)).permute(0, 2, 1, 3)
+        kv = A.w_kv(h)
+        k = A.k_P(kv[..., :Hkv * qk].view(B, T, Hkv, qk)).permute(0, 2, 1, 3)
+        v = kv[..., Hkv * qk:].view(B, T, Hkv, d // H).permute(0, 2, 1, 3)
+        q, k = rope(q, pos), rope(k, pos)
+        k, v = k.repeat_interleave(H // Hkv, 1), v.repeat_interleave(H // Hkv, 1)
+        s = (q @ k.transpose(-1, -2)) / qk ** 0.5
+        s = s.masked_fill(~torch.ones(T, T, dtype=torch.bool).tril(), float("-inf"))
+        ref = A.w_o((torch.softmax(s, -1) @ v).transpose(1, 2).reshape(B, T, d))
+        d_a = float((got - ref).abs().max())
+    full = AttentionOp(d, H, Hkv)
+    n2 = lambda m: sum(p.numel() for p in m.parameters() if p.dim() == 2)  # noqa: E731
+    check("qk_dim: A = elle formul (q / k %d boyut, olcek 1 / sqrt(qk)); matris azalmasi = (H + Hkv) (hd - qk) d" % qk,
+          d_a < 1e-5 and n2(full) - n2(A) == (H + Hkv) * (d // H - qk) * d, "fark %.1e" % d_a)
+    for op in ("split", "mix"):
+        m = ModelS(d, (1, 2), H, Hkv, op=op, qk_dim=qk).eval()
+        with torch.no_grad():
+            m.E.weight[[BL.END_ID, BL.EOS_ID]] = 0
+            x = torch.randint(0, 1000, (1, 9))
+            fl = m._logits(m.hidden(x, torch.arange(9)[None], None))[0, -1]
+            cache = dict(k=[None] * 2, v=[None] * 2, T=16)
+            m._step(x[:, :5], cache, 0)
+            d_k = float((fl - m._logits(m._step(x[:, 5:], cache, 5)[None])[0]).abs().max())
+        prompts = [[[5, 6, 7], [8, 9]], [[11, 12, 13, 14]], [[3]]]
+        one = [m.generate([p], 2, 5, batch_size=1)[0] for p in prompts]
+        check("qk_dim model op %s: KV cache adimi = tam ileri; toplu uretim = tek tek" % op,
+              d_k < 1e-4 and one == m.generate(prompts, 2, 5, batch_size=8), "fark %.1e" % d_k)
+
+
 def t_train():
     """Parca 5: train.py --model model_s --widths 1,2 (CPU, d 16; tests_v2'nin kucuk verisi): kayip duser; kimlikte widths,
     layers = adim sayisi; kesilip --resume ile surdurulen = kesintisiz (agent.pt bit duzeyinde, widths kimlikten);
@@ -363,7 +407,7 @@ def t_train():
     check("train model_s: --widths model_s disinda / model_s'de eksik -> DUR", all(m_ and "DUR" in m_ for m_ in bad), str(bad))
 
 
-TESTS = dict(ops=t_ops, steps=t_steps, stages=t_stages, model=t_model, mix=t_mix, fold=t_fold, train=t_train)
+TESTS = dict(ops=t_ops, steps=t_steps, stages=t_stages, model=t_model, mix=t_mix, fold=t_fold, qk=t_qk, train=t_train)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)

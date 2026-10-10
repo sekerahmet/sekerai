@@ -29,11 +29,46 @@ import gap_v2 as G  # noqa: E402
 
 
 @torch.no_grad()
+def ffn_sparsity(model, stories, rows, dev):
+    """4. FFN (SwiGLU) seyrekligi: h = silu(g) * up, token basina |h|^2 enerjisinin %90 / %99'u kac birimde (hidden'in payi);
+    g < 0 payi (silu yari kapali) ve |silu(g)| < 0,05 payi; down ciktisinin yalniz en buyuk %k birimle yeniden kurulma hatasi.
+    Izdusum bakisi (makale 3.3.3: aktivasyon = S2'ye izdusum): az birim cogu isi yapiyorsa seyrek cekirdek / ReLU^2 kaldiraci."""
+    import torch.nn.functional as F_
+    batch = D.build_batch(stories, rows, "transformer", dev)
+    real = batch.kind != D.Kind.PAD
+    attn = (batch.doc[:, :, None] == batch.doc[:, None, :]) & torch.ones(batch.doc.shape[1], batch.doc.shape[1], dtype=torch.bool).tril()
+    x = model.E(batch.tokens)
+    print("katman | hidden | %90 enerji | %99 enerji | g<0 | |silu(g)|<0,05 | ust %10 birimle down hatasi | ust %25")
+    for l, blk in enumerate(model.blocks):
+        q, k, v = blk._qkv(x, batch.pos)
+        from baseline import gqa_sdpa
+        x1 = x + blk.proj(gqa_sdpa(q, k, v, attn[:, None]).transpose(1, 2).reshape(*x.shape))
+        g, up = blk.gate_up(blk.n2(x1)).chunk(2, -1)
+        h = (F_.silu(g) * up)[real].float()                              # (N, hidden)
+        e = h.pow(2)
+        srt = e.sort(-1, descending=True).values.cumsum(-1) / e.sum(-1, keepdim=True)
+        n = h.shape[1]
+        f90, f99 = float((srt < 0.9).sum(-1).float().mean() + 1) / n, float((srt < 0.99).sum(-1).float().mean() + 1) / n
+        gr = g[real].float()
+        neg, off = float((gr < 0).float().mean()), float((F_.silu(gr).abs() < 0.05).float().mean())
+        full = blk.down(h.to(x.dtype)).float()
+        errs = []
+        for frac in (0.10, 0.25):
+            kk = int(n * frac)
+            idx = h.abs().topk(kk, -1).indices
+            hk = torch.zeros_like(h).scatter(-1, idx, h.gather(-1, idx))
+            errs.append(float((blk.down(hk.to(x.dtype)).float() - full).norm() / full.norm()))
+        print("%6d | %6d | %9.3f | %9.3f | %.3f | %.3f | %.3f | %.3f" % (l + 1, n, f90, f99, neg, off, errs[0], errs[1]), flush=True)
+        x = x1 + blk.down(F_.silu(g) * up)
+
+
+@torch.no_grad()
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True)
     ap.add_argument("--data", required=True)
     ap.add_argument("--rows", type=int, default=2)
+    ap.add_argument("--ffn", action="store_true", help="yalniz FFN seyrekligi (ffn_sparsity)")
     a = ap.parse_args(argv)
     if os.name == "nt":
         T._no_power_throttling()
@@ -43,6 +78,8 @@ def main(argv=None):
     assert idt["model"] == "transformer", "baseline transformer bekleniyor"
     stories = D.TokenStories(a.data, a.data, "valid")
     rows = G.exam_rows(a.data)[:a.rows]
+    if a.ffn:
+        return ffn_sparsity(model, stories, rows, dev)
     L = len(model.blocks)
     stats = {k: np.zeros(L) for k in ("u", "dA", "dF")}
     tv, err = np.zeros(L - 1), np.zeros(L - 1)

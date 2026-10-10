@@ -113,6 +113,52 @@ def skip_loss(model, batch, attn, op, frac, rule, start=2, seed=0):
 
 
 @torch.no_grad()
+def qk_bases(model, batch, attn):
+    """Head basina q / k ana bilesenleri (QK izdusumunden sonra, RoPE'den once; fit satirlari): katman -> (Uq, Uk) (H, hd, hd)."""
+    out, x = [], model.E(batch.tokens)
+    real = (batch.kind != D.Kind.PAD)
+    for blk in model.blocks:
+        q, k = _qk_pre(blk, x)
+        bases = []
+        for t in (q, k):                                                 # (B, H, T, hd)
+            z = t.permute(1, 0, 2, 3)[:, real]                           # (H, N, hd)
+            bases.append(torch.linalg.svd(z.float(), full_matrices=False).Vh.transpose(-1, -2))   # (H, hd, hd) sutunlar
+        out.append(bases)
+        x = blk(x, batch.pos, attn)
+    return out
+
+
+def _qk_pre(blk, x):
+    B, T, d = x.shape
+    hd = d // blk.heads
+    q, k, _ = blk.qkv(blk.n1(x)).split([d, blk.kv_heads * hd, blk.kv_heads * hd], -1)
+    q, k = q.view(B, T, blk.heads, hd).transpose(1, 2), k.view(B, T, blk.kv_heads, hd).transpose(1, 2)
+    return blk.q_norm(q.float()).to(x.dtype), blk.k_norm(k.float()).to(x.dtype)
+
+
+@torch.no_grad()
+def qk_rank_loss(model, batch, attn, bases, r, start=0):
+    """Katman >= start'ta q ve k head basina ilk r ana bilesene izdusurulur (RoPE'den once): kuadraturde d_qk ne kadar dusebilir."""
+    from baseline import gqa_sdpa, rope
+    x = model.E(batch.tokens)
+    for l, blk in enumerate(model.blocks):
+        if l < start:
+            x = blk(x, batch.pos, attn)
+            continue
+        B, T, d = x.shape
+        q, k = _qk_pre(blk, x)
+        Uq, Uk = bases[l][0][:, :, :r].to(q.dtype), bases[l][1][:, :, :r].to(k.dtype)
+        q = q @ Uq @ Uq.transpose(-1, -2)
+        k = k @ Uk @ Uk.transpose(-1, -2)
+        v = blk.qkv(blk.n1(x))[..., d + blk.kv_heads * (d // blk.heads):].view(B, T, blk.kv_heads, -1).transpose(1, 2)
+        a = gqa_sdpa(rope(q, batch.pos), rope(k, batch.pos), v, attn[:, None])
+        x = blk._finish(x, a)
+    h = model.norm(x)
+    keep = batch.target >= 0
+    return float(torch.nn.functional.cross_entropy(model._logits(h[keep]).float(), batch.target[keep]))
+
+
+@torch.no_grad()
 def inner_loss(model, batch, attn, layers):
     """Katman ici bolme (A ile F ayni girdiden): layers'taki katmanlarda u + A(u) + F(u), oteki katmanlar sirali."""
     x = model.E(batch.tokens)
@@ -131,6 +177,7 @@ def main(argv=None):
     ap.add_argument("--groups", default="")
     ap.add_argument("--skip", action="store_true", help="token basina uyarlamali adim (skip_loss)")
     ap.add_argument("--inner", action="store_true", help="katman ici A ile F ayni girdiden (inner_loss)")
+    ap.add_argument("--qk_rank", action="store_true", help="q / k head basina ilk r ana bilesen (qk_rank_loss)")
     a = ap.parse_args(argv)
     if os.name == "nt":
         T._no_power_throttling()
@@ -144,6 +191,14 @@ def main(argv=None):
     base = loss(model, batch, attn)
     print("taban (sirali) kayip %.4f" % base, flush=True)
     L = len(model.blocks)
+    if a.qk_rank:
+        fit = D.build_batch(stories, G.exam_rows(a.data)[a.rows:a.rows + 4], "transformer", dev)   # taban fit satirlari ayri
+        bases = qk_bases(model, fit, R.dense_mask(fit, R.document_mask))
+        print("tam (r 64) kontrol: %+.4f" % (qk_rank_loss(model, batch, attn, bases, 64) - base), flush=True)
+        for r in (48, 32, 24, 16, 8):
+            print("q, k head basina ilk %2d ana bilesen (64'ten): hepsi %+.4f | katman >= 3 %+.4f"
+                  % (r, qk_rank_loss(model, batch, attn, bases, r) - base, qk_rank_loss(model, batch, attn, bases, r, 2) - base), flush=True)
+        return
     if a.inner:
         for l in range(L):
             print("katman ici A || F, yalniz katman %2d: %+.4f" % (l + 1, inner_loss(model, batch, attn, {l}) - base), flush=True)

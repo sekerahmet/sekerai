@@ -65,28 +65,30 @@ def rope(x, pos, base=10000.0):
 class AttentionOp(torch.nn.Module):
     """A: du(x) = W_o sum_x' gamma(x, x') V(x').  Q, K, V = P(u) W_{q,k,v}; Q, K head basina izdusum (fp32) ve RoPE."""
 
-    def __init__(self, d, heads, kv_heads=None, rope_on=True, head_dim=None):
-        """head_dim (varsayilan d / heads): heads x head_dim > d genis attention (Parca 3, birlesik asama)."""
+    def __init__(self, d, heads, kv_heads=None, rope_on=True, head_dim=None, qk_dim=None):
+        """head_dim (varsayilan d / heads): heads x head_dim > d genis attention (Parca 3, birlesik asama).  qk_dim (varsayilan
+        head_dim): head basina q / k boyu (Parca 8; kuadratur: cekirdek <q, k> daha az boyutla)."""
         super().__init__()
         assert head_dim or d % heads == 0, "d heads'e bolunmeli"
         self.d, self.heads, self.hd = d, heads, int(head_dim or d // heads)
+        self.qk = int(qk_dim or self.hd)
         self.inner = heads * self.hd
         self.kv_heads = int(kv_heads or heads)
         assert heads % self.kv_heads == 0, "kv_heads heads'in boleni olmali"
         self.rope_on = rope_on
         self.P = Projection(d)
-        self.w_q = torch.nn.Linear(d, self.inner, bias=False)
-        self.w_kv = torch.nn.Linear(d, 2 * self.kv_heads * self.hd, bias=False)
+        self.w_q = torch.nn.Linear(d, heads * self.qk, bias=False)
+        self.w_kv = torch.nn.Linear(d, self.kv_heads * (self.qk + self.hd), bias=False)
         self.w_o = torch.nn.Linear(self.inner, d, bias=False)
-        self.q_P, self.k_P = Projection(self.hd), Projection(self.hd)
+        self.q_P, self.k_P = Projection(self.qk), Projection(self.qk)
 
     def qkv(self, u, pos):
         """-> q (B, H, T, hd), k / v (B, Hkv, T, hd)."""
         B, T, _ = u.shape
         (q, kv), s = self.P.linear(u, self.w_q, self.w_kv)
-        k, v = kv.split(self.kv_heads * self.hd, -1)
-        q = q.view(B, T, self.heads, self.hd).transpose(1, 2)                 # q, k: QK izdusumu s'yi siler
-        k = k.view(B, T, self.kv_heads, self.hd).transpose(1, 2)
+        k, v = kv.split([self.kv_heads * self.qk, self.kv_heads * self.hd], -1)
+        q = q.view(B, T, self.heads, self.qk).transpose(1, 2)                 # q, k: QK izdusumu s'yi siler
+        k = k.view(B, T, self.kv_heads, self.qk).transpose(1, 2)
         v = scale(v, s).view(B, T, self.kv_heads, self.hd).transpose(1, 2)
         with torch.autocast(u.device.type, enabled=False):
             q, k = self.q_P(q.float()).to(v.dtype), self.k_P(k.float()).to(v.dtype)
@@ -127,19 +129,20 @@ class MixOp(torch.nn.Module):
     values "linear": V = v (= u + A(Pu) + F(Pu), paralel blok; ayni agirlikla birebir); "swiglu": V = silu(v_g) * v_u
     (attention dogrusal olmayan ozellikleri karistirir).  Katman basina 1 izdusum, 2 matmul, 1 attention; bolme yok."""
 
-    def __init__(self, d, heads, hidden, kv_heads=None, head_dim=None, values="swiglu", rope_on=True):
+    def __init__(self, d, heads, hidden, kv_heads=None, head_dim=None, values="swiglu", rope_on=True, qk_dim=None):
         super().__init__()
         assert values in ("linear", "swiglu"), "values: linear | swiglu"
         assert head_dim or d % heads == 0, "d heads'e bolunmeli"
         self.d, self.heads, self.hd = d, heads, int(head_dim or d // heads)
+        self.qk = int(qk_dim or self.hd)
         self.kv_heads = int(kv_heads or heads)
         assert heads % self.kv_heads == 0, "kv_heads heads'in boleni olmali"
         self.inner, self.kvd, self.hidden, self.values, self.rope_on = heads * self.hd, self.kv_heads * self.hd, hidden, values, rope_on
-        self.split = [self.inner, self.kvd, self.kvd * (2 if values == "swiglu" else 1), 2 * hidden]
+        self.split = [heads * self.qk, self.kv_heads * self.qk, self.kvd * (2 if values == "swiglu" else 1), 2 * hidden]
         self.P = Projection(d)
         self.w_in = torch.nn.Linear(d, sum(self.split), bias=False)
         self.w_out = torch.nn.Linear(self.inner + hidden, d, bias=False)
-        self.q_P, self.k_P = Projection(self.hd), Projection(self.hd)
+        self.q_P, self.k_P = Projection(self.qk), Projection(self.qk)
 
     def qkv_local(self, u, pos):
         """-> q (B, H, T, hd), k / v (B, Hkv, T, hd), yerel ozellik (B, T, hidden)."""
@@ -151,8 +154,9 @@ class MixOp(torch.nn.Module):
             v = F_.silu(scale(vg, s)) * scale(vu, s)
         else:
             v = scale(v, s)
-        q = q.view(B, T, self.heads, self.hd).transpose(1, 2)
-        k, v = (t.view(B, T, self.kv_heads, self.hd).transpose(1, 2) for t in (k, v))
+        q = q.view(B, T, self.heads, self.qk).transpose(1, 2)
+        k = k.view(B, T, self.kv_heads, self.qk).transpose(1, 2)
+        v = v.view(B, T, self.kv_heads, self.hd).transpose(1, 2)
         with torch.autocast(u.device.type, enabled=False):
             q, k = self.q_P(q.float()).to(v.dtype), self.k_P(k.float()).to(v.dtype)
         if self.rope_on:
@@ -169,13 +173,13 @@ class MixOp(torch.nn.Module):
         return self.out(AttentionOp.kernel(q, k, v, ctx.mask), loc)
 
 
-def mix_hidden(d, inner, kvd, hidden, values):
+def mix_hidden(d, inner, kvd, hidden, values, qk_frac=1.0):
     """Esit matris parametresi (= esit FLOP): ayri A + F (heads, kv_heads, hidden) ile ayni toplam -> MixOp yerel genisligi
     (64'un kati, asagi).  linear: hidden aynen; swiglu: v'nin ikinci yarisi yerel genislikten duser (d 1024, tam kv: 2.736 -> 2.368)."""
     if values == "linear":
         return hidden
-    base = d * (inner + 2 * kvd) + inner * d + 3 * d * hidden          # inner = q boyu, kvd = k (= v) boyu
-    attn = d * (inner + 3 * kvd) + inner * d
+    base = d * (inner + 2 * kvd) + inner * d + 3 * d * hidden          # inner = q boyu, kvd = k (= v) boyu (ayri A + F, tam qk)
+    attn = d * (qk_frac * (inner + kvd) + 2 * kvd) + inner * d         # qk_frac: q / k boyu orani (Parca 8); kazanc yerel genislige
     return max(64, int((base - attn) / (3 * d)) // 64 * 64)
 
 

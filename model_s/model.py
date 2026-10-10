@@ -25,8 +25,8 @@ class SBlock(Step):
     """lie adimi, baseline.Block arayuzuyle (forward(x, pos, attn), _qkv, _finish; heads / kv_heads): KV cache ve StaticCache
     uretimi degismeden calisir."""
 
-    def __init__(self, d, heads, hidden, kv_heads=None, width=1, scheme="lie", values="swiglu"):
-        super().__init__(d, heads, hidden, kv_heads, scheme, 1.0, width, values)
+    def __init__(self, d, heads, hidden, kv_heads=None, width=1, scheme="lie", values="swiglu", qk_dim=None):
+        super().__init__(d, heads, hidden, kv_heads, scheme, 1.0, width, values, qk_dim)
         op = self.M if scheme == "mix" else self.A
         self.heads, self.kv_heads = op.heads, op.kv_heads
 
@@ -48,9 +48,10 @@ class SBlock(Step):
 
 
 class ModelS(BaselineTransformer):
-    def __init__(self, d, widths, heads, kv_heads=None, vocab_rows=VOCAB, op="split"):
+    def __init__(self, d, widths, heads, kv_heads=None, vocab_rows=VOCAB, op="split", qk_dim=None):
         """op: split (A sonra F, bugunku blok), parallel (MixOp linear values), mix (MixOp swiglu values; esit matris parametresi);
-        tek ad ya da adim basina virgullu liste (orn. "split,mix,mix,split": ilk / son adimda F attention'i gorur)."""
+        tek ad ya da adim basina virgullu liste (orn. "split,mix,mix,split": ilk / son adimda F attention'i gorur).  qk_dim:
+        head basina q / k boyu (Parca 8; varsayilan head boyu; kazanc FLOP'a, yerel genislik degismez)."""
         super().__init__(d, 1, heads, kv_heads, vocab_rows)            # E, norm, tarif; bloklar asagida
         self.widths, self.op = tuple(int(w) for w in widths), op
         ops = op.split(",") if "," in op else [op] * len(self.widths)
@@ -58,7 +59,7 @@ class ModelS(BaselineTransformer):
         assert self.widths and min(self.widths) >= 1, "widths >= 1"
         hidden = -(-int(8 * d / 3) // 8) * 8
         sv = {"split": ("lie", "swiglu"), "parallel": ("mix", "linear"), "mix": ("mix", "swiglu")}
-        self.blocks = torch.nn.ModuleList(SBlock(d, heads, hidden, kv_heads, w, *sv[o]) for w, o in zip(self.widths, ops))
+        self.blocks = torch.nn.ModuleList(SBlock(d, heads, hidden, kv_heads, w, *sv[o], qk_dim=qk_dim) for w, o in zip(self.widths, ops))
         n = sum(self.widths)                                             # artis olcegi: sum(w) katmanli transformer gibi
         for name, p in self.blocks.named_parameters():
             if p.dim() == 2:
