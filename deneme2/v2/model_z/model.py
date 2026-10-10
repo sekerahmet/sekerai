@@ -342,13 +342,10 @@ class SentenceTransformer(torch.nn.Module):
                 widths = [self.local_mlp] * n_loc + [g_w] * self.global_layers
             else:                                                           # kesme: ilk keep yerel tam, kalan yerel dar, G ayni
                 widths = [hidden if i < self.local_mlp_keep else self.local_mlp for i in range(n_loc)] + [hidden] * self.global_layers
-        if mlp_ratio:                                                       # MLP : attention orani (yerel, G); parametre orani
+        if mlp_ratio:                                                       # MLP : tam (GQA'siz) attention orani (yerel, G)
             assert len(mlp_ratio) == 2 and not mlp_widths and not self.local_mlp, "mlp_ratio: (yerel, G), tek basina"
-            hd = d // heads
-            attn = lambda kv: d * (2 * d + 2 * kv * hd)                     # noqa: E731  qkv + proj (SwiGLU MLP = 3 d w)
-            w = lambda r, kv: max(64, round(r * attn(kv) / (3 * d) / 64) * 64)   # noqa: E731
-            g_kv = glob_kv_heads or heads
-            widths = [w(mlp_ratio[0], heads) if k == "loc" else w(mlp_ratio[1], g_kv) for k in kinds]
+            w = lambda r: max(64, round(r * 4 * d / 3 / 64) * 64)            # noqa: E731  4 d^2 attention, SwiGLU 3 d w
+            widths = [w(mlp_ratio[0]) if k == "loc" else w(mlp_ratio[1]) for k in kinds]   # GQA'dan bagimsiz
         self.mlp_ratio = tuple(float(r) for r in mlp_ratio)
         if mlp_widths:                                                      # katman basina acik genislik (oncelikli)
             assert len(mlp_widths) == layers and not self.local_mlp, "mlp_widths: katman sayisi kadar, local_mlp'siz"

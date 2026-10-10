@@ -598,7 +598,7 @@ def _args(argv):
     ap.add_argument("--local_mlp", type=int, default=None,
                     help="yerel bloklarin MLP ic genisligi; G bloklari toplami koruyacak genislikte (0: hepsi ayni)")
     ap.add_argument("--mlp_ratio", default=None,
-                    help="MLP : attention parametre orani, yerel,G (orn. 1,4); genislik ondan hesaplanir (64'un kati)")
+                    help="MLP : tam (GQA'siz) attention parametre orani, yerel,G (orn. 1,4): genislik = oran x 4d/3 (64'un kati), GQA'dan bagimsiz")
     ap.add_argument("--mlp_widths", default=None, help="katman basina MLP ic genisligi, virgulle (orn. 2048,1024,...); yerel once, G sonra")
     ap.add_argument("--local_mlp_keep", type=int, default=None,
                     help="--local_mlp ile: ilk K yerel katman tam genislikte, kalan yerel dar, G degismez (verilmezse yer degistirme)")
