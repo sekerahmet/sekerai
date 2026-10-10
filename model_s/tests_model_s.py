@@ -6,7 +6,7 @@ import torch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(os.path.dirname(HERE), "common"))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "deneme2", "v2", "common"))   # ortak veri / egitim kodu
 if os.name == "nt":                                                     # kural 2a: EcoQoS kapali
     import train as _T
     _T._no_power_throttling()
@@ -72,7 +72,52 @@ def t_ops():
           float(other.abs().max()) == 0 and float((f2[:, 4] - f1[:, 4]).abs().max()) > 1e-4)
 
 
-TESTS = dict(ops=t_ops)
+def t_steps():
+    """Parca 2: lie adimi = bugunku transformer blogu (transformer/baseline.Block, agirliklar kopyalanir; GQA, fp32);
+    strang = elle F1/2 -> A -> F2/2 ve parametre sayisi lie ile ayni; parallel = elle A + F; uc sema birbirinden farkli."""
+    from integrator import Step
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "deneme2", "v2", "transformer"))
+    from baseline import Block
+    torch.manual_seed(1)
+    B, T, d, H, Hkv, hid = 2, 11, 32, 4, 2, 64
+    u = torch.randn(B, T, d)
+    pos = torch.arange(T).expand(B, T)
+    ctx = Context(pos)
+    lie = Step(d, H, hid, Hkv, "lie")
+    blk = Block(d, H, hid, Hkv)
+    with torch.no_grad():
+        for p in lie.parameters():
+            if p.dim() == 1:
+                p.normal_(1, 0.2)                                       # izdusum kazanclari 1 olmasin (kopya sinansin)
+        blk.qkv.weight.copy_(torch.cat([lie.A.w_q.weight, lie.A.w_kv.weight]))
+        blk.proj.weight.copy_(lie.A.w_o.weight)
+        blk.gate_up.weight.copy_(lie.F.w_gate_up.weight)
+        blk.down.weight.copy_(lie.F.w_down.weight)
+        for dst, src in ((blk.n1, lie.A.P), (blk.n2, lie.F.P), (blk.q_norm, lie.A.q_P), (blk.k_norm, lie.A.k_P)):
+            dst.weight.copy_(src.g)
+            dst.eps = src.eps
+        d_lie = float((lie(u, ctx) - blk(u, pos, None)).abs().max())
+    check("lie adimi = bugunku transformer blogu (baseline.Block, GQA, fp32)", d_lie < 1e-5, "fark %.1e" % d_lie)
+    st = Step(d, H, hid, Hkv, "strang")
+    n = lambda m: sum(p.numel() for p in m.parameters() if p.dim() == 2)   # noqa: E731  matrisler (izdusum kazanci F2'de +d)
+    with torch.no_grad():
+        v = u + 0.5 * st.F1(u)
+        v = v + st.A(v, ctx)
+        ref = v + 0.5 * st.F2(v)
+        d_st = float((st(u, ctx) - ref).abs().max())
+    pa = Step(d, H, hid, Hkv, "parallel")
+    with torch.no_grad():
+        d_pa = float((pa(u, ctx) - (u + pa.A(u, ctx) + pa.F(u))).abs().max())
+        pa.load_state_dict(lie.state_dict())
+        st_out = st(u, ctx)
+        diff_lp = float((lie(u, ctx) - pa(u, ctx)).abs().max())
+    check("strang = elle F1/2 -> A -> F2/2, matris parametresi lie ile ayni (%d)" % n(lie), d_st < 1e-6 and n(st) == n(lie),
+          "fark %.1e, strang %d" % (d_st, n(st)))
+    check("parallel = elle u + A(u) + F(u); ayni agirlikla lie'den farkli (sira onemli)", d_pa < 1e-6 and diff_lp > 1e-4,
+          "fark %.1e, lie - parallel %.1e" % (d_pa, diff_lp))
+
+
+TESTS = dict(ops=t_ops, steps=t_steps)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)

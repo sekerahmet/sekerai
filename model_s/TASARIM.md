@@ -5,7 +5,7 @@ düşün"*; *"istersen modeline bir isim seç. her parçayı ffn, attention vs s
 parçaları istersen teker teker yaz."*
 
 Kaynak: Tai, Liu, Li, Chan, *A Mathematical Explanation of Transformers* (arXiv 2510.03989; `belge/makaleler/2025/tai2025_math_transformer.txt`).
-Ad: **S** = splitting (operatör bölme) / sürekli (zaman).
+Ad: **S** = splitting (operatör bölme) / sürekli (zaman).  Klasör: `C:\AI_NEW_MODEL\model_s` (kullanıcı, 11 Ekim: "C:\AI_NEW_MODEL bunun altında model S olarak klasör aç"); veri / eğitim ortak kodu `deneme2/v2/common`.
 
 ## 1. Denklem
 
@@ -32,11 +32,11 @@ Model S'nin amacı: aynı denklemi **daha doğru şemalarla, daha az adımda** �
 
 | # | parça | dosya | durum |
 |---|---|---|---|
-| 1 | P, A, F operatörleri | `operators.py` | yazılıyor |
-| 2 | zaman adımı şemaları (lie, strang, parallel) | `integrator.py` | sırada |
+| 1 | P, A, F operatörleri | `operators.py` | bitti: A = elle integral (fp32 1,8e-7), nedensel |
+| 2 | zaman adımı şemaları (lie, strang, parallel) | `integrator.py` | bitti: lie = bugünkü transformer bloğu (bit düzeyinde) |
 | 3 | θ(t): adımlara göre parametre (bağımsız / pürüzsüz) | `integrator.py` | sırada |
 | 4 | model: başlangıç koşulu, çözücü, okuma (çıktı) | `model.py` | sırada |
-| 5 | eğitim / sınav bağlantısı (`--model model_s`) | `common/train.py` | sırada |
+| 5 | eğitim / sınav bağlantısı (`--model model_s`) | `deneme2/v2/common/train.py` | sırada |
 
 ### Parça 1 — operatörler
 
