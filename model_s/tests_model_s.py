@@ -117,7 +117,146 @@ def t_steps():
           "fark %.1e, lie - parallel %.1e" % (d_pa, diff_lp))
 
 
-TESTS = dict(ops=t_ops, steps=t_steps)
+def t_stages():
+    """Parca 3: k = 1 asamalar = sirali adimlar; k = 2 asama = u + D1(u) + D2(u); kucuk adimda hibrit ile sirali farki adim
+    boyunun karesiyle kuculur (BCH: fark / eps^2 sabit)."""
+    from integrator import Stage, Step, stages
+    torch.manual_seed(2)
+    B, T, d, H, hid = 1, 13, 32, 4, 64
+    u = torch.randn(B, T, d) * 3
+    ctx = Context(torch.arange(T).expand(B, T))
+    seq = stages(d, H, hid, (1, 1, 1, 1))
+    hyb = stages(d, H, hid, (2, 2))
+    with torch.no_grad():
+        flat = [s.steps[0] for s in seq]
+        for i, st in enumerate([st for s in hyb for st in s.steps]):
+            st.load_state_dict(flat[i].state_dict())
+        x = u
+        for s in seq:
+            x = s(x, ctx)
+        y = u
+        for st in flat:
+            y = st(y, ctx)
+        d_seq = float((x - y).abs().max())
+        s0 = hyb[0]
+        d_par = float((s0(u, ctx) - (u + (s0.steps[0](u, ctx) - u) + (s0.steps[1](u, ctx) - u))).abs().max())
+        ratios = []
+        for eps in (0.2, 0.1, 0.05):
+            a, b = Step(d, H, hid, scheme="lie", dt=eps), Step(d, H, hid, scheme="lie", dt=eps)
+            torch.manual_seed(3)
+            a.load_state_dict(flat[0].state_dict()), b.load_state_dict(flat[1].state_dict())
+            sq = b(a(u, ctx), ctx)
+            pr = Stage([a, b])(u, ctx)
+            ratios.append(float((sq - pr).norm() / u.norm()) / eps ** 2)
+        a, b, w = Step(d, H, hid, 2), Step(d, H, hid, 2), Step(d, H, hid, 2, width=2)   # GQA (kv 2)
+        kvr = a.A.kv_heads * a.A.hd
+        cat0 = lambda f: torch.cat([f(a), f(b)], 0)                       # noqa: E731
+        w.A.w_q.weight.copy_(cat0(lambda s: s.A.w_q.weight))
+        w.A.w_kv.weight.copy_(torch.cat([a.A.w_kv.weight[:kvr], b.A.w_kv.weight[:kvr],
+                                         a.A.w_kv.weight[kvr:], b.A.w_kv.weight[kvr:]]))
+        w.A.w_o.weight.copy_(torch.cat([a.A.w_o.weight, b.A.w_o.weight], 1))
+        gu = [s.F.w_gate_up.weight.chunk(2) for s in (a, b)]
+        w.F.w_gate_up.weight.copy_(torch.cat([gu[0][0], gu[1][0], gu[0][1], gu[1][1]]))
+        w.F.w_down.weight.copy_(torch.cat([a.F.w_down.weight, b.F.w_down.weight], 1))
+        u1 = u + a.A(u, ctx) + b.A(u, ctx)
+        ref = u1 + a.F(u1) + b.F(u1)
+        d_wide = float((w(u, ctx) - ref).abs().max())
+        n_ab = sum(p.numel() for s in (a, b) for p in s.parameters() if p.dim() == 2)
+        n_w = sum(p.numel() for p in w.parameters() if p.dim() == 2)
+    check("hibrit: Step(width 2) = wide formulu u1 = u + A1 + A2, u1 + F1(u1) + F2(u1) (GQA)", d_wide < 1e-5 and n_w == n_ab,
+          "fark %.1e, matris %d / %d" % (d_wide, n_w, n_ab))
+    check("hibrit: k = 1 asamalar = sirali adimlar", d_seq == 0, "fark %.1e" % d_seq)
+    check("hibrit: k = 2 asama = u + D1(u) + D2(u)", d_par < 1e-6, "fark %.1e" % d_par)
+    check("hibrit: sirali - hibrit farki eps^2 ile kuculur (BCH)", max(ratios) / min(ratios) < 1.3,
+          "fark / eps^2: %s" % ", ".join("%.4f" % r for r in ratios))
+
+
+def t_model():
+    """Parca 4: widths hepsi 1 = BaselineTransformer (agirlik kopyasi, kayip ve uretim ayni); genis model: sinav kaybi
+    (loss_per_target) ve toplu uretim (StaticCache) = token token KV cache uretimi; FLOP birimi sum(widths)."""
+    from model import ModelS
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "deneme2", "v2", "transformer"))
+    import baseline as BL
+    torch.manual_seed(4)
+    d, H, Hkv = 32, 4, 2
+    tf = BL.BaselineTransformer(d, 3, H, Hkv)
+    ms = ModelS(d, (1, 1, 1), H, Hkv)
+    with torch.no_grad():
+        ms.E.weight.copy_(tf.E.weight)
+        ms.norm.weight.copy_(tf.norm.weight)
+        for blk, sb in zip(tf.blocks, ms.blocks):
+            for p in sb.parameters():
+                if p.dim() == 1:
+                    p.normal_(1, 0.2)
+            blk.qkv.weight.copy_(torch.cat([sb.A.w_q.weight, sb.A.w_kv.weight]))
+            blk.proj.weight.copy_(sb.A.w_o.weight)
+            blk.gate_up.weight.copy_(sb.F.w_gate_up.weight)
+            blk.down.weight.copy_(sb.F.w_down.weight)
+            for dst, src in ((blk.n1, sb.A.P), (blk.n2, sb.F.P), (blk.q_norm, sb.A.q_P), (blk.k_norm, sb.A.k_P)):
+                dst.weight.copy_(src.g)
+                dst.eps = src.eps
+    toks = torch.randint(0, 1000, (2, 17))
+    pos = torch.arange(17).expand(2, 17)
+    with torch.no_grad():
+        d_h = float((tf.hidden(toks, pos, None) - ms.hidden(toks, pos, None)).abs().max())
+    check("model: widths (1, 1, 1) = BaselineTransformer (ayni agirlik, fp32)", d_h < 1e-5, "fark %.1e" % d_h)
+    wide = ModelS(d, (1, 2, 3), H, Hkv).eval()
+    with torch.no_grad():
+        wide.E.weight[[BL.END_ID, BL.EOS_ID]] = 0                         # rastgele model hemen END / EOS uretmesin
+    prompts = [[[5, 6, 7], [8, 9]], [[11, 12, 13, 14]], [[3]]]
+    one = [wide.generate([p], 2, 5, batch_size=1)[0] for p in prompts]
+    rows = wide.generate(prompts, 2, 5, batch_size=8)
+    check("model: genis (1, 2, 3) toplu uretim (StaticCache) = tek tek KV cache uretimi", one == rows, "%s" % (rows[0],))
+    with torch.no_grad():
+        x = torch.randint(0, 1000, (1, 9))
+        full = wide._logits(wide.hidden(x, torch.arange(9)[None], None))[0, -1]
+        cache = dict(k=[None] * 3, v=[None] * 3, T=16)
+        wide._logits(wide._step(x[:, :5], cache, 0)[None])
+        step = wide._logits(wide._step(x[:, 5:], cache, 5)[None])[0]
+    d_c = float((full - step).abs().max())
+    n2 = lambda m: sum(p.numel() for p in m.blocks.parameters() if p.dim() == 2)   # noqa: E731
+    check("model: KV cache adimi = tam ileri (son konum logit); matris = 6 x tek adim", d_c < 1e-4 and
+          n2(wide) == 6 * n2(ModelS(d, (1,), H, Hkv)), "fark %.1e" % d_c)
+
+
+def t_train():
+    """Parca 5: train.py --model model_s --widths 1,2 (CPU, d 16; tests_v2'nin kucuk verisi): kayip duser; kimlikte widths,
+    layers = adim sayisi; kesilip --resume ile surdurulen = kesintisiz (agent.pt bit duzeyinde, widths kimlikten);
+    generate_readings.load_run ayni agirlik; --widths model_s disinda ve model_s'de eksikse DUR."""
+    import tests_v2 as TV
+    import train as TR
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "deneme2", "v2", "diag"))
+    import generate_readings as GR
+    tp = TV.tokenizer_path()
+    if tp is None:
+        print("ATLA train: GPT-2 tokenizer yok", flush=True)
+        return
+    root, data, prompts = TV._train_root(tp)
+    TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
+    TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=3, max_tokens=4)
+    out = lambda name: os.path.join(TV.TMP, "runs", name)                 # noqa: E731
+    base = ["--data", data, "--stream", root, "--device", "cpu", "--d", "16", "--heads", "2", "--lr", "1e-2",
+            "--checkpoint_minutes", "0", "--model", "model_s", "--widths", "1,2", "--epochs", "2"]
+    a = TR.main(base + ["--out", out("s_A")])
+    L = [w["loss"] for w in a["log"]]
+    idt = torch.load(os.path.join(out("s_A"), "agent.pt"), weights_only=False)
+    check("train model_s: 2 epok kosar, kayip duser; kimlik widths [1, 2], layers 2",
+          sum(L[-3:]) / 3 < sum(L[:3]) / 3 - 0.5 and idt["identity"]["widths"] == [1, 2] and idt["identity"]["layers"] == 2,
+          "kayip %.3f -> %.3f" % (sum(L[:3]) / 3, sum(L[-3:]) / 3))
+    cut = base[:base.index("--widths")] + base[base.index("--widths") + 2:]
+    TR.main(base + ["--out", out("s_B"), "--stop_step", "5"])
+    TR.main(cut + ["--out", out("s_B"), "--resume", "1"])
+    sa, sb = (torch.load(os.path.join(out(n), "agent.pt"), weights_only=False)["state"] for n in ("s_A", "s_B"))
+    check("train model_s: kesilip surdurulen (widths kimlikten) = kesintisiz (bit duzeyinde)",
+          sa.keys() == sb.keys() and all(torch.equal(sa[k], sb[k]) for k in sa))
+    m, _ = GR.load_run(out("s_A"), data, torch.device("cpu"))
+    check("train model_s: load_run ayni agirlik", all(torch.equal(m.state_dict()[k], sa[k]) for k in sa))
+    bad = [TV._exit_msg(TR.main, base[:-4] + ["--model", "transformer", "--widths", "1,2", "--out", out("s_x1")]),
+           TV._exit_msg(TR.main, cut + ["--out", out("s_x2")])]
+    check("train model_s: --widths model_s disinda / model_s'de eksik -> DUR", all(m_ and "DUR" in m_ for m_ in bad), str(bad))
+
+
+TESTS = dict(ops=t_ops, steps=t_steps, stages=t_stages, model=t_model, train=t_train)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)

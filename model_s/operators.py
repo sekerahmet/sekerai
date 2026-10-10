@@ -47,17 +47,19 @@ def rope(x, pos, base=10000.0):
 class AttentionOp(torch.nn.Module):
     """A: du(x) = W_o sum_x' gamma(x, x') V(x').  Q, K, V = P(u) W_{q,k,v}; Q, K head basina izdusum (fp32) ve RoPE."""
 
-    def __init__(self, d, heads, kv_heads=None, rope_on=True):
+    def __init__(self, d, heads, kv_heads=None, rope_on=True, head_dim=None):
+        """head_dim (varsayilan d / heads): heads x head_dim > d genis attention (Parca 3, birlesik asama)."""
         super().__init__()
-        assert d % heads == 0, "d heads'e bolunmeli"
-        self.d, self.heads, self.hd = d, heads, d // heads
+        assert head_dim or d % heads == 0, "d heads'e bolunmeli"
+        self.d, self.heads, self.hd = d, heads, int(head_dim or d // heads)
+        self.inner = heads * self.hd
         self.kv_heads = int(kv_heads or heads)
         assert heads % self.kv_heads == 0, "kv_heads heads'in boleni olmali"
         self.rope_on = rope_on
         self.P = Projection(d)
-        self.w_q = torch.nn.Linear(d, d, bias=False)
+        self.w_q = torch.nn.Linear(d, self.inner, bias=False)
         self.w_kv = torch.nn.Linear(d, 2 * self.kv_heads * self.hd, bias=False)
-        self.w_o = torch.nn.Linear(d, d, bias=False)
+        self.w_o = torch.nn.Linear(self.inner, d, bias=False)
         self.q_P, self.k_P = Projection(self.hd), Projection(self.hd)
 
     def qkv(self, u, pos):
@@ -84,13 +86,18 @@ class AttentionOp(torch.nn.Module):
                 k, v = k.repeat_interleave(r, 1), v.repeat_interleave(r, 1)
             return F_.scaled_dot_product_attention(q, k, v, attn_mask=mask[:, None])
         from torch.nn.attention.flex_attention import flex_attention
-        return flex_attention(q, k, v, block_mask=mask, enable_gqa=gqa)
+        bs = mask.BLOCK_SIZE[0]                         # 128 disinda varsayilan cekirdek hata veriyor (baseline ile ayni)
+        return flex_attention(q, k, v, block_mask=mask, enable_gqa=gqa, kernel_options=None if bs == 128 else dict.fromkeys(
+            ("BLOCK_M", "BLOCK_N", "BLOCK_M1", "BLOCK_N1", "BLOCK_M2", "BLOCK_N2"), bs))
 
     def forward(self, u, ctx):
-        B, T, _ = u.shape
         q, k, v = self.qkv(u, ctx.pos)
-        a = self.kernel(q, k, v, ctx.mask)
-        return self.w_o(a.transpose(1, 2).reshape(B, T, self.d))
+        return self.out(self.kernel(q, k, v, ctx.mask))
+
+    def out(self, a):
+        """a (B, H, T, hd) -> du (B, T, d)."""
+        B, _, T, _ = a.shape
+        return self.w_o(a.transpose(1, 2).reshape(B, T, self.inner))
 
 
 class FeedForwardOp(torch.nn.Module):

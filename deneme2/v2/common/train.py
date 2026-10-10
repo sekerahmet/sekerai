@@ -138,7 +138,7 @@ INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ng
            "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads")   # --resume'da verilmezse kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
-FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
+FP8_MODULES = ("gate_up", "down", "w_gate_up", "w_down")   # --fp8 donusturulen Linear'lar (MLP; w_*: Model S)
 COMPILE_MODE = "max-autotune-no-cudagraphs"   # bloklarin derleme modu (5w: torba K 1024 -2,9 ms/adim; kullanici, 7 Ekim)
 CLIP_IN_OPTIMIZER = True       # clip katsayisi optimizer'a (grad yerinde carpilmaz; belge 94 s11.1), destekleyen optimizer'da
 READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
@@ -146,7 +146,7 @@ READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_ge
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
-            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads")
+            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "widths")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -281,6 +281,12 @@ def _build(args, dev):
         from baseline import BaselineTransformer
         model = BaselineTransformer(args.d, args.layers, args.heads, kv_heads=getattr(args, "glob_kv_heads", 0) or None,
                                     vocab_rows=getattr(args, "vocab_rows", D.VOCAB))
+        model, mask_fn, layout = model.to(dev), R.document_mask, "transformer"
+    elif args.model == "model_s":                                        # deneme/model-s: kok model_s/ (TASARIM.md)
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(root)), "model_s"))
+        from model import ModelS
+        model = ModelS(args.d, args.widths, args.heads, kv_heads=getattr(args, "glob_kv_heads", 0) or None,
+                       vocab_rows=getattr(args, "vocab_rows", D.VOCAB))
         model, mask_fn, layout = model.to(dev), R.document_mask, "transformer"
     else:
         sys.path.insert(0, os.path.join(root, "model_z"))
@@ -593,7 +599,10 @@ def _git():
 
 def _args(argv):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--model", required=True, choices=("transformer", "model_z"))
+    ap.add_argument("--model", required=True, choices=("transformer", "model_z", "model_s"))
+    ap.add_argument("--widths", default=None,
+                    help="model_s: adim basina genislik (orn. 1,1,1,1,2,2,2,2); layers = adim sayisi; kimlikte; --resume'da "
+                         "verilmezse kimlikten")
     ap.add_argument("--lr", type=lambda s: s if s == "auto" else float(s), default=None,
                     help="tepe lr (WSD); auto (varsayilan; muon / normuon): LR_REF[0] (LR_REF[1] / d) ^ LR_REF[2]; adamw'de "
                          "sayi sart (olculen 5e-4); --resume'da verilmezse kosunun kimliginden (belge 39, OLCULENLER_z)")
@@ -722,6 +731,17 @@ def _args(argv):
         args.mlp_ratio = [] if args.mlp_ratio in ([0.0], [0]) else args.mlp_ratio
     if args.mlp_ratio and (args.model != "model_z" or not args.global_layers or len(args.mlp_ratio) != 2):
         sys.exit("DUR: --mlp_ratio yerel,G (orn. 1,4) yalniz G katmanli Model Z'de; 0 esit genislik")
+    if args.model == "model_s":                                          # sirali adim sayisi = layers
+        if args.widths is None and was is not None:
+            args.widths = was.get("widths")
+        if not args.widths:
+            sys.exit("DUR: model_s --widths ister (orn. 1,1,2,2)")
+        args.widths = [int(x) for x in args.widths.split(",")] if isinstance(args.widths, str) else list(args.widths)
+        args.layers = len(args.widths)
+    elif args.widths:
+        sys.exit("DUR: --widths yalniz model_s")
+    else:
+        args.widths = []
     if args.glob_kv_heads == "auto" and (args.model != "model_z" or not args.global_layers):
         args.glob_kv_heads = 0                                           # transformer / G'siz Model Z: GQA yok
     if args.glob_kv_heads == "auto":
@@ -832,7 +852,8 @@ def main(argv=None):
                  summaries_last=args.summaries_last, glob_kv_heads=args.glob_kv_heads, carry_summaries=args.carry_summaries,
                  carry_group=args.carry_group, vocab_rows=args.vocab_rows, attn_gate=args.attn_gate,
                  ngram_embed=args.ngram_embed, ngram_layers=args.ngram_layers, ngram_sparse=args.ngram_sparse,
-                 mtp=args.mtp, g_nope=args.g_nope, mlp_ratio=args.mlp_ratio, local_kv_heads=args.local_kv_heads)
+                 mtp=args.mtp, g_nope=args.g_nope, mlp_ratio=args.mlp_ratio, local_kv_heads=args.local_kv_heads,
+                 widths=args.widths)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -853,7 +874,7 @@ def main(argv=None):
             sys.exit("DUR: " + _archived(was))
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
                "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [], "local_kv_heads": 0,
-               **was}                                                    # sonradan eklenenler
+               "widths": [], **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:

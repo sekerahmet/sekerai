@@ -6,6 +6,8 @@
   2. Cekirdek degisimi: ardisik katmanlarin attention cekirdekleri gamma_l (softmax(QK^T)) ne kadar benzer.  Her l+1 head'i icin
      l'nin en yakin head'i (toplam degisim mesafesi TV = 1/2 sum |g - g'|, sorgu basina ortalama); ve dondurulmus cekirdek hatasi
      |gamma_l V_{l+1} - gamma_{l+1} V_{l+1}| / |gamma_{l+1} V_{l+1}| (eslesen head ile).
+  3. Yerellik: gamma kutlesinin son w token'da (kendisi dahil) kalan payi, w = 1, 4, 16, 64; ilk token'a (EOS) giden pay.
+     Yakin alan (FMM): kutle birkac token'daysa o katmanin A'si kisa bir evrisimdir.
 
     python step_diagnostics.py --run <kosu> --data <fineweb_edu_s000> [--rows 2]
 """
@@ -45,6 +47,8 @@ def main(argv=None):
     stats = {k: np.zeros(L) for k in ("u", "dA", "dF")}
     tv, err = np.zeros(L - 1), np.zeros(L - 1)
     rank_layers, ranks = {0, 2, 5, L - 1}, {}
+    WS = (1, 4, 16, 64)
+    loc = np.zeros((L, len(WS) + 1))
     for r in rows:
         batch = D.build_batch(stories, [r], "transformer", dev)
         x = model.E(batch.tokens)
@@ -63,6 +67,13 @@ def main(argv=None):
             same = (doc[:, None] == doc[None, :]) & causal
             g = torch.softmax(s.masked_fill(~same, float("-inf")), -1)[0]   # (H, T, T)
             grams.append(g)
+            ri = torch.nonzero(real).flatten()
+            gr_ = g[:, ri][:, :, ri]                                         # (H, n, n) gercek token'lar
+            n_ = len(ri)
+            dist = torch.arange(n_)[:, None] - torch.arange(n_)[None, :]     # sorgu - anahtar
+            for j, w in enumerate(WS):
+                loc[l, j] += float((gr_ * ((dist >= 0) & (dist < w))).sum(-1).mean()) / len(rows)
+            loc[l, -1] += float(gr_[:, :, 0].mean()) / len(rows)
             vals.append(vv[0].float())
             a_out = (g @ vv[0].float()).transpose(0, 1).reshape(1, Tn, -1)
             dA = blk.proj(a_out.to(x.dtype))
@@ -99,6 +110,10 @@ def main(argv=None):
     for l in range(L):
         extra = ("%.3f | %.3f" % (tv[l], err[l])) if l < L - 1 else "-"
         print("%6d | %7.2f | %8.3f | %8.3f | %s" % (l + 1, stats["u"][l], stats["dA"][l], stats["dF"][l], extra))
+    print("\nyerellik: gamma kutlesinin son w token'daki payi (head ve sorgu ortalamasi) | ilk token payi")
+    print("katman | " + " | ".join("w %2d" % w for w in WS) + " | ilk")
+    for l in range(L):
+        print("%6d | " % (l + 1) + " | ".join("%.3f" % v for v in loc[l]))
     n_tok = int(sum((D.build_batch(stories, [r], "transformer", dev).kind[0] != D.Kind.PAD).sum() for r in rows) / len(rows))
     print("\n%%90 enerji icin boyut (d %d, satir basina ~%d token): katman | dA | dF | gamma (head ort)" % (model.E.weight.shape[1], n_tok))
     for l in sorted(rank_layers):
