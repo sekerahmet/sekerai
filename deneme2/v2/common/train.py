@@ -647,6 +647,8 @@ def _args(argv):
                     help="model_z: head basina attention cikis kapisi (belge 88a, 90a); 1 girdi n1(x), 2 girdi n1(x)'in "
                          "ilk d // 64 boyutu; auto (varsayilan): model_z ve d >= 64 ise 2, aksi 0; kimlikte; "
                          "--resume'da verilmezse kosunun kimliginden")
+    ap.add_argument("--g_keep_from", default="0",
+                    help="deneme: pencere bu adimdan (decay: inis basi) itibaren; oncesi penceresiz")
     ap.add_argument("--g_keep_occurrences", type=float, default=None,
                     help="deneme: G'de token basina pencere = O x egitimdeki ortalama tekrar araligi (sayimdan); 0 / yok: pencere yok")
     ap.add_argument("--local_kv_heads", type=lambda s: s if s == "auto" else int(s), default=None,
@@ -833,14 +835,20 @@ def main(argv=None):
     model, mask_fn, layout = _build(args, dev)
     model.row_len = row_len                                              # uretim konum siniri, carry parca boyu
     last = None
+    g_table, g_from = None, None
     if args.g_keep_occurrences:                                          # deneme/g-window: pencere = O x toplam / sayim
-        model.g_window = g_window_table(args.data, args.g_keep_occurrences, args.vocab_rows, dev)
-        w_ = model.g_window.float()
-        log("g_keep_occurrences %g: pencere ' the' (262) %d, '.' (13) %d, pencere < 2048 olan sozluk payi %.3f" % (
-            args.g_keep_occurrences, int(w_[262]), int(w_[13]), float((w_ < 2048).float().mean())))
+        g_table = g_window_table(args.data, args.g_keep_occurrences, args.vocab_rows, dev)
+        g_from = down if args.g_keep_from == "decay" else int(args.g_keep_from or 0)
+        w_ = g_table.float()
+        log("g_keep_occurrences %g (adim %d'den): pencere ' the' (262) %d, '.' (13) %d, pencere < 2048 olan sozluk payi %.3f" % (
+            args.g_keep_occurrences, g_from, int(w_[262]), int(w_[13]), float((w_ < 2048).float().mean())))
     if args.summaries_last:                                              # belge 66: [token'lar | ozetler | dolgu]
         from model import summaries_last as last
-        mask_fn = model._masks(True)
+        mask_plain = mask_fn = model._masks(True)
+        if g_table is not None:                                          # g_from oncesi penceresiz (DSA: once yogun)
+            model.g_window = g_table
+            mask_win = model._masks(True)
+            model.g_window = None                                        # baslangic secimi dongu oncesi (start bilinince)
     n_fp8 = _fp8(model, args.fp8) if args.fp8 != "none" else 0          # compile ve optimizer'dan once
     if cuda:
         for block in model.blocks:
@@ -974,7 +982,12 @@ def main(argv=None):
     first_window, epoch_from, epoch_t0, saved_at = True, start, time.time(), time.time()
     ckpt_seconds = 60 * args.checkpoint_minutes                      # kimlige girmez (kullanici: buyuk kosuda 30 dk)
     nxt = cpu_batch(start) if start < total else None
+    if g_from is not None and start >= g_from:                           # surdurme pencere evresinden
+        model.g_window, mask_fn = g_table, mask_win
     for step in range(start, end):
+        if g_from is not None and step == g_from and step > start:      # pencere acilir (bir kez yeniden derleme)
+            model.g_window, mask_fn = g_table, mask_win
+            log("g_window acildi: adim %d" % step)
         if win is None:
             sw.start(step)
             win = dict(step0=step, loss=torch.zeros((), device=dev), gn=torch.zeros((), device=dev), tokens=0, extra={})

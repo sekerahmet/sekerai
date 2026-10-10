@@ -202,12 +202,11 @@ def g_window_mask(batch, win):
     """summaries_last glob maskesi + token basina pencere (deneme/g-window): anahtar token'i, sorgudan gercek konumca
     win[token]'dan eskiyse gorunmez; BOS / Z / dolgu hep _LAST_GLOB kuraliyla.  batch: real_pos tasiyan PackedBatch."""
     base = _LAST_GLOB(batch.kind, batch.doc, batch.sent)
-    keep = (batch.kind != TOKEN)
-    wk = win[batch.tokens]
     rp = batch.real_pos
+    last = torch.where(batch.kind == TOKEN, rp + win[batch.tokens], 1 << 50)   # anahtarin gorunur oldugu son sorgu konumu
 
     def mask_mod(b, h, q, kv):
-        return base(b, h, q, kv) & (keep[b, kv] | (rp[b, q] - rp[b, kv] <= wk[b, kv]))
+        return base(b, h, q, kv) & (rp[b, q] <= last[b, kv])
     return mask_mod
 
 
