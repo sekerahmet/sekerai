@@ -120,13 +120,37 @@ sıralı derinliği genişliğe çevirmek; FLOP aynı, sıralı adım sayısı a
 Ölçüm (yukarıda) adımların büyük ve çekirdeklerin hızla değiştiğini gösteriyor; pürüzsüzlük dayatmanın kaliteye mal olması
 beklenir (TAHMİN). Strang / yüksek dereceli şemalar da bu yüzden ertelendi.
 
+### Parça 6 — tek operatör M (bölmesiz adım)
+
+Kullanıcı, 11 Ekim: *"işin matematiğini hızlandıran kolaylaştıran basitleştiren ya da farklı bir bakış açısıyla değerlendiren bir
+yöntem. mevcut literatür, yapılan transformer mimarisi insanların zamanla biriktirdiği bir hantallık da olabilir."*
+
+F, çekirdeği birim matris olan bir A'dır: A(u) + F(u) = Σ_x' [γ(x, x') W_ov + δ(x, x') F] u(x'). Bölme yalnız iki operatör ayrı
+tutulduğu için gerekiyor. Tek operatör:
+
+    z = W_in P(u) = [q | k | v_g v_u | g up]
+    u ← u + W_out [ Σ_x' γ(x, x') silu(v_g) v_u (x')  |  silu(g) up ]
+
+- **AMAÇ:** katman başına 1 izdüşüm, 2 matmul, 1 attention (bugün 2 izdüşüm, 4 matmul); bölme hatası yok; attention doğrusal
+  olmayan özellikleri karıştırır.
+- **KULLANIM:** `operators.MixOp`; `--strata_op mix` (hepsi) ya da adım başına liste (`split,mix,...,split`); `parallel` =
+  doğrusal değerler (u + A(Pu) + F(Pu), kontrol).
+- **ÖĞRENİLME:** aynı kayıp; eşit matris parametresi için yerel genişlik 7d/3 (d 1024: 2.368; 64'e aşağı yuvarlanır, %0,7 az).
+- **OKUNMA:** yerel ve attention kanallarının W_out'taki payı; katman içi kayıp artışı (`commute_probe --inner`).
+- **YÖNETİM:** test: linear = parallel adım (aynı ağırlık), swiglu = elle formül, nedensel, KV cache = tam ileri, toplu üretim.
+
+ÖLÇÜLDÜ (sıfır atış, d768 transformer, `--inner`; A ile F aynı girdiden): katman 1 +2,83, 2 +0,12, 3–9 +0,02…+0,06,
+10 +0,72; katman ≥ 3 birlikte +2,21. İlk ve son adımda F attention çıktısına muhtaç; ara adımlarda sıra az önemli →
+aday düzen `split,mix,…,mix,split`.
+
 ## 4. Deneyler (sırası)
 
 | | soru | koşular (aynı FLOP: 12 birim) |
 |---|---|---|
 | E1 | genişliğe çevrilen derinlik aynı kaliteyi verir mi, ne kadar hızlı | `1×12` (= transformer), `1,1,1,1,2,2,2,2`, `1,1,2,2,2,2,2` |
 | E1k | komütatör ilkesi: genişliği SONA koymak mı doğru | `2,2,2,2,1,1,1,1` (ters; E1'den kötüyse ilke desteklenir) |
-| E2 | (E1 olumluysa) daha geniş son tabaka | `1,1,1,3,3,3` |
+| E2 | tek operatör (FP8 kapalı: MixOp matrisleri FP8 listesinde değil, kıyas eşit) | `split` 1×12, `mix` hepsi, `split,mix×10,split`, `parallel` hepsi |
+| E3 | (E1 olumluysa) daha geniş son tabaka | `1,1,1,3,3,3` |
 
 Ortak: s000 (FineWeb-Edu), d1024, heads 16 (head 64), GQA yok, tam WSD kısa koşu (`--steps`), aynı tohum, Z2 tarifi
 (NorMuon, lr auto, FP8 MLP). Ölçüt: sınav kaybı + ms/adım + aynı kayba süre. Strang / θ(t) / donmuş γ ölçümle ertelendi

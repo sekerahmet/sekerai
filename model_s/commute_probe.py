@@ -112,6 +112,17 @@ def skip_loss(model, batch, attn, op, frac, rule, start=2, seed=0):
     return float(torch.nn.functional.cross_entropy(model._logits(h[keep]).float(), batch.target[keep]))
 
 
+@torch.no_grad()
+def inner_loss(model, batch, attn, layers):
+    """Katman ici bolme (A ile F ayni girdiden): layers'taki katmanlarda u + A(u) + F(u), oteki katmanlar sirali."""
+    x = model.E(batch.tokens)
+    for l, blk in enumerate(model.blocks):
+        x = x + d_attn(blk, x, batch.pos, attn) + d_ffn(blk, x) if l in layers else blk(x, batch.pos, attn)
+    h = model.norm(x)
+    keep = batch.target >= 0
+    return float(torch.nn.functional.cross_entropy(model._logits(h[keep]).float(), batch.target[keep]))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True)
@@ -119,6 +130,7 @@ def main(argv=None):
     ap.add_argument("--rows", type=int, default=4)
     ap.add_argument("--groups", default="")
     ap.add_argument("--skip", action="store_true", help="token basina uyarlamali adim (skip_loss)")
+    ap.add_argument("--inner", action="store_true", help="katman ici A ile F ayni girdiden (inner_loss)")
     a = ap.parse_args(argv)
     if os.name == "nt":
         T._no_power_throttling()
@@ -132,6 +144,12 @@ def main(argv=None):
     base = loss(model, batch, attn)
     print("taban (sirali) kayip %.4f" % base, flush=True)
     L = len(model.blocks)
+    if a.inner:
+        for l in range(L):
+            print("katman ici A || F, yalniz katman %2d: %+.4f" % (l + 1, inner_loss(model, batch, attn, {l}) - base), flush=True)
+        for name, s in (("katman >= 3", set(range(2, L))), ("hepsi", set(range(L)))):
+            print("katman ici A || F, %s: %+.4f" % (name, inner_loss(model, batch, attn, s) - base), flush=True)
+        return
     if a.skip:
         for op in ("F", "A", "AF"):
             for frac in (0.25, 0.5, 0.75):

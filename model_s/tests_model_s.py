@@ -219,6 +219,75 @@ def t_model():
           n2(wide) == 6 * n2(ModelS(d, (1,), H, Hkv)), "fark %.1e" % d_c)
 
 
+def t_mix():
+    """MixOp (tek operator): linear values = parallel adim (ayni agirlik); swiglu = elle formul (nedensel softmax, GQA, RoPE);
+    nedensel; esit matris parametresi (64'e yuvarlama payi icinde); ModelS op mix: KV cache adimi = tam ileri, toplu uretim =
+    tek tek; widths ile genis mix asamasi."""
+    from integrator import Step
+    from model import ModelS
+    from operators import MixOp
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "deneme2", "v2", "transformer"))
+    import baseline as BL
+    torch.manual_seed(5)
+    B, T, d, H, Hkv, hid = 2, 11, 32, 4, 2, 64
+    u = torch.randn(B, T, d)
+    pos = torch.arange(T).expand(B, T)
+    ctx = Context(pos)
+    pa, mx = Step(d, H, hid, Hkv, "parallel"), Step(d, H, hid, Hkv, "mix", values="linear")
+    with torch.no_grad():
+        g = torch.randn(d) * 0.2 + 1
+        pa.A.P.g.copy_(g), pa.F.P.g.copy_(g), mx.M.P.g.copy_(g)
+        pa.A.q_P.g.normal_(1, 0.2), pa.A.k_P.g.normal_(1, 0.2)
+        mx.M.q_P.g.copy_(pa.A.q_P.g), mx.M.k_P.g.copy_(pa.A.k_P.g)
+        kvr = Hkv * (d // H)
+        mx.M.w_in.weight.copy_(torch.cat([pa.A.w_q.weight, pa.A.w_kv.weight[:kvr], pa.A.w_kv.weight[kvr:], pa.F.w_gate_up.weight]))
+        mx.M.w_out.weight.copy_(torch.cat([pa.A.w_o.weight, pa.F.w_down.weight], 1))
+        d_lin = float((pa(u, ctx) - mx(u, ctx)).abs().max())
+    check("mix linear = parallel adim (u + A(Pu) + F(Pu), ayni agirlik, GQA)", d_lin < 1e-5, "fark %.1e" % d_lin)
+    M = MixOp(d, H, 48, Hkv, values="swiglu")
+    with torch.no_grad():
+        for p in (M.P.g, M.q_P.g, M.k_P.g):
+            p.normal_(1, 0.2)
+        got = M(u, ctx)
+        hd = d // H
+        q, k, v, loc = M.w_in(M.P(u)).split(M.split, -1)
+        vg, vu = v.chunk(2, -1)
+        v = torch.nn.functional.silu(vg) * vu
+        q = M.q_P(q.view(B, T, H, hd)).permute(0, 2, 1, 3)
+        k = M.k_P(k.view(B, T, Hkv, hd)).permute(0, 2, 1, 3)
+        v = v.view(B, T, Hkv, hd).permute(0, 2, 1, 3)
+        q, k = rope(q, pos), rope(k, pos)
+        k, v = k.repeat_interleave(H // Hkv, 1), v.repeat_interleave(H // Hkv, 1)
+        s = (q @ k.transpose(-1, -2)) / hd ** 0.5
+        s = s.masked_fill(~torch.ones(T, T, dtype=torch.bool).tril(), float("-inf"))
+        a = (torch.softmax(s, -1) @ v).transpose(1, 2).reshape(B, T, d)
+        gl, ul = loc.chunk(2, -1)
+        ref = M.w_out(torch.cat([a, torch.nn.functional.silu(gl) * ul], -1))
+        d_sw = float((got - ref).abs().max())
+        u2 = u.clone()
+        u2[:, 7] += 1.0
+        d_c = float((M(u2, ctx)[:, :7] - got[:, :7]).abs().max())
+    check("mix swiglu = elle formul (W_out [softmax(QK) silu(Vg) Vu | silu(g) up]); nedensel", d_sw < 1e-5 and d_c == 0,
+          "fark %.1e, nedensellik %.1e" % (d_sw, d_c))
+    n2 = lambda m: sum(p.numel() for p in m.parameters() if p.dim() == 2)  # noqa: E731
+    lie, mixs = Step(64, 4, 176, None, "lie"), Step(64, 4, 176, None, "mix")
+    check("mix swiglu matris parametresi = lie (yerel genislik 64'e asagi yuvarlanir: fark < 3 d 64)",
+          0 <= n2(lie) - n2(mixs) < 3 * 64 * 64, "lie %d, mix %d" % (n2(lie), n2(mixs)))
+    for op in ("mix", "parallel"):
+        wide = ModelS(d, (1, 2), H, Hkv, op=op).eval()
+        with torch.no_grad():
+            wide.E.weight[[BL.END_ID, BL.EOS_ID]] = 0
+            x = torch.randint(0, 1000, (1, 9))
+            full = wide._logits(wide.hidden(x, torch.arange(9)[None], None))[0, -1]
+            cache = dict(k=[None] * 2, v=[None] * 2, T=16)
+            wide._step(x[:, :5], cache, 0)
+            d_k = float((full - wide._logits(wide._step(x[:, 5:], cache, 5)[None])[0]).abs().max())
+        prompts = [[[5, 6, 7], [8, 9]], [[11, 12, 13, 14]], [[3]]]
+        one = [wide.generate([p], 2, 5, batch_size=1)[0] for p in prompts]
+        check("model op %s (widths 1, 2): KV cache adimi = tam ileri; toplu uretim = tek tek" % op,
+              d_k < 1e-4 and one == wide.generate(prompts, 2, 5, batch_size=8), "fark %.1e" % d_k)
+
+
 def t_train():
     """Parca 5: train.py --model model_s --widths 1,2 (CPU, d 16; tests_v2'nin kucuk verisi): kayip duser; kimlikte widths,
     layers = adim sayisi; kesilip --resume ile surdurulen = kesintisiz (agent.pt bit duzeyinde, widths kimlikten);
@@ -251,12 +320,21 @@ def t_train():
           sa.keys() == sb.keys() and all(torch.equal(sa[k], sb[k]) for k in sa))
     m, _ = GR.load_run(out("s_A"), data, torch.device("cpu"))
     check("train model_s: load_run ayni agirlik", all(torch.equal(m.state_dict()[k], sa[k]) for k in sa))
+    c = TR.main(base + ["--strata_op", "mix", "--out", out("s_M")])
+    Lm = [w["loss"] for w in c["log"]]
+    TR.main(base + ["--strata_op", "mix", "--out", out("s_M2"), "--stop_step", "5"])
+    TR.main(cut + ["--out", out("s_M2"), "--resume", "1"])
+    sm, sm2 = (torch.load(os.path.join(out(n), "agent.pt"), weights_only=False) for n in ("s_M", "s_M2"))
+    check("train model_s --strata_op mix: kayip duser, kimlikte mix; surdurulen (op kimlikten) = kesintisiz",
+          sum(Lm[-3:]) / 3 < sum(Lm[:3]) / 3 - 0.5 and sm["identity"]["strata_op"] == "mix"
+          and all(torch.equal(sm["state"][k], sm2["state"][k]) for k in sm["state"]),
+          "kayip %.3f -> %.3f" % (sum(Lm[:3]) / 3, sum(Lm[-3:]) / 3))
     bad = [TV._exit_msg(TR.main, base[:-4] + ["--model", "transformer", "--widths", "1,2", "--out", out("s_x1")]),
            TV._exit_msg(TR.main, cut + ["--out", out("s_x2")])]
     check("train model_s: --widths model_s disinda / model_s'de eksik -> DUR", all(m_ and "DUR" in m_ for m_ in bad), str(bad))
 
 
-TESTS = dict(ops=t_ops, steps=t_steps, stages=t_stages, model=t_model, train=t_train)
+TESTS = dict(ops=t_ops, steps=t_steps, stages=t_stages, model=t_model, mix=t_mix, train=t_train)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)

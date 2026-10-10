@@ -25,31 +25,43 @@ class SBlock(Step):
     """lie adimi, baseline.Block arayuzuyle (forward(x, pos, attn), _qkv, _finish; heads / kv_heads): KV cache ve StaticCache
     uretimi degismeden calisir."""
 
-    def __init__(self, d, heads, hidden, kv_heads=None, width=1):
-        super().__init__(d, heads, hidden, kv_heads, "lie", 1.0, width)
-        self.heads, self.kv_heads = self.A.heads, self.A.kv_heads
+    def __init__(self, d, heads, hidden, kv_heads=None, width=1, scheme="lie", values="swiglu"):
+        super().__init__(d, heads, hidden, kv_heads, scheme, 1.0, width, values)
+        op = self.M if scheme == "mix" else self.A
+        self.heads, self.kv_heads = op.heads, op.kv_heads
 
     def forward(self, x, pos, attn):
         return super().forward(x, Context(pos, attn))
 
     def _qkv(self, x, pos):
+        if self.scheme == "mix":                        # uretim yolu (_qkv sonra _finish ayni x ile): yerel ozellik saklanir
+            q, k, v, self._loc = self.M.qkv_local(x, pos)
+            return q, k, v
         return self.A.qkv(x, pos)
 
     def _finish(self, x, a):
+        if self.scheme == "mix":
+            loc, self._loc = self._loc, None
+            return x + self.M.out(a, loc)
         x = x + self.A.out(a)
         return x + self.F(x)
 
 
 class ModelS(BaselineTransformer):
-    def __init__(self, d, widths, heads, kv_heads=None, vocab_rows=VOCAB):
+    def __init__(self, d, widths, heads, kv_heads=None, vocab_rows=VOCAB, op="split"):
+        """op: split (A sonra F, bugunku blok), parallel (MixOp linear values), mix (MixOp swiglu values; esit matris parametresi);
+        tek ad ya da adim basina virgullu liste (orn. "split,mix,mix,split": ilk / son adimda F attention'i gorur)."""
         super().__init__(d, 1, heads, kv_heads, vocab_rows)            # E, norm, tarif; bloklar asagida
-        self.widths = tuple(int(w) for w in widths)
+        self.widths, self.op = tuple(int(w) for w in widths), op
+        ops = op.split(",") if "," in op else [op] * len(self.widths)
+        assert len(ops) == len(self.widths) and set(ops) <= {"split", "parallel", "mix"}, "op: split | parallel | mix (adim basina)"
         assert self.widths and min(self.widths) >= 1, "widths >= 1"
         hidden = -(-int(8 * d / 3) // 8) * 8
-        self.blocks = torch.nn.ModuleList(SBlock(d, heads, hidden, kv_heads, w) for w in self.widths)
+        sv = {"split": ("lie", "swiglu"), "parallel": ("mix", "linear"), "mix": ("mix", "swiglu")}
+        self.blocks = torch.nn.ModuleList(SBlock(d, heads, hidden, kv_heads, w, *sv[o]) for w, o in zip(self.widths, ops))
         n = sum(self.widths)                                             # artis olcegi: sum(w) katmanli transformer gibi
         for name, p in self.blocks.named_parameters():
             if p.dim() == 2:
-                std = 0.02 / math.sqrt(2 * n) if name.endswith(("w_o.weight", "w_down.weight")) else 0.02
+                std = 0.02 / math.sqrt(2 * n) if name.endswith(("w_o.weight", "w_down.weight", "w_out.weight")) else 0.02
                 with torch.no_grad():
                     p.normal_(0.0, std)

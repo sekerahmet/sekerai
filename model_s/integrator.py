@@ -5,23 +5,31 @@ Bir adim (bugunku "katman") u_n -> u_{n+1}; operatorler (P, A, F) operators.py'd
     strang    u <- u + dt/2 F1(u);  u <- u + dt A(u);  u <- u + dt/2 F2(u)  2. derece (Macaron Net 2019); F1, F2 yarim genislik:
                                                                           parametre lie ile ayni
     parallel  u <- u + dt (A(u) + F(u))                                   ayni u'dan iki operator (makale denklem 75; GPT-J / PaLM)
+    mix       u <- u + dt M(u)                                            tek operator (operators.MixOp): bolme yok; values
+                                                                          linear = parallel (birlesik matmul), swiglu = yeni
 dt = 1 (bugunku transformer; agirliklar olcegi tasir).  Adim basina parametre bagimsiz (theta_n); purussuz theta(t) Parca 3.
 """
 import torch
 
-from operators import AttentionOp, FeedForwardOp
+from operators import AttentionOp, FeedForwardOp, MixOp, mix_hidden
 
-SCHEMES = ("lie", "strang", "parallel")
+SCHEMES = ("lie", "strang", "parallel", "mix")
 
 
 class Step(torch.nn.Module):
     """Tek zaman adimi; operatorleri semanin sirasiyla uygular, yeni durumu dondurur."""
 
-    def __init__(self, d, heads, hidden, kv_heads=None, scheme="lie", dt=1.0, width=1):
-        """width k: birlesik hibrit asama (Parca 3) -- k x heads (head boyu d / heads), k x hidden; = k adimin `wide` formulu."""
+    def __init__(self, d, heads, hidden, kv_heads=None, scheme="lie", dt=1.0, width=1, values="swiglu"):
+        """width k: birlesik hibrit asama (Parca 3) -- k x heads (head boyu d / heads), k x hidden; = k adimin `wide` formulu.
+        mix: hidden ayri A + F'nin genisligi; MixOp'un yerel genisligi esit matris parametresiyle (mix_hidden)."""
         super().__init__()
         assert scheme in SCHEMES, "scheme: %s" % (SCHEMES,)
         self.scheme, self.dt, self.width = scheme, float(dt), int(width)
+        if scheme == "mix":
+            kv, hd = (width * kv_heads if kv_heads else None), d // heads
+            hid = mix_hidden(d, width * heads * hd, (kv or width * heads) * hd, width * hidden, values)
+            self.M = MixOp(d, width * heads, hid, kv, hd, values)
+            return
         self.A = AttentionOp(d, width * heads, width * kv_heads if kv_heads else None, head_dim=d // heads)
         hidden = width * hidden
         if scheme == "strang":                                          # esit parametre: iki yarim genislik
@@ -31,6 +39,8 @@ class Step(torch.nn.Module):
 
     def forward(self, u, ctx):
         dt = self.dt
+        if self.scheme == "mix":
+            return u + dt * self.M(u, ctx)
         if self.scheme == "lie":
             u = u + dt * self.A(u, ctx)
             return u + dt * self.F(u)
