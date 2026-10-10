@@ -308,7 +308,8 @@ class Block(torch.nn.Module):
 
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
-                 attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, mlp_ratio=()):
+                 attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, mlp_ratio=(),
+                 local_kv_heads=0):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -336,7 +337,9 @@ class SentenceTransformer(torch.nn.Module):
         assert not self.mlp_ratio or (len(self.mlp_ratio) == 2 and self.global_layers), "mlp_ratio: (yerel, G), G gerek"
         width = (lambda r: max(64, round(r * 4 * d / 3 / 64) * 64))       # noqa: E731  4 d^2 attention, SwiGLU 3 d w
         self.mlp_widths = [width(self.mlp_ratio[k == "glob"]) if self.mlp_ratio else hidden for k in kinds]
-        self.blocks = torch.nn.ModuleList(Block(d, heads, self.mlp_widths[i], glob_kv_heads if k == "glob" else None,
+        self.local_kv_heads = int(local_kv_heads or 0)                    # yerel bloklarda GQA (0: tam)
+        self.blocks = torch.nn.ModuleList(Block(d, heads, self.mlp_widths[i],
+                                                glob_kv_heads if k == "glob" else (self.local_kv_heads or None),
                                                 int(attn_gate), bool(self.g_nope) and k == "glob") for i, k in enumerate(kinds))
         self.norm = torch.nn.RMSNorm(d)
         for name, p in self.named_parameters():
@@ -602,7 +605,7 @@ class SummaryCache:
             q, k, v = block._qkv(x, p)
             ks = [c for c in (self.sum_k[l], self.sen_k[l] if read_sentence else None) if c is not None] + [k]
             vs = [c for c in (self.sum_v[l], self.sen_v[l] if read_sentence else None) if c is not None] + [v]
-            a = F.scaled_dot_product_attention(q, torch.cat(ks, 2), torch.cat(vs, 2))
+            a = gqa_sdpa(q, torch.cat(ks, 2), torch.cat(vs, 2))             # yerel GQA'da k / v daha az head
             if summary:
                 self.sum_k[l] = k if self.sum_k[l] is None else torch.cat([self.sum_k[l], k], 2)
                 self.sum_v[l] = v if self.sum_v[l] is None else torch.cat([self.sum_v[l], v], 2)

@@ -131,7 +131,7 @@ MLP_RATIO_DEFAULT = (1.0, 4.0)  # --mlp_ratio verilmezse, G'li Model Z: MLP : ta
                                 # "bu oranları koda varsayılan standart ekler misin ?"; d768 3.000: sinav -0,0039, ayni parametre)
 LR_REF = (2e-3, 768, 0.5)      # lr auto = lr0 (d0 / d) ^ us (aci / adim ~ lr 0,2 sqrt(d) sabit); d1024 olcumu: 1,4 / 1,7e-3 duz, 1,73e-3 icinde
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ngram_embed", "ngram_layers",
-           "ngram_sparse", "mtp", "g_nope", "mlp_ratio")   # --resume'da verilmezse kimlikten
+           "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads")   # --resume'da verilmezse kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
@@ -142,7 +142,7 @@ READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_ge
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
-            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio")
+            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -290,7 +290,8 @@ def _build(args, dev):
                                     ngram_layers=getattr(args, "ngram_layers", 0) or 0,
                                     ngram_sparse=bool(getattr(args, "ngram_sparse", 0)),
                                     g_nope=getattr(args, "g_nope", 0) or 0,
-                                    mlp_ratio=tuple(getattr(args, "mlp_ratio", None) or ()))
+                                    mlp_ratio=tuple(getattr(args, "mlp_ratio", None) or ()),
+                                    local_kv_heads=getattr(args, "local_kv_heads", 0) or 0)
         model, mask_fn, layout = model.to(dev), model.mask_fn, "model_z"
     return model, mask_fn, layout
 
@@ -632,6 +633,8 @@ def _args(argv):
                     help="model_z: head basina attention cikis kapisi (belge 88a, 90a); 1 girdi n1(x), 2 girdi n1(x)'in "
                          "ilk d // 64 boyutu; auto (varsayilan): model_z ve d >= 64 ise 2, aksi 0; kimlikte; "
                          "--resume'da verilmezse kosunun kimliginden")
+    ap.add_argument("--local_kv_heads", type=int, default=None,
+                    help="yerel (Z'li) bloklarda k / v head sayisi (GQA, deneme); 0 / verilmezse tam (eski)")
     ap.add_argument("--mlp_ratio", default=None,
                     help="MLP : tam (GQA'siz) attention parametre orani yerel,G: genislik = oran x 4d/3 (64'un kati); G'li Model Z'de "
                          "varsayilan 1,4; 0 esit genislik (8d/3)")
@@ -659,7 +662,7 @@ def _args(argv):
         if args.resume and os.path.exists(ckpt) else None               # varsayilan degisse de kosu kendi ayariyla surer
     for k in args.defaulted if was is not None else ():
         setattr(args, k, was.get(k, [] if k == "mlp_ratio" else
-                                 0 if k in ("glob_kv_heads", "attn_gate", "mtp", "g_nope") or k.startswith("ngram") else None))
+                                 0 if k in ("glob_kv_heads", "attn_gate", "mtp", "g_nope", "local_kv_heads") or k.startswith("ngram") else None))
     args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
     if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
         args.optimizer = DEFAULT_OPTIMIZER
@@ -715,6 +718,9 @@ def _args(argv):
         args.mlp_ratio = [] if args.mlp_ratio in ([0.0], [0]) else args.mlp_ratio
     if args.mlp_ratio and (args.model != "model_z" or not args.global_layers or len(args.mlp_ratio) != 2):
         sys.exit("DUR: --mlp_ratio yerel,G (orn. 1,4) yalniz G katmanli Model Z'de; 0 esit genislik")
+    args.local_kv_heads = int(args.local_kv_heads or 0)
+    if args.local_kv_heads and (args.model != "model_z" or args.heads % args.local_kv_heads):
+        sys.exit("DUR: --local_kv_heads yalniz Model Z'de, heads'in boleni (%d)" % args.heads)
     if args.glob_kv_heads == "auto" and (args.model != "model_z" or not args.global_layers):
         args.glob_kv_heads = 0                                           # transformer / G'siz Model Z: GQA yok
     if args.glob_kv_heads == "auto":
@@ -814,7 +820,7 @@ def main(argv=None):
                  summaries_last=args.summaries_last, glob_kv_heads=args.glob_kv_heads, carry_summaries=args.carry_summaries,
                  carry_group=args.carry_group, vocab_rows=args.vocab_rows, attn_gate=args.attn_gate,
                  ngram_embed=args.ngram_embed, ngram_layers=args.ngram_layers, ngram_sparse=args.ngram_sparse,
-                 mtp=args.mtp, g_nope=args.g_nope, mlp_ratio=args.mlp_ratio)
+                 mtp=args.mtp, g_nope=args.g_nope, mlp_ratio=args.mlp_ratio, local_kv_heads=args.local_kv_heads)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -834,7 +840,7 @@ def main(argv=None):
         if _archived(was):                                                # eski / kaldirilan yol (belge 77)
             sys.exit("DUR: " + _archived(was))
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
-               "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [],
+               "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [], "local_kv_heads": 0,
                **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
