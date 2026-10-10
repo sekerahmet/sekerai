@@ -55,6 +55,8 @@ kimliginden (alan yoksa 0); kapisiz checkpoint kapili surdurulmez (DUR).  --attn
 ikinci kolu da ekle"; "onaylıyorum, d // 64 yap"): kapi girdisi n1(x)'in ilk d // 64 boyutu, W (heads, d // 64) (speedrun
 124M tarifi; belge 88a s4.3, 90a; d768'de 12); d < 64 DUR.  Varsayilan auto (kullanici, 8 Ekim: "gate 2 varsayılan"):
 model_z ve d >= 64 ise 2, aksi halde 0.
+--micro_batches N (kullanici, 10 Ekim; 0,5B 32 satirda sigmadi): gradyan biriktirme, adimin satirlari N parcada, tek
+optimizer adimi; kimlik disi (history.segments'te), MTP / carry / seyrek n-gram ile DUR.
 --stop_step N (kullanici, 8 Ekim): takvim degismeden adim N'de durur; checkpoint.pt + agent.pt + results.json (finished
 False, stopped_at, readings_skipped "stop_step"), son sinav ve okuma yok; --resume 1 kaldigi yerden.
 Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunluk sinirinda, epok sonunda ve bitiste;
@@ -363,11 +365,55 @@ def _attn(batch, mask_fn, cuda):
     return R.block_mask(batch, mask_fn) if cuda else R.dense_mask(batch, mask_fn)
 
 
-def _step(model, batch, mask_fn, opt, cuda, timer=None, cont=None, mtp=None):
+def _rows(batch, i, n):
+    """PackedBatch'in i. satir dilimi (n esit parca; butun alanlar satir ekseninde)."""
+    B = batch.tokens.shape[0]
+    s = slice(i * B // n, (i + 1) * B // n)
+    return D.PackedBatch(**{f.name: None if getattr(batch, f.name) is None else getattr(batch, f.name)[s]
+                            for f in dataclasses.fields(batch)})
+
+
+def _apply(model, opt):
+    """Gradyanlar dolu: kirpma + optimizer adimi -> gradyan normu."""
+    seen = getattr(model, "ngram_seen", None)                          # seyrek bigram yapragi kirpmaya dahil
+    params = list(model.parameters()) if seen is None else [*model.parameters(), seen[1]]
+    if CLIP_IN_OPTIMIZER and getattr(opt, "grad_coef_ok", False):       # clip_grad_norm_ ile ayni norm ve katsayi;
+        gn = torch.nn.utils.get_total_norm([p.grad for p in params if p.grad is not None])   # carpim optimizer'da
+        opt.step(grad_coef=torch.clamp(CLIP / (gn + 1e-6), max=1.0))
+    else:
+        gn = torch.nn.utils.clip_grad_norm_(params, CLIP)
+        opt.step()
+    return gn
+
+
+def _step(model, batch, mask_fn, opt, cuda, timer=None, cont=None, mtp=None, micro=1, skip=()):
     """Tek egitim adimi -> (kayip, gradyan normu, ek ya da None) cihazda.  timer: iki CUDA olayi, cikis kalemi (yalniz
     ileri).  cont (carry, _cont_mask): devam parcasi hedeflerinin kaybi yalniz olcu (gradyansiz) -> ek {"loss_cont":
     toplam, "n_cont": sayi}.  mtp (--mtp): (ek hedefler (B, T, K), agirlik (K,)) -> geri yayilim MTP kaybindan, donen
-    kayip ana CE; ek {"mtp_ce": (K,), "mtp_steps": 1}."""
+    kayip ana CE; ek {"mtp_ce": (K,), "mtp_steps": 1}.  micro > 1 (--micro_batches): satirlar micro parcada ileri / geri,
+    parca kaybi hedef payiyla agirlikli (toplam = butun batch'in ortalama CE'si), tek optimizer adimi; skip: hedefsiz
+    (yalniz dolgu) parcalar (CPU'da bulunur: bos parcanin CE'si 0 / 0)."""
+    if micro > 1:
+        assert cont is None and mtp is None, "micro_batches: MTP / carry yok"
+        opt.zero_grad(set_to_none=True)
+        n_all = (batch.target >= 0).sum()
+        main = 0.0
+        for i in range(micro):
+            if i in skip:
+                continue
+            b = _rows(batch, i, micro)
+            with torch.autocast(b.tokens.device.type, dtype=torch.bfloat16, enabled=cuda):
+                h = model._batch_hidden(b, _attn(b, mask_fn, cuda))
+                if timer is not None and i == 0:
+                    timer[0].record()
+                loss = R.output_loss(h.flatten(0, 1), model.E.weight, b.target.flatten())
+                if timer is not None and i == 0:
+                    timer[1].record()
+                del h
+            w = (b.target >= 0).sum() / n_all
+            (loss * w).backward()
+            main = main + loss.detach() * w
+        return main, _apply(model, opt).detach(), None
     with torch.autocast(batch.tokens.device.type, dtype=torch.bfloat16, enabled=cuda):
         h = model._batch_hidden(batch, _attn(batch, mask_fn, cuda))
         if timer is not None:
@@ -388,15 +434,7 @@ def _step(model, batch, mask_fn, opt, cuda, timer=None, cont=None, mtp=None):
             timer[1].record()
     opt.zero_grad(set_to_none=True)
     loss.backward()
-    seen = getattr(model, "ngram_seen", None)                          # seyrek bigram yapragi kirpmaya dahil
-    params = list(model.parameters()) if seen is None else [*model.parameters(), seen[1]]
-    if CLIP_IN_OPTIMIZER and getattr(opt, "grad_coef_ok", False):       # clip_grad_norm_ ile ayni norm ve katsayi;
-        gn = torch.nn.utils.get_total_norm([p.grad for p in params if p.grad is not None])   # carpim optimizer'da
-        opt.step(grad_coef=torch.clamp(CLIP / (gn + 1e-6), max=1.0))
-    else:
-        gn = torch.nn.utils.clip_grad_norm_(params, CLIP)
-        opt.step()
-    return main.detach(), gn.detach(), extra
+    return main.detach(), _apply(model, opt).detach(), extra
 
 
 def _to_device(batch, dev):
@@ -606,6 +644,9 @@ def _args(argv):
     ap.add_argument("--fp8", default="none", choices=("none", "tensorwise", "rowwise"),
                     help="MLP (gate_up, down) torchao Float8Linear tarifi; none: bf16 (kimlige girmez, --resume'da "
                          "degistirilebilir; kullanici, 8 Ekim)")
+    ap.add_argument("--micro_batches", type=int, default=1,
+                    help="gradyan biriktirme: adimin satirlari N esit parcada ileri / geri, tek optimizer adimi (ayni "
+                         "matematik, tepe bellek ~1 / N); kimlige girmez, --resume'da degistirilebilir")
     ap.add_argument("--stop_step", type=int, default=None,
                     help="takvim (WSD, epok plani) degismeden adim N'de dur: checkpoint.pt (surdurulebilir) + agent.pt + "
                          "results.json (finished False, stopped_at N); son sinav ve okuma yok (kullanici, 8 Ekim)")
@@ -704,7 +745,12 @@ def main(argv=None):
     if (args.ngram_layers or args.ngram_sparse) and (not args.ngram_embed or not 0 <= args.ngram_layers <= args.layers
                                                      or args.ngram_sparse not in (0, 1)):
         ng_err = "--ngram_layers / --ngram_sparse: --ngram_embed ile, 0 <= K <= layers, sparse 0 / 1"
-    for err in (_global_error(args), _carry_error(args), ng_err, _mtp_error(args)):   # veri yuklenmeden
+    mb_err = None
+    if args.micro_batches < 1 or BATCH_ROWS % args.micro_batches:
+        mb_err = "--micro_batches %d: %d satiri esit bolmeli" % (args.micro_batches, BATCH_ROWS)
+    elif args.micro_batches > 1 and (args.mtp or args.carry_summaries or args.carry_group or args.ngram_sparse):
+        mb_err = "--micro_batches > 1 MTP / carry / --ngram_sparse ile kurulmadi"
+    for err in (_global_error(args), _carry_error(args), ng_err, _mtp_error(args), mb_err):   # veri yuklenmeden
         if err:
             sys.exit("DUR: " + err)
     if args.optimizer in ("muon", "normuon") and _muon_missing():      # sessizce AdamW'ye dusulmez
@@ -878,8 +924,12 @@ def main(argv=None):
     elif not start < end <= total:
         sys.exit("DUR: --stop_step %s: adim %d < N <= %d olmali" % (args.stop_step, start, total))
     else:
-        history.setdefault("segments", []).append(dict(start=start, fp8=args.fp8, fp8_linears=n_fp8))   # kimlik disi kip
-    log("fp8 %s (%d Linear)" % (args.fp8, n_fp8))
+        seg = dict(start=start, fp8=args.fp8, fp8_linears=n_fp8)                                       # kimlik disi kip
+        if args.micro_batches > 1:
+            seg["micro_batches"] = args.micro_batches
+        history.setdefault("segments", []).append(seg)
+    log("fp8 %s (%d Linear) | micro_batches %d (%d satir / parca)" % (args.fp8, n_fp8, args.micro_batches,
+                                                                     BATCH_ROWS // args.micro_batches))
     sw, win = R.SpeedWindow(), None
     first_window, epoch_from, epoch_t0, saved_at = True, start, time.time(), time.time()
     ckpt_seconds = 60 * args.checkpoint_minutes                      # kimlige girmez (kullanici: buyuk kosuda 30 dk)
@@ -902,7 +952,9 @@ def main(argv=None):
         if w_mtp and any(w_mtp):                                         # son evre: eski yol (saf NTP)
             mtp = (mt, torch.tensor(w_mtp))
             mtp = tuple(t.pin_memory().to(dev, non_blocking=True) for t in mtp) if cuda else mtp
-        loss, gn, extra = _step(model, _to_device(batch, dev), mask_fn, opt, cuda, timer, cont, mtp)
+        mb = args.micro_batches
+        skip = [i for i in range(mb) if not (_rows(batch, i, mb).target >= 0).any()] if mb > 1 else ()   # CPU batch
+        loss, gn, extra = _step(model, _to_device(batch, dev), mask_fn, opt, cuda, timer, cont, mtp, mb, skip)
         nxt = cpu_batch(step + 1) if step + 1 < total else None          # GPU calisirken hazirlanir
         win["loss"] += loss
         win["gn"] += gn

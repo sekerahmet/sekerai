@@ -2822,9 +2822,89 @@ def t_clipfold():
           and all(torch.equal(pc[n], pd[n]) for n in muon) and rel <= 1e-6 and len(muon) > 0)
 
 
+def t_micro():
+    """--micro_batches (gradyan biriktirme; 0,5B 32 satirda sigmadi, 10 Ekim): train._step micro 2 / 4 = micro 1, bugunku
+    varsayilan duzenli kucuk Model Z (G, GQA, kapi 2, NoPE, MLP orani, yogun n-gram).  (a) optimizer'a giden gradyanlar,
+    kayip, grad normu goreli <= 1e-5 (yalniz toplama sirasi); (b) SGD 3 adim parametreler goreli <= 1e-4 (NorMuon'un
+    bf16 Newton-Schulz'u ve Adam normu 1e-7'lik farki buyuttugu icin parametre kiyasi SGD'de); hedefsiz (dolgu) parca
+    skip ile atlanir, agirlik dogru.  DUR: satir bolunmuyor, MTP ile."""
+    import types
+    import train as TR
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "model_z"))
+    from model import SentenceTransformer, summaries_last
+    rng = np.random.default_rng(5)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(2, 6))]
+               for _ in range(12)]
+    flat, sent, story = [], [], [0]
+    for s_ in stories:
+        for t in s_:
+            sent.append((len(flat), len(flat) + len(t)))
+            flat += t
+        story.append(len(sent))
+    st = types.SimpleNamespace(stream=np.array(flat, np.int64), sent=np.array(sent, np.int64), story=np.array(story))
+
+    class Grab:                                                          # optimizer yerine: gradyanlari yakalar
+        grad_coef_ok = False
+
+        def __init__(self, m):
+            self.m, self.grads = m, None
+
+        def zero_grad(self, set_to_none=True):
+            self.m.zero_grad(set_to_none=set_to_none)
+
+        def step(self):
+            self.grads = {n: q.grad.detach().clone() for n, q in self.m.named_parameters() if q.grad is not None}
+
+    def batch(k):
+        rows = [[(3 * k + j) % 12, (3 * k + j + 5) % 12] for j in range(3)] + [[]]   # son satir bos (epok sonu dolgusu)
+        return summaries_last(D.build_batch(st, rows, "model_z", row_len=160))[0]
+
+    def model():
+        torch.manual_seed(0)
+        return SentenceTransformer(d=128, layers=3, heads=4, global_layers=1, glob_kv_heads=1, attn_gate=2, ngram_rows=97,
+                                   ngram_layers=1, g_nope=1, mlp_ratio=(1, 4))
+
+    def skip_of(b, micro):
+        return [i for i in range(micro) if not (TR._rows(b, i, micro).target >= 0).any()] if micro > 1 else ()
+
+    def grads(micro):
+        m = model()
+        g = Grab(m)
+        saved = TR.CLIP
+        TR.CLIP = 1e9                                                    # kirpma gradyani degistirmesin
+        try:
+            b = batch(0)
+            loss, gn, _ = TR._step(m, b, m._masks(True), g, False, micro=micro, skip=skip_of(b, micro))
+        finally:
+            TR.CLIP = saved
+        return float(loss), float(gn), g.grads
+
+    def sgd(micro):                                                    # SGD: guncelleme gradyana dogrusal (Adam / Muon
+        m = model()                                                      # normlamasi sifira yakin gradyani buyutur)
+        opt = torch.optim.SGD(m.parameters(), lr=0.05)
+        for k in range(3):
+            b = batch(k)
+            TR._step(m, b, m._masks(True), opt, False, micro=micro, skip=skip_of(b, micro))
+        return {n: q.detach().clone() for n, q in m.named_parameters()}
+    g1, p1 = grads(1), sgd(1)
+    rel = lambda a, b: float((a - b).abs().max() / a.abs().max().clamp_min(1e-12))  # noqa: E731
+    for micro in (2, 4):
+        gm, pm = grads(micro), sgd(micro)
+        dl, dn = abs(g1[0] - gm[0]) / g1[0], abs(g1[1] - gm[1]) / g1[1]
+        dg = max(rel(g1[2][n], gm[2][n]) for n in g1[2])
+        dp = max(rel(p1[n], pm[n]) for n in p1)
+        check("micro: micro %d = micro 1 (son satir bos, skip %s): kayip %.1e, grad normu %.1e, gradyan %.1e, SGD 3 adim "
+              "parametre %.1e goreli" % (micro, skip_of(batch(0), micro), dl, dn, dg, dp),
+              set(gm[2]) == set(g1[2]) and dl <= 1e-5 and dn <= 1e-5 and dg <= 1e-5 and dp <= 1e-4)
+    m3 = _exit_msg(TR.main, ["--model", "model_z", "--micro_batches", "3", "--out", os.path.join(TMP, "mb3")])
+    mm = _exit_msg(TR.main, ["--model", "model_z", "--micro_batches", "2", "--mtp", "2", "--out", os.path.join(TMP, "mbm")])
+    check("micro: DUR satir bolunmuyor (3) ve MTP ile", m3 is not None and "esit bolmeli" in m3 and mm is not None
+          and "MTP" in mm, "%s | %s" % (m3, mm))
+
+
 TESTS = dict(fp8=t_fp8, data=t_data, pack=t_pack, recipe=t_recipe, metrics=t_metrics, integration=t_integration,
              train=t_train, drive=t_drive, tokens=t_tokens, fineweb=t_fineweb, mtp=t_mtp, normuon=t_normuon,
-             clipfold=t_clipfold)
+             clipfold=t_clipfold, micro=t_micro)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)
