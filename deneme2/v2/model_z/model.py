@@ -40,6 +40,7 @@ blok girdisine ekler (0: hepsi); ngram_sparse egitimde tabloyu yalniz okunan sat
 """
 import dataclasses
 import functools
+import typing
 import math
 import os
 import sys
@@ -156,6 +157,27 @@ def summaries_last(batch):
                                real_pos=g(story_positions(kind) if batch.real_pos is None else batch.real_pos), **mem), perm
 
 
+def _last_ranges(kind, doc, sent, glob=False, summaries=True):
+    """summaries_last duzeni -> (a0, a1, b0, b1) int (B, T): token [a0, a1], ozet [b0, b1] (model_z_summaries_last_ranges)."""
+    B, T = kind.shape
+    big, large = T + 2, 1 << 40
+    tok, summ, pad = kind == TOKEN, (kind == BOS) | (kind == ZTOK), kind == PAD
+    col = torch.arange(T, device=kind.device).expand(B, T)
+    d, s = doc.long() * big, sent.long()
+    ktok = torch.where(tok, d + s, large)
+    ksum = torch.where(summ, d + s + 1, torch.where(tok, -1, large))
+    a0 = torch.searchsorted(ktok, d if glob else d + s)
+    a1 = torch.where(tok, col, torch.searchsorted(ktok, d + s, right=True) - 1)
+    b0 = torch.searchsorted(ksum, d)
+    b1 = torch.searchsorted(ksum, d + s + summ.long(), right=True) - 1
+    a0 = torch.where(pad, (~pad).sum(1, keepdim=True).expand(B, T), a0)
+    a1 = torch.where(pad, col, a1)
+    b0, b1 = torch.where(pad, 1, b0), torch.where(pad, 0, b1)
+    if not summaries:                                                    # noz: ozetler hic okunmaz
+        b0, b1 = torch.ones_like(b0), torch.zeros_like(b1)
+    return tuple(t.int() for t in (a0, a1, b0, b1))
+
+
 def model_z_summaries_last_ranges(kind, doc, sent, glob=False, n_mem=None):
     """summaries_last duzeninde (kind, doc, sent permute) yerel (glob False) ya da global maske -> mask_mod: sorgu basina
     iki aralik, token [a0, a1] ve ozet [b0, b1] (dolgu: kendi kosusu).  Token'lar (hikaye, cumle), ozetler (hikaye, cumle +
@@ -196,6 +218,93 @@ def model_z_summaries_last_ranges(kind, doc, sent, glob=False, n_mem=None):
 
 _LAST_GLOB = functools.partial(model_z_summaries_last_ranges, glob=True)
 model_z_summaries_last_ranges.includes_padding = _LAST_GLOB.includes_padding = True
+
+
+def _last_local_noz(kind, doc, sent):
+    """noz yerel maskesi: yalniz kendi cumlesi (ozet yok)."""
+    a0, a1, _, _ = _last_ranges(kind, doc, sent, glob=False, summaries=False)
+
+    def mask_mod(b, h, q, kv):
+        return (kv >= a0[b, q]) & (kv <= a1[b, q])
+    return mask_mod
+
+
+_last_local_noz.includes_padding = True
+
+
+class GMemory(typing.NamedTuple):
+    """G bellek attention'i (deneme/g-memory): m1 pencere + ozet maskesi (T x T), m2 bellek maskesi (T x M), idx bellek sutunlari
+    (B, M; dolgu 0, maskeli).  CUDA'da BlockMask, CPU'da bool.  NamedTuple: derleyici turle korur, nesne kimligiyle degil."""
+    m1: object
+    m2: object
+    idx: torch.Tensor
+
+
+def g_memory_attn(batch, rare, window, cuda, summaries=True, block=64):
+    """summaries_last batch'i -> GMemory.  Gorunur (sorgu q, ayni hikaye, kv <= q): son `window` token sutunu ya da ozet ya da
+    (rare[token] ve pencereden once).  Bellek: satir basina rare token sutunlari artan sirada, M blok katina dolgulu."""
+    kind, doc, sent, tok = batch.kind, batch.doc, batch.sent, batch.tokens
+    B, T = kind.shape
+    a0, a1, b0, b1 = _last_ranges(kind, doc, sent, glob=True, summaries=summaries)
+    w0 = torch.maximum(a0, a1 - window + 1)
+    is_mem = (kind == TOKEN) & rare[tok.clamp(0, len(rare) - 1)]
+    n = is_mem.sum(1)
+    Mx = max(block, -(-int(n.max()) // block) * block)
+    col = torch.arange(T, device=kind.device).expand(B, T)
+    key = torch.where(is_mem, col, T + col)                               # bellek sutunlari once, artan
+    order = torch.sort(key, 1).values[:, :Mx] if T >= Mx else torch.sort(key, 1).values
+    memc = torch.where(order < T, order, 1 << 30)                         # bellek sutunu ya da buyuk (dolgu)
+    if memc.shape[1] < Mx:
+        memc = torch.cat([memc, memc.new_full((B, Mx - memc.shape[1]), 1 << 30)], 1)
+    idx = torch.where(memc < T, memc, 0).long()
+    m0 = torch.searchsorted(memc.contiguous(), a0.long().contiguous())    # ilk a0'dan buyuk-esit
+    m1 = torch.searchsorted(memc.contiguous(), (w0.long() - 1).contiguous(), right=True) - 1   # son pencereden once
+    m0, m1 = m0.int(), m1.int()
+
+    def mod1(b, h, q, kv):
+        return ((kv >= w0[b, q]) & (kv <= a1[b, q])) | ((kv >= b0[b, q]) & (kv <= b1[b, q]))
+
+    def mod2(b, h, q, j):
+        return (j >= m0[b, q]) & (j <= m1[b, q])
+    if cuda:
+        from torch.nn.attention.flex_attention import create_block_mask
+        bm1 = create_block_mask(mod1, B, None, T, T, device=kind.device, BLOCK_SIZE=block, _compile=True)
+        bm2 = create_block_mask(mod2, B, None, T, Mx, device=kind.device, BLOCK_SIZE=block, _compile=True)
+        return GMemory(bm1, bm2, idx)
+    bb = torch.arange(B, device=kind.device)[:, None, None]
+    qq = torch.arange(T, device=kind.device)[None, :, None]
+    return GMemory(mod1(bb, 0, qq, torch.arange(T, device=kind.device)[None, None, :]),
+                   mod2(bb, 0, qq, torch.arange(Mx, device=kind.device)[None, None, :]), idx)
+
+
+def _attend_lse(q, k, v, attn):
+    """-> (cikti (B, H, T, hd), logsumexp (B, H, T) fp32); attn BlockMask (flex) ya da bool (B, T, S) (acik hesap, fp32)."""
+    if torch.is_tensor(attn):
+        H, Hkv = q.shape[1], k.shape[1]
+        if H != Hkv:
+            k, v = k.repeat_interleave(H // Hkv, 1), v.repeat_interleave(H // Hkv, 1)
+        s = (q.float() @ k.float().transpose(-1, -2)) * q.shape[-1] ** -0.5
+        s = s.masked_fill(~attn[:, None], float("-inf"))
+        lse = torch.logsumexp(s, -1)
+        p = torch.where(torch.isfinite(lse)[..., None], torch.exp(s - lse[..., None]), torch.zeros((), device=s.device))
+        return (p @ v.float()).to(q.dtype), lse
+    from torch.nn.attention.flex_attention import flex_attention
+    bs = attn.BLOCK_SIZE[0]
+    o, lse = flex_attention(q, k, v, block_mask=attn, return_lse=True, enable_gqa=k.shape[1] != q.shape[1],
+                            kernel_options=None if bs == 128 else dict.fromkeys(
+                                ("BLOCK_M", "BLOCK_N", "BLOCK_M1", "BLOCK_N1", "BLOCK_M2", "BLOCK_N2"), bs))
+    return o, lse.float()
+
+
+def _gmem_attend(q, k, v, gm):
+    """Iki parca (pencere + ozet, sikistirilmis bellek) -> birlesim gorunurlugunde tek attention (logsumexp birlestirme)."""
+    o1, l1 = _attend_lse(q, k, v, gm.m1)
+    ix = gm.idx[:, None, :, None].expand(-1, k.shape[1], -1, k.shape[3])
+    o2, l2 = _attend_lse(q, k.gather(2, ix), v.gather(2, ix), gm.m2)
+    lse = torch.logaddexp(l1, l2)
+    w1 = torch.nan_to_num(torch.exp(l1 - lse))[..., None]
+    w2 = torch.nan_to_num(torch.exp(l2 - lse))[..., None]
+    return (o1.float() * w1 + o2.float() * w2).to(q.dtype)
 
 
 def _dense(mask_mod, B, T, device):
@@ -326,6 +435,9 @@ class Block(torch.nn.Module):
             (pos, real), (al, ag) = pos, attn
             lo, gl, g = self._qkv_mixed(x, pos, real, gate=self.attn_gate is not None)
             return self._finish(x, torch.cat([_attend(*lo, al), _attend(*gl, ag)], 1), g)
+        if isinstance(attn, GMemory):                                     # deneme/g-memory: G iki parcali
+            q, k, v, *g = self._qkv(x, pos, gate=self.attn_gate is not None)
+            return self._finish(x, _gmem_attend(q, k, v, attn), *g)
         mem = None
         if isinstance(attn, tuple):
             attn, mem = attn[0], attn[1:]
@@ -432,6 +544,12 @@ class SentenceTransformer(torch.nn.Module):
         """Maske fonksiyonlari: bugunku duzen (mask_fn) ya da summaries_last duzeninde ayni yapida (tek / ikili)."""
         if not last:
             return self.mask_fn
+        gm = getattr(self, "g_memory", None)
+        if gm is not None:                                                 # deneme/g-memory: G maskesi kurucu
+            assert isinstance(self.mask_fn, tuple), "g_memory: G'li Model Z"
+            build = functools.partial(g_memory_attn, rare=gm["rare"], window=gm["window"], summaries=not gm["noz"])
+            build.gmem = True
+            return (_last_local_noz if gm["noz"] else model_z_summaries_last_ranges), build
         return (model_z_summaries_last_ranges, _LAST_GLOB) if isinstance(self.mask_fn, tuple) else \
             model_z_summaries_last_ranges
 
@@ -461,7 +579,8 @@ class SentenceTransformer(torch.nn.Module):
                 x = block(add(x, l), batch.pos, w(attn))
             return self.norm(x)
         if attn is None:
-            attn = tuple(_dense(f(batch.kind, batch.doc, batch.sent), B, T, dev) for f in mfn)
+            attn = tuple(f(batch, cuda=False) if getattr(f, "gmem", False) else _dense(f(batch.kind, batch.doc, batch.sent), B, T, dev)
+                         for f in mfn)
         assert isinstance(attn, tuple) and len(attn) == 2, "global_layers: attn (yerel, global) ikilisi olmali"
         real = batch.real_pos if last else story_positions(batch.kind)
         if self.mix_g_heads:                                               # karma: her blok iki maske, iki konum
@@ -572,6 +691,7 @@ class SentenceTransformer(torch.nn.Module):
         cikti tek tek uretimle ayni (fp32 token token)."""
         out, limit = [], self.max_positions()
         assert not getattr(self, "mix_g_heads", 0), "mix_g_heads: uretim onbellegi yok (deneme/mixed-layer)"
+        assert getattr(self, "g_memory", None) is None, "g_memory: uretim onbellegi henuz yok (deneme/g-memory)"
         static = STATIC_DECODE and StaticCache.supports(self)
         if static and generator is None and on_token is None and batch_size > 1 and len(prompts) > 1:
             for i in range(0, len(prompts), batch_size):

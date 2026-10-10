@@ -135,7 +135,8 @@ MLP_RATIO_DEFAULT = (1.0, 4.0)  # --mlp_ratio verilmezse, G'li Model Z: MLP : ta
                                 # "bu oranları koda varsayılan standart ekler misin ?"; d768 3.000: sinav -0,0039, ayni parametre)
 LR_REF = (2e-3, 768, 0.5)      # lr auto = lr0 (d0 / d) ^ us (aci / adim ~ lr 0,2 sqrt(d) sabit); d1024 olcumu: 1,4 / 1,7e-3 duz, 1,73e-3 icinde
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ngram_embed", "ngram_layers",
-           "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "mix_g_heads", "mix_kv", "g_layout")   # --resume'da kimlikten
+           "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "mix_g_heads", "mix_kv", "g_layout",
+           "g_memory_rank", "g_memory_window", "g_memory_noz")   # --resume'da kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
@@ -147,7 +148,7 @@ SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
             "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads",
-            "mix_g_heads", "mix_kv", "g_layout")
+            "mix_g_heads", "mix_kv", "g_layout", "g_memory_rank", "g_memory_window", "g_memory_noz")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -371,6 +372,8 @@ def _attn(batch, mask_fn, cuda):
     """Egitim, sinav (_Exam) ve teshis araclarinin tek maske yolu; mask_fn ikiliyse (global_layers) iki maske."""
     if isinstance(mask_fn, tuple):
         return tuple(_attn(batch, f, cuda) for f in mask_fn)
+    if getattr(mask_fn, "gmem", False):                                  # deneme/g-memory: iki parcali G
+        return mask_fn(batch, cuda=cuda)
     return R.block_mask(batch, mask_fn) if cuda else R.dense_mask(batch, mask_fn)
 
 
@@ -649,6 +652,10 @@ def _args(argv):
     ap.add_argument("--mix_g_heads", type=int, default=None,
                     help="deneme/mixed-layer: her blokta son N head G (tam causal, gercek konum), kalan yerel (Z'li); ortak MLP, "
                          "oran head payiyla agirlikli; 0 kapali (G katmanlari ayri)")
+    ap.add_argument("--g_memory_rank", type=int, default=None,
+                    help="deneme/g-memory: G pencere + ozet + bellek; bellek token'i = train sikliginda en sik R token DISI; 0 kapali")
+    ap.add_argument("--g_memory_window", type=int, default=None, help="deneme/g-memory: G pencere (token sutunu), varsayilan 512")
+    ap.add_argument("--g_memory_noz", type=int, default=None, help="deneme/g-memory: 1 Z / BOS hic okunmaz (Z'siz kontrol)")
     ap.add_argument("--g_layout", default=None,
                     help="deneme: G katmanlarinin yeri; top (varsayilan) son N blok, interleave esit aralikli + son blok G, "
                          "ya da blok numaralari '3,6,9' (0'dan, global_layers tane)")
@@ -679,7 +686,8 @@ def _args(argv):
         if args.resume and os.path.exists(ckpt) else None               # varsayilan degisse de kosu kendi ayariyla surer
     for k in args.defaulted if was is not None else ():
         setattr(args, k, was.get(k, [] if k in ("mlp_ratio", "mix_kv") else "top" if k == "g_layout" else
-                                 0 if k in ("glob_kv_heads", "attn_gate", "mtp", "g_nope", "local_kv_heads", "mix_g_heads")
+                                 0 if k in ("glob_kv_heads", "attn_gate", "mtp", "g_nope", "local_kv_heads", "mix_g_heads", "g_memory_rank",
+                                           "g_memory_noz")
                                  or k.startswith("ngram") else None))
     args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
     if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
@@ -752,6 +760,10 @@ def _args(argv):
     args.local_kv_heads = int(args.local_kv_heads or 0)
     args.mix_g_heads = int(args.mix_g_heads or 0)
     args.g_layout = args.g_layout or "top"
+    args.g_memory_rank, args.g_memory_noz = int(args.g_memory_rank or 0), int(args.g_memory_noz or 0)
+    args.g_memory_window = int(args.g_memory_window or 512)
+    if args.g_memory_rank and (args.model != "model_z" or not args.global_layers):
+        sys.exit("DUR: --g_memory_rank yalniz G'li Model Z'de")
     mk = args.mix_kv
     args.mix_kv = [int(x) for x in mk.split(",")] if isinstance(mk, str) else list(mk or [])
     if args.mix_g_heads and (args.model != "model_z" or not args.global_layers or not args.mlp_ratio):
@@ -837,6 +849,15 @@ def main(argv=None):
     model, mask_fn, layout = _build(args, dev)
     model.row_len = row_len                                              # uretim konum siniri, carry parca boyu
     last = None
+    if args.g_memory_rank:                                               # deneme/g-memory: bellek token tablosu
+        counts = np.load(os.path.join(args.data, "train_token_counts.npy"))
+        order = np.argsort(-counts, kind="stable")
+        rare = np.ones(args.vocab_rows, dtype=bool)
+        rare[order[:args.g_memory_rank]] = False
+        model.g_memory = dict(rare=torch.tensor(rare, device=dev), window=args.g_memory_window, noz=bool(args.g_memory_noz))
+        share = float(counts[~rare[:len(counts)]].sum() / counts.sum())
+        log("g_memory: pencere %d, en sik %d token bellek disi (akisin %%%.1f'i), bellek payi %%%.1f, noz %d" % (
+            args.g_memory_window, args.g_memory_rank, 100 * share, 100 * (1 - share), args.g_memory_noz))
     if args.summaries_last:                                              # belge 66: [token'lar | ozetler | dolgu]
         from model import summaries_last as last
         mask_fn = model._masks(True)
@@ -853,7 +874,8 @@ def main(argv=None):
                  carry_group=args.carry_group, vocab_rows=args.vocab_rows, attn_gate=args.attn_gate,
                  ngram_embed=args.ngram_embed, ngram_layers=args.ngram_layers, ngram_sparse=args.ngram_sparse,
                  mtp=args.mtp, g_nope=args.g_nope, mlp_ratio=args.mlp_ratio, local_kv_heads=args.local_kv_heads,
-                 mix_g_heads=args.mix_g_heads, mix_kv=args.mix_kv, g_layout=args.g_layout)
+                 mix_g_heads=args.mix_g_heads, mix_kv=args.mix_kv, g_layout=args.g_layout,
+                 g_memory_rank=args.g_memory_rank, g_memory_window=args.g_memory_window, g_memory_noz=args.g_memory_noz)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -875,6 +897,7 @@ def main(argv=None):
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
                "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [], "local_kv_heads": 0,
                "mix_g_heads": 0, "mix_kv": [], "g_layout": "top",
+               "g_memory_rank": 0, "g_memory_window": 512, "g_memory_noz": 0,
                **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])

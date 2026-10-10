@@ -1664,10 +1664,64 @@ def t_interleave():
           "top farki %.1e, summaries_last %.1e, onbellek %.1e" % (diff, d_last, d_cache))
 
 
+def t_gmem():
+    """deneme/g-memory: iki parcali G (pencere + ozet, sikistirilmis bellek; logsumexp birlestirme) = birlesim gorunurlugunde tek
+    attention (dense, fp32); pencere >= satir -> bugunku G (hidden ayni); noz: G'de ozet yok; _masks / gradyan; uretim DURUR."""
+    import recipe as R
+    from model import (_LAST_GLOB, _last_ranges, g_memory_attn, model_z_summaries_last_ranges, summaries_last)
+    rng = np.random.default_rng(7)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 12))] for _ in range(rng.integers(2, 7))]
+               for _ in range(12)]
+    batch = real_batch([list(range(i, i + 4)) for i in range(0, 12, 4)], 300, stories)
+    pb, _ = summaries_last(batch)
+    B, T = pb.kind.shape
+    torch.manual_seed(0)
+    m = SentenceTransformer(d=32, layers=3, heads=4, global_layers=1, glob_kv_heads=2, g_nope=1).eval()
+    rare = torch.tensor(rng.random(D.VOCAB) < 0.4)
+    W = 7
+    a0, a1, b0, b1 = _last_ranges(pb.kind, pb.doc, pb.sent, glob=True)
+    w0 = torch.maximum(a0, a1 - W + 1)
+    kv = torch.arange(T)[None, None, :]
+    is_mem = (pb.kind == TOKEN) & rare[pb.tokens]
+    union = ((kv >= w0[..., None]) & (kv <= a1[..., None])) | ((kv >= b0[..., None]) & (kv <= b1[..., None])) | (
+        is_mem[:, None, :] & (kv >= a0[..., None]) & (kv <= (w0 - 1)[..., None]))
+    local = R.dense_mask(pb, model_z_summaries_last_ranges)
+    gm = g_memory_attn(pb, rare, W, cuda=False)
+    big = g_memory_attn(pb, rare, 10 ** 6, cuda=False)
+    glob = R.dense_mask(pb, _LAST_GLOB)
+    with torch.no_grad():
+        d_union = float((m._batch_hidden(pb, (local, gm)) - m._batch_hidden(pb, (local, union))).abs().max())
+        d_big = float((m._batch_hidden(pb, (local, big)) - m._batch_hidden(pb, (local, glob))).abs().max())
+    real = pb.kind != PAD
+    sparse = float((union & real[:, :, None]).sum() / (glob & real[:, :, None]).sum())   # gorulen / bugunku G
+    noz = g_memory_attn(pb, rare, W, cuda=False, summaries=False)
+    summ = (pb.kind == BOS) | (pb.kind == ZTOK)
+    noz_ok = not bool((noz.m1 & summ[:, None, :] & real[:, :, None]).any())
+    m.g_memory = dict(rare=rare, window=W, noz=False)
+    fns = m._masks(True)
+    with torch.no_grad():
+        att = tuple(f(pb, cuda=False) if getattr(f, "gmem", False) else R.dense_mask(pb, f) for f in fns)
+        d_masks = float((m._batch_hidden(pb, att) - m._batch_hidden(pb, (local, gm))).abs().max())
+    m.train()
+    m._batch_hidden(pb, (local, gm)).square().mean().backward()
+    gb = m.blocks[2]
+    grad_ok = all(p.grad is not None and torch.isfinite(p.grad).all() and p.grad.abs().sum() > 0
+                  for p in (gb.qkv.weight, gb.proj.weight))
+    try:
+        m.generate([[[3, 4]]], 1, 4)
+        stop = False
+    except AssertionError:
+        stop = True
+    check("g_memory: iki parca = birlesim maskesi (fp32), pencere >= satir = bugunku G, noz'da G ozet gormez, _masks kurucusu, "
+          "gradyan, uretim DURUR", d_union < 1e-5 and d_big < 1e-5 and noz_ok and d_masks == 0 and grad_ok and stop,
+          "birlesim fark %.1e, buyuk pencere fark %.1e, gorulen pay %.2f, noz %s, masks %.1e, grad %s" % (
+              d_union, d_big, sparse, noz_ok, d_masks, grad_ok))
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab,
              limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast,
-             combo=t_combo, mix=t_mix, interleave=t_interleave)
+             combo=t_combo, mix=t_mix, interleave=t_interleave, gmem=t_gmem)
 
 if __name__ == "__main__":
     if SIDE is not None:
