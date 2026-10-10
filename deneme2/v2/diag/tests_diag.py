@@ -1,9 +1,10 @@
 """tests_diag -- V2 teshis araclari testleri (CPU; belge 33 adim 5).  Gruplar: readings (generate_readings: kayitli
 kosudan okuma = train.py'ninki; arsiv kimligi durur; ek istem secimi Drive'dan), tools (gap_v2, order_probe,
-z_ablate; model-z-mathematician), knowledge, trace (token_trace, belge 80), profile (step_profile, 10 Ekim).  Formullu z cesitleri (belge 44) ve torba
+z_ablate; model-z-mathematician), knowledge, trace (token_trace, belge 80), profile (step_profile, 10 Ekim), genspeed
+(gen_speed, 10 Ekim).  Formullu z cesitleri (belge 44) ve torba
 (bag_report; belge 77) kaldirildi.  Yardimcilar common/tests_v2'den (_train_root, tokenizer_path, DRIVE).
 
-    python tests_diag.py [--only readings,tools,knowledge,trace,profile]
+    python tests_diag.py [--only readings,tools,knowledge,trace,profile,genspeed]
 """
 import torch
 
@@ -498,7 +499,37 @@ def t_profile():
         check("profile", False, traceback.format_exc(limit=4))
 
 
-TESTS = dict(readings=t_readings, tools=t_tools, knowledge=t_knowledge, trace=t_trace, profile=t_profile)
+def t_genspeed():
+    """gen_speed (standart uretim hizi, 10 Ekim): CPU kuru kosu fp32, iki kol (Model Z varsayilan duzen, transformer GQA),
+    decode / prefill / e2e bolumleri sonlu sayi; e2e toplu (batch_size 32) = tek tek."""
+    import traceback
+    import gen_speed as GS
+    tp = T2.tokenizer_path()
+    if tp is None:
+        print("ATLA genspeed: GPT-2 tokenizer yok", flush=True)
+        return
+    root, data, _ = T2._train_root(tp)
+    try:
+        res = GS.main(["--arm", "mz=--model model_z --d 64 --layers 3 --heads 4",
+                       "--arm", "tf=--model transformer --d 64 --layers 2 --heads 4 --glob_kv_heads 1",
+                       "--data", data, "--stream", root, "--out", os.path.join(T2.TMP, "gen_speed"), "--device", "cpu",
+                       "--dtype", "fp32", "--steps", "4"])
+        dec = [r for r in res["decode"] if "skip" not in r]
+        pre = res["prefill"]
+        check("genspeed gen_speed: iki kol decode (ctx 512, B 1 / 2) ve prefill sonlu, Model Z KV yerel + glob, e2e toplu = "
+              "tek tek, gen_speed.json", len(dec) == 4 and all(np.isfinite(r["ms"]) and r["ms"] > 0 for r in dec)
+              and all("mz_ms" in r and "tf_ms" in r for r in pre) and len(pre) == 2
+              and any(r["arm"] == "mz" and r["kv_local_gb"] > 0 and r["kv_glob_gb"] > 0 for r in dec)
+              and res["e2e_same"] == res["e2e"][0]["prompts"]
+              and os.path.exists(os.path.join(T2.TMP, "gen_speed", "gen_speed.json")),
+              str([(r["arm"], r["B"], round(r["ms"], 2)) for r in dec]) + " " + str([r.get("skip") for r in res["decode"]
+                                                                                  if "skip" in r]))
+    except Exception:  # noqa: BLE001
+        check("genspeed", False, traceback.format_exc(limit=4))
+
+
+TESTS = dict(readings=t_readings, tools=t_tools, knowledge=t_knowledge, trace=t_trace, profile=t_profile,
+             genspeed=t_genspeed)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)
