@@ -72,7 +72,7 @@ GOLDEN = {
  }
 }
 GOLDEN_ARGS = {"transformer": ["--model", "transformer"],                # G acik bayrakla (varsayilan auto, 8 Ekim)
-               "model_z": ["--model", "model_z", "--layers", "2", "--global_layers", "1", "--g_nope", "0"],   # RoPE'li (10 Ekim oncesi)
+               "model_z": ["--model", "model_z", "--layers", "2", "--global_layers", "1", "--g_nope", "0", "--mlp_ratio", "0"],   # 10 Ekim oncesi
                "model_z_g0": ["--model", "model_z", "--layers", "2", "--global_layers", "0"]}
 
 
@@ -1851,7 +1851,7 @@ def _train_equiv(base, root, data, prompts, out, state, same, TR):
             if p.returncode:
                 bad.append(name + ": eski kod kosmadi " + p.stderr[-300:])
                 continue
-            b = TR.main(argv + (["--g_nope", "0"] if name == "model_z" else []) + ["--out", new])   # etiket RoPE'li
+            b = TR.main(argv + (["--g_nope", "0", "--mlp_ratio", "0"] if name == "model_z" else []) + ["--out", new])   # etiket duzeni
             a = json.load(open(os.path.join(old, "results.json")))
             sa, sb = (json.load(open(os.path.join(d, "samples.json"), encoding="utf-8")) for d in (old, new))
             ok = dict(agirlik=same(state(old), state(new)), kayip=drop(a) == drop(b), sinav=exams(a) == exams(b),

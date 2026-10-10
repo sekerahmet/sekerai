@@ -308,7 +308,7 @@ class Block(torch.nn.Module):
 
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
-                 attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0):
+                 attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, mlp_ratio=()):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -332,8 +332,12 @@ class SentenceTransformer(torch.nn.Module):
             self.E = torch.nn.Embedding(vocab_rows, d, _weight=torch.zeros(vocab_rows, d))
         kinds = ["loc"] * (layers - self.global_layers) + ["glob"] * self.global_layers
         self.g_nope = int(g_nope)                                           # G (glob) bloklarinda RoPE yok
-        self.blocks = torch.nn.ModuleList(Block(d, heads, hidden, glob_kv_heads if k == "glob" else None,
-                                                int(attn_gate), bool(self.g_nope) and k == "glob") for k in kinds)
+        self.mlp_ratio = tuple(float(r) for r in mlp_ratio)                # MLP : tam (GQA'siz) attention, (yerel, G)
+        assert not self.mlp_ratio or (len(self.mlp_ratio) == 2 and self.global_layers), "mlp_ratio: (yerel, G), G gerek"
+        width = (lambda r: max(64, round(r * 4 * d / 3 / 64) * 64))       # noqa: E731  4 d^2 attention, SwiGLU 3 d w
+        self.mlp_widths = [width(self.mlp_ratio[k == "glob"]) if self.mlp_ratio else hidden for k in kinds]
+        self.blocks = torch.nn.ModuleList(Block(d, heads, self.mlp_widths[i], glob_kv_heads if k == "glob" else None,
+                                                int(attn_gate), bool(self.g_nope) and k == "glob") for i, k in enumerate(kinds))
         self.norm = torch.nn.RMSNorm(d)
         for name, p in self.named_parameters():
             if p.dim() == 2 and not name.endswith("attn_gate"):          # kapi sifir kalir
