@@ -737,7 +737,8 @@ def t_prefill():
         info.append("G%d fark %.1e" % (gl, dmax))
     from model import StaticCache
     sd = 0.0                                                              # StaticCache = SummaryCache (belge 84)
-    for kw in (dict(global_layers=0), dict(global_layers=1, glob_kv_heads=1), dict(global_layers=3)):
+    for kw in (dict(global_layers=0), dict(global_layers=1, glob_kv_heads=1), dict(global_layers=3),
+               dict(global_layers=1, glob_kv_heads=1, local_kv_heads=1)):   # son: yerel GQA (deneme/local-gqa)
         torch.manual_seed(0)
         m = SentenceTransformer(32, 3, 2, **kw).eval()
         with torch.no_grad():

@@ -1116,11 +1116,12 @@ def _train_gqa_default(base, out, TR):
         res = {n: TR.main(S_ + ["--out", out(n), "--resume", "1"]) for n in ("kv_old_keep", "kv_old_drop")}
         ref = [w["loss"] for w in json.load(open(os.path.join(out("stop_full"), "results.json")))["log"]]
         check("train GQA varsayilan: auto = model_z G > 0 ise heads / 4 (L10 h12 3, L3 h8 2), G'siz Model Z / transformer "
-              "(acik auto dahil) / acik 0 -> 0; heads 6 DUR; varsayilan kosu (h4) kimlikte 1, glob qkv daralmis; eski kosu "
+              "(acik auto dahil) / acik 0 -> 0; heads 6 DUR; varsayilan kosu (h4) kimlikte 1, glob ve yerel qkv daralmis; eski kosu "
               "(alan 0 ya da yok) bayraksiz --resume'da 0 = kesintisiz (bit)",
               kv == {"mz L10 h12": 3, "mz L3 h8": 2, "mz G0 h12": 0, "tf h12": 0, "tf h12 auto": 0, "mz acik 0": 0}
               and bad is not None and "bolunmuyor" in bad and r["identity"]["glob_kv_heads"] == 1
-              and tuple(st["blocks.1.qkv.weight"].shape) == (24, 16) and tuple(st["blocks.0.qkv.weight"].shape) == (48, 16)
+              and tuple(st["blocks.1.qkv.weight"].shape) == (24, 16) and tuple(st["blocks.0.qkv.weight"].shape) == (24, 16)
+              and r["identity"]["local_kv_heads"] == 1                     # 10 Ekim: yerel auto = glob (LOCAL_KV_DEFAULT)
               and all(x["identity"]["glob_kv_heads"] == 0 and [w["loss"] for w in x["log"]] == ref for x in res.values()),
               "%s; %s" % (kv, bad))
     except Exception:  # noqa: BLE001
@@ -1791,7 +1792,7 @@ def _train_global(base, root, data, out, exits, TR):
               "kesilip surdurulen = kesintisiz (bit); transformer'da da kosar; bolen degil / glob'suz model_z / acik 0 ile "
               "surdurme DURUR; bayraksiz surdurme kimlikten 1 alir (bitmis kosu olarak doner)",
               q1["identity"]["glob_kv_heads"] == 1 and tuple(sq("gqa_A")["blocks.1.qkv.weight"].shape) == (32, 16)
-              and tuple(sq("gqa_A")["blocks.0.qkv.weight"].shape) == (48, 16) and stopped_q
+              and tuple(sq("gqa_A")["blocks.0.qkv.weight"].shape) == (32, 16) and stopped_q   # yerel auto = glob 1 (10 Ekim)
               and all(torch.equal(sq("gqa_A")[k], sq("gqa_cut")[k]) for k in sq("gqa_A"))
               and [w["loss"] for w in q2["log"]] == [w["loss"] for w in q1["log"]]
               and GR.load_run(out("gqa_A"), data, torch.device("cpu"))[0].blocks[1].kv_heads == 1
