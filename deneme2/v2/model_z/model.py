@@ -698,7 +698,26 @@ class SummaryCache:
 
 
 STATIC_DECODE = True       # generate: StaticCache (destekleyen modelde); False: SummaryCache (eski yol, kiyas icin)
+PREFILL_FLEX = True        # prefill_rows CUDA'da yerel bloklar FlexAttention blok maskesiyle (False: dolu T x T maske, eski yol)
 _COMPILED = {}             # derlenmis adim (surec basina bir kez; derleme hata verirse derlemesiz graph)
+
+
+def _raise_compile_limits():
+    for k in ("recompile_limit", "cache_size_limit"):                   # kademe x dtype x model sekilleri
+        if getattr(torch._dynamo.config, k, 64) < 64:
+            setattr(torch._dynamo.config, k, 64)
+
+
+def _flex_local(q, k, v, block_mask, gqa):
+    """prefill yerel attention'i (derlenir; derlemesiz flex yavas)."""
+    from torch.nn.attention.flex_attention import flex_attention
+    return flex_attention(q, k, v, block_mask=block_mask, enable_gqa=gqa)
+
+
+def _first_true(mask, width):
+    """(B, T) bool -> (B, width) satir basina True konumlari sirayla (sola yasli) ve gecerlilik (width <= T)."""
+    idx = torch.sort((~mask).to(torch.int8), dim=1, stable=True).indices[:, :width]
+    return idx, torch.gather(mask, 1, idx)
 
 
 _SPLIT = 1024              # decode_sdpa: anahtar boyu >= 4 x bu ise parcali (split-KV, belge 92); parca boyu
@@ -830,13 +849,22 @@ class StaticCache:
             sent += [len(sents)] * len(op)
             rows.append((tok, kind, pos, sent, len(sents), len(op)))
         T = [len(r[0]) for r in rows]
-        Tp = max(T)
+        Tmax = max(T)
+        flex = dev.type == "cuda" and PREFILL_FLEX                      # yerel bloklar blok maskesiyle: maliyet ~ cumle boyu
+        Tp = -(-Tmax // 128) * 128 if flex else Tmax                    # flex: 128'e yuvarla (derlenen sekil sayisi az)
         pad = lambda r, i, v: r[i] + [v] * (Tp - len(r[i]))  # noqa: E731
         lt = lambda x: torch.tensor(x, device=dev)  # noqa: E731
         tok, kind = lt([pad(r, 0, 0) for r in rows]), lt([pad(r, 1, PAD) for r in rows])
         lpos, sent = lt([pad(r, 2, 0) for r in rows]), lt([pad(r, 3, -1) for r in rows])
         doc = torch.where(kind == PAD, -1, 0)
-        local = _dense(model_z_read_mask(kind, doc, sent), B, Tp, dev)[:, None]
+        if flex:
+            from torch.nn.attention.flex_attention import create_block_mask
+            if "flex" not in _COMPILED:
+                _COMPILED["flex"] = torch.compile(_flex_local, dynamic=False)
+                _raise_compile_limits()
+            local = create_block_mask(model_z_read_mask(kind, doc, sent), B, None, Tp, Tp, device=dev, _compile=True)
+        else:
+            local = _dense(model_z_read_mask(kind, doc, sent), B, Tp, dev)[:, None]
         real = torch.arange(Tp, device=dev).expand(B, Tp)
         x = self.m.E(torch.where(kind == ZTOK, torch.full_like(tok, END_ID), tok))
         gr = None if self.m.ngram is None else self.m._ngram(tok, bigram_prev(tok, kind, doc, sent), kind == TOKEN)
@@ -849,6 +877,8 @@ class StaticCache:
             q, k, v = block._qkv(x, real if g else lpos)
             if g:                                                       # tek hikaye, sagdan dolgu: causal = glob maskesi
                 a = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=block.kv_heads != block.heads)
+            elif flex:
+                a = _COMPILED["flex"](q, k, v, local, block.kv_heads != block.heads)
             else:
                 a = gqa_sdpa(q, k, v, local)
             ks.append(k)
@@ -860,21 +890,27 @@ class StaticCache:
         opn = (kind == TOKEN) & (sent == lt([r[4] for r in rows])[:, None])
         nsum, sen = [r[4] + 1 for r in rows], [r[5] for r in rows]
         self.smax = up(max(nsum) + self.budget[1] + 1)
-        self.limits = (self.smax, up(self.budget[2]), up(Tp + self.budget[0]))  # ozet, cumle, glob konum sinirlari
+        self.limits = (self.smax, up(self.budget[2]), up(Tmax + self.budget[0]))  # ozet, cumle, glob konum sinirlari
         self.n = [list(x_) for x_ in zip(nsum, sen, T)]                 # satir basina host sayaclari (sinir denetimi)
         self.K, self.V = [], []
+        live = torch.arange(Tp, device=dev)[None] < lt(T)[:, None]       # (B, Tp) gercek konum (glob tamponu)
+        ns, no = min(self.smax, Tp), min(self.limits[1], Tp)
+        (i_s, ok_s), (i_o, ok_o) = _first_true(summ, ns), _first_true(opn, no)   # satir dongusu / nonzero yok
+
+        def take(t, i, ok):                                              # (B, H, Tp, hd) -> (B, H, n, hd), gecersiz 0
+            g = torch.gather(t, 2, i[:, None, :, None].expand(-1, t.shape[1], -1, t.shape[3]))
+            return torch.where(ok[:, None, :, None], g, torch.zeros((), dtype=t.dtype, device=t.device))
         for l in range(L):
             kk, vv = ks[l], vs[l]
             kb = kk.new_zeros(B, kk.shape[1], self.limits[2] if self.glob[l] else self.smax + self.limits[1], kk.shape[3])
             vb = torch.zeros_like(kb)
-            for r in range(B):
-                if self.glob[l]:
-                    kb[r, :, :T[r]], vb[r, :, :T[r]] = kk[r, :, :T[r]], vv[r, :, :T[r]]
-                    continue
-                i_s, i_o = summ[r].nonzero()[:, 0], opn[r].nonzero()[:, 0]
-                kb[r, :, :len(i_s)], vb[r, :, :len(i_s)] = kk[r][:, i_s], vv[r][:, i_s]
-                kb[r, :, self.smax:self.smax + len(i_o)] = kk[r][:, i_o]
-                vb[r, :, self.smax:self.smax + len(i_o)] = vv[r][:, i_o]
+            if self.glob[l]:
+                m = live[:, None, :, None]
+                kb[:, :, :Tp] = torch.where(m, kk, torch.zeros((), dtype=kk.dtype, device=dev))
+                vb[:, :, :Tp] = torch.where(m, vv, torch.zeros((), dtype=vv.dtype, device=dev))
+            else:
+                kb[:, :, :ns], vb[:, :, :ns] = take(kk, i_s, ok_s), take(vv, i_s, ok_s)
+                kb[:, :, self.smax:self.smax + no], vb[:, :, self.smax:self.smax + no] = take(kk, i_o, ok_o), take(vv, i_o, ok_o)
             self.K.append(kb)
             self.V.append(vb)
         prev = [r[0][-1] if r[5] else END_ID for r in rows]             # bigram: acik cumlenin son token'i
