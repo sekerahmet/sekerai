@@ -830,7 +830,8 @@ class StaticCache:
         """prompts: satir basina istem cumleleri, opens: satir basina acik son cumlenin token'lari (yoksa bos) -> (B, V)
         sonraki token'in logit'i.  Butun satirlar tek ileri geciste (belge 92; once satir basina SummaryCache.prefill +
         acik token'lar adim adim): satir [BOS, cumleler (Z_k ile), acik token'lar], sagdan dolgu; yerel bloklar
-        model_z_read_mask + mantiksal konum, glob bloklar causal (is_causal) + gercek konum.  Ozet (BOS + Z) ve acik cumle
+        summaries_last sirasinda (model_z_summaries_last_ranges; CUDA'da FlexAttention blok maskesi) + mantiksal konum, glob
+        bloklar causal (is_causal) + gercek konum.  Ozet (BOS + Z) ve acik cumle
         K/V'si yerel tampona, butun konumlar glob tampona (boy satirlarin en buyugune gore kademe)."""
         opens = opens or [()] * len(prompts)
         L, b, B, dev = len(self.m.blocks), self.BUCKET, len(prompts), self.dev
@@ -857,14 +858,21 @@ class StaticCache:
         tok, kind = lt([pad(r, 0, 0) for r in rows]), lt([pad(r, 1, PAD) for r in rows])
         lpos, sent = lt([pad(r, 2, 0) for r in rows]), lt([pad(r, 3, -1) for r in rows])
         doc = torch.where(kind == PAD, -1, 0)
+        # yerel bloklar summaries_last duzeninde (egitimle ayni): [token'lar | ozetler | dolgu]; Z'ler daginiksa blok maskesi
+        # pratikte dolu alt ucgen olur, toplaninca sorgu basina iki kisa aralik (kendi cumlesi + ozet bolgesi)
+        group = torch.where(kind == PAD, 2, torch.where((kind == BOS) | (kind == ZTOK), 1, 0))
+        perm = torch.argsort(group * Tp + torch.arange(Tp, device=dev), dim=1)
+        inv = torch.argsort(perm, dim=1)
+        lmod = model_z_summaries_last_ranges(*(t.gather(1, perm) for t in (kind, doc, sent)))
         if flex:
             from torch.nn.attention.flex_attention import create_block_mask
             if "flex" not in _COMPILED:
                 _COMPILED["flex"] = torch.compile(_flex_local, dynamic=False)
                 _raise_compile_limits()
-            local = create_block_mask(model_z_read_mask(kind, doc, sent), B, None, Tp, Tp, device=dev, _compile=True)
+            local = create_block_mask(lmod, B, None, Tp, Tp, device=dev, _compile=True)
         else:
-            local = _dense(model_z_read_mask(kind, doc, sent), B, Tp, dev)[:, None]
+            local = _dense(lmod, B, Tp, dev)[:, None]
+        reorder = lambda t, p: t.gather(2, p[:, None, :, None].expand(-1, t.shape[1], -1, t.shape[3]))  # noqa: E731
         real = torch.arange(Tp, device=dev).expand(B, Tp)
         x = self.m.E(torch.where(kind == ZTOK, torch.full_like(tok, END_ID), tok))
         gr = None if self.m.ngram is None else self.m._ngram(tok, bigram_prev(tok, kind, doc, sent), kind == TOKEN)
@@ -877,10 +885,10 @@ class StaticCache:
             q, k, v = block._qkv(x, real if g else lpos)
             if g:                                                       # tek hikaye, sagdan dolgu: causal = glob maskesi
                 a = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=block.kv_heads != block.heads)
-            elif flex:
-                a = _COMPILED["flex"](q, k, v, local, block.kv_heads != block.heads)
-            else:
-                a = gqa_sdpa(q, k, v, local)
+            else:                                                       # RoPE'li q / k / v summaries_last sirasina ve geri
+                qp, kp, vp = reorder(q, perm), reorder(k, perm), reorder(v, perm)
+                a = _COMPILED["flex"](qp, kp, vp, local, block.kv_heads != block.heads) if flex else gqa_sdpa(qp, kp, vp, local)
+                a = reorder(a, inv)
             ks.append(k)
             vs.append(v)
             x = block._finish(x, a)
