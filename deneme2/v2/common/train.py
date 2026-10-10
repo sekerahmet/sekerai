@@ -127,6 +127,8 @@ ATTN_GATE_DEFAULT = "auto"     # --attn_gate verilmezse (kullanici, 8 Ekim: "gat
 NGRAM_DEFAULT = 0              # --ngram_embed verilmezse (kullanici, 9 Ekim: katkisi modelden bagimsiz + dongu artti; 8 Ekim auto)
 MTP_DEFAULT = 0                # --mtp verilmezse (kullanici, 9 Ekim, n-gram ile birlikte; 8 Ekim auto)
 NOPE_DEFAULT = 1               # --g_nope verilmezse, G'li Model Z (kullanici, 10 Ekim: "öncelikle nope varsaylan olsun")
+FP8_DEFAULT = "tensorwise"     # --fp8 verilmezse, yalniz CUDA'da (CPU'da none): MLP Float8Linear (kullanici, 10 Ekim: "FP8 varsayılan
+                               # yaparsın"; d1280 1.000 adim: -%3,9 ms/adim, kayip farki sabit ~+0,003, butun dogrusallar ek -%0,8)
 MLP_RATIO_DEFAULT = (1.0, 4.0)  # --mlp_ratio verilmezse, G'li Model Z: MLP : tam attention yerel 1:1, G 4:1 (kullanici, 10 Ekim:
                                 # "bu oranları koda varsayılan standart ekler misin ?"; d768 3.000: sinav -0,0039, ayni parametre)
 LR_REF = (2e-3, 768, 0.5)      # lr auto = lr0 (d0 / d) ^ us (aci / adim ~ lr 0,2 sqrt(d) sabit); d1024 olcumu: 1,4 / 1,7e-3 duz, 1,73e-3 icinde
@@ -641,9 +643,9 @@ def _args(argv):
                     help="model_z: ayni-logit MTP ek hedef sayisi N (belge 90c; resmi kod N 2); agirlik recipe.mtp_weights, "
                          "son 1 / (N + 1) payda 0; varsayilan 0 (9 Ekim); auto: model_z 2 (carry'de 0), transformer 0; 0 kapali; "
                          "--resume'da verilmezse kosunun kimliginden")
-    ap.add_argument("--fp8", default="none", choices=("none", "tensorwise", "rowwise"),
+    ap.add_argument("--fp8", default=None, choices=("none", "tensorwise", "rowwise"),
                     help="MLP (gate_up, down) torchao Float8Linear tarifi; none: bf16 (kimlige girmez, --resume'da "
-                         "degistirilebilir; kullanici, 8 Ekim)")
+                         "degistirilebilir; kullanici, 8 Ekim); verilmezse CUDA'da FP8_DEFAULT, CPU'da none")
     ap.add_argument("--micro_batches", type=int, default=1,
                     help="gradyan biriktirme: adimin satirlari N esit parcada ileri / geri, tek optimizer adimi (ayni "
                          "matematik, tepe bellek ~1 / N); kimlige girmez, --resume'da degistirilebilir")
@@ -757,6 +759,8 @@ def main(argv=None):
         sys.exit("DUR: --optimizer %s: %s" % (args.optimizer, _muon_missing()))
     dev = torch.device(args.device)
     cuda = dev.type == "cuda"
+    if args.fp8 is None:                                                 # varsayilan: CUDA'da FP8 (MLP), CPU'da yok
+        args.fp8 = FP8_DEFAULT if cuda else "none"
     if args.fp8 != "none" and _fp8_missing(cuda):                        # bf16'ya sessizce dusulmez
         sys.exit("DUR: --fp8 %s: %s" % (args.fp8, _fp8_missing(cuda)))
     if cuda:                                                             # GPU kapisi (kural 5)
