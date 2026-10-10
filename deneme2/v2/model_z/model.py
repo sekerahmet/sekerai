@@ -220,18 +220,37 @@ def gqa_sdpa(q, k, v, mask=None):
                                           attn_mask=mask)
 
 
+def _attend(q, k, v, attn):
+    """attn: None (duz causal), bool (B, T, T) (dense) ya da FlexAttention BlockMask; k / v daha az head: GQA."""
+    gqa = dict(enable_gqa=True) if k.shape[1] != q.shape[1] else {}
+    if attn is None:
+        return F.scaled_dot_product_attention(q, k, v, is_causal=True, **gqa)
+    if torch.is_tensor(attn):
+        return gqa_sdpa(q, k, v, attn[:, None])
+    from torch.nn.attention.flex_attention import flex_attention
+    bs = attn.BLOCK_SIZE[0]                             # 128 disinda varsayilan cekirdek hata veriyor (belge 37)
+    return flex_attention(q, k, v, block_mask=attn, kernel_options=None if bs == 128 else dict.fromkeys(
+        ("BLOCK_M", "BLOCK_N", "BLOCK_M1", "BLOCK_N1", "BLOCK_M2", "BLOCK_N2"), bs), **gqa)
+
+
 class Block(torch.nn.Module):
-    def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0, nope=False):
+    def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0, nope=False, g_heads=0, g_kv_heads=0):
         """kv_heads (GQA; varsayilan heads): k / v head sayisi, heads'in boleni; qkv d -> d + 2 d kv / heads.  nope: RoPE yok.
         attn_gate 1 / 2: head basina cikis kapisi agirligi (heads, d) / (heads, d // 64) (girdi n1(x)'in ilk d // 64
         boyutu), sifir (RNG cekmez; kapisiz modelle ayni ilk agirlik)."""
         super().__init__()
         self.nope = bool(nope)                                              # g_nope: konum yerel katmanlardan
         self.heads = heads
-        self.kv_heads = int(kv_heads or heads)
-        assert self.kv_heads > 0 and heads % self.kv_heads == 0, "kv_heads heads'in boleni olmali"
+        self.g_heads = int(g_heads)                                         # deneme/mixed-layer: son g_heads head G
+        own = heads - self.g_heads                                          # yerel (Z'li) head
+        self.kv_heads = int(kv_heads or own)                                # karma blokta: yerel kisim k / v head
+        self.g_kv_heads = int(g_kv_heads or self.g_heads)
+        assert 0 <= self.g_heads < heads, "g_heads 0..heads-1"
+        assert self.kv_heads > 0 and own % self.kv_heads == 0, "kv_heads (yerel) head sayisinin boleni olmali"
+        assert not self.g_heads or self.g_heads % self.g_kv_heads == 0, "g_kv_heads g_heads'in boleni olmali"
         self.n1, self.n2 = torch.nn.RMSNorm(d), torch.nn.RMSNorm(d)
-        self.qkv = torch.nn.Linear(d, d + 2 * d * self.kv_heads // heads, bias=False)
+        kv_all = self.kv_heads + (self.g_kv_heads if self.g_heads else 0)
+        self.qkv = torch.nn.Linear(d, d + 2 * (d // heads) * kv_all, bias=False)
         self.q_norm, self.k_norm = torch.nn.RMSNorm(d // heads), torch.nn.RMSNorm(d // heads)
         self.proj = torch.nn.Linear(d, d, bias=False)
         self.gate_up = torch.nn.Linear(d, 2 * hidden, bias=False)
@@ -273,6 +292,23 @@ class Block(torch.nn.Module):
             q, k = rope(q, pos), rope(k, pos)
         return (q, k, v) + ((g,) if gate else ())
 
+    def _qkv_mixed(self, x, pos, real, gate=False):
+        """Karma blok -> (q, k, v) yerel, (q, k, v) G, kapi: yerel RoPE pos'tan, G real'dan (nope: RoPE yok)."""
+        B, T, d = x.shape
+        hd, own, kl, kg = d // self.heads, self.heads - self.g_heads, self.kv_heads, self.g_kv_heads
+        h = self.n1(x)
+        g = torch.sigmoid(F.linear(h[..., :self.attn_gate.shape[1]], self.attn_gate)) if gate else None
+        q, k, v = self.qkv(h).split([d, (kl + kg) * hd, (kl + kg) * hd], -1)
+        q = q.view(B, T, self.heads, hd).transpose(1, 2)
+        k, v = (t.view(B, T, kl + kg, hd).transpose(1, 2) for t in (k, v))
+        with torch.autocast(x.device.type, enabled=False):
+            q, k = self.q_norm(q.float()).to(v.dtype), self.k_norm(k.float()).to(v.dtype)
+        ql, qg, k_l, k_g, vl, vg = q[:, :own], q[:, own:], k[:, :kl], k[:, kl:], v[:, :kl], v[:, kl:]
+        ql, k_l = rope(ql, pos), rope(k_l, pos)
+        if not self.nope:
+            qg, k_g = rope(qg, real), rope(k_g, real)
+        return (ql, k_l, vl), (qg, k_g, vg), g
+
     def _finish(self, x, a, g=None):
         """g: _qkv(gate=True)'nun kapisi; yoksa (onbellek yollari) _gate(x)."""
         B, T, d = x.shape
@@ -286,6 +322,10 @@ class Block(torch.nn.Module):
     def forward(self, x, pos, attn):
         """attn: None (duz causal), bool (B, T, T) (dense) ya da FlexAttention BlockMask; carry: (maske, mem_rows,
         mem_cols) -> K / V = [satir || ayni katmanda kaynak satirlarin bellek sutunlari] (anahtar T + M)."""
+        if self.g_heads:                                                   # karma: pos (yerel, gercek), attn (yerel, G)
+            (pos, real), (al, ag) = pos, attn
+            lo, gl, g = self._qkv_mixed(x, pos, real, gate=self.attn_gate is not None)
+            return self._finish(x, torch.cat([_attend(*lo, al), _attend(*gl, ag)], 1), g)
         mem = None
         if isinstance(attn, tuple):
             attn, mem = attn[0], attn[1:]
@@ -294,22 +334,12 @@ class Block(torch.nn.Module):
             r, c = mem[0].clamp_min(0), mem[1].clamp_min(0)                 # bos yuva maskeyle kapali
             k = torch.cat([k, k[r, :, c].permute(0, 2, 1, 3)], 2)
             v = torch.cat([v, v[r, :, c].permute(0, 2, 1, 3)], 2)
-        gqa = dict(enable_gqa=True) if self.kv_heads != self.heads else {}
-        if attn is None:
-            a = F.scaled_dot_product_attention(q, k, v, is_causal=True, **gqa)
-        elif torch.is_tensor(attn):
-            a = gqa_sdpa(q, k, v, attn[:, None])
-        else:
-            from torch.nn.attention.flex_attention import flex_attention
-            bs = attn.BLOCK_SIZE[0]                     # 128 disinda varsayilan cekirdek hata veriyor (belge 37)
-            a = flex_attention(q, k, v, block_mask=attn, kernel_options=None if bs == 128 else dict.fromkeys(
-                ("BLOCK_M", "BLOCK_N", "BLOCK_M1", "BLOCK_N1", "BLOCK_M2", "BLOCK_N2"), bs), **gqa)
-        return self._finish(x, a, *g)
+        return self._finish(x, _attend(q, k, v, attn), *g)
 
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
                  attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, mlp_ratio=(),
-                 local_kv_heads=0):
+                 local_kv_heads=0, mix_g_heads=0, mix_kv=()):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -332,15 +362,33 @@ class SentenceTransformer(torch.nn.Module):
         if vocab_rows > VOCAB:                                   # kurulum RNG'si VOCAB'li modelle ayni; dolgu sifir
             self.E = torch.nn.Embedding(vocab_rows, d, _weight=torch.zeros(vocab_rows, d))
         kinds = ["loc"] * (layers - self.global_layers) + ["glob"] * self.global_layers
+        self.mix_g_heads = int(mix_g_heads)                                # deneme/mixed-layer: her blok yerel + G head
+        if self.mix_g_heads:
+            assert self.global_layers and 0 < self.mix_g_heads < heads, "mix_g_heads: G'li Model Z, 0 < N < heads"
+            kinds = ["mix"] * layers
         self.g_nope = int(g_nope)                                           # G (glob) bloklarinda RoPE yok
         self.mlp_ratio = tuple(float(r) for r in mlp_ratio)                # MLP : tam (GQA'siz) attention, (yerel, G)
         assert not self.mlp_ratio or (len(self.mlp_ratio) == 2 and self.global_layers), "mlp_ratio: (yerel, G), G gerek"
         width = (lambda r: max(64, round(r * 4 * d / 3 / 64) * 64))       # noqa: E731  4 d^2 attention, SwiGLU 3 d w
-        self.mlp_widths = [width(self.mlp_ratio[k == "glob"]) if self.mlp_ratio else hidden for k in kinds]
+        share = self.mix_g_heads / heads                                    # karma: oran head payiyla agirlikli
+        mix_r = (1 - share) * self.mlp_ratio[0] + share * self.mlp_ratio[1] if self.mlp_ratio else 0
+        self.mlp_widths = [(width(mix_r) if k == "mix" else width(self.mlp_ratio[k == "glob"])) if self.mlp_ratio else hidden
+                           for k in kinds]
         self.local_kv_heads = int(local_kv_heads or 0)                    # yerel bloklarda GQA (0: tam)
-        self.blocks = torch.nn.ModuleList(Block(d, heads, self.mlp_widths[i],
-                                                glob_kv_heads if k == "glob" else (self.local_kv_heads or None),
-                                                int(attn_gate), bool(self.g_nope) and k == "glob") for i, k in enumerate(kinds))
+        if self.mix_g_heads:                                               # kv: verilmezse head payina gore (tam sayi)
+            own = heads - self.mix_g_heads
+            lk = mix_kv[0] if mix_kv else (own * self.local_kv_heads // heads if self.local_kv_heads else own)
+            gk = mix_kv[1] if mix_kv else (self.mix_g_heads * int(glob_kv_heads or heads) // heads)
+            assert not mix_kv and lk * heads == own * (self.local_kv_heads or heads) or mix_kv, \
+                "mix: yerel kv tam sayi degil, --mix_kv yerel,G ver"
+            assert not mix_kv and gk * heads == self.mix_g_heads * int(glob_kv_heads or heads) or mix_kv, \
+                "mix: G kv tam sayi degil, --mix_kv yerel,G ver"
+            self.mix_kv = (int(lk), int(gk))
+        self.blocks = torch.nn.ModuleList(
+            Block(d, heads, self.mlp_widths[i], self.mix_kv[0], int(attn_gate), bool(self.g_nope), self.mix_g_heads,
+                  self.mix_kv[1]) if k == "mix" else
+            Block(d, heads, self.mlp_widths[i], glob_kv_heads if k == "glob" else (self.local_kv_heads or None),
+                  int(attn_gate), bool(self.g_nope) and k == "glob") for i, k in enumerate(kinds))
         self.norm = torch.nn.RMSNorm(d)
         for name, p in self.named_parameters():
             if p.dim() == 2 and not name.endswith("attn_gate"):          # kapi sifir kalir
@@ -407,6 +455,11 @@ class SentenceTransformer(torch.nn.Module):
             attn = tuple(_dense(f(batch.kind, batch.doc, batch.sent), B, T, dev) for f in mfn)
         assert isinstance(attn, tuple) and len(attn) == 2, "global_layers: attn (yerel, global) ikilisi olmali"
         real = batch.real_pos if last else story_positions(batch.kind)
+        if self.mix_g_heads:                                               # karma: her blok iki maske, iki konum
+            assert not mem, "mix_g_heads: carry bellegi yok"
+            for l, block in enumerate(self.blocks):
+                x = block(add(x, l), (batch.pos, real), attn)
+            return self.norm(x)
         first = len(self.blocks) - self.global_layers
         for l, block in enumerate(self.blocks):
             x = add(x, l)
@@ -510,6 +563,7 @@ class SentenceTransformer(torch.nn.Module):
         batch_size (belge 91): acgozlu, on_token'siz ve StaticCache'li uretimde istemler bu boyda toplu (_generate_rows);
         cikti tek tek uretimle ayni (fp32 token token)."""
         out, limit = [], self.max_positions()
+        assert not getattr(self, "mix_g_heads", 0), "mix_g_heads: uretim onbellegi yok (deneme/mixed-layer)"
         static = STATIC_DECODE and StaticCache.supports(self)
         if static and generator is None and on_token is None and batch_size > 1 and len(prompts) > 1:
             for i in range(0, len(prompts), batch_size):
