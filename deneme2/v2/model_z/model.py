@@ -242,14 +242,17 @@ class GMemory(typing.NamedTuple):
 
 def g_memory_attn(batch, rare, window, cuda, summaries=True, block=64):
     """summaries_last batch'i -> GMemory.  Gorunur (sorgu q, ayni hikaye, kv <= q): son `window` token sutunu ya da ozet ya da
-    (rare[token] ve pencereden once).  Bellek: satir basina rare token sutunlari artan sirada, M blok katina dolgulu."""
+    (rare[token] ve pencereden once).  Bellek: satir basina rare token sutunlari artan sirada, M 256 / 512 / 1024 / ... kademesine
+    dolgulu (her batch'te degisen M her seferinde yeniden derletiyordu: Recompiling 24)."""
     kind, doc, sent, tok = batch.kind, batch.doc, batch.sent, batch.tokens
     B, T = kind.shape
     a0, a1, b0, b1 = _last_ranges(kind, doc, sent, glob=True, summaries=summaries)
     w0 = torch.maximum(a0, a1 - window + 1)
     is_mem = (kind == TOKEN) & rare[tok.clamp(0, len(rare) - 1)]
     n = is_mem.sum(1)
-    Mx = max(block, -(-int(n.max()) // block) * block)
+    Mx = 256                                                              # kademeli boy: derleme en cok birkac sekil
+    while Mx < int(n.max()):
+        Mx *= 2
     col = torch.arange(T, device=kind.device).expand(B, T)
     key = torch.where(is_mem, col, T + col)                               # bellek sutunlari once, artan
     order = torch.sort(key, 1).values[:, :Mx] if T >= Mx else torch.sort(key, 1).values
