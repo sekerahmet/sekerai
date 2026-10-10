@@ -1,9 +1,9 @@
 """tests_diag -- V2 teshis araclari testleri (CPU; belge 33 adim 5).  Gruplar: readings (generate_readings: kayitli
 kosudan okuma = train.py'ninki; arsiv kimligi durur; ek istem secimi Drive'dan), tools (gap_v2, order_probe,
-z_ablate; model-z-mathematician), knowledge, trace (token_trace, belge 80).  Formullu z cesitleri (belge 44) ve torba
+z_ablate; model-z-mathematician), knowledge, trace (token_trace, belge 80), profile (step_profile, 10 Ekim).  Formullu z cesitleri (belge 44) ve torba
 (bag_report; belge 77) kaldirildi.  Yardimcilar common/tests_v2'den (_train_root, tokenizer_path, DRIVE).
 
-    python tests_diag.py [--only readings,tools,knowledge,trace]
+    python tests_diag.py [--only readings,tools,knowledge,trace,profile]
 """
 import torch
 
@@ -466,7 +466,39 @@ def t_trace():
         (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS) = saved
 
 
-TESTS = dict(readings=t_readings, tools=t_tools, knowledge=t_knowledge, trace=t_trace)
+def t_profile():
+    """step_profile (standart adim profili, 10 Ekim): CPU kuru kosu, gercek train.main dongusu, iki yapilandirma ayri alt
+    surecte: Model Z (varsayilan duzen: G, GQA, kapi, NoPE, MLP orani; --micro_batches 2) ve transformer.  Iki profil
+    penceresi cozumlendi, blok etiketleri (loc / glob, tf) bilesenlerde, izole senkronlu adim olculdu, step_profile.json."""
+    import traceback
+    import step_profile as SP
+    tp = T2.tokenizer_path()
+    if tp is None:
+        print("ATLA profile: GPT-2 tokenizer yok", flush=True)
+        return
+    root, data, _ = T2._train_root(tp)
+    out = os.path.join(T2.TMP, "profile")
+    try:
+        res = SP.main(["--config", "mz=--model model_z --d 64 --layers 3 --heads 4 --micro_batches 2",
+                       "--config", "tf=--model transformer --d 64 --layers 2 --heads 4",
+                       "--data", data, "--stream", root, "--local", "none", "--out", out, "--device", "cpu", "--dry", "1",
+                       "--dry_rows", "4", "--steps", "10", "--log_every", "2", "--prof_on", "4", "--prof_off", "7",
+                       "--nprof", "2", "--cap_on", "5", "--cap_off", "9"])
+        c = res["configs"]
+        comp = {n: set(p["components"]) for n in c if "profiles" in c[n] for p in c[n]["profiles"].values()
+                if "components" in p}
+        ok = all("profiles" in c[n] and set(c[n]["profiles"]) == {"w1", "w2"}
+                 and all("error" not in p for p in c[n]["profiles"].values())
+                 and c[n]["isolated"].get("step_on", {}).get("sync_step", {}).get("median", 0) > 0 for n in ("mz", "tf"))
+        check("profile step_profile: Model Z (micro 2) + transformer, pencereler w1 / w2 cozumlendi, blok etiketleri "
+              "(loc, glob / tf), izole adim, step_profile.json", ok and {"blocks loc fwd", "blocks glob fwd"} <= comp["mz"]
+              and "blocks tf fwd" in comp["tf"] and os.path.exists(os.path.join(out, "step_profile.json")),
+              str({n: sorted(v)[:6] for n, v in comp.items()}))
+    except Exception:  # noqa: BLE001
+        check("profile", False, traceback.format_exc(limit=4))
+
+
+TESTS = dict(readings=t_readings, tools=t_tools, knowledge=t_knowledge, trace=t_trace, profile=t_profile)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)
