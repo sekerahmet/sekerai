@@ -81,7 +81,8 @@ def load_run(out, data_dir, dev):
                            ngram_sparse=idt.get("ngram_sparse", 0), g_nope=idt.get("g_nope", 0),
                            mlp_ratio=tuple(idt.get("mlp_ratio", []) or ()), local_kv_heads=idt.get("local_kv_heads", 0),
                            widths=idt.get("widths", []), strata_op=idt.get("strata_op", "split"),
-                           strata_qk=idt.get("strata_qk", 0), strata_ffn_keep=idt.get("strata_ffn_keep", 1.0))
+                           strata_qk=idt.get("strata_qk", 0), strata_ffn_keep=idt.get("strata_ffn_keep", 1.0),
+                           strata_out=idt.get("strata_out", []))
     model, _, _ = T._build(spec, dev)
     model.load_state_dict(pack["state"])
     model.row_len = idt["row_len"]                                       # uretim konum siniri, carry parca boyu

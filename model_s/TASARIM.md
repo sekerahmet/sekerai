@@ -143,6 +143,27 @@ tutulduğu için gerekiyor. Tek operatör:
 10 +0,72; katman ≥ 3 birlikte +2,21. İlk ve son adımda F attention çıktısına muhtaç; ara adımlarda sıra az önemli →
 aday düzen `split,mix,…,mix,split`.
 
+### Parça 7 — izdüşüm katlama (makale §2.4, Th. 3.1)
+
+LN = kısıt kümesine izdüşüm = satır başına tek ölçek → doğrusal haritayla yer değiştirir: P(u) W = s(u) (u diag(g) W),
+s = 1/rms(u). Normlu kopya yazılmaz; QK izdüşümü ölçekten bağımsız olduğundan q, k'de s düşer; v / yerel kanallarda s SwiGLU'ya
+katılır. Fonksiyon aynı (test: çıkış ve gradyan fp32 ~1e-6). `PROJ_FOLD` varsayılan kapalı; hız `bench_step.py` ile GPU'da.
+Profil (Model Z d1024, OLCULENLER): normlar adımın ~%11'i (HESAP).
+
+### Parça 8 — q / k boyu (makale §5: head = sürekli h'nin kuadratürü)
+
+Head sayısı FLOP'u değiştirmez; kaldıraç çekirdeğin ⟨q, k⟩ boyu. ÖLÇÜLDÜ (sıfır atış, `--qk_rank`): head başına ilk r ana
+bileşen, r 48 +0,005, 32 +0,056 (katman ≥ 3 +0,037), 16 +0,40. `qk_dim` (q, k, QK izdüşümü, RoPE qk boyunda; v head boyunda);
+`--strata_qk`. HESAP d1024 / T 2048, qk 32: katman işinin ~%9'u.
+
+### Parça 9 — gate-önce FFN (makale §3.3.3: aktivasyon = izdüşüm)
+
+Kullanıcı, 11 Ekim: *"Swiglu yerine relu kullanmak değil kendi hızlı uygun gördüğünü tasarlamak daha hızlı ve entegre hatta daha
+doğru"*. silu(g) ≈ 0 ise birim up ne olursa olsun katkısız → gate kendi yönlendiricisi: önce gate (FFN'nin 1/3'ü), token başına
+|silu(g)|² enerjisi en yüksek blokların up / down'ı. ÖLÇÜLDÜ (`--ffn`): enerjinin %90'ı hidden'in %6–17'sinde; sıfır atış
+blok seyreklik (`--gate_sparse`, bloklar keyfi) %50 gate +0,37 / oracle +0,24 / rastgele +2,82. Şimdilik maskeyle (kalite);
+kazanç gruplu matmul çekirdeğiyle (keep 0,25: FFN 0,5, katman ~%25 az; HESAP). `--strata_ffn_keep`; ilk / son adım yoğun.
+
 ## 4. Deneyler (sırası)
 
 | | soru | koşular (aynı FLOP: 12 birim) |
@@ -150,7 +171,12 @@ aday düzen `split,mix,…,mix,split`.
 | E1 | genişliğe çevrilen derinlik aynı kaliteyi verir mi, ne kadar hızlı | `1×12` (= transformer), `1,1,1,1,2,2,2,2`, `1,1,2,2,2,2,2` |
 | E1k | komütatör ilkesi: genişliği SONA koymak mı doğru | `2,2,2,2,1,1,1,1` (ters; E1'den kötüyse ilke desteklenir) |
 | E2 | tek operatör (FP8 kapalı: MixOp matrisleri FP8 listesinde değil, kıyas eşit) | `split` 1×12, `mix` hepsi, `split,mix×10,split`, `parallel` hepsi |
-| E3 | (E1 olumluysa) daha geniş son tabaka | `1,1,1,3,3,3` |
+| E3 | q / k boyu ve gate-önce FFN (kalite; FP8 kapalı) | `--strata_qk 32`, `--strata_ffn_keep 0.5`, `0.25` |
+
+**E1 sonucu (ÖLÇÜLDÜ, d1024, 3.000 adım, FP8):** `1×12` sınav 3,2999 / 374,2 ms; `1,1,1,1,2,2,2,2` 3,3085 / 364,0 ms (+0,009,
+−%2,7: aynı kayba ~%1, gürültü içinde). Ters kontrol `2,2,2,2,1,1,1,1` adım 1.500'e kadar sondakinden iyi ya da eşit: **sıfır atış
+komütatör eğitim sonucunu öngörmedi**; düzen seçimi bu ilkeyle yapılmaz. Aynı iş yüklü iki genişlik kolunda ms farkı ~%3:
+koşudan koşuya derleme oynaklığı; ~%3 altı hız farkı tek koşuyla okunmaz (bench aynı süreçte).
 
 Ortak: s000 (FineWeb-Edu), d1024, heads 16 (head 64), GQA yok, tam WSD kısa koşu (`--steps`), aynı tohum, Z2 tarifi
 (NorMuon, lr auto, FP8 MLP). Ölçüt: sınav kaybı + ms/adım + aynı kayba süre. Strang / θ(t) / donmuş γ ölçümle ertelendi

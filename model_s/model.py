@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "deneme2", "v2", "transfo
 from baseline import BaselineTransformer  # noqa: E402
 from data import VOCAB  # noqa: E402
 from integrator import Step  # noqa: E402
+from output import FactorizedOutput  # noqa: E402
 from operators import Context  # noqa: E402
 
 
@@ -48,11 +49,12 @@ class SBlock(Step):
 
 
 class ModelS(BaselineTransformer):
-    def __init__(self, d, widths, heads, kv_heads=None, vocab_rows=VOCAB, op="split", qk_dim=None, ffn_keep=1.0):
+    def __init__(self, d, widths, heads, kv_heads=None, vocab_rows=VOCAB, op="split", qk_dim=None, ffn_keep=1.0, out_cuts=None):
         """op: split (A sonra F, bugunku blok), parallel (MixOp linear values), mix (MixOp swiglu values; esit matris parametresi);
         tek ad ya da adim basina virgullu liste (orn. "split,mix,mix,split": ilk / son adimda F attention'i gorur).  qk_dim:
         head basina q / k boyu (Parca 8; varsayilan head boyu; kazanc FLOP'a, yerel genislik degismez).  ffn_keep: gate-once FFN
-        token basina tutulan blok orani (Parca 9; 1 yogun; ilk ve son adim yogun kalir)."""
+        token basina tutulan blok orani (Parca 9; 1 yogun; ilk ve son adim yogun kalir).  out_cuts: frekansla carpanlara ayrilmis
+        cikis (Parca 10; orn. (4096, 16384); None: bagli tam softmax); siklik sirasi out.set_order ile (train.py)."""
         super().__init__(d, 1, heads, kv_heads, vocab_rows)            # E, norm, tarif; bloklar asagida
         self.widths, self.op = tuple(int(w) for w in widths), op
         ops = op.split(",") if "," in op else [op] * len(self.widths)
@@ -64,9 +66,21 @@ class ModelS(BaselineTransformer):
         self.blocks = torch.nn.ModuleList(SBlock(d, heads, hidden, kv_heads, w, *sv[o], qk_dim=qk_dim,
                                                  keep=1.0 if i in (0, n_s - 1) else ffn_keep)
                                           for i, (w, o) in enumerate(zip(self.widths, ops)))
+        self.out = FactorizedOutput(d, VOCAB, out_cuts) if out_cuts else None
         n = sum(self.widths)                                             # artis olcegi: sum(w) katmanli transformer gibi
         for name, p in self.blocks.named_parameters():
             if p.dim() == 2:
                 std = 0.02 / math.sqrt(2 * n) if name.endswith(("w_o.weight", "w_down.weight", "w_out.weight")) else 0.02
                 with torch.no_grad():
                     p.normal_(0.0, std)
+
+    def _logits(self, h):
+        """Carpanli cikista normlu tam log p (softmax / argmax / CE degismeden dogru); yoksa bagli tam logit."""
+        return super()._logits(h) if self.out is None else self.out.logprobs(h, self.E.weight)
+
+    def output_loss(self, h, target):
+        """Egitim kaybi (train.py): carpanli cikista kuyruk yalniz hedefi o kumede olan satirlarda; yoksa recipe.output_loss."""
+        if self.out is None:
+            import recipe as R
+            return R.output_loss(h, self.E.weight, target)
+        return self.out.loss(h, self.E.weight, target)

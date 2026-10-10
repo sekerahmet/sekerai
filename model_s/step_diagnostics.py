@@ -29,6 +29,49 @@ import gap_v2 as G  # noqa: E402
 
 
 @torch.no_grad()
+def depth_exit(model, stories, rows, dev):
+    """5. Derinlik ekseni (token basina kac adim): her katmandan sonra son norm + cikisla erken okuma (logit lens).  Katman l'de
+    token "yerlesmis": argmax son katmanin argmax'i ve KL(son || l) < 0,1.  Yerlesme katmani dagilimi + yerlesmis token'larin
+    son kayip ortalamasi (kolay mi)."""
+    import torch.nn.functional as F_
+    batch = D.build_batch(stories, rows, "transformer", dev)
+    keep = batch.target >= 0
+    T_ = batch.doc.shape[1]
+    attn = (batch.doc[:, :, None] == batch.doc[:, None, :]) & torch.ones(T_, T_, dtype=torch.bool).tril()
+    x = model.E(batch.tokens)
+    logps = []
+    for blk in model.blocks:
+        x = blk(x, batch.pos, attn)
+        logps.append(F_.log_softmax(model._logits(model.norm(x)[keep]).float(), -1))
+    fin = logps[-1]
+    tgt = batch.target[keep]
+    nll = -fin.gather(-1, tgt[:, None])[:, 0]
+    am = fin.argmax(-1)
+    L = len(logps)
+    settled = torch.full((len(tgt),), L, dtype=torch.long)
+    for l in range(L - 1, -1, -1):                                       # en erken katman: o katmandan sonra hep yerlesmis
+        kl = (fin.exp() * (fin - logps[l])).sum(-1)
+        ok = (logps[l].argmax(-1) == am) & (kl < 0.1)
+        settled = torch.where(ok & (settled == l + 1), torch.full_like(settled, l), settled)
+    print("token %d | son kayip ortalamasi %.3f" % (len(tgt), float(nll.mean())))
+    print("yerlesme katmani (1'den; L+1 = hic) | token payi | birikimli | bu token'larin son kaybi")
+    cum = 0.0
+    for l in range(L + 1):
+        m = settled == l
+        f = float(m.float().mean())
+        cum += f
+        print("%6d | %.3f | %.3f | %s" % (l + 1, f, cum, "%.3f" % float(nll[m].mean()) if m.any() else "-"))
+    print("katman | argmax = son argmax | KL(son || l) ortanca | argmax = hedef (dogru)")
+    for l in range(L):
+        kl = (fin.exp() * (fin - logps[l])).sum(-1)
+        print("%6d | %.3f | %.3f | %.3f" % (l + 1, float((logps[l].argmax(-1) == am).float().mean()), float(kl.median()),
+                                           float((logps[l].argmax(-1) == tgt).float().mean())))
+    half = settled < L // 2
+    print("yari derinlikte (katman <= %d) yerlesmis: %.3f, son kayiplari %.3f; geri kalan %.3f" %
+          (L // 2, float(half.float().mean()), float(nll[half].mean()), float(nll[~half].mean())))
+
+
+@torch.no_grad()
 def ffn_sparsity(model, stories, rows, dev):
     """4. FFN (SwiGLU) seyrekligi: h = silu(g) * up, token basina |h|^2 enerjisinin %90 / %99'u kac birimde (hidden'in payi);
     g < 0 payi (silu yari kapali) ve |silu(g)| < 0,05 payi; down ciktisinin yalniz en buyuk %k birimle yeniden kurulma hatasi.
@@ -69,6 +112,7 @@ def main(argv=None):
     ap.add_argument("--data", required=True)
     ap.add_argument("--rows", type=int, default=2)
     ap.add_argument("--ffn", action="store_true", help="yalniz FFN seyrekligi (ffn_sparsity)")
+    ap.add_argument("--exit", action="store_true", help="yalniz derinlik ekseni: katman katman erken okuma (depth_exit)")
     a = ap.parse_args(argv)
     if os.name == "nt":
         T._no_power_throttling()
@@ -80,6 +124,8 @@ def main(argv=None):
     rows = G.exam_rows(a.data)[:a.rows]
     if a.ffn:
         return ffn_sparsity(model, stories, rows, dev)
+    if a.exit:
+        return depth_exit(model, stories, rows, dev)
     L = len(model.blocks)
     stats = {k: np.zeros(L) for k in ("u", "dA", "dF")}
     tv, err = np.zeros(L - 1), np.zeros(L - 1)

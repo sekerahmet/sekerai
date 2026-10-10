@@ -397,6 +397,51 @@ def t_gate():
               ks == [1.0, 0.5, 1.0] and d_k < 1e-4, "keep %s, fark %.1e" % (ks, d_k))
 
 
+def t_out():
+    """Parca 10, carpanli cikis: siklik sirasi / ters sira; tam log p normlu (toplam 1); loss = -ortalama log p[hedef] (kuyruk
+    satir secimi dahil, -100 atlanir); geri yayilim sonlu ve butun cikis parametrelerine ulasir; ModelS: KV cache adimi = tam
+    ileri, toplu uretim = tek tek."""
+    from model import ModelS
+    from output import FactorizedOutput
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "deneme2", "v2", "transformer"))
+    import baseline as BL
+    torch.manual_seed(9)
+    d, V = 32, 300
+    fo = FactorizedOutput(d, V, cuts=(40, 120), dims=(16, 8))
+    counts = torch.randint(0, 1000, (V,)).float()
+    fo.set_order(counts)
+    ok_order = bool((counts[fo.order][:-1] >= counts[fo.order][1:]).all()) and torch.equal(fo.order[fo.rank], torch.arange(V))
+    E = torch.randn(V + 4, d, requires_grad=True)
+    h = torch.randn(23, d)
+    lp = fo.logprobs(h, E)
+    tot = float((lp.exp().sum(-1) - 1).abs().max())
+    tgt = torch.randint(0, V, (23,))
+    tgt[[3, 7]] = -100
+    loss = fo.loss(h, E, tgt)
+    keep = tgt >= 0
+    ref = -lp[keep].gather(-1, tgt[keep][:, None]).mean()
+    loss.backward()
+    grads = all(p.grad is not None and bool(torch.isfinite(p.grad).all()) for p in fo.parameters()) and E.grad is not None
+    hit = [int(((fo.rank[tgt[keep]] >= a) & (fo.rank[tgt[keep]] < b)).sum()) for a, b in zip(fo.edges, fo.edges[1:])]
+    check("carpanli cikis: siklik sirasi ve ters sira; tam log p toplami 1; loss = -ort log p[hedef] (-100 atlanir); gradyan",
+          ok_order and tot < 1e-5 and abs(float(loss) - float(ref)) < 1e-5 and grads and min(hit) > 0,
+          "toplam sapma %.1e, loss %.5f ref %.5f, kume isabeti %s" % (tot, float(loss), float(ref), hit))
+    m = ModelS(64, (1, 2), 4, out_cuts=(4096, 16384)).eval()
+    m.out.set_order(torch.randint(0, 1000, (BL.VOCAB,)).float())
+    with torch.no_grad():
+        m.E.weight[[BL.END_ID, BL.EOS_ID]] = 0
+        x = torch.randint(0, 1000, (1, 9))
+        fl = m._logits(m.hidden(x, torch.arange(9)[None], None))[0, -1]
+        cache = dict(k=[None] * 2, v=[None] * 2, T=16)
+        m._step(x[:, :5], cache, 0)
+        d_k = float((fl - m._logits(m._step(x[:, 5:], cache, 5)[None])[0]).abs().max())
+        s1 = float((fl.exp().sum() - 1).abs())
+    prompts = [[[5, 6, 7], [8, 9]], [[11, 12, 13, 14]], [[3]]]
+    one = [m.generate([p], 2, 5, batch_size=1)[0] for p in prompts]
+    check("carpanli cikis ModelS: log p toplami 1; KV cache adimi = tam ileri; toplu uretim = tek tek",
+          s1 < 1e-4 and d_k < 1e-4 and one == m.generate(prompts, 2, 5, batch_size=8), "toplam sapma %.1e, fark %.1e" % (s1, d_k))
+
+
 def t_train():
     """Parca 5: train.py --model model_s --widths 1,2 (CPU, d 16; tests_v2'nin kucuk verisi): kayip duser; kimlikte widths,
     layers = adim sayisi; kesilip --resume ile surdurulen = kesintisiz (agent.pt bit duzeyinde, widths kimlikten);
@@ -429,6 +474,18 @@ def t_train():
           sa.keys() == sb.keys() and all(torch.equal(sa[k], sb[k]) for k in sa))
     m, _ = GR.load_run(out("s_A"), data, torch.device("cpu"))
     check("train model_s: load_run ayni agirlik", all(torch.equal(m.state_dict()[k], sa[k]) for k in sa))
+    fo = ["--strata_out", "4096,16384", "--strata_qk", "4", "--strata_ffn_keep", "0.5"]
+    o = TR.main(base + fo + ["--out", out("s_O")])
+    Lo = [w["loss"] for w in o["log"]]
+    TR.main(base + fo + ["--out", out("s_O2"), "--stop_step", "5"])
+    TR.main(cut + ["--out", out("s_O2"), "--resume", "1"])
+    so, so2 = (torch.load(os.path.join(out(n), "agent.pt"), weights_only=False) for n in ("s_O", "s_O2"))
+    rk = so["state"]["out.rank"]
+    check("train model_s carpanli cikis + qk 4 + keep 0,5: kayip duser; kimlikte; siklik sirasi END / EOS basta; surdurulen = kesintisiz",
+          sum(Lo[-3:]) / 3 < sum(Lo[:3]) / 3 - 0.5 and so["identity"]["strata_out"] == [4096, 16384]
+          and so["identity"]["strata_qk"] == 4 and int(rk[50257]) < 2 and int(rk[50256]) < 2
+          and all(torch.equal(so["state"][k], so2["state"][k]) for k in so["state"]),
+          "kayip %.3f -> %.3f" % (sum(Lo[:3]) / 3, sum(Lo[-3:]) / 3))
     c = TR.main(base + ["--strata_op", "mix", "--out", out("s_M")])
     Lm = [w["loss"] for w in c["log"]]
     TR.main(base + ["--strata_op", "mix", "--out", out("s_M2"), "--stop_step", "5"])
@@ -443,7 +500,7 @@ def t_train():
     check("train model_s: --widths model_s disinda / model_s'de eksik -> DUR", all(m_ and "DUR" in m_ for m_ in bad), str(bad))
 
 
-TESTS = dict(ops=t_ops, steps=t_steps, stages=t_stages, model=t_model, mix=t_mix, fold=t_fold, qk=t_qk, gate=t_gate, train=t_train)
+TESTS = dict(ops=t_ops, steps=t_steps, stages=t_stages, model=t_model, mix=t_mix, fold=t_fold, qk=t_qk, gate=t_gate, out=t_out, train=t_train)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)
