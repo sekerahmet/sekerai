@@ -13,6 +13,8 @@ import dataclasses
 import torch
 import torch.nn.functional as F_
 
+PROJ_FOLD = False   # P katlama (Parca 7): P(u) W = s(u) (u W'), W' = diag(g) W; normlu u bellege yazilmaz.  Hiz GPU'da olculunce acilir
+
 
 @dataclasses.dataclass
 class Context:
@@ -32,6 +34,22 @@ class Projection(torch.nn.Module):
     def forward(self, u):
         uf = u.float()
         return (uf * torch.rsqrt(uf.pow(2).mean(-1, keepdim=True) + self.eps)).to(u.dtype) * self.g
+
+    def linear(self, u, *layers):
+        """-> ([ham cikislar], s).  layer(P(u)) = s * cikis: izdusum dogrusal haritayla yer degistirir, satir basina tek olcek
+        s(u) = 1 / rms(u) (fp32, (B, T, 1)); PROJ_FOLD'da cikis = u (diag(g) W)^T ve normlu kopya yazilmaz, kapaliyken cikis =
+        layer(P(u)) ve s None.  Tuketici s'yi kendi elementwise isine katar (scale); QK izdusumu olcekten bagimsiz: q, k'de s
+        duser.  Duz Linear olmayan katman (FP8) eski yoldan."""
+        if not PROJ_FOLD or not all(type(m) is torch.nn.Linear for m in layers):
+            h = self(u)
+            return [m(h) for m in layers], None
+        s = torch.rsqrt(u.float().pow(2).mean(-1, keepdim=True) + self.eps)
+        return [F_.linear(u, m.weight * self.g.to(m.weight.dtype)) for m in layers], s
+
+
+def scale(x, s):
+    """x * s (s None: x); s (B, T, 1) token basina."""
+    return x if s is None else (x.float() * s).to(x.dtype)
 
 
 def rope(x, pos, base=10000.0):
@@ -65,9 +83,11 @@ class AttentionOp(torch.nn.Module):
     def qkv(self, u, pos):
         """-> q (B, H, T, hd), k / v (B, Hkv, T, hd)."""
         B, T, _ = u.shape
-        h = self.P(u)
-        q = self.w_q(h).view(B, T, self.heads, self.hd).transpose(1, 2)
-        k, v = self.w_kv(h).view(B, T, 2, self.kv_heads, self.hd).permute(2, 0, 3, 1, 4)
+        (q, kv), s = self.P.linear(u, self.w_q, self.w_kv)
+        k, v = kv.split(self.kv_heads * self.hd, -1)
+        q = q.view(B, T, self.heads, self.hd).transpose(1, 2)                 # q, k: QK izdusumu s'yi siler
+        k = k.view(B, T, self.kv_heads, self.hd).transpose(1, 2)
+        v = scale(v, s).view(B, T, self.kv_heads, self.hd).transpose(1, 2)
         with torch.autocast(u.device.type, enabled=False):
             q, k = self.q_P(q.float()).to(v.dtype), self.k_P(k.float()).to(v.dtype)
         if self.rope_on:
@@ -124,10 +144,13 @@ class MixOp(torch.nn.Module):
     def qkv_local(self, u, pos):
         """-> q (B, H, T, hd), k / v (B, Hkv, T, hd), yerel ozellik (B, T, hidden)."""
         B, T, _ = u.shape
-        q, k, v, loc = self.w_in(self.P(u)).split(self.split, -1)
+        (z,), s = self.P.linear(u, self.w_in)
+        q, k, v, loc = z.split(self.split, -1)                                # q, k: QK izdusumu s'yi siler
         if self.values == "swiglu":
             vg, vu = v.chunk(2, -1)
-            v = F_.silu(vg) * vu
+            v = F_.silu(scale(vg, s)) * scale(vu, s)
+        else:
+            v = scale(v, s)
         q = q.view(B, T, self.heads, self.hd).transpose(1, 2)
         k, v = (t.view(B, T, self.kv_heads, self.hd).transpose(1, 2) for t in (k, v))
         with torch.autocast(u.device.type, enabled=False):
@@ -135,7 +158,7 @@ class MixOp(torch.nn.Module):
         if self.rope_on:
             q, k = rope(q, pos), rope(k, pos)
         g, up = loc.chunk(2, -1)
-        return q, k, v, F_.silu(g) * up
+        return q, k, v, F_.silu(scale(g, s)) * scale(up, s)
 
     def out(self, a, loc):
         B, _, T, _ = a.shape
@@ -166,5 +189,6 @@ class FeedForwardOp(torch.nn.Module):
         self.w_down = torch.nn.Linear(hidden, d, bias=False)
 
     def forward(self, u, ctx=None):
-        g, up = self.w_gate_up(self.P(u)).chunk(2, -1)
-        return self.w_down(F_.silu(g) * up)
+        (z,), s = self.P.linear(u, self.w_gate_up)
+        g, up = z.chunk(2, -1)
+        return self.w_down(F_.silu(scale(g, s)) * scale(up, s))

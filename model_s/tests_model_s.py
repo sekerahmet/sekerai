@@ -288,6 +288,35 @@ def t_mix():
               d_k < 1e-4 and one == wide.generate(prompts, 2, 5, batch_size=8), "fark %.1e" % d_k)
 
 
+def t_fold():
+    """Parca 7, P katlama: PROJ_FOLD acik = kapali (ayni agirlik, fp32): lie / mix swiglu / mix linear adim ciktisi ve butun
+    parametre gradyanlari; q, k'de s dusmesi QK izdusumunun olcekten bagimsizligina dayanir (fark yalniz eps)."""
+    import operators as O
+    from integrator import Step
+    torch.manual_seed(6)
+    B, T, d, H, Hkv, hid = 2, 9, 32, 4, 2, 64
+    u = torch.randn(B, T, d) * 5
+    ctx = Context(torch.arange(T).expand(B, T))
+    for name, kw in (("lie", dict(scheme="lie")), ("mix swiglu", dict(scheme="mix")), ("mix linear", dict(scheme="mix", values="linear"))):
+        st = Step(d, H, hid, Hkv, **kw)
+        with torch.no_grad():
+            for p in st.parameters():
+                if p.dim() == 1:
+                    p.normal_(1, 0.3)
+        res = []
+        for fold in (False, True):
+            O.PROJ_FOLD = fold
+            st.zero_grad()
+            y = st(u, ctx)
+            (y * torch.linspace(-1, 1, d)).sum().backward()
+            res.append((y.detach(), [p.grad.clone() for p in st.parameters()]))
+        O.PROJ_FOLD = False
+        d_y = float((res[0][0] - res[1][0]).abs().max())
+        d_g = max(float((a - b).abs().max() / (a.abs().max() + 1e-12)) for a, b in zip(res[0][1], res[1][1]))
+        check("P katlama %s: cikis ve gradyanlar = katlamasiz (fp32)" % name, d_y < 1e-4 and d_g < 1e-4,
+              "cikis %.1e, gradyan (goreli) %.1e" % (d_y, d_g))
+
+
 def t_train():
     """Parca 5: train.py --model model_s --widths 1,2 (CPU, d 16; tests_v2'nin kucuk verisi): kayip duser; kimlikte widths,
     layers = adim sayisi; kesilip --resume ile surdurulen = kesintisiz (agent.pt bit duzeyinde, widths kimlikten);
@@ -334,7 +363,7 @@ def t_train():
     check("train model_s: --widths model_s disinda / model_s'de eksik -> DUR", all(m_ and "DUR" in m_ for m_ in bad), str(bad))
 
 
-TESTS = dict(ops=t_ops, steps=t_steps, stages=t_stages, model=t_model, mix=t_mix, train=t_train)
+TESTS = dict(ops=t_ops, steps=t_steps, stages=t_stages, model=t_model, mix=t_mix, fold=t_fold, train=t_train)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)
