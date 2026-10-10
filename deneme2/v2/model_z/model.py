@@ -308,7 +308,7 @@ class Block(torch.nn.Module):
 
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
-                 attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, local_mlp=0, local_mlp_keep=-1, mlp_widths=()):
+                 attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, local_mlp=0, local_mlp_keep=-1, mlp_widths=(), mlp_ratio=()):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -342,6 +342,14 @@ class SentenceTransformer(torch.nn.Module):
                 widths = [self.local_mlp] * n_loc + [g_w] * self.global_layers
             else:                                                           # kesme: ilk keep yerel tam, kalan yerel dar, G ayni
                 widths = [hidden if i < self.local_mlp_keep else self.local_mlp for i in range(n_loc)] + [hidden] * self.global_layers
+        if mlp_ratio:                                                       # MLP : attention orani (yerel, G); parametre orani
+            assert len(mlp_ratio) == 2 and not mlp_widths and not self.local_mlp, "mlp_ratio: (yerel, G), tek basina"
+            hd = d // heads
+            attn = lambda kv: d * (2 * d + 2 * kv * hd)                     # noqa: E731  qkv + proj (SwiGLU MLP = 3 d w)
+            w = lambda r, kv: max(64, round(r * attn(kv) / (3 * d) / 64) * 64)   # noqa: E731
+            g_kv = glob_kv_heads or heads
+            widths = [w(mlp_ratio[0], heads) if k == "loc" else w(mlp_ratio[1], g_kv) for k in kinds]
+        self.mlp_ratio = tuple(float(r) for r in mlp_ratio)
         if mlp_widths:                                                      # katman basina acik genislik (oncelikli)
             assert len(mlp_widths) == layers and not self.local_mlp, "mlp_widths: katman sayisi kadar, local_mlp'siz"
             widths = [int(w) for w in mlp_widths]
