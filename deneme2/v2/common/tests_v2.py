@@ -2904,9 +2904,10 @@ def t_micro():
 
 
 def t_gwindow():
-    """deneme/g-window: g_window_mask = basvuru (summaries_last batch'inde, gercek konumla: anahtar token'i sorgudan
-    win[token]'dan uzaksa gorunmez, BOS / Z / dolgu _LAST_GLOB); sinirsiz pencere = pencere yok (kayip ve maske bit); kucuk
-    pencere kaybi degistirir; train.g_window_table sayimdan (0 sayim sinirsiz)."""
+    """deneme/g-window: G bolumu siniflara gore sirali (g_window_perm) yol = bagimsiz basvuru (dogal sirada, dolu maske:
+    _LAST_GLOB ve anahtar token'i sorgudan gercek konumca win[token]'dan eskiyse gorunmez, BOS / Z muaf) -> kayip fp32
+    <= 1e-5; sinirsiz pencere = pencere yok (<= 1e-5); kucuk pencere kaybi degistirir; g_window_mask sirali maskesi = basvuru
+    maskesinin permutasyonu (bit); train.g_window_table sayimdan (0 sayim sinirsiz)."""
     import types
     import train as TR
     sys.path.insert(0, os.path.join(os.path.dirname(HERE), "model_z"))
@@ -2922,34 +2923,38 @@ def t_gwindow():
         story.append(len(sent))
     st = types.SimpleNamespace(stream=np.array(flat, np.int64), sent=np.array(sent, np.int64), story=np.array(story))
     b, _ = MZ.summaries_last(D.build_batch(st, [[0, 1], [2, 3, 4]], "model_z", row_len=160))
+    B, T = b.kind.shape
     torch.manual_seed(0)
-    m = MZ.SentenceTransformer(d=64, layers=3, heads=4, global_layers=1, glob_kv_heads=1, local_kv_heads=1).eval()
+    m = MZ.SentenceTransformer(d=64, layers=3, heads=4, global_layers=2, glob_kv_heads=1, local_kv_heads=1).eval()
+    win = torch.randint(1, 12, (D.VOCAB,))
+    win[30:] = 1 << 40                                                    # bir kismi sinirsiz: iki sinif da dolu
+    base = R.dense_mask(b, MZ._LAST_GLOB)
+    keep = (b.kind != MZ.TOKEN)
+    rp = b.real_pos
+    ref_glob = base & (keep[:, None, :] | (rp[:, :, None] - rp[:, None, :] <= win[b.tokens][:, None, :]))
+    local = R.dense_mask(b, MZ.model_z_summaries_last_ranges)
     with torch.no_grad():
-        ref = m.loss_per_target(b)[0].mean()
+        plain = m.loss_per_target(b)[0].mean()
+        ref = m.loss_per_target(b, (local, ref_glob))[0].mean()          # basvuru: dogal sira, g_window yok
         m.g_window = torch.full((D.VOCAB,), 1 << 40, dtype=torch.long)
         big = m.loss_per_target(b)[0].mean()
-        win = torch.randint(1, 12, (D.VOCAB,))
         m.g_window = win
         small = m.loss_per_target(b)[0].mean()
         got = R.dense_mask(b, m._masks(True)[1])
-    B, T = b.kind.shape
-    base = R.dense_mask(b, MZ._LAST_GLOB)
-    exp = torch.zeros(B, T, T, dtype=torch.bool)
-    for r in range(B):
-        for q in range(T):
-            for k in range(T):
-                if not base[r, q, k]:
-                    continue
-                exp[r, q, k] = bool(b.kind[r, k] != MZ.TOKEN) or int(b.real_pos[r, q] - b.real_pos[r, k]) <= int(win[b.tokens[r, k]])
+    p = MZ.g_window_perm(b, win)
+    perm_ref = torch.stack([ref_glob[r][p[r]][:, p[r]] for r in range(B)])
+    pad = b.kind.gather(1, p) == MZ.PAD
+    ok_mask = torch.equal(got & ~pad[:, :, None], perm_ref & ~pad[:, :, None])
     tmp = os.path.join(TMP, "gwin_data")
     os.makedirs(tmp, exist_ok=True)
     np.save(os.path.join(tmp, "train_token_counts.npy"), np.array([10, 0, 30, 60], np.int64))
     tab = TR.g_window_table(tmp, 2, 6, torch.device("cpu")).tolist()
-    check("gwindow: g_window_mask = basvuru (gercek konum, BOS / Z / dolgu muaf); sinirsiz pencere = pencere yok (bit), kucuk "
-          "pencere kaybi degistirir; g_window_table (2 x 100 / sayim, 0 ve dolgu sinirsiz) %s" % tab,
-          torch.equal(got, exp) and bool(torch.equal(big, ref)) and float((small - ref).abs()) > 1e-4
-          and tab[0] == 20 and tab[2] == 6 and tab[3] == 3 and tab[1] >= 1 << 40 and tab[4] >= 1 << 40 and tab[5] >= 1 << 40,
-          "kayip %.5f / %.5f / %.5f" % (float(ref), float(big), float(small)))
+    check("gwindow: sirali G yolu = basvuru (dogal sira, dolu maske) fark %.1e; sinirsiz pencere = pencere yok fark %.1e; "
+          "kucuk pencere kaybi degistirir; sirali maske = basvurunun permutasyonu (dolgu disi); g_window_table %s"
+          % (abs(float(small - ref)), abs(float(big - plain)), tab),
+          abs(float(small - ref)) <= 1e-5 and abs(float(big - plain)) <= 1e-5 and abs(float(small - plain)) > 1e-4 and ok_mask
+          and tab[0] == 20 and tab[2] == 6 and tab[3] == 3 and tab[1] >= 1 << 40 and tab[4] >= 1 << 40,
+          "kayip %.5f / %.5f / %.5f / %.5f" % (float(plain), float(big), float(ref), float(small)))
 
 
 TESTS = dict(fp8=t_fp8, data=t_data, pack=t_pack, recipe=t_recipe, metrics=t_metrics, integration=t_integration,

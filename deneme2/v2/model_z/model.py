@@ -198,16 +198,28 @@ _LAST_GLOB = functools.partial(model_z_summaries_last_ranges, glob=True)
 model_z_summaries_last_ranges.includes_padding = _LAST_GLOB.includes_padding = True
 
 
+def g_window_perm(batch, win):
+    """G bolumunun sirasi (B, T): penceresi satirdan kisa token'lar (0), digerleri (1: nadir token, BOS, Z), dolgu (2); her
+    grup kendi icinde summaries_last sirasinda.  -> perm (yeni sutundaki eski sutun)."""
+    B, T = batch.kind.shape
+    short = (batch.kind == TOKEN) & (win[batch.tokens] < T)
+    group = torch.where(batch.kind == PAD, 2, torch.where(short, 0, 1))
+    return torch.argsort(group * T + torch.arange(T, device=batch.kind.device), dim=1)
+
+
 def g_window_mask(batch, win):
-    """summaries_last glob maskesi + token basina pencere (deneme/g-window): anahtar token'i, sorgudan gercek konumca
-    win[token]'dan eskiyse gorunmez; BOS / Z / dolgu hep _LAST_GLOB kuraliyla.  batch: real_pos tasiyan PackedBatch."""
-    base = _LAST_GLOB(batch.kind, batch.doc, batch.sent)
-    keep = (batch.kind != TOKEN)
-    wk = win[batch.tokens]
-    rp = batch.real_pos
+    """G maskesi g_window_perm sirasinda (deneme/g-window): ayni hikaye, gercek konumca nedensel (= _LAST_GLOB; BOS, Z ve
+    token'lar ayni kuralla) + anahtar token'i sorgudan win[token]'dan eskiyse gorunmez (BOS / Z muaf); dolgu kendi
+    kosusunu gorur.  batch: real_pos tasiyan PackedBatch (summaries_last)."""
+    p = g_window_perm(batch, win)
+    g = lambda t: t.gather(1, p)  # noqa: E731
+    kind, doc, rp, tok = g(batch.kind), g(batch.doc), g(batch.real_pos), g(batch.tokens)
+    pad, keep, wk = kind == PAD, kind != TOKEN, win[tok]
 
     def mask_mod(b, h, q, kv):
-        return base(b, h, q, kv) & (keep[b, kv] | (rp[b, q] - rp[b, kv] <= wk[b, kv]))
+        real = ~pad[b, q] & ~pad[b, kv] & (doc[b, q] == doc[b, kv]) & (rp[b, kv] <= rp[b, q]) & (
+            keep[b, kv] | (rp[b, q] - rp[b, kv] <= wk[b, kv]))
+        return real | (pad[b, q] & pad[b, kv] & (p[b, kv] <= p[b, q]))
     return mask_mod
 
 
@@ -428,9 +440,19 @@ class SentenceTransformer(torch.nn.Module):
         assert isinstance(attn, tuple) and len(attn) == 2, "global_layers: attn (yerel, global) ikilisi olmali"
         real = batch.real_pos if last else story_positions(batch.kind)
         first = len(self.blocks) - self.global_layers
+        win = getattr(self, "g_window", None) if last else None
+        if win is not None:                                              # G bolumu siniflara gore sirali (g_window_perm)
+            assert not mem and (g is None or self.ngram_layers <= first), "g_window: carry / G'de n-gram yok"
+            perm = g_window_perm(batch, win)
+            inv = torch.argsort(perm, dim=1)
+            real = real.gather(1, perm)
         for l, block in enumerate(self.blocks):
             x = add(x, l)
+            if win is not None and l == first:
+                x = x.gather(1, perm[..., None].expand(-1, -1, x.shape[-1]))
             x = block(x, real, w(attn[1])) if l >= first else block(x, batch.pos, w(attn[0]))
+        if win is not None:
+            x = x.gather(1, inv[..., None].expand(-1, -1, x.shape[-1]))
         return self.norm(x)
 
     def _logits(self, h):
