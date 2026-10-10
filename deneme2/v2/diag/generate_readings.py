@@ -82,6 +82,8 @@ def load_run(out, data_dir, dev):
                            mlp_ratio=tuple(idt.get("mlp_ratio", []) or ()), local_kv_heads=idt.get("local_kv_heads", 0))
     model, _, _ = T._build(spec, dev)
     model.load_state_dict(pack["state"])
+    if idt.get("g_keep_occurrences"):                                    # deneme/g-window: uretim pencereli
+        model.g_window = T.g_window_table(data_dir, idt["g_keep_occurrences"], idt.get("vocab_rows", D.VOCAB), dev)
     model.row_len = idt["row_len"]                                       # uretim konum siniri, carry parca boyu
     return model, idt
 

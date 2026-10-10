@@ -1555,10 +1555,72 @@ def t_combo():
           "G1)" % len(pieces), max(cres) < 1e-5, "fark %s" % ["%.1e" % v for v in cres])
 
 
+def t_gwin_cache():
+    """deneme/g-window uretim: pencereli StaticCache ([kalici | halka], G_RING 6 ile halka uzerine yazilir) adim adim = ayni
+    onekin tek gecisli prefill_rows'u (G maskesi pencereli, fp32 < 1e-5), G 1 GQA ve G 2; sinirsiz pencere = penceresiz
+    StaticCache; halka okunan tampon kucuk (kalici + halka < penceresiz); SummaryCache ile uretim DURUR."""
+    import model as S
+    rng = np.random.default_rng(9)
+    rs = lambda n: [[int(x) for x in rng.integers(0, 40, rng.integers(2, 9))] for _ in range(n)]  # noqa: E731
+    saved = S.G_RING
+    S.G_RING = 6
+    dmax, inf_d, sizes, stops = 0.0, 0.0, [], False
+    try:
+        for kw in (dict(global_layers=1, glob_kv_heads=1), dict(global_layers=2)):
+            torch.manual_seed(0)
+            m = SentenceTransformer(32, 3, 2, **kw).eval()
+            win = torch.randint(1, 12, (D.VOCAB,))
+            win[20:30] = 1 << 40
+            with torch.no_grad():
+                for prompt in (rs(3), rs(6)):
+                    acts = [int(x) for x in rng.integers(0, 40, 5)] + [-1] + [int(x) for x in rng.integers(0, 40, 9)] + [-1, 3]
+                    m.g_window = win
+                    c = S.StaticCache(m, 64, 8, 16)
+                    c.prefill_rows([prompt])
+                    sents, op = [list(s) for s in prompt], []
+                    for a in acts:
+                        got = c.close_sentence() if a < 0 else c.append_token(a)
+                        if a < 0:
+                            sents, op = sents + [op], []
+                        else:
+                            op = op + [a]
+                        ref = S.StaticCache(m, 64, 8, 16).prefill_rows([sents], [op])[0]
+                        dmax = max(dmax, float((got - ref).abs().max()))
+                    sizes.append((c.K[-1].shape[2], c.lp, len(prompt)))
+                    m.g_window = torch.full((D.VOCAB,), 1 << 40, dtype=torch.long)
+                    a_, b_ = S.StaticCache(m, 64, 8, 16), None
+                    la = a_.prefill_rows([prompt])[0]
+                    m.g_window = None
+                    b_ = S.StaticCache(m, 64, 8, 16)
+                    lb = b_.prefill_rows([prompt])[0]
+                    inf_d = max(inf_d, float((la - lb).abs().max()))
+                    m.g_window = torch.full((D.VOCAB,), 1 << 40, dtype=torch.long)
+                    for a in acts[:6]:
+                        la = a_.close_sentence() if a < 0 else a_.append_token(a)
+                        m.g_window = None
+                        lb = b_.close_sentence() if a < 0 else b_.append_token(a)
+                        m.g_window = torch.full((D.VOCAB,), 1 << 40, dtype=torch.long)
+                        inf_d = max(inf_d, float((la - lb).abs().max()))
+            m.g_window = win
+            sv = S.STATIC_DECODE
+            S.STATIC_DECODE = False
+            try:
+                m.generate([rs(2)], 1, 3)
+            except AssertionError:
+                stops = True
+            finally:
+                S.STATIC_DECODE = sv
+    finally:
+        S.G_RING = saved
+    check("gwin_cache: pencereli StaticCache adim adim = onekin prefill'i (fp32, G1 GQA / G2, halka 6 uzerine yazilir) fark "
+          "%.1e; sinirsiz pencere = penceresiz fark %.1e; SummaryCache DURUR; G tampon (kalici + halka) %s" % (dmax, inf_d, sizes),
+          dmax < 1e-5 and inf_d < 1e-5 and stops)
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab,
              limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast,
-             combo=t_combo)
+             combo=t_combo, gwin_cache=t_gwin_cache)
 
 if __name__ == "__main__":
     if SIDE is not None:

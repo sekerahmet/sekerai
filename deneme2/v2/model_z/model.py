@@ -530,6 +530,7 @@ class SentenceTransformer(torch.nn.Module):
         cikti tek tek uretimle ayni (fp32 token token)."""
         out, limit = [], self.max_positions()
         static = STATIC_DECODE and StaticCache.supports(self)
+        assert static or getattr(self, "g_window", None) is None, 'g_window: uretim yalniz StaticCache ile (SummaryCache penceresiz)'
         if static and generator is None and on_token is None and batch_size > 1 and len(prompts) > 1:
             for i in range(0, len(prompts), batch_size):
                 out += self._generate_rows(prompts[i:i + batch_size], max_sentences, max_tokens, open_last, stop_when)
@@ -721,6 +722,8 @@ class SummaryCache:
 
 STATIC_DECODE = True       # generate: StaticCache (destekleyen modelde); False: SummaryCache (eski yol, kiyas icin)
 PREFILL_FLEX = True        # prefill_rows CUDA'da yerel bloklar FlexAttention blok maskesiyle (False: dolu T x T maske, eski yol)
+G_RING = 512               # g_window: penceresi bundan kisa token'lar G halka tamponunda (deneme/g-window)
+_NEVER = 1 << 50           # g_window: hep gorunur kaydin son gorunur konumu
 _COMPILED = {}             # derlenmis adim (surec basina bir kez; derleme hata verirse derlemesiz graph)
 
 
@@ -787,7 +790,7 @@ def _bmm_f32(t):
     return _COMPILED["bmm_f32"]
 
 
-def _static_step(m, glob, f32, smax, w, z, live, sum_len, sen_len, tt, prev, K, V, out):
+def _static_step(m, glob, f32, smax, w, z, live, sum_len, sen_len, tt, prev, K, V, out, gw=None):
     """StaticCache'in tek adimi, satir basina (yerinde; Python dallanmasi yok -> torch.compile / CUDA graph).  z: Z_k adimi
     (girdi E(END), ozete yazilir, cumleyi okur), degilse token w (cumleye yazilir).  live False satirin sayaclari ilerlemez
     (yazdigi bos yuva maskede; toplu uretimde biten satir).  Konum: token ozet + cumle sayaci, Z ozet sayaci (=
@@ -798,19 +801,26 @@ def _static_step(m, glob, f32, smax, w, z, live, sum_len, sen_len, tt, prev, K, 
     slot = torch.where(z, sum_len, smax + sen_len)
     ar = torch.arange(len(w), device=w.device)
     loc = None
+    if gw is not None:                                                   # g_window: [kalici | halka], yuva son gorunur konumu
+        win, gexp, glen, gring, lp, ring = gw
+        wt = win[w]
+        inring = (~z) & (wt < ring)
+        gslot = torch.where(inring, lp + gring % ring, glen)
+        gexp[ar, gslot] = torch.where(live, torch.where(z, torch.full_like(tt, _NEVER), tt + wt), gexp[ar, gslot])
+        gmask = gexp >= tt[:, None]
     for l, block in enumerate(m.blocks):
         if gr is not None and l < m.ngram_layers:
             x = x + m.ngram_lambdas[l] * gr
         g = glob[l]
         j = torch.arange(K[l].shape[2], device=w.device)[None]
         if g:
-            mask = j <= tt[:, None]
+            mask = gmask if gw is not None else j <= tt[:, None]
         else:
             if loc is None:                                              # ozet [0, sum_len (+ Z)), cumle [smax, ..]
                 loc = (j < (sum_len + z.long())[:, None]) | ((j >= smax) & (j < (smax + sen_len + (~z).long())[:, None]))
             mask = loc
         q, k, v = block._qkv(x, tt[:, None] if g else pos)
-        at = tt if g else slot
+        at = (gslot if gw is not None else tt) if g else slot
         K[l][ar, :, at] = k[:, :, 0]
         V[l][ar, :, at] = v[:, :, 0]
         x = block._finish(x, decode_sdpa(q, K[l], V[l], mask, f32))
@@ -818,6 +828,9 @@ def _static_step(m, glob, f32, smax, w, z, live, sum_len, sen_len, tt, prev, K, 
     sen_len.copy_(torch.where(live, torch.where(z, torch.zeros_like(sen_len), sen_len + 1), sen_len))
     sum_len.add_((z & live).long())
     tt.add_(live.long())
+    if gw is not None:
+        glen.add_((live & ~inring).long())
+        gring.add_((live & inring).long())
     prev.copy_(torch.where(live, torch.where(z, torch.full_like(w, END_ID), w), prev))
 
 
@@ -896,6 +909,16 @@ class StaticCache:
             local = _dense(lmod, B, Tp, dev)[:, None]
         reorder = lambda t, p: t.gather(2, p[:, None, :, None].expand(-1, t.shape[1], -1, t.shape[3]))  # noqa: E731
         real = torch.arange(Tp, device=dev).expand(B, Tp)
+        win = getattr(self.m, "g_window", None)
+        if win is not None:                                              # G: nedensel + pencere (gercek konum = sutun)
+            gex = torch.where(kind == TOKEN, real + win[tok], torch.full_like(real, _NEVER))
+
+            def gmod(b_, h_, q_, kv_):
+                return (kv_ <= q_) & (q_ <= gex[b_, kv_])
+            if flex:
+                gmask = create_block_mask(gmod, B, None, Tp, Tp, device=dev, _compile=True)
+            else:
+                gmask = _dense(gmod, B, Tp, dev)[:, None]
         x = self.m.E(torch.where(kind == ZTOK, torch.full_like(tok, END_ID), tok))
         gr = None if self.m.ngram is None else self.m._ngram(tok, bigram_prev(tok, kind, doc, sent), kind == TOKEN)
         self.glob = [l >= L - self.m.global_layers for l in range(L)]
@@ -905,7 +928,10 @@ class StaticCache:
                 x = x + self.m.ngram_lambdas[l] * gr
             g = self.glob[l]
             q, k, v = block._qkv(x, real if g else lpos)
-            if g:                                                       # tek hikaye, sagdan dolgu: causal = glob maskesi
+            if g and win is not None:
+                gq = block.kv_heads != block.heads
+                a = _COMPILED["flex"](q, k, v, gmask, gq) if flex else gqa_sdpa(q, k, v, gmask)
+            elif g:                                                     # tek hikaye, sagdan dolgu: causal = glob maskesi
                 a = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=block.kv_heads != block.heads)
             else:                                                       # RoPE'li q / k / v summaries_last sirasina ve geri
                 qp, kp, vp = reorder(q, perm), reorder(k, perm), reorder(v, perm)
@@ -930,11 +956,32 @@ class StaticCache:
         def take(t, i, ok):                                              # (B, H, Tp, hd) -> (B, H, n, hd), gecersiz 0
             g = torch.gather(t, 2, i[:, None, :, None].expand(-1, t.shape[1], -1, t.shape[3]))
             return torch.where(ok[:, None, :, None], g, torch.zeros((), dtype=t.dtype, device=t.device))
+        self.gw = None
+        if win is not None:                                              # hala gorunur kayitlar: kalici / halka
+            Tr = lt(T)[:, None]
+            alive = live & (gex >= Tr)
+            ring_cls = (kind == TOKEN) & (win[tok] < G_RING)
+            pm, rm = alive & ~ring_cls, alive & ring_cls
+            pc, rc = pm.sum(1), rm.sum(1)
+            self.gp = pc.tolist()                                        # host: kalici sayaci (sinir denetimi)
+            self.lp = up(max(self.gp) + self.budget[0] + 1)
+            npk, nrk = min(self.lp, Tp), min(G_RING, Tp)
+            (i_p, ok_p), (i_r, ok_r) = _first_true(pm, npk), _first_true(rm, nrk)
+            gexp = torch.full((B, self.lp + G_RING), -1, dtype=torch.long, device=dev)
+            gexp[:, :npk] = torch.where(ok_p, gex.gather(1, i_p), -1)
+            gexp[:, self.lp:self.lp + nrk] = torch.where(ok_r, gex.gather(1, i_r), -1)
+            self.gw = [win, gexp, pc.clone(), rc.clone(), self.lp, G_RING]
+            self.win_host = win.tolist()
         for l in range(L):
             kk, vv = ks[l], vs[l]
             kb = kk.new_zeros(B, kk.shape[1], self.limits[2] if self.glob[l] else self.smax + self.limits[1], kk.shape[3])
             vb = torch.zeros_like(kb)
-            if self.glob[l]:
+            if self.glob[l] and self.gw is not None:
+                kb = kk.new_zeros(B, kk.shape[1], self.lp + G_RING, kk.shape[3])
+                vb = torch.zeros_like(kb)
+                kb[:, :, :npk], vb[:, :, :npk] = take(kk, i_p, ok_p), take(vv, i_p, ok_p)
+                kb[:, :, self.lp:self.lp + nrk], vb[:, :, self.lp:self.lp + nrk] = take(kk, i_r, ok_r), take(vv, i_r, ok_r)
+            elif self.glob[l]:
                 m = live[:, None, :, None]
                 kb[:, :, :Tp] = torch.where(m, kk, torch.zeros((), dtype=kk.dtype, device=dev))
                 vb[:, :, :Tp] = torch.where(m, vv, torch.zeros((), dtype=vv.dtype, device=dev))
@@ -953,7 +1000,7 @@ class StaticCache:
 
     def _step(self):
         _COMPILED.get("step", _static_step)(self.m, self.glob, self.f32, self.smax, self.w, self.z, self.live, *self.state,
-                                            self.K, self.V, self.out)
+                                            self.K, self.V, self.out, None if self.gw is None else tuple(self.gw))
 
     def _capture(self):
         """Ilk adimda (CUDA): derleme + CUDA graph.  Isinma adimlarinin sayac ilerlemesi geri alinir; tamponlara
@@ -965,7 +1012,7 @@ class StaticCache:
             for k in ("recompile_limit", "cache_size_limit"):                 # kademe x dtype x model sekilleri
                 if getattr(torch._dynamo.config, k, 64) < 64:
                     setattr(torch._dynamo.config, k, 64)
-        saved = [t.clone() for t in self.state]
+        saved = [t.clone() for t in self.state] + ([] if self.gw is None else [t.clone() for t in self.gw[1:4]])
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
@@ -978,7 +1025,7 @@ class StaticCache:
                     print("StaticCache: torch.compile olmadi, derlemesiz graph: %s" % str(e).splitlines()[0][:150])
                     _COMPILED["step"] = _static_step
                     self._step()
-                for t, v in zip(self.state, saved):
+                for t, v in zip(list(self.state) + ([] if self.gw is None else self.gw[1:4]), saved):
                     t.copy_(v)
         torch.cuda.current_stream().wait_stream(s)
         self.graph = torch.cuda.CUDAGraph()
@@ -994,6 +1041,11 @@ class StaticCache:
                 n[:] = [n[0] + z_, 0 if z_ else n[1] + 1, n[2] + 1]
                 assert all(a <= b for a, b in zip(n, self.limits)), \
                     "StaticCache: tampon asildi %s > %s (positions / sentences / sentence_tokens)" % (n, self.limits)
+        if getattr(self, "gw", None) is not None:                         # kalici yuva sayaci (halka asmaz)
+            for r, (w_, z_, l_) in enumerate(zip(w, z, live)):
+                if l_ and (z_ or self.win_host[int(w_)] >= G_RING):
+                    self.gp[r] += 1
+                    assert self.gp[r] <= self.lp, "StaticCache g_window: kalici tampon asildi %d > %d" % (self.gp[r], self.lp)
         if len(w) == 1:                                                  # tek satir: kopyasiz doldurma
             self.w.fill_(int(w[0]))
             self.z.fill_(bool(z[0]))

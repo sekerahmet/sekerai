@@ -121,6 +121,8 @@ def main(argv=None):
         """Bayraksiz varsayilanlar (train._args) + bayraklar, rastgele agirlik (tohum 0)."""
         args = T._args([*flags, "--out", tmp, "--data", a.data, "--stream", stream])
         m, _, _ = T._build(args, dev)
+        if getattr(args, "g_keep_occurrences", 0):                      # deneme/g-window: pencereli G onbellegi
+            m.g_window = T.g_window_table(a.data, args.g_keep_occurrences, args.vocab_rows, dev)
         keys = ("model", "d", "layers", "heads", "global_layers", "glob_kv_heads", "attn_gate", "ngram_embed", "g_nope",
                 "mlp_ratio")
         return m.eval().to(DT), {k: getattr(args, k, None) for k in keys}
@@ -158,6 +160,9 @@ def main(argv=None):
             c.state = tuple(t.repeat(B) for t in c.state)                 # sum_len, sen_len, tt, prev (bigram)
             c.n = [list(c.n[0]) for _ in range(B)]
             c.z = c.z.repeat(B)
+            if getattr(c, "gw", None) is not None:
+                c.gw[1:4] = [c.gw[1].repeat(B, 1), c.gw[2].repeat(B), c.gw[3].repeat(B)]
+                c.gp = c.gp * B
         else:
             c = mod.StaticCache(model, steps + 8)
             c.prefill_rows([tf_seq(prompt)])
@@ -190,7 +195,7 @@ def main(argv=None):
     def kv_split(c):
         """-> (yerel KV bayti, glob KV bayti); transformer'da hepsi glob."""
         glob = getattr(c, "glob", [True] * len(c.K))
-        loc = sum(2 * k.numel() * k.element_size() for k, g in zip(c.K, glob) if not g)
+        loc = sum(2 * k.numel() * k.element_size() for k, g in zip(c.K, glob) if not g)   # g_window: G = kalici + halka
         return loc, sum(2 * k.numel() * k.element_size() for k in c.K) - loc
 
     def measure(tag, m, ctx, B, prompt):
