@@ -83,9 +83,13 @@ def main(src, out, C):
     pick = np.sort(E[np.random.default_rng(0).permutation(len(E))[:D.EXAM_STORIES]])
     assert np.array_equal(np.sort(ex_src["row_stories"]), pick), "sinav hikayeleri kaynaktakiyle ayni degil"
     assert valid.n == len(np.load(os.path.join(src, "gpt2", "valid_bytes.npy"))), "valid hikaye sirasi"
+    fit = valid.lengths()[pick] <= D.ROW_LEN                         # kucuk C'de satira sigmayan sinav hikayesi disarida
+    dropped, pick = pick[~fit], pick[fit]
     ro, rs = D.pack_plan(valid.lengths()[pick], D.ROW_LEN, None)
     np.savez(os.path.join(out, "exam_pack_plan.npz"), row_offsets=ro, row_stories=pick[rs].astype(np.int32), seed=-1,
-             epoch=0, row_len=D.ROW_LEN, exam_set_sha256=str(ex_src["exam_set_sha256"]))
+             epoch=0, row_len=D.ROW_LEN, exam_set_sha256=str(ex_src["exam_set_sha256"]), dropped=dropped.astype(np.int32))
+    if len(dropped):
+        print("UYARI: %d sinav hikayesi satira sigmadi, sinav disi: %s" % (len(dropped), dropped.tolist()), flush=True)
     for f in ("train_token_counts.npy", "reading_prompts.json"):
         if os.path.exists(os.path.join(src, f)):
             shutil.copy2(os.path.join(src, f), os.path.join(out, f))
