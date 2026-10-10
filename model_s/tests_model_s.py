@@ -361,6 +361,42 @@ def t_qk():
               d_k < 1e-4 and one == m.generate(prompts, 2, 5, batch_size=8), "fark %.1e" % d_k)
 
 
+def t_gate():
+    """Parca 9, gate-once FFN: keep 1 = yogun (bit); keep 0,5 = elle formul (token basina |silu(g)|^2 blok enerjisi en yuksek
+    yarisi, gerisi 0) ve token basina tam keep x blok sayisi kadar blok acik; split ve mix modelinde ilk / son adim yogun,
+    KV cache adimi = tam ileri."""
+    import torch.nn.functional as F_
+    from model import ModelS
+    from operators import FeedForwardOp
+    torch.manual_seed(8)
+    d, hid = 32, 128
+    u = torch.randn(2, 7, d)
+    dense, sp = FeedForwardOp(d, hid), FeedForwardOp(d, hid, keep=0.5)
+    sp.load_state_dict(dense.state_dict())
+    with torch.no_grad():
+        g, up = dense.w_gate_up(dense.P(u)).chunk(2, -1)
+        ga = F_.silu(g)
+        e = ga.view(2, 7, 2, 64).pow(2).sum(-1)                          # 128 = 2 x 64: token basina 1 blok
+        m = (e == e.max(-1, keepdim=True).values).float().repeat_interleave(64, -1)
+        ref = dense.w_down(ga * up * m)
+        d_s = float((sp(u) - ref).abs().max())
+        on = float(((ga * up * m) != 0).view(2, 7, 2, 64).any(-1).sum(-1).float().mean())
+        ref1 = dense.w_down(ga * up)
+    check("gate-once: keep 1 = yogun; keep 0,5 = elle formul (en yuksek gate enerjili blok), token basina 1 / 2 blok acik",
+          torch.equal(dense(u), ref1) and d_s < 1e-6 and on == 1.0, "fark %.1e, acik blok %.2f" % (d_s, on))
+    for op in ("split", "mix"):
+        mm = ModelS(64, (1, 1, 1), 4, op=op, ffn_keep=0.5).eval()
+        ks = [(b.M.keep if b.scheme == "mix" else b.F.keep) for b in mm.blocks]
+        with torch.no_grad():
+            x = torch.randint(0, 1000, (1, 9))
+            fl = mm._logits(mm.hidden(x, torch.arange(9)[None], None))[0, -1]
+            cache = dict(k=[None] * 3, v=[None] * 3, T=16)
+            mm._step(x[:, :5], cache, 0)
+            d_k = float((fl - mm._logits(mm._step(x[:, 5:], cache, 5)[None])[0]).abs().max())
+        check("gate-once model op %s: keep ilk / son adimda 1, arada 0,5; KV cache adimi = tam ileri" % op,
+              ks == [1.0, 0.5, 1.0] and d_k < 1e-4, "keep %s, fark %.1e" % (ks, d_k))
+
+
 def t_train():
     """Parca 5: train.py --model model_s --widths 1,2 (CPU, d 16; tests_v2'nin kucuk verisi): kayip duser; kimlikte widths,
     layers = adim sayisi; kesilip --resume ile surdurulen = kesintisiz (agent.pt bit duzeyinde, widths kimlikten);
@@ -407,7 +443,7 @@ def t_train():
     check("train model_s: --widths model_s disinda / model_s'de eksik -> DUR", all(m_ and "DUR" in m_ for m_ in bad), str(bad))
 
 
-TESTS = dict(ops=t_ops, steps=t_steps, stages=t_stages, model=t_model, mix=t_mix, fold=t_fold, qk=t_qk, train=t_train)
+TESTS = dict(ops=t_ops, steps=t_steps, stages=t_stages, model=t_model, mix=t_mix, fold=t_fold, qk=t_qk, gate=t_gate, train=t_train)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)

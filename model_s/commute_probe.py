@@ -159,6 +159,30 @@ def qk_rank_loss(model, batch, attn, bases, r, start=0):
 
 
 @torch.no_grad()
+def gate_sparse_loss(model, batch, attn, frac, rule, block=64, start=0, seed=0):
+    """Gate-once FFN (sifir atis): hidden birimleri block'luk bloklar; token basina en yuksek frac blok tutulur, gerisi 0.
+    rule: gate (blok enerjisi |silu(g)|^2: up / down'dan ONCE bilinir, yonlendirici), oracle (|silu(g) up|^2), rand."""
+    import torch.nn.functional as F_
+    x = model.E(batch.tokens)
+    gen = torch.Generator().manual_seed(seed)
+    for l, blk in enumerate(model.blocks):
+        x1 = x + d_attn(blk, x, batch.pos, attn)
+        g, up = blk.gate_up(blk.n2(x1)).chunk(2, -1)
+        h = F_.silu(g) * up
+        if l >= start and frac < 1:
+            B, T, n = h.shape
+            nb = n // block
+            src = {"gate": F_.silu(g), "oracle": h}.get(rule)
+            sc = src.view(B, T, nb, block).pow(2).sum(-1) if src is not None else torch.rand(B, T, nb, generator=gen)
+            keep = torch.zeros(B, T, nb).scatter(-1, sc.topk(max(1, int(nb * frac)), -1).indices, 1.0)
+            h = (h.view(B, T, nb, block) * keep[..., None]).view(B, T, n)
+        x = x1 + blk.down(h)
+    hh = model.norm(x)
+    keep_t = batch.target >= 0
+    return float(torch.nn.functional.cross_entropy(model._logits(hh[keep_t]).float(), batch.target[keep_t]))
+
+
+@torch.no_grad()
 def inner_loss(model, batch, attn, layers):
     """Katman ici bolme (A ile F ayni girdiden): layers'taki katmanlarda u + A(u) + F(u), oteki katmanlar sirali."""
     x = model.E(batch.tokens)
@@ -178,6 +202,7 @@ def main(argv=None):
     ap.add_argument("--skip", action="store_true", help="token basina uyarlamali adim (skip_loss)")
     ap.add_argument("--inner", action="store_true", help="katman ici A ile F ayni girdiden (inner_loss)")
     ap.add_argument("--qk_rank", action="store_true", help="q / k head basina ilk r ana bilesen (qk_rank_loss)")
+    ap.add_argument("--gate_sparse", action="store_true", help="gate-once blok seyrek FFN (gate_sparse_loss)")
     a = ap.parse_args(argv)
     if os.name == "nt":
         T._no_power_throttling()
@@ -191,6 +216,13 @@ def main(argv=None):
     base = loss(model, batch, attn)
     print("taban (sirali) kayip %.4f" % base, flush=True)
     L = len(model.blocks)
+    if a.gate_sparse:
+        for frac in (0.5, 0.375, 0.25, 0.125):
+            r = {k: gate_sparse_loss(model, batch, attn, frac, k) for k in ("gate", "oracle", "rand")}
+            r3 = gate_sparse_loss(model, batch, attn, frac, "gate", start=2)
+            print("gate-once FFN, bloklarin %%%4.1f'i (64'luk) | gate %+.4f | oracle %+.4f | rand %+.4f | gate katman >= 3 %+.4f"
+                  % (100 * frac, r["gate"] - base, r["oracle"] - base, r["rand"] - base, r3 - base), flush=True)
+        return
     if a.qk_rank:
         fit = D.build_batch(stories, G.exam_rows(a.data)[a.rows:a.rows + 4], "transformer", dev)   # taban fit satirlari ayri
         bases = qk_bases(model, fit, R.dense_mask(fit, R.document_mask))

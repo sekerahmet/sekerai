@@ -47,6 +47,25 @@ class Projection(torch.nn.Module):
         return [F_.linear(u, m.weight * self.g.to(m.weight.dtype)) for m in layers], s
 
 
+GATE_BLOCK = 64     # gate-once FFN blok boyu (Parca 9)
+
+
+def gate_first(ga, up, keep, block=GATE_BLOCK):
+    """Gate-once FFN (Parca 9): h = silu(g) * up, token basina yalniz |silu(g)|^2 enerjisi en yuksek keep orani blok (gate
+    kendi yonlendiricisi: silu(g) ~ 0 ise birim up ne olursa olsun katkisiz).  keep >= 1: yogun.  Simdilik maskeyle (kalite
+    olcumu; FLOP kazanci gruplu matmul cekirdegiyle)."""
+    h = ga * up
+    if keep >= 1:
+        return h
+    *lead, n = h.shape
+    block = next(b for b in (block, 48, 32, 16, 8, 1) if n % b == 0)  # d 1024 split hidden 2.736: 48'lik
+    nb = n // block
+    with torch.no_grad():
+        sc = ga.detach().float().view(*lead, nb, block).pow(2).sum(-1)
+        m = torch.zeros_like(sc).scatter_(-1, sc.topk(max(1, round(nb * keep)), -1).indices, 1.0)
+    return (h.view(*lead, nb, block) * m.unsqueeze(-1).to(h.dtype)).view(*lead, n)
+
+
 def scale(x, s):
     """x * s (s None: x); s (B, T, 1) token basina."""
     return x if s is None else (x.float() * s).to(x.dtype)
@@ -129,12 +148,12 @@ class MixOp(torch.nn.Module):
     values "linear": V = v (= u + A(Pu) + F(Pu), paralel blok; ayni agirlikla birebir); "swiglu": V = silu(v_g) * v_u
     (attention dogrusal olmayan ozellikleri karistirir).  Katman basina 1 izdusum, 2 matmul, 1 attention; bolme yok."""
 
-    def __init__(self, d, heads, hidden, kv_heads=None, head_dim=None, values="swiglu", rope_on=True, qk_dim=None):
+    def __init__(self, d, heads, hidden, kv_heads=None, head_dim=None, values="swiglu", rope_on=True, qk_dim=None, keep=1.0):
         super().__init__()
         assert values in ("linear", "swiglu"), "values: linear | swiglu"
         assert head_dim or d % heads == 0, "d heads'e bolunmeli"
         self.d, self.heads, self.hd = d, heads, int(head_dim or d // heads)
-        self.qk = int(qk_dim or self.hd)
+        self.qk, self.keep = int(qk_dim or self.hd), float(keep)
         self.kv_heads = int(kv_heads or heads)
         assert heads % self.kv_heads == 0, "kv_heads heads'in boleni olmali"
         self.inner, self.kvd, self.hidden, self.values, self.rope_on = heads * self.hd, self.kv_heads * self.hd, hidden, values, rope_on
@@ -162,7 +181,7 @@ class MixOp(torch.nn.Module):
         if self.rope_on:
             q, k = rope(q, pos), rope(k, pos)
         g, up = loc.chunk(2, -1)
-        return q, k, v, F_.silu(scale(g, s)) * scale(up, s)
+        return q, k, v, gate_first(F_.silu(scale(g, s)), scale(up, s), self.keep)
 
     def out(self, a, loc):
         B, _, T, _ = a.shape
@@ -186,8 +205,9 @@ def mix_hidden(d, inner, kvd, hidden, values, qk_frac=1.0):
 class FeedForwardOp(torch.nn.Module):
     """F: du(x) = W_down(silu(W_gate P(u)) * W_up P(u)), her x'te ayri."""
 
-    def __init__(self, d, hidden):
+    def __init__(self, d, hidden, keep=1.0):
         super().__init__()
+        self.keep = float(keep)
         self.P = Projection(d)
         self.w_gate_up = torch.nn.Linear(d, 2 * hidden, bias=False)
         self.w_down = torch.nn.Linear(hidden, d, bias=False)
@@ -195,4 +215,4 @@ class FeedForwardOp(torch.nn.Module):
     def forward(self, u, ctx=None):
         (z,), s = self.P.linear(u, self.w_gate_up)
         g, up = z.chunk(2, -1)
-        return self.w_down(F_.silu(scale(g, s)) * scale(up, s))
+        return self.w_down(gate_first(F_.silu(scale(g, s)), scale(up, s), self.keep))

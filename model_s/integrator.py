@@ -19,7 +19,8 @@ SCHEMES = ("lie", "strang", "parallel", "mix")
 class Step(torch.nn.Module):
     """Tek zaman adimi; operatorleri semanin sirasiyla uygular, yeni durumu dondurur."""
 
-    def __init__(self, d, heads, hidden, kv_heads=None, scheme="lie", dt=1.0, width=1, values="swiglu", qk_dim=None):
+    def __init__(self, d, heads, hidden, kv_heads=None, scheme="lie", dt=1.0, width=1, values="swiglu", qk_dim=None,
+                 keep=1.0):
         """width k: birlesik hibrit asama (Parca 3) -- k x heads (head boyu d / heads), k x hidden; = k adimin `wide` formulu.
         mix: hidden ayri A + F'nin genisligi; MixOp'un yerel genisligi esit matris parametresiyle (mix_hidden)."""
         super().__init__()
@@ -28,14 +29,14 @@ class Step(torch.nn.Module):
         if scheme == "mix":
             kv, hd = (width * kv_heads if kv_heads else None), d // heads
             hid = mix_hidden(d, width * heads * hd, (kv or width * heads) * hd, width * hidden, values)
-            self.M = MixOp(d, width * heads, hid, kv, hd, values, qk_dim=qk_dim)
+            self.M = MixOp(d, width * heads, hid, kv, hd, values, qk_dim=qk_dim, keep=keep)
             return
         self.A = AttentionOp(d, width * heads, width * kv_heads if kv_heads else None, head_dim=d // heads, qk_dim=qk_dim)
         hidden = width * hidden
         if scheme == "strang":                                          # esit parametre: iki yarim genislik
-            self.F1, self.F2 = FeedForwardOp(d, hidden // 2), FeedForwardOp(d, hidden - hidden // 2)
+            self.F1, self.F2 = FeedForwardOp(d, hidden // 2, keep), FeedForwardOp(d, hidden - hidden // 2, keep)
         else:
-            self.F = FeedForwardOp(d, hidden)
+            self.F = FeedForwardOp(d, hidden, keep)
 
     def forward(self, u, ctx):
         dt = self.dt

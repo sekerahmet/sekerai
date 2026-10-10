@@ -146,7 +146,7 @@ READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_ge
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
-            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "widths", "strata_op", "strata_qk")
+            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "widths", "strata_op", "strata_qk", "strata_ffn_keep")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -287,7 +287,7 @@ def _build(args, dev):
         from model import ModelS
         model = ModelS(args.d, args.widths, args.heads, kv_heads=getattr(args, "glob_kv_heads", 0) or None,
                        vocab_rows=getattr(args, "vocab_rows", D.VOCAB), op=getattr(args, "strata_op", "") or "split",
-                       qk_dim=getattr(args, "strata_qk", 0) or None)
+                       qk_dim=getattr(args, "strata_qk", 0) or None, ffn_keep=getattr(args, "strata_ffn_keep", 0) or 1.0)
         model, mask_fn, layout = model.to(dev), R.document_mask, "transformer"
     else:
         sys.path.insert(0, os.path.join(root, "model_z"))
@@ -610,6 +610,9 @@ def _args(argv):
                          "(orn. split,mix,...,split); varsayilan split; kimlikte, --resume'da kimlikten")
     ap.add_argument("--strata_qk", type=int, default=None,
                     help="model_s: head basina q / k boyu (Parca 8; 0 = head boyu); kimlikte, --resume'da kimlikten")
+    ap.add_argument("--strata_ffn_keep", type=float, default=None,
+                    help="model_s: gate-once FFN token basina tutulan blok orani (Parca 9; 1 yogun; ilk / son adim yogun); "
+                         "kimlikte, --resume'da kimlikten")
     ap.add_argument("--lr", type=lambda s: s if s == "auto" else float(s), default=None,
                     help="tepe lr (WSD); auto (varsayilan; muon / normuon): LR_REF[0] (LR_REF[1] / d) ^ LR_REF[2]; adamw'de "
                          "sayi sart (olculen 5e-4); --resume'da verilmezse kosunun kimliginden (belge 39, OLCULENLER_z)")
@@ -747,6 +750,10 @@ def _args(argv):
         args.layers = len(args.widths)
         if args.strata_op is None:
             args.strata_op = was.get("strata_op", "split") if was is not None else "split"
+        if args.strata_ffn_keep is None:
+            args.strata_ffn_keep = was.get("strata_ffn_keep", 1.0) if was is not None else 1.0
+        if not 0 < args.strata_ffn_keep <= 1:
+            sys.exit("DUR: --strata_ffn_keep (0, 1]")
         if args.strata_qk is None:
             args.strata_qk = was.get("strata_qk", 0) if was is not None else 0
         if args.strata_qk and (args.strata_qk % 2 or args.strata_qk > args.d // args.heads):
@@ -754,10 +761,10 @@ def _args(argv):
         _ops = args.strata_op.split(",")
         if not set(_ops) <= {"split", "parallel", "mix"} or len(_ops) not in (1, len(args.widths)):
             sys.exit("DUR: --strata_op split | parallel | mix, tek ad ya da widths kadar liste (%d)" % len(args.widths))
-    elif args.widths or args.strata_op or args.strata_qk:
-        sys.exit("DUR: --widths / --strata_op / --strata_qk yalniz model_s")
+    elif args.widths or args.strata_op or args.strata_qk or args.strata_ffn_keep:
+        sys.exit("DUR: --widths / --strata_op / --strata_qk / --strata_ffn_keep yalniz model_s")
     else:
-        args.widths, args.strata_op, args.strata_qk = [], "", 0
+        args.widths, args.strata_op, args.strata_qk, args.strata_ffn_keep = [], "", 0, 0
     if args.glob_kv_heads == "auto" and (args.model != "model_z" or not args.global_layers):
         args.glob_kv_heads = 0                                           # transformer / G'siz Model Z: GQA yok
     if args.glob_kv_heads == "auto":
@@ -870,7 +877,7 @@ def main(argv=None):
                  ngram_embed=args.ngram_embed, ngram_layers=args.ngram_layers, ngram_sparse=args.ngram_sparse,
                  mtp=args.mtp, g_nope=args.g_nope, mlp_ratio=args.mlp_ratio, local_kv_heads=args.local_kv_heads,
                  widths=args.widths, strata_op=args.strata_op,
-                 strata_qk=args.strata_qk)
+                 strata_qk=args.strata_qk, strata_ffn_keep=args.strata_ffn_keep)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -891,7 +898,8 @@ def main(argv=None):
             sys.exit("DUR: " + _archived(was))
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
                "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [], "local_kv_heads": 0,
-               "widths": [], "strata_op": "split" if was.get("model") == "model_s" else "", "strata_qk": 0, **was}                                                    # sonradan eklenenler
+               "widths": [], "strata_op": "split" if was.get("model") == "model_s" else "", "strata_qk": 0,
+               "strata_ffn_keep": 1.0 if was.get("model") == "model_s" else 0, **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:
