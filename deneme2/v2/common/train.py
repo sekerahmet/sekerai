@@ -668,6 +668,8 @@ def _args(argv):
     ap.add_argument("--stop_step", type=int, default=None,
                     help="takvim (WSD, epok plani) degismeden adim N'de dur: checkpoint.pt (surdurulebilir) + agent.pt + "
                          "results.json (finished False, stopped_at N); son sinav ve okuma yok (kullanici, 8 Ekim)")
+    ap.add_argument("--stop_exam", type=int, default=0,
+                    help="deneme: 1 ise --stop_step'te sinav (okuma yok; kimlige girmez; --resume ile durulan adimda da)")
     ap.add_argument("--checkpoint_minutes", type=float, default=10,
                     help="en cok bu kadar duvar saati kaybi (sinav dahil); surdurmede degistirilebilir")
     args = ap.parse_args(argv)
@@ -965,6 +967,8 @@ def main(argv=None):
     finishing = start == total and args.stop_step is None              # bitis checkpoint'i var, results yok (belge 89b)
     if finishing:
         log("BITIS: adim %d / %d checkpoint'te; egitim yok, sinav (yoksa) + agent.pt + results.json + okuma" % (total, total))
+    elif args.stop_exam and start == end < total:                         # deneme: durulan checkpoint'te yalniz sinav
+        log("YALNIZ SINAV: adim %d checkpoint'te (--stop_exam), egitim yok" % start)
     elif not start < end <= total:
         sys.exit("DUR: --stop_step %s: adim %d < N <= %d olmali" % (args.stop_step, start, total))
     else:
@@ -1056,6 +1060,11 @@ def main(argv=None):
         if ckpt_due:
             save(args.out, done)
             saved_at = time.time()
+    if end < total and args.stop_exam and not (history["exams"] and history["exams"][-1]["step"] == end):
+        ex = _exam(model, mask_fn, valid, exam_plan, story_bytes, layout, dev, cuda, last)   # deneme: duruste sinav
+        history["exams"].append(dict(ex, step=end, epoch=None, full_epoch=False))
+        log("SINAV adim %d: kayip %.4f  acc %.4f  acc_token %.4f  bpb %.4f  end_ok %.4f  eos_ok %.4f (%.1f sn)" % (
+            end, ex["loss"], ex["acc"], ex["acc_token"], ex["bits_per_byte"], ex["end_ok"], ex["eos_ok"], ex["seconds"]))
     if end < total:                                                     # --stop_step: sinav ve okuma yok
         results = dict(config, run=os.path.basename(os.path.normpath(args.out)), finished=False, stopped_at=end,
                        readings_skipped="stop_step", exam=history["exams"][-1] if history["exams"] else None,
