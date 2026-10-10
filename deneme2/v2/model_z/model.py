@@ -339,7 +339,7 @@ class Block(torch.nn.Module):
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
                  attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, mlp_ratio=(),
-                 local_kv_heads=0, mix_g_heads=0, mix_kv=()):
+                 local_kv_heads=0, mix_g_heads=0, mix_kv=(), g_layout="top"):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -362,6 +362,11 @@ class SentenceTransformer(torch.nn.Module):
         if vocab_rows > VOCAB:                                   # kurulum RNG'si VOCAB'li modelle ayni; dolgu sifir
             self.E = torch.nn.Embedding(vocab_rows, d, _weight=torch.zeros(vocab_rows, d))
         kinds = ["loc"] * (layers - self.global_layers) + ["glob"] * self.global_layers
+        self.g_layout = g_layout                                           # top: son N blok; interleave: esit aralik, son G
+        assert g_layout in ("top", "interleave"), "g_layout top / interleave"
+        if g_layout == "interleave" and self.global_layers:
+            at = {round((i + 1) * layers / self.global_layers) - 1 for i in range(self.global_layers)}
+            kinds = ["glob" if l in at else "loc" for l in range(layers)]
         self.mix_g_heads = int(mix_g_heads)                                # deneme/mixed-layer: her blok yerel + G head
         if self.mix_g_heads:
             assert self.global_layers and 0 < self.mix_g_heads < heads, "mix_g_heads: G'li Model Z, 0 < N < heads"
@@ -384,6 +389,7 @@ class SentenceTransformer(torch.nn.Module):
             assert not mix_kv and gk * heads == self.mix_g_heads * int(glob_kv_heads or heads) or mix_kv, \
                 "mix: G kv tam sayi degil, --mix_kv yerel,G ver"
             self.mix_kv = (int(lk), int(gk))
+        self.is_glob = [k == "glob" for k in kinds]                         # blok basina G mi (onbellekler de buradan)
         self.blocks = torch.nn.ModuleList(
             Block(d, heads, self.mlp_widths[i], self.mix_kv[0], int(attn_gate), bool(self.g_nope), self.mix_g_heads,
                   self.mix_kv[1]) if k == "mix" else
@@ -460,10 +466,9 @@ class SentenceTransformer(torch.nn.Module):
             for l, block in enumerate(self.blocks):
                 x = block(add(x, l), (batch.pos, real), attn)
             return self.norm(x)
-        first = len(self.blocks) - self.global_layers
         for l, block in enumerate(self.blocks):
             x = add(x, l)
-            x = block(x, real, w(attn[1])) if l >= first else block(x, batch.pos, w(attn[0]))
+            x = block(x, real, w(attn[1])) if self.is_glob[l] else block(x, batch.pos, w(attn[0]))
         return self.norm(x)
 
     def _logits(self, h):
@@ -631,7 +636,7 @@ class SummaryCache:
         self.sum_k, self.sum_v = [None] * L, [None] * L
         self.sen_k, self.sen_v = [None] * L, [None] * L
         self.all_k, self.all_v = [None] * L, [None] * L
-        self.glob = [l >= L - model.global_layers for l in range(L)]
+        self.glob = list(model.is_glob)
         self.n_z, self.i, self.t = 0, 0, 0
         self.piece, self.used, self.gkind = 0, 1, []                       # carry: parca no, parcadaki konum, glob tur
         self.prev = END_ID                                                  # bigram: cumledeki onceki token (yoksa END)
@@ -933,7 +938,7 @@ class StaticCache:
         real = torch.arange(Tp, device=dev).expand(B, Tp)
         x = self.m.E(torch.where(kind == ZTOK, torch.full_like(tok, END_ID), tok))
         gr = None if self.m.ngram is None else self.m._ngram(tok, bigram_prev(tok, kind, doc, sent), kind == TOKEN)
-        self.glob = [l >= L - self.m.global_layers for l in range(L)]
+        self.glob = list(self.m.is_glob)
         ks, vs = [], []
         for l, block in enumerate(self.m.blocks):
             if gr is not None and l < self.m.ngram_layers:              # bigram (egitimle ayni: her blok girdisine)

@@ -1621,10 +1621,53 @@ def t_mix():
           res and not nograd and stop, "; ".join(info) + (" | gradyansiz %s" % nograd if nograd else ""))
 
 
+def t_interleave():
+    """g_layout interleave (deneme): G bloklari esit aralikli, son blok G (L 4 / N 2 -> 1, 3; L 10 / N 3 -> 2, 6, 9);
+    top ile ayni agirlik (blok turu sayisi ayni), farkli hidden; SummaryCache ve StaticCache adim adim logit = tam ileri
+    gecis (fp32); summaries_last ayni."""
+    from model import StaticCache, summaries_last
+    rng = np.random.default_rng(3)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 10))] for _ in range(rng.integers(1, 6))]
+               for _ in range(12)]
+    rows = [list(range(i, i + 4)) for i in range(0, 12, 4)]
+    batch = real_batch(rows, 200, stories)
+
+    def mk(layout, layers=4, gl=2, **kw):
+        torch.manual_seed(0)
+        return SentenceTransformer(d=32, layers=layers, heads=2, global_layers=gl, g_layout=layout, **kw).eval()
+    mi, mt = mk("interleave"), mk("top")
+    pos_ok = [l for l, g in enumerate(mi.is_glob) if g] == [1, 3] and \
+        [l for l, g in enumerate(mk("interleave", 10, 3).is_glob) if g] == [2, 6, 9]
+    with torch.no_grad():
+        hi = mi._batch_hidden(batch)
+        diff = float((hi - mt._batch_hidden(batch)).abs().max())
+        pb, perm = summaries_last(batch)
+        d_last = float((hi - mi._batch_hidden(pb).gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, 32))).abs().max())
+    d_cache = 0.0
+    for m in (mi, mk("interleave", glob_kv_heads=1, local_kv_heads=1, mlp_ratio=(1.0, 4.0), g_nope=1)):
+        with torch.no_grad():
+            lg_full, _ = full_logits(m, batch)
+            for C in (lambda: SummaryCache(m), lambda: StaticCache(m, 256, 8, 16)):
+                got = []
+                for row in rows:
+                    for si in row:
+                        c = C()
+                        got.append(c.prefill([])[None].clone())             # StaticCache cikis tamponu yeniden yazilir
+                        for s in stories[si]:
+                            for t in s:
+                                got.append(c.append_token(t)[None].clone())
+                            got.append(c.close_sentence()[None].clone())
+                d_cache = max(d_cache, float((torch.cat(got) - lg_full).abs().max()))
+    check("interleave: G bloklari esit aralikli + son blok G, top ile ayni agirlik / farkli hidden, summaries_last ayni, "
+          "SummaryCache ve StaticCache adim adim = tam ileri gecis (GQA, oran, NoPE dahil)",
+          pos_ok and diff > 1e-4 and d_last < 1e-5 and d_cache < 1e-5,
+          "top farki %.1e, summaries_last %.1e, onbellek %.1e" % (diff, d_last, d_cache))
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab,
              limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast,
-             combo=t_combo, mix=t_mix)
+             combo=t_combo, mix=t_mix, interleave=t_interleave)
 
 if __name__ == "__main__":
     if SIDE is not None:
