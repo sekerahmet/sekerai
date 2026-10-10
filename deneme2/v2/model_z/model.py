@@ -234,7 +234,7 @@ def _attend(q, k, v, attn):
 
 
 class Block(torch.nn.Module):
-    def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0, nope=False, g_heads=0, g_kv_heads=0, seq=False):
+    def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0, nope=False, g_heads=0, g_kv_heads=0):
         """kv_heads (GQA; varsayilan heads): k / v head sayisi, heads'in boleni; qkv d -> d + 2 d kv / heads.  nope: RoPE yok.
         attn_gate 1 / 2: head basina cikis kapisi agirligi (heads, d) / (heads, d // 64) (girdi n1(x)'in ilk d // 64
         boyutu), sifir (RNG cekmez; kapisiz modelle ayni ilk agirlik)."""
@@ -249,20 +249,10 @@ class Block(torch.nn.Module):
         assert self.kv_heads > 0 and own % self.kv_heads == 0, "kv_heads (yerel) head sayisinin boleni olmali"
         assert not self.g_heads or self.g_heads % self.g_kv_heads == 0, "g_kv_heads g_heads'in boleni olmali"
         self.n1, self.n2 = torch.nn.RMSNorm(d), torch.nn.RMSNorm(d)
-        self.seq = bool(seq and self.g_heads)                              # karma sirali: once G, sonra yerel (n1b)
-        if self.seq:
-            self.n1b = torch.nn.RMSNorm(d)
         kv_all = self.kv_heads + (self.g_kv_heads if self.g_heads else 0)
         self.qkv = torch.nn.Linear(d, d + 2 * (d // heads) * kv_all, bias=False)
         self.q_norm, self.k_norm = torch.nn.RMSNorm(d // heads), torch.nn.RMSNorm(d // heads)
         self.proj = torch.nn.Linear(d, d, bias=False)
-        self.split = self.seq and int(seq) == 2                             # sirali, ayri dogrusallar (dilim / cat yok; hiz)
-        if self.split:
-            hd_, own_ = d // heads, heads - self.g_heads
-            self.qkv = torch.nn.Linear(d, (own_ + 2 * self.kv_heads) * hd_, bias=False)
-            self.g_qkv = torch.nn.Linear(d, (self.g_heads + 2 * self.g_kv_heads) * hd_, bias=False)
-            self.proj = torch.nn.Linear(own_ * hd_, d, bias=False)
-            self.g_proj = torch.nn.Linear(self.g_heads * hd_, d, bias=False)
         self.gate_up = torch.nn.Linear(d, 2 * hidden, bias=False)
         self.down = torch.nn.Linear(hidden, d, bias=False)
         assert attn_gate in (0, 1, 2), "attn_gate 0 / 1 / 2"
@@ -319,39 +309,6 @@ class Block(torch.nn.Module):
             qg, k_g = rope(qg, real), rope(k_g, real)
         return (ql, k_l, vl), (qg, k_g, vg), g
 
-    def _seq(self, x, pos, real, al, ag):
-        """Sirali karma blok: G head'leri n1(x)'ten -> x1 = x + proj_G(a_G); yerel head'ler n1b(x1)'den -> x2 = x1 + proj_Y(a_Y);
-        FFN.  qkv / proj / kapi agirligi paralel blokla ayni, head gruplarina dilimlenir."""
-        B, T, d = x.shape
-        hd, own, kl, kg = d // self.heads, self.heads - self.g_heads, self.kv_heads, self.g_kv_heads
-        W, P, k0, v0 = self.qkv.weight, self.proj.weight, d, d + (kl + kg) * hd
-
-        def group(h, rows, nq, nk, p, at):
-            q, k, v = (rows(h) if callable(rows) else F.linear(h, torch.cat(rows))).split([nq * hd, nk * hd, nk * hd], -1)
-            q = q.view(B, T, nq, hd).transpose(1, 2)
-            k, v = (t.view(B, T, nk, hd).transpose(1, 2) for t in (k, v))
-            with torch.autocast(x.device.type, enabled=False):
-                q, k = self.q_norm(q.float()).to(v.dtype), self.k_norm(k.float()).to(v.dtype)
-            if p is not None:
-                q, k = rope(q, p), rope(k, p)
-            return _attend(q, k, v, at).transpose(1, 2)                     # (B, T, nq, hd)
-
-        h = self.n1(x)
-        a = group(h, self.g_qkv if self.split else (W[own * hd:d], W[k0 + kl * hd:v0], W[v0 + kl * hd:]), self.g_heads, kg,
-                  None if self.nope else real, ag)
-        if self.attn_gate is not None:
-            a = a * torch.sigmoid(F.linear(h[..., :self.attn_gate.shape[1]], self.attn_gate[own:]))[..., None]
-        a = a.reshape(B, T, self.g_heads * hd)
-        x = x + (self.g_proj(a) if self.split else F.linear(a, P[:, own * hd:]))
-        h = self.n1b(x)
-        a = group(h, self.qkv if self.split else (W[:own * hd], W[k0:k0 + kl * hd], W[v0:v0 + kl * hd]), own, kl, pos, al)
-        if self.attn_gate is not None:
-            a = a * torch.sigmoid(F.linear(h[..., :self.attn_gate.shape[1]], self.attn_gate[:own]))[..., None]
-        a = a.reshape(B, T, own * hd)
-        x = x + (self.proj(a) if self.split else F.linear(a, P[:, :own * hd]))
-        g, u = self.gate_up(self.n2(x)).chunk(2, -1)
-        return x + self.down(F.silu(g) * u)
-
     def _finish(self, x, a, g=None):
         """g: _qkv(gate=True)'nun kapisi; yoksa (onbellek yollari) _gate(x)."""
         B, T, d = x.shape
@@ -367,8 +324,6 @@ class Block(torch.nn.Module):
         mem_cols) -> K / V = [satir || ayni katmanda kaynak satirlarin bellek sutunlari] (anahtar T + M)."""
         if self.g_heads:                                                   # karma: pos (yerel, gercek), attn (yerel, G)
             (pos, real), (al, ag) = pos, attn
-            if self.seq:
-                return self._seq(x, pos, real, al, ag)
             lo, gl, g = self._qkv_mixed(x, pos, real, gate=self.attn_gate is not None)
             return self._finish(x, torch.cat([_attend(*lo, al), _attend(*gl, ag)], 1), g)
         mem = None
@@ -384,7 +339,7 @@ class Block(torch.nn.Module):
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
                  attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, mlp_ratio=(),
-                 local_kv_heads=0, mix_g_heads=0, mix_kv=(), g_layout="top", mix_seq=0):
+                 local_kv_heads=0, mix_g_heads=0, mix_kv=(), g_layout="top"):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -440,7 +395,7 @@ class SentenceTransformer(torch.nn.Module):
         self.is_glob = [k == "glob" for k in kinds]                         # blok basina G mi (onbellekler de buradan)
         self.blocks = torch.nn.ModuleList(
             Block(d, heads, self.mlp_widths[i], self.mix_kv[0], int(attn_gate), bool(self.g_nope), self.mix_g_heads,
-                  self.mix_kv[1], int(mix_seq)) if k == "mix" else
+                  self.mix_kv[1]) if k == "mix" else
             Block(d, heads, self.mlp_widths[i], glob_kv_heads if k == "glob" else (self.local_kv_heads or None),
                   int(attn_gate), bool(self.g_nope) and k == "glob") for i, k in enumerate(kinds))
         self.norm = torch.nn.RMSNorm(d)

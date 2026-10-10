@@ -1607,52 +1607,6 @@ def t_mix():
         res &= ok
         info.append("gate %d: blok fark %.1e, summaries_last %.1e, nedensel %.1e, MLP %s, kv %s" % (
             gate, d_, d_last, d_causal, sorted(widths), m.mix_kv))
-    # sirali (mix_seq): ayni agirlik (paralel modelle ayni tohum) + n1b; once G, sonra yerel x1'den; elle basvuru
-    torch.manual_seed(0)
-    ms = SentenceTransformer(d=128, layers=3, heads=4, global_layers=1, glob_kv_heads=2, local_kv_heads=2, g_nope=0,
-                             mlp_ratio=(1.0, 4.0), mix_g_heads=2, attn_gate=2, mix_seq=1).eval()
-    bs = ms.blocks[1]
-    with torch.no_grad():
-        bs.attn_gate.normal_(0, 0.5)
-        bs.n1b.weight.normal_(1, 0.1)
-        got = bs(x, (batch.pos, real), (loc, glob))
-        hd, w, P = 32, bs.qkv.weight, bs.proj.weight
-        q_all = lambda h: F.linear(h, w[:128]).view(B, T, 4, hd).transpose(1, 2)            # noqa: E731
-        k_all = lambda h: F.linear(h, w[128:128 + 2 * hd]).view(B, T, 2, hd).transpose(1, 2)  # noqa: E731
-        v_all = lambda h: F.linear(h, w[128 + 2 * hd:]).view(B, T, 2, hd).transpose(1, 2)   # noqa: E731
-        gate = lambda h: torch.sigmoid(h[..., :2] @ bs.attn_gate.T)                         # noqa: E731
-        h = bs.n1(x)
-        qg, kg = rope(bs.q_norm(q_all(h)[:, 2:]), real), rope(bs.k_norm(k_all(h)[:, 1:]), real)
-        ag = F.scaled_dot_product_attention(qg, kg.expand(-1, 2, -1, -1), v_all(h)[:, 1:].expand(-1, 2, -1, -1),
-                                            attn_mask=glob[:, None]).transpose(1, 2) * gate(h)[..., 2:, None]
-        x1 = x + ag.reshape(B, T, 2 * hd) @ P[:, 2 * hd:].T
-        h1 = bs.n1b(x1)
-        ql, kl = rope(bs.q_norm(q_all(h1)[:, :2]), batch.pos), rope(bs.k_norm(k_all(h1)[:, :1]), batch.pos)
-        al = F.scaled_dot_product_attention(ql, kl.expand(-1, 2, -1, -1), v_all(h1)[:, :1].expand(-1, 2, -1, -1),
-                                            attn_mask=loc[:, None]).transpose(1, 2) * gate(h1)[..., :2, None]
-        x2 = x1 + al.reshape(B, T, 2 * hd) @ P[:, :2 * hd].T
-        g_, u_ = bs.gate_up(bs.n2(x2)).chunk(2, -1)
-        d_seq = float((got - (x2 + bs.down(F.silu(g_) * u_))).abs().max())
-        same_w = sum(p.numel() for p in ms.parameters()) - sum(p.numel() for p in m.parameters()) == 3 * 128
-    # mix_seq 2: ayni sirali blok ayri dogrusallarla; dilimli blogun agirliklari kopyalaninca cikti ayni, parametre sayisi ayni
-    torch.manual_seed(0)
-    m2 = SentenceTransformer(d=128, layers=3, heads=4, global_layers=1, glob_kv_heads=2, local_kv_heads=2, g_nope=0,
-                             mlp_ratio=(1.0, 4.0), mix_g_heads=2, attn_gate=2, mix_seq=2).eval()
-    b2 = m2.blocks[1]
-    with torch.no_grad():
-        k0, v0 = 128, 128 + 2 * hd
-        b2.qkv.weight.copy_(torch.cat([w[:2 * hd], w[k0:k0 + hd], w[v0:v0 + hd]]))
-        b2.g_qkv.weight.copy_(torch.cat([w[2 * hd:128], w[k0 + hd:v0], w[v0 + hd:]]))
-        b2.proj.weight.copy_(P[:, :2 * hd])
-        b2.g_proj.weight.copy_(P[:, 2 * hd:])
-        for name in ("n1", "n1b", "n2", "q_norm", "k_norm", "gate_up", "down"):
-            getattr(b2, name).load_state_dict(getattr(bs, name).state_dict())
-        b2.attn_gate.copy_(bs.attn_gate)
-        d_split = float((b2(x, (batch.pos, real), (loc, glob)) - got).abs().max())
-    same_n = sum(p.numel() for p in m2.parameters()) == sum(p.numel() for p in ms.parameters())
-    res &= d_seq < 1e-5 and same_w and d_split < 1e-5 and same_n
-    info.append("sirali: blok fark %.1e, parametre farki yalniz n1b %s; ayri dogrusal (2) = dilimli %.1e, ayni sayi %s" % (
-        d_seq, same_w, d_split, same_n))
     m.train()
     loss = m._batch_hidden(batch).square().mean()
     loss.backward()
