@@ -48,7 +48,7 @@ def _padded(batch, mask_fn):
     kind yuklemesi ekler), yoksa _with_padding.  carry bellegi (batch.mem_rows): mask_fn'e satir basina bellek boyu n_mem."""
     if getattr(batch, "mem_rows", None) is not None:
         return mask_fn(batch.kind, batch.doc, batch.sent, n_mem=(batch.mem_rows >= 0).sum(1))
-    mod = mask_fn(batch.kind, batch.doc, batch.sent)
+    mod = mask_fn(batch) if getattr(mask_fn, "needs_batch", False) else mask_fn(batch.kind, batch.doc, batch.sent)
     return mod if getattr(mask_fn, "includes_padding", False) else _with_padding(mod, batch.kind, batch.doc)
 
 

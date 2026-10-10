@@ -2903,9 +2903,58 @@ def t_micro():
           and "MTP" in mm, "%s | %s" % (m3, mm))
 
 
+def t_gwindow():
+    """deneme/g-window: g_window_mask = basvuru (summaries_last batch'inde, gercek konumla: anahtar token'i sorgudan
+    win[token]'dan uzaksa gorunmez, BOS / Z / dolgu _LAST_GLOB); sinirsiz pencere = pencere yok (kayip ve maske bit); kucuk
+    pencere kaybi degistirir; train.g_window_table sayimdan (0 sayim sinirsiz)."""
+    import types
+    import train as TR
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "model_z"))
+    import model as MZ
+    import recipe as R
+    rng = np.random.default_rng(3)
+    stories = [[[int(x) for x in rng.integers(0, 40, rng.integers(2, 9))] for _ in range(rng.integers(3, 7))] for _ in range(6)]
+    flat, sent, story = [], [], [0]
+    for s_ in stories:
+        for t_ in s_:
+            sent.append((len(flat), len(flat) + len(t_)))
+            flat += t_
+        story.append(len(sent))
+    st = types.SimpleNamespace(stream=np.array(flat, np.int64), sent=np.array(sent, np.int64), story=np.array(story))
+    b, _ = MZ.summaries_last(D.build_batch(st, [[0, 1], [2, 3, 4]], "model_z", row_len=160))
+    torch.manual_seed(0)
+    m = MZ.SentenceTransformer(d=64, layers=3, heads=4, global_layers=1, glob_kv_heads=1, local_kv_heads=1).eval()
+    with torch.no_grad():
+        ref = m.loss_per_target(b)[0].mean()
+        m.g_window = torch.full((D.VOCAB,), 1 << 40, dtype=torch.long)
+        big = m.loss_per_target(b)[0].mean()
+        win = torch.randint(1, 12, (D.VOCAB,))
+        m.g_window = win
+        small = m.loss_per_target(b)[0].mean()
+        got = R.dense_mask(b, m._masks(True)[1])
+    B, T = b.kind.shape
+    base = R.dense_mask(b, MZ._LAST_GLOB)
+    exp = torch.zeros(B, T, T, dtype=torch.bool)
+    for r in range(B):
+        for q in range(T):
+            for k in range(T):
+                if not base[r, q, k]:
+                    continue
+                exp[r, q, k] = bool(b.kind[r, k] != MZ.TOKEN) or int(b.real_pos[r, q] - b.real_pos[r, k]) <= int(win[b.tokens[r, k]])
+    tmp = os.path.join(TMP, "gwin_data")
+    os.makedirs(tmp, exist_ok=True)
+    np.save(os.path.join(tmp, "train_token_counts.npy"), np.array([10, 0, 30, 60], np.int64))
+    tab = TR.g_window_table(tmp, 2, 6, torch.device("cpu")).tolist()
+    check("gwindow: g_window_mask = basvuru (gercek konum, BOS / Z / dolgu muaf); sinirsiz pencere = pencere yok (bit), kucuk "
+          "pencere kaybi degistirir; g_window_table (2 x 100 / sayim, 0 ve dolgu sinirsiz) %s" % tab,
+          torch.equal(got, exp) and bool(torch.equal(big, ref)) and float((small - ref).abs()) > 1e-4
+          and tab[0] == 20 and tab[2] == 6 and tab[3] == 3 and tab[1] >= 1 << 40 and tab[4] >= 1 << 40 and tab[5] >= 1 << 40,
+          "kayip %.5f / %.5f / %.5f" % (float(ref), float(big), float(small)))
+
+
 TESTS = dict(fp8=t_fp8, data=t_data, pack=t_pack, recipe=t_recipe, metrics=t_metrics, integration=t_integration,
              train=t_train, drive=t_drive, tokens=t_tokens, fineweb=t_fineweb, mtp=t_mtp, normuon=t_normuon,
-             clipfold=t_clipfold, micro=t_micro)
+             clipfold=t_clipfold, micro=t_micro, gwindow=t_gwindow)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)

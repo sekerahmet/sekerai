@@ -198,6 +198,19 @@ _LAST_GLOB = functools.partial(model_z_summaries_last_ranges, glob=True)
 model_z_summaries_last_ranges.includes_padding = _LAST_GLOB.includes_padding = True
 
 
+def g_window_mask(batch, win):
+    """summaries_last glob maskesi + token basina pencere (deneme/g-window): anahtar token'i, sorgudan gercek konumca
+    win[token]'dan eskiyse gorunmez; BOS / Z / dolgu hep _LAST_GLOB kuraliyla.  batch: real_pos tasiyan PackedBatch."""
+    base = _LAST_GLOB(batch.kind, batch.doc, batch.sent)
+    keep = (batch.kind != TOKEN)
+    wk = win[batch.tokens]
+    rp = batch.real_pos
+
+    def mask_mod(b, h, q, kv):
+        return base(b, h, q, kv) & (keep[b, kv] | (rp[b, q] - rp[b, kv] <= wk[b, kv]))
+    return mask_mod
+
+
 def _dense(mask_mod, B, T, device):
     """mask_mod -> bool (B, T, T) (SDPA yolu; CPU egitimi ve testler)."""
     b = torch.arange(B, device=device)[:, None, None]
@@ -372,9 +385,15 @@ class SentenceTransformer(torch.nn.Module):
         return self.row_len * max(self.carry_group, 1)
 
     def _masks(self, last=False):
-        """Maske fonksiyonlari: bugunku duzen (mask_fn) ya da summaries_last duzeninde ayni yapida (tek / ikili)."""
+        """Maske fonksiyonlari: bugunku duzen (mask_fn) ya da summaries_last duzeninde ayni yapida (tek / ikili).  g_window
+        (deneme/g-window, token basina pencere tablosu) varsa glob maskesi batch'ten (needs_batch)."""
         if not last:
             return self.mask_fn
+        win = getattr(self, "g_window", None)
+        if win is not None and isinstance(self.mask_fn, tuple):
+            glob = functools.partial(g_window_mask, win=win)
+            glob.needs_batch = glob.includes_padding = True
+            return model_z_summaries_last_ranges, glob
         return (model_z_summaries_last_ranges, _LAST_GLOB) if isinstance(self.mask_fn, tuple) else \
             model_z_summaries_last_ranges
 
@@ -404,7 +423,8 @@ class SentenceTransformer(torch.nn.Module):
                 x = block(add(x, l), batch.pos, w(attn))
             return self.norm(x)
         if attn is None:
-            attn = tuple(_dense(f(batch.kind, batch.doc, batch.sent), B, T, dev) for f in mfn)
+            attn = tuple(_dense(f(batch) if getattr(f, "needs_batch", False) else f(batch.kind, batch.doc, batch.sent), B, T, dev)
+                         for f in mfn)
         assert isinstance(attn, tuple) and len(attn) == 2, "global_layers: attn (yerel, global) ikilisi olmali"
         real = batch.real_pos if last else story_positions(batch.kind)
         first = len(self.blocks) - self.global_layers

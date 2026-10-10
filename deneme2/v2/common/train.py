@@ -135,7 +135,7 @@ MLP_RATIO_DEFAULT = (1.0, 4.0)  # --mlp_ratio verilmezse, G'li Model Z: MLP : ta
                                 # "bu oranları koda varsayılan standart ekler misin ?"; d768 3.000: sinav -0,0039, ayni parametre)
 LR_REF = (2e-3, 768, 0.5)      # lr auto = lr0 (d0 / d) ^ us (aci / adim ~ lr 0,2 sqrt(d) sabit); d1024 olcumu: 1,4 / 1,7e-3 duz, 1,73e-3 icinde
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ngram_embed", "ngram_layers",
-           "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads")   # --resume'da verilmezse kimlikten
+           "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "g_keep_occurrences")   # --resume'da verilmezse kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
@@ -146,7 +146,8 @@ READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_ge
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
-            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads")
+            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads",
+            "g_keep_occurrences")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -298,6 +299,15 @@ def _build(args, dev):
                                     local_kv_heads=getattr(args, "local_kv_heads", 0) or 0)
         model, mask_fn, layout = model.to(dev), model.mask_fn, "model_z"
     return model, mask_fn, layout
+
+
+def g_window_table(data_dir, occurrences, rows, dev):
+    """deneme/g-window: token basina G penceresi = occurrences x toplam / sayim (train_token_counts.npy; sayim 0 ya da dolgu
+    satiri: sinirsiz) -> int64 (rows,) cihazda."""
+    c = np.load(os.path.join(data_dir, "train_token_counts.npy")).astype(np.float64)
+    c = np.concatenate([c, np.zeros(max(0, rows - len(c)))])[:rows]
+    w = np.where(c > 0, occurrences * c.sum() / np.maximum(c, 1), 1 << 40)
+    return torch.tensor(np.minimum(w, 1 << 40).astype(np.int64), device=dev)
 
 
 def _fp8_missing(cuda):
@@ -637,6 +647,8 @@ def _args(argv):
                     help="model_z: head basina attention cikis kapisi (belge 88a, 90a); 1 girdi n1(x), 2 girdi n1(x)'in "
                          "ilk d // 64 boyutu; auto (varsayilan): model_z ve d >= 64 ise 2, aksi 0; kimlikte; "
                          "--resume'da verilmezse kosunun kimliginden")
+    ap.add_argument("--g_keep_occurrences", type=float, default=None,
+                    help="deneme: G'de token basina pencere = O x egitimdeki ortalama tekrar araligi (sayimdan); 0 / yok: pencere yok")
     ap.add_argument("--local_kv_heads", type=lambda s: s if s == "auto" else int(s), default=None,
                     help="yerel (Z'li) bloklarda k / v head sayisi (GQA); auto (varsayilan): glob_kv_heads ile ayni; 0 tam (eski)")
     ap.add_argument("--mlp_ratio", default=None,
@@ -666,7 +678,8 @@ def _args(argv):
         if args.resume and os.path.exists(ckpt) else None               # varsayilan degisse de kosu kendi ayariyla surer
     for k in args.defaulted if was is not None else ():
         setattr(args, k, was.get(k, [] if k == "mlp_ratio" else
-                                 0 if k in ("glob_kv_heads", "attn_gate", "mtp", "g_nope", "local_kv_heads") or k.startswith("ngram") else None))
+                                 0 if k in ("glob_kv_heads", "attn_gate", "mtp", "g_nope", "local_kv_heads", "g_keep_occurrences")
+                                 or k.startswith("ngram") else None))
     args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
     if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
         args.optimizer = DEFAULT_OPTIMIZER
@@ -729,6 +742,9 @@ def _args(argv):
             sys.exit("DUR: --glob_kv_heads auto: heads %d, %d'e bolunmuyor; sayi ver" % (args.heads, GLOB_KV_GROUP))
         args.glob_kv_heads = args.heads // GLOB_KV_GROUP
         auto.append("glob_kv_heads %d (%d / %d)" % (args.glob_kv_heads, args.heads, GLOB_KV_GROUP))
+    args.g_keep_occurrences = float(args.g_keep_occurrences or 0)
+    if args.g_keep_occurrences and (args.model != "model_z" or not args.global_layers or args.carry_summaries):
+        sys.exit("DUR: --g_keep_occurrences yalniz G katmanli Model Z'de (carry'siz)")
     if args.local_kv_heads is None:
         args.local_kv_heads = LOCAL_KV_DEFAULT
     if args.local_kv_heads == "auto":                                    # G'deki KV head sayisi (G'siz / GQA'siz: 0, tam)
@@ -817,6 +833,11 @@ def main(argv=None):
     model, mask_fn, layout = _build(args, dev)
     model.row_len = row_len                                              # uretim konum siniri, carry parca boyu
     last = None
+    if args.g_keep_occurrences:                                          # deneme/g-window: pencere = O x toplam / sayim
+        model.g_window = g_window_table(args.data, args.g_keep_occurrences, args.vocab_rows, dev)
+        w_ = model.g_window.float()
+        log("g_keep_occurrences %g: pencere ' the' (262) %d, '.' (13) %d, pencere < 2048 olan sozluk payi %.3f" % (
+            args.g_keep_occurrences, int(w_[262]), int(w_[13]), float((w_ < 2048).float().mean())))
     if args.summaries_last:                                              # belge 66: [token'lar | ozetler | dolgu]
         from model import summaries_last as last
         mask_fn = model._masks(True)
@@ -832,7 +853,8 @@ def main(argv=None):
                  summaries_last=args.summaries_last, glob_kv_heads=args.glob_kv_heads, carry_summaries=args.carry_summaries,
                  carry_group=args.carry_group, vocab_rows=args.vocab_rows, attn_gate=args.attn_gate,
                  ngram_embed=args.ngram_embed, ngram_layers=args.ngram_layers, ngram_sparse=args.ngram_sparse,
-                 mtp=args.mtp, g_nope=args.g_nope, mlp_ratio=args.mlp_ratio, local_kv_heads=args.local_kv_heads)
+                 mtp=args.mtp, g_nope=args.g_nope, mlp_ratio=args.mlp_ratio, local_kv_heads=args.local_kv_heads,
+                 g_keep_occurrences=args.g_keep_occurrences)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -852,7 +874,7 @@ def main(argv=None):
         if _archived(was):                                                # eski / kaldirilan yol (belge 77)
             sys.exit("DUR: " + _archived(was))
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
-               "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [], "local_kv_heads": 0,
+               "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [], "local_kv_heads": 0, "g_keep_occurrences": 0,
                **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
