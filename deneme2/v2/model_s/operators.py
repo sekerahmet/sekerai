@@ -1,0 +1,107 @@
+"""operators -- Model S Parca 1: denklemin sag tarafi, ayri ayri degerlendirilen operatorler (TASARIM.md s1, s3).
+
+    du/dt = A(u) + F(u),   P: izdusum (RMSNorm; operatorler P(u)'da degerlendirilir)
+
+Her operator ARTIS dondurur (du), durumu degistirmez; zaman adimi semasi (integrator) artisi kendi katsayisiyla ekler.
+    P  Projection     her token vektorunu yaricap kisitina izdusurur: u / rms(u) * g
+    A  AttentionOp    x ekseninde yerel olmayan integral: sum_x' gamma(x, x') V(x'), gamma = softmax(<Q(x), K(x')> / sqrt(hd))
+                      (nedensel ya da verilen maske), RoPE konum, QK izdusumu (fp32), GQA (k / v daha az head)
+    F  FeedForwardOp  her x'te ayri: SwiGLU (down(silu(gate) * up))
+"""
+import dataclasses
+
+import torch
+import torch.nn.functional as F_
+
+
+@dataclasses.dataclass
+class Context:
+    """Operatorlerin ortak girdisi: pos (B, T) RoPE konumu; mask None (nedensel), bool (B, T, T) ya da FlexAttention BlockMask."""
+    pos: torch.Tensor
+    mask: object = None
+
+
+class Projection(torch.nn.Module):
+    """P: u -> u / rms(u) * g (RMSNorm; makalede LN = kisita izdusum)."""
+
+    def __init__(self, d, eps=1e-6):
+        super().__init__()
+        self.g = torch.nn.Parameter(torch.ones(d))
+        self.eps = eps
+
+    def forward(self, u):
+        uf = u.float()
+        return (uf * torch.rsqrt(uf.pow(2).mean(-1, keepdim=True) + self.eps)).to(u.dtype) * self.g
+
+
+def rope(x, pos, base=10000.0):
+    """x (B, H, T, hd), pos (B, T) -> yarim boyut ciftlerinde donme (konum pos)."""
+    half = x.shape[-1] // 2
+    freq = base ** (-torch.arange(half, device=x.device, dtype=torch.float) / half)
+    ang = pos[:, None, :, None].float() * freq
+    cos, sin = ang.cos().to(x.dtype), ang.sin().to(x.dtype)
+    a, b = x[..., :half], x[..., half:]
+    return torch.cat([a * cos - b * sin, a * sin + b * cos], -1)
+
+
+class AttentionOp(torch.nn.Module):
+    """A: du(x) = W_o sum_x' gamma(x, x') V(x').  Q, K, V = P(u) W_{q,k,v}; Q, K head basina izdusum (fp32) ve RoPE."""
+
+    def __init__(self, d, heads, kv_heads=None, rope_on=True):
+        super().__init__()
+        assert d % heads == 0, "d heads'e bolunmeli"
+        self.d, self.heads, self.hd = d, heads, d // heads
+        self.kv_heads = int(kv_heads or heads)
+        assert heads % self.kv_heads == 0, "kv_heads heads'in boleni olmali"
+        self.rope_on = rope_on
+        self.P = Projection(d)
+        self.w_q = torch.nn.Linear(d, d, bias=False)
+        self.w_kv = torch.nn.Linear(d, 2 * self.kv_heads * self.hd, bias=False)
+        self.w_o = torch.nn.Linear(d, d, bias=False)
+        self.q_P, self.k_P = Projection(self.hd), Projection(self.hd)
+
+    def qkv(self, u, pos):
+        """-> q (B, H, T, hd), k / v (B, Hkv, T, hd)."""
+        B, T, _ = u.shape
+        h = self.P(u)
+        q = self.w_q(h).view(B, T, self.heads, self.hd).transpose(1, 2)
+        k, v = self.w_kv(h).view(B, T, 2, self.kv_heads, self.hd).permute(2, 0, 3, 1, 4)
+        with torch.autocast(u.device.type, enabled=False):
+            q, k = self.q_P(q.float()).to(v.dtype), self.k_P(k.float()).to(v.dtype)
+        if self.rope_on:
+            q, k = rope(q, pos), rope(k, pos)
+        return q, k, v
+
+    @staticmethod
+    def kernel(q, k, v, mask):
+        """sum_x' softmax(<q, k> / sqrt(hd)) v; mask None nedensel, bool (B, T, T) ya da BlockMask."""
+        gqa = k.shape[1] != q.shape[1]
+        if mask is None:
+            return F_.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=gqa)
+        if torch.is_tensor(mask):
+            if gqa:
+                r = q.shape[1] // k.shape[1]
+                k, v = k.repeat_interleave(r, 1), v.repeat_interleave(r, 1)
+            return F_.scaled_dot_product_attention(q, k, v, attn_mask=mask[:, None])
+        from torch.nn.attention.flex_attention import flex_attention
+        return flex_attention(q, k, v, block_mask=mask, enable_gqa=gqa)
+
+    def forward(self, u, ctx):
+        B, T, _ = u.shape
+        q, k, v = self.qkv(u, ctx.pos)
+        a = self.kernel(q, k, v, ctx.mask)
+        return self.w_o(a.transpose(1, 2).reshape(B, T, self.d))
+
+
+class FeedForwardOp(torch.nn.Module):
+    """F: du(x) = W_down(silu(W_gate P(u)) * W_up P(u)), her x'te ayri."""
+
+    def __init__(self, d, hidden):
+        super().__init__()
+        self.P = Projection(d)
+        self.w_gate_up = torch.nn.Linear(d, 2 * hidden, bias=False)
+        self.w_down = torch.nn.Linear(hidden, d, bias=False)
+
+    def forward(self, u, ctx=None):
+        g, up = self.w_gate_up(self.P(u)).chunk(2, -1)
+        return self.w_down(F_.silu(g) * up)
