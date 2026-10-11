@@ -43,7 +43,7 @@ def _fill_info_ema(state, prefix, *args, **kwargs):
 class StrataX(BaselineTransformer):
     def __init__(self, d_local=512, heads_local=8, enc_layers=2, dec_layers=2, d_global=1024, heads_global=16,
                  global_layers=12, theta=8.0, window=256, aux_weight=1.0, vocab_rows=VOCAB, out_cuts=(4096, 16384),
-                 plan=0, next_weight=0.0, rate=0.0, d_token=None, direct=False, memory=0):
+                 plan=0, next_weight=0.0, rate=0.0, d_token=None, direct=False, memory=0, inject=False):
         """plan k (HAYAL.md H8): buyuk cozucu birim basina k yuvalik plan (d_global -> k x d_local); kod cozucu token'i yazarken
         kendi yuvasinin plan vektorunu gorur (0: tek vektor, down).  next_weight (H9): sonraki birimin kodlayici vektorunu
         tahmin (kosinus, hedefte gradyan kesik) yardimci kayip agirligi.  rate r > 0: theta = r x kodlayicinin ortalama
@@ -56,6 +56,8 @@ class StrataX(BaselineTransformer):
         direct: buyuk cozucuden cikisa dogrudan kapili yol (danisman 02 / tez tartismasi 3; kullanici, 11 Ekim: "beynin konusma kismi
         sadece konusma degildir o beynin bir cok kismindan faydalanir"): h = norm(kod cozucu) + sigmoid(kapi_t) W glob_norm(z_k(t));
         ikisi ayni bagli E ile tek softmax = kapili uzmanlar carpimi (kod cozucunun d_local kanalini atlar).
+        inject (danisman, GOZDEN_GECIRME s9; N4 iletisim ilkesi): Thinker bilgisi her Writer katmanina kendi izdusumuyle
+        (x += down_l(glob_norm(z_k(t))) her Writer blogundan once; ilk blokta ctx zaten var) -- birlestirme her katmanda.
         d_token (varsayilan d_local): token temsili (E ve cikis) boyu; d_local'dan farkliysa giris / cikista ince izdusum
         (SS ayristirma: token boyu acigin cogunu acikliyor, yerel katmanlar dar kalabilir)."""
         d_tok = int(d_token or d_local)
@@ -73,6 +75,7 @@ class StrataX(BaselineTransformer):
         self.down = torch.nn.Linear(d_global, d_local * max(1, self.plan_k), bias=False)
         self.pred_next = torch.nn.Linear(d_global, d_global, bias=False) if self.next_weight else None
         self.direct = torch.nn.Linear(d_global, d_tok, bias=False) if direct else None
+        self.inject = torch.nn.ModuleList([torch.nn.Linear(d_global, d_local, bias=False) for _ in range(dec_layers - 1)]) if inject else None
         self.direct_gate = torch.nn.Linear(d_local, 1) if direct else None
         self.mem_heads, self.mem_dim = int(memory), 64
         if self.mem_heads:
@@ -98,7 +101,7 @@ class StrataX(BaselineTransformer):
                 std = 0.02 / math.sqrt(2 * n) if name.endswith(("w_o.weight", "w_down.weight")) else 0.02
                 with torch.no_grad():
                     p.normal_(0.0, std)
-        for lin in (self.up, self.down, self.tok_in, self.tok_out, self.direct, getattr(self, "mem_k", None), getattr(self, "mem_q", None),
+        for lin in (self.up, self.down, self.tok_in, self.tok_out, self.direct, *(self.inject or ()), getattr(self, "mem_k", None), getattr(self, "mem_q", None),
                     getattr(self, "mem_v", None), getattr(self, "mem_o", None)):
             if lin is None:
                 continue
@@ -208,7 +211,10 @@ class StrataX(BaselineTransformer):
                 tg = z_in[:, 1:][pairs].detach().float()
                 aux = aux + self.next_weight * (1 - torch.nn.functional.cosine_similarity(pr, tg, -1)).mean()
         x = he + ctx
-        for blk in self.blocks[self.n_enc + self.n_glob:]:
+        gk = self.glob_norm(z).gather(1, kc[..., None].expand(-1, -1, z.shape[-1])) if self.inject is not None else None
+        for i, blk in enumerate(self.blocks[self.n_enc + self.n_glob:]):
+            if i and self.inject is not None:                              # Thinker -> her Writer katmani (ilkinde ctx)
+                x = x + torch.where(ok[..., None], self.inject[i - 1](gk).float(), torch.zeros_like(x))
             x = blk(x, pos, m_loc)
         h = self.norm(self.tok_out(x) if self.tok_out is not None else x)
         if self.direct is not None:                                         # dogrudan yol: sonu <= t olan son birimin glob_norm(z)'si

@@ -546,6 +546,16 @@ def t_strata_x():
     check("strata-x dogrudan yol (buyuk cozucu -> cikis, kapili): nedensellik, belge yalitimi, uretim, kapi girdisi RMS 1",
           float((da_[0, :9] - db_[0, :9]).abs().max()) < 1e-6 and float((dr2[0, 9:] - ds2[0]).abs().max()) < 1e-5
           and len(md.generate([[[5, 6]]], 1, 3)) == 1 and float((gin[0] - 1).abs().max()) < 1e-3, "")
+    mi = StrataX(d_local=32, heads_local=4, enc_layers=1, dec_layers=3, d_global=64, heads_global=4, global_layers=2,
+                 theta=20.0, window=6, inject=True).eval()
+    with torch.no_grad():
+        ia_, ib_ = mi.forward_states(a, pos, z)[0], mi.forward_states(b, pos, z)[0]
+        ir2 = mi.forward_states(row, prow, drow)[0]
+        is2 = mi.forward_states(t2, torch.arange(7)[None], torch.zeros(1, 7, dtype=torch.long))[0]
+    mi.forward_states(a, pos, z)[0].pow(2).mean().backward()
+    check("strata-x inject (Thinker -> her Writer katmani): 2 izdusum, nedensellik, belge yalitimi, gradyan alir",
+          len(mi.inject) == 2 and float((ia_[0, :9] - ib_[0, :9]).abs().max()) < 1e-6 and float((ir2[0, 9:] - is2[0]).abs().max()) < 1e-5
+          and all(p.grad is not None and float(p.grad.abs().sum()) > 0 for p in mi.inject.parameters()), "")
     mm = StrataX(d_local=32, heads_local=4, enc_layers=1, dec_layers=1, d_global=64, heads_global=4, global_layers=2,
                  theta=20.0, window=6, memory=2).eval()
     with torch.no_grad():

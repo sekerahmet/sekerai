@@ -148,7 +148,7 @@ READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_ge
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
-            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "widths", "strata_op", "strata_qk", "strata_ffn_keep", "strata_out", "sx_local", "sx_theta", "sx_window", "sx_plan", "sx_next", "sx_rate", "sx_token", "sx_direct", "sx_memory")
+            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "widths", "strata_op", "strata_qk", "strata_ffn_keep", "strata_out", "sx_local", "sx_theta", "sx_window", "sx_plan", "sx_next", "sx_rate", "sx_token", "sx_direct", "sx_memory", "sx_inject")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -301,7 +301,8 @@ def _build(args, dev):
                         out_cuts=tuple(getattr(args, "strata_out", None) or ()) or None,
                         plan=getattr(args, "sx_plan", 0) or 0, next_weight=getattr(args, "sx_next", 0) or 0.0,
                         rate=getattr(args, "sx_rate", 0) or 0.0, d_token=getattr(args, "sx_token", 0) or None,
-                        direct=bool(getattr(args, "sx_direct", 0)), memory=getattr(args, "sx_memory", 0) or 0)
+                        direct=bool(getattr(args, "sx_direct", 0)), memory=getattr(args, "sx_memory", 0) or 0,
+                        inject=bool(getattr(args, "sx_inject", 0)))
         model, mask_fn, layout = model.to(dev), None, "transformer"        # maskeleri kendisi kurar (yerel / birim)
     else:
         sys.path.insert(0, os.path.join(root, "model_z"))
@@ -626,6 +627,7 @@ def _args(argv):
     ap.add_argument("--sx_plan", type=int, default=None, help="strata_x plan yuvasi k (HAYAL.md H8; 0 kapali); kimlikte")
     ap.add_argument("--sx_next", type=float, default=None, help="strata_x sonraki birim tahmini agirligi (H9; 0 kapali); kimlikte")
     ap.add_argument("--sx_memory", type=int, default=None, help="strata_x hikaye bellegi head sayisi (HAYAL tur 4-5; 0 kapali); kimlikte")
+    ap.add_argument("--sx_inject", type=int, default=None, help="strata_x Thinker bilgisi her Writer katmanina (1 acik); kimlikte")
     ap.add_argument("--sx_direct", type=int, default=None, help="strata_x buyuk cozucuden cikisa dogrudan kapili yol (1 acik); kimlikte")
     ap.add_argument("--sx_token", type=int, default=None, help="strata_x token temsili (E / cikis) boyu (0: yerel d); kimlikte")
     ap.add_argument("--sx_rate", type=float, default=None, help="strata_x birim basina ortalama token r: theta = r x kodlayicinin "
@@ -788,17 +790,18 @@ def _args(argv):
         args.sx_token = args.sx_token if args.sx_token is not None else w.get("sx_token", 0)
         args.sx_direct = args.sx_direct if args.sx_direct is not None else w.get("sx_direct", 0)
         args.sx_memory = args.sx_memory if args.sx_memory is not None else w.get("sx_memory", 0)
+        args.sx_inject = args.sx_inject if args.sx_inject is not None else w.get("sx_inject", 0)
         if args.strata_out is None:
             args.strata_out = w.get("strata_out", [4096, 16384])
         if isinstance(args.strata_out, str):
             args.strata_out = [] if args.strata_out in ("", "0") else [int(c) for c in args.strata_out.split(",")]
         if len(args.sx_local) != 4 or args.sx_local[0] % args.sx_local[1] or args.sx_theta <= 0:
             sys.exit("DUR: --sx_local d,heads,kodlayici,kod cozucu (d heads'e bolunur); --sx_theta > 0")
-    elif args.sx_local or args.sx_theta or args.sx_window or args.sx_plan or args.sx_next or args.sx_rate or args.sx_token or args.sx_direct             or args.sx_memory:
+    elif args.sx_local or args.sx_theta or args.sx_window or args.sx_plan or args.sx_next or args.sx_rate or args.sx_token or args.sx_direct             or args.sx_memory or args.sx_inject:
         sys.exit("DUR: --sx_* yalniz strata_x")
     else:
         (args.sx_local, args.sx_theta, args.sx_window, args.sx_plan, args.sx_next, args.sx_rate, args.sx_token, args.sx_direct,
-         args.sx_memory) = ([], 0, 0, 0, 0, 0, 0, 0, 0)
+         args.sx_memory, args.sx_inject) = ([], 0, 0, 0, 0, 0, 0, 0, 0, 0)
     if args.model == "model_s":                                          # sirali adim sayisi = layers
         if args.widths is None and was is not None:
             args.widths = was.get("widths")
@@ -950,7 +953,7 @@ def main(argv=None):
                  strata_qk=args.strata_qk, strata_ffn_keep=args.strata_ffn_keep,
                  strata_out=args.strata_out, sx_local=args.sx_local, sx_theta=args.sx_theta, sx_window=args.sx_window,
                  sx_plan=args.sx_plan, sx_next=args.sx_next, sx_rate=args.sx_rate, sx_token=args.sx_token,
-                 sx_direct=args.sx_direct, sx_memory=args.sx_memory)
+                 sx_direct=args.sx_direct, sx_memory=args.sx_memory, sx_inject=args.sx_inject)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -973,7 +976,7 @@ def main(argv=None):
                "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [], "local_kv_heads": 0,
                "widths": [], "strata_op": "split" if was.get("model") == "model_s" else "", "strata_qk": 0,
                "strata_ffn_keep": 1.0 if was.get("model") == "model_s" else 0, "strata_out": [], "sx_local": [], "sx_theta": 0,
-               "sx_window": 0, "sx_plan": 0, "sx_next": 0, "sx_rate": 0, "sx_token": 0, "sx_direct": 0, "sx_memory": 0, **was}                                                    # sonradan eklenenler
+               "sx_window": 0, "sx_plan": 0, "sx_next": 0, "sx_rate": 0, "sx_token": 0, "sx_direct": 0, "sx_memory": 0, "sx_inject": 0, **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:
