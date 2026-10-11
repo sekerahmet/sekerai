@@ -146,7 +146,7 @@ READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_ge
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
-            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "widths", "strata_op", "strata_qk", "strata_ffn_keep", "strata_out")
+            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "widths", "strata_op", "strata_qk", "strata_ffn_keep", "strata_out", "sx_local", "sx_theta", "sx_window")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -289,6 +289,14 @@ def _build(args, dev):
                        vocab_rows=getattr(args, "vocab_rows", D.VOCAB), op=getattr(args, "strata_op", "") or "split",
                        qk_dim=getattr(args, "strata_qk", 0) or None, ffn_keep=getattr(args, "strata_ffn_keep", 0) or 1.0,
                        out_cuts=tuple(getattr(args, "strata_out", None) or ()) or None)
+        model, mask_fn, layout = model.to(dev), R.document_mask, "transformer"
+    elif args.model == "strata_x":                                       # deneme/model-s: bilgiye uyarlanan x izgarasi
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(root)), "model_s"))
+        from strata_x import StrataX
+        dl, hl, ne, nd = getattr(args, "sx_local", None) or (512, 8, 2, 2)
+        model = StrataX(dl, hl, ne, nd, args.d, args.heads, args.layers, theta=getattr(args, "sx_theta", 8.0),
+                        window=getattr(args, "sx_window", 256), vocab_rows=getattr(args, "vocab_rows", D.VOCAB),
+                        out_cuts=tuple(getattr(args, "strata_out", None) or ()) or None)
         model, mask_fn, layout = model.to(dev), R.document_mask, "transformer"
     else:
         sys.path.insert(0, os.path.join(root, "model_z"))
@@ -603,7 +611,11 @@ def _git():
 
 def _args(argv):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--model", required=True, choices=("transformer", "model_z", "model_s"))
+    ap.add_argument("--model", required=True, choices=("transformer", "model_z", "model_s", "strata_x"))
+    ap.add_argument("--sx_local", default=None, help="strata_x yerel kisim d,heads,kodlayici,kod cozucu (varsayilan 512,8,2,2); "
+                                                     "--d / --heads / --layers buyuk cozucu; kimlikte")
+    ap.add_argument("--sx_theta", type=float, default=None, help="strata_x birim basina bilgi esigi, nat (varsayilan 8); kimlikte")
+    ap.add_argument("--sx_window", type=int, default=None, help="strata_x yerel attention penceresi (varsayilan 256); kimlikte")
     ap.add_argument("--widths", default=None,
                     help="model_s: adim basina genislik (orn. 1,1,1,1,2,2,2,2); layers = adim sayisi; kimlikte; --resume'da "
                          "verilmezse kimlikten")
@@ -747,6 +759,25 @@ def _args(argv):
         args.mlp_ratio = [] if args.mlp_ratio in ([0.0], [0]) else args.mlp_ratio
     if args.mlp_ratio and (args.model != "model_z" or not args.global_layers or len(args.mlp_ratio) != 2):
         sys.exit("DUR: --mlp_ratio yerel,G (orn. 1,4) yalniz G katmanli Model Z'de; 0 esit genislik")
+    if args.model == "strata_x":                                         # buyuk cozucu --d / --heads / --layers
+        if args.widths or args.strata_op or args.strata_qk or args.strata_ffn_keep:
+            sys.exit("DUR: strata_x --widths / --strata_op / --strata_qk / --strata_ffn_keep almaz")
+        args.widths, args.strata_op, args.strata_qk, args.strata_ffn_keep = [], "", 0, 0
+        w = was or {}
+        args.sx_local = args.sx_local if args.sx_local is not None else w.get("sx_local", "512,8,2,2")
+        args.sx_local = [int(v) for v in args.sx_local.split(",")] if isinstance(args.sx_local, str) else list(args.sx_local)
+        args.sx_theta = args.sx_theta if args.sx_theta is not None else w.get("sx_theta", 8.0)
+        args.sx_window = args.sx_window if args.sx_window is not None else w.get("sx_window", 256)
+        if args.strata_out is None:
+            args.strata_out = w.get("strata_out", [4096, 16384])
+        if isinstance(args.strata_out, str):
+            args.strata_out = [] if args.strata_out in ("", "0") else [int(c) for c in args.strata_out.split(",")]
+        if len(args.sx_local) != 4 or args.sx_local[0] % args.sx_local[1] or args.sx_theta <= 0:
+            sys.exit("DUR: --sx_local d,heads,kodlayici,kod cozucu (d heads'e bolunur); --sx_theta > 0")
+    elif args.sx_local or args.sx_theta or args.sx_window:
+        sys.exit("DUR: --sx_* yalniz strata_x")
+    else:
+        args.sx_local, args.sx_theta, args.sx_window = [], 0, 0
     if args.model == "model_s":                                          # sirali adim sayisi = layers
         if args.widths is None and was is not None:
             args.widths = was.get("widths")
@@ -773,6 +804,8 @@ def _args(argv):
         _ops = args.strata_op.split(",")
         if not set(_ops) <= {"split", "parallel", "mix"} or len(_ops) not in (1, len(args.widths)):
             sys.exit("DUR: --strata_op split | parallel | mix, tek ad ya da widths kadar liste (%d)" % len(args.widths))
+    elif args.model == "strata_x":
+        pass
     elif args.widths or args.strata_op or args.strata_qk or args.strata_ffn_keep or args.strata_out:
         sys.exit("DUR: --widths / --strata_op / --strata_qk / --strata_ffn_keep / --strata_out yalniz model_s")
     else:
@@ -894,7 +927,7 @@ def main(argv=None):
                  mtp=args.mtp, g_nope=args.g_nope, mlp_ratio=args.mlp_ratio, local_kv_heads=args.local_kv_heads,
                  widths=args.widths, strata_op=args.strata_op,
                  strata_qk=args.strata_qk, strata_ffn_keep=args.strata_ffn_keep,
-                 strata_out=args.strata_out)
+                 strata_out=args.strata_out, sx_local=args.sx_local, sx_theta=args.sx_theta, sx_window=args.sx_window)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -916,7 +949,8 @@ def main(argv=None):
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
                "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [], "local_kv_heads": 0,
                "widths": [], "strata_op": "split" if was.get("model") == "model_s" else "", "strata_qk": 0,
-               "strata_ffn_keep": 1.0 if was.get("model") == "model_s" else 0, "strata_out": [], **was}                                                    # sonradan eklenenler
+               "strata_ffn_keep": 1.0 if was.get("model") == "model_s" else 0, "strata_out": [], "sx_local": [], "sx_theta": 0,
+               "sx_window": 0, **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:

@@ -1,4 +1,5 @@
 """tests_model_s -- Model S parcalarinin testleri (CPU, saniyeler).  python tests_model_s.py [--only ops,...]"""
+import math
 import os
 import sys
 
@@ -442,6 +443,77 @@ def t_out():
           s1 < 1e-4 and d_k < 1e-4 and one == m.generate(prompts, 2, 5, batch_size=8), "toplam sapma %.1e, fark %.1e" % (s1, d_k))
 
 
+def t_strata_x():
+    """Strata-x: birim sinirlari = elle (belge ici floor(C / theta)); nedensellik (t'den sonrasi degisince <= t ayni: h ve sinirlar);
+    belge yalitimi (satirda iki belge = ikinci belge tek basina); output_loss degeri = ana CE, gradyan yardimci CE'yi de tasir;
+    loss_per_target ve uretim calisir."""
+    from strata_x import StrataX
+    torch.manual_seed(10)
+    m = StrataX(d_local=32, heads_local=4, enc_layers=1, dec_layers=1, d_global=64, heads_global=4, global_layers=2,
+                theta=20.0, window=6)
+    m.out.set_order(torch.randint(0, 1000, (m.out.vocab,)).float())
+    info = torch.rand(2, 12) * 9
+    doc = torch.tensor([[0] * 7 + [1] * 5, [0] * 10 + [-1] * 2])
+    ends = m.units(info, doc)
+    ref = torch.zeros_like(ends)
+    for b in range(2):
+        acc, last_q, cur = 0.0, 0, None
+        for t in range(12):
+            d_ = int(doc[b, t])
+            if d_ < 0:
+                continue
+            if d_ != cur:
+                cur, acc, last_q = d_, 0.0, 0
+            acc += float(info[b, t])
+            q = math.floor(acc / 20.0)
+            ref[b, t] = q > last_q
+            last_q = q
+    check("strata-x: birim sinirlari = elle (belge ici floor(C / theta), dolgu yok)", torch.equal(ends, ref), "%s" % ends.int().tolist())
+    m.eval()
+    T = 16
+    a = torch.randint(0, 1000, (1, T))
+    b = a.clone()
+    b[0, 9:] = torch.randint(0, 1000, (T - 9,))
+    pos = torch.arange(T)[None]
+    z = torch.zeros(1, T, dtype=torch.long)
+    with torch.no_grad():
+        ha, _, ea, ia = m.forward_states(a, pos, z)
+        hb, _, eb, ib = m.forward_states(b, pos, z)
+    d_c = float((ha[0, :9] - hb[0, :9]).abs().max())
+    check("strata-x: nedensellik (konum 9'dan sonrasi degisince 0-8 ayni: durum, sinir, bilgi); birim / token %.2f" % (ea.float().mean()),
+          d_c < 1e-6 and torch.equal(ea[0, :9], eb[0, :9]) and torch.equal(ia[0, :9], ib[0, :9]), "fark %.1e" % d_c)
+    t2 = torch.randint(0, 1000, (1, 7))
+    row = torch.cat([a[:, :9], t2], 1)
+    drow = torch.tensor([[0] * 9 + [1] * 7])
+    prow = torch.cat([torch.arange(9), torch.arange(7)])[None]
+    with torch.no_grad():
+        hr = m.forward_states(row, prow, drow)[0]
+        hs = m.forward_states(t2, torch.arange(7)[None], torch.zeros(1, 7, dtype=torch.long))[0]
+    d_d = float((hr[0, 9:] - hs[0]).abs().max())
+    check("strata-x: belge yalitimi (satirdaki ikinci belge = tek basina)", d_d < 1e-5, "fark %.1e" % d_d)
+    m.train()
+    tok = torch.randint(0, 1000, (2, 12))
+    tgt = torch.roll(tok, -1, 1)
+    tgt[:, -1] = -100
+    B_ = type("B", (), dict(tokens=tok, pos=torch.arange(12).expand(2, 12), doc=torch.zeros(2, 12, dtype=torch.long)))()
+    h = m._batch_hidden(B_)
+    loss = m.output_loss(h.flatten(0, 1), tgt.flatten())
+    main = m._nll(h.flatten(0, 1)[tgt.flatten() >= 0], tgt.flatten()[tgt.flatten() >= 0]).mean()
+    loss.backward()
+    g1 = m.blocks[0].A.w_q.weight.grad.clone()
+    m.zero_grad()
+    m.aux_weight = 0.0
+    h = m._batch_hidden(B_)
+    m.output_loss(h.flatten(0, 1), tgt.flatten()).backward()
+    g0 = m.blocks[0].A.w_q.weight.grad.clone()
+    m.aux_weight = 1.0
+    check("strata-x: output_loss degeri = ana CE; yardimci CE kodlayici gradyanina girer",
+          abs(float(loss) - float(main)) < 1e-6 and float((g1 - g0).abs().max()) > 1e-8, "loss %.4f ana %.4f" % (float(loss), float(main)))
+    m.eval()
+    out = m.generate([[[5, 6, 7]], [[8]]], 2, 4)
+    check("strata-x: uretim calisir (tek tek, tam yeniden hesap)", len(out) == 2 and all(len(o) == 3 for o in out), str(out[0])[:80])
+
+
 def t_train():
     """Parca 5: train.py --model model_s --widths 1,2 (CPU, d 16; tests_v2'nin kucuk verisi): kayip duser; kimlikte widths,
     layers = adim sayisi; kesilip --resume ile surdurulen = kesintisiz (agent.pt bit duzeyinde, widths kimlikten);
@@ -486,6 +558,21 @@ def t_train():
           and so["identity"]["strata_qk"] == 4 and int(rk[50257]) < 2 and int(rk[50256]) < 2
           and all(torch.equal(so["state"][k], so2["state"][k]) for k in so["state"]),
           "kayip %.3f -> %.3f" % (sum(Lo[:3]) / 3, sum(Lo[-3:]) / 3))
+    sx = ["--data", data, "--stream", root, "--device", "cpu", "--d", "16", "--heads", "2", "--layers", "1", "--lr", "1e-2",
+          "--checkpoint_minutes", "0", "--model", "strata_x", "--sx_local", "16,2,1,1", "--sx_theta", "6", "--sx_window", "8",
+          "--epochs", "2"]
+    x1 = TR.main(sx + ["--out", out("sx_A")])
+    Lx = [w["loss"] for w in x1["log"]]
+    TR.main(sx + ["--out", out("sx_B"), "--stop_step", "5"])
+    sxc = [a_ for a_ in sx if a_ not in ("--sx_local", "16,2,1,1", "--sx_theta", "6", "--sx_window", "8")]
+    TR.main(sxc + ["--out", out("sx_B"), "--resume", "1"])
+    xa, xb = (torch.load(os.path.join(out(n), "agent.pt"), weights_only=False) for n in ("sx_A", "sx_B"))
+    mx, _ = GR.load_run(out("sx_A"), data, torch.device("cpu"))
+    check("train strata_x: kayip duser; kimlikte sx_*; surdurulen (sx_* kimlikten) = kesintisiz; load_run ayni agirlik",
+          sum(Lx[-3:]) / 3 < sum(Lx[:3]) / 3 - 0.5 and xa["identity"]["sx_local"] == [16, 2, 1, 1] and xa["identity"]["sx_theta"] == 6
+          and all(torch.equal(xa["state"][k], xb["state"][k]) for k in xa["state"])
+          and all(torch.equal(mx.state_dict()[k], xa["state"][k]) for k in xa["state"]),
+          "kayip %.3f -> %.3f" % (sum(Lx[:3]) / 3, sum(Lx[-3:]) / 3))
     c = TR.main(base + ["--strata_op", "mix", "--out", out("s_M")])
     Lm = [w["loss"] for w in c["log"]]
     TR.main(base + ["--strata_op", "mix", "--out", out("s_M2"), "--stop_step", "5"])
@@ -500,7 +587,7 @@ def t_train():
     check("train model_s: --widths model_s disinda / model_s'de eksik -> DUR", all(m_ and "DUR" in m_ for m_ in bad), str(bad))
 
 
-TESTS = dict(ops=t_ops, steps=t_steps, stages=t_stages, model=t_model, mix=t_mix, fold=t_fold, qk=t_qk, gate=t_gate, out=t_out, train=t_train)
+TESTS = dict(ops=t_ops, steps=t_steps, stages=t_stages, model=t_model, mix=t_mix, fold=t_fold, qk=t_qk, gate=t_gate, out=t_out, strata_x=t_strata_x, train=t_train)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)

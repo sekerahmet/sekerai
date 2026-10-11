@@ -56,7 +56,10 @@ class FactorizedOutput(torch.nn.Module):
     def loss(self, h, E, target):
         """h (N, d), target (N,) (-100 hedefsiz) -> hedefli konumlarda ortalama -log p; kuyruk yalniz hedefi o kumede olan satirlarda."""
         ok = target >= 0
-        h, t = h[ok], target[ok]
+        return self.nll(h[ok], E, target[ok]).mean()
+
+    def nll(self, h, E, t):
+        """h (N, d), t (N,) gecerli hedef -> -log p[t] (N,)."""
         r = self.rank[t]
         hd = self._head(h, E)
         K0 = self.cuts[0]
@@ -67,4 +70,4 @@ class FactorizedOutput(torch.nn.Module):
             idx = m.nonzero()[:, 0]
             tl = self._tail(h[idx], E, j).gather(-1, (r[idx] - a)[:, None])[:, 0] + hd[idx, K0 + j]
             lp = lp.index_put((idx,), tl)
-        return -lp.mean()
+        return -lp

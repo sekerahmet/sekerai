@@ -29,6 +29,78 @@ import gap_v2 as G  # noqa: E402
 
 
 @torch.no_grad()
+def info_grid(model, stories, rows, dev):
+    """6. x ekseni (Strata AMR tezi): token basina surpriz -log p (modelin kendisi); dagilimin dengesizligi (Gini, bilginin
+    %50 / %90'i token'larin ne kadarinda) ve birikimli surpriz esigi theta'yi gecince kesilen birimler: birim basina token,
+    birim basina bilgi (sapmasi), cumle uzunluguyla kiyas (Model Z birimi)."""
+    import numpy as np
+    import torch.nn.functional as F_
+    batch = D.build_batch(stories, rows, "transformer", dev)
+    T_ = batch.doc.shape[1]
+    attn = (batch.doc[:, :, None] == batch.doc[:, None, :]) & torch.ones(T_, T_, dtype=torch.bool).tril()
+    h = model.hidden(batch.tokens, batch.pos, attn)
+    lp = F_.log_softmax(model._logits(h).float(), -1)
+    s_all, sent_len = [], []
+    for r in range(batch.tokens.shape[0]):
+        keep = batch.target[r] >= 0
+        t = batch.target[r][keep]
+        s = -lp[r][keep].gather(-1, t[:, None])[:, 0]
+        s_all.append(s.numpy())
+        ends = (t == D.END_ID).nonzero()[:, 0].numpy()
+        sent_len += list(np.diff(np.concatenate([[-1], ends])))
+    s = np.concatenate(s_all)
+    srt = np.sort(s)[::-1]
+    cum = np.cumsum(srt) / srt.sum()
+    n = len(s)
+    gini = 1 - 2 * np.sum(np.cumsum(np.sort(s)) / s.sum()) / n + 1 / n
+    print("token %d | ortalama surpriz %.3f nat | Gini %.3f | bilginin %%50'si token'larin %.3f'inde, %%90'i %.3f'inde | "
+          "< 0,5 nat token payi %.3f (bilgideki payi %.3f)" % (n, s.mean(), gini, (cum < 0.5).mean() + 1 / n, (cum < 0.9).mean() + 1 / n,
+                                                               (s < 0.5).mean(), s[s < 0.5].sum() / s.sum()))
+    print("cumle (END'e kadar) ortalama %.1f token, %.1f nat" % (np.mean(sent_len), s.mean() * np.mean(sent_len)))
+    print("esik theta (nat) | birim basina token (ort / ortanca) | birim sayisi / token | birim bilgisi ort (sd) | ayni sayida sabit "
+          "parcanin bilgi sd'si")
+    for theta in (4, 8, 16, 32):
+        units, acc, cnt, infos = [], 0.0, 0, []
+        for x in s:
+            acc += x
+            cnt += 1
+            if acc >= theta:
+                units.append(cnt)
+                infos.append(acc)
+                acc, cnt = 0.0, 0
+        L = int(round(np.mean(units)))
+        fixed = [s[i:i + L].sum() for i in range(0, n - L + 1, L)]
+        print("%15d | %5.2f / %3d | %.3f | %6.2f (%5.2f) | %5.2f" % (theta, np.mean(units), int(np.median(units)), len(units) / n,
+                                                                      np.mean(infos), np.std(infos), np.std(fixed)))
+    # modelsiz sinir: unigram surprizi -log f(token) (egitim akisi sikligi); birimler AYNI ortalama boyda, bilgi modelin surprizi
+    cnt_ = np.bincount(np.asarray(stories.stream[:200_000_000]), minlength=D.VOCAB).astype(np.float64)[:D.VOCAB] + 1
+    cnt_[[D.END_ID]] = cnt_.max()                                        # END akista yok; cumle sonu sik
+    uni = -np.log(cnt_ / cnt_.sum())
+    tg = np.concatenate([batch.target[r][batch.target[r] >= 0].numpy() for r in range(batch.tokens.shape[0])])
+    su = uni[tg]
+    print("modelsiz (unigram) sinir: model surprizi ile korelasyon %.3f" % np.corrcoef(su, s)[0, 1])
+    print("hedef token / birim | unigram esigi | birim basina token | birim bilgisi (model) ort (sd) | model esigiyle sd")
+    for want in (3.6, 6.2, 11.5):
+        lo, hi = 1.0, 400.0
+        for _ in range(40):                                              # unigram esigini ortalama birim boyuna ayarla
+            th = (lo + hi) / 2
+            k, acc = 0, 0.0
+            for x in su:
+                acc += x
+                if acc >= th:
+                    k, acc = k + 1, 0.0
+            lo, hi = (th, hi) if n / max(k, 1) < want else (lo, th)
+        units, infos, acc, accm, cnt = [], [], 0.0, 0.0, 0
+        for x, y in zip(su, s):
+            acc, accm, cnt = acc + x, accm + y, cnt + 1
+            if acc >= th:
+                units.append(cnt)
+                infos.append(accm)
+                acc, accm, cnt = 0.0, 0.0, 0
+        print("%19.1f | %13.1f | %5.2f | %6.2f (%5.2f) |" % (want, th, np.mean(units), np.mean(infos), np.std(infos)))
+
+
+@torch.no_grad()
 def depth_exit(model, stories, rows, dev):
     """5. Derinlik ekseni (token basina kac adim): her katmandan sonra son norm + cikisla erken okuma (logit lens).  Katman l'de
     token "yerlesmis": argmax son katmanin argmax'i ve KL(son || l) < 0,1.  Yerlesme katmani dagilimi + yerlesmis token'larin
@@ -113,6 +185,7 @@ def main(argv=None):
     ap.add_argument("--rows", type=int, default=2)
     ap.add_argument("--ffn", action="store_true", help="yalniz FFN seyrekligi (ffn_sparsity)")
     ap.add_argument("--exit", action="store_true", help="yalniz derinlik ekseni: katman katman erken okuma (depth_exit)")
+    ap.add_argument("--info", action="store_true", help="yalniz x ekseni: bilgiye gore yeniden ornekleme (info_grid)")
     a = ap.parse_args(argv)
     if os.name == "nt":
         T._no_power_throttling()
@@ -126,6 +199,8 @@ def main(argv=None):
         return ffn_sparsity(model, stories, rows, dev)
     if a.exit:
         return depth_exit(model, stories, rows, dev)
+    if a.info:
+        return info_grid(model, stories, rows, dev)
     L = len(model.blocks)
     stats = {k: np.zeros(L) for k in ("u", "dA", "dF")}
     tv, err = np.zeros(L - 1), np.zeros(L - 1)

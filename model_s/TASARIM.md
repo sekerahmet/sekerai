@@ -9,6 +9,25 @@ Ad: **S** = splitting (operatör bölme) / sürekli (zaman). Mimarinin adı **St
 verebilirsin kendin yepyeni orjinal bir isim"*): tabakalar -- sıralı derinlik yalnız adımların yer değiştirmediği (komütatörü
 büyük) yerde, geri kalan adımlar yan yana tek geniş tabakada. Kod adı `model_s` / `--model model_s` kalır.  Klasör: `C:\AI_NEW_MODEL\model_s` (kullanıcı, 11 Ekim: "C:\AI_NEW_MODEL bunun altında model S olarak klasör aç"); veri / eğitim ortak kodu `deneme2/v2/common`.
 
+## 0. Tez (11 Ekim): bilgiye uyarlanan ızgara
+
+Kullanıcı, 11 Ekim: *"Token kavramını bunun ifade ediliş şeklini, aralarında ki bağı kurma şeklini attention I ffn yi çıkışı
+normalizasyonu hepsini sorgulatabilirsin. Tamamen sıfırdan bambaşka matematiksel denklemler üzerine kurulu bambaşka bir model
+yapabilirsin. O makale bir bakış açısı"*; *"Veri senin yönlendirici olmayabilir tek başına. Öğrenmenin özü kritik"*.
+
+Makale (ve transformer) u(x, y, t)'yi üç eksende **tekdüze ızgarada** çözer: her token bir x noktası, her token d boyut (y), her
+token L adım (t). Sayısal çözümde hiçbir problem böyle çözülmez: ızgara çözümün değiştiği yerde sıklaşır (uyarlamalı ızgara,
+AMR). **Strata: dil denklemini bilgiye (sürpriz −log p) uyarlanan ızgarada çözmek.**
+
+- x: dizi eşit bilgi taşıyan birimlere yeniden örneklenir; büyük çözücü birimlerde, birimin içi küçük yerel çözücüde.
+- y: sık / basit sembol az boyut, nadir / karmaşık çok boyut (Parça 10 çıkış ilk adım).
+- t: adım sayısı yerel hataya göre (kanıt en zayıf; sona).
+
+ÖLÇÜLDÜ (d768 transformer'ın kendi sürprizi, 12.034 token, `step_diagnostics --info`): Gini 0,51; bilginin %50'si token'ların
+%19'unda, %90'ı %54'ünde; token'ların %22'si < 0,5 nat (bilginin %1,2'si). Birikimli sürpriz θ'yı geçince kesilen birim:
+θ 8 → 3,6 token / birim, θ 16 → 6,2, θ 32 → 11,5; birim bilgisi sd 2,4 (aynı uzunlukta sabit parça 6,1 / 7,6 / 11,6). Cümle
+24,7 token / 75 nat. Parça 3–10 bu tezin iç çözücüsü / y ekseni olarak kalır.
+
 ## 1. Denklem
 
 Durum u(x, y, t): x token konumu, y özellik boyutu, t derinlik (sürekli zaman).
