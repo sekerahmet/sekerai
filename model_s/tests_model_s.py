@@ -509,6 +509,20 @@ def t_strata_x():
     m.aux_weight = 1.0
     check("strata-x: output_loss degeri = ana CE; yardimci CE kodlayici gradyanina girer",
           abs(float(loss) - float(main)) < 1e-6 and float((g1 - g0).abs().max()) > 1e-8, "loss %.4f ana %.4f" % (float(loss), float(main)))
+    mp = StrataX(d_local=32, heads_local=4, enc_layers=1, dec_layers=1, d_global=64, heads_global=4, global_layers=2,
+                 theta=20.0, window=6, plan=3, next_weight=0.5).eval()
+    with torch.no_grad():
+        pa_ = mp.forward_states(a, pos, z)[0]
+        pb_ = mp.forward_states(b, pos, z)[0]
+        hr2 = mp.forward_states(row, prow, drow)[0]
+        hs2 = mp.forward_states(t2, torch.arange(7)[None], torch.zeros(1, 7, dtype=torch.long))[0]
+    mp.train()
+    hh = mp._batch_hidden(B_)
+    mp.output_loss(hh.flatten(0, 1), tgt.flatten()).backward()
+    gn = mp.pred_next.weight.grad
+    check("strata-x plan 3 + sonraki birim: nedensellik, belge yalitimi; pred_next gradyan alir",
+          float((pa_[0, :9] - pb_[0, :9]).abs().max()) < 1e-6 and float((hr2[0, 9:] - hs2[0]).abs().max()) < 1e-5
+          and gn is not None and float(gn.abs().sum()) > 0, "")
     m.eval()
     out = m.generate([[[5, 6, 7]], [[8]]], 2, 4)
     check("strata-x: uretim calisir (tek tek, tam yeniden hesap)", len(out) == 2 and all(len(o) == 3 for o in out), str(out[0])[:80])
@@ -559,12 +573,13 @@ def t_train():
           and all(torch.equal(so["state"][k], so2["state"][k]) for k in so["state"]),
           "kayip %.3f -> %.3f" % (sum(Lo[:3]) / 3, sum(Lo[-3:]) / 3))
     sx = ["--data", data, "--stream", root, "--device", "cpu", "--d", "16", "--heads", "2", "--layers", "1", "--lr", "1e-2",
-          "--checkpoint_minutes", "0", "--model", "strata_x", "--sx_local", "16,2,1,1", "--sx_theta", "6", "--sx_window", "8",
+          "--checkpoint_minutes", "0", "--model", "strata_x", "--sx_local", "16,2,1,1", "--sx_theta", "6", "--sx_window", "8", "--sx_plan", "2", "--sx_next", "0.5",
           "--epochs", "2"]
     x1 = TR.main(sx + ["--out", out("sx_A")])
     Lx = [w["loss"] for w in x1["log"]]
     TR.main(sx + ["--out", out("sx_B"), "--stop_step", "5"])
-    sxc = [a_ for a_ in sx if a_ not in ("--sx_local", "16,2,1,1", "--sx_theta", "6", "--sx_window", "8")]
+    i_ = sx.index("--sx_local")
+    sxc = sx[:i_] + sx[i_ + 10:]                                          # sx_* kimlikten
     TR.main(sxc + ["--out", out("sx_B"), "--resume", "1"])
     xa, xb = (torch.load(os.path.join(out(n), "agent.pt"), weights_only=False) for n in ("sx_A", "sx_B"))
     mx, _ = GR.load_run(out("sx_A"), data, torch.device("cpu"))

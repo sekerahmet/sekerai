@@ -32,8 +32,13 @@ def _hidden(d):
 
 class StrataX(BaselineTransformer):
     def __init__(self, d_local=512, heads_local=8, enc_layers=2, dec_layers=2, d_global=1024, heads_global=16,
-                 global_layers=12, theta=8.0, window=256, aux_weight=1.0, vocab_rows=VOCAB, out_cuts=(4096, 16384)):
+                 global_layers=12, theta=8.0, window=256, aux_weight=1.0, vocab_rows=VOCAB, out_cuts=(4096, 16384),
+                 plan=0, next_weight=0.0):
+        """plan k (HAYAL.md H8): buyuk cozucu birim basina k yuvalik plan (d_global -> k x d_local); kod cozucu token'i yazarken
+        kendi yuvasinin plan vektorunu gorur (0: tek vektor, down).  next_weight (H9): sonraki birimin kodlayici vektorunu
+        tahmin (kosinus, hedefte gradyan kesik) yardimci kayip agirligi."""
         super().__init__(d_local, 1, heads_local, None, vocab_rows)     # E (d_local), norm, uretim kurallari
+        self.plan_k, self.next_weight = int(plan), float(next_weight)
         self.theta, self.window, self.aux_weight = float(theta), int(window), float(aux_weight)
         self.n_enc, self.n_glob = enc_layers, global_layers
         loc = lambda: SBlock(d_local, heads_local, _hidden(d_local))  # noqa: E731
@@ -41,7 +46,8 @@ class StrataX(BaselineTransformer):
         self.blocks = torch.nn.ModuleList([loc() for _ in range(enc_layers)] + [glo() for _ in range(global_layers)]
                                           + [loc() for _ in range(dec_layers)])   # Muon: blocks.* (recipe.muon_params)
         self.up = torch.nn.Linear(d_local, d_global, bias=False)
-        self.down = torch.nn.Linear(d_global, d_local, bias=False)
+        self.down = torch.nn.Linear(d_global, d_local * max(1, self.plan_k), bias=False)
+        self.pred_next = torch.nn.Linear(d_global, d_global, bias=False) if self.next_weight else None
         self.g0 = torch.nn.Parameter(torch.zeros(d_local))               # tamamlanmis birim yokken baglam
         self.enc_norm, self.glob_norm = Projection(d_local), Projection(d_global)
         self.out = FactorizedOutput(d_local, VOCAB, out_cuts) if out_cuts else None
@@ -113,15 +119,28 @@ class StrataX(BaselineTransformer):
         ustart = torch.cummax(torch.where(ufirst, torch.arange(Umax, device=tokens.device), 0), 1).values
         upos = torch.arange(Umax, device=tokens.device)[None] - ustart       # belge ici birim sirasi (RoPE)
         z = self.up(he.gather(1, upos_tok[..., None].expand(-1, -1, he.shape[-1])))
+        z_in = z
         iu = torch.arange(Umax, device=tokens.device)
         m_g = (udoc[:, :, None] == udoc[:, None, :]) & (iu[:, None] >= iu[None, :]) & valid[:, None, :]
         m_g = m_g | torch.eye(Umax, dtype=torch.bool, device=tokens.device)
         for blk in self.blocks[self.n_enc:self.n_enc + self.n_glob]:
             z = blk(z, upos, m_g)
-        g = self.down(self.glob_norm(z))                                    # (B, Umax, d_local)
+        g = self.down(self.glob_norm(z))                                    # (B, Umax, k x d_local)
         kc = k.clamp(min=0)
         ok = (k >= 0) & (udoc.gather(1, kc) == doc) & (doc >= 0)
-        ctx = torch.where(ok[..., None], g.gather(1, kc[..., None].expand(-1, -1, g.shape[-1])), self.g0.to(g.dtype))
+        dl = he.shape[-1]
+        gt = g.gather(1, kc[..., None].expand(-1, -1, g.shape[-1]))         # (B, T, k x d_local)
+        if self.plan_k:                                                     # yuva = t - son birim sonu (0: sonraki birimin ilk token'i)
+            last_end = upos_tok.gather(1, kc)
+            slot = (torch.arange(T, device=tokens.device)[None] - last_end).clamp(0, self.plan_k - 1)
+            gt = gt.view(B, T, self.plan_k, dl).gather(2, slot[..., None, None].expand(-1, -1, 1, dl))[:, :, 0]
+        ctx = torch.where(ok[..., None], gt, self.g0.to(gt.dtype))
+        if self.pred_next is not None and self.training:                    # H9: z_u -> kodlayicinin z_{u+1}'i (hedef kesik)
+            pairs = valid[:, 1:] & valid[:, :-1] & (udoc[:, 1:] == udoc[:, :-1])
+            if pairs.any():
+                pr = self.pred_next(self.glob_norm(z[:, :-1]))[pairs].float()
+                tg = z_in[:, 1:][pairs].detach().float()
+                aux = aux + self.next_weight * (1 - torch.nn.functional.cosine_similarity(pr, tg, -1)).mean()
         x = he + ctx
         for blk in self.blocks[self.n_enc + self.n_glob:]:
             x = blk(x, pos, m_loc)
