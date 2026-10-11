@@ -98,7 +98,9 @@ class StrataX(BaselineTransformer):
         aux = nll_v.mean() if nll_v.numel() else he.sum() * 0
         ends = self.units(nll, doc)
         # birimler: satir basina sonlar, Umax'a dolgu
-        Umax = max(int(ends.sum(1).max()), 1)
+        Umax = 64                                                           # 2'nin kuvvetine yuvarla: derleme (dynamic=False)
+        while Umax < int(ends.sum(1).max()):                                # en cok ~6 sekil gorur
+            Umax *= 2
         r, c = ends.nonzero(as_tuple=True)
         k = torch.cumsum(ends.long(), 1) - 1                               # t'de son tamamlanmis birimin sirasi
         upos_tok = torch.zeros(B, Umax, dtype=torch.long, device=tokens.device)
@@ -159,9 +161,12 @@ class StrataX(BaselineTransformer):
     def generate(self, prompts, max_sentences, max_tokens, generator=None, open_last=False, on_token=None,
                  stop_when=None, batch_size=32):
         """Tek tek (dict onbellek, tam yeniden hesap) -- StaticCache bloklarin _qkv'sine dayanir, Strata-x'te yok."""
+        import contextlib
         import baseline as BL
         old, BL.STATIC_DECODE = BL.STATIC_DECODE, False
+        eager = getattr(torch.compiler, "set_stance", None)                # her adim yeni boy: derlenmis bloklar yeniden derlenmesin
         try:
-            return super().generate(prompts, max_sentences, max_tokens, generator, open_last, on_token, stop_when, 1)
+            with eager("force_eager") if eager else contextlib.nullcontext():
+                return super().generate(prompts, max_sentences, max_tokens, generator, open_last, on_token, stop_when, 1)
         finally:
             BL.STATIC_DECODE = old
