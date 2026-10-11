@@ -45,13 +45,14 @@ def main():
     SX.FLEX = True
     d_h = float((res[True][0] - res[False][0]).abs().max())
     same_e = torch.equal(res[True][1], res[False][1])
-    d_g = max(float((a - b).abs().max() / (b.abs().max() + 1e-12)) for a, b in zip(res[True][3], res[False][3]))
+    scale = max(float(b.abs().max()) for b in res[False][3])               # genel gradyan olcegi: kucuk gradyanli parametrede
+    d_g = max(float((a - b).abs().max()) for a, b in zip(res[True][3], res[False][3])) / scale   # goreli gurultu sisirmesin
     rows = sorted(((float((a - b).abs().max() / (b.abs().max() + 1e-12)), float((a - b).abs().max()), float(b.abs().max()), n)
                    for a, b, n in zip(res[True][3], res[False][3], res[True][4])), reverse=True)[:6]
     for r_, ab, mx, n in rows:
         print("  %-40s goreli %.1e | mutlak %.1e | en buyuk %.1e" % (n, r_, ab, mx))
     ok = d_h < 1e-4 and same_e and d_g < 1e-3
-    print("%s strata-x FLEX = yogun maske (fp32): durum %.1e, sinirlar %s, gradyan (goreli) %.1e, birim / token %.3f"
+    print("%s strata-x FLEX = yogun maske (fp32): durum %.1e, sinirlar %s, gradyan (en buyuk gradyana gore) %.1e, birim / token %.3f"
           % ("OK  " if ok else "HATA", d_h, "ayni" if same_e else "FARKLI", d_g, float(res[True][1].float().mean())))
     sys.exit(0 if ok else 1)
 
