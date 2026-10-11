@@ -523,6 +523,20 @@ def t_strata_x():
     check("strata-x plan 3 + sonraki birim: nedensellik, belge yalitimi; pred_next gradyan alir",
           float((pa_[0, :9] - pb_[0, :9]).abs().max()) < 1e-6 and float((hr2[0, 9:] - hs2[0]).abs().max()) < 1e-5
           and gn is not None and float(gn.abs().sum()) > 0, "")
+    mr = StrataX(d_local=32, heads_local=4, enc_layers=1, dec_layers=1, d_global=64, heads_global=4, global_layers=2,
+                 window=6, rate=3.0)
+    e0 = float(mr.info_ema)
+    mr.eval()
+    with torch.no_grad():
+        _, _, er, ir = mr.forward_states(a, pos, z)
+    e_eval = float(mr.info_ema)
+    mr.train()
+    mr._batch_hidden(B_)
+    e_tr = float(mr.info_ema)
+    q = torch.floor(torch.cumsum(ir[0], 0) / (3.0 * e0))
+    ref_e = q > torch.cat([q.new_zeros(1), q[:-1]])
+    check("strata-x rate: theta = r x ortalama surpriz; eval'de ortalama sabit, egitimde guncellenir; sinir = elle",
+          e_eval == e0 and e_tr != e0 and torch.equal(er[0], ref_e), "ema %.3f -> %.3f" % (e0, e_tr))
     m.eval()
     out = m.generate([[[5, 6, 7]], [[8]]], 2, 4)
     check("strata-x: uretim calisir (tek tek, tam yeniden hesap)", len(out) == 2 and all(len(o) == 3 for o in out), str(out[0])[:80])

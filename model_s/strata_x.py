@@ -33,12 +33,14 @@ def _hidden(d):
 class StrataX(BaselineTransformer):
     def __init__(self, d_local=512, heads_local=8, enc_layers=2, dec_layers=2, d_global=1024, heads_global=16,
                  global_layers=12, theta=8.0, window=256, aux_weight=1.0, vocab_rows=VOCAB, out_cuts=(4096, 16384),
-                 plan=0, next_weight=0.0):
+                 plan=0, next_weight=0.0, rate=0.0):
         """plan k (HAYAL.md H8): buyuk cozucu birim basina k yuvalik plan (d_global -> k x d_local); kod cozucu token'i yazarken
         kendi yuvasinin plan vektorunu gorur (0: tek vektor, down).  next_weight (H9): sonraki birimin kodlayici vektorunu
-        tahmin (kosinus, hedefte gradyan kesik) yardimci kayip agirligi."""
+        tahmin (kosinus, hedefte gradyan kesik) yardimci kayip agirligi.  rate r > 0: theta = r x kodlayicinin ortalama
+        surprizi (egitimde yuruyen ortalama, yalniz onceki adimlardan; buffer): birim basina ~r token, yerlesim bilgiye gore."""
         super().__init__(d_local, 1, heads_local, None, vocab_rows)     # E (d_local), norm, uretim kurallari
-        self.plan_k, self.next_weight = int(plan), float(next_weight)
+        self.plan_k, self.next_weight, self.rate = int(plan), float(next_weight), float(rate)
+        self.register_buffer("info_ema", torch.tensor(math.log(VOCAB)))   # rate: kodlayici surprizi yuruyen ortalamasi (nat)
         self.theta, self.window, self.aux_weight = float(theta), int(window), float(aux_weight)
         self.n_enc, self.n_glob = enc_layers, global_layers
         loc = lambda: SBlock(d_local, heads_local, _hidden(d_local))  # noqa: E731
@@ -76,6 +78,9 @@ class StrataX(BaselineTransformer):
         m = (doc[:, :, None] == doc[:, None, :]) & (i[:, None] >= i[None, :]) & (i[:, None] - i[None, :] < self.window)
         return m | torch.eye(T, dtype=torch.bool, device=doc.device)        # dolgu kendini gorur
 
+    def theta_now(self):
+        return self.rate * float(self.info_ema) if self.rate > 0 else self.theta
+
     def units(self, info, doc):
         """info (B, T) token bilgisi, doc (B, T) -> ends (B, T) bool: belge ici floor(C_t / theta) artti mi (t'de birim biter)."""
         real = doc >= 0
@@ -84,7 +89,7 @@ class StrataX(BaselineTransformer):
         first[:, 1:] = doc[:, 1:] != doc[:, :-1]
         start = torch.cummax(torch.where(first, torch.arange(doc.shape[1], device=doc.device), 0), 1).values
         base = torch.where(start > 0, C.gather(1, (start - 1).clamp(min=0)), torch.zeros_like(C))
-        q = torch.floor((C - base) / self.theta)
+        q = torch.floor((C - base) / self.theta_now())
         prev = torch.where(first, torch.zeros_like(q), torch.roll(q, 1, 1))
         return (q > prev) & real
 
@@ -103,6 +108,9 @@ class StrataX(BaselineTransformer):
         nll = nll.index_put((nxt.nonzero()[:, 0], nxt.nonzero()[:, 1] + 1), nll_v.detach().float())
         aux = nll_v.mean() if nll_v.numel() else he.sum() * 0
         ends = self.units(nll, doc)
+        if self.rate > 0 and self.training and nll_v.numel():              # sinirdan SONRA: bu adimin theta'si onceki adimlardan
+            with torch.no_grad():
+                self.info_ema.mul_(0.99).add_(0.01 * nll_v.detach().float().mean())
         # birimler: satir basina sonlar, Umax'a dolgu
         Umax = 64                                                           # 2'nin kuvvetine yuvarla: derleme (dynamic=False)
         while Umax < int(ends.sum(1).max()):                                # en cok ~6 sekil gorur
