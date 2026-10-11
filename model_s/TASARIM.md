@@ -57,6 +57,12 @@ Thinker'ın çıkışa doğrudan, kapılı katkısı. Ders: "küçük" adı "kü
     Biçim **tez → antitez → sentez → deney düzeneği**: ben tezi yazarım, danışman çürütmeyi getirir, kalan ölçülebilir fikir deneye
     döner; en iyi zaman GPU bir koşuyu yürütürken (kullanıcı, 11 Ekim: *"tez antitez ve sentez oluşur sonra doğru deney düzeneği
     ... Arkadaşın bi test başlatıp beklerken bunu yapabilirsin. Tabi ihtiyaç duyuyorsan ve gerekli ise"*). Küçük, açık kararlarda açılmaz.
+13. **Önce hesap, sonra görüş; tartışma uzun, test kısa** (kullanıcı, 11 Ekim: *"danışmanlar gözlemciler seni hesap ile ikna etmeli
+    görüşleri ve hipotezleri ile değil ama önce bunu matematik ile yapmalı"*; *"Biz insanlar bazen günlerce tartışır ama sadece 1 günde
+    test ederiz"*; *"ölçüm doygunluğu var sanki . Sadece doğru ölçümü seçmek gerekiyor"*). Benim için de geçerli: bir kural ya da
+    düzenek ancak hesapla kabul edilir (ders: danışmanın kısa bağlam FLOP'lu karar kuralını hesapsız aldım; c(N, ℓ) hesabı onu çürüttü).
+    Koşudan önce: notlar baştan okunur, örnek üzerinde düşünme deneyi, hipotez matematikle yazılır, iki göz (danışman + bağımsız
+    matematikçi) birbirini görmeden okur; deney yalnız hesabın bıraktığı tek bilinmeyeni ölçer. Ayrıntı: `GOZDEN_GECIRME.md`.
 
 ### N3. Ölçülenler (özet; ayrıntı `deneme2/v2/OLCULENLER_z.md`)
 
