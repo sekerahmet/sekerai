@@ -26,8 +26,17 @@ from operators import Projection  # noqa: E402
 from output import FactorizedOutput  # noqa: E402
 
 
+FLEX = True            # CUDA'da yerel ve buyuk cozucu maskeleri FlexAttention BlockMask (yogun T x T yerine); CPU yogun
+FLEX_BLOCK = 128       # BlockMask blok boyu; kova bunun kati
+UNIT_BUCKET = 128      # birim sayisi bu katina yuvarlanir (derleme dynamic=False: az sekil; 2'nin kuvveti %50'ye varan bos is)
+
+
 def _hidden(d):
     return -(-int(8 * d / 3) // 8) * 8
+
+
+def _fill_info_ema(state, prefix, *args, **kwargs):
+    state.setdefault(prefix + "info_ema", torch.tensor(math.log(VOCAB)))
 
 
 class StrataX(BaselineTransformer):
@@ -44,6 +53,7 @@ class StrataX(BaselineTransformer):
         super().__init__(d_tok, 1, heads_local, None, vocab_rows)       # E (d_token), norm, uretim kurallari
         self.plan_k, self.next_weight, self.rate = int(plan), float(next_weight), float(rate)
         self.register_buffer("info_ema", torch.tensor(math.log(VOCAB)))   # rate: kodlayici surprizi yuruyen ortalamasi (nat)
+        self._register_load_state_dict_pre_hook(_fill_info_ema)            # info_ema'dan onceki kosular
         self.theta, self.window, self.aux_weight = float(theta), int(window), float(aux_weight)
         self.n_enc, self.n_glob = enc_layers, global_layers
         loc = lambda: SBlock(d_local, heads_local, _hidden(d_local))  # noqa: E731
@@ -80,10 +90,31 @@ class StrataX(BaselineTransformer):
         return torch.nn.functional.cross_entropy(BaselineTransformer._logits(self, h).float(), tgt, reduction="none")
 
     def _local_mask(self, doc):
+        """ayni belge, nedensel, son window token (dolgu kendini gorur); CUDA + FLEX: BlockMask, aksi yogun (B, T, T)."""
         B, T = doc.shape
+        if FLEX and doc.is_cuda and T % FLEX_BLOCK == 0:
+            from torch.nn.attention.flex_attention import create_block_mask
+            W = self.window
+
+            def mod(b, h, q, k):
+                return ((doc[b, q] == doc[b, k]) & (q >= k) & (q - k < W)) | (q == k)
+            return create_block_mask(mod, B, None, T, T, device=doc.device, BLOCK_SIZE=FLEX_BLOCK, _compile=True)
         i = torch.arange(T, device=doc.device)
         m = (doc[:, :, None] == doc[:, None, :]) & (i[:, None] >= i[None, :]) & (i[:, None] - i[None, :] < self.window)
         return m | torch.eye(T, dtype=torch.bool, device=doc.device)        # dolgu kendini gorur
+
+    def _unit_mask(self, udoc, valid):
+        """birim ekseninde ayni belge, nedensel, gecerli (dolgu kendini gorur); CUDA + FLEX: BlockMask."""
+        B, U = udoc.shape
+        if FLEX and udoc.is_cuda and U % FLEX_BLOCK == 0:
+            from torch.nn.attention.flex_attention import create_block_mask
+
+            def mod(b, h, q, k):
+                return ((udoc[b, q] == udoc[b, k]) & (q >= k) & valid[b, k]) | (q == k)
+            return create_block_mask(mod, B, None, U, U, device=udoc.device, BLOCK_SIZE=FLEX_BLOCK, _compile=True)
+        iu = torch.arange(U, device=udoc.device)
+        m = (udoc[:, :, None] == udoc[:, None, :]) & (iu[:, None] >= iu[None, :]) & valid[:, None, :]
+        return m | torch.eye(U, dtype=torch.bool, device=udoc.device)
 
     def theta_now(self):
         return self.rate * float(self.info_ema) if self.rate > 0 else self.theta
@@ -121,9 +152,7 @@ class StrataX(BaselineTransformer):
             with torch.no_grad():
                 self.info_ema.mul_(0.99).add_(0.01 * nll_v.detach().float().mean())
         # birimler: satir basina sonlar, Umax'a dolgu
-        Umax = 64                                                           # 2'nin kuvvetine yuvarla: derleme (dynamic=False)
-        while Umax < int(ends.sum(1).max()):                                # en cok ~6 sekil gorur
-            Umax *= 2
+        Umax = max(1, -(-int(ends.sum(1).max()) // UNIT_BUCKET)) * UNIT_BUCKET   # kova (derleme dynamic=False)
         r, c = ends.nonzero(as_tuple=True)
         k = torch.cumsum(ends.long(), 1) - 1                               # t'de son tamamlanmis birimin sirasi
         upos_tok = torch.zeros(B, Umax, dtype=torch.long, device=tokens.device)
@@ -137,9 +166,7 @@ class StrataX(BaselineTransformer):
         upos = torch.arange(Umax, device=tokens.device)[None] - ustart       # belge ici birim sirasi (RoPE)
         z = self.up(he.gather(1, upos_tok[..., None].expand(-1, -1, he.shape[-1])))
         z_in = z
-        iu = torch.arange(Umax, device=tokens.device)
-        m_g = (udoc[:, :, None] == udoc[:, None, :]) & (iu[:, None] >= iu[None, :]) & valid[:, None, :]
-        m_g = m_g | torch.eye(Umax, dtype=torch.bool, device=tokens.device)
+        m_g = self._unit_mask(udoc, valid)
         for blk in self.blocks[self.n_enc:self.n_enc + self.n_glob]:
             z = blk(z, upos, m_g)
         g = self.down(self.glob_norm(z))                                    # (B, Umax, k x d_local)
