@@ -123,8 +123,9 @@ LOG_EVERY = 100             # adim; gunluk satiri = bir hiz penceresi
 MODEL_Z_GLOBAL_RATIO = 1 / 3   # global_layers auto (OLCULENLER_z: d768/L10 G1->G3 kazanc, d1024/L12 G3->G4 -0,0047)
 GLOB_KV_GROUP = 4              # glob_kv_heads auto = heads / 4
 GLOB_KV_DEFAULT = "auto"       # --glob_kv_heads verilmezse (kullanici, 8 Ekim: GQA varsayilan); testler eski 0'a sabitler
-LOCAL_KV_DEFAULT = "auto"      # --local_kv_heads verilmezse: yerelde de GQA, G ile ayni (kullanici, 10 Ekim: "Şu an bu ikisini varsayılan
-                               # yap kazanç büyük"; d1280 1.000 adim: -%5,6 ms/adim, kayip farki +0,065 (400) -> +0,021 (1000) kapaniyor)
+LOCAL_KV_DEFAULT = 0           # --local_kv_heads verilmezse: yerelde GQA YOK (tam k / v; kullanici, 11 Ekim: "varsayım olarak yereller de
+                               # kapalı olmalı"; 10 Ekim notu: "GQA belki yalnız G'de, Z'ler zaten sıkışık"). "auto" = G ile ayni (10 Ekim olcumu:
+                               # d1280 -%5,6 ms/adim, kayip +0,021 @1000). Hesap (model_s/TERSINE s16): yerel GQA Z'nin okunma kanalini d / 4'e daraltir.
 ATTN_GATE_DEFAULT = "auto"     # --attn_gate verilmezse (kullanici, 8 Ekim: "gate 2 varsayılan"); testler eski 0'a sabitler
 NGRAM_DEFAULT = 0              # --ngram_embed verilmezse (kullanici, 9 Ekim: katkisi modelden bagimsiz + dongu artti; 8 Ekim auto)
 MTP_DEFAULT = 0                # --mtp verilmezse (kullanici, 9 Ekim, n-gram ile birlikte; 8 Ekim auto)
