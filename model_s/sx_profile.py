@@ -80,9 +80,8 @@ def main(argv=None):
         h, _, ends, info = m.forward_states(batch.tokens, batch.pos, batch.doc)
     real = (batch.doc >= 0)
     upr = ends.sum(1)
-    Umax = 64
-    while Umax < int(upr.max()):
-        Umax *= 2
+    import strata_x as SX
+    Umax = max(1, -(-int(upr.max()) // SX.UNIT_BUCKET)) * SX.UNIT_BUCKET   # modeldeki kova
     B, T = batch.tokens.shape
     n_enc, n_glob = m.n_enc, m.n_glob
     m_loc = m._local_mask(batch.doc)
@@ -110,8 +109,7 @@ def main(argv=None):
         m.zero_grad(set_to_none=True)
     zu = torch.randn(B, Umax, dg, device=dev, requires_grad=True)
     upos = torch.arange(Umax, device=dev).expand(B, Umax)
-    iu = torch.arange(Umax, device=dev)
-    m_g = (iu[:, None] >= iu[None, :]).expand(B, Umax, Umax)
+    m_g = m._unit_mask(torch.zeros(B, Umax, dtype=torch.long, device=dev), torch.ones(B, Umax, dtype=torch.bool, device=dev))
 
     def comp_glob():
         with ac():
