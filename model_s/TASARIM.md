@@ -23,6 +23,13 @@ tek eğitim. Kod: `strata_x.py` (`--model strata_x`). Aile: BLT (2024) ve Model 
 sürpriz), modelin kendi kodlayıcısının sınır çizmesi, token düzeyi, çarpanlı çıkış, öğrendikçe ucuzlama. Operatörler (q·k softmax,
 SwiGLU, RMSNorm) henüz transformer'ınkiler — **yeni olan ayrıklaştırma, sağ taraf değil** (operatör turu sırada).
 
+**Adlar işlevden (kullanıcı, 11 Ekim: *"büyük model ve küçük model kavramları seni ve danışmanı yanıltıyor olabilir ... bizim
+bacaklarımız beynimizden daha büyük ama değerli olan beynimiz ... model büyük ve küçük yerine fonksiyon adı verirsek onun parametre
+sayısıyla boğmamış oluruz"*):** **Okuyucu** (reader; kod: yerel kodlayıcı, `blocks[:n_enc]`) metni okur, sürprizi ölçer, birim
+sınırını çizer · **Düşünür** (thinker; kod: büyük çözücü, `blocks[n_enc:n_enc+n_glob]`) birimler üzerinde hikâyenin durumunu tutar ·
+**Yazıcı** (writer; kod: yerel kod çözücü) kelimeleri döker · **Ses** (voice; kod: `direct`) Düşünür'ün çıkışa doğrudan, kapılı
+katkısı. Ders: "küçük" adı "küçük kalmalı" varsayımını doğurdu (danışman 02'nin en güçlü itirazı). Kod adları yapı oturunca değişir.
+
 ### N2. Çalışma yöntemi (kullanıcıyla birlikte oturdu, 11 Ekim)
 
 1. **Hayal → mantık süzgeci → tekrar** (`HAYAL.md`), tatmin olana kadar; hayal turunda eleme yok, süzgeçte her fikir ölçülmüş
