@@ -15,6 +15,7 @@ import strata_x as SX  # noqa: E402
 
 def main():
     assert torch.cuda.is_available(), "GPU yok"
+    torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False   # fp32 karsilastirma
     torch.manual_seed(0)
     dev = torch.device("cuda")
     m = SX.StrataX(d_local=64, heads_local=4, enc_layers=2, dec_layers=2, d_global=128, heads_global=4, global_layers=2,
@@ -39,11 +40,16 @@ def main():
         m.zero_grad()
         h, aux, ends, info = m.forward_states(tok, pos, doc)
         (h.pow(2).mean() + aux).backward()
-        res[flex] = (h.detach(), ends, info, [p.grad.clone() for p in m.parameters() if p.grad is not None])
+        res[flex] = (h.detach(), ends, info, [p.grad.clone() for p in m.parameters() if p.grad is not None],
+                     [n for n, p in m.named_parameters() if p.grad is not None])
     SX.FLEX = True
     d_h = float((res[True][0] - res[False][0]).abs().max())
     same_e = torch.equal(res[True][1], res[False][1])
     d_g = max(float((a - b).abs().max() / (b.abs().max() + 1e-12)) for a, b in zip(res[True][3], res[False][3]))
+    rows = sorted(((float((a - b).abs().max() / (b.abs().max() + 1e-12)), float((a - b).abs().max()), float(b.abs().max()), n)
+                   for a, b, n in zip(res[True][3], res[False][3], res[True][4])), reverse=True)[:6]
+    for r_, ab, mx, n in rows:
+        print("  %-40s goreli %.1e | mutlak %.1e | en buyuk %.1e" % (n, r_, ab, mx))
     ok = d_h < 1e-4 and same_e and d_g < 1e-3
     print("%s strata-x FLEX = yogun maske (fp32): durum %.1e, sinirlar %s, gradyan (goreli) %.1e, birim / token %.3f"
           % ("OK  " if ok else "HATA", d_h, "ayni" if same_e else "FARKLI", d_g, float(res[True][1].float().mean())))
