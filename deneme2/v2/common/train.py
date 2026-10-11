@@ -139,7 +139,9 @@ INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ng
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down", "w_gate_up", "w_down")   # --fp8 donusturulen Linear'lar (MLP; w_*: Model S)
-COMPILE_MODE = "max-autotune-no-cudagraphs"   # bloklarin derleme modu (5w: torba K 1024 -2,9 ms/adim; kullanici, 7 Ekim)
+COMPILE_MODE = os.environ.get("V2_COMPILE_MODE", "max-autotune-no-cudagraphs") or None   # bloklarin derleme modu (5w: torba K 1024
+# -2,9 ms/adim; kullanici, 7 Ekim); V2_COMPILE_MODE=default: kisa deneylerde autotune'suz (Strata-x: her yeni birim kovasi max-autotune'la
+# dakikalarca derleniyordu; 11 Ekim)
 CLIP_IN_OPTIMIZER = True       # clip katsayisi optimizer'a (grad yerinde carpilmaz; belge 94 s11.1), destekleyen optimizer'da
 READING_PROMPTS = os.path.join(HERE, "reading_prompts.json")
 READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_generation varsayilanlari)
