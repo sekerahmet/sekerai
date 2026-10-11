@@ -9,6 +9,71 @@ Ad: **S** = splitting (operatör bölme) / sürekli (zaman). Mimarinin adı **St
 verebilirsin kendin yepyeni orjinal bir isim"*): tabakalar -- sıralı derinlik yalnız adımların yer değiştirmediği (komütatörü
 büyük) yerde, geri kalan adımlar yan yana tek geniş tabakada. Kod adı `model_s` / `--model model_s` kalır.  Klasör: `C:\AI_NEW_MODEL\model_s` (kullanıcı, 11 Ekim: "C:\AI_NEW_MODEL bunun altında model S olarak klasör aç"); veri / eğitim ortak kodu `deneme2/v2/common`.
 
+## ÇALIŞMA NOTLARI — önce bunu oku (yaşayan bölüm; yanlış çıkan madde silinmez, ~~üstü çizilir~~ + neden + tarih)
+
+Kullanıcı, 11 Ekim 2026: *"bunları unutmamak adına çalışma notların ve şeklin yaklaşımını tasarım dökümanın başına yaz istersen
+kendi hatırlayacağın şekilde ve gerekirse düzelir şekilde"*.
+
+### N1. Strata nedir (bir paragraf)
+
+Dil modeli denklemini **bilgiye uyarlanan ızgarada** çözer (sayısal PDE'deki hareketli ızgara / eşit dağıtım ilkesi, de Boor).
+Küçük yerel model her token'da kendi sürprizini (−log p) ölçer; birikimli sürpriz θ'yı geçince bir **birim** kapanır (her birim
+eşit bilgi). Büyük çözücü **yalnız birimler** üzerinde düşünür; yerel kod çözücü token'ları döker. İki ölçekli tek model, uçtan uca
+tek eğitim. Kod: `strata_x.py` (`--model strata_x`). Aile: BLT (2024) ve Model Z ile akraba; fark: eşit bilgi ilkesi (birikimli
+sürpriz), modelin kendi kodlayıcısının sınır çizmesi, token düzeyi, çarpanlı çıkış, öğrendikçe ucuzlama. Operatörler (q·k softmax,
+SwiGLU, RMSNorm) henüz transformer'ınkiler — **yeni olan ayrıklaştırma, sağ taraf değil** (operatör turu sırada).
+
+### N2. Çalışma yöntemi (kullanıcıyla birlikte oturdu, 11 Ekim)
+
+1. **Hayal → mantık süzgeci → tekrar** (`HAYAL.md`), tatmin olana kadar; hayal turunda eleme yok, süzgeçte her fikir ölçülmüş
+   sayıya ya da HESAP'a bağlanır. Kullanıcı: *"Hayal et önce. Sonra mantık süzgecinden geçir sonra tekrar"*.
+2. **Kopya değil, kendi mimari.** Transformer / BLT / Model Z yalnız ilham; yüzde hedefi koyma, sonucu ölç ve yaz.
+3. **Doğru aletle ölç.** Tezi, gerçekte işi yapacak parçayla ölç (ders: bilgi birimlerini büyük modelin sürprizinden ölçtüm, sınırı
+   küçük kodlayıcı çiziyor → FineWeb E4 çöktü).
+4. **Tam maliyet muhasebesi** HESAP'tan önce: yerel kısım, maskeler, ek başlar, kova israfı dahil (ders: yalnız büyük çözücüyü
+   hesapladım, adım 586 ms çıktı).
+5. **Tek seferde tek değişiklik; ayrıştırma (ablasyon).** Birden çok şey değişince kayıp kaynağı ayrılamaz (ders: token boyu sandım,
+   yerel kapasite çıktı — E kolu).
+6. **Sıfır atış (eğitilmiş transformer'ı yeniden düzenleyerek) yalnız aday eler, karar verdirmez** (ders: komütatör ilkesi eğitimde
+   tutmadı; genişlik başta en iyi çıktı).
+7. **Hız iddiası önce GPU profili** (`sx_profile.py`; kullanıcı: *"Bir hız profili yazsan"*); hız farkı ~%3 altıysa tek koşudan okuma
+   (koşudan koşuya derleme oynaklığı).
+8. **Kalite = sınav kaybı / bpb + okunan metin.** SS'te hikâyeler cümle cümle okunur (döngü, isim kayması, tutarlılık, zenginlik);
+   kullanıcı: *"basit ölçüde ss öğretirsin ve hikaye düzgün yazmış mı diye bakarsın"*.
+9. **Kıyas adil:** aynı veri / tohum / adım / optimizer; parametre sayısı yazılır (eşit değilse söylenir).
+10. **Eşitlik testleri:** her yeni yol eski yola (CPU yoğun ↔ GPU flex, katlama ↔ katlamasız) fp32'de eşitlenir; göreli fark genel
+    gradyan ölçeğine göre (küçük gradyanlı parametrede göreli gürültü şişer).
+11. **Abartma yok:** "devrim" / "ilk" deme; LİTERATÜR'ü klasörden kontrol et (BLT bu fikrin iskeletini 2024'te yaptı).
+
+### N3. Ölçülenler (özet; ayrıntı `deneme2/v2/OLCULENLER_z.md`)
+
+| ne | sonuç |
+|---|---|
+| bilgi dağılımı (d768 FineWeb) | Gini 0,51; bilginin %50'si token'ların %19'unda; sürprizle birim sd 2,4, sabit parça 6–12, unigram sınırı 5–10 |
+| SS 1 epok (yerel 256, θ 4) | sınav 1,4722 (transformer 1,3127); 10/10 hikâye EOS, döngü yok, isimler tutarlı; olay örgüsü transformer'dan dar |
+| öğrendikçe ucuzlama | adım 199 → 118 ms, bellek 21 → 14,6 GB (SS 1 epok) |
+| SS 2.000 adım ayrıştırma (taban 1,4886) | yerel 256 1,672 / token 512 + yerel 256 1,674 / yerel 512 1,557 / + oran θ 1,579 / + plan 1,566 |
+| hız (flex + 128 kova) | yerel 512 105,6 ms, yerel 256 78,3 ms (transformer 120, optimizer dahil) |
+| FineWeb d1024 (eski kod, θ 8) | çöktü: birim ~1,8 token, 586 ms; durduruldu |
+
+### N4. Açık sorular / sıradaki (güncel tut)
+
+- Kalite açığı yerel kapasitede: yerel 384, yerel 256 × 4+4 koşuyor (`sxcap_*`).
+- Sürpriz başı adımın %20'si → hafif ayrı baş.
+- FineWeb'e dönüş: oran tabanlı θ + hızlı kod + doğru yerel kapasite.
+- Üretimde KV önbelleği (şu an her token baştan hesap).
+- Operatör turu: birimler eşit bilgi taşıyorsa büyük çözücünün operatörleri sadeleşebilir mi (HAYAL.md).
+- FP8 en sona (kullanıcı: *"Fp8 erken ama"*).
+
+### N5. Altyapı
+
+Dal `deneme/model-s` (yerel çalışma ağacı scratchpad `wt_s`; ana ağaçta `model_s/` izlenmez, dosyalar oradan kopyalanır).
+Testler: `tests_model_s.py` (+ ortak kod değişince `tests_v2 --only train,integration`). Araçlar: `commute_probe.py` (sıfır atış
+yeniden düzen), `step_diagnostics.py` (`--ffn`, `--exit`, `--info`), `sx_profile.py`, `sx_flex_check.py`, `bench_step.py`. Colab
+defteri 1YRkKCXDGxTiB4NsW_djHBosOkfDT9dOE: HAZIRLIK, NABIZ, OKU üstte, KAPAT en altta; her kuyruk ayrı çalışma ağacında
+(`/content/wt_*`), koşan kuyruğun ağacına dokunulmaz; hücreyi çalıştırmadan önce kimliğini kontrol et (KAPAT yanlışlıkla
+çalıştırıldı, güvenlik kontrolü durdurdu).
+
 ## 0. Tez (11 Ekim): bilgiye uyarlanan ızgara
 
 Kullanıcı, 11 Ekim: *"Token kavramını bunun ifade ediliş şeklini, aralarında ki bağı kurma şeklini attention I ffn yi çıkışı
