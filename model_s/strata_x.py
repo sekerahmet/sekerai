@@ -137,7 +137,7 @@ class StrataX(BaselineTransformer):
         m_loc = self._local_mask(doc)
         x = self.E(tokens)
         if self.tok_in is not None:
-            x = self.tok_in(x)
+            x = self.tok_in(x).float()                                      # artik akisi fp32 (autocast'te Linear bf16; danisman 01 K2)
         for blk in self.blocks[:self.n_enc]:
             x = blk(x, pos, m_loc)
         he = x
@@ -148,7 +148,7 @@ class StrataX(BaselineTransformer):
         nll = nll.index_put((nxt.nonzero()[:, 0], nxt.nonzero()[:, 1] + 1), nll_v.detach().float())
         aux = nll_v.mean() if nll_v.numel() else he.sum() * 0
         ends = self.units(nll, doc)
-        if self.rate > 0 and self.training and nll_v.numel():              # sinirdan SONRA: bu adimin theta'si onceki adimlardan
+        if self.rate > 0 and self.training and torch.is_grad_enabled() and nll_v.numel():   # sinirdan SONRA; sinav / uretim (no_grad) degistirmez
             with torch.no_grad():
                 self.info_ema.mul_(0.99).add_(0.01 * nll_v.detach().float().mean())
         # birimler: satir basina sonlar, Umax'a dolgu
@@ -164,7 +164,7 @@ class StrataX(BaselineTransformer):
         ufirst[:, 1:] = udoc[:, 1:] != udoc[:, :-1]
         ustart = torch.cummax(torch.where(ufirst, torch.arange(Umax, device=tokens.device), 0), 1).values
         upos = torch.arange(Umax, device=tokens.device)[None] - ustart       # belge ici birim sirasi (RoPE)
-        z = self.up(he.gather(1, upos_tok[..., None].expand(-1, -1, he.shape[-1])))
+        z = self.up(he.gather(1, upos_tok[..., None].expand(-1, -1, he.shape[-1]))).float()   # buyuk cozucu akisi fp32 (K2)
         z_in = z
         m_g = self._unit_mask(udoc, valid)
         for blk in self.blocks[self.n_enc:self.n_enc + self.n_glob]:
@@ -179,7 +179,7 @@ class StrataX(BaselineTransformer):
             slot = (torch.arange(T, device=tokens.device)[None] - last_end).clamp(0, self.plan_k - 1)
             gt = gt.view(B, T, self.plan_k, dl).gather(2, slot[..., None, None].expand(-1, -1, 1, dl))[:, :, 0]
         ctx = torch.where(ok[..., None], gt, self.g0.to(gt.dtype))
-        if self.pred_next is not None and self.training:                    # H9: z_u -> kodlayicinin z_{u+1}'i (hedef kesik)
+        if self.pred_next is not None and self.training and torch.is_grad_enabled():                    # H9: z_u -> kodlayicinin z_{u+1}'i (hedef kesik)
             pairs = valid[:, 1:] & valid[:, :-1] & (udoc[:, 1:] == udoc[:, :-1])
             if pairs.any():
                 pr = self.pred_next(self.glob_norm(z[:, :-1]))[pairs].float()
@@ -193,8 +193,8 @@ class StrataX(BaselineTransformer):
     # --- BaselineTransformer arayuzu ------------------------------------------------------------------------------------
     def _batch_hidden(self, batch, attn=None):
         h, aux, ends, _ = self.forward_states(batch.tokens, batch.pos, batch.doc)
-        self._aux = aux if self.training else None
-        self.last_units = ends.sum().item() / max((batch.doc >= 0).sum().item(), 1)   # birim / token (gunluk / teshis)
+        self._aux = aux if self.training and torch.is_grad_enabled() else None
+        self.stats = dict(units=ends.sum() / (batch.doc >= 0).sum().clamp(min=1), aux_ce=aux.detach())   # gunluk (tensor: senkron yok)
         return h
 
     def hidden(self, tokens, pos, attn):

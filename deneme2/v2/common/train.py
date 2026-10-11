@@ -299,7 +299,7 @@ def _build(args, dev):
                         out_cuts=tuple(getattr(args, "strata_out", None) or ()) or None,
                         plan=getattr(args, "sx_plan", 0) or 0, next_weight=getattr(args, "sx_next", 0) or 0.0,
                         rate=getattr(args, "sx_rate", 0) or 0.0, d_token=getattr(args, "sx_token", 0) or None)
-        model, mask_fn, layout = model.to(dev), R.document_mask, "transformer"
+        model, mask_fn, layout = model.to(dev), None, "transformer"        # maskeleri kendisi kurar (yerel / birim)
     else:
         sys.path.insert(0, os.path.join(root, "model_z"))
         from model import SentenceTransformer
@@ -385,6 +385,8 @@ def _attn(batch, mask_fn, cuda):
     """Egitim, sinav (_Exam) ve teshis araclarinin tek maske yolu; mask_fn ikiliyse (global_layers) iki maske."""
     if isinstance(mask_fn, tuple):
         return tuple(_attn(batch, f, cuda) for f in mask_fn)
+    if mask_fn is None:                                                  # strata_x: maskeleri model kurar
+        return None
     return R.block_mask(batch, mask_fn) if cuda else R.dense_mask(batch, mask_fn)
 
 
@@ -1118,6 +1120,8 @@ def main(argv=None):
                    rec["peak_gb"], rec["peak_reserved_gb"], rec["out_fwd_ms"]) if cuda else "",
                ("  | devam %s" % rec["loss_cont"] if carry else "")
                + ("  | mtp w %s ce %s" % (rec["mtp_w"], rec["loss_mtp"]) if args.mtp else "")
+               + ("  | birim / token %.3f  kodlayici ce %.3f" % (float(model.stats["units"]), float(model.stats["aux_ce"]))
+                  if getattr(model, "stats", None) else "")
                + ("  (ilk pencere: derleme dahil)" if first_window else "")))
         assert np.isfinite(rec["loss"]), "kayip sonlu degil; checkpoint yazilmadi"
         first_window, win = False, None

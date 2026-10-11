@@ -44,6 +44,12 @@ SwiGLU, RMSNorm) henüz transformer'ınkiler — **yeni olan ayrıklaştırma, s
 10. **Eşitlik testleri:** her yeni yol eski yola (CPU yoğun ↔ GPU flex, katlama ↔ katlamasız) fp32'de eşitlenir; göreli fark genel
     gradyan ölçeğine göre (küçük gradyanlı parametrede göreli gürültü şişer).
 11. **Abartma yok:** "devrim" / "ilk" deme; LİTERATÜR'ü klasörden kontrol et (BLT bu fikrin iskeletini 2024'te yaptı).
+12. **Danışman (`strata-advisor`):** kod denetimi, fikir çürütme, yeni fikir, araştırma; rapor `model_s/danisman/NN_*.md`, ben doğrularım
+    ve uygularım. Sohbet: tek soru, her mesaj çürüt / test öner / gerekçeyle katıl, en çok 3 tur, sonuç karar / test / N4'e açık
+    soru (kullanıcı: *"fikir alışverişi verimli ve kısır döngüye girmeden hedefli"*). Ajan kimliği scratchpad `ajan_kimlikleri.md`.
+    Biçim **tez → antitez → sentez → deney düzeneği**: ben tezi yazarım, danışman çürütmeyi getirir, kalan ölçülebilir fikir deneye
+    döner; en iyi zaman GPU bir koşuyu yürütürken (kullanıcı, 11 Ekim: *"tez antitez ve sentez oluşur sonra doğru deney düzeneği
+    ... Arkadaşın bi test başlatıp beklerken bunu yapabilirsin. Tabi ihtiyaç duyuyorsan ve gerekli ise"*). Küçük, açık kararlarda açılmaz.
 
 ### N3. Ölçülenler (özet; ayrıntı `deneme2/v2/OLCULENLER_z.md`)
 
@@ -58,7 +64,11 @@ SwiGLU, RMSNorm) henüz transformer'ınkiler — **yeni olan ayrıklaştırma, s
 
 ### N4. Açık sorular / sıradaki (güncel tut)
 
-- Kalite açığı yerel kapasitede: yerel 384, yerel 256 × 4+4 koşuyor (`sxcap_*`).
+- ~~Kalite açığı yerel kapasitede (token temsilinden değil)~~ — 11 Ekim, danışman 01 K3: E kolu (token 512 + yerel 256) çıkış
+  rank'ını 256'da bırakıyor, token temsilini gerçekte büyütmüyor; genişlik kollarında token boyu, up / down rank'ı, Muon etkin
+  adımı ve parametre birlikte değişiyor. **Açık soru:** yerel 512 + token 256 ile ayrılacak. Ayrıca 01 K2: büyük çözücü artık
+  akışı bf16'ydı (transformer fp32) — düzeltildi; önceki SS sayıları bu kusurla ölçüldü, A ve F yeniden koşulacak.
+- Yerel 384 (2+2) 1,6035 / 99,8 ms, yerel 256 × 4+4 1,6271 / 99,2 ms (ÖLÇÜLDÜ, bf16 akışla).
 - Sürpriz başı adımın %20'si → hafif ayrı baş.
 - FineWeb'e dönüş: oran tabanlı θ + hızlı kod + doğru yerel kapasite.
 - Üretimde KV önbelleği (şu an her token baştan hesap).

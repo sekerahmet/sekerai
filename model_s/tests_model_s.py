@@ -547,6 +547,28 @@ def t_strata_x():
     ref_e = q > torch.cat([q.new_zeros(1), q[:-1]])
     check("strata-x rate: theta = r x ortalama surpriz; eval'de ortalama sabit, egitimde guncellenir; sinir = elle",
           e_eval == e0 and e_tr != e0 and torch.equal(er[0], ref_e), "ema %.3f -> %.3f" % (e0, e_tr))
+    mr.train()                                                            # danisman 01 K1: train.py sinavi egitim modunda, no_grad
+    e1 = float(mr.info_ema)
+    with torch.no_grad():
+        mr._batch_hidden(B_)
+    mr.generate([[[5, 6]]], 1, 3)
+    e2 = float(mr.info_ema)
+    seen = []
+    hk = [mr.blocks[i].register_forward_pre_hook(lambda mod, args_: seen.append(args_[0].dtype)) for i in (0, 1, 3)]
+    with torch.autocast("cpu", torch.bfloat16):
+        mr._batch_hidden(B_)
+    for h_ in hk:
+        h_.remove()
+    mt.train()
+    seen_t = []
+    hk = [mt.blocks[i].register_forward_pre_hook(lambda mod, args_: seen_t.append(args_[0].dtype)) for i in (0, 1, 3)]
+    with torch.autocast("cpu", torch.bfloat16):
+        mt._batch_hidden(B_)
+    for h_ in hk:
+        h_.remove()
+    check("strata-x: sinav / uretim (no_grad, egitim modu) info_ema'yi degistirmez; autocast'te kodlayici / buyuk cozucu / kod cozucu "
+          "girdisi fp32 (d_token dahil)", e2 == e1 and set(seen) == {torch.float32} and set(seen_t) == {torch.float32},
+          "%s %s" % (seen, seen_t))
     m.eval()
     out = m.generate([[[5, 6, 7]], [[8]]], 2, 4)
     check("strata-x: uretim calisir (tek tek, tam yeniden hesap)", len(out) == 2 and all(len(o) == 3 for o in out), str(out[0])[:80])
