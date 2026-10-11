@@ -122,6 +122,12 @@ Thinker'ın çıkışa doğrudan, kapılı katkısı. Ders: "küçük" adı "kü
   token türüyle okunur: açık Thinker bilgisi gereken token'larda (ilk geçiş, H > 2) kapanıp yerel token'larda kalıyorsa kanal; yerel
   token'larda da kalıyorsa kapasite. Çekince: yeni içerik token'ı ikisini birden ister (bilgi gelmeli + Writer onu birleştirebilmeli).
   Ek okuma: Voice kapısı σ(gate) token türüne göre — Writer Thinker'ı ne zaman açıyor ("kararı uzman verir").
+  **İlk Voice koşusu geçersiz (ÖLÇÜLDÜ, `sx_voice_read.py`, `gate_check.py`):** Writer 512 + Voice 1,5581 = B3 1,5579 çünkü kapı ölüydü
+  (ham Writer durumu, boy ~170 → ön-aktivasyon −22, σ = 0,000 her token'da). Düzeltme 1a9efe7 (kapı girdisi rms_norm); koşular yeniden.
+  Ders: her yeni kapı normlu girdiye bakar; koşu sonrası kapının ortalaması okunur — kayıp "etkisiz" derken parça hiç çalışmamış olabilir.
+  **Hüküm (ÖLÇÜLDÜ, kapı çalışır, `sxvfix_*`):** Writer 512 + Voice 1,5593 (B3 1,5579); Writer 256 + token 512 + Voice **1,6701**
+  (kapı ölüyken 1,6675, A 1,672) → eşik ≥ 1,65: **kanal değil, Writer kapasitesi**. Tahminler: ben 1,54 / 1,61 (ikisi de yanlış), danışman
+  1,552 / 1,655 (yakın). Voice kapısı ort. 0,03, türe göre seçici değil, ikame. Ayrıntı ve sonraki adım: `GOZDEN_GECIRME.md` (M1 / M2).
 - **Hikâye belleği ertelendi** (danışman, `sx_attn_copy.py`, `sx_store.py`, ÖLÇÜLDÜ): pencere içi kopya transformer'la eşit (0,619 / 0,629);
   açığın %65'i ilk geçiş (bellek dokunamaz); "defter zaten var" — Thinker birimleri sürprizli token'larda kapanıyor (kopyalanacak token'ın
   ilk geçişi %41 birim sonu, taban %37); sürpriz "sonra lazım"ı zayıf seçiyor (1,1×). Kod `--sx_memory` (kapalı) hazır; açılış koşulu:

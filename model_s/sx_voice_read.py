@@ -87,6 +87,10 @@ def main(argv=None):
         run.direct_gate.register_forward_hook(hook)
     with torch.no_grad():
         L = {"run": sx_nll(run, b, keep), "ref": sx_nll(ref, b, keep)}
+        real_down = ref.down.forward
+        ref.down.forward = lambda x: ref.g0.expand(*x.shape[:-1], -1).clone()   # kiyasta Thinker kapali: her token g0
+        th_off = (sx_nll(ref, b, keep) - L["ref"])[keep]
+        ref.down.forward = real_down
         gate = cap["g"][keep] if voice else None
         if voice:
             mode["off"] = True
@@ -105,7 +109,9 @@ def main(argv=None):
     print("%-24s %6s %6s | %8s %8s %8s | %6s %8s" % ("tur", "n", "pay", "kiyas-tf", "kosu-tf", "kosu-kiy", "kapi", "kapali-k"))
     cats = [("hepsi", torch.ones_like(first)), ("ilk gecis", first), ("tekrar", ~first),
             ("H_tf < 0,5 (kalip)", H < 0.5), ("H_tf 0,5-2", (H >= 0.5) & (H < 2)), ("H_tf > 2 (yeni / secim)", H >= 2),
-            ("ilk gecis & H > 2", first & (H >= 2)), ("tekrar & H < 0,5", ~first & (H < 0.5))]
+            ("ilk gecis & H > 2", first & (H >= 2)), ("tekrar & H < 0,5", ~first & (H < 0.5)),
+            ("Thinker'a bagli (>+0,1)", th_off > 0.1), ("Thinker'siz (|.|<=0,1)", th_off.abs() <= 0.1),
+            ("Thinker zararli (<-0,1)", th_off < -0.1)]
     for nm, mm in cats:
         n = int(mm.sum())
         row = "%-24s %6d %6.3f | %+8.4f %+8.4f %+8.4f" % (nm, n, n / len(mm), float((f - t)[mm].mean()), float((r - t)[mm].mean()),
@@ -113,8 +119,11 @@ def main(argv=None):
         if voice:
             row += " | %6.3f %+8.4f" % (float(gate[mm].mean()), float((L["off"][keep] - r)[mm].mean()))
         print(row)
-    print("acik payi (kiyas - tf toplam katkisi): ilk gecis %.2f, H > 2 %.2f" % (
-        float((f - t)[first].sum() / (f - t).sum()), float((f - t)[H >= 2].sum() / (f - t).sum())))
+    tot = (f - t).sum()
+    print("acik payi (kiyas - tf toplam katkisi): ilk gecis %.2f, H > 2 %.2f | Thinker'a bagli %.2f, Thinker'siz %.2f, zararli %.2f" % (
+        float((f - t)[first].sum() / tot), float((f - t)[H >= 2].sum() / tot), float((f - t)[th_off > 0.1].sum() / tot),
+        float((f - t)[th_off.abs() <= 0.1].sum() / tot), float((f - t)[th_off < -0.1].sum() / tot)))
+    print("kiyasta Thinker kapali: ortalama %+.4f" % float(th_off.mean()))
 
 
 if __name__ == "__main__":
