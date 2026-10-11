@@ -146,7 +146,7 @@ READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_ge
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
-            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "widths", "strata_op", "strata_qk", "strata_ffn_keep", "strata_out", "sx_local", "sx_theta", "sx_window", "sx_plan", "sx_next", "sx_rate")
+            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "widths", "strata_op", "strata_qk", "strata_ffn_keep", "strata_out", "sx_local", "sx_theta", "sx_window", "sx_plan", "sx_next", "sx_rate", "sx_token")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -298,7 +298,7 @@ def _build(args, dev):
                         window=getattr(args, "sx_window", 256), vocab_rows=getattr(args, "vocab_rows", D.VOCAB),
                         out_cuts=tuple(getattr(args, "strata_out", None) or ()) or None,
                         plan=getattr(args, "sx_plan", 0) or 0, next_weight=getattr(args, "sx_next", 0) or 0.0,
-                        rate=getattr(args, "sx_rate", 0) or 0.0)
+                        rate=getattr(args, "sx_rate", 0) or 0.0, d_token=getattr(args, "sx_token", 0) or None)
         model, mask_fn, layout = model.to(dev), R.document_mask, "transformer"
     else:
         sys.path.insert(0, os.path.join(root, "model_z"))
@@ -620,6 +620,7 @@ def _args(argv):
     ap.add_argument("--sx_window", type=int, default=None, help="strata_x yerel attention penceresi (varsayilan 256); kimlikte")
     ap.add_argument("--sx_plan", type=int, default=None, help="strata_x plan yuvasi k (HAYAL.md H8; 0 kapali); kimlikte")
     ap.add_argument("--sx_next", type=float, default=None, help="strata_x sonraki birim tahmini agirligi (H9; 0 kapali); kimlikte")
+    ap.add_argument("--sx_token", type=int, default=None, help="strata_x token temsili (E / cikis) boyu (0: yerel d); kimlikte")
     ap.add_argument("--sx_rate", type=float, default=None, help="strata_x birim basina ortalama token r: theta = r x kodlayicinin "
                                                                 "ortalama surprizi (0: sabit --sx_theta); kimlikte")
     ap.add_argument("--widths", default=None,
@@ -777,16 +778,17 @@ def _args(argv):
         args.sx_plan = args.sx_plan if args.sx_plan is not None else w.get("sx_plan", 0)
         args.sx_next = args.sx_next if args.sx_next is not None else w.get("sx_next", 0.0)
         args.sx_rate = args.sx_rate if args.sx_rate is not None else w.get("sx_rate", 0.0)
+        args.sx_token = args.sx_token if args.sx_token is not None else w.get("sx_token", 0)
         if args.strata_out is None:
             args.strata_out = w.get("strata_out", [4096, 16384])
         if isinstance(args.strata_out, str):
             args.strata_out = [] if args.strata_out in ("", "0") else [int(c) for c in args.strata_out.split(",")]
         if len(args.sx_local) != 4 or args.sx_local[0] % args.sx_local[1] or args.sx_theta <= 0:
             sys.exit("DUR: --sx_local d,heads,kodlayici,kod cozucu (d heads'e bolunur); --sx_theta > 0")
-    elif args.sx_local or args.sx_theta or args.sx_window or args.sx_plan or args.sx_next or args.sx_rate:
+    elif args.sx_local or args.sx_theta or args.sx_window or args.sx_plan or args.sx_next or args.sx_rate or args.sx_token:
         sys.exit("DUR: --sx_* yalniz strata_x")
     else:
-        args.sx_local, args.sx_theta, args.sx_window, args.sx_plan, args.sx_next, args.sx_rate = [], 0, 0, 0, 0, 0
+        args.sx_local, args.sx_theta, args.sx_window, args.sx_plan, args.sx_next, args.sx_rate, args.sx_token = [], 0, 0, 0, 0, 0, 0
     if args.model == "model_s":                                          # sirali adim sayisi = layers
         if args.widths is None and was is not None:
             args.widths = was.get("widths")
@@ -937,7 +939,7 @@ def main(argv=None):
                  widths=args.widths, strata_op=args.strata_op,
                  strata_qk=args.strata_qk, strata_ffn_keep=args.strata_ffn_keep,
                  strata_out=args.strata_out, sx_local=args.sx_local, sx_theta=args.sx_theta, sx_window=args.sx_window,
-                 sx_plan=args.sx_plan, sx_next=args.sx_next, sx_rate=args.sx_rate)
+                 sx_plan=args.sx_plan, sx_next=args.sx_next, sx_rate=args.sx_rate, sx_token=args.sx_token)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -960,7 +962,7 @@ def main(argv=None):
                "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [], "local_kv_heads": 0,
                "widths": [], "strata_op": "split" if was.get("model") == "model_s" else "", "strata_qk": 0,
                "strata_ffn_keep": 1.0 if was.get("model") == "model_s" else 0, "strata_out": [], "sx_local": [], "sx_theta": 0,
-               "sx_window": 0, "sx_plan": 0, "sx_next": 0, "sx_rate": 0, **was}                                                    # sonradan eklenenler
+               "sx_window": 0, "sx_plan": 0, "sx_next": 0, "sx_rate": 0, "sx_token": 0, **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
         if old["plan_sha256"] != plan_meta["plan_sha256"][:n]:

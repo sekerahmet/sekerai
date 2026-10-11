@@ -33,12 +33,15 @@ def _hidden(d):
 class StrataX(BaselineTransformer):
     def __init__(self, d_local=512, heads_local=8, enc_layers=2, dec_layers=2, d_global=1024, heads_global=16,
                  global_layers=12, theta=8.0, window=256, aux_weight=1.0, vocab_rows=VOCAB, out_cuts=(4096, 16384),
-                 plan=0, next_weight=0.0, rate=0.0):
+                 plan=0, next_weight=0.0, rate=0.0, d_token=None):
         """plan k (HAYAL.md H8): buyuk cozucu birim basina k yuvalik plan (d_global -> k x d_local); kod cozucu token'i yazarken
         kendi yuvasinin plan vektorunu gorur (0: tek vektor, down).  next_weight (H9): sonraki birimin kodlayici vektorunu
         tahmin (kosinus, hedefte gradyan kesik) yardimci kayip agirligi.  rate r > 0: theta = r x kodlayicinin ortalama
-        surprizi (egitimde yuruyen ortalama, yalniz onceki adimlardan; buffer): birim basina ~r token, yerlesim bilgiye gore."""
-        super().__init__(d_local, 1, heads_local, None, vocab_rows)     # E (d_local), norm, uretim kurallari
+        surprizi (egitimde yuruyen ortalama, yalniz onceki adimlardan; buffer): birim basina ~r token, yerlesim bilgiye gore.
+        d_token (varsayilan d_local): token temsili (E ve cikis) boyu; d_local'dan farkliysa giris / cikista ince izdusum
+        (SS ayristirma: token boyu acigin cogunu acikliyor, yerel katmanlar dar kalabilir)."""
+        d_tok = int(d_token or d_local)
+        super().__init__(d_tok, 1, heads_local, None, vocab_rows)       # E (d_token), norm, uretim kurallari
         self.plan_k, self.next_weight, self.rate = int(plan), float(next_weight), float(rate)
         self.register_buffer("info_ema", torch.tensor(math.log(VOCAB)))   # rate: kodlayici surprizi yuruyen ortalamasi (nat)
         self.theta, self.window, self.aux_weight = float(theta), int(window), float(aux_weight)
@@ -51,8 +54,10 @@ class StrataX(BaselineTransformer):
         self.down = torch.nn.Linear(d_global, d_local * max(1, self.plan_k), bias=False)
         self.pred_next = torch.nn.Linear(d_global, d_global, bias=False) if self.next_weight else None
         self.g0 = torch.nn.Parameter(torch.zeros(d_local))               # tamamlanmis birim yokken baglam
-        self.enc_norm, self.glob_norm = Projection(d_local), Projection(d_global)
-        self.out = FactorizedOutput(d_local, VOCAB, out_cuts) if out_cuts else None
+        self.enc_norm, self.glob_norm = Projection(d_tok), Projection(d_global)
+        self.out = FactorizedOutput(d_tok, VOCAB, out_cuts) if out_cuts else None
+        self.tok_in = torch.nn.Linear(d_tok, d_local, bias=False) if d_tok != d_local else None
+        self.tok_out = torch.nn.Linear(d_local, d_tok, bias=False) if d_tok != d_local else None
         self._aux = None
         n_l, n_g = enc_layers + dec_layers, global_layers
         for name, p in self.blocks.named_parameters():
@@ -62,7 +67,9 @@ class StrataX(BaselineTransformer):
                 std = 0.02 / math.sqrt(2 * n) if name.endswith(("w_o.weight", "w_down.weight")) else 0.02
                 with torch.no_grad():
                     p.normal_(0.0, std)
-        for lin in (self.up, self.down):
+        for lin in (self.up, self.down, self.tok_in, self.tok_out):
+            if lin is None:
+                continue
             torch.nn.init.normal_(lin.weight, 0.0, 0.02)
 
     # --- parcalar ---------------------------------------------------------------------------------------------------
@@ -98,10 +105,12 @@ class StrataX(BaselineTransformer):
         B, T = tokens.shape
         m_loc = self._local_mask(doc)
         x = self.E(tokens)
+        if self.tok_in is not None:
+            x = self.tok_in(x)
         for blk in self.blocks[:self.n_enc]:
             x = blk(x, pos, m_loc)
         he = x
-        hn = self.enc_norm(he)
+        hn = self.enc_norm(self.tok_out(he) if self.tok_out is not None else he)
         nxt = (doc[:, 1:] == doc[:, :-1]) & (doc[:, 1:] >= 0)             # x_{t+1} ayni belgede: i_{t+1} = -log p_enc(x_{t+1})
         nll = torch.zeros(B, T, device=tokens.device)
         nll_v = self._nll(hn[:, :-1][nxt], tokens[:, 1:][nxt])
@@ -152,7 +161,7 @@ class StrataX(BaselineTransformer):
         x = he + ctx
         for blk in self.blocks[self.n_enc + self.n_glob:]:
             x = blk(x, pos, m_loc)
-        return self.norm(x), aux, ends, nll
+        return self.norm(self.tok_out(x) if self.tok_out is not None else x), aux, ends, nll
 
     # --- BaselineTransformer arayuzu ------------------------------------------------------------------------------------
     def _batch_hidden(self, batch, attn=None):

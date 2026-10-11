@@ -523,6 +523,16 @@ def t_strata_x():
     check("strata-x plan 3 + sonraki birim: nedensellik, belge yalitimi; pred_next gradyan alir",
           float((pa_[0, :9] - pb_[0, :9]).abs().max()) < 1e-6 and float((hr2[0, 9:] - hs2[0]).abs().max()) < 1e-5
           and gn is not None and float(gn.abs().sum()) > 0, "")
+    mt = StrataX(d_local=32, heads_local=4, enc_layers=1, dec_layers=1, d_global=64, heads_global=4, global_layers=2,
+                 theta=20.0, window=6, d_token=48).eval()
+    with torch.no_grad():
+        ta_ = mt.forward_states(a, pos, z)[0]
+        tb_ = mt.forward_states(b, pos, z)[0]
+        tr2 = mt.forward_states(row, prow, drow)[0]
+        ts2 = mt.forward_states(t2, torch.arange(7)[None], torch.zeros(1, 7, dtype=torch.long))[0]
+    check("strata-x d_token 48 (yerel 32): E / cikis 48 boyut; nedensellik, belge yalitimi, uretim",
+          mt.E.weight.shape[1] == 48 and ta_.shape[-1] == 48 and float((ta_[0, :9] - tb_[0, :9]).abs().max()) < 1e-6
+          and float((tr2[0, 9:] - ts2[0]).abs().max()) < 1e-5 and len(mt.generate([[[5, 6]]], 1, 3)) == 1, "")
     mr = StrataX(d_local=32, heads_local=4, enc_layers=1, dec_layers=1, d_global=64, heads_global=4, global_layers=2,
                  window=6, rate=3.0)
     e0 = float(mr.info_ema)
