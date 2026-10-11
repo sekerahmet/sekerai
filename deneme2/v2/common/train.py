@@ -126,10 +126,13 @@ GLOB_KV_DEFAULT = "auto"       # --glob_kv_heads verilmezse (kullanici, 8 Ekim: 
 LOCAL_KV_DEFAULT = 0           # --local_kv_heads verilmezse: yerelde GQA YOK (tam k / v; kullanici, 11 Ekim: "varsayım olarak yereller de
                                # kapalı olmalı"; 10 Ekim notu: "GQA belki yalnız G'de, Z'ler zaten sıkışık"). "auto" = G ile ayni (10 Ekim olcumu:
                                # d1280 -%5,6 ms/adim, kayip +0,021 @1000). Hesap (model_s/TERSINE s16): yerel GQA Z'nin okunma kanalini d / 4'e daraltir.
-ATTN_GATE_DEFAULT = "auto"     # --attn_gate verilmezse (kullanici, 8 Ekim: "gate 2 varsayılan"); testler eski 0'a sabitler
+ATTN_GATE_DEFAULT = 0          # --attn_gate verilmezse: kapisiz (kullanici, 11 Ekim: "gate 2 de kapat"; olculen YYG tabani kapisiz;
+                               # 8 Ekim "gate 2 varsayılan" -> "auto" = gate2 acikca verilirse)
 NGRAM_DEFAULT = 0              # --ngram_embed verilmezse (kullanici, 9 Ekim: katkisi modelden bagimsiz + dongu artti; 8 Ekim auto)
 MTP_DEFAULT = 0                # --mtp verilmezse (kullanici, 9 Ekim, n-gram ile birlikte; 8 Ekim auto)
 NOPE_DEFAULT = 1               # --g_nope verilmezse, G'li Model Z (kullanici, 10 Ekim: "öncelikle nope varsaylan olsun")
+G_LAYOUT_DEFAULT = "interleave"  # --g_layout verilmezse, G'li Model Z: Y-Y-G donusumlu (kullanici, 11 Ekim: "Bence yyg varsayılan olsun
+                                # şimdilik"; d1024 / L12 3.000 adim sinav YYG 3,4150 / YYYG 3,4193 / G sonda (top) egitim 3,4256)
 FP8_DEFAULT = "none"           # --fp8 verilmezse: kapali (kullanici, 11 Ekim: "Fp8 kapat o zaten performans sadece yüksek de açık olmalı");
                                # buyuk kosuda acikca --fp8 tensorwise (10 Ekim d1280 1.000 adim: -%3,9 ms/adim, kayip farki ~+0,003)
 MLP_RATIO_DEFAULT = (1.0, 4.0)  # --mlp_ratio verilmezse, G'li Model Z: MLP : tam attention yerel 1:1, G 4:1 (kullanici, 10 Ekim:
@@ -651,7 +654,7 @@ def _args(argv):
                     help="deneme/mixed-layer: her blokta son N head G (tam causal, gercek konum), kalan yerel (Z'li); ortak MLP, "
                          "oran head payiyla agirlikli; 0 kapali (G katmanlari ayri)")
     ap.add_argument("--g_layout", default=None,
-                    help="deneme: G katmanlarinin yeri; top (varsayilan) son N blok, interleave esit aralikli + son blok G, "
+                    help="G katmanlarinin yeri; interleave (G'li Model Z varsayilani, YYG) esit aralikli + son blok G, top son N blok, "
                          "ya da blok numaralari '3,6,9' (0'dan, global_layers tane)")
     ap.add_argument("--mix_kv", default=None, help="deneme/mixed-layer: yerel,G k / v head (verilmezse head payina gore)")
     ap.add_argument("--g_nope", type=int, default=None,
@@ -752,7 +755,7 @@ def _args(argv):
             auto.append("local_kv_heads %d (= glob_kv_heads)" % args.local_kv_heads)
     args.local_kv_heads = int(args.local_kv_heads or 0)
     args.mix_g_heads = int(args.mix_g_heads or 0)
-    args.g_layout = args.g_layout or "top"
+    args.g_layout = args.g_layout or (G_LAYOUT_DEFAULT if args.model == "model_z" and args.global_layers else "top")
     mk = args.mix_kv
     args.mix_kv = [int(x) for x in mk.split(",")] if isinstance(mk, str) else list(mk or [])
     if args.mix_g_heads and (args.model != "model_z" or not args.global_layers or not args.mlp_ratio):
