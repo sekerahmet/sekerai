@@ -42,11 +42,16 @@ def _fill_info_ema(state, prefix, *args, **kwargs):
 class StrataX(BaselineTransformer):
     def __init__(self, d_local=512, heads_local=8, enc_layers=2, dec_layers=2, d_global=1024, heads_global=16,
                  global_layers=12, theta=8.0, window=256, aux_weight=1.0, vocab_rows=VOCAB, out_cuts=(4096, 16384),
-                 plan=0, next_weight=0.0, rate=0.0, d_token=None, direct=False):
+                 plan=0, next_weight=0.0, rate=0.0, d_token=None, direct=False, memory=0):
         """plan k (HAYAL.md H8): buyuk cozucu birim basina k yuvalik plan (d_global -> k x d_local); kod cozucu token'i yazarken
         kendi yuvasinin plan vektorunu gorur (0: tek vektor, down).  next_weight (H9): sonraki birimin kodlayici vektorunu
         tahmin (kosinus, hedefte gradyan kesik) yardimci kayip agirligi.  rate r > 0: theta = r x kodlayicinin ortalama
         surprizi (egitimde yuruyen ortalama, yalniz onceki adimlardan; buffer): birim basina ~r token, yerlesim bilgiye gore.
+        memory H (HAYAL.md tur 4-5; kullanici, 11 Ekim: not defteri, bagli yazma, tekrar etmeyeni unutma, "nöronlar kendi aralarında
+        yeni bağlar kurarlar"): hikaye bellegi, H head'li sonen dogrusal (hizli agirlik) bellek. Yazma: anahtar k_j = W_k [Reader
+        durumu | Thinker katkisi] (bagli), deger v_j = E[x_j] (token kimligi), guc w_j = sigmoid(a i_j + b) (Reader surprizi);
+        okuma: r_t = sum_{j<=t, ayni belge} (q_t . k_j / sqrt(d)) w_j lam^(t-j) v_j / (1 + sum |.|), q_t Writer'dan; cikisa kapili
+        (h += sigmoid(kapi_t) W r_t).  Paralel bicim (T x T); sabit boyutlu M ile ozdes (hiz sonra).
         direct: buyuk cozucuden cikisa dogrudan kapili yol (danisman 02 / tez tartismasi 3; kullanici, 11 Ekim: "beynin konusma kismi
         sadece konusma degildir o beynin bir cok kismindan faydalanir"): h = norm(kod cozucu) + sigmoid(kapi_t) W glob_norm(z_k(t));
         ikisi ayni bagli E ile tek softmax = kapili uzmanlar carpimi (kod cozucunun d_local kanalini atlar).
@@ -68,6 +73,16 @@ class StrataX(BaselineTransformer):
         self.pred_next = torch.nn.Linear(d_global, d_global, bias=False) if self.next_weight else None
         self.direct = torch.nn.Linear(d_global, d_tok, bias=False) if direct else None
         self.direct_gate = torch.nn.Linear(d_local, 1) if direct else None
+        self.mem_heads, self.mem_dim = int(memory), 64
+        if self.mem_heads:
+            hm = self.mem_heads * self.mem_dim
+            self.mem_k = torch.nn.Linear(d_local + d_local, hm, bias=False)       # [Reader | Thinker katkisi] -> bagli anahtar
+            self.mem_q = torch.nn.Linear(d_local, hm, bias=False)                 # Writer -> sorgu
+            self.mem_v = torch.nn.Linear(d_tok, hm, bias=False)                   # token embedding -> deger
+            self.mem_o = torch.nn.Linear(hm, d_tok, bias=False)
+            self.mem_gate = torch.nn.Linear(d_local, 1)
+            self.mem_write = torch.nn.Parameter(torch.tensor([0.5, -2.0]))       # guc = sigmoid(a i + b)
+            self.mem_decay = torch.nn.Parameter(torch.full((self.mem_heads,), 4.0))   # lam = sigmoid(.): ~0,98, head basina
         self.g0 = torch.nn.Parameter(torch.zeros(d_local))               # tamamlanmis birim yokken baglam
         self.enc_norm, self.glob_norm = Projection(d_tok), Projection(d_global)
         self.out = FactorizedOutput(d_tok, VOCAB, out_cuts) if out_cuts else None
@@ -82,7 +97,8 @@ class StrataX(BaselineTransformer):
                 std = 0.02 / math.sqrt(2 * n) if name.endswith(("w_o.weight", "w_down.weight")) else 0.02
                 with torch.no_grad():
                     p.normal_(0.0, std)
-        for lin in (self.up, self.down, self.tok_in, self.tok_out, self.direct):
+        for lin in (self.up, self.down, self.tok_in, self.tok_out, self.direct, getattr(self, "mem_k", None), getattr(self, "mem_q", None),
+                    getattr(self, "mem_v", None), getattr(self, "mem_o", None)):
             if lin is None:
                 continue
             torch.nn.init.normal_(lin.weight, 0.0, 0.02)
@@ -198,7 +214,30 @@ class StrataX(BaselineTransformer):
             gz = self.glob_norm(z).gather(1, kc[..., None].expand(-1, -1, z.shape[-1]))
             gate = torch.sigmoid(self.direct_gate(x).float())
             h = h + torch.where(ok[..., None], gate * self.direct(gz).float(), torch.zeros_like(h))
+        if self.mem_heads:
+            h = h + self._memory(tokens, doc, he, ctx, x, nll)
         return h, aux, ends, nll
+
+    def _memory(self, tokens, doc, he, ctx, x, info):
+        """Hikaye bellegi okumasi (B, T, d_tok); nedensel (j <= t), belge ici; sonen dogrusal attention (paralel bicim)."""
+        B, T, _ = he.shape
+        H, dm = self.mem_heads, self.mem_dim
+        k = self.mem_k(torch.cat([he, ctx.to(he.dtype)], -1)).float().view(B, T, H, dm).transpose(1, 2)
+        q = self.mem_q(x).float().view(B, T, H, dm).transpose(1, 2)
+        v = self.mem_v(self.E(tokens)).float().view(B, T, H, dm).transpose(1, 2)
+        a, b = self.mem_write
+        w = torch.sigmoid(a * info.float() + b)                             # (B, T) yazma gucu (surpriz; i_t token t'nin kendi bilgisi)
+        i = torch.arange(T, device=tokens.device)
+        dist = (i[:, None] - i[None, :]).float()
+        allow = (doc[:, :, None] == doc[:, None, :]) & (dist >= 0) & (doc[:, :, None] >= 0)
+        lam = torch.nn.functional.logsigmoid(self.mem_decay.float())        # log lam (H,)
+        decay = torch.exp(lam[:, None, None] * dist.clamp(min=0))            # (H, T, T)
+        s = (q @ k.transpose(-1, -2)) / dm ** 0.5 * decay[None] * w[:, None, None, :]
+        s = s.masked_fill(~allow[:, None], 0.0)
+        r = (s @ v) / (1 + s.abs().sum(-1, keepdim=True))
+        r = r.transpose(1, 2).reshape(B, T, H * dm)
+        gate = torch.sigmoid(self.mem_gate(x).float())
+        return gate * self.mem_o(r.to(x.dtype)).float()
 
     # --- BaselineTransformer arayuzu ------------------------------------------------------------------------------------
     def _batch_hidden(self, batch, attn=None):

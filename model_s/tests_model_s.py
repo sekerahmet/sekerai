@@ -543,6 +543,21 @@ def t_strata_x():
     check("strata-x dogrudan yol (buyuk cozucu -> cikis, kapili): nedensellik, belge yalitimi, uretim",
           float((da_[0, :9] - db_[0, :9]).abs().max()) < 1e-6 and float((dr2[0, 9:] - ds2[0]).abs().max()) < 1e-5
           and len(md.generate([[[5, 6]]], 1, 3)) == 1, "")
+    mm = StrataX(d_local=32, heads_local=4, enc_layers=1, dec_layers=1, d_global=64, heads_global=4, global_layers=2,
+                 theta=20.0, window=6, memory=2).eval()
+    with torch.no_grad():
+        ma_ = mm.forward_states(a, pos, z)[0]
+        mb_ = mm.forward_states(b, pos, z)[0]
+        mr2 = mm.forward_states(row, prow, drow)[0]
+        ms2 = mm.forward_states(t2, torch.arange(7)[None], torch.zeros(1, 7, dtype=torch.long))[0]
+    mm.train()
+    hh = mm._batch_hidden(B_)
+    mm.output_loss(hh.flatten(0, 1), tgt.flatten()).backward()
+    check("strata-x hikaye bellegi (memory 2): nedensellik, belge yalitimi, uretim; bellek parametreleri gradyan alir",
+          float((ma_[0, :9] - mb_[0, :9]).abs().max()) < 1e-6 and float((mr2[0, 9:] - ms2[0]).abs().max()) < 1e-5
+          and len(mm.eval().generate([[[5, 6]]], 1, 3)) == 1
+          and all(p.grad is not None and float(p.grad.abs().sum()) > 0 for p in (mm.mem_k.weight, mm.mem_q.weight, mm.mem_write, mm.mem_decay)),
+          "")
     mr = StrataX(d_local=32, heads_local=4, enc_layers=1, dec_layers=1, d_global=64, heads_global=4, global_layers=2,
                  window=6, rate=3.0)
     e0 = float(mr.info_ema)

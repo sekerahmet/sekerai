@@ -121,3 +121,18 @@ süre neydi diye kendi kendime ipucu aramaya da çalışırım hafızamı bir ka
   token'larda: uyarlamalı hesap). Çekince: seyrek öğrenme sinyali; önce tek bakış, sonra yineleme.
 
 Defter tasarımı (sentez): **bağlı anahtarla yazılan, kullanılmayanın söndüğü, zor anda birkaç kez bakılan not defteri.**
+
+## Tur 5 — okurken kurulan bağlar (kullanıcı, 11 Ekim)
+
+Kullanıcı: *"insanlarda nöron sayısı çok değişmez ama insan büyüdükçe yeni şey öğrendikçe nöronlar kendi aralarında yeni bağlar kurarlar.
+bir nöron sayısız bağlantı kurabilir ve nöronların tipleride kendi aralarından uzmanlaşmış gibidir."*
+
+- Transformer: bağlantı yapısı sabit ve yoğun; öğrenme yalnız güç değiştirir. Strata: yapı öğrenmeyle değişir (birimler büyür; ÖLÇÜLDÜ
+  199 → 118 ms).
+- **Not defteri = hızlı ağırlıklar** (HİPOTEZ; LİTERATÜR hafızadan: fast weights 1980–90'lar; gated delta rule — Qwen3-Next, Kimi Linear):
+  okurken  M ← (1 − λ_t) M + k_t ⊗ v_t ;  hatırlarken  v̂ = M q_t.
+  Bağ = k (Lucy + köpek bağlamı) ⊗ v (Max); unutma = λ (sönme); sabit kapasite = M d×d (hikâye boyundan bağımsız; "nöron sayısı sabit,
+  bağlar değişir"); uzmanlaşma = katman / head başına ayrı M.
+- Strata'ya özgü olan: **ne yazılacağını Reader'ın sürprizi** (yüksek sürprizde güçlü yazma), **ne zaman bakılacağını Writer'ın
+  belirsizliği** (kapı) belirler; genel bir katman değil, işi belli bir hikâye belleği.
+- Ölçülecek: Voice sonrası kalan açık (hikâyede kurulmuş bilgi); önce danışmanla antitez, sonra küçük kol.

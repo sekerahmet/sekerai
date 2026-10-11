@@ -111,6 +111,20 @@ Thinker'ın çıkışa doğrudan, kapılı katkısı. Ders: "küçük" adı "kü
   konuşma kısmı sadece konuşma değildir o beynin bir çok kısmından faydalanır"*. Test: `--sx_direct 1`, B ayarı, 2.000 adım; H > 2
   açığı (+0,12) < ~0,08'e inerse darboğaz kanal, inmezse büyük çözücünün kapasitesi.
 
+- **Ölçek testi (ÖLÇÜLDÜ, SS 2.000 adım):** Thinker d512 / 8 → d1024 / 12: Writer 256 1,672 → 1,635, Writer 512 1,558 → 1,535; fark
+  0,114 → 0,100 — danışman 02 ölçütü (< 0,06) **tutmadı**: Thinker büyüyünce Writer ihtiyacı belirgin küçülmüyor (bu ölçekte). Alternatif
+  (HİPOTEZ, iletişim ilkesi): dar olan Writer değil Thinker → Writer kanalı (up / down rank = d_local); sınama: Voice + Writer 256 (kuyrukta).
+  Önceden tahmin (sonuç sonrası hikâye kurmamak için, kullanıcı önerisi): ben — Writer 512 + Voice ~1,54, Writer 256 + Voice ~1,61.
+- **Hikâye belleği ertelendi** (danışman, `sx_attn_copy.py`, `sx_store.py`, ÖLÇÜLDÜ): pencere içi kopya transformer'la eşit (0,619 / 0,629);
+  açığın %65'i ilk geçiş (bellek dokunamaz); "defter zaten var" — Thinker birimleri sürprizli token'larda kapanıyor (kopyalanacak token'ın
+  ilk geçişi %41 birim sonu, taban %37); sürpriz "sonra lazım"ı zayıf seçiyor (1,1×). Kod `--sx_memory` (kapalı) hazır; açılış koşulu:
+  Voice uzak kopya açığını (+0,32) kapatmazsa ve FineWeb'de uzak kopya payı SS'teki %1,2'den belirgin büyükse; yazma "hepsi + öğrenilen sönme".
+- **İletişim ilkesi (kullanıcı ön sezisi, 11 Ekim: *"transformer mimarisi kurulurken bir çok parça birleşti ama temel nokta bunların
+  hepsinin birbiriyle nasıl konuşacağdı değil mi"*):** transformer'ın gücü ortak pano (residual akış: herkes aynı alanda okur, ekleyerek
+  yazar; LİTERATÜR hafızadan, Anthropic 2021 devreler). Strata'da her parçanın kendi panosu, aralarında dar borular (Reader → Thinker
+  birim vektörü, Thinker → Writer tek vektör girişte); bugünkü açıkların hepsi iletişim sorunu (HİPOTEZ). İlke: **ayrı ölçek, ortak dil
+  ve geniş kanal** — Voice (Thinker → çıkış), not defteri (kurulmuş bilgi → çıkış), sıradaki aday: Thinker durumu her Writer katmanına
+  (yalnız girişe değil) ya da Writer her katmanda Thinker birimlerine bakar. Voice sonucu ilk sınav.
 - **Başarı ölçütü (kullanıcıyla, 11 Ekim; seçenek c):** üçü birlikte — (1) sınavda açık gürültü düzeyine (≤ ~0,02; benim önerim),
   (2) kör, karşılaştırmalı okumada (kullanıcı + human-reader, sıra çevrilerek) en az eşit tercih, (3) transformer'dan ucuz (eğitim ve
   üretim). Kullanıcı: *"bir şeyi belirli bir olgunluğa geldikçe başkalarının ölçüsüne sunarız"*.
