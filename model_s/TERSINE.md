@@ -361,3 +361,52 @@ toplam / uzman çarpımı) + derinlik (bileşim)**.
 MoE FFN. Strata'ya özgü fikirler sağ çıkmadı; kazanım: transformer ailesinin neden böyle olduğunun hesapla bilinmesi.
 **Sorgulanmamış iki yer (orijinallik varsa büyük olasılıkla burada):** (1) girdi biriminin kendisi (bayt / BPE / bilgi birimi; danışman Tur B (vi));
 (2) öğrenme kuralı (geri yayılım / gradyan inişi) — kullanıcı başta: *"Öğrenmenin özü kritik"*.
+
+---
+
+# Tur D — öğrenme kuralı (kullanıcı, 11 Ekim: *"Öğrenme kuralı bence"*; önceden: *"Geri yayılım fonksiyonundan daha efektif ... farklı bakış
+açısı ile olur"*, *"Öğrenmenin özü kritik"*; ilk hedef: *"transformerın o kaybına daha kısa sürede ulaşmak da bir hız ölçüsü"*)
+
+Yöntem: Tur A–C dersleri (problem tek amaçla; literatür ilk adımda; tek bilinmeyen; parça ekleyerek açık kapatma yok).
+
+## 14. Problem (taslak)
+
+Veri dağılımı 𝒟, model f_θ, kayıp L(θ) = E_𝒟[−log p_θ]. **Öğrenme kuralı** = θ_{k+1} = θ_k + Δ_k, Δ_k = R(o_k, geçmiş) — o_k adım k'de elde edilen
+**sinyal** (geri yayılım gradyanı, yerel sinyal, yalnız ileri geçiş ...), R onu güncellemeye çeviren **geometri** (SGD, Adam, Muon / NorMuon,
+doğal gradyan ...), ve adım k'nin **hangi veriyi / token'ı** gördüğü (sıra, seçim, ağırlık).
+**Amaç:** belirli bir hesap C (FLOP) ve veri D (token) bütçesinde min L(θ_K); ya da hedef kayba (transformer'ın kaybı) en az C / D ile ulaşmak.
+Bilinen (hafızadan, metinde doğrulanacak): eğitim FLOP ≈ 6 N D (ileri 2 N D + geri 4 N D); geri yayılım gradyanı kesin, ileri geçişin ~2× maliyeti.
+Gevşeklik nerede olabilir (aday, hüküm değil): (a) adım başına yön (geometri; Muon ölçülmüş kazanç); (b) adım başına veri (hangi token öğretir —
+Strata'nın "hesap bilgiye gitsin" ilkesinin öğrenmedeki karşılığı); (c) sinyalin maliyeti (geri geçişi ucuzlatmak / atlamak); (d) hesabın yeniden kullanımı
+(büyüyen model, paylaşım, damıtma).
+
+### 14a. Danışman literatürü (Tur D; 7 metin eklendi; Claude metinde doğruladı)
+
+| eksen | en iyi ölçülmüş | bizde |
+|---|---|---|
+| geometri | Muon AdamW kalitesine FLOP'un ~%52'siyle (`2025/liu2025_muonscalable.txt` L19, L93); NorMuon 1,1B'de Adam'a %21,74, Muon'a %11,31 (`2025/li2025_normuon.txt` L22–23); modded-nanogpt Adam'a ~1,9× adım | NorMuon var |
+| büyüyen model | G_stack 7B: 300B yerine 194B token (`2024/du2024_stacking.txt` L61) | yok |
+| veri seçimi | Rho-1 alana özel sürekli ön eğitimde DeepSeekMath'i %3 token'la (`2024/lin2024_rho1.txt` L52); RHO-LOSS görüntüde 18× adım; **genel LM ön eğitiminde ölçülmemiş** | yok |
+| sinyal (geri yayılım yerine) | FF / ileri gradyan / öngörüsel kodlama küçük görüntü ağlarında; MeZO yalnız ince ayar; LM ön eğitiminde kıyas yok | — |
+
+Hesap: geri geçiş eğitim FLOP'unun 2/3'ü → bedava sinyal en fazla 3× (gradyan kalitesi korunursa); alternatiflerin hepsi kaliteyi kaybediyor.
+**Tek gerçek açık:** genel ön eğitimde "hangi token öğretir" (Strata ilkesinin öğrenmedeki karşılığı). Risk: seçilmeyen token'ların öğrettiği beceri kaybolur
+(Hapax: maskeleme ilgili yeteneği bastırdı). Ölçüm eğitim ister (seçici kayıp vs tam CE, aynı kayba adım) — kullanıcı onayıyla.
+
+### 14b. Matematikçi (`danisman/08_ogrenme_kurali.md`) ve tek bilinmeyen
+
+- Sinyal: ucuz gradyan ilkesi — kesin gradyan ileri geçişin sabit katı; geri geçişi atlamak en çok 3×; yalnız ileri kestiricinin varyansı (n+2)‖∇f‖² (KANIT;
+  n 1,4·10⁸'de bir geri yayılım ~10⁸ ileri geçiş) → "geri yayılımdan etkili sinyal" kapalı. Kural **veri üssünü değil çarpanını** değiştirir (Bayes koşullu;
+  üs Hilberg'den, Bialek L502–515). 2× hedef d1024'te aynı token'da 0,10–0,21 nat ister; NorMuon −0,012. En büyük kuramsal gevşeklik **tek görüşte saklama**
+  (SGD ~100–1.000 görüş, Allen-Zhu) — mimari / bellek konusu (RETRO, kNN-LM). Seçim yalnız dizi düzeyinde hesap kazandırır (geri geçiş konum sayısıyla).
+- **Ölçüldü (`sx_grad_noise.py`; FineWeb transformer son checkpoint, 32 dizi, ort. 466 token):** ρ_IS = **1,028** (kural ≥ 2 → dizi seçimi ekseni kapalı);
+  Spearman(|g_s|, dizi kaybı) 0,565; |G|² tahmini < 0 (gürültüde) → B_noise belirlenemedi, çok büyük (son checkpoint minimuma yakın); çekince: eğitim ortası farklı olabilir.
+
+## 15. Tur D hükmü ve günün sonucu (Claude)
+
+Öğrenme kuralı: sinyal ilkesel kapalı, geometri (NorMuon) en iyilerden, dizi seçimi ~%3, kural üssü değiştiremez. Kullanıcının sezgisi (*"orda da muon gibi
+yeni birşey çıkmaz tutar onun bi türevini bulursunuz"*) doğrulandı.
+**Gün (Tur A–D):** her turda problem doğru kuruldu, ilkesel çözüldü, ölçüldü; cevap her seferinde bilinen yere çıktı → transformer + MoE + NorMuon ailesi bizim
+türetebildiğimiz düzeyde ilkesel en iyiye yakın. Kazanım: neden böyle olduğunun hesabı ("iki arşiv + derinlik"; softmax = tek kaynak Bayes; arşiv zorunlu
+(Hilberg); kural yalnız çarpan). Somut değer: Z2'yi ilkesel parçalarla iyileştirmek (ölçek büyüyünce MoE FFN; yerel katmanlarda delta durumu; G'de MLA KV).
+Yenilik için ders: standart problemi daha iyi çözmek değil, **hangi varsayımın yanlış olabileceğiyle** başlamak (Z2'nin cümle özeti böyle bir varsayımdı).
