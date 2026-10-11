@@ -186,3 +186,178 @@ Veri biçimi düzeldi (`fw_docs.py`, V2 sınırları): FineWeb transformer'ı 40
 - **Parça adresi** (`sx_part_address.py`, 60 belge ≥ 256 token): s 1 0,259 / 0,037; s 4 0,685 / 0,150; s 16 0,935 / 0,421 (rastgele taban =
   aday payı) → adres ayakta.
 - **Ders:** bir modelle ölçümden önce modelin bilinen kaybı yeniden üretilir (burada sınav 3,099 ↔ ham token 4,40 farkı hatayı gösterdi).
+
+### 8d. Açık: yerel pencere neden var (kullanıcı, 11 Ekim: *"Yerel pencere ne demek ? Attention mı"*; *"Bunu niye tasarıma ekledik"*)
+
+Gerekçe: parçalar sırasız (anahtar ortalaması konumu siler — matematikçi Söz 2, danışman Söz 3); ölçülen kütlenin ~%8'i önceki token.
+Ama ekiple tartışılmadan, transformer'da bilinen parça olduğu için eklendi. Seçenek: **tanımlı konum parçaları** ("1 önce", "2 önce", "cümle başı")
+aynı parça belleğinde → tek mekanizma (parçaların uyumu). Risk: yerel sözdizimi tek tek parça okumalarıyla pencere kadar zengin kurulur mu.
+Açık soru (ekibe): yerel sıra ayrı pencereyle mi, parça belleğinde konum parçalarıyla mı. Diğer açıklar: birleştirme kuralı, katmanlar,
+yazma / okuma adresinin buluşması (s 4'te kütlenin %68'i).
+
+## 9. Attention turunun dürüst hükmü (kullanıcı, 11 Ekim: *"Yani varsayım ile kafana göre parça eklersen böyle olur. ... Attention için yeni
+matematik yok anladık sadece yeni kavramlar ekleyerek attention a yön göstermeye mi döndük ... önce full attention kazım bu sırada adres
+parçacığı olur bu da bir nokta da moe nasıl yaparız sorusuna mı döndü ? Yani yeni tasarım aslında mevcut birşeyin keşifine mi döndü"*)
+
+**Evet.** "Paylaşılan parça belleği" = yönlendirmeli seyrek attention (kova / küme adayları + softmax + MoE tipi denge): Reformer (LSH), Routing
+Transformer, MoBA / NSA (blok seçimi), DeepSeek DSA (yoğun öğretmenle seçim öğretimi). Danışman akrabalığı söyledi; Claude farkı büyüttü — hata.
+**Yöntem hatası:** açık → "şu parça eklenirse çözülür" (yerel pencere, bastırma, Dirichlet, konum parçası) → yamalarla büyüyen tasarım → bilinen
+mimariye yakınsama. **Kazanım:** yeni matematik değil, attention'ın sınırlarının hesapla belgelenmesi (keskinlik üstel; sabit durum birebir geri
+çağıramaz; kapasite / Zipf / bellek sınırları; attention'ın ölçülen işi ~%76 geniş ortalama, ~%3 birebir tekrar) → attention kendi işi için
+matematiksel olarak iyi bir çözüm; çevresi keşfedilmiş.
+**Karar (Claude):** tur kapanır; parça belleği özgün tasarım değil — **bilinen parçaların özgünlüğü doğrulanmamış ve hiç sınanmamış bir
+birleşimi** (kullanıcı: *"gerçekten yeni bir varyant mı bulduk peki ?"*): bileşenlerin hepsi bilinen (kova adayları, küme toplamı, önbellek / PPM
+geri çekilmesi, örneklenmiş aday, yardımcı kayıpsız denge); literatür yalnız klasörde arandı (web yok); hiç eğitilmedi; bilinenleri aştığına dair
+hesap yok. FFN turu iki dersle:
+(1) literatür ilk adımda (fikir varsa baştan söylenir); (2) parça ekleyerek açık kapatmak yok — önce modelin ne hesaplaması gerektiği matematikle,
+tasarım ondan türer.
+
+---
+
+# Tur B — okuma ve token'ın kendisi tek bir problemden (kullanıcı, 11 Ekim: *"bu tasarım bitmeden bence bir sonrakine geçmeyeceğiz. çünkü bu
+tasarım aynen kalıyorsa bir sonraki de aynen kalır"*; *"token ne olmalı sorusuyla beraber olmalı bu. yani biz şu an D boyutlu bir nesne olarak
+tanımlıyoruz. bu kısıt olmadan konuyu ele almak gerekli"*)
+
+**Bitti ölçütü:** (1) her bileşen aynı amaçtan türer, sonradan eklenen parça yok; (2) dört açık (birleştirme, katmanlar, adres buluşması, yerel
+sıra) çözümle kapanır; (3) literatürdeki yeri (web dahil, kullanıcı onayıyla) kesin; (4) test en sonda, SS, yalnız çalıştığını görmek için.
+
+## 10. Problem (taslak)
+
+Girdi x_1..x_T. Seçilen (hiçbirinin biçimi verili değil): **durum** σ_t (vektör / kod / küme / dağılım / liste ... serbest), σ_t = U(σ_{t−1}, x_t, o_t);
+**arşiv** m_j (|m_j| bit, 0 olabilir); **okuma** o_t = A(σ_t, {m_j}_{j<t}), maliyet c_A; **tahmin** p(x_{t+1} | σ_t, o_t).
+**Amaç:** min E[−log p(x_{t+1})] + λ_m E[Σ_j |m_j|] + λ_c E[c_A + c_U], öğrenilebilirlik koşuluyla.
+**İlkesel ölçüt (LİTERATÜR hafızadan, aranacak):** öngörüsel durum — Crutchfield nedensel durumları (geleceği aynı dağıtan geçmişler denk), öngörüsel
+bilgi darboğazı (Still; Bialek, Nemenman, Tishby 2001 öngörüsel bilgi); gerekli bellek I(geçmiş; gelecek) ile sınırlı.
+**"Token ne olmalı" buradan:** gelen sembol durumun içine erir mi (bilgisi özetle açıklanıyorsa) yoksa kimliğiyle arşivlenir mi (ileride birebir
+gerekecekse)? Ölçülenler: kütlenin ~%76'sı geniş ortalama (eriyen), ~%3 birebir tekrar (arşiv), Jelassi: kopya özetle yapılamaz. Transformer bu
+seçimi yapmaz (her token tam vektör arşivlenir, özet her adım yeniden hesaplanır); SSM hiçbir şeyi arşivlemez.
+Beklenen: token'ın biçimi, arşiv biti, okuma yolu — hepsi bu amaçtan.
+
+### 10a. Danışman: formülün eksikleri ve erken uyarı
+
+Eksikler (kabul, Claude): (i) **paralel eğitim** — σ_t = U(σ_{t−1}, x_t, o_t) genel özyineleme T sıralı adım ister; kazanan aileler bu kısıtın
+çözümleri (attention konumları bağımsız; doğrusal / delta özyineleme birleşmeli → paralel ön ek / parçalı tarama; `2026/m2rnn2026.txt` L62–70) →
+amaca c_train = sıralı derinlik; (ii) **arşiv kararı çevrimiçi** (gelecek sorgu bilinmeden; önbellek politikası); (iii) **öğrenilebilirlik** = veri
+bütçesi B ile SGD'nin bulduğu çözüm (transformer kopyayı GSSM'den 100× az örnekle öğrenir, `2024/jelassi2024_repeat.txt` L287); (iv) **beklenti
+serbest üretimde de** (döngü); (v) c_A bayt (üretim bant sınırlı); (vi) **girdi birimi (bayt / BPE / bilgi birimi) de seçim değişkeni** —
+kullanıcının "token ne olmalı" sorusunun tam karşılığı, Strata'nın ilk sorusu.
+Literatür: Crutchfield / Still / Bialek–Nemenman–Tishby klasörde yok (web gerekir); amaçtan türetilmiş "arşivle / özetle" LM çalışması klasörde yok;
+Hilberg yasası (hafızadan): öngörüsel bilgi ~T^β → sonlu nedensel durum yok, arşiv + özet zorunlu.
+**Erken uyarı:** doğal çözüm büyük olasılıkla bilinen aile — özet: birleşmeli özyineleme (GDN) + öğrenilen seçici arşiv: Selective Attention
+(aynı ppl'de attention belleği 512 / 1.024 / 2.048'de 16 / 25 / 47× az, `2024/leviathan2024_selective.txt` L60–67), FoX (`2025/lin2025_fox.txt`
+L69), Titans "being surprising is more memorable" (`2025/behrouz2025_titans.txt` L221–228; Strata sürpriz ilkesinin bellek tarafı), StreamingLLM.
+**Çıta:** 2.048'de aynı ppl'de 47× az attention belleği; türetilen kural bunu geçmezse yeniden keşif.
+
+### 10b. Matematikçinin çözümü (`danisman/06_problem_cozumu.md`)
+
+- Çözüm bilinen aile: durum + attention karması; **softmax okumada en yüksek entropili seçim (Gibbs) ve "kaynak tek geçmiş konum" modelinde Bayes
+  sonsalı — arşivden okumanın tam çözümü (KANIT)**. Saf transformer λ_m → 0, sabit durum λ_m → ∞ sınırı; sonlu λ'da karma.
+- Problem metninde hata (KANIT): λ_c = 0'da durum / arşiv ayrımı yok olur; durum boyu ücretsizse σ_t = bütün geçmiş → c_U ∝ |σ| eklenmeli.
+- İki eşik (tek Lagrange): **arşivle** ⇔ κ_S L > κ_w + λ_m + r (c_bul / b + κ_R) (L bilgi ömrü, r okunma sayısı; doğrusal maliyet modelinde KANIT)
+  + Jelassi kapasite koşulu; **duruma erit** ⇔ σ_s² ≤ 2ε (doğrusal okuma e^s'nin ilk iki terimi; bağıl hata σ_s²/2). Bit: tedarik Fisher tayfında
+  su doldurma; tedarik düz → b token başına sabit.
+- Dört açık amaçtan: birleştirme = Bayes (bağımsız kanıtta log-doğrusal, kopyada karışım); katmanlar = okuma zincirindeki sıçrama sayısı; adres =
+  ilgililik hedefli bilgi darboğazı (n-gram anahtarı öğrenmesiz özel hal); yerel sıra = durumun kesin FIFO bileşeni.
+- **Token** = duruma güncelleme katkısı + arşiv kaydı (anahtar, b bitlik not); d boyutlu vektör türetilmiş zorunluluk değil, kap.
+- Transformer'ın fazlası: tam genişlikte arşiv (head başı 2.048 bit vs 32–128) ve geniş ortalamayı tarama (d768, N_eff 1.354: 4,2M vs 0,2M, 21×).
+  Öngörülen yapı (varsayım φ 0,25, b 64): ~1,9 kbit / token vs 245 kbit (~125×). Tek bilinmeyen φ = σ_s² > 2ε olan head payı (CPU; `sx_sharpness.py`).
+  Öğrenilebilirlik türetilmedi (eşikler öğrenilirse ayrık seçim geri gelir; head türüne sabitlenirse bilinen karma).
+- **Hüküm (Claude):** mimari yeni değil (alan deneme yanılmayla aynı karmaya vardı); yeni olan türetme — iki eşikli kural ve bit hesabı; literatürde
+  olup olmadığı web taramasında (danışman).
+
+### 10c. Tek bilinmeyen ölçüldü: keskinlik (ÖLÇÜLDÜ, `sx_sharpness.py`; FineWeb transformer d768 / L10, V2 biçimi, 30 belge, 120 head)
+
+φ (σ_s² > 2ε, ε 0,05 / 0,1 / 0,25) = **1,000 / 1,000 / 1,000** (tahmin 0,1–0,3 → çürüdü); ortanca σ_s² 5,09; ikinci derece Taylor ile doğrusal
+okumanın bağıl hatası ortanca **0,597**, > 0,25 olan head %90. → Hiçbir head doğrusal (sabit durumlu) okumayla değiştirilemez; "kütlenin %76'sı
+geniş → sabit durum yapar" çıkarımı (§6, §8) **yanlıştı**: kütle konumlara yayılı ama içerikçe keskin ağırlıklı. Türetilmiş kurala göre bu modelin
+en iyisi her yerde arşiv + softmax = transformer; kalan kaldıraç not boyutu (KV sıkıştırma: MLA, V4.1 — bilinen).
+Çekince: sıfır atış (eğitilmiş transformer'ın head'leri); doğrusal / hibrit model eğitimde kendi özelliklerini öğrenir → "transformer'ın öğrendiği
+okuma doğrusal değil", "doğrusal okuma imkânsız" değil.
+**Tur B hükmü (Claude):** attention'ı daha iyi yapan yeni matematik yok; softmax attention arşivden okumanın ilkesel çözümü (KANIT) ve bu modelde
+ölçümle doğrulandı. Token = duruma katkı + arşiv kaydı; arşiv kaydı her token için gerekli. Açık: danışmanın web taraması (iki eşikli kural literatürde mi).
+
+### 10d. Web taraması (danışman; 11 metin klasöre: 2026 lkv / srttt / learningtoevict / limits / gdwm; 2025 trimkv / debowski2025; 2011
+debowski; 2001 bialek / shalizi; 2000 shalizi_ib — Claude metinde doğruladı)
+
+- Kuram: dilde öngörüsel bilgi bağlamla kuvvet yasasıyla büyür (`2001/bialek2001_predictability.txt` L170; Dębowski Hilberg) → sonlu nedensel
+  durum yok, **arşiv zorunlu** (keskinlik ölçümüyle aynı yön). Nedensel durum = en küçük tam öngörücü temsil (Shalizi–Crutchfield 2001 L23);
+  bilgi darboğazı β → ∞ limitinde ona iner (2000 L74) → λ_m darboğaz katsayısı.
+- Uygulama: "neyi arşivle" bilinen aile — TRIM-KV (saklama kapısı + kapasite kaybı + yoğundan damıtma), LKV (%15 KV ile neredeyse kayıpsız),
+  Learning to Evict (RL), Selective Attention (47×). Karşı kanıt: öğrenilen önem skorlayıcısı rastgeleyi geçemiyor (`2026/limits_learnedimportance2026.txt` L27).
+- **Strata dersi:** sürprizle kapılı birebir bellek düzeltilmiş deneyde çöker (birebir eşleşme 2.250 denemede %0; `2026/srttt2026_surprisal_ttt_postmortem.txt`
+  L40); doğru yazma sinyali sürpriz değil uzak bağlama bağlılık — GDWM CPMI (`2026/gdwm2026_gatedworkingmemory.txt` L84; 4× az gradyan adımı).
+  Kendi ölçümümüzle örtüşür (tedarik ~ sürpriz 0,276 < belirsizlik 0,319, GOZDEN_GECIRME §20).
+
+## 11. Attention turu kapandı (Claude)
+
+Bitti ölçütleri: (1) tek amaçtan türetme — yapıldı; (2) dört açık amaçtan kapandı; (3) literatürdeki yer web dahil belirlendi; (4) test sona.
+**Sonuç:** softmax attention arşivden okumanın ilkesel çözümü (KANIT) ve bu modelde her head'de ölçümle doğrulandı (φ = 1); arşiv zorunlu (kuram + ölçüm);
+kalan kaldıraçlar not boyutu ve arşiv seçimi — ikisi de bilinen, aktif alanlar. Yeni olabilecek dar şey: CPMI tabanlı arşiv kuralı ön eğitimde (attention'ı
+değiştirmez, ucuzlatır). Token = duruma katkı + arşiv kaydı (her token için gerekli).
+
+**Ana hat notu (Strata değil):** Z2'ye ilkesel eklenebilecek iki şey — (i) yerel katmanlara kapılı delta durumu (S_t = α_t S_{t−1} − β_t (S_{t−1} k_t − v_t) k_tᵀ,
+o_t = S_t q_t; hata düzelten, unutan sabit ilişki belleği; Qwen3-Next / Kimi Linear / Olmo Hybrid ucuz katmanı) — Z özetleri zaten okunduğu için katkısı
+bilinmiyor, Z2 vs Z2 + delta ile ölçülür; (ii) G katmanlarında MLA tarzı KV sıkıştırma (yerel katmanlarda değil: KV pencereyle sınırlı, GQA var —
+kullanıcı: *"zaten yerel katmanlar sıkıştırılmış bir şey"*).
+
+---
+
+# Tur C — FFN (kullanıcı, 11 Ekim: *"Başlat"*; sıra: *"Attention ile başlamak mantıklı sonra da ffn bakarız"*)
+
+Yöntem (Tur A dersleri): (1) problem tek amaçla; (2) literatür ilk adımda (yeniden keşif riski baştan söylenir); (3) tek bilinmeyen ölçülür;
+(4) parça ekleyerek açık kapatılmaz. "Bitti" ölçütü Tur B ile aynı.
+
+## 12. Problem (taslak)
+
+Okuma katmanı (attention / durum) token t'ye bağlamdan bilgi getirdi: r_t. Tahmin için gereken, r_t'nin **dünya bilgisi ve dil kurallarıyla**
+işlenmesi: f(r_t) → bir sonraki token'ın olasılığı. FFN bu işi yoğun bir parametrik fonksiyonla yapıyor: W_d (silu(W_g r) ⊙ W_u r), her token'da
+bütün parametreler (token başı 16 d² FLOP; hesabın ~2/3'ü).
+Seçim değişkenleri (biçim verili değil): **bilgi deposu** (neyi parametrede tutmalı: olgu, kalıp, kural), **erişim** (her token deponun ne kadarına
+dokunur: yoğun / seyrek / arama), **işlem** (doğrusal olmayan birleştirmenin biçimi ve derinliği), **paylaşım** (katmanlar arası).
+**Amaç:** min E[−log p] + λ_F · FLOP / token + λ_P · parametre (bellek) + öğrenilebilirlik + paralel eğitim.
+Bilinen (hafızadan, metinde doğrulanacak): FFN = anahtar–değer belleği (Geva 2021); MoE / PKM / Memory Layers / Engram erişimi seyrekleştirir.
+Tek bilinmeyen adayı (ölçülür, CPU): eğitilmiş modelde FFN gizli birimlerinin token başına seyrekliği — kütlenin ne kadarı ilk k birimde, yalnız ilk k
+birim tutulunca kayıp ne olur (sıfır atış). Seyreklik yüksekse seyrek erişim ilkesel; düşükse FFN yoğun hesap olarak doğru.
+
+### 12a. Danışman literatürü (Tur C) ve seyreklik ölçümü
+
+- **Erken uyarı (danışman; Claude metinde doğruladı):** doğal çözüm bilinen aile — ince taneli, paylaşılan uzmanlı MoE + seyrek arama belleği.
+  Krajewski 2024: hesap-optimal MoE 10²⁰ FLOP'ta 20× hesaplı yoğunla eşit, 10²⁵'te > 40× (`2024/krajewski2024_finegrainedmoe.txt` L108);
+  DeepSeekMoE 16B ≈ LLaMA2 7B, ~%40 hesap (`2024/dai2024_deepseekmoe.txt` L51–53); UltraMem MoE'den çıkarımda 6× hızlı (`2024/huang2024_ultramem.txt` L66–70);
+  KAN eşit FLOP'ta dilde MLP'nin gerisinde (`2024/yu2024_kan_or_mlp.txt` L36). FFN = anahtar–değer belleği (Geva), olgular orta katman (ROME);
+  ReLU'lu T5'te token başı etkin birim %3 (`2022/li2022_lazyneuron.txt` L56–57). Sıfır atış seyreklik yanıltabilir (TASARIM Parça 9: %50 gate +0,37).
+  Yeni olabilecek dar alan (baştan): katmanlar arası paylaşılan tek seyrek bellek + token başına okuma sayısının bilgiye göre değişmesi (MoR derinlikte yapıyor).
+- **Seyreklik (ÖLÇÜLDÜ, `sx_ffn_sparsity.py`; FineWeb transformer d768 / L10, hidden 2.048, V2 biçimi, 20 belge, bütün katmanlarda aynı anda, sıfır atış):**
+  tam 3,0843; yalnız ilk %30 birim 3,1027 (+0,018); %10 3,2780 (+0,194); %3 3,9190 (+0,835); %1 5,3296 (+2,245). İlk %10 birim |h| kütlesinin
+  katmana göre %42–63'ü. → FFN işinin büyük kısmı token başına gereksiz; ama hangi birimin gerektiğini bulmak kapı / yukarı izdüşümü tam hesaplamayı
+  ister (tasarruf yalnız aşağıda) — gerçek tasarruf önceden bilen yönlendirici (MoE) ister.
+
+### 12b. Matematikçinin türetmesi (`danisman/07_ffn_problemi.md`)
+
+- Çözüm bilinen aile. Birim başına eşik: **f_i < 1/α → seyrek erişim** (f_i birimin gerektiği token oranı, α seyrek erişimin duvar saati çarpanı;
+  doğrusal maliyet modelinde KANIT); k = Σ f_i kullanım dağılımından çıkar; seyrek kısmın taneciği birlikte etkinleşme küme boyu c (c büyük → MoE,
+  c ≈ 1 → PKM / Engram). Yoğun FFN: λ_P büyük / veri kıt bölgenin çözümü. Engram'ın U biçimli dağıtım yasası bu eşiğin ampirik hali.
+- Formül düzeltmeleri: toplam (P) ve etkin (A) parametre ayrı; öğrenilebilirlik (olgu ~1.000 kez görülmezse 2 bit / parametre kapasiteye ulaşılmaz,
+  `2024/allenzhu2024_physics33_capacity.txt`); bellek kapasitesi ile okunan bayt ayrı; FFN çıktısı sonraki okumanın sorgusu → derinlik değişken.
+- **Birleşik okuma (KANIT): model = iki arşiv + derinlik.** Attention bağlam arşivinden softmax (tek kaynak varsayımının Bayes çözümü); FFN parametre
+  arşivinden normalize edilmemiş toplam (birden çok olgunun log uzayında birleşimi, uzman çarpımı; Geva ile tutarlı). Derinlik = bileşim zinciri (c adım:
+  tek tablo |V|^c, ardışık c |V|). Sıkıştırılamayan olgu tabloya, sıkıştırılabilen kural hesaba (en kısa betimleme).
+- Tek bilinmeyen: katkı matrisi C[t,i] = a_{t,i} (v_i·g_t); sütun görünümü (f_i → yoğun pay #{f_i > 1/α}/M; c) karar verir: yoğun pay ≳ 0,5 → yoğun FFN
+  bu ölçekte doğru; küçük ve k_eff ≪ M → seyrek. Tahmin (TAHMİN): k_eff(0,01) M'nin %10–30'u. Ölçüm `sx_ffn_usage.py`.
+
+### 12c. Tek bilinmeyen ölçüldü (ÖLÇÜLDÜ, `sx_ffn_usage.py`; FineWeb transformer d768 / L10, hidden 2.048, V2 biçimi, 12 belge, 6.225 hedef)
+
+Katkı C = a·(v·g): token başına %90 katkı için birim payı (k_eff) L0 0,33 … L3 0,43 … L9 0,26; birimin gerektiği token payı f_i ortanca 0,25–0,42;
+yoğun pay (f_i > 1/α) α 2: 0,01–0,20, **α 4: 0,92 (tüm katmanlar; L9 0,50)**, α 8: ~1. → Birimler uzmanlaşmamış, olgu kuyruğu yok (son katman hariç);
+kurala göre (yoğun pay ≳ 0,5) **bu ölçek / bu modelde yoğun FFN doğru**. Çekince: model yoğun eğitildi — yoğun eğitim birimleri yaygın kullanmayı
+öğretir; seyrek eğitilmiş modelin daha iyi olup olmayacağını bu ölçüm söylemez (literatür: 10²⁰ FLOP'ta bile MoE kazanır).
+
+## 13. Tur C hükmü ve günün bütünü (Claude)
+
+FFN: ilkesel çözüm bilinen aile — sık gereken bilgi yoğun çekirdekte, seyrek gereken seyrek erişimde (ince taneli MoE / bellek; Engram U-yasası); bu ölçekte
+yoğun savunulabilir, ölçekle MoE. Yeni FFN matematiği yok (KAN dilde kaybeder). Kazanım açıklama: **model = iki arşiv (bağlam: softmax; parametre:
+toplam / uzman çarpımı) + derinlik (bileşim)**.
+**Gün:** tersine mühendisliğin ilkesel olarak türettiği mimari, bugünkü en iyi bilinen mimari — hibrit attention (Z2 gibi) + sıkıştırılmış KV + ince taneli
+MoE FFN. Strata'ya özgü fikirler sağ çıkmadı; kazanım: transformer ailesinin neden böyle olduğunun hesapla bilinmesi.
+**Sorgulanmamış iki yer (orijinallik varsa büyük olasılıkla burada):** (1) girdi biriminin kendisi (bayt / BPE / bilgi birimi; danışman Tur B (vi));
+(2) öğrenme kuralı (geri yayılım / gradyan inişi) — kullanıcı başta: *"Öğrenmenin özü kritik"*.
