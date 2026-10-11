@@ -136,7 +136,7 @@ MLP_RATIO_DEFAULT = (1.0, 4.0)  # --mlp_ratio verilmezse, G'li Model Z: MLP : ta
                                 # "bu oranları koda varsayılan standart ekler misin ?"; d768 3.000: sinav -0,0039, ayni parametre)
 LR_REF = (2e-3, 768, 0.5)      # lr auto = lr0 (d0 / d) ^ us (aci / adim ~ lr 0,2 sqrt(d) sabit); d1024 olcumu: 1,4 / 1,7e-3 duz, 1,73e-3 icinde
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ngram_embed", "ngram_layers",
-           "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads")   # --resume'da verilmezse kimlikten
+           "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "mix_g_heads", "mix_kv", "g_layout")   # --resume'da kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
@@ -147,7 +147,8 @@ READING_LIMITS = dict(max_sentences=80, max_tokens=128)     # belge 21 (story_ge
 SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni)
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
-            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads")
+            "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads",
+            "mix_g_heads", "mix_kv", "g_layout")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -296,7 +297,10 @@ def _build(args, dev):
                                     ngram_sparse=bool(getattr(args, "ngram_sparse", 0)),
                                     g_nope=getattr(args, "g_nope", 0) or 0,
                                     mlp_ratio=tuple(getattr(args, "mlp_ratio", None) or ()),
-                                    local_kv_heads=getattr(args, "local_kv_heads", 0) or 0)
+                                    local_kv_heads=getattr(args, "local_kv_heads", 0) or 0,
+                                    mix_g_heads=getattr(args, "mix_g_heads", 0) or 0,
+                                    mix_kv=tuple(getattr(args, "mix_kv", None) or ()),
+                                    g_layout=getattr(args, "g_layout", None) or "top")
         model, mask_fn, layout = model.to(dev), model.mask_fn, "model_z"
     return model, mask_fn, layout
 
@@ -643,6 +647,13 @@ def _args(argv):
     ap.add_argument("--mlp_ratio", default=None,
                     help="MLP : tam (GQA'siz) attention parametre orani yerel,G: genislik = oran x 4d/3 (64'un kati); G'li Model Z'de "
                          "varsayilan 1,4; 0 esit genislik (8d/3)")
+    ap.add_argument("--mix_g_heads", type=int, default=None,
+                    help="deneme/mixed-layer: her blokta son N head G (tam causal, gercek konum), kalan yerel (Z'li); ortak MLP, "
+                         "oran head payiyla agirlikli; 0 kapali (G katmanlari ayri)")
+    ap.add_argument("--g_layout", default=None,
+                    help="deneme: G katmanlarinin yeri; top (varsayilan) son N blok, interleave esit aralikli + son blok G, "
+                         "ya da blok numaralari '3,6,9' (0'dan, global_layers tane)")
+    ap.add_argument("--mix_kv", default=None, help="deneme/mixed-layer: yerel,G k / v head (verilmezse head payina gore)")
     ap.add_argument("--g_nope", type=int, default=None,
                     help="1: G (tam) katmanlarinda RoPE yok, konum yerel katmanlardan (G'li Model Z'de varsayilan; 0 eski RoPE'li)")
     ap.add_argument("--mtp", type=lambda s: s if s == "auto" else int(s), default=None,
@@ -658,6 +669,8 @@ def _args(argv):
     ap.add_argument("--stop_step", type=int, default=None,
                     help="takvim (WSD, epok plani) degismeden adim N'de dur: checkpoint.pt (surdurulebilir) + agent.pt + "
                          "results.json (finished False, stopped_at N); son sinav ve okuma yok (kullanici, 8 Ekim)")
+    ap.add_argument("--stop_exam", type=int, default=0,
+                    help="deneme: 1 ise --stop_step'te sinav (okuma yok; kimlige girmez; --resume ile durulan adimda da)")
     ap.add_argument("--checkpoint_minutes", type=float, default=10,
                     help="en cok bu kadar duvar saati kaybi (sinav dahil); surdurmede degistirilebilir")
     args = ap.parse_args(argv)
@@ -666,8 +679,9 @@ def _args(argv):
     was = torch.load(ckpt, map_location="cpu", weights_only=False, mmap=True)["args"] \
         if args.resume and os.path.exists(ckpt) else None               # varsayilan degisse de kosu kendi ayariyla surer
     for k in args.defaulted if was is not None else ():
-        setattr(args, k, was.get(k, [] if k == "mlp_ratio" else
-                                 0 if k in ("glob_kv_heads", "attn_gate", "mtp", "g_nope", "local_kv_heads") or k.startswith("ngram") else None))
+        setattr(args, k, was.get(k, [] if k in ("mlp_ratio", "mix_kv") else "top" if k == "g_layout" else
+                                 0 if k in ("glob_kv_heads", "attn_gate", "mtp", "g_nope", "local_kv_heads", "mix_g_heads")
+                                 or k.startswith("ngram") else None))
     args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
     if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
         args.optimizer = DEFAULT_OPTIMIZER
@@ -737,6 +751,12 @@ def _args(argv):
         if args.local_kv_heads:
             auto.append("local_kv_heads %d (= glob_kv_heads)" % args.local_kv_heads)
     args.local_kv_heads = int(args.local_kv_heads or 0)
+    args.mix_g_heads = int(args.mix_g_heads or 0)
+    args.g_layout = args.g_layout or "top"
+    mk = args.mix_kv
+    args.mix_kv = [int(x) for x in mk.split(",")] if isinstance(mk, str) else list(mk or [])
+    if args.mix_g_heads and (args.model != "model_z" or not args.global_layers or not args.mlp_ratio):
+        sys.exit("DUR: --mix_g_heads yalniz G'li, mlp_ratio'lu Model Z'de")
     if args.local_kv_heads and (args.model != "model_z" or args.heads % args.local_kv_heads):
         sys.exit("DUR: --local_kv_heads yalniz Model Z'de, heads'in boleni (%d)" % args.heads)
     if args.lr == "auto":
@@ -833,7 +853,8 @@ def main(argv=None):
                  summaries_last=args.summaries_last, glob_kv_heads=args.glob_kv_heads, carry_summaries=args.carry_summaries,
                  carry_group=args.carry_group, vocab_rows=args.vocab_rows, attn_gate=args.attn_gate,
                  ngram_embed=args.ngram_embed, ngram_layers=args.ngram_layers, ngram_sparse=args.ngram_sparse,
-                 mtp=args.mtp, g_nope=args.g_nope, mlp_ratio=args.mlp_ratio, local_kv_heads=args.local_kv_heads)
+                 mtp=args.mtp, g_nope=args.g_nope, mlp_ratio=args.mlp_ratio, local_kv_heads=args.local_kv_heads,
+                 mix_g_heads=args.mix_g_heads, mix_kv=args.mix_kv, g_layout=args.g_layout)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -854,6 +875,7 @@ def main(argv=None):
             sys.exit("DUR: " + _archived(was))
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
                "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [], "local_kv_heads": 0,
+               "mix_g_heads": 0, "mix_kv": [], "g_layout": "top",
                **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
@@ -900,7 +922,13 @@ def main(argv=None):
         log("mtp %d: ayni-logit MTP, agirlik %s (adim 0), ek hedefler kapali: adim >= %d; inis basi %d" % (
             args.mtp, R.mtp_weights(0, total, args.mtp), next(s for s in range(total + 1)
                                                               if not any(R.mtp_weights(s, total, args.mtp))), down))
-    if args.global_layers:
+    if args.mix_g_heads:
+        log("mix_g_heads %d: her blokta %d yerel + %d G head, kv %s, MLP genislik %s (global_layers yalniz maske ikilisi)" % (
+            args.mix_g_heads, args.heads - args.mix_g_heads, args.mix_g_heads, model.mix_kv, model.mlp_widths[0]))
+    elif args.global_layers and args.g_layout != "top":
+        log("global_layers %d, g_layout %s: G bloklari %s (tam causal, gercek konum)" % (
+            args.global_layers, args.g_layout, [l for l, g in enumerate(model.is_glob) if g]))
+    elif args.global_layers:
         log("global_layers %d: son %d blok tam causal (model_z_global_mask), gercek hikaye konumu" % (
             args.global_layers, args.global_layers))
     if cuda:
@@ -940,6 +968,8 @@ def main(argv=None):
     finishing = start == total and args.stop_step is None              # bitis checkpoint'i var, results yok (belge 89b)
     if finishing:
         log("BITIS: adim %d / %d checkpoint'te; egitim yok, sinav (yoksa) + agent.pt + results.json + okuma" % (total, total))
+    elif args.stop_exam and start == end < total:                         # deneme: durulan checkpoint'te yalniz sinav
+        log("YALNIZ SINAV: adim %d checkpoint'te (--stop_exam), egitim yok" % start)
     elif not start < end <= total:
         sys.exit("DUR: --stop_step %s: adim %d < N <= %d olmali" % (args.stop_step, start, total))
     else:
@@ -1031,6 +1061,11 @@ def main(argv=None):
         if ckpt_due:
             save(args.out, done)
             saved_at = time.time()
+    if end < total and args.stop_exam and not (history["exams"] and history["exams"][-1]["step"] == end):
+        ex = _exam(model, mask_fn, valid, exam_plan, story_bytes, layout, dev, cuda, last)   # deneme: duruste sinav
+        history["exams"].append(dict(ex, step=end, epoch=None, full_epoch=False))
+        log("SINAV adim %d: kayip %.4f  acc %.4f  acc_token %.4f  bpb %.4f  end_ok %.4f  eos_ok %.4f (%.1f sn)" % (
+            end, ex["loss"], ex["acc"], ex["acc_token"], ex["bits_per_byte"], ex["end_ok"], ex["eos_ok"], ex["seconds"]))
     if end < total:                                                     # --stop_step: sinav ve okuma yok
         results = dict(config, run=os.path.basename(os.path.normpath(args.out)), finished=False, stopped_at=end,
                        readings_skipped="stop_step", exam=history["exams"][-1] if history["exams"] else None,
@@ -1056,6 +1091,10 @@ def main(argv=None):
                               ms_per_step_median=med("ms_per_step"), note="pencere ortancasi; ilk pencere (derleme) haric"))
     torch.save(dict(state=model.state_dict(), identity=ident, args=vars(args)), os.path.join(args.out, "agent.pt"))
     json.dump(results, open(res_path, "w"), indent=1)                   # okumadan ONCE: okuma dusse de model kalir
+    if args.mix_g_heads:                                                 # deneme/mixed-layer: uretim onbellegi yok
+        log("BITTI: %s | sinav kayip %.4f bpb %.4f | mix_g_heads: okuma yok" % (
+            args.out, results["exam"]["loss"], results["exam"]["bits_per_byte"]))
+        return results
     t = time.time()
     own = os.path.join(args.data, "reading_prompts.json")              # veri klasorunun istemleri (FineWeb, belge 48)
     rows, gen = _readings(model, valid, tok, path=own if os.path.exists(own) else None)

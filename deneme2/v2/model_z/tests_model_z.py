@@ -1555,10 +1555,119 @@ def t_combo():
           "G1)" % len(pieces), max(cres) < 1e-5, "fark %s" % ["%.1e" % v for v in cres])
 
 
+def t_mix():
+    """deneme/mixed-layer (mix_g_heads): her blok yerel (Z'li, RoPE pos) + G (tam causal, NoPE) head; blok ciktisi = agirlik
+    dilimleriyle elle kurulan basvuru (dense, fp32); MLP genisligi head payli oran; summaries_last = dogal duzen; nedensellik
+    (sonraki token degisince onceki cikti ayni); gradyan butun parametrelerde; uretim DURUR."""
+    from model import model_z_global_mask, rope, story_positions, summaries_last
+    F = torch.nn.functional
+    rng = np.random.default_rng(11)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(2, 6))]
+               for _ in range(12)]
+    batch = real_batch([list(range(i, i + 4)) for i in range(0, 12, 4)], 160, stories)
+    B, T = batch.kind.shape
+    res, info = True, []
+    for gate in (0, 2):
+        torch.manual_seed(0)
+        m = SentenceTransformer(d=128, layers=3, heads=4, global_layers=1, glob_kv_heads=2, local_kv_heads=2, g_nope=1,
+                                mlp_ratio=(1.0, 4.0), mix_g_heads=2, attn_gate=gate).eval()
+        blk = m.blocks[1]
+        loc = _dense(model_z_read_mask(batch.kind, batch.doc, batch.sent), B, T, "cpu")
+        glob = _dense(model_z_global_mask(batch.kind, batch.doc, batch.sent), B, T, "cpu")
+        real = story_positions(batch.kind)
+        with torch.no_grad():
+            if gate:
+                blk.attn_gate.normal_(0, 0.5)
+            x = torch.randn(B, T, 128)
+            got = blk(x, (batch.pos, real), (loc, glob))
+            hd, w = 32, blk.qkv.weight
+            h = blk.n1(x)
+            q = F.linear(h, w[:128]).view(B, T, 4, hd).transpose(1, 2)
+            k = F.linear(h, w[128:128 + 2 * hd]).view(B, T, 2, hd).transpose(1, 2)
+            v = F.linear(h, w[128 + 2 * hd:]).view(B, T, 2, hd).transpose(1, 2)
+            q, k = blk.q_norm(q), blk.k_norm(k)
+            ql, kl = rope(q[:, :2], batch.pos), rope(k[:, :1], batch.pos)        # yerel 2 head, kv 1
+            qg, kg = q[:, 2:], k[:, 1:]                                          # G 2 head, kv 1, NoPE
+            al = F.scaled_dot_product_attention(ql, kl.expand(-1, 2, -1, -1), v[:, :1].expand(-1, 2, -1, -1),
+                                                attn_mask=loc[:, None])
+            ag = F.scaled_dot_product_attention(qg, kg.expand(-1, 2, -1, -1), v[:, 1:].expand(-1, 2, -1, -1),
+                                                attn_mask=glob[:, None])
+            ref = blk._finish(x, torch.cat([al, ag], 1))
+            d_ = float((got - ref).abs().max())
+            h0 = m._batch_hidden(batch)
+            pb, perm = summaries_last(batch)
+            h1 = m._batch_hidden(pb).gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, 128))
+            d_last = float((h0 - h1).abs().max())
+            b2 = dataclasses.replace(batch, tokens=batch.tokens.clone())
+            b2.tokens[:, 100:] = (b2.tokens[:, 100:] + 1) % D.END_ID
+            d_causal = float((m._batch_hidden(b2)[:, :100] - h0[:, :100]).abs().max())
+        widths = set(m.mlp_widths)                                           # oran 0,5 x 1 + 0,5 x 4 = 2,5 -> 2,5 x 4 x 128 / 3
+        ok = d_ < 1e-5 and d_last < 1e-5 and d_causal == 0 and widths == {448} and m.mix_kv == (1, 1) and \
+            tuple(blk.qkv.weight.shape) == (128 + 2 * 2 * hd, 128)
+        res &= ok
+        info.append("gate %d: blok fark %.1e, summaries_last %.1e, nedensel %.1e, MLP %s, kv %s" % (
+            gate, d_, d_last, d_causal, sorted(widths), m.mix_kv))
+    m.train()
+    loss = m._batch_hidden(batch).square().mean()
+    loss.backward()
+    nograd = [n for n, p in m.named_parameters() if p.requires_grad and (p.grad is None or not p.grad.abs().sum() > 0)
+              and not n.startswith("E.")]
+    try:
+        m.generate([[[3, 4]]], 1, 4)
+        stop = False
+    except AssertionError:
+        stop = True
+    check("mix: blok = elle basvuru, summaries_last ayni, nedensel, MLP oran agirlikli, gradyan tam, uretim DURUR",
+          res and not nograd and stop, "; ".join(info) + (" | gradyansiz %s" % nograd if nograd else ""))
+
+
+def t_interleave():
+    """g_layout interleave (deneme): G bloklari esit aralikli, son blok G (L 4 / N 2 -> 1, 3; L 10 / N 3 -> 2, 6, 9);
+    top ile ayni agirlik (blok turu sayisi ayni), farkli hidden; SummaryCache ve StaticCache adim adim logit = tam ileri
+    gecis (fp32); summaries_last ayni."""
+    from model import StaticCache, summaries_last
+    rng = np.random.default_rng(3)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 10))] for _ in range(rng.integers(1, 6))]
+               for _ in range(12)]
+    rows = [list(range(i, i + 4)) for i in range(0, 12, 4)]
+    batch = real_batch(rows, 200, stories)
+
+    def mk(layout, layers=4, gl=2, **kw):
+        torch.manual_seed(0)
+        return SentenceTransformer(d=32, layers=layers, heads=2, global_layers=gl, g_layout=layout, **kw).eval()
+    mi, mt = mk("interleave"), mk("top")
+    pos_ok = [l for l, g in enumerate(mi.is_glob) if g] == [1, 3] and \
+        [l for l, g in enumerate(mk("interleave", 10, 3).is_glob) if g] == [2, 6, 9]
+    with torch.no_grad():
+        hi = mi._batch_hidden(batch)
+        diff = float((hi - mt._batch_hidden(batch)).abs().max())
+        pb, perm = summaries_last(batch)
+        d_last = float((hi - mi._batch_hidden(pb).gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, 32))).abs().max())
+    d_cache = 0.0
+    for m in (mi, mk("interleave", glob_kv_heads=1, local_kv_heads=1, mlp_ratio=(1.0, 4.0), g_nope=1)):
+        with torch.no_grad():
+            lg_full, _ = full_logits(m, batch)
+            for C in (lambda: SummaryCache(m), lambda: StaticCache(m, 256, 8, 16)):
+                got = []
+                for row in rows:
+                    for si in row:
+                        c = C()
+                        got.append(c.prefill([])[None].clone())             # StaticCache cikis tamponu yeniden yazilir
+                        for s in stories[si]:
+                            for t in s:
+                                got.append(c.append_token(t)[None].clone())
+                            got.append(c.close_sentence()[None].clone())
+                d_cache = max(d_cache, float((torch.cat(got) - lg_full).abs().max()))
+    check("interleave: G bloklari esit aralikli + son blok G, top ile ayni agirlik / farkli hidden, summaries_last ayni, "
+          "SummaryCache ve StaticCache adim adim = tam ileri gecis (GQA, oran, NoPE dahil)",
+          pos_ok and diff > 1e-4 and d_last < 1e-5 and d_cache < 1e-5,
+          "top farki %.1e, summaries_last %.1e, onbellek %.1e" % (diff, d_last, d_cache))
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab,
              limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast,
-             combo=t_combo)
+             combo=t_combo, mix=t_mix, interleave=t_interleave)
 
 if __name__ == "__main__":
     if SIDE is not None:
