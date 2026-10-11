@@ -114,7 +114,14 @@ Thinker'ın çıkışa doğrudan, kapılı katkısı. Ders: "küçük" adı "kü
 - **Ölçek testi (ÖLÇÜLDÜ, SS 2.000 adım):** Thinker d512 / 8 → d1024 / 12: Writer 256 1,672 → 1,635, Writer 512 1,558 → 1,535; fark
   0,114 → 0,100 — danışman 02 ölçütü (< 0,06) **tutmadı**: Thinker büyüyünce Writer ihtiyacı belirgin küçülmüyor (bu ölçekte). Alternatif
   (HİPOTEZ, iletişim ilkesi): dar olan Writer değil Thinker → Writer kanalı (up / down rank = d_local); sınama: Voice + Writer 256 (kuyrukta).
-  Önceden tahmin (sonuç sonrası hikâye kurmamak için, kullanıcı önerisi): ben — Writer 512 + Voice ~1,54, Writer 256 + Voice ~1,61.
+  Önceden tahmin (sonuç sonrası hikâye kurmamak için, kullanıcı önerisi): ben — Writer 512 + Voice ~1,54, Writer 256 + Voice ~1,61;
+  danışman — ~1,552 ve ~1,655. Karar eşiği (danışmanla ortak): Writer 256 + token/çıkış 512 + Voice ≤ 1,615 → sorun kanal (Voice kalır,
+  Writer dar); ≥ ~1,65 → yerel genişlik gerçek maliyet, kazanç yerel kısmı ucuzlatmakta (geniş ama sığ Writer, FP8, tek head).
+  Not: Writer 256 kolu `--sx_token 512` ile (danışman: d_tok 256 çıkışa Voice eklemek kanalı genişletmez, rank 256 kalır).
+  Kullanıcının ölçütü (11 Ekim): *"Kapasite yapacağı iş ile ölçülür kanal ise ihtiyaç duyduğu bilgi ile"* → sonuç toplam kayıpla değil
+  token türüyle okunur: açık Thinker bilgisi gereken token'larda (ilk geçiş, H > 2) kapanıp yerel token'larda kalıyorsa kanal; yerel
+  token'larda da kalıyorsa kapasite. Çekince: yeni içerik token'ı ikisini birden ister (bilgi gelmeli + Writer onu birleştirebilmeli).
+  Ek okuma: Voice kapısı σ(gate) token türüne göre — Writer Thinker'ı ne zaman açıyor ("kararı uzman verir").
 - **Hikâye belleği ertelendi** (danışman, `sx_attn_copy.py`, `sx_store.py`, ÖLÇÜLDÜ): pencere içi kopya transformer'la eşit (0,619 / 0,629);
   açığın %65'i ilk geçiş (bellek dokunamaz); "defter zaten var" — Thinker birimleri sürprizli token'larda kapanıyor (kopyalanacak token'ın
   ilk geçişi %41 birim sonu, taban %37); sürpriz "sonra lazım"ı zayıf seçiyor (1,1×). Kod `--sx_memory` (kapalı) hazır; açılış koşulu:

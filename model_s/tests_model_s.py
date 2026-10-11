@@ -535,14 +535,17 @@ def t_strata_x():
           and float((tr2[0, 9:] - ts2[0]).abs().max()) < 1e-5 and len(mt.generate([[[5, 6]]], 1, 3)) == 1, "")
     md = StrataX(d_local=32, heads_local=4, enc_layers=1, dec_layers=1, d_global=64, heads_global=4, global_layers=2,
                  theta=20.0, window=6, direct=True).eval()
+    gin = []
+    hk = md.direct_gate.register_forward_hook(lambda mod, i, o: gin.append(i[0].float().pow(2).mean(-1).sqrt()))
     with torch.no_grad():
         da_ = md.forward_states(a, pos, z)[0]
         db_ = md.forward_states(b, pos, z)[0]
         dr2 = md.forward_states(row, prow, drow)[0]
         ds2 = md.forward_states(t2, torch.arange(7)[None], torch.zeros(1, 7, dtype=torch.long))[0]
-    check("strata-x dogrudan yol (buyuk cozucu -> cikis, kapili): nedensellik, belge yalitimi, uretim",
+    hk.remove()
+    check("strata-x dogrudan yol (buyuk cozucu -> cikis, kapili): nedensellik, belge yalitimi, uretim, kapi girdisi RMS 1",
           float((da_[0, :9] - db_[0, :9]).abs().max()) < 1e-6 and float((dr2[0, 9:] - ds2[0]).abs().max()) < 1e-5
-          and len(md.generate([[[5, 6]]], 1, 3)) == 1, "")
+          and len(md.generate([[[5, 6]]], 1, 3)) == 1 and float((gin[0] - 1).abs().max()) < 1e-3, "")
     mm = StrataX(d_local=32, heads_local=4, enc_layers=1, dec_layers=1, d_global=64, heads_global=4, global_layers=2,
                  theta=20.0, window=6, memory=2).eval()
     with torch.no_grad():

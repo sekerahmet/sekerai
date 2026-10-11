@@ -15,6 +15,7 @@ import os
 import sys
 
 import torch
+import torch.nn.functional as F
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -212,7 +213,7 @@ class StrataX(BaselineTransformer):
         h = self.norm(self.tok_out(x) if self.tok_out is not None else x)
         if self.direct is not None:                                         # dogrudan yol: sonu <= t olan son birimin glob_norm(z)'si
             gz = self.glob_norm(z).gather(1, kc[..., None].expand(-1, -1, z.shape[-1]))
-            gate = torch.sigmoid(self.direct_gate(x).float())
+            gate = torch.sigmoid(self.direct_gate(F.rms_norm(x, (x.shape[-1],))).float())   # normlu: ham x (boy ~170) kapiyi doyurup oldurdu
             h = h + torch.where(ok[..., None], gate * self.direct(gz).float(), torch.zeros_like(h))
         if self.mem_heads:
             h = h + self._memory(tokens, doc, he, ctx, x, nll)
@@ -236,7 +237,7 @@ class StrataX(BaselineTransformer):
         s = s.masked_fill(~allow[:, None], 0.0)
         r = (s @ v) / (1 + s.abs().sum(-1, keepdim=True))
         r = r.transpose(1, 2).reshape(B, T, H * dm)
-        gate = torch.sigmoid(self.mem_gate(x).float())
+        gate = torch.sigmoid(self.mem_gate(F.rms_norm(x, (x.shape[-1],))).float())
         return gate * self.mem_o(r.to(x.dtype)).float()
 
     # --- BaselineTransformer arayuzu ------------------------------------------------------------------------------------
