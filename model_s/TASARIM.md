@@ -25,10 +25,10 @@ SwiGLU, RMSNorm) henüz transformer'ınkiler — **yeni olan ayrıklaştırma, s
 
 **Adlar işlevden (kullanıcı, 11 Ekim: *"büyük model ve küçük model kavramları seni ve danışmanı yanıltıyor olabilir ... bizim
 bacaklarımız beynimizden daha büyük ama değerli olan beynimiz ... model büyük ve küçük yerine fonksiyon adı verirsek onun parametre
-sayısıyla boğmamış oluruz"*):** **Okuyucu** (reader; kod: yerel kodlayıcı, `blocks[:n_enc]`) metni okur, sürprizi ölçer, birim
-sınırını çizer · **Düşünür** (thinker; kod: büyük çözücü, `blocks[n_enc:n_enc+n_glob]`) birimler üzerinde hikâyenin durumunu tutar ·
-**Yazıcı** (writer; kod: yerel kod çözücü) kelimeleri döker · **Ses** (voice; kod: `direct`) Düşünür'ün çıkışa doğrudan, kapılı
-katkısı. Ders: "küçük" adı "küçük kalmalı" varsayımını doğurdu (danışman 02'nin en güçlü itirazı). Kod adları yapı oturunca değişir.
+sayısıyla boğmamış oluruz"*; *"ben inglizce biliyorum ... çevirmek zorunda değilsin"*):** **Reader** (kod: yerel kodlayıcı,
+`blocks[:n_enc]`) metni okur, sürprizi ölçer, birim sınırını çizer · **Thinker** (kod: büyük çözücü, `blocks[n_enc:n_enc+n_glob]`)
+birimler üzerinde hikâyenin durumunu tutar · **Writer** (kod: yerel kod çözücü) kelimeleri döker · **Voice** (kod: `direct`)
+Thinker'ın çıkışa doğrudan, kapılı katkısı. Ders: "küçük" adı "küçük kalmalı" varsayımını doğurdu (danışman 02'nin en güçlü itirazı). Kod adları yapı oturunca değişir.
 
 ### N2. Çalışma yöntemi (kullanıcıyla birlikte oturdu, 11 Ekim)
 
@@ -110,6 +110,14 @@ katkısı. Ders: "küçük" adı "küçük kalmalı" varsayımını doğurdu (da
   çarpımı; "düz toplama" tarifi yanlıştı (giriş toplamı zaten doğrusal olmayan kod çözücüden geçiyor). Kullanıcı sezgisi: *"beynin
   konuşma kısmı sadece konuşma değildir o beynin bir çok kısmından faydalanır"*. Test: `--sx_direct 1`, B ayarı, 2.000 adım; H > 2
   açığı (+0,12) < ~0,08'e inerse darboğaz kanal, inmezse büyük çözücünün kapasitesi.
+
+- **Başarı ölçütü (kullanıcıyla, 11 Ekim; seçenek c):** üçü birlikte — (1) sınavda açık gürültü düzeyine (≤ ~0,02; benim önerim),
+  (2) kör, karşılaştırmalı okumada (kullanıcı + human-reader, sıra çevrilerek) en az eşit tercih, (3) transformer'dan ucuz (eğitim ve
+  üretim). Kullanıcı: *"bir şeyi belirli bir olgunluğa geldikçe başkalarının ölçüsüne sunarız"*.
+- **Maliyet yaşamaya izin verir** (kullanıcı: *"yeni fikrin maliyeti onun yaşamasına müsaade eder. 10 sene önce olsaydı transformer
+  mimarisi bu kadar hızla büyüyemezdi"*; "donanım piyangosu", Hooker 2020, LİTERATÜR hafızadan): Strata'nın düşmanı düzensizlik
+  (değişken birim, kova, yeniden derleme). Sıra: önce kalite doğruluğu, sonra donanım dostu — gerekirse değişken uzunluklu birimleri
+  dolgusuz işleyen kendi kernel'i (FlashAttention gibi: aynı matematik, donanıma göre hesap sırası).
 
 ### N5. Altyapı
 

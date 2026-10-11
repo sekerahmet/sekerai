@@ -72,3 +72,52 @@ g'yi görüyor.
 
 E4 (Strata-x tabanı) çalışsın; ardından E5 = Strata-x + plan (H8) + sonraki birim tahmini (H9). Plan kodda seçenek olarak
 şimdi yazılır.
+
+## Tur 4 — hikâye belleği (11 Ekim; danışman tartışması 2–3'ten)
+
+Ölçülen zaaf (danışman, `sx_argmax.py`): Writer, hikâyede kurulmuş bilgiyi (park, hero) kaçırıp akıcı kalıba gidiyor; geçersiz yön
+seçimi transformer'ın iki katı (%14 / %7); uzak kopya token başına +0,32. Voice (doğrudan yol) bunu kapatmazsa sıradaki çare.
+
+Soru (kullanıcıya, muhakeme): **bir hikâyede neyin hatırlanmaya değer olduğunu kim / nasıl belirler?**
+
+- H11 **şaşırtıcı olan** hatırlanır: ilk geçişte yüksek sürprizli token (yeni isim, yer) belleğe yazılır. Reader'ın sürprizi zaten var;
+  bedava. Risk: sürprizli ama önemsiz şey de yazılır (yazım hatası, nadir sıfat).
+- H12 **tekrar eden** hatırlanır: ikinci kez geçen önemlidir. Risk: ilk geçişte yazılmazsa ikinci geçişi zaten kaçırır (uzak kopya).
+- H13 **yönü değiştiren** hatırlanır: Thinker durumunun en çok değiştiği birim (karar, amaç, olay). Sayısal analizdeki izleme
+  fonksiyonu = çözümün türevi; ölçülebilir: ‖g_u − g_{u−1}‖.
+
+Mekanizma taslağı (HİPOTEZ): Writer her token'da küçük bir **sorgu** üretir; bellek = seçilmiş geçmiş token'ların (anahtar = Reader
+durumu, değer = token kimliği / embedding) listesi; kapılı attention ile çıkışa (Voice gibi) ya da Writer girdisine. Maliyet: bellek
+boyu M ≪ T. Ölçüm önce sıfır atış: H11 / H12 / H13'ün seçtiği token'lar, sonradan kopyalanan (danışmanın (i)/(ii) kovası) token'ları
+ne kadar kapsıyor (recall), bellek boyu ne kadar.
+
+### Tur 4 — kullanıcının cevabı ve sentez
+
+Kullanıcı, 11 Ekim: *"Bir insan olarak bir şey tekrar etmiyorsa unuturum genelde. Ama bu tekrar bir metin içindeki tekrar gibidir. Bir de
+sürekli tekrar ettiğim bilgiyi unutmam evimin adresi gibi. Bir bilgi nadir ama hatırlanması gereken bilgiye onu bir yerlerde saklarım bir
+not defteri gibi beynim de tutmam ama o bilgiye nasıl ulaşacağımı beynim de kalıcı hafızata yazarım ve gerektiğinde açıp bakarım."*
+
+Üç bellek türü → Strata karşılığı:
+1. **Sönen çalışma belleği** (metin içi tekrar güçlendirir, tekrarsız söner) → küçük bellek, girdi başına güç; tekrar görülünce artar.
+2. **Kalıcı bilgi** (adres) → ağırlıklar; ÖLÇÜLDÜ: dünya bilgisinde açık yok (H_tf < 0,5 +0,009).
+3. **Not defteri + dizin** (bilgiyi değil yerini hatırla) → defter = seçilmiş geçmiş token'lar olduğu gibi (ucuz); dizin = bağlamlı
+   küçük anahtar; Writer belirsizken bakar, kapıyla alır. Thinker ismi taşımaz, "bak" demeyi bilir.
+
+Kalan sorunlar: (a) ayırt etme (iki köpek: anahtar bağlamlı olmalı), (b) seyrek öğrenme sinyali (kopya hedeflerin %1–5'i; gerekirse
+yardımcı kopya kaybı), (c) yazma seçimi (sürpriz = nadir bedava; "önemli" sonradan söner). LİTERATÜR: Grave 2016 sürekli önbellek
+(`belge/makaleler/2016/grave2016_cache.txt`) — kullanıcının tarifi + sönme + seçici yazma. Sıra: önce Voice sonucu; zaaf kalırsa defter.
+
+### Tur 4 — devam: yöntem, bağ, yineleme (kullanıcı)
+
+Kullanıcı, 11 Ekim: *"Lucy ile köpeğini yanyana koyarsak hatırlarım ... Doğal olan herkesin kendi köpeği ile olan bağıdır. Ama benim
+beynim maalesef kapasiteli ikinci bir beyin ya da nöron sayımı artırma seçeneğim yok. Bu yüzden beynim yöntem geliştirir ... Bazen bir
+süre neydi diye kendi kendime ipucu aramaya da çalışırım hafızamı bir kaç kez yoklarım"*.
+
+- **Büyütme değil yöntem** → danışman 02'nin en güçlü itirazına ("yerel kısım küçük kalamıyor") cevap: Writer'ı şişirmek yerine
+  hatırlama yöntemi (defter) ver. Strata ilkesiyle aynı: hesap gereken yerde.
+- **Bağlı yazma** → defter girdisinin anahtarı yazıldığı anın bağlamı (o birimdeki Thinker durumu "Lucy'den bahsediliyor"u taşır):
+  "Lucy–köpek–Max" birlikte; "iki köpek" ayırt etmesi kendiliğinden (HİPOTEZ).
+- **Yinelemeli hatırlama** → Writer belirsizse deftere bakar; yetmezse ilk bakışın ipucuyla sorguyu düzeltip yeniden bakar (yalnız zor
+  token'larda: uyarlamalı hesap). Çekince: seyrek öğrenme sinyali; önce tek bakış, sonra yineleme.
+
+Defter tasarımı (sentez): **bağlı anahtarla yazılan, kullanılmayanın söndüğü, zor anda birkaç kez bakılan not defteri.**
