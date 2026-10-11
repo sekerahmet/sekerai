@@ -69,11 +69,40 @@ SwiGLU, RMSNorm) henüz transformer'ınkiler — **yeni olan ayrıklaştırma, s
   adımı ve parametre birlikte değişiyor. **Açık soru:** yerel 512 + token 256 ile ayrılacak. Ayrıca 01 K2: büyük çözücü artık
   akışı bf16'ydı (transformer fp32) — düzeltildi; önceki SS sayıları bu kusurla ölçüldü, A ve F yeniden koşulacak.
 - Yerel 384 (2+2) 1,6035 / 99,8 ms, yerel 256 × 4+4 1,6271 / 99,2 ms (ÖLÇÜLDÜ, bf16 akışla).
+- **Açığın kaynağı (danışman tartışması 1, 11 Ekim; ÖLÇÜLDÜ, B vs transformer s2000, 24 satır, `scratchpad/danisman/sx_copy.py`,
+  `sx_prolong*.py`):** ~~uzatma operatörü bayat~~ (tezim; açık yuvayla büyümüyor, kod çözücü eski birimlerin ctx'ine yerel
+  attention'la zaten erişiyor). Hedef türüne göre açık / toplam açığa katkı: pencere içinde geçmiş %50 → +0,041 / %30;
+  **yalnız uzakta geçmiş (uzak kopya) %1,2 → +0,316 / %5**; **ilk geçiş (yeni içerik) %49 → +0,092 / %65**, konum ≥ 256'da +0,117.
+  Karar: uzak kopya gerçek ama küçük; ana açık yeni içerik tahmini, uzakta büyüyor. Ayırt edici: pencere 512 koşusu (açık yalnız
+  kopyada kapanırsa pencere yama; yeni içerikte de kapanırsa büyük çözücü uzak içeriği iletemiyor → asıl tasarım sorusu).
+- **Bilginin üç türü (kullanıcı, 11 Ekim: *"bilgi objektifdir bilgi subjektifdir ... lucy pazara gitti ve elma aldı. sonra lucy den
+  mi bahsedeceksin ve ya elmadan mı bu bir tercih ve yöndür"*; danışman tartışması 2):** dünya bilgisi (nesnel) / **hikâyede kurulmuş
+  bilgi** (o hikâye için nesnel: isim, yer) / yön tercihi (öznel). ÖLÇÜLDÜ (`sx_entropy.py`, `sx_argmax.py`, 24 satır): belirlenmiş
+  hedeflerde (H_tf < 0,5, %25) açık +0,009 — dünya bilgisi sorun değil; açığın ~%90'ı H 0,5–4. Yön noktalarında (H > 2) B'nin
+  argmax'ı hakem (1 epok transformer) ilk 5'inde %86 (transformer s2000 %93): çoğu geçerli yön, geçersizler (%14 vs %7) rastgele
+  değil — hikâyede kurulmuş bilgiyi kaçırıp akıcı kalıba gidiyor (park → "homes", hero → "difference"; ikincisi pencere İÇİNDE).
+  HİPOTEZ: Strata'nın zaafı **hikâye belleği** (kurulmuş varlıkların token üretirken erişilebilirliği), uzak kopya bunun alt
+  kümesi. Çekince: hakem de transformer (tf lehine yanlılık). Entropi nesnel / öznel ayrımının kirli vekili (modelin bilgisizliği karışır).
 - Sürpriz başı adımın %20'si → hafif ayrı baş.
 - FineWeb'e dönüş: oran tabanlı θ + hızlı kod + doğru yerel kapasite.
 - Üretimde KV önbelleği (şu an her token baştan hesap).
 - Operatör turu: birimler eşit bilgi taşıyorsa büyük çözücünün operatörleri sadeleşebilir mi (HAYAL.md).
 - FP8 en sona (kullanıcı: *"Fp8 erken ama"*).
+
+- **Tezin en güçlü itirazı (danışman 02, `model_s/danisman/02_tez_itirazi.md`):** ilke ayakta, ekonomi SS'te tutmuyor — kaliteyi
+  toparlayan B'de yerel kısım token başına ~13,7M, büyük çözücü ~9,3M çarpma; toplam transformer'la aynı (~27M / ~26M), açık yine
+  +0,07 (HESAP). En zayıf varsayım: "yerel kısım küçük kalır". Ölçekte riskler: toplu üretimde bant genişliği (büyük çözücü ağırlığı
+  hemen her adım okunur), sınırın öğrenilmemesi, hikâye belleği. Ayakta: bilgi eşitsizliği, uzun bağlamda KV ~2,7× / attention ~7×,
+  nitel sağlık. **Çürütme testi (kuyrukta, `sxscale_*`):** büyük çözücü d1024 / L12'de yerel 512 − yerel 256 farkı; d512'de 0,115;
+  belirgin küçülürse (< ~0,06) tez yaşar, küçülmezse hesap tarafı çürür.
+
+- **Yeniden inşa (tartışma 3; kullanıcı: *"sert itiraz ... nereyi tekrar inşa edeceğin yönünü anlamak için"*):** ~~T1 sınırı
+  belirsizlikten önce çiz~~ (danışman, `sx_fresh.py`, ÖLÇÜLDÜ: aynı entropide taze g +0,119 / bayat g +0,118 — sorun ne zaman
+  danışıldığı değil). Ortak hüküm: sorun **büyük çözücünün çıkışa ulaşabildiği kanal** (yalnız d_local kod çözücüden geçiyor).
+  Çare: **doğrudan kapılı yol** `h = norm(kod çözücü) + σ(kapı_t) W glob_norm(z_k(t))` — bağlı E ile tek softmax'ta kapılı uzmanlar
+  çarpımı; "düz toplama" tarifi yanlıştı (giriş toplamı zaten doğrusal olmayan kod çözücüden geçiyor). Kullanıcı sezgisi: *"beynin
+  konuşma kısmı sadece konuşma değildir o beynin bir çok kısmından faydalanır"*. Test: `--sx_direct 1`, B ayarı, 2.000 adım; H > 2
+  açığı (+0,12) < ~0,08'e inerse darboğaz kanal, inmezse büyük çözücünün kapasitesi.
 
 ### N5. Altyapı
 

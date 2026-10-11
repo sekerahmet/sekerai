@@ -42,11 +42,14 @@ def _fill_info_ema(state, prefix, *args, **kwargs):
 class StrataX(BaselineTransformer):
     def __init__(self, d_local=512, heads_local=8, enc_layers=2, dec_layers=2, d_global=1024, heads_global=16,
                  global_layers=12, theta=8.0, window=256, aux_weight=1.0, vocab_rows=VOCAB, out_cuts=(4096, 16384),
-                 plan=0, next_weight=0.0, rate=0.0, d_token=None):
+                 plan=0, next_weight=0.0, rate=0.0, d_token=None, direct=False):
         """plan k (HAYAL.md H8): buyuk cozucu birim basina k yuvalik plan (d_global -> k x d_local); kod cozucu token'i yazarken
         kendi yuvasinin plan vektorunu gorur (0: tek vektor, down).  next_weight (H9): sonraki birimin kodlayici vektorunu
         tahmin (kosinus, hedefte gradyan kesik) yardimci kayip agirligi.  rate r > 0: theta = r x kodlayicinin ortalama
         surprizi (egitimde yuruyen ortalama, yalniz onceki adimlardan; buffer): birim basina ~r token, yerlesim bilgiye gore.
+        direct: buyuk cozucuden cikisa dogrudan kapili yol (danisman 02 / tez tartismasi 3; kullanici, 11 Ekim: "beynin konusma kismi
+        sadece konusma degildir o beynin bir cok kismindan faydalanir"): h = norm(kod cozucu) + sigmoid(kapi_t) W glob_norm(z_k(t));
+        ikisi ayni bagli E ile tek softmax = kapili uzmanlar carpimi (kod cozucunun d_local kanalini atlar).
         d_token (varsayilan d_local): token temsili (E ve cikis) boyu; d_local'dan farkliysa giris / cikista ince izdusum
         (SS ayristirma: token boyu acigin cogunu acikliyor, yerel katmanlar dar kalabilir)."""
         d_tok = int(d_token or d_local)
@@ -63,6 +66,8 @@ class StrataX(BaselineTransformer):
         self.up = torch.nn.Linear(d_local, d_global, bias=False)
         self.down = torch.nn.Linear(d_global, d_local * max(1, self.plan_k), bias=False)
         self.pred_next = torch.nn.Linear(d_global, d_global, bias=False) if self.next_weight else None
+        self.direct = torch.nn.Linear(d_global, d_tok, bias=False) if direct else None
+        self.direct_gate = torch.nn.Linear(d_local, 1) if direct else None
         self.g0 = torch.nn.Parameter(torch.zeros(d_local))               # tamamlanmis birim yokken baglam
         self.enc_norm, self.glob_norm = Projection(d_tok), Projection(d_global)
         self.out = FactorizedOutput(d_tok, VOCAB, out_cuts) if out_cuts else None
@@ -77,7 +82,7 @@ class StrataX(BaselineTransformer):
                 std = 0.02 / math.sqrt(2 * n) if name.endswith(("w_o.weight", "w_down.weight")) else 0.02
                 with torch.no_grad():
                     p.normal_(0.0, std)
-        for lin in (self.up, self.down, self.tok_in, self.tok_out):
+        for lin in (self.up, self.down, self.tok_in, self.tok_out, self.direct):
             if lin is None:
                 continue
             torch.nn.init.normal_(lin.weight, 0.0, 0.02)
@@ -188,7 +193,12 @@ class StrataX(BaselineTransformer):
         x = he + ctx
         for blk in self.blocks[self.n_enc + self.n_glob:]:
             x = blk(x, pos, m_loc)
-        return self.norm(self.tok_out(x) if self.tok_out is not None else x), aux, ends, nll
+        h = self.norm(self.tok_out(x) if self.tok_out is not None else x)
+        if self.direct is not None:                                         # dogrudan yol: sonu <= t olan son birimin glob_norm(z)'si
+            gz = self.glob_norm(z).gather(1, kc[..., None].expand(-1, -1, z.shape[-1]))
+            gate = torch.sigmoid(self.direct_gate(x).float())
+            h = h + torch.where(ok[..., None], gate * self.direct(gz).float(), torch.zeros_like(h))
+        return h, aux, ends, nll
 
     # --- BaselineTransformer arayuzu ------------------------------------------------------------------------------------
     def _batch_hidden(self, batch, attn=None):

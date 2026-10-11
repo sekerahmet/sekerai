@@ -85,7 +85,7 @@ def load_run(out, data_dir, dev):
                            strata_out=idt.get("strata_out", []), sx_local=idt.get("sx_local", []),
                            sx_theta=idt.get("sx_theta", 0), sx_window=idt.get("sx_window", 0),
                            sx_plan=idt.get("sx_plan", 0), sx_next=idt.get("sx_next", 0), sx_rate=idt.get("sx_rate", 0),
-                           sx_token=idt.get("sx_token", 0))
+                           sx_token=idt.get("sx_token", 0), sx_direct=idt.get("sx_direct", 0))
     model, _, _ = T._build(spec, dev)
     model.load_state_dict(pack["state"])
     model.row_len = idt["row_len"]                                       # uretim konum siniri, carry parca boyu
