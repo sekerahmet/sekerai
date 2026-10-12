@@ -1683,7 +1683,8 @@ def t_pmi():
     base = mk()
     g = torch.Generator().manual_seed(1)
     for mode, extra in (("vec", dict(pmi_dim=4)), ("bag", dict(pmi_k=3)), ("bag-global", dict(pmi_k=3, pmi_word=False)),
-                        ("bag-detach", dict(pmi_k=3, pmi_detach=True)), ("bag-mu", dict(pmi_k=3, pmi_detach=True, pmi_mu=True))):
+                        ("bag-detach", dict(pmi_k=3, pmi_detach=True)), ("bag-mu", dict(pmi_k=3, pmi_detach=True, pmi_mu=True)),
+                        ("bag-late", dict(pmi_k=3, pmi_at=3))):
         pm = mk(**extra)
         bufs = ("pmi_table",) if mode == "vec" else ("pmi_nbr", "pmi_w")
         same_w = all(torch.equal(p, pm.state_dict()[k]) for k, p in base.state_dict().items())
@@ -1705,7 +1706,14 @@ def t_pmi():
             tok = torch.tensor([[5, 6, 7]])
             e = pm._embed(tok, torch.tensor([[True, False, True]])) - pm.E(tok)
             only_words = float(e[0, 1].abs().max()) == 0.0 and float(e[0, 0].abs().max()) > 0
-            if mode != "vec":                                           # torba = elle sum_k (mu_k) w_k E(komsu_k)
+            if mode == "bag-late":                                      # giris torbasiz; blok 3 girisi = x + lambda |x| torba / |torba|
+                pb = pm._pmi_late(tok, torch.tensor([[True, False, True]]))
+                raw = (pm.pmi_w[5][:, None] * pm.E.weight[pm.pmi_nbr[5]]).sum(0)
+                xr = torch.randn(1, 3, 32, generator=g)
+                xl = pm._late(xr, 3, pb)
+                only_words = float(e.abs().max()) == 0.0 and pm._late(xr, 2, pb) is xr and float((xl - xr)[0, 1].abs().max()) == 0.0 \
+                    and float((xl[0, 0] - xr[0, 0] - 0.7 * xr[0, 0].norm() * raw / raw.norm()).abs().max()) < 1e-5
+            elif mode != "vec":                                         # torba = elle sum_k (mu_k) w_k E(komsu_k)
                 if mode == "bag-mu":
                     pm.pmi_mu.copy_(torch.rand(pm.pmi_mu.shape, generator=g) + 0.5)
                     e = pm._embed(tok, torch.tensor([[True, False, True]])) - pm.E(tok)
