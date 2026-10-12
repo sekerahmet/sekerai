@@ -339,7 +339,7 @@ class Block(torch.nn.Module):
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
                  attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, mlp_ratio=(),
-                 local_kv_heads=0, mix_g_heads=0, mix_kv=(), g_layout="top", pmi_dim=0, pmi_k=0):
+                 local_kv_heads=0, mix_g_heads=0, mix_kv=(), g_layout="top", pmi_dim=0, pmi_k=0, pmi_word=True):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -351,7 +351,9 @@ class SentenceTransformer(torch.nn.Module):
         (0: hepsi; lambda K tane).  ngram_sparse: egitimde (gradyan acikken) okunan satirlar ayri yaprak (ngram_seen), tablo
         gradyani yogun olusmaz.  pmi_dim P (deneme/pmi): sabit PMI tablosu (VOCAB x 2P, buffer; train.py doldurur) ->
         pmi_proj (sifirdan, RNG cekmeden: ilk agirlikta model PMI'siz ile ayni) kelime konumlarinin girdisine.  pmi_k K: kelime
-        basina K komsu + agirlik (buffer) -> lambda (sifirdan) x agirlikli komsu embedding toplami girdiye."""
+        basina K komsu + agirlik (buffer) -> lambda (sifirdan) x agirlikli komsu embedding toplami girdiye; pmi_word: lambda kelime
+        basina (VOCAB sayi; kullanici, 12 Ekim: "doktor ve komşuları çok faydalı bilgiyken türkiye ve komşuları aynı faydada
+        olmayabilir"), degilse tek sayi."""
         super().__init__()
         self.carry_group, self.row_len = int(carry_group), ROW_LEN
         self.global_layers = int(global_layers)
@@ -422,7 +424,7 @@ class SentenceTransformer(torch.nn.Module):
         if self.pmi_k:                                                  # "bir kelimeye yakın 10 20 kelimeyi verebiliyor"
             self.register_buffer("pmi_nbr", torch.zeros(VOCAB, self.pmi_k, dtype=torch.long))
             self.register_buffer("pmi_w", torch.zeros(VOCAB, self.pmi_k))
-            self.pmi_lambda = torch.nn.Parameter(torch.zeros(()))
+            self.pmi_lambda = torch.nn.Parameter(torch.zeros(VOCAB if pmi_word else ()))
 
     def _embed(self, tokens, is_token):
         """E(token) + PMI, yalniz kelime konumlarinda (BOS / Z / dolgu 0): pmi_dim'de pmi_proj(rms(tablo satiri)); pmi_k'de
@@ -435,7 +437,7 @@ class SentenceTransformer(torch.nn.Module):
             t = tokens.clamp(0, VOCAB - 1).reshape(-1)
             p = F.embedding_bag(self.pmi_nbr[t], self.E.weight, per_sample_weights=self.pmi_w[t].to(self.E.weight.dtype),
                                 mode="sum").view(*tokens.shape, -1)
-            p = self.pmi_lambda * p
+            p = (self.pmi_lambda[t].view(*tokens.shape, 1) if self.pmi_lambda.dim() else self.pmi_lambda) * p
         else:
             return x
         return x + p * is_token[..., None].to(p.dtype)

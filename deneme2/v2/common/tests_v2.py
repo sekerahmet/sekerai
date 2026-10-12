@@ -1158,6 +1158,7 @@ def _train_pmi(base, data, out, TR):
         want_n = torch.from_numpy(np.maximum(nbr, 0).astype(np.int64))
         want_w = torch.from_numpy(np.where(nbr >= 0, w, 0).astype(np.float32))
         v = TR.main(cmd[:-2] + ["--pmi_mode", "vec", "--steps", "3", "--out", out("pmi_vec")])
+        g_ = TR.main(cmd[:-2] + ["--pmi_lambda", "global", "--steps", "3", "--out", out("pmi_glob")])
         bad = [_exit_msg(TR.main, base + x + ["--out", out("pmi_bad%d" % i)]) for i, x in enumerate((
             ["--model", "transformer", "--pmi", tab], ["--model", "model_z", "--pmi", tab + ".yok"]))]
         check("train --pmi (bag K 4, NorMuon): kosar, kayip sonlu, kimlikte pmi_k / sha; liste agent.pt'de = dosya (bos komsu 0 / "
@@ -1165,7 +1166,8 @@ def _train_pmi(base, data, out, TR):
               "transformer / dosyasiz DURUR",
               a["finished"] and all(math.isfinite(x["loss"]) for x in a["log"]) and idt["pmi_k"] == 4 and idt["pmi_dim"] == 0
               and len(idt["pmi_sha256"]) == 64 and torch.equal(sa["pmi_nbr"], want_n) and torch.equal(sa["pmi_w"], want_w)
-              and float(sa["pmi_lambda"]) != 0.0 and stopped and all(torch.equal(sa[k], sb[k]) for k in sa)
+              and tuple(sa["pmi_lambda"].shape) == (D.VOCAB,) and bool(sa["pmi_lambda"].any())
+              and idt["pmi_lambda"] == "word" and g_["identity"]["pmi_lambda"] == "global" and st_(out("pmi_glob"))["pmi_lambda"].dim() == 0 and stopped and all(torch.equal(sa[k], sb[k]) for k in sa)
               and [x["loss"] for x in r["log"]] == [x["loss"] for x in a["log"]] and torch.equal(m.pmi_nbr, want_n)
               and v["identity"]["pmi_dim"] == 8 and v["identity"]["pmi_k"] == 0
               and all(b_ is not None and "pmi" in b_ for b_ in bad), str(bad))

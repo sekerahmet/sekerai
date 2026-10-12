@@ -1682,7 +1682,7 @@ def t_pmi():
         return SentenceTransformer(**{**kw, **extra}).eval()
     base = mk()
     g = torch.Generator().manual_seed(1)
-    for mode, extra in (("vec", dict(pmi_dim=4)), ("bag", dict(pmi_k=3))):
+    for mode, extra in (("vec", dict(pmi_dim=4)), ("bag", dict(pmi_k=3)), ("bag-global", dict(pmi_k=3, pmi_word=False))):
         pm = mk(**extra)
         bufs = ("pmi_table",) if mode == "vec" else ("pmi_nbr", "pmi_w")
         same_w = all(torch.equal(p, pm.state_dict()[k]) for k, p in base.state_dict().items())
@@ -1704,11 +1704,11 @@ def t_pmi():
             tok = torch.tensor([[5, 6, 7]])
             e = pm._embed(tok, torch.tensor([[True, False, True]])) - pm.E(tok)
             only_words = float(e[0, 1].abs().max()) == 0.0 and float(e[0, 0].abs().max()) > 0
-            if mode == "bag":                                           # torba = elle sum_k w_k E(komsu_k)
+            if mode != "vec":                                           # torba = elle sum_k w_k E(komsu_k)
                 ref = 0.7 * (pm.pmi_w[5][:, None] * pm.E.weight[pm.pmi_nbr[5]]).sum(0)
                 only_words &= float((e[0, 0] - ref).abs().max()) < 1e-6
         check("pmi %s (a, b): ilk agirlikta PMI'siz modelle ayni agirlik ve hidden (bit), tablo buffer; dolu iken farkli, katki "
-              "yalniz kelime konumlarinda%s" % (mode, ", torba = elle agirlikli toplam" if mode == "bag" else ""),
+              "yalniz kelime konumlarinda%s" % (mode, ", torba = elle agirlikli toplam" if mode != "vec" else ""),
               same_w and buf_ok and d0 == 0.0 and d1 > 1e-4 and only_words, "sifir %.1e, dolu %.1e" % (d0, d1))
         d_cache, d_pre = 0.0, 0.0
         with torch.no_grad():

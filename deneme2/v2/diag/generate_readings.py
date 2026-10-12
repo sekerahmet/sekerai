@@ -82,7 +82,8 @@ def load_run(out, data_dir, dev):
                            mlp_ratio=tuple(idt.get("mlp_ratio", []) or ()), local_kv_heads=idt.get("local_kv_heads", 0),
                            g_layout=idt.get("g_layout", "top"), mix_g_heads=idt.get("mix_g_heads", 0),
                            mix_kv=idt.get("mix_kv", []), pmi_dim=idt.get("pmi_dim", 0),
-                           pmi_k=idt.get("pmi_k", 0))
+                           pmi_k=idt.get("pmi_k", 0),
+                           pmi_lambda=idt.get("pmi_lambda") or ("global" if idt.get("pmi_k") else "word"))
     model, _, _ = T._build(spec, dev)
     model.load_state_dict(pack["state"])
     model.row_len = idt["row_len"]                                       # uretim konum siniri, carry parca boyu
