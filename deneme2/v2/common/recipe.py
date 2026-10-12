@@ -72,8 +72,10 @@ def block_mask(batch, mask_fn):
     return create_block_mask(mod, B, None, T, S, device=dev, BLOCK_SIZE=ATTN_BLOCK, _compile=dev.type == "cuda")
 
 
-def _output_loss(h, weight, target):
+def _output_loss(h, weight, target, prior=None):
     lg = (h @ weight.T).float()
+    if prior is not None:                                                # deneme/freq-prior: + s(h) log p (ilk VOCAB sutun)
+        lg = lg + F.pad(prior[0].float() * prior[1].float()[None], (0, lg.shape[1] - prior[1].shape[0]))
     if lg.shape[1] > VOCAB:                                              # sozluk dolgusu: dolgu sutunu -inf (belge 89)
         lg = lg.masked_fill(torch.arange(lg.shape[1], device=lg.device) >= VOCAB, float("-inf"))
     return F.cross_entropy(lg, target, ignore_index=-100)
@@ -82,14 +84,15 @@ def _output_loss(h, weight, target):
 _COMPILED = {}
 
 
-def output_loss(h, weight, target):
-    """h (N, d), weight (V, d), target (N,) (-100 hedefsiz) -> hedefli konumlarda ortalama CE (logit fp32).
-    CUDA'da derlenmis (bir kez sarilir), CPU'da eager (Windows'ta inductor icin MSVC yok)."""
+def output_loss(h, weight, target, prior=None):
+    """h (N, d), weight (V, d), target (N,) (-100 hedefsiz) -> hedefli konumlarda ortalama CE (logit fp32).  prior: (s (N, 1),
+    log p (VOCAB,)) logit'e s log p (deneme/freq-prior).  CUDA'da derlenmis (bir kez sarilir), CPU'da eager (Windows'ta
+    inductor icin MSVC yok)."""
     if not h.is_cuda:
-        return _output_loss(h, weight, target)
+        return _output_loss(h, weight, target, prior)
     if "output_loss" not in _COMPILED:
         _COMPILED["output_loss"] = torch.compile(_output_loss, dynamic=False)
-    return _COMPILED["output_loss"](h, weight, target)
+    return _COMPILED["output_loss"](h, weight, target, prior)
 
 
 def _output_loss_mtp(h, weight, target, extra, w):

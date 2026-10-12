@@ -339,7 +339,7 @@ class Block(torch.nn.Module):
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
                  attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, mlp_ratio=(),
-                 local_kv_heads=0, mix_g_heads=0, mix_kv=(), g_layout="top"):
+                 local_kv_heads=0, mix_g_heads=0, mix_kv=(), g_layout="top", freq_prior=False):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -407,6 +407,12 @@ class SentenceTransformer(torch.nn.Module):
         with torch.no_grad():
             self.E.weight[VOCAB:].zero_()
         self.ngram, self.ngram_seen = None, None
+        self.freq_prior = bool(freq_prior)                              # deneme/freq-prior (kullanici, 12 Ekim: "B'yi yaz")
+        if self.freq_prior:                                             # logit += s(h) log p; s sifir: ilk agirlikta sapmasiz
+            self.register_buffer("freq_logp", torch.zeros(VOCAB))        # egitim verisi log-sikligi (train.py doldurur)
+            self.freq_s = torch.nn.utils.skip_init(torch.nn.Linear, d, 1)  # RNG cekmez
+            torch.nn.init.zeros_(self.freq_s.weight)
+            torch.nn.init.zeros_(self.freq_s.bias)
         self.ngram_layers, self.ngram_sparse = int(ngram_layers) or layers, bool(ngram_sparse)
         if ngram_rows:                                                  # sifir tablo, lambda 0,1 (kayit #1)
             self.ngram = torch.nn.Embedding(int(ngram_rows), d, _weight=torch.zeros(int(ngram_rows), d))
@@ -475,8 +481,15 @@ class SentenceTransformer(torch.nn.Module):
         return self.norm(x)
 
     def _logits(self, h):
-        """h (..., d) -> cikis h @ E^T (bagli embedding), VOCAB sutun (sozluk dolgusu kesilir)."""
-        return (h @ self.E.weight.T)[..., :VOCAB]
+        """h (..., d) -> cikis h @ E^T (bagli embedding), VOCAB sutun (sozluk dolgusu kesilir); freq_prior: + s(h) log p."""
+        lg = (h @ self.E.weight.T)[..., :VOCAB]
+        if self.freq_prior:
+            lg = lg + (self.freq_s(h) * self.freq_logp).to(lg.dtype)
+        return lg
+
+    def freq_term(self, h):
+        """Kayip yolu (recipe.output_loss prior): (s(h) (N, 1), log p (VOCAB,)) ya da None."""
+        return (self.freq_s(h), self.freq_logp) if self.freq_prior else None
 
     def loss_per_target(self, batch, attn=None, chunk=4096):
         """-> nll (K,), pred (K,), target_kind (K,) (hedefli konumlar, satir sirasiyla; belge 21 s7 sozlesmesi)."""

@@ -1664,10 +1664,59 @@ def t_interleave():
           "top farki %.1e, summaries_last %.1e, onbellek %.1e" % (diff, d_last, d_cache))
 
 
+def t_freq():
+    """deneme/freq-prior: (a) freq_prior modelde s sifir -> bloklar / E kapali modelle bit ayni, logit bit ayni; (b) s dolu:
+    _logits = h E^T + s(h) log p; (c) recipe.output_loss(prior) = _logits'in CE'si; (d) SummaryCache ve StaticCache adim
+    adim = tam ileri gecis (s dolu, fp32 < 1e-5)."""
+    import recipe as R
+    from model import StaticCache
+    batch = real_batch([[0, 1], [2]], 64)
+    torch.manual_seed(0)
+    a = SentenceTransformer(32, 3, 2, global_layers=1).eval()
+    torch.manual_seed(0)
+    b = SentenceTransformer(32, 3, 2, global_layers=1, freq_prior=True).eval()
+    sa, sb = a.state_dict(), b.state_dict()
+    g = torch.Generator().manual_seed(4)
+    with torch.no_grad():
+        b.freq_logp.copy_(torch.log_softmax(torch.randn(D.VOCAB, generator=g), 0))
+        keep = batch.target >= 0
+        la, lb = a._logits(a._batch_hidden(batch)[keep]), b._logits(b._batch_hidden(batch)[keep])
+        init = all(torch.equal(sa[k], sb[k]) for k in sa) and set(sb) - set(sa) == {"freq_logp", "freq_s.weight", "freq_s.bias"} \
+            and torch.equal(la, lb)
+        b.freq_s.weight.copy_(torch.randn(1, 32, generator=g))
+        b.freq_s.bias.fill_(0.3)
+        h = b._batch_hidden(batch)[keep]
+        ref = (h @ b.E.weight.T)[:, :D.VOCAB] + (h @ b.freq_s.weight.T + 0.3) * b.freq_logp
+        lg = b._logits(h)
+        d_b = float((lg - ref).abs().max())
+        ce = torch.nn.functional.cross_entropy(lg.float(), batch.target[keep])
+        d_c = abs(float(R.output_loss(h, b.E.weight, batch.target[keep], b.freq_term(h))) - float(ce))
+    check("freq (a, b, c): s 0 = sapmasiz model (agirlik, logit bit); s dolu: logit = h E^T + s(h) log p; output_loss(prior) "
+          "= _logits CE", init and d_b < 1e-5 and d_c < 1e-5, "logit %.1e, CE %.1e" % (d_b, d_c))
+    rows = [[0, 1], [2]]
+    dc = 0.0
+    with torch.no_grad():
+        lg_full = b._logits(b._batch_hidden(batch)[batch.target >= 0])
+        for C in (lambda: SummaryCache(b), lambda: StaticCache(b, 64, 8, 16)):
+            got = []
+            for row in rows:
+                for si in row:
+                    c = C()
+                    got.append(c.prefill([])[None].clone())
+                    for s in STORIES[si]:
+                        for t in s:
+                            got.append(c.append_token(t)[None].clone())
+                        got.append(c.close_sentence()[None].clone())
+            dc = max(dc, float((torch.cat(got) - lg_full).abs().max()))
+    big = float(lg_full.abs().max())                                   # s log p logitleri buyutur: goreli olcu
+    check("freq (d): SummaryCache ve StaticCache adim adim = tam ileri gecis (fp32, goreli < 1e-6)", dc / big < 1e-6,
+          "%.1e / en buyuk logit %.1f" % (dc, big))
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab,
              limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast,
-             combo=t_combo, mix=t_mix, interleave=t_interleave)
+             combo=t_combo, mix=t_mix, interleave=t_interleave, freq=t_freq)
 
 if __name__ == "__main__":
     if SIDE is not None:

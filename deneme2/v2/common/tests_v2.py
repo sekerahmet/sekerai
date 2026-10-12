@@ -996,6 +996,7 @@ def t_train():
         _train_finish(base, out, TR)
         _train_gqa_default(base, out, TR)
         _train_ngram(base, data, out, TR)
+        _train_freq(base, data, out, TR)
         import copy                                                     # epok sonu eksik batch dolgusu (8 Ekim)
         import types
         import recipe as R
@@ -1128,6 +1129,34 @@ def _train_gqa_default(base, out, TR):
         check("train GQA varsayilan", False, traceback.format_exc(limit=3))
     finally:
         TR.GLOB_KV_DEFAULT = pinned
+
+
+def _train_freq(base, data, out, TR):
+    """--freq_prior (deneme/freq-prior): Model Z kosar, kimlikte; agent.pt'de freq_logp = train.freq_logp (egitim sayimi + END
+    cumle sayisi), s egitilmis; kesilip surdurulen = kesintisiz (bit); load_run kurar; transformer DURUR."""
+    import traceback
+    import data as D_
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
+        import generate_readings as GR
+        cmd = base + ["--model", "model_z", "--layers", "2", "--epochs", "2", "--freq_prior", "1"]
+        a = TR.main(cmd + ["--out", out("freq_A")])
+        stopped, r = _cut_and_resume(TR, cmd, out("freq_cut"))
+        st_ = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        sa, sb = st_(out("freq_A")), st_(out("freq_cut"))
+        stream = base[base.index("--stream") + 1] if "--stream" in base else data
+        want = torch.from_numpy(TR.freq_logp(data, D_.TokenStories(stream, data, "train")))
+        m = GR.load_run(out("freq_A"), data, torch.device("cpu"))[0]
+        bad = _exit_msg(TR.main, base + ["--model", "transformer", "--freq_prior", "1", "--out", out("freq_bad")])
+        check("train --freq_prior 1: kosar, kimlikte; freq_logp = egitim log-sikligi (END dahil, toplam olasilik 1), s "
+              "egitilmis; kesilip surdurulen = kesintisiz (bit); load_run kurar; transformer DURUR",
+              a["finished"] and a["identity"]["freq_prior"] == 1 and torch.equal(sa["freq_logp"], want)
+              and abs(float(want.double().exp().sum()) - 1) < 1e-4 and bool(sa["freq_s.weight"].any())
+              and stopped and all(torch.equal(sa[k], sb[k]) for k in sa)
+              and [w["loss"] for w in r["log"]] == [w["loss"] for w in a["log"]] and m.freq_prior
+              and torch.equal(m.freq_logp, want) and bad is not None and "freq_prior" in bad, str(bad))
+    except Exception:  # noqa: BLE001
+        check("train --freq_prior", False, traceback.format_exc(limit=4))
 
 
 def _train_ngram(base, data, out, TR):
