@@ -147,20 +147,24 @@ def wsd_lr(step, total, peak, warmup=0.01, decay=0.2):
 def param_groups(model, weight_decay=0.1, skip=()):
     """-> AdamW gruplari: 2-B agirliklar (embedding haric) decay'li; embedding, norm, bias ve 1-B decay'siz.  skip:
     baska optimizer'in parametreleri (Muon).  Bigram tablosu (model.ngram) ayri grup: wd 0, lr_mult NGRAM_LR_MULT
-    (egitim dongusu lr x lr_mult yazar); model.ngram_sparse ise tablo hic yok (NgramRowAdam'da)."""
+    (egitim dongusu lr x lr_mult yazar); model.ngram_sparse ise tablo hic yok (NgramRowAdam'da).  PMI agirliklari (pmi_lambda,
+    pmi_mu; deneme/pmi) model.pmi_lr_mult != 1 ise ayri grup: wd 0, lr_mult pmi_lr_mult."""
     emb = {id(m.weight) for m in model.modules() if isinstance(m, torch.nn.Embedding)}
     ng = getattr(model, "ngram", None)
     ng = {id(ng.weight)} if ng is not None else set()
-    decay, no_decay, table, seen = [], [], [], {id(p) for p in skip}
+    pm_mult = float(getattr(model, "pmi_lr_mult", 1.0) or 1.0)
+    pm = {id(p) for p in (getattr(model, "pmi_lambda", None), getattr(model, "pmi_mu", None)) if p is not None} if pm_mult != 1.0 else set()
+    decay, no_decay, table, pmi, seen = [], [], [], [], {id(p) for p in skip}
     if getattr(model, "ngram_sparse", False):
         seen |= ng
     for p in model.parameters():
         if id(p) in seen or not p.requires_grad:
             continue
         seen.add(id(p))
-        (table if id(p) in ng else decay if p.dim() >= 2 and id(p) not in emb else no_decay).append(p)
+        (table if id(p) in ng else pmi if id(p) in pm else decay if p.dim() >= 2 and id(p) not in emb else no_decay).append(p)
     groups = [dict(params=decay, weight_decay=weight_decay), dict(params=no_decay, weight_decay=0.0)]
-    return groups + ([dict(params=table, weight_decay=0.0, lr_mult=NGRAM_LR_MULT)] if table else [])
+    return groups + ([dict(params=table, weight_decay=0.0, lr_mult=NGRAM_LR_MULT)] if table else []) + (
+        [dict(params=pmi, weight_decay=0.0, lr_mult=pm_mult)] if pmi else [])
 
 
 class NgramRowAdam:

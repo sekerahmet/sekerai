@@ -1161,6 +1161,9 @@ def _train_pmi(base, data, out, TR):
         g_ = TR.main(cmd[:-2] + ["--pmi_lambda", "global", "--steps", "3", "--out", out("pmi_glob")])
         mu = TR.main(cmd + ["--pmi_mu", "1", "--steps", "6", "--out", out("pmi_mu")])
         smu = st_(out("pmi_mu"))
+        lm = TR.main(cmd + ["--pmi_lr_mult", "10", "--steps", "6", "--out", out("pmi_lrm")])
+        lg = torch.load(os.path.join(out("pmi_lrm"), "checkpoint.pt"), weights_only=False)["opt"]["adamw"]["param_groups"]
+        lg_ok = [len(g["params"]) for g in lg if g.get("lr_mult") == 10.0] == [1] and lm["identity"]["pmi_lr_mult"] == 10.0             and "adamw_pmi" in lm["optimizer"]["split"]
         bad = [_exit_msg(TR.main, base + x + ["--out", out("pmi_bad%d" % i)]) for i, x in enumerate((
             ["--model", "transformer", "--pmi", tab], ["--model", "model_z", "--pmi", tab + ".yok"]))]
         check("train --pmi (bag K 4, NorMuon): kosar, kayip sonlu, kimlikte pmi_k / sha; liste agent.pt'de = dosya (bos komsu 0 / "
@@ -1169,7 +1172,7 @@ def _train_pmi(base, data, out, TR):
               a["finished"] and all(math.isfinite(x["loss"]) for x in a["log"]) and idt["pmi_k"] == 4 and idt["pmi_dim"] == 0
               and len(idt["pmi_sha256"]) == 64 and torch.equal(sa["pmi_nbr"], want_n) and torch.equal(sa["pmi_w"], want_w)
               and tuple(sa["pmi_lambda"].shape) == (D.VOCAB,) and bool(sa["pmi_lambda"].any())
-              and idt["pmi_lambda"] == "word" and idt["pmi_detach"] == 1 and m.pmi_detach and mu["identity"]["pmi_mu"] == 1
+              and idt["pmi_lambda"] == "word" and idt["pmi_detach"] == 1 and m.pmi_detach and mu["identity"]["pmi_mu"] == 1 and lg_ok
               and tuple(smu["pmi_mu"].shape) == (D.VOCAB,) and bool((smu["pmi_mu"] != 1).any()) and g_["identity"]["pmi_lambda"] == "global" and st_(out("pmi_glob"))["pmi_lambda"].dim() == 0 and stopped and all(torch.equal(sa[k], sb[k]) for k in sa)
               and [x["loss"] for x in r["log"]] == [x["loss"] for x in a["log"]] and torch.equal(m.pmi_nbr, want_n)
               and v["identity"]["pmi_dim"] == 8 and v["identity"]["pmi_k"] == 0
