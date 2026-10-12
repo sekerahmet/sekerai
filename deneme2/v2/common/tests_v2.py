@@ -841,8 +841,9 @@ def t_train():
         return
     root, data, prompts = _train_root(tp)
     saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO, TR.VOCAB_ROWS,
-             TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT, TR.MTP_DEFAULT)
+             TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT, TR.MTP_DEFAULT, TR.Z_INERT_DEFAULT)
     TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
+    TR.Z_INERT_DEFAULT = 0                      # Model Z2 (Z'li): GOLDEN / etiket bit (Model Z3 _train_z3'te)
     TR.MODEL_Z_GLOBAL_RATIO = 0.6                                       # eski varsayilan: L1 / L2 G1 (8 Ekim)
     TR.GLOB_KV_DEFAULT = 0                      # eski varsayilan (GQA yok): GOLDEN / etiket bit, heads 2 (yeni _train_gqa_default)
     TR.ATTN_GATE_DEFAULT = 0                    # eski varsayilan (kapisiz): GOLDEN / etiket bit (gercegi _train_gate'te)
@@ -996,6 +997,7 @@ def t_train():
         _train_finish(base, out, TR)
         _train_gqa_default(base, out, TR)
         _train_ngram(base, data, out, TR)
+        _train_z3(base, data, out, TR)
         import copy                                                     # epok sonu eksik batch dolgusu (8 Ekim)
         import types
         import recipe as R
@@ -1043,7 +1045,7 @@ def t_train():
         check("train", False, traceback.format_exc(limit=3))
     finally:
         (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS, TR.MODEL_Z_GLOBAL_RATIO, TR.VOCAB_ROWS,
-         TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT, TR.MTP_DEFAULT) = saved
+         TR.GLOB_KV_DEFAULT, TR.ATTN_GATE_DEFAULT, TR.NGRAM_DEFAULT, TR.MTP_DEFAULT, TR.Z_INERT_DEFAULT) = saved
 
 
 def t_tokens():
@@ -1128,6 +1130,64 @@ def _train_gqa_default(base, out, TR):
         check("train GQA varsayilan", False, traceback.format_exc(limit=3))
     finally:
         TR.GLOB_KV_DEFAULT = pinned
+
+
+def _train_z3(base, data, out, TR):
+    """Model Z3 varsayilanlari (12 Ekim): (a) G'li Model Z'de z_inert 1, transformer'da 0; CPU'da <data>/pmi_k5_r<d>.npz yoksa PMI
+    baslatma / gradyan paylasimi kapali (kimlikte bos); (b) acik tabloyla: grad_share_apply = elle, needtrust katsayisi = formul,
+    pmi_init E'yi degistirir (tablosuz kosudan farkli), gradyan paylasimi agent.pt'ye ek anahtar koymaz, kesilip surdurulen =
+    kesintisiz (bit; surdurmede baslatma yeniden yapilmaz); olmayan dosya DURUR."""
+    import traceback
+    try:
+        g = np.random.default_rng(5)
+        tab = os.path.join(out("z3_tab"), "pmi.npz")
+        os.makedirs(os.path.dirname(tab), exist_ok=True)
+        nbr = g.integers(0, D.VOCAB, (D.VOCAB, 3)).astype(np.int32)
+        nbr[::5, 2] = -1
+        w = g.random((D.VOCAB, 3)).astype(np.float32)
+        cnt = g.integers(0, 5000, D.VOCAB).astype(np.int64)
+        np.savez(tab, nbr=nbr, nbr_w=w, counts=cnt, S=g.standard_normal((D.VOCAB, 8)).astype(np.float32),
+                 T=g.standard_normal((D.VOCAB, 8)).astype(np.float32), meta="{}")
+        wv = np.where(nbr >= 0, w, 0.0).astype(np.float64)
+        b0 = 1000.0 / (1000.0 + cnt.astype(np.float64))
+        m_ = np.median(cnt[cnt > 0].astype(np.float64))
+        bn = 4 * m_ * cnt / (m_ + cnt) ** 2
+        bn = bn * (cnt * b0 * wv.sum(1)).sum() / (cnt * bn * wv.sum(1)).sum()
+        tn = TR.grad_share_tables(tab, 0.7, torch.device("cpu"), "needtrust")
+        d_n = float((tn[1].double() - torch.from_numpy(0.7 * bn[:, None] * wv)).abs().max())
+        E = torch.nn.Parameter(torch.zeros(D.VOCAB + 46, 8))
+        E.grad = torch.randn(D.VOCAB + 46, 8, generator=torch.Generator().manual_seed(1))
+        want, g0 = E.grad.clone(), E.grad[:D.VOCAB].clone().double()
+        tf = TR.grad_share_tables(tab, 0.7, torch.device("cpu"), "fixed1000")
+        for k in range(3):
+            c = torch.from_numpy(np.where(nbr[:, k] >= 0, 0.7 * b0 * w[:, k], 0.0))
+            want.index_add_(0, torch.from_numpy(np.maximum(nbr[:, k], 0).astype(np.int64)), (g0 * c[:, None]).float())
+        TR.grad_share_apply(E, tf)
+        d_a = float((E.grad - want).abs().max())
+        cmd = base + ["--model", "model_z", "--layers", "3", "--global_layers", "1", "--epochs", "2", "--optimizer", "normuon"]
+        pinned, TR.Z_INERT_DEFAULT = TR.Z_INERT_DEFAULT, 1                # t_train Z2'ye sabitler; burada gercek varsayilan
+        try:
+            z = TR.main(cmd + ["--out", out("z3_auto")])                   # CPU, tablo yok: ekler kapali, Z3 acik
+        finally:
+            TR.Z_INERT_DEFAULT = pinned
+        tr = TR.main(base + ["--model", "transformer", "--layers", "2", "--steps", "2", "--out", out("z3_tf")])
+        a = TR.main(cmd + ["--grad_share", tab, "--pmi_init", tab, "--out", out("z3_A")])
+        stopped, r = _cut_and_resume(TR, cmd + ["--grad_share", tab, "--pmi_init", tab], out("z3_cut"))
+        st_ = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        sz, sa, sb = st_(out("z3_auto")), st_(out("z3_A")), st_(out("z3_cut"))
+        bad = _exit_msg(TR.main, cmd + ["--grad_share", tab + ".yok", "--out", out("z3_bad")])
+        iz, ia = z["identity"], a["identity"]
+        check("train Model Z3: varsayilan z_inert 1 (transformer 0); CPU'da tablo yoksa ekler kapali; needtrust = formul (%.1e), "
+              "dagitma = elle (%.1e); acik tabloyla kimlikte sha / eta 1 / needtrust, E farkli, agent.pt anahtarlari ayni; kesilip "
+              "surdurulen = kesintisiz (bit); olmayan dosya DURUR" % (d_n, d_a),
+              iz["z_inert"] == 1 and tr["identity"]["z_inert"] == 0 and iz["pmi_init_sha256"] == "" and iz["grad_share_sha256"] == ""
+              and d_n < 1e-5 and d_a < 1e-5 and ia["pmi_init_sha256"] and ia["grad_share_sha256"] and ia["grad_share_eta"] == 1.0
+              and ia["grad_share_beta"] == "needtrust" and set(sa) == set(sz) and not torch.equal(sa["E.weight"], sz["E.weight"])
+              and stopped and all(torch.equal(sa[k], sb[k]) for k in sa)
+              and [x["loss"] for x in r["log"]] == [x["loss"] for x in a["log"]] and bad is not None and "grad_share" in bad,
+              str(bad))
+    except Exception:  # noqa: BLE001
+        check("train Model Z3", False, traceback.format_exc(limit=4))
 
 
 def _train_ngram(base, data, out, TR):

@@ -202,6 +202,20 @@ def model_z_summaries_last_ranges(kind, doc, sent, glob=False, n_mem=None, z_ine
     return mask_mod
 
 
+def z_inert_mask(base):
+    """Model Z3 dense / flex maskesi (bugunku duzen): base maskesi eksi baska bir Z_k anahtari (sorgu kendisi haric) ->
+    summaries_last z_inert araliklariyla ayni okuma (token: kendi cumlesi + BOS; Z_k: kendi cumlesi + BOS + kendisi; G: belge
+    token'lari + BOS + kendisi)."""
+    def fn(kind, doc, sent):
+        m = base(kind, doc, sent)
+
+        def mask_mod(b, h, q, kv):
+            return m(b, h, q, kv) & ~((kind[b, kv] == ZTOK) & (kv != q))
+        return mask_mod
+    fn.includes_padding = True
+    return fn
+
+
 _LAST_GLOB = functools.partial(model_z_summaries_last_ranges, glob=True)
 _INERT_LOC = functools.partial(model_z_summaries_last_ranges, z_inert=True)
 _INERT_GLOB = functools.partial(model_z_summaries_last_ranges, glob=True, z_inert=True)
@@ -366,7 +380,9 @@ class SentenceTransformer(torch.nn.Module):
         self.global_layers = int(global_layers)
         assert 0 <= self.global_layers <= layers, "global_layers 0..layers"
         self.mask_fn = (model_z_read_mask, model_z_global_mask) if self.global_layers else model_z_read_mask
-        self.z_inert = bool(z_inert)                                    # deneme/z-inert (kullanici, 12 Ekim: "z siz versiyonu")
+        self.z_inert = bool(z_inert)                                    # Model Z3 (kullanici, 12 Ekim: "son varsayılan kararım : Z siz model")
+        if self.z_inert:
+            self.mask_fn = tuple(z_inert_mask(f) for f in self.mask_fn) if isinstance(self.mask_fn, tuple) else                 z_inert_mask(self.mask_fn)
         self.END, self.EOS = END_ID, EOS_ID
         hidden = -(-int(8 * d / 3) // 8) * 8
         assert vocab_rows >= VOCAB, "vocab_rows >= VOCAB"
@@ -442,8 +458,7 @@ class SentenceTransformer(torch.nn.Module):
 
     def _masks(self, last=False):
         """Maske fonksiyonlari: bugunku duzen (mask_fn) ya da summaries_last duzeninde ayni yapida (tek / ikili)."""
-        if self.z_inert:                                                # yalniz summaries_last yolu (egitim, sinav)
-            assert last, "z_inert: yalniz summaries_last duzeni (dense / uretim yolu yok)"
+        if self.z_inert and last:                                       # Model Z3 summaries_last araliklari
             return (_INERT_LOC, _INERT_GLOB) if isinstance(self.mask_fn, tuple) else _INERT_LOC
         if not last:
             return self.mask_fn

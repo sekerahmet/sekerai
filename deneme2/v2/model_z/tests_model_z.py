@@ -1694,16 +1694,15 @@ def t_z_inert():
         m.E.weight.copy_(E0)
     tk = (b.kind == TOKEN) & ~torch.isin(b.tokens, torch.tensor([END_ID]))
     same_tok = torch.equal(h1[tk], h2[tk])
-    stops = []
-    for fn in (lambda: m._masks(False),):
-        try:
-            fn()
-            stops.append(False)
-        except AssertionError:
-            stops.append(True)
+    with torch.no_grad():                                               # bugunku (dense) duzen = summaries_last (Model Z3)
+        nll_last = m.loss_per_target(b)[0]
+        nll_dense = m.loss_per_target(batch)[0]
+        tgt_l, tgt_d = b.target[b.target >= 0], batch.target[batch.target >= 0]
+    d_dense = float((torch.sort(nll_last)[0] - torch.sort(nll_dense)[0]).abs().max())
     check("z_inert: maske = normal eksi ZTOK anahtari (kendisi haric), yerel ve G; token Z okumaz; Z girdisi degisince token "
-          "hidden'i bit ayni; dense yol DURUR, StaticCache desteklemez",
-          ok and same_tok and all(stops) and not StaticCache.supports(m), "kaldirilan Z okumasi %s" % info)
+          "hidden'i bit ayni; dense duzen = summaries_last (hedef kumesi ayni, nll < 1e-5); StaticCache desteklemez",
+          ok and same_tok and d_dense < 1e-5 and torch.equal(torch.sort(tgt_l)[0], torch.sort(tgt_d)[0])
+          and not StaticCache.supports(m), "kaldirilan Z okumasi %s, dense %.1e" % (info, d_dense))
     rows = [[0, 1], [2]]                                                  # Model Z3 uretimi: SummaryCache = egitim ileri gecisi
     batch2 = real_batch(rows, 64)
     b2, perm2 = summaries_last(batch2)
