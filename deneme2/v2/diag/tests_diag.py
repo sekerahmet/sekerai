@@ -528,8 +528,90 @@ def t_genspeed():
         check("genspeed", False, traceback.format_exc(limit=4))
 
 
+def t_ffn():
+    """ffn_decode (12 Ekim): YYG duzeni (interleave, G 1 / 3) + GQA + n-gram 2 katman, gercek build_batch.  Giris + sum(attention
+    + FFN) + diger = merkezli hedef logiti (model._logits'ten); katmanin butun noron katkilari toplami = FFN katkisi; en buyuk
+    noron = elle; logp = loss_per_target; main JSON / md (siklik kovasi dahil)."""
+    import traceback
+    import data as D
+    import ffn_decode as FD
+    import gap_v2 as G
+    import token_trace as TT
+    import train as TR
+    tp = T2.tokenizer_path()
+    if tp is None:
+        print("ATLA ffn: GPT-2 tokenizer yok", flush=True)
+        return
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(tp)
+    root, data, prompts = T2._train_root(tp)
+    saved = (TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS)
+    TR.BATCH_ROWS, TR.LOG_EVERY = 4, 1
+    TR.READING_PROMPTS, TR.READING_LIMITS = prompts, dict(max_sentences=3, max_tokens=4)
+    try:
+        run = os.path.join(T2.TMP, "runs_ffn", "ilv")
+        TR.main(["--data", data, "--stream", root, "--device", "cpu", "--model", "model_z", "--d", "16", "--heads", "4",
+                 "--layers", "3", "--global_layers", "1", "--g_layout", "interleave", "--glob_kv_heads", "2",
+                 "--ngram_embed", "8", "--ngram_layers", "2", "--steps", "6", "--checkpoint_minutes", "0", "--out", run])
+        model = G.load(run, data, torch.device("cpu"))[0].float().eval()
+        valid = D.TokenStories(root, data, "valid")
+        sents = [s.tolist() for s in valid.sentences(1)]
+        st = TT.text_story(tok, [sents], "ss")
+        batch = D.build_batch(st, [[0]], "model_z", "cpu", row_len=1 + sum(len(s) + 1 for s in sents))
+        r = FD.decompose(model, batch)
+        with torch.no_grad():
+            h = model._batch_hidden(batch)[0]
+            keep = batch.target[0] >= 0
+            lg = model._logits(h[keep]).float()
+            cen = lg.gather(1, batch.target[0][keep][:, None])[:, 0] - lg.mean(-1)
+            nll = model.loss_per_target(batch)[0]
+            l, k = 2, 0                                                  # elle: son katman, ilk hedef, butun noronlar
+            acts = []
+            hk = model.blocks[l].down.register_forward_hook(lambda m, a, o: acts.append(a[0][0]))
+            model._batch_hidden(batch)
+            hk.remove()
+        xs = []
+        hk = model.norm.register_forward_pre_hook(lambda m, a: xs.append(a[0][0]))
+        with torch.no_grad():
+            model._batch_hidden(batch)
+        hk.remove()
+        x = xs[0][keep][k]
+        eps = model.norm.eps if model.norm.eps is not None else torch.finfo(x.dtype).eps
+        E = model.E.weight[:D.VOCAB].float()
+        w = (E - E.mean(0))[batch.target[0][keep][k]] * model.norm.weight * torch.rsqrt(x.pow(2).mean() + eps)
+        per = (acts[0][keep][k] * (w @ model.blocks[l].down.weight)).detach()
+        sumc = r["inp"] + r["attn"].sum(0) + r["ffn"].sum(0) + r["other"]
+        check("ffn_decode: giris + sum(attention + FFN) + diger = merkezli hedef logiti (fark %.1e); toplam = model._logits; "
+              "noron toplami = FFN katkisi; en buyuk noron elle; logp = loss_per_target; n-gram 'diger' sonlu"
+              % float((sumc - cen).abs().max()),
+              float((sumc - cen).abs().max()) < 1e-4 and float((r["total"] - cen).abs().max()) < 1e-4
+              and abs(float(per.sum()) - float(r["ffn"][l, k])) < 1e-4 and int(per.argmax()) == int(r["nrn_idx"][l, k, 0])
+              and abs(float(per.max()) - float(r["nrn_val"][l, k, 0])) < 1e-5
+              and float((r["logp"] + nll).abs().max()) < 1e-5 and bool(torch.isfinite(r["other"]).all()),
+              "noron %.2e / %.2e" % (float(per.sum()), float(r["ffn"][l, k])))
+        cnt = os.path.join(T2.TMP, "ffn_counts.npy")
+        np.save(cnt, np.arange(D.VOCAB, dtype=np.float64) * 40)
+        out = os.path.join(T2.TMP, "ffn_out")
+        res = FD.main(["--run", run, "--data", data, "--stream", root, "--prompts", prompts, "--text",
+                       "Lily had a red ball. She liked it a lot.", "--counts", cnt, "--device", "cpu", "--out", out])
+        js = json.load(open(os.path.join(out, "ffn_decode.json"), encoding="utf-8"))
+        t0 = js["texts"][0]["tokens"][0]
+        check("ffn_decode main: JSON / md, katman turleri = model.is_glob, konum alanlari (katman basina attn / ffn / itti / "
+              "bastirdi / 3 noron + statik token), ozet hepsi / hedef turu / siklik kovasi",
+              js["layers"] == ["G" if g else "Y" for g in model.is_glob] and js["layers"].count("G") == 1 and set(t0) >= {"i", "text", "target", "p_target", "total", "input", "other",
+                                                             "layers"}
+              and len(t0["layers"]) == 3 and len(t0["layers"][0]["ffn_up"]) == 5 and len(t0["layers"][0]["neurons"]) == 3
+              and len(t0["layers"][0]["neurons"][0][2]) == 5 and res["summary"]["by_kind"] and res["summary"]["by_freq"]
+              and os.path.exists(os.path.join(out, "ffn_decode.md")) and js["texts"][-1]["label"] == "metin 1",
+              str(list(res["summary"]["by_freq"])))
+    except Exception:  # noqa: BLE001
+        check("ffn", False, traceback.format_exc(limit=4))
+    finally:
+        TR.BATCH_ROWS, TR.LOG_EVERY, TR.READING_PROMPTS, TR.READING_LIMITS = saved
+
+
 TESTS = dict(readings=t_readings, tools=t_tools, knowledge=t_knowledge, trace=t_trace, profile=t_profile,
-             genspeed=t_genspeed)
+             genspeed=t_genspeed, ffn=t_ffn)
 
 if __name__ == "__main__":
     only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else list(TESTS)
