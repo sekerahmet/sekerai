@@ -1223,8 +1223,9 @@ def _train_som(base, data, out, TR):
         b0, r0 = TR.neuron_share_now(0, 100, 1.0, 8, 0.2)
         b1, r1 = TR.neuron_share_now(10, 100, 1.0, 8, 0.2)
         off = TR.neuron_share_now(20, 100, 1.0, 8, 0.2)
+        bt, rt = TR.neuron_share_now(50, 100, 1.0, 8, 0.2, 0.1, 2)                 # yerlesme evresi
         mass = lambda b, r: b * sum(2 * math.exp(-(o / r) ** 2) for o in range(1, r + 1))  # noqa: E731
-        sched = r0 == 8 and r1 == 4 and abs(mass(b0, r0) - 1) < 1e-9 and abs(mass(b1, r1) - 0.5) < 1e-9 and off == (0.0, 0)
+        sched = r0 == 8 and r1 == 4 and abs(mass(b0, r0) - 1) < 1e-9 and abs(mass(b1, r1) - 0.5) < 1e-9 and off == (0.0, 0) and rt == 2 and abs(mass(bt, rt) - 0.1) < 1e-9
         cmd = base + ["--model", "model_z", "--layers", "3", "--global_layers", "1", "--epochs", "2"]
         som = ["--neuron_share_radius", "4", "--neuron_share_frac", "1"]
         st_ = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731

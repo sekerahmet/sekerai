@@ -86,7 +86,7 @@ def pmi_table_path(data_dir, d):
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ngram_embed", "ngram_layers",
            "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "g_layout", "z_inert", "pmi_init", "grad_share",
            "grad_share_beta", "neuron_share", "neuron_share_radius", "neuron_share_frac", "neuron_share_at",
-           "neuron_share_layers")   # --resume'da kimlikten
+           "neuron_share_layers", "neuron_share_tail", "neuron_share_tail_radius")   # --resume'da kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
@@ -100,7 +100,7 @@ IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len",
             "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads",
             "g_layout", "z_inert", "pmi_init_sha256", "grad_share_sha256",
             "grad_share_beta", "neuron_share", "neuron_share_radius", "neuron_share_frac", "neuron_share_at",
-            "neuron_share_layers")
+            "neuron_share_layers", "neuron_share_tail", "neuron_share_tail_radius")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -432,15 +432,21 @@ def _pmi_resolve(args, cuda, log):
     args.grad_share_beta = (args.grad_share_beta or GRAD_SHARE_BETA_DEFAULT) if args.grad_share else ""
 
 
-def neuron_share_now(step, total, mass0, r0, frac):
-    """deneme/som takvimi (Kohonen'in duzen evresi): ilk frac x total adimda yaricap r0 -> 1 dogrusal, komsu kutlesi
-    mass0 x r / r0 (komsulardan gelen toplam pay, noronun kendi sinyali 1); sonra kapali -> (beta, r), beta cekirdek
-    agirligi exp(-(o / r)^2) ile toplam kutleyi verir."""
+def neuron_share_now(step, total, mass0, r0, frac, tail=0.0, r_tail=2):
+    """deneme/som takvimi (Kohonen): duzen evresi -- ilk frac x total adimda yaricap r0 -> 1 dogrusal, komsu kutlesi
+    mass0 x r / r0 (komsulardan gelen toplam pay, noronun kendi sinyali 1); yerlesme evresi -- sonra tail > 0 ise sabit
+    yaricap r_tail, kutle tail (sonuna kadar), yoksa kapali.  -> (beta, r); beta cekirdek exp(-(o / r)^2) ile kutleyi verir."""
     end = frac * total
-    if not mass0 or step >= end:
+    if not mass0:
         return 0.0, 0
-    r = max(1, round(r0 * (1 - step / end)))
-    return mass0 * r / r0 / sum(2 * math.exp(-(o / r) ** 2) for o in range(1, r + 1)), r
+    if step >= end:
+        if not tail:
+            return 0.0, 0
+        mass, r = tail, max(1, int(r_tail))
+    else:
+        r = max(1, round(r0 * (1 - step / end)))
+        mass = mass0 * r / r0
+    return mass / sum(2 * math.exp(-(o / r) ** 2) for o in range(1, r + 1)), r
 
 
 def neuron_smooth(X, beta, r):
@@ -787,6 +793,9 @@ def _args(argv):
     ap.add_argument("--neuron_share_at", default=None, choices=("grad", "update"),
                     help="deneme/som: paylasim gradyana (NorMuon'dan once) ya da guncellemeye (sonra, norm korunur)")
     ap.add_argument("--neuron_share_layers", default=None, choices=("g", "all"), help="deneme/som: yalniz G ya da butun bloklar")
+    ap.add_argument("--neuron_share_tail", type=float, default=None,
+                    help="deneme/som: yerlesme evresi kutlesi (duzen evresinden sonra sonuna kadar; 0 kapali)")
+    ap.add_argument("--neuron_share_tail_radius", type=int, default=None, help="deneme/som: yerlesme evresi yaricapi (2)")
     ap.add_argument("--g_nope", type=int, default=None,
                     help="1: G (tam) katmanlarinda RoPE yok, konum yerel katmanlardan (G'li Model Z'de varsayilan; 0 eski RoPE'li)")
     ap.add_argument("--mtp", type=lambda s: s if s == "auto" else int(s), default=None,
@@ -820,7 +829,7 @@ def _args(argv):
             setattr(args, k, "auto" if was.get(k + "_sha256") else "none")
     args.resume_pmi_sha = (was or {}).get("pmi_init_sha256", "") if args.resume else ""   # baslatma surdurmede yok
     for k, v in (("neuron_share", 0.0), ("neuron_share_radius", 64), ("neuron_share_frac", 0.2), ("neuron_share_at", "grad"),
-                 ("neuron_share_layers", "g")):                          # deneme/som; alani olmayan kosu: kapali
+                 ("neuron_share_layers", "g"), ("neuron_share_tail", 0.0), ("neuron_share_tail_radius", 2)):   # deneme/som
         if getattr(args, k) is None:
             setattr(args, k, v)
     args.neuron_share = float(args.neuron_share)
@@ -1006,7 +1015,8 @@ def main(argv=None):
                  z_inert=args.z_inert, pmi_init_sha256=args.pmi_init_sha256, grad_share_sha256=args.grad_share_sha256, grad_share_beta=args.grad_share_beta,
                  neuron_share=args.neuron_share, neuron_share_radius=args.neuron_share_radius,
                  neuron_share_frac=args.neuron_share_frac, neuron_share_at=args.neuron_share_at,
-                 neuron_share_layers=args.neuron_share_layers)
+                 neuron_share_layers=args.neuron_share_layers, neuron_share_tail=args.neuron_share_tail,
+                 neuron_share_tail_radius=args.neuron_share_tail_radius)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -1029,7 +1039,7 @@ def main(argv=None):
                "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [], "local_kv_heads": 0,
                "g_layout": "top", "z_inert": 0, "pmi_init_sha256": "", "grad_share_sha256": "",
                "grad_share_beta": "", "neuron_share": 0.0, "neuron_share_radius": 64, "neuron_share_frac": 0.2,
-               "neuron_share_at": "grad", "neuron_share_layers": "g",
+               "neuron_share_at": "grad", "neuron_share_layers": "g", "neuron_share_tail": 0.0, "neuron_share_tail_radius": 2,
                **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
@@ -1142,7 +1152,7 @@ def main(argv=None):
                 torch.cuda.reset_peak_memory_stats()
         lr = R.wsd_lr(step, total, args.lr, decay=DECAY)
         model.neuron_share_now = neuron_share_now(step, total, args.neuron_share, args.neuron_share_radius,
-                                                  args.neuron_share_frac)
+                                                  args.neuron_share_frac, args.neuron_share_tail, args.neuron_share_tail_radius)
         for g in opt.param_groups:
             g["lr"] = lr * g.get("lr_mult", 1.0)                         # bigram tablosu grubu: lr_mult
         batch, real, cont, mt = nxt
