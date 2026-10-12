@@ -9,6 +9,9 @@ sabit permutasyon).  SOM'suz modelde iki okuma ayni beklenir; SOM bloklari islev
               kez gecen token'larda gecisler iki yariya bolunur; A yarisinin ortalama blok kutlesinden token'in en aktif %10 blogu
               secilir, B yarisinin her gecisinde bu bloklarin yakaladigi kutle payi (kapsama) ve gecisin kendi en aktif %10 blogunun
               secilenlerle ortusmesi (Jaccard); sirali ve karisik ayri.
+  kumeli      sonradan siralama (MoEfication benzeri cetvel; kullanici 12 Ekim: "ölçüm ise ölç"): AYRI hikayelerde (stories ..
+              2 x stories) |aktivasyon| korelasyonu -> ilk 32 ozvektor -> k-means (blok sayisi kadar kume) -> noronlar kumeye gore
+              siralanir; butun okumalar bu sirayla da.
     python ffn_blocks.py --runs ad=klasor [...] --data <fineweb_edu_s000> --out <json> [--stories 40] [--blocks 12]
 """
 import torch  # noqa: I001
@@ -29,12 +32,12 @@ import gap_v2 as G  # noqa: E402
 import token_trace as TT  # noqa: E402
 
 
-def stories(data, n, max_tokens):
+def stories(data, n, max_tokens, start=0):
     tok, _ = G.vocab_text(data)
     profile = json.load(open(os.path.join(data, "valid_boundaries.json"), encoding="utf-8")).get("profile", "ss")
     valid = D.TokenStories(data, data, "valid")
     items = []
-    for i in range(n):
+    for i in range(start, start + n):
         sents, k = [], 0
         for s_ in valid.sentences(i):
             if k + len(s_) + 1 > max_tokens:
@@ -63,6 +66,23 @@ def nll_all(model, st, items, dev, hook=None):
     return torch.cat(out).numpy(), torch.cat(sid).numpy()
 
 
+def cluster_order(C, nb, k=32, iters=25):
+    """Korelasyon (H, H) -> kume sirasi (H,): ilk k ozvektor (ozdeger kokuyle olcekli, satir normlu) uzerinde kosinus k-means,
+    noronlar kume numarasina gore (kararli) siralanir."""
+    C = torch.nan_to_num(C.float())
+    w, V = torch.linalg.eigh(C)
+    X = V[:, -k:] * w[-k:].clamp_min(0).sqrt()
+    X = X / X.norm(dim=1, keepdim=True).clamp_min(1e-12)
+    g = torch.Generator().manual_seed(0)
+    cent = X[torch.randperm(len(X), generator=g)[:nb].to(X.device)].clone()
+    for _ in range(iters):
+        lab = (X @ cent.T).argmax(1)
+        new = torch.zeros_like(cent).index_add_(0, lab, X)
+        n_ = torch.bincount(lab, minlength=nb)
+        cent = torch.where((n_ > 0)[:, None], new / new.norm(dim=1, keepdim=True).clamp_min(1e-12), cent)
+    return torch.argsort(lab, stable=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", nargs="+", required=True)
@@ -78,6 +98,7 @@ def main():
     log = lambda m: print("[%6.1f sn] %s" % (time.time() - t0, m), flush=True)  # noqa: E731
     dev = G.setup(a.device, log)
     st, items = stories(a.data, a.stories, a.max_tokens)
+    st_fit, items_fit = stories(a.data, a.stories, a.max_tokens, start=a.stories)   # kumeleme: degerlendirmeden ayri
     res = {}
     for spec in a.runs:
         name, run = spec.split("=", 1)
@@ -86,11 +107,36 @@ def main():
         rng = np.random.default_rng(0)
         H = {l: model.blocks[l].down.weight.shape[1] for l in gl}
         perm = {l: torch.from_numpy(rng.permutation(H[l])).to(dev) for l in gl}
-        # yogunlasma
-        acc = {l: {"sirali": [], "karisik": []} for l in gl}
-        bm = {l: {"sirali": [], "karisik": []} for l in gl}                # konum basina blok kutlesi (token tutarliligi)
-        toks = []
         rec = {}
+        hooks = [model.blocks[l].down.register_forward_pre_hook(lambda m, ar, l=l: rec.__setitem__(l, ar[0][0])) for l in gl]
+        S1 = {l: torch.zeros(H[l], dtype=torch.float64, device=dev) for l in gl}
+        S2 = {l: torch.zeros(H[l], H[l], dtype=torch.float64, device=dev) for l in gl}
+        nfit = 0
+        with torch.no_grad():
+            for j, sents in enumerate(items_fit):
+                b = D.build_batch(st_fit, [[j]], "model_z", dev, row_len=1 + sum(len(s_) + 1 for s_ in sents))
+                model._batch_hidden(b)
+                keep = b.kind[0] != int(D.Kind.PAD)
+                for l in gl:
+                    A = rec[l][keep].abs().double()
+                    S1[l] += A.sum(0)
+                    S2[l] += A.T @ A
+                nfit += int(keep.sum())
+        for h in hooks:
+            h.remove()
+        permk = {}
+        for l in gl:
+            mu = S1[l] / nfit
+            cov = S2[l] / nfit - torch.outer(mu, mu)
+            sd = cov.diagonal().clamp_min(1e-12).sqrt()
+            permk[l] = cluster_order(cov / torch.outer(sd, sd), H[l] // a.block)
+            S2[l] = None
+        log("%s: kumeleme %d konumdan (ayri hikayeler)" % (name, nfit))
+        ORD = {"sirali": None, "karisik": perm, "kumeli": permk}
+        # yogunlasma
+        acc = {l: {k: [] for k in ORD} for l in gl}
+        bm = {l: {k: [] for k in ORD} for l in gl}                         # konum basina blok kutlesi (token tutarliligi)
+        toks = []
         hooks = [model.blocks[l].down.register_forward_pre_hook(lambda m, ar, l=l: rec.__setitem__(l, ar[0][0])) for l in gl]
         with torch.no_grad():
             for j, sents in enumerate(items):
@@ -101,7 +147,7 @@ def main():
                 for l in gl:
                     A = rec[l][keep].abs().float()                                  # (T, H)
                     nb = H[l] // a.block
-                    for k, X in (("sirali", A), ("karisik", A[:, perm[l]])):
+                    for k, X in ((k_, A if p_ is None else A[:, p_[l]]) for k_, p_ in ORD.items()):
                         m_ = X[:, :nb * a.block].reshape(len(X), nb, a.block).sum(-1)
                         top = m_.topk(max(1, nb // 10), -1).values.sum(-1) / m_.sum(-1).clamp_min(1e-12)
                         acc[l][k].append(top.cpu())
@@ -117,7 +163,7 @@ def main():
             row = {k: float(torch.cat(v).mean()) for k, v in acc[l].items()}
             tk = torch.cat(toks)
             ids, inv, cnt = torch.unique(tk, return_inverse=True, return_counts=True)
-            for kind in ("sirali", "karisik"):
+            for kind in ORD:
                 M = torch.cat(bm[l][kind]).float()                         # (N, nb)
                 ntop = max(1, nb // 10)
                 cov, jac = [], []
@@ -130,12 +176,12 @@ def main():
                     inter = (own[..., None] == sel).any(-1).sum(-1).float()
                     jac.append(float((inter / (2 * ntop - inter)).mean()))
                 row["token_" + kind] = dict(n_token=len(cov), kapsama=float(np.mean(cov)), jaccard=float(np.mean(jac)))
-            for kind in ("sirali", "karisik"):
+            for kind in ORD:
                 ds, st10, tk2 = [], [], []
                 for bi in pick:
                     idx = torch.arange(bi * a.block, (bi + 1) * a.block, device=dev)
-                    if kind == "karisik":
-                        idx = perm[l][idx]
+                    if ORD[kind] is not None:
+                        idx = ORD[kind][l][idx]
                     mask = torch.ones(H[l], device=dev)
                     mask[idx] = 0
 
