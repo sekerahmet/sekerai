@@ -153,7 +153,8 @@ def param_groups(model, weight_decay=0.1, skip=()):
     ng = getattr(model, "ngram", None)
     ng = {id(ng.weight)} if ng is not None else set()
     pm_mult = float(getattr(model, "pmi_lr_mult", 1.0) or 1.0)
-    pm = {id(p) for p in (getattr(model, "pmi_lambda", None), getattr(model, "pmi_mu", None)) if p is not None} if pm_mult != 1.0 else set()
+    pm = {id(p) for p in (getattr(model, "pmi_lambda", None), getattr(model, "pmi_mu", None), getattr(model, "pmi_share_s", None))
+          if p is not None} if pm_mult != 1.0 else set()
     decay, no_decay, table, pmi, seen = [], [], [], [], {id(p) for p in skip}
     if getattr(model, "ngram_sparse", False):
         seen |= ng

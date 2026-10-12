@@ -364,7 +364,7 @@ class Block(torch.nn.Module):
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
                  attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, mlp_ratio=(),
-                 local_kv_heads=0, mix_g_heads=0, mix_kv=(), g_layout="top", pmi_dim=0, pmi_k=0, pmi_word=True, pmi_detach=False, pmi_mu=False, pmi_at=-1):
+                 local_kv_heads=0, mix_g_heads=0, mix_kv=(), g_layout="top", pmi_dim=0, pmi_k=0, pmi_word=True, pmi_detach=False, pmi_mu=False, pmi_at=-1, pmi_share=False):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -381,7 +381,9 @@ class SentenceTransformer(torch.nn.Module):
         olmayabilir"), degilse tek sayi.  pmi_detach: torba komsularin E'sini salt okur (gradyan yok; CUDA'da bf16).  pmi_mu: komsu kelime
         basina carpan mu_b (VOCAB sayi, birden; lambda_a mu_b w_ab; kullanici, 12 Ekim: "hem komşu başına da bir lamda").
         pmi_at: -1 torba girise (E'ye); l >= 0 blok l girisine, akisin boyuyla olcekli: x + lambda_a |x| torba / |torba| (kullanici,
-        12 Ekim: "belki son g öncesi koyabiliriz"; olcum: girisli torba 1. bloktan sonra akisin %0'i)."""
+        12 Ekim: "belki son g öncesi koyabiliriz"; olcum: girisli torba 1. bloktan sonra akisin %0'i).  pmi_share: torba yerine
+        paylasilan vektor E_eff(a) = E(a) + beta_a sum w E(komsu), beta_a = s c / (c + n_a) (n_a sıklık, c 1.000, s sifirdan);
+        hem girdi hem cikis E_eff (nadir kelime komsularindan odunc alir; kullanici, 12 Ekim: "ikisine de bakalım")."""
         super().__init__()
         self.carry_group, self.row_len = int(carry_group), ROW_LEN
         self.global_layers = int(global_layers)
@@ -445,6 +447,8 @@ class SentenceTransformer(torch.nn.Module):
             self.ngram_lambdas = torch.nn.Parameter(torch.full((self.ngram_layers,), 0.1))
         self.pmi_dim, self.pmi_k, self.pmi_detach, self.pmi_at = int(pmi_dim), int(pmi_k), bool(pmi_detach), int(pmi_at)
         assert self.pmi_at < layers and (self.pmi_at < 0 or self.pmi_k), "pmi_at: blok no (< katman), yalniz komsu torbasinda"
+        self.pmi_share = bool(pmi_share)
+        assert not self.pmi_share or (self.pmi_k and self.pmi_at < 0), "pmi_share: komsu tablosu ister, giris / son G torbasi yok"
         assert not (self.pmi_dim and self.pmi_k), "pmi: vektor (pmi_dim) ya da komsu listesi (pmi_k), ikisi birden degil"
         if self.pmi_dim:                                                # kullanici, 12 Ekim: "n-gram gibi ama sabit bir tablo"
             self.register_buffer("pmi_table", torch.zeros(VOCAB, 2 * self.pmi_dim))
@@ -455,19 +459,38 @@ class SentenceTransformer(torch.nn.Module):
             self.register_buffer("pmi_w", torch.zeros(VOCAB, self.pmi_k))
             self.pmi_lambda = torch.nn.Parameter(torch.zeros(VOCAB if pmi_word else ()))
             self.pmi_mu = torch.nn.Parameter(torch.ones(VOCAB)) if pmi_mu else None
+            if self.pmi_share:
+                self.register_buffer("pmi_counts", torch.zeros(VOCAB))
+                self.pmi_share_s = torch.nn.Parameter(torch.zeros(()))
+                self._eff = None
 
     def _embed(self, tokens, is_token):
         """E(token) + PMI, yalniz kelime konumlarinda (BOS / Z / dolgu 0): pmi_dim'de pmi_proj(rms(tablo satiri)); pmi_k'de
         lambda * sum_k w_k E(komsu_k) (komsu torbasi; bos komsu agirligi 0)."""
+        if self.pmi_k and self.pmi_share:
+            return F.embedding(tokens, self.out_weight())
         x = self.E(tokens)
         if self.pmi_dim:
             p = self.pmi_table[tokens.clamp(0, VOCAB - 1)]
             p = self.pmi_proj(F.rms_norm(p, (p.shape[-1],)).to(x.dtype))
-        elif self.pmi_k and self.pmi_at < 0:
+        elif self.pmi_k and self.pmi_at < 0 and not self.pmi_share:
             p = self._pmi_lam(tokens) * self._pmi_raw(tokens, x.is_cuda)
         else:
             return x
         return x + p * is_token[..., None].to(p.dtype)
+
+    def out_weight(self):
+        """Girdi ve cikis agirligi: E, pmi_share'de E_eff = E + beta (sum w E(komsu)) (ilk VOCAB satir); E / s surumu degisince
+        yeniden (adim basina bir kez)."""
+        if not (self.pmi_k and self.pmi_share):
+            return self.E.weight
+        key = (self.E.weight._version, self.pmi_share_s._version, torch.is_grad_enabled(), self.E.weight.data_ptr())
+        if self._eff is None or self._eff[0] != key:
+            Wt = self.E.weight
+            bag = F.embedding_bag(self.pmi_nbr, Wt, per_sample_weights=self.pmi_w.to(Wt.dtype), mode="sum")
+            beta = self.pmi_share_s * (1000.0 / (1000.0 + self.pmi_counts))[:, None]
+            self._eff = (key, torch.cat([Wt[:VOCAB] + beta.to(Wt.dtype) * bag, Wt[VOCAB:]], 0))
+        return self._eff[1]
 
     def _pmi_raw(self, tokens, cuda):
         """sum_k (mu_k) w_k E(komsu_k) (fp32, ..., d)."""
@@ -570,7 +593,7 @@ class SentenceTransformer(torch.nn.Module):
 
     def _logits(self, h):
         """h (..., d) -> cikis h @ E^T (bagli embedding), VOCAB sutun (sozluk dolgusu kesilir)."""
-        return (h @ self.E.weight.T)[..., :VOCAB]
+        return (h @ self.out_weight().T)[..., :VOCAB]
 
     def loss_per_target(self, batch, attn=None, chunk=4096):
         """-> nll (K,), pred (K,), target_kind (K,) (hedefli konumlar, satir sirasiyla; belge 21 s7 sozlesmesi)."""
@@ -737,7 +760,7 @@ class SummaryCache:
         self.n_z, self.i, self.t = 0, 0, 0
         self.piece, self.used, self.gkind = 0, 1, []                       # carry: parca no, parcadaki konum, glob tur
         self.prev = END_ID                                                  # bigram: cumledeki onceki token (yoksa END)
-        x = model.E(torch.tensor([[EOS_ID]], device=self.dev))              # BOS = EOS token'i (belge 21 s1)
+        x = model._embed(torch.tensor([[EOS_ID]], device=self.dev), torch.zeros(1, 1, dtype=torch.bool, device=self.dev))  # BOS = EOS
         self.logits = self._out(self._step(x, 0, read_sentence=False, summary=True), summary=True)
 
     def _out(self, hn, summary):
@@ -842,7 +865,7 @@ class SummaryCache:
         self.prev = END_ID
         self.i = 0
         self.t += 1
-        x = self.m.E(torch.tensor([[END_ID]], device=self.dev))
+        x = self.m._embed(torch.tensor([[END_ID]], device=self.dev), torch.zeros(1, 1, dtype=torch.bool, device=self.dev))
         self.logits = self._out(self._step(x, self.n_z, read_sentence=True, summary=True), summary=True)
         self.sen_k = [None] * len(self.sen_k)                               # Z_k'den SONRA
         self.sen_v = [None] * len(self.sen_v)

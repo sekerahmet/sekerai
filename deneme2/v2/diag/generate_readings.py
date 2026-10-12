@@ -85,7 +85,7 @@ def load_run(out, data_dir, dev):
                            pmi_k=idt.get("pmi_k", 0),
                            pmi_lambda=idt.get("pmi_lambda") or ("global" if idt.get("pmi_k") else "word"),
                            pmi_detach=idt.get("pmi_detach", 0), pmi_mu=idt.get("pmi_mu", 0),
-                           pmi_at=idt.get("pmi_at", -1))
+                           pmi_at=idt.get("pmi_at", -1), pmi_share=idt.get("pmi_share", 0))
     model, _, _ = T._build(spec, dev)
     model.load_state_dict(pack["state"])
     model.row_len = idt["row_len"]                                       # uretim konum siniri, carry parca boyu

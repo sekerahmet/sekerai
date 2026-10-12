@@ -1776,10 +1776,59 @@ def t_pmi():
               d_cache < 1e-5 and d_pre < 1e-5, "onbellek %.1e, prefill %.1e" % (d_cache, d_pre))
 
 
+def t_pmi_share():
+    """deneme/pmi paylasilan vektor (pmi_share): E_eff = E + s c / (c + n) sum w E(komsu); (a) s 0 = PMI'siz model (hidden ve logit
+    bit); (b) s != 0: nadir kelimenin satiri sik kelimeninkinden cok degisir, girdi ve cikis ayni E_eff; (c) SummaryCache ve
+    StaticCache adim adim = tam ileri gecis."""
+    from model import StaticCache
+    rng = np.random.default_rng(11)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 10))] for _ in range(rng.integers(1, 6))]
+               for _ in range(8)]
+    rows = [list(range(i, i + 4)) for i in range(0, 8, 4)]
+    batch = real_batch(rows, 200, stories)
+    kw = dict(d=32, layers=4, heads=2, global_layers=2, g_layout="interleave", glob_kv_heads=1, mlp_ratio=(1.0, 4.0), g_nope=1)
+    torch.manual_seed(0)
+    base = SentenceTransformer(**kw).eval()
+    torch.manual_seed(0)
+    pm = SentenceTransformer(**kw, pmi_k=3, pmi_share=True).eval()
+    g = torch.Generator().manual_seed(2)
+    with torch.no_grad():
+        pm.pmi_nbr.copy_(torch.randint(0, D.VOCAB, pm.pmi_nbr.shape, generator=g))
+        pm.pmi_w.copy_(torch.rand(pm.pmi_w.shape, generator=g))
+        pm.pmi_counts.copy_(torch.where(torch.arange(D.VOCAB) % 2 == 0, torch.tensor(10.0), torch.tensor(1e6)))
+        d0 = float((pm._batch_hidden(batch) - base._batch_hidden(batch)).abs().max())
+        l0 = float((full_logits(pm, batch)[0] - full_logits(base, batch)[0]).abs().max())
+        pm.pmi_share_s.fill_(0.5)
+        d1 = float((pm._batch_hidden(batch) - base._batch_hidden(batch)).abs().max())
+        dE = (pm.out_weight()[:D.VOCAB] - pm.E.weight[:D.VOCAB]).norm(dim=1)
+        rare, freq = float(dE[0::2].mean()), float(dE[1::2].mean())
+        tok = torch.tensor([[4, 5]])
+        same_io = float((pm._embed(tok, torch.ones(1, 2, dtype=torch.bool)) - pm.out_weight()[tok]).abs().max()) == 0.0
+    check("pmi_share (a, b): s 0 = PMI'siz (hidden, logit bit); s != 0 farkli, nadir satir sik satirdan cok degisir, girdi = cikis "
+          "E_eff", d0 == 0.0 and l0 == 0.0 and d1 > 1e-4 and rare > 100 * freq and same_io,
+          "s0 %.1e / %.1e, s0,5 %.1e, nadir / sik degisim %.2e / %.2e" % (d0, l0, d1, rare, freq))
+    dc = 0.0
+    with torch.no_grad():
+        h_ = pm._batch_hidden(batch)
+        lg_full = pm._logits(h_[batch.target >= 0])                   # cikis E_eff (full_logits E.weight'i okur)
+        for C in (lambda: SummaryCache(pm), lambda: StaticCache(pm, 256, 8, 16)):
+            got = []
+            for row in rows:
+                for si in row:
+                    c = C()
+                    got.append(c.prefill([])[None].clone())
+                    for s in stories[si]:
+                        for t in s:
+                            got.append(c.append_token(t)[None].clone())
+                        got.append(c.close_sentence()[None].clone())
+            dc = max(dc, float((torch.cat(got) - lg_full).abs().max()))
+    check("pmi_share (c): SummaryCache ve StaticCache adim adim = tam ileri gecis (fp32 < 1e-5)", dc < 1e-5, "%.1e" % dc)
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab,
              limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast,
-             combo=t_combo, mix=t_mix, interleave=t_interleave, pmi=t_pmi)
+             combo=t_combo, mix=t_mix, interleave=t_interleave, pmi=t_pmi, pmi_share=t_pmi_share)
 
 if __name__ == "__main__":
     if SIDE is not None:

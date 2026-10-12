@@ -1162,6 +1162,8 @@ def _train_pmi(base, data, out, TR):
         mu = TR.main(cmd + ["--pmi_mu", "1", "--steps", "6", "--out", out("pmi_mu")])
         smu = st_(out("pmi_mu"))
         lm = TR.main(cmd + ["--pmi_lr_mult", "10", "--steps", "6", "--out", out("pmi_lrm")])
+        shr = TR.main(cmd + ["--pmi_share", "1", "--steps", "6", "--out", out("pmi_share")])
+        sh_ok = shr["identity"]["pmi_share"] == 1 and float(st_(out("pmi_share"))["pmi_share_s"]) != 0.0             and all(math.isfinite(x["loss"]) for x in shr["log"])
         ini = base + ["--model", "model_z", "--layers", "4", "--global_layers", "2", "--steps", "1", "--lr", "0"]
         TR.main(ini + ["--out", out("pmi_ini0")])
         ii = TR.main(ini + ["--pmi_init", tab, "--out", out("pmi_ini1")])
@@ -1180,7 +1182,7 @@ def _train_pmi(base, data, out, TR):
               a["finished"] and all(math.isfinite(x["loss"]) for x in a["log"]) and idt["pmi_k"] == 4 and idt["pmi_dim"] == 0
               and len(idt["pmi_sha256"]) == 64 and torch.equal(sa["pmi_nbr"], want_n) and torch.equal(sa["pmi_w"], want_w)
               and tuple(sa["pmi_lambda"].shape) == (D.VOCAB,) and bool(sa["pmi_lambda"].any())
-              and idt["pmi_lambda"] == "word" and idt["pmi_detach"] == 1 and m.pmi_detach and mu["identity"]["pmi_mu"] == 1 and lg_ok and ini_ok
+              and idt["pmi_lambda"] == "word" and idt["pmi_detach"] == 1 and m.pmi_detach and mu["identity"]["pmi_mu"] == 1 and lg_ok and ini_ok and sh_ok
               and tuple(smu["pmi_mu"].shape) == (D.VOCAB,) and bool((smu["pmi_mu"] != 1).any()) and g_["identity"]["pmi_lambda"] == "global" and st_(out("pmi_glob"))["pmi_lambda"].dim() == 0 and stopped and all(torch.equal(sa[k], sb[k]) for k in sa)
               and [x["loss"] for x in r["log"]] == [x["loss"] for x in a["log"]] and torch.equal(m.pmi_nbr, want_n)
               and v["identity"]["pmi_dim"] == 8 and v["identity"]["pmi_k"] == 0
