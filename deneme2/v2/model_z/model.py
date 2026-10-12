@@ -274,9 +274,10 @@ class Block(torch.nn.Module):
     def _forget(self, x, order):
         """deneme/fox: log f = logsigmoid(n1(x) W_f^T + b_f) (B, T, H), hikaye sirasinda (order: satir basina hikaye
         sirasi indeksi) kumulatif toplam -> fc (B, H, T) depolama sirasinda."""
-        lf = F.logsigmoid(F.linear(self.n1(x).float(), self.forget_w.float(), self.forget_b.float()))
-        idx = order[:, :, None].expand(-1, -1, lf.shape[-1])
-        c = torch.empty_like(lf).scatter_(1, idx, lf.gather(1, idx).cumsum(1))
+        with torch.autocast(x.device.type, enabled=False):                  # fp32 (bf16 autocast'ta linear bf16, cumsum fp32)
+            lf = F.logsigmoid(F.linear(self.n1(x).float(), self.forget_w.float(), self.forget_b.float()))
+            idx = order[:, :, None].expand(-1, -1, lf.shape[-1])
+            c = torch.empty_like(lf).scatter_(1, idx, lf.gather(1, idx).cumsum(1))
         return c.transpose(1, 2)
 
     def _gate(self, x):
