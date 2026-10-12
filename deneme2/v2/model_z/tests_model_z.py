@@ -1842,10 +1842,52 @@ def t_pmi_share():
           ok and len(outs) == 2 and outs[0] != outs[1], str(outs))
 
 
+def t_z_inert():
+    """deneme/z-inert: summaries_last duzeninde z_inert maskesi = normal maske eksi (sorgu != Z_k kendisi iken ZTOK anahtari,
+    BOS haric); TOKEN sorgusu hicbir ZTOK okumaz, BOS'u okur; Z_k kendisini okur; G'de de ayni; z_inert modelde token hidden'i
+    Z anahtarlarindan bagimsiz (Z girdisi degisince token ciktisi bit ayni); dense / uretim yolu DURUR."""
+    import model as S
+    from model import StaticCache, summaries_last
+    END_ID = D.END_ID
+    batch = real_batch([[0, 1], [2]], 64)
+    b, perm = summaries_last(batch)
+    B, T = b.kind.shape
+    ok, info = True, []
+    for glob in (False, True):
+        base = S._dense(S.model_z_summaries_last_ranges(b.kind, b.doc, b.sent, glob=glob), B, T, "cpu")
+        inert = S._dense(S.model_z_summaries_last_ranges(b.kind, b.doc, b.sent, glob=glob, z_inert=True), B, T, "cpu")
+        q = torch.arange(T)
+        zk = (b.kind[:, None, :] == ZTOK) & (q[None, :, None] != q[None, None, :])
+        want = base & ~zk
+        tokq = b.kind == TOKEN
+        ok &= torch.equal(inert, want) and not bool((inert & zk)[tokq].any()) and bool(inert[(b.kind == ZTOK)][:, :].any())
+        info.append(int((base & zk).sum()))
+    torch.manual_seed(0)
+    m = SentenceTransformer(32, 3, 2, global_layers=1, z_inert=True).eval()
+    with torch.no_grad():
+        h1 = m._batch_hidden(b)
+        E0 = m.E.weight.clone()
+        m.E.weight[END_ID] += 1.0                                           # Z girdisi E(END); END hedefi ayri token degil
+        h2 = m._batch_hidden(b)
+        m.E.weight.copy_(E0)
+    tk = (b.kind == TOKEN) & ~torch.isin(b.tokens, torch.tensor([END_ID]))
+    same_tok = torch.equal(h1[tk], h2[tk])
+    stops = []
+    for fn in (lambda: m._masks(False), lambda: S.SummaryCache(m)):
+        try:
+            fn()
+            stops.append(False)
+        except AssertionError:
+            stops.append(True)
+    check("z_inert: maske = normal eksi ZTOK anahtari (kendisi haric), yerel ve G; token Z okumaz; Z girdisi degisince token "
+          "hidden'i bit ayni; dense / uretim yolu DURUR, StaticCache desteklemez",
+          ok and same_tok and all(stops) and not StaticCache.supports(m), "kaldirilan Z okumasi %s" % info)
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab,
              limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast,
-             combo=t_combo, mix=t_mix, interleave=t_interleave, pmi=t_pmi, pmi_share=t_pmi_share)
+             combo=t_combo, mix=t_mix, interleave=t_interleave, pmi=t_pmi, pmi_share=t_pmi_share, z_inert=t_z_inert)
 
 if __name__ == "__main__":
     if SIDE is not None:

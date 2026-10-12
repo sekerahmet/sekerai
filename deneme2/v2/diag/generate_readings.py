@@ -81,7 +81,7 @@ def load_run(out, data_dir, dev):
                            ngram_sparse=idt.get("ngram_sparse", 0), g_nope=idt.get("g_nope", 0),
                            mlp_ratio=tuple(idt.get("mlp_ratio", []) or ()), local_kv_heads=idt.get("local_kv_heads", 0),
                            g_layout=idt.get("g_layout", "top"), mix_g_heads=idt.get("mix_g_heads", 0),
-                           mix_kv=idt.get("mix_kv", []), pmi_dim=idt.get("pmi_dim", 0),
+                           mix_kv=idt.get("mix_kv", []), z_inert=idt.get("z_inert", 0), pmi_dim=idt.get("pmi_dim", 0),
                            pmi_k=idt.get("pmi_k", 0),
                            pmi_lambda=idt.get("pmi_lambda") or ("global" if idt.get("pmi_k") else "word"),
                            pmi_detach=idt.get("pmi_detach", 0), pmi_mu=idt.get("pmi_mu", 0),

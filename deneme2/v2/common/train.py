@@ -139,7 +139,7 @@ MLP_RATIO_DEFAULT = (1.0, 4.0)  # --mlp_ratio verilmezse, G'li Model Z: MLP : ta
                                 # "bu oranları koda varsayılan standart ekler misin ?"; d768 3.000: sinav -0,0039, ayni parametre)
 LR_REF = (2e-3, 768, 0.5)      # lr auto = lr0 (d0 / d) ^ us (aci / adim ~ lr 0,2 sqrt(d) sabit); d1024 olcumu: 1,4 / 1,7e-3 duz, 1,73e-3 icinde
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ngram_embed", "ngram_layers",
-           "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "mix_g_heads", "mix_kv", "g_layout", "pmi", "pmi_mode", "pmi_lambda", "pmi_detach", "pmi_mu", "pmi_lr_mult", "pmi_at", "pmi_init", "pmi_share", "grad_share", "grad_share_eta", "grad_share_beta")   # --resume'da kimlikten
+           "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "mix_g_heads", "mix_kv", "g_layout", "pmi", "pmi_mode", "pmi_lambda", "pmi_detach", "pmi_mu", "pmi_lr_mult", "pmi_at", "pmi_init", "pmi_share", "grad_share", "grad_share_eta", "grad_share_beta", "z_inert")   # --resume'da kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
@@ -151,7 +151,7 @@ SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
             "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads",
-            "mix_g_heads", "mix_kv", "g_layout", "pmi_dim", "pmi_k", "pmi_sha256", "pmi_lambda", "pmi_detach", "pmi_mu", "pmi_lr_mult", "pmi_at", "pmi_init_sha256", "pmi_share", "grad_share_sha256", "grad_share_eta", "grad_share_beta")
+            "mix_g_heads", "mix_kv", "g_layout", "pmi_dim", "pmi_k", "pmi_sha256", "pmi_lambda", "pmi_detach", "pmi_mu", "pmi_lr_mult", "pmi_at", "pmi_init_sha256", "pmi_share", "grad_share_sha256", "grad_share_eta", "grad_share_beta", "z_inert")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -334,7 +334,8 @@ def _build(args, dev):
                                     pmi_word=getattr(args, "pmi_lambda", "word") == "word",
                                     pmi_detach=bool(getattr(args, "pmi_detach", 0)), pmi_mu=bool(getattr(args, "pmi_mu", 0)),
                                     pmi_at=int(getattr(args, "pmi_at", -1) if getattr(args, "pmi_at", None) is not None else -1),
-                                    pmi_share=bool(getattr(args, "pmi_share", 0)))
+                                    pmi_share=bool(getattr(args, "pmi_share", 0)),
+                                    z_inert=bool(getattr(args, "z_inert", 0)))
         model.pmi_lr_mult = float(getattr(args, "pmi_lr_mult", 1.0) or 1.0)   # deneme/pmi: lambda / mu lr carpani (param_groups)
         if getattr(args, "pmi_init", ""):                                # deneme/pmi: E baslangici PMI SVD vektorleriyle
             _pmi_init(model, args.pmi_init)
@@ -759,6 +760,8 @@ def _args(argv):
                     help="deneme/grad-share: kelime pay orani; fixed1000 (varsayilan) | needtrust (ihtiyac x guven, olcek medyan sayim)")
     ap.add_argument("--pmi_init", default=None, help="deneme/pmi: make_pmi.py npz'i; E baslangici PMI SVD vektorleriyle (torba gerekmez)")
     ap.add_argument("--pmi_at", default=None, help="deneme/pmi bag: in (giris, varsayilan) | last_g (son blok girisi) | blok no")
+    ap.add_argument("--z_inert", type=int, default=None,
+                    help="deneme/z-inert: 1 kimse Z okumaz (yerel: kendi cumlesi + BOS, G: belge token'lari + BOS); Z'siz kiyas")
     ap.add_argument("--mix_kv", default=None, help="deneme/mixed-layer: yerel,G k / v head (verilmezse head payina gore)")
     ap.add_argument("--g_nope", type=int, default=None,
                     help="1: G (tam) katmanlarinda RoPE yok, konum yerel katmanlardan (G'li Model Z'de varsayilan; 0 eski RoPE'li)")
@@ -786,7 +789,7 @@ def _args(argv):
         if args.resume and os.path.exists(ckpt) else None               # varsayilan degisse de kosu kendi ayariyla surer
     for k in args.defaulted if was is not None else ():
         setattr(args, k, was.get(k, [] if k in ("mlp_ratio", "mix_kv") else "top" if k == "g_layout" else "" if k == "pmi" else ("bag" if was.get("pmi_k") else "vec") if k == "pmi_mode" else "global" if k == "pmi_lambda" else 0 if k in ("pmi_detach", "pmi_mu") else 1.0 if k == "pmi_lr_mult" else -1 if k == "pmi_at" else "" if k == "pmi_init" else 0 if k == "pmi_share" else
-                                 0 if k in ("glob_kv_heads", "attn_gate", "mtp", "g_nope", "local_kv_heads", "mix_g_heads")
+                                 0 if k in ("glob_kv_heads", "attn_gate", "mtp", "g_nope", "local_kv_heads", "mix_g_heads", "z_inert")
                                  or k.startswith("ngram") else None))
     args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
     if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
@@ -858,6 +861,9 @@ def _args(argv):
             auto.append("local_kv_heads %d (= glob_kv_heads)" % args.local_kv_heads)
     args.local_kv_heads = int(args.local_kv_heads or 0)
     args.mix_g_heads = int(args.mix_g_heads or 0)
+    args.z_inert = int(args.z_inert or 0)
+    if args.z_inert and (args.model != "model_z" or args.carry_summaries or args.mix_g_heads):
+        sys.exit("DUR: --z_inert yalniz Model Z'de, carry / mix_g_heads ile yok (deneme/z-inert)")
     args.pmi, args.pmi_mode, args.pmi_lambda = args.pmi or "", args.pmi_mode or "bag", args.pmi_lambda or "word"
     args.pmi_detach = 1 if args.pmi_detach is None else int(args.pmi_detach)
     args.pmi_mu = int(args.pmi_mu or 0)
@@ -1005,7 +1011,7 @@ def main(argv=None):
                  pmi_lr_mult=args.pmi_lr_mult if args.pmi_k else 1.0, pmi_at=args.pmi_at if args.pmi_k else -1,
                  pmi_init_sha256=args.pmi_init_sha256, pmi_share=args.pmi_share,
                  grad_share_sha256=args.grad_share_sha256, grad_share_eta=args.grad_share_eta,
-                 grad_share_beta=args.grad_share_beta)
+                 grad_share_beta=args.grad_share_beta, z_inert=args.z_inert)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -1027,7 +1033,7 @@ def main(argv=None):
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
                "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [], "local_kv_heads": 0,
                "mix_g_heads": 0, "mix_kv": [], "g_layout": "top", "pmi_dim": 0, "pmi_k": 0, "pmi_sha256": "",
-               "pmi_lambda": "global" if was.get("pmi_k") else "", "pmi_detach": 0, "pmi_mu": 0, "pmi_lr_mult": 1.0, "pmi_at": -1, "pmi_init_sha256": "", "pmi_share": 0, "grad_share_sha256": "", "grad_share_eta": 0.0, "grad_share_beta": "fixed1000" if was.get("grad_share_sha256") else "",
+               "pmi_lambda": "global" if was.get("pmi_k") else "", "pmi_detach": 0, "pmi_mu": 0, "pmi_lr_mult": 1.0, "pmi_at": -1, "pmi_init_sha256": "", "pmi_share": 0, "z_inert": 0, "grad_share_sha256": "", "grad_share_eta": 0.0, "grad_share_beta": "fixed1000" if was.get("grad_share_sha256") else "",
                **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
@@ -1243,8 +1249,8 @@ def main(argv=None):
                               ms_per_step_median=med("ms_per_step"), note="pencere ortancasi; ilk pencere (derleme) haric"))
     torch.save(dict(state=model.state_dict(), identity=ident, args=vars(args)), os.path.join(args.out, "agent.pt"))
     json.dump(results, open(res_path, "w"), indent=1)                   # okumadan ONCE: okuma dusse de model kalir
-    if args.mix_g_heads:                                                 # deneme/mixed-layer: uretim onbellegi yok
-        log("BITTI: %s | sinav kayip %.4f bpb %.4f | mix_g_heads: okuma yok" % (
+    if args.mix_g_heads or args.z_inert:                                 # mixed-layer / z-inert: uretim onbellegi yok
+        log("BITTI: %s | sinav kayip %.4f bpb %.4f | mix_g_heads / z_inert: okuma yok" % (
             args.out, results["exam"]["loss"], results["exam"]["bits_per_byte"]))
         return results
     t = time.time()
