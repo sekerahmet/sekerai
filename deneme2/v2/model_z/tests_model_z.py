@@ -1699,10 +1699,95 @@ def t_z_inert():
           "fark %.1e, toplu %.1e" % (sd, sr))
 
 
+def t_fox():
+    """deneme/fox (lin2025_fox): (a) b_f buyuk (f ~ 1) -> kapisiz modelle ayni hidden (diger ilk agirliklar bit ayni);
+    (b) G blogu = elle basvuru (tek hikaye, dogal duzen: skor + c_i - c_j, c = hikaye sirasinda kumulatif log f);
+    (c) dogal duzen = summaries_last duzeni (hidden, nll, gradyan; hikaye sirasi dogru); (d) sizinti yok (son cumle degisince
+    onceki konumlar bit ayni); (e) gradyan W_f / b_f'ye ulasir; uretim onbellekleri DURUR."""
+    import recipe as R
+    import torch.nn.functional as F_
+    from model import StaticCache, summaries_last, story_positions
+    rng = np.random.default_rng(9)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(2, 6))]
+               for _ in range(8)]
+    rows = [[0, 1, 2, 3], [4, 5], [6, 7]]
+    batch = real_batch(rows, 160, stories)
+    kw = dict(d=32, layers=3, heads=2, global_layers=1, glob_kv_heads=1, g_layout="interleave", z_inert=True)
+    torch.manual_seed(0)
+    base = SentenceTransformer(**kw).eval()
+    torch.manual_seed(0)
+    big = SentenceTransformer(**kw, g_forget=30.0).eval()
+    same_init = all(torch.equal(v, big.state_dict()[k]) for k, v in base.state_dict().items())
+    with torch.no_grad():
+        d_big = float((base._batch_hidden(batch) - big._batch_hidden(batch)).abs().max())
+    torch.manual_seed(0)
+    m = SentenceTransformer(**kw, g_forget=1.0)
+    g = torch.Generator().manual_seed(2)
+    with torch.no_grad():
+        for b_ in m.blocks:
+            if b_.forget_w is not None:
+                b_.forget_w.copy_(0.3 * torch.randn(b_.forget_w.shape, generator=g))
+    m.eval()
+    one = real_batch([[0]], 40, stories)                                    # (b) tek hikaye, dogal duzen
+    gl = [l for l, g_ in enumerate(m.is_glob) if g_][0]
+    ins = {}
+    hk = m.blocks[gl].register_forward_pre_hook(lambda mod, a_: ins.__setitem__("a", a_))
+    with torch.no_grad():
+        m._batch_hidden(one)
+        hk.remove()
+        x, pos, mask = ins["a"][:3]
+        blk = m.blocks[gl]
+        got = blk(x, pos, mask, ins["a"][3])
+        q, k, v = blk._qkv(x, pos)
+        k, v = (t.repeat_interleave(blk.heads // blk.kv_heads, 1) for t in (k, v))
+        lf = F_.logsigmoid(blk.n1(x) @ blk.forget_w.T + blk.forget_b)          # (1, T, H)
+        keep = one.kind[0] != PAD
+        c = torch.where(keep[None, :, None], lf, torch.zeros_like(lf)).cumsum(1).transpose(1, 2)   # dolgu sonda
+        sc = q @ k.transpose(-1, -2) / q.shape[-1] ** 0.5 + c[..., :, None] - c[..., None, :]
+        a_ = torch.softmax(sc.masked_fill(~mask[:, None], float("-inf")), -1) @ v
+        h = x + blk.proj(a_.transpose(1, 2).reshape(x.shape))
+        gg, u = blk.gate_up(blk.n2(h)).chunk(2, -1)
+        ref = h + blk.down(F_.silu(gg) * u)
+        d_ref = float((got - ref)[0, keep].abs().max())
+    pb, perm = summaries_last(batch)                                        # (c) duzen bagimsizligi
+    B, T = batch.kind.shape
+    h0 = m._batch_hidden(batch)
+    h1 = m._batch_hidden(pb).gather(1, torch.argsort(perm, 1)[..., None].expand(-1, -1, 32))
+    d_lay = float((h0 - h1).abs().max())
+    nll0 = m.loss_per_target(batch, tuple(R.dense_mask(batch, f) for f in m.mask_fn))[0]
+    nll1 = m.loss_per_target(pb, tuple(R.dense_mask(pb, f) for f in m._masks(True)))[0]
+    old = (torch.arange(B)[:, None] * T + perm)[pb.target >= 0]
+    d_nll = float((nll0 - nll1[torch.argsort(old)]).abs().max())
+    g0 = torch.autograd.grad(nll0.mean(), [m.blocks[gl].forget_w, m.blocks[gl].forget_b])
+    g1 = torch.autograd.grad(nll1.mean(), [m.blocks[gl].forget_w, m.blocks[gl].forget_b])
+    d_g = max(float((a_ - b_).norm() / max(float(a_.norm()), 1e-12)) for a_, b_ in zip(g0, g1))
+    grad_ok = all(float(t.abs().sum()) > 0 for t in g0)
+    first = batch.doc[0] == 0                                               # (d) sizinti
+    last = int((first & (batch.sent[0] == int(batch.sent[0][first].max()))).nonzero()[0, 0])
+    alt = [[list(s_) for s_ in st] for st in stories]
+    alt[0][-1] = [(t + 7) % D.END_ID for t in alt[0][-1]]
+    with torch.no_grad():
+        h2 = m._batch_hidden(real_batch(rows, 160, alt))
+        h0d = m._batch_hidden(batch)
+    leak_ok = torch.equal(h0d[0, :last], h2[0, :last])
+    stops = []
+    for fn in (lambda: SummaryCache(m),):
+        try:
+            fn()
+            stops.append(False)
+        except AssertionError:
+            stops.append(True)
+    check("fox: b_f 30 = kapisiz (ilk agirlik bit ayni, hidden %.1e); G blogu = elle (skor + c_i - c_j; %.1e); dogal = summaries_last "
+          "(hidden %.1e, nll %.1e, kapi gradyani %.1e); sizinti yok; gradyan W_f / b_f'ye ulasir; uretim onbellegi DURUR" % (
+              d_big, d_ref, d_lay, d_nll, d_g),
+          same_init and d_big < 1e-5 and d_ref < 1e-5 and d_lay < 1e-5 and d_nll < 1e-5 and d_g < 1e-4 and grad_ok and leak_ok
+          and all(stops) and not StaticCache.supports(m))
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab,
              limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast,
-             combo=t_combo, interleave=t_interleave, z_inert=t_z_inert)
+             combo=t_combo, interleave=t_interleave, z_inert=t_z_inert, fox=t_fox)
 
 if __name__ == "__main__":
     if SIDE is not None:

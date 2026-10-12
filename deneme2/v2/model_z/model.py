@@ -224,17 +224,28 @@ def gqa_sdpa(q, k, v, mask=None):
                                           attn_mask=mask)
 
 
-def _attend(q, k, v, attn):
-    """attn: None (duz causal), bool (B, T, T) (dense) ya da FlexAttention BlockMask; k / v daha az head: GQA."""
+def _attend(q, k, v, attn, fc=None):
+    """attn: None (duz causal), bool (B, T, T) (dense) ya da FlexAttention BlockMask; k / v daha az head: GQA.  fc (B, H, T)
+    (deneme/fox): unutma kapisi kumulatif log f; skor + fc[q] - fc[k] (lin2025_fox denklem 11; flex'te score_mod, dense'te
+    kayan nokta maske)."""
     gqa = dict(enable_gqa=True) if k.shape[1] != q.shape[1] else {}
     if attn is None:
+        assert fc is None, "fox: maske gerek"
         return F.scaled_dot_product_attention(q, k, v, is_causal=True, **gqa)
     if torch.is_tensor(attn):
-        return gqa_sdpa(q, k, v, attn[:, None])
+        if fc is None:
+            return gqa_sdpa(q, k, v, attn[:, None])
+        bias = (fc[:, :, :, None] - fc[:, :, None, :]).to(q.dtype)
+        return gqa_sdpa(q, k, v, bias.masked_fill(~attn[:, None], float("-inf")))
     from torch.nn.attention.flex_attention import flex_attention
     bs = attn.BLOCK_SIZE[0]                             # 128 disinda varsayilan cekirdek hata veriyor (belge 37)
+    kw = {}
+    if fc is not None:
+        def score_mod(score, b, h, qi, ki):
+            return score + fc[b, h, qi] - fc[b, h, ki]
+        kw["score_mod"] = score_mod
     return flex_attention(q, k, v, block_mask=attn, kernel_options=None if bs == 128 else dict.fromkeys(
-        ("BLOCK_M", "BLOCK_N", "BLOCK_M1", "BLOCK_N1", "BLOCK_M2", "BLOCK_N2"), bs), **gqa)
+        ("BLOCK_M", "BLOCK_N", "BLOCK_M1", "BLOCK_N1", "BLOCK_M2", "BLOCK_N2"), bs), **gqa, **kw)
 
 
 class Block(torch.nn.Module):
@@ -256,6 +267,15 @@ class Block(torch.nn.Module):
         assert attn_gate in (0, 2), "attn_gate 0 / 2"
         assert attn_gate != 2 or d >= 64, "attn_gate 2: girdi d // 64 boyut, d %d < 64 (0 boyut)" % d
         self.attn_gate = torch.nn.Parameter(torch.zeros(heads, d // 64)) if attn_gate else None
+        self.forget_w, self.forget_b = None, None                         # deneme/fox: SentenceTransformer kurar
+
+    def _forget(self, x, order):
+        """deneme/fox: log f = logsigmoid(n1(x) W_f^T + b_f) (B, T, H), hikaye sirasinda (order: satir basina hikaye
+        sirasi indeksi) kumulatif toplam -> fc (B, H, T) depolama sirasinda."""
+        lf = F.logsigmoid(F.linear(self.n1(x).float(), self.forget_w.float(), self.forget_b.float()))
+        idx = order[:, :, None].expand(-1, -1, lf.shape[-1])
+        c = torch.empty_like(lf).scatter_(1, idx, lf.gather(1, idx).cumsum(1))
+        return c.transpose(1, 2)
 
     def _gate(self, x):
         """Blok girdisi x (B, T, d) -> kapi sigmoid(n1(x)[..., :W sutunu] W^T) (B, T, heads); satir basina, maske / konum
@@ -293,9 +313,10 @@ class Block(torch.nn.Module):
         g, u = self.gate_up(self.n2(x)).chunk(2, -1)
         return x + self.down(F.silu(g) * u)
 
-    def forward(self, x, pos, attn):
+    def forward(self, x, pos, attn, order=None):
         """attn: None (duz causal), bool (B, T, T) (dense) ya da FlexAttention BlockMask; carry: (maske, mem_rows,
-        mem_cols) -> K / V = [satir || ayni katmanda kaynak satirlarin bellek sutunlari] (anahtar T + M)."""
+        mem_cols) -> K / V = [satir || ayni katmanda kaynak satirlarin bellek sutunlari] (anahtar T + M).  order
+        (deneme/fox): hikaye sirasi, unutma kapisi icin."""
         mem = None
         if isinstance(attn, tuple):
             attn, mem = attn[0], attn[1:]
@@ -304,12 +325,16 @@ class Block(torch.nn.Module):
             r, c = mem[0].clamp_min(0), mem[1].clamp_min(0)                 # bos yuva maskeyle kapali
             k = torch.cat([k, k[r, :, c].permute(0, 2, 1, 3)], 2)
             v = torch.cat([v, v[r, :, c].permute(0, 2, 1, 3)], 2)
-        return self._finish(x, _attend(q, k, v, attn), *g)
+        fc = None
+        if self.forget_w is not None:
+            assert mem is None and order is not None, "fox: carry yok, hikaye sirasi gerek"
+            fc = self._forget(x, order)
+        return self._finish(x, _attend(q, k, v, attn, fc), *g)
 
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
                  attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, mlp_ratio=(),
-                 local_kv_heads=0, g_layout="top", z_inert=False):
+                 local_kv_heads=0, g_layout="top", z_inert=False, g_forget=0.0):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -363,6 +388,11 @@ class SentenceTransformer(torch.nn.Module):
                     (p[:VOCAB] if name == "E.weight" else p).normal_(0.0, std)   # dolgu satiri rastgele sayi cekmez
         with torch.no_grad():
             self.E.weight[VOCAB:].zero_()
+        self.g_forget = float(g_forget)                                    # deneme/fox: G'de unutma kapisi, b_f baslangici
+        for b_, g_ in zip(self.blocks, self.is_glob):                       # agirliklardan SONRA, RNG cekmez: W_f 0
+            if self.g_forget and g_:                                        # (baslangic sabit f = sigmoid(b), ALiBi gibi)
+                b_.forget_w = torch.nn.Parameter(torch.zeros(heads, d))
+                b_.forget_b = torch.nn.Parameter(torch.full((heads,), self.g_forget))
         self.ngram, self.ngram_seen = None, None
         self.ngram_layers, self.ngram_sparse = int(ngram_layers) or layers, bool(ngram_sparse)
         if ngram_rows:                                                  # sifir tablo, lambda 0,1 (kayit #1)
@@ -423,9 +453,13 @@ class SentenceTransformer(torch.nn.Module):
             attn = tuple(_dense(f(batch.kind, batch.doc, batch.sent), B, T, dev) for f in mfn)
         assert isinstance(attn, tuple) and len(attn) == 2, "global_layers: attn (yerel, global) ikilisi olmali"
         real = batch.real_pos if last else story_positions(batch.kind)
+        order = None
+        if self.g_forget:                                                   # hikaye sirasi: (belge, gercek konum), dolgu sonda
+            key = torch.where(batch.doc < 0, torch.full_like(real, 1 << 40), batch.doc.long() * (1 << 20) + real.long())
+            order = torch.argsort(key, dim=1, stable=True)
         for l, block in enumerate(self.blocks):
             x = add(x, l)
-            x = block(x, real, w(attn[1])) if self.is_glob[l] else block(x, batch.pos, w(attn[0]))
+            x = block(x, real, w(attn[1]), order) if self.is_glob[l] else block(x, batch.pos, w(attn[0]))
         return self.norm(x)
 
     def _logits(self, h):
@@ -586,6 +620,7 @@ class SummaryCache:
     (BOS ve token'lar atilir), konumlar surer; carry_group'uncu parcada onbellek sifirlanir (yeni hikaye, BOS)."""
 
     def __init__(self, model):
+        assert not getattr(model, "g_forget", 0), "fox: uretim onbellegi yok (deneme/fox)"
         self.m = model
         self.zi = bool(getattr(model, "z_inert", False))                   # Model Z3: Z_k hesaplanir (ilk token tahmini) ama okunmaz
         self.dev = model.E.weight.device
@@ -852,7 +887,7 @@ class StaticCache:
 
     @staticmethod
     def supports(model):
-        return not model.carry_group
+        return not model.carry_group and not getattr(model, "g_forget", 0)
 
     def __init__(self, model, positions, sentences, sentence_tokens):
         assert StaticCache.supports(model), "StaticCache: carry desteklenmez (SummaryCache)"

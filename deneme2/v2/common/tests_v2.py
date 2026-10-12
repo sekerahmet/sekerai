@@ -998,6 +998,7 @@ def t_train():
         _train_gqa_default(base, out, TR)
         _train_ngram(base, data, out, TR)
         _train_z3(base, data, out, TR)
+        _train_fox(base, data, out, TR)
         import copy                                                     # epok sonu eksik batch dolgusu (8 Ekim)
         import types
         import recipe as R
@@ -1203,6 +1204,30 @@ def _train_z3(base, data, out, TR):
               "%s | bayraksiz surdurme %s | %s | %s" % (bad, same_c, bad_tf, bad_g0))
     except Exception:  # noqa: BLE001
         check("train Model Z3", False, traceback.format_exc(limit=4))
+
+
+def _train_fox(base, data, out, TR):
+    """deneme/fox: --g_forget 6 kosar, kimlikte, b_f 6 ile baslar ve oynar; kesilip surdurulen = kesintisiz (bit); transformer
+    ve G'siz DURUR."""
+    import traceback
+    try:
+        cmd = base + ["--model", "model_z", "--layers", "3", "--global_layers", "1", "--epochs", "2", "--g_forget", "6"]
+        a = TR.main(cmd + ["--out", out("fox_A")])
+        stopped, r = _cut_and_resume(TR, cmd, out("fox_cut"))
+        st_ = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        sa, sb = st_(out("fox_A")), st_(out("fox_cut"))
+        fb = [v for k, v in sa.items() if k.endswith("forget_b")]
+        bad_tf = _exit_msg(TR.main, base + ["--model", "transformer", "--layers", "2", "--steps", "2", "--g_forget", "6",
+                                            "--out", out("fox_tf")])
+        bad_g0 = _exit_msg(TR.main, base + ["--model", "model_z", "--layers", "2", "--global_layers", "0", "--steps", "2",
+                                            "--g_forget", "6", "--out", out("fox_g0")])
+        check("train deneme/fox: --g_forget 6 kosar, kimlikte 6, b_f oynadi (G blogu); kesilip surdurulen = kesintisiz (bit); "
+              "transformer / G'siz DURUR",
+              a["identity"]["g_forget"] == 6.0 and len(fb) == 1 and not torch.allclose(fb[0], torch.full_like(fb[0], 6.0))
+              and stopped and all(torch.equal(sa[k], sb[k]) for k in sa) and bad_tf is not None and bad_g0 is not None,
+              "%s | %s | %s" % (fb[0].tolist() if fb else None, bad_tf, bad_g0))
+    except Exception:  # noqa: BLE001
+        check("train deneme/fox", False, traceback.format_exc(limit=4))
 
 
 def _train_ngram(base, data, out, TR):

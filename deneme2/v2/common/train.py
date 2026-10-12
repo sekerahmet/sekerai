@@ -84,7 +84,7 @@ def pmi_table_path(data_dir, d):
 
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ngram_embed", "ngram_layers",
            "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "g_layout", "z_inert", "pmi_init", "grad_share",
-           "grad_share_beta")   # --resume'da kimlikten
+           "grad_share_beta", "g_forget")   # --resume'da kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
@@ -97,7 +97,7 @@ IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
             "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads",
             "g_layout", "z_inert", "pmi_init_sha256", "grad_share_sha256",
-            "grad_share_beta")
+            "grad_share_beta", "g_forget")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -251,7 +251,8 @@ def _build(args, dev):
                                     mlp_ratio=tuple(getattr(args, "mlp_ratio", None) or ()),
                                     local_kv_heads=getattr(args, "local_kv_heads", 0) or 0,
                                     g_layout=getattr(args, "g_layout", None) or "top",
-                                    z_inert=bool(getattr(args, "z_inert", 0)))
+                                    z_inert=bool(getattr(args, "z_inert", 0)),
+                                    g_forget=float(getattr(args, "g_forget", 0) or 0))
         if getattr(args, "pmi_init", "") and not getattr(args, "resume", 0):   # ilk agirlik; surdurmede checkpoint'ten
             pmi_init_embedding(model, args.pmi_init)
         model, mask_fn, layout = model.to(dev), model.mask_fn, "model_z"
@@ -706,6 +707,9 @@ def _args(argv):
     ap.add_argument("--grad_share", default=None, help="E gradyani PMI komsularina: auto (varsayilan) | none | npz")
     ap.add_argument("--grad_share_beta", default=None, choices=("fixed1000", "needtrust"),
                     help="kelime pay orani: needtrust (varsayilan; ihtiyac x guven, olcek medyan sayim) | fixed1000")
+    ap.add_argument("--g_forget", type=float, default=None,
+                    help="deneme/fox: G katmanlarinda unutma kapisi (lin2025_fox), deger b_f baslangici (0 kapali; 6 -> f 0,9975, "
+                         "~400 token'da log-agirlik -1)")
     ap.add_argument("--g_nope", type=int, default=None,
                     help="1: G (tam) katmanlarinda RoPE yok, konum yerel katmanlardan (G'li Model Z'de varsayilan; 0 eski RoPE'li)")
     ap.add_argument("--mtp", type=lambda s: s if s == "auto" else int(s), default=None,
@@ -732,12 +736,15 @@ def _args(argv):
         if args.resume and os.path.exists(ckpt) else None               # varsayilan degisse de kosu kendi ayariyla surer
     for k in args.defaulted if was is not None else ():
         setattr(args, k, was.get(k, [] if k == "mlp_ratio" else "top" if k == "g_layout" else
-                                 0 if k in ("glob_kv_heads", "attn_gate", "mtp", "g_nope", "local_kv_heads", "z_inert")
+                                 0 if k in ("glob_kv_heads", "attn_gate", "mtp", "g_nope", "local_kv_heads", "z_inert", "g_forget")
                                  or k.startswith("ngram") else "none" if k in ("pmi_init", "grad_share") else None))
     for k in ("pmi_init", "grad_share") if was is not None else ():     # kimlikte yol yok, sha var
         if k in args.defaulted:
             setattr(args, k, "auto" if was.get(k + "_sha256") else "none")
     args.resume_pmi_sha = (was or {}).get("pmi_init_sha256", "") if args.resume else ""   # baslatma surdurmede yok
+    args.g_forget = float(args.g_forget or 0)
+    if args.g_forget and (args.model != "model_z" or not args.global_layers or args.carry_summaries):
+        sys.exit("DUR: --g_forget yalniz G'li Model Z'de, carry ile yok (deneme/fox)")
     args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
     if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
         args.optimizer = DEFAULT_OPTIMIZER
@@ -914,7 +921,8 @@ def main(argv=None):
                  ngram_embed=args.ngram_embed, ngram_layers=args.ngram_layers, ngram_sparse=args.ngram_sparse,
                  mtp=args.mtp, g_nope=args.g_nope, mlp_ratio=args.mlp_ratio, local_kv_heads=args.local_kv_heads,
                  g_layout=args.g_layout,
-                 z_inert=args.z_inert, pmi_init_sha256=args.pmi_init_sha256, grad_share_sha256=args.grad_share_sha256, grad_share_beta=args.grad_share_beta)
+                 z_inert=args.z_inert, pmi_init_sha256=args.pmi_init_sha256, grad_share_sha256=args.grad_share_sha256, grad_share_beta=args.grad_share_beta,
+                 g_forget=args.g_forget)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -936,7 +944,7 @@ def main(argv=None):
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
                "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [], "local_kv_heads": 0,
                "g_layout": "top", "z_inert": 0, "pmi_init_sha256": "", "grad_share_sha256": "",
-               "grad_share_beta": "",
+               "grad_share_beta": "", "g_forget": 0.0,
                **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
@@ -1151,6 +1159,10 @@ def main(argv=None):
     json.dump(results, open(res_path, "w"), indent=1)                   # okumadan ONCE: okuma dusse de model kalir
     t = time.time()
     own = os.path.join(args.data, "reading_prompts.json")              # veri klasorunun istemleri (FineWeb, belge 48)
+    if args.g_forget:                                                    # deneme/fox: uretim onbellegi yok
+        log("BITTI: %s | sinav kayip %.4f bpb %.4f | g_forget: okuma yok" % (
+            args.out, results["exam"]["loss"], results["exam"]["bits_per_byte"]))
+        return results
     rows, gen = _readings(model, valid, tok, path=own if os.path.exists(own) else None)
     log("okuma uretimi %.0f sn: %s" % (time.time() - t, gen))
     open(os.path.join(args.out, "samples.txt"), "w", encoding="utf-8").write(_samples_text(rows))
