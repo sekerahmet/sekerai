@@ -472,7 +472,7 @@ def mlm_masks():
 
 def mlm_batch(batch, counts, rate):
     """deneme/mlm: batch'in TOKEN konumlarindan egitim sayimina gore en nadir rate payi -> girdi MLM_ID, hedef ozgun token
-    (kendi konumunda), diger hedefler -1.  Esitlik konumla kirilir (RNG cekmez)."""
+    (kendi konumunda), diger hedefler -100 (output_loss ignore_index).  Esitlik konumla kirilir (RNG cekmez)."""
     tok = batch.kind == D.Kind.TOKEN
     n = int(rate * int(tok.sum()))
     if n == 0:
@@ -485,7 +485,7 @@ def mlm_batch(batch, counts, rate):
     m[idx] = True
     m = m.view_as(tok)
     return dataclasses.replace(batch, tokens=torch.where(m, torch.full_like(batch.tokens, MLM_ID), batch.tokens),
-                               target=torch.where(m, batch.tokens, torch.full_like(batch.target, -1)))
+                               target=torch.where(m, batch.tokens, torch.full_like(batch.target, -100)))
 
 
 def _step(model, batch, mask_fn, opt, cuda, timer=None, cont=None, mtp=None, micro=1, skip=()):
