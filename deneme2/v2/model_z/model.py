@@ -1,42 +1,21 @@
-"""model (V2) -- SentenceTransformer (Model Z), GPT-2 token.  Tarif belge/model_z_temel/22 (duzen, maske, onbellek),
-35 (ogrenilen z), 40 / 43 (global_layers); alanlar belge 21 (PackedBatch).  Kaldirilan secenekler ve eski kodun git
-etiketleri: belge 44, 77 (train._archived iletisi).
+"""model (V2) -- SentenceTransformer (Model Z), GPT-2 token.  Tarif belge/model_z_temel/22, 35, 40, 66; kaldirilan
+secenekler ve eski kodun git etiketleri belge 44, 77.
 
-Hikaye tek dizi; cumle k'nin END'inin yerinde Z_k (girdi E(END), transformer'in END konumuyla ayni girdi), dizi boyu
-transformer akisiyla ayni, hedefler konum konum ayni:
+Hikaye tek dizi; cumle k'nin END'inin yerinde Z_k (girdi E(END)); dizi boyu ve hedefler transformer'la konum konum ayni:
     girdi   BOS  t_11 .. t_1L  [Z_1]  t_21 .. t_2L  [Z_2] ...  [Z_n]
     hedef   t_11 t_12 .. END   t_21   t_22 .. END   t_31  ...  EOS
     konum   0    1    .. L     1      2    ..       2     ...  n     (Z_k k; cumle k, token i: k-1+i)
-Maske (model_z_read_mask, tek mask_mod -> dense ya da FlexAttention BlockMask): ayni hikaye, kv <= q, ve kv BOS/ZTOK ya
-da (q, kv ayni cumlenin token'i; Z_k kendi cumlesinin token'larini da gorur); aralik bicimi model_z_read_bounds ile
-(belge 65 (a)).  Z_k'nin her katmandaki hali sonraki
-cumlelerin K/V'si (belge 35 (b)).  model_z_mask: okumasiz hali (teshis: z_ablate read_off).  Uretim: SummaryCache (ozet
-onbellegi BOS + Z'ler kalici, cumle onbellegi cumle bitince silinir).  Tarif (Llama sinifi): pre-norm RMSNorm, RoPE,
-QK-norm (fp32), SwiGLU, bias yok, tied embedding.
-
-global_layers N (belge 40 s6.2 Deney G; train.py varsayilani auto = round(L / 3)): son N blok tam causal
-(model_z_global_mask: ayni hikayenin butun onceki konumlari, kelime ve Z, gercek sirayla); konum GERCEK hikaye konumu
-(story_positions = transformer duzeninin pos'u; mantiksal konumda farkli cumlelerin token'lari ayni konumu paylasir, belge 40
-Gorus 4).  Ilk L - N blok yerel.  attn: (yerel, global) ikilisi; onbellek global bloklarda butun gecmisin K/V'sini tutar.
-
-summaries_last (belge 66; kullanici, 8 Ekim: "Fikrine onay verdim"): satir bellekte [token'lar | ozetler | dolgu], her grupta
-eski sira; model ayni (attention disi konum konum, RoPE pos'tan, maske iliskiden); maske sorgu basina iki aralik
-(model_z_summaries_last_ranges).  Batch real_pos tasiyorsa bu duzen; egitim ve sinav hep bu duzende, Z'ler arada duzen
-teshis / prefill yolunda (ayni hesap).
-Sozluk dolgusu (belge 89; kullanici, 8 Ekim: "sözlük dolgusu ok, ekle"): vocab_rows > VOCAB ise E'nin dolgu satirlari sifir,
-cikis (_logits) VOCAB'a kesilir: dolgu token'i hedef olmaz, uretilmez.
-attn_gate (belge 88a, 90a; kullanici, 8 Ekim: "o zaman attention head yapalım mı"): head basina sigmoid cikis kapisi,
-SDPA ciktisinda proj'dan once, girdi n1(x) (qiu2025 G1 headwise; resmi kod qiuzh20/gated_attention modeling_qwen3.py
-:309-317, :361-362); agirlik (heads, d) sifirdan (kapi 0,5).  attn_gate 2 (kullanici, 8 Ekim: "onaylıyorum, ikinci kolu da ekle"): girdi
-n1(x)[..., :d // 64], W (heads, d // 64) (kullanici, 8 Ekim: "onaylıyorum, d // 64 yap"; speedrun 124M, modded-nanogpt
-kayit 2025-08-23_SparseAttnGate: dampen = CastedLinear(dim // 64, num_heads), x[..., :d_model // 64]; d768'de 12).  Kapi
-Block._finish'te: egitim, prefill, SummaryCache, StaticCache ayni yol.
-Bigram embedding (deneme, --ngram_embed N; belge 88b, 90b; modded-nanogpt kayit #1 bicimi): N satirlik ayri tablo (sifir
-baslangic), (onceki, simdiki) token hash'i; her blok girdisine katman basina lambda (0,1) ile eklenir.  Onceki token yalniz
-ayni (doc, sent) cumlesinin TOKEN'i ise, degilse END nobetcisi (cumle siniri asilmaz; iki duzende ayni); Z / BOS / dolgu
-satirlarina 0.  Uretimde SummaryCache prev, StaticCache prev tamponu.  Hiz (belge 90b ek): ngram_layers K yalniz ilk K
-blok girdisine ekler (0: hepsi); ngram_sparse egitimde tabloyu yalniz okunan satirlarla (ngram_seen) gunceller
-(recipe.NgramRowAdam).
+Katmanlar: yerel (cumle ici) ve G (global_layers; tam causal, gercek hikaye konumu, g_nope ile RoPE'suz); dizilim g_layout
+(top: G sonda, interleave: Y-Y-G).  Model Z3 (z_inert, varsayilan): kimse Z okumaz -- yerel token kendi cumlesi + BOS, G
+belge token'lari + BOS; Z_k kendi cumlesini okuyup sonraki cumlenin ilk token'ini tahmin eder.  Model Z2 (z_inert 0):
+token'lar onceki Z'leri ozet olarak okur (model_z_read_mask); model_z_mask okumasiz hali (teshis).
+Egitim / sinav duzeni summaries_last: satir [token'lar | ozetler | dolgu], maske sorgu basina iki aralik
+(model_z_summaries_last_ranges); Z'ler arada duzen teshis / prefill yolunda (ayni hesap).
+Uretim: SummaryCache (ozet + cumle onbellegi, G'de butun gecmis); StaticCache (sabit tampon, toplu; carry / Model Z3'te yok).
+Tarif (Llama sinifi): pre-norm RMSNorm, RoPE, QK-norm (fp32), SwiGLU, bias yok, tied embedding; E vocab_rows satir (dolgu
+satirlari sifir, cikis VOCAB'a kesilir).
+Denemeler (varsayilan kapali): attn_gate 1 | 2 (head basina sigmoid cikis kapisi; qiu2025, modded-nanogpt), bigram embedding
+(ngram_embed; modded-nanogpt kayit #1), carry (parcalar arasi Z bellegi, belge 83), mix_g_heads / mix_kv.
 """
 import dataclasses
 import functools

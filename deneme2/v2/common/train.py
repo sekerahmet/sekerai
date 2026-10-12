@@ -1,98 +1,29 @@
-"""train -- V2 ortak egitim: iki model ayni veri, ayni hedef, ayni tarif, ayni sinav; farkli olan yalniz model
-(belge/model_z_temel/20 s4, 21, 22, 24 s9; ad onayli, kullanici 6 Ekim).
+"""train -- V2 ortak egitim: Model Z ve kiyas transformer'i ayni veri, hedef, tarif ve sinavla; farkli olan yalniz model
+(belge/model_z_temel/20, 21, 22, 24).
 
-Adim (belge 24 s9):  attn = recipe.block_mask(batch, mask_fn) (CPU'da dense_mask: FlexAttention CPU'da geri yayilim
-yapmiyor); h = model._batch_hidden(batch, attn); kayip = recipe.output_loss(h, E, hedef).  bf16 autocast ve bloklarda
-compile(dynamic=False) CUDA'da; clip 1,0; AdamW (0,9 / 0,95, wd 0,1; CUDA'da fused), recipe.param_groups, recipe.wsd_lr.
---optimizer normuon VARSAYILAN (kullanici, 8 Ekim: "Ben nurmuon yapalım şimdiden dedim"; "normuon bence standart yapalım.
-büyüdükçe etkisini gösterdi"; d1024 / L12 ayni adimda -0,012; --resume'da acik verilmezse kosunun kimliginden):
-recipe.NorMuon (li2025_normuon Algorithm 1), ayni --lr (guncelleme RMS'i 0,2 lr).  --optimizer muon (7 Ekim
-varsayilani): bloklarin 2-B matrisleri recipe.BatchedMuon'a (torch.optim.Muon matematigi; adjust_lr_fn match_rms_adamw:
-guncelleme RMS'i AdamW'ninki, ayni --lr ve wd; liu2025_muonscalable), geri kalan ayni AdamW'ye; wsd_lr ikisine.  Muon yoksa kosu baslamadan DURUR.  --lr
-sayi ya da auto (varsayilan; kullanici, 8 Ekim: "her lr kendi modeline özgü D ye göre"): muon / normuon'da LR_REF[0]
-(LR_REF[1] / d) ^ LR_REF[2] (adim basina aci ~ lr 0,2 sqrt(d) sabit; d768'de olculen 2e-3, belge 39 + OLCULENLER_z);
-adamw'de sayi sart (DUR).  --optimizer adamw: eski tarif (olculen lr 5e-4).
---fp8 none|tensorwise|rowwise (kullanici, 8 Ekim: "fp8 de dene bakalım. fp8 dikkatli dene"; varsayilan none): torchao
-Float8Linear yalniz MLP'de (gate_up, down), compile'dan once; agirliklar fp32, state_dict adlari ayni (kosu basinda
-denetlenir) -> ayni kosu --resume ile FP8 acik / kapali surer; KIMLIGE GIRMEZ, kip her segmentte gunlukte ve results.json
-segments'ta.  CUDA ve torchao ister, yoksa DURUR (bf16'ya sessizce dusmez).
-Veri: BATCH_ROWS satir x row_len (plan dosyasindan); epok 1 <data>/train_pack_plan_e1.npz, sonrakiler pack_plan(seed,
-epok).  --local: ham akisin yerel kopyasi (yalniz onbellek; sha256 = <split>_boundaries.json'daki).  Epok sonu eksik batch
-CUDA'da bos (dolgu) satirla BATCH_ROWS'a tamamlanir, sinavin eksik batch'i her yerde (kullanici, 8 Ekim: "epok sonu
-derlemeyi de ekle"): derleme sekli sabit, veri atilmaz, dolgu hedefsiz.
-Model Z egitim / sinav duzeni summaries_last (belge 66; kullanici, 8 Ekim: "Fikrine onay verdim"): batch'ler
-sentence.summaries_last ile [token'lar | ozetler | dolgu] sirasinda (sinav sonucu hedef sirasina geri), maske sorgu basina
-iki aralik; uretim degismez.  --summaries_last bayragi ve torba (--bag_k) kaldirildi (kullanici, 8 Ekim: "Torbada gereksiz
-gibi"; belge 77); kimlikte summaries_last duzen isareti (model_z 1).
-Sozluk dolgusu (belge 89; kullanici, 8 Ekim: "sözlük dolgusu ok, ekle"): yeni kosuda E VOCAB_ROWS (50.304, 64'un kati)
-satir; dolgu satirlari sifir, egitim kaybinda dolgu sutunu -inf, cikis VOCAB'a kesilir (hedef olmaz, uretilmez).  Kimlikte
-vocab_rows; alani olmayan eski kosu VOCAB (50.258) ile yuklenir ve surer.
---ngram_embed N (deneme; kullanici, 8 Ekim: "isimler ok, başlat"; belge 88b, 90b): Model Z bigram embedding tablosu N satir
-(0 kapali, varsayilan; deneme 251520 = 5 x 50.304), sentence.bigram_ids; tablo AdamW wd 0, lr x recipe.NGRAM_LR_MULT.
-Kimlikte; transformer ile DUR.  Hiz secenekleri (belge 90b ek; deneme): --ngram_layers K yalniz ilk K blok girdisine
-(0 hepsi), --ngram_sparse 1 tabloyu yalniz okunan satirlarla gunceller (recipe.NgramRowAdam: beta1 0 Adam, yogun
-AdamW(0, beta2) ile ayni matematik).  Varsayilan 0 (kullanici, 9 Ekim: "lan hepsinde model boyu vs demeden aynı katkıyı
-verdi. demek ki modelden bağımsız bir katkısı var ayrıca döngü de arttı."; 8 Ekim'den 9 Ekim'e auto idi).  --ngram_embed auto:
-model_z'de 5 x vocab_rows satir (50.304'te 251.520), transformer'da 0.  n-gram acikken (auto ya da acik N) --ngram_layers
-verilmezse 1 (yalniz ilk blok girdisi; d768 3.000 adim 3,3405 / 219,8 ms, taban 3,3567 / 210,9, belge 93 ek); acik
---ngram_layers 0 butun katmanlar.  Acik --ngram_embed 0 eski davranis (bit ayni); --ngram_sparse varsayilani 0.  Uc alan
-INHERIT'te (alan yoksa 0: eski kosu kendi ayariyla surer).
---glob_kv_heads N|auto (kullanici, 8 Ekim: "bu duurmda GOA yı da sıraya koy o zaman bakalım"; uretim hizi): GQA, k / v
-N head yalniz tam causal katmanlarda (Model Z glob; transformer'da her katman, kiyas icin); yerel katmanlar tam head
-(Z K/V kanali daralmaz).  Varsayilan auto (kullanici, 8 Ekim: "GQA'yı varsayılan yap, ona karar verdik son koşuda bu
-yüzden yaptık"): Model Z ve global_layers > 0 ise heads / GLOB_KV_GROUP (bolunmezse DUR), aksi halde (transformer, G'siz
-Model Z) 0 = heads.  Acik 0 eski davranis (bit ayni); kimlikte (sekil degisir).
---carry_summaries 1 / --carry_group G (belge 81b, 83; kullanici, 8 Ekim: "isimler ok, carry kodunu başlat"): belgenin
-ardisik <= G parcasi ayni batch'te ardisik satirlarda (data.carry_pack_plan, kosu basinda, dosyasiz); parcanin son Z'si
-gruptaki sonraki parcanin ilk token'ini hedefler.  carry_summaries 1: devam parcasi BOS'suz, konum onceki parcalarin
-devami, her katmanda onceki parcalarin BOS + Z'lerini (glob'da yalniz Z'leri) bellek olarak okur (gradyan akar; KV =
-[satir || bellek], M_max plandan); --carry_group G tek basina = K kontrolu (ayni plan / hedef, BOS'lu, bellek yok).  Yalniz
-model_z.  Sinavda continuation_exam (valid'in uzun belgeleri), gunlukte loss_cont.
---attn_gate 1 (belge 88a, 90a; kullanici, 8 Ekim: "o zaman attention head yapalım mı"; yalniz model_z): her blokta head
-basina sigmoid cikis kapisi (sentence.Block._gate; girdi n1(x), agirlik sifirdan, kapi 0,5); agirlik (heads, d) bloklarin
-2-B matrisi oldugu icin Muon / NorMuon grubunda.  Acik 0 = kapisiz (bit ayni); kimlikte, --resume'da verilmezse kosunun
-kimliginden (alan yoksa 0); kapisiz checkpoint kapili surdurulmez (DUR).  --attn_gate 2 (kullanici, 8 Ekim: "onaylıyorum,
-ikinci kolu da ekle"; "onaylıyorum, d // 64 yap"): kapi girdisi n1(x)'in ilk d // 64 boyutu, W (heads, d // 64) (speedrun
-124M tarifi; belge 88a s4.3, 90a; d768'de 12); d < 64 DUR.  Varsayilan auto (kullanici, 8 Ekim: "gate 2 varsayılan"):
-model_z ve d >= 64 ise 2, aksi halde 0.
---micro_batches N (kullanici, 10 Ekim; 0,5B 32 satirda sigmadi): gradyan biriktirme, adimin satirlari N parcada, tek
-optimizer adimi; kimlik disi (history.segments'te), MTP / carry / seyrek n-gram ile DUR.
---stop_step N (kullanici, 8 Ekim): takvim degismeden adim N'de durur; checkpoint.pt + agent.pt + results.json (finished
-False, stopped_at, readings_skipped "stop_step"), son sinav ve okuma yok; --resume 1 kaldigi yerden.
-Surdurme: <out>/checkpoint.pt son kayittan --checkpoint_minutes sonraki ilk gunluk sinirinda, epok sonunda ve bitiste;
-<out>/decay_start/ inisin ilk adiminda.  --resume 1: ayni toplam -> kaldigi yerden; buyuk toplam (--epochs / --steps) -> uzatma, inis basindan; eski
-ciktilar <out>/total_<eski toplam>/'a.  Bitmis kosu durur.
-Olcu: epok sonunda ve bitiste metrics.exam_scores (exam_pack_plan.npz; egitimle ayni maske yolu); hiz pencere pencere
-(recipe.SpeedWindow; ilk pencere derleme icerir, ozete girmez).  Sonda agent.pt ve results.json, SONRA
-metrics.story_generation (reading_prompts.json; okuma dusse de model kalir).  Cikti: config.json, checkpoint.pt, decay_start/, results.json, agent.pt, samples.txt, samples.json.
-Ek okuma kayitli kosudan: diag/generate_readings.py.
---mtp N (deneme/mtp dali; kullanici, 8 Ekim: "A'yı onaylıyorum, başlat"; belge 88c, 90c): ayni-logit MTP, ek parametresiz
-(modded-nanogpt kayit 53): kayip = ana CE + agirlikli k+1 sonraki hedeflerin CE'si, ayni logit'ten (recipe.output_loss_mtp).
-Hedefler hikaye sirasinda (data.mtp_targets, summaries_last'tan once, ayni perm).  Agirlik recipe.mtp_weights(adim, toplam,
-N): son 1 / (N + 1) payda (WSD inisi dahil) yalniz ana hedef.  Sinav / bpb / okuma yalniz ana bas (dokunulmaz); gunlukte
-loss = ana CE, loss_mtp / mtp_w ayri.  Yalniz model_z; acik --mtp N carry ile DUR; kimlikte.  Varsayilan 0 (kullanici, 9 Ekim:
-n-gram ile birlikte; 8 Ekim'den 9 Ekim'e auto idi).  --mtp auto: model_z 2 (carry'de 0, gunlukte yazilir), transformer
-0; acik --mtp 0 eski davranis (bit ayni); INHERIT'te (alan yoksa 0: eski kosu kendi ayariyla surer).
+Adim: attn = recipe.block_mask(batch, mask_fn) (CPU'da dense); h = model._batch_hidden(batch, attn); kayip =
+recipe.output_loss(h, E, hedef).  CUDA'da bf16 autocast + bloklarda compile; clip 1,0; optimizer NorMuon (varsayilan; muon /
+adamw secilebilir, adamw'de lr sayi sart), recipe.wsd_lr takvimi; lr auto = LR_REF olcegi (d'ye gore).
+Varsayilan model Model Z3: G'li Model Z, YYG dizilimi, G'de GQA (heads / 4), yerelde tam K/V, G NoPE, MLP orani yerel 1:1 /
+G 4:1, kapisiz, z_inert (kimse Z okumaz), PMI baslatma + gradyan paylasimi (needtrust).  Varsayilanlar ve gerekceleri
+asagidaki *_DEFAULT sabitlerinde.
+Veri: BATCH_ROWS satir x row_len (plan dosyasindan); epok 1 <data>/train_pack_plan_e1.npz, sonrakiler pack_plan(seed, epok);
+--local ham akisin yerel kopyasi.  Eksik son batch dolgu satiriyla tamamlanir (derleme sekli sabit).  Model Z batch'leri
+summaries_last duzeninde; E VOCAB_ROWS (64'un kati) satir.
+Surdurme: <out>/checkpoint.pt en gec --checkpoint_minutes'te, epok sonunda ve bitiste; decay_start/ inisin ilk adiminda.
+--resume 1: ayni toplam -> kaldigi yerden; buyuk toplam -> uzatma (inis basindan, eski ciktilar total_<eski>/'a).
+Acikca verilmeyen INHERIT alanlari kosunun kimliginden: varsayilan degisse de kosu kendi ayariyla surer.  Kaldirilan
+ozellikli eski kosular yuklenmez (_archived; ileti git etiketini verir).
+--stop_step N: takvim degismeden adim N'de durur (surdurulebilir); --stop_exam 1 ile o adimda sinav.
+Kimlige girmeyen kipler: --fp8 (MLP'de torchao Float8; CUDA + torchao yoksa DUR), --micro_batches N (gradyan biriktirme).
+Denemeler (varsayilan kapali): --ngram_embed / --ngram_layers / --ngram_sparse (bigram tablosu), --mtp (ayni-logit MTP),
+--carry_summaries / --carry_group (parcalar arasi Z bellegi), --attn_gate 1 | 2, --mix_g_heads / --mix_kv.
+Olcu: epok sonunda ve bitiste sinav (exam_pack_plan.npz; egitimle ayni maske yolu); hiz pencere pencere (ilk pencere
+derleme icerir).  Sonda agent.pt, results.json, sonra okuma (reading_prompts.json; ek okuma diag/generate_readings.py).
+Cikti: config.json, checkpoint.pt, decay_start/, results.json, agent.pt, samples.txt, samples.json.
 
-Eski kosular (kullanici, 8 Ekim: "V2 içinde temizlik kastettim"; belge 77): Model Z kimliginde summaries_last 1 degilse
-(8 Ekim oncesi; formullu / temizlik oncesi dahil; summaries_last 0), learned_z 0 ya da kaldirilan bir ozellik (z_bow,
-layer_plan, z_reads_all, glob_drop, torba) varsa yuklenmez / surdurulmez (_archived; ileti eski kodun git etiketini verir).
-Transformer yuklenir.
---global_layers N|auto (belge 40 s6.2 Deney G; yalniz Model Z): son N blok tam causal, gercek hikaye konumuyla; maske
-ikilisi (yerel, global) _attn'dan, egitim / sinav / teshis ayni yol.  --global_layers 0: G'siz Model Z (kiyas).
-Varsayilanlar (kullanici, 8 Ekim: "Varsayılan yap ama kısa bir koşu ile son halin çalıştığından emin olalım"; "G yi de
-ölçüye bağlayalım"): model_z'de global_layers auto = round(layers x MODEL_Z_GLOBAL_RATIO) (L10 3, L12 4, L24 8; transformer
-0).  --resume 1'de acikca verilmeyen global_layers / optimizer / glob_kv_heads / lr / attn_gate kosunun kimliginden
-(INHERIT): eski kosular varsayilan degisse de kendi ayariyla surer.  Kimlikte "auto" degil cozulmus sayi.
-
-    python train.py --model transformer|model_z --out <kosu> [--lr LR|auto (varsayilan auto)] [--data <v2/simplestories_gpt2>]
-                    [--stream <simplestories>] [--local /content/v2_cache] [--epochs 1] [--steps N] [--d 512]
-                    [--layers 8] [--heads 8] [--seed 0] [--device cuda] [--resume 1]
-                    [--optimizer normuon|muon|adamw (varsayilan normuon)] [--global_layers N|auto (varsayilan auto)]
-                    [--glob_kv_heads N|auto (varsayilan auto)] [--carry_summaries 1] [--carry_group G]
-                    [--attn_gate 0|1|2|auto (varsayilan auto)] [--ngram_embed N|auto (varsayilan 0)] [--ngram_layers K]
-                    [--ngram_sparse 1]
-                    [--mtp N|auto (varsayilan 0)]
+    python train.py --model transformer|model_z --out <kosu> [--data <veri>] [--stream <kok>] [--epochs 1] [--steps N]
+                    [--d 1024] [--layers 12] [--heads 16] [--device cuda] [--resume 1]  (butun bayraklar: --help)
 """
 import torch  # noqa: I001  (Windows: torch once)
 
