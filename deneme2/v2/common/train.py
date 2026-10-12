@@ -470,22 +470,43 @@ def mlm_masks():
     return loc, glob
 
 
-def mlm_batch(batch, counts, rate):
-    """deneme/mlm: batch'in TOKEN konumlarindan egitim sayimina gore en nadir rate payi -> girdi MLM_ID, hedef ozgun token
-    (kendi konumunda), diger hedefler -100 (output_loss ignore_index).  Esitlik konumla kirilir (RNG cekmez)."""
+def mlm_batch(batch, counts, rate, step=0, rare_share=0.5):
+    """deneme/mlm (MNTP, charpentier2024_gptbert:179): batch'in TOKEN konumlarindan rate payi kapatilir -- yarisi (rare_share)
+    egitim sayimina gore en nadir, kalani deterministik sozde rastgele (adim + konum karmasi; RNG cekmez).  Girdi MLM_ID; kapatilan
+    token'in hedefi hikaye sirasinda ONCEKI konumda (o konumun normal hedefi zaten o token): iki modda da cikis = sonraki token.
+    Diger hedefler -100.  Hikaye sirasi (belge, gercek konum) ile: summaries_last'ta da dogru onceki konum."""
     tok = batch.kind == D.Kind.TOKEN
     n = int(rate * int(tok.sum()))
     if n == 0:
         return None
-    pos = torch.arange(tok.numel(), device=tok.device).view_as(tok)
-    score = torch.where(tok, counts[batch.tokens.clamp(0, D.VOCAB - 1)].float() + (pos % 997).float() / 1e6,
-                        torch.full_like(batch.tokens, 1 << 40, dtype=torch.float))
-    idx = torch.topk(-score.flatten(), n).indices
-    m = torch.zeros(tok.numel(), dtype=torch.bool, device=tok.device)
-    m[idx] = True
+    B, T = tok.shape
+    dev = tok.device
+    flat = torch.arange(tok.numel(), device=dev).view_as(tok)
+    big = torch.full_like(batch.tokens, 1 << 40, dtype=torch.float)
+    rare = torch.where(tok, counts[batch.tokens.clamp(0, D.VOCAB - 1)].float() + (flat % 997).float() / 1e6, big)
+    n_r = int(round(rare_share * n))
+    m = torch.zeros(tok.numel(), dtype=torch.bool, device=dev)
+    if n_r:
+        m[torch.topk(-rare.flatten(), n_r).indices] = True
+    if n - n_r:
+        h = ((flat * 2654435761 + (step + 1) * 40503) % 1000003).float()
+        h = torch.where(tok & ~m.view_as(tok), h, big)
+        m[torch.topk(-h.flatten(), n - n_r).indices] = True
     m = m.view_as(tok)
+    real = batch.real_pos
+    if real is None:                                                     # duz duzen: hikayeler bitisik, belgenin ilk sutunundan
+        first = torch.cat([torch.ones_like(tok[:, :1]), batch.doc[:, 1:] != batch.doc[:, :-1]], 1)
+        start = torch.cummax(torch.where(first, torch.arange(T, device=dev).expand(B, T), 0), 1).values
+        real = torch.arange(T, device=dev).expand(B, T) - start
+    key = torch.where(batch.doc < 0, torch.full_like(real, 1 << 40).long(), batch.doc.long() * (1 << 20) + real.long())
+    o = torch.argsort(key, dim=1)
+    ks = key.gather(1, o)
+    nxt = torch.full_like(o, -1)
+    ok = ks[:, 1:] == ks[:, :-1] + 1
+    nxt.scatter_(1, o[:, :-1], torch.where(ok, o[:, 1:], torch.full_like(o[:, 1:], -1)))
+    m_next = torch.where(nxt >= 0, m.gather(1, nxt.clamp_min(0)), torch.zeros_like(m))
     return dataclasses.replace(batch, tokens=torch.where(m, torch.full_like(batch.tokens, MLM_ID), batch.tokens),
-                               target=torch.where(m, batch.tokens, torch.full_like(batch.target, -100)))
+                               target=torch.where(m_next, batch.target, torch.full_like(batch.target, -100)))
 
 
 def _step(model, batch, mask_fn, opt, cuda, timer=None, cont=None, mtp=None, micro=1, skip=()):
@@ -1123,7 +1144,7 @@ def main(argv=None):
             mtp = tuple(t.pin_memory().to(dev, non_blocking=True) for t in mtp) if cuda else mtp
         mb = args.micro_batches
         skip = [i for i in range(mb) if not (_rows(batch, i, mb).target >= 0).any()] if mb > 1 else ()   # CPU batch
-        mb_ = mlm_batch(_to_device(batch, dev), mlm_counts, args.mlm_rate) if mlm_counts is not None and \
+        mb_ = mlm_batch(_to_device(batch, dev), mlm_counts, args.mlm_rate, step) if mlm_counts is not None and \
             step % args.mlm_every == args.mlm_every - 1 else None
         if mb_ is not None:                                              # deneme/mlm: kayip ayri, pencere kaybina girmez
             lm, gn, _ = _step(model, mb_, mlm_fn, opt, cuda, timer)

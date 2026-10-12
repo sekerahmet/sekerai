@@ -1208,8 +1208,8 @@ def _train_z3(base, data, out, TR):
 
 def _train_mlm(base, root, data, out, TR):
     """deneme/mlm: (a) iki yonlu maskeler = elle (yerel: ayni belge + kendi cumlesinin token'lari iki yonde + BOS + kendisi;
-    G: ayni belgenin Z disi konumlari + kendisi); (b) mlm_batch en nadir %15 TOKEN'i kapatir (girdi MLM_ID, hedef ozgun token,
-    oteki hedefler -100); (c) --mlm_every 2 kosar, gunlukte loss_mlm, kimlikte; kesilip surdurulen = kesintisiz (bit);
+    G: ayni belgenin Z disi konumlari + kendisi); (b) mlm_batch %15 TOKEN kapatir (yarisi en nadir, yarisi sozde rastgele; girdi MLM_ID), MNTP: kapatilan
+    token'in hedefi onceki konumda (o konumun normal hedefi), duz ve summaries_last duzeninde; oteki hedefler -100; (c) --mlm_every 2 kosar, gunlukte loss_mlm, kimlikte; kesilip surdurulen = kesintisiz (bit);
     --mlm_every 0 = bayraksiz (bit); Z3 disi DURUR."""
     import traceback
     try:
@@ -1238,13 +1238,20 @@ def _train_mlm(base, root, data, out, TR):
         if not os.path.exists(cpath):                                      # test verisinde yok: train akisindan say
             np.save(cpath, np.bincount(np.asarray(st.stream), minlength=D.VOCAB + 1).astype(np.int64))
         cnt = torch.from_numpy(np.load(cpath)[:D.VOCAB].astype(np.int64))
-        mb = TR.mlm_batch(b, cnt, 0.15)
-        tok = b.kind == K.TOKEN
-        masked = mb.tokens == TR.MLM_ID
-        n_ok = int(masked.sum()) == int(0.15 * int(tok.sum())) and bool((masked <= tok).all())
-        c_m, c_u = cnt[b.tokens[masked]], cnt[b.tokens[tok & ~masked]]
-        rare_ok = int(c_m.max()) <= int(c_u.min())
-        tgt_ok = torch.equal(mb.target[masked], b.tokens[masked]) and bool((mb.target[~masked] == -100).all())
+        from model import summaries_last
+        pb, _ = summaries_last(b)
+        n_ok = rare_ok = tgt_ok = True
+        for bb in (b, pb):                                                 # duz ve summaries_last duzeni
+            mb = TR.mlm_batch(bb, cnt, 0.15, step=3)
+            tok = bb.kind == K.TOKEN
+            masked = mb.tokens == TR.MLM_ID
+            n_m = int(masked.sum())
+            n_ok &= n_m == int(0.15 * int(tok.sum())) and bool((masked <= tok).all())
+            thr = int(torch.kthvalue(cnt[bb.tokens[tok]], max(1, n_m // 2)).values)
+            rare_ok &= int((cnt[bb.tokens[masked]] <= thr).sum()) >= n_m // 2
+            hedef = mb.target >= 0                                         # MNTP: hedef = kapatilan token, onceki konumda
+            tgt_ok &= int(hedef.sum()) == n_m and bool((mb.target[hedef] == bb.target[hedef]).all()) and \
+                sorted(mb.target[hedef].tolist()) == sorted(bb.tokens[masked].tolist())
         cmd = base + ["--model", "model_z", "--layers", "3", "--global_layers", "1", "--epochs", "2", "--z_inert", "1"]
         pinned, TR.VOCAB_ROWS = TR.VOCAB_ROWS, -(-D.VOCAB // 64) * 64       # MLM_ID dolgu satiri ister (t_train VOCAB'a sabitler)
         try:
@@ -1260,7 +1267,7 @@ def _train_mlm(base, root, data, out, TR):
         has_mlm = any(x.get("loss_mlm") is not None for x in a["log"])
         bad = _exit_msg(TR.main, base + ["--model", "transformer", "--layers", "2", "--steps", "2", "--mlm_every", "2",
                                          "--out", out("mlm_tf")])
-        check("train deneme/mlm: iki yonlu maskeler = elle; en nadir %15 TOKEN kapanir (hedef ozgun, oteki -100); --mlm_every 2 "
+        check("train deneme/mlm: iki yonlu maskeler = elle; %15 TOKEN kapanir (yarisi nadir), MNTP hedefi onceki konumda (iki duzende); --mlm_every 2 "
               "kosar (gunlukte loss_mlm, kimlik disi kip), kesilip surdurulen = kesintisiz (bit); --mlm_every 0 = bayraksiz (bit); "
               "transformer DURUR",
               ok_m and n_ok and rare_ok and tgt_ok and a["segments"][0].get("mlm_every") == 2 and "mlm_every" not in a["identity"] and has_mlm and stopped
