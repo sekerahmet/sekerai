@@ -241,8 +241,10 @@ def _attend(q, k, v, attn, fc=None):
     bs = attn.BLOCK_SIZE[0]                             # 128 disinda varsayilan cekirdek hata veriyor (belge 37)
     kw = {}
     if fc is not None:
+        fk = fc.clone()                                 # flex: gradyanli tensor score_mod'da tek kez okunur (iki indeks: kopya)
+
         def score_mod(score, b, h, qi, ki):
-            return score + fc[b, h, qi] - fc[b, h, ki]
+            return score + fc[b, h, qi] - fk[b, h, ki]
         kw["score_mod"] = score_mod
     return flex_attention(q, k, v, block_mask=attn, kernel_options=None if bs == 128 else dict.fromkeys(
         ("BLOCK_M", "BLOCK_N", "BLOCK_M1", "BLOCK_N1", "BLOCK_M2", "BLOCK_N2"), bs), **gqa, **kw)
