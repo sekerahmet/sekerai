@@ -226,8 +226,8 @@ def gqa_sdpa(q, k, v, mask=None):
 
 def _attend(q, k, v, attn, fc=None):
     """attn: None (duz causal), bool (B, T, T) (dense) ya da FlexAttention BlockMask; k / v daha az head: GQA.  fc (B, H, T)
-    (deneme/fox): unutma kapisi kumulatif log f; skor + fc[q] - fc[k] (lin2025_fox denklem 11; flex'te score_mod, dense'te
-    kayan nokta maske)."""
+    (deneme/fox): unutma kapisi kumulatif log f; lin2025_fox skoru + fc[q] - fc[k], fc[q] satir sabiti (softmax degismez,
+    gradyani 0) -> yalniz - fc[k] (flex'te score_mod tek okuma, dense'te kayan nokta maske)."""
     gqa = dict(enable_gqa=True) if k.shape[1] != q.shape[1] else {}
     if attn is None:
         assert fc is None, "fox: maske gerek"
@@ -235,16 +235,14 @@ def _attend(q, k, v, attn, fc=None):
     if torch.is_tensor(attn):
         if fc is None:
             return gqa_sdpa(q, k, v, attn[:, None])
-        bias = (fc[:, :, :, None] - fc[:, :, None, :]).to(q.dtype)
+        bias = (-fc[:, :, None, :]).expand(-1, -1, attn.shape[1], -1).to(q.dtype)
         return gqa_sdpa(q, k, v, bias.masked_fill(~attn[:, None], float("-inf")))
     from torch.nn.attention.flex_attention import flex_attention
     bs = attn.BLOCK_SIZE[0]                             # 128 disinda varsayilan cekirdek hata veriyor (belge 37)
     kw = {}
     if fc is not None:
-        fk = fc.clone()                                 # flex: gradyanli tensor score_mod'da tek kez okunur (iki indeks: kopya)
-
         def score_mod(score, b, h, qi, ki):
-            return score + fc[b, h, qi] - fk[b, h, ki]
+            return score - fc[b, h, ki]
         kw["score_mod"] = score_mod
     return flex_attention(q, k, v, block_mask=attn, kernel_options=None if bs == 128 else dict.fromkeys(
         ("BLOCK_M", "BLOCK_N", "BLOCK_M1", "BLOCK_N1", "BLOCK_M2", "BLOCK_N2"), bs), **gqa, **kw)
