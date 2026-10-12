@@ -996,6 +996,7 @@ def t_train():
         _train_finish(base, out, TR)
         _train_gqa_default(base, out, TR)
         _train_ngram(base, data, out, TR)
+        _train_pmi(base, data, out, TR)
         import copy                                                     # epok sonu eksik batch dolgusu (8 Ekim)
         import types
         import recipe as R
@@ -1128,6 +1129,48 @@ def _train_gqa_default(base, out, TR):
         check("train GQA varsayilan", False, traceback.format_exc(limit=3))
     finally:
         TR.GLOB_KV_DEFAULT = pinned
+
+
+def _train_pmi(base, data, out, TR):
+    """--pmi (deneme/pmi): sabit tablo (rastgele komsu listesi K 4, bos komsu -1; rastgele S / T dim 8) ile Model Z (L4 / G2
+    interleave, NorMuon) 2 epok kosar (varsayilan bag: komsu torbasi), kayip sonlu; kimlikte pmi_k 4 ve tablonun sha256'si;
+    agent.pt'de liste = dosya (bos komsu 0, agirlik 0), lambda egitilmis; kesilip surdurulen = kesintisiz (bit); load_run
+    listeyi agirliktan kurar; --pmi_mode vec kosar (pmi_dim 8); transformer / olmayan dosya DURUR."""
+    import traceback
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
+        import generate_readings as GR
+        g = np.random.default_rng(3)
+        tab = os.path.join(out("pmi_tab"), "pmi.npz")
+        os.makedirs(os.path.dirname(tab), exist_ok=True)
+        nbr = g.integers(0, D.VOCAB, (D.VOCAB, 4)).astype(np.int32)
+        nbr[::7, 3] = -1
+        w = g.random((D.VOCAB, 4)).astype(np.float32)
+        np.savez(tab, nbr=nbr, nbr_w=w, S=g.standard_normal((D.VOCAB, 8)).astype(np.float32),
+                 T=g.standard_normal((D.VOCAB, 8)).astype(np.float32), counts=np.ones(D.VOCAB, np.int64), meta="{}")
+        cmd = base + ["--model", "model_z", "--layers", "4", "--global_layers", "2", "--epochs", "2", "--pmi", tab,
+                      "--optimizer", "normuon"]
+        a = TR.main(cmd + ["--out", out("pmi_A")])
+        stopped, r = _cut_and_resume(TR, cmd, out("pmi_cut"))
+        st_ = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        sa, sb = st_(out("pmi_A")), st_(out("pmi_cut"))
+        m, idt = GR.load_run(out("pmi_A"), data, torch.device("cpu"))
+        want_n = torch.from_numpy(np.maximum(nbr, 0).astype(np.int64))
+        want_w = torch.from_numpy(np.where(nbr >= 0, w, 0).astype(np.float32))
+        v = TR.main(cmd[:-2] + ["--pmi_mode", "vec", "--steps", "3", "--out", out("pmi_vec")])
+        bad = [_exit_msg(TR.main, base + x + ["--out", out("pmi_bad%d" % i)]) for i, x in enumerate((
+            ["--model", "transformer", "--pmi", tab], ["--model", "model_z", "--pmi", tab + ".yok"]))]
+        check("train --pmi (bag K 4, NorMuon): kosar, kayip sonlu, kimlikte pmi_k / sha; liste agent.pt'de = dosya (bos komsu 0 / "
+              "agirlik 0), lambda egitilmis; kesilip surdurulen = kesintisiz (bit); load_run listeyi kurar; vec kosar (pmi_dim 8); "
+              "transformer / dosyasiz DURUR",
+              a["finished"] and all(math.isfinite(x["loss"]) for x in a["log"]) and idt["pmi_k"] == 4 and idt["pmi_dim"] == 0
+              and len(idt["pmi_sha256"]) == 64 and torch.equal(sa["pmi_nbr"], want_n) and torch.equal(sa["pmi_w"], want_w)
+              and float(sa["pmi_lambda"]) != 0.0 and stopped and all(torch.equal(sa[k], sb[k]) for k in sa)
+              and [x["loss"] for x in r["log"]] == [x["loss"] for x in a["log"]] and torch.equal(m.pmi_nbr, want_n)
+              and v["identity"]["pmi_dim"] == 8 and v["identity"]["pmi_k"] == 0
+              and all(b_ is not None and "pmi" in b_ for b_ in bad), str(bad))
+    except Exception:  # noqa: BLE001
+        check("train --pmi", False, traceback.format_exc(limit=3))
 
 
 def _train_ngram(base, data, out, TR):

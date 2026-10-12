@@ -1664,10 +1664,83 @@ def t_interleave():
           "top farki %.1e, summaries_last %.1e, onbellek %.1e" % (diff, d_last, d_cache))
 
 
+def t_pmi():
+    """deneme/pmi, iki bicim (vec: SVD vektoru + izdusum; bag: komsu torbasi lambda x sum w E(komsu)): (a) ilk agirlikta
+    (izdusum / lambda sifir) PMI'siz modelle ayni agirlik ve hidden (bit); tablo buffer (parametre degil); (b) dolu iken hidden
+    farkli, katki yalniz kelime konumlarinda, torba = elle agirlikli toplam; (c) SummaryCache ve StaticCache adim adim = tam
+    ileri gecis (interleave, GQA, oran, NoPE), prefill = token token."""
+    from model import StaticCache
+    rng = np.random.default_rng(9)
+    stories = [[[int(x) for x in rng.integers(0, D.END_ID, rng.integers(1, 10))] for _ in range(rng.integers(1, 6))]
+               for _ in range(12)]
+    rows = [list(range(i, i + 4)) for i in range(0, 12, 4)]
+    batch = real_batch(rows, 200, stories)
+    kw = dict(d=32, layers=4, heads=2, global_layers=2, g_layout="interleave", glob_kv_heads=1, mlp_ratio=(1.0, 4.0), g_nope=1)
+
+    def mk(**extra):
+        torch.manual_seed(0)
+        return SentenceTransformer(**{**kw, **extra}).eval()
+    base = mk()
+    g = torch.Generator().manual_seed(1)
+    for mode, extra in (("vec", dict(pmi_dim=4)), ("bag", dict(pmi_k=3))):
+        pm = mk(**extra)
+        bufs = ("pmi_table",) if mode == "vec" else ("pmi_nbr", "pmi_w")
+        same_w = all(torch.equal(p, pm.state_dict()[k]) for k, p in base.state_dict().items())
+        buf_ok = all(b in dict(pm.named_buffers()) for b in bufs) and all(
+            not n.startswith(bufs) for n, _ in pm.named_parameters())
+        with torch.no_grad():
+            if mode == "vec":
+                pm.pmi_table.copy_(torch.randn(pm.pmi_table.shape, generator=g))
+            else:
+                pm.pmi_nbr.copy_(torch.randint(0, D.VOCAB, pm.pmi_nbr.shape, generator=g))
+                w = torch.rand(pm.pmi_w.shape, generator=g)
+                pm.pmi_w.copy_(w / w.sum(1, keepdim=True))
+            d0 = float((pm._batch_hidden(batch) - base._batch_hidden(batch)).abs().max())
+            if mode == "vec":
+                pm.pmi_proj.weight.normal_(0.0, 0.5, generator=g)
+            else:
+                pm.pmi_lambda.fill_(0.7)
+            d1 = float((pm._batch_hidden(batch) - base._batch_hidden(batch)).abs().max())
+            tok = torch.tensor([[5, 6, 7]])
+            e = pm._embed(tok, torch.tensor([[True, False, True]])) - pm.E(tok)
+            only_words = float(e[0, 1].abs().max()) == 0.0 and float(e[0, 0].abs().max()) > 0
+            if mode == "bag":                                           # torba = elle sum_k w_k E(komsu_k)
+                ref = 0.7 * (pm.pmi_w[5][:, None] * pm.E.weight[pm.pmi_nbr[5]]).sum(0)
+                only_words &= float((e[0, 0] - ref).abs().max()) < 1e-6
+        check("pmi %s (a, b): ilk agirlikta PMI'siz modelle ayni agirlik ve hidden (bit), tablo buffer; dolu iken farkli, katki "
+              "yalniz kelime konumlarinda%s" % (mode, ", torba = elle agirlikli toplam" if mode == "bag" else ""),
+              same_w and buf_ok and d0 == 0.0 and d1 > 1e-4 and only_words, "sifir %.1e, dolu %.1e" % (d0, d1))
+        d_cache, d_pre = 0.0, 0.0
+        with torch.no_grad():
+            lg_full, _ = full_logits(pm, batch)
+            for C in (lambda: SummaryCache(pm), lambda: StaticCache(pm, 256, 8, 16)):
+                got = []
+                for row in rows:
+                    for si in row:
+                        c = C()
+                        got.append(c.prefill([])[None].clone())
+                        for s in stories[si]:
+                            for t in s:
+                                got.append(c.append_token(t)[None].clone())
+                            got.append(c.close_sentence()[None].clone())
+                d_cache = max(d_cache, float((torch.cat(got) - lg_full).abs().max()))
+            for C in (lambda: SummaryCache(pm), lambda: StaticCache(pm, 256, 8, 16)):
+                a, b = C(), SummaryCache(pm)
+                la = a.prefill(stories[0][:2])
+                b.prefill([])
+                for s in stories[0][:2]:
+                    for t in s:
+                        b.append_token(t)
+                    lb = b.close_sentence()
+                d_pre = max(d_pre, float((la - lb).abs().max()))
+        check("pmi %s (c): SummaryCache ve StaticCache adim adim = tam ileri gecis, prefill = token token (fp32 < 1e-5)" % mode,
+              d_cache < 1e-5 and d_pre < 1e-5, "onbellek %.1e, prefill %.1e" % (d_cache, d_pre))
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab,
              limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast,
-             combo=t_combo, mix=t_mix, interleave=t_interleave)
+             combo=t_combo, mix=t_mix, interleave=t_interleave, pmi=t_pmi)
 
 if __name__ == "__main__":
     if SIDE is not None:
