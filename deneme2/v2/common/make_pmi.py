@@ -73,6 +73,9 @@ def main(argv=None):
     ap.add_argument("--vocab", type=int, default=0, help="0: butun sozluk; N: yalniz en sik N token (sinama)")
     ap.add_argument("--chunk", type=int, default=200_000, help="parca basina cumle")
     ap.add_argument("--max_tokens", type=int, default=0, help="0: butun train; yoksa ilk N token'lik cumleler (sinama)")
+    ap.add_argument("--plan_steps", type=int, default=0,
+                    help="0: butun train; N: yalniz epok 1 planinin ilk N adiminda (N x BATCH_ROWS satir) gorulen hikayeler "
+                         "(kullanici, 12 Ekim: model ham metnin tamamini ancak belirli bir adimdan gorur -> adil tablo)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = ap.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
@@ -86,11 +89,28 @@ def main(argv=None):
     sent = np.load(os.path.join(a.data, "train_sentence_offsets.npy"))
     if a.max_tokens:
         sent = sent[:int(np.searchsorted(sent[:, 1], a.max_tokens)) + 1]
+    seen = None
+    if a.plan_steps:                                                     # yalniz kosunun gorecegi hikayeler (sirasi onemsiz)
+        from train import BATCH_ROWS
+        f = np.load(os.path.join(a.data, "train_pack_plan_e1.npz"))
+        ro, rs = f["row_offsets"], f["row_stories"]
+        seen = np.unique(rs[ro[0]:ro[min(a.plan_steps * BATCH_ROWS, len(ro) - 1)]])
+        so = np.load(os.path.join(a.data, "train_story_offsets.npy"))
+        spans = np.stack([sent[so[seen], 0], sent[so[seen + 1] - 1, 1]], 1)  # hikaye token araligi (sayim icin)
+        sent = sent[np.concatenate([np.arange(so[i], so[i + 1]) for i in seen])]
+        log("plan_steps %d: %d / %d hikaye, %d cumle" % (a.plan_steps, len(seen), len(so) - 1, len(sent)))
     sent = sent[sent[:, 1] - sent[:, 0] >= 2]                            # tek token'li cumlede cift yok
     counts = np.zeros(D.VOCAB, np.int64)
-    for i in range(0, len(sent), a.chunk):
-        s = sent[i:i + a.chunk]
-        counts += np.bincount(np.asarray(stream[int(s[0, 0]):int(s[-1, 1])]), minlength=D.VOCAB)[:D.VOCAB]
+    if seen is None:
+        for i in range(0, len(sent), a.chunk):
+            s = sent[i:i + a.chunk]
+            counts += np.bincount(np.asarray(stream[int(s[0, 0]):int(s[-1, 1])]), minlength=D.VOCAB)[:D.VOCAB]
+    else:                                                                # yalniz secilen hikayeler (aradaki gorulmeyen metin yok)
+        for i in range(0, len(spans), 20_000):
+            s = spans[i:i + 20_000]
+            n = s[:, 1] - s[:, 0]
+            idx = np.repeat(s[:, 0], n) + (np.arange(n.sum()) - np.repeat(np.cumsum(n) - n, n))
+            counts += np.bincount(np.asarray(stream[idx]), minlength=D.VOCAB)[:D.VOCAB]
     order = np.argsort(-counts, kind="stable")
     V = a.vocab or int((counts > 0).sum())
     keep = order[:V]                                                     # sozluk kimligi -> sik sira
@@ -157,7 +177,7 @@ def main(argv=None):
         if i_ is not None and nbr[i_, 0] >= 0:
             log("komsu %r (torba agirligi %.2f): %s" % (w_, nbr_w[i_].sum(), ", ".join(
                 "%r %.2f" % (voc.get(int(b), b), nbr_pmi[i_, n]) for n, b in enumerate(nbr[i_]) if b >= 0)))
-    meta = dict(data=a.data, k=a.k, shift=a.shift, same_word=a.same_word, dim=a.dim, min_pair=a.min_pair, min_count=a.min_count, vocab=V, sentences=int(len(sent)),
+    meta = dict(data=a.data, plan_steps=a.plan_steps, stories=None if seen is None else int(len(seen)), k=a.k, shift=a.shift, same_word=a.same_word, dim=a.dim, min_pair=a.min_pair, min_count=a.min_count, vocab=V, sentences=int(len(sent)),
                 tokens=int(counts.sum()), pairs=int(n_pairs), svd_top=[float(x) for x in Sg[:5].cpu()], weight_scale=scale,
                 stream_sha256=json.load(open(os.path.join(a.data, "train_boundaries.json")))["stream_sha256"])
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
