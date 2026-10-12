@@ -1823,6 +1823,23 @@ def t_pmi_share():
                         got.append(c.close_sentence()[None].clone())
             dc = max(dc, float((torch.cat(got) - lg_full).abs().max()))
     check("pmi_share (c): SummaryCache ve StaticCache adim adim = tam ileri gecis (fp32 < 1e-5)", dc < 1e-5, "%.1e" % dc)
+    pm.train()                                                         # (d) fused AdamW gibi _version artirmayan guncelleme (.data)
+    ok, outs = True, []
+    for _ in range(2):
+        try:
+            loss = pm._logits(pm._batch_hidden(batch)[batch.target >= 0]).float().logsumexp(-1).mean()
+            loss.backward()
+            outs.append(float(loss))
+        except RuntimeError:
+            ok = False
+            break
+        with torch.no_grad():
+            for p in pm.parameters():
+                if p.grad is not None:
+                    p.data.add_(p.grad, alpha=-0.1)
+                    p.grad = None
+    check("pmi_share (d): iki adim, _version artirmayan guncelleme: ikinci geri yayilim calisir, kayip degisir",
+          ok and len(outs) == 2 and outs[0] != outs[1], str(outs))
 
 
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,

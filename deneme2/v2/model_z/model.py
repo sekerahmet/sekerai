@@ -466,7 +466,6 @@ class SentenceTransformer(torch.nn.Module):
             if self.pmi_share:
                 self.register_buffer("pmi_counts", torch.zeros(VOCAB))
                 self.pmi_share_s = torch.nn.Parameter(torch.zeros(()))
-                self._eff = None
 
     def _embed(self, tokens, is_token):
         """E(token) + PMI, yalniz kelime konumlarinda (BOS / Z / dolgu 0): pmi_dim'de pmi_proj(rms(tablo satiri)); pmi_k'de
@@ -484,17 +483,14 @@ class SentenceTransformer(torch.nn.Module):
         return x + p * is_token[..., None].to(p.dtype)
 
     def out_weight(self):
-        """Girdi ve cikis agirligi: E, pmi_share'de E_eff = E + beta (sum w E(komsu)) (ilk VOCAB satir); E / s surumu degisince
-        yeniden (adim basina bir kez)."""
+        """Girdi ve cikis agirligi: E, pmi_share'de E_eff = E + beta (sum w E(komsu)) (ilk VOCAB satir).  Her cagrida yeniden
+        (onbellek yok: CUDA fused AdamW _version'i artirmiyor, eski grafik ikinci adimda geri yayildi)."""
         if not (self.pmi_k and self.pmi_share):
             return self.E.weight
-        key = (self.E.weight._version, self.pmi_share_s._version, torch.is_grad_enabled(), self.E.weight.data_ptr())
-        if self._eff is None or self._eff[0] != key:
-            Wt = self.E.weight
-            bag = F.embedding_bag(self.pmi_nbr, Wt, per_sample_weights=self.pmi_w.to(Wt.dtype), mode="sum")
-            beta = self.pmi_share_s * (1000.0 / (1000.0 + self.pmi_counts))[:, None]
-            self._eff = (key, torch.cat([Wt[:VOCAB] + beta.to(Wt.dtype) * bag, Wt[VOCAB:]], 0))
-        return self._eff[1]
+        Wt = self.E.weight
+        bag = F.embedding_bag(self.pmi_nbr, Wt, per_sample_weights=self.pmi_w.to(Wt.dtype), mode="sum")
+        beta = self.pmi_share_s * (1000.0 / (1000.0 + self.pmi_counts))[:, None]
+        return torch.cat([Wt[:VOCAB] + beta.to(Wt.dtype) * bag, Wt[VOCAB:]], 0)
 
     def _pmi_raw(self, tokens, cuda):
         """sum_k (mu_k) w_k E(komsu_k) (fp32, ..., d)."""
