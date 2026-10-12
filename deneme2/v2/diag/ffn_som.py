@@ -7,6 +7,8 @@ Noronun yazdigi token t_i = argmax_v Ec[v] . (g * W_down[:, i]) (ffn_decode stat
   kontrol rastgele j', t_j' komsunun t_j'si ile ayni siklik kovasinda (siklik / tur etkisi esitlenir)
 Okumalar: (1) aktivasyon korelasyonu (Pearson, valid hikayeler, butun konumlar); (2) W_down sutun kosinusu (agirlik uzayi);
 (3) W_up satir kosinusu (anahtar uzayi).  Iki model: erken (3.000 adim) ve olgun (tam epok) -> yapi egitimle buyuyor mu.
+Sira komsulari (deneme/som'un yaratmasi beklenen yapi; kullanici 12 Ekim: "iki nöron yapısını ölçersin Z3 ve şu ankini"): (i, i+o),
+o = 1 / 4 / 16 ve uzak (i, i + H/2): ayni uc okuma + konu tutarliligi = yazdiklari token PPMI komsu ya da ayni olan cift orani.
 """
 import torch  # noqa: I001
 
@@ -150,6 +152,14 @@ def main():
                 row[k] = dict(n=int(len(pr)), corr=float(np.mean(corr[i_, j_])),
                               wdown=float(np.mean((Wd[:, i_] * Wd[:, j_]).sum(0))),
                               wup=float(np.mean((Wu[i_] * Wu[j_]).sum(1))))
+            nbr_set = [set(nbr[t].tolist()) | {int(t)} for t in range(len(nbr))]
+            for o in (1, 4, 16, H[l] // 2):
+                i_ = np.arange(H[l] - o)
+                j_ = i_ + o
+                row["sira_%s" % ("uzak" if o == H[l] // 2 else o)] = dict(
+                    n=int(len(i_)), corr=float(np.mean(corr[i_, j_])), wdown=float(np.mean((Wd[:, i_] * Wd[:, j_]).sum(0))),
+                    wup=float(np.mean((Wu[i_] * Wu[j_]).sum(1))),
+                    konu=float(np.mean([int(wt[l][b]) in nbr_set[int(wt[l][a_])] for a_, b in zip(i_, j_)])))
             out.append(row)
             log("%s katman %d %s: %s" % (name, l, row["kind"], {k: (v["n"], round(v["corr"], 4), round(v["wdown"], 4),
                                                                    round(v["wup"], 4)) if v else None
