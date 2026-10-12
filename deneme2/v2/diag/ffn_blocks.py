@@ -5,6 +5,10 @@ sabit permutasyon).  SOM'suz modelde iki okuma ayni beklenir; SOM bloklari islev
   yogunlasma  token basina |aktivasyon| kutlesinin en aktif %10 blokta toplanan payi (ortalama)
   kapatma     tek blok sifirlaninca (down girdisi) hedef basina nll artisi; yerellik = toplam artisin en cok zarar goren %10
               hikayeden gelen payi ve en cok zarar goren %2 token'dan gelen payi; ortalama artis
+  token tutarliligi (kullanici 12 Ekim: "tek token için her katmanda sabit bir harita çıkması bile bir avantaj olabilir"): en az 6
+              kez gecen token'larda gecisler iki yariya bolunur; A yarisinin ortalama blok kutlesinden token'in en aktif %10 blogu
+              secilir, B yarisinin her gecisinde bu bloklarin yakaladigi kutle payi (kapsama) ve gecisin kendi en aktif %10 blogunun
+              secilenlerle ortusmesi (Jaccard); sirali ve karisik ayri.
     python ffn_blocks.py --runs ad=klasor [...] --data <fineweb_edu_s000> --out <json> [--stories 40] [--blocks 12]
 """
 import torch  # noqa: I001
@@ -84,6 +88,8 @@ def main():
         perm = {l: torch.from_numpy(rng.permutation(H[l])).to(dev) for l in gl}
         # yogunlasma
         acc = {l: {"sirali": [], "karisik": []} for l in gl}
+        bm = {l: {"sirali": [], "karisik": []} for l in gl}                # konum basina blok kutlesi (token tutarliligi)
+        toks = []
         rec = {}
         hooks = [model.blocks[l].down.register_forward_pre_hook(lambda m, ar, l=l: rec.__setitem__(l, ar[0][0])) for l in gl]
         with torch.no_grad():
@@ -91,6 +97,7 @@ def main():
                 b = D.build_batch(st, [[j]], "model_z", dev, row_len=1 + sum(len(s_) + 1 for s_ in sents))
                 model._batch_hidden(b)
                 keep = b.kind[0] != int(D.Kind.PAD)
+                toks.append(torch.where(b.kind[0][keep] == int(D.Kind.TOKEN), b.tokens[0][keep], -1).cpu())
                 for l in gl:
                     A = rec[l][keep].abs().float()                                  # (T, H)
                     nb = H[l] // a.block
@@ -98,6 +105,7 @@ def main():
                         m_ = X[:, :nb * a.block].reshape(len(X), nb, a.block).sum(-1)
                         top = m_.topk(max(1, nb // 10), -1).values.sum(-1) / m_.sum(-1).clamp_min(1e-12)
                         acc[l][k].append(top.cpu())
+                        bm[l][k].append((m_ / m_.sum(-1, keepdim=True).clamp_min(1e-12)).half().cpu())
         for h in hooks:
             h.remove()
         base, sid = nll_all(model, st, items, dev)
@@ -107,6 +115,21 @@ def main():
             nb = H[l] // a.block
             pick = rng.choice(nb, a.blocks, replace=False)
             row = {k: float(torch.cat(v).mean()) for k, v in acc[l].items()}
+            tk = torch.cat(toks)
+            ids, inv, cnt = torch.unique(tk, return_inverse=True, return_counts=True)
+            for kind in ("sirali", "karisik"):
+                M = torch.cat(bm[l][kind]).float()                         # (N, nb)
+                ntop = max(1, nb // 10)
+                cov, jac = [], []
+                for u in torch.nonzero((cnt >= 6) & (ids >= 0))[:, 0].tolist():
+                    occ = torch.nonzero(inv == u)[:, 0]
+                    A, B_ = occ[0::2], occ[1::2]
+                    sel = M[A].mean(0).topk(ntop).indices
+                    cov.append(float(M[B_][:, sel].sum(-1).mean()))
+                    own = M[B_].topk(ntop, -1).indices
+                    inter = (own[..., None] == sel).any(-1).sum(-1).float()
+                    jac.append(float((inter / (2 * ntop - inter)).mean()))
+                row["token_" + kind] = dict(n_token=len(cov), kapsama=float(np.mean(cov)), jaccard=float(np.mean(jac)))
             for kind in ("sirali", "karisik"):
                 ds, st10, tk2 = [], [], []
                 for bi in pick:
