@@ -742,9 +742,6 @@ def _args(argv):
         if k in args.defaulted:
             setattr(args, k, "auto" if was.get(k + "_sha256") else "none")
     args.resume_pmi_sha = (was or {}).get("pmi_init_sha256", "") if args.resume else ""   # baslatma surdurmede yok
-    args.g_forget = float(args.g_forget or 0)
-    if args.g_forget and (args.model != "model_z" or not args.global_layers or args.carry_summaries):
-        sys.exit("DUR: --g_forget yalniz G'li Model Z'de, carry ile yok (deneme/fox)")
     args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
     if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
         args.optimizer = DEFAULT_OPTIMIZER
@@ -819,6 +816,9 @@ def _args(argv):
     args.z_inert = int(args.z_inert or 0)
     if args.z_inert and (args.model != "model_z" or not args.global_layers or args.carry_summaries):
         sys.exit("DUR: --z_inert yalniz G'li Model Z'de, carry ile yok")
+    args.g_forget = float(args.g_forget or 0)                         # global_layers cozulduktan sonra (auto -> sayi)
+    if args.g_forget and (args.model != "model_z" or not args.global_layers or args.carry_summaries):
+        sys.exit("DUR: --g_forget yalniz G'li Model Z'de, carry ile yok (deneme/fox)")
     args.g_layout = args.g_layout or (G_LAYOUT_DEFAULT if args.model == "model_z" and args.global_layers else "top")
     if args.local_kv_heads and (args.model != "model_z" or args.heads % args.local_kv_heads):
         sys.exit("DUR: --local_kv_heads yalniz Model Z'de, heads'in boleni (%d)" % args.heads)
