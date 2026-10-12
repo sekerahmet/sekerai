@@ -156,14 +156,15 @@ def summaries_last(batch):
                                real_pos=g(story_positions(kind) if batch.real_pos is None else batch.real_pos), **mem), perm
 
 
-def model_z_summaries_last_ranges(kind, doc, sent, glob=False, n_mem=None):
+def model_z_summaries_last_ranges(kind, doc, sent, glob=False, n_mem=None, z_inert=False):
     """summaries_last duzeninde (kind, doc, sent permute) yerel (glob False) ya da global maske -> mask_mod: sorgu basina
     iki aralik, token [a0, a1] ve ozet [b0, b1] (dolgu: kendi kosusu).  Token'lar (hikaye, cumle), ozetler (hikaye, cumle +
     1) sirasinda (BOS 0, Z_k k + 1): sinirlar searchsorted ile.  Yerel: token kendi cumlesinin basindan kendisine, Z_k kendi
     cumlesinin token'lari, BOS hic; global: hikayenin ilk token'indan.  Ozet: hikayenin BOS'undan, token'da Z_(k-1)'e, Z_k'da
     kendisine.  n_mem (B,) (carry bellegi, belge 83):
     satirin ilk hikayesinin sorgulari ucuncu araligi [T, T + n_mem) gorur (glob'da BOS yuvasi haric, [T + 1, ...)); anahtar
-    uzunlugu T + M.  Dolgu kuralini icerir (includes_padding)."""
+    uzunlugu T + M.  z_inert (deneme/z-inert): ozet araligi yalniz BOS, Z_k yalniz kendisini (kimse Z okumaz; Z'siz kiyas).
+    Dolgu kuralini icerir (includes_padding)."""
     B, T = kind.shape
     big, large = T + 2, 1 << 40
     tok, summ, pad = kind == TOKEN, (kind == BOS) | (kind == ZTOK), kind == PAD
@@ -178,8 +179,15 @@ def model_z_summaries_last_ranges(kind, doc, sent, glob=False, n_mem=None):
     a0 = torch.where(pad, (~pad).sum(1, keepdim=True).expand(B, T), a0)
     a1 = torch.where(pad, col, a1)
     b0, b1 = torch.where(pad, 1, b0), torch.where(pad, 0, b1)
+    if z_inert:
+        assert n_mem is None, "z_inert: carry bellegi yok"
+        b1 = torch.where(pad, 0, b0)                                       # ozetlerden yalniz hikayenin BOS'u
     a0, a1, b0, b1 = (t.int() for t in (a0, a1, b0, b1))
 
+    if z_inert:                                                             # Z_k kendi cumlesi + BOS + kendisi
+        def mask_mod(b, h, q, kv):
+            return ((kv >= a0[b, q]) & (kv <= a1[b, q])) | ((kv >= b0[b, q]) & (kv <= b1[b, q])) | (kv == q)
+        return mask_mod
     if n_mem is None:
         def mask_mod(b, h, q, kv):
             return ((kv >= a0[b, q]) & (kv <= a1[b, q])) | ((kv >= b0[b, q]) & (kv <= b1[b, q]))
@@ -195,7 +203,10 @@ def model_z_summaries_last_ranges(kind, doc, sent, glob=False, n_mem=None):
 
 
 _LAST_GLOB = functools.partial(model_z_summaries_last_ranges, glob=True)
+_INERT_LOC = functools.partial(model_z_summaries_last_ranges, z_inert=True)
+_INERT_GLOB = functools.partial(model_z_summaries_last_ranges, glob=True, z_inert=True)
 model_z_summaries_last_ranges.includes_padding = _LAST_GLOB.includes_padding = True
+_INERT_LOC.includes_padding = _INERT_GLOB.includes_padding = True
 
 
 def _dense(mask_mod, B, T, device):
@@ -339,7 +350,7 @@ class Block(torch.nn.Module):
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
                  attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, mlp_ratio=(),
-                 local_kv_heads=0, mix_g_heads=0, mix_kv=(), g_layout="top"):
+                 local_kv_heads=0, mix_g_heads=0, mix_kv=(), g_layout="top", z_inert=False):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -355,6 +366,7 @@ class SentenceTransformer(torch.nn.Module):
         self.global_layers = int(global_layers)
         assert 0 <= self.global_layers <= layers, "global_layers 0..layers"
         self.mask_fn = (model_z_read_mask, model_z_global_mask) if self.global_layers else model_z_read_mask
+        self.z_inert = bool(z_inert)                                    # deneme/z-inert (kullanici, 12 Ekim: "z siz versiyonu")
         self.END, self.EOS = END_ID, EOS_ID
         hidden = -(-int(8 * d / 3) // 8) * 8
         assert vocab_rows >= VOCAB, "vocab_rows >= VOCAB"
@@ -430,6 +442,9 @@ class SentenceTransformer(torch.nn.Module):
 
     def _masks(self, last=False):
         """Maske fonksiyonlari: bugunku duzen (mask_fn) ya da summaries_last duzeninde ayni yapida (tek / ikili)."""
+        if self.z_inert:                                                # yalniz summaries_last yolu (egitim, sinav)
+            assert last, "z_inert: yalniz summaries_last duzeni (dense / uretim yolu yok)"
+            return (_INERT_LOC, _INERT_GLOB) if isinstance(self.mask_fn, tuple) else _INERT_LOC
         if not last:
             return self.mask_fn
         return (model_z_summaries_last_ranges, _LAST_GLOB) if isinstance(self.mask_fn, tuple) else \
@@ -633,6 +648,7 @@ class SummaryCache:
     (BOS ve token'lar atilir), konumlar surer; carry_group'uncu parcada onbellek sifirlanir (yeni hikaye, BOS)."""
 
     def __init__(self, model):
+        assert not getattr(model, "z_inert", False), "z_inert: uretim onbellegi yok (Z'siz kiyas yalniz egitim / sinav)"
         self.m = model
         self.dev = model.E.weight.device
         L = len(model.blocks)
@@ -877,7 +893,7 @@ class StaticCache:
 
     @staticmethod
     def supports(model):
-        return not model.carry_group
+        return not model.carry_group and not getattr(model, "z_inert", False)
 
     def __init__(self, model, positions, sentences, sentence_tokens):
         assert StaticCache.supports(model), "StaticCache: carry desteklenmez (SummaryCache)"
