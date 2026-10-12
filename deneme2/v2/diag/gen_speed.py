@@ -158,6 +158,8 @@ def main(argv=None):
             c.state = tuple(t.repeat(B) for t in c.state)                 # sum_len, sen_len, tt, prev (bigram)
             c.n = [list(c.n[0]) for _ in range(B)]
             c.z = c.z.repeat(B)
+            if c.zs is not None:                                          # Model Z3: glob Z yuvalari
+                c.zs = c.zs.repeat(B, 1)
         else:
             c = mod.StaticCache(model, steps + 8)
             c.prefill_rows([tf_seq(prompt)])

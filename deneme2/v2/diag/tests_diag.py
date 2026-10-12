@@ -511,7 +511,7 @@ def t_genspeed():
         return
     root, data, _ = T2._train_root(tp)
     try:
-        res = GS.main(["--arm", "mz=--model model_z --d 64 --layers 3 --heads 4 --z_inert 0",   # Z3 StaticCache: denetim 104 B6
+        res = GS.main(["--arm", "mz=--model model_z --d 64 --layers 3 --heads 4",
                        "--arm", "tf=--model transformer --d 64 --layers 2 --heads 4 --glob_kv_heads 1",
                        "--data", data, "--stream", root, "--out", os.path.join(T2.TMP, "gen_speed"), "--device", "cpu",
                        "--dtype", "fp32", "--steps", "4"])

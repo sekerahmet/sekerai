@@ -854,11 +854,13 @@ def _bmm_f32(t):
     return _COMPILED["bmm_f32"]
 
 
-def _static_step(m, glob, f32, smax, w, z, live, sum_len, sen_len, tt, prev, K, V, out):
+def _static_step(m, glob, f32, smax, w, z, live, sum_len, sen_len, tt, prev, K, V, out, zs=None):
     """StaticCache'in tek adimi, satir basina (yerinde; Python dallanmasi yok -> torch.compile / CUDA graph).  z: Z_k adimi
     (girdi E(END), ozete yazilir, cumleyi okur), degilse token w (cumleye yazilir).  live False satirin sayaclari ilerlemez
     (yazdigi bos yuva maskede; toplu uretimde biten satir).  Konum: token ozet + cumle sayaci, Z ozet sayaci (=
-    SummaryCache'in n_z + i / n_z'si), glob gercek konum tt.  prev: bigram'in onceki token'i (Z adiminda END'e doner)."""
+    SummaryCache'in n_z + i / n_z'si), glob gercek konum tt.  prev: bigram'in onceki token'i (Z adiminda END'e doner).
+    zs (Model Z3): glob tamponunda Z yuvalari (B, n); verilirse kimse baska bir Z okumaz -- yerel ozet yalniz BOS (yuva 0) +
+    Z_k kendisi, glob Z yuvalari maskeli (kendisi haric).  Z'nin K / V'si yine yazilir, okunmaz."""
     x = m.E(torch.where(z, torch.full_like(w, END_ID), w))[:, None]
     gr = None if m.ngram is None else m._ngram(w, prev, ~z)[:, None]
     pos = torch.where(z, sum_len, sum_len + sen_len)[:, None]
@@ -872,15 +874,21 @@ def _static_step(m, glob, f32, smax, w, z, live, sum_len, sen_len, tt, prev, K, 
         j = torch.arange(K[l].shape[2], device=w.device)[None]
         if g:
             mask = j <= tt[:, None]
+            if zs is not None:
+                mask = (mask & ~zs) | (j == tt[:, None])
         else:
             if loc is None:                                              # ozet [0, sum_len (+ Z)), cumle [smax, ..]
-                loc = (j < (sum_len + z.long())[:, None]) | ((j >= smax) & (j < (smax + sen_len + (~z).long())[:, None]))
+                summ = (j < 1) | (z[:, None] & (j == sum_len[:, None])) if zs is not None else \
+                    j < (sum_len + z.long())[:, None]
+                loc = summ | ((j >= smax) & (j < (smax + sen_len + (~z).long())[:, None]))
             mask = loc
         q, k, v = block._qkv(x, tt[:, None] if g else pos)
         at = tt if g else slot
         K[l][ar, :, at] = k[:, :, 0]
         V[l][ar, :, at] = v[:, :, 0]
         x = block._finish(x, decode_sdpa(q, K[l], V[l], mask, f32))
+    if zs is not None:
+        zs[ar, tt] = z
     out.copy_(m._logits(m.norm(x[:, 0])))
     sen_len.copy_(torch.where(live, torch.where(z, torch.zeros_like(sen_len), sen_len + 1), sen_len))
     sum_len.add_((z & live).long())
@@ -895,16 +903,16 @@ class StaticCache:
     basina bir kez) ve CUDA graph'a yakalanir: adim basina tek replay.  positions / sentences / sentence_tokens: istemden
     sonra en cok eklenecek konum, Z ve cumle token'i (asilirsa DURUR).  Toplu (belge 91): prefill_rows birden cok istemi
     satir satir yukler (satir basina SummaryCache.prefill + acik cumle), step_rows satir basina token / Z / canli adimi.
-    carry (parca siniri): supports False, SummaryCache."""
+    Model Z3: Z yuvalari zs bit tamponuyla maskeli (_static_step).  carry (parca siniri): supports False, SummaryCache."""
     BUCKET = 256         # tampon boylari kademeli: BUCKET x {1, 1,5} x 2^k (sekil basina bir derleme; dec84: istem basina
                          # degisen boy her istemde yeniden derletiyordu, 8'den sonra derlemesiz)
 
     @staticmethod
     def supports(model):
-        return not model.carry_group and not getattr(model, "z_inert", False)
+        return not model.carry_group
 
     def __init__(self, model, positions, sentences, sentence_tokens):
-        assert StaticCache.supports(model), "StaticCache: carry / Model Z3 desteklenmez (SummaryCache)"
+        assert StaticCache.supports(model), "StaticCache: carry desteklenmez (SummaryCache)"
         self.m, self.dev = model, model.E.weight.device
         self.budget = (positions, sentences, sentence_tokens)
         self.run = None
@@ -952,7 +960,8 @@ class StaticCache:
         group = torch.where(kind == PAD, 2, torch.where((kind == BOS) | (kind == ZTOK), 1, 0))
         perm = torch.argsort(group * Tp + torch.arange(Tp, device=dev), dim=1)
         inv = torch.argsort(perm, dim=1)
-        lmod = model_z_summaries_last_ranges(*(t.gather(1, perm) for t in (kind, doc, sent)))
+        zi = bool(getattr(self.m, "z_inert", False))
+        lmod = model_z_summaries_last_ranges(*(t.gather(1, perm) for t in (kind, doc, sent)), z_inert=zi)
         if flex:
             from torch.nn.attention.flex_attention import create_block_mask
             if "flex" not in _COMPILED:
@@ -961,6 +970,12 @@ class StaticCache:
             local = create_block_mask(lmod, B, None, Tp, Tp, device=dev, _compile=True)
         else:
             local = _dense(lmod, B, Tp, dev)[:, None]
+        gmask = None
+        if zi:                                                          # Z3 glob: causal eksi baska Z anahtari
+            def gmod(b, h, q, kv):
+                return (kv <= q) & ~((kind[b, kv] == ZTOK) & (kv != q))
+            gmask = create_block_mask(gmod, B, None, Tp, Tp, device=dev, _compile=True) if flex else \
+                _dense(gmod, B, Tp, dev)[:, None]
         reorder = lambda t, p: t.gather(2, p[:, None, :, None].expand(-1, t.shape[1], -1, t.shape[3]))  # noqa: E731
         real = torch.arange(Tp, device=dev).expand(B, Tp)
         x = self.m.E(torch.where(kind == ZTOK, torch.full_like(tok, END_ID), tok))
@@ -972,7 +987,9 @@ class StaticCache:
                 x = x + self.m.ngram_lambdas[l] * gr
             g = self.glob[l]
             q, k, v = block._qkv(x, real if g else lpos)
-            if g:                                                       # tek hikaye, sagdan dolgu: causal = glob maskesi
+            if g and gmask is not None:
+                a = _COMPILED["flex"](q, k, v, gmask, block.kv_heads != block.heads) if flex else gqa_sdpa(q, k, v, gmask)
+            elif g:                                                     # tek hikaye, sagdan dolgu: causal = glob maskesi
                 a = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=block.kv_heads != block.heads)
             else:                                                       # RoPE'li q / k / v summaries_last sirasina ve geri
                 qp, kp, vp = reorder(q, perm), reorder(k, perm), reorder(v, perm)
@@ -1012,6 +1029,10 @@ class StaticCache:
             self.V.append(vb)
         prev = [r[0][-1] if r[5] else END_ID for r in rows]             # bigram: acik cumlenin son token'i
         self.state = (lt(nsum), lt(sen), lt(T), lt(prev))               # sum_len, sen_len, tt, prev
+        self.zs = None
+        if zi:                                                          # Z3: glob tamponunda Z yuvalari
+            self.zs = torch.zeros(B, self.limits[2], dtype=torch.bool, device=dev)
+            self.zs[:, :Tp] = (kind == ZTOK) & live
         self.w, self.z = lt([0] * B), torch.zeros(B, dtype=torch.bool, device=dev)
         self.live = torch.ones(B, dtype=torch.bool, device=dev)
         self.out = torch.zeros_like(self.logits)
@@ -1020,7 +1041,7 @@ class StaticCache:
 
     def _step(self):
         _COMPILED.get("step", _static_step)(self.m, self.glob, self.f32, self.smax, self.w, self.z, self.live, *self.state,
-                                            self.K, self.V, self.out)
+                                            self.K, self.V, self.out, self.zs)
 
     def _capture(self):
         """Ilk adimda (CUDA): derleme + CUDA graph.  Isinma adimlarinin sayac ilerlemesi geri alinir; tamponlara

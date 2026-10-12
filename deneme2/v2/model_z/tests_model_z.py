@@ -1700,9 +1700,9 @@ def t_z_inert():
         tgt_l, tgt_d = b.target[b.target >= 0], batch.target[batch.target >= 0]
     d_dense = float((torch.sort(nll_last)[0] - torch.sort(nll_dense)[0]).abs().max())
     check("z_inert: maske = normal eksi ZTOK anahtari (kendisi haric), yerel ve G; token Z okumaz; Z girdisi degisince token "
-          "hidden'i bit ayni; dense duzen = summaries_last (hedef kumesi ayni, nll < 1e-5); StaticCache desteklemez",
-          ok and same_tok and d_dense < 1e-5 and torch.equal(torch.sort(tgt_l)[0], torch.sort(tgt_d)[0])
-          and not StaticCache.supports(m), "kaldirilan Z okumasi %s, dense %.1e" % (info, d_dense))
+          "hidden'i bit ayni; dense duzen = summaries_last (hedef kumesi ayni, nll < 1e-5)",
+          ok and same_tok and d_dense < 1e-5 and torch.equal(torch.sort(tgt_l)[0], torch.sort(tgt_d)[0]),
+          "kaldirilan Z okumasi %s, dense %.1e" % (info, d_dense))
     rows = [[0, 1], [2]]                                                  # Model Z3 uretimi: SummaryCache = egitim ileri gecisi
     batch2 = real_batch(rows, 64)
     b2, perm2 = summaries_last(batch2)
@@ -1726,6 +1726,38 @@ def t_z_inert():
         dc = float((torch.cat(got) - lg_full).abs().max())
     check("z_inert (Model Z3) uretim: SummaryCache adim adim = egitim ileri gecisi (summaries_last), prefill = token token "
           "(fp32 < 1e-5)", dc < 1e-5 and max(pre) < 1e-5, "adim %.1e, prefill %.1e" % (dc, max(pre)))
+    prompts = [[], [[3, 4]], [list(x) for x in STORIES[0]]]                # StaticCache (denetim 104 B6) = SummaryCache
+    sd, sr, gen_ok = 0.0, 0.0, True
+    for kw in (dict(global_layers=1), dict(global_layers=2, glob_kv_heads=1, g_layout="interleave", g_nope=True),
+               dict(global_layers=2, glob_kv_heads=1, g_layout="interleave", attn_gate=2, d=64)):
+        torch.manual_seed(0)
+        d_ = kw.pop("d", 32)
+        mz = SentenceTransformer(d_, 6 if kw.get("g_layout") else 3, 2, z_inert=True, **kw).eval()
+        with torch.no_grad():
+            for sents in prompts:
+                a, c = S.SummaryCache(mz), StaticCache(mz, 64, 8, 16)
+                sd = max(sd, float((a.prefill(sents) - c.prefill(sents)).abs().max()))
+                for t in [5, 6, -1, 7, 8, -1, 9]:
+                    la, lc = (a.close_sentence(), c.close_sentence()) if t < 0 else (a.append_token(t), c.append_token(t))
+                    sd = max(sd, float((la - lc).abs().max()))
+            many = StaticCache(mz, 64, 8, 16)                                # toplu = tek tek
+            lr_ = many.prefill_rows(prompts)
+            for r, sents in enumerate(prompts):
+                one = StaticCache(mz, 64, 8, 16)
+                sr = max(sr, float((lr_[r] - one.prefill(sents)).abs().max()))
+            steps = [([5, 6, 7], [False, False, False]), ([0, 0, 0], [True, True, True]), ([8, 9, 4], [False, False, False])]
+            singles = [StaticCache(mz, 64, 8, 16) for _ in prompts]
+            for c_, sents in zip(singles, prompts):
+                c_.prefill(sents)
+            for w_, z_ in steps:
+                lr_ = many.step_rows([END_ID if z else w for w, z in zip(w_, z_)], z_, [True] * 3)
+                for r, c_ in enumerate(singles):
+                    lo = c_.close_sentence() if z_[r] else c_.append_token(w_[r])
+                    sr = max(sr, float((lr_[r] - lo).abs().max()))
+        gen_ok &= StaticCache.supports(mz) and mz.generate(prompts, 4, 12) == _generate_stepwise(mz, prompts, 4, 12)
+    check("z_inert (Model Z3) StaticCache: adim adim = SummaryCache (G1; interleave G2 GQA NoPE; gate2), toplu prefill / "
+          "adim = tek tek (fp32 < 1e-5), generate = token token", sd < 1e-5 and sr < 1e-5 and gen_ok,
+          "fark %.1e, toplu %.1e" % (sd, sr))
 
 
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
