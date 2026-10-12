@@ -72,10 +72,18 @@ def block_mask(batch, mask_fn):
     return create_block_mask(mod, B, None, T, S, device=dev, BLOCK_SIZE=ATTN_BLOCK, _compile=dev.type == "cuda")
 
 
+def _prior_cat(h, weight, s, logp, pad=8):
+    """h (N, d), weight (V, d), s (N, 1), logp (VOCAB,) -> [h | s | 0] (N, d + pad), [weight | logp | 0] (V, d + pad):
+    h' weight'^T = h weight^T + s logp^T (dolgu satirlarinda logp 0); pad hizali matmul icin."""
+    lp = F.pad(logp.to(weight.dtype), (0, weight.shape[0] - logp.shape[0]))[:, None]
+    return (torch.cat([h, s.to(h.dtype), h.new_zeros(h.shape[0], pad - 1)], 1),
+            torch.cat([weight, lp, weight.new_zeros(weight.shape[0], pad - 1)], 1))
+
+
 def _output_loss(h, weight, target, prior=None):
+    if prior is not None:                                                # deneme/freq-prior: s log p rank-1 -> tek matmul'a ek sutun
+        h, weight = _prior_cat(h, weight, *prior)                        # (ayri (N, V) toplam tensoru +%12 sure, +26 GB; 12 Ekim)
     lg = (h @ weight.T).float()
-    if prior is not None:                                                # deneme/freq-prior: + s(h) log p (ilk VOCAB sutun)
-        lg = lg + F.pad(prior[0].float() * prior[1].float()[None], (0, lg.shape[1] - prior[1].shape[0]))
     if lg.shape[1] > VOCAB:                                              # sozluk dolgusu: dolgu sutunu -inf (belge 89)
         lg = lg.masked_fill(torch.arange(lg.shape[1], device=lg.device) >= VOCAB, float("-inf"))
     return F.cross_entropy(lg, target, ignore_index=-100)

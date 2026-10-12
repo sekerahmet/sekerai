@@ -130,6 +130,9 @@ def model_z_global_mask(kind, doc, sent):
 model_z_read_mask.includes_padding = model_z_global_mask.includes_padding = True   # recipe sarmaz (belge 65 olcumu)
 
 
+FREQ_W_SCALE = 0.01               # deneme/freq-prior: s(h)'nin w olcegi (_freq_s)
+
+
 def story_positions(kind):
     """(B, T) gercek hikaye ici konum: sutun - hikayenin BOS sutunu (= transformer duzeninin pos'u; Z_k END'in yerinde).
     Dolgu son BOS'tan sayar (dolgu yalniz dolguyu gorur)."""
@@ -484,12 +487,17 @@ class SentenceTransformer(torch.nn.Module):
         """h (..., d) -> cikis h @ E^T (bagli embedding), VOCAB sutun (sozluk dolgusu kesilir); freq_prior: + s(h) log p."""
         lg = (h @ self.E.weight.T)[..., :VOCAB]
         if self.freq_prior:
-            lg = lg + (self.freq_s(h) * self.freq_logp).to(lg.dtype)
+            lg = lg + (self._freq_s(h) * self.freq_logp).to(lg.dtype)
         return lg
+
+    def _freq_s(self, h):
+        """s(h) = FREQ_W_SCALE (w . h) + b (N, 1): w olcekli (ilk deneme: olceksiz w gradyani kirpmayi domine etti, grad
+        100. adim 23 / 7, 200. 3,1 / 1,4; HESAP: Adam adimi ~lr, |h| ~ sqrt(d) -> 1.000 adimda s ~ 0,5), b olceksiz."""
+        return F.linear(h, self.freq_s.weight * FREQ_W_SCALE, self.freq_s.bias)
 
     def freq_term(self, h):
         """Kayip yolu (recipe.output_loss prior): (s(h) (N, 1), log p (VOCAB,)) ya da None."""
-        return (self.freq_s(h), self.freq_logp) if self.freq_prior else None
+        return (self._freq_s(h), self.freq_logp) if self.freq_prior else None
 
     def loss_per_target(self, batch, attn=None, chunk=4096):
         """-> nll (K,), pred (K,), target_kind (K,) (hedefli konumlar, satir sirasiyla; belge 21 s7 sozlesmesi)."""

@@ -1668,6 +1668,7 @@ def t_freq():
     """deneme/freq-prior: (a) freq_prior modelde s sifir -> bloklar / E kapali modelle bit ayni, logit bit ayni; (b) s dolu:
     _logits = h E^T + s(h) log p; (c) recipe.output_loss(prior) = _logits'in CE'si; (d) SummaryCache ve StaticCache adim
     adim = tam ileri gecis (s dolu, fp32 < 1e-5)."""
+    import model as S
     import recipe as R
     from model import StaticCache
     batch = real_batch([[0, 1], [2]], 64)
@@ -1683,16 +1684,16 @@ def t_freq():
         la, lb = a._logits(a._batch_hidden(batch)[keep]), b._logits(b._batch_hidden(batch)[keep])
         init = all(torch.equal(sa[k], sb[k]) for k in sa) and set(sb) - set(sa) == {"freq_logp", "freq_s.weight", "freq_s.bias"} \
             and torch.equal(la, lb)
-        b.freq_s.weight.copy_(torch.randn(1, 32, generator=g))
+        b.freq_s.weight.copy_(torch.randn(1, 32, generator=g) / S.FREQ_W_SCALE)
         b.freq_s.bias.fill_(0.3)
         h = b._batch_hidden(batch)[keep]
-        ref = (h @ b.E.weight.T)[:, :D.VOCAB] + (h @ b.freq_s.weight.T + 0.3) * b.freq_logp
+        ref = (h @ b.E.weight.T)[:, :D.VOCAB] + (h @ b.freq_s.weight.T * S.FREQ_W_SCALE + 0.3) * b.freq_logp
         lg = b._logits(h)
-        d_b = float((lg - ref).abs().max())
+        d_b = float((lg - ref).abs().max()) / float(ref.abs().max())    # goreli (s log p logitleri buyutur)
         ce = torch.nn.functional.cross_entropy(lg.float(), batch.target[keep])
         d_c = abs(float(R.output_loss(h, b.E.weight, batch.target[keep], b.freq_term(h))) - float(ce))
     check("freq (a, b, c): s 0 = sapmasiz model (agirlik, logit bit); s dolu: logit = h E^T + s(h) log p; output_loss(prior) "
-          "= _logits CE", init and d_b < 1e-5 and d_c < 1e-5, "logit %.1e, CE %.1e" % (d_b, d_c))
+          "= _logits CE", init and d_b < 1e-6 and d_c < 1e-5, "logit goreli %.1e, CE %.1e" % (d_b, d_c))
     rows = [[0, 1], [2]]
     dc = 0.0
     with torch.no_grad():
