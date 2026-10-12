@@ -163,7 +163,7 @@ def model_z_summaries_last_ranges(kind, doc, sent, glob=False, n_mem=None, z_ine
     cumlesinin token'lari, BOS hic; global: hikayenin ilk token'indan.  Ozet: hikayenin BOS'undan, token'da Z_(k-1)'e, Z_k'da
     kendisine.  n_mem (B,) (carry bellegi, belge 83):
     satirin ilk hikayesinin sorgulari ucuncu araligi [T, T + n_mem) gorur (glob'da BOS yuvasi haric, [T + 1, ...)); anahtar
-    uzunlugu T + M.  z_inert (deneme/z-inert): ozet araligi yalniz BOS, Z_k yalniz kendisini (kimse Z okumaz; Z'siz kiyas).
+    uzunlugu T + M.  z_inert (Model Z3): ozet araligi yalniz BOS, Z_k yalniz kendisini (kimse Z okumaz).
     Dolgu kuralini icerir (includes_padding)."""
     B, T = kind.shape
     big, large = T + 2, 1 << 40
@@ -382,7 +382,8 @@ class SentenceTransformer(torch.nn.Module):
         self.mask_fn = (model_z_read_mask, model_z_global_mask) if self.global_layers else model_z_read_mask
         self.z_inert = bool(z_inert)                                    # Model Z3 (kullanici, 12 Ekim: "son varsayılan kararım : Z siz model")
         if self.z_inert:
-            self.mask_fn = tuple(z_inert_mask(f) for f in self.mask_fn) if isinstance(self.mask_fn, tuple) else                 z_inert_mask(self.mask_fn)
+            self.mask_fn = tuple(z_inert_mask(f) for f in self.mask_fn) if isinstance(self.mask_fn, tuple) else \
+                z_inert_mask(self.mask_fn)
         self.END, self.EOS = END_ID, EOS_ID
         hidden = -(-int(8 * d / 3) // 8) * 8
         assert vocab_rows >= VOCAB, "vocab_rows >= VOCAB"
@@ -656,7 +657,7 @@ class SentenceTransformer(torch.nn.Module):
 class SummaryCache:
     """Tek hikayenin KV onbellegi (22 s4, 35 s4): ozet (BOS + Z_1..Z_k; kalici) ve cumle (simdiki cumlenin token'lari).
     Konumlar kendiliginden: token k+i, Z_k k.  Her cagri sonraki token'in logit'ini dondurur (self.logits).  Z_k ozet +
-    kendi cumlesinin onbellegine bakar, K/V'si ozete yazilir, cumle onbellegi ANCAK sonra silinir.  global_layers
+    kendi cumlesinin onbellegine bakar, K/V'si ozete yazilir (Model Z3: yazilmaz), cumle onbellegi ANCAK sonra silinir.  global_layers
     bloklari: butun gecmisin K/V'si (all_k / all_v), gercek konumla (self.t: BOS 0, her token ve Z +1).  prefill: istem
     tek ileri geciste (egitimin maskeleri ve konumlari), onbellek token token yolla ayni duruma gelir.  carry (model.carry_group, belge 83): cumle
     kapaninca parca dolu (used > row_len - MAX_SENTENCE_TOKENS - 1) ise yeni parca: glob onbelleginde yalniz Z'ler kalir
@@ -924,7 +925,7 @@ class StaticCache:
         return not model.carry_group and not getattr(model, "z_inert", False)
 
     def __init__(self, model, positions, sentences, sentence_tokens):
-        assert StaticCache.supports(model), "StaticCache: carry desteklenmez (SummaryCache)"
+        assert StaticCache.supports(model), "StaticCache: carry / Model Z3 desteklenmez (SummaryCache)"
         self.m, self.dev = model, model.E.weight.device
         self.budget = (positions, sentences, sentence_tokens)
         self.run = None

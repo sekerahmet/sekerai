@@ -1665,9 +1665,9 @@ def t_interleave():
 
 
 def t_z_inert():
-    """deneme/z-inert: summaries_last duzeninde z_inert maskesi = normal maske eksi (sorgu != Z_k kendisi iken ZTOK anahtari,
+    """Model Z3: summaries_last duzeninde z_inert maskesi = normal maske eksi (sorgu != Z_k kendisi iken ZTOK anahtari,
     BOS haric); TOKEN sorgusu hicbir ZTOK okumaz, BOS'u okur; Z_k kendisini okur; G'de de ayni; z_inert modelde token hidden'i
-    Z anahtarlarindan bagimsiz (Z girdisi degisince token ciktisi bit ayni); dense / uretim yolu DURUR."""
+    Z anahtarlarindan bagimsiz (Z girdisi degisince token ciktisi bit ayni)."""
     import model as S
     from model import StaticCache, summaries_last
     END_ID = D.END_ID

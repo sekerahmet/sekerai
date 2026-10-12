@@ -139,8 +139,8 @@ MLP_RATIO_DEFAULT = (1.0, 4.0)  # --mlp_ratio verilmezse, G'li Model Z: MLP : ta
                                 # "bu oranları koda varsayılan standart ekler misin ?"; d768 3.000: sinav -0,0039, ayni parametre)
 LR_REF = (2e-3, 768, 0.5)      # lr auto = lr0 (d0 / d) ^ us (aci / adim ~ lr 0,2 sqrt(d) sabit); d1024 olcumu: 1,4 / 1,7e-3 duz, 1,73e-3 icinde
 Z_INERT_DEFAULT = 1            # Model Z3 (kullanici, 12 Ekim: "son varsayılan kararım : Z siz model"; ad "Model Z3"): G'li Model Z'de
-                               # kimse Z okumaz; Z_k konumu sonraki cumlenin ilk token'ini tahmin eder.  0: Model Z2 (arsiv etiketi
-                               # arsiv/model-z2-20261012).  Eski kosu kimlikten surer (alan yoksa 0)
+                               # kimse Z okumaz; Z_k konumu sonraki cumlenin ilk token'ini tahmin eder.  Model Z2: --z_inert 0
+                               # --pmi_init none --grad_share none (arsiv/model-z2-20261012).  Eski kosu kimlikten surer (alan yoksa 0)
 PMI_DEFAULT = "auto"           # --pmi_init / --grad_share verilmezse (Model Z3 tarifi, 12 Ekim: "PMI ve gradyan başlangıcı var"):
                                # <data>/pmi_k5_r<d>.npz; yoksa CUDA'da bir kez uretilir (tokenizer gibi), CPU'da ekler kapali
 GRAD_SHARE_BETA_DEFAULT = "needtrust"   # ihtiyac x guven (12 Ekim: Z'li 3,3963 / Z'siz 3,4016; YYG 3,4150)
@@ -152,7 +152,7 @@ def pmi_table_path(data_dir, d):
 
 
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ngram_embed", "ngram_layers",
-           "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "mix_g_heads", "mix_kv", "g_layout", "z_inert", "pmi_init", "grad_share", "grad_share_eta",
+           "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "mix_g_heads", "mix_kv", "g_layout", "z_inert", "pmi_init", "grad_share",
            "grad_share_beta")   # --resume'da kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
@@ -165,7 +165,7 @@ SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
             "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads",
-            "mix_g_heads", "mix_kv", "g_layout", "z_inert", "pmi_init_sha256", "grad_share_sha256", "grad_share_eta",
+            "mix_g_heads", "mix_kv", "g_layout", "z_inert", "pmi_init_sha256", "grad_share_sha256",
             "grad_share_beta")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
@@ -437,14 +437,14 @@ def grad_share_beta(counts, wsum, mode):
     return b * (n * b0 * wsum).sum() / max((n * b * wsum).sum(), 1e-30)
 
 
-def grad_share_tables(path, eta, dev, mode=GRAD_SHARE_BETA_DEFAULT):
-    """PMI tablosu (make_pmi npz) -> (komsu (VOCAB, K) long, katsayi (VOCAB, K) float32): katsayi[a, k] = eta beta_a w[a, k]
+def grad_share_tables(path, dev, mode=GRAD_SHARE_BETA_DEFAULT):
+    """PMI tablosu (make_pmi npz) -> (komsu (VOCAB, K) long, katsayi (VOCAB, K) float32): katsayi[a, k] = beta_a w[a, k]
     (bos komsu -1 -> 0, katsayi 0)."""
     f = np.load(path)
     nbr = f["nbr"][:D.VOCAB]
     w = np.where(nbr >= 0, f["nbr_w"][:D.VOCAB], 0.0).astype(np.float64)
     beta = grad_share_beta(f["counts"][:D.VOCAB], w.sum(1), mode)
-    coef = (eta * beta[:, None] * w).astype(np.float32)
+    coef = (beta[:, None] * w).astype(np.float32)
     return torch.from_numpy(np.maximum(nbr, 0).astype(np.int64)).to(dev), torch.from_numpy(coef).to(dev)
 
 
@@ -462,11 +462,15 @@ def grad_share_apply(E, tables):
 def _pmi_resolve(args, cuda, log):
     """--pmi_init / --grad_share: auto -> pmi_table_path (yoksa CUDA'da make_pmi ile uretilir, CPU'da ekler kapali), none -> '',
     yol -> var olmali.  Yalniz Model Z.  -> (pmi_init yolu, grad_share yolu), kimlik sha'lari args'a."""
-    want = {k: getattr(args, k) for k in ("pmi_init", "grad_share")}
+    want = {k: PMI_DEFAULT if getattr(args, k) is None else getattr(args, k) for k in ("pmi_init", "grad_share")}
+    if getattr(args, "resume_pmi_sha", ""):                              # surdurme: E checkpoint'ten, dosya gerekmez
+        want["pmi_init"] = "none"
     if args.model != "model_z":
-        want = {k: ("none" if v in (None, "auto") else v) for k, v in want.items()}
+        if want["pmi_init"] not in ("auto", "none"):
+            sys.exit("DUR: --pmi_init yalniz Model Z (transformer E'sine uygulanmaz)")
+        want = {k: ("none" if v == "auto" else v) for k, v in want.items()}
     auto = pmi_table_path(args.data, args.d)
-    if any(v in (None, "auto") for v in want.values()) and not os.path.exists(auto):
+    if any(v == "auto" for v in want.values()) and not os.path.exists(auto):
         if cuda:
             log("PMI tablosu yok, uretiliyor (tokenizer gibi bir kez): %s" % auto)
             import make_pmi
@@ -475,12 +479,14 @@ def _pmi_resolve(args, cuda, log):
             log("PMI tablosu yok (%s), CPU: PMI baslatma / gradyan paylasimi KAPALI" % auto)
     out = {}
     for k, v in want.items():
-        p = (auto if os.path.exists(auto) else "") if v in (None, "auto") else "" if v == "none" else v
+        p = (auto if os.path.exists(auto) else "") if v == "auto" else "" if v == "none" else v
         if p and not os.path.exists(p):
             sys.exit("DUR: --%s var olan bir make_pmi npz'i ister: %s" % (k, p))
         out[k] = p
     args.pmi_init, args.grad_share = out["pmi_init"], out["grad_share"]
     args.pmi_init_sha256 = args.grad_share_sha256 = ""
+    if getattr(args, "resume_pmi_sha", ""):
+        args.pmi_init_sha256 = args.resume_pmi_sha
     if args.pmi_init:
         f = np.load(args.pmi_init)
         args.pmi_init_sha256 = hashlib.sha256(np.ascontiguousarray(f["S"]).tobytes() + np.ascontiguousarray(f["T"]).tobytes()).hexdigest()
@@ -488,7 +494,6 @@ def _pmi_resolve(args, cuda, log):
         f = np.load(args.grad_share)
         args.grad_share_sha256 = hashlib.sha256(b"".join(np.ascontiguousarray(f[k]).tobytes()
                                                          for k in ("nbr", "nbr_w", "counts"))).hexdigest()
-    args.grad_share_eta = float(1.0 if args.grad_share_eta is None else args.grad_share_eta) if args.grad_share else 0.0
     args.grad_share_beta = (args.grad_share_beta or GRAD_SHARE_BETA_DEFAULT) if args.grad_share else ""
 
 
@@ -720,9 +725,9 @@ def _args(argv):
     ap.add_argument("--local", default=None, help="ham akisin yerel kopyasi (yalniz onbellek)")
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--steps", type=int, default=None, help="toplam adim (WSD tam takvim bu sayiyla); lr taramasi")
-    ap.add_argument("--d", type=int, default=512)
-    ap.add_argument("--layers", type=int, default=8)
-    ap.add_argument("--heads", type=int, default=8)
+    ap.add_argument("--d", type=int, default=1024)                       # kullanici, 12 Ekim: "d1024 / L12 / H16 varsayılan olsun"
+    ap.add_argument("--layers", type=int, default=12)
+    ap.add_argument("--heads", type=int, default=16)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--resume", type=int, default=0)
@@ -770,7 +775,6 @@ def _args(argv):
                          "BOS); 0 Model Z2 (Z'li)")
     ap.add_argument("--pmi_init", default=None, help="E baslangici PMI SVD'siyle: auto (varsayilan, <data>/pmi_k5_r<d>.npz) | none | npz")
     ap.add_argument("--grad_share", default=None, help="E gradyani PMI komsularina: auto (varsayilan) | none | npz")
-    ap.add_argument("--grad_share_eta", type=float, default=None, help="gradyan paylasimi orani (varsayilan 1)")
     ap.add_argument("--grad_share_beta", default=None, choices=("fixed1000", "needtrust"),
                     help="kelime pay orani: needtrust (varsayilan; ihtiyac x guven, olcek medyan sayim) | fixed1000")
     ap.add_argument("--mix_kv", default=None, help="deneme/mixed-layer: yerel,G k / v head (verilmezse head payina gore)")
@@ -801,8 +805,11 @@ def _args(argv):
     for k in args.defaulted if was is not None else ():
         setattr(args, k, was.get(k, [] if k in ("mlp_ratio", "mix_kv") else "top" if k == "g_layout" else
                                  0 if k in ("glob_kv_heads", "attn_gate", "mtp", "g_nope", "local_kv_heads", "mix_g_heads", "z_inert")
-                                 or k.startswith("ngram") else "none" if k in ("pmi_init", "grad_share") else
-                                 0.0 if k == "grad_share_eta" else None))
+                                 or k.startswith("ngram") else "none" if k in ("pmi_init", "grad_share") else None))
+    for k in ("pmi_init", "grad_share") if was is not None else ():     # kimlikte yol yok, sha var
+        if k in args.defaulted:
+            setattr(args, k, "auto" if was.get(k + "_sha256") else "none")
+    args.resume_pmi_sha = (was or {}).get("pmi_init_sha256", "") if args.resume else ""   # baslatma surdurmede yok
     args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
     if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
         args.optimizer = DEFAULT_OPTIMIZER
@@ -877,8 +884,8 @@ def _args(argv):
         args.z_inert = Z_INERT_DEFAULT if args.model == "model_z" and args.global_layers and not args.carry_summaries \
             and not args.mix_g_heads else 0
     args.z_inert = int(args.z_inert or 0)
-    if args.z_inert and (args.model != "model_z" or args.carry_summaries or args.mix_g_heads):
-        sys.exit("DUR: --z_inert yalniz Model Z'de, carry / mix_g_heads ile yok (deneme/z-inert)")
+    if args.z_inert and (args.model != "model_z" or not args.global_layers or args.carry_summaries or args.mix_g_heads):
+        sys.exit("DUR: --z_inert yalniz G'li Model Z'de, carry / mix_g_heads ile yok")
     args.g_layout = args.g_layout or (G_LAYOUT_DEFAULT if args.model == "model_z" and args.global_layers else "top")
     mk = args.mix_kv
     args.mix_kv = [int(x) for x in mk.split(",")] if isinstance(mk, str) else list(mk or [])
@@ -965,7 +972,7 @@ def main(argv=None):
     tok = Tokenizer.from_file(os.path.join(args.stream, "gpt2", "tokenizer.json"))
     model, mask_fn, layout = _build(args, dev)
     if args.grad_share:                                                  # egitimin durumu (agent.pt'de yok)
-        model.grad_share = grad_share_tables(args.grad_share, args.grad_share_eta, dev, args.grad_share_beta)
+        model.grad_share = grad_share_tables(args.grad_share, dev, args.grad_share_beta)
     model.row_len = row_len                                              # uretim konum siniri, carry parca boyu
     last = None
     if args.summaries_last:                                              # belge 66: [token'lar | ozetler | dolgu]
@@ -985,8 +992,7 @@ def main(argv=None):
                  ngram_embed=args.ngram_embed, ngram_layers=args.ngram_layers, ngram_sparse=args.ngram_sparse,
                  mtp=args.mtp, g_nope=args.g_nope, mlp_ratio=args.mlp_ratio, local_kv_heads=args.local_kv_heads,
                  mix_g_heads=args.mix_g_heads, mix_kv=args.mix_kv, g_layout=args.g_layout,
-                 z_inert=args.z_inert, pmi_init_sha256=args.pmi_init_sha256, grad_share_sha256=args.grad_share_sha256,
-                 grad_share_eta=args.grad_share_eta, grad_share_beta=args.grad_share_beta)
+                 z_inert=args.z_inert, pmi_init_sha256=args.pmi_init_sha256, grad_share_sha256=args.grad_share_sha256, grad_share_beta=args.grad_share_beta)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -1008,7 +1014,7 @@ def main(argv=None):
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
                "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [], "local_kv_heads": 0,
                "mix_g_heads": 0, "mix_kv": [], "g_layout": "top", "z_inert": 0, "pmi_init_sha256": "", "grad_share_sha256": "",
-               "grad_share_eta": 0.0, "grad_share_beta": "",
+               "grad_share_beta": "",
                **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])

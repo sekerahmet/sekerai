@@ -111,6 +111,9 @@ def _condition(model, cond, batch):
         with ZA.ablated(model, "read_off") as fn:
             mask_fn = fn
     elif "z_unseen" in parts:
+        if getattr(model, "z_inert", False):                                # Model Z3: token zaten Z okumaz
+            yield None
+            return
         mask_fn = (model_z_unseen_mask, model.mask_fn[1]) if G_ else model_z_unseen_mask
     else:
         mask_fn = model.mask_fn
@@ -118,7 +121,7 @@ def _condition(model, cond, batch):
     attn = tuple(S._dense(f(batch.kind, batch.doc, batch.sent), B, T, batch.kind.device) for f in fns)
     attn = attn if G_ else attn[0]
     hooks = []
-    for block in model.blocks[len(model.blocks) - G_:]:
+    for block in (b for b, g in zip(model.blocks, model.is_glob) if g):
         if "g_off" in parts:
             hooks.append(block.register_forward_hook(lambda m, args, out: args[0]))
         elif "g_local" in parts:
@@ -339,7 +342,7 @@ def main(argv=None):
     every = [t for x in texts for t in x["tokens"]]
     res = dict(run=os.path.basename(os.path.normpath(args.run)), identity=idt, top_k=args.top_k, conditions=conds,
                categories=list(CATEGORIES), heads=model.blocks[0].heads,
-               layers=[dict(index=l, kind="glob" if l >= n_layers - model.global_layers else "loc") for l in range(n_layers)],
+               layers=[dict(index=l, kind="glob" if model.is_glob[l] else "loc") for l in range(n_layers)],
                texts=texts, summary=_summary(every, n_layers, model.global_layers))
     os.makedirs(args.out, exist_ok=True)
     json.dump(res, open(os.path.join(args.out, "token_trace.json"), "w", encoding="utf-8"), ensure_ascii=False)

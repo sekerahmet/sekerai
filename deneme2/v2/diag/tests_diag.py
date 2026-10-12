@@ -447,7 +447,8 @@ def t_trace():
               and "| gate | bos_gated |" in md and "gate" not in js["texts"][0]["tokens"][0]["attn"][0]
               and "gate" not in r0["summary"]["attn_by_layer"][0])
         runs["combo"] = os.path.join(T2.TMP, "runs_trace", "combo")      # birlesim (belge 93): kapi 2 + bigram + MTP
-        TR.main(base + ["--layers", "3", "--global_layers", "2", "--d", "64", "--ngram_embed", "64", "--mtp", "2", "--out",
+        TR.main(base + ["--layers", "3", "--global_layers", "2", "--d", "64", "--ngram_embed", "64", "--mtp", "2",
+                        "--attn_gate", "2", "--out",
                         runs["combo"]])
         mc = G.load(runs["combo"], data, cpu)[0]
         rc = TT.trace(mc, batch, ["read_off", "g_off"], 5, False)
@@ -510,7 +511,7 @@ def t_genspeed():
         return
     root, data, _ = T2._train_root(tp)
     try:
-        res = GS.main(["--arm", "mz=--model model_z --d 64 --layers 3 --heads 4",
+        res = GS.main(["--arm", "mz=--model model_z --d 64 --layers 3 --heads 4 --z_inert 0",   # Z3 StaticCache: denetim 104 B6
                        "--arm", "tf=--model transformer --d 64 --layers 2 --heads 4 --glob_kv_heads 1",
                        "--data", data, "--stream", root, "--out", os.path.join(T2.TMP, "gen_speed"), "--device", "cpu",
                        "--dtype", "fp32", "--steps", "4"])

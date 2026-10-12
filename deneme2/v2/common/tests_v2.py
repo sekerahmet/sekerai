@@ -1136,7 +1136,9 @@ def _train_z3(base, data, out, TR):
     """Model Z3 varsayilanlari (12 Ekim): (a) G'li Model Z'de z_inert 1, transformer'da 0; CPU'da <data>/pmi_k5_r<d>.npz yoksa PMI
     baslatma / gradyan paylasimi kapali (kimlikte bos); (b) acik tabloyla: grad_share_apply = elle, needtrust katsayisi = formul,
     pmi_init E'yi degistirir (tablosuz kosudan farkli), gradyan paylasimi agent.pt'ye ek anahtar koymaz, kesilip surdurulen =
-    kesintisiz (bit; surdurmede baslatma yeniden yapilmaz); olmayan dosya DURUR."""
+    kesintisiz (bit; surdurmede baslatma yeniden yapilmaz); olmayan dosya DURUR; (c) tablo auto yolundayken bayraksiz kosu
+    bayraksiz --resume ile surer (kimlik ayni, acik tabloyla kosuya bit esit); transformer + --pmi_init ve G'siz --z_inert 1
+    DURUR."""
     import traceback
     try:
         g = np.random.default_rng(5)
@@ -1153,14 +1155,14 @@ def _train_z3(base, data, out, TR):
         m_ = np.median(cnt[cnt > 0].astype(np.float64))
         bn = 4 * m_ * cnt / (m_ + cnt) ** 2
         bn = bn * (cnt * b0 * wv.sum(1)).sum() / (cnt * bn * wv.sum(1)).sum()
-        tn = TR.grad_share_tables(tab, 0.7, torch.device("cpu"), "needtrust")
-        d_n = float((tn[1].double() - torch.from_numpy(0.7 * bn[:, None] * wv)).abs().max())
+        tn = TR.grad_share_tables(tab, torch.device("cpu"), "needtrust")
+        d_n = float((tn[1].double() - torch.from_numpy(bn[:, None] * wv)).abs().max())
         E = torch.nn.Parameter(torch.zeros(D.VOCAB + 46, 8))
         E.grad = torch.randn(D.VOCAB + 46, 8, generator=torch.Generator().manual_seed(1))
         want, g0 = E.grad.clone(), E.grad[:D.VOCAB].clone().double()
-        tf = TR.grad_share_tables(tab, 0.7, torch.device("cpu"), "fixed1000")
+        tf = TR.grad_share_tables(tab, torch.device("cpu"), "fixed1000")
         for k in range(3):
-            c = torch.from_numpy(np.where(nbr[:, k] >= 0, 0.7 * b0 * w[:, k], 0.0))
+            c = torch.from_numpy(np.where(nbr[:, k] >= 0, b0 * w[:, k], 0.0))
             want.index_add_(0, torch.from_numpy(np.maximum(nbr[:, k], 0).astype(np.int64)), (g0 * c[:, None]).float())
         TR.grad_share_apply(E, tf)
         d_a = float((E.grad - want).abs().max())
@@ -1176,16 +1178,29 @@ def _train_z3(base, data, out, TR):
         st_ = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
         sz, sa, sb = st_(out("z3_auto")), st_(out("z3_A")), st_(out("z3_cut"))
         bad = _exit_msg(TR.main, cmd + ["--grad_share", tab + ".yok", "--out", out("z3_bad")])
+        auto = TR.pmi_table_path(data, int(base[base.index("--d") + 1]))
+        shutil.copyfile(tab, auto)
+        try:                                                                # (c) bayraksiz kes / bayraksiz surdur
+            stopped_c, rc = _cut_and_resume(TR, cmd, out("z3_cut_auto"))
+        finally:
+            os.remove(auto)
+        sc = st_(out("z3_cut_auto"))
+        bad_tf = _exit_msg(TR.main, base + ["--model", "transformer", "--layers", "2", "--steps", "2", "--pmi_init", tab,
+                                           "--out", out("z3_bad_tf")])
+        bad_g0 = _exit_msg(TR.main, cmd[:cmd.index("--global_layers")] + cmd[cmd.index("--global_layers") + 2:]
+                           + ["--global_layers", "0", "--z_inert", "1", "--out", out("z3_bad_g0")])
         iz, ia = z["identity"], a["identity"]
+        same_c = stopped_c and rc["identity"] == ia and all(torch.equal(sa[k], sc[k]) for k in sa)
         check("train Model Z3: varsayilan z_inert 1 (transformer 0); CPU'da tablo yoksa ekler kapali; needtrust = formul (%.1e), "
-              "dagitma = elle (%.1e); acik tabloyla kimlikte sha / eta 1 / needtrust, E farkli, agent.pt anahtarlari ayni; kesilip "
+              "dagitma = elle (%.1e); acik tabloyla kimlikte sha / needtrust, E farkli, agent.pt anahtarlari ayni; kesilip "
               "surdurulen = kesintisiz (bit); olmayan dosya DURUR" % (d_n, d_a),
               iz["z_inert"] == 1 and tr["identity"]["z_inert"] == 0 and iz["pmi_init_sha256"] == "" and iz["grad_share_sha256"] == ""
-              and d_n < 1e-5 and d_a < 1e-5 and ia["pmi_init_sha256"] and ia["grad_share_sha256"] and ia["grad_share_eta"] == 1.0
+              and d_n < 1e-5 and d_a < 1e-5 and ia["pmi_init_sha256"] and ia["grad_share_sha256"]
               and ia["grad_share_beta"] == "needtrust" and set(sa) == set(sz) and not torch.equal(sa["E.weight"], sz["E.weight"])
               and stopped and all(torch.equal(sa[k], sb[k]) for k in sa)
-              and [x["loss"] for x in r["log"]] == [x["loss"] for x in a["log"]] and bad is not None and "grad_share" in bad,
-              str(bad))
+              and [x["loss"] for x in r["log"]] == [x["loss"] for x in a["log"]] and bad is not None and "grad_share" in bad
+              and same_c and bad_tf is not None and "pmi_init" in bad_tf and bad_g0 is not None and "z_inert" in bad_g0,
+              "%s | bayraksiz surdurme %s | %s | %s" % (bad, same_c, bad_tf, bad_g0))
     except Exception:  # noqa: BLE001
         check("train Model Z3", False, traceback.format_exc(limit=4))
 

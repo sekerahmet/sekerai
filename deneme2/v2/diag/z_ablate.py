@@ -31,13 +31,15 @@ CONDS = ("none", "read_off")
 
 @contextlib.contextmanager
 def ablated(model, cond):
-    """-> mask_fn: none modelin kendi kurali; read_off yerel bloklarda model_z_mask (global bloklar aynen)."""
+    """-> mask_fn: none modelin kendi kurali; read_off yerel bloklarda model_z_mask (global bloklar aynen).  Model Z3
+    (z_inert): model_z_mask da z_inert ile sarilir -> token okumasi ayni, Z_k kendi cumlesini okumaz."""
     S = sys.modules[type(model).__module__]
     if cond == "none":
         yield model.mask_fn
         return
     assert cond == "read_off", cond
-    yield (S.model_z_mask, model.mask_fn[1]) if model.global_layers else S.model_z_mask
+    loc = S.z_inert_mask(S.model_z_mask) if getattr(model, "z_inert", False) else S.model_z_mask
+    yield (loc, model.mask_fn[1]) if model.global_layers else loc
 
 
 def ablate(model, layout, valid, rows, dev, conds):

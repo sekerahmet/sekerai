@@ -104,10 +104,9 @@ def worker(a):
         for fn, lab in (("summaries_last", "summaries_last"), ("bigram_prev", "ngram_prev"), ("bigram_ids", "ngram_hash")):
             if hasattr(MZ, fn):
                 setattr(MZ, fn, timed(getattr(MZ, fn), lab))
-        is_z = hasattr(model, "global_layers")
-        nloc = len(model.blocks) - (model.global_layers if is_z else 0)
+        is_z = hasattr(model, "is_glob")
         for l, blk in enumerate(model.blocks):
-            relabel(blk, "block%02d_%s" % (l, ("glob" if l >= nloc else "loc") if is_z else "tf"))
+            relabel(blk, "block%02d_%s" % (l, ("glob" if model.is_glob[l] else "loc") if is_z else "tf"))
         relabel(model.E, "E")
         relabel(model.norm, "norm")
         if getattr(model, "ngram", None) is not None:

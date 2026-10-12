@@ -181,7 +181,9 @@ def main(argv=None):
                 tokens=int(counts.sum()), pairs=int(n_pairs), svd_top=[float(x) for x in Sg[:5].cpu()], weight_scale=scale,
                 stream_sha256=json.load(open(os.path.join(a.data, "train_boundaries.json")))["stream_sha256"])
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-    np.savez(a.out, nbr=nbr, nbr_w=nbr_w, nbr_pmi=nbr_pmi, S=S, T=T, counts=counts, meta=json.dumps(meta))
+    tmp = a.out + ".tmp.npz"                                                # kesilirse yarim dosya hedefte kalmaz
+    np.savez(tmp, nbr=nbr, nbr_w=nbr_w, nbr_pmi=nbr_pmi, S=S, T=T, counts=counts, meta=json.dumps(meta))
+    os.replace(tmp, a.out)
     log("yazildi:", a.out, meta)
     return meta
 
