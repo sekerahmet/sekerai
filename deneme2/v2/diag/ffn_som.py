@@ -84,6 +84,8 @@ def main():
     ap.add_argument("--max_tokens", type=int, default=1024)
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--map", type=int, default=512, help="harita: G katmanlarinda ilk N noronun korelasyon / W_down kosinus "
+                    "matrisi ve yazdigi token'lar <out>.npz'e (0 kapali)")
     a = ap.parse_args()
     t0 = time.time()
     log = lambda m: print("[%6.1f sn] %s" % (time.time() - t0, m), flush=True)  # noqa: E731
@@ -131,7 +133,7 @@ def main():
             h.remove()
         wt = written_tokens(model)
         rng = np.random.default_rng(0)
-        out = []
+        out, maps = [], {}
         for l in range(L):
             mu = S1[l] / N
             cov = S2[l] / N - torch.outer(mu, mu)
@@ -160,11 +162,18 @@ def main():
                     n=int(len(i_)), corr=float(np.mean(corr[i_, j_])), wdown=float(np.mean((Wd[:, i_] * Wd[:, j_]).sum(0))),
                     wup=float(np.mean((Wu[i_] * Wu[j_]).sum(1))),
                     konu=float(np.mean([int(wt[l][b]) in nbr_set[int(wt[l][a_])] for a_, b in zip(i_, j_)])))
+            if a.map and model.is_glob[l]:
+                n_ = min(a.map, H[l])
+                maps["%s_L%d_corr" % (name, l)] = corr[:n_, :n_].astype(np.float16)
+                maps["%s_L%d_wdown" % (name, l)] = (Wd[:, :n_].T @ Wd[:, :n_]).astype(np.float16)
+                maps["%s_L%d_tok" % (name, l)] = wt[l][:n_].astype(np.int32)
             out.append(row)
             log("%s katman %d %s: %s" % (name, l, row["kind"], {k: (v["n"], round(v["corr"], 4), round(v["wdown"], 4),
                                                                    round(v["wup"], 4)) if v else None
                                                                for k, v in row.items() if isinstance(v, dict) or v is None}))
         res[name] = dict(run=run, positions=N, layers=out)
+        if maps:
+            np.savez_compressed(a.out.replace(".json", "") + "_%s_map.npz" % name, **maps)
         del model, S1, S2
     json.dump(res, open(a.out, "w"), indent=1)
     log("bitti")
