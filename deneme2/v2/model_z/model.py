@@ -648,8 +648,8 @@ class SummaryCache:
     (BOS ve token'lar atilir), konumlar surer; carry_group'uncu parcada onbellek sifirlanir (yeni hikaye, BOS)."""
 
     def __init__(self, model):
-        assert not getattr(model, "z_inert", False), "z_inert: uretim onbellegi yok (Z'siz kiyas yalniz egitim / sinav)"
         self.m = model
+        self.zi = bool(getattr(model, "z_inert", False))                   # Model Z3: Z_k hesaplanir (ilk token tahmini) ama okunmaz
         self.dev = model.E.weight.device
         L = len(model.blocks)
         self.sum_k, self.sum_v = [None] * L, [None] * L
@@ -674,8 +674,14 @@ class SummaryCache:
         for l, block in enumerate(self.m.blocks):
             if g is not None and l < self.m.ngram_layers:
                 x = x + self.m.ngram_lambdas[l] * g
+            z_only = self.zi and summary and read_sentence                 # Z3'te Z_k: kendini okur, K / V saklanmaz
             if self.glob[l]:
                 q, k, v = block._qkv(x, torch.tensor([[self.t]], device=self.dev))
+                if z_only:
+                    ka = k if self.all_k[l] is None else torch.cat([self.all_k[l], k], 2)
+                    va = v if self.all_v[l] is None else torch.cat([self.all_v[l], v], 2)
+                    x = block._finish(x, gqa_sdpa(q, ka, va))
+                    continue
                 self.all_k[l] = k if self.all_k[l] is None else torch.cat([self.all_k[l], k], 2)
                 self.all_v[l] = v if self.all_v[l] is None else torch.cat([self.all_v[l], v], 2)
                 x = block._finish(x, gqa_sdpa(q, self.all_k[l], self.all_v[l]))
@@ -684,7 +690,9 @@ class SummaryCache:
             ks = [c for c in (self.sum_k[l], self.sen_k[l] if read_sentence else None) if c is not None] + [k]
             vs = [c for c in (self.sum_v[l], self.sen_v[l] if read_sentence else None) if c is not None] + [v]
             a = gqa_sdpa(q, torch.cat(ks, 2), torch.cat(vs, 2))             # yerel GQA'da k / v daha az head
-            if summary:
+            if summary and z_only:
+                pass
+            elif summary:
                 self.sum_k[l] = k if self.sum_k[l] is None else torch.cat([self.sum_k[l], k], 2)
                 self.sum_v[l] = v if self.sum_v[l] is None else torch.cat([self.sum_v[l], v], 2)
             else:
@@ -717,6 +725,11 @@ class SummaryCache:
         local = _dense(model_z_read_mask(kind, doc, sent), 1, T, self.dev)[:, None]
         causal = torch.ones(T, T, dtype=torch.bool, device=self.dev).tril()
         summ = ((kind == BOS) | (kind == ZTOK))[0]
+        keep = torch.ones(T, dtype=torch.bool, device=self.dev)            # glob onbellegine kalan konumlar
+        if self.zi:                                                         # Z3: kimse baska bir Z_k okumaz (kendisi haric)
+            zk = (kind[0] == ZTOK)[None, :] & ~torch.eye(T, dtype=torch.bool, device=self.dev)
+            local, causal = local & ~zk, causal & ~zk
+            summ, keep = (kind == BOS)[0], (kind != ZTOK)[0]
         x, lpos, real = self.m.E(t(tok)), t(pos), torch.arange(T, device=self.dev)[None]
         gr = None if self.m.ngram is None else self.m._ngram(t(tok), bigram_prev(t(tok), kind, doc, sent), kind == TOKEN)
         for l, block in enumerate(self.m.blocks):
@@ -726,7 +739,7 @@ class SummaryCache:
             q, k, v = block._qkv(x, real if g else lpos)
             a = gqa_sdpa(q, k, v, causal if g else local)
             if g:
-                self.all_k[l], self.all_v[l] = k, v
+                self.all_k[l], self.all_v[l] = k[:, :, keep], v[:, :, keep]
             else:
                 self.sum_k[l], self.sum_v[l] = k[:, :, summ], v[:, :, summ]
             x = block._finish(x, a)

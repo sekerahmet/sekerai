@@ -1101,8 +1101,8 @@ def main(argv=None):
                               ms_per_step_median=med("ms_per_step"), note="pencere ortancasi; ilk pencere (derleme) haric"))
     torch.save(dict(state=model.state_dict(), identity=ident, args=vars(args)), os.path.join(args.out, "agent.pt"))
     json.dump(results, open(res_path, "w"), indent=1)                   # okumadan ONCE: okuma dusse de model kalir
-    if args.mix_g_heads or args.z_inert:                                 # mixed-layer / z-inert: uretim onbellegi yok
-        log("BITTI: %s | sinav kayip %.4f bpb %.4f | mix_g_heads / z_inert: okuma yok" % (
+    if args.mix_g_heads:                                                 # deneme/mixed-layer: uretim onbellegi yok
+        log("BITTI: %s | sinav kayip %.4f bpb %.4f | mix_g_heads: okuma yok" % (
             args.out, results["exam"]["loss"], results["exam"]["bits_per_byte"]))
         return results
     t = time.time()

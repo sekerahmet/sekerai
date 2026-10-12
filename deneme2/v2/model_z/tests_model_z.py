@@ -1695,15 +1695,38 @@ def t_z_inert():
     tk = (b.kind == TOKEN) & ~torch.isin(b.tokens, torch.tensor([END_ID]))
     same_tok = torch.equal(h1[tk], h2[tk])
     stops = []
-    for fn in (lambda: m._masks(False), lambda: S.SummaryCache(m)):
+    for fn in (lambda: m._masks(False),):
         try:
             fn()
             stops.append(False)
         except AssertionError:
             stops.append(True)
     check("z_inert: maske = normal eksi ZTOK anahtari (kendisi haric), yerel ve G; token Z okumaz; Z girdisi degisince token "
-          "hidden'i bit ayni; dense / uretim yolu DURUR, StaticCache desteklemez",
+          "hidden'i bit ayni; dense yol DURUR, StaticCache desteklemez",
           ok and same_tok and all(stops) and not StaticCache.supports(m), "kaldirilan Z okumasi %s" % info)
+    rows = [[0, 1], [2]]                                                  # Model Z3 uretimi: SummaryCache = egitim ileri gecisi
+    batch2 = real_batch(rows, 64)
+    b2, perm2 = summaries_last(batch2)
+    with torch.no_grad():
+        h_last = m._batch_hidden(b2)
+        h_orig = torch.empty_like(h_last)
+        h_orig[torch.arange(h_last.shape[0])[:, None], perm2] = h_last    # perm2: yeni sutundaki eski sutun
+        lg_full = m._logits(h_orig[batch2.target >= 0])
+        got, pre = [], []
+        for row in rows:
+            for si in row:
+                c = S.SummaryCache(m)
+                got.append(c.logits[None].clone())
+                for sent_ in STORIES[si]:
+                    for t in sent_:
+                        got.append(c.append_token(t)[None].clone())
+                    got.append(c.close_sentence()[None].clone())
+                c2 = S.SummaryCache(m)                                    # prefill (istem tek geciste) = token token
+                c2.prefill([list(x) for x in STORIES[si]])
+                pre.append(float((c2.logits - got[-1][0]).abs().max()))
+        dc = float((torch.cat(got) - lg_full).abs().max())
+    check("z_inert (Model Z3) uretim: SummaryCache adim adim = egitim ileri gecisi (summaries_last), prefill = token token "
+          "(fp32 < 1e-5)", dc < 1e-5 and max(pre) < 1e-5, "adim %.1e, prefill %.1e" % (dc, max(pre)))
 
 
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
