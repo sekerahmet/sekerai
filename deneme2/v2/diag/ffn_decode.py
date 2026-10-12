@@ -36,6 +36,11 @@ import token_trace as TT  # noqa: E402  (text_story)
 BUCKETS = ((0, 1e3), (1e3, 1e4), (1e4, 1e5), (1e5, 1e6), (1e6, float("inf")))
 
 
+def out_weight(model):
+    """Cikis agirligi: model.out_weight (deneme/pmi paylasilan vektor E_eff) varsa o, yoksa E."""
+    return model.out_weight() if hasattr(model, "out_weight") else model.E.weight
+
+
 @torch.no_grad()
 def decompose(model, batch, n_up=5, n_down=3, n_neurons=3):
     """Tek hikayelik batch (B 1) -> dict (hedefli konumlar K): logp (K,), total (K,) merkezli hedef logiti, inp / other (K,),
@@ -60,7 +65,7 @@ def decompose(model, batch, n_up=5, n_down=3, n_neurons=3):
     keep = batch.target[0] >= 0
     tgt = batch.target[0][keep]
     lp = torch.log_softmax(model._logits(h[keep]).float(), -1)
-    E = model.E.weight[:D.VOCAB].float()
+    E = out_weight(model)[:D.VOCAB].float()
     Ec = E - E.mean(0)
     xL = rec["xL"][keep].float()
     eps = model.norm.eps if model.norm.eps is not None else torch.finfo(xL.dtype).eps
@@ -93,7 +98,7 @@ def decompose(model, batch, n_up=5, n_down=3, n_neurons=3):
 @torch.no_grad()
 def neuron_tokens(model, layer, idx, n=5):
     """Noronun statik yazdigi: Ec (g * W_down[:, idx]) en buyuk n token (merkezli, cikis normu agirligiyla)."""
-    E = model.E.weight[:D.VOCAB].float()
+    E = out_weight(model)[:D.VOCAB].float()
     v = model.blocks[layer].down.weight[:, idx].float() * model.norm.weight.float()
     return ((E - E.mean(0)) @ v).topk(n).indices.tolist()
 
