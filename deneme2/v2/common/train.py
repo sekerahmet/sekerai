@@ -139,7 +139,7 @@ MLP_RATIO_DEFAULT = (1.0, 4.0)  # --mlp_ratio verilmezse, G'li Model Z: MLP : ta
                                 # "bu oranları koda varsayılan standart ekler misin ?"; d768 3.000: sinav -0,0039, ayni parametre)
 LR_REF = (2e-3, 768, 0.5)      # lr auto = lr0 (d0 / d) ^ us (aci / adim ~ lr 0,2 sqrt(d) sabit); d1024 olcumu: 1,4 / 1,7e-3 duz, 1,73e-3 icinde
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ngram_embed", "ngram_layers",
-           "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "mix_g_heads", "mix_kv", "g_layout", "pmi", "pmi_mode", "pmi_lambda", "pmi_detach", "pmi_mu", "pmi_lr_mult", "pmi_at")   # --resume'da kimlikten
+           "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "mix_g_heads", "mix_kv", "g_layout", "pmi", "pmi_mode", "pmi_lambda", "pmi_detach", "pmi_mu", "pmi_lr_mult", "pmi_at", "pmi_init")   # --resume'da kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
@@ -151,7 +151,7 @@ SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
             "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads",
-            "mix_g_heads", "mix_kv", "g_layout", "pmi_dim", "pmi_k", "pmi_sha256", "pmi_lambda", "pmi_detach", "pmi_mu", "pmi_lr_mult", "pmi_at")
+            "mix_g_heads", "mix_kv", "g_layout", "pmi_dim", "pmi_k", "pmi_sha256", "pmi_lambda", "pmi_detach", "pmi_mu", "pmi_lr_mult", "pmi_at", "pmi_init_sha256")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -273,6 +273,23 @@ def _mtp_error(args):
     return None
 
 
+def _pmi_init(model, path, share=0.5):
+    """E'nin ilk agirligi (kullanici, 12 Ekim: nadir kelime "o zaman öyle bir deneme yapsak ?"; "ikisine de bakalım"): PMI tablosunun
+    [S | T] (128) vektoru sabit dik izdusumle (tohum 1234, global RNG cekmez) d'ye, satir olcegi 0,02; vektoru olan kelimede
+    E = sqrt(share) PMI + sqrt(1 - share) rastgele (varyansin yarisi PMI).  Vektorsuz kelime (hic gecmeyen) aynen kalir."""
+    f = np.load(path)
+    v = torch.from_numpy(np.concatenate([f["S"], f["T"]], 1)[:D.VOCAB]).float()
+    g = torch.Generator().manual_seed(1234)
+    Q = torch.linalg.qr(torch.randn(model.E.weight.shape[1], v.shape[1], generator=g))[0].T     # (128, d) dik satirlar
+    u = v @ Q
+    s = u.std(dim=1, keepdim=True)
+    has = s.squeeze(1) > 0
+    u = u / s.clamp_min(1e-12) * 0.02
+    with torch.no_grad():
+        rows = model.E.weight[:D.VOCAB]
+        rows[has] = (share ** 0.5) * u[has].to(rows.dtype) + ((1 - share) ** 0.5) * rows[has]
+
+
 def _build(args, dev):
     """-> (model, mask_fn, layout).  Model dosyalari yalniz burada import edilir.  Model Z: ogrenilen z (belge 35 (b));
     global_layers (args'ta yoksa 0): mask_fn (yerel, global) ikilisi.  Maske kurali yalniz burada secilir (egitim, sinav,
@@ -309,6 +326,8 @@ def _build(args, dev):
                                     pmi_detach=bool(getattr(args, "pmi_detach", 0)), pmi_mu=bool(getattr(args, "pmi_mu", 0)),
                                     pmi_at=int(getattr(args, "pmi_at", -1) if getattr(args, "pmi_at", None) is not None else -1))
         model.pmi_lr_mult = float(getattr(args, "pmi_lr_mult", 1.0) or 1.0)   # deneme/pmi: lambda / mu lr carpani (param_groups)
+        if getattr(args, "pmi_init", ""):                                # deneme/pmi: E baslangici PMI SVD vektorleriyle
+            _pmi_init(model, args.pmi_init)
         if getattr(args, "pmi", ""):                                     # deneme/pmi: sabit tablo (load_run'da agirliktan)
             f = np.load(args.pmi)
             with torch.no_grad():
@@ -679,6 +698,7 @@ def _args(argv):
                     help="deneme/pmi bag: 1 (varsayilan) torba komsu E'sini salt okur (gradyan yok, CUDA'da bf16); 0 gradyan akar")
     ap.add_argument("--pmi_mu", type=int, default=None, help="deneme/pmi bag: 1 komsu kelime basina carpan mu_b (birden); 0 yok")
     ap.add_argument("--pmi_lr_mult", type=float, default=None, help="deneme/pmi bag: lambda / mu lr = taban x carpan (1 varsayilan)")
+    ap.add_argument("--pmi_init", default=None, help="deneme/pmi: make_pmi.py npz'i; E baslangici PMI SVD vektorleriyle (torba gerekmez)")
     ap.add_argument("--pmi_at", default=None, help="deneme/pmi bag: in (giris, varsayilan) | last_g (son blok girisi) | blok no")
     ap.add_argument("--mix_kv", default=None, help="deneme/mixed-layer: yerel,G k / v head (verilmezse head payina gore)")
     ap.add_argument("--g_nope", type=int, default=None,
@@ -706,7 +726,7 @@ def _args(argv):
     was = torch.load(ckpt, map_location="cpu", weights_only=False, mmap=True)["args"] \
         if args.resume and os.path.exists(ckpt) else None               # varsayilan degisse de kosu kendi ayariyla surer
     for k in args.defaulted if was is not None else ():
-        setattr(args, k, was.get(k, [] if k in ("mlp_ratio", "mix_kv") else "top" if k == "g_layout" else "" if k == "pmi" else ("bag" if was.get("pmi_k") else "vec") if k == "pmi_mode" else "global" if k == "pmi_lambda" else 0 if k in ("pmi_detach", "pmi_mu") else 1.0 if k == "pmi_lr_mult" else -1 if k == "pmi_at" else
+        setattr(args, k, was.get(k, [] if k in ("mlp_ratio", "mix_kv") else "top" if k == "g_layout" else "" if k == "pmi" else ("bag" if was.get("pmi_k") else "vec") if k == "pmi_mode" else "global" if k == "pmi_lambda" else 0 if k in ("pmi_detach", "pmi_mu") else 1.0 if k == "pmi_lr_mult" else -1 if k == "pmi_at" else "" if k == "pmi_init" else
                                  0 if k in ("glob_kv_heads", "attn_gate", "mtp", "g_nope", "local_kv_heads", "mix_g_heads")
                                  or k.startswith("ngram") else None))
     args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
@@ -783,6 +803,12 @@ def _args(argv):
     args.pmi_detach = 1 if args.pmi_detach is None else int(args.pmi_detach)
     args.pmi_mu = int(args.pmi_mu or 0)
     args.pmi_lr_mult = float(args.pmi_lr_mult or 1.0)
+    args.pmi_init, args.pmi_init_sha256 = args.pmi_init or "", ""
+    if args.pmi_init:
+        if args.model != "model_z" or not os.path.exists(args.pmi_init):
+            sys.exit("DUR: --pmi_init yalniz Model Z'de ve var olan bir npz ile: %s" % args.pmi_init)
+        fi = np.load(args.pmi_init)
+        args.pmi_init_sha256 = hashlib.sha256(np.ascontiguousarray(fi["S"]).tobytes() + np.ascontiguousarray(fi["T"]).tobytes()).hexdigest()
     pa = args.pmi_at
     args.pmi_at = -1 if pa in (None, "in", -1, "-1") else args.layers - 1 if pa == "last_g" else int(pa)
     if args.pmi_at >= 0 and (args.model != "model_z" or not args.pmi or args.pmi_mode != "bag" or args.pmi_at >= args.layers):
@@ -903,7 +929,8 @@ def main(argv=None):
                  mix_g_heads=args.mix_g_heads, mix_kv=args.mix_kv, g_layout=args.g_layout, pmi_dim=args.pmi_dim,
                  pmi_k=args.pmi_k, pmi_sha256=args.pmi_sha256, pmi_lambda=args.pmi_lambda if args.pmi_k else "",
                  pmi_detach=args.pmi_detach if args.pmi_k else 0, pmi_mu=args.pmi_mu if args.pmi_k else 0,
-                 pmi_lr_mult=args.pmi_lr_mult if args.pmi_k else 1.0, pmi_at=args.pmi_at if args.pmi_k else -1)
+                 pmi_lr_mult=args.pmi_lr_mult if args.pmi_k else 1.0, pmi_at=args.pmi_at if args.pmi_k else -1,
+                 pmi_init_sha256=args.pmi_init_sha256)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -925,7 +952,7 @@ def main(argv=None):
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
                "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [], "local_kv_heads": 0,
                "mix_g_heads": 0, "mix_kv": [], "g_layout": "top", "pmi_dim": 0, "pmi_k": 0, "pmi_sha256": "",
-               "pmi_lambda": "global" if was.get("pmi_k") else "", "pmi_detach": 0, "pmi_mu": 0, "pmi_lr_mult": 1.0, "pmi_at": -1,
+               "pmi_lambda": "global" if was.get("pmi_k") else "", "pmi_detach": 0, "pmi_mu": 0, "pmi_lr_mult": 1.0, "pmi_at": -1, "pmi_init_sha256": "",
                **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
