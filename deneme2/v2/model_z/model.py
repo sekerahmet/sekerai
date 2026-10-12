@@ -130,6 +130,42 @@ def model_z_global_mask(kind, doc, sent):
 model_z_read_mask.includes_padding = model_z_global_mask.includes_padding = True   # recipe sarmaz (belge 65 olcumu)
 
 
+COUNT_C = (1, 2, 3, 5, 9)          # sayma (deneme/count): c kovalari 0, 1, 2, 3-4, 5-8, 9+
+COUNT_R = (3, 9, 33, 129, 513)     # r kovalari: yok, 1-2, 3-8, 9-32, 33-128, 129-512, 513+
+
+
+def count_buckets(tokens, kind, doc, pos):
+    """(B, T) -> (cb, rb) long: kelime konumunda ayni belgedeki (satir + doc) onceki gecis sayisi c ve son gecise uzaklik r
+    (pos farki) kovasi; yalniz gecmis.  Kelime olmayan konum 0 / 0.  pos: belge ici gercek sira (summaries_last'te real_pos)."""
+    B, T = tokens.shape
+    dev = tokens.device
+    w = (kind == TOKEN).reshape(-1)
+    tok = torch.where(w, tokens.reshape(-1), torch.full_like(tokens.reshape(-1), -1))
+    row = torch.arange(B, device=dev).repeat_interleave(T)
+    d, p = doc.reshape(-1).long(), pos.reshape(-1).long()
+    o = torch.argsort(p, stable=True)                                   # (row, doc, token, pos) sirasi: kararli siralamalar
+    for key in (tok, d, row):
+        o = o[torch.argsort(key[o], stable=True)]
+    st, sd, sr, sp = tok[o], d[o], row[o], p[o]
+    same = torch.zeros_like(st, dtype=torch.bool)
+    same[1:] = (st[1:] == st[:-1]) & (sd[1:] == sd[:-1]) & (sr[1:] == sr[:-1])
+    idx = torch.arange(len(st), device=dev)
+    c = idx - torch.where(same, torch.zeros_like(idx), idx).cummax(0).values
+    r = torch.zeros_like(sp)
+    r[1:] = sp[1:] - sp[:-1]
+    cb = torch.bucketize(c, torch.tensor(COUNT_C, device=dev), right=True)
+    rb = torch.where(same, torch.bucketize(r, torch.tensor(COUNT_R, device=dev), right=True) + 1, torch.zeros_like(r))
+    oc, orr = torch.empty_like(cb), torch.empty_like(rb)
+    oc[o], orr[o] = cb, rb
+    return (oc * w).view(B, T), (orr * w).view(B, T)
+
+
+def count_bucket_one(c, r):
+    """Tek konum (uretim): c onceki gecis sayisi, r son gecise uzaklik (None: yok) -> (cb, rb), count_buckets ile ayni kovalar."""
+    cb = sum(c >= x for x in COUNT_C)
+    return cb, (0 if r is None else 1 + sum(r >= x for x in COUNT_R))
+
+
 def story_positions(kind):
     """(B, T) gercek hikaye ici konum: sutun - hikayenin BOS sutunu (= transformer duzeninin pos'u; Z_k END'in yerinde).
     Dolgu son BOS'tan sayar (dolgu yalniz dolguyu gorur)."""
@@ -339,7 +375,7 @@ class Block(torch.nn.Module):
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
                  attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, mlp_ratio=(),
-                 local_kv_heads=0, mix_g_heads=0, mix_kv=(), g_layout="top"):
+                 local_kv_heads=0, mix_g_heads=0, mix_kv=(), g_layout="top", count_feat=False):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -407,10 +443,19 @@ class SentenceTransformer(torch.nn.Module):
         with torch.no_grad():
             self.E.weight[VOCAB:].zero_()
         self.ngram, self.ngram_seen = None, None
+        self.count_feat = bool(count_feat)                              # kullanici, 12 Ekim: sayma "yaz"
+        if self.count_feat:                                             # sifir tablolar (RNG cekmeden): ilk agirlikta sayimsiz model
+            assert not self.carry_group, "count_feat: carry ile yok (parcalar belgeyi boler)"
+            self.count_c = torch.nn.Embedding(len(COUNT_C) + 1, d, _weight=torch.zeros(len(COUNT_C) + 1, d))
+            self.count_r = torch.nn.Embedding(len(COUNT_R) + 2, d, _weight=torch.zeros(len(COUNT_R) + 2, d))
         self.ngram_layers, self.ngram_sparse = int(ngram_layers) or layers, bool(ngram_sparse)
         if ngram_rows:                                                  # sifir tablo, lambda 0,1 (kayit #1)
             self.ngram = torch.nn.Embedding(int(ngram_rows), d, _weight=torch.zeros(int(ngram_rows), d))
             self.ngram_lambdas = torch.nn.Parameter(torch.full((self.ngram_layers,), 0.1))
+
+    def _count_vec(self, cb, rb, is_token):
+        """Sayma vektoru: count_c[cb] + count_r[rb], yalniz kelime konumlarinda."""
+        return (self.count_c(cb) + self.count_r(rb)) * is_token[..., None].to(self.count_c.weight.dtype)
 
     def _ngram(self, tokens, prev, is_token):
         """Bigram vektoru (..., d): tablo[bigram_ids(tokens, prev)], yalniz is_token konumlarinda (Z / BOS / dolgu 0).
@@ -444,6 +489,9 @@ class SentenceTransformer(torch.nn.Module):
         last = getattr(batch, "real_pos", None) is not None
         mfn = self._masks(last)
         x = self.E(torch.where(batch.kind == ZTOK, torch.full_like(batch.tokens, END_ID), batch.tokens))
+        if self.count_feat:
+            cpos = batch.real_pos if last else torch.arange(T, device=dev).expand(B, T)
+            x = x + self._count_vec(*count_buckets(batch.tokens, batch.kind, batch.doc, cpos), batch.kind == TOKEN)
         g = None if self.ngram is None else self._ngram(
             batch.tokens, bigram_prev(batch.tokens, batch.kind, batch.doc, batch.sent), batch.kind == TOKEN)
         add = (lambda x_, l: x_) if g is None else (  # noqa: E731
@@ -643,6 +691,7 @@ class SummaryCache:
         self.n_z, self.i, self.t = 0, 0, 0
         self.piece, self.used, self.gkind = 0, 1, []                       # carry: parca no, parcadaki konum, glob tur
         self.prev = END_ID                                                  # bigram: cumledeki onceki token (yoksa END)
+        self.cnt = {}                                                       # sayma: token -> (gecis sayisi, son gercek konum)
         x = model.E(torch.tensor([[EOS_ID]], device=self.dev))              # BOS = EOS token'i (belge 21 s1)
         self.logits = self._out(self._step(x, 0, read_sentence=False, summary=True), summary=True)
 
@@ -683,7 +732,7 @@ class SummaryCache:
         Yerel bloklar model_z_read_mask + mantiksal konum, global bloklar tam causal + gercek konum (egitimle ayni dense
         maske); ozet = BOS + Z'lerin K/V'si, global = butun konumlar; cumle onbellegi bos (son Z_k'den sonra)."""
         assert self.t == 0 and self.n_z == 0 and self.i == 0, "prefill yalniz yeni onbellekte"
-        if self.m.carry_group:                                           # carry: parca sinirlari token token yolda
+        if self.m.carry_group or self.m.count_feat:                      # carry: parca sinirlari / sayma: token token yolda
             for x_ in sents:
                 for t_ in x_:
                     self.append_token(t_)
@@ -726,6 +775,12 @@ class SummaryCache:
         self.i += 1
         self.t += 1
         x = self.m.E(torch.tensor([[token]], device=self.dev))
+        if self.m.count_feat:                                           # egitimle ayni kova: gercek konum self.t
+            c, last = self.cnt.get(token, (0, None))
+            cb, rb = count_bucket_one(c, None if last is None else self.t - last)
+            self.cnt[token] = (c + 1, self.t)
+            x = x + self.m._count_vec(torch.tensor([[cb]], device=self.dev), torch.tensor([[rb]], device=self.dev),
+                                      torch.ones(1, 1, dtype=torch.bool, device=self.dev))
         g = None
         if self.m.ngram is not None:
             g = self.m._ngram(torch.tensor([[token]], device=self.dev), torch.tensor([[self.prev]], device=self.dev),
@@ -877,7 +932,7 @@ class StaticCache:
 
     @staticmethod
     def supports(model):
-        return not model.carry_group
+        return not model.carry_group and not getattr(model, "count_feat", False)
 
     def __init__(self, model, positions, sentences, sentence_tokens):
         assert StaticCache.supports(model), "StaticCache: carry desteklenmez (SummaryCache)"

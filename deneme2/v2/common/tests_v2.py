@@ -996,6 +996,7 @@ def t_train():
         _train_finish(base, out, TR)
         _train_gqa_default(base, out, TR)
         _train_ngram(base, data, out, TR)
+        _train_count(base, data, out, TR)
         import copy                                                     # epok sonu eksik batch dolgusu (8 Ekim)
         import types
         import recipe as R
@@ -1128,6 +1129,32 @@ def _train_gqa_default(base, out, TR):
         check("train GQA varsayilan", False, traceback.format_exc(limit=3))
     finally:
         TR.GLOB_KV_DEFAULT = pinned
+
+
+def _train_count(base, data, out, TR):
+    """--count_feat (deneme/count): Model Z (L4 / G2 interleave, NorMuon) 2 epok kosar, kayip sonlu; kimlikte count_feat 1; sayma
+    tablolari agent.pt'de ve egitilmis; kesilip surdurulen = kesintisiz (bit); load_run kurar; transformer / carry DURUR."""
+    import traceback
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
+        import generate_readings as GR
+        cmd = base + ["--model", "model_z", "--layers", "4", "--global_layers", "2", "--epochs", "2", "--count_feat", "1",
+                      "--optimizer", "normuon"]
+        a = TR.main(cmd + ["--out", out("cnt_A")])
+        stopped, r = _cut_and_resume(TR, cmd, out("cnt_cut"))
+        st_ = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        sa, sb = st_(out("cnt_A")), st_(out("cnt_cut"))
+        m, idt = GR.load_run(out("cnt_A"), data, torch.device("cpu"))
+        bad = [_exit_msg(TR.main, base + x + ["--out", out("cnt_bad%d" % i)]) for i, x in enumerate((
+            ["--model", "transformer", "--count_feat", "1"], ["--model", "model_z", "--count_feat", "1", "--carry_summaries", "1"]))]
+        check("train --count_feat 1 (NorMuon): kosar, kayip sonlu, kimlikte; sayma tablolari egitilmis; kesilip surdurulen = "
+              "kesintisiz (bit); load_run kurar; transformer / carry DURUR",
+              a["finished"] and all(math.isfinite(x["loss"]) for x in a["log"]) and idt["count_feat"] == 1
+              and bool(sa["count_c.weight"].any()) and bool(sa["count_r.weight"].any()) and stopped
+              and all(torch.equal(sa[k], sb[k]) for k in sa) and [x["loss"] for x in r["log"]] == [x["loss"] for x in a["log"]]
+              and m.count_feat and all(b_ is not None and "count_feat" in b_ for b_ in bad), str(bad))
+    except Exception:  # noqa: BLE001
+        check("train --count_feat", False, traceback.format_exc(limit=3))
 
 
 def _train_ngram(base, data, out, TR):

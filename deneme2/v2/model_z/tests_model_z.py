@@ -1664,10 +1664,77 @@ def t_interleave():
           "top farki %.1e, summaries_last %.1e, onbellek %.1e" % (diff, d_last, d_cache))
 
 
+def t_count():
+    """deneme/count: (a) count_buckets = dongulu basvuru (ayni satir + belge, yalniz gecmis, c ve r kovalari), summaries_last
+    sirasinda real_pos ile ayni; (b) sifir tablolar = sayimsiz model (hidden bit); (c) dolu tablolarla SummaryCache adim adim
+    = tam ileri gecis, prefill = token token, StaticCache desteklenmez."""
+    from model import StaticCache, summaries_last, count_buckets, count_bucket_one
+    rng = np.random.default_rng(13)
+    stories = [[[int(x) for x in rng.integers(3, 12, rng.integers(1, 9))] for _ in range(rng.integers(1, 6))]
+               for _ in range(12)]                                      # kucuk sozluk: tekrar bol
+    rows = [list(range(i, i + 4)) for i in range(0, 12, 4)]
+    batch = real_batch(rows, 200, stories)
+    cb, rb = count_buckets(batch.tokens, batch.kind, batch.doc, torch.arange(batch.tokens.shape[1]).expand_as(batch.tokens))
+    ok_ref = True
+    for b in range(batch.tokens.shape[0]):
+        seen = {}
+        for t in range(batch.tokens.shape[1]):
+            if int(batch.kind[b, t]) != TOKEN:
+                ok_ref &= int(cb[b, t]) == 0 and int(rb[b, t]) == 0
+                continue
+            key = (int(batch.doc[b, t]), int(batch.tokens[b, t]))
+            c, last = seen.get(key, (0, None))
+            ok_ref &= (int(cb[b, t]), int(rb[b, t])) == count_bucket_one(c, None if last is None else t - last)
+            seen[key] = (c + 1, t)
+    pb, perm = summaries_last(batch)
+    cb2, rb2 = count_buckets(pb.tokens, pb.kind, pb.doc, pb.real_pos)
+    inv = torch.argsort(perm, 1)
+    ok_last = torch.equal(cb2.gather(1, inv), cb) and torch.equal(rb2.gather(1, inv), rb)
+    check("count (a): count_buckets = dongulu basvuru (ayni belge, yalniz gecmis; kelime disi 0), summaries_last sirasinda ayni",
+          ok_ref and ok_last and int((rb > 0).sum()) > 10, "tekrarli konum %d" % int((rb > 0).sum()))
+    kw = dict(d=32, layers=4, heads=2, global_layers=2, g_layout="interleave", glob_kv_heads=1, mlp_ratio=(1.0, 4.0), g_nope=1)
+    torch.manual_seed(0)
+    base = SentenceTransformer(**kw).eval()
+    torch.manual_seed(0)
+    cm = SentenceTransformer(**kw, count_feat=True).eval()
+    same_w = all(torch.equal(p, cm.state_dict()[k]) for k, p in base.state_dict().items())
+    with torch.no_grad():
+        d0 = float((cm._batch_hidden(batch) - base._batch_hidden(batch)).abs().max())
+        g = torch.Generator().manual_seed(3)
+        cm.count_c.weight.normal_(0, 0.5, generator=g)
+        cm.count_r.weight.normal_(0, 0.5, generator=g)
+        d1 = float((cm._batch_hidden(batch) - base._batch_hidden(batch)).abs().max())
+        d_last = float((cm._batch_hidden(batch) - cm._batch_hidden(pb).gather(1, inv[..., None].expand(-1, -1, 32))).abs().max())
+    check("count (b): sifir tablolar = sayimsiz model (agirlik ve hidden bit); dolu tablolar farkli; summaries_last ayni",
+          same_w and d0 == 0.0 and d1 > 1e-4 and d_last < 1e-5, "sifir %.1e, dolu %.1e, summaries_last %.1e" % (d0, d1, d_last))
+    with torch.no_grad():
+        lg_full, _ = full_logits(cm, batch)
+        got = []
+        for row in rows:
+            for si in row:
+                c = SummaryCache(cm)
+                got.append(c.prefill([])[None].clone())
+                for s in stories[si]:
+                    for t in s:
+                        got.append(c.append_token(t)[None].clone())
+                    got.append(c.close_sentence()[None].clone())
+        dc = float((torch.cat(got) - lg_full).abs().max())
+        a, b_ = SummaryCache(cm), SummaryCache(cm)
+        la = a.prefill(stories[0][:3])
+        b_.prefill([])
+        for s in stories[0][:3]:
+            for t in s:
+                b_.append_token(t)
+            lb = b_.close_sentence()
+        dp = float((la - lb).abs().max())
+    check("count (c): SummaryCache adim adim = tam ileri gecis (fp32 < 1e-5), prefill = token token, StaticCache desteklenmez",
+          dc < 1e-5 and dp < 1e-5 and not StaticCache.supports(cm), "onbellek %.1e, prefill %.1e" % (dc, dp))
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab,
              limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast,
-             combo=t_combo, mix=t_mix, interleave=t_interleave)
+             combo=t_combo, mix=t_mix, interleave=t_interleave, count=t_count)
 
 if __name__ == "__main__":
     if SIDE is not None:
