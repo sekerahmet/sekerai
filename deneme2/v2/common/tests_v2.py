@@ -997,6 +997,7 @@ def t_train():
         _train_gqa_default(base, out, TR)
         _train_ngram(base, data, out, TR)
         _train_pmi(base, data, out, TR)
+        _train_gshare(base, data, out, TR)
         import copy                                                     # epok sonu eksik batch dolgusu (8 Ekim)
         import types
         import recipe as R
@@ -1129,6 +1130,50 @@ def _train_gqa_default(base, out, TR):
         check("train GQA varsayilan", False, traceback.format_exc(limit=3))
     finally:
         TR.GLOB_KV_DEFAULT = pinned
+
+
+def _train_gshare(base, data, out, TR):
+    """--grad_share (deneme/grad-share): (a) grad_share_apply = elle (E.grad[komsu] += katsayi E.grad[a], ozgun gradyandan;
+    bos komsu katsayi 0); (b) kosar, kimlikte sha / eta, agent.pt'de ek anahtar yok (model YYG ile ayni yapi); eta 0 = tablosuz
+    kosu (bit); eta 1 farkli; kesilip surdurulen = kesintisiz (bit); olmayan dosya DURUR."""
+    import traceback
+    try:
+        g = np.random.default_rng(5)
+        tab = os.path.join(out("gs_tab"), "gs.npz")
+        os.makedirs(os.path.dirname(tab), exist_ok=True)
+        nbr = g.integers(0, D.VOCAB, (D.VOCAB, 3)).astype(np.int32)
+        nbr[::5, 2] = -1
+        w = g.random((D.VOCAB, 3)).astype(np.float32)
+        cnt = g.integers(0, 5000, D.VOCAB).astype(np.int64)
+        np.savez(tab, nbr=nbr, nbr_w=w, counts=cnt, meta="{}")
+        tb = TR.grad_share_tables(tab, 0.7, torch.device("cpu"))
+        E = torch.nn.Parameter(torch.zeros(D.VOCAB + 46, 8))
+        E.grad = torch.randn(D.VOCAB + 46, 8, generator=torch.Generator().manual_seed(1))
+        want = E.grad.clone()
+        g0 = E.grad[:D.VOCAB].clone().double()
+        beta = 1000.0 / (1000.0 + cnt.astype(np.float64))
+        for k in range(3):
+            c = torch.from_numpy(np.where(nbr[:, k] >= 0, 0.7 * beta * w[:, k], 0.0))
+            want.index_add_(0, torch.from_numpy(np.maximum(nbr[:, k], 0).astype(np.int64)), (g0 * c[:, None]).float())
+        TR.grad_share_apply(E, tb)
+        d_a = float((E.grad - want).abs().max())
+        cmd = base + ["--model", "model_z", "--layers", "4", "--global_layers", "2", "--epochs", "2", "--optimizer", "normuon"]
+        z = TR.main(cmd + ["--out", out("gs_none")])
+        a0 = TR.main(cmd + ["--grad_share", tab, "--grad_share_eta", "0", "--out", out("gs_eta0")])
+        a = TR.main(cmd + ["--grad_share", tab, "--out", out("gs_A")])
+        stopped, r = _cut_and_resume(TR, cmd + ["--grad_share", tab], out("gs_cut"))
+        st_ = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        sz, s0, sa, sb = st_(out("gs_none")), st_(out("gs_eta0")), st_(out("gs_A")), st_(out("gs_cut"))
+        bad = _exit_msg(TR.main, cmd + ["--grad_share", tab + ".yok", "--out", out("gs_bad")])
+        check("train --grad_share: (a) dagitma = elle (fark %.1e); (b) kimlikte sha / eta 1, agent.pt anahtarlari tablosuz ile "
+              "ayni; eta 0 = tablosuz (bit); eta 1 farkli; kesilip surdurulen = kesintisiz (bit); olmayan dosya DURUR" % d_a,
+              d_a < 1e-5 and a["finished"] and a["identity"]["grad_share_eta"] == 1.0 and a["identity"]["grad_share_sha256"]
+              and set(sa) == set(sz) and all(torch.equal(sz[k], s0[k]) for k in sz)
+              and not torch.equal(sz["E.weight"], sa["E.weight"]) and stopped and all(torch.equal(sa[k], sb[k]) for k in sa)
+              and [x["loss"] for x in r["log"]] == [x["loss"] for x in a["log"]] and bad is not None and "grad_share" in bad,
+              str(bad))
+    except Exception:  # noqa: BLE001
+        check("train --grad_share", False, traceback.format_exc(limit=4))
 
 
 def _train_pmi(base, data, out, TR):
