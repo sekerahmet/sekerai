@@ -233,6 +233,10 @@ def _attend(q, k, v, attn):
         ("BLOCK_M", "BLOCK_N", "BLOCK_M1", "BLOCK_N1", "BLOCK_M2", "BLOCK_N2"), bs), **gqa)
 
 
+PMI_VEC_SCALE = 0.02   # vec: rms(PMI) x E'nin ilk olcegi (12 Ekim olcum: olceksiz vec 400. adimdan sonra +0,06-0,08 geride; Adam
+                       # sifir izdusumu eleman basina lr adimla buyutur, ~1 boylu girdi E'yi (eleman ~0,02) bastirir)
+
+
 class _BagBF16(torch.autograd.Function):
     """Gradyanli komsu torbasi (kullanici, 12 Ekim: "şimdi düzelt"): ileri bf16 embedding_bag; geri E'ye fp32 seyrek carpim
     (sik komsuda binlerce katki bf16'da toplanmaz), per_sample_weights'e (mu) gradyan <g, E(komsu)>."""
@@ -472,7 +476,7 @@ class SentenceTransformer(torch.nn.Module):
         x = self.E(tokens)
         if self.pmi_dim:
             p = self.pmi_table[tokens.clamp(0, VOCAB - 1)]
-            p = self.pmi_proj(F.rms_norm(p, (p.shape[-1],)).to(x.dtype))
+            p = self.pmi_proj((F.rms_norm(p, (p.shape[-1],)) * PMI_VEC_SCALE).to(x.dtype))   # E eleman olcegi
         elif self.pmi_k and self.pmi_at < 0 and not self.pmi_share:
             p = self._pmi_lam(tokens) * self._pmi_raw(tokens, x.is_cuda)
         else:
