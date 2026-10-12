@@ -233,6 +233,31 @@ def _attend(q, k, v, attn):
         ("BLOCK_M", "BLOCK_N", "BLOCK_M1", "BLOCK_N1", "BLOCK_M2", "BLOCK_N2"), bs), **gqa)
 
 
+class _BagBF16(torch.autograd.Function):
+    """Gradyanli komsu torbasi (kullanici, 12 Ekim: "şimdi düzelt"): ileri bf16 embedding_bag; geri E'ye fp32 seyrek carpim
+    (sik komsuda binlerce katki bf16'da toplanmaz), per_sample_weights'e (mu) gradyan <g, E(komsu)>."""
+
+    @staticmethod
+    def forward(ctx, W, nb, w):
+        ctx.save_for_backward(nb, w)
+        ctx.W = W
+        return F.embedding_bag(nb, W.to(torch.bfloat16), per_sample_weights=w.to(torch.bfloat16), mode="sum").float()
+
+    @staticmethod
+    def backward(ctx, g):
+        nb, w = ctx.saved_tensors
+        N, K = nb.shape
+        g = g.float().contiguous()
+        gW = gw = None
+        if ctx.needs_input_grad[0]:
+            idx = torch.stack([nb.reshape(-1), torch.arange(N, device=g.device).repeat_interleave(K)])
+            A = torch.sparse_coo_tensor(idx, w.reshape(-1).float(), (ctx.W.shape[0], N)).coalesce()
+            gW = torch.sparse.mm(A, g)
+        if ctx.needs_input_grad[2]:
+            gw = torch.einsum("nkd,nd->nk", ctx.W.detach()[nb].to(torch.bfloat16), g.to(torch.bfloat16)).float()
+        return gW, None, gw
+
+
 class Block(torch.nn.Module):
     def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0, nope=False, g_heads=0, g_kv_heads=0):
         """kv_heads (GQA; varsayilan heads): k / v head sayisi, heads'in boleni; qkv d -> d + 2 d kv / heads.  nope: RoPE yok.
@@ -455,6 +480,8 @@ class SentenceTransformer(torch.nn.Module):
         nb, w = self.pmi_nbr[t], self.pmi_w[t]
         if self.pmi_mu is not None:                                      # komsunun kendi faydasi (her torbada ayni)
             w = w * self.pmi_mu[nb]
+        if not self.pmi_detach and (cuda or getattr(self, "pmi_bf16_cpu", False)):   # gradyanli: bf16 ileri, fp32 geri
+            return _BagBF16.apply(W, nb, w).view(*tokens.shape, -1)
         return F.embedding_bag(nb, W, per_sample_weights=w.to(W.dtype), mode="sum").view(*tokens.shape, -1).float()
 
     def _pmi_lam(self, tokens):
@@ -462,18 +489,20 @@ class SentenceTransformer(torch.nn.Module):
         return self.pmi_lambda[t][..., None] if self.pmi_lambda.dim() else self.pmi_lambda
 
     def _pmi_late(self, tokens, is_token):
-        """pmi_at >= 0: lambda_a torba / |torba| (yalniz kelime konumlari), yoksa None; _late blok pmi_at girisinde ekler."""
+        """pmi_at >= 0: (torba, olcek) -- olcek = lambda_a / |torba| (kelime konumu disinda 0), yoksa None; _late blok pmi_at
+        girisinde x + torba olcek |x| ekler (buyuk tensorde tek carpim; ayri normalize kopyasi yok)."""
         if not self.pmi_k or self.pmi_at < 0:
             return None
         p = self._pmi_raw(tokens, tokens.is_cuda)
-        p = p / p.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-        return self._pmi_lam(tokens) * p * is_token[..., None].to(p.dtype)
+        s = self._pmi_lam(tokens) * is_token[..., None].to(p.dtype) / p.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        return p, s
 
     def _late(self, x, l, pb):
-        """Blok l girisi: pmi_at'te x + pb |x| (akisin boyu sabit olcek: gradyan pb'ye)."""
+        """Blok l girisi: pmi_at'te x + torba lambda_a |x| / |torba| (akisin boyu sabit olcek: gradyan torba ve lambda'ya)."""
         if pb is None or l != self.pmi_at:
             return x
-        return x + (pb * x.detach().float().norm(dim=-1, keepdim=True)).to(x.dtype)
+        p, s = pb
+        return x + (p * (s * x.detach().norm(dim=-1, keepdim=True).float())).to(x.dtype)
 
     def _ngram(self, tokens, prev, is_token):
         """Bigram vektoru (..., d): tablo[bigram_ids(tokens, prev)], yalniz is_token konumlarinda (Z / BOS / dolgu 0).

@@ -1708,11 +1708,25 @@ def t_pmi():
             only_words = float(e[0, 1].abs().max()) == 0.0 and float(e[0, 0].abs().max()) > 0
             if mode == "bag-late":                                      # giris torbasiz; blok 3 girisi = x + lambda |x| torba / |torba|
                 pb = pm._pmi_late(tok, torch.tensor([[True, False, True]]))
+                pm2 = mk(pmi_k=3, pmi_mu=True)                           # gradyanli bf16 yolu (CUDA) = fp32 yol: deger ve gradyan
+                pm2.pmi_nbr.copy_(pm.pmi_nbr)
+                pm2.pmi_w.copy_(pm.pmi_w)
+                pm2.pmi_mu.copy_(torch.rand(pm2.pmi_mu.shape, generator=g) + 0.5)
+                grads = []
+                for fast in (False, True):
+                    pm2.zero_grad()
+                    pm2.pmi_bf16_cpu = fast
+                    with torch.enable_grad():
+                        r_ = pm2._pmi_raw(torch.tensor([[5, 6, 7, 5]]), False)
+                        (r_ * torch.linspace(-1, 1, 32)).sum().backward()
+                    grads.append((r_.detach(), pm2.E.weight.grad.clone(), pm2.pmi_mu.grad.clone()))
+                pm2.pmi_bf16_cpu = False
+                fast_ok = all(float((a - b).abs().max()) <= 2e-2 * float(a.abs().max()) for a, b in zip(*grads))
                 raw = (pm.pmi_w[5][:, None] * pm.E.weight[pm.pmi_nbr[5]]).sum(0)
                 xr = torch.randn(1, 3, 32, generator=g)
                 xl = pm._late(xr, 3, pb)
                 only_words = float(e.abs().max()) == 0.0 and pm._late(xr, 2, pb) is xr and float((xl - xr)[0, 1].abs().max()) == 0.0 \
-                    and float((xl[0, 0] - xr[0, 0] - 0.7 * xr[0, 0].norm() * raw / raw.norm()).abs().max()) < 1e-5
+                    and float((xl[0, 0] - xr[0, 0] - 0.7 * xr[0, 0].norm() * raw / raw.norm()).abs().max()) < 1e-5 and fast_ok
             elif mode != "vec":                                         # torba = elle sum_k (mu_k) w_k E(komsu_k)
                 if mode == "bag-mu":
                     pm.pmi_mu.copy_(torch.rand(pm.pmi_mu.shape, generator=g) + 0.5)
