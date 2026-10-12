@@ -1157,6 +1157,12 @@ def _train_gshare(base, data, out, TR):
             want.index_add_(0, torch.from_numpy(np.maximum(nbr[:, k], 0).astype(np.int64)), (g0 * c[:, None]).float())
         TR.grad_share_apply(E, tb)
         d_a = float((E.grad - want).abs().max())
+        wv = np.where(nbr >= 0, w, 0.0).astype(np.float64)               # needtrust: 4 m n / (m + n)^2, hacim fixed1000'e esit
+        m_ = np.median(cnt[cnt > 0].astype(np.float64))
+        bn = 4 * m_ * cnt / (m_ + cnt) ** 2
+        bn = bn * (cnt * beta * wv.sum(1)).sum() / (cnt * bn * wv.sum(1)).sum()
+        tn = TR.grad_share_tables(tab, 0.7, torch.device("cpu"), "needtrust")
+        d_n = float((tn[1].double() - torch.from_numpy(0.7 * bn[:, None] * wv)).abs().max())
         cmd = base + ["--model", "model_z", "--layers", "4", "--global_layers", "2", "--epochs", "2", "--optimizer", "normuon"]
         z = TR.main(cmd + ["--out", out("gs_none")])
         a0 = TR.main(cmd + ["--grad_share", tab, "--grad_share_eta", "0", "--out", out("gs_eta0")])
@@ -1165,12 +1171,14 @@ def _train_gshare(base, data, out, TR):
         st_ = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
         sz, s0, sa, sb = st_(out("gs_none")), st_(out("gs_eta0")), st_(out("gs_A")), st_(out("gs_cut"))
         bad = _exit_msg(TR.main, cmd + ["--grad_share", tab + ".yok", "--out", out("gs_bad")])
+        nt = TR.main(cmd + ["--grad_share", tab, "--grad_share_beta", "needtrust", "--steps", "3", "--out", out("gs_nt")])
         check("train --grad_share: (a) dagitma = elle (fark %.1e); (b) kimlikte sha / eta 1, agent.pt anahtarlari tablosuz ile "
               "ayni; eta 0 = tablosuz (bit); eta 1 farkli; kesilip surdurulen = kesintisiz (bit); olmayan dosya DURUR" % d_a,
-              d_a < 1e-5 and a["finished"] and a["identity"]["grad_share_eta"] == 1.0 and a["identity"]["grad_share_sha256"]
+              d_a < 1e-5 and d_n < 1e-5 and a["finished"] and a["identity"]["grad_share_eta"] == 1.0 and a["identity"]["grad_share_sha256"]
               and set(sa) == set(sz) and all(torch.equal(sz[k], s0[k]) for k in sz)
               and not torch.equal(sz["E.weight"], sa["E.weight"]) and stopped and all(torch.equal(sa[k], sb[k]) for k in sa)
-              and [x["loss"] for x in r["log"]] == [x["loss"] for x in a["log"]] and bad is not None and "grad_share" in bad,
+              and [x["loss"] for x in r["log"]] == [x["loss"] for x in a["log"]] and bad is not None and "grad_share" in bad
+              and nt["identity"]["grad_share_beta"] == "needtrust" and a["identity"]["grad_share_beta"] == "fixed1000",
               str(bad))
     except Exception:  # noqa: BLE001
         check("train --grad_share", False, traceback.format_exc(limit=4))
