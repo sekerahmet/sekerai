@@ -1,5 +1,5 @@
 """make_pmi -- egitim cumlelerinden sabit PMI tablosu (deneme/pmi): cumle ici butun kelime ciftleri sayilir, PPMI =
-max(0, log P(a, b) / (P(a) P_0.75(b))) (baglam dagilimi 0,75 yumusatmali; Levy, Goldberg & Dagan 2015), kelime basina en yakin
+max(0, log P(a, b) / (P(a) P_0.75(b)) - shift) (kaydirilmis, varsayilan log 5; aynı kelimenin BPE parcalari cift sayilmaz) (baglam dagilimi 0,75 yumusatmali; Levy, Goldberg & Dagan 2015), kelime basina en yakin
 K komsu + agirlik (ham PPMI / kuresel olcek: satir toplami 1 degil); yaninda SVD ile 64'luk vektor.  Kullanici, 12 Ekim: "n-gram gibi ama sabit bir tablo gibi baştan okunan";
 "PMI aslında bir kelimeye yakın 10 20 kelimeyi verebiliyor".  Yalniz train bolumu (sinav valid'den; kural 14).
 
@@ -28,9 +28,9 @@ def log(*a):
     print("[%7.1f sn]" % (time.time() - T0), *a, flush=True)
 
 
-def sentence_pairs(tok, lens, dev):
+def sentence_pairs(tok, lens, dev, wid=None):
     """Cumle parcasi (token'lar ardisik, boylar lens) -> ayni cumledeki butun sirali (a, b) ciftleri, a != konum b (pencere =
-    cumle).  Cift sayisi sum L (L - 1)."""
+    cumle).  Cift sayisi sum L (L - 1).  wid (konum basina kelime kimligi) verilirse ayni kelimenin BPE parcalari cift sayilmaz."""
     tok, lens = torch.as_tensor(tok, device=dev), torch.as_tensor(lens, device=dev)
     sid = torch.repeat_interleave(torch.arange(len(lens), device=dev), lens)
     start = torch.cumsum(lens, 0) - lens
@@ -39,7 +39,22 @@ def sentence_pairs(tok, lens, dev):
     k = torch.arange(len(src), device=dev) - torch.repeat_interleave(torch.cumsum(per, 0) - per, per)
     i = src - start[sid[src]]                                            # kaynagin cumle icindeki sirasi
     j = k + (k >= i).long()                                              # kendisi haric
-    return tok[src], tok[start[sid[src]] + j]
+    dst = start[sid[src]] + j
+    if wid is not None:
+        wid = torch.as_tensor(wid, device=dev)
+        keep = wid[src] != wid[dst]                                      # " red" + "iscovered" = ayni kelime
+        src, dst = src[keep], dst[keep]
+    return tok[src], tok[dst]
+
+
+def word_starts(root):
+    """GPT-2 sozlugu -> token kelime basi mi (bosluk / satir / noktalama ile baslar); degilse onceki token'in devami."""
+    tk = json.load(open(os.path.join(root, "gpt2", "tokenizer.json"), encoding="utf-8"))
+    st = np.ones(D.VOCAB, bool)
+    for k_, v in tk["model"]["vocab"].items():
+        if v < D.VOCAB and k_ and k_[0].isalnum() and k_[0] not in "ĠĊĉ":   # bosluk / satir / sekme isaretleri harf sayilir
+            st[v] = False
+    return st
 
 
 def main(argv=None):
@@ -53,6 +68,8 @@ def main(argv=None):
     ap.add_argument("--dim", type=int, default=64, help="SVD vektor boyu")
     ap.add_argument("--min_pair", type=int, default=5, help="komsu icin en az birlikte gecme")
     ap.add_argument("--min_count", type=int, default=100, help="komsu olabilmek icin en az siklik (nadir gurultu)")
+    ap.add_argument("--shift", type=float, default=float(np.log(5)), help="kaydirilmis PPMI: max(0, PMI - shift) (Levy & Goldberg 2014)")
+    ap.add_argument("--same_word", type=int, default=0, help="0: ayni kelimenin BPE parcalari cift sayilmaz; 1: sayilir (eski)")
     ap.add_argument("--vocab", type=int, default=0, help="0: butun sozluk; N: yalniz en sik N token (sinama)")
     ap.add_argument("--chunk", type=int, default=200_000, help="parca basina cumle")
     ap.add_argument("--max_tokens", type=int, default=0, help="0: butun train; yoksa ilk N token'lik cumleler (sinama)")
@@ -80,6 +97,7 @@ def main(argv=None):
     rank = np.full(D.VOCAB, -1, np.int64)
     rank[keep] = np.arange(V)
     rank_t = torch.from_numpy(rank).to(dev)
+    starts = word_starts(root)
     log("cumle %d, token %d, sozluk %d, cihaz %s, sayim matrisi %.1f GB" % (len(sent), int(counts.sum()), V, dev, V * V * 4 / 1e9))
     C = torch.zeros(V * V, dtype=torch.int32, device=dev)
     n_pairs = 0
@@ -89,7 +107,9 @@ def main(argv=None):
         base = int(s[0, 0])
         pos = np.repeat(s[:, 0] - base, lens) + (np.arange(lens.sum()) - np.repeat(np.cumsum(lens) - lens, lens))
         tok = np.asarray(stream[base:int(s[-1, 1])]).astype(np.int64)[pos]
-        x, y = sentence_pairs(rank_t[torch.from_numpy(tok).to(dev)], lens, dev)
+        ws = starts[tok].copy()
+        ws[np.cumsum(lens) - lens] = True                               # cumle basi her zaman kelime basi
+        x, y = sentence_pairs(rank_t[torch.from_numpy(tok).to(dev)], lens, dev, None if a.same_word else np.cumsum(ws))
         ok = (x >= 0) & (y >= 0)
         u, c = torch.unique(x[ok] * V + y[ok], return_counts=True)
         C[u] += c.to(torch.int32)
@@ -106,7 +126,7 @@ def main(argv=None):
     w, nbr_r = torch.zeros(V, a.k, device=dev), torch.full((V, a.k), -1, dtype=torch.long, device=dev)
     for r0 in range(0, V, 4096):                                         # satir bloklari: ara matrisler kucuk kalir
         c = C[r0:r0 + 4096].float()
-        p = torch.where(c > 0, torch.log(c.clamp_min(1)) + lrow[r0:r0 + 4096, None] + lcol[None],
+        p = torch.where(c > 0, torch.log(c.clamp_min(1)) + lrow[r0:r0 + 4096, None] + lcol[None] - a.shift,
                         torch.zeros((), device=dev)).clamp_min(0)       # PPMI: log c(a,b) - log c(a) - log P_0.75(b)
         pmi[r0:r0 + 4096] = p
         sc = p.masked_fill(rare[None] | (c < a.min_pair), 0)            # komsu: sik ve en az min_pair kez birlikte
@@ -137,7 +157,7 @@ def main(argv=None):
         if i_ is not None and nbr[i_, 0] >= 0:
             log("komsu %r (torba agirligi %.2f): %s" % (w_, nbr_w[i_].sum(), ", ".join(
                 "%r %.2f" % (voc.get(int(b), b), nbr_pmi[i_, n]) for n, b in enumerate(nbr[i_]) if b >= 0)))
-    meta = dict(data=a.data, k=a.k, dim=a.dim, min_pair=a.min_pair, min_count=a.min_count, vocab=V, sentences=int(len(sent)),
+    meta = dict(data=a.data, k=a.k, shift=a.shift, same_word=a.same_word, dim=a.dim, min_pair=a.min_pair, min_count=a.min_count, vocab=V, sentences=int(len(sent)),
                 tokens=int(counts.sum()), pairs=int(n_pairs), svd_top=[float(x) for x in Sg[:5].cpu()], weight_scale=scale,
                 stream_sha256=json.load(open(os.path.join(a.data, "train_boundaries.json")))["stream_sha256"])
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
