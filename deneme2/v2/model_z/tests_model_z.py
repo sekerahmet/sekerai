@@ -1682,7 +1682,8 @@ def t_pmi():
         return SentenceTransformer(**{**kw, **extra}).eval()
     base = mk()
     g = torch.Generator().manual_seed(1)
-    for mode, extra in (("vec", dict(pmi_dim=4)), ("bag", dict(pmi_k=3)), ("bag-global", dict(pmi_k=3, pmi_word=False))):
+    for mode, extra in (("vec", dict(pmi_dim=4)), ("bag", dict(pmi_k=3)), ("bag-global", dict(pmi_k=3, pmi_word=False)),
+                        ("bag-detach", dict(pmi_k=3, pmi_detach=True))):
         pm = mk(**extra)
         bufs = ("pmi_table",) if mode == "vec" else ("pmi_nbr", "pmi_w")
         same_w = all(torch.equal(p, pm.state_dict()[k]) for k, p in base.state_dict().items())
@@ -1707,6 +1708,16 @@ def t_pmi():
             if mode != "vec":                                           # torba = elle sum_k w_k E(komsu_k)
                 ref = 0.7 * (pm.pmi_w[5][:, None] * pm.E.weight[pm.pmi_nbr[5]]).sum(0)
                 only_words &= float((e[0, 0] - ref).abs().max()) < 1e-6
+        if mode == "bag-detach":                                        # salt okuma: torbadan E'ye gradyan yok, lambda'ya var
+            pm.zero_grad()
+            with torch.enable_grad():
+                (pm._embed(tok, torch.tensor([[True, False, True]])) - pm.E(tok)).sum().backward()
+            only_words &= (pm.E.weight.grad is None or not bool(pm.E.weight.grad.any())) and bool(pm.pmi_lambda.grad.abs().sum() > 0)
+            pm.pmi_bf16_cpu = True                                      # bf16 okuma (CUDA yolu) = fp32 (bf16 hassasiyeti)
+            with torch.no_grad():
+                e16 = pm._embed(tok, torch.tensor([[True, False, True]])) - pm.E(tok)
+            pm.pmi_bf16_cpu = False
+            only_words &= float((e16 - e).abs().max()) <= 1e-2 * float(e.abs().max())
         check("pmi %s (a, b): ilk agirlikta PMI'siz modelle ayni agirlik ve hidden (bit), tablo buffer; dolu iken farkli, katki "
               "yalniz kelime konumlarinda%s" % (mode, ", torba = elle agirlikli toplam" if mode != "vec" else ""),
               same_w and buf_ok and d0 == 0.0 and d1 > 1e-4 and only_words, "sifir %.1e, dolu %.1e" % (d0, d1))

@@ -339,7 +339,7 @@ class Block(torch.nn.Module):
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
                  attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, mlp_ratio=(),
-                 local_kv_heads=0, mix_g_heads=0, mix_kv=(), g_layout="top", pmi_dim=0, pmi_k=0, pmi_word=True):
+                 local_kv_heads=0, mix_g_heads=0, mix_kv=(), g_layout="top", pmi_dim=0, pmi_k=0, pmi_word=True, pmi_detach=False):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -353,7 +353,7 @@ class SentenceTransformer(torch.nn.Module):
         pmi_proj (sifirdan, RNG cekmeden: ilk agirlikta model PMI'siz ile ayni) kelime konumlarinin girdisine.  pmi_k K: kelime
         basina K komsu + agirlik (buffer) -> lambda (sifirdan) x agirlikli komsu embedding toplami girdiye; pmi_word: lambda kelime
         basina (VOCAB sayi; kullanici, 12 Ekim: "doktor ve komşuları çok faydalı bilgiyken türkiye ve komşuları aynı faydada
-        olmayabilir"), degilse tek sayi."""
+        olmayabilir"), degilse tek sayi.  pmi_detach: torba komsularin E'sini salt okur (gradyan yok; CUDA'da bf16)."""
         super().__init__()
         self.carry_group, self.row_len = int(carry_group), ROW_LEN
         self.global_layers = int(global_layers)
@@ -415,7 +415,7 @@ class SentenceTransformer(torch.nn.Module):
         if ngram_rows:                                                  # sifir tablo, lambda 0,1 (kayit #1)
             self.ngram = torch.nn.Embedding(int(ngram_rows), d, _weight=torch.zeros(int(ngram_rows), d))
             self.ngram_lambdas = torch.nn.Parameter(torch.full((self.ngram_layers,), 0.1))
-        self.pmi_dim, self.pmi_k = int(pmi_dim), int(pmi_k)
+        self.pmi_dim, self.pmi_k, self.pmi_detach = int(pmi_dim), int(pmi_k), bool(pmi_detach)
         assert not (self.pmi_dim and self.pmi_k), "pmi: vektor (pmi_dim) ya da komsu listesi (pmi_k), ikisi birden degil"
         if self.pmi_dim:                                                # kullanici, 12 Ekim: "n-gram gibi ama sabit bir tablo"
             self.register_buffer("pmi_table", torch.zeros(VOCAB, 2 * self.pmi_dim))
@@ -435,8 +435,13 @@ class SentenceTransformer(torch.nn.Module):
             p = self.pmi_proj(F.rms_norm(p, (p.shape[-1],)).to(x.dtype))
         elif self.pmi_k:
             t = tokens.clamp(0, VOCAB - 1).reshape(-1)
-            p = F.embedding_bag(self.pmi_nbr[t], self.E.weight, per_sample_weights=self.pmi_w[t].to(self.E.weight.dtype),
-                                mode="sum").view(*tokens.shape, -1)
+            W = self.E.weight
+            if self.pmi_detach:                                         # salt okuma: komsulara gradyan yok (E tied: cikis rolu bozulmaz)
+                W = W.detach()
+                if x.is_cuda or getattr(self, "pmi_bf16_cpu", False):      # kullanici, 12 Ekim: "bf16 yap" (gradyan yok: bf16 toplama yok)
+                    W = W.to(torch.bfloat16)
+            p = F.embedding_bag(self.pmi_nbr[t], W, per_sample_weights=self.pmi_w[t].to(W.dtype),
+                                mode="sum").view(*tokens.shape, -1).float()
             p = (self.pmi_lambda[t].view(*tokens.shape, 1) if self.pmi_lambda.dim() else self.pmi_lambda) * p
         else:
             return x
