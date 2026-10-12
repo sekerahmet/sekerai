@@ -998,6 +998,7 @@ def t_train():
         _train_gqa_default(base, out, TR)
         _train_ngram(base, data, out, TR)
         _train_z3(base, data, out, TR)
+        _train_som(base, data, out, TR)
         import copy                                                     # epok sonu eksik batch dolgusu (8 Ekim)
         import types
         import recipe as R
@@ -1203,6 +1204,64 @@ def _train_z3(base, data, out, TR):
               "%s | bayraksiz surdurme %s | %s | %s" % (bad, same_c, bad_tf, bad_g0))
     except Exception:  # noqa: BLE001
         check("train Model Z3", False, traceback.format_exc(limit=4))
+
+
+def _train_som(base, data, out, TR):
+    """deneme/som: neuron_smooth = elle dongu; takvim (yaricap dogrusal iner, komsu kutlesi mass x r / r0, evre sonunda
+    kapali); --neuron_share 0 = bayraksiz (bit); grad ve update kipinde agirlik paylasimsizdan farkli, kesilip surdurulen =
+    kesintisiz (bit), update kipi adim boyunu (Frobenius) korur; transformer DURUR."""
+    import traceback
+    try:
+        g = torch.Generator().manual_seed(3)
+        X = torch.randn(40, 7, generator=g)
+        want = X.clone()
+        for o in range(1, 4):
+            k = 0.3 * math.exp(-(o / 3) ** 2)
+            want[o:] += k * X[:-o]
+            want[:-o] += k * X[o:]
+        d_s = float((TR.neuron_smooth(X, 0.3, 3) - want).abs().max())
+        b0, r0 = TR.neuron_share_now(0, 100, 1.0, 8, 0.2)
+        b1, r1 = TR.neuron_share_now(10, 100, 1.0, 8, 0.2)
+        off = TR.neuron_share_now(20, 100, 1.0, 8, 0.2)
+        mass = lambda b, r: b * sum(2 * math.exp(-(o / r) ** 2) for o in range(1, r + 1))  # noqa: E731
+        sched = r0 == 8 and r1 == 4 and abs(mass(b0, r0) - 1) < 1e-9 and abs(mass(b1, r1) - 0.5) < 1e-9 and off == (0.0, 0)
+        cmd = base + ["--model", "model_z", "--layers", "3", "--global_layers", "1", "--epochs", "2"]
+        som = ["--neuron_share_radius", "4", "--neuron_share_frac", "1"]
+        st_ = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        TR.main(cmd + ["--out", out("som_base")])
+        TR.main(cmd + ["--neuron_share", "0", "--out", out("som_zero")])
+        ok, info = True, []
+        for at in ("grad", "update"):
+            c = cmd + som + ["--neuron_share", "1", "--neuron_share_at", at]
+            r = TR.main(c + ["--out", out("som_" + at)])
+            stopped, rr = _cut_and_resume(TR, c, out("som_cut_" + at))
+            sa, sb, s0 = st_(out("som_" + at)), st_(out("som_cut_" + at)), st_(out("som_base"))
+            ok &= stopped and all(torch.equal(sa[k], sb[k]) for k in sa) and not torch.equal(sa["blocks.2.down.weight"],
+                                                                                            s0["blocks.2.down.weight"])
+            ok &= r["identity"]["neuron_share"] == 1.0 and r["identity"]["neuron_share_at"] == at
+            info.append(at)
+        m = torch.nn.Module()                                               # update kipi: adim boyu korunur
+        blk = torch.nn.Module()
+        blk.gate_up, blk.down = torch.nn.Linear(6, 16, bias=False), torch.nn.Linear(8, 6, bias=False)
+        m.blocks, m.is_glob = torch.nn.ModuleList([blk]), [True]
+        w0 = (blk.gate_up.weight.detach().clone(), blk.down.weight.detach().clone())
+        with torch.no_grad():
+            blk.gate_up.weight.add_(torch.randn(16, 6, generator=g))
+            blk.down.weight.add_(torch.randn(6, 8, generator=g))
+        n1 = [float((blk.gate_up.weight - w0[0]).norm()), float((blk.down.weight - w0[1]).norm())]
+        TR.neuron_share_update(m, [w0], 0.5, 2)
+        n2 = [float((blk.gate_up.weight - w0[0]).norm()), float((blk.down.weight - w0[1]).norm())]
+        norm_ok = all(abs(a_ - b_) < 1e-4 * a_ for a_, b_ in zip(n1, n2))
+        same0 = all(torch.equal(st_(out("som_base"))[k], v) for k, v in st_(out("som_zero")).items())
+        bad = _exit_msg(TR.main, base + ["--model", "transformer", "--layers", "2", "--steps", "2", "--neuron_share", "1",
+                                         "--out", out("som_tf")])
+        check("train deneme/som: neuron_smooth = elle (%.1e); takvim (r 8 -> 4, kutle 1 -> 0,5, evre sonu kapali); "
+              "--neuron_share 0 = bayraksiz (bit); grad / update kipi agirligi degistirir, kesilip surdurulen = kesintisiz "
+              "(bit); update kipi adim normunu korur; transformer DURUR" % d_s,
+              d_s < 1e-5 and sched and same0 and ok and norm_ok and bad is not None and "neuron_share" in bad,
+              "%s %s %s %s" % (info, n1, n2, bad))
+    except Exception:  # noqa: BLE001
+        check("train deneme/som", False, traceback.format_exc(limit=4))
 
 
 def _train_ngram(base, data, out, TR):

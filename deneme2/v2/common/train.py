@@ -31,6 +31,7 @@ import argparse
 import dataclasses
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -84,7 +85,8 @@ def pmi_table_path(data_dir, d):
 
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ngram_embed", "ngram_layers",
            "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "g_layout", "z_inert", "pmi_init", "grad_share",
-           "grad_share_beta")   # --resume'da kimlikten
+           "grad_share_beta", "neuron_share", "neuron_share_radius", "neuron_share_frac", "neuron_share_at",
+           "neuron_share_layers")   # --resume'da kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
@@ -97,7 +99,8 @@ IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
             "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads",
             "g_layout", "z_inert", "pmi_init_sha256", "grad_share_sha256",
-            "grad_share_beta")
+            "grad_share_beta", "neuron_share", "neuron_share_radius", "neuron_share_frac", "neuron_share_at",
+            "neuron_share_layers")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -429,11 +432,78 @@ def _pmi_resolve(args, cuda, log):
     args.grad_share_beta = (args.grad_share_beta or GRAD_SHARE_BETA_DEFAULT) if args.grad_share else ""
 
 
+def neuron_share_now(step, total, mass0, r0, frac):
+    """deneme/som takvimi (Kohonen'in duzen evresi): ilk frac x total adimda yaricap r0 -> 1 dogrusal, komsu kutlesi
+    mass0 x r / r0 (komsulardan gelen toplam pay, noronun kendi sinyali 1); sonra kapali -> (beta, r), beta cekirdek
+    agirligi exp(-(o / r)^2) ile toplam kutleyi verir."""
+    end = frac * total
+    if not mass0 or step >= end:
+        return 0.0, 0
+    r = max(1, round(r0 * (1 - step / end)))
+    return mass0 * r / r0 / sum(2 * math.exp(-(o / r) ** 2) for o in range(1, r + 1)), r
+
+
+def neuron_smooth(X, beta, r):
+    """X (H, n), satir = noron -> X_i + beta sum_{o=1..r} exp(-(o / r)^2) (X_(i-o) + X_(i+o)) (ozgun degerlerden, kenarda
+    sifir); kanal basina conv1d (fp32)."""
+    o = torch.arange(-r, r + 1, device=X.device, dtype=torch.float32)
+    k = beta * torch.exp(-(o / r) ** 2)
+    k[r] = 1.0
+    n = X.shape[1]
+    y = torch.nn.functional.conv1d(X.T.float()[None], k.view(1, 1, -1).expand(n, 1, -1).contiguous(), padding=r, groups=n)
+    return y[0].T.to(X.dtype)
+
+
+def _neuron_mats(model):
+    """Paylasilan bloklarin noron matrisleri: (tensor, ekseni noron olan gorunum) -> [(gate_up, 0), (down, 1)], yaricap olcegi."""
+    lay = getattr(model, "neuron_share_layers", "g")
+    blocks = [b for b, g in zip(model.blocks, getattr(model, "is_glob", [False] * len(model.blocks))) if g or lay == "all"]
+    Hmax = max(b.down.weight.shape[1] for b in model.blocks)
+    return [(b, b.down.weight.shape[1] / Hmax) for b in blocks]
+
+
+@torch.no_grad()
+def neuron_share_grad(model, beta, r):
+    """Gradyana paylasim (kirpmadan once): kapi ve deger satirlari ayri yarilarda, cikis sutunlari."""
+    for b, sc in _neuron_mats(model):
+        rr = max(1, round(r * sc))
+        H = b.down.weight.shape[1]
+        g = b.gate_up.weight.grad
+        if g is None:
+            continue
+        g[:H] = neuron_smooth(g[:H], beta, rr)
+        g[H:] = neuron_smooth(g[H:], beta, rr)
+        b.down.weight.grad.copy_(neuron_smooth(b.down.weight.grad.T, beta, rr).T)
+
+
+@torch.no_grad()
+def neuron_share_update(model, before, beta, r):
+    """Guncellemeye paylasim (optimizer'dan sonra): D = W - W0 noron ekseninde yumusatilir, matris basina ayni Frobenius
+    normuna olceklenir (adim boyu degismez), W = W0 + D'."""
+    for (b, sc), (w0_gu, w0_dn) in zip(_neuron_mats(model), before):
+        rr = max(1, round(r * sc))
+        H = b.down.weight.shape[1]
+        for w, w0, rows in ((b.gate_up.weight, w0_gu, True), (b.down.weight, w0_dn, False)):
+            D_ = (w.float() - w0.float())
+            if rows:
+                S_ = torch.cat([neuron_smooth(D_[:H], beta, rr), neuron_smooth(D_[H:], beta, rr)])
+            else:
+                S_ = neuron_smooth(D_.T, beta, rr).T
+            S_ = S_ * (D_.norm() / S_.norm().clamp_min(1e-30))
+            w.copy_((w0.float() + S_).to(w.dtype))
+
+
 def _apply(model, opt):
     """Gradyanlar dolu: (gradyan paylasimi) + kirpma + optimizer adimi -> gradyan normu."""
     gs = getattr(model, "grad_share", None)
     if gs is not None and model.E.weight.grad is not None:
         grad_share_apply(model.E.weight, gs)
+    ns_beta, ns_r = getattr(model, "neuron_share_now", (0.0, 0))
+    ns_at = getattr(model, "neuron_share_at", "grad")
+    if ns_r and ns_at == "grad":
+        neuron_share_grad(model, ns_beta, ns_r)
+    before = [(b.gate_up.weight.detach().clone(), b.down.weight.detach().clone()) for b, _ in _neuron_mats(model)] \
+        if ns_r and ns_at == "update" else None
     seen = getattr(model, "ngram_seen", None)                          # seyrek bigram yapragi kirpmaya dahil
     params = list(model.parameters()) if seen is None else [*model.parameters(), seen[1]]
     if CLIP_IN_OPTIMIZER and getattr(opt, "grad_coef_ok", False):       # clip_grad_norm_ ile ayni norm ve katsayi;
@@ -442,6 +512,8 @@ def _apply(model, opt):
     else:
         gn = torch.nn.utils.clip_grad_norm_(params, CLIP)
         opt.step()
+    if before is not None:
+        neuron_share_update(model, before, ns_beta, ns_r)
     return gn
 
 
@@ -706,6 +778,15 @@ def _args(argv):
     ap.add_argument("--grad_share", default=None, help="E gradyani PMI komsularina: auto (varsayilan) | none | npz")
     ap.add_argument("--grad_share_beta", default=None, choices=("fixed1000", "needtrust"),
                     help="kelime pay orani: needtrust (varsayilan; ihtiyac x guven, olcek medyan sayim) | fixed1000")
+    ap.add_argument("--neuron_share", type=float, default=None,
+                    help="deneme/som: MLP noron komsu paylasimi, baslangic komsu kutlesi (0 kapali; 1 = komsulardan gelen pay "
+                         "noronun kendi sinyaline esit)")
+    ap.add_argument("--neuron_share_radius", type=int, default=None, help="deneme/som: baslangic yaricapi (en genis MLP'de; "
+                    "daha dar katmanda genislikle orantili), varsayilan 64")
+    ap.add_argument("--neuron_share_frac", type=float, default=None, help="deneme/som: duzen evresi, toplam adimin payi (0,2)")
+    ap.add_argument("--neuron_share_at", default=None, choices=("grad", "update"),
+                    help="deneme/som: paylasim gradyana (NorMuon'dan once) ya da guncellemeye (sonra, norm korunur)")
+    ap.add_argument("--neuron_share_layers", default=None, choices=("g", "all"), help="deneme/som: yalniz G ya da butun bloklar")
     ap.add_argument("--g_nope", type=int, default=None,
                     help="1: G (tam) katmanlarinda RoPE yok, konum yerel katmanlardan (G'li Model Z'de varsayilan; 0 eski RoPE'li)")
     ap.add_argument("--mtp", type=lambda s: s if s == "auto" else int(s), default=None,
@@ -738,6 +819,13 @@ def _args(argv):
         if k in args.defaulted:
             setattr(args, k, "auto" if was.get(k + "_sha256") else "none")
     args.resume_pmi_sha = (was or {}).get("pmi_init_sha256", "") if args.resume else ""   # baslatma surdurmede yok
+    for k, v in (("neuron_share", 0.0), ("neuron_share_radius", 64), ("neuron_share_frac", 0.2), ("neuron_share_at", "grad"),
+                 ("neuron_share_layers", "g")):                          # deneme/som; alani olmayan kosu: kapali
+        if getattr(args, k) is None:
+            setattr(args, k, v)
+    args.neuron_share = float(args.neuron_share)
+    if args.neuron_share and args.model != "model_z":
+        sys.exit("DUR: --neuron_share yalniz Model Z (deneme/som)")
     args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
     if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
         args.optimizer = DEFAULT_OPTIMIZER
@@ -895,6 +983,7 @@ def main(argv=None):
     model, mask_fn, layout = _build(args, dev)
     if args.grad_share:                                                  # egitimin durumu (agent.pt'de yok)
         model.grad_share = grad_share_tables(args.grad_share, dev, args.grad_share_beta)
+    model.neuron_share_at, model.neuron_share_layers = args.neuron_share_at, args.neuron_share_layers
     model.row_len = row_len                                              # uretim konum siniri, carry parca boyu
     last = None
     if args.summaries_last:                                              # belge 66: [token'lar | ozetler | dolgu]
@@ -914,7 +1003,10 @@ def main(argv=None):
                  ngram_embed=args.ngram_embed, ngram_layers=args.ngram_layers, ngram_sparse=args.ngram_sparse,
                  mtp=args.mtp, g_nope=args.g_nope, mlp_ratio=args.mlp_ratio, local_kv_heads=args.local_kv_heads,
                  g_layout=args.g_layout,
-                 z_inert=args.z_inert, pmi_init_sha256=args.pmi_init_sha256, grad_share_sha256=args.grad_share_sha256, grad_share_beta=args.grad_share_beta)
+                 z_inert=args.z_inert, pmi_init_sha256=args.pmi_init_sha256, grad_share_sha256=args.grad_share_sha256, grad_share_beta=args.grad_share_beta,
+                 neuron_share=args.neuron_share, neuron_share_radius=args.neuron_share_radius,
+                 neuron_share_frac=args.neuron_share_frac, neuron_share_at=args.neuron_share_at,
+                 neuron_share_layers=args.neuron_share_layers)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -936,7 +1028,8 @@ def main(argv=None):
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
                "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [], "local_kv_heads": 0,
                "g_layout": "top", "z_inert": 0, "pmi_init_sha256": "", "grad_share_sha256": "",
-               "grad_share_beta": "",
+               "grad_share_beta": "", "neuron_share": 0.0, "neuron_share_radius": 64, "neuron_share_frac": 0.2,
+               "neuron_share_at": "grad", "neuron_share_layers": "g",
                **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
         n = len(old["plan_sha256"])
@@ -1048,6 +1141,8 @@ def main(argv=None):
             if cuda:
                 torch.cuda.reset_peak_memory_stats()
         lr = R.wsd_lr(step, total, args.lr, decay=DECAY)
+        model.neuron_share_now = neuron_share_now(step, total, args.neuron_share, args.neuron_share_radius,
+                                                  args.neuron_share_frac)
         for g in opt.param_groups:
             g["lr"] = lr * g.get("lr_mult", 1.0)                         # bigram tablosu grubu: lr_mult
         batch, real, cont, mt = nxt
