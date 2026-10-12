@@ -445,6 +445,49 @@ def _apply(model, opt):
     return gn
 
 
+MLM_ID = D.VOCAB                       # deneme/mlm: "bos" token = E'nin ilk dolgu satiri (cikista hedef olmaz)
+
+
+def mlm_masks():
+    """deneme/mlm iki yonlu maskeler (Model Z3): yerel = ayni belge, kendi cumlesinin token'lari (iki yon) + BOS + kendisi;
+    G = ayni belgenin Z disi butun konumlari (iki yon) + kendisi.  Duzenden bagimsiz (konum karsilastirmasi yok)."""
+    K = D.Kind
+
+    def loc(kind, doc, sent):
+        def mask_mod(b, h, q, kv):
+            kk = kind[b, kv]
+            tok = (kk == K.TOKEN) | (kk == K.END)
+            same = doc[b, q] == doc[b, kv]
+            return (same & ((kk == K.BOS) | (tok & (sent[b, q] == sent[b, kv])))) | (kv == q)
+        return mask_mod
+
+    def glob(kind, doc, sent):
+        def mask_mod(b, h, q, kv):
+            kk = kind[b, kv]
+            return ((doc[b, q] == doc[b, kv]) & (kk != K.ZTOK) & (kk != K.PAD)) | (kv == q)
+        return mask_mod
+    loc.includes_padding = glob.includes_padding = True
+    return loc, glob
+
+
+def mlm_batch(batch, counts, rate):
+    """deneme/mlm: batch'in TOKEN konumlarindan egitim sayimina gore en nadir rate payi -> girdi MLM_ID, hedef ozgun token
+    (kendi konumunda), diger hedefler -1.  Esitlik konumla kirilir (RNG cekmez)."""
+    tok = batch.kind == D.Kind.TOKEN
+    n = int(rate * int(tok.sum()))
+    if n == 0:
+        return None
+    pos = torch.arange(tok.numel(), device=tok.device).view_as(tok)
+    score = torch.where(tok, counts[batch.tokens.clamp(0, D.VOCAB - 1)].float() + (pos % 997).float() / 1e6,
+                        torch.full_like(batch.tokens, 1 << 40, dtype=torch.float))
+    idx = torch.topk(-score.flatten(), n).indices
+    m = torch.zeros(tok.numel(), dtype=torch.bool, device=tok.device)
+    m[idx] = True
+    m = m.view_as(tok)
+    return dataclasses.replace(batch, tokens=torch.where(m, torch.full_like(batch.tokens, MLM_ID), batch.tokens),
+                               target=torch.where(m, batch.tokens, torch.full_like(batch.target, -1)))
+
+
 def _step(model, batch, mask_fn, opt, cuda, timer=None, cont=None, mtp=None, micro=1, skip=()):
     """Tek egitim adimi -> (kayip, gradyan normu, ek ya da None) cihazda.  timer: iki CUDA olayi, cikis kalemi (yalniz
     ileri).  cont (carry, _cont_mask): devam parcasi hedeflerinin kaybi yalniz olcu (gradyansiz) -> ek {"loss_cont":
@@ -706,6 +749,12 @@ def _args(argv):
     ap.add_argument("--grad_share", default=None, help="E gradyani PMI komsularina: auto (varsayilan) | none | npz")
     ap.add_argument("--grad_share_beta", default=None, choices=("fixed1000", "needtrust"),
                     help="kelime pay orani: needtrust (varsayilan; ihtiyac x guven, olcek medyan sayim) | fixed1000")
+    ap.add_argument("--mlm_every", type=int, default=None,
+                    help="deneme/mlm: her N. adim maskeli (en nadir --mlm_rate token kapatilir, iki yonlu attention); 0 kapali")
+    ap.add_argument("--mlm_rate", type=float, default=None, help="deneme/mlm: kapatilan TOKEN payi (0,15)")
+    ap.add_argument("--replay_from", type=int, default=0,
+                    help="deneme/mlm: adim >= N'de veri adim - N'ninki (ilk N adimin metni ayni sirayla tekrar); 0 kapali. "
+                         "mlm / replay kimlige girmez (kip, segments'te): ayni checkpoint'ten farkli kiplerle surer")
     ap.add_argument("--g_nope", type=int, default=None,
                     help="1: G (tam) katmanlarinda RoPE yok, konum yerel katmanlardan (G'li Model Z'de varsayilan; 0 eski RoPE'li)")
     ap.add_argument("--mtp", type=lambda s: s if s == "auto" else int(s), default=None,
@@ -812,6 +861,11 @@ def _args(argv):
     args.z_inert = int(args.z_inert or 0)
     if args.z_inert and (args.model != "model_z" or not args.global_layers or args.carry_summaries):
         sys.exit("DUR: --z_inert yalniz G'li Model Z'de, carry ile yok")
+    args.mlm_every = int(args.mlm_every or 0)                             # deneme/mlm
+    args.mlm_rate = float(0.15 if args.mlm_rate is None else args.mlm_rate) if args.mlm_every else 0.0
+    if args.mlm_every and (not args.z_inert or args.mtp or args.micro_batches > 1 or args.carry_summaries
+                           or args.vocab_rows <= D.VOCAB):
+        sys.exit("DUR: --mlm_every yalniz Model Z3'te (z_inert), MTP / micro_batches / carry ile yok (deneme/mlm)")
     args.g_layout = args.g_layout or (G_LAYOUT_DEFAULT if args.model == "model_z" and args.global_layers else "top")
     if args.local_kv_heads and (args.model != "model_z" or args.heads % args.local_kv_heads):
         sys.exit("DUR: --local_kv_heads yalniz Model Z'de, heads'in boleni (%d)" % args.heads)
@@ -1008,7 +1062,7 @@ def main(argv=None):
         return [rs[ro[r]:ro[r + 1]].tolist() for r in range(r0, r1)], int(lengths[rs[ro[r0]:ro[r1]]].sum())
 
     def cpu_batch(step):
-        rows, real = rows_of(step)
+        rows, real = rows_of(step - args.replay_from if args.replay_from and step >= args.replay_from else step)
         if cuda:                                                         # epok sonu eksik batch: bos (dolgu) satirla tam
             rows += [[]] * (BATCH_ROWS - len(rows))                      # boy, derleme sekli sabit (CPU'da agirlik bit ayni
         b = D.build_batch(train, rows, layout, "cpu", row_len, carry)     # kalsin diye yok: dW toplama sirasi degisiyor)
@@ -1032,6 +1086,8 @@ def main(argv=None):
         sys.exit("DUR: --stop_step %s: adim %d < N <= %d olmali" % (args.stop_step, start, total))
     else:
         seg = dict(start=start, fp8=args.fp8, fp8_linears=n_fp8)                                       # kimlik disi kip
+        if args.mlm_every or args.replay_from:                           # deneme/mlm kipleri
+            seg.update(mlm_every=args.mlm_every, mlm_rate=args.mlm_rate, replay_from=args.replay_from)
         if args.micro_batches > 1:
             seg["micro_batches"] = args.micro_batches
         history.setdefault("segments", []).append(seg)
@@ -1041,6 +1097,12 @@ def main(argv=None):
     first_window, epoch_from, epoch_t0, saved_at = True, start, time.time(), time.time()
     ckpt_seconds = 60 * args.checkpoint_minutes                      # kimlige girmez (kullanici: buyuk kosuda 30 dk)
     nxt = cpu_batch(start) if start < total else None
+    mlm_counts, mlm_fn = None, None
+    if args.mlm_every:                                                   # deneme/mlm: egitim sayimi (nadirlik), iki yonlu maske
+        if not os.path.exists(os.path.join(args.data, "train_token_counts.npy")):
+            sys.exit("DUR: --mlm_every: %s/train_token_counts.npy yok (nadirlik sayimi)" % args.data)
+        mlm_counts = torch.from_numpy(np.load(os.path.join(args.data, "train_token_counts.npy"))[:D.VOCAB].astype(np.int64)).to(dev)
+        mlm_fn = mlm_masks()
     for step in range(start, end):
         if win is None:
             sw.start(step)
@@ -1061,9 +1123,17 @@ def main(argv=None):
             mtp = tuple(t.pin_memory().to(dev, non_blocking=True) for t in mtp) if cuda else mtp
         mb = args.micro_batches
         skip = [i for i in range(mb) if not (_rows(batch, i, mb).target >= 0).any()] if mb > 1 else ()   # CPU batch
-        loss, gn, extra = _step(model, _to_device(batch, dev), mask_fn, opt, cuda, timer, cont, mtp, mb, skip)
+        mb_ = mlm_batch(_to_device(batch, dev), mlm_counts, args.mlm_rate) if mlm_counts is not None and \
+            step % args.mlm_every == args.mlm_every - 1 else None
+        if mb_ is not None:                                              # deneme/mlm: kayip ayri, pencere kaybina girmez
+            lm, gn, _ = _step(model, mb_, mlm_fn, opt, cuda, timer)
+            loss, extra = None, dict(mlm_loss=lm, mlm_steps=1)
+        else:
+            loss, gn, extra = _step(model, _to_device(batch, dev), mask_fn, opt, cuda, timer, cont, mtp, mb, skip)
         nxt = cpu_batch(step + 1) if step + 1 < total else None          # GPU calisirken hazirlanir
-        win["loss"] += loss
+        if loss is not None:
+            win["loss"] += loss
+            win["n_causal"] = win.get("n_causal", 0) + 1
         win["gn"] += gn
         win["tokens"] += real
         for k, v in (extra or {}).items():                               # toplamlar cihazda (senkron yok)
@@ -1077,7 +1147,7 @@ def main(argv=None):
             continue
         s = sw.stop(done, win["tokens"])                                 # pencere kapanir: kayit / sinav disarida
         k = done - win["step0"]
-        rec = dict(step=done, epoch=epoch, lr=lr, loss=round(win["loss"].item() / k, 4),
+        rec = dict(step=done, epoch=epoch, lr=lr, loss=round(win["loss"].item() / max(1, win.get("n_causal", k)), 4),
                    grad_norm=round(win["gn"].item() / k, 4), steps=k, tokens=s["tokens"], seconds=s["seconds"],
                    ms_per_step=round(1000 * s["seconds"] / k, 1), tokens_per_sec=s["tokens_per_sec"], first=first_window,
                    peak_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2) if cuda else None,
@@ -1087,6 +1157,9 @@ def main(argv=None):
         if carry:
             n_c = int(win["extra"]["n_cont"])
             rec["loss_cont"] = round(float(win["extra"]["loss_cont"]) / n_c, 4) if n_c else None
+        if args.mlm_every:                                               # deneme/mlm: maskeli adimlarin kaybi ayri
+            n_m = win["extra"].get("mlm_steps", 0)
+            rec["loss_mlm"] = round(float(win["extra"]["mlm_loss"]) / n_m, 4) if n_m else None
         if args.mtp:                                                     # ek hedef CE (k = 1..N), pencere ortalamasi
             n_m = win["extra"].get("mtp_steps", 0)
             rec["loss_mtp"] = [round(v / n_m, 4) for v in win["extra"]["mtp_ce"].tolist()] if n_m else None
@@ -1098,6 +1171,7 @@ def main(argv=None):
                    rec["peak_gb"], rec["peak_reserved_gb"], rec["out_fwd_ms"]) if cuda else "",
                ("  | devam %s" % rec["loss_cont"] if carry else "")
                + ("  | mtp w %s ce %s" % (rec["mtp_w"], rec["loss_mtp"]) if args.mtp else "")
+               + ("  | mlm %s" % rec["loss_mlm"] if args.mlm_every else "")
                + ("  (ilk pencere: derleme dahil)" if first_window else "")))
         assert np.isfinite(rec["loss"]), "kayip sonlu degil; checkpoint yazilmadi"
         first_window, win = False, None

@@ -998,6 +998,7 @@ def t_train():
         _train_gqa_default(base, out, TR)
         _train_ngram(base, data, out, TR)
         _train_z3(base, data, out, TR)
+        _train_mlm(base, root, data, out, TR)
         import copy                                                     # epok sonu eksik batch dolgusu (8 Ekim)
         import types
         import recipe as R
@@ -1203,6 +1204,67 @@ def _train_z3(base, data, out, TR):
               "%s | bayraksiz surdurme %s | %s | %s" % (bad, same_c, bad_tf, bad_g0))
     except Exception:  # noqa: BLE001
         check("train Model Z3", False, traceback.format_exc(limit=4))
+
+
+def _train_mlm(base, root, data, out, TR):
+    """deneme/mlm: (a) iki yonlu maskeler = elle (yerel: ayni belge + kendi cumlesinin token'lari iki yonde + BOS + kendisi;
+    G: ayni belgenin Z disi konumlari + kendisi); (b) mlm_batch en nadir %15 TOKEN'i kapatir (girdi MLM_ID, hedef ozgun token,
+    oteki hedefler -1); (c) --mlm_every 2 kosar, gunlukte loss_mlm, kimlikte; kesilip surdurulen = kesintisiz (bit);
+    --mlm_every 0 = bayraksiz (bit); Z3 disi DURUR."""
+    import traceback
+    try:
+        st = D.TokenStories(root, data, "train")
+        f = np.load(os.path.join(data, "train_pack_plan_e1.npz"))
+        ro, rs = f["row_offsets"], f["row_stories"]
+        b = D.build_batch(st, [rs[ro[r]:ro[r + 1]].tolist() for r in range(4)], "model_z", "cpu", 64)
+        loc, glob = TR.mlm_masks()
+        B, T_ = b.kind.shape
+        K = D.Kind
+        q = torch.arange(T_)
+        ok_m = True
+        for fn, kind in ((loc, "loc"), (glob, "glob")):
+            m = fn(b.kind, b.doc, b.sent)(torch.arange(B)[:, None, None], 0, q[None, :, None], q[None, None, :])
+            for bi in range(B):
+                for i in range(T_):
+                    for j in range(T_):
+                        same = b.doc[bi, i] == b.doc[bi, j]
+                        kk = int(b.kind[bi, j])
+                        if kind == "loc":
+                            want = (same and (kk == K.BOS or (kk in (K.TOKEN, K.END) and b.sent[bi, i] == b.sent[bi, j]))) or i == j
+                        else:
+                            want = (same and kk not in (K.ZTOK, K.PAD)) or i == j
+                        ok_m &= bool(m[bi, i, j]) == bool(want)
+        cpath = os.path.join(data, "train_token_counts.npy")
+        if not os.path.exists(cpath):                                      # test verisinde yok: train akisindan say
+            np.save(cpath, np.bincount(np.asarray(st.stream), minlength=D.VOCAB + 1).astype(np.int64))
+        cnt = torch.from_numpy(np.load(cpath)[:D.VOCAB].astype(np.int64))
+        mb = TR.mlm_batch(b, cnt, 0.15)
+        tok = b.kind == K.TOKEN
+        masked = mb.tokens == TR.MLM_ID
+        n_ok = int(masked.sum()) == int(0.15 * int(tok.sum())) and bool((masked <= tok).all())
+        c_m, c_u = cnt[b.tokens[masked]], cnt[b.tokens[tok & ~masked]]
+        rare_ok = int(c_m.max()) <= int(c_u.min())
+        tgt_ok = torch.equal(mb.target[masked], b.tokens[masked]) and bool((mb.target[~masked] == -1).all())
+        cmd = base + ["--model", "model_z", "--layers", "3", "--global_layers", "1", "--epochs", "2"]
+        a = TR.main(cmd + ["--mlm_every", "2", "--out", out("mlm_A")])
+        stopped, r = _cut_and_resume(TR, cmd + ["--mlm_every", "2"], out("mlm_cut"))
+        z0 = TR.main(cmd + ["--mlm_every", "0", "--out", out("mlm_0")])
+        z = TR.main(cmd + ["--out", out("mlm_base")])
+        st_ = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        sa, sb = st_(out("mlm_A")), st_(out("mlm_cut"))
+        s0, sz = st_(out("mlm_0")), st_(out("mlm_base"))
+        has_mlm = any(x.get("loss_mlm") is not None for x in a["log"])
+        bad = _exit_msg(TR.main, base + ["--model", "transformer", "--layers", "2", "--steps", "2", "--mlm_every", "2",
+                                         "--out", out("mlm_tf")])
+        check("train deneme/mlm: iki yonlu maskeler = elle; en nadir %15 TOKEN kapanir (hedef ozgun, oteki -1); --mlm_every 2 "
+              "kosar (gunlukte loss_mlm, kimlik disi kip), kesilip surdurulen = kesintisiz (bit); --mlm_every 0 = bayraksiz (bit); "
+              "transformer DURUR",
+              ok_m and n_ok and rare_ok and tgt_ok and a["segments"][0].get("mlm_every") == 2 and "mlm_every" not in a["identity"] and has_mlm and stopped
+              and all(torch.equal(sa[k], sb[k]) for k in sa) and all(torch.equal(s0[k], sz[k]) for k in s0)
+              and bad is not None and "mlm" in bad,
+              "maske %s n %s nadir %s hedef %s | %s" % (ok_m, n_ok, rare_ok, tgt_ok, bad))
+    except Exception:  # noqa: BLE001
+        check("train deneme/mlm", False, traceback.format_exc(limit=4))
 
 
 def _train_ngram(base, data, out, TR):
