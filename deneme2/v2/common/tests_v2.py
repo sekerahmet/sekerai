@@ -1578,7 +1578,7 @@ def _train_combo(base, data, out, state, same, exits, TR):
 
 
 def _train_gate(base, root, data, out, state, same, exits, TR):
-    """--attn_gate 1 (belge 90a): kosar, ilk adim kaybi = kapili modelin loss_per_target'i (kapisizdan farkli), kapi
+    """--attn_gate 2 (belge 90a; d64): kosar, ilk adim kaybi = kapili modelin loss_per_target'i (kapisizdan farkli), kapi
     oynar, kimlikte; kesilip surdurulen = kesintisiz (bit); --resume'da bayraksiz kimlikten; kapisiz checkpoint kapili
     surdurulmez, transformer'da DUR (dosyaya dokunulmaz); load_run kapili kurar; NorMuon'da kapi muon grubunda."""
     import traceback
@@ -1586,10 +1586,11 @@ def _train_gate(base, root, data, out, state, same, exits, TR):
         sys.path.insert(0, os.path.join(os.path.dirname(HERE), "diag"))
         import generate_readings as GR
         mz = base + ["--model", "model_z", "--layers", "2", "--global_layers", "1", "--steps", "8"]
-        cmd = mz + ["--attn_gate", "1"]
+        mz64 = mz + ["--d", "64"]                                          # kapi 2 girdisi d // 64
+        cmd = mz64 + ["--attn_gate", "2"]
         A = out("gate_A")
         a = TR.main(cmd + ["--out", A])
-        u = TR.main(mz + ["--out", out("gate_U")])
+        u = TR.main(mz64 + ["--out", out("gate_U")])
         st = D.TokenStories(root, data, "train")
         m, mask_fn, layout = TR._build(TR._args(cmd + ["--out", "x"]), torch.device("cpu"))
         f = np.load(os.path.join(data, "train_pack_plan_e1.npz"))
@@ -1599,28 +1600,28 @@ def _train_gate(base, root, data, out, state, same, exits, TR):
             want = m.loss_per_target(b)[0].mean().item()
         sa = state(A)
         gk = [k for k in sa if k.endswith("attn_gate")]
-        check("train --attn_gate 1: kosar; ilk adim kaybi = kapili modelin loss_per_target'i, kapisizdan farkli; kapi (2 blok) "
+        check("train --attn_gate 2: kosar; ilk adim kaybi = kapili modelin loss_per_target'i, kapisizdan farkli; kapi (2 blok) "
               "sifirdan oynadi; kimlikte", abs(a["log"][0]["loss"] - want) < 1e-4
               and abs(a["log"][0]["loss"] - u["log"][0]["loss"]) > 1e-4 and len(gk) == 2 and all(sa[k].abs().sum() > 0
                                                                                              for k in gk)
-              and a["identity"]["attn_gate"] == 1 and u["identity"]["attn_gate"] == 0,
+              and a["identity"]["attn_gate"] == 2 and u["identity"]["attn_gate"] == 0,
               "ilk kayip %.4f / %.4f, kapisiz %.4f" % (a["log"][0]["loss"], want, u["log"][0]["loss"]))
         stopped, bres = _cut_and_resume(TR, cmd, out("gate_B"))
-        inherit = TR._args(mz + ["--out", out("gate_B"), "--resume", "1"]).attn_gate
+        inherit = TR._args(mz64 + ["--out", out("gate_B"), "--resume", "1"]).attn_gate
         U = os.path.join(out("gate_U"), "checkpoint.pt")
         mt = os.path.getmtime(U)
         lm = GR.load_run(A, data, torch.device("cpu"))[0]
-        check("train --attn_gate 1: adim 4'te kesilip surdurulen = kesintisiz (bit); --resume'da bayraksiz kimlikten (1); "
-              "kapisiz checkpoint --attn_gate 1 ile surdurulmez (dosyaya dokunulmaz), transformer --attn_gate 1 DUR; "
+        check("train --attn_gate 2: adim 4'te kesilip surdurulen = kesintisiz (bit); --resume'da bayraksiz kimlikten (2); "
+              "kapisiz checkpoint --attn_gate 2 ile surdurulmez (dosyaya dokunulmaz), transformer --attn_gate 2 DUR; "
               "load_run kapili kurar (agirlik bit)",
               stopped and same(sa, state(out("gate_B"))) and bres["exam"] == dict(a["exam"], seconds=bres["exam"]["seconds"])
-              and inherit == 1 and exits(cmd + ["--out", out("gate_U"), "--resume", "1"]) and os.path.getmtime(U) == mt
-              and exits(base + ["--model", "transformer", "--attn_gate", "1", "--steps", "2", "--out", out("gate_T")])
+              and inherit == 2 and exits(cmd + ["--out", out("gate_U"), "--resume", "1"]) and os.path.getmtime(U) == mt
+              and exits(base + ["--model", "transformer", "--attn_gate", "2", "--d", "64", "--steps", "2", "--out", out("gate_T")])
               and not os.path.exists(out("gate_T")) and lm.blocks[0].attn_gate is not None
               and same(sa, lm.state_dict()))
         n = TR.main(_unpin(cmd) + ["--steps", "2", "--out", out("gate_N")])
         names = n["optimizer"]["split"]["muon"]["names"]
-        check("train --attn_gate 1 --optimizer normuon (varsayilan): kapi (blocks.*.attn_gate) NorMuon grubunda",
+        check("train --attn_gate 2 --optimizer normuon (varsayilan): kapi (blocks.*.attn_gate) NorMuon grubunda",
               names.get("blocks.*.attn_gate") == 2 and not any("attn_gate" in k for k in
                                                                n["optimizer"]["split"]["adamw_decay"]["names"]), str(names))
         two = out("gate_2")
@@ -1649,15 +1650,17 @@ def _train_gate(base, root, data, out, state, same, exits, TR):
                 ("mz d16", ["--model", "model_z"]), ("tf d768", ["--model", "transformer", "--d", "768"]),
                 ("tf auto", ["--model", "transformer", "--d", "768", "--attn_gate", "auto"]),
                 ("mz acik 0", ["--model", "model_z", "--d", "768", "--attn_gate", "0"]),
-                ("mz acik 1", ["--model", "model_z", "--d", "768", "--attn_gate", "1"]))}
+                ("mz acik 2", ["--model", "model_z", "--d", "768", "--attn_gate", "2"]))}
+            one = _exit_msg(TR._args, base + ["--model", "model_z", "--d", "768", "--attn_gate", "1", "--out", "x"])
             old = [TR._args(d64 + ["--out", out(n_), "--resume", "1"]).attn_gate for n_ in ("gate_old", "gate_old0")]
             rd = TR.main(d64 + ["--out", out("gate_def")])
         finally:
             TR.ATTN_GATE_DEFAULT = pinned
         check("train --attn_gate varsayilan (ATTN_GATE_DEFAULT auto): model_z d >= 64 -> 2, d < 64 -> 0, transformer (acik "
-              "auto dahil) 0, acik 0 / 1 aynen; eski kapisiz kosu (alan 0 ya da yok) bayraksiz --resume'da 0; bayraksiz "
+              "auto dahil) 0, acik 0 / 2 aynen, kapi 1 DUR; eski kapisiz kosu (alan 0 ya da yok) bayraksiz --resume'da 0; bayraksiz "
               "d64 kosu = acik --attn_gate 2 kosusu (kimlik 2, agirlik bit)",
-              ag == {"mz d768": 2, "mz d64": 2, "mz d16": 0, "tf d768": 0, "tf auto": 0, "mz acik 0": 0, "mz acik 1": 1}
+              ag == {"mz d768": 2, "mz d64": 2, "mz d16": 0, "tf d768": 0, "tf auto": 0, "mz acik 0": 0, "mz acik 2": 2}
+              and one is not None and "kapi 1 kaldirildi" in one
               and old == [0, 0] and rd["identity"]["attn_gate"] == 2 and same(s2, state(out("gate_def"))),
               "%s; eski %s" % (ag, old))
     except Exception:  # noqa: BLE001

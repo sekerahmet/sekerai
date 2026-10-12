@@ -14,8 +14,8 @@ Egitim / sinav duzeni summaries_last: satir [token'lar | ozetler | dolgu], maske
 Uretim: SummaryCache (ozet + cumle onbellegi, G'de butun gecmis); StaticCache (sabit tampon, toplu; carry / Model Z3'te yok).
 Tarif (Llama sinifi): pre-norm RMSNorm, RoPE, QK-norm (fp32), SwiGLU, bias yok, tied embedding; E vocab_rows satir (dolgu
 satirlari sifir, cikis VOCAB'a kesilir).
-Denemeler (varsayilan kapali): attn_gate 1 | 2 (head basina sigmoid cikis kapisi; qiu2025, modded-nanogpt), bigram embedding
-(ngram_embed; modded-nanogpt kayit #1), carry (parcalar arasi Z bellegi, belge 83), mix_g_heads / mix_kv.
+Denemeler (varsayilan kapali): attn_gate 2 (head basina sigmoid cikis kapisi, girdi n1(x)[..., :d // 64]; qiu2025,
+modded-nanogpt), bigram embedding (ngram_embed; modded-nanogpt kayit #1), carry (parcalar arasi Z bellegi, belge 83).
 """
 import dataclasses
 import functools
@@ -238,30 +238,24 @@ def _attend(q, k, v, attn):
 
 
 class Block(torch.nn.Module):
-    def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0, nope=False, g_heads=0, g_kv_heads=0):
+    def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0, nope=False):
         """kv_heads (GQA; varsayilan heads): k / v head sayisi, heads'in boleni; qkv d -> d + 2 d kv / heads.  nope: RoPE yok.
-        attn_gate 1 / 2: head basina cikis kapisi agirligi (heads, d) / (heads, d // 64) (girdi n1(x)'in ilk d // 64
-        boyutu), sifir (RNG cekmez; kapisiz modelle ayni ilk agirlik)."""
+        attn_gate 2: head basina cikis kapisi agirligi (heads, d // 64) (girdi n1(x)'in ilk d // 64 boyutu), sifir (RNG
+        cekmez; kapisiz modelle ayni ilk agirlik)."""
         super().__init__()
         self.nope = bool(nope)                                              # g_nope: konum yerel katmanlardan
         self.heads = heads
-        self.g_heads = int(g_heads)                                         # deneme/mixed-layer: son g_heads head G
-        own = heads - self.g_heads                                          # yerel (Z'li) head
-        self.kv_heads = int(kv_heads or own)                                # karma blokta: yerel kisim k / v head
-        self.g_kv_heads = int(g_kv_heads or self.g_heads)
-        assert 0 <= self.g_heads < heads, "g_heads 0..heads-1"
-        assert self.kv_heads > 0 and own % self.kv_heads == 0, "kv_heads (yerel) head sayisinin boleni olmali"
-        assert not self.g_heads or self.g_heads % self.g_kv_heads == 0, "g_kv_heads g_heads'in boleni olmali"
+        self.kv_heads = int(kv_heads or heads)
+        assert heads % self.kv_heads == 0, "kv_heads head sayisinin boleni olmali"
         self.n1, self.n2 = torch.nn.RMSNorm(d), torch.nn.RMSNorm(d)
-        kv_all = self.kv_heads + (self.g_kv_heads if self.g_heads else 0)
-        self.qkv = torch.nn.Linear(d, d + 2 * (d // heads) * kv_all, bias=False)
+        self.qkv = torch.nn.Linear(d, d + 2 * (d // heads) * self.kv_heads, bias=False)
         self.q_norm, self.k_norm = torch.nn.RMSNorm(d // heads), torch.nn.RMSNorm(d // heads)
         self.proj = torch.nn.Linear(d, d, bias=False)
         self.gate_up = torch.nn.Linear(d, 2 * hidden, bias=False)
         self.down = torch.nn.Linear(hidden, d, bias=False)
-        assert attn_gate in (0, 1, 2), "attn_gate 0 / 1 / 2"
+        assert attn_gate in (0, 2), "attn_gate 0 / 2"
         assert attn_gate != 2 or d >= 64, "attn_gate 2: girdi d // 64 boyut, d %d < 64 (0 boyut)" % d
-        self.attn_gate = torch.nn.Parameter(torch.zeros(heads, d if attn_gate == 1 else d // 64)) if attn_gate else None
+        self.attn_gate = torch.nn.Parameter(torch.zeros(heads, d // 64)) if attn_gate else None
 
     def _gate(self, x):
         """Blok girdisi x (B, T, d) -> kapi sigmoid(n1(x)[..., :W sutunu] W^T) (B, T, heads); satir basina, maske / konum
@@ -269,21 +263,14 @@ class Block(torch.nn.Module):
         return torch.sigmoid(F.linear(self.n1(x)[..., :self.attn_gate.shape[1]], self.attn_gate))
 
     def _qkv(self, x, pos, gate=False):
-        """-> q, k, v (RoPE'li); gate True (kapili blok, forward): ayni n1(x)'ten kapi da (B, T, heads) -> (q, k, v, kapi).
-        attn_gate 1: kapi agirligi qkv matmul'una ek satir (tek matmul), 2: n1(x)'in ilk d // 64 boyutu (belge 90a ek:
-        ayri _gate yolu n1'i ikinci kez hesaplayip kaydediyordu)."""
+        """-> q, k, v (RoPE'li); gate True (kapili blok, forward): ayni n1(x)'ten kapi da (B, T, heads) -> (q, k, v, kapi)
+        (belge 90a ek: ayri _gate yolu n1'i ikinci kez hesaplayip kaydediyordu)."""
         B, T, d = x.shape
         hd = d // self.heads
         h = self.n1(x)
+        out = self.qkv(h)
         if gate:
-            if self.attn_gate.shape[1] == d:
-                out = F.linear(h, torch.cat([self.qkv.weight, self.attn_gate]))
-                out, g = out[..., :-self.heads], out[..., -self.heads:]
-            else:
-                out, g = self.qkv(h), F.linear(h[..., :self.attn_gate.shape[1]], self.attn_gate)
-            g = torch.sigmoid(g)
-        else:
-            out = self.qkv(h)
+            g = torch.sigmoid(F.linear(h[..., :self.attn_gate.shape[1]], self.attn_gate))
         if self.kv_heads == self.heads:
             q, k, v = out.view(B, T, 3, self.heads, hd).permute(2, 0, 3, 1, 4)
         else:                                                                # GQA: k / v kv_heads
@@ -295,23 +282,6 @@ class Block(torch.nn.Module):
         if not self.nope:
             q, k = rope(q, pos), rope(k, pos)
         return (q, k, v) + ((g,) if gate else ())
-
-    def _qkv_mixed(self, x, pos, real, gate=False):
-        """Karma blok -> (q, k, v) yerel, (q, k, v) G, kapi: yerel RoPE pos'tan, G real'dan (nope: RoPE yok)."""
-        B, T, d = x.shape
-        hd, own, kl, kg = d // self.heads, self.heads - self.g_heads, self.kv_heads, self.g_kv_heads
-        h = self.n1(x)
-        g = torch.sigmoid(F.linear(h[..., :self.attn_gate.shape[1]], self.attn_gate)) if gate else None
-        q, k, v = self.qkv(h).split([d, (kl + kg) * hd, (kl + kg) * hd], -1)
-        q = q.view(B, T, self.heads, hd).transpose(1, 2)
-        k, v = (t.view(B, T, kl + kg, hd).transpose(1, 2) for t in (k, v))
-        with torch.autocast(x.device.type, enabled=False):
-            q, k = self.q_norm(q.float()).to(v.dtype), self.k_norm(k.float()).to(v.dtype)
-        ql, qg, k_l, k_g, vl, vg = q[:, :own], q[:, own:], k[:, :kl], k[:, kl:], v[:, :kl], v[:, kl:]
-        ql, k_l = rope(ql, pos), rope(k_l, pos)
-        if not self.nope:
-            qg, k_g = rope(qg, real), rope(k_g, real)
-        return (ql, k_l, vl), (qg, k_g, vg), g
 
     def _finish(self, x, a, g=None):
         """g: _qkv(gate=True)'nun kapisi; yoksa (onbellek yollari) _gate(x)."""
@@ -326,10 +296,6 @@ class Block(torch.nn.Module):
     def forward(self, x, pos, attn):
         """attn: None (duz causal), bool (B, T, T) (dense) ya da FlexAttention BlockMask; carry: (maske, mem_rows,
         mem_cols) -> K / V = [satir || ayni katmanda kaynak satirlarin bellek sutunlari] (anahtar T + M)."""
-        if self.g_heads:                                                   # karma: pos (yerel, gercek), attn (yerel, G)
-            (pos, real), (al, ag) = pos, attn
-            lo, gl, g = self._qkv_mixed(x, pos, real, gate=self.attn_gate is not None)
-            return self._finish(x, torch.cat([_attend(*lo, al), _attend(*gl, ag)], 1), g)
         mem = None
         if isinstance(attn, tuple):
             attn, mem = attn[0], attn[1:]
@@ -343,13 +309,13 @@ class Block(torch.nn.Module):
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
                  attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, mlp_ratio=(),
-                 local_kv_heads=0, mix_g_heads=0, mix_kv=(), g_layout="top", z_inert=False):
+                 local_kv_heads=0, g_layout="top", z_inert=False):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
         dolunca glob onbelleginde yalniz Z'ler kalir, G parcada sifirlanir.  vocab_rows: E satir sayisi (>= VOCAB; dolgu
-        satirlari sifir, ilk agirlik VOCAB'li modelle ayni).  attn_gate 1 / 2: her blokta head basina cikis kapisi
-        (2: girdi n1(x)'in ilk d // 64 boyutu; sifirdan; geri kalan ilk agirlik kapisiz modelle ayni).
+        satirlari sifir, ilk agirlik VOCAB'li modelle ayni).  attn_gate 2: her blokta head basina cikis kapisi
+        (girdi n1(x)'in ilk d // 64 boyutu; sifirdan; geri kalan ilk agirlik kapisiz modelle ayni).
         ngram_rows: bigram tablosu satiri (0 kapali; tablo ve lambda
         ilk agirliklardan SONRA, RNG cekmeden: diger agirliklar kapali modelle ayni).  ngram_layers K: yalniz ilk K blok
         (0: hepsi; lambda K tane).  ngram_sparse: egitimde (gradyan acikken) okunan satirlar ayri yaprak (ngram_seen), tablo
@@ -373,37 +339,20 @@ class SentenceTransformer(torch.nn.Module):
         self.g_layout = g_layout                                           # top: son N blok; interleave: esit aralik, son G
         if g_layout not in ("top", "interleave"):                         # elle: "3,6,9" (G blok numaralari, 0'dan)
             at = {int(v) for v in str(g_layout).split(",")}
-            assert len(at) == self.global_layers and all(0 <= l < layers for l in at),                 "g_layout %s: %d farkli blok, 0..%d" % (g_layout, self.global_layers, layers - 1)
+            assert len(at) == self.global_layers and all(0 <= l < layers for l in at), \
+                "g_layout %s: %d farkli blok, 0..%d" % (g_layout, self.global_layers, layers - 1)
             kinds = ["glob" if l in at else "loc" for l in range(layers)]
         elif g_layout == "interleave" and self.global_layers:
             at = {round((i + 1) * layers / self.global_layers) - 1 for i in range(self.global_layers)}
             kinds = ["glob" if l in at else "loc" for l in range(layers)]
-        self.mix_g_heads = int(mix_g_heads)                                # deneme/mixed-layer: her blok yerel + G head
-        if self.mix_g_heads:
-            assert self.global_layers and 0 < self.mix_g_heads < heads, "mix_g_heads: G'li Model Z, 0 < N < heads"
-            kinds = ["mix"] * layers
         self.g_nope = int(g_nope)                                           # G (glob) bloklarinda RoPE yok
         self.mlp_ratio = tuple(float(r) for r in mlp_ratio)                # MLP : tam (GQA'siz) attention, (yerel, G)
         assert not self.mlp_ratio or (len(self.mlp_ratio) == 2 and self.global_layers), "mlp_ratio: (yerel, G), G gerek"
         width = (lambda r: max(64, round(r * 4 * d / 3 / 64) * 64))       # noqa: E731  4 d^2 attention, SwiGLU 3 d w
-        share = self.mix_g_heads / heads                                    # karma: oran head payiyla agirlikli
-        mix_r = (1 - share) * self.mlp_ratio[0] + share * self.mlp_ratio[1] if self.mlp_ratio else 0
-        self.mlp_widths = [(width(mix_r) if k == "mix" else width(self.mlp_ratio[k == "glob"])) if self.mlp_ratio else hidden
-                           for k in kinds]
+        self.mlp_widths = [width(self.mlp_ratio[k == "glob"]) if self.mlp_ratio else hidden for k in kinds]
         self.local_kv_heads = int(local_kv_heads or 0)                    # yerel bloklarda GQA (0: tam)
-        if self.mix_g_heads:                                               # kv: verilmezse head payina gore (tam sayi)
-            own = heads - self.mix_g_heads
-            lk = mix_kv[0] if mix_kv else (own * self.local_kv_heads // heads if self.local_kv_heads else own)
-            gk = mix_kv[1] if mix_kv else (self.mix_g_heads * int(glob_kv_heads or heads) // heads)
-            assert not mix_kv and lk * heads == own * (self.local_kv_heads or heads) or mix_kv, \
-                "mix: yerel kv tam sayi degil, --mix_kv yerel,G ver"
-            assert not mix_kv and gk * heads == self.mix_g_heads * int(glob_kv_heads or heads) or mix_kv, \
-                "mix: G kv tam sayi degil, --mix_kv yerel,G ver"
-            self.mix_kv = (int(lk), int(gk))
         self.is_glob = [k == "glob" for k in kinds]                         # blok basina G mi (onbellekler de buradan)
         self.blocks = torch.nn.ModuleList(
-            Block(d, heads, self.mlp_widths[i], self.mix_kv[0], int(attn_gate), bool(self.g_nope), self.mix_g_heads,
-                  self.mix_kv[1]) if k == "mix" else
             Block(d, heads, self.mlp_widths[i], glob_kv_heads if k == "glob" else (self.local_kv_heads or None),
                   int(attn_gate), bool(self.g_nope) and k == "glob") for i, k in enumerate(kinds))
         self.norm = torch.nn.RMSNorm(d)
@@ -474,11 +423,6 @@ class SentenceTransformer(torch.nn.Module):
             attn = tuple(_dense(f(batch.kind, batch.doc, batch.sent), B, T, dev) for f in mfn)
         assert isinstance(attn, tuple) and len(attn) == 2, "global_layers: attn (yerel, global) ikilisi olmali"
         real = batch.real_pos if last else story_positions(batch.kind)
-        if self.mix_g_heads:                                               # karma: her blok iki maske, iki konum
-            assert not mem, "mix_g_heads: carry bellegi yok"
-            for l, block in enumerate(self.blocks):
-                x = block(add(x, l), (batch.pos, real), attn)
-            return self.norm(x)
         for l, block in enumerate(self.blocks):
             x = add(x, l)
             x = block(x, real, w(attn[1])) if self.is_glob[l] else block(x, batch.pos, w(attn[0]))
@@ -581,7 +525,6 @@ class SentenceTransformer(torch.nn.Module):
         batch_size (belge 91): acgozlu, on_token'siz ve StaticCache'li uretimde istemler bu boyda toplu (_generate_rows);
         cikti tek tek uretimle ayni (fp32 token token)."""
         out, limit = [], self.max_positions()
-        assert not getattr(self, "mix_g_heads", 0), "mix_g_heads: uretim onbellegi yok (deneme/mixed-layer)"
         static = STATIC_DECODE and StaticCache.supports(self)
         if static and generator is None and on_token is None and batch_size > 1 and len(prompts) > 1:
             for i in range(0, len(prompts), batch_size):

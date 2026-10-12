@@ -17,7 +17,7 @@ ozellikli eski kosular yuklenmez (_archived; ileti git etiketini verir).
 --stop_step N: takvim degismeden adim N'de durur (surdurulebilir); --stop_exam 1 ile o adimda sinav.
 Kimlige girmeyen kipler: --fp8 (MLP'de torchao Float8; CUDA + torchao yoksa DUR), --micro_batches N (gradyan biriktirme).
 Denemeler (varsayilan kapali): --ngram_embed / --ngram_layers / --ngram_sparse (bigram tablosu), --mtp (ayni-logit MTP),
---carry_summaries / --carry_group (parcalar arasi Z bellegi), --attn_gate 1 | 2, --mix_g_heads / --mix_kv.
+--carry_summaries / --carry_group (parcalar arasi Z bellegi), --attn_gate 2.
 Olcu: epok sonunda ve bitiste sinav (exam_pack_plan.npz; egitimle ayni maske yolu); hiz pencere pencere (ilk pencere
 derleme icerir).  Sonda agent.pt, results.json, sonra okuma (reading_prompts.json; ek okuma diag/generate_readings.py).
 Cikti: config.json, checkpoint.pt, decay_start/, results.json, agent.pt, samples.txt, samples.json.
@@ -83,7 +83,7 @@ def pmi_table_path(data_dir, d):
 
 
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ngram_embed", "ngram_layers",
-           "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "mix_g_heads", "mix_kv", "g_layout", "z_inert", "pmi_init", "grad_share",
+           "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "g_layout", "z_inert", "pmi_init", "grad_share",
            "grad_share_beta")   # --resume'da kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
@@ -96,7 +96,7 @@ SAMPLE_SEED = 0             # sample cozme tohumu (V1 generate_baseline ile ayni
 IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len", "batch_rows", "train_stream_sha256",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
             "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads",
-            "mix_g_heads", "mix_kv", "g_layout", "z_inert", "pmi_init_sha256", "grad_share_sha256",
+            "g_layout", "z_inert", "pmi_init_sha256", "grad_share_sha256",
             "grad_share_beta")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
@@ -175,6 +175,9 @@ def _archived(idt):
     """Okuma ve surdurme: kimlik bu kodla kurulamiyorsa ileti, yoksa None.  Transformer her zaman yuklenir (torbali haric).
     Model Z: summaries_last 1 degilse (8 Ekim oncesi ya da summaries_last 0), learned_z 0 (formullu) ya da kaldirilan bir
     ozellik varsa durur (belge 77; sekilleri ayni olanlar sessizce yanlis yuklenirdi)."""
+    if idt.get("mix_g_heads") or idt.get("attn_gate") == 1:            # kullanici, 12 Ekim: "sil"
+        return "kosu kaldirilan karma katman (mix_g_heads) ya da kapi 1 ile egitildi; yuklenmez -- eski kod git etiketi " \
+               "arsiv/model-z2-20261012 (git worktree add <klasor> <etiket>)"
     if not idt.get("bag_k") and (idt.get("model") != "model_z" or (idt.get("summaries_last") == 1 and idt.get(
             "learned_z", 1) == 1 and not any(idt.get(k) for k in ("z_bow_weight", "layer_plan", "z_reads_all", "glob_drop")))):
         return None
@@ -247,8 +250,6 @@ def _build(args, dev):
                                     g_nope=getattr(args, "g_nope", 0) or 0,
                                     mlp_ratio=tuple(getattr(args, "mlp_ratio", None) or ()),
                                     local_kv_heads=getattr(args, "local_kv_heads", 0) or 0,
-                                    mix_g_heads=getattr(args, "mix_g_heads", 0) or 0,
-                                    mix_kv=tuple(getattr(args, "mix_kv", None) or ()),
                                     g_layout=getattr(args, "g_layout", None) or "top",
                                     z_inert=bool(getattr(args, "z_inert", 0)))
         if getattr(args, "pmi_init", "") and not getattr(args, "resume", 0):   # ilk agirlik; surdurmede checkpoint'ten
@@ -687,17 +688,14 @@ def _args(argv):
                     help="carry plani: belgenin ardisik en cok G parcasi ayni batch'te (carry_summaries 0 ile: K kontrolu, "
                          "bellek yok); varsayilan carry_summaries ise 4, degilse 0")
     ap.add_argument("--attn_gate", type=lambda s: s if s == "auto" else int(s), default=None,
-                    help="model_z: head basina attention cikis kapisi (belge 88a, 90a); 1 girdi n1(x), 2 girdi n1(x)'in "
-                         "ilk d // 64 boyutu; auto (varsayilan): model_z ve d >= 64 ise 2, aksi 0; kimlikte; "
+                    help="model_z: head basina attention cikis kapisi (belge 88a, 90a); 2 girdi n1(x)'in ilk d // 64 "
+                         "boyutu; auto: model_z ve d >= 64 ise 2, aksi 0; kimlikte; "
                          "--resume'da verilmezse kosunun kimliginden")
     ap.add_argument("--local_kv_heads", type=lambda s: s if s == "auto" else int(s), default=None,
                     help="yerel (Z'li) bloklarda k / v head sayisi (GQA); auto (varsayilan): glob_kv_heads ile ayni; 0 tam (eski)")
     ap.add_argument("--mlp_ratio", default=None,
                     help="MLP : tam (GQA'siz) attention parametre orani yerel,G: genislik = oran x 4d/3 (64'un kati); G'li Model Z'de "
                          "varsayilan 1,4; 0 esit genislik (8d/3)")
-    ap.add_argument("--mix_g_heads", type=int, default=None,
-                    help="deneme/mixed-layer: her blokta son N head G (tam causal, gercek konum), kalan yerel (Z'li); ortak MLP, "
-                         "oran head payiyla agirlikli; 0 kapali (G katmanlari ayri)")
     ap.add_argument("--g_layout", default=None,
                     help="G katmanlarinin yeri; interleave (G'li Model Z varsayilani, YYG) esit aralikli + son blok G, top son N blok, "
                          "ya da blok numaralari '3,6,9' (0'dan, global_layers tane)")
@@ -708,7 +706,6 @@ def _args(argv):
     ap.add_argument("--grad_share", default=None, help="E gradyani PMI komsularina: auto (varsayilan) | none | npz")
     ap.add_argument("--grad_share_beta", default=None, choices=("fixed1000", "needtrust"),
                     help="kelime pay orani: needtrust (varsayilan; ihtiyac x guven, olcek medyan sayim) | fixed1000")
-    ap.add_argument("--mix_kv", default=None, help="deneme/mixed-layer: yerel,G k / v head (verilmezse head payina gore)")
     ap.add_argument("--g_nope", type=int, default=None,
                     help="1: G (tam) katmanlarinda RoPE yok, konum yerel katmanlardan (G'li Model Z'de varsayilan; 0 eski RoPE'li)")
     ap.add_argument("--mtp", type=lambda s: s if s == "auto" else int(s), default=None,
@@ -734,8 +731,8 @@ def _args(argv):
     was = torch.load(ckpt, map_location="cpu", weights_only=False, mmap=True)["args"] \
         if args.resume and os.path.exists(ckpt) else None               # varsayilan degisse de kosu kendi ayariyla surer
     for k in args.defaulted if was is not None else ():
-        setattr(args, k, was.get(k, [] if k in ("mlp_ratio", "mix_kv") else "top" if k == "g_layout" else
-                                 0 if k in ("glob_kv_heads", "attn_gate", "mtp", "g_nope", "local_kv_heads", "mix_g_heads", "z_inert")
+        setattr(args, k, was.get(k, [] if k == "mlp_ratio" else "top" if k == "g_layout" else
+                                 0 if k in ("glob_kv_heads", "attn_gate", "mtp", "g_nope", "local_kv_heads", "z_inert")
                                  or k.startswith("ngram") else "none" if k in ("pmi_init", "grad_share") else None))
     for k in ("pmi_init", "grad_share") if was is not None else ():     # kimlikte yol yok, sha var
         if k in args.defaulted:
@@ -754,12 +751,12 @@ def _args(argv):
         args.attn_gate = ATTN_GATE_DEFAULT
     if args.attn_gate == "auto":                                         # kimlige cozulmus sayi
         args.attn_gate = 2 if args.model == "model_z" and args.d >= 64 else 0
-    if args.attn_gate not in (0, 1, 2):
-        sys.exit("DUR: --attn_gate %s: 0, 1, 2 ya da auto" % args.attn_gate)
+    if args.attn_gate not in (0, 2):
+        sys.exit("DUR: --attn_gate %s: 0, 2 ya da auto (kapi 1 kaldirildi: arsiv/model-z2-20261012)" % args.attn_gate)
     if args.attn_gate and args.model != "model_z":
         sys.exit("DUR: --attn_gate yalniz model_z")
     if args.attn_gate == 2 and args.d < 64:
-        sys.exit("DUR: --attn_gate 2: kapi girdisi d // 64 boyut, d %d < 64 -> 0 boyut; d >= 64 ya da --attn_gate 0 / 1"
+        sys.exit("DUR: --attn_gate 2: kapi girdisi d // 64 boyut, d %d < 64 -> 0 boyut; d >= 64 ya da --attn_gate 0"
                  % args.d)
     if args.ngram_embed is None:
         args.ngram_embed = NGRAM_DEFAULT
@@ -810,18 +807,12 @@ def _args(argv):
         if args.local_kv_heads:
             auto.append("local_kv_heads %d (= glob_kv_heads)" % args.local_kv_heads)
     args.local_kv_heads = int(args.local_kv_heads or 0)
-    args.mix_g_heads = int(args.mix_g_heads or 0)
     if args.z_inert is None:                                             # Model Z3 varsayilan (G'li Model Z)
-        args.z_inert = Z_INERT_DEFAULT if args.model == "model_z" and args.global_layers and not args.carry_summaries \
-            and not args.mix_g_heads else 0
+        args.z_inert = Z_INERT_DEFAULT if args.model == "model_z" and args.global_layers and not args.carry_summaries else 0
     args.z_inert = int(args.z_inert or 0)
-    if args.z_inert and (args.model != "model_z" or not args.global_layers or args.carry_summaries or args.mix_g_heads):
-        sys.exit("DUR: --z_inert yalniz G'li Model Z'de, carry / mix_g_heads ile yok")
+    if args.z_inert and (args.model != "model_z" or not args.global_layers or args.carry_summaries):
+        sys.exit("DUR: --z_inert yalniz G'li Model Z'de, carry ile yok")
     args.g_layout = args.g_layout or (G_LAYOUT_DEFAULT if args.model == "model_z" and args.global_layers else "top")
-    mk = args.mix_kv
-    args.mix_kv = [int(x) for x in mk.split(",")] if isinstance(mk, str) else list(mk or [])
-    if args.mix_g_heads and (args.model != "model_z" or not args.global_layers or not args.mlp_ratio):
-        sys.exit("DUR: --mix_g_heads yalniz G'li, mlp_ratio'lu Model Z'de")
     if args.local_kv_heads and (args.model != "model_z" or args.heads % args.local_kv_heads):
         sys.exit("DUR: --local_kv_heads yalniz Model Z'de, heads'in boleni (%d)" % args.heads)
     if args.lr == "auto":
@@ -922,7 +913,7 @@ def main(argv=None):
                  carry_group=args.carry_group, vocab_rows=args.vocab_rows, attn_gate=args.attn_gate,
                  ngram_embed=args.ngram_embed, ngram_layers=args.ngram_layers, ngram_sparse=args.ngram_sparse,
                  mtp=args.mtp, g_nope=args.g_nope, mlp_ratio=args.mlp_ratio, local_kv_heads=args.local_kv_heads,
-                 mix_g_heads=args.mix_g_heads, mix_kv=args.mix_kv, g_layout=args.g_layout,
+                 g_layout=args.g_layout,
                  z_inert=args.z_inert, pmi_init_sha256=args.pmi_init_sha256, grad_share_sha256=args.grad_share_sha256, grad_share_beta=args.grad_share_beta)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
@@ -944,7 +935,7 @@ def main(argv=None):
             sys.exit("DUR: " + _archived(was))
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
                "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [], "local_kv_heads": 0,
-               "mix_g_heads": 0, "mix_kv": [], "g_layout": "top", "z_inert": 0, "pmi_init_sha256": "", "grad_share_sha256": "",
+               "g_layout": "top", "z_inert": 0, "pmi_init_sha256": "", "grad_share_sha256": "",
                "grad_share_beta": "",
                **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
@@ -992,10 +983,7 @@ def main(argv=None):
         log("mtp %d: ayni-logit MTP, agirlik %s (adim 0), ek hedefler kapali: adim >= %d; inis basi %d" % (
             args.mtp, R.mtp_weights(0, total, args.mtp), next(s for s in range(total + 1)
                                                               if not any(R.mtp_weights(s, total, args.mtp))), down))
-    if args.mix_g_heads:
-        log("mix_g_heads %d: her blokta %d yerel + %d G head, kv %s, MLP genislik %s (global_layers yalniz maske ikilisi)" % (
-            args.mix_g_heads, args.heads - args.mix_g_heads, args.mix_g_heads, model.mix_kv, model.mlp_widths[0]))
-    elif args.global_layers and args.g_layout != "top":
+    if args.global_layers and args.g_layout != "top":
         log("global_layers %d, g_layout %s: G bloklari %s (tam causal, gercek konum)" % (
             args.global_layers, args.g_layout, [l for l, g in enumerate(model.is_glob) if g]))
     elif args.global_layers:
@@ -1161,10 +1149,6 @@ def main(argv=None):
                               ms_per_step_median=med("ms_per_step"), note="pencere ortancasi; ilk pencere (derleme) haric"))
     torch.save(dict(state=model.state_dict(), identity=ident, args=vars(args)), os.path.join(args.out, "agent.pt"))
     json.dump(results, open(res_path, "w"), indent=1)                   # okumadan ONCE: okuma dusse de model kalir
-    if args.mix_g_heads:                                                 # deneme/mixed-layer: uretim onbellegi yok
-        log("BITTI: %s | sinav kayip %.4f bpb %.4f | mix_g_heads: okuma yok" % (
-            args.out, results["exam"]["loss"], results["exam"]["bits_per_byte"]))
-        return results
     t = time.time()
     own = os.path.join(args.data, "reading_prompts.json")              # veri klasorunun istemleri (FineWeb, belge 48)
     rows, gen = _readings(model, valid, tok, path=own if os.path.exists(own) else None)

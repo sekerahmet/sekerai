@@ -415,7 +415,7 @@ def t_trace():
               and all(k in html for k in ('"prompt.json"', '"gen.json"', "t[12]", "t[11]", "t[9], t[10]")),
               str({k: v[1] for k, v in pages.items()}))
         runs["gate"] = os.path.join(T2.TMP, "runs_trace", "gate")
-        TR.main(base + ["--layers", "3", "--global_layers", "2", "--glob_kv_heads", "2", "--attn_gate", "1", "--out",
+        TR.main(base + ["--layers", "3", "--global_layers", "2", "--glob_kv_heads", "2", "--attn_gate", "2", "--d", "64", "--out",
                         runs["gate"]])
         mg = G.load(runs["gate"], data, cpu)[0]
         rgt = TT.trace(mg, batch, ["read_off"], 5, True)
@@ -428,7 +428,7 @@ def t_trace():
         dg, db = 0.0, 0.0
         for l, (b, (x, pos, mask)) in enumerate(zip(mg.blocks, ins)):
             xn = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + torch.finfo(x.dtype).eps) * b.n1.weight
-            g = torch.sigmoid(xn @ b.attn_gate.T)[0]                                    # (T, H)
+            g = torch.sigmoid(xn[..., :b.attn_gate.shape[1]] @ b.attn_gate.T)[0]       # (T, H); kapi 2: ilk d // 64
             w = TT.attention_weights(b, x, pos, mask)[0]
             bos = (w * (batch.kind[0] == D.Kind.BOS)[None, None, :]).sum(-1)            # (H, T); BOS konumu q'da da var
             bos = bos - torch.where(batch.kind[0] == D.Kind.BOS, w.diagonal(dim1=1, dim2=2), torch.zeros(()))
