@@ -241,6 +241,12 @@ MOE_GAMMA = 1e-3        # yuk dengesi sapma adimi (deepseek2024_v3: 0,001; liu20
 
 
 MOE_DENSE_N = 256      # gradyansiz ve en cok bu kadar token: butun uzmanlar hesaplanir (uretim; senkron yok, CUDA graph)
+MOE_SCATTER = True     # CUDA'da ScatterMoE Triton cekirdekleri (scattermoe_ops; senkronsuz); False ya da triton yok: modelz::moe_experts
+try:
+    import triton  # noqa: F401
+    from scattermoe_ops import flatten_sort_count as _sm_sort, parallel_linear as _sm_linear
+except ImportError:                                                     # CPU / triton'suz: ozel operator yolu
+    _sm_sort = _sm_linear = None
 
 
 def _swiglu(h, w):
@@ -399,6 +405,13 @@ class MoE(torch.nn.Module):
             self.load.add_(cnt)
         if N <= MOE_DENSE_N and not torch.is_grad_enabled():
             y = self._all_experts(x, idx, p)
+        elif x.is_cuda and MOE_SCATTER and _sm_linear is not None:           # ScatterMoE: dagit + carp + topla tek cekirdekte
+            dt, w = self._mm_dtype(x), self.width
+            xb = x.to(dt)                                                # bf16 once (fp32 dagitma / gradyani yok)
+            sei, ssi, eo = _sm_sort(idx, self.n)
+            hh = _sm_linear(xb, self.w_gate_up.to(dt).permute(0, 2, 1), k, sei, ssi, eo, grouped_out=True)
+            y = _sm_linear(F.silu(hh[:, :w]) * hh[:, w:], self.w_down.to(dt).permute(0, 2, 1), 1, sei, ssi, eo,
+                           grouped_in=True, gates=p.to(dt))
         else:
             dt = self._mm_dtype(x)
             order = flat.argsort(stable=True)
