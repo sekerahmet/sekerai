@@ -285,7 +285,7 @@ def _pack_carry():
             and int(bk.target[2, zk(bk, 2)[-1]]) == E)
     ok_c = (int(bc.target[0, zk(bc, 0)[1]]) == 20 and int(bc.kind[1, 0]) == K.TOKEN and bc.tokens[1, :3].tolist() == [20, 21, 22]
             and bc.pos[1, :6].tolist() == [3, 4, 5, 3, 4, 4] and bc.pos[2, :4].tolist() == [5, 5, 6, 6]
-            and bc.real_pos[1, :6].tolist() == [6, 7, 8, 9, 10, 11] and bc.real_pos[2, 0] == 12
+            and bc.carry_pos[1, :6].tolist() == [6, 7, 8, 9, 10, 11] and bc.carry_pos[2, 0] == 12 and bc.real_pos is None
             and bc.mem_rows[1].tolist() == [0, 0, 0] + [-1] * 5 and bc.mem_cols[1, :3].tolist() == [0, 3, 5]
             and bc.mem_rows[2, :5].tolist() == [0, 0, 0, 1, 1] and bc.mem_cols[2, :5].tolist() == [0, 3, 5, 3, 5]
             and bool((bc.mem_rows[0] == -1).all()) and int(bc.kind[0, 0]) == K.BOS)
@@ -293,7 +293,7 @@ def _pack_carry():
           "(FIRST) hedefler, grubun son parcasi EOS; C devam parcasi BOS'suz, mantiksal konum + onceki cumle sayisi, gercek "
           "konum + onceki boy, bellek = onceki parcalarin BOS + Z sutunlari sirayla", ok_k and ok_c,
           "K pos %s | C pos %s real %s mem %s / %s" % (bk.pos[1, :5].tolist(), bc.pos[1, :6].tolist(),
-                                                       bc.real_pos[1, :6].tolist(), bc.mem_rows[2, :5].tolist(),
+                                                       bc.carry_pos[1, :6].tolist(), bc.mem_rows[2, :5].tolist(),
                                                        bc.mem_cols[2, :5].tolist()))
 
 

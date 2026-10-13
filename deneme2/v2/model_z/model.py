@@ -119,7 +119,7 @@ def story_positions(kind):
 def summaries_last(batch):
     """PackedBatch (build_batch duzeni) -> (ayni batch [token'lar | ozetler | dolgu] sirasinda, perm (B, T): yeni sutundaki
     eski sutun).  Konum basina butun alanlar (tokens, kind, pos, doc, sent, target, target_kind) birlikte tasinir; gercek
-    hikaye konumu once hesaplanip real_pos olarak eklenir (glob katmanlari; carry batch'i getirdiyse onunki).  carry
+    hikaye konumu once hesaplanip real_pos olarak eklenir (glob katmanlari; carry batch'i carry_pos getirdiyse onu).  carry
     bellegi: mem_cols kaynak satirin yeni sutununa."""
     kind = batch.kind
     B, T = kind.shape
@@ -132,7 +132,7 @@ def summaries_last(batch):
         mem = dict(mem_cols=torch.where(batch.mem_rows >= 0, inv[r, batch.mem_cols.clamp_min(0)], -1))
     return dataclasses.replace(batch, tokens=g(batch.tokens), kind=g(kind), pos=g(batch.pos), doc=g(batch.doc),
                                sent=g(batch.sent), target=g(batch.target), target_kind=g(batch.target_kind),
-                               real_pos=g(story_positions(kind) if batch.real_pos is None else batch.real_pos), **mem), perm
+                               real_pos=g(story_positions(kind) if batch.carry_pos is None else batch.carry_pos), **mem), perm
 
 
 def model_z_summaries_last_ranges(kind, doc, sent, glob=False, n_mem=None, z_inert=False):
@@ -504,6 +504,7 @@ class SentenceTransformer(torch.nn.Module):
         add = (lambda x_, l: x_) if g is None else (  # noqa: E731
             lambda x_, l: x_ + self.ngram_lambdas[l] * g if l < self.ngram_layers else x_)
         mem = getattr(batch, "mem_rows", None) is not None              # carry bellegi (belge 83)
+        assert last or not mem, "carry bellegi summaries_last duzeni ister (once summaries_last)"
         if mem and attn is None:
             import recipe as R
             attn = tuple(R.dense_mask(batch, f) for f in mfn) if isinstance(mfn, tuple) else R.dense_mask(batch, mfn)
@@ -580,7 +581,7 @@ class SentenceTransformer(torch.nn.Module):
         opens = [list(s[-1]) if o else [] for s, o in zip(prompts, opened)]
         n_open = max(len(o) for o in opens)
         cache = StaticCache(self, max(n_open + 1, min(n_open + max_sentences * (max_tokens + 1) + 1, limit - min(
-            1 + sum(len(x) + 1 for x in p) for p in pre))), max_sentences + 1, n_open + max_tokens + 1)
+            1 + sum(len(x) + 1 for x in p) for p in pre))), max_sentences + 1, n_open + max_tokens + 1, max_glob=limit)
         am = cache.prefill_rows(pre, opens).float().argmax(-1).tolist()
         rules, act, res = [], [], [None] * len(prompts)
         for r, s in enumerate(prompts):
@@ -622,7 +623,7 @@ class SentenceTransformer(torch.nn.Module):
         cikti tek tek uretimle ayni (fp32 token token)."""
         out, limit = [], self.max_positions()
         static = STATIC_DECODE and StaticCache.supports(self)
-        if static and generator is None and on_token is None and batch_size > 1 and len(prompts) > 1:
+        if static and generator is None and on_token is None and batch_size > 1:
             for i in range(0, len(prompts), batch_size):
                 out += self._generate_rows(prompts[i:i + batch_size], max_sentences, max_tokens, open_last, stop_when)
             return out
@@ -631,7 +632,7 @@ class SentenceTransformer(torch.nn.Module):
             n_open = len(sents[-1]) if opened else 0
             t0 = 1 + sum(len(s) + 1 for s in (sents[:-1] if opened else sents))   # prefill sonrasi konum
             cache = StaticCache(self, max(n_open + 1, min(n_open + max_sentences * (max_tokens + 1) + 1, limit - t0)),
-                                max_sentences + 1, n_open + max_tokens + 1) if static else SummaryCache(self)
+                                max_sentences + 1, n_open + max_tokens + 1, max_glob=limit) if static else SummaryCache(self)
             logits = cache.prefill(sents[:-1] if opened else sents)
             for t in (sents[-1] if opened else ()):
                 logits = cache.append_token(t)
@@ -668,6 +669,8 @@ class SentenceTransformer(torch.nn.Module):
                 opened = False
                 logits = cache.close_sentence()
                 used += 1
+                if getattr(cache, "restarted", False):                   # carry grubu bitti: hikaye burada biter
+                    break
             out.append((gen, ended, eos))
         return out
 
@@ -710,17 +713,17 @@ class SummaryCache:
                 x = x + self.m.ngram_lambdas[l] * g
             z_only = self.zi and summary and read_sentence                 # Z3'te Z_k: kendini okur, K / V saklanmaz
             if self.glob[l]:
-                q, k, v = block._qkv(x, torch.tensor([[self.t]], device=self.dev))
+                q, k, v, *gt = block._qkv(x, torch.tensor([[self.t]], device=self.dev), gate=block.attn_gate is not None)
                 if z_only:
                     ka = k if self.all_k[l] is None else torch.cat([self.all_k[l], k], 2)
                     va = v if self.all_v[l] is None else torch.cat([self.all_v[l], v], 2)
-                    x = block._finish(x, gqa_sdpa(q, ka, va))
+                    x = block._finish(x, gqa_sdpa(q, ka, va), *gt)
                     continue
                 self.all_k[l] = k if self.all_k[l] is None else torch.cat([self.all_k[l], k], 2)
                 self.all_v[l] = v if self.all_v[l] is None else torch.cat([self.all_v[l], v], 2)
-                x = block._finish(x, gqa_sdpa(q, self.all_k[l], self.all_v[l]))
+                x = block._finish(x, gqa_sdpa(q, self.all_k[l], self.all_v[l]), *gt)
                 continue
-            q, k, v = block._qkv(x, p)
+            q, k, v, *gt = block._qkv(x, p, gate=block.attn_gate is not None)
             ks = [c for c in (self.sum_k[l], self.sen_k[l] if read_sentence else None) if c is not None] + [k]
             vs = [c for c in (self.sum_v[l], self.sen_v[l] if read_sentence else None) if c is not None] + [v]
             a = gqa_sdpa(q, torch.cat(ks, 2), torch.cat(vs, 2))             # yerel GQA'da k / v daha az head
@@ -732,7 +735,7 @@ class SummaryCache:
             else:
                 self.sen_k[l] = k if self.sen_k[l] is None else torch.cat([self.sen_k[l], k], 2)
                 self.sen_v[l] = v if self.sen_v[l] is None else torch.cat([self.sen_v[l], v], 2)
-            x = block._finish(x, a)
+            x = block._finish(x, a, *gt)
         return self.m.norm(x)
 
     @torch.no_grad()
@@ -746,6 +749,7 @@ class SummaryCache:
                 for t_ in x_:
                     self.append_token(t_)
                 self.close_sentence()
+                assert not getattr(self, "restarted", False), "istem carry grubundan uzun (onbellek sifirlandi)"
             return self.logits
         tok, kind, pos, sent = [EOS_ID], [BOS], [0], [-1]
         for k, x in enumerate(sents):
@@ -770,13 +774,13 @@ class SummaryCache:
             if gr is not None and l < self.m.ngram_layers:
                 x = x + self.m.ngram_lambdas[l] * gr
             g = self.glob[l]
-            q, k, v = block._qkv(x, real if g else lpos)
+            q, k, v, *gt = block._qkv(x, real if g else lpos, gate=block.attn_gate is not None)
             a = gqa_sdpa(q, k, v, causal if g else local)
             if g:
                 self.all_k[l], self.all_v[l] = k[:, :, keep], v[:, :, keep]
             else:
                 self.sum_k[l], self.sum_v[l] = k[:, :, summ], v[:, :, summ]
-            x = block._finish(x, a)
+            x = block._finish(x, a, *gt)
         self.n_z, self.i, self.t = len(sents), 0, T - 1
         self.sen_k = [None] * len(self.sen_k)
         self.sen_v = [None] * len(self.sen_v)
@@ -816,6 +820,7 @@ class SummaryCache:
                 self.piece += 1
                 if self.piece == self.m.carry_group:                        # grup bitti: yeni hikaye (BOS, bellek yok)
                     self.__init__(self.m)
+                    self.restarted = True                                   # generate burada durur (baglamsiz devam yok)
                 else:                                                       # glob: yalniz Z'ler (BOS, token'lar atilir)
                     keep = torch.tensor([k == ZTOK for k in self.gkind], device=self.dev)
                     for l, g in enumerate(self.glob):
@@ -905,27 +910,32 @@ def _static_step(m, glob, f32, smax, w, z, live, sum_len, sen_len, tt, prev, K, 
     pos = torch.where(z, sum_len, sum_len + sen_len)[:, None]
     slot = torch.where(z, sum_len, smax + sen_len)
     ar = torch.arange(len(w), device=w.device)
-    loc = None
+    loc, gmask, js = None, None, {}
     for l, block in enumerate(m.blocks):
         if gr is not None and l < m.ngram_layers:
             x = x + m.ngram_lambdas[l] * gr
         g = glob[l]
-        j = torch.arange(K[l].shape[2], device=w.device)[None]
+        n_ = K[l].shape[2]
+        if n_ not in js:
+            js[n_] = torch.arange(n_, device=w.device)[None]
+        j = js[n_]
         if g:
-            mask = j <= tt[:, None]
-            if zs is not None:
-                mask = (mask & ~zs) | (j == tt[:, None])
+            if gmask is None:
+                gmask = j <= tt[:, None]
+                if zs is not None:
+                    gmask = (gmask & ~zs) | (j == tt[:, None])
+            mask = gmask
         else:
             if loc is None:                                              # ozet [0, sum_len (+ Z)), cumle [smax, ..]
                 summ = (j < 1) | (z[:, None] & (j == sum_len[:, None])) if zs is not None else \
                     j < (sum_len + z.long())[:, None]
                 loc = summ | ((j >= smax) & (j < (smax + sen_len + (~z).long())[:, None]))
             mask = loc
-        q, k, v = block._qkv(x, tt[:, None] if g else pos)
+        q, k, v, *gt = block._qkv(x, tt[:, None] if g else pos, gate=block.attn_gate is not None)
         at = tt if g else slot
         K[l][ar, :, at] = k[:, :, 0]
         V[l][ar, :, at] = v[:, :, 0]
-        x = block._finish(x, decode_sdpa(q, K[l], V[l], mask, f32))
+        x = block._finish(x, decode_sdpa(q, K[l], V[l], mask, f32), *gt)
     if zs is not None:
         zs[ar, tt] = z
     out.copy_(m._logits(m.norm(x[:, 0])))
@@ -950,10 +960,11 @@ class StaticCache:
     def supports(model):
         return not model.carry_group
 
-    def __init__(self, model, positions, sentences, sentence_tokens):
+    def __init__(self, model, positions, sentences, sentence_tokens, max_glob=None):
         assert StaticCache.supports(model), "StaticCache: carry desteklenmez (SummaryCache)"
         self.m, self.dev = model, model.E.weight.device
         self.budget = (positions, sentences, sentence_tokens)
+        self.max_glob = max_glob                                        # glob konum ust siniri (generate: max_positions)
         self.run = None
 
     @torch.no_grad()
@@ -1025,7 +1036,7 @@ class StaticCache:
             if gr is not None and l < self.m.ngram_layers:              # bigram (egitimle ayni: her blok girdisine)
                 x = x + self.m.ngram_lambdas[l] * gr
             g = self.glob[l]
-            q, k, v = block._qkv(x, real if g else lpos)
+            q, k, v, *gt = block._qkv(x, real if g else lpos, gate=block.attn_gate is not None)
             if g and gmask is not None:
                 a = _COMPILED["flex"](q, k, v, gmask, block.kv_heads != block.heads) if flex else gqa_sdpa(q, k, v, gmask)
             elif g:                                                     # tek hikaye, sagdan dolgu: causal = glob maskesi
@@ -1036,14 +1047,15 @@ class StaticCache:
                 a = reorder(a, inv)
             ks.append(k)
             vs.append(v)
-            x = block._finish(x, a)
+            x = block._finish(x, a, *gt)
         ar = torch.arange(B, device=dev)
         self.logits = self.m._logits(self.m.norm(x[ar, lt(T) - 1]))
         summ = (kind == BOS) | (kind == ZTOK)
         opn = (kind == TOKEN) & (sent == lt([r[4] for r in rows])[:, None])
         nsum, sen = [r[4] + 1 for r in rows], [r[5] for r in rows]
         self.smax = up(max(nsum) + self.budget[1] + 1)
-        self.limits = (self.smax, up(self.budget[2]), up(Tmax + self.budget[0]))  # ozet, cumle, glob konum sinirlari
+        tg = Tmax + self.budget[0] if self.max_glob is None else min(Tmax + self.budget[0], self.max_glob)
+        self.limits = (self.smax, up(self.budget[2]), up(tg))           # ozet, cumle, glob konum sinirlari
         self.n = [list(x_) for x_ in zip(nsum, sen, T)]                 # satir basina host sayaclari (sinir denetimi)
         self.K, self.V = [], []
         live = torch.arange(Tp, device=dev)[None] < lt(T)[:, None]       # (B, Tp) gercek konum (glob tamponu)
@@ -1119,7 +1131,7 @@ class StaticCache:
         for n, z_, l_ in zip(self.n, z, live):
             if l_:
                 n[:] = [n[0] + z_, 0 if z_ else n[1] + 1, n[2] + 1]
-                assert all(a <= b for a, b in zip(n, self.limits)), \
+                assert n[0] <= self.limits[0] and n[1] < self.limits[1] and n[2] < self.limits[2], \
                     "StaticCache: tampon asildi %s > %s (positions / sentences / sentence_tokens)" % (n, self.limits)
         if len(w) == 1:                                                  # tek satir: kopyasiz doldurma
             self.w.fill_(int(w[0]))

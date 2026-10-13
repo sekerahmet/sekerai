@@ -547,7 +547,8 @@ class PackedBatch:
     target: torch.Tensor          # hedef token ya da -100
     target_kind: torch.Tensor     # TargetKind (hedefsiz -1)
     story_ids: torch.Tensor       # (B, S_max) satirdaki hikaye kimlikleri, -1 dolgu
-    real_pos: torch.Tensor = None  # summaries_last duzeninde (ve carry belleginde): gercek hikaye konumu
+    real_pos: torch.Tensor = None  # yalniz summaries_last duzeninde: gercek hikaye konumu (duzenin isareti)
+    carry_pos: torch.Tensor = None  # carry belleginde build_batch duzeninde gercek konum (summaries_last real_pos'a tasir)
     mem_rows: torch.Tensor = None  # carry bellegi (B, M_max): kaynak satir (onceki parcalarin BOS + Z'leri), -1 bos
     mem_cols: torch.Tensor = None  # (B, M_max) kaynak sutun
 
@@ -557,7 +558,7 @@ def build_batch(stories, row_stories_list, layout, device="cpu", row_len=ROW_LEN
     (numpy; olculdu: Python dongusunun ~10 kati hizli, tests_v2 'pack' dongulu basvuruyla esitligi sinar).
     carry (belge 81b, 83; model_z): dict(gpos (hikaye basina gruptaki sira), memory, m_max).  Gruptaki sonraki parcanin
     oncesi: son Z'nin hedefi sonraki parcanin ilk token'i (FIRST).  memory: devam parcasi (gpos > 0; satir basinda) BOS'suz,
-    mantiksal konum + onceki parcalarin cumle sayisi, gercek konum (real_pos) + onceki parcalarin boyu; mem_rows / mem_cols
+    mantiksal konum + onceki parcalarin cumle sayisi, gercek konum (carry_pos) + onceki parcalarin boyu; mem_rows / mem_cols
     onceki parcalarin BOS + Z sutunlari (sirayla)."""
     assert layout in ("transformer", "model_z")
     B = len(row_stories_list)
@@ -649,7 +650,7 @@ def build_batch(stories, row_stories_list, layout, device="cpu", row_len=ROW_LEN
         assert len(src) <= M, "bellek %d > m_max %d" % (len(src), M)
         mem_rows[hrow[x], :len(src)] = [r for r, _ in src]
         mem_cols[hrow[x], :len(src)] = [c for _, c in src]
-    return PackedBatch(t(tokens), t(kind), t(pos), t(doc), t(sent), t(target), t(tkind), t(sid), real_pos=t(real),
+    return PackedBatch(t(tokens), t(kind), t(pos), t(doc), t(sent), t(target), t(tkind), t(sid), carry_pos=t(real),
                        mem_rows=t(mem_rows), mem_cols=t(mem_cols))
 
 
