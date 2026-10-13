@@ -243,10 +243,30 @@ MOE_GAMMA = 1e-3        # yuk dengesi sapma adimi (deepseek2024_v3: 0,001; liu20
 MOE_DENSE_N = 256      # gradyansiz ve en cok bu kadar token: butun uzmanlar hesaplanir (uretim; senkron yok, CUDA graph)
 
 
-def _silu_grad(g):
-    """d silu(g) / dg (fp32)."""
+def _swiglu(h, w):
+    """h (N, 2w) [kapi | deger] -> silu(kapi) * deger (girdi dtype)."""
+    return F.silu(h[:, :w]) * h[:, w:]
+
+
+def _swiglu_bwd(h, g_act, w):
+    """-> (d h (N, 2w), act (N, w)); ara hesap fp32, cikti girdi dtype."""
+    g, u, ga = h[:, :w].float(), h[:, w:].float(), g_act.float()
     s_ = torch.sigmoid(g)
-    return s_ * (1 + g * (1 - s_))
+    sg = g * s_
+    gh = torch.cat([ga * u * s_ * (1 + g * (1 - s_)), ga * sg], 1)
+    return gh.to(h.dtype), (sg * u).to(h.dtype)
+
+
+def _fused(fn):
+    """CUDA'da derlenmis (eleman isleri tek cekirdek; butun satirlar, uzmandan bagimsiz), CPU'da eager."""
+    name = "moe_" + fn.__name__
+    def run(*a):
+        if not a[0].is_cuda:
+            return fn(*a)
+        if name not in _COMPILED:
+            _COMPILED[name] = torch.compile(fn, dynamic=False)
+        return _COMPILED[name](*a)
+    return run
 
 
 @torch.library.custom_op("modelz::moe_experts", mutates_args=())
@@ -254,16 +274,22 @@ def _moe_experts(xs: torch.Tensor, w_gu: torch.Tensor, w_dn: torch.Tensor,
                  offs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Uzmana gore sirali satirlar xs (N, d), w_gu (E, 2w, d), w_dn (E, d, w), offs (E,) kumulatif bitis -> (y (N, d),
     h (N, 2w) kapi | deger, geri gecis icin).  Ozel operator: Inductor icine girmez (torch 2.11 grouped-mm Triton sablonu
-    sm_120'de calismadi: duzen bayragi / TMA, autotune adayinda illegal instruction -- 14 Ekim moe_check); uzman basina
-    duz matmul (cuBLAS), cagri basina bir senkron (offs.tolist)."""
+    sm_120'de calismadi -- 14 Ekim moe_check).  Uzman basina yalniz matmul (cuBLAS); SwiGLU butun satirlarda tek derlenmis
+    cekirdek; cagri basina bir senkron (offs.tolist)."""
     w = w_dn.shape[2]
-    y, h = xs.new_zeros(xs.shape[0], w_dn.shape[1]), xs.new_empty(xs.shape[0], 2 * w)
+    ends = offs.tolist()
+    h = xs.new_empty(xs.shape[0], 2 * w)
     s0 = 0
-    for e, s1 in enumerate(offs.tolist()):
+    for e, s1 in enumerate(ends):
         if s1 > s0:
-            he = xs[s0:s1] @ w_gu[e].T
-            h[s0:s1] = he
-            y[s0:s1] = (F.silu(he[:, :w]) * he[:, w:]) @ w_dn[e].T
+            torch.mm(xs[s0:s1], w_gu[e].T, out=h[s0:s1])
+        s0 = s1
+    act = _fused(_swiglu)(h, w)
+    y = xs.new_empty(xs.shape[0], w_dn.shape[1])
+    s0 = 0
+    for e, s1 in enumerate(ends):
+        if s1 > s0:
+            torch.mm(act[s0:s1], w_dn[e].T, out=y[s0:s1])
         s0 = s1
     return y, h
 
@@ -276,19 +302,27 @@ def _(xs, w_gu, w_dn, offs):
 @torch.library.custom_op("modelz::moe_experts_bwd", mutates_args=())
 def _moe_experts_bwd(gy: torch.Tensor, xs: torch.Tensor, w_gu: torch.Tensor, w_dn: torch.Tensor, offs: torch.Tensor,
                      h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """_moe_experts'in geri gecisi -> (gxs, g_w_gu, g_w_dn); uzman basina, saklanan h ile (gate_up yeniden hesaplanmaz)."""
+    """_moe_experts'in geri gecisi -> (gxs, g_w_gu, g_w_dn); saklanan h ile (gate_up yeniden hesaplanmaz).  Uzman basina
+    matmul, SwiGLU turevi butun satirlarda tek derlenmis cekirdek."""
     w = w_dn.shape[2]
-    gx, gwu, gwd = torch.zeros_like(xs), torch.zeros_like(w_gu), torch.zeros_like(w_dn)
+    ends = offs.tolist()
+    g_act = gy.new_empty(gy.shape[0], w)
     s0 = 0
-    for e, s1 in enumerate(offs.tolist()):
+    for e, s1 in enumerate(ends):
         if s1 > s0:
-            ge, ue = h[s0:s1, :w].float(), h[s0:s1, w:].float()
-            act = (F.silu(ge) * ue).to(xs.dtype)
-            g_act = (gy[s0:s1] @ w_dn[e]).float()
-            gwd[e] = gy[s0:s1].T @ act
-            gh = torch.cat([g_act * ue * _silu_grad(ge), g_act * F.silu(ge)], 1).to(xs.dtype)
-            gwu[e] = gh.T @ xs[s0:s1]
-            gx[s0:s1] = gh @ w_gu[e]
+            torch.mm(gy[s0:s1], w_dn[e], out=g_act[s0:s1])
+        s0 = s1
+    gh, act = _fused(_swiglu_bwd)(h, g_act, w)
+    gx, gwu, gwd = torch.empty_like(xs), torch.empty_like(w_gu), torch.empty_like(w_dn)
+    s0 = 0
+    for e, s1 in enumerate(ends):
+        if s1 > s0:
+            torch.mm(gy[s0:s1].T, act[s0:s1], out=gwd[e])
+            torch.mm(gh[s0:s1].T, xs[s0:s1], out=gwu[e])
+            torch.mm(gh[s0:s1], w_gu[e], out=gx[s0:s1])
+        else:                                                            # token almayan uzman: gradyan 0
+            gwd[e].zero_()
+            gwu[e].zero_()
         s0 = s1
     return gx, gwu, gwd
 
@@ -336,7 +370,8 @@ class MoE(torch.nn.Module):
 
     def route(self, x):
         """x (N, d) -> (uzman (N, k), agirlik (N, k) fp32)."""
-        s = torch.sigmoid(F.linear(x, self.router.weight).float())
+        with torch.autocast(x.device.type, enabled=False):              # fp32 skor: bf16'da esitlik secimi dalgalandirir
+            s = torch.sigmoid(F.linear(x.float(), self.router.weight.float()))
         idx = (s + self.expert_bias).topk(self.k, -1).indices
         p = s.gather(-1, idx)
         return idx, p / p.sum(-1, keepdim=True) * self.scale
