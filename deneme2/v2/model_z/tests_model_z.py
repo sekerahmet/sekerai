@@ -1699,10 +1699,78 @@ def t_z_inert():
           "fark %.1e, toplu %.1e" % (sd, sr))
 
 
+def t_moe():
+    """deneme/moe: MoE ciktisi = token basina elle basvuru (ilk topk uzman, yeniden normalize agirlik, SwiGLU), gradyanli
+    (kapasite yeterli) ve gradyansiz; kapasite tasinca ilk token basvuruyla ayni, tasan atamalar 0; yardimci kayip
+    yonlendiriciye ek gradyan verir; model: yalniz G bloklari MoE, muon_params uzmanlari alir yonlendiriciyi almaz,
+    ileri / geri sonlu."""
+    import recipe as R
+    from model import MoE
+    torch.manual_seed(0)
+    m = MoE(16, 64, 4, 2, cap=100.0, aux=0.0)
+    for p in m.parameters():
+        torch.nn.init.normal_(p, 0, 0.3)
+    x = torch.randn(2, 7, 16)
+
+    def ref(x):
+        xf = x.reshape(-1, 16)
+        probs = (xf @ m.router.weight.T).softmax(-1)
+        w, idx = probs.topk(2, -1)
+        w = w / w.sum(-1, keepdim=True)
+        out = torch.zeros_like(xf)
+        for i in range(xf.shape[0]):
+            for j in range(2):
+                e = m.experts[int(idx[i, j])]
+                g, u = (xf[i] @ e.gate_up.weight.T).chunk(2, -1)
+                out[i] += w[i, j] * ((torch.nn.functional.silu(g) * u) @ e.down.weight.T)
+        return out.view_as(x)
+    r = ref(x)
+    with torch.no_grad():
+        y0 = m(x)
+    y1 = m(x)
+    check("moe: cikti = elle basvuru (gradyansiz / gradyanli, kapasite yeterli)",
+          torch.allclose(y0, r, atol=1e-5) and torch.allclose(y1, r, atol=1e-5),
+          "fark %.2e / %.2e" % ((y0 - r).abs().max(), (y1 - r).abs().max()))
+    m.cap = 0.3                                                          # C = ceil(0.3 * 14 * 2 / 4) = 3
+    y2 = m(x).reshape(-1, 16)
+    probs = (x.reshape(-1, 16) @ m.router.weight.T).softmax(-1)
+    a = probs.topk(2, -1)[1].reshape(-1)
+    cnt = torch.bincount(a, minlength=4)
+    dropped_tokens = sorted({i // 2 for i in range(len(a)) if int((a[:i] == a[i]).sum()) >= 3})
+    keep_tokens = [t for t in range(14) if t not in dropped_tokens]
+    check("moe: kapasite tasinca tasmayan token basvuruyla ayni, tasan token farkli",
+          torch.allclose(y2[keep_tokens], r.reshape(-1, 16)[keep_tokens], atol=1e-5) and bool(cnt.max() > 3)
+          and len(dropped_tokens) > 0 and not torch.allclose(y2[dropped_tokens], r.reshape(-1, 16)[dropped_tokens], atol=1e-5),
+          "uzman sayimi %s, tasan token %s" % (cnt.tolist(), dropped_tokens))
+    m.cap = 100.0
+    grads = []
+    for aux in (0.0, 0.5):
+        m.aux = aux
+        m.zero_grad()
+        m(x).sum().backward()
+        grads.append(m.router.weight.grad.clone())
+    check("moe: yardimci kayip yonlendiriciye ek gradyan", not torch.allclose(grads[0], grads[1]))
+    torch.manual_seed(0)
+    model = SentenceTransformer(d=32, layers=3, heads=4, global_layers=1, z_inert=True, moe_experts=4, moe_topk=2)
+    kinds = [b.moe is not None for b in model.blocks]
+    names = [n for n, _ in R.muon_params(model)]
+    rng = np.random.default_rng(3)
+    stories = [[[int(v) for v in rng.integers(0, D.END_ID, rng.integers(1, 9))] for _ in range(rng.integers(2, 5))]
+               for _ in range(8)]
+    batch = real_batch([[0, 1, 2, 3], [4, 5, 6, 7]], 96, stories)
+    h = model._batch_hidden(batch)
+    h.float().sum().backward()
+    ok_g = all(p.grad is not None and torch.isfinite(p.grad).all() for n, p in model.named_parameters()
+               if "experts" in n or "router" in n)
+    check("moe: yalniz G bloklari MoE; uzmanlar Muon'da, yonlendirici degil; ileri / geri sonlu",
+          kinds == model.is_glob and any("experts" in n for n in names) and not any("router" in n for n in names)
+          and bool(torch.isfinite(h).all()) and ok_g, "G %s" % kinds)
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab,
              limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast,
-             combo=t_combo, interleave=t_interleave, z_inert=t_z_inert)
+             combo=t_combo, interleave=t_interleave, z_inert=t_z_inert, moe=t_moe)
 
 if __name__ == "__main__":
     if SIDE is not None:

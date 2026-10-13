@@ -215,7 +215,8 @@ def muon_params(model):
     E (tied: giris + cikis), norm kazanclari, bloklarin disindaki giris katmanlari ve 1-B her sey AdamW'de (belge 20 s4)."""
     emb = {id(m.weight) for m in model.modules() if isinstance(m, torch.nn.Embedding)}
     return [(n, p) for n, p in model.named_parameters()
-            if n.startswith("blocks.") and p.dim() == 2 and p.requires_grad and id(p) not in emb]
+            if n.startswith("blocks.") and p.dim() == 2 and p.requires_grad and id(p) not in emb
+            and not n.endswith("router.weight")]                           # deneme/moe: yonlendirici AdamW'de
 
 
 class MuonAdamW:

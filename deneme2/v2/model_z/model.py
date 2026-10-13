@@ -237,8 +237,69 @@ def _attend(q, k, v, attn):
         ("BLOCK_M", "BLOCK_N", "BLOCK_M1", "BLOCK_N1", "BLOCK_M2", "BLOCK_N2"), bs), **gqa)
 
 
+class _AuxInject(torch.autograd.Function):
+    """deneme/moe: ileride y'yi aynen gecirir; geride yardimci kaybin (aux, katsayisi carpilmis) gradyanini 1 ile baslatir
+    (kayip yoluna ek donus degeri gerekmez; Megatron MoEAuxLossAutoScaler gibi)."""
+
+    @staticmethod
+    def forward(ctx, y, aux):
+        ctx.save_for_backward(aux)
+        return y.view_as(y)
+
+    @staticmethod
+    def backward(ctx, g):
+        aux, = ctx.saved_tensors
+        return g, torch.ones_like(aux)
+
+
+class _Expert(torch.nn.Module):
+    def __init__(self, d, hidden):
+        super().__init__()
+        self.gate_up = torch.nn.Linear(d, 2 * hidden, bias=False)
+        self.down = torch.nn.Linear(hidden, d, bias=False)
+
+
+class MoE(torch.nn.Module):
+    """deneme/moe: duz MoE MLP.  Yonlendirici (fp32) softmax, ilk topk uzman (agirliklar topk icinde yeniden normalize);
+    uzman genisligi hidden / topk (64'e yuvarli) -> token basina hesap yogun MLP'ye esit.  Egitimde (gradyan acik) uzman
+    basina kapasite ceil(cap N topk / E), tasan atama dusurulur (sabit sekil, compile); gradyansiz (sinav, uretim) kapasite
+    N topk (dusurme yok).  Yuk dengeleme: Switch kaybi E sum_e f_e P_e, katsayi aux (geri yolda _AuxInject)."""
+
+    def __init__(self, d, hidden, experts, topk, cap=1.25, aux=0.01):
+        super().__init__()
+        assert 1 <= topk <= experts, "moe_topk 1..moe_experts"
+        self.n, self.k, self.cap, self.aux = int(experts), int(topk), float(cap), float(aux)
+        self.width = max(64, round(hidden / self.k / 64) * 64)
+        self.router = torch.nn.Linear(d, self.n, bias=False)
+        self.experts = torch.nn.ModuleList(_Expert(d, self.width) for _ in range(self.n))
+
+    def forward(self, h):
+        B, T, d = h.shape
+        N, E, k = B * T, self.n, self.k
+        x = h.reshape(N, d)
+        with torch.autocast(h.device.type, enabled=False):
+            probs = F.linear(x.float(), self.router.weight.float()).softmax(-1)
+        w, idx = probs.topk(k, -1)
+        w = w / w.sum(-1, keepdim=True)
+        a = idx.reshape(-1)                                                  # (N k), token sirasiyla
+        oh = F.one_hot(a, E)
+        rank = ((oh.cumsum(0) - 1) * oh).sum(-1)                            # uzmanin icinde sira
+        C = int(math.ceil(self.cap * N * k / E)) if torch.is_grad_enabled() else N * k
+        dest = torch.where(rank < C, a * C + rank, torch.full_like(a, E * C))   # tasan -> atilan son satir
+        buf = x.new_zeros(E * C + 1, d).index_copy(0, dest, x.repeat_interleave(k, 0))
+        wgu = torch.stack([e.gate_up.weight for e in self.experts])          # (E, 2w, d)
+        wd = torch.stack([e.down.weight for e in self.experts])              # (E, d, w)
+        g, u = torch.bmm(buf[:-1].view(E, C, d), wgu.transpose(1, 2)).chunk(2, -1)
+        out = torch.bmm(F.silu(g) * u, wd.transpose(1, 2)).reshape(E * C, d)
+        out = torch.cat([out, out.new_zeros(1, d)])
+        y = (out[dest] * w.reshape(-1, 1).to(out.dtype)).view(N, k, d).sum(1)
+        if torch.is_grad_enabled() and self.aux:
+            y = _AuxInject.apply(y, self.aux * E * (oh.float().mean(0) * probs.mean(0)).sum())
+        return y.view(B, T, d)
+
+
 class Block(torch.nn.Module):
-    def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0, nope=False):
+    def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0, nope=False, moe=0, moe_topk=2):
         """kv_heads (GQA; varsayilan heads): k / v head sayisi, heads'in boleni; qkv d -> d + 2 d kv / heads.  nope: RoPE yok.
         attn_gate 2: head basina cikis kapisi agirligi (heads, d // 64) (girdi n1(x)'in ilk d // 64 boyutu), sifir (RNG
         cekmez; kapisiz modelle ayni ilk agirlik)."""
@@ -251,8 +312,10 @@ class Block(torch.nn.Module):
         self.qkv = torch.nn.Linear(d, d + 2 * (d // heads) * self.kv_heads, bias=False)
         self.q_norm, self.k_norm = torch.nn.RMSNorm(d // heads), torch.nn.RMSNorm(d // heads)
         self.proj = torch.nn.Linear(d, d, bias=False)
-        self.gate_up = torch.nn.Linear(d, 2 * hidden, bias=False)
-        self.down = torch.nn.Linear(hidden, d, bias=False)
+        self.moe = MoE(d, hidden, moe, moe_topk) if moe else None           # deneme/moe
+        if self.moe is None:
+            self.gate_up = torch.nn.Linear(d, 2 * hidden, bias=False)
+            self.down = torch.nn.Linear(hidden, d, bias=False)
         assert attn_gate in (0, 2), "attn_gate 0 / 2"
         assert attn_gate != 2 or d >= 64, "attn_gate 2: girdi d // 64 boyut, d %d < 64 (0 boyut)" % d
         self.attn_gate = torch.nn.Parameter(torch.zeros(heads, d // 64)) if attn_gate else None
@@ -290,6 +353,8 @@ class Block(torch.nn.Module):
         if self.attn_gate is not None:
             a = a * (self._gate(x) if g is None else g)[..., None]
         x = x + self.proj(a.reshape(B, T, d))
+        if self.moe is not None:
+            return x + self.moe(self.n2(x))
         g, u = self.gate_up(self.n2(x)).chunk(2, -1)
         return x + self.down(F.silu(g) * u)
 
@@ -309,7 +374,7 @@ class Block(torch.nn.Module):
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
                  attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, mlp_ratio=(),
-                 local_kv_heads=0, g_layout="top", z_inert=False):
+                 local_kv_heads=0, g_layout="top", z_inert=False, moe_experts=0, moe_topk=2):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -352,9 +417,12 @@ class SentenceTransformer(torch.nn.Module):
         self.mlp_widths = [width(self.mlp_ratio[k == "glob"]) if self.mlp_ratio else hidden for k in kinds]
         self.local_kv_heads = int(local_kv_heads or 0)                    # yerel bloklarda GQA (0: tam)
         self.is_glob = [k == "glob" for k in kinds]                         # blok basina G mi (onbellekler de buradan)
+        self.moe_experts, self.moe_topk = int(moe_experts), int(moe_topk)    # deneme/moe: yalniz G bloklarinin MLP'si
+        assert not self.moe_experts or self.global_layers, "moe_experts: G bloklari gerek"
         self.blocks = torch.nn.ModuleList(
             Block(d, heads, self.mlp_widths[i], glob_kv_heads if k == "glob" else (self.local_kv_heads or None),
-                  int(attn_gate), bool(self.g_nope) and k == "glob") for i, k in enumerate(kinds))
+                  int(attn_gate), bool(self.g_nope) and k == "glob", self.moe_experts if k == "glob" else 0,
+                  self.moe_topk) for i, k in enumerate(kinds))
         self.norm = torch.nn.RMSNorm(d)
         for name, p in self.named_parameters():
             if p.dim() == 2 and not name.endswith("attn_gate"):          # kapi sifir kalir

@@ -84,7 +84,7 @@ def pmi_table_path(data_dir, d):
 
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ngram_embed", "ngram_layers",
            "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "g_layout", "z_inert", "pmi_init", "grad_share",
-           "grad_share_beta")   # --resume'da kimlikten
+           "grad_share_beta", "moe_experts", "moe_topk")   # --resume'da kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
@@ -97,7 +97,7 @@ IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
             "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads",
             "g_layout", "z_inert", "pmi_init_sha256", "grad_share_sha256",
-            "grad_share_beta")
+            "grad_share_beta", "moe_experts", "moe_topk")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -251,7 +251,9 @@ def _build(args, dev):
                                     mlp_ratio=tuple(getattr(args, "mlp_ratio", None) or ()),
                                     local_kv_heads=getattr(args, "local_kv_heads", 0) or 0,
                                     g_layout=getattr(args, "g_layout", None) or "top",
-                                    z_inert=bool(getattr(args, "z_inert", 0)))
+                                    z_inert=bool(getattr(args, "z_inert", 0)),
+                                    moe_experts=getattr(args, "moe_experts", 0) or 0,
+                                    moe_topk=getattr(args, "moe_topk", 0) or 2)
         if getattr(args, "pmi_init", "") and not getattr(args, "resume", 0):   # ilk agirlik; surdurmede checkpoint'ten
             pmi_init_embedding(model, args.pmi_init)
         model, mask_fn, layout = model.to(dev), model.mask_fn, "model_z"
@@ -699,6 +701,9 @@ def _args(argv):
     ap.add_argument("--g_layout", default=None,
                     help="G katmanlarinin yeri; interleave (G'li Model Z varsayilani, YYG) esit aralikli + son blok G, top son N blok, "
                          "ya da blok numaralari '3,6,9' (0'dan, global_layers tane)")
+    ap.add_argument("--moe_experts", type=int, default=None,
+                    help="deneme/moe: G bloklarinin MLP'si E uzmanli duz MoE (0 kapali; uzman genisligi G MLP / topk)")
+    ap.add_argument("--moe_topk", type=int, default=None, help="deneme/moe: token basina uzman (2)")
     ap.add_argument("--z_inert", type=int, default=None,
                     help="Model Z3 (G'li Model Z'de varsayilan 1): kimse Z okumaz (yerel: kendi cumlesi + BOS, G: belge token'lari + "
                          "BOS); 0 Model Z2 (Z'li)")
@@ -732,13 +737,18 @@ def _args(argv):
         if args.resume and os.path.exists(ckpt) else None               # varsayilan degisse de kosu kendi ayariyla surer
     for k in args.defaulted if was is not None else ():
         setattr(args, k, was.get(k, [] if k == "mlp_ratio" else "top" if k == "g_layout" else
-                                 0 if k in ("glob_kv_heads", "attn_gate", "mtp", "g_nope", "local_kv_heads", "z_inert")
+                                 0 if k in ("glob_kv_heads", "attn_gate", "mtp", "g_nope", "local_kv_heads", "z_inert",
+                                            "moe_experts", "moe_topk")
                                  or k.startswith("ngram") else "none" if k in ("pmi_init", "grad_share") else None))
     for k in ("pmi_init", "grad_share") if was is not None else ():     # kimlikte yol yok, sha var
         if k in args.defaulted:
             setattr(args, k, "auto" if was.get(k + "_sha256") else "none")
     args.resume_pmi_sha = (was or {}).get("pmi_init_sha256", "") if args.resume else ""   # baslatma surdurmede yok
     args.vocab_rows = VOCAB_ROWS if was is None else was.get("vocab_rows", D.VOCAB)   # eski kosu kendi E boyuyla
+    args.moe_experts = int(args.moe_experts or 0)                             # deneme/moe
+    args.moe_topk = int(args.moe_topk or (2 if args.moe_experts else 0))
+    if args.moe_experts and (args.model != "model_z" or (args.fp8 or "none") != "none" or args.micro_batches > 1):
+        sys.exit("DUR: --moe_experts yalniz Model Z'de, FP8 ve micro_batches olmadan (deneme/moe)")
     if args.optimizer is None:                                           # 8 Ekim: NorMuon varsayilan
         args.optimizer = DEFAULT_OPTIMIZER
     if args.global_layers is None:
@@ -914,7 +924,8 @@ def main(argv=None):
                  ngram_embed=args.ngram_embed, ngram_layers=args.ngram_layers, ngram_sparse=args.ngram_sparse,
                  mtp=args.mtp, g_nope=args.g_nope, mlp_ratio=args.mlp_ratio, local_kv_heads=args.local_kv_heads,
                  g_layout=args.g_layout,
-                 z_inert=args.z_inert, pmi_init_sha256=args.pmi_init_sha256, grad_share_sha256=args.grad_share_sha256, grad_share_beta=args.grad_share_beta)
+                 z_inert=args.z_inert, pmi_init_sha256=args.pmi_init_sha256, grad_share_sha256=args.grad_share_sha256, grad_share_beta=args.grad_share_beta,
+                 moe_experts=args.moe_experts, moe_topk=args.moe_topk)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -935,7 +946,7 @@ def main(argv=None):
             sys.exit("DUR: " + _archived(was))
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
                "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [], "local_kv_heads": 0,
-               "g_layout": "top", "z_inert": 0, "pmi_init_sha256": "", "grad_share_sha256": "",
+               "g_layout": "top", "z_inert": 0, "pmi_init_sha256": "", "grad_share_sha256": "", "moe_experts": 0, "moe_topk": 0,
                "grad_share_beta": "",
                **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}

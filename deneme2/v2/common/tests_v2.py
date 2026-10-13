@@ -998,6 +998,7 @@ def t_train():
         _train_gqa_default(base, out, TR)
         _train_ngram(base, data, out, TR)
         _train_z3(base, data, out, TR)
+        _train_moe(base, data, out, TR)
         import copy                                                     # epok sonu eksik batch dolgusu (8 Ekim)
         import types
         import recipe as R
@@ -1130,6 +1131,32 @@ def _train_gqa_default(base, out, TR):
         check("train GQA varsayilan", False, traceback.format_exc(limit=3))
     finally:
         TR.GLOB_KV_DEFAULT = pinned
+
+
+def _train_moe(base, data, out, TR):
+    """deneme/moe: --moe_experts 4 kosar (kimlikte moe_experts 4 / moe_topk 2, kayip sonlu), kesilip surdurulen = kesintisiz
+    (bit), --moe_experts 0 = bayraksiz (bit); transformer DURUR."""
+    import traceback
+    try:
+        cmd = base + ["--model", "model_z", "--layers", "3", "--global_layers", "1", "--epochs", "2", "--z_inert", "1"]
+        a = TR.main(cmd + ["--moe_experts", "4", "--out", out("moe_A")])
+        stopped, r = _cut_and_resume(TR, cmd + ["--moe_experts", "4"], out("moe_cut"))
+        z0 = TR.main(cmd + ["--moe_experts", "0", "--out", out("moe_0")])
+        z = TR.main(cmd + ["--out", out("moe_base")])
+        st_ = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        sa, sb = st_(out("moe_A")), st_(out("moe_cut"))
+        s0, sz = st_(out("moe_0")), st_(out("moe_base"))
+        loss_ok = all(np.isfinite(x["loss"]) for x in a["log"])
+        bad = _exit_msg(TR.main, base + ["--model", "transformer", "--layers", "2", "--steps", "2", "--moe_experts", "4",
+                                         "--out", out("moe_tf")])
+        check("train deneme/moe: --moe_experts 4 kosar (kimlikte 4 / topk 2, kayip sonlu), kesilip surdurulen = kesintisiz "
+              "(bit); --moe_experts 0 = bayraksiz (bit); transformer DURUR",
+              a["identity"]["moe_experts"] == 4 and a["identity"]["moe_topk"] == 2 and loss_ok and stopped
+              and any("experts" in k for k in sa) and all(torch.equal(sa[k], sb[k]) for k in sa)
+              and all(torch.equal(s0[k], sz[k]) for k in s0) and bad is not None and "moe" in bad,
+              "kimlik %s / %s, kayip %s | %s" % (a["identity"]["moe_experts"], a["identity"]["moe_topk"], loss_ok, bad))
+    except Exception:  # noqa: BLE001
+        check("train deneme/moe", False, traceback.format_exc(limit=4))
 
 
 def _train_z3(base, data, out, TR):
