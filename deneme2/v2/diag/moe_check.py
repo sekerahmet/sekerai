@@ -57,6 +57,7 @@ def main(argv=None):
     ap.add_argument("--shared", type=int, default=1)
     ap.add_argument("--rows", type=int, default=32)
     ap.add_argument("--reps", type=int, default=20)
+    ap.add_argument("--profile", type=int, default=0, help="1: MoE ileri + geri cekirdek dokumu (3 adim)")
     a = ap.parse_args(argv)
     assert torch.cuda.is_available(), "GPU YOK"
     import torch._inductor.config as ic
@@ -113,6 +114,17 @@ def main(argv=None):
     t_m, t_d = timed(lambda: step(cm), a.reps), timed(lambda: step(cd), a.reps)
     print("ileri + geri ms: MoE %.2f | yogun %.2f | fark %+.2f (katman basina; 4 G katmani %+.1f ms / adim)"
           % (t_m, t_d, t_m - t_d, 4 * (t_m - t_d)), flush=True)
+    if a.profile:                                                       # cekirdek dokumu: nerede zaman gidiyor
+        from torch.profiler import ProfilerActivity, profile
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+            for _ in range(3):
+                step(cm)
+            torch.cuda.synchronize()
+        ev = [e for e in prof.key_averages() if e.device_time_total > 0]
+        tot = sum(e.self_device_time_total for e in ev) / 3 / 1000
+        print("profil (adim basina GPU %.2f ms; duvar MoE %.2f ms -> bosluk ~%.2f ms):" % (tot, t_m, t_m - tot), flush=True)
+        for e in sorted(ev, key=lambda e: -e.self_device_time_total)[:18]:
+            print("  %7.3f ms  x%-4d %s" % (e.self_device_time_total / 3 / 1000, e.count // 3, e.key[:110]), flush=True)
     ok = n_sync <= 2 and d_y < 2e-2 and max(d_g.values()) < 5e-2
     print("SONUC: %s" % ("GECTI" if ok else "KALDI"), flush=True)
     print("MOE_CHECK_BITTI", flush=True)
