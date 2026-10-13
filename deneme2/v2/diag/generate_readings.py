@@ -80,7 +80,9 @@ def load_run(out, data_dir, dev):
                            ngram_embed=idt.get("ngram_embed", 0), ngram_layers=idt.get("ngram_layers", 0),
                            ngram_sparse=idt.get("ngram_sparse", 0), g_nope=idt.get("g_nope", 0),
                            mlp_ratio=tuple(idt.get("mlp_ratio", []) or ()), local_kv_heads=idt.get("local_kv_heads", 0),
-                           g_layout=idt.get("g_layout", "top"), z_inert=idt.get("z_inert", 0))
+                           g_layout=idt.get("g_layout", "top"), z_inert=idt.get("z_inert", 0),
+                           moe_experts=idt.get("moe_experts", 0), moe_topk=idt.get("moe_topk", 0),
+                           moe_shared=idt.get("moe_shared", 0))
     model, _, _ = T._build(spec, dev)
     model.load_state_dict(pack["state"])
     model.row_len = idt["row_len"]                                       # uretim konum siniri, carry parca boyu

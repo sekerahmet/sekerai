@@ -1699,10 +1699,125 @@ def t_z_inert():
           "fark %.1e, toplu %.1e" % (sd, sr))
 
 
+def t_moe():
+    """deneme/moe2 (belge 107): (a) MoE katmani = token token elle toplam (ortak + sum p_j uzman_j, p sigmoid seciminde
+    normalize x topk), gradyanlar da (yonlendirici dahil); (b) sapma yalniz secime girer (agirlik ham sigmoid'den); (c) yuk
+    yalniz gradyan acikken sayilir, toplami N topk; (d) CUDA formulu torch._grouped_mm (bf16, w transpoz) = uzman dongusu;
+    (e) GQA'li Model Z3 (Y-Y-G) + MoE: SummaryCache = egitim ileri gecisi, StaticCache adim adim = SummaryCache, toplu = tek tek,
+    generate = token token."""
+    import model as S
+    from model import StaticCache, summaries_last
+    F_ = torch.nn.functional
+    torch.manual_seed(0)
+    mo = S.MoE(24, 96, 6, 2, 1)
+    with torch.no_grad():
+        for p in mo.parameters():
+            p.normal_(0, 0.3)
+    x = torch.randn(3, 5, 24)
+    xa, xb = x.clone().requires_grad_(), x.clone().requires_grad_()
+    y = mo(xa)
+    params = list(mo.parameters())
+    gy = torch.autograd.grad(y.square().sum(), [xa] + params)
+    w = mo.width
+    ref = []
+    xf = xb.reshape(-1, 24)
+    s = torch.sigmoid(xf @ mo.router.weight.T)
+    idx = (s + mo.expert_bias).topk(2, -1).indices
+    pr = s.gather(-1, idx)
+    pr = pr / pr.sum(-1, keepdim=True) * 2
+    for t in range(xf.shape[0]):
+        acc = 0
+        for j in range(2):
+            h = mo.w_gate_up[idx[t, j]] @ xf[t]
+            acc = acc + pr[t, j] * (mo.w_down[idx[t, j]] @ (F_.silu(h[:w]) * h[w:]))
+        g, u = mo.shared_gate_up(xf[t]).chunk(2)
+        ref.append(acc + mo.shared_down(F_.silu(g) * u))
+    ref = torch.stack(ref).view(3, 5, 24)
+    gr = torch.autograd.grad(ref.square().sum(), [xb] + params)
+    d_y = float((y - ref).detach().abs().max() / ref.detach().abs().max())
+    d_g = max(float((a - b).abs().max() / b.abs().max()) for a, b in zip(gy, gr))       # goreli (agirlik std 0,3)
+    with torch.no_grad():
+        mo.load.zero_()
+        mo.expert_bias.zero_()
+        mo.expert_bias[4] = 10.0                                         # hep secilir; agirligi ham s'den
+        i2, p2 = mo.route(xf.detach())
+        s2 = torch.sigmoid(xf.detach() @ mo.router.weight.T)
+        want_p = s2.gather(-1, i2)
+        want_p = want_p / want_p.sum(-1, keepdim=True) * 2
+        bias_ok = bool((i2 == 4).any(-1).all()) and torch.allclose(p2, want_p, atol=0, rtol=0)
+        mo(x)                                                            # gradyansiz: sayim yok
+        no_count = float(mo.load.sum()) == 0
+        mo.expert_bias.zero_()
+    mo(x)
+    count_ok = float(mo.load.sum()) == x.shape[0] * x.shape[1] * 2
+    g_ = torch.Generator().manual_seed(2)
+    xs = torch.randn(30, 24, generator=g_).bfloat16()
+    ws = torch.randn(4, 16, 24, generator=g_).bfloat16()
+    offs = torch.tensor([7, 7, 19, 30], dtype=torch.int32)               # bos grup dahil
+    gm = torch._grouped_mm(xs, ws.transpose(-2, -1), offs=offs)
+    lp = S._expert_mm(xs.float(), ws.float(), offs)
+    d_gm = float((gm.float() - lp).abs().max() / lp.abs().max())
+    check("moe katman: = token token elle (goreli %.1e), gradyanlar (yonlendirici dahil, goreli %.1e); sapma yalniz secimde; yuk yalniz "
+          "gradyanla, toplam N k; grouped_mm (bf16) = uzman dongusu (goreli %.1e)" % (d_y, d_g, d_gm),
+          d_y < 1e-6 and d_g < 1e-5 and bias_ok and no_count and count_ok and d_gm < 1e-2,
+          "sapma %s, sayimsiz %s, sayim %s" % (bias_ok, no_count, count_ok))
+    END_ID = D.END_ID
+    prompts = [[], [[3, 4]], [list(x_) for x_ in STORIES[0]]]
+    torch.manual_seed(0)
+    mz = SentenceTransformer(32, 6, 2, z_inert=True, global_layers=2, glob_kv_heads=1, g_layout="interleave", g_nope=True,
+                             moe_experts=4, moe_topk=2, moe_shared=1).eval()
+    gqa_moe = [type(b.moe).__name__ for b in mz.blocks if b.moe is not None] == ["MoE", "MoE"] and \
+        all(b.kv_heads == 1 for b, g in zip(mz.blocks, mz.is_glob) if g)
+    rows = [[0, 1], [2]]
+    batch2 = real_batch(rows, 64)
+    b2, perm2 = summaries_last(batch2)
+    sd, sr, dc = 0.0, 0.0, 0.0
+    with torch.no_grad():
+        h_last = mz._batch_hidden(b2)
+        h_orig = torch.empty_like(h_last)
+        h_orig[torch.arange(h_last.shape[0])[:, None], perm2] = h_last
+        lg_full = mz._logits(h_orig[batch2.target >= 0])
+        got = []
+        for row in rows:
+            for si in row:
+                c = S.SummaryCache(mz)
+                got.append(c.logits[None].clone())
+                for sent_ in STORIES[si]:
+                    for t in sent_:
+                        got.append(c.append_token(t)[None].clone())
+                    got.append(c.close_sentence()[None].clone())
+        dc = float((torch.cat(got) - lg_full).abs().max())
+        for sents in prompts:
+            a, c = S.SummaryCache(mz), StaticCache(mz, 64, 8, 16)
+            sd = max(sd, float((a.prefill(sents) - c.prefill(sents)).abs().max()))
+            for t in [5, 6, -1, 7, 8, -1, 9]:
+                la, lc = (a.close_sentence(), c.close_sentence()) if t < 0 else (a.append_token(t), c.append_token(t))
+                sd = max(sd, float((la - lc).abs().max()))
+        many = StaticCache(mz, 64, 8, 16)
+        lr_ = many.prefill_rows(prompts)
+        for r, sents in enumerate(prompts):
+            sr = max(sr, float((lr_[r] - StaticCache(mz, 64, 8, 16).prefill(sents)).abs().max()))
+        steps = [([5, 6, 7], [False, False, False]), ([0, 0, 0], [True, True, True]), ([8, 9, 4], [False, False, False])]
+        singles = [StaticCache(mz, 64, 8, 16) for _ in prompts]
+        for c_, sents in zip(singles, prompts):
+            c_.prefill(sents)
+        for w_, z_ in steps:
+            lr_ = many.step_rows([END_ID if z else w for w, z in zip(w_, z_)], z_, [True] * 3)
+            for r, c_ in enumerate(singles):
+                lo = c_.close_sentence() if z_[r] else c_.append_token(w_[r])
+                sr = max(sr, float((lr_[r] - lo).abs().max()))
+    gen_ok = StaticCache.supports(mz) and mz.generate(prompts, 4, 12) == _generate_stepwise(mz, prompts, 4, 12)
+    no_load = all(float(b.moe.load.sum()) == 0 for b in mz.blocks if b.moe is not None)
+    check("moe + GQA (Model Z3, Y-Y-G dizilim, G kv 1, NoPE): SummaryCache = egitim ileri gecisi, StaticCache adim adim = SummaryCache, "
+          "toplu = tek tek (fp32 < 1e-5), generate = token token; uretimde yuk sayilmaz",
+          gqa_moe and dc < 1e-5 and sd < 1e-5 and sr < 1e-5 and gen_ok and no_load,
+          "ileri %.1e, adim %.1e, toplu %.1e | yapi %s, generate %s, yuk %s" % (dc, sd, sr, gqa_moe, gen_ok, no_load))
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab,
              limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast,
-             combo=t_combo, interleave=t_interleave, z_inert=t_z_inert)
+             combo=t_combo, interleave=t_interleave, z_inert=t_z_inert, moe=t_moe)
 
 if __name__ == "__main__":
     if SIDE is not None:

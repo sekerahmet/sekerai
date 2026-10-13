@@ -31,6 +31,7 @@ import argparse
 import dataclasses
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -75,6 +76,8 @@ Z_INERT_DEFAULT = 1            # Model Z3 (kullanici, 12 Ekim: "son varsayılan 
 PMI_DEFAULT = "auto"           # --pmi_init / --grad_share verilmezse (Model Z3 tarifi, 12 Ekim: "PMI ve gradyan başlangıcı var"):
                                # <data>/pmi_k5_r<d>.npz; yoksa CUDA'da bir kez uretilir (tokenizer gibi), CPU'da ekler kapali
 GRAD_SHARE_BETA_DEFAULT = "needtrust"   # ihtiyac x guven (12 Ekim: Z'li 3,3963 / Z'siz 3,4016; YYG 3,4150)
+MOE_SOM = dict(r0=16.0, r1=2.0, beta_order=1.0, frac=0.2, beta_hold=0.5)   # deneme/moe2 uzman ici paylasim takvimi (belge 107
+                               # s3: sembol min > 0,6, tutma evresinde c_K 0,31; kapaninca duzen soner, belge 105 s1.1)
 
 
 def pmi_table_path(data_dir, d):
@@ -84,7 +87,7 @@ def pmi_table_path(data_dir, d):
 
 INHERIT = ("global_layers", "optimizer", "glob_kv_heads", "lr", "attn_gate", "ngram_embed", "ngram_layers",
            "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads", "g_layout", "z_inert", "pmi_init", "grad_share",
-           "grad_share_beta")   # --resume'da kimlikten
+           "grad_share_beta", "moe_experts", "moe_topk", "moe_shared", "moe_som")   # --resume'da kimlikten
 VOCAB_ROWS = -(-D.VOCAB // 64) * 64   # yeni kosuda E satiri: 50.304 (sozluk dolgusu; belge 89, OLCULENLER 5o -1,5 ms/adim)
 DEFAULT_OPTIMIZER = "normuon"                                   # kullanici, 8 Ekim
 FP8_MODULES = ("gate_up", "down")                   # --fp8 donusturulen Linear'lar (MLP)
@@ -97,7 +100,7 @@ IDENTITY = ("model", "d", "layers", "heads", "lr", "seed", "longest", "row_len",
             "optimizer", "global_layers", "summaries_last", "glob_kv_heads", "carry_summaries", "carry_group", "vocab_rows",
             "attn_gate", "ngram_embed", "ngram_layers", "ngram_sparse", "mtp", "g_nope", "mlp_ratio", "local_kv_heads",
             "g_layout", "z_inert", "pmi_init_sha256", "grad_share_sha256",
-            "grad_share_beta")
+            "grad_share_beta", "moe_experts", "moe_topk", "moe_shared", "moe_som")
 OUTPUTS = ("results.json", "agent.pt", "samples.txt", "samples.json")
 
 
@@ -251,7 +254,10 @@ def _build(args, dev):
                                     mlp_ratio=tuple(getattr(args, "mlp_ratio", None) or ()),
                                     local_kv_heads=getattr(args, "local_kv_heads", 0) or 0,
                                     g_layout=getattr(args, "g_layout", None) or "top",
-                                    z_inert=bool(getattr(args, "z_inert", 0)))
+                                    z_inert=bool(getattr(args, "z_inert", 0)),
+                                    moe_experts=getattr(args, "moe_experts", 0) or 0,
+                                    moe_topk=getattr(args, "moe_topk", 0) or 0,
+                                    moe_shared=getattr(args, "moe_shared", 0) or 0)
         if getattr(args, "pmi_init", "") and not getattr(args, "resume", 0):   # ilk agirlik; surdurmede checkpoint'ten
             pmi_init_embedding(model, args.pmi_init)
         model, mask_fn, layout = model.to(dev), model.mask_fn, "model_z"
@@ -429,11 +435,52 @@ def _pmi_resolve(args, cuda, log):
     args.grad_share_beta = (args.grad_share_beta or GRAD_SHARE_BETA_DEFAULT) if args.grad_share else ""
 
 
+def moe_som_now(step, total, on):
+    """-> (beta, r) bu adimin uzman ici paylasimi (belge 107 s3), kapaliysa None: siralama evresi (ilk frac) r r0 -> r1
+    geometrik, beta_order; sonra sonuna kadar r1, beta_hold (kapaninca duzen soner, belge 105 s1.1)."""
+    if not on:
+        return None
+    c, S = MOE_SOM, max(1, int(MOE_SOM["frac"] * total))
+    if step < S:
+        return c["beta_order"], c["r0"] * (c["r1"] / c["r0"]) ** (step / S)
+    return c["beta_hold"], c["r1"]
+
+
+def moe_som_kernel(w, beta, r, device="cpu"):
+    """Halka Gauss (w,) fp64: k_0 = 1, k_o = beta e^-(o/r)^2 / sum_{o' != 0} e^-(o'/r)^2, |o| <= min(ceil(3 r), (w - 1) // 2).
+    Cihazda kurulur (adim basina CPU -> GPU kopyasi / senkron yok)."""
+    R = min(int(math.ceil(3 * r)), (w - 1) // 2)
+    o = torch.arange(-R, R + 1, dtype=torch.float64, device=device)
+    e = torch.exp(-(o / r) ** 2)
+    e[R] = 0.0
+    k = torch.zeros(w, dtype=torch.float64, device=device).index_add_(0, o.long() % w, beta * e / e.sum())
+    k[0] += 1.0
+    return k
+
+
+def moe_som_grad(model, beta, r):
+    """Yonlendirilen uzmanlarin KAPI satirlari (w_gate_up[:, :width]) noron ekseninde halka evrisim G <- K G (rfft); deger,
+    cikis ve ortak uzman dokunulmaz.  Token almayan uzmanin gradyani 0, paylasimi da 0."""
+    kf = {}
+    for b in model.blocks:
+        m = getattr(b, "moe", None)
+        if m is None or m.w_gate_up.grad is None:
+            continue
+        G = m.w_gate_up.grad[:, :m.width]
+        if m.width not in kf:                                            # katmanlar ayni genislik: tek spektrum
+            kf[m.width] = torch.fft.rfft(moe_som_kernel(m.width, beta, r, G.device).float())
+        G.copy_(torch.fft.irfft(torch.fft.rfft(G.float(), dim=1) * kf[m.width][None, :, None], n=m.width, dim=1))
+
+
 def _apply(model, opt):
-    """Gradyanlar dolu: (gradyan paylasimi) + kirpma + optimizer adimi -> gradyan normu."""
+    """Gradyanlar dolu: (gradyan paylasimi) + (uzman ici paylasim) + kirpma + optimizer adimi (+ MoE yuk dengesi) -> gradyan
+    normu."""
     gs = getattr(model, "grad_share", None)
     if gs is not None and model.E.weight.grad is not None:
         grad_share_apply(model.E.weight, gs)
+    som = getattr(model, "moe_som_now", None)
+    if som:
+        moe_som_grad(model, *som)
     seen = getattr(model, "ngram_seen", None)                          # seyrek bigram yapragi kirpmaya dahil
     params = list(model.parameters()) if seen is None else [*model.parameters(), seen[1]]
     if CLIP_IN_OPTIMIZER and getattr(opt, "grad_coef_ok", False):       # clip_grad_norm_ ile ayni norm ve katsayi;
@@ -442,6 +489,10 @@ def _apply(model, opt):
     else:
         gn = torch.nn.utils.clip_grad_norm_(params, CLIP)
         opt.step()
+    if getattr(model, "moe", None):                                      # deneme/moe2: sapma, pencere yuku
+        win = model.__dict__.setdefault("moe_window", {})
+        for l, load in model.moe_balance():
+            win[l] = win[l] + load if l in win else load
     return gn
 
 
@@ -706,6 +757,14 @@ def _args(argv):
     ap.add_argument("--grad_share", default=None, help="E gradyani PMI komsularina: auto (varsayilan) | none | npz")
     ap.add_argument("--grad_share_beta", default=None, choices=("fixed1000", "needtrust"),
                     help="kelime pay orani: needtrust (varsayilan; ihtiyac x guven, olcek medyan sayim) | fixed1000")
+    ap.add_argument("--moe_experts", type=int, default=None,
+                    help="deneme/moe2 (belge 107): G bloklarinin MLP'si DeepSeekMoE, N yonlendirilen uzman (0 kapali); uzman "
+                         "genisligi G MLP / (topk + shared), token basina hesap yogunla ayni")
+    ap.add_argument("--moe_topk", type=int, default=None, help="deneme/moe2: token basina yonlendirilen uzman (3)")
+    ap.add_argument("--moe_shared", type=int, default=None, help="deneme/moe2: ortak uzman (1)")
+    ap.add_argument("--moe_som", type=int, default=None,
+                    help="deneme/moe2: 1 = yonlendirilen uzmanin ICINDE noron komsu gradyan paylasimi (yalniz kapi satirlari, "
+                         "MOE_SOM takvimi, belge 107 s3); 0 kapali")
     ap.add_argument("--g_nope", type=int, default=None,
                     help="1: G (tam) katmanlarinda RoPE yok, konum yerel katmanlardan (G'li Model Z'de varsayilan; 0 eski RoPE'li)")
     ap.add_argument("--mtp", type=lambda s: s if s == "auto" else int(s), default=None,
@@ -733,7 +792,7 @@ def _args(argv):
     for k in args.defaulted if was is not None else ():
         setattr(args, k, was.get(k, [] if k == "mlp_ratio" else "top" if k == "g_layout" else
                                  0 if k in ("glob_kv_heads", "attn_gate", "mtp", "g_nope", "local_kv_heads", "z_inert")
-                                 or k.startswith("ngram") else "none" if k in ("pmi_init", "grad_share") else None))
+                                 or k.startswith(("ngram", "moe_")) else "none" if k in ("pmi_init", "grad_share") else None))
     for k in ("pmi_init", "grad_share") if was is not None else ():     # kimlikte yol yok, sha var
         if k in args.defaulted:
             setattr(args, k, "auto" if was.get(k + "_sha256") else "none")
@@ -812,6 +871,15 @@ def _args(argv):
     args.z_inert = int(args.z_inert or 0)
     if args.z_inert and (args.model != "model_z" or not args.global_layers or args.carry_summaries):
         sys.exit("DUR: --z_inert yalniz G'li Model Z'de, carry ile yok")
+    args.moe_experts = int(args.moe_experts or 0)                        # deneme/moe2
+    args.moe_topk = int(args.moe_topk if args.moe_topk is not None else (3 if args.moe_experts else 0))
+    args.moe_shared = int(args.moe_shared if args.moe_shared is not None else (1 if args.moe_experts else 0))
+    args.moe_som = int(args.moe_som or 0)
+    if args.moe_experts and (args.model != "model_z" or not args.global_layers or (args.fp8 or "none") != "none"
+                             or not 1 <= args.moe_topk <= args.moe_experts or args.optimizer != "normuon"):
+        sys.exit("DUR: --moe_experts yalniz G'li Model Z'de, FP8'siz, NorMuon ile, 1 <= moe_topk <= moe_experts (deneme/moe2)")
+    if not args.moe_experts and (args.moe_som or args.moe_topk or args.moe_shared):
+        sys.exit("DUR: --moe_som / --moe_topk / --moe_shared yalniz --moe_experts ile")
     args.g_layout = args.g_layout or (G_LAYOUT_DEFAULT if args.model == "model_z" and args.global_layers else "top")
     if args.local_kv_heads and (args.model != "model_z" or args.heads % args.local_kv_heads):
         sys.exit("DUR: --local_kv_heads yalniz Model Z'de, heads'in boleni (%d)" % args.heads)
@@ -914,7 +982,8 @@ def main(argv=None):
                  ngram_embed=args.ngram_embed, ngram_layers=args.ngram_layers, ngram_sparse=args.ngram_sparse,
                  mtp=args.mtp, g_nope=args.g_nope, mlp_ratio=args.mlp_ratio, local_kv_heads=args.local_kv_heads,
                  g_layout=args.g_layout,
-                 z_inert=args.z_inert, pmi_init_sha256=args.pmi_init_sha256, grad_share_sha256=args.grad_share_sha256, grad_share_beta=args.grad_share_beta)
+                 z_inert=args.z_inert, pmi_init_sha256=args.pmi_init_sha256, grad_share_sha256=args.grad_share_sha256, grad_share_beta=args.grad_share_beta,
+                 moe_experts=args.moe_experts, moe_topk=args.moe_topk, moe_shared=args.moe_shared, moe_som=args.moe_som)
     plan_meta = dict(total=total, decay_start=down, per_epoch=per_epoch,
                      plan_sha256=[hashlib.sha256(np.ascontiguousarray(rs)).hexdigest() for _, rs in plans])
     params = sum(p.numel() for p in model.parameters())
@@ -936,6 +1005,7 @@ def main(argv=None):
         was = {"glob_kv_heads": 0, "carry_summaries": 0, "carry_group": 0, "vocab_rows": D.VOCAB, "attn_gate": 0,
                "ngram_embed": 0, "ngram_layers": 0, "ngram_sparse": 0, "mtp": 0, "g_nope": 0, "mlp_ratio": [], "local_kv_heads": 0,
                "g_layout": "top", "z_inert": 0, "pmi_init_sha256": "", "grad_share_sha256": "",
+               "moe_experts": 0, "moe_topk": 0, "moe_shared": 0, "moe_som": 0,
                "grad_share_beta": "",
                **was}                                                    # sonradan eklenenler
         diff = {k: (was.get(k), ident[k]) for k in IDENTITY if was.get(k) != ident[k]}
@@ -1050,6 +1120,7 @@ def main(argv=None):
         lr = R.wsd_lr(step, total, args.lr, decay=DECAY)
         for g in opt.param_groups:
             g["lr"] = lr * g.get("lr_mult", 1.0)                         # bigram tablosu grubu: lr_mult
+        model.moe_som_now = moe_som_now(step, total, args.moe_som)
         batch, real, cont, mt = nxt
         timer = tuple(torch.cuda.Event(enable_timing=True) for _ in range(2)) if cuda else None
         if cont is not None and cuda:
@@ -1091,6 +1162,12 @@ def main(argv=None):
             n_m = win["extra"].get("mtp_steps", 0)
             rec["loss_mtp"] = [round(v / n_m, 4) for v in win["extra"]["mtp_ce"].tolist()] if n_m else None
             rec["mtp_w"] = [round(v, 6) for v in w_mtp]
+        mw = model.__dict__.pop("moe_window", None)
+        if mw:                                                           # MoE sagligi: katman basina pencere yuku
+            rec["moe"] = [dict(layer=l, max_mean=round(float(v.max() / v.mean()), 3), min_mean=round(float(v.min() / v.mean()), 3),
+                               dead=int((v == 0).sum()), bias_range=round(float(model.blocks[l].moe.expert_bias.max()
+                                                                               - model.blocks[l].moe.expert_bias.min()), 4))
+                          for l, v in sorted(mw.items())]
         history["log"].append(rec)
         log("adim %d / %d (epok %d)  lr %.3g  kayip %.4f  grad %.3f | pencere %d adim %.1f sn  %.1f ms/adim  %.0f tok/sn%s%s"
             % (done, total, epoch, lr, rec["loss"], rec["grad_norm"], k, s["seconds"], rec["ms_per_step"],
@@ -1098,6 +1175,8 @@ def main(argv=None):
                    rec["peak_gb"], rec["peak_reserved_gb"], rec["out_fwd_ms"]) if cuda else "",
                ("  | devam %s" % rec["loss_cont"] if carry else "")
                + ("  | mtp w %s ce %s" % (rec["mtp_w"], rec["loss_mtp"]) if args.mtp else "")
+               + ("  | moe yuk max/ort %s olu %s" % ([m["max_mean"] for m in rec["moe"]], [m["dead"] for m in rec["moe"]])
+                  if "moe" in rec else "")
                + ("  (ilk pencere: derleme dahil)" if first_window else "")))
         assert np.isfinite(rec["loss"]), "kayip sonlu degil; checkpoint yazilmadi"
         first_window, win = False, None

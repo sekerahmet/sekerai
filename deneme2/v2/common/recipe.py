@@ -211,11 +211,30 @@ class NgramRowAdam:
 
 
 def muon_params(model):
-    """-> [(ad, p)] Muon'a gidenler: bloklarin (model.blocks) 2-B agirliklari (attention qkv / proj, MLP gate_up / down).
-    E (tied: giris + cikis), norm kazanclari, bloklarin disindaki giris katmanlari ve 1-B her sey AdamW'de (belge 20 s4)."""
+    """-> [(ad, p)] Muon'a gidenler: bloklarin (model.blocks) 2-B agirliklari (attention qkv / proj, MLP gate_up / down; MoE
+    yonlendiricisi) ve 3-B MoE uzman yiginlari (E, m, n; her uzman ayri matris, deepseek2026_v4 s3.5).  E (tied: giris +
+    cikis), norm kazanclari, bloklarin disindaki giris katmanlari ve 1-B her sey AdamW'de (belge 20 s4)."""
     emb = {id(m.weight) for m in model.modules() if isinstance(m, torch.nn.Embedding)}
     return [(n, p) for n, p in model.named_parameters()
-            if n.startswith("blocks.") and p.dim() == 2 and p.requires_grad and id(p) not in emb]
+            if n.startswith("blocks.") and p.dim() in (2, 3) and p.requires_grad and id(p) not in emb]
+
+
+def _matrices(ps, grads, bufs):
+    """3-B parametreyi (E, m, n) E ayri matris gorunumune acar (durum ve gradyan gorunumleri yerinde yazilir); 2-B aynen.
+    -> (parametreler, gradyanlar, tamponlar, kaynak indeksi)."""
+    P, G, M, src = [], [], [], []
+    for i, (p, g, b) in enumerate(zip(ps, grads, bufs)):
+        if p.dim() == 3:
+            P += p.unbind(0)
+            G += g.unbind(0)
+            M += b.unbind(0)
+            src += [i] * p.shape[0]
+        else:
+            P.append(p)
+            G.append(g)
+            M.append(b)
+            src.append(i)
+    return P, G, M, src
 
 
 class MuonAdamW:
@@ -271,7 +290,15 @@ def _ns_batched(G, coef, steps, eps):
 class BatchedMuon(torch.optim.Muon if hasattr(torch.optim, "Muon") else torch.optim.Optimizer):
     """torch.optim.Muon ile ayni matematik ve ayni durum (momentum_buffer); Newton-Schulz ayni bicimli matrislerde tek
     bmm yiginiyla (parametre basina ayri matmul yerine).  CPU'da torch Muon ile bit esit olculdu (d 512 sekilleri, tests_v2
-    recipe); GPU'da olculmedi, bmm toplama sirasi addmm'den farkli olabilir."""
+    recipe); GPU'da olculmedi, bmm toplama sirasi addmm'den farkli olabilir.  3-B parametre (MoE uzman yigini): torch
+    Muon kurulumda yalniz 2-B kabul ettigi icin kurulumdan sonra gruba eklenir; adimda her uzman ayri matris (_matrices)."""
+
+    def __init__(self, params, **kw):
+        params = list(params)
+        flat = [p for p in params if p.dim() == 2]
+        assert flat and all(p.dim() in (2, 3) for p in params), "Muon: 2-B (en az bir) ve 3-B parametreler"
+        super().__init__(flat, **kw)
+        self.param_groups[0]["params"] += [p for p in params if p.dim() == 3]
 
     @torch.no_grad()
     def step(self, closure=None, grad_coef=None):
@@ -284,6 +311,7 @@ class BatchedMuon(torch.optim.Muon if hasattr(torch.optim, "Muon") else torch.op
             self._init_group(g, ps, grads, bufs)
             if not ps:
                 continue
+            ps, grads, bufs, _ = _matrices(ps, grads, bufs)
             if grad_coef is not None:                                    # clip katsayisi (MuonAdamW.step)
                 torch._foreach_mul_(grads, grad_coef)
             torch._foreach_lerp_(bufs, grads, 1 - g["momentum"])
@@ -361,15 +389,19 @@ class NorMuon(BatchedMuon):
             if not ps:
                 continue
             cuda = ps[0].is_cuda
+            for p in ps:                                                 # satir basina v: (m, 1), 3-B (E, m, 1)
+                if "second_momentum_buffer" not in self.state[p]:
+                    self.state[p]["second_momentum_buffer"] = torch.zeros(*p.shape[:-1], 1, dtype=torch.float,
+                                                                          device=p.device)
+            vall = [v_ for p in ps for v_ in (self.state[p]["second_momentum_buffer"].unbind(0) if p.dim() == 3 else
+                                               [self.state[p]["second_momentum_buffer"]])]
+            ps, grads, bufs, _ = _matrices(ps, grads, bufs)
             shapes = {}
             for i, p in enumerate(ps):
                 shapes.setdefault(tuple(p.shape), []).append(i)
             for (m, n), idx in shapes.items():
                 pp = [ps[i] for i in idx]
-                for p in pp:
-                    if "second_momentum_buffer" not in self.state[p]:
-                        self.state[p]["second_momentum_buffer"] = torch.zeros(m, 1, dtype=torch.float, device=p.device)
-                vs = [self.state[p]["second_momentum_buffer"] for p in pp]
+                vs = [vall[i] for i in idx]
                 G = _opt_fn(_momentum_stack, cuda)([grads[i] for i in idx], [bufs[i] for i in idx], g["momentum"],
                                                    g["nesterov"], grad_coef)
                 torch._foreach_mul_(pp, 1 - g["lr"] * g["weight_decay"])

@@ -124,6 +124,8 @@ def main(argv=None):
     dev = G.setup(args.device, log)
     stream = args.stream or args.data
     model, _, layout, idt = G.load(args.run, args.data, dev)
+    if getattr(model, "moe", None):
+        sys.exit("DUR: ffn_decode yogun MLP (down) okur; MoE kosusu (deneme/moe2) icin uyarlanmadi")
     if layout != "model_z":
         sys.exit("DUR: ffn_decode yalniz Model Z (%s)" % args.run)
     model = model.float().eval()

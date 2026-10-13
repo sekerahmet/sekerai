@@ -237,8 +237,91 @@ def _attend(q, k, v, attn):
         ("BLOCK_M", "BLOCK_N", "BLOCK_M1", "BLOCK_N1", "BLOCK_M2", "BLOCK_N2"), bs), **gqa)
 
 
+MOE_GAMMA = 1e-3        # yuk dengesi sapma adimi (deepseek2024_v3: 0,001; liu2025_muonscalable ek C ortalama cikarma)
+
+
+def _expert_mm(x, w, offs):
+    """x (N, i) uzmana gore sirali satirlar, w (E, o, i), offs (E,) int32 kumulatif bitis -> (N, o).  CUDA: torch._grouped_mm
+    bf16 (sm_120'de ATen hizli yolu yok, derlenmis blokta Inductor Triton sablonu; belge 107 s2); CPU: uzman dongusu."""
+    if x.is_cuda:
+        return torch._grouped_mm(x.bfloat16(), w.bfloat16().transpose(-2, -1), offs=offs)
+    out, a = [], 0
+    for e, b in enumerate(offs.tolist()):
+        out.append(x[a:b] @ w[e].to(x.dtype).T)
+        a = b
+    return torch.cat(out)
+
+
+class MoE(torch.nn.Module):
+    """deneme/moe2 (belge 107): DeepSeekMoE.  `shared` ortak uzman + `experts` yonlendirilen uzman, hepsi `width` noron
+    (hidden / (topk + shared): token basina hesap yogun MLP'ye esit).  Yonlendirici sigmoid, ilk topk (sapma yalniz secimde),
+    agirlik secilenler icinde normalize x topk (sabit std ilk agirlikta cikis varyansi yogunla ayni).  Token dusurme yok:
+    uzmana gore sirala -> grouped GEMM -> geri dizip agirlikli topla.  Yuk dengesi yardimci kayipsiz: egitimde `load`
+    sayilir (egitim kipi + gradyan), adim sonunda moe_balance sapmayi gunceller."""
+
+    def __init__(self, d, hidden, experts, topk, shared=1):
+        super().__init__()
+        assert 1 <= topk <= experts, "moe_topk 1..moe_experts"
+        self.n, self.k, self.n_shared = int(experts), int(topk), int(shared)
+        self.width = w = max(8, round(hidden / (self.k + self.n_shared) / 8) * 8)
+        self.scale = float(self.k)
+        self.router = torch.nn.Linear(d, self.n, bias=False)
+        self.w_gate_up = torch.nn.Parameter(torch.empty(self.n, 2 * w, d))   # satir [kapi w | deger w]
+        self.w_down = torch.nn.Parameter(torch.empty(self.n, d, w))
+        if self.n_shared:
+            self.shared_gate_up = torch.nn.Linear(d, 2 * w * self.n_shared, bias=False)
+            self.shared_down = torch.nn.Linear(w * self.n_shared, d, bias=False)
+        self.register_buffer("expert_bias", torch.zeros(self.n))             # surdurme paketinde
+        self.register_buffer("load", torch.zeros(self.n), persistent=False)  # adim icinde sayim (egitim)
+
+    def route(self, x):
+        """x (N, d) -> (uzman (N, k), agirlik (N, k) fp32)."""
+        s = torch.sigmoid(F.linear(x, self.router.weight).float())
+        idx = (s + self.expert_bias).topk(self.k, -1).indices
+        p = s.gather(-1, idx)
+        return idx, p / p.sum(-1, keepdim=True) * self.scale
+
+    def forward(self, h):
+        B, T, d = h.shape
+        N, k = B * T, self.k
+        x = h.reshape(N, d)
+        idx, p = self.route(x)
+        flat = idx.reshape(-1)
+        order = flat.argsort(stable=True)
+        cnt = torch.zeros(self.n, dtype=torch.int32, device=x.device).scatter_add_(
+            0, flat, torch.ones_like(flat, dtype=torch.int32))
+        if self.training and torch.is_grad_enabled():                    # egitim adimi (sinav / uretim sayilmaz)
+            self.load.add_(cnt)
+        offs = cnt.cumsum(0, dtype=torch.int32)
+        g, u = _expert_mm(x[order // k], self.w_gate_up, offs).chunk(2, -1)
+        y = _expert_mm(F.silu(g) * u, self.w_down, offs)
+        inv = torch.empty_like(order).scatter_(0, order, torch.arange(N * k, device=x.device))
+        y = (y[inv].view(N, k, d) * p.unsqueeze(-1).to(y.dtype)).sum(1)
+        if self.n_shared:
+            g, u = self.shared_gate_up(x).chunk(2, -1)
+            y = y + self.shared_down(F.silu(g) * u)
+        return y.view(B, T, d)
+
+
+def moe_balance(model, gamma=MOE_GAMMA):
+    """Optimizer adimindan sonra: her MoE'de b += gamma (sign(ort - yuk) - ort(sign)) (yuk = adimdaki atama sayisi), yuk
+    sifirlanir.  -> [(katman, yuk)] (saglik gunlugu icin)."""
+    out = []
+    with torch.no_grad():
+        for l, b in enumerate(model.blocks):
+            m = getattr(b, "moe", None)
+            if m is None:
+                continue
+            load = m.load.clone()
+            s = torch.sign(load.mean() - load)
+            m.expert_bias.add_(gamma * (s - s.mean()))
+            m.load.zero_()
+            out.append((l, load))
+    return out
+
+
 class Block(torch.nn.Module):
-    def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0, nope=False):
+    def __init__(self, d, heads, hidden, kv_heads=None, attn_gate=0, nope=False, moe=None):
         """kv_heads (GQA; varsayilan heads): k / v head sayisi, heads'in boleni; qkv d -> d + 2 d kv / heads.  nope: RoPE yok.
         attn_gate 2: head basina cikis kapisi agirligi (heads, d // 64) (girdi n1(x)'in ilk d // 64 boyutu), sifir (RNG
         cekmez; kapisiz modelle ayni ilk agirlik)."""
@@ -251,8 +334,10 @@ class Block(torch.nn.Module):
         self.qkv = torch.nn.Linear(d, d + 2 * (d // heads) * self.kv_heads, bias=False)
         self.q_norm, self.k_norm = torch.nn.RMSNorm(d // heads), torch.nn.RMSNorm(d // heads)
         self.proj = torch.nn.Linear(d, d, bias=False)
-        self.gate_up = torch.nn.Linear(d, 2 * hidden, bias=False)
-        self.down = torch.nn.Linear(hidden, d, bias=False)
+        self.moe = MoE(d, hidden, **moe) if moe else None                  # deneme/moe2: MLP yerine (experts, topk, shared)
+        if self.moe is None:
+            self.gate_up = torch.nn.Linear(d, 2 * hidden, bias=False)
+            self.down = torch.nn.Linear(hidden, d, bias=False)
         assert attn_gate in (0, 2), "attn_gate 0 / 2"
         assert attn_gate != 2 or d >= 64, "attn_gate 2: girdi d // 64 boyut, d %d < 64 (0 boyut)" % d
         self.attn_gate = torch.nn.Parameter(torch.zeros(heads, d // 64)) if attn_gate else None
@@ -290,6 +375,8 @@ class Block(torch.nn.Module):
         if self.attn_gate is not None:
             a = a * (self._gate(x) if g is None else g)[..., None]
         x = x + self.proj(a.reshape(B, T, d))
+        if self.moe is not None:
+            return x + self.moe(self.n2(x))
         g, u = self.gate_up(self.n2(x)).chunk(2, -1)
         return x + self.down(F.silu(g) * u)
 
@@ -309,7 +396,7 @@ class Block(torch.nn.Module):
 class SentenceTransformer(torch.nn.Module):
     def __init__(self, d=512, layers=8, heads=8, global_layers=0, glob_kv_heads=None, carry_group=0, vocab_rows=VOCAB,
                  attn_gate=0, ngram_rows=0, ngram_layers=0, ngram_sparse=False, g_nope=0, mlp_ratio=(),
-                 local_kv_heads=0, g_layout="top", z_inert=False):
+                 local_kv_heads=0, g_layout="top", z_inert=False, moe_experts=0, moe_topk=0, moe_shared=0):
         """Bloklar: yerel (model_z_read_mask) x (layers - global_layers), sonda glob (tam causal) x global_layers.
         glob_kv_heads: glob bloklarinda k / v head sayisi (GQA; uretimde buyuk onbellek yalniz glob'ta), yerel bloklar tam
         head.  carry_group G (belge 83; agirlik degismez): uretimde (SummaryCache) parca row_len'e
@@ -352,13 +439,16 @@ class SentenceTransformer(torch.nn.Module):
         self.mlp_widths = [width(self.mlp_ratio[k == "glob"]) if self.mlp_ratio else hidden for k in kinds]
         self.local_kv_heads = int(local_kv_heads or 0)                    # yerel bloklarda GQA (0: tam)
         self.is_glob = [k == "glob" for k in kinds]                         # blok basina G mi (onbellekler de buradan)
+        self.moe = dict(experts=int(moe_experts), topk=int(moe_topk), shared=int(moe_shared)) if moe_experts else None
+        assert not self.moe or self.global_layers, "moe_experts: G bloklari gerek (yalniz G MLP'si MoE)"
         self.blocks = torch.nn.ModuleList(
             Block(d, heads, self.mlp_widths[i], glob_kv_heads if k == "glob" else (self.local_kv_heads or None),
-                  int(attn_gate), bool(self.g_nope) and k == "glob") for i, k in enumerate(kinds))
+                  int(attn_gate), bool(self.g_nope) and k == "glob", self.moe if k == "glob" else None)
+            for i, k in enumerate(kinds))
         self.norm = torch.nn.RMSNorm(d)
         for name, p in self.named_parameters():
-            if p.dim() == 2 and not name.endswith("attn_gate"):          # kapi sifir kalir
-                std = 0.02 / math.sqrt(2 * layers) if name.endswith(("proj.weight", "down.weight")) else 0.02
+            if p.dim() in (2, 3) and not name.endswith("attn_gate"):     # kapi sifir kalir; 3-B: MoE uzmanlari
+                std = 0.02 / math.sqrt(2 * layers) if name.endswith(("proj.weight", "down.weight", "w_down")) else 0.02
                 with torch.no_grad():
                     (p[:VOCAB] if name == "E.weight" else p).normal_(0.0, std)   # dolgu satiri rastgele sayi cekmez
         with torch.no_grad():
@@ -380,6 +470,10 @@ class SentenceTransformer(torch.nn.Module):
         else:
             g = self.ngram(ids)
         return g * is_token[..., None].to(g.dtype)
+
+    def moe_balance(self):
+        """deneme/moe2: optimizer adimindan sonra yuk dengesi sapmasi (moe_balance) -> [(katman, yuk)]."""
+        return moe_balance(self)
 
     def max_positions(self):
         """Uretimde hikaye basina konum siniri: egitim satiri row_len; carry belleginde carry_group parca (belge 89b)."""

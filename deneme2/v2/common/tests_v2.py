@@ -622,6 +622,32 @@ def _recipe_normuon(R, TR):
                     and torch.equal(a.detach(), a0 * (1 - 2e-3 * 0.1)))
     check("NorMuon / BatchedMuon: gradyani tam sifir matris (momentum 0) bir adimda NaN uretmez, yalniz wd kadar degisir "
           "(eta paydasi clamp_min(NORMUON_EPS))", all(zero), str(zero))
+    g3 = torch.Generator().manual_seed(3)                        # deneme/moe2: 3-B uzman yigini = E ayri 2-B matris
+    w3, wq = torch.randn(3, 8, 24, generator=g3) * 0.02, torch.randn(16, 16, generator=g3) * 0.02
+    gs3 = [(torch.randn(3, 8, 24, generator=g3), torch.randn(16, 16, generator=g3)) for _ in range(5)]
+    res3 = []
+    for cls in (R.NorMuon, R.BatchedMuon):
+        def run3(stacked, steps, st=None, start=None):
+            src = start or ([w3.clone(), wq.clone()] if stacked else [*w3.clone().unbind(0), wq.clone()])
+            ps = [torch.nn.Parameter(x.clone()) for x in src]
+            opt = cls(ps, **kw)
+            if st:
+                opt.load_state_dict(st)
+            for t in steps:
+                gg = [gs3[t][0], gs3[t][1]] if stacked else [*gs3[t][0].unbind(0), gs3[t][1]]
+                for x, gr in zip(ps, gg):
+                    x.grad = gr.clone()
+                opt.step()
+            return [x.detach() for x in ps], opt
+        s3, _ = run3(True, range(3))
+        s2, _ = run3(False, range(3))
+        h1, o1 = run3(True, range(2))
+        h2, _ = run3(True, range(2, 5), st=o1.state_dict(), start=h1)
+        f5, _ = run3(True, range(5))
+        res3.append(torch.equal(s3[0], torch.stack(s2[:3])) and torch.equal(s3[1], s2[3])
+                    and all(torch.equal(x, y) for x, y in zip(h2, f5)))
+    check("NorMuon / BatchedMuon 3-B parametre (MoE uzman yigini, E, m, n): E ayri 2-B matrisle bit ayni (3 adim); 2 + 3 adim "
+          "= kesintisiz 5 (bit)", all(res3), str(res3))
 
 
 def t_metrics():
@@ -998,7 +1024,8 @@ def t_train():
         _train_gqa_default(base, out, TR)
         _train_ngram(base, data, out, TR)
         _train_z3(base, data, out, TR)
-        import copy                                                     # epok sonu eksik batch dolgusu (8 Ekim)
+        _train_moe(base, out, TR)
+        import copy                                                    # epok sonu eksik batch dolgusu (8 Ekim)
         import types
         import recipe as R
         st = D.TokenStories(root, data, "train")
@@ -1203,6 +1230,89 @@ def _train_z3(base, data, out, TR):
               "%s | bayraksiz surdurme %s | %s | %s" % (bad, same_c, bad_tf, bad_g0))
     except Exception:  # noqa: BLE001
         check("train Model Z3", False, traceback.format_exc(limit=4))
+
+
+def _train_moe(base, out, TR):
+    """deneme/moe2 (belge 107): (a) uzman ici paylasim cekirdegi = elle halka toplam, takvim (siralama r0 -> r1 geometrik,
+    sonra tutma), paylasim yalniz yonlendirilen uzmanlarin kapi satirlarina = acik dolasimli matris carpimi, deger / cikis /
+    ortak uzman dokunulmaz; (b) Model Z3 + --moe_experts 4 --moe_topk 2 (+ --moe_som 1): kimlikte, uzmanlar ve yonlendirici
+    NorMuon'da, sapma egitimde degisir, gunlukte saglik, kesilip surdurulen = kesintisiz (bit); (c) transformer, AdamW,
+    --moe_som tek basina DURUR."""
+    import traceback
+    import math as _m
+    try:
+        w, beta, r = 40, 0.7, 3.3
+        k = TR.moe_som_kernel(w, beta, r)
+        R_ = min(int(_m.ceil(3 * r)), (w - 1) // 2)
+        e = {o: _m.exp(-(o / r) ** 2) for o in range(-R_, R_ + 1) if o}
+        want = [0.0] * w
+        want[0] = 1.0
+        for o, v in e.items():
+            want[o % w] += beta * v / sum(e.values())
+        d_k = max(abs(a - b) for a, b in zip(k.tolist(), want))
+        tot = 1000
+        sch = [TR.moe_som_now(s, tot, 1) for s in (0, 100, 199, 200, 999)]
+        c = TR.MOE_SOM
+        d_s = max(abs(sch[0][1] - c["r0"]), abs(sch[1][1] - c["r0"] * (c["r1"] / c["r0"]) ** 0.5),
+                  abs(sch[3][1] - c["r1"]), abs(sch[4][1] - c["r1"]))
+        ok_s = sch[0][0] == c["beta_order"] and sch[3][0] == c["beta_hold"] and TR.moe_som_now(5, tot, 0) is None
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(TR.__file__))), "model_z"))
+        import model as S
+        torch.manual_seed(0)
+        m = S.SentenceTransformer(32, 3, 2, global_layers=1, z_inert=True, moe_experts=4, moe_topk=2, moe_shared=1)
+        mo = m.blocks[-1].moe
+        for p in m.parameters():
+            p.grad = torch.randn_like(p)
+        g0 = {n: p.grad.clone() for n, p in m.named_parameters()}
+        TR.moe_som_grad(m, 0.8, 2.5)
+        kk = TR.moe_som_kernel(mo.width, 0.8, 2.5).float()
+        C = torch.stack([kk.roll(i) for i in range(mo.width)])           # C[i, j] = k[(i - j) mod w]
+        gate = g0["blocks.%d.moe.w_gate_up" % (len(m.blocks) - 1)]
+        d_g = float((mo.w_gate_up.grad[:, :mo.width] - C @ gate[:, :mo.width]).abs().max())
+        rest = all(torch.equal(p.grad, g0[n]) for n, p in m.named_parameters() if not n.endswith("moe.w_gate_up")) \
+            and torch.equal(mo.w_gate_up.grad[:, mo.width:], gate[:, mo.width:])
+        cmd = base + ["--model", "model_z", "--layers", "3", "--global_layers", "1", "--epochs", "2", "--optimizer", "normuon",
+                      "--z_inert", "1", "--moe_experts", "4", "--moe_topk", "2"]
+        a = TR.main(cmd + ["--out", out("moe_A")])
+        stopped, rr = _cut_and_resume(TR, cmd, out("moe_cut"))
+        st_ = lambda o: torch.load(os.path.join(o, "agent.pt"), weights_only=False)["state"]  # noqa: E731
+        sa, sb = st_(out("moe_A")), st_(out("moe_cut"))
+        cs = cmd + ["--moe_som", "1"]
+        s_full = TR.main(cs + ["--out", out("moe_som_A")])
+        stopped_s, rs = _cut_and_resume(TR, cs, out("moe_som_cut"))
+        ss, sc = st_(out("moe_som_A")), st_(out("moe_som_cut"))
+        L = [x["loss"] for x in a["log"]]
+        bias = [v for kname, v in sa.items() if kname.endswith("expert_bias")]
+        args = TR._args(cmd + ["--out", "x"])
+        model, _, _ = TR._build(args, torch.device("cpu"))
+        _, info = TR._optimizer(model, "normuon", 1e-2, False)
+        mu = info["split"]["muon"]["names"]
+        bad = [_exit_msg(TR.main, base + ["--model", "transformer", "--layers", "2", "--steps", "2", "--moe_experts", "4",
+                                          "--out", out("moe_bad_tf")]),
+               _exit_msg(TR.main, cmd[:cmd.index("--optimizer")] + cmd[cmd.index("--optimizer") + 2:]
+                         + ["--optimizer", "adamw", "--out", out("moe_bad_adam")]),
+               _exit_msg(TR.main, base + ["--model", "model_z", "--layers", "3", "--global_layers", "1", "--steps", "2",
+                                          "--moe_som", "1", "--out", out("moe_bad_som")])]
+        ia = a["identity"]
+        check("train deneme/moe2: paylasim cekirdegi = elle (%.1e), takvim (%.1e), kapi = dolasimli matris (%.1e), deger / cikis "
+              "/ ortak / diger gradyanlar ayni; kimlikte moe; uzman + yonlendirici NorMuon; sapma degisti; gunlukte saglik; kayip "
+              "duser; kesilip surdurulen = kesintisiz (bit; paylasimli da); transformer / AdamW / tek basina --moe_som DURUR"
+              % (d_k, d_s, d_g),
+              d_k < 1e-12 and d_s < 1e-9 and ok_s and d_g < 1e-5 and rest
+              and (ia["moe_experts"], ia["moe_topk"], ia["moe_shared"], ia["moe_som"]) == (4, 2, 1, 0)
+              and s_full["identity"]["moe_som"] == 1
+              and any("w_gate_up" in n for n in mu) and any("router" in n for n in mu)
+              and bias and all(float(b.abs().sum()) > 0 for b in bias) and all("moe" in x for x in a["log"])
+              and np.mean(L[-3:]) < np.mean(L[:3]) - 0.3
+              and stopped and all(torch.equal(sa[kname], sb[kname]) for kname in sa)
+              and [x["loss"] for x in rr["log"]] == L
+              and stopped_s and all(torch.equal(ss[kname], sc[kname]) for kname in ss)
+              and not torch.equal(ss[[kname for kname in ss if kname.endswith("w_gate_up")][0]],
+                                  sa[[kname for kname in sa if kname.endswith("w_gate_up")][0]])
+              and all(b_ is not None and "moe" in b_ for b_ in bad),
+              "kayip %.3f -> %.3f | %s" % (np.mean(L[:3]), np.mean(L[-3:]), bad))
+    except Exception:  # noqa: BLE001
+        check("train deneme/moe2", False, traceback.format_exc(limit=4))
 
 
 def _train_ngram(base, data, out, TR):
