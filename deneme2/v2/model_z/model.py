@@ -240,6 +240,19 @@ def _attend(q, k, v, attn):
 MOE_GAMMA = 1e-3        # yuk dengesi sapma adimi (deepseek2024_v3: 0,001; liu2025_muonscalable ek C ortalama cikarma)
 
 
+@torch.library.custom_op("modelz::tcopy", mutates_args=())
+def _tcopy(t: torch.Tensor) -> torch.Tensor:
+    """Son iki ekseni devrilmis bitisik kopya.  Ozel operator: Inductor ciktinin duzenini sonradan degistiremez (grouped-mm
+    sablonu B / A duzen bayragini erken okuyor; duz .contiguous() kopyasini Inductor girdi sirasina cevirdi, bayrak ile gercek
+    duzen celisti -> 'Tensor descriptor last dim must be 1', 14 Ekim GPU)."""
+    return t.transpose(-2, -1).contiguous()
+
+
+@_tcopy.register_fake
+def _(t):
+    return t.new_empty(*t.shape[:-2], t.shape[-1], t.shape[-2])
+
+
 def _gmm(a, b, offs):
     """a (N, K) satir duzeni (grup satirlari offs), b (E, K, M) son eksen bitisik -> (N, M).  CUDA: torch._grouped_mm (bf16);
     CPU: grup dongusu."""
@@ -272,7 +285,7 @@ class _ExpertLinear(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, w, offs):
         ctx.save_for_backward(x, w, offs)
-        return _gmm(x, w.transpose(-2, -1).contiguous(), offs)
+        return _gmm(x, _tcopy(w), offs)
 
     @staticmethod
     def backward(ctx, gy):
@@ -280,9 +293,9 @@ class _ExpertLinear(torch.autograd.Function):
         gy = gy.contiguous()
         gx = _gmm(gy, w.contiguous(), offs)
         if x.shape[1] <= gy.shape[1]:
-            gw = _gmm_w(x.t().contiguous(), gy, offs).transpose(-2, -1)
+            gw = _gmm_w(_tcopy(x), gy, offs).transpose(-2, -1)
         else:
-            gw = _gmm_w(gy.t().contiguous(), x, offs)
+            gw = _gmm_w(_tcopy(gy), x, offs)
         return gx, gw, None
 
 
