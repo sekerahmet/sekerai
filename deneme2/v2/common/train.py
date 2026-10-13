@@ -380,15 +380,20 @@ def grad_share_tables(path, dev, mode=GRAD_SHARE_BETA_DEFAULT):
     return torch.from_numpy(np.maximum(nbr, 0).astype(np.int64)).to(dev), torch.from_numpy(coef).to(dev)
 
 
+def _grad_share_add(g, nbr, coef):
+    """g (R, d) -> g + sum_k katsayi[a, k] g[a] komsu(a, k)'ya: K komsu tek index_add (ozgun gradyandan okunur)."""
+    V, K = nbr.shape
+    src = (g[:V, None, :] * coef[:, :, None]).reshape(V * K, g.shape[1])
+    return g.index_add(0, nbr.reshape(-1), src)
+
+
 @torch.no_grad()
 def grad_share_apply(E, tables):
     """Gradyan paylasimi (kullanici, 12 Ekim: "bu varsayımın doğru olduğunu varsayarak kod yazsan"): E.grad[komsu(a, k)] +=
-    katsayi[a, k] E.grad[a] (ozgun gradyandan; ilk VOCAB satir).  Ileri gecis ve model dosyasi degismez."""
+    katsayi[a, k] E.grad[a] (ozgun gradyandan; ilk VOCAB satir).  Ileri gecis ve model dosyasi degismez.  CUDA'da derlenmis tek
+    cagri (14 Ekim: once her adim VOCAB x d kopya + K tur carpma / index_add, HESAP ~3,7 ms / adim)."""
     nbr, coef = tables
-    g = E.grad
-    g0 = g[:D.VOCAB].clone()
-    for k in range(nbr.shape[1]):
-        g.index_add_(0, nbr[:, k], g0 * coef[:, k, None].to(g.dtype))
+    E.grad.copy_(R._opt_fn(_grad_share_add, E.grad.is_cuda)(E.grad, nbr, coef))
 
 
 def _pmi_resolve(args, cuda, log):
