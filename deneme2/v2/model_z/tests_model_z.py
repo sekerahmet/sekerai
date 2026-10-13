@@ -3,7 +3,7 @@
 v2-before-formula-cleanup-20261007.
 
     python tests_model_z.py [--only layout,flex,learned,global_,prefill,equiv,mask,summaries_last,gqa,carry,vocab,limit,flex_ranges,
-                            gate,ngram,ngram_fast,combo]
+                            gate,ngram,ngram_fast,combo,interleave,z_inert,generate]
 """
 import os
 import sys
@@ -1699,10 +1699,89 @@ def t_z_inert():
           "fark %.1e, toplu %.1e" % (sd, sr))
 
 
+def t_generate():
+    """Kod incelemesi (14 Ekim) eksik vakalari: (a) toplu uretim (_generate_rows) + open_last + farkli istem boyu + row_len
+    siniri = tek tek SummaryCache yolu, tek istem (M3: o da toplu yoldan) = ayni; (b) on_token akisi = uretilen token'lar +
+    cumle sonunda None, stop_when uretimi keser (cikti tam uretimin oneki), toplu ve tek yolda ayni; (c) carry'li modelde
+    generate onbellek sifirlaninca durur (sifirlamadan sonra token eklenmez; B1); (d) StaticCache cumle sayaci tampon boyuna
+    ulasmadan DURUR (B2: biten satir sonraki adimlarda tampon disina yazmasin)."""
+    import model as MOD
+    torch.manual_seed(0)
+    m = SentenceTransformer(32, 6, 2, z_inert=True, global_layers=2, glob_kv_heads=1, g_layout="interleave", g_nope=True).eval()
+    prompts = [[[3, 4, 5]], [[6, 7], [8, 9, 10, 11, 12]], [[13, 14, 15, 16, 17, 18, 19, 20], [21]], []]
+
+    def used(p, gen, opened):                                           # BOS + istem + uretim + kapanislar
+        return 1 + sum(len(s) + 1 for s in p) - opened + sum(map(len, gen)) + max(len(gen) - 1, 0)
+    saved, ok_a, info = MOD.STATIC_DECODE, True, []
+    try:
+        for rl in (100000, 16):                                       # 16: en az bir satir sinirda kesilir
+            m.row_len = rl
+            for opened in (False, True):
+                MOD.STATIC_DECODE = True
+                batch = m.generate(prompts, 6, 5, open_last=opened)
+                one = [m.generate([p], 6, 5, open_last=opened)[0] for p in prompts]
+                MOD.STATIC_DECODE = False
+                ref = m.generate(prompts, 6, 5, open_last=opened)
+                u = [used(p, r[0], bool(opened and p)) for p, r in zip(prompts, ref)]
+                ok_a &= batch == ref and one == ref and (rl > 1000 or (max(u) <= rl and any(len(r[0]) < 6 and not r[2] for r in ref)))
+                info.append("%s/%s %s" % (rl if rl < 1000 else "inf", int(opened), max(u)))
+    finally:
+        MOD.STATIC_DECODE = saved
+    m.row_len = 100000
+    p1 = [prompts[1]]
+    full = m.generate(p1, 6, 5)[0]
+    seq = []
+    streamed = m.generate(p1, 6, 5, on_token=seq.append)[0]
+    want = [t for s in streamed[0] for t in s + [None]]
+    stop = lambda gen: len(gen) >= 2  # noqa: E731
+    s_rows = m.generate(p1, 6, 5, stop_when=stop)[0]                    # toplu yol (acgozlu, on_token yok)
+    s_one = m.generate(p1, 6, 5, stop_when=stop, on_token=lambda w: None)[0]   # tek yol
+    n = min(2, len(full[0]))
+    ok_b = streamed == full and seq == want and s_rows == s_one and s_rows[0] == full[0][:n] and s_rows[1] == full[1][:n]
+    torch.manual_seed(0)
+    mc = SentenceTransformer(32, 3, 2, global_layers=1, carry_group=2).eval()
+    mc.row_len = 160
+    after, resets = [], []
+    orig_a, orig_c = MOD.SummaryCache.append_token, MOD.SummaryCache.close_sentence
+
+    def spy_a(self, t):
+        if getattr(self, "restarted", False):
+            after.append(t)
+        return orig_a(self, t)
+
+    def spy_c(self):
+        out = orig_c(self)
+        if getattr(self, "restarted", False):
+            resets.append(1)
+        return out
+    MOD.SummaryCache.append_token, MOD.SummaryCache.close_sentence = spy_a, spy_c
+    try:
+        gc = mc.generate([[[3, 4, 5]]], 200, 8)[0]
+    finally:
+        MOD.SummaryCache.append_token, MOD.SummaryCache.close_sentence = orig_a, orig_c
+    pos_c = used([[3, 4, 5]], gc[0], False)
+    ok_c = len(resets) == 1 and not after and pos_c < mc.max_positions() and len(gc[0]) < 200
+    sc = MOD.StaticCache(m, 600, 4, 3)
+    sc.prefill([[3, 4]])
+    n_ok = 0
+    try:
+        for _ in range(sc.limits[1] + 5):
+            sc.append_token(5)
+            n_ok += 1
+    except AssertionError:
+        pass
+    ok_d = n_ok == sc.limits[1] - 1
+    check("generate: toplu + open_last + farkli istem + row_len siniri = SummaryCache yolu, tek istem = ayni (%s); on_token "
+          "akisi, stop_when (toplu = tek, tam uretimin oneki); carry'de onbellek sifirlaninca durur (%d konum < %d, sifirlama "
+          "sonrasi token %d); StaticCache cumle sayaci %d'de DURUR (tampon %d)" % (", ".join(info), pos_c, mc.max_positions(),
+                                                                                   len(after), n_ok, sc.limits[1]),
+          ok_a and ok_b and ok_c and ok_d, "a %s b %s c %s d %s" % (ok_a, ok_b, ok_c, ok_d))
+
+
 TESTS = dict(layout=t_layout, flex=t_flex, learned=t_learned, global_=t_global, prefill=t_prefill,
              equiv=t_equiv, mask=t_mask, summaries_last=t_summaries_last, gqa=t_gqa, carry=t_carry, vocab=t_vocab,
              limit=t_limit, flex_ranges=t_flex_ranges, gate=t_gate, ngram=t_ngram, ngram_fast=t_ngram_fast,
-             combo=t_combo, interleave=t_interleave, z_inert=t_z_inert)
+             combo=t_combo, interleave=t_interleave, z_inert=t_z_inert, generate=t_generate)
 
 if __name__ == "__main__":
     if SIDE is not None:
