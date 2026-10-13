@@ -2,7 +2,8 @@
 uzman sinirlari GPU'dan okunur (senkron yok), TMA yok (duz tl.load + tl.dot; torch 2.11 Inductor grouped-mm sablonu sm_120'de
 calismadi).  Kaynak: https://github.com/shawntan/scattermoe (commit 47b5e1502e5a10e82c8e5945d761b877849871e7,
 scattermoe/kernels/ops.py + parallel_experts.py; tan2024_scattermoe).  Lisans Apache-2.0 (Copyright the ScatterMoE authors);
-degisiklik: tek dosya, modul ici import adlari, ParallelExperts sinifi alinmadi.  Cekirdek matematigi degistirilmedi.
+degisiklik: tek dosya, modul ici import adlari, ParallelExperts sinifi alinmadi, autotune aday listeleri (sm_120).  Cekirdek
+matematigi degistirilmedi.
 """
 import torch
 import triton
@@ -49,8 +50,15 @@ def _compute_expert_block(
 
 
 def _scatter2scatter_configs():
+    # deneme/moe2 (14 Ekim): ozgun tek ayar + sm_120 paylasimli bellek sinirina (101 KB) sigan adaylar; BLOCK_M 128 sabit.
+    # Asama basina (128 x K + K x N) x 2 bayt.
     return [
         triton.Config({'BLOCK_N': 128, 'BLOCK_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_N': 128, 'BLOCK_K': 32}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_N': 128, 'BLOCK_K': 64}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_N': 256, 'BLOCK_K': 32}, num_stages=4, num_warps=8),
+        triton.Config({'BLOCK_N': 64, 'BLOCK_K': 64}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_N': 256, 'BLOCK_K': 64}, num_stages=2, num_warps=8),
     ]
 
 @triton.autotune(configs=_scatter2scatter_configs(), key=['M', 'N', 'K'], )
@@ -190,8 +198,13 @@ def scatter2scatter_compileable(
 
 
 def _config_XtY():
+    # deneme/moe2 (14 Ekim): ozgun tek ayar + sm_120 101 KB'a sigan adaylar; asama basina (K x M + M x N) x 2 bayt.
     return [
         triton.Config({'BLOCK_N': 128, 'BLOCK_K': 128, 'BLOCK_M': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_N': 128, 'BLOCK_K': 128, 'BLOCK_M': 64}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_N': 256, 'BLOCK_K': 128, 'BLOCK_M': 32}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_N': 128, 'BLOCK_K': 256, 'BLOCK_M': 32}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_N': 64, 'BLOCK_K': 128, 'BLOCK_M': 64}, num_stages=4, num_warps=4),
     ]
 
 def group_bwd_W(DY, X, expert_offsets, E, has_bias=False):
