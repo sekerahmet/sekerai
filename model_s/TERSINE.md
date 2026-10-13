@@ -410,3 +410,33 @@ yeni birşey çıkmaz tutar onun bi türevini bulursunuz"*) doğrulandı.
 türetebildiğimiz düzeyde ilkesel en iyiye yakın. Kazanım: neden böyle olduğunun hesabı ("iki arşiv + derinlik"; softmax = tek kaynak Bayes; arşiv zorunlu
 (Hilberg); kural yalnız çarpan). Somut değer: Z2'yi ilkesel parçalarla iyileştirmek (ölçek büyüyünce MoE FFN; yerel katmanlarda delta durumu; G'de MLA KV).
 Yenilik için ders: standart problemi daha iyi çözmek değil, **hangi varsayımın yanlış olabileceğiyle** başlamak (Z2'nin cümle özeti böyle bir varsayımdı).
+
+## 16. Ana hat tasarım notu: Z'nin birimi (kullanıcı, 11 Ekim: *"Z2 ile bir kelime token aynı boy olması sezgisel olarak bana yanlış geliyor"*;
+*"bundan eminim ... z nasıl büyür token ve diğer şeyler büyümeden ? Ya da katmanlara cümlenin başını sonunu vs mi dağıtmak lazım yani z nin kv si mi
+her katmanda eşit paylaşılmalı ?"*; *"Niye karmaşık oluyor ? Zaten cümle ile kelimeyi aynı birim yapmak mantıksız"*)
+
+- Bilgi (HESAP): kelime ~2 (SS) – 4,3 (FineWeb) bit; cümle (~15–25 token) ≥ 30–100 bit + hikâyedeki yeri → Z ~10–20× daha çok taşımalı, ama aynı d.
+  Z yüklü: proje ölçümü Z okuması kapalı +0,51 (cümle başı +5,48). Literatür: blok özetini birden çok önek token'ına dağıtmak iyileştirir (ho2024 §2.4).
+- **Katmanlara dağıtmak kapasite eklemez:** Z'nin her katmandaki K/V'si aynı d genişlikli kalıntı akışından türer; Z2'de katman başına ayrı K/V (özelleşme)
+  doğru; eşit paylaşım özelleşmeyi kaybettirir. Kapasite yalnız genişlikle artar.
+- Maliyet (FFN / izdüşüm ∝ genişlik², Z konumları ~%5): tek geniş vektör d_z = 4d → ~+%80, d_z = 2d → ~+%20; **k = 4 ayrı vektör → 4d kapasite, ~+%15**.
+- **Öneri: Z = kendine ait matris (k × d) + kendi ağırlıkları** (kelimeden ayrı izdüşüm / FFN, `batch.kind` ile seçilir; çok kipli modellerdeki gibi; ortak
+  nokta attention head uzayı). Kelime token'ları değişmez; Z kelimeden farklı birim (biçim ve işleme). "Karmaşık" değil (Claude'un abartısı düzeltildi).
+  Kodda cümle başına tek Z var (`model_z/model.py`), birden çok Z denenmedi. Deneme kararı kullanıcının.
+
+### 16a. Literatür (danışman; Claude metinde doğruladı) ve plan (kullanıcı, 11 Ekim: *"Token 512 cümle 1024 denenebilir hatta k 1 k 2 ikisini de
+uyarlanabilir yaparsın yani farklı kombinasyon. Bir de bunu deneyen olmuş mu ?"*)
+
+- k özet yuvası: cümle sonu gist, N_g arttıkça uzun bağlamda (HELMET) başarı düzenli artar, kısa görevde değişmez (`2025/sentence_anchored_gist2025.txt`
+  L385–392); Block Transformer önek > 4 belirgin iyileşir (`2024/ho2024_block_transformer.txt` L645–652).
+- Türe özgü ağırlık, ortak attention: Mixture-of-Transformers (kip: metin / görüntü / ses), Chameleon 7B'de yoğun kaliteye FLOP'un %55,8'iyle
+  (`2024/liang2024_mot.txt` L46–48) — kelime / cümle ayrımı için kullanılmamış.
+- **Aynı dizide attention'ı paylaşan, daha geniş kalıntı akışlı özet token'ı (kelime d 512, Z d 1.024): klasörde ve web taramasında yok — denenmemiş.**
+- Üst birimi geniş, token'ın yerine geçen: MegaByte (P·D_G, `2023/yu2023_megabyte.txt` L150–153), Strata-x.
+**Plan (dal `deneme/z-unit`, ana hat; bayraklar uyarlanabilir, varsayılan = bugünkü Z2 bit düzeyinde):** (1) cümle başına k Z yuvası; (2) türe özgü
+ağırlıklar (Z kendi izdüşüm / FFN'i); (3) Z'ye daha geniş akış (d_z). Testler: varsayılan = eski model, kesilip sürdürülen = kesintisiz, üretim = adım
+adım. Sonra SS'te çalışıyor mu; GPU koşuları kullanıcı onayıyla.
+**Plan düzeltmesi (kullanıcı, 11 Ekim: *"Zaten ben sana dedim salla o k olayını diye mantıken 10 token d boyutta 1 tek d boyutuna sıkıştırmak
+mantıksız"*; önce: *"Senin önerdiğin aynı cümleyi farklı farklı yuvaya bölmek doğru mu ?"*):** k yuva **bırakıldı** (yuva simetrisi / kopya riski de
+vardı; "yuvalar uzmanlaşır" Claude'un hipoteziydi). Tek iş: **Z'ye kendi genişliği (d_z > d) ve kendi ağırlıkları**, aynı dizide, attention head
+uzayında buluşma. Bayrak d_z; d_z = d → bugünkü Z2 bit düzeyinde (testle).
