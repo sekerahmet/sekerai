@@ -1757,8 +1757,13 @@ def t_moe():
     gm = torch._grouped_mm(xs, ws.transpose(-2, -1), offs=offs)
     lp = S._expert_mm(xs.float(), ws.float(), offs)
     d_gm = float((gm.float() - lp).abs().max() / lp.abs().max())
+    at, bb = torch.randn(16, 32, generator=g_).bfloat16(), torch.randn(32, 16, generator=g_).bfloat16()   # adim 16 baytin kati
+    ow = torch.tensor([7, 7, 19, 32], dtype=torch.int32)
+    gw = torch._grouped_mm(at, bb, offs=ow)                            # agirlik gradyani bicimi (2-B x 2-B, offs K'da)
+    lw = S._gmm_w(at.float(), bb.float(), ow)
+    d_gm = max(d_gm, float((gw.float() - lw).abs().max() / lw.abs().max()))
     check("moe katman: = token token elle (goreli %.1e), gradyanlar (yonlendirici dahil, goreli %.1e); sapma yalniz secimde; yuk yalniz "
-          "gradyanla, toplam N k; grouped_mm (bf16) = uzman dongusu (goreli %.1e)" % (d_y, d_g, d_gm),
+          "gradyanla, toplam N k; grouped_mm (bf16; ileri ve agirlik gradyani bicimi) = uzman dongusu (goreli %.1e)" % (d_y, d_g, d_gm),
           d_y < 1e-6 and d_g < 1e-5 and bias_ok and no_count and count_ok and d_gm < 1e-2,
           "sapma %s, sayimsiz %s, sayim %s" % (bias_ok, no_count, count_ok))
     END_ID = D.END_ID

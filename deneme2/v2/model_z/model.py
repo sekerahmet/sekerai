@@ -240,18 +240,58 @@ def _attend(q, k, v, attn):
 MOE_GAMMA = 1e-3        # yuk dengesi sapma adimi (deepseek2024_v3: 0,001; liu2025_muonscalable ek C ortalama cikarma)
 
 
-def _expert_mm(x, w, offs):
-    """x (N, i) uzmana gore sirali satirlar, w (E, o, i), offs (E,) int32 kumulatif bitis -> (N, o).  CUDA: torch._grouped_mm
-    bf16 (sm_120'de ATen hizli yolu yok, derlenmis blokta Inductor Triton sablonu; belge 107 s2); CPU: uzman dongusu.
-    w (E, i, o) bitisik verilir: torch 2.11 Triton sablonu devrik gorunumde TMA tanimlayicisini bozuk kuruyor ("Tensor
-    descriptor last dim must be 1", 13 Ekim GPU); devirme zaten yapilan bf16 kopyasina katilir."""
-    if x.is_cuda:
-        return torch._grouped_mm(x.bfloat16(), w.bfloat16().transpose(-2, -1).contiguous(), offs=offs)
-    out, a = [], 0
-    for e, b in enumerate(offs.tolist()):
-        out.append(x[a:b] @ w[e].to(x.dtype).T)
-        a = b
+def _gmm(a, b, offs):
+    """a (N, K) satir duzeni (grup satirlari offs), b (E, K, M) son eksen bitisik -> (N, M).  CUDA: torch._grouped_mm (bf16);
+    CPU: grup dongusu."""
+    if a.is_cuda:
+        return torch._grouped_mm(a, b, offs=offs)
+    out, s0 = [], 0
+    for e, s1 in enumerate(offs.tolist()):
+        out.append(a[s0:s1] @ b[e])
+        s0 = s1
     return torch.cat(out)
+
+
+def _gmm_w(at, b, offs):
+    """at (P, N) satir duzeni (N grup ekseni), b (N, Q) -> (E, P, Q): grup e icin at[:, g] @ b[g]."""
+    if at.is_cuda:
+        return torch._grouped_mm(at, b, offs=offs)
+    out, s0 = [], 0
+    for s1 in offs.tolist():
+        out.append(at[:, s0:s1] @ b[s0:s1])
+        s0 = s1
+    return torch.stack(out)
+
+
+class _ExpertLinear(torch.autograd.Function):
+    """y = x w_e^T (satirin uzmani e, offs).  Uc carpim da (ileri, girdi ve agirlik gradyani) acikca bitisik girdiyle: torch
+    2.11 Inductor grouped-mm Triton sablonu son ekseni bitisik olmayan B'de TMA tanimlayicisini bozuk kuruyor ("Tensor
+    descriptor last dim must be 1", 13-14 Ekim GPU); hazir geri gecis devrik gorunum verir.  Agirlik gradyani icin x / gy'den
+    dar olani devrilir."""
+
+    @staticmethod
+    def forward(ctx, x, w, offs):
+        ctx.save_for_backward(x, w, offs)
+        return _gmm(x, w.transpose(-2, -1).contiguous(), offs)
+
+    @staticmethod
+    def backward(ctx, gy):
+        x, w, offs = ctx.saved_tensors
+        gy = gy.contiguous()
+        gx = _gmm(gy, w.contiguous(), offs)
+        if x.shape[1] <= gy.shape[1]:
+            gw = _gmm_w(x.t().contiguous(), gy, offs).transpose(-2, -1)
+        else:
+            gw = _gmm_w(gy.t().contiguous(), x, offs)
+        return gx, gw, None
+
+
+def _expert_mm(x, w, offs):
+    """x (N, i) uzmana gore sirali satirlar, w (E, o, i), offs (E,) int32 kumulatif bitis -> (N, o).  CUDA bf16
+    (derlenmis blokta Inductor Triton grouped-mm sablonu; sm_120'de ATen hizli yolu yok, belge 107 s2), CPU uzman dongusu."""
+    if x.is_cuda:
+        x, w = x.bfloat16(), w.bfloat16()
+    return _ExpertLinear.apply(x, w.to(x.dtype), offs)
 
 
 class MoE(torch.nn.Module):
