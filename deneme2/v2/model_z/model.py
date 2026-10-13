@@ -242,9 +242,11 @@ MOE_GAMMA = 1e-3        # yuk dengesi sapma adimi (deepseek2024_v3: 0,001; liu20
 
 def _expert_mm(x, w, offs):
     """x (N, i) uzmana gore sirali satirlar, w (E, o, i), offs (E,) int32 kumulatif bitis -> (N, o).  CUDA: torch._grouped_mm
-    bf16 (sm_120'de ATen hizli yolu yok, derlenmis blokta Inductor Triton sablonu; belge 107 s2); CPU: uzman dongusu."""
+    bf16 (sm_120'de ATen hizli yolu yok, derlenmis blokta Inductor Triton sablonu; belge 107 s2); CPU: uzman dongusu.
+    w (E, i, o) bitisik verilir: torch 2.11 Triton sablonu devrik gorunumde TMA tanimlayicisini bozuk kuruyor ("Tensor
+    descriptor last dim must be 1", 13 Ekim GPU); devirme zaten yapilan bf16 kopyasina katilir."""
     if x.is_cuda:
-        return torch._grouped_mm(x.bfloat16(), w.bfloat16().transpose(-2, -1), offs=offs)
+        return torch._grouped_mm(x.bfloat16(), w.bfloat16().transpose(-2, -1).contiguous(), offs=offs)
     out, a = [], 0
     for e, b in enumerate(offs.tolist()):
         out.append(x[a:b] @ w[e].to(x.dtype).T)
