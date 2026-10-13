@@ -1,6 +1,6 @@
-"""moe_check -- deneme/moe2 MoE katmaninin GPU denetimi (belge 107 s6 adim 1): gercek boy (d 1024, G MLP 5.440, 16 + 1 uzman,
+"""moe_check -- deneme/moe2 MoE katmaninin GPU denetimi (belge 107 s6 adim 1; uzmanlar ozel operator modelz::moe_experts): gercek boy (d 1024, G MLP 5.440, 16 + 1 uzman,
 token basina 3, 32 x 2048 token), egitimle ayni derleme modu.  (1) derlenmis ileri + geri = uzman dongusu basvurusu (ayni
-yonlendirme, bf16 goreli fark); (2) derlenmis adimda GPU -> CPU senkronu yok (sm_120'de ATen yedek yolu offs.cpu() yapar);
+yonlendirme, bf16 goreli fark); (2) derlenmis adimda GPU -> CPU senkron sayisi (ozel operator cagri basina bir; ileri + geri 2);
 (3) ileri + geri ms: MoE ve ayni etkin genislikte yogun SwiGLU MLP.  Son satir MOE_CHECK_BITTI.
 
     python moe_check.py [--experts 16] [--topk 3] [--shared 1] [--rows 32] [--reps 20]
@@ -88,13 +88,14 @@ def main(argv=None):
     step(cm)
     print("derleme %.0f sn" % (time.time() - t0), flush=True)
     m.zero_grad(set_to_none=True)
-    torch.cuda.set_sync_debug_mode("error")                              # senkron olursa hata
-    try:
-        gx = step(cm)
-        sync = "yok"
-    except RuntimeError as e:
-        gx, sync = None, "VAR: " + str(e).splitlines()[0][:160]
+    import warnings
+    torch.cuda.set_sync_debug_mode("warn")                               # senkronlar uyari olarak sayilir
+    with warnings.catch_warnings(record=True) as ws:
+        warnings.simplefilter("always")
+        step(cm)
     torch.cuda.set_sync_debug_mode("default")
+    n_sync = sum("synchroniz" in str(w_.message) for w_ in ws)
+    sync = "%d (beklenen 2: ozel operator ileri + geri)" % n_sync
     g_mod = {n_: p_.grad.clone() for n_, p_ in m.named_parameters() if p_.grad is not None}
     m.zero_grad(set_to_none=True)
     xr = x.clone().requires_grad_()
@@ -108,11 +109,11 @@ def main(argv=None):
            if p_.grad is not None and n_ in g_mod}
     print("ileri: derlenmis / dongu goreli %.2e" % d_y, flush=True)
     print("geri (agirlik, goreli): " + ", ".join("%s %.2e" % (k, v) for k, v in d_g.items()), flush=True)
-    print("senkron (derlenmis adim): %s" % sync, flush=True)
+    print("senkron (derlenmis adim, ileri + geri): %s" % sync, flush=True)
     t_m, t_d = timed(lambda: step(cm), a.reps), timed(lambda: step(cd), a.reps)
     print("ileri + geri ms: MoE %.2f | yogun %.2f | fark %+.2f (katman basina; 4 G katmani %+.1f ms / adim)"
           % (t_m, t_d, t_m - t_d, 4 * (t_m - t_d)), flush=True)
-    ok = sync == "yok" and d_y < 2e-2 and max(d_g.values()) < 5e-2
+    ok = n_sync <= 2 and d_y < 2e-2 and max(d_g.values()) < 5e-2
     print("SONUC: %s" % ("GECTI" if ok else "KALDI"), flush=True)
     print("MOE_CHECK_BITTI", flush=True)
 

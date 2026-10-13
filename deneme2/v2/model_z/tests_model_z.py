@@ -1702,7 +1702,7 @@ def t_z_inert():
 def t_moe():
     """deneme/moe2 (belge 107): (a) MoE katmani = token token elle toplam (ortak + sum p_j uzman_j, p sigmoid seciminde
     normalize x topk), gradyanlar da (yonlendirici dahil); (b) sapma yalniz secime girer (agirlik ham sigmoid'den); (c) yuk
-    yalniz gradyan acikken sayilir, toplami N topk; (d) CUDA formulu torch._grouped_mm (bf16, w transpoz) = uzman dongusu;
+    yalniz gradyan acikken sayilir, toplami N topk; (d) ozel operator modelz::moe_experts opcheck (sema, sahte, autograd), uretim yolu (kucuk N, butun uzmanlar) = gruplu yol;
     (e) GQA'li Model Z3 (Y-Y-G) + MoE: SummaryCache = egitim ileri gecisi, StaticCache adim adim = SummaryCache, toplu = tek tek,
     generate = token token."""
     import model as S
@@ -1750,22 +1750,21 @@ def t_moe():
         mo.expert_bias.zero_()
     mo(x)
     count_ok = float(mo.load.sum()) == x.shape[0] * x.shape[1] * 2
-    g_ = torch.Generator().manual_seed(2)
-    xs = torch.randn(30, 24, generator=g_).bfloat16()
-    ws = torch.randn(4, 16, 24, generator=g_).bfloat16()
+    g_ = torch.Generator().manual_seed(2)                               # ozel operator kaydi (sema, sahte, autograd)
+    xs, wgu, wdn = (torch.randn(*sh, generator=g_).requires_grad_() for sh in ((30, 24), (4, 16, 24), (4, 24, 8)))
     offs = torch.tensor([7, 7, 19, 30], dtype=torch.int32)               # bos grup dahil
-    gm = torch._grouped_mm(xs, ws.transpose(-2, -1), offs=offs)
-    lp = S._expert_mm(xs.float(), ws.float(), offs)
-    d_gm = float((gm.float() - lp).abs().max() / lp.abs().max())
-    at, bb = torch.randn(16, 32, generator=g_).bfloat16(), torch.randn(32, 16, generator=g_).bfloat16()   # adim 16 baytin kati
-    ow = torch.tensor([7, 7, 19, 32], dtype=torch.int32)
-    gw = torch._grouped_mm(at, bb, offs=ow)                            # agirlik gradyani bicimi (2-B x 2-B, offs K'da)
-    lw = S._gmm_w(at.float(), bb.float(), ow)
-    d_gm = max(d_gm, float((gw.float() - lw).abs().max() / lw.abs().max()))
+    oc = torch.library.opcheck(S._moe_experts, (xs, wgu, wdn, offs))
+    op_ok = all(v == "SUCCESS" for v in oc.values())
+    with torch.no_grad():                                               # uretim yolu (kucuk N, butun uzmanlar) = gruplu yol
+        y_all = mo(x)
+        saved_n, S.MOE_DENSE_N = S.MOE_DENSE_N, 0
+        y_grp = mo(x)
+        S.MOE_DENSE_N = saved_n
+    d_gm = float((y_all - y_grp).abs().max() / y_grp.abs().max())
     check("moe katman: = token token elle (goreli %.1e), gradyanlar (yonlendirici dahil, goreli %.1e); sapma yalniz secimde; yuk yalniz "
-          "gradyanla, toplam N k; grouped_mm (bf16; ileri ve agirlik gradyani bicimi) = uzman dongusu (goreli %.1e)" % (d_y, d_g, d_gm),
-          d_y < 1e-6 and d_g < 1e-5 and bias_ok and no_count and count_ok and d_gm < 1e-2,
-          "sapma %s, sayimsiz %s, sayim %s" % (bias_ok, no_count, count_ok))
+          "gradyanla, toplam N k; ozel operator opcheck; uretim yolu (butun uzmanlar) = gruplu yol (goreli %.1e)" % (d_y, d_g, d_gm),
+          d_y < 1e-6 and d_g < 1e-5 and bias_ok and no_count and count_ok and op_ok and d_gm < 1e-6,
+          "sapma %s, sayimsiz %s, sayim %s, opcheck %s" % (bias_ok, no_count, count_ok, oc))
     END_ID = D.END_ID
     prompts = [[], [[3, 4]], [list(x_) for x_ in STORIES[0]]]
     torch.manual_seed(0)

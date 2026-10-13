@@ -240,78 +240,83 @@ def _attend(q, k, v, attn):
 MOE_GAMMA = 1e-3        # yuk dengesi sapma adimi (deepseek2024_v3: 0,001; liu2025_muonscalable ek C ortalama cikarma)
 
 
-@torch.library.custom_op("modelz::tcopy", mutates_args=())
-def _tcopy(t: torch.Tensor) -> torch.Tensor:
-    """Son iki ekseni devrilmis bitisik kopya.  Ozel operator: Inductor ciktinin duzenini sonradan degistiremez (grouped-mm
-    sablonu B / A duzen bayragini erken okuyor; duz .contiguous() kopyasini Inductor girdi sirasina cevirdi, bayrak ile gercek
-    duzen celisti -> 'Tensor descriptor last dim must be 1', 14 Ekim GPU)."""
-    return t.transpose(-2, -1).contiguous()
+MOE_DENSE_N = 256      # gradyansiz ve en cok bu kadar token: butun uzmanlar hesaplanir (uretim; senkron yok, CUDA graph)
 
 
-@_tcopy.register_fake
-def _(t):
-    return t.new_empty(*t.shape[:-2], t.shape[-1], t.shape[-2])
+def _silu_grad(g):
+    """d silu(g) / dg (fp32)."""
+    s_ = torch.sigmoid(g)
+    return s_ * (1 + g * (1 - s_))
 
 
-def _gmm(a, b, offs):
-    """a (N, K) satir duzeni (grup satirlari offs), b (E, K, M) son eksen bitisik -> (N, M).  CUDA: torch._grouped_mm (bf16);
-    CPU: grup dongusu."""
-    if a.is_cuda:
-        return torch._grouped_mm(a, b, offs=offs)
-    out, s0 = [], 0
+@torch.library.custom_op("modelz::moe_experts", mutates_args=())
+def _moe_experts(xs: torch.Tensor, w_gu: torch.Tensor, w_dn: torch.Tensor,
+                 offs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Uzmana gore sirali satirlar xs (N, d), w_gu (E, 2w, d), w_dn (E, d, w), offs (E,) kumulatif bitis -> (y (N, d),
+    h (N, 2w) kapi | deger, geri gecis icin).  Ozel operator: Inductor icine girmez (torch 2.11 grouped-mm Triton sablonu
+    sm_120'de calismadi: duzen bayragi / TMA, autotune adayinda illegal instruction -- 14 Ekim moe_check); uzman basina
+    duz matmul (cuBLAS), cagri basina bir senkron (offs.tolist)."""
+    w = w_dn.shape[2]
+    y, h = xs.new_zeros(xs.shape[0], w_dn.shape[1]), xs.new_empty(xs.shape[0], 2 * w)
+    s0 = 0
     for e, s1 in enumerate(offs.tolist()):
-        out.append(a[s0:s1] @ b[e])
+        if s1 > s0:
+            he = xs[s0:s1] @ w_gu[e].T
+            h[s0:s1] = he
+            y[s0:s1] = (F.silu(he[:, :w]) * he[:, w:]) @ w_dn[e].T
         s0 = s1
-    return torch.cat(out)
+    return y, h
 
 
-def _gmm_w(at, b, offs):
-    """at (P, N) satir duzeni (N grup ekseni), b (N, Q) -> (E, P, Q): grup e icin at[:, g] @ b[g]."""
-    if at.is_cuda:
-        return torch._grouped_mm(at, b, offs=offs)
-    out, s0 = [], 0
-    for s1 in offs.tolist():
-        out.append(at[:, s0:s1] @ b[s0:s1])
+@_moe_experts.register_fake
+def _(xs, w_gu, w_dn, offs):
+    return xs.new_empty(xs.shape[0], w_dn.shape[1]), xs.new_empty(xs.shape[0], w_gu.shape[1])
+
+
+@torch.library.custom_op("modelz::moe_experts_bwd", mutates_args=())
+def _moe_experts_bwd(gy: torch.Tensor, xs: torch.Tensor, w_gu: torch.Tensor, w_dn: torch.Tensor, offs: torch.Tensor,
+                     h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """_moe_experts'in geri gecisi -> (gxs, g_w_gu, g_w_dn); uzman basina, saklanan h ile (gate_up yeniden hesaplanmaz)."""
+    w = w_dn.shape[2]
+    gx, gwu, gwd = torch.zeros_like(xs), torch.zeros_like(w_gu), torch.zeros_like(w_dn)
+    s0 = 0
+    for e, s1 in enumerate(offs.tolist()):
+        if s1 > s0:
+            ge, ue = h[s0:s1, :w].float(), h[s0:s1, w:].float()
+            act = (F.silu(ge) * ue).to(xs.dtype)
+            g_act = (gy[s0:s1] @ w_dn[e]).float()
+            gwd[e] = gy[s0:s1].T @ act
+            gh = torch.cat([g_act * ue * _silu_grad(ge), g_act * F.silu(ge)], 1).to(xs.dtype)
+            gwu[e] = gh.T @ xs[s0:s1]
+            gx[s0:s1] = gh @ w_gu[e]
         s0 = s1
-    return torch.stack(out)
+    return gx, gwu, gwd
 
 
-class _ExpertLinear(torch.autograd.Function):
-    """y = x w_e^T (satirin uzmani e, offs).  Uc carpim da (ileri, girdi ve agirlik gradyani) acikca bitisik girdiyle: torch
-    2.11 Inductor grouped-mm Triton sablonu son ekseni bitisik olmayan B'de TMA tanimlayicisini bozuk kuruyor ("Tensor
-    descriptor last dim must be 1", 13-14 Ekim GPU); hazir geri gecis devrik gorunum verir.  Agirlik gradyani icin x / gy'den
-    dar olani devrilir."""
-
-    @staticmethod
-    def forward(ctx, x, w, offs):
-        ctx.save_for_backward(x, w, offs)
-        return _gmm(x, _tcopy(w), offs)
-
-    @staticmethod
-    def backward(ctx, gy):
-        x, w, offs = ctx.saved_tensors
-        gy = gy.contiguous()
-        gx = _gmm(gy, w.contiguous(), offs)
-        if x.shape[1] <= gy.shape[1]:
-            gw = _gmm_w(_tcopy(x), gy, offs).transpose(-2, -1)
-        else:
-            gw = _gmm_w(_tcopy(gy), x, offs)
-        return gx, gw, None
+@_moe_experts_bwd.register_fake
+def _(gy, xs, w_gu, w_dn, offs, h):
+    return torch.empty_like(xs), torch.empty_like(w_gu), torch.empty_like(w_dn)
 
 
-def _expert_mm(x, w, offs):
-    """x (N, i) uzmana gore sirali satirlar, w (E, o, i), offs (E,) int32 kumulatif bitis -> (N, o).  CUDA bf16
-    (derlenmis blokta Inductor Triton grouped-mm sablonu; sm_120'de ATen hizli yolu yok, belge 107 s2), CPU uzman dongusu."""
-    if x.is_cuda:
-        x, w = x.bfloat16(), w.bfloat16()
-    return _ExpertLinear.apply(x, w.to(x.dtype), offs)
+def _moe_setup(ctx, inputs, output):
+    xs, w_gu, w_dn, offs = inputs
+    ctx.save_for_backward(xs, w_gu, w_dn, offs, output[1])
+
+
+def _moe_backward(ctx, gy, gh):
+    xs, w_gu, w_dn, offs, h = ctx.saved_tensors
+    gx, gwu, gwd = _moe_experts_bwd(gy.contiguous(), xs, w_gu, w_dn, offs, h)
+    return gx, gwu, gwd, None
+
+
+_moe_experts.register_autograd(_moe_backward, setup_context=_moe_setup)
 
 
 class MoE(torch.nn.Module):
     """deneme/moe2 (belge 107): DeepSeekMoE.  `shared` ortak uzman + `experts` yonlendirilen uzman, hepsi `width` noron
     (hidden / (topk + shared): token basina hesap yogun MLP'ye esit).  Yonlendirici sigmoid, ilk topk (sapma yalniz secimde),
     agirlik secilenler icinde normalize x topk (sabit std ilk agirlikta cikis varyansi yogunla ayni).  Token dusurme yok:
-    uzmana gore sirala -> grouped GEMM -> geri dizip agirlikli topla.  Yuk dengesi yardimci kayipsiz: egitimde `load`
+    uzmana gore sirala -> uzman basina matmul (ozel operator) -> geri dizip agirlikli topla; uretimde kucuk N butun uzmanlar.  Yuk dengesi yardimci kayipsiz: egitimde `load`
     sayilir (egitim kipi + gradyan), adim sonunda moe_balance sapmayi gunceller."""
 
     def __init__(self, d, hidden, experts, topk, shared=1):
@@ -336,22 +341,36 @@ class MoE(torch.nn.Module):
         p = s.gather(-1, idx)
         return idx, p / p.sum(-1, keepdim=True) * self.scale
 
+    def _mm_dtype(self, x):
+        return torch.get_autocast_dtype(x.device.type) if torch.is_autocast_enabled(x.device.type) else x.dtype
+
+    def _all_experts(self, x, idx, p):
+        """Kucuk N (uretim): butun uzmanlar, secilenler toplanir (senkron yok)."""
+        dt, w = self._mm_dtype(x), self.width
+        hh = torch.einsum("nd,eod->eno", x.to(dt), self.w_gate_up.to(dt))
+        ya = torch.einsum("enw,edw->end", F.silu(hh[..., :w]) * hh[..., w:], self.w_down.to(dt))   # (E, N, d)
+        rows = torch.arange(x.shape[0], device=x.device)[:, None]
+        return (ya[idx, rows] * p.unsqueeze(-1).to(ya.dtype)).sum(1)
+
     def forward(self, h):
         B, T, d = h.shape
         N, k = B * T, self.k
         x = h.reshape(N, d)
         idx, p = self.route(x)
         flat = idx.reshape(-1)
-        order = flat.argsort(stable=True)
         cnt = torch.zeros(self.n, dtype=torch.int32, device=x.device).scatter_add_(
             0, flat, torch.ones_like(flat, dtype=torch.int32))
         if self.training and torch.is_grad_enabled():                    # egitim adimi (sinav / uretim sayilmaz)
             self.load.add_(cnt)
-        offs = cnt.cumsum(0, dtype=torch.int32)
-        g, u = _expert_mm(x[order // k], self.w_gate_up, offs).chunk(2, -1)
-        y = _expert_mm(F.silu(g) * u, self.w_down, offs)
-        inv = torch.empty_like(order).scatter_(0, order, torch.arange(N * k, device=x.device))
-        y = (y[inv].view(N, k, d) * p.unsqueeze(-1).to(y.dtype)).sum(1)
+        if N <= MOE_DENSE_N and not torch.is_grad_enabled():
+            y = self._all_experts(x, idx, p)
+        else:
+            dt = self._mm_dtype(x)
+            order = flat.argsort(stable=True)
+            ys, _ = _moe_experts(x[order // k].to(dt), self.w_gate_up.to(dt), self.w_down.to(dt),
+                                 cnt.cumsum(0, dtype=torch.int32))
+            inv = torch.empty_like(order).scatter_(0, order, torch.arange(N * k, device=x.device))
+            y = (ys[inv].view(N, k, d) * p.unsqueeze(-1).to(ys.dtype)).sum(1)
         if self.n_shared:
             g, u = self.shared_gate_up(x).chunk(2, -1)
             y = y + self.shared_down(F.silu(g) * u)
