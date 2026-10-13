@@ -410,8 +410,10 @@ class MoE(torch.nn.Module):
             xb = x.to(dt)                                                # bf16 once (fp32 dagitma / gradyani yok)
             sei, ssi, eo = _sm_sort(idx, self.n)
             hh = _sm_linear(xb, self.w_gate_up.to(dt).permute(0, 2, 1), k, sei, ssi, eo, grouped_out=True)
-            y = _sm_linear(F.silu(hh[:, :w]) * hh[:, w:], self.w_down.to(dt).permute(0, 2, 1), 1, sei, ssi, eo,
-                           grouped_in=True, gates=p.to(dt))
+            ys = _sm_linear(F.silu(hh[:, :w]) * hh[:, w:], self.w_down.to(dt).permute(0, 2, 1), 1, sei, ssi, eo,
+                            grouped_in=True)                             # (N k, d) token sirasinda
+            y = (ys.view(N, k, d) * p.unsqueeze(-1).to(dt)).sum(1)       # kapi toplami tek eleman cekirdegi (ScatterMoE'nin
+                                                                         # token basina bmm'i 1,9 ms / katman, 14 Ekim)
         else:
             dt = self._mm_dtype(x)
             order = flat.argsort(stable=True)

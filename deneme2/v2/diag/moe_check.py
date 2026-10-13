@@ -58,6 +58,7 @@ def main(argv=None):
     ap.add_argument("--rows", type=int, default=32)
     ap.add_argument("--reps", type=int, default=20)
     ap.add_argument("--profile", type=int, default=0, help="1: MoE ileri + geri cekirdek dokumu (3 adim)")
+    ap.add_argument("--opt", type=int, default=1, help="1: katman basina NorMuon adimi ms (MoE / yogun agirliklar)")
     a = ap.parse_args(argv)
     assert torch.cuda.is_available(), "GPU YOK"
     import torch._inductor.config as ic
@@ -125,6 +126,17 @@ def main(argv=None):
         print("profil (adim basina GPU %.2f ms; duvar MoE %.2f ms -> bosluk ~%.2f ms):" % (tot, t_m, t_m - tot), flush=True)
         for e in sorted(ev, key=lambda e: -e.self_device_time_total)[:18]:
             print("  %7.3f ms  x%-4d %s" % (e.self_device_time_total / 3 / 1000, e.count // 3, e.key[:110]), flush=True)
+    if a.opt:                                                           # optimizer payi (egitimle ayni NorMuon ayari)
+        import recipe as R
+        def opt_ms(mod):
+            ps = [p_ for p_ in mod.parameters() if p_.dim() in (2, 3)]
+            for p_ in ps:
+                p_.grad = torch.randn_like(p_)
+            o = R.NorMuon(ps, lr=1e-3, weight_decay=0.1, **TR.MUON)
+            return timed(lambda: o.step(), max(5, a.reps // 2))
+        o_m, o_d = opt_ms(m), opt_ms(dense)
+        print("NorMuon adimi ms (katman basina): MoE %.2f | yogun %.2f | fark %+.2f (4 G katmani %+.1f ms / adim)"
+              % (o_m, o_d, o_m - o_d, 4 * (o_m - o_d)), flush=True)
     ok = n_sync <= 2 and d_y < 2e-2 and max(d_g.values()) < 5e-2
     print("SONUC: %s" % ("GECTI" if ok else "KALDI"), flush=True)
     print("MOE_CHECK_BITTI", flush=True)
