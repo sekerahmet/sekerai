@@ -151,10 +151,11 @@ def _decay_start(total):
     return total - round(DECAY * total)
 
 
-def _schedule(train, data_dir, seed, epochs, steps, carry_group=0):
+def _schedule(train, data_dir, seed, epochs, steps, carry_group=0, plan_file=None):
     """-> (epok planlari [(row_offsets, row_stories)], epok basina adim, row_len, toplam adim).  steps verilirse toplam o
-    (gerektigi kadar epok), yoksa epochs epok.  carry_group: her epok data.carry_pack_plan (dosyasiz)."""
-    f = np.load(os.path.join(data_dir, "train_pack_plan_e1.npz"))
+    (gerektigi kadar epok), yoksa epochs epok.  carry_group: her epok data.carry_pack_plan (dosyasiz).  plan_file (deneme/secim):
+    epok 1 plani bu dosyadan (secilmis hikayeler)."""
+    f = np.load(plan_file or os.path.join(data_dir, "train_pack_plan_e1.npz"))
     row_len = int(f["row_len"])
     lengths = train.lengths()
     plans, per = [], []
@@ -703,6 +704,8 @@ def _args(argv):
                     help="Model Z3 (G'li Model Z'de varsayilan 1): kimse Z okumaz (yerel: kendi cumlesi + BOS, G: belge token'lari + "
                          "BOS); 0 Model Z2 (Z'li)")
     ap.add_argument("--pmi_init", default=None, help="E baslangici PMI SVD'siyle: auto (varsayilan, <data>/pmi_k5_r<d>.npz) | none | npz")
+    ap.add_argument("--pack_plan", default=None,
+                    help="deneme/secim: epok 1 plani bu npz'den (secilmis hikayeler; row_offsets, row_stories, seed 0, epoch 1, row_len)")
     ap.add_argument("--grad_share", default=None, help="E gradyani PMI komsularina: auto (varsayilan) | none | npz")
     ap.add_argument("--grad_share_beta", default=None, choices=("fixed1000", "needtrust"),
                     help="kelime pay orani: needtrust (varsayilan; ihtiyac x guven, olcek medyan sayim) | fixed1000")
@@ -874,7 +877,12 @@ def main(argv=None):
     valid = D.TokenStories(stream, args.data, "valid")
     if args.carry_group and train.continues is None:
         sys.exit("DUR: --carry_group: veri parcali degil (train_story_continues.npy yok)")
-    plans, per_epoch, row_len, total = _schedule(train, args.data, args.seed, args.epochs, args.steps, args.carry_group)
+    if args.pack_plan and (args.carry_group or args.epochs != 1 or args.steps):
+        sys.exit("DUR: --pack_plan yalniz 1 epok, --steps ve carry olmadan (deneme/secim)")
+    plans, per_epoch, row_len, total = _schedule(train, args.data, args.seed, args.epochs, args.steps, args.carry_group,
+                                                 args.pack_plan)
+    if args.pack_plan:
+        log("deneme/secim: epok 1 plani %s (%d satir, %d hikaye)" % (args.pack_plan, len(plans[0][0]) - 1, len(plans[0][1])))
     carry, m_max = None, 0
     if args.carry_group:                                                 # grup sirasi, bellek boyu (BOS + onceki Z'ler)
         cont_ = np.asarray(train.continues, bool)
