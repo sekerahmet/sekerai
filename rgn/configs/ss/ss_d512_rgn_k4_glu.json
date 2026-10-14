@@ -1,0 +1,8 @@
+{
+  "extends": "ss_d512_rgn_k4.json",
+  "name": "ss_d512_rgn_k4_glu",
+  "notes": "MLP karşılaştırması (k = 4 çekim dikkati): cebirsel GLU: W2 [G σ_a(G) ⊙ U]. Tahmin sırası (15 Ekim): swiglu ≈ glu > rglu > rational",
+  "model": {
+    "mlp": "glu"
+  }
+}

@@ -9,7 +9,7 @@ from rgn.model import RGNModel
 
 VARIANTS = [dict(attn="rgn", pos="rope", mlp="rational", sharpness=4)] + [dict(attn="rgn", pos=p, mlp=m, power=pw)
             for p, m, pw in itertools.product(("additive", "alibi", "rope", "rope+alibi", "none"),
-                                              ("rational", "glu", "swiglu"), (1, 2))]
+                                              ("rational", "rglu", "glu", "swiglu"), (1, 2))]
 VARIANTS += [dict(attn="softmax", pos="rope", mlp=m, attn_impl="auto") for m in ("rational", "swiglu")]
 
 

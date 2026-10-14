@@ -1,6 +1,7 @@
-"""MLP: rasyonel MLP (ana), cebirsel GLU (alternatif), SwiGLU (karşılaştırma tabanı).
+"""MLP: rasyonel MLP, rasyonel kapı (rglu), cebirsel GLU, SwiGLU (karşılaştırma tabanı).
 
-Üçü de ~8D² parametre: rasyonel D×4D + 4D×D; GLU / SwiGLU 3 × D × 8D/3.
+Hepsi ~8D² parametre: rasyonel D×4D + 4D×D; kapılılar 3 × D × 8D/3.
+Ölçüldü (SS, 1000. adım, softmax dikkat): rasyonel MLP SwiGLU'dan +0,10 kayıp — kapısız ve doyan (|u| > 3 %10–18).
 """
 import torch
 import torch.nn as nn
@@ -31,11 +32,14 @@ def algebraic_sigmoid(u):
 
 
 class GatedMLP(nn.Module):
-    """kind="glu": W_2 [(G σ_a(G)) ⊙ U] (cebirsel GLU) | kind="swiglu": W_2 [SiLU(G) ⊙ U] (karşılaştırma tabanı)."""
+    """Kapılı MLP: W_2 [f(G) ⊙ U].
+        kind="rglu"   f(G) = G / sqrt(1 + G²)   rasyonel kapı (rasyonel MLP'nin fonksiyonu kapı olarak; çıktı U ile sınırsız)
+        kind="glu"    f(G) = G σ_a(G)           cebirsel GLU (SwiGLU'nun üstel olmayan karşılığı)
+        kind="swiglu" f(G) = SiLU(G)            karşılaştırma tabanı"""
 
     def __init__(self, d, ff, kind, bias=True):
         super().__init__()
-        assert kind in ("glu", "swiglu")
+        assert kind in ("rglu", "glu", "swiglu")
         self.kind = kind
         self.a = nn.Linear(d, 2 * ff, bias=bias)
         self.c = nn.Linear(ff, d, bias=bias)
@@ -43,7 +47,15 @@ class GatedMLP(nn.Module):
 
     def forward(self, x):
         g, up = self.a(x).chunk(2, dim=-1)
-        act = g * algebraic_sigmoid(g) if self.kind == "glu" else F.silu(g)
+        if self.track:
+            gd = g.detach().float()
+            self.stats = {"u_std": gd.std().item(), "sat_frac": (gd.abs() > 3).float().mean().item()}
+        if self.kind == "rglu":
+            act = g * torch.rsqrt(1.0 + g * g)
+        elif self.kind == "glu":
+            act = g * algebraic_sigmoid(g)
+        else:
+            act = F.silu(g)
         return self.c(act * up)
 
 

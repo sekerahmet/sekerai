@@ -15,7 +15,7 @@ from pathlib import Path
 ATTN = ("rgn", "softmax")
 ATTN_IMPL = ("auto", "dense", "flex", "sdpa")
 POS = ("rope", "alibi", "additive", "rope+alibi", "none")
-MLP = ("rational", "glu", "swiglu")
+MLP = ("rational", "rglu", "glu", "swiglu")
 OPTIMIZERS = ("adamw", "muon", "normuon")
 SCHEDULES = ("wsd", "cosine", "constant")
 
@@ -46,7 +46,7 @@ class ModelConfig:
     gamma_min: float = 1.0             # γ = γ_min + γ̂²
     learn_gamma: bool = True
     beta_range: tuple = (1.0, 1.0 / 65536)  # β başlangıcı (additive / alibi), head başına geometrik (azalan)
-    mlp: str = "rational"              # rational: W2 u/sqrt(1+u²) | glu: cebirsel GLU | swiglu: karşılaştırma tabanı
+    mlp: str = "rational"              # rational: W2 u/sqrt(1+u²) | rglu: W2 [G/sqrt(1+G²) ⊙ U] | glu: cebirsel GLU | swiglu: taban
     mlp_bias: bool = True
     init_std: float = 0.02
 
