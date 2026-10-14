@@ -32,14 +32,15 @@ def _ce_sum(h, weight, target):
     return F.cross_entropy((h @ weight.T).float(), target, reduction="sum")
 
 
-def lm_loss(h, weight, target, chunk=8192):
-    """Ortalama cross-entropy; logit'ler parça parça (ve eğitimde checkpoint ile) hesaplanır: V × N logit matrisi tümüyle
-    bellekte tutulmaz."""
+def lm_loss(h, weight, target, chunk=8192, use_checkpoint=True):
+    """Ortalama cross-entropy; logit'ler parça parça hesaplanır.  use_checkpoint: logit'ler geri geçişte yeniden hesaplanır
+    (V × N logit matrisi bellekte tutulmaz; bedeli LM head çarpımının bir kez daha yapılması)."""
     h, target = h.reshape(-1, h.shape[-1]), target.reshape(-1)
     total = h.new_zeros((), dtype=torch.float32)
     for i in range(0, target.numel(), chunk):
         args = (h[i:i + chunk], weight, target[i:i + chunk])
-        total = total + (checkpoint(_ce_sum, *args, use_reentrant=False) if torch.is_grad_enabled() else _ce_sum(*args))
+        use = use_checkpoint and torch.is_grad_enabled()
+        total = total + (checkpoint(_ce_sum, *args, use_reentrant=False) if use else _ce_sum(*args))
     return total / target.numel()
 
 
@@ -54,6 +55,7 @@ class RGNModel(nn.Module):
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self.lm_head.weight = self.embed.weight          # W_vocab = W_embᵀ
         self.use_rope = cfg.pos in ("rope", "rope+alibi")
+        self.loss_checkpoint = True                     # trainer TrainConfig.loss_checkpoint ile ayarlar
         if self.use_rope:
             cos, sin = rope_tables(cfg.max_len, cfg.d_model // cfg.n_heads, cfg.rope_base)
             self.register_buffer("rope_cos", cos, persistent=False)
@@ -92,7 +94,7 @@ class RGNModel(nn.Module):
         h = self.hidden(idx)
         if targets is None:
             return self.lm_head(h)
-        return lm_loss(h, self.lm_head.weight, targets)
+        return lm_loss(h, self.lm_head.weight, targets, use_checkpoint=self.loss_checkpoint)
 
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=0.0, eos_id=None, generator=None):

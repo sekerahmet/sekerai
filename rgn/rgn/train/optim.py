@@ -33,30 +33,49 @@ class Muon(torch.optim.Optimizer):
         super().__init__(params, dict(lr=lr, momentum=momentum, nesterov=nesterov, weight_decay=weight_decay,
                                       ns_steps=ns_steps, normuon=normuon, beta2=beta2))
 
+    _ns_compiled = None
+
+    def _ns(self, X, steps):
+        """Yığın (n, m, k) Newton–Schulz; CUDA'da derlenmiş (biçim başına bir kez)."""
+        if X.is_cuda:
+            if Muon._ns_compiled is None:
+                Muon._ns_compiled = torch.compile(newton_schulz, dynamic=False)
+            return Muon._ns_compiled(X, steps)
+        return newton_schulz(X, steps)
+
     @torch.no_grad()
     def step(self):
         for g in self.param_groups:
-            for p in g["params"]:
-                if p.grad is None:
-                    continue
-                st = self.state[p]
-                if "m" not in st:
-                    st["m"] = torch.zeros_like(p, dtype=torch.float32)
-                grad = p.grad.float()
-                st["m"].lerp_(grad, 1 - g["momentum"])
-                upd = grad.lerp(st["m"], g["momentum"]) if g["nesterov"] else st["m"]
-                O = newton_schulz(upd, g["ns_steps"]).float()
-                rows, cols = p.shape
+            ps = [p for p in g["params"] if p.grad is not None]
+            if not ps:
+                continue
+            for p in ps:
+                if "m" not in self.state[p]:
+                    self.state[p]["m"] = torch.zeros_like(p, dtype=torch.float32)
+            grads = [p.grad.float() for p in ps]
+            bufs = [self.state[p]["m"] for p in ps]
+            torch._foreach_lerp_(bufs, grads, 1 - g["momentum"])
+            upds = torch._foreach_lerp(grads, bufs, g["momentum"]) if g["nesterov"] else bufs
+            groups = {}
+            for i, p in enumerate(ps):
+                groups.setdefault(tuple(p.shape), []).append(i)
+            for (rows, cols), idx in groups.items():              # aynı biçimli matrisler tek yığında
+                O = self._ns(torch.stack([upds[i] for i in idx]), g["ns_steps"]).float()
                 if g["normuon"]:
-                    if "v" not in st:
-                        st["v"] = torch.zeros(rows, 1, device=p.device)
-                    st["v"].lerp_(O.square().mean(-1, keepdim=True), 1 - g["beta2"])
-                    O = O / (st["v"].sqrt() + 1e-10)
-                    O = O * (0.2 * math.sqrt(rows * cols) / O.norm().clamp_min(1e-10))
+                    for i in idx:
+                        self.state[ps[i]].setdefault("v", torch.zeros(rows, 1, device=ps[i].device))
+                    V = torch.stack([self.state[ps[i]]["v"] for i in idx])
+                    V.lerp_(O.square().mean(-1, keepdim=True), 1 - g["beta2"])
+                    for j, i in enumerate(idx):
+                        self.state[ps[i]]["v"].copy_(V[j])
+                    O = O / (V.sqrt() + 1e-10)
+                    O = O * (0.2 * math.sqrt(rows * cols) / O.flatten(1).norm(dim=1).clamp_min(1e-10))[:, None, None]
                 else:
                     O = O * (0.2 * math.sqrt(max(rows, cols)))
-                p.mul_(1 - g["lr"] * g["weight_decay"])
-                p.add_(O.to(p.dtype), alpha=-g["lr"])
+                for j, i in enumerate(idx):
+                    p = ps[i]
+                    p.mul_(1 - g["lr"] * g["weight_decay"])
+                    p.add_(O[j].to(p.dtype), alpha=-g["lr"])
 
 
 class CombinedOptimizer:

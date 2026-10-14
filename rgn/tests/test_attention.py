@@ -64,6 +64,15 @@ def test_learnable_sharpness_per_head():
         assert torch.allclose(a[:, h:h + 1], b, atol=1e-12), h
 
 
+def test_av_bf16_close_cuda():
+    """w·V bf16 seçeneği fp32 sonuca yakın (w ∈ [0, 1], bağıl hata ~1e-2'nin altında)."""
+    require_cuda()
+    q, k, v, gamma, beta = _inputs(N=512, dh=64, dtype=torch.float32, device="cuda")
+    a = rgn_dense(q, k, v, gamma, beta, "rope", 1, 4)
+    b = rgn_dense(q, k, v, gamma, beta, "rope", 1, 4, av_bf16=True)
+    assert ((a - b).abs().max() / a.abs().max()).item() < 2e-2
+
+
 def test_weights_sum_to_one_and_causal():
     q, k, v, gamma, beta = _inputs()
     for pos in ("additive", "alibi", "rope", "none"):

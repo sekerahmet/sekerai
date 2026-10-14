@@ -77,6 +77,7 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
 
     train_s, valid_s, bytes_per_token = load_streams(dc)
     model = RGNModel(cfg.model).to(device)
+    model.loss_checkpoint = tc.loss_checkpoint
     n_params = model.num_params()
     T = dc.seq_len
     tokens_per_step = tc.batch_size * T

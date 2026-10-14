@@ -33,6 +33,7 @@ class ModelConfig:
     dense_max_len: int = 1024          # auto'da dense'in üst sınırı (N×N bellek); ölçüldü: SS d512 N 1024'te dense 299 ms/adım,
                                        # flex 3800 ms/adım (flex, öğrenilebilir γ/β gradyanını yavaş yoldan topluyor)
     rgn_fp32: bool = True              # rgn dikkatinde q, k, v fp32 (yakın eşleşmede 2 - 2 q·k iptal hatası; doküman 3.5)
+    rgn_av_bf16: bool = False          # dense yolda w·V çarpımı bf16 (CUDA; q·kᵀ fp32 kalır) — hız seçeneği
     pos: str = "rope"                  # rope (varsayılan, kullanıcı 15 Ekim) | additive: payda + β(i-j) | alibi: payda × (1 + β(i-j))
                                        # | rope+alibi | none
     rope_base: float = 10000.0
@@ -111,6 +112,7 @@ class TrainConfig:
     sample_tokens: int = 64            # bitişte örnek üretim uzunluğu (0: kapalı)
     probe_tokens: int = 48             # her değerlendirmede 2 istemle greedy devam (nitel kontrol; 0: kapalı)
     profile_after: bool = True         # bitişte hız profili (runs/<koşu>/speed.json)
+    loss_checkpoint: bool = False      # kayıpta logit'leri geri geçişte yeniden hesapla (bellek az, LM head 4 geçiş yerine 3)
 
 
 @dataclass

@@ -44,9 +44,11 @@ def denominator(s, gamma, beta, k, pos, power):
     return den
 
 
-def rgn_dense(q, k, v, gamma, beta, pos, power, sharpness=1, return_weights=False):
+def rgn_dense(q, k, v, gamma, beta, pos, power, sharpness=1, return_weights=False, av_bf16=False):
     """q (B, H, N, dh), k / v (B, Hkv, N, dh) -> O (B, H, N, dh) [, α (B, H, N, N)].
-    sharpness: keskinlik üssü k — sayı (tüm head'ler) ya da (H,) tensör (head başına, öğrenilebilir)."""
+    sharpness: keskinlik üssü k — sayı (tüm head'ler) ya da (H,) tensör (head başına, öğrenilebilir).
+    av_bf16: w·V çarpımı bf16 Tensor Core'da (w ∈ [0, 1]; FlashAttention'daki P·V gibi).  q·kᵀ fp32 kalır (yakın
+    eşleşmede 2 - 2 q·k iptal hatası, doküman 3.5)."""
     H, N = q.shape[1], q.shape[2]
     if k.shape[1] != H:
         rep = H // k.shape[1]
@@ -60,7 +62,10 @@ def rgn_dense(q, k, v, gamma, beta, pos, power, sharpness=1, return_weights=Fals
     w = (1.0 / den) if (not torch.is_tensor(K) and K == 1) else den.pow(-K)
     w = w.masked_fill(rel < 0, 0.0)
     z = w.sum(dim=-1, keepdim=True).clamp_min(1e-30)    # köşegen > 0; k <= 8'de alt taşma yok, yine de 0/0'a karşı
-    out = (w @ v) / z
+    if av_bf16 and not return_weights:
+        out = (w.to(torch.bfloat16) @ v.to(torch.bfloat16)).float() / z
+    else:
+        out = (w @ v) / z
     return (out, w / z) if return_weights else out
 
 
@@ -183,7 +188,7 @@ class Attention(nn.Module):
         with ctx:
             if impl == "flex":
                 return rgn_flex(q, k, v, *args)
-            return rgn_dense(q, k, v, *args)
+            return rgn_dense(q, k, v, *args, av_bf16=self.cfg.rgn_av_bf16 and q.is_cuda)
 
     def forward(self, x, rope=None):
         B, N, D = x.shape
