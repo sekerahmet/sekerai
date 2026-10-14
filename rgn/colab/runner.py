@@ -94,11 +94,14 @@ def arkaplan(name, cmd):
 
 
 def kuyruk(configs, name="kuyruk", resume=True):
-    """Yapılandırmaları sırayla, tek arka plan sürecinde çalıştır (biri bitince ya da hata verince sonraki)."""
-    steps = " ; ".join("%s scripts/train.py --config %s %s" % (shlex.quote(sys.executable), shlex.quote(c),
-                                                                "--resume" if resume else "") for c in configs)
+    """Yapılandırmaları sırayla, tek arka plan sürecinde çalıştır (biri bitince ya da hata verince sonraki).  Öğe ezme
+    alabilir: "configs/ss/x.json train.stop_step=2000 model.sharpness=4"."""
+    items = [c.split() for c in configs]
+    steps = " ; ".join("%s scripts/train.py --config %s %s %s" % (
+        shlex.quote(sys.executable), shlex.quote(it[0]), " ".join("--set %s" % shlex.quote(x) for x in it[1:]),
+        "--resume" if resume else "") for it in items)
     j = _jobs()
-    j.setdefault("_kuyruk_icerik", {})[name] = [load_config(CODE / c).name for c in configs]
+    j.setdefault("_kuyruk_icerik", {})[name] = [load_config(CODE / it[0], it[1:]).name for it in items]
     _save_jobs(j)
     return _spawn(name, steps, runs_dir() / ("_%s.log" % name))
 

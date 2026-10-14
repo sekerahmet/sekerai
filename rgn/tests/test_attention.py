@@ -32,6 +32,24 @@ def test_formula_matches_explicit_loop():
                 assert torch.allclose(out[b, h, i], o, atol=1e-10)
 
 
+def test_sharpness_formula_and_k1_identity():
+    """k = 1 eski formülle bit düzeyinde aynı; k = 4 açık formül (1 + γ d / 4)^-4 ile aynı; k büyüdükçe e^(-γd)'ye yaklaşır."""
+    q, k, v, gamma, beta = _inputs()
+    a1 = rgn_dense(q, k, v, gamma, beta, "rope", 1, 1, return_weights=True)[1]
+    a0 = rgn_dense(q, k, v, gamma, beta, "rope", 1, return_weights=True)[1]
+    assert torch.equal(a0, a1)
+    rep = q.shape[1] // k.shape[1]
+    kk = k.repeat_interleave(rep, 1)
+    d = (2 - 2 * q @ kk.transpose(-2, -1)).clamp_min(0)
+    small = geometric(0.5, 2.0, gamma.numel()).to(gamma.dtype)          # yakınsama (göreli hata ~ (γd)² / 2k) için
+    for K, g, ref_fn in ((4, gamma, lambda g: (1 + g * d / 4) ** -4), (1024, small, lambda g: torch.exp(-g * d))):
+        w = ref_fn(g.view(1, -1, 1, 1)).tril()
+        ref = w / w.sum(-1, keepdim=True)
+        got = rgn_dense(q, k, v, g, beta, "rope", 1, K, return_weights=True)[1]
+        tol = 1e-10 if K == 4 else 1e-2
+        assert torch.allclose(got, ref, atol=tol), (K, (got - ref).abs().max().item())
+
+
 def test_weights_sum_to_one_and_causal():
     q, k, v, gamma, beta = _inputs()
     for pos in ("additive", "alibi", "rope", "none"):
@@ -83,10 +101,10 @@ def test_backward_formulas_match_autograd():
 def test_flex_matches_dense_cuda():
     require_cuda()
     q, k, v, gamma, beta = _inputs(B=2, H=4, Hkv=2, N=256, dh=64, dtype=torch.float32, device="cuda")
-    for pos in ("additive", "alibi", "none"):
-        a = rgn_dense(q, k, v, gamma, beta, pos, 1)
-        b = rgn_flex(q, k, v, gamma, beta, pos, 1)
-        assert torch.allclose(a, b, atol=2e-4, rtol=1e-3), (pos, (a - b).abs().max().item())
+    for pos, K in (("additive", 1), ("alibi", 1), ("none", 1), ("none", 4), ("additive", 2)):
+        a = rgn_dense(q, k, v, gamma, beta, pos, 1, K)
+        b = rgn_flex(q, k, v, gamma, beta, pos, 1, K)
+        assert torch.allclose(a, b, atol=2e-4, rtol=1e-3), (pos, K, (a - b).abs().max().item())
 
 
 def test_flex_gradients_reach_gamma_beta_cuda():

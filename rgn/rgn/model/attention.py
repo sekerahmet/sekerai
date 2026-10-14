@@ -7,6 +7,10 @@
           = (1 + γ_h d^p)(1 + β_h k)                         pos: alibi | rope+alibi   (çarpımsal)
     w_ij = 1 / payda,   O_i = Σ_j w_ij V_j / Σ_j w_ij        (maksimum takibi yok)
 
+Keskinlik üssü k (sharpness): w_ij = payda(γ/k)^(-k) = (1 + γ d / k)^(-k).  k = 1 ters kare çekim; k → ∞ iken w → e^(-γd)
+(Cauchy -> Gauss / softmax çekirdeği).  Tam eşleşmedeki eğim k'den bağımsız (-γ); kuyruk inceldikçe en iyi / ilgisiz oranı
+(1 + 2γ/k)^k olur (k = 1'de 1 + 2γ).  Ölçüldü (SS, 15 Ekim): k = 1'de dikkat top1 0,047, transformer 0,263.
+
 Uygulamalar:
     dense  başvuru: N×N açık hesap (CPU, testler, teşhis).  Bellek O(N²).
     flex   FlexAttention, score_mod = -log(payda): softmax(-log payda) = w / Σw birebir aynı ağırlık.  CUDA'da birleşik
@@ -40,8 +44,8 @@ def denominator(s, gamma, beta, k, pos, power):
     return den
 
 
-def rgn_dense(q, k, v, gamma, beta, pos, power, return_weights=False):
-    """q (B, H, N, dh), k / v (B, Hkv, N, dh) -> O (B, H, N, dh) [, α (B, H, N, N)]."""
+def rgn_dense(q, k, v, gamma, beta, pos, power, sharpness=1, return_weights=False):
+    """q (B, H, N, dh), k / v (B, Hkv, N, dh) -> O (B, H, N, dh) [, α (B, H, N, N)].  sharpness: keskinlik üssü k."""
     H, N = q.shape[1], q.shape[2]
     if k.shape[1] != H:
         rep = H // k.shape[1]
@@ -50,8 +54,9 @@ def rgn_dense(q, k, v, gamma, beta, pos, power, return_weights=False):
     idx = torch.arange(N, device=q.device)
     rel = idx[:, None] - idx[None, :]
     beta_b = None if beta is None else beta.view(1, -1, 1, 1)
-    den = denominator(s, gamma.view(1, -1, 1, 1), beta_b, rel.clamp_min(0).to(s.dtype), pos, power)
-    w = (1.0 / den).masked_fill(rel < 0, 0.0)
+    den = denominator(s, gamma.view(1, -1, 1, 1) / sharpness, beta_b, rel.clamp_min(0).to(s.dtype), pos, power)
+    w = (1.0 / den) if sharpness == 1 else den.pow(-sharpness)
+    w = w.masked_fill(rel < 0, 0.0)
     z = w.sum(dim=-1, keepdim=True)                     # köşegen > 0 olduğundan z > 0
     out = (w @ v) / z
     return (out, w / z) if return_weights else out
@@ -83,13 +88,14 @@ def _causal_block_mask(n, device):
     return _FLEX[key]
 
 
-def rgn_flex(q, k, v, gamma, beta, pos, power):
+def rgn_flex(q, k, v, gamma, beta, pos, power, sharpness=1):
     """FlexAttention yolu (CUDA).  γ ve β score_mod'a yakalanan tensörlerdir; gradyan alırlar (PyTorch >= 2.6)."""
     def score_mod(score, b, h, q_idx, kv_idx):
         # k = i - j 0'da kırpılır (dense ile aynı): maskeli konumlarda (j > i) payda 0 / negatif olmasın — flex'in geri
         # geçişi yakalanan γ / β'nın gradyanını maskeden bağımsız topladığı için aksi halde NaN üretir.
         k = torch.clamp(q_idx - kv_idx, min=0)
-        return -torch.log(denominator(score, gamma[h], None if beta is None else beta[h], k, pos, power))
+        den = denominator(score, gamma[h] / sharpness, None if beta is None else beta[h], k, pos, power)
+        return -sharpness * torch.log(den)
 
     return _flex_attention()(q, k, v, score_mod=score_mod, block_mask=_causal_block_mask(q.shape[2], q.device),
                              scale=1.0, enable_gqa=k.shape[1] != q.shape[1])
@@ -155,7 +161,7 @@ class Attention(nn.Module):
         impl = self.impl(q.device, q.shape[2])
         if impl == "sdpa":
             return F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=self.Hkv != self.H)
-        args = (self.gamma(), self.beta(), self.cfg.pos, self.cfg.power)
+        args = (self.gamma(), self.beta(), self.cfg.pos, self.cfg.power, self.cfg.sharpness)
         ctx = torch.autocast(q.device.type, enabled=False) if self.cfg.rgn_fp32 else contextlib.nullcontext()
         with ctx:
             if impl == "flex":
@@ -175,7 +181,7 @@ class Attention(nn.Module):
         if self.cfg.attn == "rgn":
             with torch.autocast(q.device.type, enabled=False):
                 return rgn_dense(q.float(), k.float(), v.float(), self.gamma(), self.beta(), self.cfg.pos,
-                                 self.cfg.power, return_weights=True)[1]
+                                 self.cfg.power, self.cfg.sharpness, return_weights=True)[1]
         if self.Hkv != self.H:
             k = k.repeat_interleave(self.H // self.Hkv, dim=1)
         s = (q.float() @ k.float().transpose(-2, -1)) / self.dh ** 0.5

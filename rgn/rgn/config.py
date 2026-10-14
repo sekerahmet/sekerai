@@ -37,7 +37,8 @@ class ModelConfig:
                                        # | rope+alibi | none
     rope_base: float = 10000.0
     max_len: int = 4096                # RoPE tablosu boyu
-    power: int = 1                     # çekim üssü p: 1/(1 + γ d^p)
+    power: int = 1                     # uzaklık üssü p: 1/(1 + γ d^p)
+    sharpness: int = 1                 # keskinlik üssü k: (1 + γ d / k)^(-k); k = 1 ters kare, k büyüdükçe e^(-γd)
     gamma_range: tuple = (4.0, 512.0)  # γ başlangıcı, head başına geometrik
     gamma_min: float = 1.0             # γ = γ_min + γ̂²
     learn_gamma: bool = True
@@ -61,6 +62,7 @@ class ModelConfig:
         assert self.d_model % self.n_heads == 0 and self.n_heads % self.n_kv_heads == 0
         assert (self.d_model // self.n_heads) % 2 == 0, "RoPE çift head boyutu ister"
         assert self.power in (1, 2)
+        assert 1 <= self.sharpness <= 16, "keskinlik üssü 1..16"
         assert not (self.attn == "softmax" and self.pos not in ("rope", "none")), "softmax tabanı: pos rope / none"
         assert not (self.attn == "softmax" and self.attn_impl in ("dense", "flex")), "softmax tabanı sdpa ile"
         assert not (self.attn == "rgn" and self.attn_impl == "sdpa"), "rgn dikkati sdpa ile çalışmaz (dense / flex)"
