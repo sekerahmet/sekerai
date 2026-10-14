@@ -176,6 +176,9 @@ def _run_detail(run):
     tr = m.get("train") or []
     if tr and total:
         last = tr[-1]
+        stop = (m.get("start") or [{}])[-1].get("stop_step") or 0
+        if stop:
+            total = min(total, stop)                     # stop_step'te duracak koşu
         frac = last["step"] / total
         ms = statistics.median(r["ms"] for r in tr[-5:])
         L.append("   ilerleme %s %5.1f%%  adım %d/%d  %.0fM token  kalan ~%.0f dk" % (
@@ -218,7 +221,13 @@ def _run_detail(run):
         gam = [x for l in lay for x in (l.get("gamma") or [])]
         if gam:
             s += "  γ ort %.0f [%.0f–%.0f]" % (sum(gam) / len(gam), min(gam), max(gam))
+        ks = [x for l in lay for x in (l.get("sharpness") or [])]
+        if ks and max(ks) - min(ks) > 1e-6:
+            s += "  k ort %.2f [%.2f–%.2f]" % (sum(ks) / len(ks), min(ks), max(ks))
         L.append(s)
+        if ks and max(ks) - min(ks) > 1e-6:
+            L.append("            k (katman: head'ler) " + " | ".join(
+                " ".join("%.1f" % x for x in l["sharpness"]) for l in lay))
         L.append("            katman entropisi " + " ".join("%.2f" % x for x in ent))
     return L
 

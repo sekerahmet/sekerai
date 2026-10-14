@@ -115,7 +115,8 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
     diag_x = val_windows[:4, :-1].to(device)
     eval_batch = max(1, micro)
 
-    log.write(type="start", step=step, total_steps=total_steps, tokens_per_step=tokens_per_step, params=n_params,
+    log.write(type="start", step=step, total_steps=total_steps, stop_step=tc.stop_step, tokens_per_step=tokens_per_step,
+              params=n_params,
               resumed=bool(resume and step), t=time.time())
     mc = cfg.model
     per_epoch = math.ceil(train_s.total / tokens_per_step)

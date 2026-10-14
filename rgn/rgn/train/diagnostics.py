@@ -42,6 +42,8 @@ def diagnose(model, x, ctx):
             layer["gamma"] = blk.attn.gamma().tolist()
             b = blk.attn.beta()
             layer["beta"] = None if b is None else b.tolist()
+            k = blk.attn.sharpness()
+            layer["sharpness"] = k.tolist() if torch.is_tensor(k) else [float(k)] * blk.attn.H
         out["layers"].append(layer)
     model.train(was_training)
     return out

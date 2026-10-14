@@ -38,7 +38,8 @@ def _attn_kernel(attn, B, N, device):
                 else:
                     fn = rgn_flex if attn.impl(device, N) == "flex" else dense
                     o = fn(q, k, v, attn.gamma().detach(), None if attn.beta() is None else attn.beta().detach(),
-                           cfg.pos, cfg.power, cfg.sharpness)
+                           cfg.pos, cfg.power, attn.sharpness().detach() if torch.is_tensor(attn.sharpness())
+                           else attn.sharpness())
             o.float().sum().backward()
             q.grad = k.grad = v.grad = None
         ms, mem = _time(run, warmup=2, iters=5)

@@ -50,6 +50,20 @@ def test_sharpness_formula_and_k1_identity():
         assert torch.allclose(got, ref, atol=tol), (K, (got - ref).abs().max().item())
 
 
+def test_learnable_sharpness_per_head():
+    """Head başına tensör k: tüm head'ler 4 iken sabit k = 4 ile aynı; farklı k'ler head head açık formülle aynı; ρ gradyan alır."""
+    q, k, v, gamma, beta = _inputs()
+    four = torch.full((q.shape[1],), 4.0, dtype=q.dtype)
+    assert torch.allclose(rgn_dense(q, k, v, gamma, beta, "rope", 1, four), rgn_dense(q, k, v, gamma, beta, "rope", 1, 4),
+                          atol=1e-12)
+    ks = torch.tensor([1.0, 2.5, 4.0, 7.5], dtype=q.dtype)
+    a = rgn_dense(q, k, v, gamma, beta, "rope", 1, ks, return_weights=True)[1]
+    for h in range(4):
+        b = rgn_dense(q[:, h:h + 1], k[:, h // 2:h // 2 + 1], v[:, h // 2:h // 2 + 1], gamma[h:h + 1], beta[h:h + 1],
+                      "rope", 1, float(ks[h]), return_weights=True)[1]
+        assert torch.allclose(a[:, h:h + 1], b, atol=1e-12), h
+
+
 def test_weights_sum_to_one_and_causal():
     q, k, v, gamma, beta = _inputs()
     for pos in ("additive", "alibi", "rope", "none"):

@@ -28,6 +28,17 @@ def test_causal_and_finite_gradients():
         assert torch.allclose(logits[:, :-1], m(idx2)[:, :-1], atol=1e-5), ("nedensellik", v)
 
 
+def test_learnable_sharpness_model():
+    m = RGNModel(tiny(sharpness_learn=True, sharpness_init=4.0))
+    for blk in m.blocks:
+        k = blk.attn.sharpness()
+        assert torch.allclose(k, torch.full_like(k, 4.0), atol=1e-5), k
+    idx = torch.randint(0, 97, (2, 16))
+    m(idx, idx).backward()
+    for blk in m.blocks:
+        assert (blk.attn.sharp_rho.grad.abs() > 0).all()
+
+
 def test_gamma_beta_receive_gradient():
     m = RGNModel(tiny(pos="additive"))
     idx = torch.randint(0, 97, (2, 16))
