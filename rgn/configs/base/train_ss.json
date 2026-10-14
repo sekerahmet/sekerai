@@ -2,13 +2,13 @@
   "extends": "rgn_d512.json",
   "data": {
     "dataset": "ss",
-    "seq_len": 1024,
+    "seq_len": 512,
     "eval_tokens": 4194304,
     "final_eval_tokens": 0
   },
   "train": {
-    "batch_size": 64,
-    "micro_batch": 32,
+    "batch_size": 128,
+    "micro_batch": 64,
     "epochs": 1.0,
     "optimizer": "muon",
     "lr": 0.002,
@@ -18,5 +18,6 @@
     "eval_every": 1000,
     "diag_every": 1000,
     "log_every": 50
-  }
+  },
+  "notes": "SS: pencere 512 (hikâye ort. ~290 token), 128 pencere × 512 = 65.536 token/adım. Ölçüldü (Colab, 32k token mikro adım): RGN 105 ms (512) / 140 ms (1024), transformer 69 / 70 ms"
 }
