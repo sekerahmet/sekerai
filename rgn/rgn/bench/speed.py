@@ -89,6 +89,7 @@ def bench_model(configs, steps=10, batch=None, seq_len=None):
         B = batch or (cfg.train.micro_batch or cfg.train.batch_size)
         T = seq_len or cfg.data.seq_len
         model = RGNModel(cfg.model).to(device)
+        model.loss_checkpoint = cfg.train.loss_checkpoint
         opt = build_optimizer(model, cfg.train)
         fwd = torch.compile(model) if (cfg.train.compile and device.type == "cuda") else model
         x = torch.randint(0, cfg.model.vocab_size, (B, T), device=device)
