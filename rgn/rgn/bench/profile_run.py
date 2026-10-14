@@ -1,6 +1,7 @@
 """Koşu sonu hız profili (her eğitimin sonunda trainer çağırır) -> runs/<koşu>/speed.json.
 
-    attention   koşunun dikkat çekirdeği ile softmax (SDPA) aynı boyutta, ileri + geri (ms, GB)
+    attention   koşunun dikkat çekirdeği ile softmax (SDPA) aynı boyutta, ileri + geri (ms, GB) — CUDA'da derlenmiş
+                (eğitimdeki gibi); eager dense ölçümü oranı ~20 kat abartıyordu (ss_smoke, 15 Ekim)
     block       tek blokta dikkat ve MLP alt katmanlarının ileri + geri süresi (pay)
     inference   ileri geçiş (eğitim boyunda) token/s
     generate    önbelleksiz greedy üretim token/s (batch 1, 64 token)
@@ -20,6 +21,7 @@ def _attn_kernel(attn, B, N, device):
     cfg = attn.cfg
     H, Hkv, dh = attn.H, attn.Hkv, attn.dh
     out = {}
+    dense = torch.compile(rgn_dense, dynamic=False) if device.type == "cuda" else rgn_dense
     for kind in ("model", "softmax_sdpa"):
         if kind == "softmax_sdpa" or cfg.attn == "softmax":
             dt = torch.bfloat16 if device.type == "cuda" else torch.float32
@@ -34,7 +36,7 @@ def _attn_kernel(attn, B, N, device):
                 if kind == "softmax_sdpa" or cfg.attn == "softmax":
                     o = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=Hkv != H)
                 else:
-                    fn = rgn_flex if attn.impl(device, N) == "flex" else rgn_dense
+                    fn = rgn_flex if attn.impl(device, N) == "flex" else dense
                     o = fn(q, k, v, attn.gamma().detach(), None if attn.beta() is None else attn.beta().detach(),
                            cfg.pos, cfg.power)
             o.float().sum().backward()
@@ -50,7 +52,9 @@ def _block_split(model, B, N, device, ctx):
     x = torch.randn(B, N, model.cfg.d_model, device=device, requires_grad=True)
     rope = model.rope(N)
     res = {}
-    for name, fn in (("attention", lambda: blk.attn(blk.norm1(x), rope)), ("mlp", lambda: blk.mlp(blk.norm2(x)))):
+    wrap = (lambda f: torch.compile(f, dynamic=False)) if device.type == "cuda" else (lambda f: f)
+    for name, fn in (("attention", wrap(lambda: blk.attn(blk.norm1(x), rope))),
+                     ("mlp", wrap(lambda: blk.mlp(blk.norm2(x))))):
         def run(fn=fn):
             with ctx:
                 y = fn()

@@ -10,6 +10,7 @@ Notebook'tan:
     R.nabiz()                                          # tüm işler: durum, son adım, son değerlendirme, kalan süre
     R.nabiz("ss_smoke", satir=30)                      # tek iş, günlüğün son 30 satırı
     R.kapat("ss_smoke")                                # SIGTERM: checkpoint kaydedip çıkar (sonra kos(..., resume=True))
+    R.sonuc()                                          # biten koşular: sayı + metin + hız
 
 Komut satırından (aynı işlevler):
     python colab/runner.py kos configs/ss/ss_smoke.json
@@ -157,6 +158,32 @@ def nabiz(name=None, satir=0):
             print("\n".join("   | " + l for l in lines))
 
 
+def sonuc(names=None, metin=2, karakter=400):
+    """Biten koşular: sayı (son değerlendirme, hız, bellek) + metin (greedy örnekler) + hız profili özeti."""
+    root = runs_dir()
+    runs = names or sorted(p.parent.name for p in root.glob("*/results.json"))
+    for run in runs:
+        d = root / run
+        if not (d / "results.json").exists():
+            print("%-28s bitmedi — %s" % (run, _run_status(run).strip()))
+            continue
+        r = json.loads((d / "results.json").read_text(encoding="utf-8"))
+        f, m = r["final"], r["config"]["model"]
+        print("\n== %s  (attn=%s pos=%s mlp=%s p=%s, %.1fM)" % (run, m["attn"], m["pos"], m["mlp"], m.get("power", 1),
+                                                              r["params"] / 1e6))
+        print("   kayıp %.4f  ppl %.2f  bpb %s  doğruluk %.4f  |  %s ms/adım  %s tok/s  %.1f GB  |  %.1f dk" % (
+            f["loss"], f["ppl"], "%.4f" % f["bpb"] if f["bpb"] else "-", f["acc"],
+            "%.1f" % r["ms_per_step"] if r["ms_per_step"] else "-",
+            "%.0fk" % (r["tok_per_s"] / 1e3) if r["tok_per_s"] else "-", r["peak_mem_gb"] or 0, r["wall_min"]))
+        sp = (r.get("speed") or {}).get("attention") or {}
+        if "model" in sp:
+            print("   dikkat çekirdeği %.2f ms (softmax %.2f ms, oran %.1f)" % (
+                sp["model"]["ms"], sp["softmax_sdpa"]["ms"], sp["ratio_model_vs_softmax"]))
+        if (d / "samples.json").exists():
+            for s in json.loads((d / "samples.json").read_text(encoding="utf-8"))[:metin]:
+                print("   » %s" % s["text"][:karakter].replace("\n", " "))
+
+
 def kapat(name):
     """SIGTERM gönder: eğitim checkpoint kaydedip çıkar.  Kuyruk adı verilirse kuyruk süreci grubu durur."""
     job = _jobs().get(name)
@@ -179,7 +206,9 @@ if __name__ == "__main__":
         nabiz(*(rest[:1]), satir=int(rest[1]) if len(rest) > 1 else 0)
     elif cmd == "kapat":
         kapat(rest[0])
+    elif cmd == "sonuc":
+        sonuc(rest or None)
     elif cmd == "hazirla":
         hazirla(*rest)
     else:
-        sys.exit("komutlar: hazirla | kos <config> [ezmeler] | kuyruk <config>... | arkaplan <ad> <komut> | nabiz [ad [satır]] | kapat <ad>")
+        sys.exit("komutlar: hazirla | kos <config> [ezmeler] | kuyruk <config>... | arkaplan <ad> <komut> | nabiz [ad [satır]] | sonuc [ad...] | kapat <ad>")

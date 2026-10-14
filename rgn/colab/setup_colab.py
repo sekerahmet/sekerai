@@ -7,6 +7,7 @@ Notebook'tan:
 Drive bağlama notebook hücresinde yapılmalıdır (from google.colab import drive; drive.mount("/content/drive")).
 """
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,7 @@ def main():
     ap.add_argument("--branch", default="main")
     ap.add_argument("--subdir", default="", help="depo içinde RGN klasörü (örneğin rgn)")
     args = ap.parse_args()
+    os.chdir("/content")                      # çalışma klasörü /content/RGN ise silinince git "getcwd" hatası verir
     assert DRIVE.is_dir(), "Drive bağlı değil: önce drive.mount('/content/drive')"
     if TARGET.exists():
         shutil.rmtree(TARGET)
