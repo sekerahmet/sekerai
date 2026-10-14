@@ -30,7 +30,7 @@ from rgn.paths import runs_dir
 from rgn.train import checkpoint
 from rgn.train.diagnostics import diagnose, summary_line
 from rgn.train.evaluate import evaluate, probes, samples
-from rgn.train.optim import build_optimizer
+from rgn.train.optim import build_optimizer, param_groups
 from rgn.train.schedule import lr_factor
 
 
@@ -89,6 +89,9 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
     step, t_start = 0, time.time()
     best = None
 
+    def say(msg):                                   # AI_NEW_MODEL v2 günlük biçimi: [geçen sn] mesaj
+        print("[%8.1f sn] %s" % (time.time() - t_start, msg), flush=True)
+
     ckpt_path = out / "checkpoint.pt"
     if resume and ckpt_path.exists():
         st = checkpoint.load(ckpt_path, map_location=device)
@@ -102,10 +105,10 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
                     changed.add(k)
                     g[k] = h[k]
         if changed:
-            print("[sürdür] yapılandırmadan gelen yeni değerler kullanılıyor: %s" % ", ".join(sorted(changed)), flush=True)
+            say("SÜRDÜRME: yapılandırmadan gelen yeni değerler kullanılıyor: %s" % ", ".join(sorted(changed)))
         rng.bit_generator.state = st["rng"]
         step, best = st["step"], st.get("best")
-        print("[sürdür] adım %d" % step, flush=True)
+        say("SÜRDÜRÜLDÜ adım %d'den (checkpoint.pt)" % step)
 
     fwd = torch.compile(model) if (tc.compile and device.type == "cuda") else model
     val_windows = valid_s.fixed_windows(T, dc.eval_tokens)
@@ -114,29 +117,43 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
 
     log.write(type="start", step=step, total_steps=total_steps, tokens_per_step=tokens_per_step, params=n_params,
               resumed=bool(resume and step), t=time.time())
-    print("[%s] %s | %.2fM parametre | %d adım × %d token | mikro %d × %d | cihaz %s" % (
-        cfg.name, "attn=%s pos=%s mlp=%s" % (cfg.model.attn, cfg.model.pos, cfg.model.mlp), n_params / 1e6,
-        total_steps, tokens_per_step, accum, micro, device), flush=True)
+    mc = cfg.model
+    per_epoch = math.ceil(train_s.total / tokens_per_step)
+    decay_start = int(total_steps * (1 - tc.decay)) if tc.schedule == "wsd" else None
+    gpu = torch.cuda.get_device_name(0) if device.type == "cuda" else "cpu"
+    say("%s | attn %s pos %s mlp %s p %d | D %d, katman %d, head %d (kv %d), d_ff %d, %d parametre" % (
+        cfg.name, mc.attn, mc.pos, mc.mlp, mc.power, mc.d_model, mc.n_layers, mc.n_heads, mc.n_kv_heads, mc.ff_dim(),
+        n_params))
+    say("veri %s %.1fM token | pencere %d, %d × %d = %d token/adım (mikro %d × %d) | %d adım/epok, toplam %d adım "
+        "(%.2f epok)%s | lr %g (adam %g) %s, ısınma %d adım | cihaz %s, compile %s, %s | değerlendirme %d pencere" % (
+            dc.dataset, train_s.total / 1e6, T, tc.batch_size, T, tokens_per_step, accum, micro, per_epoch, total_steps,
+            total_steps / per_epoch, ", iniş başı %d" % decay_start if decay_start is not None else "", tc.lr,
+            tc.adam_lr or tc.lr, tc.schedule, max(1, int(total_steps * tc.warmup)), gpu, tc.compile and device.type == "cuda",
+            tc.dtype if device.type == "cuda" else "fp32", len(val_windows)))
+    _mu, _de, _nd = param_groups(model, tc.optimizer in ("muon", "normuon"))
+    say("optimizer %s | %s: %d tensör, %d parametre | adamw decay: %d tensör, %d parametre | adamw no_decay: %d tensör, "
+        "%d parametre" % (tc.optimizer, tc.optimizer, len(_mu), sum(x.numel() for x in _mu), len(_de),
+                          sum(x.numel() for x in _de), len(_nd), sum(x.numel() for x in _nd)))
 
     def run_eval(final=False):
         nonlocal best
         windows = valid_s.fixed_windows(T, dc.final_eval_tokens) if final else val_windows
+        t_ev = time.time()
         r = evaluate(model, windows, eval_batch, device, ctx, bytes_per_token)
         r["probes"] = probes(model, device, tc.probe_tokens) if tc.probe_tokens else []
         best = r["loss"] if best is None else min(best, r["loss"])
         log.write(type="eval", step=step, final=final, t=time.time(), **r)
-        print("  [değerlendirme%s] adım %d | kayıp %.4f | ppl %.2f | bpb %s | doğruluk %.4f | bant %s" % (
+        say("DEĞERLENDİRME%s adım %d: kayıp %.4f  ppl %.2f  bpb %s  doğruluk %.4f  bant %s | %d token (%.1f sn)" % (
             " SON" if final else "", step, r["loss"], r["ppl"], "%.4f" % r["bpb"] if r["bpb"] else "-", r["acc"],
-            " ".join("%s:%.3f" % kv for kv in r["acc_bands"].items())), flush=True)
+            " ".join("%s:%.3f" % kv for kv in r["acc_bands"].items()), r["tokens"], time.time() - t_ev))
         for pr in r["probes"]:
-            print("    [örnek] farklı4 %.2f%s | %r" % (pr["distinct4"], " DÖNGÜ" if pr["loop"] else "", pr["text"][:160]),
-                  flush=True)
+            say("   örnek farklı4 %.2f%s | %r" % (pr["distinct4"], " DÖNGÜ" if pr["loop"] else "", pr["text"][:160]))
         return r
 
     def run_diag():
         d = diagnose(model, diag_x, ctx)
         log.write(type="diag", step=step, **d)
-        print("  [teşhis] adım %d | %s" % (step, summary_line(d)), flush=True)
+        say("TEŞHİS adım %d: %s" % (step, summary_line(d)))
 
     def save_ckpt():
         checkpoint.save(ckpt_path, model=model.state_dict(), optim=opt.state_dict(), rng=rng.bit_generator.state,
@@ -146,14 +163,14 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
     if threading.current_thread() is threading.main_thread():
         signal.signal(signal.SIGTERM, lambda *_: stop.__setitem__("flag", True))
 
-    step_ms, last_ckpt = [], time.time()
+    step_ms, last_ckpt, start_step = [], time.time(), step
     t_log, s_log = time.time(), step
     model.train()
     while step < total_steps:
         if stop["flag"] or (tc.stop_step and step >= tc.stop_step):
             save_ckpt()
             (out / "stopped").write_text("adım %d\n" % step, encoding="utf-8")
-            print("[durduruldu] adım %d — checkpoint kaydedildi; sürdürmek için --resume" % step, flush=True)
+            say("DURDURULDU adım %d — checkpoint kaydedildi; sürdürmek için --resume" % step)
             return None
         f = lr_factor(step, total_steps, tc.schedule, tc.warmup, tc.decay, tc.min_lr_frac)
         for g in opt.param_groups:
@@ -174,17 +191,21 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
         if step % tc.log_every == 0 or step == total_steps:
             if device.type == "cuda":
                 torch.cuda.synchronize()
-            dt = (time.time() - t_log) / max(1, step - s_log)
-            if step > tc.log_every:                       # ilk pencere derleme süresini içerir
+            win_steps, win_sec = step - s_log, time.time() - t_log
+            dt = win_sec / max(1, win_steps)
+            first_win = not step_ms and s_log == start_step
+            if not first_win:                             # ilk pencere derleme süresini içerir
                 step_ms.append(dt * 1000)
             t_log, s_log = time.time(), step
             mem = torch.cuda.max_memory_allocated() / 2 ** 30 if device.type == "cuda" else 0.0
             lv = float(loss_sum)
             log.write(type="train", step=step, loss=lv, lr=opt.param_groups[0]["lr"], grad_norm=float(gn),
                       ms=dt * 1000, tok_s=tokens_per_step / dt, mem_gb=mem, t=time.time())
-            print("adım %d/%d | kayıp %.4f | lr %.2e | gn %.3f | %.1f ms | %.0fk tok/s | %.1f GB" % (
-                step, total_steps, lv, opt.param_groups[0]["lr"], float(gn), dt * 1000, tokens_per_step / dt / 1e3,
-                mem), flush=True)
+            say("adım %d / %d (epok %.3f)  lr %.3g  kayıp %.4f  grad %.3f | pencere %d adım %.1f sn  %.1f ms/adım  "
+                "%d tok/sn  tepe %.1f GB  kalan ~%.0f dk%s" % (
+                    step, total_steps, step / per_epoch, opt.param_groups[0]["lr"], lv, float(gn), win_steps, win_sec,
+                    dt * 1000, tokens_per_step / dt, mem, (total_steps - step) * dt / 60,
+                    "  (ilk pencere: derleme dahil)" if first_win else ""))
             if not math.isfinite(lv):
                 raise FloatingPointError("kayıp sonlu değil (adım %d)" % step)
         if tc.eval_every and step % tc.eval_every == 0 and step < total_steps:
@@ -209,7 +230,7 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
     smp = samples(model, device, tc.sample_tokens)
     (out / "samples.json").write_text(json.dumps(smp, indent=1, ensure_ascii=False), encoding="utf-8")
     for s in smp[:2]:
-        print("  [örnek] %r" % s["text"][:200], flush=True)
+        say("SON örnek | %r" % s["text"][:200])
     med = statistics.median(step_ms) if step_ms else None
     results = {
         "name": cfg.name, "params": n_params, "steps": step, "tokens": step * tokens_per_step,
@@ -222,7 +243,7 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
         results["speed"] = {k: speed.get(k) for k in ("attention", "block", "inference")}
     (out / "results.json").write_text(json.dumps(results, indent=1, ensure_ascii=False), encoding="utf-8")
     (out / "stopped").unlink(missing_ok=True)
-    print("[bitti] %s | son kayıp %.4f | bpb %s | %s ms/adım | %.1f dk" % (
-        cfg.name, final["loss"], "%.4f" % final["bpb"] if final["bpb"] else "-", "%.1f" % med if med else "-",
-        results["wall_min"]), flush=True)
+    say("BİTTİ: %s | son kayıp %.4f  bpb %s  doğruluk %.4f | %s ms/adım  %.1f dk" % (
+        cfg.name, final["loss"], "%.4f" % final["bpb"] if final["bpb"] else "-", final["acc"],
+        "%.1f" % med if med else "-", results["wall_min"]))
     return results

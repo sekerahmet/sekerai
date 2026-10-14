@@ -181,6 +181,8 @@ def _run_detail(run):
         avg = sum(r["loss"] for r in tr[-10:]) / k
         L.append("   eğitim   kayıp %.4f (son %d ort. %.4f)  lr %.2e  gn %.3f  |  %.0f ms/adım  %.0fk tok/s  %.1f GB" % (
             last["loss"], k, avg, last["lr"], last["grad_norm"], ms, last["tok_s"] / 1e3, last["mem_gb"]))
+        L.append("   son 5    " + "   ".join("%d: %.4f (gn %.2f, %.0f ms)" % (r["step"], r["loss"], r["grad_norm"], r["ms"])
+                                          for r in tr[-5:]))
     ev = m.get("eval") or []
     if ev:
         e = ev[-1]
