@@ -1,0 +1,27 @@
+{
+  "notes": "Yerel CPU duman testi: sentetik veri, küçük model",
+  "model": {
+    "vocab_size": 512,
+    "d_model": 64,
+    "n_layers": 2,
+    "n_heads": 4,
+    "n_kv_heads": 2,
+    "max_len": 256
+  },
+  "data": {
+    "dataset": "synthetic",
+    "seq_len": 64,
+    "eval_tokens": 8192
+  },
+  "train": {
+    "batch_size": 8,
+    "max_steps": 40,
+    "optimizer": "muon",
+    "lr": 0.003,
+    "compile": false,
+    "log_every": 10,
+    "eval_every": 20,
+    "diag_every": 20,
+    "sample_tokens": 0
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "extends": "rgn_d512.json",
+  "notes": "FineWeb-Edu: 1 parça (~750M token) ile ölçek testi; D 768'e çıkarılır",
+  "model": {
+    "d_model": 768,
+    "n_layers": 12,
+    "n_heads": 12,
+    "n_kv_heads": 4
+  },
+  "data": {
+    "dataset": "fineweb",
+    "seq_len": 2048,
+    "max_train_files": 1,
+    "eval_tokens": 4194304
+  },
+  "train": {
+    "batch_size": 32,
+    "micro_batch": 16,
+    "epochs": 1.0,
+    "optimizer": "muon",
+    "lr": 0.002,
+    "schedule": "wsd",
+    "eval_every": 1000,
+    "diag_every": 1000
+  }
+}

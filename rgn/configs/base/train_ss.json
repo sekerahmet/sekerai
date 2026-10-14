@@ -1,0 +1,22 @@
+{
+  "extends": "rgn_d512.json",
+  "data": {
+    "dataset": "ss",
+    "seq_len": 1024,
+    "eval_tokens": 4194304,
+    "final_eval_tokens": 0
+  },
+  "train": {
+    "batch_size": 64,
+    "micro_batch": 32,
+    "epochs": 1.0,
+    "optimizer": "muon",
+    "lr": 0.002,
+    "schedule": "wsd",
+    "warmup": 0.01,
+    "decay": 0.2,
+    "eval_every": 1000,
+    "diag_every": 1000,
+    "log_every": 50
+  }
+}

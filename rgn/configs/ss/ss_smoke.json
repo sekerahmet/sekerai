@@ -1,0 +1,15 @@
+{
+  "extends": "ss_d512_rgn.json",
+  "name": "ss_smoke",
+  "notes": "Colab duman testi: 300 adım, küçük değerlendirme",
+  "data": {
+    "eval_tokens": 524288,
+    "final_eval_tokens": 1048576
+  },
+  "train": {
+    "max_steps": 300,
+    "eval_every": 100,
+    "diag_every": 100,
+    "log_every": 20
+  }
+}

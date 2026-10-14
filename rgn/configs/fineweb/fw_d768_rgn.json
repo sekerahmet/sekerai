@@ -1,0 +1,4 @@
+{
+  "extends": "../base/train_fineweb.json",
+  "name": "fw_d768_rgn"
+}

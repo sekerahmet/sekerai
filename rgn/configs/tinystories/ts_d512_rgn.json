@@ -1,0 +1,4 @@
+{
+  "extends": "../base/train_tinystories.json",
+  "name": "ts_d512_rgn"
+}

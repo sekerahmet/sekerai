@@ -1,0 +1,10 @@
+{
+  "extends": "../base/train_ss.json",
+  "name": "ss_d512_transformer",
+  "notes": "Karşılaştırma tabanı: softmax (QK-norm) + RoPE + SwiGLU, aynı iskelet ve bütçe",
+  "model": {
+    "attn": "softmax",
+    "pos": "rope",
+    "mlp": "swiglu"
+  }
+}

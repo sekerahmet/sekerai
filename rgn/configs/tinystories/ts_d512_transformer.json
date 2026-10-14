@@ -1,0 +1,9 @@
+{
+  "extends": "../base/train_tinystories.json",
+  "name": "ts_d512_transformer",
+  "model": {
+    "attn": "softmax",
+    "pos": "rope",
+    "mlp": "swiglu"
+  }
+}

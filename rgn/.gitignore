@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.part
+runs/
+cache/
+*.pt
+*.bin
+*.npy
+.ipynb_checkpoints/
+
+# tasarim dokumani ve arsiv YEREL kalir (depo PUBLIC; sekerai kural: belge/ yerelde)
+docs/
