@@ -19,8 +19,10 @@ Komut satırından (aynı işlevler):
 """
 import json
 import os
+import re
 import shlex
 import signal
+import statistics
 import subprocess
 import sys
 import time
@@ -101,46 +103,133 @@ def kuyruk(configs, name="kuyruk", resume=True):
     return _spawn(name, steps, runs_dir() / ("_%s.log" % name))
 
 
-def _last(path, kind):
-    if not Path(path).exists():
-        return None
-    last = None
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            if '"type": "%s"' % kind in line:
-                last = line
-    return json.loads(last) if last else None
+# Kaba kıyas çapası (farklı veri düzeni: END token'ları, hikâye maskesi, 1000 hikâyelik sınav) — yalnız yön göstergesi
+ANCHORS = {"ss": ("tf v2 d512 (AI_NEW_MODEL, farklı düzen)", 0.4732)}
+
+
+def _metrics(d):
+    out = {}
+    p = d / "metrics.jsonl"
+    if p.exists():
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:                # Drive eşitlemesi yarım satır bırakabilir
+                    continue
+                out.setdefault(r.get("type"), []).append(r)
+    return out
+
+
+def _plan(d, m):
+    """-> (toplam adım, adım başına token): 'start' kaydından ya da günlüğün başlık satırından."""
+    if m.get("start"):
+        s = m["start"][-1]
+        return s["total_steps"], s["tokens_per_step"]
+    log = d / "stdout.log"
+    if log.exists():
+        for line in open(log, encoding="utf-8", errors="replace"):
+            g = re.search(r"(\d+) adım × (\d+) token", line)
+            if g:
+                return int(g.group(1)), int(g.group(2))
+    return None, None
+
+
+def _bar(frac, n=24):
+    k = max(0, min(n, int(round(frac * n))))
+    return "█" * k + "░" * (n - k)
 
 
 def _run_status(run):
+    """Tek satır özet (bitmiş koşular ve sonuc() için)."""
     d = runs_dir() / run
-    cfg = d / "config.json"
-    tr, ev = _last(d / "metrics.jsonl", "train"), _last(d / "metrics.jsonl", "eval")
-    s = "%-28s" % run
     if (d / "results.json").exists():
         r = json.loads((d / "results.json").read_text(encoding="utf-8"))
-        return s + " BİTTİ   kayıp %.4f  bpb %s  %.1f dk" % (r["final"]["loss"], "%.4f" % r["final"]["bpb"]
-                                                             if r["final"]["bpb"] else "-", r["wall_min"])
-    if (d / "stopped").exists():
-        s += " DURDU   "
-    if tr:
-        c = json.loads(cfg.read_text(encoding="utf-8")) if cfg.exists() else None
-        s += " adım %d  kayıp %.4f  %.0f ms  %.0fk tok/s" % (tr["step"], tr["loss"], tr["ms"], tr["tok_s"] / 1e3)
-        log = runs_dir() / run / "stdout.log"
-        total = None
-        if log.exists():
-            for line in open(log, encoding="utf-8", errors="replace"):
-                if line.startswith("adım ") and "/" in line:
-                    total = int(line.split()[1].split("/")[1])
-        if total:
-            s += "  kalan ~%.0f dk" % ((total - tr["step"]) * tr["ms"] / 60000)
+        return "%-28s BİTTİ   kayıp %.4f  bpb %s  %.1f dk" % (run, r["final"]["loss"], "%.4f" % r["final"]["bpb"]
+                                                              if r["final"]["bpb"] else "-", r["wall_min"])
+    m = _metrics(d)
+    total, _ = _plan(d, m)
+    tr = (m.get("train") or [None])[-1]
+    if not tr:
+        return "%-28s %s" % (run, "DURDU" if (d / "stopped").exists() else "başlamadı / derleniyor")
+    return "%-28s %sadım %d/%s  kayıp %.4f  %.0f ms" % (run, "DURDU  " if (d / "stopped").exists() else "",
+                                                       tr["step"], total or "?", tr["loss"], tr["ms"])
+
+
+def _run_detail(run):
+    """Ayrıntılı nabız: ilerleme, eğitim, değerlendirme (+ fark), teşhis, örnek, kaba kıyas."""
+    d = runs_dir() / run
+    m = _metrics(d)
+    total, tps = _plan(d, m)
+    cfg = json.loads((d / "config.json").read_text(encoding="utf-8")) if (d / "config.json").exists() else None
+    done = (d / "results.json").exists()
+    state = "BİTTİ" if done else "DURDU" if (d / "stopped").exists() else "KOŞUYOR" if m.get("train") else "BAŞLIYOR"
+    L = ["%s  %s" % (run, state)]
+    if cfg:
+        mc = cfg["model"]
+        L[0] += "   attn=%s pos=%s mlp=%s p=%s  D %d L %d H %d  |  veri %s pencere %d" % (
+            mc["attn"], mc["pos"], mc["mlp"], mc.get("power", 1), mc["d_model"], mc["n_layers"], mc["n_heads"],
+            cfg["data"]["dataset"], cfg["data"]["seq_len"])
+    tr = m.get("train") or []
+    if tr and total:
+        last = tr[-1]
+        frac = last["step"] / total
+        ms = statistics.median(r["ms"] for r in tr[-5:])
+        L.append("   ilerleme %s %5.1f%%  adım %d/%d  %.0fM token  kalan ~%.0f dk" % (
+            _bar(frac), 100 * frac, last["step"], total, last["step"] * tps / 1e6, (total - last["step"]) * ms / 60000))
+        k = len(tr[-10:])
+        avg = sum(r["loss"] for r in tr[-10:]) / k
+        L.append("   eğitim   kayıp %.4f (son %d ort. %.4f)  lr %.2e  gn %.3f  |  %.0f ms/adım  %.0fk tok/s  %.1f GB" % (
+            last["loss"], k, avg, last["lr"], last["grad_norm"], ms, last["tok_s"] / 1e3, last["mem_gb"]))
+    ev = m.get("eval") or []
     if ev:
-        s += "  | değerlendirme %.4f" % ev["loss"]
-    return s
+        e = ev[-1]
+        delta = " (%+.4f)" % (e["loss"] - ev[-2]["loss"]) if len(ev) > 1 else ""
+        s = "   değerl.  adım %d%s: kayıp %.4f%s  ppl %.2f  bpb %s  doğruluk %.4f" % (
+            e["step"], " SON" if e.get("final") else "", e["loss"], delta, e["ppl"],
+            "%.4f" % e["bpb"] if e.get("bpb") else "-", e["acc"])
+        if e.get("acc_bands"):
+            s += "  bant " + " ".join("%s:%.3f" % kv for kv in e["acc_bands"].items())
+        if tr:
+            s += "  |  eğitim−değerl. %+.3f" % (sum(r["loss"] for r in tr[-10:]) / len(tr[-10:]) - e["loss"])
+        L.append(s)
+        anchor = ANCHORS.get(cfg["data"]["dataset"]) if cfg else None
+        if anchor and e.get("bpb"):
+            L.append("   kıyas    %s bpb %.4f  →  fark %+.4f (kaba)" % (anchor[0], anchor[1], e["bpb"] - anchor[1]))
+        for pr in (e.get("probes") or [])[:2]:
+            L.append("   örnek    farklı4 %.2f%s  » %s" % (pr["distinct4"], "  DÖNGÜ" if pr["loop"] else "",
+                                                         pr["text"][:150].replace("\n", " ")))
+    dg = m.get("diag") or []
+    if dg:
+        g = dg[-1]
+        lay = g["layers"]
+        ent = [sum(l["entropy"]) / len(l["entropy"]) for l in lay]
+        top1 = sum(sum(l["top1"]) / len(l["top1"]) for l in lay) / len(lay)
+        dist = sum(sum(l["mean_dist"]) / len(l["mean_dist"]) for l in lay) / len(lay)
+        sat = [l["mlp"].get("sat_frac") for l in lay if l.get("mlp")]
+        s = "   teşhis   adım %d: entropi %.2f  top1 %.3f  mesafe %.0f" % (g["step"], sum(ent) / len(ent), top1, dist)
+        if sat:
+            s += "  |u|>3 %.4f" % (sum(sat) / len(sat))
+        gam = [x for l in lay for x in (l.get("gamma") or [])]
+        if gam:
+            s += "  γ ort %.0f [%.0f–%.0f]" % (sum(gam) / len(gam), min(gam), max(gam))
+        L.append(s)
+        L.append("            katman entropisi " + " ".join("%.2f" % x for x in ent))
+    return L
+
+
+def _gpu():
+    try:
+        out = subprocess.run("nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader",
+                             shell=True, capture_output=True, text=True, timeout=10).stdout.strip()
+        return "GPU: bellek / toplam / kullanım = %s" % out if out else ""
+    except Exception:
+        return ""
 
 
 def nabiz(name=None, satir=0):
-    """Durum özeti; name verilirse o işin günlüğünün son `satir` satırı da."""
+    """Ayrıntılı durum: her iş ve koşusu için ilerleme, eğitim, değerlendirme, teşhis, örnek; satir > 0 ise günlüğün son
+    satırları.  Bitmiş koşular tek satır."""
     j = _jobs()
     groups = j.get("_kuyruk_icerik", {})
     names = [name] if name else [k for k in j if not k.startswith("_")]
@@ -148,14 +237,23 @@ def nabiz(name=None, satir=0):
         print("iş yok")
     for n in names:
         job = j.get(n)
-        alive = job and _alive(job["pid"])
+        alive = bool(job and _alive(job["pid"]))
         print("[%s] %s%s" % ("ÇALIŞIYOR" if alive else "durdu/bitti", n,
-                            "  (%.0f dk)" % ((time.time() - job["start"]) / 60) if job else ""))
+                            "  (%.1f dk önce başladı)" % ((time.time() - job["start"]) / 60) if job else ""))
         for run in groups.get(n, [n]):
-            print("   " + _run_status(run))
+            d = runs_dir() / run
+            if not d.exists():
+                print("   %-28s sırada" % run)
+                continue
+            detail = _run_detail(run) if (alive or not (d / "results.json").exists()) else [_run_status(run)]
+            for line in detail:
+                print("   " + line)
         if satir and job:
             lines = Path(job["log"]).read_text(encoding="utf-8", errors="replace").splitlines()[-satir:]
             print("\n".join("   | " + l for l in lines))
+    g = _gpu()
+    if g:
+        print(g)
 
 
 def sonuc(names=None, metin=2, karakter=400):

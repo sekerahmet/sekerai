@@ -29,7 +29,7 @@ from rgn.model import RGNModel
 from rgn.paths import runs_dir
 from rgn.train import checkpoint
 from rgn.train.diagnostics import diagnose, summary_line
-from rgn.train.evaluate import evaluate, samples
+from rgn.train.evaluate import evaluate, probes, samples
 from rgn.train.optim import build_optimizer
 from rgn.train.schedule import lr_factor
 
@@ -112,6 +112,8 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
     diag_x = val_windows[:4, :-1].to(device)
     eval_batch = max(1, micro)
 
+    log.write(type="start", step=step, total_steps=total_steps, tokens_per_step=tokens_per_step, params=n_params,
+              resumed=bool(resume and step), t=time.time())
     print("[%s] %s | %.2fM parametre | %d adım × %d token | mikro %d × %d | cihaz %s" % (
         cfg.name, "attn=%s pos=%s mlp=%s" % (cfg.model.attn, cfg.model.pos, cfg.model.mlp), n_params / 1e6,
         total_steps, tokens_per_step, accum, micro, device), flush=True)
@@ -120,11 +122,15 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
         nonlocal best
         windows = valid_s.fixed_windows(T, dc.final_eval_tokens) if final else val_windows
         r = evaluate(model, windows, eval_batch, device, ctx, bytes_per_token)
+        r["probes"] = probes(model, device, tc.probe_tokens) if tc.probe_tokens else []
         best = r["loss"] if best is None else min(best, r["loss"])
-        log.write(type="eval", step=step, final=final, **r)
-        print("  [değerlendirme%s] adım %d | kayıp %.4f | ppl %.2f | bpb %s | doğruluk %.4f" % (
-            " SON" if final else "", step, r["loss"], r["ppl"], "%.4f" % r["bpb"] if r["bpb"] else "-", r["acc"]),
-            flush=True)
+        log.write(type="eval", step=step, final=final, t=time.time(), **r)
+        print("  [değerlendirme%s] adım %d | kayıp %.4f | ppl %.2f | bpb %s | doğruluk %.4f | bant %s" % (
+            " SON" if final else "", step, r["loss"], r["ppl"], "%.4f" % r["bpb"] if r["bpb"] else "-", r["acc"],
+            " ".join("%s:%.3f" % kv for kv in r["acc_bands"].items())), flush=True)
+        for pr in r["probes"]:
+            print("    [örnek] farklı4 %.2f%s | %r" % (pr["distinct4"], " DÖNGÜ" if pr["loop"] else "", pr["text"][:160]),
+                  flush=True)
         return r
 
     def run_diag():
@@ -175,7 +181,7 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
             mem = torch.cuda.max_memory_allocated() / 2 ** 30 if device.type == "cuda" else 0.0
             lv = float(loss_sum)
             log.write(type="train", step=step, loss=lv, lr=opt.param_groups[0]["lr"], grad_norm=float(gn),
-                      ms=dt * 1000, tok_s=tokens_per_step / dt, mem_gb=mem)
+                      ms=dt * 1000, tok_s=tokens_per_step / dt, mem_gb=mem, t=time.time())
             print("adım %d/%d | kayıp %.4f | lr %.2e | gn %.3f | %.1f ms | %.0fk tok/s | %.1f GB" % (
                 step, total_steps, lv, opt.param_groups[0]["lr"], float(gn), dt * 1000, tokens_per_step / dt / 1e3,
                 mem), flush=True)

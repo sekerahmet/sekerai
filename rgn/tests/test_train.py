@@ -24,7 +24,11 @@ def test_cpu_training_reduces_loss():
             out = Path(d)
             for f in ("config.json", "metrics.jsonl", "checkpoint.pt", "model.pt", "results.json"):
                 assert (out / f).exists(), f
-            first = json.loads((out / "metrics.jsonl").read_text(encoding="utf-8").splitlines()[0])
+            recs = [json.loads(l) for l in (out / "metrics.jsonl").read_text(encoding="utf-8").splitlines()]
+            assert recs[0]["type"] == "start" and recs[0]["total_steps"] == cfg.train.max_steps
+            first = next(r for r in recs if r["type"] == "train")
+            ev = next(r for r in recs if r["type"] == "eval")
+            assert "acc_bands" in ev and "probes" in ev
             assert r["final"]["loss"] < first["loss"] - 0.5, (overrides, first["loss"], r["final"]["loss"])
 
 

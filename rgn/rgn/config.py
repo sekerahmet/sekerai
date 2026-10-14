@@ -102,6 +102,7 @@ class TrainConfig:
     diag_every: int = 1000             # γ, |u| > 3 oranı, dikkat entropisi
     ckpt_minutes: float = 10.0
     sample_tokens: int = 64            # bitişte örnek üretim uzunluğu (0: kapalı)
+    probe_tokens: int = 48             # her değerlendirmede 2 istemle greedy devam (nitel kontrol; 0: kapalı)
     profile_after: bool = True         # bitişte hız profili (runs/<koşu>/speed.json)
 
 
