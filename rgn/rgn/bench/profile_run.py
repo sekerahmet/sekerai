@@ -29,13 +29,14 @@ def _attn_kernel(attn, B, N, device):
         k = F.normalize(torch.randn(B, Hkv, N, dh, device=device), dim=-1).to(dt).requires_grad_()
         v = torch.randn(B, Hkv, N, dh, device=device, dtype=dt, requires_grad=True)
 
-        def run(kind=kind, q=q, k=k, v=v):
-            if kind == "softmax_sdpa" or cfg.attn == "softmax":
-                o = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=Hkv != H)
-            else:
-                fn = rgn_flex if attn.impl(device) == "flex" else rgn_dense
-                o = fn(q, k, v, attn.gamma().detach(), None if attn.beta() is None else attn.beta().detach(),
-                       cfg.pos, cfg.power)
+        def run(kind=kind, q=q, k=k, v=v, dt=dt):
+            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=dt == torch.bfloat16):
+                if kind == "softmax_sdpa" or cfg.attn == "softmax":
+                    o = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=Hkv != H)
+                else:
+                    fn = rgn_flex if attn.impl(device, N) == "flex" else rgn_dense
+                    o = fn(q, k, v, attn.gamma().detach(), None if attn.beta() is None else attn.beta().detach(),
+                           cfg.pos, cfg.power)
             o.float().sum().backward()
             q.grad = k.grad = v.grad = None
         ms, mem = _time(run, warmup=2, iters=5)

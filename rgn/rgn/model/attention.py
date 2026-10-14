@@ -126,16 +126,16 @@ class Attention(nn.Module):
     def beta(self):
         return None if self.beta_hat is None else self.beta_hat ** 2
 
-    def impl(self, device):
+    def impl(self, device, n):
+        """Kullanılacak çekirdek: sdpa (softmax), dense ya da flex.  flex yalnız CUDA'da ve N blok boyunun katıyken."""
         c = self.cfg.attn_impl
         if self.cfg.attn == "softmax":
             return "sdpa"
         if c == "auto":
-            return "flex" if device.type == "cuda" else "dense"
+            c = "dense" if (device.type != "cuda" or n <= self.cfg.dense_max_len) else "flex"
+        if c == "flex" and not (device.type == "cuda" and n >= FLEX_BLOCK and n % FLEX_BLOCK == 0):
+            c = "dense"
         return c
-
-    def _flex_ok(self, n):
-        return n >= FLEX_BLOCK and n % FLEX_BLOCK == 0
 
     def project(self, x, rope):
         """x (B, N, d) -> q (B, H, N, dh), k / v (B, Hkv, N, dh); rgn'de q̂, k̂ birim küre üzerinde."""
@@ -152,13 +152,13 @@ class Attention(nn.Module):
         return q, k, v
 
     def _core(self, q, k, v):
-        impl = self.impl(q.device)
+        impl = self.impl(q.device, q.shape[2])
         if impl == "sdpa":
             return F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=self.Hkv != self.H)
         args = (self.gamma(), self.beta(), self.cfg.pos, self.cfg.power)
         ctx = torch.autocast(q.device.type, enabled=False) if self.cfg.rgn_fp32 else contextlib.nullcontext()
         with ctx:
-            if impl == "flex" and self._flex_ok(q.shape[2]):
+            if impl == "flex":
                 return rgn_flex(q, k, v, *args)
             return rgn_dense(q, k, v, *args)
 

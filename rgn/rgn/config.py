@@ -29,7 +29,9 @@ class ModelConfig:
     n_kv_heads: int = 8                # < n_heads: GQA
     d_ff: int = 0                      # 0: otomatik (rational 4D; glu / swiglu 8D/3, 64'ün katı)
     attn: str = "rgn"                  # rgn: ters kare çekim | softmax: karşılaştırma tabanı
-    attn_impl: str = "auto"            # auto: rgn -> CUDA'da flex, CPU'da dense; softmax -> sdpa
+    attn_impl: str = "auto"            # auto: rgn -> N <= dense_max_len ise dense (derlenince hızlı), değilse flex; softmax -> sdpa
+    dense_max_len: int = 1024          # auto'da dense'in üst sınırı (N×N bellek); ölçüldü: SS d512 N 1024'te dense 299 ms/adım,
+                                       # flex 3800 ms/adım (flex, öğrenilebilir γ/β gradyanını yavaş yoldan topluyor)
     rgn_fp32: bool = True              # rgn dikkatinde q, k, v fp32 (yakın eşleşmede 2 - 2 q·k iptal hatası; doküman 3.5)
     pos: str = "additive"              # additive: payda + β(i-j) (ana) | alibi: payda × (1 + β(i-j)) | rope | rope+alibi | none
     rope_base: float = 10000.0
