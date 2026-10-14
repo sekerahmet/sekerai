@@ -1,5 +1,5 @@
 {
-  "notes": "RGN-SS mimarisi (doküman 1.3): D 512, 8 blok, 8 baş; ana parçalar: ters kare çekim + β(i-j) konum terimi + rasyonel MLP",
+  "notes": "RGN-SS mimarisi (doküman 1.3): D 512, 8 blok, 8 baş; temel değişiklikler: ters kare çekim dikkati + rasyonel MLP; konum RoPE",
   "model": {
     "d_model": 512,
     "n_layers": 8,
@@ -7,7 +7,7 @@
     "n_kv_heads": 8,
     "max_len": 2048,
     "attn": "rgn",
-    "pos": "additive",
+    "pos": "rope",
     "mlp": "rational"
   }
 }

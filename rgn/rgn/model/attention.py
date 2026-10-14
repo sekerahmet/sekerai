@@ -2,9 +2,9 @@
 
 Çekim ağırlığı (doküman 2.1, 2.4), k = i - j >= 0:
     s_ij = q̂_i · k̂_j,   d_ij = ||q̂_i - k̂_j||² = 2 - 2 s_ij ∈ [0, 4]   (birim küre)
-    payda = 1 + γ_h d^p + β_h k                              pos: additive (ANA: anlam uzaklığı + sıra uzaklığı)
+    payda = 1 + γ_h d^p                                      pos: rope (VARSAYILAN; q̂, k̂ döndürülmüş) | none
+          = 1 + γ_h d^p + β_h k                              pos: additive (anlam uzaklığı + sıra uzaklığı)
           = (1 + γ_h d^p)(1 + β_h k)                         pos: alibi | rope+alibi   (çarpımsal)
-          = 1 + γ_h d^p                                      pos: rope | none
     w_ij = 1 / payda,   O_i = Σ_j w_ij V_j / Σ_j w_ij        (maksimum takibi yok)
 
 Uygulamalar:

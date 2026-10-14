@@ -48,15 +48,15 @@ def test_order_sensitivity():
 
 
 def test_param_count_rgn_ss():
-    """Doküman 1.3: RGN-SS (D 512, 8 blok, 8 baş, d_ff 2048, V 50.304, β konum terimi)."""
+    """Doküman 1.3: RGN-SS (D 512, 8 blok, 8 baş, d_ff 2048, V 50.304, RoPE — β parametresi yok)."""
     with torch.device("meta"):
         m = RGNModel(ModelConfig(d_model=512, n_layers=8, n_heads=8, n_kv_heads=8))
     emb = 50304 * 512
-    attn = 512 * 512 * 4 + 8 + 8                     # W_Q, W_K, W_V, W_O + γ̂ + β̂
+    attn = 512 * 512 * 4 + 8                         # W_Q, W_K, W_V, W_O + γ̂
     mlp = 512 * 2048 + 2048 + 2048 * 512 + 512        # W_1, b_1, W_2, b_2
     block = attn + mlp + 2 * 512                      # + iki RMSNorm
     expected = emb + 8 * block + 512
-    assert m.num_params() == expected == 50_950_784, m.num_params()
+    assert m.num_params() == expected == 50_950_720, m.num_params()
 
 
 def test_mlp_parameter_parity():

@@ -57,7 +57,7 @@ def _attention_case(kind, B, H, Hkv, N, dh, pos, device):
     return run
 
 
-def bench_attention(seq_lens=(512, 1024, 2048, 4096), batch=16, heads=8, kv_heads=8, d_head=64, pos="additive",
+def bench_attention(seq_lens=(512, 1024, 2048, 4096), batch=16, heads=8, kv_heads=8, d_head=64, pos="rope",
                     kinds=("softmax_sdpa", "rgn_flex_fp32", "rgn_flex_bf16", "rgn_dense_fp32"), dense_max=2048):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     rows = []

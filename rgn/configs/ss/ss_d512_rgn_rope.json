@@ -1,8 +1,0 @@
-{
-  "extends": "../base/train_ss.json",
-  "name": "ss_d512_rgn_rope",
-  "notes": "Konum ablation: β terimi yerine RoPE",
-  "model": {
-    "pos": "rope"
-  }
-}

@@ -1,0 +1,8 @@
+{
+  "extends": "../base/train_ss.json",
+  "name": "ss_d512_rgn_additive",
+  "notes": "Konum ablation: RoPE yerine sıra uzaklığı paydada, w = 1/(1 + γd + β(i-j))",
+  "model": {
+    "pos": "additive"
+  }
+}

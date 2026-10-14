@@ -1,10 +1,10 @@
 # RGN — Rasyonel Çekim Ağı (Rational Gravity Network)
 
-Decoder-only bir dil modeli. Kelimeler arası etkileşim **ters kare çekim yasasıyla** (anlam uzaklığı + sıra uzaklığı),
+Decoder-only bir dil modeli. Kelimeler arası etkileşim **ters kare çekim yasasıyla** (birim küredeki anlam uzaklığı; konum RoPE),
 kelime başına dönüşüm **rasyonel MLP** ile yapılır. Tasarım dokümanı (`docs/RGN_tasarim_dokumani.md`) yerelde tutulur, depoda yoktur.
 
 ```
-çekim:   w_ij = 1 / (1 + γ_h ||q̂_i − k̂_j||² + β_h (i − j)),   α_ij = w_ij / Σ_k w_ik,   S_i = X_i + [Σ_j α_ij V_j] W_O
+çekim:   w_ij = 1 / (1 + γ_h ||q̂_i − k̂_j||²)   (q̂, k̂ birim küre + RoPE),   α_ij = w_ij / Σ_k w_ik,   S_i = X_i + [Σ_j α_ij V_j] W_O
 MLP:     u = W_1 RMSNorm(S) + b_1,   H = S + W_2 · u / sqrt(1 + u²) + b_2
 ```
 
@@ -35,7 +35,7 @@ MLP:     u = W_1 RMSNorm(S) + b_1,   H = S + W_2 · u / sqrt(1 + u²) + b_2
 | Alan | Değerler | Varsayılan |
 | :--- | :--- | :--- |
 | `attn` | `rgn` (çekim) · `softmax` (karşılaştırma tabanı) | `rgn` |
-| `pos` | `additive` (payda + β(i−j)) · `alibi` (payda × (1 + β(i−j))) · `rope` · `rope+alibi` · `none` | `additive` |
+| `pos` | `rope` · `additive` (payda + β(i−j)) · `alibi` (payda × (1 + β(i−j))) · `rope+alibi` · `none` | `rope` |
 | `mlp` | `rational` (u/√(1+u²)) · `glu` (cebirsel GLU) · `swiglu` (karşılaştırma tabanı) | `rational` |
 | `attn_impl` | `auto` (CUDA: flex, CPU: dense) · `dense` · `flex` | `auto` |
 | `power` | çekim üssü p: 1/(1 + γ d^p) | 1 |

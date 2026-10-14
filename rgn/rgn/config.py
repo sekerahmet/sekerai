@@ -33,7 +33,8 @@ class ModelConfig:
     dense_max_len: int = 1024          # auto'da dense'in üst sınırı (N×N bellek); ölçüldü: SS d512 N 1024'te dense 299 ms/adım,
                                        # flex 3800 ms/adım (flex, öğrenilebilir γ/β gradyanını yavaş yoldan topluyor)
     rgn_fp32: bool = True              # rgn dikkatinde q, k, v fp32 (yakın eşleşmede 2 - 2 q·k iptal hatası; doküman 3.5)
-    pos: str = "additive"              # additive: payda + β(i-j) (ana) | alibi: payda × (1 + β(i-j)) | rope | rope+alibi | none
+    pos: str = "rope"                  # rope (varsayılan, kullanıcı 15 Ekim) | additive: payda + β(i-j) | alibi: payda × (1 + β(i-j))
+                                       # | rope+alibi | none
     rope_base: float = 10000.0
     max_len: int = 4096                # RoPE tablosu boyu
     power: int = 1                     # çekim üssü p: 1/(1 + γ d^p)

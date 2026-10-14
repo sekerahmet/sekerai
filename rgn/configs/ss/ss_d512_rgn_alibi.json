@@ -1,7 +1,7 @@
 {
   "extends": "../base/train_ss.json",
   "name": "ss_d512_rgn_alibi",
-  "notes": "Konum ablation: toplamsal yerine çarpımsal β",
+  "notes": "Konum ablation: RoPE yerine çarpımsal β, w = 1/((1 + γd)(1 + β(i-j)))",
   "model": {
     "pos": "alibi"
   }

@@ -28,7 +28,7 @@ def main():
     ap.add_argument("--heads", type=int, default=8)
     ap.add_argument("--kv_heads", type=int, default=8)
     ap.add_argument("--d_head", type=int, default=64)
-    ap.add_argument("--pos", default="additive")
+    ap.add_argument("--pos", default="rope")
     ap.add_argument("--configs", nargs="+", default=[])
     ap.add_argument("--set", action="append", default=[])
     args = ap.parse_args()
