@@ -57,4 +57,7 @@ def summary_line(diag):
     s = "entropi %.2f | top1 %.3f | mesafe %.1f" % (mean("entropy"), mean("top1"), mean("mean_dist"))
     if sat:
         s += " | |u|>3 %.4f" % (sum(sat) / len(sat))
+    ext = [l["mlp"].get("ext_ratio") for l in L if l["mlp"] and l["mlp"].get("ext_ratio") is not None]
+    if ext:
+        s += " | kanıt/kapı " + " ".join("%.3f" % e for e in ext)
     return s

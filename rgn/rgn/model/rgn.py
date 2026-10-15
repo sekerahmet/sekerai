@@ -34,15 +34,18 @@ class Block(nn.Module):
         self.ev_proj = None
         if cfg.attn_evidence:
             # kanıt -> MLP kapı girdisi: E · r(c_h · kanıt_h), r(z) = z/√(1+z²); E sıfır başlatma (başlangıçta taban)
-            self.ev_scale = nn.Parameter(torch.full((2 * cfg.n_heads,), 0.25))      # [güç, odaklanma] × head
-            self.ev_proj = nn.Linear(2 * cfg.n_heads, cfg.ff_dim(), bias=False)
+            H = cfg.n_heads
+            mg, sg, mo, so = cfg.evidence_norm                               # [güç, odaklanma] × head
+            self.ev_mu = nn.Parameter(torch.tensor([mg] * H + [mo] * H, dtype=torch.float32))
+            self.ev_scale = nn.Parameter(torch.tensor([0.5 / sg] * H + [0.5 / so] * H, dtype=torch.float32))
+            self.ev_proj = nn.Linear(2 * H, cfg.ff_dim(), bias=False)
 
     def forward(self, x, rope=None):
         a = self.attn(self.norm1(x), rope)
         extra = None
         if self.ev_proj is not None:
             a, ev = a
-            z = ev * self.ev_scale
+            z = (ev - self.ev_mu) * self.ev_scale
             extra = self.ev_proj((z * torch.rsqrt(1.0 + z * z)).to(x.dtype))
         s = x + a                                       # S_i = X_i + Attn(RMSNorm(X))_i
         return s + self.mlp(self.norm2(s), extra)       # H_i = S_i + MLP(RMSNorm(S), kanıt)_i

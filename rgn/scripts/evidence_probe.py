@@ -97,6 +97,10 @@ def main():
                 bins = np.digitize(E, qs)
                 ql = [L[bins == b].mean() for b in range(4)]
                 print("    K%d %8.3f %9.3f %9.3f    %s" % (li + 1, E.mean(), p, s, "  ".join("%.3f" % x for x in ql)))
+            print("  %s dağılımı (bütün head ve token'lar): katman  ort   std   %%5   %%95" % part)
+            for li, e in enumerate(evs):
+                A = e[..., sl].flatten().numpy()
+                print("    K%d %8.3f %6.3f %6.3f %6.3f" % (li + 1, A.mean(), A.std(), *np.quantile(A, [0.05, 0.95])))
         if any(b.ev_proj is not None for b in m.blocks):
             means = [e.mean((0, 1)).to(device) for e in evs]       # head başına ortalama kanıt
             losses2 = []
@@ -111,6 +115,9 @@ def main():
                                                                                            L2.mean() - L.mean()))
             print("  E ağırlık normu (katman başına): " + "  ".join("%.3f" % b.ev_proj.weight.norm().item()
                                                                   for b in m.blocks))
+            print("  öğrenilen μ (güç | odak): " + "  ".join("%.2f|%.2f" % (b.ev_mu[:len(b.ev_mu) // 2].mean().item(),
+                                                                         b.ev_mu[len(b.ev_mu) // 2:].mean().item())
+                                                          for b in m.blocks))
         del m
         if device.type == "cuda":
             torch.cuda.empty_cache()

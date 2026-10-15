@@ -72,6 +72,9 @@ class ModelConfig:
                                        # atılan bilgi): güç = ln((1/n) Σ_j e^puan); odaklanma = güç − ortalama puan ≥ 0
                                        # (kaydırmaya duyarsız: yalnız puan farkları — softmax'ın kendi değişmezliğiyle uyumlu)
     attn_evidence_grad: bool = False   # güç teriminin (softmax paydası) gradyanı q / k'ye akar mı (flex desteği gerekir)
+    evidence_norm: tuple = (0.0, 2.0, 1.0, 1.5)   # (μ_güç, σ_güç, μ_odak, σ_odak) başlangıcı: z = (kanıt − μ) · 0,5/σ, sonra
+                                       # r(z) = z/√(1+z²) — ±1σ'da r ≈ ±0,45 (doymaz).  Eğitilmiş tabanda ölçülen dağılımdan
+                                       # verilmeli (scripts/evidence_probe.py); μ ve ölçek öğrenilir
     attn_gate: str = ""                # kapı: "" | "head" (head başına 1 sayı) | "elem" (her çıktı sayısı); 2σ_a ∈ (0, 2), başlangıç 1
     mlp: str = "rational"              # rational: W2 u/sqrt(1+u²) | rglu: W2 [G/sqrt(1+G²) ⊙ U] | glu: cebirsel GLU | swiglu: taban
     mlp_bias: bool = True
