@@ -27,6 +27,8 @@ class Block(nn.Module):
             cfg = dataclasses.replace(cfg, d_ff=cfg.ff_dim(kind))
         if kind == "G" and cfg.global_pos:
             cfg = dataclasses.replace(cfg, pos=cfg.global_pos)
+        if kind == "G" and cfg.sharpness_range_g:
+            cfg = dataclasses.replace(cfg, sharpness_range=tuple(cfg.sharpness_range_g))
         self.attn = Attention(cfg, window=cfg.local_window if kind == "Y" else 0)
         self.mlp = build_mlp(cfg)
 

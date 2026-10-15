@@ -86,9 +86,9 @@ def triton_ok():
     return _TRITON["ok"]
 
 
-def rgn_triton(q, k, v, gamma, sharpness=1, qk_prec="tf32x3", window=0):
+def rgn_triton(q, k, v, gamma, sharpness=1, qk_prec="tf32x3", window=0, int_k=False):
     assert triton_ok(), _TRITON.get("err")
-    return _TRITON["fn"](q, k, v, gamma, sharpness, qk_prec, window)
+    return _TRITON["fn"](q, k, v, gamma, sharpness, qk_prec, window, int_k)
 
 
 _FLEX = {}
@@ -164,7 +164,15 @@ class Attention(nn.Module):
             self.sharp_rho = nn.Parameter(torch.full((H,), t / (1 - t * t) ** 0.5))
 
     def gamma(self):
-        return self.cfg.gamma_min + self.gamma_hat ** 2
+        """γ = γ_min + γ̂², k'ye bağlı tavanla: (1 + 4γ/k)^k <= 2^120 -> en uzak anahtarın ağırlığı fp32'de alt taşmaz
+        (bir satırın bütün ağırlıkları sıfıra düşüp çıktı sessizce sıfır olmasın).  k <= 8'de tavan ~65.000 (bağlamaz),
+        k = 16'da ~720."""
+        g = self.cfg.gamma_min + self.gamma_hat ** 2
+        K = self.sharpness()
+        if torch.is_tensor(K):
+            K = K.detach()
+            return torch.minimum(g, K * (torch.pow(2.0, 120.0 / K) - 1.0) / 4.0)
+        return g.clamp(max=K * (2.0 ** (120.0 / K) - 1.0) / 4.0)
 
     def beta(self):
         return None if self.beta_hat is None else self.beta_hat ** 2
@@ -175,7 +183,10 @@ class Attention(nn.Module):
             return self.cfg.sharpness
         lo, hi = self.cfg.sharpness_range
         r = self.sharp_rho
-        return lo + (hi - lo) * 0.5 * (1.0 + r * torch.rsqrt(1.0 + r * r))
+        k = lo + (hi - lo) * 0.5 * (1.0 + r * torch.rsqrt(1.0 + r * r))
+        if self.cfg.sharpness_int:
+            k = k + (torch.round(k) - k).detach()                       # ileri tamsayı, geri sürekli (straight-through)
+        return k
 
     def impl(self, device, n):
         """Kullanılacak çekirdek: sdpa (softmax), triton, dense ya da flex.  triton / flex yalnız CUDA'da; flex N blok
@@ -219,7 +230,7 @@ class Attention(nn.Module):
         ctx = torch.autocast(q.device.type, enabled=False) if self.cfg.rgn_fp32 else contextlib.nullcontext()
         with ctx:
             if impl == "triton":
-                return rgn_triton(q, k, v, args[0], args[4], self.cfg.rgn_qk_prec, self.window)
+                return rgn_triton(q, k, v, args[0], args[4], self.cfg.rgn_qk_prec, self.window, self.cfg.sharpness_int)
             if impl == "flex":
                 assert not self.window, "yerel pencere flex yolunda yok"
                 return rgn_flex(q, k, v, *args)

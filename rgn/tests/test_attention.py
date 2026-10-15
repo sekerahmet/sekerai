@@ -127,22 +127,23 @@ def _triton_vs_dense(device, B=2, H=4, Hkv=2, N=100, dh=16, transpose=False, win
     q0, k0, v0, gamma0, _ = _inputs(B=B, H=H, Hkv=Hkv, N=N, dh=dh, dtype=torch.float32)
     G = torch.randn(B, H, N, dh, generator=torch.Generator().manual_seed(3)).to(device)
     errs = {}
-    for K in (1, 4, 3, torch.tensor([1.5, 4.0, 7.0, 2.0][:H])):
+    for K in (1, 4, 3, torch.tensor([1.5, 4.0, 7.0, 2.0][:H]), torch.tensor([1.0, 3.0, 16.0, 5.0][:H])):
         ins = [t.to(device).clone() for t in (q0, k0, v0, gamma0)] + ([K.to(device).clone()] if torch.is_tensor(K) else [])
         if transpose:                                              # modeldeki düzen: (B, N, H, dh) -> transpose
             ins[:3] = [t.transpose(1, 2).contiguous().transpose(1, 2) for t in ins[:3]]
         for t in ins:
             t.requires_grad_()
         Kx = ins[4] if torch.is_tensor(K) else K
+        int_k = torch.is_tensor(K) and bool((K == K.round()).all())   # tamsayı değerli öğrenilen k: kuvvet zinciri yolu
         res = []
-        for fn in (lambda: rgn_triton(*ins[:4], Kx, window=window),
+        for fn in (lambda: rgn_triton(*ins[:4], Kx, window=window, int_k=int_k),
                    lambda: rgn_dense(*ins[:4], None, "rope", 1, Kx, window=window)):
             o = fn()
             (o * G).sum().backward()
             res.append([o.detach()] + [t.grad.clone() for t in ins])
             for t in ins:
                 t.grad = None
-        name = "learn" if torch.is_tensor(K) else K
+        name = ("learn_int" if int_k else "learn") if torch.is_tensor(K) else K
         errs[name] = [((a - b).abs().max() / b.abs().max().clamp_min(1e-12)).item() for a, b in zip(*res)]
     return errs
 

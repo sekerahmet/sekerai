@@ -45,6 +45,10 @@ class ModelConfig:
     sharpness_learn: bool = False      # head başına öğrenilen k (sharpness_range içinde, başlangıç sharpness_init)
     sharpness_range: tuple = (1.0, 8.0)   # 8: fp32'de alt taşma güvenliği ((1 + γd/k)^-k, γ ~ 1e5'e kadar)
     sharpness_init: float = 4.0
+    sharpness_int: bool = False        # öğrenilen k ileri geçişte en yakın tamsayı (kuvvet zinciri, log / exp yok); gradyan
+                                       # sürekli k'ye düz geçer (straight-through)
+    sharpness_range_g: tuple = ()      # genel (G) katmanlarda k aralığı (yerel katmanlar sharpness_range).  Genel katmanda aday
+                                       # çok: kalın kuyruğun toplam payı aday sayısıyla büyür -> daha yüksek tavan
     gamma_range: tuple = (4.0, 512.0)  # γ başlangıcı, head başına geometrik
     gamma_min: float = 1.0             # γ = γ_min + γ̂²
     learn_gamma: bool = True
@@ -105,8 +109,9 @@ class ModelConfig:
         assert (self.d_model // self.n_heads) % 2 == 0, "RoPE çift head boyutu ister"
         assert self.power in (1, 2)
         assert 1 <= self.sharpness <= 16, "keskinlik üssü 1..16"
-        lo, hi = self.sharpness_range
-        assert 1.0 <= lo < self.sharpness_init < hi <= 16.0, "sharpness_range / sharpness_init"
+        for lo, hi in (self.sharpness_range,) + ((tuple(self.sharpness_range_g),) if self.sharpness_range_g else ()):
+            assert 1.0 <= lo < self.sharpness_init < hi <= 16.0, "sharpness_range(_g) / sharpness_init"
+        assert not self.sharpness_range_g or self.local_window, "sharpness_range_g: yerel / genel düzen gerek"
         assert not (self.attn == "softmax" and self.pos not in ("rope", "none")), "softmax tabanı: pos rope / none"
         assert not (self.attn == "softmax" and self.attn_impl in ("dense", "flex", "triton")), "softmax tabanı sdpa ile"
         assert not (self.attn_impl == "triton" and (self.pos not in ("rope", "none") or self.power != 1)), \

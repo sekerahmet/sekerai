@@ -1,0 +1,21 @@
+{
+  "extends": "../base/train_ss.json",
+  "name": "ss_d512_rgn_kint_glu_yg",
+  "notes": "Yerel/genel + tamsayı öğrenilen k (kullanıcı, 15 Ekim: 'Y'ler düşük, G'ler yüksek k — sabit değil üst sınır olarak ve tam sayı atlamalı'). Y: k ∈ {1..8}, G: k ∈ {1..16}; ileri geçiş kuvvet zinciri (log / exp yok), γ tavanı k'ye bağlı. Kıyas: ss_d512_rgn_klearn_glu_yg (sürekli k ≤ 8) 1000. adım 1,9197.",
+  "model": {
+    "sharpness_learn": true,
+    "sharpness_range": [
+      1.0,
+      8.0
+    ],
+    "sharpness_init": 4.0,
+    "mlp": "glu",
+    "local_window": 128,
+    "global_layers": 3,
+    "sharpness_int": true,
+    "sharpness_range_g": [
+      1.0,
+      16.0
+    ]
+  }
+}

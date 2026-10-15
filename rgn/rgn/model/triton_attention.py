@@ -53,6 +53,15 @@ def _weight(s, g, K, K_INT: tl.constexpr):
         r = r * r
         r = r * r
         w = r * r
+    elif K_INT == -2:
+        # öğrenilen tamsayı k (head başına, 1..16): ikili üs alma — 1 bölme + en çok 9 çarpma, log / exp yok
+        kk = K.to(tl.int32)
+        p = 1.0 / den
+        w = p * 0.0 + 1.0
+        for b in tl.static_range(5):
+            if (kk >> b) & 1:
+                w = w * p
+            p = p * p
     else:
         w = tl.exp2(-K * tl.log2(den))
     return d, den, w
@@ -242,7 +251,7 @@ def gravity_bwd(do: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Ten
     common = (*_strides(q), *_strides(k), *_strides(v), *_strides(do))
     _bwd_kv_kernel[(nb, B * H)](
         q, k, v, gamma, kvec, do, z, dl, dk, dv, pg, pk, *common, H, N, window, nb,
-        D=D, BM=bm, BN=bn, K_INT=k_int, NEED_K=k_int == 0, QK=qk, AV=av, DP=DP_PREC if qk != "ieee" else "ieee",
+        D=D, BM=bm, BN=bn, K_INT=k_int, NEED_K=k_int in (0, -2), QK=qk, AV=av, DP=DP_PREC if qk != "ieee" else "ieee",
         num_warps=nw, num_stages=ns)
     bm, bn, nw, ns = CFG["q"]
     _bwd_q_kernel[(triton.cdiv(N, bm), B * H)](
@@ -269,13 +278,13 @@ def _setup_context(ctx, inputs, output):
 def _backward(ctx, do, dz):
     q, k, v, o, z, gamma, kvec = ctx.saved_tensors
     dq, dk, dv, dg, dkv = gravity_bwd(do, q, k, v, o, z, gamma, kvec, ctx.k_int, ctx.qk_prec, ctx.window)
-    return dq, dk, dv, dg, (dkv if ctx.k_int == 0 else None), None, None, None
+    return dq, dk, dv, dg, (dkv if ctx.k_int in (0, -2) else None), None, None, None
 
 
 gravity_fwd.register_autograd(_backward, setup_context=_setup_context)
 
 
-def rgn_triton(q, k, v, gamma, sharpness=1, qk_prec="tf32x3", window=0):
+def rgn_triton(q, k, v, gamma, sharpness=1, qk_prec="tf32x3", window=0, int_k=False):
     """q (B, H, N, dh), k / v (B, Hkv, N, dh) -> O (B, H, N, dh) fp32.  rgn_dense(pos rope / none, power 1) ile aynı
     sonuç.  sharpness: sayı ya da (H,) tensör (öğrenilen k; gradyan alır).  qk_prec: q·kᵀ çarpımı — tf32x3 (fp32'ye
     yakın) | tf32 (hızlı) | ieee (tam fp32, yavaş).  window > 0: yerel katman, i yalnız i - window < j <= i'ye bakar
@@ -288,7 +297,7 @@ def rgn_triton(q, k, v, gamma, sharpness=1, qk_prec="tf32x3", window=0):
     q, k, v = (t.float() if t.stride(-1) == 1 else t.float().contiguous() for t in (q, k, v))
     gamma = gamma.float().contiguous()
     if torch.is_tensor(sharpness):
-        kvec, k_int = sharpness.float().contiguous(), 0
+        kvec, k_int = sharpness.float().contiguous(), (-2 if int_k else 0)     # -2: tamsayı değerli öğrenilen k
     else:
         kvec = torch.full((H,), float(sharpness), device=q.device)
         k_int = int(sharpness) if float(sharpness).is_integer() else -1     # -1: genel üs yolu, gradyan yok

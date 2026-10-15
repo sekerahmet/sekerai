@@ -52,6 +52,26 @@ def test_local_global_layers():
     assert (a[..., rel >= 8] == 0).all()
 
 
+def test_integer_sharpness_and_gamma_cap():
+    """Tamsayı k: ileri değerler tamsayı, ρ gradyan alır (straight-through); genel katman tavanı sharpness_range_g;
+    γ tavanı (1 + 4γ/k)^k <= 2^120."""
+    cfg = tiny(n_layers=3, local_window=8, global_layers=1, sharpness_learn=True, sharpness_int=True,
+               sharpness_range=(1.0, 8.0), sharpness_range_g=(1.0, 16.0), sharpness_init=4.0)
+    m = RGNModel(cfg)
+    assert [b.attn.cfg.sharpness_range for b in m.blocks] == [(1.0, 8.0), (1.0, 8.0), (1.0, 16.0)]
+    for b in m.blocks:
+        b.attn.sharp_rho.data.uniform_(-3, 3)
+        k = b.attn.sharpness()
+        assert torch.equal(k, k.round())
+    idx = torch.randint(0, 97, (2, 16))
+    m(idx, idx).backward()
+    assert all((b.attn.sharp_rho.grad.abs() > 0).any() for b in m.blocks)
+    a = m.blocks[2].attn
+    a.gamma_hat.data.fill_(100.0)                                   # γ ~ 1e4: k = 16'da tavan bağlar
+    g, k = a.gamma().detach(), a.sharpness().detach()
+    assert ((1 + 4 * g.double() / k.double()) ** k.double() <= 2.0 ** 120 * 1.0001).all()
+
+
 def test_learnable_sharpness_model():
     m = RGNModel(tiny(sharpness_learn=True, sharpness_init=4.0))
     for blk in m.blocks:
