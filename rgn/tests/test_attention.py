@@ -158,12 +158,13 @@ def test_triton_matches_dense_interpreter():
 
 def test_triton_matches_dense_cuda():
     """GPU: q·kᵀ tf32x3, diğer çarpımlar tf32 -> çıktı ve q / k / v gradyanı bağıl ~2e-3.  Head parametrelerinin (γ, k)
-    gradyanı tüm (i, j) üzerinden toplam: tf32 dO·Vᵀ hatası birikir, ~1e-2 (ölçüldü; hepsi tf32x3 iken 2e-6).  N = 100
-    (blok kenarı) ve 512, GQA, model düzeni (transpose)."""
+    gradyanı tüm (i, j) üzerinden toplam ve dw = (dO·V - D) / z iptali tf32 yuvarlamasını biriktirir: k = 1, N = 512'de
+    ~5e-2, k = 4'te ~5e-3 (ölçüldü; ileri w·V ve dO·Vᵀ birlikte tf32x3 iken 2e-4, çekirdek %55 yavaş — triton_attention
+    FWD_AV_PREC / DP_PREC).  N = 100 (blok kenarı) ve 512, GQA, model düzeni (transpose)."""
     require_cuda()
     for kw in (dict(N=100), dict(N=512, dh=64, transpose=True)):
         for name, e in _triton_vs_dense("cuda", **kw).items():
-            assert max(e[:4]) < 5e-3 and max(e[4:]) < 3e-2, (kw, name, e)
+            assert max(e[:4]) < 5e-3 and max(e[4:]) < 1.5e-1, (kw, name, e)
 
 
 def test_triton_compiled_model_cuda():

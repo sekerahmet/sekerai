@@ -26,8 +26,9 @@ import triton.language as tl
 
 AV_PREC = "tf32"            # geri geçişte dV, dK, dQ çarpımları
 FWD_AV_PREC = "tf32"        # ileri w·V (O; geri geçişte D = dO·O)
-DP_PREC = "tf32"            # geri dO·Vᵀ.  D ile tutarlı olmalı: ileri tf32 iken yalnız bunu tf32x3 yapmak γ gradyanı
-                            # hatasını büyütür (ölçüldü)
+DP_PREC = "tf32"            # geri dO·Vᵀ.  FWD_AV_PREC ile aynı olmalı (D = dO·O ile tutarlılık).  Ölçüldü (N 512,
+                            # tutarlı kayıplar, en kötü bağıl): ikisi tf32 -> dq 5e-3, dγ 1e-1 (k = 1), dk_h 8e-3, 1,73 ms;
+                            # yalnız ileri tf32x3 -> dγ 1,1 (tutarsız!); ikisi tf32x3 -> dγ 2e-4, 2,69 ms
 # Çekirdek başına (BM, BN, num_warps, num_stages).  fp32 bloklar paylaşılan belleği (sm_120: 99 KB) çabuk doldurur.
 # Tarandı (B 64, H 8, N 512, dh 64; tf32x3 ileri + geri 2,57 -> 1,71 ms, tf32 1,52 -> 1,33 ms).
 CFG = {"fwd": (64, 32, 4, 2), "kv": (32, 32, 4, 3), "q": (64, 32, 4, 2)}
