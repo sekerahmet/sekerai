@@ -117,6 +117,24 @@ def _causal_block_mask(n, device):
     return _FLEX[key]
 
 
+def _window_block_mask(n, window, device):
+    key = ("win", n, window, str(device))
+    if key not in _FLEX:
+        from torch.nn.attention.flex_attention import create_block_mask
+
+        def mask_mod(b, h, q_idx, kv_idx):
+            return (q_idx >= kv_idx) & (q_idx - kv_idx < window)
+        _FLEX[key] = create_block_mask(mask_mod, None, None, n, n, device=device)
+    return _FLEX[key]
+
+
+def softmax_window(q, k, v, window, scale):
+    """Softmax yerel katman (CUDA): FlexAttention blok maskesi — pencere dışındaki bloklar ileri ve geri geçişte hiç
+    hesaplanmaz (SDPA'nın N×N maskeli yolu bütün blokları hesaplar)."""
+    return _flex_attention()(q, k, v, block_mask=_window_block_mask(q.shape[2], window, q.device), scale=scale,
+                             enable_gqa=k.shape[1] != q.shape[1])
+
+
 def rgn_flex(q, k, v, gamma, beta, pos, power, sharpness=1):
     """FlexAttention yolu (CUDA).  γ ve β score_mod'a yakalanan tensörlerdir; gradyan alırlar (PyTorch >= 2.6)."""
     def score_mod(score, b, h, q_idx, kv_idx):
@@ -260,6 +278,9 @@ class Attention(nn.Module):
         if impl == "sdpa":
             s = self.dh ** -0.5                     # açık ölçek: ek boyutlar (önem) varsayılan 1/√boyut'u değiştirmesin
             if self.window:
+                n, dh = q.shape[2], q.shape[-1]
+                if q.is_cuda and n >= FLEX_BLOCK and n % FLEX_BLOCK == 0 and dh & (dh - 1) == 0:
+                    return softmax_window(q, k, v, self.window, s)           # blok atlamalı (hızlı)
                 return F.scaled_dot_product_attention(q, k, v, attn_mask=self._mask(q.shape[2], q.device),
                                                       enable_gqa=self.Hkv != self.H, scale=s)
             return F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=self.Hkv != self.H, scale=s)

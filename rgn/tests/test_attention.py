@@ -201,6 +201,27 @@ def test_triton_compiled_model_cuda():
     assert ((wt - wd).abs().max() / wd.abs().max()).item() < 2e-2
 
 
+def test_softmax_window_flex_matches_mask_cuda():
+    """Softmax yerel katman: Flex blok maskesi = SDPA N×N maskesi (ileri + geri)."""
+    require_cuda()
+    from rgn.model.attention import softmax_window
+    g = torch.Generator(device="cuda").manual_seed(0)
+    q, k, v = (torch.randn(2, 4, 256, 64, device="cuda", generator=g, requires_grad=True) for _ in range(3))
+    W = 37
+    rel = torch.arange(256, device="cuda")[:, None] - torch.arange(256, device="cuda")[None, :]
+    G = torch.randn(2, 4, 256, 64, device="cuda", generator=g)
+    outs = []
+    for fn in (lambda: softmax_window(q, k, v, W, 0.125),
+               lambda: torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=(rel >= 0) & (rel < W), scale=0.125)):
+        o = fn()
+        (o * G).sum().backward()
+        outs.append([o.detach()] + [t.grad.clone() for t in (q, k, v)])
+        for t in (q, k, v):
+            t.grad = None
+    for a, b in zip(*outs):
+        assert torch.allclose(a, b, atol=2e-3, rtol=2e-3), (a - b).abs().max().item()
+
+
 def test_flex_matches_dense_cuda():
     require_cuda()
     q, k, v, gamma, beta = _inputs(B=2, H=4, Hkv=2, N=256, dh=64, dtype=torch.float32, device="cuda")
