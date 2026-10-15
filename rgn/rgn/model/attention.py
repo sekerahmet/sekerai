@@ -135,6 +135,7 @@ def softmax_window(q, k, v, window, scale):
                              enable_gqa=k.shape[1] != q.shape[1])
 
 
+@torch.compiler.disable                    # gözlem: derleme dışında (Inductor N×N maske + üstel ağırlıkta sembolik hata veriyordu)
 @torch.no_grad()
 def locality(q, k, window, scale, taus):
     """Konum özeti (saf gözlem, gradyansız) -> (B, N, T·H):  L_τ,i = Σ_j pay_ij · e^(−(i−j)/τ) ∈ (0, 1].
@@ -148,9 +149,9 @@ def locality(q, k, window, scale, taus):
     d = (torch.arange(N, device=q.device)[:, None] - torch.arange(N, device=q.device)[None, :]).float()
     keep = (d >= 0) & (d < window) if window else d >= 0
     p = torch.softmax(s.masked_fill(~keep, float("-inf")), -1)
-    w = torch.stack([torch.exp(-d.clamp_min(0) / t) for t in taus])               # (T, N, N)
-    loc = torch.einsum("bhij,tij->bthi", p, w)                                     # (B, T, H, N)
-    return loc.reshape(B, len(taus) * H, N).transpose(1, 2)
+    dd = d.clamp_min(0)
+    loc = torch.cat([(p * torch.exp(-dd / t)).sum(-1) for t in taus], 1)           # (B, T·H, N)
+    return loc.transpose(1, 2)
 
 
 def rgn_flex(q, k, v, gamma, beta, pos, power, sharpness=1):
