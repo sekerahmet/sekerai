@@ -1,7 +1,7 @@
 {
   "extends": "../base/train_ss.json",
   "name": "ss_d512_rgn_klearn_glu_yg",
-  "notes": "Yerel/genel katmanlar (kullanıcı, Model Z deneyimi: 'YYG tarzında 2 yerel bir genel hem hızlı hem daha iyi'). Yerel: son 128 token + RoPE; genel: tam causal + RoPE. Dizilim YYGYGYYG.",
+  "notes": "Yerel/genel katmanlar (kullanıcı, 15 Ekim: 'YYG tarzında 2 yerel bir genel hem hızlı hem daha iyi'). Yerel: son 128 token + RoPE (kısa menzilli dizim); genel: tam causal + RoPE. Dizilim YYGYGYYG.",
   "model": {
     "sharpness_learn": true,
     "sharpness_range": [

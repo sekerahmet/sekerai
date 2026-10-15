@@ -23,6 +23,8 @@ class Block(nn.Module):
         super().__init__()
         self.kind = kind
         self.norm1, self.norm2 = RMSNorm(cfg.d_model), RMSNorm(cfg.d_model)
+        if cfg.ff_ratio:
+            cfg = dataclasses.replace(cfg, d_ff=cfg.ff_dim(kind))
         if kind == "G" and cfg.global_pos:
             cfg = dataclasses.replace(cfg, pos=cfg.global_pos)
         self.attn = Attention(cfg, window=cfg.local_window if kind == "Y" else 0)

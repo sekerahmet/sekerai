@@ -43,6 +43,9 @@ def test_local_global_layers():
     a = m.blocks[0].attn.weights(m.blocks[0].norm1(x), m.rope(32))
     rel = torch.arange(32)[:, None] - torch.arange(32)[None, :]
     assert (a[..., rel >= 8] == 0).all() and (a[..., (rel >= 0) & (rel < 8)] > 0).all()
+    r = RGNModel(tiny(n_layers=3, local_window=8, global_layers=1, mlp="glu", ff_ratio=(1, 3)))
+    r(torch.randint(0, 97, (2, 16)), torch.randint(0, 97, (2, 16))).backward()
+    assert r.cfg.ff_dim("Y") == 64 and r.cfg.ff_dim("G") == 256         # d 64: 1·4·64/3 = 85 -> 64; 3·4·64/3 = 256
     s = RGNModel(tiny(attn="softmax", mlp="swiglu", attn_impl="auto", n_layers=3, local_window=8, global_layers=1))
     s(idx, idx).backward()
     a = s.blocks[0].attn.weights(s.blocks[0].norm1(s.embed(idx)), s.rope(32))

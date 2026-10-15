@@ -52,8 +52,11 @@ class ModelConfig:
     local_window: int = 0              # > 0: yerel (Y) katmanlar yalnız son local_window token'a bakar (j > i - W); genel (G)
                                        # katmanlar tümüne.  0: bütün katmanlar genel (eski düzen)
     global_layers: int = 0             # local_window > 0 iken genel katman sayısı
-    g_layout: str = "interleave"       # interleave: eşit aralık, son katman G (Model Z: Y-Y-G) | top: son N | elle "2,5,7"
-    global_pos: str = ""               # genel katmanlarda konum ("" = pos); "none": konumsuz, yalnız anlam uzaklığı (Model Z g_nope)
+    g_layout: str = "interleave"       # interleave: eşit aralık, son katman G (~Y-Y-G) | top: son N | elle "2,5,7"
+    global_pos: str = ""               # genel katmanlarda konum ("" = pos); "none": konumsuz — ağırlık yalnız anlam uzaklığı
+                                       # (saf çekim; sıra bilgisi yerel katmanlardan ve causal maskeden)
+    ff_ratio: tuple = ()               # (Y, G): MLP / dikkat (4 d²) parametre oranı, katman türüne göre.  Örn. (1, 3): yerel
+                                       # katman dizimi taşır (dar MLP), genel katman anlam çekimiyle toplar (geniş MLP).  (): d_ff
     mlp: str = "rational"              # rational: W2 u/sqrt(1+u²) | rglu: W2 [G/sqrt(1+G²) ⊙ U] | glu: cebirsel GLU | swiglu: taban
     mlp_bias: bool = True
     init_std: float = 0.02
@@ -71,7 +74,13 @@ class ModelConfig:
             at = {int(v) for v in self.g_layout.split(",") if v.strip()}
         return "".join("G" if l in at else "Y" for l in range(L))
 
-    def ff_dim(self):
+    def ff_dim(self, kind=None):
+        """MLP genişliği.  kind ('Y' / 'G') ve ff_ratio verilmişse: oran × 4d² parametre (kapılı MLP 3 matris, rasyonel 2),
+        64'ün katı."""
+        if kind and self.ff_ratio:
+            r = self.ff_ratio[0 if kind == "Y" else 1]
+            mats = 2 if self.mlp == "rational" else 3
+            return max(64, round(r * 4 * self.d_model / mats / 64) * 64)
         if self.d_ff:
             return self.d_ff
         if self.mlp == "rational":
@@ -84,6 +93,7 @@ class ModelConfig:
         assert self.rgn_qk_prec in ("tf32x3", "tf32", "ieee"), self.rgn_qk_prec
         assert self.local_window >= 0 and 0 <= self.global_layers <= self.n_layers
         assert not self.global_pos or self.global_pos in POS, self.global_pos
+        assert not self.ff_ratio or (len(self.ff_ratio) == 2 and self.local_window), "ff_ratio: (Y, G), yerel pencere gerek"
         if self.local_window:
             kinds = self.layer_kinds()
             assert len(kinds) == self.n_layers and kinds.count("G") == self.global_layers, \
