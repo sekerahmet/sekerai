@@ -1,0 +1,16 @@
+{
+  "extends": "../base/train_ss.json",
+  "name": "ss_d512_tf_yg_ff12",
+  "notes": "Transformer YYG + MLP oranı katman türüne göre (kullanıcı, 15 Ekim: 'yerel MLP daha küçük mantıklı; 1:1, genel için SwiGLU formülü best practice'). MLP / dikkat parametresi: yerel 1:1 (d_ff 704), genel 2:1 = standart SwiGLU 8d/3 (d_ff 1344). Kıyas: ss_d512_tf_yg_epok 3000. adım 1,7379.",
+  "model": {
+    "attn": "softmax",
+    "pos": "rope",
+    "mlp": "swiglu",
+    "local_window": 128,
+    "global_layers": 3,
+    "ff_ratio": [
+      1,
+      2
+    ]
+  }
+}
