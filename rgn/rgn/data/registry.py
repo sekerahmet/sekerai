@@ -7,6 +7,9 @@ Yollar Drive köküne göredir (rgn/paths.py: Windows G:/Drive'ım, Colab /conte
                  (python scripts/prepare_data.py --dataset tinystories)
     fineweb      FineWeb-Edu sample-10BT: hazır parçalar (fineweb/gpt2/shard_000..013.bin, ~750M token / parça);
                  eğitim 000..012, doğrulama 013'ün ilk 10M token'ı
+    fineweb_s000 FineWeb-Edu shard_000'ın v2 sürümü (v2/fineweb_edu_s000/gpt2/{train,valid}.npy; 737,0M / 15,1M token):
+                 aynı kaynak akış (sha 0aa18c…), metin + eot, valid = belge indeksi % 50 == 0; cümle sınırları yanında
+                 (train_sentence_offsets.npy, web profili, ≤ 128 token).  _c24 / _c32 sabit parçadır, cümle değil.
     synthetic    testler için rastgele token (dosya yok)
 
 bytes_per_token: doğrulama kümesinin UTF-8 bayt / token oranı; bits-per-byte (bpb) = kayıp / ln2 / bytes_per_token.
@@ -55,6 +58,10 @@ DATASETS = {
         "fineweb", "FineWeb-Edu sample-10BT (GPT-2 BPE) — genel web metni; ölçek testi",
         train=["fineweb/gpt2/shard_%03d.bin" % i for i in range(13)], valid=["fineweb/gpt2/shard_013.bin"], fmt="bin",
         valid_max_tokens=10_000_000, bytes_per_token=3_469_725_588 / 752_097_492),   # shard_000.json oranı
+    "fineweb_s000": DatasetSpec(
+        "fineweb_s000", "FineWeb-Edu shard_000, v2 ayrımı (her 50. belge doğrulama) — eski v2 FineWeb koşularıyla kıyaslanabilir",
+        train=["v2/fineweb_edu_s000/gpt2/train.npy"], valid=["v2/fineweb_edu_s000/gpt2/valid.npy"], fmt="npy",
+        bytes_per_token=69_744_540 / 15_073_888),          # valid_bytes.npy toplamı / valid token (SS ile aynı tanım)
     "synthetic": DatasetSpec("synthetic", "Rastgele token (testler)", train=[], valid=[], fmt="synthetic",
                              bytes_per_token=4.0),
 }
