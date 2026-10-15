@@ -100,34 +100,44 @@ def test_importance_focus_gate():
     assert torch.allclose(got, ref, atol=1e-5), (got - ref).abs().max()
 
 
-def test_evidence():
-    """Kanıt: sıfır başlatmada tabanla aynı; açık hesap = ln((1/n) Σ e^puan); E gradyan alır; yerel pencerede n = W."""
-    from rgn.model.attention import softmax_lse
+def test_locality():
+    """Konum özeti: sıfır başlatmada tabanla aynı; açık formül L_τ = Σ pay e^(−(i−j)/τ); gradyansız (gözlem); E gradyan
+    alır; yerel / genel τ'lar; Tom örneği kâğıt üstü değerlerle aynı."""
+    from rgn.model.attention import locality
     base = dict(attn="softmax", mlp="swiglu", attn_impl="auto", n_kv_heads=4, n_layers=3, local_window=8, global_layers=1)
     torch.manual_seed(0)
     m0 = RGNModel(tiny(**base))
     torch.manual_seed(0)
-    m1 = RGNModel(tiny(**base, attn_evidence=True, attn_gate="head"))
-    m0.load_state_dict({k: v for k, v in m1.state_dict().items() if "ev_" not in k and "w_aux" not in k})
+    m1 = RGNModel(tiny(**base, attn_locality=True))
+    m0.load_state_dict({k: v for k, v in m1.state_dict().items() if "loc_" not in k})
     idx = torch.randint(0, 97, (2, 16))
     assert torch.allclose(m0(idx), m1(idx), atol=1e-5)
     m1(idx, idx).backward()
-    assert all((b.ev_proj.weight.grad.abs() > 0).any() for b in m1.blocks)
-    from rgn.model.attention import evidence
+    assert all((b.loc_proj.weight.grad.abs() > 0).any() for b in m1.blocks)
+    assert [b.loc_proj.in_features for b in m1.blocks] == [12, 12, 12]
     g = torch.Generator().manual_seed(1)
-    q, k, v = (torch.randn(1, 2, 12, 8, generator=g) for _ in range(3))
+    q = torch.randn(1, 2, 10, 8, generator=g, requires_grad=True)
+    k = torch.randn(1, 2, 10, 8, generator=g)
     for W in (0, 4):
-        out, lse = softmax_lse(q, k, v, W, 0.5)
-        ev = evidence(q, k, lse, W, 0.5)                          # (1, 12, 4): güç (2 head), odaklanma (2 head)
-        s = (q @ k.transpose(-2, -1)) * 0.5
-        for i in range(12):
+        L = locality(q, k, W, 0.5, (2.0, 16.0))                      # (1, 10, 4): τ 2 (2 head), τ 16 (2 head)
+        assert not L.requires_grad
+        s = (q.detach() @ k.transpose(-2, -1)) * 0.5
+        for i in range(10):
             js = [j for j in range(i + 1) if not W or i - j < W]
-            row = s[0, :, i, js]
-            assert torch.allclose(lse[0, :, i], torch.logsumexp(row, -1), atol=1e-5), (W, i)
-            power = torch.logsumexp(row, -1) - torch.log(torch.tensor(float(len(js))))
-            focus = torch.logsumexp(row - row.mean(-1, keepdim=True), -1) - torch.log(torch.tensor(float(len(js))))
-            assert torch.allclose(ev[0, i, :2], power, atol=1e-5) and torch.allclose(ev[0, i, 2:], focus, atol=1e-5), (W, i)
-            assert (ev[0, i, 2:] >= -1e-6).all()
+            p = torch.softmax(s[0, :, i, js], -1)
+            for ti, t in enumerate((2.0, 16.0)):
+                ref = (p * torch.exp(-torch.tensor([float(i - j) for j in js]) / t)).sum(-1)
+                assert torch.allclose(L[0, i, ti * 2:(ti + 1) * 2], ref, atol=1e-5), (W, i, t)
+    # Tom örneği: "he" (12) -> Tom (0) %80, "It" (6) %20 -> L_4 ≈ 0,084, L_32 ≈ 0,716
+    import math
+    sc = torch.full((13,), -1e4)
+    sc[0], sc[6] = math.log(0.8), math.log(0.2)
+    qq = torch.zeros(1, 1, 13, 13)
+    kk = torch.zeros(1, 1, 13, 13)
+    qq[0, 0, 12] = 1.0
+    kk[0, 0, :, :] = torch.diag(sc)                                 # q_12 · k_j = sc[j]
+    L = locality(qq, kk, 0, 1.0, (4.0, 32.0))
+    assert abs(L[0, 12, 0].item() - 0.084) < 2e-3 and abs(L[0, 12, 1].item() - 0.716) < 2e-3, L[0, 12]
 
 
 def test_learnable_sharpness_model():

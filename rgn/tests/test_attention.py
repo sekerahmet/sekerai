@@ -222,35 +222,6 @@ def test_softmax_window_flex_matches_mask_cuda():
         assert torch.allclose(a, b, atol=2e-3, rtol=2e-3), (a - b).abs().max().item()
 
 
-def test_softmax_lse_flex_matches_dense_cuda():
-    """Kanıt için flex paydası (doğal logaritma) = açık logsumexp; çıktı da aynı (causal ve pencere)."""
-    require_cuda()
-    from rgn.model.attention import softmax_lse
-    g = torch.Generator(device="cuda").manual_seed(0)
-    q, k, v = (torch.randn(2, 4, 256, 64, device="cuda", generator=g) for _ in range(3))
-    for W in (0, 37):
-        o1, l1 = softmax_lse(q, k, v, W, 0.125)
-        o2, l2 = softmax_lse(q.cpu(), k.cpu(), v.cpu(), W, 0.125)
-        assert torch.allclose(o1.cpu(), o2, atol=2e-3), (W, (o1.cpu() - o2).abs().max().item())
-        assert torch.allclose(l1.cpu(), l2, atol=2e-3), (W, (l1.cpu() - l2).abs().max().item())
-
-
-def test_softmax_lse_grad_cuda():
-    """Paydanın (güç) gradyanı flex'ten geri akıyor mu, açık hesapla aynı mı?  (attn_evidence_grad için önkoşul)"""
-    require_cuda()
-    from rgn.model.attention import softmax_lse
-    g = torch.Generator(device="cuda").manual_seed(0)
-    base = [torch.randn(2, 4, 256, 64, device="cuda", generator=g) for _ in range(3)]
-    grads = []
-    for dev in ("cuda", "cpu"):
-        q, k, v = (t.to(dev).clone().requires_grad_() for t in base)
-        o, l = softmax_lse(q, k, v, 0, 0.125, keep_grad=True)
-        (o.float().sum() + l.sum()).backward()
-        grads.append([t.grad.cpu() for t in (q, k, v)])
-    for a, b in zip(*grads):
-        assert torch.allclose(a, b, atol=5e-3, rtol=5e-3), (a - b).abs().max().item()
-
-
 def test_flex_matches_dense_cuda():
     require_cuda()
     q, k, v, gamma, beta = _inputs(B=2, H=4, Hkv=2, N=256, dh=64, dtype=torch.float32, device="cuda")

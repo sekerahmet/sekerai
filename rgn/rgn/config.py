@@ -68,13 +68,12 @@ class ModelConfig:
     importance_max: float = 4.0
     attn_focus: bool = False           # odak: sorgu başına keskinlik çarpanı ∈ (0, focus_max), başlangıç 1
     focus_max: float = 4.0
-    attn_evidence: bool = False        # kanıt: head başına iki sayı MLP kapı girdisine (softmax payları normalize ettiği için
-                                       # atılan bilgi): güç = ln((1/n) Σ_j e^puan); odaklanma = güç − ortalama puan ≥ 0
-                                       # (kaydırmaya duyarsız: yalnız puan farkları — softmax'ın kendi değişmezliğiyle uyumlu)
-    attn_evidence_grad: bool = False   # güç teriminin (softmax paydası) gradyanı q / k'ye akar mı (flex desteği gerekir)
-    evidence_norm: tuple = (0.0, 2.0, 1.0, 1.5)   # (μ_güç, σ_güç, μ_odak, σ_odak) başlangıcı: z = (kanıt − μ) · 0,5/σ, sonra
-                                       # r(z) = z/√(1+z²) — ±1σ'da r ≈ ±0,45 (doymaz).  Eğitilmiş tabanda ölçülen dağılımdan
-                                       # verilmeli (scripts/evidence_probe.py); μ ve ölçek öğrenilir
+    attn_locality: bool = False        # konum özeti (kullanıcı, 15 Ekim: "mesafe mantıklı"): head başına L_τ = Σ_j pay_ij e^(−(i−j)/τ)
+                                       # ∈ (0, 1] — "dikkatimin ne kadarı ~τ token içinden geldi"; MLP'ye konum bilgisi hiç
+                                       # ulaşmaz (RoPE yalnız puanda).  Paylar gradyansız (saf gözlem: dikkat sinyal kanalına
+                                       # dönüşmez); MLP kapı girdisine E · (2L − 1), E sıfır başlatma
+    locality_tau_local: tuple = (2.0, 8.0, 32.0)       # yerel katman (pencere 128: büyük τ hep ~1 olurdu)
+    locality_tau_global: tuple = (4.0, 32.0, 256.0)    # genel katman
     attn_gate: str = ""                # kapı: "" | "head" (head başına 1 sayı) | "elem" (her çıktı sayısı); 2σ_a ∈ (0, 2), başlangıç 1
     mlp: str = "rational"              # rational: W2 u/sqrt(1+u²) | rglu: W2 [G/sqrt(1+G²) ⊙ U] | glu: cebirsel GLU | swiglu: taban
     mlp_bias: bool = True
@@ -111,8 +110,8 @@ class ModelConfig:
         assert self.attn_impl in ATTN_IMPL, self.attn_impl
         assert self.rgn_qk_prec in ("tf32x3", "tf32", "ieee"), self.rgn_qk_prec
         assert self.attn_gate in ("", "head", "elem"), self.attn_gate
-        assert not (self.attn_evidence and (self.attn != "softmax" or self.attn_importance)), \
-            "kanıt: softmax dikkatinde, önem olmadan (ek boyut hızlı çekirdeği bozar)"
+        assert not (self.attn_locality and (self.attn != "softmax" or self.attn_importance)), \
+            "konum özeti: softmax dikkatinde, önem olmadan"
         assert not ((self.attn_importance or self.attn_focus or self.attn_gate) and self.attn != "softmax"), \
             "önem / odak / kapı: şimdilik softmax dikkatinde"
         assert self.local_window >= 0 and 0 <= self.global_layers <= self.n_layers

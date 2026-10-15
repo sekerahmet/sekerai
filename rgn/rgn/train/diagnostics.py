@@ -59,5 +59,5 @@ def summary_line(diag):
         s += " | |u|>3 %.4f" % (sum(sat) / len(sat))
     ext = [l["mlp"].get("ext_ratio") for l in L if l["mlp"] and l["mlp"].get("ext_ratio") is not None]
     if ext:
-        s += " | kanıt/kapı " + " ".join("%.3f" % e for e in ext)
+        s += " | konum/kapı " + " ".join("%.3f" % e for e in ext)
     return s

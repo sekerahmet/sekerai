@@ -31,24 +31,20 @@ class Block(nn.Module):
             cfg = dataclasses.replace(cfg, sharpness_range=tuple(cfg.sharpness_range_g))
         self.attn = Attention(cfg, window=cfg.local_window if kind == "Y" else 0)
         self.mlp = build_mlp(cfg)
-        self.ev_proj = None
-        if cfg.attn_evidence:
-            # kanıt -> MLP kapı girdisi: E · r(c_h · kanıt_h), r(z) = z/√(1+z²); E sıfır başlatma (başlangıçta taban)
-            H = cfg.n_heads
-            mg, sg, mo, so = cfg.evidence_norm                               # [güç, odaklanma] × head
-            self.ev_mu = nn.Parameter(torch.tensor([mg] * H + [mo] * H, dtype=torch.float32))
-            self.ev_scale = nn.Parameter(torch.tensor([0.5 / sg] * H + [0.5 / so] * H, dtype=torch.float32))
-            self.ev_proj = nn.Linear(2 * H, cfg.ff_dim(), bias=False)
+        self.loc_proj = None
+        if cfg.attn_locality:
+            # konum özeti -> MLP kapı girdisi: E · (2L − 1) ∈ (−1, 1]; E sıfır başlatma (başlangıçta taban)
+            taus = cfg.locality_tau_local if kind == "Y" else cfg.locality_tau_global
+            self.loc_proj = nn.Linear(len(taus) * cfg.n_heads, cfg.ff_dim(), bias=False)
 
     def forward(self, x, rope=None):
         a = self.attn(self.norm1(x), rope)
         extra = None
-        if self.ev_proj is not None:
-            a, ev = a
-            z = (ev - self.ev_mu) * self.ev_scale
-            extra = self.ev_proj((z * torch.rsqrt(1.0 + z * z)).to(x.dtype))
+        if self.loc_proj is not None:
+            a, loc = a
+            extra = self.loc_proj((2.0 * loc - 1.0).to(x.dtype))
         s = x + a                                       # S_i = X_i + Attn(RMSNorm(X))_i
-        return s + self.mlp(self.norm2(s), extra)       # H_i = S_i + MLP(RMSNorm(S), kanıt)_i
+        return s + self.mlp(self.norm2(s), extra)       # H_i = S_i + MLP(RMSNorm(S), konum özeti)_i
 
 
 def _ce_sum(h, weight, target):
@@ -89,7 +85,7 @@ class RGNModel(nn.Module):
         """N(0, std); residual akışına yazan W_O ve W_2 için std / sqrt(2L); bias'lar sıfır."""
         std = self.cfg.init_std
         for name, p in self.named_parameters():
-            if name.endswith(("attn.w_aux.weight", "ev_proj.weight")):
+            if name.endswith(("attn.w_aux.weight", "loc_proj.weight")):
                 nn.init.zeros_(p)                       # önem 0, odak 1, kapı 1: başlangıçta transformer tabanı
             elif p.dim() == 2:
                 s = std / math.sqrt(2 * self.cfg.n_layers) if name.endswith(("attn.w_o.weight", "mlp.c.weight")) else std

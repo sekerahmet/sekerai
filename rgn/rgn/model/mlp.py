@@ -52,10 +52,10 @@ class GatedMLP(nn.Module):
         self.track, self.stats = False, {}
 
     def forward(self, x, extra=None):
-        """extra: kapı girdisine eklenen terim (örn. dikkatin kanıt miktarı)."""
+        """extra: kapı girdisine eklenen terim (örn. dikkatin konum özeti)."""
         g, up = self.a(x).chunk(2, dim=-1)
         if extra is not None:
-            if self.track:                                             # kanıt terimi / kapı girdisi (RMS oranı)
+            if self.track:                                             # ek terim (konum özeti) / kapı girdisi (RMS oranı)
                 self.ext_ratio = (extra.float().pow(2).mean() / g.float().pow(2).mean().clamp_min(1e-12)).sqrt().item()
             g = g + extra
         if self.track:

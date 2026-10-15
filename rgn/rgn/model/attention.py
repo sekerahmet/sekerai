@@ -135,46 +135,22 @@ def softmax_window(q, k, v, window, scale):
                              enable_gqa=k.shape[1] != q.shape[1])
 
 
-def softmax_lse(q, k, v, window, scale, keep_grad=False):
-    """Softmax dikkat + satır başına ln Σ_j e^puan (B, H, N).  CUDA'da flex (pencere ya da causal blok maskesi; payda yan
-    ürün), aksi halde açık hesap.  keep_grad False: paydanın gradyanı geri yayılmaz."""
-    n, dh = q.shape[2], q.shape[-1]
-    if q.is_cuda and n >= FLEX_BLOCK and n % FLEX_BLOCK == 0 and dh & (dh - 1) == 0:
-        bm = _window_block_mask(n, window, q.device) if window else _causal_block_mask(n, q.device)
-        out, lse = _flex_attention()(q, k, v, block_mask=bm, scale=scale, enable_gqa=k.shape[1] != q.shape[1],
-                                     return_lse=True)
-        return out, (lse if keep_grad else lse.detach()).float()
-    if k.shape[1] != q.shape[1]:
-        rep = q.shape[1] // k.shape[1]
-        k, v = k.repeat_interleave(rep, 1), v.repeat_interleave(rep, 1)
-    s = (q.float() @ k.float().transpose(-2, -1)) * scale
-    rel = torch.arange(n, device=q.device)[:, None] - torch.arange(n, device=q.device)[None, :]
-    keep = (rel >= 0) & (rel < window) if window else rel >= 0
-    s = s.masked_fill(~keep, float("-inf"))
-    out = torch.softmax(s, -1) @ v.float()
-    lse = torch.logsumexp(s, -1)
-    return out.to(q.dtype), lse if keep_grad else lse.detach()
-
-
-def evidence(q, k, lse, window, scale):
-    """-> (B, N, 2H): head başına [güç, odaklanma].
-        güç        = ln((1/n_i) Σ_j e^puan_ij)                      eşleşmelerin mutlak gücü
-        odaklanma  = güç − ölçek · q_i·k̄_i = ln((1/n_i) Σ_j e^(puan_ij − ort_j puan_ij)) ≥ 0   dikkat ne kadar toplanmış
-    n_i görünür anahtar sayısı (yerel katmanda en çok pencere); k̄_i görünür anahtarların ortalaması (kümülatif toplam,
-    N×N yok).  Ortalama puan softmax'ta satır sabiti: odaklanma yalnız puan farklarına bağlı."""
-    B, H, N, D = q.shape
+@torch.no_grad()
+def locality(q, k, window, scale, taus):
+    """Konum özeti (saf gözlem, gradyansız) -> (B, N, T·H):  L_τ,i = Σ_j pay_ij · e^(−(i−j)/τ) ∈ (0, 1].
+    pay = softmax(q·k·ölçek) (causal, yerel katmanda pencere) — dikkatin kendi payları.  "Dikkatimin ne kadarı ~τ token
+    içinden geldi": 1 = tamamen yakından, 0 = tamamen uzaktan.  Tom örneği (he -> Tom 12 geri %80): L_4 ≈ 0,08,
+    L_32 ≈ 0,72; önceki-token head'i: L_4 ≈ 0,72.  Açık N×N hesap (yalnız ileri, gradyansız)."""
+    B, H, N, _ = q.shape
     if k.shape[1] != H:
         k = k.repeat_interleave(H // k.shape[1], 1)
-    cs = k.float().cumsum(2)
-    if window:
-        prev = torch.cat([cs.new_zeros(B, H, window, D), cs[:, :, :max(N - window, 0)]], 2)[:, :, :N]
-        cs = cs - prev
-    n = torch.arange(1, N + 1, device=q.device, dtype=torch.float32)
-    if window:
-        n = n.clamp(max=window)
-    mean_s = scale * (q.float() * (cs / n[:, None])).sum(-1)
-    power = lse - n.log()
-    return torch.cat([power, power - mean_s], 1).transpose(1, 2)
+    s = (q.float() @ k.float().transpose(-2, -1)) * scale
+    d = (torch.arange(N, device=q.device)[:, None] - torch.arange(N, device=q.device)[None, :]).float()
+    keep = (d >= 0) & (d < window) if window else d >= 0
+    p = torch.softmax(s.masked_fill(~keep, float("-inf")), -1)
+    w = torch.stack([torch.exp(-d.clamp_min(0) / t) for t in taus])               # (T, N, N)
+    loc = torch.einsum("bhij,tij->bthi", p, w)                                     # (B, T, H, N)
+    return loc.reshape(B, len(taus) * H, N).transpose(1, 2)
 
 
 def rgn_flex(q, k, v, gamma, beta, pos, power, sharpness=1):
@@ -342,7 +318,7 @@ class Attention(nn.Module):
         return (rel >= 0) & (rel < self.window)
 
     def forward(self, x, rope=None):
-        """-> çıktı (B, N, d); attn_evidence açıksa (çıktı, kanıt (B, N, H))."""
+        """-> çıktı (B, N, d); attn_locality açıksa (çıktı, konum özeti (B, N, T·H))."""
         B, N, D = x.shape
         q, k, v = self.project(x, rope)
         aux = self._aux(x)
@@ -350,17 +326,15 @@ class Attention(nn.Module):
             q = q * aux["focus"].unsqueeze(-1).to(q.dtype)
         if "imp" in aux:
             q, k, v = self._augment(q, k, v, aux["imp"])
-        ev = None
-        if self.cfg.attn_evidence:
-            out, lse = softmax_lse(q, k, v, self.window, self.dh ** -0.5, self.cfg.attn_evidence_grad)
-            ev = evidence(q, k, lse, self.window, self.dh ** -0.5)              # (B, N, 2H): güç, odaklanma
-        else:
-            out = self._core(q, k, v)
-        out = out[..., :self.dh]
+        loc = None
+        if self.cfg.attn_locality:
+            taus = self.cfg.locality_tau_local if self.window else self.cfg.locality_tau_global
+            loc = locality(q, k, self.window, self.dh ** -0.5, taus)
+        out = self._core(q, k, v)[..., :self.dh]
         if "gate" in aux:
             out = out * aux["gate"].to(out.dtype)
         y = self.w_o(out.to(x.dtype).transpose(1, 2).reshape(B, N, D))
-        return (y, ev) if ev is not None else y
+        return (y, loc) if loc is not None else y
 
     @torch.no_grad()
     def weights(self, x, rope=None):
