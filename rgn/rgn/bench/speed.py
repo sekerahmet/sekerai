@@ -101,6 +101,8 @@ def bench_model(configs, steps=10, batch=None, seq_len=None):
         def step():
             with ctx:
                 loss = fwd(x, x)
+                if isinstance(loss, tuple):                   # gözlemci: ana + gözlemci kaybı
+                    loss = loss[0] + loss[1]
             loss.backward()
             opt.step()
             opt.zero_grad(set_to_none=True)

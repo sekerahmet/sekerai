@@ -1,3 +1,4 @@
+from pathlib import Path
 """Model: nedensellik, sonlu gradyan, sıra duyarlılığı, parametre sayısı (doküman 1.3), başlangıç doyma istatistiği."""
 import itertools
 
@@ -138,6 +139,40 @@ def test_locality():
     kk[0, 0, :, :] = torch.diag(sc)                                 # q_12 · k_j = sc[j]
     L = locality(qq, kk, 0, 1.0, (4.0, 32.0))
     assert abs(L[0, 12, 0].item() - 0.084) < 2e-3 and abs(L[0, 12, 1].item() - 0.716) < 2e-3, L[0, 12]
+
+
+def test_observer():
+    """Gözlemci: sıfır başlatmada ana çıktı tabanla aynı; gözlemci kaybı yalnız gözlemci başını eğitir (girdi koparılmış);
+    özellikler [0, 1]; obs_feat ana kayıptan gradyan alır."""
+    import json as _j
+    import tempfile
+    from rgn.paths import ROOT
+    top = list(range(10))
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, dir=ROOT) as f:
+        _j.dump(top, f)
+    rel = Path(f.name).name
+    try:
+        base = dict(attn="softmax", mlp="swiglu", attn_impl="auto", n_kv_heads=4, n_layers=3)
+        torch.manual_seed(0)
+        m0 = RGNModel(tiny(**base))
+        torch.manual_seed(0)
+        m1 = RGNModel(tiny(**base, observer_layer=2, observer_vocab=rel))
+        m0.load_state_dict({k: v for k, v in m1.state_dict().items() if not k.startswith("obs_")})
+        idx = torch.randint(0, 97, (2, 16))
+        assert torch.allclose(m0(idx), m1(idx), atol=1e-5)
+        main, aux = m1(idx, idx)
+        aux.backward(retain_graph=True)
+        assert m1.obs_head.weight.grad.abs().sum() > 0
+        assert all(p.grad is None or p.grad.abs().sum() == 0 for n, p in m1.named_parameters() if n.startswith("blocks."))
+        m1.zero_grad()
+        m1.obs_feat.weight.data.normal_(0, 0.1)
+        m1(idx, idx)[0].backward()
+        assert m1.obs_feat.weight.grad.abs().sum() > 0 and m1.obs_head.weight.grad is None
+        _, fe = m1.observe(torch.randn(2, 16, 64))
+        assert ((fe >= 0) & (fe <= 1)).all()
+        assert int(m1.obs_map[5]) == 5 and int(m1.obs_map[50]) == 10       # sık token kendi sınıfı, diğerleri "diğer"
+    finally:
+        Path(f.name).unlink()
 
 
 def test_learnable_sharpness_model():

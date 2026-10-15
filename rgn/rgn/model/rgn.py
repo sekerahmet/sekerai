@@ -4,6 +4,7 @@
           -> final norm -> LM head (paylaşımlı embedding) -> sonraki token
 """
 import dataclasses
+import json
 import math
 
 import torch
@@ -74,6 +75,17 @@ class RGNModel(nn.Module):
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self.lm_head.weight = self.embed.weight          # W_vocab = W_embᵀ
         self.use_rope = any(b.attn.use_rope for b in self.blocks)
+        self.obs_head = None
+        if cfg.observer_layer:
+            # gözlemci: K. katman çıkışı (gradyansız) -> küçük sözlükte dağılım; özellikler sonraki katmandan önce akışa
+            from rgn.paths import ROOT
+            top = json.loads((ROOT / cfg.observer_vocab).read_text(encoding="utf-8"))
+            omap = torch.full((cfg.vocab_size,), len(top), dtype=torch.long)
+            omap[torch.tensor(top)] = torch.arange(len(top))
+            self.register_buffer("obs_map", omap)                          # token -> sınıf (len(top) = "diğer")
+            self.obs_norm = RMSNorm(cfg.d_model)
+            self.obs_head = nn.Linear(cfg.d_model, len(top) + 1, bias=False)
+            self.obs_feat = nn.Linear(3, cfg.d_model, bias=False)
         self.loss_checkpoint = True                     # trainer TrainConfig.loss_checkpoint ile ayarlar
         if self.use_rope:
             cos, sin = rope_tables(cfg.max_len, cfg.d_model // cfg.n_heads, cfg.rope_base)
@@ -85,7 +97,7 @@ class RGNModel(nn.Module):
         """N(0, std); residual akışına yazan W_O ve W_2 için std / sqrt(2L); bias'lar sıfır."""
         std = self.cfg.init_std
         for name, p in self.named_parameters():
-            if name.endswith(("attn.w_aux.weight", "loc_proj.weight")):
+            if name.endswith(("attn.w_aux.weight", "loc_proj.weight", "obs_feat.weight")):
                 nn.init.zeros_(p)                       # önem 0, odak 1, kapı 1: başlangıçta transformer tabanı
             elif p.dim() == 2:
                 s = std / math.sqrt(2 * self.cfg.n_layers) if name.endswith(("attn.w_o.weight", "mlp.c.weight")) else std
@@ -102,19 +114,38 @@ class RGNModel(nn.Module):
         assert n <= self.cfg.max_len, "dizi %d > max_len %d (RoPE tablosu)" % (n, self.cfg.max_len)
         return self.rope_cos[:n], self.rope_sin[:n]
 
-    def hidden(self, idx):
-        """idx (B, N) -> son normalize edilmiş durum (B, N, d)."""
+    def observe(self, x):
+        """Gözlemci: x (gradyansız) -> (sınıf logit'leri, özellikler (B, N, 3) ∈ [0, 1]: belirsizlik, güven, nadir)."""
+        ol = self.obs_head(self.obs_norm(x.detach())).float()
+        with torch.no_grad():
+            p = torch.softmax(ol, -1)
+            H = -(p * torch.log(p.clamp_min(1e-12))).sum(-1)
+            f = torch.stack([H / (1.0 + H), p.max(-1).values, p[..., -1]], -1)
+        return ol, f
+
+    def hidden(self, idx, return_obs=False):
+        """idx (B, N) -> son normalize edilmiş durum (B, N, d) [, gözlemci logit'leri]."""
         x = self.embed(idx)
         rope = self.rope(idx.shape[1])
-        for block in self.blocks:
+        ol = None
+        for i, block in enumerate(self.blocks):
             x = block(x, rope)
-        return self.norm_f(x)
+            if self.obs_head is not None and i == self.cfg.observer_layer - 1:
+                ol, f = self.observe(x)
+                x = x + self.obs_feat((2.0 * f - 1.0).to(x.dtype))
+        h = self.norm_f(x)
+        return (h, ol) if return_obs else h
 
     def forward(self, idx, targets=None):
-        """targets yoksa logit'ler (B, N, V); varsa ortalama kayıp (skaler)."""
-        h = self.hidden(idx)
+        """targets yoksa logit'ler (B, N, V); varsa ortalama kayıp (skaler) — gözlemci varsa (ana kayıp, gözlemci kaybı)."""
         if targets is None:
-            return self.lm_head(h)
+            return self.lm_head(self.hidden(idx))
+        if self.obs_head is not None:
+            h, ol = self.hidden(idx, return_obs=True)
+            main = lm_loss(h, self.lm_head.weight, targets, use_checkpoint=self.loss_checkpoint)
+            aux = F.cross_entropy(ol.reshape(-1, ol.shape[-1]), self.obs_map[targets].reshape(-1))
+            return main, aux
+        h = self.hidden(idx)
         return lm_loss(h, self.lm_head.weight, targets, use_checkpoint=self.loss_checkpoint)
 
     @torch.no_grad()

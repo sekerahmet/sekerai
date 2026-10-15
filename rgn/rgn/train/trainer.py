@@ -180,14 +180,21 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
         f = lr_factor(step, total_steps, tc.schedule, tc.warmup, tc.decay, tc.min_lr_frac)
         for g in opt.param_groups:
             g["lr"] = g["base_lr"] * f
-        loss_sum = 0.0
+        loss_sum, obs_sum = 0.0, 0.0
         for _ in range(accum):
             x, y = train_s.random_batch(micro, T, rng)
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             with ctx:
-                loss = fwd(x, y) / accum
-            loss.backward()
-            loss_sum += loss.detach()
+                res = fwd(x, y)
+            if isinstance(res, tuple):                        # gözlemci: kaydedilen kayıp yalnız ana kayıp
+                main, aux = res
+                (main / accum + cfg.model.observer_aux_weight * aux / accum).backward()
+                loss_sum += main.detach() / accum
+                obs_sum += aux.detach() / accum
+            else:
+                loss = res / accum
+                loss.backward()
+                loss_sum += loss.detach()
         gn = torch.nn.utils.clip_grad_norm_(model.parameters(), tc.grad_clip) if tc.grad_clip else torch.tensor(0.0)
         opt.step()
         opt.zero_grad(set_to_none=True)
@@ -205,7 +212,8 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
             mem = torch.cuda.max_memory_allocated() / 2 ** 30 if device.type == "cuda" else 0.0
             lv = float(loss_sum)
             log.write(type="train", step=step, loss=lv, lr=opt.param_groups[0]["lr"], grad_norm=float(gn),
-                      ms=dt * 1000, tok_s=tokens_per_step / dt, mem_gb=mem, t=time.time())
+                      ms=dt * 1000, tok_s=tokens_per_step / dt, mem_gb=mem, t=time.time(),
+                      **({"obs_loss": float(obs_sum)} if torch.is_tensor(obs_sum) else {}))
             say("adım %d / %d (epok %.3f)  lr %.3g  kayıp %.4f  grad %.3f | pencere %d adım %.1f sn  %.1f ms/adım  "
                 "%d tok/sn  tepe %.1f GB  kalan ~%.0f dk%s" % (
                     step, total_steps, step / per_epoch, opt.param_groups[0]["lr"], lv, float(gn), win_steps, win_sec,
