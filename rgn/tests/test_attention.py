@@ -2,7 +2,7 @@
 import torch
 import torch.nn.functional as F
 
-from _util import Skip, require_cuda
+from _util import Skip, require_cuda, tiny
 from rgn.model.attention import denominator, rgn_dense, rgn_flex
 from rgn.model.position import geometric
 
@@ -164,6 +164,27 @@ def test_triton_matches_dense_cuda():
     for kw in (dict(N=100), dict(N=512, dh=64, transpose=True)):
         for name, e in _triton_vs_dense("cuda", **kw).items():
             assert max(e[:4]) < 5e-3 and max(e[4:]) < 3e-2, (kw, name, e)
+
+
+def test_triton_compiled_model_cuda():
+    """Derlenmiş modelde (torch.compile, bf16 autocast) triton yolu: kayıp ve gradyanlar dense yolla aynı."""
+    require_cuda()
+    from rgn.model import RGNModel
+    torch.manual_seed(0)
+    idx = torch.randint(0, 97, (4, 128), device="cuda")
+    out = {}
+    for impl in ("triton", "dense"):
+        torch.manual_seed(0)
+        m = RGNModel(tiny(attn_impl=impl, sharpness_learn=True)).cuda()
+        f = torch.compile(m)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            loss = f(idx, idx)
+        loss.backward()
+        out[impl] = (loss.item(), m.blocks[0].attn.gamma_hat.grad.clone(), m.blocks[0].attn.w_q.weight.grad.clone())
+    (lt, gt, wt), (ld, gd, wd) = out["triton"], out["dense"]
+    assert abs(lt - ld) < 1e-3, (lt, ld)
+    assert ((gt - gd).abs().max() / gd.abs().max()).item() < 5e-2
+    assert ((wt - wd).abs().max() / wd.abs().max()).item() < 2e-2
 
 
 def test_flex_matches_dense_cuda():

@@ -26,7 +26,8 @@ import triton.language as tl
 
 AV_PREC = "tf32"
 # Çekirdek başına (BM, BN, num_warps, num_stages).  fp32 bloklar paylaşılan belleği (sm_120: 99 KB) çabuk doldurur.
-CFG = {"fwd": (64, 32, 4, 2), "kv": (64, 64, 4, 2), "q": (64, 64, 4, 2)}
+# Tarandı (B 64, H 8, N 512, dh 64; tf32x3 ileri + geri 2,57 -> 1,71 ms, tf32 1,52 -> 1,33 ms).
+CFG = {"fwd": (64, 32, 4, 2), "kv": (32, 32, 4, 3), "q": (64, 32, 4, 2)}
 
 
 @triton.jit
@@ -182,14 +183,17 @@ def _strides(t):
     return t.stride(0), t.stride(1), t.stride(2)
 
 
+PRECS = ("tf32x3", "tf32", "ieee")       # özel işleme kod olarak geçer (Inductor şema eşlemesi str argümanı tanımıyor)
+
+
 def _prec(device, qk):
     """Triton yorumlayıcısında (CPU, TRITON_INTERPRET=1) Tensor Core yok: tam fp32."""
-    return ("ieee", "ieee") if device.type != "cuda" else (qk, AV_PREC)
+    return ("ieee", "ieee") if device.type != "cuda" else (PRECS[qk], AV_PREC)
 
 
 @torch.library.custom_op("rgn::gravity_fwd", mutates_args=())
 def gravity_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, gamma: torch.Tensor, kvec: torch.Tensor,
-                k_int: int, qk_prec: str) -> tuple[torch.Tensor, torch.Tensor]:
+                k_int: int, qk_prec: int) -> tuple[torch.Tensor, torch.Tensor]:
     B, H, N, D = q.shape
     o = torch.empty((B, H, N, D), device=q.device, dtype=torch.float32)
     z = torch.empty((B, H, N), device=q.device, dtype=torch.float32)
@@ -209,7 +213,7 @@ def _(q, k, v, gamma, kvec, k_int, qk_prec):
 
 @torch.library.custom_op("rgn::gravity_bwd", mutates_args=())
 def gravity_bwd(do: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, o: torch.Tensor, z: torch.Tensor,
-                gamma: torch.Tensor, kvec: torch.Tensor, k_int: int, qk_prec: str
+                gamma: torch.Tensor, kvec: torch.Tensor, k_int: int, qk_prec: int
                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     B, H, N, D = q.shape
     do = do.float()
@@ -274,4 +278,4 @@ def rgn_triton(q, k, v, gamma, sharpness=1, qk_prec="tf32x3"):
     else:
         kvec = torch.full((H,), float(sharpness), device=q.device)
         k_int = int(sharpness) if float(sharpness).is_integer() else -1     # -1: genel üs yolu, gradyan yok
-    return gravity_fwd(q, k, v, gamma, kvec, k_int, qk_prec)[0]
+    return gravity_fwd(q, k, v, gamma, kvec, k_int, PRECS.index(qk_prec))[0]
