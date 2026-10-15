@@ -45,6 +45,44 @@ def evaluate(model, windows, batch, device, ctx, bytes_per_token=0.0, chunk=8192
             "tokens": count, "bpb": loss / math.log(2) / bytes_per_token if bytes_per_token else None}
 
 
+@torch.no_grad()
+def evaluate_rows(model, rows, batch, device, ctx, bytes_per_token=0.0, use_masks=True, window=0, chunk=8192):
+    """Hikâye dizilimi doğrulaması: rows = (x, y, doc, sent) (n, T); dolgu (y -100) sayılmaz.  use_masks: hikâye maskesi
+    (cümle yerel modeli için şart; window > 0: Y katmanı pencereli); False: model eğitildiği gibi (rastgele pencere tabanı) maskesiz çalışır."""
+    from rgn.model.attention import story_masks
+    was_training = model.training
+    model.eval()
+    W = model.lm_head.weight
+    X, Y, D, S = rows
+    T = X.shape[1]
+    bands = [(lo, min(hi, T)) for lo, hi in BANDS if lo < T]
+    band_ok, band_n = [0] * len(bands), [0] * len(bands)
+    total, correct, count = 0.0, 0, 0
+    for i in range(0, len(X), batch):
+        x, y = X[i:i + batch].to(device), Y[i:i + batch].to(device)
+        masks = story_masks(D[i:i + batch].to(device), S[i:i + batch].to(device), window) if use_masks else None
+        with ctx:
+            h = model.hidden(x, masks=masks)
+        h, yf = h.reshape(-1, h.shape[-1]).float(), y.reshape(-1)
+        hit = torch.zeros_like(yf, dtype=torch.bool)
+        for j in range(0, yf.numel(), chunk):
+            logits = h[j:j + chunk] @ W.float().T
+            t = yf[j:j + chunk]
+            total += torch.nn.functional.cross_entropy(logits, t, reduction="sum", ignore_index=-100).item()
+            hit[j:j + chunk] = (logits.argmax(-1) == t) & (t != -100)
+        hit, valid = hit.view(-1, T), (y != -100)
+        correct += hit.sum().item()
+        count += valid.sum().item()
+        for b, (lo, hi) in enumerate(bands):
+            band_ok[b] += hit[:, lo:hi].sum().item()
+            band_n[b] += valid[:, lo:hi].sum().item()
+    model.train(was_training)
+    loss = total / max(count, 1)
+    acc_bands = {"%d-%d" % (lo, hi): band_ok[b] / max(1, band_n[b]) for b, (lo, hi) in enumerate(bands)}
+    return {"loss": loss, "ppl": math.exp(min(loss, 50)), "acc": correct / max(count, 1), "acc_bands": acc_bands,
+            "tokens": count, "bpb": loss / math.log(2) / bytes_per_token if bytes_per_token else None}
+
+
 def distinct4(ids):
     """Üretilen token'larda farklı 4-gram oranı (1: hiç tekrar yok) ve döngü (bir 4-gram >= 3 kez)."""
     grams = [tuple(ids[i:i + 4]) for i in range(len(ids) - 3)]

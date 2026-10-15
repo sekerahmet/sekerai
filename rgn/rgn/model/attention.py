@@ -135,6 +135,29 @@ def softmax_window(q, k, v, window, scale):
                              enable_gqa=k.shape[1] != q.shape[1])
 
 
+def _story_mod(doc, sent, kind, window):
+    """Hikâye dizilimi maskesi (True = bakılır): aynı hikâye, causal; Y katmanı: window > 0 ise son window token,
+    window == 0 ise yalnız kendi cümlesi + hikâye başı (sent -1).  Dolgu (doc -1, sent -2) yalnız dolguya bakar."""
+    def mm(b, h, q, kv):
+        ok = (doc[b, q] == doc[b, kv]) & (q >= kv)
+        if kind == "Y":
+            ok = ok & ((q - kv < window) if window else ((sent[b, q] == sent[b, kv]) | (sent[b, kv] == -1)))
+        return ok
+    return mm
+
+
+def story_masks(doc, sent, window):
+    """doc, sent (B, N) -> {"Y": maske, "G": maske}.  CUDA'da FlexAttention BlockMask (atlanan bloklar hesaplanmaz),
+    CPU'da yoğun (B, 1, N, N) bool."""
+    B, N = doc.shape
+    if doc.is_cuda:
+        from torch.nn.attention.flex_attention import create_block_mask
+        return {k: create_block_mask(_story_mod(doc, sent, k, window), B, None, N, N, device=doc.device) for k in "YG"}
+    b = torch.arange(B)[:, None, None]
+    q, kv = torch.arange(N)[None, :, None], torch.arange(N)[None, None, :]
+    return {k: _story_mod(doc, sent, k, window)(b, 0, q, kv).unsqueeze(1) for k in "YG"}
+
+
 @torch.compiler.disable                    # gözlem: derleme dışında (Inductor N×N maske + üstel ağırlıkta sembolik hata veriyordu)
 @torch.no_grad()
 def locality(q, k, window, scale, taus):
@@ -318,8 +341,16 @@ class Attention(nn.Module):
         rel = torch.arange(n, device=device)[:, None] - torch.arange(n, device=device)[None, :]
         return (rel >= 0) & (rel < self.window)
 
-    def forward(self, x, rope=None):
-        """-> çıktı (B, N, d); attn_locality açıksa (çıktı, konum özeti (B, N, T·H))."""
+    def _masked(self, q, k, v, mask):
+        """Hikâye dizilimi (story_masks): BlockMask -> FlexAttention, yoğun bool -> SDPA."""
+        assert self.cfg.attn == "softmax", "hikâye maskesi yalnız softmax dikkatinde"
+        s = self.dh ** -0.5
+        if isinstance(mask, torch.Tensor):
+            return F.scaled_dot_product_attention(q, k, v, attn_mask=mask, enable_gqa=self.Hkv != self.H, scale=s)
+        return _flex_attention()(q, k, v, block_mask=mask, scale=s, enable_gqa=self.Hkv != self.H)
+
+    def forward(self, x, rope=None, mask=None):
+        """-> çıktı (B, N, d); attn_locality açıksa (çıktı, konum özeti (B, N, T·H)).  mask: hikâye dizilimi maskesi."""
         B, N, D = x.shape
         q, k, v = self.project(x, rope)
         aux = self._aux(x)
@@ -331,7 +362,7 @@ class Attention(nn.Module):
         if self.cfg.attn_locality:
             taus = self.cfg.locality_tau_local if self.window else self.cfg.locality_tau_global
             loc = locality(q, k, self.window, self.dh ** -0.5, taus)
-        out = self._core(q, k, v)[..., :self.dh]
+        out = (self._core(q, k, v) if mask is None else self._masked(q, k, v, mask))[..., :self.dh]
         if "gate" in aux:
             out = out * aux["gate"].to(out.dtype)
         y = self.w_o(out.to(x.dtype).transpose(1, 2).reshape(B, N, D))

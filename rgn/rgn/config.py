@@ -79,6 +79,7 @@ class ModelConfig:
                                        # sonraki katmandan önce akışa E·(2f − 1) (E sıfır başlatma).  Kullanıcı, 15 Ekim
     observer_vocab: str = "assets/obs_top4096.json"   # gözlemci sınıfları: en sık K token (+1 "diğer")
     observer_aux_weight: float = 1.0   # gözlemci kaybı (yalnız gözlemci başını eğitir; girdi koparılmış)
+    local_sentence: bool = False       # Y katmanları pencere yerine yalnız kendi cümlesi + hikâye başı (data.layout story gerek)
     attn_gate: str = ""                # kapı: "" | "head" (head başına 1 sayı) | "elem" (her çıktı sayısı); 2σ_a ∈ (0, 2), başlangıç 1
     mlp: str = "rational"              # rational: W2 u/sqrt(1+u²) | rglu: W2 [G/sqrt(1+G²) ⊙ U] | glu: cebirsel GLU | swiglu: taban
     mlp_bias: bool = True
@@ -120,6 +121,7 @@ class ModelConfig:
         assert not ((self.attn_importance or self.attn_focus or self.attn_gate) and self.attn != "softmax"), \
             "önem / odak / kapı: şimdilik softmax dikkatinde"
         assert self.local_window >= 0 and 0 <= self.global_layers <= self.n_layers
+        assert not self.local_sentence or (self.local_window and self.attn == "softmax"),             "local_sentence: yerel / genel düzen ve softmax gerek"
         assert not self.global_pos or self.global_pos in POS, self.global_pos
         assert not self.ff_ratio or (len(self.ff_ratio) == 2 and self.local_window), "ff_ratio: (Y, G), yerel pencere gerek"
         if self.local_window:
@@ -151,6 +153,9 @@ class DataConfig:
     local_copy: bool = True            # Colab'da token dosyalarını önce yerel diske kopyala
     eval_tokens: int = 4_194_304       # ara değerlendirme (doğrulama akışının başından sabit pencereler)
     final_eval_tokens: int = 0         # 0: tüm doğrulama kümesi
+    layout: str = "stream"             # stream: rastgele pencere | story: hikâye başından, cümle sonunda kesilen satırlar +
+                                       # hikâye maskesi (rgn/data/stories.py; kullanıcı, 15 Ekim)
+    story_root: str = "v2/simplestories_gpt2"   # layout story: cümle / hikâye sınırları (Drive köküne göre)
 
 
 @dataclass
@@ -236,6 +241,8 @@ def from_dict(raw):
     assert not raw, "bilinmeyen bölüm(ler): %s" % sorted(raw)
     cfg.model.validate()
     assert cfg.train.optimizer in OPTIMIZERS and cfg.train.schedule in SCHEDULES
+    assert cfg.data.layout in ("stream", "story"), cfg.data.layout
+    assert not cfg.model.local_sentence or cfg.data.layout == "story", "local_sentence: data.layout story gerek"
     return cfg
 
 

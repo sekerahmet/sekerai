@@ -38,8 +38,8 @@ class Block(nn.Module):
             taus = cfg.locality_tau_local if kind == "Y" else cfg.locality_tau_global
             self.loc_proj = nn.Linear(len(taus) * cfg.n_heads, cfg.ff_dim(), bias=False)
 
-    def forward(self, x, rope=None):
-        a = self.attn(self.norm1(x), rope)
+    def forward(self, x, rope=None, masks=None):
+        a = self.attn(self.norm1(x), rope, None if masks is None else masks[self.kind])
         extra = None
         if self.loc_proj is not None:
             a, loc = a
@@ -61,7 +61,7 @@ def lm_loss(h, weight, target, chunk=8192, use_checkpoint=True):
         args = (h[i:i + chunk], weight, target[i:i + chunk])
         use = use_checkpoint and torch.is_grad_enabled()
         total = total + (checkpoint(_ce_sum, *args, use_reentrant=False) if use else _ce_sum(*args))
-    return total / target.numel()
+    return total / (target != -100).sum().clamp_min(1)          # dolgu hedefi (-100) sayılmaz
 
 
 class RGNModel(nn.Module):
@@ -123,29 +123,29 @@ class RGNModel(nn.Module):
             f = torch.stack([H / (1.0 + H), p.max(-1).values, p[..., -1]], -1)
         return ol, f
 
-    def hidden(self, idx, return_obs=False):
-        """idx (B, N) -> son normalize edilmiş durum (B, N, d) [, gözlemci logit'leri]."""
+    def hidden(self, idx, return_obs=False, masks=None):
+        """idx (B, N) -> son normalize edilmiş durum (B, N, d) [, gözlemci logit'leri].  masks: story_masks (hikâye dizilimi)."""
         x = self.embed(idx)
         rope = self.rope(idx.shape[1])
         ol = None
         for i, block in enumerate(self.blocks):
-            x = block(x, rope)
+            x = block(x, rope, masks)
             if self.obs_head is not None and i == self.cfg.observer_layer - 1:
                 ol, f = self.observe(x)
                 x = x + self.obs_feat((2.0 * f - 1.0).to(x.dtype))
         h = self.norm_f(x)
         return (h, ol) if return_obs else h
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, masks=None):
         """targets yoksa logit'ler (B, N, V); varsa ortalama kayıp (skaler) — gözlemci varsa (ana kayıp, gözlemci kaybı)."""
         if targets is None:
-            return self.lm_head(self.hidden(idx))
+            return self.lm_head(self.hidden(idx, masks=masks))
         if self.obs_head is not None:
-            h, ol = self.hidden(idx, return_obs=True)
+            h, ol = self.hidden(idx, return_obs=True, masks=masks)
             main = lm_loss(h, self.lm_head.weight, targets, use_checkpoint=self.loss_checkpoint)
             aux = F.cross_entropy(ol.reshape(-1, ol.shape[-1]), self.obs_map[targets].reshape(-1))
             return main, aux
-        h = self.hidden(idx)
+        h = self.hidden(idx, masks=masks)
         return lm_loss(h, self.lm_head.weight, targets, use_checkpoint=self.loss_checkpoint)
 
     @torch.no_grad()

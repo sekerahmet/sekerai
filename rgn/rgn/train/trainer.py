@@ -29,7 +29,7 @@ from rgn.model import RGNModel
 from rgn.paths import runs_dir
 from rgn.train import checkpoint
 from rgn.train.diagnostics import diagnose, summary_line
-from rgn.train.evaluate import evaluate, probes, samples
+from rgn.train.evaluate import evaluate, evaluate_rows, probes, samples
 from rgn.train.optim import build_optimizer, param_groups
 from rgn.train.schedule import lr_factor
 
@@ -76,6 +76,12 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
     log = _Log(out / "metrics.jsonl")
 
     train_s, valid_s, bytes_per_token = load_streams(dc)
+    story = dc.layout == "story"
+    if story:                                                    # hikâye / cümle dizilimi (rgn/data/stories.py)
+        from rgn.data.stories import load_story_rows
+        from rgn.model.attention import story_masks
+        train_rows = load_story_rows(train_s.arrays[0], dc.story_root, "train")
+        valid_rows = load_story_rows(valid_s.arrays[0], dc.story_root, "valid")
     model = RGNModel(cfg.model).to(device)
     model.loss_checkpoint = tc.loss_checkpoint
     n_params = model.num_params()
@@ -114,6 +120,11 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
     fwd = torch.compile(model) if (tc.compile and device.type == "cuda") else model
     val_windows = valid_s.fixed_windows(T, dc.eval_tokens)
     diag_x = val_windows[:4, :-1].to(device)
+    if story:
+        val_rows = valid_rows.fixed_rows(T, dc.eval_tokens)
+        say("hikâye dizilimi: doğrulama %d satır, %d token (dolgu %%%.1f) | yerel katman %s" % (
+            len(val_rows[0]), int((val_rows[1] != -100).sum()), 100 * float((val_rows[1] == -100).float().mean()),
+            "cümle + hikâye başı" if cfg.model.local_sentence else "pencere %d" % cfg.model.local_window))
     eval_batch = max(1, micro)
 
     log.write(type="start", step=step, total_steps=total_steps, stop_step=tc.stop_step, tokens_per_step=tokens_per_step,
@@ -142,10 +153,16 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
 
     def run_eval(final=False):
         nonlocal best
-        windows = valid_s.fixed_windows(T, dc.final_eval_tokens) if final else val_windows
         t_ev = time.time()
-        r = evaluate(model, windows, eval_batch, device, ctx, bytes_per_token)
-        r["probes"] = probes(model, device, tc.probe_tokens) if tc.probe_tokens else []
+        if story:
+            rows = valid_rows.fixed_rows(T, dc.final_eval_tokens) if final else val_rows
+            r = evaluate_rows(model, rows, eval_batch, device, ctx, bytes_per_token,
+                              window=0 if cfg.model.local_sentence else cfg.model.local_window)
+        else:
+            windows = valid_s.fixed_windows(T, dc.final_eval_tokens) if final else val_windows
+            r = evaluate(model, windows, eval_batch, device, ctx, bytes_per_token)
+        # cümle yerel modeli maskesiz üretemez (örnek / teşhis maskesiz yol)
+        r["probes"] = probes(model, device, tc.probe_tokens) if tc.probe_tokens and not cfg.model.local_sentence else []
         best = r["loss"] if best is None else min(best, r["loss"])
         log.write(type="eval", step=step, final=final, t=time.time(), **r)
         say("DEĞERLENDİRME%s adım %d: kayıp %.4f  ppl %.2f  bpb %s  doğruluk %.4f  bant %s | %d token (%.1f sn)" % (
@@ -156,6 +173,8 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
         return r
 
     def run_diag():
+        if cfg.model.local_sentence:
+            return
         d = diagnose(model, diag_x, ctx)
         log.write(type="diag", step=step, **d)
         say("TEŞHİS adım %d: %s" % (step, summary_line(d)))
@@ -182,10 +201,15 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
             g["lr"] = g["base_lr"] * f
         loss_sum, obs_sum = 0.0, 0.0
         for _ in range(accum):
-            x, y = train_s.random_batch(micro, T, rng)
+            masks = None
+            if story:
+                x, y, doc, sent = train_rows.random_batch(micro, T, rng)
+                masks = story_masks(doc.to(device), sent.to(device), 0 if cfg.model.local_sentence else cfg.model.local_window)
+            else:
+                x, y = train_s.random_batch(micro, T, rng)
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             with ctx:
-                res = fwd(x, y)
+                res = fwd(x, y, masks) if masks is not None else fwd(x, y)
             if isinstance(res, tuple):                        # gözlemci: kaydedilen kayıp yalnız ana kayıp
                 main, aux = res
                 (main / accum + cfg.model.observer_aux_weight * aux / accum).backward()
@@ -240,7 +264,7 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
     if tc.profile_after:                                         # örnek üretimden ÖNCE (derleme önbelleği temizken)
         from rgn.bench.profile_run import profile_after_run
         speed = profile_after_run(model, cfg, device, ctx, out / "speed.json")
-    smp = samples(model, device, tc.sample_tokens)
+    smp = [] if cfg.model.local_sentence else samples(model, device, tc.sample_tokens)
     (out / "samples.json").write_text(json.dumps(smp, indent=1, ensure_ascii=False), encoding="utf-8")
     for s in smp[:2]:
         say("SON örnek | %r" % s["text"][:200])

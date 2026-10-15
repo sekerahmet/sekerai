@@ -1,0 +1,11 @@
+{
+  "extends": "ss_d512_tf_yg.json",
+  "name": "ss_d512_tf_yg_cumle",
+  "notes": "Taban YYG, veri düzeni değişik (kullanıcı, 15 Ekim: 'veriyi düzenlemek ne kadar etki ediyor'): satır hikâye başından (EOS) başlar, yalnız cümle sonunda kesilir, hikâye maskesi (G: kendi hikâyesi); Y katmanları pencere yerine yalnız kendi cümlesi + hikâye başı. Cümle sınırları v2/simplestories_gpt2 (aynı SS akışı, GPT-2). Kıyas: ss_d512_tf_yg_epok tam epok 1,5160 — ikisi de aynı hikâye satırlarında ölçülür (scripts/story_eval.py).",
+  "data": {
+    "layout": "story"
+  },
+  "model": {
+    "local_sentence": true
+  }
+}
