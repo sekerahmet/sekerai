@@ -135,15 +135,15 @@ def softmax_window(q, k, v, window, scale):
                              enable_gqa=k.shape[1] != q.shape[1])
 
 
-def softmax_lse(q, k, v, window, scale):
+def softmax_lse(q, k, v, window, scale, keep_grad=False):
     """Softmax dikkat + satır başına ln Σ_j e^puan (B, H, N).  CUDA'da flex (pencere ya da causal blok maskesi; payda yan
-    ürün), aksi halde açık hesap.  Paydanın gradyanı geri yayılmaz (kanıt gözlenen bir istatistik)."""
+    ürün), aksi halde açık hesap.  keep_grad False: paydanın gradyanı geri yayılmaz."""
     n, dh = q.shape[2], q.shape[-1]
     if q.is_cuda and n >= FLEX_BLOCK and n % FLEX_BLOCK == 0 and dh & (dh - 1) == 0:
         bm = _window_block_mask(n, window, q.device) if window else _causal_block_mask(n, q.device)
         out, lse = _flex_attention()(q, k, v, block_mask=bm, scale=scale, enable_gqa=k.shape[1] != q.shape[1],
                                      return_lse=True)
-        return out, lse.detach().float()
+        return out, (lse if keep_grad else lse.detach()).float()
     if k.shape[1] != q.shape[1]:
         rep = q.shape[1] // k.shape[1]
         k, v = k.repeat_interleave(rep, 1), v.repeat_interleave(rep, 1)
@@ -152,7 +152,29 @@ def softmax_lse(q, k, v, window, scale):
     keep = (rel >= 0) & (rel < window) if window else rel >= 0
     s = s.masked_fill(~keep, float("-inf"))
     out = torch.softmax(s, -1) @ v.float()
-    return out.to(q.dtype), torch.logsumexp(s, -1).detach()
+    lse = torch.logsumexp(s, -1)
+    return out.to(q.dtype), lse if keep_grad else lse.detach()
+
+
+def evidence(q, k, lse, window, scale):
+    """-> (B, N, 2H): head başına [güç, odaklanma].
+        güç        = ln((1/n_i) Σ_j e^puan_ij)                      eşleşmelerin mutlak gücü
+        odaklanma  = güç − ölçek · q_i·k̄_i = ln((1/n_i) Σ_j e^(puan_ij − ort_j puan_ij)) ≥ 0   dikkat ne kadar toplanmış
+    n_i görünür anahtar sayısı (yerel katmanda en çok pencere); k̄_i görünür anahtarların ortalaması (kümülatif toplam,
+    N×N yok).  Ortalama puan softmax'ta satır sabiti: odaklanma yalnız puan farklarına bağlı."""
+    B, H, N, D = q.shape
+    if k.shape[1] != H:
+        k = k.repeat_interleave(H // k.shape[1], 1)
+    cs = k.float().cumsum(2)
+    if window:
+        prev = torch.cat([cs.new_zeros(B, H, window, D), cs[:, :, :max(N - window, 0)]], 2)[:, :, :N]
+        cs = cs - prev
+    n = torch.arange(1, N + 1, device=q.device, dtype=torch.float32)
+    if window:
+        n = n.clamp(max=window)
+    mean_s = scale * (q.float() * (cs / n[:, None])).sum(-1)
+    power = lse - n.log()
+    return torch.cat([power, power - mean_s], 1).transpose(1, 2)
 
 
 def rgn_flex(q, k, v, gamma, beta, pos, power, sharpness=1):
@@ -330,12 +352,8 @@ class Attention(nn.Module):
             q, k, v = self._augment(q, k, v, aux["imp"])
         ev = None
         if self.cfg.attn_evidence:
-            out, lse = softmax_lse(q, k, v, self.window, self.dh ** -0.5)
-            # kanıt = ln((1/n_i) Σ_j e^puan): görünür anahtar sayısı n_i = min(i + 1, pencere) — sayı etkisi çıkarılır
-            n = torch.arange(1, N + 1, device=x.device, dtype=torch.float32)
-            if self.window:
-                n = n.clamp(max=self.window)
-            ev = (lse - n.log()).transpose(1, 2)
+            out, lse = softmax_lse(q, k, v, self.window, self.dh ** -0.5, self.cfg.attn_evidence_grad)
+            ev = evidence(q, k, lse, self.window, self.dh ** -0.5)              # (B, N, 2H): güç, odaklanma
         else:
             out = self._core(q, k, v)
         out = out[..., :self.dh]

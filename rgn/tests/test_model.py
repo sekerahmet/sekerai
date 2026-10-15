@@ -113,15 +113,21 @@ def test_evidence():
     assert torch.allclose(m0(idx), m1(idx), atol=1e-5)
     m1(idx, idx).backward()
     assert all((b.ev_proj.weight.grad.abs() > 0).any() for b in m1.blocks)
+    from rgn.model.attention import evidence
     g = torch.Generator().manual_seed(1)
     q, k, v = (torch.randn(1, 2, 12, 8, generator=g) for _ in range(3))
     for W in (0, 4):
         out, lse = softmax_lse(q, k, v, W, 0.5)
+        ev = evidence(q, k, lse, W, 0.5)                          # (1, 12, 4): güç (2 head), odaklanma (2 head)
         s = (q @ k.transpose(-2, -1)) * 0.5
         for i in range(12):
             js = [j for j in range(i + 1) if not W or i - j < W]
-            ref = torch.logsumexp(s[0, :, i, js], -1)
-            assert torch.allclose(lse[0, :, i], ref, atol=1e-5), (W, i)
+            row = s[0, :, i, js]
+            assert torch.allclose(lse[0, :, i], torch.logsumexp(row, -1), atol=1e-5), (W, i)
+            power = torch.logsumexp(row, -1) - torch.log(torch.tensor(float(len(js))))
+            focus = torch.logsumexp(row - row.mean(-1, keepdim=True), -1) - torch.log(torch.tensor(float(len(js))))
+            assert torch.allclose(ev[0, i, :2], power, atol=1e-5) and torch.allclose(ev[0, i, 2:], focus, atol=1e-5), (W, i)
+            assert (ev[0, i, 2:] >= -1e-6).all()
 
 
 def test_learnable_sharpness_model():

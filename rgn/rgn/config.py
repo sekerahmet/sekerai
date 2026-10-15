@@ -68,8 +68,10 @@ class ModelConfig:
     importance_max: float = 4.0
     attn_focus: bool = False           # odak: sorgu başına keskinlik çarpanı ∈ (0, focus_max), başlangıç 1
     focus_max: float = 4.0
-    attn_evidence: bool = False        # kanıt miktarı: head başına ln((1/n) Σ_j e^puan) (softmax paydası, eşleşme gücü) MLP kapı
-                                       # girdisine; softmax payları normalize ettiği için atılan bilgi geri verilir
+    attn_evidence: bool = False        # kanıt: head başına iki sayı MLP kapı girdisine (softmax payları normalize ettiği için
+                                       # atılan bilgi): güç = ln((1/n) Σ_j e^puan); odaklanma = güç − ortalama puan ≥ 0
+                                       # (kaydırmaya duyarsız: yalnız puan farkları — softmax'ın kendi değişmezliğiyle uyumlu)
+    attn_evidence_grad: bool = False   # güç teriminin (softmax paydası) gradyanı q / k'ye akar mı (flex desteği gerekir)
     attn_gate: str = ""                # kapı: "" | "head" (head başına 1 sayı) | "elem" (her çıktı sayısı); 2σ_a ∈ (0, 2), başlangıç 1
     mlp: str = "rational"              # rational: W2 u/sqrt(1+u²) | rglu: W2 [G/sqrt(1+G²) ⊙ U] | glu: cebirsel GLU | swiglu: taban
     mlp_bias: bool = True

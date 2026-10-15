@@ -34,8 +34,8 @@ class Block(nn.Module):
         self.ev_proj = None
         if cfg.attn_evidence:
             # kanıt -> MLP kapı girdisi: E · r(c_h · kanıt_h), r(z) = z/√(1+z²); E sıfır başlatma (başlangıçta taban)
-            self.ev_scale = nn.Parameter(torch.full((cfg.n_heads,), 0.25))
-            self.ev_proj = nn.Linear(cfg.n_heads, cfg.ff_dim(), bias=False)
+            self.ev_scale = nn.Parameter(torch.full((2 * cfg.n_heads,), 0.25))      # [güç, odaklanma] × head
+            self.ev_proj = nn.Linear(2 * cfg.n_heads, cfg.ff_dim(), bias=False)
 
     def forward(self, x, rope=None):
         a = self.attn(self.norm1(x), rope)

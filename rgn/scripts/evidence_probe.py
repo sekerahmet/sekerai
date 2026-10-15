@@ -2,7 +2,7 @@
 
     python scripts/evidence_probe.py --runs ss_d512_tf_yg_epok ss_d512_tf_yg_kanit
 
-kanıt_i^h = ln((1/n_i) Σ_j e^puan_ij)  (softmax paydası, eşleşme gücü; n_i görünür anahtar sayısı)
+kanıt (head başına iki sayı): güç = ln((1/n_i) Σ_j e^puan_ij), odaklanma = güç − ortalama puan ≥ 0
     1. sinyal  kanıt, sonraki-token kaybıyla ilişkili mi?  Katman başına Pearson / Spearman korelasyonu ve kanıt
                çeyreklerine göre ortalama kayıp (en düşük çeyrek -> en yüksek çeyrek).  Kanıtı kullanmayan modelde de
                ölçülür: sinyal eğitimden önce var mı?
@@ -21,7 +21,7 @@ import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 
 from rgn.system import setup_process  # noqa: E402
-from rgn.model.attention import softmax_lse  # noqa: E402
+from rgn.model.attention import evidence, softmax_lse  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from attn_anatomy import load, windows  # noqa: E402
@@ -47,10 +47,7 @@ def run_model(m, idx, override=None):
             at = blk.attn
             q, k, v = at.project(u, rope)
             _, lse = softmax_lse(q, k, v, at.window, at.dh ** -0.5)
-            n = torch.arange(1, T + 1, device=idx.device, dtype=torch.float32)
-            if at.window:
-                n = n.clamp(max=at.window)
-            ev = (lse - n.log()).transpose(1, 2)
+            ev = evidence(q, k, lse, at.window, at.dh ** -0.5)
         evs.append(ev.float())
         extra = None
         if blk.ev_proj is not None:
@@ -89,15 +86,17 @@ def main():
             evs = ev if evs is None else [torch.cat([p, q]) for p, q in zip(evs, ev)]
         L = torch.cat(losses).flatten().numpy()
         print("\n== %s (adım %s) — ortalama kayıp %.4f" % (run, step, L.mean()))
-        print("  katman  kanıt ort   Pearson  Spearman   kayıp: en düşük çeyrek -> en yüksek çeyrek kanıt")
-        for li, e in enumerate(evs):
-            E = e.mean(-1).flatten().numpy()                      # head ortalaması
-            p = np.corrcoef(E, L)[0, 1]
-            s = np.corrcoef(_rank(E), _rank(L))[0, 1]
-            qs = np.quantile(E, [0.25, 0.5, 0.75])
-            bins = np.digitize(E, qs)
-            ql = [L[bins == b].mean() for b in range(4)]
-            print("  K%d %10.3f %9.3f %9.3f    %s" % (li + 1, E.mean(), p, s, "  ".join("%.3f" % x for x in ql)))
+        H = evs[0].shape[-1] // 2
+        for part, sl in (("GÜÇ", slice(0, H)), ("ODAKLANMA", slice(H, 2 * H))):
+            print("  %s: katman  ort   Pearson  Spearman   kayıp: en düşük çeyrek -> en yüksek çeyrek" % part)
+            for li, e in enumerate(evs):
+                E = e[..., sl].mean(-1).flatten().numpy()          # head ortalaması
+                p = np.corrcoef(E, L)[0, 1]
+                s = np.corrcoef(_rank(E), _rank(L))[0, 1]
+                qs = np.quantile(E, [0.25, 0.5, 0.75])
+                bins = np.digitize(E, qs)
+                ql = [L[bins == b].mean() for b in range(4)]
+                print("    K%d %8.3f %9.3f %9.3f    %s" % (li + 1, E.mean(), p, s, "  ".join("%.3f" % x for x in ql)))
         if any(b.ev_proj is not None for b in m.blocks):
             means = [e.mean((0, 1)).to(device) for e in evs]       # head başına ortalama kanıt
             losses2 = []
