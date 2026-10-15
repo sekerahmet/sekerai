@@ -1,0 +1,11 @@
+{
+  "extends": "../base/train_ss.json",
+  "name": "ss_d512_tf_kapi",
+  "notes": "Transformer + kapı: head başına çıktı kapısı 2σ_a ∈ (0, 2) — head 'işime yarar bir şey yok' diyebilir. Kullanıcı, 15 Ekim: 'softmax kalsın, q k v değişsin'. Kıyas: ss_d512_transformer 1000. adım 1,9076.",
+  "model": {
+    "attn": "softmax",
+    "pos": "rope",
+    "mlp": "swiglu",
+    "attn_gate": "head"
+  }
+}

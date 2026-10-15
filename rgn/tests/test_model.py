@@ -72,6 +72,34 @@ def test_integer_sharpness_and_gamma_cap():
     assert ((1 + 4 * g.double() / k.double()) ** k.double() <= 2.0 ** 120 * 1.0001).all()
 
 
+def test_importance_focus_gate():
+    """Önem / odak / kapı: sıfır başlatmada çıktı tabanla birebir aynı; SDPA (ek boyutlu) yol açık formülle aynı;
+    hepsi gradyan alır."""
+    base = dict(attn="softmax", mlp="swiglu", attn_impl="auto", n_kv_heads=4)
+    torch.manual_seed(0)
+    m0 = RGNModel(tiny(**base))
+    torch.manual_seed(0)
+    m1 = RGNModel(tiny(**base, attn_importance=True, attn_focus=True, attn_gate="elem"))
+    sd = {k: v for k, v in m1.state_dict().items() if "w_aux" not in k}
+    m0.load_state_dict(sd)
+    idx = torch.randint(0, 97, (2, 16))
+    assert torch.allclose(m0(idx), m1(idx), atol=1e-5)
+    for b in m1.blocks:
+        b.attn.w_aux.weight.data.normal_(0, 0.5)
+    m1(idx, idx).backward()
+    assert all((b.attn.w_aux.weight.grad.abs() > 0).any() for b in m1.blocks)
+    a = m1.blocks[0].attn                                       # SDPA yolu = açık formül (weights) ile aynı çıktı
+    x = m1.blocks[0].norm1(m1.embed(idx))
+    q, k, v = a.project(x, m1.rope(16))
+    w = a.weights(x, m1.rope(16))
+    aux = a._aux(x)
+    ref = (w @ v) * aux["gate"]
+    q2 = q * aux["focus"].unsqueeze(-1)
+    q2, k2, v2 = a._augment(q2, k, v, aux["imp"])
+    got = a._core(q2, k2, v2)[..., :a.dh] * aux["gate"]
+    assert torch.allclose(got, ref, atol=1e-5), (got - ref).abs().max()
+
+
 def test_learnable_sharpness_model():
     m = RGNModel(tiny(sharpness_learn=True, sharpness_init=4.0))
     for blk in m.blocks:

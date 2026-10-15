@@ -1,0 +1,11 @@
+{
+  "extends": "../base/train_ss.json",
+  "name": "ss_d512_tf_odak",
+  "notes": "Transformer + odak: sorgu başına keskinlik çarpanı (0, 4), başlangıç 1 — 'eminlik her zaman iyi değil'. Kullanıcı, 15 Ekim: 'softmax kalsın, q k v değişsin'. Kıyas: ss_d512_transformer 1000. adım 1,9076.",
+  "model": {
+    "attn": "softmax",
+    "pos": "rope",
+    "mlp": "swiglu",
+    "attn_focus": true
+  }
+}

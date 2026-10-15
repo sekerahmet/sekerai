@@ -75,7 +75,9 @@ class RGNModel(nn.Module):
         """N(0, std); residual akışına yazan W_O ve W_2 için std / sqrt(2L); bias'lar sıfır."""
         std = self.cfg.init_std
         for name, p in self.named_parameters():
-            if p.dim() == 2:
+            if name.endswith("attn.w_aux.weight"):
+                nn.init.zeros_(p)                       # önem 0, odak 1, kapı 1: başlangıçta transformer tabanı
+            elif p.dim() == 2:
                 s = std / math.sqrt(2 * self.cfg.n_layers) if name.endswith(("attn.w_o.weight", "mlp.c.weight")) else std
                 nn.init.normal_(p, 0.0, s)
             elif name.endswith(".bias"):

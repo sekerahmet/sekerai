@@ -144,6 +144,10 @@ class Attention(nn.Module):
         self.w_o = nn.Linear(d, d, bias=False)                         # W_O (başları birleştirir)
         self.use_rope = cfg.pos in ("rope", "rope+alibi")
         self.beta_hat = None
+        # önem / odak / kapı ham değerleri tek projeksiyondan (RGNModel sıfırla başlatır)
+        self.aux_sizes = [n for n in (Hkv if cfg.attn_importance else 0, H if cfg.attn_focus else 0,
+                                      {"": 0, "head": H, "elem": d}[cfg.attn_gate])]
+        self.w_aux = nn.Linear(d, sum(self.aux_sizes), bias=False) if sum(self.aux_sizes) else None
         if cfg.attn == "softmax":
             self.q_norm, self.k_norm = RMSNorm(self.dh), RMSNorm(self.dh)
             return
@@ -219,13 +223,46 @@ class Attention(nn.Module):
             q, k = apply_rope(q, *rope), apply_rope(k, *rope)
         return q, k, v
 
+    def _aux(self, x):
+        """x (B, N, d) -> {"imp": (B, Hkv, N), "focus": (B, H, N), "gate": (B, H, N, 1 | dh)}; yalnız açık olanlar.
+        Hepsi r(z) = z / √(1 + z²) ile (üstel işlem yok); sıfır başlatmada önem 0, odak 1, kapı 1."""
+        if self.w_aux is None:
+            return {}
+        B, N, _ = x.shape
+        parts = torch.split(self.w_aux(x).float(), self.aux_sizes, dim=-1)
+        r = lambda z: z * torch.rsqrt(1.0 + z * z)                                     # noqa: E731
+        out = {}
+        z_imp, z_foc, z_gate = parts
+        if self.cfg.attn_importance:
+            out["imp"] = (self.cfg.importance_max * r(z_imp)).transpose(1, 2)
+        if self.cfg.attn_focus:
+            t = 2.0 / self.cfg.focus_max - 1.0                                           # σ_a(z0) = 1 / focus_max
+            z0 = t / (1.0 - t * t) ** 0.5
+            out["focus"] = (self.cfg.focus_max * 0.5 * (1.0 + r(z_foc + z0))).transpose(1, 2)
+        if self.cfg.attn_gate:
+            g = 1.0 + r(z_gate)                                                          # 2 σ_a(z)
+            out["gate"] = (g.view(B, N, self.H, 1) if self.cfg.attn_gate == "head"
+                           else g.view(B, N, self.H, self.dh)).transpose(1, 2)
+        return out
+
+    def _augment(self, q, k, v, imp):
+        """Önemi hızlı çekirdeğe (SDPA / flash) taşımak için ek boyut: q'ya sabit 1, k'ya önem / ölçek; 8'in katına
+        sıfırla doldurulur (flash).  q'·k'·ölçek = q·k·ölçek + önem_j."""
+        pad = 8
+        z = lambda t, n: t.new_zeros(*t.shape[:-1], n)                                  # noqa: E731
+        q = torch.cat([q, torch.ones_like(q[..., :1]), z(q, pad - 1)], -1)
+        k = torch.cat([k, (imp * self.dh ** 0.5).unsqueeze(-1).to(k.dtype), z(k, pad - 1)], -1)
+        v = torch.cat([v, z(v, pad)], -1)
+        return q, k, v
+
     def _core(self, q, k, v):
         impl = self.impl(q.device, q.shape[2])
         if impl == "sdpa":
+            s = self.dh ** -0.5                     # açık ölçek: ek boyutlar (önem) varsayılan 1/√boyut'u değiştirmesin
             if self.window:
                 return F.scaled_dot_product_attention(q, k, v, attn_mask=self._mask(q.shape[2], q.device),
-                                                      enable_gqa=self.Hkv != self.H)
-            return F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=self.Hkv != self.H)
+                                                      enable_gqa=self.Hkv != self.H, scale=s)
+            return F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=self.Hkv != self.H, scale=s)
         args = (self.gamma(), self.beta(), self.cfg.pos, self.cfg.power, self.sharpness())
         ctx = torch.autocast(q.device.type, enabled=False) if self.cfg.rgn_fp32 else contextlib.nullcontext()
         with ctx:
@@ -244,7 +281,14 @@ class Attention(nn.Module):
     def forward(self, x, rope=None):
         B, N, D = x.shape
         q, k, v = self.project(x, rope)
-        out = self._core(q, k, v)
+        aux = self._aux(x)
+        if "focus" in aux:
+            q = q * aux["focus"].unsqueeze(-1).to(q.dtype)
+        if "imp" in aux:
+            q, k, v = self._augment(q, k, v, aux["imp"])
+        out = self._core(q, k, v)[..., :self.dh]
+        if "gate" in aux:
+            out = out * aux["gate"].to(out.dtype)
         return self.w_o(out.to(x.dtype).transpose(1, 2).reshape(B, N, D))
 
     @torch.no_grad()
@@ -255,9 +299,14 @@ class Attention(nn.Module):
             with torch.autocast(q.device.type, enabled=False):
                 return rgn_dense(q.float(), k.float(), v.float(), self.gamma(), self.beta(), self.cfg.pos,
                                  self.cfg.power, self.sharpness(), return_weights=True, window=self.window)[1]
+        aux = self._aux(x)
+        if "focus" in aux:
+            q = q * aux["focus"].unsqueeze(-1).to(q.dtype)
         if self.Hkv != self.H:
             k = k.repeat_interleave(self.H // self.Hkv, dim=1)
         s = (q.float() @ k.float().transpose(-2, -1)) / self.dh ** 0.5
+        if "imp" in aux:
+            s = s + aux["imp"].repeat_interleave(self.H // self.Hkv, dim=1).unsqueeze(-2)
         n = s.shape[-1]
         keep = self._mask(n, s.device) if self.window else torch.ones(n, n, dtype=torch.bool, device=s.device).tril()
         s = s.masked_fill(~keep, float("-inf"))

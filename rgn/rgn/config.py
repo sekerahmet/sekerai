@@ -61,6 +61,14 @@ class ModelConfig:
                                        # (saf çekim; sıra bilgisi yerel katmanlardan ve causal maskeden)
     ff_ratio: tuple = ()               # (Y, G): MLP / dikkat (4 d²) parametre oranı, katman türüne göre.  Örn. (1, 3): yerel
                                        # katman dizimi taşır (dar MLP), genel katman anlam çekimiyle toplar (geniş MLP).  (): d_ff
+    # Softmax dikkatinde q / k / v düzeyinde eklemeler (kullanıcı, 15 Ekim: "softmax kalsın, q k v değişsin").  Hepsi
+    # cebirsel ve sıfır başlatmalı: başlangıçta model transformer tabanıyla birebir aynı.
+    #   pay(i, j) = softmax_j( odak_i · q_i·k_j / √dh + önem_j ),   çıktı_i = kapı_i · Σ_j pay(i, j) v_j
+    attn_importance: bool = False      # önem (kütle): anahtar başına, sorgudan bağımsız taban puan ∈ (-importance_max, +)
+    importance_max: float = 4.0
+    attn_focus: bool = False           # odak: sorgu başına keskinlik çarpanı ∈ (0, focus_max), başlangıç 1
+    focus_max: float = 4.0
+    attn_gate: str = ""                # kapı: "" | "head" (head başına 1 sayı) | "elem" (her çıktı sayısı); 2σ_a ∈ (0, 2), başlangıç 1
     mlp: str = "rational"              # rational: W2 u/sqrt(1+u²) | rglu: W2 [G/sqrt(1+G²) ⊙ U] | glu: cebirsel GLU | swiglu: taban
     mlp_bias: bool = True
     init_std: float = 0.02
@@ -95,6 +103,9 @@ class ModelConfig:
         assert self.attn in ATTN, self.attn
         assert self.attn_impl in ATTN_IMPL, self.attn_impl
         assert self.rgn_qk_prec in ("tf32x3", "tf32", "ieee"), self.rgn_qk_prec
+        assert self.attn_gate in ("", "head", "elem"), self.attn_gate
+        assert not ((self.attn_importance or self.attn_focus or self.attn_gate) and self.attn != "softmax"), \
+            "önem / odak / kapı: şimdilik softmax dikkatinde"
         assert self.local_window >= 0 and 0 <= self.global_layers <= self.n_layers
         assert not self.global_pos or self.global_pos in POS, self.global_pos
         assert not self.ff_ratio or (len(self.ff_ratio) == 2 and self.local_window), "ff_ratio: (Y, G), yerel pencere gerek"
