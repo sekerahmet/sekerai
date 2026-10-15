@@ -13,7 +13,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from rgn.model.attention import rgn_dense, rgn_flex
+from rgn.model.attention import rgn_dense, rgn_flex, rgn_triton
 from rgn.model.position import geometric
 
 
@@ -36,7 +36,7 @@ def _time(fn, warmup=3, iters=10):
 
 
 def _attention_case(kind, B, H, Hkv, N, dh, pos, device):
-    fp32 = kind in ("rgn_flex_fp32", "rgn_dense_fp32")
+    fp32 = kind in ("rgn_flex_fp32", "rgn_dense_fp32", "rgn_triton")
     dt = torch.float32 if fp32 else torch.bfloat16
     q = F.normalize(torch.randn(B, H, N, dh, device=device), dim=-1).to(dt).requires_grad_()
     k = F.normalize(torch.randn(B, Hkv, N, dh, device=device), dim=-1).to(dt).requires_grad_()
@@ -47,6 +47,8 @@ def _attention_case(kind, B, H, Hkv, N, dh, pos, device):
     def run():
         if kind == "softmax_sdpa":
             o = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=Hkv != H)
+        elif kind == "rgn_triton":
+            o = rgn_triton(q, k, v, gamma, 1)
         elif kind.startswith("rgn_flex"):
             o = rgn_flex(q, k, v, gamma, beta, pos, 1)
         else:
@@ -58,12 +60,12 @@ def _attention_case(kind, B, H, Hkv, N, dh, pos, device):
 
 
 def bench_attention(seq_lens=(512, 1024, 2048, 4096), batch=16, heads=8, kv_heads=8, d_head=64, pos="rope",
-                    kinds=("softmax_sdpa", "rgn_flex_fp32", "rgn_flex_bf16", "rgn_dense_fp32"), dense_max=2048):
+                    kinds=("softmax_sdpa", "rgn_triton", "rgn_dense_fp32"), dense_max=2048):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     rows = []
     for N in seq_lens:
         for kind in kinds:
-            if kind.startswith("rgn_flex") and device.type != "cuda":
+            if (kind.startswith("rgn_flex") or kind == "rgn_triton") and device.type != "cuda":
                 continue
             if kind.startswith("rgn_dense") and N > dense_max:
                 continue

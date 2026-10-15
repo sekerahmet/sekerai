@@ -16,6 +16,8 @@ Uygulamalar:
     flex   FlexAttention, score_mod = -log(payda): softmax(-log payda) = w / Σw birebir aynı ağırlık.  CUDA'da birleşik
            çekirdek, N×N belleğe yazılmaz.  KALİTE deneyi içindir: içeride exp / log var; hız iddiası (V7) özel çekirdek
            ister (doküman 3.3).
+    triton Flash-RGN (rgn/model/triton_attention.py): birleşik ileri + geri çekirdek, maksimum takibi yok.  pos rope / none,
+           power 1; CUDA'da varsayılan.
 """
 import contextlib
 
@@ -67,6 +69,25 @@ def rgn_dense(q, k, v, gamma, beta, pos, power, sharpness=1, return_weights=Fals
     else:
         out = (w @ v) / z
     return (out, w / z) if return_weights else out
+
+
+_TRITON = {}
+
+
+def triton_ok():
+    """Triton çekirdeği yüklenebiliyor mu (CUDA ortamında bir kez denenir)."""
+    if "ok" not in _TRITON:
+        try:
+            from rgn.model.triton_attention import rgn_triton
+            _TRITON.update(ok=True, fn=rgn_triton)
+        except Exception as e:                                      # triton yok / sürüm uyumsuz: dense'e düş
+            _TRITON.update(ok=False, err=repr(e))
+    return _TRITON["ok"]
+
+
+def rgn_triton(q, k, v, gamma, sharpness=1):
+    assert triton_ok(), _TRITON.get("err")
+    return _TRITON["fn"](q, k, v, gamma, sharpness)
 
 
 _FLEX = {}
@@ -155,12 +176,18 @@ class Attention(nn.Module):
         return lo + (hi - lo) * 0.5 * (1.0 + r * torch.rsqrt(1.0 + r * r))
 
     def impl(self, device, n):
-        """Kullanılacak çekirdek: sdpa (softmax), dense ya da flex.  flex yalnız CUDA'da ve N blok boyunun katıyken."""
+        """Kullanılacak çekirdek: sdpa (softmax), triton, dense ya da flex.  triton / flex yalnız CUDA'da; flex N blok
+        boyunun katıyken."""
         c = self.cfg.attn_impl
         if self.cfg.attn == "softmax":
             return "sdpa"
+        cuda = device.type == "cuda"
+        if c == "auto" and cuda and self.cfg.pos in ("rope", "none") and self.cfg.power == 1 and triton_ok():
+            return "triton"
+        if c == "triton":
+            return "triton" if cuda else "dense"
         if c == "auto":
-            c = "dense" if (device.type != "cuda" or n <= self.cfg.dense_max_len) else "flex"
+            c = "dense" if (not cuda or n <= self.cfg.dense_max_len) else "flex"
         if c == "flex" and not (device.type == "cuda" and n >= FLEX_BLOCK and n % FLEX_BLOCK == 0):
             c = "dense"
         return c
@@ -186,6 +213,8 @@ class Attention(nn.Module):
         args = (self.gamma(), self.beta(), self.cfg.pos, self.cfg.power, self.sharpness())
         ctx = torch.autocast(q.device.type, enabled=False) if self.cfg.rgn_fp32 else contextlib.nullcontext()
         with ctx:
+            if impl == "triton":
+                return rgn_triton(q, k, v, args[0], args[4])
             if impl == "flex":
                 return rgn_flex(q, k, v, *args)
             return rgn_dense(q, k, v, *args, av_bf16=self.cfg.rgn_av_bf16 and q.is_cuda)

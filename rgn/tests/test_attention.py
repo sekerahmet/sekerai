@@ -2,7 +2,7 @@
 import torch
 import torch.nn.functional as F
 
-from _util import require_cuda
+from _util import Skip, require_cuda
 from rgn.model.attention import denominator, rgn_dense, rgn_flex
 from rgn.model.position import geometric
 
@@ -119,6 +119,50 @@ def test_backward_formulas_match_autograd():
     for name, (manual, auto) in checks.items():
         err = ((manual - auto).abs().max() / auto.abs().max()).item()
         assert err < 1e-10, (name, err)
+
+
+def _triton_vs_dense(device, B=2, H=4, Hkv=2, N=100, dh=16, transpose=False):
+    """Triton çekirdeği (ileri + tüm gradyanlar) dense ile aynı: k = 1, 4, 3 (genel üs) ve head başına öğrenilen k."""
+    from rgn.model.attention import rgn_triton
+    q0, k0, v0, gamma0, _ = _inputs(B=B, H=H, Hkv=Hkv, N=N, dh=dh, dtype=torch.float32)
+    G = torch.randn(B, H, N, dh, generator=torch.Generator().manual_seed(3)).to(device)
+    errs = {}
+    for K in (1, 4, 3, torch.tensor([1.5, 4.0, 7.0, 2.0][:H])):
+        ins = [t.to(device).clone() for t in (q0, k0, v0, gamma0)] + ([K.to(device).clone()] if torch.is_tensor(K) else [])
+        if transpose:                                              # modeldeki düzen: (B, N, H, dh) -> transpose
+            ins[:3] = [t.transpose(1, 2).contiguous().transpose(1, 2) for t in ins[:3]]
+        for t in ins:
+            t.requires_grad_()
+        Kx = ins[4] if torch.is_tensor(K) else K
+        res = []
+        for fn in (lambda: rgn_triton(*ins[:4], Kx), lambda: rgn_dense(*ins[:4], None, "rope", 1, Kx)):
+            o = fn()
+            (o * G).sum().backward()
+            res.append([o.detach()] + [t.grad.clone() for t in ins])
+            for t in ins:
+                t.grad = None
+        name = "learn" if torch.is_tensor(K) else K
+        errs[name] = [((a - b).abs().max() / b.abs().max().clamp_min(1e-12)).item() for a, b in zip(*res)]
+    return errs
+
+
+def test_triton_matches_dense_interpreter():
+    """Triton yorumlayıcısı (CPU, TRITON_INTERPRET=1) ile çekirdek mantığı; yalnız ayrı süreçte çalışır (ortam değişkeni
+    triton içe aktarılmadan önce okunur): TRITON_INTERPRET=1 python tests/run_tests.py attention"""
+    import os
+    if os.environ.get("TRITON_INTERPRET") != "1":
+        raise Skip("TRITON_INTERPRET=1 değil")
+    for name, e in _triton_vs_dense("cpu").items():
+        assert max(e) < 1e-4, (name, e)
+
+
+def test_triton_matches_dense_cuda():
+    """GPU: q·kᵀ tf32x3, diğer çarpımlar tf32 -> bağıl hata ~1e-3'ün altında.  N = 100 (blok kenarı) ve 512, GQA, model
+    düzeni (transpose)."""
+    require_cuda()
+    for kw in (dict(N=100), dict(N=512, dh=64, transpose=True)):
+        for name, e in _triton_vs_dense("cuda", **kw).items():
+            assert max(e) < 5e-3, (kw, name, e)
 
 
 def test_flex_matches_dense_cuda():

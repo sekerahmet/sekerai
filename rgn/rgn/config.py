@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ATTN = ("rgn", "softmax")
-ATTN_IMPL = ("auto", "dense", "flex", "sdpa")
+ATTN_IMPL = ("auto", "triton", "dense", "flex", "sdpa")
 POS = ("rope", "alibi", "additive", "rope+alibi", "none")
 MLP = ("rational", "rglu", "glu", "swiglu")
 OPTIMIZERS = ("adamw", "muon", "normuon")
@@ -29,7 +29,8 @@ class ModelConfig:
     n_kv_heads: int = 8                # < n_heads: GQA
     d_ff: int = 0                      # 0: otomatik (rational 4D; glu / swiglu 8D/3, 64'ün katı)
     attn: str = "rgn"                  # rgn: ters kare çekim | softmax: karşılaştırma tabanı
-    attn_impl: str = "auto"            # auto: rgn -> N <= dense_max_len ise dense (derlenince hızlı), değilse flex; softmax -> sdpa
+    attn_impl: str = "auto"            # auto: rgn -> CUDA + Triton + pos rope / none + power 1 ise triton (Flash-RGN); değilse
+                                       # N <= dense_max_len ise dense, değilse flex; softmax -> sdpa
     dense_max_len: int = 1024          # auto'da dense'in üst sınırı (N×N bellek); ölçüldü: SS d512 N 1024'te dense 299 ms/adım,
                                        # flex 3800 ms/adım (flex, öğrenilebilir γ/β gradyanını yavaş yoldan topluyor)
     rgn_fp32: bool = True              # rgn dikkatinde q, k, v fp32 (yakın eşleşmede 2 - 2 q·k iptal hatası; doküman 3.5)
@@ -70,8 +71,10 @@ class ModelConfig:
         lo, hi = self.sharpness_range
         assert 1.0 <= lo < self.sharpness_init < hi <= 16.0, "sharpness_range / sharpness_init"
         assert not (self.attn == "softmax" and self.pos not in ("rope", "none")), "softmax tabanı: pos rope / none"
-        assert not (self.attn == "softmax" and self.attn_impl in ("dense", "flex")), "softmax tabanı sdpa ile"
-        assert not (self.attn == "rgn" and self.attn_impl == "sdpa"), "rgn dikkati sdpa ile çalışmaz (dense / flex)"
+        assert not (self.attn == "softmax" and self.attn_impl in ("dense", "flex", "triton")), "softmax tabanı sdpa ile"
+        assert not (self.attn_impl == "triton" and (self.pos not in ("rope", "none") or self.power != 1)), \
+            "triton çekirdeği: pos rope / none, power 1"
+        assert not (self.attn == "rgn" and self.attn_impl == "sdpa"), "rgn dikkati sdpa ile çalışmaz (triton / dense / flex)"
 
 
 @dataclass
