@@ -30,7 +30,7 @@ def diagnose(model, x, ctx):
     half = slice(N // 2, N)
     dist = (torch.arange(N, device=x.device)[:, None] - torch.arange(N, device=x.device)[None, :]).clamp_min(0).float()
     for i, blk in enumerate(model.blocks):
-        a = blk.attn.weights(*inputs[i]).float()                    # (B, H, N, N)
+        a = blk.attn.weights(*inputs[i][:2]).float()                # (B, H, N, N); x, rope (maske hariç)
         ent = -(a * a.clamp_min(1e-30).log()).sum(-1)               # (B, H, N)
         layer = {
             "entropy": ent[:, :, half].mean((0, 2)).tolist(),
