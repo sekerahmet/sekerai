@@ -1,0 +1,8 @@
+{
+  "extends": "ss_d512_tf_yg.json",
+  "name": "ss_d512_tf_yg_3epok",
+  "notes": "Taban YYG, 3 epok (aynı veri 3 kez; WSD düşüşü 3 epokun son %20'sinde). Kullanıcı, 15 Ekim: SLM'de mimariden çok eğitim miktarı (tam epok ~606M token, ~50M parametre -> ~12 token/param, az). Muennighoff 2023: ~4 tekrara kadar tekrar edilen veri neredeyse taze veri kadar iyi. Kıyas: ss_d512_tf_yg_epok tam epok 1,5160; ezber belirtisi: eğitim−değerlendirme farkının açılması. ~27.700 adım, ~55 dk.",
+  "train": {
+    "epochs": 3.0
+  }
+}
