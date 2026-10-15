@@ -24,8 +24,10 @@ import torch
 import triton
 import triton.language as tl
 
-AV_PREC = "tf32"
-DP_PREC = "tf32x3"          # dK / dV / dγ / dk çekirdeğinde dO·Vᵀ
+AV_PREC = "tf32"            # geri geçişte dV, dK, dQ çarpımları
+FWD_AV_PREC = "tf32"        # ileri w·V (O; geri geçişte D = dO·O)
+DP_PREC = "tf32"            # geri dO·Vᵀ.  D ile tutarlı olmalı: ileri tf32 iken yalnız bunu tf32x3 yapmak γ gradyanı
+                            # hatasını büyütür (ölçüldü)
 # Çekirdek başına (BM, BN, num_warps, num_stages).  fp32 bloklar paylaşılan belleği (sm_120: 99 KB) çabuk doldurur.
 # Tarandı (B 64, H 8, N 512, dh 64; tf32x3 ileri + geri 2,57 -> 1,71 ms, tf32 1,52 -> 1,33 ms).
 CFG = {"fwd": (64, 32, 4, 2), "kv": (32, 32, 4, 3), "q": (64, 32, 4, 2)}
@@ -147,7 +149,7 @@ def _bwd_q_kernel(Q, Kp, V, G, KV, DO, Z, DL, DQ,
                   sqb, sqh, sqn, skb, skh, skn, svb, svh, svn, sdb, sdh, sdn,
                   H, N,
                   D: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, K_INT: tl.constexpr,
-                  QK: tl.constexpr, AV: tl.constexpr):
+                  QK: tl.constexpr, AV: tl.constexpr, DP: tl.constexpr):
     """Sorgu bloğu başına: dQ."""
     pid_m = tl.program_id(0)
     bh = tl.program_id(1)
@@ -174,7 +176,7 @@ def _bwd_q_kernel(Q, Kp, V, G, KV, DO, Z, DL, DQ,
         d, den, w = _weight(s, g, Kh, K_INT)
         valid = (offs_m[:, None] >= offs_n[None, :]) & m_mask[:, None] & (offs_n[None, :] < N)
         w = tl.where(valid, w, 0.0)
-        dp = tl.dot(do, tl.trans(v), input_precision=AV)
+        dp = tl.dot(do, tl.trans(v), input_precision=DP)
         dw = tl.where(valid, (dp - di[:, None]) / zi[:, None], 0.0)
         ds = tl.where(d > 0.0, 2.0 * gam * dw * w / den, 0.0)
         dq += tl.dot(ds, k, input_precision=AV)
@@ -203,7 +205,7 @@ def gravity_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, gamma: torch.
     bm, bn, nw, ns = CFG["fwd"]
     _fwd_kernel[(triton.cdiv(N, bm), B * H)](
         q, k, v, gamma, kvec, o, z, *_strides(q), *_strides(k), *_strides(v), *_strides(o), H, N,
-        D=D, BM=bm, BN=bn, K_INT=k_int, QK=qk, AV=av, num_warps=nw, num_stages=ns)
+        D=D, BM=bm, BN=bn, K_INT=k_int, QK=qk, AV=FWD_AV_PREC if qk != "ieee" else "ieee", num_warps=nw, num_stages=ns)
     return o, z
 
 
@@ -238,7 +240,8 @@ def gravity_bwd(do: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Ten
     bm, bn, nw, ns = CFG["q"]
     _bwd_q_kernel[(triton.cdiv(N, bm), B * H)](
         q, k, v, gamma, kvec, do, z, dl, dq, *common, H, N,
-        D=D, BM=bm, BN=bn, K_INT=k_int, QK=qk, AV=av, num_warps=nw, num_stages=ns)
+        D=D, BM=bm, BN=bn, K_INT=k_int, QK=qk, AV=av, DP=DP_PREC if qk != "ieee" else "ieee", num_warps=nw,
+        num_stages=ns)
     return dq, dk, dv, pg.sum((0, 2)), pk.sum((0, 2))
 
 
