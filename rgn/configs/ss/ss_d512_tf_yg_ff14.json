@@ -1,0 +1,16 @@
+{
+  "extends": "../base/train_ss.json",
+  "name": "ss_d512_tf_yg_ff14",
+  "notes": "Transformer YYG + MLP oranı yerel 1:1, genel 4:1 — genel 4:1 (büyük modellerin MLP/dikkat oranı), 52,27M (+%3). Kullanıcı, 15 Ekim: 'yerel 1:1, genel 4:1 en verimli olabilir; parametre biraz artar ya da eşit'. Kıyas: ss_d512_tf_yg_epok 3000. adım 1,7379.",
+  "model": {
+    "attn": "softmax",
+    "pos": "rope",
+    "mlp": "swiglu",
+    "local_window": 128,
+    "global_layers": 3,
+    "ff_ratio": [
+      1,
+      4.0
+    ]
+  }
+}
