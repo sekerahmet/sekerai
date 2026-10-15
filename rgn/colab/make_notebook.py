@@ -18,6 +18,7 @@ Tasarım dokümanı ve günlük özetler yerelde (`rgn/docs/`, git dışı).
 | 2 KOŞU | GPU kapısı; deney listesi sırayla arka planda (`R.kuyruk`); program tam epok, `stop_step` ile kesilir |
 | 3 NABIZ | işler: durum, adım, kayıp, kalan süre, son değerlendirme |
 | 4 SONUÇ | kıyas tabloları: 1000 / 2000 / 3000. adım ve tam epok, transformer'a fark |
+| 4b KIYAS | transformer ve q/k/v koşuları yan yana, adım adım |
 | 5 HIZ | tam eğitim adımı hızı (arka planda; koşu sürerken çalıştırma) |
 | 6 DÖNGÜ | greedy üretimde tekrar testi (arka planda) |
 | X DURDUR | SIGTERM: checkpoint kaydedip çıkar; 2 KOŞU aynı listeyle kaldığı yerden sürer |
@@ -123,6 +124,37 @@ for name in [n for n in runs if n.endswith('_epok')]:
         print('%-8s %12s %12.4f %9s' % (('SON ' if e.get('final') else '') + str(e['step']), '%.4f' % t['loss'] if t else '-',
               e['loss'], '%+.4f' % (e['loss'] - t['loss']) if t else '-'))"""
 
+KIYAS = """# 4b KIYAS  |  CPU  |  tekrar: GÜVENLİ  —  transformer ve q/k/v koşuları yan yana (kayıp; parantezde transformer'a fark)
+import json
+from rgn.paths import runs_dir
+K = [('transformer', 'ss_d512_transformer'), ('önem', 'ss_d512_tf_onem'), ('odak', 'ss_d512_tf_odak'),
+     ('kapı', 'ss_d512_tf_kapi'), ('hepsi', 'ss_d512_tf_hepsi')]
+
+def _recs(run):
+    out, p = [], runs_dir() / run / 'metrics.jsonl'
+    if p.exists():
+        for l in open(p, encoding='utf-8'):
+            try: out.append(json.loads(l))
+            except Exception: pass
+    return out
+
+R_ = {ad: _recs(run) for ad, run in K}
+ev = lambda r, s: next((x['loss'] for x in r if x.get('type') == 'eval' and x.get('step') == s), None)
+print('%-9s' % 'adım' + ''.join('%19s' % ad for ad, _ in K))
+for s in (1000, 2000, 3000):
+    t = ev(R_['transformer'], s)
+    row = []
+    for ad, _ in K:
+        v = ev(R_[ad], s)
+        row.append('—' if v is None else '%.4f' % v if (ad == 'transformer' or t is None) else '%.4f (%+.4f)' % (v, v - t))
+    print('%-9s' % s + ''.join('%19s' % c for c in row))
+ms = []
+for ad, _ in K:
+    tr = sorted(x['ms'] for x in R_[ad] if x.get('type') == 'train' and 'ms' in x and 100 < x.get('step', 0) <= 3000)
+    ms.append('%.0f' % tr[len(tr) // 2] if tr else '—')
+print('%-9s' % 'ms/adım' + ''.join('%19s' % m for m in ms))
+print('\\n(transformer ms/adım kendi koşusundan: o koşuda kayıp checkpoint açıktı; hız testinde 112 ms)')"""
+
 HIZ = """# 5 HIZ  |  GPU  |  tekrar: GÜVENLİ  (arka planda; koşu sürerken çalıştırma — ölçüm bozulur; sonuç: R.nabiz('hiz', satir=20))
 # Tam eğitim adımı 128 × 512 = 65.536 token (ileri + geri + optimizer), derlenmiş.
 R.arkaplan('hiz', 'python scripts/bench_speed.py model --seq 512 --batch 128 --configs '
@@ -150,7 +182,7 @@ print('çalışan iş:', _live or 'yok')
 # İş yoksa çalışma zamanını kapat (aşağıdaki satırı aç):
 # assert not _live; from google.colab import runtime; runtime.unassign()"""
 
-CELLS = [("markdown", HEADER), ("code", HAZIRLIK), ("code", TEST), ("code", KOSU), ("code", NABIZ), ("code", SONUC),
+CELLS = [("markdown", HEADER), ("code", HAZIRLIK), ("code", TEST), ("code", KOSU), ("code", NABIZ), ("code", SONUC), ("code", KIYAS),
          ("code", HIZ), ("code", DONGU), ("code", DURDUR), ("code", DRIVE), ("code", GPU)]
 
 
