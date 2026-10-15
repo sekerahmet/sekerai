@@ -100,6 +100,30 @@ def test_importance_focus_gate():
     assert torch.allclose(got, ref, atol=1e-5), (got - ref).abs().max()
 
 
+def test_evidence():
+    """Kanıt: sıfır başlatmada tabanla aynı; açık hesap = ln((1/n) Σ e^puan); E gradyan alır; yerel pencerede n = W."""
+    from rgn.model.attention import softmax_lse
+    base = dict(attn="softmax", mlp="swiglu", attn_impl="auto", n_kv_heads=4, n_layers=3, local_window=8, global_layers=1)
+    torch.manual_seed(0)
+    m0 = RGNModel(tiny(**base))
+    torch.manual_seed(0)
+    m1 = RGNModel(tiny(**base, attn_evidence=True, attn_gate="head"))
+    m0.load_state_dict({k: v for k, v in m1.state_dict().items() if "ev_" not in k and "w_aux" not in k})
+    idx = torch.randint(0, 97, (2, 16))
+    assert torch.allclose(m0(idx), m1(idx), atol=1e-5)
+    m1(idx, idx).backward()
+    assert all((b.ev_proj.weight.grad.abs() > 0).any() for b in m1.blocks)
+    g = torch.Generator().manual_seed(1)
+    q, k, v = (torch.randn(1, 2, 12, 8, generator=g) for _ in range(3))
+    for W in (0, 4):
+        out, lse = softmax_lse(q, k, v, W, 0.5)
+        s = (q @ k.transpose(-2, -1)) * 0.5
+        for i in range(12):
+            js = [j for j in range(i + 1) if not W or i - j < W]
+            ref = torch.logsumexp(s[0, :, i, js], -1)
+            assert torch.allclose(lse[0, :, i], ref, atol=1e-5), (W, i)
+
+
 def test_learnable_sharpness_model():
     m = RGNModel(tiny(sharpness_learn=True, sharpness_init=4.0))
     for blk in m.blocks:

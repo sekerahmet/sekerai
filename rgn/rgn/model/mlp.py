@@ -18,8 +18,10 @@ class RationalMLP(nn.Module):
         self.track = False                                             # teşhis: doyma istatistiği
         self.stats = {}
 
-    def forward(self, x):
+    def forward(self, x, extra=None):
         u = self.a(x)
+        if extra is not None:
+            u = u + extra
         if self.track:
             ud = u.detach().float()
             self.stats = {"u_std": ud.std().item(), "sat_frac": (ud.abs() > 3).float().mean().item()}
@@ -45,8 +47,11 @@ class GatedMLP(nn.Module):
         self.c = nn.Linear(ff, d, bias=bias)
         self.track, self.stats = False, {}
 
-    def forward(self, x):
+    def forward(self, x, extra=None):
+        """extra: kapı girdisine eklenen terim (örn. dikkatin kanıt miktarı)."""
         g, up = self.a(x).chunk(2, dim=-1)
+        if extra is not None:
+            g = g + extra
         if self.track:
             gd = g.detach().float()
             self.stats = {"u_std": gd.std().item(), "sat_frac": (gd.abs() > 3).float().mean().item()}

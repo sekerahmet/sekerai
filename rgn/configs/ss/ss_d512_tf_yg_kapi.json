@@ -1,0 +1,13 @@
+{
+  "extends": "../base/train_ss.json",
+  "name": "ss_d512_tf_yg_kapi",
+  "notes": "Taban YYG + kapı (head). Kıyas: ss_d512_tf_yg_epok 3000. adım 1,7379; tam dikkatte kapı −0,007.",
+  "model": {
+    "attn": "softmax",
+    "pos": "rope",
+    "mlp": "swiglu",
+    "local_window": 128,
+    "global_layers": 3,
+    "attn_gate": "head"
+  }
+}

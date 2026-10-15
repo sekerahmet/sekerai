@@ -1,0 +1,14 @@
+{
+  "extends": "../base/train_ss.json",
+  "name": "ss_d512_tf_yg_kapi_kanit",
+  "notes": "Taban YYG + kapı + kanıt: head başına ln((1/n) Σ_j e^puan) MLP kapı girdisine (kullanıcı, 15 Ekim: 'MLP'ye attention skorunun yanında başka hangi skor girebilirdi'). Kıyas: ss_d512_tf_yg_epok 3000. adım 1,7379.",
+  "model": {
+    "attn": "softmax",
+    "pos": "rope",
+    "mlp": "swiglu",
+    "local_window": 128,
+    "global_layers": 3,
+    "attn_evidence": true,
+    "attn_gate": "head"
+  }
+}

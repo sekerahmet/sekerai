@@ -135,6 +135,26 @@ def softmax_window(q, k, v, window, scale):
                              enable_gqa=k.shape[1] != q.shape[1])
 
 
+def softmax_lse(q, k, v, window, scale):
+    """Softmax dikkat + satır başına ln Σ_j e^puan (B, H, N).  CUDA'da flex (pencere ya da causal blok maskesi; payda yan
+    ürün), aksi halde açık hesap.  Paydanın gradyanı geri yayılmaz (kanıt gözlenen bir istatistik)."""
+    n, dh = q.shape[2], q.shape[-1]
+    if q.is_cuda and n >= FLEX_BLOCK and n % FLEX_BLOCK == 0 and dh & (dh - 1) == 0:
+        bm = _window_block_mask(n, window, q.device) if window else _causal_block_mask(n, q.device)
+        out, lse = _flex_attention()(q, k, v, block_mask=bm, scale=scale, enable_gqa=k.shape[1] != q.shape[1],
+                                     return_lse=True)
+        return out, lse.detach().float()
+    if k.shape[1] != q.shape[1]:
+        rep = q.shape[1] // k.shape[1]
+        k, v = k.repeat_interleave(rep, 1), v.repeat_interleave(rep, 1)
+    s = (q.float() @ k.float().transpose(-2, -1)) * scale
+    rel = torch.arange(n, device=q.device)[:, None] - torch.arange(n, device=q.device)[None, :]
+    keep = (rel >= 0) & (rel < window) if window else rel >= 0
+    s = s.masked_fill(~keep, float("-inf"))
+    out = torch.softmax(s, -1) @ v.float()
+    return out.to(q.dtype), torch.logsumexp(s, -1).detach()
+
+
 def rgn_flex(q, k, v, gamma, beta, pos, power, sharpness=1):
     """FlexAttention yolu (CUDA).  γ ve β score_mod'a yakalanan tensörlerdir; gradyan alırlar (PyTorch >= 2.6)."""
     def score_mod(score, b, h, q_idx, kv_idx):
@@ -300,6 +320,7 @@ class Attention(nn.Module):
         return (rel >= 0) & (rel < self.window)
 
     def forward(self, x, rope=None):
+        """-> çıktı (B, N, d); attn_evidence açıksa (çıktı, kanıt (B, N, H))."""
         B, N, D = x.shape
         q, k, v = self.project(x, rope)
         aux = self._aux(x)
@@ -307,10 +328,21 @@ class Attention(nn.Module):
             q = q * aux["focus"].unsqueeze(-1).to(q.dtype)
         if "imp" in aux:
             q, k, v = self._augment(q, k, v, aux["imp"])
-        out = self._core(q, k, v)[..., :self.dh]
+        ev = None
+        if self.cfg.attn_evidence:
+            out, lse = softmax_lse(q, k, v, self.window, self.dh ** -0.5)
+            # kanıt = ln((1/n_i) Σ_j e^puan): görünür anahtar sayısı n_i = min(i + 1, pencere) — sayı etkisi çıkarılır
+            n = torch.arange(1, N + 1, device=x.device, dtype=torch.float32)
+            if self.window:
+                n = n.clamp(max=self.window)
+            ev = (lse - n.log()).transpose(1, 2)
+        else:
+            out = self._core(q, k, v)
+        out = out[..., :self.dh]
         if "gate" in aux:
             out = out * aux["gate"].to(out.dtype)
-        return self.w_o(out.to(x.dtype).transpose(1, 2).reshape(B, N, D))
+        y = self.w_o(out.to(x.dtype).transpose(1, 2).reshape(B, N, D))
+        return (y, ev) if ev is not None else y
 
     @torch.no_grad()
     def weights(self, x, rope=None):
