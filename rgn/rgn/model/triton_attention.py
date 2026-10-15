@@ -25,6 +25,7 @@ import triton
 import triton.language as tl
 
 AV_PREC = "tf32"
+DP_PREC = "tf32x3"          # dK / dV / dγ / dk çekirdeğinde dO·Vᵀ
 # Çekirdek başına (BM, BN, num_warps, num_stages).  fp32 bloklar paylaşılan belleği (sm_120: 99 KB) çabuk doldurur.
 # Tarandı (B 64, H 8, N 512, dh 64; tf32x3 ileri + geri 2,57 -> 1,71 ms, tf32 1,52 -> 1,33 ms).
 CFG = {"fwd": (64, 32, 4, 2), "kv": (32, 32, 4, 3), "q": (64, 32, 4, 2)}
@@ -94,8 +95,9 @@ def _bwd_kv_kernel(Q, Kp, V, G, KV, DO, Z, DL, DK, DV, PG, PK,
                    sqb, sqh, sqn, skb, skh, skn, svb, svh, svn, sdb, sdh, sdn,
                    H, N, NB,
                    D: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, K_INT: tl.constexpr, NEED_K: tl.constexpr,
-                   QK: tl.constexpr, AV: tl.constexpr):
-    """Anahtar bloğu başına: dK, dV ve head parametrelerinin (γ, k) blok kısmi toplamları."""
+                   QK: tl.constexpr, AV: tl.constexpr, DP: tl.constexpr):
+    """Anahtar bloğu başına: dK, dV ve head parametrelerinin (γ, k) blok kısmi toplamları.  DP: dO·Vᵀ hassasiyeti — γ / k
+    gradyanı tüm (i, j) toplamı, dw = (dO·V - D) / z iptali tf32 hatasını biriktirir (N 512, k 1: tf32 %4,6)."""
     pid_n = tl.program_id(0)
     bh = tl.program_id(1)
     b = bh // H
@@ -124,7 +126,7 @@ def _bwd_kv_kernel(Q, Kp, V, G, KV, DO, Z, DL, DK, DV, PG, PK,
         d, den, w = _weight(s, g, Kh, K_INT)
         valid = (offs_m[:, None] >= offs_n[None, :]) & m_mask[:, None] & (offs_n[None, :] < N)
         w = tl.where(valid, w, 0.0)
-        dp = tl.dot(do, tl.trans(v), input_precision=AV)
+        dp = tl.dot(do, tl.trans(v), input_precision=DP)
         dw = tl.where(valid, (dp - di[:, None]) / zi[:, None], 0.0)
         dv += tl.dot(tl.trans(w / zi[:, None]), do, input_precision=AV)
         t = dw * w / den
@@ -231,7 +233,8 @@ def gravity_bwd(do: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Ten
     common = (*_strides(q), *_strides(k), *_strides(v), *_strides(do))
     _bwd_kv_kernel[(nb, B * H)](
         q, k, v, gamma, kvec, do, z, dl, dk, dv, pg, pk, *common, H, N, nb,
-        D=D, BM=bm, BN=bn, K_INT=k_int, NEED_K=k_int == 0, QK=qk, AV=av, num_warps=nw, num_stages=ns)
+        D=D, BM=bm, BN=bn, K_INT=k_int, NEED_K=k_int == 0, QK=qk, AV=av, DP=DP_PREC if qk != "ieee" else "ieee",
+        num_warps=nw, num_stages=ns)
     bm, bn, nw, ns = CFG["q"]
     _bwd_q_kernel[(triton.cdiv(N, bm), B * H)](
         q, k, v, gamma, kvec, do, z, dl, dq, *common, H, N,
