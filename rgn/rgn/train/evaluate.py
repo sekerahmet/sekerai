@@ -59,7 +59,7 @@ def distinct4(ids):
 def probes(model, device, max_new_tokens=48, prompts=STORY_PROMPTS[:2]):
     """Değerlendirmede nitel kontrol: kısa greedy devam + farklı-4 + döngü.  tiktoken yoksa boş liste."""
     enc = _tokenizer()
-    if enc is None or max_new_tokens <= 0:
+    if enc is None or max_new_tokens <= 0 or model.cfg.vocab_size < enc.n_vocab:   # küçük sözlüklü (sentetik) model
         return []
     was_training = model.training
     model.eval()
@@ -86,7 +86,7 @@ def _tokenizer():  # noqa: E302
 def samples(model, device, max_new_tokens=64, prompts=STORY_PROMPTS):
     """Greedy (argmax) örnek üretim; tiktoken yoksa boş liste."""
     enc = _tokenizer()
-    if enc is None or max_new_tokens <= 0:
+    if enc is None or max_new_tokens <= 0 or model.cfg.vocab_size < enc.n_vocab:
         return []
     was_training = model.training
     model.eval()
