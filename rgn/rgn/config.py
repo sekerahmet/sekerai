@@ -77,7 +77,7 @@ class ModelConfig:
     observer_layer: int = 0            # > 0: bu katmanın (1'den sayılır) çıkışında gözlemci — gradyansız girdiden küçük sözlükte
                                        # sonraki-token dağılımı; belirsizlik H/(1+H), güven max p, nadir beklentisi p(diğer)
                                        # sonraki katmandan önce akışa E·(2f − 1) (E sıfır başlatma).  Kullanıcı, 15 Ekim
-    observer_vocab: str = "configs/ss/obs_top4096.json"   # gözlemci sınıfları: en sık K token (+1 "diğer")
+    observer_vocab: str = "assets/obs_top4096.json"   # gözlemci sınıfları: en sık K token (+1 "diğer")
     observer_aux_weight: float = 1.0   # gözlemci kaybı (yalnız gözlemci başını eğitir; girdi koparılmış)
     attn_gate: str = ""                # kapı: "" | "head" (head başına 1 sayı) | "elem" (her çıktı sayısı); 2σ_a ∈ (0, 2), başlangıç 1
     mlp: str = "rational"              # rational: W2 u/sqrt(1+u²) | rglu: W2 [G/sqrt(1+G²) ⊙ U] | glu: cebirsel GLU | swiglu: taban
