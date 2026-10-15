@@ -35,6 +35,7 @@ class ModelConfig:
                                        # flex 3800 ms/adım (flex, öğrenilebilir γ/β gradyanını yavaş yoldan topluyor)
     rgn_fp32: bool = True              # rgn dikkatinde q, k, v fp32 (yakın eşleşmede 2 - 2 q·k iptal hatası; doküman 3.5)
     rgn_av_bf16: bool = False          # dense yolda w·V çarpımı bf16 (CUDA; q·kᵀ fp32 kalır) — hız seçeneği
+    rgn_qk_prec: str = "tf32x3"        # triton yolunda q·kᵀ: tf32x3 (fp32'ye yakın) | tf32 (tam adım ~%10 hızlı) | ieee
     pos: str = "rope"                  # rope (varsayılan, kullanıcı 15 Ekim) | additive: payda + β(i-j) | alibi: payda × (1 + β(i-j))
                                        # | rope+alibi | none
     rope_base: float = 10000.0
@@ -62,6 +63,7 @@ class ModelConfig:
     def validate(self):
         assert self.attn in ATTN, self.attn
         assert self.attn_impl in ATTN_IMPL, self.attn_impl
+        assert self.rgn_qk_prec in ("tf32x3", "tf32", "ieee"), self.rgn_qk_prec
         assert self.pos in POS, self.pos
         assert self.mlp in MLP, self.mlp
         assert self.d_model % self.n_heads == 0 and self.n_heads % self.n_kv_heads == 0

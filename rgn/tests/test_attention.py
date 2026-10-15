@@ -157,12 +157,13 @@ def test_triton_matches_dense_interpreter():
 
 
 def test_triton_matches_dense_cuda():
-    """GPU: q·kᵀ tf32x3, diğer çarpımlar tf32 -> bağıl hata ~1e-3'ün altında.  N = 100 (blok kenarı) ve 512, GQA, model
-    düzeni (transpose)."""
+    """GPU: q·kᵀ tf32x3, diğer çarpımlar tf32 -> çıktı ve q / k / v gradyanı bağıl ~2e-3.  Head parametrelerinin (γ, k)
+    gradyanı tüm (i, j) üzerinden toplam: tf32 dO·Vᵀ hatası birikir, ~1e-2 (ölçüldü; hepsi tf32x3 iken 2e-6).  N = 100
+    (blok kenarı) ve 512, GQA, model düzeni (transpose)."""
     require_cuda()
     for kw in (dict(N=100), dict(N=512, dh=64, transpose=True)):
         for name, e in _triton_vs_dense("cuda", **kw).items():
-            assert max(e) < 5e-3, (kw, name, e)
+            assert max(e[:4]) < 5e-3 and max(e[4:]) < 3e-2, (kw, name, e)
 
 
 def test_flex_matches_dense_cuda():

@@ -14,17 +14,19 @@ Geri geçiş (D_i = dO_i·O_i, w maskeli):
     dγ = -Σ dw · w · d / den
     dK_h = Σ dw · w · (-ln den + (den - 1) / den)     (yalnız öğrenilen k)
 
-Hassasiyet: q·kᵀ 'tf32x3' (üç TF32 Tensor Core çarpımı, fp32'ye yakın; yakın eşleşmede 2 - 2s iptal hatası — doküman
-3.5), w·V ve gradyan çarpımları 'tf32' (w ∈ [0, 1]).  K = 1, 2, 4, 8 tam sayıları kuvvet zinciriyle (log / exp yok).
+Hassasiyet: q·kᵀ varsayılan 'tf32x3' (üç TF32 Tensor Core çarpımı, fp32'ye yakın; yakın eşleşmede 2 - 2s iptal hatası —
+doküman 3.5; ModelConfig.rgn_qk_prec), w·V ve gradyan çarpımları 'tf32' (w ∈ [0, 1]).
+Ölçüldü (RTX PRO 6000 Blackwell, B 64, H 8, N 512, dh 64, ileri + geri): tf32x3 2,6 ms, tf32 1,5 ms, hepsi tf32x3
+7,6 ms; dense (fp32) 19,5 ms; softmax SDPA bf16 0,54 ms.  Tam adım (SS d512, 128 × 512): dense 182 ms -> triton
+tf32x3 145 ms / tf32 130 ms, bellek 29,9 -> 20,2 GB; transformer 112 ms.  K = 1, 2, 4, 8 tam sayıları kuvvet zinciriyle (log / exp yok).
 """
 import torch
 import triton
 import triton.language as tl
 
-QK_PREC = "tf32x3"
 AV_PREC = "tf32"
-BLOCK_M = 64
-BLOCK_N = 64
+# Çekirdek başına (BM, BN, num_warps, num_stages).  fp32 bloklar paylaşılan belleği (sm_120: 99 KB) çabuk doldurur.
+CFG = {"fwd": (64, 32, 4, 2), "kv": (64, 64, 4, 2), "q": (64, 64, 4, 2)}
 
 
 @triton.jit
@@ -180,33 +182,34 @@ def _strides(t):
     return t.stride(0), t.stride(1), t.stride(2)
 
 
-def _prec(device):
+def _prec(device, qk):
     """Triton yorumlayıcısında (CPU, TRITON_INTERPRET=1) Tensor Core yok: tam fp32."""
-    return ("ieee", "ieee") if device.type != "cuda" else (QK_PREC, AV_PREC)
+    return ("ieee", "ieee") if device.type != "cuda" else (qk, AV_PREC)
 
 
 @torch.library.custom_op("rgn::gravity_fwd", mutates_args=())
 def gravity_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, gamma: torch.Tensor, kvec: torch.Tensor,
-                k_int: int) -> tuple[torch.Tensor, torch.Tensor]:
+                k_int: int, qk_prec: str) -> tuple[torch.Tensor, torch.Tensor]:
     B, H, N, D = q.shape
     o = torch.empty((B, H, N, D), device=q.device, dtype=torch.float32)
     z = torch.empty((B, H, N), device=q.device, dtype=torch.float32)
-    qk, av = _prec(q.device)
-    _fwd_kernel[(triton.cdiv(N, BLOCK_M), B * H)](
+    qk, av = _prec(q.device, qk_prec)
+    bm, bn, nw, ns = CFG["fwd"]
+    _fwd_kernel[(triton.cdiv(N, bm), B * H)](
         q, k, v, gamma, kvec, o, z, *_strides(q), *_strides(k), *_strides(v), *_strides(o), H, N,
-        D=D, BM=BLOCK_M, BN=BLOCK_N, K_INT=k_int, QK=qk, AV=av, num_warps=4, num_stages=2)
+        D=D, BM=bm, BN=bn, K_INT=k_int, QK=qk, AV=av, num_warps=nw, num_stages=ns)
     return o, z
 
 
 @gravity_fwd.register_fake
-def _(q, k, v, gamma, kvec, k_int):
+def _(q, k, v, gamma, kvec, k_int, qk_prec):
     B, H, N, D = q.shape
     return q.new_empty((B, H, N, D), dtype=torch.float32), q.new_empty((B, H, N), dtype=torch.float32)
 
 
 @torch.library.custom_op("rgn::gravity_bwd", mutates_args=())
 def gravity_bwd(do: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, o: torch.Tensor, z: torch.Tensor,
-                gamma: torch.Tensor, kvec: torch.Tensor, k_int: int
+                gamma: torch.Tensor, kvec: torch.Tensor, k_int: int, qk_prec: str
                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     B, H, N, D = q.shape
     do = do.float()
@@ -216,46 +219,49 @@ def gravity_bwd(do: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Ten
     dq = torch.empty((B, H, N, D), device=q.device, dtype=torch.float32)
     dk = torch.empty_like(dq)
     dv = torch.empty_like(dq)
-    nb = triton.cdiv(N, BLOCK_N)
+    bm, bn, nw, ns = CFG["kv"]
+    nb = triton.cdiv(N, bn)
     pg = torch.empty((B, H, nb), device=q.device, dtype=torch.float32)
     pk = torch.zeros((B, H, nb), device=q.device, dtype=torch.float32)
-    qk, av = _prec(q.device)
+    qk, av = _prec(q.device, qk_prec)
     common = (*_strides(q), *_strides(k), *_strides(v), *_strides(do))
     _bwd_kv_kernel[(nb, B * H)](
         q, k, v, gamma, kvec, do, z, dl, dk, dv, pg, pk, *common, H, N, nb,
-        D=D, BM=BLOCK_M, BN=BLOCK_N, K_INT=k_int, NEED_K=k_int == 0, QK=qk, AV=av, num_warps=4, num_stages=2)
-    _bwd_q_kernel[(triton.cdiv(N, BLOCK_M), B * H)](
+        D=D, BM=bm, BN=bn, K_INT=k_int, NEED_K=k_int == 0, QK=qk, AV=av, num_warps=nw, num_stages=ns)
+    bm, bn, nw, ns = CFG["q"]
+    _bwd_q_kernel[(triton.cdiv(N, bm), B * H)](
         q, k, v, gamma, kvec, do, z, dl, dq, *common, H, N,
-        D=D, BM=BLOCK_M, BN=BLOCK_N, K_INT=k_int, QK=qk, AV=av, num_warps=4, num_stages=2)
+        D=D, BM=bm, BN=bn, K_INT=k_int, QK=qk, AV=av, num_warps=nw, num_stages=ns)
     return dq, dk, dv, pg.sum((0, 2)), pk.sum((0, 2))
 
 
 @gravity_bwd.register_fake
-def _(do, q, k, v, o, z, gamma, kvec, k_int):
+def _(do, q, k, v, o, z, gamma, kvec, k_int, qk_prec):
     B, H, N, D = q.shape
     e = q.new_empty((B, H, N, D), dtype=torch.float32)
     return e, torch.empty_like(e), torch.empty_like(e), gamma.new_empty((H,)), gamma.new_empty((H,))
 
 
 def _setup_context(ctx, inputs, output):
-    q, k, v, gamma, kvec, k_int = inputs
+    q, k, v, gamma, kvec, k_int, qk_prec = inputs
     o, z = output
     ctx.save_for_backward(q, k, v, o, z, gamma, kvec)
-    ctx.k_int = k_int
+    ctx.k_int, ctx.qk_prec = k_int, qk_prec
 
 
 def _backward(ctx, do, dz):
     q, k, v, o, z, gamma, kvec = ctx.saved_tensors
-    dq, dk, dv, dg, dkv = gravity_bwd(do, q, k, v, o, z, gamma, kvec, ctx.k_int)
-    return dq, dk, dv, dg, (dkv if ctx.k_int == 0 else None), None
+    dq, dk, dv, dg, dkv = gravity_bwd(do, q, k, v, o, z, gamma, kvec, ctx.k_int, ctx.qk_prec)
+    return dq, dk, dv, dg, (dkv if ctx.k_int == 0 else None), None, None
 
 
 gravity_fwd.register_autograd(_backward, setup_context=_setup_context)
 
 
-def rgn_triton(q, k, v, gamma, sharpness=1):
+def rgn_triton(q, k, v, gamma, sharpness=1, qk_prec="tf32x3"):
     """q (B, H, N, dh), k / v (B, Hkv, N, dh) -> O (B, H, N, dh) fp32.  rgn_dense(pos rope / none, power 1) ile aynı
-    sonuç.  sharpness: sayı ya da (H,) tensör (öğrenilen k; gradyan alır)."""
+    sonuç.  sharpness: sayı ya da (H,) tensör (öğrenilen k; gradyan alır).  qk_prec: q·kᵀ çarpımı — tf32x3 (fp32'ye
+    yakın) | tf32 (hızlı) | ieee (tam fp32, yavaş)."""
     H, D = q.shape[1], q.shape[3]
     assert D in (16, 32, 64, 128), "head boyutu 16 / 32 / 64 / 128"
     if k.shape[1] != H:
@@ -268,4 +274,4 @@ def rgn_triton(q, k, v, gamma, sharpness=1):
     else:
         kvec = torch.full((H,), float(sharpness), device=q.device)
         k_int = int(sharpness) if float(sharpness).is_integer() else -1     # -1: genel üs yolu, gradyan yok
-    return gravity_fwd(q, k, v, gamma, kvec, k_int)[0]
+    return gravity_fwd(q, k, v, gamma, kvec, k_int, qk_prec)[0]

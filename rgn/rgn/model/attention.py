@@ -85,9 +85,9 @@ def triton_ok():
     return _TRITON["ok"]
 
 
-def rgn_triton(q, k, v, gamma, sharpness=1):
+def rgn_triton(q, k, v, gamma, sharpness=1, qk_prec="tf32x3"):
     assert triton_ok(), _TRITON.get("err")
-    return _TRITON["fn"](q, k, v, gamma, sharpness)
+    return _TRITON["fn"](q, k, v, gamma, sharpness, qk_prec)
 
 
 _FLEX = {}
@@ -214,7 +214,7 @@ class Attention(nn.Module):
         ctx = torch.autocast(q.device.type, enabled=False) if self.cfg.rgn_fp32 else contextlib.nullcontext()
         with ctx:
             if impl == "triton":
-                return rgn_triton(q, k, v, args[0], args[4])
+                return rgn_triton(q, k, v, args[0], args[4], self.cfg.rgn_qk_prec)
             if impl == "flex":
                 return rgn_flex(q, k, v, *args)
             return rgn_dense(q, k, v, *args, av_bf16=self.cfg.rgn_av_bf16 and q.is_cuda)
