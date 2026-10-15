@@ -3,6 +3,7 @@
     token -> embedding -> [ön-norm -> çekim dikkati -> residual -> ön-norm -> rasyonel MLP -> residual] × L
           -> final norm -> LM head (paylaşımlı embedding) -> sonraki token
 """
+import dataclasses
 import math
 
 import torch
@@ -17,10 +18,14 @@ from rgn.model.position import rope_tables
 
 
 class Block(nn.Module):
-    def __init__(self, cfg):
+    def __init__(self, cfg, kind="G"):
+        """kind: 'G' genel (tam causal; konum cfg.global_pos ya da pos) | 'Y' yerel (son local_window token, konum pos)."""
         super().__init__()
+        self.kind = kind
         self.norm1, self.norm2 = RMSNorm(cfg.d_model), RMSNorm(cfg.d_model)
-        self.attn = Attention(cfg)
+        if kind == "G" and cfg.global_pos:
+            cfg = dataclasses.replace(cfg, pos=cfg.global_pos)
+        self.attn = Attention(cfg, window=cfg.local_window if kind == "Y" else 0)
         self.mlp = build_mlp(cfg)
 
     def forward(self, x, rope=None):
@@ -50,11 +55,11 @@ class RGNModel(nn.Module):
         cfg.validate()
         self.cfg = cfg
         self.embed = nn.Embedding(cfg.vocab_size, cfg.d_model)
-        self.blocks = nn.ModuleList(Block(cfg) for _ in range(cfg.n_layers))
+        self.blocks = nn.ModuleList(Block(cfg, kind) for kind in cfg.layer_kinds())
         self.norm_f = RMSNorm(cfg.d_model)
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self.lm_head.weight = self.embed.weight          # W_vocab = W_embᵀ
-        self.use_rope = cfg.pos in ("rope", "rope+alibi")
+        self.use_rope = any(b.attn.use_rope for b in self.blocks)
         self.loss_checkpoint = True                     # trainer TrainConfig.loss_checkpoint ile ayarlar
         if self.use_rope:
             cos, sin = rope_tables(cfg.max_len, cfg.d_model // cfg.n_heads, cfg.rope_base)

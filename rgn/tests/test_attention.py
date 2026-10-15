@@ -121,7 +121,7 @@ def test_backward_formulas_match_autograd():
         assert err < 1e-10, (name, err)
 
 
-def _triton_vs_dense(device, B=2, H=4, Hkv=2, N=100, dh=16, transpose=False):
+def _triton_vs_dense(device, B=2, H=4, Hkv=2, N=100, dh=16, transpose=False, window=0):
     """Triton çekirdeği (ileri + tüm gradyanlar) dense ile aynı: k = 1, 4, 3 (genel üs) ve head başına öğrenilen k."""
     from rgn.model.attention import rgn_triton
     q0, k0, v0, gamma0, _ = _inputs(B=B, H=H, Hkv=Hkv, N=N, dh=dh, dtype=torch.float32)
@@ -135,7 +135,8 @@ def _triton_vs_dense(device, B=2, H=4, Hkv=2, N=100, dh=16, transpose=False):
             t.requires_grad_()
         Kx = ins[4] if torch.is_tensor(K) else K
         res = []
-        for fn in (lambda: rgn_triton(*ins[:4], Kx), lambda: rgn_dense(*ins[:4], None, "rope", 1, Kx)):
+        for fn in (lambda: rgn_triton(*ins[:4], Kx, window=window),
+                   lambda: rgn_dense(*ins[:4], None, "rope", 1, Kx, window=window)):
             o = fn()
             (o * G).sum().backward()
             res.append([o.detach()] + [t.grad.clone() for t in ins])
@@ -146,14 +147,25 @@ def _triton_vs_dense(device, B=2, H=4, Hkv=2, N=100, dh=16, transpose=False):
     return errs
 
 
+def test_window_dense_formula():
+    """Yerel pencere: i yalnız i - W < j <= i'ye bakar; W >= N tam causal ile aynı."""
+    q, k, v, gamma, beta = _inputs(N=12)
+    a = rgn_dense(q, k, v, gamma, beta, "rope", 1, 4, return_weights=True, window=3)[1]
+    rel = torch.arange(12)[:, None] - torch.arange(12)[None, :]
+    assert (a[..., (rel < 0) | (rel >= 3)] == 0).all() and (a[..., (rel >= 0) & (rel < 3)] > 0).all()
+    assert torch.allclose(a.sum(-1), torch.ones_like(a.sum(-1)))
+    assert torch.equal(rgn_dense(q, k, v, gamma, beta, "rope", 1, 4, window=12), rgn_dense(q, k, v, gamma, beta, "rope", 1, 4))
+
+
 def test_triton_matches_dense_interpreter():
     """Triton yorumlayıcısı (CPU, TRITON_INTERPRET=1) ile çekirdek mantığı; yalnız ayrı süreçte çalışır (ortam değişkeni
     triton içe aktarılmadan önce okunur): TRITON_INTERPRET=1 python tests/run_tests.py attention"""
     import os
     if os.environ.get("TRITON_INTERPRET") != "1":
         raise Skip("TRITON_INTERPRET=1 değil")
-    for name, e in _triton_vs_dense("cpu").items():
-        assert max(e) < 1e-4, (name, e)
+    for w in (0, 37):                                              # 37: blok sınırına denk gelmeyen pencere
+        for name, e in _triton_vs_dense("cpu", window=w).items():
+            assert max(e) < 1e-4, (w, name, e)
 
 
 def test_triton_matches_dense_cuda():
@@ -162,7 +174,7 @@ def test_triton_matches_dense_cuda():
     ~5e-2, k = 4'te ~5e-3 (ölçüldü; ileri w·V ve dO·Vᵀ birlikte tf32x3 iken 2e-4, çekirdek %55 yavaş — triton_attention
     FWD_AV_PREC / DP_PREC).  N = 100 (blok kenarı) ve 512, GQA, model düzeni (transpose)."""
     require_cuda()
-    for kw in (dict(N=100), dict(N=512, dh=64, transpose=True)):
+    for kw in (dict(N=100), dict(N=512, dh=64, transpose=True), dict(N=512, dh=64, window=128), dict(N=300, window=45)):
         for name, e in _triton_vs_dense("cuda", **kw).items():
             assert max(e[:4]) < 5e-3 and max(e[4:]) < 1.5e-1, (kw, name, e)
 

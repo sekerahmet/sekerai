@@ -1,0 +1,14 @@
+{
+  "extends": "../base/train_ss.json",
+  "name": "ss_d512_rgn_klearn_glu",
+  "notes": "Ana model (15 Ekim): öğrenilen k (head başına, 1–8) + cebirsel GLU. 1000. adım 1,9250 (transformer 1,9076).",
+  "model": {
+    "sharpness_learn": true,
+    "sharpness_range": [
+      1.0,
+      8.0
+    ],
+    "sharpness_init": 4.0,
+    "mlp": "glu"
+  }
+}

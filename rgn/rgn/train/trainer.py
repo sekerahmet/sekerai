@@ -123,6 +123,9 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
     per_epoch = math.ceil(train_s.total / tokens_per_step)
     decay_start = int(total_steps * (1 - tc.decay)) if tc.schedule == "wsd" else None
     gpu = torch.cuda.get_device_name(0) if device.type == "cuda" else "cpu"
+    if mc.local_window:
+        say("katmanlar %s (Y: yerel, son %d token, konum %s | G: genel, tam, konum %s)" % (
+            mc.layer_kinds(), mc.local_window, mc.pos, mc.global_pos or mc.pos))
     say("%s | attn %s pos %s mlp %s p %d | D %d, katman %d, head %d (kv %d), d_ff %d, %d parametre" % (
         cfg.name, mc.attn, mc.pos, mc.mlp, mc.power, mc.d_model, mc.n_layers, mc.n_heads, mc.n_kv_heads, mc.ff_dim(),
         n_params))

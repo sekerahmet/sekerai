@@ -49,9 +49,27 @@ class ModelConfig:
     gamma_min: float = 1.0             # γ = γ_min + γ̂²
     learn_gamma: bool = True
     beta_range: tuple = (1.0, 1.0 / 65536)  # β başlangıcı (additive / alibi), head başına geometrik (azalan)
+    local_window: int = 0              # > 0: yerel (Y) katmanlar yalnız son local_window token'a bakar (j > i - W); genel (G)
+                                       # katmanlar tümüne.  0: bütün katmanlar genel (eski düzen)
+    global_layers: int = 0             # local_window > 0 iken genel katman sayısı
+    g_layout: str = "interleave"       # interleave: eşit aralık, son katman G (Model Z: Y-Y-G) | top: son N | elle "2,5,7"
+    global_pos: str = ""               # genel katmanlarda konum ("" = pos); "none": konumsuz, yalnız anlam uzaklığı (Model Z g_nope)
     mlp: str = "rational"              # rational: W2 u/sqrt(1+u²) | rglu: W2 [G/sqrt(1+G²) ⊙ U] | glu: cebirsel GLU | swiglu: taban
     mlp_bias: bool = True
     init_std: float = 0.02
+
+    def layer_kinds(self):
+        """Katman dizilimi: 'Y' yerel (son local_window token), 'G' genel (tam causal)."""
+        L = self.n_layers
+        if not self.local_window:
+            return "G" * L
+        if self.g_layout == "interleave":
+            at = {round((i + 1) * L / self.global_layers) - 1 for i in range(self.global_layers)}
+        elif self.g_layout == "top":
+            at = set(range(L - self.global_layers, L))
+        else:
+            at = {int(v) for v in self.g_layout.split(",") if v.strip()}
+        return "".join("G" if l in at else "Y" for l in range(L))
 
     def ff_dim(self):
         if self.d_ff:
@@ -64,6 +82,13 @@ class ModelConfig:
         assert self.attn in ATTN, self.attn
         assert self.attn_impl in ATTN_IMPL, self.attn_impl
         assert self.rgn_qk_prec in ("tf32x3", "tf32", "ieee"), self.rgn_qk_prec
+        assert self.local_window >= 0 and 0 <= self.global_layers <= self.n_layers
+        assert not self.global_pos or self.global_pos in POS, self.global_pos
+        if self.local_window:
+            kinds = self.layer_kinds()
+            assert len(kinds) == self.n_layers and kinds.count("G") == self.global_layers, \
+                "g_layout %s: %d genel katman bekleniyor (%s)" % (self.g_layout, self.global_layers, kinds)
+            assert self.attn_impl != "flex", "yerel pencere flex yolunda yok (triton / dense / sdpa)"
         assert self.pos in POS, self.pos
         assert self.mlp in MLP, self.mlp
         assert self.d_model % self.n_heads == 0 and self.n_heads % self.n_kv_heads == 0

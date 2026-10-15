@@ -46,11 +46,12 @@ def denominator(s, gamma, beta, k, pos, power):
     return den
 
 
-def rgn_dense(q, k, v, gamma, beta, pos, power, sharpness=1, return_weights=False, av_bf16=False):
+def rgn_dense(q, k, v, gamma, beta, pos, power, sharpness=1, return_weights=False, av_bf16=False, window=0):
     """q (B, H, N, dh), k / v (B, Hkv, N, dh) -> O (B, H, N, dh) [, α (B, H, N, N)].
     sharpness: keskinlik üssü k — sayı (tüm head'ler) ya da (H,) tensör (head başına, öğrenilebilir).
     av_bf16: w·V çarpımı bf16 Tensor Core'da (w ∈ [0, 1]; FlashAttention'daki P·V gibi).  q·kᵀ fp32 kalır (yakın
-    eşleşmede 2 - 2 q·k iptal hatası, doküman 3.5)."""
+    eşleşmede 2 - 2 q·k iptal hatası, doküman 3.5).
+    window > 0: yerel katman — i yalnız i - window < j <= i'ye bakar."""
     H, N = q.shape[1], q.shape[2]
     if k.shape[1] != H:
         rep = H // k.shape[1]
@@ -62,7 +63,7 @@ def rgn_dense(q, k, v, gamma, beta, pos, power, sharpness=1, return_weights=Fals
     K = sharpness.view(1, -1, 1, 1) if torch.is_tensor(sharpness) else sharpness
     den = denominator(s, gamma.view(1, -1, 1, 1) / K, beta_b, rel.clamp_min(0).to(s.dtype), pos, power)
     w = (1.0 / den) if (not torch.is_tensor(K) and K == 1) else den.pow(-K)
-    w = w.masked_fill(rel < 0, 0.0)
+    w = w.masked_fill((rel < 0) | (rel >= window) if window else rel < 0, 0.0)
     z = w.sum(dim=-1, keepdim=True).clamp_min(1e-30)    # köşegen > 0; k <= 8'de alt taşma yok, yine de 0/0'a karşı
     if av_bf16 and not return_weights:
         out = (w.to(torch.bfloat16) @ v.to(torch.bfloat16)).float() / z
@@ -85,9 +86,9 @@ def triton_ok():
     return _TRITON["ok"]
 
 
-def rgn_triton(q, k, v, gamma, sharpness=1, qk_prec="tf32x3"):
+def rgn_triton(q, k, v, gamma, sharpness=1, qk_prec="tf32x3", window=0):
     assert triton_ok(), _TRITON.get("err")
-    return _TRITON["fn"](q, k, v, gamma, sharpness, qk_prec)
+    return _TRITON["fn"](q, k, v, gamma, sharpness, qk_prec, window)
 
 
 _FLEX = {}
@@ -131,12 +132,13 @@ def rgn_flex(q, k, v, gamma, beta, pos, power, sharpness=1):
 
 
 class Attention(nn.Module):
-    """Çekim (rgn) ya da softmax dikkati; GQA, konum terimi (β) ya da RoPE."""
+    """Çekim (rgn) ya da softmax dikkati; GQA, konum terimi (β) ya da RoPE.  window > 0: yerel katman (son window token)."""
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, window=0):
         super().__init__()
         d, H, Hkv = cfg.d_model, cfg.n_heads, cfg.n_kv_heads
         self.cfg, self.H, self.Hkv, self.dh = cfg, H, Hkv, d // H
+        self.window = int(window)
         self.w_q = nn.Linear(d, d, bias=False)                         # W_Q
         self.w_kv = nn.Linear(d, 2 * Hkv * self.dh, bias=False)        # W_K, W_V
         self.w_o = nn.Linear(d, d, bias=False)                         # W_O (başları birleştirir)
@@ -209,15 +211,24 @@ class Attention(nn.Module):
     def _core(self, q, k, v):
         impl = self.impl(q.device, q.shape[2])
         if impl == "sdpa":
+            if self.window:
+                return F.scaled_dot_product_attention(q, k, v, attn_mask=self._mask(q.shape[2], q.device),
+                                                      enable_gqa=self.Hkv != self.H)
             return F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=self.Hkv != self.H)
         args = (self.gamma(), self.beta(), self.cfg.pos, self.cfg.power, self.sharpness())
         ctx = torch.autocast(q.device.type, enabled=False) if self.cfg.rgn_fp32 else contextlib.nullcontext()
         with ctx:
             if impl == "triton":
-                return rgn_triton(q, k, v, args[0], args[4], self.cfg.rgn_qk_prec)
+                return rgn_triton(q, k, v, args[0], args[4], self.cfg.rgn_qk_prec, self.window)
             if impl == "flex":
+                assert not self.window, "yerel pencere flex yolunda yok"
                 return rgn_flex(q, k, v, *args)
-            return rgn_dense(q, k, v, *args, av_bf16=self.cfg.rgn_av_bf16 and q.is_cuda)
+            return rgn_dense(q, k, v, *args, av_bf16=self.cfg.rgn_av_bf16 and q.is_cuda, window=self.window)
+
+    def _mask(self, n, device):
+        """Softmax yerel katman maskesi (True = bakılır): 0 <= i - j < window."""
+        rel = torch.arange(n, device=device)[:, None] - torch.arange(n, device=device)[None, :]
+        return (rel >= 0) & (rel < self.window)
 
     def forward(self, x, rope=None):
         B, N, D = x.shape
@@ -232,10 +243,11 @@ class Attention(nn.Module):
         if self.cfg.attn == "rgn":
             with torch.autocast(q.device.type, enabled=False):
                 return rgn_dense(q.float(), k.float(), v.float(), self.gamma(), self.beta(), self.cfg.pos,
-                                 self.cfg.power, self.sharpness(), return_weights=True)[1]
+                                 self.cfg.power, self.sharpness(), return_weights=True, window=self.window)[1]
         if self.Hkv != self.H:
             k = k.repeat_interleave(self.H // self.Hkv, dim=1)
         s = (q.float() @ k.float().transpose(-2, -1)) / self.dh ** 0.5
         n = s.shape[-1]
-        s = s.masked_fill(~torch.ones(n, n, dtype=torch.bool, device=s.device).tril(), float("-inf"))
+        keep = self._mask(n, s.device) if self.window else torch.ones(n, n, dtype=torch.bool, device=s.device).tril()
+        s = s.masked_fill(~keep, float("-inf"))
         return torch.softmax(s, dim=-1)

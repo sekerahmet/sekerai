@@ -28,6 +28,27 @@ def test_causal_and_finite_gradients():
         assert torch.allclose(logits[:, :-1], m(idx2)[:, :-1], atol=1e-5), ("nedensellik", v)
 
 
+def test_local_global_layers():
+    """Y-Y-G dizilimi: interleave son katman G; yerel katmanda pencere, genel katmanda konum global_pos; ileri + geri çalışır;
+    yerel katman ağırlıkları pencere dışında 0."""
+    cfg = tiny(n_layers=3, local_window=8, global_layers=1, global_pos="none", sharpness=4)
+    assert cfg.layer_kinds() == "YYG"
+    assert tiny(n_layers=8, local_window=8, global_layers=3).layer_kinds() == "YYGYGYYG"
+    m = RGNModel(cfg)
+    assert [b.attn.window for b in m.blocks] == [8, 8, 0]
+    assert [b.attn.use_rope for b in m.blocks] == [True, True, False] and m.use_rope
+    idx = torch.randint(0, 97, (2, 32))
+    m(idx, idx).backward()
+    x = m.embed(idx)
+    a = m.blocks[0].attn.weights(m.blocks[0].norm1(x), m.rope(32))
+    rel = torch.arange(32)[:, None] - torch.arange(32)[None, :]
+    assert (a[..., rel >= 8] == 0).all() and (a[..., (rel >= 0) & (rel < 8)] > 0).all()
+    s = RGNModel(tiny(attn="softmax", mlp="swiglu", attn_impl="auto", n_layers=3, local_window=8, global_layers=1))
+    s(idx, idx).backward()
+    a = s.blocks[0].attn.weights(s.blocks[0].norm1(s.embed(idx)), s.rope(32))
+    assert (a[..., rel >= 8] == 0).all()
+
+
 def test_learnable_sharpness_model():
     m = RGNModel(tiny(sharpness_learn=True, sharpness_init=4.0))
     for blk in m.blocks:

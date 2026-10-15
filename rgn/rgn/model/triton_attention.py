@@ -61,7 +61,7 @@ def _weight(s, g, K, K_INT: tl.constexpr):
 @triton.jit
 def _fwd_kernel(Q, Kp, V, G, KV, O, Z,
                 sqb, sqh, sqn, skb, skh, skn, svb, svh, svn, sob, soh, son,
-                H, N,
+                H, N, W,
                 D: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, K_INT: tl.constexpr,
                 QK: tl.constexpr, AV: tl.constexpr):
     pid_m = tl.program_id(0)
@@ -76,14 +76,16 @@ def _fwd_kernel(Q, Kp, V, G, KV, O, Z,
     acc = tl.zeros([BM, D], dtype=tl.float32)
     z = tl.zeros([BM], dtype=tl.float32)
     hi = tl.minimum((pid_m + 1) * BM, N)
-    for start_n in range(0, hi, BN):
+    lo = (tl.maximum(pid_m * BM - W + 1, 0) // BN) * BN             # yerel pencere: daha eski bloklar hiç okunmaz
+    for start_n in range(lo, hi, BN):
         offs_n = start_n + tl.arange(0, BN)
         kv_mask = offs_n[:, None] < N
         k = tl.load(Kp + b * skb + h * skh + offs_n[:, None] * skn + offs_d[None, :], mask=kv_mask, other=0.0)
         v = tl.load(V + b * svb + h * svh + offs_n[:, None] * svn + offs_d[None, :], mask=kv_mask, other=0.0)
         s = tl.dot(q, tl.trans(k), input_precision=QK)
         d, den, w = _weight(s, g, Kh, K_INT)
-        valid = (offs_m[:, None] >= offs_n[None, :]) & (offs_n[None, :] < N)
+        rel = offs_m[:, None] - offs_n[None, :]
+        valid = (rel >= 0) & (rel < W) & (offs_n[None, :] < N)
         w = tl.where(valid, w, 0.0)
         z += tl.sum(w, 1)
         acc += tl.dot(w, v, input_precision=AV)
@@ -96,7 +98,7 @@ def _fwd_kernel(Q, Kp, V, G, KV, O, Z,
 @triton.jit
 def _bwd_kv_kernel(Q, Kp, V, G, KV, DO, Z, DL, DK, DV, PG, PK,
                    sqb, sqh, sqn, skb, skh, skn, svb, svh, svn, sdb, sdh, sdn,
-                   H, N, NB,
+                   H, N, W, NB,
                    D: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, K_INT: tl.constexpr, NEED_K: tl.constexpr,
                    QK: tl.constexpr, AV: tl.constexpr, DP: tl.constexpr):
     """Anahtar bloğu başına: dK, dV ve head parametrelerinin (γ, k) blok kısmi toplamları.  DP: dO·Vᵀ hassasiyeti — γ / k
@@ -118,7 +120,8 @@ def _bwd_kv_kernel(Q, Kp, V, G, KV, DO, Z, DL, DK, DV, PG, PK,
     pg = tl.zeros([BN], dtype=tl.float32)
     pk = tl.zeros([BN], dtype=tl.float32)
     lo = (pid_n * BN // BM) * BM
-    for start_m in range(lo, N, BM):
+    hi = tl.minimum((pid_n + 1) * BN + W - 1, N)                    # yerel pencere: daha sonraki sorgular bu anahtarı görmez
+    for start_m in range(lo, hi, BM):
         offs_m = start_m + tl.arange(0, BM)
         m_mask = offs_m < N
         q = tl.load(Q + b * sqb + h * sqh + offs_m[:, None] * sqn + offs_d[None, :], mask=m_mask[:, None], other=0.0)
@@ -127,7 +130,8 @@ def _bwd_kv_kernel(Q, Kp, V, G, KV, DO, Z, DL, DK, DV, PG, PK,
         di = tl.load(DL + bh * N + offs_m, mask=m_mask, other=0.0)
         s = tl.dot(q, tl.trans(k), input_precision=QK)
         d, den, w = _weight(s, g, Kh, K_INT)
-        valid = (offs_m[:, None] >= offs_n[None, :]) & m_mask[:, None] & (offs_n[None, :] < N)
+        rel = offs_m[:, None] - offs_n[None, :]
+        valid = (rel >= 0) & (rel < W) & m_mask[:, None] & (offs_n[None, :] < N)
         w = tl.where(valid, w, 0.0)
         dp = tl.dot(do, tl.trans(v), input_precision=DP)
         dw = tl.where(valid, (dp - di[:, None]) / zi[:, None], 0.0)
@@ -148,7 +152,7 @@ def _bwd_kv_kernel(Q, Kp, V, G, KV, DO, Z, DL, DK, DV, PG, PK,
 @triton.jit
 def _bwd_q_kernel(Q, Kp, V, G, KV, DO, Z, DL, DQ,
                   sqb, sqh, sqn, skb, skh, skn, svb, svh, svn, sdb, sdh, sdn,
-                  H, N,
+                  H, N, W,
                   D: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, K_INT: tl.constexpr,
                   QK: tl.constexpr, AV: tl.constexpr, DP: tl.constexpr):
     """Sorgu bloğu başına: dQ."""
@@ -168,14 +172,16 @@ def _bwd_q_kernel(Q, Kp, V, G, KV, DO, Z, DL, DQ,
     g = gam / Kh
     dq = tl.zeros([BM, D], dtype=tl.float32)
     hi = tl.minimum((pid_m + 1) * BM, N)
-    for start_n in range(0, hi, BN):
+    lo = (tl.maximum(pid_m * BM - W + 1, 0) // BN) * BN
+    for start_n in range(lo, hi, BN):
         offs_n = start_n + tl.arange(0, BN)
         kv_mask = offs_n[:, None] < N
         k = tl.load(Kp + b * skb + h * skh + offs_n[:, None] * skn + offs_d[None, :], mask=kv_mask, other=0.0)
         v = tl.load(V + b * svb + h * svh + offs_n[:, None] * svn + offs_d[None, :], mask=kv_mask, other=0.0)
         s = tl.dot(q, tl.trans(k), input_precision=QK)
         d, den, w = _weight(s, g, Kh, K_INT)
-        valid = (offs_m[:, None] >= offs_n[None, :]) & m_mask[:, None] & (offs_n[None, :] < N)
+        rel = offs_m[:, None] - offs_n[None, :]
+        valid = (rel >= 0) & (rel < W) & m_mask[:, None] & (offs_n[None, :] < N)
         w = tl.where(valid, w, 0.0)
         dp = tl.dot(do, tl.trans(v), input_precision=DP)
         dw = tl.where(valid, (dp - di[:, None]) / zi[:, None], 0.0)
@@ -198,27 +204,27 @@ def _prec(device, qk):
 
 @torch.library.custom_op("rgn::gravity_fwd", mutates_args=())
 def gravity_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, gamma: torch.Tensor, kvec: torch.Tensor,
-                k_int: int, qk_prec: int) -> tuple[torch.Tensor, torch.Tensor]:
+                k_int: int, qk_prec: int, window: int) -> tuple[torch.Tensor, torch.Tensor]:
     B, H, N, D = q.shape
     o = torch.empty((B, H, N, D), device=q.device, dtype=torch.float32)
     z = torch.empty((B, H, N), device=q.device, dtype=torch.float32)
     qk, av = _prec(q.device, qk_prec)
     bm, bn, nw, ns = CFG["fwd"]
     _fwd_kernel[(triton.cdiv(N, bm), B * H)](
-        q, k, v, gamma, kvec, o, z, *_strides(q), *_strides(k), *_strides(v), *_strides(o), H, N,
+        q, k, v, gamma, kvec, o, z, *_strides(q), *_strides(k), *_strides(v), *_strides(o), H, N, window,
         D=D, BM=bm, BN=bn, K_INT=k_int, QK=qk, AV=FWD_AV_PREC if qk != "ieee" else "ieee", num_warps=nw, num_stages=ns)
     return o, z
 
 
 @gravity_fwd.register_fake
-def _(q, k, v, gamma, kvec, k_int, qk_prec):
+def _(q, k, v, gamma, kvec, k_int, qk_prec, window):
     B, H, N, D = q.shape
     return q.new_empty((B, H, N, D), dtype=torch.float32), q.new_empty((B, H, N), dtype=torch.float32)
 
 
 @torch.library.custom_op("rgn::gravity_bwd", mutates_args=())
 def gravity_bwd(do: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, o: torch.Tensor, z: torch.Tensor,
-                gamma: torch.Tensor, kvec: torch.Tensor, k_int: int, qk_prec: int
+                gamma: torch.Tensor, kvec: torch.Tensor, k_int: int, qk_prec: int, window: int
                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     B, H, N, D = q.shape
     do = do.float()
@@ -235,44 +241,45 @@ def gravity_bwd(do: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Ten
     qk, av = _prec(q.device, qk_prec)
     common = (*_strides(q), *_strides(k), *_strides(v), *_strides(do))
     _bwd_kv_kernel[(nb, B * H)](
-        q, k, v, gamma, kvec, do, z, dl, dk, dv, pg, pk, *common, H, N, nb,
+        q, k, v, gamma, kvec, do, z, dl, dk, dv, pg, pk, *common, H, N, window, nb,
         D=D, BM=bm, BN=bn, K_INT=k_int, NEED_K=k_int == 0, QK=qk, AV=av, DP=DP_PREC if qk != "ieee" else "ieee",
         num_warps=nw, num_stages=ns)
     bm, bn, nw, ns = CFG["q"]
     _bwd_q_kernel[(triton.cdiv(N, bm), B * H)](
-        q, k, v, gamma, kvec, do, z, dl, dq, *common, H, N,
+        q, k, v, gamma, kvec, do, z, dl, dq, *common, H, N, window,
         D=D, BM=bm, BN=bn, K_INT=k_int, QK=qk, AV=av, DP=DP_PREC if qk != "ieee" else "ieee", num_warps=nw,
         num_stages=ns)
     return dq, dk, dv, pg.sum((0, 2)), pk.sum((0, 2))
 
 
 @gravity_bwd.register_fake
-def _(do, q, k, v, o, z, gamma, kvec, k_int, qk_prec):
+def _(do, q, k, v, o, z, gamma, kvec, k_int, qk_prec, window):
     B, H, N, D = q.shape
     e = q.new_empty((B, H, N, D), dtype=torch.float32)
     return e, torch.empty_like(e), torch.empty_like(e), gamma.new_empty((H,)), gamma.new_empty((H,))
 
 
 def _setup_context(ctx, inputs, output):
-    q, k, v, gamma, kvec, k_int, qk_prec = inputs
+    q, k, v, gamma, kvec, k_int, qk_prec, window = inputs
     o, z = output
     ctx.save_for_backward(q, k, v, o, z, gamma, kvec)
-    ctx.k_int, ctx.qk_prec = k_int, qk_prec
+    ctx.k_int, ctx.qk_prec, ctx.window = k_int, qk_prec, window
 
 
 def _backward(ctx, do, dz):
     q, k, v, o, z, gamma, kvec = ctx.saved_tensors
-    dq, dk, dv, dg, dkv = gravity_bwd(do, q, k, v, o, z, gamma, kvec, ctx.k_int, ctx.qk_prec)
-    return dq, dk, dv, dg, (dkv if ctx.k_int == 0 else None), None, None
+    dq, dk, dv, dg, dkv = gravity_bwd(do, q, k, v, o, z, gamma, kvec, ctx.k_int, ctx.qk_prec, ctx.window)
+    return dq, dk, dv, dg, (dkv if ctx.k_int == 0 else None), None, None, None
 
 
 gravity_fwd.register_autograd(_backward, setup_context=_setup_context)
 
 
-def rgn_triton(q, k, v, gamma, sharpness=1, qk_prec="tf32x3"):
+def rgn_triton(q, k, v, gamma, sharpness=1, qk_prec="tf32x3", window=0):
     """q (B, H, N, dh), k / v (B, Hkv, N, dh) -> O (B, H, N, dh) fp32.  rgn_dense(pos rope / none, power 1) ile aynı
     sonuç.  sharpness: sayı ya da (H,) tensör (öğrenilen k; gradyan alır).  qk_prec: q·kᵀ çarpımı — tf32x3 (fp32'ye
-    yakın) | tf32 (hızlı) | ieee (tam fp32, yavaş)."""
+    yakın) | tf32 (hızlı) | ieee (tam fp32, yavaş).  window > 0: yerel katman, i yalnız i - window < j <= i'ye bakar
+    (pencere dışındaki bloklar ileri ve geri geçişte atlanır)."""
     H, D = q.shape[1], q.shape[3]
     assert D in (16, 32, 64, 128), "head boyutu 16 / 32 / 64 / 128"
     if k.shape[1] != H:
@@ -285,4 +292,6 @@ def rgn_triton(q, k, v, gamma, sharpness=1, qk_prec="tf32x3"):
     else:
         kvec = torch.full((H,), float(sharpness), device=q.device)
         k_int = int(sharpness) if float(sharpness).is_integer() else -1     # -1: genel üs yolu, gradyan yok
-    return gravity_fwd(q, k, v, gamma, kvec, k_int, PRECS.index(qk_prec))[0]
+    N = q.shape[2]
+    w = window if 0 < window < N else N
+    return gravity_fwd(q, k, v, gamma, kvec, k_int, PRECS.index(qk_prec), w)[0]
