@@ -152,7 +152,9 @@ def story_masks(doc, sent, window):
     B, N = doc.shape
     if doc.is_cuda:
         from torch.nn.attention.flex_attention import create_block_mask
-        return {k: create_block_mask(_story_mod(doc, sent, k, window), B, None, N, N, device=doc.device) for k in "YG"}
+        # _compile: maske GPU'da derlenmiş kodla kurulur (derlemesiz B×N×N ara tensör; v2 common/recipe.py ile aynı)
+        return {k: create_block_mask(_story_mod(doc, sent, k, window), B, None, N, N, device=doc.device, _compile=True)
+                for k in "YG"}
     b = torch.arange(B)[:, None, None]
     q, kv = torch.arange(N)[None, :, None], torch.arange(N)[None, None, :]
     return {k: _story_mod(doc, sent, k, window)(b, 0, q, kv).unsqueeze(1) for k in "YG"}
