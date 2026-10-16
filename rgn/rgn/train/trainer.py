@@ -135,7 +135,7 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
     n_priv = sum(b.private.numel() for b in model.private_blocks())
     say("%s | katmanlar %s (Y: son %d token) | D %d, head %d (kv %d), d_ff %d | kapı %s | kelimeye özel %s | "
         "%d parametre (%d özel)" % (
-            cfg.name, mc.layer_kinds(), mc.local_window, mc.d_model, mc.n_heads, mc.n_kv_heads, mc.ff_dim(),
+            cfg.name, mc.layer_kinds(), mc.local_window, mc.d_model, mc.n_heads, mc.n_kv_heads, mc.ff_dim() if mc.shared_mlp else 0,
             mc.attn_gate or "yok",
             "%d satır, %s" % (model.blocks[0].private.shape[0], tc.private_opt) if n_priv else "yok", n_params, n_priv))
     say("veri %s %.1fM token | pencere %d, %d × %d = %d token/adım (mikro %d × %d) | %d adım/epok, toplam %d adım "

@@ -35,7 +35,7 @@ class ModelConfig:
     private_neurons: int = 0           # 1: her katmanda her kelimenin kendi nöronu (kelimeye özel nöron); 0: kapalı
     private_vocab: str = "assets/ss_vocab_used.json"   # özel satırı olan kelimeler (gerisi tek ortak "diğer" satırı)
     local_sentence: bool = False       # Y katmanı pencere yerine kendi cümlesi + hikâye başı (data.layout story gerek)
-    shared_mlp: bool = True            # False: ortak MLP yok, katmanın dönüşümü yalnız kelimeye özel nöron (private_neurons gerek)
+    shared_mlp: bool = True            # False: ortak MLP yok (katman = dikkat [+ kelimeye özel nöron])
     mlp_bias: bool = True
     init_std: float = 0.02
 
@@ -57,7 +57,6 @@ class ModelConfig:
         assert self.local_window >= 0 and 0 <= self.global_layers <= self.n_layers
         assert not self.local_sentence or self.local_window, "local_sentence: yerel / genel düzen gerek"
         assert self.local_window or self.global_layers, "yerel pencere yoksa bütün katmanlar genel"
-        assert self.shared_mlp or self.private_neurons, "shared_mlp False: kelimeye özel nöron gerek"
         assert self.d_model % self.n_heads == 0 and self.n_heads % self.n_kv_heads == 0
         assert (self.d_model // self.n_heads) % 2 == 0, "RoPE çift head boyutu ister"
 

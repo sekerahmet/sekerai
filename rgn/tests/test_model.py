@@ -9,7 +9,8 @@ from rgn.model import RGNModel
 
 def _variants(rel):
     return [dict(), dict(attn_gate="head"), dict(attn_gate="elem"), dict(local_window=0),
-            dict(private_neurons=1, private_vocab=rel), dict(private_neurons=1, private_vocab=rel, shared_mlp=False)]
+            dict(private_neurons=1, private_vocab=rel), dict(private_neurons=1, private_vocab=rel, shared_mlp=False),
+            dict(shared_mlp=False)]
 
 
 def test_causal_and_finite_gradients():

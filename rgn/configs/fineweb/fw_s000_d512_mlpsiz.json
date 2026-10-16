@@ -1,0 +1,8 @@
+{
+  "extends": "fw_s000_d512_tf_yg.json",
+  "name": "fw_s000_d512_mlpsiz",
+  "notes": "D0 kontrol: ortak MLP de kelimeye özel nöron da yok, katman = yalnız dikkat. D1 (yalnız özel nöron) ile kıyas: özel nöronun ortak MLP'nin yerini ne kadar doldurduğu.",
+  "model": {
+    "shared_mlp": false
+  }
+}
