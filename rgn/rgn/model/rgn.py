@@ -57,6 +57,14 @@ class Block(nn.Module):
         self.private_v = nn.Parameter(torch.empty(private_rows, cfg.kv_heads(kind) * cfg.dh())) if has_v else None
         # V vektörü kapısı: kv head başına, girdinin ve V vektörünün ilk 6 kanalından (modded-nanoGPT)
         self.vgate = nn.Linear(12, cfg.kv_heads(kind), bias=False) if has_v and cfg.private_value_gate else None
+        # Gemma 3n PLE (kıyas): kelimenin bu katmandaki vektörü + bağlam izdüşümü, gizli durumla kapılı, ortak izdüşümle
+        # akışa (blok sonunda): H += RMSNorm(W_p (GELU(W_g H) ⊙ e)),  e = (bağlam + √P · tablo[kelime]) / √2
+        P = cfg.ple_dim if private_rows else 0
+        self.private_ple = nn.Parameter(torch.empty(private_rows, P)) if P else None
+        if P:
+            self.ple_gate = nn.Linear(cfg.d_model, P, bias=False)
+            self.ple_proj = nn.Linear(P, cfg.d_model, bias=False)
+            self.ple_norm = RMSNorm(cfg.d_model)
 
     def private_out(self, xn, rows=None, priv=None, name="private"):
         """Tek özel nöron tablosu (name).  xn (B, N, d) -> (B, N, d).  rows (B, N): tam tablodan; priv = (loc (B, N),
@@ -70,12 +78,12 @@ class Block(nn.Module):
         a = F.silu((w[..., 0, :] * xn).sum(-1)) * (w[..., 1, :] * xn).sum(-1)
         return a.unsqueeze(-1) * w[..., 2, :]
 
-    def forward(self, x, rope, mask=None, rows=None, priv=None, parts=None):
+    def forward(self, x, rope, mask=None, rows=None, priv=None, parts=None, ple_ctx=None):
         """H = S + MLP(RMSNorm(S)) [+ özel],  S = X + Attn(RMSNorm(X)).  parts (dict): bileşenler buraya yazılır
         (teşhis: dikkat, mlp, özel — akışa eklenen değerler; olmayan bileşen None)."""
         xa = self.norm1(x)
         a = self.attn(xa, rope, mask, self.value_vec(xa, rows, priv))
-        return self.finish(x, a, rows, priv, parts)
+        return self.finish(x, a, rows, priv, parts, ple_ctx)
 
     def value_vec(self, xa, rows=None, priv=None):
         """Kelimeye özel V vektörü (B, N, Hkv·dh), kapılı; yoksa None.  xa = RMSNorm(X)."""
@@ -88,8 +96,8 @@ class Block(nn.Module):
             vv = (g.unsqueeze(-1) * vv.view(B, N, g.shape[-1], -1).to(g.dtype)).view(B, N, -1)
         return vv
 
-    def finish(self, x, a, rows=None, priv=None, parts=None):
-        """Dikkat çıktısı a eklendikten sonra: S = X + a, H = S + MLP(RMSNorm(S)) [+ özel]."""
+    def finish(self, x, a, rows=None, priv=None, parts=None, ple_ctx=None):
+        """Dikkat çıktısı a eklendikten sonra: S = X + a, H = S + MLP(RMSNorm(S)) [+ özel] [+ PLE]."""
         s = x + a
         xn = self.norm2(s) if self.norm2 is not None else None
         m = None
@@ -103,6 +111,11 @@ class Block(nn.Module):
             p = q if p is None else p + q
         if p is not None:
             out = out + p
+        if self.private_ple is not None:
+            look = priv[1]["private_ple"][priv[0]] if priv is not None else F.embedding(rows, self.private_ple)
+            P = self.private_ple.shape[1]
+            e = (ple_ctx + look.to(ple_ctx.dtype) * P ** 0.5) * 2 ** -0.5
+            out = out + self.ple_norm(self.ple_proj(F.gelu(self.ple_gate(out)) * e.to(out.dtype)))
         if parts is not None:
             parts.update(attn=a, mlp=m, private=p)
         return out
@@ -131,7 +144,7 @@ class RGNModel(nn.Module):
         self.cfg = cfg
         self.embed = nn.Embedding(cfg.vocab_size, cfg.d_model)
         rows = 0
-        if cfg.private_neurons or cfg.private_value:                   # token -> özel satır (0: ortak "diğer")
+        if cfg.private_neurons or cfg.private_value or cfg.ple_dim:   # token -> özel satır (0: ortak "diğer")
             used = private_vocab(cfg)
             rows = len(used) + 1
             pm = torch.zeros(cfg.vocab_size, dtype=torch.long)
@@ -140,6 +153,9 @@ class RGNModel(nn.Module):
         else:
             self.priv_map = None
         self.blocks = nn.ModuleList(Block(cfg, kind, rows, i) for i, kind in enumerate(cfg.layer_kinds()))
+        if cfg.ple_dim:                                                # PLE bağlam izdüşümü (gömmeden, katman başına P)
+            self.ple_ctx = nn.Linear(cfg.d_model, cfg.n_layers * cfg.ple_dim, bias=False)
+            self.ple_ctx_norm = RMSNorm(cfg.ple_dim)
         self.norm_f = RMSNorm(cfg.d_model)
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self.lm_head.weight = self.embed.weight                       # W_vocab = W_embᵀ
@@ -156,13 +172,16 @@ class RGNModel(nn.Module):
         for name, p in self.named_parameters():
             if name.endswith(("attn.w_aux.weight", "vgate.weight")):
                 nn.init.zeros_(p)
+            elif name.endswith(".private_ple"):
+                nn.init.normal_(p, 0.0, std)
             elif name.rsplit(".", 1)[-1].startswith("private") and not name.endswith(".private_v"):
                 nn.init.normal_(p, 0.0, std)
                 p.data.view(p.shape[0], 3, -1)[:, 2].zero_()
             elif name.endswith(".private_v"):                            # std 0: başlangıçta tabanla aynı
                 nn.init.normal_(p, 0.0, self.cfg.private_value_std) if self.cfg.private_value_std else nn.init.zeros_(p)
             elif p.dim() == 2:
-                s = std / math.sqrt(2 * self.cfg.n_layers) if name.endswith(("attn.w_o.weight", "mlp.c.weight")) else std
+                s = (std / math.sqrt(2 * self.cfg.n_layers)
+                     if name.endswith(("attn.w_o.weight", "mlp.c.weight", "ple_proj.weight")) else std)
                 nn.init.normal_(p, 0.0, s)
             elif name.endswith(".bias"):
                 nn.init.zeros_(p)
@@ -178,11 +197,18 @@ class RGNModel(nn.Module):
         """Kelimeye özel tablolar [(blok sırası, ad, parametre)] — named_parameters sırasıyla (RowAdam'ın sırası)."""
         out = []
         for i, b in enumerate(self.blocks):
-            for name in b.priv_names + ["private_v"]:
+            for name in b.priv_names + ["private_v", "private_ple"]:
                 p = getattr(b, name)
                 if p is not None:
                     out.append((i, name, p))
         return out
+
+    def ple_context(self, x0):
+        """PLE bağlam izdüşümü: gömme x0 (B, N, d) -> (B, N, L, P) ya da None."""
+        if not self.cfg.ple_dim:
+            return None
+        B, N, D = x0.shape
+        return self.ple_ctx_norm((self.ple_ctx(x0) * D ** -0.5).view(B, N, self.cfg.n_layers, self.cfg.ple_dim))
 
     def rope(self, n):
         assert n <= self.cfg.max_len, "dizi %d > max_len %d (RoPE tablosu)" % (n, self.cfg.max_len)
@@ -196,6 +222,7 @@ class RGNModel(nn.Module):
         if parts is not None:
             parts.append({"embed": x})
         rope = self.rope(idx.shape[1])
+        ple = self.ple_context(x)
         rows = self.priv_map[idx] if (self.priv_map is not None and priv is None) else None
         subs = [{} for _ in self.blocks]
         if priv is not None:
@@ -204,7 +231,8 @@ class RGNModel(nn.Module):
         for i, block in enumerate(self.blocks):
             bp = None if priv is None else (priv[0], subs[i], priv[2])
             d = {} if parts is not None else None
-            x = block(x, rope, None if masks is None else masks[block.kind], rows, bp, d)
+            x = block(x, rope, None if masks is None else masks[block.kind], rows, bp, d,
+                      None if ple is None else ple[:, :, i])
             if parts is not None:
                 parts.append(d)
         return self.norm_f(x)

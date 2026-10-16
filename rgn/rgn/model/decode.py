@@ -31,6 +31,7 @@ def decode_attn(q, k, v, mask):
 def _step(m, w, n, slot_pos, K, V, out):
     """Tek adım (yerinde, dallanmasız): token w (B,) konum n (1,) -> out (B, V) logit; n += 1."""
     x = m.embed(w)[:, None]
+    ple = m.ple_context(x)
     rope = (m.rope_cos.index_select(0, n), m.rope_sin.index_select(0, n))
     rows = m.priv_map[w][:, None] if m.priv_map is not None else None
     W = m.cfg.local_window
@@ -51,7 +52,7 @@ def _step(m, w, n, slot_pos, K, V, out):
         K[l].index_copy_(2, pos, k.to(K[l].dtype))
         V[l].index_copy_(2, pos, v.to(V[l].dtype))
         o = decode_attn(q.to(K[l].dtype), K[l], V[l], mask_y if b.kind == "Y" else mask_g)
-        x = b.finish(x, b.attn.finish(xa, o), rows)
+        x = b.finish(x, b.attn.finish(xa, o), rows, ple_ctx=None if ple is None else ple[:, :, l])
     out.copy_(m.lm_head(m.norm_f(x[:, 0])).float())
     n.add_(1)
 
@@ -74,11 +75,12 @@ class StaticCache:
         self.limit = min(m.cfg.max_len, next(t for k in range(40) for t in (BUCKET << k, (3 * BUCKET // 2) << k)
                                              if t >= need))
         x = m.embed(idx)
+        ple = m.ple_context(x)
         rope = m.rope(T)
         rows = m.priv_map[idx] if m.priv_map is not None else None
         pos = torch.arange(T, device=self.dev)
         self.K, self.V = [], []
-        for b in m.blocks:
+        for l, b in enumerate(m.blocks):
             xa = b.norm1(x)
             q, k, v = b.attn.project(xa, rope)
             vv = b.value_vec(xa, rows)
@@ -92,7 +94,8 @@ class StaticCache:
             kb[:, :, at], vb[:, :, at] = k[:, :, keep].to(self.dtype), v[:, :, keep].to(self.dtype)
             self.K.append(kb)
             self.V.append(vb)
-            x = b.finish(x, b.attn.finish(xa, b.attn._core(q, k, v)), rows)
+            x = b.finish(x, b.attn.finish(xa, b.attn._core(q, k, v)), rows,
+                         ple_ctx=None if ple is None else ple[:, :, l])
         slot_pos = torch.full((max(W, 1),), -1, dtype=torch.long, device=self.dev)
         if W:
             keep = pos[-W:]

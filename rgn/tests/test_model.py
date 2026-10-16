@@ -132,7 +132,7 @@ def test_private_row_copy_matches_full():
     (nöron, V vektörü, ikisi birlikte)."""
     with private_vocab(range(1, 40)) as rel:
         for kw in (dict(private_neurons=1), dict(private_value=1), dict(private_neurons=1, private_value=1),
-                   dict(private_neurons=2)):
+                   dict(private_neurons=2), dict(ple_dim=8)):
             torch.manual_seed(0)
             m = RGNModel(tiny(private_vocab=rel, **kw))
             tables = m.private_tables()
@@ -262,7 +262,8 @@ def test_kv_cache_matches_full():
                    dict(private_neurons=1, private_vocab=rel), dict(private_value=1, private_value_gate=True,
                                                                      private_value_std=0.05, private_vocab=rel),
                    dict(private_neurons=1, private_vocab=rel, shared_mlp=False), dict(n_heads=4, n_kv_heads=4, n_kv_heads_global=1),
-            dict(n_kv_heads_global=1, private_value=1, private_value_std=0.05, private_vocab=rel)):
+            dict(n_kv_heads_global=1, private_value=1, private_value_std=0.05, private_vocab=rel),
+            dict(ple_dim=8, private_vocab=rel), dict(ple_dim=8, private_neurons=1, private_vocab=rel)):
             torch.manual_seed(0)
             m = RGNModel(tiny(**kw)).eval()
             for _, _, p in m.private_tables():
