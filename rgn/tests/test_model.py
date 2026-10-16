@@ -9,7 +9,7 @@ from rgn.model import RGNModel
 
 def _variants(rel):
     return [dict(), dict(attn_gate="head"), dict(attn_gate="elem"), dict(local_window=0),
-            dict(private_neurons=1, private_vocab=rel)]
+            dict(private_neurons=1, private_vocab=rel), dict(private_neurons=1, private_vocab=rel, shared_mlp=False)]
 
 
 def test_causal_and_finite_gradients():
@@ -95,6 +95,14 @@ def test_private_neurons():
             h = m.hidden(idx, parts=parts)
             x = parts[0]["embed"] + sum(d["attn"] + d["mlp"] + d["private"] for d in parts[1:])
             assert torch.allclose(m.norm_f(x), h, atol=1e-5)
+        m2 = RGNModel(tiny(private_neurons=1, private_vocab=rel, shared_mlp=False))   # ortak MLP yok
+        assert all(b.mlp is None for b in m2.blocks)
+        assert m2.num_params() == m.num_params() - sum(p.numel() for b in m.blocks for p in b.mlp.parameters())
+        with torch.no_grad():
+            parts = []
+            h = m2.hidden(idx, parts=parts)
+            x = parts[0]["embed"] + sum(d["attn"] + d["private"] for d in parts[1:])
+            assert torch.allclose(m2.norm_f(x), h, atol=1e-5)
 
 
 def test_private_row_copy_matches_full():

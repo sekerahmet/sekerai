@@ -14,14 +14,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from rgn.system import setup_process  # noqa: E402
 from rgn.paths import runs_dir  # noqa: E402
 
-COLS = ("name", "attn", "pos", "mlp", "params_M", "steps", "loss", "bpb", "acc", "ms_step", "ktok_s", "mem_gb", "min")
+COLS = ("name", "model", "params_M", "steps", "loss", "bpb", "acc", "ms_step", "ktok_s", "mem_gb", "min")
+
+
+def _arch(m):
+    """Model özeti (eski koşuların config.json'ları da okunur)."""
+    if m.get("attn", "softmax") != "softmax":
+        return "eski: attn=%s mlp=%s" % (m.get("attn"), m.get("mlp"))
+    s = ("YYG w%d" % m["local_window"]) if m.get("local_window") else "tam dikkat"
+    s += " +kapı" if m.get("attn_gate") else ""
+    s += (" +özel" if m.get("shared_mlp", True) else " yalnız özel") if m.get("private_neurons") else ""
+    return s
 
 
 def rows(root):
     for f in sorted(Path(root).glob("*/results.json")):
         r = json.loads(f.read_text(encoding="utf-8"))
         m, fin = r["config"]["model"], r["final"]
-        yield dict(name=r["name"], attn=m["attn"], pos=m["pos"], mlp=m["mlp"], params_M=round(r["params"] / 1e6, 2),
+        yield dict(name=r["name"], model=_arch(m), params_M=round(r["params"] / 1e6, 2),
                    steps=r["steps"], loss=round(fin["loss"], 4), bpb=fin["bpb"] and round(fin["bpb"], 4),
                    acc=round(fin["acc"], 4), ms_step=r["ms_per_step"] and round(r["ms_per_step"], 1),
                    ktok_s=r["tok_per_s"] and round(r["tok_per_s"] / 1e3), mem_gb=r["peak_mem_gb"] and

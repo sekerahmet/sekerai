@@ -1,7 +1,7 @@
 """RGNModel — decoder-only dil modeli.
 
     token -> gömme -> [ön-norm -> dikkat (Y: yerel pencere | G: genel) -> residual
-                       -> ön-norm -> SwiGLU MLP (+ kelimeye özel nöron) -> residual] × L -> final norm -> LM head (paylaşımlı)
+                       -> ön-norm -> SwiGLU MLP (+ kelimeye özel nöron; shared_mlp False: yalnız özel nöron) -> residual] × L -> final norm -> LM head (paylaşımlı)
 
 Kelimeye özel nöron: her katmanda her kelimenin kendi satırı [g | u | w] (d'şer); o kelimenin konumunda
 a = SiLU(g·x)·(u·x), akışa a·w eklenir (ortak MLP'ye paralel, aynı x = RMSNorm(S)).  Adres token kimliğinden belli
@@ -36,7 +36,7 @@ class Block(nn.Module):
         self.kind = kind
         self.norm1, self.norm2 = RMSNorm(cfg.d_model), RMSNorm(cfg.d_model)
         self.attn = Attention(cfg, window=cfg.local_window if kind == "Y" else 0)
-        self.mlp = SwiGLU(cfg.d_model, cfg.ff_dim(), cfg.mlp_bias)
+        self.mlp = SwiGLU(cfg.d_model, cfg.ff_dim(), cfg.mlp_bias) if cfg.shared_mlp else None
         self.private = nn.Parameter(torch.empty(private_rows, 3 * cfg.d_model)) if private_rows else None
 
     def private_out(self, xn, rows=None, priv=None):
@@ -53,12 +53,15 @@ class Block(nn.Module):
 
     def forward(self, x, rope, mask=None, rows=None, priv=None, parts=None):
         """H = S + MLP(RMSNorm(S)) [+ özel],  S = X + Attn(RMSNorm(X)).  parts (dict): bileşenler buraya yazılır
-        (teşhis: dikkat, mlp, özel — akışa eklenen değerler)."""
+        (teşhis: dikkat, mlp, özel — akışa eklenen değerler; olmayan bileşen None)."""
         a = self.attn(self.norm1(x), rope, mask)
         s = x + a
         xn = self.norm2(s)
-        m = self.mlp(xn)
-        out = s + m
+        m = None
+        out = s
+        if self.mlp is not None:
+            m = self.mlp(xn)
+            out = out + m
         p = None
         if self.private is not None:
             p = self.private_out(xn, rows, priv)

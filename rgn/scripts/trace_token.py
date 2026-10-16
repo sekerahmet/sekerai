@@ -58,23 +58,26 @@ def main():
         for li, (blk, d) in enumerate(zip(m.blocks, parts[1:])):
             att = blk.attn.weights(blk.norm1(x), rope)                       # (B, H, T, T)
             s = x + d["attn"]
-            g, up = blk.mlp.a(blk.norm2(s)).chunk(2, dim=-1)
-            hc = (F.silu(g) * up)[:, c].abs()                                # nöron çıktıları (B, ff)
-            mean = hc.mean(0)
-            top = mean.topk(a.top).indices
-            glob20 = set(mean.topk(20).indices.tolist())
-            jac = np.mean([len(glob20 & set(r.topk(20).indices.tolist())) / len(glob20 | set(r.topk(20).indices.tolist()))
-                           for r in hc])
-            n0 = int(top[0])
-            promo = (E @ blk.mlp.c.weight[:, n0]).topk(5).indices
             r = x[:, c].norm(dim=-1).mean()
-            share = lambda v: (v[:, c].norm(dim=-1).mean() / r).item()  # noqa: E731
+            share = lambda v: 0.0 if v is None else (v[:, c].norm(dim=-1).mean() / r).item()  # noqa: E731
             priv = "" if d["private"] is None else "  özel %.2f" % share(d["private"])
-            print("\nK%d %s | katkı: dikkat %.2f  MLP %.2f%s (akış büyüklüğüne oran) | MLP adresi sabitliği %.2f" % (
-                li + 1, blk.kind, share(d["attn"]), share(d["mlp"]), priv, jac))
-            print("   MLP adresi (en çok çalışan nöronlar): %s" % "  ".join(
-                "%d:%.2f" % (int(i), mean[i].item()) for i in top))
-            print("   en güçlü nöron %d akışa yazınca öne çıkan: %s" % (n0, " | ".join(repr(dec(t)) for t in promo)))
+            if blk.mlp is None:                                              # ortak MLP yok (shared_mlp False)
+                print("\nK%d %s | katkı: dikkat %.2f%s (akış büyüklüğüne oran)" % (li + 1, blk.kind, share(d["attn"]), priv))
+            else:
+                g, up = blk.mlp.a(blk.norm2(s)).chunk(2, dim=-1)
+                hc = (F.silu(g) * up)[:, c].abs()                                # nöron çıktıları (B, ff)
+                mean = hc.mean(0)
+                top = mean.topk(a.top).indices
+                glob20 = set(mean.topk(20).indices.tolist())
+                jac = np.mean([len(glob20 & set(r.topk(20).indices.tolist())) / len(glob20 | set(r.topk(20).indices.tolist()))
+                               for r in hc])
+                n0 = int(top[0])
+                promo = (E @ blk.mlp.c.weight[:, n0]).topk(5).indices
+                print("\nK%d %s | katkı: dikkat %.2f  MLP %.2f%s (akış büyüklüğüne oran) | MLP adresi sabitliği %.2f" % (
+                    li + 1, blk.kind, share(d["attn"]), share(d["mlp"]), priv, jac))
+                print("   MLP adresi (en çok çalışan nöronlar): %s" % "  ".join(
+                    "%d:%.2f" % (int(i), mean[i].item()) for i in top))
+                print("   en güçlü nöron %d akışa yazınca öne çıkan: %s" % (n0, " | ".join(repr(dec(t)) for t in promo)))
             row = att[:, :, c, :c + 1]                                       # kelime neye bakıyor
             col = att[:, :, c + 1:, c].mean(-1)                              # sonrakiler kelimeye ne kadar bakıyor
             reads = []
@@ -87,7 +90,7 @@ def main():
             hm = col.mean(0)
             print("   okunur (sonraki 55 token'ın ona ortalama bakışı, head): %s" % "  ".join(
                 "h%d %.3f" % (hh, hm[hh].item()) for hh in hm.argsort(descending=True)[:4]))
-            x = s + d["mlp"] + (0 if d["private"] is None else d["private"])
+            x = s + (0 if d["mlp"] is None else d["mlp"]) + (0 if d["private"] is None else d["private"])
             p = torch.softmax(m.lm_head(m.norm_f(x[:, c])), -1).mean(0)
             pt = p.topk(4)
             print("   mantık merceği (sonraki kelime tahmini): %s" % "  ".join(

@@ -36,7 +36,8 @@ def components(m, idx):
     comp = {"gömme": parts[0]["embed"][0]}
     for li, (blk, d) in enumerate(zip(m.blocks, parts[1:])):
         comp["K%d %s dikkat" % (li + 1, blk.kind)] = d["attn"][0]
-        comp["K%d %s MLP" % (li + 1, blk.kind)] = d["mlp"][0]
+        if d["mlp"] is not None:
+            comp["K%d %s MLP" % (li + 1, blk.kind)] = d["mlp"][0]
         if d["private"] is not None:
             comp["K%d %s özel" % (li + 1, blk.kind)] = d["private"][0]
     x = sum(comp.values())

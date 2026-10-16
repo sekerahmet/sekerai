@@ -1,0 +1,8 @@
+{
+  "extends": "fw_s000_d512_tf_yg_ozel_rms.json",
+  "name": "fw_s000_d512_yalniz_ozel",
+  "notes": "Ortak MLP yok: katmanın dönüşümü yalnız kelimeye özel nöron (katman başına kelimeye 1 nöron); dikkat ortak. Kıyas 3000. adım: taban 3,8205, özel (ortak MLP + özel) 3,7611.",
+  "model": {
+    "shared_mlp": false
+  }
+}

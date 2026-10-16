@@ -25,7 +25,8 @@ def test_schedule_shapes():
 def test_cpu_training_reduces_loss():
     with private_vocab(range(1, 400)) as rel:
         for overrides in ([], ["model.attn_gate=head"], ["train.optimizer=adamw"],
-                          ["model.private_neurons=1", "model.private_vocab=" + rel]):
+                          ["model.private_neurons=1", "model.private_vocab=" + rel],
+                          ["model.private_neurons=1", "model.private_vocab=" + rel, "model.shared_mlp=false"]):
             cfg = load_config(CPU_TINY, overrides)
             with tempfile.TemporaryDirectory() as d:
                 r = train(cfg, out_dir=d)

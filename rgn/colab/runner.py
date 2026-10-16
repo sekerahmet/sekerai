@@ -168,7 +168,7 @@ def _arch(mc):
     if mc.get("attn_gate"):
         s += " +kapı"
     if mc.get("private_neurons"):
-        s += " +özel"
+        s += " +özel" if mc.get("shared_mlp", True) else " yalnız özel (ortak MLP yok)"
     return s
 
 

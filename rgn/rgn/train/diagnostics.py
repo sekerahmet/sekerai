@@ -13,16 +13,17 @@ def diagnose(model, x, ctx):
     inputs = {}
     hooks = [blk.attn.register_forward_pre_hook(lambda m, args, i=i: inputs.__setitem__(i, args))
              for i, blk in enumerate(model.blocks)]
-    for blk in model.blocks:
-        blk.mlp.track = True
+    mlps = [blk.mlp for blk in model.blocks if blk.mlp is not None]
+    for mlp in mlps:
+        mlp.track = True
     try:
         with ctx:
             model.hidden(x)
     finally:
         for h in hooks:
             h.remove()
-        for blk in model.blocks:
-            blk.mlp.track = False
+        for mlp in mlps:
+            mlp.track = False
     out = {"layers": []}
     N = x.shape[1]
     half = slice(N // 2, N)
@@ -34,7 +35,7 @@ def diagnose(model, x, ctx):
             "entropy": ent[:, :, half].mean((0, 2)).tolist(),
             "top1": a.max(-1).values[:, :, half].mean((0, 2)).tolist(),
             "mean_dist": (a * dist).sum(-1)[:, :, half].mean((0, 2)).tolist(),
-            "mlp": dict(blk.mlp.stats),
+            "mlp": dict(blk.mlp.stats) if blk.mlp is not None else {},
         })
     model.train(was_training)
     return out
