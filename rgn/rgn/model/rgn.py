@@ -45,7 +45,7 @@ class Block(nn.Module):
         self.norm1 = RMSNorm(cfg.d_model)
         self.norm2 = (RMSNorm(cfg.d_model) if (cfg.shared_mlp or (private_rows and cfg.private_neurons))
                       else None)                                       # yalnız dikkat: ikinci norm yok
-        self.attn = Attention(cfg, window=cfg.local_window if kind == "Y" else 0)
+        self.attn = Attention(cfg, window=cfg.local_window if kind == "Y" else 0, kv_heads=cfg.kv_heads(kind))
         self.mlp = SwiGLU(cfg.d_model, cfg.ff_dim(), cfg.mlp_bias) if cfg.shared_mlp else None
         k = cfg.private_neurons if private_rows else 0
         self.priv_names = ["private" if j == 0 else "private%d" % (j + 1) for j in range(k)]
@@ -54,9 +54,9 @@ class Block(nn.Module):
         for name in self.priv_names:
             setattr(self, name, nn.Parameter(torch.empty(private_rows, 3 * cfg.d_model)))
         has_v = private_rows and cfg.private_value and (not cfg.private_value_layers or layer + 1 in cfg.private_value_layers)
-        self.private_v = nn.Parameter(torch.empty(private_rows, cfg.n_kv_heads * cfg.dh())) if has_v else None
+        self.private_v = nn.Parameter(torch.empty(private_rows, cfg.kv_heads(kind) * cfg.dh())) if has_v else None
         # V vektörü kapısı: kv head başına, girdinin ve V vektörünün ilk 6 kanalından (modded-nanoGPT)
-        self.vgate = nn.Linear(12, cfg.n_kv_heads, bias=False) if has_v and cfg.private_value_gate else None
+        self.vgate = nn.Linear(12, cfg.kv_heads(kind), bias=False) if has_v and cfg.private_value_gate else None
 
     def private_out(self, xn, rows=None, priv=None, name="private"):
         """Tek özel nöron tablosu (name).  xn (B, N, d) -> (B, N, d).  rows (B, N): tam tablodan; priv = (loc (B, N),

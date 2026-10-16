@@ -45,6 +45,15 @@ def test_layer_kinds_and_window():
     assert (g[..., rel >= 0] > 0).all() and (g[..., rel < 0] == 0).all()
 
 
+def test_gqa_global_only():
+    """n_kv_heads_global: yalnız genel (G) katmanlarda GQA; yerel katmanlar n_kv_heads."""
+    m = RGNModel(tiny(n_heads=4, n_kv_heads=4, n_kv_heads_global=1))
+    assert [b.attn.Hkv for b in m.blocks] == [4, 4, 1] and m.cfg.layer_kinds() == "YYG"
+    idx = torch.randint(0, 97, (2, 16))
+    m(idx, idx).backward()
+    assert all(p.grad is not None for p in m.parameters())
+
+
 def test_wide_attention():
     """head_dim: dikkat iç boyutu d'den bağımsız (16 head × 16 = 256 > d 64); dikkat parametresi buna göre büyür."""
     m0, m = RGNModel(tiny()), RGNModel(tiny(n_heads=16, n_kv_heads=16, head_dim=16))
@@ -252,7 +261,8 @@ def test_kv_cache_matches_full():
         for kw in (dict(), dict(local_window=0), dict(n_heads=4, n_kv_heads=1), dict(attn_gate="head"),
                    dict(private_neurons=1, private_vocab=rel), dict(private_value=1, private_value_gate=True,
                                                                      private_value_std=0.05, private_vocab=rel),
-                   dict(private_neurons=1, private_vocab=rel, shared_mlp=False)):
+                   dict(private_neurons=1, private_vocab=rel, shared_mlp=False), dict(n_heads=4, n_kv_heads=4, n_kv_heads_global=1),
+            dict(n_kv_heads_global=1, private_value=1, private_value_std=0.05, private_vocab=rel)):
             torch.manual_seed(0)
             m = RGNModel(tiny(**kw)).eval()
             for _, _, p in m.private_tables():

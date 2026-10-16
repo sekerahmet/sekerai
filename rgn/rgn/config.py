@@ -26,6 +26,7 @@ class ModelConfig:
     n_layers: int = 8
     n_heads: int = 8
     n_kv_heads: int = 8                # < n_heads: GQA
+    n_kv_heads_global: int = 0         # > 0: genel (G) katmanların KV head sayısı (yalnız G'de GQA); 0: n_kv_heads
     head_dim: int = 0                  # 0: d_model / n_heads; > 0: dikkat iç boyutu n_heads · head_dim (d'den büyük olabilir)
     d_ff: int = 0                      # 0: SwiGLU 8d/3, 64'ün katı
     rope_base: float = 10000.0
@@ -54,6 +55,10 @@ class ModelConfig:
         at = {round((i + 1) * L / self.global_layers) - 1 for i in range(self.global_layers)}
         return "".join("G" if l in at else "Y" for l in range(L))
 
+    def kv_heads(self, kind):
+        """Katman türüne göre KV head sayısı ('Y' yerel, 'G' genel)."""
+        return (self.n_kv_heads_global or self.n_kv_heads) if kind == "G" else self.n_kv_heads
+
     def dh(self):
         """Head boyutu."""
         return self.head_dim or self.d_model // self.n_heads
@@ -70,6 +75,7 @@ class ModelConfig:
         assert not self.local_sentence or self.local_window, "local_sentence: yerel / genel düzen gerek"
         assert self.local_window or self.global_layers, "yerel pencere yoksa bütün katmanlar genel"
         assert (self.head_dim or self.d_model % self.n_heads == 0) and self.n_heads % self.n_kv_heads == 0
+        assert self.n_heads % (self.n_kv_heads_global or self.n_kv_heads) == 0
         assert self.dh() % 2 == 0, "RoPE çift head boyutu ister"
 
 

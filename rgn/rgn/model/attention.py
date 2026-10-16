@@ -61,9 +61,9 @@ def story_masks(doc, sent, window):
 class Attention(nn.Module):
     """Softmax dikkati; window > 0: yerel katman (son window token)."""
 
-    def __init__(self, cfg, window=0):
+    def __init__(self, cfg, window=0, kv_heads=0):
         super().__init__()
-        d, H, Hkv = cfg.d_model, cfg.n_heads, cfg.n_kv_heads
+        d, H, Hkv = cfg.d_model, cfg.n_heads, kv_heads or cfg.n_kv_heads
         self.cfg, self.H, self.Hkv, self.dh = cfg, H, Hkv, cfg.dh()
         self.window = int(window)
         self.w_q = nn.Linear(d, H * self.dh, bias=False)
