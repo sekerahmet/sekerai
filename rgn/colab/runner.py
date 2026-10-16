@@ -7,7 +7,7 @@ Notebook'tan:
     R.kos("configs/ss/ss_smoke.json")                  # arka planda başlat
     R.kuyruk(["configs/ss/ss_d512_tf_yg.json", "configs/ss/ss_d512_tf_yg_ozel.json"])   # sırayla, arka planda
     R.arkaplan("test", "python tests/run_tests.py")                                     # herhangi bir komut
-    R.nabiz()                                          # tüm işler: durum, son adım, son değerlendirme, kalan süre
+    R.nabiz()                                          # çalışan işler: durum, son adım, son değerlendirme, kalan süre
     R.nabiz("ss_smoke", satir=30)                      # tek iş, günlüğün son 30 satırı
     R.kapat("ss_smoke")                                # SIGTERM: checkpoint kaydedip çıkar (sonra kos(..., resume=True))
     R.sonuc()                                          # biten koşular: sayı + metin + hız
@@ -46,15 +46,35 @@ def _save_jobs(j):
     JOBS.write_text(json.dumps(j, indent=1, ensure_ascii=False), encoding="utf-8")
 
 
-def _alive(pid):
+def _pstart(pid):
+    """Sürecin başlama zamanı (/proc/<pid>/stat 22. alan) ya da None.  PID yeniden kullanılınca değişir."""
+    try:
+        return Path("/proc/%d/stat" % pid).read_text().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return None
+
+
+def _alive(pid, pstart=None):
+    """Süreç canlı mı: zombi canlı sayılmaz; pstart verilirse PID başka bir sürece geçmişse de canlı sayılmaz."""
     try:
         os.kill(pid, 0)
     except (OSError, ProcessLookupError):
         return False
-    try:                                              # zombi süreç (Linux) canlı sayılmaz
-        return "Z" not in Path("/proc/%d/stat" % pid).read_text().split()[2]
+    try:
+        if "Z" in Path("/proc/%d/stat" % pid).read_text().rsplit(")", 1)[1].split()[0]:
+            return False
     except (OSError, IndexError):
         return True
+    return pstart is None or _pstart(pid) == pstart
+
+
+def _job_alive(job):
+    return bool(job) and _alive(job["pid"], job.get("pstart"))
+
+
+def canli():
+    """Çalışan işlerin adları."""
+    return [n for n, j in _jobs().items() if not n.startswith("_") and _job_alive(j)]
 
 
 def _spawn(name, cmd, log):
@@ -63,7 +83,7 @@ def _spawn(name, cmd, log):
     p = subprocess.Popen(cmd, shell=True, cwd=CODE, stdout=f, stderr=subprocess.STDOUT, start_new_session=True,
                          env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"})
     j = _jobs()
-    j[name] = {"pid": p.pid, "cmd": cmd, "log": str(log), "start": time.time()}
+    j[name] = {"pid": p.pid, "pstart": _pstart(p.pid), "cmd": cmd, "log": str(log), "start": time.time()}
     _save_jobs(j)
     print("[başladı] %s (pid %d) — günlük: %s" % (name, p.pid, log))
     return name
@@ -79,7 +99,7 @@ def kos(config, *sets, name=None, resume=True):
     """Tek eğitimi arka planda başlat.  sets: "train.max_steps=200" gibi ezmeler."""
     cfg = load_config(CODE / config, sets)
     name = name or cfg.name
-    if name in _jobs() and _alive(_jobs()[name]["pid"]):
+    if _job_alive(_jobs().get(name)):
         print("[zaten çalışıyor] %s" % name)
         return name
     cmd = "%s scripts/train.py --config %s --name %s %s %s" % (
@@ -246,15 +266,15 @@ def _gpu():
 
 def nabiz(name=None, satir=0):
     """Ayrıntılı durum: her iş ve koşusu için ilerleme, eğitim, değerlendirme, teşhis, örnek; satir > 0 ise günlüğün son
-    satırları.  Bitmiş koşular tek satır."""
+    satırları.  Bitmiş koşular tek satır.  name verilmezse yalnız çalışan işler."""
     j = _jobs()
     groups = j.get("_kuyruk_icerik", {})
-    names = [name] if name else [k for k in j if not k.startswith("_")]
+    names = [name] if name else canli()
     if not names:
-        print("iş yok")
+        print("çalışan iş yok")
     for n in names:
         job = j.get(n)
-        alive = bool(job and _alive(job["pid"]))
+        alive = _job_alive(job)
         print("[%s] %s%s" % ("ÇALIŞIYOR" if alive else "durdu/bitti", n,
                             "  (%.1f dk önce başladı)" % ((time.time() - job["start"]) / 60) if job else ""))
         for run in groups.get(n, [n]):
@@ -297,7 +317,7 @@ def sonuc(names=None, metin=2, karakter=400):
 def kapat(name):
     """SIGTERM gönder: eğitim checkpoint kaydedip çıkar.  Kuyruk adı verilirse kuyruk süreci grubu durur."""
     job = _jobs().get(name)
-    if not job or not _alive(job["pid"]):
+    if not _job_alive(job):
         print("[çalışmıyor] %s" % name)
         return
     os.killpg(os.getpgid(job["pid"]), signal.SIGTERM)
