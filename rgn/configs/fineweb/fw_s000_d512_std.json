@@ -1,0 +1,8 @@
+{
+  "extends": "fw_s000_d512_tf_yg_ozel_rms.json",
+  "name": "fw_s000_d512_std",
+  "notes": "Standart (16 Ekim): YYG d512, tam MLP, kelime başına 1 özel nöron (50 bin kelime), GQA: KV head = head / 2 (3000. adımda +0,006, KV önbelleği ½). Büyük modellerde de KV = head / 2; lr = 2e-3 · sqrt(768 / d) (v2 kuralı).",
+  "model": {
+    "n_kv_heads": 4
+  }
+}
