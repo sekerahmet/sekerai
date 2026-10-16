@@ -200,6 +200,7 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
         for g in opt.param_groups:
             g["lr"] = g["base_lr"] * f
         loss_sum, obs_sum = 0.0, 0.0
+        touched = []
         for _ in range(accum):
             masks = None
             if story:
@@ -208,6 +209,8 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
             else:
                 x, y = train_s.random_batch(micro, T, rng)
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+            if model.priv_map is not None:                  # kelimeye özel satırlar: bu adımda geçenler
+                touched.append(model.priv_map[x].flatten())
             with ctx:
                 res = fwd(x, y, masks) if masks is not None else fwd(x, y)
             if isinstance(res, tuple):                        # gözlemci: kaydedilen kayıp yalnız ana kayıp
@@ -220,6 +223,8 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
                 loss.backward()
                 loss_sum += loss.detach()
         gn = torch.nn.utils.clip_grad_norm_(model.parameters(), tc.grad_clip) if tc.grad_clip else torch.tensor(0.0)
+        if opt.row_adam is not None:
+            opt.row_adam.set_rows(torch.unique(torch.cat(touched)))
         opt.step()
         opt.zero_grad(set_to_none=True)
         step += 1

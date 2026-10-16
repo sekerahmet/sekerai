@@ -314,7 +314,16 @@ def test_private_neurons():
         m(idx, idx).backward()
         g = m.blocks[0].private.grad.abs().sum(1)
         assert g[2] > 0 and float(g.sum() - g[2]) == 0                     # token 5 -> satır 2
-        mu, de, nd = param_groups(m, True)
-        assert any(p is m.blocks[0].private for p in nd) and not any(p is m.blocks[0].private for p in mu)
+        mu, de, nd = param_groups(m, True)                                  # özel tablo AdamW / Muon'a girmez
+        assert not any(p is m.blocks[0].private for p in mu + de + nd)
+        from rgn.config import TrainConfig
+        from rgn.train.optim import build_optimizer
+        opt = build_optimizer(m, TrainConfig())
+        before = m.blocks[0].private.detach().clone()
+        m.blocks[0].private.grad = torch.ones_like(before)                  # bütün satırlarda gradyan olsa da
+        opt.row_adam.set_rows(torch.tensor([2]))                            # yalnız bu adımda geçen satır güncellenir
+        opt.row_adam.step()
+        ch = (m.blocks[0].private.detach() - before).abs().sum(1)
+        assert ch[2] > 0 and float(ch.sum() - ch[2]) == 0
     finally:
         Path(f.name).unlink()

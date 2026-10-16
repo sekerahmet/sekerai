@@ -78,11 +78,48 @@ class Muon(torch.optim.Optimizer):
                     p.add_(O[j].to(p.dtype), alpha=-g["lr"])
 
 
+class RowAdam(torch.optim.Optimizer):
+    """Satır seyrek Adam (kelimeye özel tablolar): yalnız `rows` satırları (o adımda geçen kelimeler) güncellenir;
+    diğer satırların ağırlığı ve momentleri dokunulmaz (tembel Adam, gömme tabloları için standart).  Bias düzeltmesi
+    adım sayısıyla.  rows trainer tarafından her adımdan önce verilir (set_rows)."""
+
+    def __init__(self, params, lr, betas=(0.9, 0.95), eps=1e-8):
+        super().__init__(params, dict(lr=lr, betas=betas, eps=eps))
+        self.rows = None
+
+    def set_rows(self, rows):
+        self.rows = rows
+
+    @torch.no_grad()
+    def step(self):
+        r = self.rows
+        for g in self.param_groups:
+            b1, b2 = g["betas"]
+            for p in g["params"]:
+                if p.grad is None:
+                    continue
+                st = self.state[p]
+                if not st:
+                    st["m"], st["v"] = torch.zeros_like(p), torch.zeros_like(p)
+                    st["step"] = 0
+                st["step"] += 1
+                rr = r if r is not None else torch.arange(p.shape[0], device=p.device)
+                gr = p.grad.index_select(0, rr).float()
+                m = st["m"].index_select(0, rr).mul_(b1).add_(gr, alpha=1 - b1)
+                v = st["v"].index_select(0, rr).mul_(b2).addcmul_(gr, gr, value=1 - b2)
+                st["m"].index_copy_(0, rr, m)
+                st["v"].index_copy_(0, rr, v)
+                t = st["step"]
+                upd = (m / (1 - b1 ** t)) / ((v / (1 - b2 ** t)).sqrt_() + g["eps"])
+                p.index_add_(0, rr, upd.to(p.dtype), alpha=-g["lr"])
+
+
 class CombinedOptimizer:
     """Birden çok optimizer'ı tek optimizer gibi yönetir (lr takvimi tüm gruplara, checkpoint hepsine)."""
 
     def __init__(self, optimizers):
         self.optimizers = optimizers
+        self.row_adam = next((o for o in optimizers if isinstance(o, RowAdam)), None)
 
     @property
     def param_groups(self):
@@ -110,8 +147,8 @@ def param_groups(model, use_muon):
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        if ".private" in name:                     # kelimeye özel tablo: gömme gibi seyrek (AdamW, bozunmasız — nadir
-            no_decay.append(p)                       # kelimenin payı kullanılmadığı adımlarda sıfıra çekilmesin)
+        if ".private" in name:                     # kelimeye özel tablo: satır seyrek Adam (build_optimizer)
+            continue
         elif use_muon and name.startswith("blocks.") and p.dim() == 2:
             muon.append(p)
         elif p.dim() >= 2:
@@ -130,6 +167,9 @@ def build_optimizer(model, tcfg):
                                dict(params=no_decay, weight_decay=0.0, base_lr=adam_lr)],
                               lr=adam_lr, betas=tuple(tcfg.betas), fused=fused)
     opts = [adamw]
+    private = [p for n, p in model.named_parameters() if ".private" in n and p.requires_grad]
+    if private:                                  # kelimeye özel tablolar: yalnız o adımda geçen kelimelerin satırları
+        opts.append(RowAdam([dict(params=private, base_lr=adam_lr)], lr=adam_lr, betas=tuple(tcfg.betas)))
     if muon:
         opts.append(Muon([dict(params=muon, base_lr=tcfg.lr)], lr=tcfg.lr, momentum=tcfg.momentum,
                          weight_decay=tcfg.weight_decay, normuon=tcfg.optimizer == "normuon"))
