@@ -51,7 +51,7 @@ def main():
         sub = priv = None
         if model.priv_map is not None:                       # trainer ile aynı yol
             uniq = torch.unique(torch.cat([model.priv_map[x].flatten() for x, _ in mbs]))
-            sub = torch.cat([b.private.detach().index_select(0, uniq) for b in model.blocks], 1).requires_grad_()
+            sub = torch.cat([b.private.detach().index_select(0, uniq) for b in model.private_blocks()], 1).requires_grad_()
         if timed:
             t = tick("veri + satır kopyası", t)
         for x, y in mbs:
@@ -66,8 +66,8 @@ def main():
         if timed:
             t = tick("kırpma", t)
         if opt.row_adam is not None:
-            k = sub.shape[1] // len(model.blocks)
-            opt.row_adam.set_rows(uniq, [sub.grad[:, i * k:(i + 1) * k] for i in range(len(model.blocks))])
+            k = sub.shape[1] // len(model.private_blocks())
+            opt.row_adam.set_rows(uniq, [sub.grad[:, i * k:(i + 1) * k] for i in range(len(model.private_blocks()))])
         opt.step()
         opt.zero_grad(set_to_none=True)
         if timed:

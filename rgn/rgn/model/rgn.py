@@ -69,7 +69,7 @@ class Block(nn.Module):
                 tbl = vocab_neuron_table(cfg.vocab_size, cfg.ff_dim(kind), cfg.mlp_vocab_neurons, seed=layer)
             self.register_buffer("vocab_neurons", tbl)
         self.private = None
-        if cfg.private_neurons:                                  # kelimeye özel nöronlar: satır = kelime, [g | u | d] × p
+        if cfg.private_neurons and (not cfg.private_layers or kind in cfg.private_layers):   # satır = kelime, [g|u|d] × p
             self.private = nn.Parameter(torch.empty(private_rows(cfg), 3 * cfg.private_neurons * cfg.d_model))
         self.route_h = self.route_n = None
         if not mlp_only and cfg.route_heads:                     # token rotası: head'ler ve nöronlar (katman başına ayrı)
@@ -195,6 +195,10 @@ class RGNModel(nn.Module):
     def num_params(self):
         return sum(p.numel() for p in self.parameters())
 
+    def private_blocks(self):
+        """Kelimeye özel nöronu olan bloklar (sırayla)."""
+        return [b for b in self.blocks if b.private is not None]
+
     def rope(self, n):
         if not self.use_rope:
             return None
@@ -216,9 +220,11 @@ class RGNModel(nn.Module):
         rope = self.rope(idx.shape[1])
         ol = None
         for i, block in enumerate(self.blocks):
-            if priv is not None:                         # eğitim: bütün katmanların satırları (B, N, L·3pd), trainer okur
-                k = priv.shape[-1] // len(self.blocks)
-                x = block(x, rope, masks, idx, None, priv[..., i * k:(i + 1) * k])
+            if priv is not None:                         # eğitim: özel katmanların satırları (B, N, L'·3pd), trainer okur
+                pb = self.private_blocks()
+                k = priv.shape[-1] // len(pb)
+                j = next((n for n, b in enumerate(pb) if b is block), None)
+                x = block(x, rope, masks, idx, None, None if j is None else priv[..., j * k:(j + 1) * k])
             else:
                 x = block(x, rope, masks, idx, None if self.priv_map is None else self.priv_map[idx])
             if self.obs_head is not None and i == self.cfg.observer_layer - 1:

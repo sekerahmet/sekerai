@@ -213,7 +213,7 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
         priv = sub = None
         if model.priv_map is not None:                      # kelimeye özel: yalnız bu adımda geçen satırların kopyası
             uniq = torch.unique(torch.cat([model.priv_map[x].flatten() for x, _, _ in mbs]))
-            sub = torch.cat([b.private.detach().index_select(0, uniq) for b in model.blocks], 1).requires_grad_()
+            sub = torch.cat([b.private.detach().index_select(0, uniq) for b in model.private_blocks()], 1).requires_grad_()
         for x, y, masks in mbs:
             if sub is not None:                             # satırlar derleme dışında, bütün katmanlar için bir kez
                 priv = F.embedding(torch.searchsorted(uniq, model.priv_map[x]), sub.to(torch.bfloat16)
@@ -232,8 +232,8 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
         clip = list(model.parameters()) + ([sub] if sub is not None else [])
         gn = torch.nn.utils.clip_grad_norm_(clip, tc.grad_clip) if tc.grad_clip else torch.tensor(0.0)
         if opt.row_adam is not None:
-            k = sub.shape[1] // len(model.blocks)
-            opt.row_adam.set_rows(uniq, [sub.grad[:, i * k:(i + 1) * k] for i in range(len(model.blocks))])
+            k = sub.shape[1] // len(model.private_blocks())
+            opt.row_adam.set_rows(uniq, [sub.grad[:, i * k:(i + 1) * k] for i in range(len(model.private_blocks()))])
         opt.step()
         opt.zero_grad(set_to_none=True)
         step += 1

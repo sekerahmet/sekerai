@@ -86,6 +86,12 @@ def _row_adam_eager(p, m, v, rr, gr, lr, b1, b2, eps, bc1, bc2):
     p.index_add_(0, rr, (-lr) * (mr / bc1) / ((vr / bc2).sqrt() + eps))
 
 
+def _row_rms_eager(p, v, rr, gr, lr, b2, eps, bc2):
+    vr = v.index_select(0, rr) * b2 + (gr * gr).mean(1, keepdim=True) * (1 - b2)
+    v.index_copy_(0, rr, vr)
+    p.index_add_(0, rr, (-lr) * gr / ((vr / bc2).sqrt() + eps))
+
+
 _ROW_ADAM = {}
 
 
@@ -98,13 +104,24 @@ def _row_adam(p, *args):
     return _ROW_ADAM["fn"](p, *args)
 
 
+def _row_rms(p, *args):
+    if not p.is_cuda:
+        return _row_rms_eager(p, *args)
+    if "rms" not in _ROW_ADAM:
+        _ROW_ADAM["rms"] = torch.compile(_row_rms_eager, dynamic=True)
+    return _ROW_ADAM["rms"](p, *args)
+
+
 class RowAdam(torch.optim.Optimizer):
     """Satır seyrek Adam (kelimeye özel tablolar): yalnız `rows` satırları (o adımda geçen kelimeler) güncellenir;
     diğer satırların ağırlığı ve momentleri dokunulmaz (tembel Adam, gömme tabloları için standart).  Bias düzeltmesi
     adım sayısıyla.  rows trainer tarafından her adımdan önce verilir (set_rows)."""
 
-    def __init__(self, params, lr, betas=(0.9, 0.95), eps=1e-8):
+    def __init__(self, params, lr, betas=(0.9, 0.95), eps=1e-8, mode="adam"):
+        """mode adam: m, v satır satır | rms: momentsiz, satır başına tek ikinci moment (v (satır, 1))."""
+        assert mode in ("adam", "rms")
         super().__init__(params, dict(lr=lr, betas=betas, eps=eps))
+        self.mode = mode
         self.rows, self.grads = None, None
 
     def set_rows(self, rows, grads=None):
@@ -122,14 +139,20 @@ class RowAdam(torch.optim.Optimizer):
                     continue
                 st = self.state[p]
                 if not st:
-                    st["m"], st["v"] = torch.zeros_like(p), torch.zeros_like(p)
+                    if self.mode == "rms":
+                        st["v"] = torch.zeros(p.shape[0], 1, device=p.device)
+                    else:
+                        st["m"], st["v"] = torch.zeros_like(p), torch.zeros_like(p)
                     st["step"] = 0
                 st["step"] += 1
                 rr = r if r is not None else torch.arange(p.shape[0], device=p.device)
                 gr = (self.grads[i] if self.grads is not None else p.grad.index_select(0, rr)).float()
                 t = st["step"]
                 sc = lambda z: torch.tensor(z, dtype=torch.float32, device=p.device)  # noqa: E731 (derlemede sabit değil)
-                _row_adam(p, st["m"], st["v"], rr, gr, sc(g["lr"]), b1, b2, g["eps"], sc(1 - b1 ** t), sc(1 - b2 ** t))
+                if self.mode == "rms":
+                    _row_rms(p, st["v"], rr, gr, sc(g["lr"]), b2, g["eps"], sc(1 - b2 ** t))
+                else:
+                    _row_adam(p, st["m"], st["v"], rr, gr, sc(g["lr"]), b1, b2, g["eps"], sc(1 - b1 ** t), sc(1 - b2 ** t))
 
 
 class CombinedOptimizer:
@@ -187,7 +210,8 @@ def build_optimizer(model, tcfg):
     opts = [adamw]
     private = [p for n, p in model.named_parameters() if ".private" in n and p.requires_grad]
     if private:                                  # kelimeye özel tablolar: yalnız o adımda geçen kelimelerin satırları
-        opts.append(RowAdam([dict(params=private, base_lr=adam_lr)], lr=adam_lr, betas=tuple(tcfg.betas)))
+        opts.append(RowAdam([dict(params=private, base_lr=adam_lr)], lr=adam_lr, betas=tuple(tcfg.betas),
+                            mode=tcfg.private_opt))
     if muon:
         opts.append(Muon([dict(params=muon, base_lr=tcfg.lr)], lr=tcfg.lr, momentum=tcfg.momentum,
                          weight_decay=tcfg.weight_decay, normuon=tcfg.optimizer == "normuon"))

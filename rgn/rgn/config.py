@@ -89,6 +89,7 @@ class ModelConfig:
     private_neurons: int = 0           # > 0: her katmanda kelimeye ÖZEL bu kadar nöron (yalnız o kelimede çalışır ve
                                        # güncellenir; ortak MLP'ye paralel): a = SiLU(g·x)(u·x), akışa a·d.  Kullanıcı, 16 Ekim
                                        # "her kelimeye eşit ve özel parametre"
+    private_layers: str = ""           # "": bütün katmanlarda özel nöron | "G": yalnız genel katmanlarda | "Y": yalnız yerel
     private_vocab: str = "assets/ss_vocab_used.json"   # özel payı olan kelimeler (gerisi tek ortak "diğer" satırı)
     mlp_vocab_assign: str = ""         # k = 1: ilk katmanın atama tablosu (assets/*.json, scripts/make_vocab_neurons.py;
                                        # PMI komşuları aynı nöronda); sonraki katmanlar rastgele (çiftler ayrışsın)
@@ -205,6 +206,8 @@ class TrainConfig:
     eval_every: int = 1000
     diag_every: int = 1000             # γ, |u| > 3 oranı, dikkat entropisi
     ckpt_minutes: float = 10.0
+    private_opt: str = "adam"          # kelimeye özel tablolar: adam (satır seyrek Adam) | rms (momentsiz, satır başına tek
+                                       # ölçek: v_satır = ort(g²) yürüyen ortalama; parametre başına ~12 bayt taşıma)
     sample_tokens: int = 64            # bitişte örnek üretim uzunluğu (0: kapalı)
     probe_tokens: int = 48             # her değerlendirmede 2 istemle greedy devam (nitel kontrol; 0: kapalı)
     profile_after: bool = True         # bitişte hız profili (runs/<koşu>/speed.json)
@@ -264,6 +267,8 @@ def from_dict(raw):
     cfg.model.validate()
     assert cfg.train.optimizer in OPTIMIZERS and cfg.train.schedule in SCHEDULES
     assert cfg.data.layout in ("stream", "story"), cfg.data.layout
+    assert cfg.train.private_opt in ("adam", "rms"), cfg.train.private_opt
+    assert cfg.model.private_layers in ("", "G", "Y"), cfg.model.private_layers
     assert not cfg.model.local_sentence or cfg.data.layout == "story", "local_sentence: data.layout story gerek"
     return cfg
 

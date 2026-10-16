@@ -357,3 +357,34 @@ def test_private_row_copy_matches_full():
             assert torch.allclose(b.private.grad.index_select(0, uniq), sub.grad[:, i * k:(i + 1) * k], atol=1e-6)
     finally:
         Path(f.name).unlink()
+
+
+def test_private_g_rms():
+    """Özel nöron yalnız G katmanlarında; rms güncellemesi yalnız verilen satırları değiştirir ve satır başına tek ölçek."""
+    import json as _j
+    import tempfile
+    from rgn.config import TrainConfig
+    from rgn.paths import ROOT
+    from rgn.train.optim import build_optimizer
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, dir=ROOT) as f:
+        _j.dump({"tokens": list(range(1, 40))}, f)
+    rel = Path(f.name).name
+    try:
+        m = RGNModel(tiny(attn="softmax", attn_impl="sdpa", n_kv_heads=4, mlp="swiglu", n_layers=3, local_window=4,
+                          global_layers=1, private_neurons=1, private_vocab=rel, private_layers="G"))
+        assert [b.kind for b in m.private_blocks()] == ["G"] and len(m.private_blocks()) == 1
+        idx = torch.randint(0, 97, (2, 12))
+        uniq = torch.unique(m.priv_map[idx])
+        sub = torch.cat([b.private.detach().index_select(0, uniq) for b in m.private_blocks()], 1).requires_grad_()
+        m(idx, idx, priv=torch.nn.functional.embedding(torch.searchsorted(uniq, m.priv_map[idx]), sub)).backward()
+        opt = build_optimizer(m, TrainConfig(private_opt="rms"))
+        p = m.private_blocks()[0].private
+        before = p.detach().clone()
+        opt.row_adam.set_rows(uniq, [sub.grad])
+        opt.row_adam.step()
+        ch = (p.detach() - before).abs().sum(1)
+        rest = torch.ones(len(ch), dtype=torch.bool)
+        rest[uniq] = False
+        assert float(ch[rest].sum()) == 0 and opt.row_adam.state[p]["v"].shape == (p.shape[0], 1)
+    finally:
+        Path(f.name).unlink()
