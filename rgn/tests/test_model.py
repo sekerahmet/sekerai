@@ -10,7 +10,8 @@ from rgn.model import RGNModel
 def _variants(rel):
     return [dict(), dict(attn_gate="head"), dict(attn_gate="elem"), dict(local_window=0),
             dict(private_neurons=1, private_vocab=rel), dict(private_neurons=1, private_vocab=rel, shared_mlp=False),
-            dict(shared_mlp=False)]
+            dict(shared_mlp=False), dict(private_value=1, private_vocab=rel),
+            dict(private_neurons=1, private_value=1, private_vocab=rel)]
 
 
 def test_causal_and_finite_gradients():
@@ -18,8 +19,8 @@ def test_causal_and_finite_gradients():
     with private_vocab(range(1, 40)) as rel:
         for v in _variants(rel):
             m = RGNModel(tiny(**v))
-            for b in m.private_blocks():
-                b.private.data.normal_(0, 0.1)
+            for _, _, p in m.private_tables():
+                p.data.normal_(0, 0.1)
             idx = torch.randint(0, 97, (2, 16))
             m(idx, idx).backward()
             for n, p in m.named_parameters():
@@ -42,6 +43,17 @@ def test_layer_kinds_and_window():
     assert (a[..., rel >= 8] == 0).all() and (a[..., (rel >= 0) & (rel < 8)] > 0).all()
     g = m.blocks[2].attn.weights(m.blocks[2].norm1(x), m.rope(32))
     assert (g[..., rel >= 0] > 0).all() and (g[..., rel < 0] == 0).all()
+
+
+def test_wide_attention():
+    """head_dim: dikkat iç boyutu d'den bağımsız (16 head × 16 = 256 > d 64); dikkat parametresi buna göre büyür."""
+    m0, m = RGNModel(tiny()), RGNModel(tiny(n_heads=16, n_kv_heads=16, head_dim=16))
+    a = m.blocks[0].attn
+    assert a.w_q.weight.shape == (256, 64) and a.w_kv.weight.shape == (512, 64) and a.w_o.weight.shape == (64, 256)
+    assert m.num_params() > m0.num_params()
+    idx = torch.randint(0, 97, (2, 16))
+    m(idx, idx).backward()
+    assert all(p.grad is not None for p in m.parameters())
 
 
 def test_order_sensitivity():
@@ -107,22 +119,41 @@ def test_private_neurons():
 
 
 def test_private_row_copy_matches_full():
-    """Eğitim yolu (yalnız geçen satırların kopyası) tam tablo yoluyla aynı kaybı ve aynı satır gradyanlarını verir."""
+    """Eğitim yolu (yalnız geçen satırların kopyası) tam tablo yoluyla aynı kaybı ve aynı satır gradyanlarını verir
+    (nöron, V vektörü, ikisi birlikte)."""
     with private_vocab(range(1, 40)) as rel:
+        for kw in (dict(private_neurons=1), dict(private_value=1), dict(private_neurons=1, private_value=1)):
+            torch.manual_seed(0)
+            m = RGNModel(tiny(private_vocab=rel, **kw))
+            tables = m.private_tables()
+            for _, _, p in tables:
+                p.data.normal_(0, 0.1)
+            idx = torch.randint(0, 97, (2, 12))
+            l_full = m(idx, idx)
+            l_full.backward()
+            uniq = torch.unique(m.priv_map[idx])
+            sub = [p.detach().index_select(0, uniq).requires_grad_() for _, _, p in tables]
+            l_sub = m(idx, idx, priv=(torch.searchsorted(uniq, m.priv_map[idx]), sub, None))
+            l_sub.backward()
+            assert torch.allclose(l_full, l_sub, atol=1e-6), kw
+            for (_, _, p), s in zip(tables, sub):
+                assert torch.allclose(p.grad.index_select(0, uniq), s.grad, atol=1e-6), kw
+
+
+def test_private_value():
+    """V vektörü: başlangıçta (0) tabanla aynı çıktı; tek kelimelik batch'te yalnız o kelimenin satırı gradyan alır."""
+    with private_vocab([3, 5, 9]) as rel:
         torch.manual_seed(0)
-        m = RGNModel(tiny(private_neurons=1, private_vocab=rel))
-        for b in m.private_blocks():
-            b.private.data.normal_(0, 0.1)
-        idx = torch.randint(0, 97, (2, 12))
-        l_full = m(idx, idx)
-        l_full.backward()
-        uniq = torch.unique(m.priv_map[idx])
-        sub = [b.private.detach().index_select(0, uniq).requires_grad_() for b in m.private_blocks()]
-        l_sub = m(idx, idx, priv=(torch.searchsorted(uniq, m.priv_map[idx]), sub, None))
-        l_sub.backward()
-        assert torch.allclose(l_full, l_sub, atol=1e-6)
-        for b, s in zip(m.private_blocks(), sub):
-            assert torch.allclose(b.private.grad.index_select(0, uniq), s.grad, atol=1e-6)
+        m0 = RGNModel(tiny())
+        torch.manual_seed(0)
+        m = RGNModel(tiny(private_value=1, private_vocab=rel))
+        assert all(b.private is None and b.private_v.shape == (4, m.cfg.n_kv_heads * 16) for b in m.blocks)
+        m0.load_state_dict({k: v for k, v in m.state_dict().items() if "private" not in k and k != "priv_map"})
+        idx = torch.tensor([[5, 3, 5, 9]])
+        assert torch.allclose(m0(idx), m(idx), atol=1e-6)
+        m(idx[:, :1].repeat(1, 4), idx).backward()
+        g = m.blocks[1].private_v.grad.abs().sum(1)
+        assert g[2] > 0 and float(g.sum() - g[2]) == 0                     # token 5 -> satır 2
 
 
 def test_make_plan_covers_tokens():

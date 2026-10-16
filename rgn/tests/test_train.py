@@ -26,7 +26,8 @@ def test_cpu_training_reduces_loss():
     with private_vocab(range(1, 400)) as rel:
         for overrides in ([], ["model.attn_gate=head"], ["train.optimizer=adamw"],
                           ["model.private_neurons=1", "model.private_vocab=" + rel],
-                          ["model.private_neurons=1", "model.private_vocab=" + rel, "model.shared_mlp=false"]):
+                          ["model.private_neurons=1", "model.private_vocab=" + rel, "model.shared_mlp=false"],
+                          ["model.private_value=1", "model.private_vocab=" + rel]):
             cfg = load_config(CPU_TINY, overrides)
             with tempfile.TemporaryDirectory() as d:
                 r = train(cfg, out_dir=d)
@@ -60,6 +61,7 @@ def test_resume_equals_uninterrupted():
     with private_vocab(range(1, 400)) as rel:
         for opt in ("rms", "adam"):
             _resume_equal(["model.private_neurons=1", "model.private_vocab=" + rel, "train.private_opt=" + opt])
+        _resume_equal(["model.private_neurons=1", "model.private_value=1", "model.private_vocab=" + rel])
 
 
 def test_row_adam_per_row_bias():

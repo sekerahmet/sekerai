@@ -1,0 +1,8 @@
+{
+  "extends": "fw_s000_d512_tf_yg_ozel_rms.json",
+  "name": "fw_s000_d512_ozel_v",
+  "notes": "F1: kelimeye özel nöron + kelimeye özel V vektörü (her katmanda her kelimenin vektörü dikkatte V'ye eklenir; value embedding). Kıyas 3000: özel nöron 3,7611, taban 3,8205.",
+  "model": {
+    "private_value": 1
+  }
+}

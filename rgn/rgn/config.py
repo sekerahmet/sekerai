@@ -26,6 +26,7 @@ class ModelConfig:
     n_layers: int = 8
     n_heads: int = 8
     n_kv_heads: int = 8                # < n_heads: GQA
+    head_dim: int = 0                  # 0: d_model / n_heads; > 0: dikkat iç boyutu n_heads · head_dim (d'den büyük olabilir)
     d_ff: int = 0                      # 0: SwiGLU 8d/3, 64'ün katı
     rope_base: float = 10000.0
     max_len: int = 4096                # RoPE tablosu boyu
@@ -33,6 +34,7 @@ class ModelConfig:
     global_layers: int = 3             # genel (G) katman sayısı; eşit aralıklı, son katman G (8 katmanda YYGYGYYG)
     attn_gate: str = ""                # dikkat çıkış kapısı: "" | "head" (head başına) | "elem" (her çıktı); 2σ_a ∈ (0, 2)
     private_neurons: int = 0           # 1: her katmanda her kelimenin kendi nöronu (kelimeye özel nöron); 0: kapalı
+    private_value: int = 0             # 1: her katmanda her kelimenin kendi V vektörü (dikkatte V'ye eklenir; value embedding)
     private_vocab: str = "assets/ss_vocab_used.json"   # özel satırı olan kelimeler (gerisi tek ortak "diğer" satırı)
     local_sentence: bool = False       # Y katmanı pencere yerine kendi cümlesi + hikâye başı (data.layout story gerek)
     shared_mlp: bool = True            # False: ortak MLP yok (katman = dikkat [+ kelimeye özel nöron])
@@ -47,6 +49,10 @@ class ModelConfig:
         at = {round((i + 1) * L / self.global_layers) - 1 for i in range(self.global_layers)}
         return "".join("G" if l in at else "Y" for l in range(L))
 
+    def dh(self):
+        """Head boyutu."""
+        return self.head_dim or self.d_model // self.n_heads
+
     def ff_dim(self):
         """SwiGLU genişliği: d_ff ya da 8d/3 (64'ün katı)."""
         return self.d_ff or max(64, round(8 * self.d_model / 3 / 64) * 64)
@@ -54,11 +60,12 @@ class ModelConfig:
     def validate(self):
         assert self.attn_gate in ("", "head", "elem"), self.attn_gate
         assert self.private_neurons in (0, 1), "private_neurons: 0 ya da 1 (çekirdek satırı tek nöron)"
+        assert self.private_value in (0, 1), self.private_value
         assert self.local_window >= 0 and 0 <= self.global_layers <= self.n_layers
         assert not self.local_sentence or self.local_window, "local_sentence: yerel / genel düzen gerek"
         assert self.local_window or self.global_layers, "yerel pencere yoksa bütün katmanlar genel"
-        assert self.d_model % self.n_heads == 0 and self.n_heads % self.n_kv_heads == 0
-        assert (self.d_model // self.n_heads) % 2 == 0, "RoPE çift head boyutu ister"
+        assert (self.head_dim or self.d_model % self.n_heads == 0) and self.n_heads % self.n_kv_heads == 0
+        assert self.dh() % 2 == 0, "RoPE çift head boyutu ister"
 
 
 @dataclass

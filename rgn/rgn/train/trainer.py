@@ -132,12 +132,14 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
     per_epoch = math.ceil(train_s.total / tokens_per_step)
     decay_start = int(total_steps * (1 - tc.decay)) if tc.schedule == "wsd" else None
     gpu = torch.cuda.get_device_name(0) if device.type == "cuda" else "cpu"
-    n_priv = sum(b.private.numel() for b in model.private_blocks())
+    n_priv = sum(p.numel() for _, _, p in model.private_tables())
+    priv_kinds = " + ".join(k for k, on in (("nöron", mc.private_neurons), ("V", mc.private_value)) if on)
     say("%s | katmanlar %s (Y: son %d token) | D %d, head %d (kv %d), d_ff %d | kapı %s | kelimeye özel %s | "
         "%d parametre (%d özel)" % (
             cfg.name, mc.layer_kinds(), mc.local_window, mc.d_model, mc.n_heads, mc.n_kv_heads, mc.ff_dim() if mc.shared_mlp else 0,
             mc.attn_gate or "yok",
-            "%d satır, %s" % (model.blocks[0].private.shape[0], tc.private_opt) if n_priv else "yok", n_params, n_priv))
+            "%s, %d satır, %s" % (priv_kinds, model.private_tables()[0][2].shape[0], tc.private_opt) if n_priv else "yok",
+            n_params, n_priv))
     say("veri %s %.1fM token | pencere %d, %d × %d = %d token/adım (mikro %d × %d) | %d adım/epok, toplam %d adım "
         "(%.2f epok)%s | lr %g (adam %g) %s, ısınma %d adım | cihaz %s, compile %s, %s | değerlendirme %d pencere" % (
             dc.dataset, train_s.total / 1e6, T, tc.batch_size, T, tokens_per_step, accum, micro, per_epoch, total_steps,

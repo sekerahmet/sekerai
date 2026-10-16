@@ -1,0 +1,10 @@
+{
+  "extends": "fw_s000_d512_tf_yg.json",
+  "name": "fw_s000_d512_dikkat2x",
+  "notes": "G1: dikkat kapasitesi iki kat (16 head × 64 = iç boyut 1024; dikkat parametresi 8,4M -> 16,8M), MLP ve gerisi taban. Kıyas 3000: taban 3,8205.",
+  "model": {
+    "n_heads": 16,
+    "n_kv_heads": 16,
+    "head_dim": 64
+  }
+}

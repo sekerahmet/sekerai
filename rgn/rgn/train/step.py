@@ -1,8 +1,8 @@
 """Bir eğitim adımı (trainer ve scripts/profile_step.py ortak): mikro adımlar, kelimeye özel satır kopyası, kırpma,
 optimizer.
 
-Kelimeye özel nöron (model.priv_map varsa): adımdaki bütün mikro adımlarda geçen satırlar (uniq) CPU'da bulunur
-(senkron yok); her katman için yalnız bu satırların kopyası (R, 3d) yaprak tensör olur.  İleri / geri geçiş bu kopyayla
+Kelimeye özel tablolar (model.priv_map varsa; nöron ve / veya V vektörü): adımdaki bütün mikro adımlarda geçen satırlar
+(uniq) CPU'da bulunur (senkron yok); her tablo için yalnız bu satırların kopyası yaprak tensör olur.  İleri / geri geçiş bu kopyayla
 (birleşik çekirdek), gradyanı kopyada toplanır; RowAdam yalnız bu satırları günceller.  Tam boy gradyan oluşmaz.
 """
 import torch
@@ -28,7 +28,7 @@ def private_rows(model, xs, device, dtype):
     pm = _cpu_map(model)
     uniq = torch.unique(torch.cat([pm[x.flatten()] for x in xs]))
     u = uniq.to(device, non_blocking=True)
-    sub = [b.private.detach().index_select(0, u).to(dtype).requires_grad_() for b in model.private_blocks()]
+    sub = [p.detach().index_select(0, u).to(dtype).requires_grad_() for _, _, p in model.private_tables()]
     return u, len(uniq), sub
 
 
@@ -42,7 +42,8 @@ def train_step(model, fwd, opt, batches, ctx, grad_clip, device, dtype):
         priv = None
         if sub is not None:
             loc = torch.searchsorted(uniq, model.priv_map[x])
-            priv = (loc, sub, make_plan(loc.flatten(), n_rows) if x.is_cuda else None)   # plan katmanlarda ortak
+            plan = make_plan(loc.flatten(), n_rows) if (x.is_cuda and model.private_blocks()) else None
+            priv = (loc, sub, plan)                                                       # plan katmanlarda ortak
         with ctx:
             loss = fwd(x, y, masks, priv) / accum
         loss.backward()

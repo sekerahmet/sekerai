@@ -4,9 +4,11 @@
                        -> ön-norm -> SwiGLU MLP (+ kelimeye özel nöron; shared_mlp False: yalnız özel nöron) -> residual] × L -> final norm -> LM head (paylaşımlı)
 
 Kelimeye özel nöron: her katmanda her kelimenin kendi satırı [g | u | w] (d'şer); o kelimenin konumunda
-a = SiLU(g·x)·(u·x), akışa a·w eklenir (ortak MLP'ye paralel, aynı x = RMSNorm(S)).  Adres token kimliğinden belli
-(priv_map: token -> satır; 0 = ortak "diğer").  Eğitimde yalnız adımda geçen satırların kopyası kullanılır (trainer,
-rgn/model/private_kernel.py); değerlendirme / üretimde tam tablo.
+a = SiLU(g·x)·(u·x), akışa a·w eklenir (ortak MLP'ye paralel, aynı x = RMSNorm(S)).
+Kelimeye özel V vektörü (private_value): her katmanda her kelimenin kendi vektörü dikkatte V'ye eklenir; o kelimeye bakan
+token, kelimenin kendi bilgisini de okur (value embedding).
+Adres token kimliğinden belli (priv_map: token -> satır; 0 = ortak "diğer").  Eğitimde yalnız adımda geçen satırların
+kopyası kullanılır (rgn/train/step.py, rgn/model/private_kernel.py); değerlendirme / üretimde tam tablo.
 """
 import json
 import math
@@ -29,25 +31,30 @@ def private_vocab(cfg):
 
 
 class Block(nn.Module):
-    """kind 'Y': yerel (son local_window token) | 'G': genel (tam causal).  private_rows > 0: kelimeye özel nöron tablosu."""
+    """kind 'Y': yerel (son local_window token) | 'G': genel (tam causal).  private_rows > 0: kelimeye özel tablolar
+    (nöron: private (satır, 3d); V vektörü: private_v (satır, Hkv·dh))."""
 
     def __init__(self, cfg, kind="G", private_rows=0):
         super().__init__()
         self.kind = kind
         self.norm1 = RMSNorm(cfg.d_model)
-        self.norm2 = RMSNorm(cfg.d_model) if (cfg.shared_mlp or private_rows) else None   # yalnız dikkat: ikinci norm yok
+        self.norm2 = (RMSNorm(cfg.d_model) if (cfg.shared_mlp or (private_rows and cfg.private_neurons))
+                      else None)                                       # yalnız dikkat: ikinci norm yok
         self.attn = Attention(cfg, window=cfg.local_window if kind == "Y" else 0)
         self.mlp = SwiGLU(cfg.d_model, cfg.ff_dim(), cfg.mlp_bias) if cfg.shared_mlp else None
-        self.private = nn.Parameter(torch.empty(private_rows, 3 * cfg.d_model)) if private_rows else None
+        self.private = (nn.Parameter(torch.empty(private_rows, 3 * cfg.d_model))
+                        if private_rows and cfg.private_neurons else None)
+        self.private_v = (nn.Parameter(torch.empty(private_rows, cfg.n_kv_heads * cfg.dh()))
+                          if private_rows and cfg.private_value else None)
 
     def private_out(self, xn, rows=None, priv=None):
-        """xn (B, N, d) -> (B, N, d).  rows (B, N): tam tablodan; priv = (loc (B, N), sub (R, 3d), plan): eğitimde
-        adımda geçen satırların kopyası, birleşik çekirdekle (ara (B, N, 3d) tensör yok)."""
+        """xn (B, N, d) -> (B, N, d).  rows (B, N): tam tablodan; priv = (loc (B, N), {"private": sub (R, 3d)}, plan):
+        eğitimde adımda geçen satırların kopyası, birleşik çekirdekle (ara (B, N, 3d) tensör yok)."""
         B, N, D = xn.shape
         if priv is not None:
             from rgn.model.private_kernel import private_neuron
             loc, sub, plan = priv
-            return private_neuron(xn.reshape(B * N, D), loc.reshape(-1), sub, plan).view(B, N, D)
+            return private_neuron(xn.reshape(B * N, D), loc.reshape(-1), sub["private"], plan).view(B, N, D)
         w = F.embedding(rows, self.private).view(B, N, 3, D).to(xn.dtype)
         a = F.silu((w[..., 0, :] * xn).sum(-1)) * (w[..., 1, :] * xn).sum(-1)
         return a.unsqueeze(-1) * w[..., 2, :]
@@ -55,7 +62,10 @@ class Block(nn.Module):
     def forward(self, x, rope, mask=None, rows=None, priv=None, parts=None):
         """H = S + MLP(RMSNorm(S)) [+ özel],  S = X + Attn(RMSNorm(X)).  parts (dict): bileşenler buraya yazılır
         (teşhis: dikkat, mlp, özel — akışa eklenen değerler; olmayan bileşen None)."""
-        a = self.attn(self.norm1(x), rope, mask)
+        vv = None
+        if self.private_v is not None:                                # kelimeye özel V vektörü
+            vv = priv[1]["private_v"][priv[0]] if priv is not None else F.embedding(rows, self.private_v)
+        a = self.attn(self.norm1(x), rope, mask, vv)
         s = x + a
         xn = self.norm2(s) if self.norm2 is not None else None
         m = None
@@ -95,7 +105,7 @@ class RGNModel(nn.Module):
         self.cfg = cfg
         self.embed = nn.Embedding(cfg.vocab_size, cfg.d_model)
         rows = 0
-        if cfg.private_neurons:                                        # token -> özel satır (0: ortak "diğer")
+        if cfg.private_neurons or cfg.private_value:                   # token -> özel satır (0: ortak "diğer")
             used = private_vocab(cfg)
             rows = len(used) + 1
             pm = torch.zeros(cfg.vocab_size, dtype=torch.long)
@@ -108,7 +118,7 @@ class RGNModel(nn.Module):
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self.lm_head.weight = self.embed.weight                       # W_vocab = W_embᵀ
         self.loss_checkpoint = True                                    # trainer TrainConfig.loss_checkpoint ile ayarlar
-        cos, sin = rope_tables(cfg.max_len, cfg.d_model // cfg.n_heads, cfg.rope_base)
+        cos, sin = rope_tables(cfg.max_len, cfg.dh(), cfg.rope_base)
         self.register_buffer("rope_cos", cos, persistent=False)
         self.register_buffer("rope_sin", sin, persistent=False)
         self._init_weights()
@@ -123,6 +133,8 @@ class RGNModel(nn.Module):
             elif name.endswith(".private"):
                 nn.init.normal_(p, 0.0, std)
                 p.data.view(p.shape[0], 3, -1)[:, 2].zero_()
+            elif name.endswith(".private_v"):                            # V vektörü 0: başlangıçta tabanla aynı
+                nn.init.zeros_(p)
             elif p.dim() == 2:
                 s = std / math.sqrt(2 * self.cfg.n_layers) if name.endswith(("attn.w_o.weight", "mlp.c.weight")) else std
                 nn.init.normal_(p, 0.0, s)
@@ -136,21 +148,35 @@ class RGNModel(nn.Module):
         """Kelimeye özel nöronu olan bloklar (sırayla; özel nöron açıksa hepsi)."""
         return [b for b in self.blocks if b.private is not None]
 
+    def private_tables(self):
+        """Kelimeye özel tablolar [(blok sırası, ad, parametre)] — named_parameters sırasıyla (RowAdam'ın sırası)."""
+        out = []
+        for i, b in enumerate(self.blocks):
+            for name in ("private", "private_v"):
+                p = getattr(b, name)
+                if p is not None:
+                    out.append((i, name, p))
+        return out
+
     def rope(self, n):
         assert n <= self.cfg.max_len, "dizi %d > max_len %d (RoPE tablosu)" % (n, self.cfg.max_len)
         return self.rope_cos[:n], self.rope_sin[:n]
 
     def hidden(self, idx, masks=None, priv=None, parts=None):
         """idx (B, N) -> son normalize edilmiş durum (B, N, d).
-        masks: story_masks (hikâye dizilimi) | priv: (loc, katman başına satır kopyası, plan) — eğitim yolu
+        masks: story_masks (hikâye dizilimi) | priv: (loc, satır kopyaları (private_tables sırasıyla), plan) — eğitim yolu
         parts: liste verilirse katman başına bileşen sözlüğü (+ "embed")."""
         x = self.embed(idx)
         if parts is not None:
             parts.append({"embed": x})
         rope = self.rope(idx.shape[1])
         rows = self.priv_map[idx] if (self.priv_map is not None and priv is None) else None
+        subs = [{} for _ in self.blocks]
+        if priv is not None:
+            for (i, name, _), s in zip(self.private_tables(), priv[1]):
+                subs[i][name] = s
         for i, block in enumerate(self.blocks):
-            bp = None if priv is None else (priv[0], priv[1][i], priv[2])
+            bp = None if priv is None else (priv[0], subs[i], priv[2])
             d = {} if parts is not None else None
             x = block(x, rope, None if masks is None else masks[block.kind], rows, bp, d)
             if parts is not None:

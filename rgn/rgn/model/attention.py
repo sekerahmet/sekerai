@@ -64,14 +64,14 @@ class Attention(nn.Module):
     def __init__(self, cfg, window=0):
         super().__init__()
         d, H, Hkv = cfg.d_model, cfg.n_heads, cfg.n_kv_heads
-        self.cfg, self.H, self.Hkv, self.dh = cfg, H, Hkv, d // H
+        self.cfg, self.H, self.Hkv, self.dh = cfg, H, Hkv, cfg.dh()
         self.window = int(window)
-        self.w_q = nn.Linear(d, d, bias=False)
+        self.w_q = nn.Linear(d, H * self.dh, bias=False)
         self.w_kv = nn.Linear(d, 2 * Hkv * self.dh, bias=False)
-        self.w_o = nn.Linear(d, d, bias=False)
+        self.w_o = nn.Linear(H * self.dh, d, bias=False)
         self.q_norm, self.k_norm = RMSNorm(self.dh), RMSNorm(self.dh)
         # kapı: head başına (H) ya da her çıktı sayısı (d); RGNModel sıfırla başlatır (kapı 1)
-        self.w_aux = nn.Linear(d, {"": 0, "head": H, "elem": d}[cfg.attn_gate], bias=False) if cfg.attn_gate else None
+        self.w_aux = nn.Linear(d, {"": 0, "head": H, "elem": H * self.dh}[cfg.attn_gate], bias=False) if cfg.attn_gate else None
 
     def project(self, x, rope):
         """x (B, N, d) -> q (B, H, N, dh), k / v (B, Hkv, N, dh); q, k RMSNorm + RoPE."""
@@ -109,15 +109,18 @@ class Attention(nn.Module):
         g = 1.0 + z * torch.rsqrt(1.0 + z * z)
         return (g.view(B, N, self.H, 1) if self.cfg.attn_gate == "head" else g.view(B, N, self.H, self.dh)).transpose(1, 2)
 
-    def forward(self, x, rope, mask=None):
-        """x (B, N, d) -> (B, N, d).  mask: hikâye dizilimi maskesi (story_masks) ya da None."""
+    def forward(self, x, rope, mask=None, vv=None):
+        """x (B, N, d) -> (B, N, d).  mask: hikâye dizilimi maskesi (story_masks) ya da None.  vv (B, N, Hkv·dh):
+        kelimeye özel V vektörü (V'ye eklenir) ya da None."""
         B, N, D = x.shape
         q, k, v = self.project(x, rope)
+        if vv is not None:
+            v = v + vv.view(B, N, self.Hkv, self.dh).transpose(1, 2).to(v.dtype)
         out = self._core(q, k, v, mask)
         g = self.gate(x)
         if g is not None:
             out = out * g.to(out.dtype)
-        return self.w_o(out.to(x.dtype).transpose(1, 2).reshape(B, N, D))
+        return self.w_o(out.to(x.dtype).transpose(1, 2).reshape(B, N, self.H * self.dh))
 
     @torch.no_grad()
     def weights(self, x, rope):
