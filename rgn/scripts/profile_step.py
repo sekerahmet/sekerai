@@ -20,6 +20,7 @@ from rgn.config import load_config  # noqa: E402
 from rgn.data.loader import load_streams  # noqa: E402
 from rgn.model import RGNModel  # noqa: E402
 from rgn.train.optim import build_optimizer  # noqa: E402
+from rgn.model.private_kernel import make_plan  # noqa: E402
 
 
 def main():
@@ -57,7 +58,8 @@ def main():
             t = tick("veri + satır kopyası", t)
         for x, y in mbs:
             if sub is not None:
-                priv = (torch.searchsorted(uniq, model.priv_map[x]), sub)
+                loc = torch.searchsorted(uniq, model.priv_map[x])
+                priv = (loc, sub, make_plan(loc.flatten(), len(uniq))) if loc.is_cuda else (loc, sub)  # plan bir kez
             with ctx:
                 loss = (fwd(x, y, None, priv) if priv is not None else fwd(x, y)) / accum
             loss.backward()

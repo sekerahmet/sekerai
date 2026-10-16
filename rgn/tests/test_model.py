@@ -392,14 +392,14 @@ def test_private_kernel_cuda():
     """Birleşik Triton çekirdeği (CUDA): ileri ve geri, düz PyTorch karşılığıyla aynı (sık satırlar dahil)."""
     from _util import require_cuda
     require_cuda()
-    from rgn.model.private_kernel import private_fwd, reference
+    from rgn.model.private_kernel import make_plan, private_fwd, reference
     torch.manual_seed(0)
     T, D, R = 4096, 512, 300
     loc = torch.randint(0, R, (T,), device="cuda")
     loc[:1500] = 7                                                     # çok sık bir satır ("the" gibi)
     x = torch.randn(T, D, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     sub = (torch.randn(R, 3 * D, device="cuda") * 0.05).to(torch.bfloat16).requires_grad_()
-    out = private_fwd(x, loc, sub)[0]
+    out = private_fwd(x, loc, sub, *make_plan(loc, R))[0]
     g = torch.randn_like(out)
     (out.float() * g.float()).sum().backward()
     dx, ds = x.grad.clone(), sub.grad.clone()

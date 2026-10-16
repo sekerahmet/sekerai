@@ -27,6 +27,7 @@ import torch.nn.functional as F
 from rgn.config import RunConfig
 from rgn.data.loader import load_streams
 from rgn.model import RGNModel
+from rgn.model.private_kernel import make_plan
 from rgn.paths import runs_dir
 from rgn.train import checkpoint
 from rgn.train.diagnostics import diagnose, summary_line
@@ -217,7 +218,8 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
             sub = [b.private.detach().index_select(0, uniq).to(dt).requires_grad_() for b in model.private_blocks()]
         for x, y, masks in mbs:
             if sub is not None:                             # birleşik çekirdek: satır sırası + katman başına kopya
-                priv = (torch.searchsorted(uniq, model.priv_map[x]), sub)
+                loc = torch.searchsorted(uniq, model.priv_map[x])
+                priv = (loc, sub, make_plan(loc.flatten(), len(uniq))) if loc.is_cuda else (loc, sub)  # plan bir kez
             with ctx:
                 res = fwd(x, y, masks, priv) if (masks is not None or priv is not None) else fwd(x, y)
             if isinstance(res, tuple):                        # gözlemci: kaydedilen kayıp yalnız ana kayıp

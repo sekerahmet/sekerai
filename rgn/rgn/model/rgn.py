@@ -93,8 +93,8 @@ class Block(nn.Module):
         B, N, D = xn.shape
         if psub is not None:
             from rgn.model.private_kernel import private_neuron
-            loc, sub = psub
-            return private_neuron(xn.reshape(B * N, D), loc.reshape(-1), sub).view(B, N, D)
+            loc, sub, plan = psub if len(psub) == 3 else (*psub, None)
+            return private_neuron(xn.reshape(B * N, D), loc.reshape(-1), sub, plan).view(B, N, D)
         pw = None
         w = (F.embedding(rows, self.private) if pw is None else pw).view(B, N, -1, 3, D).to(xn.dtype)  # (B, N, p, 3, d)
         proj = (w[..., :2, :] * xn[:, :, None, None, :]).sum(-1)                        # (B, N, p, 2)
@@ -228,7 +228,7 @@ class RGNModel(nn.Module):
         for i, block in enumerate(self.blocks):
             if priv is not None:                         # eğitim: (satır sırası (B, N), özel blok başına satır kopyası)
                 j = next((n for n, b in enumerate(self.private_blocks()) if b is block), None)
-                x = block(x, rope, masks, idx, None, None if j is None else (priv[0], priv[1][j]))
+                x = block(x, rope, masks, idx, None, None if j is None else (priv[0], priv[1][j], *priv[2:]))
             else:
                 x = block(x, rope, masks, idx, None if self.priv_map is None else self.priv_map[idx])
             if self.obs_head is not None and i == self.cfg.observer_layer - 1:
