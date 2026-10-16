@@ -213,11 +213,13 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
         priv = sub = None
         if model.priv_map is not None:                      # kelimeye özel: yalnız bu adımda geçen satırların kopyası
             uniq = torch.unique(torch.cat([model.priv_map[x].flatten() for x, _, _ in mbs]))
-            sub = torch.cat([b.private.detach().index_select(0, uniq) for b in model.private_blocks()], 1).requires_grad_()
+            sub = torch.cat([b.private.detach().index_select(0, uniq) for b in model.private_blocks()], 1)
+            if device.type == "cuda":                       # kopya baştan bf16: mikro adım başına dönüşüm / geri dönüşüm yok
+                sub = sub.to(torch.bfloat16)
+            sub.requires_grad_()
         for x, y, masks in mbs:
             if sub is not None:                             # satırlar derleme dışında, bütün katmanlar için bir kez
-                priv = F.embedding(torch.searchsorted(uniq, model.priv_map[x]), sub.to(torch.bfloat16)
-                                   if device.type == "cuda" else sub)
+                priv = F.embedding(torch.searchsorted(uniq, model.priv_map[x]), sub)
             with ctx:
                 res = fwd(x, y, masks, priv) if (masks is not None or priv is not None) else fwd(x, y)
             if isinstance(res, tuple):                        # gözlemci: kaydedilen kayıp yalnız ana kayıp

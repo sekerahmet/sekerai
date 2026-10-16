@@ -51,12 +51,13 @@ def main():
         sub = priv = None
         if model.priv_map is not None:                       # trainer ile aynı yol
             uniq = torch.unique(torch.cat([model.priv_map[x].flatten() for x, _ in mbs]))
-            sub = torch.cat([b.private.detach().index_select(0, uniq) for b in model.private_blocks()], 1).requires_grad_()
+            sub = torch.cat([b.private.detach().index_select(0, uniq) for b in model.private_blocks()], 1)
+            sub = sub.to(torch.bfloat16).requires_grad_()
         if timed:
             t = tick("veri + satır kopyası", t)
         for x, y in mbs:
             if sub is not None:
-                priv = torch.nn.functional.embedding(torch.searchsorted(uniq, model.priv_map[x]), sub.to(torch.bfloat16))
+                priv = torch.nn.functional.embedding(torch.searchsorted(uniq, model.priv_map[x]), sub)
             with ctx:
                 loss = (fwd(x, y, None, priv) if priv is not None else fwd(x, y)) / accum
             loss.backward()
