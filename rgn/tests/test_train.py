@@ -48,6 +48,7 @@ def _resume_equal(extra):
         train(load_config(CPU_TINY, base), out_dir=a)
         assert train(load_config(CPU_TINY, base + ["train.stop_step=17"]), out_dir=b) is None
         assert (Path(b) / "stopped").exists()
+        assert torch.load(Path(b) / "model.pt", weights_only=False)["step"] == 17   # durdurmada hafif ağırlık dosyası
         r = train(load_config(CPU_TINY, base), out_dir=b, resume=True)
         assert r["steps"] == 30 and not (Path(b) / "stopped").exists()
         wa = torch.load(Path(a) / "model.pt", weights_only=False)["model"]

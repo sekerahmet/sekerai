@@ -180,6 +180,10 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
         log.write(type="diag", step=step, **d)
         say("TEŞHİS adım %d: %s" % (step, summary_line(d)))
 
+    def save_weights():
+        """model.pt: yalnız ağırlıklar + yapılandırma + adım (optimizer yok; checkpoint'in ~1/3'ü)."""
+        checkpoint.save(out / "model.pt", model=model.state_dict(), config=cfg.to_dict(), step=step)
+
     def save_ckpt():
         checkpoint.save(ckpt_path, model=model.state_dict(), optim=opt.state_dict(), rng=rng.bit_generator.state,
                         step=step, best=best, config=cfg.to_dict())
@@ -194,6 +198,7 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
     while step < total_steps:
         if stop["flag"] or (tc.stop_step and step >= tc.stop_step):
             save_ckpt()
+            save_weights()                                       # analiz / değerlendirme için hafif ağırlık dosyası
             (out / "stopped").write_text("adım %d\n" % step, encoding="utf-8")
             say("DURDURULDU adım %d — checkpoint kaydedildi; sürdürmek için --resume" % step)
             return None
@@ -247,7 +252,7 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
     peak_mem = torch.cuda.max_memory_allocated() / 2 ** 30 if device.type == "cuda" else None
     final = run_eval(final=True)
     run_diag()
-    torch.save({"model": model.state_dict(), "config": cfg.to_dict()}, out / "model.pt")
+    save_weights()
     smp = [] if mc.local_sentence else samples(model, device, tc.sample_tokens)
     (out / "samples.json").write_text(json.dumps(smp, indent=1, ensure_ascii=False), encoding="utf-8")
     for s in smp[:2]:
