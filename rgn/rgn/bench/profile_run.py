@@ -49,7 +49,7 @@ def _attn_kernel(attn, B, N, device):
 
 
 def _block_split(model, B, N, device, ctx):
-    blk = model.blocks[0]
+    blk = next(b for b in model.blocks if b.attn is not None)
     x = torch.randn(B, N, model.cfg.d_model, device=device, requires_grad=True)
     rope = model.rope(N)
     res = {}

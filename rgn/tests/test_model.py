@@ -234,3 +234,24 @@ def test_initial_u_not_saturated():
         m(torch.randint(0, 1000, (2, 128)))
     for blk in m.blocks:
         assert 0.3 < blk.mlp.stats["u_std"] < 0.6 and blk.mlp.stats["sat_frac"] < 1e-3, blk.mlp.stats
+
+
+def test_mlp_only_layers():
+    """İlk N katman yalnız MLP: o katmanda token'lar arası bilgi yok (yalnız-M model konumdan bağımsız), dikkat
+    parametresi yok, teşhis çalışır."""
+    from rgn.train.diagnostics import diagnose
+    import contextlib
+    base = dict(attn="softmax", attn_impl="sdpa", n_kv_heads=4, local_window=4, global_layers=1, n_layers=3)
+    m0, m2 = RGNModel(tiny(**base)), RGNModel(tiny(**base, mlp_only_layers=2))
+    assert m2.blocks[0].attn is None and m2.blocks[1].attn is None and m2.blocks[2].attn is not None
+    assert m2.num_params() < m0.num_params()
+    idx = torch.randint(0, 97, (2, 12))
+    x = m2.embed(idx)
+    y1 = m2.blocks[0](x)
+    x2 = x.clone()
+    x2[:, :5] = torch.randn_like(x2[:, :5])
+    assert torch.allclose(m2.blocks[0](x2)[:, 5:], y1[:, 5:])           # önceki token'lar değişince çıktı aynı
+    loss = m2(idx, idx)
+    loss.backward()
+    d = diagnose(m2, idx, contextlib.nullcontext())
+    assert len(d["layers"]) == 1

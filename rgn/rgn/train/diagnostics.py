@@ -14,7 +14,7 @@ def diagnose(model, x, ctx):
     model.eval()
     inputs = {}
     hooks = [blk.attn.register_forward_pre_hook(lambda m, args, i=i: inputs.__setitem__(i, args))
-             for i, blk in enumerate(model.blocks)]
+             for i, blk in enumerate(model.blocks) if blk.attn is not None]
     for blk in model.blocks:
         blk.mlp.track = True
     try:
@@ -30,6 +30,8 @@ def diagnose(model, x, ctx):
     half = slice(N // 2, N)
     dist = (torch.arange(N, device=x.device)[:, None] - torch.arange(N, device=x.device)[None, :]).clamp_min(0).float()
     for i, blk in enumerate(model.blocks):
+        if blk.attn is None:                                         # yalnız MLP katmanı: dikkat ölçüsü yok
+            continue
         a = blk.attn.weights(*inputs[i][:2]).float()                # (B, H, N, N); x, rope (maske hariç)
         ent = -(a * a.clamp_min(1e-30).log()).sum(-1)               # (B, H, N)
         layer = {

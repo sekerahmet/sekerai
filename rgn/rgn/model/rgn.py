@@ -19,26 +19,30 @@ from rgn.model.position import rope_tables
 
 
 class Block(nn.Module):
-    def __init__(self, cfg, kind="G"):
-        """kind: 'G' genel (tam causal; konum cfg.global_pos ya da pos) | 'Y' yerel (son local_window token, konum pos)."""
+    def __init__(self, cfg, kind="G", mlp_only=False):
+        """kind: 'G' genel (tam causal; konum cfg.global_pos ya da pos) | 'Y' yerel (son local_window token, konum pos).
+        mlp_only: dikkat yok, yalnız MLP (token'lar arası bilgi akışı yok)."""
         super().__init__()
         self.kind = kind
-        self.norm1, self.norm2 = RMSNorm(cfg.d_model), RMSNorm(cfg.d_model)
+        self.norm2 = RMSNorm(cfg.d_model)
+        self.norm1 = None if mlp_only else RMSNorm(cfg.d_model)
         if cfg.ff_ratio:
             cfg = dataclasses.replace(cfg, d_ff=cfg.ff_dim(kind))
         if kind == "G" and cfg.global_pos:
             cfg = dataclasses.replace(cfg, pos=cfg.global_pos)
         if kind == "G" and cfg.sharpness_range_g:
             cfg = dataclasses.replace(cfg, sharpness_range=tuple(cfg.sharpness_range_g))
-        self.attn = Attention(cfg, window=cfg.local_window if kind == "Y" else 0)
+        self.attn = None if mlp_only else Attention(cfg, window=cfg.local_window if kind == "Y" else 0)
         self.mlp = build_mlp(cfg)
         self.loc_proj = None
-        if cfg.attn_locality:
+        if cfg.attn_locality and not mlp_only:
             # konum özeti -> MLP kapı girdisi: E · (2L − 1) ∈ (−1, 1]; E sıfır başlatma (başlangıçta taban)
             taus = cfg.locality_tau_local if kind == "Y" else cfg.locality_tau_global
             self.loc_proj = nn.Linear(len(taus) * cfg.n_heads, cfg.ff_dim(), bias=False)
 
     def forward(self, x, rope=None, masks=None):
+        if self.attn is None:
+            return x + self.mlp(self.norm2(x))
         a = self.attn(self.norm1(x), rope, None if masks is None else masks[self.kind])
         extra = None
         if self.loc_proj is not None:
@@ -70,11 +74,11 @@ class RGNModel(nn.Module):
         cfg.validate()
         self.cfg = cfg
         self.embed = nn.Embedding(cfg.vocab_size, cfg.d_model)
-        self.blocks = nn.ModuleList(Block(cfg, kind) for kind in cfg.layer_kinds())
+        self.blocks = nn.ModuleList(Block(cfg, kind, i < cfg.mlp_only_layers) for i, kind in enumerate(cfg.layer_kinds()))
         self.norm_f = RMSNorm(cfg.d_model)
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self.lm_head.weight = self.embed.weight          # W_vocab = W_embᵀ
-        self.use_rope = any(b.attn.use_rope for b in self.blocks)
+        self.use_rope = any(b.attn is not None and b.attn.use_rope for b in self.blocks)
         self.obs_head = None
         if cfg.observer_layer:
             # gözlemci: K. katman çıkışı (gradyansız) -> küçük sözlükte dağılım; özellikler sonraki katmandan önce akışa
