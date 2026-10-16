@@ -1,0 +1,9 @@
+{
+  "extends": "ss_d512_tf_yg.json",
+  "name": "ss_d512_tf_yg_rota_yari",
+  "notes": "Taban YYG, her token'ın her katmanda baştan belirli rotası (kullanıcı, 16 Ekim: 'baştan route belirli o şekilde öğrensin, sadece MLP değil tüm route'): token kendi 4 / 8 head'inden sorar (rota dışı head çıktısı o token'da 0; okunması serbest), MLP'de kendi 672 / 1344 nöronundan geçer (geri yayılımda yalnız onlar pay alır). Dağılım dengeli (her head / nöron eşit sayıda token), katman başına ayrı; kapasite ve parametre aynı. Kıyas: taban YYG 3000. adım 1,7379.",
+  "model": {
+    "route_heads": 4,
+    "route_neurons": 672
+  }
+}

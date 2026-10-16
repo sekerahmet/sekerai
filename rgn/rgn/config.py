@@ -82,6 +82,10 @@ class ModelConfig:
     mlp_only_layers: int = 0           # > 0: ilk N katmanda dikkat yok, yalnız MLP (kullanıcı, 16 Ekim)
     mlp_vocab_neurons: int = 0         # > 0: yalnız-MLP katmanlarında nöronlar sözlüğe bölüştürülür — her token k nöron,
                                        # her nöron eşit sayıda token (k·V/ff); katman başına ayrı rastgele dağıtım
+    route_heads: int = 0               # > 0: her katmanda token başına sabit rota — token kendi route_heads head'inden sorar
+                                       # (rota dışı head'lerin o token'daki çıktısı 0; okunması serbest)
+    route_neurons: int = 0             # > 0: her katmanda token başına route_neurons MLP nöronu (yalnız onlar çalışır ve
+                                       # geri yayılımda pay alır).  Dağılım dengeli, katman başına ayrı (kullanıcı, 16 Ekim)
     mlp_vocab_assign: str = ""         # k = 1: ilk katmanın atama tablosu (assets/*.json, scripts/make_vocab_neurons.py;
                                        # PMI komşuları aynı nöronda); sonraki katmanlar rastgele (çiftler ayrışsın)
     local_sentence: bool = False       # Y katmanları pencere yerine yalnız kendi cümlesi + hikâye başı (data.layout story gerek)
@@ -131,6 +135,10 @@ class ModelConfig:
                                               and self.mlp_vocab_neurons <= self.ff_dim()), \
             "mlp_vocab_neurons: yalnız-MLP katmanı ve kapılı MLP gerek, k <= d_ff"
         assert not self.mlp_vocab_assign or self.mlp_vocab_neurons == 1, "mlp_vocab_assign: k = 1 gerek"
+        assert not (self.route_heads or self.route_neurons) or (
+            self.attn == "softmax" and self.mlp in ("swiglu", "glu", "rglu") and not self.mlp_only_layers
+            and self.route_heads <= self.n_heads and self.route_neurons <= self.ff_dim()), \
+            "rota: softmax + kapılı MLP, yalnız-MLP katmanı yok, route_heads <= H, route_neurons <= d_ff"
         assert not self.local_sentence or (self.local_window and self.attn == "softmax"),             "local_sentence: yerel / genel düzen ve softmax gerek"
         assert not self.global_pos or self.global_pos in POS, self.global_pos
         assert not self.ff_ratio or (len(self.ff_ratio) == 2 and self.local_window), "ff_ratio: (Y, G), yerel pencere gerek"

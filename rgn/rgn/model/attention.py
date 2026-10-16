@@ -351,7 +351,7 @@ class Attention(nn.Module):
             return F.scaled_dot_product_attention(q, k, v, attn_mask=mask, enable_gqa=self.Hkv != self.H, scale=s)
         return _flex_attention()(q, k, v, block_mask=mask, scale=s, enable_gqa=self.Hkv != self.H)
 
-    def forward(self, x, rope=None, mask=None):
+    def forward(self, x, rope=None, mask=None, head_mask=None):
         """-> çıktı (B, N, d); attn_locality açıksa (çıktı, konum özeti (B, N, T·H)).  mask: hikâye dizilimi maskesi."""
         B, N, D = x.shape
         q, k, v = self.project(x, rope)
@@ -367,6 +367,8 @@ class Attention(nn.Module):
         out = (self._core(q, k, v) if mask is None else self._masked(q, k, v, mask))[..., :self.dh]
         if "gate" in aux:
             out = out * aux["gate"].to(out.dtype)
+        if head_mask is not None:                                       # token rotası: (B, H, N) 1 = açık head
+            out = out * head_mask.unsqueeze(-1).to(out.dtype)
         y = self.w_o(out.to(x.dtype).transpose(1, 2).reshape(B, N, D))
         return (y, loc) if loc is not None else y
 

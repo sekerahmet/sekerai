@@ -30,6 +30,11 @@ def vocab_neuron_table(V, ff, k, seed=0):
     return table
 
 
+def _onehot(idx, n, dtype):
+    """(..., k) indeks -> (..., n) 0/1 maske."""
+    return torch.zeros(*idx.shape[:-1], n, device=idx.device, dtype=dtype).scatter_(-1, idx, 1.0)
+
+
 class Block(nn.Module):
     def __init__(self, cfg, kind="G", mlp_only=False, layer=0):
         """kind: 'G' genel (tam causal; konum cfg.global_pos ya da pos) | 'Y' yerel (son local_window token, konum pos).
@@ -57,6 +62,15 @@ class Block(nn.Module):
             else:
                 tbl = vocab_neuron_table(cfg.vocab_size, cfg.ff_dim(kind), cfg.mlp_vocab_neurons, seed=layer)
             self.register_buffer("vocab_neurons", tbl)
+        self.route_h = self.route_n = None
+        if not mlp_only and cfg.route_heads:                     # token rotası: head'ler ve nöronlar (katman başına ayrı)
+            self.register_buffer("route_h_tbl", vocab_neuron_table(cfg.vocab_size, cfg.n_heads, cfg.route_heads,
+                                                                    seed=100 + layer))
+            self.route_h = True
+        if not mlp_only and cfg.route_neurons:
+            self.register_buffer("route_n_tbl", vocab_neuron_table(cfg.vocab_size, cfg.ff_dim(kind), cfg.route_neurons,
+                                                                    seed=200 + layer))
+            self.route_n = True
         self.loc_proj = None
         if cfg.attn_locality and not mlp_only:
             # konum özeti -> MLP kapı girdisi: E · (2L − 1) ∈ (−1, 1]; E sıfır başlatma (başlangıçta taban)
@@ -72,12 +86,21 @@ class Block(nn.Module):
                 nm = torch.zeros(*idx.shape[:-1], self.mlp.c.in_features, device=x.device, dtype=x.dtype)
                 nm.scatter_(-1, idx, 1.0)
             return x + (self.mlp(self.norm2(x)) if nm is None else self.mlp(self.norm2(x), neuron_mask=nm))
-        a = self.attn(self.norm1(x), rope, None if masks is None else masks[self.kind])
+        hm = nm = None
+        if self.route_h or self.route_n:
+            assert tokens is not None, "token rotası token kimliği ister"
+        if self.route_h:
+            hm = _onehot(self.route_h_tbl[tokens], self.attn.H, x.dtype).transpose(1, 2)     # (B, H, N)
+        if self.route_n:
+            nm = _onehot(self.route_n_tbl[tokens], self.mlp.c.in_features, x.dtype)          # (B, N, ff)
+        a = self.attn(self.norm1(x), rope, None if masks is None else masks[self.kind], head_mask=hm)
         extra = None
         if self.loc_proj is not None:
             a, loc = a
             extra = self.loc_proj((2.0 * loc - 1.0).to(x.dtype))
         s = x + a                                       # S_i = X_i + Attn(RMSNorm(X))_i
+        if nm is not None:
+            return s + self.mlp(self.norm2(s), extra, neuron_mask=nm)
         return s + self.mlp(self.norm2(s), extra)       # H_i = S_i + MLP(RMSNorm(S), konum özeti)_i
 
 

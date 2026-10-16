@@ -273,3 +273,19 @@ def test_vocab_neurons():
     w = m.blocks[0].mlp.c.weight.grad                                      # (d, ff): yalnız token 5'in 2 nöronu
     used = (w.abs().sum(0) > 0).nonzero().flatten().tolist()
     assert sorted(used) == sorted(m.blocks[0].vocab_neurons[5].tolist())
+
+
+def test_token_route():
+    """Tam rota: tek token'lık batch'te yalnız token'ın head'leri (q satırları) ve nöronları gradyan alır; parametre aynı."""
+    base = dict(attn="softmax", attn_impl="sdpa", n_kv_heads=4, local_window=4, global_layers=1, n_layers=2,
+                mlp="swiglu", d_ff=16)
+    m0, m = RGNModel(tiny(**base)), RGNModel(tiny(**base, route_heads=1, route_neurons=3))
+    assert m.num_params() == m0.num_params()
+    idx = torch.full((1, 6), 5)
+    m(idx, idx).backward()
+    for blk in m.blocks:
+        h = int(blk.route_h_tbl[5, 0])
+        gq = blk.attn.w_q.weight.grad.view(4, 16, -1).abs().sum((1, 2))          # head başına q gradyanı
+        assert gq[h] > 0 and all(gq[i] == 0 for i in range(4) if i != h)
+        used = (blk.mlp.c.weight.grad.abs().sum(0) > 0).nonzero().flatten().tolist()
+        assert sorted(used) == sorted(blk.route_n_tbl[5].tolist())
