@@ -1,0 +1,8 @@
+{
+  "extends": "ss_d512_tf_yg_m2_v1.json",
+  "name": "ss_d512_tf_yg_m2_v1_pmi",
+  "notes": "MMGYGYYG, token başına 1 nöron (k 1); 1. katmanda atama PMI komşuluğuyla (assets/vocab_neurons_pmi_1344.json: FineWeb-Edu s000 PPMI-SVD 64, küresel k-ortalama, dengeli ~37 token / nöron — Tom: Jim, Bob, Dave...; cat: dog, pet...), 2. katman rastgele (aynı nöronu paylaşan token'lar ayrışsın). Kullanıcı, 16 Ekim: 'PMI ile atama yap, k 1'. Kıyas: rastgele k 1 (ss_d512_tf_yg_m2_v1), MMG yoğun 1,7613, taban 1,7379.",
+  "model": {
+    "mlp_vocab_assign": "assets/vocab_neurons_pmi_1344.json"
+  }
+}

@@ -82,6 +82,8 @@ class ModelConfig:
     mlp_only_layers: int = 0           # > 0: ilk N katmanda dikkat yok, yalnız MLP (kullanıcı, 16 Ekim)
     mlp_vocab_neurons: int = 0         # > 0: yalnız-MLP katmanlarında nöronlar sözlüğe bölüştürülür — her token k nöron,
                                        # her nöron eşit sayıda token (k·V/ff); katman başına ayrı rastgele dağıtım
+    mlp_vocab_assign: str = ""         # k = 1: ilk katmanın atama tablosu (assets/*.json, scripts/make_vocab_neurons.py;
+                                       # PMI komşuları aynı nöronda); sonraki katmanlar rastgele (çiftler ayrışsın)
     local_sentence: bool = False       # Y katmanları pencere yerine yalnız kendi cümlesi + hikâye başı (data.layout story gerek)
     attn_gate: str = ""                # kapı: "" | "head" (head başına 1 sayı) | "elem" (her çıktı sayısı); 2σ_a ∈ (0, 2), başlangıç 1
     mlp: str = "rational"              # rational: W2 u/sqrt(1+u²) | rglu: W2 [G/sqrt(1+G²) ⊙ U] | glu: cebirsel GLU | swiglu: taban
@@ -128,6 +130,7 @@ class ModelConfig:
         assert not self.mlp_vocab_neurons or (self.mlp_only_layers and self.mlp in ("swiglu", "glu", "rglu")
                                               and self.mlp_vocab_neurons <= self.ff_dim()), \
             "mlp_vocab_neurons: yalnız-MLP katmanı ve kapılı MLP gerek, k <= d_ff"
+        assert not self.mlp_vocab_assign or self.mlp_vocab_neurons == 1, "mlp_vocab_assign: k = 1 gerek"
         assert not self.local_sentence or (self.local_window and self.attn == "softmax"),             "local_sentence: yerel / genel düzen ve softmax gerek"
         assert not self.global_pos or self.global_pos in POS, self.global_pos
         assert not self.ff_ratio or (len(self.ff_ratio) == 2 and self.local_window), "ff_ratio: (Y, G), yerel pencere gerek"

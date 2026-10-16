@@ -49,8 +49,14 @@ class Block(nn.Module):
         if not (mlp_only and cfg.mlp_vocab_neurons):
             self.vocab_neurons = None
         else:
-            self.register_buffer("vocab_neurons", vocab_neuron_table(cfg.vocab_size, cfg.ff_dim(kind),
-                                                                     cfg.mlp_vocab_neurons, seed=layer))
+            if cfg.mlp_vocab_assign and layer == 0:              # PMI komşuluğuyla atama (dosyadan)
+                from rgn.paths import ROOT
+                a = json.loads((ROOT / cfg.mlp_vocab_assign).read_text(encoding="utf-8"))
+                assert a["vocab"] == cfg.vocab_size and a["neurons"] == cfg.ff_dim(kind), "atama tablosu boyu"
+                tbl = torch.tensor(a["table"], dtype=torch.long)[:, None]
+            else:
+                tbl = vocab_neuron_table(cfg.vocab_size, cfg.ff_dim(kind), cfg.mlp_vocab_neurons, seed=layer)
+            self.register_buffer("vocab_neurons", tbl)
         self.loc_proj = None
         if cfg.attn_locality and not mlp_only:
             # konum özeti -> MLP kapı girdisi: E · (2L − 1) ∈ (−1, 1]; E sıfır başlatma (başlangıçta taban)
