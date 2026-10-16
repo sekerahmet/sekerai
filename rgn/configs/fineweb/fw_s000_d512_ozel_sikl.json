@@ -1,0 +1,9 @@
+{
+  "extends": "fw_s000_d512_tf_yg_ozel_rms.json",
+  "name": "fw_s000_d512_ozel_sikl",
+  "notes": "P3: kelime başına lr, veri sıklığından: 2e-3 · clamp(sqrt(6600 / kelimenin sayısı), 1, 4) — sık kelime (6600+ kez) taban gibi 2e-3, orta ~5e-3, seyrek (400 altı) 8e-3; takvim genel WSD. Kıyas 3000: 1 nöron 3,7611.",
+  "train": {
+    "private_lr_ref": 6600,
+    "private_lr_max": 4.0
+  }
+}

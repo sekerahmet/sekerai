@@ -67,6 +67,25 @@ def test_resume_equals_uninterrupted():
                        "train.private_row_decay=67"])
 
 
+def test_row_lr_mult():
+    """Kelime başına lr çarpanı: satırın adımı lr · çarpan; çarpan sayıdan sqrt(ref / sayı), [1, max]."""
+    p = torch.nn.Parameter(torch.zeros(3, 2))
+    opt = RowAdam([dict(params=[p])], lr=0.1, mode="rms", row_mult=torch.tensor([1.0, 2.0, 4.0]))
+    opt.set_rows(torch.tensor([0, 2]), [torch.ones(2, 2)])
+    opt.step()
+    assert torch.allclose(p.data[:, 0], torch.tensor([-0.1, 0.0, -0.4]), atol=1e-5)
+    from types import SimpleNamespace
+    from rgn.train.optim import row_lr_mult
+    with private_vocab([3, 5, 9]) as rel:
+        import json
+        f = ROOT / rel
+        d = json.loads(f.read_text(encoding="utf-8"))
+        d["counts"] = [10000, 100, 1]
+        f.write_text(json.dumps(d), encoding="utf-8")
+        m = row_lr_mult(SimpleNamespace(private_vocab=rel), SimpleNamespace(private_lr_ref=400.0, private_lr_max=4.0))
+        assert torch.allclose(m, torch.tensor([1.0, 1.0, 2.0, 4.0]))
+
+
 def test_row_own_schedule():
     """row_decay: satırın adımı kendi güncelleme sayısıyla küçülür (lr·sqrt(n0/(n+n0))); dokunulmayan satır etkilenmez."""
     p = torch.nn.Parameter(torch.zeros(3, 2))

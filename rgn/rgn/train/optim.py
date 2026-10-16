@@ -125,12 +125,13 @@ class RowAdam(torch.optim.Optimizer):
     kez görülen satır, genel adım sayısından bağımsız olarak doğru ölçekle başlar.
     mode rms: momentsiz, satır başına tek ikinci moment (v (satır, 1)) | adam: m, v eleman eleman."""
 
-    def __init__(self, params, lr, betas=(0.9, 0.95), eps=1e-8, mode="rms", row_decay=0.0):
+    def __init__(self, params, lr, betas=(0.9, 0.95), eps=1e-8, mode="rms", row_decay=0.0, row_mult=None):
         assert mode in ("adam", "rms")
         assert not row_decay or mode == "rms", "row_decay yalnız rms modunda"
         super().__init__(params, dict(lr=lr, betas=betas, eps=eps))
         self.mode = mode
         self.row_decay = float(row_decay)              # n0 > 0: satırın kendi takvimi (rms)
+        self.row_mult = row_mult                       # (satır,) kelime başına lr çarpanı ya da None
         self.rows, self.grads = None, None
         self._lr = None                                    # lr cihazda kalıcı (her adım fill_: CPU -> GPU senkronu yok)
 
@@ -165,14 +166,20 @@ class RowAdam(torch.optim.Optimizer):
                     self._n0 = torch.tensor(self.row_decay, device=p.device)
                 st = self._state(p)
                 rr = self.rows if self.rows is not None else torch.arange(p.shape[0], device=p.device)
+                lr = self._lr
+                if self.row_mult is not None:              # kelime başına lr: (len(rr), 1)
+                    if self.row_mult.device != p.device:
+                        self.row_mult = self.row_mult.to(p.device)
+                    lr = self._lr * self.row_mult.index_select(0, rr).unsqueeze(1)
                 gr = (self.grads[i] if self.grads is not None else p.grad.index_select(0, rr)).float()
                 if self.mode == "rms" and self.row_decay:
-                    _row_update("rms_own", _row_rms_own_eager, p, st["v"], st["n"], rr, gr, self._lr, b2, g["eps"],
-                                self._n0)
+                    _row_update("rms_own", _row_rms_own_eager, p, st["v"], st["n"], rr, gr, lr, b2, g["eps"], self._n0)
                 elif self.mode == "rms":
-                    _row_update("rms", _row_rms_eager, p, st["v"], st["n"], rr, gr, self._lr, b2, g["eps"])
+                    _row_update("rms" if lr is self._lr else "rms_mult", _row_rms_eager, p, st["v"], st["n"], rr, gr, lr,
+                                b2, g["eps"])
                 else:
-                    _row_update("adam", _row_adam_eager, p, st["m"], st["v"], st["n"], rr, gr, self._lr, b1, b2, g["eps"])
+                    _row_update("adam" if lr is self._lr else "adam_mult", _row_adam_eager, p, st["m"], st["v"], st["n"],
+                                rr, gr, lr, b1, b2, g["eps"])
 
 
 class CombinedOptimizer:
@@ -221,6 +228,17 @@ def param_groups(model, use_muon):
     return muon, decay, no_decay
 
 
+def row_lr_mult(mcfg, tcfg):
+    """Kelime başına lr çarpanı (satır,): clamp(sqrt(ref / sayı), 1, max); satır 0 (ortak "diğer") 1.  None: kapalı."""
+    if not tcfg.private_lr_ref:
+        return None
+    import json
+    from rgn.paths import ROOT
+    counts = json.loads((ROOT / mcfg.private_vocab).read_text(encoding="utf-8"))["counts"]
+    c = torch.tensor([float("inf")] + list(counts), dtype=torch.float32).clamp_min(1.0)
+    return (tcfg.private_lr_ref / c).sqrt().clamp(1.0, tcfg.private_lr_max)
+
+
 def build_optimizer(model, tcfg):
     use_muon = tcfg.optimizer in ("muon", "normuon")
     muon, decay, no_decay = param_groups(model, use_muon)
@@ -234,7 +252,8 @@ def build_optimizer(model, tcfg):
     if private:                                  # kelimeye özel tablolar: yalnız o adımda geçen kelimelerin satırları
         plr = tcfg.private_lr or adam_lr
         opts.append(RowAdam([dict(params=private, base_lr=plr, own_schedule=bool(tcfg.private_row_decay))], lr=plr,
-                            betas=tuple(tcfg.betas), mode=tcfg.private_opt, row_decay=tcfg.private_row_decay))
+                            betas=tuple(tcfg.betas), mode=tcfg.private_opt, row_decay=tcfg.private_row_decay,
+                            row_mult=row_lr_mult(model.cfg, tcfg)))
     if muon:
         opts.append(Muon([dict(params=muon, base_lr=tcfg.lr)], lr=tcfg.lr, momentum=tcfg.momentum,
                          weight_decay=tcfg.weight_decay, normuon=tcfg.optimizer == "normuon"))

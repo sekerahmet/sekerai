@@ -111,6 +111,9 @@ class TrainConfig:
     private_lr: float = 0.0            # kelimeye özel tabloların lr'si; 0: adam_lr (ya da lr)
     private_row_decay: float = 0.0     # n0 > 0: satırın lr'si kendi sayacıyla küçülür, lr·sqrt(n0 / (n + n0)) (n: o satırın
                                        # güncelleme sayısı); genel takvimin inişi uygulanmaz (yalnız ısınma)
+    private_lr_ref: float = 0.0        # > 0: kelime başına lr çarpanı sqrt(ref / kelimenin veri sayısı), [1, private_lr_max]
+                                       # (sık kelime 1×, seyrek daha büyük; sayılar private_vocab dosyasından); takvim genel
+    private_lr_max: float = 4.0
     sample_tokens: int = 64            # bitişte örnek üretim uzunluğu (0: kapalı)
     probe_tokens: int = 48             # her değerlendirmede 2 istemle greedy devam (nitel kontrol; 0: kapalı)
     loss_checkpoint: bool = False      # kayıpta logit'leri geri geçişte yeniden hesapla (bellek az, LM head 4 geçiş yerine 3)
