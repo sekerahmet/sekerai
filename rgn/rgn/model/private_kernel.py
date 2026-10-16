@@ -7,8 +7,8 @@ Ara (T, 3d) tensör belleğe yazılmaz (eski yol: satırlar önce okunup T × 3d
 Geri (çıktı gradyanı δ):
     da = δ·w,  ds1 = da·s2·SiLU'(s1),  ds2 = da·SiLU(s1)
     dx = ds1·g + ds2·u                                   (token başına çekirdek)
-    dg_r = Σ_{t: loc=r} ds1_t x_t,  du_r = Σ ds2_t x_t,  dw_r = Σ a_t δ_t   (satır başına çekirdek: token'lar satıra göre
-                                                         sıralı, her satır tek programda — sık satırlarda atomik sıkışma yok)
+    dg_r = Σ_{t: loc=r} ds1_t x_t,  du_r = Σ ds2_t x_t,  dw_r = Σ a_t δ_t   (token'lar satıra göre sıralı; satır en çok
+                                                         CH token'lık parçalara bölünür, parça toplamı atomik — senkronsuz)
 CPU'da (testler, değerlendirme) düz PyTorch karşılığı: reference().
 """
 import torch
@@ -24,6 +24,7 @@ def reference(x, loc, sub):
 
 
 _K = {}
+CH = 32                     # satır gradyanı: parça başına en çok token (sık satır paralel parçalara bölünür)
 
 
 def _kernels():
@@ -67,24 +68,28 @@ def _kernels():
         tl.store(C + 3 * t + 2, silu * s2)
 
     @triton.jit
-    def bwd_row(DO, X, C, ORDER, SEG, DSUB, sdo, sx, sds, D: tl.constexpr):
-        r = tl.program_id(0)
-        lo = tl.load(SEG + r)
-        hi = tl.load(SEG + r + 1)
-        o = tl.arange(0, D)
-        ag = tl.zeros([D], dtype=tl.float32)
-        au = tl.zeros([D], dtype=tl.float32)
-        aw = tl.zeros([D], dtype=tl.float32)
-        for i in range(lo, hi):
-            t = tl.load(ORDER + i).to(tl.int64)
-            x = tl.load(X + t * sx + o).to(tl.float32)
-            ag += tl.load(C + 3 * t) * x
-            au += tl.load(C + 3 * t + 1) * x
-            aw += tl.load(C + 3 * t + 2) * tl.load(DO + t * sdo + o).to(tl.float32)
-        b = DSUB + r.to(tl.int64) * sds
-        tl.store(b + o, ag.to(DSUB.dtype.element_ty))
-        tl.store(b + D + o, au.to(DSUB.dtype.element_ty))
-        tl.store(b + 2 * D + o, aw.to(DSUB.dtype.element_ty))
+    def bwd_row(DO, X, C, ORDER, CROW, CLO, CHI, DSUB, sdo, sx, sds, D: tl.constexpr):
+        """Parça başına (bir satırın en çok CH ardışık token'ı): toplam fp32 DSUB'a atomik eklenir.  Sık satır birçok
+        paralel parçaya bölünür (tek programda uzun döngü yok)."""
+        c = tl.program_id(0)
+        r = tl.load(CROW + c)
+        if r >= 0:
+            lo = tl.load(CLO + c)
+            hi = tl.load(CHI + c)
+            o = tl.arange(0, D)
+            ag = tl.zeros([D], dtype=tl.float32)
+            au = tl.zeros([D], dtype=tl.float32)
+            aw = tl.zeros([D], dtype=tl.float32)
+            for i in range(lo, hi):
+                t = tl.load(ORDER + i).to(tl.int64)
+                x = tl.load(X + t * sx + o).to(tl.float32)
+                ag += tl.load(C + 3 * t) * x
+                au += tl.load(C + 3 * t + 1) * x
+                aw += tl.load(C + 3 * t + 2) * tl.load(DO + t * sdo + o).to(tl.float32)
+            b = DSUB + r.to(tl.int64) * sds
+            tl.atomic_add(b + o, ag)
+            tl.atomic_add(b + D + o, au)
+            tl.atomic_add(b + 2 * D + o, aw)
 
     _K.update(fwd=fwd, bwd_tok=bwd_tok, bwd_row=bwd_row)
     return _K
@@ -116,11 +121,24 @@ def private_bwd(do: torch.Tensor, x: torch.Tensor, loc: torch.Tensor, sub: torch
     k["bwd_tok"][(T,)](do, x, loc, sub, s, dx, c, do.stride(0), x.stride(0), sub.stride(0), dx.stride(0), D=D,
                        num_warps=4)
     order = torch.argsort(loc, stable=True)
-    seg = torch.zeros(R + 1, device=x.device, dtype=torch.int64)
-    seg[1:] = torch.cumsum(torch.bincount(loc, minlength=R), 0)
-    dsub = torch.empty_like(sub)
-    k["bwd_row"][(R,)](do, x, c, order, seg, dsub, do.stride(0), x.stride(0), dsub.stride(0), D=D, num_warps=4)
-    return dx, dsub
+    # satır sınırları senkronsuz (bincount CUDA'da eşitleme yapar): sıralı satır numaralarında arama
+    seg = torch.searchsorted(loc[order], torch.arange(R + 1, device=x.device))
+    cnt = seg[1:] - seg[:-1]
+    nch = (cnt + CH - 1) // CH                                   # satır başına parça
+    cum = torch.cumsum(nch, 0)
+    cmax = R + T // CH + 1                                       # parça sayısının üst sınırı (senkronsuz ızgara)
+    cid = torch.arange(cmax, device=x.device)
+    crow = torch.searchsorted(cum, cid, right=True)
+    ok = crow < R
+    crow_c = crow.clamp_max(R - 1)
+    first = cum[crow_c] - nch[crow_c]
+    clo = seg[crow_c] + (cid - first) * CH
+    chi = torch.minimum(clo + CH, seg[crow_c + 1])
+    crow = torch.where(ok, crow, torch.full_like(crow, -1))
+    dsub = torch.zeros(sub.shape, device=x.device, dtype=torch.float32)
+    k["bwd_row"][(cmax,)](do, x, c, order, crow, clo, chi, dsub, do.stride(0), x.stride(0), dsub.stride(0), D=D,
+                          num_warps=4)
+    return dx, dsub.to(sub.dtype)
 
 
 @private_bwd.register_fake
