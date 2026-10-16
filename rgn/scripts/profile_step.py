@@ -51,24 +51,23 @@ def main():
         sub = priv = None
         if model.priv_map is not None:                       # trainer ile aynı yol
             uniq = torch.unique(torch.cat([model.priv_map[x].flatten() for x, _ in mbs]))
-            sub = torch.cat([b.private.detach().index_select(0, uniq) for b in model.private_blocks()], 1)
-            sub = sub.to(torch.bfloat16).requires_grad_()
+            sub = [b.private.detach().index_select(0, uniq).to(torch.bfloat16).requires_grad_()
+                   for b in model.private_blocks()]
         if timed:
             t = tick("veri + satır kopyası", t)
         for x, y in mbs:
             if sub is not None:
-                priv = torch.nn.functional.embedding(torch.searchsorted(uniq, model.priv_map[x]), sub)
+                priv = (torch.searchsorted(uniq, model.priv_map[x]), sub)
             with ctx:
                 loss = (fwd(x, y, None, priv) if priv is not None else fwd(x, y)) / accum
             loss.backward()
         if timed:
             t = tick("ileri + geri", t)
-        torch.nn.utils.clip_grad_norm_(list(model.parameters()) + ([sub] if sub is not None else []), tc.grad_clip)
+        torch.nn.utils.clip_grad_norm_(list(model.parameters()) + (sub or []), tc.grad_clip)
         if timed:
             t = tick("kırpma", t)
         if opt.row_adam is not None:
-            k = sub.shape[1] // len(model.private_blocks())
-            opt.row_adam.set_rows(uniq, [sub.grad[:, i * k:(i + 1) * k] for i in range(len(model.private_blocks()))])
+            opt.row_adam.set_rows(uniq, [s.grad for s in sub])
         opt.step()
         opt.zero_grad(set_to_none=True)
         if timed:

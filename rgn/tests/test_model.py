@@ -347,14 +347,12 @@ def test_private_row_copy_matches_full():
         l_full = m(idx, idx)
         l_full.backward()
         uniq = torch.unique(m.priv_map[idx])
-        sub = torch.cat([b.private.detach().index_select(0, uniq) for b in m.blocks], 1).requires_grad_()
-        W = torch.nn.functional.embedding(torch.searchsorted(uniq, m.priv_map[idx]), sub)    # trainer'ın okuması
-        l_sub = m(idx, idx, priv=W)
+        sub = [b.private.detach().index_select(0, uniq).requires_grad_() for b in m.private_blocks()]
+        l_sub = m(idx, idx, priv=(torch.searchsorted(uniq, m.priv_map[idx]), sub))      # trainer'ın yolu
         l_sub.backward()
         assert torch.allclose(l_full, l_sub, atol=1e-6)
-        k = sub.shape[1] // len(m.blocks)
-        for i, b in enumerate(m.blocks):
-            assert torch.allclose(b.private.grad.index_select(0, uniq), sub.grad[:, i * k:(i + 1) * k], atol=1e-6)
+        for b, s in zip(m.private_blocks(), sub):
+            assert torch.allclose(b.private.grad.index_select(0, uniq), s.grad, atol=1e-6)
     finally:
         Path(f.name).unlink()
 
@@ -375,12 +373,12 @@ def test_private_g_rms():
         assert [b.kind for b in m.private_blocks()] == ["G"] and len(m.private_blocks()) == 1
         idx = torch.randint(0, 97, (2, 12))
         uniq = torch.unique(m.priv_map[idx])
-        sub = torch.cat([b.private.detach().index_select(0, uniq) for b in m.private_blocks()], 1).requires_grad_()
-        m(idx, idx, priv=torch.nn.functional.embedding(torch.searchsorted(uniq, m.priv_map[idx]), sub)).backward()
+        sub = [b.private.detach().index_select(0, uniq).requires_grad_() for b in m.private_blocks()]
+        m(idx, idx, priv=(torch.searchsorted(uniq, m.priv_map[idx]), sub)).backward()
         opt = build_optimizer(m, TrainConfig(private_opt="rms"))
         p = m.private_blocks()[0].private
         before = p.detach().clone()
-        opt.row_adam.set_rows(uniq, [sub.grad])
+        opt.row_adam.set_rows(uniq, [s.grad for s in sub])
         opt.row_adam.step()
         ch = (p.detach() - before).abs().sum(1)
         rest = torch.ones(len(ch), dtype=torch.bool)
@@ -388,3 +386,27 @@ def test_private_g_rms():
         assert float(ch[rest].sum()) == 0 and opt.row_adam.state[p]["v"].shape == (p.shape[0], 1)
     finally:
         Path(f.name).unlink()
+
+
+def test_private_kernel_cuda():
+    """Birleşik Triton çekirdeği (CUDA): ileri ve geri, düz PyTorch karşılığıyla aynı (sık satırlar dahil)."""
+    from _util import require_cuda
+    require_cuda()
+    from rgn.model.private_kernel import private_fwd, reference
+    torch.manual_seed(0)
+    T, D, R = 4096, 512, 300
+    loc = torch.randint(0, R, (T,), device="cuda")
+    loc[:1500] = 7                                                     # çok sık bir satır ("the" gibi)
+    x = torch.randn(T, D, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    sub = (torch.randn(R, 3 * D, device="cuda") * 0.05).to(torch.bfloat16).requires_grad_()
+    out = private_fwd(x, loc, sub)[0]
+    g = torch.randn_like(out)
+    (out.float() * g.float()).sum().backward()
+    dx, ds = x.grad.clone(), sub.grad.clone()
+    x.grad = sub.grad = None
+    xr, sr = x.detach().float().requires_grad_(), sub.detach().float().requires_grad_()
+    ref = reference(xr, loc, sr)
+    (ref * g.float()).sum().backward()
+    rel = lambda a, b: float((a.float() - b).norm() / b.norm().clamp_min(1e-12))  # noqa: E731
+    assert rel(out, ref.detach()) < 2e-2 and rel(dx, xr.grad) < 2e-2 and rel(ds, sr.grad) < 2e-2, (
+        rel(out, ref.detach()), rel(dx, xr.grad), rel(ds, sr.grad))

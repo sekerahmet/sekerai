@@ -213,13 +213,11 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
         priv = sub = None
         if model.priv_map is not None:                      # kelimeye özel: yalnız bu adımda geçen satırların kopyası
             uniq = torch.unique(torch.cat([model.priv_map[x].flatten() for x, _, _ in mbs]))
-            sub = torch.cat([b.private.detach().index_select(0, uniq) for b in model.private_blocks()], 1)
-            if device.type == "cuda":                       # kopya baştan bf16: mikro adım başına dönüşüm / geri dönüşüm yok
-                sub = sub.to(torch.bfloat16)
-            sub.requires_grad_()
+            dt = torch.bfloat16 if device.type == "cuda" else torch.float32   # kopya bf16 (çekirdek fp32 biriktirir)
+            sub = [b.private.detach().index_select(0, uniq).to(dt).requires_grad_() for b in model.private_blocks()]
         for x, y, masks in mbs:
-            if sub is not None:                             # satırlar derleme dışında, bütün katmanlar için bir kez
-                priv = F.embedding(torch.searchsorted(uniq, model.priv_map[x]), sub)
+            if sub is not None:                             # birleşik çekirdek: satır sırası + katman başına kopya
+                priv = (torch.searchsorted(uniq, model.priv_map[x]), sub)
             with ctx:
                 res = fwd(x, y, masks, priv) if (masks is not None or priv is not None) else fwd(x, y)
             if isinstance(res, tuple):                        # gözlemci: kaydedilen kayıp yalnız ana kayıp
@@ -231,11 +229,10 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
                 loss = res / accum
                 loss.backward()
                 loss_sum += loss.detach()
-        clip = list(model.parameters()) + ([sub] if sub is not None else [])
+        clip = list(model.parameters()) + (sub or [])
         gn = torch.nn.utils.clip_grad_norm_(clip, tc.grad_clip) if tc.grad_clip else torch.tensor(0.0)
         if opt.row_adam is not None:
-            k = sub.shape[1] // len(model.private_blocks())
-            opt.row_adam.set_rows(uniq, [sub.grad[:, i * k:(i + 1) * k] for i in range(len(model.private_blocks()))])
+            opt.row_adam.set_rows(uniq, [s.grad for s in sub])
         opt.step()
         opt.zero_grad(set_to_none=True)
         step += 1

@@ -86,16 +86,22 @@ class Block(nn.Module):
             taus = cfg.locality_tau_local if kind == "Y" else cfg.locality_tau_global
             self.loc_proj = nn.Linear(len(taus) * cfg.n_heads, cfg.ff_dim(), bias=False)
 
-    def _private(self, xn, rows=None, pw=None):
+    def _private(self, xn, rows=None, psub=None):
         """Kelimeye özel nöronlar: xn (B, N, d) -> (B, N, d).  a = SiLU(g·x)(u·x), çıktı Σ a·d.  Satırlar: rows (B, N)
-        ile tam tablodan, ya da eğitimde pw (B, N, 3pd): trainer'ın derleme dışında bir kez okuduğu satırlar."""
+        ile tam tablodan, ya da eğitimde psub = (satır sırası (B, N), o adımda geçen satırların kopyası (R, 3d)):
+        birleşik çekirdek (rgn/model/private_kernel.py; ara (T, 3d) tensör yok)."""
         B, N, D = xn.shape
+        if psub is not None:
+            from rgn.model.private_kernel import private_neuron
+            loc, sub = psub
+            return private_neuron(xn.reshape(B * N, D), loc.reshape(-1), sub).view(B, N, D)
+        pw = None
         w = (F.embedding(rows, self.private) if pw is None else pw).view(B, N, -1, 3, D).to(xn.dtype)  # (B, N, p, 3, d)
         proj = (w[..., :2, :] * xn[:, :, None, None, :]).sum(-1)                        # (B, N, p, 2)
         a = F.silu(proj[..., 0]) * proj[..., 1]
         return (a.unsqueeze(-1) * w[..., 2, :]).sum(2)
 
-    def forward(self, x, rope=None, masks=None, tokens=None, rows=None, pw=None):
+    def forward(self, x, rope=None, masks=None, tokens=None, rows=None, psub=None):
         if self.attn is None:
             nm = None
             if self.vocab_neurons is not None:                   # token'ın kendi nöronları (sözlüğe bölüştürülmüş)
@@ -120,7 +126,7 @@ class Block(nn.Module):
         xn = self.norm2(s)
         out = s + (self.mlp(xn, extra) if nm is None else self.mlp(xn, extra, neuron_mask=nm))
         if self.private is not None:                    # kelimeye özel nöronlar, ortak MLP'ye paralel
-            out = out + self._private(xn, rows, pw)
+            out = out + self._private(xn, rows, psub)
         return out                                      # H_i = S_i + MLP(RMSNorm(S))_i [+ özel_i]
 
 
@@ -220,11 +226,9 @@ class RGNModel(nn.Module):
         rope = self.rope(idx.shape[1])
         ol = None
         for i, block in enumerate(self.blocks):
-            if priv is not None:                         # eğitim: özel katmanların satırları (B, N, L'·3pd), trainer okur
-                pb = self.private_blocks()
-                k = priv.shape[-1] // len(pb)
-                j = next((n for n, b in enumerate(pb) if b is block), None)
-                x = block(x, rope, masks, idx, None, None if j is None else priv[..., j * k:(j + 1) * k])
+            if priv is not None:                         # eğitim: (satır sırası (B, N), özel blok başına satır kopyası)
+                j = next((n for n, b in enumerate(self.private_blocks()) if b is block), None)
+                x = block(x, rope, masks, idx, None, None if j is None else (priv[0], priv[1][j]))
             else:
                 x = block(x, rope, masks, idx, None if self.priv_map is None else self.priv_map[idx])
             if self.obs_head is not None and i == self.cfg.observer_layer - 1:
