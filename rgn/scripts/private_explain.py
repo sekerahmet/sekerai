@@ -12,6 +12,10 @@ o katmanın ittiği token'lar.
 
     python scripts/private_explain.py --run fw_s000_d512_ozel_3epok
     python scripts/private_explain.py --run fw_s000_d512_ozel_3epok --text "The capital of Utah is Salt Lake City."
+
+Bağlam kıyası (--focus kelime=hedef, birden çok --text): kelimenin her geçtiği yerde katman başına a ve hedef token'a
+DLA; kapı bağlama bakıyorsa a bağlama göre değişir, bakmıyorsa (düz bigram) her bağlamda aynı itiş.
+    python scripts/private_explain.py --run fw_s000_d512_ozel_3epok --focus "Brigham= Young"         --text "It was founded by Brigham Young in 1847." "She was treated at Brigham and Women's Hospital."
 """
 import argparse
 import sys
@@ -56,11 +60,57 @@ def _act(m, l, xn, rows):
     return F.silu((w[..., 0, :] * xn).sum(-1)) * (w[..., 1, :] * xn).sum(-1)
 
 
+def _acts(m, idx, parts):
+    """(L, N): her katmanda kelimenin tek nöronunun etkinliği; girdi xn = norm2(x + attn), bileşenlerden kurulur."""
+    rows = m.priv_map[idx]
+    cur, acts = m.embed(idx), []
+    for l, b in enumerate(m.blocks):
+        s = cur + parts[l]["attn"]
+        acts.append(_act(m, l, b.norm2(s), rows)[0])
+        cur = s + (parts[l]["mlp"] if parts[l]["mlp"] is not None else 0) + parts[l]["private"]
+    return torch.stack(acts)
+
+
+def _dla(m, x, parts):
+    """(L, N, V): katman başına özel nöron çıktısının logit'lere doğrudan katkısı (son norm ölçeğiyle)."""
+    scale = m.norm_f.weight.float() / x.pow(2).mean(-1, keepdim=True).add(m.norm_f.eps).sqrt()
+    priv = torch.stack([p["private"][0] for p in parts])
+    return torch.einsum("lnd,nd,vd->lnv", priv, scale, m.lm_head.weight.float())
+
+
+def focus(m, enc, texts, pairs):
+    L = len(m.blocks)
+    print("bağlam kıyası: a = kelimenin o katmandaki nöronunun etkinliği; DLA = hedef token'a doğrudan itiş (logit)")
+    for word, target in pairs:
+        tid = enc.encode(target)
+        assert len(tid) == 1, "hedef tek token olmalı: %r" % target
+        tid = tid[0]
+        print("\n== %r -> hedef %r" % (word, target))
+        print("%-46s %7s %9s %8s  %s  %s" % ("bağlam", "p(hedef)", "özelsiz", "DLA top.", " ".join("%6s" % ("a%d" % l)
+                                                                                     for l in range(L)), "ittikleri"))
+        for text in texts:
+            idx = torch.tensor([enc.encode(text)])
+            tok = [enc.decode([t]) for t in idx[0].tolist()]
+            pos = [t for t, w in enumerate(tok) if w.strip() == word.strip()]
+            if not pos:
+                continue
+            x, parts, logits = _forward(m, idx)
+            off = _forward(m, idx, off=range(L))[2]
+            dla, acts = _dla(m, x, parts), _acts(m, idx, parts)
+            for t in pos:
+                p, p0 = (logits[t].softmax(-1)[tid], off[t].softmax(-1)[tid])
+                top = [enc.decode([int(v)]) for v in dla[:, t].sum(0).topk(3).indices]
+                ctx = ("…" + "".join(tok[max(0, t - 6):t + 2]))[-46:]
+                print("%-46s %7.3f %9.3f %+8.2f  %s  %s" % (ctx, p, p0, dla[:, t, tid].sum(), " ".join(
+                    "%+6.1f" % acts[l, t] for l in range(L)), " ".join(map(repr, top))))
+
+
 @torch.no_grad()
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True)
-    ap.add_argument("--text", default=TEXT)
+    ap.add_argument("--text", nargs="+", default=[TEXT])
+    ap.add_argument("--focus", nargs="*", default=[], help='"kelime=hedef" (hedef boşlukla: "Brigham= Young")')
     ap.add_argument("--detail", type=int, default=4, help="katman katman dökülecek konum sayısı")
     a = ap.parse_args()
     import tiktoken
@@ -68,16 +118,15 @@ def main():
     m, step = load_run(a.run, "cpu", write_weights=True)
     m.float()
     assert m.cfg.private_neurons, "özel nöronsuz model"
+    if a.focus:
+        return focus(m, enc, a.text, [f.split("=", 1) for f in a.focus])
     L = len(m.blocks)
-    idx = torch.tensor([enc.encode(a.text)])
+    idx = torch.tensor([enc.encode(a.text[0])])
     N = idx.shape[1]
     tok = [enc.decode([t]) for t in idx[0].tolist()]
     x, parts, logits = _forward(m, idx)
-    gamma = m.norm_f.weight.float()
-    scale = gamma / x.pow(2).mean(-1, keepdim=True).add(m.norm_f.eps).sqrt()        # (N, d) son norm, doğrusal yaklaşım
-    E = m.lm_head.weight.float()
     priv = torch.stack([p["private"][0] for p in parts])                            # (L, N, d)
-    dla = torch.einsum("lnd,nd,vd->lnv", priv, scale, E)                             # katman, konum, token
+    dla = _dla(m, x, parts)                                                          # katman, konum, token
     nll = _nll(logits, idx)
     nll_off = _nll(_forward(m, idx, off=range(L))[2], idx)
     delta = nll_off - nll
@@ -103,14 +152,7 @@ def main():
         d_l = (_nll(_forward(m, idx, off=[l])[2], idx) - nll).mean()
         print("%-7d %13.2f %+14.3f %+16.2f" % (l, ratio, d_l, dla_t[l].mean()))
 
-    rows = m.priv_map[idx]
-    cur = m.embed(idx)                          # her katmanın özel nöron girdisi xn = norm2(x + attn), bileşenlerden
-    acts = []
-    for l, b in enumerate(m.blocks):
-        s = cur + parts[l]["attn"]
-        acts.append(_act(m, l, b.norm2(s), rows)[0])
-        cur = s + (parts[l]["mlp"] if parts[l]["mlp"] is not None else 0) + parts[l]["private"]
-    acts = torch.stack(acts)                                                         # (L, N)
+    acts = _acts(m, idx, parts)                                                      # (L, N)
     print("\nen çok yardım edilen %d konum, katman katman (a: kelimenin o katmandaki tek nöronunun etkinliği)" % a.detail)
     for t in delta.topk(min(a.detail, N - 1)).indices.tolist():
         print("\n  %r -> %r   Δ %+.2f" % (tok[t], tok[t + 1], delta[t]))
