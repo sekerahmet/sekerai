@@ -10,3 +10,4 @@ cache/
 
 # tasarim dokumani ve arsiv YEREL kalir (depo PUBLIC; sekerai kural: belge/ yerelde)
 docs/
+routes/
