@@ -282,6 +282,27 @@ def test_kv_cache_matches_full():
             assert torch.equal(m.generate(idx, 9), m.generate(idx, 9, cache=False)), kw
 
 
+def test_prefill_padding():
+    """Dolgulu prefill (istem FLEX_BLOCK'un katına sağdan dolgulanır) = dolgusuz tam ileri geçiş: son logit ve sonraki
+    adımlar; istem boyu blok katı olan, olmayan, pencereden kısa / uzun; GQA ve özel nöron."""
+    from rgn.model.decode import StaticCache
+    with private_vocab(range(1, 60)) as rel:
+        for kw in (dict(n_heads=4, n_kv_heads=2), dict(private_neurons=1, private_vocab=rel)):
+            torch.manual_seed(0)
+            m = RGNModel(tiny(max_len=256, **kw)).eval()
+            for T in (5, 127, 128, 130):
+                idx = torch.randint(0, 97, (2, T))
+                cache = StaticCache(m, 2, positions=4)
+                logits, seq = cache.prefill(idx), idx
+                for _ in range(3):
+                    with torch.no_grad():
+                        ref = m(seq)[:, -1].float()
+                    assert torch.allclose(logits, ref, atol=1e-4), (kw, T, (logits - ref).abs().max().item())
+                    nxt = logits.argmax(-1)
+                    seq = torch.cat([seq, nxt[:, None]], 1)
+                    logits = cache.step(nxt).clone()
+
+
 def test_kv_cache_cuda():
     """CUDA'da önbellekli üretim (torch.compile + CUDA graph, tampon havuzu) önbelleksizle aynı greedy token'ları verir
     (fp32; özel nöronlu YYG ve GQA); aynı tamponlarla ikinci çağrı da aynı."""

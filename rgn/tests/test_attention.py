@@ -49,3 +49,16 @@ def test_window_flex_matches_mask_cuda():
             t.grad = None
     for a, b in zip(*outs):
         assert torch.allclose(a, b, atol=2e-3, rtol=2e-3), (a - b).abs().max().item()
+
+
+def test_gqa_sdpa_matches_enable_gqa():
+    """gqa_sdpa (maskeli GQA, hızlı çekirdek yolu) = SDPA enable_gqa: Tq > 1 (yerel pencere, hikâye maskesi) ve Tq 1."""
+    from rgn.model.attention import gqa_sdpa
+    torch.manual_seed(0)
+    F = torch.nn.functional
+    for H, Hkv, Tq, S in ((8, 2, 12, 12), (8, 8, 12, 12), (8, 4, 1, 20), (6, 1, 1, 9)):
+        q, k, v = torch.randn(2, H, Tq, 16), torch.randn(2, Hkv, S, 16), torch.randn(2, Hkv, S, 16)
+        rel = torch.arange(Tq)[:, None] + (S - Tq) - torch.arange(S)[None]
+        for mask in ((rel >= 0) & (rel < 5), ((rel >= 0) & (rel < 5))[None, None].expand(2, 1, Tq, S)):
+            ref = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, enable_gqa=Hkv != H, scale=0.3)
+            assert torch.allclose(gqa_sdpa(q, k, v, mask, 0.3), ref, atol=1e-5), (H, Hkv, Tq, mask.shape)

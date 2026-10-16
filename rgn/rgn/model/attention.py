@@ -11,7 +11,23 @@ from rgn.model.norm import RMSNorm
 from rgn.model.position import apply_rope
 
 _FLEX = {}
-FLEX_BLOCK = 128           # flex yalnız N bu sayının katıyken (eğitim / değerlendirme); diğer uzunluklar (üretim) SDPA
+FLEX_BLOCK = 128           # flex yalnız N bu sayının katıyken (eğitim / değerlendirme; üretimde istem buna dolgulanır)
+
+
+def gqa_sdpa(q, k, v, mask=None, scale=None):
+    """Maskeli SDPA; GQA'da (k / v daha az head) hızlı çekirdekte kalır (v2 belge 74: enable_gqa + maske math
+    çekirdeğine düşüyordu: fp32 B × H × T × S, 8k istemde 323 ms / 78 GB → 16 ms / 0,5 GB).  Eşit head: doğrudan SDPA.
+    Tq 1: grup Tq'ya katlanır (K / V bir kez okunur); Tq > 1: k / v head boyunca geçici genişletilir."""
+    H, Hkv = q.shape[1], k.shape[1]
+    if H == Hkv:
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=mask, scale=scale)
+    B, _, Tq, dh = q.shape
+    if Tq == 1 and (mask is None or mask.shape[-2] == 1 and (mask.dim() < 3 or mask.shape[-3] == 1)):
+        return F.scaled_dot_product_attention(q.reshape(B, Hkv, H // Hkv, dh), k, v, attn_mask=mask,
+                                              scale=scale).reshape(B, H, 1, dh)
+    g = H // Hkv
+    return F.scaled_dot_product_attention(q, k.repeat_interleave(g, 1), v.repeat_interleave(g, 1), attn_mask=mask,
+                                          scale=scale)
 
 
 def _flex_attention():
@@ -90,7 +106,7 @@ class Attention(nn.Module):
         s, gqa = self.dh ** -0.5, self.Hkv != self.H
         if mask is not None:                                           # hikâye dizilimi
             if isinstance(mask, torch.Tensor):
-                return F.scaled_dot_product_attention(q, k, v, attn_mask=mask, enable_gqa=gqa, scale=s)
+                return gqa_sdpa(q, k, v, mask, s)
             return _flex_attention()(q, k, v, block_mask=mask, scale=s, enable_gqa=gqa)
         if not self.window:
             return F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=gqa, scale=s)
@@ -98,7 +114,7 @@ class Attention(nn.Module):
         if q.is_cuda and n >= FLEX_BLOCK and n % FLEX_BLOCK == 0:     # blok atlamalı yerel pencere
             return _flex_attention()(q, k, v, block_mask=_window_block_mask(n, self.window, q.device), scale=s,
                                      enable_gqa=gqa)
-        return F.scaled_dot_product_attention(q, k, v, attn_mask=self._mask(n, q.device), enable_gqa=gqa, scale=s)
+        return gqa_sdpa(q, k, v, self._mask(n, q.device), s)
 
     def gate(self, x):
         """x (B, N, d) -> kapı (B, H, N, 1 | dh) ya da None."""

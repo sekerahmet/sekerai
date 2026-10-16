@@ -37,6 +37,24 @@ def gen_rate(m, batch, prompt, new, dev, dtype, cache=True):
 
 
 @torch.no_grad()
+def gen_split(m, batch, prompt, new, dev, dtype):
+    """Önbellekli yol ayrık: (prefill ms, saf üretim ms / adım).  generate(1) = prefill (+ argmax), generate(new) =
+    prefill + (new − 1) adım; ikisi de ısınmadan sonra ölçülür."""
+    idx = torch.randint(0, 50000, (batch, prompt), device=dev)
+
+    def timed(n):
+        with torch.autocast(dev.type, dtype=dtype, enabled=dev.type == "cuda"):
+            m.generate(idx, n)
+            _sync()
+            t = time.perf_counter()
+            m.generate(idx, n)
+            _sync()
+        return time.perf_counter() - t
+    t1, tn = timed(1), timed(new)
+    return 1000 * t1, 1000 * (tn - t1) / (new - 1)
+
+
+@torch.no_grad()
 def forward_parts(m, batch, ctx, dev, dtype, reps=5):
     """Tek ileri geçişin parçaları (bağlam ctx): kanca ile katman alt modülleri ölçülür."""
     idx = torch.randint(0, 50000, (batch, ctx), device=dev)
@@ -80,14 +98,15 @@ def main():
             a_, b_ = m.generate(idx, 48), m.generate(idx, 48, cache=False)
             print("doğruluk (fp32 greedy, 4 × 48 token): önbellekli = önbelleksiz %%%.1f" % (
                 100 * (a_[:, 200:] == b_[:, 200:]).float().mean().item()))
-        print("%-34s %12s %14s" % ("durum", "token/s", "ms / yeni token"))
+        print("%-34s %12s %14s %11s %13s" % ("durum", "token/s", "ms / yeni token", "prefill ms", "saf ms/adım"))
         for cache in (True, False):
-            for batch, prompt in ((1, 32), (1, 512), (1, 1024), (16, 512), (64, 512)):
+            for batch, prompt in ((1, 32), (1, 512), (1, 700), (1, 1024), (16, 512), (16, 700), (64, 512)):
                 if not cache and batch == 64:
                     continue
                 tps, ms = gen_rate(m, batch, prompt, a.new, dev, dtype, cache)
-                print("%-34s %12.0f %14.2f" % ("%s, batch %d, bağlam %d" % ("önbellekli" if cache else "önbelleksiz",
-                                                                            batch, prompt), tps, ms))
+                split = "%11.1f %13.2f" % gen_split(m, batch, prompt, a.new, dev, dtype) if cache else ""
+                print("%-34s %12.0f %14.2f %s" % ("%s, batch %d, bağlam %d" % ("önbellekli" if cache else "önbelleksiz",
+                                                                               batch, prompt), tps, ms, split))
         for batch, ctx in ((1, 1024),):
             total, parts = forward_parts(m, batch, ctx, dev, dtype)
             print("tek ileri geçiş (batch %d, bağlam %d): %.2f ms" % (batch, ctx, 1000 * total))

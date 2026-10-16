@@ -6,11 +6,14 @@ CUDA'da ilk adımda torch.compile + CUDA graph'a alınır, sonra her adım tampo
 StaticCache ile aynı yol: belge 84).  Tampon boyu kademeli (BUCKET × {1, 1,5} × 2^k): her boy bir kez derlenir.
 
     cache = StaticCache(model, batch=B, positions=yeni_token_sayısı)
-    logits = cache.prefill(idx)            # idx (B, T), satırlar eşit boy
+    logits = cache.prefill(idx)            # idx (B, T), satırlar eşit boy; yerel katman varsa istem FLEX_BLOCK'un
+                                           # katına sağdan dolgulanır (causal: dolgu öncekileri etkilemez) → flex yolu
     logits = cache.step(next_token)        # (B,) -> (B, V)
 """
 import torch
 import torch.nn.functional as F
+
+from rgn.model.attention import FLEX_BLOCK
 
 _COMPILED = {}
 _POOL = {}                  # (model, batch, tampon boyu, dtype) -> StaticCache: tamponlar ve CUDA graph tekrar kullanılır
@@ -74,10 +77,13 @@ class StaticCache:
         assert need <= m.cfg.max_len, "istem + yeni %d > max_len %d (RoPE tablosu)" % (need, m.cfg.max_len)
         self.limit = min(m.cfg.max_len, next(t for k in range(40) for t in (BUCKET << k, (3 * BUCKET // 2) << k)
                                              if t >= need))
-        x = m.embed(idx)
+        Tx = -(-T // FLEX_BLOCK) * FLEX_BLOCK if W else T                      # yerel katman her boyda blok maskeli
+        Tx = Tx if Tx <= m.cfg.max_len else T                                  # flex'le (yoksa yoğun T × T maske)
+        xi = F.pad(idx, (0, Tx - T)) if Tx > T else idx
+        x = m.embed(xi)
         ple = m.ple_context(x)
-        rope = m.rope(T)
-        rows = m.priv_map[idx] if m.priv_map is not None else None
+        rope = m.rope(Tx)
+        rows = m.priv_map[xi] if m.priv_map is not None else None
         pos = torch.arange(T, device=self.dev)
         self.K, self.V = [], []
         for l, b in enumerate(m.blocks):
@@ -85,7 +91,7 @@ class StaticCache:
             q, k, v = b.attn.project(xa, rope)
             vv = b.value_vec(xa, rows)
             if vv is not None:
-                v = v + vv.view(B, T, b.attn.Hkv, b.attn.dh).transpose(1, 2).to(v.dtype)
+                v = v + vv.view(B, Tx, b.attn.Hkv, b.attn.dh).transpose(1, 2).to(v.dtype)
             S = W if b.kind == "Y" else self.limit
             kb = k.new_zeros(B, b.attn.Hkv, S, b.attn.dh, dtype=self.dtype)
             vb = torch.zeros_like(kb)
@@ -100,7 +106,7 @@ class StaticCache:
         if W:
             keep = pos[-W:]
             slot_pos[keep % W] = keep
-        logits = m.lm_head(m.norm_f(x[:, -1])).float()
+        logits = m.lm_head(m.norm_f(x[:, T - 1])).float()
         new = dict(K=self.K, V=self.V, slot_pos=slot_pos, n=torch.tensor([T], device=self.dev),
                    w=torch.zeros(B, dtype=torch.long, device=self.dev), out=torch.zeros_like(logits))
         self.K, self.V = getattr(self, "_K", None), getattr(self, "_V", None)
