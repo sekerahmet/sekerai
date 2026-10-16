@@ -3,8 +3,9 @@
     python scripts/loop_test.py --runs ss_d512_tf_yg_epok ss_d512_tf_yg_ozel
     python scripts/loop_test.py --runs a b --stories 256 --prompt 32 --new 384
 
-İstem: SS doğrulama hikâyelerinin ilk --prompt token'ı (hikâyeler eşit aralıkla seçilir, her model aynı istemleri görür).
-Üretim: greedy, --new token, KV önbelleksiz toplu üretim; ilk EOS'ta (hikâye bitti) o satır durur.
+İstem: doğrulama belgelerinin (SS hikâyeleri ya da --dataset fineweb_s000 belgeleri) ilk --prompt token'ı (eşit aralıkla
+seçilir, her model aynı istemleri görür).
+Üretim: greedy, --new token, KV önbellekli toplu üretim (model.generate); ilk EOS'tan sonrası sayılmaz.
 Ölçütler (istemden sonraki metin, EOS'a kadar):
     bitirdi      hikâyeyi EOS ile kendisi bitiren üretim oranı (döngüdeki model bitiremez)
     cümle tekr.  en az bir cümleyi birebir ikinci kez söyleyen üretim oranı
@@ -36,9 +37,9 @@ from rgn.train.checkpoint import load_run  # noqa: E402
 _SENT = re.compile(r"[^.!?]+[.!?]+[\"”']?")
 
 
-def prompts(n, plen, seed=0):
-    """SS doğrulama hikâyelerinin ilk plen token'ı: (n, plen) — hikâyeler eşit aralıkla, plen'den kısa olanlar atlanır."""
-    a = valid_tokens("ss", 6_000_000)
+def prompts(n, plen, dataset="ss"):
+    """Doğrulama belgelerinin ilk plen token'ı: (n, plen) — belgeler eşit aralıkla, plen'den kısa olanlar atlanır."""
+    a = valid_tokens(dataset, 6_000_000)
     starts = np.flatnonzero(a == EOS_ID) + 1
     ends = np.append(starts[1:] - 1, len(a))
     ok = [s for s, e in zip(starts, ends) if e - s > plen + 64]
@@ -53,24 +54,14 @@ def load_model(run, device):
 
 @torch.no_grad()
 def generate(model, idx, new, batch, device):
-    """Greedy, KV önbelleksiz; satır EOS üretince durur (sonrası EOS ile dolar).  -> (n, new) üretilen token'lar."""
+    """Greedy, KV önbellekli (model.generate); bütün satırlar EOS'a ulaşınca durur, eksik kısım EOS ile dolar
+    (analyse ilk EOS'tan sonrasını saymaz).  -> (n, new) üretilen token'lar."""
     out = []
     ctx = torch.autocast("cuda", dtype=torch.bfloat16) if device.type == "cuda" else torch.autocast("cpu", enabled=False)
     for i in range(0, len(idx), batch):
         x = idx[i:i + batch].to(device)
-        done = torch.zeros(len(x), dtype=torch.bool, device=device)
-        gen = []
-        for _ in range(new):
-            with ctx:
-                h = model.hidden(x)[:, -1]
-            nxt = (h.float() @ model.lm_head.weight.float().T).argmax(-1)
-            nxt = torch.where(done, torch.full_like(nxt, EOS_ID), nxt)
-            done |= nxt == EOS_ID
-            gen.append(nxt)
-            x = torch.cat([x, nxt[:, None]], 1)
-            if bool(done.all()):
-                break
-        g = torch.stack(gen, 1)
+        with ctx:
+            g = model.generate(x, new, eos_id=EOS_ID)[:, x.shape[1]:]
         if g.shape[1] < new:
             g = torch.cat([g, torch.full((len(g), new - g.shape[1]), EOS_ID, device=device)], 1)
         out.append(g.cpu())
@@ -114,11 +105,12 @@ def main():
     ap.add_argument("--new", type=int, default=384)
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--examples", type=int, default=3)
+    ap.add_argument("--dataset", default="ss")
     a = ap.parse_args()
     import tiktoken
     enc = tiktoken.get_encoding("gpt2")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    idx = prompts(a.stories, a.prompt)
+    idx = prompts(a.stories, a.prompt, a.dataset)
     print("istem: %d hikâye × ilk %d token, greedy %d token" % (len(idx), a.prompt, a.new), flush=True)
     res = {}
     for run in a.runs:
