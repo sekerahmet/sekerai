@@ -25,14 +25,14 @@ from rgn.model.position import rope_tables
 
 
 def private_vocab(cfg):
-    """Özel satırı olan token'lar (liste; satır = sıra + 1).  private_top > 0: yalnız en sık o kadar kelime (eşitlikte
-    küçük token kimliği önce), token kimliğine göre sıralı."""
+    """Özel satırı olan token'lar (liste; satır = sıra + 1).  Sıklık sırasında (eşitlikte küçük token kimliği önce)
+    [private_skip, private_top) aralığındaki kelimeler; token kimliğine göre sıralı."""
     from rgn.paths import ROOT
     d = json.loads((ROOT / cfg.private_vocab).read_text(encoding="utf-8"))
-    if not cfg.private_top:
+    if not (cfg.private_top or cfg.private_skip):
         return d["tokens"]
-    top = sorted(zip(d["counts"], d["tokens"]), key=lambda ct: (-ct[0], ct[1]))[:cfg.private_top]
-    return sorted(t for _, t in top)
+    order = sorted(zip(d["counts"], d["tokens"]), key=lambda ct: (-ct[0], ct[1]))
+    return sorted(t for _, t in order[cfg.private_skip:cfg.private_top or None])
 
 
 class Block(nn.Module):

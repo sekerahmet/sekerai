@@ -40,6 +40,7 @@ class ModelConfig:
     private_value_std: float = 0.0     # V tablosu başlangıcı N(0, std); 0: sıfır
     private_vocab: str = "assets/ss_vocab_used.json"   # özel satırı olan kelimeler (gerisi tek ortak "diğer" satırı)
     private_top: int = 0               # > 0: yalnız en sık private_top kelimeye özel satır (sayılar private_vocab'dan)
+    private_skip: int = 0              # > 0: en sık private_skip kelime özel satır almaz (ortak satıra düşer; ortak MLP çözer)
     local_sentence: bool = False       # Y katmanı pencere yerine kendi cümlesi + hikâye başı (data.layout story gerek)
     shared_mlp: bool = True            # False: ortak MLP yok (katman = dikkat [+ kelimeye özel nöron])
     mlp_bias: bool = True

@@ -177,6 +177,9 @@ def test_private_top():
         m = RGNModel(tiny(private_neurons=1, private_vocab=rel, private_top=2))
         assert m.blocks[0].private.shape[0] == 3                           # 2 kelime + ortak
         assert m.priv_map[5] == 1 and m.priv_map[11] == 2 and m.priv_map[3] == 0 and m.priv_map[9] == 0
+        m = RGNModel(tiny(private_neurons=1, private_vocab=rel, private_skip=1, private_top=3))   # 2. ve 3. sıradakiler
+        assert m.blocks[0].private.shape[0] == 3
+        assert m.priv_map[9] == 1 and m.priv_map[11] == 2 and m.priv_map[5] == 0 and m.priv_map[3] == 0
 
 
 def test_private_value():
