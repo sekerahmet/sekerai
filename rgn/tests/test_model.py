@@ -289,3 +289,32 @@ def test_token_route():
         assert gq[h] > 0 and all(gq[i] == 0 for i in range(4) if i != h)
         used = (blk.mlp.c.weight.grad.abs().sum(0) > 0).nonzero().flatten().tolist()
         assert sorted(used) == sorted(blk.route_n_tbl[5].tolist())
+
+
+def test_private_neurons():
+    """Kelimeye özel nöronlar: başlangıçta taban ile aynı çıktı (d = 0); tek kelimelik batch'te yalnız o kelimenin satırı
+    gradyan alır; özel tablo Muon'a girmez."""
+    import json as _j
+    import tempfile
+    from rgn.paths import ROOT
+    from rgn.train.optim import param_groups
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, dir=ROOT) as f:
+        _j.dump({"tokens": [3, 5, 9]}, f)
+    rel = Path(f.name).name
+    try:
+        base = dict(attn="softmax", attn_impl="sdpa", n_kv_heads=4, mlp="swiglu", n_layers=2)
+        torch.manual_seed(0)
+        m0 = RGNModel(tiny(**base))
+        torch.manual_seed(0)
+        m = RGNModel(tiny(**base, private_neurons=1, private_vocab=rel))
+        m0.load_state_dict({k: v for k, v in m.state_dict().items() if "private" not in k and k != "priv_map"})
+        idx = torch.tensor([[5, 5, 5, 5]])
+        assert torch.allclose(m0(idx), m(idx), atol=1e-5)
+        m.blocks[0].private.data.normal_(0, 0.1)
+        m(idx, idx).backward()
+        g = m.blocks[0].private.grad.abs().sum(1)
+        assert g[2] > 0 and float(g.sum() - g[2]) == 0                     # token 5 -> satır 2
+        mu, de, nd = param_groups(m, True)
+        assert any(p is m.blocks[0].private for p in nd) and not any(p is m.blocks[0].private for p in mu)
+    finally:
+        Path(f.name).unlink()

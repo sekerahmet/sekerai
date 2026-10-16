@@ -86,6 +86,10 @@ class ModelConfig:
                                        # (rota dışı head'lerin o token'daki çıktısı 0; okunması serbest)
     route_neurons: int = 0             # > 0: her katmanda token başına route_neurons MLP nöronu (yalnız onlar çalışır ve
                                        # geri yayılımda pay alır).  Dağılım dengeli, katman başına ayrı (kullanıcı, 16 Ekim)
+    private_neurons: int = 0           # > 0: her katmanda kelimeye ÖZEL bu kadar nöron (yalnız o kelimede çalışır ve
+                                       # güncellenir; ortak MLP'ye paralel): a = SiLU(g·x)(u·x), akışa a·d.  Kullanıcı, 16 Ekim
+                                       # "her kelimeye eşit ve özel parametre"
+    private_vocab: str = "assets/ss_vocab_used.json"   # özel payı olan kelimeler (gerisi tek ortak "diğer" satırı)
     mlp_vocab_assign: str = ""         # k = 1: ilk katmanın atama tablosu (assets/*.json, scripts/make_vocab_neurons.py;
                                        # PMI komşuları aynı nöronda); sonraki katmanlar rastgele (çiftler ayrışsın)
     local_sentence: bool = False       # Y katmanları pencere yerine yalnız kendi cümlesi + hikâye başı (data.layout story gerek)

@@ -110,7 +110,9 @@ def param_groups(model, use_muon):
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        if use_muon and name.startswith("blocks.") and p.dim() == 2:
+        if ".private" in name:                     # kelimeye özel tablo: gömme gibi seyrek (AdamW, bozunmasız — nadir
+            no_decay.append(p)                       # kelimenin payı kullanılmadığı adımlarda sıfıra çekilmesin)
+        elif use_muon and name.startswith("blocks.") and p.dim() == 2:
             muon.append(p)
         elif p.dim() >= 2:
             decay.append(p)

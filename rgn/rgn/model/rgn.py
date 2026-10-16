@@ -30,6 +30,12 @@ def vocab_neuron_table(V, ff, k, seed=0):
     return table
 
 
+def private_rows(cfg):
+    """Kelimeye özel tablo satır sayısı: özel payı olan kelimeler + 1 ortak "diğer"."""
+    from rgn.paths import ROOT
+    return len(json.loads((ROOT / cfg.private_vocab).read_text(encoding="utf-8"))["tokens"]) + 1
+
+
 def _onehot(idx, n, dtype):
     """(..., k) indeks -> (..., n) 0/1 maske."""
     return torch.zeros(*idx.shape[:-1], n, device=idx.device, dtype=dtype).scatter_(-1, idx, 1.0)
@@ -62,6 +68,9 @@ class Block(nn.Module):
             else:
                 tbl = vocab_neuron_table(cfg.vocab_size, cfg.ff_dim(kind), cfg.mlp_vocab_neurons, seed=layer)
             self.register_buffer("vocab_neurons", tbl)
+        self.private = None
+        if cfg.private_neurons:                                  # kelimeye özel nöronlar: satır = kelime, [g | u | d] × p
+            self.private = nn.Parameter(torch.empty(private_rows(cfg), 3 * cfg.private_neurons * cfg.d_model))
         self.route_h = self.route_n = None
         if not mlp_only and cfg.route_heads:                     # token rotası: head'ler ve nöronlar (katman başına ayrı)
             self.register_buffer("route_h_tbl", vocab_neuron_table(cfg.vocab_size, cfg.n_heads, cfg.route_heads,
@@ -77,7 +86,15 @@ class Block(nn.Module):
             taus = cfg.locality_tau_local if kind == "Y" else cfg.locality_tau_global
             self.loc_proj = nn.Linear(len(taus) * cfg.n_heads, cfg.ff_dim(), bias=False)
 
-    def forward(self, x, rope=None, masks=None, tokens=None):
+    def _private(self, xn, rows):
+        """Kelimeye özel nöronlar: xn (B, N, d), rows (B, N) -> (B, N, d).  a = SiLU(g·x)(u·x), çıktı Σ a·d."""
+        B, N, D = xn.shape
+        w = F.embedding(rows, self.private).view(B, N, -1, 3, D).to(xn.dtype)          # (B, N, p, 3, d)
+        proj = (w[..., :2, :] * xn[:, :, None, None, :]).sum(-1)                        # (B, N, p, 2)
+        a = F.silu(proj[..., 0]) * proj[..., 1]
+        return (a.unsqueeze(-1) * w[..., 2, :]).sum(2)
+
+    def forward(self, x, rope=None, masks=None, tokens=None, rows=None):
         if self.attn is None:
             nm = None
             if self.vocab_neurons is not None:                   # token'ın kendi nöronları (sözlüğe bölüştürülmüş)
@@ -99,9 +116,11 @@ class Block(nn.Module):
             a, loc = a
             extra = self.loc_proj((2.0 * loc - 1.0).to(x.dtype))
         s = x + a                                       # S_i = X_i + Attn(RMSNorm(X))_i
-        if nm is not None:
-            return s + self.mlp(self.norm2(s), extra, neuron_mask=nm)
-        return s + self.mlp(self.norm2(s), extra)       # H_i = S_i + MLP(RMSNorm(S), konum özeti)_i
+        xn = self.norm2(s)
+        out = s + (self.mlp(xn, extra) if nm is None else self.mlp(xn, extra, neuron_mask=nm))
+        if self.private is not None:                    # kelimeye özel nöronlar, ortak MLP'ye paralel
+            out = out + self._private(xn, rows)
+        return out                                      # H_i = S_i + MLP(RMSNorm(S))_i [+ özel_i]
 
 
 def _ce_sum(h, weight, target):
@@ -131,6 +150,14 @@ class RGNModel(nn.Module):
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self.lm_head.weight = self.embed.weight          # W_vocab = W_embᵀ
         self.use_rope = any(b.attn is not None and b.attn.use_rope for b in self.blocks)
+        if not cfg.private_neurons:
+            self.priv_map = None
+        else:                                  # token -> özel satır (0: ortak "diğer")
+            from rgn.paths import ROOT
+            used = json.loads((ROOT / cfg.private_vocab).read_text(encoding="utf-8"))["tokens"]
+            pm = torch.zeros(cfg.vocab_size, dtype=torch.long)
+            pm[torch.tensor(used)] = torch.arange(1, len(used) + 1)
+            self.register_buffer("priv_map", pm)
         self.obs_head = None
         if cfg.observer_layer:
             # gözlemci: K. katman çıkışı (gradyansız) -> küçük sözlükte dağılım; özellikler sonraki katmandan önce akışa
@@ -155,6 +182,9 @@ class RGNModel(nn.Module):
         for name, p in self.named_parameters():
             if name.endswith(("attn.w_aux.weight", "loc_proj.weight", "obs_feat.weight")):
                 nn.init.zeros_(p)                       # önem 0, odak 1, kapı 1: başlangıçta transformer tabanı
+            elif name.endswith(".private"):           # g, u ~ N(0, std); d = 0 (başlangıçta taban)
+                nn.init.normal_(p, 0.0, std)
+                p.data.view(p.shape[0], -1, 3, self.cfg.d_model)[:, :, 2].zero_()
             elif p.dim() == 2:
                 s = std / math.sqrt(2 * self.cfg.n_layers) if name.endswith(("attn.w_o.weight", "mlp.c.weight")) else std
                 nn.init.normal_(p, 0.0, s)
@@ -185,7 +215,7 @@ class RGNModel(nn.Module):
         rope = self.rope(idx.shape[1])
         ol = None
         for i, block in enumerate(self.blocks):
-            x = block(x, rope, masks, idx)
+            x = block(x, rope, masks, idx, None if self.priv_map is None else self.priv_map[idx])
             if self.obs_head is not None and i == self.cfg.observer_layer - 1:
                 ol, f = self.observe(x)
                 x = x + self.obs_feat((2.0 * f - 1.0).to(x.dtype))
