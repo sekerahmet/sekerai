@@ -36,6 +36,8 @@ class ModelConfig:
     attn_gate: str = ""                # dikkat çıkış kapısı: "" | "head" (head başına) | "elem" (her çıktı); 2σ_a ∈ (0, 2)
     private_neurons: int = 0           # k: her katmanda her kelimenin k nöronu (kelimeye özel nöron); 0: kapalı
     private_value: int = 0             # 1: her katmanda her kelimenin kendi V vektörü (dikkatte V'ye eklenir; value embedding)
+    private_groups: int = 1            # G > 1: özel nöron d'yi G parçaya böler, parça başına kapı (kelime başına G nöron,
+                                       # aynı satır ve işlem); g, u başlangıç std'si √G katı (iç çarpım ölçeği aynı)
     ple_dim: int = 0                   # > 0: Gemma 3n tarzı katman başına gömme (PLE), kelime × katman × ple_dim (kıyas için)
     private_value_layers: tuple = ()   # V vektörlü katmanlar (1'den sayılır); boş: hepsi
     private_value_gate: bool = False   # head başına kapı 2σ(W [x[:6], v[:6]]) (modded-nanoGPT), sıfır başlatma: kapı 1
@@ -72,6 +74,7 @@ class ModelConfig:
         assert self.attn_gate in ("", "head", "elem"), self.attn_gate
         assert 0 <= self.private_neurons <= 8, "private_neurons: 0..8 (her nöron ayrı tablo, çekirdek nöron başına)"
         assert self.private_value in (0, 1), self.private_value
+        assert self.private_groups >= 1 and self.d_model % self.private_groups == 0, "d_model grup sayısına bölünmeli"
         assert self.local_window >= 0 and 0 <= self.global_layers <= self.n_layers
         assert not self.local_sentence or self.local_window, "local_sentence: yerel / genel düzen gerek"
         assert self.local_window or self.global_layers, "yerel pencere yoksa bütün katmanlar genel"

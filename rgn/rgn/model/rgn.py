@@ -49,6 +49,7 @@ class Block(nn.Module):
         self.mlp = SwiGLU(cfg.d_model, cfg.ff_dim(), cfg.mlp_bias) if cfg.shared_mlp else None
         k = cfg.private_neurons if private_rows else 0
         self.priv_names = ["private" if j == 0 else "private%d" % (j + 1) for j in range(k)]
+        self.priv_groups = cfg.private_groups
         if not k:
             self.private = None
         for name in self.priv_names:
@@ -73,10 +74,10 @@ class Block(nn.Module):
         if priv is not None:
             from rgn.model.private_kernel import private_neuron
             loc, sub, plan = priv
-            return private_neuron(xn.reshape(B * N, D), loc.reshape(-1), sub[name], plan).view(B, N, D)
-        w = F.embedding(rows, getattr(self, name)).view(B, N, 3, D).to(xn.dtype)
-        a = F.silu((w[..., 0, :] * xn).sum(-1)) * (w[..., 1, :] * xn).sum(-1)
-        return a.unsqueeze(-1) * w[..., 2, :]
+            out = private_neuron(xn.reshape(B * N, D), loc.reshape(-1), sub[name], plan, self.priv_groups)
+            return out.view(B, N, D)
+        from rgn.model.private_kernel import neuron
+        return neuron(F.embedding(rows, getattr(self, name)).view(B, N, 3, D).to(xn.dtype), xn, self.priv_groups)
 
     def forward(self, x, rope, mask=None, rows=None, priv=None, parts=None, ple_ctx=None):
         """H = S + MLP(RMSNorm(S)) [+ özel],  S = X + Attn(RMSNorm(X)).  parts (dict): bileşenler buraya yazılır
@@ -175,7 +176,7 @@ class RGNModel(nn.Module):
             elif name.endswith(".private_ple"):
                 nn.init.normal_(p, 0.0, std)
             elif name.rsplit(".", 1)[-1].startswith("private") and not name.endswith(".private_v"):
-                nn.init.normal_(p, 0.0, std)
+                nn.init.normal_(p, 0.0, std * math.sqrt(self.cfg.private_groups))
                 p.data.view(p.shape[0], 3, -1)[:, 2].zero_()
             elif name.endswith(".private_v"):                            # std 0: başlangıçta tabanla aynı
                 nn.init.normal_(p, 0.0, self.cfg.private_value_std) if self.cfg.private_value_std else nn.init.zeros_(p)

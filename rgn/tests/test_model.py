@@ -231,26 +231,42 @@ def test_make_plan_covers_tokens():
 
 def test_private_kernel_cuda():
     """Birleşik Triton çekirdeği (CUDA): ileri ve geri, düz PyTorch karşılığıyla aynı (sık satırlar dahil; d 2'nin kuvveti
-    olmayan genişlik dahil)."""
+    olmayan genişlik dahil; gruplu nöron: G 2 / 4, parça 2'nin kuvveti olmayan dahil)."""
     require_cuda()
     from rgn.model.private_kernel import make_plan, private_fwd, reference
     torch.manual_seed(0)
-    for D in (512, 768):
+    for D, G in ((512, 1), (768, 1), (512, 4), (768, 4), (512, 2)):
         T, R = 4096, 300
         loc = torch.randint(0, R, (T,), device="cuda")
         loc[:1500] = 7                                                 # çok sık bir satır ("the" gibi)
         x = torch.randn(T, D, device="cuda", dtype=torch.bfloat16, requires_grad=True)
         sub = (torch.randn(R, 3 * D, device="cuda") * 0.05).to(torch.bfloat16).requires_grad_()
-        out = private_fwd(x, loc, sub, *make_plan(loc, R))[0]
+        out = private_fwd(x, loc, sub, *make_plan(loc, R), G)[0]
         g = torch.randn_like(out)
         (out.float() * g.float()).sum().backward()
         dx, ds = x.grad.clone(), sub.grad.clone()
         xr, sr = x.detach().float().requires_grad_(), sub.detach().float().requires_grad_()
-        ref = reference(xr, loc, sr)
+        ref = reference(xr, loc, sr, G)
         (ref * g.float()).sum().backward()
         rel = lambda a, b: float((a.float() - b).norm() / b.norm().clamp_min(1e-12))  # noqa: E731
         assert rel(out, ref.detach()) < 2e-2 and rel(dx, xr.grad) < 2e-2 and rel(ds, sr.grad) < 2e-2, (
-            D, rel(out, ref.detach()), rel(dx, xr.grad), rel(ds, sr.grad))
+            D, G, rel(out, ref.detach()), rel(dx, xr.grad), rel(ds, sr.grad))
+
+
+def test_private_groups_reference():
+    """Gruplu nöron (CPU): G 1 eski tek nöron formülü; G 4 parça başına ayrı kapı (açık döngüyle aynı)."""
+    from rgn.model.private_kernel import reference
+    torch.manual_seed(0)
+    T, D, R = 10, 16, 5
+    x, loc, sub = torch.randn(T, D), torch.randint(0, R, (T,)), torch.randn(R, 3 * D)
+    w = sub[loc].view(T, 3, D)
+    one = torch.nn.functional.silu((w[:, 0] * x).sum(-1)) * (w[:, 1] * x).sum(-1)
+    assert torch.allclose(reference(x, loc, sub), one[:, None] * w[:, 2], atol=1e-6)
+    out = reference(x, loc, sub, 4)
+    for k in range(4):
+        s = slice(4 * k, 4 * k + 4)
+        a = torch.nn.functional.silu((w[:, 0, s] * x[:, s]).sum(-1)) * (w[:, 1, s] * x[:, s]).sum(-1)
+        assert torch.allclose(out[:, s], a[:, None] * w[:, 2, s], atol=1e-6)
 
 
 def test_kv_cache_matches_full():
@@ -263,7 +279,8 @@ def test_kv_cache_matches_full():
                                                                      private_value_std=0.05, private_vocab=rel),
                    dict(private_neurons=1, private_vocab=rel, shared_mlp=False), dict(n_heads=4, n_kv_heads=4, n_kv_heads_global=1),
             dict(n_kv_heads_global=1, private_value=1, private_value_std=0.05, private_vocab=rel),
-            dict(ple_dim=8, private_vocab=rel), dict(ple_dim=8, private_neurons=1, private_vocab=rel)):
+            dict(ple_dim=8, private_vocab=rel), dict(ple_dim=8, private_neurons=1, private_vocab=rel),
+            dict(private_neurons=1, private_groups=4, private_vocab=rel)):
             torch.manual_seed(0)
             m = RGNModel(tiny(**kw)).eval()
             for _, _, p in m.private_tables():
