@@ -2,6 +2,7 @@
 model her seçeneğin istemden sonra gelme log-olasılığını hesaplar, en yükseği seçilir.  Şans %25.
 
     python scripts/fact_probe.py --runs fw_s000_d512_tf_yg fw_s000_d512_tf_yg_ozel_rms fw_s000_d512_ozel_3epok
+    python scripts/fact_probe.py --file assets/olgu_s000.tsv --runs ...      # s000'dan çıkarılmış sorular (mine_facts.py)
 
 Yanlış seçenekler mümkünse doğru cevapla aynı token uzunluğunda seçilir (toplam log-olasılık kısa seçeneği kayırır).
 Puan: toplam log-olasılıkla doğruluk; kategori başına, toplam ve öznenin (ülke, element, kitap) tek / çok token olmasına göre
@@ -17,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 
+from rgn.paths import ROOT  # noqa: E402
 from rgn.train.checkpoint import load_run  # noqa: E402
 
 CAPITALS = [("France", "Paris"), ("Germany", "Berlin"), ("Italy", "Rome"), ("Spain", "Madrid"), ("Portugal", "Lisbon"),
@@ -159,22 +161,36 @@ def score(m, enc, prompt, options, dev):
     return out
 
 
+def from_file(path):
+    """mine_facts.py çıktısı (sekmeli) -> [(ilişki, istem, doğru, [yanlışlar], None, geçme sayısı)]."""
+    qs = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines()[1:]:
+        f = line.split("	")
+        if len(f) >= 5:
+            qs.append((f[0], f[2], f[3], [w.strip() for w in f[4].split("|")], None, int(f[1])))
+    return qs
+
+
+BUCKETS = [(1, 1), (2, 4), (5, 10 ** 9)]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", nargs="+", required=True)
+    ap.add_argument("--file", default=None, help="mine_facts.py çıktısı; verilmezse yerleşik 202 soru")
     a = ap.parse_args()
     import tiktoken
     enc = tiktoken.get_encoding("gpt2")
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    qs = questions(enc=enc)
+    qs = from_file(ROOT / a.file) if a.file else [q + (None,) for q in questions(enc=enc)]
     cats = sorted({q[0] for q in qs}, key=[q[0] for q in qs].index)
-    single = [None if s is None else _ntok(enc, s) == 1 for *_, s in qs]
+    single = [None if q[4] is None else _ntok(enc, q[4]) == 1 for q in qs]
     ok = {}
     for run in a.runs:
         m, step = load_run(run, dev)
         m.float()
         ok[run] = [int(max(range(4), key=lambda i: sc[i][0]) == 0)
-                   for sc in (score(m, enc, p, [ans] + list(w), dev) for _, p, ans, w, _ in qs)]
+                   for sc in (score(m, enc, q[1], [q[2]] + list(q[3]), dev) for q in qs)]
         del m
         if dev.type == "cuda":
             torch.cuda.empty_cache()
@@ -183,7 +199,12 @@ def main():
     groups = [(c, [i for i, q in enumerate(qs) if q[0] == c]) for c in cats] + [("TOPLAM", list(range(len(qs))))]
     groups += [("özne TEK token", [i for i, s in enumerate(single) if s is True]),
                ("özne ÇOK token", [i for i, s in enumerate(single) if s is False])]
+    groups += [("s000'da %d–%s kez" % (lo, hi if hi < 10 ** 9 else "∞"), [i for i, q in enumerate(qs)
+                                                                         if q[5] is not None and lo <= q[5] <= hi])
+               for lo, hi in BUCKETS]
     for name, ix in groups:
+        if not ix:
+            continue
         print("%-22s %5d" % (name, len(ix)) + "".join("%14.0f" % (100 * sum(ok[r][i] for i in ix) / len(ix))
                                                      for r in a.runs))
 
