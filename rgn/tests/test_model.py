@@ -327,3 +327,31 @@ def test_private_neurons():
         assert ch[2] > 0 and float(ch.sum() - ch[2]) == 0
     finally:
         Path(f.name).unlink()
+
+
+def test_private_row_copy_matches_full():
+    """Eğitim yolu (yalnız geçen satırların kopyası) tam tablo yoluyla aynı kaybı ve aynı satır gradyanlarını verir."""
+    import json as _j
+    import tempfile
+    from rgn.paths import ROOT
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, dir=ROOT) as f:
+        _j.dump({"tokens": list(range(1, 40))}, f)
+    rel = Path(f.name).name
+    try:
+        torch.manual_seed(0)
+        m = RGNModel(tiny(attn="softmax", attn_impl="sdpa", n_kv_heads=4, mlp="swiglu", n_layers=2,
+                          private_neurons=1, private_vocab=rel))
+        for b in m.blocks:
+            b.private.data.normal_(0, 0.1)
+        idx = torch.randint(0, 97, (2, 12))
+        l_full = m(idx, idx)
+        l_full.backward()
+        uniq = torch.unique(m.priv_map[idx])
+        subs = [b.private.detach().index_select(0, uniq).requires_grad_() for b in m.blocks]
+        l_sub = m(idx, idx, priv=(torch.searchsorted(uniq, m.priv_map[idx]), subs))
+        l_sub.backward()
+        assert torch.allclose(l_full, l_sub, atol=1e-6)
+        for b, s in zip(m.blocks, subs):
+            assert torch.allclose(b.private.grad.index_select(0, uniq), s.grad, atol=1e-6)
+    finally:
+        Path(f.name).unlink()

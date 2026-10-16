@@ -85,18 +85,20 @@ class RowAdam(torch.optim.Optimizer):
 
     def __init__(self, params, lr, betas=(0.9, 0.95), eps=1e-8):
         super().__init__(params, dict(lr=lr, betas=betas, eps=eps))
-        self.rows = None
+        self.rows, self.grads = None, None
 
-    def set_rows(self, rows):
-        self.rows = rows
+    def set_rows(self, rows, grads=None):
+        """rows: güncellenecek satırlar; grads: (varsa) parametre sırasıyla bu satırların gradyanları (len(rows), ...)
+        — satır kopyası yolu (tam boy gradyan yok)."""
+        self.rows, self.grads = rows, grads
 
     @torch.no_grad()
     def step(self):
         r = self.rows
         for g in self.param_groups:
             b1, b2 = g["betas"]
-            for p in g["params"]:
-                if p.grad is None:
+            for i, p in enumerate(g["params"]):
+                if self.grads is None and p.grad is None:
                     continue
                 st = self.state[p]
                 if not st:
@@ -104,7 +106,7 @@ class RowAdam(torch.optim.Optimizer):
                     st["step"] = 0
                 st["step"] += 1
                 rr = r if r is not None else torch.arange(p.shape[0], device=p.device)
-                gr = p.grad.index_select(0, rr).float()
+                gr = (self.grads[i] if self.grads is not None else p.grad.index_select(0, rr)).float()
                 m = st["m"].index_select(0, rr).mul_(b1).add_(gr, alpha=1 - b1)
                 v = st["v"].index_select(0, rr).mul_(b2).addcmul_(gr, gr, value=1 - b2)
                 st["m"].index_copy_(0, rr, m)

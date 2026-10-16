@@ -86,15 +86,16 @@ class Block(nn.Module):
             taus = cfg.locality_tau_local if kind == "Y" else cfg.locality_tau_global
             self.loc_proj = nn.Linear(len(taus) * cfg.n_heads, cfg.ff_dim(), bias=False)
 
-    def _private(self, xn, rows):
-        """Kelimeye özel nöronlar: xn (B, N, d), rows (B, N) -> (B, N, d).  a = SiLU(g·x)(u·x), çıktı Σ a·d."""
+    def _private(self, xn, rows, sub=None):
+        """Kelimeye özel nöronlar: xn (B, N, d), rows (B, N) -> (B, N, d).  a = SiLU(g·x)(u·x), çıktı Σ a·d.
+        sub: eğitimde yalnız o adımda geçen satırların kopyası (rows onun içindeki sıra) — tam boy gradyan oluşmaz."""
         B, N, D = xn.shape
-        w = F.embedding(rows, self.private).view(B, N, -1, 3, D).to(xn.dtype)          # (B, N, p, 3, d)
+        w = F.embedding(rows, self.private if sub is None else sub).view(B, N, -1, 3, D).to(xn.dtype)  # (B, N, p, 3, d)
         proj = (w[..., :2, :] * xn[:, :, None, None, :]).sum(-1)                        # (B, N, p, 2)
         a = F.silu(proj[..., 0]) * proj[..., 1]
         return (a.unsqueeze(-1) * w[..., 2, :]).sum(2)
 
-    def forward(self, x, rope=None, masks=None, tokens=None, rows=None):
+    def forward(self, x, rope=None, masks=None, tokens=None, rows=None, sub=None):
         if self.attn is None:
             nm = None
             if self.vocab_neurons is not None:                   # token'ın kendi nöronları (sözlüğe bölüştürülmüş)
@@ -119,7 +120,7 @@ class Block(nn.Module):
         xn = self.norm2(s)
         out = s + (self.mlp(xn, extra) if nm is None else self.mlp(xn, extra, neuron_mask=nm))
         if self.private is not None:                    # kelimeye özel nöronlar, ortak MLP'ye paralel
-            out = out + self._private(xn, rows)
+            out = out + self._private(xn, rows, sub)
         return out                                      # H_i = S_i + MLP(RMSNorm(S))_i [+ özel_i]
 
 
@@ -209,29 +210,32 @@ class RGNModel(nn.Module):
             f = torch.stack([H / (1.0 + H), p.max(-1).values, p[..., -1]], -1)
         return ol, f
 
-    def hidden(self, idx, return_obs=False, masks=None):
+    def hidden(self, idx, return_obs=False, masks=None, priv=None):
         """idx (B, N) -> son normalize edilmiş durum (B, N, d) [, gözlemci logit'leri].  masks: story_masks (hikâye dizilimi)."""
         x = self.embed(idx)
         rope = self.rope(idx.shape[1])
         ol = None
         for i, block in enumerate(self.blocks):
-            x = block(x, rope, masks, idx, None if self.priv_map is None else self.priv_map[idx])
+            if priv is not None:                         # eğitim: (adım içi satır sırası, katman başına satır kopyaları)
+                x = block(x, rope, masks, idx, priv[0], priv[1][i])
+            else:
+                x = block(x, rope, masks, idx, None if self.priv_map is None else self.priv_map[idx])
             if self.obs_head is not None and i == self.cfg.observer_layer - 1:
                 ol, f = self.observe(x)
                 x = x + self.obs_feat((2.0 * f - 1.0).to(x.dtype))
         h = self.norm_f(x)
         return (h, ol) if return_obs else h
 
-    def forward(self, idx, targets=None, masks=None):
+    def forward(self, idx, targets=None, masks=None, priv=None):
         """targets yoksa logit'ler (B, N, V); varsa ortalama kayıp (skaler) — gözlemci varsa (ana kayıp, gözlemci kaybı)."""
         if targets is None:
             return self.lm_head(self.hidden(idx, masks=masks))
         if self.obs_head is not None:
-            h, ol = self.hidden(idx, return_obs=True, masks=masks)
+            h, ol = self.hidden(idx, return_obs=True, masks=masks, priv=priv)
             main = lm_loss(h, self.lm_head.weight, targets, use_checkpoint=self.loss_checkpoint)
             aux = F.cross_entropy(ol.reshape(-1, ol.shape[-1]), self.obs_map[targets].reshape(-1))
             return main, aux
-        h = self.hidden(idx, masks=masks)
+        h = self.hidden(idx, masks=masks, priv=priv)
         return lm_loss(h, self.lm_head.weight, targets, use_checkpoint=self.loss_checkpoint)
 
     @torch.no_grad()

@@ -200,7 +200,7 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
         for g in opt.param_groups:
             g["lr"] = g["base_lr"] * f
         loss_sum, obs_sum = 0.0, 0.0
-        touched = []
+        mbs = []
         for _ in range(accum):
             masks = None
             if story:
@@ -208,11 +208,18 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
                 masks = story_masks(doc.to(device), sent.to(device), 0 if cfg.model.local_sentence else cfg.model.local_window)
             else:
                 x, y = train_s.random_batch(micro, T, rng)
-            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-            if model.priv_map is not None:                  # kelimeye özel satırlar: bu adımda geçenler
-                touched.append(model.priv_map[x].flatten())
+            mbs.append((x.to(device, non_blocking=True), y.to(device, non_blocking=True), masks))
+        priv = subs = None
+        if model.priv_map is not None:                      # kelimeye özel: yalnız bu adımda geçen satırların kopyası
+            uniq = torch.unique(torch.cat([model.priv_map[x].flatten() for x, _, _ in mbs]))
+            R = -(-len(uniq) // 4096) * 4096                  # 4096'nın katına doldur (az sayıda şekil, az derleme)
+            idx = torch.cat([uniq, uniq.new_zeros(R - len(uniq))])
+            subs = [b.private.detach().index_select(0, idx).requires_grad_() for b in model.blocks]
+        for x, y, masks in mbs:
+            if subs is not None:
+                priv = (torch.searchsorted(uniq, model.priv_map[x]), subs)
             with ctx:
-                res = fwd(x, y, masks) if masks is not None else fwd(x, y)
+                res = fwd(x, y, masks, priv) if (masks is not None or priv is not None) else fwd(x, y)
             if isinstance(res, tuple):                        # gözlemci: kaydedilen kayıp yalnız ana kayıp
                 main, aux = res
                 (main / accum + cfg.model.observer_aux_weight * aux / accum).backward()
@@ -222,9 +229,10 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
                 loss = res / accum
                 loss.backward()
                 loss_sum += loss.detach()
-        gn = torch.nn.utils.clip_grad_norm_(model.parameters(), tc.grad_clip) if tc.grad_clip else torch.tensor(0.0)
+        clip = list(model.parameters()) + (subs or [])
+        gn = torch.nn.utils.clip_grad_norm_(clip, tc.grad_clip) if tc.grad_clip else torch.tensor(0.0)
         if opt.row_adam is not None:
-            opt.row_adam.set_rows(torch.unique(torch.cat(touched)))
+            opt.row_adam.set_rows(uniq, [s.grad[:len(uniq)] for s in subs])
         opt.step()
         opt.zero_grad(set_to_none=True)
         step += 1
