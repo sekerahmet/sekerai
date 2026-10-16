@@ -3,8 +3,9 @@ model her seçeneğin istemden sonra gelme log-olasılığını hesaplar, en yü
 
     python scripts/fact_probe.py --runs fw_s000_d512_tf_yg fw_s000_d512_tf_yg_ozel_rms fw_s000_d512_ozel_3epok
 
-İki puan: doğruluk (toplam log-olasılık) ve uzunluğa göre normalize doğruluk (log-olasılık / karakter; çok token'lı
-cevaplarda uzun seçeneğin cezasını kaldırır).  Kategori başına ve toplam.
+Yanlış seçenekler mümkünse doğru cevapla aynı token uzunluğunda seçilir (toplam log-olasılık kısa seçeneği kayırır).
+Puan: toplam log-olasılıkla doğruluk; kategori başına, toplam ve öznenin (ülke, element, kitap) tek / çok token olmasına göre
+(kelimeye özel nöron girdi token'ına bağlı: tek token'lı öznenin olgusu kendi satırında durabilir).
 """
 import argparse
 import random
@@ -108,26 +109,36 @@ YEARS = [("World War II ended in", "1945", ["1939", "1918", "1950"]),
          ("The first iPhone was released in", "2007", ["2003", "2010", "2001"])]
 
 
-def questions(seed=0):
-    """-> [(kategori, istem, doğru, [seçenekler])]; yanlışlar aynı kategoriden, tohumla sabit."""
+def _ntok(enc, w):
+    return len(enc.encode(" " + w))
+
+
+def questions(seed=0, enc=None):
+    """-> [(kategori, istem, doğru, [seçenekler], özne ya da None)]; yanlışlar aynı kategoriden, mümkünse doğru cevapla
+    aynı token uzunluğunda (enc verilirse), tohumla sabit."""
     rnd = random.Random(seed)
     qs = []
 
     def pick(pool, ans, k=3):
-        return rnd.sample(sorted({p for p in pool if p != ans}), k)
+        cand = sorted({p for p in pool if p != ans})
+        if enc is not None:
+            same = [p for p in cand if _ntok(enc, p) == _ntok(enc, ans)]
+            if len(same) >= k:
+                cand = same
+        return rnd.sample(cand, k)
 
     caps = [c for _, c in CAPITALS]
-    qs += [("başkent", "The capital of %s is" % c, a, pick(caps, a)) for c, a in CAPITALS]
+    qs += [("başkent", "The capital of %s is" % c, a, pick(caps, a), c) for c, a in CAPITALS]
     syms = [s for _, s in SYMBOLS]
-    qs += [("kimyasal simge", "The chemical symbol for %s is" % e, s, pick(syms, s)) for e, s in SYMBOLS]
-    conts = ["Europe", "Asia", "Africa", "South America", "North America"]
-    qs += [("kıta", "%s is a country located in" % c, a, pick(conts, a)) for c, a in CONTINENTS]
+    qs += [("kimyasal simge", "The chemical symbol for %s is" % e, s, pick(syms, s), e) for e, s in SYMBOLS]
+    conts = ["Europe", "Asia", "Africa", "Australia", "Antarctica", "South America", "North America", "Central America"]
+    qs += [("kıta", "%s is a country located in" % c, a, pick(conts, a), c) for c, a in CONTINENTS]
     langs = sorted({l for _, l in LANGUAGES})
-    qs += [("dil", "Most people in %s speak" % c, a, pick(langs, a)) for c, a in LANGUAGES]
-    qs += [("bilim", p, a, d) for p, a, d in SCIENCE]
-    qs += [("yazar", "%s was written by" % b, a, pick(AUTHORS, a)) for b, a in BOOKS]
-    qs += [("buluş", p, a, pick(SCIENTISTS, a)) for p, a in DISCOVERY]
-    qs += [("yıl", p, a, d) for p, a, d in YEARS]
+    qs += [("dil", "Most people in %s speak" % c, a, pick(langs, a), c) for c, a in LANGUAGES]
+    qs += [("bilim", p, a, d, None) for p, a, d in SCIENCE]
+    qs += [("yazar", "%s was written by" % b, a, pick(AUTHORS, a), b) for b, a in BOOKS]
+    qs += [("buluş", p, a, pick(SCIENTISTS, a), None) for p, a in DISCOVERY]
+    qs += [("yıl", p, a, d, None) for p, a, d in YEARS]
     return qs
 
 
@@ -155,32 +166,26 @@ def main():
     import tiktoken
     enc = tiktoken.get_encoding("gpt2")
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    qs = questions()
+    qs = questions(enc=enc)
     cats = sorted({q[0] for q in qs}, key=[q[0] for q in qs].index)
-    res = {}
+    single = [None if s is None else _ntok(enc, s) == 1 for *_, s in qs]
+    ok = {}
     for run in a.runs:
         m, step = load_run(run, dev)
         m.float()
-        r = {c: [0, 0, 0] for c in cats}
-        for cat, prompt, ans, wrong in qs:
-            opts = [ans] + list(wrong)
-            sc = score(m, enc, prompt, opts, dev)
-            r[cat][0] += int(max(range(4), key=lambda i: sc[i][0]) == 0)
-            r[cat][1] += int(max(range(4), key=lambda i: sc[i][1]) == 0)
-            r[cat][2] += 1
-        res[run] = (step, r)
+        ok[run] = [int(max(range(4), key=lambda i: sc[i][0]) == 0)
+                   for sc in (score(m, enc, p, [ans] + list(w), dev) for _, p, ans, w, _ in qs)]
         del m
         if dev.type == "cuda":
             torch.cuda.empty_cache()
-    print("%d soru, şans %%25.  Hücre: doğruluk %% (uzunluğa göre normalize %%)" % len(qs))
-    print("%-16s" % "kategori" + "".join("%26s" % r[:26] for r in a.runs))
-    for c in cats + ["TOPLAM"]:
-        row = []
-        for run in a.runs:
-            r = res[run][1]
-            ok, okn, n = (sum(v[i] for v in r.values()) for i in range(3)) if c == "TOPLAM" else r[c]
-            row.append("%.0f (%.0f)  n=%d" % (100 * ok / n, 100 * okn / n, n))
-        print("%-16s" % c + "".join("%26s" % x for x in row))
+    print("%d soru, şans %%25; yanlış seçenekler mümkünse aynı token uzunluğunda.  Hücre: doğruluk %%" % len(qs))
+    print("%-22s %5s" % ("grup", "n") + "".join("%14s" % r[-14:] for r in a.runs))
+    groups = [(c, [i for i, q in enumerate(qs) if q[0] == c]) for c in cats] + [("TOPLAM", list(range(len(qs))))]
+    groups += [("özne TEK token", [i for i, s in enumerate(single) if s is True]),
+               ("özne ÇOK token", [i for i, s in enumerate(single) if s is False])]
+    for name, ix in groups:
+        print("%-22s %5d" % (name, len(ix)) + "".join("%14.0f" % (100 * sum(ok[r][i] for i in ix) / len(ix))
+                                                     for r in a.runs))
 
 
 if __name__ == "__main__":
