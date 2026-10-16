@@ -13,6 +13,7 @@ import torch
 import torch.nn.functional as F
 
 _COMPILED = {}
+_POOL = {}                  # (model, batch, tampon boyu, dtype) -> StaticCache: tamponlar ve CUDA graph tekrar kullanılır
 BUCKET = 256
 
 
@@ -92,14 +93,23 @@ class StaticCache:
             self.K.append(kb)
             self.V.append(vb)
             x = b.finish(x, b.attn.finish(xa, b.attn._core(q, k, v)), rows)
-        self.slot_pos = torch.full((max(W, 1),), -1, dtype=torch.long, device=self.dev)
+        slot_pos = torch.full((max(W, 1),), -1, dtype=torch.long, device=self.dev)
         if W:
             keep = pos[-W:]
-            self.slot_pos[keep % W] = keep
-        self.n = torch.tensor([T], device=self.dev)
-        self.w = torch.zeros(B, dtype=torch.long, device=self.dev)
+            slot_pos[keep % W] = keep
         logits = m.lm_head(m.norm_f(x[:, -1])).float()
-        self.out = torch.zeros_like(logits)
+        new = dict(K=self.K, V=self.V, slot_pos=slot_pos, n=torch.tensor([T], device=self.dev),
+                   w=torch.zeros(B, dtype=torch.long, device=self.dev), out=torch.zeros_like(logits))
+        self.K, self.V = getattr(self, "_K", None), getattr(self, "_V", None)
+        if self.run is not None:                                               # graph var: aynı tamponlara yerinde yaz
+            for a, b in zip(self.K + self.V, new["K"] + new["V"]):
+                a.copy_(b)
+            for k_ in ("slot_pos", "n", "w", "out"):
+                getattr(self, k_).copy_(new[k_])
+        else:
+            for k_, v_ in new.items():
+                setattr(self, k_, v_)
+        self._K, self._V = self.K, self.V
         self.t = T
         return logits
 
@@ -152,7 +162,13 @@ class StaticCache:
 @torch.no_grad()
 def generate(model, idx, max_new_tokens, temperature=0.0, eos_id=None, generator=None):
     """Önbellekli üretim; RGNModel.generate ile aynı arayüz ve (greedy'de) aynı sonuç."""
-    cache = StaticCache(model, idx.shape[0], max_new_tokens)
+    B, T = idx.shape
+    probe = StaticCache(model, B, max_new_tokens)
+    limit = min(model.cfg.max_len, next(t for k in range(40) for t in (BUCKET << k, (3 * BUCKET // 2) << k)
+                                        if t >= T + max_new_tokens))
+    key = (id(model), B, limit, probe.dtype)
+    cache = _POOL.get(key) or _POOL.setdefault(key, probe)
+    cache.positions = max_new_tokens
     logits = cache.prefill(idx)
     outs = [idx]
     for i in range(max_new_tokens):
