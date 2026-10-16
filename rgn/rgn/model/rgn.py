@@ -34,7 +34,7 @@ class Block(nn.Module):
     """kind 'Y': yerel (son local_window token) | 'G': genel (tam causal).  private_rows > 0: kelimeye özel tablolar
     (nöron: private (satır, 3d); V vektörü: private_v (satır, Hkv·dh))."""
 
-    def __init__(self, cfg, kind="G", private_rows=0):
+    def __init__(self, cfg, kind="G", private_rows=0, layer=0):
         super().__init__()
         self.kind = kind
         self.norm1 = RMSNorm(cfg.d_model)
@@ -44,8 +44,10 @@ class Block(nn.Module):
         self.mlp = SwiGLU(cfg.d_model, cfg.ff_dim(), cfg.mlp_bias) if cfg.shared_mlp else None
         self.private = (nn.Parameter(torch.empty(private_rows, 3 * cfg.d_model))
                         if private_rows and cfg.private_neurons else None)
-        self.private_v = (nn.Parameter(torch.empty(private_rows, cfg.n_kv_heads * cfg.dh()))
-                          if private_rows and cfg.private_value else None)
+        has_v = private_rows and cfg.private_value and (not cfg.private_value_layers or layer + 1 in cfg.private_value_layers)
+        self.private_v = nn.Parameter(torch.empty(private_rows, cfg.n_kv_heads * cfg.dh())) if has_v else None
+        # V vektörü kapısı: kv head başına, girdinin ve V vektörünün ilk 6 kanalından (modded-nanoGPT)
+        self.vgate = nn.Linear(12, cfg.n_kv_heads, bias=False) if has_v and cfg.private_value_gate else None
 
     def private_out(self, xn, rows=None, priv=None):
         """xn (B, N, d) -> (B, N, d).  rows (B, N): tam tablodan; priv = (loc (B, N), {"private": sub (R, 3d)}, plan):
@@ -62,10 +64,15 @@ class Block(nn.Module):
     def forward(self, x, rope, mask=None, rows=None, priv=None, parts=None):
         """H = S + MLP(RMSNorm(S)) [+ özel],  S = X + Attn(RMSNorm(X)).  parts (dict): bileşenler buraya yazılır
         (teşhis: dikkat, mlp, özel — akışa eklenen değerler; olmayan bileşen None)."""
+        xa = self.norm1(x)
         vv = None
         if self.private_v is not None:                                # kelimeye özel V vektörü
             vv = priv[1]["private_v"][priv[0]] if priv is not None else F.embedding(rows, self.private_v)
-        a = self.attn(self.norm1(x), rope, mask, vv)
+            if self.vgate is not None:                                # kapı 2σ(·) ∈ (0, 2), başlangıçta 1
+                B, N, _ = x.shape
+                g = 2 * torch.sigmoid(self.vgate(torch.cat([xa[..., :6], vv[..., :6].to(xa.dtype)], -1)))
+                vv = (g.unsqueeze(-1) * vv.view(B, N, g.shape[-1], -1).to(g.dtype)).view(B, N, -1)
+        a = self.attn(xa, rope, mask, vv)
         s = x + a
         xn = self.norm2(s) if self.norm2 is not None else None
         m = None
@@ -113,7 +120,7 @@ class RGNModel(nn.Module):
             self.register_buffer("priv_map", pm)
         else:
             self.priv_map = None
-        self.blocks = nn.ModuleList(Block(cfg, kind, rows) for kind in cfg.layer_kinds())
+        self.blocks = nn.ModuleList(Block(cfg, kind, rows, i) for i, kind in enumerate(cfg.layer_kinds()))
         self.norm_f = RMSNorm(cfg.d_model)
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self.lm_head.weight = self.embed.weight                       # W_vocab = W_embᵀ
@@ -128,13 +135,13 @@ class RGNModel(nn.Module):
         g, u ~ N(0, std), w = 0 (başlangıçta özel nöronsuz modelle aynı)."""
         std = self.cfg.init_std
         for name, p in self.named_parameters():
-            if name.endswith("attn.w_aux.weight"):
+            if name.endswith(("attn.w_aux.weight", "vgate.weight")):
                 nn.init.zeros_(p)
             elif name.endswith(".private"):
                 nn.init.normal_(p, 0.0, std)
                 p.data.view(p.shape[0], 3, -1)[:, 2].zero_()
-            elif name.endswith(".private_v"):                            # V vektörü 0: başlangıçta tabanla aynı
-                nn.init.zeros_(p)
+            elif name.endswith(".private_v"):                            # std 0: başlangıçta tabanla aynı
+                nn.init.normal_(p, 0.0, self.cfg.private_value_std) if self.cfg.private_value_std else nn.init.zeros_(p)
             elif p.dim() == 2:
                 s = std / math.sqrt(2 * self.cfg.n_layers) if name.endswith(("attn.w_o.weight", "mlp.c.weight")) else std
                 nn.init.normal_(p, 0.0, s)

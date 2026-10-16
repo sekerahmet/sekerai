@@ -140,6 +140,30 @@ def test_private_row_copy_matches_full():
                 assert torch.allclose(p.grad.index_select(0, uniq), s.grad, atol=1e-6), kw
 
 
+def test_private_value_gated_layers():
+    """Seçili katmanlarda V vektörü + kapı: kapı başlangıçta 1 (V vektörü 0 iken tabanla aynı), yalnız seçili
+    katmanların tablosu var; kapı gradyan alır; satır kopyası yolu tam tabloyla aynı."""
+    with private_vocab(range(1, 40)) as rel:
+        torch.manual_seed(0)
+        m0 = RGNModel(tiny())
+        torch.manual_seed(0)
+        m = RGNModel(tiny(private_value=1, private_vocab=rel, private_value_layers=(1, 3), private_value_gate=True))
+        assert [b.private_v is not None for b in m.blocks] == [True, False, True]
+        assert [b.vgate is not None for b in m.blocks] == [True, False, True]
+        m0.load_state_dict({k: v for k, v in m.state_dict().items()
+                            if "private" not in k and "vgate" not in k and k != "priv_map"})
+        idx = torch.randint(0, 97, (2, 12))
+        assert torch.allclose(m0(idx), m(idx), atol=1e-6)
+        for _, _, p in m.private_tables():
+            p.data.normal_(0, 0.1)
+        l_full = m(idx, idx)
+        l_full.backward()
+        assert m.blocks[0].vgate.weight.grad.abs().sum() > 0
+        uniq = torch.unique(m.priv_map[idx])
+        sub = [p.detach().index_select(0, uniq).requires_grad_() for _, _, p in m.private_tables()]
+        assert torch.allclose(l_full, m(idx, idx, priv=(torch.searchsorted(uniq, m.priv_map[idx]), sub, None)), atol=1e-6)
+
+
 def test_private_value():
     """V vektörü: başlangıçta (0) tabanla aynı çıktı; tek kelimelik batch'te yalnız o kelimenin satırı gradyan alır."""
     with private_vocab([3, 5, 9]) as rel:

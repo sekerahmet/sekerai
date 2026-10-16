@@ -193,7 +193,9 @@ def param_groups(model, use_muon):
             continue
         if ".private" in name:                     # kelimeye özel tablo: RowAdam (build_optimizer)
             continue
-        if use_muon and name.startswith("blocks.") and p.dim() == 2:
+        if ".vgate." in name:                       # V vektörü kapısı (12 girdi): AdamW, ağırlık sönümsüz
+            no_decay.append(p)
+        elif use_muon and name.startswith("blocks.") and p.dim() == 2:
             muon.append(p)
         elif p.dim() >= 2:
             decay.append(p)

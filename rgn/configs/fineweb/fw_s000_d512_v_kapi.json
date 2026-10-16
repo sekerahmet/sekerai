@@ -1,0 +1,12 @@
+{
+  "extends": "fw_s000_d512_tf_yg.json",
+  "name": "fw_s000_d512_v_kapi",
+  "notes": "F3: taban + kelimeye özel V vektörü, modded-nanoGPT düzeninde: yalnız 4 katman (1, 2, 7, 8), head başına kapı 2σ(W [x[:6], v[:6]]), tablo N(0, 0,01). Özel nöron yok. Kıyas 3000: taban 3,8205, F2 (her katman, kapısız, sıfır başlangıç).",
+  "model": {
+    "private_value": 1,
+    "private_vocab": "assets/fw_s000_vocab_used.json",
+    "private_value_layers": [1, 2, 7, 8],
+    "private_value_gate": true,
+    "private_value_std": 0.01
+  }
+}
