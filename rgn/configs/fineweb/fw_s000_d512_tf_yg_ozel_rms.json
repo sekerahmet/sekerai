@@ -1,0 +1,8 @@
+{
+  "extends": "fw_s000_d512_tf_yg_ozel.json",
+  "name": "fw_s000_d512_tf_yg_ozel_rms",
+  "notes": "Kelimeye özel nöron, bütün sistem (8 katman; kullanıcı, 16 Ekim: 'özel pay tüm sistem olmalı'), özel satırlar momentsiz güncellenir (satır başına tek ikinci moment; parametre başına ~12 bayt taşıma, Adam ~28). Kıyas (3000. adım): FW taban 3,8205 / 110 ms, FW özel Adam 3,7558 / 138 ms.",
+  "train": {
+    "private_opt": "rms"
+  }
+}
