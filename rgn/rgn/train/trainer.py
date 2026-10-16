@@ -133,7 +133,8 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
     decay_start = int(total_steps * (1 - tc.decay)) if tc.schedule == "wsd" else None
     gpu = torch.cuda.get_device_name(0) if device.type == "cuda" else "cpu"
     n_priv = sum(p.numel() for _, _, p in model.private_tables())
-    priv_kinds = " + ".join(k for k, on in (("nöron", mc.private_neurons), ("V", mc.private_value)) if on)
+    priv_kinds = " + ".join(k for k, on in (("nöron×%d" % mc.private_neurons, mc.private_neurons), ("V", mc.private_value))
+                            if on)
     say("%s | katmanlar %s (Y: son %d token) | D %d, head %d (kv %d), d_ff %d | kapı %s | kelimeye özel %s | "
         "%d parametre (%d özel)" % (
             cfg.name, mc.layer_kinds(), mc.local_window, mc.d_model, mc.n_heads, mc.n_kv_heads, mc.ff_dim() if mc.shared_mlp else 0,

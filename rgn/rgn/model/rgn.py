@@ -32,7 +32,7 @@ def private_vocab(cfg):
 
 class Block(nn.Module):
     """kind 'Y': yerel (son local_window token) | 'G': genel (tam causal).  private_rows > 0: kelimeye özel tablolar
-    (nöron: private (satır, 3d); V vektörü: private_v (satır, Hkv·dh))."""
+    (nöronlar: private, private2, ... (satır, 3d) — nöron başına ayrı tablo; V vektörü: private_v (satır, Hkv·dh))."""
 
     def __init__(self, cfg, kind="G", private_rows=0, layer=0):
         super().__init__()
@@ -42,22 +42,26 @@ class Block(nn.Module):
                       else None)                                       # yalnız dikkat: ikinci norm yok
         self.attn = Attention(cfg, window=cfg.local_window if kind == "Y" else 0)
         self.mlp = SwiGLU(cfg.d_model, cfg.ff_dim(), cfg.mlp_bias) if cfg.shared_mlp else None
-        self.private = (nn.Parameter(torch.empty(private_rows, 3 * cfg.d_model))
-                        if private_rows and cfg.private_neurons else None)
+        k = cfg.private_neurons if private_rows else 0
+        self.priv_names = ["private" if j == 0 else "private%d" % (j + 1) for j in range(k)]
+        if not k:
+            self.private = None
+        for name in self.priv_names:
+            setattr(self, name, nn.Parameter(torch.empty(private_rows, 3 * cfg.d_model)))
         has_v = private_rows and cfg.private_value and (not cfg.private_value_layers or layer + 1 in cfg.private_value_layers)
         self.private_v = nn.Parameter(torch.empty(private_rows, cfg.n_kv_heads * cfg.dh())) if has_v else None
         # V vektörü kapısı: kv head başına, girdinin ve V vektörünün ilk 6 kanalından (modded-nanoGPT)
         self.vgate = nn.Linear(12, cfg.n_kv_heads, bias=False) if has_v and cfg.private_value_gate else None
 
-    def private_out(self, xn, rows=None, priv=None):
-        """xn (B, N, d) -> (B, N, d).  rows (B, N): tam tablodan; priv = (loc (B, N), {"private": sub (R, 3d)}, plan):
-        eğitimde adımda geçen satırların kopyası, birleşik çekirdekle (ara (B, N, 3d) tensör yok)."""
+    def private_out(self, xn, rows=None, priv=None, name="private"):
+        """Tek özel nöron tablosu (name).  xn (B, N, d) -> (B, N, d).  rows (B, N): tam tablodan; priv = (loc (B, N),
+        {name: sub (R, 3d)}, plan): eğitimde adımda geçen satırların kopyası, birleşik çekirdekle (ara (B, N, 3d) yok)."""
         B, N, D = xn.shape
         if priv is not None:
             from rgn.model.private_kernel import private_neuron
             loc, sub, plan = priv
-            return private_neuron(xn.reshape(B * N, D), loc.reshape(-1), sub["private"], plan).view(B, N, D)
-        w = F.embedding(rows, self.private).view(B, N, 3, D).to(xn.dtype)
+            return private_neuron(xn.reshape(B * N, D), loc.reshape(-1), sub[name], plan).view(B, N, D)
+        w = F.embedding(rows, getattr(self, name)).view(B, N, 3, D).to(xn.dtype)
         a = F.silu((w[..., 0, :] * xn).sum(-1)) * (w[..., 1, :] * xn).sum(-1)
         return a.unsqueeze(-1) * w[..., 2, :]
 
@@ -81,8 +85,10 @@ class Block(nn.Module):
             m = self.mlp(xn)
             out = out + m
         p = None
-        if self.private is not None:
-            p = self.private_out(xn, rows, priv)
+        for name in self.priv_names:
+            q = self.private_out(xn, rows, priv, name)
+            p = q if p is None else p + q
+        if p is not None:
             out = out + p
         if parts is not None:
             parts.update(attn=a, mlp=m, private=p)
@@ -137,7 +143,7 @@ class RGNModel(nn.Module):
         for name, p in self.named_parameters():
             if name.endswith(("attn.w_aux.weight", "vgate.weight")):
                 nn.init.zeros_(p)
-            elif name.endswith(".private"):
+            elif name.rsplit(".", 1)[-1].startswith("private") and not name.endswith(".private_v"):
                 nn.init.normal_(p, 0.0, std)
                 p.data.view(p.shape[0], 3, -1)[:, 2].zero_()
             elif name.endswith(".private_v"):                            # std 0: başlangıçta tabanla aynı
@@ -159,7 +165,7 @@ class RGNModel(nn.Module):
         """Kelimeye özel tablolar [(blok sırası, ad, parametre)] — named_parameters sırasıyla (RowAdam'ın sırası)."""
         out = []
         for i, b in enumerate(self.blocks):
-            for name in ("private", "private_v"):
+            for name in b.priv_names + ["private_v"]:
                 p = getattr(b, name)
                 if p is not None:
                     out.append((i, name, p))

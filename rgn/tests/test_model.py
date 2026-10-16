@@ -122,7 +122,8 @@ def test_private_row_copy_matches_full():
     """Eğitim yolu (yalnız geçen satırların kopyası) tam tablo yoluyla aynı kaybı ve aynı satır gradyanlarını verir
     (nöron, V vektörü, ikisi birlikte)."""
     with private_vocab(range(1, 40)) as rel:
-        for kw in (dict(private_neurons=1), dict(private_value=1), dict(private_neurons=1, private_value=1)):
+        for kw in (dict(private_neurons=1), dict(private_value=1), dict(private_neurons=1, private_value=1),
+                   dict(private_neurons=2)):
             torch.manual_seed(0)
             m = RGNModel(tiny(private_vocab=rel, **kw))
             tables = m.private_tables()

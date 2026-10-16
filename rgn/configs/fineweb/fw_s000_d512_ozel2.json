@@ -1,0 +1,8 @@
+{
+  "extends": "fw_s000_d512_tf_yg_ozel_rms.json",
+  "name": "fw_s000_d512_ozel2",
+  "notes": "H1: kelime başına katman başına 2 özel nöron (nöron başına ayrı tablo; 1,23B özel parametre). Kıyas 3000: 1 nöron 3,7611, taban 3,8205.",
+  "model": {
+    "private_neurons": 2
+  }
+}

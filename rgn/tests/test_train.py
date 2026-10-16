@@ -62,6 +62,7 @@ def test_resume_equals_uninterrupted():
         for opt in ("rms", "adam"):
             _resume_equal(["model.private_neurons=1", "model.private_vocab=" + rel, "train.private_opt=" + opt])
         _resume_equal(["model.private_neurons=1", "model.private_value=1", "model.private_vocab=" + rel])
+        _resume_equal(["model.private_neurons=2", "model.private_vocab=" + rel])
 
 
 def test_row_adam_per_row_bias():
