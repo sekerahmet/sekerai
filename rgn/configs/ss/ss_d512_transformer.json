@@ -1,10 +1,8 @@
 {
   "extends": "../base/train_ss.json",
   "name": "ss_d512_transformer",
-  "notes": "Karşılaştırma tabanı: softmax (QK-norm) + RoPE + SwiGLU, aynı iskelet ve bütçe",
+  "notes": "Yerel katmansız kıyas: bütün katmanlar genel (tam causal). Tam epok 1,5196.",
   "model": {
-    "attn": "softmax",
-    "pos": "rope",
-    "mlp": "swiglu"
+    "local_window": 0
   }
 }

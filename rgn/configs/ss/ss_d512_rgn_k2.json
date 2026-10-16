@@ -1,8 +1,0 @@
-{
-  "extends": "../base/train_ss.json",
-  "name": "ss_d512_rgn_k2",
-  "notes": "Keskinlik üssü k = 2: w = (1 + γd/2)^-2 (ağır kuyruk inceltilir; k → ∞ iken e^(-γd)). Gerekçe: k = 1'de dikkat top1 0,047, transformer 0,263 (SS, 15 Ekim)",
-  "model": {
-    "sharpness": 2
-  }
-}

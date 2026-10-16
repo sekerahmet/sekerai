@@ -7,7 +7,6 @@
     model.pt        bitişte model ağırlıkları + yapılandırma
     results.json    özet: son / en iyi doğrulama, hız, bellek, parametre, ortam
     samples.json    bitişte greedy örnekler
-    speed.json      bitişte hız profili (rgn/bench/profile_run.py)
     stopped         SIGTERM (colab/runner.py kapat) ile durdurulduysa: checkpoint kaydedilip çıkılır; --resume sürdürür
 """
 import contextlib
@@ -22,18 +21,17 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from rgn.config import RunConfig
 from rgn.data.loader import load_streams
-from rgn.model import RGNModel
-from rgn.model.private_kernel import make_plan
+from rgn.model import RGNModel, story_masks
 from rgn.paths import runs_dir
 from rgn.train import checkpoint
 from rgn.train.diagnostics import diagnose, summary_line
 from rgn.train.evaluate import evaluate, evaluate_rows, probes, samples
 from rgn.train.optim import build_optimizer, param_groups
 from rgn.train.schedule import lr_factor
+from rgn.train.step import train_step
 
 
 def _device():
@@ -63,11 +61,10 @@ def _env():
 
 
 def train(cfg: RunConfig, out_dir=None, resume=False):
-    tc, dc = cfg.train, cfg.data
+    tc, dc, mc = cfg.train, cfg.data, cfg.model
     device = _device()
     torch.manual_seed(tc.seed)
-    # TF32 bilinçli olarak KAPALI: bf16 autocast altında fp32 kalan tek matris çarpımı çekim dikkatidir (rgn_fp32) ve
-    # TF32 onu ~1e-3 göreli hataya düşürür (yakın eşleşme iptal hatası; doküman 3.5).  Diğer çarpımlar zaten bf16.
+    # TF32 kapalı: eğitim çarpımları bf16; fp32 kalan (değerlendirmede logit) ölçüm tutarlılığı için tam fp32
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     ctx = _autocast(device, tc.dtype)
@@ -81,10 +78,9 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
     story = dc.layout == "story"
     if story:                                                    # hikâye / cümle dizilimi (rgn/data/stories.py)
         from rgn.data.stories import load_story_rows
-        from rgn.model.attention import story_masks
         train_rows = load_story_rows(train_s.arrays[0], dc.story_root, "train")
         valid_rows = load_story_rows(valid_s.arrays[0], dc.story_root, "valid")
-    model = RGNModel(cfg.model).to(device)
+    model = RGNModel(mc).to(device)
     model.loss_checkpoint = tc.loss_checkpoint
     n_params = model.num_params()
     T = dc.seq_len
@@ -98,7 +94,7 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
     step, t_start = 0, time.time()
     best = None
 
-    def say(msg):                                   # AI_NEW_MODEL v2 günlük biçimi: [geçen sn] mesaj
+    def say(msg):                                   # günlük biçimi: [geçen sn] mesaj
         print("[%8.1f sn] %s" % (time.time() - t_start, msg), flush=True)
 
     ckpt_path = out / "checkpoint.pt"
@@ -120,28 +116,28 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
         say("SÜRDÜRÜLDÜ adım %d'den (checkpoint.pt)" % step)
 
     fwd = torch.compile(model) if (tc.compile and device.type == "cuda") else model
+    # kelimeye özel satır kopyası: bf16 eğitimde bf16 (çekirdek fp32 biriktirir), fp32 eğitimde fp32
+    priv_dtype = torch.bfloat16 if (device.type == "cuda" and tc.dtype == "bf16") else torch.float32
     val_windows = valid_s.fixed_windows(T, dc.eval_tokens)
     diag_x = val_windows[:4, :-1].to(device)
     if story:
         val_rows = valid_rows.fixed_rows(T, dc.eval_tokens)
         say("hikâye dizilimi: doğrulama %d satır, %d token (dolgu %%%.1f) | yerel katman %s" % (
             len(val_rows[0]), int((val_rows[1] != -100).sum()), 100 * float((val_rows[1] == -100).float().mean()),
-            "cümle + hikâye başı" if cfg.model.local_sentence else "pencere %d" % cfg.model.local_window))
+            "cümle + hikâye başı" if mc.local_sentence else "pencere %d" % mc.local_window))
     eval_batch = max(1, micro)
 
     log.write(type="start", step=step, total_steps=total_steps, stop_step=tc.stop_step, tokens_per_step=tokens_per_step,
-              params=n_params,
-              resumed=bool(resume and step), t=time.time())
-    mc = cfg.model
+              params=n_params, resumed=bool(resume and step), t=time.time())
     per_epoch = math.ceil(train_s.total / tokens_per_step)
     decay_start = int(total_steps * (1 - tc.decay)) if tc.schedule == "wsd" else None
     gpu = torch.cuda.get_device_name(0) if device.type == "cuda" else "cpu"
-    if mc.local_window:
-        say("katmanlar %s (Y: yerel, son %d token, konum %s, d_ff %d | G: genel, tam, konum %s, d_ff %d)" % (
-            mc.layer_kinds(), mc.local_window, mc.pos, mc.ff_dim("Y"), mc.global_pos or mc.pos, mc.ff_dim("G")))
-    say("%s | attn %s pos %s mlp %s p %d | D %d, katman %d, head %d (kv %d), d_ff %d, %d parametre" % (
-        cfg.name, mc.attn, mc.pos, mc.mlp, mc.power, mc.d_model, mc.n_layers, mc.n_heads, mc.n_kv_heads, mc.ff_dim(),
-        n_params))
+    n_priv = sum(b.private.numel() for b in model.private_blocks())
+    say("%s | katmanlar %s (Y: son %d token) | D %d, head %d (kv %d), d_ff %d | kapı %s | kelimeye özel %s | "
+        "%d parametre (%d özel)" % (
+            cfg.name, mc.layer_kinds(), mc.local_window, mc.d_model, mc.n_heads, mc.n_kv_heads, mc.ff_dim(),
+            mc.attn_gate or "yok",
+            "%d satır, %s" % (model.blocks[0].private.shape[0], tc.private_opt) if n_priv else "yok", n_params, n_priv))
     say("veri %s %.1fM token | pencere %d, %d × %d = %d token/adım (mikro %d × %d) | %d adım/epok, toplam %d adım "
         "(%.2f epok)%s | lr %g (adam %g) %s, ısınma %d adım | cihaz %s, compile %s, %s | değerlendirme %d pencere" % (
             dc.dataset, train_s.total / 1e6, T, tc.batch_size, T, tokens_per_step, accum, micro, per_epoch, total_steps,
@@ -159,12 +155,12 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
         if story:
             rows = valid_rows.fixed_rows(T, dc.final_eval_tokens) if final else val_rows
             r = evaluate_rows(model, rows, eval_batch, device, ctx, bytes_per_token,
-                              window=0 if cfg.model.local_sentence else cfg.model.local_window)
+                              window=0 if mc.local_sentence else mc.local_window)
         else:
             windows = valid_s.fixed_windows(T, dc.final_eval_tokens) if final else val_windows
             r = evaluate(model, windows, eval_batch, device, ctx, bytes_per_token)
         # cümle yerel modeli maskesiz üretemez (örnek / teşhis maskesiz yol)
-        r["probes"] = probes(model, device, tc.probe_tokens) if tc.probe_tokens and not cfg.model.local_sentence else []
+        r["probes"] = probes(model, device, tc.probe_tokens) if tc.probe_tokens and not mc.local_sentence else []
         best = r["loss"] if best is None else min(best, r["loss"])
         log.write(type="eval", step=step, final=final, t=time.time(), **r)
         say("DEĞERLENDİRME%s adım %d: kayıp %.4f  ppl %.2f  bpb %s  doğruluk %.4f  bant %s | %d token (%.1f sn)" % (
@@ -175,7 +171,7 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
         return r
 
     def run_diag():
-        if cfg.model.local_sentence:
+        if mc.local_sentence:
             return
         d = diagnose(model, diag_x, ctx)
         log.write(type="diag", step=step, **d)
@@ -201,62 +197,35 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
         f = lr_factor(step, total_steps, tc.schedule, tc.warmup, tc.decay, tc.min_lr_frac)
         for g in opt.param_groups:
             g["lr"] = g["base_lr"] * f
-        loss_sum, obs_sum = 0.0, 0.0
-        mbs = []
+        batches = []
         for _ in range(accum):
             masks = None
             if story:
                 x, y, doc, sent = train_rows.random_batch(micro, T, rng)
-                masks = story_masks(doc.to(device), sent.to(device), 0 if cfg.model.local_sentence else cfg.model.local_window)
+                masks = story_masks(doc.to(device), sent.to(device), 0 if mc.local_sentence else mc.local_window)
             else:
                 x, y = train_s.random_batch(micro, T, rng)
-            mbs.append((x.to(device, non_blocking=True), y.to(device, non_blocking=True), masks))
-        priv = sub = None
-        if model.priv_map is not None:                      # kelimeye özel: yalnız bu adımda geçen satırların kopyası
-            uniq = torch.unique(torch.cat([model.priv_map[x].flatten() for x, _, _ in mbs]))
-            dt = torch.bfloat16 if device.type == "cuda" else torch.float32   # kopya bf16 (çekirdek fp32 biriktirir)
-            sub = [b.private.detach().index_select(0, uniq).to(dt).requires_grad_() for b in model.private_blocks()]
-        for x, y, masks in mbs:
-            if sub is not None:                             # birleşik çekirdek: satır sırası + katman başına kopya
-                loc = torch.searchsorted(uniq, model.priv_map[x])
-                priv = (loc, sub, make_plan(loc.flatten(), len(uniq))) if loc.is_cuda else (loc, sub)  # plan bir kez
-            with ctx:
-                res = fwd(x, y, masks, priv) if (masks is not None or priv is not None) else fwd(x, y)
-            if isinstance(res, tuple):                        # gözlemci: kaydedilen kayıp yalnız ana kayıp
-                main, aux = res
-                (main / accum + cfg.model.observer_aux_weight * aux / accum).backward()
-                loss_sum += main.detach() / accum
-                obs_sum += aux.detach() / accum
-            else:
-                loss = res / accum
-                loss.backward()
-                loss_sum += loss.detach()
-        clip = list(model.parameters()) + (sub or [])
-        gn = torch.nn.utils.clip_grad_norm_(clip, tc.grad_clip) if tc.grad_clip else torch.tensor(0.0)
-        if opt.row_adam is not None:
-            opt.row_adam.set_rows(uniq, [s.grad for s in sub])
-        opt.step()
-        opt.zero_grad(set_to_none=True)
+            batches.append((x, y, masks))
+        loss_sum, gn = train_step(model, fwd, opt, batches, ctx, tc.grad_clip, device, priv_dtype)
         step += 1
 
         if step % tc.log_every == 0 or step == total_steps:
             if device.type == "cuda":
                 torch.cuda.synchronize()
             win_steps, win_sec = step - s_log, time.time() - t_log
-            dt = win_sec / max(1, win_steps)
+            sec = win_sec / max(1, win_steps)
             first_win = not step_ms and s_log == start_step
             if not first_win:                             # ilk pencere derleme süresini içerir
-                step_ms.append(dt * 1000)
+                step_ms.append(sec * 1000)
             t_log, s_log = time.time(), step
             mem = torch.cuda.max_memory_allocated() / 2 ** 30 if device.type == "cuda" else 0.0
             lv = float(loss_sum)
             log.write(type="train", step=step, loss=lv, lr=opt.param_groups[0]["lr"], grad_norm=float(gn),
-                      ms=dt * 1000, tok_s=tokens_per_step / dt, mem_gb=mem, t=time.time(),
-                      **({"obs_loss": float(obs_sum)} if torch.is_tensor(obs_sum) else {}))
+                      ms=sec * 1000, tok_s=tokens_per_step / sec, mem_gb=mem, t=time.time())
             say("adım %d / %d (epok %.3f)  lr %.3g  kayıp %.4f  grad %.3f | pencere %d adım %.1f sn  %.1f ms/adım  "
                 "%d tok/sn  tepe %.1f GB  kalan ~%.0f dk%s" % (
                     step, total_steps, step / per_epoch, opt.param_groups[0]["lr"], lv, float(gn), win_steps, win_sec,
-                    dt * 1000, tokens_per_step / dt, mem, (total_steps - step) * dt / 60,
+                    sec * 1000, tokens_per_step / sec, mem, (total_steps - step) * sec / 60,
                     "  (ilk pencere: derleme dahil)" if first_win else ""))
             if not math.isfinite(lv):
                 raise FloatingPointError("kayıp sonlu değil (adım %d)" % step)
@@ -275,11 +244,7 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
     final = run_eval(final=True)
     run_diag()
     torch.save({"model": model.state_dict(), "config": cfg.to_dict()}, out / "model.pt")
-    speed = None
-    if tc.profile_after:                                         # örnek üretimden ÖNCE (derleme önbelleği temizken)
-        from rgn.bench.profile_run import profile_after_run
-        speed = profile_after_run(model, cfg, device, ctx, out / "speed.json")
-    smp = [] if cfg.model.local_sentence else samples(model, device, tc.sample_tokens)
+    smp = [] if mc.local_sentence else samples(model, device, tc.sample_tokens)
     (out / "samples.json").write_text(json.dumps(smp, indent=1, ensure_ascii=False), encoding="utf-8")
     for s in smp[:2]:
         say("SON örnek | %r" % s["text"][:200])
@@ -291,8 +256,6 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
         "peak_mem_gb": peak_mem,
         "wall_min": (time.time() - t_start) / 60, "env": _env(), "config": cfg.to_dict(),
     }
-    if speed:
-        results["speed"] = {k: speed.get(k) for k in ("attention", "block", "inference")}
     (out / "results.json").write_text(json.dumps(results, indent=1, ensure_ascii=False), encoding="utf-8")
     (out / "stopped").unlink(missing_ok=True)
     say("BİTTİ: %s | son kayıp %.4f  bpb %s  doğruluk %.4f | %s ms/adım  %.1f dk" % (

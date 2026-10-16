@@ -1,8 +1,0 @@
-{
-  "extends": "../base/train_ss.json",
-  "name": "ss_d512_rgn_p2",
-  "notes": "Çekim üssü ablation: w = 1/(1 + γ||q̂-k̂||⁴ + β(i-j)) (power 2); kısmi eşleşme ayrımı 4x -> 16x (doküman 2.3)",
-  "model": {
-    "power": 2
-  }
-}

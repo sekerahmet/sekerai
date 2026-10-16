@@ -1,12 +1,11 @@
-"""RGN — Rasyonel Çekim Ağı (Rational Gravity Network).
+"""rgn — küçük decoder-only dil modeli: YYG transformer (yerel / genel dikkat katmanları) + kelimeye özel nöron.
 
-Decoder-only dil modeli: ters kare çekim dikkati + rasyonel MLP.  Tasarım: docs/RGN_tasarim_dokumani.md
+Paket adı tarihsel (eski RGN çekim dikkati deneyleri git etiketi arsiv/rgn'de).
 
 Alt paketler:
-    rgn.model  — model bileşenleri (dikkat, MLP, konum, normalizasyon, RGNModel)
-    rgn.data   — veri setleri (kayıt, hazırlama, yükleyici)
-    rgn.train  — eğitim döngüsü, optimizer, değerlendirme, teşhis, checkpoint
-    rgn.bench  — hız ve bellek profilleri
+    rgn.model  — model bileşenleri (dikkat, SwiGLU, RoPE, RMSNorm, özel nöron çekirdeği, RGNModel)
+    rgn.data   — veri setleri (kayıt, yükleyici, hikâye düzeni)
+    rgn.train  — eğitim döngüsü ve adımı, optimizer, değerlendirme, teşhis, checkpoint
 """
 from rgn.config import DataConfig, ModelConfig, RunConfig, TrainConfig, load_config
 from rgn.model import RGNModel

@@ -1,8 +1,11 @@
 {
   "extends": "ss_d512_tf_yg.json",
   "name": "ss_d512_tf_yg_ozel",
-  "notes": "Taban YYG + her katmanda her kelimeye ÖZEL 1 nöron (kullanıcı, 16 Ekim: 'her kelimeye eşit ve özel parametre, yalnız o kelimeye özgü çalışsın'): a = SiLU(g·x)(u·x), akışa a·d, ortak MLP'ye paralel; g, u, d kelimeye ait (8 katman × 1.536 = 12.288 parametre / kelime), yalnız kelime geçince çalışır ve güncellenir. SS eğitiminde geçen 28.290 kelime (assets/ss_vocab_used.json), gerisi tek ortak satır; ~348M özel parametre, hesap ~aynı. d sıfır başlatma (başlangıçta taban); AdamW, bozunmasız. Kıyas: taban YYG 3000. adım 1,7379.",
+  "notes": "Taban + kelimeye özel nöron (her katmanda her kelimenin kendi nöronu; SS'de geçen 28.290 kelime, ~348M özel parametre). Özel tablolar satır seyrek Adam ile (bu koşunun ayarı). Tam epok 1,4921 (taban 1,5160).",
   "model": {
     "private_neurons": 1
+  },
+  "train": {
+    "private_opt": "adam"
   }
 }

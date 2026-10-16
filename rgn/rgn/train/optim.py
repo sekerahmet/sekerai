@@ -1,4 +1,5 @@
-"""Optimizer: blokların 2-B matrisleri Muon / NorMuon'a; embedding, normlar, bias'lar, γ̂ ve β̂ AdamW'ye.
+"""Optimizer: blokların 2-B matrisleri Muon / NorMuon'a; gömme, normlar, bias'lar, kapı AdamW'ye; kelimeye özel
+tablolar satır seyrek RowAdam'a.
 
 Muon güncellemesinin RMS'i AdamW'ninkiyle eşlenir (ölçek 0.2·sqrt(max(m, n)), torch.optim.Muon "match_rms_adamw"); bu
 yüzden lr AdamW ölçeğinde verilir ve AI_NEW_MODEL/v2 ayarları (lr 2e-3) doğrudan taşınabilir.
@@ -78,81 +79,83 @@ class Muon(torch.optim.Optimizer):
                     p.add_(O[j].to(p.dtype), alpha=-g["lr"])
 
 
-def _row_adam_eager(p, m, v, rr, gr, lr, b1, b2, eps, bc1, bc2):
+def _row_adam_eager(p, m, v, n, rr, gr, lr, b1, b2, eps):
+    nr = n.index_select(0, rr) + 1
     mr = m.index_select(0, rr) * b1 + gr * (1 - b1)
     vr = v.index_select(0, rr) * b2 + gr * gr * (1 - b2)
+    n.index_copy_(0, rr, nr)
     m.index_copy_(0, rr, mr)
     v.index_copy_(0, rr, vr)
-    p.index_add_(0, rr, (-lr) * (mr / bc1) / ((vr / bc2).sqrt() + eps))
+    p.index_add_(0, rr, (-lr) * (mr / (1 - b1 ** nr)) / ((vr / (1 - b2 ** nr)).sqrt() + eps))
 
 
-def _row_rms_eager(p, v, rr, gr, lr, b2, eps, bc2):
+def _row_rms_eager(p, v, n, rr, gr, lr, b2, eps):
+    nr = n.index_select(0, rr) + 1
     vr = v.index_select(0, rr) * b2 + (gr * gr).mean(1, keepdim=True) * (1 - b2)
+    n.index_copy_(0, rr, nr)
     v.index_copy_(0, rr, vr)
-    p.index_add_(0, rr, (-lr) * gr / ((vr / bc2).sqrt() + eps))
+    p.index_add_(0, rr, (-lr) * gr / ((vr / (1 - b2 ** nr)).sqrt() + eps))
 
 
-_ROW_ADAM = {}
+_ROW = {}
 
 
-def _row_adam(p, *args):
-    """CUDA'da derlenmiş (topla / güncelle / geri yaz tek çekirdek grubunda; satır sayısı dinamik)."""
+def _row_update(name, fn, p, *args):
+    """CUDA'da derlenmiş (topla / güncelle / geri yaz; satır sayısı dinamik)."""
     if not p.is_cuda:
-        return _row_adam_eager(p, *args)
-    if "fn" not in _ROW_ADAM:
-        _ROW_ADAM["fn"] = torch.compile(_row_adam_eager, dynamic=True)
-    return _ROW_ADAM["fn"](p, *args)
-
-
-def _row_rms(p, *args):
-    if not p.is_cuda:
-        return _row_rms_eager(p, *args)
-    if "rms" not in _ROW_ADAM:
-        _ROW_ADAM["rms"] = torch.compile(_row_rms_eager, dynamic=True)
-    return _ROW_ADAM["rms"](p, *args)
+        return fn(p, *args)
+    if name not in _ROW:
+        _ROW[name] = torch.compile(fn, dynamic=True)
+    return _ROW[name](p, *args)
 
 
 class RowAdam(torch.optim.Optimizer):
-    """Satır seyrek Adam (kelimeye özel tablolar): yalnız `rows` satırları (o adımda geçen kelimeler) güncellenir;
-    diğer satırların ağırlığı ve momentleri dokunulmaz (tembel Adam, gömme tabloları için standart).  Bias düzeltmesi
-    adım sayısıyla.  rows trainer tarafından her adımdan önce verilir (set_rows)."""
+    """Satır seyrek Adam (kelimeye özel tablolar): yalnız `rows` satırları (o adımda geçen kelimeler) güncellenir; diğer
+    satırların ağırlığı ve durumu dokunulmaz (tembel Adam).  Bias düzeltmesi SATIR BAŞINA güncelleme sayısıyla (n): ilk
+    kez görülen satır, genel adım sayısından bağımsız olarak doğru ölçekle başlar.
+    mode rms: momentsiz, satır başına tek ikinci moment (v (satır, 1)) | adam: m, v eleman eleman."""
 
-    def __init__(self, params, lr, betas=(0.9, 0.95), eps=1e-8, mode="adam"):
-        """mode adam: m, v satır satır | rms: momentsiz, satır başına tek ikinci moment (v (satır, 1))."""
+    def __init__(self, params, lr, betas=(0.9, 0.95), eps=1e-8, mode="rms"):
         assert mode in ("adam", "rms")
         super().__init__(params, dict(lr=lr, betas=betas, eps=eps))
         self.mode = mode
         self.rows, self.grads = None, None
+        self._lr = None                                    # lr cihazda kalıcı (her adım fill_: CPU -> GPU senkronu yok)
 
     def set_rows(self, rows, grads=None):
-        """rows: güncellenecek satırlar; grads: (varsa) parametre sırasıyla bu satırların gradyanları (len(rows), ...)
-        — satır kopyası yolu (tam boy gradyan yok)."""
+        """rows: güncellenecek satırlar; grads: parametre sırasıyla bu satırların gradyanları (len(rows), ...) — satır
+        kopyası yolu; None ise p.grad'dan okunur."""
         self.rows, self.grads = rows, grads
+
+    def _state(self, p):
+        st = self.state[p]
+        if not st:
+            st["n"] = torch.zeros(p.shape[0], 1, device=p.device)
+            st["v"] = torch.zeros(p.shape[0], 1, device=p.device) if self.mode == "rms" else torch.zeros_like(p)
+            if self.mode == "adam":
+                st["m"] = torch.zeros_like(p)
+        assert ("m" in st) == (self.mode == "adam"), "RowAdam durumu %s modunda değil (private_opt değişmiş)" % self.mode
+        if "n" not in st:                                  # eski checkpoint (genel adım sayılı): sayaç oradan başlar
+            st["n"] = torch.full((p.shape[0], 1), float(st.pop("step", 0)), device=p.device)
+        return st
 
     @torch.no_grad()
     def step(self):
-        r = self.rows
         for g in self.param_groups:
             b1, b2 = g["betas"]
             for i, p in enumerate(g["params"]):
                 if self.grads is None and p.grad is None:
                     continue
-                st = self.state[p]
-                if not st:
-                    if self.mode == "rms":
-                        st["v"] = torch.zeros(p.shape[0], 1, device=p.device)
-                    else:
-                        st["m"], st["v"] = torch.zeros_like(p), torch.zeros_like(p)
-                    st["step"] = 0
-                st["step"] += 1
-                rr = r if r is not None else torch.arange(p.shape[0], device=p.device)
+                if self._lr is None:
+                    self._lr = torch.zeros((), device=p.device)
+                self._lr.fill_(g["lr"])
+                st = self._state(p)
+                rr = self.rows if self.rows is not None else torch.arange(p.shape[0], device=p.device)
                 gr = (self.grads[i] if self.grads is not None else p.grad.index_select(0, rr)).float()
-                t = st["step"]
-                sc = lambda z: torch.tensor(z, dtype=torch.float32, device=p.device)  # noqa: E731 (derlemede sabit değil)
                 if self.mode == "rms":
-                    _row_rms(p, st["v"], rr, gr, sc(g["lr"]), b2, g["eps"], sc(1 - b2 ** t))
+                    _row_update("rms", _row_rms_eager, p, st["v"], st["n"], rr, gr, self._lr, b2, g["eps"])
                 else:
-                    _row_adam(p, st["m"], st["v"], rr, gr, sc(g["lr"]), b1, b2, g["eps"], sc(1 - b1 ** t), sc(1 - b2 ** t))
+                    _row_update("adam", _row_adam_eager, p, st["m"], st["v"], st["n"], rr, gr, self._lr, b1, b2, g["eps"])
 
 
 class CombinedOptimizer:
@@ -188,9 +191,9 @@ def param_groups(model, use_muon):
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        if ".private" in name:                     # kelimeye özel tablo: satır seyrek Adam (build_optimizer)
+        if ".private" in name:                     # kelimeye özel tablo: RowAdam (build_optimizer)
             continue
-        elif use_muon and name.startswith("blocks.") and p.dim() == 2:
+        if use_muon and name.startswith("blocks.") and p.dim() == 2:
             muon.append(p)
         elif p.dim() >= 2:
             decay.append(p)

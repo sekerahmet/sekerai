@@ -1,9 +1,12 @@
 {
   "extends": "fw_s000_d512_tf_yg.json",
   "name": "fw_s000_d512_tf_yg_ozel",
-  "notes": "FineWeb-Edu s000 YYG + her katmanda her kelimeye özel 1 nöron (SS'de 3000. adımda −0,027). s000 eğitiminde geçen 50.001 kelime (assets/fw_s000_vocab_used.json; 48.365'i >= 100 kez), 12.288 parametre / kelime, ~614M özel, toplam ~665M; hesap ~aynı. Kıyas: fw_s000_d512_tf_yg aynı adımda.",
+  "notes": "FineWeb taban + kelimeye özel nöron (s000'da geçen 50.001 kelime, ~614M özel, toplam ~665M). Özel tablolar satır seyrek Adam. 3000. adım 3,7558 (taban 3,8205).",
   "model": {
     "private_neurons": 1,
     "private_vocab": "assets/fw_s000_vocab_used.json"
+  },
+  "train": {
+    "private_opt": "adam"
   }
 }

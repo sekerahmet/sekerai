@@ -1,7 +1,7 @@
 {
   "extends": "../ss/ss_d512_tf_yg.json",
   "name": "fw_s000_d512_tf_yg",
-  "notes": "FineWeb-Edu s000 (v2 ayrımı: doğrulama aynı parçadan her 50. belge) tabanı: SS'deki YYG'nin aynısı (d512, 8 katman, YYGYGYYG, yerel pencere 128), pencere 1024, adım başına 64 × 1024 = 65.536 token (SS ile aynı), 1 epok = ~11.250 adım. Kelimeye özel nöron kıyası için taban (aynı kod, aynı veri). v2 FineWeb koşularıyla kayıp kıyaslanmaz (farklı kod / model).",
+  "notes": "FineWeb-Edu s000 tabanı: SS'deki YYG'nin aynısı, pencere 1024, 64 × 1024 = 65.536 token/adım, 1 epok ~11.250 adım.",
   "data": {
     "dataset": "fineweb_s000",
     "seq_len": 1024

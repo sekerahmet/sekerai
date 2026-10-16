@@ -1,9 +1,9 @@
-"""Kelimeye özel nöronun birleşik Triton çekirdeği (ileri + geri; kullanıcı, 16 Ekim: "özel çekirdek mantıklı").
+"""Kelimeye özel nöronun birleşik Triton çekirdeği (ileri + geri).
 
 Token t, satırı r = loc[t] (adımda geçen satırların kopyası `sub` içinde), girdi x_t (d):
     g, u, w = sub[r, 0:d], sub[r, d:2d], sub[r, 2d:3d]
     s1 = g·x, s2 = u·x, a = SiLU(s1)·s2,  çıktı = a·w
-Ara (T, 3d) tensör belleğe yazılmaz (eski yol: satırlar önce okunup T × 3d'lik bir tensöre kopyalanıyordu).
+Ara (T, 3d) tensör belleğe yazılmaz.
 Geri (çıktı gradyanı δ):
     da = δ·w,  ds1 = da·s2·SiLU'(s1),  ds2 = da·SiLU(s1)
     dx = ds1·g + ds2·u                                   (token başına çekirdek)
@@ -35,7 +35,7 @@ def _kernels():
 
     @triton.jit
     def fwd(X, LOC, SUB, OUT, S, sx, ss, so, D: tl.constexpr):
-        t = tl.program_id(0)
+        t = tl.program_id(0).to(tl.int64)
         r = tl.load(LOC + t).to(tl.int64)
         o = tl.arange(0, D)
         x = tl.load(X + t * sx + o).to(tl.float32)
@@ -49,7 +49,7 @@ def _kernels():
 
     @triton.jit
     def bwd_tok(DO, X, LOC, SUB, S, DX, C, sdo, sx, ss, sdx, D: tl.constexpr):
-        t = tl.program_id(0)
+        t = tl.program_id(0).to(tl.int64)
         r = tl.load(LOC + t).to(tl.int64)
         o = tl.arange(0, D)
         b = SUB + r * ss
@@ -117,6 +117,7 @@ def make_plan(loc, R):
 def private_fwd(x: torch.Tensor, loc: torch.Tensor, sub: torch.Tensor, order: torch.Tensor, crow: torch.Tensor,
                 clo: torch.Tensor, chi: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     T, D = x.shape
+    assert D & (D - 1) == 0 and sub.shape[1] == 3 * D, "d 2'nin kuvveti, satır 3d (tek nöron)"
     out = torch.empty_like(x)
     s = torch.empty((T, 2), device=x.device, dtype=torch.float32)
     _kernels()["fwd"][(T,)](x, loc, sub, out, s, x.stride(0), sub.stride(0), out.stride(0), D=D, num_warps=4)
@@ -170,5 +171,6 @@ def private_neuron(x, loc, sub, plan=None):
     if x.is_cuda:
         loc = loc.contiguous()
         plan = plan if plan is not None else make_plan(loc, sub.shape[0])
-        return private_fwd(x.contiguous(), loc, sub.contiguous(), *plan)[0]
+        # girdi kopyanın dtype'ında (eğitimde bf16): çekirdek fp32 biriktirir; geri geçiş için saklanan x yarı boyda
+        return private_fwd(x.to(sub.dtype).contiguous(), loc, sub.contiguous(), *plan)[0].to(x.dtype)
     return reference(x, loc, sub)

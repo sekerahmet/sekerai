@@ -13,10 +13,8 @@ from rgn.data.registry import get_spec
 from rgn.paths import cache_dir, drive_root, in_colab
 
 
-def _open(path, fmt):
-    if fmt == "npy":
-        return np.load(path, mmap_mode="r")
-    return np.memmap(path, dtype=np.uint16, mode="r")
+def _open(path, fmt="npy"):
+    return np.load(path, mmap_mode="r")
 
 
 def _local(path, enabled):
@@ -85,13 +83,16 @@ def load_streams(data_cfg):
         return (TokenStream([synthetic_arrays(seed=0)]), TokenStream([synthetic_arrays(50_000, seed=1)]),
                 spec.bytes_per_token)
     root = drive_root()
-    train_files = spec.train[:data_cfg.max_train_files] if data_cfg.max_train_files else spec.train
-    for rel in train_files + spec.valid:
+    for rel in spec.train + spec.valid:
         if not (root / rel).exists():
-            hint = " (hazırlamak için: python scripts/prepare_data.py --dataset %s)" % spec.name if spec.prepare else ""
-            raise FileNotFoundError("%s bulunamadı%s" % (root / rel, hint))
-    train = TokenStream([_open(_local(root / r, data_cfg.local_copy), spec.fmt) for r in train_files])
-    valid_arrays = [_open(_local(root / r, data_cfg.local_copy), spec.fmt) for r in spec.valid]
-    if spec.valid_max_tokens:
-        valid_arrays = [a[:spec.valid_max_tokens] for a in valid_arrays]
-    return train, TokenStream(valid_arrays), spec.resolve_bytes_per_token()
+            raise FileNotFoundError("%s bulunamadı" % (root / rel))
+    train = TokenStream([_open(_local(root / r, data_cfg.local_copy)) for r in spec.train])
+    valid = TokenStream([_open(_local(root / r, data_cfg.local_copy)) for r in spec.valid])
+    return train, valid, spec.bytes_per_token
+
+
+def valid_tokens(dataset="ss", n=0):
+    """Doğrulama akışının başından n token (0: hepsi) -> numpy (analiz betikleri)."""
+    spec = get_spec(dataset)
+    a = _open(drive_root() / spec.valid[0])
+    return np.asarray(a[:n] if n else a)

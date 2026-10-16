@@ -1,9 +1,0 @@
-{
-  "extends": "../base/train_ss.json",
-  "name": "ss_d512_softmax_rational",
-  "notes": "Ablation: yalnız dikkat değişir (çekim -> softmax)",
-  "model": {
-    "attn": "softmax",
-    "pos": "rope"
-  }
-}

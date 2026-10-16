@@ -2,20 +2,19 @@
 
 Deney dosyası (configs/**.json) üç bölümden oluşur; "extends" ile bir taban dosyayı devralır (iç içe birleştirme):
 
-    {"extends": "../base/ss_d512.json", "name": "ss_d512_rgn",
-     "model": {"attn": "rgn", "mlp": "rational"}, "data": {...}, "train": {...}}
+    {"extends": "ss_d512_tf_yg.json", "name": "ss_d512_tf_yg_ozel", "model": {"private_neurons": 1}}
 
-Komut satırından tek alan ezilebilir:  --set train.lr=1e-3 --set model.pos=alibi
+Komut satırından tek alan ezilebilir:  --set train.lr=1e-3 --set model.attn_gate=head
+
+Model: softmax dikkat + RoPE + SwiGLU, yerel / genel (YYG) katman düzeni, isteğe bağlı kapı ve kelimeye özel nöron.
+Kaldırılan deneyler (RGN çekim dikkati, rasyonel MLP, önem / odak, konum özeti, gözlemci, rota...) git etiketi
+`arsiv/rgn`'de; eski config.json'larda görünen alanları REMOVED tablosu karşılar.
 """
 import dataclasses
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-ATTN = ("rgn", "softmax")
-ATTN_IMPL = ("auto", "triton", "dense", "flex", "sdpa")
-POS = ("rope", "alibi", "additive", "rope+alibi", "none")
-MLP = ("rational", "rglu", "glu", "swiglu")
 OPTIMIZERS = ("adamw", "muon", "normuon")
 SCHEDULES = ("wsd", "cosine", "constant")
 
@@ -27,157 +26,48 @@ class ModelConfig:
     n_layers: int = 8
     n_heads: int = 8
     n_kv_heads: int = 8                # < n_heads: GQA
-    d_ff: int = 0                      # 0: otomatik (rational 4D; glu / swiglu 8D/3, 64'ün katı)
-    attn: str = "rgn"                  # rgn: ters kare çekim | softmax: karşılaştırma tabanı
-    attn_impl: str = "auto"            # auto: rgn -> CUDA + Triton + pos rope / none + power 1 ise triton (Flash-RGN); değilse
-                                       # N <= dense_max_len ise dense, değilse flex; softmax -> sdpa
-    dense_max_len: int = 1024          # auto'da dense'in üst sınırı (N×N bellek); ölçüldü: SS d512 N 1024'te dense 299 ms/adım,
-                                       # flex 3800 ms/adım (flex, öğrenilebilir γ/β gradyanını yavaş yoldan topluyor)
-    rgn_fp32: bool = True              # rgn dikkatinde q, k, v fp32 (yakın eşleşmede 2 - 2 q·k iptal hatası; doküman 3.5)
-    rgn_av_bf16: bool = False          # dense yolda w·V çarpımı bf16 (CUDA; q·kᵀ fp32 kalır) — hız seçeneği
-    rgn_qk_prec: str = "tf32x3"        # triton yolunda q·kᵀ: tf32x3 (fp32'ye yakın) | tf32 (tam adım ~%10 hızlı) | ieee
-    pos: str = "rope"                  # rope (varsayılan, kullanıcı 15 Ekim) | additive: payda + β(i-j) | alibi: payda × (1 + β(i-j))
-                                       # | rope+alibi | none
+    d_ff: int = 0                      # 0: SwiGLU 8d/3, 64'ün katı
     rope_base: float = 10000.0
     max_len: int = 4096                # RoPE tablosu boyu
-    power: int = 1                     # uzaklık üssü p: 1/(1 + γ d^p)
-    sharpness: int = 1                 # keskinlik üssü k: (1 + γ d / k)^(-k); k = 1 ters kare, k büyüdükçe e^(-γd)
-    sharpness_learn: bool = False      # head başına öğrenilen k (sharpness_range içinde, başlangıç sharpness_init)
-    sharpness_range: tuple = (1.0, 8.0)   # 8: fp32'de alt taşma güvenliği ((1 + γd/k)^-k, γ ~ 1e5'e kadar)
-    sharpness_init: float = 4.0
-    sharpness_int: bool = False        # öğrenilen k ileri geçişte en yakın tamsayı (kuvvet zinciri, log / exp yok); gradyan
-                                       # sürekli k'ye düz geçer (straight-through)
-    sharpness_range_g: tuple = ()      # genel (G) katmanlarda k aralığı (yerel katmanlar sharpness_range).  Genel katmanda aday
-                                       # çok: kalın kuyruğun toplam payı aday sayısıyla büyür -> daha yüksek tavan
-    gamma_range: tuple = (4.0, 512.0)  # γ başlangıcı, head başına geometrik
-    gamma_min: float = 1.0             # γ = γ_min + γ̂²
-    learn_gamma: bool = True
-    beta_range: tuple = (1.0, 1.0 / 65536)  # β başlangıcı (additive / alibi), head başına geometrik (azalan)
-    local_window: int = 0              # > 0: yerel (Y) katmanlar yalnız son local_window token'a bakar (j > i - W); genel (G)
-                                       # katmanlar tümüne.  0: bütün katmanlar genel (eski düzen)
-    global_layers: int = 0             # local_window > 0 iken genel katman sayısı
-    g_layout: str = "interleave"       # interleave: eşit aralık, son katman G (~Y-Y-G) | top: son N | elle "2,5,7"
-    global_pos: str = ""               # genel katmanlarda konum ("" = pos); "none": konumsuz — ağırlık yalnız anlam uzaklığı
-                                       # (saf çekim; sıra bilgisi yerel katmanlardan ve causal maskeden)
-    ff_ratio: tuple = ()               # (Y, G): MLP / dikkat (4 d²) parametre oranı, katman türüne göre.  Örn. (1, 3): yerel
-                                       # katman dizimi taşır (dar MLP), genel katman anlam çekimiyle toplar (geniş MLP).  (): d_ff
-    # Softmax dikkatinde q / k / v düzeyinde eklemeler (kullanıcı, 15 Ekim: "softmax kalsın, q k v değişsin").  Hepsi
-    # cebirsel ve sıfır başlatmalı: başlangıçta model transformer tabanıyla birebir aynı.
-    #   pay(i, j) = softmax_j( odak_i · q_i·k_j / √dh + önem_j ),   çıktı_i = kapı_i · Σ_j pay(i, j) v_j
-    attn_importance: bool = False      # önem (kütle): anahtar başına, sorgudan bağımsız taban puan ∈ (-importance_max, +)
-    importance_max: float = 4.0
-    attn_focus: bool = False           # odak: sorgu başına keskinlik çarpanı ∈ (0, focus_max), başlangıç 1
-    focus_max: float = 4.0
-    attn_locality: bool = False        # konum özeti (kullanıcı, 15 Ekim: "mesafe mantıklı"): head başına L_τ = Σ_j pay_ij e^(−(i−j)/τ)
-                                       # ∈ (0, 1] — "dikkatimin ne kadarı ~τ token içinden geldi"; MLP'ye konum bilgisi hiç
-                                       # ulaşmaz (RoPE yalnız puanda).  Paylar gradyansız (saf gözlem: dikkat sinyal kanalına
-                                       # dönüşmez); MLP kapı girdisine E · (2L − 1), E sıfır başlatma
-    locality_tau_local: tuple = (2.0, 8.0, 32.0)       # yerel katman (pencere 128: büyük τ hep ~1 olurdu)
-    locality_tau_global: tuple = (4.0, 32.0, 256.0)    # genel katman
-    observer_layer: int = 0            # > 0: bu katmanın (1'den sayılır) çıkışında gözlemci — gradyansız girdiden küçük sözlükte
-                                       # sonraki-token dağılımı; belirsizlik H/(1+H), güven max p, nadir beklentisi p(diğer)
-                                       # sonraki katmandan önce akışa E·(2f − 1) (E sıfır başlatma).  Kullanıcı, 15 Ekim
-    observer_vocab: str = "assets/obs_top4096.json"   # gözlemci sınıfları: en sık K token (+1 "diğer")
-    observer_aux_weight: float = 1.0   # gözlemci kaybı (yalnız gözlemci başını eğitir; girdi koparılmış)
-    mlp_only_layers: int = 0           # > 0: ilk N katmanda dikkat yok, yalnız MLP (kullanıcı, 16 Ekim)
-    mlp_vocab_neurons: int = 0         # > 0: yalnız-MLP katmanlarında nöronlar sözlüğe bölüştürülür — her token k nöron,
-                                       # her nöron eşit sayıda token (k·V/ff); katman başına ayrı rastgele dağıtım
-    route_heads: int = 0               # > 0: her katmanda token başına sabit rota — token kendi route_heads head'inden sorar
-                                       # (rota dışı head'lerin o token'daki çıktısı 0; okunması serbest)
-    route_neurons: int = 0             # > 0: her katmanda token başına route_neurons MLP nöronu (yalnız onlar çalışır ve
-                                       # geri yayılımda pay alır).  Dağılım dengeli, katman başına ayrı (kullanıcı, 16 Ekim)
-    private_neurons: int = 0           # > 0: her katmanda kelimeye ÖZEL bu kadar nöron (yalnız o kelimede çalışır ve
-                                       # güncellenir; ortak MLP'ye paralel): a = SiLU(g·x)(u·x), akışa a·d.  Kullanıcı, 16 Ekim
-                                       # "her kelimeye eşit ve özel parametre"
-    private_layers: str = ""           # "": bütün katmanlarda özel nöron | "G": yalnız genel katmanlarda | "Y": yalnız yerel
-    private_vocab: str = "assets/ss_vocab_used.json"   # özel payı olan kelimeler (gerisi tek ortak "diğer" satırı)
-    mlp_vocab_assign: str = ""         # k = 1: ilk katmanın atama tablosu (assets/*.json, scripts/make_vocab_neurons.py;
-                                       # PMI komşuları aynı nöronda); sonraki katmanlar rastgele (çiftler ayrışsın)
-    local_sentence: bool = False       # Y katmanları pencere yerine yalnız kendi cümlesi + hikâye başı (data.layout story gerek)
-    attn_gate: str = ""                # kapı: "" | "head" (head başına 1 sayı) | "elem" (her çıktı sayısı); 2σ_a ∈ (0, 2), başlangıç 1
-    mlp: str = "rational"              # rational: W2 u/sqrt(1+u²) | rglu: W2 [G/sqrt(1+G²) ⊙ U] | glu: cebirsel GLU | swiglu: taban
+    local_window: int = 128            # yerel (Y) katman yalnız son local_window token'a bakar; 0: bütün katmanlar genel
+    global_layers: int = 3             # genel (G) katman sayısı; eşit aralıklı, son katman G (8 katmanda YYGYGYYG)
+    attn_gate: str = ""                # dikkat çıkış kapısı: "" | "head" (head başına) | "elem" (her çıktı); 2σ_a ∈ (0, 2)
+    private_neurons: int = 0           # 1: her katmanda her kelimenin kendi nöronu (kelimeye özel nöron); 0: kapalı
+    private_vocab: str = "assets/ss_vocab_used.json"   # özel satırı olan kelimeler (gerisi tek ortak "diğer" satırı)
+    local_sentence: bool = False       # Y katmanı pencere yerine kendi cümlesi + hikâye başı (data.layout story gerek)
     mlp_bias: bool = True
     init_std: float = 0.02
 
     def layer_kinds(self):
-        """Katman dizilimi: 'Y' yerel (son local_window token), 'G' genel (tam causal)."""
+        """Katman dizilimi: 'Y' yerel, 'G' genel (eşit aralık, son katman G)."""
         L = self.n_layers
         if not self.local_window:
             return "G" * L
-        if self.g_layout == "interleave":
-            at = {round((i + 1) * L / self.global_layers) - 1 for i in range(self.global_layers)}
-        elif self.g_layout == "top":
-            at = set(range(L - self.global_layers, L))
-        else:
-            at = {int(v) for v in self.g_layout.split(",") if v.strip()}
+        at = {round((i + 1) * L / self.global_layers) - 1 for i in range(self.global_layers)}
         return "".join("G" if l in at else "Y" for l in range(L))
 
-    def ff_dim(self, kind=None):
-        """MLP genişliği.  kind ('Y' / 'G') ve ff_ratio verilmişse: oran × 4d² parametre (kapılı MLP 3 matris, rasyonel 2),
-        64'ün katı."""
-        if kind and self.ff_ratio:
-            r = self.ff_ratio[0 if kind == "Y" else 1]
-            mats = 2 if self.mlp == "rational" else 3
-            return max(64, round(r * 4 * self.d_model / mats / 64) * 64)
-        if self.d_ff:
-            return self.d_ff
-        if self.mlp == "rational":
-            return 4 * self.d_model
-        return max(64, round(8 * self.d_model / 3 / 64) * 64)
+    def ff_dim(self):
+        """SwiGLU genişliği: d_ff ya da 8d/3 (64'ün katı)."""
+        return self.d_ff or max(64, round(8 * self.d_model / 3 / 64) * 64)
 
     def validate(self):
-        assert self.attn in ATTN, self.attn
-        assert self.attn_impl in ATTN_IMPL, self.attn_impl
-        assert self.rgn_qk_prec in ("tf32x3", "tf32", "ieee"), self.rgn_qk_prec
         assert self.attn_gate in ("", "head", "elem"), self.attn_gate
-        assert not (self.attn_locality and (self.attn != "softmax" or self.attn_importance)), \
-            "konum özeti: softmax dikkatinde, önem olmadan"
-        assert not ((self.attn_importance or self.attn_focus or self.attn_gate) and self.attn != "softmax"), \
-            "önem / odak / kapı: şimdilik softmax dikkatinde"
+        assert self.private_neurons in (0, 1), "private_neurons: 0 ya da 1 (çekirdek satırı tek nöron)"
         assert self.local_window >= 0 and 0 <= self.global_layers <= self.n_layers
-        assert 0 <= self.mlp_only_layers < self.n_layers, "mlp_only_layers: en az bir dikkatli katman kalmalı"
-        assert not self.mlp_vocab_neurons or (self.mlp_only_layers and self.mlp in ("swiglu", "glu", "rglu")
-                                              and self.mlp_vocab_neurons <= self.ff_dim()), \
-            "mlp_vocab_neurons: yalnız-MLP katmanı ve kapılı MLP gerek, k <= d_ff"
-        assert not self.mlp_vocab_assign or self.mlp_vocab_neurons == 1, "mlp_vocab_assign: k = 1 gerek"
-        assert not (self.route_heads or self.route_neurons) or (
-            self.attn == "softmax" and self.mlp in ("swiglu", "glu", "rglu") and not self.mlp_only_layers
-            and self.route_heads <= self.n_heads and self.route_neurons <= self.ff_dim()), \
-            "rota: softmax + kapılı MLP, yalnız-MLP katmanı yok, route_heads <= H, route_neurons <= d_ff"
-        assert not self.local_sentence or (self.local_window and self.attn == "softmax"),             "local_sentence: yerel / genel düzen ve softmax gerek"
-        assert not self.global_pos or self.global_pos in POS, self.global_pos
-        assert not self.ff_ratio or (len(self.ff_ratio) == 2 and self.local_window), "ff_ratio: (Y, G), yerel pencere gerek"
-        if self.local_window:
-            kinds = self.layer_kinds()
-            assert len(kinds) == self.n_layers and kinds.count("G") == self.global_layers, \
-                "g_layout %s: %d genel katman bekleniyor (%s)" % (self.g_layout, self.global_layers, kinds)
-            assert self.attn_impl != "flex", "yerel pencere flex yolunda yok (triton / dense / sdpa)"
-        assert self.pos in POS, self.pos
-        assert self.mlp in MLP, self.mlp
+        assert not self.local_sentence or self.local_window, "local_sentence: yerel / genel düzen gerek"
+        assert self.local_window or self.global_layers, "yerel pencere yoksa bütün katmanlar genel"
         assert self.d_model % self.n_heads == 0 and self.n_heads % self.n_kv_heads == 0
         assert (self.d_model // self.n_heads) % 2 == 0, "RoPE çift head boyutu ister"
-        assert self.power in (1, 2)
-        assert 1 <= self.sharpness <= 16, "keskinlik üssü 1..16"
-        for lo, hi in (self.sharpness_range,) + ((tuple(self.sharpness_range_g),) if self.sharpness_range_g else ()):
-            assert 1.0 <= lo < self.sharpness_init < hi <= 16.0, "sharpness_range(_g) / sharpness_init"
-        assert not self.sharpness_range_g or self.local_window, "sharpness_range_g: yerel / genel düzen gerek"
-        assert not (self.attn == "softmax" and self.pos not in ("rope", "none")), "softmax tabanı: pos rope / none"
-        assert not (self.attn == "softmax" and self.attn_impl in ("dense", "flex", "triton")), "softmax tabanı sdpa ile"
-        assert not (self.attn_impl == "triton" and (self.pos not in ("rope", "none") or self.power != 1)), \
-            "triton çekirdeği: pos rope / none, power 1"
-        assert not (self.attn == "rgn" and self.attn_impl == "sdpa"), "rgn dikkati sdpa ile çalışmaz (triton / dense / flex)"
 
 
 @dataclass
 class DataConfig:
-    dataset: str = "ss"                # rgn/data/registry.py: ss | tinystories | fineweb | synthetic
-    seq_len: int = 1024
-    max_train_files: int = 0           # 0: hepsi (fineweb'de parça sayısını sınırlamak için)
+    dataset: str = "ss"                # rgn/data/registry.py: ss | fineweb_s000 | synthetic
+    seq_len: int = 512
     local_copy: bool = True            # Colab'da token dosyalarını önce yerel diske kopyala
     eval_tokens: int = 4_194_304       # ara değerlendirme (doğrulama akışının başından sabit pencereler)
     final_eval_tokens: int = 0         # 0: tüm doğrulama kümesi
-    layout: str = "stream"             # stream: rastgele pencere | story: hikâye başından, cümle sonunda kesilen satırlar +
-                                       # hikâye maskesi (rgn/data/stories.py; kullanıcı, 15 Ekim)
+    layout: str = "stream"             # stream: rastgele pencere | story: hikâye başından, cümle sonunda kesilen satırlar
     story_root: str = "v2/simplestories_gpt2"   # layout story: cümle / hikâye sınırları (Drive köküne göre)
 
 
@@ -190,7 +80,7 @@ class TrainConfig:
     epochs: float = 1.0
     optimizer: str = "muon"            # matrisler Muon / NorMuon, geri kalan AdamW
     lr: float = 2e-3                   # Muon lr (AdamW RMS ölçeğinde: 0.2·sqrt(max(m, n)))
-    adam_lr: float = 0.0               # 0: lr ile aynı (embedding, norm, bias, γ̂, λ̂)
+    adam_lr: float = 0.0               # 0: lr ile aynı (embedding, norm, bias, kapı, özel tablolar)
     weight_decay: float = 0.1
     betas: tuple = (0.9, 0.95)
     momentum: float = 0.95
@@ -204,13 +94,11 @@ class TrainConfig:
     seed: int = 0
     log_every: int = 50
     eval_every: int = 1000
-    diag_every: int = 1000             # γ, |u| > 3 oranı, dikkat entropisi
+    diag_every: int = 1000             # dikkat entropisi, MLP doyması
     ckpt_minutes: float = 10.0
-    private_opt: str = "adam"          # kelimeye özel tablolar: adam (satır seyrek Adam) | rms (momentsiz, satır başına tek
-                                       # ölçek: v_satır = ort(g²) yürüyen ortalama; parametre başına ~12 bayt taşıma)
+    private_opt: str = "rms"           # kelimeye özel tablolar (satır seyrek): rms (momentsiz, satır başına tek ölçek) | adam
     sample_tokens: int = 64            # bitişte örnek üretim uzunluğu (0: kapalı)
     probe_tokens: int = 48             # her değerlendirmede 2 istemle greedy devam (nitel kontrol; 0: kapalı)
-    profile_after: bool = True         # bitişte hız profili (runs/<koşu>/speed.json)
     loss_checkpoint: bool = False      # kayıpta logit'leri geri geçişte yeniden hesapla (bellek az, LM head 4 geçiş yerine 3)
 
 
@@ -224,6 +112,25 @@ class RunConfig:
 
     def to_dict(self):
         return dataclasses.asdict(self)
+
+
+# Kaldırılan alanlar (arsiv/rgn): eski config.json'larda görünürse değer mevcut tasarımla uyumluysa yok sayılır.
+# Değer: kabul edilen değerler kümesi; ANY: değer ne olursa olsun yok sayılır (kaldırılan özelliğin yalnız ayarı).
+ANY = object()
+REMOVED = {
+    "model": {
+        "attn": {"softmax"}, "pos": {"rope"}, "mlp": {"swiglu"}, "g_layout": {"interleave"},
+        "attn_importance": {False}, "attn_focus": {False}, "attn_locality": {False}, "observer_layer": {0},
+        "mlp_only_layers": {0}, "mlp_vocab_neurons": {0}, "mlp_vocab_assign": {""}, "route_heads": {0},
+        "route_neurons": {0}, "private_layers": {""}, "global_pos": {""}, "ff_ratio": {()}, "sharpness_range_g": {()},
+        **{k: ANY for k in ("attn_impl", "dense_max_len", "rgn_fp32", "rgn_av_bf16", "rgn_qk_prec", "power",
+                            "sharpness", "sharpness_learn", "sharpness_range", "sharpness_init", "sharpness_int",
+                            "gamma_range", "gamma_min", "learn_gamma", "beta_range", "importance_max", "focus_max",
+                            "locality_tau_local", "locality_tau_global", "observer_vocab", "observer_aux_weight")},
+    },
+    "data": {"max_train_files": ANY},
+    "train": {"profile_after": ANY},
+}
 
 
 def _merge(base, over):
@@ -249,26 +156,31 @@ def _parse_value(text):
         return text
 
 
-def _build(section_cls, values):
-    names = {f.name: f for f in dataclasses.fields(section_cls)}
-    unknown = set(values) - set(names)
-    assert not unknown, "%s: bilinmeyen alan(lar) %s" % (section_cls.__name__, sorted(unknown))
-    kw = {k: tuple(v) if isinstance(v, list) else v for k, v in values.items()}
+def _build(section, section_cls, values):
+    names = {f.name for f in dataclasses.fields(section_cls)}
+    kw = {}
+    for k, v in values.items():
+        v = tuple(v) if isinstance(v, list) else v
+        if k in names:
+            kw[k] = v
+            continue
+        ok = REMOVED.get(section, {}).get(k)
+        assert ok is not None, "%s: bilinmeyen alan %r" % (section_cls.__name__, k)
+        assert ok is ANY or v in ok, "%s.%s = %r: kaldırılan bir özellik (git etiketi arsiv/rgn)" % (section, k, v)
     return section_cls(**kw)
 
 
 def from_dict(raw):
     raw = dict(raw)
     cfg = RunConfig(name=raw.pop("name", "run"), notes=raw.pop("notes", ""),
-                    model=_build(ModelConfig, raw.pop("model", {})),
-                    data=_build(DataConfig, raw.pop("data", {})),
-                    train=_build(TrainConfig, raw.pop("train", {})))
+                    model=_build("model", ModelConfig, raw.pop("model", {})),
+                    data=_build("data", DataConfig, raw.pop("data", {})),
+                    train=_build("train", TrainConfig, raw.pop("train", {})))
     assert not raw, "bilinmeyen bölüm(ler): %s" % sorted(raw)
     cfg.model.validate()
     assert cfg.train.optimizer in OPTIMIZERS and cfg.train.schedule in SCHEDULES
     assert cfg.data.layout in ("stream", "story"), cfg.data.layout
-    assert cfg.train.private_opt in ("adam", "rms"), cfg.train.private_opt
-    assert cfg.model.private_layers in ("", "G", "Y"), cfg.model.private_layers
+    assert cfg.train.private_opt in ("rms", "adam"), cfg.train.private_opt
     assert not cfg.model.local_sentence or cfg.data.layout == "story", "local_sentence: data.layout story gerek"
     return cfg
 

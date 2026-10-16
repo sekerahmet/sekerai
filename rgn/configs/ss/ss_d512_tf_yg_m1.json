@@ -1,8 +1,0 @@
-{
-  "extends": "ss_d512_tf_yg.json",
-  "name": "ss_d512_tf_yg_m1",
-  "notes": "Taban YYG, ilk 1 katmanda dikkat yok, yalnız MLP (M Y G Y G Y Y G; M = yalnız MLP). Kullanıcı, 16 Ekim: 'ilk katman MLP olsa ne olur, hatta ilk iki katman'. Literatür (First Attentions Last 2025): ilk dikkat en kritik dikkat; doğrudan deneme bulunamadı. Bizde kapı K1 dikkatini %98 kapatmıştı. Kıyas: taban YYG 3000. adım 1,7379 (aynı rastgele pencere düzeni).",
-  "model": {
-    "mlp_only_layers": 1
-  }
-}

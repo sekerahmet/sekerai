@@ -1,8 +1,8 @@
 """Eğitim.
 
-    python scripts/train.py --config configs/ss/ss_d512_rgn.json
-    python scripts/train.py --config configs/ss/ss_d512_rgn.json --set train.max_steps=200 --set data.eval_tokens=262144
-    python scripts/train.py --config configs/ss/ss_d512_rgn.json --resume
+    python scripts/train.py --config configs/ss/ss_d512_tf_yg_ozel.json
+    python scripts/train.py --config configs/ss/ss_d512_tf_yg.json --set train.max_steps=200 --set data.eval_tokens=262144
+    python scripts/train.py --config configs/ss/ss_d512_tf_yg_ozel.json --resume
 """
 import argparse
 import sys
@@ -17,7 +17,7 @@ from rgn.train import train  # noqa: E402
 
 def main():
     setup_process()
-    ap = argparse.ArgumentParser(description="RGN eğitimi")
+    ap = argparse.ArgumentParser(description="eğitim")
     ap.add_argument("--config", required=True, help="deney dosyası (configs/**.json)")
     ap.add_argument("--set", action="append", default=[], metavar="BÖLÜM.ALAN=DEĞER", help="alan ez (tekrarlanabilir)")
     ap.add_argument("--name", help="koşu adı (varsayılan: yapılandırmadaki ad)")

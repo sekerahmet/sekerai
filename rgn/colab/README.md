@@ -2,17 +2,13 @@
 
 ## Akış
 
-1. **Yerelde** kodu Drive'a eşitle (Drive masaüstü uygulaması `G:\Drive'ım`'ı Google Drive'a yükler):
-   ```
-   python scripts/sync_drive.py
-   ```
-2. **Colab'da** `colab/RGN_colab.ipynb` notebook'unu aç (Drive'daki `RGN/code/colab/` altından) ve hücreleri sırayla çalıştır:
-   - Drive bağlama, kurulum (`setup_colab.py`)
-   - Testler (CUDA testleri dahil: flex = dense, γ/β gradyanı)
-   - Hız profili (dikkat çekirdekleri)
-   - Duman testi (`configs/ss/ss_smoke.json`, ~300 adım)
-   - SS karşılaştırma deneyleri (Aşama 0)
-   - Sonuç tablosu
+1. **Yerelde** değişiklikleri commit edip GitHub'a gönder (kod Colab'a git'ten gider, veri Drive'dan okunur).
+2. **Colab'da** `colab/RGN_colab.ipynb` (`python colab/make_notebook.py` üretir) hücrelerini çalıştır:
+   - 0 HAZIRLIK: Drive bağlama, `BRANCH` kolundan taze kod, kurulum (`setup_colab.py`)
+   - 1 TEST: test takımı (CUDA testleri dahil: Flex pencere, özel nöron çekirdeği)
+   - 2 KOŞU: deney kuyruğu arka planda; 3 NABIZ: durum; 4 KIYAS: tabloya fark
+   - 5 PROFİL: eğitim adımı bölüm bölüm; 6 DÖNGÜ: greedy tekrar testi
+   - X DURDUR / Z GPU: checkpoint kaydedip durdur / çalışma zamanını kapat
 
 ## Klasörler (Colab)
 

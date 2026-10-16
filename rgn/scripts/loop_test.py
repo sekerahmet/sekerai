@@ -1,7 +1,6 @@
-"""Döngü testi: greedy (argmax) üretimde tekrar.  Kullanıcı, 15 Ekim: "bir cümleyi tekrar tekrar aynı şekilde söylüyor
-aç gözlü üretimde" — softmax'ın aşırı eminliği küçük modelleri döngüye sokuyor olabilir; çekim dikkati farklı mı?
+"""Döngü testi: greedy (argmax) üretimde tekrar.
 
-    python scripts/loop_test.py --runs ss_d512_transformer ss_d512_rgn_klearn_glu_epok
+    python scripts/loop_test.py --runs ss_d512_tf_yg_epok ss_d512_tf_yg_ozel
     python scripts/loop_test.py --runs a b --stories 256 --prompt 32 --new 384
 
 İstem: SS doğrulama hikâyelerinin ilk --prompt token'ı (hikâyeler eşit aralıkla seçilir, her model aynı istemleri görür).
@@ -13,7 +12,7 @@ aç gözlü üretimde" — softmax'ın aşırı eminliği küçük modelleri dö
     sıkışma      son 3 cümlesi aynı olan üretim oranı (kalıcı döngü)
     rep-4        tekrarlanan 4-gram oranı (1 - farklı-4)
     uzunluk      ortalama üretilen token (EOS'a kadar)
-Model ağırlıkları runs/<koşu>/model.pt (bitişte yazılır).  Sonuç runs/_loop_test.json.
+Model ağırlıkları rgn.train.checkpoint.load_run ile.  Sonuç runs/_loop_test.json.
 """
 import argparse
 import json
@@ -29,20 +28,17 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from rgn.system import setup_process  # noqa: E402
-from rgn.config import from_dict  # noqa: E402
-from rgn.data.registry import EOS_ID, get_spec  # noqa: E402
-from rgn.data.loader import _open  # noqa: E402
-from rgn.model import RGNModel  # noqa: E402
-from rgn.paths import drive_root, runs_dir  # noqa: E402
+from rgn.data.loader import valid_tokens  # noqa: E402
+from rgn.data.registry import EOS_ID  # noqa: E402
+from rgn.paths import runs_dir  # noqa: E402
+from rgn.train.checkpoint import load_run  # noqa: E402
 
 _SENT = re.compile(r"[^.!?]+[.!?]+[\"”']?")
 
 
 def prompts(n, plen, seed=0):
     """SS doğrulama hikâyelerinin ilk plen token'ı: (n, plen) — hikâyeler eşit aralıkla, plen'den kısa olanlar atlanır."""
-    spec = get_spec("ss")
-    arr = _open(drive_root() / spec.valid[0], spec.fmt)
-    a = np.asarray(arr[:min(len(arr), 6_000_000)])
+    a = valid_tokens("ss", 6_000_000)
     starts = np.flatnonzero(a == EOS_ID) + 1
     ends = np.append(starts[1:] - 1, len(a))
     ok = [s for s, e in zip(starts, ends) if e - s > plen + 64]
@@ -51,11 +47,8 @@ def prompts(n, plen, seed=0):
 
 
 def load_model(run, device):
-    ck = torch.load(runs_dir() / run / "model.pt", map_location="cpu", weights_only=False)
-    cfg = from_dict(ck["config"])
-    m = RGNModel(cfg.model)
-    m.load_state_dict(ck["model"])
-    return m.to(device).eval(), cfg
+    m, _ = load_run(run, device)
+    return m, m.cfg
 
 
 @torch.no_grad()

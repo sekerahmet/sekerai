@@ -1,12 +1,18 @@
-"""Eğitim duman testi: sentetik veride kısa CPU eğitimi kaybı düşürmeli, çıktı dosyaları yazılmalı, sürdürme çalışmalı."""
+"""Eğitim: kısa CPU eğitimi kaybı düşürür ve dosyaları yazar; kesilip sürdürülen koşu = kesintisiz koşu (özel nöronlu
+model dahil); RowAdam satır başına bias düzeltmesi."""
 import json
 import tempfile
 from pathlib import Path
 
-from _util import ROOT
+import torch
+
+from _util import ROOT, private_vocab
 from rgn.config import load_config
 from rgn.train import train
+from rgn.train.optim import RowAdam
 from rgn.train.schedule import lr_factor
+
+CPU_TINY = ROOT / "configs/base/cpu_tiny.json"
 
 
 def test_schedule_shapes():
@@ -17,32 +23,54 @@ def test_schedule_shapes():
 
 
 def test_cpu_training_reduces_loss():
-    for overrides in ([], ["model.attn=softmax", "model.pos=rope", "model.mlp=swiglu"], ["train.optimizer=adamw"]):
-        cfg = load_config(ROOT / "configs/base/cpu_tiny.json", overrides)
-        with tempfile.TemporaryDirectory() as d:
-            r = train(cfg, out_dir=d)
-            out = Path(d)
-            for f in ("config.json", "metrics.jsonl", "checkpoint.pt", "model.pt", "results.json"):
-                assert (out / f).exists(), f
-            recs = [json.loads(l) for l in (out / "metrics.jsonl").read_text(encoding="utf-8").splitlines()]
-            assert recs[0]["type"] == "start" and recs[0]["total_steps"] == cfg.train.max_steps
-            first = next(r for r in recs if r["type"] == "train")
-            ev = next(r for r in recs if r["type"] == "eval")
-            assert "acc_bands" in ev and "probes" in ev
-            assert r["final"]["loss"] < first["loss"] - 0.5, (overrides, first["loss"], r["final"]["loss"])
+    with private_vocab(range(1, 400)) as rel:
+        for overrides in ([], ["model.attn_gate=head"], ["train.optimizer=adamw"],
+                          ["model.private_neurons=1", "model.private_vocab=" + rel]):
+            cfg = load_config(CPU_TINY, overrides)
+            with tempfile.TemporaryDirectory() as d:
+                r = train(cfg, out_dir=d)
+                out = Path(d)
+                for f in ("config.json", "metrics.jsonl", "checkpoint.pt", "model.pt", "results.json"):
+                    assert (out / f).exists(), f
+                recs = [json.loads(l) for l in (out / "metrics.jsonl").read_text(encoding="utf-8").splitlines()]
+                assert recs[0]["type"] == "start" and recs[0]["total_steps"] == cfg.train.max_steps
+                first = next(r for r in recs if r["type"] == "train")
+                assert "acc_bands" in next(r for r in recs if r["type"] == "eval")
+                assert r["final"]["loss"] < first["loss"] - 0.5, (overrides, first["loss"], r["final"]["loss"])
 
 
-def test_resume_equals_uninterrupted():
-    """Kesilip sürdürülen koşu = kesintisiz koşu (ağırlıklar bit düzeyinde aynı): model + optimizer + takvim + veri sırası."""
-    import torch
-    base = ["train.max_steps=30", "train.eval_every=10", "train.profile_after=false"]
+def _resume_equal(extra):
+    base = ["train.max_steps=30", "train.eval_every=10"] + extra
     with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
-        train(load_config(ROOT / "configs/base/cpu_tiny.json", base), out_dir=a)
-        assert train(load_config(ROOT / "configs/base/cpu_tiny.json", base + ["train.stop_step=17"]), out_dir=b) is None
+        train(load_config(CPU_TINY, base), out_dir=a)
+        assert train(load_config(CPU_TINY, base + ["train.stop_step=17"]), out_dir=b) is None
         assert (Path(b) / "stopped").exists()
-        r = train(load_config(ROOT / "configs/base/cpu_tiny.json", base), out_dir=b, resume=True)
+        r = train(load_config(CPU_TINY, base), out_dir=b, resume=True)
         assert r["steps"] == 30 and not (Path(b) / "stopped").exists()
         wa = torch.load(Path(a) / "model.pt", weights_only=False)["model"]
         wb = torch.load(Path(b) / "model.pt", weights_only=False)["model"]
         for k in wa:
-            assert torch.equal(wa[k], wb[k]), k
+            assert torch.equal(wa[k], wb[k]), (extra, k)
+
+
+def test_resume_equals_uninterrupted():
+    """Kesilip sürdürülen koşu = kesintisiz koşu (ağırlıklar bit düzeyinde aynı): model + optimizer + takvim + veri sırası."""
+    _resume_equal([])
+    with private_vocab(range(1, 400)) as rel:
+        for opt in ("rms", "adam"):
+            _resume_equal(["model.private_neurons=1", "model.private_vocab=" + rel, "train.private_opt=" + opt])
+
+
+def test_row_adam_per_row_bias():
+    """İlk kez görülen satırın ilk güncellemesi, genel adım sayısından bağımsız (satır başına bias düzeltmesi)."""
+    for mode in ("rms", "adam"):
+        p = torch.nn.Parameter(torch.zeros(4, 3))
+        opt = RowAdam([dict(params=[p])], lr=0.1, mode=mode)
+        g = torch.ones(1, 3)
+        for _ in range(500):                                       # satır 0 çok güncellenir
+            opt.set_rows(torch.tensor([0]), [g])
+            opt.step()
+        opt.set_rows(torch.tensor([3]), [g])                       # satır 3 ilk kez
+        opt.step()
+        assert torch.allclose(p.data[3], torch.full((3,), -0.1), atol=1e-4), (mode, p.data[3])
+        assert (p.data[1:3] == 0).all()                            # dokunulmayan satırlar

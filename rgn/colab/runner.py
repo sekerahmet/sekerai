@@ -5,8 +5,8 @@ Notebook'tan:
     import sys; sys.path.insert(0, "/content/RGN/colab"); import runner as R
     R.hazirla()                                        # Drive + kod + bağımlılık + ortam raporu
     R.kos("configs/ss/ss_smoke.json")                  # arka planda başlat
-    R.kuyruk(["configs/ss/ss_d512_rgn.json", "configs/ss/ss_d512_transformer.json"])   # sırayla, arka planda
-    R.arkaplan("hiz", "python scripts/bench_speed.py attention")                       # herhangi bir komut
+    R.kuyruk(["configs/ss/ss_d512_tf_yg.json", "configs/ss/ss_d512_tf_yg_ozel.json"])   # sırayla, arka planda
+    R.arkaplan("test", "python tests/run_tests.py")                                     # herhangi bir komut
     R.nabiz()                                          # tüm işler: durum, son adım, son değerlendirme, kalan süre
     R.nabiz("ss_smoke", satir=30)                      # tek iş, günlüğün son 30 satırı
     R.kapat("ss_smoke")                                # SIGTERM: checkpoint kaydedip çıkar (sonra kos(..., resume=True))
@@ -95,7 +95,7 @@ def arkaplan(name, cmd):
 
 def kuyruk(configs, name="kuyruk", resume=True):
     """Yapılandırmaları sırayla, tek arka plan sürecinde çalıştır (biri bitince ya da hata verince sonraki).  Öğe ezme
-    alabilir: "configs/ss/x.json train.stop_step=2000 model.sharpness=4"."""
+    alabilir: "configs/ss/x.json train.stop_step=2000 model.attn_gate=head"."""
     items = [c.split() for c in configs]
     steps = " ; ".join("%s scripts/train.py --config %s %s %s" % (
         shlex.quote(sys.executable), shlex.quote(it[0]), " ".join("--set %s" % shlex.quote(x) for x in it[1:]),
@@ -159,6 +159,19 @@ def _run_status(run):
                                                        tr["step"], total or "?", tr["loss"], tr["ms"])
 
 
+def _arch(mc):
+    """Model özeti: katman düzeni, kapı, kelimeye özel nöron (eski koşuların config.json'ları da okunur)."""
+    if mc.get("attn", "softmax") != "softmax":
+        return "eski: attn=%s mlp=%s" % (mc.get("attn"), mc.get("mlp"))
+    w = mc.get("local_window", 0)
+    s = ("YYG w%d" % w) if w else "tam dikkat"
+    if mc.get("attn_gate"):
+        s += " +kapı"
+    if mc.get("private_neurons"):
+        s += " +özel"
+    return s
+
+
 def _run_detail(run):
     """Ayrıntılı nabız: ilerleme, eğitim, değerlendirme (+ fark), teşhis, örnek, kaba kıyas."""
     d = runs_dir() / run
@@ -170,9 +183,8 @@ def _run_detail(run):
     L = ["%s  %s" % (run, state)]
     if cfg:
         mc = cfg["model"]
-        L[0] += "   attn=%s pos=%s mlp=%s p=%s  D %d L %d H %d  |  veri %s pencere %d" % (
-            mc["attn"], mc["pos"], mc["mlp"], mc.get("power", 1), mc["d_model"], mc["n_layers"], mc["n_heads"],
-            cfg["data"]["dataset"], cfg["data"]["seq_len"])
+        L[0] += "   %s  D %d L %d H %d  |  veri %s pencere %d" % (
+            _arch(mc), mc["d_model"], mc["n_layers"], mc["n_heads"], cfg["data"]["dataset"], cfg["data"]["seq_len"])
     tr = m.get("train") or []
     if tr and total:
         last = tr[-1]
@@ -218,16 +230,7 @@ def _run_detail(run):
         s = "   teşhis   adım %d: entropi %.2f  top1 %.3f  mesafe %.0f" % (g["step"], sum(ent) / len(ent), top1, dist)
         if sat:
             s += "  |u|>3 %.4f" % (sum(sat) / len(sat))
-        gam = [x for l in lay for x in (l.get("gamma") or [])]
-        if gam:
-            s += "  γ ort %.0f [%.0f–%.0f]" % (sum(gam) / len(gam), min(gam), max(gam))
-        ks = [x for l in lay for x in (l.get("sharpness") or [])]
-        if ks and max(ks) - min(ks) > 1e-6:
-            s += "  k ort %.2f [%.2f–%.2f]" % (sum(ks) / len(ks), min(ks), max(ks))
         L.append(s)
-        if ks and max(ks) - min(ks) > 1e-6:
-            L.append("            k (katman: head'ler) " + " | ".join(
-                " ".join("%.1f" % x for x in l["sharpness"]) for l in lay))
         L.append("            katman entropisi " + " ".join("%.2f" % x for x in ent))
     return L
 
@@ -271,7 +274,7 @@ def nabiz(name=None, satir=0):
 
 
 def sonuc(names=None, metin=2, karakter=400):
-    """Biten koşular: sayı (son değerlendirme, hız, bellek) + metin (greedy örnekler) + hız profili özeti."""
+    """Biten koşular: sayı (son değerlendirme, hız, bellek) + metin (greedy örnekler)."""
     root = runs_dir()
     runs = names or sorted(p.parent.name for p in root.glob("*/results.json"))
     for run in runs:
@@ -281,16 +284,11 @@ def sonuc(names=None, metin=2, karakter=400):
             continue
         r = json.loads((d / "results.json").read_text(encoding="utf-8"))
         f, m = r["final"], r["config"]["model"]
-        print("\n== %s  (attn=%s pos=%s mlp=%s p=%s, %.1fM)" % (run, m["attn"], m["pos"], m["mlp"], m.get("power", 1),
-                                                              r["params"] / 1e6))
+        print("\n== %s  (%s, %.1fM)" % (run, _arch(m), r["params"] / 1e6))
         print("   kayıp %.4f  ppl %.2f  bpb %s  doğruluk %.4f  |  %s ms/adım  %s tok/s  %.1f GB  |  %.1f dk" % (
             f["loss"], f["ppl"], "%.4f" % f["bpb"] if f["bpb"] else "-", f["acc"],
             "%.1f" % r["ms_per_step"] if r["ms_per_step"] else "-",
             "%.0fk" % (r["tok_per_s"] / 1e3) if r["tok_per_s"] else "-", r["peak_mem_gb"] or 0, r["wall_min"]))
-        sp = (r.get("speed") or {}).get("attention") or {}
-        if "model" in sp:
-            print("   dikkat çekirdeği %.2f ms (softmax %.2f ms, oran %.1f)" % (
-                sp["model"]["ms"], sp["softmax_sdpa"]["ms"], sp["ratio_model_vs_softmax"]))
         if (d / "samples.json").exists():
             for s in json.loads((d / "samples.json").read_text(encoding="utf-8"))[:metin]:
                 print("   » %s" % s["text"][:karakter].replace("\n", " "))

@@ -1,7 +1,4 @@
-"""Konum: RoPE (q̂, k̂ döndürmesi; boy korunur) ve head başına başlangıç dizileri.
-
-Konum çarpanları (alibi / additive) çekim paydasının parçası olduğu için rgn/model/attention.py:denominator'dadır.
-"""
+"""Konum: RoPE (q, k döndürmesi)."""
 import torch
 
 
@@ -14,11 +11,6 @@ def rope_tables(n, d_head, base=10000.0, device=None):
 
 
 def apply_rope(x, cos, sin):
-    """x (B, H, N, d_head), cos / sin (N, d_head).  ||x|| = 1 ise sonuç da birim vektördür."""
+    """x (B, H, N, d_head), cos / sin (N, d_head)."""
     x1, x2 = x.chunk(2, dim=-1)
     return x * cos.to(x.dtype) + torch.cat([-x2, x1], dim=-1) * sin.to(x.dtype)
-
-
-def geometric(lo, hi, n):
-    """lo'dan hi'ye n elemanlı geometrik dizi (head başına γ / λ başlangıcı)."""
-    return torch.tensor([lo * (hi / lo) ** (i / max(n - 1, 1)) for i in range(n)], dtype=torch.float32)

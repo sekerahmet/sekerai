@@ -1,7 +1,7 @@
 """Ortam yolları — Windows (G:/Drive'ım) ve Colab (/content/drive/MyDrive) otomatik algılanır.
 
 Ortam değişkenleriyle her biri ezilebilir:
-    RGN_DRIVE  Drive kökü (veri setleri burada: simplestories/, tinystories/, fineweb/)
+    RGN_DRIVE  Drive kökü (veri setleri burada: simplestories/, v2/)
     RGN_CACHE  büyük token dosyalarının hızlı yerel kopyası (Colab'da /content/rgn_cache)
     RGN_RUNS   koşu çıktıları (Colab'da Drive/RGN/runs: oturum kapansa da kalır, yerelde de görünür)
 """

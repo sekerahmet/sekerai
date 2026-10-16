@@ -1,7 +1,6 @@
-"""Normalizasyon: RMSNorm (ön-norm, final norm, softmax tabanının QK-norm'u) ve birim küre (RGN'nin q̂, k̂'sı)."""
+"""RMSNorm (ön-norm, final norm, QK-norm)."""
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class RMSNorm(nn.Module):
@@ -16,8 +15,3 @@ class RMSNorm(nn.Module):
         xf = x.float()
         y = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.eps)
         return y.to(x.dtype) * self.weight.to(x.dtype)
-
-
-def unit(x):
-    """Birim küre (kazançsız L2): ||x|| = 1.  Uzaklığın matris çarpımına inmesi için şart (doküman 3.1)."""
-    return F.normalize(x.float(), dim=-1).to(x.dtype)

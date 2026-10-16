@@ -1,9 +1,7 @@
-"""RGN'ye özgü teşhisler (doküman V4 / V5 riskleri) — tek bir doğrulama batch'i üzerinde.
+"""Teşhis — tek bir doğrulama batch'i üzerinde, katman başına:
 
-    gamma, beta      head başına öğrenilmiş γ ve β
-    mlp              rasyonel MLP: ön-aktivasyon u'nun std'si ve |u| > 3 oranı (doyma)
-    attn             head başına: ortalama entropi (nats), en büyük ağırlık (odak), ortalama dikkat mesafesi (token)
-                     — son yarı konumlarda (bağlamı dolu satırlar)
+    attn   head başına ortalama entropi (nats), en büyük pay (odak), ortalama dikkat mesafesi (token) — son yarı konumlar
+    mlp    SwiGLU kapı girdisinin std'si ve |G| > 3 oranı
 """
 import torch
 
@@ -14,7 +12,7 @@ def diagnose(model, x, ctx):
     model.eval()
     inputs = {}
     hooks = [blk.attn.register_forward_pre_hook(lambda m, args, i=i: inputs.__setitem__(i, args))
-             for i, blk in enumerate(model.blocks) if blk.attn is not None]
+             for i, blk in enumerate(model.blocks)]
     for blk in model.blocks:
         blk.mlp.track = True
     try:
@@ -30,36 +28,24 @@ def diagnose(model, x, ctx):
     half = slice(N // 2, N)
     dist = (torch.arange(N, device=x.device)[:, None] - torch.arange(N, device=x.device)[None, :]).clamp_min(0).float()
     for i, blk in enumerate(model.blocks):
-        if blk.attn is None:                                         # yalnız MLP katmanı: dikkat ölçüsü yok
-            continue
-        a = blk.attn.weights(*inputs[i][:2]).float()                # (B, H, N, N); x, rope (maske hariç)
-        ent = -(a * a.clamp_min(1e-30).log()).sum(-1)               # (B, H, N)
-        layer = {
+        a = blk.attn.weights(*inputs[i][:2]).float()                # (B, H, N, N); girdi x, rope
+        ent = -(a * a.clamp_min(1e-30).log()).sum(-1)
+        out["layers"].append({
             "entropy": ent[:, :, half].mean((0, 2)).tolist(),
             "top1": a.max(-1).values[:, :, half].mean((0, 2)).tolist(),
             "mean_dist": (a * dist).sum(-1)[:, :, half].mean((0, 2)).tolist(),
             "mlp": dict(blk.mlp.stats),
-        }
-        if blk.attn.cfg.attn == "rgn":
-            layer["gamma"] = blk.attn.gamma().tolist()
-            b = blk.attn.beta()
-            layer["beta"] = None if b is None else b.tolist()
-            k = blk.attn.sharpness()
-            layer["sharpness"] = k.tolist() if torch.is_tensor(k) else [float(k)] * blk.attn.H
-        out["layers"].append(layer)
+        })
     model.train(was_training)
     return out
 
 
 def summary_line(diag):
-    """Kısa özet: katmanlar ortalaması entropi / top1 / mesafe ve MLP doyma oranı."""
+    """Kısa özet: katman ortalaması entropi / top1 / mesafe ve MLP doyma oranı."""
     L = diag["layers"]
     mean = lambda key: sum(sum(l[key]) / len(l[key]) for l in L) / len(L)  # noqa: E731
     sat = [l["mlp"].get("sat_frac") for l in L if l["mlp"]]
     s = "entropi %.2f | top1 %.3f | mesafe %.1f" % (mean("entropy"), mean("top1"), mean("mean_dist"))
     if sat:
         s += " | |u|>3 %.4f" % (sum(sat) / len(sat))
-    ext = [l["mlp"].get("ext_ratio") for l in L if l["mlp"] and l["mlp"].get("ext_ratio") is not None]
-    if ext:
-        s += " | konum/kapı " + " ".join("%.3f" % e for e in ext)
     return s

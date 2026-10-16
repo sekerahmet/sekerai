@@ -1,12 +1,5 @@
 {
   "extends": "../base/train_ss.json",
   "name": "ss_d512_tf_yg",
-  "notes": "Yeni taban (kullanıcı, 15 Ekim: 'tam koşu transformer YYG olmalı, onu baz alarak hareket etmeliyiz'): softmax + RoPE + SwiGLU, yerel / genel katmanlar YYGYGYYG, yerel pencere 128 (SDPA maskesiyle). Kıyas: ss_d512_transformer (tam epok 1,5196).",
-  "model": {
-    "attn": "softmax",
-    "pos": "rope",
-    "mlp": "swiglu",
-    "local_window": 128,
-    "global_layers": 3
-  }
+  "notes": "Taban: softmax + RoPE + SwiGLU, YYGYGYYG (yerel pencere 128, FlexAttention). Tam epok 1,5160 (bpb 0,5061); 3000. adım 1,7379."
 }

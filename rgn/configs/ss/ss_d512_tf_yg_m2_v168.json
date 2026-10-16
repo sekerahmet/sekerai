@@ -1,8 +1,0 @@
-{
-  "extends": "ss_d512_tf_yg_m2.json",
-  "name": "ss_d512_tf_yg_m2_v168",
-  "notes": "MMGYGYYG + ilk iki (yalnız MLP) katmanın 1344 nöronu sözlüğe bölüştürülür: her token 168 nöron, her nöron eşit sayıda token (~6288 / 50.304), iki katmanda ayrı rastgele dağıtım; geri yayılımda yalnız token'ın nöronları pay alır. Kullanıcı, 16 Ekim: 'ilk iki MLP katmanını vocab'a bölüştürmek, her token adil nöron alsın'. Kıyas: MMGYGYYG (yoğun) 3000. adım 1,7613; taban YYG 1,7379.",
-  "model": {
-    "mlp_vocab_neurons": 168
-  }
-}

@@ -1,10 +1,9 @@
-"""Eğitim adımı profili: GPU süresinin hangi işlemlere gittiği (kullanıcı, 16 Ekim: kelimeye özel modelde +%25 adım süresi).
+"""Eğitim adımı profili: bölüm bölüm süre ve en çok CUDA süresi alan işlemler.
 
-    python scripts/profile_step.py --config configs/fineweb/fw_s000_d512_tf_yg_ozel.json
+    python scripts/profile_step.py --config configs/fineweb/fw_s000_d512_tf_yg_ozel_rms.json
 
-Gerçek eğitim döngüsünün adımını (veri, ileri, geri, kırpma, optimizer) birkaç kez çalıştırır; ısınmadan sonra
-torch.profiler ile en çok CUDA süresi alan işlemleri ve CPU'nun GPU'yu beklediği senkron noktalarını yazar.
-Ayrıca bölüm bölüm duvar saati: veri + satır kopyası, ileri+geri, kırpma, optimizer.
+Eğitimin kendi adımını (rgn.train.step.train_step: kelimeye özel satır kopyası, ileri / geri, kırpma, optimizer) birkaç
+kez çalıştırır; ısınmadan sonra senkronlu ölçüm ve torch.profiler tablosu.
 """
 import argparse
 import sys
@@ -20,7 +19,7 @@ from rgn.config import load_config  # noqa: E402
 from rgn.data.loader import load_streams  # noqa: E402
 from rgn.model import RGNModel  # noqa: E402
 from rgn.train.optim import build_optimizer  # noqa: E402
-from rgn.model.private_kernel import make_plan  # noqa: E402
+from rgn.train.step import train_step  # noqa: E402
 
 
 def main():
@@ -39,56 +38,23 @@ def main():
     T, micro = dc.seq_len, tc.micro_batch or tc.batch_size
     accum = tc.batch_size // micro
     ctx = torch.autocast("cuda", dtype=torch.bfloat16)
-    sec = {}
 
-    def tick(name, t0):
-        torch.cuda.synchronize()
-        sec[name] = sec.get(name, 0.0) + time.time() - t0
-        return time.time()
-
-    def step(timed):
-        t = time.time()
-        mbs = [tuple(z.to(dev) for z in train_s.random_batch(micro, T, rng)) for _ in range(accum)]
-        sub = priv = None
-        if model.priv_map is not None:                       # trainer ile aynı yol
-            uniq = torch.unique(torch.cat([model.priv_map[x].flatten() for x, _ in mbs]))
-            sub = [b.private.detach().index_select(0, uniq).to(torch.bfloat16).requires_grad_()
-                   for b in model.private_blocks()]
-        if timed:
-            t = tick("veri + satır kopyası", t)
-        for x, y in mbs:
-            if sub is not None:
-                loc = torch.searchsorted(uniq, model.priv_map[x])
-                priv = (loc, sub, make_plan(loc.flatten(), len(uniq))) if loc.is_cuda else (loc, sub)  # plan bir kez
-            with ctx:
-                loss = (fwd(x, y, None, priv) if priv is not None else fwd(x, y)) / accum
-            loss.backward()
-        if timed:
-            t = tick("ileri + geri", t)
-        torch.nn.utils.clip_grad_norm_(list(model.parameters()) + (sub or []), tc.grad_clip)
-        if timed:
-            t = tick("kırpma", t)
-        if opt.row_adam is not None:
-            opt.row_adam.set_rows(uniq, [s.grad for s in sub])
-        opt.step()
-        opt.zero_grad(set_to_none=True)
-        if timed:
-            tick("optimizer", t)
+    def step():
+        batches = [(*train_s.random_batch(micro, T, rng), None) for _ in range(accum)]
+        train_step(model, fwd, opt, batches, ctx, tc.grad_clip, dev, torch.bfloat16)
 
     for _ in range(4):
-        step(False)
+        step()
     torch.cuda.synchronize()
     t0 = time.time()
     for _ in range(a.steps):
-        step(True)
-    total = time.time() - t0
-    print("adım %.1f ms (senkronlu ölçüm) — bölümler:" % (1000 * total / a.steps))
-    for k, v in sec.items():
-        print("   %-24s %7.1f ms" % (k, 1000 * v / a.steps))
+        step()
+    torch.cuda.synchronize()
+    print("adım %.1f ms (%s)" % (1000 * (time.time() - t0) / a.steps, cfg.name))
     from torch.profiler import ProfilerActivity, profile
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
         for _ in range(3):
-            step(False)
+            step()
         torch.cuda.synchronize()
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=25, max_name_column_width=60))
 

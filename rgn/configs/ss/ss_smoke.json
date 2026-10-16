@@ -1,5 +1,5 @@
 {
-  "extends": "ss_d512_rgn.json",
+  "extends": "ss_d512_tf_yg.json",
   "name": "ss_smoke",
   "notes": "Colab duman testi: 300 adım, küçük değerlendirme",
   "data": {

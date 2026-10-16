@@ -23,13 +23,20 @@ def test_random_batch_file_boundary():
     assert (x[:, 0] == 0).all() and (y[:, -1] == 16).all()
 
 
-def test_rgn_rejects_sdpa():
-    from rgn.config import ModelConfig
-    try:
-        ModelConfig(attn="rgn", attn_impl="sdpa").validate()
-    except AssertionError:
-        return
-    raise AssertionError("rgn + sdpa kabul edilmemeliydi")
+def test_removed_fields_compat():
+    """Eski config.json'lardaki kaldırılan alanlar: mevcut tasarımla uyumlu değerde yok sayılır, değilse hata."""
+    from rgn.config import from_dict
+    old = {"model": {"attn": "softmax", "pos": "rope", "mlp": "swiglu", "sharpness": 1, "gamma_range": [4.0, 512.0],
+                     "attn_importance": False, "local_window": 128, "global_layers": 3},
+           "data": {"max_train_files": 0}, "train": {"profile_after": True}}
+    cfg = from_dict(old)
+    assert cfg.model.layer_kinds() == "YYGYGYYG"
+    for bad in ({"attn": "rgn"}, {"mlp": "rational"}, {"observer_layer": 5}):
+        try:
+            from_dict({"model": bad})
+        except AssertionError:
+            continue
+        raise AssertionError("kabul edilmemeliydi: %s" % bad)
 
 
 def test_fixed_windows_deterministic():
@@ -46,7 +53,7 @@ def test_synthetic_streams():
 def test_registry_specs():
     for name, spec in DATASETS.items():
         if spec.fmt != "synthetic":
-            assert spec.train and spec.valid and spec.fmt in ("npy", "bin"), name
+            assert spec.train and spec.valid and spec.fmt == "npy" and spec.bytes_per_token > 0, name
 
 
 def test_all_configs_load():
@@ -111,14 +118,14 @@ def test_story_masks_and_loss():
     assert Ym[4].tolist() == [True, False, False, True, True] + [False] * 7     # token 8: EOS + kendi cümlesi (8, 9)
     assert Gm[8].tolist() == [False] * 7 + [True, True] + [False] * 3           # 2. hikâye yalnız kendine bakar
     torch.manual_seed(0)
-    yonly = RGNModel(tiny(vocab_size=50304, attn="softmax", attn_impl="sdpa", n_kv_heads=4, local_window=4,
-                          global_layers=0, local_sentence=True, n_layers=2)).eval()
+    yonly = RGNModel(tiny(vocab_size=50304, n_kv_heads=4, local_window=4, global_layers=0, local_sentence=True,
+                          n_layers=2)).eval()
     x2 = x.clone()
     x2[0, 1], x2[0, 2] = 30, 31                                                  # 1. cümleyi değiştir
     h1, h2 = yonly.hidden(x, masks=m), yonly.hidden(x2, masks=m)
     assert torch.allclose(h1[0, 3:7], h2[0, 3:7], atol=1e-5) and not torch.allclose(h1[0, 1:3], h2[0, 1:3])
-    full = RGNModel(tiny(vocab_size=50304, attn="softmax", attn_impl="sdpa", n_kv_heads=4, local_window=4,
-                         global_layers=1, local_sentence=True, n_layers=2)).eval()
+    full = RGNModel(tiny(vocab_size=50304, n_kv_heads=4, local_window=4, global_layers=1, local_sentence=True,
+                         n_layers=2)).eval()
     assert torch.allclose(full.hidden(x, masks=m)[0, 7:], full.hidden(x2, masks=m)[0, 7:], atol=1e-5)
     assert not torch.allclose(full.hidden(x, masks=m)[0, 3:7], full.hidden(x2, masks=m)[0, 3:7])
     h = torch.randn(1, 4, 8)

@@ -1,12 +1,14 @@
 {
-  "notes": "Yerel CPU duman testi: sentetik veri, küçük model",
+  "notes": "Yerel CPU duman testi: sentetik veri, küçük YYG model",
   "model": {
     "vocab_size": 512,
     "d_model": 64,
-    "n_layers": 2,
+    "n_layers": 3,
     "n_heads": 4,
     "n_kv_heads": 2,
-    "max_len": 256
+    "max_len": 256,
+    "local_window": 16,
+    "global_layers": 1
   },
   "data": {
     "dataset": "synthetic",

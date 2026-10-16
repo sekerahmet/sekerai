@@ -1,4 +1,4 @@
-"""Aynı hikâye satırlarında kıyas (kullanıcı, 15 Ekim: "veriyi düzenlemek ne kadar etki ediyor").
+"""Aynı hikâye satırlarında kıyas: rastgele pencereyle ve hikâye düzeniyle eğitilmiş modeller aynı token'larda.
 
     python scripts/story_eval.py --runs ss_d512_tf_yg_epok ss_d512_tf_yg_cumle
 
@@ -13,18 +13,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
-from rgn.data.loader import _open  # noqa: E402
+from rgn.data.loader import valid_tokens  # noqa: E402
 from rgn.data.registry import get_spec  # noqa: E402
 from rgn.data.stories import load_story_rows  # noqa: E402
-from rgn.paths import drive_root, runs_dir  # noqa: E402
+from rgn.paths import runs_dir  # noqa: E402
 from rgn.system import setup_process  # noqa: E402
+from rgn.train.checkpoint import load_run  # noqa: E402
 from rgn.train.evaluate import evaluate_rows  # noqa: E402
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from attn_anatomy import load  # noqa: E402
 
 
 def _final(run):
@@ -42,13 +39,13 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ctx = torch.autocast("cuda", dtype=torch.bfloat16) if device.type == "cuda" else torch.autocast("cpu", enabled=False)
     spec = get_spec("ss")
-    stream = np.asarray(_open(drive_root() / spec.valid[0], spec.fmt))
+    stream = valid_tokens("ss")
     rows = load_story_rows(stream, "v2/simplestories_gpt2", "valid").fixed_rows(512, a.tokens)
     n_tok = int((rows[1] != -100).sum())
     print("doğrulama: %d satır, %d token (dolgu %%%.1f)" % (len(rows[0]), n_tok, 100 * float((rows[1] == -100).float().mean())))
     print("%-26s %-28s %10s %8s %8s %18s" % ("koşu", "ölçüm", "kayıp", "bpb", "doğruluk", "kendi düzeni (SON)"))
     for run in a.runs:
-        m, step = load(run, device)
+        m, step = load_run(run, device)
         c = m.cfg
         modes = [("kendi maskesi (cümle)", True, 0)] if c.local_sentence else \
             [("maskesiz (eğitildiği gibi)", False, 0), ("hikâye maskeli", True, c.local_window)]

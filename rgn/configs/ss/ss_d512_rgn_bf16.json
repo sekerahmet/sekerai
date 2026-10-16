@@ -1,8 +1,0 @@
-{
-  "extends": "../base/train_ss.json",
-  "name": "ss_d512_rgn_bf16",
-  "notes": "Hassasiyet ablation: çekim dikkati de bf16 (rgn_fp32=false); kalite ve hız farkı ölçülür (doküman 3.5)",
-  "model": {
-    "rgn_fp32": false
-  }
-}
