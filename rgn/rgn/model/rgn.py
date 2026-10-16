@@ -18,8 +18,20 @@ from rgn.model.norm import RMSNorm
 from rgn.model.position import rope_tables
 
 
+def vocab_neuron_table(V, ff, k, seed=0):
+    """Sözlüğü nöronlara bölüştürür: token başına k nöron, her nöron eşit sayıda token (k·V/ff, ±1).  Token'lar rastgele
+    sıraya dizilir (katman başına ayrı tohum: iki katmanda aynı nöronu paylaşan token'lar ayrışır); sıradaki i. token
+    (i·k + j) mod ff nöronlarını alır.  -> (V, k) long."""
+    g = torch.Generator().manual_seed(1000 + seed)
+    order = torch.randperm(V, generator=g)
+    slots = (torch.arange(V)[:, None] * k + torch.arange(k)[None, :]) % ff
+    table = torch.empty(V, k, dtype=torch.long)
+    table[order] = slots
+    return table
+
+
 class Block(nn.Module):
-    def __init__(self, cfg, kind="G", mlp_only=False):
+    def __init__(self, cfg, kind="G", mlp_only=False, layer=0):
         """kind: 'G' genel (tam causal; konum cfg.global_pos ya da pos) | 'Y' yerel (son local_window token, konum pos).
         mlp_only: dikkat yok, yalnız MLP (token'lar arası bilgi akışı yok)."""
         super().__init__()
@@ -34,15 +46,26 @@ class Block(nn.Module):
             cfg = dataclasses.replace(cfg, sharpness_range=tuple(cfg.sharpness_range_g))
         self.attn = None if mlp_only else Attention(cfg, window=cfg.local_window if kind == "Y" else 0)
         self.mlp = build_mlp(cfg)
+        if not (mlp_only and cfg.mlp_vocab_neurons):
+            self.vocab_neurons = None
+        else:
+            self.register_buffer("vocab_neurons", vocab_neuron_table(cfg.vocab_size, cfg.ff_dim(kind),
+                                                                     cfg.mlp_vocab_neurons, seed=layer))
         self.loc_proj = None
         if cfg.attn_locality and not mlp_only:
             # konum özeti -> MLP kapı girdisi: E · (2L − 1) ∈ (−1, 1]; E sıfır başlatma (başlangıçta taban)
             taus = cfg.locality_tau_local if kind == "Y" else cfg.locality_tau_global
             self.loc_proj = nn.Linear(len(taus) * cfg.n_heads, cfg.ff_dim(), bias=False)
 
-    def forward(self, x, rope=None, masks=None):
+    def forward(self, x, rope=None, masks=None, tokens=None):
         if self.attn is None:
-            return x + self.mlp(self.norm2(x))
+            nm = None
+            if self.vocab_neurons is not None:                   # token'ın kendi nöronları (sözlüğe bölüştürülmüş)
+                assert tokens is not None, "sözlüğe bölüştürülmüş nöronlar token kimliği ister"
+                idx = self.vocab_neurons[tokens]                     # (B, N, k)
+                nm = torch.zeros(*idx.shape[:-1], self.mlp.c.in_features, device=x.device, dtype=x.dtype)
+                nm.scatter_(-1, idx, 1.0)
+            return x + (self.mlp(self.norm2(x)) if nm is None else self.mlp(self.norm2(x), neuron_mask=nm))
         a = self.attn(self.norm1(x), rope, None if masks is None else masks[self.kind])
         extra = None
         if self.loc_proj is not None:
@@ -74,7 +97,7 @@ class RGNModel(nn.Module):
         cfg.validate()
         self.cfg = cfg
         self.embed = nn.Embedding(cfg.vocab_size, cfg.d_model)
-        self.blocks = nn.ModuleList(Block(cfg, kind, i < cfg.mlp_only_layers) for i, kind in enumerate(cfg.layer_kinds()))
+        self.blocks = nn.ModuleList(Block(cfg, kind, i < cfg.mlp_only_layers, i) for i, kind in enumerate(cfg.layer_kinds()))
         self.norm_f = RMSNorm(cfg.d_model)
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self.lm_head.weight = self.embed.weight          # W_vocab = W_embᵀ
@@ -133,7 +156,7 @@ class RGNModel(nn.Module):
         rope = self.rope(idx.shape[1])
         ol = None
         for i, block in enumerate(self.blocks):
-            x = block(x, rope, masks)
+            x = block(x, rope, masks, idx)
             if self.obs_head is not None and i == self.cfg.observer_layer - 1:
                 ol, f = self.observe(x)
                 x = x + self.obs_feat((2.0 * f - 1.0).to(x.dtype))

@@ -255,3 +255,21 @@ def test_mlp_only_layers():
     loss.backward()
     d = diagnose(m2, idx, contextlib.nullcontext())
     assert len(d["layers"]) == 1
+
+
+def test_vocab_neurons():
+    """Sözlüğe bölüştürülmüş nöronlar: her token k farklı nöron, her nöron eşit sayıda token; iki katman ayrı dağıtım;
+    yalnız token'ın nöronları gradyan alır."""
+    from rgn.model.rgn import vocab_neuron_table
+    t = vocab_neuron_table(97, 16, 3, seed=0)
+    assert t.shape == (97, 3) and all(len(set(r.tolist())) == 3 for r in t)
+    load = torch.bincount(t.flatten(), minlength=16)
+    assert load.max() - load.min() <= 1                                   # 97·3/16 ≈ 18,2 token / nöron
+    assert not torch.equal(t, vocab_neuron_table(97, 16, 3, seed=1))
+    m = RGNModel(tiny(attn="softmax", attn_impl="sdpa", n_kv_heads=4, local_window=4, global_layers=1, n_layers=3,
+                      mlp_only_layers=2, mlp_vocab_neurons=2, mlp="swiglu", d_ff=16))
+    idx = torch.full((1, 6), 5)
+    m(idx, idx).backward()
+    w = m.blocks[0].mlp.c.weight.grad                                      # (d, ff): yalnız token 5'in 2 nöronu
+    used = (w.abs().sum(0) > 0).nonzero().flatten().tolist()
+    assert sorted(used) == sorted(m.blocks[0].vocab_neurons[5].tolist())

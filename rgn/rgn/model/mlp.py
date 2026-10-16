@@ -51,8 +51,9 @@ class GatedMLP(nn.Module):
         self.c = nn.Linear(ff, d, bias=bias)
         self.track, self.stats = False, {}
 
-    def forward(self, x, extra=None):
-        """extra: kapı girdisine eklenen terim (örn. dikkatin konum özeti)."""
+    def forward(self, x, extra=None, neuron_mask=None):
+        """extra: kapı girdisine eklenen terim (örn. dikkatin konum özeti).  neuron_mask (..., ff): yalnız 1 olan nöronlar
+        çalışır (sözlüğe bölüştürülmüş nöronlar; geri yayılımda da yalnız onlar pay alır)."""
         g, up = self.a(x).chunk(2, dim=-1)
         if extra is not None:
             if self.track:                                             # ek terim (konum özeti) / kapı girdisi (RMS oranı)
@@ -69,7 +70,10 @@ class GatedMLP(nn.Module):
             act = g * algebraic_sigmoid(g)
         else:
             act = F.silu(g)
-        return self.c(act * up)
+        h = act * up
+        if neuron_mask is not None:
+            h = h * neuron_mask.to(h.dtype)
+        return self.c(h)
 
 
 def build_mlp(cfg):
