@@ -105,7 +105,7 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
         opt.load_state_dict(st["optim"])
         changed = set()
         for g, h in zip(opt.param_groups, hp):                  # hiperparametreler checkpoint'ten değil yapılandırmadan
-            for k in ("base_lr", "weight_decay", "betas", "momentum", "nesterov"):
+            for k in ("base_lr", "weight_decay", "betas", "momentum", "nesterov", "own_schedule"):
                 if k in h and g.get(k) != h[k]:
                     changed.add(k)
                     g[k] = h[k]
@@ -198,8 +198,9 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
             say("DURDURULDU adım %d — checkpoint kaydedildi; sürdürmek için --resume" % step)
             return None
         f = lr_factor(step, total_steps, tc.schedule, tc.warmup, tc.decay, tc.min_lr_frac)
+        f_own = lr_factor(step, total_steps, "constant", tc.warmup)              # kendi takvimli satırlar: yalnız ısınma
         for g in opt.param_groups:
-            g["lr"] = g["base_lr"] * f
+            g["lr"] = g["base_lr"] * (f_own if g.get("own_schedule") else f)
         batches = []
         for _ in range(accum):
             masks = None

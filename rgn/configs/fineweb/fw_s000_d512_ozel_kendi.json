@@ -1,0 +1,9 @@
+{
+  "extends": "fw_s000_d512_tf_yg_ozel_rms.json",
+  "name": "fw_s000_d512_ozel_kendi",
+  "notes": "P2: satırın kendi takvimi — lr 8e-3·sqrt(67/(n+67)), n o kelimenin güncelleme sayısı (1000 güncellemede ~2e-3, ilk adım 8e-3); genel inişe bağlı değil (yalnız ısınma). Kıyas 3000: 1 nöron 3,7611.",
+  "train": {
+    "private_lr": 0.008,
+    "private_row_decay": 67
+  }
+}

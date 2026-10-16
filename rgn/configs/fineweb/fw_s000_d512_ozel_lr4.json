@@ -1,0 +1,8 @@
+{
+  "extends": "fw_s000_d512_tf_yg_ozel_rms.json",
+  "name": "fw_s000_d512_ozel_lr4",
+  "notes": "P1: özel tabloların lr'si ×4 (2e-3 -> 8e-3), takvim genel (WSD). Kıyas 3000: 1 nöron 3,7611.",
+  "train": {
+    "private_lr": 0.008
+  }
+}

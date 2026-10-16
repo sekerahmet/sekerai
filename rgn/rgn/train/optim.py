@@ -97,6 +97,16 @@ def _row_rms_eager(p, v, n, rr, gr, lr, b2, eps):
     p.index_add_(0, rr, (-lr) * gr / ((vr / (1 - b2 ** nr)).sqrt() + eps))
 
 
+def _row_rms_own_eager(p, v, n, rr, gr, lr, b2, eps, n0):
+    """rms + satırın kendi takvimi: lr · sqrt(n0 / (n + n0)), n o satırın önceki güncelleme sayısı."""
+    nr = n.index_select(0, rr) + 1
+    vr = v.index_select(0, rr) * b2 + (gr * gr).mean(1, keepdim=True) * (1 - b2)
+    n.index_copy_(0, rr, nr)
+    v.index_copy_(0, rr, vr)
+    own = (n0 / (nr - 1 + n0)).sqrt()
+    p.index_add_(0, rr, (-lr) * own * gr / ((vr / (1 - b2 ** nr)).sqrt() + eps))
+
+
 _ROW = {}
 
 
@@ -115,10 +125,12 @@ class RowAdam(torch.optim.Optimizer):
     kez görülen satır, genel adım sayısından bağımsız olarak doğru ölçekle başlar.
     mode rms: momentsiz, satır başına tek ikinci moment (v (satır, 1)) | adam: m, v eleman eleman."""
 
-    def __init__(self, params, lr, betas=(0.9, 0.95), eps=1e-8, mode="rms"):
+    def __init__(self, params, lr, betas=(0.9, 0.95), eps=1e-8, mode="rms", row_decay=0.0):
         assert mode in ("adam", "rms")
+        assert not row_decay or mode == "rms", "row_decay yalnız rms modunda"
         super().__init__(params, dict(lr=lr, betas=betas, eps=eps))
         self.mode = mode
+        self.row_decay = float(row_decay)              # n0 > 0: satırın kendi takvimi (rms)
         self.rows, self.grads = None, None
         self._lr = None                                    # lr cihazda kalıcı (her adım fill_: CPU -> GPU senkronu yok)
 
@@ -149,10 +161,15 @@ class RowAdam(torch.optim.Optimizer):
                 if self._lr is None:
                     self._lr = torch.zeros((), device=p.device)
                 self._lr.fill_(g["lr"])
+                if self.row_decay and getattr(self, "_n0", None) is None:
+                    self._n0 = torch.tensor(self.row_decay, device=p.device)
                 st = self._state(p)
                 rr = self.rows if self.rows is not None else torch.arange(p.shape[0], device=p.device)
                 gr = (self.grads[i] if self.grads is not None else p.grad.index_select(0, rr)).float()
-                if self.mode == "rms":
+                if self.mode == "rms" and self.row_decay:
+                    _row_update("rms_own", _row_rms_own_eager, p, st["v"], st["n"], rr, gr, self._lr, b2, g["eps"],
+                                self._n0)
+                elif self.mode == "rms":
                     _row_update("rms", _row_rms_eager, p, st["v"], st["n"], rr, gr, self._lr, b2, g["eps"])
                 else:
                     _row_update("adam", _row_adam_eager, p, st["m"], st["v"], st["n"], rr, gr, self._lr, b1, b2, g["eps"])
@@ -215,8 +232,9 @@ def build_optimizer(model, tcfg):
     opts = [adamw]
     private = [p for n, p in model.named_parameters() if ".private" in n and p.requires_grad]
     if private:                                  # kelimeye özel tablolar: yalnız o adımda geçen kelimelerin satırları
-        opts.append(RowAdam([dict(params=private, base_lr=adam_lr)], lr=adam_lr, betas=tuple(tcfg.betas),
-                            mode=tcfg.private_opt))
+        plr = tcfg.private_lr or adam_lr
+        opts.append(RowAdam([dict(params=private, base_lr=plr, own_schedule=bool(tcfg.private_row_decay))], lr=plr,
+                            betas=tuple(tcfg.betas), mode=tcfg.private_opt, row_decay=tcfg.private_row_decay))
     if muon:
         opts.append(Muon([dict(params=muon, base_lr=tcfg.lr)], lr=tcfg.lr, momentum=tcfg.momentum,
                          weight_decay=tcfg.weight_decay, normuon=tcfg.optimizer == "normuon"))

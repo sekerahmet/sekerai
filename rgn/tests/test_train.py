@@ -63,6 +63,26 @@ def test_resume_equals_uninterrupted():
             _resume_equal(["model.private_neurons=1", "model.private_vocab=" + rel, "train.private_opt=" + opt])
         _resume_equal(["model.private_neurons=1", "model.private_value=1", "model.private_vocab=" + rel])
         _resume_equal(["model.private_neurons=2", "model.private_vocab=" + rel])
+        _resume_equal(["model.private_neurons=1", "model.private_vocab=" + rel, "train.private_lr=0.008",
+                       "train.private_row_decay=67"])
+
+
+def test_row_own_schedule():
+    """row_decay: satırın adımı kendi güncelleme sayısıyla küçülür (lr·sqrt(n0/(n+n0))); dokunulmayan satır etkilenmez."""
+    p = torch.nn.Parameter(torch.zeros(3, 2))
+    opt = RowAdam([dict(params=[p])], lr=0.1, mode="rms", row_decay=4.0)
+    g = torch.ones(1, 2)
+    steps = []
+    for _ in range(5):
+        before = p.data[0].clone()
+        opt.set_rows(torch.tensor([0]), [g])
+        opt.step()
+        steps.append(float((before - p.data[0])[0]))
+    want = [0.1 * (4 / (k + 4)) ** 0.5 for k in range(5)]
+    assert all(abs(a - b) < 1e-5 for a, b in zip(steps, want)), (steps, want)
+    opt.set_rows(torch.tensor([2]), [g])
+    opt.step()
+    assert abs(float(p.data[2, 0]) + 0.1) < 1e-5 and (p.data[1] == 0).all()
 
 
 def test_row_adam_per_row_bias():

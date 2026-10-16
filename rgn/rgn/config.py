@@ -108,6 +108,9 @@ class TrainConfig:
     diag_every: int = 1000             # dikkat entropisi, MLP doyması
     ckpt_minutes: float = 10.0
     private_opt: str = "rms"           # kelimeye özel tablolar (satır seyrek): rms (momentsiz, satır başına tek ölçek) | adam
+    private_lr: float = 0.0            # kelimeye özel tabloların lr'si; 0: adam_lr (ya da lr)
+    private_row_decay: float = 0.0     # n0 > 0: satırın lr'si kendi sayacıyla küçülür, lr·sqrt(n0 / (n + n0)) (n: o satırın
+                                       # güncelleme sayısı); genel takvimin inişi uygulanmaz (yalnız ısınma)
     sample_tokens: int = 64            # bitişte örnek üretim uzunluğu (0: kapalı)
     probe_tokens: int = 48             # her değerlendirmede 2 istemle greedy devam (nitel kontrol; 0: kapalı)
     loss_checkpoint: bool = False      # kayıpta logit'leri geri geçişte yeniden hesapla (bellek az, LM head 4 geçiş yerine 3)
