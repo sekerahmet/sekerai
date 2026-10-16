@@ -204,22 +204,24 @@ def test_make_plan_covers_tokens():
 
 
 def test_private_kernel_cuda():
-    """Birleşik Triton çekirdeği (CUDA): ileri ve geri, düz PyTorch karşılığıyla aynı (sık satırlar dahil)."""
+    """Birleşik Triton çekirdeği (CUDA): ileri ve geri, düz PyTorch karşılığıyla aynı (sık satırlar dahil; d 2'nin kuvveti
+    olmayan genişlik dahil)."""
     require_cuda()
     from rgn.model.private_kernel import make_plan, private_fwd, reference
     torch.manual_seed(0)
-    T, D, R = 4096, 512, 300
-    loc = torch.randint(0, R, (T,), device="cuda")
-    loc[:1500] = 7                                                     # çok sık bir satır ("the" gibi)
-    x = torch.randn(T, D, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    sub = (torch.randn(R, 3 * D, device="cuda") * 0.05).to(torch.bfloat16).requires_grad_()
-    out = private_fwd(x, loc, sub, *make_plan(loc, R))[0]
-    g = torch.randn_like(out)
-    (out.float() * g.float()).sum().backward()
-    dx, ds = x.grad.clone(), sub.grad.clone()
-    xr, sr = x.detach().float().requires_grad_(), sub.detach().float().requires_grad_()
-    ref = reference(xr, loc, sr)
-    (ref * g.float()).sum().backward()
-    rel = lambda a, b: float((a.float() - b).norm() / b.norm().clamp_min(1e-12))  # noqa: E731
-    assert rel(out, ref.detach()) < 2e-2 and rel(dx, xr.grad) < 2e-2 and rel(ds, sr.grad) < 2e-2, (
-        rel(out, ref.detach()), rel(dx, xr.grad), rel(ds, sr.grad))
+    for D in (512, 768):
+        T, R = 4096, 300
+        loc = torch.randint(0, R, (T,), device="cuda")
+        loc[:1500] = 7                                                 # çok sık bir satır ("the" gibi)
+        x = torch.randn(T, D, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        sub = (torch.randn(R, 3 * D, device="cuda") * 0.05).to(torch.bfloat16).requires_grad_()
+        out = private_fwd(x, loc, sub, *make_plan(loc, R))[0]
+        g = torch.randn_like(out)
+        (out.float() * g.float()).sum().backward()
+        dx, ds = x.grad.clone(), sub.grad.clone()
+        xr, sr = x.detach().float().requires_grad_(), sub.detach().float().requires_grad_()
+        ref = reference(xr, loc, sr)
+        (ref * g.float()).sum().backward()
+        rel = lambda a, b: float((a.float() - b).norm() / b.norm().clamp_min(1e-12))  # noqa: E731
+        assert rel(out, ref.detach()) < 2e-2 and rel(dx, xr.grad) < 2e-2 and rel(ds, sr.grad) < 2e-2, (
+            D, rel(out, ref.detach()), rel(dx, xr.grad), rel(ds, sr.grad))

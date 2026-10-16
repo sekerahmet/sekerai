@@ -34,41 +34,44 @@ def _kernels():
     import triton.language as tl
 
     @triton.jit
-    def fwd(X, LOC, SUB, OUT, S, sx, ss, so, D: tl.constexpr):
+    def fwd(X, LOC, SUB, OUT, S, sx, ss, so, D: tl.constexpr, BD: tl.constexpr):
         t = tl.program_id(0).to(tl.int64)
         r = tl.load(LOC + t).to(tl.int64)
-        o = tl.arange(0, D)
-        x = tl.load(X + t * sx + o).to(tl.float32)
+        o = tl.arange(0, BD)
+        m = o < D
+        x = tl.load(X + t * sx + o, mask=m, other=0.0).to(tl.float32)
         b = SUB + r * ss
-        s1 = tl.sum(tl.load(b + o).to(tl.float32) * x, 0)
-        s2 = tl.sum(tl.load(b + D + o).to(tl.float32) * x, 0)
+        s1 = tl.sum(tl.load(b + o, mask=m, other=0.0).to(tl.float32) * x, 0)
+        s2 = tl.sum(tl.load(b + D + o, mask=m, other=0.0).to(tl.float32) * x, 0)
         a = s1 * tl.sigmoid(s1) * s2
-        tl.store(OUT + t * so + o, (a * tl.load(b + 2 * D + o).to(tl.float32)).to(OUT.dtype.element_ty))
+        tl.store(OUT + t * so + o, (a * tl.load(b + 2 * D + o, mask=m, other=0.0).to(tl.float32)).to(OUT.dtype.element_ty),
+                 mask=m)
         tl.store(S + 2 * t, s1)
         tl.store(S + 2 * t + 1, s2)
 
     @triton.jit
-    def bwd_tok(DO, X, LOC, SUB, S, DX, C, sdo, sx, ss, sdx, D: tl.constexpr):
+    def bwd_tok(DO, X, LOC, SUB, S, DX, C, sdo, sx, ss, sdx, D: tl.constexpr, BD: tl.constexpr):
         t = tl.program_id(0).to(tl.int64)
         r = tl.load(LOC + t).to(tl.int64)
-        o = tl.arange(0, D)
+        o = tl.arange(0, BD)
+        m = o < D
         b = SUB + r * ss
-        do = tl.load(DO + t * sdo + o).to(tl.float32)
+        do = tl.load(DO + t * sdo + o, mask=m, other=0.0).to(tl.float32)
         s1 = tl.load(S + 2 * t)
         s2 = tl.load(S + 2 * t + 1)
         sg = tl.sigmoid(s1)
         silu = s1 * sg
-        da = tl.sum(do * tl.load(b + 2 * D + o).to(tl.float32), 0)
+        da = tl.sum(do * tl.load(b + 2 * D + o, mask=m, other=0.0).to(tl.float32), 0)
         ds1 = da * s2 * sg * (1.0 + s1 * (1.0 - sg))
         ds2 = da * silu
-        dx = ds1 * tl.load(b + o).to(tl.float32) + ds2 * tl.load(b + D + o).to(tl.float32)
-        tl.store(DX + t * sdx + o, dx.to(DX.dtype.element_ty))
+        dx = ds1 * tl.load(b + o, mask=m, other=0.0).to(tl.float32) + ds2 * tl.load(b + D + o, mask=m, other=0.0).to(tl.float32)
+        tl.store(DX + t * sdx + o, dx.to(DX.dtype.element_ty), mask=m)
         tl.store(C + 3 * t, ds1)
         tl.store(C + 3 * t + 1, ds2)
         tl.store(C + 3 * t + 2, silu * s2)
 
     @triton.jit
-    def bwd_row(DO, X, C, ORDER, CROW, CLO, CHI, DSUB, sdo, sx, sds, D: tl.constexpr):
+    def bwd_row(DO, X, C, ORDER, CROW, CLO, CHI, DSUB, sdo, sx, sds, D: tl.constexpr, BD: tl.constexpr):
         """Parça başına (bir satırın en çok CH ardışık token'ı): toplam fp32 DSUB'a atomik eklenir.  Sık satır birçok
         paralel parçaya bölünür (tek programda uzun döngü yok)."""
         c = tl.program_id(0)
@@ -76,23 +79,29 @@ def _kernels():
         if r >= 0:
             lo = tl.load(CLO + c)
             hi = tl.load(CHI + c)
-            o = tl.arange(0, D)
-            ag = tl.zeros([D], dtype=tl.float32)
-            au = tl.zeros([D], dtype=tl.float32)
-            aw = tl.zeros([D], dtype=tl.float32)
+            o = tl.arange(0, BD)
+            m = o < D
+            ag = tl.zeros([BD], dtype=tl.float32)
+            au = tl.zeros([BD], dtype=tl.float32)
+            aw = tl.zeros([BD], dtype=tl.float32)
             for i in range(lo, hi):
                 t = tl.load(ORDER + i).to(tl.int64)
-                x = tl.load(X + t * sx + o).to(tl.float32)
+                x = tl.load(X + t * sx + o, mask=m, other=0.0).to(tl.float32)
                 ag += tl.load(C + 3 * t) * x
                 au += tl.load(C + 3 * t + 1) * x
-                aw += tl.load(C + 3 * t + 2) * tl.load(DO + t * sdo + o).to(tl.float32)
+                aw += tl.load(C + 3 * t + 2) * tl.load(DO + t * sdo + o, mask=m, other=0.0).to(tl.float32)
             b = DSUB + r.to(tl.int64) * sds
-            tl.atomic_add(b + o, ag)
-            tl.atomic_add(b + D + o, au)
-            tl.atomic_add(b + 2 * D + o, aw)
+            tl.atomic_add(b + o, ag, mask=m)
+            tl.atomic_add(b + D + o, au, mask=m)
+            tl.atomic_add(b + 2 * D + o, aw, mask=m)
 
     _K.update(fwd=fwd, bwd_tok=bwd_tok, bwd_row=bwd_row)
     return _K
+
+
+def _bd(d):
+    """Çekirdek blok genişliği: d'yi kapsayan 2'nin kuvveti (d 768 -> 1024, fazlası maskelenir)."""
+    return 1 << (d - 1).bit_length()
 
 
 def make_plan(loc, R):
@@ -117,10 +126,10 @@ def make_plan(loc, R):
 def private_fwd(x: torch.Tensor, loc: torch.Tensor, sub: torch.Tensor, order: torch.Tensor, crow: torch.Tensor,
                 clo: torch.Tensor, chi: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     T, D = x.shape
-    assert D & (D - 1) == 0 and sub.shape[1] == 3 * D, "d 2'nin kuvveti, satır 3d (tek nöron)"
+    assert sub.shape[1] == 3 * D, "satır 3d (tek nöron)"
     out = torch.empty_like(x)
     s = torch.empty((T, 2), device=x.device, dtype=torch.float32)
-    _kernels()["fwd"][(T,)](x, loc, sub, out, s, x.stride(0), sub.stride(0), out.stride(0), D=D, num_warps=4)
+    _kernels()["fwd"][(T,)](x, loc, sub, out, s, x.stride(0), sub.stride(0), out.stride(0), D=D, BD=_bd(D), num_warps=4)
     return out, s
 
 
@@ -139,10 +148,10 @@ def private_bwd(do: torch.Tensor, x: torch.Tensor, loc: torch.Tensor, sub: torch
     dx = torch.empty_like(x)
     c = torch.empty((T, 3), device=x.device, dtype=torch.float32)
     k["bwd_tok"][(T,)](do, x, loc, sub, s, dx, c, do.stride(0), x.stride(0), sub.stride(0), dx.stride(0), D=D,
-                       num_warps=4)
+                       BD=_bd(D), num_warps=4)
     dsub = torch.zeros(sub.shape, device=x.device, dtype=torch.float32)
     k["bwd_row"][(crow.shape[0],)](do, x, c, order, crow, clo, chi, dsub, do.stride(0), x.stride(0), dsub.stride(0),
-                                   D=D, num_warps=4)
+                                   D=D, BD=_bd(D), num_warps=4)
     return dx, dsub.to(sub.dtype)
 
 
