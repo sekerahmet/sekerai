@@ -126,6 +126,8 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
             len(val_rows[0]), int((val_rows[1] != -100).sum()), 100 * float((val_rows[1] == -100).float().mean()),
             "cümle + hikâye başı" if mc.local_sentence else "pencere %d" % mc.local_window))
     eval_batch = max(1, micro)
+    eval_hidden = (torch.compile(model.hidden, dynamic=False) if (tc.eval_compile and tc.compile and device.type == "cuda")
+                   else None)
 
     log.write(type="start", step=step, total_steps=total_steps, stop_step=tc.stop_step, tokens_per_step=tokens_per_step,
               params=n_params, resumed=bool(resume and step), t=time.time())
@@ -161,7 +163,7 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
                               window=0 if mc.local_sentence else mc.local_window)
         else:
             windows = valid_s.fixed_windows(T, dc.final_eval_tokens) if final else val_windows
-            r = evaluate(model, windows, eval_batch, device, ctx, bytes_per_token)
+            r = evaluate(model, windows, eval_batch, device, ctx, bytes_per_token, hidden=eval_hidden)
         # cümle yerel modeli maskesiz üretemez (örnek / teşhis maskesiz yol)
         r["probes"] = probes(model, device, tc.probe_tokens) if tc.probe_tokens and not mc.local_sentence else []
         best = r["loss"] if best is None else min(best, r["loss"])

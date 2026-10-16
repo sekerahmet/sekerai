@@ -10,34 +10,38 @@ BANDS = ((0, 64), (64, 256), (256, 512), (512, 1 << 30))      # pencere içi kon
 
 
 @torch.no_grad()
-def evaluate(model, windows, batch, device, ctx, bytes_per_token=0.0, chunk=8192):
-    """windows (n, T + 1) -> {"loss", "ppl", "bpb", "acc", "acc_bands", "tokens"}.  Logit'ler parça parça hesaplanır.
-    acc_bands: pencere içi konum bandına göre sonraki-token doğruluğu (bağlam büyüdükçe kazanç)."""
+def evaluate(model, windows, batch, device, ctx, bytes_per_token=0.0, chunk=8192, hidden=None):
+    """windows (n, T + 1) -> {"loss", "ppl", "bpb", "acc", "acc_bands", "tokens"}.  Logit'ler parça parça, fp32.
+    acc_bands: pencere içi konum bandına göre sonraki-token doğruluğu (bağlam büyüdükçe kazanç).
+    hidden: model.hidden yerine (ör. derlenmiş) işlev; yalnız tam batch'lerde, son eksik batch model.hidden ile.
+    Toplamlar cihazda (fp64) birikir, tek senkron sonda; fp32 lm_head bir kez."""
     was_training = model.training
     model.eval()
-    W = model.lm_head.weight
+    W = model.lm_head.weight.float()
     T = windows.shape[1] - 1
     bands = [(lo, min(hi, T)) for lo, hi in BANDS if lo < T]
-    band_ok = [0] * len(bands)
-    total, correct, count = 0.0, 0, 0
+    acc = torch.zeros(2 + len(bands), dtype=torch.float64, device=device)     # nll toplamı, doğru, bant doğruları
+    count = 0
     for i in range(0, len(windows), batch):
         w = windows[i:i + batch].to(device, non_blocking=True)
         x, y = w[:, :-1], w[:, 1:].reshape(-1)
         with ctx:
-            h = model.hidden(x)
+            h = (hidden if hidden is not None and len(w) == batch else model.hidden)(x)
         h = h.reshape(-1, h.shape[-1]).float()
         hit = torch.empty_like(y, dtype=torch.bool)
         for j in range(0, y.numel(), chunk):
-            logits = h[j:j + chunk] @ W.float().T
+            logits = h[j:j + chunk] @ W.T
             t = y[j:j + chunk]
-            total += torch.nn.functional.cross_entropy(logits, t, reduction="sum").item()
+            acc[0] += torch.nn.functional.cross_entropy(logits, t, reduction="sum").double()
             hit[j:j + chunk] = logits.argmax(-1) == t
         hit = hit.view(-1, T)
-        correct += hit.sum().item()
+        acc[1] += hit.sum()
         for b, (lo, hi) in enumerate(bands):
-            band_ok[b] += hit[:, lo:hi].sum().item()
+            acc[2 + b] += hit[:, lo:hi].sum()
         count += y.numel()
     model.train(was_training)
+    acc = acc.tolist()
+    total, correct, band_ok = acc[0], int(acc[1]), [int(v) for v in acc[2:]]
     loss = total / max(count, 1)
     n_win = count // T
     acc_bands = {"%d-%d" % (lo, hi): band_ok[b] / max(1, n_win * (hi - lo)) for b, (lo, hi) in enumerate(bands)}

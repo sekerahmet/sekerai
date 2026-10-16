@@ -111,6 +111,7 @@ class TrainConfig:
     grad_clip: float = 1.0
     dtype: str = "bf16"                # bf16 | fp32 (CPU'da her zaman fp32)
     compile: bool = True
+    eval_compile: bool = False         # değerlendirme ileri geçişi derlenmiş (CUDA; profil: scripts/eval_profile.py)
     seed: int = 0
     log_every: int = 50
     eval_every: int = 1000

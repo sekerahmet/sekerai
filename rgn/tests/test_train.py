@@ -119,3 +119,22 @@ def test_row_adam_per_row_bias():
         opt.step()
         assert torch.allclose(p.data[3], torch.full((3,), -0.1), atol=1e-4), (mode, p.data[3])
         assert (p.data[1:3] == 0).all()                            # dokunulmayan satırlar
+
+
+def test_evaluate_matches_reference():
+    """evaluate (cihazda birikim, tek senkron; son eksik batch) = açık hesap: kayıp, doğruluk, bant doğrulukları."""
+    import contextlib
+    from rgn.model import RGNModel
+    from rgn.train.evaluate import evaluate
+    from _util import tiny
+    torch.manual_seed(0)
+    m = RGNModel(tiny()).eval()
+    win = torch.randint(0, 97, (7, 33))
+    r = evaluate(m, win, 3, torch.device("cpu"), contextlib.nullcontext(), chunk=40)
+    with torch.no_grad():
+        logits = m(win[:, :-1]).float()
+    y = win[:, 1:]
+    nll = torch.nn.functional.cross_entropy(logits.reshape(-1, logits.shape[-1]), y.reshape(-1))
+    hit = logits.argmax(-1) == y
+    assert abs(r["loss"] - nll.item()) < 1e-5 and abs(r["acc"] - hit.float().mean().item()) < 1e-9, r
+    assert abs(r["acc_bands"]["0-32"] - hit.float().mean().item()) < 1e-9 and r["tokens"] == 7 * 32
