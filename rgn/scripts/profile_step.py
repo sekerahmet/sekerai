@@ -1,6 +1,7 @@
 """Eğitim adımı profili: bölüm bölüm süre ve en çok CUDA süresi alan işlemler.
 
     python scripts/profile_step.py --config configs/fineweb/fw_s000_d512_tf_yg_ozel_rms.json
+    python scripts/profile_step.py --config ... --set train.micro_batch=64 --steps 20 --no_table   # yalnız ms/adım
 
 Eğitimin kendi adımını (rgn.train.step.train_step: kelimeye özel satır kopyası, ileri / geri, kırpma, optimizer) birkaç
 kez çalıştırır; ısınmadan sonra senkronlu ölçüm ve torch.profiler tablosu.
@@ -26,8 +27,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     ap.add_argument("--steps", type=int, default=6)
+    ap.add_argument("--set", action="append", default=[], help="bölüm.alan=değer (load_config ezmesi)")
+    ap.add_argument("--no_table", action="store_true", help="yalnız ms/adım (profiler tablosu yok)")
     a = ap.parse_args()
-    cfg = load_config(a.config)
+    cfg = load_config(a.config, a.set)
     tc, dc = cfg.train, cfg.data
     dev = torch.device("cuda")
     train_s, _, _ = load_streams(dc)
@@ -50,7 +53,11 @@ def main():
     for _ in range(a.steps):
         step()
     torch.cuda.synchronize()
-    print("adım %.1f ms (%s)" % (1000 * (time.time() - t0) / a.steps, cfg.name))
+    print("adım %.1f ms  (%s; mikro %d × %d, tepe bellek %.1f GB)" % (
+        1000 * (time.time() - t0) / a.steps, " ".join(a.set) or cfg.name, accum, micro,
+        torch.cuda.max_memory_allocated() / 2 ** 30), flush=True)
+    if a.no_table:
+        return
     from torch.profiler import ProfilerActivity, profile
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
         for _ in range(3):
