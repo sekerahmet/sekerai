@@ -269,3 +269,18 @@ def test_kv_cache_matches_full():
                 seq = torch.cat([seq, nxt[:, None]], 1)
                 logits = cache.step(nxt).clone()
             assert torch.equal(m.generate(idx, 9), m.generate(idx, 9, cache=False)), kw
+
+
+def test_kv_cache_cuda():
+    """CUDA'da önbellekli üretim (torch.compile + CUDA graph, tampon havuzu) önbelleksizle aynı greedy token'ları verir
+    (fp32; özel nöronlu YYG ve GQA); aynı tamponlarla ikinci çağrı da aynı."""
+    require_cuda()
+    with private_vocab(range(1, 60)) as rel:
+        for kw in (dict(private_neurons=1, private_vocab=rel), dict(n_heads=4, n_kv_heads=1)):
+            torch.manual_seed(0)
+            m = RGNModel(tiny(**kw)).cuda().eval()
+            for _, _, p in m.private_tables():
+                p.data.normal_(0, 0.1)
+            for seed in (0, 1):                                            # ikinci tur: havuzdaki graph tekrar kullanılır
+                idx = torch.randint(0, 97, (3, 20), generator=torch.Generator().manual_seed(seed)).cuda()
+                assert torch.equal(m.generate(idx, 24), m.generate(idx, 24, cache=False)), (kw, seed)
