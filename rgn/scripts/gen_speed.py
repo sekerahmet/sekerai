@@ -3,8 +3,8 @@ göre süresi (gömme, dikkat, ortak MLP, özel nöron, LM head).
 
     python scripts/gen_speed.py --runs fw_s000_d512_tf_yg fw_s000_d512_tf_yg_ozel_rms
 
-Şu anki RGNModel.generate önbelleksiz: her yeni token'da bütün bağlam yeniden hesaplanır (token başına maliyet bağlamla
-büyür).  Bu betik o maliyeti ölçer.
+İki yol: önbellekli (rgn/model/decode.py: KV tamponu + torch.compile + CUDA graph) ve önbelleksiz başvuru (her yeni
+token'da bütün bağlam yeniden).  Her durum ölçülmeden önce aynı şekilde bir kez çalıştırılır (derleme süresi sayılmaz).
 """
 import argparse
 import sys
@@ -24,13 +24,13 @@ def _sync():
 
 
 @torch.no_grad()
-def gen_rate(m, batch, prompt, new, dev, dtype):
+def gen_rate(m, batch, prompt, new, dev, dtype, cache=True):
     idx = torch.randint(0, 50000, (batch, prompt), device=dev)
     with torch.autocast(dev.type, dtype=dtype, enabled=dev.type == "cuda"):
-        m.generate(idx[:, :8], 4)                                      # ısınma
+        m.generate(idx, new, cache=cache)                              # ısınma: aynı şekil (derleme, graph, maske)
         _sync()
         t = time.perf_counter()
-        m.generate(idx, new)
+        m.generate(idx, new, cache=cache)
         _sync()
     sec = time.perf_counter() - t
     return batch * new / sec, 1000 * sec / new
@@ -75,10 +75,14 @@ def main():
     for run in a.runs:
         m, step = load_run(run, dev)
         print("\n== %s (adım %s) — %s" % (run, step, torch.cuda.get_device_name(0) if dev.type == "cuda" else "cpu"))
-        print("%-26s %12s %14s" % ("durum", "token/s", "ms / yeni token"))
-        for batch, prompt in ((1, 32), (1, 512), (1, 1024), (16, 512)):
-            tps, ms = gen_rate(m, batch, prompt, a.new, dev, dtype)
-            print("%-26s %12.0f %14.2f" % ("batch %d, bağlam %d" % (batch, prompt), tps, ms))
+        print("%-34s %12s %14s" % ("durum", "token/s", "ms / yeni token"))
+        for cache in (True, False):
+            for batch, prompt in ((1, 32), (1, 512), (1, 1024), (16, 512), (64, 512)):
+                if not cache and batch == 64:
+                    continue
+                tps, ms = gen_rate(m, batch, prompt, a.new, dev, dtype, cache)
+                print("%-34s %12.0f %14.2f" % ("%s, batch %d, bağlam %d" % ("önbellekli" if cache else "önbelleksiz",
+                                                                            batch, prompt), tps, ms))
         for batch, ctx in ((1, 1024),):
             total, parts = forward_parts(m, batch, ctx, dev, dtype)
             print("tek ileri geçiş (batch %d, bağlam %d): %.2f ms" % (batch, ctx, 1000 * total))

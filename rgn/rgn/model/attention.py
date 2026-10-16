@@ -116,7 +116,11 @@ class Attention(nn.Module):
         q, k, v = self.project(x, rope)
         if vv is not None:
             v = v + vv.view(B, N, self.Hkv, self.dh).transpose(1, 2).to(v.dtype)
-        out = self._core(q, k, v, mask)
+        return self.finish(x, self._core(q, k, v, mask))
+
+    def finish(self, x, out):
+        """Dikkat çıktısı out (B, H, N, dh) -> kapı (x'ten) + W_O -> (B, N, d)."""
+        B, N, _ = x.shape
         g = self.gate(x)
         if g is not None:
             out = out * g.to(out.dtype)

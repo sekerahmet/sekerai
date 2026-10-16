@@ -74,14 +74,22 @@ class Block(nn.Module):
         """H = S + MLP(RMSNorm(S)) [+ özel],  S = X + Attn(RMSNorm(X)).  parts (dict): bileşenler buraya yazılır
         (teşhis: dikkat, mlp, özel — akışa eklenen değerler; olmayan bileşen None)."""
         xa = self.norm1(x)
-        vv = None
-        if self.private_v is not None:                                # kelimeye özel V vektörü
-            vv = priv[1]["private_v"][priv[0]] if priv is not None else F.embedding(rows, self.private_v)
-            if self.vgate is not None:                                # kapı 2σ(·) ∈ (0, 2), başlangıçta 1
-                B, N, _ = x.shape
-                g = 2 * torch.sigmoid(self.vgate(torch.cat([xa[..., :6], vv[..., :6].to(xa.dtype)], -1)))
-                vv = (g.unsqueeze(-1) * vv.view(B, N, g.shape[-1], -1).to(g.dtype)).view(B, N, -1)
-        a = self.attn(xa, rope, mask, vv)
+        a = self.attn(xa, rope, mask, self.value_vec(xa, rows, priv))
+        return self.finish(x, a, rows, priv, parts)
+
+    def value_vec(self, xa, rows=None, priv=None):
+        """Kelimeye özel V vektörü (B, N, Hkv·dh), kapılı; yoksa None.  xa = RMSNorm(X)."""
+        if self.private_v is None:
+            return None
+        vv = priv[1]["private_v"][priv[0]] if priv is not None else F.embedding(rows, self.private_v)
+        if self.vgate is not None:                                    # kapı 2σ(·) ∈ (0, 2), başlangıçta 1
+            B, N, _ = xa.shape
+            g = 2 * torch.sigmoid(self.vgate(torch.cat([xa[..., :6], vv[..., :6].to(xa.dtype)], -1)))
+            vv = (g.unsqueeze(-1) * vv.view(B, N, g.shape[-1], -1).to(g.dtype)).view(B, N, -1)
+        return vv
+
+    def finish(self, x, a, rows=None, priv=None, parts=None):
+        """Dikkat çıktısı a eklendikten sonra: S = X + a, H = S + MLP(RMSNorm(S)) [+ özel]."""
         s = x + a
         xn = self.norm2(s) if self.norm2 is not None else None
         m = None
@@ -209,8 +217,12 @@ class RGNModel(nn.Module):
         return lm_loss(h, self.lm_head.weight, targets, use_checkpoint=self.loss_checkpoint)
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=0.0, eos_id=None, generator=None):
-        """Önbelleksiz başvuru üretimi.  temperature 0: argmax; > 0: örnekleme."""
+    def generate(self, idx, max_new_tokens, temperature=0.0, eos_id=None, generator=None, cache=True):
+        """Üretim.  temperature 0: argmax; > 0: örnekleme.  cache: KV önbellekli yol (rgn/model/decode.py; CUDA'da
+        derlenmiş + CUDA graph); False: önbelleksiz başvuru (her token'da bütün bağlam yeniden)."""
+        if cache:
+            from rgn.model.decode import generate
+            return generate(self, idx, max_new_tokens, temperature, eos_id, generator)
         for _ in range(max_new_tokens):
             ctx = idx[:, -self.cfg.max_len:]
             logits = self.lm_head(self.hidden(ctx)[:, -1]).float()

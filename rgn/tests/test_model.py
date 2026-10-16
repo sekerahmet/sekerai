@@ -242,3 +242,30 @@ def test_private_kernel_cuda():
         rel = lambda a, b: float((a.float() - b).norm() / b.norm().clamp_min(1e-12))  # noqa: E731
         assert rel(out, ref.detach()) < 2e-2 and rel(dx, xr.grad) < 2e-2 and rel(ds, sr.grad) < 2e-2, (
             D, rel(out, ref.detach()), rel(dx, xr.grad), rel(ds, sr.grad))
+
+
+def test_kv_cache_matches_full():
+    """Önbellekli üretim = önbelleksiz: her adımın logit'i tam ileri geçişle aynı; yerel pencere döner tamponu (istem +
+    yeni > pencere), genel tampon, GQA, kapı, kelimeye özel nöron ve V vektörü."""
+    from rgn.model.decode import StaticCache
+    with private_vocab(range(1, 60)) as rel:
+        for kw in (dict(), dict(local_window=0), dict(n_heads=4, n_kv_heads=1), dict(attn_gate="head"),
+                   dict(private_neurons=1, private_vocab=rel), dict(private_value=1, private_value_gate=True,
+                                                                     private_value_std=0.05, private_vocab=rel),
+                   dict(private_neurons=1, private_vocab=rel, shared_mlp=False)):
+            torch.manual_seed(0)
+            m = RGNModel(tiny(**kw)).eval()
+            for _, _, p in m.private_tables():
+                p.data.normal_(0, 0.1)
+            idx = torch.randint(0, 97, (2, 11))
+            cache = StaticCache(m, 2, positions=14)
+            logits = cache.prefill(idx)
+            seq = idx
+            for i in range(14):
+                with torch.no_grad():
+                    ref = m(seq)[:, -1].float()
+                assert torch.allclose(logits, ref, atol=1e-4), (kw, i, (logits - ref).abs().max().item())
+                nxt = logits.argmax(-1)
+                seq = torch.cat([seq, nxt[:, None]], 1)
+                logits = cache.step(nxt).clone()
+            assert torch.equal(m.generate(idx, 9), m.generate(idx, 9, cache=False)), kw
