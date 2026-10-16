@@ -39,6 +39,7 @@ class ModelConfig:
     private_value_gate: bool = False   # head başına kapı 2σ(W [x[:6], v[:6]]) (modded-nanoGPT), sıfır başlatma: kapı 1
     private_value_std: float = 0.0     # V tablosu başlangıcı N(0, std); 0: sıfır
     private_vocab: str = "assets/ss_vocab_used.json"   # özel satırı olan kelimeler (gerisi tek ortak "diğer" satırı)
+    private_top: int = 0               # > 0: yalnız en sık private_top kelimeye özel satır (sayılar private_vocab'dan)
     local_sentence: bool = False       # Y katmanı pencere yerine kendi cümlesi + hikâye başı (data.layout story gerek)
     shared_mlp: bool = True            # False: ortak MLP yok (katman = dikkat [+ kelimeye özel nöron])
     mlp_bias: bool = True

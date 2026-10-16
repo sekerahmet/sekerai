@@ -165,6 +165,20 @@ def test_private_value_gated_layers():
         assert torch.allclose(l_full, m(idx, idx, priv=(torch.searchsorted(uniq, m.priv_map[idx]), sub, None)), atol=1e-6)
 
 
+def test_private_top():
+    """private_top: yalnız en sık K kelimenin satırı var; diğerleri ortak satır 0."""
+    import json
+    from _util import ROOT
+    with private_vocab([3, 5, 9, 11]) as rel:
+        f = ROOT / rel
+        d = json.loads(f.read_text(encoding="utf-8"))
+        d["counts"] = [10, 500, 70, 500]
+        f.write_text(json.dumps(d), encoding="utf-8")
+        m = RGNModel(tiny(private_neurons=1, private_vocab=rel, private_top=2))
+        assert m.blocks[0].private.shape[0] == 3                           # 2 kelime + ortak
+        assert m.priv_map[5] == 1 and m.priv_map[11] == 2 and m.priv_map[3] == 0 and m.priv_map[9] == 0
+
+
 def test_private_value():
     """V vektörü: başlangıçta (0) tabanla aynı çıktı; tek kelimelik batch'te yalnız o kelimenin satırı gradyan alır."""
     with private_vocab([3, 5, 9]) as rel:
