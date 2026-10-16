@@ -51,7 +51,10 @@ def main():
         tps64, ms64 = gen_rate(m, 64, 512, 64, dev, torch.bfloat16)
         rows[run] = dict(step=step, fact=100 * sum(ok) / len(ok), by={k: 100 * sum(v) / max(1, len(v)) for k, v in by.items()},
                          loop=loop, ms1=ms1, tps64=tps64, load=t_load, sec=time.time() - t0)
-        print("%-30s adım %s  yükleme %.0f sn, toplam %.0f sn" % (run, step, t_load, rows[run]["sec"]), flush=True)
+        r = rows[run]
+        print("%-30s adım %s  yükleme %.0f sn, toplam %.0f sn | olgu %%%.1f  tekrar %%%.1f  sıkışma %%%.1f  rep-4 %.3f  "
+              "%.2f ms/tok (b1)  %.0f tok/s (b64)" % (run, step, t_load, r["sec"], r["fact"], 100 * loop["any_rep"],
+                                                     100 * loop["stuck"], loop["rep4"], ms1, tps64), flush=True)
         del m
         if dev.type == "cuda":
             torch.cuda.empty_cache()
