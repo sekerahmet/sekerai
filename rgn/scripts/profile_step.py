@@ -48,27 +48,26 @@ def main():
     def step(timed):
         t = time.time()
         mbs = [tuple(z.to(dev) for z in train_s.random_batch(micro, T, rng)) for _ in range(accum)]
-        subs = priv = None
-        if model.priv_map is not None:
+        sub = priv = None
+        if model.priv_map is not None:                       # trainer ile aynı yol
             uniq = torch.unique(torch.cat([model.priv_map[x].flatten() for x, _ in mbs]))
-            R = -(-len(uniq) // 4096) * 4096
-            idx = torch.cat([uniq, uniq.new_zeros(R - len(uniq))])
-            subs = [b.private.detach().index_select(0, idx).requires_grad_() for b in model.blocks]
+            sub = torch.cat([b.private.detach().index_select(0, uniq) for b in model.blocks], 1).requires_grad_()
         if timed:
             t = tick("veri + satır kopyası", t)
         for x, y in mbs:
-            if subs is not None:
-                priv = (torch.searchsorted(uniq, model.priv_map[x]), subs)
+            if sub is not None:
+                priv = torch.nn.functional.embedding(torch.searchsorted(uniq, model.priv_map[x]), sub.to(torch.bfloat16))
             with ctx:
                 loss = (fwd(x, y, None, priv) if priv is not None else fwd(x, y)) / accum
             loss.backward()
         if timed:
             t = tick("ileri + geri", t)
-        torch.nn.utils.clip_grad_norm_(list(model.parameters()) + (subs or []), tc.grad_clip)
+        torch.nn.utils.clip_grad_norm_(list(model.parameters()) + ([sub] if sub is not None else []), tc.grad_clip)
         if timed:
             t = tick("kırpma", t)
         if opt.row_adam is not None:
-            opt.row_adam.set_rows(uniq, [s.grad[:len(uniq)] for s in subs])
+            k = sub.shape[1] // len(model.blocks)
+            opt.row_adam.set_rows(uniq, [sub.grad[:, i * k:(i + 1) * k] for i in range(len(model.blocks))])
         opt.step()
         opt.zero_grad(set_to_none=True)
         if timed:

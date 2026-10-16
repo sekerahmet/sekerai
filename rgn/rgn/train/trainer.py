@@ -22,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from rgn.config import RunConfig
 from rgn.data.loader import load_streams
@@ -209,15 +210,14 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
             else:
                 x, y = train_s.random_batch(micro, T, rng)
             mbs.append((x.to(device, non_blocking=True), y.to(device, non_blocking=True), masks))
-        priv = subs = None
+        priv = sub = None
         if model.priv_map is not None:                      # kelimeye özel: yalnız bu adımda geçen satırların kopyası
             uniq = torch.unique(torch.cat([model.priv_map[x].flatten() for x, _, _ in mbs]))
-            R = -(-len(uniq) // 4096) * 4096                  # 4096'nın katına doldur (az sayıda şekil, az derleme)
-            idx = torch.cat([uniq, uniq.new_zeros(R - len(uniq))])
-            subs = [b.private.detach().index_select(0, idx).requires_grad_() for b in model.blocks]
+            sub = torch.cat([b.private.detach().index_select(0, uniq) for b in model.blocks], 1).requires_grad_()
         for x, y, masks in mbs:
-            if subs is not None:
-                priv = (torch.searchsorted(uniq, model.priv_map[x]), subs)
+            if sub is not None:                             # satırlar derleme dışında, bütün katmanlar için bir kez
+                priv = F.embedding(torch.searchsorted(uniq, model.priv_map[x]), sub.to(torch.bfloat16)
+                                   if device.type == "cuda" else sub)
             with ctx:
                 res = fwd(x, y, masks, priv) if (masks is not None or priv is not None) else fwd(x, y)
             if isinstance(res, tuple):                        # gözlemci: kaydedilen kayıp yalnız ana kayıp
@@ -229,10 +229,11 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
                 loss = res / accum
                 loss.backward()
                 loss_sum += loss.detach()
-        clip = list(model.parameters()) + (subs or [])
+        clip = list(model.parameters()) + ([sub] if sub is not None else [])
         gn = torch.nn.utils.clip_grad_norm_(clip, tc.grad_clip) if tc.grad_clip else torch.tensor(0.0)
         if opt.row_adam is not None:
-            opt.row_adam.set_rows(uniq, [s.grad[:len(uniq)] for s in subs])
+            k = sub.shape[1] // len(model.blocks)
+            opt.row_adam.set_rows(uniq, [sub.grad[:, i * k:(i + 1) * k] for i in range(len(model.blocks))])
         opt.step()
         opt.zero_grad(set_to_none=True)
         step += 1

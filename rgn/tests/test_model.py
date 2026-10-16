@@ -347,11 +347,13 @@ def test_private_row_copy_matches_full():
         l_full = m(idx, idx)
         l_full.backward()
         uniq = torch.unique(m.priv_map[idx])
-        subs = [b.private.detach().index_select(0, uniq).requires_grad_() for b in m.blocks]
-        l_sub = m(idx, idx, priv=(torch.searchsorted(uniq, m.priv_map[idx]), subs))
+        sub = torch.cat([b.private.detach().index_select(0, uniq) for b in m.blocks], 1).requires_grad_()
+        W = torch.nn.functional.embedding(torch.searchsorted(uniq, m.priv_map[idx]), sub)    # trainer'ın okuması
+        l_sub = m(idx, idx, priv=W)
         l_sub.backward()
         assert torch.allclose(l_full, l_sub, atol=1e-6)
-        for b, s in zip(m.blocks, subs):
-            assert torch.allclose(b.private.grad.index_select(0, uniq), s.grad, atol=1e-6)
+        k = sub.shape[1] // len(m.blocks)
+        for i, b in enumerate(m.blocks):
+            assert torch.allclose(b.private.grad.index_select(0, uniq), sub.grad[:, i * k:(i + 1) * k], atol=1e-6)
     finally:
         Path(f.name).unlink()

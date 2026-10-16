@@ -78,6 +78,26 @@ class Muon(torch.optim.Optimizer):
                     p.add_(O[j].to(p.dtype), alpha=-g["lr"])
 
 
+def _row_adam_eager(p, m, v, rr, gr, lr, b1, b2, eps, bc1, bc2):
+    mr = m.index_select(0, rr) * b1 + gr * (1 - b1)
+    vr = v.index_select(0, rr) * b2 + gr * gr * (1 - b2)
+    m.index_copy_(0, rr, mr)
+    v.index_copy_(0, rr, vr)
+    p.index_add_(0, rr, (-lr) * (mr / bc1) / ((vr / bc2).sqrt() + eps))
+
+
+_ROW_ADAM = {}
+
+
+def _row_adam(p, *args):
+    """CUDA'da derlenmiş (topla / güncelle / geri yaz tek çekirdek grubunda; satır sayısı dinamik)."""
+    if not p.is_cuda:
+        return _row_adam_eager(p, *args)
+    if "fn" not in _ROW_ADAM:
+        _ROW_ADAM["fn"] = torch.compile(_row_adam_eager, dynamic=True)
+    return _ROW_ADAM["fn"](p, *args)
+
+
 class RowAdam(torch.optim.Optimizer):
     """Satır seyrek Adam (kelimeye özel tablolar): yalnız `rows` satırları (o adımda geçen kelimeler) güncellenir;
     diğer satırların ağırlığı ve momentleri dokunulmaz (tembel Adam, gömme tabloları için standart).  Bias düzeltmesi
@@ -107,13 +127,9 @@ class RowAdam(torch.optim.Optimizer):
                 st["step"] += 1
                 rr = r if r is not None else torch.arange(p.shape[0], device=p.device)
                 gr = (self.grads[i] if self.grads is not None else p.grad.index_select(0, rr)).float()
-                m = st["m"].index_select(0, rr).mul_(b1).add_(gr, alpha=1 - b1)
-                v = st["v"].index_select(0, rr).mul_(b2).addcmul_(gr, gr, value=1 - b2)
-                st["m"].index_copy_(0, rr, m)
-                st["v"].index_copy_(0, rr, v)
                 t = st["step"]
-                upd = (m / (1 - b1 ** t)) / ((v / (1 - b2 ** t)).sqrt_() + g["eps"])
-                p.index_add_(0, rr, upd.to(p.dtype), alpha=-g["lr"])
+                sc = lambda z: torch.tensor(z, dtype=torch.float32, device=p.device)  # noqa: E731 (derlemede sabit değil)
+                _row_adam(p, st["m"], st["v"], rr, gr, sc(g["lr"]), b1, b2, g["eps"], sc(1 - b1 ** t), sc(1 - b2 ** t))
 
 
 class CombinedOptimizer:
