@@ -93,10 +93,10 @@ def main():
     for run in a.runs:
         m, step = load_run(run, dev)
         print("\n== %s (adım %s) — %s" % (run, step, torch.cuda.get_device_name(0) if dev.type == "cuda" else "cpu"))
-        with torch.no_grad():                                          # doğruluk: önbellekli = önbelleksiz (fp32 greedy)
+        with torch.no_grad():                                          # önbellekli (KV bf16) ↔ önbelleksiz (fp32), greedy
             idx = torch.randint(0, 50000, (4, 200), device=dev)
             a_, b_ = m.generate(idx, 48), m.generate(idx, 48, cache=False)
-            print("doğruluk (fp32 greedy, 4 × 48 token): önbellekli = önbelleksiz %%%.1f" % (
+            print("greedy 4 × 48 token, önbellekli (KV bf16) = önbelleksiz (fp32): %%%.1f" % (
                 100 * (a_[:, 200:] == b_[:, 200:]).float().mean().item()))
         print("%-34s %12s %14s %11s %13s" % ("durum", "token/s", "ms / yeni token", "prefill ms", "saf ms/adım"))
         for cache in (True, False):
