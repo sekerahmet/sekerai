@@ -4,7 +4,7 @@ Kaynak: FineWeb-2 tur_Latn (Hugging Face, 30 parquet; dosya başına ~10 GB meti
 tok_corpus.clean ile temizlenir (NFC, Latin dışı yazı > %5 atılır, < 20 karakter atılır), kodlanır, sonuna
 <|endoftext|> (kimlik 0) eklenir.  Çıktı uint16 .npy parçaları (~250M token):
     <out>/train/fw2_<dosya>_<parça>.npy    <out>/valid.npy (son dosyanın baştan --valid_tokens kadarı; eğitime girmez)
-    <out>/meta.json  (parça başına token / bayt / belge; bitmiş dosyalar → yeniden çalıştırınca atlanır)
+    <out>/meta.json  (parça başına token; bitmiş dosyalar atlanır; yarım dosya son yazılan parçadan sürer)
 
     python scripts/tok_encode.py --tokenizer <drive>/tokenizer/egitilen/tr_bpe_40k_v2.json \\
         --out <drive>/v2/fineweb2_tr/tok40k --files 0 1 2       # bir kısmı; --files boş: hepsi
@@ -34,10 +34,14 @@ def save(path, arr):
     tmp.replace(path)
 
 
-def encode_file(tok, src, out, tag, meta, batch=4000, limit=0):
-    """Bir parquet dosyasını kodlar; PART token'da bir parça yazar.  limit > 0: o kadar token sonra durur."""
-    buf, n_tok, n_bytes, n_docs, part, t0 = [], 0, 0, 0, 0, time.time()
-    docs = []
+def encode_file(tok, src, out, tag, meta, batch=4000, limit=0, resume=None, on_part=None):
+    """Bir parquet dosyasını kodlar; PART token'da bir parça yazar.  limit > 0: o kadar token sonra durur.
+    resume: önceki çalışmanın son yazılan parçasından sonraki durum (rows = okunmuş kaynak satırı, part, sayaçlar) →
+    o kadar satır atlanır, parça numarası sürer.  on_part(durum): her parçadan sonra (meta.json'a kayıt)."""
+    r = resume or {}
+    buf, docs, t0 = [], [], time.time()
+    n_tok, n_bytes, n_docs, part = r.get("tokens", 0), r.get("bytes", 0), r.get("docs", 0), r.get("part", 0)
+    skip, rows = r.get("rows", 0), 0
 
     def flush_docs():
         nonlocal n_tok, n_bytes, n_docs
@@ -50,23 +54,29 @@ def encode_file(tok, src, out, tag, meta, batch=4000, limit=0):
         n_docs += len(docs)
         docs.clear()
 
-    def flush_part(final=False):
+    def flush_part():
         nonlocal part, buf
         if not buf:
             return
         arr = np.concatenate(buf)
         buf = []
-        name = "%s_%02d.npy" % (tag, part) if not final or part else "%s_00.npy" % tag
+        name = "%s_%02d.npy" % (tag, part)
         save(out / name, arr)
         meta["parts"][name] = dict(tokens=int(len(arr)))
         part += 1
+        if on_part:
+            on_part(dict(rows=rows, part=part, tokens=n_tok, bytes=n_bytes, docs=n_docs))
 
+    if skip:
+        print("  %s: kaldığı yerden — %d satır atlanıyor, parça %d" % (tag, skip, part), flush=True)
     cur = 0
     for d in parquet_docs([src]):
-        c = clean(d)
-        if c is None:
+        rows += 1
+        if rows <= skip:
             continue
-        docs.append(c)
+        c = clean(d)
+        if c is not None:
+            docs.append(c)
         if len(docs) >= batch:
             before = n_tok
             flush_docs()
@@ -80,7 +90,7 @@ def encode_file(tok, src, out, tag, meta, batch=4000, limit=0):
                 break
     if docs:
         flush_docs()
-    flush_part(final=True)
+    flush_part()
     return n_tok, n_bytes, n_docs
 
 
@@ -114,9 +124,14 @@ def main():
             print("atlandı (bitmiş): %s" % tag, flush=True)
             continue
         t0 = time.time()
-        sub = dict(parts={})
-        n, b, k = encode_file(tok, src[i], out / "train", tag, sub, limit=a.limit_tokens)
-        meta["parts"].update(sub["parts"])
+        prog = meta.setdefault("progress", {})
+
+        def on_part(state, tag=tag):                                    # parça yazıldı → kaldığı yer kaydı
+            prog[tag] = state
+            mp.write_text(json.dumps(meta, indent=1), encoding="utf-8")
+        n, b, k = encode_file(tok, src[i], out / "train", tag, meta, limit=a.limit_tokens, resume=prog.get(tag),
+                              on_part=on_part)
+        prog.pop(tag, None)
         meta["files"][tag] = dict(tokens=n, bytes=b, docs=k, seconds=round(time.time() - t0), src=src[i])
         mp.write_text(json.dumps(meta, indent=1), encoding="utf-8")
         tot = sum(f["tokens"] for f in meta["files"].values())
