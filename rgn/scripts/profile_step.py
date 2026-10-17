@@ -143,6 +143,33 @@ def buckets(prof, mc, steps, opt_ms):
         print("  'diğer' içinde en büyükler:")
         for k, v in sorted(other.items(), key=lambda kv: -kv[1])[:10]:
             print("    %8.1f ms  %s" % (v, k[:110]))
+    ew, names = {}, {}
+    for e in dev:
+        if next((b for b, p in KERNELS if re.search(p, e.name, re.I)), None) != "kaynaşmış elementwise (inductor)":
+            continue
+        k = next((b for b, p in ELEMENTWISE if re.search(p, e.name)), "diğer")
+        ms = e.device_time / 1000 / steps
+        ew[k] = ew.get(k, 0.0) + ms
+        names[e.name] = names.get(e.name, 0.0) + ms
+    if ew:
+        tot = sum(ew.values())
+        print("  kaynaşmış elementwise, içerdiği işleme göre (ad içinde ilk eşleşen; toplam %.1f ms):" % tot)
+        for k, v in sorted(ew.items(), key=lambda kv: -kv[1]):
+            print("    %-32s %8.1f  %%%5.1f (elementwise içinde)" % (k, v, 100 * v / tot))
+        print("  en büyük elementwise çekirdekleri:")
+        for k, v in sorted(names.items(), key=lambda kv: -kv[1])[:15]:
+            print("    %8.1f ms  %s" % (v, k[:120]))
+
+
+ELEMENTWISE = [  # inductor çekirdek adındaki işlemler; sırayla ilk eşleşen
+    ("norm (RMSNorm, QK-norm)", r"rsqrt"),
+    ("SwiGLU (SiLU × kapı)", r"silu|sigmoid"),
+    ("GELU (PLE)", r"gelu|erf"),
+    ("RoPE / birleştirme (cat, neg)", r"_cat_|_neg_|slice"),
+    ("embedding / satır toplama", r"embedding|index|gather|scatter"),
+    ("tür dönüşümü (bf16 ↔ fp32)", r"to_copy"),
+    ("toplama / çarpma (artık, kapı)", r"_add|_mul"),
+]
 
 
 if __name__ == "__main__":
