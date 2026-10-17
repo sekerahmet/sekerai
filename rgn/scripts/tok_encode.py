@@ -34,63 +34,100 @@ def save(path, arr):
     tmp.replace(path)
 
 
-def encode_file(tok, src, out, tag, meta, batch=4000, limit=0, resume=None, on_part=None):
-    """Bir parquet dosyasını kodlar; PART token'da bir parça yazar.  limit > 0: o kadar token sonra durur.
-    resume: önceki çalışmanın son yazılan parçasından sonraki durum (rows = okunmuş kaynak satırı, part, sayaçlar) →
-    o kadar satır atlanır, parça numarası sürer.  on_part(durum): her parçadan sonra (meta.json'a kayıt)."""
+_W = {}
+
+
+def _winit(tok_path):
+    """Çalışan süreç: tokenizer'ı bir kez kur."""
+    _W["tok"] = to_tiktoken(tok_path)
+
+
+def _work(docs):
+    """Çalışan süreç: belgeleri temizle + kodla → (tek dizi: belge sonlarında EOS, bayt, belge sayısı)."""
+    clean_docs = [c for c in (clean(d) for d in docs) if c is not None]
+    if not clean_docs:
+        return np.zeros(0, dtype=np.uint16), 0, 0
+    ids = _W["tok"].encode_ordinary_batch(clean_docs, num_threads=1)
+    arr = np.concatenate([np.append(np.asarray(x, dtype=np.uint16), np.uint16(EOS)) for x in ids])
+    return arr, sum(len(d.encode("utf-8")) for d in clean_docs), len(clean_docs)
+
+
+def encode_file(tok_path, src, out, tag, meta, chunk=1000, limit=0, resume=None, on_part=None, workers=0):
+    """Bir parquet dosyasını kodlar; PART token'da bir parça yazar.  Temizlik + kodlama `workers` süreçte (sıra korunur:
+    sonuç tek süreçle bire bir aynı).  limit > 0: o kadar token sonra durur.  resume: son yazılan parçadan sonraki durum
+    (rows = okunmuş kaynak satırı, part, sayaçlar) → o kadar satır atlanır.  on_part(durum): her parçadan sonra."""
+    import multiprocessing as mp
     r = resume or {}
-    buf, docs, t0 = [], [], time.time()
     n_tok, n_bytes, n_docs, part = r.get("tokens", 0), r.get("bytes", 0), r.get("docs", 0), r.get("part", 0)
-    skip, rows = r.get("rows", 0), 0
+    skip = r.get("rows", 0)
+    buf, cur, t0, rows = [], 0, time.time(), 0
 
-    def flush_docs():
-        nonlocal n_tok, n_bytes, n_docs
-        for ids in tok.encode_ordinary_batch(docs, num_threads=THREADS):
-            ids = np.asarray(ids, dtype=np.uint16)
-            buf.append(ids)
-            buf.append(np.array([EOS], dtype=np.uint16))
-            n_tok += len(ids) + 1
-        n_bytes += sum(len(d.encode("utf-8")) for d in docs)
-        n_docs += len(docs)
-        docs.clear()
-
-    def flush_part():
-        nonlocal part, buf
+    def flush_part(rows_done):
+        nonlocal part, buf, cur
         if not buf:
             return
         arr = np.concatenate(buf)
-        buf = []
+        buf, cur = [], 0
         name = "%s_%02d.npy" % (tag, part)
         save(out / name, arr)
         meta["parts"][name] = dict(tokens=int(len(arr)))
         part += 1
         if on_part:
-            on_part(dict(rows=rows, part=part, tokens=n_tok, bytes=n_bytes, docs=n_docs))
+            on_part(dict(rows=rows_done, part=part, tokens=n_tok, bytes=n_bytes, docs=n_docs))
+
+    def chunks():
+        nonlocal rows
+        c = []
+        for d in parquet_docs([src]):
+            rows += 1
+            if rows <= skip:
+                continue
+            c.append(d)
+            if len(c) >= chunk:
+                yield rows, c
+                c = []
+        if c:
+            yield rows, c
 
     if skip:
         print("  %s: kaldığı yerden — %d satır atlanıyor, parça %d" % (tag, skip, part), flush=True)
-    cur = 0
-    for d in parquet_docs([src]):
-        rows += 1
-        if rows <= skip:
-            continue
-        c = clean(d)
-        if c is not None:
-            docs.append(c)
-        if len(docs) >= batch:
-            before = n_tok
-            flush_docs()
-            cur += n_tok - before
+    w = workers or THREADS
+    ctx = mp.get_context("fork" if hasattr(os, "fork") else "spawn")
+    from collections import deque
+    pool = ctx.Pool(w, initializer=_winit, initargs=(str(tok_path),))
+    try:
+        q = deque()                                                     # (son satır, AsyncResult); sıra korunur
+        stop = False
+
+        def take():
+            nonlocal n_tok, n_bytes, n_docs, cur, stop
+            end_row, res = q.popleft()
+            arr, b, k = res.get()
+            buf.append(arr)
+            n_tok += len(arr)
+            n_bytes += b
+            n_docs += k
+            cur += len(arr)
             if cur >= PART:
-                flush_part()
-                cur = 0
+                flush_part(end_row)
                 print("  %s: %.0fM token, %.1f GB metin, %d belge, %.0f sn" % (tag, n_tok / 1e6, n_bytes / 1e9, n_docs,
                                                                               time.time() - t0), flush=True)
             if limit and n_tok >= limit:
+                stop = True
+        for end_row, c in chunks():                                     # en çok 2·w iş havada (bellek sınırlı)
+            q.append((end_row, pool.apply_async(_work, (c,))))
+            while len(q) >= 2 * w and not stop:
+                take()
+            if stop:
                 break
-    if docs:
-        flush_docs()
-    flush_part()
+        while q and not stop:
+            take()
+        for _, res in q:                                                # durdurulduysa havadakileri bekle (atılır)
+            res.wait()
+    finally:
+        pool.close()
+        pool.join()
+    flush_part(rows)
     return n_tok, n_bytes, n_docs
 
 
@@ -102,8 +139,8 @@ def main():
     ap.add_argument("--valid_file", type=int, default=29)
     ap.add_argument("--valid_tokens", type=int, default=20_000_000)
     ap.add_argument("--limit_tokens", type=int, default=0, help="deneme: dosya başına en çok bu kadar token")
+    ap.add_argument("--workers", type=int, default=0, help="temizlik + kodlama süreç sayısı (0: çekirdek sayısı)")
     a = ap.parse_args()
-    tok = to_tiktoken(a.tokenizer)                                        # HF ile aynı token'lar, ~4× hızlı
     out = Path(a.out)
     (out / "train").mkdir(parents=True, exist_ok=True)
     mp = out / "meta.json"
@@ -112,7 +149,8 @@ def main():
     if "valid" not in meta:                                            # doğrulama: son dosyanın başı
         vdir = out / "_valid"
         vdir.mkdir(exist_ok=True)
-        n, b, k = encode_file(tok, src[a.valid_file], vdir, "valid", dict(parts={}), limit=a.valid_tokens)
+        n, b, k = encode_file(a.tokenizer, src[a.valid_file], vdir, "valid", dict(parts={}), limit=a.valid_tokens,
+                              workers=a.workers)
         arr = np.concatenate([np.load(p) for p in sorted(vdir.glob("valid_*.npy"))])
         save(out / "valid.npy", arr)
         meta["valid"] = dict(tokens=int(len(arr)), bytes=b, docs=k, bytes_per_token=b / n, file=src[a.valid_file])
@@ -129,8 +167,8 @@ def main():
         def on_part(state, tag=tag):                                    # parça yazıldı → kaldığı yer kaydı
             prog[tag] = state
             mp.write_text(json.dumps(meta, indent=1), encoding="utf-8")
-        n, b, k = encode_file(tok, src[i], out / "train", tag, meta, limit=a.limit_tokens, resume=prog.get(tag),
-                              on_part=on_part)
+        n, b, k = encode_file(a.tokenizer, src[i], out / "train", tag, meta, limit=a.limit_tokens, resume=prog.get(tag),
+                              on_part=on_part, workers=a.workers)
         prog.pop(tag, None)
         meta["files"][tag] = dict(tokens=n, bytes=b, docs=k, seconds=round(time.time() - t0), src=src[i])
         mp.write_text(json.dumps(meta, indent=1), encoding="utf-8")
