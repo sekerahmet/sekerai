@@ -2,6 +2,8 @@
 olgunun s000'da kaç kez geçtiğini sayar, aynı ilişkiden aynı token uzunluğunda 3 yanlış seçenekle soru yazar.
 
     python scripts/mine_facts.py --out docs/olgu_s000.txt
+    python scripts/mine_facts.py --data v2/fineweb_edu_parts/s001/gpt2/train.npy \
+        --exclude v2/fineweb_edu_s000/gpt2/train.npy --out docs/olgu_s001_yeni.txt   # yalnız s001'de olan olgular
 
 Çıktı (sekmeyle ayrılmış, gözle kontrol için): ilişki, geçme sayısı, istem, doğru, yanlış1 | yanlış2 | yanlış3, s000'dan
 örnek cümle.  Sayı yalnız bu kalıbın geçişi (olgu başka biçimde de geçebilir).
@@ -58,26 +60,37 @@ def main():
     ap.add_argument("--max_tokens", type=int, default=0, help="0: tamamı")
     ap.add_argument("--per_bucket", type=int, default=40, help="ilişki × kova başına en çok soru")
     ap.add_argument("--dominance", type=float, default=0.8, help="öznenin en sık cevabının payı en az")
+    ap.add_argument("--data", default=get_spec("fineweb_s000").train[0], help="taranan token dosyası (Drive köküne göre)")
+    ap.add_argument("--exclude", nargs="*", default=[], help="bu dosyalarda aynı kalıpla geçen (özne, cevap) çiftleri atılır")
     a = ap.parse_args()
     import tiktoken
     enc = tiktoken.get_encoding("gpt2")
-    arr = np.load(drive_root() / get_spec("fineweb_s000").train[0], mmap_mode="r")
-    n = a.max_tokens or len(arr)
+
+    def scan(path, pairs, example=None):
+        arr = np.load(drive_root() / path, mmap_mode="r")
+        n = a.max_tokens or len(arr)
+        for i in range(0, n, a.chunk):
+            text = enc.decode(np.asarray(arr[i:min(n, i + a.chunk)]).astype(np.int64).tolist())
+            for rel, (rx, _, gx, gy) in RELATIONS.items():
+                for mt in rx.finditer(text):
+                    x, y = mt.group(gx).strip(), mt.group(gy).strip()
+                    if not (ok_entity(x) and (y.isdigit() or ok_entity(y))) or x == y:
+                        continue
+                    key = (MERGE.get(rel, rel), x, y)
+                    pairs[rel][(x, y)] += 1
+                    if example is not None and key not in example:
+                        s0, s1 = max(0, mt.start() - 80), min(len(text), mt.end() + 40)
+                        example[key] = " ".join(text[s0:s1].split())
+            print("%s: tarandı %dM / %dM token" % (path, min(n, i + a.chunk) // 1_000_000, n // 1_000_000), flush=True)
+
     pairs = {r: Counter() for r in RELATIONS}
     example = {}
-    for i in range(0, n, a.chunk):
-        text = enc.decode(np.asarray(arr[i:min(n, i + a.chunk)]).astype(np.int64).tolist())
-        for rel, (rx, _, gx, gy) in RELATIONS.items():
-            for mt in rx.finditer(text):
-                x, y = mt.group(gx).strip(), mt.group(gy).strip()
-                if not (ok_entity(x) and (y.isdigit() or ok_entity(y))) or x == y:
-                    continue
-                key = (MERGE.get(rel, rel), x, y)
-                pairs[rel][(x, y)] += 1
-                if key not in example:
-                    s0, s1 = max(0, mt.start() - 80), min(len(text), mt.end() + 40)
-                    example[key] = " ".join(text[s0:s1].split())
-        print("tarandı %dM / %dM token" % (min(n, i + a.chunk) // 1_000_000, n // 1_000_000), flush=True)
+    scan(a.data, pairs, example)
+    seen = set()                                                    # --exclude dosyalarında geçen (ilişki, özne, cevap)
+    for path in a.exclude:
+        ex_pairs = {r: Counter() for r in RELATIONS}
+        scan(path, ex_pairs)
+        seen |= {(MERGE.get(r, r), x, y) for r, c in ex_pairs.items() for (x, y) in c}
     facts = defaultdict(dict)                                       # ilişki -> özne -> (cevap, sayı)
     for rel, c in pairs.items():
         r = MERGE.get(rel, rel)
@@ -101,6 +114,7 @@ def main():
         for lo, hi in BUCKETS:
             items = sorted((x, y, k) for x, (y, k) in fx.items() if lo <= k <= hi)
             rnd.shuffle(items)
+            items = [it for it in items if (rel, it[0], it[1]) not in seen]       # --exclude'da geçenler çıkar
             for x, y, k in items[:a.per_bucket]:
                 ny = len(enc.encode(" " + y))
                 pool = [z for z in answers if z != y and len(enc.encode(" " + z)) == ny]
@@ -111,10 +125,10 @@ def main():
                 lines.append("\t".join([rel, str(k), prompt.format(x=x), y, " | ".join(wrong), ex]))
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    head = "ilişki\tgeçme\tistem\tdoğru\tyanlış seçenekler\ts000'dan örnek"
+    head = "ilişki\tgeçme\tistem\tdoğru\tyanlış seçenekler\törnek (%s)" % a.data
     out.write_text(head + "\n" + "\n".join(lines) + "\n", encoding="utf-8")
     cnt = Counter((l.split("\t")[0], next(b for b in BUCKETS if b[0] <= int(l.split("\t")[1]) <= b[1])) for l in lines)
-    print("\n%d soru -> %s" % (len(lines), out))
+    print("\n%d soru -> %s%s" % (len(lines), out, "  (--exclude'da geçen %d çift atıldı)" % len(seen) if a.exclude else ""))
     for rel in facts:
         print("  %-14s %s" % (rel, "  ".join("%d–%s: %d" % (lo, hi if hi < 10 ** 9 else "∞", cnt[(rel, (lo, hi))])
                                           for lo, hi in BUCKETS)))
