@@ -29,6 +29,7 @@ class ModelConfig:
     n_kv_heads_global: int = 0         # > 0: genel (G) katmanların KV head sayısı (yalnız G'de GQA); 0: n_kv_heads
     head_dim: int = 0                  # 0: d_model / n_heads; > 0: dikkat iç boyutu n_heads · head_dim (d'den büyük olabilir)
     d_ff: int = 0                      # 0: SwiGLU 8d/3, 64'ün katı
+    ff_layers: tuple = ()              # katman başına MLP genişliği (n_layers tane; 0: o katmanda MLP yok); boş: hepsi ff_dim()
     rope_base: float = 10000.0
     max_len: int = 4096                # RoPE tablosu boyu
     local_window: int = 128            # yerel (Y) katman yalnız son local_window token'a bakar; 0: bütün katmanlar genel
@@ -78,6 +79,12 @@ class ModelConfig:
         """SwiGLU genişliği: d_ff ya da 8d/3 (64'ün katı)."""
         return self.d_ff or max(64, round(8 * self.d_model / 3 / 64) * 64)
 
+    def layer_ff(self, i):
+        """i. katmanın MLP genişliği (0: MLP yok)."""
+        if not self.shared_mlp:
+            return 0
+        return self.ff_layers[i] if self.ff_layers else self.ff_dim()
+
     def validate(self):
         assert self.attn_gate in ("", "head", "elem"), self.attn_gate
         assert 0 <= self.private_neurons <= 8, "private_neurons: 0..8 (her nöron ayrı tablo, çekirdek nöron başına)"
@@ -86,6 +93,7 @@ class ModelConfig:
         assert self.local_window >= 0 and 0 <= self.global_layers <= self.n_layers
         assert all(0 < w <= self.local_window for w in self.y_windows), "y_windows: 1..local_window"
         assert self.y_mixer in ("attn", "conv") and self.conv_kernel >= 1, self.y_mixer
+        assert not self.ff_layers or (len(self.ff_layers) == self.n_layers and all(f >= 0 for f in self.ff_layers)),             "ff_layers: n_layers tane genişlik (0: MLP yok)"
         assert self.y_mixer == "attn" or not (self.private_value or self.local_sentence), "conv: V vektörü / cümle yok"
         assert not self.local_sentence or self.local_window, "local_sentence: yerel / genel düzen gerek"
         assert self.local_window or self.global_layers, "yerel pencere yoksa bütün katmanlar genel"

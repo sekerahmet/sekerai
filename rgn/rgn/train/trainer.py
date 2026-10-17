@@ -137,9 +137,11 @@ def train(cfg: RunConfig, out_dir=None, resume=False):
     n_priv = sum(p.numel() for _, _, p in model.private_tables())
     priv_kinds = " + ".join(k for k, on in (("nöron×%d" % mc.private_neurons, mc.private_neurons), ("V", mc.private_value),
                                              ("PLE %d" % mc.ple_dim, mc.ple_dim)) if on)
-    say("%s | katmanlar %s (Y: son %d token) | D %d, head %d (kv %d), d_ff %d | kapı %s | kelimeye özel %s | "
+    say("%s | katmanlar %s (Y: son %s token) | D %d, head %d (kv %d), d_ff %s | kapı %s | kelimeye özel %s | "
         "%d parametre (%d özel)" % (
-            cfg.name, mc.layer_kinds(), mc.local_window, mc.d_model, mc.n_heads, mc.n_kv_heads, mc.ff_dim() if mc.shared_mlp else 0,
+            cfg.name, mc.layer_kinds(), "/".join(map(str, mc.y_windows)) if mc.y_windows else mc.local_window, mc.d_model,
+            mc.n_heads, mc.n_kv_heads, "/".join(str(mc.layer_ff(i)) for i in range(mc.n_layers)) if mc.ff_layers
+            else (mc.ff_dim() if mc.shared_mlp else 0),
             mc.attn_gate or "yok",
             "%s, %d satır, %s" % (priv_kinds, model.private_tables()[0][2].shape[0], tc.private_opt) if n_priv else "yok",
             n_params, n_priv))

@@ -44,13 +44,14 @@ class Block(nn.Module):
         super().__init__()
         self.kind = kind
         self.norm1 = RMSNorm(cfg.d_model)
-        self.norm2 = (RMSNorm(cfg.d_model) if (cfg.shared_mlp or (private_rows and cfg.private_neurons))
+        ff = cfg.layer_ff(layer)                                       # 0: bu katmanda ortak MLP yok
+        self.norm2 = (RMSNorm(cfg.d_model) if (ff or (private_rows and cfg.private_neurons))
                       else None)                                       # yalnız dikkat: ikinci norm yok
         window = cfg.y_window(cfg.layer_kinds()[:layer].count("Y")) if kind == "Y" else 0
         conv = kind == "Y" and cfg.y_mixer == "conv"                   # Y'de dikkat yerine kapılı nedensel evrişim
         self.attn = None if conv else Attention(cfg, window=window, kv_heads=cfg.kv_heads(kind))
         self.conv = GatedConv(cfg.d_model, cfg.conv_kernel) if conv else None
-        self.mlp = SwiGLU(cfg.d_model, cfg.ff_dim(), cfg.mlp_bias) if cfg.shared_mlp else None
+        self.mlp = SwiGLU(cfg.d_model, ff, cfg.mlp_bias) if ff else None
         k = cfg.private_neurons if private_rows else 0
         self.priv_names = ["private" if j == 0 else "private%d" % (j + 1) for j in range(k)]
         self.priv_groups = cfg.private_groups

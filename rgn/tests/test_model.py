@@ -383,3 +383,21 @@ def test_component_map_tiny():
         w0 = [x.attn.window for x in m.blocks]
         cm.truncate(m, wins[7:], 16, [(4,)], log=lambda s: None)
         assert [x.attn.window for x in m.blocks] == w0
+
+
+def test_ff_layers():
+    """Katman başına MLP genişliği: 0 olan katmanda MLP (ve özel nöron yoksa ikinci norm) yok; geri kalan katmanlar
+    verilen genişlikte; parametre sayısı tutarlı; ileri / geri geçiş ve önbellekli üretim çalışır."""
+    torch.manual_seed(0)
+    m = RGNModel(tiny(ff_layers=(0, 64, 192))).eval()
+    assert m.blocks[0].mlp is None and m.blocks[0].norm2 is None
+    assert [b.mlp.c.weight.shape[1] for b in m.blocks[1:]] == [64, 192]
+    none = RGNModel(tiny(shared_mlp=False))                                     # hiç MLP yok (ikinci norm da yok)
+    extra = sum(p.numel() for b in m.blocks for mod in (b.mlp, b.norm2) if mod is not None for p in mod.parameters())
+    assert m.num_params() == none.num_params() + extra
+    idx = torch.randint(0, 97, (2, 20))
+    loss = m(idx[:, :-1], idx[:, 1:])
+    loss.backward()
+    assert torch.isfinite(loss)
+    with torch.no_grad():
+        assert torch.equal(m.generate(idx[:, :5], 6), m.generate(idx[:, :5], 6, cache=False))
