@@ -133,3 +133,16 @@ def test_story_masks_and_loss():
     t = torch.tensor([[1, 2, -100, -100]])
     ref = torch.nn.functional.cross_entropy((h[0, :2] @ w.T), t[0, :2])
     assert torch.allclose(lm_loss(h, w, t, use_checkpoint=False), ref, atol=1e-5)
+
+
+def test_fact_split():
+    """scripts/fact_split.py: istemden özne; referansta başka biçimde birlikte geçen olgu 'biçim', geçmeyen 'saf'."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import fact_split as fs
+    assert fs.subject("The capital of Slovak Republic is") == "Slovak Republic"
+    assert fs.subject("Ada Lovelace was born in") == "Ada Lovelace"
+    assert fs.subject("The telephone was invented by") == "telephone"
+    text = "Bangkok, the capital of Thailand, is busy. " + "x " * 400 + "Lima is far. Peru " + "y " * 400 + "Peru."
+    found = fs.cooccur([text], {("Thailand", "Bangkok"), ("Peru", "Lima"), ("Chile", "Santiago")}, 300)
+    assert found == {("Thailand", "Bangkok"), ("Peru", "Lima")}, found
