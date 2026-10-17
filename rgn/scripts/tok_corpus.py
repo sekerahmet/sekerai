@@ -19,6 +19,7 @@ Gürcü, Yunan, Çin …) olan belge atılır; 20 karakterden kısa belge atıl�
 import argparse
 import importlib.util
 import json
+import re
 import sys
 import unicodedata
 from pathlib import Path
@@ -73,12 +74,17 @@ def latin(c):
     return o < 0x250 or 0x1E00 <= o < 0x1F00                              # Latin, Latin-1, Genişletilmiş A / B / Ek
 
 
+LETTER = re.compile(r"[^\W\d_]")                                        # harf (Unicode)
+FOREIGN = re.compile(r"[^\W\d_\x00-\u024f\u1e00-\u1eff]")                 # Latin dışı harf
+
+
 def clean(t, max_foreign=0.05, min_chars=20):
+    """NFC; harflerin > max_foreign'ı Latin dışı yazıysa ya da min_chars'tan kısaysa None (sayımlar C'de: regex)."""
     if not t or len(t) < min_chars:
         return None
     t = unicodedata.normalize("NFC", t)
-    letters = [c for c in t if c.isalpha()]
-    if not letters or sum(not latin(c) for c in letters) > max_foreign * len(letters):
+    nl = len(LETTER.findall(t))
+    if not nl or len(FOREIGN.findall(t)) > max_foreign * nl:
         return None
     return t
 

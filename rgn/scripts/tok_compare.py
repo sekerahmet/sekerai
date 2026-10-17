@@ -46,6 +46,25 @@ def read(path, limit_mb=0):
 PRE_TR = r"""[’']\p{L}+| ?\p{L}+| ?\p{N}| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 
+def to_tiktoken(path, name="tr"):
+    """Byte-level BPE (Hugging Face tokenizer.json) -> tiktoken.Encoding (aynı token'lar, ~4× hızlı; ön bölme PRE_TR).
+    Sıra = kimlik = birleştirme sırası; özel token'lar yalnız SPECIAL (öğrenilmiş '<|' gibi sıradan parçalar kalır)."""
+    import tiktoken
+    from tokenizers import Tokenizer
+    bs = list(range(33, 127)) + list(range(161, 173)) + list(range(174, 256))
+    cs, n = bs[:], 0
+    for b in range(256):
+        if b not in bs:
+            bs.append(b)
+            cs.append(256 + n)
+            n += 1
+    ch2b = {chr(c): b for b, c in zip(bs, cs)}
+    vocab = Tokenizer.from_file(str(path)).get_vocab()
+    special = {k: vocab[k] for k in SPECIAL if k in vocab}
+    ranks = {bytes(ch2b[c] for c in k): v for k, v in vocab.items() if k not in special}
+    return tiktoken.Encoding(name=name, pat_str=PRE_TR, mergeable_ranks=ranks, special_tokens=special)
+
+
 def pre_tokenizer(kind):
     from tokenizers import Regex, pre_tokenizers
     if kind == "gpt2":                                                 # GPT-2 kalıbı + tek tek rakam
