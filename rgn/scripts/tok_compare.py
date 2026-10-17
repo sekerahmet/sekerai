@@ -23,7 +23,7 @@ drive_root = importlib.util.module_from_spec(_spec)                       # rgn 
 _spec.loader.exec_module(drive_root)                                       # sonrası torch Windows'ta DLL hatası verir
 drive_root = drive_root.drive_root
 
-WORDS = ["evlerimizden", "gidemeyeceklermiş", "öğretmenlerimize", "değerlendirilmesi", "İstanbul'da", "kitaplıktaki",
+WORDS = ["İstanbul’un", "Ankara'nın", "Atatürk'ün", "don't", "it's", "evlerimizden", "gidemeyeceklermiş", "öğretmenlerimize", "değerlendirilmesi", "İstanbul'da", "kitaplıktaki",
          "yapılandırılmış", "bilgisayarlarımızdaki", "Çekoslovakyalılaştıramadıklarımızdan", "1923 yılında",
          "Türkiye Cumhuriyeti", "çalışıyorum"]
 
@@ -40,11 +40,25 @@ def read(path, limit_mb=0):
     return out
 
 
-def train_bpe(texts, size, out):
+# Ön bölme kalıbı "tr": GPT-2'ninkinden İngilizce kısaltma kuralı ('s|'t|'re|'ve|'m|'ll|'d) çıkarıldı (Türkçe ekleri
+# bozuyordu: İstanbul'da → 'd | a); yerine kesme işareti (' ya da ’) + harf dizisi tek parça ('da, 'nın, 's, 't).
+# Rakamlar tek tek (önünde boşluk olabilir).
+PRE_TR = r"""[’']\p{L}+| ?\p{L}+| ?\p{N}| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+
+def pre_tokenizer(kind):
+    from tokenizers import Regex, pre_tokenizers
+    if kind == "gpt2":                                                 # GPT-2 kalıbı + tek tek rakam
+        return pre_tokenizers.Sequence([pre_tokenizers.Digits(individual_digits=True),
+                                        pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=True)])
+    return pre_tokenizers.Sequence([pre_tokenizers.Split(Regex(PRE_TR), behavior="isolated"),
+                                    pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False)])
+
+
+def train_bpe(texts, size, out, pre="tr"):
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
     tok = Tokenizer(models.BPE())
-    tok.pre_tokenizer = pre_tokenizers.Sequence([pre_tokenizers.Digits(individual_digits=True),
-                                                 pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=True)])
+    tok.pre_tokenizer = pre_tokenizer(pre)
     tok.decoder = decoders.ByteLevel()
     tr = trainers.BpeTrainer(vocab_size=size, min_frequency=2, special_tokens=["<|endoftext|>"],
                              initial_alphabet=pre_tokenizers.ByteLevel.alphabet(), show_progress=False)
@@ -84,21 +98,26 @@ def main():
     ap.add_argument("--body", type=float, default=354e6, help="gövde + PLE bağlamı (d1536 L15: 319M + 35M)")
     ap.add_argument("--d", type=int, default=1536)
     ap.add_argument("--no_train", action="store_true", help="kendi BPE'leri diskten yükle")
+    ap.add_argument("--pre", default="tr", choices=["tr", "gpt2"], help="ön bölme kalıbı (dosya adına eklenir)")
+    ap.add_argument("--also", nargs="*", default=[], help="kıyasa eklenecek eğitilmiş dosyalar (egitilen/ altında)")
     a = ap.parse_args()
     root = drive_root() / "tokenizer"
     ex = root / "ornek"
     (root / "egitilen").mkdir(parents=True, exist_ok=True)
+    from tokenizers import Tokenizer
     own = {}
+    fname = lambda s: "tr_bpe_%dk%s.json" % (s // 1000, "" if a.pre == "gpt2" else "_" + a.pre)
+    for f in a.also:
+        own["eski " + Path(f).stem] = Tokenizer.from_file(str(root / "egitilen" / f))
     if a.no_train:
-        from tokenizers import Tokenizer
         for s in a.sizes:
-            own["bizim TR %dk" % (s // 1000)] = Tokenizer.from_file(str(root / "egitilen" / ("tr_bpe_%dk.json" % (s // 1000))))
+            own["bizim TR %dk (%s)" % (s // 1000, a.pre)] = Tokenizer.from_file(str(root / "egitilen" / fname(s)))
     else:
         texts = read(ex / "train_tr_web.jsonl", a.train_mb) + read(ex / "train_tr_wiki.jsonl", a.train_mb)
         print("eğitim metni: %d belge, %.0f MB" % (len(texts), sum(len(t.encode("utf-8")) for t in texts) / 1e6), flush=True)
         for s in a.sizes:
             t0 = time.time()
-            own["bizim TR %dk" % (s // 1000)] = train_bpe(texts, s, root / "egitilen" / ("tr_bpe_%dk.json" % (s // 1000)))
+            own["bizim TR %dk (%s)" % (s // 1000, a.pre)] = train_bpe(texts, s, root / "egitilen" / fname(s), a.pre)
             print("  BPE %d: %.0f sn" % (s, time.time() - t0), flush=True)
         del texts
     enc = encoders(root, own)
