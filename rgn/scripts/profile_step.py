@@ -97,7 +97,14 @@ KERNELS = [  # (kova, çekirdek adı deseni) — sırayla ilk eşleşen
 def buckets(prof, mc, steps, opt_ms):
     """CUDA çekirdek süresini kovalara ayırır; matris çarpımlarını aten şekline göre LM head / MLP / diğer'e böler."""
     ev = prof.events()
-    dev = [e for e in ev if e.device_type.name == "CUDA"]
+    seen, dev = set(), []
+    for e in ev:                                       # GPU çekirdekleri; aynı çekirdeğin yinelenen kaydı bir kez
+        if e.device_type.name != "CUDA":
+            continue
+        key = (e.name, e.time_range.start, e.time_range.end)
+        if key not in seen:
+            seen.add(key)
+            dev.append(e)
     total = sum(e.device_time for e in dev) / 1000 / steps
     sums = {}
     for e in dev:
@@ -126,6 +133,14 @@ def buckets(prof, mc, steps, opt_ms):
             print("    %-32s %8.1f  %%%5.1f  %7s" % (k, v, 100 * v / total, g))
     if opt_ms:
         print("  optimizer adımı (senkronlu, duvar)  %8.1f ms" % (sum(opt_ms) / len(opt_ms)))
+    other = {}
+    for e in dev:
+        if not any(re.search(p, e.name, re.I) for _, p in KERNELS):
+            other[e.name] = other.get(e.name, 0.0) + e.device_time / 1000 / steps
+    if other:
+        print("  'diğer' içinde en büyükler:")
+        for k, v in sorted(other.items(), key=lambda kv: -kv[1])[:10]:
+            print("    %8.1f ms  %s" % (v, k[:110]))
 
 
 if __name__ == "__main__":
