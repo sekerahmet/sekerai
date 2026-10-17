@@ -55,6 +55,21 @@ def pre_tokenizer(kind):
                                     pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False)])
 
 
+def train_unigram(texts, size, out, pre="tr", max_piece=32):
+    """Kayıpsız Unigram: aynı byte-level ön bölme (256 bayt alfabede; bilinmeyen karakter yok); max_piece byte-level
+    harf (Türkçe harf 1–2 bayt)."""
+    from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
+    tok = Tokenizer(models.Unigram())
+    tok.pre_tokenizer = pre_tokenizer(pre)
+    tok.decoder = decoders.ByteLevel()
+    tr = trainers.UnigramTrainer(vocab_size=size, special_tokens=["<|endoftext|>", "<unk>"], unk_token="<unk>",
+                                 initial_alphabet=pre_tokenizers.ByteLevel.alphabet(), max_piece_length=max_piece,
+                                 show_progress=False)
+    tok.train_from_iterator(texts, tr, length=len(texts))
+    tok.save(str(out))
+    return tok
+
+
 def train_bpe(texts, size, out, pre="tr"):
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
     tok = Tokenizer(models.BPE())
@@ -114,6 +129,7 @@ def main():
     ap.add_argument("--no_train", action="store_true", help="kendi BPE'leri diskten yükle")
     ap.add_argument("--pre", default="tr", choices=["tr", "gpt2"], help="ön bölme kalıbı (dosya adına eklenir)")
     ap.add_argument("--also", nargs="*", default=[], help="kıyasa eklenecek eğitilmiş dosyalar (egitilen/ altında)")
+    ap.add_argument("--model", default="bpe", choices=["bpe", "unigram"])
     ap.add_argument("--hazir", nargs="*", default=HAZIR, help="hazır tokenizer'lar (Hugging Face; yalnız tokenizer dosyası)")
     a = ap.parse_args()
     root = drive_root() / "tokenizer"
@@ -121,19 +137,21 @@ def main():
     (root / "egitilen").mkdir(parents=True, exist_ok=True)
     from tokenizers import Tokenizer
     own = {}
-    fname = lambda s: "tr_bpe_%dk%s.json" % (s // 1000, "" if a.pre == "gpt2" else "_" + a.pre)
+    kind = {"bpe": "BPE", "unigram": "Unigram"}[a.model]
+    fname = lambda s: "tr_%s_%dk%s.json" % ("bpe" if a.model == "bpe" else "uni", s // 1000, "" if a.pre == "gpt2" else "_" + a.pre)
     for f in a.also:
         own["eski " + Path(f).stem] = Tokenizer.from_file(str(root / "egitilen" / f))
     if a.no_train:
         for s in a.sizes:
-            own["bizim TR %dk (%s)" % (s // 1000, a.pre)] = Tokenizer.from_file(str(root / "egitilen" / fname(s)))
+            own["bizim TR %s %dk (%s)" % (kind, s // 1000, a.pre)] = Tokenizer.from_file(str(root / "egitilen" / fname(s)))
     else:
         texts = read(ex / "train_tr_web.jsonl", a.train_mb) + read(ex / "train_tr_wiki.jsonl", a.train_mb)
         print("eğitim metni: %d belge, %.0f MB" % (len(texts), sum(len(t.encode("utf-8")) for t in texts) / 1e6), flush=True)
         for s in a.sizes:
             t0 = time.time()
-            own["bizim TR %dk (%s)" % (s // 1000, a.pre)] = train_bpe(texts, s, root / "egitilen" / fname(s), a.pre)
-            print("  BPE %d: %.0f sn" % (s, time.time() - t0), flush=True)
+            fn = train_bpe if a.model == "bpe" else train_unigram
+            own["bizim TR %s %dk (%s)" % (kind, s // 1000, a.pre)] = fn(texts, s, root / "egitilen" / fname(s), a.pre)
+            print("  %s %d: %.0f sn" % (kind, s, time.time() - t0), flush=True)
         del texts
     enc = encoders(root, own, a.hazir)
     evals = {n: read(ex / ("eval_tr_%s.jsonl" % n)) for n in ("web", "wiki")}
