@@ -87,11 +87,12 @@ def main():
 KERNELS = [  # (kova, çekirdek adı deseni) — sırayla ilk eşleşen
     ("dikkat çekirdeği", r"flex|attention|fmha|flash|sdpa"),
     ("özel nöron çekirdekleri", r"^(fwd|bwd_tok|bwd_row)$"),
-    ("matris çarpımı", r"gemm|cutlass|nvjet|xmma|sm\d+_|cublas|matmul|_mm_"),
+    ("matris çarpımı", r"gemm|cutlass|nvjet|xmma|sm\d+_|cublas|matmul|^triton_tem_fused_.*mm"),
     ("kayıp (CE / softmax)", r"cross_entropy|log_softmax|nll|softmax"),
-    ("kopya / sıfırlama", r"memcpy|memset|copy"),
     ("kaynaşmış elementwise (inductor)", r"^triton_"),
+    ("kopya / sıfırlama", r"memcpy|memset|copy"),
 ]
+ANNOT = r"^## |^Optimizer\.|^ProfilerStep|#"           # GPU üzerindeki etiket aralıkları (çekirdek değil; çift sayım)
 
 
 def buckets(prof, mc, steps, opt_ms):
@@ -99,7 +100,7 @@ def buckets(prof, mc, steps, opt_ms):
     ev = prof.events()
     seen, dev = set(), []
     for e in ev:                                       # GPU çekirdekleri; aynı çekirdeğin yinelenen kaydı bir kez
-        if e.device_type.name != "CUDA":
+        if e.device_type.name != "CUDA" or getattr(e, "is_user_annotation", False) or re.search(ANNOT, e.name):
             continue
         key = (e.name, e.time_range.start, e.time_range.end)
         if key not in seen:
@@ -116,7 +117,8 @@ def buckets(prof, mc, steps, opt_ms):
         if e.device_type.name != "CPU" or e.name not in ("aten::mm", "aten::addmm", "aten::bmm", "aten::_scaled_mm"):
             continue
         dims = {d for s in (e.input_shapes or []) for d in s}
-        k = "LM head" if V in dims else "ortak MLP" if F in dims else "diğer (projeksiyon, optimizer, ...)"
+        k = ("LM head" if V in dims else "ortak MLP" if (F in dims or 2 * F in dims)       # MLP a: d → 2·d_ff [G | U]
+             else "diğer (projeksiyon, optimizer, ...)")
         mm[k] = mm.get(k, 0.0) + e.device_time_total / 1000 / steps
     head = mm.get("LM head", 0.0) + sums.get("kayıp (CE / softmax)", 0.0)       # gövde: LM head ve kayıp hariç
     body = total - head
