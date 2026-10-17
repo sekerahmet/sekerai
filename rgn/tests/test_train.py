@@ -28,6 +28,7 @@ def test_cpu_training_reduces_loss():
                           ["model.private_neurons=1", "model.private_vocab=" + rel],
                           ["model.private_neurons=1", "model.private_groups=4", "model.private_vocab=" + rel],
                           ["model.y_windows=[8, 16]"],
+                          ["model.y_mixer=conv", "model.conv_kernel=8"],
                           ["model.private_neurons=1", "model.private_vocab=" + rel, "model.shared_mlp=false"],
                           ["model.private_value=1", "model.private_vocab=" + rel],
                           ["model.ple_dim=16", "model.private_vocab=" + rel]):

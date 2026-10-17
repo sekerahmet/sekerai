@@ -12,7 +12,7 @@ def diagnose(model, x, ctx):
     model.eval()
     inputs = {}
     hooks = [blk.attn.register_forward_pre_hook(lambda m, args, i=i: inputs.__setitem__(i, args))
-             for i, blk in enumerate(model.blocks)]
+             for i, blk in enumerate(model.blocks) if blk.attn is not None]           # evrişimli Y katmanı atlanır
     mlps = [blk.mlp for blk in model.blocks if blk.mlp is not None]
     for mlp in mlps:
         mlp.track = True
@@ -29,6 +29,8 @@ def diagnose(model, x, ctx):
     half = slice(N // 2, N)
     dist = (torch.arange(N, device=x.device)[:, None] - torch.arange(N, device=x.device)[None, :]).clamp_min(0).float()
     for i, blk in enumerate(model.blocks):
+        if blk.attn is None:
+            continue
         a = blk.attn.weights(*inputs[i][:2]).float()                # (B, H, N, N); girdi x, rope
         ent = -(a * a.clamp_min(1e-30).log()).sum(-1)
         out["layers"].append({

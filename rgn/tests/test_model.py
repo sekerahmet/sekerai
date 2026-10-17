@@ -11,7 +11,8 @@ def _variants(rel):
     return [dict(), dict(attn_gate="head"), dict(attn_gate="elem"), dict(local_window=0),
             dict(private_neurons=1, private_vocab=rel), dict(private_neurons=1, private_vocab=rel, shared_mlp=False),
             dict(shared_mlp=False), dict(private_value=1, private_vocab=rel),
-            dict(private_neurons=1, private_value=1, private_vocab=rel)]
+            dict(private_neurons=1, private_value=1, private_vocab=rel),
+            dict(y_mixer="conv", conv_kernel=4), dict(y_mixer="conv", conv_kernel=4, private_neurons=1, private_vocab=rel)]
 
 
 def test_causal_and_finite_gradients():
@@ -334,3 +335,18 @@ def test_kv_cache_cuda():
             for seed in (0, 1):                                            # ikinci tur: havuzdaki graph tekrar kullanılır
                 idx = torch.randint(0, 97, (3, 20), generator=torch.Generator().manual_seed(seed)).cuda()
                 assert torch.equal(m.generate(idx, 24), m.generate(idx, 24, cache=False)), (kw, seed)
+
+
+def test_gated_conv_window_and_generate():
+    """Evrişimli Y: konum t yalnız son K token'ı görür (daha eskisi çıktıyı değiştirmez); üretim önbelleksiz yoldan."""
+    from rgn.model.conv import GatedConv
+    torch.manual_seed(0)
+    c = GatedConv(16, 4)
+    x = torch.randn(1, 10, 16)
+    x2 = x.clone()
+    x2[:, 2] += 1.0                                                    # konum 2: t ≥ 6 için pencere dışı
+    y, y2 = c(x), c(x2)
+    assert torch.allclose(y[:, 6:], y2[:, 6:], atol=1e-6) and not torch.allclose(y[:, 2:6], y2[:, 2:6])
+    m = RGNModel(tiny(y_mixer="conv", conv_kernel=4)).eval()
+    idx = torch.randint(0, 97, (2, 7))
+    assert torch.equal(m.generate(idx, 5), m.generate(idx, 5, cache=False))

@@ -19,6 +19,7 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 from rgn.model.attention import Attention
+from rgn.model.conv import GatedConv
 from rgn.model.mlp import SwiGLU
 from rgn.model.norm import RMSNorm
 from rgn.model.position import rope_tables
@@ -46,7 +47,9 @@ class Block(nn.Module):
         self.norm2 = (RMSNorm(cfg.d_model) if (cfg.shared_mlp or (private_rows and cfg.private_neurons))
                       else None)                                       # yalnız dikkat: ikinci norm yok
         window = cfg.y_window(cfg.layer_kinds()[:layer].count("Y")) if kind == "Y" else 0
-        self.attn = Attention(cfg, window=window, kv_heads=cfg.kv_heads(kind))
+        conv = kind == "Y" and cfg.y_mixer == "conv"                   # Y'de dikkat yerine kapılı nedensel evrişim
+        self.attn = None if conv else Attention(cfg, window=window, kv_heads=cfg.kv_heads(kind))
+        self.conv = GatedConv(cfg.d_model, cfg.conv_kernel) if conv else None
         self.mlp = SwiGLU(cfg.d_model, cfg.ff_dim(), cfg.mlp_bias) if cfg.shared_mlp else None
         k = cfg.private_neurons if private_rows else 0
         self.priv_names = ["private" if j == 0 else "private%d" % (j + 1) for j in range(k)]
@@ -84,7 +87,7 @@ class Block(nn.Module):
         """H = S + MLP(RMSNorm(S)) [+ özel],  S = X + Attn(RMSNorm(X)).  parts (dict): bileşenler buraya yazılır
         (teşhis: dikkat, mlp, özel — akışa eklenen değerler; olmayan bileşen None)."""
         xa = self.norm1(x)
-        a = self.attn(xa, rope, mask, self.value_vec(xa, rows, priv))
+        a = self.conv(xa) if self.conv is not None else self.attn(xa, rope, mask, self.value_vec(xa, rows, priv))
         return self.finish(x, a, rows, priv, parts, ple_ctx)
 
     def value_vec(self, xa, rows=None, priv=None):
@@ -183,7 +186,8 @@ class RGNModel(nn.Module):
                 nn.init.normal_(p, 0.0, self.cfg.private_value_std) if self.cfg.private_value_std else nn.init.zeros_(p)
             elif p.dim() == 2:
                 s = (std / math.sqrt(2 * self.cfg.n_layers)
-                     if name.endswith(("attn.w_o.weight", "mlp.c.weight", "ple_proj.weight")) else std)
+                     if name.endswith(("attn.w_o.weight", "mlp.c.weight", "ple_proj.weight", "conv.w_out.weight"))
+                     else std)
                 nn.init.normal_(p, 0.0, s)
             elif name.endswith(".bias"):
                 nn.init.zeros_(p)
@@ -250,6 +254,8 @@ class RGNModel(nn.Module):
     def generate(self, idx, max_new_tokens, temperature=0.0, eos_id=None, generator=None, cache=True):
         """Üretim.  temperature 0: argmax; > 0: örnekleme.  cache: KV önbellekli yol (rgn/model/decode.py; CUDA'da
         derlenmiş + CUDA graph); False: önbelleksiz başvuru (her token'da bütün bağlam yeniden)."""
+        if cache and self.cfg.y_mixer == "conv":                     # evrişim durumlu önbellekli yol henüz yok
+            cache = False
         if cache:
             from rgn.model.decode import generate
             return generate(self, idx, max_new_tokens, temperature, eos_id, generator)

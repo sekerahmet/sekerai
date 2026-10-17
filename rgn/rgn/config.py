@@ -32,6 +32,8 @@ class ModelConfig:
     rope_base: float = 10000.0
     max_len: int = 4096                # RoPE tablosu boyu
     local_window: int = 128            # yerel (Y) katman yalnız son local_window token'a bakar; 0: bütün katmanlar genel
+    y_mixer: str = "attn"              # Y katmanının karıştırıcısı: attn (pencereli dikkat) | conv (kapılı nedensel evrişim)
+    conv_kernel: int = 64              # y_mixer conv: evrişim çekirdeği (son K token)
     y_windows: tuple = ()              # Y katmanlarına sırayla (döngülü) pencere, ≤ local_window; boş: hepsi local_window
                                        # (ör. [64, 128]: YYG üçlüsünde 1. Y 64, 2. Y 128)
     global_layers: int = 3             # genel (G) katman sayısı; eşit aralıklı, son katman G (8 katmanda YYGYGYYG)
@@ -83,6 +85,8 @@ class ModelConfig:
         assert self.private_groups >= 1 and self.d_model % self.private_groups == 0, "d_model grup sayısına bölünmeli"
         assert self.local_window >= 0 and 0 <= self.global_layers <= self.n_layers
         assert all(0 < w <= self.local_window for w in self.y_windows), "y_windows: 1..local_window"
+        assert self.y_mixer in ("attn", "conv") and self.conv_kernel >= 1, self.y_mixer
+        assert self.y_mixer == "attn" or not (self.private_value or self.local_sentence), "conv: V vektörü / cümle yok"
         assert not self.local_sentence or self.local_window, "local_sentence: yerel / genel düzen gerek"
         assert self.local_window or self.global_layers, "yerel pencere yoksa bütün katmanlar genel"
         assert (self.head_dim or self.d_model % self.n_heads == 0) and self.n_heads % self.n_kv_heads == 0
