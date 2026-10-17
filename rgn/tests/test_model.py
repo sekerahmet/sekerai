@@ -1,5 +1,9 @@
 """Model: nedensellik, sonlu gradyan, YYG düzeni, parametre sayısı, kapı, kelimeye özel nöron (tam tablo / satır kopyası /
 çekirdek eşdeğerliği, satır planı)."""
+import math
+import sys
+from pathlib import Path
+
 import torch
 
 from _util import private_vocab, require_cuda, tiny
@@ -350,3 +354,32 @@ def test_gated_conv_window_and_generate():
     m = RGNModel(tiny(y_mixer="conv", conv_kernel=4)).eval()
     idx = torch.randint(0, 97, (2, 7))
     assert torch.equal(m.generate(idx, 5), m.generate(idx, 5, cache=False))
+
+
+def test_component_map_tiny():
+    """İşlem haritası (scripts/component_map.py): bütün bileşenlerde sonlu R² ≤ 1; MLP ve karıştırıcı kendisiyle
+    değiştirilince kayıp aynı (takas kancaları doğru yerde); kırpma pencereleri geri yükler."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import component_map as cm
+    torch.manual_seed(0)
+    with private_vocab(range(1, 40)) as rel:
+        m = RGNModel(tiny(private_neurons=1, ple_dim=8, private_vocab=rel, max_len=64)).eval()
+        for b in m.blocks:
+            b.private.data.normal_(0, 0.05)
+        wins = torch.randint(0, 97, (10, 65))
+        base, rows = cm.analyze(m, wins[:4], wins[4:7], wins[7:], qmin=16, log=lambda s: None)
+        assert {r["comp"] for r in rows} == {"mix", "mlp", "priv", "ple"}
+        for r in rows:
+            assert all(math.isfinite(v) and v <= 1 + 1e-6 for v in r["r2"].values()), r
+            assert all(math.isfinite(v) for v in r["swap"].values()), r
+        b = m.blocks[0]
+        rope = m.rope(64)
+        for comp, fn in (("mlp", b.mlp.forward), ("mix", lambda xa: b.attn.forward(xa, rope, None, None))):  # kancasız
+            hk = cm.replace(m, 0, comp, fn, {})
+            same = cm.window_loss(m, wins[7:], 16)
+            for h in hk:
+                h.remove()
+            assert abs(same - base) < 1e-5, (comp, same, base)
+        w0 = [x.attn.window for x in m.blocks]
+        cm.truncate(m, wins[7:], 16, [(4,)], log=lambda s: None)
+        assert [x.attn.window for x in m.blocks] == w0
