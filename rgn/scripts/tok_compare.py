@@ -70,12 +70,18 @@ def train_unigram(texts, size, out, pre="tr", max_piece=32):
     return tok
 
 
-def train_bpe(texts, size, out, pre="tr"):
+# Sohbet ve araç token'ları + ileride eklenecekler için boş yer (toplam 128; kelime dağarcığı boyuna dahil)
+SPECIAL = (["<|endoftext|>", "<|pad|>", "<|system|>", "<|user|>", "<|assistant|>", "<|end|>",
+            "<|tool_call|>", "<|/tool_call|>", "<|tool_result|>", "<|/tool_result|>"]
+           + ["<|reserved_%d|>" % i for i in range(118)])
+
+
+def train_bpe(texts, size, out, pre="tr", special=("<|endoftext|>",)):
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
     tok = Tokenizer(models.BPE())
     tok.pre_tokenizer = pre_tokenizer(pre)
     tok.decoder = decoders.ByteLevel()
-    tr = trainers.BpeTrainer(vocab_size=size, min_frequency=2, special_tokens=["<|endoftext|>"],
+    tr = trainers.BpeTrainer(vocab_size=size, min_frequency=2, special_tokens=list(special),
                              initial_alphabet=pre_tokenizers.ByteLevel.alphabet(), show_progress=False)
     tok.train_from_iterator(texts, tr, length=len(texts))
     tok.save(str(out))
