@@ -67,24 +67,38 @@ def train_bpe(texts, size, out, pre="tr"):
     return tok
 
 
-def encoders(root, own):
-    """ad -> (kodlayıcı: str -> token listesi, kelime dağarcığı boyu, parçalar: str -> parça dizgileri)."""
-    import tiktoken
+HAZIR = ["ytu-ce-cosmos/turkish-gpt2", "dbmdz/bert-base-turkish-cased"]
+
+
+def hazir_tok(h, repo):
+    """Hazır tokenizer (yalnız tokenizer.json ya da vocab.txt indirilir) -> (Tokenizer, etiket)."""
+    from huggingface_hub import hf_hub_download
     from tokenizers import Tokenizer
     from tokenizers.implementations import BertWordPieceTokenizer
+    d = h / repo.replace("/", "__")
+    try:
+        p = Path(hf_hub_download(repo, "tokenizer.json", local_dir=d)) if not (d / "tokenizer.json").exists() else d / "tokenizer.json"
+        tok = Tokenizer.from_file(str(p))
+        kind = json.loads(p.read_text(encoding="utf-8"))["model"]["type"]
+    except Exception:                                                  # yalnız vocab.txt (BERT)
+        p = Path(hf_hub_download(repo, "vocab.txt", local_dir=d)) if not (d / "vocab.txt").exists() else d / "vocab.txt"
+        tok, kind = BertWordPieceTokenizer(str(p), lowercase=False, strip_accents=False, clean_text=True), "WordPiece"
+    V = tok.get_vocab_size()
+    return tok, "%s (%dk%s)" % (repo.split("/")[1][:22], round(V / 1000), "" if kind == "BPE" else ", " + kind)
+
+
+def encoders(root, own, hazir=HAZIR):
+    """ad -> (kodlayıcı: str -> token listesi, kelime dağarcığı boyu, parçalar: str -> parça dizgileri)."""
+    import tiktoken
     g = tiktoken.get_encoding("gpt2")
     out = {"gpt2 (50k)": (lambda s: g.encode_ordinary(s), g.n_vocab,
                           lambda s: [g.decode([t]) for t in g.encode_ordinary(s)])}
-    h = root / "hazir"
-    yt = Tokenizer.from_file(str(h / "ytu-ce-cosmos__turkish-gpt2" / "tokenizer.json"))
-    out["turkish-gpt2 (%dk)" % round(yt.get_vocab_size() / 1000)] = (
-        lambda s: yt.encode(s, add_special_tokens=False).ids, yt.get_vocab_size(),
-        lambda s: [yt.decode([t]) for t in yt.encode(s, add_special_tokens=False).ids])
-    bt = BertWordPieceTokenizer(str(h / "dbmdz__bert-base-turkish-cased" / "vocab.txt"), lowercase=False,
-                                strip_accents=False, clean_text=True)
-    out["bert-turkish (%dk, WordPiece)" % round(bt.get_vocab_size() / 1000)] = (
-        lambda s: bt.encode(s, add_special_tokens=False).ids, bt.get_vocab_size(),
-        lambda s: bt.encode(s, add_special_tokens=False).tokens)
+    for repo in hazir:
+        tok, name = hazir_tok(root / "hazir", repo)
+        wp = name.endswith("WordPiece)")
+        out[name] = (lambda s, t=tok: t.encode(s, add_special_tokens=False).ids, tok.get_vocab_size(),
+                     (lambda s, t=tok: t.encode(s, add_special_tokens=False).tokens) if wp else
+                     (lambda s, t=tok: [t.decode([i]) for i in t.encode(s, add_special_tokens=False).ids]))
     for name, tok in own.items():
         out[name] = (lambda s, t=tok: t.encode(s, add_special_tokens=False).ids, tok.get_vocab_size(),
                      lambda s, t=tok: [t.decode([i]) for i in t.encode(s, add_special_tokens=False).ids])
@@ -100,6 +114,7 @@ def main():
     ap.add_argument("--no_train", action="store_true", help="kendi BPE'leri diskten yükle")
     ap.add_argument("--pre", default="tr", choices=["tr", "gpt2"], help="ön bölme kalıbı (dosya adına eklenir)")
     ap.add_argument("--also", nargs="*", default=[], help="kıyasa eklenecek eğitilmiş dosyalar (egitilen/ altında)")
+    ap.add_argument("--hazir", nargs="*", default=HAZIR, help="hazır tokenizer'lar (Hugging Face; yalnız tokenizer dosyası)")
     a = ap.parse_args()
     root = drive_root() / "tokenizer"
     ex = root / "ornek"
@@ -120,7 +135,7 @@ def main():
             own["bizim TR %dk (%s)" % (s // 1000, a.pre)] = train_bpe(texts, s, root / "egitilen" / fname(s), a.pre)
             print("  BPE %d: %.0f sn" % (s, time.time() - t0), flush=True)
         del texts
-    enc = encoders(root, own)
+    enc = encoders(root, own, a.hazir)
     evals = {n: read(ex / ("eval_tr_%s.jsonl" % n)) for n in ("web", "wiki")}
     print("\n%-30s %7s | %s | %s" % ("tokenizer", "V", " ".join("%9s %9s" % ("tok/bayt", "tok/kel") for _ in evals),
                                     "bayt başına işlem (GPT-2 = 1)"))
