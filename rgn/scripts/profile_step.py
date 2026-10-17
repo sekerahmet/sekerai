@@ -111,13 +111,19 @@ def buckets(prof, mc, steps, opt_ms):
         dims = {d for s in (e.input_shapes or []) for d in s}
         k = "LM head" if V in dims else "ortak MLP" if F in dims else "diğer (projeksiyon, optimizer, ...)"
         mm[k] = mm.get(k, 0.0) + e.device_time_total / 1000 / steps
-    print("\nCUDA süresi dökümü (adım başına, %d adım ortalaması): toplam %.1f ms" % (steps, total))
+    head = mm.get("LM head", 0.0) + sums.get("kayıp (CE / softmax)", 0.0)       # gövde: LM head ve kayıp hariç
+    body = total - head
+    print("\nCUDA süresi dökümü (adım başına, %d adım ortalaması): toplam %.1f ms; LM head + kayıp %.1f ms, gövde %.1f ms"
+          % (steps, total, head, body))
+    print("  %-34s %8s  %6s  %7s" % ("", "ms", "toplam", "gövde"))
     for k, v in sorted(sums.items(), key=lambda kv: -kv[1]):
-        print("  %-34s %8.1f ms  %%%5.1f" % (k, v, 100 * v / total))
+        g = "" if k == "kayıp (CE / softmax)" else "%%%5.1f" % (100 * v / body)
+        print("  %-34s %8.1f  %%%5.1f  %7s" % (k, v, 100 * v / total, g))
     if mm:
         print("  matris çarpımı, şekle göre (aten):")
         for k, v in sorted(mm.items(), key=lambda kv: -kv[1]):
-            print("    %-32s %8.1f ms  %%%5.1f" % (k, v, 100 * v / total))
+            g = "" if k == "LM head" else "%%%5.1f" % (100 * v / body)
+            print("    %-32s %8.1f  %%%5.1f  %7s" % (k, v, 100 * v / total, g))
     if opt_ms:
         print("  optimizer adımı (senkronlu, duvar)  %8.1f ms" % (sum(opt_ms) / len(opt_ms)))
 
