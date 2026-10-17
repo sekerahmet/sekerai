@@ -32,6 +32,8 @@ class ModelConfig:
     rope_base: float = 10000.0
     max_len: int = 4096                # RoPE tablosu boyu
     local_window: int = 128            # yerel (Y) katman yalnız son local_window token'a bakar; 0: bütün katmanlar genel
+    y_windows: tuple = ()              # Y katmanlarına sırayla (döngülü) pencere, ≤ local_window; boş: hepsi local_window
+                                       # (ör. [64, 128]: YYG üçlüsünde 1. Y 64, 2. Y 128)
     global_layers: int = 3             # genel (G) katman sayısı; eşit aralıklı, son katman G (8 katmanda YYGYGYYG)
     attn_gate: str = ""                # dikkat çıkış kapısı: "" | "head" (head başına) | "elem" (her çıktı); 2σ_a ∈ (0, 2)
     private_neurons: int = 0           # k: her katmanda her kelimenin k nöronu (kelimeye özel nöron); 0: kapalı
@@ -49,6 +51,10 @@ class ModelConfig:
     shared_mlp: bool = True            # False: ortak MLP yok (katman = dikkat [+ kelimeye özel nöron])
     mlp_bias: bool = True
     init_std: float = 0.02
+
+    def y_window(self, i):
+        """i. Y katmanının penceresi."""
+        return self.y_windows[i % len(self.y_windows)] if self.y_windows else self.local_window
 
     def layer_kinds(self):
         """Katman dizilimi: 'Y' yerel, 'G' genel (eşit aralık, son katman G)."""
@@ -76,6 +82,7 @@ class ModelConfig:
         assert self.private_value in (0, 1), self.private_value
         assert self.private_groups >= 1 and self.d_model % self.private_groups == 0, "d_model grup sayısına bölünmeli"
         assert self.local_window >= 0 and 0 <= self.global_layers <= self.n_layers
+        assert all(0 < w <= self.local_window for w in self.y_windows), "y_windows: 1..local_window"
         assert not self.local_sentence or self.local_window, "local_sentence: yerel / genel düzen gerek"
         assert self.local_window or self.global_layers, "yerel pencere yoksa bütün katmanlar genel"
         assert (self.head_dim or self.d_model % self.n_heads == 0) and self.n_heads % self.n_kv_heads == 0

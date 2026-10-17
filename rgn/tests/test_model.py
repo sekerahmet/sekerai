@@ -280,7 +280,8 @@ def test_kv_cache_matches_full():
                    dict(private_neurons=1, private_vocab=rel, shared_mlp=False), dict(n_heads=4, n_kv_heads=4, n_kv_heads_global=1),
             dict(n_kv_heads_global=1, private_value=1, private_value_std=0.05, private_vocab=rel),
             dict(ple_dim=8, private_vocab=rel), dict(ple_dim=8, private_neurons=1, private_vocab=rel),
-            dict(private_neurons=1, private_groups=4, private_vocab=rel)):
+            dict(private_neurons=1, private_groups=4, private_vocab=rel),
+            dict(y_windows=[4, 8]), dict(y_windows=[4, 8], n_heads=4, n_kv_heads=1)):
             torch.manual_seed(0)
             m = RGNModel(tiny(**kw)).eval()
             for _, _, p in m.private_tables():

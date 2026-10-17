@@ -37,12 +37,12 @@ def _step(m, w, n, slot_pos, K, V, out):
     ple = m.ple_context(x)
     rope = (m.rope_cos.index_select(0, n), m.rope_sin.index_select(0, n))
     rows = m.priv_map[w][:, None] if m.priv_map is not None else None
-    W = m.cfg.local_window
-    slot, mask_y = n, None
+    W = m.cfg.local_window                                                 # döner tampon boyu (en büyük Y penceresi)
+    slot, dist = n, None
     if W:                                                                  # yapılandırmaya göre sabit (dallanma değil)
         slot = n % W
         slot_pos.index_copy_(0, slot, n)
-        mask_y = ((slot_pos > n - W) & (slot_pos >= 0))[None]
+        dist = torch.where(slot_pos >= 0, n - slot_pos, W)                # yuvanın uzaklığı (boş yuva: W)
     kg = next((K[l] for l, b in enumerate(m.blocks) if b.kind == "G"), None)
     mask_g = (torch.arange(kg.shape[2], device=w.device) <= n)[None] if kg is not None else None
     for l, b in enumerate(m.blocks):
@@ -54,7 +54,8 @@ def _step(m, w, n, slot_pos, K, V, out):
         pos = slot if b.kind == "Y" else n
         K[l].index_copy_(2, pos, k.to(K[l].dtype))
         V[l].index_copy_(2, pos, v.to(V[l].dtype))
-        o = decode_attn(q.to(K[l].dtype), K[l], V[l], mask_y if b.kind == "Y" else mask_g)
+        mask = (dist < b.attn.window)[None] if b.kind == "Y" else mask_g   # katmanın kendi penceresi (sabit)
+        o = decode_attn(q.to(K[l].dtype), K[l], V[l], mask)
         x = b.finish(x, b.attn.finish(xa, o), rows, ple_ctx=None if ple is None else ple[:, :, l])
     out.copy_(m.lm_head(m.norm_f(x[:, 0])).float())
     n.add_(1)

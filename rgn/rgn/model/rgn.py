@@ -45,7 +45,8 @@ class Block(nn.Module):
         self.norm1 = RMSNorm(cfg.d_model)
         self.norm2 = (RMSNorm(cfg.d_model) if (cfg.shared_mlp or (private_rows and cfg.private_neurons))
                       else None)                                       # yalnız dikkat: ikinci norm yok
-        self.attn = Attention(cfg, window=cfg.local_window if kind == "Y" else 0, kv_heads=cfg.kv_heads(kind))
+        window = cfg.y_window(cfg.layer_kinds()[:layer].count("Y")) if kind == "Y" else 0
+        self.attn = Attention(cfg, window=window, kv_heads=cfg.kv_heads(kind))
         self.mlp = SwiGLU(cfg.d_model, cfg.ff_dim(), cfg.mlp_bias) if cfg.shared_mlp else None
         k = cfg.private_neurons if private_rows else 0
         self.priv_names = ["private" if j == 0 else "private%d" % (j + 1) for j in range(k)]

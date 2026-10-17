@@ -27,6 +27,7 @@ def test_cpu_training_reduces_loss():
         for overrides in ([], ["model.attn_gate=head"], ["train.optimizer=adamw"],
                           ["model.private_neurons=1", "model.private_vocab=" + rel],
                           ["model.private_neurons=1", "model.private_groups=4", "model.private_vocab=" + rel],
+                          ["model.y_windows=[8, 16]"],
                           ["model.private_neurons=1", "model.private_vocab=" + rel, "model.shared_mlp=false"],
                           ["model.private_value=1", "model.private_vocab=" + rel],
                           ["model.ple_dim=16", "model.private_vocab=" + rel]):
